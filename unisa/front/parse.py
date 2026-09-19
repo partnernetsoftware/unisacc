@@ -176,7 +176,8 @@ class Walker:
     def struct_type(self):
         isu = self.at("union")
         self.next()                                   # struct | union
-        tag = self.next().text if self.at("id") else "anon%d" % self.i
+        name = self.next().text if self.at("id") else "anon%d" % self.i
+        tag = self.sc.tag_bind(name, self.at("{"), self.i)
         if self.at("{"):
             self.next()
             st = self.sc.structs.setdefault(tag, Struct(tag, isu))
@@ -381,9 +382,12 @@ class Walker:
         return n
 
     def const_init(self, sym, ty, at=0):
-        """Write a CONSTANT initialiser into the data image.  Scalars, strings,
-        brace lists, nesting, and pointers to literals -- a pointer slot is
-        filled at run time by `_start`, because the image may be relocated."""
+        """Write a CONSTANT initialiser into the data image.
+
+        One loop handles every shape: walk the DIRECT members, and let each
+        member's own call decide whether it faces a brace group of its own or
+        takes its share of a flat list.  `{1, 2, 3, {4, 5}}` needs both in the
+        same list, which a "braced or flat" flag cannot express."""
         base = self.em.t.syms[sym] - 0x100
         t = self.peek()
         if t.kind == "str" and self._is_charr(ty):
@@ -393,23 +397,26 @@ class Walker:
             return
         if ty.kind in ("arr", "struct"):
             braced = self.eat("{")
-            # `{1,2,3,4}` for int[2][2] is legal: without inner braces the
-            # values fill the scalar slots in order.
-            slots = self._members(ty) if braced and self._braced_next() \
-                else list(self._elems(ty))
-            k = 0
-            while not (self.at("}") if braced else False):
-                slots, k = self._designator(ty, slots, k)
-                if k >= len(slots):
+            mem = self._members(ty)
+            k, first = 0, True
+            while True:
+                # a braced list runs to its `}`; a flat one takes exactly this
+                # aggregate's share and leaves the rest to the caller
+                if (self.at("}") if braced else k >= len(mem)):
+                    break
+                if not first:
+                    if not self.eat(","):
+                        break
+                    if braced and self.at("}"):
+                        break
+                mem, k = self._designator(ty, mem, k)
+                if k >= len(mem):
                     raise CError("line %d: too many initialisers"
                                  % self.peek().line)
-                off, sty = slots[k]
-                self.const_init(sym, sty, at + off)
+                off, mty = mem[k]
+                self.const_init(sym, mty, at + off)
                 k += 1
-                if not self.eat(","):
-                    break
-                if not braced:
-                    break
+                first = False
             if braced:
                 self.expect("}")
             return
@@ -430,6 +437,9 @@ class Walker:
         w = min(8, max(1, ty.size(self.sc.structs)))
         self.em.t.data[base + at:base + at + w] = \
             (v & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
+
+    def _is_charr(self, ty):
+        return ty.kind == "arr" and ty.to.size(self.sc.structs) == 1
 
     def _addr_of(self):
         """`&g` or a bare array/function name: the address of a global.  It is
@@ -476,11 +486,6 @@ class Walker:
             self.expect("=")
             return self._members(ty), i
         return slots, k
-
-    def _braced_next(self):
-        """Just after a `{`: does the first element open its own brace, or is
-        this a flat list?"""
-        return self.at("{") or self.at("str")
 
     def global_init(self, sym, ty):
         try:
@@ -633,8 +638,8 @@ class Walker:
         self.expect(";")
 
     def local_init(self, ty, off):
-        """Same shape as const_init, but each element is a full expression and
-        the result is stored, not baked into the image."""
+        """Same walk as const_init, but each element is a full expression and
+        the result is stored rather than baked into the image."""
         t = self.peek()
         if t.kind == "str" and self._is_charr(ty):
             self.next()
@@ -645,21 +650,26 @@ class Walker:
             return
         if ty.kind in ("arr", "struct"):
             braced = self.eat("{")
-            slots = self._members(ty) if braced and self._braced_next() \
-                else list(self._elems(ty))
-            k = 0
-            while not (self.at("}") if braced else False):
-                slots, k = self._designator(ty, slots, k)
-                if k >= len(slots):
+            mem = self._members(ty)
+            k, first = 0, True
+            while True:
+                # a braced list runs to its `}`; a flat one takes exactly this
+                # aggregate's share and leaves the rest to the caller
+                if (self.at("}") if braced else k >= len(mem)):
+                    break
+                if not first:
+                    if not self.eat(","):
+                        break
+                    if braced and self.at("}"):
+                        break
+                mem, k = self._designator(ty, mem, k)
+                if k >= len(mem):
                     raise CError("line %d: too many initialisers"
                                  % self.peek().line)
-                eoff, ety = slots[k]
+                eoff, ety = mem[k]
                 self.local_init(ety, off - eoff)
                 k += 1
-                if not self.eat(","):
-                    break
-                if not braced:
-                    break
+                first = False
             if braced:
                 self.expect("}")
             return

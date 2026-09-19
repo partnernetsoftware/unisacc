@@ -137,12 +137,41 @@ class Scope:
         self.typedefs = {}
         self.enums = {}
         self.enum_tags = set()
+        # struct/union tags are scoped like ordinary names: an inner
+        # `struct T { ... };` shadows an outer T instead of overwriting it.
+        # `structs` stays flat and is keyed by the RESOLVED name.
+        self.tagstack = [{}]
 
     def push(self):
         self.stack.append({})
+        self.tagstack.append({})
 
     def pop(self):
         self.stack.pop()
+        self.tagstack.pop()
+
+    def tag_lookup(self, tag):
+        for d in reversed(self.tagstack):
+            if tag in d:
+                return d[tag]
+        return None
+
+    def tag_bind(self, tag, defining, uniq):
+        """Resolve a struct/union tag to its key in `structs`.
+
+        A definition binds in the CURRENT scope -- with a fresh key when the
+        tag is already visible from an outer one, so the outer type survives.
+        A mere reference resolves outward, and declares the tag here if it is
+        new."""
+        cur = self.tagstack[-1].get(tag)
+        if cur is not None:
+            return cur
+        if defining and self.tag_lookup(tag) is not None:
+            key = "%s#%d" % (tag, uniq)
+        else:
+            key = self.tag_lookup(tag) or tag
+        self.tagstack[-1][tag] = key
+        return key
 
     def depth(self):
         return len(self.stack)
