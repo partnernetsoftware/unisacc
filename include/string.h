@@ -4,6 +4,7 @@
  * ones it does not. */
 #ifndef _UNISA_STRING_H
 #define _UNISA_STRING_H
+#include <stddef.h>
 #define NULL 0
 
 static long strlen(const char *s) {

@@ -128,7 +128,7 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 172   wrong 0   unsupported 47   knownfail 1   slow 0
+corpus 220   pass 173   wrong 0   unsupported 45   knownfail 2   slow 0
 ```
 
 The programs are compiled to a real image for this host and **executed**, not

@@ -56,6 +56,7 @@ class Walker:
         self.maxoff = 0
         self.loops = []           # (continue_label, break_label)
         self.switch = []          # dicts for the open switch statements
+        self.ret_label = None     # set while a function body is being walked
         self.ret_label = None
 
     # -- token plumbing ---------------------------------------------------
@@ -81,6 +82,13 @@ class Walker:
             t = self.peek()
             raise CError("line %d: expected %r, got %r" % (t.line, kind, t.text))
         return self.next()
+
+    def istype(self, t):
+        """Does this token start a type name?  `struct`/`union`/`enum` are
+        their own token kinds, so `(struct S *)x` and `(struct S){1,2}` both
+        need them here as well as `type`."""
+        return (self.tokclass(t) == "type"
+                or t.kind in ("struct", "union", "enum"))
 
     def tokclass(self, t=None):
         """Project the current token onto the parse table's TOK axis."""
@@ -1039,17 +1047,17 @@ class Walker:
                     self.em.lea(ACC, sy.sym)
                     self.lval = None
                     return ptr(sy.ty)
-            t = self.unary()
+            t = self.addr_operand()
             if self.lval is None:
                 raise CError("line %d: & needs an lvalue" % self.peek().line)
             self.lval = None
             return ptr(t)
-        if p == "prim" and self.at("(") and self.tokclass(self.peek(1)) == "type":
-            self.next()                                   # a cast
-            base = self.declspec()
-            while self.eat("*"):
-                base = ptr(base)
+        if p == "prim" and self.at("(") and self.istype(self.peek(1)):
+            self.next()                                   # a cast ...
+            base = self.abstract_type()
             self.expect(")")
+            if self.at("{"):                              # ... or a compound
+                return self.compound_literal(base)        # literal, C99 6.5.2.5
             self.unary()
             self.load_if_lval()
             if base.kind in ("i8", "i16", "i32"):
@@ -1058,11 +1066,9 @@ class Walker:
         if p == "sizeof":
             self.next()
             self.sc.act("sizeof", self.peek(1))
-            if self.at("(") and self.tokclass(self.peek(1)) == "type":
+            if self.at("(") and self.istype(self.peek(1)):
                 self.next()
-                base = self.declspec()
-                while self.eat("*"):
-                    base = ptr(base)
+                base = self.abstract_type()
                 self.expect(")")
                 n = base.size(self.sc.structs)
             else:
@@ -1181,6 +1187,56 @@ class Walker:
                 ty = self.call_value(ty)
             else:
                 return ty
+
+    def abstract_type(self):
+        """A type name with no identifier: `int *`, `char[8]`, `int[]`."""
+        base = self.declspec()
+        while self.eat("*"):
+            base = ptr(base)
+        dims = []
+        while self.at("["):
+            self.next()
+            dims.append(0 if self.at("]") else self.const_expr())
+            self.expect("]")
+        for n in reversed(dims):
+            base = Type("arr", to=base, n=n)
+        return base
+
+    def addr_operand(self):
+        """The operand of `&`, peeling redundant parentheses.
+
+        `&(p->b)` has to keep its lvalue, and a parenthesised expression
+        normally reaches `binary()`, whose innermost level calls
+        `load_if_lval()` -- it loads the value and the address is gone.  That
+        is why `offsetof` did not compile."""
+        # a `(` that starts a type is a cast or a compound literal, not a
+        # redundant parenthesis -- `&(struct P *)0` must not be peeled
+        if self.at("(") and not self.istype(self.peek(1)):
+            m = self.mark()
+            self.next()
+            t = self.addr_operand()
+            if self.lval is not None and self.at(")"):
+                self.next()
+                return t
+            self.rewind(m)
+            self.lval = None
+        return self.unary()
+
+    def compound_literal(self, ty):
+        """`(struct S){1, 2}` -- an unnamed object with the enclosing block's
+        storage duration, initialised in place.  It is an LVALUE, so `&` and
+        `.field` work on it, which is the whole point of the construct."""
+        if self.ret_label is None:
+            raise CError("line %d: compound literal outside a function"
+                         % self.peek().line)
+        if ty.kind == "arr" and ty.n == 0:
+            ty = Type("arr", to=ty.to, n=self._init_count())
+        off = self.alloc(ty)
+        self.local_init(ty, off)
+        self.em.imm(TMP, off)
+        self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, TMP)
+        self.lval = ty
+        return self.postfix_chain(ty)
 
     def call_value(self, ty):
         """A call whose callee is an EXPRESSION, not a name: `go()()`, or

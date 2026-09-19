@@ -3,6 +3,7 @@
  * is honest about what this compiler is for.  Nothing here needs a linker. */
 #ifndef _UNISA_STDLIB_H
 #define _UNISA_STDLIB_H
+#include <stddef.h>
 #define NULL 0
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
