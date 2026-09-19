@@ -80,6 +80,7 @@ class Walker:
         self.loops = []           # (continue_label, break_label)
         self.switch = []          # dicts for the open switch statements
         self.ret_label = None     # set while a function body is being walked
+        self.called = {}          # name -> line, checked once the unit ends
         self.ret_label = None
 
     # -- token plumbing ---------------------------------------------------
@@ -214,11 +215,19 @@ class Walker:
                 continue
             break
         if self.at("(") and self.peek(1).kind == "*":
-            # int (*f)(int,int) -- a pointer to function
+            # int (*f)(int,int) -- a pointer to function.  `(* const x)` is
+            # the same declarator with a qualifier on the pointer.
             self.next()
-            while self.eat("*"):
-                pass
-            name = self.expect("id").text
+            while True:
+                if self.eat("*"):
+                    continue
+                if self.at("type") and self.peek().text in (
+                        "const", "volatile", "restrict"):
+                    self.next()
+                    continue
+                break
+            name = self.next().text if self.at("id") else \
+                (self.expect("id").text if named else "")
             self.expect(")")
             if self.at("("):
                 self.skip_parens()
@@ -229,7 +238,16 @@ class Walker:
         dims = []
         while self.at("["):
             self.next()
-            dims.append(0 if self.at("]") else self.const_expr())
+            # C99 6.7.5.2: a parameter's array declarator may carry qualifiers
+            # and `static` inside the brackets
+            while self.at("type") and self.peek().text in (
+                    "const", "volatile", "restrict", "static"):
+                self.next()
+            if self.at("*") and self.peek(1).kind == "]":
+                self.next()          # `[*]`: an unspecified VLA bound in a
+                dims.append(0)       # prototype, which is just a pointer here
+            else:
+                dims.append(0 if self.at("]") else self.const_expr())
             self.expect("]")
         for n in reversed(dims):          # int a[2][3] is 2 of (3 of int)
             ty = Type("arr", to=ty, n=n)
@@ -272,6 +290,11 @@ class Walker:
             self.em.store(LHS, off, ACC)
         self.em.call("main")
         self.em.exit_(ACC)
+        for nm, line in self.called.items():
+            if nm not in self.em.t.labels:
+                # there is no linker here: a function has to be defined in the
+                # translation unit, or come from one of our own headers
+                raise CError("line %d: undefined function %r" % (line, nm))
         return self.em.finish()
 
     def do_typedef(self):
@@ -876,6 +899,10 @@ class Walker:
         if t.kind == "-":
             return -self.const_atom()
         if t.kind == "(":
+            if self.istype(self.peek()):          # a cast in a constant
+                self.abstract_type()              # expression: the value is
+                self.expect(")")                  # unchanged, we fold in i64
+                return self.const_atom()
             v = self.const_expr()
             self.expect(")")
             return v
@@ -1243,6 +1270,9 @@ class Walker:
             elif p == "inc":
                 op = self.next().kind
                 aty = self.lval
+                if aty is None:
+                    raise CError("line %d: %s needs an lvalue"
+                                 % (self.peek().line, op))
                 self.lval = None
                 self.em.push()
                 self.em.load(ACC, ACC, 0, self.wid(aty))
@@ -1270,7 +1300,16 @@ class Walker:
         dims = []
         while self.at("["):
             self.next()
-            dims.append(0 if self.at("]") else self.const_expr())
+            # C99 6.7.5.2: a parameter's array declarator may carry qualifiers
+            # and `static` inside the brackets
+            while self.at("type") and self.peek().text in (
+                    "const", "volatile", "restrict", "static"):
+                self.next()
+            if self.at("*") and self.peek(1).kind == "]":
+                self.next()          # `[*]`: an unspecified VLA bound in a
+                dims.append(0)       # prototype, which is just a pointer here
+            else:
+                dims.append(0 if self.at("]") else self.const_expr())
             self.expect("]")
         for n in reversed(dims):
             base = Type("arr", to=base, n=n)
@@ -1403,6 +1442,7 @@ class Walker:
             self.em.load(CALLEE, CALLEE, 0)      # CALLEE held the address
             self.em.call_reg(CALLEE)
         else:
+            self.called.setdefault(name, self.peek().line)
             self.em.call(name)
         rt = I64
         if s is not None:

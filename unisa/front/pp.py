@@ -205,6 +205,8 @@ def _paren(av):
     no re-scan.  But `__VA_ARGS__` is an argument LIST -- parenthesising it
     turns N arguments into one comma expression -- and a bare literal needs no
     help, which matters because `printf`'s format has to stay a `str` token."""
+    if not av.strip():
+        return ""              # an empty argument substitutes to nothing
     if _ATOM.match(av) or _top_comma(av):
         return av
     return "(" + av + ")"
