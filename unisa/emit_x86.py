@@ -116,7 +116,8 @@ def rip(opc, reg, pc_next, target):
         (d & 0xFFFFFFFF).to_bytes(4, "little")
 
 
-def encode(ins, off, labels, arch="x86_64", syms=None, shift=0, text_va=0):
+def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
+           text_va=0, imps=None):
     """-> bytes, or None when the op has no encoding here."""
     o, a = ins.op, ins.args
     if o == "mov":

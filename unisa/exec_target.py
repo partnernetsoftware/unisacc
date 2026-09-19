@@ -236,7 +236,13 @@ class Machine:
                     k = R[a[1]]
                     R[a[0]] = self.argv[k] if k < len(self.argv) else 0
                 elif o == "spinit":
-                    pass                       # SP already set by the machine
+                    if len(a) > 1 and a[1] is not None:
+                        R[self.sp] = a[1]      # Windows: the tape's own stack
+                elif o in ("winsave", "winrest", "winstdh"):
+                    # The register save area and the standard handles are a
+                    # real-machine concern: this interpreter's gate does not
+                    # clobber anything and its handles are fds.  [I-18]
+                    pass
                 elif o == "nop":
                     pass
                 else:

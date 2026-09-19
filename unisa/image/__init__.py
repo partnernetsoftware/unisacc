@@ -25,7 +25,17 @@ def layout(os_, arch, textlen):
         # the data is written to, so it needs its own rw PT_LOAD -- which means
         # its own page, not the bytes straight after the text [I-12]
         return t, BASE[os_] + elf._round(h + textlen)
+    if os_ == "win":
+        # .text / .rdata (the import table) / .data, each on its own page:
+        # a section RVA must be a multiple of SectionAlignment [I-16]
+        return t, BASE[os_] + pe.data_rva(textlen)
     return t, t + textlen
+
+
+def imports(os_, arch, textlen):
+    """`__imp_<name>` -> the absolute address of its IAT slot.  Only Windows
+    has any: on Linux and macOS we talk to the kernel directly."""
+    return pe.imports(arch, textlen) if os_ == "win" else {}
 
 
 def relocate(tp, data, shift):
@@ -39,4 +49,8 @@ def relocate(tp, data, shift):
 
 
 def build(tp, text, data, entry):
+    if tp.os == "win":
+        return pe.write(tp.arch, text, data, entry,
+                        relocs=getattr(tp, "relocs", ()),
+                        bss=getattr(tp, "bss", 0))
     return WRITER[tp.os](tp.arch, text, data, entry)

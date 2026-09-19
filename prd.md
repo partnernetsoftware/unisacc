@@ -771,6 +771,20 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 ### 6.1 已证实
 
+#### E-35　win/* 还没跑通，但已经把 Windows 加载器的三条硬规则挖出来了
+
+| 栏 | 内容 |
+|---|---|
+| **现状** | 六目标里 `osx/arm64`、`osx/x86_64`、`lnx/x86_64`、`lnx/arm64` 已真机执行（E-33）。**`win/*` 仍然只是结构性验证**：我们发的 PE 在 Windows 11 arm64 上被加载器拒绝（`STATUS_INVALID_IMAGE_FORMAT`），原因尚未完全定位 |
+| **已确证的三条**<br>（方法：拿宿主自己的 `hostname.exe` 逐字段拆，每拆一处跑一次） | ① **节 RVA 必须按 SectionAlignment 对齐**，且 text/rdata/data 分节（[I-16]）；arm64 的 `MajorSubsystemVersion` 必须 ≥ 10<br>② **dir[5] 基址重定位必须存在，且含至少一条真实条目** —— 把真 exe 的条目换成 ABSOLUTE 填充、目录原样保留，它立刻不加载<br>③ **dir[10] load config 必须存在，且 `SecurityCookie`（+0x58）非零** —— 只清这一个 8 字节字段，真 exe 就不加载。**只留②或只留③都不行** |
+| **已排除的** | 导入表（无导入的 exe 照样跑）· `DllCharacteristics` 的 GUARD_CF 位 · DOS stub 与 `e_lfanew` · TimeDateStamp / CheckSum / LinkerVersion / 栈堆大小 / ImageVersion · `SizeOfCode` · 节的 VirtualSize 取值 · FileAlignment = SectionAlignment |
+| **仍未定位** | 把我们的「重定位 + cookie」配方**放进真 exe 的容器里，它能跑**（返回 42）；同一配方放进**我们自己生成的容器**，即使逐字段对齐也拒载。所以问题在容器的某处结构，不在这两条目录的内容 |
+| **已经做完的一半** | PE 写入器已重写：四节布局、真导入表（kernel32 八个函数）、`.reloc`、load config；lowering 侧的 [I-18] 也做了 —— win 的 gate 会保存/恢复全部 tape 寄存器、tape 有自己的 bss 栈、`fd → HANDLE` 与 `WriteFile` 出参的翻译都在 arm64 编码器里。解释器侧仍 6/6 |
+| **调试装置** | UTM 里的 Windows 11 arm64 虚机 + `utmctl file push/pull` + `exec`，一轮约 30 秒。**没有这个环路，上面三条一条也挖不出来** —— GitHub 的 windows 跑机每轮五分钟，而这次用掉约四十轮 |
+| **意义** | 与 E-34 同类：**手写二进制格式的失败模式是「加载器沉默地拒绝」**，而每个平台的容忍带都不一样。诚实的说法是六目标里四个真跑过、两个没有 |
+| **状态** | **进行中**（2026-09-19） |
+
+
 #### E-34　同一份字节，Darwin 25 跑得动、Darwin 23/24 崩在 dyld 里
 
 | 栏 | 内容 |

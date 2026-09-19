@@ -16,6 +16,16 @@ from .tape import REGS as TAPE_REGS
 # = where the loader maps the data that follows the text).
 SCRATCH = 80          # SCR0, SCR1, PRINTLEN, PRINTBUF, ARGC, ARGV
 PRINTMAX = 24
+# Windows only.  A WinAPI call is a real call: it clobbers every volatile
+# register, and ALL EIGHT tape registers are volatile on both Win64 ABIs --
+# including r7, the tape stack pointer.  So the gate brackets the call with a
+# save area, and the tape gets a stack of its own instead of borrowing the
+# process stack the way `spinit` does elsewhere.  [I-18]
+WIN_HSTD = SCRATCH + PRINTMAX            # GetStdHandle(-10/-11/-12)
+WIN_WRITTEN = WIN_HSTD + 24              # the DWORD WriteFile insists on
+WIN_SAVE = WIN_WRITTEN + 8               # r0..r7
+WIN_EXTRA = WIN_SAVE + 64
+WIN_STACK = 0x10000
 FAULTS = ("osx_class_bit", "win_argregs", "arm_gate")
 SYSV = ("rdi", "rsi", "rdx")
 
@@ -65,9 +75,17 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     base = DATA_BASE + len(data)
     SCR0, SCR1, PRINTLEN, PRINTBUF = base, base + 8, base + 16, base + 24
     ARGC, ARGV = base + 48, base + 56
-    data.extend(b"\x00" * (SCRATCH + PRINTMAX))
+    win = os_ == "win"
+    HSTD, WRITTEN, SAVE = (base + WIN_HSTD, base + WIN_WRITTEN,
+                           base + WIN_SAVE)
+    STACKTOP = base + WIN_EXTRA + WIN_STACK
+    data.extend(b"\x00" * (SCRATCH + PRINTMAX +
+                           (WIN_EXTRA - SCRATCH - PRINTMAX if win else 0)))
     tp = TargetProgram(target, bytes(data), tape.syms)
     tp.data_len = len(data)
+    # the tape stack is zero-filled, so it is bss: it costs image size but not
+    # file size, which is the difference between a 4 KB .exe and a 68 KB one
+    tp.bss = WIN_STACK if win else 0
     tp.relocs = list(tape.relocs)
     rmap = dict(zip(TAPE_REGS, C.REGMAP[arch]))
     sp = rmap["r7"]
@@ -90,10 +108,15 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             if fault == "osx_class_bit" and os_ == "osx":
                 n &= ~C.OSX_CLASS_BIT                     # [L-3] drop the bit
             tp.emit("setreg", nr, ("imm", n), role="sysno")
+        if win:
+            tp.emit("winsave", SAVE)
         for i, src in enumerate(arg_srcs):
             tp.emit("setreg", args[i], src, role="arg%d" % i)
         tp.emit("gate", form=f["form"], gate=gate, symbol=f["symbol"],
-                winapi=C.WINAPI.get(op), catop=op, sysno=sysno)
+                winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
+                hstd=HSTD, written=WRITTEN)
+        if win:
+            tp.emit("winrest", SAVE, f["ret"])
 
     entry_pc = tape.labels.get("_start", 0)
     for pc, ins in enumerate(tape.code):
@@ -105,9 +128,13 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             # bind it AT THE ENTRY LABEL -- not at tape index 0, which is some
             # other function once `_start` moves.  The interpreter already
             # starts SP at the top of its own memory, so this is a no-op there.
-            tp.emit("spinit", sp)
-            # the loader hands over argc/argv; stash them before anything else
-            tp.emit("argsave", ARGC, ARGV)
+            tp.emit("spinit", sp, STACKTOP if win else None)
+            if win:
+                # the three standard handles, once, before anything prints
+                tp.emit("winstdh", HSTD)
+            else:
+                # the loader hands over argc/argv; stash them before anything
+                tp.emit("argsave", ARGC, ARGV)
         o, a = ins.op, ins.args
 
         if o == ".write":

@@ -21,13 +21,14 @@ def assemble(tp):
     labels = {name: offs[pc] if pc < len(offs) else end
               for name, pc in tp.labels.items()}
     text_va, data_va = image.layout(tp.os, tp.arch, end)
+    imps = image.imports(tp.os, tp.arch, end)
     # interpreter addresses are DATA_BASE-relative; shift them onto the image
     shift = data_va - DATA_BASE
     out = bytearray()
     covered = 0
     for pc, ins in enumerate(tp.code):
         b = be.encode(ins, offs[pc], labels, tp.arch, tp.syms,
-                      shift, text_va)
+                      shift, text_va, imps)
         if b is None:
             b = be.UD2 if tp.arch == "x86_64" else be.BRK
         else:

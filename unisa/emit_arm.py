@@ -30,7 +30,40 @@ ALU3 = {"add64": 0x8B000000, "sub64": 0xCB000000, "xor64": 0xCA000000,
         "and64": 0x8A000000, "or64": 0xAA000000,
         "shl64": 0x9AC02000, "shr64": 0x9AC02800}
 INVCOND = {"slt64": 0xA, "sle64": 0xC, "eq": 0x1, "ne": 0x0}   # ge, gt, ne, eq
+IP0 = 16
 IP1 = 17          # x16 is the Darwin syscall-number register -- use IP1
+# Windows/arm64 [I-18].  A WinAPI call is an ordinary AAPCS64 call, so it
+# clobbers x0-x17 -- which is every tape register, the tape SP included.  The
+# gate therefore brackets the call, and translates the POSIX shape the tape
+# speaks into the one kernel32 expects.
+STD_FIRST = -10   # GetStdHandle: -10 stdin, -11 stdout, -12 stderr
+
+
+def _ldrx(rt, rn, rm):
+    """LDR Xt, [Xn, Xm, LSL #3]"""
+    return w(0xF8607800 | (rm << 16) | (rn << 5) | rt)
+
+
+def _ldr(rt, rn, off=0):
+    return w(0xF9400000 | ((off // 8) << 10) | (rn << 5) | rt)
+
+
+def _str(rt, rn, off=0):
+    return w(0xF9000000 | ((off // 8) << 10) | (rn << 5) | rt)
+
+
+def _movz(d, v):
+    return w(0xD2800000 | ((v & 0xFFFF) << 5) | d)
+
+
+def _movn(d, v):
+    """MOVN Xd, #imm -- for the negative GetStdHandle selectors"""
+    return w(0x92800000 | (((-v - 1) & 0xFFFF) << 5) | d)
+
+
+def _callimp(pc, imps, name):
+    a = (imps or {}).get("__imp_" + name, 0)
+    return adrp_add(IP1, pc, a) + _ldr(IP1, IP1) + w(0xD63F0000 | (IP1 << 5))
 
 
 def movimm(d, v, fixed=0):
@@ -63,7 +96,8 @@ def adrp_add(d, pc, target):
         w(0x91000000 | (lo12 << 10) | (d << 5) | d)
 
 
-def encode(ins, off, labels, arch="arm64", syms=None, shift=0, text_va=0):
+def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
+           text_va=0, imps=None):
     o, a = ins.op, ins.args
     if o == "mov":                                  # orr Xd, xzr, Xm
         return w(0xAA0003E0 | (N(a[1]) << 16) | N(a[0]))
@@ -140,8 +174,33 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0, text_va=0):
             w(0x8B000000 | (N(a[1]) << 16) | (3 << 10) |
               (IP1 << 5) | IP1) + \
             w(0xF9400000 | (IP1 << 5) | N(a[0]))
-    if o == "spinit":                                # mov Xd, sp
-        return w(0x91000000 | (31 << 5) | N(a[0]))
+    if o == "spinit":
+        if len(a) > 1 and a[1] is not None:
+            # Windows: the tape's own stack.  PC-relative, not an absolute
+            # immediate -- DYNAMIC_BASE is mandatory on arm64 (I-17) so the
+            # image slides.
+            return adrp_add(N(a[0]), text_va + off, a[1] + shift)
+        return w(0x91000000 | (31 << 5) | N(a[0]))   # mov Xd, sp
+    if o == "winsave":
+        out = adrp_add(IP0, text_va + off, a[0] + shift)
+        for k in range(8):
+            out += _str(k, IP0, 8 * k)
+        return out
+    if o == "winrest":
+        out = w(0xAA000000 | (0 << 16) | (31 << 5) | IP1)   # mov IP1, x0
+        out += adrp_add(IP0, text_va + off + len(out), a[0] + shift)
+        for k in range(1, 8):
+            out += _ldr(k, IP0, 8 * k)
+        out += w(0xAA000000 | (IP1 << 16) | (31 << 5) | N(a[1]))
+        return out
+    if o == "winstdh":
+        out = b""
+        for k in range(3):
+            out += _movn(0, STD_FIRST - k)
+            out += _callimp(text_va + off + len(out), imps, "GetStdHandle")
+            out += adrp_add(IP0, text_va + off + len(out), a[0] + shift)
+            out += _str(0, IP0, 8 * k)
+        return out
     if o == "ret":
         return w(0xF9400000 | (7 << 5) | IP1) + \
             w(0x91002000 | (7 << 5) | 7) + \
@@ -153,7 +212,7 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0, text_va=0):
         if g == "svc80":
             return w(0xD4001001)                     # svc #0x80
         if g == "winapi":
-            return w(0x94000000)                     # bl <thunk>
+            return _winapi(ins, off, shift, text_va, imps)
         return w(0xD4000001)                         # svc #0
     if o == "jump":
         return w(0x14000000 | (((labels[a[0]] - off) >> 2) & 0x3FFFFFF))
@@ -170,6 +229,45 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0, text_va=0):
     return None
 
 
+def _fd2handle(pc, hstd):
+    """fd 0/1/2 name a standard handle; anything above is already one."""
+    out = w(0xF1000C1F)                              # cmp x0, #3
+    body = adrp_add(IP0, pc + 8, hstd) + _ldrx(0, IP0, 0)
+    out += w(0x54000002 | ((len(body) // 4 + 1) << 5))   # b.hs over it
+    return out + body
+
+
+def _winapi(ins, off, shift, text_va, imps):
+    m = ins.meta
+    op = m.get("catop")
+    hstd = m.get("hstd", 0) + shift
+    written = m.get("written", 0) + shift
+    pc = text_va + off
+    if op == "exit":
+        return _callimp(pc, imps, "ExitProcess")
+    if op in ("write", "read"):
+        out = _fd2handle(pc, hstd)
+        out += adrp_add(3, pc + len(out), written)   # x3 = &written
+        out += w(0xAA1F03E4)                         # mov x4, xzr
+        out += _callimp(pc + len(out), imps,
+                        "WriteFile" if op == "write" else "ReadFile")
+        out += adrp_add(IP0, pc + len(out), written)
+        out += _ldr(0, IP0)                          # the POSIX return value
+        return out
+    if op == "close":
+        out = _fd2handle(pc, hstd)
+        return out + _callimp(pc + len(out), imps, "CloseHandle")
+    if op == "open":
+        out = _movz(1, 0) + w(0xB27B0021)            # x1 = GENERIC_READ
+        out += _movz(2, 1)                           # FILE_SHARE_READ
+        out += w(0xAA1F03E3)                         # x3 = 0
+        out += _movz(4, 3)                           # OPEN_EXISTING
+        out += _movz(5, 0x80)                        # FILE_ATTRIBUTE_NORMAL
+        out += w(0xAA1F03E6)                         # x6 = 0
+        return out + _callimp(pc + len(out), imps, "CreateFileA")
+    return None
+
+
 def size(ins, labels):
-    b = encode(ins, 0, {k: 0 for k in labels}, "arm64", {}, 0, 0)
+    b = encode(ins, 0, {k: 0 for k in labels}, "arm64", {}, 0, 0, {})
     return len(b) if b is not None else 4
