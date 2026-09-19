@@ -285,6 +285,8 @@ def expand(text, macros):
                 out.append(new[i:m.start()])
                 params, body = fn[m.group(1)]
                 args, end = _split_args(new, m.end() - 1)
+                if args == [""] and not params:
+                    args = []          # `F()` for `#define F() ...`
                 if args is not None and params and params[-1] == "...":
                     # C99 variadic macro: the rest becomes __VA_ARGS__
                     fixed = len(params) - 1

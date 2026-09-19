@@ -338,8 +338,7 @@ class Walker:
         if ty.kind == "arr":
             esz = ty.to.size(self.sc.structs)
             return [(i * esz, ty.to) for i in range(ty.n)]
-        st = self.sc.structs[ty.tag]
-        return [(foff, fty) for (_, (fty, foff)) in st.fields.items()]
+        return list(self.sc.structs[ty.tag].order)
 
     def _elems(self, ty):
         """The scalar slots of `ty`, in declaration order: (offset, type)."""
@@ -417,6 +416,8 @@ class Walker:
                 self.const_init(sym, mty, at + off)
                 k += 1
                 first = False
+                if self._is_union(ty):
+                    break
             if braced:
                 self.expect("}")
             return
@@ -438,6 +439,10 @@ class Walker:
         self.em.t.data[base + at:base + at + w] = \
             (v & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
 
+    def _is_union(self, ty):
+        st = self.sc.structs.get(ty.tag) if ty.kind == "struct" else None
+        return st is not None and st.is_union
+
     def _is_charr(self, ty):
         return ty.kind == "arr" and ty.to.size(self.sc.structs) == 1
 
@@ -458,6 +463,10 @@ class Walker:
         self.i = j + 1
         return sy.sym
 
+    def _is_union(self, ty):
+        st = self.sc.structs.get(ty.tag) if ty.kind == "struct" else None
+        return st is not None and st.is_union
+
     def _is_charr(self, ty):
         return ty.kind == "arr" and ty.to.size(self.sc.structs) == 1
 
@@ -465,9 +474,9 @@ class Walker:
         if ty.kind != "struct":
             raise CError("line %d: .%s in a non-struct initialiser"
                          % (self.peek().line, name))
-        for i, fn in enumerate(self.sc.structs[ty.tag].fields):
-            if fn == name:
-                return i
+        oi = self.sc.structs[ty.tag].oindex
+        if name in oi:
+            return oi[name]
         raise CError("line %d: no field %r" % (self.peek().line, name))
 
     def _designator(self, ty, slots, k):
@@ -626,6 +635,14 @@ class Walker:
                 if not self.eat(","):
                     break
                 continue
+            if self.at("("):
+                # a prototype inside a block: `int f1(char *);` declares f1,
+                # it does not define a variable
+                self.skip_parens()
+                self.sc.declare(name, Type("fn", ret=ty), "fn", sym=name)
+                if not self.eat(","):
+                    break
+                continue
             init = self.eat("=")
             if init and ty.kind == "arr" and ty.n == 0:
                 ty = Type("arr", to=ty.to, n=self._init_count())
@@ -670,6 +687,8 @@ class Walker:
                 self.local_init(ety, off - eoff)
                 k += 1
                 first = False
+                if self._is_union(ty):
+                    break
             if braced:
                 self.expect("}")
             return

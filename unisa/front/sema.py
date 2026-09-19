@@ -82,11 +82,16 @@ def ptr(t):
 class Struct:
     """Also covers unions: every field sits at offset 0 and the size is the
     widest member."""
-    __slots__ = ("tag", "fields", "size", "is_union")
+    __slots__ = ("tag", "fields", "size", "is_union", "order", "oindex")
 
     def __init__(self, tag, is_union=False):
         self.tag, self.fields, self.size = tag, {}, 0
         self.is_union = is_union
+        # `fields` is for lookup and is FLAT: an anonymous member's fields are
+        # spliced in.  `order` is for initialisers, where that same anonymous
+        # member counts as one element.  `{1, 2, 3, {4, 5}}` needs both views.
+        self.order = []
+        self.oindex = {}
 
     def embed(self, ty, structs):
         """Splice an anonymous member's fields into this aggregate.  C11
@@ -106,16 +111,21 @@ class Struct:
             self.size += sz
         for nm, (fty, foff) in inner.fields.items():
             self.fields[nm] = (fty, base + foff)
+        self.order.append((base, ty))      # one element for initialisers
 
     def add(self, name, ty, structs):
         sz = ty.size(structs)
         if self.is_union:
             self.fields[name] = (ty, 0)
+            self.oindex[name] = len(self.order)
+            self.order.append((0, ty))
             self.size = max(self.size, sz)
             return
         align = min(8, sz if sz in (1, 2, 4, 8) else 8)
         self.size = (self.size + align - 1) // align * align
         self.fields[name] = (ty, self.size)
+        self.oindex[name] = len(self.order)
+        self.order.append((self.size, ty))
         self.size += sz
 
 
