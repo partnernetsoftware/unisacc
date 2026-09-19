@@ -18,8 +18,13 @@ declare -a NAME LINE CODE
 # failure, and a suite that dies silently must not read as green.
 run() {
     local n="$1"; shift
-    local out; out=$("$@" 2>/dev/null); local rc=$?
+    local out; out=$("$@" 2>&1); local rc=$?
     NAME+=("$n"); LINE+=("$(printf '%s' "$out" | tail -1)"); CODE+=("$rc")
+    # A swallowed failure is useless in CI -- show the suite when it fails.
+    if [ "$rc" -ne 0 ]; then
+        printf '\n--- %s failed ---\n%s\n--- end %s ---\n' \
+            "$n" "$(printf '%s' "$out" | tail -30)" "$n"
+    fi
 }
 
 run acceptance ./tests/acceptance.sh

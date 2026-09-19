@@ -3,6 +3,7 @@
 Classic line walker; the only decision -- what to do with a directive given the
 current truth flag -- goes through the pp table. [G-4]
 """
+import os
 import re
 
 DIRECTIVE = re.compile(r"^\s*#\s*(\w+)\s*(.*)$")
@@ -45,9 +46,29 @@ def _truth(expr, macros):
     return v != neg
 
 
-def preprocess(src, oracle, macros=None):
-    """Returns (text, macros).  Skipped lines become blank so line numbers hold."""
+def _find_header(name, angled, here, paths):
+    cand = []
+    if not angled and here:
+        cand.append(os.path.join(here, name))
+    for p in paths:
+        cand.append(os.path.join(p, name))
+    for c in cand:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
+               _seen=None):
+    """Returns (text, macros).
+
+    Skipped lines become blank so positions hold.  `#include` splices the named
+    file in place, which does shift line numbers -- only diagnostics depend on
+    them, and a header that is spliced is more useful than a line number that
+    is exact."""
     macros = dict(macros or {})
+    _seen = _seen if _seen is not None else set()
+    here = os.path.dirname(os.path.abspath(path)) if path else None
     out = []
     stack = []            # [(taking, seen_true)]
     for raw in src.splitlines():
@@ -92,6 +113,20 @@ def preprocess(src, oracle, macros=None):
         elif act == "pop":
             if stack:
                 stack.pop()
+        elif act == "macro" and live and d == "include":
+            m2 = re.match(r'^\s*([<"])([^>"]+)[>"]', rest)
+            if m2 and _depth < 32:
+                angled = m2.group(1) == "<"
+                found = _find_header(m2.group(2), angled, here, includes)
+                if found and found not in _seen:
+                    _seen.add(found)
+                    with open(found, encoding="latin-1") as f:
+                        sub, macros = preprocess(f.read(), oracle, macros,
+                                                 found, includes,
+                                                 _depth + 1, _seen)
+                    out.append(sub)
+                    continue
+            out.append("")
         elif act == "macro" and live:
             if d == "define":
                 m2 = re.match(r"^(\w+)\(([^)]*)\)\s*(.*)$", rest)

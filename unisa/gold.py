@@ -161,7 +161,10 @@ def pp_label(d, f):
     if d in ("define", "undef"):
         return "macro"
     if d == "include":
-        return "skip"
+        # `include` mutates translation state and emits no tokens -- the same
+        # shape as define/undef, so it belongs to `macro`.  It was `skip` only
+        # while the preprocessor had no include mechanism.  [G-4 corrected]
+        return "macro"
     if d == "ifdef":
         return "take" if on else "skip"
     if d == "ifndef":

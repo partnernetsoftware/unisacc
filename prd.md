@@ -378,7 +378,7 @@ field/id = field
 ```
 默认 skip
 ifdef: 1=take 0=skip   ifndef: 取反   if/elif/else: 跟随 flag
-endif=pop   define=undef=macro   include=skip
+endif=pop   define=undef=include=macro
 ```
 
 **G-5 lex** — CHARC(11) × peek CHARC(11) → ACT(10)，**121 行**

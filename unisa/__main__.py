@@ -120,7 +120,7 @@ def cmd_build(a):
 def cmd_tape(a):
     o = _oracle(a.drive)
     try:
-        t = compile_file(a.file, o, a.target)
+        t = compile_file(a.file, o, a.target, getattr(a, "I", ()))
     except Exception as e:
         print("%s: %s" % (type(e).__name__, e))
         return 1
@@ -131,7 +131,7 @@ def cmd_tape(a):
 def cmd_run(a):
     o = _oracle(a.drive)
     try:
-        t = compile_file(a.file, o, a.target)
+        t = compile_file(a.file, o, a.target, getattr(a, "I", ()))
     except Exception as e:
         print("%s: %s" % (type(e).__name__, e))
         return 1
@@ -430,12 +430,16 @@ def main(argv=None):
     tp = sub.add_parser("tape")
     tp.add_argument("file")
     tp.add_argument("--target", default="lnx/x86_64")
+    tp.add_argument("-I", action="append", default=[],
+                    metavar="DIR", help="header search path")
     tp.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
     tp.set_defaults(fn=cmd_tape)
 
     r = sub.add_parser("run")
     r.add_argument("file")
     r.add_argument("--target", default="lnx/x86_64")
+    r.add_argument("-I", action="append", default=[],
+                    metavar="DIR", help="header search path")
     r.add_argument("--fold", action="store_true")
     r.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
     r.add_argument("--fault", default=None, choices=list(FAULTS))
@@ -448,6 +452,8 @@ def main(argv=None):
     cp.add_argument("file")
     cp.add_argument("-o", "--out", default="a.out")
     cp.add_argument("--target", default="lnx/x86_64")
+    cp.add_argument("-I", action="append", default=[],
+                    metavar="DIR", help="header search path")
     cp.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
     cp.add_argument("--from-tape", action="store_true",
                     help="input is a .tape, not C (lower + assemble only)")
