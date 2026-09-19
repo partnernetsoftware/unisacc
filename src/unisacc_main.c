@@ -1,0 +1,1385 @@
+/* unisacc -- the compiler itself, in the C subset it compiles.
+ *
+ * Every table decision goes through infer(), the same integer kernel and the
+ * same model blob the Python driver uses.  Classic code (this file) walks; the
+ * tables decide.  [T-1] [T-2]
+ *
+ * Stage 1: the lexer.  `unisacc -tokens f.c` prints the token stream.
+ */
+
+#define MAXSRC 262144
+#define MAXTOK 65536
+
+char src[MAXSRC];
+int nsrc;
+
+int tkind[MAXTOK];      /* index into TOKV */
+int tpos[MAXTOK];       /* offset of the token text in src */
+int tlen[MAXTOK];
+int ntok;
+
+char tbuf[256];
+
+/* ---- vocabulary helpers: TOKV etc are NUL-separated packed strings ---- */
+int vfind(char *v, int n, char *s, int slen) {
+    int i; int p; int k; int ok;
+    p = 0;
+    i = 0;
+    while (i < n) {
+        k = 0;
+        ok = 1;
+        while (v[p + k]) {
+            if (k >= slen) { ok = 0; }
+            if (ok) { if (v[p + k] != s[k]) ok = 0; }
+            k = k + 1;
+        }
+        if (ok) { if (k == slen) return i; }
+        p = p + k + 1;
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+int vlen(char *v, int idx) {
+    int p; int i; int k;
+    p = 0; i = 0;
+    while (i < idx) { while (v[p]) p = p + 1; p = p + 1; i = i + 1; }
+    k = 0;
+    while (v[p + k]) k = k + 1;
+    return k;
+}
+
+int voff(char *v, int idx) {
+    int p; int i;
+    p = 0; i = 0;
+    while (i < idx) { while (v[p]) p = p + 1; p = p + 1; i = i + 1; }
+    return p;
+}
+
+/* ---- character predicates (needed by both pp and lex) ---------------- */
+int isal(int c) {
+    if (c >= 97) { if (c <= 122) return 1; }
+    if (c >= 65) { if (c <= 90) return 1; }
+    if (c == 95) return 1;
+    return 0;
+}
+int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
+
+/* ---- the preprocessor: the pp table decides every directive [W-1] ----- */
+#define MAXMAC 256
+char macname[MAXMAC * 32];
+int macval[MAXMAC];      /* object-like numeric macros: #define N 256 */
+int machas[MAXMAC];
+int nmac;
+
+int mfindt(int t);
+int mfind(char *s, int n) {
+    int i; int k; int ok;
+    i = 0;
+    while (i < nmac) {
+        k = 0; ok = 1;
+        while (macname[i * 32 + k]) {
+            if (k >= n) ok = 0;
+            if (ok) { if (macname[i * 32 + k] != s[k]) ok = 0; }
+            k = k + 1;
+        }
+        if (ok) { if (k == n) return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+int mdef(char *s, int n, int v, int has) {
+    int k;
+    if (mfind(s, n) >= 0) return 0;
+    if (nmac >= MAXMAC) return 0;
+    k = 0;
+    while (k < n) { if (k < 31) macname[nmac * 32 + k] = s[k]; k = k + 1; }
+    if (n < 32) macname[nmac * 32 + n] = 0;
+    macval[nmac] = v; machas[nmac] = has;
+    nmac = nmac + 1;
+    return 0;
+}
+
+int takest[64];      /* per nesting level: are we taking? */
+int seenst[64];      /* has a branch already been taken? */
+int ndepth;
+
+int wsat(int i) { if (src[i] == 32) return 1; if (src[i] == 9) return 1; return 0; }
+
+/* Rewrite src in place: directives and skipped lines become blanks, so
+ * positions and line numbers survive. */
+int preprocess(void) {
+    int i; int ls; int j; int ws; int we; int live; int d; int flag;
+    int a; int k; int ns; int ne;
+    int key[4];
+    ndepth = 0;
+    nmac = 0;
+    i = 0;
+    while (i < nsrc) {
+        ls = i;
+        while (i < nsrc) { if (src[i] == 10) break; i = i + 1; }
+        /* live = every open level is taking */
+        live = 1;
+        k = 0;
+        while (k < ndepth) { if (takest[k] == 0) live = 0; k = k + 1; }
+        j = ls;
+        while (j < i) { if (wsat(j) == 0) break; j = j + 1; }
+        if (src[j] == 35) {                      /* '#' */
+            j = j + 1;
+            while (j < i) { if (wsat(j) == 0) break; j = j + 1; }
+            ws = j;
+            while (j < i) { if (isal(src[j] & 255) == 0) break; j = j + 1; }
+            we = j;
+            d = vfind(DIRV, NDIRV, src + ws, we - ws);
+            while (j < i) { if (wsat(j) == 0) break; j = j + 1; }
+            ns = j;
+            while (j < i) { if (isal(src[j] & 255) == 0) { if (isdi(src[j] & 255) == 0) break; } j = j + 1; }
+            ne = j;
+            flag = 0;
+            if (d >= 0) {
+                if (d == 0) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
+                if (d == 1) { if (mfind(src + ns, ne - ns) < 0) flag = 1; }
+                if (d == 2) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
+                if (d == 3) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
+                if (d == 4) { if (ndepth > 0) { if (seenst[ndepth-1] == 0) flag = 1; } }
+                if (d > 4) flag = 1;
+                key[0] = d; key[1] = flag; key[2] = 0; key[3] = 0;
+                a = infer(S_PP, key, 0);          /* the table decides */
+                if (d < 3) {                      /* ifdef ifndef if */
+                    takest[ndepth] = 0;
+                    if (a == 0) { if (live) takest[ndepth] = 1; }
+                    seenst[ndepth] = takest[ndepth];
+                    ndepth = ndepth + 1;
+                } else {
+                if (d == 3) {                     /* elif */
+                    if (ndepth > 0) {
+                        takest[ndepth-1] = 0;
+                        if (a == 0) { if (seenst[ndepth-1] == 0) takest[ndepth-1] = 1; }
+                        if (takest[ndepth-1]) seenst[ndepth-1] = 1;
+                    }
+                } else {
+                if (d == 4) {                     /* else */
+                    if (ndepth > 0) {
+                        takest[ndepth-1] = 0;
+                        if (a == 0) { if (seenst[ndepth-1] == 0) takest[ndepth-1] = 1; }
+                        if (takest[ndepth-1]) seenst[ndepth-1] = 1;
+                    }
+                } else {
+                if (a == 2) { if (ndepth > 0) ndepth = ndepth - 1; }   /* pop */
+                else {
+                if (a == 3) {                     /* macro: define / undef */
+                    if (live) { if (d == 6) {
+                        int vs; int vv; int vh;
+                        vs = ne;
+                        while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
+                        vv = 0; vh = 0;
+                        if (vs < i) { if (isdi(src[vs] & 255)) {
+                            vh = 1;
+                            while (vs < i) { if (isdi(src[vs] & 255) == 0) break;
+                                             vv = vv * 10 + ((src[vs] & 255) - 48);
+                                             vs = vs + 1; } } }
+                        mdef(src + ns, ne - ns, vv, vh);
+                    } }
+                } } } } }
+            }
+            k = ls;
+            while (k < i) { src[k] = 32; k = k + 1; }   /* blank the directive */
+        } else {
+            if (live == 0) {
+                k = ls;
+                while (k < i) { src[k] = 32; k = k + 1; }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* ---- character classes: the lex table's key axis --------------------- */
+int OPCH[128];
+
+int charclass(int c) {
+    if (c < 0) return 9;                       /* eof */
+    if (c == 10) return 1;                     /* nl */
+    if (c == 32) return 0;
+    if (c == 9) return 0;
+    if (c == 13) return 0;
+    if (isal(c)) return 2;                     /* A */
+    if (isdi(c)) return 3;                     /* d */
+    if (c == 34) return 4;                     /* q */
+    if (c == 39) return 5;                     /* sq */
+    if (c == 47) return 6;                     /* slash */
+    if (c == 42) return 7;                     /* star */
+    if (c < 128) { if (OPCH[c]) return 8; }    /* punct */
+    return 10;                                 /* other */
+}
+
+int at(int i) { if (i >= nsrc) return 0 - 1; return src[i] & 255; }
+
+/* ---- the lexer ------------------------------------------------------- */
+int lex(void) {
+    int i; int j; int a; int key[4]; int kind; int st;
+    int best; int bl; int k; int p; int L;
+    i = 0;
+    ntok = 0;
+    while (1) {
+        key[0] = charclass(at(i));
+        key[1] = charclass(at(i + 1));
+        key[2] = 0; key[3] = 0;
+        a = infer(S_LEX, key, 0);              /* the table decides [W-2] */
+        if (a == 0) {                          /* skip */
+            if (at(i) < 0) {
+                tkind[ntok] = 0; tpos[ntok] = i; tlen[ntok] = 0;
+                ntok = ntok + 1;
+                return ntok;
+            }
+            i = i + 1;
+        } else {
+        if (a == 1) { i = i + 1; }             /* nl */
+        else {
+        if (a == 7) { while (at(i) >= 0) { if (at(i) == 10) break; i = i + 1; } }
+        else {
+        if (a == 6) { i = i + 2;
+            while (at(i) >= 0) {
+                if (at(i) == 42) { if (at(i+1) == 47) { i = i + 2; break; } }
+                i = i + 1; } }
+        else {
+        if (a == 2) {                          /* ident */
+            j = i;
+            while (at(j) >= 0) { if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) break; } j = j + 1; }
+            kind = vfind(TOKV, NTOKV, src + i, j - i);
+            if (kind < 0) kind = 2;            /* id */
+            if (kind == 0) kind = 2;           /* "eof" is not a keyword */
+            if (kind == 1) kind = 2;           /* nor is "type" */
+            if (vfind(TYPEV, NTYPEV, src + i, j - i) >= 0) kind = 1;
+            tkind[ntok] = kind; tpos[ntok] = i; tlen[ntok] = j - i;
+            ntok = ntok + 1;
+            i = j;
+        } else {
+        if (a == 3) {                          /* num */
+            j = i;
+            if (at(j) == 48) {                 /* 0x... */
+                if (at(j+1) == 120) { if (at(j+1) != 0 - 1) {
+                    j = j + 2;
+                    while (at(j) >= 0) {
+                        if (isdi(at(j))) { j = j + 1; } else {
+                        if (at(j) >= 97) { if (at(j) <= 102) { j = j + 1; } else break; }
+                        else { if (at(j) >= 65) { if (at(j) <= 70) { j = j + 1; } else break; }
+                               else break; } } }
+                } }
+            }
+            while (isdi(at(j))) j = j + 1;
+            while (at(j) == 117) { j = j + 1; }    /* u */
+            while (at(j) == 85) { j = j + 1; }     /* U */
+            while (at(j) == 108) { j = j + 1; }    /* l */
+            while (at(j) == 76) { j = j + 1; }     /* L */
+            tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j - i;
+            ntok = ntok + 1;
+            i = j;
+        } else {
+        if (a == 4) {                          /* str */
+            int q;
+            j = i + 1;
+            while (1) {
+                while (at(j) >= 0) {
+                    if (at(j) == 92) { j = j + 2; } else {
+                    if (at(j) == 34) break; else j = j + 1; } }
+                /* C concatenates adjacent string literals [W-12] */
+                q = j + 1;
+                while (at(q) >= 0) {
+                    if (at(q) == 32) { q = q + 1; } else {
+                    if (at(q) == 9) { q = q + 1; } else {
+                    if (at(q) == 10) { q = q + 1; } else {
+                    if (at(q) == 13) { q = q + 1; } else break; } } } }
+                if (at(q) == 34) { j = q + 1; } else break;
+            }
+            tkind[ntok] = 4; tpos[ntok] = i; tlen[ntok] = j + 1 - i;
+            ntok = ntok + 1;
+            i = j + 1;
+        } else {
+        if (a == 5) {                          /* charlit */
+            j = i + 1;
+            if (at(j) == 92) j = j + 1;
+            j = j + 1;
+            tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j + 1 - i;
+            ntok = ntok + 1;
+            i = j + 1;
+        } else {
+        if (a == 8) {                          /* op: maximal munch */
+            best = 0 - 1; bl = 0;
+            k = 0;
+            while (k < NTOKV) {
+                L = vlen(TOKV, k);
+                if (L > bl) {
+                    p = voff(TOKV, k);
+                    if (isal(TOKV[p] & 255) == 0) {
+                        j = 0;
+                        while (j < L) { if (at(i + j) != (TOKV[p + j] & 255)) break; j = j + 1; }
+                        if (j == L) { best = k; bl = L; }
+                    }
+                }
+                k = k + 1;
+            }
+            if (best < 0) { printf("lex: stray char at %d\n", i); return 0 - 1; }
+            tkind[ntok] = best; tpos[ntok] = i; tlen[ntok] = bl;
+            ntok = ntok + 1;
+            i = i + bl;
+        } else {
+            printf("lex: bad char at %d\n", i);
+            return 0 - 1;
+        } } } } } } } } }
+    }
+    return ntok;
+}
+
+
+/* ===================== stage 5: parser + tape emitter =================== */
+/* Recursive descent mirroring the Python walker.  Every production choice
+ * goes through infer(S_PARSE, ...) -- classic control flow, neural table. */
+
+#define MAXOUT 4194304
+#define MAXSYM 4096
+
+char out[MAXOUT];
+int nout;
+char ibuf[65536];
+int nibuf;
+int toinit;              /* 1 => ec() writes the __init body instead */
+int hasinit;
+
+char symname[MAXSYM * 32];
+int symkind[MAXSYM];        /* 0 global  1 local  2 function */
+int symoff[MAXSYM];         /* local: frame offset */
+int symelem[MAXSYM];        /* element width for [] and unary * */
+int symptr[MAXSYM];         /* 1 for pointers and arrays */
+int nsym;
+int scopebase;              /* first local of the current function */
+
+int tp;                     /* current token */
+int nlab;                   /* label counter */
+int frameoff;               /* bytes of locals allocated so far */
+int framemax;
+int retlab;
+
+int P_END; int P_GLOBAL; int P_TYPEDEF; int P_STRUCT; int P_ENUM;
+int P_DECL; int P_IF; int P_WHILE; int P_FOR; int P_DO; int P_SWITCH;
+int P_CASE; int P_DEFAULT; int P_RETURN; int P_BREAK; int P_CONTINUE;
+int P_BLOCK; int P_EXPR; int P_NEG; int P_NOT; int P_DEREF; int P_ADDR;
+int P_SIZEOF; int P_PRIM; int P_INDEX; int P_CALL; int P_INC; int P_FIELD;
+int P_DONE; int P_FNSIG; int P_VARDEF; int P_GOTO;
+int T_EOF; int T_TYPE; int T_ID; int T_NUM; int T_STR;
+
+int pidx(char *n, int L) { return vfind(PRODV, NPRODV, n, L); }
+int tidx(char *n, int L) { return vfind(TOKV, NTOKV, n, L); }
+
+/* forward declarations: our own compiler resolves calls late, but a reference
+ * compiler wants them up front */
+int expr(void);
+int exprc(void);
+int unary(void);
+int primary(void);
+int postfix(void);
+int emit_binop(int k);
+int stmt(void);
+int block(void);
+int local_decl(void);
+int pf_call(int t);
+int do_printf(void);
+int is_typetok(void);
+int push(void);
+int pop1(void);
+int loadval(void);
+int newlab(void);
+int elab(char *p, int n);
+int en(int v);
+int ec(int c);
+int etok(int i);
+int alloc_local(int n);
+int sadd(int t, int kind, int off, int elem);
+int addlit(char *b, int n);
+int decode(int t, char *buf);
+
+int ec(int c) {
+    if (toinit) { ibuf[nibuf] = c; nibuf = nibuf + 1; return 0; }
+    if (nout >= MAXOUT) { __write(2, "output buffer full\n", 19); __exit(1); }
+    out[nout] = c; nout = nout + 1; return 0;
+}
+
+int es(char *s) { int i; i = 0; while (s[i]) { ec(s[i] & 255); i = i + 1; } return 0; }
+
+int en(int v) {
+    char b[24]; int n; int neg;
+    neg = 0;
+    if (v < 0) { neg = 1; v = 0 - v; }
+    n = 0;
+    if (v == 0) { b[0] = 48; n = 1; }
+    while (v > 0) { b[n] = 48 + (v % 10); v = v / 10; n = n + 1; }
+    if (neg) ec(45);
+    while (n > 0) { n = n - 1; ec(b[n] & 255); }
+    return 0;
+}
+
+int etok(int i) { int k; k = 0; while (k < tlen[i]) { ec(src[tpos[i] + k] & 255); k = k + 1; } return 0; }
+
+int newlab(void) { nlab = nlab + 1; return nlab; }
+int elab(char *p, int n) { es(p); en(n); return 0; }
+
+/* ---- symbols --------------------------------------------------------- */
+int sfind(int t) {
+    int i; int k; int ok; int n;
+    n = tlen[t];
+    i = nsym - 1;
+    while (i >= 0) {
+        k = 0; ok = 1;
+        while (symname[i * 32 + k]) {
+            if (k >= n) ok = 0;
+            if (ok) { if (symname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            k = k + 1;
+        }
+        if (ok) { if (k == n) return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+int declptr;                /* set by the declarator being processed */
+char lbuf[131072];      /* a string literal can be the whole model blob */
+int needslen; int needchb;
+
+int sadd(int t, int kind, int off, int elem) {
+    int k;
+    if (nsym >= MAXSYM) { __write(2, "symbol table full\n", 18); __exit(1); }
+    k = 0;
+    while (k < tlen[t]) { if (k < 31) symname[nsym * 32 + k] = src[tpos[t] + k]; k = k + 1; }
+    if (tlen[t] < 32) symname[nsym * 32 + tlen[t]] = 0;
+    symkind[nsym] = kind; symoff[nsym] = off; symelem[nsym] = elem;
+    symptr[nsym] = declptr;
+    nsym = nsym + 1;
+    return nsym - 1;
+}
+
+int mfindt(int t) { return mfind(src + tpos[t], tlen[t]); }
+
+/* ---- token helpers --------------------------------------------------- */
+int kind(int i) { if (i >= ntok) return T_EOF; return tkind[i]; }
+int cur(void) { return kind(tp); }
+int adv(void) { tp = tp + 1; return tp - 1; }
+int eat(int k) { if (cur() == k) { tp = tp + 1; return 1; } return 0; }
+
+int need(int k, char *what) {
+    if (cur() == k) { tp = tp + 1; return 1; }
+    __write(2, "parse error: expected ", 22); __write(2, what, 2);
+    __write(2, " got '", 6); __write(2, src + tpos[tp], tlen[tp]);
+    __write(2, "'\n", 2);
+    __exit(1);
+    return 0;
+}
+
+int ask(int nt) { int key[4]; key[0] = nt; key[1] = cur(); key[2] = 0; key[3] = 0;
+                  return infer(S_PARSE, key, 0); }
+
+/* ---- expressions ----------------------------------------------------- */
+int expr(void);
+
+int push(void) { es("  .frame 8\n  store64 [r7+0], r0\n"); return 0; }
+int pop1(void) { es("  load64 r1, [r7+0]\n  .frame -8\n"); return 0; }
+
+int lvalue;        /* 1 when r0 holds an ADDRESS, not a value */
+int curelem;       /* element width of the thing in r0 */
+int curptr;        /* 1 when the VALUE in r0 is a pointer (scales +/-) */
+
+/* storage width vs element width: a `char *p` is stored in 8 bytes but its
+ * element is 1.  Conflating them stores a single byte of the pointer. */
+int stw(void) { if (curptr) return 8; return curelem; }
+
+int loadval(void) {
+    if (lvalue) {
+        if (stw() == 1) es("  .ld r0, [r0+0], 1\n");
+        else es("  load64 r0, [r0+0]\n");
+        lvalue = 0;
+    }
+    return 0;
+}
+
+int primary(void);
+
+int unary(void) {
+    int p;
+    p = ask(2);
+    if (p == P_NEG) { adv(); unary(); loadval(); es("  imm r1, 0\n  sub64 r0, r1, r0\n"); return 0; }
+    if (p == P_NOT) { adv(); unary(); loadval(); es("  imm r1, 0\n  eq r0, r0, r1\n"); return 0; }
+    if (p == P_DEREF) { adv(); unary(); loadval(); lvalue = 1; curptr = 0; return 0; }
+    if (p == P_ADDR) { adv(); unary(); lvalue = 0; return 0; }
+    return primary();
+}
+
+int postfix(void) {
+    int p; int e;
+    while (1) {
+        p = ask(3);
+        if (p == P_INC) {
+            int op; int e2;
+            op = cur(); adv();
+            e2 = stw();
+            lvalue = 0;
+            push();                                  /* address */
+            if (e2 == 1) es("  .ld r0, [r0+0], 1\n"); else es("  load64 r0, [r0+0]\n");
+            push();                                  /* old value */
+            es("  imm r0, 1\n");
+            if (op == tidx("++", 2)) emit_binop(tidx("+", 1));
+            else emit_binop(tidx("-", 1));
+            pop1();                                  /* address */
+            if (e2 == 1) es("  .st [r1+0], r0, 1\n"); else es("  store64 [r1+0], r0\n");
+            es("  imm r2, 1\n");
+            if (op == tidx("++", 2)) es("  sub64 r0, r0, r2\n");
+            else es("  add64 r0, r0, r2\n");
+            curelem = e2;
+        } else {
+        if (p == P_INDEX) {
+            adv();
+            e = curelem;
+            loadval();
+            push();
+            expr(); loadval();
+            if (e != 1) { es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); }
+            pop1();
+            es("  add64 r0, r1, r0\n");
+            need(vfind(TOKV, NTOKV, "]", 1), "]");
+            lvalue = 1; curelem = e; curptr = 0;
+        } else {
+            return 0;
+        } }
+    }
+    return 0;
+}
+
+int pf_call(int t);
+
+int primary(void) {
+    int t; int i; int v; int k;
+    t = cur();
+    if (t == T_NUM) {
+        v = 0; k = 0;
+        while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+        adv();
+        es("  imm r0, "); en(v); ec(10);
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    if (t == T_STR) {
+        i = nlab; nlab = nlab + 1;
+        i = addlit(lbuf, decode(adv(), lbuf));
+        es("  .lea r0, S"); en(i); ec(10);
+        lvalue = 0; curelem = 1; curptr = 1;
+        return postfix();
+    }
+    if (t == vfind(TOKV, NTOKV, "(", 1)) {
+        adv(); expr(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        return postfix();
+    }
+    if (t == T_ID) {
+        if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) return pf_call(adv());
+        i = mfindt(tp);
+        if (i >= 0) { if (machas[i]) {
+            es("  imm r0, "); en(macval[i]); ec(10);
+            adv(); lvalue = 0; curelem = 8; curptr = 0;
+            return postfix();
+        } }
+        i = sfind(tp);
+        if (i < 0) { __write(2, "unknown identifier: ", 20);
+                     __write(2, src + tpos[tp], tlen[tp]);
+                     __write(2, "\n", 1); __exit(1); }
+        if (symkind[i] == 4) {           /* enum constant */
+            es("  imm r0, "); en(symoff[i]); ec(10);
+            adv(); lvalue = 0; curelem = 8;
+            return postfix();
+        }
+        if (symkind[i] == 5) {               /* global array -> its address */
+            es("  .lea r0, g_"); etok(tp); ec(10);
+            curelem = symelem[i]; curptr = 1;
+            adv(); lvalue = 0;
+            return postfix();
+        }
+        if (symkind[i] == 0) { es("  .lea r0, g_"); etok(tp); ec(10); }
+        else { es("  imm r2, "); en(symoff[i]); es("\n  sub64 r0, r6, r2\n"); }
+        curelem = symelem[i];
+        curptr = symptr[i];
+        adv();
+        lvalue = 1;
+        if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
+        return postfix();
+    }
+    printf("unexpected token %d in expression\n", tp);
+    __exit(1);
+    return 0;
+}
+
+
+/* ---- string literal pool --------------------------------------------- */
+#define MAXPOOL 1048576
+char pool[MAXPOOL];
+#define MAXLIT 4096
+int plpos[MAXLIT];
+int pllen[MAXLIT];
+int npool;
+int poolend;
+
+int addlit(char *b, int n) {
+    int k;
+    if (poolend + n >= MAXPOOL) { __write(2, "literal pool full\n", 18); __exit(1); }
+    if (npool >= MAXLIT) { __write(2, "too many literals\n", 18); __exit(1); }
+    plpos[npool] = poolend; pllen[npool] = n;
+    k = 0;
+    while (k < n) { pool[poolend + k] = b[k]; k = k + 1; }
+    poolend = poolend + n;
+    npool = npool + 1;
+    return npool - 1;
+}
+
+int hexd(int v) { if (v < 10) return 48 + v; return 87 + v; }
+
+int emit_pool(void) {
+    int i; int k; int c;
+    i = 0;
+    while (i < npool) {
+        es(".str S"); en(i); es(" \"");
+        k = 0;
+        while (k < pllen[i]) {
+            c = pool[plpos[i] + k] & 255;
+            if (c == 34) { ec(92); ec(34); }
+            else { if (c == 92) { ec(92); ec(92); }
+            else { if (c >= 32) { if (c < 127) ec(c); else {
+                       ec(92); ec(120); ec(hexd(c / 16)); ec(hexd(c % 16)); } }
+                   else { ec(92); ec(120); ec(hexd(c / 16)); ec(hexd(c % 16)); } } }
+            k = k + 1;
+        }
+        es("\\x00\"\n");          /* C strings are NUL terminated */
+        i = i + 1;
+    }
+    return 0;
+}
+
+/* decode a C string literal token into buf, return its length */
+int decode(int t, char *buf) {
+    int k; int n; int c;
+    k = 1; n = 0;
+    while (k < tlen[t] - 1) {
+        c = src[tpos[t] + k] & 255;
+        if (c == 34) {                 /* the seam between two literals */
+            k = k + 1;
+            while (k < tlen[t] - 1) {
+                c = src[tpos[t] + k] & 255;
+                if (c == 34) { k = k + 1; break; }
+                k = k + 1;
+            }
+            continue;
+        }
+        if (c == 92) {
+            k = k + 1;
+            c = src[tpos[t] + k] & 255;
+            if (c == 110) c = 10;
+            else { if (c == 116) c = 9; else { if (c == 48) c = 0; else {
+                   if (c == 114) c = 13; else {
+                   if (c == 120) {            /* \xNN */
+                       int h1; int h2;
+                       h1 = src[tpos[t] + k + 1] & 255;
+                       h2 = src[tpos[t] + k + 2] & 255;
+                       if (h1 >= 97) h1 = h1 - 87; else { if (h1 >= 65) h1 = h1 - 55; else h1 = h1 - 48; }
+                       if (h2 >= 97) h2 = h2 - 87; else { if (h2 >= 65) h2 = h2 - 55; else h2 = h2 - 48; }
+                       c = h1 * 16 + h2;
+                       k = k + 2;
+                   } } } } }
+        }
+        buf[n] = c; n = n + 1;
+        k = k + 1;
+    }
+    return n;
+}
+
+
+int do_printf(void) {
+    int t; int k; int n; int c; int m; int id;
+    char fbuf[4096];
+    need(vfind(TOKV, NTOKV, "(", 1), "(");
+    if (cur() != T_STR) { printf("printf needs a literal format\n"); __exit(1); }
+    t = adv();
+    n = decode(t, fbuf);
+    k = 0; m = 0;
+    while (k < n) {
+        c = fbuf[k] & 255;
+        if (c == 37) {
+            k = k + 1;
+            c = fbuf[k] & 255;
+            if (c == 37) { lbuf[m] = 37; m = m + 1; k = k + 1; }
+            else {
+                if (m > 0) {
+                    id = addlit(lbuf, m);
+                    es("  .lea r0, S"); en(id); es("\n  imm r1, "); en(m);
+                    es("\n  .write r0, r1\n");
+                    m = 0;
+                }
+                need(vfind(TOKV, NTOKV, ",", 1), ",");
+                expr(); loadval();
+                if (c == 100) es("  .print r0\n");
+                else { if (c == 99) {            /* %c */
+                    es("  mov r2, r0\n  .lea r0, __chb\n  .st [r0+0], r2, 1\n"
+                       "  imm r1, 1\n  .write r0, r1\n");
+                    needchb = 1;
+                } else { if (c == 115) {         /* %s */
+                    es("  .frame 8\n  store64 [r7+0], r0\n  call __slen\n"
+                       "  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -8\n"
+                       "  .write r0, r1\n");
+                    needslen = 1;
+                } else { printf("printf: unsupported conversion\n"); __exit(1); } } }
+                k = k + 1;
+            }
+        } else { lbuf[m] = c; m = m + 1; k = k + 1; }
+    }
+    if (m > 0) {
+        id = addlit(lbuf, m);
+        es("  .lea r0, S"); en(id); es("\n  imm r1, "); en(m);
+        es("\n  .write r0, r1\n");
+    }
+    need(vfind(TOKV, NTOKV, ")", 1), ")");
+    es("  imm r0, 0\n");
+    lvalue = 0; curelem = 8;
+    return 0;
+}
+
+/* ---- calls ----------------------------------------------------------- */
+int isname(int t, char *nm, int L) {
+    int k;
+    if (tlen[t] != L) return 0;
+    k = 0;
+    while (k < L) { if ((src[tpos[t] + k] & 255) != (nm[k] & 255)) return 0; k = k + 1; }
+    return 1;
+}
+
+int sysargs(int n) {                 /* pop n args into r0..r2, zero the rest */
+    int k;
+    k = n - 1;
+    while (k >= 0) { es("  load64 r"); en(k); es(", [r7+0]\n  .frame -8\n"); k = k - 1; }
+    k = n;
+    while (k < 3) { es("  imm r"); en(k); es(", 0\n"); k = k + 1; }
+    return 0;
+}
+
+int pf_call(int t) {
+    int n; int k;
+    if (isname(t, "printf", 6)) return do_printf();
+    if (isname(t, "__argc", 6)) {
+        need(tidx("(", 1), "("); need(tidx(")", 1), ")");
+        es("  .argc r0\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    if (isname(t, "__argv", 6)) {
+        need(tidx("(", 1), "(");
+        expr(); loadval();
+        need(tidx(")", 1), ")");
+        es("  .argv r0, r0\n");
+        lvalue = 0; curelem = 1; curptr = 1;
+        return postfix();
+    }
+    if (isname(t, "__open", 6) || isname(t, "__read", 6) ||
+        isname(t, "__write", 7) || isname(t, "__close", 7) ||
+        isname(t, "__exit", 6)) {
+        need(tidx("(", 1), "(");
+        n = 0;
+        while (cur() != tidx(")", 1)) {
+            expr(); loadval(); push(); n = n + 1;
+            if (eat(tidx(",", 1)) == 0) break;
+        }
+        need(tidx(")", 1), ")");
+        sysargs(n);
+        es("  .sys ");
+        if (isname(t, "__open", 6)) es("open");
+        else { if (isname(t, "__read", 6)) es("read");
+        else { if (isname(t, "__write", 7)) es("write");
+        else { if (isname(t, "__close", 7)) es("close");
+        else es("exit"); } } }
+        es(", r0, r1, r2\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    need(vfind(TOKV, NTOKV, "(", 1), "(");
+    n = 0;
+    while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
+        expr(); loadval(); push(); n = n + 1;
+        if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
+    }
+    need(vfind(TOKV, NTOKV, ")", 1), ")");
+    k = n - 1;
+    while (k >= 0) {
+        es("  load64 r"); en(k); es(", [r7+0]\n  .frame -8\n");
+        k = k - 1;
+    }
+    es("  call "); etok(t); ec(10);
+    lvalue = 0; curelem = 8;
+    return postfix();
+}
+
+/* ---- binary expressions --------------------------------------------- */
+int BOP[16];
+int BLEV[16];
+int nbop;
+
+int binop_level(int k) { int i; i = 0; while (i < nbop) { if (BOP[i] == k) return BLEV[i]; i = i + 1; } return 0 - 1; }
+
+int emit_binop(int k) {
+    pop1();
+    if (k == vfind(TOKV, NTOKV, "+", 1))  { es("  add64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "-", 1))  { es("  sub64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "*", 1))  { es("  mul64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .div r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .mod r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  slt64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  slt64 r0, r0, r1\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  sle64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  sle64 r0, r0, r1\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "==", 2)) { es("  eq r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "!=", 2)) { es("  ne r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "&", 1))  { es("  and64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "|", 1))  { es("  or64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "^", 1))  { es("  xor64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "<<", 2)) { es("  shl64 r0, r1, r0\n"); return 0; }
+    es("  shr64 r0, r1, r0\n");
+    return 0;
+}
+
+int binary(int level) {
+    int k; int e; int lp;
+    if (level > 7) { unary(); return 0; }
+    binary(level + 1);
+    while (1) {
+        k = cur();
+        if (binop_level(k) != level) break;
+        loadval();
+        e = curelem;
+        lp = curptr;
+        adv();
+        push();
+        binary(level + 1);
+        loadval();
+        if (lp) { if (e > 1) {
+            if (k == tidx("+", 1)) { es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); }
+            if (k == tidx("-", 1)) { if (curptr == 0) {
+                es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); } }
+        } }
+        emit_binop(k);
+        lvalue = 0; curelem = e; curptr = lp;
+        if (k != tidx("+", 1)) { if (k != tidx("-", 1)) { curptr = 0; curelem = 8; } }
+    }
+    return 0;
+}
+
+int land(void) {
+    int end;
+    binary(0);
+    while (cur() == vfind(TOKV, NTOKV, "&&", 2)) {
+        loadval(); adv();
+        end = newlab();
+        elab("  jumpz r0, L", end); ec(10);
+        binary(0); loadval();
+        es("  imm r1, 0\n  ne r0, r0, r1\n");
+        elab("L", end); es(":\n");
+    }
+    return 0;
+}
+
+int lor(void) {
+    int end; int rhs;
+    land();
+    while (cur() == vfind(TOKV, NTOKV, "||", 2)) {
+        loadval(); adv();
+        end = newlab(); rhs = newlab();
+        elab("  jumpz r0, L", rhs); ec(10);
+        es("  imm r0, 1\n");
+        elab("  jump L", end); ec(10);
+        elab("L", rhs); es(":\n");
+        land(); loadval();
+        es("  imm r1, 0\n  ne r0, r0, r1\n");
+        elab("L", end); es(":\n");
+    }
+    return 0;
+}
+
+int exprc(void) {                   /* the comma operator */
+    expr();
+    while (cur() == tidx(",", 1)) { adv(); expr(); }
+    return 0;
+}
+
+int aop(void) {                     /* += -= *= /= -> the plain operator */
+    if (cur() == tidx("+=", 2)) return tidx("+", 1);
+    if (cur() == tidx("-=", 2)) return tidx("-", 1);
+    if (cur() == tidx("*=", 2)) return tidx("*", 1);
+    if (cur() == tidx("/=", 2)) return tidx("/", 1);
+    return 0 - 1;
+}
+
+int expr(void) {
+    int save; int nsave; int e; int op; int isave; int psave; int pesave;
+    save = tp; nsave = nout; isave = nibuf; psave = npool; pesave = poolend;
+    unary();
+    if (lvalue) {
+        op = aop();
+        if (op >= 0) {
+            adv();
+            e = stw();
+            lvalue = 0;
+            push();                                  /* address */
+            if (e == 1) es("  .ld r0, [r0+0], 1\n"); else es("  load64 r0, [r0+0]\n");
+            push();                                  /* old value */
+            expr(); loadval();
+            emit_binop(op);                          /* pops old value */
+            pop1();                                  /* address */
+            if (e == 1) es("  .st [r1+0], r0, 1\n"); else es("  store64 [r1+0], r0\n");
+            curelem = e;
+            return 0;
+        }
+        if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
+            adv();
+            e = stw();
+            lvalue = 0;
+            push();
+            expr(); loadval();
+            pop1();
+            if (e == 1) es("  .st [r1+0], r0, 1\n");
+            else es("  store64 [r1+0], r0\n");
+            return 0;
+        }
+    }
+    tp = save; nout = nsave; lvalue = 0;
+    return lor();
+}
+
+/* ---- statements and declarations ------------------------------------- */
+int brkstack[32]; int cntstack[32]; int nloop;
+
+int patchnum(int at, int w, int v) {
+    int k; int d;
+    k = w - 1;
+    if (v == 0) { out[at + k] = 48; k = k - 1; }
+    while (v > 0) { if (k >= 0) out[at + k] = 48 + (v % 10); v = v / 10; k = k - 1; }
+    while (k >= 0) { out[at + k] = 32; k = k - 1; }
+    return 0;
+}
+
+int cexpr(void);
+
+int catom(void) {
+    int v; int k; int i;
+    if (cur() == T_NUM) {
+        v = 0; k = 0;
+        while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+        adv();
+        return v;
+    }
+    if (cur() == tidx("(", 1)) { adv(); v = cexpr(); need(tidx(")", 1), ")"); return v; }
+    if (cur() == T_ID) {
+        i = mfindt(tp);
+        if (i >= 0) { if (machas[i]) { adv(); return macval[i]; } }
+        i = sfind(tp);
+        if (i >= 0) { if (symkind[i] == 4) { adv(); return symoff[i]; } }
+    }
+    printf("constant expected at token %d\n", tp);
+    __exit(1);
+    return 0;
+}
+
+int cexpr(void) {
+    int v; int k;
+    v = catom();
+    while (1) {
+        k = cur();
+        if (k == tidx("*", 1)) { adv(); v = v * catom(); }
+        else { if (k == tidx("+", 1)) { adv(); v = v + catom(); }
+        else { if (k == tidx("-", 1)) { adv(); v = v - catom(); }
+        else { if (k == tidx("/", 1)) { adv(); v = v / catom(); }
+        else break; } } }
+    }
+    return v;
+}
+
+int alloc_local(int n) { frameoff = frameoff + n; if (frameoff > framemax) framemax = frameoff; return frameoff; }
+
+int is_typetok(void) {
+    if (cur() == T_TYPE) return 1;
+    if (cur() == vfind(TOKV, NTOKV, "struct", 6)) return 1;
+    if (cur() == vfind(TOKV, NTOKV, "union", 5)) return 1;
+    return 0;
+}
+
+int declspec(void) {                       /* -> element width */
+    int w;
+    w = 8;
+    while (is_typetok()) {
+        if (tlen[tp] == 4) { if (src[tpos[tp]] == 99) w = 1; }   /* char */
+        adv();
+    }
+    return w;
+}
+
+int stmt(void);
+
+int block(void) {
+    int savesym; int saveoff;
+    need(vfind(TOKV, NTOKV, "{", 1), "{");
+    savesym = nsym; saveoff = frameoff;
+    while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
+        if (cur() == T_EOF) { printf("unterminated block\n"); __exit(1); }
+        stmt();
+    }
+    adv();
+    nsym = savesym; frameoff = saveoff;
+    return 0;
+}
+
+int local_decl(void) {
+    int w; int t; int off; int n; int nelem;
+    w = declspec();
+    while (1) {
+        declptr = 0;
+        while (eat(vfind(TOKV, NTOKV, "*", 1))) { declptr = 1; }
+        t = adv();
+        n = 1;
+        if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
+            adv();
+            n = cexpr();
+            need(vfind(TOKV, NTOKV, "]", 1), "]");
+            off = alloc_local(n * w);
+            declptr = 1;
+            sadd(t, 1, off, w);
+            symkind[nsym - 1] = 3;         /* an array name denotes its address */
+        } else {
+            off = alloc_local(8);
+            sadd(t, 1, off, w);
+        }
+        if (eat(vfind(TOKV, NTOKV, "=", 1))) {
+            expr(); loadval();
+            es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+            if (declptr) es("  store64 [r1+0], r0\n");
+            else { if (w == 1) es("  .st [r1+0], r0, 1\n"); else es("  store64 [r1+0], r0\n"); }
+        }
+        if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
+    }
+    need(vfind(TOKV, NTOKV, ";", 1), ";");
+    return 0;
+}
+
+int stmt(void) {
+    int p; int a; int b; int c; int top;
+    p = ask(1);
+    if (p == P_BLOCK) return block();
+    if (p == P_DECL) return local_decl();
+    if (p == P_IF) {
+        adv(); need(vfind(TOKV, NTOKV, "(", 1), "(");
+        expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        a = newlab();
+        elab("  jumpz r0, L", a); ec(10);
+        stmt();
+        if (cur() == vfind(TOKV, NTOKV, "else", 4)) {
+            b = newlab();
+            elab("  jump L", b); ec(10);
+            elab("L", a); es(":\n");
+            adv(); stmt();
+            elab("L", b); es(":\n");
+        } else { elab("L", a); es(":\n"); }
+        return 0;
+    }
+    if (p == P_WHILE) {
+        adv();
+        top = newlab(); a = newlab();
+        elab("L", top); es(":\n");
+        need(vfind(TOKV, NTOKV, "(", 1), "(");
+        expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        elab("  jumpz r0, L", a); ec(10);
+        brkstack[nloop] = a; cntstack[nloop] = top; nloop = nloop + 1;
+        stmt();
+        nloop = nloop - 1;
+        elab("  jump L", top); ec(10);
+        elab("L", a); es(":\n");
+        return 0;
+    }
+    if (p == P_FOR) {
+        int stept; int bodyt; int aftert;
+        adv(); need(tidx("(", 1), "(");
+        if (eat(tidx(";", 1)) == 0) {
+            if (is_typetok()) local_decl();
+            else { exprc(); need(tidx(";", 1), ";"); }
+        }
+        top = newlab(); a = newlab(); c = newlab();
+        elab("L", top); es(":\n");
+        if (cur() != tidx(";", 1)) {
+            expr(); loadval();
+            elab("  jumpz r0, L", a); ec(10);
+        }
+        need(tidx(";", 1), ";");
+        stept = tp;
+        b = 0;
+        while (1) {                                  /* skip the step clause */
+            if (cur() == tidx("(", 1)) b = b + 1;
+            if (cur() == tidx(")", 1)) { if (b == 0) break; b = b - 1; }
+            adv();
+        }
+        adv();
+        bodyt = tp;
+        brkstack[nloop] = a; cntstack[nloop] = c; nloop = nloop + 1;
+        stmt();
+        nloop = nloop - 1;
+        aftert = tp;
+        elab("L", c); es(":\n");
+        if (stept != bodyt - 1) { tp = stept; exprc(); }
+        tp = aftert;
+        elab("  jump L", top); ec(10);
+        elab("L", a); es(":\n");
+        return 0;
+    }
+    if (p == P_RETURN) {
+        adv();
+        if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval(); }
+        need(vfind(TOKV, NTOKV, ";", 1), ";");
+        elab("  jump R", retlab); ec(10);
+        return 0;
+    }
+    if (p == P_BREAK) {
+        adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
+        elab("  jump L", brkstack[nloop - 1]); ec(10);
+        return 0;
+    }
+    if (p == P_CONTINUE) {
+        adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
+        elab("  jump L", cntstack[nloop - 1]); ec(10);
+        return 0;
+    }
+    if (p == P_DO) {
+        adv();
+        top = newlab(); a = newlab(); c = newlab();
+        elab("L", top); es(":\n");
+        brkstack[nloop] = a; cntstack[nloop] = c; nloop = nloop + 1;
+        stmt();
+        nloop = nloop - 1;
+        elab("L", c); es(":\n");
+        need(tidx("while", 5), "while");
+        need(tidx("(", 1), "(");
+        expr(); loadval();
+        need(tidx(")", 1), ")");
+        need(tidx(";", 1), ";");
+        elab("  jumpz r0, L", a); ec(10);
+        elab("  jump L", top); ec(10);
+        elab("L", a); es(":\n");
+        return 0;
+    }
+    if (eat(vfind(TOKV, NTOKV, ";", 1))) return 0;
+    exprc();
+    need(vfind(TOKV, NTOKV, ";", 1), ";");
+    return 0;
+}
+
+int function(int t, int w) {
+    int np; int pw; int pt; int off; int fpatch; int k; int start;
+    start = nout;
+    need(vfind(TOKV, NTOKV, "(", 1), "(");
+    scopebase = nsym;
+    frameoff = 0; framemax = 0;
+    np = 0;
+    etok(t); es(":\n");
+    es("  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame ");
+    fpatch = nout; es("      "); ec(10);
+    while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
+        pw = declspec();
+        declptr = 0;
+        while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
+        if (cur() == T_ID) {
+            pt = adv();
+            off = alloc_local(8);
+            sadd(pt, 1, off, pw);
+            /* r1/r2 are argument registers -- using them as scratch here
+             * would destroy arg1/arg2 before they are stored.  r5 is free. */
+            es("  imm r5, "); en(off); es("\n  sub64 r5, r6, r5\n  store64 [r5+0], r");
+            en(np); ec(10);
+            np = np + 1;
+        }
+        if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
+    }
+    need(vfind(TOKV, NTOKV, ")", 1), ")");
+    if (cur() == tidx(";", 1)) {          /* a prototype, not a definition */
+        adv();
+        nout = start;                     /* unemit the prologue */
+        nsym = scopebase;
+        return 0;
+    }
+    retlab = newlab();
+    block();
+    elab("R", retlab); es(":\n");
+    es("  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n");
+    patchnum(fpatch, 6, (framemax + 7) / 8 * 8);
+    nsym = scopebase;
+    return 0;
+}
+
+int unit(void) {
+    int p; int w; int t; int n; int k; int isarr;
+    while (1) {
+        p = ask(0);
+        if (p == P_END) break;
+        if (p == P_ENUM) {
+            int v;
+            adv();
+            if (cur() == T_ID) adv();
+            need(tidx("{", 1), "{");
+            v = 0;
+            while (cur() != tidx("}", 1)) {
+                t = adv();
+                if (eat(tidx("=", 1))) {
+                    v = 0; k = 0;
+                    while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+                    adv();
+                }
+                sadd(t, 4, v, 8);            /* 4 = enum constant */
+                v = v + 1;
+                if (eat(tidx(",", 1)) == 0) break;
+            }
+            need(tidx("}", 1), "}");
+            eat(tidx(";", 1));
+            continue;
+        }
+        w = declspec();
+        while (1) {
+            declptr = 0;
+            while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
+            t = adv();
+            p = ask(4);
+            if (p == P_FNSIG) {
+                sadd(t, 2, 0, 8);
+                function(t, w);
+                break;
+            }
+            n = 1;
+            isarr = 0;
+            if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
+                adv();
+                n = cexpr();
+                need(vfind(TOKV, NTOKV, "]", 1), "]");
+                isarr = 1;
+            }
+            sadd(t, 0, 0, w);
+            /* a global array name denotes its address, exactly like a local
+               one -- without this `read(fd, src, n)` passes the first eight
+               BYTES OF src as the pointer */
+            if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; }
+            es(".bss g_"); etok(t); ec(32);
+            /* an ARRAY needs its full storage; a bare pointer needs 8.
+               Do not conflate the two -- `char src[MAXSRC]` getting 8 bytes
+               puts the next global straight on top of the source buffer. */
+            if (isarr) en(n * w); else { if (declptr) en(8); else en(n * w); }
+            ec(10);
+            if (cur() == tidx("=", 1)) {
+                adv();
+                toinit = 1; hasinit = 1;
+                expr(); loadval();
+                es("  .lea r1, g_"); etok(t); ec(10);
+                es("  store64 [r1+0], r0\n");
+                toinit = 0;
+            }
+            if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
+        }
+        eat(vfind(TOKV, NTOKV, ";", 1));
+    }
+    return 0;
+}
+
+int bop(char *n, int L, int lev) { BOP[nbop] = tidx(n, L); BLEV[nbop] = lev; nbop = nbop + 1; return 0; }
+
+int setup_tables(void) {
+    P_END = pidx("end", 3);          P_GLOBAL = pidx("global", 6);
+    P_TYPEDEF = pidx("typedef", 7);  P_STRUCT = pidx("struct", 6);
+    P_ENUM = pidx("enum", 4);        P_DECL = pidx("decl", 4);
+    P_IF = pidx("if", 2);            P_WHILE = pidx("while", 5);
+    P_FOR = pidx("for", 3);          P_DO = pidx("do", 2);
+    P_SWITCH = pidx("switch", 6);    P_CASE = pidx("case", 4);
+    P_DEFAULT = pidx("default", 7);  P_RETURN = pidx("return", 6);
+    P_BREAK = pidx("break", 5);      P_CONTINUE = pidx("continue", 8);
+    P_BLOCK = pidx("block", 5);      P_EXPR = pidx("expr", 4);
+    P_NEG = pidx("neg", 3);          P_NOT = pidx("not", 3);
+    P_DEREF = pidx("deref", 5);      P_ADDR = pidx("addr", 4);
+    P_SIZEOF = pidx("sizeof", 6);    P_PRIM = pidx("prim", 4);
+    P_INDEX = pidx("index", 5);      P_CALL = pidx("call", 4);
+    P_INC = pidx("inc", 3);          P_FIELD = pidx("field", 5);
+    P_DONE = pidx("done", 4);        P_FNSIG = pidx("fn_sig", 6);
+    P_VARDEF = pidx("var_def", 7);   P_GOTO = pidx("goto", 4);
+    T_EOF = tidx("eof", 3);          T_TYPE = tidx("type", 4);
+    T_ID = tidx("id", 2);            T_NUM = tidx("num", 3);
+    T_STR = tidx("str", 3);
+    nbop = 0;
+    bop("|", 1, 0);  bop("^", 1, 1);  bop("&", 1, 2);
+    bop("==", 2, 3); bop("!=", 2, 3);
+    bop("<", 1, 4);  bop(">", 1, 4);  bop("<=", 2, 4); bop(">=", 2, 4);
+    bop("<<", 2, 5); bop(">>", 2, 5);
+    bop("+", 1, 6);  bop("-", 1, 6);
+    bop("*", 1, 7);  bop("/", 1, 7);  bop("%", 1, 7);
+    return 0;
+}
+
+int setup(void) {
+    int i;
+    setup_tables();
+    i = 0;
+    while (i < 128) { OPCH[i] = 0; i = i + 1; }
+    i = 0;
+    while (i < NTOKV) {
+        int p; p = voff(TOKV, i);
+        if (isal(TOKV[p] & 255) == 0) {
+            if ((TOKV[p] & 255) != 0) OPCH[TOKV[p] & 255] = 1;
+        }
+        i = i + 1;
+    }
+    OPCH[47] = 1; OPCH[42] = 1;
+    return 0;
+}
+
+int main(void) {
+    int fd; int i; int p; int L; int k;
+    nibuf = 0; toinit = 0; hasinit = 0;
+    model_dims();
+    setup();
+    if (__argc() < 2) { printf("usage: unisacc FILE.c\n"); return 1; }
+    fd = __open(__argv(1), 0);
+    if (fd < 0) { printf("cannot open input\n"); return 1; }
+    nsrc = __read(fd, src, MAXSRC);
+    __close(fd);
+    preprocess();
+    if (lex() < 0) return 1;
+    if (__argc() > 2) { tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
+        poolend = 0; nloop = 0;
+        es("_start:\n  call __init\n  call main\n  .exit r0\n");
+        unit();
+        es("__init:\n");
+        k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
+        es("  ret\n");
+        if (needslen) {
+            es("__slen:\n  mov r2, r0\n  imm r1, 0\n"
+               "__slen_top:\n  add64 r4, r2, r1\n  .ld r5, [r4+0], 1\n"
+               "  jumpz r5, __slen_end\n  imm r5, 1\n  add64 r1, r1, r5\n"
+               "  jump __slen_top\n__slen_end:\n  mov r0, r1\n  ret\n");
+        }
+        if (needchb) es(".bss __chb 8\n");
+        emit_pool();
+        __write(1, out, nout);
+        return 0; }
+    i = 0;
+    while (i < ntok) {
+        p = voff(TOKV, tkind[i]);
+        L = vlen(TOKV, tkind[i]);
+        __write(1, TOKV + p, L);
+        if (tkind[i] == 2) { __write(1, "=", 1); __write(1, src + tpos[i], tlen[i]); }
+        if (tkind[i] == 3) { __write(1, "=", 1); __write(1, src + tpos[i], tlen[i]); }
+        if (tkind[i] == 4) { __write(1, "=", 1); __write(1, src + tpos[i], tlen[i]); }
+        __write(1, "\n", 1);
+        i = i + 1;
+    }
+    printf("%d tokens\n", ntok);
+    return 0;
+}

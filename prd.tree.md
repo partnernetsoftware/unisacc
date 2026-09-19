@@ -1,0 +1,314 @@
+# UNISA SH —— 树 + DAG 视图
+
+> 开工用。规格正文见 [`prd.md`](prd.md)，全局记忆见 [`prd.map.md`](prd.map.md)。
+> 约定：`├─` 为包含（树），`══>` 为跨树依赖（DAG 边），`⟦门禁⟧` 为必须通过才能继续的检查点。
+> 方括号如 `[P-2]` 为 `prd.md` 的条款编号，三方（实现 / 形式化 / 验收）引用同一套 ID。
+
+---
+
+## T1. 系统树 —— 三层切分
+
+整个系统只有三类东西。**任何一行代码都必须能归到其中一类**，归不了就是设计走偏了。
+
+```
+UNISA SH
+│
+├─ ① 经典代码（algebra）—— 绝不神经化
+│   ├─ 递归下降走查器          确定性控制流，决策外包给 Oracle
+│   ├─ 符号表 / 作用域栈        纯数据结构
+│   ├─ 重定位算术              rel32 / arm26 / arm19 的位域拼装
+│   ├─ 目标文件头               ELF64 / Mach-O64 / PE32+
+│   ├─ tape 解释器              --fold 的基准真值
+│   └─ 目标机解释器             per-arch 寄存器 + per-os syscall 分发
+│
+├─ ② 模型数据（learned tables）—— 每一个都是「离散 key → 1 类」
+│   ├─ 前端 6 表    pp lex parse type scope irsel
+│   ├─ 后端 2 表    enc reloc
+│   ├─ 阶段网 2 个  isel abi                    （--drive spec）
+│   └─ 合体网 1 个  combo → 9 heads             （--drive combo）
+│
+└─ ③ 唯一 kernel（inference）—— 换权重不换它
+    └─ embed → gemv → ReLU → gemv → argmax
+        ├─ Python 参考实现      unisa/linalg.py，累加顺序固定
+        └─ C 部署实现           kernel/unisa_boot.c，无 softmax / 无 libm / 热路径无 malloc
+```
+
+**DAG 边**
+
+```
+② ══喂给══> ③          权重是 kernel 的唯一输入
+③ ══回答══> ①          Oracle 把类名交还给走查器
+gold 表 ══既标注又兜底══> ②   acc<0.85 用 gold，≥0.85 用网络，出货要 1.000
+```
+
+---
+
+## T2. 模块树 —— 文件到职责
+
+```
+unisa/
+├─ __main__.py        CLI 分发：train acc compile run tape lower ship dump-weights quant bench
+├─ rng.py             mulberry32 + Box-Muller            ══> net.py 初始化
+├─ linalg.py          gemv / relu / argmax / CE / Adam   累加顺序固定（§1.1）
+├─ net.py             TableNet · StageNet · UnisaNet     ══> train.py, oracle.py
+├─ catalog.py         syscall 目录 · ABI 事实 · 指令字节   ★唯一真源
+│                      ══> gold.py(9头派生) ══> lower.py ══> emit_*.py ══> exec_target.py
+├─ gold.py            key schema + 标签函数 + 完整笛卡尔积枚举
+│                      ══> train.py(标签) ══> oracle.py(兜底) ══> acc/quant(评估)
+├─ train.py           epoch 循环 · FULL gold 评估 · hot-skip · 停机 · UNDERFIT 判定
+├─ uns1.py            UNS1 读写 · f32/f16/i8/q4/q2 量化 · argmax 不变性检查
+├─ oracle.py          ★唯一分发点 ask(stage, key) → class_name；统计 net/gold 用量
+│                      [P-1] 只回传类名，禁读 logits/margin/ready 状态
+│                      [P-2] 无条件断言 key ∈ K_s ← 唯一需要真推理的证明义务
+│
+├─ front/             ── 经典走查，决策全走 oracle ──
+│   ├─ pp.py          #if 家族                    → oracle.ask("pp", (dir, defined))
+│   ├─ lex.py         字符分类 + 前瞻              → oracle.ask("lex", (c, peek))
+│   ├─ parse.py       递归下降                    → oracle.ask("parse", (nt, tok))
+│   └─ sema.py        符号表 + 类型               → oracle.ask("scope"/"type", ...)
+│
+├─ ir.py              irsel → tape 发射；printf 静态脱糖成 .print/.write
+├─ tape.py            tape 文本格式 parse / print
+├─ vm.py              通用 tape 解释器 ★基准真值
+│
+├─ lower.py           isel/abi/enc/reloc → TargetProgram；--fault 注入点
+├─ emit_x86.py        真实字节：48 01 f0 / c3 / 0f 05 ...
+├─ emit_arm.py        真实字节：00 00 01 8b / c0 03 5f d6 / 01 00 00 d4 ...
+├─ exec_target.py     ★目标机解释器：per-arch 具名寄存器 + per-os syscall 分发
+│                      只认 lower 产出的 (os,sysno)|(os,winapi)，绝不回看 tape op
+│
+├─ image/
+│   ├─ elf.py         7f454c46   单 PT_LOAD @0x400000
+│   ├─ macho.py       cffaedfe   LC_SEGMENT_64 + LC_UNIXTHREAD
+│   └─ pe.py          4d5a       MZ stub + PE\0\0 + 0x20b + .text
+│
+├─ ship.py            kit.zip = weights/ + MANIFEST.json + kernel/ + images
+└─ kernel/unisa_boot.c   部署 kernel
+
+examples/  hello fact ptr fib switch struct do host
+weights/   *.unisa
+tests/     acceptance.sh
+archive/   prd.v1.md prd.v2.1.md prd.v2.2.md
+```
+
+**关键 DAG 边（跨目录，最容易写错的三条）**
+
+```
+catalog.py ══> gold.py          9 头 gold 必须由 (op,os,arch) 函数派生，禁止手标
+lower.py   ══> exec_target.py   解释器只吃 lower 的产物，不吃 tape op   ← fold 有牙齿的根因
+vm.py      ══对拍══> exec_target.py×6   通用结果 vs 六目标结果
+```
+
+---
+
+## T2b. 决策点树 —— 工作流 × 模型（11 个，各自独立）
+
+**每个决策点一个小模型，不按阶段合并**（E-18 实测：合并最异质的那段在任何宽度下都到不了 1.000）。
+全部共用同一个 kernel，只有形状和权重不同。
+
+```
+源码 ─┬─ 前端 6 个（源码 → 通用 tape）
+      │   ├─ pp      dir(9)×defined(2)        18 行   12→12        →  4 类     274 θ
+      │   ├─ lex     c(11)×peek(11)          121 行   12→12        → 10 类     418 θ
+      │   ├─ parse   nt(5)×tok(54)           270 行   16→16        → 32 类   1,288 θ
+      │   ├─ type    t1(8)×op(15)×t2(8)      960 行   24→16        →  9 类     801 θ
+      │   ├─ scope   ctx(6)×kind(5)           30 行   16→16        →  7 类     479 θ
+      │   └─ irsel   family(5)×flavor(27)    135 行   16→16        → 25 类     953 θ
+      │
+      └─ 后端 4 个（tape → 6 个目标）
+          ├─ enc     op(38)×os(3)×arch(2)    228 行   24→16        →  5 类     829 θ
+          ├─ reloc   kind(3)×arch(2)           6 行   12→8         →  3 类     161 θ
+          ├─ isel    op(38)×arch(2)           76 行   20→24→16     → 2 头   2,328 θ
+          └─ abi     op(38)×os(3)×arch(2)    228 行   36→32→20     → 7 头   4,361 θ   +bilinear 8d
+                                                                   ─────────────────
+                                              默认 --drive spec 合计     11,892 θ
+
+          combo      op(38)×os(3)×arch(2)    228 行   52→48→32     → 9 头  10,053 θ   +factor 12d +bilinear 8d
+                     ↑ isel+abi 的【替代】，不叠加；--drive combo 时用它
+```
+
+**DAG 边**
+
+```
+gold[s] ══标注/兜底/验证══> model[s]        每个决策点一条，互不交叉
+model[*] ══同一 kernel══> linalg.gemv       11 个形状，1 份代码
+--drive ══选择装配══> {spec | combo | gold}  三条路径在全域逐 key 同类 [D-7]
+```
+
+---
+
+## T3. 数据树 —— 词表与语料规模
+
+```
+key 空间（gold 语料 = 完整笛卡尔积）
+│
+├─ 前端
+│   ├─ pp      DIRS(9) × defined(2)                    =   18 行  → take|skip|pop|macro
+│   ├─ lex     CHARC(11) × peek(11)                    =  121 行  → ACT(10)
+│   ├─ parse   NT(5) × TOKS(54)                        =  270 行  → PRODS(32)
+│   ├─ type    TYS(8) × TOPS(15) × TYS(8)              =  960 行  → TYS|illegal(9)
+│   │           └── illegal 占多数 → 训练下采样 1/19，评估用全量 960
+│   ├─ scope   CTX(6) × KIND(5)                        =   30 行  → ACTS(7)
+│   └─ irsel   family(5) × flavor(27)                  =  135 行  → recipe|bad（27 有效）
+│
+├─ 后端
+│   ├─ enc     OPS(38) × os(3) × arch(2)               =  228 行  → FORMS(5)
+│   └─ reloc   jmpkind(3) × arch(2)                    =    6 行  → rel32|arm26|arm19
+│
+└─ 阶段网（共用 OPS 轴，顺序写死，下标即 embedding 行号）
+    ├─ isel    OPS(38) × arch(2)                       =   76 行  → form, symbol, gate
+    ├─ abi     OPS(38) × os(3) × arch(2)               =  228 行  → sysno, arg0-2, ret, tls
+    └─ combo   同 abi 的 key 空间                       =  228 行  → 以上 9 头合一
+```
+
+```
+OPS(38)
+├─ SYSOPS(19)  exit read write open close mmap munmap mprotect getpid
+│              clock_gettime nanosleep futex socket connect bind listen accept clone execve
+└─ MOPS(19)    add64 sub64 xor64 mul64 slt64 sle64 load64 store64 jump jumpz
+               call ret nop cas64 fence syscall_gate tls_base cycle_counter stack_enter
+
+输出词表
+├─ FORMS(5)   syscall svc winapi x86 arm
+├─ GATES(5)   syscall svc0 svc80 winapi none
+├─ REGS(18)   rdi rsi rdx r10 rcx r8 r9 rax x0..x8 none      ← 4 个 reg head 共享 W_reg
+├─ TLS(4)     fsbase tpidr_el0 teb none
+└─ SYMS SYSNOS  由 catalog 派生函数吐出的并集 + none
+```
+
+---
+
+## T4. 构建 DAG —— 里程碑与门禁
+
+自上而下是唯一允许的推进顺序。**每个 ⟦门禁⟧ 不过，不许进下一层。**
+
+```
+M1 数学与网络
+│   rng ─> linalg ─> net ─> gold ─> train
+│   ⟦门禁⟧ unisa acc → 每阶段 = 1.000        （卡住 → 改 key 编码，不许加宽）
+│   ⟦门禁⟧ train 跑两次 → 权重字节相同
+▼
+M2 权重落盘
+│   uns1.py：f32/f16/i8/q4/q2 + 按行 scale + 亚字节打包
+│   ⟦门禁⟧ parse.i8.unisa 首四字节 = 554e5331
+│   ⟦门禁⟧ unisa quant → 逐阶段最低 argmax-不变 dtype，写入 MANIFEST
+▼
+M3 tape 与 VM
+│   tape.py ─> vm.py（r0–r7，r7=SP@0x10000，64KB LE）
+│   ⟦门禁⟧ 手写 tape 跑出预期 stdout / exit
+▼
+M4 C99 前端                    ══需要══> oracle ══需要══> M1
+│   pp ─> lex ─> parse ─> sema ─> ir
+│   ⟦门禁⟧ 七个样例都能出 tape，且 vm 跑出 [A-4] 表中的 stdout
+▼
+M5 Lowering + 六目标执行       ══需要══> catalog, M3, M4
+│   lower.py ─> exec_target.py
+│   ⟦门禁⟧ unisa run examples/hello.c --fold → 6/6        ★ 主目标
+│   ⟦门禁⟧ --fault osx_class_bit → 4/6                    ★ 证明测试有牙齿
+▼
+M6 镜像
+│   emit_x86 / emit_arm ─> image/{elf,macho,pe}
+│   ⟦门禁⟧ 三个魔数正确；同输入两次编译字节相同
+▼
+M7 Ship
+│   ship.py + kernel/unisa_boot.c
+│   ⟦门禁⟧ kit.zip 四件套齐全；权重 ≤ 32KB；acc 全 1.000 否则拒绝出货
+▼
+M8 验收 + 度量
+    tests/acceptance.sh · unisa bench · 对比 tcc 体积
+```
+
+---
+
+## T5. 验收 DAG —— 每条断言挂在谁身上
+
+```
+6/6 match ─────────┬── 依赖 lower 正确           ← abi/isel/enc/reloc 四张表
+                   ├── 依赖 exec_target 目标感知  ← 解释器不回看 tape op
+                   └── 依赖 vm 基准正确           ← 通用 tape 结果作对拍
+   └─ 反证：--fault osx_class_bit → 4/6           ← 若仍 6/6，说明 fold 是假的
+
+acc = 1.000 ───────┬── 依赖 gold 全笛卡尔积枚举
+                   └── 依赖 key 编码正确          ← 卡住时改这里，不改网络宽度
+
+字节可复现 ────────┬── 权重：mulberry32 + 固定累加顺序
+                   └── 镜像：头部无时间戳/路径/build ID
+
+体积 ≤ 32KB ───────┬── 依赖 quant 阶梯
+                   └── 依赖超级拟合带来的大 margin  ← margin 小 → 掉不到 q2
+```
+
+---
+
+## T5b. 形式结果树 —— 已证明 / 已证伪 / 开放
+
+```
+「确定性程序可被确定性网络等价替代」
+│
+├─ 已证明
+│   ├─ [P-8] 存在性：任意有限积上的全函数都有精确权重
+│   │        构造式，one-hot + 每 key 一个 ReLU 单元，11/11 机器验证
+│   │        ⇒「能不能 100%」已关闭，且是平凡的
+│   ├─ [P-3] net ≡ gold 可判定        全域枚举 2,300 key，0 分歧
+│   ├─ [P-4] 量化等价可判定            全域枚举，含 int32 算术
+│   └─ [P-5] 组合等价 C[N] ≡ C[O]     由 P-3 + P-1 同余，无需对 C 归纳
+│
+├─ 实证（非形式证明）
+│   └─ [P-7] 目标等价    7 例 × 6 目标全同；三种故障注入均退化 4/6
+│
+├─ 未证明 / 不声称
+│   ├─ [P-2] key 全域性   运行时无条件断言 ← 唯一需对走查器做真推理
+│   └─ [P-6] gold ≡ C99   不声称；已三次由实现暴露缺陷而 acc 全程满分
+│
+└─ 开放 —— 真正的研究前沿在这里
+    ├─ [P-8a] h_min(f) 的组合刻画        候选：最小矩形覆盖数 / 最小 DNF 规模
+    ├─ [P-8b] 可达性分离                 有实例（s2：12.8× 参数仍 0.8143），待形式化
+    └─ [P-8c] O(h_min) 的确定性构造算法   注意最小 DNF 为 NP-hard
+```
+
+**三明治**（每个决策点都被夹在中间，中段未知）：
+
+```
+h_min（未知）  ≤  h_训练（已知实例，精确）  <  h_构造（已知实例，精确）
+     ?              21,945 θ 合计              796,490 θ 合计
+```
+
+互有胜负：小表构造更省（reloc 0.4×、pp 0.8×），大表 SGD 大胜（abi 59×、type 47×）。
+
+---
+
+## T6. 证明义务树 —— 哪些可穷举，哪些要干活
+
+```
+「C99 可用模型等价替代」
+│
+├─ 可判定（穷举即完全判定过程，不需要任何逼近论证）
+│   ├─ [P-3] 逐阶段等价  ∀k ∈ K_s : argmax(N_s(k)) = G_s(k)
+│   │        K_s 有限闭合极小（6–960 行）══已由══> acc = 1.000
+│   └─ [P-4] 量化等价    同一有限域上穷举 argmax 不变性
+│            ══已由══> unisa quant；logit margin 只预测不证明
+│
+├─ 一行同余（不需对走查器归纳）
+│   └─ [P-5] 组合等价    net 驱动 ≡ gold 驱动
+│            ══前提══> [P-1] Oracle 不透明性   ← 一旦读 logits 当场失效
+│
+├─ 真推理（唯一藏 bug 处）
+│   └─ [P-2] key 全域性  走查器构造的 key 永不越出 K_s
+│            实现：oracle 无条件断言；义务：证明该断言不可达
+│
+└─ 与神经化正交（本实验不声称 / 需要干活）
+    ├─ [P-6] gold 驱动 ≡ C99 语义         CompCert 级别，经典编译器本来的负担
+    └─ [P-7] ∀t : exec_t(lower_t(tape)) ≃ vm(tape)   每目标一个模拟关系
+```
+
+**给形式化的提示**：P-3 / P-4 不需要 PAC bound、Lipschitz 常数、鲁棒性半径。超级拟合的意义正是把 ML 泛化问题变成**模型检验问题**。别把 P-3 当成 P-6 来做。
+
+---
+
+## T7. 三条红线
+
+```
+① fold 不许退化成「通用 tape 跑六遍再和自己比」  [X-4]  → 那不是测试
+② acc 不达标不许加宽网络                        [F-5]  → 是 key 编码错了
+③ 走查器 / 符号表 / 文件头 不许神经化            [T-1]  → 它们是代数，不是表
+```

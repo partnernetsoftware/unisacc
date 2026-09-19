@@ -1,0 +1,296 @@
+"""Tape emitter. [W-6]
+
+Register convention on the tape:
+    r0  accumulator / return value / arg0      r4 r5  args
+    r1  binop scratch (lhs)                    r6     frame pointer
+    r2  spare                                  r7     stack pointer
+    r3  arg3
+
+Every mnemonic this module emits is chosen by the irsel table -- the emitter
+never hardcodes one. [G-8]
+"""
+from .tape import Tape
+
+ACC, LHS, TMP, FP, SP = "r0", "r1", "r2", "r6", "r7"
+# r0..r4 carry arguments; r5 is reserved as the indirect-call scratch, because
+# popping a callee address into any argument register would clobber an argument
+# that is already in place.  Five arguments is the documented limit.
+ARGREGS = ("r0", "r1", "r2", "r3", "r4")
+CALLEE = "r5"
+
+# C operator -> (irsel family, flavor, swap operands?)
+ALU = {
+    "+": ("alu", "add", False), "-": ("alu", "sub", False),
+    "*": ("alu", "mul", False),
+    "<": ("alu", "lt", False), "<=": ("alu", "le", False),
+    ">": ("alu", "gt", True), ">=": ("alu", "ge", True),
+    "==": ("alu", "eq", False), "!=": ("alu", "ne", False),
+    "&": ("alu", "and", False), "|": ("alu", "or", False),
+    "^": ("alu", "xor", False), "<<": ("alu", "shl", False),
+    ">>": ("alu", "shr", False),
+}
+
+
+# irsel recipe name -> tape mnemonic (builtins carry a leading dot)
+RECIPE_OP = {
+    "add64": "add64", "sub64": "sub64", "mul64": "mul64",
+    "slt64": "slt64", "sle64": "sle64", "eq": "eq", "ne": "ne",
+    "load64": "load64", "store64": "store64",
+    "lea": ".lea", "ld": ".ld", "st": ".st", "zero": ".zero",
+    "jump": "jump", "jumpz": "jumpz", "ret": "ret",
+    "call": "call", "callpush": "call", "arg": ".arg", "frame": ".frame",
+    "callr": "callr",
+    "imm": "imm", "print": ".print", "write": ".write", "exit": ".exit",
+    "and64": "and64", "or64": "or64", "xor64": "xor64",
+    "shl64": "shl64", "shr64": "shr64",
+}
+
+
+class Emitter:
+    def __init__(self, oracle):
+        self.o = oracle
+        self.t = Tape()
+        self._n = 0
+        self._strs = {}
+        self.need_strlen = False
+        self.need_itoa = False
+        # (global, literal) pairs: a global pointer initialised with a string.
+        # The address is NOT written into the data -- a PIE image slides, so a
+        # baked-in address is wrong at run time.  `_start` computes them
+        # PC-relatively instead.  [W-13]
+        self.init_ptrs = []
+        self.chbuf = None
+
+    # -- plumbing ---------------------------------------------------------
+    def recipe(self, family, flavor):
+        """[W-6] the one neural decision in this module."""
+        r = self.o.ask("irsel", (family, flavor))
+        assert r != "bad", "irsel: no recipe for %s/%s" % (family, flavor)
+        return RECIPE_OP[r]
+
+    def new_label(self, p="L"):
+        self._n += 1
+        return "%s%d" % (p, self._n)
+
+    def label(self, name):
+        self.t.label(name)
+
+    def emit(self, op, *a):
+        self.t.emit(op, *a)
+
+    def intern(self, s):
+        if s not in self._strs:
+            name = "s%d" % len(self._strs)
+            self.t.string(name, s.encode("latin-1") + b"\x00")   # C strings are NUL-terminated
+            self._strs[s] = name
+        return self._strs[s]
+
+    # -- primitives -------------------------------------------------------
+    def imm(self, reg, k):
+        self.emit(self.recipe("lit", "imm"), reg, k)
+
+    def push(self, reg=ACC):
+        self.emit(self.recipe("call", "frame"), 8)
+        self.emit(self.recipe("mem", "store"), SP, 0, reg)
+
+    def pop(self, reg):
+        self.emit(self.recipe("mem", "load"), reg, SP, 0)
+        self.emit(self.recipe("call", "frame"), -8)
+
+    def load(self, reg, base, off, width=8):
+        if width == 8:
+            self.emit(self.recipe("mem", "load"), reg, base, off)
+        else:
+            self.emit(self.recipe("mem", "ld"), reg, base, off, width)
+
+    def store(self, base, off, reg, width=8):
+        if width == 8:
+            self.emit(self.recipe("mem", "store"), base, off, reg)
+        else:
+            self.emit(self.recipe("mem", "st"), base, off, reg, width)
+
+    def lea(self, reg, sym):
+        self.emit(self.recipe("mem", "lea"), reg, sym)
+
+    def binop(self, op):
+        """lhs on the stack, rhs in ACC -> result in ACC."""
+        fam, flav, swap = ALU[op]
+        self.pop(LHS)
+        mn = self.recipe(fam, flav)
+        if swap:
+            self.emit(mn, ACC, ACC, LHS)
+        else:
+            self.emit(mn, ACC, LHS, ACC)
+
+    def divmod_(self, op):
+        self.pop(LHS)
+        self.emit(".div" if op == "/" else ".mod", ACC, LHS, ACC)
+
+    def neg(self):
+        self.emit(self.recipe("lit", "imm"), LHS, 0)
+        self.emit(self.recipe("alu", "neg"), ACC, LHS, ACC)
+
+    def logical_not(self):
+        self.imm(LHS, 0)
+        self.emit(self.recipe("alu", "eq"), ACC, ACC, LHS)
+
+    def jump(self, l):
+        self.emit(self.recipe("ctrl", "jump"), l)
+
+    def jumpz(self, l, reg=ACC):
+        self.emit(self.recipe("ctrl", "jumpz"), reg, l)
+
+    def call(self, l):
+        self.emit(self.recipe("call", "call"), l)
+
+    def call_reg(self, reg=ACC):
+        self.emit(self.recipe("call", "callr"), reg)
+
+    def ret(self):
+        self.emit(self.recipe("ctrl", "ret"))
+
+    def frame(self, n):
+        self.emit(self.recipe("call", "frame"), n)
+
+    def arg(self, i, reg):
+        self.emit(self.recipe("call", "arg"), i, reg)
+
+    # -- function shell ---------------------------------------------------
+    def prologue(self, name, nlocals=0):
+        """Returns the index of the locals `.frame` so one-pass code can patch
+        the frame size once the body has been walked."""
+        self.label(name)
+        self.frame(8)
+        self.store(SP, 0, FP)
+        self.emit("mov", FP, SP)
+        self.frame(nlocals)
+        return len(self.t.code) - 1
+
+    def epilogue(self):
+        self.emit("mov", SP, FP)
+        self.load(FP, SP, 0)
+        self.frame(-8)
+        self.ret()
+
+    # -- printf -----------------------------------------------------------
+    def write_literal(self, s):
+        if not s:
+            return
+        self.lea(ACC, self.intern(s))
+        self.imm(LHS, len(s.encode("latin-1")))
+        self.emit(self.recipe("lit", "write"), ACC, LHS)
+
+    def print_int(self, reg=ACC):
+        """Desugared into the emitted __itoa helper plus a write, so it lowers
+        to ordinary tape ops and therefore to real machine code.  `.print` stays
+        in the tape ISA for hand-written tapes; generated code no longer uses
+        it."""
+        self.need_itoa = True
+        if reg != ACC:
+            self.emit("mov", ACC, reg)
+        self.call("__itoa")                 # -> ACC = ptr, LHS = len
+        self.emit(self.recipe("lit", "write"), ACC, LHS)
+
+    def print_str(self, reg=ACC):
+        """ACC holds char*; length via the emitted __strlen helper."""
+        self.need_strlen = True
+        self.push(reg)
+        self.call("__strlen")
+        self.emit("mov", LHS, ACC)
+        self.pop(ACC)
+        self.emit(self.recipe("lit", "write"), ACC, LHS)
+
+    def print_char(self, reg=ACC):
+        if self.chbuf is None:
+            self.chbuf = "__chbuf"
+            self.t.string(self.chbuf, b"\x00")
+        self.emit("mov", TMP, reg)
+        self.lea(ACC, self.chbuf)
+        self.store(ACC, 0, TMP, 1)
+        self.imm(LHS, 1)
+        self.emit(self.recipe("lit", "write"), ACC, LHS)
+
+    def truncate(self, width):
+        """Narrow ACC to `width` bytes with sign extension, through a stack
+        slot -- the tape has sized load/store, so no new op is needed."""
+        if width >= 8:
+            return
+        self.frame(8)
+        self.store(SP, 0, ACC, width)
+        self.load(ACC, SP, 0, width)
+        self.frame(-8)
+
+    def mask32(self):
+        """%u: keep the low 32 bits, unsigned."""
+        self.imm(TMP, 0xFFFFFFFF)
+        self.emit(self.recipe("alu", "and"), ACC, ACC, TMP)
+
+    def exit_(self, reg=ACC):
+        self.emit(self.recipe("lit", "exit"), reg)
+
+    def finish(self):
+        if self.need_strlen:
+            self._emit_strlen()
+        if self.need_itoa:
+            self._emit_itoa()
+        return self.t
+
+    def _emit_itoa(self):
+        """int64 -> decimal text.  ACC in; ACC = ptr, LHS = len out."""
+        self.t.string("__ibuf", b"\x00" * 24, align=8)
+        pos, loop, neg, done = ("itoa_pos", "itoa_loop", "itoa_neg", "itoa_done")
+        self.label("__itoa")
+        self.frame(8)
+        self.imm("r5", 0)
+        self.emit("slt64", "r5", ACC, "r5")          # value < 0 ?
+        self.store(SP, 0, "r5")
+        self.jumpz(pos, "r5")
+        self.imm("r3", 0)
+        self.emit("sub64", ACC, "r3", ACC)           # value = -value
+        self.label(pos)
+        self.emit("mov", TMP, ACC)                   # n
+        self.lea(LHS, "__ibuf")
+        self.imm("r3", 24)
+        self.emit("add64", LHS, LHS, "r3")           # p = buf + 24
+        self.imm("r4", 0)                            # len
+        self.label(loop)
+        self.imm("r3", 10)
+        self.emit(".mod", "r5", TMP, "r3")
+        self.emit(".div", TMP, TMP, "r3")
+        self.imm("r3", 48)
+        self.emit("add64", "r5", "r5", "r3")         # '0' + digit
+        self.imm("r3", 1)
+        self.emit("sub64", LHS, LHS, "r3")
+        self.store(LHS, 0, "r5", 1)
+        self.emit("add64", "r4", "r4", "r3")
+        self.jumpz(neg, TMP)
+        self.jump(loop)
+        self.label(neg)
+        self.load("r5", SP, 0)
+        self.jumpz(done, "r5")
+        self.imm("r3", 45)                           # '-'
+        self.imm("r5", 1)
+        self.emit("sub64", LHS, LHS, "r5")
+        self.store(LHS, 0, "r3", 1)
+        self.emit("add64", "r4", "r4", "r5")
+        self.label(done)
+        self.frame(-8)
+        self.emit("mov", ACC, LHS)
+        self.emit("mov", LHS, "r4")
+        self.ret()
+
+    def _emit_strlen(self):
+        top, end = "__strlen_top", "__strlen_end"
+        self.label("__strlen")
+        self.emit("mov", TMP, ACC)
+        self.imm(LHS, 0)
+        self.label(top)
+        self.emit("add64", "r4", TMP, LHS)
+        self.emit(".ld", "r5", "r4", 0, 1)
+        self.jumpz(end, "r5")
+        self.imm("r5", 1)
+        self.emit("add64", LHS, LHS, "r5")
+        self.jump(top)
+        self.label(end)
+        self.emit("mov", ACC, LHS)
+        self.ret()
