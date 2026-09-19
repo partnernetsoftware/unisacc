@@ -195,6 +195,37 @@ def cmd_compile(a):
     return 0
 
 
+def cmd_fat(a):
+    """[I-19] one file carrying every architecture of one OS."""
+    from .assemble import assemble
+    from . import image
+    from .image import fat
+    from .tape import DATA_BASE
+    o = _oracle(a.drive)
+    arches = a.arch or ["x86_64", "arm64"]
+    slices = []
+    for arch in arches:
+        tgt = "%s/%s" % (a.os, arch)
+        try:
+            t = compile_file(a.file, o, tgt, getattr(a, "I", ()))
+        except Exception as e:
+            print("%s: %s" % (type(e).__name__, e), file=sys.stderr)
+            return 1
+        tp = lower(t, tgt, o, drive=a.drive)
+        text, st = assemble(tp)
+        data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
+        img = image.build(tp, text, data, st["entry"])
+        slices.append((arch, img))
+        print("  %-12s %7d B  (text %d B, %d/%d insns encoded)"
+              % (tgt, len(img), st["bytes"], st["encoded"], st["insns"]))
+    blob = fat.write(slices)
+    with open(a.out, "wb") as f:                                  # [D-5]
+        f.write(blob)
+    print("%s  %s  %d B  %d slices  magic %s"
+          % (a.out, a.os, len(blob), len(slices), blob[:4].hex()))
+    return 0
+
+
 def cmd_vm(a):
     """Run a tape file directly -- the reference machine. [TP-4]"""
     from .tape import parse as tparse
@@ -458,6 +489,17 @@ def main(argv=None):
     cp.add_argument("--from-tape", action="store_true",
                     help="input is a .tape, not C (lower + assemble only)")
     cp.set_defaults(fn=cmd_compile)
+
+    ft = sub.add_parser("fat", help="one file, several architectures")
+    ft.add_argument("file")
+    ft.add_argument("-o", "--out", default="a.fat")
+    ft.add_argument("--os", default="osx", choices=["osx"])
+    ft.add_argument("--arch", action="append", default=[],
+                    help="repeatable; default x86_64 then arm64")
+    ft.add_argument("-I", action="append", default=[], metavar="DIR")
+    ft.add_argument("--drive", default="spec",
+                    choices=["gold", "spec", "combo", "built"])
+    ft.set_defaults(fn=cmd_fat)
 
     vm = sub.add_parser("vm")
     vm.add_argument("file")

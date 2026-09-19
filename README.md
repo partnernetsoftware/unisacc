@@ -62,6 +62,12 @@ config, and Windows still refuses the image. The three rules arm64 Windows does
 enforce — and the dozen that turned out not to matter — are written up in
 `prd.md` §6 E-35.
 
+**One file, two instruction sets.** `unisa fat hello.c -o hello` emits a
+Mach-O universal binary; the arm64 slice runs natively and the x86_64 slice
+runs under Rosetta, and `tests/fat.sh` executes both on every probe. That is
+multi-ISA within one OS — a cosmopolitan-style file that is simultaneously an
+ELF, a Mach-O and a PE is a different problem and is not what this emits.
+
 **It self-hosts.** `unisacc.c` carries the model (an 11,888-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the
 same tables. The bootstrap fixed point holds:
@@ -94,6 +100,7 @@ Python 3.11+, **standard library only**. No numpy, no torch, no build step.
 | `difftest` | unisa vs the system compiler — the only instrument that can see a defect in the reference tables |
 | `native` | emitted images actually executed on this host |
 | `crossnative` | the *other* targets executed in local Linux VMs — the blind spot where three codegen bugs lived |
+| `fat` | one file, both macOS architectures, both slices actually executed |
 | `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `selfhost` | `unisacc` built two ways agrees with the Python front end |
