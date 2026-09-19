@@ -56,8 +56,11 @@ inside one interpreter, which catches ABI and syscall-number mistakes but not
 encoder bugs: the interpreter models no page protection, no real `rsp` and no
 two-operand ALU. `osx/arm64`, `osx/x86_64` (Rosetta), `lnx/x86_64` and
 `lnx/arm64` are executed on real kernels, every probe, every time
-(`tests/crossnative.sh`). `win/*` is still only verified structurally — the PE
-has no import table yet, so nothing calls out to kernel32.
+(`tests/crossnative.sh`). `win/*` is still only verified structurally: the PE
+now has aligned sections, a kernel32 import table, base relocations and a load
+config, and Windows still refuses the image. The three rules arm64 Windows does
+enforce — and the dozen that turned out not to matter — are written up in
+`prd.md` §6 E-35.
 
 **It self-hosts.** `unisacc.c` carries the model (an 11,042-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the
