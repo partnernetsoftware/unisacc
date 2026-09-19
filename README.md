@@ -66,11 +66,26 @@ python3 -m unisa build-weights          # construct exact integer weights
 python3 -m unisa acc                    # every stage 1.000, by enumeration
 python3 -m unisa run examples/fact.c --fold
 python3 -m unisa compile examples/fib.c -o fib --target osx/arm64 --drive built
-./tests/acceptance.sh                   # 46 checks
-./tests/bootstrap.sh                    # the self-hosting fixed point
+python3 -m unisa ship --out kit.zip     # weights + manifest + kernel + images
+./tests/all.sh                          # every suite, one summary
 ```
 
 Python 3.11+, **standard library only**. No numpy, no torch, no build step.
+
+## Tests
+
+`tests/all.sh` is the entry point; each suite's verdict is its exit status.
+
+| suite | what it checks |
+|---|---|
+| `acceptance` | the spec's own checklist |
+| `vm` | the tape interpreter, on hand-written fixtures |
+| `difftest` | unisa vs the system compiler — the only instrument that can see a defect in the reference tables |
+| `native` | emitted images actually executed on this host |
+| `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
+| `ccrun` | `unisacc` compiles C and the reference VM runs it |
+| `selfhost` | `unisacc` built two ways agrees with the Python front end |
+| `bootstrap` | `B = C = U`, the self-hosting fixed point |
 
 ## Layout
 

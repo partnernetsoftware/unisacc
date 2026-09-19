@@ -238,6 +238,166 @@ def cmd_emit_kernel(a):
     return 0
 
 
+def _quantised(net, dtype):
+    """A copy of `net` whose weights have been through UNS1 at `dtype`."""
+    import copy
+    ts = [(t.name, t.rows, t.cols, t.w) for t in net.T]
+    blob = uns1.dumps(ts, dtype=dtype, acc=net.acc)
+    back = uns1.loads(blob)["tensors"]
+    q = copy.deepcopy(net)
+    for t, (_, _, _, w) in zip(q.T, back):
+        t.w = list(w)
+    return q, len(blob)
+
+
+def cmd_quant(a):
+    """[Q-6] [Q-7] the ladder: the ONLY criterion is argmax invariance over the
+    full gold corpus -- not accuracy, identity of decision."""
+    from .linalg import argmax, margin
+    nets, missing = _load()
+    if missing:
+        print("no weights for: %s  (run `unisa train`)" % ", ".join(missing))
+        return 1
+    order = [("f32", uns1.DT_F32), ("f16", uns1.DT_F16), ("i8", uns1.DT_I8),
+             ("q4", uns1.DT_Q4), ("q2", uns1.DT_Q2)]
+    names = [n for n in ALL if a.stage in (None, n)]
+    print("%-7s %7s %8s %8s %8s %8s %8s %11s  %s" %
+          ("stage", "theta", "f32", "f16", "i8", "q4", "q2", "min-margin",
+           "ship"))
+    tot_mixed = tot_i8 = 0
+    all_i8 = True
+    for n in names:
+        net = nets[n]
+        corpus = STAGES[n].corpus()
+        ref = {}
+        mm = 1e308
+        for (k, lab) in corpus:
+            out, _ = net.forward(k)
+            for hn in lab:
+                ref[(k, hn)] = argmax(out[hn])
+                mm = min(mm, margin(out[hn]))
+        cells, sizes, best = [], {}, None
+        for (nm, dt) in order:
+            q, nb = _quantised(net, dt)
+            sizes[nm] = nb
+            ok = True
+            for (k, lab) in corpus:
+                out, _ = q.forward(k, lab.keys())
+                for hn in lab:
+                    if argmax(out[hn]) != ref[(k, hn)]:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            cells.append("%7d%s" % (nb, " " if ok else "x"))
+            if ok:
+                if best is None or nb < sizes[best]:
+                    best = nm
+        tot_mixed += sizes[best]
+        tot_i8 += sizes["i8"]
+        if best in ("f32", "f16"):
+            all_i8 = False
+        print("%-7s %7d %s %11.4f  %s"
+              % (n, net.nparams(), " ".join(cells), mm, best))
+    print("\n`x` = that dtype flips at least one argmax, so [Q-6] rejects it.")
+    print("%-42s %7d B" % ("trained, each stage at its smallest valid dtype",
+                           tot_mixed))
+    print("%-42s %7d B   %s" % ("trained, uniform i8", tot_i8,
+                                "VALID" if all_i8 else "NOT VALID -- some "
+                                "stage flips an argmax at i8"))
+    try:
+        from . import uns2
+        built = _built()
+        nb = len(uns2.dump(built, STAGES))
+        print("%-42s %7d B   exact by construction, no quantisation step"
+              % ("constructed integer weights (UNS2)", nb))
+        print("%-42s %7.1fx" % ("  constructed vs trained-mixed",
+                                tot_mixed / nb))
+    except Exception:
+        pass
+    return 0
+
+
+def cmd_bench(a):
+    """[B-4] decisions/sec, cold -- a memo cache would measure a dict."""
+    import time
+    from .oracle import Oracle
+    rows = []
+    for drive in ("spec", "built"):
+        try:
+            o = _oracle(drive)
+        except Exception as e:
+            print("%s: %s" % (drive, e))
+            continue
+        for n in ALL:
+            if drive == "spec" and n == "combo":
+                continue
+            keys = STAGES[n].keys()
+            reps = max(1, a.n // max(1, len(keys)))
+            t0 = time.time()
+            for _ in range(reps):
+                for k in keys:
+                    o.ask(n, k)
+            dt = time.time() - t0
+            rows.append((drive, n, reps * len(keys) / dt))
+    print("%-7s %14s %14s %8s" % ("stage", "trained dec/s", "built dec/s",
+                                  "speedup"))
+    for n in ALL:
+        a1 = next((r[2] for r in rows if r[0] == "spec" and r[1] == n), None)
+        a2 = next((r[2] for r in rows if r[0] == "built" and r[1] == n), None)
+        print("%-7s %14s %14s %8s"
+              % (n,
+                 "%d" % a1 if a1 else "-",
+                 "%d" % a2 if a2 else "-",
+                 "%.1fx" % (a2 / a1) if a1 and a2 else "-"))
+    print("\nbudget [B-4]: Python >= 50k dec/s")
+    return 0
+
+
+def cmd_ship(a):
+    """[Q-10] the kit: weights + manifest + kernel + images."""
+    import json
+    import zipfile
+    from .assemble import assemble
+    from . import image, uns2
+    from .tape import DATA_BASE
+    nets = _built()
+    blob = uns2.dump(nets, STAGES)
+    rep = uns2.size_report(nets, STAGES)
+    o = Oracle(nets, drive="built")
+    manifest = {
+        "format": "UNS2",
+        "stages": {n: {"units": nets[n].H, "bytes": rep[n],
+                       "maxlogit": nets[n].maxlogit,
+                       "weights": nets[n].weight_values()} for n in ALL},
+        "kernel": "no multiply, no shift, no float; int8 accumulator [K-5]",
+        "exact": "by construction, verified over FULL gold [P-3]",
+        "targets": list(C.TARGETS),
+    }
+    imgs = {}
+    for tgt in C.TARGETS:
+        t = compile_file(a.example, o, tgt)
+        tp = lower(t, tgt, o, drive="built")
+        text, st = assemble(tp)
+        data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
+        imgs[tgt.replace("/", "-")] = image.build(tp, text, data, st["entry"])
+    ckernel_src = open(os.path.join("kernel", "unisa_core.c")).read()
+    with zipfile.ZipFile(a.out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("weights/built.uns2", blob)
+        z.writestr("MANIFEST.json", json.dumps(manifest, indent=1,
+                                               sort_keys=True))
+        z.writestr("kernel/unisa_core.c", ckernel_src)
+        for k, v in sorted(imgs.items()):
+            z.writestr("images/%s" % k, v)
+    n = os.path.getsize(a.out)
+    print("%-22s %7d B" % ("weights/built.uns2", len(blob)))
+    print("%-22s %7d B" % ("kernel/unisa_core.c", len(ckernel_src)))
+    for k, v in sorted(imgs.items()):
+        print("%-22s %7d B" % ("images/" + k, len(v)))
+    print("%-22s %7d B   [B-2] weights <= 32 KB, kit <= 64 KB" % (a.out, n))
+    return 0 if (len(blob) <= 32768 and n <= 65536) else 1
+
+
 def cmd_dump(a):
     nets, missing = _load()
     if missing:
@@ -313,6 +473,19 @@ def main(argv=None):
     ek = sub.add_parser("emit-kernel")
     ek.add_argument("--out", default="kernel")
     ek.set_defaults(fn=cmd_emit_kernel)
+
+    q = sub.add_parser("quant")
+    q.add_argument("--stage", default=None, choices=list(ALL))
+    q.set_defaults(fn=cmd_quant)
+
+    bn = sub.add_parser("bench")
+    bn.add_argument("--n", type=int, default=6000)
+    bn.set_defaults(fn=cmd_bench)
+
+    sh = sub.add_parser("ship")
+    sh.add_argument("--out", default="kit.zip")
+    sh.add_argument("--example", default="examples/hello.c")
+    sh.set_defaults(fn=cmd_ship)
 
     d = sub.add_parser("dump-weights")
     d.add_argument("--dtype", default="i8", choices=["i8", "f32"])
