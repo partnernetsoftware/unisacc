@@ -51,12 +51,13 @@ on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decide
 by enumeration — 2,816 keys, zero disagreements. Not a test: a decision
 procedure.
 
-**Three of the six targets have really run.** `--fold` compares six lowerings
+**Four of the six targets have really run.** `--fold` compares six lowerings
 inside one interpreter, which catches ABI and syscall-number mistakes but not
 encoder bugs: the interpreter models no page protection, no real `rsp` and no
-two-operand ALU. `osx/arm64` (the dev machine), `lnx/x86_64` and `lnx/arm64`
-are now executed on real kernels; `osx/x86_64` and `win/*` are still only
-verified structurally.
+two-operand ALU. `osx/arm64`, `osx/x86_64` (Rosetta), `lnx/x86_64` and
+`lnx/arm64` are executed on real kernels, every probe, every time
+(`tests/crossnative.sh`). `win/*` is still only verified structurally — the PE
+has no import table yet, so nothing calls out to kernel32.
 
 **It self-hosts.** `unisacc.c` carries the model (an 11,042-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the

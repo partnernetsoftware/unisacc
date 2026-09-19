@@ -181,7 +181,7 @@ unisa compile ... --from-tape  # 输入是 .tape 而非 C（只做 lowering + �
 | `selfhost.sh` | 两种构建的 unisacc 与 Python 前端逐 token 一致 | [A-20] |
 | `bootstrap.sh` | `B = C = U` 自举不动点 | [A-23] |
 | `corpus.sh` | **c-testsuite 的 220 个程序** —— 别人写的、为别的编译器写的 | [A-25] |
-| `crossnative.sh` | **非本机目标**在本地 Linux 虚机里真实执行 | [A-27] |
+| `crossnative.sh` | **非本机目标**真实执行：两个 Linux 目标进本地虚机，osx/x86_64 走 Rosetta 2 | [A-27] |
 
 | ID | 条款 |
 |---|---|
@@ -717,7 +717,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-16** | Python kernel 与 `unisa_boot.c` 在 FULL gold 上逐 key 同类 | K-4 |
 | **A-25** | `tests/corpus.sh` → `wrong = 0`，且 `pass` 不低于 `tests/corpus.baseline` | P-6 |
 | **A-26** | CI 在**真 Linux 内核**上执行发出的 ELF（不是解释它） | I-1, I-12, X-3 |
-| **A-27** | `tests/crossnative.sh` → lnx/x86_64 与 lnx/arm64 在真内核上与解释器逐例一致 | I-12..14, X-3 |
+| **A-27** | `tests/crossnative.sh` → lnx/x86_64、lnx/arm64、osx/x86_64 在真机上与解释器逐例一致 | I-12..14, X-3 |
 
 ### 5.4 体积与速度预算 [B]
 
@@ -789,8 +789,8 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **命题** | [X-3]"只解释、不 execve"让 `--fold` 6/6 看起来像一个强判据。它不是。`tests/native.sh` 只能验**本机那一个**目标（开发机 = osx/arm64），于是 **lnx/x86_64 从未在任何地方被执行过**——直到 CI 与本地 Linux 虚机把它跑起来 |
 | **三个缺陷** | ① **ELF 只有一个 `PF_R\|PF_X` 的 PT_LOAD**（[I-12]）—— 第一次写 scratch 就 SIGSEGV<br>② **`idiv` 用真 `push`/`pop` 保存 rax/rdx**（[I-13]）—— 而 `spinit` 把 tape SP 绑在 `rsp` 上，两个栈重叠：返回地址被踩，**每个打印整数的程序都死**<br>③ **x86 两操作数 ALU 的别名**（[I-14]）—— `mov dst,s1` 在 `dst == s2` 时先毁掉右操作数，`17-5` 变成 `17-17`；移位还顺手把 tape r4（`rcx`）永久冲掉 |
 | **为什么都藏得住** | 三条都**不在解释器的机器模型里**：`exec_target.py` 不建模页保护、不建模真实 `rsp`、不建模两操作数指令。arm64 是三操作数、且宿主恰好是 arm64，于是全部绕开。`--fold` 比对的是**同一个解释器**跑六遍 lowering 的结果——它能抓 ABI 和 syscall 号错误（三次故障注入都退化到 4/6），**抓不到编码器缺陷** |
-| **证据** | 修好后：`tests/crossnative.sh` 在真 Linux 内核上跑 **lnx/x86_64 44/44、lnx/arm64 44/44**；CI 在 `ubuntu-latest` 上直接执行 ELF |
-| **意义** | 对论文：**"六目标等价"这个主张的强度等于最弱的那个验证环节**。此前它是"六份 lowering 在同一个解释器里输出一致"，现在两个目标有真内核背书。诚实的说法是：`osx/arm64`（开发机）、`lnx/x86_64`、`lnx/arm64` 三个目标**已被真实执行**；`osx/x86_64`、`win/*` 仍只是结构性验证 |
+| **证据** | 修好后：`tests/crossnative.sh` 每次跑 **lnx/x86_64 47/47、lnx/arm64 47/47（真 Linux 内核）、osx/x86_64 47/47（Rosetta 2）**；CI 在 `ubuntu-latest` 上直接执行 ELF |
+| **意义** | 对论文：**"六目标等价"这个主张的强度等于最弱的那个验证环节**。此前它是"六份 lowering 在同一个解释器里输出一致"，现在两个目标有真内核背书。诚实的说法是：`osx/arm64`、`osx/x86_64`（Rosetta 2）、`lnx/x86_64`、`lnx/arm64` **四个目标每次都被真实执行**；只剩 `win/*` 仍是结构性验证——PE 还没有导入表，没有任何东西真的调到 kernel32 |
 | **状态** | **已证实**（2026-09-19）。固化为 [A-27]（`tests/crossnative.sh`）|
 
 #### E-30　外部语料第一次基线：220 个别人写的程序，暴露六个自有探针看不见的缺陷

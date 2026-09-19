@@ -47,9 +47,31 @@ EOF2
     [ "${f:-1}" -eq 0 ] || bad=$((bad+1))
 }
 
+# osx/x86_64 on an Apple Silicon host: Rosetta 2 runs it, so this target is
+# executed rather than merely parsed.  On an Intel Mac it just runs.
+run_rosetta() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    d=$(mktemp -d); p=0; f=0
+    for c in "$@"; do
+        b=$(basename "$c" .c)
+        $U compile "$c" -o "$d/$b" --target osx/x86_64 --drive "$DRIVE" \
+            >/dev/null 2>&1 || continue
+        chmod +x "$d/$b"; codesign -f -s - "$d/$b" >/dev/null 2>&1
+        want=$($U run "$c" --target osx/x86_64 --drive "$DRIVE" 2>/dev/null)
+        got=$(arch -x86_64 "$d/$b" 2>/dev/null)
+        if [ "$got" = "$want" ]; then p=$((p+1))
+        else f=$((f+1)); printf "  FAIL %-12s native [%s] vs interp [%s]\n" \
+            "$b" "$got" "$want"; fi
+    done
+    rm -rf "$d"
+    printf "  %-12s ok %s   mismatch %s\n" osx/x86_64 "$p" "$f"
+    [ "$f" -eq 0 ] || bad=$((bad+1))
+}
+
 bad=0
 run_target "${VM_X86:-minicon-lnx-x86_64}" lnx/x86_64 "$@"
 run_target "${VM_ARM:-default}"            lnx/arm64  "$@"
+run_rosetta "$@"
 echo
 echo "crossnative failing targets $bad"
 [ "$bad" -eq 0 ]
