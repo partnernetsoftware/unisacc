@@ -128,10 +128,13 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 169   wrong 0   unsupported 50   knownfail 1
+corpus 220   pass 172   wrong 0   unsupported 47   knownfail 1   slow 0
 ```
 
-`wrong` is the only failure — a program that compiled and then disagreed.
+The programs are compiled to a real image for this host and **executed**, not
+interpreted: the reference VM is a Python loop, and an eight-queens search a
+real CPU finishes instantly takes a quarter of an hour there. `wrong` is the
+only failure — a program that compiled and then disagreed.
 `unsupported` is the honest coverage gap (the front end refuses the program);
 `tests/corpus.baseline` is a ratchet, so that number may only go down.
 

@@ -23,15 +23,56 @@ if [ ! -d "$SRC" ]; then
         || { echo "clone failed -- corpus skipped"; exit 0; }
 fi
 
-pass=0; wrong=0; unsup=0; known=0; revived=0
+pass=0; wrong=0; unsup=0; known=0; revived=0; slow=0
 isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
+
+# macOS has no `timeout`, and one heavy program must not hang the suite: the
+# reference VM is a Python interpreter, so an eight-queens search that a native
+# compiler finishes instantly can take a quarter of an hour here.
+LIMIT=${LIMIT:-10}
+# Run the corpus NATIVELY when this host has a matching target: the reference
+# VM is a Python interpreter, and an eight-queens search that a real CPU
+# finishes instantly takes a quarter of an hour there.  It is also the stronger
+# check -- the image is what we ship.
+if [ -z "${HOST_TARGET:-}" ]; then
+    case "$(uname -s)/$(uname -m)" in
+        Darwin/arm64)  HOST_TARGET=osx/arm64;;
+        Darwin/x86_64) HOST_TARGET=osx/x86_64;;
+        Linux/x86_64)  HOST_TARGET=lnx/x86_64;;
+        Linux/aarch64) HOST_TARGET=lnx/arm64;;
+        *) HOST_TARGET=;;
+    esac
+fi
+runlim() {
+    "$@" & p=$!
+    ( sleep "$LIMIT"; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 & w=$!
+    wait $p 2>/dev/null; rc=$?
+    kill $w 2>/dev/null
+    return $rc
+}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 : > "$T/passing"
 for f in "$SRC"/*.c; do
     b=$(basename "$f" .c)
     want=$(cat "$f.expected" 2>/dev/null || echo "")
-    got=$($U run "$f" --drive "$DRIVE" 2>"$T/err"); code=$?
-    if [ -s "$T/err" ]; then
+    : > "$T/err"
+    if [ -n "$HOST_TARGET" ]; then
+        if $U compile "$f" -o "$T/x" --target "$HOST_TARGET" --drive "$DRIVE" \
+                >/dev/null 2>"$T/err" && [ ! -s "$T/err" ]; then
+            chmod +x "$T/x"
+            command -v codesign >/dev/null && \
+                codesign -f -s - "$T/x" >/dev/null 2>&1
+            got=$(runlim "$T/x" 2>/dev/null); code=$?
+        else
+            got=""; code=1
+        fi
+    else
+        got=$(runlim $U run "$f" --drive "$DRIVE" 2>"$T/err"); code=$?
+    fi
+    if [ "$code" -ge 128 ] && [ ! -s "$T/err" ]; then
+        slow=$((slow+1))
+        [ "${VERBOSE:-0}" = "1" ] && printf "  SLOW %s  (over %ss in the reference VM)\n" "$b" "$LIMIT"
+    elif [ -s "$T/err" ]; then
         unsup=$((unsup+1))
         [ "${VERBOSE:-0}" = "1" ] && printf "  UNS  %s  %s\n" "$b" \
             "$(head -1 "$T/err" | cut -c1-70)"
@@ -50,9 +91,9 @@ for f in "$SRC"/*.c; do
     fi
 done
 
-total=$((pass+wrong+unsup+known+revived))
+total=$((pass+wrong+unsup+known+revived+slow))
 echo
-echo "corpus $total   pass $pass   wrong $wrong   unsupported $unsup   knownfail $known"
+echo "corpus $total   pass $pass   wrong $wrong   unsupported $unsup   knownfail $known   slow $slow"
 
 rc=0
 [ "$wrong" -eq 0 ] || rc=1

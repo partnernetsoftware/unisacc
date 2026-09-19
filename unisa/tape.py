@@ -118,7 +118,13 @@ class Tape:
             end = addr - DATA_BASE
             nxt = min([a - DATA_BASE for a in self.syms.values()
                        if a - DATA_BASE > end] + [len(self.data)])
-            out.append(".str %s %s" % (name, _quote(self.data[end:nxt])))
+            blob = self.data[end:nxt]
+            # a large zero-filled global is `.bss`, not a quoted literal: a
+            # 64 KB arena would otherwise serialise as 64 KB of "\0"
+            if len(blob) > 16 and not any(blob):
+                out.append(".bss %s %d" % (name, len(blob)))
+            else:
+                out.append(".str %s %s" % (name, _quote(blob)))
         rev = {}
         for name, pc in self.labels.items():
             rev.setdefault(pc, []).append(name)
