@@ -72,6 +72,8 @@ for f in "$SRC"/*.c; do
     if [ "$code" -ge 128 ] && [ ! -s "$T/err" ]; then
         slow=$((slow+1))
         [ "${VERBOSE:-0}" = "1" ] && printf "  SLOW %s  (over %ss in the reference VM)\n" "$b" "$LIMIT"
+    elif [ -s "$T/err" ] && isknown "$b"; then
+        known=$((known+1))          # refused, and we know why
     elif [ -s "$T/err" ]; then
         unsup=$((unsup+1))
         [ "${VERBOSE:-0}" = "1" ] && printf "  UNS  %s  %s\n" "$b" \

@@ -417,6 +417,11 @@ class Walker:
             self.next()
             self.em.init_ptrs.append((sym, self.em.intern(t.val), at))
             return
+        if t.kind == "&" and self.i + 2 < len(self.tk) \
+                and self.tk[self.i + 1].kind == "(" \
+                and self.istype(self.tk[self.i + 2]):
+            self.em.init_ptrs.append((sym, self.static_compound(), at))
+            return
         lab = self._addr_of()
         if lab is not None:                       # int *p = &g;  char *q = arr;
             self.em.init_ptrs.append((sym, lab, at))
@@ -1196,7 +1201,10 @@ class Walker:
                 else:
                     sty = self.lval if self.lval is not None else ty
                     self.lval = None
-                st = self.sc.structs[sty.tag]
+                st = self.sc.structs.get(sty.tag) if sty.tag else None
+                if st is None or fname not in st.fields:
+                    raise CError("line %d: %r has no member %r"
+                                 % (self.peek().line, sty, fname))
                 fty, foff = st.fields[fname]
                 if foff:
                     self.em.imm(TMP, foff)
@@ -1258,6 +1266,22 @@ class Walker:
             self.rewind(m)
             self.lval = None
         return self.unary()
+
+    def static_compound(self):
+        """`&(struct S){1, 2}` in a STATIC initialiser.  At file scope the
+        literal has static storage duration, so it becomes an anonymous global
+        and the slot gets its address at `_start` like any other pointer."""
+        self.expect("&")
+        self.expect("(")
+        ty = self.abstract_type()
+        self.expect(")")
+        if ty.kind == "arr" and ty.n == 0:
+            ty = Type("arr", to=ty.to, n=self._init_count())
+        lab = "g_cl%d" % self.i
+        self.em.t.string(lab, b"\x00" * max(1, ty.size(self.sc.structs)),
+                         align=8)
+        self.const_init(lab, ty)
+        return lab
 
     def compound_literal(self, ty):
         """`(struct S){1, 2}` -- an unnamed object with the enclosing block's

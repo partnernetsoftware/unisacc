@@ -102,6 +102,12 @@ def lex(src, oracle):
             while j < n and (src[j].isalnum() or src[j] == "_"):
                 j += 1
             w = src[i:j]
+            # A wide/UTF literal prefix is not an identifier: `L'x'` and
+            # `u8"s"` are one token whose prefix this subset simply drops,
+            # since every string here is bytes anyway.
+            if w in ("L", "u", "U", "u8") and j < n and src[j] in "\"'":
+                i = j
+                continue
             if w in KEYWORDS:
                 toks.append(Tok(w, w, None, line))
             elif w in TYPEKW:
