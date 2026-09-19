@@ -29,7 +29,10 @@ run native     bash -c "./tests/native.sh $CORPUS"
 run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh examples/*.c tests/c/a_*.c"
 run selfhost   bash -c "./tests/selfhost.sh $CORPUS"
-run bootstrap  ./tests/bootstrap.sh
+# bootstrap needs the host toolchain to turn a tape back into a binary
+if [ "$(uname -s)" = "Darwin" ]; then
+    run bootstrap ./tests/bootstrap.sh
+fi
 run acc        bash -c "python3 -m unisa acc"
 
 echo "================ summary ================"

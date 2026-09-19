@@ -3,13 +3,25 @@
 # checks that the emitted image is a REAL program, not just a well-formed file.
 set -u
 U="python3 -m unisa"
-HOST_TARGET=${HOST_TARGET:-osx/arm64}
+# Pick the target that matches this host, so the same script verifies the ELF
+# on Linux and the Mach-O on macOS.
+if [ -z "${HOST_TARGET:-}" ]; then
+    case "$(uname -s)/$(uname -m)" in
+        Darwin/arm64)  HOST_TARGET=osx/arm64;;
+        Darwin/x86_64) HOST_TARGET=osx/x86_64;;
+        Linux/x86_64)  HOST_TARGET=lnx/x86_64;;
+        Linux/aarch64) HOST_TARGET=lnx/arm64;;
+        *) echo "no native target for $(uname -s)/$(uname -m)"; exit 0;;
+    esac
+fi
 T=$(mktemp -d); pass=0; fail=0
 for f in "$@"; do
     b=$(basename "$f" .c)
     want=$($U run "$f" --target "$HOST_TARGET" --drive built 2>/dev/null); wcode=$?
     $U compile "$f" -o "$T/$b" --target "$HOST_TARGET" --drive built >/dev/null 2>&1
-    chmod +x "$T/$b"; codesign -f -s - "$T/$b" >/dev/null 2>&1
+    chmod +x "$T/$b"
+    # macOS/arm64 refuses to run an unsigned image; Linux needs nothing
+    command -v codesign >/dev/null && codesign -f -s - "$T/$b" >/dev/null 2>&1
     got=$( "$T/$b" 2>/dev/null & p=$!; ( sleep 8; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 &
            wait $p 2>/dev/null ); gcode=$?
     if [ "$got" = "$want" ] && [ "$gcode" = "$wcode" ]; then

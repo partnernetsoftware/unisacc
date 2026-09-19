@@ -1,0 +1,51 @@
+name: ci
+
+# The point of the Linux job is not "the tests pass" -- it is that the ELF we
+# emit is a REAL program on a platform we cannot test from the dev machine.
+# Until this ran, five of the six targets were only ever verified structurally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: construct weights and check every stage
+        run: |
+          python3 -m unisa build-weights
+          python3 -m unisa acc
+
+      - name: the emitted ELF actually runs
+        run: |
+          set -e
+          for e in hello fact fib ptr struct do switch; do
+            python3 -m unisa compile examples/$e.c -o /tmp/$e \
+              --target lnx/x86_64 --drive built
+            chmod +x /tmp/$e
+            got=$(/tmp/$e); code=$?
+            want=$(python3 -m unisa run examples/$e.c --target lnx/x86_64 --drive built)
+            echo "  $e -> '$got' (exit $code)"
+            [ "$got" = "$want" ] || { echo "MISMATCH: want '$want'"; exit 1; }
+          done
+
+      - name: suites
+        run: ./tests/all.sh
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m unisa build-weights
+      - run: ./tests/all.sh

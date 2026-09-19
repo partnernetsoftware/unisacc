@@ -11,13 +11,16 @@
 set -eu
 ./tests/build_ref.sh >/dev/null
 /tmp/ua_ref unisacc.c -c > /tmp/bs_B.tape                       # B
+HOST_TARGET=${HOST_TARGET:-osx/arm64}
 python3 -m unisa compile /tmp/bs_B.tape --from-tape -o /tmp/bs_B \
-    --target osx/arm64 --drive built >/dev/null
-chmod +x /tmp/bs_B; codesign -f -s - /tmp/bs_B >/dev/null 2>&1
+    --target "$HOST_TARGET" --drive built >/dev/null
+chmod +x /tmp/bs_B
+command -v codesign >/dev/null && codesign -f -s - /tmp/bs_B >/dev/null 2>&1 || true
 /tmp/bs_B unisacc.c -c > /tmp/bs_C.tape                          # C
-python3 -m unisa compile unisacc.c -o /tmp/bs_U --target osx/arm64 \
+python3 -m unisa compile unisacc.c -o /tmp/bs_U --target "$HOST_TARGET" \
     --drive built >/dev/null
-chmod +x /tmp/bs_U; codesign -f -s - /tmp/bs_U >/dev/null 2>&1
+chmod +x /tmp/bs_U
+command -v codesign >/dev/null && codesign -f -s - /tmp/bs_U >/dev/null 2>&1 || true
 /tmp/bs_U unisacc.c -c > /tmp/bs_UT.tape                         # U
 ok=1
 cmp -s /tmp/bs_B.tape /tmp/bs_C.tape  || { echo "  FAIL B != C"; ok=0; }
