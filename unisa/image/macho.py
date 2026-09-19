@@ -13,6 +13,8 @@ PAGE = 0x4000
 CPU = {"x86_64": (0x01000007, 3), "arm64": (0x0100000C, 0)}
 LC_SEGMENT_64, LC_BUILD_VERSION = 0x19, 0x32
 LC_LOAD_DYLINKER, LC_LOAD_DYLIB, LC_MAIN = 0xE, 0xC, 0x80000028
+LC_SYMTAB, LC_DYSYMTAB, LC_DYLD_INFO_ONLY = 0x2, 0xB, 0x80000022
+STRTAB = 8            # a string table is never empty: it starts with NULs
 DYLD = b"/usr/lib/dyld"
 LIBSYS = b"/usr/lib/libSystem.B.dylib"
 SEG, SECT = 72, 80
@@ -21,7 +23,16 @@ SEG, SECT = 72, 80
 # LC_LOAD_DYLIB and enters through LC_MAIN, even though the code itself imports
 # nothing and talks to the kernel with raw `svc`.  __LINKEDIT exists because
 # codesign needs somewhere to put the signature.
-NCMDS = 8   # PAGEZERO TEXT DATA LINKEDIT DYLINKER DYLIB MAIN + BUILD = 8
+# dyld decides how to rebase a PIE image by looking at the load commands.  With
+# no LC_DYLD_INFO and no chained fixups it takes the LEGACY relocation path,
+# dereferences the LC_DYSYMTAB we never emitted, and segfaults INSIDE DYLD
+# before our first instruction -- `dyld3::MachOAnalyzer::forEachRebase_
+# Relocations`, EXC_BAD_ACCESS at 0x48, which is `locreloff` read off a null
+# dysymtab.  Darwin 25 tolerates the omission; Darwin 23 and 24 do not.  So we
+# emit all three, empty: dyld then takes the opcode path and finds nothing to
+# do.  [I-15]
+NCMDS = 11  # PAGEZERO TEXT DATA LINKEDIT DYLINKER DYLIB MAIN BUILD
+            # + DYLD_INFO_ONLY SYMTAB DYSYMTAB
 
 
 def _round(v, a=PAGE):
@@ -51,7 +62,7 @@ SLACK = 256
 
 def _cmdsz(arch):
     return (SEG + (SEG + SECT) * 2 + SEG + len(_dylinker()) + len(_dylib())
-            + 24 + 24)
+            + 24 + 24 + 48 + 24 + 80)
 
 
 def HDRS(arch):
@@ -86,12 +97,16 @@ def write(arch, text, data, entry):
                0x80000400)
     m += _seg(b"__DATA", VMADDR + textsz, datasz, textsz, datasz, 3, 3, 1)
     m += _sect(b"__data", b"__DATA", VMADDR + textsz, len(data), textsz, 0)
-    m += _seg(b"__LINKEDIT", VMADDR + link, PAGE, link, 0, 1, 1, 0)
+    m += _seg(b"__LINKEDIT", VMADDR + link, PAGE, link, STRTAB, 1, 1, 0)
     m += _dylinker()
     m += _dylib()
     m += struct.pack("<IIQQ", LC_MAIN, 24, hdrs + entry, 0)
     m += struct.pack("<IIIIII", LC_BUILD_VERSION, 24, 1, 13 << 16,
                      13 << 16, 0)
+    # empty, but present -- see the note on NCMDS  [I-15]
+    m += struct.pack("<II" + "I" * 10, LC_DYLD_INFO_ONLY, 48, *([0] * 10))
+    m += struct.pack("<IIIIII", LC_SYMTAB, 24, link, 0, link, STRTAB)
+    m += struct.pack("<II" + "I" * 18, LC_DYSYMTAB, 80, *([0] * 18))
     assert len(m) == hdrs - SLACK, (len(m), hdrs)
     m += b"\x00" * SLACK
     out = bytearray(m)
@@ -99,4 +114,5 @@ def write(arch, text, data, entry):
     out += b"\x00" * (textsz - len(out))
     out += data
     out += b"\x00" * (link - len(out))
+    out += b"\x00" * STRTAB                 # the string table itself
     return bytes(out)

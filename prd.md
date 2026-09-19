@@ -608,7 +608,7 @@ X-2 带来的后果全是设计意图：
 
 **I-4** 镜像字节可复现（D-5）。
 
-### 4.7.1 宿主平台契约 [I-5..I-14]
+### 4.7.1 宿主平台契约 [I-5..I-15]
 
 以下不是我们的设计选择，是**平台强制要求**。违反其中任何一条，失败方式都不是报错而是 SIGILL / SIGKILL / 进程挂死。实测代价见 E-27。
 
@@ -622,6 +622,8 @@ X-2 带来的后果全是设计意图：
 | **I-10** | `call`/`ret` 必须实现 **tape 的栈语义**（在 tape SP 上压弹返回地址），不能用 `bl`/`ret` 的 lr | 递归第二层即崩 |
 
 **I-12** **ELF 同样要分段**：text 是 `PF_R|PF_X`，data 必须是独立的 `PF_R|PF_W` PT_LOAD，且 `p_offset ≡ p_vaddr (mod 0x1000)`。这条与 I-8 是同一条物理事实的两个平台写法；Mach-O 被 macOS 当场逼出来，ELF 因为只在解释器里跑过而藏了很久（E-32）。违反后果：写 scratch 即 **SIGSEGV**，且本地解释器与 `readelf` 都看不出来。
+
+**I-15** **PIE 的 Mach-O 必须告诉 dyld 怎么 rebase**：既无 `LC_DYLD_INFO` 也无 chained fixups 时，dyld 走**旧的重定位路径**，去解引用我们从未发射的 `LC_DYSYMTAB` —— 在我们第一条指令之前**就在 dyld 里面崩了**（`forEachRebase_Relocations`，EXC_BAD_ACCESS at 0x48，即空 dysymtab 上的 `locreloff`）。**Darwin 25 容忍这个缺省，Darwin 23/24 不容忍**。办法是把 `LC_DYLD_INFO_ONLY` / `LC_SYMTAB` / `LC_DYSYMTAB` 三条**全零地**发出来，dyld 于是走 opcode 路径、发现无事可做。字符串表给 8 个 NUL（字符串表不能为空）。
 
 **I-13** **x86_64 的 `push`/`pop` 不能用**：`spinit` 把 tape SP 绑到真 `rsp`，于是 tape 栈的第一个槽正是 `push` 要写的地址，两者互相覆盖。`idiv` 当年就是这么保存 rax/rdx 的，症状是返回地址被踩、**每一个打印整数的 x86_64 程序都崩**。一切寄存器保存都必须走 **tape 栈**（这正是 I-10 的含义）。
 
@@ -766,6 +768,17 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 一条发现被证伪时**保留编号并标记**，不删除——证伪过程本身是结果。
 
 ### 6.1 已证实
+
+#### E-34　同一份字节，Darwin 25 跑得动、Darwin 23/24 崩在 dyld 里
+
+| 栏 | 内容 |
+|---|---|
+| **命题** | 开发机（macOS 26 / Darwin 25）上 44/44 原生通过的 Mach-O，在 GitHub 的 `macos-14`（Darwin 23）与 `macos-15`（Darwin 24）上**全部 SIGSEGV**。签名有效、`otool` 读得出、dyld 把四个段都映射上了 |
+| **诊断** | 猜了三轮都不对，改成让 CI 直接给出事实：`DYLD_PRINT_SEGMENTS` + `lldb --batch -o run -o bt`。栈顶是 **dyld 自己**：`dyld3::MachOAnalyzer::forEachRebase_Relocations`，`EXC_BAD_ACCESS (address=0x48)` |
+| **机理** | 我们的镜像是 `MH_PIE`，却既没有 `LC_DYLD_INFO` 也没有 chained fixups。dyld 因此回落到**旧的重定位路径**，去读 `LC_DYSYMTAB` —— 而我们从没发过这条命令，于是 `locreloff`（结构体偏移 0x48）从空指针上读。Darwin 25 的 dyld 提前短路了这条路径，23/24 的没有 |
+| **修复** | 发三条**全零**的 `LC_DYLD_INFO_ONLY` / `LC_SYMTAB` / `LC_DYSYMTAB`（+8 字节 NUL 字符串表）。镜像 +152 字节，dyld 改走 opcode 路径、发现无事可做。[I-15] |
+| **意义** | 两条。其一：**"在我的机器上能跑"对二进制格式尤其不可信**——加载器的容错随版本变化，而我们手写的头部正好落在容错带里。其二：这个 bug **完全在我们的代码之外**，症状是我们的进程崩溃——没有 lldb 的回溯，任何数量的猜测都到不了 `forEachRebase_Relocations` |
+| **状态** | **已证实**（2026-09-19） |
 
 #### E-33　六个目标里，五个从未被执行过 —— lnx/x86_64 一跑就露出三个后端缺陷
 
