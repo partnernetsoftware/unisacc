@@ -797,10 +797,11 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 |---|---|
 | **现状** | 六目标里 `osx/arm64`、`osx/x86_64`、`lnx/x86_64`、`lnx/arm64` 已真机执行（E-33）。**`win/*` 仍然只是结构性验证**：我们发的 PE 在 Windows 11 arm64 上被加载器拒绝（`STATUS_INVALID_IMAGE_FORMAT`），原因尚未完全定位 |
 | **已确证的三条**<br>（方法：拿宿主自己的 `hostname.exe` 逐字段拆，每拆一处跑一次） | ① **节 RVA 必须按 SectionAlignment 对齐**，且 text/rdata/data 分节（[I-16]）；arm64 的 `MajorSubsystemVersion` 必须 ≥ 10<br>② **dir[5] 基址重定位必须存在，且含至少一条真实条目** —— 把真 exe 的条目换成 ABSOLUTE 填充、目录原样保留，它立刻不加载<br>③ **dir[10] load config 必须存在，且 `SecurityCookie`（+0x58）非零** —— 只清这一个 8 字节字段，真 exe 就不加载。**只留②或只留③都不行** |
-| **已排除的** | 导入表（无导入的 exe 照样跑）· `DllCharacteristics` 的 GUARD_CF 位 · DOS stub 与 `e_lfanew` · TimeDateStamp / CheckSum / LinkerVersion / 栈堆大小 / ImageVersion · `SizeOfCode` · 节的 VirtualSize 取值 · FileAlignment = SectionAlignment |
-| **仍未定位** | 把我们的「重定位 + cookie」配方**放进真 exe 的容器里，它能跑**（返回 42）；同一配方放进**我们自己生成的容器**，即使逐字段对齐也拒载。所以问题在容器的某处结构，不在这两条目录的内容 |
+| **已排除的**（每条都是在**能跑的**真容器上单独改一处，改完仍返回 42） | 导入表（无导入的 exe 照样跑）· GUARD_CF 位 · DOS stub 与 `e_lfanew`（用我们自己的打包代码逐字节重建同值头部，仍能跑）· TimeDateStamp / CheckSum / LinkerVersion / 栈堆大小 / ImageVersion · `SizeOfCode` / `SizeOfInitializedData` · 节的 VirtualSize 取值 · FileAlignment = SectionAlignment · SizeOfHeaders = 0x1000 · 节数量 4/5/6/7 · SizeOfImage 留空洞 · **入口点落在节首**（0x1000）· 资源目录与异常目录 |
+| **顺带确认的一条** | `SizeOfImage` 必须 **≥ 最后一节的末尾**（取大无妨，取小即拒），这是真规则，但我们本来就满足 |
+| **仍未定位** | 把我们的「重定位 + cookie」配方**放进真 exe 的容器里，它返回 42**（`dir[5]` 挪进 `.rdata`、只留一条 DIR64 指向 load config 的 cookie 字段、清掉 GUARD_CF）；同一配方放进**我们自己生成的容器**，即使把上面每一栏都对齐也拒载。**结论：问题在容器本身的某处结构，而不在这两条目录的内容，也不在上面任何一个已测字段。**下一步该做的是反向逼近——从能跑的容器出发，一次只改一处**朝我们的布局**走，直到它断掉；本轮已排除节数量与 SizeOfImage 两条，剩下的是节的文件布局本身 |
 | **已经做完的一半** | PE 写入器已重写：四节布局、真导入表（kernel32 八个函数）、`.reloc`、load config；lowering 侧的 [I-18] 也做了 —— win 的 gate 会保存/恢复全部 tape 寄存器、tape 有自己的 bss 栈、`fd → HANDLE` 与 `WriteFile` 出参的翻译都在 arm64 编码器里。解释器侧仍 6/6 |
-| **调试装置** | UTM 里的 Windows 11 arm64 虚机 + `utmctl file push/pull` + `exec`，一轮约 30 秒。**没有这个环路，上面三条一条也挖不出来** —— GitHub 的 windows 跑机每轮五分钟，而这次用掉约四十轮 |
+| **调试装置** | UTM 里的 Windows 11 arm64 虚机 + `utmctl file push/pull` + `exec`，一轮约 30 秒。**没有这个环路，上面几条一条也挖不出来** —— GitHub 的 windows 跑机每轮五分钟，而这次用掉约六十轮。两个坑：`utmctl` **失败也返回 0**（必须看输出判断），以及**在 cmd 还占着输出文件时去 pull，qemu-ga 会泄漏句柄、那个文件名此后永远读不了**（所以先 `copy` 再写哨兵，最后只 pull 副本）|
 | **意义** | 与 E-34 同类：**手写二进制格式的失败模式是「加载器沉默地拒绝」**，而每个平台的容忍带都不一样。诚实的说法是六目标里四个真跑过、两个没有 |
 | **状态** | **进行中**（2026-09-19） |
 
