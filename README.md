@@ -51,6 +51,13 @@ on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decide
 by enumeration — 2,781 keys, zero disagreements. Not a test: a decision
 procedure.
 
+**Three of the six targets have really run.** `--fold` compares six lowerings
+inside one interpreter, which catches ABI and syscall-number mistakes but not
+encoder bugs: the interpreter models no page protection, no real `rsp` and no
+two-operand ALU. `osx/arm64` (the dev machine), `lnx/x86_64` and `lnx/arm64`
+are now executed on real kernels; `osx/x86_64` and `win/*` are still only
+verified structurally.
+
 **It self-hosts.** `unisacc.c` carries the model (a 10,492-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the
 same tables. The bootstrap fixed point holds:
@@ -82,6 +89,7 @@ Python 3.11+, **standard library only**. No numpy, no torch, no build step.
 | `vm` | the tape interpreter, on hand-written fixtures |
 | `difftest` | unisa vs the system compiler — the only instrument that can see a defect in the reference tables |
 | `native` | emitted images actually executed on this host |
+| `crossnative` | the *other* targets executed in local Linux VMs — the blind spot where three codegen bugs lived |
 | `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `selfhost` | `unisacc` built two ways agrees with the Python front end |

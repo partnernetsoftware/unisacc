@@ -6,6 +6,8 @@
 #   difftest    unisa vs the system compiler -- the only instrument that can
 #               see a gold defect [P-6] [A-17]
 #   native      emitted images actually executed on this host [A-18]
+#   crossnative the OTHER targets, executed in local Linux VMs [A-27];
+#               skipped when limactl or the VMs are absent
 #   artifacts   the shipped kit is usable, not merely well-formed [A-24]
 #   ccrun       unisacc compiles C; the reference VM runs it [A-21]
 #   selfhost    unisacc built two ways agrees with the Python front end [A-20]
@@ -33,6 +35,7 @@ run acceptance ./tests/acceptance.sh
 run vm         ./tests/vm.sh
 run difftest   ./tests/difftest.sh
 run native     bash -c "./tests/native.sh $PROBES"
+run crossnative bash -c "./tests/crossnative.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh examples/*.c tests/c/a_*.c"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"

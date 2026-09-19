@@ -44,7 +44,14 @@ jobs:
         run: ./tests/corpus.sh
 
   macos:
-    runs-on: macos-14
+    # macos-14 is Darwin 23, macos-15 is Darwin 24, the dev machine is Darwin
+    # 25.  Every emitted Mach-O runs on 25 and dies with SIGSEGV on 14; run
+    # both so the boundary is a fact rather than a guess.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-14, macos-15]
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,9 +59,6 @@ jobs:
           python-version: '3.12'
       - run: python3 -m unisa build-weights
 
-      # Every emitted Mach-O dies with SIGSEGV on macos-14 while the same bytes
-      # run on the dev machine (Darwin 25).  Until that is explained this step
-      # prints what the loader was given; it must not fail the job.
       - name: what this host thinks of our Mach-O
         continue-on-error: true
         run: |
@@ -62,11 +66,13 @@ jobs:
           python3 -m unisa compile examples/hello.c -o /tmp/hello \
             --target osx/arm64 --drive built
           chmod +x /tmp/hello
-          codesign -f -s - /tmp/hello && codesign -dvvv /tmp/hello 2>&1 | head
-          otool -hl /tmp/hello | head -80
+          codesign -f -s - /tmp/hello
           set +e
-          /tmp/hello; echo "exit=$?"
-          ls -l /Users/runner/Library/Logs/DiagnosticReports 2>/dev/null
-          cat /Users/runner/Library/Logs/DiagnosticReports/hello*.ips 2>/dev/null | head -60
+          /tmp/hello; echo "plain exit=$?"
+          echo "--- dyld ---"
+          DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_LIBRARIES=1 /tmp/hello 2>&1 | head -40
+          echo "--- lldb ---"
+          lldb --batch -o 'run' -o 'bt all' -o 'register read pc sp x0' \
+               -o 'disassemble --pc --count 8' -o 'quit' /tmp/hello 2>&1 | head -60
 
       - run: ./tests/all.sh

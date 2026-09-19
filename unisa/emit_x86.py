@@ -64,6 +64,21 @@ ALU2 = {"add64": 0x01, "sub64": 0x29, "xor64": 0x31,
         "and64": 0x21, "or64": 0x09}
 SETCC = {"slt64": 0x9C, "sle64": 0x9E, "eq": 0x94, "ne": 0x95}   # l, le, e, ne
 SCRATCH = 11                                                      # r11
+SCR = "r11"       # neither r11 nor rbx is in REGMAP, so neither is a tape
+SCR2 = "rbx"      # register; we exit by syscall and never return to a caller
+
+
+def _alias(dst, s1, s2):
+    """x86 ALU is two-operand: `dst = s1 op s2` becomes `mov dst,s1; op dst,s2`.
+    When `dst` IS `s2` the mov destroys the right-hand operand first, so
+    `17 - 5` computed `17 - 17`.  The interpreter and arm64 (three-operand) are
+    both immune, which is why this survived until an x86_64 kernel ran the
+    code.  [I-14]"""
+    if dst == s1:
+        return b"", s2
+    if s2 == dst:
+        return mov_rr(SCR, s2), SCR
+    return b"", s2
 
 
 def abs_mem(opc, reg, addr):
@@ -79,6 +94,18 @@ def cmp_set(cc, dst, ra, rb):
     d = NUM[dst]
     out += rex(1, d >> 3, 0, 1) + b"\x0f\xb6" + modrm(3, d, SCRATCH)
     return out
+
+
+def _sp():
+    from .catalog import REGMAP
+    return REGMAP["x86_64"][7]          # the tape SP, not rsp
+
+
+def _spadj(n, opc):
+    """opc 5 = sub, 0 = add, on the tape SP"""
+    d = NUM[_sp()]
+    return rex(1, 0, 0, d >> 3) + b"\x81" + modrm(3, opc, d) + \
+        (n & 0xFFFFFFFF).to_bytes(4, "little")
 
 
 def rip(opc, reg, pc_next, target):
@@ -97,18 +124,28 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0, text_va=0):
     if o == "imm":
         return mov_ri(a[0], a[1])
     if o in ALU2:
-        pre = b"" if a[0] == a[1] else mov_rr(a[0], a[1])
-        return pre + _alu(ALU2[o], a[0], a[2])
-    if o in ("shl64", "shr64"):                      # shifts take cl
-        pre = b"" if a[0] == a[1] else mov_rr(a[0], a[1])
-        pre += mov_rr("rcx", a[2])
-        d = NUM[a[0]]
-        return pre + rex(1, 0, 0, d >> 3) + b"\xd3" + \
-            modrm(3, 4 if o == "shl64" else 7, d)
+        pre, src2 = _alias(a[0], a[1], a[2])
+        if a[0] != a[1]:
+            pre += mov_rr(a[0], a[1])
+        return pre + _alu(ALU2[o], a[0], src2)
+    if o in ("shl64", "shr64"):
+        # The count has to be in cl -- and rcx is a TAPE register (r4, also
+        # arg3), so it must be saved and put back.  Do the whole thing in the
+        # scratches so neither operand can be the register we are about to
+        # clobber.  [I-14]
+        out = mov_rr(SCR, a[1]) + mov_rr(SCR2, a[2])
+        out += _spadj(8, 5) + mem(0x89, "rcx", _sp(), 0)     # save tape rcx
+        out += mov_rr("rcx", SCR2)
+        out += rex(1, 0, 0, 1) + b"\xd3" + \
+            modrm(3, 4 if o == "shl64" else 7, NUM[SCR])
+        out += mem(0x8B, "rcx", _sp(), 0) + _spadj(8, 0)     # restore
+        return out + mov_rr(a[0], SCR)
     if o == "mul64":
-        pre = b"" if a[0] == a[1] else mov_rr(a[0], a[1])
-        d, s = NUM[a[0]], NUM[a[2]]
-        return pre + rex(1, d >> 3, 0, s >> 3) + b"\x0f\xaf" + modrm(3, d, s)
+        pre, src2 = _alias(a[0], a[1], a[2])
+        if a[0] != a[1]:
+            pre += mov_rr(a[0], a[1])
+        d, s2 = NUM[a[0]], NUM[src2]
+        return pre + rex(1, d >> 3, 0, s2 >> 3) + b"\x0f\xaf" + modrm(3, d, s2)
     if o == "load64":
         return load_w(a[0], a[1], a[2], 8)
     if o == "store64":
@@ -155,15 +192,25 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0, text_va=0):
         return lea + sub + st + rex(0, 0, 0, t >> 3) + b"\xff" + \
             modrm(3, 4, t)
     if o in (".div", ".mod"):
-        # idiv writes rax/rdx, which are tape registers here, so bracket the
-        # whole thing with real pushes and stage the divisor in r11.
-        out = b"\x50\x52"                            # push rax, push rdx
+        # idiv writes rax/rdx, which are tape registers here, so they have to be
+        # saved.  NOT with `push`/`pop`: `spinit` binds the tape SP to the real
+        # rsp, so the tape stack starts exactly where a real push would write,
+        # and the two clobber each other.  The symptom is a corrupted return
+        # address -- every x86_64 program that printed an integer died, while
+        # the interpreter and arm64 were fine.  [I-13]  Save through the TAPE
+        # stack instead, which is what I-10 says the stack is.
+        sp = _sp()
+        out = _spadj(16, 5)
+        out += mem(0x89, "rax", sp, 0)               # mov [SP], rax
+        out += mem(0x89, "rdx", sp, 8)               # mov [SP+8], rdx
         out += mov_rr("r11", a[2])
         out += mov_rr("rax", a[1])
         out += b"\x48\x99"                           # cqo
         out += rex(1, 0, 0, 1) + b"\xf7" + modrm(3, 7, 11)   # idiv r11
         out += mov_rr("r11", "rax" if o == ".div" else "rdx")
-        out += b"\x5a\x58"                           # pop rdx, pop rax
+        out += mem(0x8B, "rax", sp, 0)               # mov rax, [SP]
+        out += mem(0x8B, "rdx", sp, 8)               # mov rdx, [SP+8]
+        out += _spadj(16, 0)
         out += mov_rr(a[0], "r11")
         return out
     if o == "argsave":                               # SysV _start: argc at [rsp]
