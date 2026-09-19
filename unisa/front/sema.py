@@ -5,7 +5,30 @@ The two decisions that ARE table-shaped go through the oracle:
   type : (t1, op, t2)    -> result type or illegal
 """
 
-TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4}   # [G-2] else 8
+TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4,
+           "u8": 1, "u16": 2, "u32": 4}               # [G-2] else 8
+UNSIGNED = ("u8", "u16", "u32", "u64")
+RANK = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
+        "i32": 3, "u32": 3, "i64": 4, "u64": 4}
+
+
+def unsigned_result(t1, t2):
+    """Is `t1 op t2` an unsigned operation?  The same rule the type table
+    uses (C99 6.3.1.8), asked here because the WALKER picks the machine op
+    and the table only reports the result type."""
+    def promote(t):
+        k = t.kind if t is not None else "i64"
+        return "i32" if RANK.get(k, 9) < 3 else k
+    a, b = promote(t1), promote(t2)
+    ua, ub = a[0] == "u", b[0] == "u"
+    if not (ua or ub):
+        return False
+    if ua and ub:
+        return True
+    u, sg = (a, b) if ua else (b, a)
+    # the other side may be a pointer or an aggregate, which has no rank
+    return RANK.get(u, 9) >= RANK.get(sg, 9)
+NARROW = ("i8", "i16", "i32", "u8", "u16", "u32")
 
 # The type table's TOPS axis is canonical: one relational op stands for all
 # four, one equality op for both.  Projecting onto it is classic key encoding,
@@ -46,6 +69,10 @@ I8 = Type("i8")
 I16 = Type("i16")
 I32 = Type("i32")
 I64 = Type("i64")
+U8 = Type("u8")
+U16 = Type("u16")
+U32 = Type("u32")
+U64 = Type("u64")
 
 
 def ptr(t):
@@ -158,4 +185,5 @@ class Scope:
         if t is None:
             return "void"
         return t.kind if t.kind in ("void", "i8", "i16", "i32", "i64",
+                                    "u8", "u16", "u32", "u64",
                                     "ptr", "arr", "struct", "fn") else "i64"

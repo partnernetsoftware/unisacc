@@ -174,8 +174,16 @@ class Machine:
                     R[a[0]] = u64(R[a[1]] << (R[a[2]] & 63))
                 elif o == "shr64":
                     R[a[0]] = u64(s64(R[a[1]]) >> (R[a[2]] & 63))
+                elif o == "lshr64":
+                    R[a[0]] = R[a[1]] >> (R[a[2]] & 63)
                 elif o == "xor64":
                     R[a[0]] = R[a[1]] ^ R[a[2]]
+                elif o in (".udiv", ".umod"):
+                    x, y = R[a[1]], R[a[2]]
+                    if y == 0:
+                        raise Halt(136)
+                    q = x // y
+                    R[a[0]] = u64(q if o == ".udiv" else x - q * y)
                 elif o in (".div", ".mod"):
                     x, y = s64(R[a[1]]), s64(R[a[2]])
                     if y == 0:
@@ -188,6 +196,10 @@ class Machine:
                     R[a[0]] = 1 if s64(R[a[1]]) < s64(R[a[2]]) else 0
                 elif o == "sle64":
                     R[a[0]] = 1 if s64(R[a[1]]) <= s64(R[a[2]]) else 0
+                elif o == "ult64":
+                    R[a[0]] = 1 if R[a[1]] < R[a[2]] else 0
+                elif o == "ule64":
+                    R[a[0]] = 1 if R[a[1]] <= R[a[2]] else 0
                 elif o == "eq":
                     R[a[0]] = 1 if R[a[1]] == R[a[2]] else 0
                 elif o == "ne":

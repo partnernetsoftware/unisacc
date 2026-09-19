@@ -137,8 +137,16 @@ class VM:
                     r[ri[a[0]]] = u64(r[ri[a[1]]] << (r[ri[a[2]]] & 63))
                 elif op == "shr64":
                     r[ri[a[0]]] = u64(s64(r[ri[a[1]]]) >> (r[ri[a[2]]] & 63))
+                elif op == "lshr64":              # unsigned: no sign to keep
+                    r[ri[a[0]]] = r[ri[a[1]]] >> (r[ri[a[2]]] & 63)
                 elif op == "xor64":
                     r[ri[a[0]]] = r[ri[a[1]]] ^ r[ri[a[2]]]
+                elif op == ".udiv" or op == ".umod":
+                    x, y = r[ri[a[1]]], r[ri[a[2]]]
+                    if y == 0:
+                        raise Halt(136)
+                    q = x // y
+                    r[ri[a[0]]] = u64(q if op == ".udiv" else x - q * y)
                 elif op == ".div" or op == ".mod":
                     x, y = s64(r[ri[a[1]]]), s64(r[ri[a[2]]])
                     if y == 0:
@@ -151,6 +159,10 @@ class VM:
                     r[ri[a[0]]] = 1 if s64(r[ri[a[1]]]) < s64(r[ri[a[2]]]) else 0
                 elif op == "sle64":
                     r[ri[a[0]]] = 1 if s64(r[ri[a[1]]]) <= s64(r[ri[a[2]]]) else 0
+                elif op == "ult64":
+                    r[ri[a[0]]] = 1 if r[ri[a[1]]] < r[ri[a[2]]] else 0
+                elif op == "ule64":
+                    r[ri[a[0]]] = 1 if r[ri[a[1]]] <= r[ri[a[2]]] else 0
                 elif op == "eq":
                     r[ri[a[0]]] = 1 if r[ri[a[1]]] == r[ri[a[2]]] else 0
                 elif op == "ne":

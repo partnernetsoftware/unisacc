@@ -43,6 +43,7 @@ RECIPE_OP = {
     "imm": "imm", "print": ".print", "write": ".write", "exit": ".exit",
     "and64": "and64", "or64": "or64", "xor64": "xor64",
     "shl64": "shl64", "shr64": "shr64",
+    "ult64": "ult64", "ule64": "ule64", "lshr64": "lshr64",
 }
 
 
@@ -112,19 +113,46 @@ class Emitter:
     def lea(self, reg, sym):
         self.emit(self.recipe("mem", "lea"), reg, sym)
 
-    def binop(self, op):
+    UNS = {"<": "ult", "<=": "ule", ">": "ugt", ">=": "uge", ">>": "lshr"}
+
+    def binop(self, op, uns=False, width=8):
         """lhs on the stack, rhs in ACC -> result in ACC."""
         fam, flav, swap = ALU[op]
+        if uns and op in self.UNS:
+            flav = self.UNS[op]
         self.pop(LHS)
+        self.narrow_pair(uns, width)
         mn = self.recipe(fam, flav)
         if swap:
             self.emit(mn, ACC, ACC, LHS)
         else:
             self.emit(mn, ACC, LHS, ACC)
 
-    def divmod_(self, op):
+    def zext(self, width):
+        """Clear the bits above `width` bytes.  A narrow load sign-extends --
+        which is right for `char` and wrong for `unsigned char` -- and a cast
+        to an unsigned type has to zero the top, not copy the sign."""
+        if width >= 8:
+            return
+        self.imm(LHS, (1 << (width * 8)) - 1)
+        self.emit(self.recipe("alu", "and"), ACC, ACC, LHS)
+
+    def narrow_pair(self, uns, width):
+        """Convert both operands to the common type before operating.  For
+        `unsigned int` that means masking to 32 bits: C says the operands are
+        converted, and without it `(int)-1 != 0xffffffffu` comes out true."""
+        if not uns or width >= 8:
+            return
+        m = (1 << (width * 8)) - 1
+        self.imm(TMP, m)
+        self.emit(self.recipe("alu", "and"), ACC, ACC, TMP)
+        self.emit(self.recipe("alu", "and"), LHS, LHS, TMP)
+
+    def divmod_(self, op, uns=False, width=8):
         self.pop(LHS)
-        self.emit(".div" if op == "/" else ".mod", ACC, LHS, ACC)
+        self.narrow_pair(uns, width)
+        mn = (".div" if op == "/" else ".mod")
+        self.emit(("." + "u" + mn[1:]) if uns else mn, ACC, LHS, ACC)
 
     def neg(self):
         self.emit(self.recipe("lit", "imm"), LHS, 0)

@@ -65,18 +65,55 @@ def parse_label(nt, tok):
 
 
 # ----------------------------------------------------------------- type [G-2]
-TYS = ("void", "i8", "i16", "i32", "i64", "ptr", "arr", "struct", "fn")
+TYS = ("void", "i8", "i16", "i32", "i64",
+       "u8", "u16", "u32", "u64", "ptr", "arr", "struct", "fn")
 TOPS = ("+", "-", "*", "/", "%", "<", "==", "=", "&", "[]", ".", "call",
         "sizeof", ",", "un*", "|", "^", "<<", ">>")
 TYOUT = TYS + ("illegal",)
-NUM = ("i8", "i16", "i32", "i64")
-TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4}
+NUM = ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+RANK = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
+        "i32": 3, "u32": 3, "i64": 4, "u64": 4}
+TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4,
+           "u8": 1, "u16": 2, "u32": 4}
 
 
 def _narrow(t1, t2):
     """char and short promote to int; the walker keeps wider
     arithmetic in i64. [G-2]"""
-    return t1 in ("i8", "i16") or t2 in ("i8", "i16")
+    return RANK.get(t1, 9) < 3 or RANK.get(t2, 9) < 3
+
+
+def _promote(t):
+    """C99 6.3.1.1: anything of lower rank than int becomes int -- signed,
+    because int can represent every value of unsigned char and short."""
+    return "i32" if RANK.get(t, 9) < 3 else t
+
+
+def _uns(t1, t2):
+    """C99 6.3.1.8, the usual arithmetic conversions, reduced to the one
+    question this table asks: is the RESULT unsigned?"""
+    a, b = _promote(t1), _promote(t2)
+    ua, ub = a[0] == "u", b[0] == "u"
+    if not (ua or ub):
+        return False
+    if ua and ub:
+        return True
+    u, sg = (a, b) if ua else (b, a)
+    # the signed type wins only when it can represent every unsigned value
+    return RANK.get(u, 9) >= RANK.get(sg, 9)
+
+
+def _arith(t1, t2):
+    """The result kind of an arithmetic or bitwise operation.
+
+    The signed rows are exactly what they were before unsigned existed: a
+    narrow operand gives i32, otherwise i64.  The unsigned rows are the real
+    C rule, because unsigned arithmetic has to WRAP at its own width --
+    `(unsigned)-1 == 0xffffffff` is the whole point. [G-2]"""
+    if _uns(t1, t2):
+        r = max(RANK.get(_promote(t1), 9), RANK.get(_promote(t2), 9))
+        return "u64" if r >= 4 else "u32"
+    return "i32" if _narrow(t1, t2) else "i64"
 
 
 def type_label(t1, op, t2):
@@ -96,11 +133,11 @@ def type_label(t1, op, t2):
         # `&` is overloaded in C: bitwise when both sides are numeric,
         # address-of otherwise (the i64&i64 -> ptr row the walker uses).
         if t1 in NUM and t2 in NUM and not (t1 == "i64" and t2 == "i64"):
-            return "i32" if _narrow(t1, t2) else "i64"
+            return _arith(t1, t2)
         return "ptr" if (t1 == "i64" and t2 == "i64") else "illegal"
     if op in ("|", "^", "<<", ">>"):
         if t1 in NUM and t2 in NUM:
-            return "i32" if _narrow(t1, t2) else "i64"
+            return _arith(t1, t2)
         return "illegal"
     if op == ",":
         return t2                      # [G-2 corrected] the comma operator
@@ -118,7 +155,7 @@ def type_label(t1, op, t2):
         if op == "-" and t1 == "ptr" and t2 == "ptr":
             return "i64"
         if t1 in NUM and t2 in NUM:
-            return "i32" if _narrow(t1, t2) else "i64"
+            return _arith(t1, t2)
     return "illegal"
 
 
@@ -217,7 +254,9 @@ IRSEL_MAP = {
     "alu": {"add": "add64", "sub": "sub64", "mul": "mul64", "lt": "slt64",
             "le": "sle64", "gt": "slt64", "ge": "sle64", "eq": "eq",
             "ne": "ne", "neg": "sub64", "and": "and64", "or": "or64",
-            "xor": "xor64", "shl": "shl64", "shr": "shr64"},
+            "xor": "xor64", "shl": "shl64", "shr": "shr64",
+            "ult": "ult64", "ule": "ule64", "ugt": "ult64", "uge": "ule64",
+            "lshr": "lshr64"},
     "mem": {"load": "load64", "store": "store64", "lea": "lea", "ld": "ld",
             "st": "st", "zero": "zero"},
     "ctrl": {"jump": "jump", "jumpz": "jumpz", "ret": "ret"},
@@ -306,7 +345,7 @@ def build():
                        dict(d=8, hidden=[16], seed=13))
     S["type"] = Stage("type", [("t1", TYS), ("op", TOPS), ("t2", TYS)],
                       [("y", TYOUT, None)], _one(type_label),
-                      dict(d=8, hidden=[20], seed=17), weight=_type_weight)
+                      dict(d=8, hidden=[32], seed=17), weight=_type_weight)
     S["scope"] = Stage("scope", [("ctx", CTX), ("kind", KIND)],
                        [("y", ACTS, None)], _one(scope_label),
                        dict(d=8, hidden=[16], seed=19))

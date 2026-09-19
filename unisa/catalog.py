@@ -34,8 +34,11 @@ SYSOPS = tuple(SYSCALLS.keys())                                        # 19
 MOPS = ("add64", "sub64", "xor64", "mul64", "slt64", "sle64", "load64",
         "store64", "jump", "jumpz", "call", "ret", "nop", "cas64", "fence",
         "syscall_gate", "tls_base", "cycle_counter", "stack_enter",
-        "and64", "or64", "shl64", "shr64", "callr")                # 24
-OPS = SYSOPS + MOPS                                                    # [V-1] 38
+        "and64", "or64", "shl64", "shr64", "callr",
+        # unsigned needs its own compare, shift and divide: the signed ones
+        # give the wrong answer above 2^63 (and above 2^31 after a cast)
+        "ult64", "ule64", "lshr64")                                # 27
+OPS = SYSOPS + MOPS                                                    # [V-1]
 
 OSX_CLASS_BIT = 0x02000000                                             # [C-2]
 
@@ -47,6 +50,8 @@ MNEMONIC = {
     "shl64": ("shl", "lsl"),        "shr64": ("sar", "asr"),
     "callr": ("call", "blr"),
     "slt64": ("setl", "cset"),      "sle64": ("setle", "cset"),
+    "ult64": ("setb", "cset"),      "ule64": ("setbe", "cset"),
+    "lshr64": ("shr", "lsr"),
     "load64": ("mov", "ldr"),       "store64": ("mov", "str"),
     "jump": ("jmp", "b"),           "jumpz": ("jz", "cbz"),
     "call": ("call", "bl"),         "ret": ("ret", "ret"),

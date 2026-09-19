@@ -28,8 +28,11 @@ def mem(store, rt, rn, off, wd):
 
 ALU3 = {"add64": 0x8B000000, "sub64": 0xCB000000, "xor64": 0xCA000000,
         "and64": 0x8A000000, "or64": 0xAA000000,
-        "shl64": 0x9AC02000, "shr64": 0x9AC02800}
-INVCOND = {"slt64": 0xA, "sle64": 0xC, "eq": 0x1, "ne": 0x0}   # ge, gt, ne, eq
+        "shl64": 0x9AC02000, "shr64": 0x9AC02800,
+        "lshr64": 0x9AC02400}
+# cset encodes the INVERTED condition: ge, gt, ne, eq, hs, hi
+INVCOND = {"slt64": 0xA, "sle64": 0xC, "eq": 0x1, "ne": 0x0,
+           "ult64": 0x2, "ule64": 0x8}
 IP0 = 16
 IP1 = 17          # x16 is the Darwin syscall-number register -- use IP1
 # Windows/arm64 [I-18].  A WinAPI call is an ordinary AAPCS64 call, so it
@@ -157,10 +160,12 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
             w(0xD1002000 | (7 << 5) | 7) + \
             w(0xF9000000 | (7 << 5) | IP1) + \
             w(0xD61F0000 | (N(a[0]) << 5))           # br Xn
-    if o == ".div":                                  # sdiv
-        return w(0x9AC00C00 | (N(a[2]) << 16) | (N(a[1]) << 5) | N(a[0]))
-    if o == ".mod":                                  # sdiv then msub
-        return w(0x9AC00C00 | (N(a[2]) << 16) | (N(a[1]) << 5) | IP1) + \
+    if o in (".div", ".udiv"):                       # sdiv / udiv
+        d = 0x9AC00C00 if o == ".div" else 0x9AC00800
+        return w(d | (N(a[2]) << 16) | (N(a[1]) << 5) | N(a[0]))
+    if o in (".mod", ".umod"):                       # divide then msub
+        d = 0x9AC00C00 if o == ".mod" else 0x9AC00800
+        return w(d | (N(a[2]) << 16) | (N(a[1]) << 5) | IP1) + \
             w(0x9B008000 | (N(a[2]) << 16) | (N(a[1]) << 10) |
               (IP1 << 5) | N(a[0]))
     if o == "argsave":                               # Darwin: x0=argc x1=argv

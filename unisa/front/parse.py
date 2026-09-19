@@ -6,7 +6,9 @@ a single class name. [P-1]
 """
 from ..gold import TOKS
 from ..ir import Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE
-from .sema import Scope, Type, VOID, I8, I16, I32, I64, ptr, Struct
+from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
+                   U8, U16, U32, U64, UNSIGNED, NARROW,
+                   unsigned_result, ptr, Struct)
 
 # A declaration specifier is a SET of words, not the last one seen:
 # `long int` is long and `short int` is short.  Resolving word by word made
@@ -31,13 +33,34 @@ def _basety(words):
         return VOID
     if "double" in words or "float" in words:
         return I64
+    u = "unsigned" in words
     if "long" in words:
-        return I64
+        return U64 if u else I64
     if "short" in words:
-        return I16
+        return U16 if u else I16
     if "char" in words:
-        return I8
-    return I32
+        return U8 if u else I8
+    return U32 if u else I32
+
+
+def _littype(text, v):
+    """C99 6.4.4.1: an integer constant takes the first type in its list that
+    can hold it, and a HEX constant's list includes the unsigned types.  That
+    is why `0xffffffff` is `unsigned int` and `4294967295` is `long` -- and
+    why `(int)-1 != 0xffffffff` is false."""
+    body = text.rstrip("uUlL")
+    suf = text[len(body):].lower()
+    hexish = body[:2].lower() == "0x" or (len(body) > 1 and body[0] == "0")
+    lng = "l" in suf
+    if "u" in suf:
+        return U32 if (not lng and v <= 0xFFFFFFFF) else U64
+    if not lng and v <= 0x7FFFFFFF:
+        return I32
+    if hexish and not lng and v <= 0xFFFFFFFF:
+        return U32
+    if v <= 0x7FFFFFFFFFFFFFFF:
+        return I64
+    return U64
 
 
 class CError(Exception):
@@ -495,7 +518,7 @@ class Walker:
             off = self.alloc(ty)
             self.sc.declare(pn, ty, "local", off)
             self.em.store(FP, -off, ARGREGS[k], min(8, ty.size(self.sc.structs))
-                          if ty.kind in ("i8", "i16", "i32") else 8)
+                          if ty.kind in NARROW else 8)
         self.block(new_scope=False)
         self.em.label(self.ret_label)
         self.em.epilogue()
@@ -833,13 +856,15 @@ class Walker:
 
     # -- expressions ------------------------------------------------------
     def wid(self, ty):
-        return ty.size(self.sc.structs) if ty.kind in ("i8", "i16", "i32") else 8
+        return ty.size(self.sc.structs) if ty.kind in NARROW else 8
 
     def load_if_lval(self):
         if self.lval is not None:
             ty = self.lval
             if ty.kind not in ("arr", "struct"):
                 self.em.load(ACC, ACC, 0, self.wid(ty))
+                if ty.kind in UNSIGNED:
+                    self.em.zext(self.wid(ty))
             self.lval = None
             return ty
         return None
@@ -878,6 +903,8 @@ class Walker:
                 self.lval = None
                 self.em.push()               # address
                 self.em.load(ACC, ACC, 0, self.wid(aty))
+                if aty.kind in UNSIGNED:
+                    self.em.zext(self.wid(aty))
                 self.em.push()               # old value
                 self.rvalue()
                 if op in ("+", "-") and aty.kind in ("ptr", "arr"):
@@ -961,12 +988,19 @@ class Walker:
             self.load_if_lval()
             res = self.sc.combine(ty, op, rty)                       # [W-4]
             if op in ("+", "-") and ty.kind in ("ptr", "arr") and \
-                    rty.kind in ("i8", "i16", "i32", "i64"):
+                    (rty.kind in ("i64", "u64") or rty.kind in NARROW):
                 self.scale(ty)
+            uns = unsigned_result(ty, rty)
+            # the common type decides the WIDTH the operands wrap at, and the
+            # table is what knows it -- ask with `+`, the arithmetic row
+            wid = 8
+            if uns:
+                ck = self.sc.combine(ty, "+", rty)                   # [W-4]
+                wid = {"u8": 1, "u16": 2, "u32": 4}.get(ck, 8)
             if op in ("/", "%"):
-                self.em.divmod_(op)
+                self.em.divmod_(op, uns, wid)
             else:
-                self.em.binop(op)
+                self.em.binop(op, uns, wid)
             if op == "-" and ty.kind == "ptr" and rty.kind == "ptr":
                 self.unscale(ty)
             ty = self.ty_from(res, ty, rty)
@@ -991,6 +1025,7 @@ class Walker:
         if kind == "illegal":
             return I64
         return {"void": VOID, "i8": I8, "i16": I16, "i32": I32, "i64": I64,
+                "u8": U8, "u16": U16, "u32": U32, "u64": U64,
                 "arr": t1, "struct": t1, "fn": t1}.get(kind, I64)
 
     def unary(self):
@@ -1060,7 +1095,9 @@ class Walker:
                 return self.compound_literal(base)        # literal, C99 6.5.2.5
             self.unary()
             self.load_if_lval()
-            if base.kind in ("i8", "i16", "i32"):
+            if base.kind in UNSIGNED:
+                self.em.zext(base.size(self.sc.structs))
+            elif base.kind in NARROW:
                 self.em.truncate(base.size(self.sc.structs))
             return self.postfix_chain(base)
         if p == "sizeof":
@@ -1093,7 +1130,7 @@ class Walker:
         if t.kind == "num":
             self.next()
             self.em.imm(ACC, int(t.val))
-            return self.postfix_chain(I32)
+            return self.postfix_chain(_littype(t.text, int(t.val)))
         if t.kind == "str":
             self.next()
             self.em.lea(ACC, self.em.intern(t.val))

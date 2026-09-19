@@ -62,7 +62,8 @@ def store_w(reg, base, disp, width):
 
 ALU2 = {"add64": 0x01, "sub64": 0x29, "xor64": 0x31,
         "and64": 0x21, "or64": 0x09}
-SETCC = {"slt64": 0x9C, "sle64": 0x9E, "eq": 0x94, "ne": 0x95}   # l, le, e, ne
+SETCC = {"slt64": 0x9C, "sle64": 0x9E, "eq": 0x94, "ne": 0x95,
+         "ult64": 0x92, "ule64": 0x96}        # l, le, e, ne, b, be
 SCRATCH = 11                                                      # r11
 SCR = "r11"       # neither r11 nor rbx is in REGMAP, so neither is a tape
 SCR2 = "rbx"      # register; we exit by syscall and never return to a caller
@@ -129,7 +130,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         if a[0] != a[1]:
             pre += mov_rr(a[0], a[1])
         return pre + _alu(ALU2[o], a[0], src2)
-    if o in ("shl64", "shr64"):
+    if o in ("shl64", "shr64", "lshr64"):
         # The count has to be in cl -- and rcx is a TAPE register (r4, also
         # arg3), so it must be saved and put back.  Do the whole thing in the
         # scratches so neither operand can be the register we are about to
@@ -138,7 +139,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         out += _spadj(8, 5) + mem(0x89, "rcx", _sp(), 0)     # save tape rcx
         out += mov_rr("rcx", SCR2)
         out += rex(1, 0, 0, 1) + b"\xd3" + \
-            modrm(3, 4 if o == "shl64" else 7, NUM[SCR])
+            modrm(3, {"shl64": 4, "shr64": 7, "lshr64": 5}[o], NUM[SCR])
         out += mem(0x8B, "rcx", _sp(), 0) + _spadj(8, 0)     # restore
         return out + mov_rr(a[0], SCR)
     if o == "mul64":
@@ -192,7 +193,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         t = NUM[a[0]]
         return lea + sub + st + rex(0, 0, 0, t >> 3) + b"\xff" + \
             modrm(3, 4, t)
-    if o in (".div", ".mod"):
+    if o in (".div", ".mod", ".udiv", ".umod"):
         # idiv writes rax/rdx, which are tape registers here, so they have to be
         # saved.  NOT with `push`/`pop`: `spinit` binds the tape SP to the real
         # rsp, so the tape stack starts exactly where a real push would write,
@@ -206,9 +207,13 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         out += mem(0x89, "rdx", sp, 8)               # mov [SP+8], rdx
         out += mov_rr("r11", a[2])
         out += mov_rr("rax", a[1])
-        out += b"\x48\x99"                           # cqo
-        out += rex(1, 0, 0, 1) + b"\xf7" + modrm(3, 7, 11)   # idiv r11
-        out += mov_rr("r11", "rax" if o == ".div" else "rdx")
+        if o[1] == "u":
+            out += rex(1, 0, 0, 0) + b"\x31" + modrm(3, 2, 2)  # xor rdx, rdx
+            out += rex(1, 0, 0, 1) + b"\xf7" + modrm(3, 6, 11)  # div r11
+        else:
+            out += b"\x48\x99"                       # cqo
+            out += rex(1, 0, 0, 1) + b"\xf7" + modrm(3, 7, 11)  # idiv r11
+        out += mov_rr("r11", "rax" if o in (".div", ".udiv") else "rdx")
         out += mem(0x8B, "rax", sp, 0)               # mov rax, [SP]
         out += mem(0x8B, "rdx", sp, 8)               # mov rdx, [SP+8]
         out += _spadj(16, 0)

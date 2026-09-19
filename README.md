@@ -27,13 +27,13 @@ classic code — algebra, not tables. Every *table-shaped* decision is a network
 | `pp` | dir × defined | 18 | 274 |
 | `lex` | charclass × peek | 121 | 418 |
 | `parse` | NT × TOK | 340 | 1,451 |
-| `type` | t1 × op × t2 | 1,539 | 1,006 |
+| `type` | t1 × op × t2 | 3,211 | 1,622 |
 | `scope` | ctx × kind | 30 | 479 |
-| `irsel` | family × flavor | 165 | 1,103 |
-| `enc` | op × os × arch | 258 | 869 |
+| `irsel` | family × flavor | 190 | 1,194 |
+| `enc` | op × os × arch | 276 | 893 |
 | `reloc` | jmpkind × arch | 6 | 161 |
-| `isel` | op × arch | 86 | 2,524 |
-| `abi` | op × os × arch | 258 | 4,421 |
+| `isel` | op × arch | 92 | 2,628 |
+| `abi` | op × os × arch | 276 | 4,457 |
 
 Ten decision points, one kernel: `embed → gemv → ReLU → gemv → argmax`.
 Swap the weights, change the capability. The kernel never changes.
@@ -44,11 +44,11 @@ Swap the weights, change the capability. The kernel never changes.
 gold decision tables, not trained: `W1 ∈ {0,1}`, `b1 ∈ {0,−1,−2}` (and not
 stored — it is recoverable), `W2 ∈ {1,2,4,8,16}`. The hidden activation is
 always 0 or 1, so there is **no multiply, no shift, no float anywhere**, and an
-**int8 accumulator suffices** (largest logit 48).
+**int8 accumulator suffices** (largest logit 40).
 
 **Verification is exhaustive, not statistical.** Each stage is a total function
 on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decided
-by enumeration — 2,821 keys, zero disagreements. Not a test: a decision
+by enumeration — 4,560 keys, zero disagreements. Not a test: a decision
 procedure.
 
 **Four of the six targets have really run.** `--fold` compares six lowerings
@@ -68,7 +68,7 @@ runs under Rosetta, and `tests/fat.sh` executes both on every probe. That is
 multi-ISA within one OS — a cosmopolitan-style file that is simultaneously an
 ELF, a Mach-O and a PE is a different problem and is not what this emits.
 
-**It self-hosts.** `unisacc.c` carries the model (an 11,888-byte blob) and the
+**It self-hosts.** `unisacc.c` carries the model (a 12,554-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the
 same tables. The bootstrap fixed point holds:
 
@@ -128,7 +128,7 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 173   wrong 0   unsupported 45   knownfail 2   slow 0
+corpus 220   pass 174   wrong 0   unsupported 45   knownfail 1   slow 0
 ```
 
 The programs are compiled to a real image for this host and **executed**, not
