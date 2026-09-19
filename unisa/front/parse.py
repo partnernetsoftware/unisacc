@@ -13,7 +13,8 @@ from .sema import Scope, Type, VOID, I8, I16, I32, I64, ptr, Struct
 # sizeof(long int) == 4.  [E-34]
 TYPEWORD = ("char", "int", "long", "short", "void",
             "unsigned", "signed", "float", "double")
-ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/"}
+ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
+              "&=": "&", "|=": "|", "^=": "^", "<<=": "<<", ">>=": ">>"}
 # The syscalls a self-hosting compiler needs, exposed as intrinsics.  They lower
 # to the tape's `.sys` gate, so the target facts (sysno, arg registers, gate)
 # still come from the abi/enc tables -- nothing here is hardcoded per target.
@@ -670,10 +671,8 @@ class Walker:
                 self.rvalue()
                 if op in ("+", "-") and aty.kind in ("ptr", "arr"):
                     self.scale(aty)
-                if op in ("*",):
-                    self.em.binop("*")
-                elif op == "/":
-                    self.em.divmod_("/")
+                if op in ("/", "%"):
+                    self.em.divmod_(op)
                 else:
                     self.em.binop(op)
                 self.em.pop(LHS)
@@ -785,6 +784,12 @@ class Walker:
 
     def unary(self):
         p = self.ask("unary")                                    # [W-3]
+        if p == "bnot":
+            self.next()
+            self.unary()
+            self.load_if_lval()
+            self.em.bitnot()
+            return I64
         if p == "neg":
             self.next()
             t = self.unary()

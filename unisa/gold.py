@@ -14,12 +14,13 @@ TOKS = ("eof", "type", "id", "num", "str", "if", "else", "while", "for", "do",
         "struct", "typedef", "enum", "{", "}", "(", ")", "[", "]", ";", ",",
         "=", "+=", "-=", "*=", "/=", "?", ":", "+", "-", "*", "/", "%",
         "==", "!=", "<", ">", "<=", ">=", "&&", "||", "!", "&", "++", "--",
-        ".", "->", "goto", "|", "^", "<<", ">>", "union")
+        ".", "->", "goto", "|", "^", "<<", ">>", "union",
+        "~", "%=", "&=", "|=", "^=", "<<=", ">>=")
 PRODS = ("end", "fn", "global", "typedef", "struct", "enum", "decl", "if",
          "while", "for", "do", "switch", "case", "default", "return", "break",
          "continue", "block", "expr", "neg", "not", "deref", "addr", "sizeof",
          "prim", "index", "call", "inc", "field", "done", "fn_sig", "var_def",
-         "goto")
+         "goto", "bnot")
 PARSE_DEFAULT = {"top": "global", "stmt": "expr", "unary": "prim",
                  "postfix": "done", "after_name": "var_def"}
 SAME_NAME = ("if", "while", "for", "do", "switch", "case", "default",
@@ -48,8 +49,8 @@ def parse_label(nt, tok):
         if tok in SAME_NAME:
             return tok
     elif nt == "unary":
-        return {"-": "neg", "!": "not", "*": "deref", "&": "addr",
-                "sizeof": "sizeof"}.get(tok, "prim")
+        return {"-": "neg", "!": "not", "~": "bnot", "*": "deref",
+                "&": "addr", "sizeof": "sizeof"}.get(tok, "prim")
     elif nt == "postfix":
         if tok == "[":
             return "index"

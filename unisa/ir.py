@@ -130,6 +130,11 @@ class Emitter:
         self.emit(self.recipe("lit", "imm"), LHS, 0)
         self.emit(self.recipe("alu", "neg"), ACC, LHS, ACC)
 
+    def bitnot(self):
+        """~x is x ^ -1; no new tape op needed."""
+        self.emit(self.recipe("lit", "imm"), LHS, -1)
+        self.emit(self.recipe("alu", "xor"), ACC, ACC, LHS)
+
     def logical_not(self):
         self.imm(LHS, 0)
         self.emit(self.recipe("alu", "eq"), ACC, ACC, LHS)

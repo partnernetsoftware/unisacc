@@ -59,12 +59,12 @@ echo "== [A-19] the compiler compiles its own decision layer =="
 $U emit-kernel --out kernel >/dev/null
 { echo '#include <stdio.h>'; cat kernel/unisa_self.c; } > /tmp/u_ref.c
 cc -w -std=c99 -o /tmp/u_ref /tmp/u_ref.c 2>/dev/null
-chk "C kernel under cc" "6737 decisions, 0 wrong" "$(/tmp/u_ref)"
+chk "C kernel under cc" "6772 decisions, 0 wrong" "$(/tmp/u_ref)"
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
     $U compile kernel/unisa_self.c -o /tmp/u_self --target osx/arm64 \
         --drive built >/dev/null
     chmod +x /tmp/u_self; codesign -f -s - /tmp/u_self >/dev/null 2>&1
-    chk "C kernel built by unisa" "6737 decisions, 0 wrong" "$(/tmp/u_self)"
+    chk "C kernel built by unisa" "6772 decisions, 0 wrong" "$(/tmp/u_self)"
 fi
 
 echo "== [A-20] self-hosting ladder: unisacc.c built two ways =="

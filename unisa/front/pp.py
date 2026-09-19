@@ -58,6 +58,27 @@ def _find_header(name, angled, here, paths):
     return None
 
 
+def _splice(src):
+    """C99 phase 2: a backslash-newline pair is deleted, joining the lines.
+    Blank lines are pushed back in so line numbers survive."""
+    if "\\\n" not in src:
+        return src
+    out, pending = [], 0
+    for line in src.split("\n"):
+        if line.endswith("\\"):
+            out.append(line[:-1])
+            pending += 1
+            continue
+        out.append(line)
+        if pending:
+            joined = "".join(out[-pending - 1:])
+            del out[-pending - 1:]
+            out.append(joined)
+            out.extend([""] * pending)
+            pending = 0
+    return "\n".join(out)
+
+
 def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                _seen=None):
     """Returns (text, macros).
@@ -71,6 +92,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     here = os.path.dirname(os.path.abspath(path)) if path else None
     out = []
     stack = []            # [(taking, seen_true)]
+    src = _splice(src)
     for raw in src.splitlines():
         m = DIRECTIVE.match(raw)
         live = all(t for (t, _) in stack)

@@ -26,7 +26,7 @@ classic code — algebra, not tables. Every *table-shaped* decision is a network
 |---|---|---|---|
 | `pp` | dir × defined | 18 | 274 |
 | `lex` | charclass × peek | 121 | 418 |
-| `parse` | NT × TOK | 300 | 1,353 |
+| `parse` | NT × TOK | 335 | 1,426 |
 | `type` | t1 × op × t2 | 1,539 | 1,006 |
 | `scope` | ctx × kind | 30 | 479 |
 | `irsel` | family × flavor | 165 | 1,103 |
@@ -48,7 +48,7 @@ always 0 or 1, so there is **no multiply, no shift, no float anywhere**, and an
 
 **Verification is exhaustive, not statistical.** Each stage is a total function
 on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decided
-by enumeration — 2,781 keys, zero disagreements. Not a test: a decision
+by enumeration — 2,816 keys, zero disagreements. Not a test: a decision
 procedure.
 
 **Three of the six targets have really run.** `--fold` compares six lowerings
@@ -58,7 +58,7 @@ two-operand ALU. `osx/arm64` (the dev machine), `lnx/x86_64` and `lnx/arm64`
 are now executed on real kernels; `osx/x86_64` and `win/*` are still only
 verified structurally.
 
-**It self-hosts.** `unisacc.c` carries the model (a 10,492-byte blob) and the
+**It self-hosts.** `unisacc.c` carries the model (an 11,042-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the
 same tables. The bootstrap fixed point holds:
 
@@ -117,7 +117,7 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 132   wrong 0   unsupported 87   knownfail 1
+corpus 220   pass 136   wrong 0   unsupported 83   knownfail 1
 ```
 
 `wrong` is the only failure — a program that compiled and then disagreed.

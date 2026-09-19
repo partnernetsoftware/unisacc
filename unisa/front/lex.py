@@ -9,7 +9,11 @@ KEYWORDS = ("if", "else", "while", "for", "do", "switch", "case", "default",
             "return", "break", "continue", "sizeof", "struct", "typedef",
             "enum", "goto", "union")
 TYPEKW = ("int", "char", "long", "short", "void", "unsigned", "signed",
-          "float", "double", "const", "static")
+          "float", "double", "const", "static",
+          # storage class and qualifiers: declspec skips them, but they have to
+          # reach it as `type` tokens or they arrive as identifiers and the
+          # declaration is rejected
+          "extern", "volatile", "register", "auto", "inline", "restrict")
 PUNCT = sorted([t for t in TOKS if not t[0].isalpha() and t != "eof"],
                key=len, reverse=True)
 OPCHARS = set("".join(PUNCT))
@@ -23,6 +27,14 @@ class Tok:
 
     def __repr__(self):
         return "%s(%s)" % (self.kind, self.text)
+
+
+def _numval(t):
+    """int(x, 0) rejects C's leading-zero octal: `022` is 18, not an error."""
+    t = t.rstrip("uUlL")
+    if len(t) > 1 and t[0] == "0" and t[1] not in "xX":
+        return int(t, 8)
+    return int(t, 0)
 
 
 def charclass(c):
@@ -108,7 +120,7 @@ def lex(src, oracle):
                     j += 1
             while j < n and src[j] in "uUlL":
                 j += 1
-            toks.append(Tok("num", src[i:j], int(src[i:j].rstrip("uUlL"), 0), line))
+            toks.append(Tok("num", src[i:j], _numval(src[i:j]), line))
             i = j
         elif act == "str":
             i += 1
