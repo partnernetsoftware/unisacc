@@ -174,10 +174,12 @@ class Walker:
                 self.skip_parens()
             return ptr(Type("fn", ret=ty)), name
         name = self.expect("id").text
+        dims = []
         while self.at("["):
             self.next()
-            n = self.const_expr()
+            dims.append(0 if self.at("]") else self.const_expr())
             self.expect("]")
+        for n in reversed(dims):          # int a[2][3] is 2 of (3 of int)
             ty = Type("arr", to=ty, n=n)
         return ty, name
 
@@ -212,10 +214,10 @@ class Walker:
                              % (self.peek().line, self.peek().text))
         # entry: run the pointer initialisers, then main
         self.em.label("_start")
-        for (g, lab) in self.em.init_ptrs:
+        for (g, lab, off) in self.em.init_ptrs:
             self.em.lea(ACC, lab)
             self.em.lea(LHS, g)
-            self.em.store(LHS, 0, ACC)
+            self.em.store(LHS, off, ACC)
         self.em.call("main")
         self.em.exit_(ACC)
         return self.em.finish()
@@ -256,29 +258,123 @@ class Walker:
                 self.function(ty, name)
                 return
             self.sc.act("top", self.tk[self.i - 1])
+            init = self.eat("=")
+            if init and ty.kind == "arr" and ty.n == 0:
+                ty = Type("arr", to=ty.to, n=self._init_count())
             size = ty.size(self.sc.structs)
             self.em.t.string("g_" + name, b"\x00" * max(1, size), align=8)
             sym = self.sc.declare(name, ty, "global", sym="g_" + name)
-            if self.eat("="):
+            if init:
                 self.global_init(sym, ty)
             if not self.eat(","):
                 break
         self.expect(";")
 
-    def global_init(self, sym, ty):
+    def _members(self, ty):
+        """The DIRECT children of an aggregate: (offset, type)."""
+        if ty.kind == "arr":
+            esz = ty.to.size(self.sc.structs)
+            return [(i * esz, ty.to) for i in range(ty.n)]
+        st = self.sc.structs[ty.tag]
+        return [(foff, fty) for (_, (fty, foff)) in st.fields.items()]
+
+    def _elems(self, ty):
+        """The scalar slots of `ty`, in declaration order: (offset, type)."""
+        if ty.kind == "arr":
+            esz = ty.to.size(self.sc.structs)
+            for i in range(ty.n):
+                for (o, t) in self._elems(ty.to):
+                    yield (i * esz + o, t)
+        elif ty.kind == "struct":
+            st = self.sc.structs[ty.tag]
+            for (_, (fty, foff)) in st.fields.items():
+                for (o, t) in self._elems(fty):
+                    yield (foff + o, t)
+        else:
+            yield (0, ty)
+
+    def _init_count(self):
+        """How many elements the initialiser at the cursor supplies, so an
+        unsized `int a[] = {...}` can be given its length.  A string counts its
+        own NUL, which is why `char s[] = "abc"` is 4 bytes."""
         t = self.peek()
         if t.kind == "str":
+            return len(t.val) + 1
+        if t.kind != "{":
+            return 1
+        depth, n, j = 0, 0, self.i
+        while j < len(self.tk):
+            k = self.tk[j].kind
+            if k == "{":
+                depth += 1
+                if depth == 1 and self.tk[j + 1].kind != "}":
+                    n = 1
+            elif k == "}":
+                depth -= 1
+                if depth == 0:
+                    return n
+            elif k == "," and depth == 1:
+                n += 1
+            j += 1
+        return n
+
+    def const_init(self, sym, ty, at=0):
+        """Write a CONSTANT initialiser into the data image.  Scalars, strings,
+        brace lists, nesting, and pointers to literals -- a pointer slot is
+        filled at run time by `_start`, because the image may be relocated."""
+        base = self.em.t.syms[sym] - 0x100
+        t = self.peek()
+        if t.kind == "str" and self._is_charr(ty):
             self.next()
-            lab = self.em.intern(t.val)
-            self.em.init_ptrs.append((sym.sym, lab))
-        elif t.kind == "num":
+            raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
+            self.em.t.data[base + at:base + at + len(raw)] = raw
+            return
+        if ty.kind in ("arr", "struct"):
+            braced = self.eat("{")
+            # `{1,2,3,4}` for int[2][2] is legal: without inner braces the
+            # values fill the scalar slots in order.
+            slots = self._members(ty) if braced and self._braced_next() \
+                else list(self._elems(ty))
+            k = 0
+            while not (self.at("}") if braced else False):
+                if k >= len(slots):
+                    raise CError("line %d: too many initialisers"
+                                 % self.peek().line)
+                off, sty = slots[k]
+                self.const_init(sym, sty, at + off)
+                k += 1
+                if not self.eat(","):
+                    break
+                if not braced:
+                    break
+            if braced:
+                self.expect("}")
+            return
+        if t.kind == "str":                       # char *p = "..."
             self.next()
-            w = min(8, max(1, ty.size(self.sc.structs)))
-            base = self.em.t.syms[sym.sym] - 0x100
-            self.em.t.data[base:base + w] = (int(t.val) & ((1 << (w * 8)) - 1)) \
-                .to_bytes(w, "little")
-        else:
-            raise CError("line %d: only constant global initialisers" % t.line)
+            self.em.init_ptrs.append((sym, self.em.intern(t.val), at))
+            return
+        v = self.const_expr()
+        w = min(8, max(1, ty.size(self.sc.structs)))
+        self.em.t.data[base + at:base + at + w] = \
+            (v & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
+
+    def _is_charr(self, ty):
+        return ty.kind == "arr" and ty.to.size(self.sc.structs) == 1
+
+    def _braced_next(self):
+        """Just after a `{`: does the first element open its own brace, or is
+        this a flat list?"""
+        return self.at("{") or self.at("str")
+
+    def global_init(self, sym, ty):
+        try:
+            self.const_init(sym.sym, ty)
+        except CError:
+            raise
+        except Exception as e:
+            raise CError("line %d: only constant global initialisers (%s)"
+                         % (self.peek().line, e))
 
     def function(self, ret, name):
         self.sc.act("top", self.peek())       # lparen -> fn_name
@@ -397,35 +493,60 @@ class Walker:
             self.sc.act("local", self.tk[self.i - 1])
             if static:                       # static storage, zero-initialised
                 lab = "g_%s_%d" % (name, self.i)
+                init = self.eat("=")
+                if init and ty.kind == "arr" and ty.n == 0:
+                    ty = Type("arr", to=ty.to, n=self._init_count())
                 self.em.t.string(lab, b"\x00" *
                                  max(1, ty.size(self.sc.structs)), align=8)
                 sym = self.sc.declare(name, ty, "global", sym=lab)
-                if self.eat("="):
+                if init:
                     self.global_init(sym, ty)
                 if not self.eat(","):
                     break
                 continue
+            init = self.eat("=")
+            if init and ty.kind == "arr" and ty.n == 0:
+                ty = Type("arr", to=ty.to, n=self._init_count())
             off = self.alloc(ty)
             sym = self.sc.declare(name, ty, "local", off)
-            if self.eat("="):
-                if self.at("{"):
-                    self.next()
-                    elem = ty.to if ty.kind == "arr" else ty
-                    esz = elem.size(self.sc.structs)
-                    k = 0
-                    while not self.at("}"):
-                        self.rvalue()
-                        self.em.store(FP, -off + k * esz, ACC, self.wid(elem))
-                        k += 1
-                        if not self.eat(","):
-                            break
-                    self.expect("}")
-                else:
-                    self.rvalue()
-                    self.em.store(FP, -off, ACC, self.wid(ty))
+            if init:
+                self.local_init(ty, off)
             if not self.eat(","):
                 break
         self.expect(";")
+
+    def local_init(self, ty, off):
+        """Same shape as const_init, but each element is a full expression and
+        the result is stored, not baked into the image."""
+        t = self.peek()
+        if t.kind == "str" and self._is_charr(ty):
+            self.next()
+            raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
+            for i, b in enumerate(raw):
+                self.em.imm(ACC, b)
+                self.em.store(FP, -off + i, ACC, 1)
+            return
+        if ty.kind in ("arr", "struct"):
+            braced = self.eat("{")
+            slots = self._members(ty) if braced and self._braced_next() \
+                else list(self._elems(ty))
+            k = 0
+            while not (self.at("}") if braced else False):
+                if k >= len(slots):
+                    raise CError("line %d: too many initialisers"
+                                 % self.peek().line)
+                eoff, ety = slots[k]
+                self.local_init(ety, off - eoff)
+                k += 1
+                if not self.eat(","):
+                    break
+                if not braced:
+                    break
+            if braced:
+                self.expect("}")
+            return
+        self.rvalue()
+        self.em.store(FP, -off, ACC, self.wid(ty))
 
     def if_stmt(self):
         self.next()

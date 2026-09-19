@@ -117,7 +117,7 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 136   wrong 0   unsupported 83   knownfail 1
+corpus 220   pass 143   wrong 0   unsupported 76   knownfail 1
 ```
 
 `wrong` is the only failure — a program that compiled and then disagreed.

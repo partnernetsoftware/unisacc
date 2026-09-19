@@ -217,6 +217,22 @@ int charclass(int c) {
 
 int at(int i) { if (i >= nsrc) return 0 - 1; return src[i] & 255; }
 
+/* C99 phase 2: a backslash-newline pair is deleted, joining the two lines.
+   It happens before tokenisation, so it applies inside literals too. */
+int splice(void) {
+    int i; int j;
+    i = 0; j = 0;
+    while (i < nsrc) {
+        if (src[i] == 92) {                      /* backslash */
+            if (src[i + 1] == 10) { i = i + 2; continue; }
+            if (src[i + 1] == 13) { if (src[i + 2] == 10) { i = i + 3; continue; } }
+        }
+        src[j] = src[i]; j = j + 1; i = i + 1;
+    }
+    nsrc = j;
+    return 0;
+}
+
 /* ---- the lexer ------------------------------------------------------- */
 int lex(void) {
     int i; int j; int a; int key[4]; int kind; int st;
@@ -1350,6 +1366,7 @@ int main(void) {
     if (fd < 0) { printf("cannot open input\n"); return 1; }
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
+    splice();
     preprocess();
     if (lex() < 0) return 1;
     if (__argc() > 2) { tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
