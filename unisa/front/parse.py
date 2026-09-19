@@ -531,10 +531,14 @@ class Walker:
     def function(self, ret, name):
         self.sc.act("top", self.peek())       # lparen -> fn_name
         self.expect("(")
-        params = []
+        params, vararg = [], False
         if not self.at(")"):
             while True:
-                if self.eat("..."):          # C99 varargs: accepted, ignored
+                if self.at("..."):
+                    # fine in a prototype -- `printf` is an intrinsic -- but a
+                    # DEFINITION would have no way to reach the extra arguments
+                    self.next()
+                    vararg = True
                     break
                 if self.at("type") and self.peek().text == "void" and \
                         self.peek(1).kind == ")":
@@ -542,6 +546,13 @@ class Walker:
                     break
                 b = self.declspec()
                 ty, pn = self.declarator(b, named=False)
+                if ty.kind == "struct":
+                    # passing an aggregate by value needs a copy the caller
+                    # makes and a layout both ends agree on; refusing is
+                    # better than compiling it into something that crashes
+                    raise CError("line %d: struct parameters are passed by "
+                                 "value, which this subset does not do"
+                                 % self.peek().line)
                 if ty.kind == "arr":
                     ty = ptr(ty.to)     # C99 6.7.5.3p7: a parameter of array
                 params.append((ty, pn))   # type is adjusted to pointer [E-33]
@@ -551,16 +562,29 @@ class Walker:
         self.sc.declare(name, Type("fn", ret=ret), "fn", sym=name)
         if self.eat(";"):
             return
+        if vararg:
+            raise CError("line %d: a variadic definition cannot reach its "
+                         "extra arguments in this subset" % self.peek().line)
         self.sc.push()
         self.off, self.maxoff = 0, 0
         self.ret_label = self.em.new_label("ret_" + name + "_")
         self.frame_ix = self.em.prologue(name)
+        # More arguments than there are argument registers: ALL of them go on
+        # the tape stack instead, pushed in source order, so arg[n-1] sits
+        # just above the return address.  The callee knows n -- it is its own
+        # parameter count -- so no shuffling is needed at either end. [W-13]
+        stacked = len(params) > len(ARGREGS)
         for k, (ty, pn) in enumerate(params):
             self.sc.act("param", self.peek())
             off = self.alloc(ty)
             self.sc.declare(pn, ty, "local", off)
-            self.em.store(FP, -off, ARGREGS[k], min(8, ty.size(self.sc.structs))
-                          if ty.kind in NARROW else 8)
+            w = (min(8, ty.size(self.sc.structs))
+                 if ty.kind in NARROW else 8)
+            if stacked:
+                self.em.load(ACC, FP, 16 + 8 * (len(params) - 1 - k))
+                self.em.store(FP, -off, ACC, w)
+            else:
+                self.em.store(FP, -off, ARGREGS[k], w)
         self.block(new_scope=False)
         self.em.label(self.ret_label)
         self.em.epilogue()
@@ -1383,7 +1407,7 @@ class Walker:
                 break
         self.expect(")")
         if args > len(ARGREGS):
-            raise CError("line %d: at most %d arguments"
+            raise CError("line %d: at most %d arguments through a pointer"
                          % (self.peek().line, len(ARGREGS)))
         for k in range(args - 1, -1, -1):
             self.em.pop(ARGREGS[k])
@@ -1430,20 +1454,21 @@ class Walker:
         self.expect(")")
         s = self.sc.lookup(name)
         indirect = s is not None and s.kind != "fn"
-        if len(args) > len(ARGREGS):
-            raise CError("line %d: at most %d arguments"
-                         % (self.peek().line, len(ARGREGS)))
-        # Args are popped straight into their own registers, highest first, so
-        # a pop can never clobber an argument that is already placed.
-        for k in range(len(args) - 1, -1, -1):
-            self.em.pop(ARGREGS[k])
-            self.em.arg(k, ARGREGS[k])
+        stacked = len(args) > len(ARGREGS)
+        if not stacked:
+            # Args are popped straight into their own registers, highest
+            # first, so a pop can never clobber one already placed.
+            for k in range(len(args) - 1, -1, -1):
+                self.em.pop(ARGREGS[k])
+                self.em.arg(k, ARGREGS[k])
         if indirect:
             self.em.load(CALLEE, CALLEE, 0)      # CALLEE held the address
             self.em.call_reg(CALLEE)
         else:
             self.called.setdefault(name, self.peek().line)
             self.em.call(name)
+        if stacked:
+            self.em.frame(-8 * len(args))        # the caller cleans up
         rt = I64
         if s is not None:
             t = s.ty

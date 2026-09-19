@@ -69,7 +69,9 @@ for f in "$SRC"/*.c; do
     else
         got=$(runlim $U run "$f" --drive "$DRIVE" 2>"$T/err"); code=$?
     fi
-    if [ "$code" -ge 128 ] && [ ! -s "$T/err" ]; then
+    # 137 is our own watchdog's SIGKILL; any other signal is the program
+    # crashing, which is a wrong answer, not a slow one
+    if [ "$code" -eq 137 ] && [ ! -s "$T/err" ]; then
         slow=$((slow+1))
         [ "${VERBOSE:-0}" = "1" ] && printf "  SLOW %s  (over %ss in the reference VM)\n" "$b" "$LIMIT"
     elif [ -s "$T/err" ] && isknown "$b"; then
