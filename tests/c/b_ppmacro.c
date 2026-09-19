@@ -12,6 +12,13 @@ int main() {
     x = 5;
     printf("%s %s %d %s\n", STR(hello), XSTR(N), CAT(ab, 7), p);
     LOG("%d %d\n", 1, 2);
-    printf("%d %d %d\n", ++x, --x, x++);
+    /* one side effect per statement: the order of evaluation of function
+       arguments is unspecified, and gcc and clang disagree about it */
+    ++x;
+    printf("%d ", x);
+    --x;
+    printf("%d ", x);
+    x++;
+    printf("%d\n", x);
     return 0;
 }
