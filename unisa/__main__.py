@@ -36,6 +36,13 @@ def cmd_train(a):
 
 
 def cmd_acc(a):
+    """[P-3] net == gold, decided by enumeration over the FULL gold.
+
+    By default this checks the CONSTRUCTED weights, because those are what we
+    ship.  `--trained` checks the SGD control arm instead; that arm is not on
+    the shipping path and is not a gate."""
+    if not a.trained:
+        return _acc_built()
     nets, missing = _load()
     if missing:
         print("no weights for: %s  (run `unisa train`)" % ", ".join(missing))
@@ -63,6 +70,33 @@ def cmd_acc(a):
     return 0
 
 
+def _acc_built():
+    from .gold import ALL
+    nets = _built()
+    print("%-7s %7s %7s  %s" % ("stage", "rows", "units", "acc (FULL gold)"))
+    bad = []
+    for n in ALL:
+        st = STAGES[n]
+        wrong = 0
+        for key in st.keys():
+            want = st.label(*key)
+            got = nets[n].predict(key)
+            for h, cls, _ in st.heads:
+                if got[h] != want[h]:
+                    wrong += 1
+        if wrong:
+            bad.append(n)
+        print("%-7s %7d %7d  %s" % (n, st.rows(), nets[n].nunits(),
+                                    "1.0000" if not wrong
+                                    else "%d WRONG" % wrong))
+    if bad:
+        print("\nWRONG: %s" % ", ".join(bad))
+        return 1
+    print("\nall stages 1.000 -- [P-3] discharged by enumeration over FULL "
+          "gold, on the CONSTRUCTED weights we ship")
+    return 0
+
+
 BUILT = os.path.join(WEIGHTS, "built.json")
 
 
@@ -80,8 +114,12 @@ def _oracle(drive="spec"):
         return Oracle(_built(), drive="built")
     nets, missing = _load()
     if missing:
-        print("training first (weights missing: %s)" % ", ".join(missing))
-        nets, _ = train(out=WEIGHTS, verbose=False)                # [U-1]
+        # [U-1] revised: fall back to CONSTRUCTING, not training.  Training is
+        # minutes of full-core work and is not on the shipping path; nothing
+        # should ever start it by accident.
+        print("weights missing (%s) -- constructing instead"
+              % ", ".join(missing), file=sys.stderr)
+        return Oracle(_built(), drive="built")
     return Oracle(nets, drive=drive)
 
 
@@ -456,6 +494,8 @@ def main(argv=None):
     t.set_defaults(fn=cmd_train)
 
     a = sub.add_parser("acc")
+    a.add_argument("--trained", action="store_true",
+                   help="check the SGD control arm instead of what we ship")
     a.set_defaults(fn=cmd_acc)
 
     tp = sub.add_parser("tape")

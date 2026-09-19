@@ -117,12 +117,15 @@ $U dump-weights --dtype i8 --out weights >/dev/null
 chk "parse.i8.unisa magic" "554e5331" \
     "$(od -An -tx1 -N4 weights/parse.i8.unisa | tr -d ' \n')"
 
-echo "== [A-14] training is byte-reproducible =="
-rm -rf /tmp/uw1 /tmp/uw2
-$U train --quiet --out /tmp/uw1 >/dev/null
-$U train --quiet --out /tmp/uw2 >/dev/null
-if diff -r /tmp/uw1 /tmp/uw2 >/dev/null 2>&1; then r=same; else r=differs; fi
-chk "two trainings" "same" "$r"
+echo "== [A-14] the shipped weights are byte-reproducible =="
+# Reconstruction is seconds and is what we ship.  Training is NOT run here:
+# it is minutes of full-core work, it is not on the shipping path, and it once
+# turned this suite into a two-hour job.  `tests/baseline.sh` runs it on
+# purpose, when someone asks for the comparison numbers.
+cp weights/built.uns2 /tmp/uw_built1
+$U build-weights >/dev/null
+if cmp -s /tmp/uw_built1 weights/built.uns2; then r=same; else r=differs; fi
+chk "two constructions" "same" "$r"
 
 echo
 echo "passed $pass, failed $fail"

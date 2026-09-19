@@ -102,12 +102,15 @@ def lex(src, oracle):
             while j < n and (src[j].isalnum() or src[j] == "_"):
                 j += 1
             w = src[i:j]
-            # A wide/UTF literal prefix is not an identifier: `L'x'` and
-            # `u8"s"` are one token whose prefix this subset simply drops,
-            # since every string here is bytes anyway.
-            if w in ("L", "u", "U", "u8") and j < n and src[j] in "\"'":
+            # A wide CHARACTER constant is just an int, so the prefix is
+            # dropped.  A wide STRING is not: its elements are wider than a
+            # byte, and pretending otherwise would miscompile silently.
+            if w in ("L", "u", "U", "u8") and j < n and src[j] == "'":
                 i = j
                 continue
+            if w in ("L", "u", "U", "u8") and j < n and src[j] == '"':
+                raise SyntaxError("line %d: wide string literals are not "
+                                  "supported (%s\"...\")" % (line, w))
             if w in KEYWORDS:
                 toks.append(Tok(w, w, None, line))
             elif w in TYPEKW:

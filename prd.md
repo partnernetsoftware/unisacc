@@ -48,6 +48,8 @@
 
 **语言**：Python 3.11+，**仅标准库**。单一包 `unisa/`。可选后续：极小的 C gemv kernel。Python CLI 通过全部验收之前不碰 Rust。
 
+> **[U-5] 「仅标准库」只约束出货路径。** 出货的是**构造**权重 + 推理 kernel，它们必须零依赖、可复现、能塞进 `unisacc.c`。**SGD 对照组不出货**，所以它想用 numpy / torch / Metal / Rust 调底层都可以——真要跑大规模对照实验时再换，届时按需租算力（本机的 Apple GPU/NPU 也是选项）。当前所有测试、所有镜像、自举全部走构造路线，对照组只由 `tests/baseline.sh` 显式触发。
+
 **终点**：`unisa train && unisa run examples/hello.c --fold` 打印 6/6 match，然后停。
 
 ---
@@ -180,6 +182,7 @@ unisa compile ... --from-tape  # 输入是 .tape 而非 C（只做 lowering + �
 | `ccrun.sh` | unisacc 编译 C，基准 VM 运行 | [A-21] |
 | `selfhost.sh` | 两种构建的 unisacc 与 Python 前端逐 token 一致 | [A-20] |
 | `bootstrap.sh` | `B = C = U` 自举不动点 | [A-23] |
+| `baseline.sh` | **SGD 对照组**，手动触发：E-18 / E-31 / E-37 要的那几个数 | U-5 |
 | `corpus.sh` | **c-testsuite 的 220 个程序** —— 别人写的、为别的编译器写的 | [A-25] |
 | `crossnative.sh` | **非本机目标**真实执行：两个 Linux 目标进本地虚机，osx/x86_64 走 Rosetta 2 | [A-27] |
 | `fat.sh` | **一个文件两条 ISA**，两个 slice 都真跑（arm64 原生 + x86_64 经 Rosetta） | [A-28] |
@@ -726,9 +729,9 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-9** | `unisa compile` → 三魔数正确 | I-1..3 |
 | **A-10** | 同输入编译两次 → 字节相同 | D-5 |
 | **A-11** | `weights/parse.i8.unisa` 以 `554e5331` 开头 | Q-1 |
-| **A-12** | `unisa acc` → **每阶段 = 1.000** | F-3, P-3 |
+| **A-12** | `unisa acc` → **每阶段 = 1.000**，验的是**出货的构造权重**（0.05 秒，4,560 key 全枚举）；`--trained` 才看 SGD 对照组，且**不作门槛** | F-3, P-3, U-5 |
 | **A-13** | `unisa quant` → 每个出货阶段在其记录 dtype 下 argmax 不变 | Q-6, P-4 |
-| **A-14** | 干净状态训练两次 → 权重字节相同 | D-3, D-6 |
+| **A-14** | 构造两次 → `built.uns2` 字节相同。**套件不再训练**：训练是分钟级满核工作、不在出货路径上，曾把套件变成两小时的活 | D-3, D-6, U-5 |
 | **A-15** | `unisa ship` → kit 四件套齐全 | Q-10 |
 | **A-16** | Python kernel 与 `unisa_boot.c` 在 FULL gold 上逐 key 同类 | K-4 |
 | **A-25** | `tests/corpus.sh` → `wrong = 0`，且 `pass` 不低于 `tests/corpus.baseline` | P-6 |

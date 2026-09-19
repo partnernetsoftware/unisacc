@@ -264,8 +264,10 @@ int lex(void) {
         if (a == 2) {                          /* ident */
             j = i;
             while (at(j) >= 0) { if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) break; } j = j + 1; }
-            /* a wide/UTF literal prefix is not an identifier: L'x', u8"s" */
-            if (at(j) == 34 | at(j) == 39) {
+            /* a wide CHARACTER constant is an int, so drop the prefix; a
+               wide STRING is refused by the Python front end, and this one
+               only has to agree about tokens */
+            if (at(j) == 39) {
                 if (j - i == 1) { if (at(i) == 76 | at(i) == 117 | at(i) == 85) {
                     i = j; continue; } }
                 if (j - i == 2) { if (at(i) == 117) { if (at(i+1) == 56) {

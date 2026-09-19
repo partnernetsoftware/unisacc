@@ -1550,6 +1550,11 @@ class Walker:
             elif spec == "u":
                 self.em.mask32()
                 self.em.print_field("int", width, left, zero)
+            elif spec in "xXo":
+                self.em.print_field({"x": "hex", "X": "HEX", "o": "oct"}[spec],
+                                    width, left, zero)
+            elif spec == "p":
+                self.em.print_field("hex", width, left, zero)
             elif spec == "s":
                 self.em.print_field("str", width, left, False, prec)
             elif spec == "c":

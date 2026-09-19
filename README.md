@@ -91,7 +91,11 @@ Python 3.11+, **standard library only**. No numpy, no torch, no build step.
 
 ## Tests
 
-`tests/all.sh` is the entry point; each suite's verdict is its exit status.
+`tests/all.sh` is the entry point; each suite's verdict is its exit status, and
+each gets a watchdog so no suite can hang the run. Training is **not** in it:
+the weights we ship are constructed, `unisa acc` verifies those by enumeration
+in a twentieth of a second, and the SGD control arm lives in
+`tests/baseline.sh` for when someone wants the comparison numbers.
 
 | suite | what it checks |
 |---|---|

@@ -13,6 +13,10 @@
 #   ccrun       unisacc compiles C; the reference VM runs it [A-21]
 #   selfhost    unisacc built two ways agrees with the Python front end [A-20]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
+#   acc         net == gold over the FULL gold, on the CONSTRUCTED weights
+#               we ship.  The SGD control arm is not here: `tests/baseline.sh`
+#               runs it on purpose, because it is minutes of full-core work
+#               and is not on the shipping path.
 #   corpus      c-testsuite -- 220 programs we did not write [A-25];
 #               skipped unless corpus/ is already present
 set -u
@@ -21,9 +25,18 @@ declare -a NAME LINE CODE
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching
 # its last line -- a summary line that happens to end differently is not a
 # failure, and a suite that dies silently must not read as green.
+# No suite may hang the run.  macOS has no `timeout`, so each one gets a
+# watchdog; 137 is the kill and reads as a failure with a clear line.
+LIMIT=${SUITE_LIMIT:-900}
 run() {
     local n="$1"; shift
-    local out; out=$("$@" 2>&1); local rc=$?
+    local out rc
+    out=$("$@" 2>&1 & p=$!
+          ( sleep "$LIMIT"; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 &
+          w=$!; wait $p 2>/dev/null; rc=$?; kill $w 2>/dev/null; exit $rc)
+    rc=$?
+    [ "$rc" -eq 137 ] && out="$out
+TIMED OUT after ${LIMIT}s"
     NAME+=("$n"); LINE+=("$(printf '%s' "$out" | tail -1)"); CODE+=("$rc")
     # A swallowed failure is useless in CI -- show the suite when it fails.
     if [ "$rc" -ne 0 ]; then
@@ -48,7 +61,7 @@ fi
 if [ -d corpus/c-testsuite ]; then
     run corpus env FETCH=0 ./tests/corpus.sh
 fi
-run acc        bash -c "python3 -m unisa acc"
+run acc        bash -c "python3 -m unisa acc"   # the SHIPPED weights
 
 echo "================ summary ================"
 bad=0

@@ -55,6 +55,7 @@ class Emitter:
         self._strs = {}
         self.need_strlen = False
         self.need_itoa = False
+        self.need_itoab = False
         # (global, literal) pairs: a global pointer initialised with a string.
         # The address is NOT written into the data -- a PIE image slides, so a
         # baked-in address is wrong at run time.  `_start` computes them
@@ -279,6 +280,11 @@ class Emitter:
         if kind == "int":
             self.need_itoa = True
             self.call("__itoa")                      # ACC = ptr, LHS = len
+        elif kind in ("hex", "HEX", "oct"):
+            self.need_itoab = True
+            self.imm(LHS, 8 if kind == "oct" else 16)
+            self.imm(TMP, 65 if kind == "HEX" else 97)
+            self.call("__itoab")
         elif kind == "str":
             self.need_strlen = True
             self.push(ACC)
@@ -299,7 +305,7 @@ class Emitter:
             self.emit(self.recipe("lit", "write"), ACC, LHS)
             return
         width = min(width, self.PADMAX)
-        pad = self._padstr(48 if zero and kind == "int" else 32)
+        pad = self._padstr(48 if zero and kind != "str" else 32)
         self.push(ACC)                               # [ptr]
         self.push(LHS)                               # [ptr][len]
         if left:
@@ -347,7 +353,52 @@ class Emitter:
             self._emit_strlen()
         if self.need_itoa:
             self._emit_itoa()
+        if self.need_itoab:
+            self._emit_itoab()
         return self.t
+
+    def _emit_itoab(self):
+        """uint64 -> text in base LHS, letters starting at TMP ('a' or 'A').
+        ACC in; ACC = ptr and LHS = len out.  Scratch is r3-r5 and two stack
+        slots -- r6 and r7 are FP and SP and must not be touched."""
+        self.t.string("__xbuf", b"\x00" * 24, align=8)
+        loop, alpha, add, done = ("itoab_loop", "itoab_alpha",
+                                  "itoab_add", "itoab_done")
+        self.label("__itoab")
+        self.frame(16)
+        self.store(SP, 0, LHS)                       # base
+        self.store(SP, 8, TMP)                       # letter base
+        self.emit("mov", TMP, ACC)                   # n
+        self.lea(LHS, "__xbuf")
+        self.imm("r3", 24)
+        self.emit("add64", LHS, LHS, "r3")           # p = buf + 24
+        self.imm("r4", 0)                            # len
+        self.label(loop)
+        self.load("r3", SP, 0)
+        self.emit(".umod", "r5", TMP, "r3")
+        self.emit(".udiv", TMP, TMP, "r3")
+        self.imm("r3", 10)
+        self.emit("slt64", ACC, "r5", "r3")          # digit < 10 ?
+        self.jumpz(alpha, ACC)
+        self.imm("r3", 48)                           # '0'
+        self.jump(add)
+        self.label(alpha)
+        self.load("r3", SP, 8)
+        self.imm(ACC, 10)
+        self.emit("sub64", "r5", "r5", ACC)
+        self.label(add)
+        self.emit("add64", "r5", "r5", "r3")
+        self.imm("r3", 1)
+        self.emit("sub64", LHS, LHS, "r3")
+        self.store(LHS, 0, "r5", 1)
+        self.emit("add64", "r4", "r4", "r3")
+        self.jumpz(done, TMP)
+        self.jump(loop)
+        self.label(done)
+        self.frame(-16)
+        self.emit("mov", ACC, LHS)
+        self.emit("mov", LHS, "r4")
+        self.ret()
 
     def _emit_itoa(self):
         """int64 -> decimal text.  ACC in; ACC = ptr, LHS = len out."""
