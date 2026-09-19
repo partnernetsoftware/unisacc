@@ -1510,8 +1510,34 @@ class Walker:
                 lit += c
                 i += 1
                 continue
-            spec = fmt[i + 1]
-            i += 2
+            i += 1
+            if i < len(fmt) and fmt[i] == "%":
+                lit += "%"
+                i += 1
+                continue
+            # flags, width, precision, length -- then the conversion [W-9]
+            left = zero = False
+            while i < len(fmt) and fmt[i] in "-+ #0":
+                left |= fmt[i] == "-"
+                zero |= fmt[i] == "0"
+                i += 1
+            width = 0
+            while i < len(fmt) and fmt[i].isdigit():
+                width = width * 10 + int(fmt[i])
+                i += 1
+            prec = None
+            if i < len(fmt) and fmt[i] == ".":
+                i += 1
+                prec = 0
+                while i < len(fmt) and fmt[i].isdigit():
+                    prec = prec * 10 + int(fmt[i])
+                    i += 1
+            while i < len(fmt) and fmt[i] in "hlLzjt":
+                i += 1
+            if i >= len(fmt):
+                raise CError("printf: format ends in a conversion")
+            spec = fmt[i]
+            i += 1
             if spec == "%":
                 lit += "%"
                 continue
@@ -1519,17 +1545,15 @@ class Walker:
             lit = ""
             self.expect(",")
             self.rvalue()
-            if spec == "d" or spec == "i" or spec == "l":
-                if spec == "l":
-                    i += 1 if i < len(fmt) and fmt[i] == "d" else 0
-                self.em.print_int()
+            if spec in "di":
+                self.em.print_field("int", width, left, zero)
             elif spec == "u":
                 self.em.mask32()
-                self.em.print_int()
+                self.em.print_field("int", width, left, zero)
             elif spec == "s":
-                self.em.print_str()
+                self.em.print_field("str", width, left, False, prec)
             elif spec == "c":
-                self.em.print_char()
+                self.em.print_field("chr", width, left, False)
             else:
                 raise CError("printf: unsupported %%%s" % spec)
         self.em.write_literal(lit)

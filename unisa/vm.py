@@ -102,6 +102,19 @@ class VM:
         raise AssertionError("vm: unsupported syscall %r" % name)
 
     # -- run -------------------------------------------------------------
+    POISON = 0xDEAD5EA1DEAD5EA1
+
+    def _gate_clobber(self, r, ret):
+        """A gate is a syscall on a real machine, and lowering puts its
+        arguments in r0-r2 -- so those registers do NOT survive it.  The
+        interpreter used to leave them alone, which let generated code keep a
+        value in r1 across a `.write` and work here while failing natively.
+        Poison them so the interpreter is no more forgiving than the CPU.
+        [TP-6]"""
+        r[0] = u64(ret)
+        r[1] = self.POISON
+        r[2] = self.POISON
+
     def run(self):
         t, r = self.t, self.r
         code, labels = t.code, t.labels
@@ -209,17 +222,20 @@ class VM:
                     r[a[0]] = r[ri[a[1]]]
                 elif op == ".print":
                     self.out.extend(str(s64(r[ri[a[0]]])).encode())
+                    self._gate_clobber(r, 0)
                 elif op == ".write":
                     p, n = r[ri[a[0]]], r[ri[a[1]]]
                     self.out.extend(self.mem[p:p + n])
+                    self._gate_clobber(r, n)
                 elif op == ".argc":
                     r[ri[a[0]]] = len(self.argv)
                 elif op == ".argv":
                     k = r[ri[a[1]]]
                     r[ri[a[0]]] = self.argv[k] if k < len(self.argv) else 0
                 elif op == ".sys":
-                    r[0] = u64(self.syscall(a[0], r[ri[a[1]]],
-                                            r[ri[a[2]]], r[ri[a[3]]]))
+                    v = u64(self.syscall(a[0], r[ri[a[1]]],
+                                         r[ri[a[2]]], r[ri[a[3]]]))
+                    self._gate_clobber(r, v)
                 elif op == ".exit":
                     raise Halt(u64(r[ri[a[0]]]) & 0xFF)
                 elif op == "nop":

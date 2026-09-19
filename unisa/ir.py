@@ -243,6 +243,87 @@ class Emitter:
         self.imm(LHS, 1)
         self.emit(self.recipe("lit", "write"), ACC, LHS)
 
+    PADMAX = 64
+
+    def _padstr(self, ch):
+        name = "__pad%d" % ch
+        self.t.string(name, bytes([ch]) * self.PADMAX)
+        return name
+
+    def _clamp_hi(self, lim):
+        """ACC = min(ACC, lim), branch free: min(a,b) = b + ((a-b) & (a-b)>>63)"""
+        self.imm(TMP, lim)
+        self.emit("sub64", ACC, ACC, TMP)            # a - b
+        self.emit("mov", LHS, ACC)
+        self.imm(TMP, 63)
+        self.emit("shr64", LHS, LHS, TMP)            # arithmetic: 0 or -1
+        self.emit(self.recipe("alu", "and"), ACC, ACC, LHS)
+        self.imm(TMP, lim)
+        self.emit("add64", ACC, ACC, TMP)
+
+    def _clamp_lo0(self):
+        """ACC = max(ACC, 0), branch free: a & ~(a >> 63)"""
+        self.emit("mov", LHS, ACC)
+        self.imm(TMP, 63)
+        self.emit("shr64", LHS, LHS, TMP)
+        self.imm(TMP, -1)
+        self.emit("xor64", LHS, LHS, TMP)
+        self.emit(self.recipe("alu", "and"), ACC, ACC, LHS)
+
+    def print_field(self, kind, width=0, left=False, zero=False, prec=None):
+        """printf with a field width.  The value is already in ACC.
+
+        Padding is a write from a static run of 64 identical bytes, with the
+        length computed at run time and clamped to zero -- a write of length 0
+        is a no-op, so the whole thing is branch free."""
+        if kind == "int":
+            self.need_itoa = True
+            self.call("__itoa")                      # ACC = ptr, LHS = len
+        elif kind == "str":
+            self.need_strlen = True
+            self.push(ACC)
+            self.call("__strlen")
+            if prec is not None:
+                self._clamp_hi(prec)
+            self.emit("mov", LHS, ACC)
+            self.pop(ACC)
+        else:                                        # a single character
+            if self.chbuf is None:
+                self.chbuf = "__chbuf"
+                self.t.string(self.chbuf, b"\x00")
+            self.emit("mov", TMP, ACC)
+            self.lea(ACC, self.chbuf)
+            self.store(ACC, 0, TMP, 1)
+            self.imm(LHS, 1)
+        if width <= 0:
+            self.emit(self.recipe("lit", "write"), ACC, LHS)
+            return
+        width = min(width, self.PADMAX)
+        pad = self._padstr(48 if zero and kind == "int" else 32)
+        self.push(ACC)                               # [ptr]
+        self.push(LHS)                               # [ptr][len]
+        if left:
+            self.pop(LHS)
+            self.pop(ACC)
+            self.push(LHS)                           # a write CLOBBERS r0-r2
+            self.emit(self.recipe("lit", "write"), ACC, LHS)
+            self.pop(LHS)                            # so `len` comes back off
+            self.imm(ACC, width)                     # the stack, not a register
+            self.emit("sub64", ACC, ACC, LHS)
+        else:
+            self.imm(ACC, width)
+            self.pop(LHS)                            # len; stack [ptr]
+            self.emit("sub64", ACC, ACC, LHS)        # pad = width - len
+            self.push(LHS)                           # [ptr][len]
+        self._clamp_lo0()
+        self.emit("mov", LHS, ACC)
+        self.lea(ACC, pad)
+        self.emit(self.recipe("lit", "write"), ACC, LHS)
+        if not left:
+            self.pop(LHS)
+            self.pop(ACC)
+            self.emit(self.recipe("lit", "write"), ACC, LHS)
+
     def truncate(self, width):
         """Narrow ACC to `width` bytes with sign extension, through a stack
         slot -- the tape has sized load/store, so no new op is needed."""
