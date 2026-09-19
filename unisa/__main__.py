@@ -122,7 +122,7 @@ def cmd_tape(a):
     try:
         t = compile_file(a.file, o, a.target, getattr(a, "I", ()))
     except Exception as e:
-        print("%s: %s" % (type(e).__name__, e))
+        print("%s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 1
     sys.stdout.write(t.to_text())
     return 0
@@ -133,7 +133,7 @@ def cmd_run(a):
     try:
         t = compile_file(a.file, o, a.target, getattr(a, "I", ()))
     except Exception as e:
-        print("%s: %s" % (type(e).__name__, e))
+        print("%s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 1
     if a.fold:
         return _fold(t, o, a)
@@ -180,7 +180,7 @@ def cmd_compile(a):
         else:
             t = compile_file(a.file, o, a.target)
     except Exception as e:
-        print("%s: %s" % (type(e).__name__, e))
+        print("%s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 1
     tp = lower(t, a.target, o, drive=a.drive)
     text, st = assemble(tp)

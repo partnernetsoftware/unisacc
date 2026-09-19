@@ -40,6 +40,9 @@ jobs:
       - name: suites
         run: ./tests/all.sh
 
+      - name: an external corpus we did not write
+        run: ./tests/corpus.sh
+
   macos:
     runs-on: macos-14
     steps:
@@ -48,4 +51,22 @@ jobs:
         with:
           python-version: '3.12'
       - run: python3 -m unisa build-weights
+
+      # Every emitted Mach-O dies with SIGSEGV on macos-14 while the same bytes
+      # run on the dev machine (Darwin 25).  Until that is explained this step
+      # prints what the loader was given; it must not fail the job.
+      - name: what this host thinks of our Mach-O
+        continue-on-error: true
+        run: |
+          sw_vers; uname -m
+          python3 -m unisa compile examples/hello.c -o /tmp/hello \
+            --target osx/arm64 --drive built
+          chmod +x /tmp/hello
+          codesign -f -s - /tmp/hello && codesign -dvvv /tmp/hello 2>&1 | head
+          otool -hl /tmp/hello | head -80
+          set +e
+          /tmp/hello; echo "exit=$?"
+          ls -l /Users/runner/Library/Logs/DiagnosticReports 2>/dev/null
+          cat /Users/runner/Library/Logs/DiagnosticReports/hello*.ips 2>/dev/null | head -60
+
       - run: ./tests/all.sh

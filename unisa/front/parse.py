@@ -6,11 +6,13 @@ a single class name. [P-1]
 """
 from ..gold import TOKS
 from ..ir import Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE
-from .sema import Scope, Type, VOID, I8, I32, I64, ptr, Struct
+from .sema import Scope, Type, VOID, I8, I16, I32, I64, ptr, Struct
 
-TYPEWORD = {"char": I8, "int": I32, "long": I64, "short": I32,
-            "void": VOID, "unsigned": I32, "signed": I32,
-            "float": I64, "double": I64}
+# A declaration specifier is a SET of words, not the last one seen:
+# `long int` is long and `short int` is short.  Resolving word by word made
+# sizeof(long int) == 4.  [E-34]
+TYPEWORD = ("char", "int", "long", "short", "void",
+            "unsigned", "signed", "float", "double")
 ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/"}
 # The syscalls a self-hosting compiler needs, exposed as intrinsics.  They lower
 # to the tape's `.sys` gate, so the target facts (sysno, arg registers, gate)
@@ -20,6 +22,21 @@ INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
 # argc/argv are not syscalls -- the loader hands them over -- so they get their
 # own tape ops rather than going through `.sys`.
 ARGV_INTRINSIC = ("__argc", "__argv")
+
+
+def _basety(words):
+    """Resolve a declaration-specifier word list to a base type."""
+    if "void" in words:
+        return VOID
+    if "double" in words or "float" in words:
+        return I64
+    if "long" in words:
+        return I64
+    if "short" in words:
+        return I16
+    if "char" in words:
+        return I8
+    return I32
 
 
 class CError(Exception):
@@ -88,6 +105,7 @@ class Walker:
         storage, not a stack slot.  The interpreter's zeroed memory hid this --
         native execution reads real stack garbage. """
         base = None
+        words = []
         self.saw_static = False
         while True:
             t = self.peek()
@@ -98,12 +116,13 @@ class Walker:
                     continue
                 self.sc.act("top" if self.sc.depth() == 1 else "local", t)
                 w = self.next().text
-                if w in ("const", "static", "unsigned", "signed"):
-                    if w == "static":
-                        self.saw_static = True
-                    base = base or I32
+                if w == "static":
+                    self.saw_static = True
                     continue
-                base = TYPEWORD[w]
+                if w in ("const", "volatile", "register", "auto",
+                         "extern", "inline"):
+                    continue
+                words.append(w)
                 continue
             if t.kind == "id" and t.text in self.sc.typedefs:
                 base = self.sc.typedefs[self.next().text]
@@ -112,6 +131,8 @@ class Walker:
                 base = self.struct_type()
                 continue
             break
+        if words:
+            base = _basety(words)
         if base is None:
             raise CError("line %d: type expected near %r"
                          % (self.peek().line, self.peek().text))
@@ -270,7 +291,9 @@ class Walker:
                     break
                 b = self.declspec()
                 ty, pn = self.declarator(b)
-                params.append((ty, pn))
+                if ty.kind == "arr":
+                    ty = ptr(ty.to)     # C99 6.7.5.3p7: a parameter of array
+                params.append((ty, pn))   # type is adjusted to pointer [E-33]
                 if not self.eat(","):
                     break
         self.expect(")")
@@ -286,7 +309,7 @@ class Walker:
             off = self.alloc(ty)
             self.sc.declare(pn, ty, "local", off)
             self.em.store(FP, -off, ARGREGS[k], min(8, ty.size(self.sc.structs))
-                          if ty.kind in ("i8", "i32") else 8)
+                          if ty.kind in ("i8", "i16", "i32") else 8)
         self.block(new_scope=False)
         self.em.label(self.ret_label)
         self.em.epilogue()
@@ -318,7 +341,7 @@ class Walker:
             name = self.next().text
             self.next()
             self.em.label("u_" + name)
-            return
+            return self.labelled()
         p = self.ask("stmt")                                     # [W-3]
         if p == "block":
             self.block()
@@ -529,6 +552,17 @@ class Walker:
             self.switch[-1]["cases"].append((v, lab))
         self.expect(":")
         self.em.label(lab)
+        self.labelled()
+
+    def labelled(self):
+        """C99 6.8.1: a label prefixes a STATEMENT.  Returning after the
+        label made `switch(x) case 1: return 1;` emit the `return` after the
+        switch instead of inside it, so it ran whatever x was.  [E-35]
+
+        A label with nothing after it is not C99, but the compound form
+        `case 1: }` is common enough in the wild to tolerate."""
+        if not self.at("}"):
+            self.stmt()
 
     CPREC = [("|",), ("^",), ("&",), ("<<", ">>"), ("+", "-"),
              ("*", "/", "%")]
@@ -587,7 +621,7 @@ class Walker:
 
     # -- expressions ------------------------------------------------------
     def wid(self, ty):
-        return ty.size(self.sc.structs) if ty.kind in ("i8", "i32") else 8
+        return ty.size(self.sc.structs) if ty.kind in ("i8", "i16", "i32") else 8
 
     def load_if_lval(self):
         if self.lval is not None:
@@ -676,7 +710,8 @@ class Walker:
             self.em.imm(ACC, 1)
             self.em.jump(end)
             self.em.label(skip)
-            self.rvalue()
+            self.logic_and()
+            self.load_if_lval()
             self.em.imm(LHS, 0)
             self.em.emit(self.em.recipe("alu", "ne"), ACC, ACC, LHS)
             self.em.label(end)
@@ -691,7 +726,8 @@ class Walker:
             end = self.em.new_label("andend")
             rhs = self.em.new_label("andrhs")
             self.em.jumpz(end)
-            self.rvalue()
+            self.binary(0)
+            self.load_if_lval()
             self.em.imm(LHS, 0)
             self.em.emit(self.em.recipe("alu", "ne"), ACC, ACC, LHS)
             self.em.label(end)
@@ -715,7 +751,7 @@ class Walker:
             self.load_if_lval()
             res = self.sc.combine(ty, op, rty)                       # [W-4]
             if op in ("+", "-") and ty.kind in ("ptr", "arr") and \
-                    rty.kind in ("i8", "i32", "i64"):
+                    rty.kind in ("i8", "i16", "i32", "i64"):
                 self.scale(ty)
             if op in ("/", "%"):
                 self.em.divmod_(op)
@@ -744,7 +780,7 @@ class Walker:
                 t2 if t2.kind in ("ptr", "arr") else ptr(I8))
         if kind == "illegal":
             return I64
-        return {"void": VOID, "i8": I8, "i32": I32, "i64": I64,
+        return {"void": VOID, "i8": I8, "i16": I16, "i32": I32, "i64": I64,
                 "arr": t1, "struct": t1, "fn": t1}.get(kind, I64)
 
     def unary(self):
@@ -782,7 +818,7 @@ class Walker:
             self.expect(")")
             self.unary()
             self.load_if_lval()
-            if base.kind in ("i8", "i32"):
+            if base.kind in ("i8", "i16", "i32"):
                 self.em.truncate(base.size(self.sc.structs))
             return self.postfix_chain(base)
         if p == "sizeof":
@@ -799,24 +835,13 @@ class Walker:
                 m = self.mark()
                 t = self.unary()
                 n = (t or I64).size(self.sc.structs)
-                self.rewind(m)
-                self.unary_skip()
+                end = self.i          # where the operand really ends
+                self.rewind(m)        # drop the code it emitted ...
+                self.i = end          # ... but keep the position [E-30]
                 self.lval = None
             self.em.imm(ACC, n)
             return I64
         return self.primary()
-
-    def unary_skip(self):
-        depth = 0
-        while True:
-            k = self.peek().kind
-            if depth == 0 and k in (";", ",", ")", "]"):
-                break
-            if k in ("(", "["):
-                depth += 1
-            elif k in (")", "]"):
-                depth -= 1
-            self.next()
 
     def primary(self):
         t = self.peek()

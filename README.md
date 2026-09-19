@@ -26,14 +26,14 @@ classic code — algebra, not tables. Every *table-shaped* decision is a network
 |---|---|---|---|
 | `pp` | dir × defined | 18 | 274 |
 | `lex` | charclass × peek | 121 | 418 |
-| `parse` | NT × TOK | 295 | 1,288 |
-| `type` | t1 × op × t2 | 1,216 | 801 |
+| `parse` | NT × TOK | 300 | 1,353 |
+| `type` | t1 × op × t2 | 1,539 | 1,006 |
 | `scope` | ctx × kind | 30 | 479 |
-| `irsel` | family × flavor | 165 | 953 |
-| `enc` | op × os × arch | 258 | 829 |
+| `irsel` | family × flavor | 165 | 1,103 |
+| `enc` | op × os × arch | 258 | 869 |
 | `reloc` | jmpkind × arch | 6 | 161 |
-| `isel` | op × arch | 86 | 2,328 |
-| `abi` | op × os × arch | 258 | 4,361 |
+| `isel` | op × arch | 86 | 2,524 |
+| `abi` | op × os × arch | 258 | 4,421 |
 
 Ten decision points, one kernel: `embed → gemv → ReLU → gemv → argmax`.
 Swap the weights, change the capability. The kernel never changes.
@@ -44,14 +44,14 @@ Swap the weights, change the capability. The kernel never changes.
 gold decision tables, not trained: `W1 ∈ {0,1}`, `b1 ∈ {0,−1,−2}` (and not
 stored — it is recoverable), `W2 ∈ {1,2,4,8,16}`. The hidden activation is
 always 0 or 1, so there is **no multiply, no shift, no float anywhere**, and an
-**int8 accumulator suffices** (max logit 19).
+**int8 accumulator suffices** (largest logit 48).
 
 **Verification is exhaustive, not statistical.** Each stage is a total function
 on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decided
-by enumeration — 2,300 keys, zero disagreements. Not a test: a decision
+by enumeration — 2,781 keys, zero disagreements. Not a test: a decision
 procedure.
 
-**It self-hosts.** `unisacc.c` carries the model (a 10,514-byte blob) and the
+**It self-hosts.** `unisacc.c` carries the model (a 10,492-byte blob) and the
 integer kernel, and drives its own lexer, preprocessor and parser through the
 same tables. The bootstrap fixed point holds:
 
@@ -86,6 +86,7 @@ Python 3.11+, **standard library only**. No numpy, no torch, no build step.
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `selfhost` | `unisacc` built two ways agrees with the Python front end |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
+| `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
 
 ## Layout
 
@@ -102,7 +103,35 @@ tests/            acceptance, differential (vs cc), native, self-hosting, bootst
 `prd.md` §6 is a running log of measured findings — including the ones that
 refuted our own predictions.
 
+## Where it stands on someone else's code
+
+`tests/corpus.sh` runs c-testsuite, 220 single-file C programs this project had
+no hand in writing:
+
+```
+corpus 220   pass 132   wrong 0   unsupported 87   knownfail 1
+```
+
+`wrong` is the only failure — a program that compiled and then disagreed.
+`unsupported` is the honest coverage gap (the front end refuses the program);
+`tests/corpus.baseline` is a ratchet, so that number may only go down.
+
+## Prior art
+
+`research/prior-art.md` is a survey of the neighbouring literature, and it is
+deliberately unflattering. The short version: constructing weights rather than
+training them is 1996 (Omlin & Giles) and 2023 (Tracr); replacing a lookup
+table with a small network is ACAS Xu, 2016 — which is also where the
+counter-example lives (Bak & Tran 2022 showed the compression unsafe, and
+Boniol et al. 2026 then compressed the same tables *exactly* with BDDs). Not
+new here: the existence theorem, integer/power-of-two weights, exhaustive
+verification, or size. What we have not found a precedent for is the
+combination — every table-shaped decision point of a real self-hosting C99
+compiler behind one kernel, with **no fallback path anywhere**, verified by
+enumeration over the whole domain.
+
 ## Status
 
-Research artifact. The C99 subset is real but partial; see `tests/difftest.sh`
-for exactly how much of it agrees with the system compiler.
+Research artifact. The C99 subset is real but partial; `tests/corpus.sh` says
+how partial, and `tests/difftest.sh` says how much of it agrees with the system
+compiler.

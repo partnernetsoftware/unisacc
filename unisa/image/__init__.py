@@ -21,6 +21,10 @@ def layout(os_, arch, textlen):
     t = BASE[os_] + h
     if os_ == "osx":
         return t, BASE[os_] + macho._round(h + textlen)
+    if os_ == "lnx":
+        # the data is written to, so it needs its own rw PT_LOAD -- which means
+        # its own page, not the bytes straight after the text [I-12]
+        return t, BASE[os_] + elf._round(h + textlen)
     return t, t + textlen
 
 

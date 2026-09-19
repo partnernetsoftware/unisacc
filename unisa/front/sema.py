@@ -5,7 +5,7 @@ The two decisions that ARE table-shaped go through the oracle:
   type : (t1, op, t2)    -> result type or illegal
 """
 
-TY_SIZE = {"void": 1, "i8": 1, "i32": 4}       # [G-2] everything else is 8
+TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4}   # [G-2] else 8
 
 # The type table's TOPS axis is canonical: one relational op stands for all
 # four, one equality op for both.  Projecting onto it is classic key encoding,
@@ -43,6 +43,7 @@ class Type:
 
 VOID = Type("void")
 I8 = Type("i8")
+I16 = Type("i16")
 I32 = Type("i32")
 I64 = Type("i64")
 
@@ -136,5 +137,5 @@ class Scope:
         """Project a Type onto the type table's TYS axis."""
         if t is None:
             return "void"
-        return t.kind if t.kind in ("void", "i8", "i32", "i64", "ptr", "arr",
-                                    "struct", "fn") else "i64"
+        return t.kind if t.kind in ("void", "i8", "i16", "i32", "i64",
+                                    "ptr", "arr", "struct", "fn") else "i64"

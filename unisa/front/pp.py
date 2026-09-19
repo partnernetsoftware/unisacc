@@ -165,6 +165,30 @@ def _split_args(s, i):
     return None, i
 
 
+# A macro name inside a string or character constant is not a macro.  With
+# `#define NULL 0` in scope, printf("c is NULL\n") printed "c is 0".  [E-32]
+# Neither alternative may cross a newline, and a character constant is at
+# most four items long: an apostrophe in an English comment (`the key's
+# value`) otherwise opens a literal that swallows the rest of the file.
+_LIT = re.compile(r'"(?:\\.|[^"\\\n])*"' + r"|'(?:\\.|[^'\\\n]){1,4}'")
+_HOLE = re.compile("\x00(\\d+)\x01")
+
+
+def _protect(text):
+    lits = []
+
+    def keep(m):
+        lits.append(m.group(0))
+        return "\x00%d\x01" % (len(lits) - 1)
+    return _LIT.sub(keep, text), lits
+
+
+def _restore(text, lits):
+    # re.sub does not rescan what the replacement inserts, so a literal whose
+    # own bytes look like a placeholder is safe.
+    return _HOLE.sub(lambda m: lits[int(m.group(1))], text)
+
+
 def expand(text, macros):
     """Object-like and function-like substitution, fixed point up to 8 rounds."""
     if not macros:
@@ -172,7 +196,7 @@ def expand(text, macros):
     obj = {k: v for k, v in macros.items() if not isinstance(v, tuple)}
     fn = {k: v for k, v in macros.items() if isinstance(v, tuple)}
     for _ in range(8):
-        new = text
+        new, lits = _protect(text)
         if fn:
             out, i = [], 0
             while i < len(new):
@@ -197,6 +221,7 @@ def expand(text, macros):
         if obj:
             pat = re.compile(r"\b(" + "|".join(re.escape(k) for k in obj) + r")\b")
             new = pat.sub(lambda m: obj[m.group(1)], new)
+        new = _restore(new, lits)
         if new == text:
             break
         text = new

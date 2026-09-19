@@ -63,12 +63,18 @@ def parse_label(nt, tok):
 
 
 # ----------------------------------------------------------------- type [G-2]
-TYS = ("void", "i8", "i32", "i64", "ptr", "arr", "struct", "fn")
+TYS = ("void", "i8", "i16", "i32", "i64", "ptr", "arr", "struct", "fn")
 TOPS = ("+", "-", "*", "/", "%", "<", "==", "=", "&", "[]", ".", "call",
         "sizeof", ",", "un*", "|", "^", "<<", ">>")
 TYOUT = TYS + ("illegal",)
-NUM = ("i8", "i32", "i64")
-TY_SIZE = {"void": 1, "i8": 1, "i32": 4}
+NUM = ("i8", "i16", "i32", "i64")
+TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4}
+
+
+def _narrow(t1, t2):
+    """char and short promote to int; the walker keeps wider
+    arithmetic in i64. [G-2]"""
+    return t1 in ("i8", "i16") or t2 in ("i8", "i16")
 
 
 def type_label(t1, op, t2):
@@ -88,11 +94,11 @@ def type_label(t1, op, t2):
         # `&` is overloaded in C: bitwise when both sides are numeric,
         # address-of otherwise (the i64&i64 -> ptr row the walker uses).
         if t1 in NUM and t2 in NUM and not (t1 == "i64" and t2 == "i64"):
-            return "i32" if ("i8" in (t1, t2)) else "i64"
+            return "i32" if _narrow(t1, t2) else "i64"
         return "ptr" if (t1 == "i64" and t2 == "i64") else "illegal"
     if op in ("|", "^", "<<", ">>"):
         if t1 in NUM and t2 in NUM:
-            return "i32" if ("i8" in (t1, t2)) else "i64"
+            return "i32" if _narrow(t1, t2) else "i64"
         return "illegal"
     if op == ",":
         return t2                      # [G-2 corrected] the comma operator
@@ -110,7 +116,7 @@ def type_label(t1, op, t2):
         if op == "-" and t1 == "ptr" and t2 == "ptr":
             return "i64"
         if t1 in NUM and t2 in NUM:
-            return "i32" if ("i8" in (t1, t2)) else "i64"
+            return "i32" if _narrow(t1, t2) else "i64"
     return "illegal"
 
 
@@ -298,7 +304,7 @@ def build():
                        dict(d=8, hidden=[16], seed=13))
     S["type"] = Stage("type", [("t1", TYS), ("op", TOPS), ("t2", TYS)],
                       [("y", TYOUT, None)], _one(type_label),
-                      dict(d=8, hidden=[16], seed=17), weight=_type_weight)
+                      dict(d=8, hidden=[20], seed=17), weight=_type_weight)
     S["scope"] = Stage("scope", [("ctx", CTX), ("kind", KIND)],
                        [("y", ACTS, None)], _one(scope_label),
                        dict(d=8, hidden=[16], seed=19))

@@ -10,8 +10,10 @@
 #   ccrun       unisacc compiles C; the reference VM runs it [A-21]
 #   selfhost    unisacc built two ways agrees with the Python front end [A-20]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
+#   corpus      c-testsuite -- 220 programs we did not write [A-25];
+#               skipped unless corpus/ is already present
 set -u
-CORPUS="examples/*.c tests/c/*.c"
+PROBES="examples/*.c tests/c/*.c"
 declare -a NAME LINE CODE
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching
 # its last line -- a summary line that happens to end differently is not a
@@ -30,13 +32,16 @@ run() {
 run acceptance ./tests/acceptance.sh
 run vm         ./tests/vm.sh
 run difftest   ./tests/difftest.sh
-run native     bash -c "./tests/native.sh $CORPUS"
+run native     bash -c "./tests/native.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh examples/*.c tests/c/a_*.c"
-run selfhost   bash -c "./tests/selfhost.sh $CORPUS"
+run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 # bootstrap needs the host toolchain to turn a tape back into a binary
 if [ "$(uname -s)" = "Darwin" ]; then
     run bootstrap ./tests/bootstrap.sh
+fi
+if [ -d corpus/c-testsuite ]; then
+    run corpus env FETCH=0 ./tests/corpus.sh
 fi
 run acc        bash -c "python3 -m unisa acc"
 
