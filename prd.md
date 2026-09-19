@@ -182,6 +182,7 @@ unisa compile ... --from-tape  # 输入是 .tape 而非 C（只做 lowering + �
 | `bootstrap.sh` | `B = C = U` 自举不动点 | [A-23] |
 | `corpus.sh` | **c-testsuite 的 220 个程序** —— 别人写的、为别的编译器写的 | [A-25] |
 | `crossnative.sh` | **非本机目标**真实执行：两个 Linux 目标进本地虚机，osx/x86_64 走 Rosetta 2 | [A-27] |
+| `fat.sh` | **一个文件两条 ISA**，两个 slice 都真跑（arm64 原生 + x86_64 经 Rosetta） | [A-28] |
 
 | ID | 条款 |
 |---|---|
@@ -608,7 +609,7 @@ X-2 带来的后果全是设计意图：
 
 **I-4** 镜像字节可复现（D-5）。
 
-### 4.7.1 宿主平台契约 [I-5..I-15]
+### 4.7.1 宿主平台契约 [I-5..I-19]
 
 以下不是我们的设计选择，是**平台强制要求**。违反其中任何一条，失败方式都不是报错而是 SIGILL / SIGKILL / 进程挂死。实测代价见 E-27。
 
@@ -624,6 +625,14 @@ X-2 带来的后果全是设计意图：
 **I-12** **ELF 同样要分段**：text 是 `PF_R|PF_X`，data 必须是独立的 `PF_R|PF_W` PT_LOAD，且 `p_offset ≡ p_vaddr (mod 0x1000)`。这条与 I-8 是同一条物理事实的两个平台写法；Mach-O 被 macOS 当场逼出来，ELF 因为只在解释器里跑过而藏了很久（E-32）。违反后果：写 scratch 即 **SIGSEGV**，且本地解释器与 `readelf` 都看不出来。
 
 **K-5a** **C kernel 的字面掩码按阶段定宽**：每个字段的掩码是 `ceil(|vocab|/64)` 个 u64。一个字就够用，直到 TOKS 越过 64（`~` 与其余复合赋值把它推到 67），blob 写入直接溢出。宽度是**每阶段**的而非全局的——只有 `parse` 需要两个字，全局加宽要多花 5.7 KB。
+
+**I-16** **PE 的节 RVA 必须按 SectionAlignment 对齐**，且要分 `.text` / `.rdata` / `.data`。第一版把 text+data 塞进一个 r-x 节、节 RVA 取 0x200，Windows 直接拒载（`Access is denied`，exit 5）。另外 arm64 不存在于 Windows 10 之前，`MajorSubsystemVersion` 必须 ≥ 10。
+
+**I-17** **arm64 Windows 强制可重定位，而且查得很细**（拿真 arm64 exe 逐字段拆出来的）：必须有 **dir[5] 基址重定位**且其中**至少一条真实条目**——把条目换成 ABSOLUTE 填充、目录原样保留，照样拒载；必须有 **dir[10] load config**，且其 **`SecurityCookie`（+0x58）非零**——只把这一个字段清零，真 exe 就不再加载；**只留其一都不行**。这与 I-7（arm64 macOS 强制 MH_PIE）是同一条物理事实，Windows 侧查得更严。详见 E-35。
+
+**I-18** **WinAPI 调用是真调用**：它按 AAPCS64 / Win64 破坏全部 volatile 寄存器，而我们八个 tape 寄存器**全都**是 volatile，**tape 栈指针 r7 也在内**。所以 win 的 gate 必须前后夹一个保存区，tape 必须有**自己的栈**（不能像别处那样把 SP 绑到进程栈），并且要把 tape 说的 POSIX 形状翻译成 kernel32 的形状（`fd → HANDLE`、`WriteFile` 的第四个出参、返回写入字节数而非 BOOL）。
+
+**I-19** **一个文件带多条 ISA**：macOS 的标准容器是 Mach-O universal（fat）——大端的 slice 描述表 + 各自按页对齐的普通镜像，内核挑 slice，`codesign -f -s -` 会把每个 slice 都签掉。这是多 ISA 主张**诚实的前半**：它是**一个 OS 之内**的多架构；cosmopolitan 那种同时是 ELF / Mach-O / PE 的文件是另一个问题，我们还没做。
 
 **I-15** **PIE 的 Mach-O 必须告诉 dyld 怎么 rebase**：既无 `LC_DYLD_INFO` 也无 chained fixups 时，dyld 走**旧的重定位路径**，去解引用我们从未发射的 `LC_DYSYMTAB` —— 在我们第一条指令之前**就在 dyld 里面崩了**（`forEachRebase_Relocations`，EXC_BAD_ACCESS at 0x48，即空 dysymtab 上的 `locreloff`）。**Darwin 25 容忍这个缺省，Darwin 23/24 不容忍**。办法是把 `LC_DYLD_INFO_ONLY` / `LC_SYMTAB` / `LC_DYSYMTAB` 三条**全零地**发出来，dyld 于是走 opcode 路径、发现无事可做。字符串表给 8 个 NUL（字符串表不能为空）。
 
@@ -718,6 +727,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-25** | `tests/corpus.sh` → `wrong = 0`，且 `pass` 不低于 `tests/corpus.baseline` | P-6 |
 | **A-26** | CI 在**真 Linux 内核**上执行发出的 ELF（不是解释它） | I-1, I-12, X-3 |
 | **A-27** | `tests/crossnative.sh` → lnx/x86_64、lnx/arm64、osx/x86_64 在真机上与解释器逐例一致 | I-12..14, X-3 |
+| **A-28** | `unisa fat` 产出 Mach-O universal，两个 slice 都执行且与解释器逐例一致 | I-19 |
 
 ### 5.4 体积与速度预算 [B]
 
@@ -770,6 +780,16 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 一条发现被证伪时**保留编号并标记**，不删除——证伪过程本身是结果。
 
 ### 6.1 已证实
+
+#### E-36　一个文件两条 ISA：Mach-O universal 已经能跑，两个 slice 都真执行
+
+| 栏 | 内容 |
+|---|---|
+| **命题** | 「综合多 ISA 可执行体」的第一步不是 cosmopolitan 式的跨 OS 文件，而是**一个 OS 之内**的多架构容器。macOS 的 Mach-O universal 就是它，而且本机两个 slice 都能真跑 |
+| **证据** | `unisa fat examples/fact.c -o fact` → `file` 认作 *Mach-O universal binary with 2 architectures*；`./fact` 走 arm64 原生、`arch -x86_64 ./fact` 走 Rosetta，两者都输出 120。`tests/fat.sh` 在 49 个探针上**两个 slice 各跑一遍**，0 不符（[A-28]）|
+| **成本** | 40 行：大端 slice 表 + 页对齐拼接。两个 slice 本身就是已有的 `osx/x86_64` 与 `osx/arm64` 镜像，一字未改 |
+| **意义** | 这条把「多 ISA」从纸面主张变成可执行文件，而且**验证方式是执行而不是读头部**。同时它划清了边界：这是**一个 OS**内的多架构，cosmopolitan 那种同时是 ELF/Mach-O/PE 的文件是另一个问题，win/* 甚至还加载不了（E-35）|
+| **状态** | **已证实**（2026-09-19）|
 
 #### E-35　win/* 还没跑通，但已经把 Windows 加载器的三条硬规则挖出来了
 
