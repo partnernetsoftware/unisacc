@@ -131,6 +131,9 @@ class Walker:
             if t.kind in ("struct", "union"):
                 base = self.struct_type()
                 continue
+            if t.kind == "enum":
+                base = self.enum_type()
+                continue
             break
         if words:
             base = _basety(words)
@@ -159,7 +162,7 @@ class Walker:
         self.sc.structs.setdefault(tag, Struct(tag, isu))
         return Type("struct", tag=tag)
 
-    def declarator(self, base):
+    def declarator(self, base, named=True):
         ty = base
         while self.eat("*"):
             ty = ptr(ty)
@@ -173,7 +176,9 @@ class Walker:
             if self.at("("):
                 self.skip_parens()
             return ptr(Type("fn", ret=ty)), name
-        name = self.expect("id").text
+        # a prototype may name no parameter: `int f(int, char *);`
+        name = self.next().text if self.at("id") else \
+            (self.expect("id").text if named else "")
         dims = []
         while self.at("["):
             self.next()
@@ -229,26 +234,37 @@ class Walker:
         self.sc.typedefs[name] = ty
         self.expect(";")
 
-    def do_enum(self):
+    def enum_type(self):
+        """`enum [tag] [{ ... }]` -- an enumerated type is an int.  The
+        enumerators go into scope; the tag is remembered so `enum E e;` can
+        name the type later."""
         self.expect("enum")
         if self.at("id"):
-            self.next()
-        self.expect("{")
+            self.sc.enum_tags.add(self.next().text)
+        if not self.eat("{"):
+            return I32                       # a reference to an existing tag
         v = 0
         while not self.at("}"):
             nm = self.expect("id").text
             if self.eat("="):
-                v = int(self.expect("num").val)
+                v = self.const_expr()
             self.sc.enums[nm] = v
             self.sc.declare(nm, I32, "enum", v)
             v += 1
             if not self.eat(","):
                 break
         self.expect("}")
-        self.expect(";")
+        return I32
 
-    def do_global(self):
-        base = self.declspec()
+    def do_enum(self):
+        self.enum_type()
+        if self.eat(";"):                    # a bare enum declaration
+            return
+        self.do_global(base=I32)             # `enum E { A } v;` declares v
+
+    def do_global(self, base=None):
+        if base is None:
+            base = self.declspec()
         if self.eat(";"):
             return
         while True:
@@ -337,6 +353,7 @@ class Walker:
                 else list(self._elems(ty))
             k = 0
             while not (self.at("}") if braced else False):
+                slots, k = self._designator(ty, slots, k)
                 if k >= len(slots):
                     raise CError("line %d: too many initialisers"
                                  % self.peek().line)
@@ -354,13 +371,58 @@ class Walker:
             self.next()
             self.em.init_ptrs.append((sym, self.em.intern(t.val), at))
             return
+        lab = self._addr_of()
+        if lab is not None:                       # int *p = &g;  char *q = arr;
+            self.em.init_ptrs.append((sym, lab, at))
+            return
         v = self.const_expr()
         w = min(8, max(1, ty.size(self.sc.structs)))
         self.em.t.data[base + at:base + at + w] = \
             (v & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
 
+    def _addr_of(self):
+        """`&g` or a bare array/function name: the address of a global.  It is
+        not a constant we can write into the image, because the image may be
+        relocated, so it joins the `_start` pointer initialisers."""
+        j = self.i + (1 if self.at("&") else 0)
+        if j >= len(self.tk) or self.tk[j].kind != "id":
+            return None
+        if self.tk[j + 1].kind not in (",", "}", ";"):
+            return None
+        sy = self.sc.lookup(self.tk[j].text)
+        if sy is None or sy.kind != "global":
+            return None
+        self.i = j + 1
+        return sy.sym
+
     def _is_charr(self, ty):
         return ty.kind == "arr" and ty.to.size(self.sc.structs) == 1
+
+    def _field_index(self, ty, name):
+        if ty.kind != "struct":
+            raise CError("line %d: .%s in a non-struct initialiser"
+                         % (self.peek().line, name))
+        for i, fn in enumerate(self.sc.structs[ty.tag].fields):
+            if fn == name:
+                return i
+        raise CError("line %d: no field %r" % (self.peek().line, name))
+
+    def _designator(self, ty, slots, k):
+        """C99 6.7.8: `.field =` and `[index] =` reposition the cursor.  A
+        designator always names a DIRECT member, so it also switches a flat
+        list back to the member view."""
+        if self.at("."):
+            self.next()
+            nm = self.expect("id").text
+            self.expect("=")
+            return self._members(ty), self._field_index(ty, nm)
+        if self.at("["):
+            self.next()
+            i = self.const_expr()
+            self.expect("]")
+            self.expect("=")
+            return self._members(ty), i
+        return slots, k
 
     def _braced_next(self):
         """Just after a `{`: does the first element open its own brace, or is
@@ -387,7 +449,7 @@ class Walker:
                     self.next()
                     break
                 b = self.declspec()
-                ty, pn = self.declarator(b)
+                ty, pn = self.declarator(b, named=False)
                 if ty.kind == "arr":
                     ty = ptr(ty.to)     # C99 6.7.5.3p7: a parameter of array
                 params.append((ty, pn))   # type is adjusted to pointer [E-33]
@@ -532,6 +594,7 @@ class Walker:
                 else list(self._elems(ty))
             k = 0
             while not (self.at("}") if braced else False):
+                slots, k = self._designator(ty, slots, k)
                 if k >= len(slots):
                     raise CError("line %d: too many initialisers"
                                  % self.peek().line)

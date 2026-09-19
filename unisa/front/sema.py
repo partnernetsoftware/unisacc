@@ -90,6 +90,7 @@ class Scope:
         self.structs = {}
         self.typedefs = {}
         self.enums = {}
+        self.enum_tags = set()
 
     def push(self):
         self.stack.append({})
