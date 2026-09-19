@@ -164,8 +164,16 @@ class Walker:
 
     def declarator(self, base, named=True):
         ty = base
-        while self.eat("*"):
-            ty = ptr(ty)
+        while True:
+            if self.eat("*"):
+                ty = ptr(ty)
+                continue
+            # `char * const p` -- a qualifier on the POINTER, not the pointee
+            if self.at("type") and self.peek().text in ("const", "volatile",
+                                                        "restrict"):
+                self.next()
+                continue
+            break
         if self.at("(") and self.peek(1).kind == "*":
             # int (*f)(int,int) -- a pointer to function
             self.next()
@@ -444,6 +452,8 @@ class Walker:
         params = []
         if not self.at(")"):
             while True:
+                if self.eat("..."):          # C99 varargs: accepted, ignored
+                    break
                 if self.at("type") and self.peek().text == "void" and \
                         self.peek(1).kind == ")":
                     self.next()
@@ -968,6 +978,23 @@ class Walker:
 
     def unary(self):
         p = self.ask("unary")                                    # [W-3]
+        if p == "preinc":
+            op = self.next().kind                # ++x is x += 1, then x
+            t = self.unary()
+            if self.lval is None:
+                raise CError("line %d: %s needs an lvalue"
+                             % (self.peek().line, op))
+            ty = self.lval
+            self.lval = None
+            self.em.push()                       # the address
+            self.em.load(ACC, ACC, 0, self.wid(ty))
+            step = ty.to.size(self.sc.structs) if ty.kind == "ptr" else 1
+            self.em.imm(LHS, step)
+            self.em.emit(self.em.recipe("alu", "add" if op == "++" else "sub"),
+                         ACC, ACC, LHS)
+            self.em.pop(LHS)
+            self.em.store(LHS, 0, ACC, self.wid(ty))
+            return ty
         if p == "bnot":
             self.next()
             self.unary()

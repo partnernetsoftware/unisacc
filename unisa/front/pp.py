@@ -167,6 +167,61 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     return "\n".join(out), macros
 
 
+def _subst(body, params, args):
+    """Substitute a function-like macro's arguments, honouring `#` and `##`.
+
+    Stringize and paste are the reason a `#` can show up outside a directive,
+    which the lexer refuses -- six corpus programs died on `bad character '#'`
+    with no other problem."""
+    if not params:
+        return body
+    amap = dict(zip(params, args))
+    pat = "|".join(re.escape(p) for p in params)
+    body = re.sub(r"(?<!#)#\s*(" + pat + r")\b",
+                  lambda m: '"%s"' % amap[m.group(1)]
+                  .replace("\\", "\\\\").replace('"', '\\"'), body)
+    if "##" in body:
+        # a pasted operand is substituted BARE: `x ## y` must not become
+        # `(a) ## (b)`, which pastes to garbage
+        parts = re.split(r"\s*##\s*", body)
+        return "".join(re.sub(r"\b(" + pat + r")\b",
+                              lambda m: amap[m.group(1)], p) for p in parts)
+    for pn, av in zip(params, args):
+        body = re.sub(r"\b%s\b" % re.escape(pn), lambda m, a=av: _paren(a),
+                      body)
+    return body
+
+
+# `\x00N\x01` is a string or character literal that _protect() has stashed:
+# by the time a macro is expanded the literals are already placeholders, so an
+# argument that IS one has to be recognised in that form.
+_ATOM = re.compile(r'^\s*(?:[A-Za-z_]\w*|[0-9][\w.]*|\x00\d+\x01)\s*$')
+
+
+def _paren(av):
+    """Wrap a macro argument, unless wrapping would change its meaning.
+
+    A real preprocessor never adds parentheses; we do, because the walker has
+    no re-scan.  But `__VA_ARGS__` is an argument LIST -- parenthesising it
+    turns N arguments into one comma expression -- and a bare literal needs no
+    help, which matters because `printf`'s format has to stay a `str` token."""
+    if _ATOM.match(av) or _top_comma(av):
+        return av
+    return "(" + av + ")"
+
+
+def _top_comma(s):
+    d = 0
+    for c in s:
+        if c in "([":
+            d += 1
+        elif c in ")]":
+            d -= 1
+        elif c == "," and d == 0:
+            return True
+    return False
+
+
 def _split_args(s, i):
     """s[i] == '(' -> (args, index just past the matching ')')"""
     depth, start, args = 0, i + 1, []
@@ -230,14 +285,17 @@ def expand(text, macros):
                 out.append(new[i:m.start()])
                 params, body = fn[m.group(1)]
                 args, end = _split_args(new, m.end() - 1)
+                if args is not None and params and params[-1] == "...":
+                    # C99 variadic macro: the rest becomes __VA_ARGS__
+                    fixed = len(params) - 1
+                    if len(args) >= fixed:
+                        args = args[:fixed] + [", ".join(args[fixed:])]
+                        params = params[:fixed] + ["__VA_ARGS__"]
                 if args is None or len(args) != len(params):
                     out.append(new[m.start():m.end()])
                     i = m.end()
                     continue
-                b = body
-                for pn, av in zip(params, args):
-                    b = re.sub(r"\b%s\b" % re.escape(pn), "(" + av + ")", b)
-                out.append(b)
+                out.append(_subst(body, params, args))
                 i = end
             new = "".join(out)
         if obj:
