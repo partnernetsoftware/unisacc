@@ -152,6 +152,13 @@ class Walker:
             st.fields, st.size, st.is_union = {}, 0, isu
             while not self.at("}"):
                 b = self.declspec()
+                if self.at(";"):
+                    # an anonymous member: `struct { int x; };` -- its fields
+                    # are addressed as if they were the parent's own, so splice
+                    # them in at the offset this member would have had
+                    self.next()
+                    st.embed(b, self.sc.structs)
+                    continue
                 while True:
                     ty, nm = self.declarator(b)
                     st.add(nm, ty, self.sc.structs)
@@ -398,7 +405,9 @@ class Walker:
         if self.tk[j + 1].kind not in (",", "}", ";"):
             return None
         sy = self.sc.lookup(self.tk[j].text)
-        if sy is None or sy.kind != "global":
+        # a function name is an address too: `struct S s = { &zero };` puts a
+        # code label in the slot, which `.lea` resolves like any other
+        if sy is None or sy.kind not in ("global", "fn"):
             return None
         self.i = j + 1
         return sy.sym
@@ -1021,6 +1030,15 @@ class Walker:
             return self.postfix_chain(self.lval)
         if p == "addr":
             self.next()
+            # `&f` where f is a function: there is no lvalue to take, the name
+            # already denotes an address (C99 6.3.2.1p4)
+            if self.at("id"):
+                sy = self.sc.lookup(self.peek().text)
+                if sy is not None and sy.kind == "fn":
+                    self.next()
+                    self.em.lea(ACC, sy.sym)
+                    self.lval = None
+                    return ptr(sy.ty)
             t = self.unary()
             if self.lval is None:
                 raise CError("line %d: & needs an lvalue" % self.peek().line)
@@ -1160,9 +1178,40 @@ class Walker:
                              ACC, ACC, TMP)
                 ty = aty
             elif p == "call":
-                raise CError("line %d: call on non-identifier" % self.peek().line)
+                ty = self.call_value(ty)
             else:
                 return ty
+
+    def call_value(self, ty):
+        """A call whose callee is an EXPRESSION, not a name: `go()()`, or
+        `p->fn()`.  The address is already in ACC, so it goes on the tape stack
+        underneath the arguments and comes back off last."""
+        self.expect("(")
+        self.load_if_lval()
+        self.em.push()                          # the callee, below the args
+        args = 0
+        while not self.at(")"):
+            self.rvalue()
+            self.em.push()
+            args += 1
+            if not self.eat(","):
+                break
+        self.expect(")")
+        if args > len(ARGREGS):
+            raise CError("line %d: at most %d arguments"
+                         % (self.peek().line, len(ARGREGS)))
+        for k in range(args - 1, -1, -1):
+            self.em.pop(ARGREGS[k])
+            self.em.arg(k, ARGREGS[k])
+        self.em.pop(CALLEE)
+        self.em.call_reg(CALLEE)
+        rt = I64
+        if ty is not None:
+            if ty.kind == "ptr" and ty.to is not None and ty.to.kind == "fn":
+                rt = ty.to.ret or I64
+            elif ty.kind == "fn":
+                rt = ty.ret or I64
+        return rt
 
     def call(self, name):
         self.expect("(")

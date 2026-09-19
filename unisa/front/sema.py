@@ -61,6 +61,25 @@ class Struct:
         self.tag, self.fields, self.size = tag, {}, 0
         self.is_union = is_union
 
+    def embed(self, ty, structs):
+        """Splice an anonymous member's fields into this aggregate.  C11
+        6.7.2.1p13: the members of an unnamed struct or union are members of
+        the containing one, so a name lookup has to find them here."""
+        if ty.kind != "struct" or ty.tag not in structs:
+            return
+        inner = structs[ty.tag]
+        sz = inner.size
+        if self.is_union:
+            base = 0
+            self.size = max(self.size, sz)
+        else:
+            align = min(8, sz if sz in (1, 2, 4, 8) else 8)
+            self.size = (self.size + align - 1) // align * align
+            base = self.size
+            self.size += sz
+        for nm, (fty, foff) in inner.fields.items():
+            self.fields[nm] = (fty, base + foff)
+
     def add(self, name, ty, structs):
         sz = ty.size(structs)
         if self.is_union:
