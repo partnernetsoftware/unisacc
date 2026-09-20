@@ -105,6 +105,32 @@ def lex(src, oracle):
             # A wide CHARACTER constant is just an int, so the prefix is
             # dropped.  A wide STRING is not: its elements are wider than a
             # byte, and pretending otherwise would miscompile silently.
+            # GCC spellings that carry no meaning for this subset.  They are
+            # everywhere in real headers, so they are dropped in the lexer
+            # rather than threaded through the grammar.
+            if w == "__attribute__" or w == "__asm__" or w == "asm":
+                k = j
+                while k < n and src[k] in " \t\n\r":
+                    k += 1
+                if k < n and src[k] == "(":
+                    depth = 0
+                    while k < n:
+                        if src[k] == "(":
+                            depth += 1
+                        elif src[k] == ")":
+                            depth -= 1
+                            if depth == 0:
+                                k += 1
+                                break
+                        elif src[k] == "\n":
+                            line += 1
+                        k += 1
+                    i = k
+                    continue
+            if w in ("__extension__", "__inline", "__inline__", "__restrict",
+                     "__restrict__", "__const", "__volatile__", "__signed__"):
+                i = j
+                continue
             if w in ("L", "u", "U", "u8") and j < n and src[j] == "'":
                 i = j
                 continue

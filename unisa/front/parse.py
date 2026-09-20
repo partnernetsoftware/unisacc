@@ -214,6 +214,11 @@ class Walker:
                 self.next()
                 continue
             break
+        if self.at("(") and not named and self.peek(1).kind != "*":
+            # `int ()` as a parameter type: a function, which decays to a
+            # pointer to one (C99 6.7.5.3p8)
+            self.skip_parens()
+            return ptr(Type("fn", ret=ty)), ""
         if self.at("(") and self.peek(1).kind == "*":
             # int (*f)(int,int) -- a pointer to function.  `(* const x)` is
             # the same declarator with a qualifier on the pointer.
@@ -229,6 +234,15 @@ class Walker:
             name = self.next().text if self.at("id") else \
                 (self.expect("id").text if named else "")
             self.expect(")")
+            if self.at("["):                 # `(*p)[4]`: pointer to array
+                dims = []
+                while self.at("["):
+                    self.next()
+                    dims.append(0 if self.at("]") else self.const_expr())
+                    self.expect("]")
+                for n in reversed(dims):
+                    ty = Type("arr", to=ty, n=n)
+                return ptr(ty), name
             if self.at("("):
                 self.skip_parens()
             return ptr(Type("fn", ret=ty)), name
@@ -341,7 +355,11 @@ class Walker:
             ty, name = self.declarator(base)
             p = self.ask("after_name")                           # [W-3]
             if p == "fn_sig":
-                self.function(ty, name)
+                if self.function(ty, name) == "proto":
+                    # `int f(int), g(int), a;` -- the list goes on
+                    if not self.eat(","):
+                        break
+                    continue
                 return
             self.sc.act("top", self.tk[self.i - 1])
             init = self.eat("=")
@@ -560,8 +578,8 @@ class Walker:
                     break
         self.expect(")")
         self.sc.declare(name, Type("fn", ret=ret), "fn", sym=name)
-        if self.eat(";"):
-            return
+        if self.at(";") or self.at(","):
+            return "proto"                   # the caller owns the separator
         if vararg:
             raise CError("line %d: a variadic definition cannot reach its "
                          "extra arguments in this subset" % self.peek().line)

@@ -217,6 +217,20 @@ int charclass(int c) {
 
 int at(int i) { if (i >= nsrc) return 0 - 1; return src[i] & 255; }
 
+/* does src[p..p+L) equal the C string nm? */
+int srcis(int p, int L, char *nm) {
+    int k;
+    k = 0;
+    while (k < L) {
+        if (nm[k] == 0) return 0;
+        if ((src[p + k] & 255) != (nm[k] & 255)) return 0;
+        k = k + 1;
+    }
+    if (nm[L] != 0) return 0;
+    return 1;
+}
+
+
 /* C99 phase 2: a backslash-newline pair is deleted, joining the two lines.
    It happens before tokenisation, so it applies inside literals too. */
 int splice(void) {
@@ -264,6 +278,30 @@ int lex(void) {
         if (a == 2) {                          /* ident */
             j = i;
             while (at(j) >= 0) { if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) break; } j = j + 1; }
+            /* GCC spellings this subset ignores.  The Python lexer drops
+               them too, and selfhost compares token streams. */
+            if (srcis(i, j - i, "__attribute__")
+                | srcis(i, j - i, "__asm__") | srcis(i, j - i, "asm")) {
+                k = j;
+                while (at(k) == 32 | at(k) == 9 | at(k) == 10 | at(k) == 13)
+                    k = k + 1;
+                if (at(k) == 40) {
+                    st = 0;
+                    while (at(k) >= 0) {
+                        if (at(k) == 40) st = st + 1;
+                        if (at(k) == 41) { st = st - 1;
+                            if (st == 0) { k = k + 1; break; } }
+                        k = k + 1;
+                    }
+                    i = k;
+                    continue;
+                }
+            }
+            if (srcis(i, j - i, "__extension__") | srcis(i, j - i, "__inline")
+                | srcis(i, j - i, "__inline__") | srcis(i, j - i, "__restrict")
+                | srcis(i, j - i, "__restrict__") | srcis(i, j - i, "__const")
+                | srcis(i, j - i, "__volatile__")
+                | srcis(i, j - i, "__signed__")) { i = j; continue; }
             /* a wide CHARACTER constant is an int, so drop the prefix; a
                wide STRING is refused by the Python front end, and this one
                only has to agree about tokens */
