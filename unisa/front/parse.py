@@ -144,6 +144,8 @@ class Walker:
             t = self.peek()
             if t.kind == "type":
                 if t.text in self.sc.typedefs:
+                    if base is not None or words:
+                        break       # the type is already named -- see below
                     base = self.sc.typedefs[t.text]
                     self.next()
                     continue
@@ -158,6 +160,13 @@ class Walker:
                 words.append(w)
                 continue
             if t.kind == "id" and t.text in self.sc.typedefs:
+                # A typedef name can only START the specifier list.  Once the
+                # type is named, the next typedef name is the thing being
+                # DECLARED -- which is how `typedef enum {...} h;` redefines
+                # an outer `h` in an inner scope.  Absorbing it left the
+                # declarator empty and the error pointed at the semicolon.
+                if base is not None or words:
+                    break
                 base = self.sc.typedefs[self.next().text]
                 continue
             if t.kind in ("struct", "union"):
@@ -206,10 +215,41 @@ class Walker:
         return Type("struct", tag=tag)
 
     def declarator(self, base, named=True):
-        ty = base
+        """The full C99 declarator grammar, built inside out.
+
+        The shapes do not come from a fixed list -- they nest.  `int
+        (*f(int, int))(int, int)` is a function returning a pointer to a
+        function, and `int (*p[4])(int)` is an array of four such pointers.
+        So each level parses its own pointers and suffixes and hands back a
+        wrapper for the level outside it to feed."""
+        # where the declared name's OWN parameter list was, if the
+        # declarator swallowed it -- see do_global
+        self.params_at = None
+        name, wrap = self._declarator(named, top=True)
+        ty = wrap(base)
+        if not named and ty.kind == "fn":
+            # a parameter declared as a function is a pointer to one
+            # (C99 6.7.5.3p8)
+            ty = ptr(ty)
+        return ty, name
+
+    def _paren_is_declarator(self):
+        """At a `(`: does it open a nested declarator or a parameter list?
+
+        `int (*f)(int)` and `int f(int)` differ only in what follows the
+        parenthesis."""
+        t = self.peek(1)
+        if t.kind in (")", "..."):
+            return False                     # `()` -- an empty parameter list
+        if self.istype(t):
+            return False                     # `(int, char *)` -- parameters
+        return t.kind in ("*", "(", "id")
+
+    def _declarator(self, named, top=False):
+        nstar = 0
         while True:
             if self.eat("*"):
-                ty = ptr(ty)
+                nstar += 1
                 continue
             # `char * const p` -- a qualifier on the POINTER, not the pointee
             if self.at("type") and self.peek().text in ("const", "volatile",
@@ -217,60 +257,56 @@ class Walker:
                 self.next()
                 continue
             break
-        if self.at("(") and not named and self.peek(1).kind != "*":
-            # `int ()` as a parameter type: a function, which decays to a
-            # pointer to one (C99 6.7.5.3p8)
-            self.skip_parens()
-            return ptr(Type("fn", ret=ty)), ""
-        if self.at("(") and self.peek(1).kind == "*":
-            # int (*f)(int,int) -- a pointer to function.  `(* const x)` is
-            # the same declarator with a qualifier on the pointer.
+        name, inner = "", None
+        if self.at("(") and self._paren_is_declarator():
             self.next()
-            while True:
-                if self.eat("*"):
-                    continue
-                if self.at("type") and self.peek().text in (
-                        "const", "volatile", "restrict"):
-                    self.next()
-                    continue
-                break
-            name = self.next().text if self.at("id") else \
-                (self.expect("id").text if named else "")
+            name, inner = self._declarator(named)
             self.expect(")")
-            if self.at("["):                 # `(*p)[4]`: pointer to array
-                dims = []
-                while self.at("["):
+        elif self.at("id"):
+            name = self.next().text
+        elif named:
+            # a prototype may name no parameter: `int f(int, char *);`
+            name = self.expect("id").text
+        sufs = []
+        while True:
+            if self.at("["):
+                self.next()
+                # C99 6.7.5.2: a parameter's array declarator may carry
+                # qualifiers and `static` inside the brackets
+                while self.at("type") and self.peek().text in (
+                        "const", "volatile", "restrict", "static"):
                     self.next()
-                    dims.append(0 if self.at("]") else self.const_expr())
-                    self.expect("]")
-                for n in reversed(dims):
-                    ty = Type("arr", to=ty, n=n)
-                return ptr(ty), name
-            if self.at("("):
+                if self.at("*") and self.peek(1).kind == "]":
+                    self.next()          # `[*]`: an unspecified VLA bound in
+                    sufs.append(("arr", 0))   # a prototype -- just a pointer
+                else:
+                    sufs.append(("arr", 0 if self.at("]")
+                                 else self.const_expr()))
+                self.expect("]")
+            elif self.at("(") and not (top and named and inner is None):
+                # The OUTERMOST named declarator's own parameter list is not
+                # ours: `int f(int)` is a definition or a prototype, and
+                # [W-3]'s `after_name` is what decides between them.  Every
+                # inner level takes its own, which is what makes
+                # `int (*f(int, int))(int, int)` parse.
+                if self.params_at is None:
+                    self.params_at = self.i   # the innermost one is the name's
                 va = self._has_ellipsis()
                 self.skip_parens()
-                return ptr(Type("fn", ret=ty, n=1 if va else 0)), name
-            return ptr(Type("fn", ret=ty)), name
-        # a prototype may name no parameter: `int f(int, char *);`
-        name = self.next().text if self.at("id") else \
-            (self.expect("id").text if named else "")
-        dims = []
-        while self.at("["):
-            self.next()
-            # C99 6.7.5.2: a parameter's array declarator may carry qualifiers
-            # and `static` inside the brackets
-            while self.at("type") and self.peek().text in (
-                    "const", "volatile", "restrict", "static"):
-                self.next()
-            if self.at("*") and self.peek(1).kind == "]":
-                self.next()          # `[*]`: an unspecified VLA bound in a
-                dims.append(0)       # prototype, which is just a pointer here
+                sufs.append(("fn", 1 if va else 0))
             else:
-                dims.append(0 if self.at("]") else self.const_expr())
-            self.expect("]")
-        for n in reversed(dims):          # int a[2][3] is 2 of (3 of int)
-            ty = Type("arr", to=ty, n=n)
-        return ty, name
+                break
+
+        def wrap(t):
+            for _ in range(nstar):
+                t = ptr(t)
+            # `int a[2][3]` is 2 of (3 of int), so the suffixes apply from
+            # the right
+            for kind, n in reversed(sufs):
+                t = Type("arr", to=t, n=n) if kind == "arr" \
+                    else Type("fn", ret=t, n=n)
+            return inner(t) if inner is not None else t
+        return name, wrap
 
     # -- top level --------------------------------------------------------
     def _has_ellipsis(self):
@@ -337,7 +373,7 @@ class Walker:
         self.expect("typedef")
         base = self.declspec()
         ty, name = self.declarator(base)
-        self.sc.typedefs[name] = ty
+        self.sc.typedef(name, ty)
         self.expect(";")
 
     def enum_type(self):
@@ -377,7 +413,18 @@ class Walker:
             ty, name = self.declarator(base)
             p = self.ask("after_name")                           # [W-3]
             if p == "fn_sig":
-                if self.function(ty, name) == "proto":
+                # Normally the parameter list is still ahead of us and `ty` is
+                # the return type.  But a function that RETURNS a function
+                # pointer wears its own parameters in the middle --
+                # `int (*f(int, int))(int, int)` -- so the declarator has
+                # already taken them; rewind to them and come back for the
+                # body.
+                if ty.kind == "fn" and self.params_at is not None:
+                    body, self.i = self.i, self.params_at
+                    r = self.function(ty.ret, name, body=body)
+                else:
+                    r = self.function(ty, name)
+                if r == "proto":
                     # `int f(int), g(int), a;` -- the list goes on
                     if not self.eat(","):
                         break
@@ -386,7 +433,7 @@ class Walker:
             self.sc.act("top", self.tk[self.i - 1])
             init = self.eat("=")
             if init and ty.kind == "arr" and ty.n == 0:
-                ty = Type("arr", to=ty.to, n=self._init_count())
+                ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
             size = ty.size(self.sc.structs)
             self.em.t.string("g_" + name, b"\x00" * max(1, size), align=8)
             sym = self.sc.declare(name, ty, "global", sym="g_" + name)
@@ -418,7 +465,32 @@ class Walker:
         else:
             yield (0, ty)
 
-    def _init_count(self):
+    def _aggr_paren(self):
+        """Does the `(` at the cursor open an aggregate initialiser?
+
+        An aggregate member facing `(` is usually `(struct S){...}` or
+        `((struct S){...})` -- but under brace elision it can equally be the
+        first scalar of a flat list, as in `PT a[] = { ((I)4 + (I)2), ... }`,
+        where the member is `I c[2]` and the parenthesis is just arithmetic.
+        Telling them apart needs the matching `)`."""
+        if not self.at("("):
+            return False
+        j, n = self.i, 0
+        while j < len(self.tk):
+            k = self.tk[j].kind
+            if k == "(":
+                n += 1
+            elif k == ")":
+                n -= 1
+                if n == 0:
+                    return (j + 1 < len(self.tk)
+                            and self.tk[j + 1].kind == "{")
+            elif k == "{":
+                return True            # the brace is inside the parentheses
+            j += 1
+        return False
+
+    def _init_count(self, elem=None):
         """How many elements the initialiser at the cursor supplies, so an
         unsized `int a[] = {...}` can be given its length.  A string counts its
         own NUL, which is why `char s[] = "abc"` is 4 bytes."""
@@ -428,6 +500,7 @@ class Walker:
         if t.kind != "{":
             return 1
         depth, idx, hi, j = 0, -1, 0, self.i
+        nested = False
         while j < len(self.tk):
             k = self.tk[j].kind
             if k == "{":
@@ -435,11 +508,15 @@ class Walker:
                 if depth == 1 and self.tk[j + 1].kind != "}":
                     idx = 0
                     hi = 1
+                elif depth == 2:
+                    nested = True       # each element brought its own braces
             elif k == "}":
                 depth -= 1
                 if depth == 0:
-                    return hi
-            elif k == "," and depth == 1:
+                    return self._elided(elem, hi, nested)
+            elif k == "," and depth == 1 and self.tk[j + 1].kind != "}":
+                # a TRAILING comma adds no element: C99 allows it, and
+                # `{1, 2, 3,}` is three long, not four
                 idx += 1
                 hi = max(hi, idx + 1)
             elif k == "[" and depth == 1 and self.tk[j - 1].kind in ("{", ","):
@@ -450,6 +527,21 @@ class Walker:
                     hi = max(hi, idx + 1)
             j += 1
         return hi
+
+    def _elided(self, elem, items, nested):
+        """Brace elision: `PT a[] = {1,2,3, 4,5,6}` is TWO PTs, not six.
+
+        C99 6.7.8p17 lets an aggregate element take its share of a flat list,
+        so counting top-level commas is only right when each element brought
+        its own braces (or is a string filling a char array)."""
+        if elem is None or nested or elem.kind not in ("arr", "struct"):
+            return items
+        if self._is_charr(elem):
+            return items                     # each item is a whole string
+        per = len(list(self._elems(elem)))
+        if per <= 1:
+            return items
+        return -(-items // per)              # ceil
 
     def const_init(self, sym, ty, at=0):
         """Write a CONSTANT initialiser into the data image.
@@ -465,13 +557,13 @@ class Walker:
             raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
             self.em.t.data[base + at:base + at + len(raw)] = raw
             return
-        if ty.kind in ("arr", "struct") and self.at("(") \
+        if ty.kind in ("arr", "struct") and self._aggr_paren() \
                 and not self.istype(self.peek(1)):
             self.next()                           # `((struct S){...})`
             self.const_init(sym, ty, at)
             self.expect(")")
             return
-        if ty.kind in ("arr", "struct") and self.at("(") \
+        if ty.kind in ("arr", "struct") and self._aggr_paren() \
                 and self.istype(self.peek(1)):
             # `(struct S){...}` used as a value: the same bytes, written here
             self.next()
@@ -596,7 +688,7 @@ class Walker:
             raise CError("line %d: only constant global initialisers (%s)"
                          % (self.peek().line, e))
 
-    def function(self, ret, name):
+    def function(self, ret, name, body=None):
         self.sc.act("top", self.peek())       # lparen -> fn_name
         self.expect("(")
         params, vararg = [], False
@@ -620,6 +712,8 @@ class Walker:
                 if not self.eat(","):
                     break
         self.expect(")")
+        if body is not None:
+            self.i = body                    # back to where the body starts
         self.sc.declare(name, Type("fn", ret=ret, n=1 if vararg else 0),
                         "fn", sym=name)
         if self.at(";") or self.at(","):
@@ -756,6 +850,11 @@ class Walker:
                 self.expect(";")
 
     def local_decl(self):
+        if self.at("typedef"):
+            # C99 6.7p1: typedef is a storage class, so it is a declaration
+            # like any other and may appear inside a block.
+            self.do_typedef()
+            return
         base = self.declspec()
         static = self.saw_static
         if self.eat(";"):
@@ -767,7 +866,7 @@ class Walker:
                 lab = "g_%s_%d" % (name, self.i)
                 init = self.eat("=")
                 if init and ty.kind == "arr" and ty.n == 0:
-                    ty = Type("arr", to=ty.to, n=self._init_count())
+                    ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
                 self.em.t.string(lab, b"\x00" *
                                  max(1, ty.size(self.sc.structs)), align=8)
                 sym = self.sc.declare(name, ty, "global", sym=lab)
@@ -786,7 +885,7 @@ class Walker:
                 continue
             init = self.eat("=")
             if init and ty.kind == "arr" and ty.n == 0:
-                ty = Type("arr", to=ty.to, n=self._init_count())
+                ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
             off = self.alloc(ty)
             sym = self.sc.declare(name, ty, "local", off)
             if init:
@@ -806,13 +905,13 @@ class Walker:
                 self.em.imm(ACC, b)
                 self.em.store(FP, -off + i, ACC, 1)
             return
-        if ty.kind in ("arr", "struct") and self.at("(") \
+        if ty.kind in ("arr", "struct") and self._aggr_paren() \
                 and not self.istype(self.peek(1)):
             self.next()                           # `((struct S){...})`
             self.const_init(sym, ty, at)
             self.expect(")")
             return
-        if ty.kind in ("arr", "struct") and self.at("(") \
+        if ty.kind in ("arr", "struct") and self._aggr_paren() \
                 and self.istype(self.peek(1)):
             # `(struct S){...}` used as a value: the same bytes, written here
             self.next()
@@ -1457,27 +1556,11 @@ class Walker:
                 return ty
 
     def abstract_type(self):
-        """A type name with no identifier: `int *`, `char[8]`, `int[]`."""
+        """A type name with no identifier: `int *`, `char[8]`,
+        `void (*)(void)`.  Same grammar as a declarator, minus the name."""
         base = self.declspec()
-        while self.eat("*"):
-            base = ptr(base)
-        dims = []
-        while self.at("["):
-            self.next()
-            # C99 6.7.5.2: a parameter's array declarator may carry qualifiers
-            # and `static` inside the brackets
-            while self.at("type") and self.peek().text in (
-                    "const", "volatile", "restrict", "static"):
-                self.next()
-            if self.at("*") and self.peek(1).kind == "]":
-                self.next()          # `[*]`: an unspecified VLA bound in a
-                dims.append(0)       # prototype, which is just a pointer here
-            else:
-                dims.append(0 if self.at("]") else self.const_expr())
-            self.expect("]")
-        for n in reversed(dims):
-            base = Type("arr", to=base, n=n)
-        return base
+        ty, _ = self.declarator(base, named=False)
+        return ty
 
     def addr_operand(self):
         """The operand of `&`, peeling redundant parentheses.
@@ -1508,7 +1591,7 @@ class Walker:
         ty = self.abstract_type()
         self.expect(")")
         if ty.kind == "arr" and ty.n == 0:
-            ty = Type("arr", to=ty.to, n=self._init_count())
+            ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
         lab = "g_cl%d" % self.i
         self.em.t.string(lab, b"\x00" * max(1, ty.size(self.sc.structs)),
                          align=8)
@@ -1523,7 +1606,7 @@ class Walker:
             raise CError("line %d: compound literal outside a function"
                          % self.peek().line)
         if ty.kind == "arr" and ty.n == 0:
-            ty = Type("arr", to=ty.to, n=self._init_count())
+            ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
         off = self.alloc(ty)
         self.local_init(ty, off)
         self.em.imm(TMP, off)

@@ -38,6 +38,10 @@ def parse_label(nt, tok):
     elif nt == "after_name":
         if tok == "(":
             return "fn_sig"
+        if tok == "{":
+            # the declarator already took the parameter list, as in
+            # `int (*f(int, int))(int, int) { ... }`
+            return "fn_sig"
     elif nt == "stmt":
         # [G-1 corrected] struct/enum/typedef at statement start always begin a
         # declaration in C99 -- there is no expression form.  v1's stmt row only

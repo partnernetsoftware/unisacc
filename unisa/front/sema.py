@@ -151,14 +151,30 @@ class Scope:
         # `struct T { ... };` shadows an outer T instead of overwriting it.
         # `structs` stays flat and is keyed by the RESOLVED name.
         self.tagstack = [{}]
+        # typedef names are block-scoped too: `typedef enum { e } h;` inside a
+        # function must not still be a type name after the closing brace.
+        # `typedefs` stays flat; this records what each block shadowed.
+        self.tdstack = [{}]
 
     def push(self):
         self.stack.append({})
         self.tagstack.append({})
+        self.tdstack.append({})
 
     def pop(self):
         self.stack.pop()
         self.tagstack.pop()
+        for n, prev in self.tdstack.pop().items():
+            if prev is None:
+                self.typedefs.pop(n, None)
+            else:
+                self.typedefs[n] = prev
+
+    def typedef(self, name, ty):
+        top = self.tdstack[-1]
+        if name not in top:
+            top[name] = self.typedefs.get(name)
+        self.typedefs[name] = ty
 
     def tag_lookup(self, tag):
         for d in reversed(self.tagstack):
