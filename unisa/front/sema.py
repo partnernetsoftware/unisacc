@@ -82,11 +82,18 @@ def ptr(t):
 class Struct:
     """Also covers unions: every field sits at offset 0 and the size is the
     widest member."""
-    __slots__ = ("tag", "fields", "size", "is_union", "order", "oindex")
+    __slots__ = ("tag", "fields", "size", "is_union", "order", "oindex",
+                 "bits", "obits", "bitpos", "align")
 
     def __init__(self, tag, is_union=False):
         self.tag, self.fields, self.size = tag, {}, 0
         self.is_union = is_union
+        # A bit-field has no address, so `fields` gives it the offset of its
+        # STORAGE UNIT and `bits` says where inside that unit it lives.
+        self.bits = {}              # name -> (bit offset in unit, width, signed)
+        self.obits = []             # the same, per `order` entry, or None
+        self.bitpos = 0             # the packing cursor, in bits
+        self.align = 1              # the widest member's alignment
         # `fields` is for lookup and is FLAT: an anonymous member's fields are
         # spliced in.  `order` is for initialisers, where that same anonymous
         # member counts as one element.  `{1, 2, 3, {4, 5}}` needs both views.
@@ -111,22 +118,82 @@ class Struct:
             self.size += sz
         for nm, (fty, foff) in inner.fields.items():
             self.fields[nm] = (fty, base + foff)
+            if nm in inner.bits:
+                bo, w, sg = inner.bits[nm]
+                self.bits[nm] = (bo, w, sg)
         self.order.append((base, ty))      # one element for initialisers
+        self.obits.append(None)
+        self.bitpos = self.size * 8
+
+    def _align_of(self, ty, structs):
+        if ty.kind == "arr":
+            return self._align_of(ty.to, structs)
+        if ty.kind == "struct" and structs and ty.tag in structs:
+            return structs[ty.tag].align
+        sz = ty.size(structs)
+        return sz if sz in (1, 2, 4, 8) else 8
+
+    def finish(self):
+        """C99 6.7.2.1p15: an object of struct type has to be able to sit in
+        an array, so the size is rounded up to the alignment.  Without this a
+        `struct { int a; char b; }` was 5 bytes and every array of one was
+        laid out differently from the platform's."""
+        a = self.align
+        self.size = (max(self.size, (self.bitpos + 7) // 8) + a - 1) // a * a
 
     def add(self, name, ty, structs):
         sz = ty.size(structs)
+        self.align = max(self.align, self._align_of(ty, structs))
         if self.is_union:
             self.fields[name] = (ty, 0)
             self.oindex[name] = len(self.order)
             self.order.append((0, ty))
+            self.obits.append(None)
             self.size = max(self.size, sz)
             return
         align = min(8, sz if sz in (1, 2, 4, 8) else 8)
+        # a plain member starts at the next byte, whatever bits precede it
+        self.size = max(self.size, (self.bitpos + 7) // 8)
         self.size = (self.size + align - 1) // align * align
         self.fields[name] = (ty, self.size)
         self.oindex[name] = len(self.order)
         self.order.append((self.size, ty))
+        self.obits.append(None)
         self.size += sz
+        self.bitpos = self.size * 8
+
+    def add_bits(self, name, ty, width, signed, structs):
+        """A bit-field.  C99 6.7.2.1 leaves the layout implementation-defined;
+        this is what both our targets' ABIs do -- pack in declaration order
+        and start a new storage unit when the field would straddle one.  A
+        width of zero names nothing and forces that break."""
+        unit = ty.size(structs) * 8
+        self.align = max(self.align, self._align_of(ty, structs))
+        if self.is_union:
+            if name:
+                self.fields[name] = (ty, 0)
+                self.bits[name] = (0, width, signed)
+                self.oindex[name] = len(self.order)
+                self.order.append((0, ty))
+                self.obits.append((0, width, signed))
+            self.size = max(self.size, ty.size(structs))
+            return
+        pos = max(self.bitpos, self.size * 8)
+        if width == 0:
+            self.bitpos = (pos + unit - 1) // unit * unit
+            self.size = max(self.size, self.bitpos // 8)
+            return
+        if pos % unit + width > unit:
+            pos = (pos + unit - 1) // unit * unit
+        off = pos // unit * (unit // 8)
+        if name:
+            self.fields[name] = (ty, off)
+            self.bits[name] = (pos - off * 8, width, signed)
+            self.oindex[name] = len(self.order)
+            self.order.append((off, ty))
+            self.obits.append((pos - off * 8, width, signed))
+        self.bitpos = pos + width
+        self.size = max(self.size, (self.bitpos + 7) // 8)
 
 
 class Sym:
@@ -147,6 +214,7 @@ class Scope:
         self.typedefs = {}
         self.enums = {}
         self.enum_tags = set()
+        self.enum_neg = {}
         # struct/union tags are scoped like ordinary names: an inner
         # `struct T { ... };` shadows an outer T instead of overwriting it.
         # `structs` stays flat and is keyed by the RESOLVED name.

@@ -73,7 +73,8 @@ class Walker:
         self.o = oracle
         self.sc = Scope(oracle)
         self.em = Emitter(oracle)
-        self.lval = None          # Type whose ADDRESS is in ACC, or None
+        self._lval = None         # Type whose ADDRESS is in ACC, or None
+        self.lbits = None         # ...and where in that word, for a bit-field
         self.frame_ix = None
         self.off = 0
         self.maxoff = 0
@@ -82,6 +83,18 @@ class Walker:
         self.ret_label = None     # set while a function body is being walked
         self.called = {}          # name -> line, checked once the unit ends
         self.ret_label = None
+
+    # A bit-field lvalue is an address PLUS a (bit offset, width, signed),
+    # and the two must never drift apart -- so producing any lvalue clears
+    # the bit part, and only the field access puts it back.
+    @property
+    def lval(self):
+        return self._lval
+
+    @lval.setter
+    def lval(self, ty):
+        self._lval = ty
+        self.lbits = None
 
     # -- token plumbing ---------------------------------------------------
     def peek(self, k=0):
@@ -193,6 +206,8 @@ class Walker:
             st = self.sc.structs.setdefault(tag, Struct(tag, isu))
             st.fields, st.size, st.is_union = {}, 0, isu
             while not self.at("}"):
+                was_enum = self.at("enum")
+                self.enum_neg = False
                 b = self.declspec()
                 if self.at(";"):
                     # an anonymous member: `struct { int x; };` -- its fields
@@ -202,15 +217,33 @@ class Walker:
                     st.embed(b, self.sc.structs)
                     continue
                 while True:
+                    if self.at(":"):          # `int : 3` -- unnamed padding
+                        self.next()
+                        st.add_bits("", b, self.const_expr(), True,
+                                    self.sc.structs)
+                        if not self.eat(","):
+                            break
+                        continue
                     ty, nm = self.declarator(b)
                     if self.at(":"):
-                        raise CError("line %d: bit-fields are not supported"
-                                     % self.peek().line)
-                    st.add(nm, ty, self.sc.structs)
+                        self.next()
+                        w = self.const_expr()
+                        unit = ty.size(self.sc.structs) * 8
+                        if ty.kind in ("ptr", "arr", "struct", "fn") \
+                                or not 0 <= w <= unit:
+                            raise CError("line %d: %r is not a bit-field type "
+                                         "or %d is a bad width"
+                                         % (self.peek().line, ty, w))
+                        signed = not (ty.kind in UNSIGNED
+                                      or (was_enum and not self.enum_neg))
+                        st.add_bits(nm, ty, w, signed, self.sc.structs)
+                    else:
+                        st.add(nm, ty, self.sc.structs)
                     if not self.eat(","):
                         break
                 self.expect(";")
             self.expect("}")
+            st.finish()
         self.sc.structs.setdefault(tag, Struct(tag, isu))
         return Type("struct", tag=tag)
 
@@ -381,21 +414,33 @@ class Walker:
         enumerators go into scope; the tag is remembered so `enum E e;` can
         name the type later."""
         self.expect("enum")
+        tag = None
         if self.at("id"):
-            self.sc.enum_tags.add(self.next().text)
+            tag = self.next().text
+            self.sc.enum_tags.add(tag)
         if not self.eat("{"):
-            return I32                       # a reference to an existing tag
-        v = 0
+            # a reference to an existing tag
+            self.enum_neg = self.sc.enum_neg.get(tag, False)
+            return I32
+        v, neg = 0, False
         while not self.at("}"):
             nm = self.expect("id").text
             if self.eat("="):
                 v = self.const_expr()
             self.sc.enums[nm] = v
             self.sc.declare(nm, I32, "enum", v)
+            neg = neg or v < 0
             v += 1
             if not self.eat(","):
                 break
         self.expect("}")
+        # An enum bit-field's signedness is implementation-defined; like gcc
+        # we make it unsigned unless some enumerator is negative.  Get this
+        # wrong and a value with bit 7 set reads back negative out of an
+        # 8-bit field, which is exactly what corpus 00218 checks.
+        if tag:
+            self.sc.enum_neg[tag] = neg
+        self.enum_neg = neg
         return I32
 
     def do_enum(self):
@@ -444,11 +489,16 @@ class Walker:
         self.expect(";")
 
     def _members(self, ty):
-        """The DIRECT children of an aggregate: (offset, type)."""
+        """The DIRECT children of an aggregate: (offset, type, bits).
+
+        `bits` is None except for a bit-field, which has no address of its
+        own -- an initialiser has to OR it into the storage unit instead of
+        writing over it."""
         if ty.kind == "arr":
             esz = ty.to.size(self.sc.structs)
-            return [(i * esz, ty.to) for i in range(ty.n)]
-        return list(self.sc.structs[ty.tag].order)
+            return [(i * esz, ty.to, None) for i in range(ty.n)]
+        st = self.sc.structs[ty.tag]
+        return [(o, t, b) for (o, t), b in zip(st.order, st.obits)]
 
     def _elems(self, ty):
         """The scalar slots of `ty`, in declaration order: (offset, type)."""
@@ -589,8 +639,11 @@ class Walker:
                 if k >= len(mem):
                     raise CError("line %d: too many initialisers"
                                  % self.peek().line)
-                off, mty = mem[k]
-                self.const_init(sym, mty, at + off)
+                off, mty, bf = mem[k]
+                if bf is not None:
+                    self._const_bits(sym, mty, at + off, bf)
+                else:
+                    self.const_init(sym, mty, at + off)
                 k += 1
                 first = False
                 if self._is_union(ty):
@@ -894,6 +947,18 @@ class Walker:
                 break
         self.expect(";")
 
+    def _const_bits(self, sym, ty, at, bf):
+        """A bit-field in a constant initialiser: OR it into the unit that is
+        already there, because its neighbours may have been written first."""
+        v = self.const_expr()
+        bo, w, _ = bf
+        unit = ty.size(self.sc.structs)
+        base = self.em.t.syms[sym] - 0x100 + at
+        cur = int.from_bytes(self.em.t.data[base:base + unit], "little")
+        m = ((1 << w) - 1) << bo
+        cur = (cur & ~m | (v << bo) & m) & ((1 << (unit * 8)) - 1)
+        self.em.t.data[base:base + unit] = cur.to_bytes(unit, "little")
+
     def local_init(self, ty, off):
         """Same walk as const_init, but each element is a full expression and
         the result is stored rather than baked into the image."""
@@ -937,8 +1002,15 @@ class Walker:
                 if k >= len(mem):
                     raise CError("line %d: too many initialisers"
                                  % self.peek().line)
-                eoff, ety = mem[k]
-                self.local_init(ety, off - eoff)
+                eoff, ety, bf = mem[k]
+                if bf is not None:
+                    self.rvalue()
+                    self.em.imm(LHS, -(off - eoff))
+                    self.em.emit(self.em.recipe("alu", "add"), LHS, FP, LHS)
+                    self.em.push(LHS)
+                    self.em.bits_set(bf[0], bf[1], bf[2], self.wid(ety))
+                else:
+                    self.local_init(ety, off - eoff)
                 k += 1
                 first = False
                 if self._is_union(ty):
@@ -1163,6 +1235,11 @@ class Walker:
         return ty.size(self.sc.structs) if ty.kind in NARROW else 8
 
     def load_if_lval(self):
+        if self.lval is not None and self.lbits is not None:
+            ty, (bo, w, sg) = self.lval, self.lbits
+            self.em.bits_get(bo, w, sg, self.wid(ty))
+            self.lval = None
+            return ty
         if self.lval is not None:
             ty = self.lval
             if ty.kind not in ("arr", "struct"):
@@ -1194,10 +1271,14 @@ class Walker:
             nxt = self.peek().kind
             if nxt == "=":
                 self.next()
-                aty = self.lval
+                aty, bits = self.lval, self.lbits
                 self.lval = None
                 self.em.push()
                 self.rvalue()
+                if bits is not None:
+                    bo, w, sg = bits
+                    self.em.bits_set(bo, w, sg, self.wid(aty))
+                    return aty
                 self.em.pop(LHS)
                 if aty.kind == "struct":
                     # `b = a` copies the whole object; both sides are
@@ -1208,12 +1289,15 @@ class Walker:
                 return aty
             if nxt in ASSIGN_OPS:
                 op = ASSIGN_OPS[self.next().kind]
-                aty = self.lval
+                aty, bits = self.lval, self.lbits
                 self.lval = None
                 self.em.push()               # address
-                self.em.load(ACC, ACC, 0, self.wid(aty))
-                if aty.kind in UNSIGNED:
-                    self.em.zext(self.wid(aty))
+                if bits is not None:
+                    self.em.bits_get(bits[0], bits[1], bits[2], self.wid(aty))
+                else:
+                    self.em.load(ACC, ACC, 0, self.wid(aty))
+                    if aty.kind in UNSIGNED:
+                        self.em.zext(self.wid(aty))
                 self.em.push()               # old value
                 self.rvalue()
                 if op in ("+", "-") and aty.kind in ("ptr", "arr"):
@@ -1222,6 +1306,9 @@ class Walker:
                     self.em.divmod_(op)
                 else:
                     self.em.binop(op)
+                if bits is not None:
+                    self.em.bits_set(bits[0], bits[1], bits[2], self.wid(aty))
+                    return aty
                 self.em.pop(LHS)
                 self.em.store(LHS, 0, ACC, self.wid(aty))
                 return aty
@@ -1345,14 +1432,20 @@ class Walker:
             if self.lval is None:
                 raise CError("line %d: %s needs an lvalue"
                              % (self.peek().line, op))
-            ty = self.lval
+            ty, bits = self.lval, self.lbits
             self.lval = None
             self.em.push()                       # the address
-            self.em.load(ACC, ACC, 0, self.wid(ty))
+            if bits is not None:
+                self.em.bits_get(bits[0], bits[1], bits[2], self.wid(ty))
+            else:
+                self.em.load(ACC, ACC, 0, self.wid(ty))
             step = ty.to.size(self.sc.structs) if ty.kind == "ptr" else 1
             self.em.imm(LHS, step)
             self.em.emit(self.em.recipe("alu", "add" if op == "++" else "sub"),
                          ACC, ACC, LHS)
+            if bits is not None:
+                self.em.bits_set(bits[0], bits[1], bits[2], self.wid(ty))
+                return ty
             self.em.pop(LHS)
             self.em.store(LHS, 0, ACC, self.wid(ty))
             return ty
@@ -1409,6 +1502,11 @@ class Walker:
             t = self.addr_operand()
             if self.lval is None:
                 raise CError("line %d: & needs an lvalue" % self.peek().line)
+            if self.lbits is not None:
+                # C99 6.5.3.2p1: a bit-field has no address -- what ACC holds
+                # is the storage unit's, which is not the same object
+                raise CError("line %d: & on a bit-field"
+                             % self.peek().line)
             self.lval = None
             return ptr(t)
         if p == "prim" and self.at("(") and self.istype(self.peek(1)):
@@ -1529,6 +1627,7 @@ class Walker:
                     self.em.imm(TMP, foff)
                     self.em.emit(self.em.recipe("alu", "add"), ACC, ACC, TMP)
                 self.lval = fty
+                self.lbits = st.bits.get(fname)
                 ty = fty
             elif p == "inc":
                 op = self.next().kind
@@ -1536,15 +1635,22 @@ class Walker:
                 if aty is None:
                     raise CError("line %d: %s needs an lvalue"
                                  % (self.peek().line, op))
+                bits = self.lbits
                 self.lval = None
                 self.em.push()
-                self.em.load(ACC, ACC, 0, self.wid(aty))
+                if bits is not None:
+                    self.em.bits_get(bits[0], bits[1], bits[2], self.wid(aty))
+                else:
+                    self.em.load(ACC, ACC, 0, self.wid(aty))
                 self.em.push()
                 step = aty.to.size(self.sc.structs) if aty.kind == "ptr" else 1
                 self.em.imm(ACC, step)
                 self.em.binop("+" if op == "++" else "-")
-                self.em.pop(LHS)
-                self.em.store(LHS, 0, ACC, self.wid(aty))
+                if bits is not None:
+                    self.em.bits_set(bits[0], bits[1], bits[2], self.wid(aty))
+                else:
+                    self.em.pop(LHS)
+                    self.em.store(LHS, 0, ACC, self.wid(aty))
                 self.em.imm(TMP, step)
                 self.em.emit(self.em.recipe("alu",
                                             "sub" if op == "++" else "add"),

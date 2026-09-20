@@ -129,6 +129,48 @@ class Emitter:
         else:
             self.emit(mn, ACC, LHS, ACC)
 
+    def bits_get(self, bitoff, width, signed, unit):
+        """ACC holds the address of a bit-field's storage unit; leave the
+        field's value in ACC.
+
+        Shift the field up to the top of the word and back down again: that
+        puts its own top bit where an arithmetic shift will copy it, which is
+        the whole of the sign question.  A bit-field has no address, so this
+        is the only way to read one."""
+        self.load(ACC, ACC, 0, unit)
+        self._bits_extract(bitoff, width, signed)
+
+    def _bits_extract(self, bitoff, width, signed):
+        up = 64 - bitoff - width
+        if up:
+            self.imm(LHS, up)
+            self.emit(self.recipe("alu", "shl"), ACC, ACC, LHS)
+        down = 64 - width
+        if down:
+            self.imm(LHS, down)
+            self.emit(self.recipe("alu", "shr" if signed else "lshr"),
+                      ACC, ACC, LHS)
+
+    def bits_set(self, bitoff, width, signed, unit):
+        """Address on the stack, new value in ACC.  Read, modify, write --
+        and leave the field's value, which is the value of the assignment
+        and is NOT the value assigned when it does not fit."""
+        mask = ((1 << width) - 1) << bitoff
+        if bitoff:
+            self.imm(LHS, bitoff)
+            self.emit(self.recipe("alu", "shl"), ACC, ACC, LHS)
+        self.imm(LHS, mask)
+        self.emit(self.recipe("alu", "and"), ACC, ACC, LHS)
+        self.pop(LHS)                             # the address
+        self.push(LHS)
+        self.load(TMP, LHS, 0, unit)
+        self.imm(LHS, ~mask & ((1 << (unit * 8)) - 1))
+        self.emit(self.recipe("alu", "and"), TMP, TMP, LHS)
+        self.emit(self.recipe("alu", "or"), ACC, ACC, TMP)
+        self.pop(LHS)
+        self.store(LHS, 0, ACC, unit)
+        self._bits_extract(bitoff, width, signed)
+
     def blockcopy(self, dst, src, n):
         """Copy `n` bytes from [src] to [dst].  The size is a compile-time
         constant, so this unrolls instead of calling a helper."""
