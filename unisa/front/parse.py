@@ -570,15 +570,15 @@ class Walker:
                 if not self.eat(","):
                     break
         self.expect(")")
-        self.sc.declare(name, Type("fn", ret=ret), "fn", sym=name)
+        self.sc.declare(name, Type("fn", ret=ret, n=1 if vararg else 0),
+                        "fn", sym=name)
         if self.at(";") or self.at(","):
             return "proto"                   # the caller owns the separator
-        if vararg:
-            raise CError("line %d: a variadic definition cannot reach its "
-                         "extra arguments in this subset" % self.peek().line)
         self.sc.push()
         self.off, self.maxoff = 0, 0
         self.fn_ret = ret
+        self.fn_nfixed = len(params) + (1 if ret.kind == "struct" else 0)
+        self.fn_vararg = vararg
         self.ret_label = self.em.new_label("ret_" + name + "_")
         self.frame_ix = self.em.prologue(name)
         # More arguments than there are argument registers: ALL of them go on
@@ -590,11 +590,13 @@ class Walker:
         sret = ret.kind == "struct"
         self.sret_off = 0
         base_k = 1 if sret else 0
-        stacked = len(params) + base_k > len(ARGREGS)
+        # A variadic function always takes its arguments on the stack: that is
+        # the only layout where the extra ones have addresses. [W-15]
+        stacked = vararg or len(params) + base_k > len(ARGREGS)
         if sret:
             self.sret_off = self.alloc(I64)
             if stacked:
-                self.em.load(ACC, FP, 16 + 8 * (len(params) + base_k - 1))
+                self.em.load(ACC, FP, 16)          # the hidden arg is first
                 self.em.store(FP, -self.sret_off, ACC)
             else:
                 self.em.store(FP, -self.sret_off, ARGREGS[0])
@@ -609,17 +611,14 @@ class Walker:
                 # and the callee copies it into its own slot so the parameter
                 # behaves like any other local [W-14]
                 if stacked:
-                    self.em.load(LHS, FP,
-                                 16 + 8 * (len(params) + base_k - 1 - k
-                                           - base_k))
+                    self.em.load(LHS, FP, 16 + 8 * (k + base_k))
                 else:
                     self.em.emit("mov", LHS, ARGREGS[k + base_k])
                 self.em.imm(ACC, off)
                 self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
                 self.em.blockcopy(ACC, LHS, ty.size(self.sc.structs))
             elif stacked:
-                self.em.load(ACC, FP,
-                             16 + 8 * (len(params) + base_k - 1 - k - base_k))
+                self.em.load(ACC, FP, 16 + 8 * (k + base_k))
                 self.em.store(FP, -off, ACC, w)
             else:
                 self.em.store(FP, -off, ARGREGS[k + base_k], w)
@@ -1476,6 +1475,8 @@ class Walker:
         self.expect("(")
         if name == "printf":
             return self.printf()
+        if name in ("va_start", "va_arg", "va_end"):
+            return self.va(name)
         if name in INTRINSIC:
             return self.intrinsic(INTRINSIC[name])
         if name in ARGV_INTRINSIC:
@@ -1516,7 +1517,21 @@ class Walker:
         self.expect(")")
         s = self.sc.lookup(name)
         indirect = s is not None and s.kind != "fn"
-        stacked = len(args) > len(ARGREGS)
+        callee = self.sc.lookup(name)
+        stacked = len(args) > len(ARGREGS) or (
+            callee is not None and callee.ty.kind == "fn" and callee.ty.n == 1)
+        if stacked:
+            # Pushing in source order leaves arg[n-1] nearest the return
+            # address.  Reverse the block so arg[k] is always at [FP+16+8k],
+            # a layout the callee can index without knowing n -- which is
+            # what varargs will need. [W-13]
+            n = len(args)
+            for i in range(n // 2):
+                j = n - 1 - i
+                self.em.load(TMP, SP, 8 * i)
+                self.em.load(LHS, SP, 8 * j)
+                self.em.store(SP, 8 * i, LHS)
+                self.em.store(SP, 8 * j, TMP)
         if not stacked:
             # Args are popped straight into their own registers, highest
             # first, so a pop can never clobber one already placed.
@@ -1564,6 +1579,62 @@ class Walker:
             self.em.imm(ARGREGS[k], 0)
         self.em.emit(".sys", op, ARGREGS[0], ARGREGS[1], ARGREGS[2])
         return I64
+
+    def va(self, which):
+        """va_start / va_arg / va_end.  An argument list this subset can walk
+        exists only because a variadic function takes everything on the stack:
+        arg[k] is at [FP + 16 + 8k], so the first variadic one is at a known
+        offset and `va_list` is just a pointer to it. [W-15]"""
+        if which == "va_end":
+            self.rvalue()
+            self.expect(")")
+            self.em.imm(ACC, 0)
+            return I32
+        if which == "va_start":
+            if not getattr(self, "fn_vararg", False):
+                raise CError("line %d: va_start outside a variadic function"
+                             % self.peek().line)
+            self.unary()                       # the va_list lvalue
+            if self.lval is None:
+                raise CError("line %d: va_start needs an lvalue"
+                             % self.peek().line)
+            self.lval = None
+            self.em.push()
+            if self.eat(","):
+                self.rvalue()                  # the last named parameter
+            self.expect(")")
+            self.em.imm(ACC, 16 + 8 * self.fn_nfixed)
+            self.em.emit(self.em.recipe("alu", "add"), ACC, FP, ACC)
+            self.em.pop(LHS)
+            self.em.store(LHS, 0, ACC)
+            self.em.imm(ACC, 0)
+            return I32
+        # va_arg(ap, T): read *ap as T, then step ap on by one slot
+        self.unary()
+        if self.lval is None:
+            raise CError("line %d: va_arg needs an lvalue" % self.peek().line)
+        self.lval = None
+        self.expect(",")
+        ty = self.abstract_type()
+        self.expect(")")
+        self.em.push()                         # &ap
+        self.em.load(ACC, ACC, 0)              # ap
+        self.em.push()                         # ap
+        self.em.load(ACC, ACC, 0, self.wid(ty))
+        if ty.kind in UNSIGNED:
+            self.em.zext(self.wid(ty))
+        self.em.pop(LHS)                       # ap
+        self.em.push()                         # value
+        self.em.imm(ACC, 8)
+        self.em.emit(self.em.recipe("alu", "add"), ACC, LHS, ACC)
+        self.em.pop(LHS)                       # value
+        self.em.push()                         # ap + 8
+        self.em.emit("mov", TMP, LHS)          # keep the value
+        self.em.pop(ACC)                       # ap + 8
+        self.em.pop(LHS)                       # &ap
+        self.em.store(LHS, 0, ACC)
+        self.em.emit("mov", ACC, TMP)
+        return ty
 
     def printf(self):
         """[W-9] desugared against the static format string."""
