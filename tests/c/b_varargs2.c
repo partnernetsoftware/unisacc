@@ -20,8 +20,12 @@ long addl(int n, ...) {
     va_end(ap);
     return s;
 }
+int (*vp)(int, ...) = &addup;      /* called through a pointer, still stacked */
+int fred(int p) { return p + 1; }
+int (*fp)(int) = &fred;
 int main() {
     printf("%d %d %d %ld\n", addup(3, 1, 2, 3), addup(1, 42),
            addup(5, 1, 1, 1, 1, 1), addl(2, 100000000000L, 1L));
+    printf("%d %d %d\n", vp(3, 1, 2, 3), fp(1), (*fp)(2));
     return 0;
 }

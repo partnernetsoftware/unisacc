@@ -244,7 +244,9 @@ class Walker:
                     ty = Type("arr", to=ty, n=n)
                 return ptr(ty), name
             if self.at("("):
+                va = self._has_ellipsis()
                 self.skip_parens()
+                return ptr(Type("fn", ret=ty, n=1 if va else 0)), name
             return ptr(Type("fn", ret=ty)), name
         # a prototype may name no parameter: `int f(int, char *);`
         name = self.next().text if self.at("id") else \
@@ -268,6 +270,23 @@ class Walker:
         return ty, name
 
     # -- top level --------------------------------------------------------
+    def _has_ellipsis(self):
+        """At a `(`: does this parameter list end in `...`?  A call through a
+        pointer has to use the same convention the callee compiled with."""
+        depth, j = 0, self.i
+        while j < len(self.tk):
+            k = self.tk[j].kind
+            if k == "(":
+                depth += 1
+            elif k == ")":
+                depth -= 1
+                if depth == 0:
+                    return False
+            elif k == "..." and depth == 1:
+                return True
+            j += 1
+        return False
+
     def skip_parens(self):
         depth = 0
         while True:
@@ -1203,6 +1222,12 @@ class Walker:
             self.next()
             t = self.unary()
             self.load_if_lval()
+            if t.kind == "ptr" and t.to is not None and t.to.kind == "fn":
+                # `*f` on a function pointer is the function itself, and a
+                # function designator IS its address -- there is nothing to
+                # load (C99 6.5.3.2p4)
+                self.lval = None
+                return self.postfix_chain(t)
             self.lval = t.to if t.kind in ("ptr", "arr") else I64
             return self.postfix_chain(self.lval)
         if p == "addr":
@@ -1455,14 +1480,26 @@ class Walker:
             if not self.eat(","):
                 break
         self.expect(")")
-        if args > len(ARGREGS):
-            raise CError("line %d: at most %d arguments through a pointer"
-                         % (self.peek().line, len(ARGREGS)))
-        for k in range(args - 1, -1, -1):
-            self.em.pop(ARGREGS[k])
-            self.em.arg(k, ARGREGS[k])
-        self.em.pop(CALLEE)
-        self.em.call_reg(CALLEE)
+        fty = ty.to if ty is not None and ty.kind == "ptr" else ty
+        variadic = fty is not None and fty.kind == "fn" and fty.n == 1
+        if args > len(ARGREGS) or variadic:
+            # the callee sits above the block; reverse the block so arg[k] is
+            # at [FP+16+8k], then fetch the callee from above it [W-13]
+            for i in range(args // 2):
+                j = args - 1 - i
+                self.em.load(TMP, SP, 8 * i)
+                self.em.load(LHS, SP, 8 * j)
+                self.em.store(SP, 8 * i, LHS)
+                self.em.store(SP, 8 * j, TMP)
+            self.em.load(CALLEE, SP, 8 * args)
+            self.em.call_reg(CALLEE)
+            self.em.frame(-8 * (args + 1))
+        else:
+            for k in range(args - 1, -1, -1):
+                self.em.pop(ARGREGS[k])
+                self.em.arg(k, ARGREGS[k])
+            self.em.pop(CALLEE)
+            self.em.call_reg(CALLEE)
         rt = I64
         if ty is not None:
             if ty.kind == "ptr" and ty.to is not None and ty.to.kind == "fn":
@@ -1489,12 +1526,17 @@ class Walker:
             self.em.emit(".argv", ACC, ACC)
             return ptr(I8)
         s0 = self.sc.lookup(name)
-        if s0 is not None and s0.kind != "fn":
+        indirect = s0 is not None and s0.kind != "fn"
+        if indirect:
+            # Push the POINTER VALUE, do not keep it in a register: a nested
+            # call while the arguments are being evaluated would clobber it.
             if s0.kind == "global":
-                self.em.lea(CALLEE, s0.sym)
+                self.em.lea(ACC, s0.sym)
             else:
                 self.em.imm(TMP, s0.off)
-                self.em.emit(self.em.recipe("alu", "sub"), CALLEE, FP, TMP)
+                self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, TMP)
+            self.em.load(ACC, ACC, 0)
+            self.em.push()
         sret_ty = None
         s_pre = self.sc.lookup(name)
         if s_pre is not None and s_pre.ty.kind == "fn" \
@@ -1515,11 +1557,12 @@ class Walker:
             if not self.eat(","):
                 break
         self.expect(")")
-        s = self.sc.lookup(name)
-        indirect = s is not None and s.kind != "fn"
-        callee = self.sc.lookup(name)
-        stacked = len(args) > len(ARGREGS) or (
-            callee is not None and callee.ty.kind == "fn" and callee.ty.n == 1)
+        s = s0
+        fty = s.ty if s is not None else None
+        if fty is not None and fty.kind == "ptr" and fty.to is not None:
+            fty = fty.to
+        variadic = fty is not None and fty.kind == "fn" and fty.n == 1
+        stacked = len(args) > len(ARGREGS) or variadic
         if stacked:
             # Pushing in source order leaves arg[n-1] nearest the return
             # address.  Reverse the block so arg[k] is always at [FP+16+8k],
@@ -1539,13 +1582,16 @@ class Walker:
                 self.em.pop(ARGREGS[k])
                 self.em.arg(k, ARGREGS[k])
         if indirect:
-            self.em.load(CALLEE, CALLEE, 0)      # CALLEE held the address
+            if stacked:
+                self.em.load(CALLEE, SP, 8 * len(args))
+            else:
+                self.em.pop(CALLEE)
             self.em.call_reg(CALLEE)
         else:
             self.called.setdefault(name, self.peek().line)
             self.em.call(name)
         if stacked:
-            self.em.frame(-8 * len(args))        # the caller cleans up
+            self.em.frame(-8 * (len(args) + (1 if indirect else 0)))
         if sret_ty is not None:
             self.em.imm(ACC, toff)
             self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
