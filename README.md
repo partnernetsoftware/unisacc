@@ -136,7 +136,7 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 207   wrong 0   unsupported 3   knownfail 10   slow 0
+corpus 220   pass 207   wrong 0   unsupported 2   knownfail 11   slow 0
 ```
 
 The programs are compiled to a real image for this host and **executed**, not
@@ -145,8 +145,7 @@ real CPU finishes instantly takes a quarter of an hour there. `wrong` is the
 only failure — a program that compiled and then disagreed.
 `unsupported` is the honest coverage gap (the front end refuses the program);
 `tests/corpus.baseline` is a ratchet, so that number may only go down.
-The three that remain are `long long` shift promotion, a VLA and a wide
-string literal; `knownfail` is the list we are deliberately not chasing,
+The two that remain are a VLA and a wide string literal; `knownfail` is the list we are deliberately not chasing,
 mostly floating point and GCC extensions.
 
 ## Prior art

@@ -139,7 +139,16 @@ def type_label(t1, op, t2):
         if t1 in NUM and t2 in NUM and not (t1 == "i64" and t2 == "i64"):
             return _arith(t1, t2)
         return "ptr" if (t1 == "i64" and t2 == "i64") else "illegal"
-    if op in ("|", "^", "<<", ">>"):
+    if op in ("<<", ">>"):
+        # [G-2 corrected] C99 6.5.7p3: the integer promotions are performed on
+        # EACH operand and the result is the type of the PROMOTED LEFT one.
+        # The usual arithmetic conversions do NOT apply here, so
+        # `(short)1 << 1L` is an int, not a long -- which is the whole of
+        # corpus 00200.  acc read 1.000 while this was wrong.
+        if t1 in NUM and t2 in NUM:
+            return _promote(t1)
+        return "illegal"
+    if op in ("|", "^"):
         if t1 in NUM and t2 in NUM:
             return _arith(t1, t2)
         return "illegal"

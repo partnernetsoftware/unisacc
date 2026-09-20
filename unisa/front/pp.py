@@ -330,8 +330,7 @@ def _subst(body, params, args):
     if "##" in body:
         return _paste(body, amap)
     for pn, av in zip(params, args):
-        body = re.sub(r"\b%s\b" % re.escape(pn), lambda m, a=av: _paren(a),
-                      body)
+        body = re.sub(r"\b%s\b" % re.escape(pn), lambda m, a=av: a, body)
     return body
 
 

@@ -15,9 +15,11 @@ PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"; export PYTHONPATH
 for f in tests/c/*.c examples/*.c; do
     b=$(basename "$f" .c)
     [ "$b" = "host" ] && continue
-    # our compiler has no #include yet, so the probes call printf bare;
-    # give the REFERENCE compiler the declaration it insists on, nothing else
-    { echo '#include <stdio.h>'; cat "$f"; } > "$T/$b.ref.c"
+    # the probes call printf and the string functions bare, because we link
+    # our own; give the REFERENCE compiler the declarations it insists on --
+    # clang makes an implicit declaration an ERROR -- and nothing else
+    { echo '#include <stdio.h>'; echo '#include <string.h>'
+      echo '#include <stdlib.h>'; cat "$f"; } > "$T/$b.ref.c"
     if ! $CC -w -std=c99 -o "$T/$b" "$T/$b.ref.c" 2>"$T/$b.cc"; then
         printf "  skip %-14s (reference rejects: %s)\n" "$b" \
             "$(grep -m1 error "$T/$b.cc" | cut -c1-40)"; continue
