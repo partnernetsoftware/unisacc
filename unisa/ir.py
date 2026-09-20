@@ -129,6 +129,17 @@ class Emitter:
         else:
             self.emit(mn, ACC, LHS, ACC)
 
+    def blockcopy(self, dst, src, n):
+        """Copy `n` bytes from [src] to [dst].  The size is a compile-time
+        constant, so this unrolls instead of calling a helper."""
+        off = 0
+        while off < n:
+            w = 8 if n - off >= 8 else (4 if n - off >= 4 else
+                                        (2 if n - off >= 2 else 1))
+            self.load(TMP, src, off, w)
+            self.store(dst, off, TMP, w)
+            off += w
+
     def zext(self, width):
         """Clear the bits above `width` bytes.  A narrow load sign-extends --
         which is right for `char` and wrong for `unsigned char` -- and a cast

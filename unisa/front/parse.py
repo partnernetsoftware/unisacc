@@ -564,13 +564,6 @@ class Walker:
                     break
                 b = self.declspec()
                 ty, pn = self.declarator(b, named=False)
-                if ty.kind == "struct":
-                    # passing an aggregate by value needs a copy the caller
-                    # makes and a layout both ends agree on; refusing is
-                    # better than compiling it into something that crashes
-                    raise CError("line %d: struct parameters are passed by "
-                                 "value, which this subset does not do"
-                                 % self.peek().line)
                 if ty.kind == "arr":
                     ty = ptr(ty.to)     # C99 6.7.5.3p7: a parameter of array
                 params.append((ty, pn))   # type is adjusted to pointer [E-33]
@@ -585,24 +578,51 @@ class Walker:
                          "extra arguments in this subset" % self.peek().line)
         self.sc.push()
         self.off, self.maxoff = 0, 0
+        self.fn_ret = ret
         self.ret_label = self.em.new_label("ret_" + name + "_")
         self.frame_ix = self.em.prologue(name)
         # More arguments than there are argument registers: ALL of them go on
         # the tape stack instead, pushed in source order, so arg[n-1] sits
         # just above the return address.  The callee knows n -- it is its own
         # parameter count -- so no shuffling is needed at either end. [W-13]
-        stacked = len(params) > len(ARGREGS)
+        # A function returning a struct takes a hidden first argument: the
+        # address the caller wants the result written to. [W-14]
+        sret = ret.kind == "struct"
+        self.sret_off = 0
+        base_k = 1 if sret else 0
+        stacked = len(params) + base_k > len(ARGREGS)
+        if sret:
+            self.sret_off = self.alloc(I64)
+            if stacked:
+                self.em.load(ACC, FP, 16 + 8 * (len(params) + base_k - 1))
+                self.em.store(FP, -self.sret_off, ACC)
+            else:
+                self.em.store(FP, -self.sret_off, ARGREGS[0])
         for k, (ty, pn) in enumerate(params):
             self.sc.act("param", self.peek())
             off = self.alloc(ty)
             self.sc.declare(pn, ty, "local", off)
             w = (min(8, ty.size(self.sc.structs))
                  if ty.kind in NARROW else 8)
-            if stacked:
-                self.em.load(ACC, FP, 16 + 8 * (len(params) - 1 - k))
+            if ty.kind == "struct":
+                # by value: what arrives is the address of the caller's copy,
+                # and the callee copies it into its own slot so the parameter
+                # behaves like any other local [W-14]
+                if stacked:
+                    self.em.load(LHS, FP,
+                                 16 + 8 * (len(params) + base_k - 1 - k
+                                           - base_k))
+                else:
+                    self.em.emit("mov", LHS, ARGREGS[k + base_k])
+                self.em.imm(ACC, off)
+                self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
+                self.em.blockcopy(ACC, LHS, ty.size(self.sc.structs))
+            elif stacked:
+                self.em.load(ACC, FP,
+                             16 + 8 * (len(params) + base_k - 1 - k - base_k))
                 self.em.store(FP, -off, ACC, w)
             else:
-                self.em.store(FP, -off, ARGREGS[k], w)
+                self.em.store(FP, -off, ARGREGS[k + base_k], w)
         self.block(new_scope=False)
         self.em.label(self.ret_label)
         self.em.epilogue()
@@ -658,6 +678,13 @@ class Walker:
             self.next()
             if not self.at(";"):
                 self.rvalue()
+                if getattr(self, "fn_ret", None) is not None \
+                        and self.fn_ret.kind == "struct":
+                    # ACC is the address of the value; copy it where the
+                    # caller asked [W-14]
+                    self.em.load(LHS, FP, 0 - self.sret_off)
+                    self.em.blockcopy(LHS, ACC,
+                                      self.fn_ret.size(self.sc.structs))
             self.expect(";")
             self.em.jump(self.ret_label)
         elif p == "goto":
@@ -998,7 +1025,12 @@ class Walker:
                 self.em.push()
                 self.rvalue()
                 self.em.pop(LHS)
-                self.em.store(LHS, 0, ACC, self.wid(aty))
+                if aty.kind == "struct":
+                    # `b = a` copies the whole object; both sides are
+                    # addresses, because load_if_lval leaves aggregates alone
+                    self.em.blockcopy(LHS, ACC, aty.size(self.sc.structs))
+                else:
+                    self.em.store(LHS, 0, ACC, self.wid(aty))
                 return aty
             if nxt in ASSIGN_OPS:
                 op = ASSIGN_OPS[self.next().kind]
@@ -1462,7 +1494,19 @@ class Walker:
             else:
                 self.em.imm(TMP, s0.off)
                 self.em.emit(self.em.recipe("alu", "sub"), CALLEE, FP, TMP)
+        sret_ty = None
+        s_pre = self.sc.lookup(name)
+        if s_pre is not None and s_pre.ty.kind == "fn" \
+                and s_pre.ty.ret is not None and s_pre.ty.ret.kind == "struct":
+            sret_ty = s_pre.ty.ret
         args = []
+        if sret_ty is not None:
+            # the hidden destination goes first, so it is argument 0
+            toff = self.alloc(sret_ty)
+            self.em.imm(ACC, toff)
+            self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
+            self.em.push()
+            args.append(1)
         while not self.at(")"):
             self.rvalue()
             self.em.push()
@@ -1487,6 +1531,11 @@ class Walker:
             self.em.call(name)
         if stacked:
             self.em.frame(-8 * len(args))        # the caller cleans up
+        if sret_ty is not None:
+            self.em.imm(ACC, toff)
+            self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
+            self.lval = None
+            return self.postfix_chain(sret_ty)
         rt = I64
         if s is not None:
             t = s.ty
