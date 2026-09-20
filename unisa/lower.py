@@ -82,6 +82,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     data.extend(b"\x00" * (SCRATCH + PRINTMAX +
                            (WIN_EXTRA - SCRATCH - PRINTMAX if win else 0)))
     tp = TargetProgram(target, bytes(data), tape.syms)
+    tp.src_os = getattr(tape, "src_os", tp.os)
     tp.data_len = len(data)
     # the tape stack is zero-filled, so it is bss: it costs image size but not
     # file size, which is the difference between a 4 KB .exe and a 68 KB one
@@ -94,7 +95,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     def R(x):
         return rmap[x] if x in rmap else x
 
-    def syscall_seq(op, arg_srcs):
+    def syscall_seq(op, arg_srcs, extra=None):
         f = facts(oracle, op, os_, arch, drive)
         args = (f["arg0"], f["arg1"], f["arg2"])
         if fault == "win_argregs" and os_ == "win":
@@ -112,9 +113,11 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             tp.emit("winsave", SAVE)
         for i, src in enumerate(arg_srcs):
             tp.emit("setreg", args[i], src, role="arg%d" % i)
+        if extra is not None:
+            tp.emit("setreg", extra[0], extra[1], role="arg3")
         tp.emit("gate", form=f["form"], gate=gate, symbol=f["symbol"],
                 winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
-                hstd=HSTD, written=WRITTEN)
+                ret=f["ret"], hstd=HSTD, written=WRITTEN)
         if win:
             tp.emit("winrest", SAVE, f["ret"])
 
@@ -151,8 +154,20 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         elif o == ".sys":
             for k in range(3):
                 tp.emit("setmem", [SCR0, SCR1, PRINTLEN][k], R(a[1 + k]))
-            syscall_seq(a[0], [("mem", SCR0), ("mem", SCR1),
-                               ("mem", PRINTLEN)])
+            if a[0] == "open" and (os_, arch) == ("lnx", "arm64"):
+                # Linux/arm64 has no `open` at all: the number in the catalog
+                # is `openat`, whose FIRST argument is a directory fd.  So
+                # every argument shifts up one and the mode ends up in a
+                # fourth register, which the abi net does not model -- its
+                # gold has three argument heads [C-1].  The shift is
+                # structural, like the relocation arithmetic, so it lives
+                # here rather than in the table.  AT_FDCWD = -100.
+                syscall_seq("open", [("imm", -100), ("mem", SCR0),
+                                     ("mem", SCR1)],
+                            extra=("x3", ("mem", PRINTLEN)))
+            else:
+                syscall_seq(a[0], [("mem", SCR0), ("mem", SCR1),
+                                   ("mem", PRINTLEN)])
             tp.emit("mov", C.REGMAP[arch][0],
                     facts(oracle, a[0], os_, arch, drive)["ret"])
         elif o == ".exit":

@@ -62,7 +62,8 @@ for f in "$SRC"/*.c; do
             chmod +x "$T/x"
             command -v codesign >/dev/null && \
                 codesign -f -s - "$T/x" >/dev/null 2>&1
-            got=$(runlim "$T/x" 2>/dev/null); code=$?
+            # in $T, not the repo: some of these programs write files
+            got=$(cd "$T" && runlim ./x 2>/dev/null); code=$?
         else
             got=""; code=1
         fi

@@ -21,9 +21,16 @@ def _load(names=ALL, wdir=WEIGHTS):
     missing = []
     for n in names:
         p = os.path.join(wdir, n + ".f32.unisa")
-        if os.path.exists(p):
+        if not os.path.exists(p):
+            missing.append(n)
+            continue
+        try:
             uns1.load_into(nets[n], p)
-        else:
+        except AssertionError:
+            # The gold vocabularies grow as the C subset does, which changes a
+            # net's shape.  A stale trained file is missing, not fatal: the
+            # shipping path constructs its weights anyway, and the control arm
+            # is re-trained on purpose when someone wants the comparison.
             missing.append(n)
     return nets, missing
 
@@ -503,7 +510,7 @@ def main(argv=None):
     tp.add_argument("--target", default="lnx/x86_64")
     tp.add_argument("-I", action="append", default=[],
                     metavar="DIR", help="header search path")
-    tp.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
+    tp.add_argument("--drive", default="built", choices=["gold", "spec", "combo", "built"])
     tp.set_defaults(fn=cmd_tape)
 
     r = sub.add_parser("run")
@@ -512,7 +519,7 @@ def main(argv=None):
     r.add_argument("-I", action="append", default=[],
                     metavar="DIR", help="header search path")
     r.add_argument("--fold", action="store_true")
-    r.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
+    r.add_argument("--drive", default="built", choices=["gold", "spec", "combo", "built"])
     r.add_argument("--fault", default=None, choices=list(FAULTS))
     r.add_argument("-v", "--verbose", action="store_true")
     # NOT argparse.REMAINDER: that swallows `--fold` into the program's argv
@@ -525,7 +532,7 @@ def main(argv=None):
     cp.add_argument("--target", default="lnx/x86_64")
     cp.add_argument("-I", action="append", default=[],
                     metavar="DIR", help="header search path")
-    cp.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
+    cp.add_argument("--drive", default="built", choices=["gold", "spec", "combo", "built"])
     cp.add_argument("--from-tape", action="store_true",
                     help="input is a .tape, not C (lower + assemble only)")
     cp.set_defaults(fn=cmd_compile)
@@ -537,7 +544,7 @@ def main(argv=None):
     ft.add_argument("--arch", action="append", default=[],
                     help="repeatable; default x86_64 then arm64")
     ft.add_argument("-I", action="append", default=[], metavar="DIR")
-    ft.add_argument("--drive", default="spec",
+    ft.add_argument("--drive", default="built",
                     choices=["gold", "spec", "combo", "built"])
     ft.set_defaults(fn=cmd_fat)
 
@@ -550,7 +557,7 @@ def main(argv=None):
     lw = sub.add_parser("lower")
     lw.add_argument("op")
     lw.add_argument("--target", default="lnx/x86_64")
-    lw.add_argument("--drive", default="spec", choices=["gold", "spec", "combo", "built"])
+    lw.add_argument("--drive", default="built", choices=["gold", "spec", "combo", "built"])
     lw.set_defaults(fn=cmd_lower)
 
     bw = sub.add_parser("build-weights")

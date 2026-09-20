@@ -641,6 +641,10 @@ X-2 带来的后果全是设计意图：
 
 **I-18** **WinAPI 调用是真调用**：它按 AAPCS64 / Win64 破坏全部 volatile 寄存器，而我们八个 tape 寄存器**全都**是 volatile，**tape 栈指针 r7 也在内**。所以 win 的 gate 必须前后夹一个保存区，tape 必须有**自己的栈**（不能像别处那样把 SP 绑到进程栈），并且要把 tape 说的 POSIX 形状翻译成 kernel32 的形状（`fd → HANDLE`、`WriteFile` 的第四个出参、返回写入字节数而非 BOOL）。
 
+**I-20** **`open` 是最不可移植的系统调用，三个 OS 三个样子**：① `O_CREAT/O_TRUNC/O_APPEND` 的**位值** Linux 与 BSD 不同（64/512/1024 vs 512/1024/8），我们曾把 Linux 的硬编进 `include/stdio.h`，于是 macOS 上 `fopen("w")` 静默失败；② **Linux/arm64 根本没有 `open`**，目录里的号是 `openat`，第一个参数是目录 fd（`AT_FDCWD = -100`），**所有参数往后移一位**，mode 落在第四个寄存器——而 abi 网只有三个参数头 [C-1]，所以这一移位是**结构性代码**，在 lowering 里；③ **Windows 根本没有 open(2)**，gate 是 `CreateFileA`，它要的是 dwDesiredAccess 与 dwCreationDisposition，而且 disposition 是**第五个**参数（得从 r8/x2 抖到影子空间）。第三条的翻译放在 **C 库里**（`#ifdef _WIN32`）而不是编码器里，因为只有它知道在为哪个平台编译；代价是这类源码像 `host.c` 一样**每个目标一份 tape**，解释器因此要记住 tape 是为哪个 OS 编的（`src_os`）。
+
+**I-21** **gate 有返回值**，而目标机解释器曾经把它丢掉：结果是返回寄存器里留着**系统调用号**。`write` 与 `exit` 不用返回值，所以这个 bug 活了很久，直到一个程序用 `open()` 的结果去 `write`，它就把 0x2000005 当成了 fd。与 [TP-6] 同类：**解释器比真机宽容的每一处，都是一个迟早会爆的雷**。
+
 **I-19** **一个文件带多条 ISA**：macOS 的标准容器是 Mach-O universal（fat）——大端的 slice 描述表 + 各自按页对齐的普通镜像，内核挑 slice，`codesign -f -s -` 会把每个 slice 都签掉。这是多 ISA 主张**诚实的前半**：它是**一个 OS 之内**的多架构；cosmopolitan 那种同时是 ELF / Mach-O / PE 的文件是另一个问题，我们还没做。
 
 **I-15** **PIE 的 Mach-O 必须告诉 dyld 怎么 rebase**：既无 `LC_DYLD_INFO` 也无 chained fixups 时，dyld 走**旧的重定位路径**，去解引用我们从未发射的 `LC_DYSYMTAB` —— 在我们第一条指令之前**就在 dyld 里面崩了**（`forEachRebase_Relocations`，EXC_BAD_ACCESS at 0x48，即空 dysymtab 上的 `locreloff`）。**Darwin 25 容忍这个缺省，Darwin 23/24 不容忍**。办法是把 `LC_DYLD_INFO_ONLY` / `LC_SYMTAB` / `LC_DYSYMTAB` 三条**全零地**发出来，dyld 于是走 opcode 路径、发现无事可做。字符串表给 8 个 NUL（字符串表不能为空）。
@@ -774,7 +778,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **P-5** 组合等价 `C[N] ≡ C[O]` | **已证明**（由 P-3 + P-1 同余，无需对 C 归纳） | §1.4 |
 | **P-7** 目标等价 | **实证**（7 例 × 6 目标全同；三种故障注入均退化到 4/6） | E-17 |
 | **P-2** key 全域性 | **未证明** —— 运行时无条件断言。**唯一需要对走查器做真推理的义务** | §1.4 · O-3 |
-| **P-6** `gold ≡ C99` | **本实验不声称**。已九次由实现暴露缺陷（3 次在 gold、6 次在走查器），而 acc 全程满分。外部语料给出可测数字：220 例 pass 196 / wrong 0 / unsupported 17 | E-2 · E-15 · E-16 · **E-30** |
+| **P-6** `gold ≡ C99` | **本实验不声称**。已九次由实现暴露缺陷（3 次在 gold、6 次在走查器），而 acc 全程满分。外部语料给出可测数字：220 例 pass 199 / wrong 0 / unsupported 14 | E-2 · E-15 · E-16 · **E-30** |
 | **P-8a** `h_min(f)` 的组合刻画 | **不是开放问题**：即（多值）两级逻辑最小化，NP-complete 且难近似 —— [R-1] | §1.4 · Masek'79 · Brayton et al.'84 |
 | **P-8b** 可达性分离（精确解存在但 SGD 不可达） | **有实例**；但这是**已建立的定理家族**，我们只贡献真实编译器表上的实例 —— [R-1] | E-18（s2：12.8× 参数仍 0.8143）· Shalev-Shwartz et al.'17 |
 | **P-8c** 是否存在 `O(h_min)` 构造算法 | **一般情形已被难近似结果排除** —— [R-1] | §1.4 · Allender et al. JCSS'08 |

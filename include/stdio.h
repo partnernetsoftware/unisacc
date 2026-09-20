@@ -64,15 +64,74 @@ static long fread(void *p, long sz, long n, FILE *f) {
     return got / sz;
 }
 
+/* O_* are not portable numbers: Linux and the BSDs picked different bits,
+   and we hardcoded Linux's.  On macOS that turned "w" into flags nobody
+   accepts; the file was never created and every read of it came back
+   empty. */
+#ifdef __linux__
+#define _U_O_CREAT   64
+#define _U_O_TRUNC   512
+#define _U_O_APPEND  1024
+#else
+#define _U_O_CREAT   512
+#define _U_O_TRUNC   1024
+#define _U_O_APPEND  8
+#endif
+
 static FILE *fopen(const char *path, const char *mode) {
     int fd;
+#ifdef _WIN32
+    /* Windows has no open(2), and CreateFileA wants its own shapes.  They
+       are built HERE and not in the encoder, because this is the only place
+       that knows whether the program is being compiled for Windows. */
+    long access;
+    long disp;
+    access = 0x80000000;                  /* GENERIC_READ  */
+    disp = 3;                             /* OPEN_EXISTING */
+    if (mode[0] == 119) { access = 0x40000000; disp = 2; }   /* 'w' CREATE_ALWAYS */
+    if (mode[0] == 97)  { access = 0x40000000; disp = 4; }   /* 'a' OPEN_ALWAYS   */
+    fd = __open((char *)path, access, disp);
+#else
     int flags;
-    flags = 0;
-    if (mode[0] == 119) flags = 577;      /* 'w': O_WRONLY|O_CREAT|O_TRUNC */
-    if (mode[0] == 97) flags = 521;       /* 'a': O_WRONLY|O_CREAT|O_APPEND */
-    fd = __open((char *)path, flags);
+    flags = 0;                            /* 'r': O_RDONLY */
+    if (mode[0] == 119)                   /* 'w' */
+        flags = 1 | _U_O_CREAT | _U_O_TRUNC;
+    if (mode[0] == 97)                    /* 'a' */
+        flags = 1 | _U_O_CREAT | _U_O_APPEND;
+    /* 0644.  Passing no mode at all left it at 0, so the file we had just
+       created could not be opened again. */
+    fd = __open((char *)path, flags, 420);
+#endif
     if (fd < 0) return NULL;
     return (FILE *)(long)fd;
+}
+
+/* Unbuffered: a FILE * here is a file descriptor, so there is nowhere to
+   keep a buffer and every character costs a read.  Correct, not fast. */
+static int fgetc(FILE *f) {
+    unsigned char c;
+    if (fread(&c, 1, 1, f) != 1) return EOF;
+    return (int)c;
+}
+
+static int getc(FILE *f) { return fgetc(f); }
+static int getchar(void) { return fgetc(stdin); }
+
+static char *fgets(char *s, int n, FILE *f) {
+    int i;
+    int c;
+    if (n <= 0) return NULL;
+    i = 0;
+    while (i < n - 1) {
+        c = fgetc(f);
+        if (c == EOF) break;
+        s[i] = (char)c;
+        i = i + 1;
+        if (c == 10) break;               /* '\n' ends the line, and stays */
+    }
+    if (i == 0) return NULL;
+    s[i] = 0;
+    return s;
 }
 
 static int fclose(FILE *f) { return __close(_unisa_fd(f)); }

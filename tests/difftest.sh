@@ -9,7 +9,9 @@ CC=${CC:-cc}
 U="python3 -m unisa"
 DRIVE=${DRIVE:-built}
 pass=0; fail=0; unsup=0
-T=$(mktemp -d)
+T=$(mktemp -d); R=$(pwd)
+# `python3 -m unisa` resolves against the cwd, and we are about to leave it
+PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"; export PYTHONPATH
 for f in tests/c/*.c examples/*.c; do
     b=$(basename "$f" .c)
     [ "$b" = "host" ] && continue
@@ -20,8 +22,9 @@ for f in tests/c/*.c examples/*.c; do
         printf "  skip %-14s (reference rejects: %s)\n" "$b" \
             "$(grep -m1 error "$T/$b.cc" | cut -c1-40)"; continue
     fi
-    want=$("$T/$b" 2>/dev/null); wcode=$?
-    got=$($U run "$f" --drive "$DRIVE" 2>"$T/$b.err"); gcode=$?
+    # in $T, not the repo: some probes write files
+    want=$(cd "$T" && ./"$b" 2>/dev/null); wcode=$?
+    got=$(cd "$T" && $U run "$R/$f" --drive "$DRIVE" 2>"$T/$b.err"); gcode=$?
     if [ ! -s "$T/$b.err" ] && [ "$got" = "$want" ] && [ "$gcode" = "$wcode" ]; then
         pass=$((pass+1)); printf "  ok   %-14s %s\n" "$b" "$(echo "$want" | head -1)"
     elif [ -s "$T/$b.err" ]; then

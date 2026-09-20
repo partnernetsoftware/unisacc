@@ -9,7 +9,7 @@ argument register or a wrong gate lands here as a trap or as wrong bytes.
 """
 from . import catalog as C
 from .tape import MEM_SIZE, STACK_TOP, DATA_BASE
-from .vm import Halt, s64, u64, MASK
+from .vm import Halt, s64, u64, MASK, open_args
 
 # the machine's own ABI -- never read from the nets [X-1]
 ABI_ARGS = {
@@ -33,6 +33,7 @@ class Machine:
     def __init__(self, tp, max_steps=20_000_000, argv=None):
         self.tp = tp
         self.os, self.arch = tp.os, tp.arch
+        self.src_os = getattr(tp, "src_os", tp.os)
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
         self.mem[DATA_BASE:DATA_BASE + len(tp.data)] = tp.data
@@ -115,10 +116,17 @@ class Machine:
             self.mem[a1:a1 + len(d)] = d
             return len(d)
         if op == "open":
-            e = self.mem.find(b"\x00", a1 if False else a0)
-            path = bytes(self.mem[a0:e if e >= 0 else a0]).decode()
+            p0, f0, m0 = a0, a1, a2
+            if (self.os, self.arch) == ("lnx", "arm64"):
+                # this target has no `open`: it is `openat`, so the directory
+                # fd is in front and everything else has shifted up one, with
+                # the mode in a fourth register [see lower.py]
+                p0, f0, m0 = a1, a2, self.R["x3"]
+            e = self.mem.find(b"\x00", p0)
+            path = bytes(self.mem[p0:e if e >= 0 else p0]).decode()
             try:
-                return _os.open(path, a1 or _os.O_RDONLY)
+                fl, md = open_args(self.src_os, f0, m0)
+                return _os.open(path, fl, md)
             except OSError:
                 return u64(-1)
         if op == "close":
@@ -155,7 +163,13 @@ class Machine:
                     self.mem[a[1]:a[1] + len(txt)] = txt
                     self.st(a[2], len(txt))
                 elif o == "gate":
-                    self.gate(ins.meta)
+                    # the result goes in the ABI's return register.  Dropping
+                    # it left the syscall NUMBER sitting there, which nothing
+                    # noticed until a program used open() or read()'s answer.
+                    v = self.gate(ins.meta)
+                    rr = ins.meta.get("ret")
+                    if v is not None and rr and rr != "none":
+                        R[rr] = u64(v)
                 elif o == "imm":
                     R[a[0]] = u64(a[1])
                 elif o == "mov":

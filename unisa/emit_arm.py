@@ -263,12 +263,16 @@ def _winapi(ins, off, shift, text_va, imps):
         out = _fd2handle(pc, hstd)
         return out + _callimp(pc + len(out), imps, "CloseHandle")
     if op == "open":
-        out = _movz(1, 0) + w(0xB27B0021)            # x1 = GENERIC_READ
-        out += _movz(2, 1)                           # FILE_SHARE_READ
-        out += w(0xAA1F03E3)                         # x3 = 0
-        out += _movz(4, 3)                           # OPEN_EXISTING
+        # The gate carries Windows' own shapes, because only the C library
+        # knows which platform it is compiling for: arg1 is dwDesiredAccess
+        # and arg2 is dwCreationDisposition (see include/stdio.h).  Hardcoding
+        # GENERIC_READ|OPEN_EXISTING here made every fopen("w") a silent
+        # failure.  The remaining parameters never vary.
+        out = w(0xAA0203E4)                          # x4 = x2 (disposition)
+        out += _movz(2, 3)                           # FILE_SHARE_READ|WRITE
+        out += w(0xAA1F03E3)                         # x3 = 0  (no security)
         out += _movz(5, 0x80)                        # FILE_ATTRIBUTE_NORMAL
-        out += w(0xAA1F03E6)                         # x6 = 0
+        out += w(0xAA1F03E6)                         # x6 = 0  (no template)
         return out + _callimp(pc + len(out), imps, "CreateFileA")
     return None
 

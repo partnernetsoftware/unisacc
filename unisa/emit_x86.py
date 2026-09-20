@@ -175,16 +175,23 @@ def _winapi(ins, off, shift, text_va, imps):
         out += _callimp(pc + len(out), imps, "CloseHandle")
         return out + _align_post()
     if op == "open":
-        out = mov_ri("rdx", 0x80000000)                      # GENERIC_READ
-        out += mov_ri("r8", 1)                               # FILE_SHARE_READ
-        out += rex(1, 0, 0, 1) + b"\x31" + modrm(3, 1, 1)     # xor r9, r9
+        # arg1 (rdx) is already dwDesiredAccess and arg2 (r8) is
+        # dwCreationDisposition -- the C library builds both, because only it
+        # knows the platform.  The disposition is CreateFileA's FIFTH
+        # parameter, so it has to move to the shadow-space slot before r8
+        # becomes the share mode.
+        out = bytearray(mov_rr("rax", "r8"))      # stash the disposition
         pre, _ = _align_pre(3)
         out += pre
-        out += _stackarg(32, 3)                              # OPEN_EXISTING
+        # [rsp+32] = dwCreationDisposition -- CreateFileA's fifth parameter,
+        # so it cannot stay in r8, which is the third
+        out += rex(1, 0, 0, 0) + b"\x89" + modrm(1, 0, 4) + b"\x24\x20"
+        out += mov_ri("r8", 3)                               # FILE_SHARE_R|W
+        out += mov_ri("r9", 0)                               # no security
         out += _stackarg(40, 0x80)                           # FILE_ATTR_NORMAL
-        out += _stackarg(48, 0)
+        out += _stackarg(48, 0)                              # hTemplateFile
         out += _callimp(pc + len(out), imps, "CreateFileA")
-        return out + _align_post()
+        return bytes(out) + _align_post()
     return None
 
 

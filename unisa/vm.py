@@ -26,8 +26,37 @@ def u64(x):
     return x & MASK
 
 
+# O_CREAT, O_TRUNC, O_APPEND.  These are not portable numbers -- Linux and
+# the BSDs chose different bits -- and include/stdio.h picks the target's, so
+# an interpreter running on some other host has to translate them back.
+_OFLAGS = {"lnx": (64, 512, 1024), "osx": (512, 1024, 8)}
+
+
+def open_args(os_, a1, a2):
+    """(flags, mode) for THIS host, from what the target's C library passed.
+
+    On Windows there is no open(2) at all: the gate is CreateFileA, so what
+    arrives is a desired access and a creation disposition, not POSIX flags."""
+    if os_ == "win":
+        if not (a1 & 0x40000000):                    # not GENERIC_WRITE
+            return _os.O_RDONLY, 0o644
+        f = _os.O_WRONLY | _os.O_CREAT
+        f |= _os.O_TRUNC if a2 == 2 else _os.O_APPEND if a2 == 4 else 0
+        return f, 0o644
+    cr, tr, ap = _OFLAGS[os_]
+    f = a1 & 3
+    if a1 & cr:
+        f |= _os.O_CREAT
+    if a1 & tr:
+        f |= _os.O_TRUNC
+    if a1 & ap:
+        f |= _os.O_APPEND
+    return f, (a2 or 0o644)
+
+
 class VM:
-    def __init__(self, tape, max_steps=MAX_STEPS, argv=None):
+    def __init__(self, tape, max_steps=MAX_STEPS, argv=None, os_=None):
+        self.os = os_ or getattr(tape, "src_os", "lnx")
         self.t = tape
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
@@ -88,7 +117,8 @@ class VM:
             return len(d)
         if name == "open":
             try:
-                return _os.open(self.cstr(a0).decode(), a1 or _os.O_RDONLY)
+                fl, md = open_args(self.os, a1, a2)
+                return _os.open(self.cstr(a0).decode(), fl, md)
             except OSError:
                 return u64(-1)
         if name == "close":
@@ -252,5 +282,5 @@ class VM:
             return bytes(self.out), h.code, self.steps
 
 
-def run(tape, max_steps=MAX_STEPS, argv=None):
-    return VM(tape, max_steps, argv).run()
+def run(tape, max_steps=MAX_STEPS, argv=None, os_=None):
+    return VM(tape, max_steps, argv, os_).run()

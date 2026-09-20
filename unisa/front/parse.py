@@ -1269,6 +1269,15 @@ class Walker:
             self.load_if_lval()
             self.em.neg()
             return t
+        if p == "uplus":
+            # Unary `+` is a no-op but for the integer promotion, which the
+            # binary rules apply anyway -- so, like `neg`, it just yields its
+            # operand.  It shows up in real code mostly through `##` pastes
+            # and defensive macros: `60 + +3`.
+            self.next()
+            t = self.unary()
+            self.load_if_lval()
+            return t
         if p == "not":
             self.next()
             self.unary()

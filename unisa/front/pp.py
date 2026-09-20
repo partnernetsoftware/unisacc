@@ -328,15 +328,68 @@ def _subst(body, params, args):
                   lambda m: '"%s"' % amap[m.group(1)]
                   .replace("\\", "\\\\").replace('"', '\\"'), body)
     if "##" in body:
-        # a pasted operand is substituted BARE: `x ## y` must not become
-        # `(a) ## (b)`, which pastes to garbage
-        parts = re.split(r"\s*##\s*", body)
-        return "".join(re.sub(r"\b(" + pat + r")\b",
-                              lambda m: amap[m.group(1)], p) for p in parts)
+        return _paste(body, amap)
     for pn, av in zip(params, args):
         body = re.sub(r"\b%s\b" % re.escape(pn), lambda m, a=av: _paren(a),
                       body)
     return body
+
+
+
+# One preprocessing token, plus whitespace runs so that `a ## b` can find its
+# operands.  Literals are already placeholders by this point.
+_PTOK = re.compile(r"##|[A-Za-z_]\w*|[0-9][\w.]*|\x00\d+\x01|\s+|.")
+
+
+def _paste(body, amap):
+    """Substitute a macro body containing `##`.
+
+    `##` joins the token immediately before it with the token immediately
+    after -- not the two halves of the body.  Splitting on `##` and
+    concatenating the halves is what turned `#define Q(A,B) A ## B+` with an
+    empty B into `++`: the trailing `+` is an ordinary token that merely
+    happens to follow the pasted one, and once B vanishes it ends up glued to
+    it.  So we emit token by token and put a space between neighbours, except
+    across a paste, where the whole point is that there is none.
+
+    A pasted operand substitutes BARE -- `x ## y` must not become `(a) ## (b)`,
+    which pastes to garbage."""
+    toks = _PTOK.findall(body)
+    pieces, glue = [], []               # glue[i]: join piece i to piece i-1
+    i, join_next = 0, False
+    while i < len(toks):
+        t = toks[i]
+        if t == "##":
+            join_next = True
+            i += 1
+            while i < len(toks) and toks[i].isspace():
+                i += 1
+            continue
+        if t.isspace():
+            i += 1
+            continue
+        pasted = join_next or (i + 1 < len(toks) and
+                               _next_is_paste(toks, i + 1))
+        v = amap.get(t, t)
+        if t in amap and not pasted:
+            v = _paren(v)
+        pieces.append(v)
+        glue.append(join_next)
+        join_next = False
+        i += 1
+    out = []
+    for k, v in enumerate(pieces):
+        if k and not glue[k]:
+            out.append(" ")
+        out.append(v)
+    return "".join(out)
+
+
+def _next_is_paste(toks, i):
+    """Is the next non-space token a `##`?  Then toks[i-1] is its left operand."""
+    while i < len(toks) and toks[i].isspace():
+        i += 1
+    return i < len(toks) and toks[i] == "##"
 
 
 # `\x00N\x01` is a string or character literal that _protect() has stashed:
@@ -401,18 +454,65 @@ _HOLE = re.compile("\x00(\\d+)\x01")
 
 
 def _protect(text):
+    """Stash literals behind placeholders, numbered past any already there.
+
+    Expansion nests -- a macro argument is expanded on its own, and that text
+    already carries the outer level's placeholders.  Numbering from 0 again
+    would make the inner _restore() hand back the wrong literal, or run off
+    the end of its own list."""
+    base = max((int(m.group(1)) for m in _HOLE.finditer(text)), default=-1) + 1
     lits = []
 
     def keep(m):
         lits.append(m.group(0))
-        return "\x00%d\x01" % (len(lits) - 1)
-    return _LIT.sub(keep, text), lits
+        return "\x00%d\x01" % (base + len(lits) - 1)
+    return _LIT.sub(keep, text), lits, base
 
 
-def _restore(text, lits):
+def _restore(text, lits, base=0):
     # re.sub does not rescan what the replacement inserts, so a literal whose
-    # own bytes look like a placeholder is safe.
-    return _HOLE.sub(lambda m: lits[int(m.group(1))], text)
+    # own bytes look like a placeholder is safe.  A placeholder outside our
+    # own range belongs to an enclosing level and is left alone.
+    def back(m):
+        k = int(m.group(1)) - base
+        return lits[k] if 0 <= k < len(lits) else m.group(0)
+    return _HOLE.sub(back, text)
+
+
+
+def _raw_operands(body, params):
+    """Which parameters appear as an operand of `#` or `##` in this body.
+
+    Those are the only ones that substitute unexpanded (C99 6.10.3.1p1)."""
+    toks = _PTOK.findall(body)
+    raw, prev = set(), None
+    for i, t in enumerate(toks):
+        if t.isspace():
+            continue
+        if t in ("#", "##"):
+            j = i + 1
+            while j < len(toks) and toks[j].isspace():
+                j += 1
+            if j < len(toks) and toks[j] in params:
+                raw.add(toks[j])
+            if t == "##" and prev in params:
+                raw.add(prev)
+        prev = t
+    return raw
+
+
+def _preexpand(body, params, args, macros, _depth=0):
+    """Macro-expand each argument before it is substituted.
+
+    This is what makes the `#define XSTR(x) STR(x)` idiom work: `x` is not an
+    operand of `#` in XSTR's body, so it is expanded first, and only the
+    result reaches STR's `#`.  Without it the rescan loop reaches STR one
+    round later and stringizes the unexpanded text."""
+    if _depth > 8:
+        return args
+    raw = _raw_operands(body, params)
+    return [a if p in raw else expand(a, macros)
+            for p, a in zip(params, args)]
 
 
 def expand(text, macros):
@@ -422,7 +522,7 @@ def expand(text, macros):
     obj = {k: v for k, v in macros.items() if not isinstance(v, tuple)}
     fn = {k: v for k, v in macros.items() if isinstance(v, tuple)}
     for _ in range(8):
-        new, lits = _protect(text)
+        new, lits, base = _protect(text)
         if fn:
             out, i = [], 0
             while i < len(new):
@@ -446,13 +546,18 @@ def expand(text, macros):
                     out.append(new[m.start():m.end()])
                     i = m.end()
                     continue
-                out.append(_subst(body, params, args))
+                out.append(_subst(body, params,
+                                  _preexpand(body, params, args, macros)))
                 i = end
             new = "".join(out)
+        # `#x` has just MADE a string literal, and a macro name inside it is
+        # not a macro: without this second pass `#define VER 3` turned
+        # STR(VER) into "3" instead of "VER".
+        new, lits2, base2 = _protect(new)
         if obj:
             pat = re.compile(r"\b(" + "|".join(re.escape(k) for k in obj) + r")\b")
             new = pat.sub(lambda m: obj[m.group(1)], new)
-        new = _restore(new, lits)
+        new = _restore(_restore(new, lits2, base2), lits, base)
         if new == text:
             break
         text = new
