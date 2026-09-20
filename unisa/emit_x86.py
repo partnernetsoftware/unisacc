@@ -97,6 +97,97 @@ def cmp_set(cc, dst, ra, rb):
     return out
 
 
+def REGS8():
+    from .catalog import REGMAP
+    return REGMAP["x86_64"]
+
+
+def _spsub(n):
+    return rex(1, 0, 0, 0) + b"\x83" + modrm(3, 5, 4) + bytes([n])
+
+
+def _spadd(n):
+    return rex(1, 0, 0, 0) + b"\x83" + modrm(3, 0, 4) + bytes([n])
+
+
+# Win64 requires rsp to be 16-byte aligned at the call, and kernel32 uses
+# aligned SSE moves, so getting it wrong is an access violation inside the
+# callee rather than a polite error.  We cannot assume what rsp is -- the tape
+# never touches it -- so align it explicitly and put it back from rbx, which
+# the callee is required to preserve.  [I-18]
+def _align_pre(extra):
+    n = 32 + ((extra * 8 + 15) // 16) * 16
+    return (mov_rr("rbx", "rsp")                      # rbx = rsp
+            + rex(1, 0, 0, 0) + b"\x83" + modrm(3, 4, 4) + b"\xf0"  # and rsp,-16
+            + _spsub(n)), n
+
+
+def _align_post():
+    return mov_rr("rsp", "rbx")
+
+
+def _stackarg(slot, val):
+    return (rex(1, 0, 0, 0) + b"\xc7" + modrm(1, 0, 4) + b"\x24"
+            + bytes([slot]) + (val & 0xFFFFFFFF).to_bytes(4, "little"))
+
+
+def _callimp(pc, imps, name):
+    """Load the IAT slot, then call the register."""
+    a = (imps or {}).get("__imp_" + name, 0)
+    out = rip(0x8B, "rax", pc + 7, a)            # mov rax, [rip+disp32]
+    return out + rex(0, 0, 0, 0)[:0] + b"\xff\xd0"   # call rax
+
+
+def _fd2handle_x86(pc, hstd):
+    """rcx holds an fd; 0/1/2 name a standard handle, higher IS one."""
+    out = rex(1, 0, 0, 0) + b"\x83" + modrm(3, 7, 1) + b"\x03"   # cmp rcx, 3
+    body = rip(0x8D, SCR, pc + 4 + 2 + 7, hstd)                   # lea r11
+    body += rex(1, 0, 0, 1) + b"\x8b" + modrm(0, 1, 4) + b"\xcb"  # mov rcx,
+    out += b"\x73" + bytes([len(body)])                           # jae over
+    return out + body
+
+
+def _winapi(ins, off, shift, text_va, imps):
+    m = ins.meta
+    op = m.get("catop")
+    hstd = m.get("hstd", 0) + shift
+    written = m.get("written", 0) + shift
+    pc = text_va + off
+    if op == "exit":
+        out, _ = _align_pre(0)
+        out += _callimp(pc + len(out), imps, "ExitProcess")
+        return out + _align_post()
+    if op in ("write", "read"):
+        out = _fd2handle_x86(pc, hstd)
+        out += rip(0x8D, "r9", pc + len(out) + 7, written)   # r9 = &written
+        pre, _ = _align_pre(1)
+        out += pre
+        out += _stackarg(32, 0)                              # lpOverlapped
+        out += _callimp(pc + len(out), imps,
+                        "WriteFile" if op == "write" else "ReadFile")
+        out += _align_post()
+        out += rip(0x8B, "rax", pc + len(out) + 7, written)
+        return out
+    if op == "close":
+        out = _fd2handle_x86(pc, hstd)
+        pre, _ = _align_pre(0)
+        out += pre
+        out += _callimp(pc + len(out), imps, "CloseHandle")
+        return out + _align_post()
+    if op == "open":
+        out = mov_ri("rdx", 0x80000000)                      # GENERIC_READ
+        out += mov_ri("r8", 1)                               # FILE_SHARE_READ
+        out += rex(1, 0, 0, 1) + b"\x31" + modrm(3, 1, 1)     # xor r9, r9
+        pre, _ = _align_pre(3)
+        out += pre
+        out += _stackarg(32, 3)                              # OPEN_EXISTING
+        out += _stackarg(40, 0x80)                           # FILE_ATTR_NORMAL
+        out += _stackarg(48, 0)
+        out += _callimp(pc + len(out), imps, "CreateFileA")
+        return out + _align_post()
+    return None
+
+
 def _sp():
     from .catalog import REGMAP
     return REGMAP["x86_64"][7]          # the tape SP, not rsp
@@ -231,8 +322,35 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         out += rex(1, 3, t >> 3, 3) + b"\x8b" + modrm(0, 11, 4) + \
             bytes([0xC3 | ((t & 7) << 3)])
         return out
-    if o == "spinit":                                # mov rN, rsp
-        return mov_rr(a[0], "rsp")
+    if o == "spinit":
+        if len(a) > 1 and a[1] is not None:
+            # Windows: the tape's own stack, reached rip-relative because the
+            # image may slide
+            return rip(0x8D, a[0], text_va + off + 7, a[1] + shift)
+        return mov_rr(a[0], "rsp")               # mov rN, rsp
+    if o == "winsave":
+        out = rip(0x8D, SCR, text_va + off + 7, a[0] + shift)
+        for k, r in enumerate(REGS8()):
+            out += mem(0x89, r, SCR, 8 * k)
+        return out
+    if o == "winrest":
+        out = mov_rr(SCR, "rax")                 # the call's result
+        out += rip(0x8D, SCR2, text_va + off + len(out) + 7, a[0] + shift)
+        for k, r in enumerate(REGS8()):
+            if k:                                # r0 carries the result back
+                out += mem(0x8B, r, SCR2, 8 * k)
+        return out + mov_rr(a[1], SCR)
+    if o == "winstdh":
+        out = b""
+        for k in range(3):
+            out += mov_ri("rcx", (-10 - k) & 0xFFFFFFFFFFFFFFFF)
+            pre, _ = _align_pre(0)
+            out += pre
+            out += _callimp(text_va + off + len(out), imps, "GetStdHandle")
+            out += _align_post()
+            out += rip(0x8D, SCR, text_va + off + len(out) + 7, a[0] + shift)
+            out += mem(0x89, "rax", SCR, 8 * k)
+        return out
     if o == "ret":                                   # pop and jump
         ld = rex(1, 1, 0, 1) + b"\x8b" + modrm(0, 11, 10)
         add = rex(1, 0, 0, 1) + b"\x81" + modrm(3, 0, 10) + \
@@ -242,7 +360,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         return b"\x90"
     if o == "gate":
         if ins.meta.get("form") == "winapi":
-            return b"\xff\x15" + b"\x00\x00\x00\x00"      # call [rip+disp32]
+            return _winapi(ins, off, shift, text_va, imps)
         return b"\x0f\x05"                                 # syscall
     if o == "jump":
         d = labels[a[0]] - (off + 5)

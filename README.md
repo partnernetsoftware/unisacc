@@ -51,16 +51,20 @@ on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decide
 by enumeration — 4,560 keys, zero disagreements. Not a test: a decision
 procedure.
 
-**Four of the six targets have really run.** `--fold` compares six lowerings
+**All six targets have really run.** `--fold` compares six lowerings
 inside one interpreter, which catches ABI and syscall-number mistakes but not
 encoder bugs: the interpreter models no page protection, no real `rsp` and no
 two-operand ALU. `osx/arm64`, `osx/x86_64` (Rosetta), `lnx/x86_64` and
 `lnx/arm64` are executed on real kernels, every probe, every time
-(`tests/crossnative.sh`). `win/*` is still only verified structurally: the PE
-now has aligned sections, a kernel32 import table, base relocations and a load
-config, and Windows still refuses the image. The three rules arm64 Windows does
-enforce — and the dozen that turned out not to matter — are written up in
-`prd.md` §6 E-35.
+`win/arm64` and `win/x86_64` are executed on a real Windows 11 machine
+(`tests/crossnative.sh`, which skips them when the VM is not up). What kept
+Windows out for so long was one header field: declaring
+`MajorSubsystemVersion` 10.0 puts the loader on a strict path that demands
+relocations of a DYNAMIC_BASE image; at 4.0 a position-independent image with
+no `.reloc` and no load config loads fine. The second bug was that the tape
+stack pointer is a volatile register under Win64, so the calls that fetch the
+standard handles had to move ahead of stack setup. Both, and the sixty rounds
+of dissection that went the wrong way first, are in `prd.md` §6 E-35.
 
 **One file, two instruction sets.** `unisa fat hello.c -o hello` emits a
 Mach-O universal binary; the arm64 slice runs natively and the x86_64 slice

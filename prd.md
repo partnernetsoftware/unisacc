@@ -1,4 +1,4 @@
-# UNISA SH —— 规格 v3.2
+# UNISA SH —— 规格 v3.3
 
 > **配套**：[`prd.tree.md`](prd.tree.md) 树+DAG，开工用 · [`prd.map.md`](prd.map.md) 记忆宫殿，记全局用 · [`research/prior-art.md`](research/prior-art.md) 先行研究，写论文前必读 · `archive/` 历史版本
 >
@@ -635,9 +635,9 @@ X-2 带来的后果全是设计意图：
 
 **K-5a** **C kernel 的字面掩码按阶段定宽**：每个字段的掩码是 `ceil(|vocab|/64)` 个 u64。一个字就够用，直到 TOKS 越过 64（`~` 与其余复合赋值把它推到 67），blob 写入直接溢出。宽度是**每阶段**的而非全局的——只有 `parse` 需要两个字，全局加宽要多花 5.7 KB。
 
-**I-16** **PE 的节 RVA 必须按 SectionAlignment 对齐**，且要分 `.text` / `.rdata` / `.data`。第一版把 text+data 塞进一个 r-x 节、节 RVA 取 0x200，Windows 直接拒载（`Access is denied`，exit 5）。另外 arm64 不存在于 Windows 10 之前，`MajorSubsystemVersion` 必须 ≥ 10。
+**I-16** **PE 的节 RVA 必须按 SectionAlignment 对齐**，且要分 `.text` / `.rdata` / `.data`。第一版把 text+data 塞进一个 r-x 节、节 RVA 取 0x200，Windows 直接拒载（`Access is denied`，exit 5）。**而 `MajorSubsystemVersion` 是一个开关：声明 10.0 把加载器拨到严格路径，声明 4.0 走宽松路径**。两个 arch 都如此，包括 arm64 —— “arm64 不存在于 Windows 10 之前所以必须声明 10” 是错的，它正是我们每一张镜像都被 `STATUS_INVALID_IMAGE_FORMAT` 拒掉的原因。详见 E-35。
 
-**I-17** **arm64 Windows 强制可重定位，而且查得很细**（拿真 arm64 exe 逐字段拆出来的）：必须有 **dir[5] 基址重定位**且其中**至少一条真实条目**——把条目换成 ABSOLUTE 填充、目录原样保留，照样拒载；必须有 **dir[10] load config**，且其 **`SecurityCookie`（+0x58）非零**——只把这一个字段清零，真 exe 就不再加载；**只留其一都不行**。这与 I-7（arm64 macOS 强制 MH_PIE）是同一条物理事实，Windows 侧查得更严。详见 E-35。
+**I-17** **在严格路径上，arm64 Windows 确实强制可重定位，而且查得很细**（拿定主自己的 arm64 exe 逐字段拆出来的，那些 exe 声明的子系统版本都 ≥ 6）：把 dir[5] 的条目换成 ABSOLUTE 填充、目录原样保留，它立刻不加载；只把 dir[10] load config 的 `SecurityCookie`（+0x58）清零，它也不加载。**但这两条并不是 PE 的普遍要求** —— 我们曾从它们推出“自己的镜像也必须带 .reloc 与 load config”，那是错的：把 `MajorSubsystemVersion` 改成 4.0，一个 **无 .reloc、无 load config** 的位置无关镜像直接跑起来。教训是方法学的：**从一个能跑的样本里拆掉某字段 → 它不跑了**，只证明该字段在**那个样本所在的模式**下是必需的，不证明它在别的模式下也必需。详见 E-35。
 
 **I-18** **WinAPI 调用是真调用**：它按 AAPCS64 / Win64 破坏全部 volatile 寄存器，而我们八个 tape 寄存器**全都**是 volatile，**tape 栈指针 r7 也在内**。所以 win 的 gate 必须前后夹一个保存区，tape 必须有**自己的栈**（不能像别处那样把 SP 绑到进程栈），并且要把 tape 说的 POSIX 形状翻译成 kernel32 的形状（`fd → HANDLE`、`WriteFile` 的第四个出参、返回写入字节数而非 BOOL）。
 
@@ -819,22 +819,21 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **命题** | 「综合多 ISA 可执行体」的第一步不是 cosmopolitan 式的跨 OS 文件，而是**一个 OS 之内**的多架构容器。macOS 的 Mach-O universal 就是它，而且本机两个 slice 都能真跑 |
 | **证据** | `unisa fat examples/fact.c -o fact` → `file` 认作 *Mach-O universal binary with 2 architectures*；`./fact` 走 arm64 原生、`arch -x86_64 ./fact` 走 Rosetta，两者都输出 120。`tests/fat.sh` 在 49 个探针上**两个 slice 各跑一遍**，0 不符（[A-28]）|
 | **成本** | 40 行：大端 slice 表 + 页对齐拼接。两个 slice 本身就是已有的 `osx/x86_64` 与 `osx/arm64` 镜像，一字未改 |
-| **意义** | 这条把「多 ISA」从纸面主张变成可执行文件，而且**验证方式是执行而不是读头部**。同时它划清了边界：这是**一个 OS**内的多架构，cosmopolitan 那种同时是 ELF/Mach-O/PE 的文件是另一个问题，win/* 甚至还加载不了（E-35）|
+| **意义** | 这条把「多 ISA」从纸面主张变成可执行文件，而且**验证方式是执行而不是读头部**。同时它划清了边界：这是**一个 OS**内的多架构，cosmopolitan 那种同时是 ELF/Mach-O/PE 的文件是另一个问题，我们还没做（各自的 win 镜像已经能跑，见 E-35）|
 | **状态** | **已证实**（2026-09-19）|
 
-#### E-35　win/* 还没跑通，但已经把 Windows 加载器的三条硬规则挖出来了
+#### E-35　六个目标全部真跑起来了；win/* 卡住的两个根因，一个在头部字段，一个在寄存器壽命
 
 | 栏 | 内容 |
 |---|---|
-| **现状** | 六目标里 `osx/arm64`、`osx/x86_64`、`lnx/x86_64`、`lnx/arm64` 已真机执行（E-33）。**`win/*` 仍然只是结构性验证**：我们发的 PE 在 Windows 11 arm64 上被加载器拒绝（`STATUS_INVALID_IMAGE_FORMAT`），原因尚未完全定位 |
-| **已确证的三条**<br>（方法：拿宿主自己的 `hostname.exe` 逐字段拆，每拆一处跑一次） | ① **节 RVA 必须按 SectionAlignment 对齐**，且 text/rdata/data 分节（[I-16]）；arm64 的 `MajorSubsystemVersion` 必须 ≥ 10<br>② **dir[5] 基址重定位必须存在，且含至少一条真实条目** —— 把真 exe 的条目换成 ABSOLUTE 填充、目录原样保留，它立刻不加载<br>③ **dir[10] load config 必须存在，且 `SecurityCookie`（+0x58）非零** —— 只清这一个 8 字节字段，真 exe 就不加载。**只留②或只留③都不行** |
-| **已排除的**（每条都是在**能跑的**真容器上单独改一处，改完仍返回 42） | 导入表（无导入的 exe 照样跑）· GUARD_CF 位 · DOS stub 与 `e_lfanew`（用我们自己的打包代码逐字节重建同值头部，仍能跑）· TimeDateStamp / CheckSum / LinkerVersion / 栈堆大小 / ImageVersion · `SizeOfCode` / `SizeOfInitializedData` · 节的 VirtualSize 取值 · FileAlignment = SectionAlignment · SizeOfHeaders = 0x1000 · 节数量 4/5/6/7 · SizeOfImage 留空洞 · **入口点落在节首**（0x1000）· 资源目录与异常目录 |
-| **顺带确认的一条** | `SizeOfImage` 必须 **≥ 最后一节的末尾**（取大无妨，取小即拒），这是真规则，但我们本来就满足 |
-| **仍未定位** | 把我们的「重定位 + cookie」配方**放进真 exe 的容器里，它返回 42**（`dir[5]` 挪进 `.rdata`、只留一条 DIR64 指向 load config 的 cookie 字段、清掉 GUARD_CF）；同一配方放进**我们自己生成的容器**，即使把上面每一栏都对齐也拒载。**结论：问题在容器本身的某处结构，而不在这两条目录的内容，也不在上面任何一个已测字段。**下一步该做的是反向逼近——从能跑的容器出发，一次只改一处**朝我们的布局**走，直到它断掉；本轮已排除节数量与 SizeOfImage 两条，剩下的是节的文件布局本身 |
-| **已经做完的一半** | PE 写入器已重写：四节布局、真导入表（kernel32 八个函数）、`.reloc`、load config；lowering 侧的 [I-18] 也做了 —— win 的 gate 会保存/恢复全部 tape 寄存器、tape 有自己的 bss 栈、`fd → HANDLE` 与 `WriteFile` 出参的翻译都在 arm64 编码器里。解释器侧仍 6/6 |
-| **调试装置** | UTM 里的 Windows 11 arm64 虚机 + `utmctl file push/pull` + `exec`，一轮约 30 秒。**没有这个环路，上面几条一条也挖不出来** —— GitHub 的 windows 跑机每轮五分钟，而这次用掉约六十轮。两个坑：`utmctl` **失败也返回 0**（必须看输出判断），以及**在 cmd 还占着输出文件时去 pull，qemu-ga 会泄漏句柄、那个文件名此后永远读不了**（所以先 `copy` 再写哨兵，最后只 pull 副本）|
-| **意义** | 与 E-34 同类：**手写二进制格式的失败模式是「加载器沉默地拒绝」**，而每个平台的容忍带都不一样。诚实的说法是六目标里四个真跑过、两个没有 |
-| **状态** | **进行中**（2026-09-19） |
+| **结果** | `win/arm64` 与 `win/x86_64` 在 Windows 11 arm64 上真机执行，所有例子与探针输出与解释器逐字节一致（x86_64 跑在 Windows 自己的仿真层上）。加上 E-33/E-36，**六个目标全部真机执行过** |
+| **根因一：`MajorSubsystemVersion`** | 我们声明了 **10.0**。这把加载器拨到严格路径，在那条路径上 DYNAMIC_BASE 的镜像被真的要求带可用的重定位，而我们的镜像宁可不要 ASLR 也不想造重定位表。改成 **4.0** 后，一个无 `.reloc`、无 load config 的镜像立刻加载并跑出正确结果。一行常量。[I-16] |
+| **根因二：tape SP 是 volatile** | arm64 通了之后 x86_64 仍 `ACCESS_VIOLATION`。二分到 `winstdh`（取三个标准句柄）：它本来排在 `spinit` 之后，而它是**真调用**，**Win64 两个 ABI 里 tape SP 所在的寄存器（x86_64 的 r10）都是 volatile** —— 刚初始化完的 tape 栈指针被调用打成垃圾。改成 `winstdh` 在 `spinit` **之前**发，当场通过。[I-18] |
+| **我们曾经推错的** | 之前从“拆真 exe”得出两条结论：**dir[5] 必须有真实重定位条目**、**dir[10] 的 `SecurityCookie` 必须非零**。两条实验本身没错，推论错了：拆的那些 exe 声明的子系统版本都 ≥ 6，所以它们本来就在严格路径上。**“从能跑的样本里拆掉 X → 它不跑了”只证明 X 在那个模式下必需，不证明它普遍必需。**这次我们花了约六十轮在错误的假设上（去造 `.reloc`、造 load config、对齐 cookie），而真正的判别性实验是另一个方向的：**拿一个 `csc.exe` 生成的 PE32+（子系统 4.0、2 节、无 `.reloc`、无 load config），它跑得好好的** —— 一个存在性反例把两条“必须”同时否掉 |
+| **方法学的教训** | 拆解一个能跑的样本，只能发现**该模式内**的必要条件；要找“最小可加载镜像”，应该去找**尽可能简陋的真实样本**并模仿它。两个方向的成本相差一个数量级 |
+| **调试装置** | UTM 里的 Windows 11 arm64 虚机 + `utmctl file push/pull` + `exec`，一轮约 30 秒。两个坑：`utmctl` **失败也返回 0**（必须看输出判断）；**在 cmd 还占着输出文件时去 pull，qemu-ga 会泄漏句柄、那个文件名此后永远读不了**（所以先 `copy` 再写哨兵，最后只 pull 副本）。现已接入 `tests/crossnative.sh`，虚机不在就跳过 |
+| **意义** | E-32/E-33/E-34 说的是“解释器看不见真机的约束”；这一条多说一层：**真机环路建起来了也不够，实验的方向决定了你能学到什么**。六个目标全部真机执行后，“一份 tape → 六份镜像”不再有任何一格是只在解释器里成立的 |
+| **状态** | **已证实**（2026-09-21）|
 
 
 #### E-34　同一份字节，Darwin 25 跑得动、Darwin 23/24 崩在 dyld 里
@@ -856,7 +855,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **三个缺陷** | ① **ELF 只有一个 `PF_R\|PF_X` 的 PT_LOAD**（[I-12]）—— 第一次写 scratch 就 SIGSEGV<br>② **`idiv` 用真 `push`/`pop` 保存 rax/rdx**（[I-13]）—— 而 `spinit` 把 tape SP 绑在 `rsp` 上，两个栈重叠：返回地址被踩，**每个打印整数的程序都死**<br>③ **x86 两操作数 ALU 的别名**（[I-14]）—— `mov dst,s1` 在 `dst == s2` 时先毁掉右操作数，`17-5` 变成 `17-17`；移位还顺手把 tape r4（`rcx`）永久冲掉 |
 | **为什么都藏得住** | 三条都**不在解释器的机器模型里**：`exec_target.py` 不建模页保护、不建模真实 `rsp`、不建模两操作数指令。arm64 是三操作数、且宿主恰好是 arm64，于是全部绕开。`--fold` 比对的是**同一个解释器**跑六遍 lowering 的结果——它能抓 ABI 和 syscall 号错误（三次故障注入都退化到 4/6），**抓不到编码器缺陷** |
 | **证据** | 修好后：`tests/crossnative.sh` 每次跑 **lnx/x86_64 47/47、lnx/arm64 47/47（真 Linux 内核）、osx/x86_64 47/47（Rosetta 2）**；CI 在 `ubuntu-latest` 上直接执行 ELF |
-| **意义** | 对论文：**"六目标等价"这个主张的强度等于最弱的那个验证环节**。此前它是"六份 lowering 在同一个解释器里输出一致"，现在两个目标有真内核背书。诚实的说法是：`osx/arm64`、`osx/x86_64`（Rosetta 2）、`lnx/x86_64`、`lnx/arm64` **四个目标每次都被真实执行**；只剩 `win/*` 仍是结构性验证——PE 还没有导入表，没有任何东西真的调到 kernel32 |
+| **意义** | 对论文：**"六目标等价"这个主张的强度等于最弱的那个验证环节**。此前它是"六份 lowering 在同一个解释器里输出一致"，现在两个目标有真内核背书。诚实的说法是：`osx/arm64`、`osx/x86_64`（Rosetta 2）、`lnx/x86_64`、`lnx/arm64` **四个目标每次都被真实执行**；只剩 `win/*` 仍是结构性验证——PE 还没有导入表，没有任何东西真的调到 kernel32。**（后续：E-35已把 `win/*` 也跑通，六个目标全部真机执行。）** |
 | **状态** | **已证实**（2026-09-19）。固化为 [A-27]（`tests/crossnative.sh`）|
 
 #### E-30　外部语料第一次基线：220 个别人写的程序，暴露六个自有探针看不见的缺陷
@@ -1320,6 +1319,8 @@ M8 验收与度量     tests/acceptance.sh + bench             ⟦B-1..B-6⟧
 **v3.1 新增**：§6 实验发现 [E] —— 面向论文的知识沉淀章节，五栏固定格式（命题/证据/机理/意义/状态），已录 E-1..E-5 已证实、E-6..E-11 待验证、E-2′/E-3′ 已证伪、四条开放问题。据实测修正两处：G-2a 的 1/19 下采样已废止（E-2），B-2a 明确体积对比基线（E-3）。并修正 v2 的计数笔误 PRODS 34→32。
 
 **v3.2 新增**（2026-09-19）：§6.6 先行研究与定位 [R-1..R-4] —— 据 `research/prior-art.md` 撤回三条与文献重复的主张（P-8 存在性、P-8b 难度、穷举验证方法），把 P-8a/P-8c 从"开放问题"改回它们本来的名字（两级逻辑最小化），并把体积主张整体换成**接口统一性**。新增外部语料验收 [A-25] 与真内核执行 [A-26]；新增宿主契约 [I-12]（ELF 的 rw 段）；`type` 表补入 `i16`（`short`），TYS 8→9、行数 1216→1539。§3.2 的模型总表改为由 `unisa/gold.py` 派生的实测值。
+
+**v3.3 新增**（2026-09-21）：**六个目标全部真机执行** —— E-35 改写为已证实，两个根因（`MajorSubsystemVersion` 10.0 把加载器拨到严格路径；tape SP 在 Win64 是 volatile，`winstdh` 必须先于 `spinit`）；[I-16] / [I-17] 改正 —— 撕掉之前“`.reloc` 与 load config 对 arm64 PE 必需”的错误推论，并记下那条方法学教训；`tests/crossnative.sh` 接入 UTM 里的 Windows 11，两个 win 目标每次随套件真跑（虚机不在则跳过）。
 
 ### 7.4 仍可重选
 

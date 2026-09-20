@@ -68,10 +68,65 @@ run_rosetta() {
     [ "$f" -eq 0 ] || bad=$((bad+1))
 }
 
+# Windows, in a UTM VM, through the guest agent.  Both targets: the arm64 one
+# runs natively and the x86_64 one under Windows' own emulation.
+run_windows() {
+    target=$1; shift
+    UTM=/Applications/UTM.app/Contents/MacOS/utmctl
+    vm=${WINVM:-minicon-win-arm-64}
+    [ -x "$UTM" ] || { echo "  skip $target (no UTM)"; return 0; }
+    "$UTM" status "$vm" 2>/dev/null | grep -q started || {
+        echo "  skip $target ($vm not started)"; return 0; }
+    t=$(date +%s)$RANDOM
+    Z='C:\u\z'"$t"'.txt'; Y='C:\u\y'"$t"'.txt'
+    D='C:\u\d'"$t"'.txt'; G='C:\u\g'"$t"'.bat'
+    d=$(mktemp -d); : > "$d/.want"
+    {   printf '@echo off\r\n'
+        n=0
+        for f in "$@"; do
+            b=$(basename "$f" .c)
+            $U compile "$f" -o "$d/$b.exe" --target "$target" \
+                --drive "$DRIVE" >/dev/null 2>&1 || continue
+            n=$((n+1)); X='C:\u\e'"$t"'_'"$n"'.exe'
+            "$UTM" file push "$vm" "$X" < "$d/$b.exe" 2>/dev/null
+            printf 'echo === %s >> %s\r\n' "$b" "$Z"
+            printf '%s >> %s 2>&1\r\n' "$X" "$Z"
+            $U run "$f" --target "$target" --drive "$DRIVE" 2>/dev/null \
+                > "$d/$b.want"
+            printf '%s\n' "=== $b" >> "$d/.want"
+            cat "$d/$b.want" >> "$d/.want"
+        done
+        printf 'copy %s %s >nul\r\n' "$Z" "$Y"
+        printf 'echo done > %s\r\n' "$D"
+    } | "$UTM" file push "$vm" "$G" 2>/dev/null
+    "$UTM" exec "$vm" --hide --cmd "cmd.exe" -- /c "$G" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 150 ]; do
+        case "$("$UTM" file pull "$vm" "$D" 2>&1)" in *done*) break;; esac
+        i=$((i+1)); sleep 2
+    done
+    # cmd.exe's `echo ===\xa0x` keeps the space before the redirect, so the
+    # marker lines come back with one trailing blank.  Strip it on both sides.
+    "$UTM" file pull "$vm" "$Y" 2>&1 | tr -d '\r' | grep -v '^RC=' \
+        | sed -e 's/[ \t]*$//' -e '/^$/d' > "$d/.got"
+    sed -e 's/[ \t]*$//' -e '/^$/d' "$d/.want" > "$d/.w"
+    if cmp -s "$d/.got" "$d/.w"; then
+        printf "  %-12s ok %s   mismatch 0\n" "$target" \
+            "$(grep -c '^=== ' "$d/.w")"
+    else
+        printf "  %-12s MISMATCH\n" "$target"
+        diff "$d/.w" "$d/.got" | head -8
+        bad=$((bad+1))
+    fi
+    rm -rf "$d"
+}
+
 bad=0
 run_target "${VM_X86:-minicon-lnx-x86_64}" lnx/x86_64 "$@"
 run_target "${VM_ARM:-default}"            lnx/arm64  "$@"
 run_rosetta "$@"
+run_windows win/arm64  "$@"
+run_windows win/x86_64 "$@"
 echo
 echo "crossnative failing targets $bad"
 [ "$bad" -eq 0 ]

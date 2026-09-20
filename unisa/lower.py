@@ -128,11 +128,13 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             # bind it AT THE ENTRY LABEL -- not at tape index 0, which is some
             # other function once `_start` moves.  The interpreter already
             # starts SP at the top of its own memory, so this is a no-op there.
-            tp.emit("spinit", sp, STACKTOP if win else None)
             if win:
-                # the three standard handles, once, before anything prints
+                # The standard handles come FIRST: these are real calls, and
+                # the tape stack pointer is a volatile register on both Win64
+                # ABIs, so it must not be live across them. [I-18]
                 tp.emit("winstdh", HSTD)
-            else:
+            tp.emit("spinit", sp, STACKTOP if win else None)
+            if not win:
                 # the loader hands over argc/argv; stash them before anything
                 tp.emit("argsave", ARGC, ARGV)
         o, a = ins.op, ins.args

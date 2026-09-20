@@ -162,11 +162,13 @@ def write(arch, text, data, entry, relocs=(), bss=0):
     # PE32+ standard fields: no BaseOfData, that field is PE32 only
     o += struct.pack("<HBBIIIII", 0x20B, 14, 0, _round(len(text), FILE_ALIGN),
                      0, 0, TEXT_RVA + entry, TEXT_RVA)
-    # arm64 did not exist before Windows 10, and the loader enforces it: an
-    # ARM64 image claiming subsystem 6.0 is rejected outright, which cmd
-    # reports as `Access is denied`.  [I-16]
+    # Subsystem 4.0.  A higher version puts the loader on its strict path,
+    # where DYNAMIC_BASE demands relocations it will actually check; at 4.0 it
+    # uses the relaxed rules and a position-independent image with no .reloc
+    # loads fine.  Declaring 10.0 was what made every image we emitted fail
+    # with STATUS_INVALID_IMAGE_FORMAT.  [I-16]
     o += struct.pack("<QIIHHHHHHIIIIHH", IMAGEBASE, SECT_ALIGN, FILE_ALIGN,
-                     10, 0, 0, 0, 10, 0, 0,
+                     4, 0, 0, 0, 4, 0, 0,
                      img_size, HDR_FILE, 0,
                      3,        # IMAGE_SUBSYSTEM_WINDOWS_CUI
                      0x8160)   # HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT
