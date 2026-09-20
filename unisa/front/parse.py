@@ -194,6 +194,9 @@ class Walker:
                     continue
                 while True:
                     ty, nm = self.declarator(b)
+                    if self.at(":"):
+                        raise CError("line %d: bit-fields are not supported"
+                                     % self.peek().line)
                     st.add(nm, ty, self.sc.structs)
                     if not self.eat(","):
                         break
@@ -424,21 +427,29 @@ class Walker:
             return len(t.val) + 1
         if t.kind != "{":
             return 1
-        depth, n, j = 0, 0, self.i
+        depth, idx, hi, j = 0, -1, 0, self.i
         while j < len(self.tk):
             k = self.tk[j].kind
             if k == "{":
                 depth += 1
                 if depth == 1 and self.tk[j + 1].kind != "}":
-                    n = 1
+                    idx = 0
+                    hi = 1
             elif k == "}":
                 depth -= 1
                 if depth == 0:
-                    return n
+                    return hi
             elif k == "," and depth == 1:
-                n += 1
+                idx += 1
+                hi = max(hi, idx + 1)
+            elif k == "[" and depth == 1 and self.tk[j - 1].kind in ("{", ","):
+                # `[2] = v` moves the cursor, so the array is at least that
+                # long: `{5, [2] = 2, 3}` has four elements
+                if self.tk[j + 1].kind == "num":
+                    idx = int(self.tk[j + 1].val)
+                    hi = max(hi, idx + 1)
             j += 1
-        return n
+        return hi
 
     def const_init(self, sym, ty, at=0):
         """Write a CONSTANT initialiser into the data image.
@@ -453,6 +464,20 @@ class Walker:
             self.next()
             raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
             self.em.t.data[base + at:base + at + len(raw)] = raw
+            return
+        if ty.kind in ("arr", "struct") and self.at("(") \
+                and not self.istype(self.peek(1)):
+            self.next()                           # `((struct S){...})`
+            self.const_init(sym, ty, at)
+            self.expect(")")
+            return
+        if ty.kind in ("arr", "struct") and self.at("(") \
+                and self.istype(self.peek(1)):
+            # `(struct S){...}` used as a value: the same bytes, written here
+            self.next()
+            self.abstract_type()
+            self.expect(")")
+            self.const_init(sym, ty, at)
             return
         if ty.kind in ("arr", "struct"):
             braced = self.eat("{")
@@ -480,6 +505,12 @@ class Walker:
                     break
             if braced:
                 self.expect("}")
+            return
+        if t.kind == "{":                         # C99 6.7.8p11: a scalar
+            self.next()                           # may be braced
+            self.const_init(sym, ty, at)
+            self.eat(",")
+            self.expect("}")
             return
         if t.kind == "str":                       # char *p = "..."
             self.next()
@@ -775,6 +806,20 @@ class Walker:
                 self.em.imm(ACC, b)
                 self.em.store(FP, -off + i, ACC, 1)
             return
+        if ty.kind in ("arr", "struct") and self.at("(") \
+                and not self.istype(self.peek(1)):
+            self.next()                           # `((struct S){...})`
+            self.const_init(sym, ty, at)
+            self.expect(")")
+            return
+        if ty.kind in ("arr", "struct") and self.at("(") \
+                and self.istype(self.peek(1)):
+            # `(struct S){...}` used as a value: the same bytes, written here
+            self.next()
+            self.abstract_type()
+            self.expect(")")
+            self.const_init(sym, ty, at)
+            return
         if ty.kind in ("arr", "struct"):
             braced = self.eat("{")
             mem = self._members(ty)
@@ -801,6 +846,12 @@ class Walker:
                     break
             if braced:
                 self.expect("}")
+            return
+        if self.at("{"):                          # a braced scalar
+            self.next()
+            self.local_init(ty, off)
+            self.eat(",")
+            self.expect("}")
             return
         self.rvalue()
         self.em.store(FP, -off, ACC, self.wid(ty))
@@ -985,6 +1036,12 @@ class Walker:
             return self.sc.enums[t.text]
         if t.kind == "-":
             return -self.const_atom()
+        if t.kind == "+":
+            return self.const_atom()
+        if t.kind == "!":
+            return 0 if self.const_atom() else 1
+        if t.kind == "~":
+            return ~self.const_atom()
         if t.kind == "(":
             if self.istype(self.peek()):          # a cast in a constant
                 self.abstract_type()              # expression: the value is

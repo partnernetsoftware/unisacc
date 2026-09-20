@@ -71,7 +71,15 @@ def _escape(s, i):
         return c, i + 1
     n = s[i + 1]
     if n == "x":
-        return chr(int(s[i + 2:i + 4], 16)), i + 4
+        j = i + 2
+        while j < len(s) and s[j] in "0123456789abcdefABCDEF" and j < i + 4:
+            j += 1
+        return chr(int(s[i + 2:j], 16) & 0xFF), j
+    if n in "01234567":                      # octal: one to three digits
+        j = i + 1
+        while j < len(s) and s[j] in "01234567" and j < i + 4:
+            j += 1
+        return chr(int(s[i + 1:j], 8) & 0xFF), j
     return ESC.get(n, n), i + 2
 
 
@@ -115,14 +123,21 @@ def lex(src, oracle):
                 if k < n and src[k] == "(":
                     depth = 0
                     while k < n:
-                        if src[k] == "(":
+                        ch = src[k]
+                        if ch in "\"'":           # a `)` inside a literal is
+                            q, k = ch, k + 1      # not a paren
+                            while k < n and src[k] != q:
+                                k += 2 if src[k] == "\\" else 1
+                            k += 1
+                            continue
+                        if ch == "(":
                             depth += 1
-                        elif src[k] == ")":
+                        elif ch == ")":
                             depth -= 1
                             if depth == 0:
                                 k += 1
                                 break
-                        elif src[k] == "\n":
+                        elif ch == "\n":
                             line += 1
                         k += 1
                     i = k
@@ -158,18 +173,26 @@ def lex(src, oracle):
             toks.append(Tok("num", src[i:j], _numval(src[i:j]), line))
             i = j
         elif act == "str":
+            start = i
             i += 1
             buf = ""
             while i < n and src[i] != '"':
                 ch, i = _escape(src, i)
                 buf += ch
             i += 1
-            toks.append(Tok("str", buf, buf, line))
+            # `text` is the SOURCE spelling and `val` the decoded bytes; the
+            # parser uses val, and lexdiff compares spellings against the
+            # self-hosted lexer, which has only the slice
+            toks.append(Tok("str", src[start:i], buf, line))
         elif act == "charlit":
+            start = i
             i += 1
             ch, i = _escape(src, i)
             i += 1                      # closing quote
-            toks.append(Tok("num", repr(ch), ord(ch), line))
+            # `text` is the SOURCE spelling, like every other token: the
+            # self-hosted lexer prints the same slice, and lexdiff compares
+            # the two token streams by text
+            toks.append(Tok("num", src[start:i], ord(ch), line))
         elif act == "op":
             for p3 in PUNCT:
                 if src.startswith(p3, i):

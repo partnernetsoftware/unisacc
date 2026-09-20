@@ -19,8 +19,7 @@ src = open(sys.argv[1], encoding="latin-1").read()
 src, _ = preprocess(src, o, {})
 for t in lex(src, o):
     if t.kind in ("id", "num", "str"):
-        print("%s=%s" % (t.kind, t.text if t.kind != "str" else
-                         '"%s"' % t.text.replace("\n", "\\n")))
+        print("%s=%s" % (t.kind, t.text.replace("\n", "\\n")))
     else:
         print(t.kind)
 PY

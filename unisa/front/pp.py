@@ -26,24 +26,171 @@ def predefines(target):
     return d
 
 
+_PPNUM = re.compile(r"0[xX][0-9a-fA-F]+|\d+")
+_PPID = re.compile(r"[A-Za-z_]\w*")
+
+
+def _pp_tokens(e):
+    """Tokenise a preprocessor constant expression."""
+    out, i = [], 0
+    ops = ("<<=", ">>=", "&&", "||", "==", "!=", "<=", ">=", "<<", ">>")
+    while i < len(e):
+        c = e[i]
+        if c in " \t":
+            i += 1
+            continue
+        if c == "'":                            # a character constant
+            j = i + 1
+            v = 0
+            while j < len(e) and e[j] != "'":
+                if e[j] == "\\":
+                    j += 1
+                    v = {"n": 10, "t": 9, "r": 13, "0": 0}.get(e[j], ord(e[j]))
+                else:
+                    v = ord(e[j])
+                j += 1
+            out.append(("num", v))
+            i = j + 1
+            continue
+        m = _PPNUM.match(e, i)
+        if m:
+            t = m.group(0)
+            i = m.end()
+            while i < len(e) and e[i] in "uUlL":
+                i += 1
+            out.append(("num", int(t, 8) if (len(t) > 1 and t[0] == "0"
+                                             and t[1] not in "xX")
+                        else int(t, 0)))
+            continue
+        m = _PPID.match(e, i)
+        if m:
+            out.append(("id", m.group(0)))
+            i = m.end()
+            continue
+        for o in ops:
+            if e.startswith(o, i):
+                out.append(("op", o))
+                i += len(o)
+                break
+        else:
+            out.append(("op", c))
+            i += 1
+    out.append(("end", None))
+    return out
+
+
+class _PPExpr:
+    """C's integer constant expression, the subset `#if` can contain."""
+    LEVELS = (("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="),
+              ("<", ">", "<=", ">="), ("<<", ">>"), ("+", "-"),
+              ("*", "/", "%"))
+
+    def __init__(self, toks):
+        self.t, self.i = toks, 0
+
+    def peek(self):
+        return self.t[self.i]
+
+    def take(self):
+        self.i += 1
+        return self.t[self.i - 1]
+
+    def expr(self, lvl=0):
+        if lvl >= len(self.LEVELS):
+            return self.unary()
+        v = self.expr(lvl + 1)
+        while self.peek()[0] == "op" and self.peek()[1] in self.LEVELS[lvl]:
+            o = self.take()[1]
+            r = self.expr(lvl + 1)
+            v = self.apply(o, v, r)
+        return v
+
+    def cond(self):
+        v = self.expr()
+        if self.peek() == ("op", "?"):
+            self.take()
+            a = self.cond()
+            if self.peek() == ("op", ":"):
+                self.take()
+            b = self.cond()
+            return a if v else b
+        return v
+
+    @staticmethod
+    def apply(o, a, b):
+        if o == "||":
+            return 1 if (a or b) else 0
+        if o == "&&":
+            return 1 if (a and b) else 0
+        if o == "|":
+            return a | b
+        if o == "^":
+            return a ^ b
+        if o == "&":
+            return a & b
+        if o == "==":
+            return 1 if a == b else 0
+        if o == "!=":
+            return 1 if a != b else 0
+        if o == "<":
+            return 1 if a < b else 0
+        if o == ">":
+            return 1 if a > b else 0
+        if o == "<=":
+            return 1 if a <= b else 0
+        if o == ">=":
+            return 1 if a >= b else 0
+        if o == "<<":
+            return a << (b & 63)
+        if o == ">>":
+            return a >> (b & 63)
+        if o == "+":
+            return a + b
+        if o == "-":
+            return a - b
+        if o == "*":
+            return a * b
+        if b == 0:
+            return 0
+        if o == "/":
+            return int(a / b) if (a < 0) != (b < 0) else a // b
+        return a - b * (int(a / b) if (a < 0) != (b < 0) else a // b)
+
+    def unary(self):
+        k, v = self.peek()
+        if k == "op" and v in ("!", "~", "-", "+"):
+            self.take()
+            x = self.unary()
+            return {"!": lambda y: 1 if not y else 0, "~": lambda y: ~y,
+                    "-": lambda y: -y, "+": lambda y: y}[v](x)
+        if k == "op" and v == "(":
+            self.take()
+            x = self.cond()
+            if self.peek() == ("op", ")"):
+                self.take()
+            return x
+        if k == "num":
+            self.take()
+            return v
+        if k == "id":
+            self.take()
+            return 0                 # C99 6.10.1: an unknown name is 0
+        self.take()
+        return 0
+
+
 def _truth(expr, macros):
-    """#if / #elif: only the forms the subset needs -- defined(X), !defined(X),
-    a bare macro name, or an integer literal."""
-    e = expr.strip()
-    neg = False
-    while e.startswith("!"):
-        neg = not neg
-        e = e[1:].strip()
-    m = re.match(r"^defined\s*\(?\s*(\w+)\s*\)?$", e)
-    if m:
-        v = m.group(1) in macros
-    elif re.match(r"^\d+$", e):
-        v = int(e) != 0
-    elif re.match(r"^\w+$", e):
-        v = macros.get(e, "0") not in ("0", "")
-    else:
-        v = False
-    return v != neg
+    """#if / #elif over a real integer constant expression: `defined(X)`
+    first, then macro expansion, then any name left standing is 0. [W-1]"""
+    e = re.sub(r"defined\s*\(\s*(\w+)\s*\)",
+               lambda m: "1" if m.group(1) in macros else "0", expr)
+    e = re.sub(r"defined\s+(\w+)",
+               lambda m: "1" if m.group(1) in macros else "0", e)
+    e = expand(e, macros)
+    try:
+        return _PPExpr(_pp_tokens(e)).cond() != 0
+    except Exception:
+        return False
 
 
 def _find_header(name, angled, here, paths):

@@ -884,6 +884,234 @@ int mdef(char *s, int n, int v, int has) {
     return 0;
 }
 
+
+/* ---- #if: a real integer constant expression ------------------------- */
+int wsat(int i);
+int ppp;             /* cursor into src, while an #if is being evaluated */
+int ppe;             /* one past the directive's last character */
+
+int ppcond(void);
+
+void ppws(void) { while (ppp < ppe) { if (wsat(ppp) == 0) break; ppp = ppp + 1; } }
+
+int pplit(char *w, int n) {          /* does the cursor sit on this word? */
+    int k;
+    if (ppp + n > ppe) return 0;
+    k = 0;
+    while (k < n) { if ((src[ppp + k] & 255) != (w[k] & 255)) return 0; k = k + 1; }
+    if (ppp + n < ppe) { if (isal(src[ppp + n] & 255)) return 0;
+                         if (isdi(src[ppp + n] & 255)) return 0; }
+    return 1;
+}
+
+int ppop(char *w, int n) {           /* consume this operator if it is here */
+    int k;
+    ppws();
+    if (ppp + n > ppe) return 0;
+    k = 0;
+    while (k < n) { if ((src[ppp + k] & 255) != (w[k] & 255)) return 0; k = k + 1; }
+    ppp = ppp + n;
+    return 1;
+}
+
+int ppnum(void) {                    /* a decimal, hex or octal constant */
+    int v; int c; int base;
+    v = 0; base = 10;
+    if (src[ppp] == 48) {
+        if (ppp + 1 < ppe) { c = src[ppp + 1] & 255;
+            if (c == 120 | c == 88) { base = 16; ppp = ppp + 2; }
+            else { base = 8; ppp = ppp + 1; } }
+        else ppp = ppp + 1;
+    }
+    while (ppp < ppe) {
+        c = src[ppp] & 255;
+        if (isdi(c)) { if (c - 48 >= base) break; v = v * base + (c - 48); }
+        else { if (base == 16) {
+                   if (c >= 97) { if (c <= 102) { v = v * 16 + (c - 87); }
+                                  else break; }
+                   else { if (c >= 65) { if (c <= 70) { v = v * 16 + (c - 55); }
+                                         else break; }
+                          else break; } }
+               else break; }
+        ppp = ppp + 1;
+    }
+    while (ppp < ppe) { c = src[ppp] & 255;
+        if (c == 117 | c == 85 | c == 108 | c == 76) ppp = ppp + 1; else break; }
+    return v;
+}
+
+int ppprim(void) {
+    int v; int ns; int ne2; int m; int paren;
+    ppws();
+    if (ppp >= ppe) return 0;
+    if (ppop("!", 1)) { if (ppprim()) return 0; return 1; }
+    if (ppop("~", 1)) return 0 - ppprim() - 1;
+    if (ppop("-", 1)) return 0 - ppprim();
+    if (ppop("+", 1)) return ppprim();
+    if (ppop("(", 1)) { v = ppcond(); ppop(")", 1); return v; }
+    if (isdi(src[ppp] & 255)) return ppnum();
+    if (src[ppp] == 39) {                        /* a character constant */
+        ppp = ppp + 1;
+        v = src[ppp] & 255;
+        if (v == 92) { ppp = ppp + 1; v = src[ppp] & 255;
+                       if (v == 110) v = 10; if (v == 116) v = 9;
+                       if (v == 48) v = 0; if (v == 114) v = 13; }
+        ppp = ppp + 1;
+        if (src[ppp] == 39) ppp = ppp + 1;
+        return v;
+    }
+    if (pplit("defined", 7)) {
+        ppp = ppp + 7;
+        ppws();
+        paren = 0;
+        if (ppop("(", 1)) paren = 1;
+        ppws();
+        ns = ppp;
+        while (ppp < ppe) { if (isal(src[ppp] & 255) == 0) {
+                                if (isdi(src[ppp] & 255) == 0) break; }
+                            ppp = ppp + 1; }
+        ne2 = ppp;
+        if (paren) ppop(")", 1);
+        if (mfind(src + ns, ne2 - ns) >= 0) return 1;
+        return 0;
+    }
+    if (isal(src[ppp] & 255)) {
+        ns = ppp;
+        while (ppp < ppe) { if (isal(src[ppp] & 255) == 0) {
+                                if (isdi(src[ppp] & 255) == 0) break; }
+                            ppp = ppp + 1; }
+        m = mfind(src + ns, ppp - ns);
+        if (m >= 0) { if (machas[m]) return macval[m]; }
+        return 0;                                /* C99 6.10.1: unknown is 0 */
+    }
+    ppp = ppp + 1;
+    return 0;
+}
+
+int ppmul(void) {
+    int v; int r;
+    v = ppprim();
+    while (1) {
+        ppws();
+        if (ppop("*", 1)) { v = v * ppprim(); }
+        else { if (ppop("/", 1)) { r = ppprim(); if (r) v = v / r; else v = 0; }
+        else { if (ppop("%", 1)) { r = ppprim(); if (r) v = v % r; else v = 0; }
+        else break; } }
+    }
+    return v;
+}
+
+int ppadd(void) {
+    int v;
+    v = ppmul();
+    while (1) {
+        ppws();
+        if (ppop("+", 1)) v = v + ppmul();
+        else { if (ppop("-", 1)) v = v - ppmul(); else break; }
+    }
+    return v;
+}
+
+int ppshift(void) {
+    int v;
+    v = ppadd();
+    while (1) {
+        ppws();
+        if (ppop("<<", 2)) v = v << ppadd();
+        else { if (ppop(">>", 2)) v = v >> ppadd(); else break; }
+    }
+    return v;
+}
+
+int pprel(void) {
+    int v;
+    v = ppshift();
+    while (1) {
+        ppws();
+        if (ppop("<=", 2)) { if (v <= ppshift()) v = 1; else v = 0; }
+        else { if (ppop(">=", 2)) { if (v >= ppshift()) v = 1; else v = 0; }
+        else { if (ppop("<", 1)) { if (v < ppshift()) v = 1; else v = 0; }
+        else { if (ppop(">", 1)) { if (v > ppshift()) v = 1; else v = 0; }
+        else break; } } }
+    }
+    return v;
+}
+
+int ppeq(void) {
+    int v;
+    v = pprel();
+    while (1) {
+        ppws();
+        if (ppop("==", 2)) { if (v == pprel()) v = 1; else v = 0; }
+        else { if (ppop("!=", 2)) { if (v != pprel()) v = 1; else v = 0; }
+        else break; }
+    }
+    return v;
+}
+
+int ppband(void) {
+    int v;
+    v = ppeq();
+    while (1) { ppws();
+        if (ppp + 1 < ppe) { if (src[ppp] == 38) { if (src[ppp+1] == 38) break; } }
+        if (ppop("&", 1)) v = v & ppeq(); else break; }
+    return v;
+}
+
+int ppbxor(void) {
+    int v;
+    v = ppband();
+    while (1) { ppws(); if (ppop("^", 1)) v = v ^ ppband(); else break; }
+    return v;
+}
+
+int ppbor(void) {
+    int v;
+    v = ppbxor();
+    while (1) { ppws();
+        if (ppp + 1 < ppe) { if (src[ppp] == 124) { if (src[ppp+1] == 124) break; } }
+        if (ppop("|", 1)) v = v | ppbxor(); else break; }
+    return v;
+}
+
+int ppland(void) {
+    int v; int r;
+    v = ppbor();
+    while (1) { ppws(); if (ppop("&&", 2)) { r = ppbor();
+                    if (v) { if (r) v = 1; else v = 0; } else v = 0; }
+                else break; }
+    return v;
+}
+
+int pplor(void) {
+    int v; int r;
+    v = ppland();
+    while (1) { ppws(); if (ppop("||", 2)) { r = ppland();
+                    if (v) v = 1; else { if (r) v = 1; else v = 0; } }
+                else break; }
+    return v;
+}
+
+int ppcond(void) {
+    int v; int a; int b;
+    v = pplor();
+    ppws();
+    if (ppop("?", 1)) {
+        a = ppcond();
+        ppop(":", 1);
+        b = ppcond();
+        if (v) return a;
+        return b;
+    }
+    return v;
+}
+
+int ppeval(int from, int to) {
+    ppp = from; ppe = to;
+    if (ppcond()) return 1;
+    return 0;
+}
+
 int takest[64];      /* per nesting level: are we taking? */
 int seenst[64];      /* has a branch already been taken? */
 int ndepth;
@@ -923,8 +1151,8 @@ int preprocess(void) {
             if (d >= 0) {
                 if (d == 0) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
                 if (d == 1) { if (mfind(src + ns, ne - ns) < 0) flag = 1; }
-                if (d == 2) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
-                if (d == 3) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
+                if (d == 2) { if (ppeval(ns, i)) flag = 1; }   /* #if */
+                if (d == 3) { if (ppeval(ns, i)) flag = 1; }   /* #elif */
                 if (d == 4) { if (ndepth > 0) { if (seenst[ndepth-1] == 0) flag = 1; } }
                 if (d > 4) flag = 1;
                 key[0] = d; key[1] = flag; key[2] = 0; key[3] = 0;
@@ -1144,10 +1372,15 @@ int lex(void) {
             ntok = ntok + 1;
             i = j + 1;
         } else {
-        if (a == 5) {                          /* charlit */
+        if (a == 5) {                          /* charlit: scan to the quote,
+                                                  an escape may be several
+                                                  characters long */
             j = i + 1;
-            if (at(j) == 92) j = j + 1;
-            j = j + 1;
+            while (at(j) >= 0) {
+                if (at(j) == 39) break;
+                if (at(j) == 92) j = j + 1;
+                j = j + 1;
+            }
             tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j + 1 - i;
             ntok = ntok + 1;
             i = j + 1;
@@ -1525,7 +1758,20 @@ int decode(int t, char *buf) {
             k = k + 1;
             c = src[tpos[t] + k] & 255;
             if (c == 110) c = 10;
-            else { if (c == 116) c = 9; else { if (c == 48) c = 0; else {
+            else { if (c == 116) c = 9; else {
+                   if (c >= 48) { if (c <= 55) {    /* \N, \NN, \NNN octal */
+                       int ov; int od;
+                       ov = 0; od = 0;
+                       while (od < 3) {
+                           c = src[tpos[t] + k] & 255;
+                           if (c < 48) break;
+                           if (c > 55) break;
+                           ov = ov * 8 + (c - 48);
+                           k = k + 1; od = od + 1;
+                       }
+                       k = k - 1;
+                       c = ov & 255;
+                   } }
                    if (c == 114) c = 13; else {
                    if (c == 120) {            /* \xNN */
                        int h1; int h2;
@@ -1535,7 +1781,7 @@ int decode(int t, char *buf) {
                        if (h2 >= 97) h2 = h2 - 87; else { if (h2 >= 65) h2 = h2 - 55; else h2 = h2 - 48; }
                        c = h1 * 16 + h2;
                        k = k + 2;
-                   } } } } }
+                   } } } }
         }
         buf[n] = c; n = n + 1;
         k = k + 1;
