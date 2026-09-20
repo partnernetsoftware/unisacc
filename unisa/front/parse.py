@@ -1682,16 +1682,12 @@ class Walker:
         self.em.emit("mov", ACC, TMP)
         return ty
 
-    def printf(self):
-        """[W-9] desugared against the static format string."""
-        t = self.expect("str")
-        fmt = t.val
-        i = 0
-        lit = ""
+    def _fmt_parts(self, fmt):
+        """Split a format string into literals and conversions."""
+        parts, lit, i = [], "", 0
         while i < len(fmt):
-            c = fmt[i]
-            if c != "%":
-                lit += c
+            if fmt[i] != "%":
+                lit += fmt[i]
                 i += 1
                 continue
             i += 1
@@ -1699,7 +1695,6 @@ class Walker:
                 lit += "%"
                 i += 1
                 continue
-            # flags, width, precision, length -- then the conversion [W-9]
             left = zero = False
             while i < len(fmt) and fmt[i] in "-+ #0":
                 left |= fmt[i] == "-"
@@ -1722,13 +1717,37 @@ class Walker:
                 raise CError("printf: format ends in a conversion")
             spec = fmt[i]
             i += 1
-            if spec == "%":
-                lit += "%"
-                continue
-            self.em.write_literal(lit)
+            parts.append((lit, spec, width, left, zero, prec))
             lit = ""
+        parts.append((lit, None, 0, False, False, None))
+        return parts
+
+    def printf(self):
+        """[W-9] desugared against the static format string.
+
+        Every argument is evaluated BEFORE anything is written, into a frame
+        slot of its own.  Interleaving them with the output was observable:
+        `printf("a %d\n", f())` printed `a ` before calling f, so a call that
+        printed something of its own came out in the wrong order."""
+        t = self.expect("str")
+        parts = self._fmt_parts(t.val)
+        slots = []
+        for (_, spec, _, _, _, _) in parts:
+            if spec is None:
+                break
             self.expect(",")
             self.rvalue()
+            off = self.alloc(I64)
+            self.em.store(FP, -off, ACC)
+            slots.append(off)
+        self.expect(")")
+        k = 0
+        for (lit, spec, width, left, zero, prec) in parts:
+            self.em.write_literal(lit)
+            if spec is None:
+                break
+            self.em.load(ACC, FP, 0 - slots[k])
+            k += 1
             if spec in "di":
                 self.em.print_field("int", width, left, zero)
             elif spec == "u":
@@ -1745,8 +1764,6 @@ class Walker:
                 self.em.print_field("chr", width, left, False)
             else:
                 raise CError("printf: unsupported %%%s" % spec)
-        self.em.write_literal(lit)
-        self.expect(")")
         self.em.imm(ACC, 0)
         return I32
 
