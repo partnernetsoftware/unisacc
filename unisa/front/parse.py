@@ -936,6 +936,7 @@ class Walker:
                 self.em.store(FP, -self.sret_off, ACC)
             else:
                 self.em.store(FP, -self.sret_off, ARGREGS[0])
+        pending = []                 # struct parameters, copied after the spill
         for k, (ty, pn) in enumerate(params):
             self.sc.act("param", self.peek())
             off = self.alloc(ty)
@@ -943,21 +944,34 @@ class Walker:
             w = (min(8, ty.size(self.sc.structs))
                  if ty.kind in NARROW else 8)
             if ty.kind == "struct":
-                # by value: what arrives is the address of the caller's copy,
+                # By value: what arrives is the address of the caller's copy,
                 # and the callee copies it into its own slot so the parameter
-                # behaves like any other local [W-14]
+                # behaves like any other local [W-14].  The copy CANNOT happen
+                # here: `blockcopy` works through r0-r2, and r1/r2 are still
+                # holding the arguments that have not been spilled yet.  So
+                # the address goes to a slot now and the copy happens once
+                # every argument is safely in the frame.
+                #
+                #   static int f(R a, R b)      -- b came in r1
+                #
+                # copying `a` clobbered it, and `b` was copied from `a`.
+                tmp = self.alloc(I64)
+                pending.append((tmp, off, ty))
                 if stacked:
-                    self.em.load(LHS, FP, 16 + 8 * (k + base_k))
+                    self.em.load(ACC, FP, 16 + 8 * (k + base_k))
+                    self.em.store(FP, -tmp, ACC)
                 else:
-                    self.em.emit("mov", LHS, ARGREGS[k + base_k])
-                self.em.imm(ACC, off)
-                self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
-                self.em.blockcopy(ACC, LHS, ty.size(self.sc.structs))
+                    self.em.store(FP, -tmp, ARGREGS[k + base_k])
             elif stacked:
                 self.em.load(ACC, FP, 16 + 8 * (k + base_k))
                 self.em.store(FP, -off, ACC, w)
             else:
                 self.em.store(FP, -off, ARGREGS[k + base_k], w)
+        for (tmp, off, ty) in pending:
+            self.em.load(LHS, FP, -tmp)
+            self.em.imm(ACC, off)
+            self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
+            self.em.blockcopy(ACC, LHS, ty.size(self.sc.structs))
         self.block(new_scope=False)
         self.em.label(self.ret_label)
         self.em.epilogue()
@@ -1807,6 +1821,19 @@ class Walker:
         t = self.peek()
         if t.kind == "(":
             self.next()
+            # Parentheses do not destroy an lvalue: `(*p)++` and `(x) = 1` are
+            # ordinary C, and `(*matchlength)++` is how half of tiny-regex-c
+            # is written.  The binary ladder loads at its innermost level, so
+            # an expression that is a bare unary has to be recognised before
+            # it goes in -- try that first and roll the emitter back if the
+            # parenthesis turns out to hold more than one operand.
+            m = self.mark()
+            ty = self.unary()
+            if self.at(")") and self.lval is not None:
+                self.next()
+                return self.postfix_chain(ty)
+            self.rewind(m)
+            self.lval = None
             ty = self.assign()
             self.expect(")")
             return self.postfix_chain(ty)
@@ -2276,6 +2303,17 @@ class Walker:
                 break
             self.em.load(ACC, FP, 0 - slots[k])
             k += 1
+            if prec is not None and spec in "diuxXop":
+                # C99 7.19.6.1p5: for an integer conversion the precision is
+                # the MINIMUM number of digits -- `%.2x` of 3 is "03".  That
+                # is zero padding, and it is what a hex dump is made of.
+                if width > prec:
+                    raise CError(
+                        "line %d: printf %%%d.%d%s -- a field wider than the "
+                        "precision needs spaces outside the zeros, which the "
+                        "desugared printf does not emit"
+                        % (self.peek().line, width, prec, spec))
+                width, zero, left = prec, True, False
             if spec in "di":
                 self.em.print_field("int", width, left, zero)
             elif spec == "u":

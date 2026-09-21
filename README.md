@@ -134,7 +134,7 @@ in a twentieth of a second, and the SGD control arm lives in
 | `multi` | two translation units compiled into one program, against `cc a.c b.c` |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
-| `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), eight algorithms, several files each, with their own known-answer tests |
+| `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), [tiny-AES-c](https://github.com/kokke/tiny-AES-c), [tiny-regex-c](https://github.com/kokke/tiny-regex-c); eleven entries, several files each, with their own known-answer tests |
 
 ## Layout
 
@@ -173,24 +173,34 @@ place where this subset evaluates `int` arithmetic at 64 bits on purpose.
 
 But a corpus of single files written *for compilers* is not the same as
 library code written *to be used*. `tests/tools.sh` runs the other kind —
-Brad Conte's crypto-algorithms, eight algorithms, each a `.c` and a `.h` and
-its own known-answer test, all of it multi-file, none of it floating point:
+crypto-algorithms, tiny-AES-c and tiny-regex-c: eleven entries, every one of
+them several files, with their own known-answer tests, none of it floating
+point:
 
 ```
-tools 8   pass 8   wrong 0   unsupported 0   skip 0
+tools 11   pass 11   wrong 0   unsupported 0   skip 0
 ```
 
-It read `pass 2` the first time, and the six defects behind that are the most
-useful thing this project has measured in a while — four of them produced a
-*wrong answer* rather than a crash, and two were invisible to all six `--fold`
-targets because the interpreter does not model addressing modes. Comments were
-being stripped by the lexer instead of before the directives (so
-`#define N 32  // note` commented out the rest of every line that used N);
-macro parameters were substituted one at a time instead of simultaneously (so
-MD5's `FF(d,a,b,c,…)` rounds wrote the wrong variable); and arm64's
-`[fp, #-off]` immediate is a *signed* 9-bit field, which we were masking — so
-every function with more than 256 bytes of frame silently read the wrong local.
-`prd.md` §6 E-45 has the full list.
+It read `pass 2` the first time. The ten defects behind that are the most
+useful thing this project has measured in a while — **seven of them produced a
+wrong answer rather than a crash**, and two were invisible to all six `--fold`
+targets because the interpreter does not model addressing modes:
+
+- comments were being removed by the *lexer*, not before the directives, so
+  `#define N 32  // note` commented out the rest of every line that used N;
+- macro parameters were substituted one at a time instead of simultaneously,
+  so MD5's `FF(d,a,b,c,…)` rounds wrote the wrong variable;
+- arm64's `[fp, #-off]` immediate is a *signed* 9-bit field and we were masking
+  it, so every function with more than 256 bytes of frame read the wrong local;
+- `uint8_t` was a typedef for signed `char`, so AES printed a screenful of `f`s;
+- parentheses destroyed an lvalue, so `(*p)++` was refused outright;
+- and a struct passed by value was copied through the registers the *later*
+  arguments were still sitting in.
+
+`prd.md` §6 E-45 and E-46 have the full list. The lesson is not that real code
+is harder — it is that real code leans on the type system, the ABI, the
+encoder and the library *at the same time*, and a probe we write ourselves
+leans on one of them at a time.
 
 ## Prior art
 
