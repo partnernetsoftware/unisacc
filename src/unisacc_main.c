@@ -1257,6 +1257,7 @@ int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
+int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
 int symstruct[MAXSYM];      /* index into the struct table, or -1 */
 
 /* ---- struct and union ------------------------------------------------
@@ -1271,6 +1272,8 @@ int stfirst[MAXSTRUCT]; int stcount[MAXSTRUCT];
 /* tags are block-scoped (C99 6.2.1): the block depth a tag was defined at,
    and whether that block has closed */
 int stdepth[MAXSTRUCT]; int stdead[MAXSTRUCT]; int bdepth;
+int vlaslot[64];          /* per block depth: where the pre-VLA stack pointer is kept */
+int curvla;               /* the thing in r0 is a VLA: its byte-count slot */
 int stsize[MAXSTRUCT]; int stalign[MAXSTRUCT]; int stunion[MAXSTRUCT];
 int nstruct;
 char mbname[MAXMEMB * 32];
@@ -1284,6 +1287,7 @@ int mbuns[MAXMEMB];
 /* 1: a member that takes no initialiser slot -- every union member after the
    first (C99 6.7.8p17: a brace list initialises a union's FIRST member) */
 int mbskip[MAXMEMB];
+int mbpst[MAXMEMB];       /* a pointer member: the struct it points to, or -1 */
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
@@ -1301,6 +1305,8 @@ int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
 int declspecfp;           /* what declspec's typedef said about that */
+int declenum;             /* the specifier was an enum */
+int enumneg;              /* some enumerator seen so far is negative */
 int ntd;
 int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
 int curstruct;          /* the struct the thing in r0 is, or -1 */
@@ -1348,6 +1354,11 @@ int primary(void);
 int postfix(void);
 int vcall(int var);
 int fpdecl(void);
+int eatstar(void);
+int initcountat(int j);
+int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes);
+int structslots(int sst);
+int cplitexpr(int w, int sst, int isarr, int n);
 int emit_binop(int k);
 int stmt(void);
 int block(void);
@@ -1560,6 +1571,7 @@ int sadd(int t, int kind, int off, int elem) {
     symvar[nsym] = 0;
     symuns[nsym] = declunsigned;
     symfp[nsym] = declfp;
+    symvla[nsym] = 0;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -1692,7 +1704,39 @@ int stemp(int st) {
     return 0;
 }
 
+/* ---- bit-fields ------------------------------------------------------
+   A bit-field has no address, so its "width" carries everything a load or a
+   store needs: the storage unit's size, where in it the field starts, how
+   wide it is, and whether it is signed.  Every path that loads or stores
+   goes through eload/estore, so reads, writes, ++, `op=` and initialisers
+   all work on bit-fields without knowing about them. */
+#define BFTAG 1048576
+int bfenc(int width, int bofs, int ub, int sig) {
+    int ul;
+    ul = 0;
+    if (ub == 2) ul = 1;
+    if (ub == 4) ul = 2;
+    if (ub == 8) ul = 3;
+    return BFTAG + width + 128 * bofs + 16384 * ul + 65536 * sig;
+}
+int bfwidth(int w) { return (w - BFTAG) % 128; }
+int bfofs(int w) { return ((w - BFTAG) / 128) % 128; }
+int bfunit(int w) { int ul; ul = ((w - BFTAG) / 16384) % 4;
+    if (ul == 0) return 1; if (ul == 1) return 2; if (ul == 2) return 4; return 8; }
+int bfsig(int w) { return (w - BFTAG) / 65536; }
+
 int eload(int w) {
+    if (w >= BFTAG) {
+        /* up to the top of the register, then back down: an arithmetic
+           shift for a signed field, so the sign question answers itself */
+        if (bfunit(w) == 8) es("  @mem.load r0, [r0+0]\n");
+        else { es("  @mem.ld r0, [r0+0], "); en(bfunit(w)); ec(10); }
+        es("  @lit.imm r1, "); en(64 - bfofs(w) - bfwidth(w));
+        es("\n  @alu.shl r0, r0, r1\n  @lit.imm r1, "); en(64 - bfwidth(w));
+        if (bfsig(w)) es("\n  @alu.shr r0, r0, r1\n");
+        else es("\n  @alu.lshr r0, r0, r1\n");
+        return 0;
+    }
     if (w == 0) return 0;
     if (w == 8) { es("  @mem.load r0, [r0+0]\n"); return 0; }
     es("  @mem.ld r0, [r0+0], "); en(w); ec(10);
@@ -1700,6 +1744,22 @@ int eload(int w) {
 }
 
 int estore(int w) {                              /* [r1] = r0 */
+    if (w >= BFTAG) {
+        /* read, clear the field's bits, or the new ones in, write back;
+           r0 -- the assigned value -- survives */
+        long mask;
+        mask = 1;
+        mask = (mask << bfwidth(w)) - 1;
+        es("  @lit.imm r2, "); en(mask); es("\n  @alu.and r3, r0, r2\n");
+        es("  @lit.imm r2, "); en(bfofs(w)); es("\n  @alu.shl r3, r3, r2\n");
+        if (bfunit(w) == 8) es("  @mem.load r4, [r1+0]\n");
+        else { es("  @mem.ld r4, [r1+0], "); en(bfunit(w)); ec(10); }
+        es("  @lit.imm r2, "); en(0 - (mask << bfofs(w)) - 1);
+        es("\n  @alu.and r4, r4, r2\n  @alu.or r4, r4, r3\n");
+        if (bfunit(w) == 8) es("  @mem.store [r1+0], r4\n");
+        else { es("  @mem.st [r1+0], r4, "); en(bfunit(w)); ec(10); }
+        return 0;
+    }
     if (w == 0) return 0;
     if (w == 8) { es("  @mem.store [r1+0], r0\n"); return 0; }
     es("  @mem.st [r1+0], r0, "); en(w); ec(10);
@@ -1724,6 +1784,46 @@ int loadval(void) {
 }
 
 int primary(void);
+
+/* `(T){...}` as an expression (C99 6.5.2.5): an unnamed object, initialised
+   in place.  Inside a function it lives in the frame; at file scope it has
+   static storage duration, so it is a data object of its own.  The cursor
+   is on the `{`. */
+int ncl;
+int cplitexpr(int w, int sst, int isarr, int n) {
+    int size; int off; int id; int save; int el;
+    el = declsz;
+    if (sst >= 0) el = stsize[sst];
+    if (declptr) el = 8;
+    if (isarr) {
+        if (n == 0) {
+            n = initcountat(tp);
+            if (sst >= 0) n = (n + structslots(sst) - 1) / structslots(sst);
+        }
+        size = n * el;
+    } else size = el;
+    if (sst >= 0) w = el;
+    if (infunc) {
+        off = alloc_local(size);
+        initaggr(0, 0, off, w, sst, size);
+        es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
+    } else {
+        /* named after the `{` token, not a counter: expr() parses
+           speculatively and rewinds, so this can run twice for one literal
+           and must name the same object both times */
+        id = tp;
+        save = toinit; toinit = 0;
+        es(".bss __cl"); en(id); ec(32); en(size); ec(10);
+        toinit = save;
+        initaggr(2, id, 0, w, sst, size);
+        es("  @mem.lea r0, __cl"); en(id); ec(10);
+    }
+    if (isarr) { lvalue = 0; curptr = 1; curelem = w; if (sst >= 0) curelem = el; }
+    else { if (sst >= 0) { lvalue = 1; curptr = 0; curelem = 0; }
+           else { lvalue = 1; curptr = declptr; curelem = w; if (declptr) curelem = 8; } }
+    curstruct = sst; cursize = size; curdim2 = 0;
+    return postfix();
+}
 
 int unary(void) {
     int p;
@@ -1764,7 +1864,7 @@ int unary(void) {
                 adv();
                 declspec();                          /* handles struct too */
                 sz = declsz;
-                while (eat(tidx("*", 1))) sz = 8;
+                while (eatstar()) sz = 8;
                 if (cur() == tidx("[", 1)) {
                     adv(); sz = sz * cexpr(); need(tidx("]", 1), "]");
                 }
@@ -1778,10 +1878,12 @@ int unary(void) {
            operand of sizeof is not evaluated [C99 6.5.3.4p2]. */
         nsave = nout;
         cursize = 8;                       /* an expression with no symbol */
+        curvla = 0;
         unary();
         nout = nsave;
         sz = cursize;
-        es("  @lit.imm r0, "); en(sz); ec(10);
+        if (curvla) { es("  @mem.load r0, [r6-"); en(curvla); es("]\n"); curvla = 0; }
+        else { es("  @lit.imm r0, "); en(sz); ec(10); }
         lvalue = 0; curelem = 8; curptr = 0;
         return 0;
     }
@@ -1790,12 +1892,19 @@ int unary(void) {
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz; int cuns;
+            int cw; int csz; int cuns; int cst; int carr; int cn;
             adv();
-            cw = declspec(); csz = declsz; cuns = declunsigned;
+            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct;
             declptr = declspecptr;
-            while (eat(tidx("*", 1))) { declptr = 1; csz = 8; }
+            while (eatstar()) { declptr = 1; csz = 8; }
+            carr = 0; cn = 0;
+            if (cur() == tidx("[", 1)) {
+                adv(); carr = 1;
+                if (cur() != tidx("]", 1)) cn = cexpr();
+                need(tidx("]", 1), "]");
+            }
             need(tidx(")", 1), ")");
+            if (cur() == tidx("{", 1)) return cplitexpr(cw, cst, carr, cn);
             unary(); loadval();
             /* narrowing is observable: `(char)300` is 44.  The tape has
                sized load/store, so a round trip through a stack slot is the
@@ -1818,6 +1927,9 @@ int unary(void) {
             lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns;
             curelem = cw;
             if (declptr) curelem = cw;
+            /* `(struct S *)p` -- the member access after it needs the type */
+            curstruct = 0 - 1;
+            if (declptr) { if (cst >= 0) { curstruct = cst; curelem = stsize[cst]; } }
             return 0;
         }
     }
@@ -1879,6 +1991,8 @@ int postfix(void) {
             if (curptr) curelem = mbelem[mi];
             cursize = mbbytes[mi];
             curstruct = mbstruct[mi];
+            /* `p->q->b`: a pointer member hands its pointee on */
+            if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
             curuns = mbuns[mi];
             if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
                 /* an array or a nested struct: the value IS the address */
@@ -1888,6 +2002,7 @@ int postfix(void) {
         } else {
         if (p == P_INDEX) {
             int row; int uu;
+            curvla = 0;
             adv();
             e = curelem;
             row = curdim2;
@@ -1921,6 +2036,10 @@ int pf_call(int t);
 int icparen;
 int vcall(int var);
 int fpdecl(void);
+int initcountat(int j);
+int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes);
+int structslots(int sst);
+int cplitexpr(int w, int sst, int isarr, int n);
 int icall(int si, int t) {
     int n; int k; int st;
     if (symkind[si] == 0) { es("  @mem.lea r0, g_"); etok(t); es("\n  @mem.load r0, [r0+0]\n"); }
@@ -2043,6 +2162,7 @@ int primary(void) {
                      __write(2, src + tpos[tp], tlen[tp]);
                      __write(2, "\n", 1); __exit(1); }
         cursize = symbytes[i];           /* what `sizeof` reports for it */
+        curvla = symvla[i];
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
         curuns = symuns[i];
@@ -2405,7 +2525,7 @@ int pf_call(int t) {
         push();                                   /* ap */
         need(tidx(",", 1), ",");
         vw = declspec(); vp = declspecptr;
-        while (eat(tidx("*", 1))) vp = 1;
+        while (eatstar()) vp = 1;
         need(tidx(")", 1), ")");
         es("  @lit.imm r2, 8\n  @alu.add r0, r0, r2\n");
         es("  @mem.load r1, [r7+8]\n  @mem.store [r1+0], r0\n");   /* ap += 8 */
@@ -2728,6 +2848,18 @@ int expr(void) {
 
 /* ---- statements and declarations ------------------------------------- */
 int brkstack[32]; int cntstack[32]; int nloop;
+/* the block depth each break / continue target lives at: jumping out of a
+   block that allocated a VLA has to give the stack back first */
+int brkdep[32]; int cntdep[32];
+int vlaback(int dep) {
+    int d;
+    d = dep + 1;
+    while (d <= bdepth) {
+        if (vlaslot[d]) { es("  @mem.load r7, [r6-"); en(vlaslot[d]); es("]\n"); return 0; }
+        d = d + 1;
+    }
+    return 0;
+}
 /* ---- switch ----------------------------------------------------------
    The dispatch chain is emitted AFTER the body, because a case label is only
    known once the body has been walked.  The control value goes to a frame
@@ -2767,18 +2899,112 @@ int catom(void) {
     return 0;
 }
 
-int cexpr(void) {
-    int v; int k;
-    v = catom();
+/* An integer constant expression (C99 6.6), with C's precedence.  It was
+   a left-to-right chain of + - * /, so `N + 1 * 2` in an array bound was
+   (N + 1) * 2, and `[1 && 1]` or `[1 ? 3 : 9]` were refused outright. */
+int cprec(int k) {
+    if (k == tidx("||", 2)) return 1;
+    if (k == tidx("&&", 2)) return 2;
+    if (k == tidx("|", 1)) return 3;
+    if (k == tidx("^", 1)) return 4;
+    if (k == tidx("&", 1)) return 5;
+    if (k == tidx("==", 2)) return 6;
+    if (k == tidx("!=", 2)) return 6;
+    if (k == tidx("<", 1)) return 7;
+    if (k == tidx(">", 1)) return 7;
+    if (k == tidx("<=", 2)) return 7;
+    if (k == tidx(">=", 2)) return 7;
+    if (k == tidx("<<", 2)) return 8;
+    if (k == tidx(">>", 2)) return 8;
+    if (k == tidx("+", 1)) return 9;
+    if (k == tidx("-", 1)) return 9;
+    if (k == tidx("*", 1)) return 10;
+    if (k == tidx("/", 1)) return 10;
+    if (k == tidx("%", 1)) return 10;
+    return 0;
+}
+long cunary(void) {
+    int w;
+    if (eat(tidx("-", 1))) return 0 - cunary();
+    if (eat(tidx("+", 1))) return cunary();
+    if (eat(tidx("!", 1))) { if (cunary()) return 0; return 1; }
+    if (eat(tidx("~", 1))) return (0 - cunary()) - 1;
+    if (cur() == tidx("sizeof", 6)) { if (kind(tp + 1) == tidx("(", 1)) { if (is_typeat(tp + 2)) {
+        adv(); adv();
+        w = declspec(); w = declsz;
+        while (eatstar()) w = 8;
+        need(tidx(")", 1), ")");
+        return w;
+    } } }
+    /* a cast inside a constant expression: `(int)7` */
+    if (cur() == tidx("(", 1)) { if (is_typeat(tp + 1)) {
+        adv(); declspec(); while (eatstar()) { }
+        need(tidx(")", 1), ")");
+        return cunary();
+    } }
+    return catom();
+}
+long cbin(int minp) {
+    long v; long r; int k; int pr;
+    v = cunary();
     while (1) {
-        k = cur();
-        if (k == tidx("*", 1)) { adv(); v = v * catom(); }
-        else { if (k == tidx("+", 1)) { adv(); v = v + catom(); }
-        else { if (k == tidx("-", 1)) { adv(); v = v - catom(); }
-        else { if (k == tidx("/", 1)) { adv(); v = v / catom(); }
-        else break; } } }
+        k = cur(); pr = cprec(k);
+        if (pr == 0) break;
+        if (pr < minp) break;
+        adv();
+        r = cbin(pr + 1);
+        if (pr == 1) { if (v) v = 1; else { if (r) v = 1; else v = 0; } }
+        else { if (pr == 2) { if (v) { if (r) v = 1; else v = 0; } else v = 0; }
+        else { if (k == tidx("|", 1)) v = v | r;
+        else { if (k == tidx("^", 1)) v = v ^ r;
+        else { if (k == tidx("&", 1)) v = v & r;
+        else { if (k == tidx("==", 2)) v = v == r;
+        else { if (k == tidx("!=", 2)) v = v != r;
+        else { if (k == tidx("<", 1)) v = v < r;
+        else { if (k == tidx(">", 1)) v = v > r;
+        else { if (k == tidx("<=", 2)) v = v <= r;
+        else { if (k == tidx(">=", 2)) v = v >= r;
+        else { if (k == tidx("<<", 2)) v = v << r;
+        else { if (k == tidx(">>", 2)) v = v >> r;
+        else { if (k == tidx("+", 1)) v = v + r;
+        else { if (k == tidx("-", 1)) v = v - r;
+        else { if (k == tidx("*", 1)) v = v * r;
+        else { if (k == tidx("/", 1)) v = v / r;
+        else v = v % r; } } } } } } } } } } } } } } } }
     }
     return v;
+}
+/* Is the bound that starts at token j (up to its `]`) a constant
+   expression?  Anything naming an object makes the array variable-length;
+   `[1 && 1]` does not. */
+int isconstdim(int j) {
+    int depth; int k; int i;
+    depth = 0;
+    while (j < ntok) {
+        k = kind(j);
+        if (k == tidx("[", 1)) depth = depth + 1;
+        if (k == tidx("]", 1)) { if (depth == 0) return 1; depth = depth - 1; }
+        if (k == T_ID) {
+            i = mfindt(j);
+            if (i >= 0) { if (machas[i]) { j = j + 1; continue; } }
+            i = sfind(j);
+            if (i < 0) return 0;
+            if (symkind[i] != 4) return 0;          /* not an enum constant */
+        }
+        j = j + 1;
+    }
+    return 1;
+}
+
+int cexpr(void) {
+    long c; long a; long b;
+    c = cbin(1);
+    if (eat(tidx("?", 1))) {
+        a = cexpr(); need(tidx(":", 1), ":"); b = cexpr();
+        if (c) return a;
+        return b;
+    }
+    return c;
 }
 
 int alloc_local(int n) { frameoff = frameoff + n; if (frameoff > framemax) framemax = frameoff; return frameoff; }
@@ -2928,7 +3154,7 @@ int enumspec(void) {
         t = adv();
         if (eat(tidx("=", 1))) {
             neg = 0;
-            if (eat(tidx("-", 1))) neg = 1;
+            if (eat(tidx("-", 1))) { neg = 1; enumneg = 1; }
             v = 0; k = 0;
             v = numval(tp);
             if (neg) v = 0 - v;
@@ -2943,6 +3169,21 @@ int enumspec(void) {
     return 4;
 }
 
+/* `*`, and the qualifiers that may follow it: `char *const p`,
+   `int (*const x)`.  They change nothing this compiler tracks. */
+int isqual(int t) {
+    if (kind(t) != T_TYPE) return 0;
+    if (srcis(tpos[t], tlen[t], "const")) return 1;
+    if (srcis(tpos[t], tlen[t], "volatile")) return 1;
+    if (srcis(tpos[t], tlen[t], "restrict")) return 1;
+    return 0;
+}
+int eatstar(void) {
+    if (eat(tidx("*", 1)) == 0) return 0;
+    while (isqual(tp)) adv();
+    return 1;
+}
+
 int declspec(void) {                       /* -> element width */
     int w; int td;
     w = 8;
@@ -2951,6 +3192,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0;
+    declenum = 0;
     td = tdfind(tp);
     if (td >= 0) {
         adv();
@@ -2969,7 +3211,7 @@ int declspec(void) {                       /* -> element width */
         declsz = stsize[declstruct];
         return 8;
     }
-    if (cur() == tidx("enum", 4)) { declsz = enumspec(); return declsz; }
+    if (cur() == tidx("enum", 4)) { declenum = 1; declsz = enumspec(); return declsz; }
     while (is_typetok()) {
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
@@ -2995,20 +3237,21 @@ int declspec(void) {                       /* -> element width */
 int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
-    int own[256]; int nown; int j;
-    nown = 0;
+    int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum;
+    nown = 0; bitpos = 0;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
     while (cur() != tidx("}", 1)) {
         w = declspec();
-        sz = declsz; mst = declstruct; muns = declunsigned;
+        sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum;
         if (cur() == tidx(";", 1)) { if (mst >= 0) {
             /* An anonymous member (C11 6.7.2.1p13): its members are members
                of this aggregate, at its offset.  Spliced in by copy. */
             int a; int e; int first;
             msz = stsize[mst]; mal = stalign[mst];
             if (mal > 8) mal = 8;
+            if ((bitpos + 7) / 8 > off) off = (bitpos + 7) / 8;
             if (stunion[si]) mo = 0;
             else {
                 while (off - (off / mal) * mal) off = off + 1;
@@ -3016,6 +3259,7 @@ int stbody(int si) {
             }
             if (stunion[si]) { if (msz > off) off = msz; }
             if (mal > al) al = mal;
+            bitpos = off * 8;
             a = stfirst[mst]; e = a + stcount[mst]; first = 1;
             while (a < e) {
                 if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
@@ -3026,6 +3270,7 @@ int stbody(int si) {
                 mbptr[nmemb] = mbptr[a]; mbstruct[nmemb] = mbstruct[a];
                 mbuns[nmemb] = mbuns[a];
                 mbskip[nmemb] = mbskip[a];
+                mbpst[nmemb] = mbpst[a];
                 if (stunion[mst]) { if (first == 0) mbskip[nmemb] = 1; }
                 first = 0;
                 if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
@@ -3039,17 +3284,61 @@ int stbody(int si) {
         } }
         while (1) {
             declptr = declspecptr;
-            while (eat(tidx("*", 1))) declptr = 1;
-            t = adv();
+            while (eatstar()) declptr = 1;
+            t = 0 - 1;
+            if (cur() != tidx(":", 1)) t = adv();     /* `unsigned : 2;` names nothing */
             n = 1;
             if (cur() == tidx("[", 1)) {
                 adv(); n = cexpr(); need(tidx("]", 1), "]");
             }
+            isbf = 0;
+            if (eat(tidx(":", 1))) {
+                /* A bit-field.  C99 6.7.2.1 leaves the layout to the
+                   implementation; this is what both our targets' ABIs do,
+                   and what the Python walker does: pack in declaration
+                   order, start a new storage unit when the field would
+                   straddle one, and a width of 0 forces that break. */
+                int unit; int pos; int uoff; int sig;
+                bw = cexpr(); isbf = 1;
+                unit = sz * 8;
+                if (sz > al) al = sz;
+                if (stunion[si]) {
+                    if (sz > off) off = sz;
+                    pos = 0;
+                } else {
+                    pos = bitpos;
+                    if (off * 8 > pos) pos = off * 8;
+                    if (bw == 0) {
+                        pos = (pos + unit - 1) / unit * unit;
+                        bitpos = pos;
+                        if ((bitpos + 7) / 8 > off) off = (bitpos + 7) / 8;
+                    } else {
+                        if (pos % unit + bw > unit) pos = (pos + unit - 1) / unit * unit;
+                        bitpos = pos + bw;
+                        if ((bitpos + 7) / 8 > off) off = (bitpos + 7) / 8;
+                    }
+                }
+                if (t < 0 || bw == 0) {
+                    if (eat(tidx(",", 1)) == 0) break;
+                    continue;
+                }
+                uoff = pos / unit * sz;
+                /* plain int is signed here, as in gcc; an enum is unsigned
+                   unless an enumerator is negative, or 148 in eight bits
+                   reads back as -108 */
+                sig = 1;
+                if (muns) sig = 0;
+                if (menum) { if (enumneg == 0) sig = 0; }
+                mo = uoff; msz = sz; mw = bfenc(bw, pos - uoff * 8, sz, sig); mel = sz;
+            }
+            if (isbf == 0) {
             msz = sz; mal = sz; mw = sz; mel = sz;
             if (mst >= 0) { msz = stsize[mst]; mal = stalign[mst]; mw = 0; mel = msz; }
             if (declptr) { msz = 8; mal = 8; mw = 8; mel = sz; if (mst >= 0) mel = stsize[mst]; }
             if (mal > 8) mal = 8;
             if (n > 1) { mel = msz; msz = msz * n; mw = 0; }
+            /* a plain member starts at the next byte, whatever bits precede it */
+            if ((bitpos + 7) / 8 > off) off = (bitpos + 7) / 8;
             if (stunion[si]) mo = 0;
             else {
                 while (off - (off / mal) * mal) off = off + 1;
@@ -3057,6 +3346,8 @@ int stbody(int si) {
             }
             if (stunion[si]) { if (msz > off) off = msz; }
             if (mal > al) al = mal;
+            bitpos = off * 8;
+            }
             if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
             k = 0;
             while (k < tlen[t]) { if (k < 31) mbname[nmemb * 32 + k] = src[tpos[t] + k]; k = k + 1; }
@@ -3065,7 +3356,9 @@ int stbody(int si) {
             mboff[nmemb] = mo; mbbytes[nmemb] = msz; mbwidth[nmemb] = mw;
             mbelem[nmemb] = mel; mbptr[nmemb] = declptr;
             mbstruct[nmemb] = 0 - 1;
-            if (declptr == 0) mbstruct[nmemb] = mst;
+            if (declptr == 0) { if (isbf == 0) mbstruct[nmemb] = mst; }
+            mbpst[nmemb] = 0 - 1;
+            if (declptr) mbpst[nmemb] = mst;
             mbuns[nmemb] = muns;
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
@@ -3093,9 +3386,11 @@ int stbody(int si) {
         mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
         mbuns[nmemb] = mbuns[own[j]];
         mbskip[nmemb] = mbskip[own[j]];
+        mbpst[nmemb] = mbpst[own[j]];
         nmemb = nmemb + 1;
         j = j + 1;
     }
+    if ((bitpos + 7) / 8 > off) off = (bitpos + 7) / 8;
     while (off - (off / al) * al) off = off + 1;
     stsize[si] = off; stalign[si] = al;
     return si;
@@ -3108,11 +3403,16 @@ int block(void) {
     need(vfind(TOKV, NTOKV, "{", 1), "{");
     savesym = nsym; saveoff = frameoff; savetd = ntd; savest = nstruct;
     bdepth = bdepth + 1;
+    vlaslot[bdepth] = 0;
     while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
         if (cur() == T_EOF) { printf("unterminated block\n"); __exit(1); }
         stmt();
     }
     adv();
+    if (vlaslot[bdepth]) {
+        es("  @mem.load r7, [r6-"); en(vlaslot[bdepth]); es("]\n");
+        vlaslot[bdepth] = 0;
+    }
     nsym = savesym; frameoff = saveoff; ntd = savetd;
     bdepth = bdepth - 1;
     while (savest < nstruct) { stdead[savest] = 1; savest = savest + 1; }
@@ -3126,7 +3426,7 @@ int do_typedef(void) {
     tw = declspec(); tsz = declsz; tsi = declstruct;
     while (1) {
         tptr = declspecptr;
-        while (eat(tidx("*", 1))) tptr = 1;
+        while (eatstar()) tptr = 1;
         /* `typedef int (*binop)(int, int);` -- a pointer to a function */
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             nt = fpdecl();
@@ -3227,7 +3527,9 @@ int slotat(int i, int w, int sst) {
 
 int initaddr(int isglobal, int gt, int off, int delta) {
     if (isglobal) {
-        es("  @mem.lea r1, g_"); etok(gt);
+        /* 2: an unnamed static object -- a compound literal at file scope */
+        if (isglobal == 2) { es("  @mem.lea r1, __cl"); en(gt); }
+        else { es("  @mem.lea r1, g_"); etok(gt); }
         if (delta) { es("\n  @lit.imm r2, "); en(delta); es("\n  @alu.add r1, r1, r2"); }
         ec(10);
     } else {
@@ -3245,6 +3547,12 @@ int initcount(void) {
     while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
     j = j + 1;
     if (kind(j) == T_STR) { return decode(j, buf) + 1; }
+    return initcountat(j);
+}
+
+/* The same, for the braced list that starts at token j. */
+int initcountat(int j) {
+    int depth; int n; int k; int c; int pos;
     if (kind(j) != tidx("{", 1)) return 1;
     depth = 0; n = 0; k = 0; pos = 0;
     while (j < ntok) {
@@ -3384,7 +3692,7 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
 int fpdecl(void) {
     int t; int depth; int var;
     adv();
-    while (eat(tidx("*", 1))) { }
+    while (eatstar()) { }
     t = adv();
     need(tidx(")", 1), ")");
     var = 0;
@@ -3412,7 +3720,7 @@ int local_decl(void) {
         declstruct = sst;
         decldim2 = 0; declfp = declspecfp;
         declptr = declspecptr;
-        while (eat(vfind(TOKV, NTOKV, "*", 1))) { declptr = 1; }
+        while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; sst = 0 - 1; declstruct = 0 - 1;
         } else t = adv(); }
@@ -3432,6 +3740,35 @@ int local_decl(void) {
         }
         lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
+        if (cur() == vfind(TOKV, NTOKV, "[", 1)) { if (isconstdim(tp + 1) == 0) {
+            /* A variable-length array (C99 6.7.5.2).  Its size is known only
+               now, so its storage comes off the tape stack here; the name is
+               a pointer to it, and a second slot keeps its byte count for
+               `sizeof`.  The first one in a block saves the stack pointer,
+               and the block's end -- or a break/continue out of it -- puts
+               it back, or a loop would eat the stack. */
+            int el; int szs;
+            adv(); expr(); loadval(); need(tidx("]", 1), "]");
+            el = w;
+            if (sst >= 0) el = declsz;
+            if (declptr) el = 8;
+            es("  @lit.imm r2, "); en(el); es("\n  @alu.mul r0, r0, r2\n");
+            szs = alloc_local(8);
+            es("  @mem.store [r6-"); en(szs); es("], r0\n");
+            if (vlaslot[bdepth] == 0) {
+                vlaslot[bdepth] = alloc_local(8);
+                es("  @mem.store [r6-"); en(vlaslot[bdepth]); es("], r7\n");
+            }
+            es("  @lit.imm r2, 7\n  @alu.add r0, r0, r2\n  @lit.imm r2, -8\n"
+               "  @alu.and r0, r0, r2\n  @alu.sub r7, r7, r0\n");
+            off = alloc_local(8);
+            es("  @mem.store [r6-"); en(off); es("], r7\n");
+            declptr = 1; declbytes = 8;
+            sadd(t, lbind, off, el);
+            symvla[nsym - 1] = szs;
+            if (eat(tidx(",", 1))) continue;
+            break;
+        } }
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
             adv();
             isarr = 1;
@@ -3550,7 +3887,8 @@ int stmt(void) {
         need(vfind(TOKV, NTOKV, "(", 1), "(");
         expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         elab("  @ctrl.jumpz r0, L", a); ec(10);
-        brkstack[nloop] = a; cntstack[nloop] = top; nloop = nloop + 1;
+        brkstack[nloop] = a; cntstack[nloop] = top;
+        brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
         elab("  @ctrl.jump L", top); ec(10);
@@ -3580,7 +3918,8 @@ int stmt(void) {
         }
         adv();
         bodyt = tp;
-        brkstack[nloop] = a; cntstack[nloop] = c; nloop = nloop + 1;
+        brkstack[nloop] = a; cntstack[nloop] = c;
+        brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
         aftert = tp;
@@ -3606,9 +3945,9 @@ int stmt(void) {
         nsw = nsw + 1;
         /* C99 6.8.6.2p1: `continue` belongs to the enclosing ITERATION
            statement.  A switch takes over `break` and nothing else. */
-        brkstack[nloop] = end;
-        if (nloop > 0) cntstack[nloop] = cntstack[nloop - 1];
-        else cntstack[nloop] = end;
+        brkstack[nloop] = end; brkdep[nloop] = bdepth;
+        if (nloop > 0) { cntstack[nloop] = cntstack[nloop - 1]; cntdep[nloop] = cntdep[nloop - 1]; }
+        else { cntstack[nloop] = end; cntdep[nloop] = bdepth; }
         nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
@@ -3670,11 +4009,13 @@ int stmt(void) {
     }
     if (p == P_BREAK) {
         adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
+        vlaback(brkdep[nloop - 1]);
         elab("  @ctrl.jump L", brkstack[nloop - 1]); ec(10);
         return 0;
     }
     if (p == P_CONTINUE) {
         adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
+        vlaback(cntdep[nloop - 1]);
         elab("  @ctrl.jump L", cntstack[nloop - 1]); ec(10);
         return 0;
     }
@@ -3682,7 +4023,8 @@ int stmt(void) {
         adv();
         top = newlab(); a = newlab(); c = newlab();
         elab("L", top); es(":\n");
-        brkstack[nloop] = a; cntstack[nloop] = c; nloop = nloop + 1;
+        brkstack[nloop] = a; cntstack[nloop] = c;
+        brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
         elab("L", c); es(":\n");
@@ -3744,12 +4086,18 @@ int function(int t, int w) {
         pw = declspec();
         pst = declstruct;
         declptr = declspecptr; declfp = declspecfp;
-        while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
+        while (eatstar()) declptr = 1;
         havename = 0;
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             pt = fpdecl(); declptr = 1; pw = 8; havename = 1;
         } }
         if (cur() == T_ID) { pt = adv(); havename = 1; }
+        /* `int a[n]`, `int a[static 5]`: an array parameter IS a pointer
+           (C99 6.7.5.3p7), whatever the brackets say */
+        while (cur() == tidx("[", 1)) {
+            while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
+            adv(); declptr = 1;
+        }
         if (havename) {
             if (scopebind("param", 5, pt) != 1) scopefail("a parameter", pt);
             off = alloc_local(8);
@@ -3823,7 +4171,7 @@ int unit(void) {
             declstruct = gstruct;
             decldim2 = 0; declfp = declspecfp;
             declptr = declspecptr;
-            while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
+            while (eatstar()) declptr = 1;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1;
             } else t = adv(); }
