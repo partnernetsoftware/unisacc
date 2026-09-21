@@ -1577,15 +1577,49 @@ int infunc;                        /* inside a function body */
    the Python walker's `sc.act(ctx, tok)`.  Its answer steers nothing on
    EITHER side yet -- see prd.md E-52 -- but a stage the self-hosted
    compiler does not even ask is a stage it has quietly dropped. */
+int scopedecl;
 int scopeact(char *ctx, int cl, int t) {
     int key[4]; int k;
     k = vfind(SKINDV, NSKINDV, "id", 2);
     if (kind(t) == T_TYPE) k = vfind(SKINDV, NSKINDV, "type_kw", 7);
+    /* struct/union/enum open a type name exactly as `int` does */
+    if (kind(t) == tidx("struct", 6)) k = vfind(SKINDV, NSKINDV, "type_kw", 7);
+    if (kind(t) == tidx("union", 5)) k = vfind(SKINDV, NSKINDV, "type_kw", 7);
+    if (kind(t) == tidx("enum", 4)) k = vfind(SKINDV, NSKINDV, "type_kw", 7);
     if (tdfind(t) >= 0) k = vfind(SKINDV, NSKINDV, "typedef_id", 10);
     if (kind(t) == tidx("*", 1)) k = vfind(SKINDV, NSKINDV, "star", 4);
     if (kind(t) == tidx("(", 1)) k = vfind(SKINDV, NSKINDV, "lparen", 6);
+    /* a name in declarator or member position is a name by position: a
+       typedef name there is being shadowed (C99 6.2.1p4) */
+    if (scopedecl) k = vfind(SKINDV, NSKINDV, "id", 2);
     key[0] = vfind(SCTXV, NSCTXV, ctx, cl); key[1] = k; key[2] = 0; key[3] = 0;
     return inf(S_SCOPE, key, 0);
+}
+
+int lbind; int gbind;
+int actis(int a, char *nm, int L) { return a == vfind(SACTV, NSACTV, nm, L); }
+
+int scopefail(char *what, int t) {
+    printf("scope: the table and the walker disagree at token %d (%s)\n", t, what);
+    __exit(1);
+    return 0;
+}
+
+/* [W-5] The table DECIDES where a declared name binds: its answer picks the
+   symbol's storage -- 0 a global (a data label), 1 a frame slot. */
+int scopebind(char *ctx, int cl, int t) {
+    int a;
+    scopedecl = 1; a = scopeact(ctx, cl, t); scopedecl = 0;
+    if (actis(a, "bind_global", 11)) return 0;
+    if (actis(a, "bind_local", 10)) return 1;
+    if (actis(a, "bind_param", 10)) return 1;
+    scopefail("a binding", t);
+    return 0 - 1;
+}
+
+int scopewant(char *ctx, int cl, int t, char *nm, int L) {
+    if (actis(scopeact(ctx, cl, t), nm, L) == 0) scopefail(nm, t);
+    return 0;
 }
 
 /* Project the current token onto the parse table's TOK axis.  A typedef name
@@ -1686,9 +1720,9 @@ int unary(void) {
     if (p == P_SIZEOF) {
         int sz; int nsave;
         adv();
-        scopeact("sizeof", 6, tp + 1);
         if (cur() == tidx("(", 1)) {
-            if (is_typeat(tp + 1)) {                 /* sizeof(TYPE) */
+            /* the TABLE decides whether `sizeof (` opens a type name */
+            if (actis(scopeact("sizeof", 6, tp + 1), "type_name", 9)) {
                 adv();
                 declspec();                          /* handles struct too */
                 sz = declsz;
@@ -1784,7 +1818,7 @@ int postfix(void) {
                 printf("member access on a non-struct at token %d\n", tp);
                 __exit(1);
             }
-            scopeact("field", 5, tp);
+            scopedecl = 1; scopewant("field", 5, tp, "field", 5); scopedecl = 0;
             mt = adv();
             mi = mbfind(curstruct, mt);
             if (mi < 0) {
@@ -1924,7 +1958,7 @@ int primary(void) {
         return postfix();
     }
     if (t == T_ID) {
-        scopeact("expr", 4, tp);
+        scopewant("expr", 4, tp, "lookup", 6);
         if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) {
             i = sfind(tp);
             if (i >= 0) { if (symfp[i]) return icall(i, tp); }
@@ -2824,7 +2858,8 @@ int declspec(void) {                       /* -> element width */
     }
     if (cur() == tidx("enum", 4)) { declsz = enumspec(); return declsz; }
     while (is_typetok()) {
-        if (infunc) scopeact("local", 5, tp); else scopeact("top", 3, tp);
+        if (infunc) scopewant("local", 5, tp, "type_name", 9);
+        else scopewant("top", 3, tp, "type_name", 9);
         if (tlen[tp] == 4) { if (src[tpos[tp]] == 99) w = 1; }   /* char */
         if (srcis(tpos[tp], tlen[tp], "char")) declsz = 1;
         if (srcis(tpos[tp], tlen[tp], "short")) declsz = 2;
@@ -3124,7 +3159,7 @@ int local_decl(void) {
             t = fpdecl(); declptr = 1; sst = 0 - 1; declstruct = 0 - 1;
         } else t = adv(); }
         else t = adv();
-        scopeact("local", 5, t);
+        lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
             adv();
@@ -3153,7 +3188,7 @@ int local_decl(void) {
             off = alloc_local(n * w);
             declptr = 1;
             declbytes = n * declsz;
-            sadd(t, 1, off, w);
+            sadd(t, lbind, off, w);
             symkind[nsym - 1] = 3;         /* an array name denotes its address */
         } else {
             /* a struct variable needs its whole body, not one slot, and its
@@ -3161,7 +3196,7 @@ int local_decl(void) {
             if (declptr == 0) { if (sst >= 0) {
                 off = alloc_local(declsz);
                 declbytes = declsz;
-                sadd(t, 1, off, w);
+                sadd(t, lbind, off, w);
                 symkind[nsym - 1] = 3;
                 if (eat(tidx("=", 1))) initaggr(0, 0, off, w, sst, declsz);
                 if (eat(tidx(",", 1))) continue;
@@ -3170,7 +3205,7 @@ int local_decl(void) {
             off = alloc_local(8);
             declbytes = declsz;
             if (declptr) declbytes = 8;
-            sadd(t, 1, off, w);
+            sadd(t, lbind, off, w);
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
             if (cur() == tidx("{", 1)) initaggr(0, 0, off, w, sst, n * w);
@@ -3385,7 +3420,7 @@ int function(int t, int w) {
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
     start = nout;
     fsym = nsym - 1;
-    scopeact("top", 3, tp);                 /* lparen -> fn_name */
+    scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     /* Look ahead at the whole parameter list before emitting a byte of it:
        a variadic function, or one with more parameters than there are
@@ -3426,7 +3461,7 @@ int function(int t, int w) {
         } }
         if (cur() == T_ID) { pt = adv(); havename = 1; }
         if (havename) {
-            scopeact("param", 5, pt);
+            if (scopebind("param", 5, pt) != 1) scopefail("a parameter", pt);
             off = alloc_local(8);
             declbytes = 8;
             sadd(pt, 1, off, pw);
@@ -3503,7 +3538,7 @@ int unit(void) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1;
             } else t = adv(); }
             else t = adv();
-            scopeact("top", 3, t);
+            gbind = scopebind("top", 3, t);
             p = ask(4);
             if (p == P_FNSIG) {
                 declbytes = 8;
@@ -3536,7 +3571,7 @@ int unit(void) {
             }
             declbytes = n * declsz;
             if (declptr) { if (isarr == 0) declbytes = 8; }
-            sadd(t, 0, 0, w);
+            sadd(t, gbind, 0, w);
             /* a struct global is an aggregate: its name is its address */
             if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
                 symkind[nsym - 1] = 5; symptr[nsym - 1] = 1;

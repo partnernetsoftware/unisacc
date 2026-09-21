@@ -263,14 +263,21 @@ class Scope:
             return "typedef_id" if tok.text in self.typedefs else "type_kw"
         if tok.kind == "id":
             return "typedef_id" if tok.text in self.typedefs else "id"
+        # `struct`/`union`/`enum` open a type name exactly as `int` does --
+        # without this the table never sees `sizeof(struct S)` as a type
+        if tok.kind in ("struct", "union", "enum"):
+            return "type_kw"
         if tok.kind == "*":
             return "star"
         if tok.kind == "(":
             return "lparen"
         return "id"
 
-    def act(self, ctx, tok):
-        return self.o.ask("scope", (ctx, self.kind_of(tok)))    # [W-5]
+    def act(self, ctx, tok, declared=False):  # declared: the position fixes it as a name
+        # A name in declarator position is being DECLARED: a typedef name
+        # there shadows the typedef (C99 6.2.1p4), so its kind is `id`.
+        k = "id" if declared and tok.kind in ("id", "type") else self.kind_of(tok)
+        return self.o.ask("scope", (ctx, k))    # [W-5]
 
     def declare(self, name, ty, kind, off=0, sym=None):
         s = Sym(name, ty, kind, off, sym)

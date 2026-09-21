@@ -151,6 +151,28 @@ class Walker:
             raise CError("line %d: expected %r, got %r" % (t.line, kind, t.text))
         return self.next()
 
+    # [W-5] the scope table DECIDES where a declared name binds.  The walker
+    # knows which context it is in; the table answers what a name there
+    # becomes, and that answer picks the storage the symbol gets -- a data
+    # label or a frame slot.  An answer that is not a binding stops the
+    # compile: the table and the walker disagree about what this is.
+    BIND = {"bind_global": "global", "bind_local": "local",
+            "bind_param": "local"}
+
+    def bind(self, ctx, tok):
+        a = self.sc.act(ctx, tok, declared=True)
+        if a not in self.BIND:
+            raise CError("line %d: scope: %r in %s is %s, not a binding"
+                         % (tok.line, tok.text, ctx, a))
+        return self.BIND[a]
+
+    def want(self, ctx, tok, expect, declared=False):
+        a = self.sc.act(ctx, tok, declared)
+        if a != expect:
+            raise CError("line %d: scope: %r in %s is %s, expected %s"
+                         % (tok.line, tok.text, ctx, a, expect))
+        return a
+
     def istype(self, t):
         """Does this token start a type name?  `struct`/`union`/`enum` are
         their own token kinds, so `(struct S *)x` and `(struct S){1,2}` both
@@ -193,7 +215,8 @@ class Walker:
                     base = self.sc.typedefs[t.text]
                     self.next()
                     continue
-                self.sc.act("top" if self.sc.depth() == 1 else "local", t)
+                self.want("top" if self.sc.depth() == 1 else "local", t,
+                          "type_name")
                 w = self.next().text
                 if w == "static":
                     self.saw_static = True
@@ -328,9 +351,11 @@ class Walker:
             name, inner = self._declarator(named)
             self.expect(")")
         elif self.at("id"):
+            self.name_tok = self.peek()
             name = self.next().text
         elif named:
             # a prototype may name no parameter: `int f(int, char *);`
+            self.name_tok = self.peek()
             name = self.expect("id").text
         sufs = []
         while True:
@@ -574,14 +599,14 @@ class Walker:
                         break
                     continue
                 return
-            self.sc.act("top", self.tk[self.i - 1])
+            gkind = self.bind("top", self.name_tok)
             init = self.eat("=")
             if init and ty.kind == "arr" and ty.n == 0:
                 ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
             size = ty.size(self.sc.structs)
             lab = "g_" + (self.mangle(name) if static else name)
             self.em.t.string(lab, b"\x00" * max(1, size), align=8)
-            sym = self.sc.declare(name, ty, "global", sym=lab)
+            sym = self.sc.declare(name, ty, gkind, sym=lab)
             if init:
                 self.global_init(sym, ty)
             if not self.eat(","):
@@ -881,7 +906,7 @@ class Walker:
 
     def function(self, ret, name, body=None, sym=None):
         sym = sym or name          # differs only for a file-scope `static`
-        self.sc.act("top", self.peek())       # lparen -> fn_name
+        self.want("top", self.peek(), "fn_name")      # lparen -> fn_name
         self.expect("(")
         params, vararg = [], False
         if not self.at(")"):
@@ -900,7 +925,7 @@ class Walker:
                 ty, pn = self.declarator(b, named=False)
                 if ty.kind == "arr":
                     ty = ptr(ty.to)     # C99 6.7.5.3p7: a parameter of array
-                params.append((ty, pn))   # type is adjusted to pointer [E-33]
+                params.append((ty, pn, self.name_tok))  # adjusted to ptr [E-33]
                 if not self.eat(","):
                     break
         self.expect(")")
@@ -937,10 +962,10 @@ class Walker:
             else:
                 self.em.store(FP, -self.sret_off, ARGREGS[0])
         pending = []                 # struct parameters, copied after the spill
-        for k, (ty, pn) in enumerate(params):
-            self.sc.act("param", self.peek())
+        for k, (ty, pn, ptok) in enumerate(params):
+            pkind = self.bind("param", ptok)
             off = self.alloc(ty)
-            self.sc.declare(pn, ty, "local", off)
+            self.sc.declare(pn, ty, pkind, off)
             w = (min(8, ty.size(self.sc.structs))
                  if ty.kind in NARROW else 8)
             if ty.kind == "struct":
@@ -1082,7 +1107,7 @@ class Walker:
         while True:
             ty, name = self.declarator(base)
             dims = self.vla_dims
-            self.sc.act("local", self.tk[self.i - 1])
+            lkind = self.bind("local", self.name_tok)
             if static:                       # static storage, zero-initialised
                 lab = "g_%s_%d%s" % (name, self.i, self.unit_tag)
                 init = self.eat("=")
@@ -1113,7 +1138,7 @@ class Walker:
             if init and ty.kind == "arr" and ty.n == 0:
                 ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
             off = self.alloc(ty)
-            sym = self.sc.declare(name, ty, "local", off)
+            sym = self.sc.declare(name, ty, lkind, off)
             if init:
                 self.local_init(ty, off)
             if not self.eat(","):
@@ -1793,8 +1818,9 @@ class Walker:
             return self.postfix_chain(base)
         if p == "sizeof":
             self.next()
-            self.sc.act("sizeof", self.peek(1))
-            if self.at("(") and self.istype(self.peek(1)):
+            # the TABLE decides whether `sizeof (` opens a type name
+            a = self.sc.act("sizeof", self.peek(1)) if self.at("(") else None
+            if a == "type_name":
                 self.next()
                 base = self.abstract_type()
                 self.expect(")")
@@ -1861,7 +1887,7 @@ class Walker:
             if self.peek(1).kind == "(":
                 self.next()
                 return self.call(name)
-            self.sc.act("expr", t)
+            self.want("expr", t, "lookup")
             self.next()
             s = self.sc.lookup(name)
             if s is None:
@@ -1915,7 +1941,7 @@ class Walker:
             elif p == "field":
                 arrow = self.peek().kind == "->"
                 self.next()
-                self.sc.act("field", self.peek())
+                self.want("field", self.peek(), "field", declared=True)
                 fname = self.expect("id").text
                 if arrow:
                     self.load_if_lval()
