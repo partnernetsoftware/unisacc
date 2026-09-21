@@ -77,7 +77,7 @@ fi
 
 echo "== [A-21] unisacc compiles C and the tape runs =="
 r=$(./tests/ccrun.sh examples/fact.c examples/fib.c examples/hello.c 2>/dev/null | tail -1)
-chk "unisacc-compiled programs" "unisacc-compiled 3   wrong 0" "$r"
+chk "unisacc-compiled programs" "unisacc-compiled 3   wrong 0   refused 0" "$r"
 
 echo "== [A-23] bootstrap fixed point =="
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then

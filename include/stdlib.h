@@ -26,6 +26,13 @@ static void *malloc(long n) {
 
 static void free(void *p) { }
 
+/* `exit` is the one libc function that cannot be written in C: it must not
+ * return.  `__exit` is the tape's gate to the OS, so this is a one-line
+ * wrapper around it -- and `abort` is the same call with the status a shell
+ * reports for SIGABRT. */
+static void exit(int code) { __exit(code); }
+static void abort(void) { __exit(134); }
+
 static void *calloc(long n, long sz) {
     char *p; long total; long i;
     total = n * sz;

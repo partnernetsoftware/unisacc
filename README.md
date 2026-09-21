@@ -66,6 +66,16 @@ stack pointer is a volatile register under Win64, so the calls that fetch the
 standard handles had to move ahead of stack setup. Both, and the sixty rounds
 of dissection that went the wrong way first, are in `prd.md` §6 E-35.
 
+**Several files, one program, no linker.** `unisa compile a.c b.c -o x`
+walks both units with one walker, so a call in the first reaches a definition
+in the last the same way it reaches one further down its own file — calls were
+already resolved at the end of the walk, not at the call site. There is no
+object format and no link step. File-scope `static` gets a per-file name so
+two units may keep their own `helper`; a single-file compile keeps the empty
+suffix, so its tape is byte-for-byte what it always was. What the units do not
+yet get is separate scope: a typedef from an earlier file is still visible in a
+later one.
+
 **One file, two instruction sets.** `unisa fat hello.c -o hello` emits a
 Mach-O universal binary; the arm64 slice runs natively and the x86_64 slice
 runs under Rosetta, and `tests/fat.sh` executes both on every probe. That is
@@ -79,6 +89,14 @@ same tables. The bootstrap fixed point holds:
 ```
 A = cc(unisacc.c)      B = A(unisacc.c)      C = B(unisacc.c)      B == C
 ```
+
+That is a fixed point, not a coverage claim: `unisacc.c` only has to accept the
+subset `unisacc.c` is written in, and it trails the Python front end badly —
+**31 of our 73 probes, 111 of the corpus's 220**, against 209 for the Python
+one. It also stops at the tape; lowering and the images are still Python. So
+the honest reading is that the C compiler reproduces itself, not that it could
+replace the driver. `tests/selfgap.sh` ratchets those two numbers so the gap
+can only shrink.
 
 ## Try it
 
@@ -112,6 +130,8 @@ in a twentieth of a second, and the SGD control arm lives in
 | `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `selfhost` | `unisacc` built two ways agrees with the Python front end |
+| `selfgap` | how much C `unisacc`'s own front end still refuses that the Python one accepts — a ratchet, because that gap was growing unmeasured |
+| `multi` | two translation units compiled into one program, against `cc a.c b.c` |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
 
@@ -166,6 +186,19 @@ enumeration over the whole domain.
 
 ## Status
 
-Research artifact. The C99 subset is real but partial; `tests/corpus.sh` says
-how partial, and `tests/difftest.sh` says how much of it agrees with the system
-compiler.
+Research artifact. Four layers, because the hard part and the big part are not
+the same part — `prd.md` §5.5 keeps the full audit.
+
+| | done when | today |
+|---|---|---|
+| **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — 11 stages, 4,560 keys, no fallback path |
+| **the targets** | six images, real machines, identical behaviour | **there** — `fat` is multi-arch within one OS; a tri-format single file is not started |
+| **the language** | someone else's C compiles, or is refused for a written reason | **there for this corpus** — 209/220, `unsupported 0`; floating point is a whole missing axis |
+| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **half** — see the self-hosting gap above |
+
+Nothing here is blocked on a question we cannot answer: `[P-8]` proves the
+weights exist for any finite table, `[F-5]` says accuracy below 1.000 is a
+key-encoding bug, and `[D-7]` says a net/gold disagreement is a defect rather
+than variance. There is no randomness at inference, so **no shortfall anywhere
+in this project has a statistical excuse**. What is left is work, and each
+piece of it lands as a ratchet that may only go up.

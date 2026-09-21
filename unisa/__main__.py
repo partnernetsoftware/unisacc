@@ -182,7 +182,7 @@ def cmd_run(a):
         return 1
     if a.fold:
         return _fold(t, o, a)
-    out, code, steps = vm_run(t, argv=[a.file] + a.args)
+    out, code, steps = vm_run(t, argv=[a.file[0]] + a.args)
     sys.stdout.buffer.write(out)
     sys.stdout.flush()
     if a.verbose:
@@ -220,7 +220,9 @@ def cmd_compile(a):
     try:
         if a.from_tape:
             from .tape import parse as tparse
-            with open(a.file, encoding="latin-1") as f:
+            if len(a.file) != 1:
+                raise ValueError("--from-tape takes exactly one tape")
+            with open(a.file[0], encoding="latin-1") as f:
                 t = tparse(f.read())
         else:
             t = compile_file(a.file, o, a.target)
@@ -506,7 +508,7 @@ def main(argv=None):
     a.set_defaults(fn=cmd_acc)
 
     tp = sub.add_parser("tape")
-    tp.add_argument("file")
+    tp.add_argument("file", nargs="+", help="one program, one or more units")
     tp.add_argument("--target", default="lnx/x86_64")
     tp.add_argument("-I", action="append", default=[],
                     metavar="DIR", help="header search path")
@@ -514,7 +516,7 @@ def main(argv=None):
     tp.set_defaults(fn=cmd_tape)
 
     r = sub.add_parser("run")
-    r.add_argument("file")
+    r.add_argument("file", nargs="+", help="one program, one or more units")
     r.add_argument("--target", default="lnx/x86_64")
     r.add_argument("-I", action="append", default=[],
                     metavar="DIR", help="header search path")
@@ -527,7 +529,7 @@ def main(argv=None):
     r.set_defaults(fn=cmd_run)
 
     cp = sub.add_parser("compile")
-    cp.add_argument("file")
+    cp.add_argument("file", nargs="+", help="one program, one or more units")
     cp.add_argument("-o", "--out", default="a.out")
     cp.add_argument("--target", default="lnx/x86_64")
     cp.add_argument("-I", action="append", default=[],

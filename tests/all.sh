@@ -12,6 +12,9 @@
 #   artifacts   the shipped kit is usable, not merely well-formed [A-24]
 #   ccrun       unisacc compiles C; the reference VM runs it [A-21]
 #   selfhost    unisacc built two ways agrees with the Python front end [A-20]
+#   multi       several translation units, one program -- against cc [A-30]
+#   selfgap     how much C the two front ends DISAGREE about, as a ratchet:
+#               the one number that was missing while the debt grew [A-29]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
 #   acc         net == gold over the FULL gold, on the CONSTRUCTED weights
 #               we ship.  The SGD control arm is not here: `tests/baseline.sh`
@@ -54,6 +57,8 @@ run fat        bash -c "./tests/fat.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh examples/*.c tests/c/a_*.c"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"
+run multi      ./tests/multi.sh
+run selfgap    ./tests/selfgap.sh
 # bootstrap needs the host toolchain to turn a tape back into a binary
 if [ "$(uname -s)" = "Darwin" ]; then
     run bootstrap ./tests/bootstrap.sh

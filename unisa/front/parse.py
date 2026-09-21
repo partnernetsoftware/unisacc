@@ -94,6 +94,19 @@ class Walker:
         self.ret_label = None     # set while a function body is being walked
         self.called = {}          # name -> line, checked once the unit ends
         self.ret_label = None
+        # `declspec` sets this; `enum E *e;` reaches do_global WITHOUT one,
+        # so it has to exist from the start.
+        self.saw_static = False
+        # One Walker walks EVERY translation unit, so that a call in one file
+        # can reach a definition in another without a linker.  The price is
+        # that file-scope `static` must stop meaning "the whole program":
+        # those names get a per-file suffix.  A single-file compile keeps the
+        # empty suffix, so its tape is byte-for-byte what it always was --
+        # which matters, because `bootstrap.sh` compares the Python front
+        # end's tape against unisacc's own.
+        self.unit_tag = ""
+        self.unit_start = 0       # first instruction index of this file
+        self.renames = {}         # this file's static name -> unique name
 
     # A bit-field lvalue is an address PLUS a (bit offset, width, signed),
     # and the two must never drift apart -- so producing any lvalue clears
@@ -412,6 +425,11 @@ class Walker:
             self.next()
 
     def unit(self):
+        self.tu()
+        return self.finish_program()
+
+    def tu(self):
+        """One translation unit."""
         while True:
             p = self.ask("top")                                  # [W-3]
             if p == "end":
@@ -425,6 +443,24 @@ class Walker:
             else:
                 raise CError("line %d: unexpected %r at top level"
                              % (self.peek().line, self.peek().text))
+        self.seal_unit()
+
+    def seal_unit(self):
+        """Rewrite this file's own references to its statics.
+
+        A static that was DECLARED before use already carries its unique name
+        -- the call site read it off the symbol.  One used before it is
+        declared does not, and C lets that happen.  The fix is local: only
+        the instructions this file emitted can mean this file's static."""
+        if not self.renames:
+            return
+        for ins in self.em.t.code[self.unit_start:]:
+            if ins.op == "call":              # `call NAME`
+                ins.args[0] = self.renames.get(ins.args[0], ins.args[0])
+            elif ins.op == ".lea":            # `.lea r, SYMBOL`
+                ins.args[1] = self.renames.get(ins.args[1], ins.args[1])
+
+    def finish_program(self):
         # entry: run the pointer initialisers, then main
         self.em.label("_start")
         for (g, lab, off) in self.em.init_ptrs:
@@ -487,9 +523,18 @@ class Walker:
             return
         self.do_global(base=I32)             # `enum E { A } v;` declares v
 
+    def mangle(self, name):
+        """`static` is file scope: give it a name no other file can spell."""
+        if not self.unit_tag:
+            return name
+        self.renames[name] = name + self.unit_tag
+        self.renames["g_" + name] = "g_" + name + self.unit_tag
+        return name + self.unit_tag
+
     def do_global(self, base=None):
         if base is None:
             base = self.declspec()
+        static = self.saw_static     # a nested declspec will clear it
         if self.eat(";"):
             return
         while True:
@@ -502,11 +547,12 @@ class Walker:
                 # `int (*f(int, int))(int, int)` -- so the declarator has
                 # already taken them; rewind to them and come back for the
                 # body.
+                sym = self.mangle(name) if static else name
                 if ty.kind == "fn" and self.params_at is not None:
                     body, self.i = self.i, self.params_at
-                    r = self.function(ty.ret, name, body=body)
+                    r = self.function(ty.ret, name, body=body, sym=sym)
                 else:
-                    r = self.function(ty, name)
+                    r = self.function(ty, name, sym=sym)
                 if r == "proto":
                     # `int f(int), g(int), a;` -- the list goes on
                     if not self.eat(","):
@@ -518,8 +564,9 @@ class Walker:
             if init and ty.kind == "arr" and ty.n == 0:
                 ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
             size = ty.size(self.sc.structs)
-            self.em.t.string("g_" + name, b"\x00" * max(1, size), align=8)
-            sym = self.sc.declare(name, ty, "global", sym="g_" + name)
+            lab = "g_" + (self.mangle(name) if static else name)
+            self.em.t.string(lab, b"\x00" * max(1, size), align=8)
+            sym = self.sc.declare(name, ty, "global", sym=lab)
             if init:
                 self.global_init(sym, ty)
             if not self.eat(","):
@@ -790,7 +837,8 @@ class Walker:
             raise CError("line %d: only constant global initialisers (%s)"
                          % (self.peek().line, e))
 
-    def function(self, ret, name, body=None):
+    def function(self, ret, name, body=None, sym=None):
+        sym = sym or name          # differs only for a file-scope `static`
         self.sc.act("top", self.peek())       # lparen -> fn_name
         self.expect("(")
         params, vararg = [], False
@@ -817,7 +865,7 @@ class Walker:
         if body is not None:
             self.i = body                    # back to where the body starts
         self.sc.declare(name, Type("fn", ret=ret, n=1 if vararg else 0),
-                        "fn", sym=name)
+                        "fn", sym=sym)
         if self.at(";") or self.at(","):
             return "proto"                   # the caller owns the separator
         self.sc.push()
@@ -825,8 +873,8 @@ class Walker:
         self.fn_ret = ret
         self.fn_nfixed = len(params) + (1 if ret.kind == "struct" else 0)
         self.fn_vararg = vararg
-        self.ret_label = self.em.new_label("ret_" + name + "_")
-        self.frame_ix = self.em.prologue(name)
+        self.ret_label = self.em.new_label("ret_" + sym + "_")
+        self.frame_ix = self.em.prologue(sym)
         # More arguments than there are argument registers: ALL of them go on
         # the tape stack instead, pushed in source order, so arg[n-1] sits
         # just above the return address.  The callee knows n -- it is its own
@@ -980,7 +1028,7 @@ class Walker:
             dims = self.vla_dims
             self.sc.act("local", self.tk[self.i - 1])
             if static:                       # static storage, zero-initialised
-                lab = "g_%s_%d" % (name, self.i)
+                lab = "g_%s_%d%s" % (name, self.i, self.unit_tag)
                 init = self.eat("=")
                 if init and ty.kind == "arr" and ty.n == 0:
                     ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
@@ -2018,8 +2066,9 @@ class Walker:
                 self.em.pop(CALLEE)
             self.em.call_reg(CALLEE)
         else:
-            self.called.setdefault(name, self.peek().line)
-            self.em.call(name)
+            tgt = s0.sym if s0 is not None and s0.kind == "fn" else name
+            self.called.setdefault(tgt, self.peek().line)
+            self.em.call(tgt)
         if stacked:
             self.em.frame(-8 * (len(args) + (1 if indirect else 0)))
         if sret_ty is not None:
@@ -2199,8 +2248,28 @@ class Walker:
 
 
 def compile_tokens(toks, oracle):
-    w = Walker(toks, oracle)
-    tape = w.unit()
+    return compile_units([toks], oracle)
+
+
+def compile_units(streams, oracle):
+    """Several translation units, one program.
+
+    There is no linker and no object format: the units are walked in turn by
+    ONE walker, so a call in the first file reaches a definition in the last
+    exactly the way it reaches one further down its own file -- `called` is
+    already resolved at the end, not at the call.  What the units do NOT get
+    is separate scope: a typedef or a struct tag from an earlier file is
+    still visible in a later one.  That is wrong C, and it is the first thing
+    to fix when a real program trips over it."""
+    w = Walker(streams[0], oracle)
+    multi = len(streams) > 1
+    for k, toks in enumerate(streams):
+        w.tk, w.i = toks, 0
+        w.unit_tag = "_u%d" % k if multi else ""
+        w.unit_start = len(w.em.t.code)
+        w.renames = {}
+        w.tu()
+    tape = w.finish_program()
     if "main" not in tape.labels:
         raise CError("no main()")
     return tape
