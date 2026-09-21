@@ -114,7 +114,13 @@ Python 3.11+, **standard library only**. No numpy, no torch, no build step.
 ## Tests
 
 `tests/all.sh` is the entry point; each suite's verdict is its exit status, and
-each gets a watchdog so no suite can hang the run. Training is **not** in it:
+each gets a watchdog so no suite can hang the run. **Testing happens on this
+desk, not on GitHub**: macOS natively, Linux in a local Lima VM
+(`tests/linux.sh`), Windows 11 in a local UTM machine (`tests/crossnative.sh`).
+The GitHub workflow is parked at `.github/workflows-disabled/ci.yml`, where
+nothing can fire it — hosted runners are metered, the macOS ones at ten times
+the Linux rate, and pushing in order to test spends money on work that is free
+here. Training is **not** in it:
 the weights we ship are constructed, `unisa acc` verifies those by enumeration
 in a twentieth of a second, and the SGD control arm lives in
 `tests/baseline.sh` for when someone wants the comparison numbers.
@@ -125,7 +131,8 @@ in a twentieth of a second, and the SGD control arm lives in
 | `vm` | the tape interpreter, on hand-written fixtures |
 | `difftest` | unisa vs the system compiler — the only instrument that can see a defect in the reference tables |
 | `native` | emitted images actually executed on this host |
-| `crossnative` | the *other* targets executed in local Linux VMs — the blind spot where three codegen bugs lived |
+| `crossnative` | the *other* targets executed on real machines — local Linux VMs and the Windows 11 machine in UTM; the blind spot where three codegen bugs lived |
+| `linux` | the whole suite again, inside the local Lima VM, because glibc and BSD libc disagree about things C only calls unspecified |
 | `fat` | one file, both macOS architectures, both slices actually executed |
 | `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
