@@ -668,6 +668,7 @@ int symkind[MAXSYM];        /* 0 global  1 local  2 function */
 int symoff[MAXSYM];         /* local: frame offset */
 int symelem[MAXSYM];        /* element width for [] and unary * */
 int symptr[MAXSYM];         /* 1 for pointers and arrays */
+int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int nsym;
 int scopebase;              /* first local of the current function */
 
@@ -693,6 +694,10 @@ int tidx(char *n, int L) { return vfind(TOKV, NTOKV, n, L); }
 int expr(void);
 int exprc(void);
 int unary(void);
+int cexpr(void);
+int is_typeat(int i);
+int typesize(void);
+int declspec(void);
 int primary(void);
 int postfix(void);
 int emit_binop(int k);
@@ -759,6 +764,8 @@ int sfind(int t) {
 }
 
 int declptr;                /* set by the declarator being processed */
+int declsz;                 /* the declared type's size, for `sizeof` */
+int declbytes;              /* ...times the array length, if it is one */
 char lbuf[131072];      /* a string literal can be the whole model blob */
 int needslen; int needchb;
 
@@ -770,6 +777,7 @@ int sadd(int t, int kind, int off, int elem) {
     if (tlen[t] < 32) symname[nsym * 32 + tlen[t]] = 0;
     symkind[nsym] = kind; symoff[nsym] = off; symelem[nsym] = elem;
     symptr[nsym] = declptr;
+    symbytes[nsym] = declbytes;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -803,6 +811,7 @@ int pop1(void) { es("  load64 r1, [r7+0]\n  .frame -8\n"); return 0; }
 int lvalue;        /* 1 when r0 holds an ADDRESS, not a value */
 int curelem;       /* element width of the thing in r0 */
 int curptr;        /* 1 when the VALUE in r0 is a pointer (scales +/-) */
+int cursize;       /* what `sizeof` would report for the thing in r0 */
 
 /* storage width vs element width: a `char *p` is stored in 8 bytes but its
  * element is 1.  Conflating them stores a single byte of the pointer. */
@@ -825,7 +834,62 @@ int unary(void) {
     if (p == P_NEG) { adv(); unary(); loadval(); es("  imm r1, 0\n  sub64 r0, r1, r0\n"); return 0; }
     if (p == P_NOT) { adv(); unary(); loadval(); es("  imm r1, 0\n  eq r0, r0, r1\n"); return 0; }
     if (p == P_DEREF) { adv(); unary(); loadval(); lvalue = 1; curptr = 0; return 0; }
+    if (p == P_SIZEOF) {
+        int sz; int nsave;
+        adv();
+        if (cur() == tidx("(", 1)) {
+            if (is_typeat(tp + 1)) {                 /* sizeof(TYPE) */
+                adv();
+                sz = typesize();
+                while (eat(tidx("*", 1))) sz = 8;
+                if (cur() == tidx("[", 1)) {
+                    adv(); sz = sz * cexpr(); need(tidx("]", 1), "]");
+                }
+                need(tidx(")", 1), ")");
+                es("  imm r0, "); en(sz); ec(10);
+                lvalue = 0; curelem = 8; curptr = 0;
+                return 0;
+            }
+        }
+        /* sizeof EXPR: walk it for its type and throw the code away -- the
+           operand of sizeof is not evaluated [C99 6.5.3.4p2]. */
+        nsave = nout;
+        cursize = 8;                       /* an expression with no symbol */
+        unary();
+        nout = nsave;
+        sz = cursize;
+        es("  imm r0, "); en(sz); ec(10);
+        lvalue = 0; curelem = 8; curptr = 0;
+        return 0;
+    }
     if (p == P_ADDR) { adv(); unary(); lvalue = 0; return 0; }
+    /* a cast: `(TYPE) unary`.  The table calls this `prim`, because `(` is
+       all it can see -- whether a type name follows is the walker's job. */
+    if (cur() == tidx("(", 1)) {
+        if (is_typeat(tp + 1)) {
+            int cw; int csz;
+            adv();
+            cw = declspec(); csz = declsz;
+            declptr = 0;
+            while (eat(tidx("*", 1))) { declptr = 1; csz = 8; }
+            need(tidx(")", 1), ")");
+            unary(); loadval();
+            /* narrowing is observable: `(char)300` is 44.  The tape has
+               sized load/store, so a round trip through a stack slot is the
+               whole of it -- and it sign-extends on the way back. */
+            if (declptr == 0) {
+                if (csz < 8) {
+                    es("  .frame 8\n  .st [r7+0], r0, "); en(csz);
+                    es("\n  .ld r0, [r7+0], "); en(csz);
+                    es("\n  .frame -8\n");
+                }
+            }
+            lvalue = 0; curptr = declptr; cursize = csz;
+            curelem = cw;
+            if (declptr) curelem = cw;
+            return 0;
+        }
+    }
     return primary();
 }
 
@@ -905,6 +969,7 @@ int primary(void) {
         if (i < 0) { __write(2, "unknown identifier: ", 20);
                      __write(2, src + tpos[tp], tlen[tp]);
                      __write(2, "\n", 1); __exit(1); }
+        cursize = symbytes[i];           /* what `sizeof` reports for it */
         if (symkind[i] == 4) {           /* enum constant */
             es("  imm r0, "); en(symoff[i]); ec(10);
             adv(); lvalue = 0; curelem = 8;
@@ -1285,6 +1350,13 @@ int expr(void) {
 
 /* ---- statements and declarations ------------------------------------- */
 int brkstack[32]; int cntstack[32]; int nloop;
+/* ---- switch ----------------------------------------------------------
+   The dispatch chain is emitted AFTER the body, because a case label is only
+   known once the body has been walked.  The control value goes to a frame
+   slot first: the chain reloads it for every comparison, and the body may
+   have clobbered every register by then. */
+int swval[256]; int swlab[256]; int nswv;
+int swdef[16]; int swslot[16]; int nsw;
 
 int patchnum(int at, int w, int v) {
     int k; int d;
@@ -1340,11 +1412,41 @@ int is_typetok(void) {
     return 0;
 }
 
+int is_typeat(int i) {
+    if (kind(i) == T_TYPE) return 1;
+    if (kind(i) == vfind(TOKV, NTOKV, "struct", 6)) return 1;
+    if (kind(i) == vfind(TOKV, NTOKV, "union", 5)) return 1;
+    return 0;
+}
+
+/* The size `sizeof` reports, which is NOT the storage width this compiler
+   uses: locals live in 8-byte slots whatever their type, but `sizeof(int)`
+   is 4 because that is what the type is.  [G-2] is about the width
+   arithmetic is EVALUATED at, and says nothing about this. */
+int typesize(void) {
+    int sz;
+    sz = 4;
+    while (is_typeat(tp)) {
+        if (srcis(tpos[tp], tlen[tp], "char")) sz = 1;
+        if (srcis(tpos[tp], tlen[tp], "short")) sz = 2;
+        if (srcis(tpos[tp], tlen[tp], "int")) { if (sz == 4) sz = 4; }
+        if (srcis(tpos[tp], tlen[tp], "long")) sz = 8;
+        if (srcis(tpos[tp], tlen[tp], "void")) sz = 1;
+        adv();
+    }
+    return sz;
+}
+
 int declspec(void) {                       /* -> element width */
     int w;
     w = 8;
+    declsz = 4;                            /* the size `sizeof` reports */
     while (is_typetok()) {
         if (tlen[tp] == 4) { if (src[tpos[tp]] == 99) w = 1; }   /* char */
+        if (srcis(tpos[tp], tlen[tp], "char")) declsz = 1;
+        if (srcis(tpos[tp], tlen[tp], "short")) declsz = 2;
+        if (srcis(tpos[tp], tlen[tp], "long")) declsz = 8;
+        if (srcis(tpos[tp], tlen[tp], "void")) declsz = 1;
         adv();
     }
     return w;
@@ -1379,10 +1481,13 @@ int local_decl(void) {
             need(vfind(TOKV, NTOKV, "]", 1), "]");
             off = alloc_local(n * w);
             declptr = 1;
+            declbytes = n * declsz;
             sadd(t, 1, off, w);
             symkind[nsym - 1] = 3;         /* an array name denotes its address */
         } else {
             off = alloc_local(8);
+            declbytes = declsz;
+            if (declptr) declbytes = 8;
             sadd(t, 1, off, w);
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
@@ -1399,6 +1504,18 @@ int local_decl(void) {
 
 int stmt(void) {
     int p; int a; int b; int c; int top;
+    /* C99 6.8.1: a label prefixes a STATEMENT.  It is spotted before the
+       table is asked, because `name :` is not a production -- the grammar
+       sees an identifier and would call it an expression. */
+    if (kind(tp) == T_ID) {
+        if (kind(tp + 1) == tidx(":", 1)) {
+            int lt;
+            lt = adv(); adv();
+            es("u_"); etok(lt); es(":\n");
+            if (cur() != tidx("}", 1)) stmt();
+            return 0;
+        }
+    }
     p = ask(1);
     if (p == P_BLOCK) return block();
     if (p == P_DECL) return local_decl();
@@ -1465,11 +1582,77 @@ int stmt(void) {
         elab("L", a); es(":\n");
         return 0;
     }
+    if (p == P_SWITCH) {
+        int slot; int disp; int end; int k; int cbase; int mysw;
+        adv(); need(tidx("(", 1), "(");
+        expr(); loadval();
+        need(tidx(")", 1), ")");
+        slot = alloc_local(8);
+        es("  imm r2, "); en(slot);
+        es("\n  sub64 r1, r6, r2\n  store64 [r1+0], r0\n");
+        disp = newlab(); end = newlab();
+        elab("  jump L", disp); ec(10);
+        cbase = nswv; mysw = nsw;
+        swdef[mysw] = 0 - 1; swslot[mysw] = slot;
+        nsw = nsw + 1;
+        /* C99 6.8.6.2p1: `continue` belongs to the enclosing ITERATION
+           statement.  A switch takes over `break` and nothing else. */
+        brkstack[nloop] = end;
+        if (nloop > 0) cntstack[nloop] = cntstack[nloop - 1];
+        else cntstack[nloop] = end;
+        nloop = nloop + 1;
+        stmt();
+        nloop = nloop - 1;
+        nsw = nsw - 1;
+        elab("  jump L", end); ec(10);
+        elab("L", disp); es(":\n");
+        k = cbase;
+        while (k < nswv) {
+            es("  imm r2, "); en(slot);
+            es("\n  sub64 r1, r6, r2\n  load64 r0, [r1+0]\n");
+            es("  imm r1, "); en(swval[k]); ec(10);
+            es("  ne r0, r0, r1\n");
+            elab("  jumpz r0, L", swlab[k]); ec(10);
+            k = k + 1;
+        }
+        nswv = cbase;
+        if (swdef[mysw] >= 0) { elab("  jump L", swdef[mysw]); ec(10); }
+        else { elab("  jump L", end); ec(10); }
+        elab("L", end); es(":\n");
+        return 0;
+    }
+    if (p == P_CASE) {
+        int v; int lab;
+        adv(); v = cexpr(); need(tidx(":", 1), ":");
+        lab = newlab();
+        swval[nswv] = v; swlab[nswv] = lab; nswv = nswv + 1;
+        elab("L", lab); es(":\n");
+        /* C99 6.8.1: a label prefixes a STATEMENT -- but `case 1: }` is
+           common enough in the wild to tolerate. */
+        if (cur() != tidx("}", 1)) stmt();
+        return 0;
+    }
+    if (p == P_DEFAULT) {
+        int lab;
+        adv(); need(tidx(":", 1), ":");
+        lab = newlab();
+        swdef[nsw - 1] = lab;
+        elab("L", lab); es(":\n");
+        if (cur() != tidx("}", 1)) stmt();
+        return 0;
+    }
     if (p == P_RETURN) {
         adv();
         if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval(); }
         need(vfind(TOKV, NTOKV, ";", 1), ";");
         elab("  jump R", retlab); ec(10);
+        return 0;
+    }
+    if (p == P_GOTO) {
+        int gt;
+        adv(); gt = adv();
+        es("  jump u_"); etok(gt); ec(10);
+        need(tidx(";", 1), ";");
         return 0;
     }
     if (p == P_BREAK) {
@@ -1523,6 +1706,7 @@ int function(int t, int w) {
         if (cur() == T_ID) {
             pt = adv();
             off = alloc_local(8);
+            declbytes = 8;
             sadd(pt, 1, off, pw);
             /* r1/r2 are argument registers -- using them as scratch here
              * would destroy arg1/arg2 before they are stored.  r5 is free. */
@@ -1566,6 +1750,7 @@ int unit(void) {
                     while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
                     adv();
                 }
+                declbytes = 4;
                 sadd(t, 4, v, 8);            /* 4 = enum constant */
                 v = v + 1;
                 if (eat(tidx(",", 1)) == 0) break;
@@ -1581,6 +1766,7 @@ int unit(void) {
             t = adv();
             p = ask(4);
             if (p == P_FNSIG) {
+                declbytes = 8;
                 sadd(t, 2, 0, 8);
                 function(t, w);
                 break;
@@ -1593,6 +1779,8 @@ int unit(void) {
                 need(vfind(TOKV, NTOKV, "]", 1), "]");
                 isarr = 1;
             }
+            declbytes = n * declsz;
+            if (declptr) { if (isarr == 0) declbytes = 8; }
             sadd(t, 0, 0, w);
             /* a global array name denotes its address, exactly like a local
                one -- without this `read(fd, src, n)` passes the first eight

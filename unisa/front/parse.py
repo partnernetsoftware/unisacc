@@ -1362,7 +1362,13 @@ class Walker:
         self.em.jump(disp)
         ctx = {"slot": slot, "cases": [], "default": None}
         self.switch.append(ctx)
-        self.loops.append((end, end, len(self.vla_saves)))
+        # C99 6.8.6.2p1: `continue` belongs to the enclosing ITERATION
+        # statement, never to a switch.  Pushing `end` as the continue target
+        # too meant `for (...) { switch (x) { case 0: continue; } rest; }` ran
+        # `rest` -- the loop's continue point is the only right answer, and a
+        # switch that is not inside a loop has none.
+        cont = self.loops[-1][0] if self.loops else end
+        self.loops.append((cont, end, len(self.vla_saves)))
         self.stmt()
         self.loops.pop()
         self.switch.pop()

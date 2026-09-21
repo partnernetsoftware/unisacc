@@ -90,13 +90,15 @@ same tables. The bootstrap fixed point holds:
 A = cc(unisacc.c)      B = A(unisacc.c)      C = B(unisacc.c)      B == C
 ```
 
-That is a fixed point, not a coverage claim: `unisacc.c` only has to accept the
-subset `unisacc.c` is written in, and it trails the Python front end badly —
-**31 of our 73 probes, 111 of the corpus's 220**, against 209 for the Python
-one. It also stops at the tape; lowering and the images are still Python. So
-the honest reading is that the C compiler reproduces itself, not that it could
+That is a fixed point, not a coverage claim — and it is a fixed point of the
+C compiler alone: all three tapes are produced by `unisacc`, built three ways,
+and Python only turns a tape into a binary. `unisacc.c` only has to accept the
+subset `unisacc.c` is written in, and it trails the Python front end: **40 of
+our 80 probes, 128 of the corpus's 220**, against 209 for the Python one. It
+also stops at the tape; lowering and the images are still Python. So the
+honest reading is that the C compiler reproduces itself, not that it could
 replace the driver. `tests/selfgap.sh` ratchets those two numbers so the gap
-can only shrink.
+can only shrink — it has gone 31 → 40 and 111 → 128 since it was installed.
 
 ## Try it
 
