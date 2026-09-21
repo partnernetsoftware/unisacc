@@ -1294,6 +1294,7 @@ char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
 int ntd;
+int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
 int curstruct;          /* the struct the thing in r0 is, or -1 */
 int curdim2;            /* ...and its inner dimension, if it has one */
 int curuns;             /* ...and whether its type is unsigned */
@@ -1654,6 +1655,33 @@ int stw(void) { if (curptr) return 8; return curelem; }
 /* `int` is four bytes here, the same as everywhere else in C, so a load has
    to say how wide it is.  Width 0 means an AGGREGATE -- a struct or an array
    -- whose value is its address, so there is nothing to load. */
+/* A struct VALUE is its address; copying one is n bytes [r1] -> [r0].  r0
+   survives, so the destination is still the result afterwards. */
+int scopy(int n) {
+    int k; int w;
+    k = 0;
+    while (k < n) {
+        w = 8;
+        while (k + w > n) w = w / 2;
+        if (w == 8) { es("  @mem.load r2, [r1+"); en(k); es("]\n  @mem.store [r0+"); en(k); es("], r2\n"); }
+        else { es("  @mem.ld r2, [r1+"); en(k); es("], "); en(w);
+               es("\n  @mem.st [r0+"); en(k); es("], r2, "); en(w); ec(10); }
+        k = k + w;
+    }
+    return 0;
+}
+
+/* Copy the struct value in r0 into a fresh frame slot and leave ITS address
+   in r0: a value that outlives the next call (a callee's return buffer is
+   shared by every call of it). */
+int stemp(int st) {
+    int o;
+    o = alloc_local(stsize[st]);
+    es("  mov r1, r0\n  @lit.imm r0, "); en(o); es("\n  @alu.sub r0, r6, r0\n");
+    scopy(stsize[st]);
+    return 0;
+}
+
 int eload(int w) {
     if (w == 0) return 0;
     if (w == 8) { es("  @mem.load r0, [r0+0]\n"); return 0; }
@@ -1874,11 +1902,13 @@ int pf_call(int t);
 /* A call through a variable that holds a function's address.  The callee
    goes on the stack UNDER the arguments; the convention is the pointee's --
    stacked if it is variadic (declfp 2) or the call has more than six. */
+int icparen;
 int icall(int si, int t) {
     int n; int k; int st;
     if (symkind[si] == 0) { es("  @mem.lea r0, g_"); etok(t); es("\n  @mem.load r0, [r0+0]\n"); }
     else { es("  @mem.load r0, [r6-"); en(symoff[si]); es("]\n"); }
     adv();
+    if (icparen) { icparen = 0; need(tidx(")", 1), ")"); }
     push();
     need(tidx("(", 1), "(");
     n = 0;
@@ -1954,6 +1984,17 @@ int primary(void) {
         return postfix();
     }
     if (t == vfind(TOKV, NTOKV, "(", 1)) {
+        /* `(*fp)(args)`: dereferencing a function pointer gives back the
+           designator (C99 6.5.3.2p4), so it is the call `fp(args)` */
+        if (kind(tp + 1) == tidx("*", 1)) { if (kind(tp + 2) == T_ID) {
+            if (kind(tp + 3) == tidx(")", 1)) { if (kind(tp + 4) == tidx("(", 1)) {
+                i = sfind(tp + 2);
+                if (i >= 0) { if (symfp[i]) {
+                    adv(); adv(); icparen = 1;
+                    return icall(i, tp);
+                } }
+            } }
+        } }
         adv(); expr(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         return postfix();
     }
@@ -2001,6 +2042,10 @@ int primary(void) {
         adv();
         lvalue = 1;
         if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
+        if (symstruct[i] >= 0) { if (symptr[i] == 0) {
+            /* a struct object: assignable, and its value is its address */
+            lvalue = 1; curptr = 0; curelem = 0;
+        } }
         return postfix();
     }
     printf("unexpected token %d in expression\n", tp);
@@ -2105,13 +2150,19 @@ int decode(int t, char *buf) {
 
 
 int do_printf(void) {
-    int t; int k; int n; int c; int m; int id;
+    int t; int k; int n; int c; int m; int id; int pass; int j; int slot[32];
     char fbuf[4096];
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     if (cur() != T_STR) { printf("printf needs a literal format\n"); __exit(1); }
     t = adv();
     n = decode(t, fbuf);
-    k = 0; m = 0;
+    /* Two passes over the format, as the Python walker does: pass 0
+       evaluates every argument into a frame slot of its own, pass 1 writes.
+       Interleaving was observable -- `printf("a %d\n", f())` wrote `a `
+       before calling f, and f's own output came out after it. */
+    pass = 0;
+    while (pass < 2) {
+    k = 0; m = 0; j = 0;
     while (k < n) {
         c = fbuf[k] & 255;
         if (c == 37) {
@@ -2146,15 +2197,22 @@ int do_printf(void) {
             }
             c = fbuf[k] & 255;
             if (c == 37) { lbuf[m] = 37; m = m + 1; k = k + 1; }
-            else {
+            else if (pass == 0) {
+                need(vfind(TOKV, NTOKV, ",", 1), ",");
+                expr(); loadval();
+                if (j >= 32) { printf("printf: more than 32 arguments\n"); __exit(1); }
+                slot[j] = alloc_local(8);
+                es("  @mem.store [r6-"); en(slot[j]); es("], r0\n");
+                j = j + 1; m = 0; k = k + 1;
+            } else {
                 if (m > 0) {
                     id = addlit(lbuf, m);
                     es("  @mem.lea r0, S"); en(id); es("\n  @lit.imm r1, "); en(m);
                     es("\n  @lit.write r0, r1\n");
                     m = 0;
                 }
-                need(vfind(TOKV, NTOKV, ",", 1), ",");
-                expr(); loadval();
+                es("  @mem.load r0, [r6-"); en(slot[j]); es("]\n");
+                j = j + 1;
                 if (c == 100) es("  @lit.print r0\n");
                 else { if (c == 105) es("  @lit.print r0\n");   /* %i */
                 else { if (c == 117) {           /* %u: the low 32 bits */
@@ -2186,12 +2244,14 @@ int do_printf(void) {
             }
         } else { lbuf[m] = c; m = m + 1; k = k + 1; }
     }
+    if (pass == 0) need(vfind(TOKV, NTOKV, ")", 1), ")");
+    pass = pass + 1;
+    }
     if (m > 0) {
         id = addlit(lbuf, m);
         es("  @mem.lea r0, S"); en(id); es("\n  @lit.imm r1, "); en(m);
         es("\n  @lit.write r0, r1\n");
     }
-    need(vfind(TOKV, NTOKV, ")", 1), ")");
     es("  @lit.imm r0, 0\n");
     lvalue = 0; curelem = 8;
     return 0;
@@ -2332,7 +2392,9 @@ int pf_call(int t) {
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     n = 0;
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
-        expr(); loadval(); push(); n = n + 1;
+        expr(); loadval();
+        if (curstruct >= 0) { if (curptr == 0) { if (curelem == 0) stemp(curstruct); } }
+        push(); n = n + 1;
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
     need(vfind(TOKV, NTOKV, ")", 1), ")");
@@ -2367,6 +2429,12 @@ int pf_call(int t) {
     }
     es("  @call.call "); etok(t); ec(10);
     lvalue = 0; curelem = 8;
+    {
+        int si; si = sfind(t);
+        if (si >= 0) { if (symkind[si] == 2) { if (symstruct[si] >= 0) { if (symptr[si] == 0) {
+            curstruct = symstruct[si]; curelem = 0; curptr = 0;
+        } } } }
+    }
     return postfix();
 }
 
@@ -2609,6 +2677,15 @@ int expr(void) {
             adv();
             e = stw();
             lvalue = 0;
+            if (e == 0) { if (curstruct >= 0) {
+                int ast; ast = curstruct;
+                push();                              /* destination */
+                expr(); loadval();
+                es("  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -8\n");
+                scopy(stsize[ast]);
+                lvalue = 0; curstruct = ast; curelem = 0; curptr = 0;
+                return 0;
+            } }
             push();
             expr(); loadval();
             pop1();
@@ -2882,6 +2959,8 @@ int declspec(void) {                       /* -> element width */
 int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
+    int own[256]; int nown; int j;
+    nown = 0;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
@@ -2918,6 +2997,8 @@ int stbody(int si) {
             mbstruct[nmemb] = 0 - 1;
             if (declptr == 0) mbstruct[nmemb] = mst;
             mbuns[nmemb] = muns;
+            if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
+            own[nown] = nmemb; nown = nown + 1;
             nmemb = nmemb + 1;
             stcount[si] = stcount[si] + 1;
             if (eat(tidx(",", 1)) == 0) break;
@@ -2925,6 +3006,23 @@ int stbody(int si) {
         need(tidx(";", 1), ";");
     }
     need(tidx("}", 1), "}");
+    /* A struct's members are the range [stfirst, stfirst + stcount).  A
+       member whose type is DEFINED inline -- `union { ... } u;` -- put its
+       own members in the middle of that range, and `u` fell off the end.
+       Re-append ours as one block; the scattered originals are dead. */
+    stfirst[si] = nmemb;
+    j = 0;
+    while (j < nown) {
+        if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
+        k = 0;
+        while (k < 32) { mbname[nmemb * 32 + k] = mbname[own[j] * 32 + k]; k = k + 1; }
+        mboff[nmemb] = mboff[own[j]]; mbbytes[nmemb] = mbbytes[own[j]];
+        mbwidth[nmemb] = mbwidth[own[j]]; mbelem[nmemb] = mbelem[own[j]];
+        mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
+        mbuns[nmemb] = mbuns[own[j]];
+        nmemb = nmemb + 1;
+        j = j + 1;
+    }
     while (off - (off / al) * al) off = off + 1;
     stsize[si] = off; stalign[si] = al;
     return si;
@@ -3369,6 +3467,10 @@ int stmt(void) {
     if (p == P_RETURN) {
         adv();
         if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval(); }
+        if (retst >= 0) {
+            es("  mov r1, r0\n  @mem.lea r0, __rv_"); etok(rett); ec(10);
+            scopy(stsize[retst]);
+        }
         need(vfind(TOKV, NTOKV, ";", 1), ";");
         elab("  @ctrl.jump R", retlab); ec(10);
         return 0;
@@ -3418,7 +3520,8 @@ int stmt(void) {
 int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start;
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
-    start = nout;
+    int pst; int nsp; int spsym[16];
+    start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;
     scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
     need(vfind(TOKV, NTOKV, "(", 1), "(");
@@ -3453,6 +3556,7 @@ int function(int t, int w) {
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (eat(tidx("...", 3))) break;
         pw = declspec();
+        pst = declstruct;
         declptr = declspecptr; declfp = 0;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
         havename = 0;
@@ -3465,6 +3569,10 @@ int function(int t, int w) {
             off = alloc_local(8);
             declbytes = 8;
             sadd(pt, 1, off, pw);
+            if (pst >= 0) { if (declptr == 0) {
+                if (nsp >= 16) { printf("more than 16 struct parameters\n"); __exit(1); }
+                spsym[nsp] = nsym - 1; nsp = nsp + 1;
+            } }
             if (stacked) {
                 /* the registers are free in this convention */
                 es("  @mem.load r1, [r6+"); en(16 + 8 * np); es("]\n");
@@ -3487,6 +3595,20 @@ int function(int t, int w) {
         nsym = scopebase;
         return 0;
     }
+    /* A struct parameter arrived as the address of the caller's copy; take
+       one of our own, so writing to it does not reach the caller. */
+    k = 0;
+    while (k < nsp) {
+        off = alloc_local(stsize[symstruct[spsym[k]]]);
+        es("  @mem.load r1, [r6-"); en(symoff[spsym[k]]); es("]\n");
+        es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
+        scopy(stsize[symstruct[spsym[k]]]);
+        symoff[spsym[k]] = off;
+        k = k + 1;
+    }
+    retst = 0 - 1;
+    if (fsym >= 0) { if (symstruct[fsym] >= 0) { if (symptr[fsym] == 0) retst = symstruct[fsym]; } }
+    rett = t;
     retlab = newlab();
     infunc = 1;
     block();
@@ -3494,6 +3616,7 @@ int function(int t, int w) {
     elab("R", retlab); es(":\n");
     es("  mov r7, r6\n  @mem.load r6, [r7+0]\n  @call.frame -8\n  @ctrl.ret\n");
     patchnum(fpatch, 6, (framemax + 7) / 8 * 8);
+    if (retst >= 0) { es(".bss __rv_"); etok(t); ec(32); en(stsize[retst]); ec(10); }
     nsym = scopebase;
     return 0;
 }
