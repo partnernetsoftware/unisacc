@@ -479,8 +479,10 @@ int splice(void) {
 int lex(void) {
     int i; int j; int a; int key[4]; int kind; int st;
     int best; int bl; int k; int p; int L;
+    int strpfx;                            /* the `L` of an `L"..."`, or -1 */
     i = 0;
     ntok = 0;
+    strpfx = 0 - 1;
     while (1) {
         key[0] = charclass(at(i));
         key[1] = charclass(at(i + 1));
@@ -530,14 +532,22 @@ int lex(void) {
                 | srcis(i, j - i, "__restrict__") | srcis(i, j - i, "__const")
                 | srcis(i, j - i, "__volatile__")
                 | srcis(i, j - i, "__signed__")) { i = j; continue; }
-            /* a wide CHARACTER constant is an int, so drop the prefix; a
-               wide STRING is refused by the Python front end, and this one
-               only has to agree about tokens */
+            /* a wide CHARACTER constant is an int, so drop the prefix.  A
+               wide STRING keeps it -- the token is still a string, and its
+               TEXT is the whole `L"..."`, which is what the Python lexer
+               emits and what lexdiff compares. */
             if (at(j) == 39) {
                 if (j - i == 1) { if (at(i) == 76 | at(i) == 117 | at(i) == 85) {
                     i = j; continue; } }
                 if (j - i == 2) { if (at(i) == 117) { if (at(i+1) == 56) {
                     i = j; continue; } } }
+            }
+            if (at(j) == 34) {
+                int wide;
+                wide = 0;
+                if (j - i == 1) { if (at(i) == 76 | at(i) == 117 | at(i) == 85) wide = 1; }
+                if (j - i == 2) { if (at(i) == 117) { if (at(i+1) == 56) wide = 1; } }
+                if (wide) { strpfx = i; i = j; continue; }
             }
             kind = vfind(TOKV, NTOKV, src + i, j - i);
             if (kind < 0) kind = 2;            /* id */
@@ -583,9 +593,18 @@ int lex(void) {
                     if (at(q) == 9) { q = q + 1; } else {
                     if (at(q) == 10) { q = q + 1; } else {
                     if (at(q) == 13) { q = q + 1; } else break; } } } }
+                /* the next literal may carry its own `L`/`u`/`U`/`u8` */
+                if (at(q) == 76 | at(q) == 117 | at(q) == 85) {
+                    if (at(q + 1) == 34) q = q + 1;
+                    else { if (at(q) == 117) { if (at(q + 1) == 56) {
+                        if (at(q + 2) == 34) q = q + 2; } } }
+                }
                 if (at(q) == 34) { j = q + 1; } else break;
             }
-            tkind[ntok] = 4; tpos[ntok] = i; tlen[ntok] = j + 1 - i;
+            if (strpfx >= 0) { tpos[ntok] = strpfx; tlen[ntok] = j + 1 - strpfx; }
+            else { tpos[ntok] = i; tlen[ntok] = j + 1 - i; }
+            tkind[ntok] = 4;
+            strpfx = 0 - 1;
             ntok = ntok + 1;
             i = j + 1;
         } else {

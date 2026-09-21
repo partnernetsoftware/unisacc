@@ -5,7 +5,8 @@ scope action, which result type -- leaves through the oracle and comes back as
 a single class name. [P-1]
 """
 from ..gold import TOKS
-from ..ir import Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE
+from ..ir import (Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE, WCHAR,
+                  wide_bytes)
 from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
                    U8, U16, U32, U64, UNSIGNED, NARROW,
                    unsigned_result, ptr, Struct)
@@ -43,6 +44,13 @@ def _basety(words):
     return U32 if u else I32
 
 
+def _wide(t):
+    """A wide string literal carries CODE POINTS; a narrow one carries the
+    source bytes.  Same token kind, because the grammar cannot tell them
+    apart -- only the initialiser and the pointer type can."""
+    return isinstance(t.val, list)
+
+
 def _littype(text, v):
     """C99 6.4.4.1: an integer constant takes the first type in its list that
     can hold it, and a HEX constant's list includes the unsigned types.  That
@@ -75,10 +83,13 @@ class Walker:
         self.em = Emitter(oracle)
         self._lval = None         # Type whose ADDRESS is in ACC, or None
         self.lbits = None         # ...and where in that word, for a bit-field
+        self.vla_saves = []       # per open block: the slot holding its SP
+        self.vla_size = {}        # a VLA's name -> the slot with its size
+        self.vla_dims = []
         self.frame_ix = None
         self.off = 0
         self.maxoff = 0
-        self.loops = []           # (continue_label, break_label)
+        self.loops = []           # (continue, break, vla depth)
         self.switch = []          # dicts for the open switch statements
         self.ret_label = None     # set while a function body is being walked
         self.called = {}          # name -> line, checked once the unit ends
@@ -258,6 +269,7 @@ class Walker:
         # where the declared name's OWN parameter list was, if the
         # declarator swallowed it -- see do_global
         self.params_at = None
+        self.vla_dims = []       # token spans of any non-constant bounds
         name, wrap = self._declarator(named, top=True)
         ty = wrap(base)
         if not named and ty.kind == "fn":
@@ -312,9 +324,35 @@ class Walker:
                 if self.at("*") and self.peek(1).kind == "]":
                     self.next()          # `[*]`: an unspecified VLA bound in
                     sufs.append(("arr", 0))   # a prototype -- just a pointer
+                elif self.at("]"):
+                    sufs.append(("arr", 0))
                 else:
-                    sufs.append(("arr", 0 if self.at("]")
-                                 else self.const_expr()))
+                    m = self.mark()
+                    try:
+                        n = self.const_expr()
+                        if not self.at("]"):
+                            raise CError("line %d: junk after an array bound"
+                                         % self.peek().line)
+                        sufs.append(("arr", n))
+                    except CError:
+                        # C99 6.7.5.2: a bound that is not a constant makes
+                        # this a variable-length array.  We cannot evaluate it
+                        # here -- no code may be emitted mid-declarator -- so
+                        # remember the token span and let local_decl come back
+                        # for it.
+                        self.rewind(m)
+                        start, d = self.i, 0
+                        while self.i < len(self.tk):
+                            k = self.peek().kind
+                            if k == "[":
+                                d += 1
+                            elif k == "]":
+                                if d == 0:
+                                    break
+                                d -= 1
+                            self.next()
+                        self.vla_dims.append((start, self.i))
+                        sufs.append(("arr", -len(self.vla_dims)))
                 self.expect("]")
             elif self.at("(") and not (top and named and inner is None):
                 # The OUTERMOST named declarator's own parameter list is not
@@ -586,7 +624,7 @@ class Walker:
         its own braces (or is a string filling a char array)."""
         if elem is None or nested or elem.kind not in ("arr", "struct"):
             return items
-        if self._is_charr(elem):
+        if self._is_charr(elem) or self._is_wcharr(elem):
             return items                     # each item is a whole string
         per = len(list(self._elems(elem)))
         if per <= 1:
@@ -602,9 +640,14 @@ class Walker:
         same list, which a "braced or flat" flag cannot express."""
         base = self.em.t.syms[sym] - 0x100
         t = self.peek()
-        if t.kind == "str" and self._is_charr(ty):
+        if t.kind == "str" and not _wide(t) and self._is_charr(ty):
             self.next()
             raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
+            self.em.t.data[base + at:base + at + len(raw)] = raw
+            return
+        if t.kind == "str" and _wide(t) and self._is_wcharr(ty):
+            self.next()
+            raw = wide_bytes(t.val)[:ty.size(self.sc.structs)]
             self.em.t.data[base + at:base + at + len(raw)] = raw
             return
         if ty.kind in ("arr", "struct") and self._aggr_paren() \
@@ -659,7 +702,9 @@ class Walker:
             return
         if t.kind == "str":                       # char *p = "..."
             self.next()
-            self.em.init_ptrs.append((sym, self.em.intern(t.val), at))
+            self.em.init_ptrs.append(
+                (sym, self.em.intern_wide(t.val) if _wide(t)
+                 else self.em.intern(t.val), at))
             return
         if t.kind == "&" and self.i + 2 < len(self.tk) \
                 and self.tk[self.i + 1].kind == "(" \
@@ -681,6 +726,10 @@ class Walker:
 
     def _is_charr(self, ty):
         return ty.kind == "arr" and ty.to.size(self.sc.structs) == 1
+
+    def _is_wcharr(self, ty):
+        return ty.kind == "arr" and ty.to.size(self.sc.structs) == WCHAR \
+            and ty.to.kind in ("i32", "u32")
 
     def _addr_of(self):
         """`&g` or a bare array/function name: the address of a global.  It is
@@ -838,12 +887,23 @@ class Walker:
         if new_scope:
             self.sc.push()
         save = self.off
+        self.vla_saves.append(None)
         while not self.at("}"):
             self.stmt()
         self.expect("}")
+        self.vla_restore(len(self.vla_saves) - 1)
+        self.vla_saves.pop()
         if new_scope:
             self.sc.pop()
             self.off = save
+
+    def vla_restore(self, depth):
+        """Put the stack pointer back, for every open block from the innermost
+        down to `depth`.  A `break` or `continue` leaves more than one."""
+        for k in range(len(self.vla_saves) - 1, depth - 1, -1):
+            off = self.vla_saves[k]
+            if off is not None:
+                self.em.load(SP, FP, -off, 8)
 
     def stmt(self):
         if self.at("id") and self.peek(1).kind == ":":           # a label
@@ -892,10 +952,13 @@ class Walker:
             self.expect(";")
             if not self.loops:
                 raise CError("break outside loop/switch")
+            # leaving one or more blocks: any VLA in them goes with us
+            self.vla_restore(self.loops[-1][2])
             self.em.jump(self.loops[-1][1])
         elif p == "continue":
             self.next()
             self.expect(";")
+            self.vla_restore(self.loops[-1][2])
             self.em.jump(self.loops[-1][0])
         else:                                    # expr
             if not self.eat(";"):
@@ -914,6 +977,7 @@ class Walker:
             return
         while True:
             ty, name = self.declarator(base)
+            dims = self.vla_dims
             self.sc.act("local", self.tk[self.i - 1])
             if static:                       # static storage, zero-initialised
                 lab = "g_%s_%d" % (name, self.i)
@@ -936,6 +1000,11 @@ class Walker:
                 if not self.eat(","):
                     break
                 continue
+            if ty.kind == "arr" and ty.n < 0:
+                self.vla_decl(name, ty, dims)
+                if not self.eat(","):
+                    break
+                continue
             init = self.eat("=")
             if init and ty.kind == "arr" and ty.n == 0:
                 ty = Type("arr", to=ty.to, n=self._init_count(ty.to))
@@ -946,6 +1015,54 @@ class Walker:
             if not self.eat(","):
                 break
         self.expect(";")
+
+    def vla_decl(self, name, ty, dims):
+        """C99 6.7.5.2: a variable-length array.
+
+        Its storage cannot be in the fixed frame, so it comes off the tape
+        stack at the point of declaration: two hidden slots hold the base
+        address and the byte size (`sizeof` on a VLA is a runtime load), and
+        the enclosing block puts the stack pointer back when it ends."""
+        if ty.to.kind == "arr" and ty.to.n < 0:
+            raise CError("line %d: a multi-dimensional VLA is not supported"
+                         % self.peek().line)
+        if self.at("="):
+            raise CError("line %d: a VLA may not be initialised"
+                         % self.peek().line)
+        esz = ty.to.size(self.sc.structs)
+        base_off = self.alloc(I64)          # the base address
+        size_off = self.alloc(I64)          # the byte size
+        # the bound, evaluated HERE, where the declaration is
+        back = self.i
+        self.i = dims[-ty.n - 1][0]
+        self.rvalue()
+        self.i = back
+        if esz != 1:
+            self.em.imm(TMP, esz)
+            self.em.emit(self.em.recipe("alu", "mul"), ACC, ACC, TMP)
+        # `sizeof` is the EXACT size, so record it before rounding
+        self.em.store(FP, -size_off, ACC, 8)
+        self.em.imm(TMP, 7)                 # arm64 faults on an unaligned
+        self.em.emit(self.em.recipe("alu", "add"), ACC, ACC, TMP)
+        self.em.imm(TMP, ~7 & 0xFFFFFFFFFFFFFFFF)   # 64-bit access, so the
+        self.em.emit(self.em.recipe("alu", "and"), ACC, ACC, TMP)  # base
+        # must stay 8-aligned
+        self.vla_mark()                     # remember SP before we move it
+        self.em.emit(self.em.recipe("alu", "sub"), SP, SP, ACC)
+        self.em.store(FP, -base_off, SP, 8)
+        sym = self.sc.declare(name, ty, "local", base_off)
+        self.vla_size[sym.name] = size_off
+
+    def vla_mark(self):
+        """Save the stack pointer, once per block, just before the first
+        variable-length array in it moves SP.  Nothing else has moved SP
+        since the block opened -- every other local is in the fixed frame --
+        so this is the same value the block started with."""
+        if self.vla_saves and self.vla_saves[-1] is not None:
+            return
+        off = self.alloc(I64)
+        self.em.store(FP, -off, SP, 8)
+        self.vla_saves[-1] = off
 
     def _const_bits(self, sym, ty, at, bf):
         """A bit-field in a constant initialiser: OR it into the unit that is
@@ -963,12 +1080,19 @@ class Walker:
         """Same walk as const_init, but each element is a full expression and
         the result is stored rather than baked into the image."""
         t = self.peek()
-        if t.kind == "str" and self._is_charr(ty):
+        if t.kind == "str" and not _wide(t) and self._is_charr(ty):
             self.next()
             raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
             for i, b in enumerate(raw):
                 self.em.imm(ACC, b)
                 self.em.store(FP, -off + i, ACC, 1)
+            return
+        if t.kind == "str" and _wide(t) and self._is_wcharr(ty):
+            self.next()
+            n = ty.size(self.sc.structs) // WCHAR
+            for i, c in enumerate((list(t.val) + [0])[:n]):
+                self.em.imm(ACC, c)
+                self.em.store(FP, -off + i * WCHAR, ACC, WCHAR)
             return
         if ty.kind in ("arr", "struct") and self._aggr_paren() \
                 and not self.istype(self.peek(1)):
@@ -1052,7 +1176,7 @@ class Walker:
         self.rvalue()
         self.expect(")")
         self.em.jumpz(end)
-        self.loops.append((top, end))
+        self.loops.append((top, end, len(self.vla_saves)))
         self.stmt()
         self.loops.pop()
         self.em.jump(top)
@@ -1063,7 +1187,7 @@ class Walker:
         top, cont, end = (self.em.new_label("dtop"), self.em.new_label("dcont"),
                           self.em.new_label("dend"))
         self.em.label(top)
-        self.loops.append((cont, end))
+        self.loops.append((cont, end, len(self.vla_saves)))
         self.stmt()
         self.loops.pop()
         self.em.label(cont)
@@ -1104,7 +1228,7 @@ class Walker:
             self.next()
         self.expect(")")
         body = self.i
-        self.loops.append((cont, end))
+        self.loops.append((cont, end, len(self.vla_saves)))
         self.stmt()
         self.loops.pop()
         after = self.i
@@ -1129,7 +1253,7 @@ class Walker:
         self.em.jump(disp)
         ctx = {"slot": slot, "cases": [], "default": None}
         self.switch.append(ctx)
-        self.loops.append((end, end))
+        self.loops.append((end, end, len(self.vla_saves)))
         self.stmt()
         self.loops.pop()
         self.switch.pop()
@@ -1165,12 +1289,24 @@ class Walker:
         if not self.at("}"):
             self.stmt()
 
-    CPREC = [("|",), ("^",), ("&",), ("<<", ">>"), ("+", "-"),
+    CPREC = [("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="),
+             ("<", ">", "<=", ">="), ("<<", ">>"), ("+", "-"),
              ("*", "/", "%")]
 
     def const_expr(self, level=0):
         """Constant folding for case labels and array bounds.  Array sizes are
-        routinely `N * 32` or `A + B`, not bare literals."""
+        routinely `N * 32` or `A + B`, not bare literals -- and the full
+        conditional ladder has to be here, because an expression this cannot
+        fold becomes a VARIABLE-LENGTH array.  `int a[1 && 1]` is not one."""
+        if level == 0:
+            v = self.const_expr(1)
+            if self.at("?"):
+                self.next()
+                a = self.const_expr(0)
+                self.expect(":")
+                b = self.const_expr(0)
+                return a if v else b
+            return v
         if level >= len(self.CPREC):
             return self.const_atom()
         v = self.const_expr(level + 1)
@@ -1195,8 +1331,24 @@ class Walker:
                 v = v & r
             elif op == "^":
                 v = v ^ r
-            else:
+            elif op == "|":
                 v = v | r
+            elif op == "&&":
+                v = 1 if (v and r) else 0
+            elif op == "||":
+                v = 1 if (v or r) else 0
+            elif op == "==":
+                v = 1 if v == r else 0
+            elif op == "!=":
+                v = 1 if v != r else 0
+            elif op == "<":
+                v = 1 if v < r else 0
+            elif op == ">":
+                v = 1 if v > r else 0
+            elif op == "<=":
+                v = 1 if v <= r else 0
+            else:
+                v = 1 if v >= r else 0
         return v
 
     def const_atom(self):
@@ -1535,12 +1687,26 @@ class Walker:
                 t = self.unary()
                 n = (t or I64).size(self.sc.structs)
                 end = self.i          # where the operand really ends
+                vla = t is not None and t.kind == "arr" and t.n < 0
                 self.rewind(m)        # drop the code it emitted ...
                 self.i = end          # ... but keep the position [E-30]
                 self.lval = None
+                if vla:
+                    # C99 6.5.3.4p2: `sizeof` a VLA is evaluated at run time
+                    self.em.load(ACC, FP, -self.vla_size[self._vla_name(m)], 8)
+                    return I64
             self.em.imm(ACC, n)
             return I64
         return self.primary()
+
+    def _vla_name(self, m):
+        """The identifier `sizeof` was applied to, so its size slot can be
+        found.  Only a bare name is supported -- `sizeof (a[0])` on a VLA
+        element is a constant anyway."""
+        for j in range(m[0], len(self.tk)):
+            if self.tk[j].kind == "id" and self.tk[j].text in self.vla_size:
+                return self.tk[j].text
+        raise CError("line %d: sizeof on a VLA expression" % self.peek().line)
 
     def primary(self):
         t = self.peek()
@@ -1555,6 +1721,9 @@ class Walker:
             return self.postfix_chain(_littype(t.text, int(t.val)))
         if t.kind == "str":
             self.next()
+            if _wide(t):
+                self.em.lea(ACC, self.em.intern_wide(t.val))
+                return self.postfix_chain(ptr(I32))
             self.em.lea(ACC, self.em.intern(t.val))
             return self.postfix_chain(ptr(I8))
         if t.kind == "id":
@@ -1575,6 +1744,12 @@ class Walker:
                 return self.postfix_chain(ptr(s.ty))
             if s.kind == "global":
                 self.em.lea(ACC, s.sym)
+            elif s.ty.kind == "arr" and s.ty.n < 0:
+                # a VLA lives on the tape stack; the frame slot holds its
+                # ADDRESS, so load that instead of computing one
+                self.em.load(ACC, FP, -s.off, 8)
+                self.lval = None
+                return self.postfix_chain(s.ty)
             else:
                 self.em.imm(TMP, s.off)
                 self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, TMP)

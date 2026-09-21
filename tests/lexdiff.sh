@@ -17,11 +17,16 @@ src = open(sys.argv[1], encoding="latin-1").read()
 # no predefines: unisacc's own preprocessor has none yet, so both sides see
 # the same truth flags
 src, _ = preprocess(src, o, {})
+# the source was read as latin-1 (one char per byte), so write the spelling
+# back out as bytes -- otherwise a UTF-8 literal comes out re-encoded and
+# differs from the C side for no reason
+w = sys.stdout.buffer.write
 for t in lex(src, o):
     if t.kind in ("id", "num", "str"):
-        print("%s=%s" % (t.kind, t.text.replace("\n", "\\n")))
+        w(("%s=%s\n" % (t.kind, t.text.replace("\n", "\\n")))
+          .encode("latin-1"))
     else:
-        print(t.kind)
+        w((t.kind + "\n").encode("latin-1"))
 PY
 )
     if [ "$a" = "$b" ]; then pass=$((pass+1)); printf "  ok   %s\n" "$(basename $f)"

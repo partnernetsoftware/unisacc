@@ -136,17 +136,19 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 207   wrong 0   unsupported 2   knownfail 11   slow 0
+corpus 220   pass 209   wrong 0   unsupported 0   knownfail 11   slow 0
 ```
 
 The programs are compiled to a real image for this host and **executed**, not
 interpreted: the reference VM is a Python loop, and an eight-queens search a
 real CPU finishes instantly takes a quarter of an hour there. `wrong` is the
 only failure — a program that compiled and then disagreed.
-`unsupported` is the honest coverage gap (the front end refuses the program);
-`tests/corpus.baseline` is a ratchet, so that number may only go down.
-The two that remain are a VLA and a wide string literal; `knownfail` is the list we are deliberately not chasing,
-mostly floating point and GCC extensions.
+`unsupported` is the honest coverage gap — the front end refuses the
+program — and it is now **zero**, so the next one to appear is a real alarm
+rather than another entry in an old backlog. `knownfail` is the list we are
+deliberately not chasing: floating point, GCC extensions, `_Generic`, and one
+place where this subset evaluates `int` arithmetic at 64 bits on purpose.
+`tests/corpus.baseline` is a ratchet, so `pass` may only go up.
 
 ## Prior art
 

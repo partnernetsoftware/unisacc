@@ -20,10 +20,11 @@ OPCHARS = set("".join(PUNCT))
 
 
 class Tok:
-    __slots__ = ("kind", "text", "val", "line")
+    __slots__ = ("kind", "text", "val", "line", "pos")
 
-    def __init__(self, kind, text, val=None, line=0):
+    def __init__(self, kind, text, val=None, line=0, pos=-1):
         self.kind, self.text, self.val, self.line = kind, text, val, line
+        self.pos = pos               # where in the source, for folding [W-12]
 
     def __repr__(self):
         return "%s(%s)" % (self.kind, self.text)
@@ -81,6 +82,18 @@ def _escape(s, i):
             j += 1
         return chr(int(s[i + 1:j], 8) & 0xFF), j
     return ESC.get(n, n), i + 2
+
+
+def _utf8_cps(b):
+    """Raw source bytes -> code points.  A byte that is not part of a valid
+    UTF-8 sequence keeps its own value, which is what a compiler reading a
+    latin-1 source would do."""
+    if not b:
+        return []
+    try:
+        return [ord(c) for c in bytes(b).decode("utf-8")]
+    except UnicodeDecodeError:
+        return list(b)
 
 
 def lex(src, oracle):
@@ -150,8 +163,36 @@ def lex(src, oracle):
                 i = j
                 continue
             if w in ("L", "u", "U", "u8") and j < n and src[j] == '"':
-                raise SyntaxError("line %d: wide string literals are not "
-                                  "supported (%s\"...\")" % (line, w))
+                # A wide string's elements are wider than a byte, so it gets
+                # its own token kind and carries CODE POINTS, not bytes.  The
+                # source was read as latin-1 (one char per byte), so the
+                # literal text is still UTF-8 and has to be decoded here --
+                # this is the only place that knows it is a literal at all.
+                start, k = i, j + 1
+                cps, raw = [], bytearray()
+                while k < n and src[k] != '"':
+                    if src[k] == "\\":
+                        cps.extend(_utf8_cps(raw)); raw = bytearray()
+                        ch, k = _escape(src, k)
+                        cps.append(ord(ch))
+                    elif ord(src[k]) > 255:
+                        # already decoded: the caller handed us text, not the
+                        # latin-1 bytes `compile_file` reads
+                        cps.extend(_utf8_cps(raw)); raw = bytearray()
+                        cps.append(ord(src[k]))
+                        k += 1
+                    else:
+                        raw.append(ord(src[k]))
+                        k += 1
+                cps.extend(_utf8_cps(raw))
+                k += 1                        # the closing quote
+                # The KIND is still `str`: grammatically a wide string is a
+                # string, and the parse table's token axis should not grow a
+                # class the grammar cannot tell apart.  What distinguishes it
+                # is the value -- code points instead of bytes.
+                toks.append(Tok("str", src[start:k], cps, line, start))
+                i = k
+                continue
             if w in KEYWORDS:
                 toks.append(Tok(w, w, None, line))
             elif w in TYPEKW:
@@ -183,7 +224,7 @@ def lex(src, oracle):
             # `text` is the SOURCE spelling and `val` the decoded bytes; the
             # parser uses val, and lexdiff compares spellings against the
             # self-hosted lexer, which has only the slice
-            toks.append(Tok("str", src[start:i], buf, line))
+            toks.append(Tok("str", src[start:i], buf, line, start))
         elif act == "charlit":
             start = i
             i += 1
@@ -209,8 +250,16 @@ def lex(src, oracle):
     out = []
     for t in toks:
         if t.kind == "str" and out and out[-1].kind == "str":
-            out[-1].text = out[-1].text + t.text
-            out[-1].val = out[-1].val + t.val
+            a, b = out[-1].val, t.val
+            if isinstance(a, list) != isinstance(b, list):
+                # C99 6.4.5p4: one wide operand makes the result wide
+                a = a if isinstance(a, list) else [ord(c) for c in a]
+                b = b if isinstance(b, list) else [ord(c) for c in b]
+            # the SPELLING is the whole source span, whitespace and all: the
+            # self-hosted lexer can only record (position, length), and
+            # lexdiff compares the two streams by text
+            out[-1].text = src[out[-1].pos:t.pos + len(t.text)]
+            out[-1].val = a + b
             continue
         out.append(t)
     return out

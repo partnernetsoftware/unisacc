@@ -49,7 +49,10 @@ class Type:
 
     def size(self, structs=None):
         if self.kind == "arr":
-            return self.n * self.to.size(structs)
+            # n < 0 marks a variable-length array: its storage is not in the
+            # frame at all, so it takes no room there and its `sizeof` is a
+            # runtime load, not this.
+            return 0 if self.n < 0 else self.n * self.to.size(structs)
         if self.kind == "struct":
             return structs[self.tag].size if structs else 8
         return TY_SIZE.get(self.kind, 8)

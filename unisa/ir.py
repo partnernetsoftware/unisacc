@@ -12,6 +12,20 @@ never hardcodes one. [G-8]
 from .tape import Tape
 
 ACC, LHS, TMP, FP, SP = "r0", "r1", "r2", "r6", "r7"
+
+# `wchar_t` is four bytes on every target we emit.  Windows' own wchar_t is
+# two, but nothing here calls a -W entry point, and one width keeps a wide
+# literal target-independent -- which is what lets `--fold` compare six
+# lowerings of ONE tape.
+WCHAR = 4
+
+
+def wide_bytes(cps, width=WCHAR):
+    """Code points -> the bytes of a wide string, NUL terminated."""
+    out = bytearray()
+    for c in list(cps) + [0]:
+        out += (c & ((1 << (width * 8)) - 1)).to_bytes(width, "little")
+    return bytes(out)
 # r0..r4 carry arguments; r5 is reserved as the indirect-call scratch, because
 # popping a callee address into any argument register would clobber an argument
 # that is already in place.  Five arguments is the documented limit.
@@ -86,6 +100,16 @@ class Emitter:
             self.t.string(name, s.encode("latin-1") + b"\x00")   # C strings are NUL-terminated
             self._strs[s] = name
         return self._strs[s]
+
+    def intern_wide(self, cps, width=WCHAR):
+        """A wide string literal: the same thing one element at a time, and
+        the elements are wider than a byte."""
+        key = ("L", width) + tuple(cps)
+        if key not in self._strs:
+            name = "w%d" % len(self._strs)
+            self.t.string(name, wide_bytes(cps, width), align=width)
+            self._strs[key] = name
+        return self._strs[key]
 
     # -- primitives -------------------------------------------------------
     def imm(self, reg, k):
