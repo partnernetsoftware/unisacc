@@ -30,36 +30,41 @@
 #               skipped unless corpus/ is already present
 set -u
 PROBES="examples/*.c tests/c/*.c"
-declare -a NAME LINE CODE
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching
 # its last line -- a summary line that happens to end differently is not a
 # failure, and a suite that dies silently must not read as green.
 # No suite may hang the run.  macOS has no `timeout`, so each one gets a
 # watchdog; 137 is the kill and reads as a failure with a clear line.
 LIMIT=${SUITE_LIMIT:-900}
+# Suites run CONCURRENTLY, JOBS at a time.  Each one writes its output to a
+# file of its own; the summary is printed afterwards in the fixed order below.
+# The default leaves cores free: this machine has overheated under full load.
+JOBS=${JOBS:-6}
+W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+ORDER=()
 run() {
     local n="$1"; shift
-    local out rc
-    out=$("$@" 2>&1 & p=$!
-          ( sleep "$LIMIT"; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 &
-          w=$!; wait $p 2>/dev/null; rc=$?; kill $w 2>/dev/null; exit $rc)
-    rc=$?
-    [ "$rc" -eq 137 ] && out="$out
-TIMED OUT after ${LIMIT}s"
-    NAME+=("$n"); LINE+=("$(printf '%s' "$out" | tail -1)"); CODE+=("$rc")
-    # A swallowed failure is useless in CI -- show the suite when it fails.
-    if [ "$rc" -ne 0 ]; then
-        # The tail is not enough: a per-probe suite prints one `ok` line each
-        # and the ONE that failed is usually alphabetically early, so it
-        # scrolls off.  CI showed `wrong 1` for three pushes without ever
-        # naming the probe.  Show the lines that are not `ok` first.
-        printf '\n--- %s failed ---\n' "$n"
-        printf '%s\n' "$out" | grep -vE '^  ok ' | head -40
-        printf '%s\n--- end %s ---\n' "$(printf '%s' "$out" | tail -20)" "$n"
-    fi
+    ORDER+=("$n")
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.5; done
+    (
+        t0=$(date +%s)
+        "$@" > "$W/$n.out" 2>&1 & p=$!
+        ( sleep "$LIMIT"; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 &
+        w=$!; wait $p 2>/dev/null; rc=$?; kill $w 2>/dev/null
+        [ "$rc" -eq 137 ] && echo "TIMED OUT after ${LIMIT}s" >> "$W/$n.out"
+        echo "$rc" > "$W/$n.rc"; echo $(( $(date +%s) - t0 )) > "$W/$n.sec"
+    ) &
 }
+# Serial, and before anything else: a failing one says why in a known place.
+serial() { run "$@"; wait; }
+T0=$(date +%s)
 
-run acceptance ./tests/acceptance.sh
+# One build of the self-hosted compiler for every suite that uses it.  ccrun
+# never built it and ran BEFORE selfhost, so it could test a stale binary.
+./tests/build_ref.sh >/dev/null || { echo "build_ref failed"; exit 1; }
+
+# acceptance rewrites weights/, which every other suite reads: it goes alone.
+serial acceptance ./tests/acceptance.sh
 run vm         ./tests/vm.sh
 run difftest   ./tests/difftest.sh
 run native     bash -c "./tests/native.sh $PROBES"
@@ -82,13 +87,27 @@ if [ -d corpus/c-testsuite ]; then
     run corpus env FETCH=0 ./tests/corpus.sh
 fi
 run acc        bash -c "python3 -m unisa acc"   # the SHIPPED weights
+wait
 
-echo "================ summary ================"
 bad=0
-for i in "${!NAME[@]}"; do
-    if [ "${CODE[$i]}" -eq 0 ]; then m=ok; else m=FAIL; bad=$((bad+1)); fi
-    printf "  %-4s %-11s %s\n" "$m" "${NAME[$i]}" "${LINE[$i]}"
+for n in "${ORDER[@]}"; do
+    rc=$(cat "$W/$n.rc" 2>/dev/null || echo 1)
+    [ "$rc" -eq 0 ] && continue
+    # A swallowed failure is useless -- show the suite when it fails.  The
+    # tail is not enough: a per-probe suite prints one `ok` line each and the
+    # ONE that failed is usually alphabetically early, so it scrolls off.
+    printf '\n--- %s failed ---\n' "$n"
+    grep -vE '^  ok ' "$W/$n.out" | head -40
+    printf '%s\n--- end %s ---\n' "$(tail -20 "$W/$n.out")" "$n"
+done
+echo "================ summary ================"
+for n in "${ORDER[@]}"; do
+    rc=$(cat "$W/$n.rc" 2>/dev/null || echo 1)
+    if [ "$rc" -eq 0 ]; then m=ok; else m=FAIL; bad=$((bad+1)); fi
+    printf "  %-4s %-11s %4ss  %s\n" "$m" "$n" "$(cat "$W/$n.sec" 2>/dev/null)" \
+        "$(tail -1 "$W/$n.out" 2>/dev/null)"
 done
 echo "========================================="
+echo "wall $(( $(date +%s) - T0 ))s   (JOBS=$JOBS)"
 [ "$bad" -eq 0 ] && echo "all suites green" || echo "$bad suite(s) failing"
 [ "$bad" -eq 0 ]

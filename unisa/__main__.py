@@ -104,7 +104,12 @@ def _acc_built():
     return 0
 
 
-BUILT = os.path.join(WEIGHTS, "built.json")
+# The cache lives next to the PACKAGE, not the cwd.  It was relative, and every
+# suite that runs a probe from a scratch directory (some probes write files)
+# found no cache there and reconstructed all eleven nets -- ~7s of full-core
+# work per probe, which was most of what the test suite spent.
+BUILT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                     WEIGHTS, "built.json")
 
 
 def _built():

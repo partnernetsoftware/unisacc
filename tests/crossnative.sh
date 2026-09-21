@@ -52,13 +52,24 @@ EOF2
 run_rosetta() {
     [ "$(uname -s)" = "Darwin" ] || return 0
     d=$(mktemp -d); p=0; f=0
+    PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
+    . "$(dirname "$0")/par.sh"
     for c in "$@"; do
         b=$(basename "$c" .c)
+        throttle
+        (
         $U compile "$c" -o "$d/$b" --target osx/x86_64 --drive "$DRIVE" \
-            >/dev/null 2>&1 || continue
+            >/dev/null 2>&1 || exit 0
         chmod +x "$d/$b"; codesign -f -s - "$d/$b" >/dev/null 2>&1
-        want=$($U run "$c" --target osx/x86_64 --drive "$DRIVE" 2>/dev/null)
-        got=$(arch -x86_64 "$d/$b" 2>/dev/null)
+        $U run "$c" --target osx/x86_64 --drive "$DRIVE" 2>/dev/null > "$d/$b.want"
+        arch -x86_64 "$d/$b" 2>/dev/null > "$d/$b.got"
+        ) &
+    done
+    wait
+    for c in "$@"; do
+        b=$(basename "$c" .c)
+        [ -f "$d/$b.got" ] || continue
+        got=$(cat "$d/$b.got"); want=$(cat "$d/$b.want")
         if [ "$got" = "$want" ]; then p=$((p+1))
         else f=$((f+1)); printf "  FAIL %-12s native [%s] vs interp [%s]\n" \
             "$b" "$got" "$want"; fi
@@ -121,12 +132,22 @@ run_windows() {
     rm -rf "$d"
 }
 
+# The targets are independent machines, so they run side by side; each job
+# counts its own failures and the reports are printed in the fixed order.
+O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
+job() { n=$1; shift; ( bad=0; "$@"; echo "$bad" > "$O/$n.bad" ) > "$O/$n.out" 2>&1 & }
+job 1 run_target "${VM_X86:-minicon-lnx-x86_64}" lnx/x86_64 "$@"
+job 2 run_target "${VM_ARM:-default}"            lnx/arm64  "$@"
+job 3 run_rosetta "$@"
+# both Windows targets share one VM: one job, in turn
+run_win_both() { run_windows win/arm64 "$@"; run_windows win/x86_64 "$@"; }
+job 4 run_win_both "$@"
+wait
 bad=0
-run_target "${VM_X86:-minicon-lnx-x86_64}" lnx/x86_64 "$@"
-run_target "${VM_ARM:-default}"            lnx/arm64  "$@"
-run_rosetta "$@"
-run_windows win/arm64  "$@"
-run_windows win/x86_64 "$@"
+for n in 1 2 3 4; do
+    cat "$O/$n.out"
+    bad=$((bad + $(cat "$O/$n.bad" 2>/dev/null || echo 1)))
+done
 echo
 echo "crossnative failing targets $bad"
 [ "$bad" -eq 0 ]

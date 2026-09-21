@@ -29,7 +29,10 @@ isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 # macOS has no `timeout`, and one heavy program must not hang the suite: the
 # reference VM is a Python interpreter, so an eight-queens search that a native
 # compiler finishes instantly can take a quarter of an hour here.
-LIMIT=${LIMIT:-10}
+# Wall clock, and the first-launch scan of a new image QUEUES system-wide: with
+# several suites launching at once a trivial program has waited past 8s before
+# it ran a single instruction.  This is a hang detector, not a benchmark.
+LIMIT=${LIMIT:-30}
 # Run the corpus NATIVELY when this host has a matching target: the reference
 # VM is a Python interpreter, and an eight-queens search that a real CPU
 # finishes instantly takes a quarter of an hour there.  It is also the stronger
@@ -52,24 +55,38 @@ runlim() {
 }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 : > "$T/passing"
+PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
+. "$REPO/tests/par.sh"
+# A: compile and run every program, PAR at a time, each in a directory of its
+# own (some of these programs write files).
+for f in "$SRC"/*.c; do
+    b=$(basename "$f" .c)
+    throttle
+    (
+    D="$T/$b.d"; mkdir -p "$D"; : > "$D/err"
+    if [ -n "$HOST_TARGET" ]; then
+        if $U compile "$f" -o "$D/x" --target "$HOST_TARGET" --drive "$DRIVE" \
+                >/dev/null 2>"$D/err" && [ ! -s "$D/err" ]; then
+            chmod +x "$D/x"
+            command -v codesign >/dev/null && \
+                codesign -f -s - "$D/x" >/dev/null 2>&1
+            (cd "$D" && runlim ./x 2>/dev/null) > "$D/got"; echo $? > "$D/code"
+        else
+            : > "$D/got"; echo 1 > "$D/code"
+        fi
+    else
+        (runlim $U run "$f" --drive "$DRIVE" 2>"$D/err") > "$D/got"; echo $? > "$D/code"
+    fi
+    ) &
+done
+wait
+# B: the verdicts, in order.
 for f in "$SRC"/*.c; do
     b=$(basename "$f" .c)
     want=$(cat "$f.expected" 2>/dev/null || echo "")
-    : > "$T/err"
-    if [ -n "$HOST_TARGET" ]; then
-        if $U compile "$f" -o "$T/x" --target "$HOST_TARGET" --drive "$DRIVE" \
-                >/dev/null 2>"$T/err" && [ ! -s "$T/err" ]; then
-            chmod +x "$T/x"
-            command -v codesign >/dev/null && \
-                codesign -f -s - "$T/x" >/dev/null 2>&1
-            # in $T, not the repo: some of these programs write files
-            got=$(cd "$T" && runlim ./x 2>/dev/null); code=$?
-        else
-            got=""; code=1
-        fi
-    else
-        got=$(runlim $U run "$f" --drive "$DRIVE" 2>"$T/err"); code=$?
-    fi
+    D="$T/$b.d"
+    cp "$D/err" "$T/err"
+    got=$(cat "$D/got"); code=$(cat "$D/code")
     # 137 is our own watchdog's SIGKILL; any other signal is the program
     # crashing, which is a wrong answer, not a slow one
     if [ "$code" -eq 137 ] && [ ! -s "$T/err" ]; then
