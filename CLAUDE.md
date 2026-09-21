@@ -2,21 +2,15 @@
 
 ## Testing: local machines, not GitHub Actions
 
-**Do not push in order to test.** The GitHub runners are metered and the two
-macOS ones bill at ten times the Linux rate, so a push-triggered matrix spends
-real money on work this desk does for free — it once exhausted the
-organisation's Actions budget mid-session.
+**Do not push in order to test.** The repository is public now, so the hosted
+runners are free and `.github/workflows/ci.yml` fires on push again — but CI
+is a *safety net*, not the test loop. Get the local suites green first and let
+CI be the second opinion on a machine nobody has been editing.
 
-The workflow is **parked**: it sits at `.github/workflows-disabled/ci.yml`,
-and GitHub only reads `.github/workflows/`, so nothing can fire it — not a
-push, not a pull request, not `gh workflow run`. Move it back only when the
-user asks for a clean-room check, and move it out again afterwards:
-
-```bash
-git mv .github/workflows-disabled .github/workflows   # arm
-gh workflow run ci
-git mv .github/workflows .github/workflows-disabled   # park it again
-```
+The reason the rule exists: while the repository was private, a push-triggered
+matrix of one Linux and two macOS jobs — the macOS ones billing at ten times
+the Linux rate — exhausted the organisation's Actions budget in a single
+session of pushing after every increment. Batch the work; push once.
 
 All three platforms are here:
 

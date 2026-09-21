@@ -669,6 +669,39 @@ int symoff[MAXSYM];         /* local: frame offset */
 int symelem[MAXSYM];        /* element width for [] and unary * */
 int symptr[MAXSYM];         /* 1 for pointers and arrays */
 int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
+int symstruct[MAXSYM];      /* index into the struct table, or -1 */
+
+/* ---- struct and union ------------------------------------------------
+   Members carry a real C layout -- an `int` member is 4 bytes at a 4-byte
+   boundary -- even though a local scalar still lives in an 8-byte slot.
+   The two are different questions, and only the struct has to answer the
+   first one. */
+#define MAXSTRUCT 128
+#define MAXMEMB 1024
+char stname[MAXSTRUCT * 32];
+int stfirst[MAXSTRUCT]; int stcount[MAXSTRUCT];
+int stsize[MAXSTRUCT]; int stalign[MAXSTRUCT]; int stunion[MAXSTRUCT];
+int nstruct;
+char mbname[MAXMEMB * 32];
+int mboff[MAXMEMB];     /* byte offset inside the struct */
+int mbbytes[MAXMEMB];   /* what `sizeof` reports for the member */
+int mbwidth[MAXMEMB];   /* the load/store width: 0 means "aggregate" */
+int mbelem[MAXMEMB];    /* element size, for [] on an array member */
+int mbptr[MAXMEMB];
+int mbstruct[MAXMEMB];
+int nmemb;
+int declstruct;         /* the struct declspec() just saw, or -1 */
+int declspecptr;        /* the specifier itself was a pointer typedef */
+
+/* ---- typedef ---------------------------------------------------------
+   The lexer cannot mark these: it runs over the whole file before the
+   parser sees a line, so a name typedef'd on line 10 is already an ordinary
+   identifier by then.  The parser resolves them by text instead. */
+#define MAXTD 256
+char tdname[MAXTD * 32];
+int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
+int ntd;
+int curstruct;          /* the struct the thing in r0 is, or -1 */
 int nsym;
 int scopebase;              /* first local of the current function */
 
@@ -695,6 +728,10 @@ int expr(void);
 int exprc(void);
 int unary(void);
 int cexpr(void);
+int cond(void);
+int mbfind(int si, int t);
+int eload(int w);
+int estore(int w);
 int is_typeat(int i);
 int typesize(void);
 int declspec(void);
@@ -778,6 +815,7 @@ int sadd(int t, int kind, int off, int elem) {
     symkind[nsym] = kind; symoff[nsym] = off; symelem[nsym] = elem;
     symptr[nsym] = declptr;
     symbytes[nsym] = declbytes;
+    symstruct[nsym] = declstruct;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -799,7 +837,20 @@ int need(int k, char *what) {
     return 0;
 }
 
-int ask(int nt) { int key[4]; key[0] = nt; key[1] = cur(); key[2] = 0; key[3] = 0;
+int tdfind(int t);
+
+/* Project the current token onto the parse table's TOK axis.  A typedef name
+   lexes as an identifier -- the lexer runs over the whole file before the
+   parser sees a line -- but the GRAMMAR has to see a type, or `myint x;`
+   goes to the table's `expr` default and is parsed as an expression. */
+int tokclass(void) {
+    int k;
+    k = cur();
+    if (k == T_ID) { if (tdfind(tp) >= 0) return T_TYPE; }
+    return k;
+}
+
+int ask(int nt) { int key[4]; key[0] = nt; key[1] = tokclass(); key[2] = 0; key[3] = 0;
                   return infer(S_PARSE, key, 0); }
 
 /* ---- expressions ----------------------------------------------------- */
@@ -817,10 +868,26 @@ int cursize;       /* what `sizeof` would report for the thing in r0 */
  * element is 1.  Conflating them stores a single byte of the pointer. */
 int stw(void) { if (curptr) return 8; return curelem; }
 
+/* `int` is four bytes here, the same as everywhere else in C, so a load has
+   to say how wide it is.  Width 0 means an AGGREGATE -- a struct or an array
+   -- whose value is its address, so there is nothing to load. */
+int eload(int w) {
+    if (w == 0) return 0;
+    if (w == 8) { es("  load64 r0, [r0+0]\n"); return 0; }
+    es("  .ld r0, [r0+0], "); en(w); ec(10);
+    return 0;
+}
+
+int estore(int w) {                              /* [r1] = r0 */
+    if (w == 0) return 0;
+    if (w == 8) { es("  store64 [r1+0], r0\n"); return 0; }
+    es("  .st [r1+0], r0, "); en(w); ec(10);
+    return 0;
+}
+
 int loadval(void) {
     if (lvalue) {
-        if (stw() == 1) es("  .ld r0, [r0+0], 1\n");
-        else es("  load64 r0, [r0+0]\n");
+        eload(stw());
         lvalue = 0;
     }
     return 0;
@@ -840,7 +907,8 @@ int unary(void) {
         if (cur() == tidx("(", 1)) {
             if (is_typeat(tp + 1)) {                 /* sizeof(TYPE) */
                 adv();
-                sz = typesize();
+                declspec();                          /* handles struct too */
+                sz = declsz;
                 while (eat(tidx("*", 1))) sz = 8;
                 if (cur() == tidx("[", 1)) {
                     adv(); sz = sz * cexpr(); need(tidx("]", 1), "]");
@@ -870,7 +938,7 @@ int unary(void) {
             int cw; int csz;
             adv();
             cw = declspec(); csz = declsz;
-            declptr = 0;
+            declptr = declspecptr;
             while (eat(tidx("*", 1))) { declptr = 1; csz = 8; }
             need(tidx(")", 1), ")");
             unary(); loadval();
@@ -903,17 +971,49 @@ int postfix(void) {
             e2 = stw();
             lvalue = 0;
             push();                                  /* address */
-            if (e2 == 1) es("  .ld r0, [r0+0], 1\n"); else es("  load64 r0, [r0+0]\n");
+            eload(e2);
             push();                                  /* old value */
             es("  imm r0, 1\n");
             if (op == tidx("++", 2)) emit_binop(tidx("+", 1));
             else emit_binop(tidx("-", 1));
             pop1();                                  /* address */
-            if (e2 == 1) es("  .st [r1+0], r0, 1\n"); else es("  store64 [r1+0], r0\n");
+            estore(e2);
             es("  imm r2, 1\n");
             if (op == tidx("++", 2)) es("  sub64 r0, r0, r2\n");
             else es("  add64 r0, r0, r2\n");
             curelem = e2;
+        } else {
+        if (p == P_FIELD) {
+            int isarrow; int mi; int mt;
+            isarrow = 0;
+            if (cur() == tidx("->", 2)) isarrow = 1;
+            adv();
+            if (isarrow) loadval();          /* the pointer's VALUE is the base */
+            if (curstruct < 0) {
+                printf("member access on a non-struct at token %d\n", tp);
+                __exit(1);
+            }
+            mt = adv();
+            mi = mbfind(curstruct, mt);
+            if (mi < 0) {
+                printf("no such member at token %d\n", mt);
+                __exit(1);
+            }
+            if (mboff[mi]) {
+                es("  imm r2, "); en(mboff[mi]);
+                es("\n  add64 r0, r0, r2\n");
+            }
+            lvalue = 1;
+            curelem = mbwidth[mi];
+            curptr = mbptr[mi];
+            if (curptr) curelem = mbelem[mi];
+            cursize = mbbytes[mi];
+            curstruct = mbstruct[mi];
+            if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
+                /* an array or a nested struct: the value IS the address */
+                if (mbstruct[mi] < 0) { lvalue = 0; curptr = 1;
+                                        curelem = mbelem[mi]; }
+            } }
         } else {
         if (p == P_INDEX) {
             adv();
@@ -928,7 +1028,7 @@ int postfix(void) {
             lvalue = 1; curelem = e; curptr = 0;
         } else {
             return 0;
-        } }
+        } } }
     }
     return 0;
 }
@@ -970,6 +1070,7 @@ int primary(void) {
                      __write(2, src + tpos[tp], tlen[tp]);
                      __write(2, "\n", 1); __exit(1); }
         cursize = symbytes[i];           /* what `sizeof` reports for it */
+        curstruct = symstruct[i];
         if (symkind[i] == 4) {           /* enum constant */
             es("  imm r0, "); en(symoff[i]); ec(10);
             adv(); lvalue = 0; curelem = 8;
@@ -1298,6 +1399,25 @@ int lor(void) {
     return 0;
 }
 
+/* `a ? b : c` -- only one arm is evaluated, so each gets its own label and
+   the value they share is r0. */
+int cond(void) {
+    int els; int end;
+    lor();
+    if (cur() != tidx("?", 1)) return 0;
+    loadval(); adv();
+    els = newlab(); end = newlab();
+    elab("  jumpz r0, L", els); ec(10);
+    expr(); loadval();
+    elab("  jump L", end); ec(10);
+    elab("L", els); es(":\n");
+    need(tidx(":", 1), ":");
+    cond(); loadval();
+    elab("L", end); es(":\n");
+    lvalue = 0;
+    return 0;
+}
+
 int exprc(void) {                   /* the comma operator */
     expr();
     while (cur() == tidx(",", 1)) { adv(); expr(); }
@@ -1323,12 +1443,12 @@ int expr(void) {
             e = stw();
             lvalue = 0;
             push();                                  /* address */
-            if (e == 1) es("  .ld r0, [r0+0], 1\n"); else es("  load64 r0, [r0+0]\n");
+            eload(e);
             push();                                  /* old value */
             expr(); loadval();
             emit_binop(op);                          /* pops old value */
             pop1();                                  /* address */
-            if (e == 1) es("  .st [r1+0], r0, 1\n"); else es("  store64 [r1+0], r0\n");
+            estore(e);
             curelem = e;
             return 0;
         }
@@ -1339,13 +1459,12 @@ int expr(void) {
             push();
             expr(); loadval();
             pop1();
-            if (e == 1) es("  .st [r1+0], r0, 1\n");
-            else es("  store64 [r1+0], r0\n");
+            estore(e);
             return 0;
         }
     }
     tp = save; nout = nsave; lvalue = 0;
-    return lor();
+    return cond();
 }
 
 /* ---- statements and declarations ------------------------------------- */
@@ -1412,10 +1531,104 @@ int is_typetok(void) {
     return 0;
 }
 
+int stbody(int si);
+
+int tdfind(int t) {
+    int i; int k; int ok;
+    if (kind(t) != T_ID) return 0 - 1;
+    i = ntd - 1;                       /* backwards: an inner one shadows */
+    while (i >= 0) {
+        ok = 1; k = 0;
+        while (k < tlen[t]) {
+            if (k > 30) ok = 0;
+            else { if (tdname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            k = k + 1;
+        }
+        if (ok) { if (tdname[i * 32 + tlen[t]] == 0) return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+int tdadd(int t, int w, int sz, int si, int isptr) {
+    int k;
+    if (ntd >= MAXTD) { __write(2, "too many typedefs\n", 18); __exit(1); }
+    k = 0;
+    while (k < tlen[t]) { if (k < 31) tdname[ntd * 32 + k] = src[tpos[t] + k]; k = k + 1; }
+    if (k > 31) k = 31;
+    tdname[ntd * 32 + k] = 0;
+    tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
+    ntd = ntd + 1;
+    return ntd - 1;
+}
+
+int stfind(int t) {
+    int i; int k; int ok;
+    i = 0;
+    while (i < nstruct) {
+        ok = 1; k = 0;
+        while (k < tlen[t]) {
+            if (k > 30) ok = 0;
+            else { if (stname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            k = k + 1;
+        }
+        if (ok) { if (stname[i * 32 + tlen[t]] == 0) return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+int stnew(int t, int isunion) {
+    int k;
+    if (nstruct >= MAXSTRUCT) { __write(2, "too many structs\n", 17); __exit(1); }
+    k = 0;
+    if (t >= 0) {
+        while (k < tlen[t]) { if (k < 31) stname[nstruct * 32 + k] = src[tpos[t] + k]; k = k + 1; }
+    }
+    if (k > 31) k = 31;
+    stname[nstruct * 32 + k] = 0;
+    stfirst[nstruct] = nmemb; stcount[nstruct] = 0;
+    stsize[nstruct] = 0; stalign[nstruct] = 1; stunion[nstruct] = isunion;
+    nstruct = nstruct + 1;
+    return nstruct - 1;
+}
+
+/* `struct` or `union`, with or without a tag, with or without a body. */
+int stparse(int isunion) {
+    int si; int t;
+    adv();
+    si = 0 - 1;
+    if (cur() == T_ID) {
+        t = tp;
+        si = stfind(t);
+        if (si < 0) si = stnew(t, isunion);
+        adv();
+    } else si = stnew(0 - 1, isunion);
+    if (cur() == tidx("{", 1)) stbody(si);
+    return si;
+}
+
+int mbfind(int si, int t) {
+    int i; int e; int k; int ok;
+    i = stfirst[si]; e = i + stcount[si];
+    while (i < e) {
+        ok = 1; k = 0;
+        while (k < tlen[t]) {
+            if (k > 30) ok = 0;
+            else { if (mbname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            k = k + 1;
+        }
+        if (ok) { if (mbname[i * 32 + tlen[t]] == 0) return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 int is_typeat(int i) {
     if (kind(i) == T_TYPE) return 1;
     if (kind(i) == vfind(TOKV, NTOKV, "struct", 6)) return 1;
     if (kind(i) == vfind(TOKV, NTOKV, "union", 5)) return 1;
+    if (tdfind(i) >= 0) return 1;
     return 0;
 }
 
@@ -1437,10 +1650,57 @@ int typesize(void) {
     return sz;
 }
 
+/* `enum [tag] { a, b = 3, c }` -- the constants go into the symbol table and
+   the type itself is just an int. */
+int enumspec(void) {
+    int v; int t; int k; int neg;
+    adv();
+    if (cur() == T_ID) { if (kind(tp) != tidx("{", 1)) adv(); }
+    if (cur() != tidx("{", 1)) return 4;          /* `enum E x;` -- a use */
+    adv();
+    v = 0;
+    while (cur() != tidx("}", 1)) {
+        t = adv();
+        if (eat(tidx("=", 1))) {
+            neg = 0;
+            if (eat(tidx("-", 1))) neg = 1;
+            v = 0; k = 0;
+            while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+            if (neg) v = 0 - v;
+            adv();
+        }
+        declbytes = 4; declstruct = 0 - 1;
+        sadd(t, 4, v, 8);                          /* 4 = enum constant */
+        v = v + 1;
+        if (eat(tidx(",", 1)) == 0) break;
+    }
+    need(tidx("}", 1), "}");
+    return 4;
+}
+
 int declspec(void) {                       /* -> element width */
-    int w;
+    int w; int td;
     w = 8;
     declsz = 4;                            /* the size `sizeof` reports */
+    declstruct = 0 - 1;
+    declspecptr = 0;
+    td = tdfind(tp);
+    if (td >= 0) {
+        adv();
+        declsz = tdsz[td]; declstruct = tdstruct[td]; declspecptr = tdptr[td];
+        return tdw[td];
+    }
+    if (cur() == tidx("struct", 6)) {
+        declstruct = stparse(0);
+        declsz = stsize[declstruct];
+        return 8;
+    }
+    if (cur() == tidx("union", 5)) {
+        declstruct = stparse(1);
+        declsz = stsize[declstruct];
+        return 8;
+    }
+    if (cur() == tidx("enum", 4)) { declsz = enumspec(); return declsz; }
     while (is_typetok()) {
         if (tlen[tp] == 4) { if (src[tpos[tp]] == 99) w = 1; }   /* char */
         if (srcis(tpos[tp], tlen[tp], "char")) declsz = 1;
@@ -1449,29 +1709,116 @@ int declspec(void) {                       /* -> element width */
         if (srcis(tpos[tp], tlen[tp], "void")) declsz = 1;
         adv();
     }
+    /* The element width IS the type's size.  It used to be 1 for char and 8
+       for everything else, which made an `int` array eight bytes per element
+       and left no room for a struct member to be four. */
+    w = declsz;
     return w;
+}
+
+/* The member list.  Alignment is the C rule -- each member starts on a
+   boundary of its own alignment, the struct's alignment is the widest of
+   them, and the total is rounded up to that -- because a struct's layout is
+   observable through `sizeof` and through every pointer into it. */
+int stbody(int si) {
+    int off; int al; int w; int sz; int n; int t; int k;
+    int msz; int mal; int mw; int mel; int mst; int mo;
+    need(tidx("{", 1), "{");
+    stfirst[si] = nmemb; stcount[si] = 0;
+    off = 0; al = 1;
+    while (cur() != tidx("}", 1)) {
+        w = declspec();
+        sz = declsz; mst = declstruct;
+        while (1) {
+            declptr = declspecptr;
+            while (eat(tidx("*", 1))) declptr = 1;
+            t = adv();
+            n = 1;
+            if (cur() == tidx("[", 1)) {
+                adv(); n = cexpr(); need(tidx("]", 1), "]");
+            }
+            msz = sz; mal = sz; mw = sz; mel = sz;
+            if (mst >= 0) { msz = stsize[mst]; mal = stalign[mst]; mw = 0; mel = msz; }
+            if (declptr) { msz = 8; mal = 8; mw = 8; mel = sz; if (mst >= 0) mel = stsize[mst]; }
+            if (mal > 8) mal = 8;
+            if (n > 1) { mel = msz; msz = msz * n; mw = 0; }
+            if (stunion[si]) mo = 0;
+            else {
+                while (off - (off / mal) * mal) off = off + 1;
+                mo = off; off = off + msz;
+            }
+            if (stunion[si]) { if (msz > off) off = msz; }
+            if (mal > al) al = mal;
+            if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
+            k = 0;
+            while (k < tlen[t]) { if (k < 31) mbname[nmemb * 32 + k] = src[tpos[t] + k]; k = k + 1; }
+            if (k > 31) k = 31;
+            mbname[nmemb * 32 + k] = 0;
+            mboff[nmemb] = mo; mbbytes[nmemb] = msz; mbwidth[nmemb] = mw;
+            mbelem[nmemb] = mel; mbptr[nmemb] = declptr;
+            mbstruct[nmemb] = 0 - 1;
+            if (declptr == 0) mbstruct[nmemb] = mst;
+            nmemb = nmemb + 1;
+            stcount[si] = stcount[si] + 1;
+            if (eat(tidx(",", 1)) == 0) break;
+        }
+        need(tidx(";", 1), ";");
+    }
+    need(tidx("}", 1), "}");
+    while (off - (off / al) * al) off = off + 1;
+    stsize[si] = off; stalign[si] = al;
+    return si;
 }
 
 int stmt(void);
 
 int block(void) {
-    int savesym; int saveoff;
+    int savesym; int saveoff; int savetd;
     need(vfind(TOKV, NTOKV, "{", 1), "{");
-    savesym = nsym; saveoff = frameoff;
+    savesym = nsym; saveoff = frameoff; savetd = ntd;
     while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
         if (cur() == T_EOF) { printf("unterminated block\n"); __exit(1); }
         stmt();
     }
     adv();
-    nsym = savesym; frameoff = saveoff;
+    nsym = savesym; frameoff = saveoff; ntd = savetd;
+    return 0;
+}
+
+/* `typedef TYPE name, *other;` -- one entry per declarator. */
+int do_typedef(void) {
+    int tw; int tsz; int tsi; int tptr; int nt;
+    adv();
+    tw = declspec(); tsz = declsz; tsi = declstruct;
+    while (1) {
+        tptr = declspecptr;
+        while (eat(tidx("*", 1))) tptr = 1;
+        nt = adv();
+        if (cur() == tidx("(", 1)) {          /* a function-pointer typedef */
+            while (cur() != tidx(";", 1)) adv();
+            tdadd(nt, 8, 8, 0 - 1, 1);
+            break;
+        }
+        if (cur() == tidx("[", 1)) {
+            adv(); tsz = tsz * cexpr(); need(tidx("]", 1), "]");
+        }
+        if (tptr) tdadd(nt, tw, 8, tsi, 1);
+        else tdadd(nt, tw, tsz, tsi, 0);
+        if (eat(tidx(",", 1)) == 0) break;
+    }
+    need(tidx(";", 1), ";");
     return 0;
 }
 
 int local_decl(void) {
-    int w; int t; int off; int n; int nelem;
+    int w; int t; int off; int n; int nelem; int sst;
+    if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
+    sst = declstruct;
+    if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
-        declptr = 0;
+        declstruct = sst;
+        declptr = declspecptr;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) { declptr = 1; }
         t = adv();
         n = 1;
@@ -1485,6 +1832,16 @@ int local_decl(void) {
             sadd(t, 1, off, w);
             symkind[nsym - 1] = 3;         /* an array name denotes its address */
         } else {
+            /* a struct variable needs its whole body, not one slot, and its
+               NAME denotes its address the way an array's does */
+            if (declptr == 0) { if (sst >= 0) {
+                off = alloc_local(declsz);
+                declbytes = declsz;
+                sadd(t, 1, off, w);
+                symkind[nsym - 1] = 3;
+                if (eat(tidx(",", 1))) continue;
+                break;
+            } }
             off = alloc_local(8);
             declbytes = declsz;
             if (declptr) declbytes = 8;
@@ -1493,8 +1850,7 @@ int local_decl(void) {
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
             expr(); loadval();
             es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
-            if (declptr) es("  store64 [r1+0], r0\n");
-            else { if (w == 1) es("  .st [r1+0], r0, 1\n"); else es("  store64 [r1+0], r0\n"); }
+            if (declptr) estore(8); else estore(w);
         }
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
@@ -1701,7 +2057,7 @@ int function(int t, int w) {
     fpatch = nout; es("      "); ec(10);
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         pw = declspec();
-        declptr = 0;
+        declptr = declspecptr;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
         if (cur() == T_ID) {
             pt = adv();
@@ -1733,10 +2089,11 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr;
+    int p; int w; int t; int n; int k; int isarr; int gstruct;
     while (1) {
         p = ask(0);
         if (p == P_END) break;
+        if (p == P_TYPEDEF) { do_typedef(); continue; }
         if (p == P_ENUM) {
             int v;
             adv();
@@ -1760,8 +2117,11 @@ int unit(void) {
             continue;
         }
         w = declspec();
+        gstruct = declstruct;
+        if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
-            declptr = 0;
+            declstruct = gstruct;
+            declptr = declspecptr;
             while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
             t = adv();
             p = ask(4);
@@ -1782,6 +2142,10 @@ int unit(void) {
             declbytes = n * declsz;
             if (declptr) { if (isarr == 0) declbytes = 8; }
             sadd(t, 0, 0, w);
+            /* a struct global is an aggregate: its name is its address */
+            if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
+                symkind[nsym - 1] = 5; symptr[nsym - 1] = 1;
+                symelem[nsym - 1] = declsz; } } }
             /* a global array name denotes its address, exactly like a local
                one -- without this `read(fd, src, n)` passes the first eight
                BYTES OF src as the pointer */
@@ -1790,7 +2154,9 @@ int unit(void) {
             /* an ARRAY needs its full storage; a bare pointer needs 8.
                Do not conflate the two -- `char src[MAXSRC]` getting 8 bytes
                puts the next global straight on top of the source buffer. */
-            if (isarr) en(n * w); else { if (declptr) en(8); else en(n * w); }
+            if (isarr) en(n * w);
+            else { if (declptr) en(8); else {
+                if (gstruct >= 0) en(declsz); else en(n * w); } }
             ec(10);
             if (cur() == tidx("=", 1)) {
                 adv();

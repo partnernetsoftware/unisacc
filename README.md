@@ -93,12 +93,13 @@ A = cc(unisacc.c)      B = A(unisacc.c)      C = B(unisacc.c)      B == C
 That is a fixed point, not a coverage claim — and it is a fixed point of the
 C compiler alone: all three tapes are produced by `unisacc`, built three ways,
 and Python only turns a tape into a binary. `unisacc.c` only has to accept the
-subset `unisacc.c` is written in, and it trails the Python front end: **40 of
-our 80 probes, 128 of the corpus's 220**, against 209 for the Python one. It
+subset `unisacc.c` is written in, and it trails the Python front end: **47 of
+our 80 probes, 144 of the corpus's 220**, against 209 for the Python one. It
 also stops at the tape; lowering and the images are still Python. So the
 honest reading is that the C compiler reproduces itself, not that it could
 replace the driver. `tests/selfgap.sh` ratchets those two numbers so the gap
-can only shrink — it has gone 31 → 40 and 111 → 128 since it was installed.
+can only shrink — it has gone 31 → 47 and 111 → 144 since it was installed,
+and `ccrun` now compiles every probe it is given with none refused.
 
 ## Try it
 
@@ -119,10 +120,9 @@ Python 3.11+, **standard library only**. No numpy, no torch, no build step.
 each gets a watchdog so no suite can hang the run. **Testing happens on this
 desk, not on GitHub**: macOS natively, Linux in a local Lima VM
 (`tests/linux.sh`), Windows 11 in a local UTM machine (`tests/crossnative.sh`).
-The GitHub workflow is parked at `.github/workflows-disabled/ci.yml`, where
-nothing can fire it — hosted runners are metered, the macOS ones at ten times
-the Linux rate, and pushing in order to test spends money on work that is free
-here. Training is **not** in it:
+CI is a second opinion, not the test loop: the local suites run first, and
+`.github/workflows/ci.yml` re-checks them on a machine nobody has been
+editing. Training is **not** in it:
 the weights we ship are constructed, `unisa acc` verifies those by enumeration
 in a twentieth of a second, and the SGD control arm lives in
 `tests/baseline.sh` for when someone wants the comparison numbers.
