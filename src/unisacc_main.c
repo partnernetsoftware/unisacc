@@ -1424,7 +1424,10 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
-int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
+int symvla[MAXSYM];
+int symfpret[MAXSYM];        /* calling it yields a function pointer */
+int symrfst[MAXSYM];         /* ...whose call returns a pointer to this struct */
+int symcst[MAXSYM];          /* a pointer variable: its call returns this struct's pointer */         /* a VLA: the frame slot holding its byte count */
 int symstruct[MAXSYM];      /* index into the struct table, or -1 */
 
 /* ---- struct and union ------------------------------------------------
@@ -1472,12 +1475,19 @@ char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
+int tdfpst[MAXTD];        /* ...and the struct its call returns a pointer to */
 int declspecfp;           /* what declspec's typedef said about that */
 int declenum;             /* the specifier was an enum */
 int enumneg;              /* some enumerator seen so far is negative */
 int ntd;
 int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
 int fnresume;             /* where a nested declarator's body starts, or -1 */
+/* Function pointers as VALUES.  curfn: r0 holds one, so `*` of it is itself
+   (C99 6.5.3.2p4) -- it loaded eight bytes of code.  curfnst: the struct a
+   call through it returns a pointer to, or -1.  fpretfp: the declarator
+   just parsed points to a function that itself returns a function pointer. */
+int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
+int declspecfpst;         /* a function-pointer typedef's call-result struct */
 int havepre;              /* binary()'s leftmost operand is already in r0 */
 int initisarr; int initrows; int initrows3; /* the next initaggr is an array; its row lengths */
 int fpdim;       /* `(*fs[2])(...)`: an array of that many pointers, or 0 */
@@ -1756,6 +1766,7 @@ int sadd(int t, int kind, int off, int elem) {
     symuns[nsym] = declunsigned;
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
+    symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -2013,10 +2024,15 @@ int cplitexpr(int w, int sst, int isarr, int n) {
 
 int unary(void) {
     int p;
+    curfn = 0; curfnst = 0 - 1;
     p = ask(2);
     if (p == P_NEG) { adv(); unary(); loadval(); es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n"); return 0; }
     if (p == P_NOT) { adv(); unary(); loadval(); es("  @lit.imm r1, 0\n  @alu.eq r0, r0, r1\n"); return 0; }
-    if (p == P_DEREF) { adv(); unary(); loadval(); lvalue = 1; curptr = 0; return 0; }
+    if (p == P_DEREF) {
+        adv(); unary(); loadval();
+        if (curfn) { lvalue = 0; return 0; }     /* *fp is fp */
+        lvalue = 1; curptr = 0; return 0;
+    }
     if (p == P_BNOT) {                  /* ~x is x ^ -1 */
         adv(); unary(); loadval();
         es("  @lit.imm r1, -1\n  @alu.xor r0, r0, r1\n");
@@ -2135,6 +2151,7 @@ int postfix(void) {
         if (p == P_CALL) {
             /* a call through whatever the expression produced: `pick()(3, 4)`,
                `s->f(5, 6)`.  The parse table said `call`; do it. */
+            vcst = curfnst;
             loadval();
             return vcall(0);
         }
@@ -2252,6 +2269,8 @@ int icall(int si, int t) {
     else { es("  @mem.load r0, [r6-"); en(symoff[si]); es("]\n"); }
     adv();
     if (icparen) { icparen = 0; need(tidx(")", 1), ")"); }
+    vcst = symcst[si];
+    vcfn = symfpret[si];
     return vcall(symfp[si] == 2);
 }
 
@@ -2288,6 +2307,11 @@ int vcall(int var) {
         es("  @mem.load r5, [r7+0]\n  @call.frame -8\n  @call.callr r5\n");
     }
     lvalue = 0; curelem = 8; curptr = 0; curuns = 0; cursize = 8; curstruct = 0 - 1;
+    curfn = 0; curfnst = 0 - 1;
+    /* the pointee returns a struct pointer: `go()()->zerofunc` */
+    if (vcst >= 0) { curstruct = vcst; curptr = 1; curelem = stsize[vcst]; }
+    vcst = 0 - 1;
+    if (vcfn) { curfn = 1; vcfn = 0; }
     return postfix();
 }
 
@@ -2392,6 +2416,7 @@ int primary(void) {
         if (symkind[i] == 2) {           /* a function designator */
             es("  @mem.lea r0, "); etok(tp); ec(10);
             adv(); lvalue = 0; curelem = 8; curptr = 0; cursize = 8;
+            curfn = 1; curfnst = 0 - 1;
             return postfix();
         }
         if (symkind[i] == 4) {           /* enum constant */
@@ -2804,6 +2829,7 @@ int pf_call(int t) {
     lvalue = 0; curelem = 8;
     {
         int si; si = sfind(t);
+        if (si >= 0) { if (symfpret[si]) { curfn = 1; curfnst = symrfst[si]; } }
         if (si >= 0) { if (symkind[si] == 2) { if (symstruct[si] >= 0) {
             if (symptr[si] == 0) { curstruct = symstruct[si]; curelem = 0; curptr = 0; }
             /* a pointer to a struct: `get()->f` needs to know which */
@@ -3306,7 +3332,7 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     tdname[ntd * 32 + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
     tduns[ntd] = declunsigned;
-    tdfp[ntd] = 0;
+    tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1;
     ntd = ntd + 1;
     return ntd - 1;
 }
@@ -3474,7 +3500,7 @@ int declspec(void) {                       /* -> element width */
     declstruct = 0 - 1;
     declspecptr = 0;
     declunsigned = 0;
-    declspecfp = 0;
+    declspecfp = 0; declspecfpst = 0 - 1;
     declenum = 0;
     skipspecq();
     td = tdfind(tp);
@@ -3483,6 +3509,7 @@ int declspec(void) {                       /* -> element width */
         declsz = tdsz[td]; declstruct = tdstruct[td]; declspecptr = tdptr[td];
         declunsigned = tduns[td];
         declspecfp = tdfp[td];
+        declspecfpst = tdfpst[td];
         skipspecq();
         return tdw[td];
     }
@@ -3725,6 +3752,7 @@ int do_typedef(void) {
             nt = fpdecl();
             tdadd(nt, 8, 8, 0 - 1, 1);
             tdfp[ntd - 1] = declfp;
+            if (tptr) tdfpst[ntd - 1] = tsi;      /* `struct S *(*fty)()` */
             if (eat(tidx(",", 1))) continue;
             break;
         } }
@@ -4153,8 +4181,17 @@ int fpdecl(void) {
     while (eatstar()) { }
     /* the name may be absent: `int (*[4])(int)` as a parameter type */
     t = 0 - 1;
+    if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+        /* `(* (*p)(int a, int b))(int c, int d)`: the declarator nests.  The
+           inner one is p, a pointer to a function; this level's suffix says
+           what THAT function returns -- another function pointer. */
+        t = fpdecl();
+        need(tidx(")", 1), ")");
+        if (cur() == tidx("(", 1)) { skipparen(); fpretfp = 1; }
+        return t;
+    } }
     if (cur() == T_ID) t = adv();
-    fpdim = 0; fpadim = 0; fpfn = 0 - 1;
+    fpdim = 0; fpadim = 0; fpfn = 0 - 1; fpretfp = 0;
     /* `(*pick(int which))(int, int)`: pick takes (int which) and RETURNS
        the pointer -- the declarator nests, and the inner list is pick's */
     if (cur() == tidx("(", 1)) { fpfn = tp; skipparen(); }
@@ -4177,6 +4214,7 @@ int fpdecl(void) {
     return t;
 }
 
+int lfp; int lfpret;
 int local_decl(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr;
     if (cur() == tidx("typedef", 7)) return do_typedef();
@@ -4189,7 +4227,7 @@ int local_decl(void) {
         declptr = declspecptr;
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
-            t = fpdecl(); declptr = 1; sst = 0 - 1; declstruct = 0 - 1;
+            t = fpdecl(); declptr = 1; lfpret = fpretfp; sst = 0 - 1; declstruct = 0 - 1;
             if (fpdim > 0) {
                 /* `int (*fs[2])(int, int)`: an array of pointers */
                 lbind = scopebind("local", 5, t);
@@ -4219,6 +4257,7 @@ int local_decl(void) {
         }
         lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
+        lfp = declfp;
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) { if (isconstdim(tp + 1) == 0) {
             /* A variable-length array (C99 6.7.5.2).  Its size is known only
                now, so its storage comes off the tape stack here; the name is
@@ -4308,6 +4347,8 @@ int local_decl(void) {
             declbytes = declsz;
             if (declptr) declbytes = 8;
             sadd(t, lbind, off, w);
+            if (lfp) { symfpret[nsym - 1] = lfpret; symcst[nsym - 1] = declspecfpst; }
+            lfpret = 0;
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
             if (cur() == tidx("{", 1)) {
@@ -4653,7 +4694,7 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn;
+    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn;
     while (1) {
         p = ask(0);
         if (p == P_END) break;
@@ -4669,9 +4710,10 @@ int unit(void) {
             decldim2 = 0; decldim3 = 0; declfp = declspecfp;
             declptr = declspecptr;
             while (eatstar()) declptr = 1;
+            gfpfn = 0;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1;
-                if (fpfn >= 0) { fnresume = tp; tp = fpfn; }
+                if (fpfn >= 0) { fnresume = tp; tp = fpfn; gfpfn = 1; }
             } else t = adv(); }
             else t = adv();
             gbind = scopebind("top", 3, t);
@@ -4680,6 +4722,10 @@ int unit(void) {
                 declbytes = 8;
                 declfp = 0;
                 sadd(t, 2, 0, 8);
+                /* `binop pick(void)`, `int (*f1(int, int))(int, int)`: a call
+                   of it yields a function pointer */
+                if (declspecfp || gfpfn) symfpret[nsym - 1] = 1;
+                symrfst[nsym - 1] = declspecfpst;
                 if (function(t, w) == 2) { adv(); continue; }
                 break;
             }
