@@ -10,13 +10,16 @@ import sys
 sys.path.insert(0, '.')
 from unisa.__main__ import _built
 from unisa.oracle import Oracle
-from unisa.front.pp import preprocess
+from unisa.front.pp import preprocess, expand
 from unisa.front.lex import lex
 o = Oracle(_built(), drive="built")
 src = open(sys.argv[1], encoding="latin-1").read()
 # no predefines: unisacc's own preprocessor has none yet, so both sides see
-# the same truth flags
-src, _ = preprocess(src, o, {})
+# the same truth flags.  Macros are EXPANDED on both sides -- the C
+# preprocessor substitutes text now, so a lexer comparison that skipped the
+# expansion would be comparing two different programs.
+src, macros = preprocess(src, o, {})
+src = expand(src, macros)
 # the source was read as latin-1 (one char per byte), so write the spelling
 # back out as bytes -- otherwise a UTF-8 literal comes out re-encoded and
 # differs from the C side for no reason

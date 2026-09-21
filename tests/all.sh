@@ -10,7 +10,9 @@
 #   crossnative the OTHER targets, executed in local Linux VMs [A-27];
 #               skipped when limactl or the VMs are absent
 #   artifacts   the shipped kit is usable, not merely well-formed [A-24]
-#   ccrun       unisacc compiles C; the reference VM runs it [A-21]
+#   ccrun       unisacc compiles C and the answers are compared against
+#               the Python front end's, on EVERY probe [A-21].  Being
+#               refused is a gap; disagreeing is a defect.
 #   selfhost    unisacc built two ways agrees with the Python front end [A-20]
 #   multi       several translation units, one program -- against cc [A-30]
 #   tools       real library code by other people, with its own test
@@ -62,7 +64,7 @@ run native     bash -c "./tests/native.sh $PROBES"
 run crossnative bash -c "./tests/crossnative.sh $PROBES"
 run fat        bash -c "./tests/fat.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
-run ccrun      bash -c "./tests/ccrun.sh examples/*.c tests/c/a_*.c"
+run ccrun      bash -c "./tests/ccrun.sh $PROBES"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then

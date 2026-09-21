@@ -67,9 +67,20 @@ int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 
 /* ---- the preprocessor: the pp table decides every directive [W-1] ----- */
 #define MAXMAC 256
+#define MACPOOL 131072
+#define MAXMPARAM 12
 char macname[MAXMAC * 32];
-int macval[MAXMAC];      /* object-like numeric macros: #define N 256 */
-int machas[MAXMAC];
+int macval[MAXMAC];      /* the numeric value, when the body is one number */
+int machas[MAXMAC];      /* ...and whether it was */
+/* The replacement list, as TEXT.  A numeric value is enough for `#if`, and
+   for nothing else: `#define STR "x"` and `#define MAX(a,b) ...` are most of
+   what real C does with the preprocessor. */
+char macpool[MACPOOL]; int nmacpool;
+int macboff[MAXMAC]; int macblen[MAXMAC];
+int macfn[MAXMAC];       /* 1 when the name was followed by `(` with no space */
+int macvar[MAXMAC];      /* 1 when the last parameter is `...` */
+int macnp[MAXMAC];
+int macpoff[MAXMAC * MAXMPARAM]; int macplen[MAXMAC * MAXMPARAM];
 int nmac;
 
 int mfindt(int t);
@@ -97,8 +108,35 @@ int mdef(char *s, int n, int v, int has) {
     while (k < n) { if (k < 31) macname[nmac * 32 + k] = s[k]; k = k + 1; }
     if (n < 32) macname[nmac * 32 + n] = 0;
     macval[nmac] = v; machas[nmac] = has;
+    macboff[nmac] = 0; macblen[nmac] = 0; macfn[nmac] = 0; macnp[nmac] = 0;
+    macvar[nmac] = 0;
     nmac = nmac + 1;
     return 0;
+}
+
+/* Copy a C string into the macro pool and return its offset. */
+int macstashs(char *t, int n) {
+    int off; int k;
+    off = nmacpool; k = 0;
+    while (k < n) {
+        if (nmacpool >= MACPOOL) { __write(2, "macro pool full\n", 16); __exit(1); }
+        macpool[nmacpool] = t[k]; nmacpool = nmacpool + 1;
+        k = k + 1;
+    }
+    return off;
+}
+
+/* Copy a stretch of source into the macro pool and return its offset. */
+int macstash(int from, int to) {
+    int off; int k;
+    off = nmacpool;
+    k = from;
+    while (k < to) {
+        if (nmacpool >= MACPOOL) { __write(2, "macro pool full\n", 16); __exit(1); }
+        macpool[nmacpool] = src[k]; nmacpool = nmacpool + 1;
+        k = k + 1;
+    }
+    return off;
 }
 
 
@@ -398,16 +436,76 @@ int preprocess(void) {
                 else {
                 if (a == 3) {                     /* macro: define / undef */
                     if (live) { if (d == 6) {
-                        int vs; int vv; int vh;
+                        int vs; int vv; int vh; int mi; int np; int ps; int pe;
+                        int po[MAXMPARAM]; int pl[MAXMPARAM]; int pk; int isvar;
                         vs = ne;
+                        np = 0 - 1; isvar = 0;
+                        /* function-like ONLY when `(` touches the name:
+                           `#define A (x)` is an object-like macro whose body
+                           happens to start with a parenthesis. */
+                        if (vs < i) { if ((src[vs] & 255) == 40) {
+                            np = 0; vs = vs + 1;
+                            while (vs < i) {
+                                while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
+                                if (vs < i) { if ((src[vs] & 255) == 41) break; }
+                                ps = vs;
+                                if ((src[vs] & 255) == 46) {     /* `...` */
+                                    while (vs < i) { if ((src[vs] & 255) != 46) break; vs = vs + 1; }
+                                    if (np < MAXMPARAM) {
+                                        po[np] = macstashs("__VA_ARGS__", 11); pl[np] = 11;
+                                    }
+                                    np = np + 1;
+                                    isvar = 1;
+                                    while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
+                                    break;
+                                }
+                                while (vs < i) {
+                                    if (isal(src[vs] & 255)) { vs = vs + 1; continue; }
+                                    if (isdi(src[vs] & 255)) { vs = vs + 1; continue; }
+                                    break;
+                                }
+                                pe = vs;
+                                if (np < MAXMPARAM) {
+                                    po[np] = macstash(ps, pe); pl[np] = pe - ps;
+                                }
+                                np = np + 1;
+                                while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
+                                if (vs < i) { if ((src[vs] & 255) == 44) { vs = vs + 1; continue; } }
+                                break;
+                            }
+                            if (vs < i) { if ((src[vs] & 255) == 41) vs = vs + 1; }
+                        } }
                         while (vs < i) { if (wsat(vs) == 0) break; vs = vs + 1; }
-                        vv = 0; vh = 0;
-                        if (vs < i) { if (isdi(src[vs] & 255)) {
+                        /* The numeric probe needs its OWN cursor: `vs` is
+                           where the replacement list starts, and scanning the
+                           digits with it left `#define N 5` with an empty
+                           body -- every use of N then expanded to nothing. */
+                        vv = 0; vh = 0; pe = vs;
+                        if (pe < i) { if (isdi(src[pe] & 255)) {
                             vh = 1;
-                            while (vs < i) { if (isdi(src[vs] & 255) == 0) break;
-                                             vv = vv * 10 + ((src[vs] & 255) - 48);
-                                             vs = vs + 1; } } }
+                            while (pe < i) { if (isdi(src[pe] & 255) == 0) break;
+                                             vv = vv * 10 + ((src[pe] & 255) - 48);
+                                             pe = pe + 1; } } }
                         mdef(src + ns, ne - ns, vv, vh);
+                        mi = mfind(src + ns, ne - ns);
+                        if (mi >= 0) {
+                            /* the replacement list runs to the end of the
+                               line -- phase 2 has already joined continuations
+                               and phase 3 has already removed comments */
+                            macblen[mi] = i - vs;
+                            macboff[mi] = macstash(vs, i);
+                            if (np >= 0) {
+                                macfn[mi] = 1; macnp[mi] = np; macvar[mi] = isvar;
+                                pk = 0;
+                                while (pk < np) {
+                                    if (pk < MAXMPARAM) {
+                                        macpoff[mi * MAXMPARAM + pk] = po[pk];
+                                        macplen[mi * MAXMPARAM + pk] = pl[pk];
+                                    }
+                                    pk = pk + 1;
+                                }
+                            }
+                        }
                     } }
                 } } } } }
             }
@@ -420,6 +518,393 @@ int preprocess(void) {
             }
         }
         i = i + 1;
+    }
+    return 0;
+}
+
+/* C99 phase 3: every comment becomes one space, BEFORE the directives of
+   phase 4 are processed.  Leaving it to the lexer -- which is phase 7 --
+   means `#define N 32  // note` captures the note as part of the replacement
+   list, and every later use of N comments out the rest of its own line.  The
+   Python side paid for this once already (E-45); with text macros on this
+   side it is the same bug.  A block comment leaves its newlines behind so
+   nothing below it moves. */
+int decomment(void) {
+    int i; int o; int c; int q;
+    i = 0; o = 0;
+    while (i < nsrc) {
+        c = src[i] & 255;
+        if (c == 34) { q = 34; }
+        else { if (c == 39) { q = 39; } else { q = 0; } }
+        if (q) {
+            src[o] = src[i]; o = o + 1; i = i + 1;
+            while (i < nsrc) {
+                if ((src[i] & 255) == 92) {
+                    src[o] = src[i]; o = o + 1; i = i + 1;
+                    if (i < nsrc) { src[o] = src[i]; o = o + 1; i = i + 1; }
+                    continue;
+                }
+                src[o] = src[i]; o = o + 1;
+                if ((src[i] & 255) == q) { i = i + 1; break; }
+                i = i + 1;
+            }
+            continue;
+        }
+        if (c == 47) {
+            if (i + 1 < nsrc) {
+                if ((src[i + 1] & 255) == 47) {          /* // */
+                    while (i < nsrc) { if ((src[i] & 255) == 10) break; i = i + 1; }
+                    src[o] = 32; o = o + 1;
+                    continue;
+                }
+                if ((src[i + 1] & 255) == 42) {          /* slash-star */
+                    int nl;
+                    nl = 0; i = i + 2;
+                    while (i < nsrc) {
+                        if ((src[i] & 255) == 10) nl = nl + 1;
+                        if ((src[i] & 255) == 42) { if (i + 1 < nsrc) {
+                            if ((src[i + 1] & 255) == 47) { i = i + 2; break; } } }
+                        i = i + 1;
+                    }
+                    src[o] = 32; o = o + 1;
+                    while (nl > 0) { src[o] = 10; o = o + 1; nl = nl - 1; }
+                    continue;
+                }
+            }
+        }
+        src[o] = src[i]; o = o + 1; i = i + 1;
+    }
+    nsrc = o;
+    return 0;
+}
+
+/* ---- macro expansion, C99 phase 4 ------------------------------------
+   The old preprocessor kept a NUMBER per macro, which is enough for `#if`
+   and for nothing else: `#define STR "x"` and `#define MAX(a,b) ...` are
+   most of what real C does with the preprocessor.  This substitutes text.
+
+   Two rules are worth stating because getting them wrong is silent:
+     * a macro is function-like only when `(` TOUCHES the name in the
+       `#define` -- `#define A (x)` is an object-like macro whose body starts
+       with a parenthesis;
+     * every parameter goes in on ONE pass over the body.  Substituting them
+       in turn rewrites text an earlier argument just put there, and
+       `FF(d,a,b,c)` on `#define FF(a,b,c,d)` then writes the wrong variable
+       (E-45 caught exactly that on the Python side). */
+char ebuf[MAXSRC]; int nebuf;
+int argo[MAXMPARAM]; int argl[MAXMPARAM]; int nargs;
+
+int eput(int c) {
+    if (nebuf >= MAXSRC) { __write(2, "macro expansion overflow\n", 25); __exit(1); }
+    ebuf[nebuf] = c; nebuf = nebuf + 1;
+    return 0;
+}
+
+int eputsrc(int from, int to) {
+    int k; k = from;
+    while (k < to) { eput(src[k] & 255); k = k + 1; }
+    return 0;
+}
+
+int identend(int i) {
+    int j; j = i;
+    while (j < nsrc) {
+        if (isal(src[j] & 255)) { j = j + 1; continue; }
+        if (isdi(src[j] & 255)) { j = j + 1; continue; }
+        break;
+    }
+    return j;
+}
+
+/* Is the identifier at macpool[bo..bo+n) one of this macro's parameters? */
+int paramat(int mi, int bo, int n) {
+    int p; int L; int ok; int j;
+    p = 0;
+    while (p < macnp[mi]) {
+        if (p < MAXMPARAM) {
+            L = macplen[mi * MAXMPARAM + p];
+            if (L == n) {
+                ok = 1; j = 0;
+                while (j < L) {
+                    if (macpool[macpoff[mi * MAXMPARAM + p] + j] != macpool[bo + j]) ok = 0;
+                    j = j + 1;
+                }
+                if (ok) return p;
+            }
+        }
+        p = p + 1;
+    }
+    return 0 - 1;
+}
+
+/* `i` is at the `(`.  Returns the index just past the matching `)`, or -1. */
+/* An argument's leading and trailing whitespace is not part of it.  `##`
+   pastes the TEXT, so `CAT(cat, ab)` with the space kept produces `cat ab`
+   and the paste silently does not happen. */
+int argpush(int st, int en) {
+    while (st < en) { if (wsat(st) == 0) break; st = st + 1; }
+    while (en > st) { if (wsat(en - 1) == 0) break; en = en - 1; }
+    if (nargs < MAXMPARAM) { argo[nargs] = st; argl[nargs] = en - st; }
+    nargs = nargs + 1;
+    return 0;
+}
+
+int collectargs(int i) {
+    int depth; int st; int c;
+    nargs = 0; depth = 1;
+    i = i + 1; st = i;
+    while (i < nsrc) {
+        c = src[i] & 255;
+        if (c == 34) {                                   /* a string */
+            i = i + 1;
+            while (i < nsrc) {
+                if ((src[i] & 255) == 92) { i = i + 2; continue; }
+                if ((src[i] & 255) == 34) break;
+                i = i + 1;
+            }
+            i = i + 1; continue;
+        }
+        if (c == 39) {                                   /* a character */
+            i = i + 1;
+            while (i < nsrc) {
+                if ((src[i] & 255) == 92) { i = i + 2; continue; }
+                if ((src[i] & 255) == 39) break;
+                i = i + 1;
+            }
+            i = i + 1; continue;
+        }
+        if (c == 40) depth = depth + 1;
+        if (c == 41) {
+            depth = depth - 1;
+            if (depth == 0) {
+                argpush(st, i);
+                return i + 1;
+            }
+        }
+        if (c == 44) { if (depth == 1) {
+            argpush(st, i);
+            st = i + 1;
+        } }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+int emitarg(int p) {
+    if (p < nargs) { if (p < MAXMPARAM) eputsrc(argo[p], argo[p] + argl[p]); }
+    return 0;
+}
+
+int emitstring(int p) {          /* #param */
+    int k; int e; int c;
+    eput(34);
+    if (p < nargs) { if (p < MAXMPARAM) {
+        k = argo[p]; e = k + argl[p];
+        while (k < e) {
+            c = src[k] & 255;
+            if (c == 34) eput(92);
+            if (c == 92) eput(92);
+            eput(c);
+            k = k + 1;
+        }
+    } }
+    eput(34);
+    return 0;
+}
+
+int emitrange(int from, int to, int depth);
+
+int emitbody(int mi, int isfn, int depth) {
+    int b; int e; int j; int je; int k; int c; int pi; int pastejust;
+    b = macboff[mi]; e = b + macblen[mi];
+    j = b; pastejust = 0;
+    while (j < e) {
+        c = macpool[j] & 255;
+        if (c == 35) {                                   /* `#` or `##` */
+            if (j + 1 < e) { if ((macpool[j + 1] & 255) == 35) {
+                while (nebuf > 0) {
+                    if (ebuf[nebuf - 1] != 32) { if (ebuf[nebuf - 1] != 9) break; }
+                    nebuf = nebuf - 1;
+                }
+                j = j + 2;
+                while (j < e) {
+                    if ((macpool[j] & 255) != 32) { if ((macpool[j] & 255) != 9) break; }
+                    j = j + 1;
+                }
+                pastejust = 1;
+                continue;
+            } }
+            if (isfn) {
+                k = j + 1;
+                while (k < e) { if ((macpool[k] & 255) != 32) break; k = k + 1; }
+                if (k < e) { if (isal(macpool[k] & 255)) {
+                    je = k;
+                    while (je < e) {
+                        if (isal(macpool[je] & 255)) { je = je + 1; continue; }
+                        if (isdi(macpool[je] & 255)) { je = je + 1; continue; }
+                        break;
+                    }
+                    pi = paramat(mi, k, je - k);
+                    if (pi >= 0) { emitstring(pi); j = je; continue; }
+                } }
+            }
+        }
+        if (c == 34) {                                   /* a literal body */
+            eput(c); j = j + 1;
+            while (j < e) {
+                if ((macpool[j] & 255) == 92) { eput(92); j = j + 1;
+                    if (j < e) { eput(macpool[j] & 255); j = j + 1; } continue; }
+                eput(macpool[j] & 255);
+                if ((macpool[j] & 255) == 34) { j = j + 1; break; }
+                j = j + 1;
+            }
+            continue;
+        }
+        if (isal(c)) {
+            je = j;
+            while (je < e) {
+                if (isal(macpool[je] & 255)) { je = je + 1; continue; }
+                if (isdi(macpool[je] & 255)) { je = je + 1; continue; }
+                break;
+            }
+            pi = 0 - 1;
+            if (isfn) pi = paramat(mi, j, je - j);
+            if (pi >= 0) {
+                /* C99 6.10.3.1: an argument is fully macro-expanded BEFORE
+                   it is substituted -- unless it is an operand of # or ##,
+                   which are handled above and use the raw text.  Without
+                   this, `XSTR(VER)` stringizes `VER` instead of its value. */
+                if (pi < nargs) { if (pi < MAXMPARAM) {
+                    emitrange(argo[pi], argo[pi] + argl[pi], depth + 1);
+                } }
+            }
+            else { k = j; while (k < je) { eput(macpool[k] & 255); k = k + 1; } }
+            j = je;
+            /* A paste makes ONE token; whatever follows it in the body is a
+               different one.  `#define Q(A,B) A ## B+` used with `Q(+,)3`
+               must give `+ +3`, not `++3`. */
+            if (pastejust) { eput(32); pastejust = 0; }
+            continue;
+        }
+        eput(c); j = j + 1;
+        if (pastejust) { eput(32); pastejust = 0; }
+    }
+    return 0;
+}
+
+int gchanged;
+
+/* One pass over src[from..to), writing the expansion into ebuf.  `depth` is
+   how deep we are inside macro arguments -- bounded, because a macro that
+   mentions itself would otherwise never finish. */
+int emitrange(int from, int to, int depth) {
+    int i; int j; int k; int c; int m; int ni;
+    int sargo[MAXMPARAM]; int sargl[MAXMPARAM]; int snargs;
+    i = from;
+    if (depth > 8) { eputsrc(from, to); return 0; }
+    while (i < to) {
+        c = src[i] & 255;
+        if (c == 34) {
+            eput(c); i = i + 1;
+            while (i < to) {
+                if ((src[i] & 255) == 92) { eput(92); i = i + 1;
+                    if (i < to) { eput(src[i] & 255); i = i + 1; } continue; }
+                eput(src[i] & 255);
+                if ((src[i] & 255) == 34) { i = i + 1; break; }
+                i = i + 1;
+            }
+            continue;
+        }
+        if (c == 39) {
+            eput(c); i = i + 1;
+            while (i < to) {
+                if ((src[i] & 255) == 92) { eput(92); i = i + 1;
+                    if (i < to) { eput(src[i] & 255); i = i + 1; } continue; }
+                eput(src[i] & 255);
+                if ((src[i] & 255) == 39) { i = i + 1; break; }
+                i = i + 1;
+            }
+            continue;
+        }
+        if (isal(c)) {
+            j = identend(i);
+            if (j > to) j = to;
+            m = mfind(src + i, j - i);
+            if (m >= 0) {
+                if (macfn[m]) {
+                    k = j;
+                    while (k < to) { if (wsat(k) == 0) { if ((src[k] & 255) != 10) break; } k = k + 1; }
+                    if (k < to) { if ((src[k] & 255) == 40) {
+                        ni = collectargs(k);
+                        if (ni > 0) {
+                            if (macnp[m] == 0) { if (nargs == 1) {
+                                if (argl[0] == 0) nargs = 0; } }
+                            /* `...` takes everything that is left, commas
+                               included -- it is ONE argument spelled
+                               __VA_ARGS__ */
+                            if (macvar[m]) { if (nargs > macnp[m]) {
+                                if (macnp[m] > 0) { if (nargs <= MAXMPARAM) {
+                                    argl[macnp[m] - 1] =
+                                        argo[nargs - 1] + argl[nargs - 1]
+                                        - argo[macnp[m] - 1];
+                                    nargs = macnp[m];
+                                } }
+                            } }
+                            /* A space on each side: this substitutes TEXT,
+                               and a body ending in `+` next to a source `+`
+                               would re-lex as `++`.  A real preprocessor
+                               works on tokens and cannot merge them. */
+                            eput(32);
+                            k = 0;
+                            while (k < MAXMPARAM) {
+                                sargo[k] = argo[k]; sargl[k] = argl[k];
+                                k = k + 1;
+                            }
+                            snargs = nargs;
+                            emitbody(m, 1, depth);
+                            k = 0;
+                            while (k < MAXMPARAM) {
+                                argo[k] = sargo[k]; argl[k] = sargl[k];
+                                k = k + 1;
+                            }
+                            nargs = snargs;
+                            eput(32);
+                            i = ni; gchanged = 1;
+                            continue;
+                        }
+                    } }
+                } else {
+                    eput(32);
+                    emitbody(m, 0, depth);
+                    eput(32);
+                    i = j; gchanged = 1;
+                    continue;
+                }
+            }
+            eputsrc(i, j);
+            i = j;
+            continue;
+        }
+        eput(c); i = i + 1;
+    }
+    return 0;
+}
+
+int expround(void) {
+    nebuf = 0; gchanged = 0;
+    emitrange(0, nsrc, 0);
+    return gchanged;
+}
+
+int expandsrc(void) {
+    int r; int k;
+    r = 0;
+    while (r < 8) {
+        if (expround() == 0) break;
+        k = 0;
+        while (k < nebuf) { src[k] = ebuf[k]; k = k + 1; }
+        nsrc = nebuf;
+        r = r + 1;
     }
     return 0;
 }
@@ -752,6 +1237,7 @@ int elab(char *p, int n);
 int en(int v);
 int ec(int c);
 int etok(int i);
+int numval(int t);
 int alloc_local(int n);
 int sadd(int t, int kind, int off, int elem);
 int addlit(char *b, int n);
@@ -775,6 +1261,35 @@ int en(int v) {
     if (neg) ec(45);
     while (n > 0) { n = n - 1; ec(b[n] & 255); }
     return 0;
+}
+
+/* C99 6.4.4.1: an integer constant may be hexadecimal, octal or decimal, and
+   may carry a u/U/l/L suffix.  Four copies of `v = v * 10 + (c - 48)` got all
+   three wrong -- `0xff` came out 7794, `010` came out 10, and `5L` came out
+   78, because 'L' - '0' is 28. */
+int numval(int t) {
+    int k; int n; int v; int c; int base; int d;
+    k = 0; n = tlen[t]; v = 0; base = 10;
+    if (n > 1) { if ((src[tpos[t]] & 255) == 48) {
+        c = src[tpos[t] + 1] & 255;
+        if (c == 120) { base = 16; k = 2; }
+        else { if (c == 88) { base = 16; k = 2; }
+               else { base = 8; k = 1; } }
+    } }
+    while (k < n) {
+        c = src[tpos[t] + k] & 255;
+        d = 0 - 1;
+        if (isdi(c)) d = c - 48;
+        if (base == 16) {
+            if (c >= 97) { if (c <= 102) d = c - 87; }
+            if (c >= 65) { if (c <= 70) d = c - 55; }
+        }
+        if (d < 0) break;                 /* a suffix, or the end */
+        if (d >= base) break;
+        v = v * base + d;
+        k = k + 1;
+    }
+    return v;
 }
 
 int etok(int i) { int k; k = 0; while (k < tlen[i]) { ec(src[tpos[i] + k] & 255); k = k + 1; } return 0; }
@@ -804,7 +1319,7 @@ int declptr;                /* set by the declarator being processed */
 int declsz;                 /* the declared type's size, for `sizeof` */
 int declbytes;              /* ...times the array length, if it is one */
 char lbuf[131072];      /* a string literal can be the whole model blob */
-int needslen; int needchb;
+int needslen; int needchb; int needxb;
 
 int sadd(int t, int kind, int off, int elem) {
     int k;
@@ -1040,7 +1555,7 @@ int primary(void) {
     t = cur();
     if (t == T_NUM) {
         v = 0; k = 0;
-        while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+        v = numval(tp);
         adv();
         es("  imm r0, "); en(v); ec(10);
         lvalue = 0; curelem = 8; curptr = 0;
@@ -1204,6 +1719,34 @@ int do_printf(void) {
         c = fbuf[k] & 255;
         if (c == 37) {
             k = k + 1;
+            /* flags, width, precision and the length modifiers.  None of
+               them change WHICH conversion this is, and the length modifier
+               least of all -- `%ld` prints the same 64-bit value `%d` does,
+               and refusing it only refused the program. */
+            while (k < n) {
+                c = fbuf[k] & 255;
+                if (c == 45) { k = k + 1; continue; }        /* - */
+                if (c == 43) { k = k + 1; continue; }        /* + */
+                if (c == 32) { k = k + 1; continue; }
+                if (c == 35) { k = k + 1; continue; }        /* # */
+                if (c == 48) { k = k + 1; continue; }        /* 0 */
+                break;
+            }
+            while (k < n) { if (isdi(fbuf[k] & 255) == 0) break; k = k + 1; }
+            if (k < n) { if ((fbuf[k] & 255) == 46) {
+                k = k + 1;
+                while (k < n) { if (isdi(fbuf[k] & 255) == 0) break; k = k + 1; }
+            } }
+            while (k < n) {
+                c = fbuf[k] & 255;
+                if (c == 104) { k = k + 1; continue; }       /* h */
+                if (c == 108) { k = k + 1; continue; }       /* l */
+                if (c == 76) { k = k + 1; continue; }        /* L */
+                if (c == 122) { k = k + 1; continue; }       /* z */
+                if (c == 106) { k = k + 1; continue; }       /* j */
+                if (c == 116) { k = k + 1; continue; }       /* t */
+                break;
+            }
             c = fbuf[k] & 255;
             if (c == 37) { lbuf[m] = 37; m = m + 1; k = k + 1; }
             else {
@@ -1216,7 +1759,22 @@ int do_printf(void) {
                 need(vfind(TOKV, NTOKV, ",", 1), ",");
                 expr(); loadval();
                 if (c == 100) es("  .print r0\n");
-                else { if (c == 99) {            /* %c */
+                else { if (c == 105) es("  .print r0\n");   /* %i */
+                else { if (c == 117) {           /* %u: the low 32 bits */
+                    es("  imm r2, 4294967295\n  and64 r0, r0, r2\n  .print r0\n");
+                } else { if (c == 120) { needxb = 1;         /* %x */
+                    es("  imm r1, 16\n  imm r2, 97\n  call __itoab\n"
+                       "  .write r0, r1\n");
+                } else { if (c == 88) { needxb = 1;          /* %X */
+                    es("  imm r1, 16\n  imm r2, 65\n  call __itoab\n"
+                       "  .write r0, r1\n");
+                } else { if (c == 112) { needxb = 1;         /* %p */
+                    es("  imm r1, 16\n  imm r2, 97\n  call __itoab\n"
+                       "  .write r0, r1\n");
+                } else { if (c == 111) { needxb = 1;         /* %o */
+                    es("  imm r1, 8\n  imm r2, 97\n  call __itoab\n"
+                       "  .write r0, r1\n");
+                } else { if (c == 99) {          /* %c */
                     es("  mov r2, r0\n  .lea r0, __chb\n  .st [r0+0], r2, 1\n"
                        "  imm r1, 1\n  .write r0, r1\n");
                     needchb = 1;
@@ -1225,7 +1783,8 @@ int do_printf(void) {
                        "  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -8\n"
                        "  .write r0, r1\n");
                     needslen = 1;
-                } else { printf("printf: unsupported conversion\n"); __exit(1); } } }
+                } else { printf("printf: unsupported conversion\n"); __exit(1); }
+                } } } } } } } }
                 k = k + 1;
             }
         } else { lbuf[m] = c; m = m + 1; k = k + 1; }
@@ -1492,7 +2051,7 @@ int catom(void) {
     int v; int k; int i;
     if (cur() == T_NUM) {
         v = 0; k = 0;
-        while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+        v = numval(tp);
         adv();
         return v;
     }
@@ -1665,7 +2224,7 @@ int enumspec(void) {
             neg = 0;
             if (eat(tidx("-", 1))) neg = 1;
             v = 0; k = 0;
-            while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+            v = numval(tp);
             if (neg) v = 0 - v;
             adv();
         }
@@ -2104,7 +2663,7 @@ int unit(void) {
                 t = adv();
                 if (eat(tidx("=", 1))) {
                     v = 0; k = 0;
-                    while (k < tlen[tp]) { v = v * 10 + ((src[tpos[tp] + k] & 255) - 48); k = k + 1; }
+                    v = numval(tp);
                     adv();
                 }
                 declbytes = 4;
@@ -2233,7 +2792,9 @@ int main(void) {
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
     splice();
+    decomment();
     preprocess();
+    expandsrc();
     if (lex() < 0) return 1;
     if (__argc() > 2) { tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
         poolend = 0; nloop = 0;
@@ -2249,6 +2810,24 @@ int main(void) {
                "  jump __slen_top\n__slen_end:\n  mov r0, r1\n  ret\n");
         }
         if (needchb) es(".bss __chb 8\n");
+        /* base-N conversion, the same routine the Python emitter writes:
+           value in r0, base in r1, letter base in r2 ('a' or 'A'); out is
+           r0 = pointer, r1 = length. */
+        if (needxb) {
+            es(".bss __xbuf 24\n"
+               "__itoab:\n  .frame 16\n  store64 [r7+0], r1\n"
+               "  store64 [r7+8], r2\n  mov r2, r0\n  .lea r1, __xbuf\n"
+               "  imm r3, 24\n  add64 r1, r1, r3\n  imm r4, 0\n"
+               "itoab_loop:\n  load64 r3, [r7+0]\n  .umod r5, r2, r3\n"
+               "  .udiv r2, r2, r3\n  imm r3, 10\n  slt64 r0, r5, r3\n"
+               "  jumpz r0, itoab_alpha\n  imm r3, 48\n  jump itoab_add\n"
+               "itoab_alpha:\n  load64 r3, [r7+8]\n  imm r0, 10\n"
+               "  sub64 r5, r5, r0\n"
+               "itoab_add:\n  add64 r5, r5, r3\n  imm r3, 1\n"
+               "  sub64 r1, r1, r3\n  .st [r1+0], r5, 1\n  add64 r4, r4, r3\n"
+               "  jumpz r2, itoab_done\n  jump itoab_loop\n"
+               "itoab_done:\n  .frame -16\n  mov r0, r1\n  mov r1, r4\n  ret\n");
+        }
         emit_pool();
         __write(1, out, nout);
         return 0; }

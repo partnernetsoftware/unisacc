@@ -93,13 +93,18 @@ A = cc(unisacc.c)      B = A(unisacc.c)      C = B(unisacc.c)      B == C
 That is a fixed point, not a coverage claim — and it is a fixed point of the
 C compiler alone: all three tapes are produced by `unisacc`, built three ways,
 and Python only turns a tape into a binary. `unisacc.c` only has to accept the
-subset `unisacc.c` is written in, and it trails the Python front end: **47 of
-our 80 probes, 144 of the corpus's 220**, against 209 for the Python one. It
+subset `unisacc.c` is written in, and it trails the Python front end: **51 of
+our 80 probes, 152 of the corpus's 220**, against 209 for the Python one. It
 also stops at the tape; lowering and the images are still Python. So the
 honest reading is that the C compiler reproduces itself, not that it could
 replace the driver. `tests/selfgap.sh` ratchets those two numbers so the gap
-can only shrink — it has gone 31 → 47 and 111 → 144 since it was installed,
-and `ccrun` now compiles every probe it is given with none refused.
+can only shrink — it has gone 31 → 51 and 111 → 152 since it was installed.
+The two lexers now agree token for token on every probe. `ccrun` asks the
+harder question: it compiles all eighty with `unisacc` and compares the
+ANSWERS against the Python front end — 45 agree, 6 disagree for reasons
+written down in `tests/ccrun.knownwrong`, and the rest are still refused.
+Being refused is a gap; disagreeing is a defect, and the two are counted
+apart.
 
 ## Try it
 
