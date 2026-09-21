@@ -1154,6 +1154,7 @@ int symoff[MAXSYM];         /* local: frame offset */
 int symelem[MAXSYM];        /* element width for [] and unary * */
 int symptr[MAXSYM];         /* 1 for pointers and arrays */
 int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
+int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
 int symstruct[MAXSYM];      /* index into the struct table, or -1 */
 
 /* ---- struct and union ------------------------------------------------
@@ -1176,6 +1177,7 @@ int mbptr[MAXMEMB];
 int mbstruct[MAXMEMB];
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
+int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
 int declspecptr;        /* the specifier itself was a pointer typedef */
 
 /* ---- typedef ---------------------------------------------------------
@@ -1187,6 +1189,7 @@ char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int ntd;
 int curstruct;          /* the struct the thing in r0 is, or -1 */
+int curdim2;            /* ...and its inner dimension, if it has one */
 int nsym;
 int scopebase;              /* first local of the current function */
 
@@ -1331,6 +1334,7 @@ int sadd(int t, int kind, int off, int elem) {
     symptr[nsym] = declptr;
     symbytes[nsym] = declbytes;
     symstruct[nsym] = declstruct;
+    symdim2[nsym] = decldim2;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -1531,8 +1535,11 @@ int postfix(void) {
             } }
         } else {
         if (p == P_INDEX) {
+            int row;
             adv();
             e = curelem;
+            row = curdim2;
+            if (row > 0) e = e * row;        /* the first index of `a[n][m]` */
             loadval();
             push();
             expr(); loadval();
@@ -1540,7 +1547,11 @@ int postfix(void) {
             pop1();
             es("  add64 r0, r1, r0\n");
             need(vfind(TOKV, NTOKV, "]", 1), "]");
-            lvalue = 1; curelem = e; curptr = 0;
+            cursize = e;
+            if (row > 0) {
+                /* a row is itself an array: its VALUE is its address */
+                curelem = e / row; curdim2 = 0; curptr = 1; lvalue = 0;
+            } else { lvalue = 1; curelem = e; curptr = 0; }
         } else {
             return 0;
         } } }
@@ -1586,6 +1597,7 @@ int primary(void) {
                      __write(2, "\n", 1); __exit(1); }
         cursize = symbytes[i];           /* what `sizeof` reports for it */
         curstruct = symstruct[i];
+        curdim2 = symdim2[i];
         if (symkind[i] == 4) {           /* enum constant */
             es("  imm r0, "); en(symoff[i]); ec(10);
             adv(); lvalue = 0; curelem = 8;
@@ -2369,22 +2381,193 @@ int do_typedef(void) {
     return 0;
 }
 
+/* ---- aggregate initialisers -----------------------------------------
+   `int a[] = {1,2,3}`, `char s[] = "hi"`, `struct P p = {1,2}`, for locals
+   and for globals alike -- a global's stores go into `__init`, which is why
+   both cases are one function with a different way of naming the base. */
+/* Brace elision (C99 6.7.8p17): an aggregate element takes its SHARE of a
+   flat list, so `PT a[] = {1,2,3, 4,5,6}` is two PTs, not six.  The list is
+   therefore walked as a sequence of SCALAR SLOTS -- element index times the
+   element's size, plus the member's offset, plus the sub-index when the
+   member is itself an array. */
+int slotoff; int slotw;
+
+int structslots(int sst) {
+    int per; int mi; int e;
+    per = 0; mi = stfirst[sst]; e = stfirst[sst] + stcount[sst];
+    while (mi < e) {
+        if (mbwidth[mi] == 0) {
+            if (mbelem[mi] > 0) per = per + mbbytes[mi] / mbelem[mi];
+            else per = per + 1;
+        } else per = per + 1;
+        mi = mi + 1;
+    }
+    if (per <= 0) per = 1;
+    return per;
+}
+
+int slotat(int i, int w, int sst) {
+    int per; int el; int k; int mi; int e; int cnt; int sub;
+    if (sst < 0) { slotoff = i * w; slotw = w; return 0; }
+    per = structslots(sst);
+    el = i / per; k = i - el * per;
+    mi = stfirst[sst]; e = stfirst[sst] + stcount[sst]; cnt = 0;
+    while (mi < e) {
+        if (mbwidth[mi] == 0) {
+            sub = 1;
+            if (mbelem[mi] > 0) sub = mbbytes[mi] / mbelem[mi];
+            if (k < cnt + sub) {
+                slotoff = el * stsize[sst] + mboff[mi] + (k - cnt) * mbelem[mi];
+                slotw = mbelem[mi];
+                if (slotw == 0) slotw = 8;
+                return 0;
+            }
+            cnt = cnt + sub;
+        } else {
+            if (k == cnt) {
+                slotoff = el * stsize[sst] + mboff[mi];
+                slotw = mbwidth[mi];
+                return 0;
+            }
+            cnt = cnt + 1;
+        }
+        mi = mi + 1;
+    }
+    slotoff = el * stsize[sst]; slotw = 8;
+    return 0;
+}
+
+int initaddr(int isglobal, int gt, int off, int delta) {
+    if (isglobal) {
+        es("  .lea r1, g_"); etok(gt);
+        if (delta) { es("\n  imm r2, "); en(delta); es("\n  add64 r1, r1, r2"); }
+        ec(10);
+    } else {
+        es("  imm r2, "); en(off - delta); es("\n  sub64 r1, r6, r2\n");
+    }
+    return 0;
+}
+
+/* How many elements the initialiser supplies, for an unsized `[]`.  The
+   cursor is on the `]`. */
+int initcount(void) {
+    int j; int depth; int n; int k; int c;
+    char buf[4096];
+    j = tp;
+    while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
+    j = j + 1;
+    if (kind(j) == T_STR) { return decode(j, buf) + 1; }
+    if (kind(j) != tidx("{", 1)) return 1;
+    depth = 0; n = 0; k = 0;
+    while (j < ntok) {
+        c = kind(j);
+        if (c == tidx("{", 1)) { depth = depth + 1; j = j + 1; continue; }
+        if (c == tidx("}", 1)) {
+            depth = depth - 1;
+            if (depth == 0) { if (k) n = n + 1; break; }
+            j = j + 1; continue;
+        }
+        if (c == tidx(",", 1)) { if (k) { n = n + 1; k = 0; } j = j + 1; continue; }
+        k = 1; j = j + 1;
+    }
+    return n;
+}
+
+int initstr(int isglobal, int gt, int off, int cap) {
+    int t; int n; int k;
+    char buf[4096];
+    t = adv();
+    n = decode(t, buf);
+    if (cap > 0) {
+        initaddr(isglobal, gt, off, 0);
+        es("  .zero r1, 0, "); en(cap); ec(10);
+    }
+    k = 0;
+    while (k <= n) {
+        int c;
+        if (k >= cap) break;
+        /* `decode` fills buf[0..n) and does not terminate it; the NUL is
+           part of the object, so write it explicitly. */
+        c = 0;
+        if (k < n) c = buf[k] & 255;
+        es("  imm r0, "); en(c); ec(10);
+        initaddr(isglobal, gt, off, k);
+        estore(1);
+        k = k + 1;
+    }
+    return 0;
+}
+
+/* Braces are FLATTENED: C lets an aggregate element take its share of a flat
+   list, and this subset has no multi-dimensional declarator to tell the
+   shapes apart anyway. */
+int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
+    int i; int depth; int delta; int ew; int mi;
+    /* C99 6.7.8p21: what the initialiser does not mention is ZERO.  Clearing
+       the object first is the whole of that rule, and the tape has an op for
+       it -- element-wise stores would also have to know which elements were
+       skipped. */
+    if (nbytes > 0) {
+        initaddr(isglobal, gt, off, 0);
+        es("  .zero r1, 0, "); en(nbytes); ec(10);
+    }
+    i = 0; depth = 0;
+    while (1) {
+        if (cur() == tidx("{", 1)) { adv(); depth = depth + 1; continue; }
+        if (cur() == tidx("}", 1)) {
+            adv(); depth = depth - 1;
+            if (depth <= 0) break;
+            continue;
+        }
+        if (cur() == tidx(",", 1)) { adv(); continue; }
+        if (cur() == T_EOF) break;
+        slotat(i, w, sst);
+        delta = slotoff; ew = slotw;
+        expr(); loadval();
+        initaddr(isglobal, gt, off, delta);
+        estore(ew);
+        i = i + 1;
+    }
+    return 0;
+}
+
 int local_decl(void) {
-    int w; int t; int off; int n; int nelem; int sst;
+    int w; int t; int off; int n; int nelem; int sst; int isarr;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
+        decldim2 = 0;
         declptr = declspecptr;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) { declptr = 1; }
         t = adv();
-        n = 1;
+        n = 1; isarr = 0;
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
             adv();
-            n = cexpr();
+            isarr = 1;
+            /* `int a[] = {1,2,3}` -- the initialiser says how long it is,
+               and for an array of structs it says how many SCALARS */
+            if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
+                n = initcount();
+                if (sst >= 0) {
+                    int per; per = structslots(sst);
+                    n = (n + per - 1) / per;
+                }
+            }
+            else n = cexpr();
             need(vfind(TOKV, NTOKV, "]", 1), "]");
+            /* `a[n][m]` is n*m elements in a row; the FIRST index strides a
+               whole row, which is what decldim2 records */
+            decldim2 = 0;
+            if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
+                adv();
+                decldim2 = cexpr();
+                need(vfind(TOKV, NTOKV, "]", 1), "]");
+                n = n * decldim2;
+            }
+            if (sst >= 0) w = declsz;
             off = alloc_local(n * w);
             declptr = 1;
             declbytes = n * declsz;
@@ -2398,6 +2581,7 @@ int local_decl(void) {
                 declbytes = declsz;
                 sadd(t, 1, off, w);
                 symkind[nsym - 1] = 3;
+                if (eat(tidx("=", 1))) initaggr(0, 0, off, w, sst, declsz);
                 if (eat(tidx(",", 1))) continue;
                 break;
             } }
@@ -2407,9 +2591,18 @@ int local_decl(void) {
             sadd(t, 1, off, w);
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
-            expr(); loadval();
-            es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
-            if (declptr) estore(8); else estore(w);
+            if (cur() == tidx("{", 1)) initaggr(0, 0, off, w, sst, n * w);
+            else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
+                initstr(0, 0, off, n);
+            } else { expr(); loadval();
+                es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+                estore(8); } }
+            else { expr(); loadval();
+                es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+                if (declptr) estore(8); else estore(w); } }
+            else { expr(); loadval();
+                es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+                if (declptr) estore(8); else estore(w); } }
         }
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
@@ -2680,6 +2873,7 @@ int unit(void) {
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declstruct = gstruct;
+            decldim2 = 0;
             declptr = declspecptr;
             while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
             t = adv();
@@ -2694,9 +2888,24 @@ int unit(void) {
             isarr = 0;
             if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                 adv();
-                n = cexpr();
+                if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
+                    n = initcount();
+                    if (gstruct >= 0) {
+                        int per; per = structslots(gstruct);
+                        n = (n + per - 1) / per;
+                    }
+                }
+                else n = cexpr();
                 need(vfind(TOKV, NTOKV, "]", 1), "]");
                 isarr = 1;
+                decldim2 = 0;
+                if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
+                    adv();
+                    decldim2 = cexpr();
+                    need(vfind(TOKV, NTOKV, "]", 1), "]");
+                    n = n * decldim2;
+                }
+                if (gstruct >= 0) w = declsz;
             }
             declbytes = n * declsz;
             if (declptr) { if (isarr == 0) declbytes = 8; }
@@ -2713,16 +2922,28 @@ int unit(void) {
             /* an ARRAY needs its full storage; a bare pointer needs 8.
                Do not conflate the two -- `char src[MAXSRC]` getting 8 bytes
                puts the next global straight on top of the source buffer. */
-            if (isarr) en(n * w);
+            if (isarr) { if (gstruct >= 0) en(n * declsz); else en(n * w); }
             else { if (declptr) en(8); else {
                 if (gstruct >= 0) en(declsz); else en(n * w); } }
             ec(10);
             if (cur() == tidx("=", 1)) {
                 adv();
                 toinit = 1; hasinit = 1;
-                expr(); loadval();
-                es("  .lea r1, g_"); etok(t); ec(10);
-                es("  store64 [r1+0], r0\n");
+                if (cur() == tidx("{", 1)) {
+                    if (isarr) initaggr(1, t, 0, w, gstruct, n * w);
+                    else { if (gstruct >= 0) initaggr(1, t, 0, w, gstruct, declsz);
+                           else initaggr(1, t, 0, w, 0 - 1, n * w); }
+                }
+                else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
+                    initstr(1, t, 0, n);
+                } else { expr(); loadval();
+                    es("  .lea r1, g_"); etok(t); ec(10); estore(8); } }
+                else { expr(); loadval();
+                    es("  .lea r1, g_"); etok(t); ec(10);
+                    if (declptr) estore(8); else estore(w); } }
+                else { expr(); loadval();
+                    es("  .lea r1, g_"); etok(t); ec(10);
+                    if (declptr) estore(8); else estore(w); } }
                 toinit = 0;
             }
             if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
