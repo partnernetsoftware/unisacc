@@ -18,7 +18,10 @@ src = open(sys.argv[1], encoding="latin-1").read()
 # the same truth flags.  Macros are EXPANDED on both sides -- the C
 # preprocessor substitutes text now, so a lexer comparison that skipped the
 # expansion would be comparing two different programs.
-src, macros = preprocess(src, o, {})
+# ...and headers are spliced on both sides: the C preprocessor implements
+# #include now, looking beside the file and then in include/.
+import os
+src, macros = preprocess(src, o, {}, sys.argv[1], ("include",))
 src = expand(src, macros)
 # the source was read as latin-1 (one char per byte), so write the spelling
 # back out as bytes -- otherwise a UTF-8 literal comes out re-encoded and

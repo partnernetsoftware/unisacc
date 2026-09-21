@@ -243,6 +243,13 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
                 }
                 start = _u_digits(buf, uv, base, upper);
                 len = 24 - start;
+                /* C99 7.19.6.1p5: an integer's precision is the MINIMUM
+                   number of digits -- `%.2x` of 0 is "00".  Zeros go in
+                   before the sign does. */
+                while (len < prec) {
+                    if (start <= 1) break;
+                    start = start - 1; buf[start] = 48; len = len + 1;
+                }
                 if (sign) { start = start - 1; buf[start] = 45; len = len + 1; }
                 sp = buf;
             }

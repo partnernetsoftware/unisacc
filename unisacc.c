@@ -1165,6 +1165,77 @@ int wsat(int i) { if (src[i] == 32) return 1; if (src[i] == 9) return 1; return 
 
 /* Rewrite src in place: directives and skipped lines become blanks, so
  * positions and line numbers survive. */
+/* ---- #include ---------------------------------------------------------
+   The file is spliced IN PLACE of the directive and the scan resumes at the
+   splice point, so a header's own directives -- its include guard first of
+   all -- are processed by the same loop with the same macro state.  `"x"` is
+   looked up beside the input file, then in include/; `<x>` in include/ only.
+   A header we do not carry is skipped, as the Python driver skips it. */
+#define MAXINC 131072
+char incbuf[MAXINC];
+char incpath[512];
+int nincl;
+
+int inctry(char *dir, int dl, int nm, int nl) {
+    int k; int p; int fd; int n; int j; int grow;
+    p = 0; k = 0;
+    while (k < dl) { if (p < 500) { incpath[p] = dir[k]; p = p + 1; } k = k + 1; }
+    k = 0;
+    while (k < nl) { if (p < 510) { incpath[p] = src[nm + k]; p = p + 1; } k = k + 1; }
+    incpath[p] = 0;
+    fd = __open(incpath, 0);
+    if (fd < 0) return 0 - 1;
+    n = __read(fd, incbuf, MAXINC);
+    __close(fd);
+    if (n < 0) return 0 - 1;
+    return n;
+}
+
+/* Replace src[ls..le) with the included text.  Returns 1 if it did. */
+int incdo(int ls, int le, int from) {
+    int j; int q; int nm; int nl; int n; int k; int dl; int grow; char *a;
+    j = from;
+    while (j < le) { if (wsat(j) == 0) break; j = j + 1; }
+    q = src[j] & 255;
+    if (q != 34) { if (q != 60) return 0; }
+    j = j + 1; nm = j;
+    while (j < le) {
+        if (q == 34) { if ((src[j] & 255) == 34) break; }
+        else { if ((src[j] & 255) == 62) break; }
+        j = j + 1;
+    }
+    nl = j - nm;
+    if (nincl > 200) return 0;               /* a header that includes itself */
+    n = 0 - 1;
+    if (q == 34) {
+        a = __argv(1);
+        dl = 0; k = 0;
+        while (a[k]) { if (a[k] == 47) dl = k + 1; k = k + 1; }
+        n = inctry(a, dl, nm, nl);
+    }
+    if (n < 0) n = inctry("include/", 8, nm, nl);
+    if (n < 0) return 0;
+    grow = n + 1 - (le - ls);
+    if (nsrc + grow >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
+    /* shift the tail, then drop the file in, plus a newline of its own */
+    if (grow > 0) {
+        k = nsrc - 1;
+        while (k >= le) { src[k + grow] = src[k]; k = k - 1; }
+    } else {
+        k = le;
+        while (k < nsrc) { src[k + grow] = src[k]; k = k + 1; }
+    }
+    k = 0;
+    while (k < n) { src[ls + k] = incbuf[k]; k = k + 1; }
+    src[ls + n] = 10;
+    nsrc = nsrc + grow;
+    nincl = nincl + 1;
+    return 1;
+}
+
+int splice(void);
+int decomment(void);
+
 int preprocess(void) {
     int i; int ls; int j; int ws; int we; int live; int d; int flag;
     int a; int k; int ns; int ne;
@@ -1195,13 +1266,28 @@ int preprocess(void) {
             flag = 0;
             if (d >= 0) {
                 if (d == 0) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
-                if (d == 1) { if (mfind(src + ns, ne - ns) < 0) flag = 1; }
+                /* The table's key is `defined` -- whether the name IS
+                   defined -- and the table itself inverts for ifndef.
+                   Inverting here too meant every `#ifndef GUARD` block was
+                   skipped: a double negation that went unseen only because
+                   unisacc.c has no include guards of its own. */
+                if (d == 1) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
                 if (d == 2) { if (ppeval(ns, i)) flag = 1; }   /* #if */
                 if (d == 3) { if (ppeval(ns, i)) flag = 1; }   /* #elif */
                 if (d == 4) { if (ndepth > 0) { if (seenst[ndepth-1] == 0) flag = 1; } }
                 if (d > 4) flag = 1;
                 key[0] = d; key[1] = flag; key[2] = 0; key[3] = 0;
                 a = infer(S_PP, key, 0);          /* the table decides */
+                /* the table files `include` under `macro` [G-4 corrected] */
+                if (d == 7) { if (live) { if (a == 3) {
+                    if (incdo(ls, i, we)) {
+                        /* phases 2 and 3 for the new text; both are no-ops
+                           on text that has already been through them */
+                        splice(); decomment();
+                        i = ls;
+                        continue;
+                    }
+                } } }
                 if (d < 3) {                      /* ifdef ifndef if */
                     takest[ndepth] = 0;
                     if (a == 0) { if (live) takest[ndepth] = 1; }
@@ -1945,6 +2031,8 @@ int symelem[MAXSYM];        /* element width for [] and unary * */
 int symptr[MAXSYM];         /* 1 for pointers and arrays */
 int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
+int symvar[MAXSYM];         /* a function that takes `...` */
+int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symstruct[MAXSYM];      /* index into the struct table, or -1 */
 
 /* ---- struct and union ------------------------------------------------
@@ -1965,9 +2053,11 @@ int mbwidth[MAXMEMB];   /* the load/store width: 0 means "aggregate" */
 int mbelem[MAXMEMB];    /* element size, for [] on an array member */
 int mbptr[MAXMEMB];
 int mbstruct[MAXMEMB];
+int mbuns[MAXMEMB];
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
+int declunsigned;       /* the specifier said `unsigned` */
 int declspecptr;        /* the specifier itself was a pointer typedef */
 
 /* ---- typedef ---------------------------------------------------------
@@ -1977,9 +2067,15 @@ int declspecptr;        /* the specifier itself was a pointer typedef */
 #define MAXTD 256
 char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
+int tduns[MAXTD];
 int ntd;
 int curstruct;          /* the struct the thing in r0 is, or -1 */
 int curdim2;            /* ...and its inner dimension, if it has one */
+int curuns;             /* ...and whether its type is unsigned */
+int binuns;             /* the operator in hand works unsigned */
+int binw4;              /* ...and in 32 bits (unsigned int, not long) */
+int fnvar;              /* the function being compiled takes `...` */
+int fnnfixed;           /* ...and this many named parameters */
 int nsym;
 int scopebase;              /* first local of the current function */
 
@@ -1995,6 +2091,7 @@ int P_CASE; int P_DEFAULT; int P_RETURN; int P_BREAK; int P_CONTINUE;
 int P_BLOCK; int P_EXPR; int P_NEG; int P_NOT; int P_DEREF; int P_ADDR;
 int P_SIZEOF; int P_PRIM; int P_INDEX; int P_CALL; int P_INC; int P_FIELD;
 int P_DONE; int P_FNSIG; int P_VARDEF; int P_GOTO;
+int P_BNOT; int P_UPLUS; int P_PREINC;
 int T_EOF; int T_TYPE; int T_ID; int T_NUM; int T_STR;
 
 int pidx(char *n, int L) { return vfind(PRODV, NPRODV, n, L); }
@@ -2027,10 +2124,10 @@ int pop1(void);
 int loadval(void);
 int newlab(void);
 int elab(char *p, int n);
-int en(int v);
+int en(long v);
 int ec(int c);
 int etok(int i);
-int numval(int t);
+long numval(int t);
 int alloc_local(int n);
 int sadd(int t, int kind, int off, int elem);
 int addlit(char *b, int n);
@@ -2044,7 +2141,7 @@ int ec(int c) {
 
 int es(char *s) { int i; i = 0; while (s[i]) { ec(s[i] & 255); i = i + 1; } return 0; }
 
-int en(int v) {
+int en(long v) {
     char b[24]; int n; int neg;
     neg = 0;
     if (v < 0) { neg = 1; v = 0 - v; }
@@ -2060,9 +2157,48 @@ int en(int v) {
    may carry a u/U/l/L suffix.  Four copies of `v = v * 10 + (c - 48)` got all
    three wrong -- `0xff` came out 7794, `010` came out 10, and `5L` came out
    78, because 'L' - '0' is 28. */
-int numval(int t) {
-    int k; int n; int v; int c; int base; int d;
+long numval(int t) {
+    int k; int n; long v; int c; int base; int d;
     k = 0; n = tlen[t]; v = 0; base = 10;
+    /* A character constant is a NUMBER token too, and it had never been
+       evaluated: the decimal loop read `'b'` as quote-minus-'0' and so on,
+       and nothing noticed until <stdio.h> was compiled here and every
+       `putchar('c')` wrote a NUL. */
+    if ((src[tpos[t]] & 255) == 39) {
+        c = src[tpos[t] + 1] & 255;
+        if (c != 92) return c;
+        c = src[tpos[t] + 2] & 255;
+        if (c == 110) return 10;                  /* \n */
+        if (c == 116) return 9;                   /* \t */
+        if (c == 114) return 13;                  /* \r */
+        if (c == 118) return 11;                  /* \v */
+        if (c == 102) return 12;                  /* \f */
+        if (c == 98) return 8;                    /* \b */
+        if (c == 97) return 7;                    /* \a */
+        if (c == 120) {                           /* \xHH */
+            k = 3; v = 0;
+            while (k < n - 1) {
+                c = src[tpos[t] + k] & 255; d = 0 - 1;
+                if (isdi(c)) d = c - 48;
+                if (c >= 97) { if (c <= 102) d = c - 87; }
+                if (c >= 65) { if (c <= 70) d = c - 55; }
+                if (d < 0) break;
+                v = v * 16 + d; k = k + 1;
+            }
+            return v;
+        }
+        if (isdi(c)) {                            /* \ooo */
+            k = 2; v = 0;
+            while (k < n - 1) {
+                c = src[tpos[t] + k] & 255;
+                if (c < 48) break;
+                if (c > 55) break;
+                v = v * 8 + (c - 48); k = k + 1;
+            }
+            return v;
+        }
+        return c;                                 /* \\ \' \" \? */
+    }
     if (n > 1) { if ((src[tpos[t]] & 255) == 48) {
         c = src[tpos[t] + 1] & 255;
         if (c == 120) { base = 16; k = 2; }
@@ -2125,6 +2261,8 @@ int sadd(int t, int kind, int off, int elem) {
     symbytes[nsym] = declbytes;
     symstruct[nsym] = declstruct;
     symdim2[nsym] = decldim2;
+    symvar[nsym] = 0;
+    symuns[nsym] = declunsigned;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -2195,8 +2333,17 @@ int estore(int w) {                              /* [r1] = r0 */
 }
 
 int loadval(void) {
+    int w;
     if (lvalue) {
-        eload(stw());
+        w = stw();
+        eload(w);
+        /* `.ld` sign-extends; an unsigned narrow object must not.  A
+           uint8_t of 0xa2 printed as ffffffffffffffa2 until this. */
+        if (curuns) { if (curptr == 0) {
+            if (w == 1) es("  imm r2, 255\n  and64 r0, r0, r2\n");
+            if (w == 2) es("  imm r2, 65535\n  and64 r0, r0, r2\n");
+            if (w == 4) es("  imm r2, 4294967295\n  and64 r0, r0, r2\n");
+        } }
         lvalue = 0;
     }
     return 0;
@@ -2210,6 +2357,30 @@ int unary(void) {
     if (p == P_NEG) { adv(); unary(); loadval(); es("  imm r1, 0\n  sub64 r0, r1, r0\n"); return 0; }
     if (p == P_NOT) { adv(); unary(); loadval(); es("  imm r1, 0\n  eq r0, r0, r1\n"); return 0; }
     if (p == P_DEREF) { adv(); unary(); loadval(); lvalue = 1; curptr = 0; return 0; }
+    if (p == P_BNOT) {                  /* ~x is x ^ -1 */
+        adv(); unary(); loadval();
+        es("  imm r1, -1\n  xor64 r0, r0, r1\n");
+        lvalue = 0; curptr = 0; return 0;
+    }
+    if (p == P_UPLUS) { adv(); unary(); loadval(); lvalue = 0; return 0; }
+    if (p == P_PREINC) {                /* ++x is x += 1, and its value is the new x */
+        int op; int e;
+        op = cur(); adv();
+        unary();
+        if (lvalue == 0) { printf("++ needs an lvalue at token %d\n", tp); __exit(1); }
+        e = stw();
+        lvalue = 0;
+        push();                                  /* address */
+        eload(e);
+        es("  imm r1, ");
+        if (curptr) en(curelem); else en(1);
+        ec(10);
+        if (op == tidx("++", 2)) es("  add64 r0, r0, r1\n");
+        else es("  sub64 r0, r0, r1\n");
+        pop1();
+        estore(e);
+        return 0;
+    }
     if (p == P_SIZEOF) {
         int sz; int nsave;
         adv();
@@ -2244,9 +2415,9 @@ int unary(void) {
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz;
+            int cw; int csz; int cuns;
             adv();
-            cw = declspec(); csz = declsz;
+            cw = declspec(); csz = declsz; cuns = declunsigned;
             declptr = declspecptr;
             while (eat(tidx("*", 1))) { declptr = 1; csz = 8; }
             need(tidx(")", 1), ")");
@@ -2256,12 +2427,20 @@ int unary(void) {
                whole of it -- and it sign-extends on the way back. */
             if (declptr == 0) {
                 if (csz < 8) {
-                    es("  .frame 8\n  .st [r7+0], r0, "); en(csz);
-                    es("\n  .ld r0, [r7+0], "); en(csz);
-                    es("\n  .frame -8\n");
+                    if (cuns) {
+                        /* unsigned: keep the low bits, zero the rest --
+                           `(unsigned char)255 >> 4` is 15, not -1 */
+                        if (csz == 1) es("  imm r2, 255\n  and64 r0, r0, r2\n");
+                        if (csz == 2) es("  imm r2, 65535\n  and64 r0, r0, r2\n");
+                        if (csz == 4) es("  imm r2, 4294967295\n  and64 r0, r0, r2\n");
+                    } else {
+                        es("  .frame 8\n  .st [r7+0], r0, "); en(csz);
+                        es("\n  .ld r0, [r7+0], "); en(csz);
+                        es("\n  .frame -8\n");
+                    }
                 }
             }
-            lvalue = 0; curptr = declptr; cursize = csz;
+            lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns;
             curelem = cw;
             if (declptr) curelem = cw;
             return 0;
@@ -2318,6 +2497,7 @@ int postfix(void) {
             if (curptr) curelem = mbelem[mi];
             cursize = mbbytes[mi];
             curstruct = mbstruct[mi];
+            curuns = mbuns[mi];
             if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
                 /* an array or a nested struct: the value IS the address */
                 if (mbstruct[mi] < 0) { lvalue = 0; curptr = 1;
@@ -2325,10 +2505,11 @@ int postfix(void) {
             } }
         } else {
         if (p == P_INDEX) {
-            int row;
+            int row; int uu;
             adv();
             e = curelem;
             row = curdim2;
+            uu = curuns;                     /* the ELEMENT's, not the index's */
             if (row > 0) e = e * row;        /* the first index of `a[n][m]` */
             loadval();
             push();
@@ -2338,6 +2519,7 @@ int postfix(void) {
             es("  add64 r0, r1, r0\n");
             need(vfind(TOKV, NTOKV, "]", 1), "]");
             cursize = e;
+            curuns = uu;
             if (row > 0) {
                 /* a row is itself an array: its VALUE is its address */
                 curelem = e / row; curdim2 = 0; curptr = 1; lvalue = 0;
@@ -2352,14 +2534,38 @@ int postfix(void) {
 int pf_call(int t);
 
 int primary(void) {
-    int t; int i; int v; int k;
+    int t; int i; long v; int k;
     t = cur();
+    curuns = 0;
     if (t == T_NUM) {
-        v = 0; k = 0;
         v = numval(tp);
+        /* C99 6.4.4.1: a constant is an int if it fits, else a long; an
+           l/L suffix makes it a long outright.  `sizeof 1L` is 8. */
+        cursize = 4;
+        if (v > 2147483647) cursize = 8;
+        if (v < 0 - 2147483647) cursize = 8;
+        k = 0;
+        while (k < tlen[tp]) {
+            if ((src[tpos[tp] + k] & 255) == 108) cursize = 8;
+            if ((src[tpos[tp] + k] & 255) == 76) cursize = 8;
+            k = k + 1;
+        }
+        if ((src[tpos[tp]] & 255) == 39) cursize = 4;      /* 'x' is an int */
+        /* C99 6.4.4.1: a HEX or OCTAL constant takes the first of int,
+           unsigned int, long, unsigned long that holds it -- so 0xffffffff
+           is an unsigned int, and `s == 0xffffffff` compares in 32 bits. */
+        if ((src[tpos[tp]] & 255) == 48) { if (tlen[tp] > 1) {
+            if (v > 2147483647) { if (v <= 4294967295) { cursize = 4; curuns = 1; } }
+        } }
+        k = 0;
+        while (k < tlen[tp]) {
+            if ((src[tpos[tp] + k] & 255) == 117) curuns = 1;   /* u */
+            if ((src[tpos[tp] + k] & 255) == 85) curuns = 1;    /* U */
+            k = k + 1;
+        }
         adv();
         es("  imm r0, "); en(v); ec(10);
-        lvalue = 0; curelem = 8; curptr = 0;
+        lvalue = 0; curelem = cursize; curptr = 0;
         return postfix();
     }
     if (t == T_STR) {
@@ -2388,6 +2594,7 @@ int primary(void) {
         cursize = symbytes[i];           /* what `sizeof` reports for it */
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
+        curuns = symuns[i];
         if (symkind[i] == 4) {           /* enum constant */
             es("  imm r0, "); en(symoff[i]); ec(10);
             adv(); lvalue = 0; curelem = 8;
@@ -2620,9 +2827,43 @@ int sysargs(int n) {                 /* pop n args into r0..r2, zero the rest */
     return 0;
 }
 
+/* Does this literal format need the RUNTIME formatter -- a flag, a width,
+   a precision?  The desugared printf writes each conversion bare; the
+   library's `_u_vfmt` does the padding, and it is ordinary C that this
+   compiler now compiles, so the two front ends format through the same
+   code. */
+int fmtneedsrt(int ft) {
+    int k; int e; int c;
+    k = tpos[ft] + 1; e = tpos[ft] + tlen[ft] - 1;
+    while (k < e) {
+        if ((src[k] & 255) == 92) { k = k + 2; continue; }
+        if ((src[k] & 255) == 37) {
+            c = src[k + 1] & 255;
+            if (c == 37) { k = k + 2; continue; }
+            if (c == 45) return 1;              /* - */
+            if (c == 43) return 1;              /* + */
+            if (c == 32) return 1;
+            if (c == 35) return 1;              /* # */
+            if (c == 46) return 1;              /* . */
+            if (isdi(c)) return 1;              /* 0 or a width */
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
 int pf_call(int t) {
     int n; int k;
-    if (isname(t, "printf", 6)) return do_printf();
+    if (isname(t, "printf", 6)) {
+        int ps; int useit;
+        useit = 0;
+        ps = sfind(t);
+        if (ps >= 0) { if (symvar[ps]) {
+            if (kind(tp + 1) == T_STR) { if (fmtneedsrt(tp + 1)) useit = 1; }
+        } }
+        if (useit == 0) return do_printf();
+        /* else: an ordinary variadic call on <stdio.h>'s printf */
+    }
     if (isname(t, "__argc", 6)) {
         need(tidx("(", 1), "("); need(tidx(")", 1), ")");
         es("  .argc r0\n");
@@ -2658,6 +2899,43 @@ int pf_call(int t) {
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
+    if (isname(t, "va_start", 8)) {          /* ap = &arg[nfixed] */
+        need(tidx("(", 1), "(");
+        unary(); lvalue = 0; push();
+        if (eat(tidx(",", 1))) { expr(); loadval(); }
+        need(tidx(")", 1), ")");
+        es("  imm r0, "); en(16 + 8 * fnnfixed); es("\n  add64 r0, r6, r0\n");
+        pop1(); es("  store64 [r1+0], r0\n  imm r0, 0\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    if (isname(t, "va_end", 6)) {
+        need(tidx("(", 1), "(");
+        expr(); loadval();
+        need(tidx(")", 1), ")");
+        es("  imm r0, 0\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    if (isname(t, "va_arg", 6)) {           /* *ap as T, then ap += 8 */
+        int vw; int vp;
+        need(tidx("(", 1), "(");
+        unary(); lvalue = 0;
+        push();                                   /* &ap */
+        es("  load64 r0, [r0+0]\n");
+        push();                                   /* ap */
+        need(tidx(",", 1), ",");
+        vw = declspec(); vp = declspecptr;
+        while (eat(tidx("*", 1))) vp = 1;
+        need(tidx(")", 1), ")");
+        es("  imm r2, 8\n  add64 r0, r0, r2\n");
+        es("  load64 r1, [r7+8]\n  store64 [r1+0], r0\n");   /* ap += 8 */
+        pop1();                                   /* r1 = old ap */
+        es("  .frame -8\n  mov r0, r1\n");
+        if (vp) eload(8); else eload(vw);
+        lvalue = 0; curelem = vw; curptr = vp;
+        return postfix();
+    }
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     n = 0;
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
@@ -2665,6 +2943,30 @@ int pf_call(int t) {
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
     need(vfind(TOKV, NTOKV, ")", 1), ")");
+    {
+        int si; int st;
+        si = sfind(t);
+        st = 0;
+        if (si >= 0) st = symvar[si];
+        if (n > 6) st = 1;
+        if (st) {
+            /* Pushed in source order, arg[n-1] is nearest; reverse the block
+               so arg[k] sits at [SP + 8k] and, after the call and the
+               callee's frame push, at [FP + 16 + 8k]. */
+            k = 0;
+            while (k < n / 2) {
+                es("  load64 r2, [r7+"); en(8 * k); es("]\n");
+                es("  load64 r1, [r7+"); en(8 * (n - 1 - k)); es("]\n");
+                es("  store64 [r7+"); en(8 * k); es("], r1\n");
+                es("  store64 [r7+"); en(8 * (n - 1 - k)); es("], r2\n");
+                k = k + 1;
+            }
+            es("  call "); etok(t); ec(10);
+            if (n > 0) { es("  .frame -"); en(8 * n); ec(10); }
+            lvalue = 0; curelem = 8;
+            return postfix();
+        }
+    }
     k = n - 1;
     while (k >= 0) {
         es("  load64 r"); en(k); es(", [r7+0]\n  .frame -8\n");
@@ -2684,6 +2986,16 @@ int binop_level(int k) { int i; i = 0; while (i < nbop) { if (BOP[i] == k) retur
 
 int emit_binop(int k) {
     pop1();
+    if (binw4) es("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n");
+    if (binuns) {
+        if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .udiv r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .umod r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  ult64 r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  ult64 r0, r0, r1\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  ule64 r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  ule64 r0, r0, r1\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">>", 2)) { es("  lshr64 r0, r1, r0\n"); return 0; }
+    }
     if (k == vfind(TOKV, NTOKV, "+", 1))  { es("  add64 r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "-", 1))  { es("  sub64 r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "*", 1))  { es("  mul64 r0, r1, r0\n"); return 0; }
@@ -2704,7 +3016,7 @@ int emit_binop(int k) {
 }
 
 int binary(int level) {
-    int k; int e; int lp;
+    int k; int e; int lp; int lu; int ru; int ls; int rs;
     if (level > 7) { unary(); return 0; }
     binary(level + 1);
     while (1) {
@@ -2713,18 +3025,44 @@ int binary(int level) {
         loadval();
         e = curelem;
         lp = curptr;
+        /* C99 6.3.1.1: a type narrower than int promotes to (signed) int,
+           so only an unsigned int or wider -- or a pointer -- makes the
+           operation unsigned. */
+        lu = 0;
+        if (curuns) { if (curelem >= 4) lu = 1; }
+        if (curptr) lu = 1;
+        ls = cursize;
         adv();
         push();
         binary(level + 1);
         loadval();
+        ru = 0;
+        if (curuns) { if (curelem >= 4) ru = 1; }
+        if (curptr) ru = 1;
+        rs = cursize;
+        binuns = lu | ru;
+        binw4 = 0;
+        if (binuns) { if (ls <= 4) { if (rs <= 4) { if (lp == 0) { if (curptr == 0) binw4 = 1; } } } }
         if (lp) { if (e > 1) {
             if (k == tidx("+", 1)) { es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); }
             if (k == tidx("-", 1)) { if (curptr == 0) {
                 es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); } }
         } }
         emit_binop(k);
+        binuns = 0; binw4 = 0;
         lvalue = 0; curelem = e; curptr = lp;
+        curuns = lu | ru;
         if (k != tidx("+", 1)) { if (k != tidx("-", 1)) { curptr = 0; curelem = 8; } }
+        if (binop_level(k) == 3) curuns = 0;         /* == != : an int */
+        if (binop_level(k) == 4) curuns = 0;         /* < > <= >= : an int */
+        /* What `sizeof` sees.  A shift has the type of its PROMOTED LEFT
+           operand (C99 6.5.7p3); a comparison is an int; other arithmetic
+           is evaluated at 64 bits in this subset [G-2], as on the Python
+           side, which the type table decides there. */
+        if (binop_level(k) == 5) { cursize = ls; if (cursize < 4) cursize = 4; }
+        else { if (binop_level(k) >= 3) { if (binop_level(k) <= 4) cursize = 4;
+                                           else cursize = 8; }
+               else cursize = 8; }
     }
     return 0;
 }
@@ -2919,6 +3257,7 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     if (k > 31) k = 31;
     tdname[ntd * 32 + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
+    tduns[ntd] = declunsigned;
     ntd = ntd + 1;
     return ntd - 1;
 }
@@ -3045,10 +3384,12 @@ int declspec(void) {                       /* -> element width */
     declsz = 4;                            /* the size `sizeof` reports */
     declstruct = 0 - 1;
     declspecptr = 0;
+    declunsigned = 0;
     td = tdfind(tp);
     if (td >= 0) {
         adv();
         declsz = tdsz[td]; declstruct = tdstruct[td]; declspecptr = tdptr[td];
+        declunsigned = tduns[td];
         return tdw[td];
     }
     if (cur() == tidx("struct", 6)) {
@@ -3068,6 +3409,7 @@ int declspec(void) {                       /* -> element width */
         if (srcis(tpos[tp], tlen[tp], "short")) declsz = 2;
         if (srcis(tpos[tp], tlen[tp], "long")) declsz = 8;
         if (srcis(tpos[tp], tlen[tp], "void")) declsz = 1;
+        if (srcis(tpos[tp], tlen[tp], "unsigned")) declunsigned = 1;
         adv();
     }
     /* The element width IS the type's size.  It used to be 1 for char and 8
@@ -3083,13 +3425,13 @@ int declspec(void) {                       /* -> element width */
    observable through `sizeof` and through every pointer into it. */
 int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
-    int msz; int mal; int mw; int mel; int mst; int mo;
+    int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
     while (cur() != tidx("}", 1)) {
         w = declspec();
-        sz = declsz; mst = declstruct;
+        sz = declsz; mst = declstruct; muns = declunsigned;
         while (1) {
             declptr = declspecptr;
             while (eat(tidx("*", 1))) declptr = 1;
@@ -3119,6 +3461,7 @@ int stbody(int si) {
             mbelem[nmemb] = mel; mbptr[nmemb] = declptr;
             mbstruct[nmemb] = 0 - 1;
             if (declptr == 0) mbstruct[nmemb] = mst;
+            mbuns[nmemb] = muns;
             nmemb = nmemb + 1;
             stcount[si] = stcount[si] + 1;
             if (eat(tidx(",", 1)) == 0) break;
@@ -3587,10 +3930,35 @@ int stmt(void) {
     return 0;
 }
 
+
 int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start;
+    int fsym; int stacked; int npar; int depth; int c; int any;
     start = nout;
+    fsym = nsym - 1;
     need(vfind(TOKV, NTOKV, "(", 1), "(");
+    /* Look ahead at the whole parameter list before emitting a byte of it:
+       a variadic function, or one with more parameters than there are
+       argument registers, takes EVERY argument on the tape stack, arg[k] at
+       [FP + 16 + 8k] [W-13] [W-15].  That has to be known before the first
+       parameter is stored. */
+    fnvar = 0; npar = 0; depth = 0; any = 0; k = tp;
+    while (k < ntok) {
+        c = kind(k);
+        if (c == tidx("(", 1)) depth = depth + 1;
+        if (c == tidx(")", 1)) { if (depth == 0) break; depth = depth - 1; }
+        if (c == tidx("...", 3)) fnvar = 1;
+        else { if (c == tidx(",", 1)) { if (depth == 0) npar = npar + 1; }
+               else any = 1; }
+        k = k + 1;
+    }
+    if (any) npar = npar + 1;
+    if (fnvar) npar = npar - 1;              /* the `...` is not a parameter */
+    stacked = 0;
+    if (fnvar) stacked = 1;
+    if (npar > 6) stacked = 1;
+    fnnfixed = npar;
+    if (fsym >= 0) symvar[fsym] = stacked;
     scopebase = nsym;
     frameoff = 0; framemax = 0;
     np = 0;
@@ -3598,6 +3966,7 @@ int function(int t, int w) {
     es("  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame ");
     fpatch = nout; es("      "); ec(10);
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
+        if (eat(tidx("...", 3))) break;
         pw = declspec();
         declptr = declspecptr;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
@@ -3606,12 +3975,19 @@ int function(int t, int w) {
             off = alloc_local(8);
             declbytes = 8;
             sadd(pt, 1, off, pw);
-            /* r1/r2 are argument registers -- using them as scratch here
-             * would destroy arg1/arg2 before they are stored.  r5 is free. */
-            es("  imm r5, "); en(off); es("\n  sub64 r5, r6, r5\n  store64 [r5+0], r");
-            en(np); ec(10);
-            np = np + 1;
+            if (stacked) {
+                /* the registers are free in this convention */
+                es("  load64 r1, [r6+"); en(16 + 8 * np); es("]\n");
+                es("  imm r5, "); en(off); es("\n  sub64 r5, r6, r5\n  store64 [r5+0], r1\n");
+            } else {
+                /* Straight into the slot: the tape takes a negative
+                   displacement, so no scratch register is needed.  There was
+                   one -- r5, "free" -- until a function had six parameters
+                   and r5 WAS the sixth, overwritten before it was stored. */
+                es("  store64 [r6-"); en(off); es("], r"); en(np); ec(10);
+            }
         }
+        np = np + 1;
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
     need(vfind(TOKV, NTOKV, ")", 1), ")");
@@ -3762,6 +4138,8 @@ int setup_tables(void) {
     P_INC = pidx("inc", 3);          P_FIELD = pidx("field", 5);
     P_DONE = pidx("done", 4);        P_FNSIG = pidx("fn_sig", 6);
     P_VARDEF = pidx("var_def", 7);   P_GOTO = pidx("goto", 4);
+    P_BNOT = pidx("bnot", 4);        P_UPLUS = pidx("uplus", 5);
+    P_PREINC = pidx("preinc", 6);
     T_EOF = tidx("eof", 3);          T_TYPE = tidx("type", 4);
     T_ID = tidx("id", 2);            T_NUM = tidx("num", 3);
     T_STR = tidx("str", 3);
