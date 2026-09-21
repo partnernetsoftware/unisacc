@@ -1268,6 +1268,9 @@ int symstruct[MAXSYM];      /* index into the struct table, or -1 */
 #define MAXMEMB 1024
 char stname[MAXSTRUCT * 32];
 int stfirst[MAXSTRUCT]; int stcount[MAXSTRUCT];
+/* tags are block-scoped (C99 6.2.1): the block depth a tag was defined at,
+   and whether that block has closed */
+int stdepth[MAXSTRUCT]; int stdead[MAXSTRUCT]; int bdepth;
 int stsize[MAXSTRUCT]; int stalign[MAXSTRUCT]; int stunion[MAXSTRUCT];
 int nstruct;
 char mbname[MAXMEMB * 32];
@@ -1278,6 +1281,9 @@ int mbelem[MAXMEMB];    /* element size, for [] on an array member */
 int mbptr[MAXMEMB];
 int mbstruct[MAXMEMB];
 int mbuns[MAXMEMB];
+/* 1: a member that takes no initialiser slot -- every union member after the
+   first (C99 6.7.8p17: a brace list initialises a union's FIRST member) */
+int mbskip[MAXMEMB];
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
@@ -1293,6 +1299,8 @@ int declspecptr;        /* the specifier itself was a pointer typedef */
 char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
+int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
+int declspecfp;           /* what declspec's typedef said about that */
 int ntd;
 int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
 int curstruct;          /* the struct the thing in r0 is, or -1 */
@@ -1338,6 +1346,8 @@ int typesize(void);
 int declspec(void);
 int primary(void);
 int postfix(void);
+int vcall(int var);
+int fpdecl(void);
 int emit_binop(int k);
 int stmt(void);
 int block(void);
@@ -1818,6 +1828,12 @@ int postfix(void) {
     int p; int e;
     while (1) {
         p = ask(3);
+        if (p == P_CALL) {
+            /* a call through whatever the expression produced: `pick()(3, 4)`,
+               `s->f(5, 6)`.  The parse table said `call`; do it. */
+            loadval();
+            return vcall(0);
+        }
         if (p == P_INC) {
             int op; int e2;
             op = cur(); adv();
@@ -1903,12 +1919,21 @@ int pf_call(int t);
    goes on the stack UNDER the arguments; the convention is the pointee's --
    stacked if it is variadic (declfp 2) or the call has more than six. */
 int icparen;
+int vcall(int var);
+int fpdecl(void);
 int icall(int si, int t) {
     int n; int k; int st;
     if (symkind[si] == 0) { es("  @mem.lea r0, g_"); etok(t); es("\n  @mem.load r0, [r0+0]\n"); }
     else { es("  @mem.load r0, [r6-"); en(symoff[si]); es("]\n"); }
     adv();
     if (icparen) { icparen = 0; need(tidx(")", 1), ")"); }
+    return vcall(symfp[si] == 2);
+}
+
+/* The callee's address is in r0 and the cursor is on the `(`.  `var` says
+   the pointee is variadic, which puts every argument on the tape stack. */
+int vcall(int var) {
+    int n; int k; int st;
     push();
     need(tidx("(", 1), "(");
     n = 0;
@@ -1918,7 +1943,7 @@ int icall(int si, int t) {
     }
     need(tidx(")", 1), ")");
     st = 0;
-    if (symfp[si] == 2) st = 1;
+    if (var) st = 1;
     if (n > 6) st = 1;
     if (st) {
         k = 0;
@@ -2002,7 +2027,9 @@ int primary(void) {
         scopewant("expr", 4, tp, "lookup", 6);
         if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) {
             i = sfind(tp);
-            if (i >= 0) { if (symfp[i]) return icall(i, tp); }
+            /* a function is never a pointer variable, even when it RETURNS
+               one (`binop pick(void)` carries binop's fp flag) */
+            if (i >= 0) { if (symfp[i]) { if (symkind[i] != 2) return icall(i, tp); } }
             return pf_call(adv());
         }
         i = mfindt(tp);
@@ -2431,9 +2458,11 @@ int pf_call(int t) {
     lvalue = 0; curelem = 8;
     {
         int si; si = sfind(t);
-        if (si >= 0) { if (symkind[si] == 2) { if (symstruct[si] >= 0) { if (symptr[si] == 0) {
-            curstruct = symstruct[si]; curelem = 0; curptr = 0;
-        } } } }
+        if (si >= 0) { if (symkind[si] == 2) { if (symstruct[si] >= 0) {
+            if (symptr[si] == 0) { curstruct = symstruct[si]; curelem = 0; curptr = 0; }
+            /* a pointer to a struct: `get()->f` needs to know which */
+            else { curstruct = symstruct[si]; curptr = 1; curelem = stsize[symstruct[si]]; }
+        } } }
     }
     return postfix();
 }
@@ -2789,14 +2818,16 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     tdname[ntd * 32 + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
     tduns[ntd] = declunsigned;
+    tdfp[ntd] = 0;
     ntd = ntd + 1;
     return ntd - 1;
 }
 
 int stfind(int t) {
     int i; int k; int ok;
-    i = 0;
-    while (i < nstruct) {
+    i = nstruct - 1;                     /* newest first: the innermost wins */
+    while (i >= 0) {
+        if (stdead[i]) { i = i - 1; continue; }
         ok = 1; k = 0;
         while (k < tlen[t]) {
             if (k > 30) ok = 0;
@@ -2804,7 +2835,7 @@ int stfind(int t) {
             k = k + 1;
         }
         if (ok) { if (stname[i * 32 + tlen[t]] == 0) return i; }
-        i = i + 1;
+        i = i - 1;
     }
     return 0 - 1;
 }
@@ -2819,6 +2850,7 @@ int stnew(int t, int isunion) {
     if (k > 31) k = 31;
     stname[nstruct * 32 + k] = 0;
     stfirst[nstruct] = nmemb; stcount[nstruct] = 0;
+    stdepth[nstruct] = bdepth; stdead[nstruct] = 0;
     stsize[nstruct] = 0; stalign[nstruct] = 1; stunion[nstruct] = isunion;
     nstruct = nstruct + 1;
     return nstruct - 1;
@@ -2833,6 +2865,8 @@ int stparse(int isunion) {
         t = tp;
         si = stfind(t);
         if (si < 0) si = stnew(t, isunion);
+        /* a DEFINITION in a deeper block shadows the outer tag */
+        else { if (kind(tp + 1) == tidx("{", 1)) { if (stdepth[si] < bdepth) si = stnew(t, isunion); } }
         adv();
     } else si = stnew(0 - 1, isunion);
     if (cur() == tidx("{", 1)) stbody(si);
@@ -2916,11 +2950,13 @@ int declspec(void) {                       /* -> element width */
     declstruct = 0 - 1;
     declspecptr = 0;
     declunsigned = 0;
+    declspecfp = 0;
     td = tdfind(tp);
     if (td >= 0) {
         adv();
         declsz = tdsz[td]; declstruct = tdstruct[td]; declspecptr = tdptr[td];
         declunsigned = tduns[td];
+        declspecfp = tdfp[td];
         return tdw[td];
     }
     if (cur() == tidx("struct", 6)) {
@@ -2967,6 +3003,40 @@ int stbody(int si) {
     while (cur() != tidx("}", 1)) {
         w = declspec();
         sz = declsz; mst = declstruct; muns = declunsigned;
+        if (cur() == tidx(";", 1)) { if (mst >= 0) {
+            /* An anonymous member (C11 6.7.2.1p13): its members are members
+               of this aggregate, at its offset.  Spliced in by copy. */
+            int a; int e; int first;
+            msz = stsize[mst]; mal = stalign[mst];
+            if (mal > 8) mal = 8;
+            if (stunion[si]) mo = 0;
+            else {
+                while (off - (off / mal) * mal) off = off + 1;
+                mo = off; off = off + msz;
+            }
+            if (stunion[si]) { if (msz > off) off = msz; }
+            if (mal > al) al = mal;
+            a = stfirst[mst]; e = a + stcount[mst]; first = 1;
+            while (a < e) {
+                if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
+                k = 0;
+                while (k < 32) { mbname[nmemb * 32 + k] = mbname[a * 32 + k]; k = k + 1; }
+                mboff[nmemb] = mo + mboff[a]; mbbytes[nmemb] = mbbytes[a];
+                mbwidth[nmemb] = mbwidth[a]; mbelem[nmemb] = mbelem[a];
+                mbptr[nmemb] = mbptr[a]; mbstruct[nmemb] = mbstruct[a];
+                mbuns[nmemb] = mbuns[a];
+                mbskip[nmemb] = mbskip[a];
+                if (stunion[mst]) { if (first == 0) mbskip[nmemb] = 1; }
+                first = 0;
+                if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
+                own[nown] = nmemb; nown = nown + 1;
+                nmemb = nmemb + 1;
+                stcount[si] = stcount[si] + 1;
+                a = a + 1;
+            }
+            adv();
+            continue;
+        } }
         while (1) {
             declptr = declspecptr;
             while (eat(tidx("*", 1))) declptr = 1;
@@ -2997,6 +3067,8 @@ int stbody(int si) {
             mbstruct[nmemb] = 0 - 1;
             if (declptr == 0) mbstruct[nmemb] = mst;
             mbuns[nmemb] = muns;
+            mbskip[nmemb] = 0;
+            if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
             if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
             own[nown] = nmemb; nown = nown + 1;
             nmemb = nmemb + 1;
@@ -3020,6 +3092,7 @@ int stbody(int si) {
         mbwidth[nmemb] = mbwidth[own[j]]; mbelem[nmemb] = mbelem[own[j]];
         mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
         mbuns[nmemb] = mbuns[own[j]];
+        mbskip[nmemb] = mbskip[own[j]];
         nmemb = nmemb + 1;
         j = j + 1;
     }
@@ -3031,15 +3104,18 @@ int stbody(int si) {
 int stmt(void);
 
 int block(void) {
-    int savesym; int saveoff; int savetd;
+    int savesym; int saveoff; int savetd; int savest;
     need(vfind(TOKV, NTOKV, "{", 1), "{");
-    savesym = nsym; saveoff = frameoff; savetd = ntd;
+    savesym = nsym; saveoff = frameoff; savetd = ntd; savest = nstruct;
+    bdepth = bdepth + 1;
     while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
         if (cur() == T_EOF) { printf("unterminated block\n"); __exit(1); }
         stmt();
     }
     adv();
     nsym = savesym; frameoff = saveoff; ntd = savetd;
+    bdepth = bdepth - 1;
+    while (savest < nstruct) { stdead[savest] = 1; savest = savest + 1; }
     return 0;
 }
 
@@ -3051,6 +3127,14 @@ int do_typedef(void) {
     while (1) {
         tptr = declspecptr;
         while (eat(tidx("*", 1))) tptr = 1;
+        /* `typedef int (*binop)(int, int);` -- a pointer to a function */
+        if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+            nt = fpdecl();
+            tdadd(nt, 8, 8, 0 - 1, 1);
+            tdfp[ntd - 1] = declfp;
+            if (eat(tidx(",", 1))) continue;
+            break;
+        } }
         nt = adv();
         if (cur() == tidx("(", 1)) {          /* a function-pointer typedef */
             while (cur() != tidx(";", 1)) adv();
@@ -3083,10 +3167,14 @@ int structslots(int sst) {
     int per; int mi; int e;
     per = 0; mi = stfirst[sst]; e = stfirst[sst] + stcount[sst];
     while (mi < e) {
-        if (mbwidth[mi] == 0) {
+        if (mbskip[mi]) { mi = mi + 1; continue; }
+        if (mbstruct[mi] >= 0) {
+            /* a struct member takes its own scalars' share, per element */
+            per = per + (mbbytes[mi] / stsize[mbstruct[mi]]) * structslots(mbstruct[mi]);
+        } else { if (mbwidth[mi] == 0) {
             if (mbelem[mi] > 0) per = per + mbbytes[mi] / mbelem[mi];
             else per = per + 1;
-        } else per = per + 1;
+        } else per = per + 1; }
         mi = mi + 1;
     }
     if (per <= 0) per = 1;
@@ -3100,6 +3188,19 @@ int slotat(int i, int w, int sst) {
     el = i / per; k = i - el * per;
     mi = stfirst[sst]; e = stfirst[sst] + stcount[sst]; cnt = 0;
     while (mi < e) {
+        if (mbskip[mi]) { mi = mi + 1; continue; }
+        if (mbstruct[mi] >= 0) {
+            sub = (mbbytes[mi] / stsize[mbstruct[mi]]) * structslots(mbstruct[mi]);
+            if (k < cnt + sub) {
+                int base; base = el * stsize[sst] + mboff[mi];
+                slotat(k - cnt, 0, mbstruct[mi]);      /* recurse into it */
+                slotoff = base + slotoff;
+                return 0;
+            }
+            cnt = cnt + sub;
+            mi = mi + 1;
+            continue;
+        }
         if (mbwidth[mi] == 0) {
             sub = 1;
             if (mbelem[mi] > 0) sub = mbbytes[mi] / mbelem[mi];
@@ -3138,25 +3239,34 @@ int initaddr(int isglobal, int gt, int off, int delta) {
 /* How many elements the initialiser supplies, for an unsized `[]`.  The
    cursor is on the `]`. */
 int initcount(void) {
-    int j; int depth; int n; int k; int c;
+    int j; int depth; int n; int k; int c; int pos;
     char buf[4096];
     j = tp;
     while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
     j = j + 1;
     if (kind(j) == T_STR) { return decode(j, buf) + 1; }
     if (kind(j) != tidx("{", 1)) return 1;
-    depth = 0; n = 0; k = 0;
+    depth = 0; n = 0; k = 0; pos = 0;
     while (j < ntok) {
         c = kind(j);
         if (c == tidx("{", 1)) { depth = depth + 1; j = j + 1; continue; }
         if (c == tidx("}", 1)) {
             depth = depth - 1;
-            if (depth == 0) { if (k) n = n + 1; break; }
+            if (depth == 0) { if (k) pos = pos + 1; break; }
             j = j + 1; continue;
         }
-        if (c == tidx(",", 1)) { if (k) { n = n + 1; k = 0; } j = j + 1; continue; }
+        if (c == tidx(",", 1)) {
+            if (k) { pos = pos + 1; k = 0; }
+            if (pos > n) n = pos;
+            j = j + 1; continue;
+        }
+        /* `[k] =`: the next element is element k (C99 6.7.8p6) */
+        if (depth == 1) { if (c == tidx("[", 1)) { if (kind(j + 1) == T_NUM) {
+            pos = numval(j + 1); j = j + 4; continue;
+        } } }
         k = 1; j = j + 1;
     }
+    if (pos > n) n = pos;
     return n;
 }
 
@@ -3188,6 +3298,26 @@ int initstr(int isglobal, int gt, int off, int cap) {
 /* Braces are FLATTENED: C lets an aggregate element take its share of a flat
    list, and this subset has no multi-dimensional declarator to tell the
    shapes apart anyway. */
+/* `(T){...}` -- or `((T){...})` -- in initialiser position is the braced
+   list itself (C99 6.5.2.5).  On a match the cursor is left on the `{` and
+   the number of extra `(` to close afterwards is returned; else -1. */
+int cplit(void) {
+    int j; int k; int depth;
+    j = tp; k = 0;
+    while (kind(j) == tidx("(", 1)) { j = j + 1; k = k + 1; }
+    if (k == 0) return 0 - 1;
+    if (is_typeat(j) == 0) return 0 - 1;
+    depth = 0;
+    while (j < ntok) {
+        if (kind(j) == tidx("(", 1)) depth = depth + 1;
+        if (kind(j) == tidx(")", 1)) { if (depth == 0) break; depth = depth - 1; }
+        j = j + 1;
+    }
+    if (kind(j + 1) != tidx("{", 1)) return 0 - 1;
+    tp = j + 1;
+    return k - 1;
+}
+
 int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     int i; int depth; int delta; int ew; int mi;
     /* C99 6.7.8p21: what the initialiser does not mention is ZERO.  Clearing
@@ -3208,6 +3338,36 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
         }
         if (cur() == tidx(",", 1)) { adv(); continue; }
         if (cur() == T_EOF) break;
+        /* C99 6.7.8p17: a designator moves the cursor, and the elements
+           after it continue from there.  `[k] =` counts ELEMENTS, so a
+           struct element moves it by its whole share of slots. */
+        if (depth == 1) { if (cur() == tidx("[", 1)) {
+            int k; int per;
+            adv(); k = cexpr(); need(tidx("]", 1), "]"); need(tidx("=", 1), "=");
+            per = 1;
+            if (sst >= 0) per = structslots(sst);
+            i = k * per;
+            continue;
+        } }
+        if (depth == 1) { if (cur() == tidx(".", 1)) { if (sst >= 0) {
+            int mi; int j; int per;
+            adv();
+            mi = mbfind(sst, tp);
+            if (mi < 0) { printf("no such member at token %d\n", tp); __exit(1); }
+            adv(); need(tidx("=", 1), "=");
+            /* the slot whose offset is the member's.  At depth 1 the object
+               IS one struct, so it is element 0 -- the cursor may already
+               sit past the end after `.last = x` */
+            per = structslots(sst);
+            j = 0;
+            while (j < per) {
+                slotat(j, w, sst);
+                if (slotoff - (j / per) * stsize[sst] == mboff[mi]) break;
+                j = j + 1;
+            }
+            i = j;
+            continue;
+        } } }
         slotat(i, w, sst);
         delta = slotoff; ew = slotw;
         expr(); loadval();
@@ -3250,13 +3410,26 @@ int local_decl(void) {
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
-        decldim2 = 0; declfp = 0;
+        decldim2 = 0; declfp = declspecfp;
         declptr = declspecptr;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; sst = 0 - 1; declstruct = 0 - 1;
         } else t = adv(); }
         else t = adv();
+        /* `int f(char *);` in a block: a prototype, not an object.  Calls
+           resolve by name, so there is nothing to allocate. */
+        if (cur() == tidx("(", 1)) {
+            int depth; depth = 0;
+            while (cur() != T_EOF) {
+                if (cur() == tidx("(", 1)) depth = depth + 1;
+                if (cur() == tidx(")", 1)) { depth = depth - 1; if (depth == 0) { adv(); break; } }
+                adv();
+            }
+            if (eat(tidx(",", 1))) continue;
+            need(tidx(";", 1), ";");
+            return 0;
+        }
         lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
@@ -3296,7 +3469,20 @@ int local_decl(void) {
                 declbytes = declsz;
                 sadd(t, lbind, off, w);
                 symkind[nsym - 1] = 3;
-                if (eat(tidx("=", 1))) initaggr(0, 0, off, w, sst, declsz);
+                if (eat(tidx("=", 1))) {
+                    int cpn; cpn = 0 - 1;
+                    if (cur() == tidx("(", 1)) cpn = cplit();
+                    if (cpn >= 0 || cur() == tidx("{", 1)) {
+                        initaggr(0, 0, off, w, sst, declsz);
+                        while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
+                    } else {
+                        /* `struct S b = a;` -- a whole-struct copy */
+                        es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
+                        push(); expr(); loadval();
+                        es("  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -8\n");
+                        scopy(declsz);
+                    }
+                }
                 if (eat(tidx(",", 1))) continue;
                 break;
             } }
@@ -3557,7 +3743,7 @@ int function(int t, int w) {
         if (eat(tidx("...", 3))) break;
         pw = declspec();
         pst = declstruct;
-        declptr = declspecptr; declfp = 0;
+        declptr = declspecptr; declfp = declspecfp;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
         havename = 0;
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -3622,39 +3808,20 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr; int gstruct;
+    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn;
     while (1) {
         p = ask(0);
         if (p == P_END) break;
         if (p == P_TYPEDEF) { do_typedef(); continue; }
-        if (p == P_ENUM) {
-            int v;
-            adv();
-            if (cur() == T_ID) adv();
-            need(tidx("{", 1), "{");
-            v = 0;
-            while (cur() != tidx("}", 1)) {
-                t = adv();
-                if (eat(tidx("=", 1))) {
-                    v = 0; k = 0;
-                    v = numval(tp);
-                    adv();
-                }
-                declbytes = 4;
-                sadd(t, 4, v, 8);            /* 4 = enum constant */
-                v = v + 1;
-                if (eat(tidx(",", 1)) == 0) break;
-            }
-            need(tidx("}", 1), "}");
-            eat(tidx(";", 1));
-            continue;
-        }
+        /* P_ENUM: `enum E { ... };`, `enum E x = C;` and `enum { ... } x;`
+           are all declarations, and declspec's enumspec takes each of them.
+           This branch used to insist on a body, so a USE was refused. */
         w = declspec();
         gstruct = declstruct;
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declstruct = gstruct;
-            decldim2 = 0; declfp = 0;
+            decldim2 = 0; declfp = declspecfp;
             declptr = declspecptr;
             while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -3665,6 +3832,7 @@ int unit(void) {
             p = ask(4);
             if (p == P_FNSIG) {
                 declbytes = 8;
+                declfp = 0;
                 sadd(t, 2, 0, 8);
                 function(t, w);
                 break;
@@ -3714,10 +3882,13 @@ int unit(void) {
             if (cur() == tidx("=", 1)) {
                 adv();
                 toinit = 1; hasinit = 1;
+                cpn = 0 - 1;
+                if (cur() == tidx("(", 1)) cpn = cplit();
                 if (cur() == tidx("{", 1)) {
                     if (isarr) initaggr(1, t, 0, w, gstruct, n * w);
                     else { if (gstruct >= 0) initaggr(1, t, 0, w, gstruct, declsz);
                            else initaggr(1, t, 0, w, 0 - 1, n * w); }
+                    while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
                 }
                 else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
                     initstr(1, t, 0, n);
