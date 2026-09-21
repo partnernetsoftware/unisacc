@@ -1471,6 +1471,7 @@ int declenum;             /* the specifier was an enum */
 int enumneg;              /* some enumerator seen so far is negative */
 int ntd;
 int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
+int fnresume;             /* where a nested declarator's body starts, or -1 */
 int curstruct;          /* the struct the thing in r0 is, or -1 */
 int curdim2;            /* ...and its inner dimension, if it has one */
 int curuns;             /* ...and whether its type is unsigned */
@@ -1517,6 +1518,7 @@ int postfix(void);
 int vcall(int var);
 int fpdecl(void);
 int eatstar(void);
+int skipparen(void);
 int iswide(int t);
 int wdecode(int t, int *cp);
 int strw(int t);
@@ -2063,6 +2065,12 @@ int unary(void) {
             cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct;
             declptr = declspecptr;
             while (eatstar()) { declptr = 1; csz = 8; }
+            if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+                adv(); while (eatstar()) { }
+                need(tidx(")", 1), ")");
+                if (cur() == tidx("(", 1)) skipparen();
+                declptr = 1; csz = 8;
+            } }
             carr = 0; cn = 0;
             if (cur() == tidx("[", 1)) {
                 adv(); carr = 1;
@@ -4003,24 +4011,45 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
 /* `(*name)(params)` -- a pointer to a function.  The cursor is on the `(`;
    returns the name's token and leaves declfp saying which calling
    convention the pointee uses, because an indirect call has to know it. */
-int fpdecl(void) {
-    int t; int depth; int var;
-    adv();
-    while (eatstar()) { }
-    t = adv();
-    need(tidx(")", 1), ")");
-    var = 0;
-    need(tidx("(", 1), "(");
-    depth = 1;
-    while (depth > 0) {
-        if (cur() == T_EOF) break;
+int fpdim;       /* `(*fs[2])(...)`: an array of that many pointers, or 0 */
+int fpadim;      /* `(*p)[4]`: a pointer to an array of that many, or 0 */
+int fpfn;        /* `(*f(params))(...)`: f is a FUNCTION; its params start here */
+int skipparen(void) {                 /* over a balanced (...) at the cursor */
+    int depth; int var;
+    depth = 0; var = 0;
+    while (cur() != T_EOF) {
         if (cur() == tidx("(", 1)) depth = depth + 1;
-        if (cur() == tidx(")", 1)) depth = depth - 1;
+        if (cur() == tidx(")", 1)) { depth = depth - 1; if (depth == 0) { adv(); break; } }
         if (cur() == tidx("...", 3)) var = 1;
         adv();
     }
-    declfp = 1;
-    if (var) declfp = 2;
+    return var;
+}
+int fpdecl(void) {
+    int t; int var;
+    adv();
+    while (eatstar()) { }
+    t = adv();
+    fpdim = 0; fpadim = 0; fpfn = 0 - 1;
+    /* `(*pick(int which))(int, int)`: pick takes (int which) and RETURNS
+       the pointer -- the declarator nests, and the inner list is pick's */
+    if (cur() == tidx("(", 1)) { fpfn = tp; skipparen(); }
+    while (cur() == tidx("[", 1)) {             /* an array of pointers */
+        adv(); fpdim = 1;
+        if (cur() != tidx("]", 1)) fpdim = cexpr();
+        need(tidx("]", 1), "]");
+    }
+    need(tidx(")", 1), ")");
+    declfp = 0;
+    if (cur() == tidx("(", 1)) {
+        var = skipparen();
+        declfp = 1;
+        if (var) declfp = 2;
+    } else { if (cur() == tidx("[", 1)) {
+        /* `(*p)[4]`: a pointer to arrays of 4 -- p[1] strides a whole row */
+        adv(); fpadim = cexpr(); need(tidx("]", 1), "]");
+    } }
+    /* `(*const x)` is just a parenthesised pointer: declfp stays 0 */
     return t;
 }
 
@@ -4037,6 +4066,18 @@ int local_decl(void) {
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; sst = 0 - 1; declstruct = 0 - 1;
+            if (fpdim > 0) {
+                /* `int (*fs[2])(int, int)`: an array of pointers */
+                lbind = scopebind("local", 5, t);
+                off = alloc_local(fpdim * 8);
+                declbytes = fpdim * 8; declfp = 0;
+                sadd(t, lbind, off, 8);
+                symkind[nsym - 1] = 3;
+                if (eat(tidx("=", 1))) initaggr(0, 0, off, 8, 0 - 1, fpdim * 8);
+                if (eat(tidx(",", 1))) continue;
+                break;
+            }
+            if (fpadim > 0) { decldim2 = fpadim; declptr = 1; }
         } else t = adv(); }
         else t = adv();
         /* `int f(char *);` in a block: a prototype, not an object.  Calls
@@ -4402,9 +4443,16 @@ int function(int t, int w) {
         declptr = declspecptr; declfp = declspecfp;
         while (eatstar()) declptr = 1;
         havename = 0;
-        if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
-            pt = fpdecl(); declptr = 1; pw = 8; havename = 1;
-        } }
+        if (cur() == tidx("(", 1)) {
+            if (kind(tp + 1) == tidx("*", 1)) {
+                pt = fpdecl(); declptr = 1; pw = 8; havename = 1;
+                if (fpdim > 0) declfp = 0;       /* an array of them decays */
+            } else {
+                /* `int f1(int (), int)`: a function type, adjusted to a
+                   pointer to it (C99 6.7.5.3p8) */
+                skipparen(); declptr = 1; pw = 8;
+            }
+        }
         if (cur() == T_ID) { pt = adv(); havename = 1; }
         /* `int a[n]`, `int a[static 5]`: an array parameter IS a pointer
            (C99 6.7.5.3p7), whatever the brackets say */
@@ -4437,7 +4485,12 @@ int function(int t, int w) {
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
     need(vfind(TOKV, NTOKV, ")", 1), ")");
-    if (cur() == tidx(";", 1)) {          /* a prototype, not a definition */
+    /* `int (*pick(int w))(int, int) {`: the body follows the OUTER list */
+    if (fnresume >= 0) { tp = fnresume; fnresume = 0 - 1; }
+    /* a prototype, not a definition -- `int f(int), g(int), gv;` lists
+       several, and the caller carries on after a comma */
+    if (cur() == tidx(";", 1) || cur() == tidx(",", 1)) {
+        if (cur() == tidx(",", 1)) { nout = start; nsym = scopebase; return 2; }
         adv();
         nout = start;                     /* unemit the prologue */
         nsym = scopebase;
@@ -4488,6 +4541,7 @@ int unit(void) {
             while (eatstar()) declptr = 1;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1;
+                if (fpfn >= 0) { fnresume = tp; tp = fpfn; }
             } else t = adv(); }
             else t = adv();
             gbind = scopebind("top", 3, t);
@@ -4496,7 +4550,7 @@ int unit(void) {
                 declbytes = 8;
                 declfp = 0;
                 sadd(t, 2, 0, 8);
-                function(t, w);
+                if (function(t, w) == 2) { adv(); continue; }
                 break;
             }
             n = 1;
@@ -4625,6 +4679,7 @@ int setup(void) {
 int main(void) {
     int fd; int i; int p; int L; int k;
     nibuf = 0; toinit = 0; hasinit = 0;
+    fnresume = 0 - 1;
     model_dims();
     setup();
     if (__argc() < 2) { printf("usage: unisacc FILE.c\n"); return 1; }
