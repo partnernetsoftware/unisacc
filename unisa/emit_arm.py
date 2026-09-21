@@ -188,6 +188,19 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return mem(False, N(a[0]), N(a[1]), a[2], a[3])
     if o == ".st":
         return mem(True, N(a[2]), N(a[0]), a[1], a[3])
+    if o == ".zero":
+        # n bytes at [base+off] <- 0, stored from xzr (rt = 31) in the widest
+        # pieces that fit.  It fell through to `brk` and nobody noticed: the
+        # Python walker never emitted it for a local, and the self-hosted
+        # compiler's tapes are only ever interpreted.
+        out, k, n = b"", 0, a[2]
+        while k < n:
+            wd = 8
+            while k + wd > n:
+                wd //= 2
+            out += mem(True, 31, N(a[0]), a[1] + k, wd)
+            k += wd
+        return out
     if o == "callr":                                 # same stack discipline
         return adr(IP1, text_va + off, text_va + off + 16) + \
             w(0xD1002000 | (7 << 5) | 7) + \

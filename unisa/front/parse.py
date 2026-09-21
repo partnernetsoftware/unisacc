@@ -1229,10 +1229,12 @@ class Walker:
                 self.em.imm(ACC, c)
                 self.em.store(FP, -off + i * WCHAR, ACC, WCHAR)
             return
+        # These two called const_init with names this function does not have
+        # -- a NameError waiting for the first local initialised this way.
         if ty.kind in ("arr", "struct") and self._aggr_paren() \
                 and not self.istype(self.peek(1)):
             self.next()                           # `((struct S){...})`
-            self.const_init(sym, ty, at)
+            self.local_init(ty, off)
             self.expect(")")
             return
         if ty.kind in ("arr", "struct") and self._aggr_paren() \
@@ -1241,10 +1243,17 @@ class Walker:
             self.next()
             self.abstract_type()
             self.expect(")")
-            self.const_init(sym, ty, at)
+            self.local_init(ty, off)
             return
         if ty.kind in ("arr", "struct"):
             braced = self.eat("{")
+            if braced:
+                # C99 6.7.8p21: what the list does not mention is ZERO.  A
+                # frame slot holds whatever the last call left there -- the
+                # interpreter's fresh stack hid this, and a native image
+                # read the leftovers of __init.
+                self.em.emit(self.em.recipe("mem", "zero"), FP, -off,
+                             ty.size(self.sc.structs))
             mem = self._members(ty)
             k, first = 0, True
             while True:

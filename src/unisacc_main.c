@@ -1306,8 +1306,8 @@ int lex(void) {
         } else {
         if (a == 3) {                          /* num */
             j = i;
-            if (at(j) == 48) {                 /* 0x... */
-                if (at(j+1) == 120) { if (at(j+1) != 0 - 1) {
+            if (at(j) == 48) {                 /* 0x... or 0X... */
+                if (at(j+1) == 120 || at(j+1) == 88) { if (at(j+1) != 0 - 1) {
                     j = j + 2;
                     while (at(j) >= 0) {
                         if (isdi(at(j))) { j = j + 1; } else {
@@ -1317,10 +1317,9 @@ int lex(void) {
                 } }
             }
             while (isdi(at(j))) j = j + 1;
-            while (at(j) == 117) { j = j + 1; }    /* u */
-            while (at(j) == 85) { j = j + 1; }     /* U */
-            while (at(j) == 108) { j = j + 1; }    /* l */
-            while (at(j) == 76) { j = j + 1; }     /* L */
+            /* the suffix letters in any order, as the Python lexer takes
+               them: `1llu` is one token, not `1ll` then an identifier `u` */
+            while (at(j) == 117 || at(j) == 85 || at(j) == 108 || at(j) == 76) j = j + 1;
             tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j - i;
             ntok = ntok + 1;
             i = j;
@@ -1404,7 +1403,12 @@ int lex(void) {
 
 char out[MAXOUT];
 int nout;
-char ibuf[65536];
+/* The __init body.  It was 64 KB and unchecked: c-testsuite 00205's one
+   initialiser writes 92 KB of it, and the overflow ran over whatever the
+   linker put next -- the symbol table on Linux ("unknown identifier"),
+   something harmless on macOS. */
+#define MAXIBUF 4194304
+char ibuf[MAXIBUF];
 int nibuf;
 int toinit;              /* 1 => ec() writes the __init body instead */
 int hasinit;
@@ -1416,6 +1420,7 @@ int symelem[MAXSYM];        /* element width for [] and unary * */
 int symptr[MAXSYM];         /* 1 for pointers and arrays */
 int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
+int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
@@ -1453,6 +1458,7 @@ int mbpst[MAXMEMB];       /* a pointer member: the struct it points to, or -1 */
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
+int decldim3;           /* `a[n][m][k]` -- k; decldim2 is then m*k */
 int declunsigned;       /* the specifier said `unsigned` */
 int declfp;             /* the declarator was `(*name)(...)`: 1, or 2 if `...` */
 int declspecptr;        /* the specifier itself was a pointer typedef */
@@ -1472,8 +1478,14 @@ int enumneg;              /* some enumerator seen so far is negative */
 int ntd;
 int retst; int rett;      /* the function being walked returns this struct by value, or -1 */
 int fnresume;             /* where a nested declarator's body starts, or -1 */
+int havepre;              /* binary()'s leftmost operand is already in r0 */
+int initisarr; int initrows; int initrows3; /* the next initaggr is an array; its row lengths */
+int fpdim;       /* `(*fs[2])(...)`: an array of that many pointers, or 0 */
+int fpadim;      /* `(*p)[4]`: a pointer to an array of that many, or 0 */
+int fpfn;        /* `(*f(params))(...)`: f is a FUNCTION; its params start here */
 int curstruct;          /* the struct the thing in r0 is, or -1 */
 int curdim2;            /* ...and its inner dimension, if it has one */
+int curdim3;
 int curuns;             /* ...and whether its type is unsigned */
 int binuns;             /* the operator in hand works unsigned */
 int binwid;             /* ...and the width it wraps at */
@@ -1549,7 +1561,10 @@ int addlit(char *b, int n);
 int decode(int t, char *buf);
 
 int ec(int c) {
-    if (toinit) { ibuf[nibuf] = c; nibuf = nibuf + 1; return 0; }
+    if (toinit) {
+        if (nibuf >= MAXIBUF) { __write(2, "initialiser code too large\n", 27); __exit(1); }
+        ibuf[nibuf] = c; nibuf = nibuf + 1; return 0;
+    }
     if (nout >= MAXOUT) { __write(2, "output buffer full\n", 19); __exit(1); }
     out[nout] = c; nout = nout + 1; return 0;
 }
@@ -1736,6 +1751,7 @@ int sadd(int t, int kind, int off, int elem) {
     symbytes[nsym] = declbytes;
     symstruct[nsym] = declstruct;
     symdim2[nsym] = decldim2;
+    symdim3[nsym] = decldim3;
     symvar[nsym] = 0;
     symuns[nsym] = declunsigned;
     symfp[nsym] = declfp;
@@ -1973,6 +1989,7 @@ int cplitexpr(int w, int sst, int isarr, int n) {
     if (sst >= 0) w = el;
     if (infunc) {
         off = alloc_local(size);
+        initisarr = isarr;
         initaggr(0, 0, off, w, sst, size);
         es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
     } else {
@@ -1983,13 +2000,14 @@ int cplitexpr(int w, int sst, int isarr, int n) {
         save = toinit; toinit = 0;
         es(".bss __cl"); en(id); ec(32); en(size); ec(10);
         toinit = save;
+        initisarr = isarr;
         initaggr(2, id, 0, w, sst, size);
         es("  @mem.lea r0, __cl"); en(id); ec(10);
     }
     if (isarr) { lvalue = 0; curptr = 1; curelem = w; if (sst >= 0) curelem = el; }
     else { if (sst >= 0) { lvalue = 1; curptr = 0; curelem = 0; }
            else { lvalue = 1; curptr = declptr; curelem = w; if (declptr) curelem = 8; } }
-    curstruct = sst; cursize = size; curdim2 = 0;
+    curstruct = sst; cursize = size; curdim2 = 0; curdim3 = 0;
     return postfix();
 }
 
@@ -2201,7 +2219,9 @@ int postfix(void) {
             curuns = uu;
             if (row > 0) {
                 /* a row is itself an array: its VALUE is its address */
-                curelem = e / row; curdim2 = 0; curptr = 1; lvalue = 0;
+                curelem = e / row; curptr = 1; lvalue = 0;
+                /* a[i] of a[n][m][k] is itself an [m][k]: its rows are k long */
+                curdim2 = curdim3; curdim3 = 0;
             } else { lvalue = 1; curelem = e; curptr = 0; }
             /* an element of a struct array is itself an aggregate: its value
                is its address, and assigning it copies the whole struct */
@@ -2367,6 +2387,7 @@ int primary(void) {
         curvla = symvla[i];
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
+        curdim3 = symdim3[i];
         curuns = symuns[i];
         if (symkind[i] == 2) {           /* a function designator */
             es("  @mem.lea r0, "); etok(tp); ec(10);
@@ -2656,7 +2677,7 @@ int pf_call(int t) {
     int n; int k;
     /* a call's value is an i64 on the type axis until return types are
        tracked; the fields describe the RESULT, not whatever came before */
-    cursize = 8; curuns = 0; curstruct = 0 - 1; curdim2 = 0;
+    cursize = 8; curuns = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
     if (isname(t, "printf", 6)) {
         int ps; int useit;
         useit = 0;
@@ -2902,7 +2923,10 @@ int tycanon(int k, char *buf) {
 int binary(int level) {
     int k; int e; int lp; int lax; int rax; int ck; int res; int cl;
     char cb[4];
-    if (level > 7) { unary(); return 0; }
+    if (level > 7) {
+        if (havepre) { havepre = 0; return 0; }     /* parsed already, by expr */
+        unary(); return 0;
+    }
     binary(level + 1);
     while (1) {
         k = cur();
@@ -2932,7 +2956,7 @@ int binary(int level) {
             es("  @lit.imm r2, "); en(e); es("\n  .div r0, r0, r2\n");
         } } } }
         binuns = 0; binwid = 8;
-        lvalue = 0; curstruct = 0 - 1; curdim2 = 0;
+        lvalue = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
         if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
                                    if (lp == 0) curptr = 1; }
         else { curptr = 0; cursize = tysize(res); curelem = cursize;
@@ -3060,7 +3084,13 @@ int expr(void) {
             return 0;
         }
     }
-    tp = save; nout = nsave; lvalue = 0;
+    /* Not an assignment: what unary() just parsed is the LEFTMOST operand
+       of the conditional expression.  Hand it down rather than rewinding
+       and parsing it again -- the rewind re-parsed every operand once per
+       enclosing parenthesis, 2^depth, and c-testsuite 00200 took 14 s in
+       the Linux VM, past selfgap's limit.  The Python walker had the same
+       rewind and the same fix. */
+    havepre = 1;
     return cond();
 }
 
@@ -3225,6 +3255,20 @@ int cexpr(void) {
     return c;
 }
 
+/* `[k]` after `a[n][m]`: record k, make the row m*k, and refuse a fourth
+   dimension out loud -- one was silently dropped, and sizeof came out 24
+   for an int[2][3][5]. */
+int dim3n;
+int dim3decl(void) {
+    dim3n = 1; decldim3 = 0;
+    if (cur() != tidx("[", 1)) return 0;
+    adv(); decldim3 = cexpr(); need(tidx("]", 1), "]");
+    dim3n = decldim3;
+    decldim2 = decldim2 * decldim3;
+    if (cur() == tidx("[", 1)) { printf("arrays of more than three dimensions are not supported\n"); __exit(1); }
+    return 0;
+}
+
 int alloc_local(int n) { frameoff = frameoff + n; if (frameoff > framemax) framemax = frameoff; return frameoff; }
 
 int is_typetok(void) {
@@ -3337,6 +3381,7 @@ int is_typeat(int i) {
     if (kind(i) == T_TYPE) return 1;
     if (kind(i) == vfind(TOKV, NTOKV, "struct", 6)) return 1;
     if (kind(i) == vfind(TOKV, NTOKV, "union", 5)) return 1;
+    if (kind(i) == vfind(TOKV, NTOKV, "enum", 4)) return 1;   /* `(enum E) x` */
     if (tdfind(i) >= 0) return 1;
     return 0;
 }
@@ -3371,12 +3416,9 @@ int enumspec(void) {
     while (cur() != tidx("}", 1)) {
         t = adv();
         if (eat(tidx("=", 1))) {
-            neg = 0;
-            if (eat(tidx("-", 1))) { neg = 1; enumneg = 1; }
-            v = 0; k = 0;
-            v = numval(tp);
-            if (neg) v = 0 - v;
-            adv();
+            /* a constant expression: `B = A + 1`, `C = LAST_OTHER_CODE` */
+            v = cexpr();
+            if (v < 0) enumneg = 1;
         }
         declbytes = 4; declstruct = 0 - 1;
         sadd(t, 4, v, 8);                          /* 4 = enum constant */
@@ -3531,8 +3573,14 @@ int stbody(int si) {
             declptr = declspecptr;
             while (eatstar()) declptr = 1;
             t = 0 - 1;
-            if (cur() != tidx(":", 1)) t = adv();     /* `unsigned : 2;` names nothing */
             n = 1;
+            if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+                /* `int (*fptr)();` -- a pointer member, called through
+                   its value; `(*f[4])()` is an array of them */
+                t = fpdecl(); declptr = 1; mst = 0 - 1;
+                if (fpdim > 0) n = fpdim;
+            } }
+            if (t < 0) { if (cur() != tidx(":", 1)) t = adv(); }   /* `unsigned : 2;` names nothing */
             if (cur() == tidx("[", 1)) {
                 adv(); n = cexpr(); need(tidx("]", 1), "]");
             }
@@ -3948,8 +3996,48 @@ int cplit(void) {
     return k - 1;
 }
 
+/* The slots one member takes in the flat list, and where a member starts. */
+int mbslots(int mi) {
+    if (mbskip[mi]) return 0;
+    if (mbstruct[mi] >= 0) return (mbbytes[mi] / stsize[mbstruct[mi]]) * structslots(mbstruct[mi]);
+    if (mbwidth[mi] == 0) { if (mbelem[mi] > 0) return mbbytes[mi] / mbelem[mi]; return 1; }
+    return 1;
+}
+int membstart(int sst, int mt) {
+    int mi; int e; int n;
+    mi = stfirst[sst]; e = mi + stcount[sst]; n = 0;
+    while (mi < e) { if (mi == mt) return n; n = n + mbslots(mi); mi = mi + 1; }
+    return n;
+}
+/* the member of sst holding relative slot rel; its first slot in *ms */
+int memberat(int sst, int rel, int *ms) {
+    int mi; int e; int n; int c;
+    mi = stfirst[sst]; e = mi + stcount[sst]; n = 0;
+    while (mi < e) {
+        c = mbslots(mi);
+        if (rel < n + c) { *ms = n; return mi; }
+        n = n + c; mi = mi + 1;
+    }
+    *ms = n;
+    return 0 - 1;
+}
+
+/* Set by a caller right before initaggr: the object is an ARRAY (an array
+   of one struct is the same size as the struct, so the size cannot tell),
+   and its rows are that many elements long for `a[n][m]`. */
+
+/* An initialiser list, walked as SCALAR SLOTS with a context per brace
+   level: which sub-aggregate the level is (its first slot, how many slots,
+   and a struct or an array's element share).  A designator resolves in its
+   level's context, and a closing brace moves the cursor to the END of its
+   sub-aggregate -- C99 6.7.8p20: `{1, {4}, 9}` puts the 9 in the member after
+   the braced one, whatever the braced list left out. */
 int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
-    int i; int depth; int delta; int ew; int mi;
+    int i; int depth; int delta; int ew; int isarr; int rows; int per; int rows3;
+    int cxbase[32]; int cxslots[32]; int cxst[32]; int cxel[32]; int cxelst[32]; int cxrow[32];
+    int cxsub[32];
+    isarr = initisarr; rows = initrows; rows3 = initrows3;
+    initisarr = 0; initrows = 0; initrows3 = 0;
     /* C99 6.7.8p21: what the initialiser does not mention is ZERO.  Clearing
        the object first is the whole of that rule, and the tape has an op for
        it -- element-wise stores would also have to know which elements were
@@ -3958,46 +4046,83 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
         initaddr(isglobal, gt, off, 0);
         es("  @mem.zero r1, 0, "); en(nbytes); ec(10);
     }
+    per = 1;
+    if (sst >= 0) per = structslots(sst);
+    /* level 1: the object itself */
+    cxbase[1] = 0; cxrow[1] = 0; cxst[1] = 0 - 1; cxel[1] = 0; cxelst[1] = 0 - 1; cxsub[1] = 0;
+    if (isarr) {
+        cxel[1] = per; cxelst[1] = sst;
+        if (rows > 0) { cxel[1] = per * rows; cxrow[1] = rows; cxsub[1] = rows3; }
+        cxslots[1] = 1000000;
+    } else {
+        if (sst >= 0) { cxst[1] = sst; cxslots[1] = per; }
+        else { cxel[1] = 1; cxslots[1] = 1000000; }   /* a scalar, or a flat array */
+    }
     i = 0; depth = 0;
     while (1) {
-        if (cur() == tidx("{", 1)) { adv(); depth = depth + 1; continue; }
+        if (cur() == tidx("{", 1)) {
+            adv(); depth = depth + 1;
+            if (depth >= 32) { printf("initialiser nested too deeply\n"); __exit(1); }
+            if (depth > 1) {
+                int d; int ms; int mi; int el;
+                d = depth - 1;
+                /* what the cursor is at, in the enclosing level */
+                cxst[depth] = 0 - 1; cxel[depth] = 0; cxelst[depth] = 0 - 1; cxrow[depth] = 0;
+                cxsub[depth] = 0;
+                cxbase[depth] = i; cxslots[depth] = 1;          /* a braced scalar */
+                if (cxst[d] >= 0) {
+                    mi = memberat(cxst[d], i - cxbase[d], &ms);
+                    if (mi >= 0) {
+                        cxbase[depth] = cxbase[d] + ms; cxslots[depth] = mbslots(mi);
+                        if (mbstruct[mi] >= 0) {
+                            if (mbbytes[mi] == stsize[mbstruct[mi]]) cxst[depth] = mbstruct[mi];
+                            else { cxel[depth] = structslots(mbstruct[mi]); cxelst[depth] = mbstruct[mi]; }
+                        } else { if (mbslots(mi) > 1) cxel[depth] = 1;
+                                 else { cxbase[depth] = i; cxslots[depth] = 1; } }
+                    }
+                } else { if (cxel[d] > 0) {
+                    el = (i - cxbase[d]) / cxel[d];
+                    cxbase[depth] = cxbase[d] + el * cxel[d];
+                    cxslots[depth] = cxel[d];
+                    if (cxrow[d] > 0) {                  /* a row of a[n][m] */
+                        cxel[depth] = cxel[d] / cxrow[d]; cxelst[depth] = cxelst[d];
+                        if (cxsub[d] > 0) {              /* ...whose elements are rows */
+                            cxel[depth] = (cxel[d] / cxrow[d]) * cxsub[d];
+                            cxrow[depth] = cxsub[d];
+                        }
+                    } else { if (cxelst[d] >= 0) cxst[depth] = cxelst[d];
+                             else { cxbase[depth] = i; cxslots[depth] = 1; } }
+                } }
+                i = cxbase[depth];
+            }
+            continue;
+        }
         if (cur() == tidx("}", 1)) {
-            adv(); depth = depth - 1;
-            if (depth <= 0) break;
+            adv();
+            if (depth <= 1) break;
+            i = cxbase[depth] + cxslots[depth];
+            depth = depth - 1;
             continue;
         }
         if (cur() == tidx(",", 1)) { adv(); continue; }
         if (cur() == T_EOF) break;
-        /* C99 6.7.8p17: a designator moves the cursor, and the elements
-           after it continue from there.  `[k] =` counts ELEMENTS, so a
-           struct element moves it by its whole share of slots. */
-        if (depth == 1) { if (cur() == tidx("[", 1)) {
-            int k; int per;
+        /* C99 6.7.8p17: a designator moves the cursor within ITS level, and
+           the elements after it continue from there */
+        if (cur() == tidx("[", 1)) {
+            int k;
             adv(); k = cexpr(); need(tidx("]", 1), "]"); need(tidx("=", 1), "=");
-            per = 1;
-            if (sst >= 0) per = structslots(sst);
-            i = k * per;
+            if (cxel[depth] > 0) i = cxbase[depth] + k * cxel[depth];
             continue;
-        } }
-        if (depth == 1) { if (cur() == tidx(".", 1)) { if (sst >= 0) {
-            int mi; int j; int per;
+        }
+        if (cur() == tidx(".", 1)) { if (cxst[depth] >= 0) {
+            int mi;
             adv();
-            mi = mbfind(sst, tp);
+            mi = mbfind(cxst[depth], tp);
             if (mi < 0) { printf("no such member at token %d\n", tp); __exit(1); }
             adv(); need(tidx("=", 1), "=");
-            /* the slot whose offset is the member's.  At depth 1 the object
-               IS one struct, so it is element 0 -- the cursor may already
-               sit past the end after `.last = x` */
-            per = structslots(sst);
-            j = 0;
-            while (j < per) {
-                slotat(j, w, sst);
-                if (slotoff - (j / per) * stsize[sst] == mboff[mi]) break;
-                j = j + 1;
-            }
-            i = j;
+            i = cxbase[depth] + membstart(cxst[depth], mi);
             continue;
-        } } }
+        } }
         slotat(i, w, sst);
         delta = slotoff; ew = slotw;
         expr(); loadval();
@@ -4011,9 +4136,6 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
 /* `(*name)(params)` -- a pointer to a function.  The cursor is on the `(`;
    returns the name's token and leaves declfp saying which calling
    convention the pointee uses, because an indirect call has to know it. */
-int fpdim;       /* `(*fs[2])(...)`: an array of that many pointers, or 0 */
-int fpadim;      /* `(*p)[4]`: a pointer to an array of that many, or 0 */
-int fpfn;        /* `(*f(params))(...)`: f is a FUNCTION; its params start here */
 int skipparen(void) {                 /* over a balanced (...) at the cursor */
     int depth; int var;
     depth = 0; var = 0;
@@ -4029,7 +4151,9 @@ int fpdecl(void) {
     int t; int var;
     adv();
     while (eatstar()) { }
-    t = adv();
+    /* the name may be absent: `int (*[4])(int)` as a parameter type */
+    t = 0 - 1;
+    if (cur() == T_ID) t = adv();
     fpdim = 0; fpadim = 0; fpfn = 0 - 1;
     /* `(*pick(int which))(int, int)`: pick takes (int which) and RETURNS
        the pointer -- the declarator nests, and the inner list is pick's */
@@ -4061,7 +4185,7 @@ int local_decl(void) {
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
-        decldim2 = 0; declfp = declspecfp;
+        decldim2 = 0; decldim3 = 0; declfp = declspecfp;
         declptr = declspecptr;
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -4073,7 +4197,7 @@ int local_decl(void) {
                 declbytes = fpdim * 8; declfp = 0;
                 sadd(t, lbind, off, 8);
                 symkind[nsym - 1] = 3;
-                if (eat(tidx("=", 1))) initaggr(0, 0, off, 8, 0 - 1, fpdim * 8);
+                if (eat(tidx("=", 1))) { initisarr = 1; initaggr(0, 0, off, 8, 0 - 1, fpdim * 8); }
                 if (eat(tidx(",", 1))) continue;
                 break;
             }
@@ -4140,12 +4264,14 @@ int local_decl(void) {
             need(vfind(TOKV, NTOKV, "]", 1), "]");
             /* `a[n][m]` is n*m elements in a row; the FIRST index strides a
                whole row, which is what decldim2 records */
-            decldim2 = 0;
+            decldim2 = 0; decldim3 = 0;
             if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                 adv();
                 decldim2 = cexpr();
                 need(vfind(TOKV, NTOKV, "]", 1), "]");
                 n = n * decldim2;
+                dim3decl();
+                n = n * dim3n;
             }
             if (sst >= 0) w = declsz;
             off = alloc_local(n * w);
@@ -4184,7 +4310,10 @@ int local_decl(void) {
             sadd(t, lbind, off, w);
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
-            if (cur() == tidx("{", 1)) initaggr(0, 0, off, w, sst, n * w);
+            if (cur() == tidx("{", 1)) {
+                if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
+                initaggr(0, 0, off, w, sst, n * w);
+            }
             else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
                 initstr(0, 0, off, n);
             } else { expr(); loadval();
@@ -4445,7 +4574,8 @@ int function(int t, int w) {
         havename = 0;
         if (cur() == tidx("(", 1)) {
             if (kind(tp + 1) == tidx("*", 1)) {
-                pt = fpdecl(); declptr = 1; pw = 8; havename = 1;
+                pt = fpdecl(); declptr = 1; pw = 8;
+                if (pt >= 0) havename = 1;
                 if (fpdim > 0) declfp = 0;       /* an array of them decays */
             } else {
                 /* `int f1(int (), int)`: a function type, adjusted to a
@@ -4536,7 +4666,7 @@ int unit(void) {
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declstruct = gstruct;
-            decldim2 = 0; declfp = declspecfp;
+            decldim2 = 0; decldim3 = 0; declfp = declspecfp;
             declptr = declspecptr;
             while (eatstar()) declptr = 1;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -4567,12 +4697,14 @@ int unit(void) {
                 else n = cexpr();
                 need(vfind(TOKV, NTOKV, "]", 1), "]");
                 isarr = 1;
-                decldim2 = 0;
+                decldim2 = 0; decldim3 = 0;
                 if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                     adv();
                     decldim2 = cexpr();
                     need(vfind(TOKV, NTOKV, "]", 1), "]");
                     n = n * decldim2;
+                    dim3decl();
+                    n = n * dim3n;
                 }
                 if (gstruct >= 0) w = declsz;
             }
@@ -4601,7 +4733,7 @@ int unit(void) {
                 cpn = 0 - 1;
                 if (cur() == tidx("(", 1)) cpn = cplit();
                 if (cur() == tidx("{", 1)) {
-                    if (isarr) initaggr(1, t, 0, w, gstruct, n * w);
+                    if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; initaggr(1, t, 0, w, gstruct, n * w); }
                     else { if (gstruct >= 0) initaggr(1, t, 0, w, gstruct, declsz);
                            else initaggr(1, t, 0, w, 0 - 1, n * w); }
                     while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }

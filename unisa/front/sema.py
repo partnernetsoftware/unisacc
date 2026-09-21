@@ -95,11 +95,12 @@ class Struct:
             return
         inner = structs[ty.tag]
         sz = inner.size
+        self.align = max(self.align, inner.align)
         if self.is_union:
             base = 0
             self.size = max(self.size, sz)
         else:
-            align = min(8, sz if sz in (1, 2, 4, 8) else 8)
+            align = min(8, inner.align)
             self.size = (self.size + align - 1) // align * align
             base = self.size
             self.size += sz
@@ -138,7 +139,11 @@ class Struct:
             self.obits.append(None)
             self.size = max(self.size, sz)
             return
-        align = min(8, sz if sz in (1, 2, 4, 8) else 8)
+        # The member's OWN alignment -- an int[3] aligns as an int, a struct
+        # as its widest member.  Guessing from the size put an 8-byte struct
+        # of ints and a 12-byte int array on 8-byte boundaries, so a struct
+        # the platform lays out in 28 bytes came out as 36 here.
+        align = min(8, self._align_of(ty, structs))
         # a plain member starts at the next byte, whatever bits precede it
         self.size = max(self.size, (self.bitpos + 7) // 8)
         self.size = (self.size + align - 1) // align * align

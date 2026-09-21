@@ -283,6 +283,18 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         return load_w(a[0], a[1], a[2], a[3])
     if o == ".st":
         return store_w(a[2], a[0], a[1], a[3])
+    if o == ".zero":
+        # n bytes at [base+disp] <- 0, from r11 (never a tape register),
+        # cleared once, in the widest pieces that fit.  It fell through to
+        # ud2 and nobody noticed: no tape had reached a native image with it.
+        out, k, n = b"\x4d\x31\xdb", 0, a[2]        # xor r11, r11
+        while k < n:
+            wd = 8
+            while k + wd > n:
+                wd //= 2
+            out += store_w(SCR, a[0], a[1] + k, wd)
+            k += wd
+        return out
     if o == "callr":
         lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + 20)
         sub = rex(1, 0, 0, 1) + b"\x81" + modrm(3, 5, 10) + \
