@@ -45,8 +45,13 @@ TIMED OUT after ${LIMIT}s"
     NAME+=("$n"); LINE+=("$(printf '%s' "$out" | tail -1)"); CODE+=("$rc")
     # A swallowed failure is useless in CI -- show the suite when it fails.
     if [ "$rc" -ne 0 ]; then
-        printf '\n--- %s failed ---\n%s\n--- end %s ---\n' \
-            "$n" "$(printf '%s' "$out" | tail -30)" "$n"
+        # The tail is not enough: a per-probe suite prints one `ok` line each
+        # and the ONE that failed is usually alphabetically early, so it
+        # scrolls off.  CI showed `wrong 1` for three pushes without ever
+        # naming the probe.  Show the lines that are not `ok` first.
+        printf '\n--- %s failed ---\n' "$n"
+        printf '%s\n' "$out" | grep -vE '^  ok ' | head -40
+        printf '%s\n--- end %s ---\n' "$(printf '%s' "$out" | tail -20)" "$n"
     fi
 }
 

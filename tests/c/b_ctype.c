@@ -19,8 +19,11 @@ int main(void)
         i = i + 1;
     }
     printf("%d %d %d %d\n", letters, digits, spaces, punct);
+    /* `!= 0`: C99 only promises these return "nonzero", and glibc really
+       does return its class mask (4096 for isxdigit) where BSD returns 1.
+       The probe is about our compiler, not about which nonzero. */
     printf("%c%c %d %d\n", toupper('q'), tolower('Q'),
-           isxdigit('e'), isgraph(' '));
+           isxdigit('e') != 0, isgraph(' ') != 0);
     printf("%d %d %d %d\n", CHAR_BIT, INT_MAX, SHRT_MAX, UCHAR_MAX);
     printf("%d\n", INT_MIN + 2147483647);
 
