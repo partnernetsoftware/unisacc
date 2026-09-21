@@ -292,4 +292,14 @@ static int fprintf(FILE *f, const char *fmt, ...) {
     va_end(ap);
     return r;
 }
+/* The compiler desugars `printf` against a STATIC format string [W-9] -- the
+ * fast path, and the common one.  A format that is not a literal cannot be
+ * desugared at all, so it becomes an ordinary variadic call on this. */
+static int printf(const char *fmt, ...) {
+    va_list ap; int r;
+    va_start(ap, fmt);
+    r = _u_vfmt(NULL, 0, stdout, fmt, ap);
+    va_end(ap);
+    return r;
+}
 #endif

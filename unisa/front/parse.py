@@ -26,6 +26,12 @@ INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
 # argc/argv are not syscalls -- the loader hands them over -- so they get their
 # own tape ops rather than going through `.sys`.
 ARGV_INTRINSIC = ("__argc", "__argv")
+# Variadic, and callable before anything declares them.  Calls are resolved at
+# the END of the walk, so a call may precede its definition -- harmless for an
+# ordinary function, but for these the CALLING CONVENTION differs (every
+# argument on the tape stack, [W-13]), and a definition that arrives later
+# cannot fix a call that was already emitted the other way.
+VARIADIC_LIBC = ("printf", "fprintf", "sprintf", "snprintf")
 
 
 def _basety(words):
@@ -1988,8 +1994,8 @@ class Walker:
 
     def call(self, name):
         self.expect("(")
-        if name == "printf":
-            return self.printf()
+        if name == "printf" and self.at("str"):
+            return self.printf()          # [W-9] static format string
         if name in ("va_start", "va_arg", "va_end"):
             return self.va(name)
         if name in INTRINSIC:
@@ -2040,6 +2046,8 @@ class Walker:
         if fty is not None and fty.kind == "ptr" and fty.to is not None:
             fty = fty.to
         variadic = fty is not None and fty.kind == "fn" and fty.n == 1
+        if fty is None and name in VARIADIC_LIBC:
+            variadic = True
         stacked = len(args) > len(ARGREGS) or variadic
         if stacked:
             # Pushing in source order leaves arg[n-1] nearest the return
