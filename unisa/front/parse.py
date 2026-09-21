@@ -98,7 +98,8 @@ class Walker:
         self.loops = []           # (continue, break, vla depth)
         self.switch = []          # dicts for the open switch statements
         self.ret_label = None     # set while a function body is being walked
-        self.called = {}          # name -> line, checked once the unit ends
+        self.called = {}          # name -> line, checked once the WALK ends
+        self.pending = {}         # ...this unit's share, before renaming
         self.ret_label = None
         # `declspec` sets this; `enum E *e;` reaches do_global WITHOUT one,
         # so it has to exist from the start.
@@ -458,6 +459,14 @@ class Walker:
         -- the call site read it off the symbol.  One used before it is
         declared does not, and C lets that happen.  The fix is local: only
         the instructions this file emitted can mean this file's static."""
+        for nm, line in self.pending.items():
+            # The call site wrote the name it could see.  A static this file
+            # declared later is renamed below, so the name we must find a
+            # definition for is the renamed one -- forgetting this left a
+            # multi-unit program looking for `memcpy` while the definition it
+            # had just been handed was called `memcpy_u0`.
+            self.called.setdefault(self.renames.get(nm, nm), line)
+        self.pending = {}
         if not self.renames:
             return
         for ins in self.em.t.code[self.unit_start:]:
@@ -631,6 +640,25 @@ class Walker:
             j += 1
         return False
 
+    def _braced_str(self, elem):
+        """The token of `{ "..." }` when that is a character array's WHOLE
+        initialiser, else None.
+
+        C99 6.7.8p14: an array of character type may be initialised by a
+        string literal, *optionally enclosed in braces*.  Read as an ordinary
+        brace group instead, `char s[] = {"abc"}` is an array of ONE, and the
+        program silently compares a truncated string."""
+        if not (self.at("{") and self.peek(1).kind == "str"
+                and self.peek(2).kind == "}" and elem is not None):
+            return None
+        t = self.peek(1)
+        if _wide(t):
+            ok = elem.kind in ("i32", "u32") \
+                and elem.size(self.sc.structs) == WCHAR
+        else:
+            ok = elem.size(self.sc.structs) == 1
+        return t if ok else None
+
     def _init_count(self, elem=None):
         """How many elements the initialiser at the cursor supplies, so an
         unsized `int a[] = {...}` can be given its length.  A string counts its
@@ -638,6 +666,9 @@ class Walker:
         t = self.peek()
         if t.kind == "str":
             return len(t.val) + 1
+        st = self._braced_str(elem)
+        if st is not None:
+            return len(st.val) + 1
         if t.kind != "{":
             return 1
         depth, idx, hi, j = 0, -1, 0, self.i
@@ -692,6 +723,11 @@ class Walker:
         takes its share of a flat list.  `{1, 2, 3, {4, 5}}` needs both in the
         same list, which a "braced or flat" flag cannot express."""
         base = self.em.t.syms[sym] - 0x100
+        if ty.kind == "arr" and self._braced_str(ty.to) is not None:
+            self.next()                           # `{`  [C99 6.7.8p14]
+            self.const_init(sym, ty, at)
+            self.expect("}")
+            return
         t = self.peek()
         if t.kind == "str" and not _wide(t) and self._is_charr(ty):
             self.next()
@@ -1133,6 +1169,11 @@ class Walker:
     def local_init(self, ty, off):
         """Same walk as const_init, but each element is a full expression and
         the result is stored rather than baked into the image."""
+        if ty.kind == "arr" and self._braced_str(ty.to) is not None:
+            self.next()                           # `{`  [C99 6.7.8p14]
+            self.local_init(ty, off)
+            self.expect("}")
+            return
         t = self.peek()
         if t.kind == "str" and not _wide(t) and self._is_charr(ty):
             self.next()
@@ -2075,7 +2116,7 @@ class Walker:
             self.em.call_reg(CALLEE)
         else:
             tgt = s0.sym if s0 is not None and s0.kind == "fn" else name
-            self.called.setdefault(tgt, self.peek().line)
+            self.pending.setdefault(tgt, self.peek().line)
             self.em.call(tgt)
         if stacked:
             self.em.frame(-8 * (len(args) + (1 if indirect else 0)))
@@ -2276,6 +2317,7 @@ def compile_units(streams, oracle):
         w.unit_tag = "_u%d" % k if multi else ""
         w.unit_start = len(w.em.t.code)
         w.renames = {}
+        w.pending = {}
         w.tu()
     tape = w.finish_program()
     if "main" not in tape.labels:

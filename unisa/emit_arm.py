@@ -22,8 +22,18 @@ def mem(store, rt, rn, off, wd):
     if off >= 0 and off % wd == 0 and (off // wd) < 4096:
         base = (STS if store else LDS)[wd]
         return w(base | ((off // wd) << 10) | (rn << 5) | rt)
-    base = (STU if store else LDU)[wd]
-    return w(base | ((off & 0x1FF) << 12) | (rn << 5) | rt)
+    if -256 <= off < 256:
+        base = (STU if store else LDU)[wd]
+        return w(base | ((off & 0x1FF) << 12) | (rn << 5) | rt)
+    # Out of BOTH ranges.  imm9 is SIGNED, so masking it was not a truncation
+    # but a sign flip: `[fp, #-260]` encoded as `[fp, #+252]`, and the program
+    # read a different local -- quietly, with no fault.  Anything past 256
+    # bytes of frame needs the address in a register.  [I-22]
+    out = movimm(IP0, abs(off))
+    out += w((0xCB000000 if off < 0 else 0x8B000000)      # sub/add IP0,rn,IP0
+             | (IP0 << 16) | (rn << 5) | IP0)
+    base = (STS if store else LDS)[wd]
+    return out + w(base | (IP0 << 5) | rt)
 
 
 ALU3 = {"add64": 0x8B000000, "sub64": 0xCB000000, "xor64": 0xCA000000,
@@ -99,6 +109,21 @@ def adrp_add(d, pc, target):
         w(0x91000000 | (lo12 << 10) | (d << 5) | d)
 
 
+def _disp(bytes_, bits):
+    """A branch displacement, in instructions, checked against its field.
+
+    Masking an immediate that does not fit is how `[fp, #-260]` became
+    `[fp, #+252]` -- a sign flip, silently, in code that ran.  [I-22]  The
+    branch fields are wide enough that nothing we compile has reached them
+    yet, so the only useful thing to do with an overflow is refuse."""
+    v = bytes_ >> 2
+    lim = 1 << (bits - 1)
+    if not -lim <= v < lim:
+        raise AssertionError(
+            "arm64: branch of %d bytes does not fit in imm%d" % (bytes_, bits))
+    return v
+
+
 def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
            text_va=0, imps=None):
     o, a = ins.op, ins.args
@@ -135,10 +160,18 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return adrp_add(IP1, text_va + off, a[0] + shift) + \
             w(0xF9000000 | (IP1 << 5) | N(a[1]))
     if o == ".frame":
-        n = a[0]
-        base = 0xD1000000 if n >= 0 else 0x91000000      # sub/add imm
-        sp = 7
-        return w(base | ((abs(n) & 0xFFF) << 10) | (sp << 5) | sp)
+        n, sp = a[0], 7                     # the tape SP is x7, not real sp
+        if abs(n) < 4096:
+            base = 0xD1000000 if n >= 0 else 0x91000000  # sub/add imm12
+            return w(base | (abs(n) << 10) | (sp << 5) | sp)
+        # imm12 stops at 4095 and masking it moved SP by the wrong amount --
+        # a Blowfish key is a 4,168-byte local, so its frame landed on top of
+        # the caller's.  Past the immediate's range the amount goes in a
+        # register.  Same lesson as [I-22]: a field that is too small must be
+        # detected, never masked.
+        return movimm(IP0, abs(n)) + \
+            w((0xCB000000 if n >= 0 else 0x8B000000)     # sub/add x7,x7,x16
+              | (IP0 << 16) | (sp << 5) | sp)
     if o == ".lea":
         sym = a[1]
         if syms and sym in syms:
@@ -220,17 +253,17 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
             return _winapi(ins, off, shift, text_va, imps)
         return w(0xD4000001)                         # svc #0
     if o == "jump":
-        return w(0x14000000 | (((labels[a[0]] - off) >> 2) & 0x3FFFFFF))
+        return w(0x14000000 | (_disp(labels[a[0]] - off, 26) & 0x3FFFFFF))
     if o == "call":
         # tape semantics: push the return address on the tape stack (x7).  `bl`
         # would put it in lr, which recursion clobbers.
         return adr(IP1, text_va + off, text_va + off + 16) + \
             w(0xD1002000 | (7 << 5) | 7) + \
             w(0xF9000000 | (7 << 5) | IP1) + \
-            w(0x14000000 | (((labels[a[0]] - (off + 12)) >> 2) & 0x3FFFFFF))
+            w(0x14000000 | (_disp(labels[a[0]] - (off + 12), 26) & 0x3FFFFFF))
     if o == "jumpz":                                 # cbz Xt, label
-        return w(0xB4000000 | ((((labels[a[1]] - off) >> 2) & 0x7FFFF) << 5) |
-                 N(a[0]))
+        return w(0xB4000000 | ((_disp(labels[a[1]] - off, 19) & 0x7FFFF) << 5)
+                 | N(a[0]))
     return None
 
 

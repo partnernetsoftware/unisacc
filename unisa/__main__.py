@@ -225,7 +225,7 @@ def cmd_compile(a):
             with open(a.file[0], encoding="latin-1") as f:
                 t = tparse(f.read())
         else:
-            t = compile_file(a.file, o, a.target)
+            t = compile_file(a.file, o, a.target, getattr(a, "I", ()))
     except Exception as e:
         print("%s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 1

@@ -226,6 +226,41 @@ def _splice(src):
     return "\n".join(out)
 
 
+def _decomment(src):
+    """C99 translation phase 3: every comment becomes one space, and it
+    happens BEFORE directives are processed in phase 4.
+
+    Leaving it to the lexer -- which is phase 7 -- meant that
+    `#define N 32   // a note` captured the note as part of the replacement
+    list, so every later use of N commented out the rest of ITS line.  Real
+    code found it: `BYTE hash[SHA256_BLOCK_SIZE] = {...}` lost its `]` and the
+    parser ran to end of file.  A block comment is replaced by a space plus
+    its own newlines, so nothing below it moves."""
+    out, i, n = [], 0, len(src)
+    while i < n:
+        c = src[i]
+        if c == '"' or c == "'":
+            # a comment opener inside a literal is not a comment
+            j = i + 1
+            while j < n and src[j] != c:
+                j += 2 if src[j] == "\\" else 1
+            out.append(src[i:j + 1])
+            i = j + 1
+        elif c == "/" and i + 1 < n and src[i + 1] == "/":
+            j = src.find("\n", i)
+            i = n if j < 0 else j            # the newline itself stays
+            out.append(" ")
+        elif c == "/" and i + 1 < n and src[i + 1] == "*":
+            j = src.find("*/", i + 2)
+            body = src[i:n if j < 0 else j + 2]
+            out.append(" " + "\n" * body.count("\n"))
+            i = n if j < 0 else j + 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                _seen=None):
     """Returns (text, macros).
@@ -239,7 +274,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     here = os.path.dirname(os.path.abspath(path)) if path else None
     out = []
     stack = []            # [(taking, seen_true)]
-    src = _splice(src)
+    src = _decomment(_splice(src))
     for raw in src.splitlines():
         m = DIRECTIVE.match(raw)
         live = all(t for (t, _) in stack)
@@ -329,9 +364,17 @@ def _subst(body, params, args):
                   .replace("\\", "\\\\").replace('"', '\\"'), body)
     if "##" in body:
         return _paste(body, amap)
-    for pn, av in zip(params, args):
-        body = re.sub(r"\b%s\b" % re.escape(pn), lambda m, a=av: a, body)
-    return body
+    # ONE pass, all parameters at once.  Substituting them in turn rewrites
+    # text that an earlier argument had just put there, and the names in
+    # question are usually the same few letters:
+    #
+    #   #define FF(a,b,c,d,...) { a += F(b,c,d); a = b + ROT(a,s); }
+    #   FF(d,a,b,c,...)
+    #
+    # a->d makes every `a` a `d`, and then d->c turns all of them into `c`.
+    # MD5 is written exactly like that, and the rounds that should have
+    # written b and d wrote c instead -- a wrong digest, no diagnostic.
+    return re.sub(r"\b(" + pat + r")\b", lambda m: amap[m.group(1)], body)
 
 
 

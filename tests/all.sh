@@ -13,6 +13,8 @@
 #   ccrun       unisacc compiles C; the reference VM runs it [A-21]
 #   selfhost    unisacc built two ways agrees with the Python front end [A-20]
 #   multi       several translation units, one program -- against cc [A-30]
+#   tools       real library code by other people, with its own test
+#               vectors, several files each [A-31]
 #   selfgap     how much C the two front ends DISAGREE about, as a ratchet:
 #               the one number that was missing while the debt grew [A-29]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
@@ -58,6 +60,9 @@ run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh examples/*.c tests/c/a_*.c"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 run multi      ./tests/multi.sh
+if [ -d corpus/crypto-algorithms ]; then
+    run tools  env FETCH=0 ./tests/tools.sh
+fi
 run selfgap    ./tests/selfgap.sh
 # bootstrap needs the host toolchain to turn a tape back into a binary
 if [ "$(uname -s)" = "Darwin" ]; then

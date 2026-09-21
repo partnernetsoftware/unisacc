@@ -134,6 +134,7 @@ in a twentieth of a second, and the SGD control arm lives in
 | `multi` | two translation units compiled into one program, against `cc a.c b.c` |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
+| `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), eight algorithms, several files each, with their own known-answer tests |
 
 ## Layout
 
@@ -170,6 +171,27 @@ deliberately not chasing: floating point, GCC extensions, `_Generic`, and one
 place where this subset evaluates `int` arithmetic at 64 bits on purpose.
 `tests/corpus.baseline` is a ratchet, so `pass` may only go up.
 
+But a corpus of single files written *for compilers* is not the same as
+library code written *to be used*. `tests/tools.sh` runs the other kind —
+Brad Conte's crypto-algorithms, eight algorithms, each a `.c` and a `.h` and
+its own known-answer test, all of it multi-file, none of it floating point:
+
+```
+tools 8   pass 8   wrong 0   unsupported 0   skip 0
+```
+
+It read `pass 2` the first time, and the six defects behind that are the most
+useful thing this project has measured in a while — four of them produced a
+*wrong answer* rather than a crash, and two were invisible to all six `--fold`
+targets because the interpreter does not model addressing modes. Comments were
+being stripped by the lexer instead of before the directives (so
+`#define N 32  // note` commented out the rest of every line that used N);
+macro parameters were substituted one at a time instead of simultaneously (so
+MD5's `FF(d,a,b,c,…)` rounds wrote the wrong variable); and arm64's
+`[fp, #-off]` immediate is a *signed* 9-bit field, which we were masking — so
+every function with more than 256 bytes of frame silently read the wrong local.
+`prd.md` §6 E-45 has the full list.
+
 ## Prior art
 
 `research/prior-art.md` is a survey of the neighbouring literature, and it is
@@ -194,7 +216,7 @@ the same part — `prd.md` §5.5 keeps the full audit.
 | **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — 11 stages, 4,560 keys, no fallback path |
 | **the targets** | six images, real machines, identical behaviour | **there** — `fat` is multi-arch within one OS; a tri-format single file is not started |
 | **the language** | someone else's C compiles, or is refused for a written reason | **there for this corpus** — 209/220, `unsupported 0`; floating point is a whole missing axis |
-| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **half** — see the self-hosting gap above |
+| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **moving** — several files per program, a libc floor, and eight real multi-file libraries passing their own tests; `unisacc` still needs Python to turn its tape into a binary |
 
 Nothing here is blocked on a question we cannot answer: `[P-8]` proves the
 weights exist for any finite table, `[F-5]` says accuracy below 1.000 is a
