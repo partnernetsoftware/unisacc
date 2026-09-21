@@ -12,22 +12,6 @@ RANK = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
         "i32": 3, "u32": 3, "i64": 4, "u64": 4}
 
 
-def unsigned_result(t1, t2):
-    """Is `t1 op t2` an unsigned operation?  The same rule the type table
-    uses (C99 6.3.1.8), asked here because the WALKER picks the machine op
-    and the table only reports the result type."""
-    def promote(t):
-        k = t.kind if t is not None else "i64"
-        return "i32" if RANK.get(k, 9) < 3 else k
-    a, b = promote(t1), promote(t2)
-    ua, ub = a[0] == "u", b[0] == "u"
-    if not (ua or ub):
-        return False
-    if ua and ub:
-        return True
-    u, sg = (a, b) if ua else (b, a)
-    # the other side may be a pointer or an aggregate, which has no rank
-    return RANK.get(u, 9) >= RANK.get(sg, 9)
 NARROW = ("i8", "i16", "i32", "u8", "u16", "u32")
 
 # The type table's TOPS axis is canonical: one relational op stands for all

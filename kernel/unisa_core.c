@@ -717,6 +717,33 @@ char *PPACTV = "take\0skip\0pop\0macro\0";
 char *NTV = "top\0stmt\0unary\0postfix\0after_name\0";
 #define NNTV 5
 
+char *TYSV = "void\0i8\0i16\0i32\0i64\0u8\0u16\0u32\0u64\0ptr\0arr\0struct\0fn\0";
+#define NTYSV 13
+
+char *TOPSV = "+\0-\0*\0/\0%\0<\0==\0=\0&\0[]\0.\0call\0sizeof\0,\0un*\0|\0^\0<<\0>>\0";
+#define NTOPSV 19
+
+char *TYOUTV = "void\0i8\0i16\0i32\0i64\0u8\0u16\0u32\0u64\0ptr\0arr\0struct\0fn\0illegal\0";
+#define NTYOUTV 14
+
+char *SCTXV = "top\0param\0local\0expr\0sizeof\0field\0";
+#define NSCTXV 6
+
+char *SKINDV = "type_kw\0id\0typedef_id\0star\0lparen\0";
+#define NSKINDV 5
+
+char *SACTV = "bind_global\0bind_param\0bind_local\0lookup\0type_name\0fn_name\0field\0";
+#define NSACTV 7
+
+char *IRFAMV = "alu\0mem\0ctrl\0call\0lit\0";
+#define NIRFAMV 5
+
+char *IRFLAV = "add\0sub\0mul\0lt\0le\0gt\0ge\0eq\0ne\0neg\0and\0or\0xor\0shl\0shr\0ult\0ule\0ugt\0uge\0lshr\0load\0store\0lea\0ld\0st\0zero\0jump\0jumpz\0ret\0call\0push\0arg\0frame\0callr\0imm\0print\0write\0exit\0";
+#define NIRFLAV 38
+
+char *IRRECV = "add64\0and64\0arg\0call\0callpush\0callr\0eq\0exit\0frame\0imm\0jump\0jumpz\0ld\0lea\0load64\0lshr64\0mul64\0ne\0or64\0print\0ret\0shl64\0shr64\0sle64\0slt64\0st\0store64\0sub64\0ule64\0ult64\0write\0xor64\0zero\0bad\0";
+#define NIRRECV 34
+
 /* the kernel -- the deploy kernel. [K-1] [K-2] [K-5]
  *
  * embed -> match -> add -> argmax.  No softmax, no libm, no malloc, and -- for

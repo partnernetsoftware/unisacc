@@ -717,6 +717,33 @@ char *PPACTV = "take\0skip\0pop\0macro\0";
 char *NTV = "top\0stmt\0unary\0postfix\0after_name\0";
 #define NNTV 5
 
+char *TYSV = "void\0i8\0i16\0i32\0i64\0u8\0u16\0u32\0u64\0ptr\0arr\0struct\0fn\0";
+#define NTYSV 13
+
+char *TOPSV = "+\0-\0*\0/\0%\0<\0==\0=\0&\0[]\0.\0call\0sizeof\0,\0un*\0|\0^\0<<\0>>\0";
+#define NTOPSV 19
+
+char *TYOUTV = "void\0i8\0i16\0i32\0i64\0u8\0u16\0u32\0u64\0ptr\0arr\0struct\0fn\0illegal\0";
+#define NTYOUTV 14
+
+char *SCTXV = "top\0param\0local\0expr\0sizeof\0field\0";
+#define NSCTXV 6
+
+char *SKINDV = "type_kw\0id\0typedef_id\0star\0lparen\0";
+#define NSKINDV 5
+
+char *SACTV = "bind_global\0bind_param\0bind_local\0lookup\0type_name\0fn_name\0field\0";
+#define NSACTV 7
+
+char *IRFAMV = "alu\0mem\0ctrl\0call\0lit\0";
+#define NIRFAMV 5
+
+char *IRFLAV = "add\0sub\0mul\0lt\0le\0gt\0ge\0eq\0ne\0neg\0and\0or\0xor\0shl\0shr\0ult\0ule\0ugt\0uge\0lshr\0load\0store\0lea\0ld\0st\0zero\0jump\0jumpz\0ret\0call\0push\0arg\0frame\0callr\0imm\0print\0write\0exit\0";
+#define NIRFLAV 38
+
+char *IRRECV = "add64\0and64\0arg\0call\0callpush\0callr\0eq\0exit\0frame\0imm\0jump\0jumpz\0ld\0lea\0load64\0lshr64\0mul64\0ne\0or64\0print\0ret\0shl64\0shr64\0sle64\0slt64\0st\0store64\0sub64\0ule64\0ult64\0write\0xor64\0zero\0bad\0";
+#define NIRRECV 34
+
 /* the kernel -- the deploy kernel. [K-1] [K-2] [K-5]
  *
  * embed -> match -> add -> argmax.  No softmax, no libm, no malloc, and -- for
@@ -802,6 +829,7 @@ int infer(int s, int *key, int head) {
 
 char src[MAXSRC];
 int nsrc;
+int inf(int st, int *key, int head);
 
 int tkind[MAXTOK];      /* index into TOKV */
 int tpos[MAXTOK];       /* offset of the token text in src */
@@ -1277,7 +1305,7 @@ int preprocess(void) {
                 if (d == 4) { if (ndepth > 0) { if (seenst[ndepth-1] == 0) flag = 1; } }
                 if (d > 4) flag = 1;
                 key[0] = d; key[1] = flag; key[2] = 0; key[3] = 0;
-                a = infer(S_PP, key, 0);          /* the table decides */
+                a = inf(S_PP, key, 0);          /* the table decides */
                 /* the table files `include` under `macro` [G-4 corrected] */
                 if (d == 7) { if (live) { if (a == 3) {
                     if (incdo(ls, i, we)) {
@@ -1807,6 +1835,18 @@ int charclass(int c) {
 int at(int i) { if (i >= nsrc) return 0 - 1; return src[i] & 255; }
 
 /* does src[p..p+L) equal the C string nm? */
+int srcin(char *a, int L, char *nm) {
+    int k;
+    k = 0;
+    while (k < L) {
+        if (nm[k] == 0) return 0;
+        if ((a[k] & 255) != (nm[k] & 255)) return 0;
+        k = k + 1;
+    }
+    if (nm[L] != 0) return 0;
+    return 1;
+}
+
 int srcis(int p, int L, char *nm) {
     int k;
     k = 0;
@@ -1848,7 +1888,7 @@ int lex(void) {
         key[0] = charclass(at(i));
         key[1] = charclass(at(i + 1));
         key[2] = 0; key[3] = 0;
-        a = infer(S_LEX, key, 0);              /* the table decides [W-2] */
+        a = inf(S_LEX, key, 0);                /* the table decides [W-2] */
         if (a == 0) {                          /* skip */
             if (at(i) < 0) {
                 tkind[ntok] = 0; tpos[ntok] = i; tlen[ntok] = 0;
@@ -2033,6 +2073,7 @@ int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
+int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
 int symstruct[MAXSYM];      /* index into the struct table, or -1 */
 
 /* ---- struct and union ------------------------------------------------
@@ -2058,6 +2099,7 @@ int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
 int declunsigned;       /* the specifier said `unsigned` */
+int declfp;             /* the declarator was `(*name)(...)`: 1, or 2 if `...` */
 int declspecptr;        /* the specifier itself was a pointer typedef */
 
 /* ---- typedef ---------------------------------------------------------
@@ -2073,7 +2115,7 @@ int curstruct;          /* the struct the thing in r0 is, or -1 */
 int curdim2;            /* ...and its inner dimension, if it has one */
 int curuns;             /* ...and whether its type is unsigned */
 int binuns;             /* the operator in hand works unsigned */
-int binw4;              /* ...and in 32 bits (unsigned int, not long) */
+int binwid;             /* ...and the width it wraps at */
 int fnvar;              /* the function being compiled takes `...` */
 int fnnfixed;           /* ...and this many named parameters */
 int nsym;
@@ -2139,7 +2181,67 @@ int ec(int c) {
     out[nout] = c; nout = nout + 1; return 0;
 }
 
-int es(char *s) { int i; i = 0; while (s[i]) { ec(s[i] & 255); i = i + 1; } return 0; }
+/* ---- irsel: every instruction name is chosen by the net [W-6] -----------
+   The emitter writes `@family.flavor` where the Python walker calls
+   `recipe(family, flavor)`, and the name is resolved HERE, at the one exit
+   every emitted byte passes through -- so no tape mnemonic in this file is
+   a hand-made choice.  The recipe -> mnemonic step afterwards is spelling
+   (RECIPE_OP on the Python side), not a decision. */
+int nask[16];
+
+int inf(int st, int *key, int head) {
+    nask[st] = nask[st] + 1;
+    return infer(st, key, head);
+}
+
+int irsel(char *fam, int fl, char *flav, int vl) {
+    int key[4];
+    key[0] = vfind(IRFAMV, NIRFAMV, fam, fl);
+    key[1] = vfind(IRFLAV, NIRFLAV, flav, vl);
+    key[2] = 0; key[3] = 0;
+    if (key[0] < 0) { __write(2, "irsel: no family\n", 17); __exit(1); }
+    if (key[1] < 0) { __write(2, "irsel: no flavor\n", 17); __exit(1); }
+    return inf(S_IRSEL, key, 0);
+}
+
+int emitrecipe(int r) {
+    int p; int L; int k;
+    p = voff(IRRECV, r); L = vlen(IRRECV, r);
+    if (srcin(IRRECV + p, L, "bad")) { __write(2, "irsel: bad recipe\n", 18); __exit(1); }
+    if (srcin(IRRECV + p, L, "callpush")) { ec(99); ec(97); ec(108); ec(108); return 0; }
+    /* the builtins are spelled with a leading dot */
+    if (srcin(IRRECV + p, L, "lea")) ec(46);
+    if (srcin(IRRECV + p, L, "ld")) ec(46);
+    if (srcin(IRRECV + p, L, "st")) ec(46);
+    if (srcin(IRRECV + p, L, "zero")) ec(46);
+    if (srcin(IRRECV + p, L, "arg")) ec(46);
+    if (srcin(IRRECV + p, L, "frame")) ec(46);
+    if (srcin(IRRECV + p, L, "print")) ec(46);
+    if (srcin(IRRECV + p, L, "write")) ec(46);
+    if (srcin(IRRECV + p, L, "exit")) ec(46);
+    k = 0;
+    while (k < L) { ec(IRRECV[p + k] & 255); k = k + 1; }
+    return 0;
+}
+
+int es(char *s) {
+    int i; int fs; int fe; int vs; int ve;
+    i = 0;
+    while (s[i]) {
+        if ((s[i] & 255) == 64) {                   /* @family.flavor */
+            fs = i + 1; fe = fs;
+            while (s[fe]) { if ((s[fe] & 255) == 46) break; fe = fe + 1; }
+            vs = fe + 1; ve = vs;
+            while (s[ve]) { if (isal(s[ve] & 255) == 0) break; ve = ve + 1; }
+            emitrecipe(irsel(s + fs, fe - fs, s + vs, ve - vs));
+            i = ve;
+            continue;
+        }
+        ec(s[i] & 255);
+        i = i + 1;
+    }
+    return 0;
+}
 
 int en(long v) {
     char b[24]; int n; int neg;
@@ -2263,6 +2365,7 @@ int sadd(int t, int kind, int off, int elem) {
     symdim2[nsym] = decldim2;
     symvar[nsym] = 0;
     symuns[nsym] = declunsigned;
+    symfp[nsym] = declfp;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -2285,6 +2388,22 @@ int need(int k, char *what) {
 }
 
 int tdfind(int t);
+int infunc;                        /* inside a function body */
+
+/* [W-5] the scope table, asked at the same points and with the same key as
+   the Python walker's `sc.act(ctx, tok)`.  Its answer steers nothing on
+   EITHER side yet -- see prd.md E-52 -- but a stage the self-hosted
+   compiler does not even ask is a stage it has quietly dropped. */
+int scopeact(char *ctx, int cl, int t) {
+    int key[4]; int k;
+    k = vfind(SKINDV, NSKINDV, "id", 2);
+    if (kind(t) == T_TYPE) k = vfind(SKINDV, NSKINDV, "type_kw", 7);
+    if (tdfind(t) >= 0) k = vfind(SKINDV, NSKINDV, "typedef_id", 10);
+    if (kind(t) == tidx("*", 1)) k = vfind(SKINDV, NSKINDV, "star", 4);
+    if (kind(t) == tidx("(", 1)) k = vfind(SKINDV, NSKINDV, "lparen", 6);
+    key[0] = vfind(SCTXV, NSCTXV, ctx, cl); key[1] = k; key[2] = 0; key[3] = 0;
+    return inf(S_SCOPE, key, 0);
+}
 
 /* Project the current token onto the parse table's TOK axis.  A typedef name
    lexes as an identifier -- the lexer runs over the whole file before the
@@ -2298,13 +2417,13 @@ int tokclass(void) {
 }
 
 int ask(int nt) { int key[4]; key[0] = nt; key[1] = tokclass(); key[2] = 0; key[3] = 0;
-                  return infer(S_PARSE, key, 0); }
+                  return inf(S_PARSE, key, 0); }
 
 /* ---- expressions ----------------------------------------------------- */
 int expr(void);
 
-int push(void) { es("  .frame 8\n  store64 [r7+0], r0\n"); return 0; }
-int pop1(void) { es("  load64 r1, [r7+0]\n  .frame -8\n"); return 0; }
+int push(void) { es("  @call.frame 8\n  @mem.store [r7+0], r0\n"); return 0; }
+int pop1(void) { es("  @mem.load r1, [r7+0]\n  @call.frame -8\n"); return 0; }
 
 int lvalue;        /* 1 when r0 holds an ADDRESS, not a value */
 int curelem;       /* element width of the thing in r0 */
@@ -2320,15 +2439,15 @@ int stw(void) { if (curptr) return 8; return curelem; }
    -- whose value is its address, so there is nothing to load. */
 int eload(int w) {
     if (w == 0) return 0;
-    if (w == 8) { es("  load64 r0, [r0+0]\n"); return 0; }
-    es("  .ld r0, [r0+0], "); en(w); ec(10);
+    if (w == 8) { es("  @mem.load r0, [r0+0]\n"); return 0; }
+    es("  @mem.ld r0, [r0+0], "); en(w); ec(10);
     return 0;
 }
 
 int estore(int w) {                              /* [r1] = r0 */
     if (w == 0) return 0;
-    if (w == 8) { es("  store64 [r1+0], r0\n"); return 0; }
-    es("  .st [r1+0], r0, "); en(w); ec(10);
+    if (w == 8) { es("  @mem.store [r1+0], r0\n"); return 0; }
+    es("  @mem.st [r1+0], r0, "); en(w); ec(10);
     return 0;
 }
 
@@ -2340,9 +2459,9 @@ int loadval(void) {
         /* `.ld` sign-extends; an unsigned narrow object must not.  A
            uint8_t of 0xa2 printed as ffffffffffffffa2 until this. */
         if (curuns) { if (curptr == 0) {
-            if (w == 1) es("  imm r2, 255\n  and64 r0, r0, r2\n");
-            if (w == 2) es("  imm r2, 65535\n  and64 r0, r0, r2\n");
-            if (w == 4) es("  imm r2, 4294967295\n  and64 r0, r0, r2\n");
+            if (w == 1) es("  @lit.imm r2, 255\n  @alu.and r0, r0, r2\n");
+            if (w == 2) es("  @lit.imm r2, 65535\n  @alu.and r0, r0, r2\n");
+            if (w == 4) es("  @lit.imm r2, 4294967295\n  @alu.and r0, r0, r2\n");
         } }
         lvalue = 0;
     }
@@ -2354,12 +2473,12 @@ int primary(void);
 int unary(void) {
     int p;
     p = ask(2);
-    if (p == P_NEG) { adv(); unary(); loadval(); es("  imm r1, 0\n  sub64 r0, r1, r0\n"); return 0; }
-    if (p == P_NOT) { adv(); unary(); loadval(); es("  imm r1, 0\n  eq r0, r0, r1\n"); return 0; }
+    if (p == P_NEG) { adv(); unary(); loadval(); es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n"); return 0; }
+    if (p == P_NOT) { adv(); unary(); loadval(); es("  @lit.imm r1, 0\n  @alu.eq r0, r0, r1\n"); return 0; }
     if (p == P_DEREF) { adv(); unary(); loadval(); lvalue = 1; curptr = 0; return 0; }
     if (p == P_BNOT) {                  /* ~x is x ^ -1 */
         adv(); unary(); loadval();
-        es("  imm r1, -1\n  xor64 r0, r0, r1\n");
+        es("  @lit.imm r1, -1\n  @alu.xor r0, r0, r1\n");
         lvalue = 0; curptr = 0; return 0;
     }
     if (p == P_UPLUS) { adv(); unary(); loadval(); lvalue = 0; return 0; }
@@ -2372,11 +2491,11 @@ int unary(void) {
         lvalue = 0;
         push();                                  /* address */
         eload(e);
-        es("  imm r1, ");
+        es("  @lit.imm r1, ");
         if (curptr) en(curelem); else en(1);
         ec(10);
-        if (op == tidx("++", 2)) es("  add64 r0, r0, r1\n");
-        else es("  sub64 r0, r0, r1\n");
+        if (op == tidx("++", 2)) es("  @alu.add r0, r0, r1\n");
+        else es("  @alu.sub r0, r0, r1\n");
         pop1();
         estore(e);
         return 0;
@@ -2384,6 +2503,7 @@ int unary(void) {
     if (p == P_SIZEOF) {
         int sz; int nsave;
         adv();
+        scopeact("sizeof", 6, tp + 1);
         if (cur() == tidx("(", 1)) {
             if (is_typeat(tp + 1)) {                 /* sizeof(TYPE) */
                 adv();
@@ -2394,7 +2514,7 @@ int unary(void) {
                     adv(); sz = sz * cexpr(); need(tidx("]", 1), "]");
                 }
                 need(tidx(")", 1), ")");
-                es("  imm r0, "); en(sz); ec(10);
+                es("  @lit.imm r0, "); en(sz); ec(10);
                 lvalue = 0; curelem = 8; curptr = 0;
                 return 0;
             }
@@ -2406,7 +2526,7 @@ int unary(void) {
         unary();
         nout = nsave;
         sz = cursize;
-        es("  imm r0, "); en(sz); ec(10);
+        es("  @lit.imm r0, "); en(sz); ec(10);
         lvalue = 0; curelem = 8; curptr = 0;
         return 0;
     }
@@ -2430,13 +2550,13 @@ int unary(void) {
                     if (cuns) {
                         /* unsigned: keep the low bits, zero the rest --
                            `(unsigned char)255 >> 4` is 15, not -1 */
-                        if (csz == 1) es("  imm r2, 255\n  and64 r0, r0, r2\n");
-                        if (csz == 2) es("  imm r2, 65535\n  and64 r0, r0, r2\n");
-                        if (csz == 4) es("  imm r2, 4294967295\n  and64 r0, r0, r2\n");
+                        if (csz == 1) es("  @lit.imm r2, 255\n  @alu.and r0, r0, r2\n");
+                        if (csz == 2) es("  @lit.imm r2, 65535\n  @alu.and r0, r0, r2\n");
+                        if (csz == 4) es("  @lit.imm r2, 4294967295\n  @alu.and r0, r0, r2\n");
                     } else {
-                        es("  .frame 8\n  .st [r7+0], r0, "); en(csz);
-                        es("\n  .ld r0, [r7+0], "); en(csz);
-                        es("\n  .frame -8\n");
+                        es("  @call.frame 8\n  @mem.st [r7+0], r0, "); en(csz);
+                        es("\n  @mem.ld r0, [r7+0], "); en(csz);
+                        es("\n  @call.frame -8\n");
                     }
                 }
             }
@@ -2461,14 +2581,14 @@ int postfix(void) {
             push();                                  /* address */
             eload(e2);
             push();                                  /* old value */
-            es("  imm r0, 1\n");
+            es("  @lit.imm r0, 1\n");
             if (op == tidx("++", 2)) emit_binop(tidx("+", 1));
             else emit_binop(tidx("-", 1));
             pop1();                                  /* address */
             estore(e2);
-            es("  imm r2, 1\n");
-            if (op == tidx("++", 2)) es("  sub64 r0, r0, r2\n");
-            else es("  add64 r0, r0, r2\n");
+            es("  @lit.imm r2, 1\n");
+            if (op == tidx("++", 2)) es("  @alu.sub r0, r0, r2\n");
+            else es("  @alu.add r0, r0, r2\n");
             curelem = e2;
         } else {
         if (p == P_FIELD) {
@@ -2481,6 +2601,7 @@ int postfix(void) {
                 printf("member access on a non-struct at token %d\n", tp);
                 __exit(1);
             }
+            scopeact("field", 5, tp);
             mt = adv();
             mi = mbfind(curstruct, mt);
             if (mi < 0) {
@@ -2488,8 +2609,8 @@ int postfix(void) {
                 __exit(1);
             }
             if (mboff[mi]) {
-                es("  imm r2, "); en(mboff[mi]);
-                es("\n  add64 r0, r0, r2\n");
+                es("  @lit.imm r2, "); en(mboff[mi]);
+                es("\n  @alu.add r0, r0, r2\n");
             }
             lvalue = 1;
             curelem = mbwidth[mi];
@@ -2514,9 +2635,9 @@ int postfix(void) {
             loadval();
             push();
             expr(); loadval();
-            if (e != 1) { es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); }
+            if (e != 1) { es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); }
             pop1();
-            es("  add64 r0, r1, r0\n");
+            es("  @alu.add r0, r1, r0\n");
             need(vfind(TOKV, NTOKV, "]", 1), "]");
             cursize = e;
             curuns = uu;
@@ -2532,6 +2653,46 @@ int postfix(void) {
 }
 
 int pf_call(int t);
+
+/* A call through a variable that holds a function's address.  The callee
+   goes on the stack UNDER the arguments; the convention is the pointee's --
+   stacked if it is variadic (declfp 2) or the call has more than six. */
+int icall(int si, int t) {
+    int n; int k; int st;
+    if (symkind[si] == 0) { es("  @mem.lea r0, g_"); etok(t); es("\n  @mem.load r0, [r0+0]\n"); }
+    else { es("  @mem.load r0, [r6-"); en(symoff[si]); es("]\n"); }
+    adv();
+    push();
+    need(tidx("(", 1), "(");
+    n = 0;
+    while (cur() != tidx(")", 1)) {
+        expr(); loadval(); push(); n = n + 1;
+        if (eat(tidx(",", 1)) == 0) break;
+    }
+    need(tidx(")", 1), ")");
+    st = 0;
+    if (symfp[si] == 2) st = 1;
+    if (n > 6) st = 1;
+    if (st) {
+        k = 0;
+        while (k < n / 2) {
+            es("  @mem.load r2, [r7+"); en(8 * k); es("]\n");
+            es("  @mem.load r1, [r7+"); en(8 * (n - 1 - k)); es("]\n");
+            es("  @mem.store [r7+"); en(8 * k); es("], r1\n");
+            es("  @mem.store [r7+"); en(8 * (n - 1 - k)); es("], r2\n");
+            k = k + 1;
+        }
+        es("  @mem.load r5, [r7+"); en(8 * n); es("]\n  @call.callr r5\n");
+        es("  @call.frame -"); en(8 * (n + 1)); ec(10);
+    } else {
+        if (n > 5) { printf("indirect call: six register arguments leave no register for the callee\n"); __exit(1); }
+        k = n - 1;
+        while (k >= 0) { es("  @mem.load r"); en(k); es(", [r7+0]\n  @call.frame -8\n"); k = k - 1; }
+        es("  @mem.load r5, [r7+0]\n  @call.frame -8\n  @call.callr r5\n");
+    }
+    lvalue = 0; curelem = 8; curptr = 0; curuns = 0; cursize = 8; curstruct = 0 - 1;
+    return postfix();
+}
 
 int primary(void) {
     int t; int i; long v; int k;
@@ -2564,14 +2725,14 @@ int primary(void) {
             k = k + 1;
         }
         adv();
-        es("  imm r0, "); en(v); ec(10);
+        es("  @lit.imm r0, "); en(v); ec(10);
         lvalue = 0; curelem = cursize; curptr = 0;
         return postfix();
     }
     if (t == T_STR) {
         i = nlab; nlab = nlab + 1;
         i = addlit(lbuf, decode(adv(), lbuf));
-        es("  .lea r0, S"); en(i); ec(10);
+        es("  @mem.lea r0, S"); en(i); ec(10);
         lvalue = 0; curelem = 1; curptr = 1;
         return postfix();
     }
@@ -2580,10 +2741,15 @@ int primary(void) {
         return postfix();
     }
     if (t == T_ID) {
-        if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) return pf_call(adv());
+        scopeact("expr", 4, tp);
+        if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) {
+            i = sfind(tp);
+            if (i >= 0) { if (symfp[i]) return icall(i, tp); }
+            return pf_call(adv());
+        }
         i = mfindt(tp);
         if (i >= 0) { if (machas[i]) {
-            es("  imm r0, "); en(macval[i]); ec(10);
+            es("  @lit.imm r0, "); en(macval[i]); ec(10);
             adv(); lvalue = 0; curelem = 8; curptr = 0;
             return postfix();
         } }
@@ -2595,19 +2761,24 @@ int primary(void) {
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
         curuns = symuns[i];
+        if (symkind[i] == 2) {           /* a function designator */
+            es("  @mem.lea r0, "); etok(tp); ec(10);
+            adv(); lvalue = 0; curelem = 8; curptr = 0; cursize = 8;
+            return postfix();
+        }
         if (symkind[i] == 4) {           /* enum constant */
-            es("  imm r0, "); en(symoff[i]); ec(10);
+            es("  @lit.imm r0, "); en(symoff[i]); ec(10);
             adv(); lvalue = 0; curelem = 8;
             return postfix();
         }
         if (symkind[i] == 5) {               /* global array -> its address */
-            es("  .lea r0, g_"); etok(tp); ec(10);
+            es("  @mem.lea r0, g_"); etok(tp); ec(10);
             curelem = symelem[i]; curptr = 1;
             adv(); lvalue = 0;
             return postfix();
         }
-        if (symkind[i] == 0) { es("  .lea r0, g_"); etok(tp); ec(10); }
-        else { es("  imm r2, "); en(symoff[i]); es("\n  sub64 r0, r6, r2\n"); }
+        if (symkind[i] == 0) { es("  @mem.lea r0, g_"); etok(tp); ec(10); }
+        else { es("  @lit.imm r2, "); en(symoff[i]); es("\n  @alu.sub r0, r6, r2\n"); }
         curelem = symelem[i];
         curptr = symptr[i];
         adv();
@@ -2761,36 +2932,36 @@ int do_printf(void) {
             else {
                 if (m > 0) {
                     id = addlit(lbuf, m);
-                    es("  .lea r0, S"); en(id); es("\n  imm r1, "); en(m);
-                    es("\n  .write r0, r1\n");
+                    es("  @mem.lea r0, S"); en(id); es("\n  @lit.imm r1, "); en(m);
+                    es("\n  @lit.write r0, r1\n");
                     m = 0;
                 }
                 need(vfind(TOKV, NTOKV, ",", 1), ",");
                 expr(); loadval();
-                if (c == 100) es("  .print r0\n");
-                else { if (c == 105) es("  .print r0\n");   /* %i */
+                if (c == 100) es("  @lit.print r0\n");
+                else { if (c == 105) es("  @lit.print r0\n");   /* %i */
                 else { if (c == 117) {           /* %u: the low 32 bits */
-                    es("  imm r2, 4294967295\n  and64 r0, r0, r2\n  .print r0\n");
+                    es("  @lit.imm r2, 4294967295\n  @alu.and r0, r0, r2\n  @lit.print r0\n");
                 } else { if (c == 120) { needxb = 1;         /* %x */
-                    es("  imm r1, 16\n  imm r2, 97\n  call __itoab\n"
-                       "  .write r0, r1\n");
+                    es("  @lit.imm r1, 16\n  @lit.imm r2, 97\n  @call.call __itoab\n"
+                       "  @lit.write r0, r1\n");
                 } else { if (c == 88) { needxb = 1;          /* %X */
-                    es("  imm r1, 16\n  imm r2, 65\n  call __itoab\n"
-                       "  .write r0, r1\n");
+                    es("  @lit.imm r1, 16\n  @lit.imm r2, 65\n  @call.call __itoab\n"
+                       "  @lit.write r0, r1\n");
                 } else { if (c == 112) { needxb = 1;         /* %p */
-                    es("  imm r1, 16\n  imm r2, 97\n  call __itoab\n"
-                       "  .write r0, r1\n");
+                    es("  @lit.imm r1, 16\n  @lit.imm r2, 97\n  @call.call __itoab\n"
+                       "  @lit.write r0, r1\n");
                 } else { if (c == 111) { needxb = 1;         /* %o */
-                    es("  imm r1, 8\n  imm r2, 97\n  call __itoab\n"
-                       "  .write r0, r1\n");
+                    es("  @lit.imm r1, 8\n  @lit.imm r2, 97\n  @call.call __itoab\n"
+                       "  @lit.write r0, r1\n");
                 } else { if (c == 99) {          /* %c */
-                    es("  mov r2, r0\n  .lea r0, __chb\n  .st [r0+0], r2, 1\n"
-                       "  imm r1, 1\n  .write r0, r1\n");
+                    es("  mov r2, r0\n  @mem.lea r0, __chb\n  @mem.st [r0+0], r2, 1\n"
+                       "  @lit.imm r1, 1\n  @lit.write r0, r1\n");
                     needchb = 1;
                 } else { if (c == 115) {         /* %s */
-                    es("  .frame 8\n  store64 [r7+0], r0\n  call __slen\n"
-                       "  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -8\n"
-                       "  .write r0, r1\n");
+                    es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @call.call __slen\n"
+                       "  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -8\n"
+                       "  @lit.write r0, r1\n");
                     needslen = 1;
                 } else { printf("printf: unsupported conversion\n"); __exit(1); }
                 } } } } } } } }
@@ -2800,11 +2971,11 @@ int do_printf(void) {
     }
     if (m > 0) {
         id = addlit(lbuf, m);
-        es("  .lea r0, S"); en(id); es("\n  imm r1, "); en(m);
-        es("\n  .write r0, r1\n");
+        es("  @mem.lea r0, S"); en(id); es("\n  @lit.imm r1, "); en(m);
+        es("\n  @lit.write r0, r1\n");
     }
     need(vfind(TOKV, NTOKV, ")", 1), ")");
-    es("  imm r0, 0\n");
+    es("  @lit.imm r0, 0\n");
     lvalue = 0; curelem = 8;
     return 0;
 }
@@ -2821,9 +2992,9 @@ int isname(int t, char *nm, int L) {
 int sysargs(int n) {                 /* pop n args into r0..r2, zero the rest */
     int k;
     k = n - 1;
-    while (k >= 0) { es("  load64 r"); en(k); es(", [r7+0]\n  .frame -8\n"); k = k - 1; }
+    while (k >= 0) { es("  @mem.load r"); en(k); es(", [r7+0]\n  @call.frame -8\n"); k = k - 1; }
     k = n;
-    while (k < 3) { es("  imm r"); en(k); es(", 0\n"); k = k + 1; }
+    while (k < 3) { es("  @lit.imm r"); en(k); es(", 0\n"); k = k + 1; }
     return 0;
 }
 
@@ -2854,6 +3025,9 @@ int fmtneedsrt(int ft) {
 
 int pf_call(int t) {
     int n; int k;
+    /* a call's value is an i64 on the type axis until return types are
+       tracked; the fields describe the RESULT, not whatever came before */
+    cursize = 8; curuns = 0; curstruct = 0 - 1; curdim2 = 0;
     if (isname(t, "printf", 6)) {
         int ps; int useit;
         useit = 0;
@@ -2861,6 +3035,7 @@ int pf_call(int t) {
         if (ps >= 0) { if (symvar[ps]) {
             if (kind(tp + 1) == T_STR) { if (fmtneedsrt(tp + 1)) useit = 1; }
         } }
+        if (ps >= 0) { if (symvar[ps]) { if (kind(tp + 1) != T_STR) useit = 1; } }
         if (useit == 0) return do_printf();
         /* else: an ordinary variadic call on <stdio.h>'s printf */
     }
@@ -2904,8 +3079,8 @@ int pf_call(int t) {
         unary(); lvalue = 0; push();
         if (eat(tidx(",", 1))) { expr(); loadval(); }
         need(tidx(")", 1), ")");
-        es("  imm r0, "); en(16 + 8 * fnnfixed); es("\n  add64 r0, r6, r0\n");
-        pop1(); es("  store64 [r1+0], r0\n  imm r0, 0\n");
+        es("  @lit.imm r0, "); en(16 + 8 * fnnfixed); es("\n  @alu.add r0, r6, r0\n");
+        pop1(); es("  @mem.store [r1+0], r0\n  @lit.imm r0, 0\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
@@ -2913,7 +3088,7 @@ int pf_call(int t) {
         need(tidx("(", 1), "(");
         expr(); loadval();
         need(tidx(")", 1), ")");
-        es("  imm r0, 0\n");
+        es("  @lit.imm r0, 0\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
@@ -2922,18 +3097,19 @@ int pf_call(int t) {
         need(tidx("(", 1), "(");
         unary(); lvalue = 0;
         push();                                   /* &ap */
-        es("  load64 r0, [r0+0]\n");
+        es("  @mem.load r0, [r0+0]\n");
         push();                                   /* ap */
         need(tidx(",", 1), ",");
         vw = declspec(); vp = declspecptr;
         while (eat(tidx("*", 1))) vp = 1;
         need(tidx(")", 1), ")");
-        es("  imm r2, 8\n  add64 r0, r0, r2\n");
-        es("  load64 r1, [r7+8]\n  store64 [r1+0], r0\n");   /* ap += 8 */
+        es("  @lit.imm r2, 8\n  @alu.add r0, r0, r2\n");
+        es("  @mem.load r1, [r7+8]\n  @mem.store [r1+0], r0\n");   /* ap += 8 */
         pop1();                                   /* r1 = old ap */
-        es("  .frame -8\n  mov r0, r1\n");
+        es("  @call.frame -8\n  mov r0, r1\n");
         if (vp) eload(8); else eload(vw);
         lvalue = 0; curelem = vw; curptr = vp;
+        cursize = vw; if (vp) cursize = 8;
         return postfix();
     }
     need(vfind(TOKV, NTOKV, "(", 1), "(");
@@ -2955,24 +3131,24 @@ int pf_call(int t) {
                callee's frame push, at [FP + 16 + 8k]. */
             k = 0;
             while (k < n / 2) {
-                es("  load64 r2, [r7+"); en(8 * k); es("]\n");
-                es("  load64 r1, [r7+"); en(8 * (n - 1 - k)); es("]\n");
-                es("  store64 [r7+"); en(8 * k); es("], r1\n");
-                es("  store64 [r7+"); en(8 * (n - 1 - k)); es("], r2\n");
+                es("  @mem.load r2, [r7+"); en(8 * k); es("]\n");
+                es("  @mem.load r1, [r7+"); en(8 * (n - 1 - k)); es("]\n");
+                es("  @mem.store [r7+"); en(8 * k); es("], r1\n");
+                es("  @mem.store [r7+"); en(8 * (n - 1 - k)); es("], r2\n");
                 k = k + 1;
             }
-            es("  call "); etok(t); ec(10);
-            if (n > 0) { es("  .frame -"); en(8 * n); ec(10); }
+            es("  @call.call "); etok(t); ec(10);
+            if (n > 0) { es("  @call.frame -"); en(8 * n); ec(10); }
             lvalue = 0; curelem = 8;
             return postfix();
         }
     }
     k = n - 1;
     while (k >= 0) {
-        es("  load64 r"); en(k); es(", [r7+0]\n  .frame -8\n");
+        es("  @mem.load r"); en(k); es(", [r7+0]\n  @call.frame -8\n");
         k = k - 1;
     }
-    es("  call "); etok(t); ec(10);
+    es("  @call.call "); etok(t); ec(10);
     lvalue = 0; curelem = 8;
     return postfix();
 }
@@ -2986,37 +3162,107 @@ int binop_level(int k) { int i; i = 0; while (i < nbop) { if (BOP[i] == k) retur
 
 int emit_binop(int k) {
     pop1();
-    if (binw4) es("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n");
+    /* narrow_pair on the Python side: an unsigned operation below 64 bits
+       converts BOTH operands first, or (int)-1 != 0xffffffffu comes out true */
+    if (binuns) { if (binwid < 8) {
+        es("  @lit.imm r2, ");
+        if (binwid == 1) en(255);
+        if (binwid == 2) en(65535);
+        if (binwid == 4) en(4294967295);
+        es("\n  @alu.and r0, r0, r2\n  @alu.and r1, r1, r2\n");
+    } }
     if (binuns) {
         if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .udiv r0, r1, r0\n"); return 0; }
         if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .umod r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  ult64 r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  ult64 r0, r0, r1\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  ule64 r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  ule64 r0, r0, r1\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">>", 2)) { es("  lshr64 r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  @alu.ult r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.ugt r0, r0, r1\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  @alu.ule r0, r1, r0\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.uge r0, r0, r1\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">>", 2)) { es("  @alu.lshr r0, r1, r0\n"); return 0; }
     }
-    if (k == vfind(TOKV, NTOKV, "+", 1))  { es("  add64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "-", 1))  { es("  sub64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "*", 1))  { es("  mul64 r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "+", 1))  { es("  @alu.add r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "-", 1))  { es("  @alu.sub r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "*", 1))  { es("  @alu.mul r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .div r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .mod r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  slt64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  slt64 r0, r0, r1\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  sle64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  sle64 r0, r0, r1\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "==", 2)) { es("  eq r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "!=", 2)) { es("  ne r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "&", 1))  { es("  and64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "|", 1))  { es("  or64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "^", 1))  { es("  xor64 r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "<<", 2)) { es("  shl64 r0, r1, r0\n"); return 0; }
-    es("  shr64 r0, r1, r0\n");
+    if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  @alu.lt r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.gt r0, r0, r1\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  @alu.le r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.ge r0, r0, r1\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "==", 2)) { es("  @alu.eq r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "!=", 2)) { es("  @alu.ne r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "&", 1))  { es("  @alu.and r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "|", 1))  { es("  @alu.or r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "^", 1))  { es("  @alu.xor r0, r1, r0\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, "<<", 2)) { es("  @alu.shl r0, r1, r0\n"); return 0; }
+    es("  @alu.shr r0, r1, r0\n");
     return 0;
 }
 
+/* ---- the type table [W-4] ----------------------------------------------
+   The result type of `t1 op t2` is the NET's answer, keyed exactly as the
+   Python walker keys it: both operands projected onto the TYS axis, the
+   operator onto the canonical TOPS axis.  Signedness and wrap width come
+   from the `+` row, which is the usual arithmetic conversion.  Rules for
+   these used to be written out here by hand; they were a second copy of the
+   table, and a copy is exactly what this compiler is not supposed to have. */
+int tyax(void) {                   /* the value in hand, on the TYS axis */
+    if (curptr) return vfind(TYSV, NTYSV, "ptr", 3);
+    if (curstruct >= 0) return vfind(TYSV, NTYSV, "struct", 6);
+    if (curuns) {
+        if (cursize == 1) return vfind(TYSV, NTYSV, "u8", 2);
+        if (cursize == 2) return vfind(TYSV, NTYSV, "u16", 3);
+        if (cursize == 4) return vfind(TYSV, NTYSV, "u32", 3);
+        return vfind(TYSV, NTYSV, "u64", 3);
+    }
+    if (cursize == 1) return vfind(TYSV, NTYSV, "i8", 2);
+    if (cursize == 2) return vfind(TYSV, NTYSV, "i16", 3);
+    if (cursize == 4) return vfind(TYSV, NTYSV, "i32", 3);
+    return vfind(TYSV, NTYSV, "i64", 3);
+}
+
+int tyask(int l, char *op, int ol, int r) {
+    int key[4];
+    key[0] = l; key[1] = vfind(TOPSV, NTOPSV, op, ol); key[2] = r; key[3] = 0;
+    return inf(S_TYPE, key, 0);
+}
+
+int tyis(int t, char *nm, int L) { return t == vfind(TYOUTV, NTYOUTV, nm, L); }
+
+int tysize(int t) {                /* bytes, for an integer result */
+    if (tyis(t, "i8", 2)) return 1;
+    if (tyis(t, "u8", 2)) return 1;
+    if (tyis(t, "i16", 3)) return 2;
+    if (tyis(t, "u16", 3)) return 2;
+    if (tyis(t, "i32", 3)) return 4;
+    if (tyis(t, "u32", 3)) return 4;
+    return 8;
+}
+
+int tyuns(int t) {
+    if (tyis(t, "u8", 2)) return 1;
+    if (tyis(t, "u16", 3)) return 1;
+    if (tyis(t, "u32", 3)) return 1;
+    if (tyis(t, "u64", 3)) return 1;
+    return 0;
+}
+
+/* the operator token, projected onto the table's canonical TOPS axis */
+int tycanon(int k, char *buf) {
+    int p; int L;
+    p = voff(TOKV, k); L = vlen(TOKV, k);
+    if (k == tidx(">", 1)) { buf[0] = 60; return 1; }
+    if (k == tidx("<=", 2)) { buf[0] = 60; return 1; }
+    if (k == tidx(">=", 2)) { buf[0] = 60; return 1; }
+    if (k == tidx("!=", 2)) { buf[0] = 61; buf[1] = 61; return 2; }
+    buf[0] = TOKV[p];
+    if (L > 1) buf[1] = TOKV[p + 1];
+    return L;
+}
+
 int binary(int level) {
-    int k; int e; int lp; int lu; int ru; int ls; int rs;
+    int k; int e; int lp; int lax; int rax; int ck; int res; int cl;
+    char cb[4];
     if (level > 7) { unary(); return 0; }
     binary(level + 1);
     while (1) {
@@ -3025,44 +3271,29 @@ int binary(int level) {
         loadval();
         e = curelem;
         lp = curptr;
-        /* C99 6.3.1.1: a type narrower than int promotes to (signed) int,
-           so only an unsigned int or wider -- or a pointer -- makes the
-           operation unsigned. */
-        lu = 0;
-        if (curuns) { if (curelem >= 4) lu = 1; }
-        if (curptr) lu = 1;
-        ls = cursize;
+        lax = tyax();
         adv();
         push();
         binary(level + 1);
         loadval();
-        ru = 0;
-        if (curuns) { if (curelem >= 4) ru = 1; }
-        if (curptr) ru = 1;
-        rs = cursize;
-        binuns = lu | ru;
-        binw4 = 0;
-        if (binuns) { if (ls <= 4) { if (rs <= 4) { if (lp == 0) { if (curptr == 0) binw4 = 1; } } } }
+        rax = tyax();
+        ck = tyask(lax, "+", 1, rax);              /* the conversion row */
+        cl = tycanon(k, cb);
+        res = tyask(lax, cb, cl, rax);             /* this operator's row */
+        binuns = tyuns(ck);
+        binwid = tysize(ck);
         if (lp) { if (e > 1) {
-            if (k == tidx("+", 1)) { es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); }
+            if (k == tidx("+", 1)) { es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); }
             if (k == tidx("-", 1)) { if (curptr == 0) {
-                es("  imm r2, "); en(e); es("\n  mul64 r0, r0, r2\n"); } }
+                es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); } }
         } }
         emit_binop(k);
-        binuns = 0; binw4 = 0;
-        lvalue = 0; curelem = e; curptr = lp;
-        curuns = lu | ru;
-        if (k != tidx("+", 1)) { if (k != tidx("-", 1)) { curptr = 0; curelem = 8; } }
-        if (binop_level(k) == 3) curuns = 0;         /* == != : an int */
-        if (binop_level(k) == 4) curuns = 0;         /* < > <= >= : an int */
-        /* What `sizeof` sees.  A shift has the type of its PROMOTED LEFT
-           operand (C99 6.5.7p3); a comparison is an int; other arithmetic
-           is evaluated at 64 bits in this subset [G-2], as on the Python
-           side, which the type table decides there. */
-        if (binop_level(k) == 5) { cursize = ls; if (cursize < 4) cursize = 4; }
-        else { if (binop_level(k) >= 3) { if (binop_level(k) <= 4) cursize = 4;
-                                           else cursize = 8; }
-               else cursize = 8; }
+        binuns = 0; binwid = 8;
+        lvalue = 0; curstruct = 0 - 1; curdim2 = 0;
+        if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
+                                   if (lp == 0) curptr = 1; }
+        else { curptr = 0; cursize = tysize(res); curelem = cursize;
+               curuns = tyuns(res); }
     }
     return 0;
 }
@@ -3073,9 +3304,9 @@ int land(void) {
     while (cur() == vfind(TOKV, NTOKV, "&&", 2)) {
         loadval(); adv();
         end = newlab();
-        elab("  jumpz r0, L", end); ec(10);
+        elab("  @ctrl.jumpz r0, L", end); ec(10);
         binary(0); loadval();
-        es("  imm r1, 0\n  ne r0, r0, r1\n");
+        es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("L", end); es(":\n");
     }
     return 0;
@@ -3087,12 +3318,12 @@ int lor(void) {
     while (cur() == vfind(TOKV, NTOKV, "||", 2)) {
         loadval(); adv();
         end = newlab(); rhs = newlab();
-        elab("  jumpz r0, L", rhs); ec(10);
-        es("  imm r0, 1\n");
-        elab("  jump L", end); ec(10);
+        elab("  @ctrl.jumpz r0, L", rhs); ec(10);
+        es("  @lit.imm r0, 1\n");
+        elab("  @ctrl.jump L", end); ec(10);
         elab("L", rhs); es(":\n");
         land(); loadval();
-        es("  imm r1, 0\n  ne r0, r0, r1\n");
+        es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("L", end); es(":\n");
     }
     return 0;
@@ -3106,9 +3337,9 @@ int cond(void) {
     if (cur() != tidx("?", 1)) return 0;
     loadval(); adv();
     els = newlab(); end = newlab();
-    elab("  jumpz r0, L", els); ec(10);
+    elab("  @ctrl.jumpz r0, L", els); ec(10);
     expr(); loadval();
-    elab("  jump L", end); ec(10);
+    elab("  @ctrl.jump L", end); ec(10);
     elab("L", els); es(":\n");
     need(tidx(":", 1), ":");
     cond(); loadval();
@@ -3128,6 +3359,12 @@ int aop(void) {                     /* += -= *= /= -> the plain operator */
     if (cur() == tidx("-=", 2)) return tidx("-", 1);
     if (cur() == tidx("*=", 2)) return tidx("*", 1);
     if (cur() == tidx("/=", 2)) return tidx("/", 1);
+    if (cur() == tidx("%=", 2)) return tidx("%", 1);
+    if (cur() == tidx("&=", 2)) return tidx("&", 1);
+    if (cur() == tidx("|=", 2)) return tidx("|", 1);
+    if (cur() == tidx("^=", 2)) return tidx("^", 1);
+    if (cur() == tidx("<<=", 3)) return tidx("<<", 2);
+    if (cur() == tidx(">>=", 3)) return tidx(">>", 2);
     return 0 - 1;
 }
 
@@ -3404,6 +3641,7 @@ int declspec(void) {                       /* -> element width */
     }
     if (cur() == tidx("enum", 4)) { declsz = enumspec(); return declsz; }
     while (is_typetok()) {
+        if (infunc) scopeact("local", 5, tp); else scopeact("top", 3, tp);
         if (tlen[tp] == 4) { if (src[tpos[tp]] == 99) w = 1; }   /* char */
         if (srcis(tpos[tp], tlen[tp], "char")) declsz = 1;
         if (srcis(tpos[tp], tlen[tp], "short")) declsz = 2;
@@ -3572,11 +3810,11 @@ int slotat(int i, int w, int sst) {
 
 int initaddr(int isglobal, int gt, int off, int delta) {
     if (isglobal) {
-        es("  .lea r1, g_"); etok(gt);
-        if (delta) { es("\n  imm r2, "); en(delta); es("\n  add64 r1, r1, r2"); }
+        es("  @mem.lea r1, g_"); etok(gt);
+        if (delta) { es("\n  @lit.imm r2, "); en(delta); es("\n  @alu.add r1, r1, r2"); }
         ec(10);
     } else {
-        es("  imm r2, "); en(off - delta); es("\n  sub64 r1, r6, r2\n");
+        es("  @lit.imm r2, "); en(off - delta); es("\n  @alu.sub r1, r6, r2\n");
     }
     return 0;
 }
@@ -3613,7 +3851,7 @@ int initstr(int isglobal, int gt, int off, int cap) {
     n = decode(t, buf);
     if (cap > 0) {
         initaddr(isglobal, gt, off, 0);
-        es("  .zero r1, 0, "); en(cap); ec(10);
+        es("  @mem.zero r1, 0, "); en(cap); ec(10);
     }
     k = 0;
     while (k <= n) {
@@ -3623,7 +3861,7 @@ int initstr(int isglobal, int gt, int off, int cap) {
            part of the object, so write it explicitly. */
         c = 0;
         if (k < n) c = buf[k] & 255;
-        es("  imm r0, "); en(c); ec(10);
+        es("  @lit.imm r0, "); en(c); ec(10);
         initaddr(isglobal, gt, off, k);
         estore(1);
         k = k + 1;
@@ -3642,7 +3880,7 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
        skipped. */
     if (nbytes > 0) {
         initaddr(isglobal, gt, off, 0);
-        es("  .zero r1, 0, "); en(nbytes); ec(10);
+        es("  @mem.zero r1, 0, "); en(nbytes); ec(10);
     }
     i = 0; depth = 0;
     while (1) {
@@ -3664,6 +3902,30 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     return 0;
 }
 
+/* `(*name)(params)` -- a pointer to a function.  The cursor is on the `(`;
+   returns the name's token and leaves declfp saying which calling
+   convention the pointee uses, because an indirect call has to know it. */
+int fpdecl(void) {
+    int t; int depth; int var;
+    adv();
+    while (eat(tidx("*", 1))) { }
+    t = adv();
+    need(tidx(")", 1), ")");
+    var = 0;
+    need(tidx("(", 1), "(");
+    depth = 1;
+    while (depth > 0) {
+        if (cur() == T_EOF) break;
+        if (cur() == tidx("(", 1)) depth = depth + 1;
+        if (cur() == tidx(")", 1)) depth = depth - 1;
+        if (cur() == tidx("...", 3)) var = 1;
+        adv();
+    }
+    declfp = 1;
+    if (var) declfp = 2;
+    return t;
+}
+
 int local_decl(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr;
     if (cur() == tidx("typedef", 7)) return do_typedef();
@@ -3672,10 +3934,14 @@ int local_decl(void) {
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
-        decldim2 = 0;
+        decldim2 = 0; declfp = 0;
         declptr = declspecptr;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) { declptr = 1; }
-        t = adv();
+        if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+            t = fpdecl(); declptr = 1; sst = 0 - 1; declstruct = 0 - 1;
+        } else t = adv(); }
+        else t = adv();
+        scopeact("local", 5, t);
         n = 1; isarr = 0;
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
             adv();
@@ -3728,13 +3994,13 @@ int local_decl(void) {
             else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
                 initstr(0, 0, off, n);
             } else { expr(); loadval();
-                es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+                es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 estore(8); } }
             else { expr(); loadval();
-                es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+                es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 if (declptr) estore(8); else estore(w); } }
             else { expr(); loadval();
-                es("  imm r2, "); en(off); es("\n  sub64 r1, r6, r2\n");
+                es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 if (declptr) estore(8); else estore(w); } }
         }
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
@@ -3764,11 +4030,11 @@ int stmt(void) {
         adv(); need(vfind(TOKV, NTOKV, "(", 1), "(");
         expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         a = newlab();
-        elab("  jumpz r0, L", a); ec(10);
+        elab("  @ctrl.jumpz r0, L", a); ec(10);
         stmt();
         if (cur() == vfind(TOKV, NTOKV, "else", 4)) {
             b = newlab();
-            elab("  jump L", b); ec(10);
+            elab("  @ctrl.jump L", b); ec(10);
             elab("L", a); es(":\n");
             adv(); stmt();
             elab("L", b); es(":\n");
@@ -3781,11 +4047,11 @@ int stmt(void) {
         elab("L", top); es(":\n");
         need(vfind(TOKV, NTOKV, "(", 1), "(");
         expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
-        elab("  jumpz r0, L", a); ec(10);
+        elab("  @ctrl.jumpz r0, L", a); ec(10);
         brkstack[nloop] = a; cntstack[nloop] = top; nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
-        elab("  jump L", top); ec(10);
+        elab("  @ctrl.jump L", top); ec(10);
         elab("L", a); es(":\n");
         return 0;
     }
@@ -3800,7 +4066,7 @@ int stmt(void) {
         elab("L", top); es(":\n");
         if (cur() != tidx(";", 1)) {
             expr(); loadval();
-            elab("  jumpz r0, L", a); ec(10);
+            elab("  @ctrl.jumpz r0, L", a); ec(10);
         }
         need(tidx(";", 1), ";");
         stept = tp;
@@ -3819,7 +4085,7 @@ int stmt(void) {
         elab("L", c); es(":\n");
         if (stept != bodyt - 1) { tp = stept; exprc(); }
         tp = aftert;
-        elab("  jump L", top); ec(10);
+        elab("  @ctrl.jump L", top); ec(10);
         elab("L", a); es(":\n");
         return 0;
     }
@@ -3829,10 +4095,10 @@ int stmt(void) {
         expr(); loadval();
         need(tidx(")", 1), ")");
         slot = alloc_local(8);
-        es("  imm r2, "); en(slot);
-        es("\n  sub64 r1, r6, r2\n  store64 [r1+0], r0\n");
+        es("  @lit.imm r2, "); en(slot);
+        es("\n  @alu.sub r1, r6, r2\n  @mem.store [r1+0], r0\n");
         disp = newlab(); end = newlab();
-        elab("  jump L", disp); ec(10);
+        elab("  @ctrl.jump L", disp); ec(10);
         cbase = nswv; mysw = nsw;
         swdef[mysw] = 0 - 1; swslot[mysw] = slot;
         nsw = nsw + 1;
@@ -3845,20 +4111,20 @@ int stmt(void) {
         stmt();
         nloop = nloop - 1;
         nsw = nsw - 1;
-        elab("  jump L", end); ec(10);
+        elab("  @ctrl.jump L", end); ec(10);
         elab("L", disp); es(":\n");
         k = cbase;
         while (k < nswv) {
-            es("  imm r2, "); en(slot);
-            es("\n  sub64 r1, r6, r2\n  load64 r0, [r1+0]\n");
-            es("  imm r1, "); en(swval[k]); ec(10);
-            es("  ne r0, r0, r1\n");
-            elab("  jumpz r0, L", swlab[k]); ec(10);
+            es("  @lit.imm r2, "); en(slot);
+            es("\n  @alu.sub r1, r6, r2\n  @mem.load r0, [r1+0]\n");
+            es("  @lit.imm r1, "); en(swval[k]); ec(10);
+            es("  @alu.ne r0, r0, r1\n");
+            elab("  @ctrl.jumpz r0, L", swlab[k]); ec(10);
             k = k + 1;
         }
         nswv = cbase;
-        if (swdef[mysw] >= 0) { elab("  jump L", swdef[mysw]); ec(10); }
-        else { elab("  jump L", end); ec(10); }
+        if (swdef[mysw] >= 0) { elab("  @ctrl.jump L", swdef[mysw]); ec(10); }
+        else { elab("  @ctrl.jump L", end); ec(10); }
         elab("L", end); es(":\n");
         return 0;
     }
@@ -3886,24 +4152,24 @@ int stmt(void) {
         adv();
         if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval(); }
         need(vfind(TOKV, NTOKV, ";", 1), ";");
-        elab("  jump R", retlab); ec(10);
+        elab("  @ctrl.jump R", retlab); ec(10);
         return 0;
     }
     if (p == P_GOTO) {
         int gt;
         adv(); gt = adv();
-        es("  jump u_"); etok(gt); ec(10);
+        es("  @ctrl.jump u_"); etok(gt); ec(10);
         need(tidx(";", 1), ";");
         return 0;
     }
     if (p == P_BREAK) {
         adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
-        elab("  jump L", brkstack[nloop - 1]); ec(10);
+        elab("  @ctrl.jump L", brkstack[nloop - 1]); ec(10);
         return 0;
     }
     if (p == P_CONTINUE) {
         adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
-        elab("  jump L", cntstack[nloop - 1]); ec(10);
+        elab("  @ctrl.jump L", cntstack[nloop - 1]); ec(10);
         return 0;
     }
     if (p == P_DO) {
@@ -3919,8 +4185,8 @@ int stmt(void) {
         expr(); loadval();
         need(tidx(")", 1), ")");
         need(tidx(";", 1), ";");
-        elab("  jumpz r0, L", a); ec(10);
-        elab("  jump L", top); ec(10);
+        elab("  @ctrl.jumpz r0, L", a); ec(10);
+        elab("  @ctrl.jump L", top); ec(10);
         elab("L", a); es(":\n");
         return 0;
     }
@@ -3933,9 +4199,10 @@ int stmt(void) {
 
 int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start;
-    int fsym; int stacked; int npar; int depth; int c; int any;
+    int fsym; int stacked; int npar; int depth; int c; int any; int havename;
     start = nout;
     fsym = nsym - 1;
+    scopeact("top", 3, tp);                 /* lparen -> fn_name */
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     /* Look ahead at the whole parameter list before emitting a byte of it:
        a variadic function, or one with more parameters than there are
@@ -3963,28 +4230,33 @@ int function(int t, int w) {
     frameoff = 0; framemax = 0;
     np = 0;
     etok(t); es(":\n");
-    es("  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame ");
+    es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (eat(tidx("...", 3))) break;
         pw = declspec();
-        declptr = declspecptr;
+        declptr = declspecptr; declfp = 0;
         while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
-        if (cur() == T_ID) {
-            pt = adv();
+        havename = 0;
+        if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+            pt = fpdecl(); declptr = 1; pw = 8; havename = 1;
+        } }
+        if (cur() == T_ID) { pt = adv(); havename = 1; }
+        if (havename) {
+            scopeact("param", 5, pt);
             off = alloc_local(8);
             declbytes = 8;
             sadd(pt, 1, off, pw);
             if (stacked) {
                 /* the registers are free in this convention */
-                es("  load64 r1, [r6+"); en(16 + 8 * np); es("]\n");
-                es("  imm r5, "); en(off); es("\n  sub64 r5, r6, r5\n  store64 [r5+0], r1\n");
+                es("  @mem.load r1, [r6+"); en(16 + 8 * np); es("]\n");
+                es("  @lit.imm r5, "); en(off); es("\n  @alu.sub r5, r6, r5\n  @mem.store [r5+0], r1\n");
             } else {
                 /* Straight into the slot: the tape takes a negative
                    displacement, so no scratch register is needed.  There was
                    one -- r5, "free" -- until a function had six parameters
                    and r5 WAS the sixth, overwritten before it was stored. */
-                es("  store64 [r6-"); en(off); es("], r"); en(np); ec(10);
+                es("  @mem.store [r6-"); en(off); es("], r"); en(np); ec(10);
             }
         }
         np = np + 1;
@@ -3998,9 +4270,11 @@ int function(int t, int w) {
         return 0;
     }
     retlab = newlab();
+    infunc = 1;
     block();
+    infunc = 0;
     elab("R", retlab); es(":\n");
-    es("  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n");
+    es("  mov r7, r6\n  @mem.load r6, [r7+0]\n  @call.frame -8\n  @ctrl.ret\n");
     patchnum(fpatch, 6, (framemax + 7) / 8 * 8);
     nsym = scopebase;
     return 0;
@@ -4039,10 +4313,14 @@ int unit(void) {
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declstruct = gstruct;
-            decldim2 = 0;
+            decldim2 = 0; declfp = 0;
             declptr = declspecptr;
             while (eat(vfind(TOKV, NTOKV, "*", 1))) declptr = 1;
-            t = adv();
+            if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+                t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1;
+            } else t = adv(); }
+            else t = adv();
+            scopeact("top", 3, t);
             p = ask(4);
             if (p == P_FNSIG) {
                 declbytes = 8;
@@ -4103,12 +4381,12 @@ int unit(void) {
                 else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
                     initstr(1, t, 0, n);
                 } else { expr(); loadval();
-                    es("  .lea r1, g_"); etok(t); ec(10); estore(8); } }
+                    es("  @mem.lea r1, g_"); etok(t); ec(10); estore(8); } }
                 else { expr(); loadval();
-                    es("  .lea r1, g_"); etok(t); ec(10);
+                    es("  @mem.lea r1, g_"); etok(t); ec(10);
                     if (declptr) estore(8); else estore(w); } }
                 else { expr(); loadval();
-                    es("  .lea r1, g_"); etok(t); ec(10);
+                    es("  @mem.lea r1, g_"); etok(t); ec(10);
                     if (declptr) estore(8); else estore(w); } }
                 toinit = 0;
             }
@@ -4187,16 +4465,16 @@ int main(void) {
     if (lex() < 0) return 1;
     if (__argc() > 2) { tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
         poolend = 0; nloop = 0;
-        es("_start:\n  call __init\n  call main\n  .exit r0\n");
+        es("_start:\n  @call.call __init\n  @call.call main\n  @lit.exit r0\n");
         unit();
         es("__init:\n");
         k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
-        es("  ret\n");
+        es("  @ctrl.ret\n");
         if (needslen) {
-            es("__slen:\n  mov r2, r0\n  imm r1, 0\n"
-               "__slen_top:\n  add64 r4, r2, r1\n  .ld r5, [r4+0], 1\n"
-               "  jumpz r5, __slen_end\n  imm r5, 1\n  add64 r1, r1, r5\n"
-               "  jump __slen_top\n__slen_end:\n  mov r0, r1\n  ret\n");
+            es("__slen:\n  mov r2, r0\n  @lit.imm r1, 0\n"
+               "__slen_top:\n  @alu.add r4, r2, r1\n  @mem.ld r5, [r4+0], 1\n"
+               "  @ctrl.jumpz r5, __slen_end\n  @lit.imm r5, 1\n  @alu.add r1, r1, r5\n"
+               "  @ctrl.jump __slen_top\n__slen_end:\n  mov r0, r1\n  @ctrl.ret\n");
         }
         if (needchb) es(".bss __chb 8\n");
         /* base-N conversion, the same routine the Python emitter writes:
@@ -4204,21 +4482,31 @@ int main(void) {
            r0 = pointer, r1 = length. */
         if (needxb) {
             es(".bss __xbuf 24\n"
-               "__itoab:\n  .frame 16\n  store64 [r7+0], r1\n"
-               "  store64 [r7+8], r2\n  mov r2, r0\n  .lea r1, __xbuf\n"
-               "  imm r3, 24\n  add64 r1, r1, r3\n  imm r4, 0\n"
-               "itoab_loop:\n  load64 r3, [r7+0]\n  .umod r5, r2, r3\n"
-               "  .udiv r2, r2, r3\n  imm r3, 10\n  slt64 r0, r5, r3\n"
-               "  jumpz r0, itoab_alpha\n  imm r3, 48\n  jump itoab_add\n"
-               "itoab_alpha:\n  load64 r3, [r7+8]\n  imm r0, 10\n"
-               "  sub64 r5, r5, r0\n"
-               "itoab_add:\n  add64 r5, r5, r3\n  imm r3, 1\n"
-               "  sub64 r1, r1, r3\n  .st [r1+0], r5, 1\n  add64 r4, r4, r3\n"
-               "  jumpz r2, itoab_done\n  jump itoab_loop\n"
-               "itoab_done:\n  .frame -16\n  mov r0, r1\n  mov r1, r4\n  ret\n");
+               "__itoab:\n  @call.frame 16\n  @mem.store [r7+0], r1\n"
+               "  @mem.store [r7+8], r2\n  mov r2, r0\n  @mem.lea r1, __xbuf\n"
+               "  @lit.imm r3, 24\n  @alu.add r1, r1, r3\n  @lit.imm r4, 0\n"
+               "itoab_loop:\n  @mem.load r3, [r7+0]\n  .umod r5, r2, r3\n"
+               "  .udiv r2, r2, r3\n  @lit.imm r3, 10\n  @alu.lt r0, r5, r3\n"
+               "  @ctrl.jumpz r0, itoab_alpha\n  @lit.imm r3, 48\n  @ctrl.jump itoab_add\n"
+               "itoab_alpha:\n  @mem.load r3, [r7+8]\n  @lit.imm r0, 10\n"
+               "  @alu.sub r5, r5, r0\n"
+               "itoab_add:\n  @alu.add r5, r5, r3\n  @lit.imm r3, 1\n"
+               "  @alu.sub r1, r1, r3\n  @mem.st [r1+0], r5, 1\n  @alu.add r4, r4, r3\n"
+               "  @ctrl.jumpz r2, itoab_done\n  @ctrl.jump itoab_loop\n"
+               "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
         }
         emit_pool();
         __write(1, out, nout);
+        /* `unisacc FILE -c -v`: how many times each stage was asked, so a
+           test can check that no table-shaped stage is decided in code */
+        if (__argc() > 3) {
+            nout = 0;
+            es("asked pp "); en(nask[S_PP]); es(" lex "); en(nask[S_LEX]);
+            es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
+            es(" scope "); en(nask[S_SCOPE]); es(" irsel "); en(nask[S_IRSEL]);
+            ec(10);
+            __write(2, out, nout);
+        }
         return 0; }
     i = 0;
     while (i < ntok) {

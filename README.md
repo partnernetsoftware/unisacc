@@ -83,8 +83,11 @@ multi-ISA within one OS — a cosmopolitan-style file that is simultaneously an
 ELF, a Mach-O and a PE is a different problem and is not what this emits.
 
 **It self-hosts.** `unisacc.c` carries the model (a 12,554-byte blob) and the
-integer kernel, and drives its own lexer, preprocessor and parser through the
-same tables. The bootstrap fixed point holds:
+integer kernel, and drives its own preprocessor, lexer, parser, type checker, scope
+resolution and instruction selection through the same tables — every
+instruction name it emits is chosen by the `irsel` net at the moment it is
+written, and `tests/stages.sh` checks, probe by probe, that no stage the
+Python front end asks a net about is decided in code on the C side. The bootstrap fixed point holds:
 
 ```
 A = cc(unisacc.c)      B = A(unisacc.c)      C = B(unisacc.c)      B == C
@@ -144,6 +147,7 @@ in a twentieth of a second, and the SGD control arm lives in
 | `artifacts` | the shipped kit is *usable*: weight blob round-trips to the same decisions, every image is recognised by the platform's own tools, shipping twice gives the same bytes |
 | `ccrun` | `unisacc` compiles C and the reference VM runs it |
 | `selfhost` | `unisacc` built two ways agrees with the Python front end |
+| `stages` | every decision stage the Python front end asks a net about, the C front end asks too — the only suite that can see a hand-written rule that happens to agree with the table |
 | `selfgap` | how much C `unisacc`'s own front end still refuses that the Python one accepts — a ratchet, because that gap was growing unmeasured |
 | `multi` | two translation units compiled into one program, against `cc a.c b.c` |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |

@@ -9,7 +9,7 @@ from ..ir import (Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE, WCHAR,
                   wide_bytes)
 from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
                    U8, U16, U32, U64, UNSIGNED, NARROW,
-                   unsigned_result, ptr, Struct)
+                   ptr, Struct)
 
 # A declaration specifier is a SET of words, not the last one seen:
 # `long int` is long and `short int` is short.  Resolving word by word made
@@ -1653,13 +1653,15 @@ class Walker:
             if op in ("+", "-") and ty.kind in ("ptr", "arr") and \
                     (rty.kind in ("i64", "u64") or rty.kind in NARROW):
                 self.scale(ty)
-            uns = unsigned_result(ty, rty)
-            # the common type decides the WIDTH the operands wrap at, and the
-            # table is what knows it -- ask with `+`, the arithmetic row
-            wid = 8
-            if uns:
-                ck = self.sc.combine(ty, "+", rty)                   # [W-4]
-                wid = {"u8": 1, "u16": 2, "u32": 4}.get(ck, 8)
+            # Signedness and wrap width both come from the TABLE: the `+` row
+            # is the usual arithmetic conversion, so an unsigned result there
+            # is an unsigned operation.  This used to be a hand-written copy
+            # of the same rule (`unsigned_result`); enumeration over all 169
+            # type pairs showed the two agree everywhere, so the copy is gone
+            # -- a table-shaped decision belongs to the net, not to code.
+            ck = self.sc.combine(ty, "+", rty)                       # [W-4]
+            uns = ck in ("u8", "u16", "u32", "u64")
+            wid = {"u8": 1, "u16": 2, "u32": 4}.get(ck, 8)
             if op in ("/", "%"):
                 self.em.divmod_(op, uns, wid)
             else:

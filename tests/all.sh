@@ -17,6 +17,8 @@
 #   multi       several translation units, one program -- against cc [A-30]
 #   tools       real library code by other people, with its own test
 #               vectors, several files each [A-31]
+#   stages      every stage the Python front end asks on a probe, the C
+#               front end asks too: no table-shaped decision in code [A-33]
 #   selfgap     how much C the two front ends DISAGREE about, as a ratchet:
 #               the one number that was missing while the debt grew [A-29]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
@@ -71,6 +73,7 @@ if [ -d corpus/crypto-algorithms ]; then
     run tools  env FETCH=0 ./tests/tools.sh
 fi
 run selfgap    ./tests/selfgap.sh
+run stages     bash -c "./tests/stages.sh $PROBES"
 # bootstrap needs the host toolchain to turn a tape back into a binary
 if [ "$(uname -s)" = "Darwin" ]; then
     run bootstrap ./tests/bootstrap.sh

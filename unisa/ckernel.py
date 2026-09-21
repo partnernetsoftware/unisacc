@@ -123,11 +123,18 @@ def emit_core(nets, path):
     L += ['  return %d;' % len(meta), '}', '']
     # vocabularies the C side needs, packed as NUL-separated strings so no
     # array-of-pointer initialiser is required (our subset has none yet)
-    from .gold import TOKS, PRODS, LEXACT, DIRS, PPACT, NT
+    from .gold import (TOKS, PRODS, LEXACT, DIRS, PPACT, NT, TYS, TOPS,
+                       TYOUT, CTX, KIND, ACTS, FAMILY, FLAVOR, RECIPE)
     from .front.lex import TYPEKW
+    # type / scope / irsel: the C front end asks these tables too, with the
+    # same keys the Python walker uses -- a stage the self-hosted compiler
+    # decides in hand-written code is a stage the thesis does not cover.
     for nm, vals in (("TOKV", TOKS), ("PRODV", PRODS), ("ACTV", LEXACT),
                      ("TYPEV", TYPEKW), ("DIRV", DIRS), ("PPACTV", PPACT),
-                     ("NTV", NT)):
+                     ("NTV", NT), ("TYSV", TYS), ("TOPSV", TOPS),
+                     ("TYOUTV", TYOUT), ("SCTXV", CTX), ("SKINDV", KIND),
+                     ("SACTV", ACTS), ("IRFAMV", FAMILY), ("IRFLAV", FLAVOR),
+                     ("IRRECV", RECIPE)):
         packed = "".join(v + "\\0" for v in vals)
         L += ['char *%s = "%s";' % (nm, packed),
               '#define N%s %d' % (nm, len(vals)), '']
