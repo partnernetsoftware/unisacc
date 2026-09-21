@@ -616,6 +616,168 @@ int preprocess(void) {
    Python side paid for this once already (E-45); with text macros on this
    side it is the same bug.  A block comment leaves its newlines behind so
    nothing below it moves. */
+/* ---- on-demand headers ------------------------------------------------
+   There is no linker: the C library is ordinary C in include/, defined
+   `static`.  A program that calls strlen without including <string.h> --
+   most C ever written -- used to be refused, or, where a call happened to
+   resolve, answered wrong.  The Python driver retries with the header
+   appended; this does the same in one pass, before preprocessing: for every
+   function one of our headers DEFINES, if the program calls it and does not
+   define it, the header is appended.  Appending keeps line numbers, and the
+   include guards make a second copy free.  printf is special: the walker
+   desugars it, so <stdio.h> is only needed for a format that needs the
+   runtime formatter (a width, a flag, a precision). */
+int idch(int c) { if (isal(c)) return 1; return isdi(c); }
+
+/* where the identifier nm[0..nl) next occurs in src from `from`, or -1 */
+int srcfind(char *nm, int nl, int from) {
+    int i; int k;
+    i = from;
+    while (i + nl <= nsrc) {
+        k = 0;
+        while (k < nl) { if ((src[i + k] & 255) != (nm[k] & 255)) break; k = k + 1; }
+        if (k == nl) {
+            if (i == 0 || idch(src[i - 1] & 255) == 0) {
+                if (i + nl >= nsrc || idch(src[i + nl] & 255) == 0) return i;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+int skipws(int i) {
+    while (i < nsrc) { if (wsat(i) == 0) { if ((src[i] & 255) != 10) break; } i = i + 1; }
+    return i;
+}
+/* 1: called somewhere; 2: defined (its `)` is followed by `{`) */
+int srcuse(char *nm, int nl) {
+    int i; int j; int d; int called;
+    called = 0; i = srcfind(nm, nl, 0);
+    while (i >= 0) {
+        j = skipws(i + nl);
+        if (j < nsrc) { if ((src[j] & 255) == 40) {
+            called = 1;
+            d = 0;
+            while (j < nsrc) {
+                if ((src[j] & 255) == 40) d = d + 1;
+                if ((src[j] & 255) == 41) { d = d - 1; if (d == 0) break; }
+                j = j + 1;
+            }
+            j = skipws(j + 1);
+            if (j < nsrc) { if ((src[j] & 255) == 123) return 2; }
+        } }
+        i = srcfind(nm, nl, i + 1);
+    }
+    return called;
+}
+/* does some literal printf format need the runtime formatter? */
+int rtprintf(void) {
+    int i; int j; int c;
+    i = srcfind("printf", 6, 0);
+    while (i >= 0) {
+        j = skipws(i + 6);
+        if (j < nsrc) { if ((src[j] & 255) == 40) {
+            j = skipws(j + 1);
+            if (j < nsrc) { if ((src[j] & 255) == 34) {
+                j = j + 1;
+                while (j < nsrc) {
+                    c = src[j] & 255;
+                    if (c == 34) break;
+                    if (c == 92) { j = j + 2; continue; }
+                    if (c == 37) {
+                        c = src[j + 1] & 255;
+                        if (c == 45 || c == 43 || c == 32 || c == 35 || c == 46) return 1;
+                        if (isdi(c)) return 1;
+                        j = j + 2; continue;
+                    }
+                    j = j + 1;
+                }
+            } }
+        } }
+        i = srcfind("printf", 6, i + 1);
+    }
+    return 0;
+}
+int srcappend(char *t, int n) {
+    int k;
+    if (nsrc + n >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
+    k = 0;
+    while (k < n) { src[nsrc] = t[k]; nsrc = nsrc + 1; k = k + 1; }
+    return 0;
+}
+/* PREPENDED, where the user would have written it.  The Python driver can
+   append, because it resolves calls at the end of the unit; this walker
+   picks a call's convention AT the call, so a variadic library function
+   has to be defined before its first use. */
+int incappend(char *h, int hl) {
+    int n; int k;
+    n = 12 + hl;                            /* `#include <` h `>\n` */
+    if (nsrc + n >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
+    k = nsrc - 1;
+    while (k >= 0) { src[k + n] = src[k]; k = k - 1; }
+    k = 0;
+    while (k < 10) { src[k] = "#include <"[k]; k = k + 1; }
+    while (k < 10 + hl) { src[k] = h[k - 10]; k = k + 1; }
+    src[k] = 62; src[k + 1] = 10;
+    nsrc = nsrc + n;
+    return 0;
+}
+/* the header's definitions: a line opening `static`, whose name is the
+   identifier before its first `(`, and which opens a body on that line */
+int hdrneeded(int n) {
+    int i; int e; int p; int b; int a; int k; int hasbody;
+    i = 0;
+    while (i < n) {
+        e = i;
+        while (e < n) { if ((incbuf[e] & 255) == 10) break; e = e + 1; }
+        if (e - i > 7) { if (incbuf[i] == 115) { if (incbuf[i + 1] == 116) { if (incbuf[i + 2] == 97) {
+          if (incbuf[i + 3] == 116) { if (incbuf[i + 4] == 105) { if (incbuf[i + 5] == 99) {
+            p = i; while (p < e) { if ((incbuf[p] & 255) == 40) break; p = p + 1; }
+            hasbody = 0; k = p;
+            while (k < e) { if ((incbuf[k] & 255) == 123) hasbody = 1; k = k + 1; }
+            if (p < e) { if (hasbody) {
+                b = p;
+                while (b > i) { if ((incbuf[b - 1] & 255) != 32) break; b = b - 1; }
+                a = b;
+                while (a > i) { if (idch(incbuf[a - 1] & 255) == 0) break; a = a - 1; }
+                if (b > a) {
+                    /* printf is the walker's; see rtprintf */
+                    k = 1;
+                    if (b - a == 6) { if (srcfind("printf", 6, 0) >= 0) {
+                        if (incbuf[a] == 112) { if (incbuf[a + 1] == 114) { if (incbuf[a + 2] == 105) {
+                            if (incbuf[a + 3] == 110) { if (incbuf[a + 4] == 116) { if (incbuf[a + 5] == 102) k = 0; } } } } } } }
+                    if (k) { if (srcuse(incbuf + a, b - a) == 1) return 1; }
+                }
+            } }
+        } } } } } } }
+        i = e + 1;
+    }
+    return 0;
+}
+int autoinc(void) {
+    char *hs; int k; int st; int fd; int n; int p;
+    hs = "assert.h ctype.h stdlib.h string.h wchar.h stdio.h ";
+    k = 0;
+    while (hs[k]) {
+        st = k;
+        while (hs[k] != 32) k = k + 1;
+        p = 0;
+        while (p < 8) { incpath[p] = "include/"[p]; p = p + 1; }
+        n = st;
+        while (n < k) { incpath[p] = hs[n]; p = p + 1; n = n + 1; }
+        incpath[p] = 0;
+        fd = __open(incpath, 0);
+        if (fd >= 0) {
+            n = __read(fd, incbuf, MAXINC);
+            __close(fd);
+            if (n > 0) { if (hdrneeded(n)) incappend(hs + st, k - st); }
+        }
+        k = k + 1;
+    }
+    if (rtprintf()) incappend("stdio.h", 7);
+    return 0;
+}
+
 int decomment(void) {
     int i; int o; int c; int q;
     i = 0; o = 0;
@@ -1355,6 +1517,10 @@ int postfix(void);
 int vcall(int var);
 int fpdecl(void);
 int eatstar(void);
+int iswide(int t);
+int wdecode(int t, int *cp);
+int strw(int t);
+int wcp[4096];
 int initcountat(int j);
 int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes);
 int structslots(int sst);
@@ -1947,22 +2113,29 @@ int postfix(void) {
             return vcall(0);
         }
         if (p == P_INC) {
-            int op; int e2;
+            int op; int e2; int step; int ce;
             op = cur(); adv();
             e2 = stw();
+            /* a pointer steps by its ELEMENT (C99 6.5.6p8) -- it stepped by
+               one byte, and only char pointers had ever been tested */
+            ce = curelem;
+            step = 1;
+            if (curptr) step = curelem;
             lvalue = 0;
             push();                                  /* address */
             eload(e2);
             push();                                  /* old value */
-            es("  @lit.imm r0, 1\n");
+            es("  @lit.imm r0, "); en(step); ec(10);
             if (op == tidx("++", 2)) emit_binop(tidx("+", 1));
             else emit_binop(tidx("-", 1));
             pop1();                                  /* address */
             estore(e2);
-            es("  @lit.imm r2, 1\n");
+            es("  @lit.imm r2, "); en(step); ec(10);
             if (op == tidx("++", 2)) es("  @alu.sub r0, r0, r2\n");
             else es("  @alu.add r0, r0, r2\n");
+            /* the value is the old pointer, still pointing at elements */
             curelem = e2;
+            if (curptr) curelem = ce;
         } else {
         if (p == P_FIELD) {
             int isarrow; int mi; int mt;
@@ -2001,9 +2174,10 @@ int postfix(void) {
             } }
         } else {
         if (p == P_INDEX) {
-            int row; int uu;
+            int row; int uu; int ist;
             curvla = 0;
             adv();
+            ist = curstruct;                 /* the index expression resets it */
             e = curelem;
             row = curdim2;
             uu = curuns;                     /* the ELEMENT's, not the index's */
@@ -2021,6 +2195,10 @@ int postfix(void) {
                 /* a row is itself an array: its VALUE is its address */
                 curelem = e / row; curdim2 = 0; curptr = 1; lvalue = 0;
             } else { lvalue = 1; curelem = e; curptr = 0; }
+            /* an element of a struct array is itself an aggregate: its value
+               is its address, and assigning it copies the whole struct */
+            curstruct = ist;
+            if (ist >= 0) { if (row == 0) curelem = 0; }
         } else {
             return 0;
         } } }
@@ -2120,6 +2298,22 @@ int primary(void) {
         lvalue = 0; curelem = cursize; curptr = 0;
         return postfix();
     }
+    if (t == T_STR) { if (iswide(tp)) {
+        int wn; int wk;
+        wn = wdecode(adv(), wcp);
+        wk = 0;
+        while (wk <= wn) {                          /* with its terminator */
+            int wv; wv = 0;
+            if (wk < wn) wv = wcp[wk];
+            lbuf[wk * 4] = wv & 255; lbuf[wk * 4 + 1] = (wv >> 8) & 255;
+            lbuf[wk * 4 + 2] = (wv >> 16) & 255; lbuf[wk * 4 + 3] = (wv >> 24) & 255;
+            wk = wk + 1;
+        }
+        i = addlit(lbuf, (wn + 1) * 4);
+        es("  @mem.lea r0, S"); en(i); ec(10);
+        lvalue = 0; curelem = 4; curptr = 1;
+        return postfix();
+    } }
     if (t == T_STR) {
         i = nlab; nlab = nlab + 1;
         i = addlit(lbuf, decode(adv(), lbuf));
@@ -2186,6 +2380,9 @@ int primary(void) {
         else { es("  @lit.imm r2, "); en(symoff[i]); es("\n  @alu.sub r0, r6, r2\n"); }
         curelem = symelem[i];
         curptr = symptr[i];
+        /* a pointer to a struct steps by the STRUCT: its element width was
+           the specifier's 8, so `r++` on a 16-byte struct went half-way */
+        if (curptr) { if (symstruct[i] >= 0) { if (symkind[i] != 3) curelem = stsize[symstruct[i]]; } }
         adv();
         lvalue = 1;
         if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
@@ -2722,6 +2919,10 @@ int binary(int level) {
                 es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); } }
         } }
         emit_binop(k);
+        /* C99 6.5.6p9: the difference of two pointers counts ELEMENTS */
+        if (lp) { if (curptr) { if (e > 1) { if (k == tidx("-", 1)) {
+            es("  @lit.imm r2, "); en(e); es("\n  .div r0, r0, r2\n");
+        } } } }
         binuns = 0; binwid = 8;
         lvalue = 0; curstruct = 0 - 1; curdim2 = 0;
         if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
@@ -2809,17 +3010,26 @@ int expr(void) {
     if (lvalue) {
         op = aop();
         if (op >= 0) {
+            int ptrl; int pel;
             adv();
+            ptrl = curptr; pel = curelem;
             e = stw();
             lvalue = 0;
             push();                                  /* address */
             eload(e);
             push();                                  /* old value */
             expr(); loadval();
+            /* `p += n` moves n ELEMENTS, as `p = p + n` does */
+            if (ptrl) { if (pel > 1) {
+                if (op == tidx("+", 1) || op == tidx("-", 1)) {
+                    es("  @lit.imm r2, "); en(pel); es("\n  @alu.mul r0, r0, r2\n");
+                }
+            } }
             emit_binop(op);                          /* pops old value */
             pop1();                                  /* address */
             estore(e);
             curelem = e;
+            if (ptrl) { curptr = 1; curelem = pel; }
             return 0;
         }
         if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
@@ -3184,6 +3394,29 @@ int eatstar(void) {
     return 1;
 }
 
+/* Words that qualify a declaration without naming its type: they may come
+   before a typedef name or `struct` (`const wchar_t *s`, `static struct S
+   x`) and after one (`wchar_t const`).  Each is still a type word to the
+   scope table, and is asked as one. */
+int isspecq(int t) {
+    if (kind(t) != T_TYPE) return 0;
+    if (isqual(t)) return 1;
+    if (srcis(tpos[t], tlen[t], "static")) return 1;
+    if (srcis(tpos[t], tlen[t], "extern")) return 1;
+    if (srcis(tpos[t], tlen[t], "register")) return 1;
+    if (srcis(tpos[t], tlen[t], "inline")) return 1;
+    if (srcis(tpos[t], tlen[t], "auto")) return 1;
+    return 0;
+}
+int skipspecq(void) {
+    while (isspecq(tp)) {
+        if (infunc) scopewant("local", 5, tp, "type_name", 9);
+        else scopewant("top", 3, tp, "type_name", 9);
+        adv();
+    }
+    return 0;
+}
+
 int declspec(void) {                       /* -> element width */
     int w; int td;
     w = 8;
@@ -3193,25 +3426,29 @@ int declspec(void) {                       /* -> element width */
     declunsigned = 0;
     declspecfp = 0;
     declenum = 0;
+    skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
         adv();
         declsz = tdsz[td]; declstruct = tdstruct[td]; declspecptr = tdptr[td];
         declunsigned = tduns[td];
         declspecfp = tdfp[td];
+        skipspecq();
         return tdw[td];
     }
     if (cur() == tidx("struct", 6)) {
         declstruct = stparse(0);
         declsz = stsize[declstruct];
+        skipspecq();
         return 8;
     }
     if (cur() == tidx("union", 5)) {
         declstruct = stparse(1);
         declsz = stsize[declstruct];
+        skipspecq();
         return 8;
     }
-    if (cur() == tidx("enum", 4)) { declenum = 1; declsz = enumspec(); return declsz; }
+    if (cur() == tidx("enum", 4)) { declenum = 1; declsz = enumspec(); skipspecq(); return declsz; }
     while (is_typetok()) {
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
@@ -3546,6 +3783,7 @@ int initcount(void) {
     j = tp;
     while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
     j = j + 1;
+    if (iswide(j)) return wdecode(j, wcp) + 1;
     if (kind(j) == T_STR) { return decode(j, buf) + 1; }
     return initcountat(j);
 }
@@ -3578,9 +3816,85 @@ int initcountat(int j) {
     return n;
 }
 
+/* ---- wide string literals ---------------------------------------------
+   `L"..."`: the source is read a byte at a time, so the literal is still
+   UTF-8 here; it decodes to code points, and each element of the array is
+   four bytes -- wchar_t is four bytes on every target, so one tape still
+   lowers to six.  Adjacent literals are one token with seams, as for
+   narrow ones.  Returns the number of code points written to cp. */
+int iswide(int t) {
+    if (kind(t) != T_STR) return 0;
+    if ((src[tpos[t]] & 255) == 76) return 1;             /* L */
+    return 0;
+}
+int strw(int t) { if (iswide(t)) return 4; return 1; }
+int hexv(int c) {
+    if (c >= 97) return c - 87;
+    if (c >= 65) return c - 55;
+    return c - 48;
+}
+int wdecode(int t, int *cp) {
+    int k; int e; int n; int c; int m; int need;
+    k = 0; e = tlen[t]; n = 0;
+    while (k < e) {
+        /* to the next opening quote: past `L`, blanks and a seam */
+        while (k < e) { if ((src[tpos[t] + k] & 255) == 34) break; k = k + 1; }
+        k = k + 1;
+        while (k < e) {
+            c = src[tpos[t] + k] & 255;
+            if (c == 34) { k = k + 1; break; }
+            if (c == 92) {
+                k = k + 1; c = src[tpos[t] + k] & 255;
+                if (c == 110) c = 10;
+                else { if (c == 116) c = 9;
+                else { if (c == 114) c = 13;
+                else { if (c == 48) { c = 0; }
+                else { if (c == 120) {
+                    c = 0; k = k + 1;
+                    while (k < e) {
+                        m = src[tpos[t] + k] & 255;
+                        if (isdi(m) == 0) { if (m < 65 || m > 102) break; if (m > 70) { if (m < 97) break; } }
+                        c = c * 16 + hexv(m); k = k + 1;
+                    }
+                    k = k - 1;
+                } } } } }
+                cp[n] = c; n = n + 1; k = k + 1;
+                continue;
+            }
+            /* UTF-8: the lead byte says how many continuation bytes follow */
+            need = 0;
+            if (c >= 240) { need = 3; c = c & 7; }
+            else { if (c >= 224) { need = 2; c = c & 15; }
+            else { if (c >= 192) { need = 1; c = c & 31; } } }
+            k = k + 1;
+            while (need > 0) { c = c * 64 + (src[tpos[t] + k] & 63); k = k + 1; need = need - 1; }
+            cp[n] = c; n = n + 1;
+        }
+    }
+    return n;
+}
+
 int initstr(int isglobal, int gt, int off, int cap) {
     int t; int n; int k;
     char buf[4096];
+    if (iswide(tp)) {
+        /* four bytes an element; cap counts ELEMENTS */
+        t = adv();
+        n = wdecode(t, wcp);
+        if (cap > 0) {
+            initaddr(isglobal, gt, off, 0);
+            es("  @mem.zero r1, 0, "); en(cap * 4); ec(10);
+        }
+        k = 0;
+        while (k < n) {
+            if (k >= cap) break;
+            es("  @lit.imm r0, "); en(wcp[k]); ec(10);
+            initaddr(isglobal, gt, off, k * 4);
+            estore(4);
+            k = k + 1;
+        }
+        return 0;
+    }
     t = adv();
     n = decode(t, buf);
     if (cap > 0) {
@@ -3830,7 +4144,7 @@ int local_decl(void) {
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
             if (cur() == tidx("{", 1)) initaggr(0, 0, off, w, sst, n * w);
-            else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
+            else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
                 initstr(0, 0, off, n);
             } else { expr(); loadval();
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
@@ -4238,7 +4552,7 @@ int unit(void) {
                            else initaggr(1, t, 0, w, 0 - 1, n * w); }
                     while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
                 }
-                else { if (cur() == T_STR) { if (isarr) { if (w == 1) {
+                else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
                     initstr(1, t, 0, n);
                 } else { expr(); loadval();
                     es("  @mem.lea r1, g_"); etok(t); ec(10); estore(8); } }
@@ -4320,6 +4634,9 @@ int main(void) {
     __close(fd);
     splice();
     decomment();
+    /* compiling only: the token dump is the lexer's instrument, and the
+       Python side it is compared with does header selection in its driver */
+    if (__argc() > 2) autoinc();
     preprocess();
     expandsrc();
     if (lex() < 0) return 1;

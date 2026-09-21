@@ -88,6 +88,7 @@ class Walker:
         self.sc = Scope(oracle)
         self.em = Emitter(oracle)
         self._lval = None         # Type whose ADDRESS is in ACC, or None
+        self._pre = None          # a leftmost operand assign() already parsed
         self.lbits = None         # ...and where in that word, for a bit-field
         self.vla_saves = []       # per open block: the slot holding its SP
         self.vla_size = {}        # a VLA's name -> the slot with its size
@@ -1557,7 +1558,6 @@ class Walker:
         return ty
 
     def assign(self):
-        m = self.mark()
         ty = self.unary()
         if self.lval is not None:
             nxt = self.peek().kind
@@ -1604,8 +1604,12 @@ class Walker:
                 self.em.pop(LHS)
                 self.em.store(LHS, 0, ACC, self.wid(aty))
                 return aty
-        self.rewind(m)
-        self.lval = None
+        # Not an assignment: the unary just parsed is the LEFTMOST operand of
+        # the conditional expression, so hand it down instead of rewinding
+        # and parsing it again.  The rewind re-parsed every operand once per
+        # enclosing parenthesis -- 2^depth -- and a 52-line c-testsuite
+        # program whose macros nest parentheses took 16 s to compile.
+        self._pre = ty
         return self.ternary()
 
     def ternary(self):
@@ -1664,7 +1668,10 @@ class Walker:
 
     def binary(self, level):
         if level >= len(self.PREC):
-            t = self.unary()
+            if self._pre is not None:            # parsed already, by assign
+                t, self._pre = self._pre, None
+            else:
+                t = self.unary()
             self.load_if_lval()
             return t
         ty = self.binary(level + 1)
@@ -1691,7 +1698,11 @@ class Walker:
                 self.em.divmod_(op, uns, wid)
             else:
                 self.em.binop(op, uns, wid)
-            if op == "-" and ty.kind == "ptr" and rty.kind == "ptr":
+            # C99 6.5.6p9: the difference of two pointers counts ELEMENTS.
+            # An array operand decays to a pointer first, so `p - arr` is
+            # the same subtraction -- it used to answer in bytes.
+            if op == "-" and ty.kind in ("ptr", "arr") and \
+                    rty.kind in ("ptr", "arr"):
                 self.unscale(ty)
             ty = self.ty_from(res, ty, rty)
         return ty
