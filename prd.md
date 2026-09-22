@@ -748,6 +748,8 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-28** | `unisa fat` 产出 Mach-O universal，两个 slice 都执行且与解释器逐例一致 | I-19 |
 | **A-32** | `tests/linux.sh` → 整套套件在**本机虚机的真 Linux 内核**上跑过（2026-09-21 实测：`difftest 78/0`、`tools 11/11`、`corpus 209`，全绿）。虚机把仓库**只读**挂载，而套件要写（`build_ref.sh` 在源码旁边生成 `unisacc.c`），所以先把树拷进客机再跑；`corpus/` 软链回挂载点，因为套件只读它。**Linux 走 Lima 而非 UTM**：UTM 里那两台 Linux 没装 QEMU guest agent，`utmctl exec/file/ip-address` 一律失败，网络 Shared 无端口转发、MAC 不进宿主 ARP 表，所以也没有现成 SSH 路；Windows 那台**装了** agent，所以 UTM 管 Windows。GitHub 的 workflow 被**挪出 `.github/workflows/`**（放在 `workflows-disabled/`，GitHub 只读前者，所以推送、PR、手动一概点不着）：runner 是计费的，macOS 那两个按 10 倍计价，而这台机器上 macOS（原生）、Linux（Lima）、Windows（UTM）**三个平台都有**，六个目标全都能真跑。**按下推送就烧一次额度**，等于把钱花在这台机器不花钱就能做的事情上 | A-26, A-27 |
 | **A-33** | `tests/stages.sh` → 每个探针上，Python 前端问过的每个决策阶段，C 前端也问过。**所有别的套件量的都是答案**，而一条与表一致的手写规则答案与表完全相同 —— 只有这一条能看见「决定是不是网络做的」 | T-2, E-52 |
+| **A-34** | `tests/closure.sh` → 每个探针、每个目标，`unisacc FILE -b os/arch` 写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**；宿主目标的镜像真跑，输出与 VM 一致。一个头字段、一个位移、一个 REX 前缀错了都会在这里现形 | S-6, E-55 |
+| **A-35** | `tests/nativeboot.sh` → cc 编出的 unisacc `-b` 造出 unisacc（N1），N1 造 N2，N2 造 N3：**N1 = N2 = N3 逐字节**，且 N2 交叉写出的其余五个目标与 cc 编出的 unisacc 写出的相同；UTM 的 Windows 机器开着时，win/arm64 与 win/x86_64 的 unisacc 在 Windows 上各自重建自己，逐字节相同。**全程没有 Python** | S-6, E-55 |
 | **A-31** | `tests/tools.sh` → 别人的库代码（crypto-algorithms，八个算法，每个多文件、自带已知答案测试）与 `cc` 同输出，且 `pass` 不低于 `tests/tools.baseline`。**语料清零只说明前端不拒绝，不说明跑对** | W-14, I-22 |
 | **A-30** | `tests/multi.sh` → 两个翻译单元编译成一个程序，与 `cc a.c b.c` 同输出，`--fold` 6/6，且本机镜像真跑。语料构造成**共享会被看见**：两个单元各有同名不同值的 `static` | W-14 |
 | **A-29** | `tests/selfgap.sh` → unisacc 接受的程序数不低于 `tests/selfgap.baseline`（自举差距只能缩小）。**A-23 的不动点不是覆盖率**：unisacc.c 只需接受它自己用到的子集，于是三十次提交里前端特性单边堆在 Python 侧而套件量不到 —— `selfhost.sh` 只比词法器，`ccrun.sh` 遇到拒绝就打印 `UNS` 走人。这条把那个数变成棘轮 | A-20, A-23 |
@@ -780,7 +782,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 **S-5 为什么"推到 100%"没有理论风险。** [P-8] 的构造式存在性定理给了上界 `h = |K|`，所以"能不能到 100%"**不是开放问题**，开放的只有最小性；[F-5] 说到不了 1.000 是 **key 编码错了**，不准加宽网络；[D-7] 说网络与 gold 不一致是**其中之一有 bug**，不是模型方差；[D-1] 推理期无 RNG。合起来：**这个项目里任何一处"差一点"都是缺陷，没有一处可以赖给随机性**。剩下的全是确定性工程量，可枚举、可验收。
 
-**S-6 自举是“够自己用”的自举，不是追平 —— 现在前端已经追平。** [A-23] 的不动点 B=C=U 是**自我复现**。前端这一层已追平（2026-09-22，E-53）：unisacc 编译全部 83 个探针且答案全部一致，接受 211/220 语料，Python 前端通过的它都接受。**但它仍只出 tape**，lowering、两个编码器与三个镜像格式仍是 Python，所以准确的说法仍是：**unisacc.c 能把任何 C 程序编成 tape**，不能独立造出可执行文件。真正的 100% 自举 = 把 lowering、编码器、镜像格式也搬进 C —— 那是搬运，不是设计（`catalog` 已是唯一真源，`ckernel.py` 已会把模型与 kernel 发成 C）。这一层的仪表是 [A-29]。
+**S-6 自举闭环已达：没有 Python 的自举。**（2026-09-22，E-55）unisacc 带着自己的后端（`src/unisacc_back.c`：lowering、两个编码器、ELF/Mach-O/PE），`unisacc FILE -b os/arch` 直接写出可执行文件。判据是最严的那种：对每个探针、每个目标，它写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**（[A-34] closure 534/534）；cc 编出的 unisacc 用 `-b` 造出 unisacc，那个原生 unisacc 再造自己，**N1 = N2 = N3 逐字节**，并且交叉写出的其余五个目标也一致（[A-35] nativeboot，osx/arm64 与 lnx/arm64 两台真机）。[A-23] 的 B=C=U 仍保留，它证明的是 tape 经 Python 后端的不动点；这里证明的是镜像经自己的后端的不动点。
 
 **S-7 "能编译常见 C99 工具"的卡点是形态，不是语言特性。** 按"离判据多远 ÷ 成本"排：
 
@@ -792,7 +794,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | 4 | **运行期格式串的 `printf`** —— `<stdio.h>` 本来就有完整的 `_u_vfmt`，缺的只是把非字面量格式串从内建路径放行 | **已做**，[W-9] |
 | 5 | **工具语料棘轮** —— 真实库代码，多文件，自带已知答案测试 | **已做**，[A-31]，三个仓 `pass 11/11`，见 E-45、E-46 |
 | 6 | **自举前端追平**（由第 1 项驱动） | **已达**（2026-09-22）：probes 83/83、`ccrun` 83 一致 / 0 已知分歧 / 0 拒绝，语料接受 211/220（覆盖 Python 前端通过的全部 209），词法器 83/0，两平台全绿，见 E-47..E-53 |
-| 7 | **自举闭环**：lowering/编码/镜像进 C | 未做 |
+| 7 | **自举闭环**：lowering/编码/镜像进 C | **已达**（2026-09-22）：镜像与 Python 后端 534/534 逐字节相同，原生 N1=N2=N3，osx/lnx/win 四个目标真机自举。见 E-55 |
 | 8 | **浮点** | **已达**（2026-09-22）：两个前端、两个 ISA、VM 与目标解释器；`%f/%e/%g` 与平台 libc 逐位一致；`<math.h>` 为 fdlibm，1 ulp 以内。见 E-54 |
 | 9 | cosmo 式三格式单文件 | 野心项，不在关键路径 |
 
@@ -912,6 +914,22 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **顺带** | `sizeof a[0]` 一直是错的：下标分支没更新 `cursize`，于是 `sizeof plain / sizeof plain[0]` 算出 1。这种错只有**对答案**才看得见，棘轮看不见 |
 | **状态** | **已证实**（2026-09-21）|
 
+
+#### E-55　自举闭环：镜像逐字节，以及「只有真机跑它自己编的东西」才看得见的错
+
+| 栏 | 内容 |
+|---|---|
+| **结果** | [A-34] closure：89 个探针 × 6 个目标 **534/534 镜像与 Python 后端逐字节相同**，宿主镜像 89/89 与 VM 一致；[A-35] nativeboot：**N1 = N2 = N3**，交叉 5/5，osx/arm64 与 lnx/arm64；**在 Windows 真机上** win/arm64 与 win/x86_64（后者经 Windows 自带的仿真）的 unisacc 也各自重建出逐字节相同的自己。四个目标、三个操作系统上没有 Python 的自举。macOS、Linux 全绿 |
+| **做法** | 后端是**移植**，不是重新设计：`lower.py`、`assemble.py`、`emit_arm.py`、`emit_x86.py` 与三个镜像写出器逐函数搬进 C，`catalog` 仍是唯一真源（`ckernel.py` 把后端词表连同模型一起发成 C）。零数据从不在内存里展开：`.bss` 只是一个长度，写出器流式输出 |
+| **① 指针深度** | unisacc 把 `int **q` 的 `*q` 当 4 字节 int 读、指针数组按 4 字节一格排。解释器的地址恰好放得进 32 位，**只有原生镜像**会把高半截丢掉 |
+| **② 静态局部变量** | unisacc 把 `static` 局部当普通局部：每次调用重新开始。解释器的栈是新的、恰好全零，看起来「保留」了值 |
+| **③ lnx/arm64 的 argc 永远是 0** | `argsave` 按 Darwin 的交接读 x0/x1；Linux 把 argc 放在 `[sp]`。**两个后端都错**（它们逐字节相同，所以错也相同），因为此前没有一个 Linux arm64 探针看 argc —— 是原生 unisacc 在 Linux 上打出自己的 usage 才暴露 |
+| **④ 目标宏** | unisacc 从不预定义 `__linux__` / `_WIN32`：`<stdio.h>` 在 Linux 用了 BSD 的 `O_*` 位（`fopen(…,"w")` 失败），在 Windows 走了 `open(2)`。现在 `-b` / `-t os/arch` 决定预定义，裸 tape 为 lnx/x86_64，与 `unisa/front/pp.py` 相同；`unisa vm --os` 让解释器按同一 OS 读系统调用参数 |
+| **⑤ `main(argc, argv)` 从来没拿到参数** | 两个前端的 `_start` 都直接 `call main`，r0/r1 是 `__init` 留下的东西 —— unisacc 自己用 `__argc()` 内建，所以一直没人看见。现在 `_start` 用 `.argc`/`.argv` 建出数组再调用（两个前端同一段 stub）。追下去又是三处：osx/x86_64 的 `argsave` 按 Linux `_start` 从 `[rsp]` 读 argc，而 LC_MAIN 是被 dyld **调用**的，那里是返回地址；x86 的 `argvget` 把元素读进 r11 就停了，而且 REX 字节把 X 位也置上了；Windows 根本没有 argv —— 新的 `winargs` 在入口调 `GetCommandLineA` 并原地切分（引号、制表符），两个 ISA、两个后端同一段机器码。新探针 `b_argv` |
+| **⑥ Windows 上打不开文件** | unisacc 读源文件用 `__open(path, 0)`，Windows 的 gate 是 CreateFileA（访问掩码 + 处置），`0` 等于什么权限都不要。`ropen()` 按 `_WIN32` 选参数，与 `<stdio.h>` 的 fopen 同一个选择 |
+| **⑦ `LC_LOAD_DYLINKER` 的 cmdsize 是 28** | 64 位镜像要求 8 的倍数；内核放行，objdump 与 otool 的解析器不放行。改为 32，从头部 SLACK 里拿 4 字节，正文位置不动 |
+| **⑧ 91 MB 的镜像** | unisacc 自己的镜像 91 MB，其中 10 页非零：零数据虽不在内存里展开，却照样写进了文件，因为它的表排在大缓冲区之后。现在两个后端同一条规则：非零块在前、全零块在后（各保持地址 mod 8），文件只存到最后一个非零字节 —— ELF `p_filesz < p_memsz`，Mach-O 一个 `S_ZEROFILL` 的 `__bss` 节（从头部的 SLACK 里拿 80 字节，正文位置不动），PE 的 cookie 本来就是零，随尾部一起零填充。**91 MB → 639 KB** |
+| **状态** | **已证实**（2026-09-22）|
 
 #### E-54　浮点：一整根轴，按构造加进每一张表
 

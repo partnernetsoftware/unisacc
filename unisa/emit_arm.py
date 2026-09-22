@@ -50,6 +50,8 @@ IP1 = 17          # x16 is the Darwin syscall-number register -- use IP1
 # gate therefore brackets the call, and translates the POSIX shape the tape
 # speaks into the one kernel32 expects.
 STD_FIRST = -10   # GetStdHandle: -10 stdin, -11 stdout, -12 stderr
+# the command-line splitter: x0 = read, x1 = write, x2 = argc, x3 = argv[]
+WINARGS_BODY = (0x39400004, 0x7100809F, 0x54000060, 0x7100249F, 0x54000061, 0x91000400, 0x17FFFFFA, 0x34000364, 0xF100FC5F, 0x5400032A, 0xF8227861, 0x91000442, 0xD2800005, 0x39400004, 0x34000264, 0x7100889F, 0x54000081, 0xD24000A5, 0x91000400, 0x17FFFFFA, 0xB50000A5, 0x7100809F, 0x540000E0, 0x7100249F, 0x540000A0, 0x39000024, 0x91000421, 0x91000400, 0x17FFFFF1, 0x3900003F, 0x91000421, 0x91000400, 0x17FFFFE0, 0x3900003F)
 
 
 def _ldrx(rt, rn, rm):
@@ -251,6 +253,17 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         for k in range(1, 8):
             out += _ldr(k, IP0, 8 * k)
         out += w(0xAA000000 | (IP1 << 16) | (31 << 5) | N(a[1]))
+        return out
+    if o == "winargs":
+        # Windows hands over no argv: split GetCommandLineA() in place (the
+        # write pointer never passes the read pointer), quotes honoured, at
+        # most 63 arguments, into the argv array a[2]
+        out = _callimp(text_va + off, imps, "GetCommandLineA")
+        out += w(0xAA0003E1) + w(0xD2800002)         # mov x1, x0; mov x2, #0
+        out += adrp_add(3, text_va + off + len(out), a[2] + shift)
+        out += b"".join(w(v) for v in WINARGS_BODY)
+        out += adrp_add(IP0, text_va + off + len(out), a[0] + shift) + _str(2, IP0)
+        out += adrp_add(IP0, text_va + off + len(out), a[1] + shift) + _str(3, IP0)
         return out
     if o == "winstdh":
         out = b""

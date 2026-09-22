@@ -511,6 +511,7 @@ class Walker:
             self.em.lea(ACC, lab)
             self.em.lea(LHS, g)
             self.em.store(LHS, off, ACC)
+        self._argv_stub()
         self.em.call("main")
         self.em.exit_(ACC)
         for nm, line in self.called.items():
@@ -519,6 +520,28 @@ class Walker:
                 # translation unit, or come from one of our own headers
                 raise CError("line %d: undefined function %r" % (line, nm))
         return self.em.finish()
+
+    def _argv_stub(self):
+        """main(argc, argv) gets them in r0, r1: argv is an ARRAY, and the
+        machine only answers `.argv rd, k` one element at a time, so `_start`
+        builds it.  unisacc emits the same stub."""
+        t = self.em.t
+        t.string("__argvv", b"\x00" * 32768, align=8)       # 4096 slots, bss
+        t.emit(".argc", "r0")
+        t.emit(".lea", "r1", "__argvv")
+        t.emit("imm", "r2", 0)
+        t.label("__argv_top")
+        t.emit("slt64", "r3", "r2", "r0")
+        t.emit("jumpz", "r3", "__argv_done")
+        t.emit(".argv", "r4", "r2")
+        t.emit("imm", "r5", 8)
+        t.emit("mul64", "r5", "r2", "r5")
+        t.emit("add64", "r5", "r1", "r5")
+        t.emit("store64", "r5", 0, "r4")
+        t.emit("imm", "r5", 1)
+        t.emit("add64", "r2", "r2", "r5")
+        t.emit("jump", "__argv_top")
+        t.label("__argv_done")
 
     def do_typedef(self):
         self.expect("typedef")

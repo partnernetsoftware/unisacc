@@ -24,7 +24,8 @@ PRINTMAX = 24
 WIN_HSTD = SCRATCH + PRINTMAX            # GetStdHandle(-10/-11/-12)
 WIN_WRITTEN = WIN_HSTD + 24              # the DWORD WriteFile insists on
 WIN_SAVE = WIN_WRITTEN + 8               # r0..r7
-WIN_EXTRA = WIN_SAVE + 64
+WIN_ARGVA = WIN_SAVE + 64               # argv[64], split from GetCommandLineA
+WIN_EXTRA = WIN_ARGVA + 512
 WIN_STACK = 0x10000
 FAULTS = ("osx_class_bit", "win_argregs", "arm_gate")
 SYSV = ("rdi", "rsi", "rdx")
@@ -66,10 +67,34 @@ def facts(oracle, op, os_, arch, drive="spec"):
     return f
 
 
+def zero_last(data, syms, base):
+    """Lay the data out initialised-first: every blob (a symbol's bytes, up
+    to the next symbol) that holds a nonzero byte, in order, then every blob
+    that is all zeros.  Each keeps its address mod 8.  The zeros then form one
+    tail, which an image maps without storing -- unisacc's own tables sat
+    after its buffers and made its image 91 MB of mostly nothing.  Code names
+    data only through `syms` and no data byte holds an address (both front
+    ends set pointer globals at run time), so moving a blob is invisible."""
+    starts = sorted(set(a - base for a in syms.values()))
+    if not starts or starts[0] != 0:
+        starts = [0] + starts
+    ends = starts[1:] + [len(data)]
+    blobs = [(s, e) for s, e in zip(starts, ends)]
+    nz = [b for b in blobs if any(data[b[0]:b[1]])]
+    zz = [b for b in blobs if not any(data[b[0]:b[1]])]
+    out = bytearray()
+    new = {}
+    for s, e in nz + zz:
+        out.extend(b"\x00" * ((s - len(out)) % 8))
+        new[s] = len(out)
+        out.extend(data[s:e])
+    return out, {n: base + new[a - base] for n, a in syms.items()}
+
+
 def lower(tape, target, oracle, fault=None, drive="spec"):
     from .tape import DATA_BASE
     os_, arch = target.split("/")
-    data = bytearray(tape.data)
+    data, syms = zero_last(tape.data, tape.syms, DATA_BASE)
     pad = (-len(data)) % 8
     data.extend(b"\x00" * pad)
     base = DATA_BASE + len(data)
@@ -81,7 +106,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     STACKTOP = base + WIN_EXTRA + WIN_STACK
     data.extend(b"\x00" * (SCRATCH + PRINTMAX +
                            (WIN_EXTRA - SCRATCH - PRINTMAX if win else 0)))
-    tp = TargetProgram(target, bytes(data), tape.syms)
+    tp = TargetProgram(target, bytes(data), syms)
     tp.src_os = getattr(tape, "src_os", tp.os)
     tp.data_len = len(data)
     # the tape stack is zero-filled, so it is bss: it costs image size but not
@@ -136,6 +161,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                 # the tape stack pointer is a volatile register on both Win64
                 # ABIs, so it must not be live across them. [I-18]
                 tp.emit("winstdh", HSTD)
+                tp.emit("winargs", ARGC, ARGV, base + WIN_ARGVA)
             tp.emit("spinit", sp, STACKTOP if win else None)
             if not win:
                 # the loader hands over argc/argv; stash them before anything

@@ -44,7 +44,9 @@ def _pad4(b):
 
 
 def _dylinker():
-    body = _pad4(DYLD + b"\x00")
+    # cmdsize must be a multiple of 8 on a 64-bit image: 12 + 20, not 12 + 16
+    # (the kernel let 28 through; objdump and otool's parser did not)
+    body = DYLD + b"\x00" * (20 - len(DYLD))
     return struct.pack("<III", LC_LOAD_DYLINKER, 12 + len(body), 12) + body
 
 
@@ -57,11 +59,11 @@ def _dylib():
 # codesign APPENDS LC_CODE_SIGNATURE to the load commands.  With the header
 # region packed exactly full it overwrites the first bytes of __text, which
 # disassembles as `udf` and dies with SIGILL.  Real linkers leave slack here.
-SLACK = 256
+SLACK = 172          # 256, less __bss's 80 and the dylinker's 4: HDRS holds
 
 
 def _cmdsz(arch):
-    return (SEG + (SEG + SECT) * 2 + SEG + len(_dylinker()) + len(_dylib())
+    return (SEG + (SEG + SECT) + (SEG + 2 * SECT) + SEG + len(_dylinker()) + len(_dylib())
             + 24 + 24 + 48 + 24 + 80)
 
 
@@ -80,11 +82,13 @@ def _sect(sect, seg, addr, size, off, flags):
                        2, 0, 0, flags, 0, 0, 0)
 
 
-def write(arch, text, data, entry):
+def write(arch, text, data, entry, full=None):
+    full = len(data) if full is None else full
     cpu, sub = CPU[arch]
     hdrs = HDRS(arch)
     textsz = _round(hdrs + len(text))
-    datasz = _round(max(1, len(data)))
+    datavm = _round(max(1, full))           # mapped
+    datasz = _round(len(data))              # stored; __bss zero-fills the rest
     link = textsz + datasz
     m = bytearray()
     m += struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, sub, 2, NCMDS,
@@ -95,9 +99,12 @@ def write(arch, text, data, entry):
     m += _seg(b"__TEXT", VMADDR, textsz, 0, textsz, 5, 5, 1)
     m += _sect(b"__text", b"__TEXT", VMADDR + hdrs, len(text), hdrs,
                0x80000400)
-    m += _seg(b"__DATA", VMADDR + textsz, datasz, textsz, datasz, 3, 3, 1)
+    m += _seg(b"__DATA", VMADDR + textsz, datavm, textsz, datasz, 3, 3, 2)
     m += _sect(b"__data", b"__DATA", VMADDR + textsz, len(data), textsz, 0)
-    m += _seg(b"__LINKEDIT", VMADDR + link, PAGE, link, STRTAB, 1, 1, 0)
+    m += _sect(b"__bss", b"__DATA", VMADDR + textsz + len(data),
+               full - len(data), 0, 1)                   # S_ZEROFILL
+    m += _seg(b"__LINKEDIT", VMADDR + textsz + datavm, PAGE, link, STRTAB,
+              1, 1, 0)
     m += _dylinker()
     m += _dylib()
     m += struct.pack("<IIQQ", LC_MAIN, 24, hdrs + entry, 0)

@@ -37,6 +37,31 @@ for t in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
     cmp -s <("$UA" unisacc.c -b "$t") <("$T/r2" unisacc.c -b "$t") \
         || { echo "  FAIL cross $t"; ok=0; }
 done
+# Windows, when the UTM machine is up (see tests/crossnative.sh): unisacc's
+# own PE, both ISAs, rebuilds itself ON Windows to the same bytes.
+UTM=/Applications/UTM.app/Contents/MacOS/utmctl; VM=${WINVM:-minicon-win-arm-64}
+if [ -x "$UTM" ] && "$UTM" status "$VM" 2>/dev/null | grep -q started; then
+    n=$(date +%s)$RANDOM
+    for t in win/arm64 win/x86_64; do
+        tt=$(echo "$t" | tr / _)
+        "$UA" unisacc.c -b "$t" > "$T/W.$tt"
+        "$UTM" file push "$VM" 'C:\u\nb'"$n$tt"'.exe' < "$T/W.$tt" 2>/dev/null
+    done
+    "$UTM" file push "$VM" 'C:\u\nb'"$n"'.c' < unisacc.c 2>/dev/null
+    printf '@echo off\r\ncd /d C:\\u\r\nnb%swin_arm64.exe nb%s.c -b win/arm64 > nb%sa.out\r\nnb%swin_x86_64.exe nb%s.c -b win/x86_64 > nb%sx.out\r\necho done > nb%s.txt\r\n' \
+        "$n" "$n" "$n" "$n" "$n" "$n" "$n" | "$UTM" file push "$VM" 'C:\u\nb'"$n"'.bat' 2>/dev/null
+    "$UTM" exec "$VM" --hide --cmd cmd.exe -- /c 'C:\u\nb'"$n"'.bat' >/dev/null 2>&1
+    i=0; while [ $i -lt 150 ]; do
+        case "$("$UTM" file pull "$VM" 'C:\u\nb'"$n"'.txt' 2>&1)" in *done*) break;; esac
+        i=$((i+1)); sleep 3; done
+    "$UTM" file pull "$VM" 'C:\u\nb'"$n"'a.out' > "$T/Wa" 2>/dev/null
+    "$UTM" file pull "$VM" 'C:\u\nb'"$n"'x.out' > "$T/Wx" 2>/dev/null
+    cmp -s "$T/W.win_arm64" "$T/Wa" || { echo "  FAIL win/arm64 self-build differs"; ok=0; }
+    cmp -s "$T/W.win_x86_64" "$T/Wx" || { echo "  FAIL win/x86_64 self-build differs"; ok=0; }
+    [ $ok = 1 ] && echo "  ok  on Windows: win/arm64 and win/x86_64 rebuild themselves"
+else
+    echo "  skip Windows ($VM not started)"
+fi
 printf "  %s  N1=N2=N3 on %s, cross 5/5  %s\n" "$([ $ok = 1 ] && echo ok || echo FAIL)" \
     "$H" "$(shasum < "$T/N1" | cut -c1-16)"
 echo

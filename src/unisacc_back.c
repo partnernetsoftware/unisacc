@@ -77,6 +77,11 @@ long bkdlen;                        /* the data's full length, zeros included */
 int bkstored;                       /* how much of bkdata is in use */
 long bkz_at[BK_MAXZ]; long bkz_len[BK_MAXZ]; int bknz;
 long bkd_at[BK_MAXZ]; int bkd_off[BK_MAXZ]; int bkd_len[BK_MAXZ]; int bknd;
+int bkds_id[BK_MAXZ]; int bknds;     /* data symbols, in allocation = address order */
+int bk_dsym(int id) {
+    if (bknds >= BK_MAXZ) { __write(2, "back end: too many data symbols\n", 32); __exit(1); }
+    bkds_id[bknds] = id; bknds = bknds + 1; return 0;
+}
 
 int bk_zeros(long n) {
     if (n <= 0) return 0;
@@ -94,6 +99,94 @@ int bk_bytes(char *b, int n) {
     bkd_at[bknd] = bkdlen; bkd_off[bknd] = bkstored; bkd_len[bknd] = n; bknd = bknd + 1;
     k = 0; while (k < n) { bkdata[bkstored + k] = b[k]; k = k + 1; }
     bkstored = bkstored + n; bkdlen = bkdlen + n;
+    return 0;
+}
+
+/* Initialised blobs first, all-zero blobs after, each keeping its address
+   mod 8 -- lower.zero_last, the same rule on the same blobs (a symbol's
+   bytes up to the next symbol).  A stored run lies inside its own symbol's
+   blob, so a blob is nonzero exactly when one of its runs has a nonzero
+   byte.  The zeros end up as one tail the image does not store. */
+long bkb_s[BK_MAXZ]; long bkb_e[BK_MAXZ]; long bkb_new[BK_MAXZ];
+int bkb_nz[BK_MAXZ]; int bkb_r0[BK_MAXZ]; int bkb_r1[BK_MAXZ]; int bknb;
+long bkt_at[BK_MAXZ]; int bkt_off[BK_MAXZ]; int bkt_len[BK_MAXZ];
+int bk_repack(void) {
+    int i; int b; int a; int r; int pass; int nt; long o; long cur; long k; long at;
+    bknb = 0;
+    o = 0 - 1; if (bknds > 0) o = bksym_addr[bkds_id[0]] - BK_DATA_BASE;
+    if (o != 0) { bkb_s[0] = 0; bknb = 1; }
+    i = 0;
+    while (i < bknds) {
+        o = bksym_addr[bkds_id[i]] - BK_DATA_BASE;
+        if (bknb == 0 || bkb_s[bknb - 1] != o) {
+            if (bknb >= BK_MAXZ) { __write(2, "back end: too many blobs\n", 25); __exit(1); }
+            bkb_s[bknb] = o; bknb = bknb + 1;
+        }
+        i = i + 1;
+    }
+    b = 0; a = 0;
+    while (b < bknb) {
+        if (b + 1 < bknb) bkb_e[b] = bkb_s[b + 1]; else bkb_e[b] = bkdlen;
+        bkb_nz[b] = 0; bkb_r0[b] = a;
+        while (a < bknd && bkd_at[a] < bkb_e[b]) {
+            k = 0;
+            while (k < bkd_len[a]) { if (bkdata[bkd_off[a] + k]) { bkb_nz[b] = 1; break; } k = k + 1; }
+            a = a + 1;
+        }
+        bkb_r1[b] = a;
+        b = b + 1;
+    }
+    nt = bknd; r = 0;
+    while (r < nt) { bkt_at[r] = bkd_at[r]; bkt_off[r] = bkd_off[r]; bkt_len[r] = bkd_len[r]; r = r + 1; }
+    cur = 0; pass = 1;
+    while (pass >= 0) {
+        b = 0;
+        while (b < bknb) {
+            if (bkb_nz[b] == pass) {
+                cur = cur + ((bkb_s[b] - cur) % 8 + 8) % 8;
+                bkb_new[b] = cur; cur = cur + bkb_e[b] - bkb_s[b];
+            }
+            b = b + 1;
+        }
+        pass = pass - 1;
+    }
+    bknd = 0; bknz = 0; bkdlen = 0; pass = 1;
+    while (pass >= 0) {
+        b = 0;
+        while (b < bknb) {
+            if (bkb_nz[b] == pass) {
+                r = bkb_r0[b];
+                while (r < bkb_r1[b]) {
+                    at = bkb_new[b] + bkt_at[r] - bkb_s[b];
+                    bk_zeros(at - bkdlen);
+                    bkd_at[bknd] = at; bkd_off[bknd] = bkt_off[r]; bkd_len[bknd] = bkt_len[r];
+                    bknd = bknd + 1; bkdlen = at + bkt_len[r];
+                    r = r + 1;
+                }
+            }
+            b = b + 1;
+        }
+        pass = pass - 1;
+    }
+    bk_zeros(cur - bkdlen);
+    i = 0; b = 0;
+    while (i < bknds) {
+        o = bksym_addr[bkds_id[i]] - BK_DATA_BASE;
+        while (bkb_s[b] != o) b = b + 1;
+        bksym_addr[bkds_id[i]] = BK_DATA_BASE + bkb_new[b];
+        i = i + 1;
+    }
+    return 0;
+}
+/* the data up to its last nonzero byte: what an image stores */
+long bk_nzlen(void) {
+    int a; long k;
+    a = bknd - 1;
+    while (a >= 0) {
+        k = bkd_len[a] - 1;
+        while (k >= 0) { if (bkdata[bkd_off[a] + k]) return bkd_at[a] + k + 1; k = k - 1; }
+        a = a - 1;
+    }
     return 0;
 }
 
@@ -172,7 +265,7 @@ int bk_parse(char *t, int n) {
             cnt = bk_num(t + j + 1, e - j - 1);
             bk_zeros((8 - bkdlen % 8) % 8);
             id = bk_name(t + s0, s1 - s0);
-            bksym_addr[id] = BK_DATA_BASE + bkdlen;
+            bksym_addr[id] = BK_DATA_BASE + bkdlen; bk_dsym(id);
             bk_zeros(cnt);
             i = e + 1; continue;
         }
@@ -199,7 +292,7 @@ int bk_parse(char *t, int n) {
             }
             id = bk_name(t + s0, s1 - s0);
             if (bksym_addr[id] < 0) {
-                bksym_addr[id] = BK_DATA_BASE + bkdlen;
+                bksym_addr[id] = BK_DATA_BASE + bkdlen; bk_dsym(id);
                 bk_bytes(bkstrbuf, m);
             }
             i = e + 1; continue;
@@ -315,6 +408,7 @@ int bk_formis(char *nm) { char *e; int k; e = bk_nth(BH_ENC_Y, bkf_form); k = 0;
 #define TO_SPINIT 107
 #define TO_ARGSAVE 108
 #define TO_ARGVGET 109
+#define TO_WINARGS 110
 /* setreg's source kinds */
 #define SK_IMM 1
 #define SK_REG 2
@@ -326,7 +420,7 @@ int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
 long bk_scr0; long bk_scr1; long bk_plen; long bk_pbuf; long bk_argc; long bk_argv;
-long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
+long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
 int bk_rmap[8];                     /* tape register -> machine register */
 int bk_nr;                          /* the syscall-number register */
 
@@ -367,8 +461,9 @@ int bk_lower(void) {
     bk_scr0 = base; bk_scr1 = base + 8; bk_plen = base + 16; bk_pbuf = base + 24;
     bk_argc = base + 48; bk_argv = base + 56;
     bk_hstd = base + 104; bk_written = base + 128; bk_save = base + 136;
-    bk_stacktop = base + 200 + 65536;
-    if (bkos == 2) bk_zeros(200); else bk_zeros(104);
+    bk_argva = base + 200;                      /* argv[64] on Windows */
+    bk_stacktop = base + 712 + 65536;
+    if (bkos == 2) bk_zeros(712); else bk_zeros(104);
     bk_bss = 0; if (bkos == 2) bk_bss = 65536;
     /* REGMAP: rax rdi rsi rdx rcx r8 r9 r10 / x0..x7 */
     x86map[0] = 0; x86map[1] = 7; x86map[2] = 6; x86map[3] = 2; x86map[4] = 1;
@@ -394,6 +489,7 @@ int bk_lower(void) {
         if (pc == bkentry) {
             /* bind the tape SP at the ENTRY: a real process has a real stack */
             if (bkos == 2) tk(TO_WINSTDH, bk_hstd, 0, 0, 0);
+            if (bkos == 2) tk(TO_WINARGS, bk_argc, bk_argv, bk_argva, 0);
             tk(TO_SPINIT, bk_rmap[7], bkos == 2 ? bk_stacktop : 0 - 1, 0, 0);
             if (bkos != 2) tk(TO_ARGSAVE, bk_argc, bk_argv, bkos == 0, 0);
         }
@@ -559,6 +655,9 @@ int a_ldr(int rt, int rn, long off) { ow(0xF9400000 | ((off / 8) << 10) | (rn <<
 int a_str(int rt, int rn, long off) { ow(0xF9000000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
 int a_movz(int d, long v) { ow(0xD2800000 | ((v & 0xFFFF) << 5) | d); return 0; }
 int a_movn(int d, long v) { ow(0x92800000 | (((0 - v - 1) & 0xFFFF) << 5) | d); return 0; }
+/* the Windows command-line splitter, the same words emit_arm/emit_x86 hold */
+long BK_WA_ARM[34] = {0x39400004, 0x7100809F, 0x54000060, 0x7100249F, 0x54000061, 0x91000400, 0x17FFFFFA, 0x34000364, 0xF100FC5F, 0x5400032A, 0xF8227861, 0x91000442, 0xD2800005, 0x39400004, 0x34000264, 0x7100889F, 0x54000081, 0xD24000A5, 0x91000400, 0x17FFFFFA, 0xB50000A5, 0x7100809F, 0x540000E0, 0x7100249F, 0x540000A0, 0x39000024, 0x91000421, 0x91000400, 0x17FFFFF1, 0x3900003F, 0x91000421, 0x91000400, 0x17FFFFE0, 0x3900003F};
+char BK_WA_X86[93] = {15, 182, 6, 60, 32, 116, 4, 60, 9, 117, 5, 72, 255, 198, 235, 240, 132, 192, 116, 73, 72, 131, 249, 63, 125, 67, 73, 137, 60, 200, 72, 255, 193, 69, 49, 201, 15, 182, 6, 132, 192, 116, 47, 60, 34, 117, 9, 65, 131, 241, 1, 72, 255, 198, 235, 236, 69, 133, 201, 117, 8, 60, 32, 116, 14, 60, 9, 116, 10, 136, 7, 72, 255, 199, 72, 255, 198, 235, 213, 198, 7, 0, 72, 255, 199, 72, 255, 198, 235, 166, 198, 7, 0};
 int a_callimp(long pc, int k) {
     a_adrp_add(A_IP1, pc, bk_sizing ? 0 : bk_imp[k]);
     a_ldr(A_IP1, A_IP1, 0);
@@ -715,6 +814,16 @@ int bk_arm(int i, long off) {
         a_adrp_add(A_IP0, pc + (bkol - s), a[0] + bk_shift);
         k = 1; while (k < 8) { a_ldr(k, A_IP0, 8 * k); k = k + 1; }
         ow(0xAA000000 | (A_IP1 << 16) | (31 << 5) | (a[1] < 0 ? 31 : a[1]));
+        return 1;
+    }
+    if (op == TO_WINARGS) {
+        int s; s = bkol;
+        a_callimp(pc, 6);                                        /* GetCommandLineA */
+        ow(0xAA0003E1); ow(0xD2800002);
+        a_adrp_add(3, pc + (bkol - s), a[2] + bk_shift);
+        k = 0; while (k < 34) { ow(BK_WA_ARM[k]); k = k + 1; }
+        a_adrp_add(A_IP0, pc + (bkol - s), a[0] + bk_shift); a_str(2, A_IP0, 0);
+        a_adrp_add(A_IP0, pc + (bkol - s), a[1] + bk_shift); a_str(3, A_IP0, 0);
         return 1;
     }
     if (op == TO_WINSTDH) {
@@ -1096,6 +1205,11 @@ int bk_x86(int i, long off) {
     if (op == TO_ITOA) { x_itoa(pc, a[0] + bk_shift, a[1] + bk_shift, a[2] + bk_shift); return 1; }
     if (op == TO_ARGSAVE) {
         int s; s = bkol;
+        if (a[2] == 0) {                /* Darwin: dyld calls us, rdi/rsi */
+            x_rip(0x89, 7, pc + 7, a[0] + bk_shift);
+            x_rip(0x89, 6, pc + 14, a[1] + bk_shift);
+            return 1;
+        }
         x_rex(1, 0, 0, 0); ob(0x8B); x_modrm(0, 0, 4); ob(0x24);
         x_rip(0x89, X_RAX, pc + (bkol - s) + 7, a[0] + bk_shift);
         x_rex(1, 0, 0, 0); ob(0x8D); x_modrm(1, 0, 4); ob(0x24); ob(0x08);
@@ -1106,7 +1220,8 @@ int bk_x86(int i, long off) {
         int t;
         x_rip(0x8B, X_R11, pc + 7, a[2] + bk_shift);
         t = a[1];
-        x_rex(1, 3, t >> 3, 3); ob(0x8B); x_modrm(0, 11, 4); ob(0xC3 | ((t & 7) << 3));
+        x_rex(1, 1, t >> 3, 1); ob(0x8B); x_modrm(0, 11, 4); ob(0xC3 | ((t & 7) << 3));
+        x_movrr(a[0], X_R11);
         return 1;
     }
     if (op == TO_SPINIT) {
@@ -1125,6 +1240,18 @@ int bk_x86(int i, long off) {
         x_rip(0x8D, X_RBX, pc + (bkol - s) + 7, a[0] + bk_shift);
         k = 1; while (k < 8) { x_mem(0x8B, 0 - 1, bk_rmap[k], X_RBX, 8 * k, 1); k = k + 1; }
         x_movrr(a[1], X_R11);
+        return 1;
+    }
+    if (op == TO_WINARGS) {
+        int s; s = bkol;
+        x_alignpre(0);
+        x_callimp(pc + (bkol - s), 6);
+        x_alignpost();
+        ob(0x48); ob(0x89); ob(0xC6); ob(0x48); ob(0x89); ob(0xC7); ob(0x31); ob(0xC9);
+        x_rip(0x8D, 8, pc + (bkol - s) + 7, a[2] + bk_shift);
+        k = 0; while (k < 93) { ob(BK_WA_X86[k] & 255); k = k + 1; }
+        x_rip(0x89, 1, pc + (bkol - s) + 7, a[0] + bk_shift);
+        x_rip(0x89, 8, pc + (bkol - s) + 7, a[1] + bk_shift);
         return 1;
     }
     if (op == TO_WINSTDH) {
@@ -1286,7 +1413,7 @@ int bk_idata_layout(void) {
     bk_idata_len = off + 320;                        /* LOADCFG 0x140 */
     return 0;
 }
-long bk_macho_hdrs(void) { return 32 + (72 + 152 * 2 + 72 + 28 + 56 + 24 + 24 + 48 + 24 + 80) + 256; }
+long bk_macho_hdrs(void) { return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 + 48 + 24 + 80) + 172; }
 
 int bk_assemble(void) {
     long off; int i; int ok; int id;
@@ -1353,22 +1480,26 @@ int wname(char *s, int n) {                       /* s padded with NULs to n */
 }
 int wtext(void) { long k; k = 0; while (k < bktlen) { wb(bktext[k]); k = k + 1; } return 0; }
 /* the data, in address order: stored runs and zero runs interleave */
-int wdata(void) {
+int wdata(long lim) {                /* the data's first lim bytes */
     int a; int z; long p; long k;
     a = 0; z = 0; p = 0;
-    while (p < bkdlen) {
+    while (p < lim) {
         if (a < bknd && bkd_at[a] == p) {
-            k = 0; while (k < bkd_len[a]) { wb(bkdata[bkd_off[a] + k]); k = k + 1; }
+            k = 0; while (k < bkd_len[a] && p + k < lim) { wb(bkdata[bkd_off[a] + k]); k = k + 1; }
             p = p + bkd_len[a]; a = a + 1; continue;
         }
-        if (z < bknz && bkz_at[z] == p) { wz(bkz_len[z]); p = p + bkz_len[z]; z = z + 1; continue; }
+        if (z < bknz && bkz_at[z] == p) {
+            k = bkz_len[z]; if (p + k > lim) k = lim - p;
+            wz(k); p = p + bkz_len[z]; z = z + 1; continue;
+        }
         __write(2, "back end: data gap\n", 19); __exit(1);
     }
     return 0;
 }
 
 int bk_elf(void) {
-    long tend; long doff;
+    long tend; long doff; long L;
+    L = bk_nzlen();
     tend = 176 + bktlen;
     doff = bk_round(tend, 4096);
     wb(127); wb(69); wb(76); wb(70); wb(2); wb(1); wb(1); wb(0); wz(8);
@@ -1376,8 +1507,8 @@ int bk_elf(void) {
     w64(4194304 + 176 + bk_entry); w64(64); w64(0);
     w32(0); w16(64); w16(56); w16(2); w16(0); w16(0); w16(0);
     w32(1); w32(5); w64(0); w64(4194304); w64(4194304); w64(tend); w64(tend); w64(4096);
-    w32(1); w32(6); w64(doff); w64(4194304 + doff); w64(4194304 + doff); w64(bkdlen); w64(bkdlen); w64(4096);
-    wtext(); wz(doff - tend); wdata();
+    w32(1); w32(6); w64(doff); w64(4194304 + doff); w64(4194304 + doff); w64(L); w64(bkdlen); w64(4096);
+    wtext(); wz(doff - tend); wdata(L);
     return 0;
 }
 
@@ -1393,30 +1524,33 @@ int bk_sect(char *sect, char *seg, long addr, long size, long off, long flags) {
     return 0;
 }
 int bk_macho(void) {
-    long hdrs; long textsz; long datasz; long link; long v;
+    long hdrs; long textsz; long datasz; long datavm; long link; long v; long L;
     hdrs = bk_macho_hdrs();
+    L = bk_nzlen();
     textsz = bk_round(hdrs + bktlen, 16384);
-    datasz = bk_round(bkdlen > 1 ? bkdlen : 1, 16384);
+    datavm = bk_round(bkdlen > 1 ? bkdlen : 1, 16384);   /* mapped */
+    datasz = bk_round(L, 16384);                         /* stored */
     link = textsz + datasz;
     v = 4294967296;
     w32(0xFEEDFACF); w32(bkarch ? 0x0100000C : 0x01000007); w32(bkarch ? 0 : 3);
-    w32(2); w32(11); w32(hdrs - 32 - 256); w32(0x200085); w32(0);
+    w32(2); w32(11); w32(hdrs - 32 - 172); w32(0x200085); w32(0);
     bk_seg("__PAGEZERO", 0, v, 0, 0, 0, 0, 0);
     bk_seg("__TEXT", v, textsz, 0, textsz, 5, 5, 1);
     bk_sect("__text", "__TEXT", v + hdrs, bktlen, hdrs, 0x80000400);
-    bk_seg("__DATA", v + textsz, datasz, textsz, datasz, 3, 3, 1);
-    bk_sect("__data", "__DATA", v + textsz, bkdlen, textsz, 0);
-    bk_seg("__LINKEDIT", v + link, 16384, link, 8, 1, 1, 0);
-    w32(0xE); w32(28); w32(12); wname("/usr/lib/dyld", 16);
+    bk_seg("__DATA", v + textsz, datavm, textsz, datasz, 3, 3, 2);
+    bk_sect("__data", "__DATA", v + textsz, L, textsz, 0);
+    bk_sect("__bss", "__DATA", v + textsz + L, bkdlen - L, 0, 1);      /* S_ZEROFILL */
+    bk_seg("__LINKEDIT", v + textsz + datavm, 16384, link, 8, 1, 1, 0);
+    w32(0xE); w32(32); w32(12); wname("/usr/lib/dyld", 20);
     w32(0xC); w32(56); w32(24); w32(0); w32(0x10000); w32(0x10000); wname("/usr/lib/libSystem.B.dylib", 32);
     w32(0x80000028); w32(24); w64(hdrs + bk_entry); w64(0);
     w32(0x32); w32(24); w32(1); w32(13 << 16); w32(13 << 16); w32(0);
     w32(0x80000022); w32(48); wz(40);
     w32(2); w32(24); w32(link); w32(0); w32(link); w32(8);
     w32(0xB); w32(80); wz(72);
-    wz(256);
+    wz(172);
     wtext(); wz(textsz - hdrs - bktlen);
-    wdata(); wz(link - textsz - bkdlen);
+    wdata(L); wz(link - textsz - L);
     wz(8);
     return 0;
 }
@@ -1429,7 +1563,7 @@ int bk_pesect(char *name, long rva, long vsize, long foff, long fsize, long flag
 int bk_pe(void) {
     long rd_rva; long dt_rva; long cookie_rva; long rd_file; long dt_file; long dlen2;
     long dvs; long rl_rva; long rl_file; long img; long reloc_rva; long page; long k;
-    long nmrva[8]; long off; long dllrva; int j; int L; char *e; long cfgstart;
+    long nmrva[8]; long off; long dllrva; int j; int L; char *e; long cfgstart; long nzl; long raw;
     rd_rva = 4096 + bk_round(bktlen, 4096);
     dt_rva = rd_rva + bk_round(bk_idata_len, 4096);
     cookie_rva = dt_rva + bk_round(bkdlen > 1 ? bkdlen : 1, 8);
@@ -1437,8 +1571,10 @@ int bk_pe(void) {
     dt_file = rd_file + bk_round(bk_idata_len, 512);
     dlen2 = bk_round(bkdlen > 1 ? bkdlen : 1, 8) + 8;
     dvs = dlen2 + bk_bss;
+    /* stored: up to the last nonzero byte; the rest and the cookie are zero-filled */
+    nzl = bk_nzlen(); raw = bk_round(nzl > 1 ? nzl : 1, 8);
     rl_rva = dt_rva + bk_round(dvs, 4096);
-    rl_file = dt_file + bk_round(dlen2, 512);
+    rl_file = dt_file + bk_round(raw, 512);
     img = rl_rva + 4096;                            /* the .reloc is 12 bytes */
     /* DOS stub and PE header */
     wb(77); wb(90); wz(58); w32(64);
@@ -1460,7 +1596,7 @@ int bk_pe(void) {
     }
     bk_pesect(".text", 4096, bktlen, 1024, bktlen, 0x60000020);
     bk_pesect(".rdata", rd_rva, bk_idata_len, rd_file, bk_idata_len, 0x40000040);
-    bk_pesect(".data", dt_rva, dvs, dt_file, dlen2, 0xC0000040);
+    bk_pesect(".data", dt_rva, dvs, dt_file, raw, 0xC0000040);
     bk_pesect(".reloc", rl_rva, 12, rl_file, 12, 0x42000040);
     wz(1024 - bkwtot);
     wtext(); wz(bk_round(bktlen, 512) - bktlen);
@@ -1489,9 +1625,9 @@ int bk_pe(void) {
     cfgstart = bkwtot;
     w32(320); wz(0x58 - 4); w64(5368709120 + cookie_rva); wz(320 - 0x58 - 8);
     wz(bk_round(bk_idata_len, 512) - bk_idata_len);
-    /* the data, 8-padded, then 8 bytes of cookie */
-    wdata(); wz(dlen2 - bkdlen);
-    wz(bk_round(dlen2, 512) - dlen2);
+    /* the stored data, 8-padded */
+    wdata(nzl); wz(raw - nzl);
+    wz(bk_round(raw, 512) - raw);
     /* .reloc: one block, the cookie pointer in the load config, DIR64 */
     reloc_rva = rd_rva + bk_cfg_off + 0x58;
     page = reloc_rva / 4096 * 4096;
@@ -1507,6 +1643,7 @@ int bk_build(char *t, int n, char *target) {
     if (target[0] == 119) bkos = 2;                  /* win */
     bkarch = 0; if (target[4] == 97) bkarch = 1;     /* .../arm64 */
     bk_parse(t, n);
+    bk_repack();
     bk_lower();
     bk_assemble();
     bkwn = 0; bkwtot = 0;

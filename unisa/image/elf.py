@@ -23,7 +23,8 @@ def HDRS(arch):
     return EHDR + PHDR * NPH
 
 
-def write(arch, text, data, entry):
+def write(arch, text, data, entry, full=None):
+    full = len(data) if full is None else full   # p_memsz; the rest is bss
     hdrs = HDRS(arch)
     tend = hdrs + len(text)
     doff = _round(tend)                 # p_offset == p_vaddr (mod PAGE)
@@ -35,6 +36,6 @@ def write(arch, text, data, entry):
     e += struct.pack("<IIQQQQQQ", 1, 5, 0, VADDR, VADDR,
                      tend, tend, PAGE)                       # PT_LOAD r-x
     e += struct.pack("<IIQQQQQQ", 1, 6, doff, VADDR + doff, VADDR + doff,
-                     len(data), len(data), PAGE)             # PT_LOAD rw-
+                     len(data), full, PAGE)                  # PT_LOAD rw-
     assert len(e) == hdrs, len(e)
     return bytes(e) + text + b"\x00" * (doff - tend) + data

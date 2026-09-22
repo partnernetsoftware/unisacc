@@ -382,6 +382,17 @@ int wsat(int i) { if (src[i] == 32) return 1; if (src[i] == 9) return 1; return 
    all -- are processed by the same loop with the same macro state.  `"x"` is
    looked up beside the input file, then in include/; `<x>` in include/ only.
    A header we do not carry is skipped, as the Python driver skips it. */
+/* Open for reading.  Windows has no open(2): the gate there is CreateFileA,
+   which takes an access mask and a disposition -- <stdio.h>'s fopen makes
+   the same choice.  _WIN32 is predefined when unisacc is built FOR Windows. */
+int ropen(char *path) {
+#ifdef _WIN32
+    return __open(path, 0x80000000, 3);      /* GENERIC_READ, OPEN_EXISTING */
+#else
+    return __open(path, 0);
+#endif
+}
+
 #define MAXINC 131072
 char incbuf[MAXINC];
 char incpath[512];
@@ -394,7 +405,7 @@ int inctry(char *dir, int dl, int nm, int nl) {
     k = 0;
     while (k < nl) { if (p < 510) { incpath[p] = src[nm + k]; p = p + 1; } k = k + 1; }
     incpath[p] = 0;
-    fd = __open(incpath, 0);
+    fd = ropen(incpath);
     if (fd < 0) return 0 - 1;
     n = __read(fd, incbuf, MAXINC);
     __close(fd);
@@ -785,7 +796,7 @@ int autoinc(void) {
         n = st;
         while (n < k) { incpath[p] = hs[n]; p = p + 1; n = n + 1; }
         incpath[p] = 0;
-        fd = __open(incpath, 0);
+        fd = ropen(incpath);
         if (fd >= 0) {
             n = __read(fd, incbuf, MAXINC);
             __close(fd);
@@ -5513,7 +5524,7 @@ int main(void) {
     model_dims();
     setup();
     if (__argc() < 2) { printf("usage: unisacc FILE.c\n"); return 1; }
-    fd = __open(__argv(1), 0);
+    fd = ropen(__argv(1));
     if (fd < 0) { printf("cannot open input\n"); return 1; }
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
@@ -5534,7 +5545,12 @@ int main(void) {
     if (lex() < 0) return 1;
     if (__argc() > 2) { tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
         poolend = 0; nloop = 0;
-        es("_start:\n  @call.call __init\n  @call.call main\n  @lit.exit r0\n");
+        /* main(argc, argv): the machine answers `.argv rd, k` one element at
+           a time, so _start builds the array -- the stub unisa/front/parse.py
+           writes, instruction for instruction */
+        es("_start:\n  @call.call __init\n");
+        es("  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n  jump __argv_top\n__argv_done:\n");
+        es("  @call.call main\n  @lit.exit r0\n.bss __argvv 32768\n");
         unit();
         es("__init:\n");
         k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }

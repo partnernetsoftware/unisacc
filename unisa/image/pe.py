@@ -135,14 +135,17 @@ def imports(arch, textlen):
     return {"__imp_" + f: base + 8 * i for i, f in enumerate(IMPORTS)}
 
 
-def write(arch, text, data, entry, relocs=(), bss=0):
+def write(arch, text, data, entry, relocs=(), bss=0, full=None):
+    full = len(data) if full is None else full
     rd_rva, dt_rva = _rvas(len(text))
-    cookie_rva = dt_rva + _round(max(1, len(data)), 8)
+    # the cookie follows the FULL data; it is a zero word, so it may as well
+    # be zero-filled with the rest of the tail instead of stored
+    cookie_rva = dt_rva + _round(max(1, full), 8)
     idata, _, _ = _idata(rd_rva, IMAGEBASE + cookie_rva)
     rd_file = HDR_FILE + _round(len(text), FILE_ALIGN)
     dt_file = rd_file + _round(len(idata), FILE_ALIGN)
-    data = bytes(data).ljust(_round(max(1, len(data)), 8), b"\x00") + b"\x00" * 8
-    dvs = len(data) + bss                      # bss costs image, not file
+    dvs = _round(max(1, full), 8) + 8 + bss    # bss costs image, not file
+    data = bytes(data).ljust(_round(max(1, len(data)), 8), b"\x00")
     rl_rva = dt_rva + _round(dvs, SECT_ALIGN)
     rl_file = dt_file + _round(len(data), FILE_ALIGN)
     # the cookie pointer in the load config is itself an absolute address, so

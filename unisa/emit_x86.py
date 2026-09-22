@@ -218,6 +218,11 @@ def _spadd(n):
 # callee rather than a polite error.  We cannot assume what rsp is -- the tape
 # never touches it -- so align it explicitly and put it back from rbx, which
 # the callee is required to preserve.  [I-18]
+# the command-line splitter: rsi = read, rdi = write, rcx = argc, r8 = argv[]
+WINARGS_BODY = bytes.fromhex(
+    "0fb6063c2074043c09750548ffc6ebf084c074494883f93f7d4349893cc848ffc14531c90fb60684c0742f3c2275094183f10148ffc6ebec4585c975083c20740e3c09740a880748ffc748ffc6ebd5c6070048ffc748ffc6eba6c60700")
+
+
 def _align_pre(extra):
     n = 32 + ((extra * 8 + 15) // 16) * 16
     return (mov_rr("rbx", "rsp")                      # rbx = rsp
@@ -471,6 +476,11 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         out += mov_rr(a[0], "r11")
         return out
     if o == "argsave":                               # SysV _start: argc at [rsp]
+        if not (len(a) > 2 and a[2]):
+            # Darwin: dyld CALLS the LC_MAIN entry -- argc in rdi, argv in
+            # rsi, and [rsp] is a return address
+            out = rip(0x89, "rdi", text_va + off + 7, a[0] + shift)
+            return out + rip(0x89, "rsi", text_va + off + 14, a[1] + shift)
         out = rex(1, 0, 0, 0) + b"\x8b" + modrm(0, 0, 4) + b"\x24"
         out += rip(0x89, "rax", text_va + off + len(out) + 7, a[0] + shift)
         out += rex(1, 0, 0, 0) + b"\x8d" + modrm(1, 0, 4) + b"\x24\x08"
@@ -479,9 +489,9 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "argvget":
         out = rip(0x8B, "r11", text_va + off + 7, a[2] + shift)
         t = NUM[a[1]]
-        out += rex(1, 3, t >> 3, 3) + b"\x8b" + modrm(0, 11, 4) + \
-            bytes([0xC3 | ((t & 7) << 3)])
-        return out
+        out += rex(1, 1, t >> 3, 1) + b"\x8b" + modrm(0, 11, 4) + \
+            bytes([0xC3 | ((t & 7) << 3)])          # r11 = argv[t]
+        return out + mov_rr(a[0], "r11")            # ...into the destination
     if o == "spinit":
         if len(a) > 1 and a[1] is not None:
             # Windows: the tape's own stack, reached rip-relative because the
@@ -500,6 +510,16 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             if k:                                # r0 carries the result back
                 out += mem(0x8B, r, SCR2, 8 * k)
         return out + mov_rr(a[1], SCR)
+    if o == "winargs":                               # see emit_arm
+        pre, _ = _align_pre(0)
+        out = pre + _callimp(text_va + off + len(pre), imps, "GetCommandLineA")
+        out += _align_post()
+        out += bytes.fromhex("4889c64889c731c9")   # mov rsi,rax; mov rdi,rax; xor ecx,ecx
+        out += rip(0x8D, "r8", text_va + off + len(out) + 7, a[2] + shift)
+        out += WINARGS_BODY
+        out += rip(0x89, "rcx", text_va + off + len(out) + 7, a[0] + shift)
+        out += rip(0x89, "r8", text_va + off + len(out) + 7, a[1] + shift)
+        return out
     if o == "winstdh":
         out = b""
         for k in range(3):
