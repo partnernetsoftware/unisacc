@@ -290,12 +290,14 @@ def reloc_label(k, arch):
 # ---------------------------------------------------------------- irsel [G-8]
 FAMILY = ("alu", "mem", "ctrl", "call", "lit", "fpu")
 IRSEL_MAP = {
+    # `_rev`: the same op with its two sources swapped -- a > b is b < a.
+    # The swap is part of the answer, so no front end decides it in code.
     "alu": {"add": "add64", "sub": "sub64", "mul": "mul64", "lt": "slt64",
-            "le": "sle64", "gt": "slt64", "ge": "sle64", "eq": "eq",
+            "le": "sle64", "gt": "slt64_rev", "ge": "sle64_rev", "eq": "eq",
             "ne": "ne", "neg": "sub64", "and": "and64", "or": "or64",
             "xor": "xor64", "shl": "shl64", "shr": "shr64",
-            "ult": "ult64", "ule": "ule64", "ugt": "ult64", "uge": "ule64",
-            "lshr": "lshr64"},
+            "ult": "ult64", "ule": "ule64", "ugt": "ult64_rev",
+            "uge": "ule64_rev", "lshr": "lshr64"},
     "mem": {"load": "load64", "store": "store64", "lea": "lea", "ld": "ld",
             "st": "st", "zero": "zero"},
     "ctrl": {"jump": "jump", "jumpz": "jumpz", "ret": "ret"},
@@ -311,7 +313,9 @@ IRSEL_MAP = {
             "sdiv": "fdiv32", "slt": "flt32", "sle": "fle32", "seq": "feq32",
             "i2d": "cvtid", "u2d": "cvtud", "i2s": "cvtis", "u2s": "cvtus",
             "d2i": "cvtdi", "d2u": "cvtdu", "s2d": "cvtsd", "d2s": "cvtds",
-            "dsqrt": "fsqrt64", "ssqrt": "fsqrt32"},
+            "dsqrt": "fsqrt64", "ssqrt": "fsqrt32",
+            "dgt": "flt64_rev", "dge": "fle64_rev",
+            "sgt": "flt32_rev", "sge": "fle32_rev"},
 }
 FLAVOR = tuple(dict.fromkeys(f for m in IRSEL_MAP.values() for f in m))
 RECIPE = tuple(sorted({r for m in IRSEL_MAP.values() for r in m.values()})) + ("bad",)
@@ -408,6 +412,39 @@ def build():
                        [("y", RELKIND, None)], _one(reloc_label),
                        dict(d=6, hidden=[8], seed=37))
 
+    # what a scalar type IS, for code generation: its size, whether it is
+    # unsigned, whether it is narrower than a register.  These were three
+    # dicts the front ends read (TY_SIZE, UNSIGNED, NARROW). [C-9]
+    _SZ = {"void": 1, "i8": 1, "i16": 2, "i32": 4, "u8": 1, "u16": 2,
+           "u32": 4, "f32": 4}
+    S["tyinfo"] = Stage(
+        "tyinfo", [("t", TYOUT)],
+        [("size", ("1", "2", "4", "8"), None), ("uns", ("0", "1"), None),
+         ("narrow", ("0", "1"), None)],
+        lambda t: {"size": str(_SZ.get(t, 8)),
+                   "uns": "1" if t in ("u8", "u16", "u32", "u64") else "0",
+                   "narrow": "1" if t in ("i8", "i16", "i32", "u8", "u16",
+                                          "u32") else "0"},
+        dict(d=6, hidden=[12], seed=43))
+
+    # which routine prints a printf conversion -- the letter was an if-chain
+    # in both front ends [C-10]
+    _PF = {"d": "int", "i": "int", "u": "u32", "x": "hex", "X": "HEX",
+           "o": "oct", "p": "hex", "c": "chr", "s": "str"}
+    S["pfconv"] = Stage("pfconv", [("conv", tuple(_PF))],
+                        [("y", ("int", "u32", "hex", "HEX", "oct", "chr",
+                                "str"), None)],
+                        _one(lambda c: _PF[c]), dict(d=6, hidden=[8], seed=47))
+
+    # which machine register holds tape register rN -- a table, so a stage
+    # (it was a dict both back ends read directly) [C-8]
+    TREGS = ("r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7")
+    MREGS = tuple(sorted(set(C.REGMAP["x86_64"]) | set(C.REGMAP["arm64"])))
+    S["regmap"] = Stage("regmap", [("treg", TREGS), ("arch", C.ARCH)],
+                        [("y", MREGS, None)],
+                        _one(lambda t, a: C.REGMAP[a][int(t[1])]),
+                        dict(d=6, hidden=[12], seed=41))
+
     SYMS = C.vocab("symbol")
     SYSNOS = C.vocab("sysno")
     S["isel"] = Stage("isel", [("op", C.OPS), ("arch", C.ARCH)],
@@ -417,13 +454,15 @@ def build():
     # [S-2 corrected] gate is an OS fact, so it lives here, not on isel.
     abi_heads = [("sysno", SYSNOS, None), ("arg0", C.REGS, "reg"),
                  ("arg1", C.REGS, "reg"), ("arg2", C.REGS, "reg"),
-                 ("ret", C.REGS, "reg"), ("tls", C.TLS, None),
-                 ("gate", C.GATES, None)]
+                 ("ret", C.REGS, "reg"),
+                 ("gate", C.GATES, None),
+                 ("nrreg", C.vocab("nrreg"), None)]
     S["abi"] = Stage("abi", [("op", C.OPS), ("os", C.OS), ("arch", C.ARCH)],
                      abi_heads,
                      lambda op, o, a: {k: v for k, v in C.nine(op, o, a).items()
                                        if k in ("sysno", "arg0", "arg1", "arg2",
-                                                "ret", "tls", "gate")},
+                                                "ret", "gate",
+                                                "nrreg")},
                      dict(dims=(12, 8, 8), hidden=[32, 20], seed=5,
                           bilinear=8))
     S["combo"] = Stage("combo", [("op", C.OPS), ("os", C.OS), ("arch", C.ARCH)],
@@ -439,6 +478,7 @@ STAGES = build()
 # the keyword set the C lexer needs, kept next to TOKS so they stay in step
 KEYWORDS_C = tuple(t for t in TOKS if t[0].isalpha() and t != "eof")
 
-TABLES = ("pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc")
+TABLES = ("pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc",
+          "regmap", "tyinfo", "pfconv")
 STAGE_NETS = ("isel", "abi")
 ALL = TABLES + STAGE_NETS + ("combo",)

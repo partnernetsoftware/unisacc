@@ -77,6 +77,25 @@ def cmd_acc(a):
     return 0
 
 
+def _ties(net, key):
+    """{head: True when the top logit is shared}.  IntNet.predict takes the
+    first maximum; build-weights rejects ties, and `acc` -- which reads the
+    cache -- must not be the weaker check."""
+    hit = [0] * net.H
+    for i, v in enumerate(key):
+        for j in net.feeds[net.offs[i] + net.vidx[i][v]]:
+            hit[j] += 1
+    out = {}
+    for hn, _ in net.heads:
+        z = [0] * net.ncls[hn]
+        for j in range(net.H):
+            if hit[j] + net.b1[j] > 0:
+                for (k, w) in net.w2[hn][j]:
+                    z[k] += w
+        out[hn] = z.count(max(z)) != 1
+    return out
+
+
 def _acc_built():
     from .gold import ALL
     nets = _built()
@@ -88,9 +107,10 @@ def _acc_built():
         for key in st.keys():
             want = st.label(*key)
             got = nets[n].predict(key)
+            tie = _ties(nets[n], key)
             for h, cls, _ in st.heads:
-                if got[h] != want[h]:
-                    wrong += 1
+                if got[h] != want[h] or tie[h]:
+                    wrong += 1              # a tie is a failure, not a pick
         if wrong:
             bad.append(n)
         print("%-7s %7d %7d  %s" % (n, st.rows(), nets[n].nunits(),
@@ -297,8 +317,8 @@ def cmd_lower(a):
     from .lower import facts
     f = facts(o, a.op, os_, arch, a.drive)
     print("%s  @  %s" % (a.op, a.target))
-    for k in ("form", "symbol", "gate", "sysno", "arg0", "arg1", "arg2",
-              "ret", "tls"):
+    for k in ("form", "gate", "nrreg", "sysno", "arg0", "arg1", "arg2",
+              "ret"):
         print("  %-7s %s" % (k, f[k]))
     if f["form"] == "winapi":
         print("  %-7s %s" % ("winapi", C.WINAPI.get(a.op)))
@@ -502,7 +522,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     t = sub.add_parser("train")
-    t.add_argument("--epochs", type=int, default=90)
+    t.add_argument("--epochs", type=int, default=200)   # TR-2: the 4th lr step (epoch >= 90) must be reachable
     t.add_argument("--out", default=WEIGHTS)
     t.add_argument("--quiet", action="store_true")
     t.set_defaults(fn=cmd_train)

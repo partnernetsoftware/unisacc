@@ -340,6 +340,8 @@ int bk_parse(char *t, int n) {
 
 /* ---- facts from the nets, as lower.facts() asks them ------------------- */
 int bkos; int bkarch;               /* 0 lnx 1 osx 2 win; 0 x86_64 1 arm64 */
+int bkrel;                          /* the reloc answer for the branch being lowered */
+int bkf_nr;                         /* the syscall-number register (abi nrreg) */
 int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;
 int bkf_arg[3]; int bkf_ret;        /* machine register numbers, -1 none */
 int bkf_sym;                        /* the symbol class index (isel), unused in bytes */
@@ -360,11 +362,10 @@ int bk_regnum(char *nm) {
     }
     return 0 - 1;                     /* none */
 }
-/* ask isel, abi and enc for catalog op `cop` (an index into BF_ABI_0) */
+/* ask abi and enc for catalog op `cop` (an index into BF_ABI_0) -- only
+   what the bytes use; isel is not a question the lowering obeys */
 int bk_facts(int cop) {
     int key[4]; int c; char *nm;
-    key[0] = cop; key[1] = bkarch; key[2] = 0; key[3] = 0;
-    bkf_sym = inf(S_ISEL, key, HD_ISEL_SYMBOL);
     key[0] = cop; key[1] = bkos; key[2] = bkarch; key[3] = 0;
     c = inf(S_ABI, key, HD_ABI_SYSNO);
     nm = bk_nth(BH_ABI_SYSNO, c);
@@ -376,6 +377,7 @@ int bk_facts(int cop) {
     bkf_arg[2] = bk_regnum(bk_nth(BH_ABI_ARG2, inf(S_ABI, key, HD_ABI_ARG2)));
     bkf_ret = bk_regnum(bk_nth(BH_ABI_RET, inf(S_ABI, key, HD_ABI_RET)));
     bkf_gate = inf(S_ABI, key, HD_ABI_GATE);
+    bkf_nr = bk_regnum(bk_nth(BH_ABI_NRREG, inf(S_ABI, key, HD_ABI_NRREG)));
     bkf_form = inf(S_ENC, key, 0);        /* enc is os-aware, and wins */
     return 0;
 }
@@ -416,19 +418,18 @@ int bk_formis(char *nm) { char *e; int k; e = bk_nth(BH_ENC_Y, bkf_form); k = 0;
 #define SK_ADDR 4
 int tkop[BK_MAXT]; long tka[BK_MAXT * 4]; int tkk[BK_MAXT * 4]; int tkn;
 /* gate metadata: form, gate, catalog op, return register */
-int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
+int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
 long bk_scr0; long bk_scr1; long bk_plen; long bk_pbuf; long bk_argc; long bk_argv;
 long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
 int bk_rmap[8];                     /* tape register -> machine register */
-int bk_nr;                          /* the syscall-number register */
 
 int tk(int op, long a0, long a1, long a2, long a3) {
     if (tkn >= BK_MAXT) { __write(2, "back end: lowered program too long\n", 35); __exit(1); }
     tkop[tkn] = op; tka[tkn * 4] = a0; tka[tkn * 4 + 1] = a1; tka[tkn * 4 + 2] = a2; tka[tkn * 4 + 3] = a3;
     tkk[tkn * 4] = BK_I; tkk[tkn * 4 + 1] = BK_I; tkk[tkn * 4 + 2] = BK_I; tkk[tkn * 4 + 3] = BK_I;
-    tkg_form[tkn] = 0; tkg_gate[tkn] = 0; tkg_cop[tkn] = 0 - 1; tkg_ret[tkn] = 0 - 1;
+    tkg_rel[tkn] = 0 - 1; tkg_form[tkn] = 0; tkg_gate[tkn] = 0; tkg_cop[tkn] = 0 - 1; tkg_ret[tkn] = 0 - 1;
     tkn = tkn + 1;
     return tkn - 1;
 }
@@ -439,7 +440,7 @@ int tk_setreg(int dst, int kind, long v) { return tk(TO_SETREG, dst, v, 0, kind)
 int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int xreg, int xk, long xv) {
     int g;
     bk_facts(cop);
-    if (bkf_hasno) tk_setreg(bk_nr, SK_IMM, bkf_sysno);
+    if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno);
     if (bkos == 2) tk(TO_WINSAVE, bk_save, 0, 0, 0);
     tk_setreg(bkf_arg[0], k0, v0);
     tk_setreg(bkf_arg[1], k1, v1);
@@ -453,7 +454,8 @@ int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int x
 
 int bk_lower(void) {
     long base; int pc; int op; int k; int cw;
-    int x86map[8]; int j;
+    int j;
+    bkrel = 0 - 1;
     /* data: pad to 8, then the scratch cells -- and on Windows the save area
        and the tape's own stack (that one bss, not file) */
     bk_zeros((8 - bkdlen % 8) % 8);
@@ -465,12 +467,13 @@ int bk_lower(void) {
     bk_stacktop = base + 712 + 65536;
     if (bkos == 2) bk_zeros(712); else bk_zeros(104);
     bk_bss = 0; if (bkos == 2) bk_bss = 65536;
-    /* REGMAP: rax rdi rsi rdx rcx r8 r9 r10 / x0..x7 */
-    x86map[0] = 0; x86map[1] = 7; x86map[2] = 6; x86map[3] = 2; x86map[4] = 1;
-    x86map[5] = 8; x86map[6] = 9; x86map[7] = 10;
-    j = 0; while (j < 8) { bk_rmap[j] = bkarch ? j : x86map[j]; j = j + 1; }
-    /* NR_REG: rax on x86_64; x8 on lnx/arm64, x16 on osx and win arm64 */
-    bk_nr = 0; if (bkarch) { if (bkos == 0) bk_nr = 8; else bk_nr = 16; }
+    /* tape register -> machine register: the regmap stage decides */
+    j = 0;
+    while (j < 8) {
+        int key[4]; key[0] = j; key[1] = bkarch; key[2] = 0; key[3] = 0;
+        bk_rmap[j] = bk_regnum(bk_nth(BH_REGMAP_Y, inf(S_REGMAP, key, 0)));
+        j = j + 1;
+    }
     tkn = 0;
     /* for each tape pc, the labels that point at it: one chain per pc,
        built once -- a scan of every name per instruction is quadratic */
@@ -536,7 +539,7 @@ int bk_lower(void) {
             sh = bk_nth(BKSHAPE, op);
             if (bk_is(op, "jump") || bk_is(op, "jumpz") || bk_is(op, "call")) {
                 key[0] = bk_is(op, "jump") ? 0 : (bk_is(op, "jumpz") ? 1 : 2); key[1] = bkarch; key[2] = 0; key[3] = 0;
-                inf(S_RELOC, key, 0);
+                bkrel = inf(S_RELOC, key, 0);
                 bk_facts(bk_cop(bk_is(op, "call") ? "call" : (bk_is(op, "jumpz") ? "jumpz" : "jump")));
             } else {
                 char nm2[16]; char *e; int L2;
@@ -545,6 +548,7 @@ int bk_lower(void) {
                 if (bk_cop(nm2) >= 0) bk_facts(bk_cop(nm2));
             }
             n = tk(op, 0, 0, 0, 0);
+            tkg_rel[n] = bkrel; bkrel = 0 - 1;
             k = 0;
             while (sh[k]) {
                 if (bkak[pc * 4 + k] == BK_R) tka[n * 4 + k] = bk_rmap[bkav[pc * 4 + k]];
@@ -650,6 +654,16 @@ long a_disp(long bytes, int bits) {
     lim = (long)1 << (bits - 1);
     if (v < 0 - lim || v >= lim) { __write(2, "arm64: branch does not fit\n", 27); __exit(1); }
     return v;
+}
+/* the reloc stage's answer IS the displacement field (emit_arm.RELFIELD) */
+long a_relf(int i, long d) {
+    char *r;
+    if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
+    r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
+    if (bk_str_is(r, "arm26")) return a_disp(d, 26) & 0x3FFFFFF;
+    if (bk_str_is(r, "arm19")) return (a_disp(d, 19) & 0x7FFFF) << 5;
+    __write(2, "back end: reloc class has no arm field\n", 39); __exit(1);
+    return 0;
 }
 int a_ldr(int rt, int rn, long off) { ow(0xF9400000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
 int a_str(int rt, int rn, long off) { ow(0xF9000000 | ((off / 8) << 10) | (rn << 5) | rt); return 0; }
@@ -930,18 +944,18 @@ int bk_arm(int i, long off) {
     }
     if (bk_str_is(o, "nop")) { ow(0xD503201F); return 1; }
     if (bk_str_is(o, "jump")) {
-        ow(0x14000000 | (a_disp(bk_label(a[0]) - off, 26) & 0x3FFFFFF));
+        ow(0x14000000 | a_relf(i, bk_label(a[0]) - off));
         return 1;
     }
     if (bk_str_is(o, "call")) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
-        ow(0x14000000 | (a_disp(bk_label(a[0]) - (off + 12), 26) & 0x3FFFFFF));
+        ow(0x14000000 | a_relf(i, bk_label(a[0]) - (off + 12)));
         return 1;
     }
     if (bk_str_is(o, "jumpz")) {
-        ow(0xB4000000 | ((a_disp(bk_label(a[1]) - off, 19) & 0x7FFFF) << 5) | a[0]);
+        ow(0xB4000000 | a_relf(i, bk_label(a[1]) - off) | a[0]);
         return 1;
     }
     return 0;
@@ -967,6 +981,14 @@ int x_movri(int d, unsigned long imm) {
     return 0;
 }
 int x_d32(long v) { ow(v & 0xFFFFFFFF); return 0; }
+int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
+    char *r;
+    if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
+    r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
+    if (bk_str_is(r, "rel32")) { x_d32(d); return 0; }
+    __write(2, "back end: reloc class has no x86 field\n", 39); __exit(1);
+    return 0;
+}
 /* mem: opc may be two bytes (0x0F 0xBE); w is REX.W */
 int x_mem(int opc, int opc2, int r, int b, long disp, int w) {
     x_rex(w, r >> 3, 0, b >> 3);
@@ -1371,18 +1393,18 @@ int bk_x86(int i, long off) {
         return 1;
     }
     if (bk_str_is(o, "nop")) { ob(0x90); return 1; }
-    if (bk_str_is(o, "jump")) { ob(0xE9); x_d32(bk_label(a[0]) - (off + 5)); return 1; }
+    if (bk_str_is(o, "jump")) { ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1; }
     if (bk_str_is(o, "call")) {
         x_rip(0x8D, X_R11, pc + 7, pc + 22);
         x_rex(1, 0, 0, 1); ob(0x81); x_modrm(3, 5, 10); x_d32(8);
         x_rex(1, 1, 0, 1); ob(0x89); x_modrm(0, 11, 10);
-        ob(0xE9); x_d32(bk_label(a[0]) - (off + 22));
+        ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 22));
         return 1;
     }
     if (bk_str_is(o, "jumpz")) {
         int r; r = a[0];
         x_rex(1, r >> 3, 0, r >> 3); ob(0x85); x_modrm(3, r, r);
-        ob(0x0F); ob(0x84); x_d32(bk_label(a[1]) - (off + 3 + 6));
+        ob(0x0F); ob(0x84); x_rel(i, bk_label(a[1]) - (off + 3 + 6));
         return 1;
     }
     return 0;

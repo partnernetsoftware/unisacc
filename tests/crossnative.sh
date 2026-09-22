@@ -88,6 +88,10 @@ run_windows() {
     [ -x "$UTM" ] || { echo "  skip $target (no UTM)"; return 0; }
     "$UTM" status "$vm" 2>/dev/null | grep -q started || {
         echo "  skip $target ($vm not started)"; return 0; }
+    # status can say `started` for a machine that is going down, or whose
+    # guest agent is not up yet: only an answered command counts
+    perl -e 'alarm 20; exec @ARGV' "$UTM" exec "$vm" --cmd cmd.exe -- /c echo up \
+        >/dev/null 2>&1 || { echo "  skip $target ($vm agent not answering)"; return 0; }
     t=$(date +%s)$RANDOM
     Z='C:\u\z'"$t"'.txt'; Y='C:\u\y'"$t"'.txt'
     D='C:\u\d'"$t"'.txt'; G='C:\u\g'"$t"'.bat'

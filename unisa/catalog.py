@@ -164,10 +164,20 @@ def tls(op, os_, arch):
     return "tpidr_el0" if arch == "arm64" else "fsbase"
 
 
+def nrreg(op, os_, arch):
+    """Which register carries the syscall number -- an (os, arch) fact, and
+    only for an op that has a number at all.  It was a dict the lowering read
+    directly; now it is a head, so the net decides it like the rest. [C-7]"""
+    if sysno(op, os_, arch) == "none":
+        return "none"
+    return NR_REG[(os_, arch)]
+
+
 def nine(op, os_, arch):
-    """The 9 heads, derived. [G-9] [S-6]"""
+    """The heads, derived (nine, and `nrreg`). [G-9] [S-6]"""
     a0, a1, a2, rt = argregs(op, os_, arch)
     return {
+        "nrreg": nrreg(op, os_, arch),
         "form": enc_form(op, os_, arch),
         "symbol": symbol(op, arch),
         "gate": gate(op, os_, arch),
@@ -189,7 +199,8 @@ def isel_two(op, arch):
     return {"form": enc_form(op, "lnx", arch), "symbol": symbol(op, arch)}
 
 
-# The syscall-number register is classic knowledge, not a head -- and it is an
+# The syscall-number register -- the table behind the `nrreg` head (and the
+# target machine model's own copy, which must not ask the net).  It is an
 # OS fact, not just an arch one: Linux/arm64 passes it in x8, Darwin/arm64 in
 # x16.  Getting this wrong hangs the process instead of failing loudly.
 NR_REG = {("lnx", "x86_64"): "rax", ("osx", "x86_64"): "rax",

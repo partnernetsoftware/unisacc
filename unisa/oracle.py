@@ -17,6 +17,20 @@ from .linalg import argmax
 from .train import NET_READY
 
 
+def _ablations():
+    """UNISA_ABLATE=stage[.head],... -- see Oracle.ask"""
+    import os
+    d = {}
+    for item in os.environ.get("UNISA_ABLATE", "").split(","):
+        if item:
+            st, _, hd = item.partition(".")
+            d[st] = hd
+    return d
+
+
+_ABLATE = _ablations()
+
+
 class Oracle:
     def __init__(self, nets=None, drive="spec"):
         self.drive = drive
@@ -36,6 +50,25 @@ class Oracle:
                     net is not None and net.acc >= NET_READY and drive != "gold")
 
     def ask(self, stage, key):
+        out = self._ask(stage, key)
+        ab = _ABLATE.get(stage)
+        if ab is None:
+            return out
+        # ablation [A-36]: rotate one head's answer to the next class, so a
+        # suite can check the answer is USED -- a stage whose answer can be
+        # wrong without changing any output is asked, not obeyed
+        st = STAGES[stage]
+        if len(st.heads) == 1:
+            cl = list(st.heads[0][1])
+            return cl[(cl.index(out) + 1) % len(cl)]
+        out = dict(out)
+        for hn, cl, *_ in st.heads:
+            if ab in ("", hn):
+                cl = list(cl)
+                out[hn] = cl[(cl.index(out[hn]) + 1) % len(cl)]
+        return out
+
+    def _ask(self, stage, key):
         st = STAGES[stage]
         # [P-2] key totality -- unconditional, never compiled out
         assert len(key) == len(st.fields), \

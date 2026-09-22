@@ -1670,8 +1670,11 @@ int ec(int c) {
 int nask[16];
 
 int inf(int st, int *key, int head) {
+    int r;
     nask[st] = nask[st] + 1;
-    return infer(st, key, head);
+    r = infer(st, key, head);
+    if (r < 0) { __write(2, "oracle: key outside the stage's domain\n", 39); __exit(1); }
+    return r;
 }
 
 int irsel(char *fam, int fl, char *flav, int vl) {
@@ -1684,9 +1687,17 @@ int irsel(char *fam, int fl, char *flav, int vl) {
     return inf(S_IRSEL, key, 0);
 }
 
+int recrev(int r) {                   /* does recipe r end in `_rev`? */
+    int p; int L;
+    p = voff(IRRECV, r); L = vlen(IRRECV, r);
+    if (L < 4) return 0;
+    return srcin(IRRECV + p + L - 4, 4, "_rev");
+}
+
 int emitrecipe(int r) {
     int p; int L; int k;
     p = voff(IRRECV, r); L = vlen(IRRECV, r);
+    if (recrev(r)) L = L - 4;          /* spelled as its op; es() swaps */
     if (srcin(IRRECV + p, L, "bad")) { __write(2, "irsel: bad recipe\n", 18); __exit(1); }
     if (srcin(IRRECV + p, L, "callpush")) { ec(99); ec(97); ec(108); ec(108); return 0; }
     /* the builtins are spelled with a leading dot */
@@ -1705,7 +1716,7 @@ int emitrecipe(int r) {
 }
 
 int es(char *s) {
-    int i; int fs; int fe; int vs; int ve;
+    int i; int fs; int fe; int vs; int ve; int r; int k;
     i = 0;
     while (s[i]) {
         if ((s[i] & 255) == 64) {                   /* @family.flavor */
@@ -1714,8 +1725,22 @@ int es(char *s) {
             vs = fe + 1; ve = vs;
             /* a flavor may have digits: `i2d`, `s2d` */
             while (s[ve]) { if (isal(s[ve] & 255) == 0) { if (isdi(s[ve] & 255) == 0) break; } ve = ve + 1; }
-            emitrecipe(irsel(s + fs, fe - fs, s + vs, ve - vs));
+            r = irsel(s + fs, fe - fs, s + vs, ve - vs);
+            emitrecipe(r);
             i = ve;
+            /* a `_rev` recipe swaps the two sources: " rD, rA, rB" is
+               written " rD, rB, rA" -- the net decided, not the caller */
+            if (recrev(r)) {
+                int c1; int c2; int e;
+                c1 = i; while (s[c1] && s[c1] != 44) c1 = c1 + 1;
+                c2 = c1 + 1; while (s[c2] && s[c2] != 44) c2 = c2 + 1;
+                e = c2 + 1; while (s[e] && s[e] != 10) e = e + 1;
+                k = i; while (k <= c1) { ec(s[k] & 255); k = k + 1; }
+                k = c2 + 1; while (k < e) { ec(s[k] & 255); k = k + 1; }
+                ec(44);
+                k = c1 + 1; while (k < c2) { ec(s[k] & 255); k = k + 1; }
+                i = e;
+            }
             continue;
         }
         ec(s[i] & 255);
@@ -2784,23 +2809,37 @@ int do_printf(void) {
                 }
                 es("  @mem.load r0, [r6-"); en(slot[j]); es("]\n");
                 j = j + 1;
+                /* which routine prints this conversion: the pfconv stage */
+                {   char cc[2]; int key[4]; int h; char *hn;
+                    cc[0] = c; cc[1] = 0;
+                    key[0] = vfind(BF_PFCONV_0, NBF_PFCONV_0, cc, 1);
+                    if (key[0] < 0) { printf("printf: unsupported conversion\n"); __exit(1); }
+                    key[1] = 0; key[2] = 0; key[3] = 0;
+                    h = inf(S_PFCONV, key, 0);
+                    hn = BH_PFCONV_Y + voff(BH_PFCONV_Y, h);
+                    c = 0;
+                    if (hn[0] == 105) c = 100;                       /* int */
+                    if (hn[0] == 117) c = 117;                       /* u32 */
+                    if (hn[0] == 104) c = 120;                       /* hex */
+                    if (hn[0] == 72) c = 88;                         /* HEX */
+                    if (hn[0] == 111) c = 111;                       /* oct */
+                    if (hn[0] == 99) c = 99;                         /* chr */
+                    if (hn[0] == 115) c = 115;                       /* str */
+                }
+                /* c now names the ROUTINE the net chose, not the letter */
                 if (c == 100) es("  @lit.print r0\n");
-                else { if (c == 105) es("  @lit.print r0\n");   /* %i */
-                else { if (c == 117) {           /* %u: the low 32 bits */
+                else { if (c == 117) {           /* the low 32 bits */
                     es("  @lit.imm r2, 4294967295\n  @alu.and r0, r0, r2\n  @lit.print r0\n");
-                } else { if (c == 120) { needxb = 1;         /* %x */
+                } else { if (c == 120) { needxb = 1;         /* hex */
                     es("  @lit.imm r1, 16\n  @lit.imm r2, 97\n  @call.call __itoab\n"
                        "  @lit.write r0, r1\n");
-                } else { if (c == 88) { needxb = 1;          /* %X */
+                } else { if (c == 88) { needxb = 1;          /* HEX */
                     es("  @lit.imm r1, 16\n  @lit.imm r2, 65\n  @call.call __itoab\n"
                        "  @lit.write r0, r1\n");
-                } else { if (c == 112) { needxb = 1;         /* %p */
-                    es("  @lit.imm r1, 16\n  @lit.imm r2, 97\n  @call.call __itoab\n"
-                       "  @lit.write r0, r1\n");
-                } else { if (c == 111) { needxb = 1;         /* %o */
+                } else { if (c == 111) { needxb = 1;         /* oct */
                     es("  @lit.imm r1, 8\n  @lit.imm r2, 97\n  @call.call __itoab\n"
                        "  @lit.write r0, r1\n");
-                } else { if (c == 99) {          /* %c */
+                } else { if (c == 99) {          /* chr */
                     es("  mov r2, r0\n  @mem.lea r0, __chb\n  @mem.st [r0+0], r2, 1\n"
                        "  @lit.imm r1, 1\n  @lit.write r0, r1\n");
                     needchb = 1;
@@ -2810,7 +2849,7 @@ int do_printf(void) {
                        "  @lit.write r0, r1\n");
                     needslen = 1;
                 } else { printf("printf: unsupported conversion\n"); __exit(1); }
-                } } } } } } } }
+                } } } } } }
                 k = k + 1;
             }
         } else { lbuf[m] = c; m = m + 1; k = k + 1; }
@@ -3076,9 +3115,9 @@ int emit_binop(int k) {
         if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .udiv r0, r1, r0\n"); return 0; }
         if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .umod r0, r1, r0\n"); return 0; }
         if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  @alu.ult r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.ugt r0, r0, r1\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.ugt r0, r1, r0\n"); return 0; }
         if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  @alu.ule r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.uge r0, r0, r1\n"); return 0; }
+        if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.uge r0, r1, r0\n"); return 0; }
         if (k == vfind(TOKV, NTOKV, ">>", 2)) { es("  @alu.lshr r0, r1, r0\n"); return 0; }
     }
     if (k == vfind(TOKV, NTOKV, "+", 1))  { es("  @alu.add r0, r1, r0\n"); return 0; }
@@ -3087,9 +3126,9 @@ int emit_binop(int k) {
     if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .div r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .mod r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  @alu.lt r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.gt r0, r0, r1\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.gt r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  @alu.le r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.ge r0, r0, r1\n"); return 0; }
+    if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.ge r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "==", 2)) { es("  @alu.eq r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "!=", 2)) { es("  @alu.ne r0, r1, r0\n"); return 0; }
     if (k == vfind(TOKV, NTOKV, "&", 1))  { es("  @alu.and r0, r1, r0\n"); return 0; }
@@ -3369,22 +3408,22 @@ int tyask(int l, char *op, int ol, int r) {
 
 int tyis(int t, char *nm, int L) { return t == vfind(TYOUTV, NTYOUTV, nm, L); }
 
+/* a type's size and signedness: the tyinfo stage, as sema.py asks it */
+int tyinfo(int t, int head) {
+    int key[4]; key[0] = t; key[1] = 0; key[2] = 0; key[3] = 0;
+    return inf(S_TYINFO, key, head);
+}
+
 int tysize(int t) {                /* bytes, for an integer result */
-    if (tyis(t, "i8", 2)) return 1;
-    if (tyis(t, "u8", 2)) return 1;
-    if (tyis(t, "i16", 3)) return 2;
-    if (tyis(t, "u16", 3)) return 2;
-    if (tyis(t, "i32", 3)) return 4;
-    if (tyis(t, "u32", 3)) return 4;
-    return 8;
+    int c;
+    c = tyinfo(t, HD_TYINFO_SIZE);
+    return BH_TYINFO_SIZE[voff(BH_TYINFO_SIZE, c)] - 48;
 }
 
 int tyuns(int t) {
-    if (tyis(t, "u8", 2)) return 1;
-    if (tyis(t, "u16", 3)) return 1;
-    if (tyis(t, "u32", 3)) return 1;
-    if (tyis(t, "u64", 3)) return 1;
-    return 0;
+    int c;
+    c = tyinfo(t, HD_TYINFO_UNS);
+    return BH_TYINFO_UNS[voff(BH_TYINFO_UNS, c)] - 48;
 }
 
 /* the operator token, projected onto the table's canonical TOPS axis */
@@ -3448,9 +3487,9 @@ int binary(int level) {
             if (k == tidx("/", 1)) { es(cf == 8 ? "  @fpu.ddiv r0, r1, r0\n" : "  @fpu.sdiv r0, r1, r0\n"); isarith = 1; }
             /* a > b is b < a; != is not == -- which is also NaN's answer */
             if (k == tidx("<", 1)) es(cf == 8 ? "  @fpu.dlt r0, r1, r0\n" : "  @fpu.slt r0, r1, r0\n");
-            if (k == tidx(">", 1)) es(cf == 8 ? "  @fpu.dlt r0, r0, r1\n" : "  @fpu.slt r0, r0, r1\n");
+            if (k == tidx(">", 1)) es(cf == 8 ? "  @fpu.dgt r0, r1, r0\n" : "  @fpu.sgt r0, r1, r0\n");
             if (k == tidx("<=", 2)) es(cf == 8 ? "  @fpu.dle r0, r1, r0\n" : "  @fpu.sle r0, r1, r0\n");
-            if (k == tidx(">=", 2)) es(cf == 8 ? "  @fpu.dle r0, r0, r1\n" : "  @fpu.sle r0, r0, r1\n");
+            if (k == tidx(">=", 2)) es(cf == 8 ? "  @fpu.dge r0, r1, r0\n" : "  @fpu.sge r0, r1, r0\n");
             if (k == tidx("==", 2)) es(cf == 8 ? "  @fpu.deq r0, r1, r0\n" : "  @fpu.seq r0, r1, r0\n");
             if (k == tidx("!=", 2)) { es(cf == 8 ? "  @fpu.deq r0, r1, r0\n" : "  @fpu.seq r0, r1, r0\n");
                                       es("  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n"); }
@@ -3953,18 +3992,34 @@ int is_typeat(int i) {
    uses: locals live in 8-byte slots whatever their type, but `sizeof(int)`
    is 4 because that is what the type is.  [G-2] is about the width
    arithmetic is EVALUATED at, and says nothing about this. */
+/* specifier keywords -> a type KIND (parsing, as sema.py's declspec does);
+   the kind's size is the tyinfo stage's answer, not a number written here.
+   kb: 0 void, 1 char, 2 short, 3 int, 4 long, 5 float, 6 double */
+int kindsize(int kb, int un) {
+    char *nm; int L;
+    nm = un ? "u32" : "i32";
+    if (kb == 0) nm = "void";
+    if (kb == 1) nm = un ? "u8" : "i8";
+    if (kb == 2) nm = un ? "u16" : "i16";
+    if (kb == 4) nm = un ? "u64" : "i64";
+    if (kb == 5) nm = "f32";
+    if (kb == 6) nm = "f64";
+    L = 0; while (nm[L]) L = L + 1;
+    return tysize(vfind(TYOUTV, NTYOUTV, nm, L));
+}
+
 int typesize(void) {
-    int sz;
-    sz = 4;
+    int kb; int un;
+    kb = 3; un = 0;
     while (is_typeat(tp)) {
-        if (srcis(tpos[tp], tlen[tp], "char")) sz = 1;
-        if (srcis(tpos[tp], tlen[tp], "short")) sz = 2;
-        if (srcis(tpos[tp], tlen[tp], "int")) { if (sz == 4) sz = 4; }
-        if (srcis(tpos[tp], tlen[tp], "long")) sz = 8;
-        if (srcis(tpos[tp], tlen[tp], "void")) sz = 1;
+        if (srcis(tpos[tp], tlen[tp], "char")) kb = 1;
+        if (srcis(tpos[tp], tlen[tp], "short")) kb = 2;
+        if (srcis(tpos[tp], tlen[tp], "long")) kb = 4;
+        if (srcis(tpos[tp], tlen[tp], "void")) kb = 0;
+        if (srcis(tpos[tp], tlen[tp], "unsigned")) un = 1;
         adv();
     }
-    return sz;
+    return kindsize(kb, un);
 }
 
 /* `enum [tag] { a, b = 3, c }` -- the constants go into the symbol table and
@@ -4033,8 +4088,8 @@ int skipspecq(void) {
 }
 
 int declspec(void) {                       /* -> element width */
-    int w; int td;
-    w = 8;
+    int w; int td; int kb;
+    w = 8; kb = 3;
     declsz = 4;                            /* the size `sizeof` reports */
     declstruct = 0 - 1;
     declspecptr = 0;
@@ -4075,15 +4130,16 @@ int declspec(void) {                       /* -> element width */
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
         if (tlen[tp] == 4) { if (src[tpos[tp]] == 99) w = 1; }   /* char */
-        if (srcis(tpos[tp], tlen[tp], "char")) declsz = 1;
-        if (srcis(tpos[tp], tlen[tp], "short")) declsz = 2;
-        if (srcis(tpos[tp], tlen[tp], "long")) declsz = 8;
-        if (srcis(tpos[tp], tlen[tp], "void")) declsz = 1;
+        if (srcis(tpos[tp], tlen[tp], "char")) kb = 1;
+        if (srcis(tpos[tp], tlen[tp], "short")) kb = 2;
+        if (srcis(tpos[tp], tlen[tp], "long")) kb = 4;
+        if (srcis(tpos[tp], tlen[tp], "void")) kb = 0;
         if (srcis(tpos[tp], tlen[tp], "unsigned")) declunsigned = 1;
-        if (srcis(tpos[tp], tlen[tp], "float")) { declsz = 4; declflt = 4; }
-        if (srcis(tpos[tp], tlen[tp], "double")) { declsz = 8; declflt = 8; }  /* long double too */
+        if (srcis(tpos[tp], tlen[tp], "float")) { kb = 5; declflt = 4; }
+        if (srcis(tpos[tp], tlen[tp], "double")) { kb = 6; declflt = 8; }  /* long double too */
         adv();
     }
+    declsz = kindsize(kb, declunsigned);   /* the size: tyinfo's answer */
     /* The element width IS the type's size.  It used to be 1 for char and 8
        for everything else, which made an `int` array eight bytes per element
        and left no room for a struct member to be four. */
@@ -5594,6 +5650,7 @@ int main(void) {
             es("asked pp "); en(nask[S_PP]); es(" lex "); en(nask[S_LEX]);
             es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
             es(" scope "); en(nask[S_SCOPE]); es(" irsel "); en(nask[S_IRSEL]);
+            es(" tyinfo "); en(nask[S_TYINFO]); es(" pfconv "); en(nask[S_PFCONV]);
             ec(10);
             __write(2, out, nout);
         } } }

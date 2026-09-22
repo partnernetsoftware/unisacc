@@ -1,12 +1,12 @@
 """tape -> TargetProgram. [L]
 
-Five tables drive every target fact here:
-    enc   (op,os,arch) -> form          <- authoritative form
-    isel  (op,arch)    -> symbol
-    abi   (op,os,arch) -> sysno, arg0-2, ret, tls, gate
-    reloc (kind,arch)  -> rel32|arm26|arm19
-Nothing target-specific is hardcoded except the machine's own register map,
-which is classic algebra. [T-1]
+Four stages drive every target fact here, and each answer is used (a wrong
+one changes the image -- tests/ablate.sh):
+    enc    (op,os,arch) -> form
+    abi    (op,os,arch) -> sysno, arg0-2, ret, gate, nrreg
+    reloc  (kind,arch)  -> rel32|arm26|arm19, the displacement field
+    regmap (treg,arch)  -> the machine register holding tape register rN
+[T-1]
 """
 from . import catalog as C
 from .tape import REGS as TAPE_REGS
@@ -57,13 +57,18 @@ class TargetProgram:
 
 
 def facts(oracle, op, os_, arch, drive="spec"):
-    """The 9 target facts for one catalog op. [L-2]"""
+    """The target facts for one catalog op. [L-2]
+
+    Only what the lowering USES is asked (tests/ablate.sh checks each one
+    changes the image).  isel is not asked: its `form` is the arch-level view
+    enc supersedes, and its `symbol` is a mnemonic no encoder reads -- it
+    stays a constructed stage for the spec/combo experiments, not a question
+    the compiler pretends to obey."""
     if drive == "combo":
         f = oracle.ask("combo", (op, os_, arch))
         return dict(f)
-    f = dict(oracle.ask("isel", (op, arch)))
-    f.update(oracle.ask("abi", (op, os_, arch)))
-    f["form"] = oracle.ask("enc", (op, os_, arch))       # os-aware, wins
+    f = dict(oracle.ask("abi", (op, os_, arch)))
+    f["form"] = oracle.ask("enc", (op, os_, arch))       # os-aware
     return f
 
 
@@ -113,9 +118,8 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     # file size, which is the difference between a 4 KB .exe and a 68 KB one
     tp.bss = WIN_STACK if win else 0
     tp.relocs = list(tape.relocs)
-    rmap = dict(zip(TAPE_REGS, C.REGMAP[arch]))
+    rmap = {r: oracle.ask("regmap", (r, arch)) for r in TAPE_REGS}
     sp = rmap["r7"]
-    nr = C.NR_REG[(os_, arch)]
 
     def R(x):
         return rmap[x] if x in rmap else x
@@ -133,14 +137,14 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             n = int(sysno, 0)
             if fault == "osx_class_bit" and os_ == "osx":
                 n &= ~C.OSX_CLASS_BIT                     # [L-3] drop the bit
-            tp.emit("setreg", nr, ("imm", n), role="sysno")
+            tp.emit("setreg", f["nrreg"], ("imm", n), role="sysno")
         if win:
             tp.emit("winsave", SAVE)
         for i, src in enumerate(arg_srcs):
             tp.emit("setreg", args[i], src, role="arg%d" % i)
         if extra is not None:
             tp.emit("setreg", extra[0], extra[1], role="arg3")
-        tp.emit("gate", form=f["form"], gate=gate, symbol=f["symbol"],
+        tp.emit("gate", form=f["form"], gate=gate,
                 winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
                 ret=f["ret"], hstd=HSTD, written=WRITTEN)
         if win:
@@ -197,7 +201,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             else:
                 syscall_seq(a[0], [("mem", SCR0), ("mem", SCR1),
                                    ("mem", PRINTLEN)])
-            tp.emit("mov", C.REGMAP[arch][0],
+            tp.emit("mov", rmap["r0"],
                     facts(oracle, a[0], os_, arch, drive)["ret"])
         elif o == ".exit":
             tp.emit("setmem", SCR0, R(a[0]))
@@ -208,19 +212,18 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             tp.emit("argvget", R(a[0]), R(a[1]), ARGV)
         elif o == ".arg":
             f = facts(oracle, "add64", os_, arch, drive)      # a plain move
-            tp.emit("mov", C.REGMAP[arch][a[0]], R(a[1]), symbol=f["symbol"])
+            tp.emit("mov", rmap["r%d" % a[0]], R(a[1]))
         elif o in ("jump", "jumpz", "call"):
             kind = JMPKIND[o]
             rk = oracle.ask("reloc", (kind, arch))             # [L-1]
             cop = "call" if o == "call" else o
             f = facts(oracle, cop if cop in C.OPS else "jump", os_, arch, drive)
-            tp.emit(o, *[R(x) for x in a], reloc=rk, form=f["form"],
-                    symbol=f["symbol"])
+            tp.emit(o, *[R(x) for x in a], reloc=rk, form=f["form"])
         else:
             meta = {}
             if o in C.OPS:
                 f = facts(oracle, o, os_, arch, drive)
-                meta = {"form": f["form"], "symbol": f["symbol"]}
+                meta = {"form": f["form"]}
             tp.emit(o, *[R(x) if isinstance(x, str) else x for x in a], **meta)
 
     for name, at in tape.labels.items():

@@ -116,6 +116,7 @@ def emit_core(nets, path):
           'int STAGE_OFF[%d];' % len(meta),
           'int STAGE_NCLS[%d];' % (len(meta) * 12),
           'int STAGE_MW[%d];' % len(meta),
+          'int STAGE_VN[%d];' % (len(meta) * 4),
           'int act[4096];', 'int z[512];', '']
     L += ['int model_dims(void) {']
     for i, (st, m, H, nh, off, ncls, vlen, mw) in enumerate(meta):
@@ -123,6 +124,8 @@ def emit_core(nets, path):
                  '  STAGE_MW[%d] = %d;' % (i, m, i, H, i, off, i, mw))
         for k, c in enumerate(ncls):
             L.append('  STAGE_NCLS[%d] = %d;' % (i * 12 + k, c))
+        for f, n in enumerate(vlen):
+            L.append('  STAGE_VN[%d] = %d;' % (i * 4 + f, n))
     L += ['  return %d;' % len(meta), '}', '']
     # vocabularies the C side needs, packed as NUL-separated strings so no
     # array-of-pointer initialiser is required (our subset has none yet)
@@ -141,11 +144,11 @@ def emit_core(nets, path):
         packed = "".join(v + "\\0" for v in vals)
         L += ['char *%s = "%s";' % (nm, packed),
               '#define N%s %d' % (nm, len(vals)), '']
-    # the back end's stages -- isel, abi, enc, reloc: every field and every
+    # the back end's stages -- isel, abi, enc, reloc, regmap: every field and every
     # head, named by stage.  The self-hosted compiler lowers its own tape by
     # asking these, exactly as unisa/lower.py does; a head's classes are the
     # NET's, in the net's order, which is what infer() returns an index into.
-    for st in ("enc", "reloc", "isel", "abi"):
+    for st in ("enc", "reloc", "regmap", "tyinfo", "pfconv", "isel", "abi"):
         S = STAGES[st]
         for i, (_, vals) in enumerate(S.fields):
             nm = "BF_%s_%d" % (st.upper(), i)
@@ -184,6 +187,7 @@ def emit_self(nets, path):
           'int STAGE_OFF[%d];' % len(meta),
           'int STAGE_NCLS[%d];' % (len(meta) * 12),
           'int STAGE_MW[%d];' % len(meta),
+          'int STAGE_VN[%d];' % (len(meta) * 4),
           'int act[4096];', 'int z[512];', '']
     L += ['int model_dims(void) {']
     for i, (st, m, H, nh, off, ncls, vlen, mw) in enumerate(meta):
@@ -191,6 +195,8 @@ def emit_self(nets, path):
                  '  STAGE_MW[%d] = %d;' % (i, m, i, H, i, off, i, mw))
         for k, c in enumerate(ncls):
             L.append('  STAGE_NCLS[%d] = %d;' % (i * 12 + k, c))
+        for f, n in enumerate(vlen):
+            L.append('  STAGE_VN[%d] = %d;' % (i * 4 + f, n))
     L += ['  return %d;' % len(meta), '}', '']
     L += [KERNEL_BODY]
     open(path, "w").write("\n".join(L) + "\n")
@@ -253,9 +259,20 @@ long mask64(int p) {
 int infer(int s, int *key, int head) {
     int m; int H; int off; int j; int f; int hit; int ne; int k;
     int p; int best; int bi; int u; int hh; int c; int w; int ncls;
-    int any; int got; int wi; int mw;
+    int any; int got; int wi; int mw; int q;
     long lit;
     m = STAGE_M[s]; H = STAGE_H[s]; off = STAGE_OFF[s]; mw = STAGE_MW[s];
+    /* a key outside the table is never answered [P-2]: the net is only
+       defined on the domain it was verified on.  -1 tells the caller. */
+    f = 0;
+    while (f < m) {
+        if (key[f] < 0 || key[f] >= STAGE_VN[(s << 2) + f]) return 0 - 1;
+        f = f + 1;
+    }
+    /* the masks are stored unit by unit, field by field, word by word --
+       the order this loop visits them -- so one running offset reaches
+       every one, and no index is multiplied out */
+    q = off;
     j = 0;
     while (j < H) {
         hit = 1;
@@ -264,7 +281,7 @@ int infer(int s, int *key, int head) {
             /* MASKW u64 words per field: a vocabulary may exceed 64 values */
             any = 0; got = 0; wi = 0;
             while (wi < mw) {
-                lit = mask64(off + ((j * m + f) * mw + wi) * 8);
+                lit = mask64(q); q = q + 8;
                 if (lit) any = 1;
                 if (wi == (key[f] >> 6)) {
                     if ((lit >> (key[f] & 63)) & 1) got = 1;
@@ -277,10 +294,10 @@ int infer(int s, int *key, int head) {
         act[j] = hit;
         j = j + 1;
     }
-    p = off + H * m * mw * 8;
+    p = q;
     ne = getb(p) | (getb(p+1) << 8) | (getb(p+2) << 16) | (getb(p+3) << 24);
     p = p + 4;
-    ncls = STAGE_NCLS[s * 12 + head];
+    ncls = STAGE_NCLS[(s << 3) + (s << 2) + head];
     c = 0;
     while (c < ncls) { z[c] = 0; c = c + 1; }
     k = 0;

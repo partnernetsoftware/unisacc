@@ -289,18 +289,27 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
             return _winapi(ins, off, shift, text_va, imps)
         return w(0xD4000001)                         # svc #0
     if o == "jump":
-        return w(0x14000000 | (_disp(labels[a[0]] - off, 26) & 0x3FFFFFF))
+        return w(0x14000000 | _relfield(ins, labels[a[0]] - off))
     if o == "call":
         # tape semantics: push the return address on the tape stack (x7).  `bl`
         # would put it in lr, which recursion clobbers.
         return adr(IP1, text_va + off, text_va + off + 16) + \
             w(0xD1002000 | (7 << 5) | 7) + \
             w(0xF9000000 | (7 << 5) | IP1) + \
-            w(0x14000000 | (_disp(labels[a[0]] - (off + 12), 26) & 0x3FFFFFF))
+            w(0x14000000 | _relfield(ins, labels[a[0]] - (off + 12)))
     if o == "jumpz":                                 # cbz Xt, label
-        return w(0xB4000000 | ((_disp(labels[a[1]] - off, 19) & 0x7FFFF) << 5)
-                 | N(a[0]))
+        return w(0xB4000000 | _relfield(ins, labels[a[1]] - off) | N(a[0]))
     return None
+
+
+# The reloc stage's answer IS the displacement field: its width and where it
+# sits in the word.  A wrong answer is a wrong branch, not an ignored hint.
+RELFIELD = {"arm26": (26, 0), "arm19": (19, 5)}
+
+
+def _relfield(ins, d):
+    bits, at = RELFIELD[ins.meta["reloc"]]
+    return (_disp(d, bits) & ((1 << bits) - 1)) << at
 
 
 def _itoa(pc, src, buf, lenp):

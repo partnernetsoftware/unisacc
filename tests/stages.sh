@@ -21,7 +21,7 @@ from unisa.__main__ import _built
 from unisa.oracle import Oracle
 from unisa.driver import compile_file
 UA, files = sys.argv[1], sys.argv[2:]
-FRONT = ("pp", "lex", "parse", "type", "scope", "irsel")
+FRONT = ("pp", "lex", "parse", "type", "scope", "irsel", "tyinfo", "pfconv")
 nets = _built()
 # a probe the two front ends are KNOWN to disagree on is listed, with its
 # reason, in one place -- ccrun.knownwrong -- and is not re-judged here
@@ -48,6 +48,12 @@ for f in files:
         continue
     py = {s for s in FRONT if o.stats.get(s, [0, 0]) != [0, 0]}
     missing = sorted(s for s in py if c.get(s, 0) == 0)
+    # a printf with flags or a width is formatted AT RUN TIME by <stdio.h>'s
+    # _u_vfmt in unisacc's tape, so there is no compile-time conversion to
+    # decide; the Python front end desugars it and asks pfconv.  Excused only
+    # when the tape really calls the runtime formatter.
+    if "pfconv" in missing and b"call _u_vfmt" in r.stdout:
+        missing.remove("pfconv")
     if missing:
         bad += 1
         print("  FAIL %-14s python asks %s, unisacc never does" %

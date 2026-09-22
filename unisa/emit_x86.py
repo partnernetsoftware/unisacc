@@ -545,21 +545,27 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             return _winapi(ins, off, shift, text_va, imps)
         return b"\x0f\x05"                                 # syscall
     if o == "jump":
-        d = labels[a[0]] - (off + 5)
-        return b"\xe9" + (d & 0xFFFFFFFF).to_bytes(4, "little")
+        return b"\xe9" + _rel(ins, labels[a[0]] - (off + 5))
     if o == "call":                                  # push ret addr on r10
         lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + 22)
         sub = rex(1, 0, 0, 1) + b"\x81" + modrm(3, 5, 10) + \
             (8).to_bytes(4, "little")
         st = rex(1, 1, 0, 1) + b"\x89" + modrm(0, 11, 10)
-        d = labels[a[0]] - (off + 22)
-        return lea + sub + st + b"\xe9" + (d & 0xFFFFFFFF).to_bytes(4, "little")
+        return lea + sub + st + b"\xe9" + _rel(ins, labels[a[0]] - (off + 22))
     if o == "jumpz":
         r = NUM[a[0]]
         test = rex(1, r >> 3, 0, r >> 3) + b"\x85" + modrm(3, r, r)
-        d = labels[a[1]] - (off + len(test) + 6)
-        return test + b"\x0f\x84" + (d & 0xFFFFFFFF).to_bytes(4, "little")
+        return test + b"\x0f\x84" + _rel(ins, labels[a[1]] - (off + len(test) + 6))
     return None
+
+
+# the reloc stage's answer is the displacement's width (see emit_arm)
+RELBYTES = {"rel32": 4}
+
+
+def _rel(ins, d):
+    n = RELBYTES[ins.meta["reloc"]]
+    return (d & ((1 << (8 * n)) - 1)).to_bytes(n, "little")
 
 
 def size(ins, labels):

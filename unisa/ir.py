@@ -37,7 +37,7 @@ ALU = {
     "+": ("alu", "add", False), "-": ("alu", "sub", False),
     "*": ("alu", "mul", False),
     "<": ("alu", "lt", False), "<=": ("alu", "le", False),
-    ">": ("alu", "gt", True), ">=": ("alu", "ge", True),
+    ">": ("alu", "gt", False), ">=": ("alu", "ge", False),
     "==": ("alu", "eq", False), "!=": ("alu", "ne", False),
     "&": ("alu", "and", False), "|": ("alu", "or", False),
     "^": ("alu", "xor", False), "<<": ("alu", "shl", False),
@@ -61,6 +61,10 @@ RECIPE_OP = {
 }
 from .fp import OPS as _FOPS
 RECIPE_OP.update({op: op for op in _FOPS})     # the fpu recipes are the ops
+# a `_rev` recipe is its op with the two sources swapped (gold.IRSEL_MAP)
+RECIPE_OP.update({r + "_rev": RECIPE_OP[r] for r in
+                  ("slt64", "sle64", "ult64", "ule64",
+                   "flt64", "fle64", "flt32", "fle32")})
 
 
 class Emitter:
@@ -85,6 +89,16 @@ class Emitter:
         r = self.o.ask("irsel", (family, flavor))
         assert r != "bad", "irsel: no recipe for %s/%s" % (family, flavor)
         return RECIPE_OP[r]
+
+    def emit3(self, family, flavor, dst, a, b):
+        """dst = a OP b, where irsel's answer decides the op AND whether the
+        sources swap (a `_rev` recipe) -- a > b is b < a, and that is the
+        net's call, not this function's."""
+        r = self.o.ask("irsel", (family, flavor))
+        assert r != "bad", "irsel: no recipe for %s/%s" % (family, flavor)
+        if r.endswith("_rev"):
+            a, b = b, a
+        self.emit(RECIPE_OP[r], dst, a, b)
 
     def new_label(self, p="L"):
         self._n += 1
@@ -178,15 +192,10 @@ class Emitter:
             fl = {"+": "add", "-": "sub", "*": "mul", "/": "div"}[op]
             self.emit(self.recipe("fpu", p + fl), ACC, LHS, ACC)
             return
-        # a > b is b < a; != is not ==, which is also what NaN needs
-        fl, swap = {"<": ("lt", False), ">": ("lt", True),
-                    "<=": ("le", False), ">=": ("le", True),
-                    "==": ("eq", False), "!=": ("eq", False)}[op]
-        mn = self.recipe("fpu", p + fl)
-        if swap:
-            self.emit(mn, ACC, ACC, LHS)
-        else:
-            self.emit(mn, ACC, LHS, ACC)
+        # a > b is b < a (irsel answers `_rev`); != is not ==, as NaN needs
+        fl = {"<": "lt", ">": "gt", "<=": "le", ">=": "ge",
+              "==": "eq", "!=": "eq"}[op]
+        self.emit3("fpu", p + fl, ACC, LHS, ACC)
         if op == "!=":
             self.imm(TMP, 1)
             self.emit(self.recipe("alu", "xor"), ACC, ACC, TMP)
@@ -212,11 +221,7 @@ class Emitter:
             flav = self.UNS[op]
         self.pop(LHS)
         self.narrow_pair(uns, width)
-        mn = self.recipe(fam, flav)
-        if swap:
-            self.emit(mn, ACC, ACC, LHS)
-        else:
-            self.emit(mn, ACC, LHS, ACC)
+        self.emit3(fam, flav, ACC, LHS, ACC)
 
     def bits_get(self, bitoff, width, signed, unit):
         """ACC holds the address of a bit-field's storage unit; leave the

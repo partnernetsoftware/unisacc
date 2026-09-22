@@ -5,15 +5,30 @@ The two decisions that ARE table-shaped go through the oracle:
   type : (t1, op, t2)    -> result type or illegal
 """
 
-TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4,
-           "u8": 1, "u16": 2, "u32": 4, "f32": 4}     # [G-2] else 8
 FLOATS = ("f32", "f64")
-UNSIGNED = ("u8", "u16", "u32", "u64")
-RANK = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
-        "i32": 3, "u32": 3, "i64": 4, "u64": 4}
+
+# A scalar type's size, signedness and narrowness are a table -- the tyinfo
+# stage.  The front end asks it; the oracle is bound when a Scope is made.
+ORACLE = None
 
 
-NARROW = ("i8", "i16", "i32", "u8", "u16", "u32")
+def tyinfo(kind):
+    return ORACLE.ask("tyinfo", (kind,))
+
+
+def ty_size(kind):
+    return int(tyinfo(kind)["size"])
+
+
+def is_unsigned(kind):
+    return kind in _TYOUT and tyinfo(kind)["uns"] == "1"
+
+
+def is_narrow(kind):
+    return kind in _TYOUT and tyinfo(kind)["narrow"] == "1"
+
+
+from ..gold import TYOUT as _TYOUT                # noqa: E402
 
 # The type table's TOPS axis is canonical: one relational op stands for all
 # four, one equality op for both.  Projecting onto it is classic key encoding,
@@ -43,7 +58,7 @@ class Type:
             return 0 if self.n < 0 else self.n * self.to.size(structs)
         if self.kind == "struct":
             return structs[self.tag].size if structs else 8
-        return TY_SIZE.get(self.kind, 8)
+        return ty_size(self.kind)
 
     def __repr__(self):
         if self.kind == "ptr":
@@ -206,6 +221,8 @@ class Scope:
     """Symbol table + the scope-table oracle calls."""
 
     def __init__(self, oracle):
+        global ORACLE
+        ORACLE = oracle
         self.o = oracle
         self.stack = [{}]
         self.structs = {}

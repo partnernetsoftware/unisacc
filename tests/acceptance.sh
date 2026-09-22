@@ -13,7 +13,9 @@ chk() { # chk <name> <expected> <actual>
 
 echo "== [A-12] acc = 1.000 on FULL gold =="
 n=$($U acc | grep -c ' 1\.0000')
-chk "stages at 1.000" 11 "$n"
+# every stage the gold defines, not a number that goes stale when one is added
+want=$(python3 -c "from unisa.gold import STAGES; print(len(STAGES))")
+chk "stages at 1.000" "$want" "$n"
 
 echo "== [A-5][A-6] every example folds 6/6 =="
 for e in hello fact ptr fib switch struct do; do

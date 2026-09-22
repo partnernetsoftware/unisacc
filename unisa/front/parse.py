@@ -8,9 +8,11 @@ from ..gold import TOKS
 from ..ir import (Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE, WCHAR,
                   wide_bytes)
 from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
-                   U8, U16, U32, U64, UNSIGNED, NARROW,
+                   U8, U16, U32, U64, is_unsigned, is_narrow,
                    F32, F64, FLOATS, ptr, Struct)
 from .lex import FNum
+from ..gold import STAGES as _STAGES
+PFCONVS = _STAGES["pfconv"].fields[0][1]
 
 # A declaration specifier is a SET of words, not the last one seen:
 # `long int` is long and `short int` is short.  Resolving word by word made
@@ -292,7 +294,7 @@ class Walker:
                             raise CError("line %d: %r is not a bit-field type "
                                          "or %d is a bad width"
                                          % (self.peek().line, ty, w))
-                        signed = not (ty.kind in UNSIGNED
+                        signed = not (is_unsigned(ty.kind)
                                       or (was_enum and not self.enum_neg))
                         st.add_bits(nm, ty, w, signed, self.sc.structs)
                     else:
@@ -998,7 +1000,7 @@ class Walker:
             off = self.alloc(ty)
             self.sc.declare(pn, ty, pkind, off)
             w = (min(8, ty.size(self.sc.structs))
-                 if ty.kind in NARROW else 8)
+                 if is_narrow(ty.kind) else 8)
             if ty.kind == "struct":
                 # By value: what arrives is the address of the caller's copy,
                 # and the callee copies it into its own slot so the parameter
@@ -1100,9 +1102,9 @@ class Walker:
                 # type -- a uint32_t function must not hand back 64 bits of
                 # whatever the arithmetic left above its width
                 if fr is not None and not self.isflt(fr) and not self.isflt(rt):
-                    if fr.kind in UNSIGNED and fr.kind != "u64":
+                    if is_unsigned(fr.kind) and fr.kind != "u64":
                         self.em.zext(fr.size(self.sc.structs))
-                    elif fr.kind in NARROW:
+                    elif is_narrow(fr.kind):
                         self.em.truncate(fr.size(self.sc.structs))
                 if getattr(self, "fn_ret", None) is not None \
                         and self.fn_ret.kind == "struct":
@@ -1692,7 +1694,7 @@ class Walker:
     def wid(self, ty):
         if ty.kind == "f32":
             return 4
-        return ty.size(self.sc.structs) if ty.kind in NARROW else 8
+        return ty.size(self.sc.structs) if is_narrow(ty.kind) else 8
 
     # -- floating point: conversions at every place C converts -------------
     @staticmethod
@@ -1727,7 +1729,7 @@ class Walker:
             ty = self.lval
             if ty.kind not in ("arr", "struct"):
                 self.em.load(ACC, ACC, 0, self.wid(ty))
-                if ty.kind in UNSIGNED:
+                if is_unsigned(ty.kind):
                     self.em.zext(self.wid(ty))
             self.lval = None
             return ty
@@ -1782,7 +1784,7 @@ class Walker:
                     self.em.bits_get(bits[0], bits[1], bits[2], self.wid(aty))
                 else:
                     self.em.load(ACC, ACC, 0, self.wid(aty))
-                    if aty.kind in UNSIGNED:
+                    if is_unsigned(aty.kind):
                         self.em.zext(self.wid(aty))
                 self.em.push()               # old value
                 rt = self.rvalue()
@@ -1916,10 +1918,10 @@ class Walker:
                 ty = self.fbinary(op, ty, rty, res)
                 continue
             if op in ("+", "-") and ty.kind in ("ptr", "arr") and \
-                    (rty.kind in ("i64", "u64") or rty.kind in NARROW):
+                    (rty.kind in ("i64", "u64") or is_narrow(rty.kind)):
                 self.scale(ty)
             if op == "+" and rty.kind in ("ptr", "arr") and \
-                    (ty.kind in ("i64", "u64") or ty.kind in NARROW):
+                    (ty.kind in ("i64", "u64") or is_narrow(ty.kind)):
                 # `n + p`: the INTEGER is on the stack; scale it there
                 self.em.pop(LHS)
                 self.em.push(ACC)
@@ -2100,9 +2102,9 @@ class Walker:
             self.convto(t, base)
             if self.isflt(base) or self.isflt(t):
                 pass
-            elif base.kind in UNSIGNED:
+            elif is_unsigned(base.kind):
                 self.em.zext(base.size(self.sc.structs))
-            elif base.kind in NARROW:
+            elif is_narrow(base.kind):
                 self.em.truncate(base.size(self.sc.structs))
             return self.postfix_chain(base)
         if p == "sizeof":
@@ -2590,7 +2592,7 @@ class Walker:
         self.em.load(ACC, ACC, 0)              # ap
         self.em.push()                         # ap
         self.em.load(ACC, ACC, 0, self.wid(ty))
-        if ty.kind in UNSIGNED:
+        if is_unsigned(ty.kind):
             self.em.zext(self.wid(ty))
         self.em.pop(LHS)                       # ap
         self.em.push()                         # value
@@ -2725,22 +2727,18 @@ class Walker:
                         "desugared printf does not emit"
                         % (self.peek().line, width, prec, spec))
                 width, zero, left = prec, True, False
-            if spec in "di":
-                self.em.print_field("int", width, left, zero)
-            elif spec == "u":
+            if spec not in PFCONVS:
+                raise CError("printf: unsupported %%%s" % spec)
+            how = self.o.ask("pfconv", (spec,))       # which routine [C-10]
+            if how == "u32":
                 self.em.mask32()
-                self.em.print_field("int", width, left, zero)
-            elif spec in "xXo":
-                self.em.print_field({"x": "hex", "X": "HEX", "o": "oct"}[spec],
-                                    width, left, zero)
-            elif spec == "p":
-                self.em.print_field("hex", width, left, zero)
-            elif spec == "s":
+                how = "int"
+            if how == "str":
                 self.em.print_field("str", width, left, False, prec)
-            elif spec == "c":
+            elif how == "chr":
                 self.em.print_field("chr", width, left, False)
             else:
-                raise CError("printf: unsupported %%%s" % spec)
+                self.em.print_field(how, width, left, zero)
         self.em.imm(ACC, 0)
         return I32
 
