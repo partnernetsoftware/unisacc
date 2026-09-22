@@ -14,9 +14,10 @@ class IntNet:
     __slots__ = ("stage", "heads", "H", "feeds", "b1", "w2", "offs",
                  "vidx", "ncls", "exact", "maxlogit")
 
-    def __init__(self, stage, p):
-        self.stage = stage
-        S = STAGES[stage]
+    def __init__(self, stage, p, stages=None):
+        reg = stages if stages is not None else STAGES
+        self.stage = stage if isinstance(stage, str) else stage.name
+        S = reg[self.stage]
         self.heads = [(hn, list(cl)) for hn, cl in p["heads"]]
         self.H = p["H"]
         self.offs = p["offs"]
@@ -74,22 +75,30 @@ class IntNet:
         return sorted(vals)
 
 
-def build(stage, verify=True):
-    p = build_net(stage)
-    n = IntNet(stage, p)
+def build(stage, verify=True, stages=None):
+    # `stage` may be a name (looked up in `stages` or the unisa registry) or a
+    # Stage object.  Construction always receives the Stage object so sibling
+    # packages can share this kernel without registering into unisa.gold.
+    reg = stages if stages is not None else STAGES
+    st = stage if not isinstance(stage, str) else reg[stage]
+    name = st.name
+    p = build_net(st)
+    n = IntNet(name, p, stages=reg)
     if verify:
         bad, mx_pre, mx_log = verify_int(p)
         n.exact = not bad
         n.maxlogit = mx_log
-        assert n.exact, "%s: construction not exact (%d wrong)" % (stage, len(bad))
+        assert n.exact, "%s: construction not exact (%d wrong)" % (name, len(bad))
     else:
         n.exact, n.maxlogit = None, None
     return n
 
 
-def build_all(names=None, verify=True):
-    from .gold import ALL
-    return {n: build(n, verify) for n in (names or ALL)}
+def build_all(names=None, verify=True, stages=None):
+    from .gold import ALL as _ALL
+    reg = stages if stages is not None else STAGES
+    names = names or (list(reg) if stages is not None else _ALL)
+    return {n: build(n, verify, stages=reg) for n in names}
 
 
 # -- cache -----------------------------------------------------------------
@@ -114,8 +123,9 @@ def to_dict(n):
     }
 
 
-def from_dict(d):
-    S = STAGES[d["stage"]]
+def from_dict(d, stages=None):
+    reg = stages if stages is not None else STAGES
+    S = reg[d["stage"]]
     n = IntNet.__new__(IntNet)
     n.stage = d["stage"]
     n.H = d["H"]
@@ -140,6 +150,6 @@ def save_all(nets, path):
     return os.path.getsize(path)
 
 
-def load_all(path):
+def load_all(path, stages=None):
     with open(path) as f:
-        return {k: from_dict(v) for k, v in json.load(f).items()}
+        return {k: from_dict(v, stages=stages) for k, v in json.load(f).items()}

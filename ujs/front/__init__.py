@@ -1,0 +1,1 @@
+"""UJS front end."""

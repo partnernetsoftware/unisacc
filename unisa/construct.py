@@ -49,9 +49,16 @@ class Domain:
 
     def __init__(self, stage, quotient=True):
         from itertools import product as _product
-        S = STAGES[stage]
+        # Accept a stage name (unisa registry) or a Stage object (sibling
+        # products such as ujs reuse the same construction without a second
+        # copy of the cube algebra).
+        if isinstance(stage, str):
+            S = STAGES[stage]
+            self.name = stage
+        else:
+            S = stage
+            self.name = S.name
         self.S = S
-        self.name = stage
         self.ovocabs = [list(v) for (_, v) in S.fields]
         self.m = len(self.ovocabs)
         self.okeys = S.keys()
