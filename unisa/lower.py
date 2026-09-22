@@ -139,7 +139,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             tp.emit("spinit", sp, STACKTOP if win else None)
             if not win:
                 # the loader hands over argc/argv; stash them before anything
-                tp.emit("argsave", ARGC, ARGV)
+                tp.emit("argsave", ARGC, ARGV, os_ == "lnx")
         o, a = ins.op, ins.args
 
         if o == ".write":
@@ -149,7 +149,10 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         elif o == ".print":
             tp.emit("setmem", SCR0, R(a[0]))
             tp.emit("itoa", SCR0, PRINTBUF, PRINTLEN)
-            syscall_seq("write", [("imm", 1), ("imm", PRINTBUF),
+            # the buffer's ADDRESS, relocated like any data address: as an
+            # `imm` it was the interpreter's number, and a native write read
+            # from nowhere
+            syscall_seq("write", [("imm", 1), ("addr", PRINTBUF),
                                   ("mem", PRINTLEN)])
         elif o == ".sys":
             for k in range(3):

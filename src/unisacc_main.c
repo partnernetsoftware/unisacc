@@ -447,12 +447,31 @@ int incdo(int ls, int le, int from) {
 int splice(void);
 int decomment(void);
 
+/* The target's predefined macros, the same set unisa/front/pp.py gives:
+   `#ifdef __linux__` in <stdio.h> picks the O_* bits, `#ifdef _WIN32` the
+   Win32 file calls, so a tape is compiled FOR an OS.  `-b os/arch` and
+   `-t os/arch` name it; a bare tape is lnx/x86_64, as it is on the Python
+   side and as the VM reads it. */
+char *tgt;
+int mdef1(char *s) { int n; n = 0; while (s[n]) n = n + 1; return mdef(s, n, 1, 1); }
+int predef(void) {
+    char *t; t = tgt;
+    if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
+    if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
+    if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
+    if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
+    mdef1("__LP64__");
+    mdef1("__UNISA__");
+    return 0;
+}
+
 int preprocess(void) {
     int i; int ls; int j; int ws; int we; int live; int d; int flag;
     int a; int k; int ns; int ne;
     int key[4];
     ndepth = 0;
     nmac = 0;
+    predef();
     i = 0;
     while (i < nsrc) {
         ls = i;
@@ -1442,6 +1461,7 @@ int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
 int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
+int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
 /* Floating point.  A value's floating kind is 0 (an integer), 4 (float) or
    8 (double); like the unsigned bit it describes the object a pointer points
    to, so `*p` of a `double *` is a double. */
@@ -1481,7 +1501,7 @@ int mbuns[MAXMEMB];
    first (C99 6.7.8p17: a brace list initialises a union's FIRST member) */
 int mbskip[MAXMEMB];
 int mbpst[MAXMEMB];       /* a pointer member: the struct it points to, or -1 */
-int mbflt[MAXMEMB];
+int mbflt[MAXMEMB]; int mbptrd[MAXMEMB];
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
@@ -1500,7 +1520,7 @@ int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
 int tdfpst[MAXTD];        /* ...and the struct its call returns a pointer to */
-int tdflt[MAXTD];
+int tdflt[MAXTD]; int tdpd[MAXTD];
 int declspecfp;           /* what declspec's typedef said about that */
 int declenum;             /* the specifier was an enum */
 int enumneg;              /* some enumerator seen so far is negative */
@@ -1513,6 +1533,18 @@ int fnresume;             /* where a nested declarator's body starts, or -1 */
    just parsed points to a function that itself returns a function pointer. */
 int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
 int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
+/* Pointer DEPTH.  `int **q` is a pointer to a pointer: *q is itself eight
+   bytes, and only **q is the int.  A 0/1 pointer flag read *q as a 4-byte
+   int -- right in the interpreter, whose addresses fit in 32 bits, and a
+   segfault natively.  declpd counts the stars of the declarator being read;
+   curpd is the depth of the pointer in r0 and curbase its innermost
+   pointee's width. */
+int declpd; int declspecpd; int declbase; int curpd; int curbase;
+/* `static` inside a function: the object has static storage, named `ls<N>`
+   (N the name's token, unique in the unit), initialised once in __init.
+   As a frame slot it was whatever the stack last held -- the interpreter's
+   fresh, reused stack counted 1 2 3 by luck; a native image did not. */
+int declstatic;
 int initflt;              /* an initialiser's element kind, for its slots */
 int declspecfpst;         /* a function-pointer typedef's call-result struct */
 int havepre;              /* binary()'s leftmost operand is already in r0 */
@@ -1567,6 +1599,9 @@ int postfix(void);
 int vcall(int var);
 int fpdecl(void);
 int eatstar(void);
+int bk_build(char *t, int n, char *target);
+int symlea(int i, int t, char *reg);
+int dkind(int flt);
 int setkind(int k);
 int fltlit(int t);
 unsigned long fdec2bin(int p, int n, int f32);
@@ -1808,6 +1843,9 @@ int sadd(int t, int kind, int off, int elem) {
     symvla[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
     symflt[nsym] = declflt; symnpk[nsym] = 0 - 1;
+    symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
+    if (declptr) symptrd[nsym] = declpd > 0 ? declpd : 1;
+    symbase[nsym] = declbase;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -2082,7 +2120,12 @@ int unary(void) {
     if (p == P_DEREF) {
         adv(); unary(); loadval();
         if (curfn) { lvalue = 0; return 0; }     /* *fp is fp */
-        lvalue = 1; curptr = 0; return 0;
+        lvalue = 1;
+        if (curpd >= 2) {                        /* *q of int **q is an int * */
+            curpd = curpd - 1; curptr = 1;
+            curelem = curpd >= 2 ? 8 : curbase;
+        } else { curptr = 0; curpd = 0; }
+        return 0;
     }
     if (p == P_BNOT) {                  /* ~x is x ^ -1 */
         adv(); unary(); loadval();
@@ -2150,16 +2193,25 @@ int unary(void) {
         lvalue = 0; curelem = 8; curptr = 0;
         return 0;
     }
-    if (p == P_ADDR) { adv(); unary(); lvalue = 0; return 0; }
+    if (p == P_ADDR) { adv(); unary();
+        /* &x: a pointer one deeper than x */
+        if (lvalue) {
+            if (curptr) { curpd = curpd + 1; curelem = 8; }
+            else { curbase = curelem; if (curstruct >= 0) { curbase = stsize[curstruct]; }
+                   curelem = curbase; curpd = 1; if (curflt) curelem = curflt; }
+            curptr = 1;
+        }
+        lvalue = 0; return 0; }
     /* a cast: `(TYPE) unary`.  The table calls this `prim`, because `(` is
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok;
+            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd;
             adv();
             cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt;
-            declptr = declspecptr;
+            declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) { declptr = 1; csz = 8; }
+            cpd = declpd;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 adv(); while (eatstar()) { }
                 need(tidx(")", 1), ")");
@@ -2201,6 +2253,8 @@ int unary(void) {
             } }
             lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns; curflt = cflt;
             curelem = cw;
+            curpd = 0; curbase = cw;
+            if (declptr) { curpd = cpd > 0 ? cpd : 1; if (curpd >= 2) curelem = 8; }
             if (declptr) curelem = cw;
             /* `(struct S *)p` -- the member access after it needs the type */
             curstruct = 0 - 1;
@@ -2286,6 +2340,8 @@ int postfix(void) {
             curelem = mbwidth[mi];
             curptr = mbptr[mi];
             if (curptr) curelem = mbelem[mi];
+            curpd = 0; curbase = mbelem[mi];
+            if (curptr) { curpd = mbptrd[mi]; if (curpd >= 2) curelem = 8; }
             cursize = mbbytes[mi];
             curstruct = mbstruct[mi];
             /* `p->q->b`: a pointer member hands its pointee on */
@@ -2299,8 +2355,9 @@ int postfix(void) {
             } }
         } else {
         if (p == P_INDEX) {
-            int row; int uu; int ist; int ifl;
+            int row; int uu; int ist; int ifl; int ipd; int ibase;
             curvla = 0;
+            ipd = curpd; ibase = curbase;
             adv();
             ist = curstruct;                 /* the index expression resets it */
             ifl = curflt;
@@ -2328,6 +2385,13 @@ int postfix(void) {
             curstruct = ist;
             curflt = ifl;
             if (ist >= 0) { if (row == 0) curelem = 0; }
+            /* an element of an array of pointers, or q[i] of int **q, is a
+               pointer itself */
+            curpd = 0;
+            if (row == 0) { if (ipd >= 2) {
+                curptr = 1; curpd = ipd - 1; curbase = ibase;
+                curelem = curpd >= 2 ? 8 : ibase;
+            } }
         } else {
             return 0;
         } } }
@@ -2349,7 +2413,7 @@ int structslots(int sst);
 int cplitexpr(int w, int sst, int isarr, int n);
 int icall(int si, int t) {
     int n; int k; int st;
-    if (symkind[si] == 0) { es("  @mem.lea r0, g_"); etok(t); es("\n  @mem.load r0, [r0+0]\n"); }
+    if (symkind[si] == 0) { symlea(si, t, "r0"); es("  @mem.load r0, [r0+0]\n"); }
     else { es("  @mem.load r0, [r6-"); en(symoff[si]); es("]\n"); }
     adv();
     if (icparen) { icparen = 0; need(tidx(")", 1), ")"); }
@@ -2518,18 +2582,21 @@ int primary(void) {
             return postfix();
         }
         if (symkind[i] == 5) {               /* global array -> its address */
-            es("  @mem.lea r0, g_"); etok(tp); ec(10);
+            symlea(i, tp, "r0");
             curelem = symelem[i]; curptr = 1;
+            curpd = symptrd[i]; curbase = symbase[i]; if (curpd >= 2) curelem = 8;
             adv(); lvalue = 0;
             return postfix();
         }
-        if (symkind[i] == 0) { es("  @mem.lea r0, g_"); etok(tp); ec(10); }
+        if (symkind[i] == 0) symlea(i, tp, "r0");
         else { es("  @lit.imm r2, "); en(symoff[i]); es("\n  @alu.sub r0, r6, r2\n"); }
         curelem = symelem[i];
         curptr = symptr[i];
         /* a pointer to a struct steps by the STRUCT: its element width was
            the specifier's 8, so `r++` on a 16-byte struct went half-way */
         if (curptr) { if (symstruct[i] >= 0) { if (symkind[i] != 3) curelem = stsize[symstruct[i]]; } }
+        curpd = 0; curbase = symbase[i];
+        if (curptr) { curpd = symptrd[i]; if (curpd >= 2) curelem = 8; }
         adv();
         lvalue = 1;
         if (symkind[i] == 3) { lvalue = 0; curptr = 1; }   /* array -> address */
@@ -3274,6 +3341,15 @@ int ftruthy(void) {
 /* the bits of 1.0 in a floating kind */
 long fone(int k) { if (k == 8) return 4607182418800017408; return 1065353216; }
 
+/* the data label of global symbol i (token t): g_NAME, or a static local's */
+int symlea(int i, int t, char *reg) {
+    es("  @mem.lea "); es(reg);
+    if (symlab[i] >= 0) { es(", ls"); en(symlab[i]); }
+    else { es(", g_"); etok(t); }
+    ec(10);
+    return 0;
+}
+
 int tyask(int l, char *op, int ol, int r) {
     int key[4];
     key[0] = l; key[1] = vfind(TOPSV, NTOPSV, op, ol); key[2] = r; key[3] = 0;
@@ -3315,7 +3391,7 @@ int tycanon(int k, char *buf) {
 
 int binary(int level) {
     int k; int e; int lp; int lax; int rax; int ck; int res; int cl;
-    int lf; int rf; int lk; int lfr; int rfr; int re; int rp;
+    int lf; int rf; int lk; int lfr; int rfr; int re; int rp; int lpd; int rpd; int lbase; int rbase;
     char cb[4];
     if (level > 7) {
         if (havepre) { havepre = 0; return 0; }     /* parsed already, by expr */
@@ -3331,13 +3407,14 @@ int binary(int level) {
         lfr = curflt;                              /* float, or a pointee's */
         lf = 0; if (curptr == 0) { if (curstruct < 0) lf = curflt; }
         lk = fkind();
+        lpd = curpd; lbase = curbase;
         lax = tyax();
         adv();
         push();
         binary(level + 1);
         loadval();
         rf = 0; if (curptr == 0) { if (curstruct < 0) rf = curflt; }
-        rfr = curflt; re = curelem; rp = curptr;
+        rfr = curflt; re = curelem; rp = curptr; rpd = curpd; rbase = curbase;
         rax = tyax();
         ck = tyask(lax, "+", 1, rax);              /* the conversion row */
         cl = tycanon(k, cb);
@@ -3391,8 +3468,9 @@ int binary(int level) {
         binuns = 0; binwid = 8;
         lvalue = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
         if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
-                                   curflt = lfr;
-                                   if (lp == 0) { curptr = 1; curelem = re; curflt = rfr; } }
+                                   curflt = lfr; curpd = lpd; curbase = lbase;
+                                   if (lp == 0) { curptr = 1; curelem = re; curflt = rfr;
+                                                  curpd = rpd; curbase = rbase; } }
         else { curptr = 0; cursize = tysize(res); curelem = cursize;
                curuns = tyuns(res); curflt = 0; }
     }
@@ -3914,6 +3992,7 @@ int isqual(int t) {
 }
 int eatstar(void) {
     if (eat(tidx("*", 1)) == 0) return 0;
+    declpd = declpd + 1;
     while (isqual(tp)) adv();
     return 1;
 }
@@ -3934,6 +4013,7 @@ int isspecq(int t) {
 }
 int skipspecq(void) {
     while (isspecq(tp)) {
+        if (srcis(tpos[tp], tlen[tp], "static")) declstatic = 1;
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
         adv();
@@ -3949,7 +4029,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
-    declenum = 0; declflt = 0;
+    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0;
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -3959,22 +4039,27 @@ int declspec(void) {                       /* -> element width */
         declspecfp = tdfp[td];
         declspecfpst = tdfpst[td];
         declflt = tdflt[td];
+        declspecpd = tdptr[td] ? tdpd[td] : 0;
+        declbase = tdw[td];
+        if (declstruct >= 0) declbase = stsize[declstruct];
         skipspecq();
         return tdw[td];
     }
     if (cur() == tidx("struct", 6)) {
         declstruct = stparse(0);
         declsz = stsize[declstruct];
+        declbase = declsz;
         skipspecq();
         return 8;
     }
     if (cur() == tidx("union", 5)) {
         declstruct = stparse(1);
         declsz = stsize[declstruct];
+        declbase = declsz;
         skipspecq();
         return 8;
     }
-    if (cur() == tidx("enum", 4)) { declenum = 1; declsz = enumspec(); skipspecq(); return declsz; }
+    if (cur() == tidx("enum", 4)) { declenum = 1; declsz = enumspec(); declbase = declsz; skipspecq(); return declsz; }
     while (is_typetok()) {
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
@@ -3992,6 +4077,7 @@ int declspec(void) {                       /* -> element width */
        for everything else, which made an `int` array eight bytes per element
        and left no room for a struct member to be four. */
     w = declsz;
+    declbase = w;
     return w;
 }
 
@@ -4037,6 +4123,7 @@ int stbody(int si) {
                 mbskip[nmemb] = mbskip[a];
                 mbpst[nmemb] = mbpst[a];
                 mbflt[nmemb] = mbflt[a];
+                mbptrd[nmemb] = mbptrd[a];
                 if (stunion[mst]) { if (first == 0) mbskip[nmemb] = 1; }
                 first = 0;
                 if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
@@ -4049,7 +4136,7 @@ int stbody(int si) {
             continue;
         } }
         while (1) {
-            declptr = declspecptr;
+            declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) declptr = 1;
             t = 0 - 1;
             n = 1;
@@ -4132,6 +4219,7 @@ int stbody(int si) {
             mbpst[nmemb] = 0 - 1;
             if (declptr) mbpst[nmemb] = mst;
             mbflt[nmemb] = mflt;
+            mbptrd[nmemb] = declptr ? (declpd > 0 ? declpd : 1) : 0;
             mbuns[nmemb] = muns;
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
@@ -4161,6 +4249,7 @@ int stbody(int si) {
         mbskip[nmemb] = mbskip[own[j]];
         mbpst[nmemb] = mbpst[own[j]];
         mbflt[nmemb] = mbflt[own[j]];
+        mbptrd[nmemb] = mbptrd[own[j]];
         nmemb = nmemb + 1;
         j = j + 1;
     }
@@ -4199,7 +4288,7 @@ int do_typedef(void) {
     adv();
     tw = declspec(); tsz = declsz; tsi = declstruct;
     while (1) {
-        tptr = declspecptr;
+        tptr = declspecptr; declpd = declspecpd;
         while (eatstar()) tptr = 1;
         /* `typedef int (*binop)(int, int);` -- a pointer to a function */
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -4219,7 +4308,7 @@ int do_typedef(void) {
         if (cur() == tidx("[", 1)) {
             adv(); tsz = tsz * cexpr(); need(tidx("]", 1), "]");
         }
-        if (tptr) tdadd(nt, tw, 8, tsi, 1);
+        if (tptr) { tdadd(nt, tw, 8, tsi, 1); tdpd[ntd - 1] = declpd > 0 ? declpd : 1; }
         else tdadd(nt, tw, tsz, tsi, 0);
         if (eat(tidx(",", 1)) == 0) break;
     }
@@ -4308,7 +4397,8 @@ int initaddr(int isglobal, int gt, int off, int delta) {
     if (isglobal) {
         /* 2: an unnamed static object -- a compound literal at file scope */
         if (isglobal == 2) { es("  @mem.lea r1, __cl"); en(gt); }
-        else { es("  @mem.lea r1, g_"); etok(gt); }
+        else { if (isglobal == 3) { es("  @mem.lea r1, ls"); en(gt); }   /* a static local */
+               else { es("  @mem.lea r1, g_"); etok(gt); } }
         if (delta) { es("\n  @lit.imm r2, "); en(delta); es("\n  @alu.add r1, r1, r2"); }
         ec(10);
     } else {
@@ -4685,16 +4775,17 @@ int dkind(int flt) {
     return 0;
 }
 int local_decl(void) {
-    int w; int t; int off; int n; int nelem; int sst; int isarr;
+    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
     lflt0 = declflt;          /* an initialiser's casts would overwrite it */
+    lstat = declstatic;
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
-        declptr = declspecptr;
+        declptr = declspecptr; declpd = declspecpd;
         declflt = lflt0;
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -4729,6 +4820,46 @@ int local_decl(void) {
         lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
         lfp = declfp;
+        if (lstat) {
+            int ew; long nb; int lk2;
+            if (cur() == tidx("[", 1)) {
+                adv(); isarr = 1;
+                if (cur() == tidx("]", 1)) {
+                    n = initcount();
+                    if (sst >= 0) { int per; per = structslots(sst); n = (n + per - 1) / per; }
+                } else n = cexpr();
+                need(tidx("]", 1), "]");
+            }
+            ew = w;
+            if (sst >= 0) ew = declsz;
+            if (declptr) { if (isarr) { if (declpd > 0) ew = 8; } else ew = 8; }
+            nb = n * ew;
+            if (declptr == 0) { if (sst >= 0) { if (isarr == 0) nb = declsz; } }
+            es(".bss ls"); en(t); ec(32); en(nb < 8 ? 8 : nb); ec(10);
+            declbytes = nb;
+            sadd(t, 0, 0, isarr ? ew : w);
+            symlab[nsym - 1] = t;
+            if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symptrd[nsym - 1] = declpd + 1; }
+            else { if (declptr == 0) { if (sst >= 0) {
+                symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symelem[nsym - 1] = declsz; } } }
+            if (eat(tidx("=", 1))) {
+                /* once, at program start: into __init, like a global's */
+                lk2 = dkind(lflt0);
+                initflt = lflt0;
+                toinit = 1; hasinit = 1;
+                if (cur() == tidx("{", 1)) {
+                    if (isarr) { initisarr = 1; }
+                    initaggr(3, t, 0, isarr ? ew : w, sst, nb);
+                } else { if (cur() == T_STR) { if (isarr) { initstr(3, t, 0, n); }
+                    else { expr(); loadval(); es("  @mem.lea r1, ls"); en(t); ec(10); estore(8); } }
+                else { expr(); loadval(); fconv(fkind(), lk2);
+                    es("  @mem.lea r1, ls"); en(t); ec(10);
+                    if (declptr) estore(8); else estore(w); } }
+                toinit = 0;
+            }
+            if (eat(tidx(",", 1))) continue;
+            break;
+        }
         if (cur() == vfind(TOKV, NTOKV, "[", 1)) { if (isconstdim(tp + 1) == 0) {
             /* A variable-length array (C99 6.7.5.2).  Its size is known only
                now, so its storage comes off the tape stack here; the name is
@@ -4784,11 +4915,15 @@ int local_decl(void) {
                 n = n * dim3n;
             }
             if (sst >= 0) w = declsz;
+            apd = declpd;
+            if (apd > 0) w = 8;            /* an array of POINTERS: 8 each */
             off = alloc_local(n * w);
             declptr = 1;
             declbytes = n * declsz;
+            if (apd > 0) declbytes = n * 8;
             sadd(t, lbind, off, w);
             symkind[nsym - 1] = 3;         /* an array name denotes its address */
+            symptrd[nsym - 1] = apd + 1;
         } else {
             /* a struct variable needs its whole body, not one slot, and its
                NAME denotes its address the way an array's does */
@@ -5102,7 +5237,7 @@ int function(int t, int w) {
         if (eat(tidx("...", 3))) break;
         pw = declspec();
         pst = declstruct; pfl = declflt;
-        declptr = declspecptr; declfp = declspecfp;
+        declptr = declspecptr; declpd = declspecpd; declfp = declspecfp;
         while (eatstar()) declptr = 1;
         havename = 0;
         if (cur() == tidx("(", 1)) {
@@ -5202,7 +5337,7 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk;
+    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd;
     while (1) {
         p = ask(0);
         if (p == P_END) break;
@@ -5217,7 +5352,7 @@ int unit(void) {
         while (1) {
             declstruct = gstruct;
             decldim2 = 0; decldim3 = 0; declfp = declspecfp;
-            declptr = declspecptr;
+            declptr = declspecptr; declpd = declspecpd;
             declflt = gflt0;
             while (eatstar()) declptr = 1;
             gfpfn = 0;
@@ -5264,7 +5399,10 @@ int unit(void) {
                 }
                 if (gstruct >= 0) w = declsz;
             }
+            gpd = declpd;
+            if (isarr) { if (gpd > 0) w = 8; }          /* an array of pointers */
             declbytes = n * declsz;
+            if (isarr) { if (gpd > 0) declbytes = n * 8; }
             if (declptr) { if (isarr == 0) declbytes = 8; }
             sadd(t, gbind, 0, w);
             /* a struct global is an aggregate: its name is its address */
@@ -5274,7 +5412,7 @@ int unit(void) {
             /* a global array name denotes its address, exactly like a local
                one -- without this `read(fd, src, n)` passes the first eight
                BYTES OF src as the pointer */
-            if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; }
+            if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symptrd[nsym - 1] = gpd + 1; }
             es(".bss g_"); etok(t); ec(32);
             /* an ARRAY needs its full storage; a bare pointer needs 8.
                Do not conflate the two -- `char src[MAXSRC]` getting 8 bytes
@@ -5383,6 +5521,9 @@ int main(void) {
        silence: unisacc.c grew past 256 KB when the model did, and compiling
        itself stopped at an "unexpected token" where the file was cut. */
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
+    tgt = "lnx/x86_64";
+    if (__argc() > 3) { char *f; f = __argv(2);
+        if (f[0] == 45) { if (f[1] == 98 || f[1] == 116) tgt = __argv(3); } }
     splice();
     decomment();
     /* compiling only: the token dump is the lexer's instrument, and the
@@ -5424,17 +5565,22 @@ int main(void) {
                "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
         }
         emit_pool();
+        /* `-b os/arch`: not the tape but the executable, from our own back
+           end [S-7 item 7]; else the tape, for the Python one or the VM */
+        {   char *a2; a2 = __argv(2);
+            if (a2[0] == 45 && a2[1] == 98) { bk_build(out, nout, __argv(3)); return 0; }
+        }
         __write(1, out, nout);
         /* `unisacc FILE -c -v`: how many times each stage was asked, so a
            test can check that no table-shaped stage is decided in code */
-        if (__argc() > 3) {
+        if (__argc() > 3) { char *v; v = __argv(3); if (v[0] == 45) { if (v[1] == 118) {
             nout = 0;
             es("asked pp "); en(nask[S_PP]); es(" lex "); en(nask[S_LEX]);
             es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
             es(" scope "); en(nask[S_SCOPE]); es(" irsel "); en(nask[S_IRSEL]);
             ec(10);
             __write(2, out, nout);
-        }
+        } } }
         return 0; }
     i = 0;
     while (i < ntok) {

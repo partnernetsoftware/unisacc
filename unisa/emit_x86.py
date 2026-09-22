@@ -298,6 +298,40 @@ def _winapi(ins, off, shift, text_va, imps):
     return None
 
 
+def _itoa(pc, src, buf, lenp):
+    """`.print`: the signed value at `src` in decimal at `buf`, its length at
+    `lenp`.  It had no encoding (ud2) -- only the self-hosted compiler emits
+    `.print`.  r11-r15 and rbx are not tape registers; div needs rax/rdx,
+    which the syscall that follows loads afresh anyway.  Digits are counted,
+    then written from the end.  |v| is taken unsigned: -LONG_MIN is fine."""
+    def r(opc, reg, target, out):      # rip-relative at the current position
+        return rip(opc, reg, pc + len(out) + 7, target)
+    out = bytearray()
+    out += r(0x8B, "rax", src, out)                              # rax = v
+    out += b"\x4d\x31\xe4"                                        # xor r12, r12
+    out += b"\x48\x85\xc0"                                        # test rax, rax
+    neg = b"\x48\xf7\xd8" + mov_ri("r12", 1)                      # neg rax; r12 = 1
+    out += b"\x79" + bytes([len(neg)]) + neg                       # jns over
+    out += mov_rr("r15", "rax") + mov_ri("r11", 10)
+    out += mov_rr("r13", "rax") + b"\x4d\x31\xf6"                  # r13 = |v|; r14 = 0
+    loop = mov_rr("rax", "r13") + b"\x48\x31\xd2" + b"\x49\xf7\xf3"   # div r11
+    loop += mov_rr("r13", "rax") + b"\x49\xff\xc6"                 # inc r14
+    loop += b"\x4d\x85\xed"                                        # test r13, r13
+    out += loop + b"\x75" + bytes([(-(len(loop) + 2)) & 0xFF])      # jnz loop
+    out += b"\x4d\x01\xe6"                                        # r14 += r12
+    out += r(0x89, "r14", lenp, out)                             # *lenp = r14
+    out += r(0x8D, "rbx", buf, out)                              # rbx = buf
+    out += b"\x4e\x8d\x2c\x33"                                    # lea r13, [rbx+r14]
+    loop = mov_rr("rax", "r15") + b"\x48\x31\xd2" + b"\x49\xf7\xf3"
+    loop += mov_rr("r15", "rax") + b"\x48\x83\xc2\x30"             # rdx += '0'
+    loop += b"\x49\xff\xcd" + b"\x41\x88\x55\x00"                # dec r13; mov [r13], dl
+    loop += b"\x4d\x85\xff"                                        # test r15, r15
+    out += loop + b"\x75" + bytes([(-(len(loop) + 2)) & 0xFF])      # jnz loop
+    tail = b"\xc6\x03\x2d"                                         # mov byte [rbx], '-'
+    out += b"\x4d\x85\xe4" + b"\x74" + bytes([len(tail)]) + tail    # test r12; jz over
+    return bytes(out)
+
+
 def _sp():
     from .catalog import REGMAP
     return REGMAP["x86_64"][7]          # the tape SP, not rsp
@@ -361,6 +395,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             return mov_ri(a[0], v)
         if k == "reg":
             return mov_rr(a[0], v)
+        if k == "addr":                              # lea: the address itself
+            return rip(0x8D, a[0], text_va + off + 7, v + shift)
         return rip(0x8B, a[0], text_va + off + 7, v + shift)
     if o == "setmem":
         return rip(0x89, a[1], text_va + off + 7, a[0] + shift)
@@ -482,6 +518,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         return ld + add + rex(0, 0, 0, 1) + b"\xff" + modrm(3, 4, 11)
     if o == "nop":
         return b"\x90"
+    if o == "itoa":
+        return _itoa(text_va + off, a[0] + shift, a[1] + shift, a[2] + shift)
     if o == "gate":
         if ins.meta.get("form") == "winapi":
             return _winapi(ins, off, shift, text_va, imps)

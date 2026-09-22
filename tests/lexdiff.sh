@@ -10,7 +10,7 @@ import sys
 sys.path.insert(0, '.')
 from unisa.__main__ import _built
 from unisa.oracle import Oracle
-from unisa.front.pp import preprocess, expand
+from unisa.front.pp import preprocess, expand, predefines
 from unisa.front.lex import lex
 o = Oracle(_built(), drive="built")
 src = open(sys.argv[1], encoding="latin-1").read()
@@ -21,7 +21,8 @@ src = open(sys.argv[1], encoding="latin-1").read()
 # ...and headers are spliced on both sides: the C preprocessor implements
 # #include now, looking beside the file and then in include/.
 import os
-src, macros = preprocess(src, o, {}, sys.argv[1], ("include",))
+# both front ends predefine the target's macros; a bare run is lnx/x86_64
+src, macros = preprocess(src, o, predefines("lnx/x86_64"), sys.argv[1], ("include",))
 src = expand(src, macros)
 # the source was read as latin-1 (one char per byte), so write the spelling
 # back out as bytes -- otherwise a UTF-8 literal comes out re-encoded and

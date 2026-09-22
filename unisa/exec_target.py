@@ -76,6 +76,8 @@ class Machine:
             return u64(v)
         if k == "reg":
             return self.R[v]
+        if k == "addr":                  # a data address, as a value
+            return u64(v)
         return self.ld(v, 8)
 
     # -- the gate ---------------------------------------------------------

@@ -154,6 +154,8 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
             return movimm(N(a[0]), v & ((1 << 64) - 1))
         if k == "reg":
             return w(0xAA0003E0 | (N(v) << 16) | N(a[0]))
+        if k == "addr":
+            return adrp_add(N(a[0]), text_va + off, v + shift)
         return adrp_add(IP1, text_va + off, v + shift) + \
             w(0xF9400000 | (IP1 << 5) | N(a[0]))
     if o == "setmem":
@@ -217,7 +219,11 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
             w(0x9B008000 | (N(a[2]) << 16) | (N(a[1]) << 10) |
               (IP1 << 5) | N(a[0]))
     if o == "argsave":                               # Darwin: x0=argc x1=argv
-        return adrp_add(IP1, text_va + off, a[0] + shift) + \
+        pre = b""
+        if len(a) > 2 and a[2]:                      # Linux: argc at [sp]
+            pre = w(0xF94003E0) + w(0x910023E1)      # ldr x0,[sp]; add x1,sp,#8
+            off += 8
+        return pre + adrp_add(IP1, text_va + off, a[0] + shift) + \
             w(0xF9000000 | (IP1 << 5) | 0) + \
             adrp_add(IP1, text_va + off + 12, a[1] + shift) + \
             w(0xF9000000 | (IP1 << 5) | 1)
@@ -260,6 +266,8 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
             w(0xD61F0000 | (IP1 << 5))
     if o == "nop":
         return w(0xD503201F)
+    if o == "itoa":
+        return _itoa(text_va + off, a[0] + shift, a[1] + shift, a[2] + shift)
     if o == "gate":
         g = ins.meta.get("gate")
         if g == "svc80":
@@ -280,6 +288,41 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return w(0xB4000000 | ((_disp(labels[a[1]] - off, 19) & 0x7FFFF) << 5)
                  | N(a[0]))
     return None
+
+
+def _itoa(pc, src, buf, lenp):
+    """`.print`: the signed value at `src` in decimal at `buf`, its length at
+    `lenp`.  It had no encoding at all -- a `.print` reached a native image
+    as `brk` -- because only the self-hosted compiler emits it.  x9-x17 are
+    not tape registers; the digits are counted first, then written from the
+    end, so no reversal is needed.  |v| is taken unsigned: -LONG_MIN is fine."""
+    out = adrp_add(9, pc, src) + _ldr(10, 9)                 # x10 = v
+    out += _movz(11, 0)                                      # x11 = negative?
+    out += w(0xF100001F | (10 << 5))                         # cmp x10, #0
+    out += w(0x54000000 | (3 << 5) | 0xA)                    # b.ge +3
+    out += w(0xCB000000 | (10 << 16) | (31 << 5) | 10)       # neg x10
+    out += _movz(11, 1)
+    out += _movz(12, 10)                                     # x12 = 10
+    out += w(0xAA0003E0 | (10 << 16) | 13)                   # x13 = x10
+    out += _movz(14, 0)                                      # x14 = count
+    out += w(0x9AC00800 | (12 << 16) | (13 << 5) | 13)       # udiv x13, x13, x12
+    out += w(0x91000400 | (14 << 5) | 14)                    # add x14, x14, #1
+    out += w(0xB5000000 | (((-2) & 0x7FFFF) << 5) | 13)      # cbnz x13, -2
+    out += w(0x8B000000 | (11 << 16) | (14 << 5) | 14)       # x14 += neg
+    out += adrp_add(9, pc + len(out), lenp) + _str(14, 9)    # *lenp = x14
+    out += adrp_add(9, pc + len(out), buf)                   # x9 = buf
+    out += w(0x8B000000 | (14 << 16) | (9 << 5) | 13)        # x13 = end
+    out += w(0x9AC00800 | (12 << 16) | (10 << 5) | 15)       # udiv x15, x10, x12
+    out += w(0x9B008000 | (12 << 16) | (10 << 10) | (15 << 5) | 17)   # msub
+    out += w(0x91000000 | (48 << 10) | (17 << 5) | 17)       # + '0'
+    out += w(0xD1000400 | (13 << 5) | 13)                    # x13 -= 1
+    out += w(0x39000000 | (13 << 5) | 17)                    # strb w17, [x13]
+    out += w(0xAA0003E0 | (15 << 16) | 10)                   # x10 = x15
+    out += w(0xB5000000 | (((-6) & 0x7FFFF) << 5) | 10)      # cbnz x10, -6
+    out += w(0xB4000000 | (3 << 5) | 11)                     # cbz x11, +3
+    out += _movz(17, 45)                                     # '-'
+    out += w(0x39000000 | (9 << 5) | 17)                     # strb w17, [x9]
+    return out
 
 
 def _fd2handle(pc, hstd):

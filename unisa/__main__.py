@@ -283,7 +283,7 @@ def cmd_vm(a):
     from .tape import parse as tparse
     with open(a.file, encoding="latin-1") as f:
         t = tparse(f.read())
-    out, code, steps = vm_run(t, argv=[a.file] + a.args)
+    out, code, steps = vm_run(t, argv=[a.file] + a.args, os_=a.os)
     sys.stdout.buffer.write(out)
     sys.stdout.flush()
     if a.verbose:
@@ -559,6 +559,9 @@ def main(argv=None):
     vm.add_argument("file")
     vm.add_argument("args", nargs=argparse.REMAINDER)
     vm.add_argument("-v", "--verbose", action="store_true")
+    # which OS the tape was compiled FOR; a text tape does not say, and a
+    # bare one is lnx (the front ends' default target)
+    vm.add_argument("--os", choices=("lnx", "osx", "win"), default=None)
     vm.set_defaults(fn=cmd_vm)
 
     lw = sub.add_parser("lower")

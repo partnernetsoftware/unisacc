@@ -1138,6 +1138,80 @@ char *IRFLAV = "add\0sub\0mul\0lt\0le\0gt\0ge\0eq\0ne\0neg\0and\0or\0xor\0shl\0s
 char *IRRECV = "add64\0and64\0arg\0call\0callpush\0callr\0cvtdi\0cvtds\0cvtdu\0cvtid\0cvtis\0cvtsd\0cvtud\0cvtus\0eq\0exit\0fadd32\0fadd64\0fdiv32\0fdiv64\0feq32\0feq64\0fle32\0fle64\0flt32\0flt64\0fmul32\0fmul64\0frame\0fsqrt32\0fsqrt64\0fsub32\0fsub64\0imm\0jump\0jumpz\0ld\0lea\0load64\0lshr64\0mul64\0ne\0or64\0print\0ret\0shl64\0shr64\0sle64\0slt64\0st\0store64\0sub64\0ule64\0ult64\0write\0xor64\0zero\0bad\0";
 #define NIRRECV 58
 
+char *BF_ENC_0 = "exit\000read\000write\000open\000close\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define NBF_ENC_0 70
+
+char *BF_ENC_1 = "lnx\000osx\000win\000";
+#define NBF_ENC_1 3
+
+char *BF_ENC_2 = "x86_64\000arm64\000";
+#define NBF_ENC_2 2
+
+char *BH_ENC_Y = "syscall\000svc\000winapi\000x86\000arm\000";
+#define NBH_ENC_Y 5
+#define HD_ENC_Y 0
+
+char *BF_RELOC_0 = "jmp\000jz\000call\000";
+#define NBF_RELOC_0 3
+
+char *BF_RELOC_1 = "x86_64\000arm64\000";
+#define NBF_RELOC_1 2
+
+char *BH_RELOC_Y = "rel32\000arm26\000arm19\000";
+#define NBH_RELOC_Y 3
+#define HD_RELOC_Y 0
+
+char *BF_ISEL_0 = "exit\000read\000write\000open\000close\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define NBF_ISEL_0 70
+
+char *BF_ISEL_1 = "x86_64\000arm64\000";
+#define NBF_ISEL_1 2
+
+char *BH_ISEL_FORM = "syscall\000svc\000winapi\000x86\000arm\000";
+#define NBH_ISEL_FORM 5
+#define HD_ISEL_FORM 0
+
+char *BH_ISEL_SYMBOL = "accept\000add\000addsd\000addss\000and\000asr\000b\000bind\000bl\000blr\000call\000casal\000cbz\000clock_gettime\000clone\000close\000cmpxchg\000connect\000cset\000cvtsd2ss\000cvtsi2sd\000cvtsi2ss\000cvtss2sd\000cvttsd2si\000divsd\000divss\000dmb\000eor\000execve\000exit\000fadd\000fcmp\000fcvt\000fcvtzs\000fcvtzu\000fdiv\000fmul\000fsqrt\000fsub\000futex\000getpid\000imul\000jmp\000jz\000ldr\000listen\000lsl\000lsr\000mfence\000mmap\000mov\000mprotect\000mrs\000mul\000mulsd\000mulss\000munmap\000nanosleep\000none\000nop\000open\000or\000orr\000push\000rdfsbase\000rdtsc\000read\000ret\000sar\000scvtf\000setb\000setbe\000setl\000setle\000shl\000shr\000socket\000sqrtsd\000sqrtss\000stp\000str\000sub\000subsd\000subss\000svc\000syscall\000ucomisd\000ucomiss\000ucvtf\000write\000xor\000";
+#define NBH_ISEL_SYMBOL 91
+#define HD_ISEL_SYMBOL 1
+
+char *BF_ABI_0 = "exit\000read\000write\000open\000close\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define NBF_ABI_0 70
+
+char *BF_ABI_1 = "lnx\000osx\000win\000";
+#define NBF_ABI_1 3
+
+char *BF_ABI_2 = "x86_64\000arm64\000";
+#define NBF_ABI_2 2
+
+char *BH_ABI_SYSNO = "0\0000x2000001\0000x2000003\0000x2000004\0000x2000005\0000x2000006\0000x2000014\0000x200001e\0000x200003b\0000x2000049\0000x200004a\0000x2000061\0000x2000062\0000x2000068\0000x200006a\0000x2000074\0000x20000c5\0000x20000f0\0000x2000168\0000x2000203\0001\00010\000101\00011\000113\000172\000198\0002\000200\000201\000202\000203\000215\000220\000221\000222\000226\000228\0003\00035\00039\00041\00042\00043\00049\00050\00056\00057\00059\00060\00063\00064\0009\00093\00098\000none\000";
+#define NBH_ABI_SYSNO 56
+#define HD_ABI_SYSNO 0
+
+char *BH_ABI_ARG0 = "rdi\000rsi\000rdx\000r10\000rcx\000r8\000r9\000rax\000x0\000x1\000x2\000x3\000x4\000x5\000x6\000x7\000x8\000none\000";
+#define NBH_ABI_ARG0 18
+#define HD_ABI_ARG0 1
+
+char *BH_ABI_ARG1 = "rdi\000rsi\000rdx\000r10\000rcx\000r8\000r9\000rax\000x0\000x1\000x2\000x3\000x4\000x5\000x6\000x7\000x8\000none\000";
+#define NBH_ABI_ARG1 18
+#define HD_ABI_ARG1 2
+
+char *BH_ABI_ARG2 = "rdi\000rsi\000rdx\000r10\000rcx\000r8\000r9\000rax\000x0\000x1\000x2\000x3\000x4\000x5\000x6\000x7\000x8\000none\000";
+#define NBH_ABI_ARG2 18
+#define HD_ABI_ARG2 3
+
+char *BH_ABI_RET = "rdi\000rsi\000rdx\000r10\000rcx\000r8\000r9\000rax\000x0\000x1\000x2\000x3\000x4\000x5\000x6\000x7\000x8\000none\000";
+#define NBH_ABI_RET 18
+#define HD_ABI_RET 4
+
+char *BH_ABI_TLS = "fsbase\000tpidr_el0\000teb\000none\000";
+#define NBH_ABI_TLS 4
+#define HD_ABI_TLS 5
+
+char *BH_ABI_GATE = "syscall\000svc0\000svc80\000winapi\000none\000";
+#define NBH_ABI_GATE 5
+#define HD_ABI_GATE 6
+
 /* the kernel -- the deploy kernel. [K-1] [K-2] [K-5]
  *
  * embed -> match -> add -> argmax.  No softmax, no libm, no malloc, and -- for

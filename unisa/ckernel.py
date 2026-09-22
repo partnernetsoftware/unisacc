@@ -141,6 +141,25 @@ def emit_core(nets, path):
         packed = "".join(v + "\\0" for v in vals)
         L += ['char *%s = "%s";' % (nm, packed),
               '#define N%s %d' % (nm, len(vals)), '']
+    # the back end's stages -- isel, abi, enc, reloc: every field and every
+    # head, named by stage.  The self-hosted compiler lowers its own tape by
+    # asking these, exactly as unisa/lower.py does; a head's classes are the
+    # NET's, in the net's order, which is what infer() returns an index into.
+    for st in ("enc", "reloc", "isel", "abi"):
+        S = STAGES[st]
+        for i, (_, vals) in enumerate(S.fields):
+            nm = "BF_%s_%d" % (st.upper(), i)
+            # \\000, three digits: a value that starts with a digit (a
+            # syscall number) would otherwise extend the octal escape
+            packed = "".join(str(v) + "\\000" for v in vals)
+            L += ['char *%s = "%s";' % (nm, packed),
+                  '#define N%s %d' % (nm, len(vals)), '']
+        for hi, (hn, cl) in enumerate(nets[st].heads):
+            nm = "BH_%s_%s" % (st.upper(), hn.upper())
+            packed = "".join(str(v) + "\\000" for v in cl)
+            L += ['char *%s = "%s";' % (nm, packed),
+                  '#define N%s %d' % (nm, len(cl)),
+                  '#define HD_%s_%s %d' % (st.upper(), hn.upper(), hi), '']
     L += [KERNEL_BODY.split('int main(void)')[0]]
     open(path, "w").write("\n".join(L) + "\n")
     return len(blob), len(meta)

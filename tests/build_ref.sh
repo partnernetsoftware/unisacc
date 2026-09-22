@@ -5,7 +5,7 @@ set -e
 # concurrently and several of them rebuild, so nobody may ever see half a
 # file -- the same source gives the same bytes, so the last rename wins
 # harmlessly.
-cat kernel/unisa_core.c src/unisacc_main.c > unisacc.c.$$
+cat kernel/unisa_core.c src/unisacc_main.c src/unisacc_back.c > unisacc.c.$$
 mv -f unisacc.c.$$ unisacc.c
 cat tests/refshim.h unisacc.c tests/reffoot.h > "${1:-/tmp/ua_ref.c}.$$"
 mv -f "${1:-/tmp/ua_ref.c}.$$" "${1:-/tmp/ua_ref.c}"

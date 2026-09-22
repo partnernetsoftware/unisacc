@@ -21,6 +21,10 @@
 #               front end asks too: no table-shaped decision in code [A-33]
 #   selfgap     how much C the two front ends DISAGREE about, as a ratchet:
 #               the one number that was missing while the debt grew [A-29]
+#   nativeboot  unisacc -b builds unisacc, which rebuilds itself to the same
+#               bytes -- the bootstrap with no Python in it [S-6]
+#   closure     unisacc -b writes the same image bytes as the Python back
+#               end, all six targets, and the host image runs right [S-7]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
 #   acc         net == gold over the FULL gold, on the CONSTRUCTED weights
 #               we ship.  The SGD control arm is not here: `tests/baseline.sh`
@@ -73,6 +77,7 @@ run fat        bash -c "./tests/fat.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh $PROBES"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"
+run closure    bash -c "./tests/closure.sh $PROBES"
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
     run tools  env FETCH=0 ./tests/tools.sh
@@ -83,6 +88,7 @@ run stages     bash -c "./tests/stages.sh $PROBES"
 if [ "$(uname -s)" = "Darwin" ]; then
     run bootstrap ./tests/bootstrap.sh
 fi
+run nativeboot ./tests/nativeboot.sh
 if [ -d corpus/c-testsuite ]; then
     run corpus env FETCH=0 ./tests/corpus.sh
 fi
