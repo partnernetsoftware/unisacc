@@ -38,9 +38,24 @@ def _numval(t):
     return int(t, 0)
 
 
+class FNum(float):
+    """A floating constant's value.  `bits` is what the tape carries: the
+    binary64 pattern, or for an `f` suffix the binary32 one (rounded once
+    from the decimal, not via a double)."""
+    def __new__(cls, text):
+        from ..fp import bd, dec_to_f32
+        body = text.rstrip("fFlL")
+        self = float.__new__(cls, float(body))
+        self.f32 = text[-1] in "fF"
+        self.bits = dec_to_f32(body) if self.f32 else bd(float(body))
+        return self
+
+
 def charclass(c):
     if c == "":
         return "eof"
+    if c == ".":
+        return "dot"                 # `.5` may start a number [G-5]
     if c == "\n":
         return "nl"
     if c in " \t\r\f\v":
@@ -209,6 +224,31 @@ def lex(src, oracle):
             else:
                 while j < n and src[j].isdigit():
                     j += 1
+            # A floating constant (C99 6.4.4.2): a fraction, an exponent, or
+            # both, then at most one of f F l L.  Scanning the extent is
+            # structure; that it IS a number was the table's answer.
+            isf = False
+            if src[i:i + 2].lower() != "0x":
+                if j < n and src[j] == ".":
+                    isf = True
+                    j += 1
+                    while j < n and src[j].isdigit():
+                        j += 1
+                if j < n and src[j] in "eE":
+                    k = j + 1
+                    if k < n and src[k] in "+-":
+                        k += 1
+                    if k < n and src[k].isdigit():
+                        isf = True
+                        j = k
+                        while j < n and src[j].isdigit():
+                            j += 1
+            if isf:
+                if j < n and src[j] in "fFlL":
+                    j += 1
+                toks.append(Tok("num", src[i:j], FNum(src[i:j]), line))
+                i = j
+                continue
             while j < n and src[j] in "uUlL":
                 j += 1
             toks.append(Tok("num", src[i:j], _numval(src[i:j]), line))

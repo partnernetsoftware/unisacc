@@ -188,6 +188,8 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return mem(False, N(a[0]), N(a[1]), a[2], a[3])
     if o == ".st":
         return mem(True, N(a[2]), N(a[0]), a[1], a[3])
+    if o in FP_OPS:
+        return _fp(o, a)
     if o == ".zero":
         # n bytes at [base+off] <- 0, stored from xzr (rt = 31) in the widest
         # pieces that fit.  It fell through to `brk` and nobody noticed: the
@@ -321,6 +323,64 @@ def _winapi(ins, off, shift, text_va, imps):
         out += w(0xAA1F03E6)                         # x6 = 0  (no template)
         return out + _callimp(pc + len(out), imps, "CreateFileA")
     return None
+
+
+# ---- floating point [TP] ---------------------------------------------------
+# The value is its bit pattern in a general register.  Each op moves it into
+# v16/v17 -- caller-saved, and used nowhere else -- computes, and moves the
+# result back: `fmov` is a bit copy, so nothing is converted on the way.
+D16, D17 = 16, 17
+
+
+def _fmov_to(v, x, dbl):      # FMOV Dv, Xx  /  FMOV Sv, Wx
+    return w((0x9E670000 if dbl else 0x1E270000) | (x << 5) | v)
+
+
+def _fmov_from(x, v, dbl):    # FMOV Xx, Dv  /  FMOV Wx, Sv (zero-extends)
+    return w((0x9E660000 if dbl else 0x1E260000) | (v << 5) | x)
+
+
+FARITH = {"fadd": 0x1E202800, "fsub": 0x1E203800, "fmul": 0x1E200800,
+          "fdiv": 0x1E201800}
+# cset Xd, cond == csinc Xd, xzr, xzr, invert(cond).  After fcmp: MI is
+# ordered less-than, LS less-or-equal, EQ equal -- and all three are FALSE
+# when either operand is NaN, which is C's answer.
+FCMP_INV = {"flt": 0x5, "fle": 0x8, "feq": 0x1}      # PL, HI, NE
+FP_OPS = tuple(k + b for k in list(FARITH) + list(FCMP_INV)
+               for b in ("64", "32")) + (
+    "cvtid", "cvtud", "cvtis", "cvtus", "cvtdi", "cvtdu", "cvtsd", "cvtds",
+    "fsqrt64", "fsqrt32")
+
+
+def _fp(o, a):
+    if o[:4] in FARITH or o[:3] in FCMP_INV:
+        dbl = o.endswith("64")
+        ty = 0x00400000 if dbl else 0          # the ftype field: 01 = double
+        d, n, m = N(a[0]), N(a[1]), N(a[2])
+        out = _fmov_to(D16, n, dbl) + _fmov_to(D17, m, dbl)
+        if o[:4] in FARITH:
+            out += w(FARITH[o[:4]] | ty | (D17 << 16) | (D16 << 5) | D16)
+            return out + _fmov_from(d, D16, dbl)
+        out += w(0x1E202000 | ty | (D17 << 16) | (D16 << 5))       # fcmp
+        return out + w(0x9A9F07E0 | (FCMP_INV[o[:3]] << 12) | d)   # cset
+    d, n = N(a[0]), N(a[1])
+    if o in ("cvtid", "cvtud", "cvtis", "cvtus"):  # scvtf / ucvtf from Xn
+        base = {"cvtid": 0x9E620000, "cvtud": 0x9E630000,
+                "cvtis": 0x9E220000, "cvtus": 0x9E230000}[o]
+        return w(base | (n << 5) | D16) + _fmov_from(d, D16, o[-1] == "d")
+    if o in ("cvtdi", "cvtdu"):                    # fcvtzs / fcvtzu to Xd
+        return _fmov_to(D16, n, True) + \
+            w((0x9E780000 if o == "cvtdi" else 0x9E790000) | (D16 << 5) | d)
+    if o == "cvtsd":                               # fcvt Dd, Sn
+        return _fmov_to(D16, n, False) + w(0x1E22C000 | (D16 << 5) | D16) + \
+            _fmov_from(d, D16, True)
+    if o == "cvtds":                               # fcvt Sd, Dn
+        return _fmov_to(D16, n, True) + w(0x1E624000 | (D16 << 5) | D16) + \
+            _fmov_from(d, D16, False)
+    dbl = o == "fsqrt64"                           # fsqrt
+    return _fmov_to(D16, n, dbl) + \
+        w((0x1E61C000 if dbl else 0x1E21C000) | (D16 << 5) | D16) + \
+        _fmov_from(d, D16, dbl)
 
 
 def size(ins, labels):

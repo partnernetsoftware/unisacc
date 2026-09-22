@@ -25,7 +25,10 @@ def maskw(st):
 
 
 def _blob(nets):
-    """unit records, flat: [nf][fieldmasks...][nw2][(unit,cls,w)...]"""
+    """unit records, flat: [nf][fieldmasks...][nw2][(unit,cls,w)...]
+
+    w is two bytes: the construction's weights are priority levels, and the
+    type table with a floating axis needs 256 -- one past what a byte held."""
     out = bytearray()
     meta = []
     for st in ALL:
@@ -62,7 +65,7 @@ def _blob(nets):
         out += len(ents).to_bytes(4, "little")
         for (j, hi, k, w) in ents:
             out += bytes([j & 0xFF, (j >> 8) & 0xFF, hi, k & 0xFF,
-                          (k >> 8) & 0xFF, w])
+                          (k >> 8) & 0xFF, w & 0xFF, (w >> 8) & 0xFF])
         meta.append((st, m, n.H, len(n.heads), start,
                      [len(cl) for _, cl in n.heads],
                      [len(v) for (_, v) in S.fields], W))
@@ -266,9 +269,9 @@ int infer(int s, int *key, int head) {
         u = getb(p) | (getb(p+1) << 8);
         hh = getb(p+2);
         c = getb(p+3) | (getb(p+4) << 8);
-        w = getb(p+5);
+        w = getb(p+5) | (getb(p+6) << 8);
         if (hh == head) { if (act[u]) z[c] = z[c] + w; }
-        p = p + 6;
+        p = p + 7;
         k = k + 1;
     }
     best = z[0]; bi = 0;

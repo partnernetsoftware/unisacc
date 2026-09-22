@@ -59,6 +59,8 @@ RECIPE_OP = {
     "shl64": "shl64", "shr64": "shr64",
     "ult64": "ult64", "ule64": "ule64", "lshr64": "lshr64",
 }
+from .fp import OPS as _FOPS
+RECIPE_OP.update({op: op for op in _FOPS})     # the fpu recipes are the ops
 
 
 class Emitter:
@@ -139,6 +141,69 @@ class Emitter:
         self.emit(self.recipe("mem", "lea"), reg, sym)
 
     UNS = {"<": "ult", "<=": "ule", ">": "ugt", ">=": "uge", ">>": "lshr"}
+
+    # -- floating point [TP] ------------------------------------------------
+    # A value's kind decides the op: "f64", "f32", or an integer kind.  Every
+    # op is chosen by the irsel net, family `fpu`, like every other op.
+    FCONV = {("i", "f64"): "i2d", ("u", "f64"): "u2d",
+             ("i", "f32"): "i2s", ("u", "f32"): "u2s",
+             ("f64", "i"): "d2i", ("f64", "u"): "d2u",
+             ("f32", "f64"): "s2d", ("f64", "f32"): "d2s"}
+
+    def conv(self, frm, to, reg=ACC):
+        """Convert the value in `reg` from kind `frm` to kind `to` (C99
+        6.3.1.4-5).  Integer to integer is not this function's business --
+        the width is applied where the value is stored."""
+        isf = lambda k: k in ("f32", "f64")
+        if frm == to or not (isf(frm) or isf(to)):
+            return
+        ik = lambda k: "u" if k == "u64" else "i"   # narrower unsigned is
+        if frm == "f32" and not isf(to):              # already zero-extended
+            self.conv("f32", "f64", reg)
+            frm = "f64"
+        if isf(frm) and isf(to):
+            key = (frm, to)
+        elif isf(to):
+            key = (ik(frm), to)
+        else:
+            key = (frm, ik(to))
+        self.emit(self.recipe("fpu", self.FCONV[key]), reg, reg)
+
+    def fbinop(self, op, kind):
+        """lhs on the stack and rhs in ACC, BOTH already of floating `kind`
+        -> result in ACC: the value for + - * /, 0 or 1 for a comparison."""
+        p = "d" if kind == "f64" else "s"
+        self.pop(LHS)
+        if op in ("+", "-", "*", "/"):
+            fl = {"+": "add", "-": "sub", "*": "mul", "/": "div"}[op]
+            self.emit(self.recipe("fpu", p + fl), ACC, LHS, ACC)
+            return
+        # a > b is b < a; != is not ==, which is also what NaN needs
+        fl, swap = {"<": ("lt", False), ">": ("lt", True),
+                    "<=": ("le", False), ">=": ("le", True),
+                    "==": ("eq", False), "!=": ("eq", False)}[op]
+        mn = self.recipe("fpu", p + fl)
+        if swap:
+            self.emit(mn, ACC, ACC, LHS)
+        else:
+            self.emit(mn, ACC, LHS, ACC)
+        if op == "!=":
+            self.imm(TMP, 1)
+            self.emit(self.recipe("alu", "xor"), ACC, ACC, TMP)
+
+    def fneg(self, kind):
+        """-x flips the sign bit and nothing else: -0.0 and -NaN included."""
+        self.imm(TMP, (1 << 63) if kind == "f64" else (1 << 31))
+        self.emit(self.recipe("alu", "xor"), ACC, ACC, TMP)
+
+    def ftruth(self, kind):
+        """A floating value as a truth value: 1 unless it compares equal to
+        zero -- so -0.0 is false and NaN is true (C99 6.8.4.1, 6.5.3.3)."""
+        self.imm(TMP, 0)
+        self.emit(self.recipe("fpu", ("d" if kind == "f64" else "s") + "eq"),
+                  ACC, ACC, TMP)
+        self.imm(TMP, 1)
+        self.emit(self.recipe("alu", "xor"), ACC, ACC, TMP)
 
     def binop(self, op, uns=False, width=8):
         """lhs on the stack, rhs in ACC -> result in ACC."""

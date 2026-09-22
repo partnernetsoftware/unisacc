@@ -7,8 +7,8 @@
  * Stage 1: the lexer.  `unisacc -tokens f.c` prints the token stream.
  */
 
-#define MAXSRC 262144
-#define MAXTOK 65536
+#define MAXSRC 1048576
+#define MAXTOK 131072
 
 char src[MAXSRC];
 int nsrc;
@@ -1173,6 +1173,7 @@ int charclass(int c) {
     if (c == 39) return 5;                     /* sq */
     if (c == 47) return 6;                     /* slash */
     if (c == 42) return 7;                     /* star */
+    if (c == 46) return 11;                    /* dot: `.5` may start a number */
     if (c < 128) { if (OPCH[c]) return 8; }    /* punct */
     return 10;                                 /* other */
 }
@@ -1226,10 +1227,13 @@ int lex(void) {
     int i; int j; int a; int key[4]; int kind; int st;
     int best; int bl; int k; int p; int L;
     int strpfx;                            /* the `L` of an `L"..."`, or -1 */
+    int isf;
     i = 0;
     ntok = 0;
     strpfx = 0 - 1;
     while (1) {
+        /* every branch below appends at most one token; none checked */
+        if (ntok >= MAXTOK - 2) { printf("too many tokens\n"); return 0 - 1; }
         key[0] = charclass(at(i));
         key[1] = charclass(at(i + 1));
         key[2] = 0; key[3] = 0;
@@ -1317,9 +1321,22 @@ int lex(void) {
                 } }
             }
             while (isdi(at(j))) j = j + 1;
+            /* a floating constant (C99 6.4.4.2): a fraction, an exponent or
+               both, then at most one of f F l L -- the extent the Python
+               lexer takes, so the two token streams stay equal */
+            isf = 0;
+            if (at(i) != 48 || (at(i + 1) != 120 && at(i + 1) != 88)) {
+                if (at(j) == 46) { isf = 1; j = j + 1; while (isdi(at(j))) j = j + 1; }
+                if (at(j) == 101 || at(j) == 69) {
+                    int k2; k2 = j + 1;
+                    if (at(k2) == 43 || at(k2) == 45) k2 = k2 + 1;
+                    if (isdi(at(k2))) { isf = 1; j = k2; while (isdi(at(j))) j = j + 1; }
+                }
+            }
+            if (isf) { if (at(j) == 102 || at(j) == 70 || at(j) == 108 || at(j) == 76) j = j + 1; }
             /* the suffix letters in any order, as the Python lexer takes
                them: `1llu` is one token, not `1ll` then an identifier `u` */
-            while (at(j) == 117 || at(j) == 85 || at(j) == 108 || at(j) == 76) j = j + 1;
+            else { while (at(j) == 117 || at(j) == 85 || at(j) == 108 || at(j) == 76) j = j + 1; }
             tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j - i;
             ntok = ntok + 1;
             i = j;
@@ -2446,7 +2463,9 @@ int primary(void) {
         } }
         return postfix();
     }
-    printf("unexpected token %d in expression\n", tp);
+    printf("unexpected token %d in expression: ", tp);
+    __write(1, src + tpos[tp], tlen[tp] < 40 ? tlen[tp] : 40);
+    printf("\n");
     __exit(1);
     return 0;
 }
@@ -3535,6 +3554,13 @@ int declspec(void) {                       /* -> element width */
         if (srcis(tpos[tp], tlen[tp], "long")) declsz = 8;
         if (srcis(tpos[tp], tlen[tp], "void")) declsz = 1;
         if (srcis(tpos[tp], tlen[tp], "unsigned")) declunsigned = 1;
+        /* Refused out loud until this front end has the floating axis: as
+           an unknown type word `double` read as a 4-byte int, so a program
+           compiled and answered wrong. */
+        if (srcis(tpos[tp], tlen[tp], "float") || srcis(tpos[tp], tlen[tp], "double")) {
+            printf("floating point is not supported by unisacc yet\n");
+            __exit(1);
+        }
         adv();
     }
     /* The element width IS the type's size.  It used to be 1 for char and 8
@@ -4865,6 +4891,10 @@ int main(void) {
     if (fd < 0) { printf("cannot open input\n"); return 1; }
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
+    /* A full buffer means the file did not fit.  It used to be read short in
+       silence: unisacc.c grew past 256 KB when the model did, and compiling
+       itself stopped at an "unexpected token" where the file was cut. */
+    if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
     splice();
     decomment();
     /* compiling only: the token dump is the lexer's instrument, and the

@@ -7,6 +7,8 @@ never looks back at the generic tape op. [X-2]
 That is the whole reason --fold is a test: a wrong syscall number, a wrong
 argument register or a wrong gate lands here as a trap or as wrong bytes.
 """
+from . import fp
+from .fp import OPS3 as _FOPS3, OPS2 as _FOPS2
 from . import catalog as C
 from .tape import MEM_SIZE, STACK_TOP, DATA_BASE
 from .vm import Halt, s64, u64, MASK, open_args
@@ -218,6 +220,10 @@ class Machine:
                     R[a[0]] = 1 if R[a[1]] == R[a[2]] else 0
                 elif o == "ne":
                     R[a[0]] = 1 if R[a[1]] != R[a[2]] else 0
+                elif o in _FOPS3:                 # [TP] fp.py, shared
+                    R[a[0]] = fp.op3(o, R[a[1]], R[a[2]])
+                elif o in _FOPS2:
+                    R[a[0]] = fp.op2(o, R[a[1]])
                 elif o == "load64":
                     R[a[0]] = self.ld(self.addr(a[1], a[2]))
                 elif o == "store64":

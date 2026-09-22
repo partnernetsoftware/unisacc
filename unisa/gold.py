@@ -70,11 +70,20 @@ def parse_label(nt, tok):
 
 # ----------------------------------------------------------------- type [G-2]
 TYS = ("void", "i8", "i16", "i32", "i64",
-       "u8", "u16", "u32", "u64", "ptr", "arr", "struct", "fn")
+       "u8", "u16", "u32", "u64", "ptr", "arr", "struct", "fn",
+       "f32", "f64")
 TOPS = ("+", "-", "*", "/", "%", "<", "==", "=", "&", "[]", ".", "call",
         "sizeof", ",", "un*", "|", "^", "<<", ">>")
 TYOUT = TYS + ("illegal",)
 NUM = ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
+FLT = ("f32", "f64")                  # float, double (long double is double)
+
+
+def _farith(t1, t2):
+    """C99 6.3.1.8 for a floating operand: the wider floating type wins, and
+    an integer meets a float as that float.  FLT_EVAL_METHOD is 0 on both
+    our ISAs (SSE, AArch64 FP), so float OP float stays float."""
+    return "f64" if "f64" in (t1, t2) else "f32"
 RANK = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
         "i32": 3, "u32": 3, "i64": 4, "u64": 4}
 TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4,
@@ -157,13 +166,26 @@ def type_label(t1, op, t2):
                                        # yields its right operand; v1 had no
                                        # rule so it fell through to illegal
     if op in ("<", "=="):
+        if (t1 in FLT or t2 in FLT) and not (t1 in NUM + FLT and t2 in NUM + FLT):
+            return "illegal"
         return "i64"
+    if op in ("+", "-", "*", "/") and (t1 in FLT or t2 in FLT):
+        # arithmetic with a floating operand; % and the bitwise operators
+        # have no floating rows (6.5.5p2, 6.5.10-12) and stay illegal below
+        if t1 in NUM + FLT and t2 in NUM + FLT:
+            return _farith(t1, t2)
+        return "illegal"
     if op in ("+", "-", "*", "/", "%"):
         if op in ("+", "-") and t1 in ("ptr", "arr") and t2 in NUM:
             # [G-2 corrected] v1 had `ptr|arr + num -> ptr` but no rule for
             # `ptr - num`, so `p - 1` fell through to illegal -> i64 and the
             # deref then loaded 8 bytes instead of the element width.  Caught by
             # differential testing (tests/c/b_negidx.c); acc read 1.000 throughout.
+            return "ptr"
+        if op == "+" and t1 in NUM and t2 in ("ptr", "arr"):
+            # C99 6.5.6p2: either operand of + may be the pointer.  With no
+            # row, `1 + (int *)p` was an integer sum that moved ONE byte --
+            # which is how <math.h>'s high word came out of the wrong place
             return "ptr"
         if op == "-" and t1 == "ptr" and t2 == "ptr":
             return "i64"
@@ -234,7 +256,7 @@ def pp_label(d, f):
 
 # ------------------------------------------------------------------ lex [G-5]
 CHARC = ("ws", "nl", "A", "d", "q", "sq", "slash", "star", "punct", "eof",
-         "other")
+         "other", "dot")
 LEXACT = ("skip", "nl", "ident", "num", "str", "charlit", "cmt", "linecmt",
           "op", "bad")
 
@@ -245,6 +267,10 @@ def lex_label(c, peek):
             return "linecmt"
         if peek == "star":
             return "cmt"
+    if c == "dot":
+        # `.5` is a floating constant (C99 6.4.4.2); every other `.` is the
+        # member operator or part of `...`
+        return "num" if peek == "d" else "op"
     return {"ws": "skip", "nl": "nl", "A": "ident", "d": "num", "q": "str",
             "sq": "charlit", "slash": "op", "star": "op", "punct": "op",
             "eof": "skip", "other": "bad"}[c]
@@ -262,7 +288,7 @@ def reloc_label(k, arch):
 
 
 # ---------------------------------------------------------------- irsel [G-8]
-FAMILY = ("alu", "mem", "ctrl", "call", "lit")
+FAMILY = ("alu", "mem", "ctrl", "call", "lit", "fpu")
 IRSEL_MAP = {
     "alu": {"add": "add64", "sub": "sub64", "mul": "mul64", "lt": "slt64",
             "le": "sle64", "gt": "slt64", "ge": "sle64", "eq": "eq",
@@ -276,6 +302,16 @@ IRSEL_MAP = {
     "call": {"call": "call", "push": "callpush", "arg": "arg",
              "frame": "frame", "callr": "callr"},
     "lit": {"imm": "imm", "print": "print", "write": "write", "exit": "exit"},
+    # floating point: values travel as IEEE bit patterns in the general
+    # registers (the tape convention is ours on both ends of every call), so
+    # these are the only ops that look inside them.  d = double, s = float.
+    "fpu": {"dadd": "fadd64", "dsub": "fsub64", "dmul": "fmul64",
+            "ddiv": "fdiv64", "dlt": "flt64", "dle": "fle64", "deq": "feq64",
+            "sadd": "fadd32", "ssub": "fsub32", "smul": "fmul32",
+            "sdiv": "fdiv32", "slt": "flt32", "sle": "fle32", "seq": "feq32",
+            "i2d": "cvtid", "u2d": "cvtud", "i2s": "cvtis", "u2s": "cvtus",
+            "d2i": "cvtdi", "d2u": "cvtdu", "s2d": "cvtsd", "d2s": "cvtds",
+            "dsqrt": "fsqrt64", "ssqrt": "fsqrt32"},
 }
 FLAVOR = tuple(dict.fromkeys(f for m in IRSEL_MAP.values() for f in m))
 RECIPE = tuple(sorted({r for m in IRSEL_MAP.values() for r in m.values()})) + ("bad",)

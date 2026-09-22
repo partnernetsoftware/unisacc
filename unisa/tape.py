@@ -63,6 +63,10 @@ SHAPE = {
     ".argv":   ("r", "r"),             # rd = argv[rs], a char*
     "nop":     (),
 }
+# floating point [TP]: see fp.py for what each one means
+from .fp import OPS3 as _FOPS3, OPS2 as _FOPS2
+SHAPE.update({op: ("r", "r", "r") for op in _FOPS3})
+SHAPE.update({op: ("r", "r") for op in _FOPS2})
 
 ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0",
            "\\": "\\", '"': '"', "'": "'"}

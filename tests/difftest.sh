@@ -26,7 +26,7 @@ for f in tests/c/*.c examples/*.c; do
     # clang makes an implicit declaration an ERROR -- and nothing else
     { echo '#include <stdio.h>'; echo '#include <string.h>'
       echo '#include <stdlib.h>'; cat "$f"; } > "$T/$b.ref.c"
-    if ! $CC -w -std=c99 -o "$D/$b" "$T/$b.ref.c" 2>"$T/$b.cc"; then
+    if ! $CC -w -std=c99 -o "$D/$b" "$T/$b.ref.c" -lm 2>"$T/$b.cc"; then
         exit 0
     fi
     (cd "$D" && ./"$b" 2>/dev/null) > "$T/$b.want"; echo $? > "$T/$b.wcode"

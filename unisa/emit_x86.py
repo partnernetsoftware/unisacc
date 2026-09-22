@@ -50,6 +50,109 @@ def load_w(reg, base, disp, width):
                reg, base, disp)
 
 
+# ---- floating point [TP] ---------------------------------------------------
+# A floating value is its bit pattern in a general register.  Each op moves it
+# into xmm0/xmm1 -- volatile under every ABI we target, and used nowhere
+# else -- computes there, and moves the result back.  movq/movd copy bits.
+def _sse_g(pfx, opc, xmm, gpr, w, gpr_in_reg=False):
+    """an SSE op with a general-register operand: the mandatory prefix, then
+    REX, then 0F opc.  Normally the xmm is ModRM.reg and the gpr ModRM.rm;
+    cvttsd2si writes the gpr, so there it is reg and the xmm rm."""
+    g = NUM[gpr]
+    if gpr_in_reg:
+        r = rex(w, g >> 3, 0, 0)
+        mr = modrm(3, g, xmm)
+    else:
+        r = rex(w, 0, 0, g >> 3)
+        mr = modrm(3, xmm, g)
+    if r == b"\x40":
+        r = b""                                   # no REX needed
+    return bytes([pfx]) + r + bytes([0x0F, opc]) + mr
+
+
+def _sse_x(pfx, opc, xd, xs, imm=None):
+    """an SSE op between xmm registers (xmm0-7: no REX)"""
+    out = (bytes([pfx]) if pfx else b"") + bytes([0x0F, opc]) + modrm(3, xd, xs)
+    return out + (bytes([imm]) if imm is not None else b"")
+
+
+def _movq_x(x, g):  return _sse_g(0x66, 0x6E, x, g, 1)    # movq xmm, r64
+def _movq_g(g, x):  return _sse_g(0x66, 0x7E, x, g, 1)    # movq r64, xmm
+def _movd_x(x, g):  return _sse_g(0x66, 0x6E, x, g, 0)    # movd xmm, r32
+def _movd_g(g, x):  return _sse_g(0x66, 0x7E, x, g, 0)    # movd r32, xmm (zero-extends)
+
+
+def _and1(g):
+    d = NUM[g]
+    return rex(1, 0, 0, d >> 3) + b"\x83" + modrm(3, 4, d) + b"\x01"
+
+
+FARITH = {"fadd": 0x58, "fsub": 0x5C, "fmul": 0x59, "fdiv": 0x5E}
+# CMPSD/CMPSS predicates: EQ_OQ, LT_OS, LE_OS -- each FALSE when either side
+# is NaN, which is C's answer, and no flag or parity juggling is needed
+FCMP = {"feq": 0, "flt": 1, "fle": 2}
+FP_OPS = tuple(k + b for k in list(FARITH) + list(FCMP)
+               for b in ("64", "32")) + (
+    "cvtid", "cvtud", "cvtis", "cvtus", "cvtdi", "cvtdu", "cvtsd", "cvtds",
+    "fsqrt64", "fsqrt32")
+
+
+def _u2f(ra, dbl):
+    """u64 -> double/float: there is no such instruction below AVX-512.  With
+    the top bit clear the signed convert is exact; with it set, halve the
+    value keeping the lost bit sticky, convert, and double -- the standard
+    sequence, and correctly rounded."""
+    pfx = 0xF2 if dbl else 0xF3
+    a = NUM[ra]
+    test = rex(1, a >> 3, 0, a >> 3) + b"\x85" + modrm(3, a, a)
+    small = _sse_g(pfx, 0x2A, 0, ra, 1)                          # cvtsi2s? xmm0, ra
+    big = mov_rr("r11", ra) + rex(1, 0, 0, 1) + b"\xd1" + modrm(3, 5, 11) + \
+        mov_rr("rbx", ra) + _and1("rbx") + _alu(0x09, "r11", "rbx") + \
+        _sse_g(pfx, 0x2A, 0, "r11", 1) + _sse_x(pfx, 0x58, 0, 0)  # + xmm0, xmm0
+    small += b"\xeb" + bytes([len(big)])                         # jmp over big
+    return test + b"\x78" + bytes([len(small)]) + small + big      # js big
+
+
+def _fp(o, a):
+    if o[:4] in FARITH or o[:3] in FCMP:
+        dbl = o.endswith("64")
+        ld, st = (_movq_x, _movq_g) if dbl else (_movd_x, _movd_g)
+        pfx = 0xF2 if dbl else 0xF3
+        out = ld(0, a[1]) + ld(1, a[2])
+        if o[:4] in FARITH:
+            return out + _sse_x(pfx, FARITH[o[:4]], 0, 1) + st(a[0], 0)
+        out += _sse_x(pfx, 0xC2, 0, 1, FCMP[o[:3]])             # cmpsd/cmpss
+        return out + st(a[0], 0) + _and1(a[0])
+    if o == "cvtid":
+        return _sse_g(0xF2, 0x2A, 0, a[1], 1) + _movq_g(a[0], 0)
+    if o == "cvtis":
+        return _sse_g(0xF3, 0x2A, 0, a[1], 1) + _movd_g(a[0], 0)
+    if o == "cvtud":
+        return _u2f(a[1], True) + _movq_g(a[0], 0)
+    if o == "cvtus":
+        return _u2f(a[1], False) + _movd_g(a[0], 0)
+    if o == "cvtdi":                                  # cvttsd2si r64, xmm0
+        return _movq_x(0, a[1]) + _sse_g(0xF2, 0x2C, 0, a[0], 1, True)
+    if o == "cvtdu":
+        # below 2^63 the signed truncation is right; above it, subtract 2^63
+        # first and put the top bit back afterwards
+        two63 = 0x43E0000000000000
+        pre = _movq_x(0, a[1]) + mov_ri("r11", two63) + _movq_x(1, "r11") + \
+            _sse_x(0x66, 0x2E, 0, 1)                              # ucomisd
+        small = _sse_g(0xF2, 0x2C, 0, a[0], 1, True)
+        big = _sse_x(0xF2, 0x5C, 0, 1) + _sse_g(0xF2, 0x2C, 0, a[0], 1, True) + \
+            mov_ri("r11", 1 << 63) + _alu(0x31, a[0], "r11")
+        small += b"\xeb" + bytes([len(big)])
+        return pre + b"\x73" + bytes([len(small)]) + small + big  # jae big
+    if o == "cvtsd":
+        return _movd_x(0, a[1]) + _sse_x(0xF3, 0x5A, 0, 0) + _movq_g(a[0], 0)
+    if o == "cvtds":
+        return _movq_x(0, a[1]) + _sse_x(0xF2, 0x5A, 0, 0) + _movd_g(a[0], 0)
+    dbl = o == "fsqrt64"
+    ld, st = (_movq_x, _movq_g) if dbl else (_movd_x, _movd_g)
+    return ld(0, a[1]) + _sse_x(0xF2 if dbl else 0xF3, 0x51, 0, 0) + st(a[0], 0)
+
+
 def store_w(reg, base, disp, width):
     if width == 8:
         return mem(0x89, reg, base, disp)
@@ -283,6 +386,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         return load_w(a[0], a[1], a[2], a[3])
     if o == ".st":
         return store_w(a[2], a[0], a[1], a[3])
+    if o in FP_OPS:
+        return _fp(o, a)
     if o == ".zero":
         # n bytes at [base+disp] <- 0, from r11 (never a tape register),
         # cleared once, in the widest pieces that fit.  It fell through to

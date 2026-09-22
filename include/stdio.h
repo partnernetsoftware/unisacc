@@ -168,6 +168,184 @@ static long _u_digits(char *buf, unsigned long v, int base, int upper) {
     return i;
 }
 
+/* ---- floating conversions, exactly ------------------------------------
+ * A double is m * 2^e with m < 2^53, so its value is a FINITE decimal:
+ * m * 2^e when e >= 0, and m * 5^-e / 10^-e when e < 0.  Build that integer
+ * exactly (base 10^9 limbs), then every conversion is a rounding of one digit
+ * string at one place -- nearest, ties to even, which is what both platform
+ * libcs do with the exact value.  No floating arithmetic is used, so the
+ * digits cannot depend on how this very code was compiled. */
+#define _U_NL 132                    /* 1188 decimal digits: 5^1074 * 2^53 fits */
+#define _U_ND 1200
+
+/* digits of v, most significant first; returns their count, and *x is how
+   many of them are before the decimal point (<= 0 for |v| < 1) */
+static int _u_dexp(unsigned long bits, char *dig, int *x) {
+    unsigned long lim[_U_NL];
+    unsigned long m;
+    unsigned long t;
+    unsigned long carry;
+    unsigned long mul;
+    int n;
+    int e;
+    int k;
+    int j;
+    int nd;
+    int ex;
+    int first;
+    ex = (bits >> 52) & 2047;
+    m = bits & 4503599627370495;              /* 2^52 - 1 */
+    if (ex == 0) e = 0 - 1074; else { m = m | 4503599627370496; e = ex - 1075; }
+    if (m == 0) { dig[0] = 48; *x = 1; return 1; }
+    lim[0] = m % 1000000000; lim[1] = (m / 1000000000) % 1000000000;
+    lim[2] = m / 1000000000000000000; n = 3;
+    while (n > 1) { if (lim[n - 1] != 0) break; n = n - 1; }
+    k = e; if (k < 0) k = 0 - k;
+    while (k > 0) {                           /* by 2^e, or by 5^-e */
+        if (e > 0) { if (k >= 29) { mul = 536870912; k = k - 29; }
+                     else { mul = 1; while (k > 0) { mul = mul * 2; k = k - 1; } } }
+        else { if (k >= 13) { mul = 1220703125; k = k - 13; }
+               else { mul = 1; while (k > 0) { mul = mul * 5; k = k - 1; } } }
+        carry = 0; j = 0;
+        while (j < n) { t = lim[j] * mul + carry; lim[j] = t % 1000000000;
+                        carry = t / 1000000000; j = j + 1; }
+        while (carry) { lim[n] = carry % 1000000000; carry = carry / 1000000000; n = n + 1; }
+    }
+    nd = 0; j = n - 1; first = 1;
+    while (j >= 0) {
+        /* a limb's nine digits, low first into d9, then out high first */
+        char d9[9];
+        t = lim[j]; k = 8;
+        while (k >= 0) { d9[k] = 48 + t % 10; t = t / 10; k = k - 1; }
+        k = 0;
+        while (k < 9) {
+            if (first == 0 || d9[k] != 48) { dig[nd] = d9[k]; nd = nd + 1; first = 0; }
+            k = k + 1;
+        }
+        j = j - 1;
+    }
+    ex = (bits >> 52) & 2047;
+    k = ex == 0 ? 1074 : 1075 - ex;           /* -e: digits after the point */
+    if (k < 0) k = 0;
+    *x = nd - k;
+    return nd;
+}
+
+/* keep r digits of dig[0..nd), rounding to nearest, ties to even; returns
+   the new count, and bumps *x when the rounding carries out (9.99 -> 10.0) */
+static int _u_round(char *dig, int nd, int r, int *x) {
+    int up;
+    int j;
+    if (r >= nd) return nd;
+    if (r < 0) { dig[0] = 48; return 0; }
+    up = 0;
+    if (dig[r] > 53) up = 1;
+    if (dig[r] == 53) {
+        j = r + 1;
+        while (j < nd) { if (dig[j] != 48) { up = 1; break; } j = j + 1; }
+        if (up == 0) { if (r > 0) { if ((dig[r - 1] - 48) & 1) up = 1; } }
+    }
+    nd = r;
+    if (up) {
+        j = r - 1;
+        while (j >= 0) {
+            if (dig[j] != 57) { dig[j] = dig[j] + 1; break; }
+            dig[j] = 48; j = j - 1;
+        }
+        if (j < 0) {                              /* carried out of the top */
+            j = nd; while (j > 0) { dig[j] = dig[j - 1]; j = j - 1; }
+            dig[0] = 49; nd = nd + 1; *x = *x + 1;
+        }
+    }
+    return nd;
+}
+
+/* the digit at position p of the number (0 = first integer digit) */
+static int _u_dat(char *dig, int nd, int x, int p) {
+    if (p < 0) return 48;
+    if (p >= nd) return 48;
+    return dig[p];
+}
+
+/* %f %e %g (and upper case) of `bits` into out[]; returns the length.
+   Sign, width and padding are the caller's. */
+static int _u_ffmt(char *out, unsigned long bits, int c, int prec, int alt) {
+    char dig[_U_ND];
+    int nd;
+    int x;
+    int n;
+    int j;
+    int e;
+    int ee;
+    int style;
+    int P;
+    int upper;
+    int strip;
+    upper = c == 70 || c == 69 || c == 71;
+    if (((bits >> 52) & 2047) == 2047) {
+        char *w;
+        if (bits & 4503599627370495) w = upper ? "NAN" : "nan";
+        else w = upper ? "INF" : "inf";
+        out[0] = w[0]; out[1] = w[1]; out[2] = w[2];
+        return 3;
+    }
+    if (prec < 0) prec = 6;
+    nd = _u_dexp(bits & 9223372036854775807, dig, &x);
+    if (dig[0] == 48) x = 1;                  /* zero: one integer digit */
+    style = c | 32;                           /* f e g */
+    strip = 0;
+    if (style == 103) {
+        /* C99 7.19.6.1p8: P significant digits; the exponent X that %e would
+           show decides between the two styles */
+        P = prec; if (P == 0) P = 1;
+        {   char d2[_U_ND]; int n2; int x2;
+            j = 0; while (j < nd) { d2[j] = dig[j]; j = j + 1; }
+            x2 = x; n2 = _u_round(d2, nd, P, &x2);
+            e = x2 - 1;
+            if (dig[0] == 48) e = 0;
+        }
+        if (P > e && e >= 0 - 4) { style = 102; prec = P - 1 - e; }
+        else { style = 101; prec = P - 1; }
+        if (alt == 0) strip = 1;
+    }
+    n = 0;
+    if (style == 102) {
+        nd = _u_round(dig, nd, x + prec, &x);
+        if (x <= 0) { out[n] = 48; n = n + 1; }
+        else { j = 0; while (j < x) { out[n] = _u_dat(dig, nd, x, j); n = n + 1; j = j + 1; } }
+        if (prec > 0 || alt) { out[n] = 46; n = n + 1; }
+        j = 0;
+        while (j < prec) { out[n] = _u_dat(dig, nd, x, x + j); n = n + 1; j = j + 1; }
+    } else {
+        if (dig[0] == 48) e = 0;
+        else { nd = _u_round(dig, nd, prec + 1, &x); e = x - 1; }
+        out[n] = _u_dat(dig, nd, x, 0); n = n + 1;
+        if (prec > 0 || alt) { out[n] = 46; n = n + 1; }
+        j = 1;
+        while (j <= prec) { out[n] = _u_dat(dig, nd, x, j); n = n + 1; j = j + 1; }
+        if (strip) {
+            while (n > 0) { if (out[n - 1] != 48) break; n = n - 1; }
+            if (n > 0) { if (out[n - 1] == 46) n = n - 1; }
+            strip = 0;
+        }
+        out[n] = upper ? 69 : 101; n = n + 1;
+        if (e < 0) { out[n] = 45; ee = 0 - e; } else { out[n] = 43; ee = e; }
+        n = n + 1;
+        if (ee >= 100) { out[n] = 48 + ee / 100; n = n + 1; }
+        out[n] = 48 + (ee / 10) % 10; n = n + 1;
+        out[n] = 48 + ee % 10; n = n + 1;
+    }
+    if (strip) {                              /* %g without '#' */
+        j = 0;
+        while (j < n) { if (out[j] == 46) break; j = j + 1; }
+        if (j < n) {
+            while (n > 0) { if (out[n - 1] != 48) break; n = n - 1; }
+            if (n > 0) { if (out[n - 1] == 46) n = n - 1; }
+        }
+    }
+    return n;
+}
+
 static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
     long n;
     long i;
@@ -183,26 +361,40 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
     int upper;
     int sign;
     int lng;
+    int plus;
+    int space;
+    int alt;
+    int neg;
+    long j;
     long sv;
     unsigned long uv;
     char *sp;
     char buf[24];
+    char fbuf[1300];
     n = 0;
     i = 0;
     while (fmt[i]) {
         if (fmt[i] != 37) { _u_put(out, cap, &n, f, fmt[i]); i = i + 1; continue; }
         i = i + 1;
         left = 0; zero = 0; width = 0; prec = 0 - 1;
+        plus = 0; space = 0; alt = 0;
         while (fmt[i] == 45 | fmt[i] == 48 | fmt[i] == 43 | fmt[i] == 32
                | fmt[i] == 35) {
             if (fmt[i] == 45) left = 1;
             if (fmt[i] == 48) zero = 1;
+            if (fmt[i] == 43) plus = 1;
+            if (fmt[i] == 32) space = 1;
+            if (fmt[i] == 35) alt = 1;
             i = i + 1;
         }
+        if (fmt[i] == 42) { width = va_arg(ap, int); i = i + 1;     /* `*` */
+            if (width < 0) { left = 1; width = 0 - width; } }
         while (fmt[i] >= 48) { if (fmt[i] > 57) break;
             width = width * 10 + (fmt[i] - 48); i = i + 1; }
         if (fmt[i] == 46) {
             i = i + 1; prec = 0;
+            if (fmt[i] == 42) { prec = va_arg(ap, int); i = i + 1;
+                if (prec < 0) prec = 0 - 1; }
             while (fmt[i] >= 48) { if (fmt[i] > 57) break;
                 prec = prec * 10 + (fmt[i] - 48); i = i + 1; }
         }
@@ -215,7 +407,22 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
         c = fmt[i];
         i = i + 1;
         if (c == 37) { _u_put(out, cap, &n, f, 37); continue; }
-        sp = NULL; sign = 0; base = 10; upper = 0;
+        sp = NULL; sign = 0; base = 10; upper = 0; neg = 0;
+#ifdef __UNISA_FLOAT
+        if (c == 102 | c == 70 | c == 101 | c == 69 | c == 103 | c == 71) {
+            /* %f %e %g: a double -- a float argument was promoted to one */
+            double dv;
+            unsigned long bits;
+            dv = va_arg(ap, double);
+            bits = *(unsigned long *)&dv;
+            neg = (bits >> 63) & 1;
+            len = _u_ffmt(fbuf + 1, bits, c, prec, alt);
+            start = 1; sp = fbuf;
+            if (((bits >> 52) & 2047) == 2047) zero = 0;   /* inf, nan pad with spaces */
+            sign = neg;
+        } else
+#endif
+        {
         if (c == 115) {
             sp = va_arg(ap, char *);
             if (sp == NULL) sp = "(null)";
@@ -229,7 +436,9 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
             } else {
                 if (c == 100 | c == 105) {
                     sv = va_arg(ap, long);
+                    if (lng == 0) sv = (int)sv;       /* an int is 32 bits */
                     if (sv < 0) { sign = 1; uv = 0 - sv; } else uv = sv;
+                    neg = sign;
                 } else {
                     if (c == 120) { base = 16; }
                     if (c == 88) { base = 16; upper = 1; }
@@ -250,18 +459,30 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
                     if (start <= 1) break;
                     start = start - 1; buf[start] = 48; len = len + 1;
                 }
-                if (sign) { start = start - 1; buf[start] = 45; len = len + 1; }
                 sp = buf;
+                if (prec >= 0) zero = 0;          /* 7.19.6.1p6: 0 ignored */
             }
         }
-        k = width - len;
-        if (left == 0) {
-            while (k > 0) { _u_put(out, cap, &n, f, zero ? 48 : 32); k = k - 1; }
         }
-        k = 0;
-        while (k < len) { _u_put(out, cap, &n, f, sp[start + k] & 255); k = k + 1; }
-        if (left) { k = width - len;
-            while (k > 0) { _u_put(out, cap, &n, f, 32); k = k - 1; } }
+        /* the sign character: '-', or '+' / ' ' when asked for (signed
+           conversions only).  With '0' the zeros go AFTER it: -0042 */
+        {   int sc;
+            sc = 0;
+            if (c == 100 | c == 105 | c == 102 | c == 70 | c == 101 | c == 69
+                | c == 103 | c == 71) {
+                if (sign) sc = 45; else { if (plus) sc = 43; else { if (space) sc = 32; } }
+            }
+            k = width - len;
+            if (sc) k = k - 1;
+            if (left == 0) { if (zero == 0) {
+                while (k > 0) { _u_put(out, cap, &n, f, 32); k = k - 1; } } }
+            if (sc) _u_put(out, cap, &n, f, sc);
+            if (left == 0) { if (zero) {
+                while (k > 0) { _u_put(out, cap, &n, f, 48); k = k - 1; } } }
+            j = 0;
+            while (j < len) { _u_put(out, cap, &n, f, sp[start + j] & 255); j = j + 1; }
+            if (left) { while (k > 0) { _u_put(out, cap, &n, f, 32); k = k - 1; } }
+        }
     }
     if (out != NULL) { if (cap != 0) {
         if (cap < 0) out[n] = 0; else { if (n < cap) out[n] = 0;

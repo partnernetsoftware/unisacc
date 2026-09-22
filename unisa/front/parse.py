@@ -9,7 +9,8 @@ from ..ir import (Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE, WCHAR,
                   wide_bytes)
 from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
                    U8, U16, U32, U64, UNSIGNED, NARROW,
-                   ptr, Struct)
+                   F32, F64, FLOATS, ptr, Struct)
+from .lex import FNum
 
 # A declaration specifier is a SET of words, not the last one seen:
 # `long int` is long and `short int` is short.  Resolving word by word made
@@ -38,8 +39,10 @@ def _basety(words):
     """Resolve a declaration-specifier word list to a base type."""
     if "void" in words:
         return VOID
-    if "double" in words or "float" in words:
-        return I64
+    if "double" in words:
+        return F64                  # long double is double on both our ABIs'
+    if "float" in words:
+        return F32
     u = "unsigned" in words
     if "long" in words:
         return U64 if u else I64
@@ -830,7 +833,10 @@ class Walker:
         if lab is not None:                       # int *p = &g;  char *q = arr;
             self.em.init_ptrs.append((sym, lab, at))
             return
-        v = self.const_expr()
+        if self.isflt(ty) or self._fconst_ahead():
+            v = self.fconst_value(ty)
+        else:
+            v = self.const_expr()
         w = min(8, max(1, ty.size(self.sc.structs)))
         self.em.t.data[base + at:base + at + w] = \
             (v & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
@@ -932,7 +938,8 @@ class Walker:
         self.expect(")")
         if body is not None:
             self.i = body                    # back to where the body starts
-        self.sc.declare(name, Type("fn", ret=ret, n=1 if vararg else 0),
+        self.sc.declare(name, Type("fn", ret=ret, n=1 if vararg else 0,
+                                   params=[p[0] for p in params]),
                         "fn", sym=sym)
         if self.at(";") or self.at(","):
             return "proto"                   # the caller owns the separator
@@ -1063,7 +1070,17 @@ class Walker:
         elif p == "return":
             self.next()
             if not self.at(";"):
-                self.rvalue()
+                rt = self.rvalue()
+                fr = getattr(self, "fn_ret", None)
+                self.convto(rt, fr)
+                # C99 6.8.6.4p3: the value is converted to the function's
+                # type -- a uint32_t function must not hand back 64 bits of
+                # whatever the arithmetic left above its width
+                if fr is not None and not self.isflt(fr) and not self.isflt(rt):
+                    if fr.kind in UNSIGNED and fr.kind != "u64":
+                        self.em.zext(fr.size(self.sc.structs))
+                    elif fr.kind in NARROW:
+                        self.em.truncate(fr.size(self.sc.structs))
                 if getattr(self, "fn_ret", None) is not None \
                         and self.fn_ret.kind == "struct":
                     # ACC is the address of the value; copy it where the
@@ -1245,6 +1262,20 @@ class Walker:
             self.expect(")")
             self.local_init(ty, off)
             return
+        if ty.kind == "struct" and not self.at("{"):
+            # C99 6.7.8p13: an automatic struct may be initialised by an
+            # EXPRESSION of its type -- `struct s t = f();` -- which copies
+            # the whole object.  Anything else here is brace elision.
+            m = self.mark()
+            t = self.assign()
+            if t is not None and t.kind == "struct":
+                self.lval = None
+                self.em.imm(LHS, off)
+                self.em.emit(self.em.recipe("alu", "sub"), LHS, FP, LHS)
+                self.em.blockcopy(LHS, ACC, ty.size(self.sc.structs))
+                return
+            self.rewind(m)
+            self.lval = None
         if ty.kind in ("arr", "struct"):
             braced = self.eat("{")
             if braced:
@@ -1292,13 +1323,13 @@ class Walker:
             self.eat(",")
             self.expect("}")
             return
-        self.rvalue()
+        self.convto(self.rvalue(), ty)            # C99 6.7.8p11
         self.em.store(FP, -off, ACC, self.wid(ty))
 
     def if_stmt(self):
         self.next()
         self.expect("(")
-        self.rvalue()
+        self.truthy(self.rvalue())
         self.expect(")")
         els, end = self.em.new_label("else"), self.em.new_label("endif")
         self.em.jumpz(els)
@@ -1317,7 +1348,7 @@ class Walker:
         top, end = self.em.new_label("wtop"), self.em.new_label("wend")
         self.em.label(top)
         self.expect("(")
-        self.rvalue()
+        self.truthy(self.rvalue())
         self.expect(")")
         self.em.jumpz(end)
         self.loops.append((top, end, len(self.vla_saves)))
@@ -1337,7 +1368,7 @@ class Walker:
         self.em.label(cont)
         self.expect("while")
         self.expect("(")
-        self.rvalue()
+        self.truthy(self.rvalue())
         self.expect(")")
         self.expect(";")
         self.em.jumpz(end)
@@ -1359,7 +1390,7 @@ class Walker:
                           self.em.new_label("fend"))
         self.em.label(top)
         if not self.at(";"):
-            self.rvalue()
+            self.truthy(self.rvalue())
             self.em.jumpz(end)
         self.expect(";")
         step = self.mark()
@@ -1501,6 +1532,108 @@ class Walker:
                 v = 1 if v >= r else 0
         return v
 
+    # -- floating constant expressions (C99 6.6p7-8) -------------------------
+    # A static object's initialiser is folded here, so it must be folded
+    # exactly as the running program would compute it: each value carries its
+    # kind, "i" (integer), "d" (double) or "s" (float), and the usual
+    # arithmetic conversions apply operator by operator.
+    def _fconst_ahead(self):
+        """does the constant expression starting here contain a float?"""
+        depth, j = 0, self.i
+        while j < len(self.tk):
+            t = self.tk[j]
+            if t.kind in ("(", "[", "{"):
+                depth += 1
+            elif t.kind in (")", "]", "}"):
+                if depth == 0:
+                    return False
+                depth -= 1
+            elif t.kind in (",", ";") and depth == 0:
+                return False
+            elif t.kind == "num" and isinstance(t.val, FNum):
+                return True
+            elif t.kind == "type" and t.text in ("float", "double"):
+                return True
+            j += 1
+        return False
+
+    def fconst_value(self, ty):
+        """the stored bits of a constant initialiser of type ty"""
+        from ..fp import bd, bs
+        k, v = self.fconst(0)
+        if ty.kind == "f64":
+            return bd(float(v))
+        if ty.kind == "f32":
+            return bs(float(v))
+        return int(v) if k == "i" else int(float(v))   # truncation, 6.3.1.4
+
+    @staticmethod
+    def _fround(k, v):
+        from ..fp import bs, s
+        return s(bs(v)) if k == "s" else v
+
+    def fconst(self, level):
+        if level == 0:
+            c = self.fconst(1)
+            if self.at("?"):
+                self.next()
+                a = self.fconst(0)
+                self.expect(":")
+                b = self.fconst(0)
+                return a if c[1] else b
+            return c
+        ops = {1: ("+", "-"), 2: ("*", "/")}
+        if level > 2:
+            return self.fconst_atom()
+        a = self.fconst(level + 1)
+        while self.peek().kind in ops[level]:
+            op = self.next().kind
+            b = self.fconst(level + 1)
+            if a[0] == "i" and b[0] == "i":
+                x, y = a[1], b[1]
+                r = x + y if op == "+" else x - y if op == "-" else \
+                    x * y if op == "*" else (int(x / y) if y else 0)
+                a = ("i", r)
+                continue
+            k = "d" if "d" in (a[0], b[0]) else "s"
+            x, y = float(a[1]), float(b[1])
+            if op == "/":
+                from ..fp import _div
+                r = _div(x, y)
+            else:
+                r = x + y if op == "+" else x - y if op == "-" else x * y
+            a = (k, self._fround(k, r))
+        return a
+
+    def fconst_atom(self):
+        t = self.next()
+        if t.kind == "num":
+            if isinstance(t.val, FNum):
+                from ..fp import s
+                return ("s", s(t.val.bits)) if t.val.f32 else ("d", float(t.val))
+            return ("i", int(t.val))
+        if t.kind == "id" and t.text in self.sc.enums:
+            return ("i", self.sc.enums[t.text])
+        if t.kind == "-":
+            k, v = self.fconst_atom()
+            return (k, -v)
+        if t.kind == "+":
+            return self.fconst_atom()
+        if t.kind == "(":
+            if self.istype(self.peek()):          # a cast
+                cty = self.abstract_type()
+                self.expect(")")
+                k, v = self.fconst_atom()
+                if cty.kind == "f64":
+                    return ("d", float(v))
+                if cty.kind == "f32":
+                    return ("s", self._fround("s", float(v)))
+                return ("i", int(v))
+            v = self.fconst(0)
+            self.expect(")")
+            return v
+        raise CError("line %d: constant expected, got %r" % (t.line, t.text))
+
     def const_atom(self):
         t = self.next()
         if t.kind == "num":
@@ -1534,7 +1667,32 @@ class Walker:
 
     # -- expressions ------------------------------------------------------
     def wid(self, ty):
+        if ty.kind == "f32":
+            return 4
         return ty.size(self.sc.structs) if ty.kind in NARROW else 8
+
+    # -- floating point: conversions at every place C converts -------------
+    @staticmethod
+    def isflt(ty):
+        return ty is not None and ty.kind in FLOATS
+
+    def convto(self, frm, to):
+        """ACC holds a value of type `frm`; make it a `to` (C99 6.3.1.4-5).
+        Integer-to-integer is left to the store's width, as it always was."""
+        if frm is None or to is None:
+            return
+        if self.isflt(frm) or self.isflt(to):
+            self.em.conv(frm.kind, to.kind)
+
+    def truthy(self, ty):
+        """ACC holds a value about to be tested: a float becomes 0 or 1."""
+        if self.isflt(ty):
+            self.em.ftruth(ty.kind)
+
+    def fone(self, ty):
+        """the bits of 1.0 in a floating type"""
+        from ..fp import bd, bs
+        return bd(1.0) if ty.kind == "f64" else bs(1.0)
 
     def load_if_lval(self):
         if self.lval is not None and self.lbits is not None:
@@ -1567,7 +1725,10 @@ class Walker:
         return ty
 
     def assign(self):
-        ty = self.unary()
+        if self._pre is not None:              # parsed already, by primary()
+            ty, self._pre = self._pre, None
+        else:
+            ty = self.unary()
         if self.lval is not None:
             nxt = self.peek().kind
             if nxt == "=":
@@ -1575,7 +1736,8 @@ class Walker:
                 aty, bits = self.lval, self.lbits
                 self.lval = None
                 self.em.push()
-                self.rvalue()
+                rt = self.rvalue()
+                self.convto(rt, aty)        # C99 6.5.16.1p2
                 if bits is not None:
                     bo, w, sg = bits
                     self.em.bits_set(bo, w, sg, self.wid(aty))
@@ -1600,10 +1762,27 @@ class Walker:
                     if aty.kind in UNSIGNED:
                         self.em.zext(self.wid(aty))
                 self.em.push()               # old value
-                self.rvalue()
-                if op in ("+", "-") and aty.kind in ("ptr", "arr"):
+                rt = self.rvalue()
+                if self.isflt(aty) or self.isflt(rt):
+                    # `x op= y` is `x = x op y` (6.5.16.2p3): in the common
+                    # type, then converted back to x's
+                    ck = self.sc.combine(aty, op, rt)            # [W-4]
+                    cty = F64 if ck == "f64" else (F32 if ck == "f32" else aty)
+                    self.convto(rt, cty)
+                    self.em.pop(LHS)
+                    self.em.push(ACC)
+                    self.em.emit("mov", ACC, LHS)
+                    self.convto(aty, cty)
+                    self.em.pop(LHS)
+                    self.em.push(ACC)
+                    self.em.emit("mov", ACC, LHS)
+                    self.em.fbinop(op, cty.kind)
+                    self.convto(cty, aty)
+                elif op in ("+", "-") and aty.kind in ("ptr", "arr"):
                     self.scale(aty)
-                if op in ("/", "%"):
+                if self.isflt(aty) or self.isflt(rt):
+                    pass
+                elif op in ("/", "%"):
                     self.em.divmod_(op)
                 else:
                     self.em.binop(op)
@@ -1626,13 +1805,28 @@ class Walker:
         if self.at("?"):
             self.next()
             self.load_if_lval()
+            self.truthy(ty)
             els, end = self.em.new_label("qelse"), self.em.new_label("qend")
             self.em.jumpz(els)
+            m = self.mark()
             t1 = self.rvalue()
             self.em.jump(end)
             self.expect(":")
             self.em.label(els)
-            self.rvalue()
+            t2 = self.rvalue()
+            if (self.isflt(t1) or self.isflt(t2)) and t1.kind != t2.kind:
+                # C99 6.5.15p5: the arithmetic operands meet in their common
+                # type.  The first arm was emitted before the second's type
+                # was known, so emit both again, converting each.
+                ck = self.sc.combine(t1, "+", t2)                # [W-4]
+                cty = F64 if ck == "f64" else F32
+                self.rewind(m)
+                self.convto(self.rvalue(), cty)
+                self.em.jump(end)
+                self.expect(":")
+                self.em.label(els)
+                self.convto(self.rvalue(), cty)
+                t1 = cty
             self.em.label(end)
             return t1
         return ty
@@ -1642,14 +1836,16 @@ class Walker:
         while self.at("||"):
             self.next()
             self.load_if_lval()
+            self.truthy(ty)
             end = self.em.new_label("orend")
             skip = self.em.new_label("orrhs")
             self.em.jumpz(skip)
             self.em.imm(ACC, 1)
             self.em.jump(end)
             self.em.label(skip)
-            self.logic_and()
+            t2 = self.logic_and()
             self.load_if_lval()
+            self.truthy(t2)
             self.em.imm(LHS, 0)
             self.em.emit(self.em.recipe("alu", "ne"), ACC, ACC, LHS)
             self.em.label(end)
@@ -1661,11 +1857,13 @@ class Walker:
         while self.at("&&"):
             self.next()
             self.load_if_lval()
+            self.truthy(ty)
             end = self.em.new_label("andend")
             rhs = self.em.new_label("andrhs")
             self.em.jumpz(end)
-            self.binary(0)
+            t2 = self.binary(0)
             self.load_if_lval()
+            self.truthy(t2)
             self.em.imm(LHS, 0)
             self.em.emit(self.em.recipe("alu", "ne"), ACC, ACC, LHS)
             self.em.label(end)
@@ -1691,9 +1889,22 @@ class Walker:
             rty = self.binary(level + 1)
             self.load_if_lval()
             res = self.sc.combine(ty, op, rty)                       # [W-4]
+            if self.isflt(ty) or self.isflt(rty):
+                ty = self.fbinary(op, ty, rty, res)
+                continue
             if op in ("+", "-") and ty.kind in ("ptr", "arr") and \
                     (rty.kind in ("i64", "u64") or rty.kind in NARROW):
                 self.scale(ty)
+            if op == "+" and rty.kind in ("ptr", "arr") and \
+                    (ty.kind in ("i64", "u64") or ty.kind in NARROW):
+                # `n + p`: the INTEGER is on the stack; scale it there
+                self.em.pop(LHS)
+                self.em.push(ACC)
+                self.em.emit("mov", ACC, LHS)
+                self.scale(rty)
+                self.em.pop(LHS)
+                self.em.push(ACC)
+                self.em.emit("mov", ACC, LHS)
             # Signedness and wrap width both come from the TABLE: the `+` row
             # is the usual arithmetic conversion, so an unsigned result there
             # is an unsigned operation.  This used to be a hand-written copy
@@ -1715,6 +1926,28 @@ class Walker:
                 self.unscale(ty)
             ty = self.ty_from(res, ty, rty)
         return ty
+
+    def fbinary(self, op, ty, rty, res):
+        """lhs (of type ty) on the stack, rhs (rty) in ACC, one of them
+        floating.  Both go to the common type the TYPE TABLE names -- the `+`
+        row is the usual arithmetic conversion -- and the op is done there."""
+        if res == "illegal":
+            raise CError("line %d: %s on a floating operand"
+                         % (self.peek().line, op))
+        ck = self.sc.combine(ty, "+", rty)                       # [W-4]
+        cty = F64 if ck == "f64" else F32
+        self.convto(rty, cty)                 # rhs, in ACC
+        self.em.pop(LHS)                      # lhs, converted in place:
+        self.em.push(ACC)                     # swap it into ACC and back
+        self.em.emit("mov", ACC, LHS)
+        self.convto(ty, cty)
+        self.em.pop(LHS)
+        self.em.push(ACC)
+        self.em.emit("mov", ACC, LHS)
+        self.em.fbinop(op, cty.kind)
+        if op in ("+", "-", "*", "/"):
+            return cty
+        return I32                            # a comparison is an int
 
     def scale(self, pty):
         n = pty.to.size(self.sc.structs)
@@ -1753,10 +1986,16 @@ class Walker:
                 self.em.bits_get(bits[0], bits[1], bits[2], self.wid(ty))
             else:
                 self.em.load(ACC, ACC, 0, self.wid(ty))
-            step = ty.to.size(self.sc.structs) if ty.kind == "ptr" else 1
-            self.em.imm(LHS, step)
-            self.em.emit(self.em.recipe("alu", "add" if op == "++" else "sub"),
-                         ACC, ACC, LHS)
+            if self.isflt(ty):
+                self.em.push(ACC)
+                self.em.imm(ACC, self.fone(ty))
+                self.em.fbinop("+" if op == "++" else "-", ty.kind)
+            else:
+                step = ty.to.size(self.sc.structs) if ty.kind == "ptr" else 1
+                self.em.imm(LHS, step)
+                self.em.emit(self.em.recipe("alu",
+                                            "add" if op == "++" else "sub"),
+                             ACC, ACC, LHS)
             if bits is not None:
                 self.em.bits_set(bits[0], bits[1], bits[2], self.wid(ty))
                 return ty
@@ -1773,7 +2012,10 @@ class Walker:
             self.next()
             t = self.unary()
             self.load_if_lval()
-            self.em.neg()
+            if self.isflt(t):
+                self.em.fneg(t.kind)
+            else:
+                self.em.neg()
             return t
         if p == "uplus":
             # Unary `+` is a no-op but for the integer promotion, which the
@@ -1786,8 +2028,9 @@ class Walker:
             return t
         if p == "not":
             self.next()
-            self.unary()
+            t = self.unary()
             self.load_if_lval()
+            self.truthy(t)
             self.em.logical_not()
             return I32
         if p == "deref":
@@ -1829,9 +2072,12 @@ class Walker:
             self.expect(")")
             if self.at("{"):                              # ... or a compound
                 return self.compound_literal(base)        # literal, C99 6.5.2.5
-            self.unary()
+            t = self.unary()
             self.load_if_lval()
-            if base.kind in UNSIGNED:
+            self.convto(t, base)
+            if self.isflt(base) or self.isflt(t):
+                pass
+            elif base.kind in UNSIGNED:
                 self.em.zext(base.size(self.sc.structs))
             elif base.kind in NARROW:
                 self.em.truncate(base.size(self.sc.structs))
@@ -1881,18 +2127,24 @@ class Walker:
             # an expression that is a bare unary has to be recognised before
             # it goes in -- try that first and roll the emitter back if the
             # parenthesis turns out to hold more than one operand.
-            m = self.mark()
             ty = self.unary()
             if self.at(")") and self.lval is not None:
                 self.next()
                 return self.postfix_chain(ty)
-            self.rewind(m)
-            self.lval = None
+            # More than one operand: what unary() parsed is the LEFTMOST of
+            # them, so hand it to assign() instead of rewinding -- the rewind
+            # parsed every operand again per enclosing parenthesis, 2^depth.
+            self._pre = ty
             ty = self.assign()
             self.expect(")")
             return self.postfix_chain(ty)
         if t.kind == "num":
             self.next()
+            if isinstance(t.val, FNum):
+                # a floating constant is its bit pattern (C99 6.4.4.2p4:
+                # double unless suffixed f)
+                self.em.imm(ACC, t.val.bits)
+                return self.postfix_chain(F32 if t.val.f32 else F64)
             self.em.imm(ACC, int(t.val))
             return self.postfix_chain(_littype(t.text, int(t.val)))
         if t.kind == "str":
@@ -1993,6 +2245,19 @@ class Walker:
                     self.em.bits_get(bits[0], bits[1], bits[2], self.wid(aty))
                 else:
                     self.em.load(ACC, ACC, 0, self.wid(aty))
+                if self.isflt(aty):
+                    # (x + 1) - 1 is not x in floating point: keep the old
+                    # value itself.  Stack: address, old value.
+                    self.em.push()
+                    self.em.push()
+                    self.em.imm(ACC, self.fone(aty))
+                    self.em.fbinop("+" if op == "++" else "-", aty.kind)
+                    self.em.load(LHS, SP, 8)
+                    self.em.store(LHS, 0, ACC, self.wid(aty))
+                    self.em.pop(ACC)
+                    self.em.frame(-8)
+                    ty = aty
+                    continue
                 self.em.push()
                 step = aty.to.size(self.sc.structs) if aty.kind == "ptr" else 1
                 self.em.imm(ACC, step)
@@ -2116,10 +2381,20 @@ class Walker:
 
     def call(self, name):
         self.expect("(")
-        if name == "printf" and self.at("str"):
+        if name == "printf" and self.at("str") \
+                and not self._rt_format(self.peek().val):
             return self.printf()          # [W-9] static format string
         if name in ("va_start", "va_arg", "va_end"):
             return self.va(name)
+        if name in ("__builtin_sqrt", "__builtin_sqrtf"):
+            # the hardware square root: correctly rounded on both ISAs, and
+            # what <math.h>'s sqrt is (C99 F.9.4.5)
+            fty = F32 if name.endswith("f") else F64
+            self.convto(self.rvalue(), fty)
+            self.expect(")")
+            self.em.emit(self.em.recipe("fpu", "dsqrt" if fty is F64
+                                        else "ssqrt"), ACC, ACC)
+            return self.postfix_chain(fty)
         if name in INTRINSIC:
             return self.intrinsic(INTRINSIC[name])
         if name in ARGV_INTRINSIC:
@@ -2156,10 +2431,17 @@ class Walker:
             self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
             self.em.push()
             args.append(1)
+        pty = s0.ty if s0 is not None else None
+        if pty is not None and pty.kind == "ptr" and pty.to is not None:
+            pty = pty.to
+        plist = pty.params if pty is not None and pty.kind == "fn" else None
+        k = 0
         while not self.at(")"):
-            self.rvalue()
+            at = self.rvalue()
+            self.argconv(at, plist, k)
             self.em.push()
             args.append(1)
+            k += 1
             if not self.eat(","):
                 break
         self.expect(")")
@@ -2214,6 +2496,15 @@ class Walker:
             elif t.kind == "fn":
                 rt = t.ret
         return self.postfix_chain(rt)
+
+    def argconv(self, at, plist, k):
+        """An argument to parameter k: converted to the parameter's type when
+        a prototype names one, else the default argument promotions -- float
+        becomes double (C99 6.5.2.2p6-7), which is what `...` receives."""
+        if plist is not None and k < len(plist):
+            self.convto(at, plist[k])
+        elif at is not None and at.kind == "f32":
+            self.convto(at, F64)
 
     def intrinsic(self, op):
         """__read/__write/__open/__close/__exit -> the `.sys` gate."""
@@ -2290,6 +2581,49 @@ class Walker:
         self.em.store(LHS, 0, ACC)
         self.em.emit("mov", ACC, TMP)
         return ty
+
+    @staticmethod
+    def _rt_format(fmt):
+        """Does this literal format need the RUNTIME formatter in <stdio.h>?
+        The walker desugars integers and strings; a floating conversion, a
+        sign flag, `#`, a `*` width, or zero padding of a signed value go to
+        _u_vfmt, which does them (and exactly -- see _u_ffmt)."""
+        if not isinstance(fmt, str):
+            return False
+        i = 0
+        while i < len(fmt):
+            if fmt[i] != "%":
+                i += 1
+                continue
+            i += 1
+            if i < len(fmt) and fmt[i] == "%":
+                i += 1
+                continue
+            flags = ""
+            while i < len(fmt) and fmt[i] in "-+ #0":
+                flags += fmt[i]
+                i += 1
+            if i < len(fmt) and fmt[i] == "*":
+                return True
+            while i < len(fmt) and (fmt[i].isdigit() or fmt[i] == "."):
+                i += 1
+            if i < len(fmt) and fmt[i] == "*":
+                return True
+            mods = ""
+            while i < len(fmt) and fmt[i] in "hlLzjt":
+                mods += fmt[i]
+                i += 1
+            spec = fmt[i] if i < len(fmt) else ""
+            if spec in "fFeEgGaA" or any(f in flags for f in "+ #"):
+                return True
+            # a 64-bit unsigned conversion: the desugared %u is 32 bits and
+            # prints signed, so %lu of 2^63 and up came out wrong
+            if spec in "uxXo" and any(m in mods for m in "lzjt"):
+                return True
+            if "0" in flags and spec in "di":
+                return True
+            i += 1
+        return False
 
     def _fmt_parts(self, fmt):
         """Split a format string into literals and conversions."""

@@ -37,7 +37,13 @@ MOPS = ("add64", "sub64", "xor64", "mul64", "slt64", "sle64", "load64",
         "and64", "or64", "shl64", "shr64", "callr",
         # unsigned needs its own compare, shift and divide: the signed ones
         # give the wrong answer above 2^63 (and above 2^31 after a cast)
-        "ult64", "ule64", "lshr64")                                # 27
+        "ult64", "ule64", "lshr64",                                # 27
+        # floating point, on IEEE bit patterns in the general registers:
+        # d = binary64, s = binary32 [TP] (fp.py says what each one means)
+        "fadd64", "fsub64", "fmul64", "fdiv64", "flt64", "fle64", "feq64",
+        "fadd32", "fsub32", "fmul32", "fdiv32", "flt32", "fle32", "feq32",
+        "cvtid", "cvtud", "cvtis", "cvtus", "cvtdi", "cvtdu", "cvtsd",
+        "cvtds", "fsqrt64", "fsqrt32")                             # 51
 OPS = SYSOPS + MOPS                                                    # [V-1]
 
 OSX_CLASS_BIT = 0x02000000                                             # [C-2]
@@ -59,6 +65,19 @@ MNEMONIC = {
     "fence": ("mfence", "dmb"),     "syscall_gate": ("syscall", "svc"),
     "tls_base": ("rdfsbase", "mrs"), "cycle_counter": ("rdtsc", "mrs"),
     "stack_enter": ("push", "stp"),
+    "fadd64": ("addsd", "fadd"),    "fsub64": ("subsd", "fsub"),
+    "fmul64": ("mulsd", "fmul"),    "fdiv64": ("divsd", "fdiv"),
+    "flt64": ("ucomisd", "fcmp"),   "fle64": ("ucomisd", "fcmp"),
+    "feq64": ("ucomisd", "fcmp"),
+    "fadd32": ("addss", "fadd"),    "fsub32": ("subss", "fsub"),
+    "fmul32": ("mulss", "fmul"),    "fdiv32": ("divss", "fdiv"),
+    "flt32": ("ucomiss", "fcmp"),   "fle32": ("ucomiss", "fcmp"),
+    "feq32": ("ucomiss", "fcmp"),
+    "cvtid": ("cvtsi2sd", "scvtf"), "cvtud": ("cvtsi2sd", "ucvtf"),
+    "cvtis": ("cvtsi2ss", "scvtf"), "cvtus": ("cvtsi2ss", "ucvtf"),
+    "cvtdi": ("cvttsd2si", "fcvtzs"), "cvtdu": ("cvttsd2si", "fcvtzu"),
+    "cvtsd": ("cvtss2sd", "fcvt"),  "cvtds": ("cvtsd2ss", "fcvt"),
+    "fsqrt64": ("sqrtsd", "fsqrt"), "fsqrt32": ("sqrtss", "fsqrt"),
 }
 
 # real bytes for the three the spec pins                               [C-4]

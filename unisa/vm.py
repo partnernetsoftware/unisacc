@@ -4,6 +4,8 @@ Target-independent on purpose: it knows nothing about syscall numbers, ABIs or
 instruction encodings.  Everything target-specific lives in lower.py and
 exec_target.py, and the fold compares those six results against this one.
 """
+from . import fp
+from .fp import OPS3 as FOPS3, OPS2 as FOPS2
 import os as _os
 
 from .tape import REGS, SP, MEM_SIZE, STACK_TOP, DATA_BASE
@@ -210,6 +212,10 @@ class VM:
                     r[ri[a[0]]] = 1 if r[ri[a[1]]] == r[ri[a[2]]] else 0
                 elif op == "ne":
                     r[ri[a[0]]] = 1 if r[ri[a[1]]] != r[ri[a[2]]] else 0
+                elif op in FOPS3:
+                    r[ri[a[0]]] = fp.op3(op, r[ri[a[1]]], r[ri[a[2]]])
+                elif op in FOPS2:
+                    r[ri[a[0]]] = fp.op2(op, r[ri[a[1]]])
                 elif op == "load64":
                     r[ri[a[0]]] = self.ld(self._addr(ri[a[1]], a[2]), 8)
                 elif op == "store64":

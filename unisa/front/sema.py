@@ -6,7 +6,8 @@ The two decisions that ARE table-shaped go through the oracle:
 """
 
 TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4,
-           "u8": 1, "u16": 2, "u32": 4}               # [G-2] else 8
+           "u8": 1, "u16": 2, "u32": 4, "f32": 4}     # [G-2] else 8
+FLOATS = ("f32", "f64")
 UNSIGNED = ("u8", "u16", "u32", "u64")
 RANK = {"i8": 1, "u8": 1, "i16": 2, "u16": 2,
         "i32": 3, "u32": 3, "i64": 4, "u64": 4}
@@ -26,10 +27,13 @@ TOP_CANON = {"<": "<", ">": "<", "<=": "<", ">=": "<",
 
 
 class Type:
-    __slots__ = ("kind", "to", "n", "tag", "ret")
+    __slots__ = ("kind", "to", "n", "tag", "ret", "params")
 
-    def __init__(self, kind, to=None, n=0, tag=None, ret=None):
+    def __init__(self, kind, to=None, n=0, tag=None, ret=None, params=None):
         self.kind, self.to, self.n, self.tag, self.ret = kind, to, n, tag, ret
+        # a function's parameter types when a prototype gave them, else None:
+        # an argument is converted to its parameter's type (C99 6.5.2.2p7)
+        self.params = params
 
     def size(self, structs=None):
         if self.kind == "arr":
@@ -60,6 +64,8 @@ U8 = Type("u8")
 U16 = Type("u16")
 U32 = Type("u32")
 U64 = Type("u64")
+F32 = Type("f32")
+F64 = Type("f64")
 
 
 def ptr(t):
@@ -308,4 +314,5 @@ class Scope:
             return "void"
         return t.kind if t.kind in ("void", "i8", "i16", "i32", "i64",
                                     "u8", "u16", "u32", "u64",
-                                    "ptr", "arr", "struct", "fn") else "i64"
+                                    "ptr", "arr", "struct", "fn",
+                                    "f32", "f64") else "i64"

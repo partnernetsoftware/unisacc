@@ -59,12 +59,18 @@ echo "== [A-19] the compiler compiles its own decision layer =="
 $U emit-kernel --out kernel >/dev/null
 { echo '#include <stdio.h>'; cat kernel/unisa_self.c; } > /tmp/u_ref.c
 cc -w -std=c99 -o /tmp/u_ref /tmp/u_ref.c 2>/dev/null
-chk "C kernel under cc" "8792 decisions, 0 wrong" "$(/tmp/u_ref)"
+# Every decision of every stage's FULL gold, counted FROM the tables -- a
+# literal count went stale the first time a table grew (the floating axis).
+NDEC=$(python3 -c "
+import sys; sys.path.insert(0, '.')
+from unisa.gold import ALL, STAGES
+print(sum(len(STAGES[s].keys()) * len(STAGES[s].heads) for s in ALL))")
+chk "C kernel under cc" "$NDEC decisions, 0 wrong" "$(/tmp/u_ref)"
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
     $U compile kernel/unisa_self.c -o /tmp/u_self --target osx/arm64 \
         --drive built >/dev/null
     chmod +x /tmp/u_self; codesign -f -s - /tmp/u_self >/dev/null 2>&1
-    chk "C kernel built by unisa" "8792 decisions, 0 wrong" "$(/tmp/u_self)"
+    chk "C kernel built by unisa" "$NDEC decisions, 0 wrong" "$(/tmp/u_self)"
 fi
 
 echo "== [A-20] self-hosting ladder: unisacc.c built two ways =="
