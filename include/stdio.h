@@ -408,7 +408,6 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
         i = i + 1;
         if (c == 37) { _u_put(out, cap, &n, f, 37); continue; }
         sp = NULL; sign = 0; base = 10; upper = 0; neg = 0;
-#ifdef __UNISA_FLOAT
         if (c == 102 | c == 70 | c == 101 | c == 69 | c == 103 | c == 71) {
             /* %f %e %g: a double -- a float argument was promoted to one */
             double dv;
@@ -420,9 +419,7 @@ static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
             start = 1; sp = fbuf;
             if (((bits >> 52) & 2047) == 2047) zero = 0;   /* inf, nan pad with spaces */
             sign = neg;
-        } else
-#endif
-        {
+        } else {
         if (c == 115) {
             sp = va_arg(ap, char *);
             if (sp == NULL) sp = "(null)";

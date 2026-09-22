@@ -23,9 +23,6 @@ def predefines(target):
     for m in PREDEF[os_] + PREDEF[arch]:
         d[m] = "1"
     d["__UNISA__"] = "1"
-    # this front end has the floating axis; <stdio.h> compiles its %f branch
-    # only where the compiler does (the self-hosted one gains it later)
-    d["__UNISA_FLOAT"] = "1"
     return d
 
 

@@ -156,6 +156,8 @@ def dec_to_f32(text):
     e = v.numerator.bit_length() - v.denominator.bit_length()
     if Fraction(2) ** e > v:
         e -= 1
+    if e > 127:                         # past FLT_MAX: infinity (C99 6.4.4.2p3
+        return 0xFF800000 if neg else 0x7F800000   # lets it overflow)
     e = max(e, -126)                    # below that the float is subnormal
     q = v / Fraction(2) ** (e - 23)     # the significand, scaled to 24 bits
     n = q.numerator // q.denominator

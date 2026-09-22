@@ -1441,7 +1441,13 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
-int symvla[MAXSYM];
+int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
+/* Floating point.  A value's floating kind is 0 (an integer), 4 (float) or
+   8 (double); like the unsigned bit it describes the object a pointer points
+   to, so `*p` of a `double *` is a double. */
+int symflt[MAXSYM];
+int sympk[MAXSYM * 8];         /* a function's parameter kinds (fkind), first 8 */
+int symnpk[MAXSYM];            /* how many; -1: no prototype seen */
 int symfpret[MAXSYM];        /* calling it yields a function pointer */
 int symrfst[MAXSYM];         /* ...whose call returns a pointer to this struct */
 int symcst[MAXSYM];          /* a pointer variable: its call returns this struct's pointer */         /* a VLA: the frame slot holding its byte count */
@@ -1475,6 +1481,7 @@ int mbuns[MAXMEMB];
    first (C99 6.7.8p17: a brace list initialises a union's FIRST member) */
 int mbskip[MAXMEMB];
 int mbpst[MAXMEMB];       /* a pointer member: the struct it points to, or -1 */
+int mbflt[MAXMEMB];
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
@@ -1493,6 +1500,7 @@ int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
 int tdfpst[MAXTD];        /* ...and the struct its call returns a pointer to */
+int tdflt[MAXTD];
 int declspecfp;           /* what declspec's typedef said about that */
 int declenum;             /* the specifier was an enum */
 int enumneg;              /* some enumerator seen so far is negative */
@@ -1504,6 +1512,8 @@ int fnresume;             /* where a nested declarator's body starts, or -1 */
    call through it returns a pointer to, or -1.  fpretfp: the declarator
    just parsed points to a function that itself returns a function pointer. */
 int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
+int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
+int initflt;              /* an initialiser's element kind, for its slots */
 int declspecfpst;         /* a function-pointer typedef's call-result struct */
 int havepre;              /* binary()'s leftmost operand is already in r0 */
 int initisarr; int initrows; int initrows3; /* the next initaggr is an array; its row lengths */
@@ -1557,6 +1567,15 @@ int postfix(void);
 int vcall(int var);
 int fpdecl(void);
 int eatstar(void);
+int setkind(int k);
+int fltlit(int t);
+unsigned long fdec2bin(int p, int n, int f32);
+int fconv(int from, int to);
+int fkind(void);
+int argconv(int si, int k);
+int callres(int si);
+int ftruthy(void);
+long fone(int k);
 int skipparen(void);
 int iswide(int t);
 int wdecode(int t, int *cp);
@@ -1647,7 +1666,8 @@ int es(char *s) {
             fs = i + 1; fe = fs;
             while (s[fe]) { if ((s[fe] & 255) == 46) break; fe = fe + 1; }
             vs = fe + 1; ve = vs;
-            while (s[ve]) { if (isal(s[ve] & 255) == 0) break; ve = ve + 1; }
+            /* a flavor may have digits: `i2d`, `s2d` */
+            while (s[ve]) { if (isal(s[ve] & 255) == 0) { if (isdi(s[ve] & 255) == 0) break; } ve = ve + 1; }
             emitrecipe(irsel(s + fs, fe - fs, s + vs, ve - vs));
             i = ve;
             continue;
@@ -1659,12 +1679,15 @@ int es(char *s) {
 }
 
 int en(long v) {
-    char b[24]; int n; int neg;
+    char b[24]; int n; int neg; unsigned long u;
     neg = 0;
-    if (v < 0) { neg = 1; v = 0 - v; }
+    /* through an unsigned: -v of LONG_MIN is itself, and a signed loop over
+       it printed a bare '-' -- the sign bit of a double is exactly that */
+    u = v;
+    if (v < 0) { neg = 1; u = 0 - u; }
     n = 0;
-    if (v == 0) { b[0] = 48; n = 1; }
-    while (v > 0) { b[n] = 48 + (v % 10); v = v / 10; n = n + 1; }
+    if (u == 0) { b[0] = 48; n = 1; }
+    while (u > 0) { b[n] = 48 + (u % 10); u = u / 10; n = n + 1; }
     if (neg) ec(45);
     while (n > 0) { n = n - 1; ec(b[n] & 255); }
     return 0;
@@ -1784,6 +1807,7 @@ int sadd(int t, int kind, int off, int elem) {
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
+    symflt[nsym] = declflt; symnpk[nsym] = 0 - 1;
     nsym = nsym + 1;
     return nsym - 1;
 }
@@ -2043,8 +2067,18 @@ int unary(void) {
     int p;
     curfn = 0; curfnst = 0 - 1;
     p = ask(2);
-    if (p == P_NEG) { adv(); unary(); loadval(); es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n"); return 0; }
-    if (p == P_NOT) { adv(); unary(); loadval(); es("  @lit.imm r1, 0\n  @alu.eq r0, r0, r1\n"); return 0; }
+    if (p == P_NEG) { adv(); unary(); loadval();
+        if (curflt) { if (curptr == 0) {        /* -x flips the sign bit, -0.0 too */
+            es("  @lit.imm r1, "); en(curflt == 8 ? (long)1 << 63 : 2147483648); es("\n  @alu.xor r0, r0, r1\n");
+            return 0; } }
+        es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n"); return 0; }
+    if (p == P_NOT) { adv(); unary(); loadval();
+        if (curflt) { if (curptr == 0) {        /* !x is x == 0.0 */
+            es("  @lit.imm r1, 0\n");
+            if (curflt == 8) es("  @fpu.deq r0, r0, r1\n"); else es("  @fpu.seq r0, r0, r1\n");
+            setkind(0); cursize = 4; curelem = 4;
+            return 0; } }
+        es("  @lit.imm r1, 0\n  @alu.eq r0, r0, r1\n"); return 0; }
     if (p == P_DEREF) {
         adv(); unary(); loadval();
         if (curfn) { lvalue = 0; return 0; }     /* *fp is fp */
@@ -2065,6 +2099,16 @@ int unary(void) {
         lvalue = 0;
         push();                                  /* address */
         eload(e);
+        if (curflt) { if (curptr == 0) {         /* a float steps by 1.0 */
+            int fk; fk = curflt;
+            es("  @lit.imm r1, "); en(fone(fk)); ec(10);
+            if (op == tidx("++", 2)) es(fk == 8 ? "  @fpu.dadd r0, r0, r1\n" : "  @fpu.sadd r0, r0, r1\n");
+            else es(fk == 8 ? "  @fpu.dsub r0, r0, r1\n" : "  @fpu.ssub r0, r0, r1\n");
+            pop1();
+            estore(e);
+            setkind(fk);
+            return 0;
+        } }
         es("  @lit.imm r1, ");
         if (curptr) en(curelem); else en(1);
         ec(10);
@@ -2111,9 +2155,9 @@ int unary(void) {
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz; int cuns; int cst; int carr; int cn;
+            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok;
             adv();
-            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct;
+            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt;
             declptr = declspecptr;
             while (eatstar()) { declptr = 1; csz = 8; }
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -2131,10 +2175,16 @@ int unary(void) {
             need(tidx(")", 1), ")");
             if (cur() == tidx("{", 1)) return cplitexpr(cw, cst, carr, cn);
             unary(); loadval();
+            /* C99 6.3.1.4-5 at a cast: to or from a floating type */
+            ok = fkind();
+            if (declptr == 0) {
+                if (cflt) fconv(ok, cflt);
+                else { if (ok >= 4) fconv(ok, (cuns && csz == 8) ? 1 : 0); }
+            }
             /* narrowing is observable: `(char)300` is 44.  The tape has
                sized load/store, so a round trip through a stack slot is the
                whole of it -- and it sign-extends on the way back. */
-            if (declptr == 0) {
+            if (declptr == 0) { if (cflt == 0) {
                 if (csz < 8) {
                     if (cuns) {
                         /* unsigned: keep the low bits, zero the rest --
@@ -2148,8 +2198,8 @@ int unary(void) {
                         es("\n  @call.frame -8\n");
                     }
                 }
-            }
-            lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns;
+            } }
+            lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns; curflt = cflt;
             curelem = cw;
             if (declptr) curelem = cw;
             /* `(struct S *)p` -- the member access after it needs the type */
@@ -2184,6 +2234,20 @@ int postfix(void) {
             lvalue = 0;
             push();                                  /* address */
             eload(e2);
+            if (curflt) { if (curptr == 0) {
+                /* (x + 1) - 1 is not x in floating point: keep the old value
+                   itself.  Stack: address, old value. */
+                int fk; fk = curflt;
+                push();
+                es("  @lit.imm r1, "); en(fone(fk)); ec(10);
+                if (op == tidx("++", 2)) es(fk == 8 ? "  @fpu.dadd r0, r0, r1\n" : "  @fpu.sadd r0, r0, r1\n");
+                else es(fk == 8 ? "  @fpu.dsub r0, r0, r1\n" : "  @fpu.ssub r0, r0, r1\n");
+                es("  @mem.load r1, [r7+8]\n");
+                estore(e2);
+                es("  @mem.load r0, [r7+0]\n  @call.frame -16\n");
+                setkind(fk);
+                continue;
+            } }
             push();                                  /* old value */
             es("  @lit.imm r0, "); en(step); ec(10);
             if (op == tidx("++", 2)) emit_binop(tidx("+", 1));
@@ -2227,6 +2291,7 @@ int postfix(void) {
             /* `p->q->b`: a pointer member hands its pointee on */
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
             curuns = mbuns[mi];
+            curflt = mbflt[mi];
             if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
                 /* an array or a nested struct: the value IS the address */
                 if (mbstruct[mi] < 0) { lvalue = 0; curptr = 1;
@@ -2234,10 +2299,11 @@ int postfix(void) {
             } }
         } else {
         if (p == P_INDEX) {
-            int row; int uu; int ist;
+            int row; int uu; int ist; int ifl;
             curvla = 0;
             adv();
             ist = curstruct;                 /* the index expression resets it */
+            ifl = curflt;
             e = curelem;
             row = curdim2;
             uu = curuns;                     /* the ELEMENT's, not the index's */
@@ -2260,6 +2326,7 @@ int postfix(void) {
             /* an element of a struct array is itself an aggregate: its value
                is its address, and assigning it copies the whole struct */
             curstruct = ist;
+            curflt = ifl;
             if (ist >= 0) { if (row == 0) curelem = 0; }
         } else {
             return 0;
@@ -2299,7 +2366,7 @@ int vcall(int var) {
     need(tidx("(", 1), "(");
     n = 0;
     while (cur() != tidx(")", 1)) {
-        expr(); loadval(); push(); n = n + 1;
+        expr(); loadval(); argconv(0 - 1, n); push(); n = n + 1;
         if (eat(tidx(",", 1)) == 0) break;
     }
     need(tidx(")", 1), ")");
@@ -2324,7 +2391,7 @@ int vcall(int var) {
         es("  @mem.load r5, [r7+0]\n  @call.frame -8\n  @call.callr r5\n");
     }
     lvalue = 0; curelem = 8; curptr = 0; curuns = 0; cursize = 8; curstruct = 0 - 1;
-    curfn = 0; curfnst = 0 - 1;
+    curfn = 0; curfnst = 0 - 1; curflt = 0;
     /* the pointee returns a struct pointer: `go()()->zerofunc` */
     if (vcst >= 0) { curstruct = vcst; curptr = 1; curelem = stsize[vcst]; }
     vcst = 0 - 1;
@@ -2335,7 +2402,15 @@ int vcall(int var) {
 int primary(void) {
     int t; int i; long v; int k;
     t = cur();
-    curuns = 0;
+    curuns = 0; curflt = 0;
+    if (t == T_NUM) { if (fltlit(tp)) {
+        /* a floating constant: its bits, rounded once from the decimal */
+        int fk; fk = fltlit(tp);
+        es("  @lit.imm r0, "); en(fdec2bin(tpos[tp], tlen[tp], fk == 4)); ec(10);
+        adv();
+        setkind(fk);
+        return postfix();
+    } }
     if (t == T_NUM) {
         v = numval(tp);
         /* C99 6.4.4.1: a constant is an int if it fits, else a long; an
@@ -2426,6 +2501,7 @@ int primary(void) {
                      __write(2, "\n", 1); __exit(1); }
         cursize = symbytes[i];           /* what `sizeof` reports for it */
         curvla = symvla[i];
+        curflt = symflt[i];
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
         curdim3 = symdim3[i];
@@ -2433,7 +2509,7 @@ int primary(void) {
         if (symkind[i] == 2) {           /* a function designator */
             es("  @mem.lea r0, "); etok(tp); ec(10);
             adv(); lvalue = 0; curelem = 8; curptr = 0; cursize = 8;
-            curfn = 1; curfnst = 0 - 1;
+            curfn = 1; curfnst = 0 - 1; curflt = 0;
             return postfix();
         }
         if (symkind[i] == 4) {           /* enum constant */
@@ -2705,6 +2781,13 @@ int fmtneedsrt(int ft) {
         if ((src[k] & 255) == 37) {
             c = src[k + 1] & 255;
             if (c == 37) { k = k + 2; continue; }
+            if (c == 102 || c == 70 || c == 101 || c == 69 || c == 103 || c == 71
+                || c == 97 || c == 65) return 1;          /* %f %e %g %a */
+            if (c == 108 || c == 122 || c == 106 || c == 116) {   /* %lu %lx %lo */
+                int c2; c2 = src[k + 2] & 255;
+                if (c2 == 108) c2 = src[k + 3] & 255;
+                if (c2 == 117 || c2 == 120 || c2 == 88 || c2 == 111) return 1;
+            }
             if (c == 45) return 1;              /* - */
             if (c == 43) return 1;              /* + */
             if (c == 32) return 1;
@@ -2717,8 +2800,28 @@ int fmtneedsrt(int ft) {
     return 0;
 }
 
+/* An argument to parameter k of function si: converted to the parameter's
+   type when a prototype gave one, else the default argument promotions --
+   float becomes double (C99 6.5.2.2p6-7), which is what `...` receives. */
+int argconv(int si, int k) {
+    if (si >= 0) { if (symkind[si] == 2) { if (symnpk[si] > k) { if (k < 8) {
+        fconv(fkind(), sympk[si * 8 + k]);
+        return 0;
+    } } } }
+    if (curflt == 4) { if (curptr == 0) fconv(4, 8); }
+    return 0;
+}
+/* what a call of si hands back: a float or double, when it returns one */
+int callres(int si) {
+    curflt = 0;
+    if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) {
+        curflt = symflt[si]; cursize = curflt; curelem = curflt;
+    } } } }
+    return 0;
+}
+
 int pf_call(int t) {
-    int n; int k;
+    int n; int k; int psi;
     /* a call's value is an i64 on the type axis until return types are
        tracked; the fields describe the RESULT, not whatever came before */
     cursize = 8; curuns = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
@@ -2786,15 +2889,25 @@ int pf_call(int t) {
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
+    if (isname(t, "__builtin_sqrt", 14) || isname(t, "__builtin_sqrtf", 15)) {
+        /* the hardware square root, correctly rounded (C99 F.9.4.5) */
+        int sk; sk = tlen[t] == 15 ? 4 : 8;
+        need(tidx("(", 1), "(");
+        expr(); loadval(); fconv(fkind(), sk);
+        need(tidx(")", 1), ")");
+        es(sk == 8 ? "  @fpu.dsqrt r0, r0\n" : "  @fpu.ssqrt r0, r0\n");
+        setkind(sk);
+        return postfix();
+    }
     if (isname(t, "va_arg", 6)) {           /* *ap as T, then ap += 8 */
-        int vw; int vp;
+        int vw; int vp; int vfl;
         need(tidx("(", 1), "(");
         unary(); lvalue = 0;
         push();                                   /* &ap */
         es("  @mem.load r0, [r0+0]\n");
         push();                                   /* ap */
         need(tidx(",", 1), ",");
-        vw = declspec(); vp = declspecptr;
+        vw = declspec(); vp = declspecptr; vfl = declflt;
         while (eatstar()) vp = 1;
         need(tidx(")", 1), ")");
         es("  @lit.imm r2, 8\n  @alu.add r0, r0, r2\n");
@@ -2804,13 +2917,16 @@ int pf_call(int t) {
         if (vp) eload(8); else eload(vw);
         lvalue = 0; curelem = vw; curptr = vp;
         cursize = vw; if (vp) cursize = 8;
+        curflt = vfl;
         return postfix();
     }
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     n = 0;
+    psi = sfind(t);
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         expr(); loadval();
         if (curstruct >= 0) { if (curptr == 0) { if (curelem == 0) stemp(curstruct); } }
+        argconv(psi, n);
         push(); n = n + 1;
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
@@ -2836,6 +2952,7 @@ int pf_call(int t) {
             es("  @call.call "); etok(t); ec(10);
             if (n > 0) { es("  @call.frame -"); en(8 * n); ec(10); }
             lvalue = 0; curelem = 8;
+            callres(si);
             return postfix();
         }
     }
@@ -2846,6 +2963,7 @@ int pf_call(int t) {
     }
     es("  @call.call "); etok(t); ec(10);
     lvalue = 0; curelem = 8;
+    callres(sfind(t));
     {
         int si; si = sfind(t);
         if (si >= 0) { if (symfpret[si]) { curfn = 1; curfnst = symrfst[si]; } }
@@ -2911,9 +3029,189 @@ int emit_binop(int k) {
    from the `+` row, which is the usual arithmetic conversion.  Rules for
    these used to be written out here by hand; they were a second copy of the
    table, and a copy is exactly what this compiler is not supposed to have. */
+/* ---- floating constants: decimal to binary, exactly --------------------
+   A constant's bits must be the ones the Python front end gets from
+   float(text): the value rounded ONCE, to nearest, ties to even.  There is
+   no strtod to call, and a loop of multiplications by ten rounds at every
+   step, so this is done in integers: the digits as a big number M and a
+   power of ten, M * 10^e exactly when e >= 0, and when e < 0 the quotient
+   M * 2^s / 10^-e with its remainder as the sticky bit.  One rounding, at
+   the precision the result actually has -- a subnormal's included. */
+#define FB_L 160                       /* 32-bit limbs: 5120 bits */
+unsigned long fbA[FB_L]; int fbAn;     /* the working number */
+unsigned long fbD[FB_L]; int fbDn;     /* the divisor, 10^k */
+unsigned long fbQ[FB_L]; int fbQn;
+int fb_bits(unsigned long *a, int n) {  /* bit length */
+    unsigned long t; int b;
+    while (n > 0) { if (a[n - 1] != 0) break; n = n - 1; }
+    if (n == 0) return 0;
+    t = a[n - 1]; b = 0;
+    while (t) { b = b + 1; t = t >> 1; }
+    return (n - 1) * 32 + b;
+}
+int fb_bit(unsigned long *a, int n, int i) {
+    if (i < 0) return 0;
+    if (i / 32 >= n) return 0;
+    return (a[i / 32] >> (i % 32)) & 1;
+}
+int fb_mul(unsigned long *a, int n, unsigned long m) {   /* a *= m, m < 2^32 */
+    unsigned long c; unsigned long t; int j;
+    c = 0; j = 0;
+    while (j < n) { t = a[j] * m + c; a[j] = t & 4294967295; c = t >> 32; j = j + 1; }
+    if (c) { if (n < FB_L) { a[n] = c; n = n + 1; } }
+    return n;
+}
+int fb_add(unsigned long *a, int n, unsigned long v) {   /* a += v, carried */
+    int j; unsigned long t;
+    j = 0;
+    while (v) {
+        if (j >= n) { if (n < FB_L) { a[n] = 0; n = n + 1; } else break; }
+        t = a[j] + v; a[j] = t & 4294967295; v = t >> 32; j = j + 1;
+    }
+    return n;
+}
+int fb_shl1(unsigned long *a, int n) {                   /* a <<= 1 */
+    unsigned long c; unsigned long t; int j;
+    c = 0; j = 0;
+    while (j < n) { t = (a[j] << 1) | c; c = t >> 32; a[j] = t & 4294967295; j = j + 1; }
+    if (c) { if (n < FB_L) { a[n] = c; n = n + 1; } }
+    return n;
+}
+int fb_cmp(unsigned long *a, int an, unsigned long *b, int bn) {
+    int j;
+    while (an > 0) { if (a[an - 1] != 0) break; an = an - 1; }
+    while (bn > 0) { if (b[bn - 1] != 0) break; bn = bn - 1; }
+    if (an != bn) return an > bn ? 1 : 0 - 1;
+    j = an - 1;
+    while (j >= 0) { if (a[j] != b[j]) return a[j] > b[j] ? 1 : 0 - 1; j = j - 1; }
+    return 0;
+}
+int fb_sub(unsigned long *a, int an, unsigned long *b, int bn) {   /* a -= b, a >= b */
+    long t; long br; int j;
+    br = 0; j = 0;
+    while (j < an) {
+        t = (long)a[j] - br;
+        if (j < bn) t = t - (long)b[j];
+        if (t < 0) { t = t + 4294967296; br = 1; } else br = 0;
+        a[j] = t; j = j + 1;
+    }
+    return an;
+}
+/* the bits of the constant in src[p..p+n): binary64, or binary32 if f32 */
+unsigned long fdec2bin(int p, int n, int f32) {
+    int e10; int k; int seen; int c; int fr; int neg; int j;
+    int prec; int emin; int bias; int mbits; int lead; int keep; int drop;
+    int s; int L; int sticky; int exp;
+    unsigned long m; unsigned long bitsout;
+    fbAn = 1; fbA[0] = 0; e10 = 0; fr = 0; seen = 0; k = 0;
+    while (k < n) {                       /* the significand's digits */
+        c = src[p + k] & 255;
+        if (c == 46) { fr = 1; k = k + 1; continue; }
+        if (c < 48 || c > 57) break;
+        fbAn = fb_mul(fbA, fbAn, 10);
+        fbAn = fb_add(fbA, fbAn, c - 48);
+        if (fr) e10 = e10 - 1;
+        seen = 1; k = k + 1;
+    }
+    if (k < n) { c = src[p + k] & 255;
+        if (c == 101 || c == 69) {        /* the exponent */
+            int ev; int es;
+            k = k + 1; es = 1; ev = 0;
+            if ((src[p + k] & 255) == 45) { es = 0 - 1; k = k + 1; }
+            else { if ((src[p + k] & 255) == 43) k = k + 1; }
+            while (k < n) { c = src[p + k] & 255; if (c < 48 || c > 57) break;
+                            if (ev < 100000) ev = ev * 10 + (c - 48); k = k + 1; }
+            e10 = e10 + es * ev;
+        } }
+    prec = 53; emin = 0 - 1022; bias = 1023; mbits = 52;
+    if (f32) { prec = 24; emin = 0 - 126; bias = 127; mbits = 23; }
+    if (fb_bits(fbA, fbAn) == 0) return 0;
+    if (e10 > 400) e10 = 400;             /* past any double: overflows below */
+    if (e10 < 0 - 800) return 0;           /* below any subnormal */
+    s = 0;
+    if (e10 >= 0) {
+        j = 0; while (j < e10) { fbAn = fb_mul(fbA, fbAn, 10); j = j + 1; }
+        sticky = 0;
+        fbQn = fbAn; j = 0; while (j < fbAn) { fbQ[j] = fbA[j]; j = j + 1; }
+    } else {
+        /* Q = floor(M * 2^s / 10^k), s large enough for prec+2 bits */
+        fbDn = 1; fbD[0] = 1;
+        j = 0; while (j < 0 - e10) { fbDn = fb_mul(fbD, fbDn, 10); j = j + 1; }
+        s = prec + 3 + fb_bits(fbD, fbDn) - fb_bits(fbA, fbAn);
+        if (s < 0) s = 0;
+        j = 0; while (j < s) { fbAn = fb_shl1(fbA, fbAn); j = j + 1; }
+        /* long division, a bit at a time: R in fbA's place, Q built up */
+        {   unsigned long R[FB_L]; int Rn; int i; int nb;
+            Rn = 1; R[0] = 0; fbQn = fbAn; j = 0; while (j < fbQn) { fbQ[j] = 0; j = j + 1; }
+            nb = fb_bits(fbA, fbAn); i = nb - 1;
+            while (i >= 0) {
+                Rn = fb_shl1(R, Rn);
+                R[0] = R[0] | fb_bit(fbA, fbAn, i);
+                if (fb_cmp(R, Rn, fbD, fbDn) >= 0) {
+                    Rn = fb_sub(R, Rn, fbD, fbDn);
+                    fbQ[i / 32] = fbQ[i / 32] | ((unsigned long)1 << (i % 32));
+                }
+                i = i - 1;
+            }
+            sticky = fb_bits(R, Rn) != 0;
+        }
+    }
+    L = fb_bits(fbQ, fbQn);
+    lead = L - 1 - s;                     /* the leading bit's binary exponent */
+    keep = prec;
+    if (lead < emin) keep = prec - (emin - lead);   /* subnormal: fewer bits */
+    if (keep < 0) keep = 0 - 1;
+    drop = L - keep;                      /* bits below the rounding point */
+    m = 0; j = L - 1;
+    while (j >= drop) { m = (m << 1) | fb_bit(fbQ, fbQn, j); j = j - 1; }   /* 0 below bit 0 */
+    if (keep < 0) m = 0;
+    {   int half; int rest; int jj;
+        half = fb_bit(fbQ, fbQn, drop - 1);
+        rest = sticky; jj = drop - 2;
+        while (jj >= 0) { if (fb_bit(fbQ, fbQn, jj)) { rest = 1; break; } jj = jj - 1; }
+        if (drop <= 0) { half = 0; rest = 0; }
+        if (half) { if (rest || (m & 1)) m = m + 1; }
+    }
+    exp = drop - s;                       /* value = m * 2^exp */
+    if (m >> prec) { m = m >> 1; exp = exp + 1; }     /* rounded up to 2^prec */
+    if (m == 0) return 0;
+    lead = exp + prec - 1;
+    if (m < ((unsigned long)1 << (prec - 1))) {        /* subnormal */
+        bitsout = m;
+    } else {
+        if (lead + bias >= 2 * bias + 1) {             /* overflow: inf */
+            if (f32) return 2139095040;
+            return 9218868437227405312;
+        }
+        bitsout = ((unsigned long)(lead + bias) << mbits) | (m & (((unsigned long)1 << mbits) - 1));
+    }
+    return bitsout;
+}
+
+/* is the NUM token t a floating constant?  0, 4 (float) or 8 (double) */
+int fltlit(int t) {
+    int k; int c; int hex;
+    k = 0; hex = 0;
+    if (tlen[t] > 1) { if ((src[tpos[t]] & 255) == 48) { c = src[tpos[t] + 1] & 255; if (c == 120 || c == 88) hex = 1; } }
+    if (hex) return 0;
+    if ((src[tpos[t]] & 255) == 39) return 0;          /* a character constant */
+    while (k < tlen[t]) {
+        c = src[tpos[t] + k] & 255;
+        if (c == 46 || c == 101 || c == 69) {
+            c = src[tpos[t] + tlen[t] - 1] & 255;
+            if (c == 102 || c == 70) return 4;
+            return 8;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
 int tyax(void) {                   /* the value in hand, on the TYS axis */
     if (curptr) return vfind(TYSV, NTYSV, "ptr", 3);
     if (curstruct >= 0) return vfind(TYSV, NTYSV, "struct", 6);
+    if (curflt == 8) return vfind(TYSV, NTYSV, "f64", 3);
+    if (curflt == 4) return vfind(TYSV, NTYSV, "f32", 3);
     if (curuns) {
         if (cursize == 1) return vfind(TYSV, NTYSV, "u8", 2);
         if (cursize == 2) return vfind(TYSV, NTYSV, "u16", 3);
@@ -2925,6 +3223,56 @@ int tyax(void) {                   /* the value in hand, on the TYS axis */
     if (cursize == 4) return vfind(TYSV, NTYSV, "i32", 3);
     return vfind(TYSV, NTYSV, "i64", 3);
 }
+
+/* The value in hand as a conversion kind: 8 double, 4 float, 1 u64 (the
+   one integer the signed conversions get wrong), 0 any other integer --
+   narrower unsigned values are already zero-extended in the register. */
+int fkind(void) {
+    if (curptr) return 1;
+    if (curflt) return curflt;
+    if (curuns) { if (cursize == 8) return 1; }
+    return 0;
+}
+/* r0 from kind `from` to kind `to` (C99 6.3.1.4-5); integer to integer is
+   the store's business.  Every op is the irsel net's `fpu` family. */
+int fconv(int from, int to) {
+    if (from == to) return 0;
+    if (from < 4) { if (to < 4) return 0; }
+    if (from == 4) {
+        es("  @fpu.s2d r0, r0\n");
+        if (to == 8) return 0;
+        from = 8;
+    }
+    if (from == 8) {
+        if (to == 4) { es("  @fpu.d2s r0, r0\n"); return 0; }
+        if (to == 1) es("  @fpu.d2u r0, r0\n"); else es("  @fpu.d2i r0, r0\n");
+        return 0;
+    }
+    if (to == 8) { if (from == 1) es("  @fpu.u2d r0, r0\n"); else es("  @fpu.i2d r0, r0\n"); return 0; }
+    if (from == 1) es("  @fpu.u2s r0, r0\n"); else es("  @fpu.i2s r0, r0\n");
+    return 0;
+}
+/* ...and the value's description follows it */
+int setkind(int k) {
+    lvalue = 0; curptr = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
+    if (k >= 4) { curflt = k; cursize = k; curelem = k; curuns = 0; return 0; }
+    curflt = 0;
+    if (k == 1) { curuns = 1; cursize = 8; curelem = 8; }
+    return 0;
+}
+/* a floating value about to be TESTED becomes 0 or 1: 1 unless it compares
+   equal to zero, so -0.0 is false and NaN is true (C99 6.8.4.1) */
+int ftruthy(void) {
+    if (curflt == 0) return 0;
+    if (curptr) return 0;
+    es("  @lit.imm r1, 0\n");
+    if (curflt == 8) es("  @fpu.deq r0, r0, r1\n"); else es("  @fpu.seq r0, r0, r1\n");
+    es("  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n");
+    curflt = 0; cursize = 4; curelem = 4;
+    return 0;
+}
+/* the bits of 1.0 in a floating kind */
+long fone(int k) { if (k == 8) return 4607182418800017408; return 1065353216; }
 
 int tyask(int l, char *op, int ol, int r) {
     int key[4];
@@ -2967,6 +3315,7 @@ int tycanon(int k, char *buf) {
 
 int binary(int level) {
     int k; int e; int lp; int lax; int rax; int ck; int res; int cl;
+    int lf; int rf; int lk; int lfr; int rfr; int re; int rp;
     char cb[4];
     if (level > 7) {
         if (havepre) { havepre = 0; return 0; }     /* parsed already, by expr */
@@ -2979,17 +3328,56 @@ int binary(int level) {
         loadval();
         e = curelem;
         lp = curptr;
+        lfr = curflt;                              /* float, or a pointee's */
+        lf = 0; if (curptr == 0) { if (curstruct < 0) lf = curflt; }
+        lk = fkind();
         lax = tyax();
         adv();
         push();
         binary(level + 1);
         loadval();
+        rf = 0; if (curptr == 0) { if (curstruct < 0) rf = curflt; }
+        rfr = curflt; re = curelem; rp = curptr;
         rax = tyax();
         ck = tyask(lax, "+", 1, rax);              /* the conversion row */
         cl = tycanon(k, cb);
         res = tyask(lax, cb, cl, rax);             /* this operator's row */
+        if (lf || rf) {
+            /* A floating operand: both go to the common type the TYPE TABLE
+               names in its `+` row (the usual arithmetic conversion), and
+               the op is the irsel net's fpu family. */
+            int cf; int isarith;
+            if (tyis(res, "illegal", 7)) { printf("floating operand for this operator at token %d\n", tp); __exit(1); }
+            cf = 4; if (tyis(ck, "f64", 3)) cf = 8;
+            fconv(fkind(), cf);                    /* rhs, in r0 */
+            es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @mem.load r0, [r7+8]\n");
+            fconv(lk, cf);                         /* lhs, from under it */
+            es("  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -16\n");
+            isarith = 0;
+            if (k == tidx("+", 1)) { es(cf == 8 ? "  @fpu.dadd r0, r1, r0\n" : "  @fpu.sadd r0, r1, r0\n"); isarith = 1; }
+            if (k == tidx("-", 1)) { es(cf == 8 ? "  @fpu.dsub r0, r1, r0\n" : "  @fpu.ssub r0, r1, r0\n"); isarith = 1; }
+            if (k == tidx("*", 1)) { es(cf == 8 ? "  @fpu.dmul r0, r1, r0\n" : "  @fpu.smul r0, r1, r0\n"); isarith = 1; }
+            if (k == tidx("/", 1)) { es(cf == 8 ? "  @fpu.ddiv r0, r1, r0\n" : "  @fpu.sdiv r0, r1, r0\n"); isarith = 1; }
+            /* a > b is b < a; != is not == -- which is also NaN's answer */
+            if (k == tidx("<", 1)) es(cf == 8 ? "  @fpu.dlt r0, r1, r0\n" : "  @fpu.slt r0, r1, r0\n");
+            if (k == tidx(">", 1)) es(cf == 8 ? "  @fpu.dlt r0, r0, r1\n" : "  @fpu.slt r0, r0, r1\n");
+            if (k == tidx("<=", 2)) es(cf == 8 ? "  @fpu.dle r0, r1, r0\n" : "  @fpu.sle r0, r1, r0\n");
+            if (k == tidx(">=", 2)) es(cf == 8 ? "  @fpu.dle r0, r0, r1\n" : "  @fpu.sle r0, r0, r1\n");
+            if (k == tidx("==", 2)) es(cf == 8 ? "  @fpu.deq r0, r1, r0\n" : "  @fpu.seq r0, r1, r0\n");
+            if (k == tidx("!=", 2)) { es(cf == 8 ? "  @fpu.deq r0, r1, r0\n" : "  @fpu.seq r0, r1, r0\n");
+                                      es("  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n"); }
+            if (isarith) setkind(cf);
+            else { setkind(0); cursize = 4; curelem = 4; }
+            continue;
+        }
         binuns = tyuns(ck);
         binwid = tysize(ck);
+        if (lp == 0) { if (rp) { if (re > 1) { if (k == tidx("+", 1)) {
+            /* `n + p`: the INTEGER is on the stack; scale it there */
+            es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @mem.load r0, [r7+8]\n");
+            es("  @lit.imm r2, "); en(re); es("\n  @alu.mul r0, r0, r2\n  @mem.store [r7+8], r0\n");
+            es("  @mem.load r0, [r7+0]\n  @call.frame -8\n");
+        } } } }
         if (lp) { if (e > 1) {
             if (k == tidx("+", 1)) { es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); }
             if (k == tidx("-", 1)) { if (curptr == 0) {
@@ -3003,9 +3391,10 @@ int binary(int level) {
         binuns = 0; binwid = 8;
         lvalue = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
         if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
-                                   if (lp == 0) curptr = 1; }
+                                   curflt = lfr;
+                                   if (lp == 0) { curptr = 1; curelem = re; curflt = rfr; } }
         else { curptr = 0; cursize = tysize(res); curelem = cursize;
-               curuns = tyuns(res); }
+               curuns = tyuns(res); curflt = 0; }
     }
     return 0;
 }
@@ -3014,10 +3403,10 @@ int land(void) {
     int end;
     binary(0);
     while (cur() == vfind(TOKV, NTOKV, "&&", 2)) {
-        loadval(); adv();
+        loadval(); ftruthy(); adv();
         end = newlab();
         elab("  @ctrl.jumpz r0, L", end); ec(10);
-        binary(0); loadval();
+        binary(0); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("L", end); es(":\n");
     }
@@ -3028,13 +3417,13 @@ int lor(void) {
     int end; int rhs;
     land();
     while (cur() == vfind(TOKV, NTOKV, "||", 2)) {
-        loadval(); adv();
+        loadval(); ftruthy(); adv();
         end = newlab(); rhs = newlab();
         elab("  @ctrl.jumpz r0, L", rhs); ec(10);
         es("  @lit.imm r0, 1\n");
         elab("  @ctrl.jump L", end); ec(10);
         elab("L", rhs); es(":\n");
-        land(); loadval();
+        land(); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("L", end); es(":\n");
     }
@@ -3047,14 +3436,29 @@ int cond(void) {
     int els; int end;
     lor();
     if (cur() != tidx("?", 1)) return 0;
-    loadval(); adv();
+    loadval(); ftruthy(); adv();
     els = newlab(); end = newlab();
     elab("  @ctrl.jumpz r0, L", els); ec(10);
-    expr(); loadval();
-    elab("  @ctrl.jump L", end); ec(10);
-    elab("L", els); es(":\n");
-    need(tidx(":", 1), ":");
-    cond(); loadval();
+    {   int save; int nsave; int k1; int k2; int a1; int cf;
+        save = tp; nsave = nout;
+        expr(); loadval(); k1 = fkind(); a1 = tyax();
+        elab("  @ctrl.jump L", end); ec(10);
+        elab("L", els); es(":\n");
+        need(tidx(":", 1), ":");
+        cond(); loadval(); k2 = fkind();
+        if ((k1 >= 4 || k2 >= 4) && k1 != k2) {
+            /* C99 6.5.15p5: the arms meet in their common type.  The first
+               was emitted before the second's type was known: again. */
+            cf = tyis(tyask(a1, "+", 1, tyax()), "f64", 3) ? 8 : 4;
+            tp = save; nout = nsave;
+            expr(); loadval(); fconv(fkind(), cf);
+            elab("  @ctrl.jump L", end); ec(10);
+            elab("L", els); es(":\n");
+            need(tidx(":", 1), ":");
+            cond(); loadval(); fconv(fkind(), cf);
+            setkind(cf);
+        }
+    }
     elab("L", end); es(":\n");
     lvalue = 0;
     return 0;
@@ -3087,15 +3491,35 @@ int expr(void) {
     if (lvalue) {
         op = aop();
         if (op >= 0) {
-            int ptrl; int pel;
+            int ptrl; int pel; int ak; int aax;
             adv();
             ptrl = curptr; pel = curelem;
+            ak = fkind(); aax = tyax();
             e = stw();
             lvalue = 0;
             push();                                  /* address */
             eload(e);
             push();                                  /* old value */
             expr(); loadval();
+            if (ak >= 4 || (curflt && curptr == 0)) {
+                /* `x op= y` is `x = x op y` (6.5.16.2p3): in the common
+                   type the table names, then back to x's */
+                int cf;
+                cf = tyis(tyask(aax, "+", 1, tyax()), "f64", 3) ? 8 : 4;
+                fconv(fkind(), cf);
+                es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @mem.load r0, [r7+8]\n");
+                fconv(ak, cf);
+                es("  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -16\n");
+                if (op == tidx("+", 1)) es(cf == 8 ? "  @fpu.dadd r0, r1, r0\n" : "  @fpu.sadd r0, r1, r0\n");
+                if (op == tidx("-", 1)) es(cf == 8 ? "  @fpu.dsub r0, r1, r0\n" : "  @fpu.ssub r0, r1, r0\n");
+                if (op == tidx("*", 1)) es(cf == 8 ? "  @fpu.dmul r0, r1, r0\n" : "  @fpu.smul r0, r1, r0\n");
+                if (op == tidx("/", 1)) es(cf == 8 ? "  @fpu.ddiv r0, r1, r0\n" : "  @fpu.sdiv r0, r1, r0\n");
+                fconv(cf, ak);
+                pop1();                              /* address */
+                estore(e);
+                setkind(ak);
+                return 0;
+            }
             /* `p += n` moves n ELEMENTS, as `p = p + n` does */
             if (ptrl) { if (pel > 1) {
                 if (op == tidx("+", 1) || op == tidx("-", 1)) {
@@ -3110,7 +3534,10 @@ int expr(void) {
             return 0;
         }
         if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
+            int ak;
             adv();
+            ak = fkind();
+            if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
             lvalue = 0;
             if (e == 0) { if (curstruct >= 0) {
@@ -3124,8 +3551,10 @@ int expr(void) {
             } }
             push();
             expr(); loadval();
+            fconv(fkind(), ak);                      /* C99 6.5.16.1p2 */
             pop1();
             estore(e);
+            if (ak >= 4) setkind(ak);
             return 0;
         }
     }
@@ -3351,7 +3780,7 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     tdname[ntd * 32 + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
     tduns[ntd] = declunsigned;
-    tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1;
+    tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1; tdflt[ntd] = declflt;
     ntd = ntd + 1;
     return ntd - 1;
 }
@@ -3520,7 +3949,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
-    declenum = 0;
+    declenum = 0; declflt = 0;
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -3529,6 +3958,7 @@ int declspec(void) {                       /* -> element width */
         declunsigned = tduns[td];
         declspecfp = tdfp[td];
         declspecfpst = tdfpst[td];
+        declflt = tdflt[td];
         skipspecq();
         return tdw[td];
     }
@@ -3554,13 +3984,8 @@ int declspec(void) {                       /* -> element width */
         if (srcis(tpos[tp], tlen[tp], "long")) declsz = 8;
         if (srcis(tpos[tp], tlen[tp], "void")) declsz = 1;
         if (srcis(tpos[tp], tlen[tp], "unsigned")) declunsigned = 1;
-        /* Refused out loud until this front end has the floating axis: as
-           an unknown type word `double` read as a 4-byte int, so a program
-           compiled and answered wrong. */
-        if (srcis(tpos[tp], tlen[tp], "float") || srcis(tpos[tp], tlen[tp], "double")) {
-            printf("floating point is not supported by unisacc yet\n");
-            __exit(1);
-        }
+        if (srcis(tpos[tp], tlen[tp], "float")) { declsz = 4; declflt = 4; }
+        if (srcis(tpos[tp], tlen[tp], "double")) { declsz = 8; declflt = 8; }  /* long double too */
         adv();
     }
     /* The element width IS the type's size.  It used to be 1 for char and 8
@@ -3577,14 +4002,14 @@ int declspec(void) {                       /* -> element width */
 int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
-    int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum;
+    int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
     nown = 0; bitpos = 0;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
     while (cur() != tidx("}", 1)) {
         w = declspec();
-        sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum;
+        sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum; mflt = declflt;
         if (cur() == tidx(";", 1)) { if (mst >= 0) {
             /* An anonymous member (C11 6.7.2.1p13): its members are members
                of this aggregate, at its offset.  Spliced in by copy. */
@@ -3611,6 +4036,7 @@ int stbody(int si) {
                 mbuns[nmemb] = mbuns[a];
                 mbskip[nmemb] = mbskip[a];
                 mbpst[nmemb] = mbpst[a];
+                mbflt[nmemb] = mbflt[a];
                 if (stunion[mst]) { if (first == 0) mbskip[nmemb] = 1; }
                 first = 0;
                 if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
@@ -3705,6 +4131,7 @@ int stbody(int si) {
             if (declptr == 0) { if (isbf == 0) mbstruct[nmemb] = mst; }
             mbpst[nmemb] = 0 - 1;
             if (declptr) mbpst[nmemb] = mst;
+            mbflt[nmemb] = mflt;
             mbuns[nmemb] = muns;
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
@@ -3733,6 +4160,7 @@ int stbody(int si) {
         mbuns[nmemb] = mbuns[own[j]];
         mbskip[nmemb] = mbskip[own[j]];
         mbpst[nmemb] = mbpst[own[j]];
+        mbflt[nmemb] = mbflt[own[j]];
         nmemb = nmemb + 1;
         j = j + 1;
     }
@@ -3830,6 +4258,7 @@ int structslots(int sst) {
 
 int slotat(int i, int w, int sst) {
     int per; int el; int k; int mi; int e; int cnt; int sub;
+    slotflt = initflt;
     if (sst < 0) { slotoff = i * w; slotw = w; return 0; }
     per = structslots(sst);
     el = i / per; k = i - el * per;
@@ -3853,6 +4282,7 @@ int slotat(int i, int w, int sst) {
             if (mbelem[mi] > 0) sub = mbbytes[mi] / mbelem[mi];
             if (k < cnt + sub) {
                 slotoff = el * stsize[sst] + mboff[mi] + (k - cnt) * mbelem[mi];
+                slotflt = mbflt[mi];
                 slotw = mbelem[mi];
                 if (slotw == 0) slotw = 8;
                 return 0;
@@ -3861,6 +4291,8 @@ int slotat(int i, int w, int sst) {
         } else {
             if (k == cnt) {
                 slotoff = el * stsize[sst] + mboff[mi];
+                slotflt = mbflt[mi];
+                if (mbptr[mi]) slotflt = 0;
                 slotw = mbwidth[mi];
                 return 0;
             }
@@ -4088,9 +4520,11 @@ int memberat(int sst, int rel, int *ms) {
    the braced one, whatever the braced list left out. */
 int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     int i; int depth; int delta; int ew; int isarr; int rows; int per; int rows3;
+    int myflt; int sk;
     int cxbase[32]; int cxslots[32]; int cxst[32]; int cxel[32]; int cxelst[32]; int cxrow[32];
     int cxsub[32];
     isarr = initisarr; rows = initrows; rows3 = initrows3;
+    myflt = initflt;          /* nested literals set it for themselves */
     initisarr = 0; initrows = 0; initrows3 = 0;
     /* C99 6.7.8p21: what the initialiser does not mention is ZERO.  Clearing
        the object first is the whole of that rule, and the tape has an op for
@@ -4177,9 +4611,11 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
             i = cxbase[depth] + membstart(cxst[depth], mi);
             continue;
         } }
+        initflt = myflt;
         slotat(i, w, sst);
-        delta = slotoff; ew = slotw;
+        delta = slotoff; ew = slotw; sk = slotflt;
         expr(); loadval();
+        fconv(fkind(), sk);                      /* to the slot's type */
         initaddr(isglobal, gt, off, delta);
         estore(ew);
         i = i + 1;
@@ -4240,17 +4676,26 @@ int fpdecl(void) {
     return t;
 }
 
-int lfp; int lfpret;
+int lfp; int lfpret; int lflt0; int gflt0;
+/* the conversion kind of the object being declared */
+int dkind(int flt) {
+    if (declptr) return 1;
+    if (flt) return flt;
+    if (declunsigned) { if (declsz == 8) return 1; }
+    return 0;
+}
 int local_decl(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
+    lflt0 = declflt;          /* an initialiser's casts would overwrite it */
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
         declptr = declspecptr;
+        declflt = lflt0;
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; lfpret = fpretfp; sst = 0 - 1; declstruct = 0 - 1;
@@ -4377,6 +4822,8 @@ int local_decl(void) {
             lfpret = 0;
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
+            int lk; lk = dkind(lflt0);
+            initflt = lflt0;
             if (cur() == tidx("{", 1)) {
                 if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
                 initaggr(0, 0, off, w, sst, n * w);
@@ -4387,9 +4834,11 @@ int local_decl(void) {
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 estore(8); } }
             else { expr(); loadval();
+                fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 if (declptr) estore(8); else estore(w); } }
             else { expr(); loadval();
+                fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 if (declptr) estore(8); else estore(w); } }
         }
@@ -4418,7 +4867,7 @@ int stmt(void) {
     if (p == P_DECL) return local_decl();
     if (p == P_IF) {
         adv(); need(vfind(TOKV, NTOKV, "(", 1), "(");
-        expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        expr(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         a = newlab();
         elab("  @ctrl.jumpz r0, L", a); ec(10);
         stmt();
@@ -4436,7 +4885,7 @@ int stmt(void) {
         top = newlab(); a = newlab();
         elab("L", top); es(":\n");
         need(vfind(TOKV, NTOKV, "(", 1), "(");
-        expr(); loadval(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        expr(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         elab("  @ctrl.jumpz r0, L", a); ec(10);
         brkstack[nloop] = a; cntstack[nloop] = top;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
@@ -4456,7 +4905,7 @@ int stmt(void) {
         top = newlab(); a = newlab(); c = newlab();
         elab("L", top); es(":\n");
         if (cur() != tidx(";", 1)) {
-            expr(); loadval();
+            expr(); loadval(); ftruthy();
             elab("  @ctrl.jumpz r0, L", a); ec(10);
         }
         need(tidx(";", 1), ";");
@@ -4542,7 +4991,24 @@ int stmt(void) {
     }
     if (p == P_RETURN) {
         adv();
-        if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval(); }
+        if (cur() != vfind(TOKV, NTOKV, ";", 1)) { expr(); loadval();
+            if (retst < 0) {
+                fconv(fkind(), retkind);
+                /* a uint32_t function must not hand back 64 bits of whatever
+                   the arithmetic left above its width */
+                if (retkind == 0) { if (retsz < 8) { if (1) {
+                    if (retuns) {
+                        if (retsz == 1) es("  @lit.imm r2, 255\n  @alu.and r0, r0, r2\n");
+                        if (retsz == 2) es("  @lit.imm r2, 65535\n  @alu.and r0, r0, r2\n");
+                        if (retsz == 4) es("  @lit.imm r2, 4294967295\n  @alu.and r0, r0, r2\n");
+                    } else {
+                        es("  @call.frame 8\n  @mem.st [r7+0], r0, "); en(retsz);
+                        es("\n  @mem.ld r0, [r7+0], "); en(retsz);
+                        es("\n  @call.frame -8\n");
+                    }
+                } } }
+            }
+        }
         if (retst >= 0) {
             es("  mov r1, r0\n  @mem.lea r0, __rv_"); etok(rett); ec(10);
             scopy(stsize[retst]);
@@ -4581,7 +5047,7 @@ int stmt(void) {
         elab("L", c); es(":\n");
         need(tidx("while", 5), "while");
         need(tidx("(", 1), "(");
-        expr(); loadval();
+        expr(); loadval(); ftruthy();
         need(tidx(")", 1), ")");
         need(tidx(";", 1), ";");
         elab("  @ctrl.jumpz r0, L", a); ec(10);
@@ -4599,7 +5065,7 @@ int stmt(void) {
 int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start;
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
-    int pst; int nsp; int spsym[16];
+    int pst; int nsp; int spsym[16]; int pfl;
     start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;
     scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
@@ -4635,7 +5101,7 @@ int function(int t, int w) {
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (eat(tidx("...", 3))) break;
         pw = declspec();
-        pst = declstruct;
+        pst = declstruct; pfl = declflt;
         declptr = declspecptr; declfp = declspecfp;
         while (eatstar()) declptr = 1;
         havename = 0;
@@ -4678,9 +5144,17 @@ int function(int t, int w) {
                 es("  @mem.store [r6-"); en(off); es("], r"); en(np); ec(10);
             }
         }
+        /* the parameter's kind, for callers to convert to */
+        if (fsym >= 0) { if (np < 8) {
+            int pk; pk = 0;
+            if (declptr) pk = 1;
+            else { if (pfl) pk = pfl; else { if (declunsigned) { if (declsz == 8) pk = 1; } } }
+            sympk[fsym * 8 + np] = pk;
+        } }
         np = np + 1;
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
+    if (fsym >= 0) symnpk[fsym] = np;
     need(vfind(TOKV, NTOKV, ")", 1), ")");
     /* `int (*pick(int w))(int, int) {`: the body follows the OUTER list */
     if (fnresume >= 0) { tp = fnresume; fnresume = 0 - 1; }
@@ -4706,6 +5180,14 @@ int function(int t, int w) {
     }
     retst = 0 - 1;
     if (fsym >= 0) { if (symstruct[fsym] >= 0) { if (symptr[fsym] == 0) retst = symstruct[fsym]; } }
+    /* what `return` converts to (C99 6.8.6.4p3) */
+    retkind = 0; retsz = w; retuns = 0;
+    if (fsym >= 0) {
+        retuns = symuns[fsym];
+        if (symptr[fsym]) { retkind = 1; retsz = 8; }
+        else { if (symflt[fsym]) retkind = symflt[fsym];
+               else { if (retuns) { if (w == 8) retkind = 1; } } }
+    }
     rett = t;
     retlab = newlab();
     infunc = 1;
@@ -4720,7 +5202,7 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn;
+    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk;
     while (1) {
         p = ask(0);
         if (p == P_END) break;
@@ -4730,11 +5212,13 @@ int unit(void) {
            This branch used to insist on a body, so a USE was refused. */
         w = declspec();
         gstruct = declstruct;
+        gflt0 = declflt;
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declstruct = gstruct;
             decldim2 = 0; decldim3 = 0; declfp = declspecfp;
             declptr = declspecptr;
+            declflt = gflt0;
             while (eatstar()) declptr = 1;
             gfpfn = 0;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -4802,6 +5286,8 @@ int unit(void) {
             if (cur() == tidx("=", 1)) {
                 adv();
                 toinit = 1; hasinit = 1;
+                gk = dkind(gflt0);
+                initflt = gflt0;
                 cpn = 0 - 1;
                 if (cur() == tidx("(", 1)) cpn = cplit();
                 if (cur() == tidx("{", 1)) {
@@ -4815,9 +5301,11 @@ int unit(void) {
                 } else { expr(); loadval();
                     es("  @mem.lea r1, g_"); etok(t); ec(10); estore(8); } }
                 else { expr(); loadval();
+                    fconv(fkind(), gk);
                     es("  @mem.lea r1, g_"); etok(t); ec(10);
                     if (declptr) estore(8); else estore(w); } }
                 else { expr(); loadval();
+                    fconv(fkind(), gk);
                     es("  @mem.lea r1, g_"); etok(t); ec(10);
                     if (declptr) estore(8); else estore(w); } }
                 toinit = 0;
