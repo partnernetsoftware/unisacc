@@ -39,7 +39,7 @@ function paintHud(s) {
     `ujs <b>${s.ujsMs.toFixed(2)} ms</b> · gpu_submit <b>${s.drawMs.toFixed(2)} ms</b><br>` +
     `fps <b>${s.fps.toFixed(0)}</b> · score <b>${s.score.toFixed(0)}</b>` +
     (host._stats?.().bytes ? `<br>packet <b>${host._stats().bytes}</b> B` : "") +
-    (s.alive ? "" : `<br><span class="warn">crashed — tap / Space</span>`);
+    (s.alive ? "" : `<br><span class="warn">crashed — double-tap / Space</span>`);
 }
 
 try {

@@ -62,46 +62,50 @@ try {
       returnByValue: true,
     });
     const v = r.result.value || {};
-    if (v.uxe?.ready && v.uxe.ship && v.uxe.wasmGame && v.uxe.wasmEngine && v.uxe.fps > 0) {
+    if (v.uxe?.ready && v.uxe.ship && v.uxe.wasmGame && v.uxe.wasmEngine &&
+        (v.uxe.fps > 0 || v.uxe.ujsMs > 0 || v.uxe.score > 0)) {
       const inlineOnly = (v.scripts || []).every((s) => !s || s === "");
       if (!inlineOnly) throw new Error("expected no external script src");
 
-      // Touch virtual stick: finger on right half → ix=+1, FLAG_TOUCH
+      // Touch relative stick: down near center, drag far right past deadzone → ix=+1
       const layout = await cdp(ws, 200, "Runtime.evaluate", {
         expression: `(() => {
           const c = document.getElementById('c');
           const r = c.getBoundingClientRect();
-          const x = r.left + r.width * 0.88;
-          const y = r.top + r.height * 0.5;
-          const o = { pointerId: 7, pointerType: 'touch', isPrimary: true,
-            clientX: x, clientY: y, buttons: 1, button: 0,
-            bubbles: true, cancelable: true };
-          c.dispatchEvent(new PointerEvent('pointerdown', o));
-          c.dispatchEvent(new PointerEvent('pointermove', o));
-          return { touchAction: getComputedStyle(c).touchAction };
+          const x0 = r.left + r.width * 0.5;
+          const y0 = r.top + r.height * 0.5;
+          const x1 = r.left + r.width * 0.95;
+          const base = { pointerId: 7, pointerType: 'touch', isPrimary: true,
+            buttons: 1, button: 0, bubbles: true, cancelable: true };
+          c.dispatchEvent(new PointerEvent('pointerdown', { ...base, clientX: x0, clientY: y0 }));
+          c.dispatchEvent(new PointerEvent('pointermove', { ...base, clientX: x1, clientY: y0 }));
+          return { touchAction: getComputedStyle(c).touchAction, w: r.width };
         })()`,
         returnByValue: true,
       });
       const ta = layout.result.value?.touchAction;
       if (ta !== "none") throw new Error("touch-action " + ta);
       let stick = null;
-      for (let i = 0; i < 20; i++) {
-        await sleep(50);
+      let lastSnap = null;
+      for (let i = 0; i < 25; i++) {
+        await sleep(40);
         const ir = await cdp(ws, 300 + i, "Runtime.evaluate", {
           expression: `(() => {
             const h = window.__UXE_HOST__;
             if (!h) return null;
-            h.host_input_read();
-            return h._lastInput?.() || null;
+            return h.host_input_read();
           })()`,
           returnByValue: true,
         });
         const s = ir.result.value;
+        lastSnap = s;
         if (s && s.ix === 1 && (s.flags & 4) && s.fire === 1) {
           stick = s; break;
         }
       }
-      if (!stick) throw new Error("touch stick did not produce ix=1 FLAG_TOUCH");
+      if (!stick) {
+        throw new Error("touch stick did not produce ix=1 FLAG_TOUCH last=" + JSON.stringify(lastSnap));
+      }
       console.log("OK_SHIP", {
         backend: v.uxe.backend,
         scripts: v.scripts,

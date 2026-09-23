@@ -8,7 +8,7 @@ import {
   encodeInputSnapshot, INPUT_BYTES,
   BTN_LEFT, BTN_RIGHT, BTN_MIDDLE,
   FLAG_POINTER_IN, FLAG_SUICIDE, FLAG_TOUCH,
-  axesFromStick,
+  axesFromDrag,
 } from "./input.js";
 
 /**
@@ -65,6 +65,8 @@ export async function createBrowserHost(canvas, opts = {}) {
   let primaryId = -1;
   // Opt-in: FPS look (drone mouse). Asteroid / touch stay unlocked.
   let pointerLockEnabled = opts.pointerLock === true;
+  /** Stick origin in NDC at pointerdown (relative drag). */
+  let stickOx = 0, stickOy = 0, stickLive = false;
 
   function syncPointerFromEvent(e) {
     const r = canvas.getBoundingClientRect();
@@ -108,6 +110,9 @@ export async function createBrowserHost(canvas, opts = {}) {
     }
     canvas.setPointerCapture?.(e.pointerId);
     if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
+    stickOx = mx;
+    stickOy = my;
+    stickLive = true;
     // Primary contact → "left". Synthetic PointerEvents in headless may omit
     // button/buttons; touch always counts.
     if (
@@ -130,6 +135,7 @@ export async function createBrowserHost(canvas, opts = {}) {
     if (e.pointerId === primaryId) {
       primaryId = -1;
       buttons &= ~BTN_LEFT;
+      stickLive = false;
     }
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
@@ -138,6 +144,7 @@ export async function createBrowserHost(canvas, opts = {}) {
     if (e.pointerId === primaryId) {
       primaryId = -1;
       buttons &= ~BTN_LEFT;
+      stickLive = false;
     }
   }, ptrOpts);
 
@@ -183,8 +190,8 @@ export async function createBrowserHost(canvas, opts = {}) {
     renderer.render(scene, camera);
   }
 
-  function stickAxes(outMx, outMy) {
-    return axesFromStick(outMx, outMy);
+  function stickAxes(dx, dy) {
+    return axesFromDrag(dx, dy);
   }
 
   /** @type {object|null} */
@@ -216,9 +223,9 @@ export async function createBrowserHost(canvas, opts = {}) {
         movAccX = 0;
         movAccY = 0;
       }
-      // Virtual stick: primary contact + no keyboard axes → NDC → ix/iy.
-      if (contact && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
-        const a = stickAxes(outMx, outMy);
+      // Relative stick: drag from press origin (not screen center) → less twitchy.
+      if (contact && stickLive && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
+        const a = stickAxes(outMx - stickOx, outMy - stickOy);
         ix = a.ix;
         iy = a.iy;
       }

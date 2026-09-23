@@ -55,6 +55,8 @@ export async function runAsteroidCore(host, opts) {
 
   let state = freshState();
   let alive = true;
+  let lastFire = 0;
+  let tapMs = 0;
 
   const warm = await wasm_run({ image: fnImage, blob: fnBlob }, {
     ...state, ix: 0, iy: 0, dt: 0.016,
@@ -110,10 +112,27 @@ export async function runAsteroidCore(host, opts) {
     if (nIn !== INPUT_BYTES) throw new Error("host_input_read bytes " + nIn);
     const input = decodeInputSnapshot(inputBuf);
 
-    if (input.fire && !alive) {
-      state = freshState();
-      alive = true;
+    // Restart: keyboard Space = single edge; touch = double-tap within 450ms
+    const fireEdge = !!(input.fire && !lastFire);
+    lastFire = input.fire;
+    if (!alive && fireEdge) {
+      const touch = !!(input.flags & 4);
+      if (!touch) {
+        state = freshState();
+        alive = true;
+        tapMs = 0;
+      } else {
+        const nowTap = host.host_time();
+        if (tapMs > 0 && nowTap - tapMs < 450) {
+          state = freshState();
+          alive = true;
+          tapMs = 0;
+        } else {
+          tapMs = nowTap;
+        }
+      }
     }
+    if (alive) tapMs = 0;
 
     let ujsMs = 0;
     if (alive) {

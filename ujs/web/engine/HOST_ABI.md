@@ -157,18 +157,18 @@ f32 mx | f32 my | u32 buttons | u32 flags     ← v2
 
 | 字段 | 含义（浏览器） |
 |---|---|
-| `ix` / `iy` | −1/0/1 ← WASD / 方向键；**或** 按住主触点时由 `mx/my` 合成的虚拟摇杆（触屏 / 鼠标拖） |
+| `ix` / `iy` | −1/0/1 ← WASD / 方向键；**或** 按住后相对按下点拖动合成的虚拟摇杆（死区约 0.32 NDC） |
 | `fire` | Space **或** 主触点按下（鼠标左键 / 手指） |
 | `mx` / `my` | 相对 canvas 的 NDC；Pointer Events（含 touch）更新 |
 | `buttons` | bit0 主触点 · bit1 右 · bit2 中 |
 | `flags` | bit0 = 指针在 canvas 内 · bit1 = suicide（KeyF）· **bit2 = touch**（当前主触点是手指） |
 
-**触屏约定（Host 侧，游戏零改动即可用）：**
+**触屏约定（Host 侧）：**
 
 - canvas `touch-action: none`，拦截默认滚动
 - **不**对 touch 请求 Pointer Lock（Lock 仅 opt-in，给 FPS 鼠标用）
-- 按住屏幕：以触点相对中心的 NDC 驱动 `ix/iy`（死区 `STICK_DEADZONE`≈0.2）
-- 点按 = `fire`（Asteroid 撞毁后重开）
+- 按住拖动：以**按下点**为原点的相对位移驱动 `ix/iy`（死区 `STICK_DEADZONE`≈0.32，比相对屏幕中心更稳）
+- Asteroid 撞毁后：**双击**重开（键盘空格仍单击即可）
 
 decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1（兼容旧 `{game}.wasm` 小缓冲）。
 

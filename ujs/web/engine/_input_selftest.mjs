@@ -40,6 +40,8 @@ const up = axesFromStick(0, 0.8);
 if (up.ix !== 0 || up.iy !== -1) throw new Error("stick up");
 const dead = axesFromStick(0.05, -0.05);
 if (dead.ix !== 0 || dead.iy !== 0) throw new Error("stick deadzone");
+const soft = axesFromStick(0.25, 0);
+if (soft.ix !== 0) throw new Error("stick soft dead 0.25");
 
 console.log("OK_INPUT", {
   bytes: buf.byteLength, version: out.version,

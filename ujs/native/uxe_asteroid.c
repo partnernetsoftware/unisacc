@@ -56,6 +56,8 @@ static f64 last_ms, last_hud, acc_ujs, acc_gpu;
 static u32 acc_frames;
 static u8 input_buf[INPUT_BYTES];
 static u8 packet_buf[1 << 18];
+static u32 prev_fire;
+static f64 tap1_ms;
 
 static void log_lit(u32 level, const char *s) {
   u32 n = 0;
@@ -178,13 +180,15 @@ static u32 encode_packet(void) {
   return o;
 }
 
-static void decode_input(i32 *ix, i32 *iy, u32 *fire) {
+static void decode_input(i32 *ix, i32 *iy, u32 *fire, u32 *flags) {
   *ix = (i32)((u32)input_buf[8] | ((u32)input_buf[9] << 8) |
               ((u32)input_buf[10] << 16) | ((u32)input_buf[11] << 24));
   *iy = (i32)((u32)input_buf[12] | ((u32)input_buf[13] << 8) |
               ((u32)input_buf[14] << 16) | ((u32)input_buf[15] << 24));
   *fire = (u32)input_buf[16] | ((u32)input_buf[17] << 8) |
           ((u32)input_buf[18] << 16) | ((u32)input_buf[19] << 24);
+  *flags = (u32)input_buf[32] | ((u32)input_buf[33] << 8) |
+           ((u32)input_buf[34] << 16) | ((u32)input_buf[35] << 24);
 }
 
 __attribute__((export_name("game_init")))
@@ -215,7 +219,7 @@ __attribute__((export_name("game_frame")))
 void game_frame(void) {
   f64 now, dt, t0, g0, ujs_ms, gpu_ms;
   i32 ix, iy, nIn;
-  u32 fire, plen;
+  u32 fire, flags, plen, fire_edge, is_touch;
 
   host_frame_begin();
   now = host_time();
@@ -229,9 +233,24 @@ void game_frame(void) {
     host_request_frame();
     return;
   }
-  decode_input(&ix, &iy, &fire);
+  decode_input(&ix, &iy, &fire, &flags);
+  fire_edge = fire && !prev_fire;
+  prev_fire = fire;
+  is_touch = (flags & 4u) != 0;
 
-  if (fire && st.alive == 0.0) fresh_state();
+  if (st.alive == 0.0 && fire_edge) {
+    /* Keyboard Space: one press. Touch: double-tap within 450ms. */
+    if (!is_touch) {
+      fresh_state();
+      tap1_ms = 0.0;
+    } else if (tap1_ms > 0.0 && (now - tap1_ms) < 450.0) {
+      fresh_state();
+      tap1_ms = 0.0;
+    } else {
+      tap1_ms = now;
+    }
+  }
+  if (st.alive != 0.0) tap1_ms = 0.0;
 
   ujs_ms = 0.0;
   if (st.alive != 0.0) {

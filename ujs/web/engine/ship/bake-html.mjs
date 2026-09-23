@@ -45,7 +45,7 @@ const html = `<!DOCTYPE html>
   <div id="hud">ship · loading wasms…</div>
   <div id="banner"><div>
     <h1 style="margin:0 0 8px;font-size:28px">撞毁</h1>
-    <p style="margin:0;opacity:.85">点按或空格重开 · <span id="final">0</span></p>
+    <p style="margin:0;opacity:.85">双击或空格重开 · <span id="final">0</span></p>
   </div></div>
   <canvas id="c"></canvas>
   <script type="module">
