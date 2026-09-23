@@ -271,10 +271,15 @@ char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr
 char *bk_lists[BK_NLISTS]; int bk_idx[BK_NLISTS * BK_NIDX];
 int bk_idxn[BK_NLISTS]; int bk_nlists;
 
+char *bk_lastlist; int bk_lastslot;  /* calls cluster: the same list, again */
 int bk_index(char *list) {           /* the slot holding this list's offsets */
     int i; int k; int n;
+    if (list == bk_lastlist) return bk_lastslot;
     i = 0;
-    while (i < bk_nlists) { if (bk_lists[i] == list) return i; i = i + 1; }
+    while (i < bk_nlists) {
+        if (bk_lists[i] == list) { bk_lastlist = list; bk_lastslot = i; return i; }
+        i = i + 1;
+    }
     if (bk_nlists >= BK_NLISTS) return 0 - 1;   /* fall back to the walk */
     i = bk_nlists; bk_nlists = bk_nlists + 1;
     bk_lists[i] = list;
@@ -287,6 +292,7 @@ int bk_index(char *list) {           /* the slot holding this list's offsets */
         if (list[k] == 0) break;
     }
     bk_idxn[i] = n;
+    bk_lastlist = list; bk_lastslot = i;
     return i;
 }
 

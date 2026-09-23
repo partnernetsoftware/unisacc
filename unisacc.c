@@ -4942,18 +4942,60 @@ int macpoff[MAXMAC * MAXMPARAM]; int macplen[MAXMAC * MAXMPARAM];
 int nmac;
 
 int mfindt(int t);
-int mfind(char *s, int n) {
-    int i; int k; int ok;
+/* Every identifier in the source is looked up here -- that is what the
+   preprocessor DOES -- and the table holds hundreds of macros once the
+   headers are in, so the linear scan was the front end's hottest loop on
+   a sampling profile of the self-compile.
+   An open-addressed index over the same table: the answer is the same
+   entry, found without walking.  `mh_n` tracks how many entries the index
+   has seen, so a table that grew (or was reset) is re-indexed rather than
+   answered from a stale index. */
+#define MACH 8192
+int mac_h[MACH]; int mh_n = 0 - 1;
+
+int mac_hash(char *s, int n) {
+    int i; int h;
+    h = n * 131;
+    i = 0;
+    while (i < n) { h = h * 31 + (s[i] & 255); i = i + 1; }
+    h = h & (MACH - 1);
+    if (h < 0) h = 0 - h;
+    return h;
+}
+
+int mac_is(int i, char *s, int n) {     /* is entry i the name s[0..n)? */
+    int k;
+    k = 0;
+    while (macname[i * 32 + k]) {
+        if (k >= n) return 0;
+        if (macname[i * 32 + k] != s[k]) return 0;
+        k = k + 1;
+    }
+    return k == n;
+}
+
+int mac_reindex(void) {
+    int i; int h;
+    i = 0; while (i < MACH) { mac_h[i] = 0; i = i + 1; }
     i = 0;
     while (i < nmac) {
-        k = 0; ok = 1;
-        while (macname[i * 32 + k]) {
-            if (k >= n) ok = 0;
-            if (ok) { if (macname[i * 32 + k] != s[k]) ok = 0; }
-            k = k + 1;
-        }
-        if (ok) { if (k == n) return i; }
+        { int L; L = 0; while (macname[i * 32 + L]) L = L + 1;
+          h = mac_hash(macname + i * 32, L); }
+        while (mac_h[h]) h = (h + 1) & (MACH - 1);
+        mac_h[h] = i + 1;
         i = i + 1;
+    }
+    mh_n = nmac;
+    return 0;
+}
+
+int mfind(char *s, int n) {
+    int h;
+    if (mh_n != nmac) mac_reindex();
+    h = mac_hash(s, n);
+    while (mac_h[h]) {
+        if (mac_is(mac_h[h] - 1, s, n)) return mac_h[h] - 1;
+        h = (h + 1) & (MACH - 1);
     }
     return 0 - 1;
 }
@@ -6764,11 +6806,31 @@ int ec(int c) {
    (RECIPE_OP on the Python side), not a decision. */
 int nask[16];
 
+/* The oracle is a PURE FUNCTION of (stage, key, head) over a domain of
+   6,650 keys, and the compiler asks it once per token and once per lowered
+   instruction -- so the same question arrives thousands of times and a
+   sampling profile of the self-compile put `infer` at the top.
+   The answers are memoised.  This does not decide anything: a miss still
+   runs the net, the ANSWER is the net's, and `nask` still counts every
+   ask, so [A-33] `stages.sh` and `-c -v` see exactly what they saw before.
+   Direct-mapped, so a collision costs one extra inference and never a
+   wrong answer -- the tag is compared before the value is used. */
+#define INFC 16384
+int infc_tag[INFC]; int infc_val[INFC]; int infc_live[INFC];
+
 int inf(int st, int *key, int head) {
-    int r;
+    int r; int h; int tag;
+    /* the key is at most four small fields; this packs them with the
+       stage and the head into one int, which is the tag */
+    tag = ((st * 19 + head) * 8191) ^ (key[0] * 131) ^ (key[1] * 3571)
+        ^ (key[2] * 65537) ^ (key[3] * 97);
+    if (tag < 0) tag = 0 - tag;
+    h = tag & (INFC - 1);
     nask[st] = nask[st] + 1;
+    if (infc_live[h]) { if (infc_tag[h] == tag) return infc_val[h]; }
     r = infer(st, key, head);
     if (r < 0) { __write(2, "oracle: key outside the stage's domain\n", 39); __exit(1); }
+    infc_tag[h] = tag; infc_val[h] = r; infc_live[h] = 1;
     return r;
 }
 
@@ -11434,10 +11496,15 @@ char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr
 char *bk_lists[BK_NLISTS]; int bk_idx[BK_NLISTS * BK_NIDX];
 int bk_idxn[BK_NLISTS]; int bk_nlists;
 
+char *bk_lastlist; int bk_lastslot;  /* calls cluster: the same list, again */
 int bk_index(char *list) {           /* the slot holding this list's offsets */
     int i; int k; int n;
+    if (list == bk_lastlist) return bk_lastslot;
     i = 0;
-    while (i < bk_nlists) { if (bk_lists[i] == list) return i; i = i + 1; }
+    while (i < bk_nlists) {
+        if (bk_lists[i] == list) { bk_lastlist = list; bk_lastslot = i; return i; }
+        i = i + 1;
+    }
     if (bk_nlists >= BK_NLISTS) return 0 - 1;   /* fall back to the walk */
     i = bk_nlists; bk_nlists = bk_nlists + 1;
     bk_lists[i] = list;
@@ -11450,6 +11517,7 @@ int bk_index(char *list) {           /* the slot holding this list's offsets */
         if (list[k] == 0) break;
     }
     bk_idxn[i] = n;
+    bk_lastlist = list; bk_lastslot = i;
     return i;
 }
 
