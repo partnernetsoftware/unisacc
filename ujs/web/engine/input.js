@@ -7,7 +7,11 @@
  *
  * mx, my: canvas NDC ∈ [-1, 1], origin center, +x right, +y up
  * buttons: bit0 left · bit1 right · bit2 middle
- * flags: bit0 pointer inside canvas
+ * flags: bit0 pointer inside · bit1 suicide · bit2 touch (vs mouse/pen)
+ *
+ * Browser Host: when primary button is held and keyboard axes are idle,
+ * mx/my drive a virtual stick into ix/iy (touch + mouse drag). Pointer lock
+ * is opt-in; touch never locks.
  */
 export const INPUT_MAGIC = 0x4e495855; // 'UXIN' LE
 export const INPUT_VERSION = 2;
@@ -22,6 +26,28 @@ export const BTN_MIDDLE = 4;
 export const FLAG_POINTER_IN = 1;
 /** Host may set: operator armed suicide / kamikaze (KeyF). */
 export const FLAG_SUICIDE = 2;
+/** Primary contact is a touch (finger), not mouse/pen. */
+export const FLAG_TOUCH = 4;
+/** Dead-zone radius for Host virtual stick (NDC). */
+export const STICK_DEADZONE = 0.2;
+
+/**
+ * Map canvas NDC to discrete stick axes (same convention as WASD).
+ * my +up → iy −1；my −down → iy +1.
+ * @param {number} mx
+ * @param {number} my
+ * @param {number} [dead]
+ * @returns {{ ix: number, iy: number }}
+ */
+export function axesFromStick(mx, my, dead = STICK_DEADZONE) {
+  let ix = 0, iy = 0;
+  if (mx <= -dead) ix = -1;
+  else if (mx >= dead) ix = 1;
+  if (my <= -dead) iy = 1;
+  else if (my >= dead) iy = -1;
+  return { ix, iy };
+}
+
 
 /**
  * @param {{

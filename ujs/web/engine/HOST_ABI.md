@@ -157,11 +157,18 @@ f32 mx | f32 my | u32 buttons | u32 flags     ← v2
 
 | 字段 | 含义（浏览器） |
 |---|---|
-| `ix` / `iy` | −1/0/1 ← WASD / 方向键 |
-| `fire` | Space **或** 鼠标左键 |
-| `mx` / `my` | 相对 canvas 的 NDC；`pointermove` 更新 |
-| `buttons` | bit0 左 · bit1 右 · bit2 中 |
-| `flags` | bit0 = 指针在 canvas 内 |
+| `ix` / `iy` | −1/0/1 ← WASD / 方向键；**或** 按住主触点时由 `mx/my` 合成的虚拟摇杆（触屏 / 鼠标拖） |
+| `fire` | Space **或** 主触点按下（鼠标左键 / 手指） |
+| `mx` / `my` | 相对 canvas 的 NDC；Pointer Events（含 touch）更新 |
+| `buttons` | bit0 主触点 · bit1 右 · bit2 中 |
+| `flags` | bit0 = 指针在 canvas 内 · bit1 = suicide（KeyF）· **bit2 = touch**（当前主触点是手指） |
+
+**触屏约定（Host 侧，游戏零改动即可用）：**
+
+- canvas `touch-action: none`，拦截默认滚动
+- **不**对 touch 请求 Pointer Lock（Lock 仅 opt-in，给 FPS 鼠标用）
+- 按住屏幕：以触点相对中心的 NDC 驱动 `ix/iy`（死区 `STICK_DEADZONE`≈0.2）
+- 点按 = `fire`（Asteroid 撞毁后重开）
 
 decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1（兼容旧 `{game}.wasm` 小缓冲）。
 
@@ -191,7 +198,7 @@ Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
 |---|---|---|
 | H1 ✓ | 雾 / 环境光 / 方向光 | UXEP v2 |
 | H2 ✓ | 金属粗糙自发光 / 多 mesh | UXEP v3 · `meshes.js` |
-| **H3 ✓ 指针** | 鼠标/触屏 NDC + 按键位 | **UXIN v2**（`mx/my/buttons/flags`） |
+| **H3 ✓ 指针** | 鼠标/触屏 NDC + 按键位 + Host 虚拟摇杆 | **UXIN v2**（`mx/my/buttons/flags`，`FLAG_TOUCH`） |
 | H3 余 | 点精灵 · 更多 action bit | UXEP points · UXIN 再扩 |
 | **H4** | 贴图 · buffer 驻留 | `map_id` · `host_asset` |
 | 后加 | `host_audio` · `host_storage` · `host_net` | 独立符号，仍经 Host |

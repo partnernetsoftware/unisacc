@@ -1,4 +1,4 @@
-/** Browser implementation of Host ABI v0 (+ UXIN v2 pointer). */
+/** Browser implementation of Host ABI v0 (+ UXIN v2 pointer / touch stick). */
 import { createWebGLRenderer } from "./renderer-webgl.js";
 import { createWebGPURenderer } from "./renderer-webgpu.js";
 import { Scene, PerspectiveCamera } from "./scene.js";
@@ -6,12 +6,18 @@ import { HOST_ABI_VERSION } from "./host-abi.js";
 import { decodeRenderPacket } from "./packet.js";
 import {
   encodeInputSnapshot, INPUT_BYTES,
-  BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, FLAG_POINTER_IN,
+  BTN_LEFT, BTN_RIGHT, BTN_MIDDLE,
+  FLAG_POINTER_IN, FLAG_SUICIDE, FLAG_TOUCH,
+  axesFromStick,
 } from "./input.js";
 
 /**
  * @param {HTMLCanvasElement} canvas
- * @param {{ baseURL?: URL, prefer?: "auto" | "webgpu" | "webgl" }} [opts]
+ * @param {{
+ *   baseURL?: URL,
+ *   prefer?: "auto" | "webgpu" | "webgl",
+ *   pointerLock?: boolean,
+ * }} [opts]
  */
 export async function createBrowserHost(canvas, opts = {}) {
   const baseURL = opts.baseURL || new URL(".", import.meta.url);
@@ -39,6 +45,11 @@ export async function createBrowserHost(canvas, opts = {}) {
   renderer.resize();
   addEventListener("resize", () => renderer.resize());
 
+  // Mobile: keep gestures for the game, not the browser chrome.
+  canvas.style.touchAction = "none";
+  canvas.style.userSelect = "none";
+  canvas.style.webkitUserSelect = "none";
+
   const keys = Object.create(null);
   const onKey = (down) => (e) => {
     keys[e.code] = down;
@@ -49,6 +60,11 @@ export async function createBrowserHost(canvas, opts = {}) {
 
   let mx = 0, my = 0, buttons = 0, flags = 0;
   let movAccX = 0, movAccY = 0;
+  /** @type {string} */
+  let primaryType = "mouse";
+  let primaryId = -1;
+  // Opt-in: FPS look (drone mouse). Asteroid / touch stay unlocked.
+  let pointerLockEnabled = opts.pointerLock === true;
 
   function syncPointerFromEvent(e) {
     const r = canvas.getBoundingClientRect();
@@ -63,6 +79,8 @@ export async function createBrowserHost(canvas, opts = {}) {
     flags = inside ? FLAG_POINTER_IN : 0;
   }
 
+  const ptrOpts = { passive: false };
+
   canvas.addEventListener("pointermove", (e) => {
     if (document.pointerLockElement === canvas) {
       movAccX += e.movementX || 0;
@@ -70,29 +88,61 @@ export async function createBrowserHost(canvas, opts = {}) {
       flags = FLAG_POINTER_IN;
       return;
     }
+    if (primaryId >= 0 && e.pointerId !== primaryId) return;
     syncPointerFromEvent(e);
-  });
-  let pointerLockEnabled = opts.pointerLock !== false;
+    if (e.cancelable) e.preventDefault();
+  }, ptrOpts);
 
   canvas.addEventListener("pointerdown", (e) => {
-    if (pointerLockEnabled && document.pointerLockElement !== canvas) {
+    const isTouch = e.pointerType === "touch";
+    if (
+      pointerLockEnabled &&
+      !isTouch &&
+      document.pointerLockElement !== canvas
+    ) {
       canvas.requestPointerLock?.();
+    }
+    if (primaryId < 0 || e.pointerId === primaryId) {
+      primaryId = e.pointerId;
+      primaryType = e.pointerType || "mouse";
     }
     canvas.setPointerCapture?.(e.pointerId);
     if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
-    if (e.button === 0) buttons |= BTN_LEFT;
+    // Primary contact → "left". Synthetic PointerEvents in headless may omit
+    // button/buttons; touch always counts.
+    if (
+      e.isPrimary !== false &&
+      (isTouch || e.button === 0 || e.button === -1 || (e.buttons & 1))
+    ) {
+      buttons |= BTN_LEFT;
+    }
     if (e.button === 1) buttons |= BTN_MIDDLE;
     if (e.button === 2) buttons |= BTN_RIGHT;
-    e.preventDefault();
-  });
+    if (e.cancelable) e.preventDefault();
+  }, ptrOpts);
+
   canvas.addEventListener("pointerup", (e) => {
     if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
-    if (e.button === 0) buttons &= ~BTN_LEFT;
+    const isTouch = e.pointerType === "touch";
+    if (isTouch || e.button === 0 || e.button === -1) buttons &= ~BTN_LEFT;
     if (e.button === 1) buttons &= ~BTN_MIDDLE;
     if (e.button === 2) buttons &= ~BTN_RIGHT;
-  });
+    if (e.pointerId === primaryId) {
+      primaryId = -1;
+      buttons &= ~BTN_LEFT;
+    }
+    if (e.cancelable) e.preventDefault();
+  }, ptrOpts);
+
+  canvas.addEventListener("pointercancel", (e) => {
+    if (e.pointerId === primaryId) {
+      primaryId = -1;
+      buttons &= ~BTN_LEFT;
+    }
+  }, ptrOpts);
+
   canvas.addEventListener("pointerleave", () => {
-    if (document.pointerLockElement !== canvas) flags = 0;
+    if (document.pointerLockElement !== canvas && primaryId < 0) flags = 0;
   });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   document.addEventListener("pointerlockchange", () => {
@@ -133,6 +183,13 @@ export async function createBrowserHost(canvas, opts = {}) {
     renderer.render(scene, camera);
   }
 
+  function stickAxes(outMx, outMy) {
+    return axesFromStick(outMx, outMy);
+  }
+
+  /** @type {object|null} */
+  let lastSnap = null;
+
   return {
     version: HOST_ABI_VERSION,
     backend: renderer.backend,
@@ -148,22 +205,33 @@ export async function createBrowserHost(canvas, opts = {}) {
       if (keys.KeyS || keys.ArrowDown) iy += 1;
       if (keys.KeyW || keys.ArrowUp) iy -= 1;
       const fireKey = keys.Space ? 1 : 0;
-      const fireBtn = (buttons & BTN_LEFT) ? 1 : 0;
+      const contact = primaryId >= 0 || (buttons & BTN_LEFT) !== 0;
+      const fireBtn = contact ? 1 : 0;
       let outMx = mx, outMy = my;
       let outFlags = flags;
-      if (keys.KeyF) outFlags |= 2; // FLAG_SUICIDE
+      if (keys.KeyF) outFlags |= FLAG_SUICIDE;
       if (document.pointerLockElement === canvas) {
         outMx = Math.max(-1, Math.min(1, movAccX / 48));
         outMy = Math.max(-1, Math.min(1, -movAccY / 48));
         movAccX = 0;
         movAccY = 0;
       }
+      // Virtual stick: primary contact + no keyboard axes → NDC → ix/iy.
+      if (contact && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
+        const a = stickAxes(outMx, outMy);
+        ix = a.ix;
+        iy = a.iy;
+      }
+      if (primaryId >= 0 && primaryType === "touch") outFlags |= FLAG_TOUCH;
+      const outButtons = contact ? (buttons | BTN_LEFT) : buttons;
+
       const snap = {
         ix, iy,
         fire: fireKey || fireBtn,
-        mx: outMx, my: outMy, buttons, flags: outFlags,
+        mx: outMx, my: outMy, buttons: outButtons, flags: outFlags,
         keys: { ...keys },
       };
+      lastSnap = snap;
       if (buf != null) {
         const ab = buf instanceof ArrayBuffer
           ? buf
@@ -217,6 +285,10 @@ export async function createBrowserHost(canvas, opts = {}) {
       if (!pointerLockEnabled && document.pointerLockElement === canvas) {
         document.exitPointerLock?.();
       }
+    },
+
+    _lastInput() {
+      return lastSnap;
     },
 
     _stats() {

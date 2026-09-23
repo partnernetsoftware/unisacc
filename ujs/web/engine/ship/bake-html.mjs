@@ -17,8 +17,8 @@ const html = `<!DOCTYPE html>
   <title>UXE · Asteroid</title>
   <style>
     :root { color-scheme: dark; }
-    html, body { margin: 0; height: 100%; background: #05060a; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
-    #c { display: block; width: 100%; height: 100%; }
+    html, body { margin: 0; height: 100%; background: #05060a; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; touch-action: none; }
+    #c { display: block; width: 100%; height: 100%; touch-action: none; }
     #hud {
       position: fixed; left: 16px; top: 16px; z-index: 2;
       color: #c8d0e0; font-size: 13px; line-height: 1.55;
@@ -45,7 +45,7 @@ const html = `<!DOCTYPE html>
   <div id="hud">ship · loading wasms…</div>
   <div id="banner"><div>
     <h1 style="margin:0 0 8px;font-size:28px">撞毁</h1>
-    <p style="margin:0;opacity:.85">空格重开 · <span id="final">0</span></p>
+    <p style="margin:0;opacity:.85">点按或空格重开 · <span id="final">0</span></p>
   </div></div>
   <canvas id="c"></canvas>
   <script type="module">

@@ -64,6 +64,44 @@ try {
     const v = r.result.value || {};
     if (v.uxe?.ready && v.uxe.ship && v.uxe.wasmGame && v.uxe.wasmEngine && v.uxe.fps > 0) {
       const inlineOnly = (v.scripts || []).every((s) => !s || s === "");
+      if (!inlineOnly) throw new Error("expected no external script src");
+
+      // Touch virtual stick: finger on right half → ix=+1, FLAG_TOUCH
+      const layout = await cdp(ws, 200, "Runtime.evaluate", {
+        expression: `(() => {
+          const c = document.getElementById('c');
+          const r = c.getBoundingClientRect();
+          const x = r.left + r.width * 0.88;
+          const y = r.top + r.height * 0.5;
+          const o = { pointerId: 7, pointerType: 'touch', isPrimary: true,
+            clientX: x, clientY: y, buttons: 1, button: 0,
+            bubbles: true, cancelable: true };
+          c.dispatchEvent(new PointerEvent('pointerdown', o));
+          c.dispatchEvent(new PointerEvent('pointermove', o));
+          return { touchAction: getComputedStyle(c).touchAction };
+        })()`,
+        returnByValue: true,
+      });
+      const ta = layout.result.value?.touchAction;
+      if (ta !== "none") throw new Error("touch-action " + ta);
+      let stick = null;
+      for (let i = 0; i < 20; i++) {
+        await sleep(50);
+        const ir = await cdp(ws, 300 + i, "Runtime.evaluate", {
+          expression: `(() => {
+            const h = window.__UXE_HOST__;
+            if (!h) return null;
+            h.host_input_read();
+            return h._lastInput?.() || null;
+          })()`,
+          returnByValue: true,
+        });
+        const s = ir.result.value;
+        if (s && s.ix === 1 && (s.flags & 4) && s.fire === 1) {
+          stick = s; break;
+        }
+      }
+      if (!stick) throw new Error("touch stick did not produce ix=1 FLAG_TOUCH");
       console.log("OK_SHIP", {
         backend: v.uxe.backend,
         scripts: v.scripts,
@@ -73,8 +111,8 @@ try {
         n: v.uxe.n,
         wasmGame: v.uxe.wasmGame,
         wasmEngine: v.uxe.wasmEngine,
+        touchStick: { ix: stick.ix, flags: stick.flags, mx: stick.mx },
       });
-      if (!inlineOnly) throw new Error("expected no external script src");
       ws.close(); chrome.kill("SIGKILL"); process.exit(0);
     }
     if (v.uxe?.ready === false) throw new Error(v.uxe.error);

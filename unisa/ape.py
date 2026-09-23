@@ -13,11 +13,15 @@ So the file is:
     MZ qFpD='....'      <- DOS header; e_lfanew lives inside the quotes
     <the shell script>  <- still the DOS stub, as far as Windows cares
     <PE headers + the win/x86_64 image>
-    <the lnx and osx images, one after another>
+    <the lnx and osx images, gzipped, one after another>
+
+The Unix slices are gzipped and the script decompresses the one it picked
+(`gzip -dc`); the PE half cannot be, since Windows runs it in place.
 
 Windows on arm64 runs the x86-64 PE under its own emulation, which is how
 tests/crossnative.sh already exercises that target.
 """
+import gzip
 import struct
 
 from .image import pe
@@ -49,7 +53,9 @@ def _script(table):
         '  *) echo "unisacc: no slice for $u" >&2; exit 1;;',
         "esac",
         't="${TMPDIR:-/tmp}/unisacc.$$"',
-        'tail -c +$o "$0" | head -c $n > "$t" || exit 1',
+        # the slices are gzipped; `gzip -dc` is the spelling both Apple gzip
+        # and GNU gzip have had forever (busybox spells it `gunzip -c`)
+        'tail -c +$o "$0" | head -c $n | gzip -dc > "$t" || exit 1',
         'chmod +x "$t"',
         '"$t" "$@"; r=$?',
         'rm -f "$t"',
@@ -84,7 +90,11 @@ def build(compile_target, out):
     script, the second writes the real offsets.  The script's length cannot
     change between them, which is what the fixed-width fields are for.
     """
-    imgs = {t: compile_target(t) for (_, t) in SLICES}
+    # The appended Unix slices are gzipped -- the script pipes them through
+    # `gzip -dc`.  mtime=0 so the bytes are a function of the input alone;
+    # the project depends on byte-identical rebuilds.  The win/x86_64 image
+    # at offset 0 is NOT compressed: Windows executes it in place.
+    imgs = {t: gzip.compress(compile_target(t), mtime=0) for (_, t) in SLICES}
     # pass 1: plausible numbers, padded to a fixed length
     guess = [(name, 1 << 30, len(imgs[t])) for (name, t) in SLICES]
     want = len(_script(guess)) + PAD

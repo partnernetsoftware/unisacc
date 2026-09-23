@@ -2,10 +2,11 @@
 # unisacc.com: one file, every target. [A-38] [S-10]
 #
 # The file is a PE for Windows and a shell script for a Unix shell, with the
-# lnx and osx images appended.  Here it is built and then run ON THIS HOST,
-# which exercises the header (the shell has to accept the first line), the
-# offsets in the script (BSD tail reads a leading zero as octal, so they are
-# plain decimal) and the slice itself.
+# lnx and osx images appended, gzipped.  Here it is built and then run ON THIS
+# HOST, which exercises the header (the shell has to accept the first line),
+# the offsets in the script (BSD tail reads a leading zero as octal, so they
+# are plain decimal), the `gzip -dc` the script pipes the slice through, and
+# the slice itself.
 #
 # The other hosts run the same file: tests/linux.sh through Lima, and
 # tests/crossnative.sh's Windows machine loads the PE half.

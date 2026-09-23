@@ -25,7 +25,9 @@ const TAG = { f64: 3, str: 4, list: 5, dict: 6 };
 export async function startShip(cfg) {
   const host = await createBrowserHost(cfg.canvas, {
     prefer: cfg.prefer || "auto",
+    pointerLock: false,
   });
+  window.__UXE_HOST__ = host;
 
   const [engineBuf, gameBuf] = await Promise.all([
     fetch(cfg.engineUrl).then((r) => {
@@ -186,9 +188,9 @@ export async function startShip(cfg) {
       `backend <b>${host.backend}</b> · entities <b>${snap.n}</b><br>` +
       `ujs <b>${snap.ujsMs.toFixed(2)} ms</b> · gpu <b>${snap.drawMs.toFixed(2)} ms</b><br>` +
       `fps <b>${snap.fps.toFixed(0)}</b> · score <b>${snap.score.toFixed(0)}</b><br>` +
-      `操作 <b>WASD</b> 移动` +
+      `操作 <b>WASD</b> / <b>触屏拖</b> · 撞毁后 <b>点按</b>/空格重开` +
       (host._stats?.().bytes ? ` · packet <b>${host._stats().bytes}</b> B` : "") +
-      (snap.alive ? "" : `<br><span class="warn">撞毁 — 空格重开</span>`);
+      (snap.alive ? "" : `<br><span class="warn">撞毁 — 点按或空格重开</span>`);
   }
 
   const imports = {
