@@ -13,14 +13,19 @@ export async function createEngine(canvas, opts = {}) {
   const camera = new PerspectiveCamera();
 
   let renderer = null;
-  if (prefer === "webgpu") {
+  if (prefer !== "webgl") {
     try {
       renderer = await createWebGPURenderer(canvas);
     } catch {
       renderer = null;
     }
   }
-  if (!renderer) renderer = createWebGLRenderer(canvas);
+  if (!renderer) {
+    if (prefer === "webgpu") {
+      // explicit webgpu-only failure still falls back for demos
+    }
+    renderer = createWebGLRenderer(canvas);
+  }
 
   renderer.resize();
   addEventListener("resize", () => renderer.resize());

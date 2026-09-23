@@ -48,7 +48,8 @@ Packet {
 **线上格式**（LE，magic `UXEP`，version=1）见 `packet.js` `encodeRenderPacket` / `decodeRenderPacket`。  
 `host_gpu_submit` 主路径吃 **ArrayBuffer**；对象仅调试兼容。
 
-宿主：解码 packet → 译成 WebGL/WebGPU command → **一次** `present`。
+宿主：解码 packet → 译成 WebGL/WebGPU command → **一次** `present`。  
+浏览器：`createBrowserHost({ prefer: "webgpu"|"webgl" })` 默认先 WebGPU 实例化路径，失败回退 WebGL。
 
 ## 输入快照（**已线性化**，`input.js`）
 
