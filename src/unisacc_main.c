@@ -2064,6 +2064,15 @@ long numval(int t) {
     return v;
 }
 
+/* One string, in one place: a release is identifiable from the binary. */
+#define UNISACC_VERSION "0.1.23"
+/* Are two NUL-terminated strings the same? */
+int strsame(char *a, char *b) {
+    int k;
+    k = 0;
+    while (a[k] && b[k]) { if (a[k] != b[k]) return 0; k = k + 1; }
+    return a[k] == b[k];
+}
 int curunit;                /* which input file is being walked */
 int ustat_is(int t);
 int etok(int i) {
@@ -6078,6 +6087,12 @@ int main(void) {
         a = __argv(i);
         if (a[0] == 45 && a[1] == 45 && a[1 + 1] == 0) {   /* `--`: argv starts */
             i = i + 1; break;
+        }
+        /* `-version` / `--version`: which build is this.  `-v` is taken --
+           it prints how many times each stage was asked. */
+        if (strsame(a, "-version") || strsame(a, "--version")) {
+            printf("unisacc %s\n", UNISACC_VERSION);
+            return 0;
         }
         if (a[0] == 45 && a[1]) {
             if (a[1] == 73) {                              /* -I */

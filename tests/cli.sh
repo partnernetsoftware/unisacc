@@ -93,6 +93,11 @@ say "-E preprocesses" "expanded" "$got"
 say "-Wall -O2 -g -std" "ok" "$( (cd "$T" && perl -e 'alarm 120; exec @ARGV' \
     "$UA_RUN" -Wall -O2 -g -std=c99 -run def.c 2>&1) | sed 's/^off$/ok/')"
 
+# which build is this: a release has to be identifiable from the binary
+got=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" --version 2>&1) )
+case "$got" in "unisacc "[0-9]*) got="a version";; esac
+say "--version" "a version" "$got"
+
 echo
 echo "cli  ok $ok   wrong $bad   (from a scratch dir, no repo in sight)"
 # A suite that checked nothing is not green: `closure.sh` with no
