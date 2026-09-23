@@ -276,6 +276,50 @@ def _winapi(ins, off, shift, text_va, imps):
         out += _align_post()
         out += rip(0x8B, "rax", pc + len(out) + 7, written)
         return out
+    if op == "mmap":
+        # VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect) --
+        # four arguments, which is exactly what Win64 passes in registers
+        pre, _ = _align_pre(0)
+        out = pre + _callimp(pc + len(pre), imps, "VirtualAlloc")
+        return out + _align_post()
+    if op == "mprotect":
+        # VirtualProtect(addr, size, newProtect, &old): the old protection
+        # has to go somewhere, and the WriteFile scratch cell is free here
+        scr0 = m.get("scr0", 0) + shift
+        scr1 = m.get("scr1", 0) + shift
+        out = rip(0x8D, "r9", pc + 7, written)                # r9 = &old
+        pre, _ = _align_pre(0)
+        out += pre
+        out += _callimp(pc + len(out), imps, "VirtualProtect")
+        out += _align_post()
+        # Windows on arm64 will not execute code that is still only in the
+        # data cache, and changing the protection does not flush it: the
+        # first instruction raises STATUS_ILLEGAL_INSTRUCTION.  The current
+        # process is the pseudo-handle -1, so nothing else is imported.
+        out += mov_ri("rcx", (-1) & 0xFFFFFFFFFFFFFFFF)
+        out += rip(0x8B, "rdx", pc + len(out) + 7, scr0)      # the address
+        out += rip(0x8B, "r8", pc + len(out) + 7, scr1)       # the length
+        pre2, _ = _align_pre(0)
+        out += pre2
+        out += _callimp(pc + len(out), imps, "FlushInstructionCache")
+        out += _align_post()
+        # POSIX says 0 on success; VirtualProtect says nonzero
+        out += rex(1, 0, 0, 0) + b"\x83" + modrm(3, 7, 0) + b"\x00"   # cmp rax,0
+        out += b"\x0f\x94\xc0"                        # sete al
+        out += rex(1, 0, 0, 0) + b"\x0f\xb6\xc0"      # movzx rax, al
+        return out
+    if op == "munmap":
+        out = mov_ri("r8", 0x8000)                      # MEM_RELEASE
+        out += mov_ri("rdx", 0)                         # dwSize must be 0
+        pre, _ = _align_pre(0)
+        out += pre
+        out += _callimp(pc + len(out), imps, "VirtualFree")
+        out += _align_post()
+        # POSIX munmap returns 0 on success, VirtualFree nonzero
+        out += rex(1, 0, 0, 0) + b"\x83" + modrm(3, 7, 0) + b"\x00"
+        out += b"\x0f\x94\xc0"
+        out += rex(1, 0, 0, 0) + b"\x0f\xb6\xc0"
+        return out
     if op == "close":
         out = _fd2handle_x86(pc, hstd)
         pre, _ = _align_pre(0)

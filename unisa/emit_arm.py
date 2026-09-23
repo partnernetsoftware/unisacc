@@ -375,6 +375,32 @@ def _winapi(ins, off, shift, text_va, imps):
         out += adrp_add(IP0, pc + len(out), written)
         out += _ldr(0, IP0)                          # the POSIX return value
         return out
+    if op == "mmap":
+        return _callimp(pc, imps, "VirtualAlloc")       # four args, in x0..x3
+    if op == "mprotect":
+        scr0 = m.get("scr0", 0) + shift
+        scr1 = m.get("scr1", 0) + shift
+        out = adrp_add(3, pc, written)                  # x3 = &old
+        out += _callimp(pc + len(out), imps, "VirtualProtect")
+        # see emit_x86: arm64 Windows needs the instruction cache flushed,
+        # and GetCurrentProcess() is always the pseudo-handle -1
+        out += _movn(0, -1)                             # x0 = -1
+        out += adrp_add(IP0, pc + len(out), scr0)
+        out += _ldr(1, IP0)                             # x1 = the address
+        out += adrp_add(IP0, pc + len(out), scr1)
+        out += _ldr(2, IP0)                             # x2 = the length
+        out += _callimp(pc + len(out), imps, "FlushInstructionCache")
+        # POSIX returns 0 on success, VirtualProtect nonzero
+        out += w(0xF100001F)                            # cmp x0, #0
+        out += w(0x9A9F17E0)                            # cset x0, eq
+        return out
+    if op == "munmap":
+        out = w(0xD2900002)                             # x2 = 0x8000 MEM_RELEASE
+        out += w(0xAA1F03E1)                            # x1 = 0 (dwSize)
+        out += _callimp(pc + len(out), imps, "VirtualFree")
+        out += w(0xF100001F)                            # cmp x0, #0
+        out += w(0x9A9F17E0)                            # cset x0, eq
+        return out
     if op == "close":
         out = _fd2handle(pc, hstd)
         return out + _callimp(pc + len(out), imps, "CloseHandle")

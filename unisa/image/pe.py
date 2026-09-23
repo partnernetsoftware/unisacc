@@ -21,7 +21,8 @@ DLL = b"KERNEL32.dll"
 # Fixed order: the IAT slot for a name is its index, and lowering resolves
 # `__imp_<name>` to that slot's address.
 IMPORTS = ("GetStdHandle", "WriteFile", "ReadFile", "CloseHandle",
-           "CreateFileA", "ExitProcess", "GetCommandLineA", "VirtualAlloc")
+           "CreateFileA", "ExitProcess", "GetCommandLineA", "VirtualAlloc",
+           "VirtualProtect", "VirtualFree", "FlushInstructionCache")
 
 
 def _round(v, a):

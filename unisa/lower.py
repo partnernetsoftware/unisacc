@@ -152,6 +152,12 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             tp.emit("winsave", SAVE)
         for i, src in enumerate(arg_srcs):
             if args[i] == "none":
+                # Win64 passes the fifth argument and beyond on the stack,
+                # which this gate does not do.  The WinAPI shapes it calls
+                # take four or fewer, so the rest are simply not passed --
+                # `mmap` becomes VirtualAlloc(addr, size, type, protect).
+                if os_ == "win":
+                    break
                 raise NotImplementedError(
                     "%s/%s passes syscall argument %d on the stack, which "
                     "this gate does not do (%s)" % (os_, arch, i, op))
@@ -163,7 +169,8 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         # there. [I-20]
         tp.emit("gate", form=f["form"], gate=gate, carry=(os_ == "osx"),
                 winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
-                ret=f["ret"], hstd=HSTD, written=WRITTEN)
+                ret=f["ret"], hstd=HSTD, written=WRITTEN,
+                scr0=SCR0, scr1=SCR1)
         if win:
             tp.emit("winrest", SAVE, f["ret"])
 

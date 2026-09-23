@@ -10822,6 +10822,7 @@ int bkrel;                          /* the reloc answer for the branch being low
    in memory this process maps, instead of into an image on disk.  Nothing
    about the code changes -- the same encoders, the same tables -- only where
    text and data are placed and the fact that nobody writes a header. */
+long bk_impval[16];                 /* run mode on Windows: the real routines */
 int bk_runmode; long bk_runtext; long bk_rundata; long bk_runtsz; long bk_rundsz;
 int bkf_nr;                         /* the syscall-number register (abi nrreg) */
 int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;
@@ -10926,10 +10927,20 @@ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
     int g; int i;
     bk_facts(cop);
     if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno);
+    /* a WinAPI call clobbers every tape register, the tape STACK POINTER
+       included, so it is bracketed here exactly as the three-argument gate
+       is.  Without this the compiler returned from VirtualAlloc with a
+       garbage stack and fetched its next instruction from nowhere. */
+    if (bkos == 2) tk(TO_WINSAVE, bk_save, 0, 0, 0);
     i = 0;
-    while (i < 6) { tk_setreg(bkf_arg[i], SK_MEM, cell + 8 * i); i = i + 1; }
+    while (i < 6) {
+        if (bkf_arg[i] < 0) break;         /* Win64: the rest go on the stack */
+        tk_setreg(bkf_arg[i], SK_MEM, cell + 8 * i);
+        i = i + 1;
+    }
     g = tk(TO_GATE, 0, 0, 0, 0);
     tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
+    if (bkos == 2) tk(TO_WINREST, bk_save, bkf_ret, 0, 0);
     return 0;
 }
 
@@ -10990,7 +11001,8 @@ int bk_lower(void) {
         if (pc == bkentry) {
             /* bind the tape SP at the ENTRY: a real process has a real stack */
             if (bkos == 2) tk(TO_WINSTDH, bk_hstd, 0, 0, 0);
-            if (bkos == 2) tk(TO_WINARGS, bk_argc, bk_argv, bk_argva, 0);
+            if (bkos == 2 && bk_runmode == 0)
+                tk(TO_WINARGS, bk_argc, bk_argv, bk_argva, 0);
             tk(TO_SPINIT, bk_rmap[7], bkos == 2 ? bk_stacktop : 0 - 1, 0, 0);
             /* In run mode nobody hands over argc/argv: the loader writes
                them into the two cells below before it jumps, so the entry
@@ -11088,7 +11100,8 @@ int bk_lower(void) {
 char *bkout;                        /* where the current instruction's bytes go */
 int bkol;                           /* how many so far */
 long bk_textva; long bk_shift; int bk_sizing;
-long bk_imp[8];                     /* Windows: the IAT slot of each import */
+#define BK_NIMP 11                  /* pe.IMPORTS */
+long bk_imp[BK_NIMP];               /* Windows: the IAT slot of each import */
 long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
 
 int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
@@ -11221,6 +11234,34 @@ int a_winapi(int i, long off) {
         a_callimp(pc + (bkol - s), bk_str_is(nm, "write") ? 1 : 2);
         a_adrp_add(A_IP0, pc + (bkol - s), written);
         a_ldr(0, A_IP0, 0);
+        return 1;
+    }
+    if (bk_str_is(nm, "mmap")) {          /* VirtualAlloc, four args in x0..x3 */
+        a_callimp(pc, 7);
+        return 1;
+    }
+    if (bk_str_is(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
+        long scr0; long scr1;
+        scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
+        a_adrp_add(3, pc, written);
+        a_callimp(pc + (bkol - s), 8);
+        /* arm64 Windows will not execute code that is only in the data
+           cache, and a protection change does not flush it.  The current
+           process is the pseudo-handle -1. [S-9] */
+        a_movn(0, 0 - 1);
+        a_adrp_add(A_IP0, pc + (bkol - s), scr0); a_ldr(1, A_IP0, 0);
+        a_adrp_add(A_IP0, pc + (bkol - s), scr1); a_ldr(2, A_IP0, 0);
+        a_callimp(pc + (bkol - s), 10);
+        ow(0xF100001F);                   /* cmp x0, #0 -- POSIX wants 0 = ok */
+        ow(0x9A9F17E0);                   /* cset x0, eq */
+        return 1;
+    }
+    if (bk_str_is(nm, "munmap")) {        /* VirtualFree(addr, 0, MEM_RELEASE) */
+        ow(0xD2900002);
+        ow(0xAA1F03E1);
+        a_callimp(pc + (bkol - s), 9);
+        ow(0xF100001F);                   /* POSIX wants 0 = ok */
+        ow(0x9A9F17E0);
         return 1;
     }
     if (bk_str_is(nm, "close")) {
@@ -11593,6 +11634,38 @@ int x_winapi(int i, long off) {
         x_rip(0x8B, X_RAX, pc + (bkol - s) + 7, written);
         return 1;
     }
+    if (bk_str_is(nm, "mmap")) {
+        x_alignpre(0); x_callimp(pc + (bkol - s), 7); x_alignpost();
+        return 1;
+    }
+    if (bk_str_is(nm, "mprotect")) {
+        long scr0; long scr1;
+        scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
+        x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);   /* r9 = &old */
+        x_alignpre(0);
+        x_callimp(pc + (bkol - s), 8);
+        x_alignpost();
+        /* flush the instruction cache -- see the arm64 gate */
+        x_movri(X_RCX, 0 - 1);
+        x_rip(0x8B, X_RDX, pc + (bkol - s) + 7, scr0);
+        x_rip(0x8B, X_R8, pc + (bkol - s) + 7, scr1);
+        x_alignpre(0);
+        x_callimp(pc + (bkol - s), 10);
+        x_alignpost();
+        x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax, 0 */
+        ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
+        x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx rax, al */
+        return 1;
+    }
+    if (bk_str_is(nm, "munmap")) {
+        x_movri(X_R8, 0x8000);            /* MEM_RELEASE */
+        x_movri(X_RDX, 0);                /* dwSize must be 0 */
+        x_alignpre(0); x_callimp(pc + (bkol - s), 9); x_alignpost();
+        x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax,0 */
+        ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
+        x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx */
+        return 1;
+    }
     if (bk_str_is(nm, "close")) {
         x_fd2handle(pc, hstd);
         x_alignpre(0);
@@ -11946,20 +12019,20 @@ int bk_enc(int i, long off) { if (bkarch) return bk_arm(i, off); return bk_x86(i
 long bk_round(long v, long a) { return (v + a - 1) / a * a; }
 
 /* Windows' import section layout (pe._idata) -- the same arithmetic */
-char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000";
+char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000";
 long bk_idata_len; long bk_iat_off; long bk_cfg_off;
 int bk_idata_layout(void) {
     long off; int k; int L; char *e;
-    off = 184;                                      /* nm_off = 40 + 72 + 72 */
+    off = 40 + (BK_NIMP + 1) * 8 * 2;               /* desc + ILT + IAT */
     k = 0;
-    while (k < 8) {
+    while (k < BK_NIMP) {
         e = bk_nth(BK_IMPS, k); L = 0; while (e[L]) L = L + 1;
         L = 2 + L + 1; if (L % 2) L = L + 1;
         off = off + L; k = k + 1;
     }
     off = off + 13;                                  /* KERNEL32.dll and its NUL */
     off = (off + 7) / 8 * 8;
-    bk_cfg_off = off; bk_iat_off = 112;
+    bk_cfg_off = off; bk_iat_off = 40 + (BK_NIMP + 1) * 8;   /* after the ILT */
     bk_idata_len = off + 320;                        /* LOADCFG 0x140 */
     return 0;
 }
@@ -11984,13 +12057,27 @@ int bk_assemble(void) {
     if (bk_runmode) {
         /* two mappings: text goes read-execute once it is written, data
            stays writable, so nothing is ever both [macOS forbids W^X] */
-        bk_runtsz = bk_round(bktlen > 1 ? bktlen : 1, 16384);
+        /* room for the import slots at the end of the text: they must be
+           within reach of a rip-relative call, and read-only suits them */
+        bk_runtsz = bk_round((bktlen > 1 ? bktlen : 1) + 128, 16384);
         bk_rundsz = bk_round(bkdlen + 65536, 16384);
 #ifdef _WIN32
-        /* Windows maps memory with VirtualAlloc, whose shape is not the
-           POSIX one this gate carries -- run mode is Unix-only for now, and
-           says so instead of mapping something wrong */
-        __write(2, "run: not on Windows yet (VirtualAlloc)\n", 39); __exit(1);
+        /* ONE region, PAGE_EXECUTE_READWRITE: the gate calls its imports
+           rip-relative, and two separate allocations can land more than
+           2 GB apart -- which is an access violation, not a bad call. */
+        bk_runtext = __mmap(0, bk_runtsz + bk_rundsz, 0x3000, 4, 0, 0);
+        bk_rundata = bk_runtext + bk_runtsz;
+        {   long tbl; int q;
+            tbl = bk_runtext + bk_runtsz - 8 * 16;   /* the import slots */
+            q = 0;
+            while (q < BK_NIMP) {
+                char *c; long v; int b;
+                c = (char *)(tbl + 8 * q); v = bk_impval[q]; b = 0;
+                while (b < 8) { c[b] = (v >> (8 * b)) & 255; b = b + 1; }
+                bk_imp[q] = tbl + 8 * q;
+                q = q + 1;
+            }
+        }
 #else
         bk_runtext = __mmap(0, bk_runtsz, 3, BK_MAP_ANON, 0 - 1, 0);
         bk_rundata = __mmap(0, bk_rundsz, 3, BK_MAP_ANON, 0 - 1, 0);
@@ -12013,7 +12100,7 @@ int bk_assemble(void) {
         bk_textva = 5368709120 + 4096;
         rd = 4096 + bk_round(bktlen, 4096);
         bk_datava = 5368709120 + rd + bk_round(bk_idata_len, 4096);
-        i = 0; while (i < 8) { bk_imp[i] = 5368709120 + rd + bk_iat_off + 8 * i; i = i + 1; }
+        i = 0; while (i < BK_NIMP) { bk_imp[i] = 5368709120 + rd + bk_iat_off + 8 * i; i = i + 1; }
     } } }
     bk_shift = bk_datava - BK_DATA_BASE;
     bk_sizing = 0;
@@ -12287,7 +12374,7 @@ int bk_pesect(char *name, long rva, long vsize, long foff, long fsize, long flag
 int bk_pe(void) {
     long rd_rva; long dt_rva; long cookie_rva; long rd_file; long dt_file; long dlen2;
     long dvs; long rl_rva; long rl_file; long img; long reloc_rva; long page; long k;
-    long nmrva[8]; long off; long dllrva; int j; int L; char *e; long cfgstart; long nzl; long raw;
+    long nmrva[BK_NIMP]; long off; long dllrva; int j; int L; char *e; long cfgstart; long nzl; long raw;
     rd_rva = 4096 + bk_round(bktlen, 4096);
     dt_rva = rd_rva + bk_round(bk_idata_len, 4096);
     cookie_rva = dt_rva + bk_round(bkdlen > 1 ? bkdlen : 1, 8);
@@ -12314,7 +12401,7 @@ int bk_pe(void) {
         if (j == 1) { w32(rd_rva); w32(40); }
         else { if (j == 5) { w32(rl_rva); w32(12); }
         else { if (j == 10) { w32(rd_rva + bk_cfg_off); w32(320); }
-        else { if (j == 12) { w32(rd_rva + bk_iat_off); w32(72); }
+        else { if (j == 12) { w32(rd_rva + bk_iat_off); w32((BK_NIMP + 1) * 8); }
         else { w32(0); w32(0); } } } }
         j = j + 1;
     }
@@ -12325,20 +12412,21 @@ int bk_pe(void) {
     wz(1024 - bkwtot);
     wtext(); wz(bk_round(bktlen, 512) - bktlen);
     /* the import section, at rd_rva */
-    off = 184; j = 0;
-    while (j < 8) {
+    off = 40 + (BK_NIMP + 1) * 8 * 2; j = 0;
+    while (j < BK_NIMP) {
         e = bk_nth(BK_IMPS, j); L = 0; while (e[L]) L = L + 1;
         nmrva[j] = rd_rva + off;
         L = 2 + L + 1; if (L % 2) L = L + 1;
         off = off + L; j = j + 1;
     }
     dllrva = rd_rva + off;
-    w32(rd_rva + 40); w32(0); w32(0); w32(dllrva); w32(rd_rva + 112);
+    w32(rd_rva + 40); w32(0); w32(0); w32(dllrva);
+    w32(rd_rva + 40 + (BK_NIMP + 1) * 8);           /* the IAT */
     wz(20);
-    j = 0; while (j < 8) { w64(nmrva[j]); j = j + 1; } w64(0);
-    j = 0; while (j < 8) { w64(nmrva[j]); j = j + 1; } w64(0);
+    j = 0; while (j < BK_NIMP) { w64(nmrva[j]); j = j + 1; } w64(0);
+    j = 0; while (j < BK_NIMP) { w64(nmrva[j]); j = j + 1; } w64(0);
     j = 0;
-    while (j < 8) {
+    while (j < BK_NIMP) {
         e = bk_nth(BK_IMPS, j); L = 0; while (e[L]) L = L + 1;
         w16(0); k = 0; while (k < L) { wb(e[k]); k = k + 1; } wb(0);
         if ((2 + L + 1) % 2) wb(0);
@@ -12361,10 +12449,81 @@ int bk_pe(void) {
 }
 
 /* `unisacc FILE -b os/arch`: the tape in t[0..n), as an image on fd 1 */
+/* ---- Windows: where are WriteFile and friends? -------------------------
+   Code in memory has no import table, so the gate's `call [slot]` needs real
+   slots.  This process HAS them: it is a PE with the same imports, so we find
+   our own image, walk its import descriptors and take the address of each
+   slot BY NAME -- by name, because the order is only ours if the compiler
+   that built this binary was ours. [S-9] */
+long bk_rd32(long p) {
+    char *c; c = (char *)p;
+    return (c[0] & 255) | ((c[1] & 255) << 8) | ((c[2] & 255) << 16) | ((long)(c[3] & 255) << 24);
+}
+long bk_rd64(long p) { return bk_rd32(p) | (bk_rd32(p + 4) << 32); }
+
+int bk_win_imports(long here) {
+    long base; long pe; long dd; long imp; long d; long ilt; long iat; long k;
+    long nrva; char *nm; int i; int j; int ok;
+    base = here & (0 - 4096);
+    while (base > 65536) {                     /* the MZ our image starts with */
+        char *c; c = (char *)base;
+        if (c[0] == 77 && c[1] == 90) {
+            pe = base + bk_rd32(base + 0x3C);
+            if (bk_rd32(pe) == 0x00004550) break;      /* "PE\0\0" */
+        }
+        base = base - 4096;
+    }
+    if (base <= 65536) { __write(2, "run: cannot find this image\n", 28); __exit(1); }
+    dd = pe + 24 + 112;                        /* the data directories */
+    imp = base + bk_rd32(dd + 8);              /* entry 1: the import table */
+    d = imp;
+    while (bk_rd32(d + 12)) {                  /* until the null descriptor */
+        ilt = bk_rd32(d);                      /* OriginalFirstThunk */
+        if (ilt == 0) ilt = bk_rd32(d + 16);
+        ilt = base + ilt;
+        iat = base + bk_rd32(d + 16);
+        k = 0;
+        while (bk_rd64(ilt + 8 * k)) {
+            nrva = bk_rd64(ilt + 8 * k);
+            if (nrva > 0) { if ((nrva >> 63) == 0) {
+                nm = (char *)(base + nrva + 2);         /* past the hint */
+                i = 0;
+                while (i < BK_NIMP) {
+                    char *e; e = bk_nth(BK_IMPS, i);
+                    ok = 1; j = 0;
+                    while (e[j] || nm[j]) {
+                        if (e[j] != nm[j]) { ok = 0; break; }
+                        j = j + 1;
+                    }
+                    if (ok) bk_impval[i] = bk_rd64(iat + 8 * k);
+                    i = i + 1;
+                }
+            } }
+            k = k + 1;
+        }
+        d = d + 20;
+    }
+    i = 0;
+    while (i < BK_NIMP) {
+        if (bk_impval[i] == 0) {
+            __write(2, "run: this image does not import ", 32);
+            __write(2, bk_nth(BK_IMPS, i), 12); __write(2, "\n", 1);
+            __exit(1);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 /* Compile the tape into memory and hand back the entry address. [S-9] */
 long bk_run(char *t, int n, long argc, long argv) {
     int a; long k; char *d; char *c;
     bkos = BK_HOST_OS; bkarch = BK_HOST_ARCH; bk_runmode = 1;
+#ifdef _WIN32
+    /* the gate calls through import slots; in memory there is no import
+       table, so it uses this process's own [S-9] */
+    bk_win_imports((long)bk_win_imports);
+#endif
     bk_parse(t, n);
     bk_repack();
     bk_lower();
@@ -12383,7 +12542,16 @@ long bk_run(char *t, int n, long argc, long argv) {
     k = 0; while (k < 8) { c[k] = (argv >> (8 * k)) & 255; k = k + 1; }
     d = (char *)bk_runtext;
     k = 0; while (k < bktlen) { d[k] = bktext[k]; k = k + 1; }
-    if (__mprotect(bk_runtext, bk_runtsz, 5) != 0) {
+#ifdef _WIN32
+    /* PAGE_EXECUTE_READ over the TEXT only, which is the sequence Windows
+       expects: newly written code is still in the data cache, and on arm64
+       the first instruction raises STATUS_ILLEGAL_INSTRUCTION unless the
+       range is both re-protected and flushed (the gate does the flush).
+       The data half stays writable -- the program's stack is in it. */
+    if (__mprotect(bk_runtext, bk_runtsz, 0x20) != 0) {
+#else
+    if (__mprotect(bk_runtext, bk_runtsz, 5) != 0) {      /* READ | EXEC */
+#endif
         __write(2, "run: cannot make the code executable\n", 37); __exit(1);
     }
     return bk_runtext + bk_entry;

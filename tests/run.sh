@@ -38,6 +38,35 @@ for f in $PROBES; do
         diff "$T/ref.out" "$T/run.out" | head -4
     fi
 done
+# Windows, when the UTM machine is up: `-run` there maps with VirtualAlloc,
+# re-protects to make the code executable and flushes the instruction cache
+# (arm64 will not run code that is still only in the data cache).
+UTM=/Applications/UTM.app/Contents/MacOS/utmctl; VM=${WINVM:-minicon-win-arm-64}
+if [ -x "$UTM" ] && "$UTM" status "$VM" 2>/dev/null | grep -q started \
+   && perl -e 'alarm 20; exec @ARGV' "$UTM" exec "$VM" --cmd cmd.exe -- /c echo up >/dev/null 2>&1; then
+    n=$(date +%s)$RANDOM
+    for t in win/arm64 win/x86_64; do
+        tt=$(echo "$t" | tr / _)
+        "$UA_RUN" unisacc.c -b "$t" > "$T/uw.$tt" 2>/dev/null
+        "$UTM" file push "$VM" 'C:\u\r'"$n$tt"'.exe' < "$T/uw.$tt" 2>/dev/null
+    done
+    { echo '#include <stdio.h>'; cat examples/fib.c; } > "$T/wf.c"
+    "$UTM" file push "$VM" 'C:\u\r'"$n"'.c' < "$T/wf.c" 2>/dev/null
+    printf '@echo off\r\ncd /d C:\\u\r\nr%swin_x86_64.exe -run r%s.c > r%s.txt 2>&1\r\nr%swin_arm64.exe -run r%s.c >> r%s.txt 2>&1\r\necho done > r%sd.txt\r\n' \
+        "$n" "$n" "$n" "$n" "$n" "$n" "$n" | "$UTM" file push "$VM" 'C:\u\r'"$n"'.bat' 2>/dev/null
+    "$UTM" exec "$VM" --hide --cmd cmd.exe -- /c 'C:\u\r'"$n"'.bat' >/dev/null 2>&1
+    i=0; while [ $i -lt 60 ]; do
+        case "$("$UTM" file pull "$VM" 'C:\u\r'"$n"'d.txt' 2>&1)" in *done*) break;; esac
+        i=$((i+1)); sleep 3; done
+    got=$("$UTM" file pull "$VM" 'C:\u\r'"$n"'.txt' 2>/dev/null | tr -d '\r' | tr '\n' ' ')
+    case "$got" in
+        "55 55 "*) ok=$((ok+2)); echo "  ok   windows -run, both ISAs";;
+        *) bad=$((bad+1)); echo "  FAIL windows -run gave [$got]";;
+    esac
+else
+    echo "  skip windows (-run needs the UTM machine started)"
+fi
+
 echo
 echo "run  compiled-and-ran $ok   wrong $bad   (skipped $skip)"
 [ "$bad" -eq 0 ]
