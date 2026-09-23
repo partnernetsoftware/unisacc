@@ -43,4 +43,6 @@ for f in "$@"; do
 done
 echo
 echo "fat $pass   mismatch $fail   (both slices executed)"
-[ "$fail" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]

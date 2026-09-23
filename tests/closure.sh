@@ -68,4 +68,6 @@ for f in "$@"; do
 done
 echo
 echo "closure  images identical $same   differ $diff   (refused $refused)   host-run ok $ran   wrong $ranwrong"
-[ "$diff" -eq 0 ] && [ "$ranwrong" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$diff" -eq 0 ] && [ "$ranwrong" -eq 0 ] && [ "$same" -gt 0 ]

@@ -13,4 +13,6 @@ for f in "$@"; do
     else fail=$((fail+1)); printf "  FAIL %-12s got '%s' want '%s'\n" "$b" "$got" "$want"; fi
 done
 echo; echo "gen2-compiled $pass   wrong $fail"
-[ "$fail" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]

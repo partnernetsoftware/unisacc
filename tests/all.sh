@@ -33,6 +33,15 @@
 #               script for Unix, with a slice per target inside [S-10]
 #   closure     unisacc -b writes the same image bytes as the Python back
 #               end, all six targets, and the host image runs right [S-7]
+#   layout      the data layout ENUMERATED, not sampled: every tape of up to
+#               three data definitions, with and without a symbol defined
+#               twice, both back ends, all six targets [A-41] [P-3]
+#   datashape   generated programs whose globals are declared in one order
+#               and allocated in another -- shapes the corpus never asks
+#               for, because it grew from things people wanted [A-41]
+#   bigclosure  the closure on the compiler itself: 707 KB and 1874 data
+#               symbols, the only input ever big enough to break the back
+#               end while all 90 probes stayed green [A-42]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
 #   acc         net == gold over the FULL gold, on the CONSTRUCTED weights
 #               we ship.  The SGD control arm is not here: `tests/baseline.sh`
@@ -87,6 +96,9 @@ run ccrun      bash -c "./tests/ccrun.sh $PROBES"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 run closure    bash -c "./tests/closure.sh $PROBES"
 run run        ./tests/run.sh
+run layout     ./tests/layout.sh
+run datashape  ./tests/datashape.sh
+run bigclosure ./tests/bigclosure.sh
 run cli        ./tests/cli.sh
 run diag       ./tests/diag.sh
 run ape        ./tests/ape.sh

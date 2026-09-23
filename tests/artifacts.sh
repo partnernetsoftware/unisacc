@@ -64,4 +64,6 @@ chk "weights <= 32768 B" "yes" "$([ "$w" -le 32768 ] && echo yes || echo "no ($w
 chk "kit <= 65536 B" "yes" "$([ "$k" -le 65536 ] && echo yes || echo "no ($k)")"
 
 echo; echo "artifacts $pass   failed $fail"
-[ "$fail" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]

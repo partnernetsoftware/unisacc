@@ -5834,6 +5834,33 @@ int setup(void) {
 /* The front end as a FUNCTION: read `path`, compile it for target `t`, and
    leave the tape text in out[0..nout).  unisacc's own main calls it, and so
    does unisaccrun, which then runs the tape instead of writing it out. */
+/* A tape, read as it stands.  `unisacc x.tape -b os/arch` puts the back end
+   under test on its own: the layout suite enumerates tapes that no C program
+   would produce, and a tape is the only input both back ends take. */
+int fe_read(char *path) {
+    int fd;
+    /* the back end asks the model too (isel, abi, reloc), and the model is
+       what fe_tape sets up on the way past */
+    model_dims();
+    setup();
+    fd = ropen(path);
+    if (fd < 0) { printf("cannot open %s\n", path); return 1; }
+    nout = __read(fd, out, MAXOUT);
+    __close(fd);
+    if (nout < 0) { printf("cannot read %s\n", path); return 1; }
+    if (nout >= MAXOUT) { __write(2, "tape too large\n", 15); __exit(1); }
+    return 0;
+}
+
+/* Does the path end in ".tape"? */
+int istape(char *p) {
+    int n;
+    n = 0; while (p[n]) n = n + 1;
+    if (n < 5) return 0;
+    return p[n - 5] == 46 && p[n - 4] == 116 && p[n - 3] == 97
+        && p[n - 2] == 112 && p[n - 1] == 101;
+}
+
 int fe_tape(char *path, char *t) {
     int fd; int k;
     srcpath = path;
@@ -5969,7 +5996,8 @@ int main(void) {
     }
     if (dump) {
         int ofd;
-        if (fe_tape(__argv(fi), t)) return 1;
+        if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
+        else { if (fe_tape(__argv(fi), t)) return 1; }
         ofd = 1;
         if (outpath) {
             ofd = wopen(outpath);

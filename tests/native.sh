@@ -56,4 +56,6 @@ for f in "$@"; do
 done
 rm -rf "$T"
 echo; echo "native $pass   mismatch $fail"
-[ "$fail" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]

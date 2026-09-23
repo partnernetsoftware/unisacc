@@ -314,10 +314,17 @@ int bk_parse(char *t, int n) {
             long cnt;
             j = j + 5; s0 = j; while (t[j] != 32) j = j + 1; s1 = j;
             cnt = bk_num(t + j + 1, e - j - 1);
-            bk_zeros((8 - bkdlen % 8) % 8);
             id = bk_name(t + s0, s1 - s0);
-            bksym_addr[id] = BK_DATA_BASE + bkdlen; bk_dsym(id);
-            bk_zeros(cnt);
+            /* Tape.string interns: a name already known keeps its address
+               and reserves NOTHING the second time.  This used to allocate
+               again and move the symbol, so a global defined twice -- which
+               is what a tentative definition completed later looks like --
+               put the two back ends 8 bytes apart. */
+            if (bksym_addr[id] < 0) {
+                bk_zeros((8 - bkdlen % 8) % 8);
+                bksym_addr[id] = BK_DATA_BASE + bkdlen; bk_dsym(id);
+                bk_zeros(cnt);
+            }
             i = e + 1; continue;
         }
         if (t[j] == 46 && t[j + 1] == 115 && t[j + 2] == 116 && t[j + 3] == 114 && t[j + 4] == 32) {

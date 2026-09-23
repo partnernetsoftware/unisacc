@@ -78,4 +78,6 @@ say "missing input" "diagnosed" "$got"
 
 echo
 echo "cli  ok $ok   wrong $bad   (from a scratch dir, no repo in sight)"
-[ "$bad" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]

@@ -11,4 +11,6 @@ chk hello "hello from C99" "$(python3 -m unisa vm tests/tapes/hello.tape)"
 chk fact  "120"            "$(python3 -m unisa vm tests/tapes/fact.tape)"
 chk call  "55"             "$(python3 -m unisa vm tests/tapes/call.tape)"
 echo; echo "vm fixtures $pass   wrong $fail"
-[ "$fail" -eq 0 ]
+# A suite that checked nothing is not green: `closure.sh` with no
+# probes once printed `identical 0 differ 0` and exited 0.
+[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
