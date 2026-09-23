@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache" />
+  <title>UXE · Live host (fake)</title>
+  <style>
+    :root { color-scheme: dark; --bg:#06080e; --fg:#d5dbe8; --muted:#8b96aa; --acc:#7ec8ff; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg);
+      font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 720px; margin: 0 auto; padding: 20px 16px 32px; }
+    .brand { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--acc); }
+    h1 { font-size: 28px; margin: 6px 0 8px; font-weight: 650; }
+    .lead { color: var(--muted); font-size: 14px; margin: 0 0 16px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
+    input, button {
+      border: 1px solid rgba(130,150,190,.35); border-radius: 8px;
+      background: rgba(14,18,30,.85); color: var(--fg); padding: 10px 12px; font-size: 14px;
+    }
+    input { flex: 1; min-width: 120px; }
+    button { cursor: pointer; background: rgba(30,50,70,.95); }
+    button:disabled { opacity: .45; }
+    canvas, video {
+      width: 100%; aspect-ratio: 16/9; border-radius: 12px;
+      border: 1px solid rgba(130,150,190,.28); background: #000;
+    }
+    #log { margin-top: 12px; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
+    a { color: var(--acc); }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="brand">UXE</p>
+    <h1>假直播源</h1>
+    <p class="lead">画布动画 → WebRTC。观众打开 <a id="watchLink" href="./">index.html</a> 同房间即可。</p>
+    <div class="row">
+      <input id="room" value="demo" spellcheck="false" />
+      <button id="go">开播</button>
+    </div>
+    <canvas id="c" width="960" height="540"></canvas>
+    <div id="log"></div>
+  </main>
+  <script type="module">
+    const SIGNAL = "wss://uxe-live.kcc668.workers.dev/room/";
+    const ICE = { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }] };
+
+    const roomEl = document.getElementById("room");
+    const goBtn = document.getElementById("go");
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d");
+    const logEl = document.getElementById("log");
+    const watchLink = document.getElementById("watchLink");
+    const q = new URLSearchParams(location.search);
+    if (q.get("room")) roomEl.value = q.get("room");
+
+    let ws, selfId, localStream, raf;
+    /** @type {Map<string, RTCPeerConnection>} */
+    const pcs = new Map();
+
+    function log(...a) {
+      logEl.textContent = a.map(String).join(" ") + "\n" + logEl.textContent.slice(0, 800);
+    }
+
+    function send(obj) {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    }
+
+    function paintFake(t) {
+      const w = canvas.width, h = canvas.height;
+      ctx.fillStyle = "#0a1020";
+      ctx.fillRect(0, 0, w, h);
+      const x = (Math.sin(t / 600) * 0.5 + 0.5) * (w - 160);
+      const y = (Math.cos(t / 900) * 0.5 + 0.5) * (h - 120);
+      ctx.fillStyle = "#7ec8ff";
+      ctx.fillRect(x, y, 140, 90);
+      ctx.fillStyle = "#d5dbe8";
+      ctx.font = "28px ui-sans-serif, system-ui";
+      ctx.fillText("UXE fake live", 28, 48);
+      ctx.font = "18px ui-monospace, monospace";
+      ctx.fillText(new Date(t).toISOString().slice(11, 23), 28, 84);
+      ctx.fillText("room " + roomEl.value, 28, 112);
+      raf = requestAnimationFrame(paintFake);
+    }
+
+    function startFakeStream() {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(paintFake);
+      localStream = canvas.captureStream(20);
+      // silent audio keeps some mobile pipelines happier
+      const ac = new AudioContext();
+      const osc = ac.createOscillator();
+      const dest = ac.createMediaStreamDestination();
+      const gain = ac.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain); gain.connect(dest);
+      osc.start();
+      dest.stream.getAudioTracks().forEach((tr) => localStream.addTrack(tr));
+      return localStream;
+    }
+
+    async function callViewer(peerId) {
+      if (!localStream || pcs.has(peerId) || peerId === selfId) return;
+      const pc = new RTCPeerConnection(ICE);
+      pcs.set(peerId, pc);
+      localStream.getTracks().forEach((tr) => pc.addTrack(tr, localStream));
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) return;
+        send({ type: "signal", to: peerId, payload: { kind: "ice", candidate: ev.candidate } });
+      };
+      pc.onconnectionstatechange = () => log("pc", peerId, pc.connectionState);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      send({ type: "signal", to: peerId, payload: { kind: "offer", sdp: pc.localDescription } });
+      log("offer →", peerId);
+    }
+
+    async function onSignal(from, payload) {
+      const pc = pcs.get(from);
+      if (!pc || !payload) return;
+      if (payload.kind === "answer" && payload.sdp) {
+        await pc.setRemoteDescription(payload.sdp);
+        log("answer ←", from);
+      } else if (payload.kind === "ice" && payload.candidate) {
+        try { await pc.addIceCandidate(payload.candidate); } catch (e) { log("ice", e.message); }
+      }
+    }
+
+    function connect() {
+      const room = (roomEl.value || "demo").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "demo";
+      roomEl.value = room;
+      watchLink.href = `./?room=${encodeURIComponent(room)}`;
+      history.replaceState(null, "", `?room=${encodeURIComponent(room)}`);
+      goBtn.disabled = true;
+      ws?.close();
+      pcs.forEach((pc) => pc.close());
+      pcs.clear();
+      startFakeStream();
+
+      ws = new WebSocket(SIGNAL + room);
+      ws.onopen = () => {
+        log("ws open", room);
+        send({ type: "join", role: "host", name: "fake" });
+      };
+      ws.onclose = () => { log("ws close"); goBtn.disabled = false; };
+      ws.onerror = () => log("ws error");
+      ws.onmessage = async (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === "welcome") selfId = msg.peerId;
+        if (msg.type === "joined") {
+          log("host", selfId, "peers", (msg.peers || []).length);
+          for (const p of msg.peers || []) {
+            if (p.role !== "host") await callViewer(p.peerId);
+          }
+        }
+        if (msg.type === "peer_join" && msg.peer?.peerId) {
+          log("join", msg.peer.role, msg.peer.peerId);
+          if (msg.peer.role !== "host") await callViewer(msg.peer.peerId);
+        }
+        if (msg.type === "signal") await onSignal(msg.from, msg.payload);
+        if (msg.type === "peer_leave") {
+          const pc = pcs.get(msg.peerId);
+          if (pc) { pc.close(); pcs.delete(msg.peerId); }
+        }
+      };
+    }
+
+    goBtn.onclick = connect;
+    if (q.get("auto") === "1") connect();
+  </script>
+</body>
+</html>

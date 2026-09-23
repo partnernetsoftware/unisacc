@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache" />
+  <title>UXE · Live</title>
+  <style>
+    :root { color-scheme: dark; --bg:#06080e; --fg:#d5dbe8; --muted:#8b96aa; --acc:#7ec8ff; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg);
+      font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif; }
+    main { max-width: 720px; margin: 0 auto; padding: 20px 16px 32px; }
+    .brand { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--acc); }
+    h1 { font-size: 28px; margin: 6px 0 8px; font-weight: 650; }
+    .lead { color: var(--muted); font-size: 14px; margin: 0 0 16px; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
+    input, button {
+      border: 1px solid rgba(130,150,190,.35); border-radius: 8px;
+      background: rgba(14,18,30,.85); color: var(--fg); padding: 10px 12px; font-size: 14px;
+    }
+    input { flex: 1; min-width: 120px; }
+    button { cursor: pointer; background: rgba(30,50,70,.95); }
+    button:disabled { opacity: .45; cursor: default; }
+    #stage {
+      width: 100%; aspect-ratio: 16/9; background: #000; border-radius: 12px;
+      border: 1px solid rgba(130,150,190,.28); object-fit: contain;
+    }
+    #log {
+      margin-top: 12px; font-size: 12px; color: var(--muted); white-space: pre-wrap;
+      min-height: 3em; line-height: 1.4;
+    }
+    a { color: var(--acc); }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="brand">UXE</p>
+    <h1>看直播</h1>
+    <p class="lead">接 <code>uxe-live</code> 信令。假源请另开 <a href="./host.html">host.html</a>。</p>
+    <div class="row">
+      <input id="room" value="demo" spellcheck="false" />
+      <button id="go">进入</button>
+    </div>
+    <video id="stage" playsinline autoplay muted></video>
+    <div id="log"></div>
+  </main>
+  <script type="module">
+    const SIGNAL = "wss://uxe-live.kcc668.workers.dev/room/";
+    const ICE = { iceServers: [{ urls: "stun:stun.cloudflare.com:3478" }] };
+
+    const roomEl = document.getElementById("room");
+    const goBtn = document.getElementById("go");
+    const video = document.getElementById("stage");
+    const logEl = document.getElementById("log");
+    const q = new URLSearchParams(location.search);
+    if (q.get("room")) roomEl.value = q.get("room");
+
+    let ws, selfId;
+    /** @type {Map<string, RTCPeerConnection>} */
+    const pcs = new Map();
+
+    function log(...a) {
+      logEl.textContent = a.map(String).join(" ") + "\n" + logEl.textContent.slice(0, 800);
+    }
+
+    function send(obj) {
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+    }
+
+    function ensurePc(fromId) {
+      let pc = pcs.get(fromId);
+      if (pc) return pc;
+      pc = new RTCPeerConnection(ICE);
+      pcs.set(fromId, pc);
+      pc.onicecandidate = (ev) => {
+        if (!ev.candidate) return;
+        send({ type: "signal", to: fromId, payload: { kind: "ice", candidate: ev.candidate } });
+      };
+      pc.ontrack = (ev) => {
+        video.srcObject = ev.streams[0] || new MediaStream([ev.track]);
+        video.play().catch(() => {});
+        log("track", ev.track.kind);
+      };
+      pc.onconnectionstatechange = () => log("pc", fromId, pc.connectionState);
+      return pc;
+    }
+
+    async function onSignal(from, payload) {
+      if (!payload || !from) return;
+      const pc = ensurePc(from);
+      if (payload.kind === "offer" && payload.sdp) {
+        await pc.setRemoteDescription(payload.sdp);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        send({ type: "signal", to: from, payload: { kind: "answer", sdp: pc.localDescription } });
+      } else if (payload.kind === "ice" && payload.candidate) {
+        try { await pc.addIceCandidate(payload.candidate); } catch (e) { log("ice", e.message); }
+      }
+    }
+
+    function connect() {
+      const room = (roomEl.value || "demo").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "demo";
+      roomEl.value = room;
+      history.replaceState(null, "", `?room=${encodeURIComponent(room)}`);
+      goBtn.disabled = true;
+      ws?.close();
+      pcs.forEach((pc) => pc.close());
+      pcs.clear();
+      video.srcObject = null;
+
+      ws = new WebSocket(SIGNAL + room);
+      ws.onopen = () => {
+        log("ws open", room);
+        send({ type: "join", role: "viewer", name: "watch" });
+      };
+      ws.onclose = () => { log("ws close"); goBtn.disabled = false; };
+      ws.onerror = () => log("ws error");
+      ws.onmessage = async (ev) => {
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === "welcome") { selfId = msg.peerId; log("self", selfId); }
+        if (msg.type === "joined") log("joined", "peers", (msg.peers || []).length);
+        if (msg.type === "signal") await onSignal(msg.from, msg.payload);
+        if (msg.type === "peer_leave") {
+          const pc = pcs.get(msg.peerId);
+          if (pc) { pc.close(); pcs.delete(msg.peerId); }
+          log("leave", msg.peerId);
+        }
+      };
+    }
+
+    goBtn.onclick = connect;
+    if (q.get("auto") === "1") connect();
+  </script>
+</body>
+</html>
