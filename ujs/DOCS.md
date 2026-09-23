@@ -21,7 +21,8 @@
 | 读什么 | 何时 |
 |---|---|
 | [`README.md`](README.md) | 安装、`wasm_run`、分发（Release） |
-| [`prd.md`](prd.md) | **规格真源**（语言 / API / 验收条款） |
+| [`prd.md`](prd.md) | **产品活规格 v1.1**（交付 · API · UXE · 门禁 · 代理 snapshot） |
+| [`archive/prd-v1.0.md`](archive/prd-v1.0.md) | 原条款全表（归档） |
 | [`TOOLS.md`](TOOLS.md) | CLI、发版脚本、门禁命令 |
 | [`web/README.md`](web/README.md) | `web/` 哪些进 git、哪些进 Release |
 | [`package.json`](package.json) | 版本与 npm scripts |
@@ -42,19 +43,21 @@
 **交付面（外网）**
 
 ```
-/docs/index.html              # 游戏索引（Asteroid + 无人机）
-/docs/uxe/asteroid/           # html + asteroid.wasm + engine.wasm
-/docs/uxe/drone/              # html + engine.wasm（JS 核 embed）
+/docs/index.html
+/docs/uxe/engine.js           # 共享 Host + GPU
+/docs/uxe/asteroid/           # index + game.js + wasm
+/docs/uxe/drone/              # index + game.js + engine.wasm
 ```
 
-本地对照：`/engine/demo/` · `/engine/ship/` · `/engine/ship/drone/`。
+本地对照：`/engine/demo/` · `/engine/ship/`（旁路 `engine.js`）。
 
 ```bash
-npm run ship:pages          # asteroid + drone → docs/uxe/
-npm run test:uxe:all        # 无人门禁
+npm run ship:pages          # engine.js + asteroid + drone
+npm run test:uxe:all        # 无人门禁（CDP · snapshot 可读）
 ```
 
-分项：`test:uxe:packet` · `input` · `uxe` · `ship` · `drone` · `drone:ship`（均 alarm）。  
+分项：`test:uxe:packet` · `input` · `uxe` · `ship` · `drone` · `drone:ship`。  
+代理开发约定见 [`prd.md`](prd.md) §6（断言写在数上，截图非默认）。  
 Three 对照：`test:game` · `test:game:browser`。
 
 ---
@@ -88,31 +91,26 @@ Three 对照：`test:game` · `test:game:browser`。
 ```
 ujs/
 ├── DOCS.md  README.md  TOOLS.md  FUTURE.md  prd.md  package.json
+├── archive/                # 过期规格（prd-v1.0…）
 ├── scripts/
 │   ├── release-artifacts.sh
-│   ├── ship-engine.sh      # asteroid → docs/uxe/asteroid
-│   ├── ship-pages.sh       # asteroid + drone
-│   └── uxe-gate.sh         # test:uxe:all
+│   ├── ship-engine.sh · ship-pages.sh · uxe-gate.sh
 ├── web/
 │   ├── wasm_run.js  compiler.js  BUILD.json
-│   ├── engine/             # UXE
-│   │   ├── HOST_ABI.md  PLATFORM.md  README.md
-│   │   ├── browser-host.js  packet.js  input.js  _cdp.mjs
-│   │   ├── core-asteroid.js  core-drone.js  core-monopoly.js（归档车）
-│   │   ├── demo/  ship/  archive/
-│   └── game/               # Three 对照 + exp/
-├── native/                 # C VM · uxe_asteroid.c
-└── construct/              # Python gold · front · build
+│   ├── engine/             # UXE：demo/ · ship/（engine.js+game.js）· archive/
+│   └── game/
+├── native/
+└── construct/
 ```
 
 ---
 
 ## 文档对齐约定
 
-1. **规格**只认 `prd.md`；UXE / Host API **不**偷偷改 `wasm_run` 契约。
-2. **Host 真源**：`HOST_ABI.md`；平台叙事：`PLATFORM.md`；README 只摘要。
-3. 改 `host_*` / UXEP·UXIN / 交付面 → 同会话更新 HOST_ABI + engine README + DOCS/FUTURE。
-4. 门禁以 `package.json` + `uxe-gate.sh` 为准。
-5. **游戏 wasm 与引擎 wasm 不合包**。
+1. **产品规格**认 `prd.md`（v1.1）；条款全表在 `archive/prd-v1.0.md`。UXE Host **不**改 `wasm_run` 契约。
+2. **Host 真源**：`HOST_ABI.md`；平台：`PLATFORM.md`；README 只摘要。
+3. 改 `host_*` / UXEP·UXIN / 交付面 / snapshot 约定 → 同会话更新 HOST_ABI + prd §6 + DOCS。
+4. 门禁以 `package.json` + `uxe-gate.sh` 为准；**代理默认读 JSON snapshot，不靠截图**。
+5. **游戏 wasm 与引擎 wasm 不合包**；页面共享 `engine.js`。
 6. **LLM**：密钥只在 Host/壳；规划见 HOST_ABI §7.1。
-7. 过期实践车进 [`web/engine/archive/`](web/engine/archive/)，勿再写进「下一刀」。
+7. 过期实践车 → `web/engine/archive/`；过期规格 → `ujs/archive/`。

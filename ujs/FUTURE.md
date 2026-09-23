@@ -39,7 +39,8 @@
 |---|---|---|
 | **1. eng ABI 下沉** | `eng_sim_step` 双 memory 搬砖 → `engine.wasm` 稳定导出 | 页胶水只剩 Host；三款 ship 最大重复块消失 |
 | **2. 换核模板** | `ship:pages` 一条链；新建 game = `*.ujs` + `core-*` + bake 钩子 | 作者路径可抄，不靠口头传统 |
-| **3. 门禁即契约** | 改 ABI / 输入 / ship → 必绿 `test:uxe:all` | 人只审玩感；CI 作第二意见 |
+| **3. 门禁即契约** | 改 ABI / 输入 / ship → 必绿 `test:uxe:all` | 人只审玩感；**断言在 snapshot，不在截图** |
+| **3b. Snapshot 落地** | `host_debug_snapshot` / `__UXE_SNAP__`（见 prd §6） | 代理自测加速；与门禁共用 |
 | **4. Host 按卡住点加厚** | audio · 贴图(H4) · … | 不为对标清单而清单；有玩法再开 |
 | **5. host_llm（BYO）** | HOST_ABI §7.1；壳持 key | 智能玩法不代持密钥；纯本地仍可玩 |
 

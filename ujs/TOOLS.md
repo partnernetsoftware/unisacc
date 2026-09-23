@@ -40,7 +40,8 @@ cd ujs && npm run ship:pages && npm run test:uxe:all
 |---|---|
 | [`DOCS.md`](DOCS.md) | **地图**（先读） |
 | [`README.md`](README.md) | 开箱与分发 |
-| [`prd.md`](prd.md) | 规格 |
+| [`prd.md`](prd.md) | 产品活规格 v1.1 |
+| [`archive/prd-v1.0.md`](archive/prd-v1.0.md) | 原条款全表 |
 | [`web/README.md`](web/README.md) | git vs Release |
 | [`web/engine/README.md`](web/engine/README.md) | UXE |
 | [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | Host ABI |

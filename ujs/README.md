@@ -2,7 +2,7 @@
 
 > **产品**：`wasm_run(code, globals, locals)`（浏览器 · Node · Bun）  
 > **构造**：`ujs/construct/`（Python；出表 / `web-build` / 验收）  
-> **规格**：[`prd.md`](prd.md)
+> **规格**：[`prd.md`](prd.md)（v1.1 活规格；条款全表见 [`archive/prd-v1.0.md`](archive/prd-v1.0.md)）
 
 先出产物（开发机）：`npm run build`（即 `python3 -m ujs web-build`；要 `python3` + `zig`）。
 
@@ -85,12 +85,13 @@ ujs/
 ├── package.json         # Node/Bun 包（入口 web/wasm_run.js）
 ├── DOCS.md              # 文档地图（先读）
 ├── TOOLS.md  FUTURE.md  prd.md
+├── archive/             # 过期规格
 ├── scripts/             # release-artifacts · ship-pages · uxe-gate
 ├── web/                 # 站点 + ESM 库
 │   ├── wasm_run.js      # bootRuntime / wasm_run
 │   ├── compiler.js      # 页内编译
 │   ├── BUILD.json       # 产物指纹
-│   ├── engine/          # UXE：demo/ + ship/ + archive/
+│   ├── engine/          # UXE：demo/ + ship/（engine.js+game.js）+ archive/
 │   ├── game/            # Three 对照 + exp/
 │   └── *.wasm / gen.*   # web-build 生成（gitignore / Release）
 ├── native/              # C：VM + {game}.wasm 源

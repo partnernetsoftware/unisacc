@@ -67,6 +67,8 @@ Pages 上 `index.html` 内联了约 40KB+ JS。拆开看：
 
 浏览器实现：`createBrowserHost(canvas, { prefer, baseURL })` → 上表 + `backend`（`"webgl"` \| `"webgpu"`）+ `version`。
 
+**代理 / 门禁**：优先读 `__UXE__` 与 `host_input_read()`（及规划中的 snapshot，见 [`prd.md`](../../prd.md) §6）；不要用截图当默认验收。
+
 **GPU 选择**（`prefer`）：
 
 - `auto`（默认）：能起 WebGPU 则用，否则 WebGL  
