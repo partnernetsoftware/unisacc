@@ -33,4 +33,5 @@ npm run test:uxe:ship
 npm run test:uxe:drone:rules
 npm run test:uxe:drone
 npm run test:uxe:drone:ship
+npm run test:uxe:snap
 echo "OK_UXE_GATE"

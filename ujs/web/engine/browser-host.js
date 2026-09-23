@@ -3,13 +3,15 @@ import { createWebGLRenderer } from "./renderer-webgl.js";
 import { createWebGPURenderer } from "./renderer-webgpu.js";
 import { Scene, PerspectiveCamera } from "./scene.js";
 import { HOST_ABI_VERSION } from "./host-abi.js";
-import { decodeRenderPacket } from "./packet.js";
+import { decodeRenderPacket, summarizeRenderPacket } from "./packet.js";
 import {
   encodeInputSnapshot, INPUT_BYTES,
   BTN_LEFT, BTN_RIGHT, BTN_MIDDLE,
   FLAG_POINTER_IN, FLAG_SUICIDE, FLAG_TOUCH, FLAG_LOOK_STICK,
   axesFromDrag, analogFromDrag,
 } from "./input.js";
+
+const INPUT_RING_CAP = 32;
 
 /**
  * @param {HTMLCanvasElement} canvas
@@ -183,6 +185,40 @@ export async function createBrowserHost(canvas, opts = {}) {
   }
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
+  /** @type {ReturnType<typeof summarizeRenderPacket>} */
+  let lastPacketSummary = null;
+  /** @type {object[]} */
+  const inputRing = [];
+  /** @type {object|null} */
+  let lastDebugSnap = null;
+
+  function publishDebugSnap(extraInput) {
+    const input = extraInput || lastSnap;
+    const snap = {
+      t: performance.now(),
+      backend: renderer.backend,
+      input: input
+        ? {
+          ix: input.ix, iy: input.iy, fire: input.fire,
+          mx: input.mx, my: input.my, buttons: input.buttons, flags: input.flags,
+        }
+        : null,
+      inputRing: inputRing.slice(),
+      uxe: (typeof window !== "undefined" && window.__UXE__) || null,
+      packet: lastPacketSummary,
+    };
+    lastDebugSnap = snap;
+    if (typeof window !== "undefined") window.__UXE_SNAP__ = snap;
+    return snap;
+  }
+
+  function pushInputRing(snap) {
+    inputRing.push({
+      ix: snap.ix, iy: snap.iy, fire: snap.fire,
+      mx: snap.mx, my: snap.my, buttons: snap.buttons, flags: snap.flags,
+    });
+    while (inputRing.length > INPUT_RING_CAP) inputRing.shift();
+  }
 
   function applyObjectPacket(packet) {
     const [r, g, b, a] = packet.clear || [0.02, 0.024, 0.04, 1];
@@ -212,7 +248,9 @@ export async function createBrowserHost(canvas, opts = {}) {
       cloud.dirty = true;
     }
     lastPacketClouds = packet.clouds?.length || 0;
+    lastPacketSummary = summarizeRenderPacket(packet);
     renderer.render(scene, camera);
+    publishDebugSnap();
   }
 
   function stickAxes(dx, dy) {
@@ -284,6 +322,8 @@ export async function createBrowserHost(canvas, opts = {}) {
         pointerLock: document.pointerLockElement === canvas,
       };
       lastSnap = snap;
+      pushInputRing(snap);
+      publishDebugSnap(snap);
       if (buf != null) {
         const ab = buf instanceof ArrayBuffer
           ? buf
@@ -310,7 +350,16 @@ export async function createBrowserHost(canvas, opts = {}) {
       applyObjectPacket(packet);
     },
 
-    host_frame_present() {},
+    host_frame_present() {
+      publishDebugSnap();
+    },
+
+    /** One-frame JSON for agents / CDP (also mirrored on window.__UXE_SNAP__). */
+    host_debug_snapshot() {
+      // Refresh input so ring/flags match the call site, then return live snap.
+      const input = this.host_input_read();
+      return publishDebugSnap(input);
+    },
 
     async host_asset_read(path) {
       const url = /^(https?:|data:)/i.test(path) || path.startsWith("/")

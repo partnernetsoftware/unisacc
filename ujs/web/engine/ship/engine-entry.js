@@ -11,6 +11,7 @@ export {
   FLAG_POINTER_IN, FLAG_SUICIDE, FLAG_TOUCH, FLAG_LOOK_STICK,
 } from "../input.js";
 export {
-  encodeRenderPacket, decodeRenderPacket, MESH_OCTA, MESH_SHIP,
+  encodeRenderPacket, decodeRenderPacket, summarizeRenderPacket,
+  MESH_OCTA, MESH_SHIP,
 } from "../packet.js";
 export { MESH_BOX } from "../meshes.js";

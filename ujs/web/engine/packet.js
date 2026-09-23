@@ -185,4 +185,41 @@ export function decodeRenderPacket(raw) {
   };
 }
 
+/**
+ * Stable JSON summary of a decoded UXEP for agent / CDP asserts.
+ * @param {ReturnType<typeof decodeRenderPacket>|object|null|undefined} packet
+ */
+export function summarizeRenderPacket(packet) {
+  if (!packet) return null;
+  const cam = packet.camera || {};
+  const clouds = (packet.clouds || []).map((c) => {
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    const xyz = c.xyz;
+    const n = c.count | 0;
+    for (let i = 0; i < n; i++) {
+      const y = xyz[i * 3 + 1];
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+    if (n === 0) {
+      yMin = 0;
+      yMax = 0;
+    }
+    return {
+      meshId: c.meshId ?? 0,
+      count: n,
+      yMin: yMin === Infinity ? 0 : yMin,
+      yMax: yMax === -Infinity ? 0 : yMax,
+    };
+  });
+  return {
+    clear: packet.clear ? Array.from(packet.clear) : null,
+    eye: cam.eye ? Array.from(cam.eye) : null,
+    target: cam.target ? Array.from(cam.target) : null,
+    fogDensity: packet.fog?.density ?? 0,
+    clouds,
+  };
+}
+
 export { DEFAULT_FOG, DEFAULT_AMBIENT, DEFAULT_LIGHTS };

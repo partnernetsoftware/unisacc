@@ -1115,6 +1115,38 @@ function decodeRenderPacket(raw) {
     clouds
   };
 }
+function summarizeRenderPacket(packet) {
+  if (!packet) return null;
+  const cam = packet.camera || {};
+  const clouds = (packet.clouds || []).map((c) => {
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    const xyz = c.xyz;
+    const n = c.count | 0;
+    for (let i = 0; i < n; i++) {
+      const y = xyz[i * 3 + 1];
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+    if (n === 0) {
+      yMin = 0;
+      yMax = 0;
+    }
+    return {
+      meshId: c.meshId ?? 0,
+      count: n,
+      yMin: yMin === Infinity ? 0 : yMin,
+      yMax: yMax === -Infinity ? 0 : yMax
+    };
+  });
+  return {
+    clear: packet.clear ? Array.from(packet.clear) : null,
+    eye: cam.eye ? Array.from(cam.eye) : null,
+    target: cam.target ? Array.from(cam.target) : null,
+    fogDensity: packet.fog?.density ?? 0,
+    clouds
+  };
+}
 
 // web/engine/input.js
 var INPUT_MAGIC = 1313429589;
@@ -1195,6 +1227,7 @@ function decodeInputSnapshot(raw) {
 }
 
 // web/engine/browser-host.js
+var INPUT_RING_CAP = 32;
 async function createBrowserHost(canvas, opts = {}) {
   const baseURL = opts.baseURL || new URL(".", import.meta.url);
   const prefer = opts.prefer || "auto";
@@ -1333,6 +1366,43 @@ async function createBrowserHost(canvas, opts = {}) {
   }
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
+  let lastPacketSummary = null;
+  const inputRing = [];
+  let lastDebugSnap = null;
+  function publishDebugSnap(extraInput) {
+    const input = extraInput || lastSnap;
+    const snap = {
+      t: performance.now(),
+      backend: renderer.backend,
+      input: input ? {
+        ix: input.ix,
+        iy: input.iy,
+        fire: input.fire,
+        mx: input.mx,
+        my: input.my,
+        buttons: input.buttons,
+        flags: input.flags
+      } : null,
+      inputRing: inputRing.slice(),
+      uxe: typeof window !== "undefined" && window.__UXE__ || null,
+      packet: lastPacketSummary
+    };
+    lastDebugSnap = snap;
+    if (typeof window !== "undefined") window.__UXE_SNAP__ = snap;
+    return snap;
+  }
+  function pushInputRing(snap) {
+    inputRing.push({
+      ix: snap.ix,
+      iy: snap.iy,
+      fire: snap.fire,
+      mx: snap.mx,
+      my: snap.my,
+      buttons: snap.buttons,
+      flags: snap.flags
+    });
+    while (inputRing.length > INPUT_RING_CAP) inputRing.shift();
+  }
   function applyObjectPacket(packet) {
     const [r, g, b, a] = packet.clear || [0.02, 0.024, 0.04, 1];
     scene.clearColor = [r, g, b, a];
@@ -1360,7 +1430,9 @@ async function createBrowserHost(canvas, opts = {}) {
       cloud.dirty = true;
     }
     lastPacketClouds = packet.clouds?.length || 0;
+    lastPacketSummary = summarizeRenderPacket(packet);
     renderer.render(scene, camera);
+    publishDebugSnap();
   }
   function stickAxes(dx, dy) {
     return axesFromDrag(dx, dy);
@@ -1428,6 +1500,8 @@ async function createBrowserHost(canvas, opts = {}) {
         pointerLock: document.pointerLockElement === canvas
       };
       lastSnap = snap;
+      pushInputRing(snap);
+      publishDebugSnap(snap);
       if (buf != null) {
         const ab = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
         encodeInputSnapshot(snap, ab);
@@ -1448,6 +1522,12 @@ async function createBrowserHost(canvas, opts = {}) {
       applyObjectPacket(packet);
     },
     host_frame_present() {
+      publishDebugSnap();
+    },
+    /** One-frame JSON for agents / CDP (also mirrored on window.__UXE_SNAP__). */
+    host_debug_snapshot() {
+      const input = this.host_input_read();
+      return publishDebugSnap(input);
     },
     async host_asset_read(path) {
       const url = /^(https?:|data:)/i.test(path) || path.startsWith("/") ? path : new URL(path, baseURL).href;
@@ -1502,5 +1582,6 @@ export {
   decodeInputSnapshot,
   decodeRenderPacket,
   encodeInputSnapshot,
-  encodeRenderPacket
+  encodeRenderPacket,
+  summarizeRenderPacket
 };

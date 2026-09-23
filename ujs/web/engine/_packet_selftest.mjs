@@ -1,4 +1,4 @@
-import { encodeRenderPacket, decodeRenderPacket, PACKET_MAGIC } from "./packet.js";
+import { encodeRenderPacket, decodeRenderPacket, summarizeRenderPacket, PACKET_MAGIC } from "./packet.js";
 
 const N = 480;
 const xyz = new Float32Array(N * 3);
@@ -34,9 +34,13 @@ if (Math.abs(out.fog.density - 0.018) > 1e-6) throw new Error("fog");
 if (out.lights.length < 1) throw new Error("lights");
 if (out.clouds[0].meshId !== 0) throw new Error("mesh rock");
 if (out.clouds[1].meshId !== 1) throw new Error("mesh ship");
+const sum = summarizeRenderPacket(out);
+if (!sum || sum.eye[1] !== 3) throw new Error("summarize eye");
+if (sum.clouds[0].yMin !== -(N - 1) || sum.clouds[0].count !== N) throw new Error("summarize y");
 console.log("OK_PACKET", {
   bytes: buf.byteLength, ver: out.version,
   clouds: out.clouds.length, n0: out.clouds[0].count,
   fog: out.fog.density, lights: out.lights.length,
   mesh: [out.clouds[0].meshId, out.clouds[1].meshId],
+  snapY: [sum.clouds[0].yMin, sum.clouds[0].yMax],
 });

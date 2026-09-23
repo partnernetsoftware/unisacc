@@ -61,6 +61,7 @@ Pages 上 `index.html` 内联了约 40KB+ JS。拆开看：
 | `host_frame_begin` | `() → void` | 帧起点（与宿主事件环对齐；浏览器可为空） |
 | `host_frame_present` | `() → void` | 帧终点 / 换缓冲钩子（浏览器可为空；ship 胶水可在此刷 HUD） |
 | `host_gpu_submit` | `(packet) → void` | 提交 **UXEP**（主路径 `ArrayBuffer`；对象仅调试） |
+| `host_debug_snapshot` | `() → object` | **浏览器调试**：一帧 JSON（input · packet 摘要 · `__UXE__`）；同步写 `window.__UXE_SNAP__` |
 | `host_asset_read` | `(path) → bytes` | 只读资源（浏览器：`fetch`；相对路径相对 `baseURL`） |
 | `host_log` | `(level, msg) → void` | 诊断：`info` / `warn` / `error` |
 | `host_request_frame` | `(cb) → void` | 下一帧回调（浏览器：`requestAnimationFrame`） |

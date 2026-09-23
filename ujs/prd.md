@@ -108,16 +108,16 @@ CI 是第二意见；本地门禁先绿。人只审手感，不点门禁。
 | `window.__DRONE_API__` 等 | 探针专用确定性动作（face/fire/detonate） |
 | `_cdp.mjs` + `test:uxe:*` | 无头 Chrome · 禁代理 · wall clock |
 
-### 6.3 规划契约：`__UXE_SNAP__` / `host_debug_snapshot()`（未实现则按此补）
+### 6.3 契约：`__UXE_SNAP__` / `host_debug_snapshot()`
 
-一帧一 JSON，字段稳定、可 diff：
+一帧一 JSON，字段稳定、可 diff（Host 每帧提交后刷新 `window.__UXE_SNAP__`）：
 
 ```text
 {
   t: number,                 // host_time
   backend: "webgl"|"webgpu",
   input: { ix, iy, fire, mx, my, buttons, flags },   // 当前 UXIN
-  inputRing?: Input[],       // 可选：最近 N 帧
+  inputRing?: Input[],       // 最近 N 帧
   uxe: object,               // 与 __UXE__ 同形
   packet?: {                 // 上一包 UXEP 摘要（解码后）
     clear, eye, target, fogDensity,
@@ -128,9 +128,11 @@ CI 是第二意见；本地门禁先绿。人只审手感，不点门禁。
 
 | 用途 | 怎么断言 |
 |---|---|
-| 天地方向 | `eye[1]` vs 地面 `yMin`；勿靠截图色块 |
+| 天地方向 | `eye[1]` vs 地面 `yMin`/`yMax`；勿靠截图色块 |
 | 触屏飞行 | 注入双指后 `flags & LOOK_STICK` · `iy === -1` |
 | 回归 | `uxe.ammo` / `locked` / `alive` 与探针脚本 |
+
+门禁：`npm run test:uxe:snap`（Asteroid + Drone ship 互动，走 snapshot）。
 
 可选辅助（非主路径）：上/下半屏平均色。仍禁止以「看图说话」代替上表。
 
