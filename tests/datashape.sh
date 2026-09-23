@@ -35,19 +35,28 @@ for f in $files; do
             "$(cat "$T/want")" "$(cat "$T/got")"; }
 done
 
-# 2. the shape is really there: at least one program defines a data symbol
-#    twice, which is what puts a symbol out of address order
-dup=0
+# 2. the shape is really there, and the front end handles it: the generator
+#    writes `int gN;` and completes it further down with `int gN = v;` --
+#    ONE object, which C calls a tentative definition.  The tape must name
+#    it once (two `.bss` lines reserved space nobody used, and put a symbol
+#    out of address order [E-61]), and step 1 above has already checked the
+#    value survives.
+tent=0; dup=0
 for f in $files; do
+    t=$(awk '/^int g[0-9]+;$/{n[$2]++} END{for (k in n) if (n[k]) c++; print c+0}' "$f")
+    c=$(grep -cE '^int g[0-9]+;$' "$f")
+    v=$(grep -cE '^int g[0-9]+ = [0-9]+;$' "$f")
+    [ "$c" -gt 0 ] && [ "$v" -gt 0 ] && tent=$((tent+1))
     d=$(perl -e 'alarm 120; exec @ARGV' "$UA" "$f" -t lnx/x86_64 2>/dev/null |
         awk '/^\.(bss|str) /{print $2}' | sort | uniq -d | wc -l)
     dup=$((dup + d))
 done
-[ "$dup" -gt 0 ] || { echo "  FAIL the generator no longer produces a symbol defined twice"; bad=$((bad+1)); }
+[ "$tent" -gt 0 ] || { echo "  FAIL the generator no longer writes a tentative definition"; bad=$((bad+1)); }
+[ "$dup" -eq 0 ] || { echo "  FAIL a global reached the tape twice ($dup names)"; bad=$((bad+1)); }
 
 # 3. and the two back ends agree on all six targets
 ./tests/closure.sh $files || bad=$((bad+1))
 
 echo
-echo "datashape  programs $n   wrong $bad   (symbols defined twice: $dup)"
+echo "datashape  programs $n   wrong $bad   (with a tentative definition: $tent, named twice in a tape: $dup)"
 [ "$bad" -eq 0 ] && [ "$n" -gt 0 ]

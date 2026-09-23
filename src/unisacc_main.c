@@ -2086,6 +2086,7 @@ int sfind(int t) {
     return 0 - 1;
 }
 
+int gdup;                   /* this global was already defined further up */
 int declptr;                /* set by the declarator being processed */
 int declsz;                 /* the declared type's size, for `sizeof` */
 int declbytes;              /* ...times the array length, if it is one */
@@ -5729,6 +5730,13 @@ int unit(void) {
             declbytes = n * declsz;
             if (isarr) { if (gpd > 0) declbytes = n * 8; }
             if (declptr) { if (isarr == 0) declbytes = 8; }
+            /* `int x;` followed by `int x = 5;` is ONE object: C calls the
+               first a tentative definition and the second completes it.
+               Emitting `.bss g_x` twice reserved space nobody uses -- both
+               back ends intern the name, so the second blob is dead -- and
+               it put a symbol out of address order, which is the shape that
+               took the back end down on the compiler itself [E-61]. */
+            gdup = sfind(t) >= 0;
             sadd(t, gbind, 0, w);
             /* a struct global is an aggregate: its name is its address */
             if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
@@ -5738,14 +5746,17 @@ int unit(void) {
                one -- without this `read(fd, src, n)` passes the first eight
                BYTES OF src as the pointer */
             if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symptrd[nsym - 1] = gpd + 1; }
-            es(".bss g_"); etok(t); ec(32);
-            /* an ARRAY needs its full storage; a bare pointer needs 8.
-               Do not conflate the two -- `char src[MAXSRC]` getting 8 bytes
-               puts the next global straight on top of the source buffer. */
-            if (isarr) { if (gstruct >= 0) en(n * declsz); else en(n * w); }
-            else { if (declptr) en(8); else {
-                if (gstruct >= 0) en(declsz); else en(n * w); } }
-            ec(10);
+            if (gdup == 0) {
+                es(".bss g_"); etok(t); ec(32);
+                /* an ARRAY needs its full storage; a bare pointer needs 8.
+                   Do not conflate the two -- `char src[MAXSRC]` getting 8
+                   bytes puts the next global straight on top of the source
+                   buffer. */
+                if (isarr) { if (gstruct >= 0) en(n * declsz); else en(n * w); }
+                else { if (declptr) en(8); else {
+                    if (gstruct >= 0) en(declsz); else en(n * w); } }
+                ec(10);
+            }
             if (cur() == tidx("=", 1)) {
                 adv();
                 toinit = 1; hasinit = 1;
