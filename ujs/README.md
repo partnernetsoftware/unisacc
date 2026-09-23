@@ -53,11 +53,12 @@ console.log(r2.ok); // 5
 | URL | 角色 |
 |---|---|
 | `/` | playground |
-| **`/engine/demo/`** | **UXE 主线**（Host ABI + 二进制 packet + `sim.ujs`） |
+| **`/engine/demo/`** | UXE **源码测试**（分模块 + 页内 compiler） |
+| **`/engine/ship/`** | UXE **发布面**（html + `asteroid.wasm` + `gameEngine.wasm`） |
 | `/game/` | Three 对照 |
 | `/game/exp/` | 裸 WebGL 对照 |
 
-契约与文件表：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md)、[`web/engine/README.md`](web/engine/README.md)、[`DOCS.md`](DOCS.md)。
+契约：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md)、[`web/engine/README.md`](web/engine/README.md)、[`DOCS.md`](DOCS.md)。
 
 ## 构造侧（Python，非应用依赖）
 
@@ -78,17 +79,16 @@ python3 -m ujs js2wasm prog.ujs -o prog.wasm
 ```
 ujs/
 ├── package.json         # Node/Bun 包（入口 web/wasm_run.js）
-├── DOCS.md              # 文档地图
+├── DOCS.md              # 文档地图（先读）
 ├── TOOLS.md  FUTURE.md  prd.md
-├── scripts/             # release-artifacts.sh 等
+├── scripts/             # release-artifacts · ship-engine
 ├── web/                 # 站点 + ESM 库
 │   ├── wasm_run.js      # bootRuntime / wasm_run
-│   ├── compiler.js      # 页内编译（手写）
-│   ├── BUILD.json       # 产物指纹（可入库；二进制在 Release）
-│   ├── index.html …     # playground
-│   ├── engine/          # UXE：Host ABI + demo（产品化主线）
+│   ├── compiler.js      # 页内编译
+│   ├── BUILD.json       # 产物指纹
+│   ├── engine/          # UXE：demo/ + ship/
 │   ├── game/            # Three 对照 + exp/
-│   └── *.wasm / gen.*   # web-build 生成（gitignore）
-├── native/              # C VM（js2wasm / full wasm）
+│   └── *.wasm / gen.*   # web-build 生成（gitignore / Release）
+├── native/              # C：VM + {game}.wasm 源
 └── construct/           # Python：gold · front · build · CLI
 ```

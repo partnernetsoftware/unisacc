@@ -18,12 +18,13 @@ WebGPU 和/或 WebGL（浏览器自适应）| Vulkan/Metal/D3D12/SDL …
 | | 开发 | 发布（目标） |
 |---|---|---|
 | 源码 | `engine/*.js` 分文件 | **不**把拆分源当交付物 |
-| 页面 JS | `demo/host.js` 多模块 | **一个** `ship/uxe-demo.js`（可再内嵌进 HTML） |
-| 运行时 | 同左 | `ujs_full.wasm` +（远期）**游戏核也进 wasm** |
-| 资源 | `sim.ujs` 可外置 | 可外置或打进 wasm 资源段 |
+| 页面 JS | `demo/` 多模块 + compiler | **极薄胶水**（GPU Host + 双 wasm 桥） |
+| 引擎 | `ujs_full.wasm` | **`gameEngine.wasm`**（同产物，交付名） |
+| 游戏 | `core-asteroid.js` | **`{gameName}.wasm`**（如 `asteroid.wasm`） |
+| 资源 | `sim.ujs` 可外置 | 编进 `{game}.wasm` |
 
-今日：`npm run ship:engine` → `web/engine/ship/`（html + 单 bundle）。  
-明日：胶水再缩；`core-asteroid` + 调度进单 wasm，页面只剩 boot 几行。
+今日：`index.html` + `asteroid.wasm` + `gameEngine.wasm`（**不合包**）。  
+明日：胶水再收；Host 只留 DOM 接线。
 
 ## 浏览器 GPU 后端（一等公民 · 自适应）
 
@@ -104,5 +105,6 @@ u32 magic "UXIN" | u32 version=1 | i32 ix | i32 iy | u32 fire | [reserved…]
 
 ## 与 UJS
 
-- **玩法步进**仍可 `wasm_run(sim.ujs)`（构造/验收路径）。
-- **引擎核**目标：单 wasm 只调 Host ABI；UJS 产出状态 → 核写入 packet → `host_gpu_submit`。
+- **玩法步进**：`gameEngine.wasm`（=`ujs_full`）跑预编译 sim image；demo 仍可页内 `compile` + `wasm_run`。
+- **游戏核**：`{game}.wasm` 只调 Host ABI + `eng_boot`/`eng_sim_step`（胶水桥到引擎）；**不**与引擎合包。
+- 数据流：UJS 产出状态 → 核写入 UXEP → `host_gpu_submit`。

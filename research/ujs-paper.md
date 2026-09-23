@@ -129,7 +129,7 @@ We claim properties checked by `./tests/ujs.sh` (and the CLI commands it wraps).
 
 Optional CI/context: `js2wasm` and full demo wasm instantiate under Node when available—still pass/fail, not benchmark tables.
 
-**Optional qualitative artifact (not a metric).** The repository ships a static playground (`npm run demo`), an UXE Host-ABI demo under `ujs/web/engine/demo/` (UJS-1 `sim.ujs` via `wasm_run`, binary render packet to the browser host), and a Three.js contrast page under `ujs/web/game/`. These illustrate the product loop without contributing latency or accuracy claims beyond the suite table above.
+**Optional qualitative artifact (not a metric).** The repository ships a static playground (`npm run demo`); an UXE Host-ABI **source** demo under `ujs/web/engine/demo/`; an UXE **ship** surface under `ujs/web/engine/ship/` consisting of static `index.html` plus two **separate** Wasm modules—`{game}.wasm` (game core) and `gameEngine.wasm` (the `ujs_full.wasm` VM under a delivery name)—and a Three.js contrast page under `ujs/web/game/`. These illustrate the product loop without contributing latency or accuracy claims beyond the suite table above.
 
 **Relation to Paper A.** Enumeration and IntNet proofs live primarily in [cite A]; this paper’s evaluation emphasizes *language/product* obligations (IC, fold, front parity, in-page API) that C self-host does not cover.
 
@@ -172,7 +172,7 @@ UJS shows that the UNISA SH method [cite A]—constructed integer table networks
 | 4 | Diagram of stages ↔ gold columns; Fn serialization |
 | 5.3 | jtape opcode families (pointer only; no full ISA dump in short paper) |
 | 5.4 | One stub_kind example (shape×load) without claiming perf |
-| 6 | Screenshot/pointer to playground + `ujs/web/engine/demo/` (Host ABI artifact, not number) |
+| 6 | Screenshot/pointer to playground + `engine/demo/` + `engine/ship/` (html + game.wasm + gameEngine.wasm; not numbers) |
 | App. | Mapping UJS clause IDs (T/L/IC/X) ↔ test names |
 
 ---

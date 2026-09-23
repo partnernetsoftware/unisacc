@@ -62,8 +62,19 @@ try {
       returnByValue: true,
     });
     const v = r.result.value || {};
-    if (v.uxe?.ready && v.uxe.ship && v.uxe.ujsMs != null) {
-      console.log("OK_SHIP", { backend: v.uxe.backend, scripts: v.scripts, ujsMs: v.uxe.ujsMs });
+    if (v.uxe?.ready && v.uxe.ship && v.uxe.wasmGame && v.uxe.wasmEngine && v.uxe.fps > 0) {
+      const inlineOnly = (v.scripts || []).every((s) => !s || s === "");
+      console.log("OK_SHIP", {
+        backend: v.uxe.backend,
+        scripts: v.scripts,
+        inlineOnly,
+        ujsMs: v.uxe.ujsMs,
+        fps: v.uxe.fps,
+        n: v.uxe.n,
+        wasmGame: v.uxe.wasmGame,
+        wasmEngine: v.uxe.wasmEngine,
+      });
+      if (!inlineOnly) throw new Error("expected no external script src");
       ws.close(); chrome.kill("SIGKILL"); process.exit(0);
     }
     if (v.uxe?.ready === false) throw new Error(v.uxe.error);

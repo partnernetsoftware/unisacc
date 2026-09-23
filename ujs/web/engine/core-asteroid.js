@@ -2,7 +2,7 @@
  * Game core (JS stand-in for future single wasm module).
  * Talks ONLY via Host ABI + wasm_run for UJS sim — no canvas/WebGL imports.
  */
-import { bootRuntime, compile, wasm_run, unwrap } from "../wasm_run.js";
+import { bootRuntime, wasm_run, unwrap } from "../wasm_run.js";
 import { encodeRenderPacket } from "./packet.js";
 import { decodeInputSnapshot, INPUT_BYTES } from "./input.js";
 
@@ -25,21 +25,33 @@ function freshState() {
 
 /**
  * @param {import("./host-abi.js").HostAbi} host
- * @param {{ simUrl: string, wasmUrl: string, onHud?: (s: object) => void }} opts
+ * @param {{
+ *   simUrl?: string,
+ *   wasmUrl: string,
+ *   precompiled?: { image: Uint8Array|number[], blob: { globals?: string[], locals?: string[] } },
+ *   onHud?: (s: object) => void
+ * }} opts
  */
 export async function runAsteroidCore(host, opts) {
   host.host_log("info", "core boot abi");
   const wasmBytes = await host.host_asset_read(opts.wasmUrl);
-  // bootRuntime wants URL or bytes — use bytes path via ArrayBuffer
   await bootRuntime(wasmBytes.buffer.slice(
     wasmBytes.byteOffset,
     wasmBytes.byteOffset + wasmBytes.byteLength,
   ));
 
-  const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
-  const compiled = compile(simText);
-  const fnImage = compiled.image;
-  const fnBlob = compiled.blob;
+  let fnImage, fnBlob;
+  if (opts.precompiled?.image) {
+    const img = opts.precompiled.image;
+    fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
+    fnBlob = opts.precompiled.blob || {};
+  } else {
+    const { compile } = await import("../compiler.js");
+    const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
+    const compiled = compile(simText);
+    fnImage = compiled.image;
+    fnBlob = compiled.blob;
+  }
 
   let state = freshState();
   let alive = true;

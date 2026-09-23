@@ -1,6 +1,6 @@
-/** Product API: wasm_run(code | fn, globals, locals) in the browser. [A-1][T-5] */
-import { compile } from "./compiler.js";
-
+/** Product API: wasm_run(code | fn, globals, locals) in the browser. [A-1][T-5]
+ *  compile() is loaded only for string source — ship bundles stay compiler-free.
+ */
 const TAG = { null: 0, bool: 1, i64: 2, f64: 3, str: 4, list: 5, dict: 6, fn: 7, tup: 8 };
 
 const HOST_EXPORTS = [
@@ -155,6 +155,7 @@ export async function wasm_run(codeOrFn, globalsMap = {}, localsMap = {}) {
   let image, blob, askTrace, askHeat;
   try {
     if (typeof codeOrFn === "string") {
+      const { compile } = await import("./compiler.js");
       ({ image, blob, askTrace, askHeat } = compile(codeOrFn));
     } else if (codeOrFn && codeOrFn.image) {
       image = codeOrFn.image;
@@ -202,4 +203,9 @@ function unwrap(r) {
   return r.ok;
 }
 
-export { compile, HOST_EXPORTS, TAG, unwrap };
+export async function compile(src) {
+  const m = await import("./compiler.js");
+  return m.compile(src);
+}
+
+export { HOST_EXPORTS, TAG, unwrap };

@@ -1,79 +1,92 @@
 # UXE — UJS eXperimental Engine
 
-> **不是** Three 移植。按 UJS / UNISA 思路：闭合契约、薄胶水、玩法可走 `wasm_run`、GPU 经 Host ABI。  
-> 设计真源：[`HOST_ABI.md`](HOST_ABI.md)。本文与目录文件一一对应；过时即改。
+> **不是** Three 移植。闭合契约、薄胶水、玩法走 UJS-1、GPU 经 Host ABI。  
+> 设计真源：[`HOST_ABI.md`](HOST_ABI.md)。本文与目录文件一一对应。
 
 ## 开发 vs 发布
 
-- **开发**：分文件（本目录）；`/engine/demo/`
-- **发布**：`npm run ship:engine` → `/engine/ship/`（**一个** `uxe-demo.js` + 薄 html + wasm）
-- **远期**：核进单 wasm；html 内联极薄 boot；拆分 `.js` 不进用户包
+| | 开发 `/engine/demo/` | 发布 `/engine/ship/` |
+|---|---|---|
+| 玩法 | 页内 `compile(sim.ujs)` | 预编译进 `asteroid.wasm` |
+| 核 | `core-asteroid.js` | **`asteroid.wasm`**（`native/uxe_asteroid.c`） |
+| 引擎 | `ujs_full.wasm` | **`gameEngine.wasm`**（同产物，交付名） |
+| 页 | 多模块 ESM | **一张** `index.html` + 极薄胶水 |
+
+```bash
+npm run ship:engine      # 生成 ship 三件套
+npm run test:uxe:ship    # CDP 验收
+```
 
 ## 命题
 
 ```
-Shell = 引擎核（经典调度） + UJS 脚本（玩法/决策） + Host ABI → GPU
+Shell = {game}.wasm（调度 + packet）
+      + gameEngine.wasm（UJS VM）
+      + 极薄 JS（Host GPU / 输入 / 双 wasm 桥）
 ```
 
-| 层 | 现状（代码） | 方向 |
+| 层 | 现状 | 约束 |
 |---|---|---|
-| 玩法 | `../game/sim.ujs` → `wasm_run` | 保持 UJS-1 |
-| 核 | `core-asteroid.js`（JS 占位） | → 单 wasm，仍只调 `host_*` |
-| Host | `browser-host.js` | 可换 Native Host |
-| GPU 提交 | `packet.js` 二进制 **UXEP** → `host_gpu_submit` | buffer 驻留 |
-| 输入 | `input.js` 二进制 **UXIN** | 手柄/指针后加 |
-| GPU 后端 | **WebGL + WebGPU 自适应**（`prefer: auto\|webgl\|webgpu`） | compute / 驻留 buffer |
-| 胶水 | `demo/host.js` | 仅 canvas + HUD + `createBrowserHost` |
+| 玩法 | `game/sim.ujs` | UJS-1；表外永久拒绝 |
+| 游戏核 | ship: `asteroid.wasm` | 只调 `host_*` + `eng_*`；**不含** VM |
+| 引擎 | `gameEngine.wasm` | = `ujs_full.wasm`；**不合进**游戏 wasm |
+| Host | `browser-host.js` | WebGL / WebGPU 自适应 |
+| 提交 | UXEP → `host_gpu_submit` | 一次一包，非逐 draw |
+| 输入 | UXIN | `host_input_read(buf)` |
 
-## 架构（已实现）
+## 架构
+
+**demo（源码测试）**
 
 ```
-demo/host.js          # 胶水
-      ↓
-core-asteroid.js      # 核：UJS 步进 + encodeRenderPacket
-      ↓ host_*
-browser-host.js       # 浏览器宿主（auto: WebGPU→WebGL）
-      ↓ decode UXEP → WebGPU 或 WebGL
-renderer-webgpu.js | renderer-webgl.js
+demo/host.js → core-asteroid.js → wasm_run(ujs_full)
+                    ↓ host_*
+              browser-host → WebGL | WebGPU
 ```
 
-`createEngine` / `uxe.js`：底层场景 API，供宿主内部或实验用；**演示主路径走 Host ABI**。
+**ship（交付）**
+
+```
+index.html（内联胶水）
+    ├─ instantiate gameEngine.wasm
+    ├─ instantiate asteroid.wasm  (imports: host_* + eng_boot/eng_sim_step)
+    └─ browser-host → WebGL | WebGPU
+```
 
 ## 文件职责
 
 | 文件 | 职责 |
 |---|---|
-| `HOST_ABI.md` | 契约说明（MVP 六类、packet、反模式） |
-| `host-abi.js` | ABI 版本常量 / typedef |
-| `packet.js` | UXEP encode/decode |
-| `input.js` | UXIN encode/decode |
-| `browser-host.js` | 浏览器 `host_*`；**WebGL / WebGPU 自适应** |
-| `core-asteroid.js` | Asteroid 核（不知 canvas） |
+| `HOST_ABI.md` | 契约（MVP 六类、UXEP/UXIN、反模式） |
+| `host-abi.js` | ABI 版本常量 |
+| `packet.js` / `input.js` | UXEP / UXIN |
+| `browser-host.js` | 浏览器 `host_*` |
+| `core-asteroid.js` | demo 用 JS 核 |
 | `math.js` `scene.js` | 矩阵 / InstanceCloud |
-| `renderer-webgl.js` | WebGL1 实例化后端 |
-| `renderer-webgpu.js` | WebGPU 实例化绘制（失败则宿主回退 WebGL） |
-| `uxe.js` | `createEngine` 门面（底层） |
-| `demo/` | 产品演示页 + CDP `_probe.mjs` |
-| `_packet_selftest*` | packet 门禁（alarm） |
+| `renderer-webgl.js` / `renderer-webgpu.js` | GPU 后端 |
+| `uxe.js` | `createEngine` 底层门面（非主路径） |
+| `demo/` | 源码测试 + `_probe.mjs` |
+| `ship/` | 发布面：`build-asteroid.mjs` · `host-entry.js` · `bake-html.mjs` |
+| `_packet_selftest*` / `_input_selftest*` | 二进制门禁 |
 
 ## 跑与门禁
 
 ```bash
 cd ujs && npm run demo
-# http://127.0.0.1:8765/engine/demo/           # prefer=auto
-# …/engine/demo/?gpu=webgl | ?gpu=webgpu       # 强制
+# /engine/demo/          源码测试
+# /engine/ship/          发布面
+# ?gpu=webgl|webgpu|auto
 
-npm run test:uxe:packet   # alarm 20
-npm run test:uxe:input    # alarm 15
-npm run test:uxe          # alarm 55，需本机 Chrome
+npm run test:uxe:packet
+npm run test:uxe:input
+npm run test:uxe
+npm run test:uxe:ship
 ```
 
-发版：`./ujs/scripts/release-artifacts.sh --with-demos` 包含本目录（无自测脚本亦可）。
-
-## 与 `game/` 
+## 与 `game/`
 
 | 路径 | 角色 |
 |---|---|
 | **`web/engine/`** | **产品化主线** |
 | `web/game/` | Three 对照 |
-| `web/game/exp/` | 裸 GL 对照实验 |
+| `web/game/exp/` | 裸 GL 对照 |

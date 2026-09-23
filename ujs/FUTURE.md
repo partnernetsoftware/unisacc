@@ -48,22 +48,23 @@ WASM 核心  →  极薄 JS 绑定  →  WebGPU/WebGL  →  GPU
 |---|---|
 | UJS-1 / `wasm_run` | 可构造、可验收的脚本/玩法 |
 | **UXE**（`web/engine/`） | 自研引擎主线：场景 + GPU 后端；非 Three |
-| 下一刀 | WebGPU 实例绘制、buffer 驻留、引擎核收进单 wasm |
+| 下一刀 | WebGPU buffer 驻留；胶水 `eng_*` 再收（双 wasm 不变） |
 
 **信心边界：** 不移植 `three.module.js`；自研闭合子集 + WebGPU/WebGL 绑定。
 
-### P0.3 · UXE 自研引擎 — **已开工**
+### P0.3 · UXE 自研引擎 — **交付面已验证**
 
 路径：`ujs/web/engine/`。
 
-- v0：闭合场景 API + WebGL 绘制 + WebGPU 探测/驻留 stub
-- **Host ABI v0**（`HOST_ABI.md`）：`time/input/frame/gpu_submit/asset_read/log`；演示经 `browser-host` + `core-asteroid`（核不知 canvas）
-- GPU：UXEP → **WebGL / WebGPU 自适应**；输入 UXIN
-- **交付**：开发分源；发布 `ship:engine` 单 JS bundle；远期核+逻辑进单 wasm（html 只留胶水）
-- 发版：`--with-demos` 含 `web/engine/`
-- 验收：`test:uxe:packet` · `test:uxe:input` · `test:uxe`（均 alarm）
+- Host ABI v0：`time/input/frame/gpu_submit/asset_read/log`；UXEP / UXIN
+- GPU：WebGL / WebGPU 自适应
+- **交付（不合包）**：`index.html` + `{game}.wasm` + `gameEngine.wasm`（=`ujs_full`）
+- 开发：`/engine/demo/` 分源；发布：`npm run ship:engine` → `/engine/ship/`
+- 验收：`test:uxe:packet` · `test:uxe:input` · `test:uxe` · `test:uxe:ship`
 
-下一刀：GPU buffer 驻留少拷贝；核收进单 wasm（同 ABI）。
+下一刀：GPU buffer 驻留少拷贝；胶水再收（`eng_*` 桥可下沉，仍保持双 wasm）。
+
+**已否决**：把游戏核与 VM 打成单个 wasm（验证过可做，但交付边界错误）。
 
 ---
 
