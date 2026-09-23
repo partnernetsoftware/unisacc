@@ -7,6 +7,8 @@ const HOST_EXPORTS = [
   "host_reset", "host_prog_addr", "host_load_image", "host_run",
   "host_set_local", "host_set_global", "host_get_local", "host_get_global",
   "host_mk_null", "host_mk_bool", "host_mk_i64", "host_mk_f64", "host_mk_str",
+  "host_mk_list", "host_list_set", "host_list_get",
+  "host_mk_dict", "host_dict_set", "host_dict_key", "host_dict_val", "host_len",
   "tag_of_export", "i64_of_export", "f64_of_export",
   "str_len_export", "str_ptr_export", "mem_base", "mem_size",
   "last_ic_stub_export", "ujs_ic_ask",
@@ -85,15 +87,35 @@ function pyToHandle(ex, mem, v) {
   if (typeof v === "bigint") return ex.host_mk_i64(v);
   if (typeof v === "string") {
     const bytes = new TextEncoder().encode(v);
-    const base = Number(ex.mem_base());
-    const scratch = base + 500000;
-    new Uint8Array(mem.buffer).set(bytes, scratch);
-    return ex.host_mk_str(500000, bytes.length); // C offset into mem[]
+    const scratch = 500000; // offset into mem[]
+    new Uint8Array(mem.buffer, Number(ex.mem_base()) + scratch, bytes.length).set(bytes);
+    return ex.host_mk_str(scratch, bytes.length);
+  }
+  if (Array.isArray(v)) {
+    if (typeof ex.host_mk_list !== "function")
+      throw new Error("ujs_full.wasm too old for list bind; npm run build");
+    const h = ex.host_mk_list(v.length);
+    for (let i = 0; i < v.length; i++)
+      ex.host_list_set(h, i, pyToHandle(ex, mem, v[i]));
+    return h;
+  }
+  if (typeof v === "object") {
+    if (typeof ex.host_mk_dict !== "function")
+      throw new Error("ujs_full.wasm too old for dict bind; npm run build");
+    const keys = Object.keys(v);
+    const h = ex.host_mk_dict(keys.length);
+    for (let i = 0; i < keys.length; i++) {
+      const k = pyToHandle(ex, mem, keys[i]);
+      const val = pyToHandle(ex, mem, v[keys[i]]);
+      ex.host_dict_set(h, i, k, val);
+    }
+    return h;
   }
   throw new Error("unsupported global/local type: " + typeof v);
 }
 
 function readHandle(ex, mem, h) {
+  if (!h) return null;
   const t = ex.tag_of_export(h);
   if (t === TAG.null) return null;
   if (t === TAG.bool) return !!new Uint8Array(mem.buffer)[Number(ex.mem_base()) + h + 4];
@@ -104,6 +126,21 @@ function readHandle(ex, mem, h) {
     const n = Number(ex.str_len_export(h));
     const base = Number(ex.mem_base());
     return new TextDecoder().decode(new Uint8Array(mem.buffer, base + p, n));
+  }
+  if (t === TAG.list && typeof ex.host_list_get === "function") {
+    const n = Number(ex.host_len(h));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(readHandle(ex, mem, ex.host_list_get(h, i)));
+    return out;
+  }
+  if (t === TAG.dict && typeof ex.host_dict_key === "function") {
+    const n = Number(ex.host_len(h));
+    const out = {};
+    for (let i = 0; i < n; i++) {
+      const k = readHandle(ex, mem, ex.host_dict_key(h, i));
+      out[k] = readHandle(ex, mem, ex.host_dict_val(h, i));
+    }
+    return out;
   }
   return { tag: t, handle: h };
 }

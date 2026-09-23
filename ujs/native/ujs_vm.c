@@ -333,9 +333,11 @@ static u32 run_code(u32 base, u32 len) {
       u32 sh = SH_UNKNOWN, gu = GU_NONE;
       if (pc < end && mem[pc] == OP_CALL) {
         u32 argc = mem[pc + 1];
-        u32 need = (argc == 255) ? 2u : (argc + 1u);
+        u32 need;
+        if (argc >= 128) need = (argc - 128) + 2u; /* fixed + list + callee */
+        else need = argc + 1u;
         if (sp >= 4u * need) {
-          a = peek((argc == 255) ? 1u : argc);
+          a = peek(need - 1u);
           sh = shape_of_val(a);
           gu = (tag_of(a) == TAG_FN) ? GU_TYPE_OK : GU_NONE;
         }
@@ -480,13 +482,16 @@ static u32 run_code(u32 base, u32 len) {
       return 0;
     case OP_CALL: {
       u32 argc=mem[pc++], args[64], fi, ent, nparams, rest_ix, nloc;
-      u32 nested;
-      if (argc == 255) { /* CALL_SPREAD: top is list/tup */
-        a = pop();
+      u32 nested, nfixed, na;
+      if (argc >= 128) { /* CALL_SPREAD: … callee, fixed…, list */
+        nfixed = argc - 128;
+        a = pop(); /* list */
         if (tag_of(a)!=TAG_LIST && tag_of(a)!=TAG_TUP) return 0;
-        argc = len_of(a);
-        if (argc > 64) return 0;
-        for (i=0;i<argc;i++) args[i]=rd32(a+8+i*4);
+        na = len_of(a);
+        if (nfixed + na > 64) return 0;
+        for (i=0;i<nfixed;i++) args[nfixed-1-i]=pop();
+        for (i=0;i<na;i++) args[nfixed+i]=rd32(a+8+i*4);
+        argc = nfixed + na;
       } else {
         if (argc > 64) return 0;
         for (i=argc;i>0;i--) args[i-1]=pop();
@@ -591,6 +596,50 @@ u32 host_mk_bool(u32 b) { return mk_bool((u8)b); }
 u32 host_mk_i64(i64 v) { return mk_i64(v); }
 u32 host_mk_f64(f64 v) { return mk_f64(v); }
 u32 host_mk_str(u32 ptr, u32 n) { return mk_str(&mem[ptr], n); }
+
+u32 host_mk_list(u32 n) {
+  u32 p, i;
+  if (n > 4096) return 0;
+  p = alloc(8 + n * 4);
+  mem[p] = TAG_LIST;
+  wr16(p + 2, (u16)n);
+  for (i = 0; i < n; i++) wr32(p + 8 + i * 4, 0);
+  return p;
+}
+void host_list_set(u32 h, u32 i, u32 v) {
+  if (tag_of(h) != TAG_LIST || i >= len_of(h)) return;
+  wr32(h + 8 + i * 4, v);
+}
+u32 host_list_get(u32 h, u32 i) {
+  if (tag_of(h) != TAG_LIST || i >= len_of(h)) return 0;
+  return rd32(h + 8 + i * 4);
+}
+u32 host_mk_dict(u32 n) {
+  u32 p, i;
+  if (n > 4096) return 0;
+  p = alloc(8 + n * 8);
+  mem[p] = TAG_DICT;
+  wr16(p + 2, (u16)n);
+  for (i = 0; i < n; i++) {
+    wr32(p + 8 + i * 8, 0);
+    wr32(p + 8 + i * 8 + 4, 0);
+  }
+  return p;
+}
+void host_dict_set(u32 h, u32 i, u32 k, u32 v) {
+  if (tag_of(h) != TAG_DICT || i >= len_of(h)) return;
+  wr32(h + 8 + i * 8, k);
+  wr32(h + 8 + i * 8 + 4, v);
+}
+u32 host_dict_key(u32 h, u32 i) {
+  if (tag_of(h) != TAG_DICT || i >= len_of(h)) return 0;
+  return rd32(h + 8 + i * 8);
+}
+u32 host_dict_val(u32 h, u32 i) {
+  if (tag_of(h) != TAG_DICT || i >= len_of(h)) return 0;
+  return rd32(h + 8 + i * 8 + 4);
+}
+u32 host_len(u32 h) { return len_of(h); }
 
 u32 tag_of_export(u32 h) { return tag_of(h); }
 i64 i64_of_export(u32 h) { return i64_of(h); }

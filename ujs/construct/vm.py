@@ -234,13 +234,18 @@ def run(fn: Fn, globals_map, locals_map, *, mutate_globals=False,
             pc += 1
             continue
         if op == "call":
-            # stack: … callee, args…  OR  … callee, list  when a==255 (CALL_SPREAD)
+            # stack: … callee, args…  OR  … callee, fixed…, list  when a>=128
             argc = ins.a
-            if argc == 255:
+            if argc >= 128:
+                nfixed = argc - 128
+                if nfixed > 64:
+                    raise Trap("type", "call spread")
                 lst = pop()
                 if lst[0] not in ("list", "tup"):
                     raise Trap("type", "call spread")
-                args = list(lst[1])
+                fixed = [pop() for _ in range(nfixed)]
+                fixed.reverse()
+                args = fixed + list(lst[1])
             else:
                 args = [pop() for _ in range(argc)]
                 args.reverse()

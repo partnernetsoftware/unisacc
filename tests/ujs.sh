@@ -158,6 +158,9 @@ return sum(1, 2, 3);""",
   """function sum(a,b,c){return a+b+c;}
 let xs=[1,2,3];
 return sum(...xs);""",
+  """function sum(a,b,c){return a+b+c;}
+let xs=[2,3];
+return sum(1, ...xs);""",
 ]
 print(json.dumps({s: list(pack_program(encode_fn(compile_src(s, o)))) for s in probes}))
 PY
@@ -181,13 +184,19 @@ echo "== call-site spread =="
 python3 - <<'PY'
 from ujs.construct import api
 from ujs.construct import value as V
-src = """function sum(a,b,c){return a+b+c;}
+cases = [
+("""function sum(a,b,c){return a+b+c;}
 let xs=[1,2,3];
-return sum(...xs);"""
-r = api.run(src)
-assert r.ok and V.to_py(r.value) == 6, r.err
-r2 = api.wasm_run(src)
-assert r2.ok and V.to_py(r2.value) == 6, r2.err
+return sum(...xs);""", 6),
+("""function sum(a,b,c){return a+b+c;}
+let xs=[2,3];
+return sum(1, ...xs);""", 6),
+]
+for src, want in cases:
+    r = api.run(src)
+    assert r.ok and V.to_py(r.value) == want, (src, r.err)
+    r2 = api.wasm_run(src)
+    assert r2.ok and V.to_py(r2.value) == want, (src, r2.err)
 print("spread py OK")
 PY
 python3 -m ujs web-build
@@ -250,13 +259,17 @@ const probes = [
   [`function sum(a,b,c){return a+b+c;}
 let xs=[1,2,3];
 return sum(...xs);`, 6],
+  [`function sum(a,b,c){return a+b+c;}
+let xs=[2,3];
+return sum(1, ...xs);`, 6],
+  ['return xs[1] + d.a;', 5, { xs: [1, 2, 3], d: { a: 3 } }, {}],
 ];
 for (const row of probes) {
   const [src, exp, G, L] = row;
   const r = await wasm_run(src, G||{}, L||{});
   if (r.err) throw new Error(JSON.stringify(r.err)+' '+src);
   if (JSON.stringify(unwrap(r)) !== JSON.stringify(exp))
-    throw new Error(src+' got '+r.ok+' want '+exp);
+    throw new Error(src+' got '+JSON.stringify(r.ok)+' want '+JSON.stringify(exp));
 }
 console.log('in-page wasm_run OK');
 JS

@@ -196,11 +196,14 @@ def run_blob(blob, globals_map=None, locals_map=None, *,
             push(V.wrap_list(xs)); continue
         if name == "call":
             argc = code[pc]; pc += 1
-            if argc == 255:
+            if argc >= 128:
+                nfixed = argc - 128
                 lst = pop()
                 if lst[0] not in ("list", "tup"):
                     raise Trap("type", "call spread")
-                args = list(lst[1])
+                fixed = [pop() for _ in range(nfixed)]
+                fixed.reverse()
+                args = fixed + list(lst[1])
             else:
                 args = [pop() for _ in range(argc)]; args.reverse()
             callee = pop()

@@ -33,6 +33,9 @@ import { bootRuntime, wasm_run } from "ujs";
 await bootRuntime(new URL("./web/ujs_full.wasm", import.meta.url));
 const r = await wasm_run("return 1+2*3;", {}, {});
 console.log(r.ok);  // 7
+// globals 可绑 list/dict（未声明名走 G）：
+const r2 = await wasm_run("return xs[1] + d.a;", { xs: [1, 2, 3], d: { a: 3 } }, {});
+console.log(r2.ok); // 5
 // 或：import { unwrap } from "ujs"; unwrap(r)
 ```
 

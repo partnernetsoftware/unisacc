@@ -577,16 +577,16 @@ class Compiler:
             elif p == "call":
                 self.eat("(")
                 argc = 0
-                spread_only = False
+                spread = False
                 while not self.at(")"):
                     if self.at("..."):
-                        if argc != 0:
-                            raise CompileError("spread must be sole call argument")
+                        if spread:
+                            raise CompileError("multiple spreads in call")
                         self.eat("...")
-                        self.expr()  # leave list on stack; call 255 expands
-                        spread_only = True
+                        self.expr()  # leave list on stack
+                        spread = True
                         if self.at(","):
-                            raise CompileError("spread must be sole call argument")
+                            raise CompileError("spread must be last call argument")
                         break
                     self.expr()
                     argc += 1
@@ -594,8 +594,8 @@ class Compiler:
                         self.eat(",")
                 self.eat(")")
                 self.emit("ic_enter", "call")
-                # 255 = CALL_SPREAD: stack is … callee, list
-                self.emit("call", 255 if spread_only else argc)
+                # 128+n = CALL_SPREAD with n fixed args before the list
+                self.emit("call", (128 + argc) if spread else argc)
             elif p == "dot":
                 self.eat(".")
                 name = self.eat("id").text
