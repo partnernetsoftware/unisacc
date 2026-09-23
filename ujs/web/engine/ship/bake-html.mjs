@@ -9,11 +9,13 @@ const host = fs.readFileSync(path.join(ship, "uxe-host.js"), "utf8")
   .replace(/<\/script/gi, "<\\/script");
 
 const home = process.env.UXE_SHIP_HOME || "../";
+const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
 const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache" />
   <title>UXE · Asteroid</title>
   <style>
     :root { color-scheme: dark; }
@@ -62,8 +64,8 @@ try {
     banner: document.getElementById("banner"),
     finalEl: document.getElementById("final"),
     prefer,
-    gameUrl: new URL("./asteroid.wasm", location.href).href,
-    engineUrl: new URL("./engine.wasm", location.href).href,
+    gameUrl: new URL("./asteroid.wasm?v=${stamp}", location.href).href,
+    engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
   });
 } catch (e) {
   hud.innerHTML = '<span class="warn">boot failed</span><br>' + String(e.message || e);

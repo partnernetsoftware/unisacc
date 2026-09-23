@@ -6,7 +6,7 @@
 ## 一句话
 
 **同一套 Host API + 可换 `{game}` 核 + 用户可选自带 LLM API** → 可外网玩的游戏平台。  
-先把交付面与玩法密度做实；变现模型后置。
+小游戏不是旁支：它们是 Host 的压力测试与可扩展性证明。边做玩法边加厚 ABI；**无人门禁**（`npm run test:uxe:all`）代替人肉点鼠标。
 
 ## 三块积木
 
@@ -14,7 +14,7 @@
 |---|---|---|
 | **Host API** | 时间 / 输入 / 帧 / UXEP·GPU / 资源 / 日志 | 继续加厚（H3+）；规划 `host_llm` |
 | **引擎** | `engine.wasm`（=`ujs_full`；游戏 / app / harness 共用） | 稳定交付名；与业务核永远分开 |
-| **游戏** | Asteroid（Pages）· 大富翁（归档） | 下一款街机实践车；模板可复制 |
+| **游戏** | Asteroid · 无人机（Pages）· 大富翁（归档） | 继续用街机实践车逼 Host；模板可复制 |
 
 外网入口（GitHub Pages · `docs/`）：
 
@@ -46,9 +46,11 @@
 
 今日缺口（按优先级）：
 
-1. **街机无人机战场**（`demo/drone/`，指针已用上）→ 可玩后再 ship / Pages  
+1. **eng ABI 下沉**（`eng_sim_step` 进 `engine.wasm`）— 胶水变薄  
 2. Host 继续按卡住点加厚（audio / 贴图…）  
 3. `host_llm_*`：有玩法需要再落地  
+
+无人环：改 Host / 输入 / ship 后先跑 `cd ujs && npm run test:uxe:all`（自启 8765 · CDP · 禁代理）。
 
 ## 明确不做
 

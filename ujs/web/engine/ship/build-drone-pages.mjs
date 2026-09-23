@@ -50,6 +50,7 @@ if (/compiler\.gen\.js/.test(hostRaw)) {
   process.exit(1);
 }
 const hostJs = hostRaw.replace(/<\/script/gi, "<\\/script");
+const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
 
 function bake(homeHref) {
   return `<!DOCTYPE html>
@@ -57,6 +58,7 @@ function bake(homeHref) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache" />
   <title>UXE · 无人机驾舱</title>
   <style>
     :root { color-scheme: dark; }
@@ -156,7 +158,7 @@ try {
     reticle: document.getElementById("reticle"),
     prefer,
     controls: initial,
-    engineUrl: new URL("./engine.wasm", location.href).href,
+    engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
     onControls: paintCtrl,
   });
   window.__UXE_API__ = api;

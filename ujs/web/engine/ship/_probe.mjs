@@ -1,11 +1,11 @@
 /** CDP probe for /engine/ship/ — wall clock. */
-import { spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
-import fs from "fs";
+import {
+  DEMO_ORIGIN, spawnChrome, makeCdp, connectPage, ensureDemoServer,
+} from "../_cdp.mjs";
 
 const WALL_MS = 40_000;
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const URL = "http://127.0.0.1:8765/engine/ship/?t=" + Date.now();
+const URL = DEMO_ORIGIN + "/engine/ship/?t=" + Date.now();
 const PORT = 9341;
 const PROFILE = "/tmp/uxe-ship-" + process.pid;
 const deadline = Date.now() + WALL_MS;
@@ -15,48 +15,12 @@ const left = () => {
   return ms;
 };
 
-fs.rmSync(PROFILE, { recursive: true, force: true });
-fs.mkdirSync(PROFILE, { recursive: true });
-const chromeEnv = {
-  ...process.env,
-  http_proxy: "", https_proxy: "", HTTP_PROXY: "", HTTPS_PROXY: "",
-  ALL_PROXY: "", all_proxy: "", NO_PROXY: "*", no_proxy: "*",
-};
-const chrome = spawn(CHROME, [
-  `--remote-debugging-port=${PORT}`, "--headless=new", "--use-angle=swiftshader",
-  "--enable-webgl", "--ignore-gpu-blocklist", "--no-first-run",
-  "--no-proxy-server", "--proxy-bypass-list=*",
-  `--user-data-dir=${PROFILE}`, "about:blank",
-], { stdio: ["ignore", "ignore", "pipe"], env: chromeEnv });
-
-function cdp(ws, id, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(method)), Math.min(12000, left()));
-    const onMsg = (ev) => {
-      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.id !== id) return;
-      clearTimeout(t); ws.removeEventListener("message", onMsg);
-      if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-      else resolve(msg.result);
-    };
-    ws.addEventListener("message", onMsg);
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
+const server = await ensureDemoServer();
+const chrome = spawnChrome({ port: PORT, profile: PROFILE });
+const cdp = makeCdp(left);
 
 try {
-  while (Date.now() < deadline) {
-    try { if ((await fetch(`http://127.0.0.1:${PORT}/json/version`)).ok) break; } catch {}
-    await sleep(Math.min(200, left()));
-  }
-  const tabs = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-  const page = tabs.find((t) => t.type === "page") || tabs[0];
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    ws.addEventListener("open", res);
-    ws.addEventListener("error", rej);
-    setTimeout(() => rej(new Error("ws")), Math.min(8000, left()));
-  });
+  const ws = await connectPage(PORT, left);
   await cdp(ws, 1, "Runtime.enable");
   await cdp(ws, 2, "Page.enable");
   await cdp(ws, 3, "Page.navigate", { url: URL });
@@ -73,7 +37,6 @@ try {
       const inlineOnly = (v.scripts || []).every((s) => !s || s === "");
       if (!inlineOnly) throw new Error("expected no external script src");
 
-      // Touch relative stick: down near center, drag far right past deadzone → ix=+1
       const layout = await cdp(ws, 200, "Runtime.evaluate", {
         expression: `(() => {
           const c = document.getElementById('c');
@@ -123,7 +86,7 @@ try {
         wasmEngine: v.uxe.wasmEngine,
         touchStick: { ix: stick.ix, flags: stick.flags, mx: stick.mx },
       });
-      ws.close(); chrome.kill("SIGKILL"); process.exit(0);
+      ws.close(); chrome.kill("SIGKILL"); server.stop(); process.exit(0);
     }
     if (v.uxe?.ready === false) throw new Error(v.uxe.error);
     await sleep(Math.min(350, left()));
@@ -131,6 +94,7 @@ try {
   throw new Error("never ready");
 } catch (e) {
   try { chrome.kill("SIGKILL"); } catch {}
+  try { server.stop(); } catch {}
   console.error("FAIL_SHIP", e.message || e);
   process.exit(1);
 }

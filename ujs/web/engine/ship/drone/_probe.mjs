@@ -1,38 +1,19 @@
 /** CDP probe for drone ship-js under /engine/ship/drone/ */
-import { spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
-import fs from "fs";
+import {
+  DEMO_ORIGIN, spawnChrome, makeCdp, connectPage, ensureDemoServer,
+} from "../../_cdp.mjs";
 
 const WALL_MS = 55_000;
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const URL = "http://127.0.0.1:8765/engine/ship/drone/?t=" + Date.now();
+const URL = DEMO_ORIGIN + "/engine/ship/drone/?t=" + Date.now();
 const PORT = 9367;
 const PROFILE = "/tmp/uxe-drone-ship-" + process.pid;
 const deadline = Date.now() + WALL_MS;
 const left = () => Math.max(0, deadline - Date.now());
 
-fs.rmSync(PROFILE, { recursive: true, force: true });
-fs.mkdirSync(PROFILE, { recursive: true });
-const chrome = spawn(CHROME, [
-  `--remote-debugging-port=${PORT}`, "--headless=new", "--use-angle=swiftshader",
-  "--enable-webgl", "--ignore-gpu-blocklist", "--no-first-run",
-  `--user-data-dir=${PROFILE}`, URL,
-], { stdio: ["ignore", "ignore", "pipe"] });
-
-function cdp(ws, id, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(method)), Math.min(12000, left() || 1));
-    const onMsg = (ev) => {
-      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.id !== id) return;
-      clearTimeout(t); ws.removeEventListener("message", onMsg);
-      if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-      else resolve(msg.result);
-    };
-    ws.addEventListener("message", onMsg);
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
+const server = await ensureDemoServer();
+const chrome = spawnChrome({ port: PORT, profile: PROFILE });
+const cdp = makeCdp(left);
 
 async function uxe(ws, id) {
   const r = await cdp(ws, id, "Runtime.evaluate", {
@@ -49,18 +30,7 @@ async function evalExpr(ws, id, expression) {
 }
 
 try {
-  while (Date.now() < deadline) {
-    try { if ((await fetch(`http://127.0.0.1:${PORT}/json/version`)).ok) break; } catch {}
-    await sleep(Math.min(200, left() || 1));
-  }
-  const tabs = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-  const page = tabs.find((t) => t.type === "page") || tabs[0];
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    ws.addEventListener("open", res);
-    ws.addEventListener("error", rej);
-    setTimeout(() => rej(new Error("ws")), Math.min(8000, left() || 1));
-  });
+  const ws = await connectPage(PORT, left);
   await cdp(ws, 1, "Runtime.enable");
   await cdp(ws, 2, "Page.enable");
   await cdp(ws, 3, "Page.navigate", { url: URL });
@@ -127,9 +97,10 @@ try {
     ammo: fired.ammo, magazine: mouseMode.magazine,
     suicideArm: true, missileSpent: true,
   });
-  ws.close(); chrome.kill("SIGKILL"); process.exit(0);
+  ws.close(); chrome.kill("SIGKILL"); server.stop(); process.exit(0);
 } catch (e) {
   try { chrome.kill("SIGKILL"); } catch {}
+  try { server.stop(); } catch {}
   console.error("FAIL_DRONE_SHIP", e.message || e);
   process.exit(1);
 }

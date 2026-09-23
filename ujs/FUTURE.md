@@ -129,17 +129,22 @@ host_llm（BYO Key）打开「带智能的玩法」而不代持密钥
 |---|---|---|
 | **Asteroid** | Pages 上线 | 连续操作 + 即时反馈 → 可玩；Host MVP 够用 |
 | **城市大富翁** | **索引下架**（源码归档） | 回合制 + 弱反馈 + 多键别扭 → 可玩性低；不该当第二款门面 |
-| **下一款** | **无人机战场** demo 已通探针 | 用指针+街机手感逼 Host；再 ship / 上索引 |
+| **无人机战场** | Pages 上线 · 探针绿 | 指针+双模式操控+触屏相对摇杆；逼出 UXIN FLAG_TOUCH |
+
+### 信念与无人环
+
+几款街机已证明 **UJS + Host + 可换核** 可扩展。继续用游戏夯底层，不以训练填表代替构造。  
+验收默认无人：`npm run test:uxe:all`（`scripts/uxe-gate.sh` · 公共 `_cdp.mjs` · 自启静态服 · 禁代理）。人只审玩感，不点门禁。
 
 ### 下一款：街机无人机战场
 
-路径：`web/game/drone.ujs` · `engine/core-drone.js` · `engine/demo/drone/`。
+路径：`web/game/drone.ujs` · `engine/core-drone.js` · `engine/demo/drone/` · Pages `docs/uxe/drone/`。
 
 | 已通 | 证据 |
 |---|---|
 | UXIN v2 指针 | `mx/my/buttons`；CDP `mouseMoved` → `mx>0` |
-| 第一人称跟飞 + 瞄准锥射击 | demo；点击/空格开火 |
-| 无人验收 | `test:uxe:input` · `test:uxe:drone:rules` · `test:uxe:drone` |
+| 第一人称跟飞 + 瞄准锥 / 导弹 | demo + ship；锁定开火 · 自杀臂 |
+| 无人验收 | `test:uxe:all`（含 drone demo/ship/rules） |
 
 原则：缺口进 HOST_ABI；探针必须能模拟指针，禁止只靠人工点鼠标验收。
 

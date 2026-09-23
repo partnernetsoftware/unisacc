@@ -242,12 +242,14 @@ Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
 
 ```bash
 cd ujs
+npm run test:uxe:all       # 一键无人门禁（自启 8765 · CDP · 禁代理）
+# 或分项：
 npm run test:uxe:packet    # UXEP
 npm run test:uxe:input     # UXIN
 npm run test:uxe           # demo asteroid
 npm run test:uxe:ship      # ship asteroid
-npm run test:uxe:monopoly  # demo monopoly
-npm run test:uxe:monopoly:ship
+npm run test:uxe:drone     # demo drone
+npm run test:uxe:drone:ship
 ```
 
 改 ABI 而未改本文件 / 门禁 = 文档债务。

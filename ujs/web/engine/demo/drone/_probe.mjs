@@ -1,38 +1,19 @@
 /** CDP: FP drone — boot, magazine=2, lock+fire ammo--, suicide arm + blast. */
-import { spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
-import fs from "fs";
+import {
+  DEMO_ORIGIN, spawnChrome, makeCdp, connectPage, ensureDemoServer,
+} from "../../_cdp.mjs";
 
 const WALL_MS = 55_000;
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const URL = "http://127.0.0.1:8765/engine/demo/drone/?t=" + Date.now();
+const URL = DEMO_ORIGIN + "/engine/demo/drone/?t=" + Date.now();
 const PORT = 9366;
 const PROFILE = "/tmp/uxe-drone-fp-" + process.pid;
 const deadline = Date.now() + WALL_MS;
 const left = () => Math.max(0, deadline - Date.now());
 
-fs.rmSync(PROFILE, { recursive: true, force: true });
-fs.mkdirSync(PROFILE, { recursive: true });
-const chrome = spawn(CHROME, [
-  `--remote-debugging-port=${PORT}`, "--headless=new", "--use-angle=swiftshader",
-  "--enable-webgl", "--ignore-gpu-blocklist", "--no-first-run",
-  `--user-data-dir=${PROFILE}`, URL,
-], { stdio: ["ignore", "ignore", "pipe"] });
-
-function cdp(ws, id, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(method)), Math.min(12000, left() || 1));
-    const onMsg = (ev) => {
-      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.id !== id) return;
-      clearTimeout(t); ws.removeEventListener("message", onMsg);
-      if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-      else resolve(msg.result);
-    };
-    ws.addEventListener("message", onMsg);
-    ws.send(JSON.stringify({ id, method, params }));
-  });
-}
+const server = await ensureDemoServer();
+const chrome = spawnChrome({ port: PORT, profile: PROFILE });
+const cdp = makeCdp(left);
 
 async function uxe(ws, id) {
   const r = await cdp(ws, id, "Runtime.evaluate", {
@@ -49,18 +30,7 @@ async function evalExpr(ws, id, expression) {
 }
 
 try {
-  while (Date.now() < deadline) {
-    try { if ((await fetch(`http://127.0.0.1:${PORT}/json/version`)).ok) break; } catch {}
-    await sleep(Math.min(200, left() || 1));
-  }
-  const tabs = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json();
-  const page = tabs.find((t) => t.type === "page") || tabs[0];
-  const ws = new WebSocket(page.webSocketDebuggerUrl);
-  await new Promise((res, rej) => {
-    ws.addEventListener("open", res);
-    ws.addEventListener("error", rej);
-    setTimeout(() => rej(new Error("ws")), Math.min(8000, left() || 1));
-  });
+  const ws = await connectPage(PORT, left);
   await cdp(ws, 1, "Runtime.enable");
   await cdp(ws, 2, "Page.enable");
   await cdp(ws, 3, "Page.navigate", { url: URL });
@@ -74,7 +44,6 @@ try {
   }
   if (!ready) throw new Error("never ready fp ammo=2");
 
-  // Wait for __DRONE_API__
   let apiOk = false;
   for (let i = 0; i < 30; i++) {
     apiOk = await evalExpr(ws, 150 + i, `!!(window.__DRONE_API__ && window.__DRONE_API__.faceNearest)`);
@@ -91,13 +60,11 @@ try {
   const L = layout.result.value;
   const cx = L.x + L.w * 0.5, cy = L.y + L.h * 0.5;
 
-  // Mouse move proves pointer path (UXIN mx/my)
   await cdp(ws, 205, "Input.dispatchMouseEvent", {
     type: "mouseMoved", x: cx + 40, y: cy, button: "none", buttons: 0,
   });
   await sleep(150);
 
-  // --- Mode A: face + lock + fire → ammo decreases ---
   await evalExpr(ws, 210, `window.__DRONE_API__.faceNearest()`);
   await sleep(200);
   let locked = null;
@@ -109,7 +76,6 @@ try {
   }
   if (!locked?.locked) throw new Error("lock failed after faceNearest");
 
-  // CDP Space held across frames + API fire fallback
   await cdp(ws, 230, "Input.dispatchKeyEvent", {
     type: "keyDown", windowsVirtualKeyCode: 32, code: "Space", key: " ", text: " ",
   });
@@ -129,7 +95,6 @@ try {
     throw new Error("missile fire did not spend ammo / spawn / kill");
   }
 
-  // Wait for missile impact kill if still in flight
   if ((fired.kills || 0) === 0 && (fired.missiles || 0) > 0) {
     for (let i = 0; i < 40; i++) {
       await sleep(80);
@@ -138,7 +103,6 @@ try {
     }
   }
 
-  // --- Mode B: KeyF arm suicide (CDP key path) ---
   await cdp(ws, 400, "Input.dispatchKeyEvent", {
     type: "keyDown", windowsVirtualKeyCode: 70, code: "KeyF", key: "f",
   });
@@ -154,7 +118,6 @@ try {
   });
   if (!armed?.suicideArm) throw new Error("suicide arm via KeyF failed");
 
-  // Deterministic blast via probe API (ram path covered by KeyF arm + speed in play)
   const blast = await evalExpr(ws, 430, `window.__DRONE_API__.detonateNow()`);
   if (!blast || blast.nk < 1) throw new Error("suicide blast nk=" + JSON.stringify(blast));
 
@@ -178,9 +141,10 @@ try {
     kills: after.kills, endReason: after.endReason || "",
     score: after.score,
   });
-  ws.close(); chrome.kill("SIGKILL"); process.exit(0);
+  ws.close(); chrome.kill("SIGKILL"); server.stop(); process.exit(0);
 } catch (e) {
   try { chrome.kill("SIGKILL"); } catch {}
+  try { server.stop(); } catch {}
   console.error("FAIL_DRONE", e.message || e);
   process.exit(1);
 }

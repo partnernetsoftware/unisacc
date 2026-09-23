@@ -12,7 +12,7 @@
 | `python3 -m ujs run / wasm-run / js2wasm / …` | 构造 CLI；`python3 -m ujs -h` |
 | `npm run build` / `demo` / `test` | 薄封装（`test` → `../tests/ujs.sh`） |
 | `npm run ship:engine` | → `scripts/ship-engine.sh` |
-| `npm run test:uxe` / `:ship` / `:packet` / `:input` | UXE 门禁（均 alarm） |
+| `npm run test:uxe:all` / `:ship` / `:packet` / `:input` | UXE 无人门禁（均 alarm） |
 
 ## 发版（手动）
 

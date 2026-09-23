@@ -56,6 +56,7 @@
 
 ```bash
 npm run ship:engine         # 生成上述三件
+npm run test:uxe:all        # 一键无人门禁（packet→input→demo→ship→drone*）
 npm run test:uxe:ship       # alarm 55 → CDP /engine/ship/
 npm run test:uxe:packet     # alarm 20 → UXEP
 npm run test:uxe:input      # alarm 15 → UXIN

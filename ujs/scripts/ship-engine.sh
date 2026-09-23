@@ -16,6 +16,10 @@ fi
 
 cd "$ROOT/ujs"
 
+# Stamp Pages HTML so browsers refetch wasm after ship
+STAMP="${UXE_SHIP_STAMP:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || date +%Y%m%d)}"
+export UXE_SHIP_STAMP="$STAMP"
+
 # ——— Asteroid (C {game}.wasm) ———
 perl -e 'alarm 120; exec @ARGV' node "$SHIP/build-asteroid.mjs"
 cp -f "$WEB/ujs_full.wasm" "$SHIP/engine.wasm"
@@ -31,13 +35,13 @@ if grep -q "compiler.gen\|runAsteroidCore\|bootRuntime" "$HOST_JS"; then
   exit 1
 fi
 
-perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" node "$SHIP/bake-html.mjs"
+perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" UXE_SHIP_STAMP="$STAMP" node "$SHIP/bake-html.mjs"
 
 PAGES_AST="$DOCS/uxe/asteroid"
 mkdir -p "$PAGES_AST"
-perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../../" node "$SHIP/bake-html.mjs"
+perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../../" UXE_SHIP_STAMP="$STAMP" node "$SHIP/bake-html.mjs"
 cp -f "$SHIP/index.html" "$SHIP/asteroid.wasm" "$SHIP/engine.wasm" "$PAGES_AST/"
-perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" node "$SHIP/bake-html.mjs"
+perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" UXE_SHIP_STAMP="$STAMP" node "$SHIP/bake-html.mjs"
 
 # ——— Monopoly：归档，不进 Pages 索引 / 不镜像 docs ———
 # 源码仍留在 demo/monopoly · ship/monopoly（本地可开）；Pages 只公开 asteroid。
