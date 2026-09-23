@@ -1766,7 +1766,8 @@ int sha_final(char *out) {            /* 32 bytes */
     return 0;
 }
 
-int wflush(void) { if (bkwn) __write(1, bkwb, bkwn); bkwn = 0; return 0; }
+int bkfd = 1;                       /* where the image goes: -o, else stdout */
+int wflush(void) { if (bkwn) __write(bkfd, bkwb, bkwn); bkwn = 0; return 0; }
 /* while signing, every byte written also goes through SHA-256, and each
    4 KB page's digest is kept: the signature is the last thing in the file,
    so it can be written from these once the rest is out [I-19] */

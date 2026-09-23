@@ -4971,6 +4971,18 @@ int wsat(int i) { if (src[i] == 32) return 1; if (src[i] == 9) return 1; return 
 /* Open for reading.  Windows has no open(2): the gate there is CreateFileA,
    which takes an access mask and a disposition -- <stdio.h>'s fopen makes
    the same choice.  _WIN32 is predefined when unisacc is built FOR Windows. */
+int wopen(char *path) {              /* create/truncate, for -o */
+#ifdef _WIN32
+    return __open(path, 0x40000000, 2);   /* GENERIC_WRITE, CREATE_ALWAYS */
+#else
+#ifdef __linux__
+    return __open(path, 1 | 64 | 512, 493);    /* WRONLY|CREAT|TRUNC, 0755 */
+#else
+    return __open(path, 1 | 512 | 1024, 493);
+#endif
+#endif
+}
+
 int ropen(char *path) {
 #ifdef _WIN32
     return __open(path, 0x80000000, 3);      /* GENERIC_READ, OPEN_EXISTING */
@@ -6410,6 +6422,7 @@ int eatstar(void);
 #endif
 
 int bk_build(char *t, int n, char *target);
+int bkfd;                                            /* -o, else stdout */
 long bk_run(char *t, int n, long argc, long argv);   /* -run [S-9] */
 char *runargv[256];
 int symlea(int i, int t, char *reg);
@@ -10492,8 +10505,9 @@ int fe_tape(char *path, char *t) {
 int main(void) {
     int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb;
     char *a; char *t; long e; int n;
+    char *outpath;
     int (*entry)(long, long);
-    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0;
+    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0;
     i = 1;
     while (i < __argc()) {
         a = __argv(i);
@@ -10508,17 +10522,19 @@ int main(void) {
             } else { if (a[1] == 114) { runit = 1;         /* -run */
             } else { if (a[1] == 99) { dump = 1;           /* -c */
             } else { if (a[1] == 118) { verb = 1;          /* -v */
+            } else { if (a[1] == 111) {                    /* -o */
+                if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
             } else { if (a[1] == 98 || a[1] == 116) {      /* -b, -t */
                 if (a[1] == 98) dump = 2; else dump = 1;
                 i = i + 1; t = __argv(i);
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } }
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } }
         } else { if (fi == 0) { fi = i; if (runit) break; } }
         i = i + 1;
     }
     if (fi == 0) {
         model_dims(); setup();
         printf("usage: unisacc [-run] [-I dir] [-D name[=n]] FILE.c"
-               " [-c | -b os/arch] [args...]\n");
+               " [-c | -b os/arch] [-o out] [args...]\n");
         return 1;
     }
     if (runit) {
@@ -10535,9 +10551,17 @@ int main(void) {
         return entry(0, 0);
     }
     if (dump) {
+        int ofd;
         if (fe_tape(__argv(fi), t)) return 1;
-        if (dump == 2) { bk_build(out, nout, t); return 0; }
-        __write(1, out, nout);
+        ofd = 1;
+        if (outpath) {
+            ofd = wopen(outpath);
+            if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
+        }
+        bkfd = ofd;
+        if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
+        __write(ofd, out, nout);
+        if (ofd != 1) __close(ofd);
         /* `-c -v`: how many times each stage was asked, so a test can check
            that no table-shaped stage is decided in code */
         if (verb) {
@@ -12352,7 +12376,8 @@ int sha_final(char *out) {            /* 32 bytes */
     return 0;
 }
 
-int wflush(void) { if (bkwn) __write(1, bkwb, bkwn); bkwn = 0; return 0; }
+int bkfd = 1;                       /* where the image goes: -o, else stdout */
+int wflush(void) { if (bkwn) __write(bkfd, bkwb, bkwn); bkwn = 0; return 0; }
 /* while signing, every byte written also goes through SHA-256, and each
    4 KB page's digest is kept: the signature is the last thing in the file,
    so it can be written from these once the rest is out [I-19] */

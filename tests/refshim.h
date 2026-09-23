@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
-#define __open(p,f)    open((p),(f))
+#define __open(...)    open(__VA_ARGS__)
 #define __read(f,b,n)  (int)read((f),(b),(n))
 #define __write(f,b,n) (int)write((f),(b),(n))
 #define __close(f)     close(f)
