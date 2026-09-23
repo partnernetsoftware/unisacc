@@ -64,6 +64,30 @@ if [ -n "$HOST" ]; then
     fi
 fi
 
+# The SHIPPED compiler, not only the Python driver: `unisacc a.c b.c` is
+# what someone with one binary and two files actually types.
+UA=${UA:-/tmp/ua_ref}
+[ -x "$UA" ] || "$R/tests/build_ref.sh" >/dev/null || rc=1
+if [ -x "$UA" ]; then
+    check "unisacc -run m1 m2" \
+        "$(perl -e 'alarm 120; exec @ARGV' "$UA" -run "$D/m1.c" "$D/m2.c" 2>&1 | tail -1)"
+    check "unisacc m2 m1 -run" \
+        "$(perl -e 'alarm 120; exec @ARGV' "$UA" -run "$D/m2.c" "$D/m1.c" 2>&1 | tail -1)"
+    got=$(perl -e 'alarm 120; exec @ARGV' "$UA" -run "$D/n1.c" "$D/n2.c" 2>&1 | tail -1)
+    if [ "$got" = "5" ]; then printf "  ok   %-24s %s\n" "unisacc libc on demand" "$got"
+    else printf "  FAIL %-24s got '%s' want '5'\n" "unisacc libc on demand" "$got"; rc=1; fi
+    if [ -n "$HOST" ]; then
+        if perl -e 'alarm 200; exec @ARGV' "$UA" "$D/m1.c" "$D/m2.c" \
+               -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
+            chmod +x "$T/um"
+            command -v codesign >/dev/null && codesign -f -s - "$T/um" >/dev/null 2>&1
+            check "unisacc -b $HOST" "$("$T/um")"
+        else
+            echo "  FAIL unisacc -b $HOST: compile failed"; rc=1
+        fi
+    fi
+fi
+
 echo
 [ $rc -eq 0 ] && echo "multi-unit ok" || echo "multi-unit FAILING"
 exit $rc

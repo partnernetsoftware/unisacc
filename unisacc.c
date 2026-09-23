@@ -6264,6 +6264,7 @@ int symptr[MAXSYM];         /* 1 for pointers and arrays */
 int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
 int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
+int symunit[MAXSYM];        /* which input file declared it */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
@@ -6649,7 +6650,20 @@ long numval(int t) {
     return v;
 }
 
-int etok(int i) { int k; k = 0; while (k < tlen[i]) { ec(src[tpos[i] + k] & 255); k = k + 1; } return 0; }
+int curunit;                /* which input file is being walked */
+int ustat_is(int t);
+int etok(int i) {
+    int k; int u;
+    k = 0; while (k < tlen[i]) { ec(src[tpos[i] + k] & 255); k = k + 1; }
+    /* the suffix travels with the name, so a definition and every use of it
+       inside the unit spell it the same way */
+    if (ustat_is(i)) {
+        es("__u"); u = curunit;
+        if (u >= 10) ec(48 + u / 10);
+        ec(48 + u % 10);
+    }
+    return 0;
+}
 
 int newlab(void) { nlab = nlab + 1; return nlab; }
 int elab(char *p, int n) { es(p); en(n); return 0; }
@@ -6672,6 +6686,42 @@ int sfind(int t) {
     return 0 - 1;
 }
 
+char *inputs[64]; int ninput;   /* the input files, in order */
+/* Two units may each have a `static helper`, and they are DIFFERENT
+   functions; with no linker there is one namespace, so the later unit's
+   statics carry a suffix.  Unit 0 keeps its names, which is why compiling
+   one file produces the same tape it always did. */
+#define MAXUSTAT 512
+char ustat[MAXUSTAT * 32]; int ustat_u[MAXUSTAT]; int nustat;
+int ustat_add(int t) {
+    int k;
+    if (curunit == 0) return 0;
+    if (nustat >= MAXUSTAT) return 0;
+    k = 0;
+    while (k < tlen[t] && k < 31) { ustat[nustat * 32 + k] = src[tpos[t] + k]; k = k + 1; }
+    ustat[nustat * 32 + k] = 0;
+    ustat_u[nustat] = curunit; nustat = nustat + 1;
+    return 0;
+}
+/* Is this token a static of the unit being walked? */
+int ustat_is(int t) {
+    int i; int k; int ok;
+    if (curunit == 0) return 0;
+    i = 0;
+    while (i < nustat) {
+        if (ustat_u[i] == curunit) {
+            k = 0; ok = 1;
+            while (ustat[i * 32 + k]) {
+                if (k >= tlen[t]) { ok = 0; break; }
+                if (ustat[i * 32 + k] != src[tpos[t] + k]) { ok = 0; break; }
+                k = k + 1;
+            }
+            if (ok) { if (k == tlen[t]) return 1; }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 int pponly;                 /* -E: stop after the preprocessor */
 int gdup;                   /* this global was already defined further up */
 int declptr;                /* set by the declarator being processed */
@@ -6693,6 +6743,7 @@ int sadd(int t, int kind, int off, int elem) {
     symdim2[nsym] = decldim2;
     symdim3[nsym] = decldim3;
     symvar[nsym] = 0;
+    symunit[nsym] = curunit;
     symuns[nsym] = declunsigned;
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
@@ -10114,6 +10165,9 @@ int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start;
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
     int pst; int nsp; int spsym[16]; int pfl;
+    /* `static int helper(...)` in the second unit is not the `helper` in
+       the first: recorded here, before the label is emitted */
+    if (declstatic) ustat_add(t);
     start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;
     scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
@@ -10323,7 +10377,15 @@ int unit(void) {
                back ends intern the name, so the second blob is dead -- and
                it put a symbol out of address order, which is the shape that
                took the back end down on the compiler itself [E-61]. */
-            gdup = sfind(t) >= 0;
+            /* a file-scope static belongs to THIS unit; record it before
+               anything spells the name, so the definition already carries
+               the suffix */
+            if (declstatic) ustat_add(t);
+            /* ...which also means a second unit's `static hidden` is NOT a
+               redeclaration of the first unit's: it needs its own storage,
+               under its own name */
+            k = sfind(t);
+            gdup = k >= 0 && symunit[k] == curunit;
             sadd(t, gbind, 0, w);
             /* a struct global is an aggregate: its name is its address */
             if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
@@ -10450,6 +10512,18 @@ int fe_read(char *path) {
     return 0;
 }
 
+/* Does the path end in ".c"?  Under `-run` this is what separates the
+   inputs from the program's own arguments. */
+int isdotc(char *p) {
+    int n;
+    n = 0; while (p[n]) n = n + 1;
+    if (n < 2) return 0;
+    if (p[n - 2] == 46 && p[n - 1] == 99) return 1;     /* .c */
+    if (n >= 5) { if (p[n - 5] == 46 && p[n - 4] == 116 && p[n - 3] == 97
+                   && p[n - 2] == 112 && p[n - 1] == 101) return 1; }  /* .tape */
+    return 0;
+}
+
 /* Does the path end in ".tape"? */
 int istape(char *p) {
     int n;
@@ -10459,7 +10533,11 @@ int istape(char *p) {
         && p[n - 2] == 112 && p[n - 1] == 101;
 }
 
-int fe_tape(char *path, char *t) {
+/* Read, preprocess and lex ONE file.  Split out of fe_tape so that several
+   files can be walked into one tape: preprocessing is per file (include
+   guards, `#define` state, `__FILE__`), only the walk is shared -- the same
+   division driver.compile_sources makes on the Python side. */
+int fe_load(char *path, char *t) {
     int fd; int k;
     srcpath = path;
     optincdl = 0;
@@ -10469,10 +10547,8 @@ int fe_tape(char *path, char *t) {
         if (k > 0 && optincdir[k - 1] != 47) { optincdir[k] = 47; k = k + 1; }
         optincdir[k] = 0; optincdl = k;
     }
-    nibuf = 0; toinit = 0; hasinit = 0;
+    toinit = 0; hasinit = 0;
     fnresume = 0 - 1;
-    model_dims();
-    setup();
     fd = ropen(path);
     if (fd < 0) { printf("cannot open input\n"); return 1; }
     nsrc = __read(fd, src, MAXSRC);
@@ -10495,8 +10571,29 @@ int fe_tape(char *path, char *t) {
         return 2;
     }
     if (lex() < 0) return 1;
-    tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
+    tp = 0;
+    return 0;
+}
+
+/* The whole front end: the prologue, every unit, the epilogue.  `paths` is
+   one file or several, and several make ONE program -- there is no linker,
+   so a call in the first unit reaches a definition in the last the same way
+   it reaches one further down its own file. */
+int fe_units(char **paths, int npath, char *t) {
+    int k; int u; int r;
+    /* The model answers the `@stage.op` forms the prologue itself contains,
+       so it is set up BEFORE anything is emitted.  With this after the
+       first file was loaded, `@call.call __init` came out as `add64` -- a
+       wrong tape, quietly. */
+    model_dims();
+    setup();
+    nout = 0; nsym = 0; nlab = 0; npool = 0;
     poolend = 0; nloop = 0;
+    /* `__init` ACCUMULATES: every unit's global initialisers run there, so
+       this is reset once for the program, not once per file.  Resetting it
+       per file silently dropped unit one's initialisers -- the program ran
+       and printed zeros. */
+    nibuf = 0; nustat = 0;
     es("_start:\n  @call.call __init\n");
     es("  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n"
        "  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n"
@@ -10504,7 +10601,14 @@ int fe_tape(char *path, char *t) {
        "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
        "  jump __argv_top\n__argv_done:\n");
     es("  @call.call main\n  @lit.exit r0\n.bss __argvv 32768\n");
-    unit();
+    u = 0;
+    while (u < npath) {
+        curunit = u;
+        r = fe_load(paths[u], t);
+        if (r) return r;
+        unit();
+        u = u + 1;
+    }
     es("__init:\n");
     k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
     es("  @ctrl.ret\n");
@@ -10554,9 +10658,13 @@ int main(void) {
     char *outpath;
     int (*entry)(long, long);
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0;
+    ninput = 0;
     i = 1;
     while (i < __argc()) {
         a = __argv(i);
+        if (a[0] == 45 && a[1] == 45 && a[1 + 1] == 0) {   /* `--`: argv starts */
+            i = i + 1; break;
+        }
         if (a[0] == 45 && a[1]) {
             if (a[1] == 73) {                              /* -I */
                 if (a[2]) optinc = a + 2; else { i = i + 1; optinc = __argv(i); }
@@ -10582,21 +10690,37 @@ int main(void) {
                       || a[1] == 79 || a[1] == 102 || a[1] == 115
                       || a[1] == 112 || a[1] == 109) {    /* -W -w -g -O -f -std -pipe -m */
             } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } }
-        } else { if (fi == 0) { fi = i; if (runit) break; } }
+        } else {
+            /* Several inputs make ONE program.  Under `-run` the line also
+               carries the PROGRAM's arguments, so the inputs are the `.c`
+               files at the front: the first argument that is not one ends
+               the list and begins argv.  `--` ends it explicitly, for a
+               program whose own first argument is a .c file. */
+            if (fi == 0) fi = i;
+            if (runit) {
+                if (isdotc(a) == 0) break;
+            }
+            if (ninput < 64) { inputs[ninput] = a; ninput = ninput + 1; }
+        }
         i = i + 1;
     }
     if (fi == 0) {
         model_dims(); setup();
-        printf("usage: unisacc [-run] [-I dir] [-D name[=n]] FILE.c"
-               " [-c | -b os/arch] [-o out] [args...]\n");
+        printf("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
+               " FILE.c [FILE.c...] [-c | -b os/arch] [-o out]"
+               " [-- args...]\n");
         return 1;
     }
     if (runit) {
-        if (fe_tape(__argv(fi), HOST_TARGET)) return 1;
-        n = __argc() - fi;
+        if (fe_units(inputs, ninput, HOST_TARGET)) return 1;
+        /* argv[0] is the program, which is its first source file; the rest
+           of the line follows the inputs */
+        n = __argc() - (fi + ninput) + 1;
         if (n > 255) n = 255;
-        k = 0;
-        while (k < n) { runargv[k] = __argv(fi + k); k = k + 1; }
+        if (n < 1) n = 1;
+        runargv[0] = __argv(fi);
+        k = 1;
+        while (k < n) { runargv[k] = __argv(fi + ninput + k - 1); k = k + 1; }
         runargv[n] = 0;
         /* bk_run writes argc/argv into the program's own cells, so this call
            assumes nobody's calling convention */
@@ -10616,7 +10740,7 @@ int main(void) {
         bkfd = ofd;
         if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
         else {
-            r = fe_tape(__argv(fi), t);
+            r = fe_units(inputs, ninput, t);
             if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
             if (r) return 1;
         }
