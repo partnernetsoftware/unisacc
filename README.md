@@ -136,10 +136,14 @@ in both back ends), so an image we emit runs on arm64 macOS with no
 whose first bytes are read two ways: Windows sees `MZ` and
 a PE, a Unix shell sees an assignment and then a script that picks the slice
 for the machine it is on. It has run on macOS/arm64, macOS/x86_64 (Rosetta),
-Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 5.1 MB
-today — four complete images side by side, with no sharing yet. The eleven
-C headers travel inside it, so it compiles `#include <stdio.h>` from any
-directory; `-I`, `-D` and a `#!` line work the way tcc's do.
+Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 1.3 MB
+today: the four Unix slices are gzipped and the script pipes the one it
+picked through `gzip -dc`, and the x86 encoder now uses short forms (mod=00
+and mod=01 displacements, `0x83` imm8, `mov r32, imm32`) instead of spending
+44% of its bytes on the zero halves of disp32/imm32. That is 5.16 MB down to
+1.29 MB. The eleven C headers travel inside it, so it compiles
+`#include <stdio.h>` from any directory; `-I`, `-D`, `-o`, and a `#!` line
+work the way tcc's do.
 
 ## Try it
 
@@ -195,6 +199,9 @@ in a twentieth of a second, and the SGD control arm lives in
 | `run` | `unisacc -run` compiles a file and runs it in memory, against the system `cc` |
 | `cli` | the compiler as a tool, from a scratch directory: built-in headers, `-I`, `-D`, shebang, exit status |
 | `ape` | `unisacc.com` is built and run on this host: one file, a PE for Windows and a script for Unix |
+| `layout` | the data layout **enumerated**, not sampled: every tape of up to three data definitions, each also with one symbol defined twice — 762 tapes, 4,572 image comparisons across all six targets, in twelve seconds |
+| `datashape` | generated programs whose globals are declared in one order and allocated in another; the suite asserts the shape is present before it asserts the bytes match |
+| `bigclosure` | the closure on the compiler itself — 707 KB and 1,874 data symbols, the only input ever big enough to break the back end while all 90 probes stayed green |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
 | `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), [tiny-AES-c](https://github.com/kokke/tiny-AES-c), [tiny-regex-c](https://github.com/kokke/tiny-regex-c); eleven entries, several files each, with their own known-answer tests |
 
