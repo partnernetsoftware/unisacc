@@ -20,13 +20,16 @@ export function perspective(fovy, aspect, near, far, out) {
 }
 
 export function lookAt(ex, ey, ez, cx, cy, cz, out) {
+  // RH Y-up: z = eye-center, x = normalize(up × z), y = z × x
   let zx = ex - cx, zy = ey - cy, zz = ez - cz;
   let len = Math.hypot(zx, zy, zz) || 1;
   zx /= len; zy /= len; zz /= len;
-  let xx = zy * 0 - zz * 1, xy = zz * 0 - zx * 0, xz = zx * 1 - zy * 0;
+  let xx = zz, xy = 0, xz = -zx; // up(0,1,0) × z
   len = Math.hypot(xx, xy, xz) || 1;
   xx /= len; xy /= len; xz /= len;
-  const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+  const yx = zy * xz - zz * xy;
+  const yy = zz * xx - zx * xz;
+  const yz = zx * xy - zy * xx;
   out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
   out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
   out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
