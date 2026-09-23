@@ -105,8 +105,8 @@ assert "MANIFEST.json" in names
 assert "weights/built.json" in names
 assert "native/ujs_vm.c" in names
 assert "samples/fact.wasm" in names
-assert "web/wasm_run.js" in names
-assert "web/ujs_full.wasm" in names
+assert "core/wasm_run.js" in names
+assert "core/ujs_full.wasm" in names
 assert "web/BUILD.json" in names
 assert "package.json" in names
 m = json.loads(z.read("MANIFEST.json"))
@@ -169,7 +169,7 @@ print(json.dumps({s: list(pack_program(encode_fn(compile_src(s, o)))) for s in p
 PY
 node --input-type=module <<'JS'
 import fs from 'fs';
-import { compile } from './ujs/web/compiler.js';
+import { compile } from './ujs/core/compiler.js';
 const py = JSON.parse(fs.readFileSync('/tmp/ujs_parity_py.json','utf8'));
 let bad = 0;
 for (const [src, bytes] of Object.entries(py)) {
@@ -208,12 +208,12 @@ echo "== BUILD.json gates =="
 python3 - <<'PY'
 import hashlib, json, os
 pkg = json.load(open("ujs/package.json"))
-bj = json.load(open("ujs/web/BUILD.json"))
+bj = json.load(open("ujs/core/BUILD.json"))
 assert bj["product"] == "ujs"
 assert bj["version"] == pkg["version"], (bj["version"], pkg["version"])
 assert bj["suite"] == "tests/ujs.sh"
 art = bj["artifacts"]["ujs_full.wasm"]
-raw = open("ujs/web/ujs_full.wasm", "rb").read()
+raw = open("ujs/core/ujs_full.wasm", "rb").read()
 got = hashlib.sha256(raw).hexdigest()
 assert got == art["sha256"], (got, art["sha256"])
 assert len(raw) == art["bytes"]
@@ -264,7 +264,7 @@ JS
 import fs from 'fs';
 const need = ['host_run', 'host_mk_list', 'host_mk_dict', 'host_len',
               'host_list_get', 'host_dict_key'];
-const buf = fs.readFileSync('ujs/web/ujs_full.wasm');
+const buf = fs.readFileSync('ujs/core/ujs_full.wasm');
 const { instance } = await WebAssembly.instantiate(buf);
 const ex = instance.exports;
 for (const n of need) {
@@ -274,8 +274,8 @@ console.log('ABI smoke OK', need.join(','));
 JS
   echo "== in-page wasm_run =="
   node --input-type=module <<'JS'
-import { bootRuntime, wasm_run, unwrap } from './ujs/web/wasm_run.js';
-await bootRuntime(new URL('./ujs/web/ujs_full.wasm', import.meta.url));
+import { bootRuntime, wasm_run, unwrap } from './ujs/core/wasm_run.js';
+await bootRuntime(new URL('./ujs/core/ujs_full.wasm', import.meta.url));
 const probes = [
   ['return 1+2*3;', 7],
   ['const n=5; let f=1; while(n>0){f=f*n; n=n-1;} return f;', 120],
