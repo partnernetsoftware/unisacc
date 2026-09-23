@@ -1,15 +1,38 @@
 #!/usr/bin/env node
-/** Bake ship/index.html: tiny glue + asteroid.wasm + engine.wasm */
+/** Bake asteroid ship: thin index.html (game.js built separately or here). */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { spawnSync } from "child_process";
 
 const ship = path.dirname(fileURLToPath(import.meta.url));
-const host = fs.readFileSync(path.join(ship, "uxe-host.js"), "utf8")
-  .replace(/<\/script/gi, "<\\/script");
-
-const home = process.env.UXE_SHIP_HOME || "../";
 const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
+const home = process.env.UXE_SHIP_HOME || "../";
+const skipBundle = process.env.UXE_SKIP_GAME_BUNDLE === "1";
+
+if (!skipBundle) {
+  const gameOut = path.join(ship, "game.js");
+  const build = spawnSync("npx", [
+    "--yes", "esbuild@0.23.1",
+    path.join(ship, "host-entry.js"),
+    "--bundle", "--format=esm", "--platform=browser", "--target=es2022",
+    "--loader:.json=json",
+    "--external:./engine.js",
+    `--outfile=${gameOut}`,
+  ], { stdio: "inherit", cwd: path.join(ship, "../..") });
+  if (build.status !== 0) process.exit(build.status || 1);
+
+  const gameJs = fs.readFileSync(gameOut, "utf8");
+  if (/createWebGLRenderer|createWebGPURenderer|compiler\.gen/.test(gameJs)) {
+    console.error("asteroid game.js pulled in Host/GPU or compiler — abort");
+    process.exit(1);
+  }
+  if (!gameJs.includes("./engine.js")) {
+    console.error("asteroid game.js missing ./engine.js import — abort");
+    process.exit(1);
+  }
+}
+
 const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -44,16 +67,14 @@ const html = `<!DOCTYPE html>
 </head>
 <body>
   <a class="nav" href="${home}" style="right:16px;top:16px">← 游戏索引</a>
-  <div id="hud">ship · loading wasms…</div>
+  <div id="hud">ship · loading…</div>
   <div id="banner"><div>
     <h1 style="margin:0 0 8px;font-size:28px">撞毁</h1>
     <p style="margin:0;opacity:.85">双击或空格重开 · <span id="final">0</span></p>
   </div></div>
   <canvas id="c"></canvas>
   <script type="module">
-/* tiny Host glue — wires asteroid.wasm ↔ engine.wasm + GPU */
-${host}
-
+import { startShip } from "./game.js?v=${stamp}";
 const q = new URLSearchParams(location.search).get("gpu");
 const prefer = q === "webgl" || q === "webgpu" ? q : "auto";
 const hud = document.getElementById("hud");
@@ -78,4 +99,4 @@ try {
 `;
 
 fs.writeFileSync(path.join(ship, "index.html"), html);
-console.log("baked", path.join(ship, "index.html"), "home=", home);
+console.log("baked asteroid", path.join(ship, "index.html"), "home=", home);

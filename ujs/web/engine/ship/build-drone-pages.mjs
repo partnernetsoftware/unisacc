@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Build Drone Pages ship (JS core + precompiled sim + engine.wasm).
- * Output: docs/uxe/drone/  and  web/engine/ship/drone/
+ * Build Drone Pages ship.
+ * Shared Host/GPU: ../engine.js (and docs/uxe/engine.js).
+ * This game: game.js + engine.wasm + thin index.html.
  */
 import fs from "fs";
 import path from "path";
@@ -14,6 +15,7 @@ const web = path.resolve(here, "../..");
 const root = path.resolve(web, "../..");
 const outLocal = path.join(here, "drone");
 const outPages = path.join(root, "docs/uxe/drone");
+const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
 
 const simSrc = fs.readFileSync(path.join(web, "game/drone.ujs"), "utf8");
 const { image, blob } = compile(simSrc);
@@ -28,29 +30,43 @@ for (const dir of [outLocal, outPages]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
+// Ensure shared engine.js exists (Host + GPU)
+const engBuild = spawnSync("node", [path.join(here, "build-engine-js.mjs")], {
+  stdio: "inherit", cwd: path.join(web, ".."),
+});
+if (engBuild.status !== 0) process.exit(engBuild.status || 1);
+
+const gameOut = path.join(outLocal, "game.js");
 const esbuild = spawnSync("npx", [
   "--yes", "esbuild@0.23.1",
   path.join(here, "drone-host-entry.js"),
   "--bundle", "--format=esm", "--platform=browser", "--target=es2022",
   "--loader:.json=json",
   "--define:__UXE_SHIP__=true",
+  "--external:../engine.js",
   "--external:fs",
   "--external:path",
   "--external:url",
   "--external:./compiler.js",
   "--external:./compiler.gen.js",
   "--external:../compiler.js",
-  `--outfile=${path.join(outLocal, "uxe-host.js")}`,
+  `--outfile=${gameOut}`,
 ], { stdio: "inherit", cwd: path.join(web, "..") });
 if (esbuild.status !== 0) process.exit(esbuild.status || 1);
 
-const hostRaw = fs.readFileSync(path.join(outLocal, "uxe-host.js"), "utf8");
-if (/compiler\.gen\.js/.test(hostRaw)) {
-  console.error("drone ship glued compiler.gen — abort");
+const gameJs = fs.readFileSync(gameOut, "utf8");
+if (/compiler\.gen\.js/.test(gameJs)) {
+  console.error("drone game.js glued compiler.gen — abort");
   process.exit(1);
 }
-const hostJs = hostRaw.replace(/<\/script/gi, "<\\/script");
-const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
+if (/createWebGLRenderer|createWebGPURenderer/.test(gameJs)) {
+  console.error("drone game.js pulled in Host/GPU — abort");
+  process.exit(1);
+}
+if (!gameJs.includes("../engine.js")) {
+  console.error("drone game.js missing ../engine.js import — abort");
+  process.exit(1);
+}
 
 function bake(homeHref) {
   return `<!DOCTYPE html>
@@ -135,8 +151,7 @@ function bake(homeHref) {
   </div>
   <canvas id="c"></canvas>
   <script type="module">
-${hostJs}
-
+import { startDroneShip } from "./game.js?v=${stamp}";
 const params = new URLSearchParams(location.search);
 const q = params.get("gpu");
 const prefer = q === "webgl" || q === "webgpu" ? q : "auto";
@@ -180,6 +195,15 @@ fs.copyFileSync(path.join(web, "ujs_full.wasm"), path.join(outLocal, "engine.was
 
 fs.writeFileSync(path.join(outPages, "index.html"), bake("../../"));
 fs.copyFileSync(path.join(outLocal, "engine.wasm"), path.join(outPages, "engine.wasm"));
+fs.copyFileSync(gameOut, path.join(outPages, "game.js"));
+
+// drop legacy fat inline host if present
+for (const p of [
+  path.join(outLocal, "uxe-host.js"),
+  path.join(outPages, "uxe-host.js"),
+]) {
+  try { fs.unlinkSync(p); } catch { /* */ }
+}
 
 console.log("drone ship-js ok:");
 console.log("  local ", outLocal);

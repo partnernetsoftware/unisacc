@@ -15,8 +15,9 @@
 | 不跟踪 → **Release** / 本地 `web-build` · `ship:pages` | |
 |---|---|
 | `ujs_full.wasm` · `compiler.gen.js` | 产品核 |
-| `engine/ship/asteroid.wasm` · `engine.wasm` | asteroid 发布面 |
-| `engine/ship/index.html` · `uxe-host.js` | bake 生成（gitignore） |
+| `engine/ship/asteroid.wasm` · `engine.wasm` · `game.js` | asteroid 发布面 |
+| `engine/ship/engine.js` · `docs/uxe/engine.js` | **共享 Host/GPU**（`build-engine-js`） |
+| `engine/ship/index.html` | bake 生成（gitignore） |
 | `ujs_rt.wasm` · `progs/*` | 可选演示 |
 | `game/three.module.js` | 按需拉取 |
 

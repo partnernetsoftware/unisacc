@@ -10,7 +10,7 @@
 | 玩法 | 页内 `compile(*.ujs)` | 预编译进核或 embed |
 | 核 | `core-asteroid.js` · `core-drone.js` | `asteroid.wasm` · drone ship-js |
 | 引擎 | `ujs_full.wasm` | **`engine.wasm`** |
-| 页 | 多模块 ESM | **一张** `index.html` + 极薄胶水 |
+| 页 | 多模块 ESM | `index.html` + **`engine.js`（共享）** + `game.js` |
 
 ```bash
 npm run ship:pages             # asteroid + drone → ship/ 与 docs/uxe/
@@ -50,10 +50,11 @@ demo/ · demo/drone/  →  core-*.js  →  wasm_run(ujs_full)
 **ship**
 
 ```
-index.html（内联胶水）
+index.html
+    ├─ ../engine.js     # 共享 Host + GPU（docs/uxe/engine.js）
+    ├─ ./game.js        # 本游戏胶水 / 核
     ├─ engine.wasm
-    ├─ asteroid.wasm  或  drone 打包核 + embed sim
-    └─ browser-host → WebGL | WebGPU
+    └─ asteroid.wasm（仅 asteroid）
 ```
 
 ## 文件职责

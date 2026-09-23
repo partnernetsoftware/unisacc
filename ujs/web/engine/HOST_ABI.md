@@ -190,9 +190,15 @@ decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1�
 
 Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
 
+```
+docs/uxe/engine.js          # 共享 Host + GPU
+docs/uxe/{game}/index.html  # 薄页
+docs/uxe/{game}/game.js     # 本游戏胶水
+docs/uxe/{game}/*.wasm
+```
+
 ```bash
-cd ujs && npm run ship:pages    # asteroid + drone → docs/uxe/
-# 或分项：npm run ship:engine · npm run ship:drone
+cd ujs && npm run ship:pages    # 先 engine.js，再 asteroid + drone
 ```
 
 `eng_sim_step` 双 memory 搬砖仍在 JS ship 胶水（§0「下一刀」）；沉 wasm 前页内体积会继续偏厚。

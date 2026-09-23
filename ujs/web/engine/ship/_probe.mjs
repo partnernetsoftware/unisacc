@@ -28,14 +28,23 @@ try {
   while (Date.now() < deadline) {
     n++;
     const r = await cdp(ws, 100 + n, "Runtime.evaluate", {
-      expression: `({ uxe: window.__UXE__ || null, scripts: [...document.scripts].map(s => s.src.split('/').pop()) })`,
+      expression: `({
+        uxe: window.__UXE__ || null,
+        hasHost: !!window.__UXE_HOST__,
+        mods: [...document.querySelectorAll('script[type=module]')].flatMap(s => {
+          const t = s.textContent || '';
+          return [...t.matchAll(/from\\s*["']([^"']+)["']/g)].map(m => m[1].split('?')[0]);
+        }),
+      })`,
       returnByValue: true,
     });
     const v = r.result.value || {};
     if (v.uxe?.ready && v.uxe.ship && v.uxe.wasmGame && v.uxe.wasmEngine &&
         (v.uxe.fps > 0 || v.uxe.ujsMs > 0 || v.uxe.score > 0)) {
-      const inlineOnly = (v.scripts || []).every((s) => !s || s === "");
-      if (!inlineOnly) throw new Error("expected no external script src");
+      const mods = v.mods || [];
+      if (!mods.some((m) => m === "./game.js" || m.endsWith("/game.js"))) {
+        throw new Error("expected import ./game.js got " + JSON.stringify(mods));
+      }
 
       const layout = await cdp(ws, 200, "Runtime.evaluate", {
         expression: `(() => {
@@ -77,8 +86,7 @@ try {
       }
       console.log("OK_SHIP", {
         backend: v.uxe.backend,
-        scripts: v.scripts,
-        inlineOnly,
+        mods,
         ujsMs: v.uxe.ujsMs,
         fps: v.uxe.fps,
         n: v.uxe.n,

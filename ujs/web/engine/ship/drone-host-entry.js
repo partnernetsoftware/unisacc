@@ -1,8 +1,8 @@
 /**
  * Drone Pages / ship-js entry.
- * Bundled: Host + core + precompiled sim. Fetches engine.wasm only.
+ * Host/GPU from ../engine.js (shared); this file is game.js only.
  */
-import { createBrowserHost } from "../browser-host.js";
+import { createBrowserHost } from "../engine.js";
 import { runDroneCore } from "../core-drone.js";
 import embed from "./drone.embed.json";
 

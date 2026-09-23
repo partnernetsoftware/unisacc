@@ -1,33 +1,20 @@
-/**
- * Ship glue: bridge engine.wasm ↔ asteroid.wasm (+ HUD).
- * Host/GPU come from ./engine.js (shared).
- */
-import { createBrowserHost, INPUT_BYTES } from "./engine.js";
-import meta from "./sim.meta.json";
+// engine/ship/host-entry.js
+import { createBrowserHost, INPUT_BYTES } from "../engine.js";
 
-const N = meta.n || 480;
-const GLOBALS = meta.globals;
-const gIndex = Object.fromEntries(GLOBALS.map((g, i) => [g, i]));
-const TAG = { f64: 3, str: 4, list: 5, dict: 6 };
+// engine/ship/sim.meta.json
+var sim_meta_default = { imageLen: 1463, globals: ["xs", "alive", "ys", "zs", "vxs", "vys", "vzs", "rs", "px", "py", "pz", "score", "ix", "dt", "iy"], n: 480 };
 
-/**
- * @param {{
- *   canvas: HTMLCanvasElement,
- *   hud: HTMLElement,
- *   banner: HTMLElement,
- *   finalEl: HTMLElement,
- *   prefer?: "auto"|"webgl"|"webgpu",
- *   gameUrl: string,
- *   engineUrl: string,
- * }} cfg
- */
-export async function startShip(cfg) {
+// engine/ship/host-entry.js
+var N = sim_meta_default.n || 480;
+var GLOBALS = sim_meta_default.globals;
+var gIndex = Object.fromEntries(GLOBALS.map((g, i) => [g, i]));
+var TAG = { f64: 3, str: 4, list: 5, dict: 6 };
+async function startShip(cfg) {
   const host = await createBrowserHost(cfg.canvas, {
     prefer: cfg.prefer || "auto",
-    pointerLock: false,
+    pointerLock: false
   });
   window.__UXE_HOST__ = host;
-
   const [engineBuf, gameBuf] = await Promise.all([
     fetch(cfg.engineUrl).then((r) => {
       if (!r.ok) throw new Error("fetch engine " + r.status);
@@ -36,35 +23,44 @@ export async function startShip(cfg) {
     fetch(cfg.gameUrl).then((r) => {
       if (!r.ok) throw new Error("fetch game " + r.status);
       return r.arrayBuffer();
-    }),
+    })
   ]);
-
   const { instance: engine } = await WebAssembly.instantiate(engineBuf);
   const ex = engine.exports;
   for (const n of [
-    "memory", "host_reset", "host_prog_addr", "host_load_image", "host_run",
-    "host_set_global", "host_mk_f64", "host_mk_list", "host_list_set", "host_list_get",
-    "host_len", "host_dict_key", "host_dict_val",
-    "tag_of_export", "f64_of_export", "str_len_export", "str_ptr_export", "mem_base",
+    "memory",
+    "host_reset",
+    "host_prog_addr",
+    "host_load_image",
+    "host_run",
+    "host_set_global",
+    "host_mk_f64",
+    "host_mk_list",
+    "host_list_set",
+    "host_list_get",
+    "host_len",
+    "host_dict_key",
+    "host_dict_val",
+    "tag_of_export",
+    "f64_of_export",
+    "str_len_export",
+    "str_ptr_export",
+    "mem_base"
   ]) {
     if (ex[n] == null) throw new Error("engine missing " + n);
   }
-
   const engMem = () => new Uint8Array(ex.memory.buffer);
-
   function engWriteImage(srcBytes) {
     const base = Number(ex.mem_base());
     const addr = Number(ex.host_prog_addr());
     engMem().set(srcBytes, base + addr);
     ex.host_load_image();
   }
-
   function mkF64List(arr) {
     const h = ex.host_mk_list(arr.length);
     for (let i = 0; i < arr.length; i++) ex.host_list_set(h, i, ex.host_mk_f64(arr[i]));
     return h;
   }
-
   function readF64List(h, n) {
     const out = new Float64Array(n);
     if (ex.tag_of_export(h) !== TAG.list) return out;
@@ -72,7 +68,6 @@ export async function startShip(cfg) {
     for (let i = 0; i < m; i++) out[i] = Number(ex.f64_of_export(ex.host_list_get(h, i)));
     return out;
   }
-
   function strEq(h, lit) {
     if (ex.tag_of_export(h) !== TAG.str) return false;
     const n = Number(ex.str_len_export(h));
@@ -82,7 +77,6 @@ export async function startShip(cfg) {
     for (let i = 0; i < n; i++) if (bytes[i] !== lit.charCodeAt(i)) return false;
     return true;
   }
-
   function applyReturn(h, state) {
     if (ex.tag_of_export(h) !== TAG.dict) return;
     const n = Number(ex.host_len(h));
@@ -104,7 +98,6 @@ export async function startShip(cfg) {
       else if (strEq(k, "hit") && Number(ex.f64_of_export(v)) !== 0) state.alive = 0;
     }
   }
-
   function readState(mem, ptr) {
     const dv = new DataView(mem.buffer, ptr, (7 * N + 5) * 8);
     const take = (off, n) => {
@@ -113,48 +106,65 @@ export async function startShip(cfg) {
       return a;
     };
     let o = 0;
-    const xs = take(o, N); o += N * 8;
-    const ys = take(o, N); o += N * 8;
-    const zs = take(o, N); o += N * 8;
-    const vxs = take(o, N); o += N * 8;
-    const vys = take(o, N); o += N * 8;
-    const vzs = take(o, N); o += N * 8;
-    const rs = take(o, N); o += N * 8;
+    const xs = take(o, N);
+    o += N * 8;
+    const ys = take(o, N);
+    o += N * 8;
+    const zs = take(o, N);
+    o += N * 8;
+    const vxs = take(o, N);
+    o += N * 8;
+    const vys = take(o, N);
+    o += N * 8;
+    const vzs = take(o, N);
+    o += N * 8;
+    const rs = take(o, N);
+    o += N * 8;
     return {
-      xs, ys, zs, vxs, vys, vzs, rs,
+      xs,
+      ys,
+      zs,
+      vxs,
+      vys,
+      vzs,
+      rs,
       px: dv.getFloat64(o, true),
       py: dv.getFloat64(o + 8, true),
       pz: dv.getFloat64(o + 16, true),
       score: dv.getFloat64(o + 24, true),
-      alive: dv.getFloat64(o + 32, true),
+      alive: dv.getFloat64(o + 32, true)
     };
   }
-
   function writeState(mem, ptr, state) {
     const dv = new DataView(mem.buffer, ptr, (7 * N + 5) * 8);
     const put = (off, arr) => {
       for (let i = 0; i < arr.length; i++) dv.setFloat64(off + i * 8, arr[i], true);
     };
     let o = 0;
-    put(o, state.xs); o += N * 8;
-    put(o, state.ys); o += N * 8;
-    put(o, state.zs); o += N * 8;
-    put(o, state.vxs); o += N * 8;
-    put(o, state.vys); o += N * 8;
-    put(o, state.vzs); o += N * 8;
-    put(o, state.rs); o += N * 8;
+    put(o, state.xs);
+    o += N * 8;
+    put(o, state.ys);
+    o += N * 8;
+    put(o, state.zs);
+    o += N * 8;
+    put(o, state.vxs);
+    o += N * 8;
+    put(o, state.vys);
+    o += N * 8;
+    put(o, state.vzs);
+    o += N * 8;
+    put(o, state.rs);
+    o += N * 8;
     dv.setFloat64(o, state.px, true);
     dv.setFloat64(o + 8, state.py, true);
     dv.setFloat64(o + 16, state.pz, true);
     dv.setFloat64(o + 24, state.score, true);
     dv.setFloat64(o + 32, state.alive, true);
   }
-
   let gameMem;
   let gameFrame;
   let hudPtr = 0;
   let hudSize = 0;
-
   function paintFromHud() {
     if (!gameMem || !hudPtr) return;
     const dv = new DataView(gameMem.buffer, hudPtr, hudSize || 48);
@@ -170,7 +180,7 @@ export async function startShip(cfg) {
       ship: true,
       wasmGame: true,
       wasmEngine: true,
-      backend: host.backend,
+      backend: host.backend
     };
     window.__UXE__ = snap;
     if (!snap.ready) return;
@@ -179,19 +189,11 @@ export async function startShip(cfg) {
       cfg.finalEl.textContent = (snap.score ?? 0).toFixed(0);
     } else cfg.banner.classList.remove("show");
     if (!(snap.ujsMs > 0) && !(snap.fps > 0)) {
-      cfg.hud.textContent = "asteroid + engine · warming…";
+      cfg.hud.textContent = "asteroid + engine \xB7 warming\u2026";
       return;
     }
-    cfg.hud.innerHTML =
-      `<b>Asteroid</b> · ship<br>` +
-      `backend <b>${host.backend}</b> · entities <b>${snap.n}</b><br>` +
-      `ujs <b>${snap.ujsMs.toFixed(2)} ms</b> · gpu <b>${snap.drawMs.toFixed(2)} ms</b><br>` +
-      `fps <b>${snap.fps.toFixed(0)}</b> · score <b>${snap.score.toFixed(0)}</b><br>` +
-      `操作 <b>WASD</b> / <b>触屏拖</b> · 撞毁后 <b>双击</b>/空格重开` +
-      (host._stats?.().bytes ? ` · packet <b>${host._stats().bytes}</b> B` : "") +
-      (snap.alive ? "" : `<br><span class="warn">撞毁 — 双击或空格重开</span>`);
+    cfg.hud.innerHTML = `<b>Asteroid</b> \xB7 ship<br>backend <b>${host.backend}</b> \xB7 entities <b>${snap.n}</b><br>ujs <b>${snap.ujsMs.toFixed(2)} ms</b> \xB7 gpu <b>${snap.drawMs.toFixed(2)} ms</b><br>fps <b>${snap.fps.toFixed(0)}</b> \xB7 score <b>${snap.score.toFixed(0)}</b><br>\u64CD\u4F5C <b>WASD</b> / <b>\u89E6\u5C4F\u62D6</b> \xB7 \u649E\u6BC1\u540E <b>\u53CC\u51FB</b>/\u7A7A\u683C\u91CD\u5F00` + (host._stats?.().bytes ? ` \xB7 packet <b>${host._stats().bytes}</b> B` : "") + (snap.alive ? "" : `<br><span class="warn">\u649E\u6BC1 \u2014 \u53CC\u51FB\u6216\u7A7A\u683C\u91CD\u5F00</span>`);
   }
-
   const imports = {
     env: {
       host_time: () => host.host_time(),
@@ -216,7 +218,6 @@ export async function startShip(cfg) {
         host.host_log(levels[level] || "info", msg);
       },
       host_request_frame: () => host.host_request_frame(() => gameFrame()),
-
       eng_boot: (imagePtr, imageLen) => {
         try {
           ex.host_reset();
@@ -227,7 +228,6 @@ export async function startShip(cfg) {
           return 1;
         }
       },
-
       eng_sim_step: (statePtr, ix, iy, dt) => {
         try {
           const state = readState(gameMem, statePtr);
@@ -259,10 +259,9 @@ export async function startShip(cfg) {
           console.error(e);
           return 1;
         }
-      },
-    },
+      }
+    }
   };
-
   const { instance: game } = await WebAssembly.instantiate(gameBuf, imports);
   gameMem = game.exports.memory;
   gameFrame = game.exports.game_frame;
@@ -271,3 +270,6 @@ export async function startShip(cfg) {
   if (!game.exports.game_init()) throw new Error("game_init failed");
   return { backend: host.backend };
 }
+export {
+  startShip
+};
