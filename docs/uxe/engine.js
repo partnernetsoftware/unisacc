@@ -1,4 +1,4 @@
-// web/engine/math.js
+// uxe/math.js
 function mat4() {
   return new Float32Array(16);
 }
@@ -66,7 +66,7 @@ function mul(a, b, out) {
   return out;
 }
 
-// web/engine/meshes.js
+// uxe/meshes.js
 var MESH_OCTA = 0;
 var MESH_SHIP = 1;
 var OCTA_MESH = new Float32Array([
@@ -348,7 +348,7 @@ function allMeshes() {
   return TABLE;
 }
 
-// web/engine/renderer-webgl.js
+// uxe/renderer-webgl.js
 var VS = `#version 100
 attribute vec3 aPos;
 attribute vec3 aInst;
@@ -508,7 +508,7 @@ function createWebGLRenderer(canvas) {
   };
 }
 
-// web/engine/renderer-webgpu.js
+// uxe/renderer-webgpu.js
 var WGSL = (
   /* wgsl */
   `
@@ -838,7 +838,7 @@ async function createWebGPURenderer(canvas) {
   return { backend: "webgpu", device, resize, render };
 }
 
-// web/engine/scene.js
+// uxe/scene.js
 var PerspectiveCamera = class {
   constructor(fovy = Math.PI / 3, near = 0.1, far = 300) {
     this.fovy = fovy;
@@ -904,10 +904,10 @@ var Scene = class {
   }
 };
 
-// web/engine/host-abi.js
+// uxe/host-abi.js
 var HOST_ABI_VERSION = 0;
 
-// web/engine/packet.js
+// uxe/packet.js
 var PACKET_MAGIC = 1346721877;
 var PACKET_VERSION = 3;
 var MESH_OCTA2 = 0;
@@ -1148,7 +1148,7 @@ function summarizeRenderPacket(packet) {
   };
 }
 
-// web/engine/input.js
+// uxe/input.js
 var INPUT_MAGIC = 1313429589;
 var INPUT_VERSION = 2;
 var INPUT_BYTES_V1 = 20;
@@ -1226,7 +1226,7 @@ function decodeInputSnapshot(raw) {
   return out;
 }
 
-// web/engine/browser-host.js
+// uxe/host-browser.js
 var INPUT_RING_CAP = 32;
 async function createBrowserHost(canvas, opts = {}) {
   const baseURL = opts.baseURL || new URL(".", import.meta.url);

@@ -1,7 +1,7 @@
 # UJS / UNISA — 路线与产品化
 
 > 用效果说话；实践车逼 Host。构造权重，不训练填表。  
-> 契约：[HOST_ABI.md](web/engine/HOST_ABI.md) · 平台：[PLATFORM.md](web/engine/PLATFORM.md) · 地图：[DOCS.md](DOCS.md)
+> 契约：[HOST_ABI.md](uxe/HOST_ABI.md) · 平台：[PLATFORM.md](uxe/PLATFORM.md) · 地图：[DOCS.md](DOCS.md)
 
 ---
 
@@ -25,7 +25,7 @@
 |---|---|---|
 | Asteroid | Pages | 连续操作 + 即时反馈 → Host MVP 够用 |
 | 无人机 | Pages · 门禁绿 | 指针/双操控/触屏逼 UXIN；WebGPU Y 勿乱翻 |
-| 大富翁 | **归档**（[`archive/`](web/engine/archive/)） | 回合制弱反馈不当门面 |
+| 大富翁 | **归档**（[`archive/`](uxe/archive/)） | 回合制弱反馈不当门面 |
 
 信念：几款街机已证明 **UJS + Host + 可换核** 可扩展。新游戏是压力测试，不是旁支。
 

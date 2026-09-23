@@ -1,10 +1,10 @@
 /** Node self-test for Asteroid Rush sim (no browser). Invoked with alarm wrapper. */
-import { bootRuntime, compile, wasm_run, unwrap } from "../wasm_run.js";
+import { bootRuntime, compile, wasm_run, unwrap } from "../core/wasm_run.js";
 import fs from "fs";
 
 const N = 480;
 const src = fs.readFileSync(new URL("./sim.ujs", import.meta.url), "utf8");
-await bootRuntime(new URL("../ujs_full.wasm", import.meta.url));
+await bootRuntime(new URL("../../core/ujs_full.wasm", import.meta.url));
 const c = compile(src);
 
 function fresh() {

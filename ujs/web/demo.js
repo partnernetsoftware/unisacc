@@ -1,6 +1,6 @@
 /** UJS web — maximize inference-compiler showcase. */
-import { bootRuntime, wasm_run } from "./wasm_run.js";
-import { jspiSupported, runJspiProbe } from "./jspi.js";
+import { bootRuntime, wasm_run } from "../core/wasm_run.js";
+import { jspiSupported, runJspiProbe } from "../core/jspi.js";
 
 const TAG = { null: 0, bool: 1, i64: 2, f64: 3, str: 4, list: 5, dict: 6, fn: 7 };
 
@@ -82,7 +82,7 @@ async function boot() {
     demos = dem;
     fullDemos = fullMeta;
     askWasm = (await WebAssembly.instantiate(askBuf)).instance.exports;
-    await bootRuntime(new URL("./ujs_full.wasm", import.meta.url));
+    await bootRuntime(new URL("../core/ujs_full.wasm", import.meta.url));
     const stages = Object.keys(man.stages).length;
     let jspiLine = "JSPI: checking…";
     status.innerHTML =

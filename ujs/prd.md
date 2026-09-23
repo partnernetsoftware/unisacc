@@ -1,7 +1,7 @@
 # UJS —— 产品规格 v1.1
 
 > **活规格**（与代码同会话更新）。完整条款表见归档 [`archive/prd-v1.0.md`](archive/prd-v1.0.md)。  
-> Host 细节真源：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) · 地图：[`DOCS.md`](DOCS.md) · 路线：[`FUTURE.md`](FUTURE.md)
+> Host 细节真源：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) · 地图：[`DOCS.md`](DOCS.md) · 路线：[`FUTURE.md`](FUTURE.md)
 
 ---
 
@@ -16,9 +16,9 @@
 
 | 层 | 交付 | 不是 |
 |---|---|---|
-| **产品 API** | `bootRuntime` / `wasm_run`（`ujs/web` · Node/Bun/浏览器） | 页内训练 · 完整 ES |
-| **UXE** | Host + `{game}` 核 + `engine.wasm` + 共享 **`engine.js`** | Three 移植 · 合包 |
-| **构造侧** | `construct/` gold → 权重 / `web-build` | 应用运行时依赖 |
+| **产品 API** | `bootRuntime` / `wasm_run`（`ujs/core` · Node/Bun/浏览器） | 页内训练 · 完整 ES |
+| **UXE** | Host + `{app}` 核 + `engine.wasm` + 共享 **`engine.js`** | Three 移植 · 合包 |
+| **构造侧** | `construct/` gold → 权重 / `web-build` → `core/` | 应用运行时依赖 |
 
 ### 1.1 外网游戏面（Pages · `docs/`）
 
@@ -30,7 +30,7 @@ docs/uxe/{game}/*.wasm
 docs/index.html              # 索引（Asteroid · 无人机）
 ```
 
-本地：`/engine/demo/` 分源 · `/engine/ship/` 对照。  
+本地：`/uxe/demo/` 分源 · `/uxe/ship/` 对照。  
 重建：`npm run ship:pages` · 无人门禁：`npm run test:uxe:all`。
 
 ### 1.2 不交付
@@ -75,7 +75,7 @@ wasm_run(fn|src, globals, locals) → { ok } | { err }
 | **一次一包** | UXEP → `host_gpu_submit`；UXIN → `host_input_read` |
 | **触屏** | 单指移动摇杆；双指左飞右看（`FLAG_LOOK_STICK`） |
 
-契约细节：[`HOST_ABI.md`](web/engine/HOST_ABI.md)。平台叙事：[`PLATFORM.md`](web/engine/PLATFORM.md)。
+契约细节：[`HOST_ABI.md`](uxe/HOST_ABI.md)。平台叙事：[`PLATFORM.md`](uxe/PLATFORM.md)。
 
 ---
 
@@ -155,7 +155,7 @@ CI 是第二意见；本地门禁先绿。人只审手感，不点门禁。
 |---|---|
 | **本文件** | 产品活规格 v1.1 |
 | [`archive/prd-v1.0.md`](archive/prd-v1.0.md) | 原条款全表（L/V/A/G/X/IC/…） |
-| [`HOST_ABI.md`](web/engine/HOST_ABI.md) | Host / UXEP / UXIN 真源 |
+| [`HOST_ABI.md`](uxe/HOST_ABI.md) | Host / UXEP / UXIN 真源 |
 | [`FUTURE.md`](FUTURE.md) | 产品化下一刀（eng 下沉 · 模板 · snapshot 落地） |
 | [`DOCS.md`](DOCS.md) | 阅读地图 |
 

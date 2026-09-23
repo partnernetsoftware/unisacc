@@ -1,6 +1,6 @@
 /** Host: Three.js render + input; UJS/wasm runs sim.ujs each frame. */
 import * as THREE from "three";
-import { bootRuntime, compile, wasm_run, unwrap } from "../wasm_run.js";
+import { bootRuntime, compile, wasm_run, unwrap } from "../core/wasm_run.js";
 
 const N = 480;
 const hud = document.getElementById("hud");
@@ -146,7 +146,7 @@ async function main() {
     console.warn("three init failed, continuing sim-only", e);
   }
   hud.textContent = (hasWebGL ? "" : "[sim-only] ") + "loading wasm + compiling sim.ujs…";
-  await bootRuntime(new URL("../ujs_full.wasm", import.meta.url));
+  await bootRuntime(new URL("../../core/ujs_full.wasm", import.meta.url));
   const src = await fetch(new URL("./sim.ujs", import.meta.url)).then((r) => {
     if (!r.ok) throw new Error("sim.ujs " + r.status);
     return r.text();

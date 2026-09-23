@@ -527,7 +527,7 @@ def _git_short() -> str:
 
 
 def write_build_json(out_dir: str) -> str:
-    """Write ujs/web/BUILD.json — provenance fingerprint for prebuilt wasm."""
+    """Write ujs/core/BUILD.json — provenance fingerprint for prebuilt wasm."""
     from datetime import datetime, timezone
 
     artifacts = {}

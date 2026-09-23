@@ -31,7 +31,8 @@ VER=$(python3 -c 'import json; print(json.load(open("ujs/package.json"))["versio
 OUT_DIR="$ROOT/dist"
 STAGE="$OUT_DIR/ujs-$VER-stage"
 ZIP="$OUT_DIR/ujs-$VER-artifacts.zip"
-WEB="$ROOT/ujs/web"
+CORE="$ROOT/ujs/core"
+UJS="$ROOT/ujs"
 
 echo "== ujs release-artifacts v$VER =="
 
@@ -43,18 +44,18 @@ else
   python3 -m ujs web-build
 fi
 
-test -f "$WEB/BUILD.json"
-test -f "$WEB/ujs_full.wasm"
-test -f "$WEB/compiler.gen.js"
+test -f "$CORE/BUILD.json"
+test -f "$CORE/ujs_full.wasm"
+test -f "$CORE/compiler.gen.js"
 
 python3 - <<PY
 import json, hashlib, pathlib, sys
-web = pathlib.Path("$WEB")
-b = json.loads((web / "BUILD.json").read_text())
+core = pathlib.Path("$CORE")
+b = json.loads((core / "BUILD.json").read_text())
 pkg = json.loads(pathlib.Path("ujs/package.json").read_text())
 assert b["version"] == pkg["version"], (b["version"], pkg["version"])
 for name, meta in b["artifacts"].items():
-    p = web / name
+    p = core / name
     if not p.is_file():
         print("missing", p, file=sys.stderr); sys.exit(1)
     h = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -66,64 +67,48 @@ print("fingerprint OK", b["version"], b.get("git"))
 PY
 
 rm -rf "$STAGE"
-mkdir -p "$STAGE/web" "$OUT_DIR"
+mkdir -p "$STAGE/core" "$OUT_DIR"
 
-# hand-written product surface (needed to boot the prebuilt wasm)
-for f in wasm_run.js compiler.js index.html demo.js style.css jspi.js README.md; do
-  [[ -f "$WEB/$f" ]] && cp "$WEB/$f" "$STAGE/web/"
+for f in index.js wasm_run.js compiler.js jspi.js README.md BUILD.json \
+         ujs_full.wasm compiler.gen.js ujs_rt.wasm; do
+  [[ -f "$CORE/$f" ]] && cp "$CORE/$f" "$STAGE/core/"
 done
 cp "$ROOT/ujs/package.json" "$STAGE/"
 cp "$ROOT/ujs/README.md" "$STAGE/"
-cp "$WEB/BUILD.json" "$STAGE/web/"
-
-# core binaries (Release payload)
-cp "$WEB/ujs_full.wasm" "$STAGE/web/"
-cp "$WEB/compiler.gen.js" "$STAGE/web/"
-[[ -f "$WEB/ujs_rt.wasm" ]] && cp "$WEB/ujs_rt.wasm" "$STAGE/web/"
 
 if [[ "$WITH_DEMOS" -eq 1 ]]; then
-  mkdir -p "$STAGE/web/progs"
-  cp "$WEB/progs/"*.wasm "$STAGE/web/progs/" 2>/dev/null || true
-  [[ -f "$WEB/full_demos.json" ]] && cp "$WEB/full_demos.json" "$STAGE/web/"
-  [[ -f "$WEB/demos.json" ]] && cp "$WEB/demos.json" "$STAGE/web/"
-  # game demo sources (no vendored three.module.js)
-  if [[ -d "$WEB/game" ]]; then
-    mkdir -p "$STAGE/web/game/exp"
-    for f in README.md index.html host.js sim.ujs; do
-      [[ -f "$WEB/game/$f" ]] && cp "$WEB/game/$f" "$STAGE/web/game/"
-    done
-    for f in README.md index.html host.js rawgl.js; do
-      [[ -f "$WEB/game/exp/$f" ]] && cp "$WEB/game/exp/$f" "$STAGE/web/game/exp/"
-    done
+  mkdir -p "$STAGE/web" "$STAGE/uxe/demo"
+  for f in index.html demo.js style.css README.md; do
+    [[ -f "$UJS/web/$f" ]] && cp "$UJS/web/$f" "$STAGE/web/"
+  done
+  if [[ -d "$UJS/web/progs" ]]; then
+    mkdir -p "$STAGE/web/progs"
+    cp "$UJS/web/progs/"*.wasm "$STAGE/web/progs/" 2>/dev/null || true
   fi
-  # UXE engine product path (Host ABI + demo)
-  if [[ -d "$WEB/engine" ]]; then
-    mkdir -p "$STAGE/web/engine/demo"
-    for f in README.md HOST_ABI.md host-abi.js browser-host.js packet.js input.js \
-             core-asteroid.js math.js scene.js uxe.js \
-             renderer-webgl.js renderer-webgpu.js; do
-      [[ -f "$WEB/engine/$f" ]] && cp "$WEB/engine/$f" "$STAGE/web/engine/"
-    done
-    for f in index.html host.js; do
-      [[ -f "$WEB/engine/demo/$f" ]] && cp "$WEB/engine/demo/$f" "$STAGE/web/engine/demo/"
-    done
-  fi
+  for f in README.md HOST_ABI.md host-abi.js host-browser.js packet.js input.js \
+           app-asteroid.js app-drone.js math.js scene.js meshes.js \
+           renderer-webgl.js renderer-webgpu.js; do
+    [[ -f "$UJS/uxe/$f" ]] && cp "$UJS/uxe/$f" "$STAGE/uxe/"
+  done
+  for f in index.html host.js; do
+    [[ -f "$UJS/uxe/demo/$f" ]] && cp "$UJS/uxe/demo/$f" "$STAGE/uxe/demo/"
+  done
 fi
 
 python3 - <<PY
 import json, pathlib
 stage = pathlib.Path("$STAGE")
-b = json.loads((stage / "web" / "BUILD.json").read_text())
+b = json.loads((stage / "core" / "BUILD.json").read_text())
 note = {
   "how": "Upload this zip as a GitHub Release asset for tag/version matching package.json.",
-  "verify": "sha256 of web/ujs_full.wasm and web/compiler.gen.js must match web/BUILD.json",
-  "boot": "import { bootRuntime, wasm_run } from './web/wasm_run.js'; await bootRuntime(new URL('./web/ujs_full.wasm', import.meta.url));",
+  "verify": "sha256 of core/ujs_full.wasm and core/compiler.gen.js must match core/BUILD.json",
+  "boot": "import { bootRuntime, wasm_run } from './core/wasm_run.js'; await bootRuntime(new URL('./core/ujs_full.wasm', import.meta.url));",
   "build": b,
 }
 (stage / "RELEASE.txt").write_text(
   "UJS %(version)s artifacts\\n"
   "git=%(git)s created=%(created)s\\n"
-  "Core: web/ujs_full.wasm + web/compiler.gen.js (+ hand-written ESM).\\n"
+  "Core: core/ujs_full.wasm + core/compiler.gen.js (+ hand-written ESM).\\n"
   "Do not commit this zip to git; attach to the GitHub Release.\\n" % b
   + "\\n" + json.dumps(note, indent=2) + "\\n"
 )

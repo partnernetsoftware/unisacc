@@ -163,7 +163,7 @@ def cmd_ship(a):
     from unisa.intnet import save_all
     import tempfile
     _ujs = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    web = os.path.join(_ujs, "web")
+    web = os.path.join(_ujs, "core")
     # ensure product assets + BUILD.json fingerprint exist
     full_wasm = os.path.join(web, "ujs_full.wasm")
     build_json = os.path.join(web, "BUILD.json")
@@ -187,7 +187,7 @@ def cmd_ship(a):
     vm_c = open(os.path.join(_ujs, "native", "ujs_vm.c"), "rb").read()
     manifest = {
         "format": "UJS-1",
-        "product": "web/wasm_run.js + ujs_full.wasm",
+        "product": "core/wasm_run.js + ujs_full.wasm",
         "stages": {
             n: {"units": nets[n].H, "exact": bool(nets[n].exact)}
             for n in ALL
@@ -205,9 +205,8 @@ def cmd_ship(a):
         return 1
 
     js_files = [
-        "wasm_run.js", "compiler.js", "compiler.gen.js",
-        "ujs_full.wasm", "BUILD.json", "index.html", "demo.js", "style.css",
-        "package.json",
+        "index.js", "wasm_run.js", "compiler.js", "compiler.gen.js",
+        "ujs_full.wasm", "BUILD.json",
     ]
     with zipfile.ZipFile(a.out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("weights/built.json", weights)
@@ -225,7 +224,7 @@ def cmd_ship(a):
             if not os.path.isfile(path):
                 print("ship missing", path, file=sys.stderr)
                 return 1
-            z.write(path, "web/" + name)
+            z.write(path, "core/" + name)
     print("wrote", a.out, os.path.getsize(a.out), "bytes")
     print("MANIFEST stages", len(ALL), "exact")
     return 0
@@ -394,8 +393,8 @@ def main(argv=None):
     c.set_defaults(func=cmd_compile)
 
     wb = sp.add_parser("web-build",
-                       help="emit ujs/web product (ujs_full.wasm + demos)")
-    wb.add_argument("--out", default=os.path.join("ujs", "web"))
+                       help="emit ujs/core product (ujs_full.wasm + compiler.gen)")
+    wb.add_argument("--out", default=os.path.join("ujs", "core"))
     wb.set_defaults(func=cmd_web_build)
 
     j = sp.add_parser("js2wasm", help="UJS-1 → .wasm (full VM via zig)")

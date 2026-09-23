@@ -1,27 +1,11 @@
-# UJS web
+# UJS web — playground &对照
 
-产品 ESM + playground + UXE / 对照演示。
+静态演示根的一部分（`npm run demo` 服务于整个 `ujs/`）。
 
-| 跟踪（git） | |
+| 路径 | 角色 |
 |---|---|
-| `wasm_run.js` | **库入口**：`bootRuntime` / `wasm_run` |
-| `compiler.js` | 页内编译（与 Python front 对齐） |
-| `BUILD.json` | 指纹：version / sha256 / ABI（无二进制） |
-| `index.html` `demo.js` `style.css` | playground |
-| `jspi.js` | JSPI 探针（非主路径） |
-| `engine/` | **UXE**：`demo/` · `ship/` 源与脚本 · `archive/` |
-| `game/` | Three 对照 + `exp/`（非 API 依赖） |
+| `index.html` · `demo.js` · `style.css` | playground（`wasm_run`） |
+| `game/` | Three / 裸 WebGL **对照**（非产品 API） |
+| `progs/` · `demos.json` | 可选演示产物 |
 
-| 不跟踪 → **Release** / 本地 `web-build` · `ship:pages` | |
-|---|---|
-| `ujs_full.wasm` · `compiler.gen.js` | 产品核 |
-| `engine/ship/asteroid.wasm` · `engine.wasm` · `game.js` | asteroid 发布面 |
-| `engine/ship/engine.js` · `docs/uxe/engine.js` | **共享 Host/GPU**（`build-engine-js`） |
-| `engine/ship/index.html` | bake 生成（gitignore） |
-| `ujs_rt.wasm` · `progs/*` | 可选演示 |
-| `game/three.module.js` | 按需拉取 |
-
-本地：`npm run build` · `npm run ship:pages`。  
-发版核：`./scripts/release-artifacts.sh`；UXE 演示源随 `--with-demos`。
-
-地图：[`../DOCS.md`](../DOCS.md)。
+**产品核**在 [`../core/`](../core/)。**UXE Host**在 [`../uxe/`](../uxe/)。

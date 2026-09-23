@@ -1,10 +1,10 @@
-// engine/ship/host-entry.js
+// uxe/ship/host-entry.js
 import { createBrowserHost, INPUT_BYTES } from "../engine.js";
 
-// engine/ship/sim.meta.json
+// uxe/ship/sim.meta.json
 var sim_meta_default = { imageLen: 1463, globals: ["xs", "alive", "ys", "zs", "vxs", "vys", "vzs", "rs", "px", "py", "pz", "score", "ix", "dt", "iy"], n: 480 };
 
-// engine/ship/host-entry.js
+// uxe/ship/host-entry.js
 var N = sim_meta_default.n || 480;
 var GLOBALS = sim_meta_default.globals;
 var gIndex = Object.fromEntries(GLOBALS.map((g, i) => [g, i]));

@@ -107,12 +107,12 @@ assert "native/ujs_vm.c" in names
 assert "samples/fact.wasm" in names
 assert "core/wasm_run.js" in names
 assert "core/ujs_full.wasm" in names
-assert "web/BUILD.json" in names
+assert "core/BUILD.json" in names
 assert "package.json" in names
 m = json.loads(z.read("MANIFEST.json"))
 assert m["format"] == "UJS-1"
 assert all(s["exact"] for s in m["stages"].values())
-bj = json.loads(z.read("web/BUILD.json"))
+bj = json.loads(z.read("core/BUILD.json"))
 assert bj["product"] == "ujs" and "ujs_full.wasm" in bj["artifacts"]
 print("ship ok", sorted(names))
 PY
@@ -203,7 +203,7 @@ for src, want in cases:
 print("spread py OK")
 PY
 python3 -m ujs web-build
-python3 -c 'assert open("ujs/web/ujs_rt.wasm","rb").read(4)==b"\0asm"; import os; print("wasm", os.path.getsize("ujs/web/ujs_rt.wasm"), "B")'
+python3 -c 'assert open("ujs/core/ujs_rt.wasm","rb").read(4)==b"\0asm"; import os; print("wasm", os.path.getsize("ujs/core/ujs_rt.wasm"), "B")'
 echo "== BUILD.json gates =="
 python3 - <<'PY'
 import hashlib, json, os
@@ -226,7 +226,7 @@ if command -v node >/dev/null; then
   node --input-type=module <<'JS'
 import fs from 'fs';
 const demos = JSON.parse(fs.readFileSync('ujs/web/demos.json','utf8'));
-const buf = fs.readFileSync('ujs/web/ujs_rt.wasm');
+const buf = fs.readFileSync('ujs/core/ujs_rt.wasm');
 const { instance } = await WebAssembly.instantiate(buf);
 const { run, memory } = instance.exports;
 for (const [id, d] of Object.entries(demos)) {

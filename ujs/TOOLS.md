@@ -5,7 +5,7 @@
 | 工具 | 作用 |
 |---|---|
 | `./tests/ujs.sh` | **主验收门**：acc / fold / icfold / difftest / ship / front parity / in-page `wasm_run` / BUILD 指纹 |
-| `python3 -m ujs web-build` | 生成 `ujs/web` 核产物 + `BUILD.json` |
+| `python3 -m ujs web-build` | 生成 `ujs/core` 核产物 + `BUILD.json` |
 | `python3 -m ujs ship --out kit.zip` | 构造侧 kit（内部自检） |
 | `./ujs/scripts/release-artifacts.sh` | 发版 zip：`ujs_full.wasm` + `compiler.gen.js` + ESM |
 | `./ujs/scripts/ship-pages.sh` | **Pages 全量**：asteroid + drone → `docs/uxe/` |
@@ -25,7 +25,7 @@
 ```
 
 产出：`dist/ujs-<version>-artifacts.zip`(+`.sha256`)。  
-核对：解压后 `web/ujs_full.wasm` sha256 = `web/BUILD.json`。
+核对：解压后 `core/ujs_full.wasm` sha256 = `core/BUILD.json`。
 
 UXE Pages：
 
@@ -43,9 +43,9 @@ cd ujs && npm run ship:pages && npm run test:uxe:all
 | [`prd.md`](prd.md) | 产品活规格 v1.1 |
 | [`archive/prd-v1.0.md`](archive/prd-v1.0.md) | 原条款全表 |
 | [`web/README.md`](web/README.md) | git vs Release |
-| [`web/engine/README.md`](web/engine/README.md) | UXE |
-| [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | Host ABI |
-| [`web/engine/archive/`](web/engine/archive/) | 下架实践车 |
+| [`uxe/README.md`](uxe/README.md) | UXE |
+| [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host ABI |
+| [`uxe/archive/`](uxe/archive/) | 下架实践车 |
 | [`native/README.md`](native/README.md) | C VM / 游戏核 |
 | [`FUTURE.md`](FUTURE.md) | 产品化下一刀 |
 | [`../research/README.md`](../research/README.md) | 论文索引 |

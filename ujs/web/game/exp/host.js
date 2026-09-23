@@ -1,5 +1,5 @@
 /** Exp host: same sim.ujs + wasm_run; draw via raw WebGL (no Three). */
-import { bootRuntime, compile, wasm_run, unwrap } from "../../wasm_run.js";
+import { bootRuntime, compile, wasm_run, unwrap } from "../../core/wasm_run.js";
 import { createRawGl } from "./rawgl.js";
 
 const N = 480;
@@ -62,7 +62,7 @@ async function main() {
     throw e;
   }
   hud.textContent = "loading wasm + sim.ujs…";
-  await bootRuntime(new URL("../../ujs_full.wasm", import.meta.url));
+  await bootRuntime(new URL("../../../core/ujs_full.wasm", import.meta.url));
   const src = await fetch(new URL("../sim.ujs", import.meta.url)).then((r) => {
     if (!r.ok) throw new Error("sim.ujs " + r.status);
     return r.text();

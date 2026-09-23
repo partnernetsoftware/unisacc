@@ -1,6 +1,6 @@
 # Asteroid Rush 3D — **对照演示**（Three.js 宿主）
 
-> 产品化主线：[`../engine/`](../engine/)（demo 源码测 · **ship** 发布面）。本目录保留 Three 对照。
+> 产品化主线：[`../uxe/`](../uxe/)（demo 源码测 · **ship** 发布面）。本目录保留 Three 对照。
 
 ## 分层（勿混）
 
