@@ -758,8 +758,9 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-34** | `tests/closure.sh` → 每个探针、每个目标，`unisacc FILE -b os/arch` 写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**；宿主目标的镜像真跑，输出与 VM 一致。一个头字段、一个位移、一个 REX 前缀错了都会在这里现形 | S-6, E-55 |
 | **A-35** | `tests/nativeboot.sh` → cc 编出的 unisacc `-b` 造出 unisacc（N1），N1 造 N2，N2 造 N3：**N1 = N2 = N3 逐字节**，且 N2 交叉写出的其余五个目标与 cc 编出的 unisacc 写出的相同；UTM 的 Windows 机器开着时，win/arm64 与 win/x86_64 的 unisacc 在 Windows 上各自重建自己，逐字节相同。**全程没有 Python** | S-6, E-55 |
 | **A-36** | `tests/ablate.sh` → 把某个阶段（或某个输出头）的答案**旋转成错的**，重编全部探针的六个镜像：必须有镜像变了，或者编译被拒。问过一个网络不等于听它的——[A-33] 只能证明"问过" | S-6, E-57 |
-| **A-37** | `tests/run.sh` → `unisaccrun FILE.c` 编译并在内存里运行，stdout 与退出码都要与系统 cc 编出的二进制一致。不写镜像，也就没有代码签名这一步 | S-9, E-56 |
-| **A-38** | `tests/ape.sh` → 构建 `unisaccrun.com` 并在本机运行它：检验头部（shell 必须接受第一行）、脚本里的偏移（BSD tail 的八进制陷阱）与切片本身。其余平台由 `linux.sh` 与 `crossnative.sh` 的 Windows 机器承担 | S-10, E-56 |
+| **A-37** | `tests/run.sh` → `unisacc -run FILE.c` 编译并在内存里运行，stdout 与退出码都要与系统 cc 编出的二进制一致。不写镜像，也就没有代码签名这一步 | S-9, E-56 |
+| **A-39** | `tests/cli.sh` → 在一个与本仓库无关的空目录里，把编译器当**工具**用：自带头文件、`-I`、`-D`、shebang、argv、退出码，以及"文件不存在要被诊断"。一个能用的编译器，是在它是你手上唯一一个文件时也能用的 | S-11, E-59 |
+| **A-38** | `tests/ape.sh` → 构建 `unisacc.com` 并在本机运行它：检验头部（shell 必须接受第一行）、脚本里的偏移（BSD tail 的八进制陷阱）与切片本身。其余平台由 `linux.sh` 与 `crossnative.sh` 的 Windows 机器承担 | S-10, E-56 |
 | **A-31** | `tests/tools.sh` → 别人的库代码（crypto-algorithms，八个算法，每个多文件、自带已知答案测试）与 `cc` 同输出，且 `pass` 不低于 `tests/tools.baseline`。**语料清零只说明前端不拒绝，不说明跑对** | W-14, I-22 |
 | **A-30** | `tests/multi.sh` → 两个翻译单元编译成一个程序，与 `cc a.c b.c` 同输出，`--fold` 6/6，且本机镜像真跑。语料构造成**共享会被看见**：两个单元各有同名不同值的 `static` | W-14 |
 | **A-29** | `tests/selfgap.sh` → unisacc 接受的程序数不低于 `tests/selfgap.baseline`（自举差距只能缩小）。**A-23 的不动点不是覆盖率**：unisacc.c 只需接受它自己用到的子集，于是三十次提交里前端特性单边堆在 Python 侧而套件量不到 —— `selfhost.sh` 只比词法器，`ccrun.sh` 遇到拒绝就打印 `UNS` 走人。这条把那个数变成棘轮 | A-20, A-23 |
@@ -806,8 +807,9 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | 6 | **自举前端追平**（由第 1 项驱动） | **已达**（2026-09-22）：probes 90/90、`ccrun` 90 一致 / 0 已知分歧 / 0 拒绝，语料接受 216/220（覆盖 Python 前端通过的全部 209），词法器 83/0，两平台全绿，见 E-47..E-53 |
 | 7 | **自举闭环**：lowering/编码/镜像进 C | **已达**（2026-09-22）：镜像与 Python 后端 540/540 逐字节相同，原生 N1=N2=N3，osx/lnx/win 四个目标真机自举。见 E-55 |
 | 8 | **浮点** | **已达**（2026-09-22）：两个前端、两个 ISA、VM 与目标解释器；`%f/%e/%g` 与平台 libc 逐位一致；`<math.h>` 为 fdlibm，1 ulp 以内。见 E-54 |
-| 9 | cosmo 式三格式单文件 | **已达**（2026-09-23）：`unisaccrun.com` 一个文件，对 Windows 是 PE、对 Unix shell 是脚本，内含四个切片；macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64（x64 仿真）都跑通。见 E-56 |
-| 10 | **编译即运行**（`tcc -run` 那一类） | **已达**（2026-09-23）：`unisaccrun FILE.c` 不落盘，直接在内存里编译并运行。见 E-56 |
+| 9 | cosmo 式三格式单文件 | **已达**（2026-09-23）：`unisacc.com` 一个文件，对 Windows 是 PE、对 Unix shell 是脚本，内含四个切片；macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64（x64 仿真）都跑通。见 E-56 |
+| 10 | **编译即运行**（`tcc -run` 那一类） | **已达**（2026-09-23）：`unisacc -run FILE.c` 不落盘，直接在内存里编译并运行。见 E-56 |
+| 11 | **像 tinycc 一样可用**：自带头文件、`-I`、`-D`、shebang | **已达**（2026-09-23）：11 个头文件嵌在二进制里，任意目录可用；`unisaccrun` 并入 `unisacc`，产物是单文件 `unisacc.com`。见 E-59 |
 
 **S-9 仪表要能证伪自己。** 一个套件如果只比对答案，它证明不了答案是**被使用**的
 （[A-36] 的由来，见 E-57）；一个仪表如果自己崩溃却把崩溃算成通过，它比没有还糟——所以
@@ -936,6 +938,17 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **顺带** | `sizeof a[0]` 一直是错的：下标分支没更新 `cursize`，于是 `sizeof plain / sizeof plain[0]` 算出 1。这种错只有**对答案**才看得见，棘轮看不见 |
 | **状态** | **已证实**（2026-09-21）|
 
+
+#### E-59　把编译器变成工具：自带头文件，与 Darwin 的进位标志
+
+| 栏 | 内容 |
+|---|---|
+| **结果** | `unisacc -run FILE.c [args]` 并入本体（不再有单独的 unisaccrun），加上 `-I`、`-D`、shebang；11 个头文件（60,768 B）嵌进二进制。`tests/cli.sh` [A-39] 在**一个空目录**里验证这些：那里没有本仓库的任何文件，9/9 通过 |
+| **为什么必须嵌** | 头文件原先按**当前工作目录**找 `include/`。一个发出去的单文件编译器根本没有那个目录，所以 `.com` 一离开仓库就报 `lex: bad char at 0`。现在顺序是：源文件旁边 → `-I` → `include/` → **自带的副本**，开发时改 `include/` 仍然立刻生效 |
+| **[I-20] Darwin 的系统调用错误从不检查** | 追这个 bug 追出一条更重的：**macOS 用进位标志报告系统调用失败，返回的 errno 是正数**，而我们只判断返回值 `< 0`。于是 `open` 失败返回 2（ENOENT）被当成合法的文件描述符——自举出来的编译器于是去读 stderr。cc 编的版本看不到这个问题（它用的是 POSIX `open()`，返回 -1），所以它躲过了所有既有测试 |
+| **修法** | osx 的网关在系统调用之后加两条指令：arm64 `b.cc +8` 跳过 `neg x0, x0`，x86-64 `jnc +3` 跳过 `neg rax`。于是调用方在哪个平台上看到的都是 `-errno`。两个后端同时改，closure 仍逐字节相同 |
+| **教训** | 这个错误存在于**每一个 macOS 镜像的每一次失败的系统调用**里，而全部套件都是绿的——因为探针只走成功路径。"失败路径也要有探针"，`cli.sh` 里那条"文件不存在必须被诊断"就是为此 |
+| **状态** | **已证实**（2026-09-23）|
 
 #### E-58　重构的判据：产物逐字节不变
 

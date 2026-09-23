@@ -543,7 +543,12 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "gate":
         if ins.meta.get("form") == "winapi":
             return _winapi(ins, off, shift, text_va, imps)
-        return b"\x0f\x05"                                 # syscall
+        out = b"\x0f\x05"                                  # syscall
+        if ins.meta.get("carry"):
+            # Darwin: CF set means failure, rax holds errno.  `jnc +3` over
+            # `neg rax`, so the caller sees -errno like everywhere else [I-20]
+            out += b"\x73\x03" + b"\x48\xf7\xd8"
+        return out
     if o == "jump":
         return b"\xe9" + _rel(ins, labels[a[0]] - (off + 5))
     if o == "call":                                  # push ret addr on r10

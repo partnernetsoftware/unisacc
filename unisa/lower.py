@@ -156,7 +156,12 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                     "%s/%s passes syscall argument %d on the stack, which "
                     "this gate does not do (%s)" % (os_, arch, i, op))
             tp.emit("setreg", args[i], src, role="arg%d" % i)
-        tp.emit("gate", form=f["form"], gate=gate,
+        # Darwin reports a failed syscall in the CARRY flag and returns the
+        # errno POSITIVE; Linux returns -errno.  Without this the caller sees
+        # ENOENT (2) as a valid file descriptor -- which is exactly what a
+        # self-built compiler did when it looked for a header that was not
+        # there. [I-20]
+        tp.emit("gate", form=f["form"], gate=gate, carry=(os_ == "osx"),
                 winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
                 ret=f["ret"], hstd=HSTD, written=WRITTEN)
         if win:

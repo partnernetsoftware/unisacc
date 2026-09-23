@@ -919,9 +919,12 @@ int bk_arm(int i, long off) {
     }
     if (op == TO_GATE) {
         char *g; g = bk_nth(BH_ABI_GATE, tkg_gate[i]);
-        if (bk_str_is(g, "svc80")) { ow(0xD4001001); return 1; }
         if (bk_str_is(g, "winapi")) return a_winapi(i, off);
-        ow(0xD4000001);
+        if (bk_str_is(g, "svc80")) ow(0xD4001001); else ow(0xD4000001);
+        /* Darwin puts a failed syscall in the CARRY flag and returns errno
+           POSITIVE: `b.cc +8` over `neg x0, x0`, so the caller sees -errno
+           the way it does everywhere else [I-20] */
+        if (bkos == 1) { ow(0x54000043); ow(0xCB0003E0); }
         return 1;
     }
     o = bk_nth(BKOPS, op);
@@ -1358,6 +1361,9 @@ int bk_x86(int i, long off) {
     if (op == TO_GATE) {
         if (bk_str_is(bk_nth(BH_ENC_Y, tkg_form[i]), "winapi")) return x_winapi(i, off);
         ob(0x0F); ob(0x05);
+        /* Darwin: CF set means failure, rax holds errno -- `jnc +3` over
+           `neg rax` [I-20] */
+        if (bkos == 1) { ob(0x73); ob(0x03); ob(0x48); ob(0xF7); ob(0xD8); }
         return 1;
     }
     o = bk_nth(BKOPS, op);

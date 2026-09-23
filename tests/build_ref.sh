@@ -7,7 +7,7 @@ set -e
 # harmlessly.
 # unisacc.c is ONE file -- no include path to depend on -- so the model goes
 # in where unisa_core.c's `#include` names it
-{ cat kernel/unisa_model.inc
+{ cat kernel/unisa_model.inc kernel/unisa_headers.inc
   grep -v '^#include "unisa_' kernel/unisa_core.c
   cat src/unisacc_main.c src/unisacc_back.c; } > unisacc.c.$$
 mv -f unisacc.c.$$ unisacc.c

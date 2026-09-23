@@ -121,7 +121,7 @@ everything the Python front end accepts; `tests/selfgap.sh` ratchets both
 numbers so the gap can only shrink. The two lexers agree token for token on
 every probe.
 
-**It compiles and runs.** `unisaccrun FILE.c [args]` compiles a program and
+**It compiles and runs.** `unisacc -run FILE.c [args]` compiles a program and
 runs it with nothing written to disk: the whole program is compiled once, at
 the addresses it will run at in memory, and jumped into — ahead-of-time
 compilation whose output happens to land in a mapping, not a JIT. On Apple
@@ -132,12 +132,14 @@ Mach-O images now carry their own ad-hoc code signature (SHA-256 page hashes
 in both back ends), so an image we emit runs on arm64 macOS with no
 `codesign` step.
 
-**One file for every target.** `python3 -m unisa ape` writes
-`unisaccrun.com`, whose first bytes are read two ways: Windows sees `MZ` and
+**One file for every target.** `python3 -m unisa ape` writes `unisacc.com`,
+whose first bytes are read two ways: Windows sees `MZ` and
 a PE, a Unix shell sees an assignment and then a script that picks the slice
 for the machine it is on. It has run on macOS/arm64, macOS/x86_64 (Rosetta),
-Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 4.7 MB
-today — four complete images side by side, with no sharing yet.
+Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 5.1 MB
+today — four complete images side by side, with no sharing yet. The eleven
+C headers travel inside it, so it compiles `#include <stdio.h>` from any
+directory; `-I`, `-D` and a `#!` line work the way tcc's do.
 
 ## Try it
 
@@ -150,8 +152,8 @@ python3 -m unisa ship --out kit.zip     # weights + manifest + kernel + images
 
 ./tests/build_ref.sh                    # cc builds unisacc itself
 /tmp/ua_ref examples/fib.c -b osx/arm64 > fib   # no Python in this line
-./tests/build_run.sh && /tmp/ua_run examples/fib.c   # compile and run, no file
-python3 -m unisa ape --via /tmp/ua_ref  # unisaccrun.com, one file per target
+/tmp/ua_ref -run examples/fib.c          # compile and run, nothing on disk
+python3 -m unisa ape --via /tmp/ua_ref  # unisacc.com, one file per target
 
 ./tests/all.sh                          # every suite, one summary
 ```
@@ -190,8 +192,9 @@ in a twentieth of a second, and the SGD control arm lives in
 | `closure` | the image `unisacc -b` writes is byte-identical to the Python back end's, for every probe on all six targets |
 | `nativeboot` | `unisacc` builds itself and the result rebuilds itself to the same bytes — no Python anywhere, on four real targets |
 | `ablate` | each stage's answer is rotated to a wrong one: an image must change, or the compile must be refused — asking a net is not the same as obeying it |
-| `run` | `unisaccrun` compiles a file and runs it in memory, against the system `cc` |
-| `ape` | `unisaccrun.com` is built and run on this host: one file, a PE for Windows and a script for Unix |
+| `run` | `unisacc -run` compiles a file and runs it in memory, against the system `cc` |
+| `cli` | the compiler as a tool, from a scratch directory: built-in headers, `-I`, `-D`, shebang, exit status |
+| `ape` | `unisacc.com` is built and run on this host: one file, a PE for Windows and a script for Unix |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
 | `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), [tiny-AES-c](https://github.com/kokke/tiny-AES-c), [tiny-regex-c](https://github.com/kokke/tiny-regex-c); eleven entries, several files each, with their own known-answer tests |
 
@@ -308,7 +311,7 @@ the same part — `prd.md` §5.5 keeps the full audit.
 | **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — 14 stages, 6,650 keys, no fallback path |
 | **the targets** | six images, real machines, identical behaviour | **there** — `fat` is multi-arch within one OS; a tri-format single file is not started |
 | **the language** | someone else's C compiles, or is refused for a written reason | **there for this corpus** — 214/220, `unsupported 0`; the remaining six are non-C99 extensions |
-| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **reached for the self-hosting part** — `unisacc -b` writes the image itself, byte-identical to the driver's, and rebuilds itself with no Python; `unisaccrun` compiles and runs in memory |
+| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **reached for the self-hosting part** — `unisacc -b` writes the image itself, byte-identical to the driver's, and rebuilds itself with no Python; `unisacc -run` compiles and runs in memory, from any directory |
 
 Nothing here is blocked on a question we cannot answer: `[P-8]` proves the
 weights exist for any finite table, `[F-5]` says accuracy below 1.000 is a

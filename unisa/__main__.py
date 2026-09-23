@@ -312,7 +312,7 @@ def cmd_vm(a):
 
 
 def cmd_ape(a):
-    """One file for every target: unisaccrun.com. [S-10]
+    """One file for every target: unisacc.com. [S-10]
 
     The tape comes from `unisacc FILE -t os/arch` when a compiler binary is
     given (seconds per target), or from the Python front end otherwise; the
@@ -372,6 +372,10 @@ def cmd_emit_kernel(a):
     nets = _built()
     n, nc = ckernel.emit_self(nets, os.path.join(a.out, "unisa_self.c"))
     ckernel.emit_core(nets, os.path.join(a.out, "unisa_core.c"))
+    nh, hb = ckernel.emit_headers("include",
+                                  os.path.join(a.out, ckernel.HEADERS_INC))
+    print("%s/%s  %d headers, %d B (the C library, carried inside)"
+          % (a.out, ckernel.HEADERS_INC, nh, hb))
     print("%s/unisa_self.c  model blob %d B, %d self-test decisions"
           % (a.out, n, nc))
     print("%s/unisa_core.c  model + kernel, no main (for unisacc.c)" % a.out)
@@ -613,8 +617,8 @@ def main(argv=None):
     ft.set_defaults(fn=cmd_fat)
 
     apx = sub.add_parser("ape")
-    apx.add_argument("file", nargs="?", default="unisaccrun.c")
-    apx.add_argument("-o", "--out", default="unisaccrun.com")
+    apx.add_argument("file", nargs="?", default="unisacc.c")
+    apx.add_argument("-o", "--out", default="unisacc.com")
     apx.add_argument("--via", default=None,
                      help="a unisacc binary to get each target's tape from")
     apx.add_argument("--drive", default="built")

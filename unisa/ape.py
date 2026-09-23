@@ -1,5 +1,7 @@
 """One file that runs on Linux, macOS and Windows, on x86-64 and arm64. [S-10]
 
+`unisacc.com`: the compiler itself -- `-run` included -- as a single file.
+
 The trick is Cosmopolitan's: the first bytes are read two ways.  Windows sees
 `MZ` and a PE header at the offset in e_lfanew; a Unix shell sees
 `MZqFpD='...'`, an assignment whose value happens to contain that header, and
@@ -44,9 +46,9 @@ def _script(table):
         "u=$(uname -s)$(uname -m)",
         "case \"$u\" in",
         "  " + "\n  ".join(cases),
-        '  *) echo "unisaccrun: no slice for $u" >&2; exit 1;;',
+        '  *) echo "unisacc: no slice for $u" >&2; exit 1;;',
         "esac",
-        't="${TMPDIR:-/tmp}/unisaccrun.$$"',
+        't="${TMPDIR:-/tmp}/unisacc.$$"',
         'tail -c +$o "$0" | head -c $n > "$t" || exit 1',
         'chmod +x "$t"',
         '"$t" "$@"; r=$?',

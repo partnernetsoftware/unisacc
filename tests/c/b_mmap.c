@@ -2,7 +2,7 @@
    mapping, and making it executable.  mmap takes SIX arguments, which is why
    the abi table carries arg3..arg5 and the tape has `.sys6`.  Executing the
    mapped bytes is not checked here: the VM and the target machine model keep
-   code and data apart, so that belongs to unisaccrun's own test. */
+   code and data apart, so that belongs to `unisacc -run`'s own test. */
 #include <stdio.h>
 #ifdef __linux__
 #define ANON 0x20

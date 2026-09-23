@@ -393,10 +393,48 @@ int ropen(char *path) {
 #endif
 }
 
+/* tcc-style options the driver fills in before calling fe_tape [S-11]:
+   `-I dir` is searched before the built-in headers, `-D NAME[=n]` is
+   predefined like any other macro. */
+char *optinc; int noptd; char *optd[16];
+char *srcpath;                    /* the file being compiled, for `"x.h"` */
+char optincdir[512]; int optincdl; /* -I, normalised with a trailing slash */
+
 #define MAXINC 131072
 char incbuf[MAXINC];
 char incpath[512];
 int nincl;
+
+/* The headers we carry: `#include <stdio.h>` has to work when the compiler
+   is a single file somewhere else entirely, with no include/ to read.  The
+   filesystem still wins when it has the header, so editing include/ during
+   development takes effect straight away. [S-11] */
+int hdr_find(int nm, int nl) {
+    int i; int p; int k; int ok;
+    i = 0;
+    while (i < NHDR) {
+        p = voff(HDR_NAMES, i);
+        ok = 1; k = 0;
+        while (k < nl) {
+            if (HDR_NAMES[p + k] != src[nm + k]) { ok = 0; break; }
+            k = k + 1;
+        }
+        if (ok) { if (HDR_NAMES[p + nl] == 0) return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+int hdr_read(int nm, int nl) {       /* -> bytes in incbuf, or -1 */
+    int i; char *t; int n;
+    i = hdr_find(nm, nl);
+    if (i < 0) return 0 - 1;
+    t = hdr_text(i);
+    n = 0;
+    while (t[n]) { if (n < MAXINC) incbuf[n] = t[n]; n = n + 1; }
+    if (n >= MAXINC) { __write(2, "header too large\n", 17); __exit(1); }
+    return n;
+}
 
 int inctry(char *dir, int dl, int nm, int nl) {
     int k; int p; int fd; int n; int j; int grow;
@@ -430,12 +468,14 @@ int incdo(int ls, int le, int from) {
     if (nincl > 200) return 0;               /* a header that includes itself */
     n = 0 - 1;
     if (q == 34) {
-        a = __argv(1);
+        a = srcpath;
         dl = 0; k = 0;
         while (a[k]) { if (a[k] == 47) dl = k + 1; k = k + 1; }
         n = inctry(a, dl, nm, nl);
     }
+    if (n < 0) { if (optincdl) n = inctry(optincdir, optincdl, nm, nl); }
     if (n < 0) n = inctry("include/", 8, nm, nl);
+    if (n < 0) n = hdr_read(nm, nl);     /* the copy we carry [S-11] */
     if (n < 0) return 0;
     grow = n + 1 - (le - ls);
     if (nsrc + grow >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
@@ -464,9 +504,40 @@ int decomment(void);
    `-t os/arch` name it; a bare tape is lnx/x86_64, as it is on the Python
    side and as the VM reads it. */
 char *tgt;
-int mdef1(char *s) { int n; n = 0; while (s[n]) n = n + 1; return mdef(s, n, 1, 1); }
+int mdefb(char *s, int n, char *body, int bl, long v) {
+    int i;
+    mdef(s, n, v, 1);
+    i = mfind(s, n);
+    if (i < 0) return 0;
+    macboff[i] = macstashs(body, bl); macblen[i] = bl;
+    return 0;
+}
+
+/* `-D NAME` and the target's own macros: defined as 1, and they expand to
+   "1" as well -- a macro with a value but no body expands to NOTHING, which
+   turns `printf("%d", LEVEL)` into `printf("%d", )`. */
+int mdef1(char *s) { int n; n = 0; while (s[n]) n = n + 1; return mdefb(s, n, "1", 1, 1); }
+
+int blen(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 int predef(void) {
-    char *t; t = tgt;
+    char *t; int i;
+    /* -D NAME or -D NAME=<integer> */
+    i = 0;
+    while (i < noptd) {
+        char *a; int n; long v;
+        a = optd[i]; n = 0; v = 1;
+        while (a[n] && a[n] != 61) n = n + 1;      /* '=' */
+        if (a[n] == 61) {
+            int k; int neg;
+            k = n + 1; neg = 0; v = 0;
+            if (a[k] == 45) { neg = 1; k = k + 1; }
+            while (a[k] >= 48 && a[k] <= 57) { v = v * 10 + (a[k] - 48); k = k + 1; }
+            if (neg) v = 0 - v;
+            mdefb(a, n, a + n + 1, blen(a + n + 1), v);
+        } else mdefb(a, n, "1", 1, 1);
+        i = i + 1;
+    }
+    t = tgt;
     if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
     if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
     if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
@@ -1610,7 +1681,24 @@ int postfix(void);
 int vcall(int var);
 int fpdecl(void);
 int eatstar(void);
+/* which target this binary itself runs on, for `-run` [S-9] */
+#ifdef __linux__
+#ifdef __aarch64__
+#define HOST_TARGET "lnx/arm64"
+#else
+#define HOST_TARGET "lnx/x86_64"
+#endif
+#else
+#ifdef __aarch64__
+#define HOST_TARGET "osx/arm64"
+#else
+#define HOST_TARGET "osx/x86_64"
+#endif
+#endif
+
 int bk_build(char *t, int n, char *target);
+long bk_run(char *t, int n, long argc, long argv);   /* -run [S-9] */
+char *runargv[256];
 int symlea(int i, int t, char *reg);
 int dkind(int flt);
 int setkind(int k);
@@ -5603,6 +5691,14 @@ int setup(void) {
    does unisaccrun, which then runs the tape instead of writing it out. */
 int fe_tape(char *path, char *t) {
     int fd; int k;
+    srcpath = path;
+    optincdl = 0;
+    if (optinc) {
+        k = 0;
+        while (optinc[k] && k < 500) { optincdir[k] = optinc[k]; k = k + 1; }
+        if (k > 0 && optincdir[k - 1] != 47) { optincdir[k] = 47; k = k + 1; }
+        optincdir[k] = 0; optincdl = k;
+    }
     nibuf = 0; toinit = 0; hasinit = 0;
     fnresume = 0 - 1;
     model_dims();
@@ -5612,6 +5708,12 @@ int fe_tape(char *path, char *t) {
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
+    /* a shebang line belongs to the shell, not to C: blank it, keeping the
+       newline so every later position still reports the right line */
+    if (nsrc > 1) { if (src[0] == 35) { if (src[1] == 33) {
+        k = 0;
+        while (k < nsrc && src[k] != 10) { src[k] = 32; k = k + 1; }
+    } } }
     tgt = t;
     splice();
     decomment();
@@ -5659,23 +5761,71 @@ int fe_tape(char *path, char *t) {
 }
 
 #ifndef UNISACC_NO_MAIN
+/* The command line, tinycc-shaped:
+
+     unisacc -run FILE.c [args...]     compile and run, nothing on disk
+     unisacc FILE.c -b os/arch         write the executable
+     unisacc FILE.c -c                 write the tape
+     unisacc FILE.c -t os/arch         the tape for a target
+     unisacc FILE.c                    the token dump (the lexer's instrument)
+     -I dir, -D name[=n]               as everywhere else
+
+   Flags are taken from anywhere on the line, because this tool grew up
+   writing them AFTER the file and its own suites still spell it that way;
+   the first argument that is not a flag is the input, and for `-run` what
+   follows the input belongs to the PROGRAM. */
 int main(void) {
-    int fd; int i; int p; int L; int k;
-    if (__argc() < 2) { model_dims(); setup(); printf("usage: unisacc FILE.c\n"); return 1; }
-    if (__argc() > 2) {                  /* compile: tape, or an executable */
-        char *t; char *a2;
-        t = "lnx/x86_64";
-        if (__argc() > 3) { char *f; f = __argv(2);
-            if (f[0] == 45) { if (f[1] == 98 || f[1] == 116) t = __argv(3); } }
-        if (fe_tape(__argv(1), t)) return 1;
-        /* `-b os/arch`: not the tape but the executable, from our own back
-           end [S-7 item 7]; else the tape, for the Python one or the VM */
-        a2 = __argv(2);
-        if (a2[0] == 45 && a2[1] == 98) { bk_build(out, nout, __argv(3)); return 0; }
+    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb;
+    char *a; char *t; long e; int n;
+    int (*entry)(long, long);
+    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0;
+    i = 1;
+    while (i < __argc()) {
+        a = __argv(i);
+        if (a[0] == 45 && a[1]) {
+            if (a[1] == 73) {                              /* -I */
+                if (a[2]) optinc = a + 2; else { i = i + 1; optinc = __argv(i); }
+            } else { if (a[1] == 68) {                     /* -D */
+                if (noptd < 16) {
+                    if (a[2]) optd[noptd] = a + 2; else { i = i + 1; optd[noptd] = __argv(i); }
+                    noptd = noptd + 1;
+                }
+            } else { if (a[1] == 114) { runit = 1;         /* -run */
+            } else { if (a[1] == 99) { dump = 1;           /* -c */
+            } else { if (a[1] == 118) { verb = 1;          /* -v */
+            } else { if (a[1] == 98 || a[1] == 116) {      /* -b, -t */
+                if (a[1] == 98) dump = 2; else dump = 1;
+                i = i + 1; t = __argv(i);
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } }
+        } else { if (fi == 0) { fi = i; if (runit) break; } }
+        i = i + 1;
+    }
+    if (fi == 0) {
+        model_dims(); setup();
+        printf("usage: unisacc [-run] [-I dir] [-D name[=n]] FILE.c"
+               " [-c | -b os/arch] [args...]\n");
+        return 1;
+    }
+    if (runit) {
+        if (fe_tape(__argv(fi), HOST_TARGET)) return 1;
+        n = __argc() - fi;
+        if (n > 255) n = 255;
+        k = 0;
+        while (k < n) { runargv[k] = __argv(fi + k); k = k + 1; }
+        runargv[n] = 0;
+        /* bk_run writes argc/argv into the program's own cells, so this call
+           assumes nobody's calling convention */
+        e = bk_run(out, nout, n, (long)runargv);
+        entry = (int (*)(long, long))e;
+        return entry(0, 0);
+    }
+    if (dump) {
+        if (fe_tape(__argv(fi), t)) return 1;
+        if (dump == 2) { bk_build(out, nout, t); return 0; }
         __write(1, out, nout);
-        /* `unisacc FILE -c -v`: how many times each stage was asked, so a
-           test can check that no table-shaped stage is decided in code */
-        if (__argc() > 3) { char *v; v = __argv(3); if (v[0] == 45) { if (v[1] == 118) {
+        /* `-c -v`: how many times each stage was asked, so a test can check
+           that no table-shaped stage is decided in code */
+        if (verb) {
             nout = 0;
             es("asked pp "); en(nask[S_PP]); es(" lex "); en(nask[S_LEX]);
             es(" parse "); en(nask[S_PARSE]); es(" type "); en(nask[S_TYPE]);
@@ -5683,7 +5833,7 @@ int main(void) {
             es(" tyinfo "); en(nask[S_TYINFO]); es(" pfconv "); en(nask[S_PFCONV]);
             ec(10);
             __write(2, out, nout);
-        } } }
+        }
         return 0;
     }
     /* the token dump: the lexer's instrument.  No header selection here --
@@ -5692,7 +5842,8 @@ int main(void) {
     fnresume = 0 - 1;
     model_dims();
     setup();
-    fd = ropen(__argv(1));
+    srcpath = __argv(fi);
+    fd = ropen(srcpath);
     if (fd < 0) { printf("cannot open input\n"); return 1; }
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);

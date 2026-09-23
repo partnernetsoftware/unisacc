@@ -283,11 +283,14 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return _itoa(text_va + off, a[0] + shift, a[1] + shift, a[2] + shift)
     if o == "gate":
         g = ins.meta.get("gate")
-        if g == "svc80":
-            return w(0xD4001001)                     # svc #0x80
         if g == "winapi":
             return _winapi(ins, off, shift, text_va, imps)
-        return w(0xD4000001)                         # svc #0
+        out = w(0xD4001001) if g == "svc80" else w(0xD4000001)   # svc
+        if ins.meta.get("carry"):
+            # Darwin: carry set means the call failed and x0 holds errno.
+            # `b.cc +8` over `neg x0, x0`, so the caller sees -errno. [I-20]
+            out += w(0x54000043) + w(0xCB0003E0)
+        return out
     if o == "jump":
         return w(0x14000000 | _relfield(ins, labels[a[0]] - off))
     if o == "call":

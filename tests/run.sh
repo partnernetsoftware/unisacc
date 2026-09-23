@@ -1,17 +1,18 @@
 #!/bin/bash
-# unisaccrun: compile and run, with nothing written to disk. [A-37] [S-9]
+# `unisacc -run`: compile and run, with nothing written to disk. [A-37] [S-9]
 #
-# For every probe, `unisaccrun FILE.c` must print what the same file prints
+# For every probe, `unisacc -run FILE.c` must print what the same file prints
 # when the system compiler builds it and the binary runs -- same stdout, same
 # exit status.  The program is compiled AT the addresses it will run at, in
 # memory this process mapped, so there is no image and no code signature.
 #
-# UA_RUN=<path> checks a different build: the point of the second one is that
-# it is unisacc's OWN output (tests/closure.sh builds it that way).
+# UA_RUN=<path> checks a different build -- for instance unisacc's own
+# output, which is what makes the check worth running twice.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-UA_RUN=${UA_RUN:-/tmp/ua_run}
-[ -x "$UA_RUN" ] || ./tests/build_run.sh >/dev/null || exit 1
+# `unisacc -run FILE.c` -- the compiler itself, no separate tool
+UA_RUN=${UA_RUN:-/tmp/ua_ref}
+[ -x "$UA_RUN" ] || ./tests/build_ref.sh >/dev/null || exit 1
 PROBES=${*:-examples/hello.c examples/fib.c examples/fact.c examples/switch.c
             examples/struct.c examples/do.c examples/ptr.c
             tests/c/b_float.c tests/c/b_argv.c tests/c/b_mmap.c
@@ -26,7 +27,7 @@ for f in $PROBES; do
     (cd "$T" && perl -e 'alarm 30; exec @ARGV' ./ref one two > ref.out 2>/dev/null)
     rc1=$?
     # from the repo root: unisacc looks for <stdio.h> under ./include
-    perl -e 'alarm 60; exec @ARGV' "$UA_RUN" "$f" one two > "$T/run.out" 2>/dev/null
+    perl -e 'alarm 60; exec @ARGV' "$UA_RUN" -run "$f" one two > "$T/run.out" 2>/dev/null
     rc2=$?
     # argv[0] differs by construction (the source path vs the binary), so a
     # probe that prints it is compared on the rest of its output
