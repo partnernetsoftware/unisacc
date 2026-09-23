@@ -484,6 +484,77 @@ def encode_i64_program(ops_with_args) -> bytes:
     return bytes(out)
 
 
+# Product / list-dict bind surface expected on ujs_full.wasm (acceptance ABI).
+BUILD_ABI = [
+    "host_run",
+    "host_mk_list",
+    "host_mk_dict",
+    "host_len",
+    "host_list_get",
+    "host_dict_key",
+]
+
+BUILD_ARTIFACTS = ("ujs_full.wasm", "compiler.gen.js", "ujs_rt.wasm")
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _pkg_version() -> str:
+    # ujs/construct/build/web.py → ujs/package.json
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    pkg = os.path.join(root, "package.json")
+    with open(pkg, encoding="utf-8") as f:
+        return json.load(f)["version"]
+
+
+def _git_short() -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or "unknown"
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def write_build_json(out_dir: str) -> str:
+    """Write ujs/web/BUILD.json — provenance fingerprint for prebuilt wasm."""
+    from datetime import datetime, timezone
+
+    artifacts = {}
+    for name in BUILD_ARTIFACTS:
+        path = os.path.join(out_dir, name)
+        if not os.path.isfile(path):
+            continue
+        artifacts[name] = {
+            "sha256": _sha256_file(path),
+            "bytes": os.path.getsize(path),
+        }
+    rec = {
+        "product": "ujs",
+        "version": _pkg_version(),
+        "git": _git_short(),
+        "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "artifacts": artifacts,
+        "suite": "tests/ujs.sh",
+        "abi": list(BUILD_ABI),
+    }
+    path = os.path.join(out_dir, "BUILD.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rec, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path
+
+
 def web_build(out_dir: str) -> dict:
     os.makedirs(out_dir, exist_ok=True)
     nets = build_nets()

@@ -94,6 +94,11 @@ export function lex(src) {
       continue;
     }
     if (act === "op" || act === "punct") {
+      // // line comment (parity with construct/front/lex.py)
+      if (peek() === "/" && peek(1) === "/") {
+        while (peek() && peek() !== "\n") i++;
+        continue;
+      }
       let matched = null;
       for (const p of PUNCT) {
         if (src.startsWith(p, i)) { matched = p; break; }

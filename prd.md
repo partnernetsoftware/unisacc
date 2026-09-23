@@ -750,6 +750,8 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-33** | `tests/stages.sh` → 每个探针上，Python 前端问过的每个决策阶段，C 前端也问过。**所有别的套件量的都是答案**，而一条与表一致的手写规则答案与表完全相同 —— 只有这一条能看见「决定是不是网络做的」 | T-2, E-52 |
 | **A-34** | `tests/closure.sh` → 每个探针、每个目标，`unisacc FILE -b os/arch` 写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**；宿主目标的镜像真跑，输出与 VM 一致。一个头字段、一个位移、一个 REX 前缀错了都会在这里现形 | S-6, E-55 |
 | **A-35** | `tests/nativeboot.sh` → cc 编出的 unisacc `-b` 造出 unisacc（N1），N1 造 N2，N2 造 N3：**N1 = N2 = N3 逐字节**，且 N2 交叉写出的其余五个目标与 cc 编出的 unisacc 写出的相同；UTM 的 Windows 机器开着时，win/arm64 与 win/x86_64 的 unisacc 在 Windows 上各自重建自己，逐字节相同。**全程没有 Python** | S-6, E-55 |
+| **A-37** | `tests/run.sh` → `unisaccrun FILE.c` 编译并在内存里运行，stdout 与退出码都要与系统 cc 编出的二进制一致。不写镜像，也就没有代码签名这一步 | S-9, E-56 |
+| **A-38** | `tests/ape.sh` → 构建 `unisaccrun.com` 并在本机运行它：检验头部（shell 必须接受第一行）、脚本里的偏移（BSD tail 的八进制陷阱）与切片本身。其余平台由 `linux.sh` 与 `crossnative.sh` 的 Windows 机器承担 | S-10, E-56 |
 | **A-31** | `tests/tools.sh` → 别人的库代码（crypto-algorithms，八个算法，每个多文件、自带已知答案测试）与 `cc` 同输出，且 `pass` 不低于 `tests/tools.baseline`。**语料清零只说明前端不拒绝，不说明跑对** | W-14, I-22 |
 | **A-30** | `tests/multi.sh` → 两个翻译单元编译成一个程序，与 `cc a.c b.c` 同输出，`--fold` 6/6，且本机镜像真跑。语料构造成**共享会被看见**：两个单元各有同名不同值的 `static` | W-14 |
 | **A-29** | `tests/selfgap.sh` → unisacc 接受的程序数不低于 `tests/selfgap.baseline`（自举差距只能缩小）。**A-23 的不动点不是覆盖率**：unisacc.c 只需接受它自己用到的子集，于是三十次提交里前端特性单边堆在 Python 侧而套件量不到 —— `selfhost.sh` 只比词法器，`ccrun.sh` 遇到拒绝就打印 `UNS` 走人。这条把那个数变成棘轮 | A-20, A-23 |
@@ -796,7 +798,8 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | 6 | **自举前端追平**（由第 1 项驱动） | **已达**（2026-09-22）：probes 83/83、`ccrun` 83 一致 / 0 已知分歧 / 0 拒绝，语料接受 211/220（覆盖 Python 前端通过的全部 209），词法器 83/0，两平台全绿，见 E-47..E-53 |
 | 7 | **自举闭环**：lowering/编码/镜像进 C | **已达**（2026-09-22）：镜像与 Python 后端 534/534 逐字节相同，原生 N1=N2=N3，osx/lnx/win 四个目标真机自举。见 E-55 |
 | 8 | **浮点** | **已达**（2026-09-22）：两个前端、两个 ISA、VM 与目标解释器；`%f/%e/%g` 与平台 libc 逐位一致；`<math.h>` 为 fdlibm，1 ulp 以内。见 E-54 |
-| 9 | cosmo 式三格式单文件 | 野心项，不在关键路径 |
+| 9 | cosmo 式三格式单文件 | **已达**（2026-09-23）：`unisaccrun.com` 一个文件，对 Windows 是 PE、对 Unix shell 是脚本，内含四个切片；macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64（x64 仿真）都跑通。见 E-56 |
+| 10 | **编译即运行**（`tcc -run` 那一类） | **已达**（2026-09-23）：`unisaccrun FILE.c` 不落盘，直接在内存里编译并运行。见 E-56 |
 
 **S-8 每一项都要落成棘轮。** 像 `corpus.baseline`、`selfgap.baseline` 那样只能升不能降，于是"完成度"不再是一个拍脑袋的百分比，而是套件里的数字。**绿色不等于覆盖**——一个套件只能证明它真的问过的问题，见 E-43。
 
@@ -914,6 +917,20 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **顺带** | `sizeof a[0]` 一直是错的：下标分支没更新 `cursize`，于是 `sizeof plain / sizeof plain[0]` 算出 1。这种错只有**对答案**才看得见，棘轮看不见 |
 | **状态** | **已证实**（2026-09-21）|
 
+
+#### E-56　编译即运行、自签名，以及一个文件跑遍四个目标
+
+| 栏 | 内容 |
+|---|---|
+| **结果** | `unisaccrun FILE.c [args]` 编译并运行，磁盘上不落任何文件：macOS/arm64 与 Linux/arm64 各 11/11 与系统 cc 同输出（[A-37]）。`unisaccrun.com` 一个文件在 macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64（x64 仿真）上都能跑（[A-38]） |
+| **不是 JIT** | 整个程序一次性编译完成，没有热点探测、没有重编译；只是产物落在这个进程映射出来的内存里，而不是磁盘上。AOT 到内存 |
+| **为什么必须在内存里** | 实测：Apple silicon 上把自己镜像里的静态数组 `mprotect` 成可执行**失败**（页属于已签名的镜像），而 `mmap` 出来的匿名内存改成可执行**成功**。走「临时文件 + exec」的话，未签名的 Mach-O 会被内核直接杀掉 |
+| **六参数系统调用** | `mmap` 要六个参数而网关只传三个：abi 新增 `arg3/arg4/arg5` 三个输出头，tape 新增 `.sys6`，两个前端新增 `__mmap/__mprotect/__munmap`。VM 与目标机模型把 `mmap` 实现为自己内存里的 bump 分配 |
+| **自签名** | Mach-O 写出器自己生成 ad-hoc 代码签名（SHA-256 分页哈希 + CodeDirectory + `LC_CODE_SIGNATURE`），两个后端逐字节相同，`codesign -v` 通过。**镜像不再需要任何外部工具就能在 Apple silicon 上运行** |
+| **一个文件** | 头部字节同时是合法的 `MZ`（Windows 读 e_lfanew 找 PE）和合法的 sh 赋值（`MZqFpD='`），脚本按 `uname` 选切片、解出来执行。Windows on ARM 靠 x64 仿真覆盖。目前 4.74 MB：四个切片各自是完整镜像，尚未做共享或压缩 |
+| **顺带暴露的错** | ① x86-64 上第 4 和第 6 个系统调用参数寄存器**正是** tape 的栈指针和帧指针，六参数调用会把程序的栈抽掉；② `BKNOPS` 写死 65 而操作码表已有 66 项，最后一个查不到；③ run 模式原先用寄存器传 argc/argv，这假设了**调用方**的调用约定——我们的和 C 的在 x86-64 上不同，改为由加载方写进程序自己的数据格；④ BSD 的 `tail` 把前导零的字节数当八进制，`.com` 的偏移必须是纯十进制；⑤ 文件第一行不能含 NUL，否则 shell 拒绝执行，所以头部字节放到第二行、仍在引号内 |
+| **尚未覆盖** | Windows 的 run 模式需要 `VirtualAlloc`/`VirtualProtect`，目前明确报错而不是错误地映射；lnx/x86_64 的原生运行仍缺一台 x86 Linux 机器 |
+| **状态** | **已证实**（2026-09-23）|
 
 #### E-55　自举闭环：镜像逐字节，以及「只有真机跑它自己编的东西」才看得见的错
 

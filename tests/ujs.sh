@@ -107,10 +107,13 @@ assert "native/ujs_vm.c" in names
 assert "samples/fact.wasm" in names
 assert "web/wasm_run.js" in names
 assert "web/ujs_full.wasm" in names
+assert "web/BUILD.json" in names
 assert "package.json" in names
 m = json.loads(z.read("MANIFEST.json"))
 assert m["format"] == "UJS-1"
 assert all(s["exact"] for s in m["stages"].values())
+bj = json.loads(z.read("web/BUILD.json"))
+assert bj["product"] == "ujs" and "ujs_full.wasm" in bj["artifacts"]
 print("ship ok", sorted(names))
 PY
 
@@ -201,6 +204,24 @@ print("spread py OK")
 PY
 python3 -m ujs web-build
 python3 -c 'assert open("ujs/web/ujs_rt.wasm","rb").read(4)==b"\0asm"; import os; print("wasm", os.path.getsize("ujs/web/ujs_rt.wasm"), "B")'
+echo "== BUILD.json gates =="
+python3 - <<'PY'
+import hashlib, json, os
+pkg = json.load(open("ujs/package.json"))
+bj = json.load(open("ujs/web/BUILD.json"))
+assert bj["product"] == "ujs"
+assert bj["version"] == pkg["version"], (bj["version"], pkg["version"])
+assert bj["suite"] == "tests/ujs.sh"
+art = bj["artifacts"]["ujs_full.wasm"]
+raw = open("ujs/web/ujs_full.wasm", "rb").read()
+got = hashlib.sha256(raw).hexdigest()
+assert got == art["sha256"], (got, art["sha256"])
+assert len(raw) == art["bytes"]
+need = {"host_run", "host_mk_list", "host_mk_dict", "host_len",
+        "host_list_get", "host_dict_key"}
+assert need.issubset(set(bj["abi"])), bj["abi"]
+print("BUILD.json ok", bj["version"], art["sha256"][:12], "…")
+PY
 if command -v node >/dev/null; then
   node --input-type=module <<'JS'
 import fs from 'fs';
@@ -237,6 +258,19 @@ for (const [id, d] of Object.entries(meta)) {
   if (v !== expect[id]) throw new Error(id+' '+v);
 }
 console.log('full demos OK');
+JS
+  echo "== ABI smoke (ujs_full.wasm) =="
+  node --input-type=module <<'JS'
+import fs from 'fs';
+const need = ['host_run', 'host_mk_list', 'host_mk_dict', 'host_len',
+              'host_list_get', 'host_dict_key'];
+const buf = fs.readFileSync('ujs/web/ujs_full.wasm');
+const { instance } = await WebAssembly.instantiate(buf);
+const ex = instance.exports;
+for (const n of need) {
+  if (typeof ex[n] !== 'function') throw new Error('missing export ' + n);
+}
+console.log('ABI smoke OK', need.join(','));
 JS
   echo "== in-page wasm_run =="
   node --input-type=module <<'JS'

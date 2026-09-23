@@ -164,9 +164,10 @@ def cmd_ship(a):
     import tempfile
     _ujs = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     web = os.path.join(_ujs, "web")
-    # ensure product assets exist
+    # ensure product assets + BUILD.json fingerprint exist
     full_wasm = os.path.join(web, "ujs_full.wasm")
-    if not os.path.isfile(full_wasm):
+    build_json = os.path.join(web, "BUILD.json")
+    if not os.path.isfile(full_wasm) or not os.path.isfile(build_json):
         print("ship: running web-build for product assets…", file=sys.stderr)
         cmd_web_build(argparse.Namespace(out=web))
 
@@ -205,7 +206,7 @@ def cmd_ship(a):
 
     js_files = [
         "wasm_run.js", "compiler.js", "compiler.gen.js",
-        "ujs_full.wasm", "index.html", "demo.js", "style.css",
+        "ujs_full.wasm", "BUILD.json", "index.html", "demo.js", "style.css",
         "package.json",
     ]
     with zipfile.ZipFile(a.out, "w", zipfile.ZIP_DEFLATED) as z:
@@ -313,6 +314,9 @@ return sum(10, 20, 30);
     from .build.browser import emit as emit_browser
     gen = emit_browser(a.out)
     print("browser compiler", gen)
+    from .build.web import write_build_json
+    bpath = write_build_json(a.out)
+    print("BUILD.json", bpath)
     return 0
 
 

@@ -11,11 +11,12 @@
 
 **交付**：
 1. **JS 产品 / 库** —— `ujs/web` + `package.json`：`bootRuntime` / `wasm_run`（浏览器 · Node · Bun）
-2. **站点 / 示例** —— `web/index.html` playground（`npm run demo`）
+2. **站点 / 示例** —— `web/index.html` playground（`npm run demo`）；**UXE** `web/engine/`（Host ABI 演示，产品化主线）；可选 `web/game/`（Three 对照，非 API 契约）
 3. **`js2wasm`** —— 全量 UJS-1 → `.wasm`（construct CLI；C VM via zig）
 4. **构造侧** —— `ujs/construct/`（Python gold / front / build；非应用依赖）
 
-浏览器与 Node 跑的是 WASM + ESM；**不在页面训练**。构造：`python3 -m ujs web-build`。
+浏览器与 Node 跑的是 WASM + ESM；**不在页面训练**。构造：`python3 -m ujs web-build`。  
+二进制倾向 **GitHub Release**；仓内留 `BUILD.json` 指纹（见 `TOOLS.md`）。
 
 **不交付**：完整 ES、开放原型链、`eval`、异步、正则引擎。
 

@@ -82,32 +82,53 @@ runs under Rosetta, and `tests/fat.sh` executes both on every probe. That is
 multi-ISA within one OS — a cosmopolitan-style file that is simultaneously an
 ELF, a Mach-O and a PE is a different problem and is not what this emits.
 
-**It self-hosts.** `unisacc.c` carries the model (a 12,554-byte blob) and the
-integer kernel, and drives its own preprocessor, lexer, parser, type checker, scope
-resolution and instruction selection through the same tables — every
-instruction name it emits is chosen by the `irsel` net at the moment it is
-written, and `tests/stages.sh` checks, probe by probe, that no stage the
-Python front end asks a net about is decided in code on the C side. The bootstrap fixed point holds:
+**It self-hosts, and it no longer needs the driver.** `unisacc.c` carries the
+model and the integer kernel, and drives its own preprocessor, lexer, parser,
+type checker, scope resolution and instruction selection through the same
+tables — every instruction name it emits is chosen by the `irsel` net at the
+moment it is written, and `tests/stages.sh` checks, probe by probe, that no
+stage the Python front end asks a net about is decided in code on the C side.
+
+It also carries its own back end (`src/unisacc_back.c`: lowering, both
+encoders, the ELF, Mach-O and PE writers), so `unisacc FILE -b os/arch`
+writes the executable itself. Two fixed points hold:
 
 ```
-A = cc(unisacc.c)      B = A(unisacc.c)      C = B(unisacc.c)      B == C
+A = cc(unisacc.c)   B = A(unisacc.c)   C = B(unisacc.c)      B == C   (tapes)
+N1 = A -b HOST      N2 = N1 -b HOST    N3 = N2 -b HOST       N1 == N2 == N3
 ```
 
-That is a fixed point, not a coverage claim — and it is a fixed point of the
-C compiler alone: all three tapes are produced by `unisacc`, built three ways,
-and Python only turns a tape into a binary. `unisacc.c` only has to accept the
-subset `unisacc.c` is written in, and it trails the Python front end: **60 of
-our 80 probes, 176 of the corpus's 220**, against 209 for the Python one. It
-also stops at the tape; lowering and the images are still Python. So the
-honest reading is that the C compiler reproduces itself, not that it could
-replace the driver. `tests/selfgap.sh` ratchets those two numbers so the gap
-can only shrink — it has gone 31 → 60 and 111 → 176 since it was installed.
-The two lexers now agree token for token on every probe. `ccrun` asks the
-harder question: it compiles all eighty with `unisacc` and compares the
-ANSWERS against the Python front end — 58 agree, 2 disagree for reasons
-written down in `tests/ccrun.knownwrong`, and the rest are still refused.
-Being refused is a gap; disagreeing is a defect, and the two are counted
-apart.
+The second one has no Python in it at all, and it holds on osx/arm64,
+lnx/arm64 and — on the real machine — win/arm64 and win/x86_64. The stricter
+check is `tests/closure.sh`: for all 90 probes on all six targets, the image
+`unisacc` writes is **byte-identical** to the one the Python back end writes
+from the same tape (540/540). A wrong header field, displacement or REX
+prefix shows up there.
+
+The front end has caught up too: `ccrun` compiles all 90 probes with
+`unisacc` and compares the ANSWERS against the Python front end — 90 agree,
+0 disagree, 0 refused. It accepts 216 of the corpus's 220 programs, covering
+everything the Python front end accepts; `tests/selfgap.sh` ratchets both
+numbers so the gap can only shrink. The two lexers agree token for token on
+every probe.
+
+**It compiles and runs.** `unisaccrun FILE.c [args]` compiles a program and
+runs it with nothing written to disk: the whole program is compiled once, at
+the addresses it will run at in memory, and jumped into — ahead-of-time
+compilation whose output happens to land in a mapping, not a JIT. On Apple
+silicon that is the only way it can work: a mapping this process made and
+then marked executable runs, while an unsigned file on disk is killed.
+
+Mach-O images now carry their own ad-hoc code signature (SHA-256 page hashes
+in both back ends), so an image we emit runs on arm64 macOS with no
+`codesign` step.
+
+**One file for every target.** `python3 -m unisa ape` writes
+`unisaccrun.com`, whose first bytes are read two ways: Windows sees `MZ` and
+a PE, a Unix shell sees an assignment and then a script that picks the slice
+for the machine it is on. It has run on macOS/arm64, macOS/x86_64 (Rosetta),
+Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 4.7 MB
+today — four complete images side by side, with no sharing yet.
 
 ## Try it
 
@@ -117,6 +138,12 @@ python3 -m unisa acc                    # every stage 1.000, by enumeration
 python3 -m unisa run examples/fact.c --fold
 python3 -m unisa compile examples/fib.c -o fib --target osx/arm64 --drive built
 python3 -m unisa ship --out kit.zip     # weights + manifest + kernel + images
+
+./tests/build_ref.sh                    # cc builds unisacc itself
+/tmp/ua_ref examples/fib.c -b osx/arm64 > fib   # no Python in this line
+./tests/build_run.sh && /tmp/ua_run examples/fib.c   # compile and run, no file
+python3 -m unisa ape --via /tmp/ua_ref  # unisaccrun.com, one file per target
+
 ./tests/all.sh                          # every suite, one summary
 ```
 
@@ -151,6 +178,11 @@ in a twentieth of a second, and the SGD control arm lives in
 | `selfgap` | how much C `unisacc`'s own front end still refuses that the Python one accepts — a ratchet, because that gap was growing unmeasured |
 | `multi` | two translation units compiled into one program, against `cc a.c b.c` |
 | `bootstrap` | `B = C = U`, the self-hosting fixed point |
+| `closure` | the image `unisacc -b` writes is byte-identical to the Python back end's, for every probe on all six targets |
+| `nativeboot` | `unisacc` builds itself and the result rebuilds itself to the same bytes — no Python anywhere, on four real targets |
+| `ablate` | each stage's answer is rotated to a wrong one: an image must change, or the compile must be refused — asking a net is not the same as obeying it |
+| `run` | `unisaccrun` compiles a file and runs it in memory, against the system `cc` |
+| `ape` | `unisaccrun.com` is built and run on this host: one file, a PE for Windows and a script for Unix |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
 | `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), [tiny-AES-c](https://github.com/kokke/tiny-AES-c), [tiny-regex-c](https://github.com/kokke/tiny-regex-c); eleven entries, several files each, with their own known-answer tests |
 
@@ -246,10 +278,14 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 
 | | |
 |---|---|
-| 说明 | [`ujs/README.md`](ujs/README.md) · [`ujs/package.json`](ujs/package.json) |
+| 地图 | [`ujs/DOCS.md`](ujs/DOCS.md) |
+| 说明 | [`ujs/README.md`](ujs/README.md) · [`ujs/TOOLS.md`](ujs/TOOLS.md) |
 | 规格 | [`ujs/prd.md`](ujs/prd.md) |
+| 论文 B | [`research/ujs-paper-outline.md`](research/ujs-paper-outline.md) · [`research/README.md`](research/README.md) |
+| 演示 | `npm run demo` → `/game/` |
 | 验收 | `./tests/ujs.sh` |
-| 出货 | `python3 -m ujs web-build` → `ujs/web/` |
+| 本地产物 | `python3 -m ujs web-build` |
+| 发版附件 | `./ujs/scripts/release-artifacts.sh` → `dist/`（手动上传 GitHub Release） |
 
 与 C 线共享构造代数；**不**把 Web 并入 `unisa` 交付范围。
 
@@ -263,7 +299,7 @@ the same part — `prd.md` §5.5 keeps the full audit.
 | **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — 11 stages, 4,560 keys, no fallback path |
 | **the targets** | six images, real machines, identical behaviour | **there** — `fat` is multi-arch within one OS; a tri-format single file is not started |
 | **the language** | someone else's C compiles, or is refused for a written reason | **there for this corpus** — 209/220, `unsupported 0`; floating point is a whole missing axis |
-| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **moving** — several files per program, a libc floor, and eight real multi-file libraries passing their own tests; `unisacc` still needs Python to turn its tape into a binary |
+| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **reached for the self-hosting part** — `unisacc -b` writes the image itself, byte-identical to the driver's, and rebuilds itself with no Python; `unisaccrun` compiles and runs in memory |
 
 Nothing here is blocked on a question we cannot answer: `[P-8]` proves the
 weights exist for any finite table, `[F-5]` says accuracy below 1.000 is a
