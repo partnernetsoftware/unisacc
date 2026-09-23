@@ -86,63 +86,71 @@ export async function createWebGPURenderer(canvas) {
     return null;
   }
 
-  const ctx = canvas.getContext("webgpu");
-  if (!ctx) return null;
-
   const format = navigator.gpu.getPreferredCanvasFormat();
-  const shader = device.createShaderModule({ code: WGSL });
 
-  const bgl = device.createBindGroupLayout({
-    entries: [{
-      binding: 0,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
-      buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 80 },
-    }],
-  });
-  const pll = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+  let pipeline, meshBuf, bgl;
+  try {
+    const shader = device.createShaderModule({ code: WGSL });
+    bgl = device.createBindGroupLayout({
+      entries: [{
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: 80 },
+      }],
+    });
+    const pll = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
+    pipeline = device.createRenderPipeline({
+      layout: pll,
+      vertex: {
+        module: shader,
+        entryPoint: "vs_main",
+        buffers: [
+          {
+            arrayStride: 12,
+            stepMode: "vertex",
+            attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }],
+          },
+          {
+            arrayStride: 12,
+            stepMode: "instance",
+            attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }],
+          },
+          {
+            arrayStride: 4,
+            stepMode: "instance",
+            attributes: [{ shaderLocation: 2, offset: 0, format: "float32" }],
+          },
+        ],
+      },
+      fragment: {
+        module: shader,
+        entryPoint: "fs_main",
+        targets: [{ format }],
+      },
+      primitive: { topology: "triangle-list" },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: true,
+        depthCompare: "less",
+      },
+    });
+    meshBuf = device.createBuffer({
+      size: MESH.byteLength,
+      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+      label: "uxe-mesh",
+    });
+    device.queue.writeBuffer(meshBuf, 0, MESH);
+  } catch {
+    try { device.destroy(); } catch { /* ignore */ }
+    return null;
+  }
 
-  const pipeline = device.createRenderPipeline({
-    layout: pll,
-    vertex: {
-      module: shader,
-      entryPoint: "vs_main",
-      buffers: [
-        {
-          arrayStride: 12,
-          stepMode: "vertex",
-          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }],
-        },
-        {
-          arrayStride: 12,
-          stepMode: "instance",
-          attributes: [{ shaderLocation: 1, offset: 0, format: "float32x3" }],
-        },
-        {
-          arrayStride: 4,
-          stepMode: "instance",
-          attributes: [{ shaderLocation: 2, offset: 0, format: "float32" }],
-        },
-      ],
-    },
-    fragment: {
-      module: shader,
-      entryPoint: "fs_main",
-      targets: [{ format }],
-    },
-    primitive: { topology: "triangle-list" },
-    depthStencil: {
-      format: "depth24plus",
-      depthWriteEnabled: true,
-      depthCompare: "less",
-    },
-  });
-
-  const meshBuf = device.createBuffer({
-    size: MESH.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    label: "uxe-mesh",
-  });
-  device.queue.writeBuffer(meshBuf, 0, MESH);
+  // Take canvas context only after GPU objects succeed — keeps WebGL fallback possible.
+  const ctx = canvas.getContext("webgpu");
+  if (!ctx) {
+    try { device.destroy(); } catch { /* ignore */ }
+    return null;
+  }
 
   let uniformBuf = null;
   let uniformCpu = null;
@@ -240,34 +248,40 @@ export async function createWebGPURenderer(canvas) {
     for (const cloud of scene.clouds.values()) {
       if (cloud.count > 0) clouds.push(cloud);
     }
+
+    const [cr, cg, cb, ca] = scene.clearColor;
+    const beginPass = (enc) => enc.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        clearValue: { r: cr, g: cg, b: cb, a: ca },
+        loadOp: "clear",
+        storeOp: "store",
+      }],
+      depthStencilAttachment: {
+        view: depthTex.createView(),
+        depthClearValue: 1,
+        depthLoadOp: "clear",
+        depthStoreOp: "store",
+      },
+    });
+
     if (clouds.length === 0) {
-      const [cr, cg, cb, ca] = scene.clearColor;
       const enc = device.createCommandEncoder();
-      const pass = enc.beginRenderPass({
-        colorAttachments: [{
-          view: ctx.getCurrentTexture().createView(),
-          clearValue: { r: cr, g: cg, b: cb, a: ca },
-          loadOp: "clear",
-          storeOp: "store",
-        }],
-        depthStencilAttachment: {
-          view: depthTex.createView(),
-          depthClearValue: 1,
-          depthLoadOp: "clear",
-          depthStoreOp: "store",
-        },
-      });
+      const pass = beginPass(enc);
       pass.end();
       device.queue.submit([enc.finish()]);
       return;
     }
 
-    let maxInst = 0;
-    for (const c of clouds) maxInst = Math.max(maxInst, c.count);
-    ensureInstanceCapacity(maxInst);
+    let xyzFloats = 0;
+    let scaleFloats = 0;
+    for (const c of clouds) {
+      xyzFloats += c.count * 3;
+      scaleFloats += c.count;
+    }
+    ensureInstanceCapacity(Math.max(xyzFloats / 3, 1));
     ensureUniformSlots(clouds.length);
 
-    // Upload all instance + uniform data before the pass (one buffer write per cloud uniforms).
     for (let i = 0; i < clouds.length; i++) {
       const cloud = clouds[i];
       const base = i * UNIFORM_FLOATS;
@@ -278,17 +292,6 @@ export async function createWebGPURenderer(canvas) {
       uniformCpu[base + 19] = 0;
     }
     device.queue.writeBuffer(uniformBuf, 0, uniformCpu.subarray(0, clouds.length * UNIFORM_FLOATS));
-
-    // Instance buffers: one shared pair; rewrite between draws is unsafe mid-pass,
-    // so pack sequentially into the growable buffers with per-cloud offsets via separate buffers.
-    // Practical path: allocate per-cloud vertex ranges in one big buffer.
-    let xyzFloats = 0;
-    let scaleFloats = 0;
-    for (const c of clouds) {
-      xyzFloats += c.count * 3;
-      scaleFloats += c.count;
-    }
-    ensureInstanceCapacity(Math.max(xyzFloats / 3, scaleFloats));
 
     const xyzPack = new Float32Array(xyzFloats);
     const scalePack = new Float32Array(scaleFloats);
@@ -305,22 +308,8 @@ export async function createWebGPURenderer(canvas) {
     device.queue.writeBuffer(instXyzBuf, 0, xyzPack);
     device.queue.writeBuffer(instScaleBuf, 0, scalePack);
 
-    const [cr, cg, cb, ca] = scene.clearColor;
     const enc = device.createCommandEncoder();
-    const pass = enc.beginRenderPass({
-      colorAttachments: [{
-        view: ctx.getCurrentTexture().createView(),
-        clearValue: { r: cr, g: cg, b: cb, a: ca },
-        loadOp: "clear",
-        storeOp: "store",
-      }],
-      depthStencilAttachment: {
-        view: depthTex.createView(),
-        depthClearValue: 1,
-        depthLoadOp: "clear",
-        depthStoreOp: "store",
-      },
-    });
+    const pass = beginPass(enc);
     pass.setPipeline(pipeline);
     pass.setVertexBuffer(0, meshBuf);
 
