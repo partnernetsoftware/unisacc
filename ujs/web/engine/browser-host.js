@@ -89,8 +89,9 @@ export async function createBrowserHost(canvas, opts = {}) {
       let ix = 0, iy = 0;
       if (keys.KeyA || keys.ArrowLeft) ix -= 1;
       if (keys.KeyD || keys.ArrowRight) ix += 1;
-      if (keys.KeyS || keys.ArrowDown) iy -= 1;
-      if (keys.KeyW || keys.ArrowUp) iy += 1;
+      // Chase cam sits above looking forward: raw +iy felt inverted on screen.
+      if (keys.KeyS || keys.ArrowDown) iy += 1;
+      if (keys.KeyW || keys.ArrowUp) iy -= 1;
       const snap = {
         ix, iy,
         fire: keys.Space ? 1 : 0,
