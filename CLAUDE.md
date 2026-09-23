@@ -50,6 +50,26 @@ Anything that might run for more than a minute goes in the background
 (`run_in_background`) or carries an explicit bounded timeout. A foreground
 suite once blocked the session for two hours.
 
+## Running the suites
+
+Things that cost time here before they were written down:
+
+- **`all.sh` prints nothing until it finishes.** Each suite writes to its own
+  file and the summary comes at the end, so a log of zero bytes means
+  *running*, not stuck. Individual suites (`./tests/closure.sh …`) print as
+  they go — run those when progress needs to be visible.
+- **Do not edit the tree while a suite runs.** A run that overlapped edits to
+  `lower.py` reported 59 mismatches from images that were never written, and
+  the whole run had to be thrown away. Finish the edit, rebuild, then start.
+- **Every inner step gets its own watchdog**, not just the outer command. An
+  ablation run with no per-compile timeout hung for twenty minutes on one
+  looping compile. macOS has no `timeout`: use
+  `perl -e 'alarm N; exec @ARGV' …`.
+- **`pkill -f` fails under this shell's locale** ("illegal byte sequence").
+  Kill by PID (`ps -eo pid,command | grep …`).
+- `nativeboot` is the long pole (~4 min): it compiles `unisacc.c` with
+  unisacc three times over, then cross-writes five more targets.
+
 ## Pushing
 
 Batch the work and push once. Every push used to trigger three billed jobs.
