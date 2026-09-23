@@ -64,10 +64,15 @@ function bestLock(state, B) {
 
 /**
  * @param {import("./host-abi.js").HostAbi} host
- * @param {{ simUrl?: string, wasmUrl: string, precompiled?: object, onHud?: Function }} opts
+ * @param {{
+ *   simUrl?: string, wasmUrl: string, precompiled?: object, onHud?: Function,
+ *   controls?: "keyboard"|"mouse"
+ * }} opts
  */
 export async function runDroneCore(host, opts) {
   host.host_log("info", "drone FP cockpit boot");
+  let controls = opts.controls === "mouse" ? "mouse" : "keyboard";
+  host.setPointerLockEnabled?.(controls === "mouse");
   const wasmBytes = await host.host_asset_read(opts.wasmUrl);
   await bootRuntime(wasmBytes.buffer.slice(
     wasmBytes.byteOffset,
@@ -250,8 +255,28 @@ export async function runDroneCore(host, opts) {
     const snapObj = host.host_input_read();
     if (snapObj && typeof snapObj === "object") keys = snapObj.keys || {};
 
-    yaw += mx * 2.4 * dt;
-    pitch += my * 2.0 * dt;
+    // Look: keyboard (default) = IJKL；mouse = 指针（飞行杆：后拉抬头）
+    let lookX = 0, lookY = 0;
+    if (controls === "mouse") {
+      lookX = mx;
+      lookY = my;
+    } else {
+      if (keys.KeyJ || keys.ArrowLeft) lookX -= 1;
+      if (keys.KeyL || keys.ArrowRight) lookX += 1;
+      // I = nose up (flight), K = nose down
+      if (keys.KeyI || keys.ArrowUp) lookY -= 1;
+      if (keys.KeyK || keys.ArrowDown) lookY += 1;
+      // Arrows also feed ix/iy in Host — zero strafe/thrust from arrows by
+      // re-deriving move from WASD only.
+      ix = 0; iy = 0;
+      if (keys.KeyA) ix -= 1;
+      if (keys.KeyD) ix += 1;
+      if (keys.KeyS) iy += 1;
+      if (keys.KeyW) iy -= 1;
+      fire = keys.Space ? 1 : 0;
+    }
+    yaw += lookX * 2.4 * dt;
+    pitch -= lookY * 2.0 * dt;
     if (pitch > 1.15) pitch = 1.15;
     if (pitch < -1.15) pitch = -1.15;
 
@@ -259,7 +284,9 @@ export async function runDroneCore(host, opts) {
     const fireEdge = fire && !lastFire;
     lastFire = fire;
 
-    const wantSuicide = !!(flags & FLAG_SUICIDE) || !!(buttons & BTN_RIGHT) || !!keys.KeyF;
+    const wantSuicide = controls === "mouse"
+      ? (!!(flags & FLAG_SUICIDE) || !!(buttons & BTN_RIGHT) || !!keys.KeyF)
+      : (!!keys.KeyF || !!(flags & FLAG_SUICIDE));
     if (wantSuicide && state.alive) suicideArm = true;
 
     // acquire lock
@@ -351,8 +378,9 @@ export async function runDroneCore(host, opts) {
         score: state.score, kills, remaining, alive: state.alive,
         ammo: state.ammo, magazine: MAGAZINE,
         locked, lockIdx, suicideArm, endReason, mode,
+        controls,
         mx, my, buttons, flags,
-        pointer: true,
+        pointer: controls === "mouse",
         fps: (accFrames * 1000) / (now - lastHud),
       });
       accFrames = 0;
@@ -366,8 +394,17 @@ export async function runDroneCore(host, opts) {
     score: 0, kills: 0, remaining: NT, alive: 1,
     ammo: MAGAZINE, magazine: MAGAZINE,
     locked: false, suicideArm: false, mode: "模式：搜索锁定目标",
-    mx: 0, my: 0, buttons: 0, flags: 0, pointer: true,
+    controls,
+    mx: 0, my: 0, buttons: 0, flags: 0, pointer: controls === "mouse",
   });
   host.host_request_frame(tick);
-  return { nt: NT, magazine: MAGAZINE };
+  return {
+    nt: NT,
+    magazine: MAGAZINE,
+    getControls: () => controls,
+    setControls(next) {
+      controls = next === "mouse" ? "mouse" : "keyboard";
+      host.setPointerLockEnabled?.(controls === "mouse");
+    },
+  };
 }

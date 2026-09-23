@@ -72,8 +72,10 @@ export async function createBrowserHost(canvas, opts = {}) {
     }
     syncPointerFromEvent(e);
   });
+  let pointerLockEnabled = opts.pointerLock !== false;
+
   canvas.addEventListener("pointerdown", (e) => {
-    if (document.pointerLockElement !== canvas) {
+    if (pointerLockEnabled && document.pointerLockElement !== canvas) {
       canvas.requestPointerLock?.();
     }
     canvas.setPointerCapture?.(e.pointerId);
@@ -208,6 +210,13 @@ export async function createBrowserHost(canvas, opts = {}) {
 
     host_request_frame(cb) {
       requestAnimationFrame(cb);
+    },
+
+    setPointerLockEnabled(on) {
+      pointerLockEnabled = !!on;
+      if (!pointerLockEnabled && document.pointerLockElement === canvas) {
+        document.exitPointerLock?.();
+      }
     },
 
     _stats() {

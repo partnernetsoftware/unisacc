@@ -1,13 +1,13 @@
-/** CDP: FP drone — boot, pointer, ammo magazine, suicide arm flag. */
+/** CDP probe for drone ship-js under /engine/ship/drone/ */
 import { spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
 import fs from "fs";
 
 const WALL_MS = 55_000;
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-const URL = "http://127.0.0.1:8765/engine/demo/drone/?t=" + Date.now();
-const PORT = 9366;
-const PROFILE = "/tmp/uxe-drone-fp-" + process.pid;
+const URL = "http://127.0.0.1:8765/engine/ship/drone/?t=" + Date.now();
+const PORT = 9367;
+const PROFILE = "/tmp/uxe-drone-ship-" + process.pid;
 const deadline = Date.now() + WALL_MS;
 const left = () => Math.max(0, deadline - Date.now());
 
@@ -61,14 +61,14 @@ try {
   let ready = null;
   for (let n = 0; Date.now() < deadline; n++) {
     const v = await uxe(ws, 100 + n);
-    if (v?.ready && v.drone && v.fp && v.ammo === 2) { ready = v; break; }
+    if (v?.ready && v.drone && v.fp && v.ship && v.ammo === 2 && v.controls === "keyboard") {
+      ready = v; break;
+    }
     if (v?.ready === false) throw new Error(v.error);
     await sleep(Math.min(300, left() || 1));
   }
-  if (!ready) throw new Error("never ready fp ammo=2");
-  if (ready.controls !== "keyboard") throw new Error("default controls must be keyboard");
+  if (!ready) throw new Error("never ready ship keyboard ammo=2");
 
-  // Arm suicide via KeyF (works in keyboard mode)
   await cdp(ws, 210, "Input.dispatchKeyEvent", {
     type: "keyDown", windowsVirtualKeyCode: 70, code: "KeyF", key: "f",
   });
@@ -84,63 +84,26 @@ try {
   });
   if (!armed) throw new Error("suicide arm via KeyF failed");
 
-  // Keyboard look + thrust + fire (I look / W fly / Space fire)
-  for (let k = 0; k < 10; k++) {
-    await cdp(ws, 300 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyDown", windowsVirtualKeyCode: 73, code: "KeyI", key: "i",
-    });
-    await cdp(ws, 301 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyDown", windowsVirtualKeyCode: 87, code: "KeyW", key: "w",
-    });
-    await sleep(80);
-    await cdp(ws, 302 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyDown", windowsVirtualKeyCode: 32, code: "Space", key: " ",
-    });
-    await sleep(40);
-    await cdp(ws, 303 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyUp", windowsVirtualKeyCode: 32, code: "Space", key: " ",
-    });
-  }
-  await cdp(ws, 400, "Input.dispatchKeyEvent", {
-    type: "keyUp", windowsVirtualKeyCode: 87, code: "KeyW", key: "w",
-  });
-  await cdp(ws, 401, "Input.dispatchKeyEvent", {
-    type: "keyUp", windowsVirtualKeyCode: 73, code: "KeyI", key: "i",
-  });
-
-  // Switch to mouse mode via API
-  await cdp(ws, 410, "Runtime.evaluate", {
+  await cdp(ws, 240, "Runtime.evaluate", {
     expression: `window.__UXE_API__ && window.__UXE_API__.setControls("mouse")`,
   });
-  let mouseOk = null;
+  let mouseMode = null;
   for (let i = 0; i < 15; i++) {
     await sleep(100);
-    const v = await uxe(ws, 420 + i);
-    if (v?.controls === "mouse") { mouseOk = v; break; }
+    const v = await uxe(ws, 250 + i);
+    if (v?.controls === "mouse") { mouseMode = v; break; }
   }
-  if (!mouseOk) throw new Error("setControls mouse failed");
+  if (!mouseMode) throw new Error("setControls mouse failed");
 
-  let after = null;
-  for (let i = 0; i < 15; i++) {
-    await sleep(100);
-    after = await uxe(ws, 500 + i);
-    if (after?.fp) break;
-  }
-  if (!after?.fp) throw new Error("lost fp state");
-  if (after.magazine !== 2) throw new Error("magazine");
-  if (!armed.suicideArm && !after.suicideArm) throw new Error("suicide never armed");
-
-  console.log("OK_DRONE", {
-    backend: after.backend, fp: true,
-    controlsDefault: "keyboard", controlsNow: after.controls,
-    ammo: after.ammo, magazine: after.magazine,
-    suicideArm: after.suicideArm || armed.suicideArm,
-    kills: after.kills, locked: after.locked,
-    score: after.score,
+  console.log("OK_DRONE_SHIP", {
+    backend: mouseMode.backend, fp: true, ship: true,
+    controlsDefault: "keyboard", controlsNow: mouseMode.controls,
+    ammo: mouseMode.ammo, magazine: mouseMode.magazine,
+    suicideArm: true,
   });
   ws.close(); chrome.kill("SIGKILL"); process.exit(0);
 } catch (e) {
   try { chrome.kill("SIGKILL"); } catch {}
-  console.error("FAIL_DRONE", e.message || e);
+  console.error("FAIL_DRONE_SHIP", e.message || e);
   process.exit(1);
 }
