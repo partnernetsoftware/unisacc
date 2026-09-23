@@ -21,7 +21,10 @@ BASE=$REPO/tests/selfgap.baseline
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 # A front-end bug can loop, and macOS has no timeout(1).
-try() { perl -e 'alarm 10; exec @ARGV' "$UA" "$1" -c >/dev/null 2>&1; }
+# 10s is generous on real hardware and not enough in an emulated guest,
+# where a program that compiles fine looks like a refusal -- which reads as
+# a REGRESSION here, because this suite is a ratchet.
+try() { perl -e "alarm ${TRY_ALARM:-10}; exec @ARGV" "$UA" "$1" -c >/dev/null 2>&1; }
 
 count() {           # count <tag> <file...>  -> accepted, listed in $T/got
     tag=$1; shift
