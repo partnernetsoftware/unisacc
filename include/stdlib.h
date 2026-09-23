@@ -67,6 +67,75 @@ static int atoi(const char *s) {
     return v * sign;
 }
 
+/* strtol/strtoul/strtod: the conversions C89 and C99 put here.  `end` is
+ * written when it is not null, which is how callers tell "no digits" from
+ * "the value happened to be zero". */
+static long strtol(const char *s, char **end, int base) {
+    long v; int sign; long i; int d;
+    v = 0; sign = 1; i = 0;
+    while (s[i] == 32 || (s[i] >= 9 && s[i] <= 13)) i = i + 1;
+    if (s[i] == 45) { sign = 0 - 1; i = i + 1; }
+    else { if (s[i] == 43) i = i + 1; }
+    if (base == 0) {
+        base = 10;
+        if (s[i] == 48) {
+            if (s[i+1] == 120 || s[i+1] == 88) { base = 16; i = i + 2; }
+            else base = 8;
+        }
+    } else { if (base == 16) { if (s[i] == 48) {
+        if (s[i+1] == 120 || s[i+1] == 88) i = i + 2; } } }
+    while (s[i]) {
+        d = 0 - 1;
+        if (s[i] >= 48 && s[i] <= 57) d = s[i] - 48;
+        else { if (s[i] >= 97 && s[i] <= 122) d = s[i] - 97 + 10;
+        else { if (s[i] >= 65 && s[i] <= 90) d = s[i] - 65 + 10; } }
+        if (d < 0 || d >= base) break;
+        v = v * base + d; i = i + 1;
+    }
+    if (end) *end = (char *)(s + i);
+    return v * sign;
+}
+static unsigned long strtoul(const char *s, char **end, int base) {
+    return (unsigned long)strtol(s, end, base);
+}
+static long atol(const char *s) { return strtol(s, 0, 10); }
+
+/* The fractional part is accumulated as an integer and scaled once, so a
+ * long run of digits does not lose the low ones to repeated division. */
+static double strtod(const char *s, char **end) {
+    double v; double frac; double scale; int sign; long i; int any;
+    long e; int esign;
+    v = 0.0; sign = 1; i = 0; any = 0;
+    while (s[i] == 32 || (s[i] >= 9 && s[i] <= 13)) i = i + 1;
+    if (s[i] == 45) { sign = 0 - 1; i = i + 1; }
+    else { if (s[i] == 43) i = i + 1; }
+    while (s[i] >= 48 && s[i] <= 57) { v = v * 10.0 + (double)(s[i] - 48); i = i + 1; any = 1; }
+    if (s[i] == 46) {
+        i = i + 1; frac = 0.0; scale = 1.0;
+        while (s[i] >= 48 && s[i] <= 57) {
+            frac = frac * 10.0 + (double)(s[i] - 48); scale = scale * 10.0;
+            i = i + 1; any = 1;
+        }
+        if (scale > 1.0) v = v + frac / scale;
+    }
+    if (any) { if (s[i] == 101 || s[i] == 69) {
+        long j; j = i + 1; esign = 1;
+        if (s[j] == 45) { esign = 0 - 1; j = j + 1; }
+        else { if (s[j] == 43) j = j + 1; }
+        if (s[j] >= 48 && s[j] <= 57) {
+            e = 0;
+            while (s[j] >= 48 && s[j] <= 57) { e = e * 10 + (s[j] - 48); j = j + 1; }
+            i = j;
+            while (e > 0) { if (esign > 0) v = v * 10.0; else v = v / 10.0; e = e - 1; }
+        }
+    } }
+    if (end) *end = (char *)(s + (any ? i : 0));
+    return v * (double)sign;
+}
+static float strtof(const char *s, char **end) { return (float)strtod(s, end); }
+static double strtold(const char *s, char **end) { return strtod(s, end); }
+static double atof(const char *s) { return strtod(s, 0); }
+
 static long _unisa_seed = 1;
 static int rand(void) {
     _unisa_seed = _unisa_seed * 1103515245 + 12345;

@@ -1783,6 +1783,8 @@ int fnresume;             /* where a nested declarator's body starts, or -1 */
    call through it returns a pointer to, or -1.  fpretfp: the declarator
    just parsed points to a function that itself returns a function pointer. */
 int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
+int fntok = 0 - 1;          /* the name token of the function being walked,
+                               for C99's predefined `__func__` */
 int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
 /* Pointer DEPTH.  `int **q` is a pointer to a pointer: *q is itself eight
    bytes, and only **q is the int.  A 0/1 pointer flag read *q as a 4-byte
@@ -2887,6 +2889,26 @@ int primary(void) {
         lvalue = 0; curelem = 4; curptr = 1;
         return postfix();
     } }
+    /* C99 6.4.2.2: inside a function, `__func__` is declared as if by
+       `static const char __func__[] = "name";`.  It is not an identifier
+       to look up -- there is no such symbol -- so it is answered here,
+       with the name of the function being walked. */
+    if (t == T_ID) { if (srcis(tpos[tp], tlen[tp], "__func__")) {
+        int fl;
+        adv();
+        if (fntok < 0) { i = addlit("", 0); }
+        else {
+            fl = 0;
+            while (fl < tlen[fntok] && fl < 120) {
+                lbuf[fl] = src[tpos[fntok] + fl]; fl = fl + 1;
+            }
+            lbuf[fl] = 0;
+            i = addlit(lbuf, fl + 1);
+        }
+        es("  @mem.lea r0, S"); en(i); ec(10);
+        lvalue = 0; curelem = 1; curptr = 1;
+        return postfix();
+    } }
     if (t == T_STR) {
         i = nlab; nlab = nlab + 1;
         i = addlit(lbuf, decode(adv(), lbuf));
@@ -2906,7 +2928,11 @@ int primary(void) {
                 } }
             } }
         } }
-        adv(); expr(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        /* `( expr )` is a parenthesised expression, and inside the
+           parentheses the COMMA OPERATOR is in scope: `(a++, b++, c)`
+           evaluates all three and has c's value.  This used to call
+           expr(), which stops at the comma, so the `)` never arrived. */
+        adv(); exprc(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         return postfix();
     }
     if (t == T_ID) {
@@ -4505,7 +4531,8 @@ int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
-    nown = 0; bitpos = 0;
+    int flex;                   /* this member is `name[]`: a flexible array */
+    nown = 0; bitpos = 0; flex = 0;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
@@ -4562,9 +4589,17 @@ int stbody(int si) {
                 t = fpdecl(); declptr = 1; mst = 0 - 1;
                 if (fpdim > 0) n = fpdim;
             } }
+            flex = 0;
             if (t < 0) { if (cur() != tidx(":", 1)) t = adv(); }   /* `unsigned : 2;` names nothing */
             if (cur() == tidx("[", 1)) {
-                adv(); n = cexpr(); need(tidx("]", 1), "]");
+                /* C99 6.7.2.1p16: the LAST member of a struct may have an
+                   incomplete array type -- `char d[];` -- and contributes
+                   nothing to sizeof.  The bytes are whatever the caller
+                   allocated past the struct, so the member is an offset
+                   with a length of zero. */
+                adv();
+                if (cur() == tidx("]", 1)) { n = 0; flex = 1; } else n = cexpr();
+                need(tidx("]", 1), "]");
             }
             isbf = 0;
             if (eat(tidx(":", 1))) {
@@ -4612,6 +4647,12 @@ int stbody(int si) {
             if (declptr) { msz = 8; mal = 8; mw = 8; mel = sz; if (mst >= 0) mel = stsize[mst]; }
             if (mal > 8) mal = 8;
             if (n > 1) { mel = msz; msz = msz * n; mw = 0; }
+            /* The flexible member is an ARRAY of length zero: `mw = 0` is
+               what marks a member as "its name is its address", and its
+               size contributes nothing to the struct (C99 6.7.2.1p16).
+               Without this it stayed a scalar and `s->d[0]` dereferenced
+               the member's VALUE as a pointer. */
+            if (flex) { mel = msz; msz = 0; mw = 0; }
             /* a plain member starts at the next byte, whatever bits precede it */
             if ((bitpos + 7) / 8 > off) off = (bitpos + 7) / 8;
             if (stunion[si]) mo = 0;
@@ -5620,6 +5661,7 @@ int function(int t, int w) {
     /* `static int helper(...)` in the second unit is not the `helper` in
        the first: recorded here, before the label is emitted */
     if (declstatic) ustat_add(t);
+    fntok = t;
     start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;
     scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
