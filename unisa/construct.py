@@ -18,9 +18,10 @@ Ported from the minimal-cover derivation; techniques, in order of payoff:
   T5 additive factorisation             biggest win on the multi-head stages
 """
 
-import sys, time
+import os, sys, time
 
-sys.path.insert(0, '/Users/wjc/repos/unisacc')
+# run as a script from anywhere: the repo root is two levels up from this file
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from unisa.gold import STAGES, ALL
 from unisa.linalg import argmax
 
