@@ -59,5 +59,17 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     cd \$W
     export FETCH=0
     export SUITE_LIMIT='$LIMIT' TRY_ALARM='$TRY' JOBS='${JOBS:-4}'
-    if [ '$what' = all ]; then ./tests/all.sh; else ./tests/$what.sh; fi
+    # Some suites take the probe list; run without it they test NOTHING --
+    # closure printed 'identical 0 differ 0' and ccrun reported 90 lost
+    # probes, which is its ratchet correctly describing a run of zero.
+    # (No backticks in here: this whole command is inside double quotes on
+    # the HOST, so a backtick runs there.)
+    P=''
+    case '$what' in
+        native|crossnative|fat|ccrun|selfhost|closure|stages)
+            P='examples/*.c tests/c/*.c';;
+    esac
+    if [ '$what' = all ]; then ./tests/all.sh
+    elif [ -n \"\$P\" ]; then sh -c \"./tests/$what.sh \$P\"
+    else ./tests/$what.sh; fi
 "
