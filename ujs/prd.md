@@ -11,7 +11,7 @@
 
 **交付**：
 1. **JS 产品 / 库** —— `ujs/web` + `package.json`：`bootRuntime` / `wasm_run`（浏览器 · Node · Bun）
-2. **站点 / 示例** —— `web/index.html` playground（`npm run demo`）；**UXE** `web/engine/`（`demo/` 源码测 · `ship/` 发布面：html + `{game}.wasm` + `gameEngine.wasm`）；可选 `web/game/`（Three 对照，非 API 契约）
+2. **站点 / 示例** —— `web/index.html` playground（`npm run demo`）；**UXE** `web/engine/`（`demo/` 源码测 · `ship/` 发布面：html + `{game}.wasm` + `engine.wasm`）；可选 `web/game/`（Three 对照，非 API 契约）
 3. **`js2wasm`** —— 全量 UJS-1 → `.wasm`（construct CLI；C VM via zig）
 4. **构造侧** —— `ujs/construct/`（Python gold / front / build；非应用依赖）
 

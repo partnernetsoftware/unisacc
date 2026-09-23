@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Bake ship/index.html: tiny glue + asteroid.wasm + gameEngine.wasm */
+/** Bake ship/index.html: tiny glue + asteroid.wasm + engine.wasm */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -49,7 +49,7 @@ const html = `<!DOCTYPE html>
   </div></div>
   <canvas id="c"></canvas>
   <script type="module">
-/* tiny Host glue — wires asteroid.wasm ↔ gameEngine.wasm + GPU */
+/* tiny Host glue — wires asteroid.wasm ↔ engine.wasm + GPU */
 ${host}
 
 const q = new URLSearchParams(location.search).get("gpu");
@@ -63,7 +63,7 @@ try {
     finalEl: document.getElementById("final"),
     prefer,
     gameUrl: new URL("./asteroid.wasm", location.href).href,
-    engineUrl: new URL("./gameEngine.wasm", location.href).href,
+    engineUrl: new URL("./engine.wasm", location.href).href,
   });
 } catch (e) {
   hud.innerHTML = '<span class="warn">boot failed</span><br>' + String(e.message || e);

@@ -13,7 +13,7 @@
 | 积木 | 现在 | 平台要什么 |
 |---|---|---|
 | **Host API** | 时间 / 输入 / 帧 / UXEP·GPU / 资源 / 日志 | 继续加厚（H3+）；规划 `host_llm` |
-| **引擎** | `gameEngine.wasm`（UJS VM） | 稳定交付名；与游戏核永远分开 |
+| **引擎** | `engine.wasm`（=`ujs_full`；游戏 / app / harness 共用） | 稳定交付名；与业务核永远分开 |
 | **游戏** | Asteroid（Pages）· 大富翁（归档） | 下一款街机实践车；模板可复制 |
 
 外网入口（GitHub Pages · `docs/`）：

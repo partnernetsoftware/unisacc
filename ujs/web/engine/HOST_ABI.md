@@ -18,7 +18,25 @@
     WebGL / WebGPU · 输入 · 资源 · （将来）LLM / 音频 / 存储
 ```
 
-配套引擎：`gameEngine.wasm`（=`ujs_full.wasm`）跑 UJS 玩法；**与游戏 wasm 不合包**。
+配套引擎：交付名 **`engine.wasm`**（=`ujs_full.wasm` 构建产物）。  
+命名不用 `gameEngine`：同一引擎还要跑 **wasm app**（AI harness、工具壳等），不只是游戏。  
+与 `{game|app}.wasm` **不合包**。
+
+---
+
+## 0. Ship 胶水为什么看起来「厚」
+
+Pages 上 `index.html` 内联了约 40KB+ JS。拆开看：
+
+| 块 | 大约 | 能否沉进 `engine.wasm` |
+|---|---|---|
+| **WebGL / WebGPU 译包**（`browser-host` + renderer） | 大半 | **否** — 必须调浏览器 GPU API；Host 边界就是为这个留的 |
+| **UXEP/UXIN 编解码** | 小 | 游戏核已在 C 侧编码 packet；JS 解码留给 Host |
+| **`eng_boot` / `eng_sim_step` 双 memory 搬砖**（list↔数组、字典回写） | 中 | **是 · 下一刀** — 应收成 `engine.wasm` 导出的稳定 `eng_step(packed_state)`，页内只剩 instantiate + 调一次 |
+| DOM / fetch / rAF | 薄 | 否 — 壳的事 |
+
+原则：**能沉的是「引擎协议」**（UJS 步进、状态打包），**不能沉的是「宿主能力」**（GPU、输入设备、密钥、网络）。  
+缩胶水 = 加厚 `engine.wasm` 的 eng ABI，不是把 WebGPU 塞进 freestanding wasm。
 
 ---
 
@@ -60,7 +78,7 @@ ship 另有胶水桥（**不是** Host ABI 本体，只在页内）：
 
 | 符号 | 作用 |
 |---|---|
-| `eng_boot(image_ptr, len)` | 把预编译 UJS image 装进 `gameEngine.wasm` |
+| `eng_boot(image_ptr, len)` | 把预编译 UJS image 装进 `engine.wasm` |
 | `eng_sim_step(...)` | 一帧/一步玩法；胶水在双 memory 之间搬状态 |
 
 ---
@@ -157,7 +175,7 @@ decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1�
 |---|---|---|
 | 玩法 | 页内 compile / 读 `.ujs` | 预编译进核或 embed |
 | 核 | `core-*.js` | `{game}.wasm` 或 ship-js 打包核 |
-| 引擎 | `ujs_full.wasm` | `gameEngine.wasm` |
+| 引擎 | `ujs_full.wasm` | `engine.wasm` |
 | Host | 分模块 `browser-host.js` | 内联进 `index.html` 的薄胶水 |
 
 Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。  
@@ -208,7 +226,7 @@ Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
 1. 核里碰 `canvas` / DOM / `fetch` / 文件系统。  
 2. 逐 draw 跨边界。  
 3. 为单一游戏开旁路 API（缺口进本表版本化）。  
-4. 游戏 wasm 与 `gameEngine.wasm` 合包。  
+4. 游戏 wasm 与 `engine.wasm` 合包。  
 5. 把 LLM Key 或用户隐私写进 packet / sim globals。
 
 ---

@@ -20,9 +20,9 @@
 - **UJS-1 闭合语言**：表内全功能、表外永久拒绝；显式 `G`/`L`；无原型/`eval`/async。
 - **jtape + fold**：语义真源；jtape VM ≡ WasmProgram（+ 可选宿主 wasm）。
 - **IC 阶段**：`shape×op×guard→stub_kind`；有限 stub 库；`icfold` 保证开关同答。
-- **产品面**：`wasm_run` + `ujs_full.wasm`（browser/Node/Bun）；嵌入演示交付名 `gameEngine.wasm`；Python 仅在 `construct/`；二进制走 Release + `BUILD.json`。
+- **产品面**：`wasm_run` + `ujs_full.wasm`（browser/Node/Bun）；嵌入演示交付名 `engine.wasm`；Python 仅在 `construct/`；二进制走 Release + `BUILD.json`。
 - **验收叙事**：定性绑定 `tests/ujs.sh`——acc / fold / icfold / front parity / ship / in-page wasm_run；**不编造数字**。
-- **可选产物指针**（非数字表）：playground；**`engine/demo/`**（Host ABI 源码测）；**`engine/ship/`**（html + `{game}.wasm` + `gameEngine.wasm`，不合包）；`game/`（Three 对照）。
+- **可选产物指针**（非数字表）：playground；**`engine/demo/`**（Host ABI 源码测）；**`engine/ship/`**（html + `{game}.wasm` + `engine.wasm`，不合包）；`game/`（Three 对照）。
 
 ---
 

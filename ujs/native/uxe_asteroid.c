@@ -1,8 +1,8 @@
 /* UXE Asteroid game core — freestanding {game}.wasm (NO UJS VM linked).
  * Imports:
  *   env.host_*     — browser Host ABI
- *   env.eng_boot   — load sim image into gameEngine.wasm
- *   env.eng_sim_step — one UJS step via gameEngine.wasm (glue bridges memories)
+ *   env.eng_boot   — load sim image into engine.wasm
+ *   env.eng_sim_step — one UJS step via engine.wasm (glue bridges memories)
  */
 #include <stdint.h>
 #include "sim_embed.h"
@@ -29,7 +29,7 @@ extern void host_log(u32 level, u32 ptr, u32 len);
 IMP __attribute__((import_name("host_request_frame")))
 extern void host_request_frame(void);
 
-/* Bridge into gameEngine.wasm (implemented in page glue). */
+/* Bridge into engine.wasm (implemented in page glue). */
 IMP __attribute__((import_name("eng_boot")))
 extern i32 eng_boot(u32 image_ptr, u32 image_len);
 IMP __attribute__((import_name("eng_sim_step")))

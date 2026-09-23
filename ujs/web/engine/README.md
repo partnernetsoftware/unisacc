@@ -9,7 +9,7 @@
 |---|---|---|
 | 玩法 | 页内 `compile(*.ujs)` | 预编译进核或 embed |
 | 核 | `core-asteroid.js` / `core-monopoly.js` | `asteroid.wasm` · monopoly ship-js |
-| 引擎 | `ujs_full.wasm` | **`gameEngine.wasm`** |
+| 引擎 | `ujs_full.wasm` | **`engine.wasm`** |
 | 页 | 多模块 ESM | **一张** `index.html` + 极薄胶水 |
 
 ```bash
@@ -22,7 +22,7 @@ npm run test:uxe:monopoly:ship
 
 ```
 Shell = {game} 核（调度 + packet）
-      + gameEngine.wasm（UJS VM）
+      + engine.wasm（UJS VM）
       + 极薄 JS（Host GPU / 输入 / 双 wasm 桥）
       + （规划）用户自带 LLM → host_llm_*
 ```
@@ -31,7 +31,7 @@ Shell = {game} 核（调度 + packet）
 |---|---|---|
 | 玩法 | `game/sim.ujs` · `game/monopoly.ujs` | UJS-1；表外永久拒绝 |
 | 游戏核 | ship: `asteroid.wasm`；monopoly: ship-js | 只调 `host_*`（+ ship 的 `eng_*`） |
-| 引擎 | `gameEngine.wasm` | = `ujs_full`；**不合进**游戏 wasm |
+| 引擎 | `engine.wasm` | = `ujs_full`；**不合进**游戏 wasm |
 | Host | `browser-host.js` | WebGL / WebGPU 自适应 |
 | 提交 | UXEP → `host_gpu_submit` | 一次一包 |
 | 输入 | UXIN | `host_input_read(buf)` |
@@ -50,7 +50,7 @@ demo/{asteroid,monopoly}/host.js → core-*.js → wasm_run(ujs_full)
 
 ```
 index.html（内联胶水）
-    ├─ gameEngine.wasm
+    ├─ engine.wasm
     ├─ asteroid.wasm  或  monopoly 打包核 + embed sim
     └─ browser-host → WebGL | WebGPU
 ```

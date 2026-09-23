@@ -17,7 +17,7 @@
 |---|---|
 | `ujs/web/` playground | `wasm_run` 开箱 |
 | `ujs/web/engine/demo/` | UXE 源码测试（Host ABI） |
-| `ujs/web/engine/ship/` | UXE **发布面**：`index.html` + `{game}.wasm` + `gameEngine.wasm`（不合包） |
+| `ujs/web/engine/ship/` | UXE **发布面**：`index.html` + `{game}.wasm` + `engine.wasm`（不合包） |
 | `ujs/web/game/` | Three 对照（非主线） |
 
 产品目录地图：[`ujs/DOCS.md`](../ujs/DOCS.md)。

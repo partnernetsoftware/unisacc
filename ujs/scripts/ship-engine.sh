@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ship deliverables + GitHub Pages mirror under docs/
-#   asteroid: index.html + asteroid.wasm + gameEngine.wasm
-#   monopoly: index.html + gameEngine.wasm（JS 核 + 预编译 sim；C monopoly.wasm 后补）
+#   asteroid: index.html + asteroid.wasm + engine.wasm
+#   monopoly: index.html + engine.wasm（JS 核 + 预编译 sim；C monopoly.wasm 后补）
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WEB="$ROOT/ujs/web"
@@ -18,7 +18,7 @@ cd "$ROOT/ujs"
 
 # ——— Asteroid (C {game}.wasm) ———
 perl -e 'alarm 120; exec @ARGV' node "$SHIP/build-asteroid.mjs"
-cp -f "$WEB/ujs_full.wasm" "$SHIP/gameEngine.wasm"
+cp -f "$WEB/ujs_full.wasm" "$SHIP/engine.wasm"
 
 perl -e 'alarm 120; exec @ARGV' npx --yes esbuild@0.23.1 \
   "$SHIP/host-entry.js" \
@@ -36,7 +36,7 @@ perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" node "$SHIP/bake-html.mjs
 PAGES_AST="$DOCS/uxe/asteroid"
 mkdir -p "$PAGES_AST"
 perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../../" node "$SHIP/bake-html.mjs"
-cp -f "$SHIP/index.html" "$SHIP/asteroid.wasm" "$SHIP/gameEngine.wasm" "$PAGES_AST/"
+cp -f "$SHIP/index.html" "$SHIP/asteroid.wasm" "$SHIP/engine.wasm" "$PAGES_AST/"
 perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" node "$SHIP/bake-html.mjs"
 
 # ——— Monopoly：归档，不进 Pages 索引 / 不镜像 docs ———

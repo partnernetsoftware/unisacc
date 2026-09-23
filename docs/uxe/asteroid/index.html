@@ -38,7 +38,7 @@
   </div></div>
   <canvas id="c"></canvas>
   <script type="module">
-/* tiny Host glue — wires asteroid.wasm ↔ gameEngine.wasm + GPU */
+/* tiny Host glue — wires asteroid.wasm ↔ engine.wasm + GPU */
 // web/engine/math.js
 function mat4() {
   return new Float32Array(16);
@@ -1124,6 +1124,7 @@ async function createBrowserHost(canvas, opts = {}) {
   addEventListener("keydown", onKey(true));
   addEventListener("keyup", onKey(false));
   let mx = 0, my = 0, buttons = 0, flags = 0;
+  let movAccX = 0, movAccY = 0;
   function syncPointerFromEvent(e) {
     const r = canvas.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
@@ -1135,26 +1136,38 @@ async function createBrowserHost(canvas, opts = {}) {
     flags = inside ? FLAG_POINTER_IN : 0;
   }
   canvas.addEventListener("pointermove", (e) => {
+    if (document.pointerLockElement === canvas) {
+      movAccX += e.movementX || 0;
+      movAccY += e.movementY || 0;
+      flags = FLAG_POINTER_IN;
+      return;
+    }
     syncPointerFromEvent(e);
   });
   canvas.addEventListener("pointerdown", (e) => {
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock?.();
+    }
     canvas.setPointerCapture?.(e.pointerId);
-    syncPointerFromEvent(e);
+    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
     if (e.button === 0) buttons |= BTN_LEFT;
     if (e.button === 1) buttons |= BTN_MIDDLE;
     if (e.button === 2) buttons |= BTN_RIGHT;
     e.preventDefault();
   });
   canvas.addEventListener("pointerup", (e) => {
-    syncPointerFromEvent(e);
+    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
     if (e.button === 0) buttons &= ~BTN_LEFT;
     if (e.button === 1) buttons &= ~BTN_MIDDLE;
     if (e.button === 2) buttons &= ~BTN_RIGHT;
   });
   canvas.addEventListener("pointerleave", () => {
-    flags = 0;
+    if (document.pointerLockElement !== canvas) flags = 0;
   });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  document.addEventListener("pointerlockchange", () => {
+    if (document.pointerLockElement === canvas) flags = FLAG_POINTER_IN;
+  });
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
   function applyObjectPacket(packet) {
@@ -1200,20 +1213,29 @@ async function createBrowserHost(canvas, opts = {}) {
       if (keys.KeyW || keys.ArrowUp) iy -= 1;
       const fireKey = keys.Space ? 1 : 0;
       const fireBtn = buttons & BTN_LEFT ? 1 : 0;
+      let outMx = mx, outMy = my;
+      let outFlags = flags;
+      if (keys.KeyF) outFlags |= 2;
+      if (document.pointerLockElement === canvas) {
+        outMx = Math.max(-1, Math.min(1, movAccX / 48));
+        outMy = Math.max(-1, Math.min(1, -movAccY / 48));
+        movAccX = 0;
+        movAccY = 0;
+      }
       const snap = {
         ix,
         iy,
         fire: fireKey || fireBtn,
-        mx,
-        my,
+        mx: outMx,
+        my: outMy,
         buttons,
-        flags,
+        flags: outFlags,
         keys: { ...keys }
       };
       if (buf != null) {
         const ab = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
         encodeInputSnapshot(snap, ab);
-        return Math.min(ab.byteLength, INPUT_BYTES) >= INPUT_BYTES ? INPUT_BYTES : ab.byteLength >= 20 ? 20 : 0;
+        return ab.byteLength >= INPUT_BYTES ? INPUT_BYTES : ab.byteLength >= 20 ? 20 : 0;
       }
       return snap;
     },
@@ -1266,7 +1288,7 @@ async function startShip(cfg) {
   });
   const [engineBuf, gameBuf] = await Promise.all([
     fetch(cfg.engineUrl).then((r) => {
-      if (!r.ok) throw new Error("fetch gameEngine " + r.status);
+      if (!r.ok) throw new Error("fetch engine " + r.status);
       return r.arrayBuffer();
     }),
     fetch(cfg.gameUrl).then((r) => {
@@ -1296,7 +1318,7 @@ async function startShip(cfg) {
     "str_ptr_export",
     "mem_base"
   ]) {
-    if (ex[n] == null) throw new Error("gameEngine missing " + n);
+    if (ex[n] == null) throw new Error("engine missing " + n);
   }
   const engMem = () => new Uint8Array(ex.memory.buffer);
   function engWriteImage(srcBytes) {
@@ -1438,7 +1460,7 @@ async function startShip(cfg) {
       cfg.finalEl.textContent = (snap.score ?? 0).toFixed(0);
     } else cfg.banner.classList.remove("show");
     if (!(snap.ujsMs > 0) && !(snap.fps > 0)) {
-      cfg.hud.textContent = "asteroid + gameEngine \xB7 warming\u2026";
+      cfg.hud.textContent = "asteroid + engine \xB7 warming\u2026";
       return;
     }
     cfg.hud.innerHTML = `<b>Asteroid</b> \xB7 ship<br>backend <b>${host.backend}</b> \xB7 entities <b>${snap.n}</b><br>ujs <b>${snap.ujsMs.toFixed(2)} ms</b> \xB7 gpu <b>${snap.drawMs.toFixed(2)} ms</b><br>fps <b>${snap.fps.toFixed(0)}</b> \xB7 score <b>${snap.score.toFixed(0)}</b><br>\u64CD\u4F5C <b>WASD</b> \u79FB\u52A8` + (host._stats?.().bytes ? ` \xB7 packet <b>${host._stats().bytes}</b> B` : "") + (snap.alive ? "" : `<br><span class="warn">\u649E\u6BC1 \u2014 \u7A7A\u683C\u91CD\u5F00</span>`);
@@ -1535,7 +1557,7 @@ try {
     finalEl: document.getElementById("final"),
     prefer,
     gameUrl: new URL("./asteroid.wasm", location.href).href,
-    engineUrl: new URL("./gameEngine.wasm", location.href).href,
+    engineUrl: new URL("./engine.wasm", location.href).href,
   });
 } catch (e) {
   hud.innerHTML = '<span class="warn">boot failed</span><br>' + String(e.message || e);

@@ -58,7 +58,7 @@ WASM 核心  →  极薄 JS 绑定  →  WebGPU/WebGL  →  GPU
 
 - Host ABI v0：`time/input/frame/gpu_submit/asset_read/log`；UXEP / UXIN
 - GPU：WebGL / WebGPU 自适应
-- **交付（不合包）**：`index.html` + `{game}.wasm` + `gameEngine.wasm`（=`ujs_full`）
+- **交付（不合包）**：`index.html` + `{game}.wasm` + `engine.wasm`（=`ujs_full`）
 - 开发：`/engine/demo/` 分源；发布：`npm run ship:engine` → `/engine/ship/`
 - 验收：`test:uxe:packet` · `test:uxe:input` · `test:uxe` · `test:uxe:ship`
 
@@ -117,10 +117,10 @@ host_llm（BYO Key）打开「带智能的玩法」而不代持密钥
 
 | 优先 | 内容 |
 |---|---|
-| **下一款街机实践车** | 见下「候选」；用可玩性逼 Host，不先堆规则盘 |
-| **H3** | 指针 / 多键 / points（有游戏卡住再开） |
-| **host_llm 草案** | HOST_ABI §7.1；有玩法需要再落地 |
-| **模板** | 换 sim / 换核最短路径 |
+| **eng ABI 下沉** | 把 ship 里 `eng_sim_step` 双 memory 搬砖收进 `engine.wasm`，页胶水只留 GPU Host |
+| **街机无人机** | `demo/drone/` 可玩性；过门槛再 ship / Pages |
+| **host_llm 草案** | HOST_ABI §7.1 |
+| **模板** | 换核最短路径（game 与 app 同一 `engine.wasm`） |
 | **A2** | host fn / 错误行号 |
 
 ### 实践车状态

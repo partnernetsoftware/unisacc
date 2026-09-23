@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build asteroid.wasm = game core ONLY (no UJS VM).
- * Engine is separate: ship/gameEngine.wasm (= ujs_full.wasm).
+ * Engine is separate: ship/engine.wasm (= ujs_full.wasm).
  */
 import fs from "fs";
 import path from "path";

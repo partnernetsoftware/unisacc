@@ -8,7 +8,7 @@
 | `python3 -m ujs web-build` | 生成 `ujs/web` 核产物 + `BUILD.json` |
 | `python3 -m ujs ship --out kit.zip` | 构造侧 kit（内部自检） |
 | `./ujs/scripts/release-artifacts.sh` | 发版 zip：`ujs_full.wasm` + `compiler.gen.js` + ESM |
-| `./ujs/scripts/ship-engine.sh` | UXE 发布面：`html` + `asteroid.wasm` + `gameEngine.wasm` |
+| `./ujs/scripts/ship-engine.sh` | UXE 发布面：`html` + `asteroid.wasm` + `engine.wasm` |
 | `python3 -m ujs run / wasm-run / js2wasm / …` | 构造 CLI；`python3 -m ujs -h` |
 | `npm run build` / `demo` / `test` | 薄封装（`test` → `../tests/ujs.sh`） |
 | `npm run ship:engine` | → `scripts/ship-engine.sh` |
@@ -29,7 +29,7 @@ UXE 游戏包（另一步，不合进核 zip 亦可）：
 
 ```bash
 cd ujs && npm run ship:engine && npm run test:uxe:ship
-# 交付：web/engine/ship/{index.html,asteroid.wasm,gameEngine.wasm}
+# 交付：web/engine/ship/{index.html,asteroid.wasm,engine.wasm}
 ```
 
 ## 文档

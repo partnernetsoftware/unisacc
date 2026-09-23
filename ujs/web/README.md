@@ -15,7 +15,7 @@
 | 不跟踪 → **Release** / 本地 `web-build` · `ship:engine` | |
 |---|---|
 | `ujs_full.wasm` · `compiler.gen.js` | 产品核（≈88KB wasm） |
-| `engine/ship/asteroid.wasm` · `gameEngine.wasm` | UXE 发布面（`npm run ship:engine`） |
+| `engine/ship/asteroid.wasm` · `engine.wasm` | UXE 发布面（`npm run ship:engine`） |
 | `engine/ship/index.html` · `uxe-host.js` | 由 `bake-html` 生成 |
 | `ujs_rt.wasm` · `progs/*` | 可选演示 |
 | `game/three.module.js` | 按需拉取 |

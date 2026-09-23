@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Build Monopoly Pages ship (JS core + precompiled sim + gameEngine.wasm).
+ * Build Monopoly Pages ship (JS core + precompiled sim + engine.wasm).
  * Output: docs/uxe/monopoly/  and  web/engine/ship/monopoly/
  */
 import fs from "fs";
@@ -94,7 +94,7 @@ try {
     canvas: document.getElementById("c"),
     hud,
     prefer,
-    engineUrl: new URL("./gameEngine.wasm", location.href).href,
+    engineUrl: new URL("./engine.wasm", location.href).href,
   });
 } catch (e) {
   hud.innerHTML = '<span class="warn">boot failed</span><br>' + String(e.message || e);
@@ -108,10 +108,10 @@ try {
 }
 
 fs.writeFileSync(path.join(outLocal, "index.html"), bake("../../"));
-fs.copyFileSync(path.join(web, "ujs_full.wasm"), path.join(outLocal, "gameEngine.wasm"));
+fs.copyFileSync(path.join(web, "ujs_full.wasm"), path.join(outLocal, "engine.wasm"));
 
 fs.writeFileSync(path.join(outPages, "index.html"), bake("../../"));
-fs.copyFileSync(path.join(outLocal, "gameEngine.wasm"), path.join(outPages, "gameEngine.wasm"));
+fs.copyFileSync(path.join(outLocal, "engine.wasm"), path.join(outPages, "engine.wasm"));
 
 console.log("monopoly ship-js ok:");
 console.log("  local ", outLocal);

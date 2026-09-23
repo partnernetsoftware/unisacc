@@ -1,6 +1,6 @@
 /**
- * Ship glue: browser Host + bridge gameEngine.wasm ↔ asteroid.wasm.
- * Deliverable: index.html + asteroid.wasm + gameEngine.wasm
+ * Ship glue: browser Host + bridge engine.wasm ↔ asteroid.wasm.
+ * Deliverable: index.html + asteroid.wasm + engine.wasm
  */
 import { createBrowserHost } from "../browser-host.js";
 import { INPUT_BYTES } from "../input.js";
@@ -29,7 +29,7 @@ export async function startShip(cfg) {
 
   const [engineBuf, gameBuf] = await Promise.all([
     fetch(cfg.engineUrl).then((r) => {
-      if (!r.ok) throw new Error("fetch gameEngine " + r.status);
+      if (!r.ok) throw new Error("fetch engine " + r.status);
       return r.arrayBuffer();
     }),
     fetch(cfg.gameUrl).then((r) => {
@@ -46,7 +46,7 @@ export async function startShip(cfg) {
     "host_len", "host_dict_key", "host_dict_val",
     "tag_of_export", "f64_of_export", "str_len_export", "str_ptr_export", "mem_base",
   ]) {
-    if (ex[n] == null) throw new Error("gameEngine missing " + n);
+    if (ex[n] == null) throw new Error("engine missing " + n);
   }
 
   const engMem = () => new Uint8Array(ex.memory.buffer);
@@ -178,7 +178,7 @@ export async function startShip(cfg) {
       cfg.finalEl.textContent = (snap.score ?? 0).toFixed(0);
     } else cfg.banner.classList.remove("show");
     if (!(snap.ujsMs > 0) && !(snap.fps > 0)) {
-      cfg.hud.textContent = "asteroid + gameEngine · warming…";
+      cfg.hud.textContent = "asteroid + engine · warming…";
       return;
     }
     cfg.hud.innerHTML =

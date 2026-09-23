@@ -9,7 +9,7 @@
 | 层 | 是什么 | 不是什么 |
 |---|---|---|
 | **产品 API** | `wasm_run` + `ujs_full.wasm` | 训练入口 |
-| **UXE 嵌入** | Host ABI + `{game}.wasm` + `gameEngine.wasm` | Three 移植 |
+| **UXE 嵌入** | Host ABI + `{game}.wasm` + `engine.wasm` | Three 移植 |
 | **构造侧** | `construct/` Python gold → 权重 / `web-build` | 应用依赖 |
 
 ---
@@ -41,7 +41,7 @@
 
 ```
 /engine/ship/                 # 本地开发对照
-  index.html + asteroid.wasm + gameEngine.wasm
+  index.html + asteroid.wasm + engine.wasm
 
 /docs/                        # GitHub Pages（外网测）
   index.html                  # 游戏索引（当前仅 Asteroid）
@@ -114,7 +114,7 @@ ujs/
 │   │   └── ship/               # 发布面（asteroid + monopoly/）
 │   └── game/                   # Three 对照 + exp/
 ├── native/
-│   ├── ujs_vm.c                # → ujs_full / gameEngine
+│   ├── ujs_vm.c                # → ujs_full / engine
 │   ├── ujs_ic_net.c            # IC 网（生成/构造）
 │   └── uxe_asteroid.c          # → asteroid.wasm（无链 VM）
 └── construct/                  # Python：gold · front · build · CLI
@@ -128,5 +128,5 @@ ujs/
 2. **Host 真源**：`web/engine/HOST_ABI.md`；平台叙事：`PLATFORM.md`；README 只摘要。
 3. 改 `host_*` / UXEP·UXIN / 交付面 → 同会话更新 HOST_ABI + engine README + DOCS/FUTURE + research 定性指针。
 4. 门禁以 `package.json` scripts 为准；文档里的 alarm 秒数须一致。
-5. **游戏 wasm 与引擎 wasm 不合包**：`{game}.wasm` ≠ `gameEngine.wasm`。
+5. **游戏 wasm 与引擎 wasm 不合包**：`{game}.wasm` ≠ `engine.wasm`。
 6. **LLM**：密钥只在 Host/壳；规划符号见 HOST_ABI §7.1，禁止进核与 packet。
