@@ -9,9 +9,8 @@ let canvas = document.getElementById("c");
 
 hud.textContent = "Host ABI boot…";
 
-const prefer = new URLSearchParams(location.search).get("gpu") === "webgpu"
-  ? "webgpu"
-  : "webgl";
+const q = new URLSearchParams(location.search).get("gpu");
+const prefer = q === "webgl" || q === "webgpu" ? q : "auto";
 
 const host = await createBrowserHost(canvas, {
   baseURL: new URL("../../", import.meta.url),

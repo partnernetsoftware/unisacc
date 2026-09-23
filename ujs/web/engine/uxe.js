@@ -5,10 +5,10 @@ import { createWebGPURenderer } from "./renderer-webgpu.js";
 
 /**
  * @param {HTMLCanvasElement} canvas
- * @param {{ prefer?: "webgl" | "webgpu" }} [opts]
+ * @param {{ prefer?: "auto" | "webgl" | "webgpu" }} [opts]
  */
 export async function createEngine(canvas, opts = {}) {
-  const prefer = opts.prefer || "webgpu";
+  const prefer = opts.prefer || "auto";
   const scene = new Scene();
   const camera = new PerspectiveCamera();
 
@@ -20,12 +20,7 @@ export async function createEngine(canvas, opts = {}) {
       renderer = null;
     }
   }
-  if (!renderer) {
-    if (prefer === "webgpu") {
-      // explicit webgpu-only failure still falls back for demos
-    }
-    renderer = createWebGLRenderer(canvas);
-  }
+  if (!renderer) renderer = createWebGLRenderer(canvas);
 
   renderer.resize();
   addEventListener("resize", () => renderer.resize());

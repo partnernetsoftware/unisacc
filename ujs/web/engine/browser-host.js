@@ -8,21 +8,25 @@ import { encodeInputSnapshot, INPUT_BYTES } from "./input.js";
 
 /**
  * @param {HTMLCanvasElement} canvas
- * @param {{ baseURL?: URL, prefer?: "webgpu" | "webgl" }} [opts]
+ * @param {{ baseURL?: URL, prefer?: "auto" | "webgpu" | "webgl" }} [opts]
  * @returns {Promise<import("./host-abi.js").HostAbi & { backend: string, version: number }>}
  */
 export async function createBrowserHost(canvas, opts = {}) {
   const baseURL = opts.baseURL || new URL(".", import.meta.url);
-  // Default webgl for reliable demos; webgpu when explicitly preferred and healthy.
-  const prefer = opts.prefer || "webgl";
+  // auto: WebGPU if available & healthy, else WebGL (both are first-class).
+  const prefer = opts.prefer || "auto";
 
   let renderer = null;
-  if (prefer === "webgpu") {
+  const tryGpu = prefer === "auto" || prefer === "webgpu";
+  if (tryGpu) {
     try {
       renderer = await createWebGPURenderer(canvas);
     } catch (e) {
       console.warn("[uxe-host] webgpu init failed", e);
       renderer = null;
+    }
+    if (!renderer && prefer === "webgpu") {
+      console.warn("[uxe-host] prefer=webgpu unavailable; falling back to webgl");
     }
   }
   if (!renderer) {

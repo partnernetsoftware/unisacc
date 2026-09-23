@@ -16,7 +16,7 @@ Shell = 引擎核（经典调度） + UJS 脚本（玩法/决策） + Host ABI �
 | Host | `browser-host.js` | 可换 Native Host |
 | GPU 提交 | `packet.js` 二进制 **UXEP** → `host_gpu_submit` | buffer 驻留 |
 | 输入 | `input.js` 二进制 **UXIN** | 手柄/指针后加 |
-| GPU 后端 | WebGL 保底；**WebGPU 实例绘制已接**（不可用则回退） | 计算着色器后加 |
+| GPU 后端 | **WebGL + WebGPU 自适应**（`prefer: auto\|webgl\|webgpu`） | compute / 驻留 buffer |
 | 胶水 | `demo/host.js` | 仅 canvas + HUD + `createBrowserHost` |
 
 ## 架构（已实现）
@@ -26,7 +26,7 @@ demo/host.js          # 胶水
       ↓
 core-asteroid.js      # 核：UJS 步进 + encodeRenderPacket
       ↓ host_*
-browser-host.js       # 浏览器宿主（prefer webgpu→webgl）
+browser-host.js       # 浏览器宿主（auto: WebGPU→WebGL）
       ↓ decode UXEP → WebGPU 或 WebGL
 renderer-webgpu.js | renderer-webgl.js
 ```
@@ -41,7 +41,7 @@ renderer-webgpu.js | renderer-webgl.js
 | `host-abi.js` | ABI 版本常量 / typedef |
 | `packet.js` | UXEP encode/decode |
 | `input.js` | UXIN encode/decode |
-| `browser-host.js` | 浏览器实现 `host_*`（prefer webgpu→webgl） |
+| `browser-host.js` | 浏览器 `host_*`；**WebGL / WebGPU 自适应** |
 | `core-asteroid.js` | Asteroid 核（不知 canvas） |
 | `math.js` `scene.js` | 矩阵 / InstanceCloud |
 | `renderer-webgl.js` | WebGL1 实例化后端 |
@@ -54,7 +54,8 @@ renderer-webgpu.js | renderer-webgl.js
 
 ```bash
 cd ujs && npm run demo
-# http://127.0.0.1:8765/engine/demo/
+# http://127.0.0.1:8765/engine/demo/           # prefer=auto
+# …/engine/demo/?gpu=webgl | ?gpu=webgpu       # 强制
 
 npm run test:uxe:packet   # alarm 20
 npm run test:uxe:input    # alarm 15
