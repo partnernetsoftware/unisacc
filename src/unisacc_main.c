@@ -1836,7 +1836,10 @@ int eatstar(void);
 #endif
 
 int bk_build(char *t, int n, char *target);
-int bkfd;                                            /* -o, else stdout */
+int bkfd = 1;    /* where the image goes: -o, else stdout.  DEFINED here,
+                    once: two definitions of one global become two .bss
+                    lines, and the two back ends disagree about which of the
+                    two addresses the name means. */
 long bk_run(char *t, int n, long argc, long argv);   /* -run [S-9] */
 char *runargv[256];
 int symlea(int i, int t, char *reg);

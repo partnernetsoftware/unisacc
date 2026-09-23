@@ -97,8 +97,15 @@ long bkdlen;                        /* the data's full length, zeros included */
 int bkstored;                       /* how much of bkdata is in use */
 long bkz_at[BK_MAXZ]; long bkz_len[BK_MAXZ]; int bknz;
 long bkd_at[BK_MAXZ]; int bkd_off[BK_MAXZ]; int bkd_len[BK_MAXZ]; int bknd;
-int bkds_id[BK_MAXZ]; int bknds;     /* data symbols, in allocation = address order */
+int bkds_id[BK_MAXZ]; int bknds;     /* data symbols, each one ONCE */
 int bk_dsym(int id) {
+    int i;
+    /* lower.zero_last reads a DICT of symbols, so a name appears once there
+       however many times the tape names it.  A tentative definition that is
+       later completed reaches this twice; the second registration used to
+       make bk_repack rewrite the same symbol's address twice, the second
+       time from an address it had already moved. */
+    i = 0; while (i < bknds) { if (bkds_id[i] == id) return 0; i = i + 1; }
     if (bknds >= BK_MAXZ) { __write(2, "back end: too many data symbols\n", 32); __exit(1); }
     bkds_id[bknds] = id; bknds = bknds + 1; return 0;
 }
@@ -132,17 +139,30 @@ int bkb_nz[BK_MAXZ]; int bkb_r0[BK_MAXZ]; int bkb_r1[BK_MAXZ]; int bknb;
 long bkt_at[BK_MAXZ]; int bkt_off[BK_MAXZ]; int bkt_len[BK_MAXZ];
 int bk_repack(void) {
     int i; int b; int a; int r; int pass; int nt; long o; long cur; long k; long at;
+    /* The blob starts are the symbols' offsets, SORTED and deduplicated --
+       lower.zero_last says `sorted(set(...))` and means it.  A symbol is
+       allocated in declaration order, which is address order only until a
+       later declaration lands earlier; on a program this size it does (the
+       first descent in unisacc's own 1874 data symbols is at 282), and the
+       walk that used to assume the order ran off the end of bkb_s. */
     bknb = 0;
-    o = 0 - 1; if (bknds > 0) o = bksym_addr[bkds_id[0]] - BK_DATA_BASE;
-    if (o != 0) { bkb_s[0] = 0; bknb = 1; }
     i = 0;
     while (i < bknds) {
         o = bksym_addr[bkds_id[i]] - BK_DATA_BASE;
-        if (bknb == 0 || bkb_s[bknb - 1] != o) {
+        b = bknb;                           /* insertion sort: nearly sorted */
+        while (b > 0 && bkb_s[b - 1] > o) b = b - 1;
+        if (b == 0 || bkb_s[b - 1] != o) {  /* a repeat is not a new blob */
             if (bknb >= BK_MAXZ) { __write(2, "back end: too many blobs\n", 25); __exit(1); }
-            bkb_s[bknb] = o; bknb = bknb + 1;
+            k = bknb;
+            while (k > b) { bkb_s[k] = bkb_s[k - 1]; k = k - 1; }
+            bkb_s[b] = o; bknb = bknb + 1;
         }
         i = i + 1;
+    }
+    if (bknb == 0 || bkb_s[0] != 0) {       /* the bytes before the first one */
+        b = bknb;
+        while (b > 0) { bkb_s[b] = bkb_s[b - 1]; b = b - 1; }
+        bkb_s[0] = 0; bknb = bknb + 1;
     }
     b = 0; a = 0;
     while (b < bknb) {
@@ -189,10 +209,21 @@ int bk_repack(void) {
         pass = pass - 1;
     }
     bk_zeros(cur - bkdlen);
-    i = 0; b = 0;
+    /* bkb_s is sorted, and the symbols are not, so each one is looked up --
+       a binary search, because 1874 symbols against 1874 blobs is a walk
+       long enough to notice. */
+    i = 0;
     while (i < bknds) {
+        int lo; int hi;
         o = bksym_addr[bkds_id[i]] - BK_DATA_BASE;
-        while (bkb_s[b] != o) b = b + 1;
+        lo = 0; hi = bknb - 1; b = 0 - 1;
+        while (lo <= hi) {
+            int mid;
+            mid = lo + (hi - lo) / 2;
+            if (bkb_s[mid] == o) { b = mid; lo = hi + 1; }
+            else { if (bkb_s[mid] < o) lo = mid + 1; else hi = mid - 1; }
+        }
+        if (b < 0) { __write(2, "back end: lost a data symbol\n", 29); __exit(1); }
         bksym_addr[bkds_id[i]] = BK_DATA_BASE + bkb_new[b];
         i = i + 1;
     }
@@ -1788,7 +1819,6 @@ int sha_final(char *out) {            /* 32 bytes */
     return 0;
 }
 
-int bkfd = 1;                       /* where the image goes: -o, else stdout */
 int wflush(void) { if (bkwn) __write(bkfd, bkwb, bkwn); bkwn = 0; return 0; }
 /* while signing, every byte written also goes through SHA-256, and each
    4 KB page's digest is kept: the signature is the last thing in the file,
