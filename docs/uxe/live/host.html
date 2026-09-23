@@ -10,22 +10,26 @@
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg);
       font-family: "Segoe UI", ui-sans-serif, system-ui, sans-serif; }
-    main { max-width: 720px; margin: 0 auto; padding: 20px 16px 32px; }
+    main { max-width: 880px; margin: 0 auto; padding: 20px 16px 32px; }
     .brand { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--acc); }
     h1 { font-size: 28px; margin: 6px 0 8px; font-weight: 650; }
-    .lead { color: var(--muted); font-size: 14px; margin: 0 0 16px; }
-    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
-    input, button {
+    .lead { color: var(--muted); font-size: 14px; margin: 0 0 16px; line-height: 1.45; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
+    label { font-size: 12px; color: var(--muted); letter-spacing: .04em; }
+    input, button, select {
       border: 1px solid rgba(130,150,190,.35); border-radius: 8px;
       background: rgba(14,18,30,.85); color: var(--fg); padding: 10px 12px; font-size: 14px;
     }
     input { flex: 1; min-width: 120px; }
+    select { min-width: 7.5rem; }
     button { cursor: pointer; background: rgba(30,50,70,.95); }
     button:disabled { opacity: .45; }
-    canvas, video {
+    canvas {
       width: 100%; aspect-ratio: 16/9; border-radius: 12px;
       border: 1px solid rgba(130,150,190,.28); background: #000;
+      image-rendering: auto;
     }
+    #meta { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
     #log { margin-top: 12px; font-size: 12px; color: var(--muted); white-space: pre-wrap; }
     a { color: var(--acc); }
   </style>
@@ -34,12 +38,43 @@
   <main>
     <p class="brand">UXE</p>
     <h1>假直播源</h1>
-    <p class="lead">画布动画 → WebRTC。观众打开 <a id="watchLink" href="./">index.html</a> 同房间即可。</p>
+    <p class="lead">
+      清晰度主要由<strong>画布像素</strong>决定（不是 CSS 显示大小）；WebRTC 还会按码率再压。
+      观众：<a id="watchLink" href="./">同房间观看页</a>。
+    </p>
     <div class="row">
-      <input id="room" value="demo" spellcheck="false" />
+      <input id="room" value="demo" spellcheck="false" placeholder="房间名" />
       <button id="go">开播</button>
     </div>
-    <canvas id="c" width="960" height="540"></canvas>
+    <div class="row">
+      <label>分辨率
+        <select id="res">
+          <option value="640x360">360p</option>
+          <option value="960x540">540p</option>
+          <option value="1280x720" selected>720p</option>
+          <option value="1920x1080">1080p</option>
+        </select>
+      </label>
+      <label>帧率
+        <select id="fps">
+          <option value="15">15</option>
+          <option value="24">24</option>
+          <option value="30" selected>30</option>
+          <option value="60">60</option>
+        </select>
+      </label>
+      <label>目标码率
+        <select id="br">
+          <option value="800000">0.8 Mbps</option>
+          <option value="1500000">1.5 Mbps</option>
+          <option value="2500000" selected>2.5 Mbps</option>
+          <option value="4500000">4.5 Mbps</option>
+          <option value="8000000">8 Mbps</option>
+        </select>
+      </label>
+    </div>
+    <canvas id="c" width="1280" height="720"></canvas>
+    <p id="meta"></p>
     <div id="log"></div>
   </main>
   <script type="module">
@@ -48,47 +83,81 @@
 
     const roomEl = document.getElementById("room");
     const goBtn = document.getElementById("go");
+    const resEl = document.getElementById("res");
+    const fpsEl = document.getElementById("fps");
+    const brEl = document.getElementById("br");
+    const metaEl = document.getElementById("meta");
     const canvas = document.getElementById("c");
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: false });
     const logEl = document.getElementById("log");
     const watchLink = document.getElementById("watchLink");
     const q = new URLSearchParams(location.search);
     if (q.get("room")) roomEl.value = q.get("room");
+    if (q.get("res")) resEl.value = q.get("res");
+    if (q.get("fps")) fpsEl.value = q.get("fps");
+    if (q.get("br")) brEl.value = q.get("br");
 
-    let ws, selfId, localStream, raf;
+    let ws, selfId, localStream, raf, captureFps = 30, targetBitrate = 2500000;
     /** @type {Map<string, RTCPeerConnection>} */
     const pcs = new Map();
 
     function log(...a) {
-      logEl.textContent = a.map(String).join(" ") + "\n" + logEl.textContent.slice(0, 800);
+      logEl.textContent = a.map(String).join(" ") + "\n" + logEl.textContent.slice(0, 900);
     }
 
     function send(obj) {
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
     }
 
+    function applyCanvasSize() {
+      const [w, h] = resEl.value.split("x").map(Number);
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      captureFps = Number(fpsEl.value) || 30;
+      targetBitrate = Number(brEl.value) || 2500000;
+      metaEl.textContent =
+        `推流 ${w}×${h} @ ${captureFps}fps · 目标 ${(targetBitrate / 1e6).toFixed(1)} Mbps` +
+        `（显示区会缩放，以像素为准）`;
+      return { w, h };
+    }
+
     function paintFake(t) {
       const w = canvas.width, h = canvas.height;
       ctx.fillStyle = "#0a1020";
       ctx.fillRect(0, 0, w, h);
-      const x = (Math.sin(t / 600) * 0.5 + 0.5) * (w - 160);
-      const y = (Math.cos(t / 900) * 0.5 + 0.5) * (h - 120);
+      const bw = Math.max(120, w * 0.12);
+      const bh = Math.max(70, h * 0.12);
+      const x = (Math.sin(t / 600) * 0.5 + 0.5) * (w - bw);
+      const y = (Math.cos(t / 900) * 0.5 + 0.5) * (h - bh);
       ctx.fillStyle = "#7ec8ff";
-      ctx.fillRect(x, y, 140, 90);
+      ctx.fillRect(x, y, bw, bh);
+      // fine grid so soft encoding is obvious
+      ctx.strokeStyle = "rgba(126,200,255,.25)";
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx < w; gx += 40) {
+        ctx.beginPath(); ctx.moveTo(gx + 0.5, 0); ctx.lineTo(gx + 0.5, h); ctx.stroke();
+      }
+      for (let gy = 0; gy < h; gy += 40) {
+        ctx.beginPath(); ctx.moveTo(0, gy + 0.5); ctx.lineTo(w, gy + 0.5); ctx.stroke();
+      }
+      const fs = Math.max(22, Math.round(w / 36));
       ctx.fillStyle = "#d5dbe8";
-      ctx.font = "28px ui-sans-serif, system-ui";
-      ctx.fillText("UXE fake live", 28, 48);
-      ctx.font = "18px ui-monospace, monospace";
-      ctx.fillText(new Date(t).toISOString().slice(11, 23), 28, 84);
-      ctx.fillText("room " + roomEl.value, 28, 112);
+      ctx.font = `${fs}px ui-sans-serif, system-ui`;
+      ctx.fillText("UXE fake live", 28, fs + 16);
+      ctx.font = `${Math.max(14, Math.round(fs * 0.65))}px ui-monospace, monospace`;
+      ctx.fillText(new Date(t).toISOString().slice(11, 23), 28, fs * 2 + 20);
+      ctx.fillText(`${w}×${h} · ${captureFps}fps · room ${roomEl.value}`, 28, fs * 3 + 20);
       raf = requestAnimationFrame(paintFake);
     }
 
     function startFakeStream() {
+      applyCanvasSize();
       if (raf) cancelAnimationFrame(raf);
       raf = requestAnimationFrame(paintFake);
-      localStream = canvas.captureStream(20);
-      // silent audio keeps some mobile pipelines happier
+      if (localStream) localStream.getTracks().forEach((t) => t.stop());
+      localStream = canvas.captureStream(captureFps);
       const ac = new AudioContext();
       const osc = ac.createOscillator();
       const dest = ac.createMediaStreamDestination();
@@ -100,6 +169,27 @@
       return localStream;
     }
 
+    async function tuneSender(pc) {
+      for (const sender of pc.getSenders()) {
+        if (sender.track?.kind !== "video") continue;
+        const params = sender.getParameters();
+        if (!params.encodings || !params.encodings.length) {
+          params.encodings = [{}];
+        }
+        for (const enc of params.encodings) {
+          enc.maxBitrate = targetBitrate;
+          enc.scaleResolutionDownBy = 1;
+          enc.maxFramerate = captureFps;
+        }
+        try {
+          await sender.setParameters(params);
+          log("encode", `${canvas.width}x${canvas.height}`, `${(targetBitrate / 1e6).toFixed(1)}Mb`, `${captureFps}fps`);
+        } catch (e) {
+          log("setParameters", e.message);
+        }
+      }
+    }
+
     async function callViewer(peerId) {
       if (!localStream || pcs.has(peerId) || peerId === selfId) return;
       const pc = new RTCPeerConnection(ICE);
@@ -109,9 +199,13 @@
         if (!ev.candidate) return;
         send({ type: "signal", to: peerId, payload: { kind: "ice", candidate: ev.candidate } });
       };
-      pc.onconnectionstatechange = () => log("pc", peerId, pc.connectionState);
+      pc.onconnectionstatechange = () => {
+        log("pc", peerId, pc.connectionState);
+        if (pc.connectionState === "connected") tuneSender(pc);
+      };
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      await tuneSender(pc);
       send({ type: "signal", to: peerId, payload: { kind: "offer", sdp: pc.localDescription } });
       log("offer →", peerId);
     }
@@ -121,6 +215,7 @@
       if (!pc || !payload) return;
       if (payload.kind === "answer" && payload.sdp) {
         await pc.setRemoteDescription(payload.sdp);
+        await tuneSender(pc);
         log("answer ←", from);
       } else if (payload.kind === "ice" && payload.candidate) {
         try { await pc.addIceCandidate(payload.candidate); } catch (e) { log("ice", e.message); }
@@ -130,9 +225,18 @@
     function connect() {
       const room = (roomEl.value || "demo").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64) || "demo";
       roomEl.value = room;
-      watchLink.href = `./?room=${encodeURIComponent(room)}`;
-      history.replaceState(null, "", `?room=${encodeURIComponent(room)}`);
+      const qs = new URLSearchParams({
+        room,
+        res: resEl.value,
+        fps: fpsEl.value,
+        br: brEl.value,
+      });
+      watchLink.href = `./?room=${encodeURIComponent(room)}&v=20260923q`;
+      history.replaceState(null, "", `?${qs}`);
       goBtn.disabled = true;
+      resEl.disabled = true;
+      fpsEl.disabled = true;
+      brEl.disabled = true;
       ws?.close();
       pcs.forEach((pc) => pc.close());
       pcs.clear();
@@ -140,10 +244,16 @@
 
       ws = new WebSocket(SIGNAL + room);
       ws.onopen = () => {
-        log("ws open", room);
+        log("ws open", room, resEl.value, fpsEl.value + "fps");
         send({ type: "join", role: "host", name: "fake" });
       };
-      ws.onclose = () => { log("ws close"); goBtn.disabled = false; };
+      ws.onclose = () => {
+        log("ws close");
+        goBtn.disabled = false;
+        resEl.disabled = false;
+        fpsEl.disabled = false;
+        brEl.disabled = false;
+      };
       ws.onerror = () => log("ws error");
       ws.onmessage = async (ev) => {
         let msg; try { msg = JSON.parse(ev.data); } catch { return; }
@@ -166,6 +276,10 @@
       };
     }
 
+    applyCanvasSize();
+    resEl.onchange = () => { if (!goBtn.disabled) applyCanvasSize(); };
+    fpsEl.onchange = () => { if (!goBtn.disabled) applyCanvasSize(); };
+    brEl.onchange = () => { if (!goBtn.disabled) applyCanvasSize(); };
     goBtn.onclick = connect;
     if (q.get("auto") === "1") connect();
   </script>
