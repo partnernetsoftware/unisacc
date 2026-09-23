@@ -13,6 +13,18 @@ Browser Host | Native Host
 WebGPU 和/或 WebGL（浏览器自适应）| Vulkan/Metal/D3D12/SDL …
 ```
 
+## 开发 vs 发布（交付面）
+
+| | 开发 | 发布（目标） |
+|---|---|---|
+| 源码 | `engine/*.js` 分文件 | **不**把拆分源当交付物 |
+| 页面 JS | `demo/host.js` 多模块 | **一个** `ship/uxe-demo.js`（可再内嵌进 HTML） |
+| 运行时 | 同左 | `ujs_full.wasm` +（远期）**游戏核也进 wasm** |
+| 资源 | `sim.ujs` 可外置 | 可外置或打进 wasm 资源段 |
+
+今日：`npm run ship:engine` → `web/engine/ship/`（html + 单 bundle）。  
+明日：胶水再缩；`core-asteroid` + 调度进单 wasm，页面只剩 boot 几行。
+
 ## 浏览器 GPU 后端（一等公民 · 自适应）
 
 宿主必须同时具备两套主流 Web 图形接口，按能力选择，**不是二选一放弃**：

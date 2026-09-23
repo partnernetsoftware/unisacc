@@ -58,7 +58,8 @@ WASM 核心  →  极薄 JS 绑定  →  WebGPU/WebGL  →  GPU
 
 - v0：闭合场景 API + WebGL 绘制 + WebGPU 探测/驻留 stub
 - **Host ABI v0**（`HOST_ABI.md`）：`time/input/frame/gpu_submit/asset_read/log`；演示经 `browser-host` + `core-asteroid`（核不知 canvas）
-- GPU：UXEP → **WebGL / WebGPU 自适应**（`prefer: auto`；`?gpu=` 可强制）；输入 UXIN
+- GPU：UXEP → **WebGL / WebGPU 自适应**；输入 UXIN
+- **交付**：开发分源；发布 `ship:engine` 单 JS bundle；远期核+逻辑进单 wasm（html 只留胶水）
 - 发版：`--with-demos` 含 `web/engine/`
 - 验收：`test:uxe:packet` · `test:uxe:input` · `test:uxe`（均 alarm）
 

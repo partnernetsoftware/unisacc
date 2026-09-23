@@ -3,6 +3,12 @@
 > **不是** Three 移植。按 UJS / UNISA 思路：闭合契约、薄胶水、玩法可走 `wasm_run`、GPU 经 Host ABI。  
 > 设计真源：[`HOST_ABI.md`](HOST_ABI.md)。本文与目录文件一一对应；过时即改。
 
+## 开发 vs 发布
+
+- **开发**：分文件（本目录）；`/engine/demo/`
+- **发布**：`npm run ship:engine` → `/engine/ship/`（**一个** `uxe-demo.js` + 薄 html + wasm）
+- **远期**：核进单 wasm；html 内联极薄 boot；拆分 `.js` 不进用户包
+
 ## 命题
 
 ```

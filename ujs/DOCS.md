@@ -25,6 +25,7 @@
 自测（一律带 wall clock）：
 
 ```bash
+npm run ship:engine           # → /engine/ship/ 单 bundle（需先 web-build）
 npm run test:uxe:packet     # alarm 20 → UXEP encode/decode
 npm run test:uxe:input      # alarm 15 → UXIN encode/decode
 npm run test:uxe            # alarm 55 → Chrome CDP /engine/demo
