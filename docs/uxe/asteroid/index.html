@@ -1063,19 +1063,32 @@ function decodeRenderPacket(raw) {
 
 // web/engine/input.js
 var INPUT_MAGIC = 1313429589;
-var INPUT_VERSION = 1;
-var INPUT_BYTES = 20;
+var INPUT_VERSION = 2;
+var INPUT_BYTES_V1 = 20;
+var INPUT_BYTES = 36;
+var BTN_LEFT = 1;
+var BTN_RIGHT = 2;
+var BTN_MIDDLE = 4;
+var FLAG_POINTER_IN = 1;
 function encodeInputSnapshot(snap, out) {
-  const buf = out || new ArrayBuffer(INPUT_BYTES);
-  if (buf.byteLength < INPUT_BYTES) {
+  const want = INPUT_BYTES;
+  const buf = out || new ArrayBuffer(want);
+  if (buf.byteLength < INPUT_BYTES_V1) {
     throw new Error("input buffer too small " + buf.byteLength);
   }
   const dv = new DataView(buf);
+  const ver = buf.byteLength >= INPUT_BYTES ? INPUT_VERSION : 1;
   dv.setUint32(0, INPUT_MAGIC, true);
-  dv.setUint32(4, INPUT_VERSION, true);
+  dv.setUint32(4, ver, true);
   dv.setInt32(8, snap.ix | 0, true);
   dv.setInt32(12, snap.iy | 0, true);
-  dv.setUint32(16, snap.fire >>> 0, true);
+  dv.setUint32(16, snap.fire >>> 0 || 0, true);
+  if (ver >= 2) {
+    dv.setFloat32(20, Number(snap.mx) || 0, true);
+    dv.setFloat32(24, Number(snap.my) || 0, true);
+    dv.setUint32(28, snap.buttons >>> 0 || 0, true);
+    dv.setUint32(32, snap.flags >>> 0 || 0, true);
+  }
   return buf;
 }
 
@@ -1110,6 +1123,38 @@ async function createBrowserHost(canvas, opts = {}) {
   };
   addEventListener("keydown", onKey(true));
   addEventListener("keyup", onKey(false));
+  let mx = 0, my = 0, buttons = 0, flags = 0;
+  function syncPointerFromEvent(e) {
+    const r = canvas.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
+    const nx = (e.clientX - r.left) / r.width * 2 - 1;
+    const ny = -((e.clientY - r.top) / r.height * 2 - 1);
+    mx = Math.max(-1, Math.min(1, nx));
+    my = Math.max(-1, Math.min(1, ny));
+    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    flags = inside ? FLAG_POINTER_IN : 0;
+  }
+  canvas.addEventListener("pointermove", (e) => {
+    syncPointerFromEvent(e);
+  });
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture?.(e.pointerId);
+    syncPointerFromEvent(e);
+    if (e.button === 0) buttons |= BTN_LEFT;
+    if (e.button === 1) buttons |= BTN_MIDDLE;
+    if (e.button === 2) buttons |= BTN_RIGHT;
+    e.preventDefault();
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    syncPointerFromEvent(e);
+    if (e.button === 0) buttons &= ~BTN_LEFT;
+    if (e.button === 1) buttons &= ~BTN_MIDDLE;
+    if (e.button === 2) buttons &= ~BTN_RIGHT;
+  });
+  canvas.addEventListener("pointerleave", () => {
+    flags = 0;
+  });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
   function applyObjectPacket(packet) {
@@ -1147,32 +1192,33 @@ async function createBrowserHost(canvas, opts = {}) {
     host_time() {
       return performance.now();
     },
-    /**
-     * @param {ArrayBuffer|ArrayBufferView} [buf]
-     * @returns {object|number} object if no buf; byte length written if buf
-     */
     host_input_read(buf) {
       let ix = 0, iy = 0;
       if (keys.KeyA || keys.ArrowLeft) ix -= 1;
       if (keys.KeyD || keys.ArrowRight) ix += 1;
       if (keys.KeyS || keys.ArrowDown) iy += 1;
       if (keys.KeyW || keys.ArrowUp) iy -= 1;
+      const fireKey = keys.Space ? 1 : 0;
+      const fireBtn = buttons & BTN_LEFT ? 1 : 0;
       const snap = {
         ix,
         iy,
-        fire: keys.Space ? 1 : 0,
+        fire: fireKey || fireBtn,
+        mx,
+        my,
+        buttons,
+        flags,
         keys: { ...keys }
       };
       if (buf != null) {
         const ab = buf instanceof ArrayBuffer ? buf : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
         encodeInputSnapshot(snap, ab);
-        return INPUT_BYTES;
+        return Math.min(ab.byteLength, INPUT_BYTES) >= INPUT_BYTES ? INPUT_BYTES : ab.byteLength >= 20 ? 20 : 0;
       }
       return snap;
     },
     host_frame_begin() {
     },
-    /** Prefer ArrayBuffer (wasm-ready); object form kept for debug only. */
     host_gpu_submit(packetOrBuf) {
       let packet = packetOrBuf;
       if (packetOrBuf instanceof ArrayBuffer || ArrayBuffer.isView(packetOrBuf)) {

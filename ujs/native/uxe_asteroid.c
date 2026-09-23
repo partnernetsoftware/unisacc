@@ -36,7 +36,8 @@ IMP __attribute__((import_name("eng_sim_step")))
 extern i32 eng_sim_step(u32 state_ptr, i32 ix, i32 iy, f64 dt);
 
 enum { N = 480 };
-enum { INPUT_BYTES = 20 };
+enum { INPUT_BYTES = 36 };
+
 enum { PACKET_MAGIC = 0x50455855u };
 
 typedef struct {

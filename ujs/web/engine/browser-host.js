@@ -1,19 +1,20 @@
-/** Browser implementation of Host ABI v0. */
+/** Browser implementation of Host ABI v0 (+ UXIN v2 pointer). */
 import { createWebGLRenderer } from "./renderer-webgl.js";
 import { createWebGPURenderer } from "./renderer-webgpu.js";
 import { Scene, PerspectiveCamera } from "./scene.js";
 import { HOST_ABI_VERSION } from "./host-abi.js";
 import { decodeRenderPacket } from "./packet.js";
-import { encodeInputSnapshot, INPUT_BYTES } from "./input.js";
+import {
+  encodeInputSnapshot, INPUT_BYTES,
+  BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, FLAG_POINTER_IN,
+} from "./input.js";
 
 /**
  * @param {HTMLCanvasElement} canvas
  * @param {{ baseURL?: URL, prefer?: "auto" | "webgpu" | "webgl" }} [opts]
- * @returns {Promise<import("./host-abi.js").HostAbi & { backend: string, version: number }>}
  */
 export async function createBrowserHost(canvas, opts = {}) {
   const baseURL = opts.baseURL || new URL(".", import.meta.url);
-  // auto: WebGPU if available & healthy, else WebGL (both are first-class).
   const prefer = opts.prefer || "auto";
 
   let renderer = null;
@@ -45,6 +46,56 @@ export async function createBrowserHost(canvas, opts = {}) {
   };
   addEventListener("keydown", onKey(true));
   addEventListener("keyup", onKey(false));
+
+  let mx = 0, my = 0, buttons = 0, flags = 0;
+  let movAccX = 0, movAccY = 0;
+
+  function syncPointerFromEvent(e) {
+    const r = canvas.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return;
+    const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+    const ny = -(((e.clientY - r.top) / r.height) * 2 - 1);
+    mx = Math.max(-1, Math.min(1, nx));
+    my = Math.max(-1, Math.min(1, ny));
+    const inside =
+      e.clientX >= r.left && e.clientX <= r.right &&
+      e.clientY >= r.top && e.clientY <= r.bottom;
+    flags = inside ? FLAG_POINTER_IN : 0;
+  }
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (document.pointerLockElement === canvas) {
+      movAccX += e.movementX || 0;
+      movAccY += e.movementY || 0;
+      flags = FLAG_POINTER_IN;
+      return;
+    }
+    syncPointerFromEvent(e);
+  });
+  canvas.addEventListener("pointerdown", (e) => {
+    if (document.pointerLockElement !== canvas) {
+      canvas.requestPointerLock?.();
+    }
+    canvas.setPointerCapture?.(e.pointerId);
+    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
+    if (e.button === 0) buttons |= BTN_LEFT;
+    if (e.button === 1) buttons |= BTN_MIDDLE;
+    if (e.button === 2) buttons |= BTN_RIGHT;
+    e.preventDefault();
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
+    if (e.button === 0) buttons &= ~BTN_LEFT;
+    if (e.button === 1) buttons &= ~BTN_MIDDLE;
+    if (e.button === 2) buttons &= ~BTN_RIGHT;
+  });
+  canvas.addEventListener("pointerleave", () => {
+    if (document.pointerLockElement !== canvas) flags = 0;
+  });
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  document.addEventListener("pointerlockchange", () => {
+    if (document.pointerLockElement === canvas) flags = FLAG_POINTER_IN;
+  });
 
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
@@ -88,20 +139,27 @@ export async function createBrowserHost(canvas, opts = {}) {
       return performance.now();
     },
 
-    /**
-     * @param {ArrayBuffer|ArrayBufferView} [buf]
-     * @returns {object|number} object if no buf; byte length written if buf
-     */
     host_input_read(buf) {
       let ix = 0, iy = 0;
       if (keys.KeyA || keys.ArrowLeft) ix -= 1;
       if (keys.KeyD || keys.ArrowRight) ix += 1;
-      // Chase cam sits above looking forward: raw +iy felt inverted on screen.
       if (keys.KeyS || keys.ArrowDown) iy += 1;
       if (keys.KeyW || keys.ArrowUp) iy -= 1;
+      const fireKey = keys.Space ? 1 : 0;
+      const fireBtn = (buttons & BTN_LEFT) ? 1 : 0;
+      let outMx = mx, outMy = my;
+      let outFlags = flags;
+      if (keys.KeyF) outFlags |= 2; // FLAG_SUICIDE
+      if (document.pointerLockElement === canvas) {
+        outMx = Math.max(-1, Math.min(1, movAccX / 48));
+        outMy = Math.max(-1, Math.min(1, -movAccY / 48));
+        movAccX = 0;
+        movAccY = 0;
+      }
       const snap = {
         ix, iy,
-        fire: keys.Space ? 1 : 0,
+        fire: fireKey || fireBtn,
+        mx: outMx, my: outMy, buttons, flags: outFlags,
         keys: { ...keys },
       };
       if (buf != null) {
@@ -109,14 +167,14 @@ export async function createBrowserHost(canvas, opts = {}) {
           ? buf
           : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
         encodeInputSnapshot(snap, ab);
-        return INPUT_BYTES;
+        return ab.byteLength >= INPUT_BYTES ? INPUT_BYTES
+          : (ab.byteLength >= 20 ? 20 : 0);
       }
       return snap;
     },
 
     host_frame_begin() {},
 
-    /** Prefer ArrayBuffer (wasm-ready); object form kept for debug only. */
     host_gpu_submit(packetOrBuf) {
       let packet = packetOrBuf;
       if (packetOrBuf instanceof ArrayBuffer || ArrayBuffer.isView(packetOrBuf)) {

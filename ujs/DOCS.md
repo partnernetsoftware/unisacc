@@ -30,26 +30,25 @@
 
 | 读什么 | 何时 |
 |---|---|
-| [`web/engine/README.md`](web/engine/README.md) | **UXE** 总览、demo vs ship、文件表 |
-| [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | Host ABI 契约（核不知浏览器） |
+| [`web/engine/README.md`](web/engine/README.md) | UXE 总览、demo vs ship、文件表 |
+| [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | **Host API 真源**（符号 · UXEP/UXIN · 扩展 · `host_llm` 规划） |
+| [`web/engine/PLATFORM.md`](web/engine/PLATFORM.md) | 游戏平台方向：多核 ship + **用户自带 LLM API** |
 | [`web/game/README.md`](web/game/README.md) | Asteroid + Three **对照**（非主线） |
 | [`web/game/exp/README.md`](web/game/exp/README.md) | 同仿真、裸 WebGL 实验 |
-| [`FUTURE.md`](FUTURE.md) | P0–P0.4；平台靠能力+demo/移植长出来；A–D |
+| [`FUTURE.md`](FUTURE.md) | P0–P0.4；H 档；实践车；A–D |
 
 **交付面（已验证）**
 
 ```
 /engine/ship/                 # 本地开发对照
   index.html + asteroid.wasm + gameEngine.wasm
-  monopoly/                   # Monopoly ship-js + gameEngine.wasm
 
 /docs/                        # GitHub Pages（外网测）
-  index.html                  # 游戏索引
+  index.html                  # 游戏索引（当前仅 Asteroid）
   uxe/asteroid/               # Asteroid ship 三件套
-  uxe/monopoly/               # Monopoly ship-js
 ```
 
-`npm run ship:engine` 同步到 `docs/uxe/{asteroid,monopoly}/`。Pages 源选 **`/docs`**。
+`npm run ship:engine` 同步 asteroid → `docs/uxe/asteroid/`。大富翁已归档，不进索引。Pages 源选 **`/docs`**。
 
 开发对照：`/engine/demo/`（分源 + 页内 compiler）。
 
@@ -106,11 +105,13 @@ ujs/
 │   ├── BUILD.json              # 指纹（可入库）
 │   ├── index.html …            # playground
 │   ├── engine/                 # UXE
-│   │   ├── HOST_ABI.md         # 契约真源
+│   │   ├── HOST_ABI.md         # Host API 真源
+│   │   ├── PLATFORM.md         # 平台方向 · BYO LLM
 │   │   ├── browser-host.js …   # 分源实现
-│   │   ├── core-asteroid.js    # demo 用 JS 核
-│   │   ├── demo/               # 源码测试页
-│   │   └── ship/               # 发布面（生成物）
+│   │   ├── core-asteroid.js    # demo JS 核
+│   │   ├── core-monopoly.js    # demo / ship-js 核
+│   │   ├── demo/               # 源码测试页（含 monopoly/）
+│   │   └── ship/               # 发布面（asteroid + monopoly/）
 │   └── game/                   # Three 对照 + exp/
 ├── native/
 │   ├── ujs_vm.c                # → ujs_full / gameEngine
@@ -123,8 +124,9 @@ ujs/
 
 ## 文档对齐约定
 
-1. **规格**只认 `prd.md`；UXE / Host ABI **不**偷偷改 `wasm_run` 契约。
-2. **设计真源**：`web/engine/HOST_ABI.md` + 同目录实现；README 只摘要。
+1. **规格**只认 `prd.md`；UXE / Host API **不**偷偷改 `wasm_run` 契约。
+2. **Host 真源**：`web/engine/HOST_ABI.md`；平台叙事：`PLATFORM.md`；README 只摘要。
 3. 改 `host_*` / UXEP·UXIN / 交付面 → 同会话更新 HOST_ABI + engine README + DOCS/FUTURE + research 定性指针。
 4. 门禁以 `package.json` scripts 为准；文档里的 alarm 秒数须一致。
 5. **游戏 wasm 与引擎 wasm 不合包**：`{game}.wasm` ≠ `gameEngine.wasm`。
+6. **LLM**：密钥只在 Host/壳；规划符号见 HOST_ABI §7.1，禁止进核与 packet。

@@ -39,18 +39,16 @@ perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../../" node "$SHIP/bake-html.
 cp -f "$SHIP/index.html" "$SHIP/asteroid.wasm" "$SHIP/gameEngine.wasm" "$PAGES_AST/"
 perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" node "$SHIP/bake-html.mjs"
 
-# ——— Monopoly (ship-js for Pages) ———
-perl -e 'alarm 120; exec @ARGV' node "$SHIP/build-monopoly-pages.mjs"
+# ——— Monopoly：归档，不进 Pages 索引 / 不镜像 docs ———
+# 源码仍留在 demo/monopoly · ship/monopoly（本地可开）；Pages 只公开 asteroid。
+rm -rf "$DOCS/uxe/monopoly"
 
-# ——— Game index (always refresh) ———
-cp -f "$DOCS/index.html" "$DOCS/index.html" 2>/dev/null || true
-# index is authored in-repo; ensure .nojekyll
+# ——— Game index（已手写；确保 .nojekyll） ———
 touch "$DOCS/.nojekyll"
 
 echo "ship ok:"
 echo "  asteroid  $PAGES_AST"
-echo "  monopoly  $DOCS/uxe/monopoly"
 echo "  index     $DOCS/index.html"
+echo "  monopoly  archived (not on Pages)"
 echo "local asteroid: http://127.0.0.1:8765/engine/ship/"
-echo "local monopoly: http://127.0.0.1:8765/engine/ship/monopoly/"
 echo "pages root:     docs/ → GitHub Pages"

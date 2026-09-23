@@ -96,54 +96,81 @@ WASM 核心  →  极薄 JS 绑定  →  WebGPU/WebGL  →  GPU
 
 ## 平台怎么长出来（不谈变现）
 
-命题：**Host 能力逼近 Three 常用子集 → 做好游戏移植与 demo → 自然长成游戏平台。**  
-不先设计「谁付钱」；交付面与玩法密度到位，平台身份是结果不是 KPI。
+命题：**Host 能力加厚 + 多款可换核 ship +（可选）用户自带 LLM API** → 游戏平台。  
+契约：[HOST_ABI.md](web/engine/HOST_ABI.md) · 叙事：[PLATFORM.md](web/engine/PLATFORM.md)。
 
 ### 增长链
 
 ```
-加厚 Host/UXEP（对标 Three 能力）
+加厚 Host/UXEP（对标 Three 子集）
         ↓
-同一套 ship：html + {game}.wasm + gameEngine.wasm
+同一套 ship → docs/uxe/{game}/（Pages）
         ↓
-多款 demo / 移植（证明可换核、可换玩法）
+多款 demo / 移植（Asteroid · Monopoly · …）
         ↓
-别人按模板打自己的 {game}.wasm  →  平台
+host_llm（BYO Key）打开「带智能的玩法」而不代持密钥
+        ↓
+别人按模板打自己的 {game} → 平台
 ```
 
 ### 当下该堆的
 
 | 优先 | 内容 |
 |---|---|
-| **H2+** | 材质、多 mesh、点精灵、指针……按 P0.4 表继续 |
-| **第二款游戏** | **城市大富翁（单机）** · `demo/monopoly/` · 验证 Host 模板可复制 |
-| **移植** | 选小型 Three/经典小游戏，逻辑收进 UJS-1 + `{game}.wasm` |
-| **模板** | `ship:engine` 文档化：换 sim / 换核的最短路径 |
-| **A2** | host fn / 错误行号——写第二款玩法时会卡住 |
+| **下一款街机实践车** | 见下「候选」；用可玩性逼 Host，不先堆规则盘 |
+| **H3** | 指针 / 多键 / points（有游戏卡住再开） |
+| **host_llm 草案** | HOST_ABI §7.1；有玩法需要再落地 |
+| **模板** | 换 sim / 换核最短路径 |
+| **A2** | host fn / 错误行号 |
 
-### 实践车：三维城市大富翁（单机）
+### 实践车状态
 
-路径：`web/game/monopoly.ujs` + `engine/core-monopoly.js` + `engine/demo/monopoly/`。
+| 车 | 状态 | 教训 |
+|---|---|---|
+| **Asteroid** | Pages 上线 | 连续操作 + 即时反馈 → 可玩；Host MVP 够用 |
+| **城市大富翁** | **索引下架**（源码归档） | 回合制 + 弱反馈 + 多键别扭 → 可玩性低；不该当第二款门面 |
+| **下一款** | **无人机战场** demo 已通探针 | 用指针+街机手感逼 Host；再 ship / 上索引 |
+
+### 下一款：街机无人机战场
+
+路径：`web/game/drone.ujs` · `engine/core-drone.js` · `engine/demo/drone/`。
 
 | 已通 | 证据 |
 |---|---|
-| 16 格环盘 + BOX/OCTA 实例 | UXEP v3 clouds；`MESH_BOX=2` |
-| 掷骰/走格/买/跳过/租金/破产 | UJS sim；骰子在 Host（无 RNG） |
-| 人机对战 | 人空格掷/买 · A 跳过；AI 自动 |
-| 探针 | `npm run test:uxe:monopoly` · `test:uxe:monopoly:rules` |
+| UXIN v2 指针 | `mx/my/buttons`；CDP `mouseMoved` → `mx>0` |
+| 第一人称跟飞 + 瞄准锥射击 | demo；点击/空格开火 |
+| 无人验收 | `test:uxe:input` · `test:uxe:drone:rules` · `test:uxe:drone` |
 
-**本游戏卡住 Host 的真实缺口（驱动 H3+）**：
+原则：缺口进 HOST_ABI；探针必须能模拟指针，禁止只靠人工点鼠标验收。
 
-| 缺口 | Three 对照 | 落点 |
-|---|---|---|
-| 多键语义（买/跳过/建房） | `keydown` 多码 | UXIN reserved / action bits → **H3** |
-| 点选格子 / 轨道相机 | Raycaster + OrbitControls | 指针 + 相机模式 → **H3** |
-| 地块色带 / 牌面字 | 贴图或 CanvasTexture | map_id / 字形 → **H4** |
-| 掷骰音效 | Audio | `host_audio` → 后加 |
-| ship `{monopoly}.wasm` | 同 asteroid 模板 | **暂用 ship-js**（预编译 sim + 打包核 + gameEngine）；C 核后补 |
-| **GitHub Pages** | 外网测 ship | `docs/index.html` 游戏索引 + `docs/uxe/{asteroid,monopoly}/` |
+### 候选（备选）
 
-原则：缺口进 `HOST_ABI` / 本表，**不**为 Monopoly 特开旁路 API。
+| 候选 | 一句话 | 会撞到的 Host | 备注 |
+|---|---|---|---|
+| **★ 街机无人机战场** | 飞无人机作战：指针瞄 + 射击 | **UXIN v2 指针 ✓** · 姿态 · 稍后 audio | **demo 已通** · `demo/drone/` + CDP 探针 |
+| 光迹对决（Tron） | 方庭留死光迹 | 尾迹 BOX | 备选 |
+| 纵深冲刺 | 强制前进廊道躲障 | 与飞行偏近 | 可作飞行训练关 |
+| 点地塔防 | 点击放炮台 | **一上来就要指针** | 不如无人机可先键盘 |
+| 立体推箱 | Sokoban 3D | 多键 / 正交相机 | 慢热 |
+
+**现定下一刀：街机无人机战场（Arcade Drone Combat）。**
+
+范围（可做 / 先不做）：
+
+| 做 | 先不做 |
+|---|---|
+| 第三人称追逐无人机：俯仰/转向/油门（WASD）+ 射击 | 全仪表舱、真实气动、地景流式、ATC |
+| 简单战场：地面目标 / 敌机实例 + 分数 + 坠毁重开 | 完整兵棋、多人联机 |
+| 先键盘瞄准（机头方向开火）；**需要点选/自由看时再开 Host 指针** | 一上来就做完整鼠标 FPS 操控 |
+| UJS 管运动与碰撞；Host 管输入与画面 | 搬 Three 飞行控件 |
+
+现有 UXEP（camera + fog + lights + BOX/OCTA）**够开 demo**。  
+会倒逼的 Host：连续姿态手感 → 可能更细的输入轴；瞄准/点选 UI → **UXIN 指针（H3）**；临场感 → `host_audio`；以后简易小地图/准星贴图 → H4。
+
+### 归档：三维城市大富翁
+
+路径仍在：`web/game/monopoly.ujs` · `engine/core-monopoly.js` · `demo/monopoly/` · `ship/monopoly/`。  
+**不**进 `docs/` 索引；`ship:engine` **不再**镜像到 Pages。重做或拆件时再动。
 
 ### 仍不做（技术边界，不是商业话术）
 

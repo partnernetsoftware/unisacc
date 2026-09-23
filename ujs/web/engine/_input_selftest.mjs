@@ -3,23 +3,36 @@ import {
   decodeInputSnapshot,
   INPUT_MAGIC,
   INPUT_BYTES,
+  INPUT_BYTES_V1,
+  INPUT_VERSION,
 } from "./input.js";
 
-const snap = { ix: -1, iy: 1, fire: 1 };
+const snap = { ix: -1, iy: 1, fire: 1, mx: 0.5, my: -0.25, buttons: 1, flags: 1 };
 const buf = encodeInputSnapshot(snap);
 const dv = new DataView(buf);
-if (buf.byteLength !== INPUT_BYTES) throw new Error("size");
+if (buf.byteLength !== INPUT_BYTES) throw new Error("size " + buf.byteLength);
 if (dv.getUint32(0, true) !== INPUT_MAGIC) throw new Error("magic");
+if (dv.getUint32(4, true) !== INPUT_VERSION) throw new Error("ver");
 if (dv.getInt32(8, true) !== -1) throw new Error("ix");
 if (dv.getInt32(12, true) !== 1) throw new Error("iy");
 if (dv.getUint32(16, true) !== 1) throw new Error("fire");
+if (Math.abs(dv.getFloat32(20, true) - 0.5) > 1e-6) throw new Error("mx");
+if (Math.abs(dv.getFloat32(24, true) + 0.25) > 1e-6) throw new Error("my");
+if (dv.getUint32(28, true) !== 1) throw new Error("buttons");
+if (dv.getUint32(32, true) !== 1) throw new Error("flags");
 
 const out = decodeInputSnapshot(buf);
-if (out.ix !== -1 || out.iy !== 1 || out.fire !== 1) throw new Error("roundtrip");
+if (out.ix !== -1 || out.iy !== 1 || out.fire !== 1) throw new Error("roundtrip keys");
+if (Math.abs(out.mx - 0.5) > 1e-6 || Math.abs(out.my + 0.25) > 1e-6) throw new Error("roundtrip ptr");
+if (out.buttons !== 1 || out.flags !== 1 || out.version !== 2) throw new Error("roundtrip meta");
 
-const bigger = new ArrayBuffer(INPUT_BYTES + 8);
-encodeInputSnapshot({ ix: 0, iy: 0, fire: 0 }, bigger);
-const out2 = decodeInputSnapshot(bigger);
-if (out2.ix !== 0 || out2.fire !== 0) throw new Error("reserved");
+// v1 buffer still encodable / decodable
+const v1buf = new ArrayBuffer(INPUT_BYTES_V1);
+encodeInputSnapshot({ ix: 1, iy: 0, fire: 0 }, v1buf);
+const v1 = decodeInputSnapshot(v1buf);
+if (v1.version !== 1 || v1.ix !== 1 || v1.mx !== 0) throw new Error("v1 compat");
 
-console.log("OK_INPUT", { bytes: buf.byteLength, ix: out.ix, iy: out.iy, fire: out.fire });
+console.log("OK_INPUT", {
+  bytes: buf.byteLength, version: out.version,
+  ix: out.ix, mx: out.mx, buttons: out.buttons,
+});

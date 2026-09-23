@@ -53,12 +53,12 @@ console.log(r2.ok); // 5
 | URL | 角色 |
 |---|---|
 | `/` | playground |
-| **`/engine/demo/`** | UXE **源码测试**（分模块 + 页内 compiler） |
-| **`/engine/ship/`** | UXE **发布面**（html + `asteroid.wasm` + `gameEngine.wasm`） |
+| **`/engine/demo/`** | UXE asteroid 源码测试 |
+| **`/engine/ship/`** | asteroid 发布面 |
 | `/game/` | Three 对照 |
 | `/game/exp/` | 裸 WebGL 对照 |
 
-契约：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md)、[`web/engine/README.md`](web/engine/README.md)、[`DOCS.md`](DOCS.md)。
+契约：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md)（**Host API**）、[`web/engine/PLATFORM.md`](web/engine/PLATFORM.md)、[`web/engine/README.md`](web/engine/README.md)、[`DOCS.md`](DOCS.md)。
 
 ## 构造侧（Python，非应用依赖）
 
