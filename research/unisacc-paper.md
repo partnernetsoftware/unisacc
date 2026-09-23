@@ -128,7 +128,7 @@ tape 分别 lower 到 6 个目标 {lnx, osx, win} × {x86-64, arm64}。lower 过
 
 1. **前端**：`unisacc.c`（C 前端，内含生成的推理内核与权重）把自己编成 tape。cc 编出的 unisacc 记作 A，A 编自己得到 B，B 编自己得到 C，要求 B = C；并且 Python 驱动编出的版本 U 与之相同。
 2. **后端闭环**：lowering、两个编码器、三种镜像写出器移植进 C。对每个探针的每个目标，`unisacc -b os/arch` 写出的镜像必须与 Python 后端从同一条 tape 写出的**逐字节相同**：90 个探针 × 6 个目标，540/540。
-3. **无 Python 的原生自举**：cc 编出的 unisacc 写出 unisacc 的原生镜像 N1，N1 写出 N2，N2 写出 N3，要求 N1 = N2 = N3，并且另外 5 个目标的交叉输出一致。这在 osx/arm64 与 lnx/arm64 真机上成立；在 Windows 真机上，win/arm64 与 win/x86-64（后者经系统仿真）的 unisacc 也各自重建出逐字节相同的自己。
+3. **无 Python 的原生自举**：cc 编出的 unisacc 写出 unisacc 的原生镜像 N1，N1 写出 N2，N2 写出 N3，要求 N1 = N2 = N3，并且另外 5 个目标的交叉输出一致。这在 osx/arm64、lnx/arm64 与 lnx/x86-64 上成立；在 Windows 真机上，win/arm64 与 win/x86-64（后者经系统仿真）的 unisacc 也各自重建出逐字节相同的自己。五个平台，全部没有 Python。
 
 逐字节判据的价值在于：它能暴露“解释器看不见”的错误。例如多级指针的高 32 位被截断、静态局部变量未保留、Linux arm64 的 argc 读错位置、`main(argc, argv)` 从未收到参数、镜像把 87 MB 的零写进文件（修正后 unisacc 自身的镜像从 91 MB 降到 639 KB）。这些错误都是在“原生运行它自己编出的东西”时才暴露的。
 
@@ -160,7 +160,7 @@ tape 分别 lower 到 6 个目标 {lnx, osx, win} × {x86-64, arm64}。lower 过
 | 差分测试 | 90 个探针与系统 cc 对拍 | 88 一致，0 错误 |
 | 真实库代码 | crypto-algorithms 的已知答案测试，多文件 | 11/11 |
 | 后端闭环 | 镜像与参考后端逐字节相同 | 540/540；编译器自身（707 KB、1,874 个数据符号）6/6 |
-| 原生自举 | N1 = N2 = N3，无 Python | osx/arm64、lnx/arm64、win/arm64、win/x86-64 |
+| 原生自举 | N1 = N2 = N3，无 Python | osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64 |
 | 浮点 | `%f/%e/%g` 与平台 libc 逐位一致 | 格式化代码中无浮点运算（十进制大数展开） |
 
 ## 8　局限与负结果

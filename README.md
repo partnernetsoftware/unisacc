@@ -108,7 +108,8 @@ N1 = A -b HOST      N2 = N1 -b HOST    N3 = N2 -b HOST       N1 == N2 == N3
 ```
 
 The second one has no Python in it at all, and it holds on osx/arm64,
-lnx/arm64 and — on the real machine — win/arm64 and win/x86_64. The stricter
+lnx/arm64, lnx/x86_64 and — on the real machine — win/arm64 and win/x86_64:
+five platforms. The stricter
 check is `tests/closure.sh`: for all 90 probes on all six targets, the image
 `unisacc` writes is **byte-identical** to the one the Python back end writes
 from the same tape (540/540). A wrong header field, displacement or REX
