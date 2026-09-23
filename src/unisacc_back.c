@@ -1085,6 +1085,12 @@ int x_modrm(int mod, int reg, int rm) { ob((mod << 6) | ((reg & 7) << 3) | (rm &
 int x_alu(int opc, int d, int s) { x_rex(1, s >> 3, 0, d >> 3); ob(opc); x_modrm(3, s, d); return 0; }
 int x_movrr(int d, int s) { return x_alu(0x89, d, s); }
 int x_movri(int d, unsigned long imm) {
+    /* SHORT form -- see emit_x86.mov_ri: mov r32, imm32 zero-extends. */
+    if ((imm >> 32) == 0) {
+        if (d >= 8) ob(0x41);
+        ob(0xB8 + (d & 7)); ow(imm & 0xFFFFFFFF);
+        return 0;
+    }
     x_rex(1, 0, 0, d >> 3); ob(0xB8 + (d & 7));
     ow(imm & 0xFFFFFFFF); ow(imm >> 32);
     return 0;
@@ -1102,6 +1108,10 @@ int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
 int x_mem(int opc, int opc2, int r, int b, long disp, int w) {
     x_rex(w, r >> 3, 0, b >> 3);
     ob(opc); if (opc2 >= 0) ob(opc2);
+    /* SHORT forms -- see emit_x86.mem.  disp is a frame offset or a small
+       literal, never an address, so the width is final in the sizing pass. */
+    if (disp == 0 && (b & 7) != 5) { x_modrm(0, r, b); return 0; }
+    if (disp >= 0 - 128 && disp <= 127) { x_modrm(1, r, b); ob(disp & 255); return 0; }
     x_modrm(2, r, b); x_d32(disp);
     return 0;
 }
@@ -1128,9 +1138,17 @@ int x_cmpset(int cc, int d, int ra, int rb) {
     x_rex(1, d >> 3, 0, 1); ob(0x0F); ob(0xB6); x_modrm(3, d, X_R11);
     return 0;
 }
-int x_spadj(long n, int opc) {                  /* on the tape SP, r10 */
-    x_rex(1, 0, 0, X_R10 >> 3); ob(0x81); x_modrm(3, opc, X_R10); x_d32(n);
+/* `op r64, imm` with /opc -- see emit_x86.alu_imm.  SHORT form: 0x83 takes a
+   sign-extended imm8, four bytes rather than seven.  n is a frame size or a
+   literal, never an address, so the width is final in the sizing pass. */
+int x_aluimm(int d, int opc, long n) {
+    x_rex(1, 0, 0, d >> 3);
+    if (n >= 0 - 128 && n <= 127) { ob(0x83); x_modrm(3, opc, d); ob(n & 255); return 0; }
+    ob(0x81); x_modrm(3, opc, d); x_d32(n);
     return 0;
+}
+int x_spadj(long n, int opc) {                  /* on the tape SP, r10 */
+    return x_aluimm(X_R10, opc, n);
 }
 int x_spsub(int n) { x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 5, 4); ob(n); return 0; }
 int x_alignpre(int extra) {
@@ -1237,9 +1255,14 @@ int x_itoa(long pc, long src, long buf, long lenp) {
     x_rip(0x8B, X_RAX, pc + (bkol - s) + 7, src);
     ob(0x4D); ob(0x31); ob(0xE4);                    /* xor r12, r12 */
     ob(0x48); ob(0x85); ob(0xC0);                    /* test rax, rax */
-    ob(0x79); ob(3 + 10);                            /* jns over neg + mov */
-    ob(0x48); ob(0xF7); ob(0xD8);                    /* neg rax */
-    x_movri(12, 1);
+    {   int jp;                                      /* jns over neg + mov */
+        ob(0x79); jp = bkol; ob(0);                  /* the mov's width is a
+                                                        SHORT-form choice, so
+                                                        measure, never count */
+        ob(0x48); ob(0xF7); ob(0xD8);                /* neg rax */
+        x_movri(12, 1);
+        bkout[jp] = bkol - jp - 1;
+    }
     x_movrr(15, X_RAX); x_movri(X_R11, 10);
     x_movrr(13, X_RAX); ob(0x4D); ob(0x31); ob(0xF6);  /* xor r14, r14 */
     l0 = bkol;
@@ -1484,8 +1507,7 @@ int bk_x86(int i, long off) {
     }
     if (bk_str_is(o, ".frame")) {
         long n; n = a[0];
-        x_rex(1, 0, 0, X_R10 >> 3); ob(0x81); x_modrm(3, n >= 0 ? 5 : 0, X_R10);
-        x_d32(n >= 0 ? n : 0 - n);
+        x_aluimm(X_R10, n >= 0 ? 5 : 0, n >= 0 ? n : 0 - n);
         return 1;
     }
     if (bk_str_is(o, ".lea")) { x_rip(0x8D, a[0], pc + 7, bk_leaaddr(i)); return 1; }
@@ -1504,8 +1526,8 @@ int bk_x86(int i, long off) {
         return 1;
     }
     if (bk_str_is(o, "callr")) {
-        x_rip(0x8D, X_R11, pc + 7, pc + 20);
-        x_rex(1, 0, 0, 1); ob(0x81); x_modrm(3, 5, 10); x_d32(8);
+        x_rip(0x8D, X_R11, pc + 7, pc + 17);
+        x_aluimm(X_R10, 5, 8);
         x_rex(1, 1, 0, 1); ob(0x89); x_modrm(0, 11, 10);
         x_rex(0, 0, 0, a[0] >> 3); ob(0xFF); x_modrm(3, 4, a[0]);
         return 1;
@@ -1532,17 +1554,17 @@ int bk_x86(int i, long off) {
     }
     if (bk_str_is(o, "ret")) {
         x_rex(1, 1, 0, 1); ob(0x8B); x_modrm(0, 11, 10);
-        x_rex(1, 0, 0, 1); ob(0x81); x_modrm(3, 0, 10); x_d32(8);
+        x_aluimm(X_R10, 0, 8);
         x_rex(0, 0, 0, 1); ob(0xFF); x_modrm(3, 4, 11);
         return 1;
     }
     if (bk_str_is(o, "nop")) { ob(0x90); return 1; }
     if (bk_str_is(o, "jump")) { ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1; }
     if (bk_str_is(o, "call")) {
-        x_rip(0x8D, X_R11, pc + 7, pc + 22);
-        x_rex(1, 0, 0, 1); ob(0x81); x_modrm(3, 5, 10); x_d32(8);
+        x_rip(0x8D, X_R11, pc + 7, pc + 19);
+        x_aluimm(X_R10, 5, 8);
         x_rex(1, 1, 0, 1); ob(0x89); x_modrm(0, 11, 10);
-        ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 22));
+        ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 19));
         return 1;
     }
     if (bk_str_is(o, "jumpz")) {

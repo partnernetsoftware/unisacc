@@ -28,14 +28,30 @@ def mov_rr(dst, src):
 
 def mov_ri(dst, imm):
     d = NUM[dst]
+    v = imm & ((1 << 64) - 1)
+    # SHORT form: `mov r32, imm32` zero-extends to 64 bits, so any value that
+    # fits in an unsigned 32-bit field needs five bytes (six for r8-r15)
+    # rather than movabs' ten.  The value is a literal, final in the sizing
+    # pass -- an address goes through rip()/`.lea`, never through here.
+    if v >> 32 == 0:
+        pre = b"\x41" if d >= 8 else b""
+        return pre + bytes([0xB8 + (d & 7)]) + v.to_bytes(4, "little")
     return rex(1, 0, 0, d >> 3) + bytes([0xB8 + (d & 7)]) + \
-        (imm & ((1 << 64) - 1)).to_bytes(8, "little")
+        v.to_bytes(8, "little")
 
 
 def mem(opc, reg, base, disp, w=1):
     r, b = NUM[reg], NUM[base]
     pre = rex(w, r >> 3, 0, b >> 3)
     op = bytes([opc]) if isinstance(opc, int) else opc
+    # SHORT forms.  `disp` is always a frame offset or a small literal -- never
+    # a label address -- so its width is final in the sizing pass.  rm==5 has
+    # no mod=00 form ([rip+disp32] takes that slot), but no base we use is
+    # rbp/r13, so the guard is belt and braces.
+    if disp == 0 and (b & 7) != 5:
+        return pre + op + modrm(0, r, b)
+    if -128 <= disp <= 127:
+        return pre + op + modrm(1, r, b) + (disp & 0xFF).to_bytes(1, "little")
     return pre + op + modrm(2, r, b) + \
         (disp & 0xFFFFFFFF).to_bytes(4, "little")
 
@@ -386,11 +402,21 @@ def _sp():
     return REGMAP["x86_64"][7]          # the tape SP, not rsp
 
 
+def alu_imm(reg, opc, n):
+    """`op r64, imm` with /opc.  SHORT form: 0x83 takes a sign-extended imm8,
+    four bytes rather than seven.  `n` is always a frame size or a literal --
+    never a label address -- so the width is final in the sizing pass."""
+    d = NUM[reg] if isinstance(reg, str) else reg
+    pre = rex(1, 0, 0, d >> 3)
+    if -128 <= n <= 127:
+        return pre + b"\x83" + modrm(3, opc, d) + bytes([n & 0xFF])
+    return pre + b"\x81" + modrm(3, opc, d) + \
+        (n & 0xFFFFFFFF).to_bytes(4, "little")
+
+
 def _spadj(n, opc):
     """opc 5 = sub, 0 = add, on the tape SP"""
-    d = NUM[_sp()]
-    return rex(1, 0, 0, d >> 3) + b"\x81" + modrm(3, opc, d) + \
-        (n & 0xFFFFFFFF).to_bytes(4, "little")
+    return alu_imm(_sp(), opc, n)
 
 
 def rip(opc, reg, pc_next, target):
@@ -450,11 +476,9 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "setmem":
         return rip(0x89, a[1], text_va + off + 7, a[0] + shift)
     if o == ".frame":
-        d = NUM[a[0]] if False else NUM["r10"]
         n = a[0]
         opc = 5 if n >= 0 else 0                    # /5 sub, /0 add
-        return rex(1, 0, 0, d >> 3) + b"\x81" + modrm(3, opc, d) + \
-            (abs(n) & 0xFFFFFFFF).to_bytes(4, "little")
+        return alu_imm("r10", opc, abs(n))
     if o == ".lea":                                  # movabs, fixed 10 bytes
         sym = a[1]
         if syms and sym in syms:
@@ -486,10 +510,10 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             k += wd
         return out
     if o == "callr":
-        lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + 20)
-        sub = rex(1, 0, 0, 1) + b"\x81" + modrm(3, 5, 10) + \
-            (8).to_bytes(4, "little")
+        sub = alu_imm("r10", 5, 8)
         st = rex(1, 1, 0, 1) + b"\x89" + modrm(0, 11, 10)
+        n = 7 + len(sub) + len(st) + 3
+        lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + n)
         t = NUM[a[0]]
         return lea + sub + st + rex(0, 0, 0, t >> 3) + b"\xff" + \
             modrm(3, 4, t)
@@ -577,8 +601,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         return out
     if o == "ret":                                   # pop and jump
         ld = rex(1, 1, 0, 1) + b"\x8b" + modrm(0, 11, 10)
-        add = rex(1, 0, 0, 1) + b"\x81" + modrm(3, 0, 10) + \
-            (8).to_bytes(4, "little")
+        add = alu_imm("r10", 0, 8)
         return ld + add + rex(0, 0, 0, 1) + b"\xff" + modrm(3, 4, 11)
     if o == "nop":
         return b"\x90"
@@ -596,11 +619,11 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "jump":
         return b"\xe9" + _rel(ins, labels[a[0]] - (off + 5))
     if o == "call":                                  # push ret addr on r10
-        lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + 22)
-        sub = rex(1, 0, 0, 1) + b"\x81" + modrm(3, 5, 10) + \
-            (8).to_bytes(4, "little")
+        sub = alu_imm("r10", 5, 8)
         st = rex(1, 1, 0, 1) + b"\x89" + modrm(0, 11, 10)
-        return lea + sub + st + b"\xe9" + _rel(ins, labels[a[0]] - (off + 22))
+        n = 7 + len(sub) + len(st) + 5
+        lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + n)
+        return lea + sub + st + b"\xe9" + _rel(ins, labels[a[0]] - (off + n))
     if o == "jumpz":
         r = NUM[a[0]]
         test = rex(1, r >> 3, 0, r >> 3) + b"\x85" + modrm(3, r, r)

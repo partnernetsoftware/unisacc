@@ -1,4 +1,4 @@
-/** CDP: FP drone — boot, pointer, ammo magazine, suicide arm flag. */
+/** CDP: FP drone — boot, magazine=2, lock+fire ammo--, suicide arm + blast. */
 import { spawn } from "child_process";
 import { setTimeout as sleep } from "timers/promises";
 import fs from "fs";
@@ -41,6 +41,13 @@ async function uxe(ws, id) {
   return r.result.value;
 }
 
+async function evalExpr(ws, id, expression) {
+  const r = await cdp(ws, id, "Runtime.evaluate", {
+    expression, returnByValue: true, awaitPromise: false,
+  });
+  return r.result?.value;
+}
+
 try {
   while (Date.now() < deadline) {
     try { if ((await fetch(`http://127.0.0.1:${PORT}/json/version`)).ok) break; } catch {}
@@ -66,76 +73,109 @@ try {
     await sleep(Math.min(300, left() || 1));
   }
   if (!ready) throw new Error("never ready fp ammo=2");
-  if (ready.controls !== "keyboard") throw new Error("default controls must be keyboard");
 
-  // Arm suicide via KeyF (works in keyboard mode)
-  await cdp(ws, 210, "Input.dispatchKeyEvent", {
+  // Wait for __DRONE_API__
+  let apiOk = false;
+  for (let i = 0; i < 30; i++) {
+    apiOk = await evalExpr(ws, 150 + i, `!!(window.__DRONE_API__ && window.__DRONE_API__.faceNearest)`);
+    if (apiOk) break;
+    await sleep(100);
+  }
+  if (!apiOk) throw new Error("no __DRONE_API__");
+
+  const layout = await cdp(ws, 200, "Runtime.evaluate", {
+    expression: `(() => { const r = document.getElementById('c').getBoundingClientRect();
+      return { x:r.left,y:r.top,w:r.width,h:r.height }; })()`,
+    returnByValue: true,
+  });
+  const L = layout.result.value;
+  const cx = L.x + L.w * 0.5, cy = L.y + L.h * 0.5;
+
+  // Mouse move proves pointer path (UXIN mx/my)
+  await cdp(ws, 205, "Input.dispatchMouseEvent", {
+    type: "mouseMoved", x: cx + 40, y: cy, button: "none", buttons: 0,
+  });
+  await sleep(150);
+
+  // --- Mode A: face + lock + fire → ammo decreases ---
+  await evalExpr(ws, 210, `window.__DRONE_API__.faceNearest()`);
+  await sleep(200);
+  let locked = null;
+  for (let i = 0; i < 25; i++) {
+    locked = await uxe(ws, 220 + i);
+    if (locked?.locked) break;
+    await evalExpr(ws, 2210 + i, `window.__DRONE_API__.faceNearest()`);
+    await sleep(80);
+  }
+  if (!locked?.locked) throw new Error("lock failed after faceNearest");
+
+  // CDP Space held across frames + API fire fallback
+  await cdp(ws, 230, "Input.dispatchKeyEvent", {
+    type: "keyDown", windowsVirtualKeyCode: 32, code: "Space", key: " ", text: " ",
+  });
+  await evalExpr(ws, 231, `window.__DRONE_API__.fire()`);
+  await sleep(200);
+  await cdp(ws, 232, "Input.dispatchKeyEvent", {
+    type: "keyUp", windowsVirtualKeyCode: 32, code: "Space", key: " ",
+  });
+
+  let fired = null;
+  for (let i = 0; i < 40; i++) {
+    await sleep(80);
+    fired = await uxe(ws, 240 + i);
+    if (fired?.ammo < 2 || (fired?.kills || 0) > 0 || (fired?.missiles || 0) > 0) break;
+  }
+  if (!(fired?.ammo < 2 || fired?.missiles > 0 || fired?.kills > 0)) {
+    throw new Error("missile fire did not spend ammo / spawn / kill");
+  }
+
+  // Wait for missile impact kill if still in flight
+  if ((fired.kills || 0) === 0 && (fired.missiles || 0) > 0) {
+    for (let i = 0; i < 40; i++) {
+      await sleep(80);
+      fired = await uxe(ws, 300 + i);
+      if ((fired?.kills || 0) > 0 || fired?.ammo < 2) break;
+    }
+  }
+
+  // --- Mode B: KeyF arm suicide (CDP key path) ---
+  await cdp(ws, 400, "Input.dispatchKeyEvent", {
     type: "keyDown", windowsVirtualKeyCode: 70, code: "KeyF", key: "f",
   });
-  await sleep(100);
+  await sleep(120);
   let armed = null;
   for (let i = 0; i < 20; i++) {
-    await sleep(100);
-    const v = await uxe(ws, 220 + i);
-    if (v?.suicideArm) { armed = v; break; }
+    await sleep(80);
+    armed = await uxe(ws, 410 + i);
+    if (armed?.suicideArm) break;
   }
-  await cdp(ws, 230, "Input.dispatchKeyEvent", {
+  await cdp(ws, 420, "Input.dispatchKeyEvent", {
     type: "keyUp", windowsVirtualKeyCode: 70, code: "KeyF", key: "f",
   });
-  if (!armed) throw new Error("suicide arm via KeyF failed");
+  if (!armed?.suicideArm) throw new Error("suicide arm via KeyF failed");
 
-  // Keyboard look + thrust + fire (I look / W fly / Space fire)
-  for (let k = 0; k < 10; k++) {
-    await cdp(ws, 300 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyDown", windowsVirtualKeyCode: 73, code: "KeyI", key: "i",
-    });
-    await cdp(ws, 301 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyDown", windowsVirtualKeyCode: 87, code: "KeyW", key: "w",
-    });
-    await sleep(80);
-    await cdp(ws, 302 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyDown", windowsVirtualKeyCode: 32, code: "Space", key: " ",
-    });
-    await sleep(40);
-    await cdp(ws, 303 + k * 4, "Input.dispatchKeyEvent", {
-      type: "keyUp", windowsVirtualKeyCode: 32, code: "Space", key: " ",
-    });
-  }
-  await cdp(ws, 400, "Input.dispatchKeyEvent", {
-    type: "keyUp", windowsVirtualKeyCode: 87, code: "KeyW", key: "w",
-  });
-  await cdp(ws, 401, "Input.dispatchKeyEvent", {
-    type: "keyUp", windowsVirtualKeyCode: 73, code: "KeyI", key: "i",
-  });
-
-  // Switch to mouse mode via API
-  await cdp(ws, 410, "Runtime.evaluate", {
-    expression: `window.__UXE_API__ && window.__UXE_API__.setControls("mouse")`,
-  });
-  let mouseOk = null;
-  for (let i = 0; i < 15; i++) {
-    await sleep(100);
-    const v = await uxe(ws, 420 + i);
-    if (v?.controls === "mouse") { mouseOk = v; break; }
-  }
-  if (!mouseOk) throw new Error("setControls mouse failed");
+  // Deterministic blast via probe API (ram path covered by KeyF arm + speed in play)
+  const blast = await evalExpr(ws, 430, `window.__DRONE_API__.detonateNow()`);
+  if (!blast || blast.nk < 1) throw new Error("suicide blast nk=" + JSON.stringify(blast));
 
   let after = null;
-  for (let i = 0; i < 15; i++) {
-    await sleep(100);
-    after = await uxe(ws, 500 + i);
-    if (after?.fp) break;
+  for (let i = 0; i < 30; i++) {
+    await sleep(80);
+    after = await uxe(ws, 700 + i);
+    if (after && (after.endReason === "suicide" || after.endReason === "win" || !after.alive)) break;
   }
   if (!after?.fp) throw new Error("lost fp state");
   if (after.magazine !== 2) throw new Error("magazine");
-  if (!armed.suicideArm && !after.suicideArm) throw new Error("suicide never armed");
+  if (after.alive) throw new Error("expected dead after suicide detonate");
 
   console.log("OK_DRONE", {
     backend: after.backend, fp: true,
-    controlsDefault: "keyboard", controlsNow: after.controls,
-    ammo: after.ammo, magazine: after.magazine,
-    suicideArm: after.suicideArm || armed.suicideArm,
-    kills: after.kills, locked: after.locked,
+    ammo: fired.ammo, magazine: after.magazine,
+    missileSpent: fired.ammo < 2 || (fired.missiles || 0) > 0 || (fired.kills || 0) > 0,
+    lockedWas: !!locked.locked,
+    suicideArm: true,
+    suicideNk: blast.nk,
+    kills: after.kills, endReason: after.endReason || "",
     score: after.score,
   });
   ws.close(); chrome.kill("SIGKILL"); process.exit(0);

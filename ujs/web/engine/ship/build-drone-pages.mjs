@@ -56,39 +56,52 @@ function bake(homeHref) {
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>UXE · 无人机驾舱</title>
   <style>
     :root { color-scheme: dark; }
-    html, body { margin: 0; height: 100%; background: #1a2228; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
-    #c { display: block; width: 100%; height: 100%; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; touch-action: none;
+      background: #121820;
+      font-family: "IBM Plex Sans", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+    }
+    #c { display: block; width: 100%; height: 100%; touch-action: none; }
+    #vignette {
+      position: fixed; inset: 0; z-index: 1; pointer-events: none;
+      background:
+        radial-gradient(ellipse at center, transparent 42%, rgba(0,0,0,.55) 100%),
+        linear-gradient(180deg, rgba(0,8,12,.35) 0%, transparent 18%, transparent 82%, rgba(0,0,0,.45) 100%);
+    }
     #hud {
       position: fixed; left: 16px; top: 16px; z-index: 2;
-      color: #d8e6f0; font-size: 13px; line-height: 1.55;
-      text-shadow: 0 1px 2px #000; pointer-events: none;
-      background: rgba(6,12,18,.72); padding: 10px 12px; border-radius: 8px;
-      border: 1px solid rgba(120,180,140,.35); min-width: 280px;
-      font-variant-numeric: tabular-nums;
+      color: #d5e8f2; font-size: 13px; line-height: 1.55;
+      background: rgba(4,10,16,.78); padding: 12px 14px; border-radius: 4px;
+      border: 1px solid rgba(100,200,140,.4); min-width: min(300px, calc(100vw - 32px));
+      pointer-events: none; font-variant-numeric: tabular-nums;
+      box-shadow: 0 0 24px rgba(40,120,80,.15);
     }
     #hud b { color: #9fe7b0; }
     #hud .warn { color: #ff8a7a; }
     #hud .lock { color: #5dff8a; }
     #hud .mode { color: #f0d878; }
+    #hud.armed { border-color: rgba(255,90,70,.55); }
+    #hud.locked-on { border-color: rgba(80,255,140,.65); }
     #reticle {
-      position: fixed; left: 50%; top: 50%; width: 22px; height: 22px;
-      margin: -11px 0 0 -11px; pointer-events: none; z-index: 2;
-      border: 2px solid rgba(180,255,160,.75); border-radius: 50%;
-      box-shadow: 0 0 0 1px rgba(0,0,0,.5), inset 0 0 8px rgba(80,255,120,.15);
+      position: fixed; left: 50%; top: 50%; width: 28px; height: 28px;
+      margin: -14px 0 0 -14px; pointer-events: none; z-index: 2;
+      border: 2px solid rgba(180,255,160,.7); border-radius: 50%;
     }
-    #reticle::before, #reticle::after {
-      content: ""; position: absolute; background: rgba(180,255,160,.75);
+    #reticle.lock { border-color: #5dff8a; transform: scale(1.15); }
+    #reticle.suicide { border-color: #ff6a55; }
+    #ammo {
+      position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%);
+      z-index: 2; pointer-events: none; letter-spacing: 6px; font-size: 18px;
+      color: #f0d878;
     }
-    #reticle::before { left: 50%; top: -6px; width: 2px; height: 6px; margin-left: -1px; }
-    #reticle::after { left: 50%; bottom: -6px; width: 2px; height: 6px; margin-left: -1px; }
     a.nav {
       position: fixed; z-index: 2; right: 16px; top: 16px;
       color: #c8d8e0; font-size: 13px; text-decoration: none;
-      background: rgba(6,12,18,.72); padding: 8px 10px; border-radius: 8px;
+      background: rgba(6,12,18,.72); padding: 8px 10px; border-radius: 4px;
       border: 1px solid rgba(120,180,140,.35);
     }
     #controls {
@@ -110,7 +123,9 @@ function bake(homeHref) {
 </head>
 <body>
   <a class="nav" href="${homeHref}">← 游戏索引</a>
+  <div id="vignette"></div>
   <div id="reticle"></div>
+  <div id="ammo"></div>
   <div id="hud">驾舱启动…</div>
   <div id="controls">
     <button type="button" id="ctrl-kb" class="on">纯键盘</button>
@@ -137,6 +152,8 @@ try {
   const api = await startDroneShip({
     canvas: document.getElementById("c"),
     hud,
+    ammoEl: document.getElementById("ammo"),
+    reticle: document.getElementById("reticle"),
     prefer,
     controls: initial,
     engineUrl: new URL("./engine.wasm", location.href).href,

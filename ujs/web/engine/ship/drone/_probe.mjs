@@ -41,6 +41,13 @@ async function uxe(ws, id) {
   return r.result.value;
 }
 
+async function evalExpr(ws, id, expression) {
+  const r = await cdp(ws, id, "Runtime.evaluate", {
+    expression, returnByValue: true,
+  });
+  return r.result?.value;
+}
+
 try {
   while (Date.now() < deadline) {
     try { if ((await fetch(`http://127.0.0.1:${PORT}/json/version`)).ok) break; } catch {}
@@ -69,37 +76,56 @@ try {
   }
   if (!ready) throw new Error("never ready ship keyboard ammo=2");
 
-  await cdp(ws, 210, "Input.dispatchKeyEvent", {
+  let apiOk = false;
+  for (let i = 0; i < 25; i++) {
+    apiOk = await evalExpr(ws, 150 + i, `!!(window.__DRONE_API__ && window.__DRONE_API__.faceNearest)`);
+    if (apiOk) break;
+    await sleep(80);
+  }
+  if (!apiOk) throw new Error("no __DRONE_API__");
+
+  await evalExpr(ws, 210, `window.__DRONE_API__.faceNearest()`);
+  await sleep(150);
+  await evalExpr(ws, 211, `window.__DRONE_API__.fire()`);
+  let fired = null;
+  for (let i = 0; i < 30; i++) {
+    await sleep(80);
+    fired = await uxe(ws, 220 + i);
+    if (fired?.ammo < 2 || fired?.missiles > 0 || fired?.kills > 0) break;
+  }
+  if (!(fired?.ammo < 2 || fired?.missiles > 0 || fired?.kills > 0)) {
+    throw new Error("ship fire failed");
+  }
+
+  await cdp(ws, 230, "Input.dispatchKeyEvent", {
     type: "keyDown", windowsVirtualKeyCode: 70, code: "KeyF", key: "f",
   });
   await sleep(100);
   let armed = null;
-  for (let i = 0; i < 20; i++) {
-    await sleep(100);
-    const v = await uxe(ws, 220 + i);
-    if (v?.suicideArm) { armed = v; break; }
+  for (let i = 0; i < 15; i++) {
+    await sleep(80);
+    armed = await uxe(ws, 240 + i);
+    if (armed?.suicideArm) break;
   }
-  await cdp(ws, 230, "Input.dispatchKeyEvent", {
+  await cdp(ws, 250, "Input.dispatchKeyEvent", {
     type: "keyUp", windowsVirtualKeyCode: 70, code: "KeyF", key: "f",
   });
-  if (!armed) throw new Error("suicide arm via KeyF failed");
+  if (!armed?.suicideArm) throw new Error("KeyF arm failed");
 
-  await cdp(ws, 240, "Runtime.evaluate", {
-    expression: `window.__UXE_API__ && window.__UXE_API__.setControls("mouse")`,
-  });
+  await evalExpr(ws, 260, `window.__UXE_API__ && window.__UXE_API__.setControls("mouse")`);
   let mouseMode = null;
   for (let i = 0; i < 15; i++) {
-    await sleep(100);
-    const v = await uxe(ws, 250 + i);
-    if (v?.controls === "mouse") { mouseMode = v; break; }
+    await sleep(80);
+    mouseMode = await uxe(ws, 270 + i);
+    if (mouseMode?.controls === "mouse") break;
   }
-  if (!mouseMode) throw new Error("setControls mouse failed");
+  if (!mouseMode || mouseMode.controls !== "mouse") throw new Error("setControls mouse failed");
 
   console.log("OK_DRONE_SHIP", {
     backend: mouseMode.backend, fp: true, ship: true,
     controlsDefault: "keyboard", controlsNow: mouseMode.controls,
-    ammo: mouseMode.ammo, magazine: mouseMode.magazine,
-    suicideArm: true,
+    ammo: fired.ammo, magazine: mouseMode.magazine,
+    suicideArm: true, missileSpent: true,
   });
   ws.close(); chrome.kill("SIGKILL"); process.exit(0);
 } catch (e) {

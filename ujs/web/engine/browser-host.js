@@ -230,6 +230,7 @@ export async function createBrowserHost(canvas, opts = {}) {
         fire: fireKey || fireBtn,
         mx: outMx, my: outMy, buttons: outButtons, flags: outFlags,
         keys: { ...keys },
+        pointerLock: document.pointerLockElement === canvas,
       };
       lastSnap = snap;
       if (buf != null) {

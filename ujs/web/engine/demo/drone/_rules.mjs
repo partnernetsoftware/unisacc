@@ -37,4 +37,10 @@ o = await run({ ...base(), iy: 0, suicide: 1, thit: [1, 1] });
 if (o.alive !== 0) throw new Error("suicide ends alive");
 if (o.thp[0] !== 0 || o.thp[1] !== 0) throw new Error("suicide wipe");
 
-console.log("OK_DRONE_RULES", { pz_move: true, missile: true, suicide: true });
+// nose-up climb bleed while thrusting
+o = await run({ ...base(), fy: 0.5, iy: -1 });
+if (!(o.py > 14)) throw new Error("look-climb expected py=" + o.py);
+
+console.log("OK_DRONE_RULES", {
+  pz_move: true, missile: true, suicide: true, look_climb: true,
+});

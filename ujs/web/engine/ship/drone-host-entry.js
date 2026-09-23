@@ -8,14 +8,16 @@ import embed from "./drone.embed.json";
 
 function helpLine(controls) {
   return controls === "mouse"
-    ? "鼠标看 · WASD 飞 · 锁定后点击/空格发射（2发）· F/右键武装自爆"
-    : "IJKL 看 · WASD 飞 · 锁定后空格发射（2发）· F 武装自爆";
+    ? "鼠标看 · WASD 飞 · Shift 加速 · 锁定后点击/空格发射（2发）· F/右键武装自爆"
+    : "IJKL 看 · WASD 飞 · Shift 加速 · 锁定后空格发射（2发）· F 武装自爆";
 }
 
 /**
  * @param {{
  *   canvas: HTMLCanvasElement,
  *   hud: HTMLElement,
+ *   ammoEl?: HTMLElement,
+ *   reticle?: HTMLElement,
  *   prefer?: "auto"|"webgl"|"webgpu",
  *   engineUrl: string,
  *   controls?: "keyboard"|"mouse",
@@ -29,6 +31,7 @@ export async function startDroneShip(cfg) {
     baseURL: new URL(".", cfg.engineUrl),
     pointerLock: controls === "mouse",
   });
+  window.__UXE_HOST__ = host;
 
   const engineUrl = cfg.engineUrl;
   const orig = host.host_asset_read.bind(host);
@@ -44,13 +47,20 @@ export async function startDroneShip(cfg) {
   function paint(s) {
     window.__UXE__ = { ...s, backend: host.backend, ship: true, drone: true };
     if (!s.ready) return;
-    const ammoBar = "●".repeat(s.ammo || 0) + "○".repeat(Math.max(0, (s.magazine || 2) - (s.ammo || 0)));
+    cfg.hud.classList.toggle("armed", !!s.suicideArm);
+    cfg.hud.classList.toggle("locked-on", !!s.locked && !s.suicideArm);
+    cfg.reticle?.classList.toggle("lock", !!s.locked && !s.suicideArm);
+    cfg.reticle?.classList.toggle("suicide", !!s.suicideArm);
+    const ammoBar = "▮".repeat(s.ammo || 0) + "▯".repeat(Math.max(0, (s.magazine || 2) - (s.ammo || 0)));
+    if (cfg.ammoEl) cfg.ammoEl.textContent = ammoBar;
     const modeLabel = s.controls === "mouse" ? "键盘+鼠标" : "纯键盘";
     cfg.hud.innerHTML =
       `<b>无人机 · 第一人称驾舱</b> · ship-js<br>` +
       `backend <b>${host.backend}</b> · fps <b>${(s.fps || 0).toFixed(0)}</b> · <b>${modeLabel}</b><br>` +
       `<span class="mode">${s.mode || ""}</span><br>` +
-      `弹仓 <b>${ammoBar}</b> (${s.ammo}/${s.magazine}) · 击毁 <b>${s.kills || 0}</b> · 敌 <b>${s.remaining ?? "?"}</b><br>` +
+      `弹仓 <b>${ammoBar}</b> (${s.ammo}/${s.magazine})` +
+      (s.missiles ? ` · 在途 <b>${s.missiles}</b>` : "") +
+      ` · 击毁 <b>${s.kills || 0}</b> · 敌 <b>${s.remaining ?? "?"}</b><br>` +
       `得分 <b>${(s.score || 0).toFixed(0)}</b>` +
       (s.locked ? ` · <b class="lock">锁定</b>` : "") +
       (s.suicideArm ? ` · <b class="warn">自爆已武装</b>` : "") + `<br>` +
@@ -66,6 +76,8 @@ export async function startDroneShip(cfg) {
     controls,
     onHud: paint,
   });
+  window.__DRONE_API__ = api.api;
+  window.__UXE_API__ = api;
 
   return {
     backend: host.backend,
