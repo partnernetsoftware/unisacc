@@ -54,6 +54,20 @@ suite once blocked the session for two hours.
 
 Batch the work and push once. Every push used to trigger three billed jobs.
 
+## Building and releasing
+
+**CI tests; it does not build.** Every shipped artifact is cross-compiled in
+ONE environment locally -- that is the whole point of a compiler that writes
+all six targets itself -- and then moved through a GitHub release (a draft
+while it is in flight) as the transfer mechanism. GitHub Actions is only ever
+a second opinion on a clean machine, never the thing that produces the
+binary. Local cross-machine testing goes through the UTM machines
+(`tests/crossnative.sh`, and the `utm-court` helper that lives outside this
+repo) and the Lima Linux VM.
+
+v0.0.1 (2026-09-23) was released this way: `python3 -m unisa ape` built
+`unisaccrun.com` here, `gh release create` uploaded it.
+
 ## The route
 
 Construction, not training. The shipped weights are derived from the gold

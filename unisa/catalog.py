@@ -1,6 +1,6 @@
 """Catalog -- the single source of truth for isel/abi/enc/combo. [C-8]
 
-The 9-head gold is DERIVED by nine() from (op, os, arch). Never hand-labelled. [G-9]
+The multi-head gold is DERIVED by nine() from (op, os, arch). Never hand-labelled. [G-9]
 """
 
 OS = ("lnx", "osx", "win")
@@ -92,7 +92,6 @@ FORMS = ("syscall", "svc", "winapi", "x86", "arm")                     # [V-2]
 GATES = ("syscall", "svc0", "svc80", "winapi", "none")
 REGS = ("rdi", "rsi", "rdx", "r10", "rcx", "r8", "r9", "rax",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "none")
-TLS = ("fsbase", "tpidr_el0", "teb", "none")
 
 # r0-r7 -> machine registers                                           [C-5]
 REGMAP = {
@@ -159,15 +158,6 @@ def argregs(op, os_, arch):
     return ("x0", "x1", "x2", "x3", "x4", "x5", "x0")
 
 
-def tls(op, os_, arch):
-    """[C-6]"""
-    if op != "tls_base":
-        return "none"
-    if os_ == "win":
-        return "teb"
-    return "tpidr_el0" if arch == "arm64" else "fsbase"
-
-
 def nrreg(op, os_, arch):
     """Which register carries the syscall number -- an (os, arch) fact, and
     only for an op that has a number at all.  It was a dict the lowering read
@@ -178,7 +168,11 @@ def nrreg(op, os_, arch):
 
 
 def nine(op, os_, arch):
-    """The heads, derived (nine, and `nrreg`). [G-9] [S-6]"""
+    """Every target fact of one catalog op, derived. [G-9] [S-6]
+
+    Twelve of them now, not the nine the name remembers: `nrreg` and
+    `arg3..arg5` came in with the six-argument gate, and `tls` went out when
+    the head that carried it turned out to have no reader."""
     a0, a1, a2, a3, a4, a5, rt = argregs(op, os_, arch)
     return {
         "nrreg": nrreg(op, os_, arch),
@@ -188,7 +182,6 @@ def nine(op, os_, arch):
         "gate": gate(op, os_, arch),
         "sysno": sysno(op, os_, arch),
         "arg0": a0, "arg1": a1, "arg2": a2, "ret": rt,
-        "tls": tls(op, os_, arch),
     }
 
 
@@ -200,6 +193,10 @@ def isel_two(op, arch):
     and `svc80` on osx.  A key of (op, arch) cannot express that, so gate moved
     to abi.  Head count is unchanged: isel 2 + abi 7 = 9.  `form` here is the
     ARCH-level view; enc (op x os x arch) is authoritative for lowering.
+
+    [2026-09-23] The lowering no longer asks isel at all: enc supersedes its
+    form and no encoder reads its symbol (tests/ablate.sh).  It stays as a
+    stage for the spec and combo arms.
     """
     return {"form": enc_form(op, "lnx", arch), "symbol": symbol(op, arch)}
 

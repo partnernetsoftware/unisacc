@@ -24,7 +24,7 @@ UNISA SH
 ├─ ② 模型数据（learned tables）—— 每一个都是「离散 key → 1 类」
 │   ├─ 前端 6 表    pp lex parse type scope irsel
 │   ├─ 后端 2 表    enc reloc
-│   ├─ 阶段网 2 个  isel abi                    （--drive spec）
+│   ├─ 阶段网 2 个  isel abi                    （--drive spec，对照臂）
 │   └─ 合体网 1 个  combo → 9 heads             （--drive combo）
 │
 └─ ③ 唯一 kernel（inference）—— 换权重不换它
@@ -71,7 +71,7 @@ unisa/
 ├─ tape.py            tape 文本格式 parse / print
 ├─ vm.py              通用 tape 解释器 ★基准真值
 │
-├─ lower.py           isel/abi/enc/reloc → TargetProgram；--fault 注入点
+├─ lower.py           abi/enc/reloc/regmap → TargetProgram；--fault 注入点
 ├─ emit_x86.py        真实字节：48 01 f0 / c3 / 0f 05 ...
 ├─ emit_arm.py        真实字节：00 00 01 8b / c0 03 5f d6 / 01 00 00 d4 ...
 ├─ exec_target.py     ★目标机解释器：per-arch 具名寄存器 + per-os syscall 分发

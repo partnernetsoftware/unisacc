@@ -22,20 +22,29 @@ $ python3 -m unisa run examples/hello.c --fold
 The walker, symbol table, relocation arithmetic and object-file headers are
 classic code — algebra, not tables. Every *table-shaped* decision is a network:
 
-| stage | key space | rows | θ |
+| stage | key space | rows | units |
 |---|---|---|---|
-| `pp` | dir × defined | 18 | 274 |
-| `lex` | charclass × peek | 121 | 418 |
-| `parse` | NT × TOK | 340 | 1,451 |
-| `type` | t1 × op × t2 | 3,211 | 1,622 |
-| `scope` | ctx × kind | 30 | 479 |
-| `irsel` | family × flavor | 190 | 1,194 |
-| `enc` | op × os × arch | 276 | 893 |
-| `reloc` | jmpkind × arch | 6 | 161 |
-| `isel` | op × arch | 92 | 2,628 |
-| `abi` | op × os × arch | 276 | 4,457 |
+| `pp` | dir × defined | 18 | 6 |
+| `lex` | c × peek | 144 | 11 |
+| `parse` | nt × tok | 340 | 34 |
+| `type` | t1 × op × t2 | 4,275 | 61 |
+| `scope` | ctx × kind | 30 | 9 |
+| `irsel` | family × flavor | 396 | 71 |
+| `enc` | op × os × arch | 420 | 5 |
+| `reloc` | kind × arch | 6 | 3 |
+| `regmap` | treg × arch | 16 | 10 |
+| `tyinfo` | t | 16 | 6 |
+| `pfconv` | conv | 9 | 7 |
+| `isel` | op × arch | 140 | 70 |
+| `abi` | op × os × arch | 420 | 37 |
+| `combo` | op × os × arch | 420 | 83 |
 
-Ten decision points, one kernel: `embed → gemv → ReLU → gemv → argmax`.
+The last two are the control arm: the lowering asks neither. `isel`'s form is
+the one `enc` supersedes and no encoder reads its symbol; `combo` replaces
+`isel`+`abi` in the trained configuration. Units are the CONSTRUCTED
+weights' hidden units — what ships — not trained parameters.
+
+Fourteen decision points, one kernel: `embed → gemv → ReLU → gemv → argmax`.
 Swap the weights, change the capability. The kernel never changes.
 
 ## What makes it unusual
@@ -48,7 +57,7 @@ always 0 or 1, so there is **no multiply, no shift, no float anywhere**, and an
 
 **Verification is exhaustive, not statistical.** Each stage is a total function
 on a finite closed domain, so `∀k ∈ K_s : argmax(N_s(k)) = G_s(k)` is decided
-by enumeration — 4,560 keys, zero disagreements. Not a test: a decision
+by enumeration — 6,650 keys, zero disagreements. Not a test: a decision
 procedure.
 
 **All six targets have really run.** `--fold` compares six lowerings
@@ -207,7 +216,7 @@ refuted our own predictions.
 no hand in writing:
 
 ```
-corpus 220   pass 209   wrong 0   unsupported 0   knownfail 11   slow 0
+corpus 220   pass 214   wrong 0   unsupported 0   knownfail 6   slow 0
 ```
 
 The programs are compiled to a real image for this host and **executed**, not
@@ -296,9 +305,9 @@ the same part — `prd.md` §5.5 keeps the full audit.
 
 | | done when | today |
 |---|---|---|
-| **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — 11 stages, 4,560 keys, no fallback path |
+| **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — 14 stages, 6,650 keys, no fallback path |
 | **the targets** | six images, real machines, identical behaviour | **there** — `fat` is multi-arch within one OS; a tri-format single file is not started |
-| **the language** | someone else's C compiles, or is refused for a written reason | **there for this corpus** — 209/220, `unsupported 0`; floating point is a whole missing axis |
+| **the language** | someone else's C compiles, or is refused for a written reason | **there for this corpus** — 214/220, `unsupported 0`; the remaining six are non-C99 extensions |
 | **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **reached for the self-hosting part** — `unisacc -b` writes the image itself, byte-identical to the driver's, and rebuilds itself with no Python; `unisaccrun` compiles and runs in memory |
 
 Nothing here is blocked on a question we cannot answer: `[P-8]` proves the

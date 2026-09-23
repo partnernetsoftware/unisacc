@@ -59,8 +59,10 @@ chk "trained vs constructed image" "identical" "$r"
 
 echo "== [A-19] the compiler compiles its own decision layer =="
 $U emit-kernel --out kernel >/dev/null
+# the self test includes the model and the cases from beside itself, so the
+# copy cc builds is told where that is
 { echo '#include <stdio.h>'; cat kernel/unisa_self.c; } > /tmp/u_ref.c
-cc -w -std=c99 -o /tmp/u_ref /tmp/u_ref.c 2>/dev/null
+cc -w -std=c99 -I kernel -o /tmp/u_ref /tmp/u_ref.c 2>/dev/null
 # Every decision of every stage's FULL gold, counted FROM the tables -- a
 # literal count went stale the first time a table grew (the floating axis).
 NDEC=$(python3 -c "

@@ -3,7 +3,7 @@
 Four stages drive every target fact here, and each answer is used (a wrong
 one changes the image -- tests/ablate.sh):
     enc    (op,os,arch) -> form
-    abi    (op,os,arch) -> sysno, arg0-2, ret, gate, nrreg
+    abi    (op,os,arch) -> sysno, arg0..arg5, ret, gate, nrreg
     reloc  (kind,arch)  -> rel32|arm26|arm19, the displacement field
     regmap (treg,arch)  -> the machine register holding tape register rN
 [T-1]

@@ -5,7 +5,9 @@
 set -e
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 { echo "#define UNISACC_NO_MAIN 1"
-  cat kernel/unisa_core.c src/unisacc_main.c src/unisacc_back.c \
+  cat kernel/unisa_model.inc
+  grep -v '^#include "unisa_' kernel/unisa_core.c
+  cat src/unisacc_main.c src/unisacc_back.c \
       src/unisaccrun_main.c; } > unisaccrun.c.$$
 mv -f unisaccrun.c.$$ unisaccrun.c
 cat tests/refshim.h unisaccrun.c tests/reffoot.h > "${1:-/tmp/ua_run.c}.$$"

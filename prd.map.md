@@ -11,7 +11,7 @@
 flowchart TD
     subgraph R1["🚪 一号厅 · 门厅 —— 命题"]
         A1["Shell = 推理器 + 执行器 + 模型数据"]
-        A2["① 经典代码 走查/符号表/文件头/重定位<br/>② 模型数据 10 个阶段 11 个网络含 combo<br/>③ 唯一 kernel"]
+        A2["① 经典代码 走查/符号表/文件头/重定位<br/>② 模型数据 14 个阶段（含只在对照臂的 isel/combo）<br/>③ 唯一 kernel"]
         A3["kernel: embed → gemv → ReLU → gemv → argmax<br/>部署无 softmax 无 libm"]
         A1 --> A2 --> A3
     end
@@ -65,7 +65,7 @@ flowchart TD
 
     subgraph R7["⚒️ 七号厅 · 熔炉 —— Lowering"]
         G1["锚：炉口分出六条铸道"]
-        G2["isel form/symbol/gate<br/>abi sysno/arg0-2/ret/tls<br/>enc 五种 form · reloc 三种"]
+        G2["abi sysno/arg0-5/ret/gate/nrreg<br/>enc 五种 form · reloc 三种<br/>regmap tape 寄存器 → 机器寄存器"]
         G3["lnx osx win × x86_64 arm64"]
         G4["osx sysno = 0x02000000 或上 nr<br/>这一位是承重的"]
         G1 --> G2 --> G3 --> G4
@@ -109,7 +109,7 @@ flowchart LR
 
     TAPE --> VM["vm.py 解释器<br/>★基准真值"]
 
-    TAPE --> LOW["lower<br/>isel · abi · enc · reloc"]
+    TAPE --> LOW["lower<br/>abi · enc · reloc · regmap"]
     LOW --> T1["lnx/x86_64"]
     LOW --> T2["lnx/arm64"]
     LOW --> T3["osx/x86_64"]
@@ -194,7 +194,7 @@ stateDiagram-v2
 | **6/6 与 4/6** | 正向验收 与 反向对照 |
 | **7f454c46 / cffaedfe / 4d5a** | ELF / Mach-O / PE 魔数 |
 | **P-1 / P-2** | Oracle 不透明性 / key 全域性——组合等价与唯一真推理义务 |
-| **11 个模型** | 每决策点一个，默认路径用 10 个（combo 是 isel+abi 的替代） |
+| **14 个模型** | 每决策点一个；发布路径（`--drive built`）用 12 个，`isel` 与 `combo` 只在对照臂 |
 | **21,945 θ** | 全部训练产物；默认 spec 路径 11,892 θ |
 | **P-8** | 存在性已构造式证明 —— 开放的是最小性，不是可行性 |
 | **q4 / i8** | 8 个阶段止于 q4，3 个止于 i8，**q2 无一幸存** |

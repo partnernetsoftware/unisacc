@@ -3,9 +3,11 @@
     embed keys -> [factor] [bilinear] -> gemv+ReLU (1..2) -> heads -> argmax
 
 TableNet : hidden=[h],        heads={'y': nout}
-isel     : hidden=[24,16],    heads form/symbol/gate
-abi      : hidden=[32,20],    heads sysno/arg0-2/ret/tls, bilinear=8
-combo    : hidden=[48,32],    9 heads, factor=12 bilinear=8, shared W_reg
+isel     : hidden=[24,16],    heads form/symbol  (spec arm only: the
+                              lowering does not ask it -- enc supersedes the
+                              form and no encoder reads the symbol)
+abi      : hidden=[32,20],    heads sysno/arg0-5/ret/gate/nrreg, bilinear=8
+combo    : hidden=[48,32],    12 heads, factor=12 bilinear=8, shared W_reg
 """
 import math
 from .rng import Rng

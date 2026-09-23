@@ -29,7 +29,7 @@
 
 | 术语 | 定义 |
 |---|---|
-| **stage（阶段）** | 一个表形状的决策点，各由一个独立小模型作答。共 10 个：pp lex parse type scope irsel isel abi enc reloc（外加 `combo`，是 isel+abi 的替代装配）。清单见 §3.0 |
+| **stage（阶段）** | 一个表形状的决策点，各由一个独立小模型作答。共 14 个：pp lex parse type scope irsel tyinfo pfconv（前端）、enc reloc regmap abi（后端），外加只在对照臂里的 `isel` 与 `combo`。清单见 §3.0 |
 | **key** | 某阶段的一个输入元组，取自该阶段声明的字段词表 |
 | **K_s** | 阶段 s 的 key 全域 = 各字段词表的完整笛卡尔积 |
 | **gold** | 阶段 s 上的参考标签函数 `G_s : K_s → Class_s`，全函数 |
@@ -190,7 +190,7 @@ unisa compile ... --from-tape  # 输入是 .tape 而非 C（只做 lowering + �
 | ID | 条款 |
 |---|---|
 | **U-1** | `unisa run file.c --fold` 是产品本体；权重缺失时首次运行自动训练 |
-| **U-2** | `--drive`（默认 `spec`）：`gold` 强制全部走表；`spec` = isel∘abi 两个 StageNet；`combo` = 单个 UnisaNet 供 9 头；**`built` = 构造出的整数网络**（K-5，精确性由构造保证，无 readiness 门禁）。前端表不受 spec/combo 影响，但 `built` 覆盖全部阶段 |
+| **U-2** | `--drive`（默认 `built`）：`gold` 强制全部走表；`spec` = isel∘abi 两个 StageNet；`combo` = 单个 UnisaNet 供 12 头；**`built` = 构造出的整数网络**（K-5，精确性由构造保证，无 readiness 门禁）。前端表不受 spec/combo 影响，但 `built` 覆盖全部阶段 |
 | **U-3** | `--fault`：`--fold` 的反向对照（§5.1），正常运行不出现 |
 | **U-4** | 退出码：`0` 成功 / `1` 编译错误 / `2` fold 未达 6/6 |
 
@@ -207,37 +207,44 @@ unisa compile ... --from-tape  # 输入是 .tape 而非 C（只做 lowering + �
 key 空间互不相干，共享 trunk 没有结构可共享、只有互相挤占。分立还带来**变更局部性**
 ——改一张 gold 只需重训那一张（约 0.3 秒）。
 
-全部 11 个模型共用同一个 kernel（[K-1]），只有形状和权重不同。
+全部 14 个模型共用同一个 kernel（[K-1]），只有形状和权重不同。
 
-| 模型 | 工作流位置 | key 空间 | 行数 | emb 维 | 层形状 | 头(类数) | 交互项 | seed | θ |
-|---|---|---|---|---|---|---|---|---|---|
-| `pp` | 前端 · 预处理 | `dir(9)×defined(2)` | 18 | 6 | `12` | `y(4)` | — | 23 | 274 |
-| `lex` | 前端 · 词法 | `c(11)×peek(11)` | 121 | 6 | `12` | `y(10)` | — | 31 | 418 |
-| `parse` | 前端 · 语法 | `nt(5)×tok(68)` | 340 | 8 | `16` | `y(35)` | — | 13 | 1451 |
-| `type` | 前端 · 类型 | `t1(13)×op(19)×t2(13)` | 3211 | 8 | `32` | `y(14)` | — | 17 | 1622 |
-| `scope` | 前端 · 作用域 | `ctx(6)×kind(5)` | 30 | 8 | `16` | `y(7)` | — | 19 | 479 |
-| `irsel` | 前端 · IR 选择 | `family(5)×flavor(38)` | 190 | 8 | `16` | `y(34)` | — | 11 | 1194 |
-| `enc` | 后端 · 编码形式 | `op(46)×os(3)×arch(2)` | 276 | 8 | `16` | `y(5)` | — | 29 | 893 |
-| `reloc` | 后端 · 重定位 | `kind(3)×arch(2)` | 6 | 6 | `8` | `y(3)` | — | 37 | 161 |
-| `isel` | 后端 · 指令选择 | `op(46)×arch(2)` | 92 | 12+8 | `24→16` | `form(5),symbol(62)` | — | 3 | 2628 |
-| `abi` | 后端 · 调用约定 | `op(43)×os(3)×arch(2)` | 258 | 12+8+8 | `32→20` | `sysno(56),arg0(18),arg1(18),arg2(18),ret(18),tls(4),gate(5)` | bilinear 8d | 5 | 4421 |
-| `combo` | 后端 · 合一（替代 isel+abi） | `op(43)×os(3)×arch(2)` | 258 | 16+8+8 | `48→32` | `form(5),symbol(59),sysno(56),arg0(18),arg1(18),arg2(18),ret(18),tls(4),gate(5)` | factor 12d+bilinear 8d | 7 | 10397 |
+| 阶段 | 工作流位置 | key 空间 | 行数 | 头(类数) | 单元 |
+|---|---|---|---|---|---|
+| `pp` | 前端 · 预处理 | `dir(9)×defined(2)` | 18 | `y(4)` | 6 |
+| `lex` | 前端 · 词法 | `c(12)×peek(12)` | 144 | `y(10)` | 11 |
+| `parse` | 前端 · 语法 | `nt(5)×tok(68)` | 340 | `y(36)` | 34 |
+| `type` | 前端 · 类型 | `t1(15)×op(19)×t2(15)` | 4275 | `y(16)` | 61 |
+| `scope` | 前端 · 作用域 | `ctx(6)×kind(5)` | 30 | `y(7)` | 9 |
+| `irsel` | 前端 · IR 选择 | `family(6)×flavor(66)` | 396 | `y(66)` | 71 |
+| `enc` | 后端 · 编码形式 | `op(70)×os(3)×arch(2)` | 420 | `y(5)` | 5 |
+| `reloc` | 后端 · 重定位 | `kind(3)×arch(2)` | 6 | `y(3)` | 3 |
+| `regmap` | 后端 · 寄存器映射 | `treg(8)×arch(2)` | 16 | `y(16)` | 10 |
+| `tyinfo` | 前端 · 类型事实 | `t(16)` | 16 | `size(4),uns(2),narrow(2)` | 6 |
+| `pfconv` | 前端 · printf 转换 | `conv(9)` | 9 | `y(7)` | 7 |
+| `isel` | 仅 spec/combo 臂 | `op(70)×arch(2)` | 140 | `form(5),symbol(91)` | 70 |
+| `abi` | 后端 · 调用约定 | `op(70)×os(3)×arch(2)` | 420 | `sysno(56),arg0(18),arg1(18),arg2(18),arg3(18),arg4(18),ar…` | 37 |
+| `combo` | 后端 · 合一（替代 isel+abi） | `op(70)×os(3)×arch(2)` | 420 | `form(5),symbol(91),sysno(56),arg0(18),arg1(18),arg2(18),a…` | 83 |
+| **合计** | | | **6650** | | **413** |
 
-> 本表由 `unisa/gold.py` 的 `STAGES` 派生，行数与 θ 为实测值（`unisa train` 末尾那张表）。
-> 词表扩张会同时改行数与 θ；`type` 的 9 个类型里 `i16` 是 2026-09-19 补的（E-31）。
+> 本表**由 `unisa/gold.py` 与发布的构造权重生成**（`python3 -m unisa acc` 是同一批
+> 数字）。它漂过三次，所以这里只放构造路径的行数与单元数；训练 θ 属于对照臂，见
+> [E-1]，不在发布路径上。`isel` 仍是一个阶段，但 **lowering 不再询问它**：它的
+> `form` 由 os 感知的 `enc` 取代，`symbol` 没有任何编码器读（`tests/ablate.sh`）。
 
 **装配方式**（`--drive`，[U-2]）：
 
-| 模式 | 使用的模型 | 合计 θ |
-|---|---|---|
-| `spec`（默认） | pp lex parse type scope irsel enc reloc **isel abi** | **11,892** |
-| `combo` | pp lex parse type scope irsel enc reloc **combo** | 13,584 |
-| `gold` | 不用模型，全部查表（训练中途仍可编译，见 [O-1]） | 0 |
+| 模式 | 使用的模型 |
+|---|---|
+| `built`（默认，发布路径） | 全部 14 个的**构造整数权重** |
+| `spec` | 训练臂：pp lex parse type scope irsel enc reloc **isel abi**（历史口径） |
+| `combo` | 训练臂：前端各表 + **combo** 替代 isel+abi |
+| `gold` | 不用模型，全部查表（见 [O-1]） |
 
-`combo` 是 `isel`+`abi` 的**替代**而非追加：同一 key 空间 `op×os×arch` 上的 9 个头合一。
+`combo` 是 `isel`+`abi` 的**替代**而非追加：同一 key 空间 `op×os×arch` 上的头合一。
 两条路径在完整 gold 上逐 key 同类（[D-7]），所以 `--drive` 不改变编译结果，只改变由谁作答。
 
-**前端 6 个** 把源码走到通用 tape，**后端 4 个** 把 tape 铺到 6 个目标。
+**前端 8 个** 把源码走到通用 tape，**后端 4 个** 把 tape 铺到 6 个目标（`isel` 与 `combo` 只在对照臂里）。
 形状细则见 [N]（TableNet）与 [S]（StageNet / combo）；每个 key 空间的标签函数见 [G]。
 
 ### 3.1 唯一 kernel [K]
@@ -282,8 +289,8 @@ u = (t ^ (t >>> 14)) & M32  ;  return u / 2^32
 
 | ID | 网络 | 规格 |
 |---|---|---|
-| **S-1** | isel | emb op12+arch8，h1=24 h2=16，heads form/symbol/gate，seed 3 |
-| **S-2** | abi | emb op12+os8+arch8，h1=32 h2=20，heads sysno/arg0-2/ret/tls，bilinear 8d，seed 5 |
+| **S-1** | isel | emb op12+arch8，h1=24 h2=16，heads form/symbol（gate 已移入 abi），seed 3 |
+| **S-2** | abi | emb op12+os8+arch8，h1=32 h2=20，heads sysno/arg0-5/ret/gate/nrreg，bilinear 8d，seed 5 |
 | **S-3** | combo | ~10.5kθ，seed 7，`E_op[38,16] E_os[3,8] E_arch[2,8]` |
 
 **S-4** combo 的 `h0=52` 分解：
@@ -356,7 +363,7 @@ PRODS = end fn global typedef struct enum decl if while for do switch case defau
         inc field done fn_sig var_def
 ```
 
-**G-2 type** — TYS(13) × TOPS(19) × TYS(13) → TYS|illegal，**3211 行**
+**G-2 type** — TYS(15) × TOPS(19) × TYS(15) → TYS|illegal，**4275 行**
 
 ```
 TYS  = void i8 i16 i32 i64 u8 u16 u32 u64 ptr arr struct fn
@@ -507,7 +514,7 @@ oracle.ask(stage, key_tuple) -> class_name
 | ID | 条款 |
 |---|---|
 | **O-1** | 网络存在**且** `net.acc >= NET_READY`（在 FULL gold 上测得）→ 网络 argmax；否则 → 查 gold 表 |
-| **O-2** | 逐阶段统计 net / gold 用量，`unisa run` 末尾打印 `nets: k/10 driven` |
+| **O-2** | 逐阶段统计 net / gold 用量，`unisa run` 末尾打印 `nets: k/14 driven` |
 | **O-3** | 无条件断言 `key ∈ K_s`（P-2） |
 | **O-4** | 遵守 P-1 / P-1a / P-1b：只回传类名，不泄露任何内部状态 |
 
@@ -586,7 +593,7 @@ exit 60/93/1 ExitProcess；read 0/63/3 ReadFile；write 1/64/4 WriteFile；open 
 **C-6** 除 `tls_base` 外，MOPS 的 arg0-2/ret/tls 一律 `none`；`tls_base` 的 tls 按 os 取 `fsbase|tpidr_el0|teb`。
 **C-7** win 下 `sysno = none`，WinAPI 名字落在 `symbol`。
 
-**C-8** 本节是 isel / abi / enc / combo 的**唯一真源**；9 头 gold 必须由 `(op, os, arch)` 上的函数派生（G-9），`SYMS`/`SYSNOS` 即它吐出的值。
+**C-8** 本节是 isel / abi / enc / combo 的**唯一真源**；多头 gold 必须由 `(op, os, arch)` 上的函数派生（G-9），`SYMS`/`SYSNOS` 即它吐出的值。
 
 ### 4.5 Lowering [L]
 
@@ -737,7 +744,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-9** | `unisa compile` → 三魔数正确 | I-1..3 |
 | **A-10** | 同输入编译两次 → 字节相同 | D-5 |
 | **A-11** | `weights/parse.i8.unisa` 以 `554e5331` 开头 | Q-1 |
-| **A-12** | `unisa acc` → **每阶段 = 1.000**，验的是**出货的构造权重**（0.05 秒，4,560 key 全枚举）；`--trained` 才看 SGD 对照组，且**不作门槛** | F-3, P-3, U-5 |
+| **A-12** | `unisa acc` → **每阶段 = 1.000**，验的是**出货的构造权重**（0.05 秒，6,650 key 全枚举）；`--trained` 才看 SGD 对照组，且**不作门槛** | F-3, P-3, U-5 |
 | **A-13** | `unisa quant` → 每个出货阶段在其记录 dtype 下 argmax 不变 | Q-6, P-4 |
 | **A-14** | 构造两次 → `built.uns2` 字节相同。**套件不再训练**：训练是分钟级满核工作、不在出货路径上，曾把套件变成两小时的活 | D-3, D-6, U-5 |
 | **A-15** | `unisa ship` → kit 四件套齐全 | Q-10 |
@@ -746,7 +753,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-26** | 在**真 Linux 内核**上执行发出的 ELF（不是解释它）。默认由本机 Lima 虚机承担（[A-32]），GitHub 的 runner 只在把目录挪回来之后作为无尘室复核 | I-1, I-12, X-3 |
 | **A-27** | `tests/crossnative.sh` → lnx/x86_64、lnx/arm64、osx/x86_64 在真机上与解释器逐例一致 | I-12..14, X-3 |
 | **A-28** | `unisa fat` 产出 Mach-O universal，两个 slice 都执行且与解释器逐例一致 | I-19 |
-| **A-32** | `tests/linux.sh` → 整套套件在**本机虚机的真 Linux 内核**上跑过（2026-09-21 实测：`difftest 78/0`、`tools 11/11`、`corpus 209`，全绿）。虚机把仓库**只读**挂载，而套件要写（`build_ref.sh` 在源码旁边生成 `unisacc.c`），所以先把树拷进客机再跑；`corpus/` 软链回挂载点，因为套件只读它。**Linux 走 Lima 而非 UTM**：UTM 里那两台 Linux 没装 QEMU guest agent，`utmctl exec/file/ip-address` 一律失败，网络 Shared 无端口转发、MAC 不进宿主 ARP 表，所以也没有现成 SSH 路；Windows 那台**装了** agent，所以 UTM 管 Windows。GitHub 的 workflow 被**挪出 `.github/workflows/`**（放在 `workflows-disabled/`，GitHub 只读前者，所以推送、PR、手动一概点不着）：runner 是计费的，macOS 那两个按 10 倍计价，而这台机器上 macOS（原生）、Linux（Lima）、Windows（UTM）**三个平台都有**，六个目标全都能真跑。**按下推送就烧一次额度**，等于把钱花在这台机器不花钱就能做的事情上 | A-26, A-27 |
+| **A-32** | `tests/linux.sh` → 整套套件在**本机虚机的真 Linux 内核**上跑过（2026-09-21 实测：`difftest 78/0`、`tools 11/11`、`corpus 209`；2026-09-23 复测 `run 11/11`、`ape 3/3`）。虚机把仓库**只读**挂载，而套件要写（`build_ref.sh` 在源码旁边生成 `unisacc.c`），所以先把树拷进客机再跑；`corpus/` 软链回挂载点，因为套件只读它。**Linux 走 Lima 而非 UTM**：UTM 里那两台 Linux 没装 QEMU guest agent，`utmctl exec/file/ip-address` 一律失败，网络 Shared 无端口转发、MAC 不进宿主 ARP 表，所以也没有现成 SSH 路；Windows 那台**装了** agent，所以 UTM 管 Windows。**CI 只做测试，不做构建**（2026-09-23 定）：交付物在本机一个环境里交叉编译出全部目标，再经 GitHub release（在途时用草稿）搬运；Actions 只是干净机器上的第二意见。仓库转公开后 runner 免费，`.github/workflows/ci.yml` 已恢复在推送时触发，但它仍然不是产物的来源。当初把 workflow 挪走是因为：runner 是计费的，macOS 那两个按 10 倍计价，而这台机器上 macOS（原生）、Linux（Lima）、Windows（UTM）**三个平台都有**，六个目标全都能真跑。**按下推送就烧一次额度**，等于把钱花在这台机器不花钱就能做的事情上 | A-26, A-27 |
 | **A-33** | `tests/stages.sh` → 每个探针上，Python 前端问过的每个决策阶段，C 前端也问过。**所有别的套件量的都是答案**，而一条与表一致的手写规则答案与表完全相同 —— 只有这一条能看见「决定是不是网络做的」 | T-2, E-52 |
 | **A-34** | `tests/closure.sh` → 每个探针、每个目标，`unisacc FILE -b os/arch` 写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**；宿主目标的镜像真跑，输出与 VM 一致。一个头字段、一个位移、一个 REX 前缀错了都会在这里现形 | S-6, E-55 |
 | **A-35** | `tests/nativeboot.sh` → cc 编出的 unisacc `-b` 造出 unisacc（N1），N1 造 N2，N2 造 N3：**N1 = N2 = N3 逐字节**，且 N2 交叉写出的其余五个目标与 cc 编出的 unisacc 写出的相同；UTM 的 Windows 机器开着时，win/arm64 与 win/x86_64 的 unisacc 在 Windows 上各自重建自己，逐字节相同。**全程没有 Python** | S-6, E-55 |
@@ -777,14 +784,14 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | 层 | 目标 | 完成判据 | 实测（2026-09-21） |
 |---|---|---|---|
-| **S-1 命题** | 每个表形状的决策点都是网络，结构性代码不神经化 | 全 stage `acc = 1.000`（FULL gold 穷举）+ [P-1] 不透明性 | **已达**。11 个 stage，4,560 key 全枚举，零分歧 |
+| **S-1 命题** | 每个表形状的决策点都是网络，结构性代码不神经化 | 全 stage `acc = 1.000`（FULL gold 穷举）+ [P-1] 不透明性 | **已达**。11 个 stage，6,650 key 全枚举，零分歧 |
 | **S-2 目标** | 一条 tape → 六份镜像，stdout/exit 一致 | 六个目标**在真机上**逐例一致 | **已达**。`unisa fat` 是**一个 OS 内**的多架构；cosmo 式同时是 ELF/Mach-O/PE 的单文件**未开工** |
 | **S-3 语言** | C99 子集覆盖别人写的代码 | 外部语料 `unsupported 0`、`wrong 0` | **已达当前语料，含浮点**（2026-09-22）。`corpus 220 pass 214 wrong 0 unsupported 0 knownfail 6`；余下 6 个全是 C99 之外的扩展（GCC 语句表达式、空结构体、`push_macro`、C11 `_Generic`）与 [G-2] 的 64 位整数求值，见 E-54 |
 | **S-4 产品** | 对标 tcc：能编译常见 C99 工具；真正自举 | ① 工具语料棘轮（**未建**）② unisacc 自己造出自己的可执行文件 | **最远**。见下 |
 
 **S-5 为什么"推到 100%"没有理论风险。** [P-8] 的构造式存在性定理给了上界 `h = |K|`，所以"能不能到 100%"**不是开放问题**，开放的只有最小性；[F-5] 说到不了 1.000 是 **key 编码错了**，不准加宽网络；[D-7] 说网络与 gold 不一致是**其中之一有 bug**，不是模型方差；[D-1] 推理期无 RNG。合起来：**这个项目里任何一处"差一点"都是缺陷，没有一处可以赖给随机性**。剩下的全是确定性工程量，可枚举、可验收。
 
-**S-6 自举闭环已达：没有 Python 的自举。**（2026-09-22，E-55）unisacc 带着自己的后端（`src/unisacc_back.c`：lowering、两个编码器、ELF/Mach-O/PE），`unisacc FILE -b os/arch` 直接写出可执行文件。判据是最严的那种：对每个探针、每个目标，它写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**（[A-34] closure 534/534）；cc 编出的 unisacc 用 `-b` 造出 unisacc，那个原生 unisacc 再造自己，**N1 = N2 = N3 逐字节**，并且交叉写出的其余五个目标也一致（[A-35] nativeboot，osx/arm64 与 lnx/arm64 两台真机）。[A-23] 的 B=C=U 仍保留，它证明的是 tape 经 Python 后端的不动点；这里证明的是镜像经自己的后端的不动点。
+**S-6 自举闭环已达：没有 Python 的自举。**（2026-09-22，E-55）unisacc 带着自己的后端（`src/unisacc_back.c`：lowering、两个编码器、ELF/Mach-O/PE），`unisacc FILE -b os/arch` 直接写出可执行文件。判据是最严的那种：对每个探针、每个目标，它写出的镜像与 Python 后端从同一条 tape 写出的**逐字节相同**（[A-34] closure 540/540）；cc 编出的 unisacc 用 `-b` 造出 unisacc，那个原生 unisacc 再造自己，**N1 = N2 = N3 逐字节**，并且交叉写出的其余五个目标也一致（[A-35] nativeboot，osx/arm64 与 lnx/arm64 两台真机）。[A-23] 的 B=C=U 仍保留，它证明的是 tape 经 Python 后端的不动点；这里证明的是镜像经自己的后端的不动点。
 
 **S-7 "能编译常见 C99 工具"的卡点是形态，不是语言特性。** 按"离判据多远 ÷ 成本"排：
 
@@ -795,8 +802,8 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | 3 | **libc 地板** `<ctype.h>` `<limits.h>` `<assert.h>` + `exit` | **已做**，[W-15] |
 | 4 | **运行期格式串的 `printf`** —— `<stdio.h>` 本来就有完整的 `_u_vfmt`，缺的只是把非字面量格式串从内建路径放行 | **已做**，[W-9] |
 | 5 | **工具语料棘轮** —— 真实库代码，多文件，自带已知答案测试 | **已做**，[A-31]，三个仓 `pass 11/11`，见 E-45、E-46 |
-| 6 | **自举前端追平**（由第 1 项驱动） | **已达**（2026-09-22）：probes 83/83、`ccrun` 83 一致 / 0 已知分歧 / 0 拒绝，语料接受 211/220（覆盖 Python 前端通过的全部 209），词法器 83/0，两平台全绿，见 E-47..E-53 |
-| 7 | **自举闭环**：lowering/编码/镜像进 C | **已达**（2026-09-22）：镜像与 Python 后端 534/534 逐字节相同，原生 N1=N2=N3，osx/lnx/win 四个目标真机自举。见 E-55 |
+| 6 | **自举前端追平**（由第 1 项驱动） | **已达**（2026-09-22）：probes 90/90、`ccrun` 90 一致 / 0 已知分歧 / 0 拒绝，语料接受 216/220（覆盖 Python 前端通过的全部 209），词法器 83/0，两平台全绿，见 E-47..E-53 |
+| 7 | **自举闭环**：lowering/编码/镜像进 C | **已达**（2026-09-22）：镜像与 Python 后端 540/540 逐字节相同，原生 N1=N2=N3，osx/lnx/win 四个目标真机自举。见 E-55 |
 | 8 | **浮点** | **已达**（2026-09-22）：两个前端、两个 ISA、VM 与目标解释器；`%f/%e/%g` 与平台 libc 逐位一致；`<math.h>` 为 fdlibm，1 ulp 以内。见 E-54 |
 | 9 | cosmo 式三格式单文件 | **已达**（2026-09-23）：`unisaccrun.com` 一个文件，对 Windows 是 PE、对 Unix shell 是脚本，内含四个切片；macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64（x64 仿真）都跑通。见 E-56 |
 | 10 | **编译即运行**（`tcc -run` 那一类） | **已达**（2026-09-23）：`unisaccrun FILE.c` 不落盘，直接在内存里编译并运行。见 E-56 |
@@ -820,12 +827,12 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | 命题 | 状态 | 依据 |
 |---|---|---|
 | **P-8** 任意有限积上的全函数，存在精确实现它的 kernel 权重 | **已证明**（构造式，11/11 机器验证）。**但这是已知结果**，不是本文贡献 —— [R-1] | §1.4 · E-19 · Omlin & Giles'96 · Tracr'23 |
-| **P-3** `net ≡ gold` 可判定 | **已证明**（全域枚举，4,560 key，0 分歧） | E-5 |
+| **P-3** `net ≡ gold` 可判定 | **已证明**（全域枚举，6,650 key，0 分歧） | E-5 |
 | **P-4** 量化等价可判定 | **已证明**（全域枚举，含 K-3 整数算术） | E-6′ |
 | **P-5** 组合等价 `C[N] ≡ C[O]` | **已证明**（由 P-3 + P-1 同余，无需对 C 归纳） | §1.4 |
 | **P-7** 目标等价 | **实证**（7 例 × 6 目标全同；三种故障注入均退化到 4/6） | E-17 |
 | **P-2** key 全域性 | **未证明** —— 运行时无条件断言。**唯一需要对走查器做真推理的义务** | §1.4 · O-3 |
-| **P-6** `gold ≡ C99` | **本实验不声称**。已九次由实现暴露缺陷（3 次在 gold、6 次在走查器），而 acc 全程满分。外部语料给出可测数字：220 例 pass 209 / wrong 0 / unsupported 0 | E-2 · E-15 · E-16 · **E-30** |
+| **P-6** `gold ≡ C99` | **本实验不声称**。已九次由实现暴露缺陷（3 次在 gold、6 次在走查器），而 acc 全程满分。外部语料给出可测数字：220 例 pass 214 / wrong 0 / unsupported 0 | E-2 · E-15 · E-16 · **E-30** |
 | **P-8a** `h_min(f)` 的组合刻画 | **不是开放问题**：即（多值）两级逻辑最小化，NP-complete 且难近似 —— [R-1] | §1.4 · Masek'79 · Brayton et al.'84 |
 | **P-8b** 可达性分离（精确解存在但 SGD 不可达） | **有实例**；但这是**已建立的定理家族**，我们只贡献真实编译器表上的实例 —— [R-1] | E-18（s2：12.8× 参数仍 0.8143）· Shalev-Shwartz et al.'17 |
 | **P-8c** 是否存在 `O(h_min)` 构造算法 | **一般情形已被难近似结果排除** —— [R-1] | §1.4 · Allender et al. JCSS'08 |
@@ -841,6 +848,13 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 一条发现被证伪时**保留编号并标记**，不删除——证伪过程本身是结果。
 
 ### 6.1 已证实
+
+> **读法（2026-09-23 加）**：每条实验记录的是**它当时**的口径。2026-09-22 之前的
+> 条目说“11 个阶段 / 4,560 key”，此后是 14 个阶段 / 6,650 key（新增 `regmap`、
+> `tyinfo`、`pfconv`，`isel` 退出 lowering，`abi` 去 `tls` 加 `nrreg` 与
+> `arg3..arg5`）；探针数由 83 → 89 → 90。这些数字**不更新**：改了就不再是当时的测量。
+> 当前事实看 §3.0、§5.5 与 `python3 -m unisa acc`。
+
 
 #### E-38　解释器比 CPU 宽容：`.write` 会冲掉 ABI 参数寄存器，而 tape VM 不建模这件事
 
@@ -936,7 +950,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | 栏 | 内容 |
 |---|---|
-| **结果** | [A-34] closure：89 个探针 × 6 个目标 **534/534 镜像与 Python 后端逐字节相同**，宿主镜像 89/89 与 VM 一致；[A-35] nativeboot：**N1 = N2 = N3**，交叉 5/5，osx/arm64 与 lnx/arm64；**在 Windows 真机上** win/arm64 与 win/x86_64（后者经 Windows 自带的仿真）的 unisacc 也各自重建出逐字节相同的自己。四个目标、三个操作系统上没有 Python 的自举。macOS、Linux 全绿 |
+| **结果** | [A-34] closure：90 个探针 × 6 个目标 **540/540 镜像与 Python 后端逐字节相同**，宿主镜像 90/90 与 VM 一致；[A-35] nativeboot：**N1 = N2 = N3**，交叉 5/5，osx/arm64 与 lnx/arm64；**在 Windows 真机上** win/arm64 与 win/x86_64（后者经 Windows 自带的仿真）的 unisacc 也各自重建出逐字节相同的自己。四个目标、三个操作系统上没有 Python 的自举。macOS、Linux 全绿 |
 | **做法** | 后端是**移植**，不是重新设计：`lower.py`、`assemble.py`、`emit_arm.py`、`emit_x86.py` 与三个镜像写出器逐函数搬进 C，`catalog` 仍是唯一真源（`ckernel.py` 把后端词表连同模型一起发成 C）。零数据从不在内存里展开：`.bss` 只是一个长度，写出器流式输出 |
 | **① 指针深度** | unisacc 把 `int **q` 的 `*q` 当 4 字节 int 读、指针数组按 4 字节一格排。解释器的地址恰好放得进 32 位，**只有原生镜像**会把高半截丢掉 |
 | **② 静态局部变量** | unisacc 把 `static` 局部当普通局部：每次调用重新开始。解释器的栈是新的、恰好全零，看起来「保留」了值 |
@@ -1622,21 +1636,14 @@ M8 验收与度量     tests/acceptance.sh + bench             ⟦B-1..B-6⟧
 
 ### 7.3 版本沿革
 
-`archive/prd.v1.md` 原始规格 · `v2.1` 展开版（英文） · `v2.2` 精炼版 · **v3 分层重编号**。
+v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已归档到
+[`archive/prd-history.md`](archive/prd-history.md)：那些数字记录的是当时的口径
+（`OPS` 38、9 头、TYS 8→9、selfgap 31/73 等），与今天的代码不符，留在正文里只会
+被当成现状读。
 
-**v2 钉死**（按会先咬人的顺序）：LR 是 epoch 衰减表而非参数量分档 · `h0=52` 给出五段分解 · 9 头连同词表枚举 · `OPS` 固定 38 且顺序写死 · "FULL gold" 定义为完整笛卡尔积 · parse 覆盖规则拆行（v1 原文无法无歧义切词）· type 的 `1/19 illegal` 解读为训练下采样 + 全量评估 · enc/reloc/irsel 默认分支补全 · 补齐 connect/bind/listen/accept 的 win 符号 · r0–r7 寄存器映射与 MOPS 的 `none` 约定 · 完整列出 tape 指令集 · `--fold` 明确为逐目标 lowering **且**目标感知解释 · 加入反向对照 · 补 Mach-O/PE 魔数、退出码、`--drive`、`--holdout` 语义、Oracle 分发 · 选定 fib/ptr/struct 预期输出。
-
-**v2.1 新增**：确定性契约 [D] · 超级拟合确立为目标、`SHIP_ACC=1.000` [F] · q4/q2 dtype 与按行 scale [Q] · argmax 不变性作为量化唯一判据与逐阶段混合 dtype [Q-6..Q-9] · 体积/速度预算与 tinycc 对比 [B]。
-
-**v3 新增**：§1.4 证明义务与接口约束 [P] —— Oracle 不透明性、key 全域性、五层义务分层；全文条款编号；四层重排；验收清单挂条款依赖 [A-5..A-16]。
-
-**v3.1 新增**：§6 实验发现 [E] —— 面向论文的知识沉淀章节，五栏固定格式（命题/证据/机理/意义/状态），已录 E-1..E-5 已证实、E-6..E-11 待验证、E-2′/E-3′ 已证伪、四条开放问题。据实测修正两处：G-2a 的 1/19 下采样已废止（E-2），B-2a 明确体积对比基线（E-3）。并修正 v2 的计数笔误 PRODS 34→32。
-
-**v3.2 新增**（2026-09-19）：§6.6 先行研究与定位 [R-1..R-4] —— 据 `research/prior-art.md` 撤回三条与文献重复的主张（P-8 存在性、P-8b 难度、穷举验证方法），把 P-8a/P-8c 从"开放问题"改回它们本来的名字（两级逻辑最小化），并把体积主张整体换成**接口统一性**。新增外部语料验收 [A-25] 与真内核执行 [A-26]；新增宿主契约 [I-12]（ELF 的 rw 段）；`type` 表补入 `i16`（`short`），TYS 8→9、行数 1216→1539。§3.2 的模型总表改为由 `unisa/gold.py` 派生的实测值。
-
-**v3.4 新增**（2026-09-21）：**§5.5 完成度盘点** [S-1..S-8] —— 四层目标、各自的可测判据、实测数字与卡点排序；**libc 地板** [W-15]（`<ctype.h>` `<limits.h>` `<assert.h>` + `exit`/`abort`）；**多翻译单元** [W-14] [A-30] —— `unisa compile a.c b.c` 无链接器、无目标文件，同一个 walker 走完全部单元；文件作用域 `static` 按文件改名，单文件 tape 逐字节不变。**自举差距上棘轮** [A-29] `tests/selfgap.sh`：unisacc 自己的前端只接受 111/220 语料与 31/73 探针，而这个差距此前**没有任何仪表**（见 E-43）。
-
-**v3.3 新增**（2026-09-21）：**六个目标全部真机执行** —— E-35 改写为已证实，两个根因（`MajorSubsystemVersion` 10.0 把加载器拨到严格路径；tape SP 在 Win64 是 volatile，`winstdh` 必须先于 `spinit`）；[I-16] / [I-17] 改正 —— 撕掉之前“`.reloc` 与 load config 对 arm64 PE 必需”的错误推论，并记下那条方法学教训；`tests/crossnative.sh` 接入 UTM 里的 Windows 11，两个 win 目标每次随套件真跑（虚机不在则跳过）。
+**此后的变化**按实验条目记在 §6：浮点 [E-54]、自举闭环 [E-55]、编译即运行与单文件
+打包 [E-56]，以及表形决策的对齐（`regmap`/`tyinfo`/`pfconv` 三个新阶段、`isel`
+退出 lowering、`abi` 去 `tls` 加 `nrreg`/`arg3..5`）。
 
 ### 7.4 仍可重选
 
