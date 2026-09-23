@@ -4,6 +4,7 @@ import { createWebGPURenderer } from "./renderer-webgpu.js";
 import { Scene, PerspectiveCamera } from "./scene.js";
 import { HOST_ABI_VERSION } from "./host-abi.js";
 import { decodeRenderPacket } from "./packet.js";
+import { encodeInputSnapshot, INPUT_BYTES } from "./input.js";
 
 /**
  * @param {HTMLCanvasElement} canvas
@@ -12,13 +13,15 @@ import { decodeRenderPacket } from "./packet.js";
  */
 export async function createBrowserHost(canvas, opts = {}) {
   const baseURL = opts.baseURL || new URL(".", import.meta.url);
-  const prefer = opts.prefer; // undefined → try webgpu then webgl
+  // Default webgl for reliable demos; webgpu when explicitly preferred and healthy.
+  const prefer = opts.prefer || "webgl";
 
   let renderer = null;
-  if (prefer !== "webgl") {
+  if (prefer === "webgpu") {
     try {
       renderer = await createWebGPURenderer(canvas);
-    } catch {
+    } catch (e) {
+      console.warn("[uxe-host] webgpu init failed", e);
       renderer = null;
     }
   }
@@ -74,17 +77,29 @@ export async function createBrowserHost(canvas, opts = {}) {
       return performance.now();
     },
 
-    host_input_read() {
+    /**
+     * @param {ArrayBuffer|ArrayBufferView} [buf]
+     * @returns {object|number} object if no buf; byte length written if buf
+     */
+    host_input_read(buf) {
       let ix = 0, iy = 0;
       if (keys.KeyA || keys.ArrowLeft) ix -= 1;
       if (keys.KeyD || keys.ArrowRight) ix += 1;
       if (keys.KeyS || keys.ArrowDown) iy -= 1;
       if (keys.KeyW || keys.ArrowUp) iy += 1;
-      return {
+      const snap = {
         ix, iy,
         fire: keys.Space ? 1 : 0,
         keys: { ...keys },
       };
+      if (buf != null) {
+        const ab = buf instanceof ArrayBuffer
+          ? buf
+          : buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+        encodeInputSnapshot(snap, ab);
+        return INPUT_BYTES;
+      }
+      return snap;
     },
 
     host_frame_begin() {},

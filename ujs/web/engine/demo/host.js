@@ -5,14 +5,19 @@ import { runAsteroidCore } from "../core-asteroid.js";
 const hud = document.getElementById("hud");
 const banner = document.getElementById("banner");
 const finalEl = document.getElementById("final");
-const canvas = document.getElementById("c");
+let canvas = document.getElementById("c");
 
 hud.textContent = "Host ABI boot…";
 
+const prefer = new URLSearchParams(location.search).get("gpu") === "webgpu"
+  ? "webgpu"
+  : "webgl";
+
 const host = await createBrowserHost(canvas, {
   baseURL: new URL("../../", import.meta.url),
-  prefer: "webgpu",
+  prefer,
 });
+canvas = document.getElementById("c") || canvas;
 
 function paintHud(s) {
   window.__UXE__ = { ...s, backend: host.backend };
@@ -43,7 +48,10 @@ try {
     onHud: paintHud,
   });
 } catch (e) {
-  hud.innerHTML = `<span class="warn">boot failed</span><br>${String(e.message || e)}`;
-  window.__UXE__ = { ready: false, error: String(e.message || e) };
-  host.host_log("error", String(e.message || e));
+  const msg = String(e && e.stack || e.message || e);
+  hud.innerHTML = `<span class="warn">boot failed</span><br>${msg}`;
+  window.__UXE__ = { ready: false, error: msg };
+  window.__UXE_LAST_ERR__ = msg;
+  try { host.host_log("error", msg); } catch (_) {}
+  console.error(e);
 }
