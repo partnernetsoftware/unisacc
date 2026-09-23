@@ -17,11 +17,17 @@ const left = () => {
 
 fs.rmSync(PROFILE, { recursive: true, force: true });
 fs.mkdirSync(PROFILE, { recursive: true });
+const chromeEnv = {
+  ...process.env,
+  http_proxy: "", https_proxy: "", HTTP_PROXY: "", HTTPS_PROXY: "",
+  ALL_PROXY: "", all_proxy: "", NO_PROXY: "*", no_proxy: "*",
+};
 const chrome = spawn(CHROME, [
   `--remote-debugging-port=${PORT}`, "--headless=new", "--use-angle=swiftshader",
   "--enable-webgl", "--ignore-gpu-blocklist", "--no-first-run",
-  `--user-data-dir=${PROFILE}`, URL,
-], { stdio: ["ignore", "ignore", "pipe"] });
+  "--no-proxy-server", "--proxy-bypass-list=*",
+  `--user-data-dir=${PROFILE}`, "about:blank",
+], { stdio: ["ignore", "ignore", "pipe"], env: chromeEnv });
 
 function cdp(ws, id, method, params = {}) {
   return new Promise((resolve, reject) => {

@@ -1142,7 +1142,7 @@ async function createBrowserHost(canvas, opts = {}) {
   let primaryType = "mouse";
   let primaryId = -1;
   let pointerLockEnabled = opts.pointerLock === true;
-  let stickOx = 0, stickOy = 0, stickLive = false;
+  let stickOx = 0, stickOy = 0;
   function syncPointerFromEvent(e) {
     const r = canvas.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
@@ -1170,15 +1170,17 @@ async function createBrowserHost(canvas, opts = {}) {
     if (pointerLockEnabled && !isTouch && document.pointerLockElement !== canvas) {
       canvas.requestPointerLock?.();
     }
-    if (primaryId < 0 || e.pointerId === primaryId) {
+    const newPrimary = primaryId < 0;
+    if (newPrimary || e.pointerId === primaryId) {
       primaryId = e.pointerId;
       primaryType = e.pointerType || "mouse";
     }
     canvas.setPointerCapture?.(e.pointerId);
     if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
-    stickOx = mx;
-    stickOy = my;
-    stickLive = true;
+    if (newPrimary) {
+      stickOx = mx;
+      stickOy = my;
+    }
     if (e.isPrimary !== false && (isTouch || e.button === 0 || e.button === -1 || e.buttons & 1)) {
       buttons |= BTN_LEFT;
     }
@@ -1195,7 +1197,6 @@ async function createBrowserHost(canvas, opts = {}) {
     if (e.pointerId === primaryId) {
       primaryId = -1;
       buttons &= ~BTN_LEFT;
-      stickLive = false;
     }
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
@@ -1203,7 +1204,6 @@ async function createBrowserHost(canvas, opts = {}) {
     if (e.pointerId === primaryId) {
       primaryId = -1;
       buttons &= ~BTN_LEFT;
-      stickLive = false;
     }
   }, ptrOpts);
   canvas.addEventListener("pointerleave", () => {
@@ -1272,7 +1272,7 @@ async function createBrowserHost(canvas, opts = {}) {
         movAccX = 0;
         movAccY = 0;
       }
-      if (contact && stickLive && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
+      if (contact && primaryId >= 0 && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
         const a = stickAxes(outMx - stickOx, outMy - stickOy);
         ix = a.ix;
         iy = a.iy;
@@ -1325,7 +1325,14 @@ async function createBrowserHost(canvas, opts = {}) {
       else console.log(line);
     },
     host_request_frame(cb) {
-      requestAnimationFrame(cb);
+      let fired = false;
+      const once = (t) => {
+        if (fired) return;
+        fired = true;
+        cb(typeof t === "number" ? t : performance.now());
+      };
+      requestAnimationFrame(once);
+      setTimeout(once, 50);
     },
     setPointerLockEnabled(on) {
       pointerLockEnabled = !!on;

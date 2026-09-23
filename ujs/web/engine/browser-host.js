@@ -65,8 +65,8 @@ export async function createBrowserHost(canvas, opts = {}) {
   let primaryId = -1;
   // Opt-in: FPS look (drone mouse). Asteroid / touch stay unlocked.
   let pointerLockEnabled = opts.pointerLock === true;
-  /** Stick origin in NDC at pointerdown (relative drag). */
-  let stickOx = 0, stickOy = 0, stickLive = false;
+  /** Stick origin in NDC at primary pointerdown (relative drag). */
+  let stickOx = 0, stickOy = 0;
 
   function syncPointerFromEvent(e) {
     const r = canvas.getBoundingClientRect();
@@ -104,15 +104,18 @@ export async function createBrowserHost(canvas, opts = {}) {
     ) {
       canvas.requestPointerLock?.();
     }
-    if (primaryId < 0 || e.pointerId === primaryId) {
+    const newPrimary = primaryId < 0;
+    if (newPrimary || e.pointerId === primaryId) {
       primaryId = e.pointerId;
       primaryType = e.pointerType || "mouse";
     }
     canvas.setPointerCapture?.(e.pointerId);
     if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
-    stickOx = mx;
-    stickOy = my;
-    stickLive = true;
+    // Origin only when a new primary contact begins (ignore compat duplicates).
+    if (newPrimary) {
+      stickOx = mx;
+      stickOy = my;
+    }
     // Primary contact → "left". Synthetic PointerEvents in headless may omit
     // button/buttons; touch always counts.
     if (
@@ -135,7 +138,6 @@ export async function createBrowserHost(canvas, opts = {}) {
     if (e.pointerId === primaryId) {
       primaryId = -1;
       buttons &= ~BTN_LEFT;
-      stickLive = false;
     }
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
@@ -144,7 +146,6 @@ export async function createBrowserHost(canvas, opts = {}) {
     if (e.pointerId === primaryId) {
       primaryId = -1;
       buttons &= ~BTN_LEFT;
-      stickLive = false;
     }
   }, ptrOpts);
 
@@ -223,8 +224,9 @@ export async function createBrowserHost(canvas, opts = {}) {
         movAccX = 0;
         movAccY = 0;
       }
-      // Relative stick: drag from press origin (not screen center) → less twitchy.
-      if (contact && stickLive && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
+      // Relative stick: drag from primary-down origin → ix/iy (large deadzone).
+      if (contact && primaryId >= 0 && ix === 0 && iy === 0 &&
+          document.pointerLockElement !== canvas) {
         const a = stickAxes(outMx - stickOx, outMy - stickOy);
         ix = a.ix;
         iy = a.iy;
@@ -285,7 +287,16 @@ export async function createBrowserHost(canvas, opts = {}) {
     },
 
     host_request_frame(cb) {
-      requestAnimationFrame(cb);
+      // rAF preferred; setTimeout fallback keeps the loop alive in headless
+      // (macOS CVDisplayLink often fails without a display).
+      let fired = false;
+      const once = (t) => {
+        if (fired) return;
+        fired = true;
+        cb(typeof t === "number" ? t : performance.now());
+      };
+      requestAnimationFrame(once);
+      setTimeout(once, 50);
     },
 
     setPointerLockEnabled(on) {
