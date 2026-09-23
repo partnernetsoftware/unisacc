@@ -76,6 +76,23 @@ run args.c a b c >/dev/null; say "exit status" "4" "$?"
 got=$(run nosuch.c); case "$got" in *"cannot open"*) got="diagnosed";; esac
 say "missing input" "diagnosed" "$got"
 
+# -E: the preprocessor on its own, the way cc's is.  A build system that
+# runs `CC -E` to chase dependencies gets text, not a refusal.
+cat > "$T/pp.c" <<'EOF'
+#define TWICE(x) ((x) + (x))
+int v = TWICE(21);
+EOF
+got=$( (cd "$T" && perl -e 'alarm 60; exec @ARGV' "$UA_RUN" -E pp.c 2>&1) | tr -s ' \n' ' ')
+# macro expansion leaves its own spacing, exactly as cc -E does; what
+# matters is that the argument was substituted twice
+case "$got" in *"int v = ((21) + (21))"*) got="expanded";; esac
+say "-E preprocesses" "expanded" "$got"
+
+# the flags a Makefile passes that mean nothing here must not be refused:
+# there is one dialect, one optimisation level, no separate debug info
+say "-Wall -O2 -g -std" "ok" "$( (cd "$T" && perl -e 'alarm 120; exec @ARGV' \
+    "$UA_RUN" -Wall -O2 -g -std=c99 -run def.c 2>&1) | sed 's/^off$/ok/')"
+
 echo
 echo "cli  ok $ok   wrong $bad   (from a scratch dir, no repo in sight)"
 # A suite that checked nothing is not green: `closure.sh` with no

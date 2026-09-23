@@ -2086,6 +2086,7 @@ int sfind(int t) {
     return 0 - 1;
 }
 
+int pponly;                 /* -E: stop after the preprocessor */
 int gdup;                   /* this global was already defined further up */
 int declptr;                /* set by the declarator being processed */
 int declsz;                 /* the declared type's size, for `sizeof` */
@@ -5903,6 +5904,10 @@ int fe_tape(char *path, char *t) {
     autoinc();
     preprocess();
     expandsrc();
+    if (pponly) {                       /* -E: the text, not a program */
+        __write(bkfd, src, nsrc);
+        return 2;
+    }
     if (lex() < 0) return 1;
     tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
     poolend = 0; nloop = 0;
@@ -5979,10 +5984,18 @@ int main(void) {
             } else { if (a[1] == 118) { verb = 1;          /* -v */
             } else { if (a[1] == 111) {                    /* -o */
                 if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
+            } else { if (a[1] == 69) { pponly = 1; dump = 1;  /* -E */
             } else { if (a[1] == 98 || a[1] == 116) {      /* -b, -t */
                 if (a[1] == 98) dump = 2; else dump = 1;
                 i = i + 1; t = __argv(i);
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } }
+            /* Flags a build system passes that mean nothing here: there is
+               one dialect (C99), one optimisation level, and no separate
+               debug info.  A compiler that REFUSES them cannot be dropped
+               into an existing Makefile, which is most of what `CC=` is. */
+            } else { if (a[1] == 87 || a[1] == 119 || a[1] == 103
+                      || a[1] == 79 || a[1] == 102 || a[1] == 115
+                      || a[1] == 112 || a[1] == 109) {    /* -W -w -g -O -f -std -pipe -m */
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } }
         } else { if (fi == 0) { fi = i; if (runit) break; } }
         i = i + 1;
     }
@@ -6006,15 +6019,21 @@ int main(void) {
         return entry(0, 0);
     }
     if (dump) {
-        int ofd;
-        if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
-        else { if (fe_tape(__argv(fi), t)) return 1; }
+        int ofd; int r;
+        /* the destination is opened FIRST: `-E -o x.i` writes from inside
+           the front end, before there is a tape to write */
         ofd = 1;
         if (outpath) {
             ofd = wopen(outpath);
             if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
         }
         bkfd = ofd;
+        if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
+        else {
+            r = fe_tape(__argv(fi), t);
+            if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
+            if (r) return 1;
+        }
         if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
         __write(ofd, out, nout);
         if (ofd != 1) __close(ofd);

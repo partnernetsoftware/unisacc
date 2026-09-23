@@ -32,13 +32,17 @@ case "$(limactl list "$VM" --format '{{.Status}}' 2>/dev/null)" in
     *) echo "linux: VM '$VM' is not running -- skipped"; exit 0;;
 esac
 
-limactl shell "$VM" -- bash -lc "
+# The tree is packed HERE and piped in, rather than unpacked from a mount
+# inside the guest: only the `default` VM mounts this repository, and
+# assuming the mount made `LIMA_VM=minicon-lnx-x86_64` fail with a tar error
+# that said nothing about mounts.  corpus/ travels too (4 MB) -- it used to
+# be symlinked back to the mount, which for the same reason was not there.
+tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     set -u
     command -v cc >/dev/null || { echo 'linux: no cc in the VM'; exit 1; }
     W=\$HOME/unisa-linux
     rm -rf \$W && mkdir -p \$W
-    tar -C '$R' -cf - --exclude=.git --exclude=corpus . | tar -C \$W -xf -
-    ln -sfn '$R/corpus' \$W/corpus
+    tar -C \$W -xf -
     cd \$W
     export FETCH=0
     if [ '$what' = all ]; then ./tests/all.sh; else ./tests/$what.sh; fi
