@@ -17,7 +17,9 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
 D=$R/tests/c99
-ok=0; bad=0; refused=0
+ok=0; bad=0; refused=0; known=0; revived=0
+KNOWN=$R/tests/c99.knownfail
+isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 : > "$T/passing"
 for f in "$D"/*.c; do
     b=$(basename "$f" .c)
@@ -31,28 +33,42 @@ for f in "$D"/*.c; do
         grc=$?
         # a refusal and a wrong answer are different failures
         if [ -s "$T/err" ]; then
-            printf "  UNS  %-24s %s\n" "$b" "$(head -1 "$T/err" | cut -c1-52)"
-            refused=$((refused+1)); continue
+            if isknown "$b"; then
+                known=$((known+1))
+            else
+                printf "  UNS  %-24s %s\n" "$b" "$(head -1 "$T/err" | cut -c1-52)"
+                refused=$((refused+1))
+            fi
+            continue
         fi
         got=$(cat "$T/got")
         if [ "$got" = "$want" ] && [ "$grc" = "$wrc" ]; then
             ok=$((ok+1)); echo "$b" >> "$T/passing"; continue
         fi
+        if isknown "$b"; then known=$((known+1)); continue; fi
         printf "  WRONG %-23s exit %s, cc says %s\n" "$b" "$grc" "$wrc"
         bad=$((bad+1)); continue
     fi
     got=$(cat "$T/got")
     if [ "$got" = "$want" ]; then
+        if isknown "$b"; then
+            revived=$((revived+1))
+            printf "  REVIVED %s  now works -- delete its line from c99.knownfail\n" "$b"
+        fi
         ok=$((ok+1)); echo "$b" >> "$T/passing"
     else
-        printf "  WRONG %-23s got [%s] cc says [%s]\n" "$b" "$got" "$want"
-        bad=$((bad+1))
+        if isknown "$b"; then known=$((known+1))
+        else
+            printf "  WRONG %-23s got [%s] cc says [%s]\n" "$b" "$got" "$want"
+            bad=$((bad+1))
+        fi
     fi
 done
-total=$((ok + bad + refused))
+total=$((ok + bad + refused + known))
 echo
-printf "c99  supported %d/%d   wrong %d   refused %d   (%d%%)\n" \
-    "$ok" "$total" "$bad" "$refused" "$(( total ? ok * 100 / total : 0 ))"
+printf "c99  supported %d/%d (%d%%)   wrong %d   refused %d   known gaps %d\n" \
+    "$ok" "$total" "$(( total ? ok * 100 / total : 0 ))" "$bad" "$refused" "$known"
+[ "$revived" -eq 0 ] || bad=$((bad+1))
 
 # A ratchet, because this is the number the project's claim rests on.
 BASE=$R/tests/c99.baseline
