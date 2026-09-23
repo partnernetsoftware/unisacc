@@ -6,11 +6,15 @@
  *   v2 (36 B): v1 fields + mx | my | buttons | flags   ← current
  *
  * mx, my: canvas NDC ∈ [-1, 1], origin center, +x right, +y up
+ *   · mouse / pointer-lock: absolute or look-delta
+ *   · touch + FLAG_LOOK_STICK: 右摇杆连续轴（相对按下点）→ 俯仰/偏航
  * buttons: bit0 left · bit1 right · bit2 middle
- * flags: bit0 pointer inside · bit1 suicide · bit2 touch (vs mouse/pen)
+ * flags: bit0 in · bit1 suicide · bit2 touch · bit3 look-stick
  *
- * Browser Host: primary contact drives a **relative** virtual stick (drag from
- * touch-down / click-down origin → ix/iy). Pointer lock is opt-in; touch never locks.
+ * Browser Host touch:
+ *   · 单指 → 移动摇杆 ix/iy（相对按下点）
+ *   · 双指 → 左指移动、右指看（mx/my + FLAG_LOOK_STICK）
+ * Pointer lock opt-in；touch 永不 lock。
  */
 export const INPUT_MAGIC = 0x4e495855; // 'UXIN' LE
 export const INPUT_VERSION = 2;
@@ -25,14 +29,15 @@ export const BTN_MIDDLE = 4;
 export const FLAG_POINTER_IN = 1;
 /** Host may set: operator armed suicide / kamikaze (KeyF). */
 export const FLAG_SUICIDE = 2;
-/** Primary contact is a touch (finger), not mouse/pen. */
+/** At least one contact is a touch (finger), not mouse/pen. */
 export const FLAG_TOUCH = 4;
+/** mx/my are continuous look-stick axes (dual-touch right finger). */
+export const FLAG_LOOK_STICK = 8;
 /** Dead-zone for relative drag stick (NDC displacement from touch-down). */
-export const STICK_DEADZONE = 0.32;
+export const STICK_DEADZONE = 0.28;
 
 /**
  * Map drag delta (current NDC − origin NDC) to discrete stick axes.
- * Larger deadzone = less twitchy on phones.
  * my +up → iy −1；my −down → iy +1.
  * @param {number} dx
  * @param {number} dy
@@ -48,11 +53,25 @@ export function axesFromDrag(dx, dy, dead = STICK_DEADZONE) {
   return { ix, iy };
 }
 
-/** @deprecated alias — absolute NDC stick; prefer axesFromDrag */
+/**
+ * Continuous stick ∈ [-1,1] after deadzone (for look).
+ * @param {number} dx
+ * @param {number} dy
+ * @param {number} [dead]
+ * @returns {{ x: number, y: number }}
+ */
+export function analogFromDrag(dx, dy, dead = STICK_DEADZONE) {
+  const reach = Math.max(dead + 0.05, 0.55);
+  let x = 0, y = 0;
+  if (Math.abs(dx) >= dead) x = Math.max(-1, Math.min(1, dx / reach));
+  if (Math.abs(dy) >= dead) y = Math.max(-1, Math.min(1, dy / reach));
+  return { x, y };
+}
+
+/** @deprecated alias — prefer axesFromDrag */
 export function axesFromStick(mx, my, dead = STICK_DEADZONE) {
   return axesFromDrag(mx, my, dead);
 }
-
 
 /**
  * @param {{

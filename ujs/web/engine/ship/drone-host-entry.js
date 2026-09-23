@@ -6,7 +6,10 @@ import { createBrowserHost } from "../browser-host.js";
 import { runDroneCore } from "../core-drone.js";
 import embed from "./drone.embed.json";
 
-function helpLine(controls) {
+function helpLine(controls, touch) {
+  if (touch) {
+    return "左指拖飞 · 右指拖看 · 锁定后点发射 · 双击空档再出击";
+  }
   return controls === "mouse"
     ? "鼠标看 · WASD 飞 · Shift 加速 · 锁定后点击/空格发射（2发）· F/右键武装自爆"
     : "IJKL 看 · WASD 飞 · Shift 加速 · 锁定后空格发射（2发）· F 武装自爆";
@@ -65,9 +68,9 @@ export async function startDroneShip(cfg) {
       (s.locked ? ` · <b class="lock">锁定</b>` : "") +
       (s.suicideArm ? ` · <b class="warn">自爆已武装</b>` : "") + `<br>` +
       (s.alive
-        ? helpLine(s.controls)
+        ? helpLine(s.controls, s.touch)
         : `<span class="warn">${s.endReason === "win" ? "全歼" : "任务结束"} — 空格再出击</span>`);
-  }
+    }
 
   const image = new Uint8Array(embed.image);
   const api = await runDroneCore(host, {

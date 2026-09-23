@@ -91,11 +91,36 @@ try {
   }
   if (!mouseMode || mouseMode.controls !== "mouse") throw new Error("setControls mouse failed");
 
+  // Dual-touch: left finger forward thrust (iy=-1), right finger look stick
+  const dual = await cdp(ws, 500, "Runtime.evaluate", {
+    expression: `(() => {
+      const c = document.getElementById('c');
+      const r = c.getBoundingClientRect();
+      const mk = (id, x, y) => ({
+        pointerId: id, pointerType: 'touch', isPrimary: id === 11,
+        buttons: 1, button: 0, bubbles: true, cancelable: true,
+        clientX: r.left + r.width * x, clientY: r.top + r.height * y,
+      });
+      c.dispatchEvent(new PointerEvent('pointerdown', mk(11, 0.2, 0.7)));
+      c.dispatchEvent(new PointerEvent('pointermove', mk(11, 0.2, 0.35)));
+      c.dispatchEvent(new PointerEvent('pointerdown', mk(12, 0.8, 0.55)));
+      c.dispatchEvent(new PointerEvent('pointermove', mk(12, 0.95, 0.55)));
+      return window.__UXE_HOST__.host_input_read();
+    })()`,
+    returnByValue: true,
+  });
+  const d = dual.result.value;
+  if (!d || !(d.flags & 4)) throw new Error("dual touch FLAG_TOUCH missing " + JSON.stringify(d));
+  if (!(d.flags & 8)) throw new Error("dual touch FLAG_LOOK_STICK missing " + JSON.stringify(d));
+  if (d.iy !== -1) throw new Error("dual left thrust iy!=-1 " + JSON.stringify(d));
+  if (!(d.mx > 0.2)) throw new Error("dual right look mx " + JSON.stringify(d));
+
   console.log("OK_DRONE_SHIP", {
     backend: mouseMode.backend, fp: true, ship: true,
     controlsDefault: "keyboard", controlsNow: mouseMode.controls,
     ammo: fired.ammo, magazine: mouseMode.magazine,
     suicideArm: true, missileSpent: true,
+    dualTouch: { iy: d.iy, mx: d.mx, flags: d.flags },
   });
   ws.close(); chrome.kill("SIGKILL"); server.stop(); process.exit(0);
 } catch (e) {

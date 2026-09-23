@@ -2,14 +2,19 @@ import {
   encodeInputSnapshot,
   decodeInputSnapshot,
   axesFromStick,
+  analogFromDrag,
   INPUT_MAGIC,
   INPUT_BYTES,
   INPUT_BYTES_V1,
   INPUT_VERSION,
   FLAG_TOUCH,
+  FLAG_LOOK_STICK,
 } from "./input.js";
 
-const snap = { ix: -1, iy: 1, fire: 1, mx: 0.5, my: -0.25, buttons: 1, flags: 1 | FLAG_TOUCH };
+const snap = {
+  ix: -1, iy: 1, fire: 1, mx: 0.5, my: -0.25, buttons: 1,
+  flags: 1 | FLAG_TOUCH | FLAG_LOOK_STICK,
+};
 const buf = encodeInputSnapshot(snap);
 const dv = new DataView(buf);
 if (buf.byteLength !== INPUT_BYTES) throw new Error("size " + buf.byteLength);
@@ -21,14 +26,15 @@ if (dv.getUint32(16, true) !== 1) throw new Error("fire");
 if (Math.abs(dv.getFloat32(20, true) - 0.5) > 1e-6) throw new Error("mx");
 if (Math.abs(dv.getFloat32(24, true) + 0.25) > 1e-6) throw new Error("my");
 if (dv.getUint32(28, true) !== 1) throw new Error("buttons");
-if (dv.getUint32(32, true) !== (1 | FLAG_TOUCH)) throw new Error("flags");
+if (dv.getUint32(32, true) !== (1 | FLAG_TOUCH | FLAG_LOOK_STICK)) throw new Error("flags");
 
 const out = decodeInputSnapshot(buf);
 if (out.ix !== -1 || out.iy !== 1 || out.fire !== 1) throw new Error("roundtrip keys");
 if (Math.abs(out.mx - 0.5) > 1e-6 || Math.abs(out.my + 0.25) > 1e-6) throw new Error("roundtrip ptr");
-if (out.buttons !== 1 || out.flags !== (1 | FLAG_TOUCH) || out.version !== 2) throw new Error("roundtrip meta");
+if (out.buttons !== 1 || out.flags !== (1 | FLAG_TOUCH | FLAG_LOOK_STICK) || out.version !== 2) {
+  throw new Error("roundtrip meta");
+}
 
-// v1 buffer still encodable / decodable
 const v1buf = new ArrayBuffer(INPUT_BYTES_V1);
 encodeInputSnapshot({ ix: 1, iy: 0, fire: 0 }, v1buf);
 const v1 = decodeInputSnapshot(v1buf);
@@ -43,8 +49,13 @@ if (dead.ix !== 0 || dead.iy !== 0) throw new Error("stick deadzone");
 const soft = axesFromStick(0.25, 0);
 if (soft.ix !== 0) throw new Error("stick soft dead 0.25");
 
+const look = analogFromDrag(0.5, -0.4);
+if (!(look.x > 0.5 && look.y < -0.4)) throw new Error("analog look " + JSON.stringify(look));
+const lookDead = analogFromDrag(0.1, 0.1);
+if (lookDead.x !== 0 || lookDead.y !== 0) throw new Error("analog dead");
+
 console.log("OK_INPUT", {
   bytes: buf.byteLength, version: out.version,
   ix: out.ix, mx: out.mx, buttons: out.buttons, flags: out.flags,
-  stick: { right, up },
+  stick: { right, up }, look,
 });

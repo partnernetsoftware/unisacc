@@ -161,14 +161,17 @@ f32 mx | f32 my | u32 buttons | u32 flags     ← v2
 | `fire` | Space **或** 主触点按下（鼠标左键 / 手指） |
 | `mx` / `my` | 相对 canvas 的 NDC；Pointer Events（含 touch）更新 |
 | `buttons` | bit0 主触点 · bit1 右 · bit2 中 |
-| `flags` | bit0 = 指针在 canvas 内 · bit1 = suicide（KeyF）· **bit2 = touch**（当前主触点是手指） |
+| `flags` | bit0 = 指针在 canvas 内 · bit1 = suicide（KeyF）· **bit2 = touch** · **bit3 = look-stick**（`mx/my` 为右摇杆轴） |
 
 **触屏约定（Host 侧）：**
 
 - canvas `touch-action: none`，拦截默认滚动
-- **不**对 touch 请求 Pointer Lock（Lock 仅 opt-in，给 FPS 鼠标用）
-- 按住拖动：以**按下点**为原点的相对位移驱动 `ix/iy`（死区 `STICK_DEADZONE`≈0.32，比相对屏幕中心更稳）
+- **不**对 touch 请求 Pointer Lock
+- **单指**：相对按下点拖动 → `ix/iy`（移动 / 油门）
+- **双指**：左侧指 → `ix/iy`；右侧指 → `mx/my` 连续看轴 + **`FLAG_LOOK_STICK`**（bit3）
 - Asteroid 撞毁后：**双击**重开（键盘空格仍单击即可）
+
+`flags`：bit0 指针在内 · bit1 suicide · bit2 touch · **bit3 look-stick**。
 
 decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1（兼容旧 `{game}.wasm` 小缓冲）。
 

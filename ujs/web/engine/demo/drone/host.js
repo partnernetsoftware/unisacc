@@ -14,7 +14,10 @@ const q = params.get("gpu");
 const prefer = q === "webgl" || q === "webgpu" ? q : "auto";
 let controls = params.get("controls") === "mouse" ? "mouse" : "keyboard";
 
-function helpLine(c) {
+function helpLine(c, touch) {
+  if (touch) {
+    return "左指拖飞 · 右指拖看 · 锁定后点发射 · 双击空档再出击";
+  }
   return c === "mouse"
     ? "鼠标看 · WASD 飞 · Shift 加速 · 锁定后点击/空格发射（2发）· F/右键武装自爆"
     : "IJKL 看 · WASD 飞 · Shift 加速 · 锁定后空格发射（2发）· F 武装自爆";
@@ -58,7 +61,7 @@ function paint(s) {
     (s.locked ? ` · <b class="lock">锁定</b>` : "") +
     (s.suicideArm ? ` · <b class="warn">自爆已武装</b>` : "") + `<br>` +
     (s.alive
-      ? helpLine(s.controls)
+      ? helpLine(s.controls, s.touch)
       : `<span class="warn">${s.endReason === "win" ? "全歼" : "任务结束"} — 空格再出击</span>`);
 }
 

@@ -7,8 +7,8 @@ import { decodeRenderPacket } from "./packet.js";
 import {
   encodeInputSnapshot, INPUT_BYTES,
   BTN_LEFT, BTN_RIGHT, BTN_MIDDLE,
-  FLAG_POINTER_IN, FLAG_SUICIDE, FLAG_TOUCH,
-  axesFromDrag,
+  FLAG_POINTER_IN, FLAG_SUICIDE, FLAG_TOUCH, FLAG_LOOK_STICK,
+  axesFromDrag, analogFromDrag,
 } from "./input.js";
 
 /**
@@ -60,25 +60,34 @@ export async function createBrowserHost(canvas, opts = {}) {
 
   let mx = 0, my = 0, buttons = 0, flags = 0;
   let movAccX = 0, movAccY = 0;
-  /** @type {string} */
-  let primaryType = "mouse";
-  let primaryId = -1;
   // Opt-in: FPS look (drone mouse). Asteroid / touch stay unlocked.
   let pointerLockEnabled = opts.pointerLock === true;
-  /** Stick origin in NDC at primary pointerdown (relative drag). */
-  let stickOx = 0, stickOy = 0;
+  /**
+   * Active pointers. Touch: multi; mouse: one.
+   * @type {Map<number, { x: number, y: number, ox: number, oy: number, touch: boolean }>}
+   */
+  const ptrs = new Map();
 
-  function syncPointerFromEvent(e) {
+  function ndcFromEvent(e) {
     const r = canvas.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return;
+    if (r.width <= 0 || r.height <= 0) return null;
     const nx = ((e.clientX - r.left) / r.width) * 2 - 1;
     const ny = -(((e.clientY - r.top) / r.height) * 2 - 1);
-    mx = Math.max(-1, Math.min(1, nx));
-    my = Math.max(-1, Math.min(1, ny));
-    const inside =
-      e.clientX >= r.left && e.clientX <= r.right &&
-      e.clientY >= r.top && e.clientY <= r.bottom;
-    flags = inside ? FLAG_POINTER_IN : 0;
+    return {
+      x: Math.max(-1, Math.min(1, nx)),
+      y: Math.max(-1, Math.min(1, ny)),
+      inside:
+        e.clientX >= r.left && e.clientX <= r.right &&
+        e.clientY >= r.top && e.clientY <= r.bottom,
+    };
+  }
+
+  function syncPointerFromEvent(e) {
+    const p = ndcFromEvent(e);
+    if (!p) return;
+    mx = p.x;
+    my = p.y;
+    flags = p.inside ? FLAG_POINTER_IN : 0;
   }
 
   const ptrOpts = { passive: false };
@@ -90,8 +99,20 @@ export async function createBrowserHost(canvas, opts = {}) {
       flags = FLAG_POINTER_IN;
       return;
     }
-    if (primaryId >= 0 && e.pointerId !== primaryId) return;
-    syncPointerFromEvent(e);
+    const p = ndcFromEvent(e);
+    if (!p) return;
+    const rec = ptrs.get(e.pointerId);
+    if (rec) {
+      rec.x = p.x;
+      rec.y = p.y;
+    }
+    if (!rec || !rec.touch) {
+      mx = p.x;
+      my = p.y;
+      flags = p.inside ? FLAG_POINTER_IN : 0;
+    } else {
+      flags = FLAG_POINTER_IN;
+    }
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
 
@@ -104,20 +125,16 @@ export async function createBrowserHost(canvas, opts = {}) {
     ) {
       canvas.requestPointerLock?.();
     }
-    const newPrimary = primaryId < 0;
-    if (newPrimary || e.pointerId === primaryId) {
-      primaryId = e.pointerId;
-      primaryType = e.pointerType || "mouse";
+    const p = ndcFromEvent(e);
+    if (p) {
+      ptrs.set(e.pointerId, {
+        x: p.x, y: p.y, ox: p.x, oy: p.y, touch: isTouch,
+      });
+      mx = p.x;
+      my = p.y;
+      flags = p.inside ? FLAG_POINTER_IN : 0;
     }
     canvas.setPointerCapture?.(e.pointerId);
-    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
-    // Origin only when a new primary contact begins (ignore compat duplicates).
-    if (newPrimary) {
-      stickOx = mx;
-      stickOy = my;
-    }
-    // Primary contact → "left". Synthetic PointerEvents in headless may omit
-    // button/buttons; touch always counts.
     if (
       e.isPrimary !== false &&
       (isTouch || e.button === 0 || e.button === -1 || (e.buttons & 1))
@@ -130,33 +147,40 @@ export async function createBrowserHost(canvas, opts = {}) {
   }, ptrOpts);
 
   canvas.addEventListener("pointerup", (e) => {
-    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
+    ptrs.delete(e.pointerId);
     const isTouch = e.pointerType === "touch";
     if (isTouch || e.button === 0 || e.button === -1) buttons &= ~BTN_LEFT;
     if (e.button === 1) buttons &= ~BTN_MIDDLE;
     if (e.button === 2) buttons &= ~BTN_RIGHT;
-    if (e.pointerId === primaryId) {
-      primaryId = -1;
-      buttons &= ~BTN_LEFT;
-    }
+    if (ptrs.size === 0) buttons &= ~BTN_LEFT;
+    else flags = FLAG_POINTER_IN;
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
 
   canvas.addEventListener("pointercancel", (e) => {
-    if (e.pointerId === primaryId) {
-      primaryId = -1;
-      buttons &= ~BTN_LEFT;
-    }
+    ptrs.delete(e.pointerId);
+    if (ptrs.size === 0) buttons &= ~BTN_LEFT;
   }, ptrOpts);
 
   canvas.addEventListener("pointerleave", () => {
-    if (document.pointerLockElement !== canvas && primaryId < 0) flags = 0;
+    if (document.pointerLockElement !== canvas && ptrs.size === 0) flags = 0;
   });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   document.addEventListener("pointerlockchange", () => {
     if (document.pointerLockElement === canvas) flags = FLAG_POINTER_IN;
   });
 
+  /** Pick move (leftmost / only) and look (rightmost when ≥2) contacts. */
+  function touchSticks() {
+    const list = [];
+    for (const rec of ptrs.values()) {
+      if (rec.touch) list.push(rec);
+    }
+    if (list.length === 0) return { move: null, look: null };
+    if (list.length === 1) return { move: list[0], look: null };
+    list.sort((a, b) => a.x - b.x);
+    return { move: list[0], look: list[list.length - 1] };
+  }
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
 
@@ -213,7 +237,9 @@ export async function createBrowserHost(canvas, opts = {}) {
       if (keys.KeyS || keys.ArrowDown) iy += 1;
       if (keys.KeyW || keys.ArrowUp) iy -= 1;
       const fireKey = keys.Space ? 1 : 0;
-      const contact = primaryId >= 0 || (buttons & BTN_LEFT) !== 0;
+      const { move, look } = touchSticks();
+      const anyPtr = ptrs.size > 0;
+      const contact = anyPtr || (buttons & BTN_LEFT) !== 0;
       const fireBtn = contact ? 1 : 0;
       let outMx = mx, outMy = my;
       let outFlags = flags;
@@ -223,15 +249,31 @@ export async function createBrowserHost(canvas, opts = {}) {
         outMy = Math.max(-1, Math.min(1, -movAccY / 48));
         movAccX = 0;
         movAccY = 0;
+      } else if (move || look) {
+        outFlags |= FLAG_TOUCH;
+        if (move && ix === 0 && iy === 0) {
+          const a = stickAxes(move.x - move.ox, move.y - move.oy);
+          ix = a.ix;
+          iy = a.iy;
+        }
+        if (look) {
+          const a = analogFromDrag(look.x - look.ox, look.y - look.oy);
+          outMx = a.x;
+          outMy = a.y;
+          outFlags |= FLAG_LOOK_STICK;
+        } else {
+          outMx = 0;
+          outMy = 0;
+        }
+      } else if (contact && ix === 0 && iy === 0) {
+        // mouse drag as move stick (asteroid)
+        const mouse = [...ptrs.values()].find((r) => !r.touch);
+        if (mouse) {
+          const a = stickAxes(mouse.x - mouse.ox, mouse.y - mouse.oy);
+          ix = a.ix;
+          iy = a.iy;
+        }
       }
-      // Relative stick: drag from primary-down origin → ix/iy (large deadzone).
-      if (contact && primaryId >= 0 && ix === 0 && iy === 0 &&
-          document.pointerLockElement !== canvas) {
-        const a = stickAxes(outMx - stickOx, outMy - stickOy);
-        ix = a.ix;
-        iy = a.iy;
-      }
-      if (primaryId >= 0 && primaryType === "touch") outFlags |= FLAG_TOUCH;
       const outButtons = contact ? (buttons | BTN_LEFT) : buttons;
 
       const snap = {

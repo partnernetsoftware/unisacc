@@ -1126,7 +1126,8 @@ var BTN_MIDDLE = 4;
 var FLAG_POINTER_IN = 1;
 var FLAG_SUICIDE = 2;
 var FLAG_TOUCH = 4;
-var STICK_DEADZONE = 0.32;
+var FLAG_LOOK_STICK = 8;
+var STICK_DEADZONE = 0.28;
 function axesFromDrag(dx, dy, dead = STICK_DEADZONE) {
   let ix = 0, iy = 0;
   if (dx <= -dead) ix = -1;
@@ -1134,6 +1135,13 @@ function axesFromDrag(dx, dy, dead = STICK_DEADZONE) {
   if (dy <= -dead) iy = 1;
   else if (dy >= dead) iy = -1;
   return { ix, iy };
+}
+function analogFromDrag(dx, dy, dead = STICK_DEADZONE) {
+  const reach = Math.max(dead + 0.05, 0.55);
+  let x = 0, y = 0;
+  if (Math.abs(dx) >= dead) x = Math.max(-1, Math.min(1, dx / reach));
+  if (Math.abs(dy) >= dead) y = Math.max(-1, Math.min(1, dy / reach));
+  return { x, y };
 }
 function encodeInputSnapshot(snap, out) {
   const want = INPUT_BYTES;
@@ -1221,19 +1229,25 @@ async function createBrowserHost(canvas, opts = {}) {
   addEventListener("keyup", onKey(false));
   let mx = 0, my = 0, buttons = 0, flags = 0;
   let movAccX = 0, movAccY = 0;
-  let primaryType = "mouse";
-  let primaryId = -1;
   let pointerLockEnabled = opts.pointerLock === true;
-  let stickOx = 0, stickOy = 0;
-  function syncPointerFromEvent(e) {
+  const ptrs = /* @__PURE__ */ new Map();
+  function ndcFromEvent(e) {
     const r = canvas.getBoundingClientRect();
-    if (r.width <= 0 || r.height <= 0) return;
+    if (r.width <= 0 || r.height <= 0) return null;
     const nx = (e.clientX - r.left) / r.width * 2 - 1;
     const ny = -((e.clientY - r.top) / r.height * 2 - 1);
-    mx = Math.max(-1, Math.min(1, nx));
-    my = Math.max(-1, Math.min(1, ny));
-    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-    flags = inside ? FLAG_POINTER_IN : 0;
+    return {
+      x: Math.max(-1, Math.min(1, nx)),
+      y: Math.max(-1, Math.min(1, ny)),
+      inside: e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom
+    };
+  }
+  function syncPointerFromEvent(e) {
+    const p = ndcFromEvent(e);
+    if (!p) return;
+    mx = p.x;
+    my = p.y;
+    flags = p.inside ? FLAG_POINTER_IN : 0;
   }
   const ptrOpts = { passive: false };
   canvas.addEventListener("pointermove", (e) => {
@@ -1243,8 +1257,20 @@ async function createBrowserHost(canvas, opts = {}) {
       flags = FLAG_POINTER_IN;
       return;
     }
-    if (primaryId >= 0 && e.pointerId !== primaryId) return;
-    syncPointerFromEvent(e);
+    const p = ndcFromEvent(e);
+    if (!p) return;
+    const rec = ptrs.get(e.pointerId);
+    if (rec) {
+      rec.x = p.x;
+      rec.y = p.y;
+    }
+    if (!rec || !rec.touch) {
+      mx = p.x;
+      my = p.y;
+      flags = p.inside ? FLAG_POINTER_IN : 0;
+    } else {
+      flags = FLAG_POINTER_IN;
+    }
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
   canvas.addEventListener("pointerdown", (e) => {
@@ -1252,17 +1278,20 @@ async function createBrowserHost(canvas, opts = {}) {
     if (pointerLockEnabled && !isTouch && document.pointerLockElement !== canvas) {
       canvas.requestPointerLock?.();
     }
-    const newPrimary = primaryId < 0;
-    if (newPrimary || e.pointerId === primaryId) {
-      primaryId = e.pointerId;
-      primaryType = e.pointerType || "mouse";
+    const p = ndcFromEvent(e);
+    if (p) {
+      ptrs.set(e.pointerId, {
+        x: p.x,
+        y: p.y,
+        ox: p.x,
+        oy: p.y,
+        touch: isTouch
+      });
+      mx = p.x;
+      my = p.y;
+      flags = p.inside ? FLAG_POINTER_IN : 0;
     }
     canvas.setPointerCapture?.(e.pointerId);
-    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
-    if (newPrimary) {
-      stickOx = mx;
-      stickOy = my;
-    }
     if (e.isPrimary !== false && (isTouch || e.button === 0 || e.button === -1 || e.buttons & 1)) {
       buttons |= BTN_LEFT;
     }
@@ -1271,30 +1300,36 @@ async function createBrowserHost(canvas, opts = {}) {
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
   canvas.addEventListener("pointerup", (e) => {
-    if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
+    ptrs.delete(e.pointerId);
     const isTouch = e.pointerType === "touch";
     if (isTouch || e.button === 0 || e.button === -1) buttons &= ~BTN_LEFT;
     if (e.button === 1) buttons &= ~BTN_MIDDLE;
     if (e.button === 2) buttons &= ~BTN_RIGHT;
-    if (e.pointerId === primaryId) {
-      primaryId = -1;
-      buttons &= ~BTN_LEFT;
-    }
+    if (ptrs.size === 0) buttons &= ~BTN_LEFT;
+    else flags = FLAG_POINTER_IN;
     if (e.cancelable) e.preventDefault();
   }, ptrOpts);
   canvas.addEventListener("pointercancel", (e) => {
-    if (e.pointerId === primaryId) {
-      primaryId = -1;
-      buttons &= ~BTN_LEFT;
-    }
+    ptrs.delete(e.pointerId);
+    if (ptrs.size === 0) buttons &= ~BTN_LEFT;
   }, ptrOpts);
   canvas.addEventListener("pointerleave", () => {
-    if (document.pointerLockElement !== canvas && primaryId < 0) flags = 0;
+    if (document.pointerLockElement !== canvas && ptrs.size === 0) flags = 0;
   });
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
   document.addEventListener("pointerlockchange", () => {
     if (document.pointerLockElement === canvas) flags = FLAG_POINTER_IN;
   });
+  function touchSticks() {
+    const list = [];
+    for (const rec of ptrs.values()) {
+      if (rec.touch) list.push(rec);
+    }
+    if (list.length === 0) return { move: null, look: null };
+    if (list.length === 1) return { move: list[0], look: null };
+    list.sort((a, b) => a.x - b.x);
+    return { move: list[0], look: list[list.length - 1] };
+  }
   let lastPacketClouds = 0;
   let lastPacketBytes = 0;
   function applyObjectPacket(packet) {
@@ -1343,7 +1378,9 @@ async function createBrowserHost(canvas, opts = {}) {
       if (keys.KeyS || keys.ArrowDown) iy += 1;
       if (keys.KeyW || keys.ArrowUp) iy -= 1;
       const fireKey = keys.Space ? 1 : 0;
-      const contact = primaryId >= 0 || (buttons & BTN_LEFT) !== 0;
+      const { move, look } = touchSticks();
+      const anyPtr = ptrs.size > 0;
+      const contact = anyPtr || (buttons & BTN_LEFT) !== 0;
       const fireBtn = contact ? 1 : 0;
       let outMx = mx, outMy = my;
       let outFlags = flags;
@@ -1353,13 +1390,30 @@ async function createBrowserHost(canvas, opts = {}) {
         outMy = Math.max(-1, Math.min(1, -movAccY / 48));
         movAccX = 0;
         movAccY = 0;
+      } else if (move || look) {
+        outFlags |= FLAG_TOUCH;
+        if (move && ix === 0 && iy === 0) {
+          const a = stickAxes(move.x - move.ox, move.y - move.oy);
+          ix = a.ix;
+          iy = a.iy;
+        }
+        if (look) {
+          const a = analogFromDrag(look.x - look.ox, look.y - look.oy);
+          outMx = a.x;
+          outMy = a.y;
+          outFlags |= FLAG_LOOK_STICK;
+        } else {
+          outMx = 0;
+          outMy = 0;
+        }
+      } else if (contact && ix === 0 && iy === 0) {
+        const mouse = [...ptrs.values()].find((r) => !r.touch);
+        if (mouse) {
+          const a = stickAxes(mouse.x - mouse.ox, mouse.y - mouse.oy);
+          ix = a.ix;
+          iy = a.iy;
+        }
       }
-      if (contact && primaryId >= 0 && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
-        const a = stickAxes(outMx - stickOx, outMy - stickOy);
-        ix = a.ix;
-        iy = a.iy;
-      }
-      if (primaryId >= 0 && primaryType === "touch") outFlags |= FLAG_TOUCH;
       const outButtons = contact ? buttons | BTN_LEFT : buttons;
       const snap = {
         ix,
@@ -2140,7 +2194,13 @@ async function runDroneCore(host, opts) {
       keys = snapObj.keys || {};
       pointerLock = !!snapObj.pointerLock;
     }
-    if (controls === "keyboard") {
+    if (flags & FLAG_TOUCH) {
+      if (flags & FLAG_LOOK_STICK) {
+        yaw += mx * 2.6 * dt;
+        pitch -= my * 2.2 * dt;
+      }
+      haveAbs = false;
+    } else if (controls === "keyboard") {
       let lookX = 0, lookY = 0;
       if (keys.KeyJ || keys.ArrowLeft) lookX -= 1;
       if (keys.KeyL || keys.ArrowRight) lookX += 1;
@@ -2249,7 +2309,8 @@ async function runDroneCore(host, opts) {
     host.host_frame_present();
     accFrames++;
     if (now - lastHud >= 160) {
-      const mode = !state.alive ? endReason === "win" ? "\u4EFB\u52A1\u5B8C\u6210 \u2014 \u5168\u6B7C" : endReason === "suicide" ? "\u81EA\u7206\u51FA\u51FB" : "\u5931\u8054" : suicideArm ? "\u6A21\u5F0F B\uFF1A\u81EA\u7206\u51B2\u649E \u2014 \u649E\u5411\u76EE\u6807\uFF01" : locked ? "\u6A21\u5F0F A\uFF1A\u5BFC\u5F39\u9501\u5B9A \u2014 \u5C04\u51FB\uFF01" : state.ammo <= 0 ? "\u5F39\u4ED3\u7A7A \u2014 F/\u53F3\u952E\u6B66\u88C5\u81EA\u7206" : "\u6A21\u5F0F A\uFF1A\u641C\u7D22\u9501\u5B9A\u76EE\u6807";
+      const touch = !!(flags & FLAG_TOUCH);
+      const mode = !state.alive ? endReason === "win" ? "\u4EFB\u52A1\u5B8C\u6210 \u2014 \u5168\u6B7C" : endReason === "suicide" ? "\u81EA\u7206\u51FA\u51FB" : "\u5931\u8054" : suicideArm ? "\u6A21\u5F0F B\uFF1A\u81EA\u7206\u51B2\u649E \u2014 \u649E\u5411\u76EE\u6807\uFF01" : locked ? "\u6A21\u5F0F A\uFF1A\u5BFC\u5F39\u9501\u5B9A \u2014 \u5C04\u51FB\uFF01" : state.ammo <= 0 ? "\u5F39\u4ED3\u7A7A \u2014 F/\u53F3\u952E\u6B66\u88C5\u81EA\u7206" : touch ? "\u89E6\u5C4F\uFF1A\u5DE6\u6307\u62D6\u98DE \xB7 \u53F3\u6307\u62D6\u770B \xB7 \u53CC\u6307\u5E76\u7528" : "\u6A21\u5F0F A\uFF1A\u641C\u7D22\u9501\u5B9A\u76EE\u6807";
       opts.onHud?.({
         ready: true,
         drone: true,
@@ -2267,6 +2328,7 @@ async function runDroneCore(host, opts) {
         endReason,
         mode,
         controls,
+        touch,
         mx,
         my,
         buttons,
@@ -2321,7 +2383,10 @@ async function runDroneCore(host, opts) {
 var drone_embed_default = { image: [232, 2, 0, 0, 9, 0, 45, 11, 29, 8, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 1, 3, 26, 0, 0, 0, 0, 0, 0, 0, 8, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 4, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 6, 9, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 45, 6, 21, 36, 193, 0, 0, 0, 5, 0, 0, 0, 0, 9, 2, 5, 1, 0, 0, 0, 9, 3, 5, 2, 0, 0, 0, 9, 4, 5, 3, 0, 0, 0, 9, 5, 5, 4, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 9, 6, 5, 6, 0, 0, 0, 9, 0, 5, 7, 0, 0, 0, 9, 7, 5, 8, 0, 0, 0, 9, 8, 5, 9, 0, 0, 0, 9, 9, 5, 10, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0, 7, 0, 33, 12, 39, 3, 0, 0, 0, 0, 0, 0, 0, 0, 9, 10, 45, 1, 13, 8, 3, 7, 3, 11, 9, 11, 8, 4, 7, 4, 11, 9, 12, 7, 3, 45, 2, 14, 4, 102, 102, 102, 102, 102, 102, 214, 63, 45, 2, 14, 8, 5, 7, 5, 11, 3, 26, 0, 0, 0, 0, 0, 0, 0, 9, 13, 45, 2, 14, 8, 2, 7, 2, 11, 9, 2, 9, 14, 7, 3, 45, 2, 14, 9, 15, 7, 4, 45, 2, 14, 45, 0, 12, 7, 2, 45, 2, 14, 9, 16, 45, 2, 14, 45, 0, 12, 10, 2, 9, 2, 11, 9, 3, 9, 12, 7, 3, 45, 2, 14, 4, 154, 153, 153, 153, 153, 153, 225, 63, 45, 2, 14, 7, 5, 45, 0, 12, 9, 17, 7, 4, 45, 2, 14, 45, 0, 12, 7, 2, 45, 2, 14, 9, 16, 45, 2, 14, 45, 0, 12, 10, 3, 9, 3, 11, 9, 4, 9, 18, 7, 3, 45, 2, 14, 9, 19, 7, 4, 45, 2, 14, 45, 0, 12, 7, 2, 45, 2, 14, 9, 16, 45, 2, 14, 45, 0, 12, 10, 4, 9, 4, 11, 9, 3, 4, 0, 0, 0, 0, 0, 0, 4, 64, 45, 5, 17, 36, 167, 1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 4, 64, 10, 3, 9, 3, 11, 9, 3, 3, 55, 0, 0, 0, 0, 0, 0, 0, 19, 36, 198, 1, 0, 0, 3, 55, 0, 0, 0, 0, 0, 0, 0, 10, 3, 9, 3, 11, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 1, 7, 1, 11, 7, 1, 7, 0, 45, 5, 17, 36, 93, 2, 0, 0, 9, 20, 7, 1, 45, 7, 26, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 6, 21, 36, 69, 2, 0, 0, 9, 9, 7, 1, 45, 7, 26, 3, 0, 0, 0, 0, 0, 0, 0, 0, 19, 36, 69, 2, 0, 0, 9, 9, 7, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 45, 8, 27, 11, 7, 6, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 0, 12, 8, 6, 7, 6, 11, 9, 5, 3, 244, 1, 0, 0, 0, 0, 0, 0, 45, 0, 12, 10, 5, 9, 5, 11, 7, 1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 0, 12, 8, 1, 7, 1, 11, 35, 212, 1, 0, 0, 9, 21, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 6, 21, 36, 145, 2, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 10, 1, 9, 1, 11, 9, 5, 3, 150, 0, 0, 0, 0, 0, 0, 0, 45, 0, 12, 10, 5, 9, 5, 11, 5, 0, 0, 0, 0, 9, 2, 5, 1, 0, 0, 0, 9, 3, 5, 2, 0, 0, 0, 9, 4, 5, 3, 0, 0, 0, 9, 5, 5, 4, 0, 0, 0, 9, 1, 5, 5, 0, 0, 0, 9, 6, 5, 6, 0, 0, 0, 9, 0, 5, 7, 0, 0, 0, 9, 7, 5, 8, 0, 0, 0, 9, 8, 5, 9, 0, 0, 0, 9, 9, 5, 10, 0, 0, 0, 7, 6, 5, 11, 0, 0, 0, 7, 0, 33, 12, 39, 12, 0, 0, 0, 2, 0, 0, 0, 112, 120, 0, 0, 2, 0, 0, 0, 112, 121, 0, 0, 2, 0, 0, 0, 112, 122, 0, 0, 5, 0, 0, 0, 115, 99, 111, 114, 101, 0, 0, 0, 5, 0, 0, 0, 97, 108, 105, 118, 101, 0, 0, 0, 4, 0, 0, 0, 97, 109, 109, 111, 3, 0, 0, 0, 116, 120, 115, 0, 3, 0, 0, 0, 116, 121, 115, 0, 3, 0, 0, 0, 116, 122, 115, 0, 3, 0, 0, 0, 116, 104, 112, 0, 2, 0, 0, 0, 110, 107, 0, 0, 1, 0, 0, 0, 110, 0, 0, 0, 0, 0, 0, 0], blob: { globals: ["txs", "alive", "px", "py", "pz", "score", "ammo", "tys", "tzs", "thp", "iy", "ix", "fy", "speed_mul", "fx", "rx", "dt", "ry", "fz", "rz", "thit", "suicide"], locals: ["n", "i", "speed", "thrust", "strafe", "climb", "nk"] } };
 
 // web/engine/ship/drone-host-entry.js
-function helpLine(controls) {
+function helpLine(controls, touch) {
+  if (touch) {
+    return "\u5DE6\u6307\u62D6\u98DE \xB7 \u53F3\u6307\u62D6\u770B \xB7 \u9501\u5B9A\u540E\u70B9\u53D1\u5C04 \xB7 \u53CC\u51FB\u7A7A\u6863\u518D\u51FA\u51FB";
+  }
   return controls === "mouse" ? "\u9F20\u6807\u770B \xB7 WASD \u98DE \xB7 Shift \u52A0\u901F \xB7 \u9501\u5B9A\u540E\u70B9\u51FB/\u7A7A\u683C\u53D1\u5C04\uFF082\u53D1\uFF09\xB7 F/\u53F3\u952E\u6B66\u88C5\u81EA\u7206" : "IJKL \u770B \xB7 WASD \u98DE \xB7 Shift \u52A0\u901F \xB7 \u9501\u5B9A\u540E\u7A7A\u683C\u53D1\u5C04\uFF082\u53D1\uFF09\xB7 F \u6B66\u88C5\u81EA\u7206";
 }
 async function startDroneShip(cfg) {
@@ -2352,7 +2417,7 @@ async function startDroneShip(cfg) {
     const ammoBar = "\u25AE".repeat(s.ammo || 0) + "\u25AF".repeat(Math.max(0, (s.magazine || 2) - (s.ammo || 0)));
     if (cfg.ammoEl) cfg.ammoEl.textContent = ammoBar;
     const modeLabel = s.controls === "mouse" ? "\u952E\u76D8+\u9F20\u6807" : "\u7EAF\u952E\u76D8";
-    cfg.hud.innerHTML = `<b>\u65E0\u4EBA\u673A \xB7 \u7B2C\u4E00\u4EBA\u79F0\u9A7E\u8231</b> \xB7 ship-js<br>backend <b>${host.backend}</b> \xB7 fps <b>${(s.fps || 0).toFixed(0)}</b> \xB7 <b>${modeLabel}</b><br><span class="mode">${s.mode || ""}</span><br>\u5F39\u4ED3 <b>${ammoBar}</b> (${s.ammo}/${s.magazine})` + (s.missiles ? ` \xB7 \u5728\u9014 <b>${s.missiles}</b>` : "") + ` \xB7 \u51FB\u6BC1 <b>${s.kills || 0}</b> \xB7 \u654C <b>${s.remaining ?? "?"}</b><br>\u5F97\u5206 <b>${(s.score || 0).toFixed(0)}</b>` + (s.locked ? ` \xB7 <b class="lock">\u9501\u5B9A</b>` : "") + (s.suicideArm ? ` \xB7 <b class="warn">\u81EA\u7206\u5DF2\u6B66\u88C5</b>` : "") + `<br>` + (s.alive ? helpLine(s.controls) : `<span class="warn">${s.endReason === "win" ? "\u5168\u6B7C" : "\u4EFB\u52A1\u7ED3\u675F"} \u2014 \u7A7A\u683C\u518D\u51FA\u51FB</span>`);
+    cfg.hud.innerHTML = `<b>\u65E0\u4EBA\u673A \xB7 \u7B2C\u4E00\u4EBA\u79F0\u9A7E\u8231</b> \xB7 ship-js<br>backend <b>${host.backend}</b> \xB7 fps <b>${(s.fps || 0).toFixed(0)}</b> \xB7 <b>${modeLabel}</b><br><span class="mode">${s.mode || ""}</span><br>\u5F39\u4ED3 <b>${ammoBar}</b> (${s.ammo}/${s.magazine})` + (s.missiles ? ` \xB7 \u5728\u9014 <b>${s.missiles}</b>` : "") + ` \xB7 \u51FB\u6BC1 <b>${s.kills || 0}</b> \xB7 \u654C <b>${s.remaining ?? "?"}</b><br>\u5F97\u5206 <b>${(s.score || 0).toFixed(0)}</b>` + (s.locked ? ` \xB7 <b class="lock">\u9501\u5B9A</b>` : "") + (s.suicideArm ? ` \xB7 <b class="warn">\u81EA\u7206\u5DF2\u6B66\u88C5</b>` : "") + `<br>` + (s.alive ? helpLine(s.controls, s.touch) : `<span class="warn">${s.endReason === "win" ? "\u5168\u6B7C" : "\u4EFB\u52A1\u7ED3\u675F"} \u2014 \u7A7A\u683C\u518D\u51FA\u51FB</span>`);
   }
   const image = new Uint8Array(drone_embed_default.image);
   const api = await runDroneCore(host, {

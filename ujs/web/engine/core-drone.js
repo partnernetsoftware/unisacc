@@ -5,7 +5,7 @@ import { bootRuntime, wasm_run, unwrap } from "../wasm_run.js";
 import { encodeRenderPacket, MESH_OCTA } from "./packet.js";
 import { MESH_BOX } from "./meshes.js";
 import {
-  decodeInputSnapshot, INPUT_BYTES, BTN_RIGHT, FLAG_SUICIDE,
+  decodeInputSnapshot, INPUT_BYTES, BTN_RIGHT, FLAG_SUICIDE, FLAG_TOUCH, FLAG_LOOK_STICK,
 } from "./input.js";
 
 const NT = 8;
@@ -479,8 +479,15 @@ export async function runDroneCore(host, opts) {
       pointerLock = !!snapObj.pointerLock;
     }
 
-    // Look: keyboard (default) = IJKL；mouse = 指针（lock 增量 / 未 lock 绝对差分）
-    if (controls === "keyboard") {
+    // Touch twin-stick (FLAG_TOUCH): keep host ix/iy for thrust; look from right stick.
+    // Keyboard / mouse paths unchanged when not touching.
+    if (flags & FLAG_TOUCH) {
+      if (flags & FLAG_LOOK_STICK) {
+        yaw += mx * 2.6 * dt;
+        pitch -= my * 2.2 * dt;
+      }
+      haveAbs = false;
+    } else if (controls === "keyboard") {
       let lookX = 0, lookY = 0;
       if (keys.KeyJ || keys.ArrowLeft) lookX -= 1;
       if (keys.KeyL || keys.ArrowRight) lookX += 1;
@@ -601,6 +608,7 @@ export async function runDroneCore(host, opts) {
 
     accFrames++;
     if (now - lastHud >= 160) {
+      const touch = !!(flags & FLAG_TOUCH);
       const mode = !state.alive
         ? (endReason === "win" ? "任务完成 — 全歼"
           : endReason === "suicide" ? "自爆出击"
@@ -611,13 +619,16 @@ export async function runDroneCore(host, opts) {
             ? "模式 A：导弹锁定 — 射击！"
             : state.ammo <= 0
               ? "弹仓空 — F/右键武装自爆"
-              : "模式 A：搜索锁定目标";
+              : touch
+                ? "触屏：左指拖飞 · 右指拖看 · 双指并用"
+                : "模式 A：搜索锁定目标";
       opts.onHud?.({
         ready: true, drone: true, fp: true, abi: true,
         score: state.score, kills, remaining, alive: state.alive,
         ammo: state.ammo, magazine: MAGAZINE,
         locked, lockIdx, suicideArm, endReason, mode,
         controls,
+        touch,
         mx, my, buttons, flags, pointerLock,
         missiles: missiles.length,
         pointer: controls === "mouse",
