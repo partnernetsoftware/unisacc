@@ -135,8 +135,24 @@ def imports(arch, textlen):
     return {"__imp_" + f: base + 8 * i for i, f in enumerate(IMPORTS)}
 
 
-def write(arch, text, data, entry, relocs=(), bss=0, full=None):
+def write(arch, text, data, entry, relocs=(), bss=0, full=None, stub=b""):
+    """`stub` goes between the DOS header and the PE header, where the DOS
+    stub used to sit.  An APE file puts its shell script there: the same
+    bytes are a PE for Windows and a script for a Unix shell. [S-10]"""
     full = len(data) if full is None else full
+    global HDR_FILE, TEXT_RVA
+    hdr_file, text_rva = HDR_FILE, TEXT_RVA
+    if stub:
+        hdr_file = max(HDR_FILE, _round(488 + len(stub), FILE_ALIGN))
+        text_rva = max(TEXT_RVA, _round(hdr_file, SECT_ALIGN))
+    HDR_FILE, TEXT_RVA = hdr_file, text_rva
+    try:
+        return _write(arch, text, data, entry, relocs, bss, full, stub)
+    finally:
+        HDR_FILE, TEXT_RVA = 0x400, 0x1000
+
+
+def _write(arch, text, data, entry, relocs, bss, full, stub):
     rd_rva, dt_rva = _rvas(len(text))
     # the cookie follows the FULL data; it is a zero word, so it may as well
     # be zero-filled with the rest of the tail instead of stored
@@ -156,9 +172,18 @@ def write(arch, text, data, entry, relocs=(), bss=0, full=None):
 
     dos = bytearray(64)
     dos[0:2] = b"MZ"
-    struct.pack_into("<I", dos, 0x3C, 64)
+    struct.pack_into("<I", dos, 0x3C, 64 + len(stub))
+    if stub:
+        # the script lives inside the DOS stub area; the fields the loader
+        # reads (the magic, and e_lfanew at 0x3C) are quoted text to a shell.
+        # The first 62 bytes fill the DOS header itself, so the PE header
+        # lands at 64 + what is left -- that is len(stub) + 2.
+        dos[2:64] = stub[:62].ljust(62, b"\x00")
+        dos[0x3C:0x40] = struct.pack("<I", len(stub) + 2)
+        stub = stub[62:]
     opt = 240
     p = bytearray(dos)
+    p += stub
     p += b"PE\x00\x00"
     p += struct.pack("<HHIIIHH", MACHINE[arch], 4, 0, 0, 0, opt, 0x22)
     o = bytearray()

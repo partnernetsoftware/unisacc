@@ -48,7 +48,7 @@ def relocate(tp, data, shift):
     return bytes(out)
 
 
-def build(tp, text, data, entry):
+def build(tp, text, data, entry, stub=b""):
     # Only the data up to its last nonzero byte is stored; the loader zero-
     # fills the rest of the `full` length.  lower.zero_last put the zeros last.
     full = len(data)
@@ -56,5 +56,5 @@ def build(tp, text, data, entry):
     if tp.os == "win":
         return pe.write(tp.arch, text, data, entry,
                         relocs=getattr(tp, "relocs", ()),
-                        bss=getattr(tp, "bss", 0), full=full)
+                        bss=getattr(tp, "bss", 0), full=full, stub=stub)
     return WRITER[tp.os](tp.arch, text, data, entry, full=full)

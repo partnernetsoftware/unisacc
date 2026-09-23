@@ -14,13 +14,15 @@ from .tape import MEM_SIZE, STACK_TOP, DATA_BASE
 from .vm import Halt, s64, u64, MASK, open_args
 
 # the machine's own ABI -- never read from the nets [X-1]
+# This machine keeps its OWN copy of the ABI on purpose: checking the
+# lowering against the table the lowering came from would prove nothing.
 ABI_ARGS = {
-    ("lnx", "x86_64"): ("rdi", "rsi", "rdx"),
-    ("osx", "x86_64"): ("rdi", "rsi", "rdx"),
-    ("win", "x86_64"): ("rcx", "rdx", "r8"),
-    ("lnx", "arm64"): ("x0", "x1", "x2"),
-    ("osx", "arm64"): ("x0", "x1", "x2"),
-    ("win", "arm64"): ("x0", "x1", "x2"),
+    ("lnx", "x86_64"): ("rdi", "rsi", "rdx", "r10", "r8", "r9"),
+    ("osx", "x86_64"): ("rdi", "rsi", "rdx", "r10", "r8", "r9"),
+    ("win", "x86_64"): ("rcx", "rdx", "r8", "r9"),
+    ("lnx", "arm64"): ("x0", "x1", "x2", "x3", "x4", "x5"),
+    ("osx", "arm64"): ("x0", "x1", "x2", "x3", "x4", "x5"),
+    ("win", "arm64"): ("x0", "x1", "x2", "x3"),
 }
 WINAPI_EFFECT = {"WriteFile": "write", "ExitProcess": "exit",
                  "ReadFile": "read", "CloseHandle": "close",
@@ -38,6 +40,7 @@ class Machine:
         self.src_os = getattr(tp, "src_os", tp.os)
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
+        self._brk = len(self.mem) // 2   # where mmap hands out pages
         self.mem[DATA_BASE:DATA_BASE + len(tp.data)] = tp.data
         self.R = {r: 0 for r in C.REGS if r != "none"}
         self.R["x16"] = self.R["x17"] = 0      # arm64 IP0/IP1: NR reg + scratch
@@ -100,8 +103,22 @@ class Machine:
             if op is None:
                 raise Trap("no syscall %d (0x%x) on %s/%s"
                            % (n, n, self.os, self.arch))
-        a0, a1, a2 = (self.R[r] for r in ABI_ARGS[(self.os, self.arch)])
+        regs = ABI_ARGS[(self.os, self.arch)]
+        a0, a1, a2 = (self.R[r] for r in regs[:3])
         import os as _os
+        if op == "mmap":
+            # a bump allocation in this machine's memory; the pages are as
+            # executable as anything else here, which is why a program that
+            # maps code and jumps into it runs under this model too
+            n = (a1 + 0xFFF) & ~0xFFF
+            p = self._brk
+            if p + n > len(self.mem) - 0x20000:
+                return u64(-1)
+            self._brk = p + n
+            self.mem[p:p + n] = b"\x00" * n
+            return p
+        if op in ("mprotect", "munmap"):
+            return 0
         if op == "write":
             if a0 == 1 or a0 == 2:
                 self.out.extend(self.mem[a1:a1 + a2])
@@ -125,7 +142,7 @@ class Machine:
                 # this target has no `open`: it is `openat`, so the directory
                 # fd is in front and everything else has shifted up one, with
                 # the mode in a fourth register [see lower.py]
-                p0, f0, m0 = a1, a2, self.R["x3"]
+                p0, f0, m0 = a1, a2, self.R[regs[3]]
             e = self.mem.find(b"\x00", p0)
             path = bytes(self.mem[p0:e if e >= 0 else p0]).decode()
             try:

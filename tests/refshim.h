@@ -8,6 +8,12 @@
 #define __read(f,b,n)  (int)read((f),(b),(n))
 #define __write(f,b,n) (int)write((f),(b),(n))
 #define __close(f)     close(f)
+#include <sys/mman.h>
+/* run mode maps memory and makes it executable; the intrinsics unisa lowers
+   through the `.sys6`/`.sys` gate are these calls here */
+#define __mmap(a,n,p,f,d,o) (long)mmap((void *)(long)(a),(n),(p),(f),(d),(o))
+#define __mprotect(a,n,p)   mprotect((void *)(long)(a),(n),(p))
+#define __munmap(a,n)       munmap((void *)(long)(a),(n))
 #include <stdlib.h>
 #define __exit(c)      exit(c)
 static int   G_argc;

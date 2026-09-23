@@ -59,6 +59,7 @@ SHAPE = {
     ".write":  ("r", "r"),
     ".exit":   ("r",),
     ".sys":    ("s", "r", "r", "r"),   # catalog op name + 3 args -> r0
+    ".sys6":   ("s", "r", "r", "r", "r", "r", "r"),   # ...and six, for mmap
     ".argc":   ("r",),                 # argument count
     ".argv":   ("r", "r"),             # rd = argv[rs], a char*
     "nop":     (),

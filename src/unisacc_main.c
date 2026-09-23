@@ -2885,6 +2885,15 @@ int sysargs(int n) {                 /* pop n args into r0..r2, zero the rest */
     return 0;
 }
 
+int sysargs6(int n) {                /* the same, into r0..r5: `mmap` [.sys6] */
+    int k;
+    k = n - 1;
+    while (k >= 0) { es("  @mem.load r"); en(k); es(", [r7+0]\n  @call.frame -8\n"); k = k - 1; }
+    k = n;
+    while (k < 6) { es("  @lit.imm r"); en(k); es(", 0\n"); k = k + 1; }
+    return 0;
+}
+
 /* Does this literal format need the RUNTIME formatter -- a flag, a width,
    a precision?  The desugared printf writes each conversion bare; the
    library's `_u_vfmt` does the padding, and it is ordinary C that this
@@ -2967,8 +2976,22 @@ int pf_call(int t) {
         lvalue = 0; curelem = 1; curptr = 1;
         return postfix();
     }
+    if (isname(t, "__mmap", 6)) {        /* six arguments: the .sys6 gate */
+        need(tidx("(", 1), "(");
+        n = 0;
+        while (cur() != tidx(")", 1)) {
+            expr(); loadval(); push(); n = n + 1;
+            if (eat(tidx(",", 1)) == 0) break;
+        }
+        need(tidx(")", 1), ")");
+        sysargs6(n);
+        es("  .sys6 mmap, r0, r1, r2, r3, r4, r5\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
     if (isname(t, "__open", 6) || isname(t, "__read", 6) ||
         isname(t, "__write", 7) || isname(t, "__close", 7) ||
+        isname(t, "__mprotect", 10) || isname(t, "__munmap", 8) ||
         isname(t, "__exit", 6)) {
         need(tidx("(", 1), "(");
         n = 0;
@@ -2983,7 +3006,9 @@ int pf_call(int t) {
         else { if (isname(t, "__read", 6)) es("read");
         else { if (isname(t, "__write", 7)) es("write");
         else { if (isname(t, "__close", 7)) es("close");
-        else es("exit"); } } }
+        else { if (isname(t, "__mprotect", 10)) es("mprotect");
+        else { if (isname(t, "__munmap", 8)) es("munmap");
+        else es("exit"); } } } } }
         es(", r0, r1, r2\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
@@ -5573,75 +5598,80 @@ int setup(void) {
     return 0;
 }
 
-int main(void) {
-    int fd; int i; int p; int L; int k;
+/* The front end as a FUNCTION: read `path`, compile it for target `t`, and
+   leave the tape text in out[0..nout).  unisacc's own main calls it, and so
+   does unisaccrun, which then runs the tape instead of writing it out. */
+int fe_tape(char *path, char *t) {
+    int fd; int k;
     nibuf = 0; toinit = 0; hasinit = 0;
     fnresume = 0 - 1;
     model_dims();
     setup();
-    if (__argc() < 2) { printf("usage: unisacc FILE.c\n"); return 1; }
-    fd = ropen(__argv(1));
+    fd = ropen(path);
     if (fd < 0) { printf("cannot open input\n"); return 1; }
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
-    /* A full buffer means the file did not fit.  It used to be read short in
-       silence: unisacc.c grew past 256 KB when the model did, and compiling
-       itself stopped at an "unexpected token" where the file was cut. */
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
-    tgt = "lnx/x86_64";
-    if (__argc() > 3) { char *f; f = __argv(2);
-        if (f[0] == 45) { if (f[1] == 98 || f[1] == 116) tgt = __argv(3); } }
+    tgt = t;
     splice();
     decomment();
-    /* compiling only: the token dump is the lexer's instrument, and the
-       Python side it is compared with does header selection in its driver */
-    if (__argc() > 2) autoinc();
+    autoinc();
     preprocess();
     expandsrc();
     if (lex() < 0) return 1;
-    if (__argc() > 2) { tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
-        poolend = 0; nloop = 0;
-        /* main(argc, argv): the machine answers `.argv rd, k` one element at
-           a time, so _start builds the array -- the stub unisa/front/parse.py
-           writes, instruction for instruction */
-        es("_start:\n  @call.call __init\n");
-        es("  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n  jump __argv_top\n__argv_done:\n");
-        es("  @call.call main\n  @lit.exit r0\n.bss __argvv 32768\n");
-        unit();
-        es("__init:\n");
-        k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
-        es("  @ctrl.ret\n");
-        if (needslen) {
-            es("__slen:\n  mov r2, r0\n  @lit.imm r1, 0\n"
-               "__slen_top:\n  @alu.add r4, r2, r1\n  @mem.ld r5, [r4+0], 1\n"
-               "  @ctrl.jumpz r5, __slen_end\n  @lit.imm r5, 1\n  @alu.add r1, r1, r5\n"
-               "  @ctrl.jump __slen_top\n__slen_end:\n  mov r0, r1\n  @ctrl.ret\n");
-        }
-        if (needchb) es(".bss __chb 8\n");
-        /* base-N conversion, the same routine the Python emitter writes:
-           value in r0, base in r1, letter base in r2 ('a' or 'A'); out is
-           r0 = pointer, r1 = length. */
-        if (needxb) {
-            es(".bss __xbuf 24\n"
-               "__itoab:\n  @call.frame 16\n  @mem.store [r7+0], r1\n"
-               "  @mem.store [r7+8], r2\n  mov r2, r0\n  @mem.lea r1, __xbuf\n"
-               "  @lit.imm r3, 24\n  @alu.add r1, r1, r3\n  @lit.imm r4, 0\n"
-               "itoab_loop:\n  @mem.load r3, [r7+0]\n  .umod r5, r2, r3\n"
-               "  .udiv r2, r2, r3\n  @lit.imm r3, 10\n  @alu.lt r0, r5, r3\n"
-               "  @ctrl.jumpz r0, itoab_alpha\n  @lit.imm r3, 48\n  @ctrl.jump itoab_add\n"
-               "itoab_alpha:\n  @mem.load r3, [r7+8]\n  @lit.imm r0, 10\n"
-               "  @alu.sub r5, r5, r0\n"
-               "itoab_add:\n  @alu.add r5, r5, r3\n  @lit.imm r3, 1\n"
-               "  @alu.sub r1, r1, r3\n  @mem.st [r1+0], r5, 1\n  @alu.add r4, r4, r3\n"
-               "  @ctrl.jumpz r2, itoab_done\n  @ctrl.jump itoab_loop\n"
-               "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
-        }
-        emit_pool();
+    tp = 0; nout = 0; nsym = 0; nlab = 0; npool = 0;
+    poolend = 0; nloop = 0;
+    es("_start:\n  @call.call __init\n");
+    es("  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n"
+       "  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n"
+       "  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n"
+       "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
+       "  jump __argv_top\n__argv_done:\n");
+    es("  @call.call main\n  @lit.exit r0\n.bss __argvv 32768\n");
+    unit();
+    es("__init:\n");
+    k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
+    es("  @ctrl.ret\n");
+    if (needslen) {
+        es("__slen:\n  mov r2, r0\n  @lit.imm r1, 0\n"
+           "__slen_top:\n  @alu.add r4, r2, r1\n  @mem.ld r5, [r4+0], 1\n"
+           "  @ctrl.jumpz r5, __slen_end\n  @lit.imm r5, 1\n  @alu.add r1, r1, r5\n"
+           "  @ctrl.jump __slen_top\n__slen_end:\n  mov r0, r1\n  @ctrl.ret\n");
+    }
+    if (needchb) es(".bss __chb 8\n");
+    if (needxb) {
+        es(".bss __xbuf 24\n"
+           "__itoab:\n  @call.frame 16\n  @mem.store [r7+0], r1\n"
+           "  @mem.store [r7+8], r2\n  mov r2, r0\n  @mem.lea r1, __xbuf\n"
+           "  @lit.imm r3, 24\n  @alu.add r1, r1, r3\n  @lit.imm r4, 0\n"
+           "itoab_loop:\n  @mem.load r3, [r7+0]\n  .umod r5, r2, r3\n"
+           "  .udiv r2, r2, r3\n  @lit.imm r3, 10\n  @alu.lt r0, r5, r3\n"
+           "  @ctrl.jumpz r0, itoab_alpha\n  @lit.imm r3, 48\n  @ctrl.jump itoab_add\n"
+           "itoab_alpha:\n  @mem.load r3, [r7+8]\n  @lit.imm r0, 10\n"
+           "  @alu.sub r5, r5, r0\n"
+           "itoab_add:\n  @alu.add r5, r5, r3\n  @lit.imm r3, 1\n"
+           "  @alu.sub r1, r1, r3\n  @mem.st [r1+0], r5, 1\n  @alu.add r4, r4, r3\n"
+           "  @ctrl.jumpz r2, itoab_done\n  @ctrl.jump itoab_loop\n"
+           "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
+    }
+    emit_pool();
+    return 0;
+}
+
+#ifndef UNISACC_NO_MAIN
+int main(void) {
+    int fd; int i; int p; int L; int k;
+    if (__argc() < 2) { model_dims(); setup(); printf("usage: unisacc FILE.c\n"); return 1; }
+    if (__argc() > 2) {                  /* compile: tape, or an executable */
+        char *t; char *a2;
+        t = "lnx/x86_64";
+        if (__argc() > 3) { char *f; f = __argv(2);
+            if (f[0] == 45) { if (f[1] == 98 || f[1] == 116) t = __argv(3); } }
+        if (fe_tape(__argv(1), t)) return 1;
         /* `-b os/arch`: not the tape but the executable, from our own back
            end [S-7 item 7]; else the tape, for the Python one or the VM */
-        {   char *a2; a2 = __argv(2);
-            if (a2[0] == 45 && a2[1] == 98) { bk_build(out, nout, __argv(3)); return 0; }
-        }
+        a2 = __argv(2);
+        if (a2[0] == 45 && a2[1] == 98) { bk_build(out, nout, __argv(3)); return 0; }
         __write(1, out, nout);
         /* `unisacc FILE -c -v`: how many times each stage was asked, so a
            test can check that no table-shaped stage is decided in code */
@@ -5654,7 +5684,25 @@ int main(void) {
             ec(10);
             __write(2, out, nout);
         } } }
-        return 0; }
+        return 0;
+    }
+    /* the token dump: the lexer's instrument.  No header selection here --
+       the Python side it is compared with does that in its driver. */
+    nibuf = 0; toinit = 0; hasinit = 0;
+    fnresume = 0 - 1;
+    model_dims();
+    setup();
+    fd = ropen(__argv(1));
+    if (fd < 0) { printf("cannot open input\n"); return 1; }
+    nsrc = __read(fd, src, MAXSRC);
+    __close(fd);
+    if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
+    tgt = "lnx/x86_64";
+    splice();
+    decomment();
+    preprocess();
+    expandsrc();
+    if (lex() < 0) return 1;
     i = 0;
     while (i < ntok) {
         p = voff(TOKV, tkind[i]);
@@ -5669,3 +5717,4 @@ int main(void) {
     printf("%d tokens\n", ntok);
     return 0;
 }
+#endif

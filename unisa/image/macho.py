@@ -10,6 +10,7 @@ import struct
 
 VMADDR = 0x100000000
 PAGE = 0x4000
+PAGE4 = 0x1000       # the code-signing page, which is 4 KB whatever PAGE is
 CPU = {"x86_64": (0x01000007, 3), "arm64": (0x0100000C, 0)}
 LC_SEGMENT_64, LC_BUILD_VERSION = 0x19, 0x32
 LC_LOAD_DYLINKER, LC_LOAD_DYLIB, LC_MAIN = 0xE, 0xC, 0x80000028
@@ -31,7 +32,18 @@ SEG, SECT = 72, 80
 # dysymtab.  Darwin 25 tolerates the omission; Darwin 23 and 24 do not.  So we
 # emit all three, empty: dyld then takes the opcode path and finds nothing to
 # do.  [I-15]
-NCMDS = 11  # PAGEZERO TEXT DATA LINKEDIT DYLINKER DYLIB MAIN BUILD
+NCMDS = 12  # PAGEZERO TEXT DATA LINKEDIT DYLINKER DYLIB MAIN BUILD ... SIG
+LC_CODE_SIGNATURE = 0x1D
+# An arm64 image the kernel will run must be SIGNED -- an unsigned one is
+# killed on sight.  Ad-hoc means no certificate and no CMS: a CodeDirectory
+# whose SHA-256 hashes cover every page of the file, which is exactly what
+# `codesign -s -` writes.  Emitting it here is what lets an image we produced
+# run on Apple silicon with no other tool in the loop. [I-19]
+CS_MAGIC_EMBEDDED = 0xFADE0CC0
+CS_MAGIC_CODEDIRECTORY = 0xFADE0C02
+CS_ADHOC = 0x00000002
+CS_EXECSEG_MAIN_BINARY = 0x1
+IDENT = b"unisa\x00"        # fixed, so two runs give the same bytes
             # + DYLD_INFO_ONLY SYMTAB DYSYMTAB
 
 
@@ -59,12 +71,53 @@ def _dylib():
 # codesign APPENDS LC_CODE_SIGNATURE to the load commands.  With the header
 # region packed exactly full it overwrites the first bytes of __text, which
 # disassembles as `udf` and dies with SIGILL.  Real linkers leave slack here.
-SLACK = 172          # 256, less __bss's 80 and the dylinker's 4: HDRS holds
+SLACK = 156          # 256, less __bss's 80, the dylinker's 4 and the code
+                     # signature command's 16: HDRS holds
 
 
 def _cmdsz(arch):
     return (SEG + (SEG + SECT) + (SEG + 2 * SECT) + SEG + len(_dylinker()) + len(_dylib())
-            + 24 + 24 + 48 + 24 + 80)
+            + 24 + 24 + 48 + 24 + 80 + 16)
+
+
+def _cd_len():
+    """CodeDirectory without its hashes: the fixed part plus the identifier."""
+    return 88 + len(IDENT)
+
+
+def _sig_len(code_limit):
+    slots = (code_limit + PAGE4 - 1) // PAGE4
+    return 12 + 8 + _cd_len() + 32 * slots      # SuperBlob + one index + CD
+
+
+def _signature(image, code_limit, exec_limit):
+    """The ad-hoc SuperBlob for `image[:code_limit]`."""
+    import hashlib
+    slots = (code_limit + PAGE4 - 1) // PAGE4
+    cd = struct.pack(">IIIIIIIIIBBBBI", CS_MAGIC_CODEDIRECTORY,
+                     _cd_len() + 32 * slots,
+                     0x20400,                    # version
+                     CS_ADHOC,                   # flags
+                     _cd_len(),                  # hashOffset
+                     88,                         # identOffset: after the
+                                                 # fixed part of version 0x20400
+                     0,                          # nSpecialSlots
+                     slots, code_limit,
+                     32,                         # hashSize
+                     2,                          # hashType: SHA-256
+                     0, 12,                      # platform, log2(pageSize)
+                     0)                          # spare2
+    cd += struct.pack(">IIIQQQQ", 0, 0, 0, 0,    # scatter, team, spare3, cl64
+                      0, exec_limit, CS_EXECSEG_MAIN_BINARY)
+    assert len(cd) == 88, len(cd)                # the fixed part
+    cd += IDENT
+    assert len(cd) == _cd_len(), (len(cd), _cd_len())
+    for i in range(slots):
+        page = bytes(image[i * PAGE4:(i + 1) * PAGE4])
+        cd += hashlib.sha256(page).digest()
+    blob = struct.pack(">III", CS_MAGIC_EMBEDDED, 12 + 8 + len(cd), 1)
+    blob += struct.pack(">II", 0, 20)            # slot 0 (CodeDirectory), off
+    return blob + cd
 
 
 def HDRS(arch):
@@ -103,8 +156,12 @@ def write(arch, text, data, entry, full=None):
     m += _sect(b"__data", b"__DATA", VMADDR + textsz, len(data), textsz, 0)
     m += _sect(b"__bss", b"__DATA", VMADDR + textsz + len(data),
                full - len(data), 0, 1)                   # S_ZEROFILL
-    m += _seg(b"__LINKEDIT", VMADDR + textsz + datavm, PAGE, link, STRTAB,
-              1, 1, 0)
+    # __LINKEDIT holds the string table and then the signature
+    sigoff = (link + STRTAB + 15) // 16 * 16
+    siglen = _sig_len(sigoff)
+    linksz = sigoff - link + siglen
+    m += _seg(b"__LINKEDIT", VMADDR + textsz + datavm, _round(linksz), link,
+              linksz, 1, 1, 0)
     m += _dylinker()
     m += _dylib()
     m += struct.pack("<IIQQ", LC_MAIN, 24, hdrs + entry, 0)
@@ -114,6 +171,7 @@ def write(arch, text, data, entry, full=None):
     m += struct.pack("<II" + "I" * 10, LC_DYLD_INFO_ONLY, 48, *([0] * 10))
     m += struct.pack("<IIIIII", LC_SYMTAB, 24, link, 0, link, STRTAB)
     m += struct.pack("<II" + "I" * 18, LC_DYSYMTAB, 80, *([0] * 18))
+    m += struct.pack("<IIII", LC_CODE_SIGNATURE, 16, sigoff, siglen)
     assert len(m) == hdrs - SLACK, (len(m), hdrs)
     m += b"\x00" * SLACK
     out = bytearray(m)
@@ -122,4 +180,8 @@ def write(arch, text, data, entry, full=None):
     out += data
     out += b"\x00" * (link - len(out))
     out += b"\x00" * STRTAB                 # the string table itself
+    out += b"\x00" * (sigoff - len(out))
+    # the hashes cover everything written so far, this image's own header
+    # included -- which is why the signature is last and its own bytes are not
+    out += _signature(out, sigoff, textsz)
     return bytes(out)

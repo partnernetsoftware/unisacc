@@ -311,6 +311,43 @@ def cmd_vm(a):
     return code
 
 
+def cmd_ape(a):
+    """One file for every target: unisaccrun.com. [S-10]
+
+    The tape comes from `unisacc FILE -t os/arch` when a compiler binary is
+    given (seconds per target), or from the Python front end otherwise; the
+    lowering, the images and the packaging are this side's.
+    """
+    import subprocess
+    from .ape import build as ape_build
+    from .assemble import assemble
+    from . import image
+    from .tape import parse as tparse, DATA_BASE
+    o = _oracle(a.drive)
+
+    def one(target, stub=b""):
+        if a.via:
+            r = subprocess.run([a.via, a.file, "-t", target],
+                               capture_output=True)
+            if r.returncode != 0:
+                raise SystemExit("%s: %s" % (a.file, r.stderr.decode()[:200]))
+            t = tparse(r.stdout.decode("latin-1"))
+            t.src_os = target.split("/")[0]
+        else:
+            t = compile_file(a.file, o, target)
+        tp = lower(t, target, o, drive=a.drive)
+        text, st = assemble(tp)
+        data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
+        img = image.build(tp, text, data, st["entry"], stub=stub)
+        print("  %-12s %8d B" % (target, len(img)), file=sys.stderr)
+        return img
+
+    blob = ape_build(one, a.out)
+    print("%s  %d B  (%s, and a shell script for the rest)"
+          % (a.out, len(blob), blob[:2].decode()))
+    return 0
+
+
 def cmd_lower(a):
     o = _oracle(a.drive)
     os_, arch = a.target.split("/")
@@ -574,6 +611,14 @@ def main(argv=None):
     ft.add_argument("--drive", default="built",
                     choices=["gold", "spec", "combo", "built"])
     ft.set_defaults(fn=cmd_fat)
+
+    apx = sub.add_parser("ape")
+    apx.add_argument("file", nargs="?", default="unisaccrun.c")
+    apx.add_argument("-o", "--out", default="unisaccrun.com")
+    apx.add_argument("--via", default=None,
+                     help="a unisacc binary to get each target's tape from")
+    apx.add_argument("--drive", default="built")
+    apx.set_defaults(fn=cmd_ape)
 
     vm = sub.add_parser("vm")
     vm.add_argument("file")

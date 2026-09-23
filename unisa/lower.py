@@ -14,7 +14,14 @@ from .tape import REGS as TAPE_REGS
 # Scratch lives in the DATA area, not at a magic absolute address, so the same
 # offsets resolve for the interpreter (base 0x100) and for a real image (base
 # = where the loader maps the data that follows the text).
-SCRATCH = 80          # SCR0, SCR1, PRINTLEN, PRINTBUF, ARGC, ARGV
+SCRATCH = 144         # SCR0, SCR1, PRINTLEN, PRINTBUF, ARGC, ARGV, SYSA[6],
+                      # SYSFP, SYSSP
+SYSA = 80             # six cells: a 6-argument syscall spills its sources
+                      # here, because setting an argument register can clobber
+                      # a tape register another argument still lives in
+SYSFP = 128           # ...and on x86-64 two of the six argument registers ARE
+SYSSP = 136           # the tape's frame and stack pointers (r9, r10), so a
+                      # six-argument syscall saves and restores them [S-9]
 PRINTMAX = 24
 # Windows only.  A WinAPI call is a real call: it clobbers every volatile
 # register, and ALL EIGHT tape registers are volatile on both Win64 ABIs --
@@ -105,6 +112,8 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     base = DATA_BASE + len(data)
     SCR0, SCR1, PRINTLEN, PRINTBUF = base, base + 8, base + 16, base + 24
     ARGC, ARGV = base + 48, base + 56
+    SYSCELL = [base + SYSA + 8 * i for i in range(6)]
+    FPCELL, SPCELL = base + SYSFP, base + SYSSP
     win = os_ == "win"
     HSTD, WRITTEN, SAVE = (base + WIN_HSTD, base + WIN_WRITTEN,
                            base + WIN_SAVE)
@@ -124,9 +133,10 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     def R(x):
         return rmap[x] if x in rmap else x
 
-    def syscall_seq(op, arg_srcs, extra=None):
+    def syscall_seq(op, arg_srcs):
         f = facts(oracle, op, os_, arch, drive)
-        args = (f["arg0"], f["arg1"], f["arg2"])
+        args = (f["arg0"], f["arg1"], f["arg2"],
+                f["arg3"], f["arg4"], f["arg5"])
         if fault == "win_argregs" and os_ == "win":
             args = SYSV                                   # [L-3] wrong ABI regs
         gate = f["gate"]
@@ -141,9 +151,11 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         if win:
             tp.emit("winsave", SAVE)
         for i, src in enumerate(arg_srcs):
+            if args[i] == "none":
+                raise NotImplementedError(
+                    "%s/%s passes syscall argument %d on the stack, which "
+                    "this gate does not do (%s)" % (os_, arch, i, op))
             tp.emit("setreg", args[i], src, role="arg%d" % i)
-        if extra is not None:
-            tp.emit("setreg", extra[0], extra[1], role="arg3")
         tp.emit("gate", form=f["form"], gate=gate,
                 winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
                 ret=f["ret"], hstd=HSTD, written=WRITTEN)
@@ -196,8 +208,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                 # structural, like the relocation arithmetic, so it lives
                 # here rather than in the table.  AT_FDCWD = -100.
                 syscall_seq("open", [("imm", -100), ("mem", SCR0),
-                                     ("mem", SCR1)],
-                            extra=("x3", ("mem", PRINTLEN)))
+                                     ("mem", SCR1), ("mem", PRINTLEN)])
             else:
                 syscall_seq(a[0], [("mem", SCR0), ("mem", SCR1),
                                    ("mem", PRINTLEN)])
@@ -206,6 +217,17 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         elif o == ".exit":
             tp.emit("setmem", SCR0, R(a[0]))
             syscall_seq("exit", [("mem", SCR0), ("imm", 0), ("imm", 0)])
+        elif o == ".sys6":
+            # six arguments: spill them all, then fill the argument registers
+            for i in range(6):
+                tp.emit("setmem", SYSCELL[i], R(a[i + 1]))
+            tp.emit("setmem", FPCELL, rmap["r6"])
+            tp.emit("setmem", SPCELL, rmap["r7"])
+            syscall_seq(a[0], [("mem", c) for c in SYSCELL])
+            tp.emit("mov", rmap["r0"],
+                    facts(oracle, a[0], os_, arch, drive)["ret"])
+            tp.emit("setreg", rmap["r6"], ("mem", FPCELL), role="fp")
+            tp.emit("setreg", rmap["r7"], ("mem", SPCELL), role="sp")
         elif o == ".argc":
             tp.emit("setreg", R(a[0]), ("mem", ARGC), role="argc")
         elif o == ".argv":

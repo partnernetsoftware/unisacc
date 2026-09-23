@@ -62,6 +62,7 @@ class VM:
         self.t = tape
         self.max_steps = max_steps
         self.mem = bytearray(MEM_SIZE)
+        self._brk = MEM_SIZE // 2        # where mmap hands out pages
         self.mem[DATA_BASE:DATA_BASE + len(tape.data)] = tape.data
         # argv lives just above the program's data, NUL terminated
         self.argv = []
@@ -100,8 +101,25 @@ class VM:
         e = self.mem.find(b"\x00", p)
         return bytes(self.mem[p:e if e >= 0 else len(self.mem)])
 
-    def syscall(self, name, a0, a1, a2):
-        """[TP-5] the handful of syscalls a self-hosting compiler needs."""
+    def syscall(self, name, a0, a1, a2, a3=0, a4=0, a5=0):
+        """[TP-5] the handful of syscalls a self-hosting compiler needs.
+
+        `mmap` here is a bump allocation inside the machine's own memory and
+        `mprotect` is a no-op: this model has one flat address space and no
+        protection, which is enough to RUN what a program maps -- executing
+        it needs a real kernel, and that is what the target images do."""
+        if name == "mmap":
+            n = (a1 + 0xFFF) & ~0xFFF
+            p = self._brk
+            if p + n > STACK_TOP - 0x10000:
+                return u64(-1)
+            self._brk = p + n
+            self.mem[p:p + n] = b"\x00" * n
+            return p
+        if name == "mprotect":
+            return 0
+        if name == "munmap":
+            return 0
         if name == "write":
             if a0 == 1 or a0 == 2:
                 self.out.extend(self.mem[a1:a1 + a2])
@@ -271,6 +289,9 @@ class VM:
                 elif op == ".sys":
                     v = u64(self.syscall(a[0], r[ri[a[1]]],
                                          r[ri[a[2]]], r[ri[a[3]]]))
+                    self._gate_clobber(r, v)
+                elif op == ".sys6":
+                    v = u64(self.syscall(a[0], *[r[ri[x]] for x in a[1:7]]))
                     self._gate_clobber(r, v)
                 elif op == ".exit":
                     raise Halt(u64(r[ri[a[0]]]) & 0xFF)

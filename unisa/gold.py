@@ -454,13 +454,15 @@ def build():
     # [S-2 corrected] gate is an OS fact, so it lives here, not on isel.
     abi_heads = [("sysno", SYSNOS, None), ("arg0", C.REGS, "reg"),
                  ("arg1", C.REGS, "reg"), ("arg2", C.REGS, "reg"),
-                 ("ret", C.REGS, "reg"),
+                 ("arg3", C.REGS, "reg"), ("arg4", C.REGS, "reg"),
+                 ("arg5", C.REGS, "reg"), ("ret", C.REGS, "reg"),
                  ("gate", C.GATES, None),
                  ("nrreg", C.vocab("nrreg"), None)]
     S["abi"] = Stage("abi", [("op", C.OPS), ("os", C.OS), ("arch", C.ARCH)],
                      abi_heads,
                      lambda op, o, a: {k: v for k, v in C.nine(op, o, a).items()
                                        if k in ("sysno", "arg0", "arg1", "arg2",
+                                                "arg3", "arg4", "arg5",
                                                 "ret", "gate",
                                                 "nrreg")},
                      dict(dims=(12, 8, 8), hidden=[32, 20], seed=5,

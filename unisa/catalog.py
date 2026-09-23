@@ -143,16 +143,20 @@ def gate(op, os_, arch):
 
 
 def argregs(op, os_, arch):
-    """[C-3] [C-6] -> (arg0, arg1, arg2, ret)"""
+    """[C-3] [C-6] -> (arg0..arg5, ret).
+
+    Six, not three: `mmap` takes six, and a compiler that runs what it
+    compiles needs it.  Win64 passes four in registers and the rest on the
+    stack, which this gate does not do -- hence `none`."""
     if op in MOPS:
-        return ("none", "none", "none", "none")
+        return ("none",) * 7
     if os_ == "win":
         if arch == "x86_64":
-            return ("rcx", "rdx", "r8", "rax")
-        return ("x0", "x1", "x2", "x0")
-    if arch == "x86_64":
-        return ("rdi", "rsi", "rdx", "rax")
-    return ("x0", "x1", "x2", "x0")
+            return ("rcx", "rdx", "r8", "r9", "none", "none", "rax")
+        return ("x0", "x1", "x2", "x3", "none", "none", "x0")
+    if arch == "x86_64":                  # SysV syscall: rdi rsi rdx r10 r8 r9
+        return ("rdi", "rsi", "rdx", "r10", "r8", "r9", "rax")
+    return ("x0", "x1", "x2", "x3", "x4", "x5", "x0")
 
 
 def tls(op, os_, arch):
@@ -175,9 +179,10 @@ def nrreg(op, os_, arch):
 
 def nine(op, os_, arch):
     """The heads, derived (nine, and `nrreg`). [G-9] [S-6]"""
-    a0, a1, a2, rt = argregs(op, os_, arch)
+    a0, a1, a2, a3, a4, a5, rt = argregs(op, os_, arch)
     return {
         "nrreg": nrreg(op, os_, arch),
+        "arg3": a3, "arg4": a4, "arg5": a5,
         "form": enc_form(op, os_, arch),
         "symbol": symbol(op, arch),
         "gate": gate(op, os_, arch),

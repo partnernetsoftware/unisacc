@@ -23,6 +23,10 @@
 #               the one number that was missing while the debt grew [A-29]
 #   nativeboot  unisacc -b builds unisacc, which rebuilds itself to the same
 #               bytes -- the bootstrap with no Python in it [S-6]
+#   run         unisaccrun compiles a file and RUNS it in memory (no image,
+#               no temp file): same stdout and exit as the system cc [S-9]
+#   ape         unisaccrun.com: one file that is a PE for Windows and a shell
+#               script for Unix, with a slice per target inside [S-10]
 #   closure     unisacc -b writes the same image bytes as the Python back
 #               end, all six targets, and the host image runs right [S-7]
 #   bootstrap   B = C = U, the self-hosting fixed point [A-23]
@@ -78,6 +82,8 @@ run artifacts  ./tests/artifacts.sh
 run ccrun      bash -c "./tests/ccrun.sh $PROBES"
 run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 run closure    bash -c "./tests/closure.sh $PROBES"
+run run        ./tests/run.sh
+run ape        ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
     run tools  env FETCH=0 ./tests/tools.sh

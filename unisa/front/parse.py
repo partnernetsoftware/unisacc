@@ -11,6 +11,8 @@ from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
                    U8, U16, U32, U64, is_unsigned, is_narrow,
                    F32, F64, FLOATS, ptr, Struct)
 from .lex import FNum
+# r0..r5 carry a syscall's arguments (r6 is the frame pointer, r7 the stack)
+SYSREGS = ("r0", "r1", "r2", "r3", "r4", "r5")
 from ..gold import STAGES as _STAGES
 PFCONVS = _STAGES["pfconv"].fields[0][1]
 
@@ -25,7 +27,11 @@ ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
 # to the tape's `.sys` gate, so the target facts (sysno, arg registers, gate)
 # still come from the abi/enc tables -- nothing here is hardcoded per target.
 INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
-             "__close": "close", "__exit": "exit"}
+             "__close": "close", "__exit": "exit",
+             "__mprotect": "mprotect", "__munmap": "munmap"}
+# six arguments, so the six-register gate: a compiler that runs what it
+# compiles maps memory, and mmap takes six
+INTRINSIC6 = {"__mmap": "mmap"}
 # argc/argv are not syscalls -- the loader hands them over -- so they get their
 # own tape ops rather than going through `.sys`.
 ARGV_INTRINSIC = ("__argc", "__argv")
@@ -2422,6 +2428,8 @@ class Walker:
             return self.postfix_chain(fty)
         if name in INTRINSIC:
             return self.intrinsic(INTRINSIC[name])
+        if name in INTRINSIC6:
+            return self.intrinsic(INTRINSIC6[name])
         if name in ARGV_INTRINSIC:
             if name == "__argc":
                 self.expect(")")
@@ -2541,14 +2549,17 @@ class Walker:
             if not self.eat(","):
                 break
         self.expect(")")
-        if n > 3:
-            raise CError("line %d: %s takes at most 3 arguments"
-                         % (self.peek().line, op))
+        wide = op in INTRINSIC6.values()
+        m = 6 if wide else 3
+        if n > m:
+            raise CError("line %d: %s takes at most %d arguments"
+                         % (self.peek().line, op, m))
+        regs = SYSREGS[:m]
         for k in range(n - 1, -1, -1):
-            self.em.pop(ARGREGS[k])
-        for k in range(n, 3):
-            self.em.imm(ARGREGS[k], 0)
-        self.em.emit(".sys", op, ARGREGS[0], ARGREGS[1], ARGREGS[2])
+            self.em.pop(regs[k])
+        for k in range(n, m):
+            self.em.imm(regs[k], 0)
+        self.em.emit(".sys6" if wide else ".sys", op, *regs)
         return I64
 
     def va(self, which):

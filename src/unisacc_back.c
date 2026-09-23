@@ -17,6 +17,26 @@
    could not compile itself -- the buffer would be part of what it stores. */
 
 #define BK_DATA_BASE 256            /* tape.DATA_BASE */
+/* Which target this very binary runs on, for run mode [S-9], and the
+   anonymous-mapping flags of that OS (MAP_PRIVATE | MAP_ANON). */
+#ifdef __linux__
+#define BK_HOST_OS 0
+#define BK_MAP_ANON 34
+#else
+#ifdef _WIN32
+#define BK_HOST_OS 2
+#define BK_MAP_ANON 0
+#else
+#define BK_HOST_OS 1
+#define BK_MAP_ANON 4098
+#endif
+#endif
+#ifdef __aarch64__
+#define BK_HOST_ARCH 1
+#else
+#define BK_HOST_ARCH 0
+#endif
+
 #define BK_MAXI 262144              /* tape instructions */
 #define BK_MAXT 524288              /* lowered instructions */
 #define BK_MAXN 131072              /* names: labels and data symbols */
@@ -196,15 +216,15 @@ long bk_nzlen(void) {
 #define BK_I 2                      /* an immediate */
 #define BK_N 3                      /* a name: label or data symbol */
 int bkop[BK_MAXI];
-int bkak[BK_MAXI * 4]; long bkav[BK_MAXI * 4];
+int bkak[BK_MAXI * 8]; long bkav[BK_MAXI * 8];   /* up to 8: `.sys6` */
 int bkni;
 int bkentry;                        /* the _start label's pc */
 
 /* the tape's op names, in one packed list; an op is its index here */
-char *BKOPS = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000.div\000.mod\000.udiv\000.umod\000slt64\000sle64\000ult64\000ule64\000eq\000ne\000load64\000store64\000.ld\000.st\000.lea\000.zero\000jump\000jumpz\000call\000callr\000ret\000.frame\000.arg\000.print\000.write\000.exit\000.sys\000.argc\000.argv\000nop\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
-#define BKNOPS 65
+char *BKOPS = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000.div\000.mod\000.udiv\000.umod\000slt64\000sle64\000ult64\000ule64\000eq\000ne\000load64\000store64\000.ld\000.st\000.lea\000.zero\000jump\000jumpz\000call\000callr\000ret\000.frame\000.arg\000.print\000.write\000.exit\000.sys\000.sys6\000.argc\000.argv\000nop\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define BKNOPS 66              /* BKOPS entries: `.sys6` made it 66 */
 /* operand shapes, one char per operand: r i L s */
-char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rri\000rir\000rrii\000riri\000rs\000rii\000L\000rL\000L\000r\000\000i\000ir\000r\000rr\000r\000srrr\000r\000rr\000\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000";
+char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rri\000rir\000rrii\000riri\000rs\000rii\000L\000rL\000L\000r\000\000i\000ir\000r\000rr\000r\000srrr\000srrrrrr\000r\000rr\000\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000";
 
 /* the i-th entry of a packed list: its start */
 char *bk_nth(char *list, int i) {
@@ -315,17 +335,17 @@ int bk_parse(char *t, int n) {
             while (j < e && (t[j] == 32 || t[j] == 44 || t[j] == 91 || t[j] == 93)) j = j + 1;
             q = j;
             if (sh[na] == 114) {             /* a register: r0..r7 */
-                bkak[bkni * 4 + na] = BK_R; bkav[bkni * 4 + na] = t[j + 1] - 48;
+                bkak[bkni * 8 + na] = BK_R; bkav[bkni * 8 + na] = t[j + 1] - 48;
                 j = j + 2;
             } else { if (sh[na] == 105) {    /* an immediate, maybe +K/-K after a register */
                 while (j < e && t[j] != 32 && t[j] != 44 && t[j] != 93) j = j + 1;
-                bkak[bkni * 4 + na] = BK_I; bkav[bkni * 4 + na] = bk_num(t + q, j - q);
+                bkak[bkni * 8 + na] = BK_I; bkav[bkni * 8 + na] = bk_num(t + q, j - q);
             } else {                         /* L or s: a name, or a number */
                 while (j < e && t[j] != 32 && t[j] != 44) j = j + 1;
                 if ((t[q] >= 48 && t[q] <= 57) || t[q] == 45) {
-                    bkak[bkni * 4 + na] = BK_I; bkav[bkni * 4 + na] = bk_num(t + q, j - q);
+                    bkak[bkni * 8 + na] = BK_I; bkav[bkni * 8 + na] = bk_num(t + q, j - q);
                 } else {
-                    bkak[bkni * 4 + na] = BK_N; bkav[bkni * 4 + na] = bk_name(t + q, j - q);
+                    bkak[bkni * 8 + na] = BK_N; bkav[bkni * 8 + na] = bk_name(t + q, j - q);
                 }
             } }
             na = na + 1;
@@ -341,9 +361,14 @@ int bk_parse(char *t, int n) {
 /* ---- facts from the nets, as lower.facts() asks them ------------------- */
 int bkos; int bkarch;               /* 0 lnx 1 osx 2 win; 0 x86_64 1 arm64 */
 int bkrel;                          /* the reloc answer for the branch being lowered */
+/* run mode [S-9]: the program is assembled AT the addresses it will run at,
+   in memory this process maps, instead of into an image on disk.  Nothing
+   about the code changes -- the same encoders, the same tables -- only where
+   text and data are placed and the fact that nobody writes a header. */
+int bk_runmode; long bk_runtext; long bk_rundata; long bk_runtsz; long bk_rundsz;
 int bkf_nr;                         /* the syscall-number register (abi nrreg) */
 int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;
-int bkf_arg[3]; int bkf_ret;        /* machine register numbers, -1 none */
+int bkf_arg[6]; int bkf_ret;        /* machine register numbers, -1 none */
 int bkf_sym;                        /* the symbol class index (isel), unused in bytes */
 
 /* a class index's spelling -> a machine register number (-1 for none) */
@@ -375,6 +400,9 @@ int bk_facts(int cop) {
     bkf_arg[0] = bk_regnum(bk_nth(BH_ABI_ARG0, inf(S_ABI, key, HD_ABI_ARG0)));
     bkf_arg[1] = bk_regnum(bk_nth(BH_ABI_ARG1, inf(S_ABI, key, HD_ABI_ARG1)));
     bkf_arg[2] = bk_regnum(bk_nth(BH_ABI_ARG2, inf(S_ABI, key, HD_ABI_ARG2)));
+    bkf_arg[3] = bk_regnum(bk_nth(BH_ABI_ARG3, inf(S_ABI, key, HD_ABI_ARG3)));
+    bkf_arg[4] = bk_regnum(bk_nth(BH_ABI_ARG4, inf(S_ABI, key, HD_ABI_ARG4)));
+    bkf_arg[5] = bk_regnum(bk_nth(BH_ABI_ARG5, inf(S_ABI, key, HD_ABI_ARG5)));
     bkf_ret = bk_regnum(bk_nth(BH_ABI_RET, inf(S_ABI, key, HD_ABI_RET)));
     bkf_gate = inf(S_ABI, key, HD_ABI_GATE);
     bkf_nr = bk_regnum(bk_nth(BH_ABI_NRREG, inf(S_ABI, key, HD_ABI_NRREG)));
@@ -422,7 +450,7 @@ int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
 long bk_scr0; long bk_scr1; long bk_plen; long bk_pbuf; long bk_argc; long bk_argv;
-long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
+long bk_sysa; long bk_sysfp; long bk_syssp; long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
 int bk_rmap[8];                     /* tape register -> machine register */
 
 int tk(int op, long a0, long a1, long a2, long a3) {
@@ -437,7 +465,18 @@ int tk(int op, long a0, long a1, long a2, long a3) {
 int tk_setreg(int dst, int kind, long v) { return tk(TO_SETREG, dst, v, 0, kind); }
 
 /* lower.syscall_seq */
-int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int xreg, int xk, long xv) {
+int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
+    int g; int i;
+    bk_facts(cop);
+    if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno);
+    i = 0;
+    while (i < 6) { tk_setreg(bkf_arg[i], SK_MEM, cell + 8 * i); i = i + 1; }
+    g = tk(TO_GATE, 0, 0, 0, 0);
+    tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
+    return 0;
+}
+
+int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k3, long v3) {
     int g;
     bk_facts(cop);
     if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno);
@@ -445,7 +484,7 @@ int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int x
     tk_setreg(bkf_arg[0], k0, v0);
     tk_setreg(bkf_arg[1], k1, v1);
     tk_setreg(bkf_arg[2], k2, v2);
-    if (xreg >= 0) tk_setreg(xreg, xk, xv);
+    if (k3 >= 0) tk_setreg(bkf_arg[3], k3, v3);
     g = tk(TO_GATE, 0, 0, 0, 0);
     tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
     if (bkos == 2) tk(TO_WINREST, bk_save, bkf_ret, 0, 0);
@@ -462,10 +501,12 @@ int bk_lower(void) {
     base = BK_DATA_BASE + bkdlen;
     bk_scr0 = base; bk_scr1 = base + 8; bk_plen = base + 16; bk_pbuf = base + 24;
     bk_argc = base + 48; bk_argv = base + 56;
-    bk_hstd = base + 104; bk_written = base + 128; bk_save = base + 136;
-    bk_argva = base + 200;                      /* argv[64] on Windows */
-    bk_stacktop = base + 712 + 65536;
-    if (bkos == 2) bk_zeros(712); else bk_zeros(104);
+    bk_sysa = base + 80;                        /* six syscall spill cells */
+    bk_sysfp = base + 128; bk_syssp = base + 136;   /* ...and the tape FP/SP */
+    bk_hstd = base + 168; bk_written = base + 192; bk_save = base + 200;
+    bk_argva = base + 264;                      /* argv[64] on Windows */
+    bk_stacktop = base + 776 + 65536;
+    if (bkos == 2) bk_zeros(776); else bk_zeros(168);
     bk_bss = 0; if (bkos == 2) bk_bss = 65536;
     /* tape register -> machine register: the regmap stage decides */
     j = 0;
@@ -494,44 +535,68 @@ int bk_lower(void) {
             if (bkos == 2) tk(TO_WINSTDH, bk_hstd, 0, 0, 0);
             if (bkos == 2) tk(TO_WINARGS, bk_argc, bk_argv, bk_argva, 0);
             tk(TO_SPINIT, bk_rmap[7], bkos == 2 ? bk_stacktop : 0 - 1, 0, 0);
-            if (bkos != 2) tk(TO_ARGSAVE, bk_argc, bk_argv, bkos == 0, 0);
+            /* In run mode nobody hands over argc/argv: the loader writes
+               them into the two cells below before it jumps, so the entry
+               takes no arguments and no calling convention is assumed --
+               the caller may be a C compiler's or our own. [S-9] */
+            if (bkos != 2 && bk_runmode == 0)
+                tk(TO_ARGSAVE, bk_argc, bk_argv, bkos == 0, 0);
         }
         op = bkop[pc];
         if (bk_is(op, ".write")) {
-            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 4]], 0, 0);
-            tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 4 + 1]], 0, 0);
-            bk_syscall(bk_cop("write"), SK_IMM, 1, SK_MEM, bk_scr0, SK_MEM, bk_scr1, 0 - 1, 0, 0);
+            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
+            tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 8 + 1]], 0, 0);
+            bk_syscall(bk_cop("write"), SK_IMM, 1, SK_MEM, bk_scr0, SK_MEM, bk_scr1, 0 - 1, 0);
         } else { if (bk_is(op, ".print")) {
-            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 4]], 0, 0);
+            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
             tk(TO_ITOA, bk_scr0, bk_pbuf, bk_plen, 0);
-            bk_syscall(bk_cop("write"), SK_IMM, 1, SK_ADDR, bk_pbuf, SK_MEM, bk_plen, 0 - 1, 0, 0);
+            bk_syscall(bk_cop("write"), SK_IMM, 1, SK_ADDR, bk_pbuf, SK_MEM, bk_plen, 0 - 1, 0);
         } else { if (bk_is(op, ".sys")) {
             char nm[32]; int id; int L;
-            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 4 + 1]], 0, 0);
-            tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 4 + 2]], 0, 0);
-            tk(TO_SETMEM, bk_plen, bk_rmap[bkav[pc * 4 + 3]], 0, 0);
-            id = bkav[pc * 4]; L = bkname_len[id]; if (L > 31) L = 31;
+            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8 + 1]], 0, 0);
+            tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 8 + 2]], 0, 0);
+            tk(TO_SETMEM, bk_plen, bk_rmap[bkav[pc * 8 + 3]], 0, 0);
+            id = bkav[pc * 8]; L = bkname_len[id]; if (L > 31) L = 31;
             k = 0; while (k < L) { nm[k] = bkpool[bkname_at[id] + k]; k = k + 1; } nm[L] = 0;
             cw = bk_cop(nm);
             if (bkos == 0 && bkarch == 1 && bk_same(id, "open", 4)) {
                 /* Linux/arm64 has no `open`: the number is openat's, whose
                    first argument is a directory fd, AT_FDCWD */
-                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, 3, SK_MEM, bk_plen);
+                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen);
             } else {
-                bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0, 0);
+                bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0);
             }
             bk_facts(cw);
             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
+        } else { if (bk_is(op, ".sys6")) {
+            char nm[32]; int id; int L;
+            k = 0;
+            while (k < 6) {
+                tk(TO_SETMEM, bk_sysa + 8 * k, bk_rmap[bkav[pc * 8 + 1 + k]], 0, 0);
+                k = k + 1;
+            }
+            id = bkav[pc * 8]; L = bkname_len[id]; if (L > 31) L = 31;
+            k = 0; while (k < L) { nm[k] = bkpool[bkname_at[id] + k]; k = k + 1; } nm[L] = 0;
+            cw = bk_cop(nm);
+            /* on x86-64 two of the six argument registers ARE the tape's
+               frame and stack pointers: save them across the call [S-9] */
+            tk(TO_SETMEM, bk_sysfp, bk_rmap[6], 0, 0);
+            tk(TO_SETMEM, bk_syssp, bk_rmap[7], 0, 0);
+            bk_syscall6(cw, bk_sysa);
+            bk_facts(cw);
+            tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
+            tk_setreg(bk_rmap[6], SK_MEM, bk_sysfp);
+            tk_setreg(bk_rmap[7], SK_MEM, bk_syssp);
         } else { if (bk_is(op, ".exit")) {
-            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 4]], 0, 0);
-            bk_syscall(bk_cop("exit"), SK_MEM, bk_scr0, SK_IMM, 0, SK_IMM, 0, 0 - 1, 0, 0);
+            tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
+            bk_syscall(bk_cop("exit"), SK_MEM, bk_scr0, SK_IMM, 0, SK_IMM, 0, 0 - 1, 0);
         } else { if (bk_is(op, ".argc")) {
-            tk_setreg(bk_rmap[bkav[pc * 4]], SK_MEM, bk_argc);
+            tk_setreg(bk_rmap[bkav[pc * 8]], SK_MEM, bk_argc);
         } else { if (bk_is(op, ".argv")) {
-            tk(TO_ARGVGET, bk_rmap[bkav[pc * 4]], bk_rmap[bkav[pc * 4 + 1]], bk_argv, 0);
+            tk(TO_ARGVGET, bk_rmap[bkav[pc * 8]], bk_rmap[bkav[pc * 8 + 1]], bk_argv, 0);
         } else { if (bk_is(op, ".arg")) {
             bk_facts(bk_cop("add64"));                /* a plain move */
-            tk(bk_opof("mov", 3), bk_rmap[bkav[pc * 4]], bk_rmap[bkav[pc * 4 + 1]], 0, 0);
+            tk(bk_opof("mov", 3), bk_rmap[bkav[pc * 8]], bk_rmap[bkav[pc * 8 + 1]], 0, 0);
         } else {
             /* every other op, with its registers mapped; its facts are asked
                as lower.py asks them (jumps also ask reloc) */
@@ -551,12 +616,12 @@ int bk_lower(void) {
             tkg_rel[n] = bkrel; bkrel = 0 - 1;
             k = 0;
             while (sh[k]) {
-                if (bkak[pc * 4 + k] == BK_R) tka[n * 4 + k] = bk_rmap[bkav[pc * 4 + k]];
-                else tka[n * 4 + k] = bkav[pc * 4 + k];
-                tkk[n * 4 + k] = bkak[pc * 4 + k];
+                if (bkak[pc * 8 + k] == BK_R) tka[n * 4 + k] = bk_rmap[bkav[pc * 8 + k]];
+                else tka[n * 4 + k] = bkav[pc * 8 + k];
+                tkk[n * 4 + k] = bkak[pc * 8 + k];
                 k = k + 1;
             }
-        } } } } } } }
+        } } } } } } } }
         pc = pc + 1;
     }
     return tkn;
@@ -1435,7 +1500,7 @@ int bk_idata_layout(void) {
     bk_idata_len = off + 320;                        /* LOADCFG 0x140 */
     return 0;
 }
-long bk_macho_hdrs(void) { return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 + 48 + 24 + 80) + 172; }
+long bk_macho_hdrs(void) { return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 + 48 + 24 + 80 + 16) + 156; }
 
 int bk_assemble(void) {
     long off; int i; int ok; int id;
@@ -1453,7 +1518,27 @@ int bk_assemble(void) {
     bktlen = off;
     /* image.layout: where text and data land, known before encoding */
     bk_idata_layout();
-    if (bkos == 1) {
+    if (bk_runmode) {
+        /* two mappings: text goes read-execute once it is written, data
+           stays writable, so nothing is ever both [macOS forbids W^X] */
+        bk_runtsz = bk_round(bktlen > 1 ? bktlen : 1, 16384);
+        bk_rundsz = bk_round(bkdlen + 65536, 16384);
+#ifdef _WIN32
+        /* Windows maps memory with VirtualAlloc, whose shape is not the
+           POSIX one this gate carries -- run mode is Unix-only for now, and
+           says so instead of mapping something wrong */
+        __write(2, "run: not on Windows yet (VirtualAlloc)\n", 39); __exit(1);
+#else
+        bk_runtext = __mmap(0, bk_runtsz, 3, BK_MAP_ANON, 0 - 1, 0);
+        bk_rundata = __mmap(0, bk_rundsz, 3, BK_MAP_ANON, 0 - 1, 0);
+#endif
+        if (bk_runtext == 0 - 1 || bk_rundata == 0 - 1 ||
+            bk_runtext == 0 || bk_rundata == 0) {
+            __write(2, "run: cannot map memory\n", 23); __exit(1);
+        }
+        bk_textva = bk_runtext;
+        bk_datava = bk_rundata;
+    } else { if (bkos == 1) {
         long h; h = bk_macho_hdrs();
         bk_textva = 4294967296 + h;
         bk_datava = 4294967296 + bk_round(h + bktlen, 16384);
@@ -1466,7 +1551,7 @@ int bk_assemble(void) {
         rd = 4096 + bk_round(bktlen, 4096);
         bk_datava = 5368709120 + rd + bk_round(bk_idata_len, 4096);
         i = 0; while (i < 8) { bk_imp[i] = 5368709120 + rd + bk_iat_off + 8 * i; i = i + 1; }
-    } }
+    } } }
     bk_shift = bk_datava - BK_DATA_BASE;
     bk_sizing = 0;
     bkout = bktext; bkol = 0;
@@ -1488,8 +1573,141 @@ int bk_assemble(void) {
 
 /* ---- the image, streamed to fd 1 ------------------------------------- */
 char bkwb[65536]; int bkwn; long bkwtot;
+
+/* ---- SHA-256, for the Mach-O ad-hoc signature [I-19] -------------------
+   Only what a signature needs: feed the image's bytes through, take a digest
+   every 4 KB page.  Everything is masked to 32 bits by hand -- this subset
+   has no uint32_t arithmetic of its own. */
+long SHA_K[64] = {
+    1116352408, 1899447441, 3049323471, 3921009573,
+    961987163, 1508970993, 2453635748, 2870763221,
+    3624381080, 310598401, 607225278, 1426881987,
+    1925078388, 2162078206, 2614888103, 3248222580,
+    3835390401, 4022224774, 264347078, 604807628,
+    770255983, 1249150122, 1555081692, 1996064986,
+    2554220882, 2821834349, 2952996808, 3210313671,
+    3336571891, 3584528711, 113926993, 338241895,
+    666307205, 773529912, 1294757372, 1396182291,
+    1695183700, 1986661051, 2177026350, 2456956037,
+    2730485921, 2820302411, 3259730800, 3345764771,
+    3516065817, 3600352804, 4094571909, 275423344,
+    430227734, 506948616, 659060556, 883997877,
+    958139571, 1322822218, 1537002063, 1747873779,
+    1955562222, 2024104815, 2227730452, 2361852424,
+    2428436474, 2756734187, 3204031479, 3329325298
+};
+long sha_h[8]; char sha_blk[64]; int sha_bn; long sha_tot;
+
+long sh_rr(long x, int n) {          /* rotate right, 32-bit */
+    return ((x >> n) | (x << (32 - n))) & 4294967295;
+}
+
+int sha_init(void) {
+    sha_h[0] = 1779033703; sha_h[1] = 3144134277; sha_h[2] = 1013904242;
+    sha_h[3] = 2773480762; sha_h[4] = 1359893119; sha_h[5] = 2600822924;
+    sha_h[6] = 528734635; sha_h[7] = 1541459225;
+    sha_bn = 0; sha_tot = 0;
+    return 0;
+}
+
+int sha_block(char *p) {
+    long w[64]; long a; long b; long c; long d; long e; long f; long g; long h;
+    long s0; long s1; long ch; long maj; long t1; long t2;
+    int i;
+    i = 0;
+    while (i < 16) {
+        /* through longs: a byte over 127 shifted left 24 overflows a 32-bit
+           int, and the reference compiler's int IS 32 bits */
+        long b0; long b1; long b2; long b3;
+        b0 = p[i * 4] & 255; b1 = p[i * 4 + 1] & 255;
+        b2 = p[i * 4 + 2] & 255; b3 = p[i * 4 + 3] & 255;
+        w[i] = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3;
+        i = i + 1;
+    }
+    while (i < 64) {
+        s0 = sh_rr(w[i - 15], 7) ^ sh_rr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        s1 = sh_rr(w[i - 2], 17) ^ sh_rr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 4294967295;
+        i = i + 1;
+    }
+    a = sha_h[0]; b = sha_h[1]; c = sha_h[2]; d = sha_h[3];
+    e = sha_h[4]; f = sha_h[5]; g = sha_h[6]; h = sha_h[7];
+    i = 0;
+    while (i < 64) {
+        s1 = sh_rr(e, 6) ^ sh_rr(e, 11) ^ sh_rr(e, 25);
+        ch = (e & f) ^ ((e ^ 4294967295) & g);
+        t1 = (h + s1 + ch + SHA_K[i] + w[i]) & 4294967295;
+        s0 = sh_rr(a, 2) ^ sh_rr(a, 13) ^ sh_rr(a, 22);
+        maj = (a & b) ^ (a & c) ^ (b & c);
+        t2 = (s0 + maj) & 4294967295;
+        h = g; g = f; f = e; e = (d + t1) & 4294967295;
+        d = c; c = b; b = a; a = (t1 + t2) & 4294967295;
+        i = i + 1;
+    }
+    sha_h[0] = (sha_h[0] + a) & 4294967295; sha_h[1] = (sha_h[1] + b) & 4294967295;
+    sha_h[2] = (sha_h[2] + c) & 4294967295; sha_h[3] = (sha_h[3] + d) & 4294967295;
+    sha_h[4] = (sha_h[4] + e) & 4294967295; sha_h[5] = (sha_h[5] + f) & 4294967295;
+    sha_h[6] = (sha_h[6] + g) & 4294967295; sha_h[7] = (sha_h[7] + h) & 4294967295;
+    return 0;
+}
+
+int sha_byte(int v) {
+    sha_blk[sha_bn] = v; sha_bn = sha_bn + 1; sha_tot = sha_tot + 1;
+    if (sha_bn == 64) { sha_block(sha_blk); sha_bn = 0; }
+    return 0;
+}
+
+int sha_final(char *out) {            /* 32 bytes */
+    long bits; int i;
+    bits = sha_tot * 8;
+    sha_byte(128);
+    while (sha_bn != 56) sha_byte(0);
+    i = 7;
+    while (i >= 0) { sha_byte((bits >> (8 * i)) & 255); i = i - 1; }
+    i = 0;
+    while (i < 8) {
+        out[i * 4] = (sha_h[i] >> 24) & 255; out[i * 4 + 1] = (sha_h[i] >> 16) & 255;
+        out[i * 4 + 2] = (sha_h[i] >> 8) & 255; out[i * 4 + 3] = sha_h[i] & 255;
+        i = i + 1;
+    }
+    return 0;
+}
+
 int wflush(void) { if (bkwn) __write(1, bkwb, bkwn); bkwn = 0; return 0; }
-int wb(int b) { bkwb[bkwn] = b; bkwn = bkwn + 1; bkwtot = bkwtot + 1; if (bkwn == 65536) wflush(); return 0; }
+/* while signing, every byte written also goes through SHA-256, and each
+   4 KB page's digest is kept: the signature is the last thing in the file,
+   so it can be written from these once the rest is out [I-19] */
+#define BK_MAXPAGE 8192
+int bk_sign; int bk_npage; int bk_pagen; char bk_hashes[BK_MAXPAGE * 32];
+
+int wb(int b) {
+    bkwb[bkwn] = b; bkwn = bkwn + 1; bkwtot = bkwtot + 1;
+    if (bk_sign) {
+        sha_byte(b & 255);
+        bk_pagen = bk_pagen + 1;
+        if (bk_pagen == 4096) {
+            if (bk_npage >= BK_MAXPAGE) { __write(2, "sign: image too large\n", 22); __exit(1); }
+            sha_final(bk_hashes + bk_npage * 32);
+            bk_npage = bk_npage + 1; bk_pagen = 0; sha_init();
+        }
+    }
+    if (bkwn == 65536) wflush();
+    return 0;
+}
+
+int bk_sign_end(void) {               /* the partial last page, if any */
+    if (bk_pagen > 0) {
+        if (bk_npage >= BK_MAXPAGE) { __write(2, "sign: image too large\n", 22); __exit(1); }
+        sha_final(bk_hashes + bk_npage * 32);
+        bk_npage = bk_npage + 1; bk_pagen = 0;
+    }
+    bk_sign = 0;
+    return 0;
+}
+
+/* big-endian, for the signature blob (everything else here is little) */
+int wb32(long v) { wb((v >> 24) & 255); wb((v >> 16) & 255); wb((v >> 8) & 255); wb(v & 255); return 0; }
+int wb64(long v) { wb32((v >> 32) & 4294967295); wb32(v & 4294967295); return 0; }
 int wz(long n) { while (n > 0) { wb(0); n = n - 1; } return 0; }
 int w16(long v) { wb(v & 255); wb((v >> 8) & 255); return 0; }
 int w32(long v) { w16(v & 65535); w16((v >> 16) & 65535); return 0; }
@@ -1547,6 +1765,7 @@ int bk_sect(char *sect, char *seg, long addr, long size, long off, long flags) {
 }
 int bk_macho(void) {
     long hdrs; long textsz; long datasz; long datavm; long link; long v; long L;
+    long sigoff; long siglen; long linksz; long slots; long cdlen; int i;
     hdrs = bk_macho_hdrs();
     L = bk_nzlen();
     textsz = bk_round(hdrs + bktlen, 16384);
@@ -1555,14 +1774,20 @@ int bk_macho(void) {
     link = textsz + datasz;
     v = 4294967296;
     w32(0xFEEDFACF); w32(bkarch ? 0x0100000C : 0x01000007); w32(bkarch ? 0 : 3);
-    w32(2); w32(11); w32(hdrs - 32 - 172); w32(0x200085); w32(0);
+    w32(2); w32(12); w32(hdrs - 32 - 156); w32(0x200085); w32(0);
     bk_seg("__PAGEZERO", 0, v, 0, 0, 0, 0, 0);
     bk_seg("__TEXT", v, textsz, 0, textsz, 5, 5, 1);
     bk_sect("__text", "__TEXT", v + hdrs, bktlen, hdrs, 0x80000400);
     bk_seg("__DATA", v + textsz, datavm, textsz, datasz, 3, 3, 2);
     bk_sect("__data", "__DATA", v + textsz, L, textsz, 0);
     bk_sect("__bss", "__DATA", v + textsz + L, bkdlen - L, 0, 1);      /* S_ZEROFILL */
-    bk_seg("__LINKEDIT", v + textsz + datavm, 16384, link, 8, 1, 1, 0);
+    /* __LINKEDIT holds the string table, then the ad-hoc signature */
+    sigoff = (link + 8 + 15) / 16 * 16;
+    slots = (sigoff + 4095) / 4096;
+    cdlen = 88 + 6;                                  /* fixed part + "unisa\0" */
+    siglen = 12 + 8 + cdlen + 32 * slots;
+    linksz = sigoff - link + siglen;
+    bk_seg("__LINKEDIT", v + textsz + datavm, bk_round(linksz, 16384), link, linksz, 1, 1, 0);
     w32(0xE); w32(32); w32(12); wname("/usr/lib/dyld", 20);
     w32(0xC); w32(56); w32(24); w32(0); w32(0x10000); w32(0x10000); wname("/usr/lib/libSystem.B.dylib", 32);
     w32(0x80000028); w32(24); w64(hdrs + bk_entry); w64(0);
@@ -1570,10 +1795,24 @@ int bk_macho(void) {
     w32(0x80000022); w32(48); wz(40);
     w32(2); w32(24); w32(link); w32(0); w32(link); w32(8);
     w32(0xB); w32(80); wz(72);
-    wz(172);
+    w32(0x1D); w32(16); w32(sigoff); w32(siglen);    /* LC_CODE_SIGNATURE */
+    wz(156);
     wtext(); wz(textsz - hdrs - bktlen);
     wdata(L); wz(link - textsz - L);
     wz(8);
+    wz(sigoff - bkwtot);
+    /* the hashes cover everything written so far -- this header included */
+    bk_sign_end();
+    wb32(0xFADE0CC0); wb32(12 + 8 + cdlen + 32 * slots); wb32(1);   /* SuperBlob */
+    wb32(0); wb32(20);                                              /* slot 0 */
+    wb32(0xFADE0C02); wb32(cdlen + 32 * slots); wb32(0x20400); wb32(2);
+    wb32(cdlen); wb32(88); wb32(0); wb32(slots); wb32(sigoff);
+    wb(32); wb(2); wb(0); wb(12); wb32(0);
+    wb32(0); wb32(0); wb32(0); wb64(0);
+    wb64(0); wb64(textsz); wb64(1);
+    wb(117); wb(110); wb(105); wb(115); wb(97); wb(0);              /* "unisa" */
+    i = 0;
+    while (i < slots * 32) { wb(bk_hashes[i] & 255); i = i + 1; }
     return 0;
 }
 
@@ -1659,6 +1898,34 @@ int bk_pe(void) {
 }
 
 /* `unisacc FILE -b os/arch`: the tape in t[0..n), as an image on fd 1 */
+/* Compile the tape into memory and hand back the entry address. [S-9] */
+long bk_run(char *t, int n, long argc, long argv) {
+    int a; long k; char *d; char *c;
+    bkos = BK_HOST_OS; bkarch = BK_HOST_ARCH; bk_runmode = 1;
+    bk_parse(t, n);
+    bk_repack();
+    bk_lower();
+    bk_assemble();
+    /* the data: mapped pages are already zero, so only the stored runs move */
+    a = 0;
+    while (a < bknd) {
+        d = (char *)(bk_rundata + bkd_at[a]);
+        k = 0; while (k < bkd_len[a]) { d[k] = bkdata[bkd_off[a] + k]; k = k + 1; }
+        a = a + 1;
+    }
+    /* argc and argv, straight into the program's own cells */
+    c = (char *)(bk_rundata + bk_argc - BK_DATA_BASE);
+    k = 0; while (k < 8) { c[k] = (argc >> (8 * k)) & 255; k = k + 1; }
+    c = (char *)(bk_rundata + bk_argv - BK_DATA_BASE);
+    k = 0; while (k < 8) { c[k] = (argv >> (8 * k)) & 255; k = k + 1; }
+    d = (char *)bk_runtext;
+    k = 0; while (k < bktlen) { d[k] = bktext[k]; k = k + 1; }
+    if (__mprotect(bk_runtext, bk_runtsz, 5) != 0) {
+        __write(2, "run: cannot make the code executable\n", 37); __exit(1);
+    }
+    return bk_runtext + bk_entry;
+}
+
 int bk_build(char *t, int n, char *target) {
     bkos = 0;
     if (target[0] == 111) bkos = 1;                  /* osx */
@@ -1669,6 +1936,7 @@ int bk_build(char *t, int n, char *target) {
     bk_lower();
     bk_assemble();
     bkwn = 0; bkwtot = 0;
+    if (bkos == 1) { bk_sign = 1; bk_npage = 0; bk_pagen = 0; sha_init(); }
     if (bkos == 0) bk_elf();
     if (bkos == 1) bk_macho();
     if (bkos == 2) bk_pe();
