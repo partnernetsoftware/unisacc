@@ -397,6 +397,23 @@ int ropen(char *path) {
    `-I dir` is searched before the built-in headers, `-D NAME[=n]` is
    predefined like any other macro. */
 char *optinc; int noptd; char *optd[16];
+
+/* ---- where a byte came from, so an error can say file:line:col --------
+   The buffer the parser sees is not the file the user wrote: continuation
+   lines are joined (fewer lines) and every `#include` is replaced by the
+   header's text (many more).  Two small tables record exactly that, and
+   `err_at` walks them backwards.  Macro expansion rewrites in place and
+   never adds or removes a newline, so it does not enter into it. [S-12] */
+#define MAXIREG 512
+long ireg_ln[MAXIREG];    /* the line the header's text starts on */
+long ireg_nl[MAXIREG];    /* how many lines it is */
+int ireg_nm[MAXIREG];     /* its name, as an offset into `fnpool` */
+int nireg;
+#define MAXSPL 4096
+long spl_at[MAXSPL]; int nspl;   /* joined continuation lines */
+char fnpool[8192]; int nfnpool;
+char incname[64];                 /* the header being spliced, for the table */
+int nautoinc;                     /* `#include` lines WE put at the top */
 char *srcpath;                    /* the file being compiled, for `"x.h"` */
 char optincdir[512]; int optincdl; /* -I, normalised with a trailing slash */
 
@@ -466,6 +483,11 @@ int incdo(int ls, int le, int from) {
     }
     nl = j - nm;
     if (nincl > 200) return 0;               /* a header that includes itself */
+    {   int q2;                              /* the name, before the shift */
+        incname[0] = 0; q2 = 0;
+        while (q2 < nl && q2 < 62) { incname[q2] = src[nm + q2]; q2 = q2 + 1; }
+        incname[q2] = 0;
+    }
     n = 0 - 1;
     if (q == 34) {
         a = srcpath;
@@ -492,11 +514,108 @@ int incdo(int ls, int le, int from) {
     src[ls + n] = 10;
     nsrc = nsrc + grow;
     nincl = nincl + 1;
+    /* remember the swap, so a position inside the header can name it and a
+       position after it can be counted back to the user's own line [S-12].
+       Includes are spliced left to right, and a nested one lands INSIDE the
+       region just recorded, so the table stays in order. */
+    if (nireg < MAXIREG) {
+        long c2; long ln;
+        ln = 1; c2 = 0;
+        while (c2 < ls) { if (src[c2] == 10) ln = ln + 1; c2 = c2 + 1; }
+        ireg_ln[nireg] = ln;
+        ireg_nl[nireg] = 1; c2 = 0;
+        while (c2 < n) { if (incbuf[c2] == 10) ireg_nl[nireg] = ireg_nl[nireg] + 1; c2 = c2 + 1; }
+        ireg_nm[nireg] = nfnpool;
+        q = 0;
+        while (incname[q] && nfnpool < 8000) { fnpool[nfnpool] = incname[q]; nfnpool = nfnpool + 1; q = q + 1; }
+        fnpool[nfnpool] = 0; nfnpool = nfnpool + 1;
+        nireg = nireg + 1;
+    }
     return 1;
 }
 
 int splice(void);
 int decomment(void);
+
+/* ---- diagnostics ------------------------------------------------------
+   `file:line:col: error: ...`, then the line, then a caret -- the shape
+   every C programmer already reads.  The position walks back through the
+   include swaps (§ the tables above); the line printed is the one the
+   PARSER saw, which differs from the file only where a macro expanded. */
+int blen(char *s);
+
+int ec2(int c) { char b[1]; b[0] = c; __write(2, b, 1); return 0; }
+
+int en2(long v) {                      /* a number, to stderr */
+    char b[24]; int n; int k;
+    if (v == 0) { ec2(48); return 0; }
+    n = 0;
+    while (v > 0 && n < 23) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    k = n - 1;
+    while (k >= 0) { ec2(b[k] & 255); k = k - 1; }
+    return 0;
+}
+
+int err_line(long p) {                 /* print the line containing p */
+    long a; long b;
+    a = p;
+    while (a > 0 && src[a - 1] != 10) a = a - 1;
+    b = p;
+    while (b < nsrc && src[b] != 10) b = b + 1;
+    __write(2, "  ", 2);
+    __write(2, src + a, b - a);
+    __write(2, "\n  ", 3);
+    a = a;
+    while (a < p) { __write(2, src[a] == 9 ? "\t" : " ", 1); a = a + 1; }
+    __write(2, "^\n", 2);
+    return 0;
+}
+
+int err_at(long p, char *msg) {
+    long q; long line; long col; int i; int inside; char *fname;
+    if (p < 0) p = 0;
+    if (p > nsrc) p = nsrc;
+    /* the line and column IN THE BUFFER -- macro expansion rewrites a line
+       but never adds or removes one, so the line survives it */
+    line = 1; col = 1; q = 0;
+    while (q < p) {
+        if (src[q] == 10) { line = line + 1; col = 1; } else col = col + 1;
+        q = q + 1;
+    }
+    /* Undo the header splices, innermost first.  A region spans the lines
+       [ln, ln + nl]: `nl` lines of header text, and then the blank left
+       where the `#include` line's own newline still is.  So a line after it
+       sits `nl` lines further down than it does in the file. */
+    inside = 0 - 1;
+    i = nireg - 1;
+    while (i >= 0) {
+        if (line > ireg_ln[i] + ireg_nl[i]) line = line - ireg_nl[i];
+        else { if (line >= ireg_ln[i]) { inside = i; line = line - ireg_ln[i] + 1; break; } }
+        i = i - 1;
+    }
+    fname = inside >= 0 ? fnpool + ireg_nm[inside] : srcpath;
+    if (inside < 0) {
+        line = line - nautoinc;   /* the headers we added on the user's behalf */
+        /* each joined continuation line is a line the file has that this
+           buffer does not */
+        i = 0;
+        while (i < nspl) { if (spl_at[i] < p) line = line + 1; i = i + 1; }
+    }
+    __write(2, fname, blen(fname));
+    ec2(58); en2(line); ec2(58); en2(col);
+    __write(2, ": error: ", 9);
+    __write(2, msg, blen(msg));
+    ec2(10);
+    err_line(p);
+    return 0;
+}
+
+int err_tok(int t, char *msg) {        /* ...at a token */
+    if (t < 0 || t >= ntok) { err_at(nsrc, msg); __exit(1); }
+    err_at(tpos[t], msg);
+    __exit(1);
+    return 0;
+}
 
 /* The target's predefined macros, the same set unisa/front/pp.py gives:
    `#ifdef __linux__` in <stdio.h> picks the O_* bits, `#ifdef _WIN32` the
@@ -821,6 +940,7 @@ int incappend(char *h, int hl) {
     while (k < 10 + hl) { src[k] = h[k - 10]; k = k + 1; }
     src[k] = 62; src[k + 1] = 10;
     nsrc = nsrc + n;
+    nautoinc = nautoinc + 1;      /* a line the user did not write [S-12] */
     return 0;
 }
 /* the header's definitions: a line opening `static`, whose name is the
@@ -1314,8 +1434,15 @@ int splice(void) {
     i = 0; j = 0;
     while (i < nsrc) {
         if (src[i] == 92) {                      /* backslash */
-            if (src[i + 1] == 10) { i = i + 2; continue; }
-            if (src[i + 1] == 13) { if (src[i + 2] == 10) { i = i + 3; continue; } }
+            /* a joined line means one fewer newline than the file has */
+            if (src[i + 1] == 10) {
+                if (nspl < MAXSPL) { spl_at[nspl] = j; nspl = nspl + 1; }
+                i = i + 2; continue;
+            }
+            if (src[i + 1] == 13) { if (src[i + 2] == 10) {
+                if (nspl < MAXSPL) { spl_at[nspl] = j; nspl = nspl + 1; }
+                i = i + 3; continue;
+            } }
         }
         src[j] = src[i]; j = j + 1; i = i + 1;
     }
@@ -1983,11 +2110,18 @@ int adv(void) { tp = tp + 1; return tp - 1; }
 int eat(int k) { if (cur() == k) { tp = tp + 1; return 1; } return 0; }
 
 int need(int k, char *what) {
+    char msg[64]; int n; int q;
     if (cur() == k) { tp = tp + 1; return 1; }
-    __write(2, "parse error: expected ", 22); __write(2, what, 2);
-    __write(2, " got '", 6); __write(2, src + tpos[tp], tlen[tp]);
-    __write(2, "'\n", 2);
-    __exit(1);
+    /* "expected ';'" -- and the caret goes on the token that is NOT it,
+       which is where the eye looks anyway */
+    n = 0;
+    while ("expected "[n]) { msg[n] = "expected "[n]; n = n + 1; }
+    msg[n] = 39; n = n + 1;                         /* a quote */
+    q = 0;
+    while (what[q] && n < 60) { msg[n] = what[q]; n = n + 1; q = q + 1; }
+    msg[n] = 39; n = n + 1;
+    msg[n] = 0;
+    err_tok(tp, msg);
     return 0;
 }
 
@@ -2261,7 +2395,7 @@ int unary(void) {
         int op; int e;
         op = cur(); adv();
         unary();
-        if (lvalue == 0) { printf("++ needs an lvalue at token %d\n", tp); __exit(1); }
+        if (lvalue == 0) err_tok(tp, "++ and -- need an lvalue");
         e = stw();
         lvalue = 0;
         push();                                  /* address */
@@ -2446,14 +2580,14 @@ int postfix(void) {
             adv();
             if (isarrow) loadval();          /* the pointer's VALUE is the base */
             if (curstruct < 0) {
-                printf("member access on a non-struct at token %d\n", tp);
+                err_tok(tp, "member access on something that is not a struct");
                 __exit(1);
             }
             scopedecl = 1; scopewant("field", 5, tp, "field", 5); scopedecl = 0;
             mt = adv();
             mi = mbfind(curstruct, mt);
             if (mi < 0) {
-                printf("no such member at token %d\n", mt);
+                err_tok(mt, "no such member");
                 __exit(1);
             }
             if (mboff[mi]) {
@@ -2684,9 +2818,7 @@ int primary(void) {
             return postfix();
         } }
         i = sfind(tp);
-        if (i < 0) { __write(2, "unknown identifier: ", 20);
-                     __write(2, src + tpos[tp], tlen[tp]);
-                     __write(2, "\n", 1); __exit(1); }
+        if (i < 0) err_tok(tp, "unknown identifier");
         cursize = symbytes[i];           /* what `sizeof` reports for it */
         curvla = symvla[i];
         curflt = symflt[i];
@@ -2730,10 +2862,7 @@ int primary(void) {
         } }
         return postfix();
     }
-    printf("unexpected token %d in expression: ", tp);
-    __write(1, src + tpos[tp], tlen[tp] < 40 ? tlen[tp] : 40);
-    printf("\n");
-    __exit(1);
+    err_tok(tp, "this is not the start of an expression");
     return 0;
 }
 
@@ -3587,7 +3716,7 @@ int binary(int level) {
                names in its `+` row (the usual arithmetic conversion), and
                the op is the irsel net's fpu family. */
             int cf; int isarith;
-            if (tyis(res, "illegal", 7)) { printf("floating operand for this operator at token %d\n", tp); __exit(1); }
+            if (tyis(res, "illegal", 7)) err_tok(tp, "this operator takes no floating operand");
             cf = 4; if (tyis(ck, "f64", 3)) cf = 8;
             fconv(fkind(), cf);                    /* rhs, in r0 */
             es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @mem.load r0, [r7+8]\n");
@@ -3857,7 +3986,7 @@ int catom(void) {
         i = sfind(tp);
         if (i >= 0) { if (symkind[i] == 4) { adv(); return symoff[i]; } }
     }
-    printf("constant expected at token %d\n", tp);
+    err_tok(tp, "a constant is required here");
     __exit(1);
     return 0;
 }
@@ -4448,7 +4577,7 @@ int block(void) {
     bdepth = bdepth + 1;
     vlaslot[bdepth] = 0;
     while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
-        if (cur() == T_EOF) { printf("unterminated block\n"); __exit(1); }
+        if (cur() == T_EOF) err_tok(tp, "unterminated block: the file ends inside it");
         stmt();
     }
     adv();
@@ -4876,7 +5005,7 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
             int mi;
             adv();
             mi = mbfind(cxst[depth], tp);
-            if (mi < 0) { printf("no such member at token %d\n", tp); __exit(1); }
+            if (mi < 0) err_tok(tp, "no such member");
             adv(); need(tidx("=", 1), "=");
             i = cxbase[depth] + membstart(cxst[depth], mi);
             continue;

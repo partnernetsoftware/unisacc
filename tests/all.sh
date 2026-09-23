@@ -27,6 +27,8 @@
 #               image, no temp file): same stdout and exit as the cc [S-9]
 #   cli         the compiler as a TOOL, from a scratch dir: built-in headers,
 #               -I, -D, a shebang, argv, exit status [S-11]
+#   diag        what the compiler says when the program is wrong: the user's
+#               file, the user's line, the column, the line itself [S-12]
 #   ape         unisacc.com: one file that is a PE for Windows and a shell
 #               script for Unix, with a slice per target inside [S-10]
 #   closure     unisacc -b writes the same image bytes as the Python back
@@ -86,6 +88,7 @@ run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 run closure    bash -c "./tests/closure.sh $PROBES"
 run run        ./tests/run.sh
 run cli        ./tests/cli.sh
+run diag       ./tests/diag.sh
 run ape        ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
