@@ -64,6 +64,11 @@ eng 下沉 + 统一 bake
 
 **现定主线是夯底层（上表 1–3），不是再开一款门面游戏。** 新游戏只在逼出 Host 缺口时开。
 
+### 已停泊：WebRTC Live 实验
+
+概念通、产品远。Pages 假源/观看 + `uxe-live` Worker 信令已通，**不作 UJS 直播主线**。  
+经验与坑写死在 [`docs/uxe/live/README.md`](../docs/uxe/live/README.md)，供以后 **网络游戏 / DataChannel / host_rtc** 复用。
+
 ---
 
 ## Host 对标档（摘要）
@@ -74,7 +79,7 @@ eng 下沉 + 统一 bake
 | H3 指针 | UXIN v2 · FLAG_TOUCH | ✓ |
 | H3 余 | points · 更多 action | 有需要再开 |
 | H4 | 贴图 · buffer 驻留 | 下一能力档 |
-| 后加 | audio · storage · net · llm | 独立符号，仍经 Host |
+| 后加 | audio · storage · **net/rtc** · llm | 独立符号，仍经 Host；rtc 经验见 `docs/uxe/live/README.md` |
 
 原则：加字段进 packet，不加逐物体 `host_draw_*`；永不 `import three`。
 

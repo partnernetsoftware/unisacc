@@ -41,20 +41,49 @@ int vfind(char *v, int n, char *s, int slen) {
     return 0 - 1;
 }
 
-int vlen(char *v, int idx) {
-    int p; int i; int k;
-    p = 0; i = 0;
-    while (i < idx) { while (v[p]) p = p + 1; p = p + 1; i = i + 1; }
-    k = 0;
-    while (v[p + k]) k = k + 1;
-    return k;
+/* A vocabulary is a run of NUL-separated names, and `voff`/`vlen` used to
+   walk it from the front on every call -- which the lexer does per token.
+   A sampling profile of the self-compile found the strlen that inner loop
+   compiles to at the top, so each vocabulary is indexed ONCE, on first
+   use.  There are few enough of them to find by pointer. */
+#define V_NLISTS 16
+#define V_NIDX 1024
+char *v_lists[V_NLISTS]; int v_idx[V_NLISTS * V_NIDX]; int v_n[V_NLISTS];
+int v_nlists;
+
+int v_slot(char *v) {
+    int i; int p; int n;
+    i = 0;
+    while (i < v_nlists) { if (v_lists[i] == v) return i; i = i + 1; }
+    if (v_nlists >= V_NLISTS) return 0 - 1;     /* fall back to the walk */
+    i = v_nlists; v_nlists = v_nlists + 1;
+    v_lists[i] = v;
+    p = 0; n = 0;
+    while (n < V_NIDX) {
+        v_idx[i * V_NIDX + n] = p; n = n + 1;
+        while (v[p]) p = p + 1;
+        p = p + 1;
+        if (v[p] == 0) break;
+    }
+    v_n[i] = n;
+    return i;
 }
 
 int voff(char *v, int idx) {
-    int p; int i;
+    int s; int p; int i;
+    s = v_slot(v);
+    if (s >= 0 && idx >= 0 && idx < v_n[s]) return v_idx[s * V_NIDX + idx];
     p = 0; i = 0;
     while (i < idx) { while (v[p]) p = p + 1; p = p + 1; i = i + 1; }
     return p;
+}
+
+int vlen(char *v, int idx) {
+    int p; int k;
+    p = voff(v, idx);
+    k = 0;
+    while (v[p + k]) k = k + 1;
+    return k;
 }
 
 /* ---- character predicates (needed by both pp and lex) ---------------- */

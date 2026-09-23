@@ -258,8 +258,43 @@ char *BKOPS = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\0
 char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rri\000rir\000rrii\000riri\000rs\000rii\000L\000rL\000L\000r\000\000i\000ir\000r\000rr\000r\000srrr\000srrrrrr\000r\000rr\000\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000";
 
 /* the i-th entry of a packed list: its start */
+/* A catalog is a run of NUL-separated names.  Walking it from the front on
+   every lookup made this the hottest thing in the compiler: `bk_cop` scans
+   all 70 catalog ops and calls bk_nth for each, so one op lookup costs
+   O(n^2) character scanning -- and there is one per lowered instruction.
+   A sampling profile of the self-compile put 57% of the time inside the
+   strlen the inner loop compiles to.
+   So each list is indexed ONCE, the first time it is asked for, and the
+   lists are few enough (nine) to find by pointer in a linear scan. */
+#define BK_NLISTS 16
+#define BK_NIDX 1024
+char *bk_lists[BK_NLISTS]; int bk_idx[BK_NLISTS * BK_NIDX];
+int bk_idxn[BK_NLISTS]; int bk_nlists;
+
+int bk_index(char *list) {           /* the slot holding this list's offsets */
+    int i; int k; int n;
+    i = 0;
+    while (i < bk_nlists) { if (bk_lists[i] == list) return i; i = i + 1; }
+    if (bk_nlists >= BK_NLISTS) return 0 - 1;   /* fall back to the walk */
+    i = bk_nlists; bk_nlists = bk_nlists + 1;
+    bk_lists[i] = list;
+    k = 0; n = 0;
+    /* the catalog ends where an empty name would start: two NULs in a row */
+    while (n < BK_NIDX) {
+        bk_idx[i * BK_NIDX + n] = k; n = n + 1;
+        while (list[k]) k = k + 1;
+        k = k + 1;
+        if (list[k] == 0) break;
+    }
+    bk_idxn[i] = n;
+    return i;
+}
+
 char *bk_nth(char *list, int i) {
-    int k; k = 0;
+    int s; int k;
+    s = bk_index(list);
+    if (s >= 0 && i >= 0 && i < bk_idxn[s]) return list + bk_idx[s * BK_NIDX + i];
+    k = 0;
     while (i > 0) { while (list[k]) k = k + 1; k = k + 1; i = i - 1; }
     return list + k;
 }

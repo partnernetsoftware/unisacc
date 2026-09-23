@@ -47,6 +47,7 @@
 /docs/uxe/engine.js           # 共享 Host + GPU
 /docs/uxe/asteroid/           # index + game.js + wasm
 /docs/uxe/drone/              # index + game.js + engine.wasm
+/docs/uxe/live/               # WebRTC 实验（观看/假源）；经验 → README.md
 ```
 
 本地对照：`/engine/demo/` · `/engine/ship/`（旁路 `engine.js`）。
