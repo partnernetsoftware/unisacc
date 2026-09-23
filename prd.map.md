@@ -18,7 +18,7 @@ flowchart TD
 
     subgraph R2["📚 二号厅 · 图书馆 —— Gold"]
         B1["锚：墙上八个书架，每架一张表"]
-        B2["pp 18 · lex 121 · parse 270 · type 960<br/>scope 30 · irsel 135 · enc 228 · reloc 6"]
+        B2["pp 18 · lex 144 · parse 340 · type 4275 · scope 30<br/>irsel 396 · enc 420 · reloc 6 · regmap 16 · tyinfo 16<br/>pfconv 9 · isel 140 · abi 420 · combo 420"]
         B3["FULL gold = 完整笛卡尔积<br/>gold 既是标注，也是兜底，也是验证器"]
         B1 --> B2 --> B3
     end
@@ -194,8 +194,8 @@ stateDiagram-v2
 | **6/6 与 4/6** | 正向验收 与 反向对照 |
 | **7f454c46 / cffaedfe / 4d5a** | ELF / Mach-O / PE 魔数 |
 | **P-1 / P-2** | Oracle 不透明性 / key 全域性——组合等价与唯一真推理义务 |
-| **14 个模型** | 每决策点一个；发布路径（`--drive built`）用 12 个，`isel` 与 `combo` 只在对照臂 |
-| **21,945 θ** | 全部训练产物；默认 spec 路径 11,892 θ |
+| **14 个模型** | 每决策点一个；发布路径（`--drive built`）用全部 14 个的构造整数权重 |
+| **7,052 B** | 发布的构造权重（UNS2 全部 14 个阶段）。θ 计数属 11 阶段的 SGD 时期，见 `archive/prd-history.md` |
 | **P-8** | 存在性已构造式证明 —— 开放的是最小性，不是可行性 |
 | **q4 / i8** | 8 个阶段止于 q4，3 个止于 i8，**q2 无一幸存** |
 

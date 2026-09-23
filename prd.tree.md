@@ -101,6 +101,108 @@ vm.py      ══对拍══> exec_target.py×6   通用结果 vs 六目标结�
 
 ---
 
+## T2b. 决策点树 —— 工作流 × 模型（14 个，各自独立）
+
+**每个决策点一个小模型，不按阶段合并**（E-18 实测：合并最异质的那段在任何宽度下都到不了 1.000）。
+全部共用同一个 kernel，只有形状和权重不同。发布路径 `--drive built` 用的是**构造**权重，
+不是训练产物；下表的行数与单元数以 `python3 -m unisa acc` 的当次输出为准（2026-09-23 实测）。
+
+```
+源码 ─┬─ 前端 8 个（源码 → 通用 tape）
+      │   ├─ pp      dir(9)×defined(2)          18 行    6 单元  →  4 类
+      │   ├─ lex     c(12)×peek(12)            144 行   11 单元  → 10 类
+      │   ├─ parse   nt(5)×tok(68)             340 行   34 单元  → 36 类
+      │   ├─ type    t1(15)×op(19)×t2(15)    4,275 行   61 单元  → 16 类
+      │   ├─ scope   ctx(6)×kind(5)             30 行    9 单元  →  7 类
+      │   ├─ irsel   family(6)×flavor(66)      396 行   71 单元  → 65 类
+      │   ├─ tyinfo  t(16)                       16 行    6 单元  → 3 头（size/uns/narrow）
+      │   └─ pfconv  conv(9)                      9 行    7 单元  →  7 类
+      │
+      └─ 后端 4 个（tape → 6 个目标）
+          ├─ enc     op(70)×os(3)×arch(2)      420 行    5 单元  →  5 类
+          ├─ reloc   kind(3)×arch(2)             6 行    3 单元  →  3 类
+          ├─ regmap  treg(8)×arch(2)            16 行   10 单元  → 16 类
+          └─ abi     op(70)×os(3)×arch(2)      420 行   37 单元  → 10 头
+                                                ──────────────────────────
+                                                 12 个在编译路径上   6,650 键
+
+      对照臂 2 个（不在编译路径上）
+          ├─ isel    op(70)×arch(2)            140 行   70 单元  →  2 头
+          └─ combo   op(70)×os(3)×arch(2)      420 行   83 单元  → 12 头
+```
+
+**这张表会过期。** 它是手抄的 —— `prd.tree.md` 与 `prd.map.md` 都没有生成器，
+所以 11→14 那次重构之后它们静静地落后了一天（见 0.0.6 计划第 6 项）。
+唯一的真值是 `python3 -m unisa acc`。
+
+**DAG 边**
+
+```
+② ══喂给══> ③          权重是 kernel 的唯一输入
+③ ══回答══> ①          Oracle 把类名交还给走查器
+gold 表 ══既标注又兜底══> ②   acc<0.85 用 gold，≥0.85 用网络，出货要 1.000
+```
+
+---
+
+## T2. 模块树 —— 文件到职责
+
+```
+unisa/
+├─ __main__.py        CLI 分发：train acc compile run tape lower ship dump-weights quant bench
+├─ rng.py             mulberry32 + Box-Muller            ══> net.py 初始化
+├─ linalg.py          gemv / relu / argmax / CE / Adam   累加顺序固定（§1.1）
+├─ net.py             TableNet · StageNet · UnisaNet     ══> train.py, oracle.py
+├─ catalog.py         syscall 目录 · ABI 事实 · 指令字节   ★唯一真源
+│                      ══> gold.py(9头派生) ══> lower.py ══> emit_*.py ══> exec_target.py
+├─ gold.py            key schema + 标签函数 + 完整笛卡尔积枚举
+│                      ══> train.py(标签) ══> oracle.py(兜底) ══> acc/quant(评估)
+├─ train.py           epoch 循环 · FULL gold 评估 · hot-skip · 停机 · UNDERFIT 判定
+├─ uns1.py            UNS1 读写 · f32/f16/i8/q4/q2 量化 · argmax 不变性检查
+├─ oracle.py          ★唯一分发点 ask(stage, key) → class_name；统计 net/gold 用量
+│                      [P-1] 只回传类名，禁读 logits/margin/ready 状态
+│                      [P-2] 无条件断言 key ∈ K_s ← 唯一需要真推理的证明义务
+│
+├─ front/             ── 经典走查，决策全走 oracle ──
+│   ├─ pp.py          #if 家族                    → oracle.ask("pp", (dir, defined))
+│   ├─ lex.py         字符分类 + 前瞻              → oracle.ask("lex", (c, peek))
+│   ├─ parse.py       递归下降                    → oracle.ask("parse", (nt, tok))
+│   └─ sema.py        符号表 + 类型               → oracle.ask("scope"/"type", ...)
+│
+├─ ir.py              irsel → tape 发射；printf 静态脱糖成 .print/.write
+├─ tape.py            tape 文本格式 parse / print
+├─ vm.py              通用 tape 解释器 ★基准真值
+│
+├─ lower.py           abi/enc/reloc/regmap → TargetProgram；--fault 注入点
+├─ emit_x86.py        真实字节：48 01 f0 / c3 / 0f 05 ...
+├─ emit_arm.py        真实字节：00 00 01 8b / c0 03 5f d6 / 01 00 00 d4 ...
+├─ exec_target.py     ★目标机解释器：per-arch 具名寄存器 + per-os syscall 分发
+│                      只认 lower 产出的 (os,sysno)|(os,winapi)，绝不回看 tape op
+│
+├─ image/
+│   ├─ elf.py         7f454c46   单 PT_LOAD @0x400000
+│   ├─ macho.py       cffaedfe   LC_SEGMENT_64 + LC_UNIXTHREAD
+│   └─ pe.py          4d5a       MZ stub + PE\0\0 + 0x20b + .text
+│
+├─ ship.py            kit.zip = weights/ + MANIFEST.json + kernel/ + images
+└─ kernel/unisa_boot.c   部署 kernel
+
+examples/  hello fact ptr fib switch struct do host
+weights/   *.unisa
+tests/     acceptance.sh
+archive/   prd.v1.md prd.v2.1.md prd.v2.2.md
+```
+
+**关键 DAG 边（跨目录，最容易写错的三条）**
+
+```
+catalog.py ══> gold.py          9 头 gold 必须由 (op,os,arch) 函数派生，禁止手标
+lower.py   ══> exec_target.py   解释器只吃 lower 的产物，不吃 tape op   ← fold 有牙齿的根因
+vm.py      ══对拍══> exec_target.py×6   通用结果 vs 六目标结果
+```
+
+---
+
 ## T2b. 决策点树 —— 工作流 × 模型（11 个，各自独立）
 
 **每个决策点一个小模型，不按阶段合并**（E-18 实测：合并最异质的那段在任何宽度下都到不了 1.000）。

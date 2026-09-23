@@ -1,6 +1,6 @@
 # research/
 
-论文与 prior-art 草稿；**不是**产品规格（规格在 `ujs/prd.md`）。
+论文与 prior-art 草稿；**不是**产品规格（Paper A 的规格是仓库根的 `prd.md`，Paper B 的是 `ujs/prd.md`）。
 
 | 文件 | 角色 |
 |---|---|
