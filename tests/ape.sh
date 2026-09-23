@@ -12,9 +12,8 @@
 # tests/crossnative.sh's Windows machine loads the PE half.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || ./tests/build_ref.sh >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 COM=$T/unisacc.com
 perl -e 'alarm 900; exec @ARGV' python3 -m unisa ape unisacc.c --via "$UA" \
     -o "$COM" >/dev/null 2>&1 || { echo "  FAIL could not build the .com"; exit 1; }

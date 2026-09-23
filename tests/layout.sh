@@ -18,9 +18,8 @@
 # blob starts were not sorted.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || ./tests/build_ref.sh >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 n=$(python3 tests/gen_layout.py "$T" "${DEPTH:-3}") || { echo "  FAIL generator"; exit 1; }
 [ "$n" -gt 0 ] || { echo "  FAIL the generator wrote no tapes"; exit 1; }
 perl -e 'alarm 900; exec @ARGV' python3 tests/layout_check.py "$UA" "$T" \

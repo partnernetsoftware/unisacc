@@ -15,9 +15,8 @@
 # than no line, because it sends the reader somewhere else.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || ./tests/build_ref.sh >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 ok=0; bad=0
 
 check() {   # check <name> <want line:col> <want text in message>

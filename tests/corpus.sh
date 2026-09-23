@@ -11,6 +11,7 @@ set -u
 U="python3 -m unisa"
 DRIVE=${DRIVE:-built}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$REPO/tests/lib.sh"
 DIR=${CORPUS:-$REPO/corpus/c-testsuite}
 SRC=$DIR/tests/single-exec
 BASE=$REPO/tests/corpus.baseline
@@ -120,19 +121,5 @@ echo "corpus $total   pass $pass   wrong $wrong   unsupported $unsup   knownfail
 rc=0
 [ "$wrong" -eq 0 ] || rc=1
 [ "$revived" -eq 0 ] || rc=1
-if [ -f "$BASE" ]; then
-    prev=$(cat "$BASE")
-    if [ "$pass" -lt "$prev" ]; then
-        echo "REGRESSION: pass $pass < baseline $prev"
-        comm -13 "$T/passing" "$BASE.list" 2>/dev/null | head -20 | sed 's/^/  lost /'
-        rc=1
-    elif [ "$pass" -gt "$prev" ]; then
-        echo "baseline $prev -> $pass (run with RATCHET=1 to record)"
-        [ "${RATCHET:-0}" = "1" ] && { echo "$pass" > "$BASE"; \
-            sort "$T/passing" > "$BASE.list"; echo "recorded."; }
-    fi
-else
-    echo "$pass" > "$BASE"; sort "$T/passing" > "$BASE.list"
-    echo "baseline recorded: $pass"
-fi
+ratchet "$BASE" "$pass" "$T/passing" || rc=1
 exit $rc

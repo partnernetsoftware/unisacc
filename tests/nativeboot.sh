@@ -12,9 +12,8 @@
 # rewrites the file it signs, so it only ever touches a copy that is run.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || ./tests/build_ref.sh >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64)  H=osx/arm64;;
     Darwin/x86_64) H=osx/x86_64;;

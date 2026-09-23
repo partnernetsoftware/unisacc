@@ -13,17 +13,10 @@
 # ever seen a program this size.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || ./tests/build_ref.sh >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
-case "$(uname -s)/$(uname -m)" in
-    Darwin/arm64)  HOSTT=osx/arm64;;
-    Darwin/x86_64) HOSTT=osx/x86_64;;
-    Linux/x86_64)  HOSTT=lnx/x86_64;;
-    Linux/aarch64) HOSTT=lnx/arm64;;
-    *) HOSTT=;;
-esac
+HOSTT=$(host_target)
 same=0; diff=0
 for t in $TARGETS; do
     tt=$(echo "$t" | tr / _)

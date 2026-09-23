@@ -3,6 +3,7 @@
 # Python compiler's own output for the same program.  [A-21]
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
+. "$R/tests/lib.sh"
 UA=${UA:-/tmp/ua_ref}
 BASE=$R/tests/ccrun.baseline
 KNOWN=$R/tests/ccrun.knownwrong
@@ -46,20 +47,5 @@ rc=0
 if [ "${NOBASE:-0}" = "1" ]; then
     exit $rc
 fi
-if [ -f "$BASE" ]; then
-    prev=$(cat "$BASE")
-    if [ "$pass" -lt "$prev" ]; then
-        echo "REGRESSION: agreed $pass < baseline $prev"
-        sort "$T/passing" > "$T/s"
-        comm -13 "$T/s" "$BASE.list" 2>/dev/null | sed 's/^/  lost /'
-        rc=1
-    elif [ "$pass" -gt "$prev" ]; then
-        echo "baseline $prev -> $pass (run with RATCHET=1 to record)"
-        [ "${RATCHET:-0}" = "1" ] && { echo "$pass" > "$BASE"; \
-            sort "$T/passing" > "$BASE.list"; echo "recorded."; }
-    fi
-else
-    echo "$pass" > "$BASE"; sort "$T/passing" > "$BASE.list"
-    echo "baseline recorded: $pass"
-fi
+ratchet "$BASE" "$pass" "$T/passing" || rc=1
 exit $rc

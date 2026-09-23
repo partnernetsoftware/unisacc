@@ -13,17 +13,10 @@
 # print what the reference VM prints for that tape.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || "$R/tests/build_ref.sh" >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
-case "$(uname -s)/$(uname -m)" in
-    Darwin/arm64)  HOSTT=osx/arm64;;
-    Darwin/x86_64) HOSTT=osx/x86_64;;
-    Linux/x86_64)  HOSTT=lnx/x86_64;;
-    Linux/aarch64) HOSTT=lnx/arm64;;
-    *) HOSTT=;;
-esac
+HOSTT=$(host_target)
 PAR_WAIT=4   # the host run waits on the first-launch scan
 . "$R/tests/par.sh"
 for f in "$@"; do

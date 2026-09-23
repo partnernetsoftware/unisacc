@@ -14,6 +14,7 @@
 # first time it ran -- see prd.md E-45 for what that bought.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
+. "$R/tests/lib.sh"
 CACHE=${TOOLS:-$R/corpus}
 BASE=$R/tests/tools.baseline
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
@@ -107,20 +108,5 @@ echo "tools $((pass+wrong+unsup+skip))   pass $pass   wrong $wrong   unsupported
 
 rc=0
 [ "$wrong" -eq 0 ] || rc=1
-if [ -f "$BASE" ]; then
-    prev=$(cat "$BASE")
-    if [ "$pass" -lt "$prev" ]; then
-        echo "REGRESSION: pass $pass < baseline $prev"
-        sort "$T/passing" > "$T/s"
-        comm -13 "$T/s" "$BASE.list" 2>/dev/null | sed 's/^/  lost /'
-        rc=1
-    elif [ "$pass" -gt "$prev" ]; then
-        echo "baseline $prev -> $pass (run with RATCHET=1 to record)"
-        [ "${RATCHET:-0}" = "1" ] && { echo "$pass" > "$BASE"; \
-            sort "$T/passing" > "$BASE.list"; echo "recorded."; }
-    fi
-else
-    echo "$pass" > "$BASE"; sort "$T/passing" > "$BASE.list"
-    echo "baseline recorded: $pass"
-fi
+ratchet "$BASE" "$pass" "$T/passing" || rc=1
 exit $rc
