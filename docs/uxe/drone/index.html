@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta http-equiv="Cache-Control" content="no-cache" />
   <title>UXE · 无人机驾舱</title>
   <style>
     :root { color-scheme: dark; }
@@ -663,7 +664,6 @@ function norm32(v) {
   return [v[0] / L, v[1] / L, v[2] / L];
 }
 function adaptProjectionForWebGPU(P) {
-  P[5] = -P[5];
   const z0 = P[2], z1 = P[6], z2 = P[10], z3 = P[14];
   const w0 = P[3], w1 = P[7], w2 = P[11], w3 = P[15];
   P[2] = z0 * 0.5 + w0 * 0.5;
@@ -1208,13 +1208,13 @@ var BTN_MIDDLE = 4;
 var FLAG_POINTER_IN = 1;
 var FLAG_SUICIDE = 2;
 var FLAG_TOUCH = 4;
-var STICK_DEADZONE = 0.2;
-function axesFromStick(mx, my, dead = STICK_DEADZONE) {
+var STICK_DEADZONE = 0.32;
+function axesFromDrag(dx, dy, dead = STICK_DEADZONE) {
   let ix = 0, iy = 0;
-  if (mx <= -dead) ix = -1;
-  else if (mx >= dead) ix = 1;
-  if (my <= -dead) iy = 1;
-  else if (my >= dead) iy = -1;
+  if (dx <= -dead) ix = -1;
+  else if (dx >= dead) ix = 1;
+  if (dy <= -dead) iy = 1;
+  else if (dy >= dead) iy = -1;
   return { ix, iy };
 }
 function encodeInputSnapshot(snap, out) {
@@ -1306,6 +1306,7 @@ async function createBrowserHost(canvas, opts = {}) {
   let primaryType = "mouse";
   let primaryId = -1;
   let pointerLockEnabled = opts.pointerLock === true;
+  let stickOx = 0, stickOy = 0;
   function syncPointerFromEvent(e) {
     const r = canvas.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return;
@@ -1333,12 +1334,17 @@ async function createBrowserHost(canvas, opts = {}) {
     if (pointerLockEnabled && !isTouch && document.pointerLockElement !== canvas) {
       canvas.requestPointerLock?.();
     }
-    if (primaryId < 0 || e.pointerId === primaryId) {
+    const newPrimary = primaryId < 0;
+    if (newPrimary || e.pointerId === primaryId) {
       primaryId = e.pointerId;
       primaryType = e.pointerType || "mouse";
     }
     canvas.setPointerCapture?.(e.pointerId);
     if (document.pointerLockElement !== canvas) syncPointerFromEvent(e);
+    if (newPrimary) {
+      stickOx = mx;
+      stickOy = my;
+    }
     if (e.isPrimary !== false && (isTouch || e.button === 0 || e.button === -1 || e.buttons & 1)) {
       buttons |= BTN_LEFT;
     }
@@ -1402,8 +1408,8 @@ async function createBrowserHost(canvas, opts = {}) {
     lastPacketClouds = packet.clouds?.length || 0;
     renderer.render(scene, camera);
   }
-  function stickAxes(outMx, outMy) {
-    return axesFromStick(outMx, outMy);
+  function stickAxes(dx, dy) {
+    return axesFromDrag(dx, dy);
   }
   let lastSnap = null;
   return {
@@ -1430,8 +1436,8 @@ async function createBrowserHost(canvas, opts = {}) {
         movAccX = 0;
         movAccY = 0;
       }
-      if (contact && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
-        const a = stickAxes(outMx, outMy);
+      if (contact && primaryId >= 0 && ix === 0 && iy === 0 && document.pointerLockElement !== canvas) {
+        const a = stickAxes(outMx - stickOx, outMy - stickOy);
         ix = a.ix;
         iy = a.iy;
       }
@@ -1483,7 +1489,14 @@ async function createBrowserHost(canvas, opts = {}) {
       else console.log(line);
     },
     host_request_frame(cb) {
-      requestAnimationFrame(cb);
+      let fired = false;
+      const once = (t) => {
+        if (fired) return;
+        fired = true;
+        cb(typeof t === "number" ? t : performance.now());
+      };
+      requestAnimationFrame(once);
+      setTimeout(once, 50);
     },
     setPointerLockEnabled(on) {
       pointerLockEnabled = !!on;
@@ -2468,7 +2481,7 @@ try {
     reticle: document.getElementById("reticle"),
     prefer,
     controls: initial,
-    engineUrl: new URL("./engine.wasm?v=20260923g", location.href).href,
+    engineUrl: new URL("./engine.wasm?v=20260923sky", location.href).href,
     onControls: paintCtrl,
   });
   window.__UXE_API__ = api;
