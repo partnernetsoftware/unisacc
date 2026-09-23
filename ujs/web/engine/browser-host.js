@@ -270,6 +270,8 @@ export async function createBrowserHost(canvas, opts = {}) {
 
     host_input_read(buf) {
       let ix = 0, iy = 0;
+      // UXIN: A/← ix=-1 · D/→ ix=+1 · W/↑ iy=-1 · S/↓ iy=+1
+      // (matches touch stick & drone thrust; asteroid sim negates iy→py)
       if (keys.KeyA || keys.ArrowLeft) ix -= 1;
       if (keys.KeyD || keys.ArrowRight) ix += 1;
       if (keys.KeyS || keys.ArrowDown) iy += 1;

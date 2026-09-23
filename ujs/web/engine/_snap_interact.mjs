@@ -96,11 +96,32 @@ try {
   }
   if (!(stick.inputRing?.length >= 1)) throw new Error("asteroid inputRing empty");
 
+  // W /↑ → iy=-1 must raise chase-cam eye.y (world +Y = screen up)
+  const eyeBefore = stick.packet?.eye?.[1];
+  await cdp(ws, 210, "Input.dispatchKeyEvent", {
+    type: "keyDown", windowsVirtualKeyCode: 87, code: "KeyW", key: "w",
+  });
+  let eyeAfter = eyeBefore;
+  for (let i = 0; i < 20; i++) {
+    await sleep(50);
+    const s = await snap(ws, 220 + i);
+    eyeAfter = s?.packet?.eye?.[1];
+    if (typeof eyeBefore === "number" && typeof eyeAfter === "number" &&
+        eyeAfter > eyeBefore + 0.02) break;
+  }
+  await cdp(ws, 240, "Input.dispatchKeyEvent", {
+    type: "keyUp", windowsVirtualKeyCode: 87, code: "KeyW", key: "w",
+  });
+  if (!(typeof eyeBefore === "number" && eyeAfter > eyeBefore + 0.02)) {
+    throw new Error("asteroid W did not raise eye.y before=" + eyeBefore + " after=" + eyeAfter);
+  }
+
   console.log("OK_SNAP_ASTEROID", {
     backend: ast0.backend,
     eye: ast0.packet.eye,
     clouds: ast0.packet.clouds.length,
     touch: { ix: stick.input.ix, flags: stick.input.flags },
+    wRaisesEye: { before: eyeBefore, after: eyeAfter },
   });
 
   // —— Drone ship ——
