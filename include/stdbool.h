@@ -1,15 +1,10 @@
-/* <stdbool.h> for the unisa C subset.
- *
- * C99 defines `bool` as a macro for `_Bool`, whose conversion rule is that
- * any nonzero value becomes 1.  This compiler does not have `_Bool` as a
- * type yet (tests/c99.knownfail says so, and it is 0.0.6 work), so `bool`
- * is `int` here: `bool b = 2;` stores 2 rather than 1, and `sizeof(bool)`
- * is 4 rather than 1.  Everything written with `bool`, `true` and `false`
- * as booleans behaves the same way.
- */
+/* <stdbool.h> for the unisa C subset.  C99 7.16: three macros over _Bool,
+ * which the compiler now has as a one-byte unsigned type whose conversion
+ * rule is "0 if the value compares equal to 0, 1 otherwise" -- so
+ * `bool b = 2;` stores 1, as the standard requires. */
 #ifndef _UNISA_STDBOOL_H
 #define _UNISA_STDBOOL_H
-#define bool int
+#define bool _Bool
 #define true 1
 #define false 0
 #define __bool_true_false_are_defined 1

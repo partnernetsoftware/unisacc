@@ -1250,8 +1250,8 @@ char *PRODV = "end\0fn\0global\0typedef\0struct\0enum\0decl\0if\0while\0for\0do\
 char *ACTV = "skip\0nl\0ident\0num\0str\0charlit\0cmt\0linecmt\0op\0bad\0";
 #define NACTV 10
 
-char *TYPEV = "int\0char\0long\0short\0void\0unsigned\0signed\0float\0double\0const\0static\0extern\0volatile\0register\0auto\0inline\0restrict\0";
-#define NTYPEV 17
+char *TYPEV = "int\0char\0long\0short\0void\0unsigned\0signed\0float\0double\0const\0static\0_Bool\0extern\0volatile\0register\0auto\0inline\0restrict\0";
+#define NTYPEV 18
 
 char *DIRV = "ifdef\0ifndef\0if\0elif\0else\0endif\0define\0include\0undef\0";
 #define NDIRV 9

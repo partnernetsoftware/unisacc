@@ -1250,8 +1250,8 @@ char *PRODV = "end\0fn\0global\0typedef\0struct\0enum\0decl\0if\0while\0for\0do\
 char *ACTV = "skip\0nl\0ident\0num\0str\0charlit\0cmt\0linecmt\0op\0bad\0";
 #define NACTV 10
 
-char *TYPEV = "int\0char\0long\0short\0void\0unsigned\0signed\0float\0double\0const\0static\0extern\0volatile\0register\0auto\0inline\0restrict\0";
-#define NTYPEV 17
+char *TYPEV = "int\0char\0long\0short\0void\0unsigned\0signed\0float\0double\0const\0static\0_Bool\0extern\0volatile\0register\0auto\0inline\0restrict\0";
+#define NTYPEV 18
 
 char *DIRV = "ifdef\0ifndef\0if\0elif\0else\0endif\0define\0include\0undef\0";
 #define NDIRV 9
@@ -3255,36 +3255,26 @@ char *HDR_5 =
 
 char *HDR_6 =
   "\x2f\x2a\x20\x3c\x73\x74\x64\x62\x6f\x6f\x6c\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74"
-  "\x68\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x2e\x0a\x20"
-  "\x2a\x0a\x20\x2a\x20\x43\x39\x39\x20\x64\x65\x66\x69\x6e\x65\x73\x20\x60\x62\x6f"
-  "\x6f\x6c\x60\x20\x61\x73\x20\x61\x20\x6d\x61\x63\x72\x6f\x20\x66\x6f\x72\x20\x60"
-  "\x5f\x42\x6f\x6f\x6c\x60\x2c\x20\x77\x68\x6f\x73\x65\x20\x63\x6f\x6e\x76\x65\x72"
-  "\x73\x69\x6f\x6e\x20\x72\x75\x6c\x65\x20\x69\x73\x20\x74\x68\x61\x74\x0a\x20\x2a"
-  "\x20\x61\x6e\x79\x20\x6e\x6f\x6e\x7a\x65\x72\x6f\x20\x76\x61\x6c\x75\x65\x20\x62"
-  "\x65\x63\x6f\x6d\x65\x73\x20\x31\x2e\x20\x20\x54\x68\x69\x73\x20\x63\x6f\x6d\x70"
-  "\x69\x6c\x65\x72\x20\x64\x6f\x65\x73\x20\x6e\x6f\x74\x20\x68\x61\x76\x65\x20\x60"
-  "\x5f\x42\x6f\x6f\x6c\x60\x20\x61\x73\x20\x61\x0a\x20\x2a\x20\x74\x79\x70\x65\x20"
-  "\x79\x65\x74\x20\x28\x74\x65\x73\x74\x73\x2f\x63\x39\x39\x2e\x6b\x6e\x6f\x77\x6e"
-  "\x66\x61\x69\x6c\x20\x73\x61\x79\x73\x20\x73\x6f\x2c\x20\x61\x6e\x64\x20\x69\x74"
-  "\x20\x69\x73\x20\x30\x2e\x30\x2e\x36\x20\x77\x6f\x72\x6b\x29\x2c\x20\x73\x6f\x20"
-  "\x60\x62\x6f\x6f\x6c\x60\x0a\x20\x2a\x20\x69\x73\x20\x60\x69\x6e\x74\x60\x20\x68"
-  "\x65\x72\x65\x3a\x20\x60\x62\x6f\x6f\x6c\x20\x62\x20\x3d\x20\x32\x3b\x60\x20\x73"
-  "\x74\x6f\x72\x65\x73\x20\x32\x20\x72\x61\x74\x68\x65\x72\x20\x74\x68\x61\x6e\x20"
-  "\x31\x2c\x20\x61\x6e\x64\x20\x60\x73\x69\x7a\x65\x6f\x66\x28\x62\x6f\x6f\x6c\x29"
-  "\x60\x0a\x20\x2a\x20\x69\x73\x20\x34\x20\x72\x61\x74\x68\x65\x72\x20\x74\x68\x61"
-  "\x6e\x20\x31\x2e\x20\x20\x45\x76\x65\x72\x79\x74\x68\x69\x6e\x67\x20\x77\x72\x69"
-  "\x74\x74\x65\x6e\x20\x77\x69\x74\x68\x20\x60\x62\x6f\x6f\x6c\x60\x2c\x20\x60\x74"
-  "\x72\x75\x65\x60\x20\x61\x6e\x64\x20\x60\x66\x61\x6c\x73\x65\x60\x0a\x20\x2a\x20"
-  "\x61\x73\x20\x62\x6f\x6f\x6c\x65\x61\x6e\x73\x20\x62\x65\x68\x61\x76\x65\x73\x20"
-  "\x74\x68\x65\x20\x73\x61\x6d\x65\x20\x77\x61\x79\x2e\x0a\x20\x2a\x2f\x0a\x23\x69"
-  "\x66\x6e\x64\x65\x66\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53\x54\x44\x42\x4f\x4f\x4c"
-  "\x5f\x48\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53\x54"
-  "\x44\x42\x4f\x4f\x4c\x5f\x48\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x62\x6f\x6f\x6c"
-  "\x20\x69\x6e\x74\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x74\x72\x75\x65\x20\x31\x0a"
-  "\x23\x64\x65\x66\x69\x6e\x65\x20\x66\x61\x6c\x73\x65\x20\x30\x0a\x23\x64\x65\x66"
-  "\x69\x6e\x65\x20\x5f\x5f\x62\x6f\x6f\x6c\x5f\x74\x72\x75\x65\x5f\x66\x61\x6c\x73"
-  "\x65\x5f\x61\x72\x65\x5f\x64\x65\x66\x69\x6e\x65\x64\x20\x31\x0a\x23\x65\x6e\x64"
-  "\x69\x66\x0a";
+  "\x68\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x2e\x20\x20"
+  "\x43\x39\x39\x20\x37\x2e\x31\x36\x3a\x20\x74\x68\x72\x65\x65\x20\x6d\x61\x63\x72"
+  "\x6f\x73\x20\x6f\x76\x65\x72\x20\x5f\x42\x6f\x6f\x6c\x2c\x0a\x20\x2a\x20\x77\x68"
+  "\x69\x63\x68\x20\x74\x68\x65\x20\x63\x6f\x6d\x70\x69\x6c\x65\x72\x20\x6e\x6f\x77"
+  "\x20\x68\x61\x73\x20\x61\x73\x20\x61\x20\x6f\x6e\x65\x2d\x62\x79\x74\x65\x20\x75"
+  "\x6e\x73\x69\x67\x6e\x65\x64\x20\x74\x79\x70\x65\x20\x77\x68\x6f\x73\x65\x20\x63"
+  "\x6f\x6e\x76\x65\x72\x73\x69\x6f\x6e\x0a\x20\x2a\x20\x72\x75\x6c\x65\x20\x69\x73"
+  "\x20\x22\x30\x20\x69\x66\x20\x74\x68\x65\x20\x76\x61\x6c\x75\x65\x20\x63\x6f\x6d"
+  "\x70\x61\x72\x65\x73\x20\x65\x71\x75\x61\x6c\x20\x74\x6f\x20\x30\x2c\x20\x31\x20"
+  "\x6f\x74\x68\x65\x72\x77\x69\x73\x65\x22\x20\x2d\x2d\x20\x73\x6f\x0a\x20\x2a\x20"
+  "\x60\x62\x6f\x6f\x6c\x20\x62\x20\x3d\x20\x32\x3b\x60\x20\x73\x74\x6f\x72\x65\x73"
+  "\x20\x31\x2c\x20\x61\x73\x20\x74\x68\x65\x20\x73\x74\x61\x6e\x64\x61\x72\x64\x20"
+  "\x72\x65\x71\x75\x69\x72\x65\x73\x2e\x20\x2a\x2f\x0a\x23\x69\x66\x6e\x64\x65\x66"
+  "\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53\x54\x44\x42\x4f\x4f\x4c\x5f\x48\x0a\x23\x64"
+  "\x65\x66\x69\x6e\x65\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53\x54\x44\x42\x4f\x4f\x4c"
+  "\x5f\x48\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x62\x6f\x6f\x6c\x20\x5f\x42\x6f\x6f"
+  "\x6c\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x74\x72\x75\x65\x20\x31\x0a\x23\x64\x65"
+  "\x66\x69\x6e\x65\x20\x66\x61\x6c\x73\x65\x20\x30\x0a\x23\x64\x65\x66\x69\x6e\x65"
+  "\x20\x5f\x5f\x62\x6f\x6f\x6c\x5f\x74\x72\x75\x65\x5f\x66\x61\x6c\x73\x65\x5f\x61"
+  "\x72\x65\x5f\x64\x65\x66\x69\x6e\x65\x64\x20\x31\x0a\x23\x65\x6e\x64\x69\x66\x0a";
 
 char *HDR_7 =
   "\x23\x69\x66\x6e\x64\x65\x66\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53\x54\x44\x44\x45"
@@ -6548,6 +6538,7 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
+int symbool[MAXSYM];        /* ...and it is _Bool, which normalises on store */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
 int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
 int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
@@ -6586,6 +6577,7 @@ int mbelem[MAXMEMB];    /* element size, for [] on an array member */
 int mbptr[MAXMEMB];
 int mbstruct[MAXMEMB];
 int mbuns[MAXMEMB];
+int mbbool[MAXMEMB];        /* the member is _Bool */
 /* 1: a member that takes no initialiser slot -- every union member after the
    first (C99 6.7.8p17: a brace list initialises a union's FIRST member) */
 int mbskip[MAXMEMB];
@@ -6621,6 +6613,7 @@ int fnresume;             /* where a nested declarator's body starts, or -1 */
    call through it returns a pointer to, or -1.  fpretfp: the declarator
    just parsed points to a function that itself returns a function pointer. */
 int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
+int curbool;                /* the lvalue in hand is _Bool [C99 6.3.1.2] */
 int fntok = 0 - 1;          /* the name token of the function being walked,
                                for C99's predefined `__func__` */
 int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
@@ -6636,6 +6629,7 @@ int declpd; int declspecpd; int declbase; int curpd; int curbase;
    As a frame slot it was whatever the stack last held -- the interpreter's
    fresh, reused stack counted 1 2 3 by luck; a native image did not. */
 int declstatic;
+int declbool;               /* the declared type is _Bool */
 int initflt;              /* an initialiser's element kind, for its slots */
 int declspecfpst;         /* a function-pointer typedef's call-result struct */
 int havepre;              /* binary()'s leftmost operand is already in r0 */
@@ -7037,6 +7031,7 @@ int sadd(int t, int kind, int off, int elem) {
     symvar[nsym] = 0;
     symunit[nsym] = curunit;
     symuns[nsym] = declunsigned;
+    symbool[nsym] = declbool;
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
@@ -7551,7 +7546,7 @@ int postfix(void) {
             curstruct = mbstruct[mi];
             /* `p->q->b`: a pointer member hands its pointee on */
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
-            curuns = mbuns[mi];
+            curuns = mbuns[mi]; curbool = mbbool[mi];
             curflt = mbflt[mi];
             if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
                 /* an array or a nested struct: the value IS the address */
@@ -7796,7 +7791,7 @@ int primary(void) {
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
         curdim3 = symdim3[i];
-        curuns = symuns[i];
+        curuns = symuns[i]; curbool = symbool[i];
         if (symkind[i] == 2) {           /* a function designator */
             es("  @mem.lea r0, "); etok(tp); ec(10);
             adv(); lvalue = 0; curelem = 8; curptr = 0; cursize = 8;
@@ -8566,6 +8561,27 @@ int fkind(void) {
 /* r0 from kind `from` to kind `to` (C99 6.3.1.4-5); integer to integer is
    the store's business.  Every op is the irsel net's `fpu` family. */
 int fconv(int from, int to) {
+    /* Conversion kind 9 is "to _Bool": C99 6.3.1.2 makes it a COMPARISON,
+       not a truncation -- 0 if the value compares equal to 0, else 1 --
+       so it is handled before the float conversions, and after them, so
+       that `_Bool b = 0.5;` is 1 rather than (int)0.5. */
+    if (to == 9) {
+        /* A float compares against 0.0, not against (int)value: C99 says
+           `_Bool b = 0.5;` is 1, and truncating first would make it 0. */
+        if (from == 8) {
+            es("  @lit.imm r1, 0\n  @fpu.deq r0, r0, r1\n"
+               "  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n");
+            return 0;
+        }
+        if (from == 4) {
+            es("  @lit.imm r1, 0\n  @fpu.seq r0, r0, r1\n"
+               "  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n");
+            return 0;
+        }
+        es("  @lit.imm r2, 0\n  @alu.ne r0, r0, r2\n");
+        return 0;
+    }
+    if (from == 9) from = 0;
     if (from == to) return 0;
     if (from < 4) { if (to < 4) return 0; }
     if (from == 4) {
@@ -8827,6 +8843,7 @@ int aop(void) {                     /* += -= *= /= -> the plain operator */
 
 int expr(void) {
     int save; int nsave; int e; int op; int isave; int psave; int pesave;
+    int bl;                     /* the assignment target is _Bool */
     save = tp; nsave = nout; isave = nibuf; psave = npool; pesave = poolend;
     unary();
     if (lvalue) {
@@ -8880,6 +8897,7 @@ int expr(void) {
             ak = fkind();
             if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
+            bl = curbool;               /* the TARGET's type, before the RHS */
             lvalue = 0;
             if (e == 0) { if (curstruct >= 0) {
                 int ast; ast = curstruct;
@@ -8893,6 +8911,10 @@ int expr(void) {
             push();
             expr(); loadval();
             fconv(fkind(), ak);                      /* C99 6.5.16.1p2 */
+            /* C99 6.3.1.2: converting to _Bool gives 0 if the value
+               compares equal to 0, and 1 otherwise -- it is not a
+               truncation, which is what storing one byte would be. */
+            if (bl) es("  @lit.imm r2, 0\n  @alu.ne r0, r0, r2\n");
             pop1();
             estore(e);
             if (ak >= 4) setkind(ak);
@@ -9308,7 +9330,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
-    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0;
+    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0;
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -9347,6 +9369,10 @@ int declspec(void) {                       /* -> element width */
         if (srcis(tpos[tp], tlen[tp], "short")) kb = 2;
         if (srcis(tpos[tp], tlen[tp], "long")) kb = 4;
         if (srcis(tpos[tp], tlen[tp], "void")) kb = 0;
+        /* C99 6.2.5p2: _Bool holds 0 or 1 and nothing else.  One byte and
+           unsigned; what makes it a boolean rather than a narrow integer
+           is the CONVERSION rule, not the width. */
+        if (srcis(tpos[tp], tlen[tp], "_Bool")) { kb = 1; declunsigned = 1; declbool = 1; }
         if (srcis(tpos[tp], tlen[tp], "unsigned")) declunsigned = 1;
         if (srcis(tpos[tp], tlen[tp], "float")) { kb = 5; declflt = 4; }
         if (srcis(tpos[tp], tlen[tp], "double")) { kb = 6; declflt = 8; }  /* long double too */
@@ -9370,6 +9396,7 @@ int stbody(int si) {
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
     int flex;                   /* this member is `name[]`: a flexible array */
+    int mbl;                    /* ...and this one is _Bool */
     nown = 0; bitpos = 0; flex = 0;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
@@ -9377,6 +9404,7 @@ int stbody(int si) {
     while (cur() != tidx("}", 1)) {
         w = declspec();
         sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum; mflt = declflt;
+        mbl = declbool;   /* saved like muns: declspec runs again per member */
         if (cur() == tidx(";", 1)) { if (mst >= 0) {
             /* An anonymous member (C11 6.7.2.1p13): its members are members
                of this aggregate, at its offset.  Spliced in by copy. */
@@ -9515,7 +9543,7 @@ int stbody(int si) {
             if (declptr) mbpst[nmemb] = mst;
             mbflt[nmemb] = mflt;
             mbptrd[nmemb] = declptr ? (declpd > 0 ? declpd : 1) : 0;
-            mbuns[nmemb] = muns;
+            mbuns[nmemb] = muns; mbbool[nmemb] = mbl;
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
             if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
@@ -9541,6 +9569,7 @@ int stbody(int si) {
         mbwidth[nmemb] = mbwidth[own[j]]; mbelem[nmemb] = mbelem[own[j]];
         mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
         mbuns[nmemb] = mbuns[own[j]];
+        mbbool[nmemb] = mbbool[own[j]];
         mbskip[nmemb] = mbskip[own[j]];
         mbpst[nmemb] = mbpst[own[j]];
         mbflt[nmemb] = mbflt[own[j]];
@@ -10064,6 +10093,7 @@ int fpdecl(void) {
 int lfp; int lfpret; int lflt0; int gflt0;
 /* the conversion kind of the object being declared */
 int dkind(int flt) {
+    if (declbool) { if (declptr == 0) return 9; }   /* the _Bool conversion */
     if (declptr) return 1;
     if (flt) return flt;
     if (declunsigned) { if (declsz == 8) return 1; }

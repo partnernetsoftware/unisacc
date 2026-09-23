@@ -9,7 +9,7 @@ KEYWORDS = ("if", "else", "while", "for", "do", "switch", "case", "default",
             "return", "break", "continue", "sizeof", "struct", "typedef",
             "enum", "goto", "union")
 TYPEKW = ("int", "char", "long", "short", "void", "unsigned", "signed",
-          "float", "double", "const", "static",
+          "float", "double", "const", "static", "_Bool",
           # storage class and qualifiers: declspec skips them, but they have to
           # reach it as `type` tokens or they arrive as identifiers and the
           # declaration is rejected

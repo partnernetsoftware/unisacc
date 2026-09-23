@@ -238,8 +238,8 @@ for (const [id, d] of Object.entries(demos)) {
 console.log('node demos OK');
 JS
   echo 'let n=5; let f=1; while(n>0){f=f*n; n=n-1;} return f;' > /tmp/ujs_fact.ujs
-  python3 -m ujs js2wasm /tmp/ujs_fact.ujs -o /tmp/ujs_fact.wasm
-  node --input-type=module -e 'import fs from "fs"; const {instance}=await WebAssembly.instantiate(fs.readFileSync("/tmp/ujs_fact.wasm")); const h=instance.exports.main_export(); if (Number(instance.exports.i64_of_export(h))!==120) throw new Error("js2wasm"); console.log("js2wasm OK");'
+  python3 -m ujs ujs2wasm /tmp/ujs_fact.ujs -o /tmp/ujs_fact.wasm
+  node --input-type=module -e 'import fs from "fs"; const {instance}=await WebAssembly.instantiate(fs.readFileSync("/tmp/ujs_fact.wasm")); const h=instance.exports.main_export(); if (Number(instance.exports.i64_of_export(h))!==120) throw new Error("ujs2wasm"); console.log("ujs2wasm OK");'
   # full demos from web-build
   node --input-type=module <<'JS'
 import fs from 'fs';

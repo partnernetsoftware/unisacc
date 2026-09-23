@@ -1710,6 +1710,7 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
+int symbool[MAXSYM];        /* ...and it is _Bool, which normalises on store */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
 int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
 int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
@@ -1748,6 +1749,7 @@ int mbelem[MAXMEMB];    /* element size, for [] on an array member */
 int mbptr[MAXMEMB];
 int mbstruct[MAXMEMB];
 int mbuns[MAXMEMB];
+int mbbool[MAXMEMB];        /* the member is _Bool */
 /* 1: a member that takes no initialiser slot -- every union member after the
    first (C99 6.7.8p17: a brace list initialises a union's FIRST member) */
 int mbskip[MAXMEMB];
@@ -1783,6 +1785,7 @@ int fnresume;             /* where a nested declarator's body starts, or -1 */
    call through it returns a pointer to, or -1.  fpretfp: the declarator
    just parsed points to a function that itself returns a function pointer. */
 int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
+int curbool;                /* the lvalue in hand is _Bool [C99 6.3.1.2] */
 int fntok = 0 - 1;          /* the name token of the function being walked,
                                for C99's predefined `__func__` */
 int curflt; int declflt; int retflt; int retkind; int retsz; int retuns; int slotflt;
@@ -1798,6 +1801,7 @@ int declpd; int declspecpd; int declbase; int curpd; int curbase;
    As a frame slot it was whatever the stack last held -- the interpreter's
    fresh, reused stack counted 1 2 3 by luck; a native image did not. */
 int declstatic;
+int declbool;               /* the declared type is _Bool */
 int initflt;              /* an initialiser's element kind, for its slots */
 int declspecfpst;         /* a function-pointer typedef's call-result struct */
 int havepre;              /* binary()'s leftmost operand is already in r0 */
@@ -2199,6 +2203,7 @@ int sadd(int t, int kind, int off, int elem) {
     symvar[nsym] = 0;
     symunit[nsym] = curunit;
     symuns[nsym] = declunsigned;
+    symbool[nsym] = declbool;
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
@@ -2713,7 +2718,7 @@ int postfix(void) {
             curstruct = mbstruct[mi];
             /* `p->q->b`: a pointer member hands its pointee on */
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
-            curuns = mbuns[mi];
+            curuns = mbuns[mi]; curbool = mbbool[mi];
             curflt = mbflt[mi];
             if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
                 /* an array or a nested struct: the value IS the address */
@@ -2958,7 +2963,7 @@ int primary(void) {
         curstruct = symstruct[i];
         curdim2 = symdim2[i];
         curdim3 = symdim3[i];
-        curuns = symuns[i];
+        curuns = symuns[i]; curbool = symbool[i];
         if (symkind[i] == 2) {           /* a function designator */
             es("  @mem.lea r0, "); etok(tp); ec(10);
             adv(); lvalue = 0; curelem = 8; curptr = 0; cursize = 8;
@@ -3728,6 +3733,27 @@ int fkind(void) {
 /* r0 from kind `from` to kind `to` (C99 6.3.1.4-5); integer to integer is
    the store's business.  Every op is the irsel net's `fpu` family. */
 int fconv(int from, int to) {
+    /* Conversion kind 9 is "to _Bool": C99 6.3.1.2 makes it a COMPARISON,
+       not a truncation -- 0 if the value compares equal to 0, else 1 --
+       so it is handled before the float conversions, and after them, so
+       that `_Bool b = 0.5;` is 1 rather than (int)0.5. */
+    if (to == 9) {
+        /* A float compares against 0.0, not against (int)value: C99 says
+           `_Bool b = 0.5;` is 1, and truncating first would make it 0. */
+        if (from == 8) {
+            es("  @lit.imm r1, 0\n  @fpu.deq r0, r0, r1\n"
+               "  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n");
+            return 0;
+        }
+        if (from == 4) {
+            es("  @lit.imm r1, 0\n  @fpu.seq r0, r0, r1\n"
+               "  @lit.imm r1, 1\n  @alu.xor r0, r0, r1\n");
+            return 0;
+        }
+        es("  @lit.imm r2, 0\n  @alu.ne r0, r0, r2\n");
+        return 0;
+    }
+    if (from == 9) from = 0;
     if (from == to) return 0;
     if (from < 4) { if (to < 4) return 0; }
     if (from == 4) {
@@ -3989,6 +4015,7 @@ int aop(void) {                     /* += -= *= /= -> the plain operator */
 
 int expr(void) {
     int save; int nsave; int e; int op; int isave; int psave; int pesave;
+    int bl;                     /* the assignment target is _Bool */
     save = tp; nsave = nout; isave = nibuf; psave = npool; pesave = poolend;
     unary();
     if (lvalue) {
@@ -4042,6 +4069,7 @@ int expr(void) {
             ak = fkind();
             if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
+            bl = curbool;               /* the TARGET's type, before the RHS */
             lvalue = 0;
             if (e == 0) { if (curstruct >= 0) {
                 int ast; ast = curstruct;
@@ -4055,6 +4083,10 @@ int expr(void) {
             push();
             expr(); loadval();
             fconv(fkind(), ak);                      /* C99 6.5.16.1p2 */
+            /* C99 6.3.1.2: converting to _Bool gives 0 if the value
+               compares equal to 0, and 1 otherwise -- it is not a
+               truncation, which is what storing one byte would be. */
+            if (bl) es("  @lit.imm r2, 0\n  @alu.ne r0, r0, r2\n");
             pop1();
             estore(e);
             if (ak >= 4) setkind(ak);
@@ -4470,7 +4502,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
-    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0;
+    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0;
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -4509,6 +4541,10 @@ int declspec(void) {                       /* -> element width */
         if (srcis(tpos[tp], tlen[tp], "short")) kb = 2;
         if (srcis(tpos[tp], tlen[tp], "long")) kb = 4;
         if (srcis(tpos[tp], tlen[tp], "void")) kb = 0;
+        /* C99 6.2.5p2: _Bool holds 0 or 1 and nothing else.  One byte and
+           unsigned; what makes it a boolean rather than a narrow integer
+           is the CONVERSION rule, not the width. */
+        if (srcis(tpos[tp], tlen[tp], "_Bool")) { kb = 1; declunsigned = 1; declbool = 1; }
         if (srcis(tpos[tp], tlen[tp], "unsigned")) declunsigned = 1;
         if (srcis(tpos[tp], tlen[tp], "float")) { kb = 5; declflt = 4; }
         if (srcis(tpos[tp], tlen[tp], "double")) { kb = 6; declflt = 8; }  /* long double too */
@@ -4532,6 +4568,7 @@ int stbody(int si) {
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
     int flex;                   /* this member is `name[]`: a flexible array */
+    int mbl;                    /* ...and this one is _Bool */
     nown = 0; bitpos = 0; flex = 0;
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
@@ -4539,6 +4576,7 @@ int stbody(int si) {
     while (cur() != tidx("}", 1)) {
         w = declspec();
         sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum; mflt = declflt;
+        mbl = declbool;   /* saved like muns: declspec runs again per member */
         if (cur() == tidx(";", 1)) { if (mst >= 0) {
             /* An anonymous member (C11 6.7.2.1p13): its members are members
                of this aggregate, at its offset.  Spliced in by copy. */
@@ -4677,7 +4715,7 @@ int stbody(int si) {
             if (declptr) mbpst[nmemb] = mst;
             mbflt[nmemb] = mflt;
             mbptrd[nmemb] = declptr ? (declpd > 0 ? declpd : 1) : 0;
-            mbuns[nmemb] = muns;
+            mbuns[nmemb] = muns; mbbool[nmemb] = mbl;
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
             if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
@@ -4703,6 +4741,7 @@ int stbody(int si) {
         mbwidth[nmemb] = mbwidth[own[j]]; mbelem[nmemb] = mbelem[own[j]];
         mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
         mbuns[nmemb] = mbuns[own[j]];
+        mbbool[nmemb] = mbbool[own[j]];
         mbskip[nmemb] = mbskip[own[j]];
         mbpst[nmemb] = mbpst[own[j]];
         mbflt[nmemb] = mbflt[own[j]];
@@ -5226,6 +5265,7 @@ int fpdecl(void) {
 int lfp; int lfpret; int lflt0; int gflt0;
 /* the conversion kind of the object being declared */
 int dkind(int flt) {
+    if (declbool) { if (declptr == 0) return 9; }   /* the _Bool conversion */
     if (declptr) return 1;
     if (flt) return flt;
     if (declunsigned) { if (declsz == 8) return 1; }
