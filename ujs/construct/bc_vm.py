@@ -1,4 +1,7 @@
-"""Python reference VM for full UJS bytecode. Semantic twin of WASM. [TP-1]"""
+"""Python reference VM for full UJS bytecode (optional twin of native/ujs_vm.c).
+
+未接线验收；语义对照用。主路径：``vm.py`` (jtape) / ``native/ujs_vm.c``。
+"""
 from __future__ import annotations
 
 from .bc import OP, TAG, OP_NAME

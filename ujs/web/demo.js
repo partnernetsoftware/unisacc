@@ -82,7 +82,7 @@ async function boot() {
     demos = dem;
     fullDemos = fullMeta;
     askWasm = (await WebAssembly.instantiate(askBuf)).instance.exports;
-    await bootRuntime("ujs_full.wasm");
+    await bootRuntime(new URL("./ujs_full.wasm", import.meta.url));
     const stages = Object.keys(man.stages).length;
     let jspiLine = "JSPI: checking…";
     status.innerHTML =

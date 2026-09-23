@@ -12,35 +12,50 @@ const HOST_EXPORTS = [
   "last_ic_stub_export", "ujs_ic_ask",
 ];
 
-let rt = null; // { exports, memory }
+let rt = null; // { ex, mem }
 
-export async function bootRuntime(wasmUrl = "ujs_full.wasm") {
-  let buf;
-  if (typeof wasmUrl !== "string") {
-    buf = wasmUrl;
-  } else if (typeof process !== "undefined" && wasmUrl.indexOf("://") < 0) {
+async function loadWasmBytes(spec) {
+  if (spec instanceof ArrayBuffer) return new Uint8Array(spec);
+  if (ArrayBuffer.isView(spec)) return new Uint8Array(spec.buffer, spec.byteOffset, spec.byteLength);
+  if (typeof URL !== "undefined" && spec instanceof URL) {
+    if (typeof process !== "undefined" && spec.protocol === "file:") {
+      const fs = await import("fs");
+      return fs.readFileSync(spec);
+    }
+    const r = await fetch(spec);
+    if (!r.ok) throw new Error("fetch wasm failed: " + spec + " (" + r.status + ")");
+    return new Uint8Array(await r.arrayBuffer());
+  }
+  if (typeof spec !== "string") throw new Error("bootRuntime: need path, URL, or bytes");
+
+  if (typeof process !== "undefined" && spec.indexOf("://") < 0) {
     const fs = await import("fs");
     const path = await import("path");
     const { fileURLToPath } = await import("url");
     const here = path.dirname(fileURLToPath(import.meta.url));
     const cand = [
-      path.isAbsolute(wasmUrl) ? wasmUrl : null,
-      path.join(here, wasmUrl),
-      path.resolve(wasmUrl),
+      path.isAbsolute(spec) ? spec : null,
+      path.join(here, spec),
+      path.resolve(spec),
     ].filter(Boolean);
-    let buf = null;
     for (const p of cand) {
-      try { buf = fs.readFileSync(p); break; } catch (_) {}
+      try { return fs.readFileSync(p); } catch (_) {}
     }
-    if (!buf) throw new Error("wasm not found: " + wasmUrl);
-    // continue with buf below
-    const { instance } = await WebAssembly.instantiate(buf);
-    rt = { ex: instance.exports, mem: instance.exports.memory };
-    return rt;
-  } else {
-    buf = await fetch(wasmUrl).then((r) => r.arrayBuffer());
+    throw new Error(
+      "wasm not found: " + spec + " (run: python3 -m ujs web-build / npm run build)");
   }
+  const r = await fetch(spec);
+  if (!r.ok) throw new Error("fetch wasm failed: " + spec + " (" + r.status + ")");
+  return new Uint8Array(await r.arrayBuffer());
+}
+
+/** Boot shared full VM. Prefer: bootRuntime(new URL('./ujs_full.wasm', import.meta.url)) */
+export async function bootRuntime(wasmUrl = "ujs_full.wasm") {
+  const buf = await loadWasmBytes(wasmUrl);
   const { instance } = await WebAssembly.instantiate(buf);
+  if (typeof instance.exports.host_run !== "function") {
+    throw new Error("not ujs_full.wasm (missing host_run); run: npm run build");
+  }
   rt = { ex: instance.exports, mem: instance.exports.memory };
   return rt;
 }

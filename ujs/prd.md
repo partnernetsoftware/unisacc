@@ -10,12 +10,12 @@
 ### 0.1 交付
 
 **交付**：
-1. 可嵌入脚本核 —— `compile` + `run` / `wasm_run`
-2. **`js2wasm`** —— **全量 UJS-1** → 浏览器可加载 `.wasm`（C VM via zig + 嵌入字节码；`main_export`）
-3. **网页产物** —— `web-build` → `ujs_rt.wasm`（ask）+ `ujs_full.wasm` + `progs/*.wasm`
-4. 全部表形状决策由构造整数网驱动；jtape ≡ 全量字节码 VM 可 fold；IC stub 库有限且可穷举
+1. **JS 产品 / 库** —— `ujs/web` + `package.json`：`bootRuntime` / `wasm_run`（浏览器 · Node · Bun）
+2. **站点 / 示例** —— `web/index.html` playground（`npm run demo`）
+3. **`js2wasm`** —— 全量 UJS-1 → `.wasm`（construct CLI；C VM via zig）
+4. **构造侧** —— `ujs/construct/`（Python gold / front / build；非应用依赖）
 
-Python 是构造器与验收台；**浏览器里跑的是 WASM + demo JS，不在页面训练**。
+浏览器与 Node 跑的是 WASM + ESM；**不在页面训练**。构造：`python3 -m ujs web-build`。
 
 **不交付**：完整 ES、开放原型链、`eval`、异步、正则引擎。
 
@@ -86,10 +86,10 @@ Python 是构造器与验收台；**浏览器里跑的是 WASM + demo JS，不�
 |---|---|
 | 字面量 | `null` `true`/`false` 整数 浮点 字符串 |
 | 复合 | `list` `[...]` · `dict` `{k: v}`（键为 str）· tuple 多返回 |
-| 绑定 | `let` 赋值；块作用域 |
-| 控制 | `if`/`else` `while` `for(;;)` `break` `continue` `return` **`switch`/`case`/`default`** |
-| 函数 | `function name(a,b,...rest) { ... }`；调用；**rest / spread** |
-| 运算 | 算术 比较 逻辑 索引 `a[b]` 成员 `a.b`（≡ `a["b"]`）`in` `len` `keys` |
+| 绑定 | `let` / `const`（语义同 let）赋值；块作用域；复合赋值 `+=`… |
+| 控制 | `if`/`else` `while` `for(;;)` `for…of` `break` `continue` `return` **`switch`/`case`/`default`** |
+| 函数 | `function name(a,b,...rest)`；**箭头** `x => e` / `(a,b) => {…}`；调用；rest / spread（实参 spread 仍受限） |
+| 运算 | 算术 比较（含 `===`/`!==`）逻辑 `??` 三元 `?:` 索引 `a[b]` 成员 `a.b` `in` `typeof` `len` `keys` |
 | 闭包 | 仅可读 `G ∪ 词法外层已绑定名`；捕获集在 compile 期封闭 |
 
 ### 4.2 无（永久）

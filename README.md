@@ -234,17 +234,24 @@ combination — every table-shaped decision point of a real self-hosting C99
 compiler behind one kernel, with **no fallback path anywhere**, verified by
 enumeration over the whole domain.
 
-## UJS（平行实验）
+## UJS（平行 JS 产品）
 
-同构命题、另一条产品线：闭合 JS 子集 → 网页 `wasm_run`。
+开箱：**浏览器 / Node / Bun** `wasm_run`；Python 仅在 `ujs/construct/` 做出货。
+
+```js
+import { bootRuntime, wasm_run } from "./ujs/web/wasm_run.js";
+await bootRuntime(new URL("./ujs/web/ujs_full.wasm", import.meta.url));
+console.log((await wasm_run("return 1+2;", {}, {})).ok);
+```
 
 | | |
 |---|---|
-| 规格 / 目录图 | [`ujs/prd.md`](ujs/prd.md) · [`ujs/README.md`](ujs/README.md) |
+| 说明 | [`ujs/README.md`](ujs/README.md) · [`ujs/package.json`](ujs/package.json) |
+| 规格 | [`ujs/prd.md`](ujs/prd.md) |
 | 验收 | `./tests/ujs.sh` |
-| 网页 | `python3 -m ujs web-build` → 打开 `ujs/web/index.html` |
+| 出货 | `python3 -m ujs web-build` → `ujs/web/` |
 
-与 C 线共享构造代数与 IntNet；**不**把 Web 塞进 `unisa` 的交付范围。
+与 C 线共享构造代数；**不**把 Web 并入 `unisa` 交付范围。
 
 ## Status
 

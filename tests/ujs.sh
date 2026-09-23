@@ -10,14 +10,14 @@ python3 -m ujs acc
 echo "== wasm_run probes =="
 python3 - <<'PY'
 from ujs import wasm_run
-from ujs.oracle import Oracle
+from ujs.construct.oracle import Oracle
 
 o = Oracle(drive="gold")
 
 def expect(src, val, G=None, L=None):
     r = wasm_run(src, G or {}, L or {}, oracle=o)
     assert r.ok, (src, r.err)
-    from ujs import value as V
+    from ujs.construct import value as V
     got = V.to_py(r.value)
     assert got == val, (src, got, val)
 
@@ -54,8 +54,8 @@ function sum(a, ...rest) {
 return sum(1, 2, 3);
 """, 6)
 
-from ujs import api
-from ujs import value as V
+from ujs.construct import api
+from ujs.construct import value as V
 src = "let n = 5; let f = 1; while (n > 0) { f = f * n; n = n - 1; } return f;"
 r1 = api.run(src, backend="jtape", oracle=o)
 r2 = api.run(src, backend="wasm", oracle=o)
@@ -71,9 +71,9 @@ python3 -m ujs fold /tmp/t.ujs
 echo "== ujs icfold =="
 python3 -m ujs icfold /tmp/t.ujs
 python3 - <<'PY'
-from ujs import api
-from ujs.oracle import Oracle
-from ujs import value as V
+from ujs.construct import api
+from ujs.construct.oracle import Oracle
+from ujs.construct import value as V
 o = Oracle(drive="gold")
 probes = [
     "return 1 + 2 * 3;",
@@ -105,6 +105,9 @@ assert "MANIFEST.json" in names
 assert "weights/built.json" in names
 assert "native/ujs_vm.c" in names
 assert "samples/fact.wasm" in names
+assert "web/wasm_run.js" in names
+assert "web/ujs_full.wasm" in names
+assert "package.json" in names
 m = json.loads(z.read("MANIFEST.json"))
 assert m["format"] == "UJS-1"
 assert all(s["exact"] for s in m["stages"].values())
@@ -113,10 +116,10 @@ PY
 
 echo "== ujs determinism =="
 python3 - <<'PY'
-from ujs.oracle import Oracle
-from ujs.front.compile import compile_src
-from ujs.bc_encode import encode_fn
-from ujs.wat_vm import pack_program
+from ujs.construct.oracle import Oracle
+from ujs.construct.front.compile import compile_src
+from ujs.construct.bc_encode import encode_fn
+from ujs.construct.wat_vm import pack_program
 o = Oracle(drive="gold")
 src = "let n=5; let f=1; while(n>0){f=f*n; n=n-1;} return f;"
 a = pack_program(encode_fn(compile_src(src, o)))
@@ -168,7 +171,7 @@ JS
   echo "== in-page wasm_run =="
   node --input-type=module <<'JS'
 import { bootRuntime, wasm_run } from './ujs/web/wasm_run.js';
-await bootRuntime('ujs_full.wasm');
+await bootRuntime(new URL('./ujs/web/ujs_full.wasm', import.meta.url));
 const probes = [
   ['return 1+2*3;', 7],
   ['const n=5; let f=1; while(n>0){f=f*n; n=n-1;} return f;', 120],
@@ -192,6 +195,19 @@ for (const row of probes) {
     throw new Error(src+' got '+r.ok+' want '+exp);
 }
 console.log('in-page wasm_run OK');
+JS
+  echo "== npm package entry =="
+  node --input-type=module <<'JS'
+import { createRequire } from 'module';
+import { pathToFileURL } from 'url';
+import path from 'path';
+const req = createRequire(pathToFileURL(path.resolve('ujs/package.json')));
+const pkg = req('./package.json');
+if (pkg.name !== 'ujs' || !pkg.exports['.']) throw new Error('bad package.json');
+const mod = await import(pathToFileURL(path.resolve('ujs', pkg.exports['.'])).href);
+if (typeof mod.bootRuntime !== 'function' || typeof mod.wasm_run !== 'function')
+  throw new Error('exports missing API');
+console.log('npm package entry OK', pkg.version);
 JS
 fi
 

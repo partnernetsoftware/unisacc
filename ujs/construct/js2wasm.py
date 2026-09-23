@@ -6,7 +6,6 @@ Default: full UJS-1 (str/list/dict/fn/...) via freestanding C VM (zig cc).
 Exports: memory, main_export / run_prog, tag_of_export, i64_of_export,
          str_ptr_export, str_len_export.
 
-``--i64-only``: legacy WAT stack machine (numeric subset).
 """
 from __future__ import annotations
 
@@ -19,9 +18,10 @@ from .front.compile import compile_src, CompileError
 from .oracle import Oracle
 from .wat_vm import pack_program
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VM_C = os.path.join(ROOT, "ujs", "native", "ujs_vm.c")
-IC_C = os.path.join(ROOT, "ujs", "native", "ujs_ic_net.c")
+# construct/ → ujs/
+_UJS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VM_C = os.path.join(_UJS, "native", "ujs_vm.c")
+IC_C = os.path.join(_UJS, "native", "ujs_ic_net.c")
 
 
 class Js2WasmError(Exception):
@@ -30,7 +30,7 @@ class Js2WasmError(Exception):
 
 def _ensure_ic_net():
     if not os.path.isfile(IC_C):
-        from .emit_ic_c import emit
+        from .build.ic_c import emit
         emit(IC_C)
 
 
@@ -70,11 +70,7 @@ def _zig_cc_wasm(sources, out_path, defines=None):
     subprocess.check_call(cmd)
 
 
-def js2wasm(src: str, out_path: str, *, i64_only: bool = False,
-            keep_wat: bool = False) -> dict:
-    if i64_only:
-        raise Js2WasmError("--i64-only retired; full UJS-1 is the default path")
-
+def js2wasm(src: str, out_path: str) -> dict:
     _ensure_ic_net()
     o = Oracle(drive="gold")
     try:
