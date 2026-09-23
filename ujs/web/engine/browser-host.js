@@ -18,15 +18,13 @@ export async function createBrowserHost(canvas, opts = {}) {
   if (prefer !== "webgl") {
     try {
       renderer = await createWebGPURenderer(canvas);
-    } catch (e) {
-      if (prefer === "webgpu") throw e;
+    } catch {
       renderer = null;
     }
   }
-  if (!renderer && prefer !== "webgpu") {
+  if (!renderer) {
     renderer = createWebGLRenderer(canvas);
   }
-  if (!renderer) throw new Error("no GPU backend available");
 
   const scene = new Scene();
   const camera = new PerspectiveCamera();

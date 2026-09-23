@@ -26,9 +26,9 @@ demo/host.js          # 胶水
       ↓
 core-asteroid.js      # 核：UJS 步进 + encodeRenderPacket
       ↓ host_*
-browser-host.js       # 浏览器宿主
-      ↓ decode + WebGL
-renderer-webgl.js
+browser-host.js       # 浏览器宿主（prefer webgpu→webgl）
+      ↓ decode UXEP → WebGPU 或 WebGL
+renderer-webgpu.js | renderer-webgl.js
 ```
 
 `createEngine` / `uxe.js`：底层场景 API，供宿主内部或实验用；**演示主路径走 Host ABI**。
