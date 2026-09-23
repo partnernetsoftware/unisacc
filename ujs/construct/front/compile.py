@@ -577,16 +577,16 @@ class Compiler:
             elif p == "call":
                 self.eat("(")
                 argc = 0
+                spread_only = False
                 while not self.at(")"):
                     if self.at("..."):
+                        if argc != 0:
+                            raise CompileError("spread must be sole call argument")
                         self.eat("...")
-                        self.expr()
-                        self.emit("spread")
-                        # spread pushes N; argc unknown static — pack rest
-                        # For simplicity: spread expands onto stack; count not
-                        # tracked.  Restrict: spread only as last arg handled
-                        # by restpack at runtime — emit call with argc=-1 flag
-                        argc = -1
+                        self.expr()  # leave list on stack; call 255 expands
+                        spread_only = True
+                        if self.at(","):
+                            raise CompileError("spread must be sole call argument")
                         break
                     self.expr()
                     argc += 1
@@ -594,7 +594,8 @@ class Compiler:
                         self.eat(",")
                 self.eat(")")
                 self.emit("ic_enter", "call")
-                self.emit("call", max(argc, 0) if argc >= 0 else argc)
+                # 255 = CALL_SPREAD: stack is … callee, list
+                self.emit("call", 255 if spread_only else argc)
             elif p == "dot":
                 self.eat(".")
                 name = self.eat("id").text

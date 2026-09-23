@@ -160,4 +160,9 @@ export async function wasm_run(codeOrFn, globalsMap = {}, localsMap = {}) {
   }
 }
 
-export { compile, HOST_EXPORTS, TAG };
+function unwrap(r) {
+  if (r && r.err) throw new Error((r.err.kind || "err") + ": " + (r.err.message || ""));
+  return r.ok;
+}
+
+export { compile, HOST_EXPORTS, TAG, unwrap };

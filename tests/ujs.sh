@@ -128,7 +128,68 @@ assert a == b and a[:4] != b"nope"
 print("determinism OK", len(a), "bytes")
 PY
 
-echo "== ujs web-build =="
+echo "== front parity (py image ≡ js image) =="
+python3 - <<'PY' > /tmp/ujs_parity_py.json
+import json
+from ujs.construct.oracle import Oracle
+from ujs.construct.front.compile import compile_src
+from ujs.construct.bc_encode import encode_fn
+from ujs.construct.wat_vm import pack_program
+o = Oracle(drive="gold")
+probes = [
+  "return 1+2*3;",
+  "let n=5; let f=1; while(n>0){f=f*n; n=n-1;} return f;",
+  'return "hi"+"!";',
+  "return 1===1;",
+  "return 1?2:3;",
+  "let f=x=>x*2; return f(21);",
+  "let s=0; for(let x of [1,2,3]){s+=x;} return s;",
+  "return typeof 1;",
+  'let d={a:1}; return "a" in d;',
+  "return null ?? 9;",
+  "let a=1, b=2; return a+b;",
+  "let f=x=>{return x+1;}; return f(41);",
+  """function sum(a, ...rest) {
+  let s = a; let i = 0;
+  while (i < len(rest)) { s = s + rest[i]; i = i + 1; }
+  return s;
+}
+return sum(1, 2, 3);""",
+  """function sum(a,b,c){return a+b+c;}
+let xs=[1,2,3];
+return sum(...xs);""",
+]
+print(json.dumps({s: list(pack_program(encode_fn(compile_src(s, o)))) for s in probes}))
+PY
+node --input-type=module <<'JS'
+import fs from 'fs';
+import { compile } from './ujs/web/compiler.js';
+const py = JSON.parse(fs.readFileSync('/tmp/ujs_parity_py.json','utf8'));
+let bad = 0;
+for (const [src, bytes] of Object.entries(py)) {
+  const img = Array.from(compile(src).image);
+  if (JSON.stringify(img) !== JSON.stringify(bytes)) {
+    console.error('parity fail', src.slice(0,50), 'py', bytes.length, 'js', img.length);
+    bad++;
+  }
+}
+if (bad) process.exit(1);
+console.log('front parity OK', Object.keys(py).length);
+JS
+
+echo "== call-site spread =="
+python3 - <<'PY'
+from ujs.construct import api
+from ujs.construct import value as V
+src = """function sum(a,b,c){return a+b+c;}
+let xs=[1,2,3];
+return sum(...xs);"""
+r = api.run(src)
+assert r.ok and V.to_py(r.value) == 6, r.err
+r2 = api.wasm_run(src)
+assert r2.ok and V.to_py(r2.value) == 6, r2.err
+print("spread py OK")
+PY
 python3 -m ujs web-build
 python3 -c 'assert open("ujs/web/ujs_rt.wasm","rb").read(4)==b"\0asm"; import os; print("wasm", os.path.getsize("ujs/web/ujs_rt.wasm"), "B")'
 if command -v node >/dev/null; then
@@ -170,7 +231,7 @@ console.log('full demos OK');
 JS
   echo "== in-page wasm_run =="
   node --input-type=module <<'JS'
-import { bootRuntime, wasm_run } from './ujs/web/wasm_run.js';
+import { bootRuntime, wasm_run, unwrap } from './ujs/web/wasm_run.js';
 await bootRuntime(new URL('./ujs/web/ujs_full.wasm', import.meta.url));
 const probes = [
   ['return 1+2*3;', 7],
@@ -186,12 +247,15 @@ const probes = [
   ['return null ?? 9;', 9],
   ['let a=1, b=2; return a+b;', 3],
   ['let f=x=>{return x+1;}; return f(41);', 42],
+  [`function sum(a,b,c){return a+b+c;}
+let xs=[1,2,3];
+return sum(...xs);`, 6],
 ];
 for (const row of probes) {
   const [src, exp, G, L] = row;
   const r = await wasm_run(src, G||{}, L||{});
   if (r.err) throw new Error(JSON.stringify(r.err)+' '+src);
-  if (JSON.stringify(r.ok) !== JSON.stringify(exp))
+  if (JSON.stringify(unwrap(r)) !== JSON.stringify(exp))
     throw new Error(src+' got '+r.ok+' want '+exp);
 }
 console.log('in-page wasm_run OK');

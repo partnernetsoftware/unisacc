@@ -88,7 +88,7 @@
 | 复合 | `list` `[...]` · `dict` `{k: v}`（键为 str）· tuple 多返回 |
 | 绑定 | `let` / `const`（语义同 let）赋值；块作用域；复合赋值 `+=`… |
 | 控制 | `if`/`else` `while` `for(;;)` `for…of` `break` `continue` `return` **`switch`/`case`/`default`** |
-| 函数 | `function name(a,b,...rest)`；**箭头** `x => e` / `(a,b) => {…}`；调用；rest / spread（实参 spread 仍受限） |
+| 函数 | `function name(a,b,...rest)`；**箭头** `x => e` / `(a,b) => {…}`；调用；rest；**sole-arg spread** `f(...xs)`（`call` argc=255） |
 | 运算 | 算术 比较（含 `===`/`!==`）逻辑 `??` 三元 `?:` 索引 `a[b]` 成员 `a.b` `in` `typeof` `len` `keys` |
 | 闭包 | 仅可读 `G ∪ 词法外层已绑定名`；捕获集在 compile 期封闭 |
 

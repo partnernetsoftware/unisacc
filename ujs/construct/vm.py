@@ -234,10 +234,16 @@ def run(fn: Fn, globals_map, locals_map, *, mutate_globals=False,
             pc += 1
             continue
         if op == "call":
-            # stack: ... args callee ; a = argc
+            # stack: … callee, args…  OR  … callee, list  when a==255 (CALL_SPREAD)
             argc = ins.a
-            args = [pop() for _ in range(argc)]
-            args.reverse()
+            if argc == 255:
+                lst = pop()
+                if lst[0] not in ("list", "tup"):
+                    raise Trap("type", "call spread")
+                args = list(lst[1])
+            else:
+                args = [pop() for _ in range(argc)]
+                args.reverse()
             callee = pop()
             if callee[0] != "fn":
                 raise Trap("type", "call on %s" % callee[0])

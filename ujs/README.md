@@ -33,6 +33,7 @@ import { bootRuntime, wasm_run } from "ujs";
 await bootRuntime(new URL("./web/ujs_full.wasm", import.meta.url));
 const r = await wasm_run("return 1+2*3;", {}, {});
 console.log(r.ok);  // 7
+// 或：import { unwrap } from "ujs"; unwrap(r)
 ```
 
 失败看 `r.err`。产品 wasm 是 **`ujs_full.wasm`**（`ujs_rt.wasm` 仅 ask 演示）。

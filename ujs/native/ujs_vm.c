@@ -333,8 +333,9 @@ static u32 run_code(u32 base, u32 len) {
       u32 sh = SH_UNKNOWN, gu = GU_NONE;
       if (pc < end && mem[pc] == OP_CALL) {
         u32 argc = mem[pc + 1];
-        if (sp >= 4u * (argc + 1u)) {
-          a = peek(argc);
+        u32 need = (argc == 255) ? 2u : (argc + 1u);
+        if (sp >= 4u * need) {
+          a = peek((argc == 255) ? 1u : argc);
           sh = shape_of_val(a);
           gu = (tag_of(a) == TAG_FN) ? GU_TYPE_OK : GU_NONE;
         }
@@ -480,7 +481,16 @@ static u32 run_code(u32 base, u32 len) {
     case OP_CALL: {
       u32 argc=mem[pc++], args[64], fi, ent, nparams, rest_ix, nloc;
       u32 nested;
-      for (i=argc;i>0;i--) args[i-1]=pop();
+      if (argc == 255) { /* CALL_SPREAD: top is list/tup */
+        a = pop();
+        if (tag_of(a)!=TAG_LIST && tag_of(a)!=TAG_TUP) return 0;
+        argc = len_of(a);
+        if (argc > 64) return 0;
+        for (i=0;i<argc;i++) args[i]=rd32(a+8+i*4);
+      } else {
+        if (argc > 64) return 0;
+        for (i=argc;i>0;i--) args[i-1]=pop();
+      }
       a=pop();
       if (tag_of(a)!=TAG_FN) return 0;
       fi=rd32(a+4);

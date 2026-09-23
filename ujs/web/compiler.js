@@ -575,12 +575,14 @@ class Compiler {
       } else if (p === "call") {
         this.eat("(");
         let argc = 0;
+        let spreadOnly = false;
         while (!this.at(")")) {
           if (this.at("...")) {
+            if (argc !== 0) throw new Error("spread must be sole call argument");
             this.eat("...");
-            this.assign();
-            this.emit("spread");
-            argc = -1;
+            this.assign(); // leave list on stack; call 255 expands
+            spreadOnly = true;
+            if (this.at(",")) throw new Error("spread must be sole call argument");
             break;
           }
           this.assign();
@@ -589,7 +591,7 @@ class Compiler {
         }
         this.eat(")");
         this.emit("ic_enter", "call");
-        this.emit("call", Math.max(argc, 0));
+        this.emit("call", spreadOnly ? 255 : argc);
       } else if (p === "dot") {
         this.eat(".");
         const name = this.eat("id").text;
