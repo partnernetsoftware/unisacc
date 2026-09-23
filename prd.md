@@ -956,7 +956,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | 栏 | 内容 |
 |---|---|
-| **结果** | `-run` 在四个平台、六个目标上都成立：macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64、Windows/x86_64（真机实测；lnx/x86_64 仍只有逐字节等价）。`tests/run.sh` 的 Windows 分支每次随套件跑 |
+| **结果** | `-run` 在四个平台、六个目标上都成立：macOS/arm64、macOS/x86_64（Rosetta）、Linux/arm64、Windows/arm64、Windows/x86_64（真机实测）；lnx/x86_64 于 2026-09-23 在 Lima 的 x86_64 客机里补上真机执行，`native 90/0`、对 glibc 的 `difftest 88/0`。`tests/run.sh` 的 Windows 分支每次随套件跑 |
 | **① 没有导入表** | 内存里的代码没有 PE 导入表，而它要调用 `WriteFile`。解法：编译器**读自己进程的导入表**——从自己的代码地址往下找到 `MZ`，走导入描述符，**按名字**取每个槽的地址（按名字，因为顺序只有在编译它的也是我们自己时才可信） |
 | **② 2 GB 之外** | 第一版把代码和数据各映射一块，结果访问违例：网关用 rip 相对寻址调用导入槽，而两次 `VirtualAlloc` 可能相距超过 2 GB。改为**一整块**，导入槽放在代码段尾部 |
 | **③ 指令缓存** | arm64 Windows 报非法指令：新写入的代码还在数据缓存里。改保护属性**不够**，必须显式 `FlushInstructionCache`；这一步做进了 `mprotect` 的网关（当前进程是伪句柄 -1，所以不必多导入一个函数） |

@@ -116,10 +116,18 @@ prefix shows up there.
 
 The front end has caught up too: `ccrun` compiles all 90 probes with
 `unisacc` and compares the ANSWERS against the Python front end — 90 agree,
-0 disagree, 0 refused. It accepts 216 of the corpus's 220 programs, covering
-everything the Python front end accepts; `tests/selfgap.sh` ratchets both
-numbers so the gap can only shrink. The two lexers agree token for token on
-every probe.
+0 disagree, 0 refused. The self-hosting gap is **0**: `tests/selfgap.sh`
+takes every program `unisacc` refuses and offers it to the Python front
+end, and nothing it compiles is refused here. The four corpus programs
+neither accepts use GNU statement expressions, `__builtin_expect` and C11
+`_Generic` — outside the C99 subset, refused by both. The two lexers agree
+token for token on every probe.
+
+**Several files, one program, no linker.** `unisacc a.c b.c` walks both
+units into one tape, so a call in the first reaches a definition in the
+last. Each unit is preprocessed on its own (include guards and `#define`
+state are per file) and a later unit's file-scope statics are renamed, so
+two units may each have their own `static helper`.
 
 **It compiles and runs.** `unisacc -run FILE.c [args]` compiles a program and
 runs it with nothing written to disk: the whole program is compiled once, at
@@ -142,8 +150,10 @@ picked through `gzip -dc`, and the x86 encoder now uses short forms (mod=00
 and mod=01 displacements, `0x83` imm8, `mov r32, imm32`) instead of spending
 44% of its bytes on the zero halves of disp32/imm32. That is 5.16 MB down to
 1.29 MB. The eleven C headers travel inside it, so it compiles
-`#include <stdio.h>` from any directory; `-I`, `-D`, `-o`, and a `#!` line
-work the way tcc's do.
+`#include <stdio.h>` from any directory; `-I`, `-D`, `-o`, `-E`, and a `#!` line
+work the way tcc's do, and the flags a Makefile passes anyway (`-Wall`,
+`-O2`, `-g`, `-std=c99`) are accepted rather than refused — there is one
+dialect here, one optimisation level and no separate debug info.
 
 ## Try it
 

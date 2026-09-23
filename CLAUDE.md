@@ -17,7 +17,7 @@ All three platforms are here:
 | platform | how | covers |
 |---|---|---|
 | macOS arm64 + x86_64 | `./tests/all.sh`, `./tests/fat.sh` (Rosetta) | osx/arm64, osx/x86_64 |
-| Linux | `./tests/linux.sh` — the whole suite inside the local Lima VM | lnx/arm64, lnx/x86_64 |
+| Linux | `./tests/linux.sh` — the whole suite inside a local Lima VM. `LIMA_VM=minicon-lnx-x86_64` is x86_64 on this arm64 host, so it is **emulated**: linux.sh notices the architecture mismatch and multiplies the watchdogs by ten, because seven suites once "failed" by timing out while working. It has no repo mount, so the tree is piped in; `gcc` was installed there on 2026-09-23 | lnx/arm64, lnx/x86_64 |
 | Windows 11 | `./tests/crossnative.sh` — the local UTM machine, driven by `utmctl` | win/arm64, win/x86_64 |
 
 `tests/crossnative.sh` skips a target whose VM is not up, so start the UTM
@@ -38,6 +38,11 @@ and drop the Lima dependency.
 The Lima VM mounts the repo **read-only**, so `tests/linux.sh` copies the tree
 into the guest (minus `.git` and `corpus/`, with `corpus/` symlinked back —
 the suites only read it) before running.
+
+A skipped target is not a passing target: `crossnative.sh` names what it
+skipped and `STRICT=1` makes a skip a failure. Every suite also fails when
+it checked *nothing* — `closure.sh` with no probes used to print
+`identical 0 differ 0` and exit 0.
 
 Green on macOS is not green. `difftest` compares against the *system*
 compiler, and glibc and BSD libc disagree about things C only calls
