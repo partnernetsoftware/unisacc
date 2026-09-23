@@ -52,11 +52,36 @@ else
 fi
 sort "$T/got" > "$T/sorted"
 
+# The GAP itself, which is what the name promises: a program the PYTHON
+# front end compiles and unisacc refuses is debt on the C side.  When this
+# was written the debt was one-directional and large; today the two front
+# ends refuse exactly the same four programs, and those four are GNU
+# statement expressions, __builtin_expect and C11 _Generic -- outside the
+# C99 subset, refused by both, and so not a self-hosting gap at all.
+# Counting only what unisacc accepts could never have said that.
+gap=0; gapnames=""
+if [ -d "$CORP" ]; then
+    for f in "$CORP"/*.c "$REPO"/examples/*.c "$REPO"/tests/c/*.c; do
+        [ -f "$f" ] || continue
+        try "$f" && continue                    # unisacc took it: no debt
+        if perl -e 'alarm 20; exec @ARGV' python3 -m unisa tape "$f" \
+               >/dev/null 2>&1; then
+            gap=$((gap+1)); gapnames="$gapnames $(basename "$f")"
+        fi
+    done
+fi
+
 echo
 printf "selfgap  probes %s   corpus %s   (accepted / total)\n" \
     "$(echo "$probes" | tr ' ' '/')" "$(echo "$corpus" | tr ' ' '/')"
+if [ "$gap" -eq 0 ]; then
+    printf "  the gap itself: 0 -- no program the Python front end compiles is refused here\n"
+else
+    printf "  the gap itself: %d --%s\n" "$gap" "$gapnames"
+fi
 
 rc=0
+[ "$gap" -eq 0 ] || { echo "  the C front end is behind the Python one on $gap program(s)"; rc=1; }
 check() {           # check <dim> <accepted>
     dim=$1; got=$2
     [ "$got" = "-" ] && { echo "  $dim skipped (corpus absent)"; return; }
