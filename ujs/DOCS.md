@@ -34,16 +34,22 @@
 | [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | Host ABI 契约（核不知浏览器） |
 | [`web/game/README.md`](web/game/README.md) | Asteroid + Three **对照**（非主线） |
 | [`web/game/exp/README.md`](web/game/exp/README.md) | 同仿真、裸 WebGL 实验 |
-| [`FUTURE.md`](FUTURE.md) | P0–P0.3 已验证；下一刀记账 |
+| [`FUTURE.md`](FUTURE.md) | P0–P0.4；平台靠能力+demo/移植长出来；A–D |
 
 **交付面（已验证）**
 
 ```
-/engine/ship/
-  index.html          # 静态页 + 极薄胶水（GPU Host + 双 wasm 桥）
-  asteroid.wasm       # {gameName}.wasm — 玩法核（不含 VM）
-  gameEngine.wasm     # = ujs_full.wasm 交付名 — UJS VM
+/engine/ship/                 # 本地开发对照
+  index.html + asteroid.wasm + gameEngine.wasm
+  monopoly/                   # Monopoly ship-js + gameEngine.wasm
+
+/docs/                        # GitHub Pages（外网测）
+  index.html                  # 游戏索引
+  uxe/asteroid/               # Asteroid ship 三件套
+  uxe/monopoly/               # Monopoly ship-js
 ```
+
+`npm run ship:engine` 同步到 `docs/uxe/{asteroid,monopoly}/`。Pages 源选 **`/docs`**。
 
 开发对照：`/engine/demo/`（分源 + 页内 compiler）。
 

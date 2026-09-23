@@ -93,13 +93,14 @@ static u32 encode_packet(void) {
   u32 o = 0, i;
   f64 eye0 = st.px * 0.15, eye1 = st.py * 0.15 + 2.8, eye2 = st.pz + 11.0;
   f64 tgt0 = st.px * 0.05, tgt1 = st.py * 0.05, tgt2 = st.pz - 18.0;
-  u32 nbytes = 8 + 16 + 36 + 4
-    + (12 + 4 + N * 12 + N * 4)
-    + (12 + 4 + 12 + 4);
+  /* v3 cloud hdr: color12 + em12 + metal4 + rough4 + meshId4 + count4 = 40 */
+  u32 nbytes = 8 + 16 + 36 + 16 + 16 + 4 + 2 * 28 + 4
+    + (40 + N * 12 + N * 4)
+    + (40 + 12 + 4);
   if (nbytes > sizeof(packet_buf)) return 0;
 
   wr_u32(packet_buf + o, PACKET_MAGIC); o += 4;
-  wr_u32(packet_buf + o, 1); o += 4;
+  wr_u32(packet_buf + o, 3); o += 4;
   wr_f32(packet_buf + o, 0.02); o += 4;
   wr_f32(packet_buf + o, 0.024); o += 4;
   wr_f32(packet_buf + o, 0.04); o += 4;
@@ -113,11 +114,43 @@ static u32 encode_packet(void) {
   wr_f32(packet_buf + o, tgt0); o += 4;
   wr_f32(packet_buf + o, tgt1); o += 4;
   wr_f32(packet_buf + o, tgt2); o += 4;
+
+  wr_f32(packet_buf + o, 0.018); o += 4;
+  wr_f32(packet_buf + o, 0.02); o += 4;
+  wr_f32(packet_buf + o, 0.024); o += 4;
+  wr_f32(packet_buf + o, 0.04); o += 4;
+  wr_f32(packet_buf + o, 0.25); o += 4;
+  wr_f32(packet_buf + o, 0.38); o += 4;
+  wr_f32(packet_buf + o, 0.5); o += 4;
+  wr_f32(packet_buf + o, 0.55); o += 4;
+  wr_u32(packet_buf + o, 2); o += 4;
+  wr_f32(packet_buf + o, 0.35); o += 4;
+  wr_f32(packet_buf + o, 0.9); o += 4;
+  wr_f32(packet_buf + o, 0.25); o += 4;
+  wr_f32(packet_buf + o, 1.0); o += 4;
+  wr_f32(packet_buf + o, 0.9); o += 4;
+  wr_f32(packet_buf + o, 0.78); o += 4;
+  wr_f32(packet_buf + o, 1.15); o += 4;
+  wr_f32(packet_buf + o, -0.4); o += 4;
+  wr_f32(packet_buf + o, 0.2); o += 4;
+  wr_f32(packet_buf + o, -0.5); o += 4;
+  wr_f32(packet_buf + o, 0.4); o += 4;
+  wr_f32(packet_buf + o, 0.53); o += 4;
+  wr_f32(packet_buf + o, 1.0); o += 4;
+  wr_f32(packet_buf + o, 0.45); o += 4;
+
   wr_u32(packet_buf + o, 2); o += 4;
 
+  /* rocks: mesh 0 */
   wr_f32(packet_buf + o, 0.55); o += 4;
   wr_f32(packet_buf + o, 0.58); o += 4;
   wr_f32(packet_buf + o, 0.62); o += 4;
+  wr_f32(packet_buf + o, 0.0); o += 4;
+  wr_f32(packet_buf + o, 0.0); o += 4;
+  wr_f32(packet_buf + o, 0.0); o += 4;
+  wr_f32(packet_buf + o, 0.15); o += 4;
+  wr_f32(packet_buf + o, 0.75); o += 4;
+  wr_u32(packet_buf + o, 0); o += 4;
   wr_u32(packet_buf + o, N); o += 4;
   for (i = 0; i < N; i++) {
     wr_f32(packet_buf + o, st.xs[i]); o += 4;
@@ -126,9 +159,16 @@ static u32 encode_packet(void) {
   }
   for (i = 0; i < N; i++) { wr_f32(packet_buf + o, st.rs[i]); o += 4; }
 
+  /* ship: mesh 1 */
   wr_f32(packet_buf + o, 0.35); o += 4;
   wr_f32(packet_buf + o, 0.75); o += 4;
   wr_f32(packet_buf + o, 1.0); o += 4;
+  wr_f32(packet_buf + o, 0.05); o += 4;
+  wr_f32(packet_buf + o, 0.12); o += 4;
+  wr_f32(packet_buf + o, 0.2); o += 4;
+  wr_f32(packet_buf + o, 0.45); o += 4;
+  wr_f32(packet_buf + o, 0.35); o += 4;
+  wr_u32(packet_buf + o, 1); o += 4;
   wr_u32(packet_buf + o, 1); o += 4;
   wr_f32(packet_buf + o, st.px); o += 4;
   wr_f32(packet_buf + o, st.py); o += 4;

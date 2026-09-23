@@ -8,12 +8,13 @@ const ship = path.dirname(fileURLToPath(import.meta.url));
 const host = fs.readFileSync(path.join(ship, "uxe-host.js"), "utf8")
   .replace(/<\/script/gi, "<\\/script");
 
+const home = process.env.UXE_SHIP_HOME || "../";
 const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>UXE · Ship · asteroid + gameEngine</title>
+  <title>UXE · Asteroid</title>
   <style>
     :root { color-scheme: dark; }
     html, body { margin: 0; height: 100%; background: #05060a; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
@@ -40,8 +41,7 @@ const html = `<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <a class="nav" href="../" style="right:130px;top:16px">UXE 入口</a>
-  <a class="nav" href="../demo/" style="right:16px;top:16px">← 源码测试</a>
+  <a class="nav" href="${home}" style="right:16px;top:16px">← 游戏索引</a>
   <div id="hud">ship · loading wasms…</div>
   <div id="banner"><div>
     <h1 style="margin:0 0 8px;font-size:28px">撞毁</h1>
@@ -76,4 +76,4 @@ try {
 `;
 
 fs.writeFileSync(path.join(ship, "index.html"), html);
-console.log("baked", path.join(ship, "index.html"));
+console.log("baked", path.join(ship, "index.html"), "home=", home);

@@ -55,19 +55,20 @@ WebGPU 和/或 WebGL（浏览器自适应）| Vulkan/Metal/D3D12/SDL …
 | `host_asset_read(path) → bytes` | 只读资源 |
 | `host_log(level, msg)` | 诊断 |
 
-后加（刻意不做进 v0）：`host_audio` / `host_net` / `host_storage` / 剪贴板等。
+后加（v0 未做；路线见 `FUTURE.md` P0.4）：雾/光进 UXEP、材质、多 mesh、指针、`host_audio` / `host_net` / `host_storage`。
 
 ## 反模式
 
 - 不要把 `canvas.getContext` / `fetch` / `addEventListener` 直接塞进核。
 - 不要 `host_draw_mesh()` 每物体跨边界一次；聚成 **packet** 再 `host_gpu_submit`。
+- 不要 `import three`；**能力对标**靠加厚本 ABI，不是搬库。
 
 ## Render packet（**已线性化**，`packet.js`）
 
-逻辑视图：
+逻辑视图（**v1** 已实现；**v2** = v1 + fog + lights，见下）：
 
 ```
-Packet {
+Packet v1 {
   clear: [r,g,b,a]
   camera: { fovy, near, far, eye[3], target[3] }
   clouds: [
@@ -76,10 +77,14 @@ Packet {
 }
 ```
 
-**线上格式**（LE，magic `UXEP`，version=1）见 `packet.js` `encodeRenderPacket` / `decodeRenderPacket`。  
+**v2 增量**（H1）：fog + ambient + lights。  
+**v3 增量**（H2）：每 cloud 增加 `emissive[3]`、`metalness`、`roughness`、`mesh_id`（0=八面体岩，1=船楔，2=盒）。
+
+**线上格式**（LE，magic `UXEP`）见 `packet.js`。decode 接受 v1–v3。  
 `host_gpu_submit` 主路径吃 **ArrayBuffer**；对象仅调试兼容。
 
 宿主：解码 packet → 译成 **WebGL 或 WebGPU** command → **一次** `present`。
+预置几何：`meshes.js`。
 
 ## 输入快照（**已线性化**，`input.js`）
 

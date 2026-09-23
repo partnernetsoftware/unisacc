@@ -66,6 +66,89 @@ WASM 核心  →  极薄 JS 绑定  →  WebGPU/WebGL  →  GPU
 
 **已否决**：把游戏核与 VM 打成单个 wasm（验证过可做，但交付边界错误）。
 
+### P0.4 · Host API 加厚，**能力对标** Three（不是搬库）
+
+先前说「不可能」指的是：**Three-in-wasm / 合包 / 开 ES**。那些没做；做的是另一条——且已跑通。  
+正确读法：**逐步加厚 Host ABI + UXEP/UXIN**，使画面与交互能力逼近 Three 对照页所用子集；宿主仍译包，核仍不知 canvas。
+
+对标对象（`web/game/host.js` 实际用到的）：
+
+| Three 用法 | UXE 落点 | 阶段 |
+|---|---|---|
+| InstancedMesh + PerspectiveCamera | UXEP clouds + camera（**已有**） | — |
+| FogExp2 | UXEP fog | **H1 ✓** |
+| Ambient + DirectionalLight | UXEP lights | **H1 ✓** |
+| MeshStandard（金属/粗糙/自发光） | cloud material 字段 | **H2 ✓** |
+| 多几何（船 vs 岩） | mesh_id 预置表 | **H2 ✓** |
+| Points（星空） | UXEP points / kind=points | H3 |
+| 指针 / 多键 | UXIN 扩 reserved | H3 |
+| 贴图 / 环境光 | `host_asset` + map_id；buffer 驻留 | H4 |
+| 阴影 / 后处理 | 很晚；有证据再开 | H5+ |
+
+原则：
+
+- **加字段进 packet**，不加 `host_draw_mesh` 逐物体 API。
+- 版本 bump（UXEP v2…）；旧包拒绝或显式兼容层。
+- 每档：双后端（WebGL+WebGPU）+ packet/input 自测 + demo/ship 探针。
+- **永不** `import three.module.js` 进主线。
+
+---
+
+## 平台怎么长出来（不谈变现）
+
+命题：**Host 能力逼近 Three 常用子集 → 做好游戏移植与 demo → 自然长成游戏平台。**  
+不先设计「谁付钱」；交付面与玩法密度到位，平台身份是结果不是 KPI。
+
+### 增长链
+
+```
+加厚 Host/UXEP（对标 Three 能力）
+        ↓
+同一套 ship：html + {game}.wasm + gameEngine.wasm
+        ↓
+多款 demo / 移植（证明可换核、可换玩法）
+        ↓
+别人按模板打自己的 {game}.wasm  →  平台
+```
+
+### 当下该堆的
+
+| 优先 | 内容 |
+|---|---|
+| **H2+** | 材质、多 mesh、点精灵、指针……按 P0.4 表继续 |
+| **第二款游戏** | **城市大富翁（单机）** · `demo/monopoly/` · 验证 Host 模板可复制 |
+| **移植** | 选小型 Three/经典小游戏，逻辑收进 UJS-1 + `{game}.wasm` |
+| **模板** | `ship:engine` 文档化：换 sim / 换核的最短路径 |
+| **A2** | host fn / 错误行号——写第二款玩法时会卡住 |
+
+### 实践车：三维城市大富翁（单机）
+
+路径：`web/game/monopoly.ujs` + `engine/core-monopoly.js` + `engine/demo/monopoly/`。
+
+| 已通 | 证据 |
+|---|---|
+| 16 格环盘 + BOX/OCTA 实例 | UXEP v3 clouds；`MESH_BOX=2` |
+| 掷骰/走格/买/跳过/租金/破产 | UJS sim；骰子在 Host（无 RNG） |
+| 人机对战 | 人空格掷/买 · A 跳过；AI 自动 |
+| 探针 | `npm run test:uxe:monopoly` · `test:uxe:monopoly:rules` |
+
+**本游戏卡住 Host 的真实缺口（驱动 H3+）**：
+
+| 缺口 | Three 对照 | 落点 |
+|---|---|---|
+| 多键语义（买/跳过/建房） | `keydown` 多码 | UXIN reserved / action bits → **H3** |
+| 点选格子 / 轨道相机 | Raycaster + OrbitControls | 指针 + 相机模式 → **H3** |
+| 地块色带 / 牌面字 | 贴图或 CanvasTexture | map_id / 字形 → **H4** |
+| 掷骰音效 | Audio | `host_audio` → 后加 |
+| ship `{monopoly}.wasm` | 同 asteroid 模板 | **暂用 ship-js**（预编译 sim + 打包核 + gameEngine）；C 核后补 |
+| **GitHub Pages** | 外网测 ship | `docs/index.html` 游戏索引 + `docs/uxe/{asteroid,monopoly}/` |
+
+原则：缺口进 `HOST_ABI` / 本表，**不**为 Monopoly 特开旁路 API。
+
+### 仍不做（技术边界，不是商业话术）
+
+- 搬 `three.module.js`；游戏与引擎合包；开放完整 ES；页内训练填表。
+
 ---
 
 ## 中期产品加深（A）

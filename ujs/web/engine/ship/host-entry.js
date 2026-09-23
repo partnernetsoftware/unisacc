@@ -182,12 +182,13 @@ export async function startShip(cfg) {
       return;
     }
     cfg.hud.innerHTML =
-      `<b>asteroid.wasm</b> + <b>gameEngine.wasm</b><br>` +
+      `<b>Asteroid</b> · ship<br>` +
       `backend <b>${host.backend}</b> · entities <b>${snap.n}</b><br>` +
       `ujs <b>${snap.ujsMs.toFixed(2)} ms</b> · gpu <b>${snap.drawMs.toFixed(2)} ms</b><br>` +
-      `fps <b>${snap.fps.toFixed(0)}</b> · score <b>${snap.score.toFixed(0)}</b>` +
-      (host._stats?.().bytes ? `<br>packet <b>${host._stats().bytes}</b> B` : "") +
-      (snap.alive ? "" : `<br><span class="warn">crashed — Space</span>`);
+      `fps <b>${snap.fps.toFixed(0)}</b> · score <b>${snap.score.toFixed(0)}</b><br>` +
+      `操作 <b>WASD</b> 移动` +
+      (host._stats?.().bytes ? ` · packet <b>${host._stats().bytes}</b> B` : "") +
+      (snap.alive ? "" : `<br><span class="warn">撞毁 — 空格重开</span>`);
   }
 
   const imports = {

@@ -58,6 +58,9 @@ export async function createBrowserHost(canvas, opts = {}) {
     camera.far = cam.far;
     camera.setEye(cam.eye[0], cam.eye[1], cam.eye[2]);
     camera.setTarget(cam.target[0], cam.target[1], cam.target[2]);
+    if (packet.fog) scene.fog = packet.fog;
+    if (packet.ambient) scene.ambient = packet.ambient;
+    if (packet.lights) scene.lights = packet.lights;
 
     scene.clouds.clear();
     let i = 0;
@@ -67,6 +70,10 @@ export async function createBrowserHost(canvas, opts = {}) {
       cloud.count = c.count;
       cloud.xyz = c.xyz;
       cloud.scale = c.scale;
+      cloud.emissive = c.emissive || [0, 0, 0];
+      cloud.metalness = c.metalness ?? 0.2;
+      cloud.roughness = c.roughness ?? 0.5;
+      cloud.meshId = c.meshId ?? 0;
       cloud.dirty = true;
     }
     lastPacketClouds = packet.clouds?.length || 0;

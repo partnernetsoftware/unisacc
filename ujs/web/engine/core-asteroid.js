@@ -89,8 +89,14 @@ export async function runAsteroidCore(host, opts) {
         target: [px * 0.05, py * 0.05, pz - 18],
       },
       clouds: [
-        { color: [0.55, 0.58, 0.62], count: N, xyz: rockXYZ, scale: rockS },
-        { color: [0.35, 0.75, 1.0], count: 1, xyz: shipXYZ, scale: shipS },
+        {
+          color: [0.55, 0.58, 0.62], count: N, xyz: rockXYZ, scale: rockS,
+          meshId: 0, metalness: 0.15, roughness: 0.75, emissive: [0, 0, 0],
+        },
+        {
+          color: [0.35, 0.75, 1.0], count: 1, xyz: shipXYZ, scale: shipS,
+          meshId: 1, metalness: 0.45, roughness: 0.35, emissive: [0.05, 0.12, 0.2],
+        },
       ],
     });
   }

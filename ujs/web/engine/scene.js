@@ -20,6 +20,10 @@ export class InstanceCloud {
     this.xyz = new Float32Array(capacity * 3);
     this.scale = new Float32Array(capacity);
     this.color = color;
+    this.emissive = [0, 0, 0];
+    this.metalness = 0.2;
+    this.roughness = 0.5;
+    this.meshId = 0;
     this.dirty = true;
   }
   set(i, x, y, z, s) {
@@ -35,6 +39,12 @@ export class Scene {
   constructor() {
     this.clouds = new Map();
     this.clearColor = [0.02, 0.024, 0.04, 1];
+    this.fog = { density: 0.018, color: [0.02, 0.024, 0.04] };
+    this.ambient = { color: [0.25, 0.38, 0.5], intensity: 0.55 };
+    this.lights = [
+      { dir: [0.35, 0.9, 0.25], color: [1.0, 0.9, 0.78], intensity: 1.15 },
+      { dir: [-0.4, 0.2, -0.5], color: [0.4, 0.53, 1.0], intensity: 0.45 },
+    ];
   }
   instances(name, capacity, color) {
     const c = new InstanceCloud(capacity, color);

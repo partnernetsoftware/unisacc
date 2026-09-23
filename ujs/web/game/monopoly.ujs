@@ -1,0 +1,222 @@
+// City Monopoly — one turn step (UJS-1). Single-player: human=0, AI=1.
+// Board: 16 cells. Host injects action + dice (UJS has no RNG).
+//
+// Globals in:
+//   turn, phase, pos0, pos1, money0, money1,
+//   owned (list 16, -1 free / 0 / 1), houses (list 16),
+//   action (0 idle, 1 roll, 2 buy, 3 skip, 4 restart, 5 build),
+//   dice (1..12, host sets on roll)
+//
+// phase: 0 need_roll | 1 offer_buy | 2 game_over | 3 offer_build
+// msg: 0 ok, 1 wait, 2 offer buy, 3 rent, 4 bought, 5 bankrupt, 6 win, 7 offer build, 8 built
+
+let CELLS = 16;
+let START_MONEY = 1500;
+let i = 0;
+let cell = 0;
+let owner = -1;
+let price = 0;
+let rent = 0;
+let cost = 0;
+let msg = 0;
+let d = 0;
+
+if (action === 4) {
+  turn = 0;
+  phase = 0;
+  pos0 = 0;
+  pos1 = 0;
+  money0 = START_MONEY;
+  money1 = START_MONEY;
+  i = 0;
+  while (i < CELLS) {
+    owned[i] = -1;
+    houses[i] = 0;
+    i = i + 1;
+  }
+  msg = 0;
+  return {
+    turn: turn, phase: phase,
+    pos0: pos0, pos1: pos1, money0: money0, money1: money1,
+    owned: owned, houses: houses,
+    msg: msg, dice: 0, winner: -1
+  };
+}
+
+if (phase === 2) {
+  return {
+    turn: turn, phase: phase,
+    pos0: pos0, pos1: pos1, money0: money0, money1: money1,
+    owned: owned, houses: houses,
+    msg: 6, dice: dice, winner: turn
+  };
+}
+
+// Inline price — no nested fn closing over globals.
+function cell_price(c) {
+  if (c === 0) { return 0; }
+  if (c === 4) { return 0; }
+  if (c === 8) { return 0; }
+  if (c === 12) { return 0; }
+  return 60 + (c % 4) * 40 + ((c - (c % 4)) / 4) * 20;
+}
+
+if (action === 1) {
+  if (phase !== 0) {
+    msg = 1;
+  } else {
+    d = dice;
+    if (d < 1) { d = 2; }
+    if (d > 12) { d = 12; }
+    if (turn === 0) {
+      pos0 = (pos0 + d) % CELLS;
+      if (pos0 < d) { money0 = money0 + 200; }
+      cell = pos0;
+    } else {
+      pos1 = (pos1 + d) % CELLS;
+      if (pos1 < d) { money1 = money1 + 200; }
+      cell = pos1;
+    }
+    owner = owned[cell];
+    price = cell_price(cell);
+    if (price === 0) { rent = 0; }
+    else { rent = 10 + (cell % 4) * 8 + houses[cell] * 25; }
+    if (price === 0) {
+      phase = 0;
+      turn = 1 - turn;
+      msg = 0;
+    } else {
+      if (owner < 0) {
+        phase = 1;
+        msg = 2;
+      } else {
+        if (owner !== turn) {
+          if (turn === 0) {
+            money0 = money0 - rent;
+            money1 = money1 + rent;
+            if (money0 < 0) {
+              phase = 2;
+              msg = 5;
+              return {
+                turn: turn, phase: phase,
+                pos0: pos0, pos1: pos1, money0: money0, money1: money1,
+                owned: owned, houses: houses,
+                msg: msg, dice: d, winner: 1
+              };
+            }
+          } else {
+            money1 = money1 - rent;
+            money0 = money0 + rent;
+            if (money1 < 0) {
+              phase = 2;
+              msg = 5;
+              return {
+                turn: turn, phase: phase,
+                pos0: pos0, pos1: pos1, money0: money0, money1: money1,
+                owned: owned, houses: houses,
+                msg: msg, dice: d, winner: 0
+              };
+            }
+          }
+          msg = 3;
+          phase = 0;
+          turn = 1 - turn;
+        } else {
+          if (houses[cell] < 4) {
+            phase = 3;
+            msg = 7;
+          } else {
+            phase = 0;
+            turn = 1 - turn;
+            msg = 0;
+          }
+        }
+      }
+    }
+  }
+}
+
+if (action === 2) {
+  if (phase !== 1) {
+    msg = 1;
+  } else {
+    if (turn === 0) { cell = pos0; } else { cell = pos1; }
+    price = cell_price(cell);
+    if (owned[cell] >= 0) {
+      msg = 1;
+    } else {
+      if (turn === 0) {
+        if (money0 >= price) {
+          money0 = money0 - price;
+          owned[cell] = 0;
+          msg = 4;
+        } else {
+          msg = 1;
+        }
+      } else {
+        if (money1 >= price) {
+          money1 = money1 - price;
+          owned[cell] = 1;
+          msg = 4;
+        } else {
+          msg = 1;
+        }
+      }
+      phase = 0;
+      turn = 1 - turn;
+    }
+  }
+}
+
+if (action === 5) {
+  if (phase !== 3) {
+    msg = 1;
+  } else {
+    if (turn === 0) { cell = pos0; } else { cell = pos1; }
+    cost = 50 + houses[cell] * 30;
+    if (houses[cell] >= 4) {
+      msg = 1;
+    } else {
+      if (turn === 0) {
+        if (money0 >= cost) {
+          money0 = money0 - cost;
+          houses[cell] = houses[cell] + 1;
+          msg = 8;
+        } else {
+          msg = 1;
+        }
+      } else {
+        if (money1 >= cost) {
+          money1 = money1 - cost;
+          houses[cell] = houses[cell] + 1;
+          msg = 8;
+        } else {
+          msg = 1;
+        }
+      }
+    }
+    phase = 0;
+    turn = 1 - turn;
+  }
+}
+
+if (action === 3) {
+  if (phase === 1) {
+    phase = 0;
+    turn = 1 - turn;
+    msg = 0;
+  } else {
+    if (phase === 3) {
+      phase = 0;
+      turn = 1 - turn;
+      msg = 0;
+    }
+  }
+}
+
+return {
+  turn: turn, phase: phase,
+  pos0: pos0, pos1: pos1, money0: money0, money1: money1,
+  owned: owned, houses: houses,
+  msg: msg, dice: dice, winner: -1
+};
