@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Build Monopoly Pages ship (JS core + precompiled sim + engine.wasm).
- * Output: docs/uxe/monopoly/  and  web/engine/ship/monopoly/
+ * ARCHIVED — builds monopoly ship locally; not part of ship:pages.
+ * See web/engine/archive/README.md. Output may write docs/uxe/monopoly/
+ * which ship-engine.sh deletes on the next asteroid ship.
  */
 import fs from "fs";
 import path from "path";

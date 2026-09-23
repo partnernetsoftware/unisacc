@@ -1,5 +1,6 @@
 /**
- * City Monopoly core — Host ABI only; UJS rules in monopoly.ujs.
+ * City Monopoly core — ARCHIVED (not on Pages / not in test:uxe:all).
+ * See web/engine/archive/README.md. Host ABI only; UJS rules in monopoly.ujs.
  * Dice RNG lives in host (UJS-1 has no random).
  */
 import { bootRuntime, wasm_run, unwrap } from "../wasm_run.js";

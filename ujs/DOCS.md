@@ -2,6 +2,8 @@
 
 入口按读者分流。**文档必须与代码同步**：改 ABI、目录或门禁时，同会话改相关 README；禁止只写愿景。
 
+**命令真源**：[`package.json`](package.json) scripts · [`scripts/uxe-gate.sh`](scripts/uxe-gate.sh) · [`scripts/ship-pages.sh`](scripts/ship-pages.sh)。
+
 ---
 
 ## 三层一句话
@@ -31,39 +33,29 @@
 | 读什么 | 何时 |
 |---|---|
 | [`web/engine/README.md`](web/engine/README.md) | UXE 总览、demo vs ship、文件表 |
-| [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | **Host API 真源**（符号 · UXEP/UXIN · 扩展 · `host_llm` 规划） |
-| [`web/engine/PLATFORM.md`](web/engine/PLATFORM.md) | 游戏平台方向：多核 ship + **用户自带 LLM API** |
+| [`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md) | **Host API 真源** |
+| [`web/engine/PLATFORM.md`](web/engine/PLATFORM.md) | 游戏平台方向 · BYO LLM |
+| [`web/engine/archive/`](web/engine/archive/) | 下架实践车（大富翁等） |
 | [`web/game/README.md`](web/game/README.md) | Asteroid + Three **对照**（非主线） |
-| [`web/game/exp/README.md`](web/game/exp/README.md) | 同仿真、裸 WebGL 实验 |
-| [`FUTURE.md`](FUTURE.md) | P0–P0.4；H 档；实践车；A–D |
+| [`FUTURE.md`](FUTURE.md) | 已交付 · 产品化下一刀 · H 档 |
 
-**交付面（已验证）**
+**交付面（外网）**
 
 ```
-/engine/ship/                 # 本地开发对照
-  index.html + asteroid.wasm + engine.wasm
-
-/docs/                        # GitHub Pages（外网测）
-  index.html                  # 游戏索引（当前仅 Asteroid）
-  uxe/asteroid/               # Asteroid ship 三件套
+/docs/index.html              # 游戏索引（Asteroid + 无人机）
+/docs/uxe/asteroid/           # html + asteroid.wasm + engine.wasm
+/docs/uxe/drone/              # html + engine.wasm（JS 核 embed）
 ```
 
-`npm run ship:engine` 同步 asteroid → `docs/uxe/asteroid/`。大富翁已归档，不进索引。Pages 源选 **`/docs`**。
-
-开发对照：`/engine/demo/`（分源 + 页内 compiler）。
-
-自测（一律 wall clock）：
+本地对照：`/engine/demo/` · `/engine/ship/` · `/engine/ship/drone/`。
 
 ```bash
-npm run ship:engine         # 生成上述三件
-npm run test:uxe:all        # 一键无人门禁（packet→input→demo→ship→drone*）
-npm run test:uxe:ship       # alarm 55 → CDP /engine/ship/
-npm run test:uxe:packet     # alarm 20 → UXEP
-npm run test:uxe:input      # alarm 15 → UXIN
-npm run test:uxe            # alarm 55 → /engine/demo/
-npm run test:game           # alarm 45 → sim.ujs node
-npm run test:game:browser   # alarm 55 → /game/ Three 对照
+npm run ship:pages          # asteroid + drone → docs/uxe/
+npm run test:uxe:all        # 无人门禁
 ```
+
+分项：`test:uxe:packet` · `input` · `uxe` · `ship` · `drone` · `drone:ship`（均 alarm）。  
+Three 对照：`test:game` · `test:game:browser`。
 
 ---
 
@@ -95,30 +87,22 @@ npm run test:game:browser   # alarm 55 → /game/ Three 对照
 
 ```
 ujs/
-├── DOCS.md                 ← 本页（地图）
-├── README.md  TOOLS.md  FUTURE.md  prd.md  package.json
+├── DOCS.md  README.md  TOOLS.md  FUTURE.md  prd.md  package.json
 ├── scripts/
-│   ├── release-artifacts.sh    # 发版 zip（ujs_full + compiler.gen）
-│   └── ship-engine.sh          # UXE 发布面（html + 双 wasm）
+│   ├── release-artifacts.sh
+│   ├── ship-engine.sh      # asteroid → docs/uxe/asteroid
+│   ├── ship-pages.sh       # asteroid + drone
+│   └── uxe-gate.sh         # test:uxe:all
 ├── web/
-│   ├── wasm_run.js             # 产品 API
-│   ├── compiler.js             # 页内编译（demo / playground）
-│   ├── BUILD.json              # 指纹（可入库）
-│   ├── index.html …            # playground
-│   ├── engine/                 # UXE
-│   │   ├── HOST_ABI.md         # Host API 真源
-│   │   ├── PLATFORM.md         # 平台方向 · BYO LLM
-│   │   ├── browser-host.js …   # 分源实现
-│   │   ├── core-asteroid.js    # demo JS 核
-│   │   ├── core-monopoly.js    # demo / ship-js 核
-│   │   ├── demo/               # 源码测试页（含 monopoly/）
-│   │   └── ship/               # 发布面（asteroid + monopoly/）
-│   └── game/                   # Three 对照 + exp/
-├── native/
-│   ├── ujs_vm.c                # → ujs_full / engine
-│   ├── ujs_ic_net.c            # IC 网（生成/构造）
-│   └── uxe_asteroid.c          # → asteroid.wasm（无链 VM）
-└── construct/                  # Python：gold · front · build · CLI
+│   ├── wasm_run.js  compiler.js  BUILD.json
+│   ├── engine/             # UXE
+│   │   ├── HOST_ABI.md  PLATFORM.md  README.md
+│   │   ├── browser-host.js  packet.js  input.js  _cdp.mjs
+│   │   ├── core-asteroid.js  core-drone.js  core-monopoly.js（归档车）
+│   │   ├── demo/  ship/  archive/
+│   └── game/               # Three 对照 + exp/
+├── native/                 # C VM · uxe_asteroid.c
+└── construct/              # Python gold · front · build
 ```
 
 ---
@@ -126,8 +110,9 @@ ujs/
 ## 文档对齐约定
 
 1. **规格**只认 `prd.md`；UXE / Host API **不**偷偷改 `wasm_run` 契约。
-2. **Host 真源**：`web/engine/HOST_ABI.md`；平台叙事：`PLATFORM.md`；README 只摘要。
-3. 改 `host_*` / UXEP·UXIN / 交付面 → 同会话更新 HOST_ABI + engine README + DOCS/FUTURE + research 定性指针。
-4. 门禁以 `package.json` scripts 为准；文档里的 alarm 秒数须一致。
-5. **游戏 wasm 与引擎 wasm 不合包**：`{game}.wasm` ≠ `engine.wasm`。
-6. **LLM**：密钥只在 Host/壳；规划符号见 HOST_ABI §7.1，禁止进核与 packet。
+2. **Host 真源**：`HOST_ABI.md`；平台叙事：`PLATFORM.md`；README 只摘要。
+3. 改 `host_*` / UXEP·UXIN / 交付面 → 同会话更新 HOST_ABI + engine README + DOCS/FUTURE。
+4. 门禁以 `package.json` + `uxe-gate.sh` 为准。
+5. **游戏 wasm 与引擎 wasm 不合包**。
+6. **LLM**：密钥只在 Host/壳；规划见 HOST_ABI §7.1。
+7. 过期实践车进 [`web/engine/archive/`](web/engine/archive/)，勿再写进「下一刀」。

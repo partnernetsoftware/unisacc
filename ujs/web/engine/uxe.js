@@ -1,9 +1,11 @@
-/** UXE public facade — createEngine(canvas). */
+
+/** @deprecated Prefer createBrowserHost + core-*.js. Kept for release-artifacts. */
 import { Scene, PerspectiveCamera } from "./scene.js";
 import { createWebGLRenderer } from "./renderer-webgl.js";
 import { createWebGPURenderer } from "./renderer-webgpu.js";
 
 /**
+ * Optional thin facade (not the Host-game path).
  * @param {HTMLCanvasElement} canvas
  * @param {{ prefer?: "auto" | "webgl" | "webgpu" }} [opts]
  */

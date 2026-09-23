@@ -1,69 +1,57 @@
 # UXE · 游戏平台方向
 
 > 短文：平台怎么从 Host + 多款 ship 长出来。  
-> **契约真源**仍是 [`HOST_ABI.md`](HOST_ABI.md)；本文不替代 ABI。
+> **契约真源**仍是 [`HOST_ABI.md`](HOST_ABI.md)；产品化下一刀见 [`FUTURE.md`](../../FUTURE.md)。
 
 ## 一句话
 
 **同一套 Host API + 可换 `{game}` 核 + 用户可选自带 LLM API** → 可外网玩的游戏平台。  
-小游戏不是旁支：它们是 Host 的压力测试与可扩展性证明。边做玩法边加厚 ABI；**无人门禁**（`npm run test:uxe:all`）代替人肉点鼠标。
+小游戏是 Host 的压力测试；**无人门禁**（`npm run test:uxe:all`）代替人肉点鼠标。
 
 ## 三块积木
 
 | 积木 | 现在 | 平台要什么 |
 |---|---|---|
-| **Host API** | 时间 / 输入 / 帧 / UXEP·GPU / 资源 / 日志 | 继续加厚（H3+）；规划 `host_llm` |
-| **引擎** | `engine.wasm`（=`ujs_full`；游戏 / app / harness 共用） | 稳定交付名；与业务核永远分开 |
-| **游戏** | Asteroid · 无人机（Pages）· 大富翁（归档） | 继续用街机实践车逼 Host；模板可复制 |
+| **Host API** | 时间 / 输入 / 帧 / UXEP·GPU / 资源 / 日志 | 按卡住点加厚；规划 `host_llm` |
+| **引擎** | `engine.wasm`（=`ujs_full`） | eng ABI 下沉；与业务核永远分开 |
+| **游戏** | Asteroid · 无人机（Pages）；大富翁见 [`archive/`](archive/) | **换核模板**可复制 |
 
-外网入口（GitHub Pages · `docs/`）：
+外网：`/docs/index.html` · `/docs/uxe/{name}/`。
 
-- 索引：`/docs/index.html`
-- 游戏：`/docs/uxe/{name}/`
-
-本地重建：`cd ujs && npm run ship:engine`。
+```bash
+cd ujs && npm run ship:pages && npm run test:uxe:all
+```
 
 ## 用户自带 LLM（BYO API）
 
-意图：玩家或作者在壳里粘贴 **自己的** API endpoint + key，用来驱动 NPC、关卡生成、裁判、叙事等——**平台不代持密钥、不做中心化计费前提**。
-
 | 层 | 职责 |
 |---|---|
-| 页面壳 | UI：填 key / 选模型；永不把 key 写入 URL 或 UXEP |
-| Host | `host_llm_*`（规划）：发请求、超时、剥 key、只回结果 bytes |
-| 游戏核 | 只提交提示结构化请求、消费结构化回复；可降级为「无 LLM 也能玩」 |
+| 页面壳 | 填 key / 选模型；永不写入 URL 或 UXEP |
+| Host | `host_llm_*`（规划）：代发、超时、剥 key |
+| 游戏核 | 结构化请求/回复；可降级为无 LLM 可玩 |
 
-详见 Host API §7.1。未实现前游戏保持纯本地可玩。
+详见 HOST_ABI §7.1。
 
-## 作者路径（目标体验）
+## 作者路径（目标）
 
 ```
-写 `*.ujs` + 核只调 `host_*`
-  → npm run ship:engine
-  → docs/uxe/{game}/ 可玩（过可玩性门槛再进索引）
+写 *.ujs + 核只调 host_*
+  → npm run ship:pages（或单游戏 ship 钩子）
+  → docs/uxe/{game}/ + 索引（过可玩性门槛）
   → （可选）壳打开 LLM
 ```
 
-今日缺口（按优先级）：
-
-1. **eng ABI 下沉**（`eng_sim_step` 进 `engine.wasm`）— 胶水变薄  
-2. Host 继续按卡住点加厚（audio / 贴图…）  
-3. `host_llm_*`：有玩法需要再落地  
-
-无人环：改 Host / 输入 / ship 后先跑 `cd ujs && npm run test:uxe:all`（自启 8765 · CDP · 禁代理）。
+今日缺口：① eng ABI 下沉 ② 统一 bake/模板 ③ host_llm 有玩法再开。
 
 ## 明确不做
 
-- 把 Three 搬进 wasm  
-- 游戏与引擎合包  
-- 开放完整浏览器 JS 当玩法语言  
-- 把用户 key 写进仓库、packet、或公共日志  
+- Three 进 wasm · 合包 · 完整浏览器 JS 当玩法语言 · 用户 key 进仓库/packet
 
-## 相关文档
+## 相关
 
 | 文档 | 用途 |
 |---|---|
 | [`HOST_ABI.md`](HOST_ABI.md) | Host API 真源 |
-| [`README.md`](README.md) | UXE 目录与 demo/ship |
-| [`../../DOCS.md`](../../DOCS.md) | ujs 文档地图 |
-| [`../../FUTURE.md`](../../FUTURE.md) | P0 / H 档 / 中期节点 |
+| [`README.md`](README.md) | UXE 目录 |
+| [`archive/`](archive/) | 下架车 |
+| [`../../FUTURE.md`](../../FUTURE.md) | 产品化下一刀 |

@@ -582,7 +582,6 @@ function norm32(v) {
   return [v[0] / L, v[1] / L, v[2] / L];
 }
 function adaptProjectionForWebGPU(P) {
-  P[5] = -P[5];
   const z0 = P[2], z1 = P[6], z2 = P[10], z3 = P[14];
   const w0 = P[3], w1 = P[7], w2 = P[11], w3 = P[15];
   P[2] = z0 * 0.5 + w0 * 0.5;

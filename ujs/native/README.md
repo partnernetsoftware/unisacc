@@ -10,7 +10,8 @@
 
 ```bash
 python3 -m ujs web-build          # → ujs_full.wasm
-cd ujs && npm run ship:engine     # → asteroid.wasm + 复制 engine.wasm
+cd ujs && npm run ship:pages      # asteroid + drone → docs/uxe/
+# 仅 asteroid：npm run ship:engine
 ```
 
 `uxe_asteroid.c` 经 `env.eng_boot` / `env.eng_sim_step` 由页内胶水桥到 `engine.wasm`（双 linear memory，不合包）。

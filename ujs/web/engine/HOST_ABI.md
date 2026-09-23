@@ -185,8 +185,14 @@ decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1�
 | 引擎 | `ujs_full.wasm` | `engine.wasm` |
 | Host | 分模块 `browser-host.js` | 内联进 `index.html` 的薄胶水 |
 
-Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。  
-重建：`cd ujs && npm run ship:engine`。
+Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
+
+```bash
+cd ujs && npm run ship:pages    # asteroid + drone → docs/uxe/
+# 或分项：npm run ship:engine · npm run ship:drone
+```
+
+`eng_sim_step` 双 memory 搬砖仍在 JS ship 胶水（§0「下一刀」）；沉 wasm 前页内体积会继续偏厚。
 
 ---
 
@@ -242,14 +248,9 @@ Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
 
 ```bash
 cd ujs
-npm run test:uxe:all       # 一键无人门禁（自启 8765 · CDP · 禁代理）
-# 或分项：
-npm run test:uxe:packet    # UXEP
-npm run test:uxe:input     # UXIN
-npm run test:uxe           # demo asteroid
-npm run test:uxe:ship      # ship asteroid
-npm run test:uxe:drone     # demo drone
-npm run test:uxe:drone:ship
+npm run test:uxe:all       # 一键无人门禁（uxe-gate.sh）
+# 分项：packet · input · uxe · ship · drone · drone:ship · drone:rules
+# 归档车（非默认）：test:uxe:monopoly*
 ```
 
 改 ABI 而未改本文件 / 门禁 = 文档债务。

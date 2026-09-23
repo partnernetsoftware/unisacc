@@ -54,11 +54,15 @@ console.log(r2.ok); // 5
 |---|---|
 | `/` | playground |
 | **`/engine/demo/`** | UXE asteroid 源码测试 |
+| **`/engine/demo/drone/`** | UXE 无人机源码测试 |
 | **`/engine/ship/`** | asteroid 发布面 |
+| **`/engine/ship/drone/`** | 无人机发布面 |
+| Pages `docs/` | 外网索引（Asteroid + 无人机） |
 | `/game/` | Three 对照 |
 | `/game/exp/` | 裸 WebGL 对照 |
 
-契约：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md)（**Host API**）、[`web/engine/PLATFORM.md`](web/engine/PLATFORM.md)、[`web/engine/README.md`](web/engine/README.md)、[`DOCS.md`](DOCS.md)。
+契约：[`web/engine/HOST_ABI.md`](web/engine/HOST_ABI.md)、[`web/engine/PLATFORM.md`](web/engine/PLATFORM.md)、[`web/engine/README.md`](web/engine/README.md)、[`DOCS.md`](DOCS.md)。  
+Pages 重建：`npm run ship:pages` · 无人门禁：`npm run test:uxe:all`。
 
 ## 构造侧（Python，非应用依赖）
 
@@ -81,12 +85,12 @@ ujs/
 ├── package.json         # Node/Bun 包（入口 web/wasm_run.js）
 ├── DOCS.md              # 文档地图（先读）
 ├── TOOLS.md  FUTURE.md  prd.md
-├── scripts/             # release-artifacts · ship-engine
+├── scripts/             # release-artifacts · ship-pages · uxe-gate
 ├── web/                 # 站点 + ESM 库
 │   ├── wasm_run.js      # bootRuntime / wasm_run
 │   ├── compiler.js      # 页内编译
 │   ├── BUILD.json       # 产物指纹
-│   ├── engine/          # UXE：demo/ + ship/
+│   ├── engine/          # UXE：demo/ + ship/ + archive/
 │   ├── game/            # Three 对照 + exp/
 │   └── *.wasm / gen.*   # web-build 生成（gitignore / Release）
 ├── native/              # C：VM + {game}.wasm 源

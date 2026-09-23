@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Ship deliverables + GitHub Pages mirror under docs/
-#   asteroid: index.html + asteroid.wasm + engine.wasm
-#   monopoly: index.html + engine.wasm（JS 核 + 预编译 sim；C monopoly.wasm 后补）
+# Ship asteroid deliverables + GitHub Pages mirror under docs/uxe/asteroid/
+# Full Pages (asteroid + drone): npm run ship:pages
+# Monopoly is archived — this script deletes docs/uxe/monopoly if present.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WEB="$ROOT/ujs/web"
@@ -43,16 +43,16 @@ perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../../" UXE_SHIP_STAMP="$STAMP
 cp -f "$SHIP/index.html" "$SHIP/asteroid.wasm" "$SHIP/engine.wasm" "$PAGES_AST/"
 perl -e 'alarm 30; exec @ARGV' env UXE_SHIP_HOME="../" UXE_SHIP_STAMP="$STAMP" node "$SHIP/bake-html.mjs"
 
-# ——— Monopoly：归档，不进 Pages 索引 / 不镜像 docs ———
-# 源码仍留在 demo/monopoly · ship/monopoly（本地可开）；Pages 只公开 asteroid。
+# ——— Monopoly：归档（见 web/engine/archive/）———
+# 源码仍留在 demo/monopoly · ship/monopoly；正式 Pages 不镜像。
 rm -rf "$DOCS/uxe/monopoly"
 
-# ——— Game index（已手写；确保 .nojekyll） ———
+# ——— Game index（手写；确保 .nojekyll） ———
 touch "$DOCS/.nojekyll"
 
 echo "ship ok:"
 echo "  asteroid  $PAGES_AST"
 echo "  index     $DOCS/index.html"
-echo "  monopoly  archived (not on Pages)"
+echo "  monopoly  archived — use ship:pages for drone too"
 echo "local asteroid: http://127.0.0.1:8765/engine/ship/"
 echo "pages root:     docs/ → GitHub Pages"
