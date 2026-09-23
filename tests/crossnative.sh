@@ -18,7 +18,9 @@ command -v limactl >/dev/null || { echo "crossnative skipped (no limactl)"; exit
 run_target() {   # run_target <vm> <target> <files...>
     vm=$1; target=$2; shift 2
     limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null \
-        | grep -q "^$vm Running" || { echo "  skip $target ($vm not running)"; return 0; }
+        | grep -q "^$vm Running" || {
+            echo "  skip $target ($vm not running)"
+            echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
     d=$(mktemp -d); : > "$d/.list"
     for f in "$@"; do
         b=$(basename "$f" .c)
@@ -139,6 +141,10 @@ run_windows() {
 # The targets are independent machines, so they run side by side; each job
 # counts its own failures and the reports are printed in the fixed order.
 O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
+# A skipped target is not a passing target.  This suite reported "failing
+# targets 0" while every VM was stopped and nothing at all had run, which
+# reads as green in the summary -- the same vacuous pass closure.sh had.
+SKIPFILE=$O/skipped; : > "$SKIPFILE"; export SKIPFILE
 job() { n=$1; shift; ( bad=0; "$@"; echo "$bad" > "$O/$n.bad" ) > "$O/$n.out" 2>&1 & }
 job 1 run_target "${VM_X86:-minicon-lnx-x86_64}" lnx/x86_64 "$@"
 job 2 run_target "${VM_ARM:-default}"            lnx/arm64  "$@"
@@ -152,6 +158,13 @@ for n in 1 2 3 4; do
     cat "$O/$n.out"
     bad=$((bad + $(cat "$O/$n.bad" 2>/dev/null || echo 1)))
 done
+nskip=$(wc -l < "$SKIPFILE" | tr -d ' ')
 echo
-echo "crossnative failing targets $bad"
-[ "$bad" -eq 0 ]
+if [ "$nskip" -gt 0 ]; then
+    echo "crossnative failing targets $bad   SKIPPED $nskip: $(tr '\n' ' ' < "$SKIPFILE")"
+else
+    echo "crossnative failing targets $bad   (no target skipped)"
+fi
+# Skipping is allowed -- these are dev-machine VMs -- but it must be VISIBLE.
+# STRICT=1 (what a release check uses) turns a skip into a failure.
+[ "$bad" -eq 0 ] && { [ "${STRICT:-0}" = "0" ] || [ "$nskip" -eq 0 ]; }
