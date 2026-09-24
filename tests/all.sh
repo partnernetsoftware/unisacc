@@ -36,6 +36,8 @@
 #   c99         one probe per C99 feature, the denominator written from the
 #               standard's list of changes rather than from what we support
 #               [A-44]
+#   warn        the four -Wall warnings against cc -Wall: same lines, same
+#               kinds on the probes, and none cc does not give on the corpus
 #   fuzz        generated programs, against the system compiler: the
 #               combinations nobody combined [A-46]
 #   hostile     input the compiler was not expecting -- truncated files,
@@ -133,6 +135,7 @@ run datashape  ./tests/datashape.sh
 run bigclosure ./tests/bigclosure.sh
 run cli        ./tests/cli.sh
 run diag       ./tests/diag.sh
+run warn       ./tests/warn.sh
 run ape        ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then

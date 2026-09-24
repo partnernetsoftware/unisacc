@@ -755,7 +755,26 @@ int err_line(long p) {                 /* print the line containing p */
     return 0;
 }
 
-int err_at(long p, char *msg) {
+int warnall;             /* -Wall: the warnings below are printed [S-15 C4] */
+int panic;               /* defined with the error reporter: the walker is unwinding */
+int curcall;             /* the value in hand came from a call (its type is not tracked) */
+int declvoid;            /* the last base type scanned was `void` */
+int nwarn;
+int diag_at(long p, char *msg, char *kind);
+int err_at(long p, char *msg) { return diag_at(p, msg, ": error: "); }
+/* A warning: the same file:line:col shape, `warning:`, and clang's own
+   [-W...] tag at the end of the message so a suite can map the kinds.
+   Only under -Wall -- every suite that reads stderr as "refused" stays
+   as it is, and so does a Makefile that does not ask. */
+int warnonly;            /* diag_at: this one is a warning -- not in a header */
+int warn_at(long p, char *msg) {
+    if (warnall == 0) return 0;
+    if (panic) return 0;
+    nwarn = nwarn + 1;
+    warnonly = 1;
+    return diag_at(p, msg, ": warning: ");
+}
+int diag_at(long p, char *msg, char *kind) {
     long q; long line; long col; int i; int inside; char *fname;
     if (p < 0) p = 0;
     if (p > nsrc) p = nsrc;
@@ -778,6 +797,7 @@ int err_at(long p, char *msg) {
         i = i - 1;
     }
     fname = inside >= 0 ? fnpool + ireg_nm[inside] : srcpath;
+    if (warnonly) { warnonly = 0; if (inside >= 0) { nwarn = nwarn - 1; return 0; } }
     if (inside < 0) {
         line = line - nautoinc;   /* the headers we added on the user's behalf */
         /* each joined continuation line is a line the file has that this
@@ -787,7 +807,7 @@ int err_at(long p, char *msg) {
     }
     __write(2, fname, blen(fname));
     ec2(58); en2(line); ec2(58); en2(col);
-    __write(2, ": error: ", 9);
+    __write(2, kind, blen(kind));
     __write(2, msg, blen(msg));
     ec2(10);
     err_line(p);
@@ -807,7 +827,6 @@ int kind(int i);
 int tidx(char *s, int L);
 int nerr;                /* errors reported so far */
 int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
-int panic;               /* an error was reported: the walker is unwinding */
 int errtop;              /* where the top-level construct being walked began */
 
 int err_tok(int t, char *msg) {        /* ...at a token */
@@ -2106,6 +2125,8 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
+int symtok[MAXSYM];         /* the token that declared it */
+int symused[MAXSYM];        /* read at least once (not just assigned) */
 int symbool[MAXSYM];        /* ...and it is _Bool, which normalises on store */
 int symfp[MAXSYM];          /* holds a function pointer: 1 register, 2 stacked */
 int symvla[MAXSYM];         /* a VLA: the frame slot holding its byte count */
@@ -2715,6 +2736,7 @@ int sadd(int t, int kind, int off, int elem) {
     symvar[nsym] = 0;
     symunit[nsym] = curunit;
     symuns[nsym] = declunsigned;
+    symtok[nsym] = t; symused[nsym] = 0;
     symbool[nsym] = declbool;
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
@@ -3032,6 +3054,11 @@ int unary(void) {
             curpd = curpd - 1; curptr = 1;
             curelem = curpd >= 2 ? 8 : curbase;
         } else { curptr = 0; curpd = 0;
+                 /* and as wide as the pointee: `*b` of an `int *b` kept the
+                    POINTER's eight bytes, so it sat on the type axis as a
+                    long -- `%d` with it warned, and `*u * 3` of an
+                    `unsigned *u` was never narrowed */
+                 if (curelem > 0) { if (curelem <= 8) { if (curstruct < 0) cursize = curelem; } }
                  /* `*p` of a struct pointer is the struct: an aggregate,
                     whose value is its address, so nothing more is loaded.
                     `sum(*p)` used to load its first eight bytes and pass
@@ -3490,6 +3517,7 @@ int primary(void) {
         if (kind(tp + 1) == tidx("*", 1)) { if (kind(tp + 2) == T_ID) {
             if (kind(tp + 3) == tidx(")", 1)) { if (kind(tp + 4) == tidx("(", 1)) {
                 i = sfind(tp + 2);
+                if (i >= 0) symused[i] = 1;
                 if (i >= 0) { if (symfp[i]) {
                     adv(); adv(); icparen = 1;
                     return icall(i, tp);
@@ -3505,6 +3533,7 @@ int primary(void) {
     }
     if (t == T_ID) {
         scopewant("expr", 4, tp, "lookup", 6);
+        { int ui; ui = sfind(tp); if (ui >= 0) { if (kind(tp + 1) == tidx("(", 1)) symused[ui] = 1; } }
         if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) {
             i = sfind(tp);
             /* a function is never a pointer variable, even when it RETURNS
@@ -3520,6 +3549,16 @@ int primary(void) {
         } }
         i = sfind(tp);
         if (i < 0) err_tok(tp, "unknown identifier");
+        if (i >= 0) {
+            /* written, not read: `x = ...` as a statement of its own.  Any
+               other position -- `*x = `, `a = x = 0`, `f(x = 1)` -- reads
+               x or uses the assignment's value, as clang counts it. */
+            if (kind(tp + 1) != tidx("=", 1)) symused[i] = 1;
+            else { if (tp > 0) {
+                int pk; pk = kind(tp - 1);
+                if (pk != tidx(";", 1) && pk != tidx("{", 1) && pk != tidx("}", 1) && pk != tidx(")", 1)) symused[i] = 1;
+            } }
+        }
         cursize = symbytes[i];           /* what `sizeof` reports for it */
         curvla = symvla[i];
         curflt = symflt[i];
@@ -3533,9 +3572,10 @@ int primary(void) {
             curfn = 1; curfnst = 0 - 1; curflt = 0;
             return postfix();
         }
-        if (symkind[i] == 4) {           /* enum constant */
+        if (symkind[i] == 4) {           /* enum constant: an int (6.7.2.2p3) */
             es("  @lit.imm r0, "); en(symoff[i]); ec(10);
             adv(); lvalue = 0; curelem = 8;
+            curptr = 0; cursize = 4; curuns = 0; curflt = 0; curstruct = 0 - 1; curfn = 0;
             return postfix();
         }
         if (symkind[i] == 5) {               /* global array -> its address */
@@ -3663,7 +3703,72 @@ int decode(int t, char *buf) {
 }
 
 
+/* -Wformat [S-15 C4]: one conversion against the argument just walked.
+   printf's format is read at compile time either way, so the type is
+   known; the wording is clang's. */
+int pf_check(int c, int lng, int at) {
+    if (curcall) return 0;
+    if (c == 115) { if (curptr == 0) { if (curfn == 0)
+        warn_at(tpos[at], "format specifies type 'char *' but the argument has an integer type [-Wformat]"); } }
+    if (c == 112) { if (curptr == 0) { if (curfn == 0)
+        warn_at(tpos[at], "format specifies type 'void *' but the argument has an integer type [-Wformat]"); } }
+    if (c == 100 || c == 105 || c == 117 || c == 120 || c == 88 || c == 111 || c == 99) {
+        if (curptr) warn_at(tpos[at], "format specifies an integer type but the argument is a pointer [-Wformat]");
+        else { if (curflt) warn_at(tpos[at], "format specifies an integer type but the argument has a floating type [-Wformat]");
+        else { if (lng == 0) { if (cursize == 8) { if (curstruct < 0)
+            warn_at(tpos[at], "format specifies type 'int' but the argument has type 'long' [-Wformat]"); } }
+        else { if (cursize < 8)
+            warn_at(tpos[at], "format specifies type 'long' but the argument has type 'int' [-Wformat]"); } } }
+    }
+    if (c == 102 || c == 101 || c == 103 || c == 70 || c == 69 || c == 71) { if (curflt == 0)
+        warn_at(tpos[at], "format specifies type 'double' but the argument has an integer type [-Wformat]"); }
+    return 0;
+}
+
+/* The arguments walked once for their TYPES and the emitter rewound, the
+   way expr() rewinds a false start: the real walk -- do_printf's or the
+   ordinary call's, when the format needs the runtime printf -- follows
+   as if nothing happened.  An error found here parks the cursor like any
+   other and is not walked into twice. */
+int pf_dryrun(int ft) {
+    char fb[4096]; int n; int k; int c; int lng; int at;
+    int save; int nsave; int isave; int psave; int pesave;
+    if (warnall == 0) return 0;
+    save = tp; nsave = nout; isave = nibuf; psave = npool; pesave = poolend;
+    n = decode(ft, fb);
+    tp = ft + 1;
+    k = 0;
+    while (k < n) {
+        c = fb[k] & 255;
+        if (c != 37) { k = k + 1; continue; }
+        k = k + 1;
+        while (k < n) { c = fb[k] & 255; if (c == 45 || c == 43 || c == 32 || c == 35 || c == 48) { k = k + 1; continue; } break; }
+        if (k < n) { if (fb[k] == 42) { k = k + 1; if (eat(tidx(",", 1))) { expr(); loadval(); } } }
+        while (k < n) { if (isdi(fb[k] & 255) == 0) break; k = k + 1; }
+        if (k < n) { if (fb[k] == 46) { k = k + 1;
+            if (k < n) { if (fb[k] == 42) { k = k + 1; if (eat(tidx(",", 1))) { expr(); loadval(); } } }
+            while (k < n) { if (isdi(fb[k] & 255) == 0) break; k = k + 1; } } }
+        lng = 0;
+        while (k < n) {
+            c = fb[k] & 255;
+            if (c == 104 || c == 76 || c == 122 || c == 106 || c == 116) { k = k + 1; continue; }
+            if (c == 108) { lng = 1; k = k + 1; continue; }
+            break;
+        }
+        if (k >= n) break;
+        c = fb[k] & 255; k = k + 1;
+        if (c == 37) continue;
+        if (eat(tidx(",", 1)) == 0) break;          /* too few arguments: not this check's */
+        at = tp; curcall = 0; expr(); loadval();
+        pf_check(c, lng, at);
+        if (panic) break;
+    }
+    if (panic == 0) { tp = save; nout = nsave; nibuf = isave; npool = psave; poolend = pesave; }
+    return 0;
+}
+
 int do_printf(void) {
+    int lng;
     int t; int k; int n; int c; int m; int id; int pass; int j; int slot[32];
     char fbuf[4096];
     need(vfind(TOKV, NTOKV, "(", 1), "(");
@@ -3699,10 +3804,11 @@ int do_printf(void) {
                 k = k + 1;
                 while (k < n) { if (isdi(fbuf[k] & 255) == 0) break; k = k + 1; }
             } }
+            lng = 0;
             while (k < n) {
                 c = fbuf[k] & 255;
                 if (c == 104) { k = k + 1; continue; }       /* h */
-                if (c == 108) { k = k + 1; continue; }       /* l */
+                if (c == 108) { lng = 1; k = k + 1; continue; }       /* l */
                 if (c == 76) { k = k + 1; continue; }        /* L */
                 if (c == 122) { k = k + 1; continue; }       /* z */
                 if (c == 106) { k = k + 1; continue; }       /* j */
@@ -3857,7 +3963,7 @@ int argconv(int si, int k) {
 }
 /* what a call of si hands back: a float or double, when it returns one */
 int callres(int si) {
-    curflt = 0;
+    curflt = 0; curcall = 1;
     if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) {
         curflt = symflt[si]; cursize = curflt; curelem = curflt;
     } } } }
@@ -3869,6 +3975,7 @@ int pf_call(int t) {
     /* a call's value is an i64 on the type axis until return types are
        tracked; the fields describe the RESULT, not whatever came before */
     cursize = 8; curuns = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
+    curcall = 1;                          /* whichever way the call is made */
     if (isname(t, "printf", 6)) {
         int ps; int useit;
         useit = 0;
@@ -3877,6 +3984,7 @@ int pf_call(int t) {
             if (kind(tp + 1) == T_STR) { if (fmtneedsrt(tp + 1)) useit = 1; }
         } }
         if (ps >= 0) { if (symvar[ps]) { if (kind(tp + 1) != T_STR) useit = 1; } }
+        if (kind(tp + 1) == T_STR) pf_dryrun(tp + 1);
         if (useit == 0) return do_printf();
         /* else: an ordinary variadic call on <stdio.h>'s printf */
     }
@@ -3985,6 +4093,7 @@ int pf_call(int t) {
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     n = 0;
     psi = sfind(t);
+    if (psi >= 0) symused[psi] = 1;
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (cur() == T_EOF) break;
         expr(); loadval();
@@ -4588,6 +4697,7 @@ int land(void) {
         binary(0); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("L", end); es(":\n");
+        setkind(0); cursize = 4; curelem = 4; curptr = 0;   /* an int (6.5.13p3) */
     }
     return 0;
 }
@@ -4605,6 +4715,7 @@ int lor(void) {
         land(); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("L", end); es(":\n");
+        setkind(0); cursize = 4; curelem = 4; curptr = 0;   /* an int (6.5.14p3) */
     }
     return 0;
 }
@@ -4612,7 +4723,7 @@ int lor(void) {
 /* `a ? b : c` -- only one arm is evaluated, so each gets its own label and
    the value they share is r0. */
 int cond(void) {
-    int els; int end;
+    int els; int end; int p1; int e1;
     lor();
     if (cur() != tidx("?", 1)) return 0;
     loadval(); ftruthy(); adv();
@@ -4620,7 +4731,7 @@ int cond(void) {
     elab("  @ctrl.jumpz r0, L", els); ec(10);
     {   int save; int nsave; int k1; int k2; int a1; int cf;
         save = tp; nsave = nout;
-        expr(); loadval(); k1 = fkind(); a1 = tyax();
+        expr(); loadval(); k1 = fkind(); a1 = tyax(); p1 = curptr; e1 = curelem;
         elab("  @ctrl.jump L", end); ec(10);
         elab("L", els); es(":\n");
         need(tidx(":", 1), ":");
@@ -4639,6 +4750,9 @@ int cond(void) {
         }
     }
     elab("L", end); es(":\n");
+    /* C99 6.5.15p6: one arm a pointer and the other a null pointer
+       constant -- the result is the pointer's type */
+    if (p1) { if (curptr == 0) { curptr = 1; curelem = e1; } }
     lvalue = 0;
     return 0;
 }
@@ -4661,6 +4775,20 @@ int aop(void) {                     /* += -= *= /= -> the plain operator */
     if (cur() == tidx("<<=", 3)) return tidx("<<", 2);
     if (cur() == tidx(">>=", 3)) return tidx(">>", 2);
     return 0 - 1;
+}
+
+/* -Wint-conversion: a pointer target given an integer that is not the
+   null pointer constant.  The value's facts are in cur*, the target's
+   were taken before the right-hand side; a function designator is a
+   pointer in this sense and a lone `0` (NULL expands to it) is exempt. */
+int intptr_check(int tptr, int rt) {
+    if (tptr == 0) return 0;
+    if (curcall) return 0;
+    if (curptr || curfn || curflt) return 0;
+    if (curstruct >= 0) return 0;
+    if (tp == rt + 1) { if (kind(rt) == T_NUM) { if (numval(rt) == 0) return 0; } }
+    warn_at(tpos[rt], "incompatible integer to pointer conversion [-Wint-conversion]");
+    return 0;
 }
 
 int expr(void) {
@@ -4724,8 +4852,9 @@ int expr(void) {
             return 0;
         }
         if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
-            int ak;
+            int ak; int tptr; int rt;
             adv();
+            tptr = curptr; rt = tp; curcall = 0;
             ak = fkind();
             if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
@@ -4742,6 +4871,7 @@ int expr(void) {
             } }
             push();
             expr(); loadval();
+            intptr_check(tptr, rt);
             fconv(fkind(), ak);                      /* C99 6.5.16.1p2 */
             /* C99 6.3.1.2: converting to _Bool gives 0 if the value
                compares equal to 0, and 1 otherwise -- it is not a
@@ -5063,6 +5193,7 @@ int is_typeat(int i) {
    the kind's size is the tyinfo stage's answer, not a number written here.
    kb: 0 void, 1 char, 2 short, 3 int, 4 long, 5 float, 6 double */
 int kindsize(int kb, int un) {
+    declvoid = kb == 0;
     char *nm; int L;
     nm = un ? "u32" : "i32";
     if (kb == 0) nm = "void";
@@ -5075,6 +5206,7 @@ int kindsize(int kb, int un) {
     return tysize(vfind(TYOUTV, NTYOUTV, nm, L));
 }
 
+int laststmt;            /* the body's last top-level statement returns, loops forever or exits */
 int typesize(void) {
     int kb; int un;
     kb = 3; un = 0;
@@ -5228,7 +5360,7 @@ int stbody(int si) {
     int off; int al; int w; int sz; int n; int t; int k;
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
-    int flex;                   /* this member is `name[]`: a flexible array */
+    int flex; int marr;                   /* this member is `name[]`: a flexible array */
     int mbl;                    /* ...and this one is _Bool */
     nown = 0; bitpos = 0; flex = 0;
     stopen[si] = 1;             /* this tag is INCOMPLETE until the `}` */
@@ -5284,7 +5416,7 @@ int stbody(int si) {
             declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) declptr = 1;
             t = 0 - 1;
-            n = 1;
+            n = 1; marr = 0;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 /* `int (*fptr)();` -- a pointer member, called through
                    its value; `(*f[4])()` is an array of them */
@@ -5293,7 +5425,7 @@ int stbody(int si) {
             } }
             flex = 0;
             if (t < 0) { if (cur() != tidx(":", 1)) t = adv(); }   /* `unsigned : 2;` names nothing */
-            if (cur() == tidx("[", 1)) {
+            if (cur() == tidx("[", 1)) { marr = 1;
                 /* C99 6.7.2.1p16: the LAST member of a struct may have an
                    incomplete array type -- `char d[];` -- and contributes
                    nothing to sizeof.  The bytes are whatever the caller
@@ -5360,7 +5492,12 @@ int stbody(int si) {
             if (mst >= 0) { msz = stsize[mst]; mal = stalign[mst]; mw = 0; mel = msz; }
             if (declptr) { msz = 8; mal = 8; mw = 8; mel = sz; if (mst >= 0) mel = stsize[mst]; }
             if (mal > 8) mal = 8;
-            if (n > 1) { mel = msz; msz = msz * n; mw = 0; }
+            /* an array member is an aggregate whatever its length: `char
+               x[1]` was `n > 1`-tested here and stayed a scalar, so `a.x`
+               of a struct parameter loaded the byte instead of taking
+               its address -- the -Wformat calibration found it, and the
+               program it came from crashed */
+            if (marr) { if (flex == 0) { mel = msz; msz = msz * n; mw = 0; } }
             /* The flexible member is an ARRAY of length zero: `mw = 0` is
                what marks a member as "its name is its address", and its
                size contributes nothing to the struct (C99 6.7.2.1p16).
@@ -5435,11 +5572,12 @@ int stbody(int si) {
 int stmt(void);
 
 int block(void) {
-    int savesym; int saveoff; int savetd; int savest;
+    int savesym; int saveoff; int savetd; int savest; int k;
     need(vfind(TOKV, NTOKV, "{", 1), "{");
     savesym = nsym; saveoff = frameoff; savetd = ntd; savest = nstruct;
     bdepth = bdepth + 1;
     vlaslot[bdepth] = 0;
+    laststmt = 0;
     while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
         if (cur() == T_EOF) { err_tok(tp, "unterminated block: the file ends inside it"); break; }
         stmt();
@@ -5448,6 +5586,27 @@ int block(void) {
     if (vlaslot[bdepth]) {
         es("  @mem.load r7, [r6-"); en(vlaslot[bdepth]); es("]\n");
         vlaslot[bdepth] = 0;
+    }
+    /* -Wunused-variable: declared in this block, never read.  Written
+       and never read counts too -- clang calls that "set but not used",
+       on the same line.  Prototypes declared in a block are not
+       variables; parameters were added before the block and are not
+       in this range. */
+    k = savesym;
+    while (k < nsym) {
+        if (symused[k] == 0) { if (symkind[k] == 1 || symkind[k] == 3) { if (symtok[k] >= 0) {
+            char wm[64]; int q; int r;
+            q = 0;
+            while ("unused variable '"[q]) { wm[q] = "unused variable '"[q]; q = q + 1; }
+            r = 0;
+            while (symname[k * 32 + r] && r < 24) { wm[q] = symname[k * 32 + r]; q = q + 1; r = r + 1; }
+            wm[q] = 39; q = q + 1;
+            r = 0;
+            while (" [-Wunused-variable]"[r]) { wm[q] = " [-Wunused-variable]"[r]; q = q + 1; r = r + 1; }
+            wm[q] = 0;
+            warn_at(tpos[symtok[k]], wm);
+        } } }
+        k = k + 1;
     }
     nsym = savesym; frameoff = saveoff; ntd = savetd;
     bdepth = bdepth - 1;
@@ -6153,11 +6312,13 @@ int local_decl(void) {
             } else { expr(); loadval();
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 estore(8); } }
-            else { expr(); loadval();
+            else { int rt; rt = tp; curcall = 0; expr(); loadval();
+                intptr_check(lptr, rt);
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 if (lptr) estore(8); else estore(w); } }
-            else { expr(); loadval();
+            else { int rt; rt = tp; curcall = 0; expr(); loadval();
+                intptr_check(lptr, rt);
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
                 if (lptr) estore(8); else estore(w); } }
@@ -6168,7 +6329,29 @@ int local_decl(void) {
     return 0;
 }
 
+/* -Wreturn-type without a flow graph: after each statement, `laststmt`
+   says whether control can fall out of its end.  A return, an endless
+   loop and a call that does not come back cannot; a block takes its last
+   statement's answer; `if` with `else` takes both branches'; everything
+   else can (a switch whose every case returns is judged pessimistically,
+   and the corpus check in tests/warn.sh is what bounds the damage). */
+int stmt_(void);
 int stmt(void) {
+    int inf; int r;
+    inf = 0;
+    if (cur() == tidx("return", 6)) inf = 1;
+    if (cur() == tidx("while", 5)) { if (kind(tp + 2) == T_NUM) { if (kind(tp + 3) == tidx(")", 1)) {
+        if (numval(tp + 2) != 0) inf = 1; } } }
+    if (cur() == tidx("for", 3)) { if (kind(tp + 2) == tidx(";", 1)) { if (kind(tp + 3) == tidx(";", 1)) inf = 1; } }
+    if (kind(tp) == T_ID) {
+        if (isname(tp, "exit", 4) || isname(tp, "abort", 5) || isname(tp, "__exit", 6) || isname(tp, "_exit", 5)) inf = 1;
+    }
+    laststmt = 0;
+    r = stmt_();
+    if (inf) laststmt = 1;
+    return r;
+}
+int stmt_(void) {
     int p; int a; int b; int c; int top;
     /* C99 6.8.1: a label prefixes a STATEMENT.  It is spotted before the
        table is asked, because `name :` is not a production -- the grammar
@@ -6191,13 +6374,15 @@ int stmt(void) {
         a = newlab();
         elab("  @ctrl.jumpz r0, L", a); ec(10);
         stmt();
+        c = laststmt;                            /* the then-branch's answer */
         if (cur() == vfind(TOKV, NTOKV, "else", 4)) {
             b = newlab();
             elab("  @ctrl.jump L", b); ec(10);
             elab("L", a); es(":\n");
             adv(); stmt();
             elab("L", b); es(":\n");
-        } else { elab("L", a); es(":\n"); }
+            laststmt = c && laststmt;
+        } else { elab("L", a); es(":\n"); laststmt = 0; }
         return 0;
     }
     if (p == P_WHILE) {
@@ -6385,12 +6570,13 @@ int stmt(void) {
 
 
 int function(int t, int w) {
-    int np; int pw; int pt; int off; int fpatch; int k; int start;
+    int np; int pw; int pt; int off; int fpatch; int k; int start; int fnvoid;
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
     int pst; int nsp; int spsym[16]; int pfl;
     /* `static int helper(...)` in the second unit is not the `helper` in
        the first: recorded here, before the label is emitted */
     if (declstatic) ustat_add(t);
+    fnvoid = declvoid;                       /* before the parameters' types overwrite it */
     fntok = t;
     start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;
@@ -6525,6 +6711,13 @@ int function(int t, int w) {
     infunc = 1;
     block();
     infunc = 0;
+    /* -Wreturn-type, the way it can be judged without a flow graph: the
+       body's last top-level statement is a return, an endless loop, or a
+       call that does not come back.  main is exempt (C99 5.1.2.2.3). */
+    if (fnvoid == 0) { if (declptr == 0 || 1) { if (retst < 0) { if (laststmt == 0) { if (panic == 0) {
+        if (isname(t, "main", 4) == 0)
+            warn_at(tpos[tp - 1], "non-void function does not return a value in all control paths [-Wreturn-type]");
+    } } } } }
     elab("R", retlab); es(":\n");
     es("  mov r7, r6\n  @mem.load r6, [r7+0]\n  @call.frame -8\n  @ctrl.ret\n");
     patchnum(fpatch, 6, (framemax + 7) / 8 * 8);
@@ -6919,6 +7112,9 @@ int fe_units(char **paths, int npath, char *t) {
            "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
     }
     emit_pool();
+    if (nwarn > 0) { if (nerr == 0) {
+        en2(nwarn); __write(2, nwarn == 1 ? " warning generated.\n" : " warnings generated.\n", nwarn == 1 ? 20 : 21);
+    } }
     if (nerr > 0) {
         en2(nerr); __write(2, nerr == 1 ? " error generated.\n" : " errors generated.\n", nerr == 1 ? 18 : 19);
         return 1;
@@ -6993,6 +7189,7 @@ int main(void) {
             } else { if (strsame(a, "-include")) {         /* -include FILE */
                 i = i + 1;
                 if (nopti < 8) { opti[nopti] = __argv(i); nopti = nopti + 1; }
+            } else { if (strsame(a, "-Wall") || strsame(a, "-Wextra")) { warnall = 1;
             } else { if (strpre(a, "-ferror-limit=")) { maxerr = 0; k = 14;
                 while (a[k] >= 48 && a[k] <= 57) { maxerr = maxerr * 10 + (a[k] - 48); k = k + 1; }
             } else { if (strsame(a, "-nostdinc")) { nostdinc = 1;
@@ -7017,7 +7214,7 @@ int main(void) {
             } else { if (a[1] == 87 || a[1] == 119 || a[1] == 103
                       || a[1] == 79 || a[1] == 102 || a[1] == 115
                       || a[1] == 112 || a[1] == 109) {    /* -W -w -g -O -f -std -pipe -m */
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } }
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
