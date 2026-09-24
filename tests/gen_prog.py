@@ -111,44 +111,52 @@ class Gen:
         return "(%s) %s (%s)" % (a, self.r.pick(["<", ">", "<=", ">=", "==", "!="]), b)
 
     # -- statements -------------------------------------------------------
-    def stmt(self, vars, d, out):
+    def stmt(self, vars, d, out, readonly=()):
+        # `vars` is what may be ASSIGNED; `rd` is what may be READ.  The
+        # two differ exactly at loop counters.
+        rd = list(vars) + list(readonly)
         k = self.r.n(10)
         pad = "    " * (d + 1)
         if d >= 3:
             k = self.r.n(3)
         if k == 0:
-            out.append("%s%s = %s;" % (pad, self.ivar(vars), self.expr(vars)))
+            out.append("%s%s = %s;" % (pad, self.ivar(vars), self.expr(rd)))
         elif k == 1:
-            out.append("%s%s += %s;" % (pad, self.ivar(vars), self.expr(vars)))
+            out.append("%s%s += %s;" % (pad, self.ivar(vars), self.expr(rd)))
         elif k == 2:
             out.append("%s%s = (%s) ? %s : %s;" %
-                       (pad, self.ivar(vars), self.cond(vars),
-                        self.expr(vars), self.expr(vars)))
+                       (pad, self.ivar(vars), self.cond(rd),
+                        self.expr(rd), self.expr(rd)))
         elif k == 3:
-            out.append("%sif (%s) {" % (pad, self.cond(vars)))
-            self.block(vars, d + 1, out)
+            out.append("%sif (%s) {" % (pad, self.cond(rd)))
+            self.block(vars, d + 1, out, readonly)
             out.append("%s} else {" % pad)
-            self.block(vars, d + 1, out)
+            self.block(vars, d + 1, out, readonly)
             out.append("%s}" % pad)
         elif k == 4:
-            # a bounded loop: the count is a literal, so it always ends
+            # A bounded loop.  The induction variable is NOT added to the
+            # assignable set: the first version of this passed `vars + [i]`
+            # down, the body reassigned the counter, and a generated
+            # program ran for more than twenty seconds under cc as well as
+            # under unisacc -- a generator that writes non-terminating
+            # programs measures the timeout, not the compiler.
             i = self.uniq("i")
             out.append("%sfor (int %s = 0; %s < %d; %s++) {"
                        % (pad, i, i, 1 + self.r.n(6), i))
-            self.block(vars + [i], d + 1, out)
+            self.block(vars, d + 1, out, list(readonly) + [i])
             out.append("%s}" % pad)
         elif k == 5:
             i = self.uniq("w")
             out.append("%s{ int %s = %d;" % (pad, i, 1 + self.r.n(5)))
             out.append("%s  while (%s > 0) {" % (pad, i))
-            self.block(vars + [i], d + 1, out)
+            self.block(vars, d + 1, out, list(readonly) + [i])
             out.append("%s    %s--;" % (pad, i))
             out.append("%s  } }" % pad)
         elif k == 6:
-            out.append("%sswitch ((%s) & 3) {" % (pad, self.expr(vars)))
+            out.append("%sswitch ((%s) & 3) {" % (pad, self.expr(rd)))
             for c in range(self.r.n(3) + 1):
                 out.append("%scase %d:" % (pad, c))
-                self.block(vars, d + 1, out)
+                self.block(vars, d + 1, out, readonly)
                 if self.r.n(2):
                     out.append("%s    break;" % pad)
             out.append("%sdefault: %s ^= 1; }" % (pad, self.ivar(vars)))
@@ -159,9 +167,9 @@ class Gen:
             n = 2 + self.r.n(6)
             out.append("%sint %s[%d];" % (pad, a, n))
             out.append("%sfor (int %s = 0; %s < %d; %s++) %s[%s] = %s;"
-                       % (pad, j, j, n, j, a, j, self.expr(vars)))
+                       % (pad, j, j, n, j, a, j, self.expr(rd)))
             out.append("%s%s += %s[(%s) & %d];"
-                       % (pad, self.ivar(vars), a, self.expr(vars), n - 1))
+                       % (pad, self.ivar(vars), a, self.expr(rd), n - 1))
         elif k == 8:
             # a pointer that never leaves its object
             p = self.uniq("ptr")
@@ -169,11 +177,11 @@ class Gen:
             out.append("%sint *%s = &%s; *%s = (*%s) + %s;"
                        % (pad, p, v, p, p, self.small()))
         else:
-            out.append("%s%s = %s;" % (pad, self.ivar(vars), self.expr(vars)))
+            out.append("%s%s = %s;" % (pad, self.ivar(vars), self.expr(rd)))
 
-    def block(self, vars, d, out):
+    def block(self, vars, d, out, readonly=()):
         for _ in range(1 + self.r.n(3)):
-            self.stmt(vars, d, out)
+            self.stmt(vars, d, out, readonly)
 
     # -- the program ------------------------------------------------------
     def program(self):

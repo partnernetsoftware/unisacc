@@ -1,5 +1,6 @@
 #!/bin/bash
 # ship-js contract — no C game wasm / no eng_* glue on Pages faces.
+# Asteroid Pages default path B: sim.wasm + direct_step in game.js.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 bad=0
@@ -37,7 +38,45 @@ do
 done
 echo "no legacy asteroid.wasm ok"
 
-# game-ready emit still required for path-B next step
+# Asteroid path B: sim.wasm next to game + entry wires directSim
+check_sim_wasm() {
+  local wasm="$1" label="$2"
+  if [[ ! -f "$wasm" ]]; then
+    echo "FAIL $label missing sim.wasm ($wasm)"; bad=$((bad+1)); return
+  fi
+  if ! python3 -c 'import sys; d=open(sys.argv[1],"rb").read(4); sys.exit(0 if d==b"\0asm" else 1)' "$wasm"; then
+    echo "FAIL $label sim.wasm not \\0asm"; bad=$((bad+1))
+  else
+    echo "ok $label sim.wasm \\0asm ($(wc -c < "$wasm" | tr -d ' ') B)"
+  fi
+}
+check_sim_wasm "$ROOT/ujs/uxe/ship/sim.wasm" "asteroid-local"
+check_sim_wasm "$ROOT/docs/uxe/asteroid/sim.wasm" "asteroid-pages"
+
+for js in \
+  "$ROOT/ujs/uxe/ship/game.js" \
+  "$ROOT/docs/uxe/asteroid/game.js"
+do
+  label=$(basename "$(dirname "$js")")/game.js
+  if ! grep -E 'bootDirectStep|host_set_global' "$js" >/dev/null; then
+    echo "FAIL $label missing path-B direct_step surface"; bad=$((bad+1))
+  else
+    echo "ok $label path-B direct_step"
+  fi
+  # must not step solely via bytecode image embed (path A hot path)
+  if grep -E 'precompiled:\s*\{\s*image' "$js" >/dev/null; then
+    echo "FAIL $label still wires precompiled image (path A)"; bad=$((bad+1))
+  else
+    echo "ok $label no precompiled image wire"
+  fi
+  if ! grep -E 'directSim' "$js" >/dev/null; then
+    echo "FAIL $label missing directSim pass"; bad=$((bad+1))
+  else
+    echo "ok $label passes directSim"
+  fi
+done
+
+# game-ready emit still required for path-B (drone pending A→B)
 python3 - <<'PY'
 import sys
 from pathlib import Path

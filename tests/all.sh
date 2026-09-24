@@ -36,6 +36,8 @@
 #   c99         one probe per C99 feature, the denominator written from the
 #               standard's list of changes rather than from what we support
 #               [A-44]
+#   fuzz        generated programs, against the system compiler: the
+#               combinations nobody combined [A-46]
 #   bench       what the compiler costs, as a ratchet: the self-compile, a
 #               small probe, and the price of emitting unoptimised code
 #               [A-45]
@@ -105,6 +107,7 @@ run selfhost   bash -c "./tests/selfhost.sh $PROBES"
 run closure    bash -c "./tests/closure.sh $PROBES"
 run run        ./tests/run.sh
 run c99        ./tests/c99.sh
+run fuzz       ./tests/fuzz.sh
 run bench      ./tests/bench.sh
 run consts     bash -c 'python3 tests/consts_check.py'
 run layout     ./tests/layout.sh

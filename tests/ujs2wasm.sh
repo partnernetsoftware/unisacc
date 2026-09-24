@@ -193,4 +193,7 @@ for p in games:
 sys.exit(1 if bad else 0)
 PY
 
+echo "== ujs2wasm step (sim host_* fold) =="
+./tests/ujs2wasm_step.sh
+
 echo "ujs2wasm suite OK"
