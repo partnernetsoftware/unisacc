@@ -12399,6 +12399,11 @@ long bk_textva; long bk_shift; int bk_sizing;
 #define BK_NIMP 11                  /* pe.IMPORTS */
 long bk_imp[BK_NIMP];               /* Windows: the IAT slot of each import */
 long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
+/* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]
+   says instruction i is a branch encoded in its short form; tjk[i] is that
+   form's length (0: not a relaxable branch) and tjt[i] its target label. */
+char tshort[BK_MAXT]; char tfit[BK_MAXT]; int tjk[BK_MAXT]; int tjt[BK_MAXT];
+long tsz[BK_MAXT];
 
 int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
 int ow(unsigned long v) {           /* a 32-bit little-endian word */
@@ -12849,6 +12854,12 @@ int x_movri(int d, unsigned long imm) {
     return 0;
 }
 int x_d32(long v) { ow(v & 0xFFFFFFFF); return 0; }
+int x_rel8(long d) {                  /* a short branch's displacement */
+    if (bk_sizing == 0) { if (d < 0 - 128 || d > 127) {
+        __write(2, "back end: rel8 out of range\n", 28); __exit(1); } }
+    ob(d & 255);
+    return 0;
+}
 int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
@@ -13312,7 +13323,11 @@ int bk_x86(int i, long off) {
         return 1;
     }
     if (bk_str_is(o, "nop")) { ob(0x90); return 1; }
-    if (bk_str_is(o, "jump")) { ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1; }
+    if (bk_str_is(o, "jump")) {
+        tjk[i] = 2; tjt[i] = a[0];
+        if (tshort[i]) { ob(0xEB); x_rel8(bk_label(a[0]) - (off + 2)); return 1; }
+        ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1;
+    }
     if (bk_str_is(o, "call")) {
         x_rip(0x8D, X_R11, pc + 7, pc + 19);
         x_aluimm(X_R10, 5, 8);
@@ -13323,6 +13338,8 @@ int bk_x86(int i, long off) {
     if (bk_str_is(o, "jumpz")) {
         int r; r = a[0];
         x_rex(1, r >> 3, 0, r >> 3); ob(0x85); x_modrm(3, r, r);
+        tjk[i] = 3 + 2; tjt[i] = a[1];
+        if (tshort[i]) { ob(0x74); x_rel8(bk_label(a[1]) - (off + 3 + 2)); return 1; }
         ob(0x0F); ob(0x84); x_rel(i, bk_label(a[1]) - (off + 3 + 6));
         return 1;
     }
@@ -13359,16 +13376,38 @@ long bk_macho_hdrs(void) { return 32 + (72 + 152 + 232 + 72 + 32 + 56 + 24 + 24 
 int bk_assemble(void) {
     long off; int i; int ok; int id;
     bk_sizing = 1; bk_textva = 0; bk_shift = 0;
-    off = 0;
+    i = 0;
+    while (i < tkn) { tshort[i] = 0; tfit[i] = 0; tjk[i] = 0; i = i + 1; }
+    /* every size once, long forms */
     i = 0;
     while (i < tkn) {
-        toff[i] = off;
         bkout = bkscr; bkol = 0;
         ok = bk_enc(i, 0);
-        if (ok) off = off + bkol; else off = off + (bkarch ? 4 : 2);
+        if (ok) tsz[i] = bkol; else tsz[i] = bkarch ? 4 : 2;
         i = i + 1;
     }
-    toff[tkn] = off;
+    /* rounds: lay out, mark every branch whose short form reaches, repeat */
+    while (1) {
+        int nfit; long d; int t;
+        off = 0; i = 0;
+        while (i < tkn) { toff[i] = off; off = off + tsz[i]; i = i + 1; }
+        toff[tkn] = off;
+        nfit = 0; i = 0;
+        while (i < tkn) {
+            if (tjk[i]) { if (tshort[i] == 0) {
+                t = bklab_tpc[tjt[i]];
+                d = (t < 0 ? 0 : toff[t]) - (toff[i] + tjk[i]);
+                if (d >= 0 - 128 && d <= 127) { tfit[i] = 1; nfit = nfit + 1; }
+            } }
+            i = i + 1;
+        }
+        if (nfit == 0) break;
+        i = 0;
+        while (i < tkn) {
+            if (tfit[i]) { tshort[i] = 1; tfit[i] = 0; tsz[i] = tjk[i]; }
+            i = i + 1;
+        }
+    }
     bktlen = off;
     /* image.layout: where text and data land, known before encoding */
     bk_idata_layout();

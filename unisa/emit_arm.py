@@ -127,7 +127,7 @@ def _disp(bytes_, bits):
 
 
 def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
-           text_va=0, imps=None):
+           text_va=0, imps=None, short=False):
     o, a = ins.op, ins.args
     if o == "mov":                                  # orr Xd, xzr, Xm
         return w(0xAA0003E0 | (N(a[1]) << 16) | N(a[0]))
@@ -477,6 +477,15 @@ def _fp(o, a):
         _fmov_from(d, D16, dbl)
 
 
-def size(ins, labels):
+def size(ins, labels, short=False):
     b = encode(ins, 0, {k: 0 for k in labels}, "arm64", {}, 0, 0, {})
     return len(b) if b is not None else 4
+
+
+def short_size(ins):
+    """arm64 branches are one fixed-width word: nothing to relax."""
+    return None
+
+
+def branch_target(ins):
+    return None

@@ -13,13 +13,39 @@ BACKEND = {"x86_64": emit_x86, "arm64": emit_arm}
 
 def assemble(tp):
     be = BACKEND[tp.arch]
-    off, offs = 0, []
-    for ins in tp.code:
-        offs.append(off)
-        off += be.size(ins, tp.labels)
-    end = off
-    labels = {name: offs[pc] if pc < len(offs) else end
-              for name, pc in tp.labels.items()}
+    # Branch relaxation [S-10 #1].  Every branch starts in its long form;
+    # each round lays the code out, then marks -- all at once -- every
+    # branch whose SHORT form would reach its target from where it now
+    # sits, and the round repeats until nothing more fits.  Shortening only
+    # ever brings code closer together, so a branch that fits keeps
+    # fitting: the rounds terminate, and the set they end with does not
+    # depend on the order branches are looked at.  unisacc_back.c's
+    # bk_assemble runs the same rounds, and closure checks the two agree
+    # byte for byte.
+    # Sizes are measured ONCE, in the long form; a round only subtracts what
+    # each newly short branch saves and re-sums the offsets -- re-encoding
+    # every instruction per round would give back the speed the assembler
+    # has, on a program the size of the compiler.
+    sizes = [be.size(ins, tp.labels) for ins in tp.code]
+    cand = [(pc, be.short_size(ins), be.branch_target(ins))
+            for pc, ins in enumerate(tp.code) if be.short_size(ins) is not None]
+    short = set()
+    while True:
+        off, offs = 0, []
+        for n in sizes:
+            offs.append(off)
+            off += n
+        end = off
+        labels = {name: offs[pc] if pc < len(offs) else end
+                  for name, pc in tp.labels.items()}
+        fits = [(pc, n) for pc, n, tgt in cand
+                if pc not in short and
+                -128 <= labels[tgt] - (offs[pc] + n) <= 127]
+        if not fits:
+            break
+        for pc, n in fits:
+            short.add(pc)
+            sizes[pc] = n
     text_va, data_va = image.layout(tp.os, tp.arch, end)
     imps = image.imports(tp.os, tp.arch, end)
     # interpreter addresses are DATA_BASE-relative; shift them onto the image
@@ -28,7 +54,7 @@ def assemble(tp):
     covered = 0
     for pc, ins in enumerate(tp.code):
         b = be.encode(ins, offs[pc], labels, tp.arch, tp.syms,
-                      shift, text_va, imps)
+                      shift, text_va, imps, pc in short)
         if b is None:
             b = be.UD2 if tp.arch == "x86_64" else be.BRK
         else:

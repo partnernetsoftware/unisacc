@@ -428,8 +428,9 @@ def rip(opc, reg, pc_next, target):
 
 
 def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
-           text_va=0, imps=None):
-    """-> bytes, or None when the op has no encoding here."""
+           text_va=0, imps=None, short=False):
+    """-> bytes, or None when the op has no encoding here.  `short`: the
+    assembler has found this branch's target within a signed byte."""
     o, a = ins.op, ins.args
     if o == "mov":
         return mov_rr(a[0], a[1])
@@ -617,6 +618,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             out += b"\x73\x03" + b"\x48\xf7\xd8"
         return out
     if o == "jump":
+        if short:                                    # jmp rel8
+            return b"\xeb" + _rel8(labels[a[0]] - (off + 2))
         return b"\xe9" + _rel(ins, labels[a[0]] - (off + 5))
     if o == "call":                                  # push ret addr on r10
         sub = alu_imm("r10", 5, 8)
@@ -627,6 +630,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "jumpz":
         r = NUM[a[0]]
         test = rex(1, r >> 3, 0, r >> 3) + b"\x85" + modrm(3, r, r)
+        if short:                                    # jz rel8
+            return test + b"\x74" + _rel8(labels[a[1]] - (off + len(test) + 2))
         return test + b"\x0f\x84" + _rel(ins, labels[a[1]] - (off + len(test) + 6))
     return None
 
@@ -640,6 +645,26 @@ def _rel(ins, d):
     return (d & ((1 << (8 * n)) - 1)).to_bytes(n, "little")
 
 
-def size(ins, labels):
-    b = encode(ins, 0, {k: 0 for k in labels}, "x86_64", {}, 0, 0)
+def size(ins, labels, short=False):
+    b = encode(ins, 0, {k: 0 for k in labels}, "x86_64", {}, 0, 0, None, short)
     return len(b) if b is not None else len(UD2)
+
+
+def short_size(ins):
+    """The length of this branch's short form, or None if it has none.
+    `jump` and `jumpz` do; `call` does not -- its jmp is part of a fixed
+    sequence whose return address is computed from the lengths."""
+    if ins.op == "jump":
+        return 2
+    if ins.op == "jumpz":
+        return 3 + 2                     # test r, r (REX 85 modrm) + jz rel8
+    return None
+
+
+def branch_target(ins):
+    return ins.args[0] if ins.op == "jump" else ins.args[1]
+
+
+def _rel8(d):
+    assert -128 <= d <= 127, "rel8 out of range: %d" % d
+    return (d & 0xFF).to_bytes(1, "little")
