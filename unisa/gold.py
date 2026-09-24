@@ -117,16 +117,21 @@ def _uns(t1, t2):
 
 
 def _arith(t1, t2):
-    """The result kind of an arithmetic or bitwise operation.
+    """The result kind of an arithmetic or bitwise operation: C99 6.3.1.8,
+    the usual arithmetic conversions.  After the integer promotions the
+    result has the rank of the WIDER operand, signed or unsigned.
 
-    The signed rows are exactly what they were before unsigned existed: a
-    narrow operand gives i32, otherwise i64.  The unsigned rows are the real
-    C rule, because unsigned arithmetic has to WRAP at its own width --
-    `(unsigned)-1 == 0xffffffff` is the whole point. [G-2]"""
+    [G-2 retired, 2026-09-24] The signed rows used to say "a narrow operand
+    gives i32, otherwise i64" -- so `int + int` was a long and `short +
+    long` an int, both wrong.  It was a shortcut from before unsigned
+    existed, and every table test passed while it stood, because the table
+    agreed with ITSELF: enumeration proves the net equals the gold, never
+    that the gold is C.  It surfaced as `sizeof(1 + 0) == 8` in corpus
+    00200, a test about exactly this rule."""
+    r = max(RANK.get(_promote(t1), 9), RANK.get(_promote(t2), 9))
     if _uns(t1, t2):
-        r = max(RANK.get(_promote(t1), 9), RANK.get(_promote(t2), 9))
         return "u64" if r >= 4 else "u32"
-    return "i32" if _narrow(t1, t2) else "i64"
+    return "i64" if r >= 4 else "i32"
 
 
 def type_label(t1, op, t2):
