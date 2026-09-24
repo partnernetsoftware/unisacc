@@ -55,12 +55,21 @@ runlim() {
     return $rc
 }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+# SHARD=k/n runs every n-th program starting at the k-th.  The whole corpus
+# is 220 first executions, each a 0.5-0.9 s XProtect scan, and one run may
+# not take more than 60 s (AGENTS.md) -- so it goes in shards: 1/4 .. 4/4.
+FILES=""; i=0
+SHARD=${SHARD:-1/1}; SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
+for f in "$SRC"/*.c; do
+    [ $((i % SH_N)) -eq $((SH_K - 1)) ] && FILES="$FILES $f"
+    i=$((i + 1))
+done
 : > "$T/passing"
 PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
 . "$REPO/tests/par.sh"
 # A: compile and run every program, PAR at a time, each in a directory of its
 # own (some of these programs write files).
-for f in "$SRC"/*.c; do
+for f in $FILES; do
     b=$(basename "$f" .c)
     throttle
     (
@@ -82,7 +91,7 @@ for f in "$SRC"/*.c; do
 done
 wait
 # B: the verdicts, in order.
-for f in "$SRC"/*.c; do
+for f in $FILES; do
     b=$(basename "$f" .c)
     want=$(cat "$f.expected" 2>/dev/null || echo "")
     D="$T/$b.d"
@@ -121,5 +130,13 @@ echo "corpus $total   pass $pass   wrong $wrong   unsupported $unsup   knownfail
 rc=0
 [ "$wrong" -eq 0 ] || rc=1
 [ "$revived" -eq 0 ] || rc=1
-ratchet "$BASE" "$pass" "$T/passing" || rc=1
+if [ "$SH_N" -eq 1 ]; then
+    ratchet "$BASE" "$pass" "$T/passing" || rc=1
+else
+    # a shard cannot move the baseline, but it must not lose anything in it
+    for f in $FILES; do basename "$f" .c; done | sort > "$T/mine"
+    sort "$T/passing" > "$T/got"
+    lost=$(comm -12 "$T/mine" "$BASE.list" | comm -23 - "$T/got")
+    [ -n "$lost" ] && { echo "$lost" | sed 's/^/  REGRESSION lost /'; rc=1; }
+fi
 exit $rc

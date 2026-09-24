@@ -38,26 +38,51 @@ for c in $CLASSES; do
         echo "  FAIL the generator did not run for class $c"; exit 1; }
     total=$((total + N))
 done
-ok=0; bad=0; uns=0; skip=0
+# Each program in its own directory, PAR at a time: the reference binary's
+# first run is a 0.5-0.9 s XProtect scan, and 160 of them in a row were
+# over the 60 s a run may take (AGENTS.md).  Verdicts are read back in
+# order, so the report is the same as the serial one.
+PAR_WAIT=4
+. "$R/tests/par.sh"
+CACHE=${FUZZ_CACHE:-${TMPDIR:-/tmp}/unisacc-fuzz-want}; mkdir -p "$CACHE"
+CCV=$(cc --version 2>&1 | head -1)
 for f in "$T"/*_*.c; do
     b=$(basename "$f" .c)
+    throttle
+    (
+    D="$T/$b.d"; mkdir -p "$D"
+    # cc's answer for this exact source is cached: the programs are fixed by
+    # their seeds, so a rerun needs neither cc nor the scan of its output
+    key="$CACHE/$( (cat "$f"; echo "$CCV") | shasum | cut -c1-40)"
+    if [ -f "$key" ]; then cp "$key" "$D/want"
+    else
+        if ! cc -w -std=c99 -o "$D/ref" "$f" 2>/dev/null; then echo notc > "$D/v"; exit 0; fi
+        if ! bound 5 "$D/ref" > "$D/want" 2>/dev/null; then echo loops > "$D/v"; exit 0; fi
+        cp "$D/want" "$key.$$" && mv "$key.$$" "$key"
+    fi
+    bound 30 "$UA" -run "$f" > "$D/got" 2>"$D/err"
+    echo done > "$D/v"
+    ) &
+done
+wait
+ok=0; bad=0; uns=0; skip=0
+for f in "$T"/*_*.c; do
+    b=$(basename "$f" .c); D="$T/$b.d"
     cls=""; for c in $CLASSES; do [ "${b%%_*}" = "${c:0:1}" ] && cls=$c; done
-    if ! cc -w -std=c99 -o "$T/ref" "$f" 2>/dev/null; then
-        # the oracle refusing its own generator is a generator bug, and a
-        # loud one: it means the programs are not C
-        echo "  FAIL cc refused $b -- the generator emitted something that is not C"
-        bad=$((bad+1)); continue
-    fi
-    if ! want=$(bound 5 "$T/ref" 2>/dev/null); then
-        echo "  FAIL $b does not terminate under cc -- a generator bug"
-        bad=$((bad+1)); continue
-    fi
-    got=$(bound 30 "$UA" -run "$f" 2>"$T/err")
-    if [ -s "$T/err" ]; then
+    case "$(cat "$D/v" 2>/dev/null)" in
+    notc)  echo "  FAIL cc refused $b -- the generator emitted something that is not C"
+           bad=$((bad+1)); continue;;
+    loops) echo "  FAIL $b does not terminate under cc -- a generator bug"
+           bad=$((bad+1)); continue;;
+    done)  ;;
+    *)     echo "  FAIL $b: no verdict"; bad=$((bad+1)); continue;;
+    esac
+    if [ -s "$D/err" ]; then
         uns=$((uns+1))
-        printf "  UNS   %-10s %s\n" "$b" "$(head -1 "$T/err" | cut -c1-58)"
+        printf "  UNS   %-10s %s\n" "$b" "$(head -1 "$D/err" | cut -c1-58)"
         continue
     fi
+    got=$(cat "$D/got"); want=$(cat "$D/want")
     if [ "$got" = "$want" ]; then ok=$((ok+1))
     else
         bad=$((bad+1))

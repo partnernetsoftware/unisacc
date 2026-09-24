@@ -50,7 +50,7 @@
 
 | 层 | 弃什么 | 做成什么之后可以弃 | 现在卡在 |
 |---|---|---|---|
-| **P0 弃出货 Python** | `web-build` / `ujs2wasm` CLI / 预编译 embed **不再是 ship 必经** | ① Pages 玩法步进只加载直出 `.wasm`（B），不再 `wasm_run`+bytecode ② 改 `.ujs` 用 **JS/wasm 宿主**重编译，而不是 `python3 -m ujs …` ③ `npm run ship:*` 里无 `python3` | Asteroid+drone **M1/M1b✓**；**M2✓**；**M3 v8✓**（dict · list len u32 · stage2≡stage1）；下一刀 sim.ujs body≡stage0；`web-build` 仍一次 zig/Python 产核 |
+| **P0 弃出货 Python** | `web-build` / `ujs2wasm` CLI / 预编译 embed **不再是 ship 必经** | ① Pages 玩法步进只加载直出 `.wasm`（B），不再 `wasm_run`+bytecode ② 改 `.ujs` 用 **JS/wasm 宿主**重编译，而不是 `python3 -m ujs …` ③ `npm run ship:*` 里无 `python3` | Asteroid+drone **M1/M1b✓**；**M2✓**；**M3 v9✓**（global setidx · setidx值走全表达式）；sim 可编；下一刀 sim body≡stage0；`web-build` 仍一次 zig/Python 产核 |
 | **P1 弃构造 Python** | gold / oracle / acc 也不靠 Python | 构造臂迁到 **unisacc**（或自举后的构造器）；枚举门禁仍在 | unisacc 未稳；刻意后置 |
 
 **P0 可检里程碑（每步弃一点）**
@@ -72,7 +72,7 @@
 | **已有脚手架** | `engine.wasm`（A VM）· ship-js Host · `ujs2wasm` **Python CLI**（把 `.ujs`→用户程序 `.wasm`）· `ujs2wasm_step` 门禁 | 再扩 Python 专属出货链 | 脚手架 ✓；非自举 |
 | **M1** | ① **`sim.wasm`**（直出玩法核，含 `host_*`/`run_step`）② Pages/ship **默认**加载它步进 ③ `direct_step.js` 热路径 ④ 合同：`uxe_ship_js` 验 sim.wasm | 只 fold 绿却仍默认 A | **Asteroid ✓ · drone ✓** |
 | **M2** | ① **`compiler.wasm`**：Node/浏览器 `compile(ujs)→wasm` ② **`compile.mjs`** ③ **`ship:*` 无 python3 emit** ④ sim/drone 经 compiler.wasm 出货 | 继续把 emit 只留在 `.py` 当日常编译器 | **✓** `ujs2wasm_compiler.sh`（含 ship emit 无 python3）。一次性构建 compiler.wasm 仍用 zig |
-| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v8✓** dict · len u32 · stage2≡stage1；下一刀 sim body≡stage0 |
+| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v9✓** global setidx；sim 可编；下一刀 body≡stage0 |
 | **P1** | gold/oracle/acc 在 **unisacc**（或自举构造器） | 在 ujs 里把 Python 构造成产品 | 后置 |
 
 **两条产物线不要混**
@@ -94,26 +94,26 @@ M1b drone 切 B             ✓（对称产物）
         ↓
 M2 编译器 wasm 化          **✓**（compile+host+sim+ship emit 无 python3）
         ↓
-M3 UJS 自举                **v8✓** dict · len u32 · stage2≡stage1 → sim body≡stage0 → P0 余 web-build
+M3 UJS 自举                **v9✓** global setidx · sim可编 → body≡stage0 → P0 余 web-build
         ↓
 P1 构造迁 unisacc          可选
 ```
 
 （换核模板 / 门禁契约 / Host 加厚仍按杠杆穿插；不改变上表弃 Python 顺序与产物线。）
 
-#### M3（v8 ✓ dict · list len u32 · stage2≡stage1）
+#### M3（v9 ✓ global setidx · sim 可编）
 
 **协议**：stage0=`compiler.wasm`(C) 编 `compiler.ujs` → stage1 core；stage1 再编 `compiler.ujs` → stage2；**main body 字节一致**。host 拼进 `compiler_rt_stub.wasm`。
 
-**已交付（v8）**
+**已交付（v9）**
 
 | 件 | 说明 |
 |---|---|
-| `compiler.ujs` | v7 + **dict `{k:v}`** · OPS/OUT **32768** · ST/CST 加深 |
-| `compiler.wasm` host | 容器 **len u32 @+4**（破 u16/65535，SRC 可 >64K）· MEM_PAGES **128** |
-| 门禁 | dict fold · ===/f64 · **stage2≡stage1** |
+| `compiler.ujs` | v8 + **global `xs[i]=`** · setidx 值走全表达式（`iphase`）· dict |
+| `compiler.wasm` host | 容器 **len u32 @+4** · MEM_PAGES **128** |
+| 门禁 | dict · stage2≡stage1；sim **instantiate** 绿，body≡stage0 未齐 |
 
-**下一刀**：`sim.ujs` body≡stage0（全局 setidx · return 多键 dict）→ 自举编玩法核。
+**下一刀**：`sim.ujs` body≡stage0（对齐 stage0 对全局 setidx/多键 dict 的字节）→ 自举编玩法核。
 
 **P0 余**：`web-build` 仍一次 zig/Python 产 A 核（非编译器路径）。
 
@@ -164,7 +164,7 @@ compile(src: Uint8Array|string) →
 | **2b / M1** | Asteroid 步进默认 `sim.wasm`（path B） | `ujs2wasm_step` + `uxe_ship_js`（含 sim.wasm） | **✓** |
 | **M1b** | drone 对称切 B（`ship/drone/sim.wasm`） | `uxe_ship_js`（drone sim.wasm + directSim） | **✓** |
 | **M2** | `compiler.wasm` + 无 python ship | `ujs2wasm_compiler.sh`；ship 无 `python3` emit | **✓** |
-| **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v8✓** dict·len u32；sim body≡stage0 未开 |
+| **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v9✓** global setidx；sim body≡stage0 未齐 |
 | **3** | 换核模板 | 按下表抄路径绿 | 骨架 ✓ |
 | **4** | 门禁即契约 | `ujs.sh` 含 ujs2wasm；ship-js 合同；uxe 无人 | 进行中 |
 | **5–6** | Host / llm | 有玩法再开 | 搁置 |
