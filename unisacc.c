@@ -1421,8 +1421,8 @@ char *BH_ABI_NRREG = "none\000rax\000x16\000x8\000";
  * The headers this compiler answers `#include <x.h>` with, packed
  * as text: a shipped binary has no include/ to read. */
 
-char *HDR_NAMES = "assert.h\000ctype.h\000inttypes.h\000limits.h\000math.h\000stdarg.h\000stdbool.h\000stddef.h\000stdint.h\000stdio.h\000stdlib.h\000string.h\000wchar.h\000";
-#define NHDR 13
+char *HDR_NAMES = "assert.h\000ctype.h\000inttypes.h\000limits.h\000math.h\000memory.h\000stdarg.h\000stdbool.h\000stddef.h\000stdint.h\000stdio.h\000stdlib.h\000string.h\000wchar.h\000";
+#define NHDR 14
 
 char *HDR_0 =
   "\x2f\x2a\x20\x3c\x61\x73\x73\x65\x72\x74\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74\x68"
@@ -3232,6 +3232,22 @@ char *HDR_4 =
   "\x20\x62\x20\x3a\x20\x30\x2e\x30\x3b\x20\x7d\x0a\x23\x65\x6e\x64\x69\x66\x0a";
 
 char *HDR_5 =
+  "\x2f\x2a\x20\x3c\x6d\x65\x6d\x6f\x72\x79\x2e\x68\x3e\x3a\x20\x74\x68\x65\x20\x70"
+  "\x72\x65\x2d\x73\x74\x61\x6e\x64\x61\x72\x64\x20\x73\x70\x65\x6c\x6c\x69\x6e\x67"
+  "\x20\x6f\x66\x20\x3c\x73\x74\x72\x69\x6e\x67\x2e\x68\x3e\x2c\x20\x77\x68\x69\x63"
+  "\x68\x20\x67\x6c\x69\x62\x63\x20\x61\x6e\x64\x0a\x20\x2a\x20\x6d\x61\x63\x4f\x53"
+  "\x20\x62\x6f\x74\x68\x20\x73\x74\x69\x6c\x6c\x20\x73\x68\x69\x70\x2e\x20\x20\x63"
+  "\x72\x79\x70\x74\x6f\x2d\x61\x6c\x67\x6f\x72\x69\x74\x68\x6d\x73\x20\x69\x6e\x63"
+  "\x6c\x75\x64\x65\x73\x20\x69\x74\x2c\x20\x61\x6e\x64\x20\x61\x20\x68\x65\x61\x64"
+  "\x65\x72\x20\x74\x68\x61\x74\x0a\x20\x2a\x20\x63\x61\x6e\x6e\x6f\x74\x20\x62\x65"
+  "\x20\x66\x6f\x75\x6e\x64\x20\x69\x73\x20\x61\x6e\x20\x65\x72\x72\x6f\x72\x20\x6e"
+  "\x6f\x77\x20\x5b\x43\x39\x39\x20\x36\x2e\x31\x30\x2e\x32\x70\x34\x5d\x2e\x20\x2a"
+  "\x2f\x0a\x23\x69\x66\x6e\x64\x65\x66\x20\x5f\x55\x4e\x49\x53\x41\x5f\x4d\x45\x4d"
+  "\x4f\x52\x59\x5f\x48\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x5f\x55\x4e\x49\x53\x41"
+  "\x5f\x4d\x45\x4d\x4f\x52\x59\x5f\x48\x0a\x23\x69\x6e\x63\x6c\x75\x64\x65\x20\x3c"
+  "\x73\x74\x72\x69\x6e\x67\x2e\x68\x3e\x0a\x23\x65\x6e\x64\x69\x66\x0a";
+
+char *HDR_6 =
   "\x2f\x2a\x20\x3c\x73\x74\x64\x61\x72\x67\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74\x68"
   "\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x2e\x20\x20\x41"
   "\x20\x76\x61\x72\x69\x61\x64\x69\x63\x20\x66\x75\x6e\x63\x74\x69\x6f\x6e\x20\x74"
@@ -3263,7 +3279,7 @@ char *HDR_5 =
   "\x76\x61\x5f\x63\x6f\x70\x79\x28\x64\x2c\x20\x73\x29\x20\x28\x28\x64\x29\x20\x3d"
   "\x20\x28\x73\x29\x29\x0a\x23\x65\x6e\x64\x69\x66\x0a";
 
-char *HDR_6 =
+char *HDR_7 =
   "\x2f\x2a\x20\x3c\x73\x74\x64\x62\x6f\x6f\x6c\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74"
   "\x68\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x2e\x20\x20"
   "\x43\x39\x39\x20\x37\x2e\x31\x36\x3a\x20\x74\x68\x72\x65\x65\x20\x6d\x61\x63\x72"
@@ -3286,7 +3302,7 @@ char *HDR_6 =
   "\x20\x5f\x5f\x62\x6f\x6f\x6c\x5f\x74\x72\x75\x65\x5f\x66\x61\x6c\x73\x65\x5f\x61"
   "\x72\x65\x5f\x64\x65\x66\x69\x6e\x65\x64\x20\x31\x0a\x23\x65\x6e\x64\x69\x66\x0a";
 
-char *HDR_7 =
+char *HDR_8 =
   "\x23\x69\x66\x6e\x64\x65\x66\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53\x54\x44\x44\x45"
   "\x46\x5f\x48\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x5f\x55\x4e\x49\x53\x41\x5f\x53"
   "\x54\x44\x44\x45\x46\x5f\x48\x0a\x23\x64\x65\x66\x69\x6e\x65\x20\x4e\x55\x4c\x4c"
@@ -3306,7 +3322,7 @@ char *HDR_7 =
   "\x60\x20\x64\x69\x72\x65\x63\x74\x6c\x79\x20\x69\x66\x20\x79\x6f\x75\x20\x6e\x65"
   "\x65\x64\x20\x69\x74\x2e\x20\x2a\x2f\x0a\x23\x65\x6e\x64\x69\x66\x0a";
 
-char *HDR_8 =
+char *HDR_9 =
   "\x2f\x2a\x20\x3c\x73\x74\x64\x69\x6e\x74\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74\x68"
   "\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x2e\x0a\x20\x2a"
   "\x0a\x20\x2a\x20\x54\x68\x65\x20\x65\x78\x61\x63\x74\x2d\x77\x69\x64\x74\x68\x20"
@@ -3377,7 +3393,7 @@ char *HDR_8 =
   "\x5f\x4d\x41\x58\x20\x20\x31\x38\x34\x34\x36\x37\x34\x34\x30\x37\x33\x37\x30\x39"
   "\x35\x35\x31\x36\x31\x35\x0a\x23\x65\x6e\x64\x69\x66\x0a";
 
-char *HDR_9 =
+char *HDR_10 =
   "\x2f\x2a\x20\x4d\x69\x6e\x69\x6d\x61\x6c\x20\x3c\x73\x74\x64\x69\x6f\x2e\x68\x3e"
   "\x20\x66\x6f\x72\x20\x74\x68\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62"
   "\x73\x65\x74\x2e\x0a\x20\x2a\x20\x70\x72\x69\x6e\x74\x66\x20\x69\x73\x20\x64\x65"
@@ -4294,7 +4310,7 @@ char *HDR_9 =
   "\x20\x20\x72\x65\x74\x75\x72\x6e\x20\x72\x3b\x0a\x7d\x0a\x23\x65\x6e\x64\x69\x66"
   "\x0a";
 
-char *HDR_10 =
+char *HDR_11 =
   "\x2f\x2a\x20\x3c\x73\x74\x64\x6c\x69\x62\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74\x68"
   "\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x2e\x20\x20\x54"
   "\x68\x65\x20\x61\x6c\x6c\x6f\x63\x61\x74\x6f\x72\x20\x69\x73\x20\x61\x20\x62\x75"
@@ -4550,7 +4566,7 @@ char *HDR_10 =
   "\x75\x6e\x69\x73\x61\x5f\x73\x65\x65\x64\x20\x3d\x20\x73\x3b\x20\x7d\x0a\x23\x65"
   "\x6e\x64\x69\x66\x0a";
 
-char *HDR_11 =
+char *HDR_12 =
   "\x2f\x2a\x20\x3c\x73\x74\x72\x69\x6e\x67\x2e\x68\x3e\x20\x66\x6f\x72\x20\x74\x68"
   "\x65\x20\x75\x6e\x69\x73\x61\x20\x43\x20\x73\x75\x62\x73\x65\x74\x3a\x20\x72\x65"
   "\x61\x6c\x20\x69\x6d\x70\x6c\x65\x6d\x65\x6e\x74\x61\x74\x69\x6f\x6e\x73\x2c\x20"
@@ -4696,7 +4712,7 @@ char *HDR_11 =
   "\x20\x20\x20\x20\x72\x65\x74\x75\x72\x6e\x20\x30\x3b\x0a\x7d\x0a\x23\x65\x6e\x64"
   "\x69\x66\x0a";
 
-char *HDR_12 =
+char *HDR_13 =
   "\x2f\x2a\x20\x77\x63\x68\x61\x72\x2e\x68\x20\x2d\x2d\x20\x65\x6e\x6f\x75\x67\x68"
   "\x20\x6f\x66\x20\x69\x74\x20\x66\x6f\x72\x20\x77\x69\x64\x65\x20\x73\x74\x72\x69"
   "\x6e\x67\x20\x6c\x69\x74\x65\x72\x61\x6c\x73\x2e\x0a\x20\x2a\x0a\x20\x2a\x20\x60"
@@ -4745,6 +4761,7 @@ char *hdr_text(int i) {
   if (i == 10) return HDR_10;
   if (i == 11) return HDR_11;
   if (i == 12) return HDR_12;
+  if (i == 13) return HDR_13;
   return 0;
 }
 
@@ -5341,6 +5358,7 @@ int wsat(int i) { if (src[i] == 32) return 1; if (src[i] == 9) return 1; return 
    which takes an access mask and a disposition -- <stdio.h>'s fopen makes
    the same choice.  _WIN32 is predefined when unisacc is built FOR Windows. */
 int wopen(char *path) {              /* create/truncate, for -o */
+    if (path[0] == 45 && path[1] == 0) return 1;   /* `-o -`: stdout */
 #ifdef _WIN32
     return __open(path, 0x40000000, 2);   /* GENERIC_WRITE, CREATE_ALWAYS */
 #else
@@ -5364,6 +5382,18 @@ int ropen(char *path) {
    `-I dir` is searched before the built-in headers, `-D NAME[=n]` is
    predefined like any other macro. */
 char *optinc; int noptd; char *optd[16];
+/* The rest of what a Makefile passes [S-15 C1]: -U names, -include files,
+   -nostdinc, and stdin as an input. */
+int noptu; char *optu[16];
+int nopti; char *opti[8];
+int nostdinc;
+/* -MD / -MF FILE [S-15 C2]: every file the preprocessor OPENED, in order,
+   for a `target: deps` line make can read.  The built-in header copies are
+   not files and are not listed -- cc lists its system headers because they
+   are on disk; ours travel inside the binary. */
+char *depfile; int wantdeps;
+char deppool[65536]; int ndeppool; int ndeps;
+int prelines;               /* lines -include put before the user's own */
 
 /* ---- where a byte came from, so an error can say file:line:col --------
    The buffer the parser sees is not the file the user wrote: continuation
@@ -5411,6 +5441,7 @@ int hdr_find(int nm, int nl) {
 
 int hdr_read(int nm, int nl) {       /* -> bytes in incbuf, or -1 */
     int i; char *t; int n;
+    if (nostdinc) return 0 - 1;        /* -nostdinc: only -I and the file's dir */
     i = hdr_find(nm, nl);
     if (i < 0) return 0 - 1;
     t = hdr_text(i);
@@ -5420,6 +5451,7 @@ int hdr_read(int nm, int nl) {       /* -> bytes in incbuf, or -1 */
     return n;
 }
 
+int err_at(long p, char *msg);
 int inctry(char *dir, int dl, int nm, int nl) {
     int k; int p; int fd; int n; int j; int grow;
     p = 0; k = 0;
@@ -5432,7 +5464,37 @@ int inctry(char *dir, int dl, int nm, int nl) {
     n = __read(fd, incbuf, MAXINC);
     __close(fd);
     if (n < 0) return 0 - 1;
+    if (wantdeps) {                    /* a file that was really read */
+        k = 0;
+        while (incpath[k] && ndeppool < 65534) { deppool[ndeppool] = incpath[k]; ndeppool = ndeppool + 1; k = k + 1; }
+        if (ndeppool < 65535) { deppool[ndeppool] = 0; ndeppool = ndeppool + 1; ndeps = ndeps + 1; }
+    }
     return n;
+}
+
+/* the .d file: `target: input deps...`, one per line as make expects */
+int writedeps(char *target, char **inputs, int ninput) {
+    int fd; int k; int q; char *nm; char buf[4];
+    if (depfile == 0) return 0;
+    fd = wopen(depfile);
+    if (fd < 0) { printf("cannot write %s\n", depfile); return 1; }
+    nm = target; k = 0; while (nm[k]) k = k + 1; __write(fd, nm, k);
+    __write(fd, ":", 1);
+    q = 0;
+    while (q < ninput) {
+        nm = inputs[q]; k = 0; while (nm[k]) k = k + 1;
+        __write(fd, " \\\n  ", 5); __write(fd, nm, k);
+        q = q + 1;
+    }
+    q = 0; k = 0;
+    while (q < ndeps) {
+        int L; L = 0; while (deppool[k + L]) L = L + 1;
+        __write(fd, " \\\n  ", 5); __write(fd, deppool + k, L);
+        k = k + L + 1; q = q + 1;
+    }
+    buf[0] = 10; __write(fd, buf, 1);
+    if (fd != 1) __close(fd);
+    return 0;
 }
 
 /* Replace src[ls..le) with the included text.  Returns 1 if it did. */
@@ -5456,7 +5518,11 @@ int incdo(int ls, int le, int from) {
         incname[q2] = 0;
     }
     n = 0 - 1;
-    if (q == 34) {
+    /* an absolute path names its file outright: it was being joined to
+       the source's directory, so `#include "/abs/x.h"` silently opened
+       nothing and the program compiled without it */
+    if (src[nm] == 47) n = inctry("", 0, nm, nl);
+    else if (q == 34) {
         a = srcpath;
         dl = 0; k = 0;
         while (a[k]) { if (a[k] == 47) dl = k + 1; k = k + 1; }
@@ -5465,7 +5531,13 @@ int incdo(int ls, int le, int from) {
     if (n < 0) { if (optincdl) n = inctry(optincdir, optincdl, nm, nl); }
     if (n < 0) n = inctry("include/", 8, nm, nl);
     if (n < 0) n = hdr_read(nm, nl);     /* the copy we carry [S-11] */
-    if (n < 0) return 0;
+    if (n < 0) {
+        /* C99 6.10.2p4: a header that cannot be found is a constraint
+           violation.  This returned 0 and the line simply vanished -- the
+           program compiled without whatever it was meant to declare. */
+        err_at(nm, "no such file for #include");
+        __exit(1);
+    }
     grow = n + 1 - (le - ls);
     if (nsrc + grow >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
     /* shift the tail, then drop the file in, plus a newline of its own */
@@ -5544,7 +5616,7 @@ int err_at(long p, char *msg) {
     if (p > nsrc) p = nsrc;
     /* the line and column IN THE BUFFER -- macro expansion rewrites a line
        but never adds or removes one, so the line survives it */
-    line = 1; col = 1; q = 0;
+    line = 1 - prelines; col = 1; q = 0;
     while (q < p) {
         if (src[q] == 10) { line = line + 1; col = 1; } else col = col + 1;
         q = q + 1;
@@ -5625,6 +5697,14 @@ int predef(void) {
     }
     t = tgt;
     if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
+    /* -U NAME: applied after every predefinition, so it can remove one */
+    i = 0;
+    while (i < noptu) {
+        int m; int n; n = 0; while (optu[i][n]) n = n + 1;
+        m = mac_newest(optu[i], n);
+        if (m >= 0) macto[m] = 0;               /* live in no segment */
+        i = i + 1;
+    }
     if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
     if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
     if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
@@ -11383,6 +11463,7 @@ int fe_read(char *path) {
    inputs from the program's own arguments. */
 int isdotc(char *p) {
     int n;
+    if (p[0] == 45 && p[1] == 0) return 1;         /* `-`: standard input */
     n = 0; while (p[n]) n = n + 1;
     if (n < 2) return 0;
     if (p[n - 2] == 46 && p[n - 1] == 99) return 1;     /* .c */
@@ -11416,10 +11497,39 @@ int fe_load(char *path, char *t) {
     }
     toinit = 0; hasinit = 0;
     fnresume = 0 - 1;
-    fd = ropen(path);
-    if (fd < 0) { printf("cannot open input\n"); return 1; }
-    nsrc = __read(fd, src, MAXSRC);
-    __close(fd);
+    /* `-` is standard input: the whole of it, in pieces */
+    if (path[0] == 45 && path[1] == 0) {
+        int got; nsrc = 0;
+        while (nsrc < MAXSRC - 1) {
+            got = __read(0, src + nsrc, MAXSRC - 1 - nsrc);
+            if (got <= 0) break;
+            nsrc = nsrc + got;
+        }
+    } else {
+        fd = ropen(path);
+        if (fd < 0) { printf("cannot open input\n"); return 1; }
+        nsrc = __read(fd, src, MAXSRC);
+        __close(fd);
+    }
+    /* -include FILE: as if `#include "FILE"` were the first line.  The
+       lines it adds sit BEFORE the user's, so err_at subtracts them. */
+    prelines = 0;
+    if (nopti > 0) {
+        int ni; int total; int q;
+        total = 0;
+        ni = 0; while (ni < nopti) { total = total + 12 + blen(opti[ni]); ni = ni + 1; }
+        if (nsrc + total >= MAXSRC - 1) { printf("source too large\n"); return 1; }
+        q = nsrc - 1; while (q >= 0) { src[q + total] = src[q]; q = q - 1; }
+        q = 0; ni = 0;
+        while (ni < nopti) {
+            int k2; char *nm; nm = opti[ni];
+            k2 = 0; while ("#include \""[k2]) { src[q] = "#include \""[k2]; q = q + 1; k2 = k2 + 1; }
+            k2 = 0; while (nm[k2]) { src[q] = nm[k2]; q = q + 1; k2 = k2 + 1; }
+            src[q] = 34; src[q + 1] = 10; q = q + 2;
+            prelines = prelines + 1; ni = ni + 1;
+        }
+        nsrc = nsrc + total;
+    }
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
     /* a shebang line belongs to the shell, not to C: blank it, keeping the
        newline so every later position still reports the right line */
@@ -11564,6 +11674,25 @@ int main(void) {
             } else { if (a[1] == 118) { verb = 1;          /* -v */
             } else { if (a[1] == 111) {                    /* -o */
                 if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
+            } else { if (a[1] == 85) {                     /* -U */
+                if (noptu < 16) {
+                    if (a[2]) optu[noptu] = a + 2; else { i = i + 1; optu[noptu] = __argv(i); }
+                    noptu = noptu + 1;
+                }
+            } else { if (strsame(a, "-include")) {         /* -include FILE */
+                i = i + 1;
+                if (nopti < 8) { opti[nopti] = __argv(i); nopti = nopti + 1; }
+            } else { if (strsame(a, "-nostdinc")) { nostdinc = 1;
+            } else { if (strsame(a, "-MD") || strsame(a, "-MMD")) { wantdeps = 1; depfile = depfile ? depfile : "";
+            } else { if (strsame(a, "-MF")) { i = i + 1; wantdeps = 1; depfile = __argv(i);
+            } else { if (strsame(a, "-MT") || strsame(a, "-MQ")) { i = i + 1;
+            } else { if (strsame(a, "-MP") || strsame(a, "-M") || strsame(a, "-MM")) {
+            /* -l and -L: the library is in the headers, so there is nothing
+               to link and nothing to search.  -x c: the only language. */
+            } else { if (a[1] == 108 || a[1] == 76) {
+                if (a[2] == 0) i = i + 1;
+            } else { if (a[1] == 120) {                    /* -x LANG */
+                if (a[2] == 0) i = i + 1;
             } else { if (a[1] == 69) { pponly = 1; dump = 1;  /* -E */
             } else { if (a[1] == 98 || a[1] == 116) {      /* -b, -t */
                 if (a[1] == 98) dump = 2; else dump = 1;
@@ -11575,7 +11704,7 @@ int main(void) {
             } else { if (a[1] == 87 || a[1] == 119 || a[1] == 103
                       || a[1] == 79 || a[1] == 102 || a[1] == 115
                       || a[1] == 112 || a[1] == 109) {    /* -W -w -g -O -f -std -pipe -m */
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } }
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -11599,6 +11728,15 @@ int main(void) {
                " (-c is a synonym: there are no object files)\n");
         return 1;
     }
+    if (depfile) { if (depfile[0] == 0) {
+        static char dname[520]; char *base; int k; int dot;
+        base = outpath ? outpath : inputs[0];
+        k = 0; dot = 0 - 1;
+        while (base[k] && k < 512) { dname[k] = base[k]; if (base[k] == 46) dot = k; if (base[k] == 47) dot = 0 - 1; k = k + 1; }
+        if (dot < 0) dot = k;
+        dname[dot] = 46; dname[dot + 1] = 100; dname[dot + 2] = 0;
+        depfile = dname;
+    } }
     if (runit) {
         if (fe_units(inputs, ninput, HOST_TARGET)) return 1;
         /* argv[0] is the program, which is its first source file; the rest
@@ -11632,6 +11770,7 @@ int main(void) {
             if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
             if (r) return 1;
         }
+        if (depfile) { if (writedeps(outpath ? outpath : "a.out", inputs, ninput)) return 1; }
         if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
         __write(ofd, out, nout);
         if (ofd != 1) __close(ofd);

@@ -374,6 +374,9 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
             if m2 and _depth < 32:
                 angled = m2.group(1) == "<"
                 found = _find_header(m2.group(2), angled, here, includes)
+                if not found:
+                    raise ValueError("%s: no such file for #include: %s"
+                                     % (path or "<input>", m2.group(2)))
                 if found and found not in _seen:
                     _seen.add(found)
                     # the header's code is expanded with the table as it

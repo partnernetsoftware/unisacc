@@ -171,6 +171,11 @@ try wide_struct
 printf 'struct S { struct S inner; };\nint main(void){ return 0; }\n' > "$T/self_struct.c"
 refuse self_struct
 
+# an #include of a file that does not exist.  Both front ends used to drop
+# the line without a word, and the program compiled without its header.
+printf '#include "nowhere_at_all.h"\nint main(void){return 0;}\n' > "$T/missing_include.c"
+refuse missing_include
+
 # an input that does not exist at all, and a directory where a file goes
 bound 20 "$UA" "$T/nothing_here.c" -c >/dev/null 2>&1
 case "$?" in 139|138|134|136|11|142) echo "  FAIL missing file crashed"; bad=$((bad+1));; *) ok=$((ok+1));; esac

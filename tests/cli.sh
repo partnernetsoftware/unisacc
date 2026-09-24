@@ -100,6 +100,28 @@ b=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" def.c -c) | head -1)
 say "-S writes the tape" "_start:" "$a"
 say "-c is the same" "$a" "$b"
 
+# The rest of what a Makefile passes [S-15 C1]: -U undoes a -D (and a
+# predefined name), -include prepends a file, -l/-L/-x are accepted, `-` is
+# stdin and `-o -` is stdout, -nostdinc drops the built-in headers.
+say "-U undoes -D"  "off" "$(run -DFEATURE -UFEATURE def.c)"
+printf '#define LEVEL 9\n' > "$T/pre.h"
+say "-include"      "on 9" "$(run -DFEATURE -include pre.h def.c)"
+say "-lm -L -x c accepted" "off" "$(run -lm -L/nowhere -x c def.c)"
+say "stdin as input" "from stdin" \
+    "$( (cd "$T" && printf '#include <stdio.h>\nint main(void){puts("from stdin");return 0;}\n' \
+        | perl -e 'alarm 120; exec @ARGV' "$UA_RUN" -run - 2>&1) )"
+say "-o - is stdout" "_start:" \
+    "$( (cd "$T" && perl -e 'alarm 120; exec @ARGV' "$UA_RUN" def.c -S -o - 2>&1) | head -1)"
+got=$( (cd "$T" && perl -e 'alarm 120; exec @ARGV' "$UA_RUN" -nostdinc lib.c -S 2>&1) | head -1)
+case "$got" in *"no such file for #include"*) got="refused, as cc does";; esac
+say "-nostdinc refuses <stdio.h>" "refused, as cc does" "$got"
+
+# -MD writes what make wants: `target: input headers`, only files that were
+# really opened (the built-in header copies are not files) [S-15 C2]
+(cd "$T" && perl -e 'alarm 120; exec @ARGV' "$UA_RUN" -MD inc.c -S -I inc -o inc.tape >/dev/null 2>&1)
+say "-MD names the target" "inc.tape:" "$(head -1 "$T/inc.d" 2>/dev/null | tr -d ' \\')"
+say "-MD lists the header" "greet.h" "$(grep -o 'greet.h' "$T/inc.d" 2>/dev/null | head -1)"
+
 # which build is this: a release has to be identifiable from the binary
 got=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" --version 2>&1) )
 case "$got" in "unisacc "[0-9]*) got="a version";; esac

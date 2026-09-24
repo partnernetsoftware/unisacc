@@ -168,6 +168,29 @@ unisa vm FILE.tape [args...]   # 直接运行一条 tape —— 基准机器 [TP
 unisa compile ... --from-tape  # 输入是 .tape 而非 C（只做 lowering + 汇编）
 ```
 
+**出货的编译器 `unisacc`（`unisacc.com`）的契约** [S-11] [S-15 C1]——上面是 Python 驱动，这才是用户拿到的东西。每个 flag 与 `tests/cli.sh` 里的一条用例对应；行为对标 cc/tcc，凡有出入处写明：
+
+```
+unisacc [flags] FILE.c [FILE.c ...] [-- args...]
+  -run            编译后直接在内存里运行，不落盘；后面的 .c 是输入，第一个非 .c 起是程序的 argv，`--` 显式分界
+  -b os/arch      写该目标的可执行镜像（六个目标任选，与宿主无关）
+  -S              写 tape——本编译器汇编层的 IR，与 gcc -S 同级；-c 是它的同义词（没有目标文件）
+  -E              只预处理，输出文本
+  -o FILE         输出位置；`-o -` 为 stdout
+  -               作为输入文件名时表示 stdin
+  -I DIR  -D N[=v]  -U N     与 cc 同义；-U 在全部预定义之后生效，能撤销 __linux__ 之类
+  -include FILE   如同源文件第一行是 #include "FILE"；报错行号仍是用户文件的
+  -nostdinc       不查内建的头文件副本（只查源文件目录与 -I）
+  -l* -L* -x c    接受并忽略：库在头文件里，没有链接器，只有一种语言
+  -W* -w -g -O* -f* -std=* -pipe -m*   接受并忽略：一种方言、一档优化、无独立调试信息
+  -v              编译后打印每个阶段被问了多少次（仪表，不是 verbose）
+  -version / --version   版本串
+  --check-oracle  枚举全部问题，核对缓存与网络逐个一致 [A-49]
+FILE.tape         输入是 tape 时直接进后端
+```
+
+与 cc 明确不同之处：`-c` 不产目标文件；`-O` 不做任何优化；`-g` 不产调试信息；找不到的 `#include` 是错误（C99 6.10.2p4），以前是静默跳过。
+
 ### 2.1 测试套件
 
 `tests/all.sh` 是唯一入口，按**退出码**判定每一套（不靠匹配末行）：
