@@ -896,6 +896,8 @@ int diag_at(long p, char *msg, char *kind) {
 int tp; int ntok;        /* the walker's cursor and its bound: defined with the lexer, used here */
 int kind(int i);
 int undef_calls(void);
+int opt_stack(void);
+int optlevel;            /* -O: 0 writes the tape as walked [H1] */
 int tidx(char *s, int L);
 int nerr;                /* errors reported so far */
 int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
@@ -7329,6 +7331,7 @@ int fe_units(char **paths, int npath, char *t) {
     }
     emit_pool();
     if (nerr == 0) nerr = undef_calls();
+    if (nerr == 0 && optlevel > 0) opt_stack();
     if (nwarn > 0) { if (nerr == 0) {
         en2(nwarn); __write(2, nwarn == 1 ? " warning generated.\n" : " warnings generated.\n", nwarn == 1 ? 20 : 21);
     } }
@@ -7396,6 +7399,140 @@ int undef_calls(void) {
         i = e + 1;
     }
     return bad;
+}
+
+/* ---- -O1: the stack top in a register [H1] -------------------------------
+   The walker evaluates `a op b` by pushing a, computing b, popping a:
+
+       .frame 8 / store64 [r7+0], rX / S... / load64 rY, [r7+0] / .frame -8
+
+   When S is straight-line code that never names rY or r7 and has no
+   implicit operands, the slot is a register move:  mov rY, rX / S...
+   (with S empty and X = Y the pair is nothing at all).  A tape -> tape
+   rewrite, so both back ends lower the same optimised tape and closure
+   still holds byte for byte; at -O0 the tape is exactly the walker's. */
+#define OPT_MAXL 1048576
+int ol_s[OPT_MAXL]; int ol_e[OPT_MAXL]; int ol_n;   /* line starts, and where each ends (its newline, or nout) */
+char out2[MAXOUT]; int nout2;
+int ol_len(int l) { return ol_e[l] - ol_s[l]; }
+int ol_is(int l, char *t) {          /* line l is exactly t */
+    int k; int p; p = ol_s[l]; k = 0;
+    while (t[k]) { if (out[p + k] != t[k]) return 0; k = k + 1; }
+    return k == ol_len(l);
+}
+int ol_reg(int p, int e) {            /* rN spanning out[p..e) -> N, else -1 */
+    int n;
+    if (e - p < 2 || out[p] != 114) return 0 - 1;
+    p = p + 1; n = 0;
+    while (p < e) { if (isdi(out[p] & 255) == 0) return 0 - 1; n = n * 10 + out[p] - 48; p = p + 1; }
+    return n;
+}
+int ol_push(int l) {                  /* `  store64 [r7+0], rX` -> X */
+    char *t; int k; int p;
+    t = "  store64 [r7+0], "; p = ol_s[l]; k = 0;
+    while (t[k]) { if (out[p + k] != t[k]) return 0 - 1; k = k + 1; }
+    return ol_reg(p + k, p + ol_len(l));
+}
+int ol_pop(int l) {                   /* `  load64 rY, [r7+0]` -> Y */
+    char *t; int k; int p; int e; int q;
+    t = "  load64 "; p = ol_s[l]; k = 0;
+    while (t[k]) { if (out[p + k] != t[k]) return 0 - 1; k = k + 1; }
+    e = p + ol_len(l); q = p + k;
+    while (q < e && out[q] != 44) q = q + 1;
+    if (e - q != 8) return 0 - 1;
+    t = ", [r7+0]"; k = 0;
+    while (k < 8) { if (out[q + k] != t[k]) return 0 - 1; k = k + 1; }
+    return ol_reg(p + 9, q);
+}
+int ol_names(int l, int r) {          /* does line l name register r */
+    int p; int e; int n;
+    p = ol_s[l]; e = p + ol_len(l);
+    while (p < e) {
+        if (out[p] == 114) { if (p == ol_s[l] || isal(out[p - 1] & 255) == 0) {
+            if (p + 1 < e && isdi(out[p + 1] & 255)) {
+                n = 0; p = p + 1;
+                while (p < e && isdi(out[p] & 255)) { n = n * 10 + out[p] - 48; p = p + 1; }
+                if (n == r) return 1;
+                continue;
+            }
+        } }
+        p = p + 1;
+    }
+    return 0;
+}
+int ol_simple(int l) {                /* straight-line, explicit operands only */
+    char *ok; int p; int e; int k; int w; int i;
+    p = ol_s[l]; e = p + ol_len(l);
+    if (e - p < 3 || out[p] != 32 || out[p + 1] != 32) return 0;
+    p = p + 2; w = p; while (w < e && out[w] != 32) w = w + 1;
+    ok = "imm\0load64\0store64\0sub64\0.ld\0.lea\0.st\0add64\0mul64\0eq\0mov\0slt64\0and64\0ne\0sle64\0or64\0shl64\0shr64\0lshr64\0xor64\0ult64\0";
+    i = vfind(ok, 21, out + p, w - p);
+    return i >= 0;
+}
+int ol_emit(int l) { int k; k = 0; while (k < ol_len(l)) { out2[nout2] = out[ol_s[l] + k]; nout2 = nout2 + 1; k = k + 1; }
+    out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
+int ol_mov(int y, int x) {
+    char b[32]; int n;
+    out2[nout2] = 32; out2[nout2 + 1] = 32; nout2 = nout2 + 2;
+    b[0] = 109; b[1] = 111; b[2] = 118; b[3] = 32; n = 4;
+    out2[nout2] = 109; out2[nout2 + 1] = 111; out2[nout2 + 2] = 118; out2[nout2 + 3] = 32; nout2 = nout2 + 4;
+    out2[nout2] = 114; nout2 = nout2 + 1;
+    if (y >= 10) { out2[nout2] = 48 + y / 10; nout2 = nout2 + 1; }
+    out2[nout2] = 48 + y % 10; out2[nout2 + 1] = 44; out2[nout2 + 2] = 32; out2[nout2 + 3] = 114; nout2 = nout2 + 4;
+    if (x >= 10) { out2[nout2] = 48 + x / 10; nout2 = nout2 + 1; }
+    out2[nout2] = 48 + x % 10; out2[nout2 + 1] = 10; nout2 = nout2 + 2;
+    return n;
+}
+int opt_round(void) {
+    int i; int j; int x; int y; int k; int ok; int hits;
+    ol_n = 0; i = 0;
+    while (i < nout) {
+        if (ol_n >= OPT_MAXL) return 0;
+        ol_s[ol_n] = i;
+        while (i < nout && out[i] != 10) i = i + 1;
+        ol_e[ol_n] = i; ol_n = ol_n + 1;
+        i = i + 1;
+    }
+    nout2 = 0; hits = 0; i = 0;
+    while (i < ol_n) {
+        if (i + 3 < ol_n && ol_is(i, "  .frame 8")) {
+            x = ol_push(i + 1);
+            if (x >= 0) {
+                j = i + 2; ok = 0;
+                while (j < ol_n && j <= i + 18) {
+                    y = ol_pop(j);
+                    if (y >= 0) { if (j + 1 < ol_n && ol_is(j + 1, "  .frame -8")) ok = 1; break; }
+                    if (ol_simple(j) == 0) break;
+                    if (ol_names(j, 7)) break;
+                    j = j + 1;
+                }
+                if (ok) {
+                    k = i + 2;
+                    while (k < j) { if (ol_names(k, y)) ok = 0; k = k + 1; }
+                    if (j > i + 2 && x == y) ok = 0;
+                }
+                if (ok) {
+                    if (x != y) ol_mov(y, x);
+                    k = i + 2; while (k < j) { ol_emit(k); k = k + 1; }
+                    hits = hits + 1;
+                    i = j + 2;
+                    continue;
+                }
+            }
+        }
+        ol_emit(i);
+        i = i + 1;
+    }
+    if (nout2 > 0 && out[nout - 1] != 10) nout2 = nout2 - 1;   /* no newline was there */
+    i = 0; while (i < nout2) { out[i] = out2[i]; i = i + 1; }
+    nout = nout2;
+    return hits;
+}
+int opt_stack(void) {
+    int r;
+    r = 0;
+    while (r < 4) { if (opt_round() == 0) break; r = r + 1; }
+    return 0;
 }
 
 #ifndef UNISACC_NO_MAIN
@@ -7490,6 +7627,10 @@ int main(void) {
             } else { if (a[1] == 87 || a[1] == 119 || a[1] == 103
                       || a[1] == 79 || a[1] == 102 || a[1] == 115
                       || a[1] == 112 || a[1] == 109) {    /* -W -w -g -O -f -std -pipe -m */
+                if (a[1] == 79) {             /* -O, -O0..-O3, -Os: [H1] */
+                    optlevel = 1;
+                    if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
+                }
             } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
