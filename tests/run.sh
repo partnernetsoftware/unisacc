@@ -21,7 +21,14 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok=0; bad=0; skip=0
 for f in $PROBES; do
     b=$(basename "$f" .c)
-    { echo '#include <stdio.h>'; cat "$f"; } > "$T/ref.c"
+    # the reference gets real declarations for the three builtins: glibc
+    # EXPORTS __mmap, so undeclared it linked with an int return and the
+    # pointer lost its top half -- the reference crashed, on Linux only
+    { echo '#include <stdio.h>'; echo '#include <sys/mman.h>'
+      echo '#define __mmap(a,n,p,f,d,o) (long)mmap((void *)(long)(a),(n),(p),(f),(d),(o))'
+      echo '#define __mprotect(a,n,p) mprotect((void *)(long)(a),(n),(p))'
+      echo '#define __munmap(a,n) munmap((void *)(long)(a),(n))'
+      cat "$f"; } > "$T/ref.c"
     cc -w -o "$T/ref" "$T/ref.c" -lm 2>/dev/null || cc -w -o "$T/ref" "$f" -lm 2>/dev/null || {
         skip=$((skip+1)); continue; }
     (cd "$T" && perl -e 'alarm 30; exec @ARGV' ./ref one two > ref.out 2>/dev/null)

@@ -13,7 +13,9 @@
 | suite 内 game-ready | `sim.ujs`/`drone.ujs` 必须 `can_emit_direct` |
 
 另：`./tests/ujs2wasm_step.sh` — 路径 B 步进 fold（inject + `run_step` ≡ jtape）。  
-`./tests/uxe_ship_js.sh` — ship-js 合同（无 eng_*、无 C `asteroid.wasm`）。
+`./tests/uxe_ship_js.sh` — ship-js 合同（无 eng_*、无 C `asteroid.wasm`）。  
+`./tests/ujs2wasm_compiler.sh` — **M2 子集**：`compiler.wasm` 编 arith+fact（无 python3）；全量 sim/ship 仍开放。  
+重建：`./ujs/scripts/build-compiler-wasm.sh` → `ujs/core/compiler.wasm`。
 
 ## Direct host ABI（路径 B 步进）
 

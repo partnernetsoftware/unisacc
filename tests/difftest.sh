@@ -24,8 +24,16 @@ for f in tests/c/*.c examples/*.c; do
     # the probes call printf and the string functions bare, because we link
     # our own; give the REFERENCE compiler the declarations it insists on --
     # clang makes an implicit declaration an ERROR -- and nothing else
+    # ...including the three syscalls the probes spell as builtins.  glibc
+    # EXPORTS a symbol named __mmap, so an undeclared call linked to it with
+    # an implicit int return and the 64-bit pointer was cut to 32 bits: the
+    # REFERENCE crashed, on Linux only, and the suite reported it as ours.
     { echo '#include <stdio.h>'; echo '#include <string.h>'
-      echo '#include <stdlib.h>'; cat "$f"; } > "$T/$b.ref.c"
+      echo '#include <stdlib.h>'; echo '#include <sys/mman.h>'
+      echo '#define __mmap(a,n,p,f,d,o) (long)mmap((void *)(long)(a),(n),(p),(f),(d),(o))'
+      echo '#define __mprotect(a,n,p) mprotect((void *)(long)(a),(n),(p))'
+      echo '#define __munmap(a,n) munmap((void *)(long)(a),(n))'
+      cat "$f"; } > "$T/$b.ref.c"
     if ! $CC -w -std=c99 -o "$D/$b" "$T/$b.ref.c" -lm 2>"$T/$b.cc"; then
         exit 0
     fi

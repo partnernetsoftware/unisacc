@@ -6934,22 +6934,93 @@ int nask[16];
    Direct-mapped, so a collision costs one extra inference and never a
    wrong answer -- the tag is compared before the value is used. */
 #define INFC 16384
-int infc_tag[INFC]; int infc_val[INFC]; int infc_live[INFC];
+/* The slot stores the WHOLE question -- stage, head and all four key
+   fields -- and a hit compares every one of them.  The first version
+   stored a hash and compared the hash: over the full domain two of the
+   15,221 questions share one, so a hit could hand back another question's
+   answer without a sound.  And that hash overflowed a signed int, which is
+   undefined behaviour, so clang and gcc computed different ones and the
+   wrong answer moved between compilers -- Linux CI (gcc) refused a C99
+   program the Mac (clang) compiled.  Now the hash only chooses the slot;
+   it cannot change an answer, and it cannot overflow: each step is
+   reduced before the next multiply. */
+int infc_st[INFC]; int infc_hd[INFC]; int infc_k0[INFC]; int infc_k1[INFC];
+int infc_k2[INFC]; int infc_k3[INFC]; int infc_val[INFC]; int infc_live[INFC];
 
 int inf(int st, int *key, int head) {
-    int r; int h; int tag;
-    /* the key is at most four small fields; this packs them with the
-       stage and the head into one int, which is the tag */
-    tag = ((st * 19 + head) * 8191) ^ (key[0] * 131) ^ (key[1] * 3571)
-        ^ (key[2] * 65537) ^ (key[3] * 97);
-    if (tag < 0) tag = 0 - tag;
-    h = tag & (INFC - 1);
+    int r; int h;
+    h = st & (INFC - 1);
+    h = (h * 31 + (head & 1023)) & (INFC - 1);
+    h = (h * 31 + (key[0] & 1023)) & (INFC - 1);
+    h = (h * 31 + (key[1] & 1023)) & (INFC - 1);
+    h = (h * 31 + (key[2] & 1023)) & (INFC - 1);
+    h = (h * 31 + (key[3] & 1023)) & (INFC - 1);
     nask[st] = nask[st] + 1;
-    if (infc_live[h]) { if (infc_tag[h] == tag) return infc_val[h]; }
+    if (infc_live[h]) {
+        if (infc_st[h] == st && infc_hd[h] == head && infc_k0[h] == key[0]
+            && infc_k1[h] == key[1] && infc_k2[h] == key[2]
+            && infc_k3[h] == key[3]) return infc_val[h];
+    }
     r = infer(st, key, head);
     if (r < 0) { __write(2, "oracle: key outside the stage's domain\n", 39); __exit(1); }
-    infc_tag[h] = tag; infc_val[h] = r; infc_live[h] = 1;
+    infc_st[h] = st; infc_hd[h] = head; infc_k0[h] = key[0];
+    infc_k1[h] = key[1]; infc_k2[h] = key[2]; infc_k3[h] = key[3];
+    infc_val[h] = r; infc_live[h] = 1;
     return r;
+}
+
+/* `unisacc --check-oracle` [A-49]: every question the model can be asked,
+   through the cache, compared with the net answering it directly.  Twice --
+   forwards and backwards -- because which question evicts which depends on
+   the order, and a cache that answers wrong answers wrong only for SOME
+   order.  The first version of the cache stored a hash of the question
+   instead of the question; this is the check that would have caught it. */
+int oracle_n;
+int oracle_pass(int dir) {
+    int s; int h; int f; int m; int bad; int n; int r0; int r1; int done;
+    int key[4]; int lim[4];
+    bad = 0; n = 0;
+    s = dir > 0 ? 0 : NSTAGE - 1;
+    while (s >= 0 && s < NSTAGE) {
+        m = STAGE_M[s];
+        h = 0;
+        while (h < 12) {
+            if (STAGE_NCLS[s * 12 + h] > 0) {
+                f = 0;
+                while (f < 4) {
+                    lim[f] = f < m ? STAGE_VN[(s << 2) + f] : 1;
+                    key[f] = dir > 0 ? 0 : lim[f] - 1;
+                    f = f + 1;
+                }
+                done = 0;
+                while (done == 0) {
+                    r1 = inf(s, key, h);
+                    r0 = infer(s, key, h);
+                    n = n + 1;
+                    if (r0 != r1) bad = bad + 1;
+                    /* the odometer, in this pass's direction */
+                    f = 0;
+                    while (1) {
+                        if (f >= 4) { done = 1; break; }
+                        if (dir > 0) {
+                            key[f] = key[f] + 1;
+                            if (key[f] < lim[f]) break;
+                            key[f] = 0;
+                        } else {
+                            key[f] = key[f] - 1;
+                            if (key[f] >= 0) break;
+                            key[f] = lim[f] - 1;
+                        }
+                        f = f + 1;
+                    }
+                }
+            }
+            h = h + 1;
+        }
+        s = s + dir;
+    }
+    oracle_n = n;
+    return bad;
 }
 
 int irsel(char *fam, int fl, char *flav, int vl) {
@@ -11309,6 +11380,14 @@ int main(void) {
         a = __argv(i);
         if (a[0] == 45 && a[1] == 45 && a[1 + 1] == 0) {   /* `--`: argv starts */
             i = i + 1; break;
+        }
+        if (strsame(a, "--check-oracle")) {
+            int b1; int b2;
+            model_dims(); setup();
+            b1 = oracle_pass(1); b2 = oracle_pass(0 - 1);
+            printf("oracle  questions %d   cached answers that differ from the net: %d\n",
+                   oracle_n, b1 + b2);
+            return (b1 + b2) ? 1 : 0;
         }
         /* `-version` / `--version`: which build is this.  `-v` is taken --
            it prints how many times each stage was asked. */

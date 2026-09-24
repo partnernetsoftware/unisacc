@@ -27,7 +27,11 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
 TOL=${TOLERANCE:-30}          # percent slower than baseline that still passes
-BASE=$R/tests/bench.baseline.$(uname -m)
+# One machine's numbers are not another's.  Keyed by `uname -m` alone,
+# GitHub's arm64 macOS runners -- six times slower than the laptop that
+# recorded it -- were held to the laptop's baseline and failed every push.
+# A machine with no baseline of its own records one and passes.
+BASE=$R/tests/bench.baseline.$(uname -m).$(hostname -s | tr -c 'A-Za-z0-9\n' '_')
 
 # The reference the numbers are about is an OPTIMISED build: the shipped
 # binary's own speed is the `ratio` line, further down.

@@ -47,6 +47,8 @@
 #               [A-45]
 #   consts      the numbers lower.py derives and unisacc_back.c hardcodes
 #               are the same numbers [A-43]
+#   oracle      every question the model can be asked, through the cache,
+#               equals the net's own answer -- both orders [A-49]
 #   layout      the data layout ENUMERATED, not sampled: every tape of up to
 #               three data definitions, with and without a symbol defined
 #               twice, both back ends, all six targets [A-41] [P-3]
@@ -115,6 +117,7 @@ run fuzz       ./tests/fuzz.sh
 run hostile    ./tests/hostile.sh
 run bench      ./tests/bench.sh
 run consts     bash -c 'python3 tests/consts_check.py'
+run oracle     bash -c '"${UA:-/tmp/ua_ref}" --check-oracle'
 run layout     ./tests/layout.sh
 run datashape  ./tests/datashape.sh
 run bigclosure ./tests/bigclosure.sh

@@ -63,6 +63,27 @@ def main():
          r"bk_stacktop = base \+ (\d+) \+ \d+;"),
     ]
 
+    # The three image writers.  C spells these in decimal (4294967296 is
+    # macho.VMADDR = 0x100000000), which is exactly why a drift would be
+    # invisible to a reader: nobody recognises 5368709120 as 0x140000000.
+    from unisa.image import elf, macho, pe
+    ehdr_and_phdrs = 64 + 56 * elf.NPH          # where ELF text starts
+    checks += [
+        ("elf.VADDR (text)", elf.VADDR, r"bk_textva = (\d+) \+ \d+;"),
+        ("elf.VADDR (data)", elf.VADDR, r"bk_datava = (\d+) \+ bk_round\(\d+ \+ bktlen, 4096\)"),
+        ("elf headers", ehdr_and_phdrs, r"bk_textva = \d+ \+ (\d+);"),
+        ("elf.PAGE", elf.PAGE, r"bk_datava = \d+ \+ bk_round\(\d+ \+ bktlen, (\d+)\)"),
+        ("elf entry", elf.VADDR, r"w64\((\d+) \+ \d+ \+ bk_entry\)"),
+        ("macho.VMADDR (text)", macho.VMADDR, r"bk_textva = (\d+) \+ h;"),
+        ("macho.VMADDR (data)", macho.VMADDR, r"bk_datava = (\d+) \+ bk_round\(h \+ bktlen"),
+        ("macho.PAGE", macho.PAGE, r"bk_datava = \d+ \+ bk_round\(h \+ bktlen, (\d+)\)"),
+        ("pe.IMAGEBASE (text)", pe.IMAGEBASE, r"bk_textva = (\d+) \+ 4096;"),
+        ("pe.TEXT_RVA", pe.TEXT_RVA, r"bk_textva = \d+ \+ (\d+);\s*\n[^\n]*\n[^\n]*bk_datava = 5368709120"),
+        ("pe.IMAGEBASE (data)", pe.IMAGEBASE, r"bk_datava = (\d+) \+ rd"),
+        ("pe.IMAGEBASE (IAT)", pe.IMAGEBASE, r"bk_imp\[i\] = (\d+) \+ rd"),
+        ("len(pe.IMPORTS)", len(pe.IMPORTS), r"#define BK_NIMP (\d+)"),
+    ]
+
     bad = 0
     for name, want, pattern in checks:
         got, why = c_literal(pattern, c, name)
