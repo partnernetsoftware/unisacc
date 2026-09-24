@@ -30,7 +30,12 @@ for f in tests/c/*.c examples/*.c; do
     # REFERENCE crashed, on Linux only, and the suite reported it as ours.
     { echo '#include <stdio.h>'; echo '#include <string.h>'
       echo '#include <stdlib.h>'; echo '#include <sys/mman.h>'
-      echo '#define __mmap(a,n,p,f,d,o) (long)mmap((void *)(long)(a),(n),(p),(f),(d),(o))'
+      echo 'static long unisa_mmap_(long a,long n,long p,long f,long d,long o){return (long)mmap((void *)a,(size_t)n,(int)p,(int)f,(int)d,(off_t)o);}'
+      # VARIADIC: the probe writes __mmap(M_ARGS), and a six-parameter
+      # function-like macro counts ONE argument there -- arguments are
+      # identified before M_ARGS expands.  The build failed on glibc and
+      # the fallback below quietly built the bare file instead.
+      echo '#define __mmap(...) unisa_mmap_(__VA_ARGS__)'
       echo '#define __mprotect(a,n,p) mprotect((void *)(long)(a),(n),(p))'
       echo '#define __munmap(a,n) munmap((void *)(long)(a),(n))'
       cat "$f"; } > "$T/$b.ref.c"

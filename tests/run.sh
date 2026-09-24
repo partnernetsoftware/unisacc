@@ -25,12 +25,25 @@ for f in $PROBES; do
     # EXPORTS __mmap, so undeclared it linked with an int return and the
     # pointer lost its top half -- the reference crashed, on Linux only
     { echo '#include <stdio.h>'; echo '#include <sys/mman.h>'
-      echo '#define __mmap(a,n,p,f,d,o) (long)mmap((void *)(long)(a),(n),(p),(f),(d),(o))'
+      echo 'static long unisa_mmap_(long a,long n,long p,long f,long d,long o){return (long)mmap((void *)a,(size_t)n,(int)p,(int)f,(int)d,(off_t)o);}'
+      # VARIADIC: the probe writes __mmap(M_ARGS), and a six-parameter
+      # function-like macro counts ONE argument there -- arguments are
+      # identified before M_ARGS expands.  The build failed on glibc and
+      # the fallback below quietly built the bare file instead.
+      echo '#define __mmap(...) unisa_mmap_(__VA_ARGS__)'
       echo '#define __mprotect(a,n,p) mprotect((void *)(long)(a),(n),(p))'
       echo '#define __munmap(a,n) munmap((void *)(long)(a),(n))'
       cat "$f"; } > "$T/ref.c"
-    cc -w -o "$T/ref" "$T/ref.c" -lm 2>/dev/null || cc -w -o "$T/ref" "$f" -lm 2>/dev/null || {
-        skip=$((skip+1)); continue; }
+    # No fallback to the bare file: when the prelude build failed on glibc,
+    # building the probe WITHOUT it linked glibc's own __mmap undeclared, and
+    # the reference crashed -- reported as a compiler failure.  A reference
+    # that cannot be built is skipped, and says so.
+    if ! cc -w -o "$T/ref" "$T/ref.c" -lm 2>"$T/cc.err"; then
+        skip=$((skip+1))
+        printf "  skip %-12s the reference will not build: %s\n" "$b" \
+            "$(grep -m1 error "$T/cc.err" | cut -c1-60)"
+        continue
+    fi
     (cd "$T" && perl -e 'alarm 30; exec @ARGV' ./ref one two > ref.out 2>/dev/null)
     rc1=$?
     # from the repo root: unisacc looks for <stdio.h> under ./include

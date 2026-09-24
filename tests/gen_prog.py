@@ -155,10 +155,15 @@ class Gen:
         elif k == 6:
             out.append("%sswitch ((%s) & 3) {" % (pad, self.expr(rd)))
             for c in range(self.r.n(3) + 1):
-                out.append("%scase %d:" % (pad, c))
+                # braces: a label labels a STATEMENT (C99 6.8.1), and a
+                # declaration is not one.  New clang takes `case 0: int x;`
+                # as a C23 extension; the macOS-14 runner's clang refused
+                # eight seeds of the first version for exactly this.
+                out.append("%scase %d: {" % (pad, c))
                 self.block(vars, d + 1, out, readonly)
                 if self.r.n(2):
                     out.append("%s    break;" % pad)
+                out.append("%s}" % pad)
             out.append("%sdefault: %s ^= 1; }" % (pad, self.ivar(vars)))
         elif k == 7:
             # an array, indexed only inside its bounds
