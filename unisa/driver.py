@@ -2,7 +2,7 @@
 import os
 import re
 
-from .front.pp import preprocess, predefines, expand
+from .front.pp import preprocess, predefines, expand, expand_positional
 from .front.lex import lex
 from .front.parse import compile_units, CError
 
@@ -51,7 +51,7 @@ def _compile_once(srcs, oracle, target, paths, includes):
                                   tuple(includes) + (DEFAULT_INCLUDE,))
         from .front import pp as _pp
         origin = _pp.LAST_ORIGIN[0]
-        ex = expand(text, macros)
+        ex = expand_positional(text, macros)
         seen.append((ex, origin))
         streams.append(lex(ex, oracle))
     try:

@@ -96,7 +96,18 @@ int isal(int c) {
 int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 
 /* ---- the preprocessor: the pp table decides every directive [W-1] ----- */
-#define MAXMAC 256
+#define MAXMAC 2048
+/* A macro lives from its #define to its #undef, and a redefinition replaces
+   it from THAT point on (C99 6.10.3.5).  This preprocessor used to process
+   every directive first and expand the text with the FINAL table
+   afterwards -- `#define V 1`, `a = V`, `#undef V`, `#define V 2`, `b = V`
+   gave a = b = 2 -- and #undef did nothing at all.  Now every directive
+   that changes the table opens a new SEGMENT of the source, each entry
+   knows the segments it is live in, [macfrom, macto), and expansion
+   resolves a name in the segment of the text it is expanding.  A
+   redefinition is a new entry; the old one is closed, not overwritten. */
+#define SEGINF 1000000000
+#define MAXSEG 65536
 #define MACPOOL 131072
 #define MAXMPARAM 12
 char macname[MAXMAC * 32];
@@ -112,6 +123,18 @@ int macvar[MAXMAC];      /* 1 when the last parameter is `...` */
 int macnp[MAXMAC];
 int macpoff[MAXMAC * MAXMPARAM]; int macplen[MAXMAC * MAXMPARAM];
 int nmac;
+int macfrom[MAXMAC]; int macto[MAXMAC];   /* live in segments [from, to) */
+int macprev[MAXMAC];     /* the previous entry with the same name, or -1 */
+int curseg;              /* the table's segment while preprocessing */
+int segpos[MAXSEG]; int nsegpos;   /* segment k+1 starts at segpos[k] */
+int pp_seg = 0 - 1;      /* -1: resolve against the table as it stands now
+                            (while preprocessing, and after); otherwise the
+                            segment of the text being expanded */
+int srcseg[MAXSRC];      /* the segment of each byte of src */
+int eseg;                /* the segment of what eput is writing */
+/* #pragma push_macro / pop_macro: the saved entry (or -1) per push */
+#define MAXPUSH 256
+char pushname[MAXPUSH * 32]; int pushent[MAXPUSH]; int npush;
 
 int mfindt(int t);
 /* Every identifier in the source is looked up here -- that is what the
@@ -152,8 +175,13 @@ int mac_reindex(void) {
     i = 0;
     while (i < nmac) {
         { int L; L = 0; while (macname[i * 32 + L]) L = L + 1;
-          h = mac_hash(macname + i * 32, L); }
-        while (mac_h[h]) h = (h + 1) & (MACH - 1);
+          h = mac_hash(macname + i * 32, L);
+          /* a later entry of the same name takes the slot: the index
+             holds the NEWEST, and macprev reaches the older ones */
+          while (mac_h[h]) {
+              if (mac_is(mac_h[h] - 1, macname + i * 32, L)) break;
+              h = (h + 1) & (MACH - 1);
+          } }
         mac_h[h] = i + 1;
         i = i + 1;
     }
@@ -161,7 +189,8 @@ int mac_reindex(void) {
     return 0;
 }
 
-int mfind(char *s, int n) {
+/* The newest entry spelled s[0..n), live or not, or -1. */
+int mac_newest(char *s, int n) {
     int h;
     if (mh_n != nmac) mac_reindex();
     h = mac_hash(s, n);
@@ -172,10 +201,27 @@ int mfind(char *s, int n) {
     return 0 - 1;
 }
 
+int mfind(char *s, int n) {
+    int m;
+    m = mac_newest(s, n);
+    if (pp_seg < 0) {                   /* now: only the newest can be live */
+        if (m >= 0) { if (macto[m] < SEGINF) return 0 - 1; }
+        return m;
+    }
+    while (m >= 0) {                    /* the entry live in pp_seg */
+        if (macfrom[m] <= pp_seg && pp_seg < macto[m]) return m;
+        m = macprev[m];
+    }
+    return 0 - 1;
+}
+
 int mdef(char *s, int n, int v, int has) {
-    int k;
-    if (mfind(s, n) >= 0) return 0;
-    if (nmac >= MAXMAC) return 0;
+    int k; int old;
+    old = mac_newest(s, n);
+    if (nmac >= MAXMAC) { __write(2, "too many macro definitions\n", 27); __exit(1); }
+    /* the live definition ends where this one begins */
+    if (old >= 0) { if (macto[old] >= SEGINF) macto[old] = curseg; }
+    macfrom[nmac] = curseg; macto[nmac] = SEGINF; macprev[nmac] = old;
     k = 0;
     while (k < n) { if (k < 31) macname[nmac * 32 + k] = s[k]; k = k + 1; }
     if (n < 32) macname[nmac * 32 + n] = 0;
@@ -749,12 +795,77 @@ int predef(void) {
     return 0;
 }
 
+int srcis(int p, int L, char *nm);
+/* A directive at line start `ls` is about to change the table: the text
+   after it is a new segment. */
+int newseg(int ls) {
+    if (nsegpos >= MAXSEG) { __write(2, "too many macro changes\n", 23); __exit(1); }
+    curseg = curseg + 1;
+    segpos[nsegpos] = ls; nsegpos = nsegpos + 1;
+    return 0;
+}
+
+/* #pragma push_macro("X") / pop_macro("X") at src[p..e): 1 if it was one */
+int pushpop(int ls, int p, int e) {
+    int ispush; int n0; int n1; int m; int k; int j; int q;
+    while (p < e && wsat(p)) p = p + 1;
+    ispush = 0 - 1;
+    if (p + 10 <= e) { if (srcis(p, 10, "push_macro")) { ispush = 1; p = p + 10; } }
+    if (ispush < 0) { if (p + 9 <= e) { if (srcis(p, 9, "pop_macro")) { ispush = 0; p = p + 9; } } }
+    if (ispush < 0) return 0;
+    while (p < e && (src[p] & 255) != 34) p = p + 1;
+    if (p >= e) return 0;
+    n0 = p + 1; n1 = n0;
+    while (n1 < e && (src[n1] & 255) != 34) n1 = n1 + 1;
+    if (n1 >= e || n1 == n0 || n1 - n0 > 31) return 0;
+    if (ispush) {
+        if (npush >= MAXPUSH) return 1;
+        k = 0;
+        while (k < n1 - n0) { pushname[npush * 32 + k] = src[n0 + k]; k = k + 1; }
+        pushname[npush * 32 + k] = 0;
+        pushent[npush] = mfind(src + n0, n1 - n0);
+        npush = npush + 1;
+        return 1;
+    }
+    /* pop: the most recent push of this name */
+    j = npush - 1;
+    while (j >= 0) {
+        k = 0; q = 1;
+        while (k < n1 - n0) { if (pushname[j * 32 + k] != src[n0 + k]) q = 0; k = k + 1; }
+        if (q) { if (pushname[j * 32 + k] == 0) break; }
+        j = j - 1;
+    }
+    if (j < 0) return 1;
+    m = pushent[j];
+    k = j; while (k + 1 < npush) {       /* drop that push */
+        q = 0; while (q < 32) { pushname[k * 32 + q] = pushname[(k + 1) * 32 + q]; q = q + 1; }
+        pushent[k] = pushent[k + 1]; k = k + 1;
+    }
+    npush = npush - 1;
+    newseg(ls);
+    { int cur; cur = mfind(src + n0, n1 - n0); if (cur >= 0) macto[cur] = curseg; }
+    if (m >= 0) {                        /* the saved definition, again */
+        mdef(src + n0, n1 - n0, macval[m], machas[m]);
+        k = nmac - 1;
+        macboff[k] = macboff[m]; macblen[k] = macblen[m];
+        macfn[k] = macfn[m]; macnp[k] = macnp[m]; macvar[k] = macvar[m];
+        q = 0;
+        while (q < MAXMPARAM) {
+            macpoff[k * MAXMPARAM + q] = macpoff[m * MAXMPARAM + q];
+            macplen[k * MAXMPARAM + q] = macplen[m * MAXMPARAM + q];
+            q = q + 1;
+        }
+    }
+    return 1;
+}
+
 int preprocess(void) {
     int i; int ls; int j; int ws; int we; int live; int d; int flag;
     int a; int k; int ns; int ne;
     int key[4];
     ndepth = 0;
-    nmac = 0;
+    nmac = 0; mh_n = 0 - 1;
+    curseg = 0; nsegpos = 0; npush = 0; pp_seg = 0 - 1;
     predef();
     i = 0;
     while (i < nsrc) {
@@ -778,6 +889,9 @@ int preprocess(void) {
             while (j < i) { if (isal(src[j] & 255) == 0) { if (isdi(src[j] & 255) == 0) break; } j = j + 1; }
             ne = j;
             flag = 0;
+            if (d < 0) { if (live) { if (we - ws == 6) { if (srcis(ws, 6, "pragma")) {
+                pushpop(ls, we, i);
+            } } } }
             if (d >= 0) {
                 if (d == 0) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
                 /* The table's key is `defined` -- whether the name IS
@@ -825,7 +939,13 @@ int preprocess(void) {
                 if (a == 2) { if (ndepth > 0) ndepth = ndepth - 1; }   /* pop */
                 else {
                 if (a == 3) {                     /* macro: define / undef */
+                    /* #undef NAME: the live definition ends here */
+                    if (live) { if (d == 8) {
+                        int um; um = mfind(src + ns, ne - ns);
+                        if (um >= 0) { newseg(ls); macto[um] = curseg; }
+                    } }
                     if (live) { if (d == 6) {
+                        newseg(ls);
                         int vs; int vv; int vh; int mi; int np; int ps; int pe;
                         int po[MAXMPARAM]; int pl[MAXMPARAM]; int pk; int isvar;
                         vs = ne;
@@ -1155,9 +1275,10 @@ int decomment(void) {
 char ebuf[MAXSRC]; int nebuf;
 int argo[MAXMPARAM]; int argl[MAXMPARAM]; int nargs;
 
+int ebseg[MAXSRC];       /* the segment each byte of ebuf came from */
 int eput(int c) {
     if (nebuf >= MAXSRC) { __write(2, "macro expansion overflow\n", 25); __exit(1); }
-    ebuf[nebuf] = c; nebuf = nebuf + 1;
+    ebuf[nebuf] = c; ebseg[nebuf] = eseg; nebuf = nebuf + 1;
     return 0;
 }
 
@@ -1437,6 +1558,8 @@ int emitrange(int from, int to, int depth) {
         if (isal(c)) {
             j = identend(i);
             if (j > to) j = to;
+            /* the name means what it meant WHERE it is */
+            eseg = srcseg[i]; pp_seg = eseg;
             /* C99 6.10.9: `_Pragma ( string-literal )` is the operator form
                of `#pragma`, and this compiler honours no pragma -- the
                directive form is already dropped -- so the operator form is
@@ -1542,15 +1665,22 @@ int expround(void) {
 }
 
 int expandsrc(void) {
-    int r; int k;
+    int r; int k; int sg;
+    /* every byte's segment: how many table changes precede it */
+    sg = 0; k = 0; r = 0;
+    while (r < nsrc) {
+        while (k < nsegpos && segpos[k] <= r) { sg = sg + 1; k = k + 1; }
+        srcseg[r] = sg; r = r + 1;
+    }
     r = 0;
     while (r < 8) {
         if (expround() == 0) break;
         k = 0;
-        while (k < nebuf) { src[k] = ebuf[k]; k = k + 1; }
+        while (k < nebuf) { src[k] = ebuf[k]; srcseg[k] = ebseg[k]; k = k + 1; }
         nsrc = nebuf;
         r = r + 1;
     }
+    pp_seg = 0 - 1;
     return 0;
 }
 

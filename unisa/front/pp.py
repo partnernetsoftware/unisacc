@@ -265,6 +265,21 @@ def _decomment(src):
 # output line, see there
 LAST_ORIGIN = [None]
 
+# Positional macros.  C defines a macro FROM its #define TO its #undef, and a
+# redefinition in between replaces it from that point on -- `#define V 1`,
+# `a = V`, `#undef V`, `#define V 2`, `b = V` gives a = 1, b = 2.  This
+# preprocessor used to process every directive first and expand the whole
+# text with the FINAL table afterwards, so both were 2.  Now, whenever the
+# table changes, the next line of code is prefixed with MARK N MARK, and N
+# indexes SNAPS, the table as it stood there; expand_positional() expands
+# each stretch with its own table and drops the markers.  A marker sits at
+# the start of a line, so no line and no column moves.
+SNAPS = []
+MARK = "\x02"
+_MARK_RE = re.compile(MARK + r"(\d+)" + MARK)
+# #pragma push_macro / pop_macro: a stack of saved definitions per name
+_PUSHED = {}
+
 
 def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                _seen=None):
@@ -275,6 +290,10 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     them, and a header that is spliced is more useful than a line number that
     is exact."""
     macros = dict(macros or {})
+    if _depth == 0:
+        SNAPS[:] = [dict(macros)]          # the table the text starts with
+        _PUSHED.clear()
+    pending = [False]                      # the table changed; mark the next code
     _seen = _seen if _seen is not None else set()
     here = os.path.dirname(os.path.abspath(path)) if path else None
     out = []
@@ -293,9 +312,28 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
         m = DIRECTIVE.match(raw)
         live = all(t for (t, _) in stack)
         if not m:
+            if live and pending[0] and raw.strip():
+                SNAPS.append(dict(macros))
+                raw = MARK + str(len(SNAPS) - 1) + MARK + raw
+                pending[0] = False
             out.append(raw if live else "")
             continue
         d, rest = m.group(1), m.group(2)
+        if d == "pragma" and live:
+            # #pragma push_macro("X") / pop_macro("X"): save X's definition
+            # (or its absence) and restore it later
+            pm = re.match(r'^\s*(push_macro|pop_macro)\s*\(\s*"(\w+)"\s*\)', rest)
+            if pm:
+                name = pm.group(2)
+                if pm.group(1) == "push_macro":
+                    _PUSHED.setdefault(name, []).append(macros.get(name))
+                elif _PUSHED.get(name):
+                    saved = _PUSHED[name].pop()
+                    if saved is None:
+                        macros.pop(name, None)
+                    else:
+                        macros[name] = saved
+                    pending[0] = True
         if d not in ("ifdef", "ifndef", "if", "elif", "else", "endif",
                      "define", "include", "undef"):
             out.append("")
@@ -338,11 +376,21 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                 found = _find_header(m2.group(2), angled, here, includes)
                 if found and found not in _seen:
                     _seen.add(found)
+                    # the header's code is expanded with the table as it
+                    # stands HERE, so a waiting marker goes in first ...
+                    if pending[0]:
+                        SNAPS.append(dict(macros))
+                        lead = MARK + str(len(SNAPS) - 1) + MARK
+                        pending[0] = False
+                    else:
+                        lead = ""
                     with open(found, encoding="latin-1") as f:
                         sub, macros = preprocess(f.read(), oracle, macros,
                                                  found, includes,
                                                  _depth + 1, _seen)
-                    out.append(sub)
+                    out.append(lead + sub)
+                    # ... and whatever it defined applies from here on
+                    pending[0] = True
                     where.append(LAST_ORIGIN[0] or
                                  [(found, 0)] * (sub.count("\n") + 1))
                     continue
@@ -361,6 +409,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                             parts[1].strip() if len(parts) > 1 else "1"
             elif d == "undef" and rest.split():
                 macros.pop(rest.split()[0], None)
+            pending[0] = True
         out.append("")
     while len(where) < len(out):
         where.append([(path, len(where) + 1)])
@@ -584,6 +633,18 @@ def _preexpand(body, params, args, macros, _depth=0):
     raw = _raw_operands(body, params)
     return [a if p in raw else expand(a, macros)
             for p, a in zip(params, args)]
+
+
+def expand_positional(text, macros):
+    """Expand each stretch of text with the macro table in force there (see
+    SNAPS).  Text with no markers is one stretch, expanded with `macros`."""
+    parts = _MARK_RE.split(text)
+    if len(parts) == 1:
+        return expand(text, macros)
+    out = [expand(parts[0], SNAPS[0] if SNAPS else macros)]
+    for i in range(1, len(parts), 2):
+        out.append(expand(parts[i + 1], SNAPS[int(parts[i])]))
+    return "".join(out)
 
 
 def expand(text, macros):
