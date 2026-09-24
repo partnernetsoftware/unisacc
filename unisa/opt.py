@@ -1,0 +1,357 @@
+"""-O1/-O2 on the tape: the Python twin of opt_stack() in unisacc_main.c. [H1] [H2]
+
+Both front ends answer table-shaped questions through the same nets, and both
+optimise the same way: `tests/optpy.sh` feeds the C front end's -O0 tape
+through this module and requires the C front end's -O2 tape, byte for byte.
+So every test below is the C code's test, down to which bytes of a line it
+looks at -- a looser Python check would be a different optimiser.
+"""
+import re
+
+SIMPLE = ("imm", "load64", "store64", "sub64", ".ld", ".lea", ".st", "add64",
+          "mul64", "eq", "mov", "slt64", "and64", "ne", "sle64", "or64",
+          "shl64", "shr64", "lshr64", "xor64", "ult64")
+_REG = re.compile(r"r(\d+)")
+LABEL, RET, JUMP, JUMPZ, CALL, FRAME, SIMPLEK, OTHER = range(8)
+
+
+def _isal(c):
+    return c.isalpha() or c == "_"
+
+
+def _regs(s):
+    """every rN in s whose r is not preceded by a letter or _ -- ol_mask"""
+    out = []
+    for m in _REG.finditer(s):
+        p = m.start()
+        if p == 0 or not _isal(s[p - 1]):
+            out.append(int(m.group(1)))
+    return out
+
+
+def _word(ln, w):
+    if not ln.startswith(" "):
+        return False
+    rest = ln[2:]
+    return rest.startswith(w) and (len(rest) == len(w) or rest[len(w)] == " ")
+
+
+def _simple(ln):
+    if len(ln) < 3 or not ln.startswith("  "):
+        return False
+    return ln[2:].split(" ", 1)[0] in SIMPLE
+
+
+def _firstreg(ln):
+    p = ln.find(" ", 2)
+    if p < 0:
+        return -1
+    i = p
+    while i < len(ln):
+        c = ln[i]
+        if (c == "r" and not _isal(ln[i - 1]) and i + 1 < len(ln)
+                and ln[i + 1].isdigit()):
+            j = i + 1
+            while j < len(ln) and ln[j].isdigit():
+                j += 1
+            return int(ln[i + 1:j])
+        if c == "[":
+            return -1
+        i += 1
+    return -1
+
+
+def _writes(ln, z):
+    if _word(ln, "store64") or _word(ln, ".st"):
+        return False
+    if _firstreg(ln) != z:
+        return False
+    p = ln.find(" ", 2)
+    rs = _regs(ln[p:]) if p >= 0 else []
+    return z not in rs[1:]
+
+
+def _names(ln, r):
+    return r in _regs(ln)
+
+
+def _reg(s):
+    """ol_reg: the whole of s is rN"""
+    if len(s) < 2 or s[0] != "r" or not s[1:].isdigit():
+        return -1
+    return int(s[1:])
+
+
+def _push(ln):
+    t = "  store64 [r7+0], "
+    return _reg(ln[len(t):]) if ln.startswith(t) else -1
+
+
+def _pop(ln):
+    t = "  load64 "
+    if not ln.startswith(t):
+        return -1
+    q = ln.find(",", len(t))
+    if q < 0:
+        q = len(ln)
+    if len(ln) - q != 8 or ln[q:] != ", [r7+0]":
+        return -1
+    return _reg(ln[9:q])
+
+
+class _Round:
+    def __init__(self, lines, level):
+        self.L = lines
+        self.level = level
+        self.n = len(lines)
+        self.lab = {}
+        for i, ln in enumerate(lines):
+            if (len(ln) > 1 and ln.endswith(":") and not ln.startswith(" ")
+                    and not ln.startswith(".")):
+                self.lab.setdefault(ln[:-1], i)
+        self.zok = {}
+        if level >= 2:
+            self.zok = {z: True for z in range(2, 6)}
+            self._split()
+            self._prep()
+            for z in range(2, 6):
+                if not self._solve(z):
+                    self.zok[z] = False
+
+    # ---- liveness, as bl_split / ol_prep / ol_scan / bl_solve ----------
+    def _split(self):
+        self.bl_of = [0] * self.n
+        self.bl_s = []
+        cut = True
+        for l, ln in enumerate(self.L):
+            if not ln.startswith(" "):
+                cut = True
+            if cut:
+                self.bl_s.append(l)
+                cut = False
+            self.bl_of[l] = len(self.bl_s) - 1
+            if ln.startswith(" ") and (_word(ln, "jump") or _word(ln, "jumpz")
+                                       or _word(ln, "ret")):
+                cut = True
+        self.live = {}
+
+    def _target(self, ln):
+        p = ln.rfind(" ")
+        t = self.lab.get(ln[p + 1:])
+        return -1 if t is None else self.bl_of[t]
+
+    def _prep(self):
+        K, RM, WM, TG = [], [], [], []
+        for ln in self.L:
+            rm = wm = 0
+            tg = -1
+            if not ln.startswith(" "):
+                k = LABEL
+            elif _word(ln, "ret"):
+                k = RET
+            elif _word(ln, "jump"):
+                k, tg = JUMP, self._target(ln)
+            elif _word(ln, "jumpz"):
+                k, tg = JUMPZ, self._target(ln)
+                for r in _regs(ln):
+                    if r < 16:
+                        rm |= 1 << r
+            elif _word(ln, "call"):
+                k, tg = CALL, self._target(ln)
+            elif _word(ln, ".frame"):
+                k = FRAME
+            elif _simple(ln):
+                k = SIMPLEK
+                m = 0
+                for r in _regs(ln):
+                    if r < 16:
+                        m |= 1 << r
+                f = -1
+                if not _word(ln, "store64") and not _word(ln, ".st"):
+                    f = _firstreg(ln)
+                if f >= 0:
+                    wm = 1 << f
+                    rm = m & ~(1 << f)
+                    if not _writes(ln, f):
+                        rm |= 1 << f
+                else:
+                    rm = m
+            else:
+                k, rm = OTHER, 255
+            K.append(k); RM.append(rm); WM.append(wm); TG.append(tg)
+        self.K, self.RM, self.WM, self.TG = K, RM, WM, TG
+
+    def _scan(self, z, l):
+        live = self.live[z]
+        bit = 1 << z
+        K, RM, WM, TG = self.K, self.RM, self.WM, self.TG
+        while l < self.n:
+            k = K[l]
+            if k == LABEL:
+                return live[self.bl_of[l]]
+            if k == RET:
+                return 0
+            if k == JUMP:
+                t = TG[l]
+                return 1 if t < 0 else live[t]
+            if k == JUMPZ:
+                if RM[l] & bit:
+                    return 1
+                t = TG[l]
+                if t < 0 or live[t]:
+                    return 1
+            elif k == CALL:
+                t = TG[l]
+                if t < 0 or live[t]:
+                    return 1
+            elif k != FRAME:
+                if RM[l] & bit:
+                    return 1
+                if WM[l] & bit:
+                    return 0
+            l += 1
+        return 1
+
+    def _solve(self, z):
+        live = self.live[z] = [0] * len(self.bl_s)
+        changed, rounds = True, 0
+        while changed and rounds < 64:
+            changed = False
+            rounds += 1
+            for b in range(len(self.bl_s) - 1, -1, -1):
+                s = self.bl_s[b]
+                v = self._scan(z, s + 1 if not self.L[s].startswith(" ") else s)
+                if v and not live[b]:
+                    live[b] = 1
+                    changed = True
+        return not changed
+
+    def dead(self, z, frm):
+        if not self.zok.get(z):
+            return False
+        return self._scan(z, frm) == 0
+
+    # ---- the rewrites --------------------------------------------------
+    def local(self, i, out):
+        """imm r2, N / sub64 rD, r6, r2 / .ld rD, [rD+0], W -- ol_local"""
+        L = self.L
+        if i + 2 >= self.n or not self.zok.get(2):
+            return False
+        a = L[i]
+        t = "  imm r2, "
+        if not a.startswith(t) or len(a) <= len(t) or not a[len(t):].isdigit():
+            return False
+        num = a[len(t):]
+        b = L[i + 1]
+        t = "  sub64 r"
+        if not b.startswith(t) or len(b) <= len(t):
+            return False
+        d = ord(b[9]) - 48
+        if d < 0 or d > 7 or d in (2, 6, 7):
+            return False
+        if len(b) != 9 + 9:
+            return False
+        q = 10
+        if b[q] != "," or b[q + 2] != "r" or b[q + 3] != "6" or \
+                b[q + 6] != "r" or b[q + 7] != "2":
+            return False
+        c = L[i + 2]
+        ld, k = 0, 0
+        if c.startswith("  .ld r") and len(c) > 7:
+            k = 7
+            if ord(c[k]) - 48 == d:
+                ld = 1
+        if ld == 0:
+            if not (c.startswith("  load64 r") and len(c) > 10):
+                return False
+            k = 10
+            if ord(c[k]) - 48 != d:
+                return False
+            ld = 2
+        q = k + 1
+        if len(c) < q + 8:
+            return False
+        if c[q] != "," or c[q + 2] != "[" or c[q + 3] != "r" or \
+                ord(c[q + 4]) - 48 != d:
+            return False
+        if c[q + 5] != "+" or c[q + 6] != "0" or c[q + 7] != "]":
+            return False
+        if ld == 2 and q + 8 != len(c):
+            return False
+        if ld == 1 and (q + 8 >= len(c) or c[q + 8] != ","):
+            return False
+        if not self.dead(2, i + 3):
+            return False
+        if ld == 1:
+            out.append("  .ld r%d, [r6-%s]%s" % (d, num, c[q + 8:]))
+        else:
+            out.append("  load64 r%d, [r6-%s]" % (d, num))
+        return True
+
+    def run(self):
+        L, n, out, hits, i = self.L, self.n, [], 0, 0
+        while i < n:
+            if i + 3 < n and L[i] == "  .frame 8":
+                x = _push(L[i + 1])
+                if x >= 0:
+                    j, ok = i + 2, False
+                    while j < n and j <= i + 18:
+                        y = _pop(L[j])
+                        if y >= 0:
+                            ok = j + 1 < n and L[j + 1] == "  .frame -8"
+                            break
+                        if not _simple(L[j]) or _names(L[j], 7):
+                            break
+                        j += 1
+                    z = -1
+                    if ok:
+                        if any(_names(L[k], y) for k in range(i + 2, j)):
+                            ok = False
+                        if j > i + 2 and x == y:
+                            ok = False
+                        if not ok and self.level >= 2:
+                            for zz in (3, 4, 5):
+                                if z >= 0:
+                                    break
+                                if zz in (x, y):
+                                    continue
+                                if any(_names(L[k], zz) for k in range(i + 2, j)):
+                                    continue
+                                if self.dead(zz, j + 2):
+                                    z = zz
+                    if ok:
+                        if x != y:
+                            out.append("  mov r%d, r%d" % (y, x))
+                        out.extend(L[i + 2:j])
+                        hits += 1
+                        i = j + 2
+                        continue
+                    if z >= 0:
+                        out.append("  mov r%d, r%d" % (z, x))
+                        out.extend(L[i + 2:j])
+                        out.append("  mov r%d, r%d" % (y, z))
+                        hits += 1
+                        i = j + 2
+                        continue
+            if self.level >= 2 and self.local(i, out):
+                hits += 1
+                i += 3
+                continue
+            out.append(L[i])
+            i += 1
+        return out, hits
+
+
+def optimise(text, level):
+    """the tape text at -O<level>, as the C front end writes it"""
+    if level <= 0:
+        return text
+    nl = text.endswith("\n")
+    lines = text.split("\n")
+    if nl:
+        lines = lines[:-1]
+    for _ in range(4):
+        lines, hits = _Round(lines, level).run()
+        if hits == 0:
+            break
+    return "\n".join(lines) + ("\n" if nl else "")
