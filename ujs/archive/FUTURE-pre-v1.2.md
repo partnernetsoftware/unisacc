@@ -1,7 +1,10 @@
-# UJS / UNISA — 路线与产品化
+# UJS / UNISA — 路线与产品化（归档）
+
+> **已归档。** 目标与下一刀已并入 [`../prd.md`](../prd.md) §7–§8（v1.2）。勿再改本稿。  
+> 文内相对链接按原 `ujs/FUTURE.md` 位置书写，可能失效。
 
 > 用效果说话；实践车逼 Host。构造权重，不训练填表。  
-> 契约：[HOST_ABI.md](uxe/HOST_ABI.md) · 平台：[PLATFORM.md](uxe/PLATFORM.md) · 地图：[DOCS.md](DOCS.md)
+> 契约：[HOST_ABI.md](../uxe/HOST_ABI.md) · 平台：[PLATFORM.md](../uxe/PLATFORM.md) · 地图：[DOCS.md](../DOCS.md)
 
 ---
 

@@ -1,6 +1,6 @@
 # UJS —— 规格 v1.0（归档）
 
-> **已归档。** 活规格见 [`../prd.md`](../prd.md) v1.1。  
+> **已归档。** 活规格见 [`../prd.md`](../prd.md) v1.2（规格 + 目标）。  
 > 本文保留完整 [L/V/A/G/X/IC/…] 条款表，供对照；勿当当前交付面真源。
 
 # UJS —— 规格 v1.0
@@ -17,7 +17,7 @@
 **交付**：
 1. **JS 产品 / 库** —— `ujs/web` + `package.json`：`bootRuntime` / `wasm_run`（浏览器 · Node · Bun）
 2. **站点 / 示例** —— `web/index.html` playground（`npm run demo`）；**UXE** `web/engine/`（`demo/` 源码测 · `ship/` 发布面：html + `{game}.wasm` + `engine.wasm`）；可选 `web/game/`（Three 对照，非 API 契约）
-3. **`js2wasm`** —— 全量 UJS-1 → `.wasm`（construct CLI；C VM via zig）
+3. **`ujs2wasm`** —— 全量 UJS → `.wasm`（construct CLI；C VM via zig；原名 `js2wasm`）
 4. **构造侧** —— `ujs/construct/`（Python gold / front / build；非应用依赖）
 
 浏览器与 Node 跑的是 WASM + ESM；**不在页面训练**。构造：`python3 -m ujs web-build`。  
@@ -215,7 +215,7 @@ python3 -m ujs acc
 python3 -m ujs compile file.ujs -o out.fn
 python3 -m ujs run file.ujs [--globals JSON] [--locals JSON]
 python3 -m ujs wasm-run file.ujs ...
-python3 -m ujs js2wasm file.ujs -o out.wasm   # 全量 UJS-1 → .wasm（main_export）
+python3 -m ujs ujs2wasm file.ujs -o out.wasm   # 全量 UJS → .wasm（main_export）
 python3 -m ujs web-build                       # ask runtime + full demos
 python3 -m ujs fold file.ujs
 python3 -m ujs ship --out kit.zip

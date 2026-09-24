@@ -1,13 +1,15 @@
-# UXE · 游戏平台方向
+# UXE · 游戏平台方向（归档）
+
+> **已归档。** 平台叙事已并入 [`../prd.md`](../prd.md) 记忆宫殿；Host 真源仍是 [`../uxe/HOST_ABI.md`](../uxe/HOST_ABI.md)。
 
 > 短文：平台怎么从 Host + 多款 ship 长出来。  
-> **契约真源**仍是 [`HOST_ABI.md`](HOST_ABI.md)；产品化下一刀见 [`FUTURE.md`](../../FUTURE.md)。
+> **契约真源**仍是 [`HOST_ABI.md`](HOST_ABI.md)；规格与下一刀见 [`prd.md`](../prd.md) §7–§8。
 
 ## 一句话
 
 **同一套 Host API + 可换 `{game}` 核 + 用户可选自带 LLM API** → 可外网玩的游戏平台。  
 小游戏是 Host 的压力测试；**无人门禁**（`npm run test:uxe:all`）代替人肉点鼠标。  
-代理开发：断言写在 snapshot JSON 上（[`prd.md`](../../prd.md) §6），截图非默认。
+代理开发：断言写在 snapshot JSON 上（[`prd.md`](../prd.md) §6），截图非默认。
 
 ## 三块积木
 
@@ -44,7 +46,7 @@ cd ujs && npm run ship:pages && npm run test:uxe:all
   → （可选）壳打开 LLM
 ```
 
-今日缺口：① eng ABI 下沉 ② 统一 bake / `{app}` 叙事 ③ host_llm 有玩法再开。  
+今日缺口（与 [`prd.md`](../prd.md) §8 对齐）：① eng ABI 下沉 ② `{app}` 接 ujs2wasm ③ 换核模板 / 门禁契约。host_llm 有玩法再开。  
 WebRTC Live 仅为联网实验，**非**产品缺口清单项；见 [`docs/uxe/live/README.md`](../../../docs/uxe/live/README.md)。
 
 ## 明确不做
@@ -56,7 +58,6 @@ WebRTC Live 仅为联网实验，**非**产品缺口清单项；见 [`docs/uxe/l
 | 文档 | 用途 |
 |---|---|
 | [`HOST_ABI.md`](HOST_ABI.md) | Host API 真源 |
-| [`../../prd.md`](../../prd.md) | 产品规格 · 代理观测 §6 |
+| [`../prd.md`](../prd.md) | 产品规格 · 当前目标 §7–§8 · 代理观测 §6 |
 | [`README.md`](README.md) | UXE 目录 |
 | [`archive/`](archive/) | 下架车 |
-| [`../../FUTURE.md`](../../FUTURE.md) | 产品化下一刀 |

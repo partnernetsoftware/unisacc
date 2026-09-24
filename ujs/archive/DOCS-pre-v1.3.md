@@ -1,4 +1,6 @@
-# UJS 文档地图
+# UJS 文档地图（归档）
+
+> **已归档。** 活文档见 [`../prd.md`](../prd.md) v1.3（思维树 · 记忆宫殿）。
 
 入口按读者分流。**文档必须与代码同步**：改 ABI、目录或门禁时，同会话改相关 README。
 
@@ -22,7 +24,7 @@
 |---|---|
 | [`README.md`](README.md) | 安装、`wasm_run`、分发 |
 | [`core/README.md`](core/README.md) | core 文件表 |
-| [`prd.md`](prd.md) | 产品活规格 v1.1 |
+| [`prd.md`](prd.md) | 产品活规格 **+ 当前目标**（v1.2） |
 | [`TOOLS.md`](TOOLS.md) | CLI、发版、门禁 |
 | [`package.json`](package.json) | 版本与 npm scripts |
 
@@ -36,7 +38,6 @@
 | [`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) | Host API 真源 |
 | [`uxe/PLATFORM.md`](uxe/PLATFORM.md) | 平台叙事 |
 | [`../docs/uxe/live/README.md`](../docs/uxe/live/README.md) | WebRTC 实验经验（非主线） |
-| [`FUTURE.md`](FUTURE.md) | 下一刀 |
 
 **交付面（外网）**
 
@@ -73,7 +74,7 @@ npm run test:uxe:all
 
 ## 同步规则
 
-1. 产品规格认 `prd.md`。  
+1. 产品规格与当前目标认 `prd.md`。  
 2. 改 `host_*` / UXEP·UXIN → `uxe/HOST_ABI.md` + 门禁。  
 3. 改 core 布局 / exports → `core/README.md` + `package.json` + `tests/ujs.sh`。  
-4. 过期实践车 → `uxe/archive/`。
+4. 过期实践车 → `uxe/archive/`；过期规格/路线 → `archive/`。

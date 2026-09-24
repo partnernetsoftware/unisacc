@@ -102,7 +102,7 @@ Hot sites query `ask(ic, (shape, op, guard)) → stub_kind` from a finite stub c
 
 ### 5.5 Wasm lower and product
 
-`isel` / `enc` / `reloc` go only through the oracle [LW-4]. Constructor CLI builds `ujs_full.wasm` and demos; `js2wasm` emits standalone UJS-1 programs. Page/Node loads ESM + wasm; training never runs in the page.
+`isel` / `enc` / `reloc` go only through the oracle [LW-4]. Constructor CLI builds `ujs_full.wasm` and demos; `ujs2wasm` emits standalone UJS programs. Page/Node loads ESM + wasm; training never runs in the page.
 
 ### 5.6 Front parity
 
@@ -127,7 +127,7 @@ We claim properties checked by `./tests/ujs.sh` (and the CLI commands it wraps).
 | Product path | **in-page `wasm_run`** | Node loads `ujs_full.wasm` via `bootRuntime`; probes incl. G/L binding, spread, arrows |
 | Package contract | npm entry check | exports `bootRuntime` / `wasm_run` |
 
-Optional CI/context: `js2wasm` and full demo wasm instantiate under Node when available—still pass/fail, not benchmark tables.
+Optional CI/context: `ujs2wasm` and full demo wasm instantiate under Node when available—still pass/fail, not benchmark tables.
 
 **Optional qualitative artifact (not a metric).** The repository ships a static playground (`npm run demo`); an UXE Host-ABI **source** demo under `ujs/web/engine/demo/`; an UXE **ship** surface under `ujs/web/engine/ship/` consisting of static `index.html` plus two **separate** Wasm modules—`{game}.wasm` (game core) and `engine.wasm` (the `ujs_full.wasm` VM under a delivery name)—and a Three.js contrast page under `ujs/web/game/`. These illustrate the product loop without contributing latency or accuracy claims beyond the suite table above.
 

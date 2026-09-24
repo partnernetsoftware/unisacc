@@ -1,11 +1,14 @@
-"""js2wasm — UJS-1 → browser-loadable .wasm. [LW-3]
+"""ujs2wasm — UJS → browser-loadable .wasm. [LW-3]
 
-    python3 -m ujs js2wasm prog.ujs -o prog.wasm
+    python3 -m ujs ujs2wasm prog.ujs -o prog.wasm
 
-Default: full UJS-1 (str/list/dict/fn/...) via freestanding C VM (zig cc).
-Exports: memory, main_export / run_prog, tag_of_export, i64_of_export,
-         str_ptr_export, str_len_export.
+Default: **direct** emit (jtape → WAT → wat2wasm) when ``isel``/codegen
+cover the program — no C VM in the artifact. Only true surface gaps
+(``restpack``/… until emit lands) fall back to the C-VM embed via zig.
 
+Force paths: ``--mode direct`` / ``--mode vm``.
+
+Exports (both paths): main_export, tag_of_export, i64_of_export, …
 """
 from __future__ import annotations
 
@@ -14,17 +17,17 @@ import subprocess
 import tempfile
 
 from .bc_encode import encode_fn, EncodeError
+from .emit_wasm import DirectEmitError, can_emit_direct, emit_wasm
 from .front.compile import compile_src, CompileError
 from .oracle import Oracle
 from .wat_vm import pack_program
 
-# construct/ → ujs/
 _UJS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VM_C = os.path.join(_UJS, "native", "ujs_vm.c")
 IC_C = os.path.join(_UJS, "native", "ujs_ic_net.c")
 
 
-class Js2WasmError(Exception):
+class Ujs2WasmError(Exception):
     pass
 
 
@@ -78,7 +81,8 @@ def _zig_cc_wasm(sources, out_path, defines=None):
     subprocess.check_call(cmd)
 
 
-def js2wasm(src: str, out_path: str) -> dict:
+def _ujs2wasm_vm(src: str, out_path: str) -> dict:
+    """Phase-1 helper: bytecode + C VM → wasm via zig."""
     _ensure_ic_net()
     o = Oracle(drive="gold")
     try:
@@ -86,9 +90,8 @@ def js2wasm(src: str, out_path: str) -> dict:
         blob = encode_fn(fn)
         image = pack_program(blob)
     except (CompileError, EncodeError, SyntaxError, AssertionError) as e:
-        raise Js2WasmError(str(e)) from e
+        raise Ujs2WasmError(str(e)) from e
 
-    # generate embed.c
     with tempfile.TemporaryDirectory() as td:
         emb = os.path.join(td, "embed.c")
         with open(emb, "w") as f:
@@ -106,16 +109,57 @@ def js2wasm(src: str, out_path: str) -> dict:
             f.write("const u32 ujs_embed_len = %u;\n" % len(image))
         _zig_cc_wasm([VM_C, IC_C, emb], out_path, defines=["UJS_EMBED"])
 
-    magic = open(out_path, "rb").read(4)
-    if magic != b"\0asm":
-        raise Js2WasmError("not a wasm module")
+    if open(out_path, "rb").read(4) != b"\0asm":
+        raise Ujs2WasmError("not a wasm module")
     return {
         "wasm": out_path,
         "bytes": os.path.getsize(out_path),
         "image": len(image),
+        "direct": False,
         "full": True,
     }
 
 
-def js2wasm_file(path: str, out_path: str, **kw) -> dict:
-    return js2wasm(open(path).read(), out_path, **kw)
+def _ujs2wasm_direct(src: str, out_path: str) -> dict:
+    o = Oracle(drive="gold")
+    try:
+        fn = compile_src(src, o)
+    except (CompileError, SyntaxError, AssertionError) as e:
+        raise Ujs2WasmError(str(e)) from e
+    ok, why = can_emit_direct(fn, o)
+    if not ok:
+        raise Ujs2WasmError("direct: %s" % why)
+    try:
+        return emit_wasm(fn, out_path, o)
+    except DirectEmitError as e:
+        raise Ujs2WasmError("direct emit: %s" % e) from e
+
+
+def ujs2wasm(src: str, out_path: str, mode: str = "auto") -> dict:
+    """Compile UJS source to ``out_path``.
+
+    mode: ``auto`` (direct if covered else vm), ``direct``, ``vm``.
+    """
+    if mode not in ("auto", "direct", "vm"):
+        raise Ujs2WasmError("bad mode %r" % mode)
+
+    if mode == "vm":
+        return _ujs2wasm_vm(src, out_path)
+
+    if mode == "direct":
+        return _ujs2wasm_direct(src, out_path)
+
+    # auto: try direct when isel+emit cover; do not swallow emit failures
+    o = Oracle(drive="gold")
+    try:
+        fn = compile_src(src, o)
+    except (CompileError, SyntaxError, AssertionError) as e:
+        raise Ujs2WasmError(str(e)) from e
+    ok, why = can_emit_direct(fn, o)
+    if ok:
+        return emit_wasm(fn, out_path, o)
+    return _ujs2wasm_vm(src, out_path)
+
+
+def ujs2wasm_file(path: str, out_path: str, **kw) -> dict:
+    return ujs2wasm(open(path).read(), out_path, **kw)

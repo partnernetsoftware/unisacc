@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * Build asteroid.wasm = game core ONLY (no UJS VM).
- * Engine is separate: ship/engine.wasm (= ujs_full.wasm).
+ * LEGACY — C asteroid.wasm builder (eng_* dual-memory).
+ * Out of shipping path: use build-asteroid-pages.mjs (ship-js).
+ * Kept for archaeology / optional A/B; do not call from ship-engine.sh.
  */
 import fs from "fs";
 import path from "path";

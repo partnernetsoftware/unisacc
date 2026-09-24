@@ -108,6 +108,6 @@ class Runtime:
         return wasm_run(fn_or_src, globals_map, locals_map, **kw)
 
     def to_wasm(self, src, out_path, **kw):
-        """Compile UJS-1 source to a browser-loadable .wasm (js2wasm)."""
-        from .js2wasm import js2wasm
-        return js2wasm(src, out_path, **kw)
+        """Compile UJS source to a browser-loadable .wasm (ujs2wasm)."""
+        from .ujs2wasm import ujs2wasm
+        return ujs2wasm(src, out_path, **kw)

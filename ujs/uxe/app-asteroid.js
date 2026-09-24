@@ -46,6 +46,9 @@ export async function runAsteroidCore(host, opts) {
     fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
     fnBlob = opts.precompiled.blob || {};
   } else {
+    if (typeof __UXE_SHIP__ !== "undefined" && __UXE_SHIP__) {
+      throw new Error("ship build requires precompiled sim embed");
+    }
     const { compile } = await import("../core/compiler.js");
     const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
     const compiled = compile(simText);

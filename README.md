@@ -301,21 +301,20 @@ enumeration over the whole domain.
 开箱：**浏览器 / Node / Bun** `wasm_run`；Python 仅在 `ujs/construct/` 做出货。
 
 ```js
-import { bootRuntime, wasm_run } from "./ujs/web/wasm_run.js";
-await bootRuntime(new URL("./ujs/web/ujs_full.wasm", import.meta.url));
+import { bootRuntime, wasm_run } from "./ujs/core/wasm_run.js";
+await bootRuntime(new URL("./ujs/core/ujs_full.wasm", import.meta.url));
 console.log((await wasm_run("return 1+2;", {}, {})).ok);
 ```
 
 | | |
 |---|---|
-| 地图 | [`ujs/DOCS.md`](ujs/DOCS.md) |
-| 说明 | [`ujs/README.md`](ujs/README.md) · [`ujs/TOOLS.md`](ujs/TOOLS.md) |
-| 规格 | [`ujs/prd.md`](ujs/prd.md) |
+| 规格 | [`ujs/prd.md`](ujs/prd.md)（思维树 · 记忆宫殿） |
+| 开箱 | [`ujs/README.md`](ujs/README.md) · Host [`ujs/uxe/HOST_ABI.md`](ujs/uxe/HOST_ABI.md) |
 | 论文 B | [`research/ujs-paper-outline.md`](research/ujs-paper-outline.md) · [`research/README.md`](research/README.md) |
-| 演示 | `npm run demo` → `/game/` |
-| 验收 | `./tests/ujs.sh` |
+| 演示 | `cd ujs && npm run demo` |
+| 验收 | `./tests/ujs.sh` · `cd ujs && npm run test:uxe:all` |
 | 本地产物 | `python3 -m ujs web-build` |
-| 发版附件 | `./ujs/scripts/release-artifacts.sh` → `dist/`（手动上传 GitHub Release） |
+| 发版附件 | `./ujs/scripts/release-artifacts.sh` → `dist/`（上传 GitHub Release） |
 
 与 C 线共享构造代数；**不**把 Web 并入 `unisa` 交付范围。
 

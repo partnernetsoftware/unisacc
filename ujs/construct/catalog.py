@@ -47,10 +47,13 @@ STUBS = (
 )
 
 # ---- wasm lowering --------------------------------------------------------
+# poly_bin / heap / typeof: constructed forms so isel never needs "trap" for
+# in-language ops (emit asks the table; missing coverage is a gold bug).
 WASM_FORMS = (
     "nop", "i64_bin", "f64_bin", "i64_cmp", "f64_cmp",
     "bool_logic", "local", "global", "const",
     "br", "br_if", "call", "ret",
+    "poly_bin", "heap", "typeof",
     "host", "trap",
 )
 IMMCLASS = ("none", "i64", "f64", "bool", "str_ix", "slot", "label", "count")
@@ -86,8 +89,11 @@ def shape_of(ty, keysig):
 def isel_form(op):
     if op in ("nop", "drop", "ic_enter"):
         return "nop"
-    if op in ("add", "sub", "mul", "mod"):
-        return "i64_bin"          # default; type stage narrows at emit
+    # add is poly (i64 | str | f64); sub/mul/mod stay numeric-bin default
+    if op == "add":
+        return "poly_bin"
+    if op in ("sub", "mul", "mod"):
+        return "i64_bin"
     if op == "div":
         return "f64_bin"
     if op in ("lt", "le", "gt", "ge", "eq", "ne"):
@@ -108,6 +114,11 @@ def isel_form(op):
         return "call"
     if op == "ret":
         return "ret"
+    if op in ("idx", "setidx", "dot", "len", "keys", "in",
+              "mklist", "mkdict", "mktup", "spread", "restpack"):
+        return "heap"
+    if op in ("typeof", "shapeof"):
+        return "typeof"
     if op == "print":
         return "host"
     return "trap"
@@ -127,7 +138,13 @@ def enc_template(form, imm):
     if form == "const":
         return "op_imm" if imm != "none" else "op"
     if form in ("i64_bin", "f64_bin", "i64_cmp", "f64_cmp", "bool_logic",
-                "call", "ret"):
+                "poly_bin", "typeof", "call", "ret"):
+        return "op"
+    if form == "heap":
+        if imm in ("count", "str_ix"):
+            return "op_imm"
+        if imm == "slot":
+            return "op_slot"
         return "op"
     return "trap"
 

@@ -1,15 +1,11 @@
 # construct — 构造侧（非应用运行时）
 
-Python：gold 表、走查、jtape/VM、IC、`web-build`、CLI。
+Python：gold、走查、jtape/VM、`web-build`、`ujs2wasm`、CLI。规格见 [`../prd.md`](../prd.md)。
 
 ```bash
-python3 -m ujs web-build   # → ../core/ujs_full.wasm + compiler.gen.js + BUILD.json
+python3 -m ujs web-build    # → ../core/
+python3 -m ujs ujs2wasm foo.ujs -o foo.wasm
 python3 -m ujs acc
-from ujs.construct import Runtime
 ```
 
-应用请用 [`../package.json`](../package.json) / [`../core/`](../core/)。  
-C 源在 [`../native/`](../native/)（VM + UXE 游戏核）。  
-本目录**不是**训练入口；出货权重由构造代数枚举生成。
-
-地图：[`../DOCS.md`](../DOCS.md)。
+应用用 [`../core/`](../core/)。C 源在 [`../native/`](../native/)。**不是**训练入口。

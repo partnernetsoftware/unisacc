@@ -156,7 +156,7 @@ def cmd_ship(a):
     """[X-7] kit: JS product + weights + VM + sample + MANIFEST."""
     import zipfile
     from .build.ic_c import emit as emit_ic
-    from .js2wasm import js2wasm
+    from .ujs2wasm import ujs2wasm
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
     nets = build_nets(verify=True)
@@ -178,7 +178,7 @@ def cmd_ship(a):
         emit_ic(os.path.join(td, "ujs_ic_net.c"))
         ic_c = open(os.path.join(td, "ujs_ic_net.c"), "rb").read()
         sample = os.path.join(td, "fact.wasm")
-        js2wasm(
+        ujs2wasm(
             "let n=5; let f=1; while(n>0){f=f*n; n=n-1;} return f;",
             sample,
         )
@@ -250,7 +250,7 @@ def cmd_web_build(a):
           info["stages"], "stages")
     # full UJS VM runtime (host loads image into memory)
     import subprocess, os
-    from .js2wasm import _ensure_ic_net, VM_C, IC_C
+    from .ujs2wasm import _ensure_ic_net, VM_C, IC_C
     _ensure_ic_net()
     full = os.path.join(a.out, "ujs_full.wasm")
     subprocess.check_call([
@@ -277,8 +277,8 @@ def cmd_web_build(a):
         "-o", full, VM_C, IC_C,
     ])
     print("full", full, os.path.getsize(full), "bytes")
-    # prebuild demo programs via js2wasm into web/demos/
-    from .js2wasm import js2wasm
+    # prebuild demo programs via ujs2wasm into core/progs/
+    from .ujs2wasm import ujs2wasm
     demo_dir = os.path.join(a.out, "progs")
     os.makedirs(demo_dir, exist_ok=True)
     demos = {
@@ -303,7 +303,7 @@ return sum(10, 20, 30);
     meta = {}
     for name, src in demos.items():
         path = os.path.join(demo_dir, name + ".wasm")
-        info2 = js2wasm(src, path)
+        info2 = ujs2wasm(src, path)
         meta[name] = {"src": src.strip(), "wasm": "progs/%s.wasm" % name,
                       "bytes": info2["bytes"]}
     import json
@@ -319,16 +319,18 @@ return sum(10, 20, 30);
     return 0
 
 
-def cmd_js2wasm(a):
-    from .js2wasm import js2wasm_file, Js2WasmError
+def cmd_ujs2wasm(a):
+    from .ujs2wasm import ujs2wasm_file, Ujs2WasmError
     try:
-        info = js2wasm_file(a.file, a.out)
-    except Js2WasmError as e:
-        print("js2wasm:", e, file=sys.stderr)
+        info = ujs2wasm_file(a.file, a.out, mode=a.mode)
+    except Ujs2WasmError as e:
+        print("ujs2wasm:", e, file=sys.stderr)
         return 1
-    print("wrote %s (%d bytes%s)" % (
+    how = "direct" if info.get("direct") else "vm"
+    print("wrote %s (%d bytes%s, %s)" % (
         info["wasm"], info["bytes"],
-        (", image %d" % info["image"]) if info.get("image") else ""))
+        (", image %d" % info["image"]) if info.get("image") else "",
+        how))
     return 0
 
 
@@ -397,10 +399,12 @@ def main(argv=None):
     wb.add_argument("--out", default=os.path.join("ujs", "core"))
     wb.set_defaults(func=cmd_web_build)
 
-    j = sp.add_parser("js2wasm", help="UJS-1 → .wasm (full VM via zig)")
+    j = sp.add_parser("ujs2wasm", help="UJS → .wasm (direct \\0asm; vm fallback)")
     j.add_argument("file")
     j.add_argument("-o", "--out", required=True)
-    j.set_defaults(func=cmd_js2wasm)
+    j.add_argument("--mode", choices=("auto", "direct", "vm"), default="auto",
+                   help="auto=direct if i64-subset else C-VM; direct|vm force")
+    j.set_defaults(func=cmd_ujs2wasm)
 
     args = p.parse_args(argv)
     return args.func(args)

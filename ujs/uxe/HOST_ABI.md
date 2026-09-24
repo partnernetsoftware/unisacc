@@ -24,19 +24,19 @@
 
 ---
 
-## 0. Ship 胶水为什么看起来「厚」
+## 0. Ship 胶水（ship-js 现状）
 
-Pages 上 `index.html` 内联了约 40KB+ JS。拆开看：
+Asteroid / 无人机 **Pages 已走 ship-js**：`game.js` + 共享 `engine.js` + `engine.wasm`，**无** `{game}.wasm`、**无** `eng_boot` / `eng_sim_step` 双 memory 搬砖。  
+玩法步进经产品 API `wasm_run`（路径 A）；路径 B（`ujs2wasm` 直出接核）见 [`prd.md`](../prd.md) 目标 #2b。
 
-| 块 | 大约 | 能否沉进 `engine.wasm` |
-|---|---|---|
-| **WebGL / WebGPU 译包**（`host-browser` + renderer） | 大半 | **否** — 必须调浏览器 GPU API；Host 边界就是为这个留的 |
-| **UXEP/UXIN 编解码** | 小 | 游戏核已在 C 侧编码 packet；JS 解码留给 Host |
-| **`eng_boot` / `eng_sim_step` 双 memory 搬砖**（list↔数组、字典回写） | 中 | **是 · 下一刀** — 应收成 `engine.wasm` 导出的稳定 `eng_step(packed_state)`，页内只剩 instantiate + 调一次 |
-| DOM / fetch / rAF | 薄 | 否 — 壳的事 |
+| 块 | 落点 |
+|---|---|
+| WebGL / WebGPU 译包 | Host（不可沉） |
+| UXEP/UXIN | Host 编解码 · 核只调 `host_*` |
+| 玩法调度 | `app-*.js`（ship 预编译 embed · 禁拉 `compiler.gen`） |
+| 遗留 C 双 wasm + eng_* | `native/uxe_asteroid.c` · `ship/host-entry.js` · `build-asteroid.mjs` — **不再出货** |
 
-原则：**能沉的是「引擎协议」**（UJS 步进、状态打包），**不能沉的是「宿主能力」**（GPU、输入设备、密钥、网络）。  
-缩胶水 = 加厚 `engine.wasm` 的 eng ABI，不是把 WebGPU 塞进 freestanding wasm。
+门禁：`./tests/uxe_ship_js.sh`（无 eng_* · 无 asteroid.wasm · game-ready emit）。
 
 ---
 
@@ -77,12 +77,7 @@ Pages 上 `index.html` 内联了约 40KB+ JS。拆开看：
 - 页参：`?gpu=auto|webgpu|webgl`  
 - 约束：WebGPU pipeline **建造成功**后才锁 `getContext("webgpu")`，否则无法回退
 
-ship 另有胶水桥（**不是** Host ABI 本体，只在页内）：
-
-| 符号 | 作用 |
-|---|---|
-| `eng_boot(image_ptr, len)` | 把预编译 UJS image 装进 `engine.wasm` |
-| `eng_sim_step(...)` | 一帧/一步玩法；胶水在双 memory 之间搬状态 |
+出货路径为 **ship-js**（见 §0）。遗留 C 双 wasm 曾用页内 `eng_boot` / `eng_sim_step`（`ship/host-entry.js`），**不再出货**。
 
 ---
 
@@ -204,13 +199,13 @@ docs/uxe/{game}/*.wasm
 cd ujs && npm run ship:pages    # 先 engine.js，再 asteroid + drone
 ```
 
-`eng_sim_step` 双 memory 搬砖仍在 JS ship 胶水（§0「下一刀」）；沉 wasm 前页内体积会继续偏厚。
+两款均为 ship-js：`game.js` + `engine.wasm` + 共享 `../engine.js`（无 `{game}.wasm`）。
 
 ---
 
 ## 7. 扩展路线（Host 加厚）
 
-对标 Three 常用子集 → 见 `FUTURE.md` P0.4。摘要：
+对标 Three 常用子集 → 见 [`prd.md`](../prd.md) 目标 #5。摘要：
 
 | 档 | 能力 | 落点 |
 |---|---|---|
@@ -242,7 +237,7 @@ cd ujs && npm run ship:pages    # 先 engine.js，再 asteroid + drone
 | 限流 / 超时 / 取消在 Host | 核保持同步帧友好 |
 | 与玩法解耦：LLM 是 **Host 能力**，不是 UJS 语言特性 | 无 API 的部署仍可跑纯本地游戏 |
 
-平台叙事与目录约定见 [`PLATFORM.md`](PLATFORM.md)。
+规格与目标见 [`../prd.md`](../prd.md)。
 
 ---
 
