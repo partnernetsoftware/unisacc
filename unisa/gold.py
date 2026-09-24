@@ -171,9 +171,13 @@ def type_label(t1, op, t2):
                                        # yields its right operand; v1 had no
                                        # rule so it fell through to illegal
     if op in ("<", "=="):
+        # C99 6.5.8p6, 6.5.9p3: a relational or equality operator yields an
+        # INT, 0 or 1.  This said i64 -- the same shortcut as [G-2] -- and the
+        # gold audit against cc [A-50] found it on its first run: 200 keys,
+        # `sizeof(a < b)` was 8.
         if (t1 in FLT or t2 in FLT) and not (t1 in NUM + FLT and t2 in NUM + FLT):
             return "illegal"
-        return "i64"
+        return "i32"
     if op in ("+", "-", "*", "/") and (t1 in FLT or t2 in FLT):
         # arithmetic with a floating operand; % and the bitwise operators
         # have no floating rows (6.5.5p2, 6.5.10-12) and stay illegal below

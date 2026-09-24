@@ -143,6 +143,10 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         if fault == "arm_gate" and gate in ("svc0", "svc80"):
             gate = "svc0" if gate == "svc80" else "svc80"
         sysno = f["sysno"]
+        if sysno == "none" and not win and op not in C.MOPS:
+            # no number and not a WinAPI call: emitting the gate anyway would
+            # enter the kernel with whatever the number register held
+            raise ValueError("%s: no system call for this on %s" % (op, os_))
         if sysno != "none":
             n = int(sysno, 0)
             if fault == "osx_class_bit" and os_ == "osx":

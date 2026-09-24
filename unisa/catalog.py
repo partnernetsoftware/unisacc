@@ -18,8 +18,13 @@ SYSCALLS = {
     "munmap":        (11, 215, 73, "VirtualFree"),
     "mprotect":      (10, 226, 74, "VirtualProtect"),
     "getpid":        (39, 172, 20, "GetCurrentProcessId"),
-    "clock_gettime": (228, 113, 116, "QueryPerformanceCounter"),
-    "nanosleep":     (35, 101, 240, "Sleep"),
+    # macOS has neither as a system call -- libc builds them from
+    # gettimeofday (a different signature) and __semwait_signal.  They
+    # were 116 and 240 here, and 240 is SYS_listxattr: the syscall audit
+    # against <sys/syscall.h> [A-51] found it on its first run.  None means
+    # the lowering REFUSES the op on osx rather than guess.
+    "clock_gettime": (228, 113, None, "QueryPerformanceCounter"),
+    "nanosleep":     (35, 101, None, "Sleep"),
     "futex":         (202, 98, 515, "WaitOnAddress"),
     "socket":        (41, 198, 97, "WSASocketW"),
     "connect":       (42, 203, 98, "connect"),
@@ -119,6 +124,8 @@ def sysno(op, os_, arch):
     lx, la, ox, _ = SYSCALLS[op]
     if os_ == "lnx":
         return str(lx if arch == "x86_64" else la)
+    if ox is None:                          # no such syscall on this OS
+        return "none"
     return hex(OSX_CLASS_BIT | ox)          # osx, both arches
 
 

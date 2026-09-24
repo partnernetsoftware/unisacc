@@ -477,6 +477,7 @@ int bk_facts(int cop) {
     bkf_hasno = 1;
     if (nm[0] == 110) bkf_hasno = 0;  /* none */
     else bkf_sysno = bk_num(nm, 64);
+
     bkf_arg[0] = bk_regnum(bk_nth(BH_ABI_ARG0, inf(S_ABI, key, HD_ABI_ARG0)));
     bkf_arg[1] = bk_regnum(bk_nth(BH_ABI_ARG1, inf(S_ABI, key, HD_ABI_ARG1)));
     bkf_arg[2] = bk_regnum(bk_nth(BH_ABI_ARG2, inf(S_ABI, key, HD_ABI_ARG2)));
@@ -543,11 +544,23 @@ int tk(int op, long a0, long a1, long a2, long a3) {
 }
 /* setreg dst, (kind, value) -- the kind rides in a3 */
 int tk_setreg(int dst, int kind, long v) { return tk(TO_SETREG, dst, v, 0, kind); }
+/* A SYSTEM CALL with no number that is not a WinAPI call: the gate would
+   enter the kernel with whatever the number register held.  Refused, as
+   lower.py refuses.  (Jumps and calls ask bk_facts too and have no number
+   by nature; only the syscall sequences come here.) */
+int bk_needno(void) {
+    if (bkf_hasno == 0 && bkos != 2) {
+        __write(2, "back end: no system call for this op on this OS\n", 49);
+        __exit(1);
+    }
+    return 0;
+}
 
 /* lower.syscall_seq */
 int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
     int g; int i;
     bk_facts(cop);
+    bk_needno();
     if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno);
     /* a WinAPI call clobbers every tape register, the tape STACK POINTER
        included, so it is bracketed here exactly as the three-argument gate
@@ -569,6 +582,7 @@ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
 int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k3, long v3) {
     int g;
     bk_facts(cop);
+    bk_needno();
     if (bkf_hasno) tk_setreg(bkf_nr, SK_IMM, bkf_sysno);
     if (bkos == 2) tk(TO_WINSAVE, bk_save, 0, 0, 0);
     tk_setreg(bkf_arg[0], k0, v0);

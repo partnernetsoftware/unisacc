@@ -51,6 +51,11 @@
 #               equals the net's own answer -- both orders [A-49]
 #   docs        the stage tables in prd.tree.md, prd.map.md and README.md
 #               are the generated ones, not copies that can drift [A-48]
+#   gold_audit  the type table against the system compiler, key by key:
+#               enumeration proves the net equals the gold, this asks
+#               whether the gold is C [A-50]
+#   abi_audit   the syscall numbers against this machine's <sys/syscall.h>;
+#               each host checks its own column [A-51]
 #   layout      the data layout ENUMERATED, not sampled: every tape of up to
 #               three data definitions, with and without a symbol defined
 #               twice, both back ends, all six targets [A-41] [P-3]
@@ -121,6 +126,8 @@ run bench      ./tests/bench.sh
 run consts     bash -c 'python3 tests/consts_check.py'
 run oracle     bash -c '"${UA:-/tmp/ua_ref}" --check-oracle'
 run docs       ./tests/docs.sh
+run gold_audit bash -c 'python3 tests/gold_audit.py'
+run abi_audit  bash -c 'python3 tests/abi_audit.py'
 run layout     ./tests/layout.sh
 run datashape  ./tests/datashape.sh
 run bigclosure ./tests/bigclosure.sh
