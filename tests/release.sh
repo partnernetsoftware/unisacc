@@ -23,7 +23,12 @@ say() {   # say <what> <ok|FAIL> <detail>
 
 # 1. the tree is committed: a release built from a dirty tree cannot be
 #    rebuilt from the tag it claims to be
-dirty=$(git status --porcelain -- ':!ujs' 2>/dev/null | wc -l | tr -d ' ')
+# Only what the artifact is BUILT from: this tree is shared with another
+# workstream, whose uncommitted files say nothing about whether this release
+# can be rebuilt from its tag.  (The first version looked at everything but
+# ujs/ and failed on eighteen of that workstream's files elsewhere.)
+INPUTS="src unisa kernel include unisacc.c weights"
+dirty=$(git status --porcelain -- $INPUTS 2>/dev/null | wc -l | tr -d ' ')
 say "tree committed" "$([ "$dirty" = 0 ] && echo ok || echo FAIL)" \
     "$([ "$dirty" = 0 ] && echo "clean" || echo "$dirty file(s) uncommitted")"
 
@@ -34,19 +39,25 @@ case "$v" in "unisacc "[0-9]*) say "version string" ok "$v";;
              *) say "version string" FAIL "$v";; esac
 
 # 3. every suite, with a skipped target counted as a failure
-STRICT=1 ./tests/all.sh > "$R/.release.log" 2>&1
+LOG=$(mktemp)                        # not in the tree: nobody commits it
+STRICT=1 ./tests/all.sh > "$LOG" 2>&1
 rc=$?
 say "all suites (STRICT=1)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" \
-    "$(tail -3 "$R/.release.log" | head -1)"
-[ $rc -eq 0 ] || sed -n '/=== summary/,$p' "$R/.release.log" | grep FAIL | head -10
+    "$(tail -3 "$LOG" | head -1)"
+[ $rc -eq 0 ] || sed -n '/=== summary/,$p' "$LOG" | grep FAIL | head -10
 
 # 3b. ...and a suite that SKIPPED is not a suite that passed.  fat is macOS
 #     only, corpus and tools need their corpora present, crossnative needs
 #     the VMs: each is legitimate on some machine and none of them is
 #     legitimate on the machine a release is cut from.
-skipped=$(sed -n '/=== summary/,$p' "$R/.release.log" | grep -ci "skipped" || true)
+# The suites' own words for a skip: "SKIPPED n: target" (crossnative) and
+# "skipped (reason)" (fat, corpus, selfgap).  A bare "skipped" also matched
+# crossnative's "(no target skipped)" -- the gate failed on the sentence
+# saying nothing was skipped.
+SKIPRE='SKIPPED [0-9]|skipped \('
+skipped=$(sed -n '/=== summary/,$p' "$LOG" | grep -cE "$SKIPRE" || true)
 say "nothing skipped" "$([ "$skipped" = 0 ] && echo ok || echo FAIL)" \
-    "$(sed -n '/=== summary/,$p' "$R/.release.log" | grep -i skipped | \
+    "$(sed -n '/=== summary/,$p' "$LOG" | grep -E "$SKIPRE" | \
        sed 's/^  ok *//' | tr '\n' ';' | cut -c1-70)"
 
 # 4. the artifact, if asked: built here for all six targets, then run
