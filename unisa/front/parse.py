@@ -97,6 +97,14 @@ class CError(Exception):
     pass
 
 
+class CErrors(CError):
+    """More than one error from one walk [S-15 C3]: each carries the token
+    it was raised at; the driver locates them one by one."""
+    def __init__(self, errors):
+        CError.__init__(self, "%d errors" % len(errors))
+        self.errors = errors
+
+
 class Walker:
     def __init__(self, toks, oracle):
         self.tk, self.i = toks, 0
@@ -113,6 +121,7 @@ class Walker:
         self.off = 0
         self.maxoff = 0
         self.loops = []           # (continue, break, vla depth)
+        self.errors = []          # every CError this walk recovered from
         self.switch = []          # dicts for the open switch statements
         self.ret_label = None     # set while a function body is being walked
         self.called = {}          # name -> line, checked once the WALK ends
@@ -477,22 +486,64 @@ class Walker:
         self.tu()
         return self.finish_program()
 
+    MAXERR = 20                  # as the C front end's -ferror-limit default
+
     def tu(self):
-        """One translation unit."""
+        """One translation unit.  An error does not end the walk: it is
+        recorded at its token, the cursor moves past the construct it was
+        in, the walker's per-function state is dropped, and the next
+        top-level construct is walked [S-15 C3].  The C front end does the
+        same with a parked cursor; here the exception unwinds for us."""
         while True:
-            p = self.ask("top")                                  # [W-3]
-            if p == "end":
-                break
-            if p == "typedef":
-                self.do_typedef()
-            elif p == "enum":
-                self.do_enum()
-            elif p in ("struct", "global"):
-                self.do_global()
-            else:
-                raise CError("line %d: unexpected %r at top level"
-                             % (self.peek().line, self.peek().text))
+            start = self.i
+            try:
+                p = self.ask("top")                                  # [W-3]
+                if p == "end":
+                    break
+                if p == "typedef":
+                    self.do_typedef()
+                elif p == "enum":
+                    self.do_enum()
+                elif p in ("struct", "global"):
+                    self.do_global()
+                else:
+                    raise CError("line %d: unexpected %r at top level"
+                                 % (self.peek().line, self.peek().text))
+            except CError as e:
+                if not hasattr(e, "tok") and self.tk:
+                    e.tok = self.tk[min(self.i, len(self.tk) - 1)]
+                self.errors.append(e)
+                if len(self.errors) >= self.MAXERR:
+                    break
+                self._resync(start)
         self.seal_unit()
+
+    def _resync(self, start):
+        """The token after the construct that began at `start`: a balanced
+        brace block (and the `;` that closes a struct's), or a `;` at depth
+        0.  Then the state a broken function would have left behind."""
+        depth, i = 0, start
+        while i < len(self.tk):
+            k = self.tk[i].kind
+            if k == "{":
+                depth += 1
+            elif k == "}":
+                depth -= 1
+                if depth <= 0:
+                    i += 1
+                    if i < len(self.tk) and self.tk[i].kind == ";":
+                        i += 1
+                    break
+            elif k == ";" and depth == 0:
+                i += 1
+                break
+            i += 1
+        self.i = i
+        while len(self.sc.stack) > 1:
+            self.sc.pop()
+        self._lval = self._pre = self.lbits = None
+        self.loops, self.vla_saves, self.vla_dims = [], [], []
+        self.vla_size = {}
 
     def seal_unit(self):
         """Rewrite this file's own references to its statics.
@@ -2825,6 +2876,10 @@ def compile_units(streams, oracle):
                 e.tok = w.tk[min(w.i, len(w.tk) - 1)]
                 e.unit = k
             raise
+        if w.errors:
+            for e in w.errors:
+                e.unit = k
+            raise CErrors(w.errors)
     tape = w.finish_program()
     if "main" not in tape.labels:
         raise CError("no main()")

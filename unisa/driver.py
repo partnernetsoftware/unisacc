@@ -4,7 +4,7 @@ import re
 
 from .front.pp import preprocess, predefines, expand, expand_positional
 from .front.lex import lex
-from .front.parse import compile_units, CError
+from .front.parse import compile_units, CError, CErrors
 
 
 def compile_c(src, oracle, target="lnx/x86_64", path=None, includes=()):
@@ -56,6 +56,11 @@ def _compile_once(srcs, oracle, target, paths, includes):
         streams.append(lex(ex, oracle))
     try:
         t = compile_units(streams, oracle)
+    except CErrors as e:
+        n = len(e.errors)
+        d = CDiag("\n".join(str(_located(x, seen)) for x in e.errors)
+                  + "\n%d error%s generated." % (n, "" if n == 1 else "s"))
+        raise d from None
     except CError as e:
         raise _located(e, seen) from None
     # Which OS the SOURCE was compiled for.  Not the same question as which

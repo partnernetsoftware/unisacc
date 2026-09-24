@@ -103,6 +103,53 @@ case "$got" in
     *) bad=$((bad+1)); printf "  FAIL %-14s want line 5\n       got  %s\n" cont "$got";;
 esac
 
+# More than one error per run [S-15 C3]: three functions, three mistakes,
+# all three reported with the right line, and nothing after the third.
+cat > "$T/multi.c" <<'XEOF'
+#include <stdio.h>
+int one(int a) {
+    return a + nope1;
+}
+int two(int b) {
+    int c = b
+    return c;
+}
+int three(void) {
+    return nope3;
+}
+int main(void) { return one(1) + two(2) + three(); }
+XEOF
+got=$(perl -e 'alarm 60; exec @ARGV' "$UA" -run "$T/multi.c" 2>&1 | grep -c "error:")
+if [ "$got" -eq 3 ]; then ok=$((ok+1)); else
+    bad=$((bad+1)); printf "  FAIL %-14s want 3 errors, got %s\n" multi "$got"; fi
+lines=$(perl -e 'alarm 60; exec @ARGV' "$UA" -run "$T/multi.c" 2>&1 | grep "error:" | sed 's/.*multi\.c:\([0-9]*\):.*/\1/' | tr '\n' ' ')
+if [ "$lines" = "3 7 10 " ]; then ok=$((ok+1)); else
+    bad=$((bad+1)); printf "  FAIL %-14s want lines 3 7 10, got %s\n" multi-lines "$lines"; fi
+# ...and the Python front end reports the same three [S-10 #4]
+got=$(perl -e 'alarm 120; exec @ARGV' python3 -m unisa tape "$T/multi.c" 2>&1 | grep -c "error:")
+if [ "$got" -eq 3 ]; then ok=$((ok+1)); else
+    bad=$((bad+1)); printf "  FAIL %-14s (python) want 3 errors, got %s\n" multi "$got"; fi
+# -ferror-limit=1 stops after the first, as clang's does
+got=$(perl -e 'alarm 60; exec @ARGV' "$UA" -ferror-limit=1 -run "$T/multi.c" 2>&1 | grep -c "error:")
+if [ "$got" -eq 1 ]; then ok=$((ok+1)); else
+    bad=$((bad+1)); printf "  FAIL %-14s want 1 error under -ferror-limit=1, got %s\n" limit "$got"; fi
+
+# Recovery must not turn a wrong program into a hang or a crash.  Damage
+# the first 40 corpus programs -- delete their third `;` -- and require a
+# diagnosis, exit status 1, no signal, within the bound.  The seeds are
+# the files themselves, so a failure names one.
+dmg=0; dbad=0
+for f in $(ls corpus/c-testsuite/tests/single-exec/*.c 2>/dev/null | head -40); do
+    b=$(basename "$f" .c)
+    awk 'BEGIN{n=0} { line=$0; out=""; while (match(line, /;/)) { n++; if (n==3) { out=out substr(line,1,RSTART-1); line=substr(line,RSTART+1) } else { out=out substr(line,1,RSTART); line=substr(line,RSTART+1) } } print out line }' "$f" > "$T/dmg_$b.c"
+    perl -e 'alarm 20; exec @ARGV' "$UA" "$T/dmg_$b.c" -b lnx/x86_64 -o "$T/dmg.bin" > "$T/dmg.out" 2>&1; rc=$?
+    if [ "$rc" -eq 1 ] && grep -q "error:" "$T/dmg.out"; then dmg=$((dmg+1))
+    elif [ "$rc" -eq 0 ]; then dmg=$((dmg+1))   # the third `;` was in a comment or a string
+    else dbad=$((dbad+1)); printf "  FAIL damaged %-20s exit %s: %s\n" "$b" "$rc" "$(head -1 "$T/dmg.out" | cut -c1-60)"; fi
+done
+printf "  damaged corpus: %d diagnosed cleanly, %d hung or crashed\n" "$dmg" "$dbad"
+[ "$dbad" -eq 0 ] && [ "$dmg" -gt 0 ] && ok=$((ok+1)) || bad=$((bad+1))
+
 echo
 echo "diag  ok $ok   wrong $bad"
 # A suite that checked nothing is not green: `closure.sh` with no

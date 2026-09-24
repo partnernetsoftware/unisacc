@@ -794,11 +794,52 @@ int err_at(long p, char *msg) {
     return 0;
 }
 
+/* More than one error per run [S-15 C3].  There is no longjmp here, so an
+   error cannot unwind the walker; instead it PARKS the token pointer at
+   the end of the file.  Every loop in the walker stops at EOF -- the
+   hostile suite's truncated inputs made sure of that -- so the recursion
+   unwinds by itself, emitting garbage the driver will never assemble
+   (nerr > 0 means no image).  Back at the top level, unit() re-syncs to
+   the token after the construct the error was in and walks on.  Errors
+   raised while parked are cascades of the first and are not reported. */
+int tp; int ntok;        /* the walker's cursor and its bound: defined with the lexer, used here */
+int kind(int i);
+int tidx(char *s, int L);
+int nerr;                /* errors reported so far */
+int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
+int panic;               /* an error was reported: the walker is unwinding */
+int errtop;              /* where the top-level construct being walked began */
+
 int err_tok(int t, char *msg) {        /* ...at a token */
-    if (t < 0 || t >= ntok) { err_at(nsrc, msg); __exit(1); }
-    err_at(tpos[t], msg);
-    __exit(1);
+    if (panic) return 0;
+    if (t < 0 || t >= ntok) err_at(nsrc, msg); else err_at(tpos[t], msg);
+    nerr = nerr + 1;
+    if (maxerr > 0) { if (nerr >= maxerr) {
+        __write(2, "too many errors emitted, stopping now\n", 38);
+        __exit(1);
+    } }
+    panic = 1;
+    tp = ntok;
     return 0;
+}
+
+/* After an error: the token after the construct it was in.  From where
+   that construct began, skip a balanced brace block or a `;` at depth 0;
+   the `;` that closes `struct S {...};` goes with the block. */
+int resync(int from) {
+    int k; int depth; int c;
+    k = from; depth = 0;
+    while (k < ntok) {
+        c = kind(k);
+        if (c == tidx("{", 1)) depth = depth + 1;
+        if (c == tidx("}", 1)) {
+            depth = depth - 1;
+            if (depth <= 0) { k = k + 1; if (kind(k) == tidx(";", 1)) k = k + 1; return k; }
+        }
+        if (c == tidx(";", 1)) { if (depth == 0) return k + 1; }
+        k = k + 1;
+    }
+    return ntok;
 }
 
 /* The target's predefined macros, the same set unisa/front/pp.py gives:
@@ -2023,7 +2064,11 @@ int lex(void) {
             ntok = ntok + 1;
             i = i + bl;
         } else {
-            printf("lex: bad char at %d\n", i);
+            /* file:line:col like every other diagnosis -- this one printed
+               a byte offset, and the damaged-corpus instrument [S-15 C3]
+               counted it as a silent exit */
+            err_at(i, "unexpected character");
+            nerr = nerr + 1;
             return 0 - 1;
         } } } } } } } } }
     }
@@ -2547,6 +2592,12 @@ long numval(int t) {
 /* One string, in one place: a release is identifiable from the binary. */
 #define UNISACC_VERSION "0.0.6"
 /* Are two NUL-terminated strings the same? */
+int strpre(char *a, char *p) {          /* a starts with p */
+    int k;
+    k = 0;
+    while (p[k]) { if (a[k] != p[k]) return 0; k = k + 1; }
+    return 1;
+}
 int strsame(char *a, char *b) {
     int k;
     k = 0;
@@ -2730,8 +2781,11 @@ int lbind; int gbind;
 int actis(int a, char *nm, int L) { return a == vfind(SACTV, NSACTV, nm, L); }
 
 int scopefail(char *what, int t) {
-    printf("scope: the table and the walker disagree at token %d (%s)\n", t, what);
-    __exit(1);
+    /* The table would not bind this name where the walker stands.  On a
+       valid program that is the two disagreeing -- an internal alarm; on
+       the programs people actually hand a compiler it is a missing `;`
+       before a declarator, and it is reported as that, at the token. */
+    err_tok(t, "expected ';' before this declarator");
     return 0;
 }
 
@@ -3291,6 +3345,7 @@ int vcall(int var) {
     need(tidx("(", 1), "(");
     n = 0;
     while (cur() != tidx(")", 1)) {
+        if (cur() == T_EOF) break;
         expr(); loadval(); argconv(0 - 1, n); push(); n = n + 1;
         if (eat(tidx(",", 1)) == 0) break;
     }
@@ -3843,6 +3898,7 @@ int pf_call(int t) {
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {
+            if (cur() == T_EOF) break;
             expr(); loadval(); push(); n = n + 1;
             if (eat(tidx(",", 1)) == 0) break;
         }
@@ -3859,6 +3915,7 @@ int pf_call(int t) {
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {
+            if (cur() == T_EOF) break;
             expr(); loadval(); push(); n = n + 1;
             if (eat(tidx(",", 1)) == 0) break;
         }
@@ -3929,6 +3986,7 @@ int pf_call(int t) {
     n = 0;
     psi = sfind(t);
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
+        if (cur() == T_EOF) break;
         expr(); loadval();
         if (curstruct >= 0) { if (curptr == 0) { if (curelem == 0) stemp(curstruct); } }
         argconv(psi, n);
@@ -5041,6 +5099,7 @@ int enumspec(void) {
     adv();
     v = 0;
     while (cur() != tidx("}", 1)) {
+        if (cur() == T_EOF) break;
         t = adv();
         if (eat(tidx("=", 1))) {
             /* a constant expression: `B = A + 1`, `C = LAST_OTHER_CODE` */
@@ -5177,6 +5236,7 @@ int stbody(int si) {
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
     while (cur() != tidx("}", 1)) {
+        if (cur() == T_EOF) break;
         w = declspec();
         sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum; mflt = declflt;
 
@@ -5381,7 +5441,7 @@ int block(void) {
     bdepth = bdepth + 1;
     vlaslot[bdepth] = 0;
     while (cur() != vfind(TOKV, NTOKV, "}", 1)) {
-        if (cur() == T_EOF) err_tok(tp, "unterminated block: the file ends inside it");
+        if (cur() == T_EOF) { err_tok(tp, "unterminated block: the file ends inside it"); break; }
         stmt();
     }
     adv();
@@ -5414,7 +5474,7 @@ int do_typedef(void) {
         } }
         nt = adv();
         if (cur() == tidx("(", 1)) {          /* a function-pointer typedef */
-            while (cur() != tidx(";", 1)) adv();
+            while (cur() != tidx(";", 1)) { if (cur() == T_EOF) break; adv(); }
             tdadd(nt, 8, 8, 0 - 1, 1);
             break;
         }
@@ -6172,6 +6232,7 @@ int stmt(void) {
         stept = tp;
         b = 0;
         while (1) {                                  /* skip the step clause */
+            if (cur() == T_EOF) break;               /* parked there by an error */
             if (cur() == tidx("(", 1)) b = b + 1;
             if (cur() == tidx(")", 1)) { if (b == 0) break; b = b - 1; }
             adv();
@@ -6184,7 +6245,8 @@ int stmt(void) {
         nloop = nloop - 1;
         aftert = tp;
         elab("L", c); es(":\n");
-        if (stept != bodyt - 1) { tp = stept; exprc(); }
+        /* not after an error: the cursor is parked at EOF and stays there */
+        if (panic == 0) { if (stept != bodyt - 1) { tp = stept; exprc(); } }
         tp = aftert;
         elab("  @ctrl.jump L", top); ec(10);
         elab("L", a); es(":\n");
@@ -6363,6 +6425,7 @@ int function(int t, int w) {
     es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
+        if (cur() == T_EOF) break;
         if (eat(tidx("...", 3))) break;
         pw = declspec();
         pst = declstruct; pfl = declflt;
@@ -6473,6 +6536,15 @@ int function(int t, int w) {
 int unit(void) {
     int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd; int gfpd;
     while (1) {
+        if (panic) {
+            /* the walker unwound to EOF after an error: drop the broken
+               construct's locals, and walk on from the next one */
+            panic = 0;
+            if (infunc) { nsym = scopebase; infunc = 0; }
+            nloop = 0; retst = 0 - 1;
+            tp = resync(errtop);
+        }
+        errtop = tp;
         p = ask(0);
         if (p == P_END) break;
         if (p == P_TYPEDEF) { do_typedef(); continue; }
@@ -6847,6 +6919,10 @@ int fe_units(char **paths, int npath, char *t) {
            "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
     }
     emit_pool();
+    if (nerr > 0) {
+        en2(nerr); __write(2, nerr == 1 ? " error generated.\n" : " errors generated.\n", nerr == 1 ? 18 : 19);
+        return 1;
+    }
     return 0;
 }
 
@@ -6917,6 +6993,8 @@ int main(void) {
             } else { if (strsame(a, "-include")) {         /* -include FILE */
                 i = i + 1;
                 if (nopti < 8) { opti[nopti] = __argv(i); nopti = nopti + 1; }
+            } else { if (strpre(a, "-ferror-limit=")) { maxerr = 0; k = 14;
+                while (a[k] >= 48 && a[k] <= 57) { maxerr = maxerr * 10 + (a[k] - 48); k = k + 1; }
             } else { if (strsame(a, "-nostdinc")) { nostdinc = 1;
             } else { if (strsame(a, "-MD") || strsame(a, "-MMD")) { wantdeps = 1; depfile = depfile ? depfile : "";
             } else { if (strsame(a, "-MF")) { i = i + 1; wantdeps = 1; depfile = __argv(i);
@@ -6939,7 +7017,7 @@ int main(void) {
             } else { if (a[1] == 87 || a[1] == 119 || a[1] == 103
                       || a[1] == 79 || a[1] == 102 || a[1] == 115
                       || a[1] == 112 || a[1] == 109) {    /* -W -w -g -O -f -std -pipe -m */
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } }
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
