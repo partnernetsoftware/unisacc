@@ -68,6 +68,11 @@ def _wide(t):
     return isinstance(t.val, list)
 
 
+# the unsigned kinds narrower than a register, and their widths: a value of
+# one of these is kept zero-extended in the register (see binary)
+NARROW_UNS = {"u8": 1, "u16": 2, "u32": 4}
+
+
 def _littype(text, v):
     """C99 6.4.4.1: an integer constant takes the first type in its list that
     can hold it, and a HEX constant's list includes the unsigned types.  That
@@ -521,6 +526,14 @@ class Walker:
             self.em.store(LHS, off, ACC)
         self._argv_stub()
         self.em.call("main")
+        # A return from main is exit(status) (C99 5.1.2.2.3): when the
+        # program carries our <stdlib.h>, `exit` is a function in it -- the
+        # one that runs the atexit handlers -- so the stub returns through
+        # it rather than leaving by .exit with the handlers unrun.
+        for nm in ("exit", "exit_u0"):
+            if nm in self.em.t.labels:
+                self.em.call(nm)
+                break
         self.em.exit_(ACC)
         for nm, line in self.called.items():
             if nm not in self.em.t.labels:
@@ -1811,12 +1824,20 @@ class Walker:
                     self.convto(cty, aty)
                 elif op in ("+", "-") and aty.kind in ("ptr", "arr"):
                     self.scale(aty)
+                # `x op= y` is done in the common type (6.5.16.2p3):
+                # unsigned when the table says so -- `h >>= 1` on a u64
+                # used to shift the sign in -- then masked to x's width
+                ck = self.sc.combine(aty, "+", rt)                   # [W-4]
+                uns = ck in ("u8", "u16", "u32", "u64")
+                wid = {"u8": 1, "u16": 2, "u32": 4}.get(ck, 8)
                 if self.isflt(aty) or self.isflt(rt):
                     pass
                 elif op in ("/", "%"):
-                    self.em.divmod_(op)
+                    self.em.divmod_(op, uns, wid)
                 else:
-                    self.em.binop(op)
+                    self.em.binop(op, uns, wid)
+                if aty.kind in NARROW_UNS:
+                    self.em.zext(NARROW_UNS[aty.kind])
                 if bits is not None:
                     self.em.bits_set(bits[0], bits[1], bits[2], self.wid(aty))
                     return aty
@@ -1955,6 +1976,14 @@ class Walker:
             if op == "-" and ty.kind in ("ptr", "arr") and \
                     rty.kind in ("ptr", "arr"):
                 self.unscale(ty)
+            # A u8/u16/u32 value in a register is always zero-extended: the
+            # OPERANDS of a narrow unsigned op were masked (narrow_pair),
+            # the RESULT was not, and `21 - (v & 1023)` -- int minus u32,
+            # so a u32 -- stayed a negative 64-bit value when it was widened
+            # to long.  The eight-class fuzz [S-15 A3] found it, in both
+            # front ends at once.
+            if res in NARROW_UNS:
+                self.em.zext(NARROW_UNS[res])
             ty = self.ty_from(res, ty, rty)
         return ty
 
@@ -2017,6 +2046,8 @@ class Walker:
                 self.em.bits_get(bits[0], bits[1], bits[2], self.wid(ty))
             else:
                 self.em.load(ACC, ACC, 0, self.wid(ty))
+                if is_unsigned(ty.kind):
+                    self.em.zext(self.wid(ty))
             if self.isflt(ty):
                 self.em.push(ACC)
                 self.em.imm(ACC, self.fone(ty))
@@ -2027,6 +2058,8 @@ class Walker:
                 self.em.emit(self.em.recipe("alu",
                                             "add" if op == "++" else "sub"),
                              ACC, ACC, LHS)
+                if ty.kind in NARROW_UNS:
+                    self.em.zext(NARROW_UNS[ty.kind])
             if bits is not None:
                 self.em.bits_set(bits[0], bits[1], bits[2], self.wid(ty))
                 return ty
@@ -2035,10 +2068,13 @@ class Walker:
             return ty
         if p == "bnot":
             self.next()
-            self.unary()
+            t = self.unary()
             self.load_if_lval()
             self.em.bitnot()
-            return I64
+            if t.kind == "u32":               # ~x of a u32 is a u32
+                self.em.zext(4)
+                return U32
+            return U64 if t.kind == "u64" else I64
         if p == "neg":
             self.next()
             t = self.unary()
@@ -2047,6 +2083,8 @@ class Walker:
                 self.em.fneg(t.kind)
             else:
                 self.em.neg()
+                if t.kind == "u32":           # -x of a u32 wraps in 32 bits
+                    self.em.zext(4)
             return t
         if p == "uplus":
             # Unary `+` is a no-op but for the integer promotion, which the

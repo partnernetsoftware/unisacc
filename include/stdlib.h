@@ -30,7 +30,16 @@ static void free(void *p) { }
  * return.  `__exit` is the tape's gate to the OS, so this is a one-line
  * wrapper around it -- and `abort` is the same call with the status a shell
  * reports for SIGABRT. */
-static void exit(int code) { __exit(code); }
+static void (*_unisa_atexit[32])(void);
+static int _unisa_natexit = 0;
+static void exit(int code) {
+    /* the atexit handlers, last registered first (C99 7.20.4.3p3) */
+    while (_unisa_natexit > 0) {
+        _unisa_natexit = _unisa_natexit - 1;
+        _unisa_atexit[_unisa_natexit]();
+    }
+    __exit(code);
+}
 static void abort(void) { __exit(134); }
 
 static void *calloc(long n, long sz) {
@@ -142,4 +151,70 @@ static int rand(void) {
     return (int)((_unisa_seed >> 16) & 32767);
 }
 static void srand(int s) { _unisa_seed = s; }
+/* ---- C99 7.20.6-7.20.7 and the pieces of 7.20.4 a program can rely on
+   here: labs, div, qsort, bsearch, atexit.  Real code, like the rest of
+   this header: the sort is a heap sort, so its worst case is bounded and
+   it needs no stack beyond one element's bytes [S-15 D2]. */
+static long labs(long v) { if (v < 0) return 0 - v; return v; }
+static long long llabs(long long v) { if (v < 0) return 0 - v; return v; }
+typedef struct { int quot; int rem; } div_t;
+typedef struct { long quot; long rem; } ldiv_t;
+static div_t div(int a, int b) { div_t r; r.quot = a / b; r.rem = a % b; return r; }
+static ldiv_t ldiv(long a, long b) { ldiv_t r; r.quot = a / b; r.rem = a % b; return r; }
+
+static void _unisa_swap(char *a, char *b, long n) {
+    long i; char t;
+    i = 0;
+    while (i < n) { t = a[i]; a[i] = b[i]; b[i] = t; i = i + 1; }
+}
+
+/* Sift element `i` of a heap of `n` elements down to its place. */
+static void _unisa_sift(char *base, long n, long sz, long i, int (*cmp)(const void *, const void *)) {
+    long c;
+    while (1) {
+        c = 2 * i + 1;
+        if (c >= n) return;
+        if (c + 1 < n) { if (cmp(base + c * sz, base + (c + 1) * sz) < 0) c = c + 1; }
+        if (cmp(base + i * sz, base + c * sz) >= 0) return;
+        _unisa_swap(base + i * sz, base + c * sz, sz);
+        i = c;
+    }
+}
+
+static void qsort(void *v, long n, long sz, int (*cmp)(const void *, const void *)) {
+    char *base; long i;
+    base = (char *)v;
+    if (n < 2) return;
+    i = n / 2;
+    while (i > 0) { i = i - 1; _unisa_sift(base, n, sz, i, cmp); }
+    i = n;
+    while (i > 1) {
+        i = i - 1;
+        _unisa_swap(base, base + i * sz, sz);
+        _unisa_sift(base, i, sz, 0, cmp);
+    }
+}
+
+static void *bsearch(const void *key, const void *v, long n, long sz, int (*cmp)(const void *, const void *)) {
+    char *base; long lo; long hi; long mid; int c;
+    base = (char *)v; lo = 0; hi = n;
+    while (lo < hi) {
+        mid = lo + (hi - lo) / 2;
+        c = cmp(key, base + mid * sz);
+        if (c == 0) return base + mid * sz;
+        if (c < 0) hi = mid; else lo = mid + 1;
+    }
+    return 0;
+}
+
+/* atexit: the handlers run, last registered first, from `exit` -- which is
+   also where a return from main ends up, since the entry stub calls `exit`
+   whenever this header defined one.  Thirty-two is C's minimum (7.20.4.2). */
+static int atexit(void (*fn)(void)) {
+    if (_unisa_natexit >= 32) return 0 - 1;
+    _unisa_atexit[_unisa_natexit] = fn;
+    _unisa_natexit = _unisa_natexit + 1;
+    return 0;
+}
+
 #endif

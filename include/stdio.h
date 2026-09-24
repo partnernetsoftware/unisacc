@@ -7,6 +7,7 @@
 #define _UNISA_STDIO_H
 #include <stddef.h>
 #include <stdarg.h>
+#include <errno.h>
 #define NULL 0
 #define EOF (0-1)
 #define SEEK_SET 0
@@ -527,4 +528,150 @@ static int printf(const char *fmt, ...) {
     va_end(ap);
     return r;
 }
+/* ---- sscanf: the conversions a program reads numbers and words with --
+   d i u x o c s f e g, the l and h length modifiers, a field width, `*`
+   to discard, `%%`, and white space in the format matching any amount of
+   it.  Returns the number of conversions stored, or EOF when the input
+   ran out before the first one -- the same contract as the platform's,
+   which is what a program comparing the two observes. [S-15 D2] */
+static int _u_isspace(int c) { return c == 32 || (c >= 9 && c <= 13); }
+static int _u_digit(int c, int base) {
+    int v;
+    v = 0 - 1;
+    if (c >= 48 && c <= 57) v = c - 48;
+    if (c >= 97 && c <= 122) v = c - 97 + 10;
+    if (c >= 65 && c <= 90) v = c - 65 + 10;
+    if (v >= base) return 0 - 1;
+    return v;
+}
+static int vsscanf(const char *in, const char *fmt, va_list ap) {
+    long i; long j; int stored; int c; int width; int skip; int lng; int base;
+    int neg; int any; long v; unsigned long uv; double d; double scale; int exp; int eneg;
+    char *sp; int *ip; long *lp; short *hp; double *dp; float *fp; long n;
+    i = 0; j = 0; stored = 0;
+    while (fmt[j]) {
+        c = fmt[j];
+        if (_u_isspace(c)) { while (_u_isspace(in[i])) i = i + 1; j = j + 1; continue; }
+        if (c != 37) { if (in[i] != c) break; i = i + 1; j = j + 1; continue; }
+        j = j + 1;
+        if (fmt[j] == 37) { if (in[i] != 37) break; i = i + 1; j = j + 1; continue; }
+        skip = 0; width = 0; lng = 0;
+        if (fmt[j] == 42) { skip = 1; j = j + 1; }
+        while (fmt[j] >= 48 && fmt[j] <= 57) { width = width * 10 + (fmt[j] - 48); j = j + 1; }
+        if (fmt[j] == 104) { lng = 0 - 1; j = j + 1; if (fmt[j] == 104) { lng = 0 - 2; j = j + 1; } }
+        if (fmt[j] == 108) { lng = 1; j = j + 1; if (fmt[j] == 108) j = j + 1; }
+        if (fmt[j] == 122 || fmt[j] == 106 || fmt[j] == 116) { lng = 1; j = j + 1; }
+        if (fmt[j] == 76) { lng = 1; j = j + 1; }
+        c = fmt[j]; j = j + 1;
+        if (width == 0) width = 1000000000;
+        if (c == 99) {                                   /* %c: no space skip */
+            if (width == 1000000000) width = 1;
+            if (in[i] == 0) { if (stored == 0) return EOF; return stored; }
+            if (skip == 0) sp = va_arg(ap, char *);
+            n = 0;
+            while (n < width) { if (in[i] == 0) break; if (skip == 0) sp[n] = in[i]; i = i + 1; n = n + 1; }
+            if (skip == 0) stored = stored + 1;
+            continue;
+        }
+        while (_u_isspace(in[i])) i = i + 1;
+        if (in[i] == 0) { if (stored == 0) return EOF; return stored; }
+        if (c == 115) {                                  /* %s */
+            if (skip == 0) sp = va_arg(ap, char *);
+            n = 0;
+            while (n < width) { if (in[i] == 0) break; if (_u_isspace(in[i])) break;
+                                if (skip == 0) sp[n] = in[i]; i = i + 1; n = n + 1; }
+            if (skip == 0) { sp[n] = 0; stored = stored + 1; }
+            continue;
+        }
+        if (c == 100 || c == 105 || c == 117 || c == 120 || c == 88 || c == 111) {
+            base = 10;
+            if (c == 120 || c == 88) base = 16;
+            if (c == 111) base = 8;
+            neg = 0; any = 0; uv = 0; n = 0;
+            if (in[i] == 45 || in[i] == 43) { if (n < width) { neg = in[i] == 45; i = i + 1; n = n + 1; } }
+            if (c == 105 || base == 16) { if (in[i] == 48) { if (in[i + 1] == 120 || in[i + 1] == 88) {
+                if (_u_digit(in[i + 2], 16) >= 0) { if (n + 2 < width) { base = 16; i = i + 2; n = n + 2; } } } } }
+            if (c == 105) { if (base == 10) { if (in[i] == 48) base = 8; } }
+            while (n < width) {
+                v = _u_digit(in[i], base);
+                if (v < 0) break;
+                uv = uv * base + v; i = i + 1; n = n + 1; any = 1;
+            }
+            if (any == 0) break;
+            if (neg) uv = 0 - uv;
+            if (skip == 0) {
+                if (lng == 1) { lp = va_arg(ap, long *); *lp = (long)uv; }
+                else { if (lng == 0 - 1) { hp = va_arg(ap, short *); *hp = (short)uv; }
+                       else { if (lng == 0 - 2) { sp = va_arg(ap, char *); *sp = (char)uv; }
+                              else { ip = va_arg(ap, int *); *ip = (int)uv; } } }
+                stored = stored + 1;
+            }
+            continue;
+        }
+        if (c == 102 || c == 101 || c == 103 || c == 70 || c == 69 || c == 71 || c == 97) {
+            neg = 0; any = 0; d = 0.0; n = 0;
+            if (in[i] == 45 || in[i] == 43) { if (n < width) { neg = in[i] == 45; i = i + 1; n = n + 1; } }
+            while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break; d = d * 10.0 + v; i = i + 1; n = n + 1; any = 1; }
+            if (in[i] == 46) { if (n < width) {
+                i = i + 1; n = n + 1; scale = 0.1;
+                while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break;
+                                    d = d + v * scale; scale = scale * 0.1; i = i + 1; n = n + 1; any = 1; }
+            } }
+            if (any == 0) break;
+            if (in[i] == 101 || in[i] == 69) { if (n < width) {
+                exp = 0; eneg = 0; j = j; 
+                if (in[i + 1] == 45 || in[i + 1] == 43) { eneg = in[i + 1] == 45;
+                    if (_u_digit(in[i + 2], 10) >= 0) { i = i + 2; n = n + 2;
+                        while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break; exp = exp * 10 + v; i = i + 1; n = n + 1; } } }
+                else { if (_u_digit(in[i + 1], 10) >= 0) { i = i + 1; n = n + 1;
+                        while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break; exp = exp * 10 + v; i = i + 1; n = n + 1; } } }
+                while (exp > 0) { if (eneg) d = d / 10.0; else d = d * 10.0; exp = exp - 1; }
+            } }
+            if (neg) d = 0.0 - d;
+            if (skip == 0) {
+                if (lng == 1) { dp = va_arg(ap, double *); *dp = d; }
+                else { fp = va_arg(ap, float *); *fp = (float)d; }
+                stored = stored + 1;
+            }
+            continue;
+        }
+        if (c == 110) {                                  /* %n */
+            if (skip == 0) { ip = va_arg(ap, int *); *ip = (int)i; }
+            continue;
+        }
+        break;                                           /* an unknown conversion ends the scan */
+    }
+    return stored;
+}
+static int sscanf(const char *in, const char *fmt, ...) {
+    va_list ap; int r;
+    va_start(ap, fmt);
+    r = vsscanf(in, fmt, ap);
+    va_end(ap);
+    return r;
+}
+
+/* perror: the message, a colon, and errno's text -- the eleven codes
+   <errno.h> defines, "Unknown error N" for the rest. */
+static char *strerror(int e) {
+    if (e == 0) return "Success";
+    if (e == 1) return "Operation not permitted";
+    if (e == 2) return "No such file or directory";
+    if (e == 5) return "Input/output error";
+    if (e == 9) return "Bad file descriptor";
+    if (e == 12) return "Cannot allocate memory";
+    if (e == 13) return "Permission denied";
+    if (e == 17) return "File exists";
+    if (e == 22) return "Invalid argument";
+    if (e == 28) return "No space left on device";
+    if (e == 33) return "Numerical argument out of domain";
+    if (e == 34) return "Numerical result out of range";
+    return "Unknown error";
+}
+static void perror(const char *s) {
+    if (s) { if (*s) { fputs(s, stderr); fputs(": ", stderr); } }
+    fputs(strerror(errno), stderr);
+    fputc(10, stderr);
+}
+
 #endif

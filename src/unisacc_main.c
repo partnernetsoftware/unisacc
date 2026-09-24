@@ -2261,6 +2261,7 @@ int is_typetok(void);
 int push(void);
 int pop1(void);
 int loadval(void);
+int zext(int w);
 int newlab(void);
 int elab(char *p, int n);
 int en(long v);
@@ -2605,6 +2606,22 @@ int ustat_add(int t) {
     ustat_u[nustat] = curunit; nustat = nustat + 1;
     return 0;
 }
+/* The function called `nm` that unit 0 defined, or -1: unit 0's statics
+   keep their names, so this is the label a call would use. */
+int symfn(char *nm, int L) {
+    int i; int k; int ok;
+    i = 0;
+    while (i < nsym) {
+        if (symkind[i] == 2) { if (symunit[i] == 0) {
+            ok = 1; k = 0;
+            while (k < L) { if (symname[i * 32 + k] != nm[k]) ok = 0; k = k + 1; }
+            if (symname[i * 32 + L] != 0) ok = 0;
+            if (ok) return i;
+        } }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
 /* Is this token a static of the unit being walked? */
 int ustat_is(int t) {
     int i; int k; int ok;
@@ -2833,6 +2850,24 @@ int eload(int w) {
     return 0;
 }
 
+/* A u8/u16/u32 value in a register is always zero-extended.  Every narrow
+   unsigned RESULT is masked here -- a binary op's, a compound
+   assignment's, ++x's, -x's, ~x's -- so widening it to long, returning it
+   or passing it needs nothing more.  The OPERANDS of a narrow unsigned op
+   were already masked (emit_binop); the results were not, and
+   `21 - (v & 1023)`, int minus u32 and so a u32, stayed a negative
+   64-bit value when it was widened to long.  The eight-class fuzz
+   [S-15 A3] found it, in both front ends at once. */
+int zext(int w) {
+    if (w >= 8) return 0;
+    es("  @lit.imm r2, ");
+    if (w == 1) en(255);
+    if (w == 2) en(65535);
+    if (w == 4) en(4294967295);
+    es("\n  @alu.and r0, r0, r2\n");
+    return 0;
+}
+
 int estore(int w) {                              /* [r1] = r0 */
     if (w >= BFTAG) {
         /* read, clear the field's bits, or the new ones in, write back;
@@ -2925,7 +2960,9 @@ int unary(void) {
         if (curflt) { if (curptr == 0) {        /* -x flips the sign bit, -0.0 too */
             es("  @lit.imm r1, "); en(curflt == 8 ? (long)1 << 63 : 2147483648); es("\n  @alu.xor r0, r0, r1\n");
             return 0; } }
-        es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n"); return 0; }
+        es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n");
+        if (curptr == 0) { if (curuns) { if (cursize == 4) zext(4); } }
+        return 0; }
     if (p == P_NOT) { adv(); unary(); loadval();
         if (curflt) { if (curptr == 0) {        /* !x is x == 0.0 */
             es("  @lit.imm r1, 0\n");
@@ -2951,6 +2988,7 @@ int unary(void) {
     if (p == P_BNOT) {                  /* ~x is x ^ -1 */
         adv(); unary(); loadval();
         es("  @lit.imm r1, -1\n  @alu.xor r0, r0, r1\n");
+        if (curptr == 0) { if (curuns) { if (cursize == 4) zext(4); } }
         lvalue = 0; curptr = 0; return 0;
     }
     if (p == P_UPLUS) { adv(); unary(); loadval(); lvalue = 0; return 0; }
@@ -2963,6 +3001,7 @@ int unary(void) {
         lvalue = 0;
         push();                                  /* address */
         eload(e);
+        if (curptr == 0) { if (e < BFTAG) { if (curuns) zext(e); } }
         if (curflt) { if (curptr == 0) {         /* a float steps by 1.0 */
             int fk; fk = curflt;
             es("  @lit.imm r1, "); en(fone(fk)); ec(10);
@@ -2978,6 +3017,7 @@ int unary(void) {
         ec(10);
         if (op == tidx("++", 2)) es("  @alu.add r0, r0, r1\n");
         else es("  @alu.sub r0, r0, r1\n");
+        if (curptr == 0) { if (e < BFTAG) { if (curuns) zext(e); } }
         pop1();
         estore(e);
         return 0;
@@ -4467,6 +4507,7 @@ int binary(int level) {
         if (lp) { if (curptr) { if (e > 1) { if (k == tidx("-", 1)) {
             es("  @lit.imm r2, "); en(e); es("\n  .div r0, r0, r2\n");
         } } } }
+        if (tyis(res, "ptr", 3) == 0) { if (tyuns(res)) zext(tysize(res)); }
         binuns = 0; binwid = 8;
         lvalue = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
         if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
@@ -4580,6 +4621,7 @@ int expr(void) {
             lvalue = 0;
             push();                                  /* address */
             eload(e);
+            if (ptrl == 0) { if (e < BFTAG) { if (tyuns(aax)) zext(e); } }
             push();                                  /* old value */
             expr(); loadval();
             if (ak >= 4 || (curflt && curptr == 0)) {
@@ -4607,7 +4649,16 @@ int expr(void) {
                     es("  @lit.imm r2, "); en(pel); es("\n  @alu.mul r0, r0, r2\n");
                 }
             } }
+            /* `x op= y` is done in the common type (6.5.16.2p3): unsigned
+               when the table says so, or `h >>= 1` on a u64 shifted in
+               the sign; then the value is x's, masked to x's width */
+            if (ptrl == 0) {
+                int ck2; ck2 = tyask(aax, "+", 1, tyax());
+                binuns = tyuns(ck2); binwid = tysize(ck2);
+            }
             emit_binop(op);                          /* pops old value */
+            binuns = 0; binwid = 8;
+            if (ptrl == 0) { if (e < BFTAG) { if (tyuns(aax)) zext(e); } }
             pop1();                                  /* address */
             estore(e);
             curelem = e;
@@ -6420,7 +6471,7 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd;
+    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd; int gfpd;
     while (1) {
         p = ask(0);
         if (p == P_END) break;
@@ -6438,9 +6489,9 @@ int unit(void) {
             declptr = declspecptr; declpd = declspecpd;
             declflt = gflt0;
             while (eatstar()) declptr = 1;
-            gfpfn = 0;
+            gfpfn = 0; gfpd = 0;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
-                t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1;
+                t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1; gfpd = 1;
                 if (fpfn >= 0) { fnresume = tp; tp = fpfn; gfpfn = 1; }
             } else t = adv(); }
             else t = adv();
@@ -6459,6 +6510,13 @@ int unit(void) {
             }
             n = 1;
             isarr = 0;
+            /* `void (*tab[4])(void)` at file scope: an array of fpdim
+               pointers, as the local path has long known.  Here it was one
+               8-byte scalar indexed by BYTE -- atexit's handler table was
+               the first global one anybody wrote [S-15 D2]. */
+            if (gfpd) { if (gfpfn == 0) { if (fpdim > 0) {
+                n = fpdim; isarr = 1; declpd = 1; declfp = 0;
+            } } }
             if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                 adv();
                 if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
@@ -6746,7 +6804,7 @@ int fe_units(char **paths, int npath, char *t) {
        "  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n"
        "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
        "  jump __argv_top\n__argv_done:\n");
-    es("  @call.call main\n  @lit.exit r0\n.bss __argvv 32768\n");
+    es("  @call.call main\n  @ctrl.jump __main_ret\n.bss __argvv 32768\n");
     u = 0;
     while (u < npath) {
         curunit = u;
@@ -6758,6 +6816,14 @@ int fe_units(char **paths, int npath, char *t) {
     es("__init:\n");
     k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
     es("  @ctrl.ret\n");
+    /* A return from main is exit(status) (C99 5.1.2.2.3).  When the program
+       carries our <stdlib.h>, `exit` is a function in it -- the one that
+       runs the atexit handlers -- so the entry stub returns through it
+       rather than leaving by `.exit` with the handlers unrun.  Only after
+       every unit is walked is it known whether there is one. */
+    es("__main_ret:\n");
+    if (symfn("exit", 4) >= 0) es("  @call.call exit\n");
+    es("  @lit.exit r0\n");
     if (needslen) {
         es("__slen:\n  mov r2, r0\n  @lit.imm r1, 0\n"
            "__slen_top:\n  @alu.add r4, r2, r1\n  @mem.ld r5, [r4+0], 1\n"

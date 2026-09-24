@@ -118,4 +118,39 @@ static int memcmp(const void *a, const void *b, long n) {
     }
     return 0;
 }
+static char *strncat(char *d, const char *s, long n) {
+    long i; long j;
+    i = 0; while (d[i]) i = i + 1;
+    j = 0;
+    while (j < n) { if (s[j] == 0) break; d[i + j] = s[j]; j = j + 1; }
+    d[i + j] = 0;
+    return d;
+}
+
+/* strtok keeps its place between calls, as the standard says it must; the
+   place is one static pointer, which is why strtok is not reentrant. */
+static char *_unisa_tok = 0;
+static char *strtok(char *s, const char *delim) {
+    char *start; long k; int isd;
+    if (s == 0) s = _unisa_tok;
+    if (s == 0) return 0;
+    /* skip leading delimiters */
+    while (*s) {
+        isd = 0; k = 0;
+        while (delim[k]) { if (delim[k] == *s) isd = 1; k = k + 1; }
+        if (isd == 0) break;
+        s = s + 1;
+    }
+    if (*s == 0) { _unisa_tok = 0; return 0; }
+    start = s;
+    while (*s) {
+        isd = 0; k = 0;
+        while (delim[k]) { if (delim[k] == *s) isd = 1; k = k + 1; }
+        if (isd) { *s = 0; _unisa_tok = s + 1; return start; }
+        s = s + 1;
+    }
+    _unisa_tok = 0;
+    return start;
+}
+
 #endif

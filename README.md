@@ -155,7 +155,7 @@ today: the four Unix slices are gzipped and the script pipes the one it
 picked through `gzip -dc`, and the x86 encoder now uses short forms (mod=00
 and mod=01 displacements, `0x83` imm8, `mov r32, imm32`) instead of spending
 44% of its bytes on the zero halves of disp32/imm32. That is 5.16 MB down to
-1.29 MB. The eleven C headers travel inside it, so it compiles
+1.29 MB. The nineteen C headers travel inside it, so it compiles
 `#include <stdio.h>` from any directory; `-I`, `-D`, `-o`, `-E`, and a `#!` line
 work the way tcc's do, and the flags a Makefile passes anyway (`-Wall`,
 `-O2`, `-g`, `-std=c99`) are accepted rather than refused — there is one
