@@ -7558,70 +7558,173 @@ int ol_writes(int l, int z) {        /* z is written and not read on line l */
     }
     return 1;
 }
-/* Where a function's prologue saves its parameters -- `store64 [r6-N], rK`
-   after `mov r6, r7` -- is the only place the walker reads r3..r5 before
-   writing them in a block (ol_zlocal checks that, per tape, and refuses
-   the register if not).  So such a register is dead at every block
-   boundary except the entry of a function that takes it as a parameter. */
-int ol_zok[8];
-int ol_saves(int t, int z) {         /* does the function at line t save rz */
-    int l; int p;
-    l = t + 1;
-    while (l < ol_n && l < t + 40) {
-        if (out[ol_s[l]] != 32) return 0;
-        p = ol_s[l];
-        if (ol_word(l, "store64") && out[p + 10] == 91 && out[p + 11] == 114 && out[p + 12] == 54) {
-            if (ol_names(l, z) && ol_firstreg(l) < 0) return 1;
-        } else if (ol_word(l, "mov") == 0 && ol_word(l, ".frame") == 0 && ol_word(l, "store64") == 0) return 0;
-        l = l + 1;
-    }
-    return 0;
+/* Liveness of one register at block granularity, for -O2.  Blocks start
+   at a label and after a jump, jumpz or ret.  A block uses z first by
+   reading it (live in), by writing it (dead in), or not at all (live in
+   iff a successor is).  A call reads z iff the callee's entry block has z
+   live; anything outside the whitelist is taken to read every register;
+   `ret` hands back r0/r1 only.  The least fixed point is the liveness. */
+#define BL_MAX 131072
+int bl_of[OPT_MAXL]; int bl_s[BL_MAX]; int bl_n; char bl_live[6 * BL_MAX]; int bl_z;
+int ol_target(int l) {                /* the block a jump/call names, or -1 */
+    int e; int p; int t;
+    e = ol_e[l]; p = e; while (p > ol_s[l] && out[p - 1] != 32) p = p - 1;
+    t = ol_lab(p, e);
+    if (t < 0) return 0 - 1;
+    return bl_of[t];
 }
-int ol_zlocal(int z) {
-    int l; int w; int prolog; int p;
-    w = 0; prolog = 0; l = 0;
+int ol_isctl(int l) { return ol_word(l, "jump") || ol_word(l, "jumpz") || ol_word(l, "ret"); }
+int bl_split(void) {
+    int l; int cut;
+    bl_n = 0; cut = 1; l = 0;
     while (l < ol_n) {
-        if (out[ol_s[l]] != 32) { w = 0; prolog = 0; l = l + 1; continue; }
-        if (ol_is(l, "  mov r6, r7")) prolog = 1;
-        if (ol_names(l, z)) {
-            if (ol_writes(l, z)) w = 1;
-            else if (w == 0) {
-                p = ol_s[l];
-                if (prolog && ol_word(l, "store64") && out[p + 11] == 114 && out[p + 12] == 54) { l = l + 1; continue; }
-                return 0;
-            }
-        }
-        if (ol_word(l, "jump") || ol_word(l, "jumpz") || ol_word(l, "ret")) { w = 0; prolog = 0; }
+        if (out[ol_s[l]] != 32) cut = 1;
+        if (cut) { if (bl_n >= BL_MAX) return 0; bl_s[bl_n] = l; bl_n = bl_n + 1; cut = 0; }
+        bl_of[l] = bl_n - 1;
+        if (out[ol_s[l]] == 32) { if (ol_isctl(l)) cut = 1; }
         l = l + 1;
     }
     return 1;
 }
-int ol_dead(int z, int from) {
-    int l; int budget; int e; int p; int t;
-    if (ol_zok[z] == 0) return 0;
-    l = from; budget = 200;
-    while (l < ol_n && budget > 0) {
-        budget = budget - 1;
-        if (out[ol_s[l]] != 32) {                 /* a label: a block starts */
-            if (ol_saves(l, z)) return 0;
-            return 1;
+/* Each line once per round: its kind, the registers it reads and writes,
+   and the block it jumps to -- the solver then never re-parses text. */
+int ol_k[OPT_MAXL]; int ol_rm[OPT_MAXL]; int ol_wm[OPT_MAXL]; int ol_tg[OPT_MAXL];
+#define OK_SIMPLE 0
+#define OK_LABEL 1
+#define OK_RET 2
+#define OK_JUMP 3
+#define OK_JUMPZ 4
+#define OK_CALL 5
+#define OK_FRAME 6
+#define OK_OTHER 7
+int ol_mask(int l) {                  /* every rN the line names */
+    int p; int e; int n; int m;
+    p = ol_s[l]; e = ol_e[l]; m = 0;
+    while (p < e) {
+        if (out[p] == 114 && (p == ol_s[l] || isal(out[p - 1] & 255) == 0) && p + 1 < e && isdi(out[p + 1] & 255)) {
+            n = 0; p = p + 1;
+            while (p < e && isdi(out[p] & 255)) { n = n * 10 + out[p] - 48; p = p + 1; }
+            if (n < 16) m = m | (1 << n);
+            continue;
         }
-        if (ol_word(l, "jumpz")) return ol_names(l, z) == 0;
-        if (ol_word(l, "jump") || ol_word(l, "ret")) return 1;
-        if (ol_word(l, "call")) {
-            e = ol_e[l]; p = e; while (p > ol_s[l] && out[p - 1] != 32) p = p - 1;
-            t = ol_lab(p, e);
-            if (t < 0) return 0;
-            if (ol_saves(t, z)) return 0;
-            l = l + 1; continue;
-        }
-        if (ol_simple(l) == 0) return 0;
-        if (ol_writes(l, z)) return 1;
-        if (ol_names(l, z)) return 0;
+        p = p + 1;
+    }
+    return m;
+}
+int ol_prep(void) {
+    int l; int f; int m;
+    l = 0;
+    while (l < ol_n) {
+        ol_rm[l] = 0; ol_wm[l] = 0; ol_tg[l] = 0 - 1;
+        if (out[ol_s[l]] != 32) ol_k[l] = OK_LABEL;
+        else if (ol_word(l, "ret")) ol_k[l] = OK_RET;
+        else if (ol_word(l, "jump")) { ol_k[l] = OK_JUMP; ol_tg[l] = ol_target(l); }
+        else if (ol_word(l, "jumpz")) { ol_k[l] = OK_JUMPZ; ol_tg[l] = ol_target(l); ol_rm[l] = ol_mask(l); }
+        else if (ol_word(l, "call")) { ol_k[l] = OK_CALL; ol_tg[l] = ol_target(l); }
+        else if (ol_word(l, ".frame")) ol_k[l] = OK_FRAME;
+        else if (ol_simple(l)) {
+            ol_k[l] = OK_SIMPLE; m = ol_mask(l); f = 0 - 1;
+            if (ol_word(l, "store64") == 0 && ol_word(l, ".st") == 0) f = ol_firstreg(l);
+            if (f >= 0) {
+                ol_wm[l] = 1 << f;
+                ol_rm[l] = m & ~(1 << f);
+                if (ol_writes(l, f) == 0) ol_rm[l] = ol_rm[l] | (1 << f);
+            } else ol_rm[l] = m;
+        } else { ol_k[l] = OK_OTHER; ol_rm[l] = 255; }
         l = l + 1;
     }
     return 0;
 }
+/* from line l on, is z read before written: 1 live, 0 dead */
+int ol_scan(int z, int l) {
+    int t; int k; int bit; int base;
+    bit = 1 << z; base = z * BL_MAX;
+    while (l < ol_n) {
+        k = ol_k[l];
+        if (k == OK_LABEL) return bl_live[base + bl_of[l]];
+        if (k == OK_RET) return 0;
+        if (k == OK_JUMP) { t = ol_tg[l]; return t < 0 ? 1 : bl_live[base + t]; }
+        if (k == OK_JUMPZ) {
+            if (ol_rm[l] & bit) return 1;
+            t = ol_tg[l]; if (t < 0) return 1;
+            if (bl_live[base + t]) return 1;
+        } else if (k == OK_CALL) {
+            t = ol_tg[l]; if (t < 0) return 1;
+            if (bl_live[base + t]) return 1;
+        } else if (k != OK_FRAME) {
+            if (ol_rm[l] & bit) return 1;
+            if (ol_wm[l] & bit) return 0;
+        }
+        l = l + 1;
+    }
+    return 1;
+}
+int bl_solve(int z) {
+    int b; int changed; int v; int rounds;
+    bl_z = z;
+    b = 0; while (b < bl_n) { bl_live[z * BL_MAX + b] = 0; b = b + 1; }
+    changed = 1; rounds = 0;
+    while (changed && rounds < 64) {
+        changed = 0; rounds = rounds + 1;
+        b = bl_n - 1;
+        while (b >= 0) {
+            v = ol_scan(z, out[ol_s[bl_s[b]]] != 32 ? bl_s[b] + 1 : bl_s[b]);
+            if (v && bl_live[z * BL_MAX + b] == 0) { bl_live[z * BL_MAX + b] = 1; changed = 1; }
+            b = b - 1;
+        }
+    }
+    return changed == 0;
+}
+int ol_zok[8];
+int ol_dead(int z, int from) {
+    if (ol_zok[z] == 0) return 0;
+    return ol_scan(z, from) == 0;
+}
+/* -O2: a local's load is `imm r2, N / sub64 rD, r6, r2 / .ld rD, [rD+0], W`
+   (or load64).  With r2 dead after it, that is one instruction on the frame
+   pointer: `.ld rD, [r6-N], W`.  Returns 1 and writes it, or 0. */
+int ol_pre(int l, char *t) {         /* line l starts with t -> its length */
+    int k; int p; p = ol_s[l]; k = 0;
+    while (t[k]) { if (p + k >= ol_e[l] || out[p + k] != t[k]) return 0; k = k + 1; }
+    return k;
+}
+int ol_put(int p, int e) { while (p < e) { out2[nout2] = out[p]; nout2 = nout2 + 1; p = p + 1; } return 0; }
+int ol_puts(char *t) { int k; k = 0; while (t[k]) { out2[nout2] = t[k]; nout2 = nout2 + 1; k = k + 1; } return 0; }
+int ol_local(int i) {
+    int a; int n0; int n1; int d; int q; int k; int ld;
+    if (i + 2 >= ol_n || ol_zok[2] == 0) return 0;
+    a = ol_pre(i, "  imm r2, "); if (a == 0) return 0;
+    n0 = ol_s[i] + a; n1 = ol_e[i];
+    k = n0; if (k >= n1) return 0;
+    while (k < n1) { if (isdi(out[k] & 255) == 0) return 0; k = k + 1; }
+    a = ol_pre(i + 1, "  sub64 r"); if (a == 0) return 0;
+    d = out[ol_s[i + 1] + a] - 48;
+    if (d < 0 || d > 7 || d == 2 || d == 6 || d == 7) return 0;
+    if (ol_len(i + 1) != a + 9) return 0;            /* `sub64 rD, r6, r2` */
+    q = ol_s[i + 1] + a + 1;
+    if (out[q] != 44 || out[q + 2] != 114 || out[q + 3] != 54 || out[q + 6] != 114 || out[q + 7] != 50) return 0;
+    ld = 0;
+    k = ol_pre(i + 2, "  .ld r");
+    if (k) { if (out[ol_s[i + 2] + k] - 48 == d) ld = 1; }
+    if (ld == 0) {
+        k = ol_pre(i + 2, "  load64 r");
+        if (k == 0 || out[ol_s[i + 2] + k] - 48 != d) return 0;
+        ld = 2;
+    }
+    q = ol_s[i + 2] + k + 1;                          /* `, [rD+0]` */
+    if (out[q] != 44 || out[q + 2] != 91 || out[q + 3] != 114 || out[q + 4] - 48 != d) return 0;
+    if (out[q + 5] != 43 || out[q + 6] != 48 || out[q + 7] != 93) return 0;
+    if (ld == 2 && q + 8 != ol_e[i + 2]) return 0;
+    if (ld == 1 && out[q + 8] != 44) return 0;
+    if (ol_dead(2, i + 3) == 0) return 0;
+    if (ld == 1) ol_puts("  .ld r"); else ol_puts("  load64 r");
+    out2[nout2] = 48 + d; nout2 = nout2 + 1;
+    ol_puts(", [r6-"); ol_put(n0, n1); ol_puts("]");
+    if (ld == 1) ol_put(q + 8, ol_e[i + 2]);
+    out2[nout2] = 10; nout2 = nout2 + 1;
+    return 1;
+}
+
 int opt_round(void) {
     int i; int j; int x; int y; int k; int ok; int hits; int z; int zz; int bad;
     ol_n = 0; i = 0;
@@ -7633,7 +7736,9 @@ int opt_round(void) {
         i = i + 1;
     }
     ol_labels();
-    if (optlevel >= 2) { k = 3; while (k <= 5) { ol_zok[k] = ol_zlocal(k); k = k + 1; } }
+    if (optlevel >= 2) { k = 2; while (k <= 5) { ol_zok[k] = 1; k = k + 1; } if (bl_split() == 0) { k = 2; while (k <= 5) { ol_zok[k] = 0; k = k + 1; } }
+        else ol_prep();
+        k = 2; while (k <= 5) { if (ol_zok[k]) { if (bl_solve(k) == 0) ol_zok[k] = 0; } k = k + 1; } }
     nout2 = 0; hits = 0; i = 0;
     while (i < ol_n) {
         if (i + 3 < ol_n && ol_is(i, "  .frame 8")) {
@@ -7683,6 +7788,7 @@ int opt_round(void) {
                 }
             }
         }
+        if (optlevel >= 2) { if (ol_local(i)) { hits = hits + 1; i = i + 3; continue; } }
         ol_emit(i);
         i = i + 1;
     }
