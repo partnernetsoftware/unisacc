@@ -56,7 +56,7 @@ closure: ref
 	@./tests/closure.sh $(PROBES)
 
 corpus: ref
-	@FETCH=0 ./tests/corpus.sh
+	@for k in 1 2 3 4; do FETCH=0 SHARD=$$k/4 ./tests/corpus.sh || exit 1; done
 
 bench: ref
 	@./tests/bench.sh

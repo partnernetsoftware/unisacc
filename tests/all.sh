@@ -149,7 +149,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 run nativeboot ./tests/nativeboot.sh
 if [ -d corpus/c-testsuite ]; then
-    run corpus env FETCH=0 ./tests/corpus.sh
+    # four shards: each run stays under the 60 s ceiling (AGENTS.md)
+    run corpus1 env FETCH=0 SHARD=1/4 ./tests/corpus.sh
+    run corpus2 env FETCH=0 SHARD=2/4 ./tests/corpus.sh
+    run corpus3 env FETCH=0 SHARD=3/4 ./tests/corpus.sh
+    run corpus4 env FETCH=0 SHARD=4/4 ./tests/corpus.sh
 fi
 run acc        bash -c "python3 -m unisa acc"   # the SHIPPED weights
 wait
