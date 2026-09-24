@@ -9,6 +9,9 @@ cover the program — no C VM in the artifact. Only true surface gaps
 Force paths: ``--mode direct`` / ``--mode vm``.
 
 Exports (both paths): main_export, tag_of_export, i64_of_export, …
+Direct also: clear_slots / run_step / host_reset / host_run / host_set_global /
+host_mk_* / host_list_* / host_dict_* (aligned with ``ujs_vm.c``) so binders can
+inject globals and step without a bytecode image.
 """
 from __future__ import annotations
 

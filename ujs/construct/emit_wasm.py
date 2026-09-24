@@ -15,7 +15,13 @@ from .oracle import Oracle
 
 TAG_NULL, TAG_BOOL, TAG_I64, TAG_F64, TAG_STR = 0, 1, 2, 3, 4
 TAG_LIST, TAG_DICT, TAG_FN, TAG_TUP = 5, 6, 7, 8
-HEAP0, STACK0, LOCALS0, SAVE0, STRDATA0 = 256, 8192, 16384, 17408, 20480
+# Heap must fit game sims (hundreds of f64 list cells per step). Binders use
+# scratch at HOST_SCRATCH for host_mk_str (same idea as wasm_run.js).
+HEAP0, STACK0, LOCALS0, SAVE0 = 65536, 524288, 589824, 590080
+GMAP0, LMAP0, STRDATA0 = 590800, 591824, 593000
+HOST_SCRATCH = 950000
+MEM_PAGES = 16
+MEM_BYTES = MEM_PAGES * 65536
 
 
 class DirectEmitError(Exception):
@@ -73,13 +79,32 @@ def _slot_names(fn: Fn) -> list[str]:
     return names
 
 
+def _gl_names(fn: Fn) -> tuple[list[str], list[str]]:
+    """Local / global name tables matching ``bc_encode.encode_fn`` order."""
+    slots = {n: i for i, n in enumerate(fn.localslot)}
+    for ins in fn.code:
+        if ins.op in ("load_l", "store_l") and isinstance(ins.a, str) and ins.a not in slots:
+            slots[ins.a] = len(slots)
+    inv = [None] * len(slots)
+    for n, i in slots.items():
+        inv[i] = n
+    local_names = list(inv)
+    globals_used: list[str] = []
+    g_ix: dict[str, int] = {}
+    for ins in fn.code:
+        if ins.op in ("load_g", "store_g") and isinstance(ins.a, str) and ins.a not in g_ix:
+            g_ix[ins.a] = len(globals_used)
+            globals_used.append(ins.a)
+    return local_names, globals_used
+
+
 def _esc(bs: bytes) -> str:
     return "".join("\\%02x" % b for b in bs)
 
 
 def _helpers() -> str:
     return f"""
-  (memory (export "memory") 16)
+  (memory (export "memory") {MEM_PAGES})
   (global $freep (mut i32) (i32.const {HEAP0}))
   (global $sp (mut i32) (i32.const {STACK0}))
   (global $call_argc (mut i32) (i32.const 0))
@@ -346,6 +371,152 @@ def _helpers() -> str:
       (local.set $n (i32.const 3))))
     (call $mk_str (local.get $s) (local.get $n)))
 """
+
+
+def _map_data(addr: int, indices: list[int]) -> str:
+    if not indices:
+        return ""
+    blob = b"".join(i.to_bytes(4, "little") for i in indices)
+    return f'(data (i32.const {addr}) "{_esc(blob)}")'
+
+
+def _host_api_wat(flat_slots: list[str], local_names: list[str],
+                  globals_used: list[str]) -> str:
+    """Host ABI aligned with ``native/ujs_vm.c`` host_* (path-A binders)."""
+    six = {n: i for i, n in enumerate(flat_slots)}
+    lmap = [six[n] for n in local_names]
+    gmap = [six[n] for n in globals_used]
+    parts = [_map_data(LMAP0, lmap), _map_data(GMAP0, gmap)]
+    parts.append(f"""
+  ;; clear/set slots used by load_g/store_g (and locals): flat LOCALS0 table
+  (func $clear_slots (result i32)
+    (local $i i32)
+    (local.set $i (i32.const 0))
+    (block $c (loop $L
+      (br_if $c (i32.ge_u (local.get $i) (i32.const 64)))
+      (i32.store (i32.add (i32.const {LOCALS0}) (i32.mul (local.get $i) (i32.const 4))) (i32.const 0))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $L)))
+    (i32.const 0))
+  (func $host_reset (result i32)
+    (global.set $freep (i32.const {HEAP0}))
+    (global.set $sp (i32.const {STACK0}))
+    (call $clear_slots))
+  ;; run body without wiping injected slots / heap (sp only)
+  (func $run_step (result i32)
+    (global.set $sp (i32.const {STACK0}))
+    (call $main_body))
+  (func $host_run (result i32) (call $run_step))
+  (func $host_set_local (param $i i32) (param $h i32)
+    (if (i32.ge_u (local.get $i) (i32.const {len(lmap)})) (then (return)))
+    (i32.store
+      (i32.add (i32.const {LOCALS0})
+        (i32.mul (i32.load (i32.add (i32.const {LMAP0})
+          (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))
+      (local.get $h)))
+  (func $host_set_global (param $i i32) (param $h i32)
+    (if (i32.ge_u (local.get $i) (i32.const {len(gmap)})) (then (return)))
+    (i32.store
+      (i32.add (i32.const {LOCALS0})
+        (i32.mul (i32.load (i32.add (i32.const {GMAP0})
+          (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))
+      (local.get $h)))
+  (func $host_get_local (param $i i32) (result i32)
+    (if (result i32) (i32.ge_u (local.get $i) (i32.const {len(lmap)}))
+      (then (i32.const 0))
+      (else (i32.load
+        (i32.add (i32.const {LOCALS0})
+          (i32.mul (i32.load (i32.add (i32.const {LMAP0})
+            (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))))))
+  (func $host_get_global (param $i i32) (result i32)
+    (if (result i32) (i32.ge_u (local.get $i) (i32.const {len(gmap)}))
+      (then (i32.const 0))
+      (else (i32.load
+        (i32.add (i32.const {LOCALS0})
+          (i32.mul (i32.load (i32.add (i32.const {GMAP0})
+            (i32.mul (local.get $i) (i32.const 4)))) (i32.const 4)))))))
+  (func $host_mk_null (result i32) (i32.const 0))
+  (func $host_mk_bool (param $b i32) (result i32) (call $mk_bool (local.get $b)))
+  (func $host_mk_i64 (param $v i64) (result i32) (call $mk_i64 (local.get $v)))
+  (func $host_mk_f64 (param $v f64) (result i32) (call $mk_f64 (local.get $v)))
+  (func $host_mk_str (param $ptr i32) (param $n i32) (result i32)
+    (call $mk_str (local.get $ptr) (local.get $n)))
+  (func $host_mk_list (param $n i32) (result i32)
+    (local $p i32) (local $i i32)
+    (if (result i32) (i32.gt_u (local.get $n) (i32.const 4096))
+      (then (i32.const 0))
+      (else
+        (local.set $p (call $alloc (i32.add (i32.const 8)
+          (i32.mul (local.get $n) (i32.const 4)))))
+        (i32.store8 (local.get $p) (i32.const {TAG_LIST}))
+        (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $n))
+        (local.set $i (i32.const 0))
+        (block $done (loop $L
+          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+          (i32.store (i32.add (i32.add (local.get $p) (i32.const 8))
+            (i32.mul (local.get $i) (i32.const 4))) (i32.const 0))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $L)))
+        (local.get $p))))
+  (func $host_list_set (param $h i32) (param $i i32) (param $v i32)
+    (if (i32.ne (call $tag_of (local.get $h)) (i32.const {TAG_LIST})) (then (return)))
+    (if (i32.ge_u (local.get $i) (call $len_of (local.get $h))) (then (return)))
+    (i32.store (i32.add (i32.add (local.get $h) (i32.const 8))
+      (i32.mul (local.get $i) (i32.const 4))) (local.get $v)))
+  (func $host_list_get (param $h i32) (param $i i32) (result i32)
+    (if (result i32) (i32.ne (call $tag_of (local.get $h)) (i32.const {TAG_LIST}))
+      (then (i32.const 0))
+      (else (if (result i32) (i32.ge_u (local.get $i) (call $len_of (local.get $h)))
+        (then (i32.const 0))
+        (else (i32.load (i32.add (i32.add (local.get $h) (i32.const 8))
+          (i32.mul (local.get $i) (i32.const 4)))))))))
+  (func $host_mk_dict (param $n i32) (result i32)
+    (local $p i32) (local $i i32)
+    (if (result i32) (i32.gt_u (local.get $n) (i32.const 4096))
+      (then (i32.const 0))
+      (else
+        (local.set $p (call $alloc (i32.add (i32.const 8)
+          (i32.mul (local.get $n) (i32.const 8)))))
+        (i32.store8 (local.get $p) (i32.const {TAG_DICT}))
+        (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $n))
+        (local.set $i (i32.const 0))
+        (block $done (loop $L
+          (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+          (i32.store (i32.add (i32.add (local.get $p) (i32.const 8))
+            (i32.mul (local.get $i) (i32.const 8))) (i32.const 0))
+          (i32.store (i32.add (i32.add (i32.add (local.get $p) (i32.const 8))
+            (i32.mul (local.get $i) (i32.const 8))) (i32.const 4)) (i32.const 0))
+          (local.set $i (i32.add (local.get $i) (i32.const 1)))
+          (br $L)))
+        (local.get $p))))
+  (func $host_dict_set (param $h i32) (param $i i32) (param $k i32) (param $v i32)
+    (if (i32.ne (call $tag_of (local.get $h)) (i32.const {TAG_DICT})) (then (return)))
+    (if (i32.ge_u (local.get $i) (call $len_of (local.get $h))) (then (return)))
+    (i32.store (i32.add (i32.add (local.get $h) (i32.const 8))
+      (i32.mul (local.get $i) (i32.const 8))) (local.get $k))
+    (i32.store (i32.add (i32.add (i32.add (local.get $h) (i32.const 8))
+      (i32.mul (local.get $i) (i32.const 8))) (i32.const 4)) (local.get $v)))
+  (func $host_dict_key (param $h i32) (param $i i32) (result i32)
+    (if (result i32) (i32.ne (call $tag_of (local.get $h)) (i32.const {TAG_DICT}))
+      (then (i32.const 0))
+      (else (if (result i32) (i32.ge_u (local.get $i) (call $len_of (local.get $h)))
+        (then (i32.const 0))
+        (else (i32.load (i32.add (i32.add (local.get $h) (i32.const 8))
+          (i32.mul (local.get $i) (i32.const 8)))))))))
+  (func $host_dict_val (param $h i32) (param $i i32) (result i32)
+    (if (result i32) (i32.ne (call $tag_of (local.get $h)) (i32.const {TAG_DICT}))
+      (then (i32.const 0))
+      (else (if (result i32) (i32.ge_u (local.get $i) (call $len_of (local.get $h)))
+        (then (i32.const 0))
+        (else (i32.load (i32.add (i32.add (i32.add (local.get $h) (i32.const 8))
+          (i32.mul (local.get $i) (i32.const 8))) (i32.const 4))))))))
+  (func $host_len (param $h i32) (result i32) (call $len_of (local.get $h)))
+  (func $host_scratch (result i32) (i32.const {HOST_SCRATCH}))
+  (func $last_ic_stub_export (result i32) (i32.const 0))
+  (func $host_prog_addr (result i32) (i32.const 0))
+  (func $host_load_image (result i32) (i32.const 0))
+""")
+    return "\n".join(p for p in parts if p)
 
 
 def _normalize(fn: Fn, strings: list[str]) -> Fn:
@@ -678,17 +849,12 @@ def emit_wat(fn: Fn, oracle: Oracle | None = None) -> str:
         out.append("\n".join(d))
 
     out.append(_body(_normalize(fn, strings), str_off, fn_index, "main_body"))
+    flat = _slot_names(fn)
+    local_names, globals_used = _gl_names(fn)
+    out.append(_host_api_wat(flat, local_names, globals_used))
     out.append(f"""
   (func $main_export (result i32)
-    (local $i i32)
-    (global.set $freep (i32.const {HEAP0}))
-    (global.set $sp (i32.const {STACK0}))
-    (local.set $i (i32.const 0))
-    (block $c (loop $L
-      (br_if $c (i32.ge_u (local.get $i) (i32.const 64)))
-      (i32.store (i32.add (i32.const {LOCALS0}) (i32.mul (local.get $i) (i32.const 4))) (i32.const 0))
-      (local.set $i (i32.add (local.get $i) (i32.const 1)))
-      (br $L)))
+    (drop (call $host_reset))
     (call $main_body))
   (func $tag_of_export (param $h i32) (result i32) (call $tag_of (local.get $h)))
   (func $i64_of_export (param $h i32) (result i64) (call $i64_of (local.get $h)))
@@ -701,8 +867,33 @@ def emit_wat(fn: Fn, oracle: Oracle | None = None) -> str:
     (if (result i32) (i32.eqz (local.get $h)) (then (i32.const 0))
       (else (i32.add (local.get $h) (i32.const 8)))))
   (func $mem_base (result i32) (i32.const 0))
-  (func $mem_size (result i32) (i32.const {16 * 65536}))
+  (func $mem_size (result i32) (i32.const {MEM_BYTES}))
   (export "main_export" (func $main_export))
+  (export "clear_slots" (func $clear_slots))
+  (export "run_step" (func $run_step))
+  (export "host_reset" (func $host_reset))
+  (export "host_run" (func $host_run))
+  (export "host_set_local" (func $host_set_local))
+  (export "host_set_global" (func $host_set_global))
+  (export "host_get_local" (func $host_get_local))
+  (export "host_get_global" (func $host_get_global))
+  (export "host_mk_null" (func $host_mk_null))
+  (export "host_mk_bool" (func $host_mk_bool))
+  (export "host_mk_i64" (func $host_mk_i64))
+  (export "host_mk_f64" (func $host_mk_f64))
+  (export "host_mk_str" (func $host_mk_str))
+  (export "host_mk_list" (func $host_mk_list))
+  (export "host_list_set" (func $host_list_set))
+  (export "host_list_get" (func $host_list_get))
+  (export "host_mk_dict" (func $host_mk_dict))
+  (export "host_dict_set" (func $host_dict_set))
+  (export "host_dict_key" (func $host_dict_key))
+  (export "host_dict_val" (func $host_dict_val))
+  (export "host_len" (func $host_len))
+  (export "host_scratch" (func $host_scratch))
+  (export "host_prog_addr" (func $host_prog_addr))
+  (export "host_load_image" (func $host_load_image))
+  (export "last_ic_stub_export" (func $last_ic_stub_export))
   (export "tag_of_export" (func $tag_of_export))
   (export "i64_of_export" (func $i64_of_export))
   (export "f64_of_export" (func $f64_of_export))
@@ -727,5 +918,13 @@ def emit_wasm(fn: Fn, out_path: str, oracle: Oracle | None = None) -> dict:
             raise DirectEmitError("wat2wasm failed; wrote %s.wat" % out_path) from e
     if open(out_path, "rb").read(4) != b"\0asm":
         raise DirectEmitError("not wasm")
-    return {"wasm": out_path, "bytes": os.path.getsize(out_path),
-            "direct": True, "image": len(fn.code)}
+    local_names, globals_used = _gl_names(fn)
+    return {
+        "wasm": out_path,
+        "bytes": os.path.getsize(out_path),
+        "direct": True,
+        "image": len(fn.code),
+        "locals": local_names,
+        "globals": globals_used,
+        "slots": _slot_names(fn),
+    }

@@ -1,10 +1,10 @@
 /**
- * Drone Pages / ship-js entry.
+ * Drone Pages / ship-js entry — M1b path B default (sim.wasm direct).
  * Host/GPU from ../engine.js (shared); this file is game.js only.
  */
 import { createBrowserHost } from "../engine.js";
 import { runDroneCore } from "../app-drone.js";
-import embed from "./drone.embed.json";
+import simMeta from "./drone/sim.meta.json";
 
 function helpLine(controls, touch) {
   if (touch) {
@@ -23,6 +23,7 @@ function helpLine(controls, touch) {
  *   reticle?: HTMLElement,
  *   prefer?: "auto"|"webgl"|"webgpu",
  *   engineUrl: string,
+ *   simUrl?: string,
  *   controls?: "keyboard"|"mouse",
  *   onControls?: (c: "keyboard"|"mouse") => void,
  * }} cfg
@@ -37,6 +38,7 @@ export async function startDroneShip(cfg) {
   window.__UXE_HOST__ = host;
 
   const engineUrl = cfg.engineUrl;
+  const simUrl = cfg.simUrl || new URL("sim.wasm", new URL(".", engineUrl)).href;
   const orig = host.host_asset_read.bind(host);
   host.host_asset_read = async (path) => {
     if (path === "ujs_full.wasm" || path === "engine.wasm" || path.endsWith("engine.wasm")) {
@@ -48,7 +50,9 @@ export async function startDroneShip(cfg) {
   };
 
   function paint(s) {
-    window.__UXE__ = { ...s, backend: host.backend, ship: true, drone: true };
+    window.__UXE__ = {
+      ...s, backend: host.backend, ship: true, drone: true, pathB: true,
+    };
     if (!s.ready) return;
     cfg.hud.classList.toggle("armed", !!s.suicideArm);
     cfg.hud.classList.toggle("locked-on", !!s.locked && !s.suicideArm);
@@ -58,7 +62,7 @@ export async function startDroneShip(cfg) {
     if (cfg.ammoEl) cfg.ammoEl.textContent = ammoBar;
     const modeLabel = s.controls === "mouse" ? "键盘+鼠标" : "纯键盘";
     cfg.hud.innerHTML =
-      `<b>无人机 · 第一人称驾舱</b> · ship-js<br>` +
+      `<b>无人机 · 第一人称驾舱</b> · ship-js · <b>path B</b><br>` +
       `backend <b>${host.backend}</b> · fps <b>${(s.fps || 0).toFixed(0)}</b> · <b>${modeLabel}</b><br>` +
       `<span class="mode">${s.mode || ""}</span><br>` +
       `弹仓 <b>${ammoBar}</b> (${s.ammo}/${s.magazine})` +
@@ -72,10 +76,19 @@ export async function startDroneShip(cfg) {
         : `<span class="warn">${s.endReason === "win" ? "全歼" : "任务结束"} — 空格再出击</span>`);
     }
 
-  const image = new Uint8Array(embed.image);
+  const simRes = await fetch(simUrl);
+  if (!simRes.ok) throw new Error("fetch sim.wasm " + simRes.status);
+  const simWasm = new Uint8Array(await simRes.arrayBuffer());
+  if (simWasm[0] !== 0 || simWasm[1] !== 0x61 || simWasm[2] !== 0x73 || simWasm[3] !== 0x6d) {
+    throw new Error("sim.wasm bad magic");
+  }
+
   const api = await runDroneCore(host, {
     wasmUrl: "engine.wasm",
-    precompiled: { image, blob: embed.blob },
+    directSim: {
+      wasm: simWasm,
+      meta: { globals: simMeta.globals || [], locals: simMeta.locals || [] },
+    },
     controls,
     onHud: paint,
   });
@@ -84,6 +97,7 @@ export async function startDroneShip(cfg) {
 
   return {
     backend: host.backend,
+    pathB: true,
     getControls: () => api.getControls(),
     setControls(next) {
       api.setControls(next);

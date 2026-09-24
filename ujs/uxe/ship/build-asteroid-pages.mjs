@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 /**
  * Build Asteroid Pages ship-js (no C game wasm / no eng_* bridge).
- * Shared Host/GPU: ../engine.js · game: game.js + engine.wasm + thin index.html.
+ * Path B default: compile.mjs (compiler.wasm) → sim.wasm + meta; no python3 emit.
  */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
-import { compile } from "../../core/compiler.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ujs = path.resolve(here, "../..");
@@ -18,14 +17,58 @@ const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
 const homeLocal = process.env.UXE_SHIP_HOME || "../";
 const homePages = "../../";
 
-const simSrc = fs.readFileSync(path.join(ujs, "web/game/sim.ujs"), "utf8");
-const { image, blob } = compile(simSrc);
-const embedPath = path.join(here, "asteroid.embed.json");
-fs.writeFileSync(embedPath, JSON.stringify({
-  image: [...image],
-  blob: { globals: blob.globals || [], locals: blob.locals || [] },
-}));
-console.log("embed", image.length, "B · globals", (blob.globals || []).join(","));
+const simUjs = path.join(ujs, "web/game/sim.ujs");
+const simWasm = path.join(here, "sim.wasm");
+const simMeta = path.join(here, "sim.meta.json");
+
+// Path B: compiler.wasm → sim.wasm + meta (globals order = host_set_global indices)
+const u2w = spawnSync(
+  "node",
+  [path.join(ujs, "compile.mjs"), simUjs, "-o", simWasm],
+  {
+    stdio: ["ignore", "pipe", "inherit"],
+    cwd: root,
+    env: { ...process.env, UJS_REQUIRE_COMPILER_WASM: "1" },
+    encoding: "utf8",
+  },
+);
+if (u2w.status !== 0) {
+  console.error(u2w.stdout || "");
+  process.exit(u2w.status || 1);
+}
+let emitInfo;
+try {
+  emitInfo = JSON.parse((u2w.stdout || "").trim().split("\n").pop());
+} catch (_) {
+  console.error("compile.mjs did not print JSON:", u2w.stdout);
+  process.exit(1);
+}
+if (emitInfo.bridge !== "compiler.wasm") {
+  console.error("ship emit must use compiler.wasm, got", emitInfo.bridge);
+  process.exit(1);
+}
+// compile.mjs writes <stem>.meta.json next to -o; normalize name for host-entry import
+const emittedMeta = simWasm.replace(/\.wasm$/i, "") + ".meta.json";
+if (emittedMeta !== simMeta && fs.existsSync(emittedMeta)) {
+  fs.copyFileSync(emittedMeta, simMeta);
+}
+if (!fs.existsSync(simMeta)) {
+  console.error("sim.meta.json missing after compile");
+  process.exit(1);
+}
+const magic = fs.readFileSync(simWasm).subarray(0, 4);
+if (magic[0] !== 0 || magic[1] !== 0x61 || magic[2] !== 0x73 || magic[3] !== 0x6d) {
+  console.error("sim.wasm missing or not \\0asm");
+  process.exit(1);
+}
+console.log(
+  "sim.wasm",
+  emitInfo.bytes,
+  "B · bridge",
+  emitInfo.bridge,
+  "· globals",
+  (emitInfo.globals || []).join(","),
+);
 
 fs.mkdirSync(outPages, { recursive: true });
 
@@ -71,6 +114,10 @@ if (!gameJs.includes("./engine.js") && !gameJs.includes("'./engine.js'")) {
   console.error("asteroid game.js missing ./engine.js import — abort");
   process.exit(1);
 }
+if (!/bootDirectStep|host_set_global|run_step/.test(gameJs)) {
+  console.error("asteroid game.js missing path-B direct_step surface — abort");
+  process.exit(1);
+}
 
 function bake(homeHref) {
   return `<!DOCTYPE html>
@@ -107,7 +154,7 @@ function bake(homeHref) {
 </head>
 <body>
   <a class="nav" href="${homeHref}" style="right:16px;top:16px">← 游戏索引</a>
-  <div id="hud">ship-js · loading…</div>
+  <div id="hud">ship-js · path B · loading…</div>
   <div id="banner"><div>
     <h1 style="margin:0 0 8px;font-size:28px">撞毁</h1>
     <p style="margin:0;opacity:.85">双击或空格重开 · <span id="final">0</span></p>
@@ -126,6 +173,7 @@ try {
     finalEl: document.getElementById("final"),
     prefer,
     engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
+    simUrl: new URL("./sim.wasm?v=${stamp}", location.href).href,
   });
 } catch (e) {
   hud.innerHTML = '<span class="warn">boot failed</span><br>' + String(e.message || e);
@@ -140,22 +188,26 @@ try {
 
 fs.writeFileSync(path.join(outLocal, "index.html"), bake(homeLocal));
 fs.copyFileSync(path.join(ujs, "core/ujs_full.wasm"), path.join(outLocal, "engine.wasm"));
+// sim.wasm / sim.meta.json already in outLocal (= here)
 
 fs.writeFileSync(path.join(outPages, "index.html"), bake(homePages));
 fs.copyFileSync(path.join(outLocal, "engine.wasm"), path.join(outPages, "engine.wasm"));
+fs.copyFileSync(simWasm, path.join(outPages, "sim.wasm"));
+fs.copyFileSync(simMeta, path.join(outPages, "sim.meta.json"));
 let pagesGame = fs.readFileSync(gameOut, "utf8")
   .replaceAll('from "./engine.js"', 'from "../engine.js"')
   .replaceAll("from './engine.js'", "from '../engine.js'");
 fs.writeFileSync(path.join(outPages, "game.js"), pagesGame);
 
-// drop legacy C game artifact from Pages if present
+// drop legacy C / path-A embed artifacts
 for (const p of [
   path.join(outLocal, "asteroid.wasm"),
   path.join(outPages, "asteroid.wasm"),
+  path.join(outLocal, "asteroid.embed.json"),
 ]) {
   try { fs.unlinkSync(p); } catch { /* */ }
 }
 
-console.log("asteroid ship-js ok:");
+console.log("asteroid ship-js ok (path B directSim):");
 console.log("  local ", outLocal);
 console.log("  pages ", outPages);

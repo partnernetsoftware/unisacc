@@ -1,8 +1,12 @@
 /**
  * Game core (JS stand-in for future single wasm module).
- * Talks ONLY via Host ABI + wasm_run for UJS sim — no canvas/WebGL imports.
+ * Talks ONLY via Host ABI — no canvas/WebGL imports.
+ *
+ * Path B (ship default): opts.directSim = { wasm, meta } → ujs2wasm host_* + run_step
+ * (see tests/ujs2wasm_step.sh). Else path A: wasm_run + bytecode (demo).
  */
 import { bootRuntime, wasm_run, unwrap } from "../core/wasm_run.js";
+import { bootDirectStep } from "./direct_step.js";
 import { encodeRenderPacket } from "./packet.js";
 import { decodeInputSnapshot, INPUT_BYTES } from "./input.js";
 
@@ -29,31 +33,44 @@ function freshState() {
  *   simUrl?: string,
  *   wasmUrl: string,
  *   precompiled?: { image: Uint8Array|number[], blob: { globals?: string[], locals?: string[] } },
+ *   directSim?: { wasm: Uint8Array|ArrayBuffer, meta: { globals: string[], locals?: string[] } },
  *   onHud?: (s: object) => void
  * }} opts
  */
 export async function runAsteroidCore(host, opts) {
   host.host_log("info", "core boot abi");
-  const wasmBytes = await host.host_asset_read(opts.wasmUrl);
-  await bootRuntime(wasmBytes.buffer.slice(
-    wasmBytes.byteOffset,
-    wasmBytes.byteOffset + wasmBytes.byteLength,
-  ));
 
-  let fnImage, fnBlob;
-  if (opts.precompiled?.image) {
-    const img = opts.precompiled.image;
-    fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
-    fnBlob = opts.precompiled.blob || {};
+  let stepSim;
+  if (opts.directSim?.wasm && opts.directSim?.meta) {
+    host.host_log("info", "sim path B direct");
+    stepSim = await bootDirectStep(opts.directSim.wasm, opts.directSim.meta);
   } else {
     if (typeof __UXE_SHIP__ !== "undefined" && __UXE_SHIP__) {
-      throw new Error("ship build requires precompiled sim embed");
+      throw new Error("ship requires directSim (path B); bytecode wasm_run removed from ship");
     }
-    const { compile } = await import("../core/compiler.js");
-    const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
-    const compiled = compile(simText);
-    fnImage = compiled.image;
-    fnBlob = compiled.blob;
+    const wasmBytes = await host.host_asset_read(opts.wasmUrl);
+    await bootRuntime(wasmBytes.buffer.slice(
+      wasmBytes.byteOffset,
+      wasmBytes.byteOffset + wasmBytes.byteLength,
+    ));
+
+    let fnImage, fnBlob;
+    if (opts.precompiled?.image) {
+      const img = opts.precompiled.image;
+      fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
+      fnBlob = opts.precompiled.blob || {};
+    } else {
+      const { compile } = await import("../core/compiler.js");
+      const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
+      const compiled = compile(simText);
+      fnImage = compiled.image;
+      fnBlob = compiled.blob;
+    }
+    stepSim = async (globalsMap) => {
+      const r = await wasm_run({ image: fnImage, blob: fnBlob }, globalsMap, {});
+      if (r.err) throw new Error(JSON.stringify(r.err));
+      return unwrap(r);
+    };
   }
 
   let state = freshState();
@@ -61,11 +78,10 @@ export async function runAsteroidCore(host, opts) {
   let lastFire = 0;
   let tapMs = 0;
 
-  const warm = await wasm_run({ image: fnImage, blob: fnBlob }, {
+  const warm = await stepSim({
     ...state, ix: 0, iy: 0, dt: 0.016,
-  }, {});
-  if (warm.err) throw new Error(JSON.stringify(warm.err));
-  state = { ...state, ...unwrap(warm) };
+  });
+  state = { ...state, ...warm };
   alive = !!state.alive;
 
   const rockXYZ = new Float32Array(N * 3);
@@ -140,26 +156,26 @@ export async function runAsteroidCore(host, opts) {
     let ujsMs = 0;
     if (alive) {
       const t0 = host.host_time();
-      const r = await wasm_run({ image: fnImage, blob: fnBlob }, {
-        xs: state.xs, ys: state.ys, zs: state.zs,
-        vxs: state.vxs, vys: state.vys, vzs: state.vzs, rs: state.rs,
-        px: state.px, py: state.py, pz: state.pz,
-        ix: input.ix, iy: input.iy, dt, score: state.score, alive: 1,
-      }, {});
-      ujsMs = host.host_time() - t0;
-      if (r.err) {
-        host.host_log("error", "ujs " + JSON.stringify(r.err));
+      try {
+        const out = await stepSim({
+          xs: state.xs, ys: state.ys, zs: state.zs,
+          vxs: state.vxs, vys: state.vys, vzs: state.vzs, rs: state.rs,
+          px: state.px, py: state.py, pz: state.pz,
+          ix: input.ix, iy: input.iy, dt, score: state.score, alive: 1,
+        });
+        ujsMs = host.host_time() - t0;
+        state = {
+          xs: out.xs, ys: out.ys, zs: out.zs,
+          vxs: out.vxs, vys: out.vys, vzs: out.vzs, rs: out.rs,
+          px: out.px, py: out.py, pz: out.pz,
+          score: out.score, alive: out.alive,
+        };
+        if (!out.alive || out.hit) alive = false;
+      } catch (e) {
+        host.host_log("error", "ujs " + (e && e.message ? e.message : String(e)));
         host.host_request_frame(tick);
         return;
       }
-      const out = unwrap(r);
-      state = {
-        xs: out.xs, ys: out.ys, zs: out.zs,
-        vxs: out.vxs, vys: out.vys, vzs: out.vzs, rs: out.rs,
-        px: out.px, py: out.py, pz: out.pz,
-        score: out.score, alive: out.alive,
-      };
-      if (!out.alive || out.hit) alive = false;
     }
 
     const g0 = host.host_time();

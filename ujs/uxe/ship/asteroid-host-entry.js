@@ -1,10 +1,10 @@
 /**
- * Asteroid Pages / ship-js entry (no asteroid.wasm / no eng_* glue).
- * Host/GPU from ../engine.js (shared); this file is game.js only.
+ * Asteroid Pages / ship-js entry — M1 path B default (sim.wasm direct).
+ * Host/GPU from ./engine.js; game.js only.
  */
 import { createBrowserHost } from "./engine.js";
 import { runAsteroidCore } from "../app-asteroid.js";
-import embed from "./asteroid.embed.json";
+import simMeta from "./sim.meta.json";
 
 /**
  * @param {{
@@ -14,6 +14,7 @@ import embed from "./asteroid.embed.json";
  *   finalEl?: HTMLElement,
  *   prefer?: "auto"|"webgl"|"webgpu",
  *   engineUrl: string,
+ *   simUrl?: string,
  * }} cfg
  */
 export async function startShip(cfg) {
@@ -25,6 +26,7 @@ export async function startShip(cfg) {
   window.__UXE_HOST__ = host;
 
   const engineUrl = cfg.engineUrl;
+  const simUrl = cfg.simUrl || new URL("sim.wasm", new URL(".", engineUrl)).href;
   const orig = host.host_asset_read.bind(host);
   host.host_asset_read = async (path) => {
     if (path === "ujs_full.wasm" || path === "engine.wasm" || path.endsWith("engine.wasm")) {
@@ -36,10 +38,12 @@ export async function startShip(cfg) {
   };
 
   function paint(s) {
-    window.__UXE__ = { ...s, backend: host.backend, ship: true, asteroid: true };
+    window.__UXE__ = {
+      ...s, backend: host.backend, ship: true, asteroid: true, pathB: true,
+    };
     if (!s.ready) return;
     cfg.hud.innerHTML =
-      `<b>Asteroid Rush</b> · ship-js<br>` +
+      `<b>Asteroid Rush</b> · ship-js · <b>path B</b><br>` +
       `backend <b>${host.backend}</b> · fps <b>${(s.fps || 0).toFixed(0)}</b><br>` +
       `得分 <b>${(s.score || 0).toFixed(0)}</b>` +
       (s.alive
@@ -53,12 +57,21 @@ export async function startShip(cfg) {
     }
   }
 
-  const image = new Uint8Array(embed.image);
+  const simRes = await fetch(simUrl);
+  if (!simRes.ok) throw new Error("fetch sim.wasm " + simRes.status);
+  const simWasm = new Uint8Array(await simRes.arrayBuffer());
+  if (simWasm[0] !== 0 || simWasm[1] !== 0x61 || simWasm[2] !== 0x73 || simWasm[3] !== 0x6d) {
+    throw new Error("sim.wasm bad magic");
+  }
+
   await runAsteroidCore(host, {
     wasmUrl: "engine.wasm",
-    precompiled: { image, blob: embed.blob },
+    directSim: {
+      wasm: simWasm,
+      meta: { globals: simMeta.globals || [], locals: simMeta.locals || [] },
+    },
     onHud: paint,
   });
 
-  return { backend: host.backend };
+  return { backend: host.backend, pathB: true };
 }

@@ -27,13 +27,13 @@
 ## 0. Ship 胶水（ship-js 现状）
 
 Asteroid / 无人机 **Pages 已走 ship-js**：`game.js` + 共享 `engine.js` + `engine.wasm`，**无** `{game}.wasm`、**无** `eng_boot` / `eng_sim_step` 双 memory 搬砖。  
-玩法步进经产品 API `wasm_run`（路径 A）；路径 B（`ujs2wasm` 直出接核）见 [`prd.md`](../prd.md) 目标 #2b。
+Asteroid + drone Pages **默认路径 B**：`ujs2wasm`→`sim.wasm` + `opts.directSim`（[`direct_step.js`](direct_step.js)），热路径不走 `wasm_run`。门禁：`./tests/ujs2wasm_step.sh` · `./tests/uxe_ship_js.sh` — 见 [`prd.md`](../prd.md) #2b / M1 / M1b。
 
 | 块 | 落点 |
 |---|---|
 | WebGL / WebGPU 译包 | Host（不可沉） |
 | UXEP/UXIN | Host 编解码 · 核只调 `host_*` |
-| 玩法调度 | `app-*.js`（ship 预编译 embed · 禁拉 `compiler.gen`） |
+| 玩法调度 | `app-*.js`（Asteroid/drone：`directSim`+`sim.wasm`；禁拉 `compiler.gen`） |
 | 遗留 C 双 wasm + eng_* | `native/uxe_asteroid.c` · `ship/host-entry.js` · `build-asteroid.mjs` — **不再出货** |
 
 门禁：`./tests/uxe_ship_js.sh`（无 eng_* · 无 asteroid.wasm · game-ready emit）。

@@ -1,7 +1,11 @@
 /**
  * FP drone battlefield — cockpit view, 2 missiles (lock+fire), suicide ram.
+ *
+ * Path B (ship default): opts.directSim = { wasm, meta } → ujs2wasm host_* + run_step
+ * Else path A: wasm_run + bytecode (demo / rules).
  */
 import { bootRuntime, wasm_run, unwrap } from "../core/wasm_run.js";
+import { bootDirectStep } from "./direct_step.js";
 import { encodeRenderPacket, MESH_OCTA } from "./packet.js";
 import { MESH_BOX } from "./meshes.js";
 import {
@@ -79,7 +83,11 @@ function faceTargetIdx(state, i) {
 /**
  * @param {import("./host-abi.js").HostAbi} host
  * @param {{
- *   simUrl?: string, wasmUrl: string, precompiled?: object, onHud?: Function,
+ *   simUrl?: string,
+ *   wasmUrl: string,
+ *   precompiled?: { image: Uint8Array|number[], blob: { globals?: string[], locals?: string[] } },
+ *   directSim?: { wasm: Uint8Array|ArrayBuffer, meta: { globals: string[], locals?: string[] } },
+ *   onHud?: Function,
  *   controls?: "keyboard"|"mouse"
  * }} opts
  */
@@ -87,26 +95,38 @@ export async function runDroneCore(host, opts) {
   host.host_log("info", "drone FP cockpit boot");
   let controls = opts.controls === "mouse" ? "mouse" : "keyboard";
   host.setPointerLockEnabled?.(controls === "mouse");
-  const wasmBytes = await host.host_asset_read(opts.wasmUrl);
-  await bootRuntime(wasmBytes.buffer.slice(
-    wasmBytes.byteOffset,
-    wasmBytes.byteOffset + wasmBytes.byteLength,
-  ));
 
-  let fnImage, fnBlob;
-  if (opts.precompiled?.image) {
-    const img = opts.precompiled.image;
-    fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
-    fnBlob = opts.precompiled.blob || {};
+  let stepSim;
+  if (opts.directSim?.wasm && opts.directSim?.meta) {
+    host.host_log("info", "sim path B direct");
+    stepSim = await bootDirectStep(opts.directSim.wasm, opts.directSim.meta);
   } else {
     if (typeof __UXE_SHIP__ !== "undefined" && __UXE_SHIP__) {
-      throw new Error("drone ship requires precompiled sim");
+      throw new Error("ship requires directSim (path B); bytecode wasm_run removed from ship");
     }
-    const { compile } = await import("../core/compiler.js");
-    const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
-    const compiled = compile(simText);
-    fnImage = compiled.image;
-    fnBlob = compiled.blob;
+    const wasmBytes = await host.host_asset_read(opts.wasmUrl);
+    await bootRuntime(wasmBytes.buffer.slice(
+      wasmBytes.byteOffset,
+      wasmBytes.byteOffset + wasmBytes.byteLength,
+    ));
+
+    let fnImage, fnBlob;
+    if (opts.precompiled?.image) {
+      const img = opts.precompiled.image;
+      fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
+      fnBlob = opts.precompiled.blob || {};
+    } else {
+      const { compile } = await import("../core/compiler.js");
+      const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
+      const compiled = compile(simText);
+      fnImage = compiled.image;
+      fnBlob = compiled.blob;
+    }
+    stepSim = async (globalsMap) => {
+      const r = await wasm_run({ image: fnImage, blob: fnBlob }, globalsMap, {});
+      if (r.err) throw new Error(JSON.stringify(r.err));
+      return unwrap(r);
+    };
   }
 
   let state = freshState();
@@ -144,26 +164,25 @@ export async function runDroneCore(host, opts) {
   }
 
   async function stepWith(dt, ix, iy, B, thit, suicide, speedMul) {
-    const r = await wasm_run({ image: fnImage, blob: fnBlob }, {
-      px: state.px, py: state.py, pz: state.pz,
-      score: state.score, alive: state.alive, ammo: state.ammo,
-      ix, iy, dt, suicide, speed_mul: speedMul,
-      fx: B.fx, fy: B.fy, fz: B.fz,
-      rx: B.rx, ry: B.ry, rz: B.rz,
-      txs: state.txs, tys: state.tys, tzs: state.tzs, thp: state.thp, thit,
-    }, {});
-    if (r.err) {
-      host.host_log("error", "ujs " + JSON.stringify(r.err));
-      return;
+    try {
+      const out = await stepSim({
+        px: state.px, py: state.py, pz: state.pz,
+        score: state.score, alive: state.alive, ammo: state.ammo,
+        ix, iy, dt, suicide, speed_mul: speedMul,
+        fx: B.fx, fy: B.fy, fz: B.fz,
+        rx: B.rx, ry: B.ry, rz: B.rz,
+        txs: state.txs, tys: state.tys, tzs: state.tzs, thp: state.thp, thit,
+      });
+      state = {
+        px: out.px, py: out.py, pz: out.pz,
+        score: out.score, alive: out.alive, ammo: state.ammo,
+        txs: out.txs, tys: out.tys, tzs: out.tzs, thp: out.thp,
+        tang: state.tang,
+      };
+      kills += out.nk || 0;
+    } catch (e) {
+      host.host_log("error", "ujs " + (e && e.message ? e.message : String(e)));
     }
-    const out = unwrap(r);
-    state = {
-      px: out.px, py: out.py, pz: out.pz,
-      score: out.score, alive: out.alive, ammo: state.ammo,
-      txs: out.txs, tys: out.tys, tzs: out.tzs, thp: out.thp,
-      tang: state.tang,
-    };
-    kills += out.nk || 0;
   }
 
   function orbitTargets(dt) {

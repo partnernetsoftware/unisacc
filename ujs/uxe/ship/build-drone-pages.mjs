@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
- * Build Drone Pages ship.
+ * Build Drone Pages ship-js.
+ * Path B default: compile.mjs (compiler.wasm) → sim.wasm + meta; no python3 emit.
  * Shared Host/GPU: ../engine.js (and docs/uxe/engine.js).
- * This game: game.js + engine.wasm + thin index.html.
  */
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { spawnSync } from "child_process";
-import { compile } from "../../core/compiler.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const ujs = path.resolve(here, "../..");
@@ -17,18 +16,61 @@ const outLocal = path.join(here, "drone");
 const outPages = path.join(root, "docs/uxe/drone");
 const stamp = process.env.UXE_SHIP_STAMP || Date.now().toString(36);
 
-const simSrc = fs.readFileSync(path.join(ujs, "web/game/drone.ujs"), "utf8");
-const { image, blob } = compile(simSrc);
-const embedPath = path.join(here, "drone.embed.json");
-fs.writeFileSync(embedPath, JSON.stringify({
-  image: [...image],
-  blob: { globals: blob.globals || [], locals: blob.locals || [] },
-}));
-console.log("embed", image.length, "B · globals", (blob.globals || []).join(","));
+const simUjs = path.join(ujs, "web/game/drone.ujs");
+const simWasm = path.join(outLocal, "sim.wasm");
+const simMeta = path.join(outLocal, "sim.meta.json");
 
 for (const dir of [outLocal, outPages]) {
   fs.mkdirSync(dir, { recursive: true });
 }
+
+// Path B: compiler.wasm → sim.wasm + meta (globals order = host_set_global indices)
+const u2w = spawnSync(
+  "node",
+  [path.join(ujs, "compile.mjs"), simUjs, "-o", simWasm],
+  {
+    stdio: ["ignore", "pipe", "inherit"],
+    cwd: root,
+    env: { ...process.env, UJS_REQUIRE_COMPILER_WASM: "1" },
+    encoding: "utf8",
+  },
+);
+if (u2w.status !== 0) {
+  console.error(u2w.stdout || "");
+  process.exit(u2w.status || 1);
+}
+let emitInfo;
+try {
+  emitInfo = JSON.parse((u2w.stdout || "").trim().split("\n").pop());
+} catch (_) {
+  console.error("compile.mjs did not print JSON:", u2w.stdout);
+  process.exit(1);
+}
+if (emitInfo.bridge !== "compiler.wasm") {
+  console.error("ship emit must use compiler.wasm, got", emitInfo.bridge);
+  process.exit(1);
+}
+const emittedMeta = simWasm.replace(/\.wasm$/i, "") + ".meta.json";
+if (emittedMeta !== simMeta && fs.existsSync(emittedMeta)) {
+  fs.copyFileSync(emittedMeta, simMeta);
+}
+if (!fs.existsSync(simMeta)) {
+  console.error("sim.meta.json missing after compile");
+  process.exit(1);
+}
+const magic = fs.readFileSync(simWasm).subarray(0, 4);
+if (magic[0] !== 0 || magic[1] !== 0x61 || magic[2] !== 0x73 || magic[3] !== 0x6d) {
+  console.error("sim.wasm missing or not \\0asm");
+  process.exit(1);
+}
+console.log(
+  "sim.wasm",
+  emitInfo.bytes,
+  "B · bridge",
+  emitInfo.bridge,
+  "· globals",
+  (emitInfo.globals || []).join(","),
+);
 
 // Ensure shared engine.js exists (Host + GPU)
 const engBuild = spawnSync("node", [path.join(here, "build-engine-js.mjs")], {
@@ -44,12 +86,14 @@ const esbuild = spawnSync("npx", [
   "--loader:.json=json",
   "--define:__UXE_SHIP__=true",
   "--external:../engine.js",
-  "--external:fs",
-  "--external:path",
-  "--external:url",
+  "--external:../core/compiler.js",
+  "--external:../core/compiler.gen.js",
   "--external:./compiler.js",
   "--external:./compiler.gen.js",
   "--external:../compiler.js",
+  "--external:fs",
+  "--external:path",
+  "--external:url",
   `--outfile=${gameOut}`,
 ], { stdio: "inherit", cwd: ujs });
 if (esbuild.status !== 0) process.exit(esbuild.status || 1);
@@ -65,6 +109,10 @@ if (/createWebGLRenderer|createWebGPURenderer/.test(gameJs)) {
 }
 if (!gameJs.includes("../engine.js")) {
   console.error("drone game.js missing ../engine.js import — abort");
+  process.exit(1);
+}
+if (!/bootDirectStep|host_set_global|run_step/.test(gameJs)) {
+  console.error("drone game.js missing path-B direct_step surface — abort");
   process.exit(1);
 }
 
@@ -144,7 +192,7 @@ function bake(homeHref) {
   <div id="vignette"></div>
   <div id="reticle"></div>
   <div id="ammo"></div>
-  <div id="hud">驾舱启动…</div>
+  <div id="hud">ship-js · path B · 驾舱启动…</div>
   <div id="controls">
     <button type="button" id="ctrl-kb" class="on">纯键盘</button>
     <button type="button" id="ctrl-ms">键盘+鼠标</button>
@@ -174,6 +222,7 @@ try {
     prefer,
     controls: initial,
     engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
+    simUrl: new URL("./sim.wasm?v=${stamp}", location.href).href,
     onControls: paintCtrl,
   });
   window.__UXE_API__ = api;
@@ -195,16 +244,19 @@ fs.copyFileSync(path.join(ujs, "core/ujs_full.wasm"), path.join(outLocal, "engin
 
 fs.writeFileSync(path.join(outPages, "index.html"), bake("../../"));
 fs.copyFileSync(path.join(outLocal, "engine.wasm"), path.join(outPages, "engine.wasm"));
+fs.copyFileSync(simWasm, path.join(outPages, "sim.wasm"));
+fs.copyFileSync(simMeta, path.join(outPages, "sim.meta.json"));
 fs.copyFileSync(gameOut, path.join(outPages, "game.js"));
 
-// drop legacy fat inline host if present
+// drop legacy path-A embed / fat host
 for (const p of [
+  path.join(here, "drone.embed.json"),
   path.join(outLocal, "uxe-host.js"),
   path.join(outPages, "uxe-host.js"),
 ]) {
   try { fs.unlinkSync(p); } catch { /* */ }
 }
 
-console.log("drone ship-js ok:");
+console.log("drone ship-js ok (path B directSim):");
 console.log("  local ", outLocal);
 console.log("  pages ", outPages);

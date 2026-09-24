@@ -186,6 +186,95 @@ function unwrap(r) {
   return r.ok;
 }
 
+// uxe/direct_step.js
+var TAG2 = { null: 0, bool: 1, i64: 2, f64: 3, str: 4, list: 5, dict: 6 };
+function pyToHandle2(ex, mem, v, scratch) {
+  if (v === null || v === void 0) return ex.host_mk_null();
+  if (typeof v === "boolean") return ex.host_mk_bool(v ? 1 : 0);
+  if (typeof v === "number") {
+    if (Number.isInteger(v) && Math.abs(v) <= Number.MAX_SAFE_INTEGER)
+      return ex.host_mk_i64(BigInt(v));
+    return ex.host_mk_f64(v);
+  }
+  if (typeof v === "bigint") return ex.host_mk_i64(v);
+  if (typeof v === "string") {
+    const bytes = new TextEncoder().encode(v);
+    const base = Number(ex.mem_base());
+    new Uint8Array(mem.buffer, base + scratch, bytes.length).set(bytes);
+    return ex.host_mk_str(scratch, bytes.length);
+  }
+  if (Array.isArray(v)) {
+    const h = ex.host_mk_list(v.length);
+    for (let i = 0; i < v.length; i++)
+      ex.host_list_set(h, i, pyToHandle2(ex, mem, v[i], scratch));
+    return h;
+  }
+  if (typeof v === "object") {
+    const keys = Object.keys(v);
+    const h = ex.host_mk_dict(keys.length);
+    for (let i = 0; i < keys.length; i++) {
+      ex.host_dict_set(
+        h,
+        i,
+        pyToHandle2(ex, mem, keys[i], scratch),
+        pyToHandle2(ex, mem, v[keys[i]], scratch)
+      );
+    }
+    return h;
+  }
+  throw new Error("unsupported type " + typeof v);
+}
+function readHandle2(ex, mem, h) {
+  if (!h) return null;
+  const t = ex.tag_of_export(h);
+  if (t === TAG2.null) return null;
+  if (t === TAG2.bool) return !!new Uint8Array(mem.buffer)[Number(ex.mem_base()) + h + 4];
+  if (t === TAG2.i64) return Number(ex.i64_of_export(h));
+  if (t === TAG2.f64) return Number(ex.f64_of_export(h));
+  if (t === TAG2.str) {
+    const p = Number(ex.str_ptr_export(h));
+    const n = Number(ex.str_len_export(h));
+    return new TextDecoder().decode(
+      new Uint8Array(mem.buffer, Number(ex.mem_base()) + p, n)
+    );
+  }
+  if (t === TAG2.list) {
+    const n = Number(ex.host_len(h));
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(readHandle2(ex, mem, ex.host_list_get(h, i)));
+    return out;
+  }
+  if (t === TAG2.dict) {
+    const n = Number(ex.host_len(h));
+    const out = {};
+    for (let i = 0; i < n; i++) {
+      const k = readHandle2(ex, mem, ex.host_dict_key(h, i));
+      out[k] = readHandle2(ex, mem, ex.host_dict_val(h, i));
+    }
+    return out;
+  }
+  throw new Error("unsupported tag " + t);
+}
+async function bootDirectStep(wasmBytes, meta) {
+  const buf = wasmBytes instanceof ArrayBuffer ? new Uint8Array(wasmBytes) : wasmBytes;
+  const { instance } = await WebAssembly.instantiate(buf);
+  const ex = instance.exports;
+  if (typeof ex.host_run !== "function" && typeof ex.run_step !== "function")
+    throw new Error("direct module missing run_step/host_run");
+  const runBody = typeof ex.run_step === "function" ? ex.run_step : ex.host_run;
+  const mem = ex.memory;
+  const gnames = meta.globals || [];
+  const scratch = typeof ex.host_scratch === "function" ? Number(ex.host_scratch()) : 95e4;
+  return function step(globalsMap) {
+    ex.host_reset();
+    for (const [k, v] of Object.entries(globalsMap || {})) {
+      const ix = gnames.indexOf(k);
+      if (ix >= 0) ex.host_set_global(ix, pyToHandle2(ex, mem, v, scratch));
+    }
+    return readHandle2(ex, mem, runBody());
+  };
+}
+
 // uxe/packet.js
 var PACKET_MAGIC = 1346721877;
 var PACKET_VERSION = 3;
@@ -679,25 +768,36 @@ async function runDroneCore(host, opts) {
   host.host_log("info", "drone FP cockpit boot");
   let controls = opts.controls === "mouse" ? "mouse" : "keyboard";
   host.setPointerLockEnabled?.(controls === "mouse");
-  const wasmBytes = await host.host_asset_read(opts.wasmUrl);
-  await bootRuntime(wasmBytes.buffer.slice(
-    wasmBytes.byteOffset,
-    wasmBytes.byteOffset + wasmBytes.byteLength
-  ));
-  let fnImage, fnBlob;
-  if (opts.precompiled?.image) {
-    const img = opts.precompiled.image;
-    fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
-    fnBlob = opts.precompiled.blob || {};
+  let stepSim;
+  if (opts.directSim?.wasm && opts.directSim?.meta) {
+    host.host_log("info", "sim path B direct");
+    stepSim = await bootDirectStep(opts.directSim.wasm, opts.directSim.meta);
   } else {
     if (true) {
-      throw new Error("drone ship requires precompiled sim");
+      throw new Error("ship requires directSim (path B); bytecode wasm_run removed from ship");
     }
-    const { compile } = await import("../compiler.js");
-    const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
-    const compiled = compile(simText);
-    fnImage = compiled.image;
-    fnBlob = compiled.blob;
+    const wasmBytes = await host.host_asset_read(opts.wasmUrl);
+    await bootRuntime(wasmBytes.buffer.slice(
+      wasmBytes.byteOffset,
+      wasmBytes.byteOffset + wasmBytes.byteLength
+    ));
+    let fnImage, fnBlob;
+    if (opts.precompiled?.image) {
+      const img = opts.precompiled.image;
+      fnImage = img instanceof Uint8Array ? img : new Uint8Array(img);
+      fnBlob = opts.precompiled.blob || {};
+    } else {
+      const { compile } = await import("../core/compiler.js");
+      const simText = new TextDecoder().decode(await host.host_asset_read(opts.simUrl));
+      const compiled = compile(simText);
+      fnImage = compiled.image;
+      fnBlob = compiled.blob;
+    }
+    stepSim = async (globalsMap) => {
+      const r = await wasm_run({ image: fnImage, blob: fnBlob }, globalsMap, {});
+      if (r.err) throw new Error(JSON.stringify(r.err));
+      return unwrap(r);
+    };
   }
   let state = freshState();
   let yaw = Math.PI, pitch = -0.06;
@@ -731,49 +831,48 @@ async function runDroneCore(host, opts) {
     }
   }
   async function stepWith(dt, ix, iy, B, thit, suicide, speedMul) {
-    const r = await wasm_run({ image: fnImage, blob: fnBlob }, {
-      px: state.px,
-      py: state.py,
-      pz: state.pz,
-      score: state.score,
-      alive: state.alive,
-      ammo: state.ammo,
-      ix,
-      iy,
-      dt,
-      suicide,
-      speed_mul: speedMul,
-      fx: B.fx,
-      fy: B.fy,
-      fz: B.fz,
-      rx: B.rx,
-      ry: B.ry,
-      rz: B.rz,
-      txs: state.txs,
-      tys: state.tys,
-      tzs: state.tzs,
-      thp: state.thp,
-      thit
-    }, {});
-    if (r.err) {
-      host.host_log("error", "ujs " + JSON.stringify(r.err));
-      return;
+    try {
+      const out = await stepSim({
+        px: state.px,
+        py: state.py,
+        pz: state.pz,
+        score: state.score,
+        alive: state.alive,
+        ammo: state.ammo,
+        ix,
+        iy,
+        dt,
+        suicide,
+        speed_mul: speedMul,
+        fx: B.fx,
+        fy: B.fy,
+        fz: B.fz,
+        rx: B.rx,
+        ry: B.ry,
+        rz: B.rz,
+        txs: state.txs,
+        tys: state.tys,
+        tzs: state.tzs,
+        thp: state.thp,
+        thit
+      });
+      state = {
+        px: out.px,
+        py: out.py,
+        pz: out.pz,
+        score: out.score,
+        alive: out.alive,
+        ammo: state.ammo,
+        txs: out.txs,
+        tys: out.tys,
+        tzs: out.tzs,
+        thp: out.thp,
+        tang: state.tang
+      };
+      kills += out.nk || 0;
+    } catch (e) {
+      host.host_log("error", "ujs " + (e && e.message ? e.message : String(e)));
     }
-    const out = unwrap(r);
-    state = {
-      px: out.px,
-      py: out.py,
-      pz: out.pz,
-      score: out.score,
-      alive: out.alive,
-      ammo: state.ammo,
-      txs: out.txs,
-      tys: out.tys,
-      tzs: out.tzs,
-      thp: out.thp,
-      tang: state.tang
-    };
-    kills += out.nk || 0;
   }
   function orbitTargets(dt) {
     tOrbit += dt;
@@ -1317,8 +1416,8 @@ async function runDroneCore(host, opts) {
   };
 }
 
-// uxe/ship/drone.embed.json
-var drone_embed_default = { image: [232, 2, 0, 0, 9, 0, 45, 11, 29, 8, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 1, 3, 26, 0, 0, 0, 0, 0, 0, 0, 8, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 4, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 5, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 6, 9, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 45, 6, 21, 36, 193, 0, 0, 0, 5, 0, 0, 0, 0, 9, 2, 5, 1, 0, 0, 0, 9, 3, 5, 2, 0, 0, 0, 9, 4, 5, 3, 0, 0, 0, 9, 5, 5, 4, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 5, 5, 0, 0, 0, 9, 6, 5, 6, 0, 0, 0, 9, 0, 5, 7, 0, 0, 0, 9, 7, 5, 8, 0, 0, 0, 9, 8, 5, 9, 0, 0, 0, 9, 9, 5, 10, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 5, 11, 0, 0, 0, 7, 0, 33, 12, 39, 3, 0, 0, 0, 0, 0, 0, 0, 0, 9, 10, 45, 1, 13, 8, 3, 7, 3, 11, 9, 11, 8, 4, 7, 4, 11, 9, 12, 7, 3, 45, 2, 14, 4, 102, 102, 102, 102, 102, 102, 214, 63, 45, 2, 14, 8, 5, 7, 5, 11, 3, 26, 0, 0, 0, 0, 0, 0, 0, 9, 13, 45, 2, 14, 8, 2, 7, 2, 11, 9, 2, 9, 14, 7, 3, 45, 2, 14, 9, 15, 7, 4, 45, 2, 14, 45, 0, 12, 7, 2, 45, 2, 14, 9, 16, 45, 2, 14, 45, 0, 12, 10, 2, 9, 2, 11, 9, 3, 9, 12, 7, 3, 45, 2, 14, 4, 154, 153, 153, 153, 153, 153, 225, 63, 45, 2, 14, 7, 5, 45, 0, 12, 9, 17, 7, 4, 45, 2, 14, 45, 0, 12, 7, 2, 45, 2, 14, 9, 16, 45, 2, 14, 45, 0, 12, 10, 3, 9, 3, 11, 9, 4, 9, 18, 7, 3, 45, 2, 14, 9, 19, 7, 4, 45, 2, 14, 45, 0, 12, 7, 2, 45, 2, 14, 9, 16, 45, 2, 14, 45, 0, 12, 10, 4, 9, 4, 11, 9, 3, 4, 0, 0, 0, 0, 0, 0, 4, 64, 45, 5, 17, 36, 167, 1, 0, 0, 4, 0, 0, 0, 0, 0, 0, 4, 64, 10, 3, 9, 3, 11, 9, 3, 3, 55, 0, 0, 0, 0, 0, 0, 0, 19, 36, 198, 1, 0, 0, 3, 55, 0, 0, 0, 0, 0, 0, 0, 10, 3, 9, 3, 11, 3, 0, 0, 0, 0, 0, 0, 0, 0, 8, 1, 7, 1, 11, 7, 1, 7, 0, 45, 5, 17, 36, 93, 2, 0, 0, 9, 20, 7, 1, 45, 7, 26, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 6, 21, 36, 69, 2, 0, 0, 9, 9, 7, 1, 45, 7, 26, 3, 0, 0, 0, 0, 0, 0, 0, 0, 19, 36, 69, 2, 0, 0, 9, 9, 7, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 45, 8, 27, 11, 7, 6, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 0, 12, 8, 6, 7, 6, 11, 9, 5, 3, 244, 1, 0, 0, 0, 0, 0, 0, 45, 0, 12, 10, 5, 9, 5, 11, 7, 1, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 0, 12, 8, 1, 7, 1, 11, 35, 212, 1, 0, 0, 9, 21, 3, 1, 0, 0, 0, 0, 0, 0, 0, 45, 6, 21, 36, 145, 2, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 10, 1, 9, 1, 11, 9, 5, 3, 150, 0, 0, 0, 0, 0, 0, 0, 45, 0, 12, 10, 5, 9, 5, 11, 5, 0, 0, 0, 0, 9, 2, 5, 1, 0, 0, 0, 9, 3, 5, 2, 0, 0, 0, 9, 4, 5, 3, 0, 0, 0, 9, 5, 5, 4, 0, 0, 0, 9, 1, 5, 5, 0, 0, 0, 9, 6, 5, 6, 0, 0, 0, 9, 0, 5, 7, 0, 0, 0, 9, 7, 5, 8, 0, 0, 0, 9, 8, 5, 9, 0, 0, 0, 9, 9, 5, 10, 0, 0, 0, 7, 6, 5, 11, 0, 0, 0, 7, 0, 33, 12, 39, 12, 0, 0, 0, 2, 0, 0, 0, 112, 120, 0, 0, 2, 0, 0, 0, 112, 121, 0, 0, 2, 0, 0, 0, 112, 122, 0, 0, 5, 0, 0, 0, 115, 99, 111, 114, 101, 0, 0, 0, 5, 0, 0, 0, 97, 108, 105, 118, 101, 0, 0, 0, 4, 0, 0, 0, 97, 109, 109, 111, 3, 0, 0, 0, 116, 120, 115, 0, 3, 0, 0, 0, 116, 121, 115, 0, 3, 0, 0, 0, 116, 122, 115, 0, 3, 0, 0, 0, 116, 104, 112, 0, 2, 0, 0, 0, 110, 107, 0, 0, 1, 0, 0, 0, 110, 0, 0, 0, 0, 0, 0, 0], blob: { globals: ["txs", "alive", "px", "py", "pz", "score", "ammo", "tys", "tzs", "thp", "iy", "ix", "fy", "speed_mul", "fx", "rx", "dt", "ry", "fz", "rz", "thit", "suicide"], locals: ["n", "i", "speed", "thrust", "strafe", "climb", "nk"] } };
+// uxe/ship/drone/sim.meta.json
+var sim_meta_default = { globals: ["txs", "alive", "px", "py", "pz", "score", "ammo", "tys", "tzs", "thp", "iy", "ix", "fy", "speed_mul", "fx", "rx", "dt", "ry", "fz", "rz", "thit", "suicide"], locals: ["n", "i", "speed", "thrust", "strafe", "climb", "nk"] };
 
 // uxe/ship/drone-host-entry.js
 function helpLine(controls, touch) {
@@ -1336,6 +1435,7 @@ async function startDroneShip(cfg) {
   });
   window.__UXE_HOST__ = host;
   const engineUrl = cfg.engineUrl;
+  const simUrl = cfg.simUrl || new URL("sim.wasm", new URL(".", engineUrl)).href;
   const orig = host.host_asset_read.bind(host);
   host.host_asset_read = async (path) => {
     if (path === "ujs_full.wasm" || path === "engine.wasm" || path.endsWith("engine.wasm")) {
@@ -1346,7 +1446,13 @@ async function startDroneShip(cfg) {
     return orig(path);
   };
   function paint(s) {
-    window.__UXE__ = { ...s, backend: host.backend, ship: true, drone: true };
+    window.__UXE__ = {
+      ...s,
+      backend: host.backend,
+      ship: true,
+      drone: true,
+      pathB: true
+    };
     if (!s.ready) return;
     cfg.hud.classList.toggle("armed", !!s.suicideArm);
     cfg.hud.classList.toggle("locked-on", !!s.locked && !s.suicideArm);
@@ -1355,12 +1461,20 @@ async function startDroneShip(cfg) {
     const ammoBar = "\u25AE".repeat(s.ammo || 0) + "\u25AF".repeat(Math.max(0, (s.magazine || 2) - (s.ammo || 0)));
     if (cfg.ammoEl) cfg.ammoEl.textContent = ammoBar;
     const modeLabel = s.controls === "mouse" ? "\u952E\u76D8+\u9F20\u6807" : "\u7EAF\u952E\u76D8";
-    cfg.hud.innerHTML = `<b>\u65E0\u4EBA\u673A \xB7 \u7B2C\u4E00\u4EBA\u79F0\u9A7E\u8231</b> \xB7 ship-js<br>backend <b>${host.backend}</b> \xB7 fps <b>${(s.fps || 0).toFixed(0)}</b> \xB7 <b>${modeLabel}</b><br><span class="mode">${s.mode || ""}</span><br>\u5F39\u4ED3 <b>${ammoBar}</b> (${s.ammo}/${s.magazine})` + (s.missiles ? ` \xB7 \u5728\u9014 <b>${s.missiles}</b>` : "") + ` \xB7 \u51FB\u6BC1 <b>${s.kills || 0}</b> \xB7 \u654C <b>${s.remaining ?? "?"}</b><br>\u5F97\u5206 <b>${(s.score || 0).toFixed(0)}</b>` + (s.locked ? ` \xB7 <b class="lock">\u9501\u5B9A</b>` : "") + (s.suicideArm ? ` \xB7 <b class="warn">\u81EA\u7206\u5DF2\u6B66\u88C5</b>` : "") + `<br>` + (s.alive ? helpLine(s.controls, s.touch) : `<span class="warn">${s.endReason === "win" ? "\u5168\u6B7C" : "\u4EFB\u52A1\u7ED3\u675F"} \u2014 \u7A7A\u683C\u518D\u51FA\u51FB</span>`);
+    cfg.hud.innerHTML = `<b>\u65E0\u4EBA\u673A \xB7 \u7B2C\u4E00\u4EBA\u79F0\u9A7E\u8231</b> \xB7 ship-js \xB7 <b>path B</b><br>backend <b>${host.backend}</b> \xB7 fps <b>${(s.fps || 0).toFixed(0)}</b> \xB7 <b>${modeLabel}</b><br><span class="mode">${s.mode || ""}</span><br>\u5F39\u4ED3 <b>${ammoBar}</b> (${s.ammo}/${s.magazine})` + (s.missiles ? ` \xB7 \u5728\u9014 <b>${s.missiles}</b>` : "") + ` \xB7 \u51FB\u6BC1 <b>${s.kills || 0}</b> \xB7 \u654C <b>${s.remaining ?? "?"}</b><br>\u5F97\u5206 <b>${(s.score || 0).toFixed(0)}</b>` + (s.locked ? ` \xB7 <b class="lock">\u9501\u5B9A</b>` : "") + (s.suicideArm ? ` \xB7 <b class="warn">\u81EA\u7206\u5DF2\u6B66\u88C5</b>` : "") + `<br>` + (s.alive ? helpLine(s.controls, s.touch) : `<span class="warn">${s.endReason === "win" ? "\u5168\u6B7C" : "\u4EFB\u52A1\u7ED3\u675F"} \u2014 \u7A7A\u683C\u518D\u51FA\u51FB</span>`);
   }
-  const image = new Uint8Array(drone_embed_default.image);
+  const simRes = await fetch(simUrl);
+  if (!simRes.ok) throw new Error("fetch sim.wasm " + simRes.status);
+  const simWasm = new Uint8Array(await simRes.arrayBuffer());
+  if (simWasm[0] !== 0 || simWasm[1] !== 97 || simWasm[2] !== 115 || simWasm[3] !== 109) {
+    throw new Error("sim.wasm bad magic");
+  }
   const api = await runDroneCore(host, {
     wasmUrl: "engine.wasm",
-    precompiled: { image, blob: drone_embed_default.blob },
+    directSim: {
+      wasm: simWasm,
+      meta: { globals: sim_meta_default.globals || [], locals: sim_meta_default.locals || [] }
+    },
     controls,
     onHud: paint
   });
@@ -1368,6 +1482,7 @@ async function startDroneShip(cfg) {
   window.__UXE_API__ = api;
   return {
     backend: host.backend,
+    pathB: true,
     getControls: () => api.getControls(),
     setControls(next) {
       api.setControls(next);

@@ -1,0 +1,181 @@
+#!/usr/bin/env node
+/**
+ * M2 host entry: UJS source → direct \\0asm (+ meta).
+ *
+ * Product path: WebAssembly.instantiate(compiler.wasm) when present.
+ * Fallback: python3 -m ujs ujs2wasm --mode direct (until artifact exists).
+ *
+ * ABI (ujs/prd.md §M2):
+ *   compile(src) → { wasm, meta: { locals, globals, slots } }
+ *
+ * Usage:
+ *   node ujs/compile.mjs path/to/prog.ujs [-o out.wasm]
+ */
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.resolve(__dirname, "..");
+
+/** @typedef {{ locals: string[], globals: string[], slots: string[] }} CompileMeta */
+/** @typedef {{ wasm: Uint8Array, meta: CompileMeta }} CompileResult */
+
+function findCompilerWasm() {
+  for (const rel of [
+    "ujs/core/compiler.wasm",
+    "ujs/compiler.wasm",
+    "ujs/uxe/ship/compiler.wasm",
+  ]) {
+    const p = path.join(REPO, rel);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+let _cwasm = null; // { exports, memory } | null | false
+
+async function loadCompilerWasm() {
+  if (_cwasm !== null) return _cwasm || null;
+  const p = findCompilerWasm();
+  if (!p) {
+    _cwasm = false;
+    return null;
+  }
+  const { instance } = await WebAssembly.instantiate(fs.readFileSync(p));
+  const ex = instance.exports;
+  for (const n of [
+    "memory", "alloc", "compile",
+    "out_ptr", "out_len", "meta_ptr", "meta_len", "err_ptr", "err_len",
+  ]) {
+    if (!(n in ex)) throw new Error("compiler.wasm missing export " + n);
+  }
+  _cwasm = { exports: ex, path: p };
+  return _cwasm;
+}
+
+async function compileViaWasm(text) {
+  const cw = await loadCompilerWasm();
+  if (!cw) return null;
+  const ex = cw.exports;
+  const bytes = new TextEncoder().encode(text);
+  const ptr = ex.alloc(bytes.length + 1);
+  if (!ptr) throw new Error("compiler.wasm alloc failed");
+  const mem = ex.memory;
+  new Uint8Array(mem.buffer, ptr, bytes.length).set(bytes);
+  const st = ex.compile(ptr, bytes.length);
+  if (st !== 0) {
+    const ep = ex.err_ptr() >>> 0;
+    const el = ex.err_len() >>> 0;
+    const msg = el
+      ? new TextDecoder().decode(new Uint8Array(mem.buffer, ep, el))
+      : "compile failed";
+    throw new Error(msg);
+  }
+  const op = ex.out_ptr() >>> 0;
+  const ol = ex.out_len() >>> 0;
+  const wasm = new Uint8Array(mem.buffer, op, ol).slice();
+  let meta = { locals: [], globals: [], slots: [] };
+  const mp = ex.meta_ptr() >>> 0;
+  const ml = ex.meta_len() >>> 0;
+  if (ml > 0) {
+    meta = JSON.parse(new TextDecoder().decode(new Uint8Array(mem.buffer, mp, ml)));
+  }
+  if (wasm.length < 4 || wasm[0] !== 0 || wasm[1] !== 0x61 ||
+      wasm[2] !== 0x73 || wasm[3] !== 0x6d) {
+    throw new Error("compiler.wasm did not emit \\0asm");
+  }
+  return { wasm, meta };
+}
+
+function compileViaPython(text) {
+  const td = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "ujs-compile-"));
+  const inPath = path.join(td, "in.ujs");
+  const outPath = path.join(td, "out.wasm");
+  fs.writeFileSync(inPath, text);
+  const r = spawnSync(
+    "python3",
+    ["-m", "ujs", "ujs2wasm", inPath, "-o", outPath, "--mode", "direct"],
+    { cwd: REPO, encoding: "utf8", env: process.env },
+  );
+  if (r.status !== 0) {
+    try { fs.rmSync(td, { recursive: true, force: true }); } catch (_) {}
+    throw new Error((r.stderr || r.stdout || "compile failed").trim());
+  }
+  const wasm = new Uint8Array(fs.readFileSync(outPath));
+  try { fs.rmSync(td, { recursive: true, force: true }); } catch (_) {}
+  if (wasm.length < 4 || wasm[0] !== 0 || wasm[1] !== 0x61 ||
+      wasm[2] !== 0x73 || wasm[3] !== 0x6d) {
+    throw new Error("not a wasm module");
+  }
+  return { wasm, meta: { locals: [], globals: [], slots: [] } };
+}
+
+/**
+ * Product contract. Prefer compiler.wasm; else python3 bridge.
+ * @param {Uint8Array|string} src
+ * @returns {Promise<CompileResult>}
+ */
+export async function compile(src) {
+  const text = typeof src === "string" ? src : Buffer.from(src).toString("utf8");
+  const via = await compileViaWasm(text);
+  if (via) return via;
+  return compileViaPython(text);
+}
+
+export async function compileBackend() {
+  const p = findCompilerWasm();
+  return p ? "compiler.wasm" : "python3";
+}
+
+function usage() {
+  console.error("usage: node ujs/compile.mjs <file.ujs> [-o out.wasm]");
+  process.exit(2);
+}
+
+async function main(argv) {
+  const args = argv.slice(2);
+  if (args.length < 1 || args[0] === "-h" || args[0] === "--help") usage();
+  let out = null;
+  const files = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "-o" && args[i + 1]) {
+      out = args[++i];
+    } else if (args[i].startsWith("-")) {
+      usage();
+    } else {
+      files.push(args[i]);
+    }
+  }
+  if (files.length !== 1) usage();
+  const srcPath = path.resolve(files[0]);
+  const backend = await compileBackend();
+  if (process.env.UJS_REQUIRE_COMPILER_WASM === "1" && backend !== "compiler.wasm") {
+    throw new Error("UJS_REQUIRE_COMPILER_WASM=1 but compiler.wasm missing");
+  }
+  const { wasm, meta } = await compile(fs.readFileSync(srcPath));
+  const wasmPath = out || srcPath.replace(/\.ujs$/i, "") + ".wasm";
+  fs.writeFileSync(wasmPath, wasm);
+  const metaPath = wasmPath.replace(/\.wasm$/i, "") + ".meta.json";
+  fs.writeFileSync(metaPath, JSON.stringify({
+    globals: meta.globals || [],
+    locals: meta.locals || [],
+  }));
+  console.log(JSON.stringify({
+    wasm: wasmPath,
+    meta: metaPath,
+    bytes: wasm.length,
+    bridge: backend,
+    globals: meta.globals || [],
+  }));
+}
+
+const isMain = process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main(process.argv).catch((e) => {
+    console.error("compile:", e.message || e);
+    process.exit(1);
+  });
+}
