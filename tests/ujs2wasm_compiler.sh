@@ -307,6 +307,44 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 SRC[i]==N body≡stage0");
 ' "$OUT/srccmp_s0.wasm" "$OUT/srccmp.wasm"
 
+echo "-- M3 v7: === + f64 lit/arith/mix body≡stage0"
+printf 'let x = 0;\nif (x === 0) { x = 1; }\nreturn x;\n' > "$OUT/eq3.ujs"
+perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/compiler_core.wasm" "$OUT/eq3.ujs" -o "$OUT/eq3.wasm" >/dev/null
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs "$OUT/eq3.ujs" -o "$OUT/eq3_s0.wasm" >/dev/null
+printf 'let x = 1.5;\nx = x * 2.0 + 0.5;\nreturn x;\n' > "$OUT/f64a.ujs"
+perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/compiler_core.wasm" "$OUT/f64a.ujs" -o "$OUT/f64a.wasm" >/dev/null
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs "$OUT/f64a.ujs" -o "$OUT/f64a_s0.wasm" >/dev/null
+printf 'let i = 3;\nlet x = 0.0;\nx = i * 1.5;\nreturn x;\n' > "$OUT/f64m.ujs"
+perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/compiler_core.wasm" "$OUT/f64m.ujs" -o "$OUT/f64m.wasm" >/dev/null
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs "$OUT/f64m.ujs" -o "$OUT/f64m_s0.wasm" >/dev/null
+perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+import fs from "fs";
+function mainBody(path) {
+  const u = fs.readFileSync(path);
+  function readUleb(b,i){let v=0,s=0;for(;;){const x=b[i++];v|=(x&0x7f)<<s;if(!(x&0x80))return[v,i];s+=7;}}
+  let i=8;
+  while(i<u.length){const sid=u[i++];const[ln,i2]=readUleb(u,i);i=i2;
+    if(sid===10){const code=u.subarray(i,i+ln);let[nf,o]=readUleb(code,0);
+      for(let fi=0;fi<nf;fi++){const[sz,o2]=readUleb(code,o);const body=[...code.subarray(o2,o2+sz)];o=o2+sz;if(fi===1)return body;}}
+    i+=ln;}
+}
+function eq(a,b,tag){
+  if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
+    console.error("FAIL M3 "+tag, a?.length, b?.length); process.exit(1);
+  }
+}
+eq(mainBody(process.argv[1]), mainBody(process.argv[2]), "eq3≢stage0");
+eq(mainBody(process.argv[3]), mainBody(process.argv[4]), "f64arith≢stage0");
+eq(mainBody(process.argv[5]), mainBody(process.argv[6]), "f64mix≢stage0");
+console.log("OK M3 === + f64 lit/arith/mix body≡stage0");
+' "$OUT/eq3_s0.wasm" "$OUT/eq3.wasm" "$OUT/f64a_s0.wasm" "$OUT/f64a.wasm" "$OUT/f64m_s0.wasm" "$OUT/f64m.wasm"
+
 # stage1 = stage0(compiler.ujs); stage2 = stage1(compiler.ujs); bodies must match
 perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/core/compiler.ujs -o "$OUT/stage1.wasm" >/dev/null
@@ -330,4 +368,4 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 stage2≡stage1 mainBody", a.length);
 ' "$OUT/stage1.wasm" "$OUT/stage2.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v6 self-host stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v7 ===/f64 · stage2≡stage1)"

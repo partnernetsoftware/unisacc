@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v6: v5 + f64 inject cmp + empty else + OPS/OUT 16k; stage2≡stage1.
+// v7: v6 + === + f64 lit/arith/cmp/neg/I2F mix; OPS/OUT 32k; stage2≡stage1.
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -33,11 +33,18 @@ let gn = 0;
 let gs = 0;
 let idx_slot = 0;
 let elem_f = 0;
+let fneg = 0;
+let fbits = 0;
+let fden = 0;
+let fexp = 0;
+let fsc = -1;
+let fl = 0;
+let TWO52 = 4503599627370496;
 
-let OUT = list(16384);
-let OPS = list(16384);
-let KEYS = list(64);
-let LTY = list(64);
+let OUT = list(32768);
+let OPS = list(32768);
+let KEYS = list(96);
+let LTY = list(96);
 let GKEYS = list(16);
 let GTY = list(16);
 let ST = list(64);
@@ -556,6 +563,19 @@ while (finished == 0) {
                     } else {
                     ch = SRC[pos];
                     cd = 0;
+                    fneg = 0;
+                    if (ch == 45) {
+                      if (pos + 1 < n) {
+                        j = SRC[pos + 1];
+                        if (j >= 48) {
+                          if (j <= 57) {
+                            fneg = 1;
+                            pos = pos + 1;
+                            ch = SRC[pos];
+                          }
+                        }
+                      }
+                    }
                     if (ch >= 48) { if (ch <= 57) { cd = 1; } }
                     if (cd == 1) {
                         tnum = 0; done = 0;
@@ -573,26 +593,88 @@ while (finished == 0) {
                             }
                           }
                         }
-                        OPS[opsn] = 66; opsn = opsn + 1;
-                        i = tnum; done = 0;
-                        while (done == 0) {
-                          ch = i % 128;
-                          i = i / 128;
-                          if (i == 0) {
-                            if (ch > 63) {
-                              OPS[opsn] = ch + 128; opsn = opsn + 1;
-                              OPS[opsn] = 0; opsn = opsn + 1;
-                            } else {
-                              OPS[opsn] = ch; opsn = opsn + 1;
+                        fl = 0; fden = 1;
+                        if (pos < n) {
+                          if (SRC[pos] == 46) {
+                            fl = 1;
+                            pos = pos + 1;
+                            done = 0;
+                            while (done == 0) {
+                              if (pos >= n) { done = 1; }
+                              else {
+                                ch = SRC[pos];
+                                if (ch < 48) { done = 1; }
+                                else {
+                                  if (ch > 57) { done = 1; }
+                                  else {
+                                    tnum = tnum * 10 + (ch - 48);
+                                    fden = fden * 10;
+                                    pos = pos + 1;
+                                  }
+                                }
+                              }
                             }
-                            done = 1;
-                          } else {
-                            OPS[opsn] = ch + 128; opsn = opsn + 1;
                           }
                         }
-                        ety = 1;
-                        elem_f = 0;
-                        ST[bsp - 1] = 2;
+                        if (fl == 1) {
+                          i = tnum; j = fden; fexp = 0;
+                          if (i == 0) { fbits = 0; }
+                          else {
+                            while (i < j) { i = i * 2; fexp = fexp - 1; }
+                            while (i >= j * 2) { j = j * 2; fexp = fexp + 1; }
+                            mul = (i - j) * TWO52;
+                            fbits = mul / j;
+                            k = mul - fbits * j;
+                            if (k * 2 > j) { fbits = fbits + 1; }
+                            else {
+                              if (k * 2 == j) {
+                                if (fbits - (fbits / 2) * 2 == 1) { fbits = fbits + 1; }
+                              }
+                            }
+                            if (fbits == TWO52) { fbits = 0; fexp = fexp + 1; }
+                            fbits = (fexp + 1023) * TWO52 + fbits;
+                          }
+                          OPS[opsn] = 68; opsn = opsn + 1;
+                          i = 0;
+                          while (i < 8) {
+                            k = fbits / 256;
+                            OPS[opsn] = fbits - k * 256;
+                            fbits = k;
+                            opsn = opsn + 1;
+                            i = i + 1;
+                          }
+                          if (fneg == 1) {
+                            OPS[opsn] = 154; opsn = opsn + 1;
+                          }
+                          ety = 2; elem_f = 0;
+                          ST[bsp - 1] = 2;
+                        } else {
+                          OPS[opsn] = 66; opsn = opsn + 1;
+                          i = tnum; done = 0;
+                          while (done == 0) {
+                            ch = i % 128;
+                            i = i / 128;
+                            if (i == 0) {
+                              if (ch > 63) {
+                                OPS[opsn] = ch + 128; opsn = opsn + 1;
+                                OPS[opsn] = 0; opsn = opsn + 1;
+                              } else {
+                                OPS[opsn] = ch; opsn = opsn + 1;
+                              }
+                              done = 1;
+                            } else {
+                              OPS[opsn] = ch + 128; opsn = opsn + 1;
+                            }
+                          }
+                          if (fneg == 1) {
+                            OPS[opsn] = 66; opsn = opsn + 1;
+                            OPS[opsn] = 127; opsn = opsn + 1;
+                            OPS[opsn] = 126; opsn = opsn + 1;
+                          }
+                          ety = 1;
+                          elem_f = 0;
+                          ST[bsp - 1] = 2;
+                        }
                     } else {
                       k = 0; mul = 1; i = 0; done = 0;
                       while (done == 0) {
@@ -626,7 +708,11 @@ while (finished == 0) {
                         if (found == 1) {
                           OPS[opsn] = 32; opsn = opsn + 1;
                           OPS[opsn] = lx; opsn = opsn + 1;
-                          if (LTY[lx] == 127) { ety = 3; elem_f = 0; } else { ety = 1; elem_f = 0; }
+                          if (LTY[lx] == 127) { ety = 3; elem_f = 0; }
+                          else {
+                            if (LTY[lx] == 124) { ety = 2; elem_f = 0; }
+                            else { ety = 1; elem_f = 0; }
+                          }
                           ST[bsp - 1] = 2;
                         } else {
                           found = 0; j = 0; gs = 0;
@@ -766,15 +852,25 @@ while (finished == 0) {
                         else {
                           if (op == 89) { pos = pos + 2; }
                           else {
-                            if (op == 81) { pos = pos + 2; }
-                            else {
+                            if (op == 81) {
+                              pos = pos + 2;
+                              // ===
+                              if (pos < n) {
+                                if (SRC[pos] == 61) { pos = pos + 1; }
+                              }
+                            } else {
                               if (op == 82) { pos = pos + 2; }
                               else { pos = pos + 1; }
                             }
                           }
                         }
                         ST[bsp - 1] = 4;
-                        SOP[bsp - 1] = op + elem_f * 256;
+                        fl = 0;
+                        if (elem_f == 1) { fl = 1; }
+                        else {
+                          if (ety == 2) { fl = 1; }
+                        }
+                        SOP[bsp - 1] = op + fl * 256;
                         ST[bsp] = 1;
                         SPR[bsp] = prec + 1;
                         bsp = bsp + 1;
@@ -786,13 +882,47 @@ while (finished == 0) {
                       op = SOP[bsp - 1];
                       lx = op / 256;
                       op = op - lx * 256;
+                      fl = 0;
+                      if (ety == 2) { fl = 1; }
+                      if (elem_f == 1) { fl = 1; }
+                      cd = 0;
                       if (op >= 81) {
-                        if (op <= 89) {
-                          // compare: f64 elem left (lx==1) → I2F right + f64 cmp
-                          if (lx == 1) {
-                            if (ety == 1) {
-                              OPS[opsn] = 185; opsn = opsn + 1;
+                        if (op <= 89) { cd = 1; }
+                      }
+                      if (cd == 1) {
+                        // compare
+                        if (lx == 1) {
+                          if (fl == 0) {
+                            if (ety == 1) { OPS[opsn] = 185; opsn = opsn + 1; }
+                          }
+                          if (op == 81) { OPS[opsn] = 97; opsn = opsn + 1; }
+                          else {
+                            if (op == 82) { OPS[opsn] = 98; opsn = opsn + 1; }
+                            else {
+                              if (op == 83) { OPS[opsn] = 99; opsn = opsn + 1; }
+                              else {
+                                if (op == 85) { OPS[opsn] = 100; opsn = opsn + 1; }
+                                else {
+                                  if (op == 87) { OPS[opsn] = 101; opsn = opsn + 1; }
+                                  else {
+                                    if (op == 89) { OPS[opsn] = 102; opsn = opsn + 1; }
+                                    else { OPS[opsn] = op; opsn = opsn + 1; }
+                                  }
+                                }
+                              }
                             }
+                          }
+                          OPS[opsn] = 173; opsn = opsn + 1;
+                        } else {
+                          if (fl == 1) {
+                            if (fsc < 0) {
+                              fsc = kn; KEYS[kn] = 0; LTY[kn] = 124; kn = kn + 1;
+                            }
+                            OPS[opsn] = 33; opsn = opsn + 1;
+                            OPS[opsn] = fsc; opsn = opsn + 1;
+                            OPS[opsn] = 185; opsn = opsn + 1;
+                            OPS[opsn] = 32; opsn = opsn + 1;
+                            OPS[opsn] = fsc; opsn = opsn + 1;
                             if (op == 81) { OPS[opsn] = 97; opsn = opsn + 1; }
                             else {
                               if (op == 82) { OPS[opsn] = 98; opsn = opsn + 1; }
@@ -815,13 +945,53 @@ while (finished == 0) {
                             OPS[opsn] = op; opsn = opsn + 1;
                             OPS[opsn] = 173; opsn = opsn + 1;
                           }
-                          ety = 1;
-                          elem_f = 0;
-                        } else {
-                          OPS[opsn] = op; opsn = opsn + 1;
                         }
+                        ety = 1;
+                        elem_f = 0;
                       } else {
-                        OPS[opsn] = op; opsn = opsn + 1;
+                        // arith
+                        if (lx == 1) {
+                          if (fl == 0) {
+                            if (ety == 1) { OPS[opsn] = 185; opsn = opsn + 1; }
+                          }
+                          if (op == 124) { OPS[opsn] = 160; opsn = opsn + 1; }
+                          else {
+                            if (op == 125) { OPS[opsn] = 161; opsn = opsn + 1; }
+                            else {
+                              if (op == 126) { OPS[opsn] = 162; opsn = opsn + 1; }
+                              else {
+                                if (op == 127) { OPS[opsn] = 163; opsn = opsn + 1; }
+                                else { OPS[opsn] = op; opsn = opsn + 1; }
+                              }
+                            }
+                          }
+                          ety = 2; elem_f = 0;
+                        } else {
+                          if (fl == 1) {
+                            if (fsc < 0) {
+                              fsc = kn; KEYS[kn] = 0; LTY[kn] = 124; kn = kn + 1;
+                            }
+                            OPS[opsn] = 33; opsn = opsn + 1;
+                            OPS[opsn] = fsc; opsn = opsn + 1;
+                            OPS[opsn] = 185; opsn = opsn + 1;
+                            OPS[opsn] = 32; opsn = opsn + 1;
+                            OPS[opsn] = fsc; opsn = opsn + 1;
+                            if (op == 124) { OPS[opsn] = 160; opsn = opsn + 1; }
+                            else {
+                              if (op == 125) { OPS[opsn] = 161; opsn = opsn + 1; }
+                              else {
+                                if (op == 126) { OPS[opsn] = 162; opsn = opsn + 1; }
+                                else {
+                                  if (op == 127) { OPS[opsn] = 163; opsn = opsn + 1; }
+                                  else { OPS[opsn] = op; opsn = opsn + 1; }
+                                }
+                              }
+                            }
+                            ety = 2; elem_f = 0;
+                          } else {
+                            OPS[opsn] = op; opsn = opsn + 1;
+                          }
+                        }
                       }
                       ST[bsp - 1] = 2;
                     } else {
@@ -1229,7 +1399,10 @@ while (finished == 0) {
               elem_f = 0;
             } else {
               if (ety == 3) { LTY[dst] = 127; }
-              else { LTY[dst] = 126; }
+              else {
+                if (ety == 2) { LTY[dst] = 124; }
+                else { LTY[dst] = 126; }
+              }
             }
             OPS[opsn] = 33; opsn = opsn + 1;
             OPS[opsn] = dst; opsn = opsn + 1;
@@ -1240,27 +1413,48 @@ while (finished == 0) {
                 OPS[opsn] = 176; opsn = opsn + 1;
               }
               elem_f = 0;
+            } else {
+              if (ety == 2) {
+                if (LTY[dst] == 126) {
+                  // f64 into i64 local — trunc
+                  OPS[opsn] = 176; opsn = opsn + 1;
+                } else {
+                  LTY[dst] = 124;
+                }
+              }
             }
             OPS[opsn] = 33; opsn = opsn + 1;
             OPS[opsn] = dst; opsn = opsn + 1;
           }
           if (want == 8) {
-            // GSTORE: box i64, i32.const slot, call 15
-            OPS[opsn] = 16; opsn = opsn + 1;
-            OPS[opsn] = 0; opsn = opsn + 1;
+            // GSTORE
+            if (ety == 2) {
+              OPS[opsn] = 16; opsn = opsn + 1;
+              OPS[opsn] = 4; opsn = opsn + 1;
+            } else {
+              OPS[opsn] = 16; opsn = opsn + 1;
+              OPS[opsn] = 0; opsn = opsn + 1;
+            }
             OPS[opsn] = 65; opsn = opsn + 1;
             OPS[opsn] = dst; opsn = opsn + 1;
             OPS[opsn] = 16; opsn = opsn + 1;
             OPS[opsn] = 15; opsn = opsn + 1;
-            GTY[dst] = 1;
+            if (ety == 2) { GTY[dst] = 2; }
+            else { GTY[dst] = 1; }
           }
           if (want == 2) {
             if (ety == 3) {
               OPS[opsn] = 15; opsn = opsn + 1;
             } else {
-              OPS[opsn] = 16; opsn = opsn + 1;
-              OPS[opsn] = 0; opsn = opsn + 1;
-              OPS[opsn] = 15; opsn = opsn + 1;
+              if (ety == 2) {
+                OPS[opsn] = 16; opsn = opsn + 1;
+                OPS[opsn] = 4; opsn = opsn + 1;
+                OPS[opsn] = 15; opsn = opsn + 1;
+              } else {
+                OPS[opsn] = 16; opsn = opsn + 1;
+                OPS[opsn] = 0; opsn = opsn + 1;
+                OPS[opsn] = 15; opsn = opsn + 1;
+              }
             }
           }
           if (want == 4) {
