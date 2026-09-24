@@ -304,16 +304,8 @@ char *bk_nth(char *list, int i) {
     while (i > 0) { while (list[k]) k = k + 1; k = k + 1; i = i - 1; }
     return list + k;
 }
-int bk_opof(char *s, int n) {
-    int i; int k; char *e;
-    i = 0;
-    while (i < BKNOPS) {
-        e = bk_nth(BKOPS, i); k = 0;
-        while (k < n) { if (e[k] != s[k]) break; k = k + 1; }
-        if (k == n) { if (e[n] == 0) return i; }
-        i = i + 1;
-    }
-    return 0 - 1;
+int bk_opof(char *s, int n) {        /* hashed: see vfind */
+    return vfind(BKOPS, BKNOPS, s, n);
 }
 int bk_is(int op, char *nm) {       /* is op the tape op spelled nm? */
     char *e; int k;
@@ -458,13 +450,9 @@ int bk_regnum(char *nm) {
         return bk_num(nm + 1, 2);
     }
     x86 = "rax\000rcx\000rdx\000rbx\000rsp\000rbp\000rsi\000rdi\000r8\000r9\000r10\000r11\000r12\000r13\000r14\000r15\000";
-    i = 0;
-    while (i < 16) {
-        e = bk_nth(x86, i); k = 0;
-        while (e[k] && nm[k] == e[k]) k = k + 1;
-        if (e[k] == 0 && nm[k] == 0) return i;
-        i = i + 1;
-    }
+    k = 0; while (nm[k]) k = k + 1;
+    i = vfind(x86, 16, nm, k);
+    if (i >= 0) return i;
     return 0 - 1;                     /* none */
 }
 /* ask abi and enc for catalog op `cop` (an index into BF_ABI_0) -- only
@@ -491,15 +479,9 @@ int bk_facts(int cop) {
     return 0;
 }
 int bk_cop(char *nm) {                  /* a catalog op's index */
-    int i; int k; char *e;
-    i = 0;
-    while (i < NBF_ABI_0) {
-        e = bk_nth(BF_ABI_0, i); k = 0;
-        while (e[k] && nm[k] == e[k]) k = k + 1;
-        if (e[k] == 0 && nm[k] == 0) return i;
-        i = i + 1;
-    }
-    return 0 - 1;
+    int k;
+    k = 0; while (nm[k]) k = k + 1;
+    return vfind(BF_ABI_0, NBF_ABI_0, nm, k);
 }
 int bk_gateis(char *nm) { char *e; int k; e = bk_nth(BH_ABI_GATE, bkf_gate); k = 0;
     while (nm[k]) { if (e[k] != nm[k]) return 0; k = k + 1; } return e[k] == 0; }

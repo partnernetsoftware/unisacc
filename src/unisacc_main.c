@@ -22,7 +22,70 @@ int ntok;
 char tbuf[256];
 
 /* ---- vocabulary helpers: TOKV etc are NUL-separated packed strings ---- */
-int vfind(char *v, int n, char *s, int slen) {
+int vfind(char *v, int n, char *s, int slen);
+
+/* A vocabulary is a run of NUL-separated names, and `voff`/`vlen` used to
+   walk it from the front on every call -- which the lexer does per token.
+   A sampling profile of the self-compile found the strlen that inner loop
+   compiles to at the top, so each vocabulary is indexed ONCE, on first
+   use.  There are few enough of them to find by pointer. */
+#define V_NLISTS 64      /* 16 was fewer than the vocabularies: the rest walked */
+#define V_NIDX 1024
+char *v_lists[V_NLISTS]; int v_idx[V_NLISTS * V_NIDX]; int v_n[V_NLISTS];
+int v_nlists;
+
+char *v_last; int v_lastslot;  /* the lexer asks the same list back to back */
+int v_slot(char *v) {
+    int i; int p; int n;
+    if (v == v_last) return v_lastslot;
+    i = 0;
+    while (i < v_nlists) {
+        if (v_lists[i] == v) { v_last = v; v_lastslot = i; return i; }
+        i = i + 1;
+    }
+    if (v_nlists >= V_NLISTS) return 0 - 1;     /* fall back to the walk */
+    i = v_nlists; v_nlists = v_nlists + 1;
+    v_lists[i] = v;
+    p = 0; n = 0;
+    while (n < V_NIDX) {
+        v_idx[i * V_NIDX + n] = p; n = n + 1;
+        while (v[p]) p = p + 1;
+        p = p + 1;
+        if (v[p] == 0) break;
+    }
+    v_n[i] = n;
+    v_last = v; v_lastslot = i;
+    return i;
+}
+
+int voff(char *v, int idx) {
+    int s; int p; int i;
+    s = v_slot(v);
+    if (s >= 0 && idx >= 0 && idx < v_n[s]) return v_idx[s * V_NIDX + idx];
+    p = 0; i = 0;
+    while (i < idx) { while (v[p]) p = p + 1; p = p + 1; i = i + 1; }
+    return p;
+}
+
+/* vfind by hash.  The walk above was 44% of the self-built compiler
+   compiling itself: the lexer asks it for every identifier, and the parser
+   for every `tidx(",", 1)`.  Each vocabulary gets a table on first use;
+   a name maps to its FIRST index, which is what the walk returns. */
+#define VH_SIZE 4096
+int vh_tab[V_NLISTS * VH_SIZE]; int vh_built[V_NLISTS];
+int vhash(char *s, int n) {
+    int h; int k;
+    h = n; k = 0;
+    while (k < n) { h = (h * 31 + (s[k] & 255)) & 16777215; k = k + 1; }
+    return h & (VH_SIZE - 1);
+}
+int vsame(char *v, int p, char *s, int slen) {
+    int k;
+    k = 0;
+    while (k < slen) { if (v[p + k] != s[k]) return 0; if (v[p + k] == 0) return 0; k = k + 1; }
+    return v[p + k] == 0;
+}
+int vfind_walk(char *v, int n, char *s, int slen) {
     int i; int p; int k; int ok;
     p = 0;
     i = 0;
@@ -40,42 +103,50 @@ int vfind(char *v, int n, char *s, int slen) {
     }
     return 0 - 1;
 }
-
-/* A vocabulary is a run of NUL-separated names, and `voff`/`vlen` used to
-   walk it from the front on every call -- which the lexer does per token.
-   A sampling profile of the self-compile found the strlen that inner loop
-   compiles to at the top, so each vocabulary is indexed ONCE, on first
-   use.  There are few enough of them to find by pointer. */
-#define V_NLISTS 16
-#define V_NIDX 1024
-char *v_lists[V_NLISTS]; int v_idx[V_NLISTS * V_NIDX]; int v_n[V_NLISTS];
-int v_nlists;
-
-int v_slot(char *v) {
-    int i; int p; int n;
-    i = 0;
-    while (i < v_nlists) { if (v_lists[i] == v) return i; i = i + 1; }
-    if (v_nlists >= V_NLISTS) return 0 - 1;     /* fall back to the walk */
-    i = v_nlists; v_nlists = v_nlists + 1;
-    v_lists[i] = v;
-    p = 0; n = 0;
-    while (n < V_NIDX) {
-        v_idx[i * V_NIDX + n] = p; n = n + 1;
-        while (v[p]) p = p + 1;
-        p = p + 1;
-        if (v[p] == 0) break;
+/* Most calls name a literal -- `tidx(",", 1)`, 313 of them -- so the same
+   (list, pointer, length) comes back again and again.  A hit is only a
+   guess about the pointer's CONTENT, which can change (the lexer passes
+   src + i), so it is re-checked; only found names are kept, and a name's
+   first index is still its first index when the same bytes come back. */
+#define VC_SIZE 1024
+char *vc_s[VC_SIZE]; char *vc_v[VC_SIZE]; int vc_l[VC_SIZE]; int vc_r[VC_SIZE];
+int vfind(char *v, int n, char *s, int slen) {
+    int sl; int i; int h; int e; int b; int L; int c;
+    sl = v_slot(v);
+    if (sl < 0) return vfind_walk(v, n, s, slen);
+    if (v_n[sl] < n) return vfind_walk(v, n, s, slen);
+    c = ((int)((long)s & 1048575) * 7 + slen) & (VC_SIZE - 1);
+    if (vc_s[c] == s) { if (vc_v[c] == v) { if (vc_l[c] == slen) {
+        e = vc_r[c];
+        if (vsame(v, v_idx[sl * V_NIDX + e], s, slen)) { if (e < n) return e; return 0 - 1; }
+    } } }
+    b = sl * VH_SIZE;
+    if (vh_built[sl] == 0) {
+        vh_built[sl] = 1;
+        i = 0;
+        while (i < v_n[sl]) {
+            L = 0; while (v[v_idx[sl * V_NIDX + i] + L]) L = L + 1;
+            h = vhash(v + v_idx[sl * V_NIDX + i], L);
+            while (vh_tab[b + h]) {
+                e = vh_tab[b + h] - 1;
+                if (vsame(v, v_idx[sl * V_NIDX + e], v + v_idx[sl * V_NIDX + i], L)) break;
+                h = (h + 1) & (VH_SIZE - 1);
+            }
+            if (vh_tab[b + h] == 0) vh_tab[b + h] = i + 1;
+            i = i + 1;
+        }
     }
-    v_n[i] = n;
-    return i;
-}
-
-int voff(char *v, int idx) {
-    int s; int p; int i;
-    s = v_slot(v);
-    if (s >= 0 && idx >= 0 && idx < v_n[s]) return v_idx[s * V_NIDX + idx];
-    p = 0; i = 0;
-    while (i < idx) { while (v[p]) p = p + 1; p = p + 1; i = i + 1; }
-    return p;
+    h = vhash(s, slen);
+    while (vh_tab[b + h]) {
+        e = vh_tab[b + h] - 1;
+        if (vsame(v, v_idx[sl * V_NIDX + e], s, slen)) {
+            vc_s[c] = s; vc_v[c] = v; vc_l[c] = slen; vc_r[c] = e;
+            if (e < n) return e;
+            return 0 - 1;
+        }
+        h = (h + 1) & (VH_SIZE - 1);
+    }
+    return 0 - 1;
 }
 
 int vlen(char *v, int idx) {
@@ -1175,11 +1246,98 @@ int preprocess(void) {
    runtime formatter (a width, a flag, a precision). */
 int idch(int c) { if (isal(c)) return 1; return isdi(c); }
 
+/* Where each identifier occurs, built once for autoinc.  srcfind scanned
+   the whole source per header function asked about -- 39% of the
+   self-built compiler compiling itself.  An occurrence is a maximal run of
+   identifier characters, which is exactly what the scan's two boundary
+   tests accept.  Valid only while autoinc runs (srcix_on).  Prepending a
+   header line moves every position by the same amount, so incappend adds
+   to sx_pre instead of rebuilding; the prepended bytes themselves (ending
+   in a newline, so no identifier straddles the seam) are walked. */
+#define SX_SIZE 65536
+#define SX_MAXOCC 262144
+int sx_tab[SX_SIZE];          /* name id + 1 */
+int sx_pos[SX_SIZE]; int sx_len[SX_SIZE]; int sx_cnt[SX_SIZE]; int sx_at[SX_SIZE];
+int sx_occ[SX_MAXOCC]; int sx_names; int srcix_on; int sx_pre;
+int sx_find_at(char *nm, int nl, int sh);
+int sx_find(char *nm, int nl) { return sx_find_at(nm, nl, 0); }
+int sx_find_at(char *nm, int nl, int sh) {   /* name id, or < 0 */
+    int h; int e; int k; int ok;
+    h = vhash(nm, nl) * 16 + (nl & 15);
+    h = h & (SX_SIZE - 1);
+    while (sx_tab[h]) {
+        e = sx_tab[h] - 1;
+        if (sx_len[e] == nl) {
+            ok = 1; k = 0;
+            while (k < nl) { if ((src[sh + sx_pos[e] + k] & 255) != (nm[k] & 255)) { ok = 0; break; } k = k + 1; }
+            if (ok) return e;
+        }
+        h = (h + 1) & (SX_SIZE - 1);
+    }
+    return 0 - h - 2;                 /* not found: -(free slot) - 2 */
+}
+int srcix_build(void) {
+    int i; int j; int e; int pass; int tot;
+    srcix_on = 0; sx_pre = 0;
+    i = 0; while (i < SX_SIZE) { sx_tab[i] = 0; i = i + 1; }
+    sx_names = 0;
+    pass = 0;
+    while (pass < 2) {
+        i = 0;
+        while (i < nsrc) {
+            if (idch(src[i] & 255)) {
+                j = i; while (j < nsrc) { if (idch(src[j] & 255) == 0) break; j = j + 1; }
+                e = sx_find(src + i, j - i);
+                if (e < 0) {
+                    if (pass == 1) return 0;               /* cannot happen */
+                    if (sx_names >= SX_SIZE / 2) return 0; /* too many: walk */
+                    sx_tab[0 - e - 2] = sx_names + 1;
+                    e = sx_names; sx_names = sx_names + 1;
+                    sx_pos[e] = i; sx_len[e] = j - i; sx_cnt[e] = 0;
+                }
+                if (pass == 0) sx_cnt[e] = sx_cnt[e] + 1;
+                else { sx_occ[sx_at[e]] = i; sx_at[e] = sx_at[e] + 1; }
+                i = j;
+            } else i = i + 1;
+        }
+        if (pass == 0) {
+            tot = 0; e = 0;
+            while (e < sx_names) { sx_at[e] = tot; tot = tot + sx_cnt[e]; e = e + 1; }
+            if (tot > SX_MAXOCC) return 0;
+        }
+        pass = pass + 1;
+    }
+    e = 0; while (e < sx_names) { sx_at[e] = sx_at[e] - sx_cnt[e]; e = e + 1; }
+    srcix_on = 1;
+    return 1;
+}
 /* where the identifier nm[0..nl) next occurs in src from `from`, or -1 */
+int srcfind_walk(char *nm, int nl, int from);
+int srcfind_lim(char *nm, int nl, int from, int end);
 int srcfind(char *nm, int nl, int from) {
+    int e; int lo; int hi; int m;
+    if (srcix_on == 0) return srcfind_walk(nm, nl, from);
+    if (nl <= 0) return srcfind_walk(nm, nl, from);
+    e = 0; while (e < nl) { if (idch(nm[e] & 255) == 0) return srcfind_walk(nm, nl, from); e = e + 1; }
+    if (from < sx_pre) {                  /* the prepended lines: walk them */
+        m = srcfind_lim(nm, nl, from, sx_pre);
+        if (m >= 0) return m;
+        from = sx_pre;
+    }
+    e = sx_find_at(nm, nl, sx_pre);
+    if (e < 0) return 0 - 1;
+    from = from - sx_pre;
+    lo = sx_at[e]; hi = sx_at[e] + sx_cnt[e];
+    while (lo < hi) { m = (lo + hi) / 2; if (sx_occ[m] < from) lo = m + 1; else hi = m; }
+    if (lo < sx_at[e] + sx_cnt[e]) return sx_occ[lo] + sx_pre;
+    return 0 - 1;
+}
+int srcfind_lim(char *nm, int nl, int from, int end);
+int srcfind_walk(char *nm, int nl, int from) { return srcfind_lim(nm, nl, from, nsrc); }
+int srcfind_lim(char *nm, int nl, int from, int end) {
     int i; int k;
     i = from;
-    while (i + nl <= nsrc) {
+    while (i + nl <= end) {
         k = 0;
         while (k < nl) { if ((src[i + k] & 255) != (nm[k] & 255)) break; k = k + 1; }
         if (k == nl) {
@@ -1267,6 +1425,7 @@ int incappend(char *h, int hl) {
     src[k] = 62; src[k + 1] = 10;
     nsrc = nsrc + n;
     nautoinc = nautoinc + 1;      /* a line the user did not write [S-12] */
+    sx_pre = sx_pre + n;          /* every indexed position just moved */
     return 0;
 }
 /* the header's definitions: a line opening `static`, whose name is the
@@ -1317,11 +1476,14 @@ int autoinc(void) {
         if (fd >= 0) {
             n = __read(fd, incbuf, MAXINC);
             __close(fd);
-            if (n > 0) { if (hdrneeded(n)) incappend(hs + st, k - st); }
+            if (n > 0) { if (srcix_on == 0) srcix_build();
+                         if (hdrneeded(n)) incappend(hs + st, k - st); }
         }
         k = k + 1;
     }
+    if (srcix_on == 0) srcix_build();
     if (rtprintf()) incappend("stdio.h", 7);
+    srcix_on = 0;
     return 0;
 }
 
@@ -2644,19 +2806,59 @@ int newlab(void) { nlab = nlab + 1; return nlab; }
 int elab(char *p, int n) { es(p); en(n); return 0; }
 
 /* ---- symbols --------------------------------------------------------- */
-int sfind(int t) {
-    int i; int k; int ok; int n;
+/* sfind by hash chain.  The backward walk over every symbol was 10% of
+   the self-built compiler compiling itself.  A chain holds indices newest
+   first, so its first live match is the walk's first match.  Scopes pop
+   by lowering nsym; the dead entries (>= nsym) sit at the FRONT of their
+   chains, are skipped on lookup, and are unlinked when their slot is
+   reused.  A name of 32 or more characters is stored truncated, so what
+   it matches is not its hash's business: those go on one chain of their
+   own (SH_LONG) that every lookup merges in, and a long query walks. */
+#define SH_SIZE 8192
+#define SH_LONG SH_SIZE
+int sh_head[SH_SIZE + 1];                 /* index + 1, 0: empty */
+int sh_link[MAXSYM]; int sh_b[MAXSYM]; int sh_hi;
+int sh_bucket(int t) {
+    if (tlen[t] >= 32) return SH_LONG;
+    return vhash(src + tpos[t], tlen[t]) & (SH_SIZE - 1);
+}
+int sh_push(int i, int t) {
+    int ob; int b;
+    if (i < sh_hi) {                      /* reusing a dead slot */
+        ob = sh_b[i];
+        while (sh_head[ob] - 1 >= i) sh_head[ob] = sh_link[sh_head[ob] - 1];
+    } else sh_hi = i + 1;
+    b = sh_bucket(t);
+    sh_b[i] = b; sh_link[i] = sh_head[b]; sh_head[b] = i + 1;
+    return 0;
+}
+int sfind_is(int i, int t) {
+    int k; int ok; int n;
     n = tlen[t];
+    k = 0; ok = 1;
+    while (symname[i * 32 + k]) {
+        if (k >= n) ok = 0;
+        if (ok) { if (symname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+        k = k + 1;
+    }
+    if (ok) { if (k == n) return 1; }
+    return 0;
+}
+int sfind_walk(int t) {
+    int i;
     i = nsym - 1;
-    while (i >= 0) {
-        k = 0; ok = 1;
-        while (symname[i * 32 + k]) {
-            if (k >= n) ok = 0;
-            if (ok) { if (symname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
-            k = k + 1;
-        }
-        if (ok) { if (k == n) return i; }
-        i = i - 1;
+    while (i >= 0) { if (sfind_is(i, t)) return i; i = i - 1; }
+    return 0 - 1;
+}
+int sfind(int t) {
+    int a; int b;
+    if (tlen[t] >= 32) return sfind_walk(t);
+    a = sh_head[sh_bucket(t)] - 1; b = sh_head[SH_LONG] - 1;
+    while (a >= nsym) a = sh_link[a] - 1;
+    while (b >= nsym) b = sh_link[b] - 1;
+    while (a >= 0 || b >= 0) {
+        if (a > b) { if (sfind_is(a, t)) return a; a = sh_link[a] - 1; }
+        else { if (sfind_is(b, t)) return b; b = sh_link[b] - 1; }
     }
     return 0 - 1;
 }
@@ -2721,6 +2923,7 @@ int declbytes;              /* ...times the array length, if it is one */
 char lbuf[131072];      /* a string literal can be the whole model blob */
 int needslen; int needchb; int needxb;
 
+int sh_push(int i, int t);
 int sadd(int t, int kind, int off, int elem) {
     int k;
     if (nsym >= MAXSYM) { __write(2, "symbol table full\n", 18); __exit(1); }
@@ -2745,6 +2948,7 @@ int sadd(int t, int kind, int off, int elem) {
     symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
     if (declptr) symptrd[nsym] = declpd > 0 ? declpd : 1;
     symbase[nsym] = declbase;
+    sh_push(nsym, t);
     nsym = nsym + 1;
     return nsym - 1;
 }
