@@ -391,5 +391,28 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 sim.ujs body≡stage0", a.length);
 ' "$OUT/sim_s0.wasm" "$OUT/sim_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v10 sim body≡stage0 · stage2≡stage1)"
+echo "-- M3 v11: drone.ujs body≡stage0"
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs ujs/web/game/drone.ujs -o "$OUT/drone_s0.wasm" >/dev/null
+perl -e 'alarm 90; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/stage1.wasm" ujs/web/game/drone.ujs -o "$OUT/drone_s1.wasm" >/dev/null
+perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+import fs from "fs";
+function mainBody(path) {
+  const u = fs.readFileSync(path);
+  function readUleb(b,i){let v=0,s=0;for(;;){const x=b[i++];v|=(x&0x7f)<<s;if(!(x&0x80))return[v,i];s+=7;}}
+  let i=8;
+  while(i<u.length){const sid=u[i++];const[ln,i2]=readUleb(u,i);i=i2;
+    if(sid===10){const code=u.subarray(i,i+ln);let[nf,o]=readUleb(code,0);
+      for(let fi=0;fi<nf;fi++){const[sz,o2]=readUleb(code,o);const body=[...code.subarray(o2,o2+sz)];o=o2+sz;if(fi===1)return body;}}
+    i+=ln;}
+}
+const a=mainBody(process.argv[1]), b=mainBody(process.argv[2]);
+if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
+  console.error("FAIL M3 drone≢stage0", a?.length, b?.length); process.exit(1);
+}
+console.log("OK M3 drone.ujs body≡stage0", a.length);
+' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
+
+echo "ujs2wasm_compiler OK (M2 + M3 v11 sim+drone body≡stage0 · stage2≡stage1)"
 
