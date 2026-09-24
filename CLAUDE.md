@@ -80,8 +80,14 @@ Things that cost time here before they were written down:
   `ps -eo pid,pcpu,command | awk '$2 > 20'`.
 - **`pkill -f` fails under this shell's locale** ("illegal byte sequence").
   Kill by PID (`ps -eo pid,command | grep …`).
-- `nativeboot` is the long pole (~4 min): it compiles `unisacc.c` with
-  unisacc three times over, then cross-writes five more targets.
+- `nativeboot` (~18 s) compiles `unisacc.c` with unisacc three times over,
+  then cross-writes five more targets. It and `bigclosure` used to take
+  minutes; that was two O(n*m) loops in the Python back end (a label dict
+  rebuilt per instruction, a label scan per tape pc), fixed 2026-09-25.
+  `make com` went 182 s -> 17 s. unisacc compiling itself takes ~0.25 s per
+  target, so a suite that takes minutes is waiting on Python or on macOS's
+  first-launch scan of new binaries (`native`, ~44 s) -- profile before
+  blaming the compiler.
 
 ## Pushing
 
