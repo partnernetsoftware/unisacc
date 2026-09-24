@@ -2481,7 +2481,7 @@ long numval(int t) {
 }
 
 /* One string, in one place: a release is identifiable from the binary. */
-#define UNISACC_VERSION "0.0.5"
+#define UNISACC_VERSION "0.0.6"
 /* Are two NUL-terminated strings the same? */
 int strsame(char *a, char *b) {
     int k;
