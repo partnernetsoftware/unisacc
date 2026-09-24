@@ -93,6 +93,13 @@ say "-E preprocesses" "expanded" "$got"
 say "-Wall -O2 -g -std" "ok" "$( (cd "$T" && perl -e 'alarm 120; exec @ARGV' \
     "$UA_RUN" -Wall -O2 -g -std=c99 -run def.c 2>&1) | sed 's/^off$/ok/')"
 
+# -S is the name for "write the tape", the assembly-level IR, and -c is
+# only a synonym -- there are no object files here [S-10 #7]
+a=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" def.c -S) | head -1)
+b=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" def.c -c) | head -1)
+say "-S writes the tape" "_start:" "$a"
+say "-c is the same" "$a" "$b"
+
 # which build is this: a release has to be identifiable from the binary
 got=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" --version 2>&1) )
 case "$got" in "unisacc "[0-9]*) got="a version";; esac

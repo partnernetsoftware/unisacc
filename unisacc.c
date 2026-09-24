@@ -11128,7 +11128,12 @@ int main(void) {
                     noptd = noptd + 1;
                 }
             } else { if (a[1] == 114) { runit = 1;         /* -run */
-            } else { if (a[1] == 99) { dump = 1;           /* -c */
+            /* -S writes the tape: the tape IS this compiler's assembly-level
+               IR, the same level gcc's -S stops at.  -c is kept as a synonym
+               because the suites have always spelled it that way -- but
+               there are no object files and no linker here, so `-c` never
+               means what it means to gcc, and the usage line says so. */
+            } else { if (a[1] == 99 || a[1] == 83) { dump = 1;   /* -c, -S */
             } else { if (a[1] == 118) { verb = 1;          /* -v */
             } else { if (a[1] == 111) {                    /* -o */
                 if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
@@ -11161,8 +11166,10 @@ int main(void) {
     if (fi == 0) {
         model_dims(); setup();
         printf("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
-               " FILE.c [FILE.c...] [-c | -b os/arch] [-o out]"
-               " [-- args...]\n");
+               " FILE.c [FILE.c...] [-S | -b os/arch] [-o out]"
+               " [-- args...]\n"
+               "  -S  write the tape, this compiler's assembly-level IR"
+               " (-c is a synonym: there are no object files)\n");
         return 1;
     }
     if (runit) {
