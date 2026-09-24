@@ -7795,7 +7795,12 @@ int unary(void) {
         if (curpd >= 2) {                        /* *q of int **q is an int * */
             curpd = curpd - 1; curptr = 1;
             curelem = curpd >= 2 ? 8 : curbase;
-        } else { curptr = 0; curpd = 0; }
+        } else { curptr = 0; curpd = 0;
+                 /* `*p` of a struct pointer is the struct: an aggregate,
+                    whose value is its address, so nothing more is loaded.
+                    `sum(*p)` used to load its first eight bytes and pass
+                    THOSE as the address -- a segfault in the callee */
+                 if (curstruct >= 0) curelem = 0; }
         return 0;
     }
     if (p == P_BNOT) {                  /* ~x is x ^ -1 */
@@ -8177,6 +8182,20 @@ int primary(void) {
             if ((src[tpos[tp] + k] & 255) == 85) curuns = 1;    /* U */
             k = k + 1;
         }
+        /* C99 6.4.4.1 again: a decimal constant with a u suffix is the
+           first of unsigned int, unsigned long that holds it -- so
+           3655922532u is 32 bits wide, and `3655922532u * p` wraps there.
+           The int-or-long rule above had made it a long, and the widened
+           fuzz [S-15 A3] found the product never being narrowed. */
+        if (curuns) { if (v >= 0) { if (v <= 4294967295) {
+            int hasl; hasl = 0; k = 0;
+            while (k < tlen[tp]) {
+                if ((src[tpos[tp] + k] & 255) == 108) hasl = 1;
+                if ((src[tpos[tp] + k] & 255) == 76) hasl = 1;
+                k = k + 1;
+            }
+            if (hasl == 0) cursize = 4;
+        } } }
         adv();
         es("  @lit.imm r0, "); en(v); ec(10);
         lvalue = 0; curelem = cursize; curptr = 0;
@@ -11175,7 +11194,12 @@ int function(int t, int w) {
         if (havename) {
             if (scopebind("param", 5, pt) != 1) scopefail("a parameter", pt);
             off = alloc_local(8);
-            declbytes = 8;
+            /* The SLOT is eight bytes; the parameter is its declared size.
+               `declbytes = 8` here made every `unsigned p` a u64 on the
+               type axis, so `b * p` was never narrowed to 32 bits and
+               `(b * p) / 13u` divided the whole 64-bit product -- found
+               by the widened fuzz [S-15 A3], not by any written probe. */
+            declbytes = declptr ? 8 : declsz;
             sadd(pt, 1, off, pw);
             if (pst >= 0) { if (declptr == 0) {
                 if (nsp >= 16) { printf("more than 16 struct parameters\n"); __exit(1); }

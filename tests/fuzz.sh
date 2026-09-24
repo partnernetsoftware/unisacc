@@ -8,8 +8,14 @@
 # is the oracle, and a disagreement names a seed that regenerates the
 # program byte for byte.
 #
-#   ./tests/fuzz.sh            the standing set (N seeds from FIRST)
-#   N=500 FIRST=1000 ./tests/fuzz.sh     a longer hunt
+#   ./tests/fuzz.sh            the standing set: N seeds from FIRST, per class
+#   N=125 FIRST=1000 ./tests/fuzz.sh     a longer hunt (8 classes x 125 = 1000)
+#   CLASSES="struct unsigned" ./tests/fuzz.sh     only those shapes
+#
+# The generator has eight program SHAPES [S-15 A3] -- int, unsigned,
+# narrow, struct, pointer, float, recursion, mixed -- and each gets N
+# seeds, so one run is 8N programs.  The seven added shapes found three
+# C-front-end bugs on their first run (tests/c/b_fuzzfound.c keeps them).
 #
 # The generator's rules keep every program's behaviour DEFINED -- if it
 # were not, cc and unisacc would be allowed to differ and this would
@@ -22,14 +28,20 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
-N=${N:-60}
+N=${N:-20}
 FIRST=${FIRST:-1}
+CLASSES=${CLASSES:-"int unsigned narrow struct pointer float recursion mixed"}
 command -v cc >/dev/null || { echo "  skip (no system compiler to compare against)"; exit 0; }
-python3 tests/gen_prog.py "$T" "$N" "$FIRST" >/dev/null || {
-    echo "  FAIL the generator did not run"; exit 1; }
+total=0
+for c in $CLASSES; do
+    python3 tests/gen_prog.py "$T" "$N" "$FIRST" "$c" >/dev/null || {
+        echo "  FAIL the generator did not run for class $c"; exit 1; }
+    total=$((total + N))
+done
 ok=0; bad=0; uns=0; skip=0
-for f in "$T"/s*.c; do
+for f in "$T"/*_*.c; do
     b=$(basename "$f" .c)
+    cls=""; for c in $CLASSES; do [ "${b%%_*}" = "${c:0:1}" ] && cls=$c; done
     if ! cc -w -std=c99 -o "$T/ref" "$f" 2>/dev/null; then
         # the oracle refusing its own generator is a generator bug, and a
         # loud one: it means the programs are not C
@@ -50,9 +62,9 @@ for f in "$T"/s*.c; do
     else
         bad=$((bad+1))
         printf "  WRONG %-10s got [%s]  cc says [%s]\n" "$b" "$got" "$want"
-        printf "        reproduce: python3 tests/gen_prog.py DIR 1 %s\n" "${b#s}"
+        printf "        reproduce: python3 tests/gen_prog.py DIR 1 %s %s\n" "${b#*_}" "$cls"
     fi
 done
 echo
-echo "fuzz  agreed $ok/$N   wrong $bad   refused $uns   (seeds $FIRST..$((FIRST + N - 1)))"
+echo "fuzz  agreed $ok/$total   wrong $bad   refused $uns   (seeds $FIRST..$((FIRST + N - 1)) in each of: $CLASSES)"
 [ "$bad" -eq 0 ] && [ "$uns" -eq 0 ] && [ "$ok" -gt 0 ]

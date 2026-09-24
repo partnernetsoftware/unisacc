@@ -876,7 +876,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 |---|---|---|---|
 | A1 | **type 表对照 cc 的审计** | [G-2] 那条错规则（`int + int` 是 long）在 gold 里待了整个项目，枚举 1.000、全部套件绿——因为枚举只能证明网络等于表。以系统 cc 为裁判：对 4,275 个键中的数值组合生成 `sizeof((T1)0 op (T2)0)` 与结果符号性探针，一次编译、逐键对照 | 新套件 `gold_audit`：type 表与 cc 分歧为 0，或每条分歧进 `gold.knownfail` 并写明理由（例如我们有意不区分 `long` 与 `long long`） |
 | A2 | **abi 表的系统调用号对照系统头** | 六个目标的 syscall 号是手录的；在有 `<sys/syscall.h>` 的机器上逐个比对 | Linux（Lima 两台）、macOS 本机分歧 0 |
-| A3 | **fuzz 扩面** | 现在只生成有符号 int 运算。要覆盖 unsigned 回绕、char/short 窄化与提升、结构体传值、指针算术、浮点、递归——它们是 A1 那类错最可能藏身的地方 | 生成器分 8 类，每类 ≥60 个种子，全部与 cc 一致；`N=1000` 的长跑一次无分歧 |
+| A3 | **fuzz 扩面** —— **已达**（2026-09-24）。`tests/gen_prog.py` 分 8 类（int/unsigned/narrow/struct/pointer/float/recursion/mixed），`tests/fuzz.sh` 每类 N 个种子。7 个新类**第一次跑**就在 C 前端抓到三个 90 个手写探针从未碰到的错：形参的 `sizeof` 是 8 字节槽位（于是 `unsigned p` 在类型轴上是 u64，`(b*p)/13u` 从未截到 32 位）；带 `u` 后缀、超过 INT_MAX 的十进制常量当成 long（C99 6.4.4.1 说是 unsigned int）；`*p`（结构体指针）传值时装入前 8 字节当地址（callee 段错误）。Python 前端三处都对——这正是 selfhost/stages 只有在探针碰到时才看得见的那类缺口；`tests/c/b_fuzzfound.c` 固定它们。修后 **8×60 = 480/480** 一致；生成器自己的一个 UB（`int *` 指向 `unsigned char`）也是这轮抓出来的 | ✅ 8 类各 ≥60 种子全部一致；`N=125`（8×125=1000）长跑见下 |
 
 **B. 体积与速度（P0）**
 
