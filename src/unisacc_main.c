@@ -5703,9 +5703,10 @@ int local_decl(void) {
                     initaggr(3, t, 0, isarr ? ew : w, sst, nb);
                 } else { if (cur() == T_STR) { if (isarr) { initstr(3, t, 0, n); }
                     else { expr(); loadval(); es("  @mem.lea r1, ls"); en(t); ec(10); estore(8); } }
-                else { expr(); loadval(); fconv(fkind(), lk2);
+                else { int sptr; sptr = declptr;   /* before the RHS */
+                    expr(); loadval(); fconv(fkind(), lk2);
                     es("  @mem.lea r1, ls"); en(t); ec(10);
-                    if (declptr) estore(8); else estore(w); } }
+                    if (sptr) estore(8); else estore(w); } }
                 toinit = 0;
             }
             if (eat(tidx(",", 1))) continue;
@@ -5808,7 +5809,17 @@ int local_decl(void) {
             lfpret = 0;
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
-            int lk; lk = dkind(lflt0);
+            int lk; int lptr;
+            lk = dkind(lflt0);
+            /* Whether the thing being initialised is a POINTER, taken now:
+               the initialiser can contain a type name of its own -- a
+               compound literal `(int[]){5,6,7}`, a cast, a sizeof -- and
+               parsing it rewrites the global `declptr`.  `int *a =
+               (int[]){...}` stored the pointer 4 bytes wide, the element
+               width, and read it back 8: the top half was whatever the
+               stack held.  It passed here by luck and printed garbage on
+               a GitHub runner. */
+            lptr = declptr;
             initflt = lflt0;
             if (cur() == tidx("{", 1)) {
                 if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
@@ -5822,11 +5833,11 @@ int local_decl(void) {
             else { expr(); loadval();
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
-                if (declptr) estore(8); else estore(w); } }
+                if (lptr) estore(8); else estore(w); } }
             else { expr(); loadval();
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
                 es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
-                if (declptr) estore(8); else estore(w); } }
+                if (lptr) estore(8); else estore(w); } }
         }
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
