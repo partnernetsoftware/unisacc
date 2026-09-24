@@ -32,7 +32,7 @@ static char *strncpy(char *d, const char *s, uint32_t n) {
 
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
-        HOST_SCRATCH = 950000, MEM_PAGES = 16 };
+        HOST_SCRATCH = 950000, MEM_PAGES = 64 };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4 };
 
 static uint8_t  g_heap[256 * 1024];

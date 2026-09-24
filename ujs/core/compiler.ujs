@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v4: v3 + while / if / else. No fn/&&/||/break/else-if.
+// v5: v4 + list/len/index + SRC/OUTN.
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -28,10 +28,18 @@ let dst = 0;
 let lx = 0;
 let depth = 0;
 let csp = 0;
+let ety = 1;
+let gn = 0;
+let gs = 0;
+let idx_slot = 0;
+let elem_f = 0;
 
-let OUT = list(1024);
-let OPS = list(1024);
-let KEYS = list(32);
+let OUT = list(4096);
+let OPS = list(4096);
+let KEYS = list(64);
+let LTY = list(64);
+let GKEYS = list(16);
+let GTY = list(16);
 let ST = list(64);
 let SOP = list(64);
 let SPR = list(64);
@@ -300,7 +308,7 @@ while (finished == 0) {
             if (KEYS[j] == k) { found = 1; slot = j; }
             j = j + 1;
           }
-          if (found == 0) { slot = kn; KEYS[kn] = k; kn = kn + 1; }
+          if (found == 0) { slot = kn; KEYS[kn] = k; LTY[kn] = 126; kn = kn + 1; }
           dst = slot;
           done = 0;
           while (done == 0) {
@@ -360,8 +368,18 @@ while (finished == 0) {
                 if (KEYS[j] == k) { found = 1; dst = j; }
                 j = j + 1;
               }
-              if (found == 0) { ok = 0; finished = 1; }
-              else {
+              if (found == 0) {
+                // global assign e.g. OUTN =
+                found = 0; j = 0; gs = 0;
+                while (j < gn) {
+                  if (GKEYS[j] == k) { found = 1; gs = j; }
+                  j = j + 1;
+                }
+                if (found == 0) {
+                  gs = gn; GKEYS[gn] = k; GTY[gn] = 1; gn = gn + 1;
+                }
+                dst = gs;
+                want = 8;
                 done = 0;
                 while (done == 0) {
                   if (pos >= n) { done = 1; }
@@ -384,6 +402,36 @@ while (finished == 0) {
                 else {
                   if (SRC[pos] != 61) { ok = 0; finished = 1; }
                   else { pos = pos + 1; }
+                }
+              } else {
+                done = 0;
+                while (done == 0) {
+                  if (pos >= n) { done = 1; }
+                  else {
+                    ch = SRC[pos];
+                    if (ch == 32) { pos = pos + 1; }
+                    else {
+                      if (ch == 9) { pos = pos + 1; }
+                      else {
+                        if (ch == 10) { pos = pos + 1; }
+                        else {
+                          if (ch == 13) { pos = pos + 1; }
+                          else { done = 1; }
+                        }
+                      }
+                    }
+                  }
+                }
+                if (pos >= n) { ok = 0; finished = 1; }
+                else {
+                  if (SRC[pos] == 91) {
+                    want = 6;
+                    idx_slot = dst;
+                    pos = pos + 1;
+                  } else {
+                    if (SRC[pos] != 61) { ok = 0; finished = 1; }
+                    else { pos = pos + 1; }
+                  }
                 }
               }
             }
@@ -421,7 +469,17 @@ while (finished == 0) {
         }
       }
 
-      // parse expression → OPS (want 1/2/3/4/5)
+      // setidx: load list then parse index
+      if (want == 6) {
+        if (ok == 1) {
+          if (finished == 0) {
+            OPS[opsn] = 32; opsn = opsn + 1;
+            OPS[opsn] = idx_slot; opsn = opsn + 1;
+          }
+        }
+      }
+
+      // parse expression → OPS (want 1/2/3/4/5/6/8)
       if (ok == 1) {
         if (finished == 0) {
           bsp = 0;
@@ -461,6 +519,39 @@ while (finished == 0) {
                     SPR[bsp] = 0;
                     bsp = bsp + 1;
                   } else {
+                    found = 0;
+                    if (pos + 4 < n) {
+                      if (SRC[pos] == 108) {
+                        if (SRC[pos + 1] == 105) {
+                          if (SRC[pos + 2] == 115) {
+                            if (SRC[pos + 3] == 116) {
+                              if (SRC[pos + 4] == 40) { found = 10; }
+                            }
+                          }
+                        }
+                      }
+                    }
+                    if (found == 0) {
+                      if (pos + 3 < n) {
+                        if (SRC[pos] == 108) {
+                          if (SRC[pos + 1] == 101) {
+                            if (SRC[pos + 2] == 110) {
+                              if (SRC[pos + 3] == 40) { found = 11; }
+                            }
+                          }
+                        }
+                      }
+                    }
+                    if (found == 10) {
+                      pos = pos + 5;
+                      ST[bsp - 1] = 5;
+                      ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                    } else {
+                    if (found == 11) {
+                      pos = pos + 4;
+                      ST[bsp - 1] = 6;
+                      ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                    } else {
                     ch = SRC[pos];
                     cd = 0;
                     if (ch >= 48) { if (ch <= 57) { cd = 1; } }
@@ -497,6 +588,7 @@ while (finished == 0) {
                             OPS[opsn] = ch + 128; opsn = opsn + 1;
                           }
                         }
+                        ety = 1;
                         ST[bsp - 1] = 2;
                     } else {
                       k = 0; mul = 1; i = 0; done = 0;
@@ -528,13 +620,41 @@ while (finished == 0) {
                           if (KEYS[j] == k) { found = 1; lx = j; }
                           j = j + 1;
                         }
-                        if (found == 0) { ok = 0; bsp = 0; }
-                        else {
+                        if (found == 1) {
                           OPS[opsn] = 32; opsn = opsn + 1;
                           OPS[opsn] = lx; opsn = opsn + 1;
+                          if (LTY[lx] == 127) { ety = 3; elem_f = 0; } else { ety = 1; }
+                          ST[bsp - 1] = 2;
+                        } else {
+                          found = 0; j = 0; gs = 0;
+                          while (j < gn) {
+                            if (GKEYS[j] == k) { found = 1; gs = j; }
+                            j = j + 1;
+                          }
+                          if (found == 0) {
+                            gs = gn; GKEYS[gn] = k; GTY[gn] = 3; gn = gn + 1;
+                          }
+                          tnum = 2048 + gs * 4;
+                          OPS[opsn] = 65; opsn = opsn + 1;
+                          i = tnum; done = 0;
+                          while (done == 0) {
+                            ch = i % 128; i = i / 128;
+                            if (i == 0) { OPS[opsn] = ch; opsn = opsn + 1; done = 1; }
+                            else { OPS[opsn] = ch + 128; opsn = opsn + 1; }
+                          }
+                          OPS[opsn] = 40; opsn = opsn + 1;
+                          OPS[opsn] = 2; opsn = opsn + 1;
+                          OPS[opsn] = 0; opsn = opsn + 1;
+                          if (GTY[gs] == 1) {
+                            OPS[opsn] = 16; opsn = opsn + 1;
+                            OPS[opsn] = 3; opsn = opsn + 1;
+                            ety = 1; elem_f = 0;
+                          } else { ety = 3; elem_f = 1; }
                           ST[bsp - 1] = 2;
                         }
                       }
+                    }
+                    }
                     }
                   }
                 }
@@ -569,7 +689,7 @@ while (finished == 0) {
                   }
                 } else {
                   if (st == 2) {
-                    // binop or done
+                    // binop or index or done
                     done = 0;
                     while (done == 0) {
                       if (pos >= n) { done = 1; }
@@ -588,6 +708,20 @@ while (finished == 0) {
                         }
                       }
                     }
+                    if (pos < n) {
+                      if (SRC[pos] == 91) {
+                        if (ety == 3) {
+                          pos = pos + 1;
+                          SOP[bsp - 1] = ety;
+                          ST[bsp - 1] = 7;
+                          ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                          op = 99;
+                        }
+                      }
+                    }
+                    if (op == 99) {
+                      op = 0;
+                    } else {
                     op = 0; prec = 0;
                     if (pos < n) {
                       ch = SRC[pos];
@@ -643,6 +777,7 @@ while (finished == 0) {
                         bsp = bsp + 1;
                       }
                     }
+                    }
                   } else {
                     if (st == 4) {
                       op = SOP[bsp - 1];
@@ -654,8 +789,388 @@ while (finished == 0) {
                       }
                       ST[bsp - 1] = 2;
                     } else {
-                      ok = 0; bsp = 0;
+                      if (st == 5) {
+                        // after list(expr) expect )
+                        done = 0;
+                        while (done == 0) {
+                          if (pos >= n) { done = 1; }
+                          else {
+                            ch = SRC[pos];
+                            if (ch == 32) { pos = pos + 1; }
+                            else {
+                              if (ch == 9) { pos = pos + 1; }
+                              else {
+                                if (ch == 10) { pos = pos + 1; }
+                                else {
+                                  if (ch == 13) { pos = pos + 1; }
+                                  else { done = 1; }
+                                }
+                              }
+                            }
+                          }
+                        }
+                        if (pos >= n) { ok = 0; bsp = 0; }
+                        else {
+                          if (SRC[pos] != 41) { ok = 0; bsp = 0; }
+                          else {
+                            pos = pos + 1;
+                            OPS[opsn] = 167; opsn = opsn + 1;
+                            OPS[opsn] = 16; opsn = opsn + 1;
+                            OPS[opsn] = 6; opsn = opsn + 1;
+                            ety = 3;
+                            ST[bsp - 1] = 2;
+                          }
+                        }
+                      } else {
+                        if (st == 6) {
+                          done = 0;
+                          while (done == 0) {
+                            if (pos >= n) { done = 1; }
+                            else {
+                              ch = SRC[pos];
+                              if (ch == 32) { pos = pos + 1; }
+                              else {
+                                if (ch == 9) { pos = pos + 1; }
+                                else {
+                                  if (ch == 10) { pos = pos + 1; }
+                                  else {
+                                    if (ch == 13) { pos = pos + 1; }
+                                    else { done = 1; }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          if (pos >= n) { ok = 0; bsp = 0; }
+                          else {
+                            if (SRC[pos] != 41) { ok = 0; bsp = 0; }
+                            else {
+                              pos = pos + 1;
+                              OPS[opsn] = 16; opsn = opsn + 1;
+                              OPS[opsn] = 10; opsn = opsn + 1;
+                              OPS[opsn] = 173; opsn = opsn + 1;
+                              ety = 1;
+                              ST[bsp - 1] = 2;
+                            }
+                          }
+                        } else {
+                          if (st == 7) {
+                            // after list[index] expect ]
+                            done = 0;
+                            while (done == 0) {
+                              if (pos >= n) { done = 1; }
+                              else {
+                                ch = SRC[pos];
+                                if (ch == 32) { pos = pos + 1; }
+                                else {
+                                  if (ch == 9) { pos = pos + 1; }
+                                  else {
+                                    if (ch == 10) { pos = pos + 1; }
+                                    else {
+                                      if (ch == 13) { pos = pos + 1; }
+                                      else { done = 1; }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                            if (pos >= n) { ok = 0; bsp = 0; }
+                            else {
+                              if (SRC[pos] != 93) { ok = 0; bsp = 0; }
+                              else {
+                                pos = pos + 1;
+                                OPS[opsn] = 167; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                OPS[opsn] = 7; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                if (elem_f == 1) {
+                                  OPS[opsn] = 5; opsn = opsn + 1;
+                                  OPS[opsn] = 176; opsn = opsn + 1;
+                                } else {
+                                  OPS[opsn] = 3; opsn = opsn + 1;
+                                }
+                                ety = 1;
+                                ST[bsp - 1] = 2;
+                              }
+                            }
+                          } else {
+                            ok = 0; bsp = 0;
+                          }
+                        }
+                      }
                     }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // setidx: after index expr → ] = value
+      if (want == 6) {
+        if (ok == 1) {
+          if (finished == 0) {
+            done = 0;
+            while (done == 0) {
+              if (pos >= n) { done = 1; }
+              else {
+                ch = SRC[pos];
+                if (ch == 32) { pos = pos + 1; }
+                else {
+                  if (ch == 9) { pos = pos + 1; }
+                  else {
+                    if (ch == 10) { pos = pos + 1; }
+                    else {
+                      if (ch == 13) { pos = pos + 1; }
+                      else { done = 1; }
+                    }
+                  }
+                }
+              }
+            }
+            if (pos >= n) { ok = 0; finished = 1; }
+            else {
+              if (SRC[pos] != 93) { ok = 0; finished = 1; }
+              else {
+                pos = pos + 1;
+                done = 0;
+                while (done == 0) {
+                  if (pos >= n) { done = 1; }
+                  else {
+                    ch = SRC[pos];
+                    if (ch == 32) { pos = pos + 1; }
+                    else {
+                      if (ch == 9) { pos = pos + 1; }
+                      else {
+                        if (ch == 10) { pos = pos + 1; }
+                        else {
+                          if (ch == 13) { pos = pos + 1; }
+                          else { done = 1; }
+                        }
+                      }
+                    }
+                  }
+                }
+                if (pos >= n) { ok = 0; finished = 1; }
+                else {
+                  if (SRC[pos] != 61) { ok = 0; finished = 1; }
+                  else {
+                    pos = pos + 1;
+                    OPS[opsn] = 167; opsn = opsn + 1;
+                    // parse value expr
+                    bsp = 0;
+                    ST[0] = 1; SPR[0] = 0; bsp = 1;
+                    while (bsp > 0) {
+                      if (ok != 1) { bsp = 0; }
+                      else {
+                        st = ST[bsp - 1];
+                        if (st == 1) {
+                          done = 0;
+                          while (done == 0) {
+                            if (pos >= n) { done = 1; }
+                            else {
+                              ch = SRC[pos];
+                              if (ch == 32) { pos = pos + 1; }
+                              else {
+                                if (ch == 9) { pos = pos + 1; }
+                                else {
+                                  if (ch == 10) { pos = pos + 1; }
+                                  else {
+                                    if (ch == 13) { pos = pos + 1; }
+                                    else { done = 1; }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          if (pos >= n) { ok = 0; bsp = 0; }
+                          else {
+                            ch = SRC[pos];
+                            cd = 0;
+                            if (ch >= 48) { if (ch <= 57) { cd = 1; } }
+                            if (cd == 1) {
+                              tnum = 0; done = 0;
+                              while (done == 0) {
+                                if (pos >= n) { done = 1; }
+                                else {
+                                  ch = SRC[pos];
+                                  if (ch < 48) { done = 1; }
+                                  else {
+                                    if (ch > 57) { done = 1; }
+                                    else {
+                                      tnum = tnum * 10 + (ch - 48);
+                                      pos = pos + 1;
+                                    }
+                                  }
+                                }
+                              }
+                              OPS[opsn] = 66; opsn = opsn + 1;
+                              i = tnum; done = 0;
+                              while (done == 0) {
+                                ch = i % 128; i = i / 128;
+                                if (i == 0) {
+                                  if (ch > 63) {
+                                    OPS[opsn] = ch + 128; opsn = opsn + 1;
+                                    OPS[opsn] = 0; opsn = opsn + 1;
+                                  } else { OPS[opsn] = ch; opsn = opsn + 1; }
+                                  done = 1;
+                                } else { OPS[opsn] = ch + 128; opsn = opsn + 1; }
+                              }
+                              ST[bsp - 1] = 2;
+                            } else {
+                              k = 0; mul = 1; i = 0; done = 0;
+                              while (done == 0) {
+                                if (pos >= n) { done = 1; }
+                                else {
+                                  if (i >= 8) { done = 1; }
+                                  else {
+                                    ch = SRC[pos]; cd = 0;
+                                    if (ch >= 97) { if (ch <= 122) { cd = 1; } }
+                                    if (ch >= 65) { if (ch <= 90) { cd = 1; } }
+                                    if (ch == 95) { cd = 1; }
+                                    if (i > 0) { if (ch >= 48) { if (ch <= 57) { cd = 1; } } }
+                                    if (cd == 0) { done = 1; }
+                                    else {
+                                      k = k + ch * mul; mul = mul * 256;
+                                      pos = pos + 1; i = i + 1;
+                                    }
+                                  }
+                                }
+                              }
+                              if (i == 0) { ok = 0; bsp = 0; }
+                              else {
+                                found = 0; j = 0; lx = 0;
+                                while (j < kn) {
+                                  if (KEYS[j] == k) { found = 1; lx = j; }
+                                  j = j + 1;
+                                }
+                                if (found == 0) { ok = 0; bsp = 0; }
+                                else {
+                                  OPS[opsn] = 32; opsn = opsn + 1;
+                                  OPS[opsn] = lx; opsn = opsn + 1;
+                                  // xs[i] in value
+                                  done = 0;
+                                  while (done == 0) {
+                                    if (pos >= n) { done = 1; }
+                                    else {
+                                      ch = SRC[pos];
+                                      if (ch == 32) { pos = pos + 1; }
+                                      else {
+                                        if (ch == 9) { pos = pos + 1; }
+                                        else {
+                                          if (ch == 10) { pos = pos + 1; }
+                                          else {
+                                            if (ch == 13) { pos = pos + 1; }
+                                            else { done = 1; }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                  if (pos < n) {
+                                    if (SRC[pos] == 91) {
+                                      pos = pos + 1;
+                                      ST[bsp - 1] = 8;
+                                      ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                                    } else {
+                                      ST[bsp - 1] = 2;
+                                    }
+                                  } else {
+                                    ST[bsp - 1] = 2;
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        } else {
+                          if (st == 8) {
+                            // after xs[index] in value
+                            done = 0;
+                            while (done == 0) {
+                              if (pos >= n) { done = 1; }
+                              else {
+                                ch = SRC[pos];
+                                if (ch == 32) { pos = pos + 1; }
+                                else {
+                                  if (ch == 9) { pos = pos + 1; }
+                                  else {
+                                    if (ch == 10) { pos = pos + 1; }
+                                    else {
+                                      if (ch == 13) { pos = pos + 1; }
+                                      else { done = 1; }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                            if (pos >= n) { ok = 0; bsp = 0; }
+                            else {
+                              if (SRC[pos] != 93) { ok = 0; bsp = 0; }
+                              else {
+                                pos = pos + 1;
+                                OPS[opsn] = 167; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                OPS[opsn] = 7; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                OPS[opsn] = 3; opsn = opsn + 1;
+                                ST[bsp - 1] = 2;
+                              }
+                            }
+                          } else {
+                          if (st == 2) {
+                            // binop in setidx value
+                            done = 0;
+                            while (done == 0) {
+                              if (pos >= n) { done = 1; }
+                              else {
+                                ch = SRC[pos];
+                                if (ch == 32) { pos = pos + 1; }
+                                else {
+                                  if (ch == 9) { pos = pos + 1; }
+                                  else {
+                                    if (ch == 10) { pos = pos + 1; }
+                                    else {
+                                      if (ch == 13) { pos = pos + 1; }
+                                      else { done = 1; }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                            op = 0; prec = 0;
+                            if (pos < n) {
+                              ch = SRC[pos];
+                              if (ch == 42) { op = 126; prec = 20; }
+                              if (ch == 47) { op = 127; prec = 20; }
+                              if (ch == 37) { op = 129; prec = 20; }
+                              if (ch == 43) { op = 124; prec = 10; }
+                              if (ch == 45) { op = 125; prec = 10; }
+                            }
+                            if (op == 0) { bsp = bsp - 1; }
+                            else {
+                              if (prec < SPR[bsp - 1]) { bsp = bsp - 1; }
+                              else {
+                                pos = pos + 1;
+                                ST[bsp - 1] = 4; SOP[bsp - 1] = op;
+                                ST[bsp] = 1; SPR[bsp] = prec + 1; bsp = bsp + 1;
+                              }
+                            }
+                          } else {
+                            if (st == 4) {
+                              op = SOP[bsp - 1];
+                              OPS[opsn] = op; opsn = opsn + 1;
+                              ST[bsp - 1] = 2;
+                            } else { ok = 0; bsp = 0; }
+                          }
+                          }
+                        }
+                      }
+                    }
+                    OPS[opsn] = 16; opsn = opsn + 1;
+                    OPS[opsn] = 0; opsn = opsn + 1;
+                    OPS[opsn] = 16; opsn = opsn + 1;
+                    OPS[opsn] = 9; opsn = opsn + 1;
                   }
                 }
               }
@@ -668,6 +1183,8 @@ while (finished == 0) {
       if (ok == 1) {
         if (finished == 0) {
           if (want == 1) {
+            if (ety == 3) { LTY[dst] = 127; }
+            else { LTY[dst] = 126; }
             OPS[opsn] = 33; opsn = opsn + 1;
             OPS[opsn] = dst; opsn = opsn + 1;
           }
@@ -675,10 +1192,24 @@ while (finished == 0) {
             OPS[opsn] = 33; opsn = opsn + 1;
             OPS[opsn] = dst; opsn = opsn + 1;
           }
-          if (want == 2) {
+          if (want == 8) {
+            // GSTORE: box i64, i32.const slot, call 15
             OPS[opsn] = 16; opsn = opsn + 1;
             OPS[opsn] = 0; opsn = opsn + 1;
+            OPS[opsn] = 65; opsn = opsn + 1;
+            OPS[opsn] = dst; opsn = opsn + 1;
+            OPS[opsn] = 16; opsn = opsn + 1;
             OPS[opsn] = 15; opsn = opsn + 1;
+            GTY[dst] = 1;
+          }
+          if (want == 2) {
+            if (ety == 3) {
+              OPS[opsn] = 15; opsn = opsn + 1;
+            } else {
+              OPS[opsn] = 16; opsn = opsn + 1;
+              OPS[opsn] = 0; opsn = opsn + 1;
+              OPS[opsn] = 15; opsn = opsn + 1;
+            }
           }
           if (want == 4) {
             OPS[opsn] = 167; opsn = opsn + 1;
@@ -842,7 +1373,7 @@ if (ok == 1) {
   i = 0;
   while (i < kn) {
     OUT[outn] = 1; outn = outn + 1;
-    OUT[outn] = 126; outn = outn + 1;
+    OUT[outn] = LTY[i]; outn = outn + 1;
     i = i + 1;
   }
   i = 0;

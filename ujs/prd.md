@@ -50,7 +50,7 @@
 
 | 层 | 弃什么 | 做成什么之后可以弃 | 现在卡在 |
 |---|---|---|---|
-| **P0 弃出货 Python** | `web-build` / `ujs2wasm` CLI / 预编译 embed **不再是 ship 必经** | ① Pages 玩法步进只加载直出 `.wasm`（B），不再 `wasm_run`+bytecode ② 改 `.ujs` 用 **JS/wasm 宿主**重编译，而不是 `python3 -m ujs …` ③ `npm run ship:*` 里无 `python3` | Asteroid+drone **M1/M1b✓**；**M2✓**；**M3 v4✓**（while/if · body≡stage0）；list/SRC 与 stage2≡stage1 未开；`web-build` 仍一次 zig/Python 产核 |
+| **P0 弃出货 Python** | `web-build` / `ujs2wasm` CLI / 预编译 embed **不再是 ship 必经** | ① Pages 玩法步进只加载直出 `.wasm`（B），不再 `wasm_run`+bytecode ② 改 `.ujs` 用 **JS/wasm 宿主**重编译，而不是 `python3 -m ujs …` ③ `npm run ship:*` 里无 `python3` | Asteroid+drone **M1/M1b✓**；**M2✓**；**M3 v5✓**（list/SRC · body≡stage0）；自编/stage2≡stage1 未开；`web-build` 仍一次 zig/Python 产核 |
 | **P1 弃构造 Python** | gold / oracle / acc 也不靠 Python | 构造臂迁到 **unisacc**（或自举后的构造器）；枚举门禁仍在 | unisacc 未稳；刻意后置 |
 
 **P0 可检里程碑（每步弃一点）**
@@ -72,7 +72,7 @@
 | **已有脚手架** | `engine.wasm`（A VM）· ship-js Host · `ujs2wasm` **Python CLI**（把 `.ujs`→用户程序 `.wasm`）· `ujs2wasm_step` 门禁 | 再扩 Python 专属出货链 | 脚手架 ✓；非自举 |
 | **M1** | ① **`sim.wasm`**（直出玩法核，含 `host_*`/`run_step`）② Pages/ship **默认**加载它步进 ③ `direct_step.js` 热路径 ④ 合同：`uxe_ship_js` 验 sim.wasm | 只 fold 绿却仍默认 A | **Asteroid ✓ · drone ✓** |
 | **M2** | ① **`compiler.wasm`**：Node/浏览器 `compile(ujs)→wasm` ② **`compile.mjs`** ③ **`ship:*` 无 python3 emit** ④ sim/drone 经 compiler.wasm 出货 | 继续把 emit 只留在 `.py` 当日常编译器 | **✓** `ujs2wasm_compiler.sh`（含 ship emit 无 python3）。一次性构建 compiler.wasm 仍用 zig |
-| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v4✓** let/arith/while/if · body≡stage0；尚无 list/SRC；stage2≡stage1 未开 |
+| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v5✓** list/len/下标/SRC/OUTN · body≡stage0；自编自身尚 FAIL/OOB；stage2≡stage1 未开 |
 | **P1** | gold/oracle/acc 在 **unisacc**（或自举构造器） | 在 ujs 里把 Python 构造成产品 | 后置 |
 
 **两条产物线不要混**
@@ -94,33 +94,31 @@ M1b drone 切 B             ✓（对称产物）
         ↓
 M2 编译器 wasm 化          **✓**（compile+host+sim+ship emit 无 python3）
         ↓
-M3 UJS 自举                **v4✓** let/arith/while/if · body≡stage0 → list/SRC → stage2≡stage1 → P0 完成
+M3 UJS 自举                **v5✓** list/SRC · body≡stage0 → 修自编 → stage2≡stage1 → P0 完成
         ↓
 P1 构造迁 unisacc          可选
 ```
 
 （换核模板 / 门禁契约 / Host 加厚仍按杠杆穿插；不改变上表弃 Python 顺序与产物线。）
 
-#### M3（v4 ✓ · 自举未完）
+#### M3（v5 ✓ · 自举未完）
 
-**协议**：stage0=`compiler.wasm`(C) 编 `compiler.ujs` → core；core 读 inject `SRC` 吐 main-body 字节；host 拼进 `compiler_rt_stub.wasm` → 完整 `\0asm`。自举门闩是 **stage2 字节 ≡ stage1**（同一 UJS 编译器编自身），不是 ≡ C codegen。中间门闩：子集程序的 main-body **≡ stage0**（已绿）。
+**协议**：stage0=`compiler.wasm`(C) 编 `compiler.ujs` → core；core 读 inject `SRC` 吐 main-body；host 拼进 `compiler_rt_stub.wasm`。门闩：子集 **body≡stage0**（已绿）；最终 **stage2≡stage1**。
 
-**已交付（v4）**
+**已交付（v5）**
 
-| 件 | 路径 | 说明 |
-|---|---|---|
-| `compiler.ujs` | `ujs/core/compiler.ujs` | **真实 emit**：`let`/`=`/`return`/`while`/`if`/`else` · i64 算术比较括号；ident≤8；main-body **≡ stage0** |
-| stage0 加厚 | `ujs/native/compiler_min.c` | `list(n)` · f64→i64 assign trunc（inject 字符码） |
-| RT 模板 | `ujs/core/compiler_rt_stub.wasm` | host ABI + 可替换 main（func 1） |
-| 宿主 | `compile.mjs` · `run-compiler-core.mjs` · `rebuild-main.mjs` | stage0 编 core；inject SRC → splice |
-| 门禁 | `ujs2wasm_compiler.sh` M3 段 | arith / **while** / **if/else** body≡stage0 |
+| 件 | 说明 |
+|---|---|
+| `compiler.ujs` | let/assign/while/if/else/return · i64 算术比较 · **`list`/`len`/下标** · **inject `SRC`/`OUTN`** · 混合 local 类型 i64/i32-handle · HRET |
+| stage0 | `MEM_PAGES=64`（自编堆）；`list(n)` · f64→i64 trunc |
+| 门禁 | arith/while/if/**list setidx** body≡stage0 |
 
-**未开（挡 stage2≡stage1）**
+**未开**
 
-- `list` / `len` / 下标 / inject 全局 `SRC`（`compiler.ujs` 自身依赖）
-- 用 core 编 `compiler.ujs` → stage1；再编一次 → stage2；字节一致
+- core 编完整 `compiler.ujs` 自身仍返回 FAIL 模板（解析缺口）或曾 OOB（已抬内存）
+- stage2≡stage1
 
-**下一刀**：list/len/下标/SRC → 自举门禁。
+**下一刀**：定位自编 FAIL → 绿自编 → stage2≡stage1 门禁。
 
 #### M2（✓）
 
@@ -169,7 +167,7 @@ compile(src: Uint8Array|string) →
 | **2b / M1** | Asteroid 步进默认 `sim.wasm`（path B） | `ujs2wasm_step` + `uxe_ship_js`（含 sim.wasm） | **✓** |
 | **M1b** | drone 对称切 B（`ship/drone/sim.wasm`） | `uxe_ship_js`（drone sim.wasm + directSim） | **✓** |
 | **M2** | `compiler.wasm` + 无 python ship | `ujs2wasm_compiler.sh`；ship 无 `python3` emit | **✓** |
-| **M3** | `compiler.ujs` 自举 | body≡stage0（子集）→ stage2≡stage1 | **v4✓** while/if；list/自举未完 |
+| **M3** | `compiler.ujs` 自举 | body≡stage0（子集）→ stage2≡stage1 | **v5✓** list/SRC；自编未完 |
 | **3** | 换核模板 | 按下表抄路径绿 | 骨架 ✓ |
 | **4** | 门禁即契约 | `ujs.sh` 含 ujs2wasm；ship-js 合同；uxe 无人 | 进行中 |
 | **5–6** | Host / llm | 有玩法再开 | 搁置 |
