@@ -60,7 +60,8 @@ probe=$(ms "$T/opt" examples/fib.c -b lnx/x86_64 -o "$T/b.bin")
 host=$(host_target)
 ratio=0
 if [ -n "$host" ]; then
-    if bound 600 "$T/opt" unisacc.c -b "$host" -o "$T/self.bin" 2>/dev/null; then
+    # built as make com builds it: -O2 [H1]
+    if bound 60 "$T/opt" -O2 unisacc.c -b "$host" -o "$T/self.bin" 2>/dev/null; then
         chmod +x "$T/self.bin"
         command -v codesign >/dev/null && codesign -f -s - "$T/self.bin" >/dev/null 2>&1
         shipped=$(ms "$T/self.bin" unisacc.c -b "$host" -o "$T/c.bin")
