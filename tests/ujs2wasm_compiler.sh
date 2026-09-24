@@ -202,4 +202,57 @@ if(Number(instance.exports.i64_of_export(r))!==13){console.error("FAIL arith run
 console.log("OK M3 arith body≡stage0 run=13");
 ' "$OUT/arith_s0.wasm" "$OUT/arith.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v3 emit; self-host stage2≡stage1 open)"
+printf 'let i = 0;\nwhile (i < 3) {\n  i = i + 1;\n}\nreturn i;\n' > "$OUT/while.ujs"
+perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/compiler_core.wasm" "$OUT/while.ujs" -o "$OUT/while.wasm" >/dev/null
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs "$OUT/while.ujs" -o "$OUT/while_s0.wasm" >/dev/null
+perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+import fs from "fs";
+function mainBody(path) {
+  const u = fs.readFileSync(path);
+  function readUleb(b,i){let v=0,s=0;for(;;){const x=b[i++];v|=(x&0x7f)<<s;if(!(x&0x80))return[v,i];s+=7;}}
+  let i=8;
+  while(i<u.length){const sid=u[i++];const[ln,i2]=readUleb(u,i);i=i2;
+    if(sid===10){const code=u.subarray(i,i+ln);let[nf,o]=readUleb(code,0);
+      for(let fi=0;fi<nf;fi++){const[sz,o2]=readUleb(code,o);const body=[...code.subarray(o2,o2+sz)];o=o2+sz;if(fi===1)return body;}}
+    i+=ln;}
+}
+const a=mainBody(process.argv[1]), b=mainBody(process.argv[2]);
+if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
+  console.error("FAIL M3 while≢stage0", a, b); process.exit(1);
+}
+const {instance}=await WebAssembly.instantiate(fs.readFileSync(process.argv[2]));
+instance.exports.host_reset();
+const r=instance.exports.run_step();
+if(Number(instance.exports.i64_of_export(r))!==3){console.error("FAIL while run");process.exit(1);}
+console.log("OK M3 while body≡stage0 run=3");
+' "$OUT/while_s0.wasm" "$OUT/while.wasm"
+printf 'let x = 1;\nif (x == 1) {\n  x = 2;\n} else {\n  x = 3;\n}\nreturn x;\n' > "$OUT/iff.ujs"
+perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/compiler_core.wasm" "$OUT/iff.ujs" -o "$OUT/iff.wasm" >/dev/null
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs "$OUT/iff.ujs" -o "$OUT/iff_s0.wasm" >/dev/null
+perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+import fs from "fs";
+function mainBody(path) {
+  const u = fs.readFileSync(path);
+  function readUleb(b,i){let v=0,s=0;for(;;){const x=b[i++];v|=(x&0x7f)<<s;if(!(x&0x80))return[v,i];s+=7;}}
+  let i=8;
+  while(i<u.length){const sid=u[i++];const[ln,i2]=readUleb(u,i);i=i2;
+    if(sid===10){const code=u.subarray(i,i+ln);let[nf,o]=readUleb(code,0);
+      for(let fi=0;fi<nf;fi++){const[sz,o2]=readUleb(code,o);const body=[...code.subarray(o2,o2+sz)];o=o2+sz;if(fi===1)return body;}}
+    i+=ln;}
+}
+const a=mainBody(process.argv[1]), b=mainBody(process.argv[2]);
+if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
+  console.error("FAIL M3 if≢stage0", a, b); process.exit(1);
+}
+const {instance}=await WebAssembly.instantiate(fs.readFileSync(process.argv[2]));
+instance.exports.host_reset();
+const r=instance.exports.run_step();
+if(Number(instance.exports.i64_of_export(r))!==2){console.error("FAIL if run");process.exit(1);}
+console.log("OK M3 if/else body≡stage0 run=2");
+' "$OUT/iff_s0.wasm" "$OUT/iff.wasm"
+
+echo "ujs2wasm_compiler OK (M2 + M3 v4 while/if; self-host stage2≡stage1 open)"
