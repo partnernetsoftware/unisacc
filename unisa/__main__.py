@@ -238,6 +238,14 @@ def _fold(t, o, a):
     return 0 if ok == 6 else 2                                    # [U-4]
 
 
+def cmd_docs(a):
+    """[A-48] the stage table in prd.tree.md, prd.map.md and README.md,
+    generated from the gold tables and the constructed weights."""
+    from . import docgen
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return docgen.main(["--check"] if a.check else [], root)
+
+
 def cmd_compile(a):
     from .assemble import assemble
     from . import image
@@ -572,6 +580,11 @@ def main(argv=None):
     a.add_argument("--trained", action="store_true",
                    help="check the SGD control arm instead of what we ship")
     a.set_defaults(fn=cmd_acc)
+
+    dg = sub.add_parser("docs", help="regenerate the stage tables in the docs")
+    dg.add_argument("--check", action="store_true",
+                    help="report stale tables and exit 1 instead of writing")
+    dg.set_defaults(fn=cmd_docs)
 
     tp = sub.add_parser("tape")
     tp.add_argument("file", nargs="+", help="one program, one or more units")
