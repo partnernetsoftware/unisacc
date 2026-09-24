@@ -281,6 +281,12 @@ class Machine:
                     R[self.sp] = u64(R[self.sp] + 8)
                 elif o == ".frame":
                     R[self.sp] = u64(R[self.sp] - a[0])
+                elif o == "push":
+                    R[self.sp] = u64(R[self.sp] - 8)
+                    self.st(R[self.sp], R[a[0]])
+                elif o == "pop":
+                    R[a[0]] = self.ld(R[self.sp])
+                    R[self.sp] = u64(R[self.sp] + 8)
                 elif o in ("argsave", "winargs"):
                     self.st(a[0], len(self.argv))
                 elif o == "argvget":

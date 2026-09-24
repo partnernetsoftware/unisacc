@@ -179,10 +179,17 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
             tp.emit("winrest", SAVE, f["ret"])
 
     entry_pc = tape.labels.get("_start", 0)
+    # [S-15 B1] push/pop pairing needs to know which tape pcs a label can
+    # reach: the second half of a pair must not be a jump target
+    targets = set(tape.labels.values())
+    skip = False
     for pc, ins in enumerate(tape.code):
         for name, at in tape.labels.items():
             if at == pc:
                 tp.labels[name] = len(tp.code)
+        if skip:                     # the second half of a fused pair
+            skip = False
+            continue
         if pc == entry_pc:
             # The tape's SP is a register; a real process has a real stack, so
             # bind it AT THE ENTRY LABEL -- not at tape index 0, which is some
@@ -194,7 +201,12 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                 # ABIs, so it must not be live across them. [I-18]
                 tp.emit("winstdh", HSTD)
                 tp.emit("winargs", ARGC, ARGV, base + WIN_ARGVA)
-            tp.emit("spinit", sp, STACKTOP if win else None)
+            # x86-64: the tape stack IS the process stack now that r7 is
+            # rsp, on Windows as well -- the WinAPI gate aligns and restores
+            # rsp itself.  arm64 keeps a stack of its own on Windows: x7 is
+            # not sp, and a WinAPI call would run over it.
+            tp.emit("spinit", sp,
+                    STACKTOP if (win and arch == "arm64") else None)
             if not win:
                 # the loader hands over argc/argv; stash them before anything
                 tp.emit("argsave", ARGC, ARGV, os_ == "lnx")
@@ -251,6 +263,20 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         elif o == ".arg":
             f = facts(oracle, "add64", os_, arch, drive)      # a plain move
             tp.emit("mov", rmap["r%d" % a[0]], R(a[1]))
+        elif (arch == "x86_64" and o == ".frame" and a[0] == 8
+              and pc + 1 < len(tape.code) and pc + 1 not in targets
+              and tape.code[pc + 1].op == "store64"
+              and tape.code[pc + 1].args[0] == "r7"
+              and tape.code[pc + 1].args[1] == 0):
+            # `.frame 8; store64 [r7+0], r` is a push -- one byte, or two
+            tp.emit("push", R(tape.code[pc + 1].args[2]))
+            skip = True
+        elif (arch == "x86_64" and o == "load64" and a[1] == "r7" and a[2] == 0
+              and pc + 1 < len(tape.code) and pc + 1 not in targets
+              and tape.code[pc + 1].op == ".frame"
+              and tape.code[pc + 1].args[0] == -8):
+            tp.emit("pop", R(a[0]))
+            skip = True
         elif o in ("jump", "jumpz", "call"):
             kind = JMPKIND[o]
             rk = oracle.ask("reloc", (kind, arch))             # [L-1]

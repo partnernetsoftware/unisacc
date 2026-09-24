@@ -48,11 +48,14 @@ def mem(opc, reg, base, disp, w=1):
     # a label address -- so its width is final in the sizing pass.  rm==5 has
     # no mod=00 form ([rip+disp32] takes that slot), but no base we use is
     # rbp/r13, so the guard is belt and braces.
+    # rm == 4 means "SIB follows"; 0x24 is the SIB that names rsp itself.
+    # The tape stack pointer is rsp now, so every [r7+disp] pays this byte.
+    sib = b"\x24" if (b & 7) == 4 else b""
     if disp == 0 and (b & 7) != 5:
-        return pre + op + modrm(0, r, b)
+        return pre + op + modrm(0, r, b) + sib
     if -128 <= disp <= 127:
-        return pre + op + modrm(1, r, b) + (disp & 0xFF).to_bytes(1, "little")
-    return pre + op + modrm(2, r, b) + \
+        return pre + op + modrm(1, r, b) + sib + (disp & 0xFF).to_bytes(1, "little")
+    return pre + op + modrm(2, r, b) + sib + \
         (disp & 0xFFFFFFFF).to_bytes(4, "little")
 
 
@@ -399,7 +402,17 @@ def _itoa(pc, src, buf, lenp):
 
 def _sp():
     from .catalog import REGMAP
-    return REGMAP["x86_64"][7]          # the tape SP, not rsp
+    return REGMAP["x86_64"][7]          # the tape SP -- rsp, since [S-15 B1]
+
+
+def push(reg):
+    d = NUM[reg] if isinstance(reg, str) else reg
+    return (rex(0, 0, 0, 1) if d >= 8 else b"") + bytes([0x50 | (d & 7)])
+
+
+def pop(reg):
+    d = NUM[reg] if isinstance(reg, str) else reg
+    return (rex(0, 0, 0, 1) if d >= 8 else b"") + bytes([0x58 | (d & 7)])
 
 
 def alu_imm(reg, opc, n):
@@ -447,11 +460,11 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         # scratches so neither operand can be the register we are about to
         # clobber.  [I-14]
         out = mov_rr(SCR, a[1]) + mov_rr(SCR2, a[2])
-        out += _spadj(8, 5) + mem(0x89, "rcx", _sp(), 0)     # save tape rcx
+        out += push("rcx")                                   # save tape rcx
         out += mov_rr("rcx", SCR2)
         out += rex(1, 0, 0, 1) + b"\xd3" + \
             modrm(3, {"shl64": 4, "shr64": 7, "lshr64": 5}[o], NUM[SCR])
-        out += mem(0x8B, "rcx", _sp(), 0) + _spadj(8, 0)     # restore
+        out += pop("rcx")                                    # restore
         return out + mov_rr(a[0], SCR)
     if o == "mul64":
         pre, src2 = _alias(a[0], a[1], a[2])
@@ -479,7 +492,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == ".frame":
         n = a[0]
         opc = 5 if n >= 0 else 0                    # /5 sub, /0 add
-        return alu_imm("r10", opc, abs(n))
+        return alu_imm(_sp(), opc, abs(n))          # rsp, since [S-15 B1]
     if o == ".lea":                                  # movabs, fixed 10 bytes
         sym = a[1]
         if syms and sym in syms:
@@ -510,14 +523,13 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             out += store_w(SCR, a[0], a[1] + k, wd)
             k += wd
         return out
-    if o == "callr":
-        sub = alu_imm("r10", 5, 8)
-        st = rex(1, 1, 0, 1) + b"\x89" + modrm(0, 11, 10)
-        n = 7 + len(sub) + len(st) + 3
-        lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + n)
+    if o == "callr":                                 # call r64: FF /2
         t = NUM[a[0]]
-        return lea + sub + st + rex(0, 0, 0, t >> 3) + b"\xff" + \
-            modrm(3, 4, t)
+        return (rex(0, 0, 0, 1) if t >= 8 else b"") + b"\xff" + modrm(3, 2, t)
+    if o == "push":
+        return push(a[0])
+    if o == "pop":
+        return pop(a[0])
     if o in (".div", ".mod", ".udiv", ".umod"):
         # idiv writes rax/rdx, which are tape registers here, so they have to be
         # saved.  NOT with `push`/`pop`: `spinit` binds the tape SP to the real
@@ -600,10 +612,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
             out += rip(0x8D, SCR, text_va + off + len(out) + 7, a[0] + shift)
             out += mem(0x89, "rax", SCR, 8 * k)
         return out
-    if o == "ret":                                   # pop and jump
-        ld = rex(1, 1, 0, 1) + b"\x8b" + modrm(0, 11, 10)
-        add = alu_imm("r10", 0, 8)
-        return ld + add + rex(0, 0, 0, 1) + b"\xff" + modrm(3, 4, 11)
+    if o == "ret":
+        return b"\xc3"
     if o == "nop":
         return b"\x90"
     if o == "itoa":
@@ -621,12 +631,8 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         if short:                                    # jmp rel8
             return b"\xeb" + _rel8(labels[a[0]] - (off + 2))
         return b"\xe9" + _rel(ins, labels[a[0]] - (off + 5))
-    if o == "call":                                  # push ret addr on r10
-        sub = alu_imm("r10", 5, 8)
-        st = rex(1, 1, 0, 1) + b"\x89" + modrm(0, 11, 10)
-        n = 7 + len(sub) + len(st) + 5
-        lea = rip(0x8D, "r11", text_va + off + 7, text_va + off + n)
-        return lea + sub + st + b"\xe9" + _rel(ins, labels[a[0]] - (off + n))
+    if o == "call":                                  # call rel32
+        return b"\xe8" + _rel(ins, labels[a[0]] - (off + 5))
     if o == "jumpz":
         r = NUM[a[0]]
         test = rex(1, r >> 3, 0, r >> 3) + b"\x85" + modrm(3, r, r)

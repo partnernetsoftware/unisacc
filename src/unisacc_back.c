@@ -520,6 +520,8 @@ int bk_formis(char *nm) { char *e; int k; e = bk_nth(BH_ENC_Y, bkf_form); k = 0;
 #define TO_ARGSAVE 108
 #define TO_ARGVGET 109
 #define TO_WINARGS 110
+#define TO_PUSH 111
+#define TO_POP 112
 /* setreg's source kinds */
 #define SK_IMM 1
 #define SK_REG 2
@@ -639,7 +641,10 @@ int bk_lower(void) {
             if (bkos == 2) tk(TO_WINSTDH, bk_hstd, 0, 0, 0);
             if (bkos == 2 && bk_runmode == 0)
                 tk(TO_WINARGS, bk_argc, bk_argv, bk_argva, 0);
-            tk(TO_SPINIT, bk_rmap[7], bkos == 2 ? bk_stacktop : 0 - 1, 0, 0);
+            /* x86-64: the tape stack is the process stack, Windows too --
+               r7 is rsp and the WinAPI gate aligns and restores it.  arm64
+               keeps its own stack on Windows: x7 is not sp. */
+            tk(TO_SPINIT, bk_rmap[7], (bkos == 2 && bkarch == 1) ? bk_stacktop : 0 - 1, 0, 0);
             /* In run mode nobody hands over argc/argv: the loader writes
                them into the two cells below before it jumps, so the entry
                takes no arguments and no calling convention is assumed --
@@ -702,6 +707,21 @@ int bk_lower(void) {
         } else { if (bk_is(op, ".arg")) {
             bk_facts(bk_cop("add64"));                /* a plain move */
             tk(bk_opof("mov", 3), bk_rmap[bkav[pc * 8]], bk_rmap[bkav[pc * 8 + 1]], 0, 0);
+        } else { if (bkarch == 0 && bk_is(op, ".frame") && bkav[pc * 8] == 8
+                     && pc + 1 < bkni && bklab_first[pc + 1] < 0
+                     && bk_is(bkop[pc + 1], "store64")
+                     && bkav[(pc + 1) * 8] == 7 && bkav[(pc + 1) * 8 + 1] == 0) {
+            /* `.frame 8; store64 [r7+0], r` is a push [S-15 B1] -- as
+               lower.py fuses it, and only when no label can reach the
+               second half */
+            tk(TO_PUSH, bk_rmap[bkav[(pc + 1) * 8 + 2]], 0, 0, 0);
+            pc = pc + 1;
+        } else { if (bkarch == 0 && bk_is(op, "load64") && bkav[pc * 8 + 1] == 7
+                     && bkav[pc * 8 + 2] == 0
+                     && pc + 1 < bkni && bklab_first[pc + 1] < 0
+                     && bk_is(bkop[pc + 1], ".frame") && bkav[(pc + 1) * 8] == 0 - 8) {
+            tk(TO_POP, bk_rmap[bkav[pc * 8]], 0, 0, 0);
+            pc = pc + 1;
         } else {
             /* every other op, with its registers mapped; its facts are asked
                as lower.py asks them (jumps also ask reloc) */
@@ -726,7 +746,7 @@ int bk_lower(void) {
                 tkk[n * 4 + k] = bkak[pc * 8 + k];
                 k = k + 1;
             }
-        } } } } } } } }
+        } } } } } } } } } }
         pc = pc + 1;
     }
     return tkn;
@@ -1214,9 +1234,11 @@ int x_mem(int opc, int opc2, int r, int b, long disp, int w) {
     ob(opc); if (opc2 >= 0) ob(opc2);
     /* SHORT forms -- see emit_x86.mem.  disp is a frame offset or a small
        literal, never an address, so the width is final in the sizing pass. */
-    if (disp == 0 && (b & 7) != 5) { x_modrm(0, r, b); return 0; }
-    if (disp >= 0 - 128 && disp <= 127) { x_modrm(1, r, b); ob(disp & 255); return 0; }
-    x_modrm(2, r, b); x_d32(disp);
+    /* rm == 4 means a SIB follows; 0x24 is the SIB naming rsp itself, which
+       the tape stack pointer now is (emit_x86.mem does the same) */
+    if (disp == 0 && (b & 7) != 5) { x_modrm(0, r, b); if ((b & 7) == 4) ob(0x24); return 0; }
+    if (disp >= 0 - 128 && disp <= 127) { x_modrm(1, r, b); if ((b & 7) == 4) ob(0x24); ob(disp & 255); return 0; }
+    x_modrm(2, r, b); if ((b & 7) == 4) ob(0x24); x_d32(disp);
     return 0;
 }
 int x_load(int r, int b, long disp, int wd) {
@@ -1251,9 +1273,11 @@ int x_aluimm(int d, int opc, long n) {
     ob(0x81); x_modrm(3, opc, d); x_d32(n);
     return 0;
 }
-int x_spadj(long n, int opc) {                  /* on the tape SP, r10 */
-    return x_aluimm(X_R10, opc, n);
+int x_spadj(long n, int opc) {                  /* on the tape SP: rsp */
+    return x_aluimm(X_RSP, opc, n);
 }
+int x_push(int r) { if (r >= 8) x_rex(0, 0, 0, 1); ob(0x50 | (r & 7)); return 0; }
+int x_pop(int r)  { if (r >= 8) x_rex(0, 0, 0, 1); ob(0x58 | (r & 7)); return 0; }
 int x_spsub(int n) { x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 5, 4); ob(n); return 0; }
 int x_alignpre(int extra) {
     int n; n = 32 + ((extra * 8 + 15) / 16) * 16;
@@ -1506,6 +1530,8 @@ int bk_x86(int i, long off) {
         x_rip(0x89, X_RAX, pc + (bkol - s) + 7, a[1] + bk_shift);
         return 1;
     }
+    if (op == TO_PUSH) { x_push(a[0]); return 1; }
+    if (op == TO_POP) { x_pop(a[0]); return 1; }
     if (op == TO_ARGVGET) {
         int t;
         x_rip(0x8B, X_R11, pc + 7, a[2] + bk_shift);
@@ -1584,11 +1610,11 @@ int bk_x86(int i, long off) {
     }
     if (bk_str_is(o, "shl64") || bk_str_is(o, "shr64") || bk_str_is(o, "lshr64")) {
         x_movrr(X_R11, a[1]); x_movrr(X_RBX, a[2]);
-        x_spadj(8, 5); x_mem(0x89, 0 - 1, X_RCX, X_R10, 0, 1);
+        x_push(X_RCX);
         x_movrr(X_RCX, X_RBX);
         x_rex(1, 0, 0, 1); ob(0xD3);
         x_modrm(3, bk_str_is(o, "shl64") ? 4 : (bk_str_is(o, "shr64") ? 7 : 5), X_R11);
-        x_mem(0x8B, 0 - 1, X_RCX, X_R10, 0, 1); x_spadj(8, 0);
+        x_pop(X_RCX);
         x_movrr(a[0], X_R11);
         return 1;
     }
@@ -1611,7 +1637,7 @@ int bk_x86(int i, long off) {
     }
     if (bk_str_is(o, ".frame")) {
         long n; n = a[0];
-        x_aluimm(X_R10, n >= 0 ? 5 : 0, n >= 0 ? n : 0 - n);
+        x_aluimm(X_RSP, n >= 0 ? 5 : 0, n >= 0 ? n : 0 - n);
         return 1;
     }
     if (bk_str_is(o, ".lea")) { x_rip(0x8D, a[0], pc + 7, bk_leaaddr(i)); return 1; }
@@ -1629,17 +1655,15 @@ int bk_x86(int i, long off) {
         }
         return 1;
     }
-    if (bk_str_is(o, "callr")) {
-        x_rip(0x8D, X_R11, pc + 7, pc + 17);
-        x_aluimm(X_R10, 5, 8);
-        x_rex(1, 1, 0, 1); ob(0x89); x_modrm(0, 11, 10);
-        x_rex(0, 0, 0, a[0] >> 3); ob(0xFF); x_modrm(3, 4, a[0]);
+    if (bk_str_is(o, "callr")) {           /* call r64: FF /2 [S-15 B1] */
+        if (a[0] >= 8) x_rex(0, 0, 0, 1);
+        ob(0xFF); x_modrm(3, 2, a[0]);
         return 1;
     }
     if (bk_str_is(o, ".div") || bk_str_is(o, ".mod") || bk_str_is(o, ".udiv") || bk_str_is(o, ".umod")) {
         x_spadj(16, 5);
-        x_mem(0x89, 0 - 1, X_RAX, X_R10, 0, 1);
-        x_mem(0x89, 0 - 1, X_RDX, X_R10, 8, 1);
+        x_mem(0x89, 0 - 1, X_RAX, X_RSP, 0, 1);
+        x_mem(0x89, 0 - 1, X_RDX, X_RSP, 8, 1);
         x_movrr(X_R11, a[2]);
         x_movrr(X_RAX, a[1]);
         if (o[1] == 117) {                            /* .udiv .umod */
@@ -1650,29 +1674,24 @@ int bk_x86(int i, long off) {
             x_rex(1, 0, 0, 1); ob(0xF7); x_modrm(3, 7, 11);
         }
         x_movrr(X_R11, (bk_str_is(o, ".div") || bk_str_is(o, ".udiv")) ? X_RAX : X_RDX);
-        x_mem(0x8B, 0 - 1, X_RAX, X_R10, 0, 1);
-        x_mem(0x8B, 0 - 1, X_RDX, X_R10, 8, 1);
+        x_mem(0x8B, 0 - 1, X_RAX, X_RSP, 0, 1);
+        x_mem(0x8B, 0 - 1, X_RDX, X_RSP, 8, 1);
         x_spadj(16, 0);
         x_movrr(a[0], X_R11);
         return 1;
     }
-    if (bk_str_is(o, "ret")) {
-        x_rex(1, 1, 0, 1); ob(0x8B); x_modrm(0, 11, 10);
-        x_aluimm(X_R10, 0, 8);
-        x_rex(0, 0, 0, 1); ob(0xFF); x_modrm(3, 4, 11);
-        return 1;
-    }
+    if (bk_str_is(o, "ret")) { ob(0xC3); return 1; }   /* the machine's own */
     if (bk_str_is(o, "nop")) { ob(0x90); return 1; }
     if (bk_str_is(o, "jump")) {
         tjk[i] = 2; tjt[i] = a[0];
         if (tshort[i]) { ob(0xEB); x_rel8(bk_label(a[0]) - (off + 2)); return 1; }
         ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1;
     }
-    if (bk_str_is(o, "call")) {
-        x_rip(0x8D, X_R11, pc + 7, pc + 19);
-        x_aluimm(X_R10, 5, 8);
-        x_rex(1, 1, 0, 1); ob(0x89); x_modrm(0, 11, 10);
-        ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 19));
+    if (bk_str_is(o, "call")) {            /* call rel32: the return address
+                                              lands where the old sequence put
+                                              it, so ret and the frame walk
+                                              are unchanged */
+        ob(0xE8); x_rel(i, bk_label(a[0]) - (off + 5));
         return 1;
     }
     if (bk_str_is(o, "jumpz")) {

@@ -882,7 +882,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | # | 事项 | 为什么 | 完成判据 |
 |---|---|---|---|
-| B1 | **regmap：x86_64 的 tape 栈指针映射到 `rsp`** | push/pop 从 7 字节变 1–2 字节，`call`/`ret` 成原生（现 19 字节）。估算省 text 的 30% 上下，且出货二进制更快。这是**改 gold 表**（regmap）的事。风险：`[rsp+disp]` 需 SIB 字节；Windows 要求调用时 16 字节对齐；信号处理会用栈；六个目标的 ABI 都要重验。**arm64 不做**——`sp` 用于访存时必须 16 字节对齐，8 字节的 push 会出错 | 编译器自身 x86 text 降 ≥20%；bench 的出货比值下降；closure/bigclosure 逐字节一致；acc 全 1.000；六个目标实机运行 |
+| B1 | **regmap：x86_64 的 tape 栈指针映射到 `rsp`** —— **已达**（2026-09-24）。改的是 gold 的 regmap 表（r7 → rsp），重建权重、枚举全 1.000。两个后端各自把前端的 `.frame 8; store64 [r7+0], r` / `load64 r, [r7+0]; .frame -8` 融合成 `push`/`pop`（仅当第二半不是任何标号的目标），`call`/`callr`/`ret` 用机器自己的形式；`[rsp+d]` 加 SIB 字节。Windows 的 x86_64 改在进程栈上跑 tape（WinAPI 门自己对齐并恢复 rsp），arm64 维持自有栈（x7 不是 sp）。实测：编译器自身 lnx/x86_64 text **750,137 → 475,534 B（−36.6%）**；closure 540/540、fat 90/0（Rosetta 真 x86 执行）。途中两个后端各漏改一处（Python 的 `.frame`、C 的 `.div` 溢出基址）——都是 closure 逐字节比对当场抓出来的 | ✅ −36.6%，判据 ≥20% |
 | B2 | **`.com` 的 Windows 部分自解压** | PE 占 `.com` 约 62% 且原地执行。一个小 PE 存根 + **用 C 写、由 unisacc 自己编译**的 inflate，解出真正的 PE 再执行（顺带是一次对编译器的真实负载测试） | `.com` 降 ≥30%；win/arm64、win/x86_64 实机跑通 `-run` 与 `-b` |
 | B3 | **B1 之后重测速度与体积，写进 bench 与 README** | 不量不算 | bench 记录新基线；README 的体积与速度数字与实测一致（生成或检查） |
 

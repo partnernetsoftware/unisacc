@@ -95,12 +95,15 @@ BYTES = {
 
 FORMS = ("syscall", "svc", "winapi", "x86", "arm")                     # [V-2]
 GATES = ("syscall", "svc0", "svc80", "winapi", "none")
-REGS = ("rdi", "rsi", "rdx", "r10", "rcx", "r8", "r9", "rax",
+REGS = ("rdi", "rsi", "rdx", "r10", "rcx", "r8", "r9", "rax", "rsp",
         "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "none")
 
 # r0-r7 -> machine registers                                           [C-5]
 REGMAP = {
-    "x86_64": ("rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10"),
+    # r7, the tape stack pointer, IS rsp on x86-64 [S-15 B1]: push, pop,
+    # call and ret are then the machine's own one-byte forms.  On arm64 sp
+    # must stay 16-aligned for every access, so x7 stays a plain register.
+    "x86_64": ("rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "rsp"),
     "arm64":  ("x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"),
 }
 
