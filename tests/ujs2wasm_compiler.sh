@@ -283,4 +283,51 @@ if(Number(instance.exports.i64_of_export(r))!==6){console.error("FAIL list run")
 console.log("OK M3 list/setidx body≡stage0 run=6");
 ' "$OUT/listx_s0.wasm" "$OUT/listx.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v5 list/SRC; self-host stage2≡stage1 open)"
+echo "-- M3 v6: SRC cmp + if-no-else + self-host stage2≡stage1"
+printf 'let x = 0;\nif (SRC[0] == 47) { x = 1; }\nreturn x;\n' > "$OUT/srccmp.ujs"
+perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/compiler_core.wasm" "$OUT/srccmp.ujs" -o "$OUT/srccmp.wasm" >/dev/null
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs "$OUT/srccmp.ujs" -o "$OUT/srccmp_s0.wasm" >/dev/null
+perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+import fs from "fs";
+function mainBody(path) {
+  const u = fs.readFileSync(path);
+  function readUleb(b,i){let v=0,s=0;for(;;){const x=b[i++];v|=(x&0x7f)<<s;if(!(x&0x80))return[v,i];s+=7;}}
+  let i=8;
+  while(i<u.length){const sid=u[i++];const[ln,i2]=readUleb(u,i);i=i2;
+    if(sid===10){const code=u.subarray(i,i+ln);let[nf,o]=readUleb(code,0);
+      for(let fi=0;fi<nf;fi++){const[sz,o2]=readUleb(code,o);const body=[...code.subarray(o2,o2+sz)];o=o2+sz;if(fi===1)return body;}}
+    i+=ln;}
+}
+const a=mainBody(process.argv[1]), b=mainBody(process.argv[2]);
+if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
+  console.error("FAIL M3 srccmp≢stage0", a, b); process.exit(1);
+}
+console.log("OK M3 SRC[i]==N body≡stage0");
+' "$OUT/srccmp_s0.wasm" "$OUT/srccmp.wasm"
+
+# stage1 = stage0(compiler.ujs); stage2 = stage1(compiler.ujs); bodies must match
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs ujs/core/compiler.ujs -o "$OUT/stage1.wasm" >/dev/null
+perl -e 'alarm 90; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+  "$OUT/stage1.wasm" ujs/core/compiler.ujs -o "$OUT/stage2.wasm" >/dev/null
+perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+import fs from "fs";
+function mainBody(path) {
+  const u = fs.readFileSync(path);
+  function readUleb(b,i){let v=0,s=0;for(;;){const x=b[i++];v|=(x&0x7f)<<s;if(!(x&0x80))return[v,i];s+=7;}}
+  let i=8;
+  while(i<u.length){const sid=u[i++];const[ln,i2]=readUleb(u,i);i=i2;
+    if(sid===10){const code=u.subarray(i,i+ln);let[nf,o]=readUleb(code,0);
+      for(let fi=0;fi<nf;fi++){const[sz,o2]=readUleb(code,o);const body=[...code.subarray(o2,o2+sz)];o=o2+sz;if(fi===1)return body;}}
+    i+=ln;}
+}
+const a=mainBody(process.argv[1]), b=mainBody(process.argv[2]);
+if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
+  console.error("FAIL M3 stage2≢stage1", a?.length, b?.length); process.exit(1);
+}
+console.log("OK M3 stage2≡stage1 mainBody", a.length);
+' "$OUT/stage1.wasm" "$OUT/stage2.wasm"
+
+echo "ujs2wasm_compiler OK (M2 + M3 v6 self-host stage2≡stage1)"
