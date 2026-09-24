@@ -5995,11 +5995,37 @@ int eputsrc(int from, int to) {
     return 0;
 }
 
+/* A universal character name inside an identifier, C99 6.4.3: `\u` and
+   four hex digits, or `\U` and eight.  How many bytes it spans at j, or 0.
+   The identifier keeps its SPELLING -- `caf\u00e9` is one name, spelled
+   the same wherever it is used -- which is all a program can observe. */
+int ishexc(int c) {
+    if (c >= 48 && c <= 57) return 1;
+    if (c >= 97 && c <= 102) return 1;
+    if (c >= 65 && c <= 70) return 1;
+    return 0;
+}
+int ucnlen(int j) {
+    int n; int k;
+    if (j + 1 >= nsrc) return 0;
+    if ((src[j] & 255) != 92) return 0;
+    n = 0;
+    if ((src[j + 1] & 255) == 117) n = 4;
+    if ((src[j + 1] & 255) == 85) n = 8;
+    if (n == 0) return 0;
+    if (j + 2 + n > nsrc) return 0;
+    k = 0;
+    while (k < n) { if (ishexc(src[j + 2 + k] & 255) == 0) return 0; k = k + 1; }
+    return 2 + n;
+}
+
 int identend(int i) {
-    int j; j = i;
+    int j; int u; j = i;
     while (j < nsrc) {
         if (isal(src[j] & 255)) { j = j + 1; continue; }
         if (isdi(src[j] & 255)) { j = j + 1; continue; }
+        u = ucnlen(j);
+        if (u) { j = j + u; continue; }
         break;
     }
     return j;
@@ -6120,6 +6146,27 @@ int emitbody(int mi, int isfn, int depth) {
                     if ((macpool[j] & 255) != 32) { if ((macpool[j] & 255) != 9) break; }
                     j = j + 1;
                 }
+                /* `, ## __VA_ARGS__` with NO variable arguments: the comma
+                   goes too.  Strictly a GNU extension -- C99 6.10.3p4 wants
+                   at least one argument for `...` -- but it is in so much
+                   real code (every logging macro) that refusing it refuses
+                   the code. */
+                if (isfn) { if (j + 11 <= e) {
+                    int q; int isva; isva = 1; q = 0;
+                    while (q < 11) {
+                        if ((macpool[j + q] & 255) != ("__VA_ARGS__"[q] & 255)) isva = 0;
+                        q = q + 1;
+                    }
+                    if (isva) {
+                        int vp; vp = macnp[mi] - 1;
+                        if (vp >= nargs || argl[vp] == 0) {
+                            if (nebuf > 0) { if (ebuf[nebuf - 1] == 44) nebuf = nebuf - 1; }
+                            j = j + 11;
+                            pastejust = 0;
+                            continue;
+                        }
+                    }
+                } }
                 pastejust = 1;
                 continue;
             } }
@@ -6218,6 +6265,36 @@ int emitrange(int from, int to, int depth) {
         if (isal(c)) {
             j = identend(i);
             if (j > to) j = to;
+            /* C99 6.10.9: `_Pragma ( string-literal )` is the operator form
+               of `#pragma`, and this compiler honours no pragma -- the
+               directive form is already dropped -- so the operator form is
+               dropped too, whole, the moment it is seen. */
+            if (j - i == 7) { if ((src[i] & 255) == 95 && (src[i+1] & 255) == 80
+                && (src[i+2] & 255) == 114 && (src[i+3] & 255) == 97
+                && (src[i+4] & 255) == 103 && (src[i+5] & 255) == 109
+                && (src[i+6] & 255) == 97) {                  /* _Pragma */
+                k = j;
+                while (k < to) { if (wsat(k) == 0) break; k = k + 1; }
+                if (k < to) { if ((src[k] & 255) == 40) {
+                    int dep; int inq;
+                    dep = 0; inq = 0;
+                    while (k < to) {
+                        c = src[k] & 255;
+                        if (inq) {
+                            if (c == 92) k = k + 1;
+                            else { if (c == 34) inq = 0; }
+                        } else {
+                            if (c == 34) inq = 1;
+                            if (c == 40) dep = dep + 1;
+                            if (c == 41) { dep = dep - 1; if (dep == 0) { k = k + 1; break; } }
+                        }
+                        k = k + 1;
+                    }
+                    eput(32);
+                    i = k;
+                    continue;
+                } }
+            } }
             m = mfind(src + i, j - i);
             if (m >= 0) {
                 if (macfn[m]) {
@@ -6228,6 +6305,13 @@ int emitrange(int from, int to, int depth) {
                         if (ni > 0) {
                             if (macnp[m] == 0) { if (nargs == 1) {
                                 if (argl[0] == 0) nargs = 0; } }
+                            /* `P("x")` for `P(fmt, ...)`: the variable part is
+                               empty, not missing */
+                            if (macvar[m]) { if (nargs == macnp[m] - 1) {
+                                if (nargs < MAXMPARAM) {
+                                    argo[nargs] = ni - 1; argl[nargs] = 0;
+                                    nargs = nargs + 1;
+                                } } }
                             /* `...` takes everything that is left, commas
                                included -- it is ONE argument spelled
                                __VA_ARGS__ */
@@ -6404,7 +6488,14 @@ int lex(void) {
         else {
         if (a == 2) {                          /* ident */
             j = i;
-            while (at(j) >= 0) { if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) break; } j = j + 1; }
+            while (at(j) >= 0) {
+                if (isal(at(j)) == 0) { if (isdi(at(j)) == 0) {
+                    int u; u = ucnlen(j);      /* `caf\u00e9` is one name */
+                    if (u == 0) break;
+                    j = j + u; continue;
+                } }
+                j = j + 1;
+            }
             /* GCC spellings this subset ignores.  The Python lexer drops
                them too, and selfhost compares token streams. */
             if (srcis(i, j - i, "__attribute__")
@@ -6472,6 +6563,23 @@ int lex(void) {
                both, then at most one of f F l L -- the extent the Python
                lexer takes, so the two token streams stay equal */
             isf = 0;
+            /* the hex floating form: 0x HEX [. HEX] p [+-] DEC.  The integer
+               scan above stopped at the `.` or the `p`. */
+            if (at(i) == 48 && (at(i + 1) == 120 || at(i + 1) == 88)) {
+                int k3; k3 = j;
+                if (at(k3) == 46) {
+                    k3 = k3 + 1;
+                    while (isdi(at(k3)) || (at(k3) >= 97 && at(k3) <= 102)
+                           || (at(k3) >= 65 && at(k3) <= 70)) k3 = k3 + 1;
+                }
+                if (at(k3) == 112 || at(k3) == 80) {
+                    int k4; k4 = k3 + 1;
+                    if (at(k4) == 43 || at(k4) == 45) k4 = k4 + 1;
+                    if (isdi(at(k4))) {
+                        isf = 1; j = k4; while (isdi(at(j))) j = j + 1;
+                    }
+                }
+            }
             if (at(i) != 48 || (at(i + 1) != 120 && at(i + 1) != 88)) {
                 if (at(j) == 46) { isf = 1; j = j + 1; while (isdi(at(j))) j = j + 1; }
                 if (at(j) == 101 || at(j) == 69) {
@@ -6762,6 +6870,7 @@ int dkind(int flt);
 int setkind(int k);
 int fltlit(int t);
 unsigned long fdec2bin(int p, int n, int f32);
+unsigned long fhex2bin(int p, int n, int f32);
 int fconv(int from, int to);
 int fkind(void);
 int argconv(int si, int k);
@@ -7741,7 +7850,12 @@ int primary(void) {
     if (t == T_NUM) { if (fltlit(tp)) {
         /* a floating constant: its bits, rounded once from the decimal */
         int fk; fk = fltlit(tp);
-        es("  @lit.imm r0, "); en(fdec2bin(tpos[tp], tlen[tp], fk == 4)); ec(10);
+        es("  @lit.imm r0, ");
+        if (tlen[tp] > 1 && (src[tpos[tp]] & 255) == 48
+            && ((src[tpos[tp] + 1] & 255) == 120 || (src[tpos[tp] + 1] & 255) == 88))
+            en(fhex2bin(tpos[tp], tlen[tp], fk == 4));
+        else en(fdec2bin(tpos[tp], tlen[tp], fk == 4));
+        ec(10);
         adv();
         setkind(fk);
         return postfix();
@@ -8494,6 +8608,77 @@ int fb_sub(unsigned long *a, int an, unsigned long *b, int bn) {   /* a -= b, a 
     return an;
 }
 /* the bits of the constant in src[p..p+n): binary64, or binary32 if f32 */
+/* A hexadecimal floating constant, C99 6.4.4.2: `0x1.8p1`.  Unlike a
+   decimal one it names a binary value EXACTLY -- that is why it exists --
+   so there is no long division here: the hex digits are the significand,
+   `p` is a power of two, and the only rounding is the final fit into 52
+   (or 23) bits, to nearest, ties to even. */
+unsigned long fhex2bin(int p, int n, int f32) {
+    int k; int c; int d; int fr; int nf; int sticky; int top; int e2;
+    int mbits; int bias; int emax; int neg; int shift; int biased;
+    long ev;
+    unsigned long m; unsigned long half; unsigned long rem; unsigned long out;
+    mbits = f32 ? 23 : 52; bias = f32 ? 127 : 1023; emax = f32 ? 255 : 2047;
+    k = 2; m = 0; fr = 0; nf = 0; sticky = 0;
+    while (k < n) {
+        c = src[p + k] & 255;
+        if (c == 46) { fr = 1; k = k + 1; continue; }
+        d = 0 - 1;
+        if (c >= 48 && c <= 57) d = c - 48;
+        if (c >= 97 && c <= 102) d = c - 87;
+        if (c >= 65 && c <= 70) d = c - 55;
+        if (d < 0) break;
+        /* keep the first sixteen hex digits exactly; any nonzero digit
+           past them only matters as "something was below" for rounding */
+        if ((m >> 60) == 0) { m = m * 16 + d; if (fr) nf = nf + 1; }
+        else { if (d) sticky = 1; if (fr == 0) nf = nf - 1; }
+        k = k + 1;
+    }
+    ev = 0; neg = 0;
+    if (k < n) { if ((src[p + k] & 255) == 112 || (src[p + k] & 255) == 80) {
+        k = k + 1;
+        if (k < n) { if ((src[p + k] & 255) == 45) { neg = 1; k = k + 1; }
+                     else { if ((src[p + k] & 255) == 43) k = k + 1; } }
+        while (k < n) {
+            c = src[p + k] & 255;
+            if (c < 48 || c > 57) break;
+            if (ev < 100000) ev = ev * 10 + (c - 48);
+            k = k + 1;
+        }
+    } }
+    if (neg) ev = 0 - ev;
+    if (m == 0) return 0;
+    /* value = m * 2^(ev - 4*nf); put the top bit of m at position mbits */
+    top = 63; while (((m >> top) & 1) == 0) top = top - 1;
+    e2 = (int)ev - 4 * nf + top;          /* the unbiased exponent */
+    biased = e2 + bias;
+    if (biased >= emax) return f32 ? 0x7F800000 : 0x7FF0000000000000;  /* inf */
+    shift = top - mbits;                   /* >0: drop bits, <0: add zeros */
+    if (biased <= 0) shift = shift + (1 - biased);   /* subnormal */
+    if (shift > 0) {
+        if (shift >= 64) { rem = m; m = 0; half = 0; }
+        else {
+            rem = m & (((unsigned long)1 << shift) - 1);
+            half = (unsigned long)1 << (shift - 1);
+            m = m >> shift;
+        }
+        if (shift < 64) {
+            if (rem > half || (rem == half && (sticky || (m & 1)))) m = m + 1;
+            else { if (rem == half) { if (sticky) m = m + 1; } }
+        }
+    } else { m = m << (0 - shift); }
+    if (biased <= 0) {
+        /* a subnormal: the exponent field is zero, and rounding may carry
+           it into the smallest normal, which the addition does for free */
+        return m;
+    }
+    /* rounding may have carried into a new top bit */
+    if ((m >> (mbits + 1)) & 1) { m = m >> 1; biased = biased + 1; }
+    if (biased >= emax) return f32 ? 0x7F800000 : 0x7FF0000000000000;
+    out = ((unsigned long)biased << mbits) | (m & (((unsigned long)1 << mbits) - 1));
+    return out;
+}
+
 unsigned long fdec2bin(int p, int n, int f32) {
     int e10; int k; int seen; int c; int fr; int neg; int j;
     int prec; int emin; int bias; int mbits; int lead; int keep; int drop;
@@ -8589,7 +8774,19 @@ int fltlit(int t) {
     int k; int c; int hex;
     k = 0; hex = 0;
     if (tlen[t] > 1) { if ((src[tpos[t]] & 255) == 48) { c = src[tpos[t] + 1] & 255; if (c == 120 || c == 88) hex = 1; } }
-    if (hex) return 0;
+    if (hex) {
+        /* hex is an integer unless it has a binary exponent: `0x1.8p1` */
+        while (k < tlen[t]) {
+            c = src[tpos[t] + k] & 255;
+            if (c == 112 || c == 80) {
+                c = src[tpos[t] + tlen[t] - 1] & 255;
+                if (c == 102 || c == 70) return 4;
+                return 8;
+            }
+            k = k + 1;
+        }
+        return 0;
+    }
     if ((src[tpos[t]] & 255) == 39) return 0;          /* a character constant */
     while (k < tlen[t]) {
         c = src[tpos[t] + k] & 255;

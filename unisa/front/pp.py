@@ -410,6 +410,16 @@ def _paste(body, amap):
         if t.isspace():
             i += 1
             continue
+        # `, ## __VA_ARGS__` with no variable arguments: the comma goes too.
+        # A GNU extension, but in every logging macro; the C front end does
+        # the same, so the two keep compiling the same programs.
+        if (t == "__VA_ARGS__" and join_next and amap.get(t, None) == ""
+                and pieces and pieces[-1].strip() == ","):
+            pieces.pop()
+            glue.pop()
+            join_next = False
+            i += 1
+            continue
         pasted = join_next or (i + 1 < len(toks) and
                                _next_is_paste(toks, i + 1))
         v = amap.get(t, t)

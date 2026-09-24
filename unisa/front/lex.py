@@ -45,9 +45,21 @@ class FNum(float):
     def __new__(cls, text):
         from ..fp import bd, dec_to_f32
         body = text.rstrip("fFlL")
-        self = float.__new__(cls, float(body))
-        self.f32 = text[-1] in "fF"
-        self.bits = dec_to_f32(body) if self.f32 else bd(float(body))
+        # a hex body keeps its trailing hex digits: only strip a suffix that
+        # follows the binary exponent
+        if body[:2].lower() == "0x":
+            body = text[:-1] if text[-1] in "fFlL" and "p" in text.lower() else text
+            v = float.fromhex(body)     # exact: that is what hex floats are for
+        else:
+            v = float(body)
+        self = float.__new__(cls, v)
+        self.f32 = text[-1] in "fF" and not (text[:2].lower() == "0x" and "p" not in text.lower())
+        if self.f32:
+            import struct
+            self.bits = (struct.unpack("<I", struct.pack("<f", v))[0]
+                         if body[:2].lower() == "0x" else dec_to_f32(body))
+        else:
+            self.bits = bd(v)
         return self
 
 
@@ -135,8 +147,19 @@ def lex(src, oracle):
             i = (j + 2) if j >= 0 else n
         elif act == "ident":
             j = i
-            while j < n and (src[j].isalnum() or src[j] == "_"):
-                j += 1
+            HEX = "0123456789abcdefABCDEF"
+            while j < n:
+                if src[j].isalnum() or src[j] == "_":
+                    j += 1
+                    continue
+                # a universal character name, C99 6.4.3 -- `caf\u00e9` is
+                # one identifier, kept by its spelling, as the C lexer does
+                if src[j] == "\\" and j + 1 < n and src[j + 1] in "uU":
+                    w = 4 if src[j + 1] == "u" else 8
+                    if all(c in HEX for c in src[j + 2:j + 2 + w]) and j + 2 + w <= n:
+                        j += 2 + w
+                        continue
+                break
             w = src[i:j]
             # A wide CHARACTER constant is just an int, so the prefix is
             # dropped.  A wide STRING is not: its elements are wider than a
@@ -228,6 +251,23 @@ def lex(src, oracle):
             # both, then at most one of f F l L.  Scanning the extent is
             # structure; that it IS a number was the table's answer.
             isf = False
+            # the hex floating form, 0x HEX [. HEX] p [+-] DEC -- the same
+            # extent the C lexer takes, so the two token streams stay equal
+            if src[i:i + 2].lower() == "0x":
+                k = j
+                if k < n and src[k] == ".":
+                    k += 1
+                    while k < n and src[k] in "0123456789abcdefABCDEF":
+                        k += 1
+                if k < n and src[k] in "pP":
+                    k2 = k + 1
+                    if k2 < n and src[k2] in "+-":
+                        k2 += 1
+                    if k2 < n and src[k2].isdigit():
+                        isf = True
+                        j = k2
+                        while j < n and src[j].isdigit():
+                            j += 1
             if src[i:i + 2].lower() != "0x":
                 if j < n and src[j] == ".":
                     isf = True
