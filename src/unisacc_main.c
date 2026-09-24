@@ -7642,7 +7642,7 @@ int ol_scan(int z, int l) {
     while (l < ol_n) {
         k = ol_k[l];
         if (k == OK_LABEL) return bl_live[base + bl_of[l]];
-        if (k == OK_RET) return 0;
+        if (k == OK_RET) return z <= 1;           /* r0/r1 carry the result */
         if (k == OK_JUMP) { t = ol_tg[l]; return t < 0 ? 1 : bl_live[base + t]; }
         if (k == OK_JUMPZ) {
             if (ol_rm[l] & bit) return 1;
@@ -7797,10 +7797,265 @@ int opt_round(void) {
     nout = nout2;
     return hits;
 }
+int ol_lines(void) {
+    int i;
+    ol_n = 0; i = 0;
+    while (i < nout) {
+        if (ol_n >= OPT_MAXL) return 0;
+        ol_s[ol_n] = i;
+        while (i < nout && out[i] != 10) i = i + 1;
+        ol_e[ol_n] = i; ol_n = ol_n + 1;
+        i = i + 1;
+    }
+    return 1;
+}
+int ol_commit(void) {
+    int i;
+    if (nout2 > 0 && out[nout - 1] != 10) nout2 = nout2 - 1;   /* no newline was there */
+    i = 0; while (i < nout2) { out[i] = out2[i]; i = i + 1; }
+    nout = nout2;
+    return 0;
+}
+/* ---- -O2: the peep table [H2] -------------------------------------------
+   The structural half: find an instruction and its neighbour (or, for a
+   jump, the instruction it lands on), and say how their operands relate.
+   Whether that relation licenses a rewrite -- and which -- is the `peep`
+   table's answer, asked of its net exactly as unisa/opt.py asks it. */
+int pp_word(int l, char *w) {         /* the op word of line l into w */
+    int p; int e; int k;
+    k = 0;
+    if (l >= ol_n || out[ol_s[l]] != 32) { w[0] = 0; return 0; }
+    p = ol_s[l] + 2; e = ol_e[l];
+    while (p < e && out[p] != 32 && k < 15) { w[k] = out[p]; k = k + 1; p = p + 1; }
+    w[k] = 0;
+    return k;
+}
+int pp_acls(int l) {                  /* index into BF_PEEP_0 */
+    char w[16]; int n; char *c;
+    n = pp_word(l, w);
+    c = "other";
+    if (n) {
+        if (vfind("store64\0load64\0imm\0mov\0jump\0jumpz\0", 6, w, n) >= 0) c = w;
+        else if (vfind("add64\0sub64\0mul64\0shl64\0shr64\0lshr64\0or64\0xor64\0and64\0eq\0ne\0slt64\0sle64\0ult64\0", 14, w, n) >= 0) c = "alu";
+    }
+    n = 0; while (c[n]) n = n + 1;
+    return vfind(BF_PEEP_0, NBF_PEEP_0, c, n);
+}
+int pp_bcls(int l) {                  /* index into BF_PEEP_1 */
+    char w[16]; int n; int i;
+    if (l >= ol_n) return vfind(BF_PEEP_1, NBF_PEEP_1, "none", 4);
+    n = pp_word(l, w);
+    if (n) {
+        i = vfind(BF_PEEP_1, NBF_PEEP_1, w, n);
+        if (i >= 0 && vfind("other\0none\0", 2, w, n) < 0) return i;
+    }
+    return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
+}
+int pp_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
+int pp_real(int l) {                  /* the first line at or after l that is not a label */
+    while (l < ol_n && pp_islab(l)) l = l + 1;
+    return l;
+}
+int pp_lastword(int l) {              /* where the line's last token starts */
+    int p; p = ol_e[l]; while (p > ol_s[l] && out[p - 1] != 32) p = p - 1; return p;
+}
+int pp_same(int p, int e, int q, int f) {    /* out[p..e) == out[q..f) */
+    if (e - p != f - q) return 0;
+    while (p < e) { if (out[p] != out[q]) return 0; p = p + 1; q = q + 1; }
+    return 1;
+}
+/* `  store64 [M], rX` -> X, M at pp_m0..pp_m1; else -1 */
+int pp_m0; int pp_m1; int pp_n0; int pp_n1;
+int pp_store(int l) {
+    int p; int e; int q;
+    if (ol_pre(l, "  store64 [") == 0) return 0 - 1;
+    p = ol_s[l] + 11; e = ol_e[l]; q = p;
+    while (q < e && out[q] != 93) q = q + 1;
+    if (q + 3 >= e || out[q + 1] != 44 || out[q + 2] != 32) return 0 - 1;
+    pp_m0 = p; pp_m1 = q;
+    return ol_reg(q + 3, e);
+}
+/* `  load64 rY, [M]` -> Y, M at pp_n0..pp_n1 */
+int pp_load(int l) {
+    int p; int e; int q; int y;
+    if (ol_pre(l, "  load64 ") == 0) return 0 - 1;
+    p = ol_s[l] + 9; e = ol_e[l]; q = p;
+    while (q < e && out[q] != 44) q = q + 1;
+    y = ol_reg(p, q);
+    if (y < 0 || q + 3 >= e || out[q + 1] != 32 || out[q + 2] != 91 || out[e - 1] != 93) return 0 - 1;
+    pp_n0 = q + 3; pp_n1 = e - 1;
+    return y;
+}
+/* the same store shape as the SECOND of a pair: M at pp_n0..pp_n1 */
+int pp_store2(int l) {
+    int y; int a; int b;
+    a = pp_m0; b = pp_m1;
+    y = pp_store(l);
+    pp_n0 = pp_m0; pp_n1 = pp_m1; pp_m0 = a; pp_m1 = b;
+    return y;
+}
+/* `  imm rK, N` -> K, N in pp_imm (decimal digits only, at most 18) */
+long pp_imm;
+int pp_immat(int l) {
+    int p; int e; int q; int k; long v;
+    if (ol_pre(l, "  imm r") == 0) return 0 - 1;
+    p = ol_s[l] + 6; e = ol_e[l]; q = p;
+    while (q < e && out[q] != 44) q = q + 1;
+    k = ol_reg(p, q);
+    if (k < 0 || q + 2 >= e || out[q + 1] != 32) return 0 - 1;
+    q = q + 2; v = 0;
+    if (e - q > 18) return 0 - 1;
+    while (q < e) { if (isdi(out[q] & 255) == 0) return 0 - 1; v = v * 10 + out[q] - 48; q = q + 1; }
+    pp_imm = v;
+    return k;
+}
+/* `  OP rD, rS, rT` -> 1, with the three in pp_d pp_sr pp_t */
+int pp_d; int pp_sr; int pp_t;
+int pp_three(int l) {
+    int p; int e; int q;
+    if (l >= ol_n || out[ol_s[l]] != 32) return 0;
+    p = ol_s[l] + 2; e = ol_e[l];
+    while (p < e && out[p] != 32) p = p + 1;
+    p = p + 1; q = p; while (q < e && out[q] != 44) q = q + 1;
+    pp_d = ol_reg(p, q); if (pp_d < 0 || q + 2 >= e) return 0;
+    p = q + 2; q = p; while (q < e && out[q] != 44) q = q + 1;
+    pp_sr = ol_reg(p, q); if (pp_sr < 0 || q + 2 >= e) return 0;
+    pp_t = ol_reg(q + 2, e); if (pp_t < 0) return 0;
+    return 1;
+}
+/* `  mov rY, rX` -> 1, Y and X in pp_d, pp_sr */
+int pp_movat(int l) {
+    int p; int e; int q;
+    if (ol_pre(l, "  mov r") == 0) return 0;
+    p = ol_s[l] + 6; e = ol_e[l]; q = p;
+    while (q < e && out[q] != 44) q = q + 1;
+    pp_d = ol_reg(p, q); if (pp_d < 0 || q + 2 >= e) return 0;
+    pp_sr = ol_reg(q + 2, e);
+    return pp_sr >= 0;
+}
+int pp_emitreg(int r) {
+    out2[nout2] = 114; nout2 = nout2 + 1;
+    if (r >= 10) { out2[nout2] = 48 + r / 10; nout2 = nout2 + 1; }
+    out2[nout2] = 48 + r % 10; nout2 = nout2 + 1;
+    return 0;
+}
+int pp_emitnum(long v) {
+    char b[24]; int n;
+    n = 0;
+    if (v == 0) { b[0] = 48; n = 1; }
+    while (v > 0) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; out2[nout2] = b[n]; nout2 = nout2 + 1; }
+    return 0;
+}
+int pp_nl(void) { out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
+int pp_rel(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BF_PEEP_2, NBF_PEEP_2, nm, n); }
+int pp_act(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BH_PEEP_Y, NBH_PEEP_Y, nm, n); }
+int pp_asks;
+int peep_round(void) {
+    int i; int n; int a; int b; int rel; int act; int key[4]; int t; int u; int k; int x; int y;
+    int hits; int p; int e; int q; long v; int lg; int d; int none;
+    if (ol_lines() == 0) return 0;
+    ol_labels();
+    k = 0; while (k <= 5) { ol_zok[k] = 1; k = k + 1; }
+    if (bl_split() == 0) { k = 0; while (k <= 5) { ol_zok[k] = 0; k = k + 1; } }
+    else {
+        ol_prep();
+        k = 0; while (k <= 5) { if (bl_solve(k) == 0) ol_zok[k] = 0; k = k + 1; }
+    }
+    none = pp_rel("none");
+    nout2 = 0; hits = 0; i = 0; n = ol_n;
+    while (i < n) {
+        if (out[ol_s[i]] != 32) { ol_emit(i); i = i + 1; continue; }
+        a = pp_acls(i); b = pp_bcls(i + 1); rel = none;
+        t = 0 - 1; x = 0 - 1; y = 0 - 1; u = 0; v = 0;
+        if (ol_word(i, "jump") || ol_word(i, "jumpz")) {
+            p = pp_lastword(i); e = ol_e[i];
+            k = i + 1;
+            while (k < n && pp_islab(k)) {
+                if (pp_same(ol_s[k], ol_e[k] - 1, p, e)) u = 1;
+                k = k + 1;
+            }
+            if (u) { rel = pp_rel("to_next"); b = pp_bcls(pp_real(i + 1)); }
+            else {
+                t = ol_lab(p, e);
+                if (t >= 0) {
+                    t = pp_real(t + 1);
+                    if (t < n && ol_word(t, "jump")) {
+                        q = pp_lastword(t);
+                        if (pp_same(q, ol_e[t], p, e) == 0) { rel = pp_rel("to_jump"); b = pp_bcls(t); }
+                    }
+                }
+            }
+        } else if (i + 1 < n && pp_store(i) >= 0) {
+            x = pp_store(i);
+            y = pp_load(i + 1);
+            if (y < 0) y = pp_store2(i + 1);
+            /* not the expression stack's own slot: [r7+..] is what B1 turns
+               into a real push and pop on x86, and a pop made a mov is a
+               pop that costs more */
+            if (y >= 0 && pp_same(pp_m0, pp_m1, pp_n0, pp_n1) && (out[pp_m0] != 114 || out[pp_m0 + 1] != 55)) {
+                if (x == y) rel = pp_rel("same_slot_same_reg"); else rel = pp_rel("same_slot");
+            }
+        } else if (i + 1 < n && pp_immat(i) >= 0) {
+            x = pp_immat(i); v = pp_imm;
+            if (x <= 5 && ol_word(i + 1, "mov") == 0 && pp_three(i + 1)) {
+                if (pp_t == x && pp_sr != x && ol_dead(x, i + 2)) {
+                    if (v == 0) rel = pp_rel("const0");
+                    else if (v == 1) rel = pp_rel("const1");
+                    else if ((v & (v - 1)) == 0) rel = pp_rel("pow2");
+                }
+            } else if (x <= 5 && pp_movat(i + 1)) {
+                if (pp_sr == x && pp_d != x && ol_dead(x, i + 2)) rel = pp_rel("copy_dead");
+            }
+        }
+        if (rel == none) {
+            if (ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
+                d = ol_firstreg(i);
+                if (d >= 0 && d <= 5) { if ((ol_wm[i] & (1 << d)) && ol_dead(d, i + 1)) rel = pp_rel("a_dead"); }
+            }
+        }
+        if (rel == none) { ol_emit(i); i = i + 1; continue; }
+        key[0] = a; key[1] = b; key[2] = rel; key[3] = 0;
+        act = inf(S_PEEP, key, 0); pp_asks = pp_asks + 1;
+        if (act == pp_act("keep")) { ol_emit(i); i = i + 1; continue; }
+        hits = hits + 1;
+        if (act == pp_act("load_to_mov")) {
+            ol_emit(i);
+            ol_puts("  mov "); pp_emitreg(y); ol_puts(", "); pp_emitreg(x); pp_nl();
+            i = i + 2; continue;
+        }
+        if (act == pp_act("drop_b")) { ol_emit(i); i = i + 2; continue; }
+        if (act == pp_act("drop_a")) { i = i + 1; continue; }
+        if (act == pp_act("retarget")) {
+            p = pp_lastword(i); ol_put(ol_s[i], p);
+            q = pp_lastword(t); ol_put(q, ol_e[t]); pp_nl();
+            i = i + 1; continue;
+        }
+        if (act == pp_act("to_mov")) {
+            ol_puts("  mov "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); pp_nl();
+            i = i + 2; continue;
+        }
+        if (act == pp_act("to_shl")) {
+            lg = 0; while (v > 1) { v = v / 2; lg = lg + 1; }
+            ol_puts("  imm "); pp_emitreg(x); ol_puts(", "); pp_emitnum(lg); pp_nl();
+            ol_puts("  shl64 "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); ol_puts(", "); pp_emitreg(x); pp_nl();
+            i = i + 2; continue;
+        }
+        if (act == pp_act("fold_imm")) {
+            ol_puts("  imm "); pp_emitreg(pp_d); ol_puts(", "); pp_emitnum(pp_imm); pp_nl();
+            i = i + 2; continue;
+        }
+        ol_emit(i); i = i + 1; hits = hits - 1;     /* an action this code does not know */
+    }
+    ol_commit();
+    return hits;
+}
+
 int opt_stack(void) {
     int r;
     r = 0;
     while (r < 4) { if (opt_round() == 0) break; r = r + 1; }
+    if (optlevel >= 2) { r = 0; while (r < 4) { if (peep_round() == 0) break; r = r + 1; } }
     return 0;
 }
 

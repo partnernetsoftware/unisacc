@@ -335,6 +335,54 @@ def irsel_label(fam, flav):
 
 
 # ================================================================== registry
+
+# ---- peep: what to do with an instruction pair on the tape [H2] ------------
+# The optimiser's structural half finds a pair and says how its operands
+# relate; whether that relation licenses a rewrite, and which, is this table.
+PEEP_A = ("store64", "load64", "imm", "mov", "jump", "jumpz", "alu", "other")
+PEEP_B = ("store64", "load64", "imm", "mov", "jump", "jumpz", "add64", "sub64",
+          "mul64", "shl64", "shr64", "lshr64", "or64", "xor64", "and64",
+          "other", "none")
+PEEP_REL = ("none", "same_slot", "same_slot_same_reg", "const0", "const1",
+            "pow2", "copy_dead", "to_next", "to_jump", "a_dead")
+PEEP_ACT = ("keep", "load_to_mov", "drop_b", "drop_a", "retarget", "to_mov",
+            "to_shl", "fold_imm")
+
+
+def peep_label(a, b, rel):
+    """store64 [M],rX then load64 rY,[M]: the load is a move (or nothing);
+    then store64 [M] again: the first store is dead.  imm rK,0 as the second
+    source of add/sub/or/xor/shifts, or imm rK,1 into mul, with rK dead:
+    a move.  (imm rK,2^n into mul stays a multiply: see below.)  imm then mov out of a dead rK:
+    the constant goes straight to the move's target.  A jump to the next
+    instruction is nothing; a jump to a jump goes to the final target.  An
+    instruction whose only effect is writing a dead register is nothing."""
+    if rel in ("same_slot", "same_slot_same_reg") and a == "store64":
+        if b == "load64":
+            return "load_to_mov" if rel == "same_slot" else "drop_b"
+        if b == "store64":
+            return "drop_a"
+    if rel == "const0" and a == "imm" and b in ("add64", "sub64", "or64",
+                                                 "xor64", "shl64", "shr64",
+                                                 "lshr64"):
+        return "to_mov"
+    if rel == "const1" and a == "imm" and b == "mul64":
+        return "to_mov"
+    # pow2 -> to_shl is NOT taken: measured, a tape shift lowers on x86 to a
+    # move into cl and `shl r, cl`, longer than the imul it replaces (the
+    # compiler's x86 image grew 24 KB).  The relation stays in the key so
+    # the answer is the table's, and a target-aware key can revisit it.
+    if rel == "copy_dead" and a == "imm" and b == "mov":
+        return "fold_imm"
+    if rel == "to_next" and a in ("jump", "jumpz"):
+        return "drop_a"
+    if rel == "to_jump" and a in ("jump", "jumpz") and b == "jump":
+        return "retarget"
+    if rel == "a_dead" and a in ("imm", "mov", "alu", "load64"):
+        return "drop_a"
+    return "keep"
+
+
 class Stage:
     def __init__(self, name, fields, heads, label, cfg, weight=None):
         self.name = name
@@ -482,6 +530,9 @@ def build():
                        C.nine,
                        dict(dims=(16, 8, 8), hidden=[48, 32], seed=7,
                             factor=12, bilinear=8))
+    S["peep"] = Stage("peep", [("a", PEEP_A), ("b", PEEP_B), ("rel", PEEP_REL)],
+                      [("y", PEEP_ACT, None)], _one(peep_label),
+                      dict(d=8, hidden=[16], seed=53))
     return S
 
 
@@ -490,6 +541,6 @@ STAGES = build()
 KEYWORDS_C = tuple(t for t in TOKS if t[0].isalpha() and t != "eof")
 
 TABLES = ("pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc",
-          "regmap", "tyinfo", "pfconv")
+          "regmap", "tyinfo", "pfconv", "peep")
 STAGE_NETS = ("isel", "abi")
 ALL = TABLES + STAGE_NETS + ("combo",)

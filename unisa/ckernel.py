@@ -193,7 +193,7 @@ def emit_core(nets, path):
     # head, named by stage.  The self-hosted compiler lowers its own tape by
     # asking these, exactly as unisa/lower.py does; a head's classes are the
     # NET's, in the net's order, which is what infer() returns an index into.
-    for st in ("enc", "reloc", "regmap", "tyinfo", "pfconv", "isel", "abi"):
+    for st in ("enc", "reloc", "regmap", "tyinfo", "pfconv", "peep", "isel", "abi"):
         S = STAGES[st]
         for i, (_, vals) in enumerate(S.fields):
             nm = "BF_%s_%d" % (st.upper(), i)

@@ -190,7 +190,7 @@ class _Round:
             if k == LABEL:
                 return live[self.bl_of[l]]
             if k == RET:
-                return 0
+                return 1 if z <= 1 else 0      # r0/r1 carry the result
             if k == JUMP:
                 t = TG[l]
                 return 1 if t < 0 else live[t]
@@ -342,7 +342,251 @@ class _Round:
         return out, hits
 
 
-def optimise(text, level):
+# ---- -O2: the peep table [H2] -------------------------------------------
+ALU = ("add64", "sub64", "mul64", "shl64", "shr64", "lshr64", "or64", "xor64",
+       "and64", "eq", "ne", "slt64", "sle64", "ult64")
+
+
+def _opword(ln):
+    return ln[2:].split(" ", 1)[0][:15] if ln.startswith(" ") else ""
+
+
+def _islab(ln):
+    return (not ln.startswith(" ") and not ln.startswith(".") and len(ln) > 1
+            and ln.endswith(":"))
+
+
+def _last(ln):
+    return ln[ln.rfind(" ") + 1:]
+
+
+def _store(ln):
+    t = "  store64 ["
+    if not ln.startswith(t):
+        return -1, None
+    q = ln.find("]", 11)
+    if q < 0:
+        q = len(ln)
+    if q + 3 >= len(ln) or ln[q + 1] != "," or ln[q + 2] != " ":
+        return -1, None
+    return _reg(ln[q + 3:]), ln[11:q]
+
+
+def _load(ln):
+    t = "  load64 "
+    if not ln.startswith(t):
+        return -1, None
+    q = ln.find(",", 9)
+    if q < 0:
+        q = len(ln)
+    y = _reg(ln[9:q])
+    if y < 0 or q + 3 >= len(ln) or ln[q + 1] != " " or ln[q + 2] != "[" \
+            or ln[-1] != "]":
+        return -1, None
+    return y, ln[q + 3:len(ln) - 1]
+
+
+def _immat(ln):
+    t = "  imm r"
+    if not ln.startswith(t):
+        return -1, 0
+    q = ln.find(",", 6)
+    if q < 0:
+        q = len(ln)
+    k = _reg(ln[6:q])
+    if k < 0 or q + 2 >= len(ln) or ln[q + 1] != " ":
+        return -1, 0
+    num = ln[q + 2:]
+    if len(num) > 18 or not all("0" <= c <= "9" for c in num):
+        return -1, 0
+    return k, int(num)
+
+
+def _three(ln):
+    if not ln.startswith(" "):
+        return None
+    p = ln.find(" ", 2)
+    if p < 0:
+        return None
+    p += 1
+    q = ln.find(",", p)
+    if q < 0:
+        q = len(ln)
+    d = _reg(ln[p:q])
+    if d < 0 or q + 2 >= len(ln):
+        return None
+    p = q + 2
+    q = ln.find(",", p)
+    if q < 0:
+        q = len(ln)
+    sr = _reg(ln[p:q])
+    if sr < 0 or q + 2 >= len(ln):
+        return None
+    t = _reg(ln[q + 2:])
+    if t < 0:
+        return None
+    return d, sr, t
+
+
+def _movat(ln):
+    t = "  mov r"
+    if not ln.startswith(t):
+        return None
+    q = ln.find(",", 6)
+    if q < 0:
+        q = len(ln)
+    d = _reg(ln[6:q])
+    if d < 0 or q + 2 >= len(ln):
+        return None
+    sr = _reg(ln[q + 2:])
+    return (d, sr) if sr >= 0 else None
+
+
+class _Peep(_Round):
+    def __init__(self, lines, oracle):
+        self.L = lines
+        self.level = 2
+        self.n = len(lines)
+        self.oracle = oracle
+        self.lab = {}
+        for i, ln in enumerate(lines):
+            if _islab(ln):
+                self.lab.setdefault(ln[:-1], i)
+        self.zok = {z: True for z in range(0, 6)}
+        self._split()
+        self._prep()
+        for z in range(0, 6):
+            if not self._solve(z):
+                self.zok[z] = False
+
+    def _acls(self, ln):
+        w = _opword(ln)
+        if w in ("store64", "load64", "imm", "mov", "jump", "jumpz"):
+            return w
+        return "alu" if w in ALU else "other"
+
+    def _bcls(self, l):
+        if l >= self.n:
+            return "none"
+        from .gold import PEEP_B
+        w = _opword(self.L[l])
+        return w if w and w in PEEP_B and w not in ("other", "none") else "other"
+
+    def _real(self, l):
+        while l < self.n and _islab(self.L[l]):
+            l += 1
+        return l
+
+    def run(self):
+        L, n, out, hits, i = self.L, self.n, [], 0, 0
+        while i < n:
+            A = L[i]
+            if not A.startswith(" "):
+                out.append(A)
+                i += 1
+                continue
+            a, b, rel = self._acls(A), self._bcls(i + 1), "none"
+            t = x = y = -1
+            v = 0
+            d3 = mv = None
+            if _word(A, "jump") or _word(A, "jumpz"):
+                name = _last(A)
+                u = False
+                k = i + 1
+                while k < n and _islab(L[k]):
+                    if L[k][:-1] == name:
+                        u = True
+                    k += 1
+                if u:
+                    rel, b = "to_next", self._bcls(self._real(i + 1))
+                else:
+                    t = self.lab.get(name, -1)
+                    if t >= 0:
+                        t = self._real(t + 1)
+                        if t < n and _word(L[t], "jump") and _last(L[t]) != name:
+                            rel, b = "to_jump", self._bcls(t)
+            elif i + 1 < n and _store(A)[0] >= 0:
+                x, m = _store(A)
+                y, m2 = _load(L[i + 1])
+                if y < 0:
+                    y, m2 = _store(L[i + 1])
+                if y >= 0 and m == m2 and not (m[:1] == "r" and m[1:2] == "7"):
+                    rel = "same_slot_same_reg" if x == y else "same_slot"
+            elif i + 1 < n and _immat(A)[0] >= 0:
+                x, v = _immat(A)
+                B = L[i + 1]
+                d3 = _three(B) if x <= 5 and not _word(B, "mov") else None
+                if d3 is not None:
+                    dd, sr, tt = d3
+                    if tt == x and sr != x and self.dead(x, i + 2):
+                        if v == 0:
+                            rel = "const0"
+                        elif v == 1:
+                            rel = "const1"
+                        elif v & (v - 1) == 0:
+                            rel = "pow2"
+                elif x <= 5:
+                    mv = _movat(B)
+                    if mv is not None and mv[1] == x and mv[0] != x \
+                            and self.dead(x, i + 2):
+                        rel = "copy_dead"
+            if rel == "none" and self.K[i] == SIMPLEK and not _word(A, "store64") \
+                    and not _word(A, ".st"):
+                dd = _firstreg(A)
+                if 0 <= dd <= 5 and (self.WM[i] >> dd) & 1 and self.dead(dd, i + 1):
+                    rel = "a_dead"
+            if rel == "none":
+                out.append(A)
+                i += 1
+                continue
+            act = self.oracle.ask("peep", (a, b, rel))
+            if act == "keep":
+                out.append(A)
+                i += 1
+                continue
+            hits += 1
+            if act == "load_to_mov":
+                out.append(A)
+                out.append("  mov r%d, r%d" % (y, x))
+                i += 2
+            elif act == "drop_b":
+                out.append(A)
+                i += 2
+            elif act == "drop_a":
+                i += 1
+            elif act == "retarget":
+                out.append(A[:A.rfind(" ") + 1] + _last(L[t]))
+                i += 1
+            elif act == "to_mov":
+                dd, sr, _ = d3
+                out.append("  mov r%d, r%d" % (dd, sr))
+                i += 2
+            elif act == "to_shl":
+                dd, sr, _ = d3
+                out.append("  imm r%d, %d" % (x, v.bit_length() - 1))
+                out.append("  shl64 r%d, r%d, r%d" % (dd, sr, x))
+                i += 2
+            elif act == "fold_imm":
+                out.append("  imm r%d, %d" % (mv[0], v))
+                i += 2
+            else:
+                out.append(A)
+                i += 1
+                hits -= 1
+        return out, hits
+
+
+_ORACLE = []
+
+
+def _oracle():
+    if not _ORACLE:
+        from .__main__ import _oracle as mk
+        _ORACLE.append(mk("built"))
+    return _ORACLE[0]
+
+
+def optimise(text, level, oracle=None):
     """the tape text at -O<level>, as the C front end writes it"""
     if level <= 0:
         return text
@@ -354,4 +598,10 @@ def optimise(text, level):
         lines, hits = _Round(lines, level).run()
         if hits == 0:
             break
+    if level >= 2:
+        o = oracle or _oracle()
+        for _ in range(4):
+            lines, hits = _Peep(lines, o).run()
+            if hits == 0:
+                break
     return "\n".join(lines) + ("\n" if nl else "")

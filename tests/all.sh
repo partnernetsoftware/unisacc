@@ -138,6 +138,7 @@ run diag       ./tests/diag.sh
 run warn       ./tests/warn.sh
 run opt        ./tests/opt.sh
 run optpy      ./tests/optpy.sh
+run difftest_o ./tests/difftest_o.sh
 run ape        ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
