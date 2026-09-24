@@ -13143,8 +13143,147 @@ int ol_mov(int y, int x) {
     out2[nout2] = 48 + x % 10; out2[nout2 + 1] = 10; nout2 = nout2 + 2;
     return n;
 }
+/* Is register z dead at line `from`?  A bounded forward walk over the
+   tape's own control flow: fall through, follow `jump`, take both ways of
+   `jumpz`.  A pure write of z first on every path: dead.  A read, a call
+   (the callee reads its arguments from r0..r5), anything outside the
+   whitelist, or running out of budget: assume live.  `ret` hands back r0
+   (and r1 for a pair), so z in r3..r5 is dead there. */
+int ol_lab(int p, int e) {           /* the line index of label out[p..e) */
+    int h; int q; int lo; int hi; int m; int k;
+    h = vhash(out + p, e - p) * 16 + ((e - p) & 15); h = h & (UD_SIZE - 1);
+    while (ud_tab[h]) {
+        q = ud_tab[h] - 1; k = 0;
+        while (k < e - p && out[q + k] == out[p + k]) k = k + 1;
+        if (k == e - p && out[q + k] == 58) {
+            lo = 0; hi = ol_n - 1;
+            while (lo < hi) { m = (lo + hi + 1) / 2; if (ol_s[m] <= q) lo = m; else hi = m - 1; }
+            return lo;
+        }
+        h = (h + 1) & (UD_SIZE - 1);
+    }
+    return 0 - 1;
+}
+int ol_labels(void) {                /* ud_tab: every `name:` line of out */
+    int l; int h; int p;
+    l = 0; while (l < UD_SIZE) { ud_tab[l] = 0; l = l + 1; }
+    l = 0;
+    while (l < ol_n) {
+        p = ol_s[l];
+        if (ol_len(l) > 1) { if (out[ol_e[l] - 1] == 58) { if (out[p] != 32) { if (out[p] != 46) {
+            h = vhash(out + p, ol_len(l) - 1) * 16 + ((ol_len(l) - 1) & 15); h = h & (UD_SIZE - 1);
+            while (ud_tab[h]) h = (h + 1) & (UD_SIZE - 1);
+            ud_tab[h] = p + 1;
+        } } } }
+        l = l + 1;
+    }
+    return 0;
+}
+int ol_word(int l, char *w) {        /* the op of line l is w */
+    int p; int k; p = ol_s[l] + 2; k = 0;
+    if (out[ol_s[l]] != 32) return 0;
+    while (w[k]) { if (out[p + k] != w[k]) return 0; k = k + 1; }
+    return out[p + k] == 32 || p + k == ol_e[l];
+}
+int ol_firstreg(int l) {             /* the first rN on the line, or -1 */
+    int p; int e; int n;
+    p = ol_s[l] + 2; e = ol_e[l];
+    while (p < e && out[p] != 32) p = p + 1;
+    while (p < e) {
+        if (out[p] == 114 && isal(out[p - 1] & 255) == 0 && p + 1 < e && isdi(out[p + 1] & 255)) {
+            n = 0; p = p + 1;
+            while (p < e && isdi(out[p] & 255)) { n = n * 10 + out[p] - 48; p = p + 1; }
+            return n;
+        }
+        if (out[p] == 91) return 0 - 1;     /* `[`: a memory operand comes first */
+        p = p + 1;
+    }
+    return 0 - 1;
+}
+int ol_writes(int l, int z) {        /* z is written and not read on line l */
+    int p; int e; int n; int first;
+    if (ol_word(l, "store64") || ol_word(l, ".st")) return 0;
+    if (ol_firstreg(l) != z) return 0;
+    p = ol_s[l] + 2; e = ol_e[l]; first = 1;
+    while (p < e && out[p] != 32) p = p + 1;
+    while (p < e) {
+        if (out[p] == 114 && isal(out[p - 1] & 255) == 0 && p + 1 < e && isdi(out[p + 1] & 255)) {
+            n = 0; p = p + 1;
+            while (p < e && isdi(out[p] & 255)) { n = n * 10 + out[p] - 48; p = p + 1; }
+            if (first == 0 && n == z) return 0;
+            first = 0;
+            continue;
+        }
+        p = p + 1;
+    }
+    return 1;
+}
+/* Where a function's prologue saves its parameters -- `store64 [r6-N], rK`
+   after `mov r6, r7` -- is the only place the walker reads r3..r5 before
+   writing them in a block (ol_zlocal checks that, per tape, and refuses
+   the register if not).  So such a register is dead at every block
+   boundary except the entry of a function that takes it as a parameter. */
+int ol_zok[8];
+int ol_saves(int t, int z) {         /* does the function at line t save rz */
+    int l; int p;
+    l = t + 1;
+    while (l < ol_n && l < t + 40) {
+        if (out[ol_s[l]] != 32) return 0;
+        p = ol_s[l];
+        if (ol_word(l, "store64") && out[p + 10] == 91 && out[p + 11] == 114 && out[p + 12] == 54) {
+            if (ol_names(l, z) && ol_firstreg(l) < 0) return 1;
+        } else if (ol_word(l, "mov") == 0 && ol_word(l, ".frame") == 0 && ol_word(l, "store64") == 0) return 0;
+        l = l + 1;
+    }
+    return 0;
+}
+int ol_zlocal(int z) {
+    int l; int w; int prolog; int p;
+    w = 0; prolog = 0; l = 0;
+    while (l < ol_n) {
+        if (out[ol_s[l]] != 32) { w = 0; prolog = 0; l = l + 1; continue; }
+        if (ol_is(l, "  mov r6, r7")) prolog = 1;
+        if (ol_names(l, z)) {
+            if (ol_writes(l, z)) w = 1;
+            else if (w == 0) {
+                p = ol_s[l];
+                if (prolog && ol_word(l, "store64") && out[p + 11] == 114 && out[p + 12] == 54) { l = l + 1; continue; }
+                return 0;
+            }
+        }
+        if (ol_word(l, "jump") || ol_word(l, "jumpz") || ol_word(l, "ret")) { w = 0; prolog = 0; }
+        l = l + 1;
+    }
+    return 1;
+}
+int ol_dead(int z, int from) {
+    int l; int budget; int e; int p; int t;
+    if (ol_zok[z] == 0) return 0;
+    l = from; budget = 200;
+    while (l < ol_n && budget > 0) {
+        budget = budget - 1;
+        if (out[ol_s[l]] != 32) {                 /* a label: a block starts */
+            if (ol_saves(l, z)) return 0;
+            return 1;
+        }
+        if (ol_word(l, "jumpz")) return ol_names(l, z) == 0;
+        if (ol_word(l, "jump") || ol_word(l, "ret")) return 1;
+        if (ol_word(l, "call")) {
+            e = ol_e[l]; p = e; while (p > ol_s[l] && out[p - 1] != 32) p = p - 1;
+            t = ol_lab(p, e);
+            if (t < 0) return 0;
+            if (ol_saves(t, z)) return 0;
+            l = l + 1; continue;
+        }
+        if (ol_simple(l) == 0) return 0;
+        if (ol_writes(l, z)) return 1;
+        if (ol_names(l, z)) return 0;
+        l = l + 1;
+    }
+    return 0;
+}
 int opt_round(void) {
-    int i; int j; int x; int y; int k; int ok; int hits;
+    int i; int j; int x; int y; int k; int ok; int hits; int z; int zz; int bad;
     ol_n = 0; i = 0;
     while (i < nout) {
         if (ol_n >= OPT_MAXL) return 0;
@@ -13153,6 +13292,8 @@ int opt_round(void) {
         ol_e[ol_n] = i; ol_n = ol_n + 1;
         i = i + 1;
     }
+    ol_labels();
+    if (optlevel >= 2) { k = 3; while (k <= 5) { ol_zok[k] = ol_zlocal(k); k = k + 1; } }
     nout2 = 0; hits = 0; i = 0;
     while (i < ol_n) {
         if (i + 3 < ol_n && ol_is(i, "  .frame 8")) {
@@ -13166,14 +13307,36 @@ int opt_round(void) {
                     if (ol_names(j, 7)) break;
                     j = j + 1;
                 }
+                z = 0 - 1;
                 if (ok) {
                     k = i + 2;
                     while (k < j) { if (ol_names(k, y)) ok = 0; k = k + 1; }
                     if (j > i + 2 && x == y) ok = 0;
+                    if (ok == 0 && optlevel >= 2) {
+                        /* the middle uses y: carry x in a register nobody
+                           needs until it is written again */
+                        zz = 3;
+                        while (zz <= 5 && z < 0) {
+                            if (zz != x && zz != y) {
+                                k = i + 2; bad = 0;
+                                while (k < j) { if (ol_names(k, zz)) bad = 1; k = k + 1; }
+                                if (bad == 0) { if (ol_dead(zz, j + 2)) z = zz; }
+                            }
+                            zz = zz + 1;
+                        }
+                    }
                 }
                 if (ok) {
                     if (x != y) ol_mov(y, x);
                     k = i + 2; while (k < j) { ol_emit(k); k = k + 1; }
+                    hits = hits + 1;
+                    i = j + 2;
+                    continue;
+                }
+                if (z >= 0) {
+                    ol_mov(z, x);
+                    k = i + 2; while (k < j) { ol_emit(k); k = k + 1; }
+                    ol_mov(y, z);
                     hits = hits + 1;
                     i = j + 2;
                     continue;
