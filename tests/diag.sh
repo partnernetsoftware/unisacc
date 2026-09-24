@@ -28,6 +28,17 @@ check() {   # check <name> <want line:col> <want text in message>
         *) bad=$((bad+1)); printf "  FAIL %-14s want %s (%s)\n       got  %s\n" \
                "$name" "$want" "$msg" "$got";;
     esac
+    # ...and the PYTHON front end says the same thing [S-10 #4].  It used
+    # to report the line of its spliced buffer -- `line 553` for line 4 of
+    # a six-line file -- so the two front ends disagreed about where an
+    # error was even when they agreed that there was one.
+    got=$(perl -e 'alarm 120; exec @ARGV' python3 -m unisa tape "$T/$name.c" 2>&1 \
+          | grep -m1 "error:")
+    case "$got" in
+        *"$name.c:$want: error:"*"$msg"*) ok=$((ok+1));;
+        *) bad=$((bad+1)); printf "  FAIL %-14s (python) want %s (%s)\n       got  %s\n" \
+               "$name" "$want" "$msg" "$got";;
+    esac
 }
 
 cat > "$T/ident.c" <<'EOF'

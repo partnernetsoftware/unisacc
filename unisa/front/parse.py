@@ -2776,7 +2776,17 @@ def compile_units(streams, oracle):
         w.unit_start = len(w.em.t.code)
         w.renames = {}
         w.pending = {}
-        w.tu()
+        try:
+            w.tu()
+        except CError as e:
+            # Thirty-odd raise sites say "line N" from their own token; the
+            # one place every error passes through attaches the token the
+            # walker stood on, so the driver can name the USER's file,
+            # line and column instead of a line in the spliced buffer.
+            if not hasattr(e, "tok") and w.tk:
+                e.tok = w.tk[min(w.i, len(w.tk) - 1)]
+                e.unit = k
+            raise
     tape = w.finish_program()
     if "main" not in tape.labels:
         raise CError("no main()")

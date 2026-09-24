@@ -261,6 +261,11 @@ def _decomment(src):
     return "".join(out)
 
 
+# the origin map of the most recent preprocess() call: (file, line) per
+# output line, see there
+LAST_ORIGIN = [None]
+
+
 def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                _seen=None):
     """Returns (text, macros).
@@ -274,8 +279,17 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     here = os.path.dirname(os.path.abspath(path)) if path else None
     out = []
     stack = []            # [(taking, seen_true)]
+    # where[k] lists the (file, line) of every output line element out[k]
+    # produces.  An #include splices a whole header into ONE element, so
+    # without this every line after it was reported hundreds of lines off:
+    # the Python front end said `line 553` for line 4 of a six-line file.
+    where = []
     src = _decomment(_splice(src))
-    for raw in src.splitlines():
+    for lineno, raw in enumerate(src.splitlines(), 1):
+        # every element appended below came from this source line, unless
+        # it is a spliced header, which brings its own origins
+        while len(where) < len(out):
+            where.append([(path, lineno - 1)])
         m = DIRECTIVE.match(raw)
         live = all(t for (t, _) in stack)
         if not m:
@@ -329,6 +343,8 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                                                  found, includes,
                                                  _depth + 1, _seen)
                     out.append(sub)
+                    where.append(LAST_ORIGIN[0] or
+                                 [(found, 0)] * (sub.count("\n") + 1))
                     continue
             out.append("")
         elif act == "macro" and live:
@@ -346,6 +362,9 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
             elif d == "undef" and rest.split():
                 macros.pop(rest.split()[0], None)
         out.append("")
+    while len(where) < len(out):
+        where.append([(path, len(where) + 1)])
+    LAST_ORIGIN[0] = [o for w in where for o in w]
     return "\n".join(out), macros
 
 

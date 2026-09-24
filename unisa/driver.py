@@ -45,17 +45,82 @@ def compile_sources(srcs, oracle, target="lnx/x86_64", paths=None,
 def _compile_once(srcs, oracle, target, paths, includes):
     # Preprocessing is PER FILE (include guards, __FILE__, #define state);
     # only the walk is shared.
-    streams = []
+    streams, seen = [], []
     for src, path in zip(srcs, paths):
         text, macros = preprocess(src, oracle, predefines(target), path,
                                   tuple(includes) + (DEFAULT_INCLUDE,))
-        streams.append(lex(expand(text, macros), oracle))
-    t = compile_units(streams, oracle)
+        from .front import pp as _pp
+        origin = _pp.LAST_ORIGIN[0]
+        ex = expand(text, macros)
+        seen.append((ex, origin))
+        streams.append(lex(ex, oracle))
+    try:
+        t = compile_units(streams, oracle)
+    except CError as e:
+        raise _located(e, seen) from None
     # Which OS the SOURCE was compiled for.  Not the same question as which
     # OS a lowering targets: `#ifdef _WIN32` is decided here, once, and an
     # interpreter has to read the tape's syscall arguments in that light.
     t.src_os = target.split("/")[0]
     return t
+
+
+class CDiag(CError):
+    """A CError that already reads `file:line:col: error: ...`, the shape the
+    C front end prints [S-12] -- so it is printed as it stands."""
+
+
+def _located(e, seen):
+    """[S-12] the user's file, line and column, then the line, then a caret.
+
+    The walker's line numbers count lines of the buffer it was handed, in
+    which every #include has been spliced -- so they are the origin table's
+    INDEX, not a line anyone can find.  The column is measured in the line
+    the parser saw, which is the user's except where a macro expanded; the
+    printed line is that same line, so the caret still points at the token."""
+    tok = getattr(e, "tok", None)
+    unit = getattr(e, "unit", 0)
+    if tok is None or unit >= len(seen):
+        return e
+    text, origin = seen[unit]
+    msg = str(e)
+    # The message's own "line N" is the OFFENDING token's line; the walker
+    # has usually moved past it by the time the error escapes.  Likewise
+    # the token the message quotes is the one to point at.
+    m = re.match(r"line (\d+): ", msg)
+    bline = int(m.group(1)) if m else tok.line
+    # "expected ';', got 'return'" is about the token it GOT; otherwise the
+    # first quoted token is the one the message is about
+    q = (re.search(r"got '([^']+)'", msg) or re.search(r'got "([^"]+)"', msg)
+         or re.search(r"'([^']+)'", msg) or re.search(r'"([^"]+)"', msg))
+    name = q.group(1) if q else None
+    if not origin or bline < 1 or bline > len(origin):
+        return e
+    path, line = origin[bline - 1]
+    lines = text.split("\n")
+    src_line = lines[bline - 1] if bline - 1 < len(lines) else ""
+    # The lexer records a position only for string literals (it needs one
+    # to fold them), so the column is where the token's text first appears
+    # on its line -- exact whenever the token is the line's only copy of
+    # itself, which for the identifiers and punctuation errors name is the
+    # usual case.
+    col = 1
+    for cand in (name, str(tok.text) if tok.text else None):
+        if cand:
+            k = src_line.find(cand)
+            if k >= 0:
+                col = k + 1
+                break
+    m = re.match(r"line \d+: (.*)$", msg, re.S)
+    if m:
+        msg = m.group(1)
+    # C's wording, where the two front ends mean the same thing
+    msg = re.sub(r"^unknown identifier '.*'$", "unknown identifier", msg)
+    out = "%s:%d:%d: error: %s\n  %s\n  %s^" % (
+        path or "<input>", line, col, msg, src_line, " " * (col - 1))
+    d = CDiag(out)
+    d.tok, d.unit = tok, unit
+    return d
 
 
 _LIBC = None
