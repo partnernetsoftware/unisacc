@@ -335,7 +335,7 @@ def cmd_ape(a):
 
     def one(target, stub=b""):
         if a.via:
-            r = subprocess.run([a.via, a.file, "-t", target],
+            r = subprocess.run([a.via, "-O" + a.olevel, a.file, "-t", target],
                                capture_output=True)
             if r.returncode != 0:
                 raise SystemExit("%s: %s" % (a.file, r.stderr.decode()[:200]))
@@ -635,6 +635,9 @@ def main(argv=None):
     apx.add_argument("--via", default=None,
                      help="a unisacc binary to get each target's tape from")
     apx.add_argument("--drive", default="built")
+    apx.add_argument("-O", dest="olevel", default="0",
+                     help="optimisation level passed to --via (the tape is "
+                          "optimised by the C front end) [H1]")
     apx.set_defaults(fn=cmd_ape)
 
     vm = sub.add_parser("vm")

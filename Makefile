@@ -22,6 +22,8 @@ UA     ?= /tmp/ua_ref
 # Suites run concurrently; the default leaves cores free because this
 # machine has overheated under full load.
 JOBS   ?= 4
+# The shipped compiler is built at -O2 [H1]; OPT=0 gives the walker's code.
+OPT    ?= 2
 
 .PHONY: help quick test com release linux bench acc weights clean ref \
         c99 closure corpus
@@ -71,7 +73,7 @@ weights:
 # point of a compiler that writes all six itself.  CI tests; it does not
 # build.
 com: ref
-	@python3 -m unisa ape unisacc.c --via $(UA) -o unisacc.com
+	@python3 -m unisa ape unisacc.c --via $(UA) -O $(OPT) -o unisacc.com
 	@chmod +x unisacc.com
 	@ls -l unisacc.com | awk '{printf "  unisacc.com  %s B\n", $$5}'
 

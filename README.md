@@ -150,12 +150,14 @@ in both back ends), so an image we emit runs on arm64 macOS with no
 whose first bytes are read two ways: Windows sees `MZ` and
 a PE, a Unix shell sees an assignment and then a script that picks the slice
 for the machine it is on. It has run on macOS/arm64, macOS/x86_64 (Rosetta),
-Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 1.3 MB
+Linux/arm64 and Windows/arm64 (through its x64 emulation). It is 1.18 MB
 today: the four Unix slices are gzipped and the script pipes the one it
-picked through `gzip -dc`, and the x86 encoder now uses short forms (mod=00
+picked through `gzip -dc`, the x86 encoder uses short forms (mod=00
 and mod=01 displacements, `0x83` imm8, `mov r32, imm32`) instead of spending
-44% of its bytes on the zero halves of disp32/imm32. That is 5.16 MB down to
-1.29 MB. The nineteen C headers travel inside it, so it compiles
+44% of its bytes on the zero halves of disp32/imm32, and `make com` builds
+the compiler at `-O2`, which keeps the expression stack's top in a register
+(the arm64 slices are 29% smaller than at `-O0`). That is 5.16 MB down to
+1.18 MB. The nineteen C headers travel inside it, so it compiles
 `#include <stdio.h>` from any directory; `-I`, `-D`, `-o`, `-E`, and a `#!` line
 work the way tcc's do, and the flags a Makefile passes anyway (`-Wall`,
 `-O2`, `-g`, `-std=c99`) are accepted rather than refused — there is one
