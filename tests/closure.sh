@@ -39,9 +39,10 @@ for f in "$@"; do
     done
     if [ -n "$HOSTT" ]; then
         tt=$(echo "$HOSTT" | tr / _)
-        cp "$D/ua.$tt" "$D/run"; chmod +x "$D/run"
-        command -v codesign >/dev/null && codesign -f -s - "$D/run" >/dev/null 2>&1
-        (cd "$D" && perl -e 'alarm 30; exec @ARGV' ./run > "$D/run.out" 2>/dev/null)
+        # In memory (-run), not from disk: a fresh file's first exec is a
+        # 0.5-0.9 s XProtect scan, and the on-disk image is executed by
+        # native.sh -- the same bytes, as the cmp above just proved.
+        (cd "$D" && perl -e 'alarm 30; exec @ARGV' "$UA" "$R/$f" -run > "$D/run.out" 2>/dev/null)
         python3 -m unisa vm --os "${HOSTT%/*}" "$D/tape.$tt" > "$D/vm.out" 2>/dev/null
         cmp -s "$D/run.out" "$D/vm.out" && echo "ran" >> "$D/verdict" || echo "RANWRONG" >> "$D/verdict"
     fi

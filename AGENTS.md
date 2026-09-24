@@ -51,6 +51,9 @@ catches it.
 
 ## Long commands
 
+**Ceiling: 60 s per run** (owner's rule, 2026-09-25). Every watchdog is at
+most 60 s; a suite that needs longer gets split or narrowed.
+
 Anything that might run for more than a minute goes in the background
 (`run_in_background`) or carries an explicit bounded timeout. A foreground
 suite once blocked the session for two hours.

@@ -895,6 +895,7 @@ int diag_at(long p, char *msg, char *kind) {
    raised while parked are cascades of the first and are not reported. */
 int tp; int ntok;        /* the walker's cursor and its bound: defined with the lexer, used here */
 int kind(int i);
+int undef_calls(void);
 int tidx(char *s, int L);
 int nerr;                /* errors reported so far */
 int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
@@ -1473,12 +1474,23 @@ int autoinc(void) {
         while (n < k) { incpath[p] = hs[n]; p = p + 1; n = n + 1; }
         incpath[p] = 0;
         fd = ropen(incpath);
-        if (fd >= 0) {
-            n = __read(fd, incbuf, MAXINC);
-            __close(fd);
-            if (n > 0) { if (srcix_on == 0) srcix_build();
-                         if (hdrneeded(n)) incappend(hs + st, k - st); }
+        n = 0 - 1;
+        if (fd >= 0) { n = __read(fd, incbuf, MAXINC); __close(fd); }
+        else if (nostdinc == 0) {
+            /* not beside us: the copy we carry, as #include falls back to.
+               Only the relative path was tried, so outside the source tree
+               -- which is everywhere the shipped binary runs -- nothing was
+               appended, strcpy stayed undefined, and the program jumped
+               into garbage [S-11] */
+            p = vfind(HDR_NAMES, NHDR, hs + st, k - st);
+            if (p >= 0) {
+                char *t; t = hdr_text(p); n = 0;
+                while (t[n]) { if (n < MAXINC) incbuf[n] = t[n]; n = n + 1; }
+                if (n >= MAXINC) n = 0 - 1;
+            }
         }
+        if (n > 0) { if (srcix_on == 0) srcix_build();
+                     if (hdrneeded(n)) incappend(hs + st, k - st); }
         k = k + 1;
     }
     if (srcix_on == 0) srcix_build();
@@ -7316,6 +7328,7 @@ int fe_units(char **paths, int npath, char *t) {
            "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
     }
     emit_pool();
+    if (nerr == 0) nerr = undef_calls();
     if (nwarn > 0) { if (nerr == 0) {
         en2(nwarn); __write(2, nwarn == 1 ? " warning generated.\n" : " warnings generated.\n", nwarn == 1 ? 20 : 21);
     } }
@@ -7324,6 +7337,65 @@ int fe_units(char **paths, int npath, char *t) {
         return 1;
     }
     return 0;
+}
+
+/* A call to a function no unit defines.  There is no linker, so such a
+   call was written to the tape as-is, and the back end resolved the
+   missing label to offset 0 -- the program jumped into its own entry and
+   hung or crashed.  The Python front end has always refused it; this is
+   the same refusal, made after every unit is walked (a later unit may
+   define the name), and shaped like a linker's, since by then the calling
+   unit's text is gone. */
+#define UD_SIZE 65536
+int ud_tab[UD_SIZE];
+int ud_same(int a, int b) {          /* do the names at out+a, out+b match */
+    int ea; int eb;
+    while (1) {
+        ea = out[a] == 10 || out[a] == 58;   /* a label ends in `:`, a call in */
+        eb = out[b] == 10 || out[b] == 58;   /* a newline: both are the end */
+        if (ea || eb) return ea && eb;
+        if (out[a] != out[b]) return 0;
+        a = a + 1; b = b + 1;
+    }
+    return 0;
+}
+int ud_len(int a) { int n; n = 0; while (out[a + n] != 10 && out[a + n] != 58) n = n + 1; return n; }
+int ud_slot(int a) {                  /* its slot: found, or the free one */
+    int h;
+    h = vhash(out + a, ud_len(a)) * 16 + (ud_len(a) & 15);
+    h = h & (UD_SIZE - 1);
+    while (ud_tab[h]) { if (ud_same(ud_tab[h] - 1, a)) return h; h = (h + 1) & (UD_SIZE - 1); }
+    return h;
+}
+int undef_calls(void) {
+    int i; int e; int h; int bad;
+    i = 0; while (i < UD_SIZE) { ud_tab[i] = 0; i = i + 1; }
+    i = 0;                            /* every `name:` that starts a line */
+    while (i < nout) {
+        e = i; while (e < nout) { if (out[e] == 10) break; e = e + 1; }
+        if (e > i + 1) { if (out[e - 1] == 58) { if (out[i] != 32) { if (out[i] != 46) {
+            h = ud_slot(i); if (ud_tab[h] == 0) ud_tab[h] = i + 1;
+        } } } }
+        i = e + 1;
+    }
+    bad = 0; i = 0;
+    while (i < nout) {
+        e = i; while (e < nout) { if (out[e] == 10) break; e = e + 1; }
+        /* `  call NAME` -- es() has already asked irsel for the spelling */
+        if (e - i > 7) { if (out[i] == 32) { if (out[i + 1] == 32) { if (out[i + 2] == 99) {
+            if (out[i + 3] == 97) { if (out[i + 4] == 108) { if (out[i + 5] == 108) { if (out[i + 6] == 32) {
+                h = ud_slot(i + 7);
+                if (ud_tab[h] == 0) {
+                    ud_tab[h] = i + 8;        /* report each name once */
+                    __write(2, "unisacc: error: undefined function '", 36);
+                    __write(2, out + i + 7, e - i - 7);
+                    __write(2, "'\n", 2);
+                    bad = bad + 1;
+                }
+            } } } } } } } }
+        i = e + 1;
+    }
+    return bad;
 }
 
 #ifndef UNISACC_NO_MAIN

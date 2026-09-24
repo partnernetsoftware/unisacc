@@ -19,7 +19,7 @@ say() {   # say <name> <want> <got>
     if [ "$2" = "$3" ]; then ok=$((ok+1))
     else bad=$((bad+1)); printf "  FAIL %-22s want [%s] got [%s]\n" "$1" "$2" "$3"; fi
 }
-run() { (cd "$T" && perl -e 'alarm 120; exec @ARGV' "$UA_RUN" -run "$@" 2>&1); }
+run() { (cd "$T" && perl -e 'alarm 20; exec @ARGV' "$UA_RUN" -run "$@" 2>&1); }
 
 mkdir -p "$T/inc"
 printf '#define GREETING "hello from an include dir"\n' > "$T/inc/greet.h"
@@ -121,6 +121,17 @@ say "-nostdinc refuses <stdio.h>" "refused, as cc does" "$got"
 (cd "$T" && perl -e 'alarm 120; exec @ARGV' "$UA_RUN" -MD inc.c -S -I inc -o inc.tape >/dev/null 2>&1)
 say "-MD names the target" "inc.tape:" "$(head -1 "$T/inc.d" 2>/dev/null | tr -d ' \\')"
 say "-MD lists the header" "greet.h" "$(grep -o 'greet.h' "$T/inc.d" 2>/dev/null | head -1)"
+
+# no #include at all, outside the repo: the header is found on demand from
+# the copies we carry.  autoinc only tried ./include/, so this program got
+# no strcpy, and -run spun in the garbage the missing label resolved to
+printf 'int main(void){ char b[8]; strcpy(b, "auto"); printf("%%s %%d\\n", b, (int)strlen(b)); return 0; }\n' > "$T/noinc.c"
+say "libc with no #include" "auto 4" "$(run noinc.c)"
+# a call nobody defines is an error, not a jump to offset 0
+printf 'int main(void){ return nosuchfn(3); }\n' > "$T/undef.c"
+got=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" undef.c -S -o undef.tape 2>&1; echo "rc=$?") | tr '\n' ' ')
+case "$got" in *"undefined function 'nosuchfn'"*"rc=1"*) got=refused;; esac
+say "undefined function" "refused" "$got"
 
 # which build is this: a release has to be identifiable from the binary
 got=$( (cd "$T" && perl -e 'alarm 30; exec @ARGV' "$UA_RUN" --version 2>&1) )
