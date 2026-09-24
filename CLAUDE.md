@@ -70,6 +70,14 @@ Things that cost time here before they were written down:
   ablation run with no per-compile timeout hung for twenty minutes on one
   looping compile. macOS has no `timeout`: use
   `perl -e 'alarm N; exec @ARGV' …`.
+- **`alarm` binds only the process it execs**, not anything that process
+  starts. A test that BUILDS a program and then runs it has two things to
+  bound, and the second is the dangerous one: `cc -o p f.c && ./p` leaves
+  `./p` unbounded. A generated program that never terminated once span at
+  99.8% CPU for the better part of an hour after the harness that started
+  it was gone, and the heat was blamed on the suites. When the machine is
+  hot, look for a runaway FIRST:
+  `ps -eo pid,pcpu,command | awk '$2 > 20'`.
 - **`pkill -f` fails under this shell's locale** ("illegal byte sequence").
   Kill by PID (`ps -eo pid,command | grep …`).
 - `nativeboot` is the long pole (~4 min): it compiles `unisacc.c` with
