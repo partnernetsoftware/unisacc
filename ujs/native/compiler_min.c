@@ -32,7 +32,7 @@ static char *strncpy(char *d, const char *s, uint32_t n) {
 
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
-        HOST_SCRATCH = 950000, MEM_PAGES = 64 };
+        HOST_SCRATCH = 950000, MEM_PAGES = 128 };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4 };
 
 static uint8_t  g_heap[256 * 1024];
@@ -232,7 +232,7 @@ enum {
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
   OP_RET, OP_FRET, OP_HRET
 };
-enum { MAXC = 8192, MAXL = 128, MAXG = 64, MAXN = 32 };
+enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32 };
 typedef struct { uint8_t op; int64_t a; } Ins;
 typedef struct {
   Ins code[MAXC]; int nc;
@@ -955,10 +955,10 @@ static int mk_list_body(Buf *c) {
   if (!bi32(c, (int32_t)(TAG_LIST))) return 0;
   if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
-  if (!bu8(c, 0x3b) || !bu8(c, 0x01) || !bleu(c, 0)) return 0; /* i32.store16 */
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0; /* i32.store len */
   /* freep = align(p + 8 + n*4) */
   if (!bi32(c, (int32_t)(0))) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
@@ -1033,11 +1033,12 @@ static int list_set_body(Buf *c, int hvi) {
 
 
 static int len_of_body(Buf *c) {
+  /* u32 length at +4 (was u16 at +2; SRC can exceed 65535) */
   if (!bleu(c, 0)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
-  if (!bu8(c, 0x2f) || !bu8(c, 0x01) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0; /* i32.load */
   return bu8(c, 0x0b);
 }
 
@@ -1056,10 +1057,10 @@ static int mk_str_body(Buf *c) {
   if (!bi32(c, (int32_t)(TAG_STR))) return 0;
   if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 2)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
-  if (!bu8(c, 0x3b) || !bu8(c, 0x01) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0; /* i32.store len */
   if (!bi32(c, (int32_t)(0))) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 2)) return 0;
   if (!bi32(c, (int32_t)(8))) return 0;
@@ -1120,10 +1121,10 @@ static int mk_dict_body(Buf *c) {
   if (!bi32(c, (int32_t)(TAG_DICT))) return 0;
   if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
-  if (!bu8(c, 0x3b) || !bu8(c, 0x01) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x36) || !bu8(c, 0x02) || !bleu(c, 0)) return 0; /* i32.store len */
   if (!bi32(c, (int32_t)(0))) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
   if (!bi32(c, (int32_t)(8))) return 0;
@@ -1226,9 +1227,9 @@ static int dict_get_body(Buf *c) {
   if (!bleu(c, 1) || !bleu(c, 3) || !bu8(c, 0x7f)) return 0;
   /* n = len_of(d) */
   if (!bu8(c, 0x20) || !bleu(c, 0)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
-  if (!bu8(c, 0x2f) || !bu8(c, 0x01) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x21) || !bleu(c, 2)) return 0;
   if (!bi32(c, (int32_t)(0))) return 0;
   if (!bu8(c, 0x21) || !bleu(c, 3)) return 0;
@@ -1250,13 +1251,13 @@ static int dict_get_body(Buf *c) {
   if (!bu8(c, 0x21) || !bleu(c, 4)) return 0;
   /* compare len */
   if (!bu8(c, 0x20) || !bleu(c, 4)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
-  if (!bu8(c, 0x2f) || !bu8(c, 0x01) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x20) || !bleu(c, 1)) return 0;
-  if (!bi32(c, (int32_t)(2))) return 0;
+  if (!bi32(c, (int32_t)(4))) return 0;
   if (!bu8(c, 0x6a)) return 0;
-  if (!bu8(c, 0x2f) || !bu8(c, 0x01) || !bleu(c, 0)) return 0;
+  if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x46)) return 0; /* i32.eq */
   if (!bu8(c, 0x04) || !bu8(c, 0x40)) return 0;
   /* byte-compare: for short keys, compare first 8 bytes as i64 if len<=8 */

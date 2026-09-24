@@ -128,7 +128,7 @@ def _helpers() -> str:
   (func $len_of (param $h i32) (result i32)
     (if (result i32) (i32.eqz (local.get $h))
       (then (i32.const 0))
-      (else (i32.load16_u (i32.add (local.get $h) (i32.const 2))))))
+      (else (i32.load (i32.add (local.get $h) (i32.const 4))))))
   (func $i64_of (param $h i32) (result i64)
     (i64.load (i32.add (local.get $h) (i32.const 8))))
   (func $mk_i64 (param $v i64) (result i32)
@@ -164,7 +164,7 @@ def _helpers() -> str:
     (local $p i32) (local $i i32)
     (local.set $p (call $alloc (i32.add (i32.const 8) (local.get $n))))
     (i32.store8 (local.get $p) (i32.const {TAG_STR}))
-    (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $n))
+    (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $n))
     (local.set $i (i32.const 0))
     (block $done (loop $L
       (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
@@ -217,7 +217,7 @@ def _helpers() -> str:
         (local.set $nb (call $len_of (local.get $b)))
         (local.set $q (call $alloc (i32.add (i32.const 8) (i32.add (local.get $na) (local.get $nb)))))
         (i32.store8 (local.get $q) (i32.const {TAG_STR}))
-        (i32.store16 (i32.add (local.get $q) (i32.const 2)) (i32.add (local.get $na) (local.get $nb)))
+        (i32.store (i32.add (local.get $q) (i32.const 4)) (i32.add (local.get $na) (local.get $nb)))
         (local.set $i (i32.const 0))
         (block $c1 (loop $L1
           (br_if $c1 (i32.ge_u (local.get $i) (local.get $na)))
@@ -449,7 +449,7 @@ def _host_api_wat(flat_slots: list[str], local_names: list[str],
         (local.set $p (call $alloc (i32.add (i32.const 8)
           (i32.mul (local.get $n) (i32.const 4)))))
         (i32.store8 (local.get $p) (i32.const {TAG_LIST}))
-        (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $n))
+        (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $n))
         (local.set $i (i32.const 0))
         (block $done (loop $L
           (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
@@ -478,7 +478,7 @@ def _host_api_wat(flat_slots: list[str], local_names: list[str],
         (local.set $p (call $alloc (i32.add (i32.const 8)
           (i32.mul (local.get $n) (i32.const 8)))))
         (i32.store8 (local.get $p) (i32.const {TAG_DICT}))
-        (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $n))
+        (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $n))
         (local.set $i (i32.const 0))
         (block $done (loop $L
           (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
@@ -568,7 +568,7 @@ def _body(fn: Fn, str_off: list[tuple[int, int]], fn_index: dict[str, int],
           (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.const 0))))
           (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $i) (i32.const 4)))))
           (i32.store8 (local.get $p) (i32.const {TAG_LIST}))
-          (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $i))
+          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $i))
           (local.set $t (i32.const 0))
           (block $rd (loop $RL
             (br_if $rd (i32.ge_u (local.get $t) (local.get $i)))
@@ -666,7 +666,7 @@ def _body(fn: Fn, str_off: list[tuple[int, int]], fn_index: dict[str, int],
           (local.set $nn (i32.const {cnt}))
           (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 4)))))
           (i32.store8 (local.get $p) (i32.const {TAG_LIST}))
-          (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $nn))
+          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $nn))
           (local.set $i (local.get $nn))
           (block $done (loop $L
             (br_if $done (i32.eqz (local.get $i)))
@@ -682,7 +682,7 @@ def _body(fn: Fn, str_off: list[tuple[int, int]], fn_index: dict[str, int],
           (local.set $nn (i32.const {cnt}))
           (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 8)))))
           (i32.store8 (local.get $p) (i32.const {TAG_DICT}))
-          (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $nn))
+          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $nn))
           (local.set $i (local.get $nn))
           (block $done (loop $L
             (br_if $done (i32.eqz (local.get $i)))
@@ -700,7 +700,7 @@ def _body(fn: Fn, str_off: list[tuple[int, int]], fn_index: dict[str, int],
           (local.set $nn (i32.const {cnt}))
           (local.set $p (call $alloc (i32.add (i32.const 8) (i32.mul (local.get $nn) (i32.const 4)))))
           (i32.store8 (local.get $p) (i32.const {TAG_TUP}))
-          (i32.store16 (i32.add (local.get $p) (i32.const 2)) (local.get $nn))
+          (i32.store (i32.add (local.get $p) (i32.const 4)) (local.get $nn))
           (local.set $i (local.get $nn))
           (block $done (loop $L
             (br_if $done (i32.eqz (local.get $i)))

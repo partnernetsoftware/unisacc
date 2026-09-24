@@ -368,4 +368,4 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 stage2≡stage1 mainBody", a.length);
 ' "$OUT/stage1.wasm" "$OUT/stage2.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v7 ===/f64 · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v8 dict · len u32 · stage2≡stage1)"

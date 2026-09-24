@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v7: v6 + === + f64 lit/arith/cmp/neg/I2F mix; OPS/OUT 32k; stage2≡stage1.
+// v8: v7 + dict {k:v}; host list len u32; OPS/OUT 32k; stage2≡stage1.
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -39,6 +39,12 @@ let fden = 0;
 let fexp = 0;
 let fsc = -1;
 let fl = 0;
+let dsc = -1;
+let dpn = 0;
+let dpi = 0;
+let dkn = 0;
+let dsave = 0;
+let DKEY = list(8);
 let TWO52 = 4503599627370496;
 
 let OUT = list(32768);
@@ -47,10 +53,10 @@ let KEYS = list(96);
 let LTY = list(96);
 let GKEYS = list(16);
 let GTY = list(16);
-let ST = list(64);
-let SOP = list(64);
-let SPR = list(64);
-let CST = list(32);
+let ST = list(128);
+let SOP = list(128);
+let SPR = list(128);
+let CST = list(64);
 
 n = len(SRC);
 
@@ -561,6 +567,93 @@ while (finished == 0) {
                       ST[bsp - 1] = 6;
                       ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
                     } else {
+                    if (SRC[pos] == 123) {
+                      // dict { k: v, ... }
+                      pos = pos + 1;
+                      done = 0;
+                      while (done == 0) {
+                        if (pos >= n) { done = 1; }
+                        else {
+                          ch = SRC[pos];
+                          if (ch == 32) { pos = pos + 1; }
+                          else {
+                            if (ch == 9) { pos = pos + 1; }
+                            else {
+                              if (ch == 10) { pos = pos + 1; }
+                              else {
+                                if (ch == 13) { pos = pos + 1; }
+                                else { done = 1; }
+                              }
+                            }
+                          }
+                        }
+                      }
+                      if (pos >= n) { ok = 0; bsp = 0; }
+                      else {
+                        if (SRC[pos] == 125) {
+                          pos = pos + 1;
+                          if (dsc < 0) {
+                            dsc = kn; KEYS[kn] = 0; LTY[kn] = 127; kn = kn + 1;
+                          }
+                          OPS[opsn] = 65; opsn = opsn + 1;
+                          OPS[opsn] = 0; opsn = opsn + 1;
+                          OPS[opsn] = 16; opsn = opsn + 1;
+                          OPS[opsn] = 12; opsn = opsn + 1;
+                          ety = 3; elem_f = 0;
+                          ST[bsp - 1] = 2;
+                        } else {
+                          dsave = pos;
+                          dpn = 1; dpi = 0; cd = 0;
+                          while (cd == 0) {
+                            if (pos >= n) { cd = 1; ok = 0; }
+                            else {
+                              ch = SRC[pos];
+                              if (ch == 123) { dpi = dpi + 1; pos = pos + 1; }
+                              else {
+                                if (ch == 91) { dpi = dpi + 1; pos = pos + 1; }
+                                else {
+                                  if (ch == 125) {
+                                    if (dpi == 0) { cd = 1; }
+                                    else { dpi = dpi - 1; pos = pos + 1; }
+                                  } else {
+                                    if (ch == 93) {
+                                      if (dpi > 0) { dpi = dpi - 1; }
+                                      pos = pos + 1;
+                                    } else {
+                                      if (ch == 44) {
+                                        if (dpi == 0) { dpn = dpn + 1; }
+                                        pos = pos + 1;
+                                      } else { pos = pos + 1; }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                          if (ok != 1) { bsp = 0; }
+                          else {
+                            pos = dsave;
+                            if (dsc < 0) {
+                              dsc = kn; KEYS[kn] = 0; LTY[kn] = 127; kn = kn + 1;
+                            }
+                            OPS[opsn] = 65; opsn = opsn + 1;
+                            i = dpn; done = 0;
+                            while (done == 0) {
+                              ch = i % 128; i = i / 128;
+                              if (i == 0) { OPS[opsn] = ch; opsn = opsn + 1; done = 1; }
+                              else { OPS[opsn] = ch + 128; opsn = opsn + 1; }
+                            }
+                            OPS[opsn] = 16; opsn = opsn + 1;
+                            OPS[opsn] = 12; opsn = opsn + 1;
+                            OPS[opsn] = 33; opsn = opsn + 1;
+                            OPS[opsn] = dsc; opsn = opsn + 1;
+                            dpi = 0;
+                            ST[bsp - 1] = 13;
+                            SPR[bsp - 1] = dpn;
+                          }
+                        }
+                      }
+                    } else {
                     ch = SRC[pos];
                     cd = 0;
                     fneg = 0;
@@ -742,6 +835,7 @@ while (finished == 0) {
                           ST[bsp - 1] = 2;
                         }
                       }
+                    }
                     }
                     }
                     }
@@ -1102,7 +1196,191 @@ while (finished == 0) {
                               }
                             }
                           } else {
-                            ok = 0; bsp = 0;
+                            if (st == 13) {
+                              // dict pair: key : value
+                              done = 0;
+                              while (done == 0) {
+                                if (pos >= n) { done = 1; }
+                                else {
+                                  ch = SRC[pos];
+                                  if (ch == 32) { pos = pos + 1; }
+                                  else {
+                                    if (ch == 9) { pos = pos + 1; }
+                                    else {
+                                      if (ch == 10) { pos = pos + 1; }
+                                      else {
+                                        if (ch == 13) { pos = pos + 1; }
+                                        else { done = 1; }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                              dkn = 0;
+                              done = 0;
+                              while (done == 0) {
+                                if (pos >= n) { done = 1; }
+                                else {
+                                  if (dkn >= 8) { done = 1; }
+                                  else {
+                                    ch = SRC[pos]; cd = 0;
+                                    if (ch >= 97) { if (ch <= 122) { cd = 1; } }
+                                    if (ch >= 65) { if (ch <= 90) { cd = 1; } }
+                                    if (ch == 95) { cd = 1; }
+                                    if (dkn > 0) { if (ch >= 48) { if (ch <= 57) { cd = 1; } } }
+                                    if (cd == 0) { done = 1; }
+                                    else {
+                                      DKEY[dkn] = ch;
+                                      dkn = dkn + 1;
+                                      pos = pos + 1;
+                                    }
+                                  }
+                                }
+                              }
+                              if (dkn == 0) { ok = 0; bsp = 0; }
+                              else {
+                                OPS[opsn] = 32; opsn = opsn + 1;
+                                OPS[opsn] = dsc; opsn = opsn + 1;
+                                i = 0;
+                                while (i < dkn) {
+                                  OPS[opsn] = 65; opsn = opsn + 1;
+                                  j = 1024 + i; done = 0;
+                                  while (done == 0) {
+                                    ch = j % 128; j = j / 128;
+                                    if (j == 0) { OPS[opsn] = ch; opsn = opsn + 1; done = 1; }
+                                    else { OPS[opsn] = ch + 128; opsn = opsn + 1; }
+                                  }
+                                  OPS[opsn] = 65; opsn = opsn + 1;
+                                  k = DKEY[i];
+                                  if (k > 63) {
+                                    OPS[opsn] = k + 128; opsn = opsn + 1;
+                                    OPS[opsn] = 0; opsn = opsn + 1;
+                                  } else {
+                                    OPS[opsn] = k; opsn = opsn + 1;
+                                  }
+                                  OPS[opsn] = 58; opsn = opsn + 1;
+                                  OPS[opsn] = 0; opsn = opsn + 1;
+                                  OPS[opsn] = 0; opsn = opsn + 1;
+                                  i = i + 1;
+                                }
+                                OPS[opsn] = 65; opsn = opsn + 1;
+                                OPS[opsn] = 128; opsn = opsn + 1;
+                                OPS[opsn] = 8; opsn = opsn + 1;
+                                OPS[opsn] = 65; opsn = opsn + 1;
+                                OPS[opsn] = dkn; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                OPS[opsn] = 11; opsn = opsn + 1;
+                                done = 0;
+                                while (done == 0) {
+                                  if (pos >= n) { done = 1; }
+                                  else {
+                                    ch = SRC[pos];
+                                    if (ch == 32) { pos = pos + 1; }
+                                    else {
+                                      if (ch == 9) { pos = pos + 1; }
+                                      else {
+                                        if (ch == 10) { pos = pos + 1; }
+                                        else {
+                                          if (ch == 13) { pos = pos + 1; }
+                                          else { done = 1; }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                                if (pos >= n) { ok = 0; bsp = 0; }
+                                else {
+                                  if (SRC[pos] != 58) { ok = 0; bsp = 0; }
+                                  else {
+                                    pos = pos + 1;
+                                    // stack: dict, key — parse value under st=14
+                                    ST[bsp - 1] = 14;
+                                    SOP[bsp - 1] = dpi;
+                                    ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                                  }
+                                }
+                              }
+                            } else {
+                              if (st == 14) {
+                                // after dict value
+                                if (ety == 1) {
+                                  OPS[opsn] = 16; opsn = opsn + 1;
+                                  OPS[opsn] = 0; opsn = opsn + 1;
+                                } else {
+                                  if (ety == 2) {
+                                    OPS[opsn] = 16; opsn = opsn + 1;
+                                    OPS[opsn] = 4; opsn = opsn + 1;
+                                  }
+                                }
+                                OPS[opsn] = 65; opsn = opsn + 1;
+                                OPS[opsn] = SOP[bsp - 1]; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                OPS[opsn] = 16; opsn = opsn + 1;
+                                dpi = SOP[bsp - 1] + 1;
+                                dpn = SPR[bsp - 1];
+                                if (dpi < dpn) {
+                                  done = 0;
+                                  while (done == 0) {
+                                    if (pos >= n) { done = 1; }
+                                    else {
+                                      ch = SRC[pos];
+                                      if (ch == 32) { pos = pos + 1; }
+                                      else {
+                                        if (ch == 9) { pos = pos + 1; }
+                                        else {
+                                          if (ch == 10) { pos = pos + 1; }
+                                          else {
+                                            if (ch == 13) { pos = pos + 1; }
+                                            else { done = 1; }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                  if (pos >= n) { ok = 0; bsp = 0; }
+                                  else {
+                                    if (SRC[pos] != 44) { ok = 0; bsp = 0; }
+                                    else {
+                                      pos = pos + 1;
+                                      ST[bsp - 1] = 13;
+                                      SPR[bsp - 1] = dpn;
+                                    }
+                                  }
+                                } else {
+                                  done = 0;
+                                  while (done == 0) {
+                                    if (pos >= n) { done = 1; }
+                                    else {
+                                      ch = SRC[pos];
+                                      if (ch == 32) { pos = pos + 1; }
+                                      else {
+                                        if (ch == 9) { pos = pos + 1; }
+                                        else {
+                                          if (ch == 10) { pos = pos + 1; }
+                                          else {
+                                            if (ch == 13) { pos = pos + 1; }
+                                            else { done = 1; }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                  if (pos >= n) { ok = 0; bsp = 0; }
+                                  else {
+                                    if (SRC[pos] != 125) { ok = 0; bsp = 0; }
+                                    else {
+                                      pos = pos + 1;
+                                      OPS[opsn] = 32; opsn = opsn + 1;
+                                      OPS[opsn] = dsc; opsn = opsn + 1;
+                                      ety = 3; elem_f = 0;
+                                      ST[bsp - 1] = 2;
+                                    }
+                                  }
+                                }
+                              } else {
+                                ok = 0; bsp = 0;
+                              }
+                            }
                           }
                         }
                       }
@@ -1630,13 +1908,15 @@ if (ok == 1) {
   OUT[outn] = 0; outn = outn + 1;
   OUT[outn] = 11; outn = outn + 1;
 } else {
-  OUT[0] = 0;
-  OUT[1] = 66;
-  OUT[2] = 0;
-  OUT[3] = 16;
-  OUT[4] = 0;
-  OUT[5] = 15;
-  OUT[6] = 0;
+  OUT[0] = 255;
+  OUT[1] = pos % 256;
+  i = pos / 256;
+  OUT[2] = i % 256;
+  i = i / 256;
+  OUT[3] = i % 256;
+  OUT[4] = kn;
+  OUT[5] = want;
+  OUT[6] = depth;
   OUT[7] = 11;
   outn = 8;
 }

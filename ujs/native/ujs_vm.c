@@ -81,7 +81,7 @@ static f64 f64_of(u32 h) {
 }
 static u32 mk_str(const u8 *s, u32 n) {
   u32 p = alloc(8+n); u32 i;
-  mem[p]=TAG_STR; wr16(p+2,(u16)n);
+  mem[p]=TAG_STR; wr32(p+4,n);
   for (i=0;i<n;i++) mem[p+8+i]=s[i];
   return p;
 }
@@ -91,7 +91,7 @@ static u32 mk_str_lit(const char *s) {
 }
 static u32 tag_of(u32 h) { return h ? mem[h] : TAG_NULL; }
 static i64 i64_of(u32 h) { return rd64(h+8); }
-static u32 len_of(u32 h) { return h ? rd16(h+2) : 0; }
+static u32 len_of(u32 h) { return h ? rd32(h+4) : 0; }
 static u8 *str_ptr(u32 h) { return &mem[h+8]; }
 
 static int truthy(u32 h) {
@@ -176,7 +176,7 @@ static u32 dict_grow_set(u32 d, u32 key, u32 val) {
   u32 n = len_of(d), p, i;
   if (dict_set(d, key, val)) return d;
   p = alloc(8 + (n+1)*8);
-  mem[p]=TAG_DICT; wr16(p+2,(u16)(n+1));
+  mem[p]=TAG_DICT; wr32(p+4,n+1);
   for (i=0;i<n;i++) {
     wr32(p+8+i*8, rd32(d+8+i*8));
     wr32(p+8+i*8+4, rd32(d+8+i*8+4));
@@ -255,7 +255,7 @@ static u32 run_code(u32 base, u32 len) {
       if (op==OP_ADD && tag_of(a)==TAG_STR && tag_of(b)==TAG_STR) {
         u32 na=len_of(a), nb=len_of(b);
         u32 q = alloc(8+na+nb);
-        mem[q]=TAG_STR; wr16(q+2,(u16)(na+nb));
+        mem[q]=TAG_STR; wr32(q+4,na+nb);
         for (i=0;i<na;i++) mem[q+8+i]=str_ptr(a)[i];
         for (i=0;i<nb;i++) mem[q+8+na+i]=str_ptr(b)[i];
         push(q); break;
@@ -378,15 +378,15 @@ static u32 run_code(u32 base, u32 len) {
       break;
     }
     case OP_MKLIST:
-      n=mem[pc++]; p=alloc(8+n*4); mem[p]=TAG_LIST; wr16(p+2,(u16)n);
+      n=mem[pc++]; p=alloc(8+n*4); mem[p]=TAG_LIST; wr32(p+4,n);
       for (i=n;i>0;i--) wr32(p+8+(i-1)*4, pop());
       push(p); break;
     case OP_MKTUP:
-      n=mem[pc++]; p=alloc(8+n*4); mem[p]=TAG_TUP; wr16(p+2,(u16)n);
+      n=mem[pc++]; p=alloc(8+n*4); mem[p]=TAG_TUP; wr32(p+4,n);
       for (i=n;i>0;i--) wr32(p+8+(i-1)*4, pop());
       push(p); break;
     case OP_MKDICT:
-      n=mem[pc++]; p=alloc(8+n*8); mem[p]=TAG_DICT; wr16(p+2,(u16)n);
+      n=mem[pc++]; p=alloc(8+n*8); mem[p]=TAG_DICT; wr32(p+4,n);
       for (i=n;i>0;i--) { b=pop(); a=pop(); wr32(p+8+(i-1)*8,a); wr32(p+8+(i-1)*8+4,b); }
       push(p); break;
     case OP_IDX:
@@ -446,7 +446,7 @@ static u32 run_code(u32 base, u32 len) {
       a=pop();
       if (tag_of(a)!=TAG_DICT) return 0;
       n = len_of(a);
-      p = alloc(8+n*4); mem[p]=TAG_LIST; wr16(p+2,(u16)n);
+      p = alloc(8+n*4); mem[p]=TAG_LIST; wr32(p+4,n);
       for (i=0;i<n;i++) wr32(p+8+i*4, rd32(a+8+i*8));
       push(p); break;
     }
@@ -469,7 +469,7 @@ static u32 run_code(u32 base, u32 len) {
       break;
     }
     case OP_RESTPACK:
-      n=mem[pc++]; p=alloc(8+n*4); mem[p]=TAG_LIST; wr16(p+2,(u16)n);
+      n=mem[pc++]; p=alloc(8+n*4); mem[p]=TAG_LIST; wr32(p+4,n);
       for (i=n;i>0;i--) wr32(p+8+(i-1)*4, pop());
       push(p); break;
     case OP_TYPEOF: push(typeof_str(pop())); break;
@@ -507,7 +507,7 @@ static u32 run_code(u32 base, u32 len) {
       for (i=0;i<nparams && i<argc;i++) locals[i]=args[i];
       if (rest_ix != 0xFFFFFFFFu) {
         u32 rn = argc>nparams ? argc-nparams : 0;
-        p=alloc(8+rn*4); mem[p]=TAG_LIST; wr16(p+2,(u16)rn);
+        p=alloc(8+rn*4); mem[p]=TAG_LIST; wr32(p+4,rn);
         for (i=0;i<rn;i++) wr32(p+8+i*4, args[nparams+i]);
         locals[rest_ix]=p;
       }
@@ -599,10 +599,10 @@ u32 host_mk_str(u32 ptr, u32 n) { return mk_str(&mem[ptr], n); }
 
 u32 host_mk_list(u32 n) {
   u32 p, i;
-  if (n > 4096) return 0;
+  if (n > 1048576) return 0;
   p = alloc(8 + n * 4);
   mem[p] = TAG_LIST;
-  wr16(p + 2, (u16)n);
+  wr32(p + 4, n);
   for (i = 0; i < n; i++) wr32(p + 8 + i * 4, 0);
   return p;
 }
@@ -616,10 +616,10 @@ u32 host_list_get(u32 h, u32 i) {
 }
 u32 host_mk_dict(u32 n) {
   u32 p, i;
-  if (n > 4096) return 0;
+  if (n > 1048576) return 0;
   p = alloc(8 + n * 8);
   mem[p] = TAG_DICT;
-  wr16(p + 2, (u16)n);
+  wr32(p + 4, n);
   for (i = 0; i < n; i++) {
     wr32(p + 8 + i * 8, 0);
     wr32(p + 8 + i * 8 + 4, 0);
