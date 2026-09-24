@@ -651,8 +651,27 @@ def _rel(ins, d):
     return (d & ((1 << (8 * n)) - 1)).to_bytes(n, "little")
 
 
+class _Zero:
+    """`labels` as the sizing pass sees it: every name present, every
+    address 0.  A view, not a copy -- building `{k: 0 for k in labels}`
+    per instruction made sizing unisacc.c (123k insns x 5k labels) cost
+    17 s of a 28 s target; this costs nothing per call."""
+    __slots__ = ("_l",)
+
+    def __init__(self, labels):
+        self._l = labels
+
+    def __contains__(self, k):
+        return k in self._l
+
+    def __getitem__(self, k):
+        if k in self._l:
+            return 0
+        raise KeyError(k)
+
+
 def size(ins, labels, short=False):
-    b = encode(ins, 0, {k: 0 for k in labels}, "x86_64", {}, 0, 0, None, short)
+    b = encode(ins, 0, _Zero(labels), "x86_64", {}, 0, 0, None, short)
     return len(b) if b is not None else len(UD2)
 
 

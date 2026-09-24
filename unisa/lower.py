@@ -182,11 +182,15 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     # [S-15 B1] push/pop pairing needs to know which tape pcs a label can
     # reach: the second half of a pair must not be a jump target
     targets = set(tape.labels.values())
+    # labels by pc, built once: scanning every label per instruction was
+    # 160k x 5k comparisons on unisacc.c, 9 s of a 28 s target
+    at_pc = {}
+    for name, at in tape.labels.items():
+        at_pc.setdefault(at, []).append(name)
     skip = False
     for pc, ins in enumerate(tape.code):
-        for name, at in tape.labels.items():
-            if at == pc:
-                tp.labels[name] = len(tp.code)
+        for name in at_pc.get(pc, ()):
+            tp.labels[name] = len(tp.code)
         if skip:                     # the second half of a fused pair
             skip = False
             continue
