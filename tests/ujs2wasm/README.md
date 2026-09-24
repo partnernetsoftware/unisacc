@@ -29,7 +29,7 @@ tag_of_export · f64_of_export · host_list_get · host_dict_*  # Node 读回
 
 emit 返回 `locals` / `globals` / `slots`（globals 序 = `host_set_global` 下标）。`host_scratch` 给 `host_mk_str`。
 
-Asteroid Pages 默认：`opts.directSim = { wasm, meta }` → `uxe/direct_step.js`（drone 仍 `wasm_run`）。
+Asteroid + drone Pages 默认：`opts.directSim = { wasm, meta }` → `uxe/direct_step.js`。
 
 ```bash
 ./tests/ujs2wasm_step.sh

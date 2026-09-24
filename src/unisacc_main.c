@@ -1111,13 +1111,21 @@ int decomment(void) {
                     continue;
                 }
                 if ((src[i + 1] & 255) == 42) {          /* slash-star */
-                    int nl;
-                    nl = 0; i = i + 2;
+                    int nl; int start;
+                    nl = 0; start = i; i = i + 2;
                     while (i < nsrc) {
                         if ((src[i] & 255) == 10) nl = nl + 1;
                         if ((src[i] & 255) == 42) { if (i + 1 < nsrc) {
                             if ((src[i + 1] & 255) == 47) { i = i + 2; break; } } }
                         i = i + 1;
+                    }
+                    /* C99 5.1.1.2p1 phase 3: a comment has to be closed.
+                       Running off the end used to be silent, so a stray
+                       `/*` swallowed the rest of the file and whatever it
+                       left compiled. */
+                    if (i >= nsrc) {
+                        err_at(start, "unterminated comment");
+                        __exit(1);
                     }
                     src[o] = 32; o = o + 1;
                     while (nl > 0) { src[o] = 10; o = o + 1; nl = nl - 1; }
@@ -1782,6 +1790,7 @@ int stdepth[MAXSTRUCT]; int stdead[MAXSTRUCT]; int bdepth;
 int vlaslot[64];          /* per block depth: where the pre-VLA stack pointer is kept */
 int curvla;               /* the thing in r0 is a VLA: its byte-count slot */
 int stsize[MAXSTRUCT]; int stalign[MAXSTRUCT]; int stunion[MAXSTRUCT];
+int stopen[MAXSTRUCT];      /* being defined: the tag's type is incomplete */
 int nstruct;
 char mbname[MAXMEMB * 32];
 int mboff[MAXMEMB];     /* byte offset inside the struct */
@@ -4632,12 +4641,14 @@ int stbody(int si) {
     int flex;                   /* this member is `name[]`: a flexible array */
     int mbl;                    /* ...and this one is _Bool */
     nown = 0; bitpos = 0; flex = 0;
+    stopen[si] = 1;             /* this tag is INCOMPLETE until the `}` */
     need(tidx("{", 1), "{");
     stfirst[si] = nmemb; stcount[si] = 0;
     off = 0; al = 1;
     while (cur() != tidx("}", 1)) {
         w = declspec();
         sz = declsz; mst = declstruct; muns = declunsigned; menum = declenum; mflt = declflt;
+
         mbl = declbool;   /* saved like muns: declspec runs again per member */
         if (cur() == tidx(";", 1)) { if (mst >= 0) {
             /* An anonymous member (C11 6.7.2.1p13): its members are members
@@ -4741,6 +4752,18 @@ int stbody(int si) {
                 if (menum) { if (enumneg == 0) sig = 0; }
                 mo = uoff; msz = sz; mw = bfenc(bw, pos - uoff * 8, sz, sig); mel = sz;
             }
+            /* C99 6.7.2.1p2: a member cannot have an incomplete type, and
+               the struct being defined is incomplete until its `}`.
+               `struct S { struct S inner; }` used to be accepted and
+               sizeof was whatever the half-built entry held.  Checked HERE,
+               after the declarator: a POINTER to the same tag is how every
+               list is written, and declptr is only known once the stars
+               have been eaten. */
+            if (isbf == 0) { if (mst >= 0) { if (declptr == 0) {
+                if (stopen[mst]) {
+                    err_tok(t, "a struct cannot contain itself by value");
+                    __exit(1);
+                } } } }
             if (isbf == 0) {
             msz = sz; mal = sz; mw = sz; mel = sz;
             if (mst >= 0) { msz = stsize[mst]; mal = stalign[mst]; mw = 0; mel = msz; }
@@ -4793,6 +4816,7 @@ int stbody(int si) {
        member whose type is DEFINED inline -- `union { ... } u;` -- put its
        own members in the middle of that range, and `u` fell off the end.
        Re-append ours as one block; the scattered originals are dead. */
+    stopen[si] = 0;             /* complete from here on */
     stfirst[si] = nmemb;
     j = 0;
     while (j < nown) {

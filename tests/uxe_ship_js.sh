@@ -1,6 +1,6 @@
 #!/bin/bash
 # ship-js contract — no C game wasm / no eng_* glue on Pages faces.
-# Asteroid Pages default path B: sim.wasm + direct_step in game.js.
+# Asteroid + drone Pages default path B: sim.wasm + direct_step in game.js.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 bad=0
@@ -38,7 +38,7 @@ do
 done
 echo "no legacy asteroid.wasm ok"
 
-# Asteroid path B: sim.wasm next to game + entry wires directSim
+# Path B: sim.wasm next to game + entry wires directSim
 check_sim_wasm() {
   local wasm="$1" label="$2"
   if [[ ! -f "$wasm" ]]; then
@@ -52,12 +52,14 @@ check_sim_wasm() {
 }
 check_sim_wasm "$ROOT/ujs/uxe/ship/sim.wasm" "asteroid-local"
 check_sim_wasm "$ROOT/docs/uxe/asteroid/sim.wasm" "asteroid-pages"
+check_sim_wasm "$ROOT/ujs/uxe/ship/drone/sim.wasm" "drone-local"
+check_sim_wasm "$ROOT/docs/uxe/drone/sim.wasm" "drone-pages"
 
-for js in \
-  "$ROOT/ujs/uxe/ship/game.js" \
-  "$ROOT/docs/uxe/asteroid/game.js"
-do
-  label=$(basename "$(dirname "$js")")/game.js
+check_path_b() {
+  local js="$1" label="$2"
+  if [[ ! -f "$js" ]]; then
+    echo "FAIL $label missing game.js"; bad=$((bad+1)); return
+  fi
   if ! grep -E 'bootDirectStep|host_set_global' "$js" >/dev/null; then
     echo "FAIL $label missing path-B direct_step surface"; bad=$((bad+1))
   else
@@ -74,9 +76,21 @@ do
   else
     echo "ok $label passes directSim"
   fi
-done
+}
 
-# game-ready emit still required for path-B (drone pending A→B)
+check_path_b "$ROOT/ujs/uxe/ship/game.js" "asteroid-local"
+check_path_b "$ROOT/docs/uxe/asteroid/game.js" "asteroid-pages"
+check_path_b "$ROOT/ujs/uxe/ship/drone/game.js" "drone-local"
+check_path_b "$ROOT/docs/uxe/drone/game.js" "drone-pages"
+
+# legacy path-A drone embed must be gone
+if [[ -f "$ROOT/ujs/uxe/ship/drone.embed.json" ]]; then
+  echo "FAIL legacy drone.embed.json still present"; bad=$((bad+1))
+else
+  echo "ok no drone.embed.json"
+fi
+
+# game-ready emit still required for path-B
 python3 - <<'PY'
 import sys
 from pathlib import Path
