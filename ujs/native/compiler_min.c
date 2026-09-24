@@ -169,13 +169,13 @@ static void next(Lex *L) {
       iv = iv * 10 + (L->src[L->pos++] - '0');
     if (L->pos < L->len && L->src[L->pos] == '.') {
       L->pos++;
-      double v = (double)iv;
-      double place = 0.1;
+      /* ratio tnum/fden — avoids place*=0.1 ulp drift vs exact IEEE */
+      int64_t tnum = iv, fden = 1;
       while (L->pos < L->len && dig(L->src[L->pos])) {
-        v += place * (double)(L->src[L->pos++] - '0');
-        place *= 0.1;
+        tnum = tnum * 10 + (L->src[L->pos++] - '0');
+        fden *= 10;
       }
-      L->fnum = v; L->tok = T_FNUM; return;
+      L->fnum = (double)tnum / (double)fden; L->tok = T_FNUM; return;
     }
     L->num = iv; L->tok = T_NUM; return;
   }
