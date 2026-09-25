@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 #define MAXF 3
 #define MAXV 128   /* raw values per field: storage only, never a bit index */
@@ -240,6 +241,27 @@ int sameslice(int i, int u, int v) {
 }
 
 long bit(int j) { return ((long)1) << j; }
+
+/* THE checked addition for every weight / logit accumulation (rank weights
+   in ranks(), a merged cube's W2 in rep_from_dl, headfail's z, the final
+   verifier's z; README "checked accumulation" lists them).  Preconditions:
+   long is 64-bit (main checks sizeof(long) == 8) and a, b >= 0 (checked
+   here: every summand is a rank weight bit(lv) >= 1, a W2 entry >= 0, or a
+   sum of those).  The overflow test a > LONG_MAX - b is made BEFORE a + b
+   is computed; LONG_MAX - b cannot overflow for b >= 0.  Exit 6 on either
+   failure (5 is the qset self-test's). */
+char *sumwhat;               /* the site, for the diagnostic */
+long ladd(long a, long b) {
+    if (a < 0 || b < 0) {
+        printf("construct: %s: overflow guard: negative summand %ld + %ld in %s\n", gpath, a, b, sumwhat);
+        exit(6);
+    }
+    if (a > LONG_MAX - b) {
+        printf("construct: %s: overflow: %s: %ld + %ld exceeds LONG_MAX\n", gpath, sumwhat, a, b);
+        exit(6);
+    }
+    return a + b;
+}
 
 int popc(long m) {
     int c = 0;
@@ -632,6 +654,7 @@ void ranks(void) {
             if (lv[i] > 60) die("a rank does not fit a long");
         }
         grew = 0;
+        sumwhat = "ranks z";
         for (j = 0; j < nq; j = j + 1) {
             if (nfire[j] < 2) continue;
             w = fire[j][0];
@@ -639,7 +662,7 @@ void ranks(void) {
             for (c = 0; c < ncl[ch]; c = c + 1) { z[c] = 0; zs[c] = 0; }
             for (t = 0; t < nfire[j]; t = t + 1) {
                 c = rl[fire[j][t]];
-                z[c] = z[c] + bit(lv[fire[j][t]]);
+                z[c] = ladd(z[c], bit(lv[fire[j][t]]));
                 zs[c] = 1;
             }
             for (c = 0; c < ncl[ch]; c = c + 1) {
@@ -678,11 +701,12 @@ int newunit(int ci, long *cube) {
 void rep_from_dl(int ci) {
     int r, u, found;
     cn[ci] = 0;
+    sumwhat = "rep_from_dl merged cube weight";
     for (r = 0; r < nr; r = r + 1) {
         found = -1;
         for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXU + u], rc[r])) { found = u; break; }
         if (found < 0) found = newunit(ci, rc[r]);
-        cw[ci * MAXU + found][rl[r]] = cw[ci * MAXU + found][rl[r]] + bit(lv[r]);
+        cw[ci * MAXU + found][rl[r]] = ladd(cw[ci * MAXU + found][rl[r]], bit(lv[r]));
     }
 }
 
@@ -718,11 +742,12 @@ int headfail(int ci, int *badj) {
     long z[MAXC], mx;
     int u, j, c, nb = 0, cntmx, arg;
     for (u = 0; u < cn[ci]; u = u + 1) cubemask(ccube[ci * MAXU + u], hfm[u]);
+    sumwhat = "headfail z";
     for (j = 0; j < nq; j = j + 1) {
         for (c = 0; c < ncl[ch]; c = c + 1) z[c] = 0;
         for (u = 0; u < cn[ci]; u = u + 1)
             if (qtest(hfm[u], j))
-                for (c = 0; c < ncl[ch]; c = c + 1) z[c] = z[c] + cw[ci * MAXU + u][c];
+                for (c = 0; c < ncl[ch]; c = c + 1) z[c] = ladd(z[c], cw[ci * MAXU + u][c]);
         mx = z[0]; arg = 0;
         for (c = 1; c < ncl[ch]; c = c + 1) if (z[c] > mx) { mx = z[c]; arg = c; }
         cntmx = 0;
@@ -1219,6 +1244,7 @@ void build(char *path) {
     }
     /* verify over the FULL original domain, every head; maxlogit as verify_int */
     mxlog = 0;
+    sumwhat = "verifier z";
     bad = 0;
     for (k = 0; k < nok; k = k + 1) {
         for (h = 0; h < nh; h = h + 1) {
@@ -1232,7 +1258,11 @@ void build(char *path) {
                     printf("construct: %s: deployment invariant broken: unit %d activation %ld on key %d (must be 0 or 1)\n", path, j, hv, k);
                     exit(3);
                 }
-                if (hv > 0) for (c = 0; c < ncl[h]; c = c + 1) z[c] = z[c] + hv * W2[h * MAXU + j][c];
+                /* hv * W2 is formed only here, AFTER the check above: hv is
+                   0 or 1 at this point (hv > 1 exited; hv <= 0 adds nothing),
+                   so the product is W2 itself and cannot overflow; the sum
+                   goes through ladd */
+                if (hv > 0) for (c = 0; c < ncl[h]; c = c + 1) z[c] = ladd(z[c], hv * W2[h * MAXU + j][c]);
             }
             mx = z[0]; mn = z[0]; arg = 0;
             for (c = 1; c < ncl[h]; c = c + 1) {
@@ -1428,11 +1458,43 @@ void writeuns2(char *opath, int ns) {
     fclose(f);
 }
 
+/* -T summax | sumover | sumrun: the SAME ladd the accumulation sites call,
+   on the three boundary cases.  summax: (LONG_MAX - 5) + 5 = LONG_MAX must
+   succeed (exit 0).  sumover: (LONG_MAX - 5) + 6, one past it, must be
+   rejected by ladd (exit 6) before the addition.  sumrun: a running sum of
+   bit(60), the largest rank weight ranks() admits (8 rank-60 rules on one
+   key): 7 terms fit (7 * 2^60 < LONG_MAX), the 8th must be rejected. */
+void sumtest(int which) {
+    long s;
+    int i;
+    gpath = "-T sum";
+    sumwhat = "sum self-test";
+    if (which == 0) {
+        s = ladd(LONG_MAX - 5, 5);
+        printf("sum self-test: max: (LONG_MAX - 5) + 5 = %ld = LONG_MAX %s\n", s, s == LONG_MAX ? "ok" : "WRONG");
+        exit(s == LONG_MAX ? 0 : 1);
+    }
+    if (which == 1) {
+        printf("sum self-test: one past: (LONG_MAX - 5) + 6\n");
+        s = ladd(LONG_MAX - 5, 6);
+        printf("sum self-test: one past was NOT rejected: %ld\n", s);
+        exit(1);
+    }
+    s = 0;
+    for (i = 1; i <= 8; i = i + 1) {
+        s = ladd(s, bit(60));
+        printf("sum self-test: run: %d x 2^60 = %ld\n", i, s);
+    }
+    printf("sum self-test: run: 8 x 2^60 was NOT rejected\n");
+    exit(1);
+}
+
 int main(int argc, char **argv) {
     int ai, ns = 0;
     char *path = 0;
     char *upath = 0;
     dbg = 0;
+    if (sizeof(long) != 8) { printf("construct: long is not 64-bit; ladd's precondition fails\n"); return 6; }
     for (ai = 1; ai < argc; ai = ai + 1) {
         if (streq(argv[ai], "-d")) dbg = 1;
         else if (streq(argv[ai], "-t")) tflag = 1;
@@ -1441,7 +1503,10 @@ int main(int argc, char **argv) {
             ai = ai + 1;
             if (streq(argv[ai], "bias")) tbreak = 1;
             else if (streq(argv[ai], "act")) tbreak = 2;
-            else { printf("construct: -T bias | -T act\n"); return 2; }
+            else if (streq(argv[ai], "summax")) sumtest(0);
+            else if (streq(argv[ai], "sumover")) sumtest(1);
+            else if (streq(argv[ai], "sumrun")) sumtest(2);
+            else { printf("construct: -T bias | act | summax | sumover | sumrun\n"); return 2; }
         }
         else if (streq(argv[ai], "-u") && ai + 1 < argc && !upath) { ai = ai + 1; upath = argv[ai]; }
         else if (upath) {

@@ -29,7 +29,7 @@ parse parse t i
 type type t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset reader capq capn capo capg capc"
+GLOBALS="qset sum reader capq capn capo capg capc"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -99,6 +99,26 @@ for b in cc ua san; do
     B 30 "$T/c_$b" -Q > "$T/q.$b" 2>&1; rc=$?
     if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 13 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (13 sizes)"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
+done
+# checked accumulation: -T summax/sumover/sumrun drive the SAME ladd() that
+# every weight/logit sum calls.  max must succeed (exit 0); one past LONG_MAX
+# and a running sum of 2^60 crossing it must be rejected by the guard (exit
+# exactly 6, the overflow diagnostic), never by a UBSan report or a signal.
+# The static half: the four accumulation sites are ladd calls (README).
+nl=$(grep -cE '(z\[c\]|cw\[ci \* MAXU \+ found\]\[rl\[r\]\]) = ladd\(' iterate/construct/construct.c)
+raw=$(grep -cE 'z\[c\] = z\[c\] \+|= cw\[.*\] \+' iterate/construct/construct.c)
+if [ "$nl" = 4 ] && [ "$raw" = 0 ]; then echo "sum sites: 4 accumulations call ladd (ranks, rep_from_dl, headfail, verifier)"
+else echo "sum sites: expected 4 ladd accumulations and 0 raw ones, found $nl and $raw"; fail=1; fi
+for b in cc ua san; do
+    for c in "summax|0|= LONG_MAX ok" "sumover|6|9223372036854775802 + 6 exceeds LONG_MAX" \
+             "sumrun|6|8070450532247928832 + 1152921504606846976 exceeds LONG_MAX"; do
+        t=${c%%|*}; r=${c#*|}; want=${r#*|}; r=${r%%|*}
+        B 10 "$T/c_$b" -T $t > "$T/sum.$t.$b" 2>&1; rc=$?
+        if [ $rc -eq $r ] && grep -q "$want" "$T/sum.$t.$b" && ! grep -q 'runtime error' "$T/sum.$t.$b"; then
+            echo "sum self-test $t $b ok (rc $rc): $(tail -1 "$T/sum.$t.$b")"
+        else echo "sum self-test $t $b FAILED (rc $rc, want $r): $(tail -1 "$T/sum.$t.$b")"; fail=1; fi
+    done
+    [ "$(grep -c '^sum self-test: run: [1-7] x' "$T/sum.sumrun.$b")" = 7 ] || { echo "sum self-test sumrun $b: the 7 terms below the limit did not all succeed"; fail=1; }
 done
 fi
 for s in $(stages all); do

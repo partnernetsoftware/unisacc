@@ -653,3 +653,60 @@ path 54, patch path 18); one candidate, the decision list, chosen; 62 rules,
 H = 62.  Timings: `netdump.py -d` 7.1 s, `uns2slice.py` 2.6 s, construct -d
 cc 0.19 s, unisacc 2.25 s, UBSan 1.39 s; full `check.sh` 31 s.  MAXR 62 is
 now exactly used by type (62 rules).
+
+## abi, step 1: checked accumulation (2026-09-25)
+
+Capacity unchanged (MAXR 62, MAXH 4, MAXCAND 96).  Every weight / logit sum
+now goes through one helper, `ladd(a, b)`, which tests `a > LONG_MAX - b`
+BEFORE it computes `a + b`; nothing adds first and looks for wraparound.
+
+Preconditions: `long` is 64-bit (`main` checks `sizeof(long) == 8`, exit 6
+otherwise) and `a, b >= 0`.  Non-negativity is checked inside `ladd` (exit 6,
+`overflow guard: negative summand`), because it is not guaranteed by the
+type: it follows from the construction (rank weights `bit(lv)` with
+0 <= lv <= 60, W2/cw entries that are such weights, 1, or `bit(k + 2)`, and
+sums of those), so `LONG_MAX - b` itself can never overflow.
+
+**Exit 6 (new)**: `construct: <tsv>: overflow: <site>: A + B exceeds
+LONG_MAX`.  (5 stays the qset self-test's code.)
+
+Audit of every sum in construct.c:
+
+| site | code | what | guarded |
+|---|---|---|---|
+| `ranks()` | `z[c] = ladd(z[c], bit(lv[..]))` | per-key rank-weight sum per class | ladd |
+| `rep_from_dl()` | `cw[..][rl[r]] = ladd(cw[..][rl[r]], bit(lv[r]))` | merged cube's W2 (two rules with the same cube and class) | ladd |
+| `headfail()` | `z[c] = ladd(z[c], cw[..][c])` | candidate's logits per key | ladd |
+| verifier in `build()` | `z[c] = ladd(z[c], hv * W2[..][c])` | the net's logits over the full original domain | ladd |
+| `hv = b1 + w1(..)` | verifier | activation: b1 >= -(nf - 1) >= -2, plus at most nf ones | bounded by 3, no guard needed |
+| `qpopc`, `qpopcand`, `total_units`, `sumlen`, `tunits`, trace counters | ints | counts <= MAXQ / MAXU | bounded |
+| `prod = prod * popc(pr)` | rep_factored | <= 62^3 | bounded |
+| `nok = nok * nv[i]`, `nq = nq * ng[i]` | reader, domain | checked against MAXOK / MAXQ after each step, each factor <= 128 | bounded |
+| `units += secH[i]` | writeuns2 | <= MAXS x MAXU | bounded |
+| `mxlog` from `-mx`, `-mn` | verifier | z >= 0, so never LONG_MIN | no sum |
+
+`hv * W2` is formed only in the verifier, AFTER invariant 1 has been
+tested for that unit and key (`hv > 1` exits 3, `hv <= 0` adds nothing), so
+at the multiplication hv is exactly 1 and the product is W2 itself.  That
+order is kept and commented in the code.
+
+**The production paths call the tested helper.**  There is one `ladd` and
+the four accumulations above are its only non-test callers
+(`grep -n 'ladd('`).  check.sh checks it statically: exactly 4 lines match
+`(z[c]|cw[ci * MAXU + found][rl[r]]) = ladd(`, and 0 lines still match a raw
+`z[c] = z[c] +` or `= cw[..] +` (the pre-step source matches 4).
+
+**Test entry**, the same `ladd`: `-T summax` computes (LONG_MAX - 5) + 5 and
+must print LONG_MAX, exit 0; `-T sumover` computes (LONG_MAX - 5) + 6 and
+must be rejected (exit 6); `-T sumrun` adds 2^60 (the largest rank weight
+ranks() admits) eight times: 1..7 x 2^60 succeed (7 x 2^60 =
+8,070,450,532,247,928,832 < LONG_MAX) and the 8th is rejected (exit 6).
+check.sh (global check `sum`) runs all three on cc, unisacc and UBSan and
+accepts only the exact exit code, the exact diagnostic and no UBSan
+`runtime error`; for sumrun it also requires the seven successful lines.
+
+Verification (cc -O2, unisacc -O2 osx/arm64, UBSan): all 14 stages' `-d`,
+`-u` and `-t` outputs and blobs byte-identical to the pre-step build (252
+files, 0 differ), and every build agrees with cc; `check.sh --batches`: ok,
+batch 1 (7 stages + global) 4.0 s, batch 2 (6 stages) 4.0 s, batch 3 (type)
+27.6 s; the three sum cases pass on all three builds.
