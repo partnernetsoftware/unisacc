@@ -2,9 +2,9 @@
 /**
  * M2/M3 host entry: UJS source → direct \\0asm (+ meta).
  *
- * Default: WebAssembly.instantiate(compiler.wasm) when present.
- * UJS_COMPILER=core: stage1 compiler_core.wasm (compiler.ujs) + splice.
- * Fallback: python3 -m ujs ujs2wasm --mode direct (until artifact exists).
+ * Default: compiler_core.wasm (compiler.ujs stage1) when present.
+ * UJS_COMPILER=wasm|stage0 or UJS_REQUIRE_COMPILER_WASM=1 → C stage0.
+ * Fallback: python3 -m ujs ujs2wasm --mode direct.
  *
  * Usage:
  *   node ujs/compile.mjs path/to/prog.ujs [-o out.wasm]
@@ -22,6 +22,17 @@ const REPO = path.resolve(__dirname, "..");
 /** @typedef {{ wasm: Uint8Array, meta: CompileMeta }} CompileResult */
 
 function wantCore() {
+  const v = (process.env.UJS_COMPILER || "").toLowerCase();
+  if (v === "wasm" || v === "stage0" || v === "c" || v === "compiler.wasm")
+    return false;
+  if (v === "core" || v === "compiler.ujs" || v === "compiler_core")
+    return true;
+  // Default product path: stage1 core. Force stage0 for body≡ / rebuild core.
+  if (process.env.UJS_REQUIRE_COMPILER_WASM === "1") return false;
+  return !!findCompilerCore();
+}
+
+function coreForced() {
   const v = (process.env.UJS_COMPILER || "").toLowerCase();
   return v === "core" || v === "compiler.ujs" || v === "compiler_core";
 }
@@ -152,7 +163,8 @@ export async function compile(src) {
   if (wantCore()) {
     const via = await compileViaCore(text);
     if (via) return via;
-    throw new Error("UJS_COMPILER=core but compiler_core.wasm missing");
+    if (coreForced())
+      throw new Error("UJS_COMPILER=core but compiler_core.wasm missing");
   }
   const via = await compileViaWasm(text);
   if (via) return via;
@@ -193,7 +205,7 @@ async function main(argv) {
       && backend !== "compiler.wasm") {
     throw new Error("UJS_REQUIRE_COMPILER_WASM=1 but compiler.wasm missing");
   }
-  if (wantCore() && backend !== "compiler_core.wasm") {
+  if (coreForced() && backend !== "compiler_core.wasm") {
     throw new Error("UJS_COMPILER=core but compiler_core.wasm missing");
   }
   const { wasm, meta } = await compile(fs.readFileSync(srcPath));

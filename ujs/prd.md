@@ -115,17 +115,18 @@ P1 构造迁 unisacc          可选
 | `compiler.wasm` | len u32 · f64 lex ratio · MEM 128 |
 | 门禁 | **sim+drone body≡stage0** · stage2≡stage1 |
 
-**下一刀**：ship 默认 `UJS_COMPILER=core`；加厚 `compiler.ujs` 覆盖面；或 P1 构造迁 unisacc。
+**下一刀**：`compiler.ujs` v13 — `[…]` 字面量 + `dict.dot`，使 fold corpus 也能默认 core。
 
-**P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm`（=`compiler.ujs` stage1）+ `sim.wasm`；`web-build`/`ujs_full` 非出货必经。
+**P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm` + `sim.wasm`；`compile.mjs` **默认** core（fold 子集仍 stage0 至 v13）。
 
-#### M3 v12（✓ core→meta · ship via compiler.ujs）
+#### M3 v12（✓ core→meta · default compile=core）
 
 | 件 | 说明 |
 |---|---|
 | `compiler.ujs` | v12：`OUT` 尾部名表 + `MG`；供 host 写 `.meta.json` |
-| `compiler_core.wasm` | stage1 入树；`UJS_COMPILER=core` |
-| ship | asteroid+drone emit bridge=`compiler_core.wasm` |
+| `compiler_core.wasm` | stage1 入树；`compile.mjs` **默认** |
+| ship | asteroid+drone bridge=`compiler_core.wasm` |
+| 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（fold `[`/`.`） |
 
 #### M2（✓）
 

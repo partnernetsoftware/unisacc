@@ -24,14 +24,16 @@ for (const dir of [outLocal, outPages]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-// Path B: compiler.ujs core → sim.wasm + meta (globals order = host_set_global indices)
+// Path B: compile.mjs → compiler_core.wasm (ignore ambient UJS_REQUIRE_*)
+const env = { ...process.env, UJS_COMPILER: "core" };
+delete env.UJS_REQUIRE_COMPILER_WASM;
 const u2w = spawnSync(
   "node",
   [path.join(ujs, "compile.mjs"), simUjs, "-o", simWasm],
   {
     stdio: ["ignore", "pipe", "inherit"],
     cwd: root,
-    env: { ...process.env, UJS_COMPILER: "core" },
+    env,
     encoding: "utf8",
   },
 );

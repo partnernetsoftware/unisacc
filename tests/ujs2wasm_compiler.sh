@@ -37,6 +37,9 @@ exit 127
 STUB
 chmod +x "$TRAPBIN/python3"
 export PATH="$TRAPBIN:$PATH"
+# Product-path compiles default to core; stage0 compares set REQUIRE locally.
+unset UJS_REQUIRE_COMPILER_WASM || true
+unset UJS_COMPILER || true
 
 EXPECT="$ROOT/tests/ujs2wasm/expect.json"
 RUNNER="$ROOT/tests/ujs2wasm/run_wasm.mjs"
@@ -46,18 +49,29 @@ STEP_EXPECT="$ROOT/tests/ujs2wasm/step_expect.json"
 for name in arith fact branch f64_arith list setidx dict globals_fold list_f64; do
   src="tests/ujs2wasm/corpus/${name}.ujs"
   echo "-- compile $name via compile.mjs (no python3)"
-  log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
+  # Fold corpus still needs stage0 for [..] / dict.dot until compiler.ujs v13.
+  log=$(perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+    node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
   echo "$log"
   [ -f "$OUT/${name}.wasm" ] || { echo "FAIL: no wasm for $name"; exit 1; }
   magic=$(head -c 4 "$OUT/${name}.wasm" | od -An -tx1 | tr -d ' \n')
   [ "$magic" = "0061736d" ] || { echo "FAIL: $name not \\0asm ($magic)"; exit 1; }
   echo "$log" | grep -q '"bridge":"compiler.wasm"' \
-    || { echo "FAIL: expected bridge compiler.wasm, got: $log"; exit 1; }
+    || { echo "FAIL: fold corpus expects stage0 bridge, got: $log"; exit 1; }
   got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm")
   want=$(node -e "const e=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); process.stdout.write(String(e[process.argv[2]]))" "$EXPECT" "$name")
   [ "$got" = "$want" ] || { echo "FAIL: fold $name got=$got want=$want"; exit 1; }
   echo "OK $name fold=$got"
 done
+
+echo "-- default compile.mjs → compiler_core (product path)"
+log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
+  tests/ujs2wasm/corpus/arith.ujs -o "$OUT/arith_core.wasm")
+echo "$log" | grep -q '"bridge":"compiler_core.wasm"' \
+  || { echo "FAIL: default bridge should be compiler_core.wasm: $log"; exit 1; }
+got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/arith_core.wasm")
+[ "$got" = "7" ] || { echo "FAIL: default-core arith fold=$got"; exit 1; }
+echo "OK default core arith fold=7"
 
 if perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs tests/ujs2wasm/corpus/str.ujs \
     -o "$OUT/str.wasm" 2>"$OUT/str.err"; then
@@ -67,20 +81,10 @@ fi
 echo "OK subset rejects str.ujs"
 
 echo "-- setidx_globals via compile.mjs + run_step (no python3)"
-perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
+perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  node ujs/compile.mjs \
   tests/ujs2wasm/step_corpus/setidx_globals.ujs -o "$OUT/setidx_globals.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
-import fs from "fs";
-const {instance}=await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
-const text=fs.readFileSync(process.argv[2],"utf8");
-const b=new TextEncoder().encode(text);
-const p=instance.exports.alloc(b.length+1);
-new Uint8Array(instance.exports.memory.buffer,p,b.length).set(b);
-if(instance.exports.compile(p,b.length)!==0) throw new Error("compile");
-const meta=JSON.parse(new TextDecoder().decode(new Uint8Array(
-  instance.exports.memory.buffer, instance.exports.meta_ptr(), instance.exports.meta_len())));
-fs.writeFileSync(process.argv[3], JSON.stringify(meta));
-' "$COMPILER_WASM" tests/ujs2wasm/step_corpus/setidx_globals.ujs "$OUT/setidx_globals.meta.json"
+# meta from compile.mjs (core); globals inject list from step_expect
 node -e '
 const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 require("fs").writeFileSync(process.argv[2], JSON.stringify(e.setidx_globals.globals));
@@ -113,20 +117,16 @@ for f in ujs/uxe/ship/build-asteroid-pages.mjs ujs/uxe/ship/build-drone-pages.mj
     echo "FAIL: $f still emits via python3/emit_wasm"
     exit 1
   fi
-  if ! grep -q 'UJS_COMPILER.*core\|UJS_COMPILER: "core"' "$f"; then
-    echo "FAIL: $f not using UJS_COMPILER=core"
-    exit 1
-  fi
 done
-# compile.mjs under PATH trap must succeed for both game cores via compiler.ujs
+# default compile.mjs (no UJS_COMPILER) under PATH trap → core
 TRAPBIN2="$OUT/bin"
-got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_COMPILER=core \
+got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" \
   node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/ship_sim.wasm")
 echo "$got" | grep -q '"bridge":"compiler_core.wasm"' || { echo "FAIL ship sim emit: $got"; exit 1; }
-got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_COMPILER=core \
+got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" \
   node ujs/compile.mjs ujs/web/game/drone.ujs -o "$OUT/ship_drone.wasm")
 echo "$got" | grep -q '"bridge":"compiler_core.wasm"' || { echo "FAIL ship drone emit: $got"; exit 1; }
-echo "OK ship emit compiler_core.wasm (PATH without python3)"
+echo "OK ship emit compiler_core.wasm default (PATH without python3)"
 
 echo "-- ship builders: no A-core / web-build"
 for f in ujs/uxe/ship/build-asteroid-pages.mjs ujs/uxe/ship/build-drone-pages.mjs \
@@ -428,5 +428,5 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v12 core-meta + ship via compiler.ujs · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v12 · compile.mjs default core · stage2≡stage1)"
 
