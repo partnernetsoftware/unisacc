@@ -28,6 +28,31 @@ OUT="${TMPDIR:-/tmp}/ujs2wasm-compiler.$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
+# Companion practice twin (not a third IR): optional tinyvm module validate.
+# UJS_REQUIRE_TINYVM=1 → missing binary is FAIL (same spirit as STRICT skips).
+find_tinyvm() {
+  if command -v tinyvm >/dev/null 2>&1; then command -v tinyvm; return; fi
+  for c in \
+    "$ROOT/../tinyvm/target/release/tinyvm" \
+    "$ROOT/../tinyvm/target/debug/tinyvm" \
+    "$HOME/repos/tinyvm/target/release/tinyvm" \
+    "$HOME/repos/tinyvm/target/debug/tinyvm"
+  do
+    if [[ -x "$c" ]]; then echo "$c"; return; fi
+  done
+  return 1
+}
+TINYVM="$(find_tinyvm || true)"
+if [[ -z "$TINYVM" && "${UJS_REQUIRE_TINYVM:-}" == "1" ]]; then
+  echo "FAIL: UJS_REQUIRE_TINYVM=1 but tinyvm not found"
+  exit 1
+fi
+if [[ -n "$TINYVM" ]]; then
+  echo "tinyvm: $TINYVM (fold+ship module validate)"
+else
+  echo "tinyvm: skip (not found; Node instantiate still gates)"
+fi
+
 echo "artifact: $COMPILER_WASM ($(wc -c < "$COMPILER_WASM") bytes)"
 
 TRAPBIN="$OUT/bin"
@@ -62,8 +87,15 @@ for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 u
     'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
   want=$(node -e "const e=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); process.stdout.write(String(e[process.argv[2]]))" "$EXPECT" "$name")
   [ "$got" = "$want" ] || { echo "FAIL: fold $name got=$got want=$want"; exit 1; }
+  if [[ -n "$TINYVM" ]]; then
+    perl -e 'alarm 30; exec @ARGV' "$TINYVM" module validate "$OUT/${name}.wasm" >/dev/null \
+      || { echo "FAIL: tinyvm validate $name"; exit 1; }
+  fi
   echo "OK $name fold=$got"
 done
+if [[ -n "$TINYVM" ]]; then
+  echo "OK tinyvm validate fold corpus"
+fi
 
 echo "-- default compile.mjs → compiler_core (product path)"
 log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
@@ -426,5 +458,14 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v17 · fold corpus via compiler_core · stage2≡stage1)"
+if [[ -n "$TINYVM" ]]; then
+  echo "-- tinyvm validate ship twins (sim/drone)"
+  for w in "$OUT/sim_s0.wasm" "$OUT/sim_s1.wasm" "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"; do
+    perl -e 'alarm 30; exec @ARGV' "$TINYVM" module validate "$w" >/dev/null \
+      || { echo "FAIL: tinyvm validate $(basename "$w")"; exit 1; }
+  done
+  echo "OK tinyvm validate sim+drone"
+fi
+
+echo "ujs2wasm_compiler OK (M2 + M3 v17 · fold corpus via compiler_core · stage2≡stage1 · tinyvm validate optional)"
 

@@ -144,7 +144,15 @@ P1 构造迁 unisacc          可选
 | 门禁 | fold **str**→`hello ujs`；stage2≡stage1 · sim+drone body≡stage0 |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
 
-**下一刀**：v18+（长 str / fn 等仍 out of ship）。
+#### Practice twin：tinyvm（✓ 可选 module validate）
+
+| 件 | 说明 |
+|---|---|
+| 角色 | 伴生 `\0asm` 解释器；**校验面**孪生 oracle，不是第三 IR、不替代 M3 / construct |
+| 门禁 | `ujs2wasm_compiler.sh`：若找到 `tinyvm`，对 fold 语料 + sim/drone 做 `module validate`；`UJS_REQUIRE_TINYVM=1` 时缺二进制 = FAIL |
+| 查找 | `PATH` · `../tinyvm/target/{release,debug}/tinyvm` · `$HOME/repos/tinyvm/...` |
+
+**下一刀**：v18+（长 str / fn 等仍 out of ship）；tinyvm **执行**孪生（invoke `main_export`）另开，非本刀。
 
 #### M3 v15（✓ else-if · fold corpus on core）
 

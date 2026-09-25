@@ -214,8 +214,8 @@ UJS shows that the UNISA SH method [cite A] extends to a closed JavaScript *spec
 
 ## Appendix A — Suite name checklist
 
-**Language / construct:** `acc` · `fold` · `icfold` · `difftest` · `determinism` · front parity · in-page `wasm_run` · `ujs.sh` · `ujs2wasm.sh` (full corpus ≠ ship)  
-**Product / M3 / P0:** **`ujs2wasm_compiler`** · ship builders without `emit_wasm` · §6.2 core probes  
+**Language / construct:** `acc` · `fold` · `icfold` · `difftest` · `determinism` · front parity · in-page `wasm_run` · `ujs.sh` · `ujs2wasm.sh` (full corpus ≠ ship; optional tinyvm validate)  
+**Product / M3 / P0:** **`ujs2wasm_compiler`** · ship builders without `emit_wasm` · §6.2 core probes · optional **tinyvm `module validate`** on fold+sim/drone (`UJS_REQUIRE_TINYVM=1` to require)  
 **Ship-js:** `uxe_ship_js`  
 **UXE (separate):** `test:uxe:*`
 
@@ -229,12 +229,12 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 |---|---|
 | “Web compiler = table network” | M3 is classical subset + twin-tests; IntNet lives on construct spine |
 | “language gate = only `ujs2wasm_compiler`” | Layered: `ujs.sh` + compiler + `uxe_ship_js`; UXE separate |
-| “UJS-1 done because v16 green” | UJS-1_ship ⊂ UJS-1; `str`/`fn`/… still construct-side |
+| “UJS-1 done because v17 green” | UJS-1_ship ⊂ UJS-1; long `str`/`fn`/… still construct-side |
 | “B re-proves IntNet” | [cite A] only; B has no UJS Lean |
 | “`web-build` is the ship path” | path-A residual; P0 ship uses `compiler_core` + `sim.wasm` |
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |
 | “`construct/` holds the reusable weights” | Generators are `seed/`; artifacts are `weights/` (A/C rule) |
-| “need a new UJS bytecode VM next” | Product path already emits `\0asm`; next leverage is subset/host/oracle—not a third IR |
+| “need a new UJS bytecode VM next” | Product path already emits `\0asm`; companion `tinyvm` is validate/execute *oracle*, not a third IR |
 
 ---
 
