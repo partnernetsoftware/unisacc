@@ -78,7 +78,7 @@ echo "-- v18 str bounds (accept + reject; stage0/core recorded separately)"
 # Expects: tests/ujs2wasm/str_bounds_expect.json (hand-authored; not from either compiler).
 BOUNDS_EXPECT="$ROOT/tests/ujs2wasm/str_bounds_expect.json"
 
-for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long; do
+for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long dict_key8; do
   want=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String(e.accept[process.argv[2]]))' "$BOUNDS_EXPECT" "$name")
   src="tests/ujs2wasm/corpus/${name}.ujs"
   if ! perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >"$OUT/${name}_core.compile.log" 2>&1; then
@@ -102,11 +102,11 @@ for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long; do
   set -e
   [ "$rec" -eq 0 ] || { echo "FAIL: $name core run trap/timeout ec=$rec"; exit 1; }
   [ "$re0" -eq 0 ] || { echo "FAIL: $name stage0 run trap/timeout ec=$re0"; exit 1; }
-  [ "$got" = "$want" ] || { echo "FAIL: $name core exec got!=hand expect"; exit 1; }
-  [ "$got0" = "$want" ] || { echo "FAIL: $name stage0 exec got!=hand expect"; exit 1; }
+  [ "$got" = "$want" ] || { echo "FAIL: $name core exec got!=hand expect got=$got want=$want"; exit 1; }
+  [ "$got0" = "$want" ] || { echo "FAIL: $name stage0 exec got!=hand expect got=$got0 want=$want"; exit 1; }
   echo "OK $name core_compile=ok stage0_compile=ok core_exec=ok stage0_exec=ok"
 done
-for neg in str_lit256 str_escape str_nonascii; do
+for neg in str_lit256 str_escape str_nonascii str_nul dict_key9; do
   src="tests/ujs2wasm/neg/${neg}.ujs"
   rm -f "$OUT/${neg}.wasm" "$OUT/${neg}_s0.wasm"
   set +e

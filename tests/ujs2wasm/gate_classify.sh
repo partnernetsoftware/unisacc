@@ -1,9 +1,10 @@
 # Classify compile CLI outcomes for short-str negative tests.
 # Only "parse_reject" is a greened reject. Sourced by the product gate.
 #
-# Exact allowlisted diagnostics (from compile.mjs / stage0):
-#   compile: bad primary
-#   compile: compiler.ujs core compile failed
+# Exact allowlisted diagnostics (compile.mjs catch → "compile: " + e.message):
+#   stage0: bad primary | bad token (NUL/lex) | dict key too long (keys >8)
+#   core:   compiler.ujs core compile failed
+# NOT allowlisted: compile: ENOENT / compile: unreachable / stacks with compile.mjs
 
 classify_compile_outcome() {
   local ec="$1" err="$2" wasm="$3"
@@ -19,9 +20,12 @@ classify_compile_outcome() {
   if grep -qiE 'RuntimeError|wasm trap|WebAssembly\.|segmentation|SIG(SEGV|ABRT|BUS)|alarm|timed? out|ENOENT|EACCES|module not found' "$err"; then
     echo runtime_or_timeout_diag; return
   fi
+  if grep -qxF 'compile: unreachable' "$err"; then
+    echo runtime_or_timeout_diag; return
+  fi
   if [ "$ec" -ne 1 ]; then echo other_nonzero; return; fi
-  # Exact CLI reject lines only (whole-line match).
-  if grep -qxE 'compile: bad primary|compile: compiler\.ujs core compile failed' "$err"; then
+  # Exact CLI reject lines only (whole-line match). Never "^compile:".
+  if grep -qxE 'compile: bad primary|compile: bad token|compile: dict key too long|compile: compiler\.ujs core compile failed' "$err"; then
     echo parse_reject; return
   fi
   echo other_nonzero

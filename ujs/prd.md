@@ -148,10 +148,10 @@ P1 构造迁 unisacc          可选
 
 | 件 | 说明 |
 |---|---|
-| 完成判据 | `"…"` **0–255 ASCII、无转义**；≥256 / `\` / byte>127 → parse reject；stage0 与 core 同 fold 执行；stage2≡stage1；sim+drone body≡；**不开** `fn` / tinyvm execute |
-| `compiler_min.c` | 字面量池 `sdata`；`OP_SCONST a=(off<<16)\|len` → SCRATCH0 写字节 + `mk_str`（与 ≤7 路径同形，仅 len 放宽） |
-| `compiler.ujs` | `DKEY` 256；去掉 lit≤7；`i32.const` len 用正确 LEB（len≥64） |
-| 门禁 | `str_bounds`：accept empty/7/8/32/255/cat；reject 256/escape/nonascii；独立 `str_bounds_expect.json` |
+| 完成判据 | `"…"` **0–255 非 NUL ASCII、无转义**；NUL / ≥256 / `\` / byte>127 → parse reject；**dict/dot 键 ≤8**（RT `dict_get` 按前 8 字节 i64 比；更长显式拒绝，不静默碰撞）；stage0≡core 执行；stage2≡stage1；sim+drone；**不开** `fn` / tinyvm execute |
+| `compiler_min.c` | 字面量池 `sdata`；`OP_SCONST a=(off<<16)\|len`；拒 NUL；dict/dot `kn>8` → `dict key too long` |
+| `compiler.ujs` | `DKEY` 256（lit）；dict/dot 键 cap 8；len≥64 LEB |
+| 门禁 | accept empty/7/8/32/255/cat + `dict_key8`→2；reject 256/escape/nonascii/NUL/`dict_key9` |
 
 #### Practice twin：tinyvm（✓ 可选 module validate）
 

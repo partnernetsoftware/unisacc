@@ -1,7 +1,7 @@
 /* M2/M3 stage0 (C): UJS-1_ship → \\0asm inside this module.
  * Build: ujs/seed/stage0/build-compiler-wasm.sh → ujs/iterate/compiler.wasm
  * Product default is stage1 core (compiler.ujs), not this file alone.
- * Cover (aligned v18): v17 + ASCII str lit 0–255 (no escapes) · str+str · str return.
+ * Cover (aligned v18): ASCII str lit 0–255 non-NUL · dict/dot keys ≤8 · str+str · HRET.
  * Gaps (UJS-1_ship residual): general long str / fn · baked gold ·
  *   byte-identical vs full Python emit_wasm.
  */
@@ -187,6 +187,7 @@ static void next(Lex *L) {
     while (L->pos < L->len && L->src[L->pos] != '"') {
       char ch = L->src[L->pos];
       if (ch == '\\') { L->tok = T_BAD; return; }
+      if (ch == 0) { L->tok = T_BAD; return; } /* NUL not in ship str domain */
       if (n >= MAXSTRLIT) { L->tok = T_BAD; return; }
       if ((uint8_t)ch > 127) { L->tok = T_BAD; return; }
       L->str[n++] = ch;
@@ -459,6 +460,10 @@ static int pprim(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, scratch)) return 0;
     for (int i = 0; i < n; i++) {
       if (L->tok != T_ID) { P->err = "dict key"; return 0; }
+      /* RT dict_get compares ≤8 payload bytes (i64); longer keys collide — reject. */
+      uint32_t kn = 0;
+      while (L->id[kn]) kn++;
+      if (kn > 8) { P->err = "dict key too long"; return 0; }
       char kbuf[64];
       strncpy(kbuf, L->id, 63); kbuf[63] = 0;
       next(L);
@@ -564,6 +569,11 @@ static int ppostfix(Lex *L, Prog *P) {
       if (ty != TY_DICT) { P->err = "dot non-dict"; return 0; }
       next(L);
       if (L->tok != T_ID) { P->err = "dot name"; return 0; }
+      {
+        uint32_t kn = 0;
+        while (L->id[kn]) kn++;
+        if (kn > 8) { P->err = "dict key too long"; return 0; }
+      }
       if (!emit_sconst_cstr(P, L->id)) return 0;
       next(L);
       if (!emit(P, OP_DOT, 0)) return 0;
@@ -1378,7 +1388,8 @@ static int dict_get_body(Buf *c) {
   if (!bu8(c, 0x28) || !bu8(c, 0x02) || !bleu(c, 0)) return 0;
   if (!bu8(c, 0x46)) return 0; /* i32.eq */
   if (!bu8(c, 0x04) || !bu8(c, 0x40)) return 0;
-  /* byte-compare: for short keys, compare first 8 bytes as i64 if len<=8 */
+  /* byte-compare: first 8 payload bytes as i64 (mk_str zero-pads).
+   * Keys longer than 8 are rejected at compile; do not silently prefix-match. */
   if (!bu8(c, 0x20) || !bleu(c, 4)) return 0;
   if (!bi32(c, (int32_t)(8))) return 0;
   if (!bu8(c, 0x6a)) return 0;

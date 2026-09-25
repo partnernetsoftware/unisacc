@@ -119,7 +119,7 @@ UJS cites these by reference. **B’s extra P-2 obligation:** each new *table* s
 
 **UJS-1_ship (M3 / Pages path, as of compiler v18):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **ASCII string literals 0–255 + concat + return**, globals inject / `host_*` / `run_step`.
 
-**Str literal bound (v18):** each `"…"` literal is **0–255 bytes of ASCII** with **no escapes** (`\` rejected; bytes >127 rejected). Length ≥256 rejected. The bound is on the **literal**, not on concat results. **Still out of M3 ship:** general `fn`, escapes/UTF-8, baked gold/catalog, whole-module ≡ full Python `emit_wasm` (see `ujs/prd.md` M2 residual).
+**Str literal bound (v18):** each `"…"` literal is **0–255 bytes of non-NUL ASCII** with **no escapes** (`\` / NUL / bytes >127 / length ≥256 rejected). **Dict/dot keys ≤8** ASCII (runtime `dict_get` compares an 8-byte prefix; longer keys are rejected—no silent collision). **Still out of M3 ship:** `fn`, escapes/UTF-8, full-length dict key identity, baked gold/catalog, whole-module ≡ full Python `emit_wasm`.
 
 Papers and release notes must say **which** face is meant.
 
