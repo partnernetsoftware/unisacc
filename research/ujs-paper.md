@@ -2,40 +2,41 @@
 
 **Status:** workshop / short-paper draft (companion to Paper A)  
 **Language:** English body; Chinese abstract optional  
-**Repo artifact:** `ujs/` · acceptance: `./tests/ujs.sh`
+**Repo artifact:** `ujs/` · language gate: `./tests/ujs2wasm_compiler.sh` · product: `./tests/ujs.sh`  
+**Method proofs:** live in Paper A [cite A] (`research/formalization-roadmap.md`, Lean L0–L3)—this paper does not re-prove IntNet existence.
 
 ---
 
 ## Abstract
 
-We present **UJS**, a closed JavaScript subset (**UJS-1**) whose compile-time decisions are realized by the same *construct-don't-train* discipline as UNISA SH [cite A]: finite gold tables are compiled into an integer IntNet kernel; shipping accuracy is exact by construction and verified by full key-space enumeration (P-1 / P-2 / P-3). Where Paper A targets a C self-hosting shell, UJS applies the method to a *dynamic* language pipeline—lex, parse, scope/type/shape, IR selection, **inline-cache (IC)** stubs, and WebAssembly lowering—and ships a browser/Node/Bun product whose public API is `wasm_run(code, G, L)`. The semantic spine is **jtape**; fold checks equate the jtape VM with a WasmProgram interpreter (and, when present, a host wasm instance). An IC stage (`shape × op × guard → stub_kind`) is optional for performance but must preserve results (`icfold`). We do not report invented throughput numbers; we claim qualitative properties already gated by the repository suite `tests/ujs.sh` (acc, fold, icfold, front parity, ship, in-page `wasm_run`).
+We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; shipping accuracy is exact by construction and checked by full key-space enumeration. **Method-kernel obligations (P-8 / P-3 / P-5 / P-1, and a P-2 sample) are discharged in [cite A]** (enumeration + Lean theorems such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`); Paper B only *instantiates* them on a dynamic-language / Web pipeline and adds product gates.
+
+Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline to lex/parse/scope/type/shape, IR selection, optional **inline-cache (IC)** stubs, and WebAssembly lowering—and ships browser/Node/Bun surfaces whose stepping path no longer requires Python at product time. The semantic spine remains **jtape** where the bytecode VM is exercised; the **M3** line additionally ships a UJS-written compiler (`compiler.ujs` → `compiler_core.wasm`) with stage2 ≡ stage1 and fold bodies ≡ stage0. We do not invent throughput numbers; claims are suite names already in the repository.
 
 **摘要（可选）**  
-UJS 将 UNISA SH [cite A] 的「由 gold 表构造整数网络、全域枚举保证精确、禁止低置信回退」方法迁到闭合 JS 子集 UJS-1，并交付 Web 产品 API `wasm_run`。语义真源为 jtape；IC 与 wasm lower 为经典控制流上的有限决策表。验收绑定既有套件名称，不虚构实验数字。
+UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS 子集：方法核（存在性、决策列表声音性、`ask` 同余、P-2 样板）在 A 用枚举与 Lean 卸责；B 只证明**迁移 + Web/自举产品义务**。出货编译默认 `compiler_core.wasm`（M3）；Python 限于构造臂，非 Pages/ship 必经。验收绑套件名，不虚构数字。
 
 ---
 
 ## 1. Introduction
 
-Neural components in compilers and runtimes are usually *trained* heuristics: they may speed up common cases but correctness rests on a classical fallback (learned indexes [Kraska et al. 2018], MLGO-style guidance [Trofin et al. 2021]). A parallel line *constructs* networks from discrete objects so that equivalence is a theorem or a finite check (Omlin & Giles 1996; Tracr [Lindner et al. 2023]; enumeration verification [Jia & Rinard 2021]). UNISA SH [cite A] takes the constructive path for a C shell: **Shell = inferencer + executor + model data**, weights built from gold tables, shared integer IntNet, and P-1/P-2/P-3 as hard contracts (oracle returns class names only; every ask key is in a closed set $K_s$; $\forall k: \mathrm{argmax}(N)=G$).
+Neural components in compilers and runtimes are usually *trained* heuristics with classical fallbacks. A parallel line *constructs* networks from discrete objects so equivalence is a finite check (Omlin & Giles 1996; Tracr; Jia & Rinard). UNISA SH [cite A] takes that path for C: **Shell = inferencer + executor + model data**, with hard contracts P-1/P-2/P-3 and a now machine-checked method kernel (Lean L0–L3 in the companion repo).
 
-**UJS** asks whether the same method transfers to a language that *looks* dynamic—objects with finite shapes, operators guarded by runtime tags, and a web delivery surface—without opening the ECMAScript universe. We define **UJS-1**: a closed subset (literals, `let`/`const`, control including `switch`, functions/arrows, rest and call-site spread, list/dict values, lexical capture of an explicit name set). Outside the tables, rejection is permanent: no `eval`, prototypes, `this`/`new`/`class`, async, or RegExp engine.
+**UJS** asks whether the same method transfers to a language that *looks* dynamic—finite shapes, tag-guarded operators, Web delivery—without opening ECMAScript. We define **UJS-1**: a closed subset. Outside the tables, rejection is permanent.
 
-The product is not a research REPL alone: `ujs/package.json` exports ESM `bootRuntime` / `wasm_run` for browser, Node, and Bun; the shipped runtime blob is **`ujs_full.wasm`**. Python under `ujs/construct/` is the **constructor** (gold, walk, build, ship)—not an application dependency.
-
-**Companion framing.** Paper A [cite A] develops the method and the C self-host story. This paper (Paper B) reuses the construction algebra and IntNet kernel, separates gold/jtape/IC/wasm corpora, and evaluates web-facing fold and parity claims.
+**Companion framing.** Paper A [cite A] owns construction algebra, IntNet soundness, enumeration-as-decision-procedure, and C self-host. This paper reuses that kernel by citation, then evaluates (i) closed JS + IC + wasm lower, (ii) jtape/fold and front parity where applicable, (iii) **M3 self-host of the UJS→wasm compiler** and Python-free ship builders.
 
 ---
 
 ## 2. Contributions
 
-1. **Method transfer to a closed dynamic subset.** Same Shell proposition and P-discipline as [cite A], applied to UJS-1 stages including **IC** (`shape × op × guard`) and wasm instruction selection/encoding/relocation.
-2. **jtape as semantic source of truth**, with **fold**: jtape VM ≡ WasmProgram interpretation (host `.wasm` as a third side when exercised).
-3. **Web product surface**: `wasm_run(code|Fn, G, L)` with explicit globals/locals; no in-page training; construct via `python3 -m ujs web-build`.
-4. **Cross-host front parity**: Python front image ≡ JS front image on a fixed probe set (suite: front parity).
-5. **Ship gate**: kit includes MANIFEST with per-stage `exact`, weights, native VM sources, `web/ujs_full.wasm`, and package entry (suite: ship)—without claiming compression wins over tables [cite A; cf. Boniol et al. 2026 on ACAS Xu].
+1. **Method transfer (not re-proof).** Same Shell proposition and P-discipline as [cite A], applied to UJS-1 stages including **IC** (`shape × op × guard`) and wasm `isel`/`enc`/`reloc`. Novel writing is the *transfer* and product packaging; IntNet proofs stay in A.
+2. **jtape / fold** (bytecode path) and **M3 compiler self-host** (`compiler.ujs`, stage2 ≡ stage1, sim/drone body ≡ stage0) as language-line obligations A does not cover.
+3. **Web product surface**: `wasm_run` / UXE Pages; default compile path **`compiler_core.wasm`** (P0); Python construct is not a ship dependency.
+4. **Cross-host front parity** where dual fronts still exist; parity reduces drift, it does not replace [cite A].
+5. **Ship gates** without selling compression over tables [cite A; Boniol et al.].
 
-Non-claims (aligned with [cite A] and `research/prior-art.md`): we do not claim novelty of table→MLP construction (Tracr / Omlin–Giles folklore); we do not claim enumeration verification itself is new (Jia & Rinard); we do not claim UJS-1 is ECMAScript.
+Non-claims (aligned with [cite A] / `prior-art.md`): no novelty of table→MLP construction; no novelty of enumeration verification; UJS-1 ≠ full ES; no CompCert-level claim that gold ≡ JS semantics (external referees / fold only).
 
 ---
 
@@ -43,138 +44,127 @@ Non-claims (aligned with [cite A] and `research/prior-art.md`): we do not claim 
 
 | Line | Relation to UJS |
 |---|---|
-| **Tracr** [Lindner et al. 2023] | Finite-domain lookup → MLP: same *kind* of construction as our table nets; goal is interpretability lab, not a shipping JS→wasm product. |
-| **ACAS Xu + Reluplex + Jia&Rinard** | Networks approximating continuous tables need verification effort; enumeration after quantization is prior art. Our $K_s$ are discrete finite products by design, so P-3 is a decision procedure on the closed key set [cite A]. |
-| **Boniol et al. 2026 (BDD compression)** | Exact alternatives to approximate NN compression; we do **not** sell size reduction as the thesis. |
-| **Learned indexes / Bloom** | Correctness via last-mile or backup filters; our contracts forbid gold/logit fallback at ask time (P-1). |
-| **MLGO / production ML in compilers** | Heuristic replacement where any choice may be legal; our stages are *total functions on closed keys* with SHIP_ACC = 1.000. |
-| **UNISA SH** [cite A] | Method + C self-host; UJS is the dynamic-language / web companion. |
+| **Tracr** | Same *kind* of finite lookup→MLP; not a shipping JS→wasm product. |
+| **ACAS Xu / Reluplex / Jia&Rinard** | Continuous nets need heavy verification; our $K_s$ are discrete products, so P-3 is a decision procedure [cite A]. |
+| **Boniol et al. 2026** | Exact BDD compression; we do **not** sell size as the thesis. |
+| **Learned indexes / Bloom** | Backup filters; P-1 forbids gold/logit fallback at ask time. |
+| **MLGO** | Heuristics among legal choices; our stages are total functions on closed keys. |
+| **UNISA SH** [cite A] | Method kernel + C self-host; UJS is the dynamic/web companion. P-8b SGD unreachability is literature + A's instance, not B's open problem. |
 
-Full adversarial survey: repository `research/prior-art.md`.
+Full survey: `research/prior-art.md`.
 
 ---
 
 ## 4. System Overview
 
 ```
-src ──► walk (lex…irsel [+ IC]) ──► Fn(jtape, meta)
-              │ oracle.ask(stage, key)     │
-              ▼                            ▼
-         constructed IntNet          run / wasm_run
-         (embed→gemv→ReLU→gemv→argmax)     │
-                                           ├─ jtape VM
-                                           ├─ WasmProgram interpret
-                                           └─ host wasm (optional)
+src ──► walk (lex…irsel [+ IC]) ──► Fn(jtape, meta)     [bytecode / construct path]
+              │ oracle.ask(stage, key)
+              ▼
+         constructed IntNet  [cite A: same kernel]
+
+src ──► compiler.ujs (M3) ──► compiler_core.wasm ──► splice RT ──► \0asm   [product compile path]
 ```
 
-- **Classic code:** walker, environments, stacks, stub assembly, wasm section layout [T-1].
-- **Network:** last-mile table selection only [T-2]; gold is annotation and verifier; no low-confidence ship path [T-3].
-- **Kernel:** identical integer path to unisa [T-4][K-1] [cite A].
-- **API anchor:** `wasm_run` [T-5][A-1]; `compile` → cacheable `Fn`; execution binds explicit `G`/`L`.
+- **Classic code:** walker / M3 compiler source, environments, wasm layout.
+- **Network:** last-mile table selection only; proofs in [cite A].
+- **Product compile:** `ujs/compile.mjs` defaults to `compiler_core.wasm`; stage0 `compiler.wasm` is bootstrap and body≡ oracle.
+- **API:** `wasm_run` / UXE Host; Pages load game wasm + host, not a Python emit at request time.
 
-Stages (all must be exact at ship): `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc`.
+Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships).
 
 ---
 
 ## 5. Method
 
-### 5.1 Construction and contracts (shared with Paper A)
+### 5.1 Construction and contracts (owned by Paper A)
 
-Weights are produced by `build-weights` from FULL gold—not by training. Determinism: no RNG at inference; argmax ties take the least class index; same source + weights ⇒ byte-identical Fn/wasm blob [D-*]. Proof discipline [cite A]:
+Weights from FULL gold via `build-weights`—not training. Discipline [cite A] §3.4:
 
-- **P-1** Oracle returns class names only; no logits; no gold fallback in the ask path.
-- **P-2** Every `ask` key ∈ $K_s$.
-- **P-3** Per-stage enumeration: $\forall k \in K_s:\ \mathrm{argmax}(N(k))=G(k)$.
-- **P-5** Net-driven ≡ gold-driven under P-1.
-- **F-3** SHIP_ACC = 1.000 or refuse ship.
+| ID | Content | Discharged in A by |
+|---|---|---|
+| **P-8** | Exact net exists for any finite $G:K\to Y$ | Lean L0 `naive_exact` (folklore restated) |
+| **P-3** | $\forall k:\arg\max N(k)=G(k)$ | Enumeration + Lean L1 `decision_list_exact` |
+| **P-5** | Net-driven ≡ gold-driven under P-1 | Lean L2 `cong_of_pointwise` / `p5_of_p3_trace` |
+| **P-1** | Opaque `ask` (class names only) | Engineering + L2 model hypothesis |
+| **P-2** | Every ask key ∈ $K_s$ | Runtime assert; Lean L3 **sample** `asks_subset_K` (`reloc`); **full walker still open** |
+| **P-6** | gold ≡ language semantics | External referee—not claimed in A or B |
+
+UJS inherits these by citation. **B’s extra P-2 obligation:** each new UJS table stage (especially **IC** and wasm `isel`/`enc`/`reloc`) must eventually supply an A-style domain-closure sample or keep the runtime assert + suite pressure; we do not pretend IC is exempt.
 
 ### 5.2 UJS-1 language (closed)
 
-Values: `null | bool | i64 | f64 | str | list | dict | fn | tup`. Name resolution: locals → lexical outer → globals; miss is hard error. Closures capture a compile-time closed set of names from $G$ ∪ outer bindings. Dict shapes are finite `shape_id`s—no prototype chain.
+Values: `null | bool | i64 | f64 | str | list | dict | fn | tup` (subset actually emitted grows with M3: today ship/game path emphasizes i64/f64/list/dict/control). Name resolution: locals → lexical outer → globals. Outside tables / subset: permanent reject (no `eval`, prototypes, `this`/`new`/`class`, async, RegExp engine).
 
-### 5.3 jtape and fold
+### 5.3 jtape, fold, and M3 self-host
 
-**jtape** is the target-independent instruction stream (analogue of unisa tape) and the semantic truth [TP-1]. Fold [X-4][LW-2][LW-3]: disagreement between jtape VM and WasmProgram (or host instance) is a bug, not a confidence band.
+**jtape** remains the semantic spine for the bytecode VM path; fold equates jtape VM ↔ WasmProgram (host wasm when exercised).
+
+**M3** adds a second spine: `compiler.ujs` compiled by stage0 yields `compiler_core.wasm`; recompilation yields stage2 ≡ stage1; game `sim.ujs` / `drone.ujs` main bodies ≡ stage0. This is the UJS analogue of A’s twin-test discipline, aimed at **Python-free product compile**, not at re-proving IntNet.
 
 ### 5.4 Inline cache stage
 
-Hot sites query `ask(ic, (shape, op, guard)) → stub_kind` from a finite stub catalog [IC-1][IC-2]. Deopt back to the interpreter is classical control flow [IC-4]. **icfold** [IC-3][X-3]: IC on/off must agree on the same `(fn, G, L)`.
+Hot sites: `ask(ic, (shape, op, guard)) → stub_kind` from a finite stub catalog. Deopt is classical control flow. **icfold:** IC on/off agree. IC keys are another finite product—same P-2/P-3 shape as [cite A]; stub choice is not learned by SGD.
 
 ### 5.5 Wasm lower and product
 
-`isel` / `enc` / `reloc` go only through the oracle [LW-4]. Constructor CLI builds `ujs_full.wasm` and demos; `ujs2wasm` emits standalone UJS programs. Page/Node loads ESM + wasm; training never runs in the page.
+`isel` / `enc` / `reloc` go through the oracle when those tables are on the path [cite A]. Ship builders (`build-*-pages.mjs`) call `compile.mjs` → core; they must not shell out to `python3` emit on the product path (gate: `ujs2wasm_compiler.sh`).
 
 ### 5.6 Front parity
 
-The in-browser/JS `compiler.js` front must emit the same packed image as the Python `compile_src` path on shared probes—bridging constructor and product without dual semantics.
+Where a JS front and a Python front both exist, packed images must match on shared probes. Parity is anti-drift, not a substitute for [cite A].
 
 ---
 
 ## 6. Evaluation Claims (suite-backed, qualitative)
 
-We claim properties checked by `./tests/ujs.sh` (and the CLI commands it wraps). **No fabricated latencies, sizes, or accuracy decimals beyond the contractual 1.000 ship gate.**
+**No fabricated latencies or accuracy decimals** beyond contractual 1.000 where `acc` applies.
 
-| Claim | Suite / gate | What “pass” means |
+| Claim | Suite / gate | Pass means |
 |---|---|---|
-| Per-stage exact nets | `acc` [X-1] | FULL gold; SHIP_ACC discipline |
-| API / language probes | `wasm_run` probes [X-6] | arith, strings, list/dict, while, switch, functions, rest |
-| Semantic fold | `fold` [X-4] | jtape ≡ WasmProgram on exercised programs |
-| IC preserves semantics | `icfold` [X-3] | IC on ≡ IC off |
-| Diff vs reference | `difftest` [X-2] | agree with net-free reference interpreter |
-| Deterministic compile | `determinism` [X-5] | two compiles → identical bytes |
-| Ship kit integrity | `ship` [X-7] | MANIFEST `exact` stages; includes `ujs_full.wasm`, `wasm_run.js`, package.json, samples |
-| Constructor ≡ page front | **front parity** | Python packed image ≡ JS `compile` image on probe set |
-| Product path | **in-page `wasm_run`** | Node loads `ujs_full.wasm` via `bootRuntime`; probes incl. G/L binding, spread, arrows |
-| Package contract | npm entry check | exports `bootRuntime` / `wasm_run` |
+| Method kernel | [cite A] Lean + `unisa acc` | Not re-run as B’s novelty |
+| UJS table exactness (when tables ship) | `acc` / construct gates | FULL gold; SHIP_ACC |
+| M3 compiler self-host | `ujs2wasm_compiler.sh` | stage2≡stage1; sim/drone body≡stage0; default bridge=`compiler_core.wasm` |
+| Subset fold (arith…elseif, setidx_globals, …) | same | fold values + inject step |
+| Ship builders Python-free | same | no `emit_wasm` / no A-core copy for Pages |
+| jtape fold / icfold / front parity | `tests/ujs.sh` (where enabled) | agree / identical images |
+| UXE unmanned | `npm run test:uxe:*` | **separate gate** from language (see `ujs/prd.md` #4) |
 
-Optional CI/context: `ujs2wasm` and full demo wasm instantiate under Node when available—still pass/fail, not benchmark tables.
-
-**Optional qualitative artifact (not a metric).** The repository ships a static playground (`npm run demo`); an UXE Host-ABI **source** demo under `ujs/web/engine/demo/`; an UXE **ship** surface under `ujs/web/engine/ship/` consisting of static `index.html` plus two **separate** Wasm modules—`{game}.wasm` (game core) and `engine.wasm` (the `ujs_full.wasm` VM under a delivery name)—and a Three.js contrast page under `ujs/web/game/`. These illustrate the product loop without contributing latency or accuracy claims beyond the suite table above.
-
-**Relation to Paper A.** Enumeration and IntNet proofs live primarily in [cite A]; this paper’s evaluation emphasizes *language/product* obligations (IC, fold, front parity, in-page API) that C self-host does not cover.
+**Relation to Paper A.** IntNet / enumeration / congruence / P-2 sample live in [cite A]. B emphasizes language self-host, Web ship path, and IC packaging.
 
 ---
 
 ## 7. Discussion and Limitations
 
-- **Closed language.** UJS-1 is not a migration path to full ES; openness would break finite $K_s$ and P-3.
-- **IC is not learning.** Stub choice is another constructed table; novelty is packaging IC into the same oracle discipline, not discovering stubs by gradient descent.
-- **Python constructor vs JS product.** Parity tests reduce dual-implementation risk; they do not replace proofs in [cite A].
-- **Web without self-host thesis.** Paper A’s bootstrap/self-host contributions are out of scope here; UJS parallel-delivers web while C-line PRD retains “no Web” for that product [prd §14].
+- **Closed language.** Opening to full ES breaks finite $K_s$ and P-3.
+- **IC is not learning.** Another constructed table under the same oracle.
+- **P-2 remains the hard transfer debt.** A’s Lean sample is a template; UJS walkers (IC, wasm lower, M3 compiler) still rely on asserts + suites until each stage gets a closure argument.
+- **Python constructor.** Allowed to shrink only; product compile must not grow new Python-only ship edges.
+- **Web vs A’s “no Web” for the C product.** Intentional split: A = C shell; B = Web/JS practice of the *same theory*.
 
 ---
 
 ## 8. Conclusion
 
-UJS shows that the UNISA SH method [cite A]—constructed integer table networks, closed keys, enumeration, no ask-time fallback—extends to a closed JavaScript subset with IC and wasm lowering, and ships as `wasm_run` for browser and server JS runtimes. Correctness obligations are operationalized as named suites (`acc`, `fold`, `icfold`, front parity, `ship`, in-page `wasm_run`) rather than statistical test scores.
+UJS shows that the UNISA SH method [cite A] extends to a closed JavaScript subset with IC and wasm lowering, and that the **product compile path can self-host in UJS** (`compiler_core.wasm`) without re-deriving IntNet theory. Method proofs stay in A; B’s claims are transfer, self-host gates, and Web delivery—operationalized as named suites, not statistical scores.
 
 ---
 
-## References (incomplete draft list)
+## References (placeholders)
 
-- [cite A] Companion manuscript / technical report: *UNISA SH* (exact-by-construction table networks; C self-host). Unpublished or under submission; cite as companion to this work.
-- Boniol et al. Compressing ACAS-Xu Lookup Tables with Binary Decision Diagrams. NFM 2026.
-- Jia & Rinard. Verifying Low-dimensional Input Neural Networks via Input Quantization. SAS 2021.
-- Julian et al. Policy Compression for Aircraft Collision Avoidance Systems. DASC 2016.
-- Katz et al. Reluplex. CAV 2017.
-- Kraska et al. The Case for Learned Index Structures. SIGMOD 2018.
-- Lindner et al. Tracr: Compiled Transformers as a Laboratory for Interpretability. NeurIPS 2023.
-- Omlin & Giles. Constructing Deterministic Finite-State Automata in Recurrent Neural Networks. JACM 1996.
-- Trofin et al. MLGO. 2021.
-- Repository: `research/prior-art.md`, `ujs/prd.md`, `tests/ujs.sh`.
+- [cite A] Companion: *UNISA SH / 表即网络* — construction, enumeration, Lean L0–L3, C self-host. See `research/unisacc-paper.md` §3.4 and `research/formalization-roadmap.md`.
+- Omlin & Giles 1996; Lindner et al. 2023 (Tracr); Jia & Rinard 2021; Boniol et al. 2026; Kraska et al. 2018; Trofin et al. 2021 (MLGO); Shalev-Shwartz et al. (P-8b family)—as in `research/prior-art.md`.
 
 ---
 
-## Outline map (for expansion)
+## Appendix A — Suite name checklist
 
-| § | Expand with |
-|---|---|
-| 4 | Diagram of stages ↔ gold columns; Fn serialization |
-| 5.3 | jtape opcode families (pointer only; no full ISA dump in short paper) |
-| 5.4 | One stub_kind example (shape×load) without claiming perf |
-| 6 | Screenshot/pointer to playground + `engine/demo/` + `engine/ship/` (html + game.wasm + engine.wasm; not numbers) |
-| App. | Mapping UJS clause IDs (T/L/IC/X) ↔ test names |
+`acc` · `fold` · `icfold` · `difftest` · `determinism` · `ship` · front parity · in-page `wasm_run` · **`ujs2wasm_compiler`** (M2/M3/P0) · UXE probes (separate).
+
+## Appendix B — Non-goals
+
+Full ES · in-page training · claiming size≪table as main result · inventing latency tables · re-proving P-8/P-3 in B · CompCert-level gold≡JS.
 
 ---
 
-*Draft only. Do not invent metrics. Cross-cite Paper A at every shared-method claim marked [cite A].*
+*Draft. Cross-cite [cite A] at every shared-method claim. Numbers only from green suites.*
