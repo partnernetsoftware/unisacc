@@ -7485,12 +7485,27 @@ int oi_ask(int i) {
     oi_done[i] = 1;
     return i;
 }
-int ol_simple(int l) {                /* straight-line, explicit operands only */
+/* the opinfo index of line l's op word, looked up once per line per round:
+   every rewrite asked it again by name, and the lookups were a quarter of
+   an -O2 compile.  ol_gen moves on whenever the lines are rebuilt. */
+int ol_opi_v[OPT_MAXL]; int ol_opi_g[OPT_MAXL]; int ol_gen;
+int ol_opi(int l) {
     int p; int e; int w; int i;
+    if (ol_opi_g[l] == ol_gen) return ol_opi_v[l];
+    p = ol_s[l]; e = ol_e[l]; i = 0 - 1;
+    if (out[p] == 32) {
+        p = p + 2; w = p;
+        while (w < e && out[w] != 32 && w - p < 15) w = w + 1;
+        if (w > p) i = oi_ask(oi_idx(out + p, w - p));
+    }
+    ol_opi_g[l] = ol_gen; ol_opi_v[l] = i;
+    return i;
+}
+int ol_simple(int l) {                /* straight-line, explicit operands only */
+    int p; int e; int i;
     p = ol_s[l]; e = p + ol_len(l);
     if (e - p < 3 || out[p] != 32 || out[p + 1] != 32) return 0;
-    p = p + 2; w = p; while (w < e && out[w] != 32) w = w + 1;
-    i = oi_ask(oi_idx(out + p, w - p));
+    i = ol_opi(l);
     return i >= 0 && oi_simple[i];
 }
 int ol_emit(int l) { int k; k = 0; while (k < ol_len(l)) { out2[nout2] = out[ol_s[l] + k]; nout2 = nout2 + 1; k = k + 1; }
@@ -7790,16 +7805,10 @@ int ol_local(int i) {
     return 1;
 }
 
+int ol_lines(void);
 int opt_round(void) {
     int i; int j; int x; int y; int k; int ok; int hits; int z; int zz; int bad;
-    ol_n = 0; i = 0;
-    while (i < nout) {
-        if (ol_n >= OPT_MAXL) return 0;
-        ol_s[ol_n] = i;
-        while (i < nout && out[i] != 10) i = i + 1;
-        ol_e[ol_n] = i; ol_n = ol_n + 1;
-        i = i + 1;
-    }
+    if (ol_lines() == 0) return 0;    /* one line builder: it also retires ol_opi's cache */
     ol_labels();
     if (optlevel >= 2) { k = 2; while (k <= 5) { ol_zok[k] = 1; k = k + 1; } if (bl_split() == 0) { k = 2; while (k <= 5) { ol_zok[k] = 0; k = k + 1; } }
         else ol_prep();
@@ -7864,6 +7873,7 @@ int opt_round(void) {
 }
 int ol_lines(void) {
     int i;
+    ol_gen = ol_gen + 1;              /* every cached ol_opi answer is stale */
     ol_n = 0; i = 0;
     while (i < nout) {
         if (ol_n >= OPT_MAXL) return 0;
@@ -7896,18 +7906,16 @@ int pp_word(int l, char *w) {         /* the op word of line l into w */
     return k;
 }
 int pp_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
-    char w[16]; int n; int i;
-    n = pp_word(l, w);
-    if (n == 0) return vfind(BF_PEEP_0, NBF_PEEP_0, "other", 5);
-    i = oi_ask(oi_idx(w, n));
+    int i;
+    i = ol_opi(l);
+    if (i < 0) return vfind(BF_PEEP_0, NBF_PEEP_0, "other", 5);
     return oi_acls[i];
 }
 int pp_bcls(int l) {                  /* index into BF_PEEP_1, from opinfo */
-    char w[16]; int n; int i;
+    int i;
     if (l >= ol_n) return vfind(BF_PEEP_1, NBF_PEEP_1, "none", 4);
-    n = pp_word(l, w);
-    if (n == 0) return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
-    i = oi_ask(oi_idx(w, n));
+    i = ol_opi(l);
+    if (i < 0) return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
     return oi_bcls[i];
 }
 int pp_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
