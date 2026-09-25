@@ -333,10 +333,6 @@ long bk_num(char *s, int n) {       /* int(tok, 0): decimal, 0x, a sign */
     return v;
 }
 int bk_hex(int c) { if (c >= 48 && c <= 57) return c - 48; return (c | 32) - 87; }
-int bk_isreg(char *s, int n) {
-    if (n == 2) { if (s[0] == 114) { if (s[1] >= 48 && s[1] <= 55) return s[1] - 48 + 1; } }
-    return 0;
-}
 char bkstrbuf[1048576];
 int bk_parse(char *t, int n) {
     int i; int e; int j; int k; int op; int na; int s0; int s1; char *sh; int id;
@@ -523,10 +519,6 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
     k = 0; while (nm[k]) k = k + 1;
     return vfind(BF_ABI_0, NBF_ABI_0, nm, k);
 }
-int bk_gateis(char *nm) { char *e; int k; e = bk_nth(BH_ABI_GATE, bkf_gate); k = 0;
-    while (nm[k]) { if (e[k] != nm[k]) return 0; k = k + 1; } return e[k] == 0; }
-int bk_formis(char *nm) { char *e; int k; e = bk_nth(BH_ENC_Y, bkf_form); k = 0;
-    while (nm[k]) { if (e[k] != nm[k]) return 0; k = k + 1; } return e[k] == 0; }
 
 /* ---- lowering: lower.py ------------------------------------------------ */
 /* A lowered instruction: tape ops keep their index; the target's own are
@@ -811,7 +803,6 @@ int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
 int ow(unsigned long v) {           /* a 32-bit little-endian word */
     ob(v & 255); ob((v >> 8) & 255); ob((v >> 16) & 255); ob((v >> 24) & 255); return 0;
 }
-int oq(unsigned long v) { ow(v & 0xFFFFFFFF); ow(v >> 32); return 0; }
 int bk_str_is(char *a, char *b) {
     int k; k = 0;
     while (a[k] && b[k]) { if (a[k] != b[k]) return 0; k = k + 1; }

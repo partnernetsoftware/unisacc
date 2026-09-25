@@ -1411,13 +1411,6 @@ int rtprintf(void) {
     }
     return 0;
 }
-int srcappend(char *t, int n) {
-    int k;
-    if (nsrc + n >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
-    k = 0;
-    while (k < n) { src[nsrc] = t[k]; nsrc = nsrc + 1; k = k + 1; }
-    return 0;
-}
 /* PREPENDED, where the user would have written it.  The Python driver can
    append, because it resolves calls at the end of the unit; this walker
    picks a call's convention AT the call, so a variadic library function
@@ -1703,10 +1696,6 @@ int collectargs(int i) {
     return 0 - 1;
 }
 
-int emitarg(int p) {
-    if (p < nargs) { if (p < MAXMPARAM) eputsrc(argo[p], argo[p] + argl[p]); }
-    return 0;
-}
 
 int emitstring(int p) {          /* #param */
     int k; int e; int c;
@@ -7877,15 +7866,6 @@ int ol_commit(void) {
    jump, the instruction it lands on), and say how their operands relate.
    Whether that relation licenses a rewrite -- and which -- is the `peep`
    table's answer, asked of its net exactly as unisa/opt.py asks it. */
-int pp_word(int l, char *w) {         /* the op word of line l into w */
-    int p; int e; int k;
-    k = 0;
-    if (l >= ol_n || out[ol_s[l]] != 32) { w[0] = 0; return 0; }
-    p = ol_s[l] + 2; e = ol_e[l];
-    while (p < e && out[p] != 32 && k < 15) { w[k] = out[p]; k = k + 1; p = p + 1; }
-    w[k] = 0;
-    return k;
-}
 int pp_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
     int i;
     i = ol_opi(l);

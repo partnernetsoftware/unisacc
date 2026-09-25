@@ -8637,13 +8637,6 @@ int rtprintf(void) {
     }
     return 0;
 }
-int srcappend(char *t, int n) {
-    int k;
-    if (nsrc + n >= MAXSRC) { __write(2, "source too large\n", 17); __exit(1); }
-    k = 0;
-    while (k < n) { src[nsrc] = t[k]; nsrc = nsrc + 1; k = k + 1; }
-    return 0;
-}
 /* PREPENDED, where the user would have written it.  The Python driver can
    append, because it resolves calls at the end of the unit; this walker
    picks a call's convention AT the call, so a variadic library function
@@ -8929,10 +8922,6 @@ int collectargs(int i) {
     return 0 - 1;
 }
 
-int emitarg(int p) {
-    if (p < nargs) { if (p < MAXMPARAM) eputsrc(argo[p], argo[p] + argl[p]); }
-    return 0;
-}
 
 int emitstring(int p) {          /* #param */
     int k; int e; int c;
@@ -15103,15 +15092,6 @@ int ol_commit(void) {
    jump, the instruction it lands on), and say how their operands relate.
    Whether that relation licenses a rewrite -- and which -- is the `peep`
    table's answer, asked of its net exactly as unisa/opt.py asks it. */
-int pp_word(int l, char *w) {         /* the op word of line l into w */
-    int p; int e; int k;
-    k = 0;
-    if (l >= ol_n || out[ol_s[l]] != 32) { w[0] = 0; return 0; }
-    p = ol_s[l] + 2; e = ol_e[l];
-    while (p < e && out[p] != 32 && k < 15) { w[k] = out[p]; k = k + 1; p = p + 1; }
-    w[k] = 0;
-    return k;
-}
 int pp_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
     int i;
     i = ol_opi(l);
@@ -15987,10 +15967,6 @@ long bk_num(char *s, int n) {       /* int(tok, 0): decimal, 0x, a sign */
     return v;
 }
 int bk_hex(int c) { if (c >= 48 && c <= 57) return c - 48; return (c | 32) - 87; }
-int bk_isreg(char *s, int n) {
-    if (n == 2) { if (s[0] == 114) { if (s[1] >= 48 && s[1] <= 55) return s[1] - 48 + 1; } }
-    return 0;
-}
 char bkstrbuf[1048576];
 int bk_parse(char *t, int n) {
     int i; int e; int j; int k; int op; int na; int s0; int s1; char *sh; int id;
@@ -16177,10 +16153,6 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
     k = 0; while (nm[k]) k = k + 1;
     return vfind(BF_ABI_0, NBF_ABI_0, nm, k);
 }
-int bk_gateis(char *nm) { char *e; int k; e = bk_nth(BH_ABI_GATE, bkf_gate); k = 0;
-    while (nm[k]) { if (e[k] != nm[k]) return 0; k = k + 1; } return e[k] == 0; }
-int bk_formis(char *nm) { char *e; int k; e = bk_nth(BH_ENC_Y, bkf_form); k = 0;
-    while (nm[k]) { if (e[k] != nm[k]) return 0; k = k + 1; } return e[k] == 0; }
 
 /* ---- lowering: lower.py ------------------------------------------------ */
 /* A lowered instruction: tape ops keep their index; the target's own are
@@ -16465,7 +16437,6 @@ int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
 int ow(unsigned long v) {           /* a 32-bit little-endian word */
     ob(v & 255); ob((v >> 8) & 255); ob((v >> 16) & 255); ob((v >> 24) & 255); return 0;
 }
-int oq(unsigned long v) { ow(v & 0xFFFFFFFF); ow(v >> 32); return 0; }
 int bk_str_is(char *a, char *b) {
     int k; k = 0;
     while (a[k] && b[k]) { if (a[k] != b[k]) return 0; k = k + 1; }
