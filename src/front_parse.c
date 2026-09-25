@@ -1249,7 +1249,7 @@ int postfix(void) {
             } }
         } else {
         if (p == P_INDEX) {
-            int row; int uu; int ist; int ifl; int ipd; int ibase;
+            int row; int uu; int ist; int ifl; int ipd; int ibase; int d3;
             curvla = 0;
             ipd = curpd; ibase = curbase;
             adv();
@@ -1257,6 +1257,7 @@ int postfix(void) {
             ifl = curflt;
             e = curelem;
             row = curdim2;
+            d3 = curdim3;                    /* saved: the index expression resets it */
             uu = curuns;                     /* the ELEMENT's, not the index's */
             if (row > 0) e = e * row;        /* the first index of `a[n][m]` */
             loadval();
@@ -1272,7 +1273,7 @@ int postfix(void) {
                 /* a row is itself an array: its VALUE is its address */
                 curelem = e / row; curptr = 1; lvalue = 0;
                 /* a[i] of a[n][m][k] is itself an [m][k]: its rows are k long */
-                curdim2 = curdim3; curdim3 = 0;
+                curdim2 = d3; curdim3 = 0;
             } else { lvalue = 1; curelem = e; curptr = 0; }
             /* an element of a struct array is itself an aggregate: its value
                is its address, and assigning it copies the whole struct */
