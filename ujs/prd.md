@@ -94,7 +94,7 @@ M1b drone 切 B             ✓（对称产物）
         ↓
 M2 编译器 wasm 化          **✓**（compile+host+sim+ship emit 无 python3）
         ↓
-M3 UJS 自举                **v15✓** sim+drone body≡ · else-if · ship via core
+M3 UJS 自举                **v16✓** sim+drone body≡ · ! · &&/|| · ship via core
         ↓
 P0 ship 无 A 核            **✓** 停拷 ujs_full；web-build 非 ship 必经
         ↓
@@ -117,6 +117,16 @@ P1 构造迁 unisacc          可选
 
 **P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm` + `sim.wasm`；`compile.mjs` **默认** core。
 
+#### M3 v16（✓ unary ! · &&/|| short-circuit · fold corpus on core）
+
+| 件 | 说明 |
+|---|---|
+| `compiler_min.c` / `compiler.ujs` | v16：`!e` → i64.eqz+extend（0/1）；`a&&b`/`a\|\|b` 经 IF0/IF1/IF2 + i64 `lscratch`/`lsc` 短路（JS 值语义；仅 i64；ujs op 200/201） |
+| 门禁 | fold **logic**→7；stage2≡stage1 · sim+drone body≡stage0；setidx_globals 默认 core |
+| 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
+
+**下一刀**：v17 短 str（仍非 stage0 面；本刀未做）。
+
 #### M3 v15（✓ else-if · fold corpus on core）
 
 | 件 | 说明 |
@@ -124,8 +134,6 @@ P1 构造迁 unisacc          可选
 | `compiler_min.c` / `compiler.ujs` | v15：`else if (...)` 复用 if 路径（C：`pstmt`；ujs：CST=4 + 收尾 IF2）；`else {` 不变 |
 | 门禁 | fold 含 **elseif**；stage2≡stage1 · sim+drone body≡stage0；setidx_globals 默认 core |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
-
-**下一刀**：v16 视缺口（`||`·`&&` / `!` / 短 str — 均非 stage0 面，需扩 stage0 或仅 core 产品面）。
 
 #### M3 v14（✓ unary minus · fold corpus on core）
 

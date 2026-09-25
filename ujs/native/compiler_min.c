@@ -138,7 +138,7 @@ enum {
   T_EOF, T_NUM, T_FNUM, T_ID, T_LET, T_WHILE, T_RETURN, T_IF, T_ELSE,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT,
-  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_BAD
+  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_BAD
 };
 typedef struct {
   const char *src; uint32_t len, pos;
@@ -213,7 +213,12 @@ static void next(Lex *L) {
     } else L->tok=T_EQ;
     return;
   }
-  if (c=='!' && L->pos<L->len && L->src[L->pos]=='='){ L->pos++; L->tok = T_NE; return; }
+  if (c=='!'){
+    if (L->pos<L->len && L->src[L->pos]=='='){ L->pos++; L->tok = T_NE; return; }
+    L->tok = T_NOT; return;
+  }
+  if (c=='&' && L->pos<L->len && L->src[L->pos]=='&'){ L->pos++; L->tok = T_AND; return; }
+  if (c=='|' && L->pos<L->len && L->src[L->pos]=='|'){ L->pos++; L->tok = T_OR; return; }
   L->tok = T_BAD;
 }
 
@@ -222,7 +227,7 @@ enum {
   OP_CONST, OP_FCONST, OP_LOAD, OP_STORE,
   OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
   OP_FADD, OP_FSUB, OP_FMUL, OP_FDIV,
-  OP_LT, OP_GT, OP_LE, OP_GE, OP_EQ, OP_NE, OP_NEG, OP_FNEG,
+  OP_LT, OP_GT, OP_LE, OP_GE, OP_EQ, OP_NE, OP_NEG, OP_FNEG, OP_NOT,
   OP_WBEGIN, OP_WCOND, OP_WEND,
   OP_IF0, OP_IF1, OP_IF2,
   OP_BOXI, OP_BOXF, OP_MKLIST, OP_MKLIST_DYN, OP_LSET, OP_IDXGET, OP_IDXSET, OP_LEN, OP_IWRAP,
@@ -240,6 +245,7 @@ typedef struct {
   char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; int ng;
   int scratch; /* i32 temp for list/dict init, or -1 */
   int fscratch; /* f64 temp for i64→f64 under, or -1 */
+  int lscratch; /* i64 temp for && / || short-circuit, or -1 */
   int list_elem_ty; /* TY_I64/TY_F64 of last list literal */
   const char *err;
 } Prog;
@@ -284,6 +290,15 @@ static int ensure_fscratch(Prog *P) {
   P->lty[P->nl] = TY_F64;
   P->lety[P->nl] = TY_F64;
   P->fscratch = P->nl;
+  return P->nl++;
+}
+static int ensure_lscratch(Prog *P) {
+  if (P->lscratch >= 0) return P->lscratch;
+  if (P->nl >= MAXL) { P->err = "too many locals"; return -1; }
+  P->names[P->nl][0] = 0;
+  P->lty[P->nl] = TY_I64;
+  P->lety[P->nl] = TY_I64;
+  P->lscratch = P->nl;
   return P->nl++;
 }
 
@@ -488,6 +503,12 @@ static int pprim(Lex *L, Prog *P) {
     if (!emit(P, ty == TY_F64 ? OP_FNEG : OP_NEG, 0)) return 0;
     return ty;
   }
+  if (L->tok == T_NOT) {
+    next(L); int ty = pprim(L, P); if (!ty) return 0;
+    if (ty != TY_I64) { P->err = "! needs i64"; return 0; }
+    if (!emit(P, OP_NOT, 0)) return 0;
+    return TY_I64;
+  }
   P->err = "bad primary"; return 0;
 }
 
@@ -569,7 +590,46 @@ static int pcmp(Lex *L, Prog *P) {
   if (!emit(P, opf, 0)) return 0;
   return TY_I64;
 }
-static int pexpr(Lex *L, Prog *P) { return pcmp(L, P); }
+/* a && b / a || b — short-circuit via IF0/IF1/IF2 + i64 scratch (JS-ish values) */
+static int pand(Lex *L, Prog *P) {
+  int ty = pcmp(L, P); if (!ty) return 0;
+  while (L->tok == T_AND) {
+    if (ty != TY_I64) { P->err = "&& needs i64"; return 0; }
+    int sc = ensure_lscratch(P); if (sc < 0) return 0;
+    next(L);
+    if (!emit(P, OP_STORE, sc)) return 0;
+    if (!emit(P, OP_LOAD, sc)) return 0;
+    if (!emit(P, OP_IF0, 0)) return 0;
+    int ty2 = pcmp(L, P); if (!ty2) return 0;
+    if (ty2 != TY_I64) { P->err = "&& needs i64"; return 0; }
+    if (!emit(P, OP_STORE, sc)) return 0;
+    if (!emit(P, OP_IF1, 0)) return 0;
+    if (!emit(P, OP_IF2, 0)) return 0;
+    if (!emit(P, OP_LOAD, sc)) return 0;
+    ty = TY_I64;
+  }
+  return ty;
+}
+static int por(Lex *L, Prog *P) {
+  int ty = pand(L, P); if (!ty) return 0;
+  while (L->tok == T_OR) {
+    if (ty != TY_I64) { P->err = "|| needs i64"; return 0; }
+    int sc = ensure_lscratch(P); if (sc < 0) return 0;
+    next(L);
+    if (!emit(P, OP_STORE, sc)) return 0;
+    if (!emit(P, OP_LOAD, sc)) return 0;
+    if (!emit(P, OP_IF0, 0)) return 0;
+    if (!emit(P, OP_IF1, 0)) return 0;
+    int ty2 = pand(L, P); if (!ty2) return 0;
+    if (ty2 != TY_I64) { P->err = "|| needs i64"; return 0; }
+    if (!emit(P, OP_STORE, sc)) return 0;
+    if (!emit(P, OP_IF2, 0)) return 0;
+    if (!emit(P, OP_LOAD, sc)) return 0;
+    ty = TY_I64;
+  }
+  return ty;
+}
+static int pexpr(Lex *L, Prog *P) { return por(L, P); }
 
 static int pblock(Lex *L, Prog *P) {
   if (!expect(L, T_LB, P, "expected {")) return 0;
@@ -736,6 +796,10 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x42) || !blei64(c, -1) || !bu8(c, 0x7e)) return 0; break;
     case OP_FNEG:
       if (!bu8(c, 0x9a)) return 0; break; /* f64.neg */
+    case OP_NOT:
+      if (!bu8(c, 0x50)) return 0; /* i64.eqz */
+      if (!bu8(c, 0xad)) return 0; /* i64.extend_i32_u */
+      break;
     case OP_WBEGIN:
       if (!bu8(c, 0x02) || !bu8(c, 0x40)) return 0;
       if (!bu8(c, 0x03) || !bu8(c, 0x40)) return 0;
@@ -1676,7 +1740,7 @@ int32_t compile(uint32_t src_ptr, uint32_t src_len) {
   if (src_len > 100000) { set_err("src too large"); return 1; }
   const char *src = (const char *)(uintptr_t)src_ptr;
 
-  Prog P; memset(&P, 0, sizeof P); P.scratch = -1; P.fscratch = -1;
+  Prog P; memset(&P, 0, sizeof P); P.scratch = -1; P.fscratch = -1; P.lscratch = -1;
   Lex L; L.src = src; L.len = src_len; L.pos = 0;
   next(&L);
   while (L.tok != T_EOF) {
