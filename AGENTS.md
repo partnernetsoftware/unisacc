@@ -135,6 +135,7 @@ and each data block names its source:
 | `unisa_headers.inc` | the C library carried inside the binary | `include/*.h`, verbatim |
 | `unisa_cases.inc` | every key of every stage with its gold class, for the self test | `unisa/gold.py` |
 | `unisa_core.c`, `unisa_self.c` | the integer inference kernel | `KERNEL_BODY` in `unisa/ckernel.py` |
+| `weights/gold/*.tsv` | every stage's truth table as data, one line per key (written by `unisa gold-export`, which `build-weights` runs) | `unisa/gold.py` |
 
 They are committed on purpose: `unisacc.c` is these files and `src/`
 concatenated, so the compiler builds -- and rebuilds itself -- with no

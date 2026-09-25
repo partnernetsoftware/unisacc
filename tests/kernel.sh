@@ -18,6 +18,14 @@ for f in "$T"/*; do
     if cmp -s "$f" "kernel/$b"; then ok=$((ok+1))
     else bad=$((bad+1)); echo "  STALE kernel/$b -- run: python3 -m unisa emit-kernel"; fi
 done
+# ...and the truth tables as data (weights/gold/*.tsv), from the same gold
+perl -e 'alarm 55; exec @ARGV' python3 -m unisa gold-export --out "$T/gold" >/dev/null 2>&1 || {
+    echo "  FAIL gold-export did not run"; exit 1; }
+for f in "$T"/gold/*.tsv; do
+    b=$(basename "$f")
+    if cmp -s "$f" "weights/gold/$b"; then ok=$((ok+1))
+    else bad=$((bad+1)); echo "  STALE weights/gold/$b -- run: python3 -m unisa gold-export"; fi
+done
 echo
 echo "kernel  generated files up to date $ok   stale $bad"
 [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]

@@ -501,6 +501,62 @@ class _Peep(_Round):
             l += 1
         return l
 
+    def stfuse(self, i, out):
+        """a local's store, the mirror of `local` [H4] -- pp_stfuse"""
+        L, n = self.L, self.n
+        if i + 3 >= n:
+            return 0
+        t = "  imm r2, "
+        if not L[i].startswith(t) or len(L[i]) <= len(t) or \
+                not all("0" <= c <= "9" for c in L[i][len(t):]):
+            return 0
+        num = L[i][len(t):]
+        b = L[i + 1]
+        if not b.startswith("  sub64 r") or len(b) != 18:
+            return 0
+        a = ord(b[9]) - 48
+        if a < 0 or a > 5 or a == 2:
+            return 0
+        if b[10] != "," or b[12] != "r" or b[13] != "6" or b[16] != "r" or b[17] != "2":
+            return 0
+        j = i + 2
+        while j < n and j < i + 11:
+            ln = L[j]
+            st = 1 if ln.startswith("  .st [r") else (2 if ln.startswith("  store64 [r") else 0)
+            if st:
+                p = 8 if st == 1 else 12
+                if len(ln) < p + 8:
+                    return 0
+                if ord(ln[p]) - 48 != a or ln[p + 1:p + 4] != "+0]":
+                    return 0
+                if ln[p + 4:p + 7] != ", r":
+                    return 0
+                q = p + 7
+                if q >= len(ln) or not ln[q].isdigit():
+                    return 0
+                v = 0
+                while q < len(ln) and ln[q].isdigit():
+                    v = v * 10 + ord(ln[q]) - 48
+                    q += 1
+                if v in (a, 2):
+                    return 0
+                if st == 2 and q != len(ln):
+                    return 0
+                if st == 1 and (q >= len(ln) or ln[q] != ","):
+                    return 0
+                if not self.dead(a, j + 1) or not self.dead(2, j + 1):
+                    return 0
+                out.extend(L[i + 2:j])
+                if st == 1:
+                    out.append("  .st [r6-%s], r%d%s" % (num, v, ln[q:]))
+                else:
+                    out.append("  store64 [r6-%s], r%d" % (num, v))
+                return j + 1
+            if not _simple(ln) or _names(ln, a) or _names(ln, 2):
+                return 0
+            j += 1
+        return 0
+
     def run(self):
         L, n, out, hits, i = self.L, self.n, [], 0, 0
         while i < n:
@@ -508,6 +564,11 @@ class _Peep(_Round):
             if not A.startswith(" "):
                 out.append(A)
                 i += 1
+                continue
+            k = self.stfuse(i, out)
+            if k > 0:
+                hits += 1
+                i = k
                 continue
             a, b, rel = self._acls(A), self._bcls(i + 1), "none"
             t = x = y = -1

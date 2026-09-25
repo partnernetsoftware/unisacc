@@ -13,6 +13,12 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 PROBES=${*:-examples/hello.c examples/fib.c examples/switch.c examples/struct.c tests/c/b_float.c tests/c/b_file.c tests/c/b_argv.c}
 TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
 ABL=${ABL:-"pp lex parse type scope irsel enc reloc regmap abi.sysno abi.arg0 abi.arg1 abi.arg2 abi.ret abi.gate abi.nrreg"}
+# SHARD=k/n keeps every n-th ablation starting at the k-th: each ablation is
+# 42 compiles, and all sixteen in one run were over the 60 s ceiling
+# (AGENTS.md).  all.sh runs 1/4 .. 4/4.
+if [ -n "${SHARD:-}" ]; then
+    ABL=$(echo $ABL | tr ' ' '\n' | awk -v k="${SHARD%/*}" -v n="${SHARD#*/}" '(NR-1)%n==k-1' | tr '\n' ' ')
+fi
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 images() {   # images <tag> -> one line per probe/target: sha or REFUSED

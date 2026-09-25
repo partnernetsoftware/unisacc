@@ -7987,6 +7987,53 @@ int pp_rereg(int l, int a, int b, int all) {
     pp_nl();
     return 0;
 }
+/* -O2: a local's store, the mirror of ol_local [H4].  The walker writes
+       imm r2, N / sub64 rA, r6, r2 / S... / .st [rA+0], rV, W
+   and with rA and r2 dead after the store (S straight-line, naming neither)
+   that is S... / .st [r6-N], rV, W -- two instructions fewer per store.
+   Returns the line after the store, having written the result; 0 if not. */
+int pp_stfuse(int i) {
+    int k; int a; int j; int q; int p; int e; int v; int st; int n0; int n1;
+    if (i + 3 >= ol_n) return 0;
+    k = ol_pre(i, "  imm r2, "); if (k == 0) return 0;
+    n0 = ol_s[i] + k; n1 = ol_e[i];
+    if (n0 >= n1) return 0;
+    q = n0; while (q < n1) { if (isdi(out[q] & 255) == 0) return 0; q = q + 1; }
+    if (ol_pre(i + 1, "  sub64 r") == 0 || ol_len(i + 1) != 18) return 0;
+    q = ol_s[i + 1];
+    a = out[q + 9] - 48;
+    if (a < 0 || a > 5 || a == 2) return 0;
+    if (out[q + 10] != 44 || out[q + 12] != 114 || out[q + 13] != 54 || out[q + 16] != 114 || out[q + 17] != 50) return 0;
+    j = i + 2;
+    while (j < ol_n && j < i + 11) {
+        st = 0;
+        if (ol_pre(j, "  .st [r")) st = 1;
+        else if (ol_pre(j, "  store64 [r")) st = 2;
+        if (st) {
+            p = ol_s[j] + (st == 1 ? 8 : 12); e = ol_e[j];
+            if (out[p] - 48 != a || out[p + 1] != 43 || out[p + 2] != 48 || out[p + 3] != 93) return 0;
+            if (out[p + 4] != 44 || out[p + 5] != 32 || out[p + 6] != 114) return 0;
+            q = p + 7; v = 0;
+            if (q >= e || isdi(out[q] & 255) == 0) return 0;
+            while (q < e && isdi(out[q] & 255)) { v = v * 10 + out[q] - 48; q = q + 1; }
+            if (v == a || v == 2) return 0;
+            if (st == 2 && q != e) return 0;
+            if (st == 1 && (q >= e || out[q] != 44)) return 0;
+            if (ol_dead(a, j + 1) == 0 || ol_dead(2, j + 1) == 0) return 0;
+            k = i + 2; while (k < j) { ol_emit(k); k = k + 1; }
+            if (st == 1) ol_puts("  .st [r6-"); else ol_puts("  store64 [r6-");
+            ol_put(n0, n1); ol_puts("], ");
+            pp_emitreg(v);
+            if (st == 1) ol_put(q, e);
+            pp_nl();
+            return j + 1;
+        }
+        if (ol_simple(j) == 0) return 0;
+        if (ol_names(j, a) || ol_names(j, 2)) return 0;
+        j = j + 1;
+    }
+    return 0;
+}
 int pp_asks;
 int peep_round(void) {
     int i; int n; int a; int b; int rel; int act; int key[4]; int t; int u; int k; int x; int y;
@@ -8003,6 +8050,8 @@ int peep_round(void) {
     nout2 = 0; hits = 0; i = 0; n = ol_n;
     while (i < n) {
         if (out[ol_s[i]] != 32) { ol_emit(i); i = i + 1; continue; }
+        k = pp_stfuse(i);
+        if (k > 0) { hits = hits + 1; i = k; continue; }
         a = pp_acls(i); b = pp_bcls(i + 1); rel = none;
         t = 0 - 1; x = 0 - 1; y = 0 - 1; u = 0; v = 0;
         if (ol_word(i, "jump") || ol_word(i, "jumpz")) {

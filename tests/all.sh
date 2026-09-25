@@ -110,7 +110,10 @@ T0=$(date +%s)
 ./tests/build_ref.sh >/dev/null || { echo "build_ref failed"; exit 1; }
 
 # acceptance rewrites weights/, which every other suite reads: it goes alone.
-serial acceptance ./tests/acceptance.sh
+serial acceptance1 env PART=1/4 ./tests/acceptance.sh
+serial acceptance2 env PART=2/4 ./tests/acceptance.sh
+serial acceptance3 env PART=3/4 ./tests/acceptance.sh
+serial acceptance4 env PART=4/4 ./tests/acceptance.sh
 run vm         ./tests/vm.sh
 run difftest   ./tests/difftest.sh
 run native     bash -c "./tests/native.sh $PROBES"
