@@ -975,6 +975,22 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 **J3、J2 的重新评估**（J1、J5 之后）：两个 walker 都把局部变量的地址先算进 r0 作左值、再经 `[r0+0]` 读写；在发射时直接用 `[r6-N]`（J3）要改左值表示，两前端同改。而 -O2 的读取融合与写入融合（H4）已消去绝大多数此类访问，出货构建（-O2）上 J3 的剩余收益小，降级。J2（临时量进寄存器）同理：H1 的栈顶缓存已消去约四分之三的 push/pop。余下差距的真正来源待下一次对自建二进制的指令级剖析确定，再定 J2 的范围。
 
+**K. 抽象、复用与归档（P1，2026-09-25，主人：“解决完速度，下一步梳理代码的抽象与复用”）**
+
+每一步都以“对 HEAD 逐字节相同”为判据：C 侧 918 个镜像（examples、tests/c、tests/c99 与编译器自身，-O0/-O2，三个目标），Python 侧 closure 570/0、stages 95、optpy 192/0；自举 nativeboot、bigclosure 6/0。
+
+| # | 内容 | 状态 |
+|---|---|---|
+| K1 | 删死代码：C 七个函数（29 行）、Python 十二个函数（132 行）、`unisa.sh`；`tests/gen2.sh` 归档（nativeboot 已取代） | 已达 |
+| K2 | `src/` 由两个文件按段切成七个：`front_pp`、`front_parse`、`opt`、`main`、`back_lower`、`back_encode`、`back_image`；拼接顺序即依赖，`unisacc.c` 逐字节不变 | 已达 |
+| K3 | 一个字符串相等（后端的 `bk_str_is` 是 `strsame` 的拷贝，107 处）；优化器六处手写的 out2 写字节合成 `ol_c`；peep 助手 `pp_` → `pk_`（`pp_` 本是预处理器的前缀） | 已达 |
+| K4 | walker 的 `eimm`/`eframe`（25 处）；整行一次交给 `es()`，因为 `_rev` 配方按同一串里的逗号找操作数 | 已达 |
+| K5 | cli、run、multi、selfgap、kernel 改用 `tests/lib.sh`；顺带修正 cli/run 在 snap 下用的是 `/tmp/ua_ref` 而非快照的 `$UA` | 已达 |
+| K6 | `unisa/bits.py`：四份 `_round`、五处 64 位掩码合一 | 已达 |
+| K7 | SGD 对照臂的 `weights/*.unisa` 移入 archive | **不做**：`--drive`、训练输出与 acceptance 都按路径读它们，约 150 KB，收益小于改动面 |
+| K8 | 余项：`ud_same`/`pk_same` 类区间比较合一；walker 其余 `es`+`en` 模式（load/store 帧槽）；其余套件迁 `lib.sh` | 待做 |
+
+
 **明确不做**：目标文件与链接器（多单元已由一个 walker 解决）；训练（对照臂）；C11/C23 中 G 组之外的特性。
 
 **进度（2026-09-25 01:30，编译速度）**：B3 的速度一半已达。`make com` **182 s → 17 s**：Python 后端两处 O(n·m)（`size()` 每条指令重建 5k 标签字典、`lower()` 每个 pc 扫全部标签），镜像逐字节不变。出货二进制编译自己 **2.5 s → 1.0 s**、cc -O2 构建 **264 → 90 ms**：采样定位 93% 在 `vfind`/`srcfind`/`sfind` 三个线性查找（`V_NLISTS` 16 小于实际的 18 个词表，多出的永远走线性），改为哈希，六目标镜像、全部探针与 220 个 c-testsuite 程序对旧编译器逐字节相同，gen2 = gen1。验证：closure 564/0、stages/selfhost 94、native 94/0、nativeboot、bigclosure 6/0、ape 3/0。**套件慢与发热的主因不是编译器**：每个新写出的二进制首次执行被 XProtect 扫描 0.5–0.9 s（`XprotectService` ~35% CPU），编译一个探针只要 0.01 s；十三个套件逐探针写-签-执行新文件。对策（`-run` 取代落盘执行、或主人把终端加入“开发者工具”）待定，见 AGENTS.md。
