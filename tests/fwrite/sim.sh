@@ -116,20 +116,24 @@ C2
 } > "$T/f.c"
 
 bad=0
-judge() {  # $1 = path name, $2 = output file
+judge() {  # $1 = path name, $2 = output file, $3 = the probe's exit status
+    # A pass needs BOTH the text (11 PASS, 0 FAIL, END fails=0) and exit 0:
+    # a probe that prints every PASS and then exits 2, is killed by a signal
+    # or by the watchdog (alarm -> 142) is a failure.  $3 is the status of
+    # the command itself, saved right after it ran -- never a pipe's tail.
     sed 's/^/    /' "$2"
     p=$(grep -c '^PASS ' "$2"); f=$(grep -c '^FAIL ' "$2")
-    if [ "$p" = 11 ] && [ "$f" = 0 ] && grep -q '^END fails=0$' "$2"; then
-        echo "  $1: SIMULATED 11/11 PASS"
-    else echo "  $1: SIMULATED FAIL (pass $p, fail $f)"; bad=1; fi
+    if [ "$3" = 0 ] && [ "$p" = 11 ] && [ "$f" = 0 ] && grep -q '^END fails=0$' "$2"; then
+        echo "  $1: SIMULATED 11/11 PASS (exit 0)"
+    else echo "  $1: SIMULATED FAIL (pass $p, fail $f, exit $3)"; bad=1; fi
 }
 echo "== native (osx/arm64 executable)"
 if b 30 "$UA" "$T/f.c" -b osx/arm64 -o "$T/x" >"$T/build.log" 2>&1; then
-    b 20 "$T/x" > "$T/o1" 2>&1; judge native "$T/o1"
+    b 20 "$T/x" > "$T/o1" 2>&1; rc=$?; judge native "$T/o1" $rc
 else cat "$T/build.log"; echo "  native: FAIL build"; bad=1; fi
 echo "== -run"
-b 30 "$UA" -run "$T/f.c" > "$T/o2" 2>&1; judge -run "$T/o2"
+b 30 "$UA" -run "$T/f.c" > "$T/o2" 2>&1; rc=$?; judge -run "$T/o2" $rc
 echo "== python --drive built"
-(cd "$R" && b 55 python3 -m unisa run "$T/f.c" --drive built) > "$T/o3" 2>&1; judge python "$T/o3"
+(cd "$R" && b 55 python3 -m unisa run "$T/f.c" --drive built) > "$T/o3" 2>&1; rc=$?; judge python "$T/o3" $rc
 [ $bad = 0 ] && echo "SIMULATED fwrite: all paths PASS" || echo "SIMULATED fwrite: FAIL"
 exit $bad
