@@ -1,13 +1,16 @@
-# iterate/kernel -- J10 step 3, first slice
+# iterate/kernel -- J10 step 3, first and second slices
 
 `genmodel.c` writes part of `kernel/unisa_model.inc` from declared inputs, in
 the C subset unisacc compiles. The parts are the `S_*` defines, `MODEL`, `NSTAGE`
 and the `STAGE_*`/`act`/`z` declarations, `DENSE`, `DENSE_LEN`,
 `STAGE_DOFF/NH` and `model_dims()`.
-The rest of the file (the provenance header, vocabularies `TOKV..IRRECV`,
-`BF_*`/`BH_*`, `ENC_*`) is still written by Python and is out of this slice.
+The second slice adds the 15 TSV vocabularies (`TOKV`, `PRODV`, `ACTV`, `DIRV`,
+`PPACTV`, `NTV`, `TYSV`, `TOPSV`, `TYOUTV`, `SCTXV`, `SKINDV`, `SACTV`, `IRFAMV`,
+`IRFLAV`, `IRRECV`) and `BF_*`/`BH_*`/`HD_*` for 11 stages (see "Second slice"
+below). The provenance header, `TYPEV` (lex.py TYPEKW) and `ENC_*` are still
+written by Python and are out of scope.
 
-    genmodel -o OUT order.tsv weights/built.uns2 weights/gold/<18 stages>.tsv
+    genmodel -o OUT order.tsv vocab.tsv weights/built.uns2 weights/gold/<18 stages>.tsv
 
 ## Inputs
 
@@ -59,7 +62,7 @@ failure). Nothing is written unless every check passes.
 ## check.sh
 
 `iterate/kernel/check.sh [ua]` runs from the repo root, with `ua` defaulting to
-`/tmp/ua_ref`. `CHECKS="..."` selects checks and `--batches` runs four batches
+`/tmp/ua_ref`. `CHECKS="..."` selects checks and `--batches` runs six batches
 of at most 60 s each. Each step is bounded with `alarm`. A check gets
 `receipt <check>` only when all of its `need` marks are present. If a selected
 check has no receipt, the run fails.
@@ -77,6 +80,13 @@ check has no receipt, the run fails.
 | label | one label changed in a temp copy of prec.tsv, with UNS2 unchanged. genmodel's output changes in exactly one DENSE line, and the semantic check REJECTS it (1 wrong) in cc and ua |
 | perm | order.tsv with its stages reversed. The region is byte-identical to `permoracle.py`, which is emit_core with `ckernel.ALL` permuted the same way in a scratch process, and it differs from the unpermuted region. `S_*` = the permuted positions, and sem passes |
 | fault | `CHECKS=order SKIP=order`: the check's body is dropped and nothing inside it fails. The run must still exit non-zero, because `order` has no receipt |
+| vocab | `vocab_check.py`: vocab.tsv equals ckernel.py's tuples (second slice) |
+| region2 | `vregion.awk`: the oracle's vocab/BF/BH region equals the shipped one, and genmodel's is byte-identical to it in cc, ua and san |
+| vneg | 17 broken inputs (vocab.tsv or a TSV), each rc 1 with its diagnostic and no output, in cc, ua and san |
+| vpos | a non-first vocab value starting 8 or 9 is accepted; cc reads it back from the emitted TOKV |
+| pool | two different renames in the first-loaded (enc) and last-loaded (reloc) TSV both survive; exactly those two lines change |
+| rename | opinfo `add64` -> `addq`: the changed symbols are predicted from the schema and vocab.tsv, and match exactly |
+| integ | the MIXED file equals the shipped one modulo comments; `tests/snap.sh` closure and nativeboot over it |
 
 The region (`region.awk`) runs from the first `#define S_` line to the `}`
 that closes `int model_dims(void) {`. Whole-line `/* ... */` comment blocks

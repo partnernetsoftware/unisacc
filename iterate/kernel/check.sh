@@ -418,7 +418,7 @@ if sel vneg; then
             *) voc="$V/$n.tsv"; set -- $K/order.tsv weights/built.uns2 $GOLD ;;
             esac
             rm -f "$V/out"
-            VOC=$voc gm $b "$V/out" "$@" > "$V/o" 2>&1; rc=$?
+            VOC=$voc; gm $b "$V/out" "$@" > "$V/o" 2>&1; rc=$?; unset VOC   # a function call keeps a prefix assignment in sh: set and unset
             if [ $rc = 1 ] && grep -qF "$want" "$V/o" && [ ! -e "$V/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$V/o"; then
                 echo "vneg $n $b: rc 1, no output: $(head -1 "$V/o" | LC_ALL=C tr -c '\n -~' '?')"; P "vneg $n $b"
             else echo "vneg $n $b: FAILED (rc $rc, want 1 and '$want'): $(head -1 "$V/o" | LC_ALL=C tr -c '\n -~' '?')"; fi
@@ -437,10 +437,10 @@ if sel vpos; then
         for b in cc ua san; do
             rm -f "$V/out"
             gm $b "$V/out" $K/order.tsv weights/built.uns2 $noparse "$V/$n/parse.tsv" > "$V/o" 2>&1; rc=$?
-            { grep '^char \*TOKV = ' "$V/out"; echo 'int printf(const char *, ...); int main(void) { char *p = TOKV; int i; for (i = 0; i < 5; i = i + 1) while (*p++) ; printf("%s\n", p); return 0; }'; } > "$V/x.c" 2>/dev/null
+            { grep '^char \*TOKV = ' "$V/out"; echo 'int puts(const char *); int main(void) { char *p = TOKV; int i; for (i = 0; i < 5; i = i + 1) while (*p++) ; puts(p); return 0; }'; } > "$V/x.c" 2>/dev/null
             B 60 cc -w -o "$V/x" "$V/x.c" > /dev/null 2>&1 && got=$(B 10 "$V/x") || got="(no build)"
             if [ $rc = 0 ] && grep -q "^char \*TOKV = \".*\\\\0${d}if\\\\0" "$V/out" && [ "$got" = "${d}if" ]; then
-                echo "vpos $n $b: rc 0, TOKV holds '\\0${d}if\\0'; cc reads value 5 back as '$got'"; P "vpos $n $b"
+                printf '%s\n' "vpos $n $b: rc 0, TOKV holds '\\0${d}if\\0'; cc reads value 5 back as '$got'"; P "vpos $n $b"
             else echo "vpos $n $b: FAILED (rc $rc, value 5 '$got'): $(head -1 "$V/o")"; fi
         done
     done
@@ -461,7 +461,7 @@ if sel pool; then
     grep '^char \*BF_RELOC_0 = ' "$PL/v0" | sed 's/"jmp\\000/"POOLB_a_different_jmp\\000/' >> "$PL/want"
     grep -e '^char \*BF_ENC_1 = ' -e '^char \*BF_RELOC_0 = ' "$PL/v1" > "$PL/got"
     if [ -s "$PL/v1" ] && [ "$(wc -l < "$PL/want" | tr -d ' ')" = 2 ] && cmp -s "$PL/want" "$PL/got"; then
-        echo "pool kept: $(tr '\n' ' ' < "$PL/got")"; P "pool kept"
+        printf '%s\n' "pool kept: $(tr '\n' ' ' < "$PL/got")"; P "pool kept"
     else echo "pool kept: FAILED: $(tr '\n' ' ' < "$PL/got")"; fi
     nd=$(diff "$PL/v0" "$PL/v1" | grep -c '^[<>]'); ns=$(diff "$PL/v0" "$PL/v1" | grep '^>' | sed 's/^> char \*\([A-Z0-9_]*\) = .*/\1/' | sort | tr '\n' ' ')
     if [ "$nd" = 4 ] && [ "$ns" = "BF_ENC_1 BF_RELOC_0 " ] && region "$T/base.cc" > "$PL/r0" && region "$PL/out.cc" > "$PL/r1" && cmp -s "$PL/r0" "$PL/r1"; then
@@ -480,7 +480,7 @@ if sel rename; then
         BEGIN { while ((getline l < VOC) > 0) { split(l, a, "\t"); if (a[1] == "bfbh" && a[2] == st) bf = 1
                     if (a[1] == "vocab" && a[3] == st) m[a[4] "|" a[5]] = a[2] } }
         $1 == "#field" { hit = 0; for (i = 3; i <= NF; i++) if ($i == v) hit = 1
-            if (hit) { if (bf) print "BF_" toupper(st) "_" nf; if (("field|" $2) in m) print m["field|" $2] }; nf++ }
+            if (hit) { if (bf) print "BF_" toupper(st) "_" nf + 0; if (("field|" $2) in m) print m["field|" $2] }; nf++ }
         $1 == "#head" { hit = 0; for (i = 4; i <= NF; i++) if ($i == v) hit = 1
             if (hit) { if (bf) print "BH_" toupper(st) "_" toupper($2); if (("head|" $2) in m) print m["head|" $2] } }' weights/gold/$st.tsv | sort | tr '\n' ' ' > "$RN/pred"
     others=$(echo "$GOLD" | grep -v "/$st.tsv\$")
@@ -515,7 +515,8 @@ if sel integ; then
     cp "$I/mixed.inc" "$I/tree/kernel/unisa_model.inc"
     for s in ${INTEG:-closure nativeboot}; do
         t1=$(now)
-        ( cd "$I/tree" && B 60 bash tests/snap.sh $s ) > "$I/$s" 2>&1; rc=$?
+        case $s in closure) arg="closure examples/*.c tests/c/*.c" ;; *) arg=$s ;; esac   # closure takes the all.sh probes
+        ( cd "$I/tree" && B 60 bash tests/snap.sh "$arg" ) > "$I/$s" 2>&1; rc=$?
         echo "integ $s: rc $rc, $(perl -e "printf '%.1f', $(now) - $t1") s: $(tail -1 "$I/$s")"
         [ $rc = 0 ] && P "integ $s"
     done
