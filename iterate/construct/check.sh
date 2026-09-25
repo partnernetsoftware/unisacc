@@ -95,7 +95,8 @@ combo|0|uns2
 combo|0|trace
 |0||py ship round
 |0||order.ua
-|0||order.cc order.san wfail'
+|0||order.cc order.san
+|0||wfail'
 if [ "${1:-}" = --batches ]; then
     shift; UA=${1:-/tmp/ua_ref}
     # the plan: every (stage, kind) exactly once -- a full batch covers all

@@ -1090,3 +1090,81 @@ combo acceptance (cc -O2, unisacc -O2 osx/arm64, UBSan):
 18/18 is **per-stage** acceptance only.  Writing the whole pack (all
 stages into one UNS2, MAXS 8) is unchanged and is a separate, later
 acceptance.
+
+## The whole pack (2026-09-25)
+
+`construct -u out.uns2 <18 tsv>` builds every stage in ONE process and
+writes one complete UNS2.  construct sorts the sections by name itself
+(insertion sort on the 16-byte name, as `uns2.dump`'s `sorted(nets)`), so
+argument order does not matter.  `-u a.uns2 <tsv...> -u b.uns2 <tsv...>`
+writes several packs from one process (each further `-u` writes the
+previous pack and starts the next).
+
+**Capacity.** `MAXS 8 -> 24` (`sec[MAXS][SECSZ]`, 1.5 MB).  A pack's stage
+files are counted before any build: more than MAXS exits **4**,
+`capacity: 25 stage files, more than 24 (MAXS)` (check.sh: the 18 files
+plus 7 copies of prec.tsv).
+
+**Exit codes** (construct.c header): 1 reader / not exact, 2 usage or a
+stage given twice, 3 deployment invariant, 4 capacity, 5 self-test, 6
+overflow, **7 (new): output could not be opened, written or closed**
+(`write: cannot open <p> for writing`, `write: <p>: short write, header|stage
+<s> <n> of <len> B`, `write: <p>: close failed`).  A duplicate stage is
+rejected right after its second copy is built, before the output is
+opened (exit 2); an empty `-u` group exits 2.  A short write or failed
+close leaves an incomplete file; the exit status says so.
+
+**State audit.** `resetstage()`, first thing in `build()`, resets every
+count a build leaves: reader `nf nh nok sname`; domain `nq nqw qtl nord`;
+rules `nr`; T4 pool `npool`; `ncand`; per head `nhc[] hnr[] chosen[]` (all
+MAXH); T5 `nparts`; net `H h0 mxlog ch`; trace counters `tunits talign
+ttie tpickmoved tfatt tfnone tfearlyb tfearlyp tfkept tsel trounds tacc
+trej tchg`.  Arrays are not cleared; each is written before read, bounded
+by a count above or recomputed per stage: `grp gfirst ng qk qlab qmask ALL
+FULLW gnw gtl crank`, `oseen olab`, `labmask rem`, `cons fire nfire lv`,
+`cn ccube cw` (newunit clears its row), buckets `gcode gcls bcls bn boff
+bfill bof bpool border` (per rep_factored call), `hc hrc hrl hlv`, `ucube
+b1 W2` (rows cleared per new unit), `pool pall`.  Cube words above
+`gnw[i]` may hold an earlier stage's bits; nothing reads past `gnw[i]`.
+Deliberately persistent: `dbg tflag tbreak poolcap` (command line) and
+`sec seclen secname secH` (the pack, over ns).
+
+**Results** (cc -O2, unisacc -O2 osx/arm64, UBSan -O1), all three builds:
+
+- 18 stages, **9,124 B**, raw-identical to `uns2slice.py` (Python oracle)
+  and to `weights/built.uns2` **with the 16 B header**; `tools/uns2pack.py`:
+  version 01 00, nStages 18, nUnits 513 = sum of section H, reserved 0,
+  order sorted (`abi binsel combo enc irsel isel lex opinfo parse peep
+  pfconv pp prec regmap reloc scope tyinfo type`), name set, length, raw.
+- three orders in ONE process (TABLE, reverse, fixed shuffle `combo reloc
+  type tyinfo abi pp isel enc irsel regmap parse pfconv opinfo binsel peep
+  prec lex scope`; 54 builds): byte-identical and = built.uns2.
+- round trip (uns2.load + IntNet.predict): 18 stages, 8,484 keys, 20,184
+  (key, head) pairs, unique argmax = TSV label.
+- one 18-stage build: cc 1.7 s, unisacc 9.2 s, UBSan 6.3 s; uns2slice 18
+  stages 20 s.
+
+**Write failures** (real faults, temp dir only): directory as output,
+path in a missing directory (fopen, exit 7); `ulimit -f 1` (1,024 B,
+SIGXFSZ ignored so write(2) returns EFBIG): the 18-stage pack's fwrite
+comes back short (`stage combo 0 of 3208 B`); combo alone (3,224 B, one
+stdio buffer) fails at fclose.  cc and UBSan: all 7 negatives pass.
+
+**BLOCKER: the unisacc build cannot see a short write or close failure.**
+`include/stdio.h`: `fwrite` returns `n` whatever `__write` returned, is
+unbuffered, `fclose` is `close(fd)`.  Reduced case (fwrite 3000 then 5000
+B under `ulimit -f 1`): cc 3000, 0, fclose -1; unisacc -O2 AND `python3 -m
+unisa run --drive built` both 3000, 5000, fclose 0.  Reference = binary, so
+not a miscompilation: a library contract.  `p wfail short ua` and `p wfail
+close ua` fail, and the `wfail` receipt is withheld (the gate is red on
+exactly these two marks).  Fix: `include/stdio.h` fwrite returning bytes
+written / sz -- outside this step.
+
+**check.sh.** `PACKS="py ship round order.cc order.ua order.san wfail"`,
+`receipt pack <item>`, marks in `need pack`.  `PACK=<items>|all` selects;
+the default run runs all; a PARTS run refuses them.  `BATCHES` lines are
+`stages|global|kinds|pack`; the plan must hold each pack item once, each
+batch must return exactly its receipts, the union is 18 stages + 23
+globals + 7 pack items.  Measured: 42.1, 10.2, 30.4, 15.2, 45.0, 22.5,
+20.0 s (unchanged), then `py ship round` 39.0 s, `order.ua` 36.3 s,
+`order.cc order.san` 23.9 s, `wfail` 28.3 s (rc 1: the blocker above).
