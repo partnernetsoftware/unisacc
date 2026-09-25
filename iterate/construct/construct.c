@@ -71,6 +71,7 @@ int olab[MAXOK][MAXH];
 int oseen[MAXOK];
 int dbg;
 int tflag;                   /* -t: print the branch trace instead of the net */
+int tclosefail;              /* -T closefail: SIMULATED close failure (check.sh only) */
 int tbreak;                  /* test entry: 1 bias, 2 act (see build) */
 
 void die(char *msg) {
@@ -1784,7 +1785,13 @@ void writeuns2(char *opath, int ns) {
         n = (int)fwrite(sec[ord[i]], 1, seclen[ord[i]], f);
         if (n != seclen[ord[i]]) { printf("construct: write: %s: short write, stage %s %d of %d B\n", opath, secname[ord[i]], n, seclen[ord[i]]); exit(7); }
     }
-    if (fclose(f) != 0) { printf("construct: write: %s: close failed (buffered data not written)\n", opath); exit(7); }
+    /* -T closefail (test entry, check.sh only): the file IS closed for
+       real, then the result the check below sees is forced to failure, so
+       the production check and its exit 7 are what is exercised.  The
+       diagnostic says SIMULATED. */
+    n = fclose(f);
+    if (tclosefail) n = -1;
+    if (n != 0) { printf("construct: write: %s: close failed (buffered data not written)%s\n", opath, tclosefail ? " [SIMULATED: -T closefail]" : ""); exit(7); }
 }
 
 /* -T summax | sumover | sumrun: the SAME ladd the accumulation sites call,
@@ -1838,7 +1845,8 @@ int main(int argc, char **argv) {
             else if (streq(argv[ai], "summax")) sumtest(0);
             else if (streq(argv[ai], "sumover")) sumtest(1);
             else if (streq(argv[ai], "sumrun")) sumtest(2);
-            else { printf("construct: -T bias | act | pool | summax | sumover | sumrun\n"); return 2; }
+            else if (streq(argv[ai], "closefail")) tclosefail = 1;   /* test entry: SIMULATED fclose failure */
+            else { printf("construct: -T bias | act | pool | summax | sumover | sumrun | closefail\n"); return 2; }
         }
         else if (streq(argv[ai], "-u") && ai + 1 < argc && (!upath || ns > 0)) {
             /* a further -u ends the previous pack (written now) and starts

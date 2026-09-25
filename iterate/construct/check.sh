@@ -59,7 +59,7 @@ need() {    # need stage <s> | need global <g>: the required pass marks
         case $2 in
         py|ship|round) for b in cc ua san; do echo "p $2 $b"; done ;;
         order.*) echo "p order ${2#order.}" ;;
-        wfail) for b in cc ua san; do for t in opendir opennodir short close dup maxs empty; do echo "p wfail $t $b"; done; done ;;
+        wfail) for b in cc ua san; do for t in opendir opennodir rlimpack rlimone closefail dup maxs empty; do echo "p wfail $t $b"; done; done ;;
         esac
         return
     fi
@@ -752,32 +752,42 @@ for b in cc ua san; do
     else echo "pack order $b FAILED (rc $rc): $(head -1 "$T/o.$b.out")"; for x in 2 3; do cmp "$T/o1.$b.uns2" "$T/o$x.$b.uns2"; done; fail=1; fi
 done
 # write failures and pack-argument negatives: each must exit with exactly
-# its code and diagnostic.  REAL faults, no test entry: a directory as the
-# output and a path in a missing directory (fopen fails); RLIMIT_FSIZE
-# 1024 B (ulimit -f 1, SIGXFSZ ignored so write returns EFBIG) with the
-# 18-stage pack -> a section fwrite comes back short; with combo alone
-# (3,224 B, within one stdio buffer) every fwrite is buffered and the
-# flush at fclose fails.  Outputs go to $T only.  Plus a stage given twice
-# (exit 2), MAXS + 1 stage files (exit 4, before any build), an empty -u.
+# its code and diagnostic.  REAL faults: a directory as the output and a
+# path in a missing directory (fopen fails); RLIMIT_FSIZE 1024 B (ulimit -f
+# 1, SIGXFSZ ignored so write returns EFBIG) with the 18-stage pack
+# (rlimpack) and with combo alone (rlimone, 3,224 B).  An RLIMIT case must
+# exit 7 with an IO diagnostic; the failing call may be fwrite ("short
+# write") OR fclose ("close failed") -- unbuffered unisacc stdio reports at
+# fwrite, buffered host stdio may report at fclose -- and the line printed
+# names which one, per build.  An RLIMIT case is NOT counted as close
+# coverage.  closefail: the fclose-return check, by the test entry -T
+# closefail (SIMULATED: the file is really closed, then the value the
+# production check reads is forced to failure) -> exit 7.  Outputs go to
+# $T only.  Plus a stage given twice (exit 2), MAXS + 1 stage files (exit 4,
+# before any build), an empty -u (exit 2).
 if psel wfail; then
     MX=$(sed -n 's/^#define MAXS \([0-9]*\).*/\1/p' iterate/construct/construct.c)
     XF=; i=$NST; while [ $i -le $MX ]; do XF="$XF weights/gold/prec.tsv"; i=$((i + 1)); done
     for b in cc ua san; do
         mkdir -p "$T/wdir"
-        for c in "opendir|7|cannot open" "opennodir|7|cannot open" "short|7|short write" "close|7|close failed" \
-                 "dup|2|given twice" "maxs|4|more than $MX (MAXS)" "empty|2|a -u pack with no stage"; do
+        for c in "opendir|7|cannot open" "opennodir|7|cannot open" "rlimpack|7|short write\|close failed" "rlimone|7|short write\|close failed" \
+                 "closefail|7|close failed .*SIMULATED" "dup|2|given twice" "maxs|4|more than $MX (MAXS)" "empty|2|a -u pack with no stage"; do
             t=${c%%|*}; r=${c#*|}; want=${r#*|}; r=${r%%|*}; o="$T/wf.$t.$b.out"
             case $t in
             opendir) B 30 "$T/c_$b" -u "$T/wdir" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
             opennodir) B 30 "$T/c_$b" -u "$T/nodir/x.uns2" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
-            short) ( trap '' XFSZ; ulimit -f 1; B 60 "$T/c_$b" -u "$T/wf.short.uns2" $PF > "$o" 2>&1 ); rc=$? ;;
-            close) ( trap '' XFSZ; ulimit -f 1; B 30 "$T/c_$b" -u "$T/wf.close.uns2" weights/gold/combo.tsv > "$o" 2>&1 ); rc=$? ;;
+            rlimpack) ( trap '' XFSZ; ulimit -f 1; B 60 "$T/c_$b" -u "$T/wf.rlimpack.uns2" $PF > "$o" 2>&1 ); rc=$? ;;
+            rlimone) ( trap '' XFSZ; ulimit -f 1; B 30 "$T/c_$b" -u "$T/wf.rlimone.uns2" weights/gold/combo.tsv > "$o" 2>&1 ); rc=$? ;;
+            closefail) B 30 "$T/c_$b" -T closefail -u "$T/wf.closefail.uns2" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
             dup) B 30 "$T/c_$b" -u "$T/wf.dup.uns2" weights/gold/prec.tsv weights/gold/reloc.tsv weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
             maxs) B 30 "$T/c_$b" -u "$T/wf.maxs.uns2" $PF $XF > "$o" 2>&1; rc=$? ;;
             empty) B 30 "$T/c_$b" -u "$T/wf.e1.uns2" -u "$T/wf.e2.uns2" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
             esac
+            at=
+            case $t in rlim*) if grep -q 'short write' "$o"; then at=" [failed at fwrite]"; elif grep -q 'close failed' "$o"; then at=" [failed at fclose]"; fi ;;
+                       closefail) at=" [SIMULATED close failure]" ;; esac
             if [ $rc -eq $r ] && grep -q "$want" "$o" && ! grep -q 'runtime error' "$o"; then
-                echo "write negative $t $b: exit $rc: $(head -1 "$o" | sed "s#$T#\$T#g")"; P "p wfail $t $b"
+                echo "write negative $t $b: exit $rc$at: $(grep -m1 'construct: ' "$o" | sed "s#$T#\$T#g")"; P "p wfail $t $b"
             else echo "write negative $t $b WRONG (rc $rc, want $r): $(head -1 "$o")"; fail=1; fi
         done
         if [ -e "$T/wf.dup.uns2" ] || [ -e "$T/wf.maxs.uns2" ]; then echo "write negative $b: a rejected pack left an output file"; fail=1; fi
