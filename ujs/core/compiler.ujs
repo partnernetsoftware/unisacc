@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v13: v12 + […] list literals + dict.field (CST[slot]=1 → dict handle).
+// v14: v13 + unary minus on primary (-x / -(e) → OP_NEG / OP_FNEG).
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -65,6 +65,7 @@ let idlen = 0;
 let ST = list(128);
 let SOP = list(128);
 let SPR = list(128);
+let UNY = list(128);
 let CST = list(64);
 
 n = len(SRC);
@@ -562,6 +563,7 @@ while (finished == 0) {
           bsp = 0;
           ST[0] = 1;
           SPR[0] = 0;
+          UNY[0] = 0;
           bsp = 1;
           while (bsp > 0) {
             if (ok != 1) { bsp = 0; }
@@ -594,6 +596,7 @@ while (finished == 0) {
                     ST[bsp - 1] = 3;
                     ST[bsp] = 1;
                     SPR[bsp] = 0;
+                    UNY[bsp] = 0;
                     bsp = bsp + 1;
                   } else {
                     found = 0;
@@ -622,12 +625,12 @@ while (finished == 0) {
                     if (found == 10) {
                       pos = pos + 5;
                       ST[bsp - 1] = 5;
-                      ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                      ST[bsp] = 1; SPR[bsp] = 0; UNY[bsp] = 0; bsp = bsp + 1;
                     } else {
                     if (found == 11) {
                       pos = pos + 4;
                       ST[bsp - 1] = 6;
-                      ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                      ST[bsp] = 1; SPR[bsp] = 0; UNY[bsp] = 0; bsp = bsp + 1;
                     } else {
                     if (SRC[pos] == 91) {
                       pos = pos + 1;
@@ -816,7 +819,16 @@ while (finished == 0) {
                           }
                         }
                       }
+                      if (fneg == 0) {
+                        // unary minus (stage0 pprim NEG/FNEG); apply at st==2 before postfix
+                        pos = pos + 1;
+                        UNY[bsp - 1] = UNY[bsp - 1] + 1;
+                        cd = 3;
+                      }
                     }
+                    if (cd == 3) {
+                      // re-enter primary (ST stays 1)
+                    } else {
                     if (ch >= 48) { if (ch <= 57) { cd = 1; } }
                     if (cd == 1) {
                         tnum = 0; done = 0;
@@ -1047,6 +1059,7 @@ while (finished == 0) {
                     }
                     }
                     }
+                    }
                   }
                 }
               } else {
@@ -1080,6 +1093,17 @@ while (finished == 0) {
                   }
                 } else {
                   if (st == 2) {
+                    // apply pending unary minus (stage0 OP_NEG / OP_FNEG) before postfix
+                    while (UNY[bsp - 1] > 0) {
+                      UNY[bsp - 1] = UNY[bsp - 1] - 1;
+                      if (ety == 2) {
+                        OPS[opsn] = 154; opsn = opsn + 1;
+                      } else {
+                        OPS[opsn] = 66; opsn = opsn + 1;
+                        OPS[opsn] = 127; opsn = opsn + 1;
+                        OPS[opsn] = 126; opsn = opsn + 1;
+                      }
+                    }
                     // binop or index or done
                     done = 0;
                     while (done == 0) {
@@ -1198,7 +1222,7 @@ while (finished == 0) {
                             pos = pos + 1;
                             SOP[bsp - 1] = elem_f;
                             ST[bsp - 1] = 7;
-                            ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                            ST[bsp] = 1; SPR[bsp] = 0; UNY[bsp] = 0; bsp = bsp + 1;
                             op = 99;
                           }
                         }
@@ -1269,6 +1293,7 @@ while (finished == 0) {
                         SOP[bsp - 1] = op + fl * 256;
                         ST[bsp] = 1;
                         SPR[bsp] = prec + 1;
+                        UNY[bsp] = 0;
                         bsp = bsp + 1;
                       }
                     }
@@ -1605,7 +1630,7 @@ while (finished == 0) {
                                     // stack: dict, key — parse value under st=14
                                     ST[bsp - 1] = 14;
                                     SOP[bsp - 1] = dpi;
-                                    ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                                    ST[bsp] = 1; SPR[bsp] = 0; UNY[bsp] = 0; bsp = bsp + 1;
                                   }
                                 }
                               }
@@ -1691,7 +1716,7 @@ while (finished == 0) {
                                   OPS[opsn] = 32; opsn = opsn + 1;
                                   OPS[opsn] = dsc; opsn = opsn + 1;
                                   ST[bsp - 1] = 16;
-                                  ST[bsp] = 1; SPR[bsp] = 0; bsp = bsp + 1;
+                                  ST[bsp] = 1; SPR[bsp] = 0; UNY[bsp] = 0; bsp = bsp + 1;
                                 } else {
                                 if (st == 16) {
                                   if (dpi == 0) {

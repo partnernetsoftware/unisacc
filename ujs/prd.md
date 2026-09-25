@@ -94,7 +94,7 @@ M1b drone 切 B             ✓（对称产物）
         ↓
 M2 编译器 wasm 化          **✓**（compile+host+sim+ship emit 无 python3）
         ↓
-M3 UJS 自举                **v12✓** sim+drone body≡ · core→meta · ship via core
+M3 UJS 自举                **v14✓** sim+drone body≡ · unary minus · ship via core
         ↓
 P0 ship 无 A 核            **✓** 停拷 ujs_full；web-build 非 ship 必经
         ↓
@@ -117,6 +117,16 @@ P1 构造迁 unisacc          可选
 
 **P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm` + `sim.wasm`；`compile.mjs` **默认** core。
 
+#### M3 v14（✓ unary minus · fold corpus on core）
+
+| 件 | 说明 |
+|---|---|
+| `compiler.ujs` | v14：`-x` / `-(e)` / `--x` → OP_NEG（i64.const -1;mul）或 OP_FNEG（f64.neg）；字面量 `-N` 仍走原 lex |
+| 门禁 | fold 含 **unary_minus**；stage2≡stage1 · sim+drone body≡stage0；setidx_globals 默认 core |
+| 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
+
+**下一刀**：v15 视缺口（else-if / `||`·`&&` / 短 str / `!` — 均非 stage0 面，需扩 stage0 或仅 core 产品面）。
+
 #### M3 v13（✓ `[…]` + `dict.field` · fold corpus on core）
 
 | 件 | 说明 |
@@ -125,8 +135,6 @@ P1 构造迁 unisacc          可选
 | 门禁 | fold 子集经 **compiler_core**；stage2≡stage1 · sim+drone body≡stage0；**setidx_globals 默认 core** |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
 | splice | `rebuild-main.mjs` 把 stub 的 `host_set/get_global` 边界从 ng=1 补到 MAXG=64（否则 inject 只写得进 idx0） |
-
-**下一刀**：v14 视缺口（更大子集 / IC / 错误信息）；setidx_globals 已关。
 
 #### M3 v12（✓ core→meta · default compile=core）
 
