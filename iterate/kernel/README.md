@@ -1,0 +1,107 @@
+# iterate/kernel -- J10 step 3, first slice
+
+`genmodel.c` writes part of `kernel/unisa_model.inc` from declared inputs, in
+the C subset unisacc compiles. The parts are the `S_*` defines, `MODEL`, `NSTAGE`
+and the `STAGE_*`/`act`/`z` declarations, `DENSE`, `DENSE_LEN`,
+`STAGE_DOFF/NH` and `model_dims()`.
+The rest of the file (the provenance header, vocabularies `TOKV..IRRECV`,
+`BF_*`/`BH_*`, `ENC_*`) is still written by Python and is out of this slice.
+
+    genmodel -o OUT order.tsv weights/built.uns2 weights/gold/<18 stages>.tsv
+
+## Inputs
+
+genmodel reads only the inputs named on the command line. It opens two paths
+(`fopen(path, "rb")` on an argument and `fopen(opath, "wb")`), and check.sh
+counts those call sites. It never reads `built.json`, `kernel/`, `gold.py` or
+anything relative to the working directory.
+
+- **order.tsv**: the declared stage order. It holds `stage<TAB>name` lines in
+  stage-ID order (`S_<NAME>` = index) and `heads_max<TAB>16`, the stride of
+  `STAGE_NCLS`. There must be exactly 18 stage lines and no repeats.
+  `order_check.py` asserts that it equals `gold.ALL` and `ckernel.HEADS_MAX`.
+  **Transition:** `gold.ALL` is still what the Python side uses and what this
+  file is compared against. order.tsv is not yet the only ordering authority.
+- **built.uns2**: decoded with a bounds check before every read. The header
+  checks are magic, version 1, flags 0, pad 0, nStages 18 and nUnits = the sum
+  of H. Per section it checks the NUL-padded name (no repeats), pad,
+  `h0 = sum(fieldLens)`, `W1 bytes = ceil(H*h0/8)` with zero padding bits,
+  and per head `ncls >= 1` and `1 <= wBits <= 16`. Each payload must be used
+  exactly: its byte length is `ceil(bits read / 8)`, with zero padding and
+  `class < ncls`. No bytes may follow the last section.
+- **gold TSVs**: the same reader contract as `iterate/construct` (schema, header,
+  values, classes, every key exactly once). Each TSV is identified by its
+  `# stage NAME:` line, not by its file name or argument position.
+
+Stages are matched **by name**. Every order.tsv stage must be exactly one UNS2
+section and exactly one TSV, and all three lists hold 18 names without repeats.
+If so, the three name sets are equal. Then UNS2 and the TSV must agree on the
+number of fields, the values per field, the number of heads and the classes per
+head. Nothing is inferred by position.
+
+## Outputs, as `ckernel.py` writes them
+
+- `MODEL`: sections in order.tsv order. For each unit and field there are `MW`
+  little-endian u64 masks (`MW = max(1, ceil(len/64))` over the stage's
+  fields), and a full mask is written 0. Then come `u32 nEntries` and the
+  7-byte entries `(unit u16, head u8, class u16, w u16)`, ordered by head,
+  then unit, then row: the UNS2 payload order, which is `_blob`'s.
+- `DENSE`: one byte per stage, key and head. Keys run in field-major order (the
+  last field fastest, which is `S.keys()`), and heads are the minor index.
+  Each byte is the index of **the TSV label** in that head's `#head` class list.
+  It is taken straight from the TSV rows, never from `infer()`.
+
+Exit codes: 1 bad input (reader, UNS2 decode, name or dimension mismatch),
+2 usage, 4 capacity (fields > 4, H > 4096, classes > 512 or 256 in DENSE, ...),
+7 the output could not be opened, written or closed (short `fwrite`, `fclose`
+failure). Nothing is written unless every check passes.
+
+## check.sh
+
+`iterate/kernel/check.sh [ua]` runs from the repo root, with `ua` defaulting to
+`/tmp/ua_ref`. `CHECKS="..."` selects checks and `--batches` runs four batches
+of at most 60 s each. Each step is bounded with `alarm`. A check gets
+`receipt <check>` only when all of its `need` marks are present. If a selected
+check has no receipt, the run fails.
+
+| check | what it proves |
+|---|---|
+| order | order.tsv = gold.ALL and HEADS_MAX (`order_check.py`); genmodel.c names no stage |
+| build | genmodel built with cc -O2, unisacc -O2 (osx/arm64), cc -fsanitize=undefined,address; each runs on the declared inputs |
+| region | the Python **oracle**: `python3 -m unisa emit-kernel --out <scratch>` run at the same commit. Its region equals the shipped one, and genmodel's region is byte-identical to it in all three builds |
+| empty | genmodel run with its cwd set to a directory that holds only `order.tsv built.uns2 gold/` (no `kernel/`, no `built.json`). The output equals the repo-root run (cc, ua) |
+| sem | a **MIXED** model.inc: genmodel's region spliced into the shipped file, which supplies the header, vocab, BF/BH and ENC. It is built with the **real** `kernel/unisa_core.c` (only its `#include` lines are removed) and `sem.c`. For every key and head, `infer()` must equal the TSV label via DENSE and the max logit must be unique. Built with cc and with unisacc |
+| oracle | `tests/build_ref.sh` builds the whole compiler, in a scratch tree, over the MIXED model.inc. Then `--check-oracle` runs |
+| neg | 14 broken **copies**, each of which must exit 1 with its diagnostic and write no output, in cc, ua and san |
+| wfail | output is a directory or a path in a missing directory (the open fails), or a real short write under `ulimit -f 1` with SIGXFSZ ignored. Each must exit 7 in cc, ua and san |
+| label | one label changed in a temp copy of prec.tsv, with UNS2 unchanged. genmodel's output changes in exactly one DENSE line, and the semantic check REJECTS it (1 wrong) in cc and ua |
+| perm | order.tsv with its stages reversed. The region is byte-identical to `permoracle.py`, which is emit_core with `ckernel.ALL` permuted the same way in a scratch process, and it differs from the unpermuted region. `S_*` = the permuted positions, and sem passes |
+| fault | `CHECKS=order SKIP=order`: the check's body is dropped and nothing inside it fails. The run must still exit non-zero, because `order` has no receipt |
+
+The region (`region.awk`) runs from the first `#define S_` line to the `}`
+that closes `int model_dims(void) {`. Whole-line `/* ... */` comment blocks
+are removed, because genmodel's comments name its own inputs. Everything
+else, including blank lines, is compared byte for byte.
+
+## Results (2026-09-25)
+
+- region: 204,496 B and 2,514 lines. Oracle = shipped, and cc, ua and san are all identical.
+- sem, MIXED model.inc with the real kernel: 18 stages, 8,484 keys and 20,184
+  (key, head) decisions, with 0 wrong, 0 non-unique and 0 layout errors (cc and unisacc).
+- `--check-oracle` on the compiler built over the MIXED file: 20,184 questions and 0 differences.
+- negatives: 14 × 3 builds; wfail: 3 × 3 builds. The short write is reported
+  as `short write, 1024 of 205057 B`, including by the unisacc build.
+- timings: the full run takes 10.8 s; `--batches` takes 3.7, 4.2, 4.2 and 4.0 s.
+
+## Not done here (recorded)
+
+- **Provenance header:** not implemented. genmodel writes its own short comment
+  header, which is not compared. The shipped header lists the sha256 prefixes of
+  `gold.py`, `catalog.py`, `lex.py`, `built.json` and `ckernel.py`, and the
+  MIXED file keeps it unchanged. That header therefore still names
+  `built.json`, which genmodel does not read. The header's format is still
+  undecided (prd J10: reproduce the Python sha256 in C, or change the format).
+- The MIXED file is **not** free of Python. Its header, vocabularies, BF/BH and
+  ENC still come from `emit-kernel`.
+- `sem.c` indexes `STAGE_NCLS[s * 16 + h]` as the kernel does (`<< 4`). A
+  heads_max other than 16 would pass genmodel's checks but not the kernel's.
