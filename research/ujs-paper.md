@@ -2,7 +2,7 @@
 
 **Status:** workshop / short-paper draft (companion to Paper A)  
 **Language:** English body; Chinese abstract optional  
-**Repo artifact:** `ujs/`  
+**Repo artifact:** `ujs/` (layout: `seed/` · `weights/` · `iterate/` · `practice/` — see `ujs/ARCHITECTURE.md`; legacy `construct`/`core`/`uxe` paths are compatibility symlinks)  
 **Gates (layered; see `ujs/prd.md` #4):**  
 - **Language / construct / path-B:** `./tests/ujs.sh` (includes `ujs2wasm` → step)  
 - **M3 / P0 product compile:** `./tests/ujs2wasm_compiler.sh`  
@@ -63,6 +63,15 @@ Full survey and negative evidence: `research/prior-art.md`.
 
 ## 4. System Overview
 
+The living tree mirrors Paper C’s seed / reusable-data / iterate split (`ujs/ARCHITECTURE.md`):
+
+| Panel | Path | Role |
+|---|---|---|
+| **Seed** | `ujs/seed/` | Python construct (`seed/construct/`), C stage0 (`seed/stage0/`), path-A VM sources |
+| **Weights** | `ujs/weights/` | *Artifacts only* (e.g. `ujs_ic_net.c`); generators stay in seed |
+| **Iterate** | `ujs/iterate/` | M3: `compiler.ujs`, `compiler_core.wasm`, `compile.mjs` |
+| **Practice** | `ujs/practice/` | `core/` (`wasm_run`, path-A), `uxe/` (Host/Pages), `web/` |
+
 ```
 src ──► walk (lex…irsel [+ IC]) ──► Fn(jtape, meta)     [construct / bytecode spine]
               │ oracle.ask(stage, key)
@@ -71,17 +80,17 @@ src ──► walk (lex…irsel [+ IC]) ──► Fn(jtape, meta)     [construct
               │
               ▼  (optional) emit_wasm / path-B tools — method & full-surface emit
 
-src ──► compiler.ujs (M3, classical subset) ──► compiler_core.wasm
-              │                                 ──► splice RT ──► \0asm
-              ▼                                 [product compile spine; not IntNet]
+src ──► iterate/compiler.ujs (M3) ──► compiler_core.wasm
+              │                        ──► splice RT ──► \0asm
+              ▼                        [product compile spine; not IntNet]
          stage2 ≡ stage1 · game body ≡ stage0
 ```
 
-- **Classic code:** construct walkers, environments, wasm layout; **and** the M3 compiler source (C stage0 + UJS stage1+).
-- **Network:** last-mile table selection on the construct spine only; proofs in [cite A].
-- **Product compile:** `ujs/compile.mjs` defaults to `compiler_core.wasm`; stage0 `compiler.wasm` is bootstrap and body≡ oracle. **Do not read M3 as “the Web compiler is driven by table nets.”**
-- **API:** `wasm_run` / UXE Host; Pages load game wasm + host, not a Python emit at request time.
-- **Dev residual:** `python3 -m ujs web-build` still builds path-A `ujs_full` / engine when forced; it is **out of** the P0 ship path.
+- **Classic code:** seed walkers / stage0; **and** iterate M3 sources.
+- **Network:** last-mile table selection on the construct spine only; proofs in [cite A]; weight *bytes* land in `weights/` (and shared root `weights/` for A).
+- **Product compile:** `ujs/iterate/compile.mjs` (symlink `ujs/compile.mjs`) defaults to `compiler_core.wasm`; stage0 `compiler.wasm` is bootstrap and body≡ oracle. **Do not read M3 as “the Web compiler is driven by table nets.”**
+- **API:** `practice/core` `wasm_run` / `practice/uxe` Host; Pages load game wasm + host, not a Python emit at request time.
+- **Dev residual:** `python3 -m ujs web-build` still builds path-A `ujs_full` under `practice/core` when forced; it is **out of** the P0 ship path.
 
 Stages that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships). M3 expands a **classical** AST→wasm subset independently of baking those golds.
 
@@ -182,6 +191,8 @@ Plus `setidx_globals` (host inject + `run_step`) and Asteroid/drone ship emit wi
 - **P-2 remains the hard transfer debt.** A’s Lean sample is a template; UJS *table* walkers still rely on asserts + suites. M3 adds suite/byte obligations, not Lean.
 - **Python constructor.** Allowed to shrink only; product compile must not grow new Python-only ship edges. P1 (construct → unisacc) is intentionally deferred (`ujs/prd.md`).
 - **Web vs A’s “no Web” for the C product.** Intentional split: A = C shell; B = Web/JS practice of the *same theory*.
+- **Layout is part of the claim hygiene.** Keeping generators in `seed/` and weight *bytes* in `weights/` (A/C rule) prevents rereading `gold.py` as “the reusable net.”
+- **Execution hosts are not the next IntNet.** Browser/Node already run `\0asm`; a portable wasm interpreter (e.g. companion `tinyvm`) would be another *practice* executor / twin oracle—not a third language spine and not a substitute for M3 or for construct tables.
 
 ---
 
@@ -196,7 +207,7 @@ UJS shows that the UNISA SH method [cite A] extends to a closed JavaScript *spec
 - [cite A] Companion: *UNISA SH / 表即网络* — `research/unisacc-paper.md` §3.4 · `research/formalization-roadmap.md` (Lean L0–L3).
 - Omlin & Giles, *Constructing deterministic finite-state automata in recurrent neural networks*, JACM 1996.
 - Lindner et al., Tracr (2023); Jia & Rinard (SAS 2021); Boniol et al. (2026); Kraska et al. (2018); Trofin et al., MLGO (2021); Shalev-Shwartz et al. (P-8b family)—detail in `research/prior-art.md`.
-- Living product / gates: `ujs/prd.md` · Host: `ujs/uxe/HOST_ABI.md` · outline: `research/ujs-paper-outline.md`.
+- Living product / gates: `ujs/prd.md` · layout: `ujs/ARCHITECTURE.md` · Host: `ujs/practice/uxe/HOST_ABI.md` (symlink `ujs/uxe/`) · outline: `research/ujs-paper-outline.md`.
 - Suite oracles (not marketing scores): `tests/ujs2wasm/expect.json` · core fold list in §6.2.
 
 ---
@@ -222,6 +233,8 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “B re-proves IntNet” | [cite A] only; B has no UJS Lean |
 | “`web-build` is the ship path” | path-A residual; P0 ship uses `compiler_core` + `sim.wasm` |
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |
+| “`construct/` holds the reusable weights” | Generators are `seed/`; artifacts are `weights/` (A/C rule) |
+| “need a new UJS bytecode VM next” | Product path already emits `\0asm`; next leverage is subset/host/oracle—not a third IR |
 
 ---
 

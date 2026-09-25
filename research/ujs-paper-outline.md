@@ -1,8 +1,7 @@
 # UJS 论文（Paper B）—— 作者一页提纲
 
-> 对应正文：`research/ujs-paper.md`  
-> 伴生：Paper A = 方法核 + C 自举（Lean L0–L3 / §3.4）；本文 = **同一方法的迁移** × 闭合 JS × Web / M3 自举。  
-> 规格真源：`ujs/prd.md`（门禁分层、M3 子集、P0/P1）。
+> 规格真源：`ujs/prd.md` · 目录：`ujs/ARCHITECTURE.md`（seed / weights / iterate / practice）  
+> 伴生：Paper A = 方法核 + C 自举（Lean L0–L3 / §3.4）；本文 = **同一方法的迁移** × 闭合 JS × Web / M3 自举。
 
 ---
 
