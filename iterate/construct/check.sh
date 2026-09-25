@@ -787,7 +787,7 @@ if psel wfail; then
             case $t in rlim*) if grep -q 'short write' "$o"; then at=" [failed at fwrite]"; elif grep -q 'close failed' "$o"; then at=" [failed at fclose]"; fi ;;
                        closefail) at=" [SIMULATED close failure]" ;; esac
             if [ $rc -eq $r ] && grep -q "$want" "$o" && ! grep -q 'runtime error' "$o"; then
-                echo "write negative $t $b: exit $rc$at: $(grep -m1 'construct: ' "$o" | sed "s#$T#\$T#g")"; P "p wfail $t $b"
+                echo "write negative $t $b: exit $rc$at: $(grep -m1 "$want" "$o" | sed "s#$T#\$T#g")"; P "p wfail $t $b"
             else echo "write negative $t $b WRONG (rc $rc, want $r): $(head -1 "$o")"; fail=1; fi
         done
         if [ -e "$T/wf.dup.uns2" ] || [ -e "$T/wf.maxs.uns2" ]; then echo "write negative $b: a rejected pack left an output file"; fail=1; fi
