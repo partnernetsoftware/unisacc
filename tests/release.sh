@@ -10,6 +10,14 @@
 #   ./tests/release.sh            everything, and say whether it is ready
 #   ./tests/release.sh --com      also build unisacc.com and exercise it
 #
+#   SUITES=0   skip step 3's single `all.sh` run (about nine minutes, one
+#              unbounded aggregate).  Run the suites instead as the bounded
+#              steps listed in AGENTS.md / tests/snap.sh, each <= 60 s, and
+#              record them; this script then checks the tree, the version
+#              string and the artifact only.
+#   RELEASE_OUT=dir   where the built unisacc.com is KEPT (default: dist/).
+#              The scratch copy is deleted when the script exits.
+#
 # It does not push, tag, or upload: those are the parts a person decides.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
@@ -41,11 +49,12 @@ case "$v" in "unisacc "[0-9]*) say "version string" ok "$v";;
 # 3. every suite, with a skipped target counted as a failure
 # the machines crossnative needs: started here if they are not running, and
 # stopped on the way out -- failure included -- if this started them [S-15 F1]
-if [ "${VMS:-1}" = 1 ]; then
+if [ "${SUITES:-1}" = 1 ] && [ "${VMS:-1}" = 1 ]; then
     ./tests/vms.sh up
     trap './tests/vms.sh down' EXIT
 fi
 LOG=$(mktemp)                        # not in the tree: nobody commits it
+if [ "${SUITES:-1}" = 1 ]; then
 STRICT=1 ./tests/all.sh > "$LOG" 2>&1
 rc=$?
 say "all suites (STRICT=1)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" \
@@ -65,6 +74,9 @@ skipped=$(sed -n '/=== summary/,$p' "$LOG" | grep -cE "$SKIPRE" || true)
 say "nothing skipped" "$([ "$skipped" = 0 ] && echo ok || echo FAIL)" \
     "$(sed -n '/=== summary/,$p' "$LOG" | grep -E "$SKIPRE" | \
        sed 's/^  ok *//' | tr '\n' ';' | cut -c1-70)"
+else
+    echo "  --   all suites               not run here (SUITES=0): run them as bounded steps and record them"
+fi
 
 # 4. the artifact, if asked: built here for all six targets, then run
 if [ "$com" = 1 ]; then
@@ -80,8 +92,14 @@ if [ "$com" = 1 ]; then
         mkdir -p "$T/fresh"; cp "$T/unisacc.com" "$T/fresh/"
         printf '#include <stdio.h>\nint h(void);\nint main(void){printf("%%d\\n",h());return 0;}\n' > "$T/fresh/a.c"
         printf 'static int n = 7;\nint h(void){return n;}\n' > "$T/fresh/b.c"
-        got=$( (cd "$T/fresh" && bound 180 ./unisacc.com -run a.c b.c 2>&1) )
-        say ".com compiles two files" "$([ "$got" = 7 ] && echo ok || echo FAIL)" "$got"
+        # the command's own status counts as well as its output: a run that
+        # printed 7 and then crashed, or was killed by the watchdog, fails
+        got=$( (cd "$T/fresh" && bound 60 ./unisacc.com -run a.c b.c 2>&1) ); grc=$?
+        say ".com compiles two files" "$([ "$grc" = 0 ] && [ "$got" = 7 ] && echo ok || echo FAIL)" "rc $grc, output '$got'"
+        OUT=${RELEASE_OUT:-$R/dist}
+        mkdir -p "$OUT" && cp "$T/unisacc.com" "$OUT/unisacc.com" && chmod +x "$OUT/unisacc.com"
+        say ".com kept" "$([ -x "$OUT/unisacc.com" ] && echo ok || echo FAIL)" \
+            "$OUT/unisacc.com  sha256 $(shasum -a 256 "$OUT/unisacc.com" | cut -c1-16)  from $(git rev-parse --short HEAD)"
     else
         say ".com built" FAIL "$(tail -1 "$T/ape.log")"
     fi
