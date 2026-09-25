@@ -755,11 +755,18 @@ int codedigit(int code, int pi, int pp, int fi) {
 }
 
 /* T5; returns 1 and fills candidate ci, or 0 for None */
+int tfearlyb, tfearlyp;      /* trace: early rejections (cap reached) on the base / patch path */
 long fcov[QW], fres[QW], ftmp[QW];
 int rep_factored(int ci, int pi, int merge, int k) {
     long sets[MAXF], wmask, pr;
     int i, u, pp, j, code, fi, f, x, ngv, nbk, b, t, a, tmp, cap, it, nb, prod, cnt, s, e;
     int badj[MAXQ];
+    /* Early rejection needs cap = nr > 0 and cap <= MAXU: then no candidate
+       here passes nr units, so newunit's MAXU die cannot fire first. */
+    if (nr <= 0 || nr > MAXU) {
+        printf("construct: %s: capacity: rep_factored cap %d rules, outside 1..%d units\n", gpath, nr, MAXU);
+        exit(4);
+    }
     cn[ci] = 0;
     qzero(fcov);
     if (k) {
@@ -843,6 +850,9 @@ int rep_factored(int ci, int pi, int merge, int k) {
                     sets[f] = 0;
                     for (t = s; t < e; t = t + 1) sets[f] = sets[f] | bit(codedigit(bpool[boff[b] + t], pi, pp, fi));
                 }
+                /* Python appends units only and returns None once len(units)
+                   >= cap: reaching cap here already decides None */
+                if (cn[ci] >= nr) { tfearlyb = tfearlyb + 1; return 0; }
                 u = newunit(ci, sets);
                 wmask = bcls[b];
                 for (i = 0; i < ncl[ch]; i = i + 1) if ((wmask >> i) & 1) cw[ci * MAXU + u][i] = 1;
@@ -861,6 +871,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
             cnt = 0;
             for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXU + u], sets)) cnt = 1;
             if (cnt) return 0;
+            if (cn[ci] >= nr) { tfearlyp = tfearlyp + 1; return 0; }
             u = newunit(ci, sets);
             cw[ci * MAXU + u][qlab[ch][j]] = bit(k + 2);
         }
@@ -1123,7 +1134,7 @@ void build(char *path) {
     orders();
     partitions();
     ncand = 0; npool = 0; tunits = 0;
-    talign = 0; ttie = 0; tpickmoved = 0; tfatt = 0; tfnone = 0; tfkept = 0; tsel = 0; trounds = 0; tacc = 0; trej = 0; tchg = 0;
+    talign = 0; ttie = 0; tpickmoved = 0; tfatt = 0; tfnone = 0; tfearlyb = 0; tfearlyp = 0; tfkept = 0; tsel = 0; trounds = 0; tacc = 0; trej = 0; tchg = 0;
     if (dbg) {
         for (i = 0; i < nf; i = i + 1) {
             printf("groups %d:", i);
@@ -1256,6 +1267,7 @@ void trace(void) {
     }
     printf("trace T5 partitions %d, rep_factored calls %d, None %d, not shorter than dlist %d, kept %d\n",
            nparts, tfatt, tfnone, tfatt - tfnone - tfkept, tfkept);
+    printf("trace T5 early rejections (unit count reached cap = rules): base path %d, patch path %d\n", tfearlyb, tfearlyp);
     printf("trace selections %d, starts whose pick moved a head %d\n", tsel, tpickmoved);
     printf("trace T4 rounds %d, lists accepted %d (changed %d), rejected %d\n", trounds, tacc, tchg, trej);
     printf("trace T4 REDUCE aligned to a pool cube %d, pool flag changed a rule's choice %d\n", talign, ttie);

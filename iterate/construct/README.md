@@ -567,3 +567,27 @@ Verified: all 13 stages' `-d`, `-u` and `-t` outputs from cc, unisacc and
 UBSan builds are byte-identical to the pre-change build; `check.sh` ok.
 Static memory (`size -m`, cc -O2, `__common` zerofill): 12,294,848 B ->
 8,100,544 B.  This is static memory, not RSS.
+
+## type, step 2: early rejection inside rep_factored (2026-09-25)
+
+Before each `newunit` of a factor block (base path) and of a patch unit
+(patch path), rep_factored returns 0 (None) once the candidate already has
+cap = nr units.  Why this is equivalent: Python only ever appends units and
+returns None at the first `len(units) >= cap` check; every exit after the
+count reaches cap is None, and the only success exit sits behind that check.
+So the RESULT is preserved -- None, or the identical valid candidate.  What
+is NOT preserved is a rejected candidate's intermediate unit trajectory: C
+stops at cap, Python keeps appending first.  The C build no longer reaches
+counts such as the 245 / 2,969 units measured in the Python reference on type.
+
+Preconditions nr > 0 and nr <= MAXU are checked on entry (exit 4 with a
+capacity diagnostic), so a future capacity change cannot let a newunit hit the
+physical MAXU die first.  That branch is never hit (uncovered): nr >= 1
+whenever nq >= 1, and MAXR 62 < MAXU 128.  The k-prefix newunit needs no guard
+(it runs with cn = i < k <= nr).
+
+`-t` adds `trace T5 early rejections ...: base path B, patch path P`.  On the
+13 stages: pp 6/3, reloc 6/0, lex 18/0, scope 18/0, enc 38/0, peep 72/0,
+parse 14/0, the rest 0/0.  The patch-path guard is reached (pp).  Every other
+output is byte-identical to step 1, including the kept factored candidates of
+regmap (18), binsel (18) and parse (2).
