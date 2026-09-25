@@ -1,5 +1,9 @@
 #!/bin/bash
-# ujs acceptance — acc + api probes + fold + web wasm
+# ujs acceptance — construct / language spine (Paper B 构造脊)
+#   acc · wasm_run probes · fold · icfold · front · ujs2wasm.sh (full corpus)
+# Product M3/P0 is NOT this file alone — also:
+#   ./tests/ujs2wasm_compiler.sh · ./tests/uxe_ship_js.sh
+# UXE unmanned (npm run test:uxe:*) is a separate gate (prd #4).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

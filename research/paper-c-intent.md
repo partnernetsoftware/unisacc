@@ -1,7 +1,7 @@
 # Paper C 意向书：种子机与迭代脱离——把"确定性模型推理替代编译"推广为管道方法
 
 **状态**：意向书（2026-09-25）。不是草稿，也不做任何结果声称。
-**关系**：独立成文。引用 Paper A（[`unisacc-paper.md`](unisacc-paper.md)，C99 编译器）与 Paper B（[`ujs-paper.md`](ujs-paper.md)，UJS → WebAssembly），把两者当作**两个已完成的实例**，而不重复它们的内容。
+**关系**：独立成文。引用 Paper A（[`unisacc-paper.md`](unisacc-paper.md)，C99 编译器）与 Paper B（[`ujs-paper.md`](ujs-paper.md)，UJS → WebAssembly），把两者当作**两个可复现、门禁已钉的迁移实例**（B：构造脊 + M3 出货脊；UJS-1_ship ≠ 全表 UJS-1；无 UJS Lean），而不重复它们的内容、也不把「门禁绿」写成「全管道 Lean 闭合」。
 
 ---
 
@@ -14,7 +14,7 @@
 | | 种子机（第 0 代） | 脱离种子的证据 |
 |---|---|---|
 | Paper A | Python 前后端与构造器 | C 写的 unisacc 用自己的后端造出自己，N1 = N2 = N3 逐字节相同，在五个真实目标上全程无 Python（A-35）；Python 退为参考实现与回退手段 |
-| Paper B | Python 构造器与 path-B 模拟 | `compiler.wasm` 与 `compiler.ujs`，stage2 ≡ stage1（ujs M3） |
+| Paper B | Python 构造器与 path-B / jtape（方法脊） | `compiler_core` 自举：stage2 ≡ stage1 · sim/drone body ≡ stage0（M3 **出货脊**；手写子集，非 IntNet） |
 
 两条线都不是事先设计成这样的，而是边做边收敛到同一个形状。Paper C 的任务是把这个形状**明确写出来、证明它、再验证它能迁移**。
 

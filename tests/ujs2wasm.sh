@@ -1,5 +1,7 @@
 #!/bin/bash
-# ujs2wasm suite — direct \\0asm emit + fold parity + optional tinyvm validate.
+# ujs2wasm suite — construct / full-emit corpus (Paper B 构造脊对照)
+#   direct \\0asm via Python tools + fold parity + optional tinyvm.
+#   Full expect.json ≠ UJS-1_ship: product core fold is ujs2wasm_compiler.sh §6.2.
 #
 #   ./tests/ujs2wasm.sh
 #

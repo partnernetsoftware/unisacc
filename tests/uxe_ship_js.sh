@@ -1,6 +1,7 @@
 #!/bin/bash
-# ship-js contract — no C game wasm / no eng_* glue on Pages faces.
-# Asteroid + drone Pages default path B: sim.wasm + direct_step in game.js.
+# ship-js contract — Paper B 出货面合同（非 UXE 无人门）
+#   Pages: sim.wasm + directSim · no eng_* · no A-core engine.wasm · no compiler.gen
+# Layered with: ./tests/ujs.sh · ./tests/ujs2wasm_compiler.sh · npm run test:uxe:*（另门）
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 bad=0

@@ -13,12 +13,12 @@
 
 | 层 | 交付 | 不是 |
 |---|---|---|
-| **core** | `bootRuntime` / `wasm_run` / `compile` · `ujs_full.wasm` | 页内训练 · 完整 ES |
-| **UXE** | Host + `{app}` 核 + `engine.wasm` + 共享 `engine.js` | Three 移植 · 合包 |
-| **构造** | `construct/` gold → 权重；`ujs2wasm` → `\0asm`；`web-build` → `core/` | 应用运行时依赖 |
+| **core** | `bootRuntime` / `wasm_run` / `compile` · path-A `ujs_full` · **出货** `compiler_core` | 页内训练 · 完整 ES · 把 M3 说成 IntNet |
+| **UXE** | Host + `{app}` · Pages 步进 **`sim.wasm`** · 共享 `engine.js` | Three 移植 · 合包 · ship 必经 `engine.wasm`（P0 已弃） |
+| **构造** | `construct/` gold → 权重；全表 `ujs2wasm`；`web-build` → path-A | 应用运行时依赖 · ship emit |
 
-**路径 A**（共享 VM）：`web-build` → `ujs_full.wasm` ≡ UXE **`engine.wasm`**（已交付；内核仍 C+zig）。  
-**路径 B**（直出）：`python3 -m ujs ujs2wasm foo.ujs -o foo.wasm`（已交付；`isel`/`enc`→WAT→wasm）。  
+**路径 A**（共享 VM · 方法/演示）：`web-build` → `ujs_full.wasm`（曾用名 **`engine.wasm`**；**非** P0 ship 必经；内核仍 C+zig）。  
+**路径 B**（直出 · 出货步进）：`compile.mjs` → **`compiler_core.wasm`** → `sim.wasm`（已交付；玩法核）。  
 开发可先 B 写 `.ujs`，再把 UXE `{app}` 接到 B（§目标）。
 
 **语言（闭合）**：表内全功能，表外永久拒绝。有字面量 / list·dict / let·const / if·while·for·switch / function·箭头 / rest·spread / 算术比较 / 索引成员 / `len`·`keys` / 只读外层闭包。无 `undefined` 双轨、`var`/hoisting、`this`/`class`/prototype、`eval`、async/generator、RegExp 字面量。条款全表见 [`archive/prd-v1.0.md`](archive/prd-v1.0.md)。
@@ -69,10 +69,10 @@
 
 | 里程碑 | 必须落地的产物 | 不是产物（别做厚） | 状态 |
 |---|---|---|---|
-| **已有脚手架** | `engine.wasm`（A VM）· ship-js Host · `ujs2wasm` **Python CLI**（把 `.ujs`→用户程序 `.wasm`）· `ujs2wasm_step` 门禁 | 再扩 Python 专属出货链 | 脚手架 ✓；非自举 |
+| **已有脚手架** | path-A `ujs_full`（曾名 engine）· ship-js Host · 全表 `ujs2wasm` **Python CLI** · `ujs2wasm_step` | 再扩 Python 专属出货链 | 脚手架 ✓；非自举；**非** P0 必经 |
 | **M1** | ① **`sim.wasm`**（直出玩法核，含 `host_*`/`run_step`）② Pages/ship **默认**加载它步进 ③ `direct_step.js` 热路径 ④ 合同：`uxe_ship_js` 验 sim.wasm | 只 fold 绿却仍默认 A | **Asteroid ✓ · drone ✓** |
 | **M2** | ① **`compiler.wasm`**：Node/浏览器 `compile(ujs)→wasm` ② **`compile.mjs`** ③ **`ship:*` 无 python3 emit** ④ sim/drone 经 compiler.wasm 出货 | 继续把 emit 只留在 `.py` 当日常编译器 | **✓** `ujs2wasm_compiler.sh`（含 ship emit 无 python3）。一次性构建 compiler.wasm 仍用 zig |
-| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v11✓** sim+drone body≡stage0；**P0✓** ship 无 A 核 |
+| **M3** | ① **`compiler.ujs`**（编译器用 UJS 写）② **stage0/1/2**：stage2 字节 ≡ stage1 ③ 自举门禁脚本 | 「差不多能编」无字节一致 | **v16✓** sim+drone body≡ · !/&&/|| · **P0✓** ship 无 A 核 |
 | **P1** | gold/oracle/acc 在 **unisacc**（或自举构造器） | 在 ujs 里把 Python 构造成产品 | 后置 |
 
 **两条产物线不要混**
@@ -84,6 +84,15 @@
 ```
 
 今日 `ujs2wasm` 只是 **用户程序线的 Python 工厂**；自举要的是 **编译器线** 上的 wasm/UJS 产物。
+
+**论文 / 对外叙事：两条脊（同纪律，不同产物）**
+
+| 脊 | 是什么 | 诚实边界 |
+|---|---|---|
+| **构造 / jtape** | gold→IntNet→oracle；`acc` / fold / icfold；全表 `ujs2wasm` | 方法验收；表阶段仍欠全量 P-2 Lean（继承 Paper A） |
+| **M3 出货** | 手写 `compiler.ujs`→`compiler_core.wasm`；stage2≡ · body≡ · ship 无 python emit | **不是** IntNet；交付面 = **UJS-1_ship**（渐扩），≠ 全表 UJS-1 |
+
+写 Paper B / Release 时：出货写 core；`web-build` 是 path-A 开发/引擎残线；语言门 = `ujs.sh` + `ujs2wasm_compiler.sh` + `uxe_ship_js`，UXE 另门（§目标 #4）。
 
 ```
 0 emit 齐 · 2a ship-js     ✓
@@ -103,15 +112,15 @@ P1 构造迁 unisacc          可选
 
 （换核模板 / 门禁契约 / Host 加厚仍按杠杆穿插；不改变上表弃 Python 顺序与产物线。）
 
-#### M3（v11 ✓ sim+drone body≡stage0）
+#### M3（协议；交付面见 v12…v16）
 
 **协议**：stage0=`compiler.wasm`(C) 编 `compiler.ujs` → stage1 core；stage1 再编 `compiler.ujs` → stage2；**main body 字节一致**。host 拼进 `compiler_rt_stub.wasm`。
 
-**已交付（v11）**
+**v11 基线（仍成立）**
 
 | 件 | 说明 |
 |---|---|
-| `compiler.ujs` | v10 + id>8 drain · GKEYS64 · f64 `(i-j)*TWO52/j` 无溢出 |
+| `compiler.ujs` | id>8 drain · GKEYS64 · f64 `(i-j)*TWO52/j` 无溢出 |
 | `compiler.wasm` | len u32 · f64 lex ratio · MEM 128 |
 | 门禁 | **sim+drone body≡stage0** · stage2≡stage1 |
 
@@ -207,7 +216,7 @@ compile(src: Uint8Array|string) →
 | **2b / M1** | Asteroid 步进默认 `sim.wasm`（path B） | `ujs2wasm_step` + `uxe_ship_js`（含 sim.wasm） | **✓** |
 | **M1b** | drone 对称切 B（`ship/drone/sim.wasm`） | `uxe_ship_js`（drone sim.wasm + directSim） | **✓** |
 | **M2** | `compiler.wasm` + 无 python ship | `ujs2wasm_compiler.sh`；ship 无 `python3` emit | **✓** |
-| **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v11✓** sim+drone body≡stage0 |
+| **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v16✓** + fold logic/elseif/… on core |
 | **P0** | ship 无 web-build / 无 `engine.wasm`（A） | `ujs2wasm_compiler.sh` · `ship-engine` 拒 A 核 | **✓** |
 | **3** | 换核模板 | 按下表抄路径绿 | 骨架 ✓ |
 | **4** | 门禁即契约 | **语言/ujs2wasm/ship-js**：`tests/ujs.sh` + `ujs2wasm_compiler.sh` + `uxe_ship_js` ✓。**UXE 无人**（`npm run test:uxe:all` / ship CDP）另门，不并入 `all.sh`；探针偶发 `never ready` 时修 UXE 门，不挡语言绿 | 语言 ✓ · UXE 另门 |
@@ -267,20 +276,21 @@ UJS
 │   └─ isel / enc …     ujs2wasm 决策表（WAT 形态）
 │
 └─ ③ 出货面（artifacts）
-    ├─ core/ujs_full.wasm (+ compiler.gen.js)   路径 A
-    ├─ engine.wasm                              = A 的 UXE 名
-    ├─ *.wasm from ujs2wasm                     路径 B
-    └─ docs/uxe/{engine.js,{game}/}             Pages
+    ├─ core/ujs_full.wasm (+ compiler.gen.js)   路径 A（非 P0 ship）
+    ├─ core/compiler_core.wasm                 M3 出货编译器（默认 bridge）
+    ├─ ship/*/sim.wasm                         路径 B 玩法核
+    └─ docs/uxe/{engine.js,{game}/}             Pages（无 engine.wasm 必经）
 ```
 
 **DAG 边**
 
 ```
-gold ══构造══> 权重 / isel·enc
+gold ══构造══> 权重 / isel·enc          ← 构造脊
 ② ══驱动══> ① 走查 / emit（Oracle 只回类名）
-① ══产出══> ③ 出货面
-A (engine) ══Host══> {app}     双 wasm，永不合包
-B (ujs2wasm) ══目标══> {app}.wasm   ← 目标 #2
+① ══产出══> ③ path-A / 全表对照
+compiler.ujs ══M3══> compiler_core ══> sim.wasm   ← 出货脊
+A (ujs_full) ══Host══> demo（可选）
+B (sim.wasm) ══directSim══> Pages
 ```
 
 ## T2. 目录树 —— 文件到职责
@@ -316,30 +326,28 @@ ujs/
 
 ```
 web-build ══> core/ujs_full.wasm     （A-demo / FORCE_WEB_BUILD；非 ship）
-ship B ══> compiler.wasm → sim.wasm  （无 engine.wasm / 无 python3）
+ship B ══> compiler_core → sim.wasm  （无 engine.wasm / 无 python3 emit）
 {app} ══只调══> host_*          （不知 canvas / fetch / key）
 UXEP ══一次一包══> host_gpu_submit
 UXIN ══> host_input_read
 tests/ujs.sh ══含══> tests/ujs2wasm.sh
 ```
 
-## T3. 出货 DAG —— 两条路径
+## T3. 出货 DAG —— 两条路径（两脊）
 
 ```
 .ujs 源
  │
- ├──── 路径 A（共享 VM）────────────────────────────┐
- │    construct front → bytecode → zig/C → ujs_full │
- │    UXE：engine.wasm + 页内 compile 或 embed      │
- │    ⟦门禁⟧ ./tests/ujs.sh · test:uxe:all          │
- │                                                  │
- └──── 路径 B（直出程序）───────────────────────────┤
-      jtape → isel/enc → WAT → wat2wasm → foo.wasm  │
-      ⟦门禁⟧ ./tests/ujs2wasm.sh                    │
-      目标：接成 {app}.wasm，砍 uxe_*.c              │
-                                                    ▼
+ ├──── 路径 A / 构造脊（方法 · 非 P0 ship）─────────────┐
+ │    gold→IntNet · jtape · web-build → ujs_full       │
+ │    ⟦门禁⟧ ./tests/ujs.sh（acc/fold/icfold/…）       │
+ │                                                     │
+ └──── 路径 B / M3 出货脊 ─────────────────────────────┤
+      compile.mjs → compiler_core → sim.wasm           │
+      ⟦门禁⟧ ./tests/ujs2wasm_compiler.sh · uxe_ship_js│
+                                                       ▼
                               npm run ship:pages → docs/
-                              ⟦门禁⟧ test:uxe:all · 人审手感
+                              ⟦门禁⟧ ship-js 合同；UXE 另门 test:uxe:all
 ```
 
 ## T4. UXE 积木树
@@ -347,14 +355,15 @@ tests/ujs.sh ══含══> tests/ujs2wasm.sh
 ```
 UXE Shell
 ├─ {app|game} 核     调度 · 组 UXEP · 读 UXIN · 只调 host_*
-├─ engine.wasm       UJS VM（= ujs_full）；eng_* 待下沉（目标 #1）
+├─ sim.wasm          出货玩法核（path B · UJS-1_ship · core 编）
+├─ ujs_full（可选）  path-A 演示 VM；**非** ship 必经（曾名 engine.wasm）
 ├─ Host（engine.js） GPU / 输入 / 时间 / 资源 /（规划）llm
 └─ Pages             docs/uxe/engine.js + docs/uxe/{name}/
 ```
 
 ```
-demo：*.ujs → compile(ujs_full) → host_*
-ship：index.html → engine.js + game.js + engine.wasm [+ app.wasm]
+demo：*.ujs → compile(ujs_full) 或页内测 → host_*
+ship：index.html → engine.js + game.js + sim.wasm（directSim；无 engine.wasm）
 ```
 
 ## T5. 验收 DAG
@@ -362,10 +371,13 @@ ship：index.html → engine.js + game.js + engine.wasm [+ app.wasm]
 ```
 语言绿 ── ./tests/ujs.sh ──┬── acc / fold / icfold / difftest
                            ├── front parity · in-page wasm_run
-                           └── ujs2wasm（direct · fold · neg · tinyvm?）
+                           └── ujs2wasm.sh（全量 corpus ≠ UJS-1_ship）
 
-UXE 绿 ── test:uxe:all ────┬── CDP 探针 · snapshot 数
-                           └── 禁代理猜 UI
+出货绿 ── ujs2wasm_compiler.sh · uxe_ship_js.sh
+                           └── core bridge · stage2≡ · body≡ · 无 A 核
+
+UXE 绿 ── test:uxe:all ────┬── CDP 探针 · snapshot 数（**另门**）
+                           └── 禁代理猜 UI；不挡语言/出货绿
 
 出货 ──── ship:pages ─────── docs/ 与 BUILD 指纹对齐 Release
 ```
@@ -373,9 +385,10 @@ UXE 绿 ── test:uxe:all ────┬── CDP 探针 · snapshot 数
 ## T6. 三条红线
 
 ```
-① 双 wasm 永不合包                    → {app} ≠ engine
-② 核只调 host_*                       → 无 canvas / key / fetch
-③ 出货权重构造、不训练填表             → --drive 默认 built；勿擅跑 train
+① 双 wasm 永不合包（若仍跑 path-A） → {app} ≠ ujs_full
+② 核只调 host_*                      → 无 canvas / key / fetch
+③ 出货权重构造、不训练填表            → --drive 默认 built；勿擅跑 train
+   + 出货脊 ≠ IntNet；UJS-1_ship ≠ 全表 UJS-1
 ```
 
 ---
@@ -411,7 +424,7 @@ flowchart TD
 
     subgraph R4["熔炉 · UXE 运行时"]
         D1["{app} 核 ══host_*══> Host"]
-        D2["engine.wasm = ujs_full"]
+        D2["ship: sim.wasm · demo: ujs_full"]
         D3["一次一包 UXEP · UXIN 读输入"]
         D1 --> D2 --> D3
     end
@@ -433,7 +446,7 @@ flowchart TD
 
     subgraph R6["哨所 · 观测与门禁"]
         F1["__UXE_SNAP__ 一帧 JSON"]
-        F2["test:uxe:all · ujs.sh"]
+        F2["分层门禁：ujs.sh · compiler · ship-js · uxe另门"]
         F3["截图非默认；人只审手感"]
         F1 --> F2 --> F3
     end
@@ -455,33 +468,27 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    SRC[".ujs"] --> FRONT["front lex/compile"]
-    FRONT --> JT["jtape"]
-    JT --> VM["路径 A：C VM → ujs_full / engine"]
-    JT --> DIR["路径 B：isel/enc → WAT → wasm"]
+    SRC[".ujs"] --> FRONT["front / 或 M3 compiler"]
+    FRONT --> JT["jtape · 构造脊"]
+    FRONT --> M3["compiler_core · 出货脊"]
+    JT --> VM["path A：ujs_full 演示"]
+    M3 --> SIM["path B：sim.wasm"]
 
-    VM --> CORE["core/ + engine.wasm"]
-    DIR --> APP["{app}.wasm 目标"]
-
-    CORE --> HOST["Host engine.js"]
-    APP -.目标.-> HOST
-    GAME["app-*.js / 过渡 C 核"] --> HOST
+    VM -.-> DEMO["demo / FORCE_WEB_BUILD"]
+    SIM --> PAGES["Pages · directSim"]
+    PAGES --> HOST["Host engine.js"]
+    DEMO -.-> HOST
     HOST --> GPU["WebGL | WebGPU"]
     HOST --> IN["UXIN"]
-    GAME --> PK["UXEP"]
-    PK --> HOST
-
-    HOST --> PAGES["docs/uxe/{game}"]
-    SNAP["__UXE_SNAP__"] -.门禁.-> GATE["test:uxe:all"]
-    PAGES --> GATE
+    SNAP["__UXE_SNAP__"] -.门禁.-> GATE["uxe另门"]
 
     classDef net fill:#312e81,stroke:#818cf8,color:#e0e7ff
     classDef cls fill:#064e3b,stroke:#34d399,color:#d1fae5
-    class FRONT,JT,DIR net
-    class VM,CORE,HOST,GPU,GATE cls
+    class FRONT,JT,M3 net
+    class VM,SIM,HOST,GPU,GATE cls
 ```
 
-**读图**：紫 = 构造/决策表路径；绿 = 经典运行时与 Host。`{app}` 接路径 B 是当前主杠杆。
+**读图**：紫 = 决策/编译路径（构造脊或 M3）；绿 = Host / Pages。出货主杠杆是 **sim.wasm + core**，不是 `engine.wasm`。
 
 ## 门禁状态机
 
@@ -489,18 +496,18 @@ flowchart LR
 stateDiagram-v2
     [*] --> Lang
     Lang: 语言/构造 ujs.sh
-    Wasm: ujs2wasm 套件
-    Uxe: test:uxe:all
+    Product: ujs2wasm_compiler + uxe_ship_js
+    Uxe: test:uxe:all（另门）
     Ship: ship:pages
     Feel: 人审手感
 
-    Lang --> Wasm: ujs2wasm 语料绿
-    Wasm --> Uxe: 改 UXE / Host / 输入
-    Uxe --> Ship: snapshot 断言过
+    Lang --> Product: 构造绿后验出货脊
+    Product --> Ship: core/sim 合同绿
     Ship --> Feel: docs 可玩
     Feel --> [*]
+    Ship --> Uxe: UXE 另验，不挡语言/出货
 
-    Lang --> Lang: 卡住改语言/gold/编码，勿训练填表
+    Lang --> Lang: 卡住改语言/gold；勿训练填表；勿把 M3 当 IntNet
 ```
 
 ## 目标推进图
@@ -509,38 +516,38 @@ stateDiagram-v2
 flowchart TD
     U2W["ujs2wasm 语料"] --> E0["0 setidx+f64+game-ready ✓"]
     E0 --> SJS["2a ship-js 砍 C ✓"]
-    SJS --> B2["2b sim→ujs2wasm"]
-    B2 --> TPL["3 换核模板"]
-    TPL --> GATE["4 门禁即契约"]
-    GATE --> HOST["5 Host · 6 llm"]
+    SJS --> M1["M1/M1b sim.wasm ✓"]
+    M1 --> M2["M2 compiler.wasm ✓"]
+    M2 --> M3["M3 core 自举 v16 ✓"]
+    M3 --> P0["P0 无 A 核 ship ✓"]
+    P0 --> NEXT["可选：v17 短 str · P1 construct"]
 
     classDef now fill:#064e3b,stroke:#34d399,color:#d1fae5
     classDef next fill:#1e3a5f,stroke:#60a5fa,color:#e0f2fe
-    class E0,SJS now
-    class B2,TPL,GATE next
+    class E0,SJS,M1,M2,M3,P0 now
+    class NEXT next
 ```
 
 ## 随身卡
 
 | 记 | 是什么 |
 |---|---|
-| **A / B** | 共享 VM（engine） / ujs2wasm 直出 |
-| **双 wasm** | `{app}` ≠ `engine`，永不合包 |
+| **两脊** | 构造/jtape（IntNet）∥ M3 出货（`compiler_core`，非 IntNet） |
+| **A / B** | path-A `ujs_full` 演示 / path-B `sim.wasm` 出货步进 |
+| **UJS-1_ship** | M3 已交付子集 ⊂ 全表 UJS-1 |
+| **门禁** | `ujs.sh` · `ujs2wasm_compiler` · `uxe_ship_js` · UXE 另门 |
 | **host_*** | 核唯一出入口；GPU/key 停 Host |
 | **UXEP / UXIN** | 一次一包提交 / 输入快照 |
-| **ujs.sh · test:uxe:all** | 语言门 · UXE 无人门 |
 | **BUILD.json** | 与 Release 对指纹 |
-| **构造不训练** | 出货权重由 gold 代数生成 |
-| **1→4** | emit → ship-js → ujs2wasm 步进 → 模板/门禁 |
-
+| **构造不训练** | 出货权重由 gold 代数生成；M3 另用孪生字节门禁 |
 
 ## 走出宫殿前默念
 
 ```mermaid
 flowchart LR
-    L1["① 不合包"] --> R1["app ≠ engine"]
+    L1["① ship 无 A 核"] --> R1["sim.wasm · 非 engine.wasm"]
     L2["② 核只调 host_*"] --> R2["无 canvas/key"]
-    L3["③ 构造出货"] --> R3["勿训练填表"]
+    L3["③ 两脊分清"] --> R3["M3 ≠ IntNet"]
 
     classDef red fill:#7f1d1d,stroke:#f87171,color:#fee2e2
     class L1,L2,L3 red

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * M2/M3 host entry: UJS source → direct \\0asm (+ meta).
+ * M2/M3 host entry: UJS source → direct \\0asm (+ meta).  Paper B 出货脊。
  *
- * Default: compiler_core.wasm (compiler.ujs stage1) when present.
+ * Default: compiler_core.wasm (compiler.ujs stage1) when present — NOT IntNet.
  * UJS_COMPILER=wasm|stage0 or UJS_REQUIRE_COMPILER_WASM=1 → C stage0.
- * Fallback: python3 -m ujs ujs2wasm --mode direct.
+ * Fallback: python3 -m ujs ujs2wasm --mode direct (dev only; ship gates forbid).
  *
  * Usage:
  *   node ujs/compile.mjs path/to/prog.ujs [-o out.wasm]

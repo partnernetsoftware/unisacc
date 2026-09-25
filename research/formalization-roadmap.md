@@ -27,6 +27,8 @@ B/C 凡方法命题一律 **[cite A]**；本文件是 A 的可机读证明义务
 
 **刻意不做**：自举不动点、六目标 ABI、gold≡C99、`h_min` NP。
 
+**Paper B / UJS**：方法命题一律 [cite A]。B **无** UJS 专用 Lean 里程碑；M3 `compiler_core` 自举是**出货脊**孪生检验，不进 L0–L3。表阶段（IC / wasm lower）仍欠全 walker P-2，继承上表「全 walker 仍开放」。
+
 ## 构建
 
 ```bash

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# M2 gate: compiler.wasm callable from Node — no python3 on the product path.
+# M2/M3/P0 product gate (Paper B 出货脊 — not IntNet):
+#   default compile.mjs → compiler_core.wasm; stage2≡stage1; sim/drone body≡stage0;
+#   no python3 emit on ship path; no A-core copy for Pages.
 #
-# Subset: arith · fact · branch · f64 · list · setidx · dict · globals_fold · list_f64 · unary_minus · elseif · logic
-# + setidx_globals (host inject + run_step) · sim.ujs compile · ship builders no python3 emit
+# UJS-1_ship fold: arith · fact · branch · f64 · list · setidx · dict · globals_fold ·
+#   list_f64 · unary_minus · elseif · logic · setidx_globals · sim/drone ship emit
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-echo "== ujs2wasm_compiler (M2 subset) =="
+echo "== ujs2wasm_compiler (M2/M3/P0 · UJS-1_ship) =="
 
 COMPILER_WASM=""
 for cand in ujs/core/compiler.wasm ujs/compiler.wasm ujs/uxe/ship/compiler.wasm; do

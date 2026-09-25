@@ -1,7 +1,10 @@
-/* M2 subset: UJS → \\0asm inside this module.
+/* M2/M3 stage0 (C): UJS-1_ship → \\0asm inside this module.
  * Build: ujs/scripts/build-compiler-wasm.sh → ujs/core/compiler.wasm
- * Cover: let/while/if/else/return · i64+f64 arith · list/len/idx/setidx.
- * Gaps: str literal / fn / full sim host parity — ship still open.
+ * Product default is stage1 core (compiler.ujs), not this file alone.
+ * Cover (aligned v16): let/while/if/else/else-if/return · i64+f64 ·
+ *   list/len/idx/setidx · dict/dot · unary -/! · &&/|| (i64) · host globals.
+ * Gaps (UJS-1_ship residual): general long str / fn · baked gold ·
+ *   byte-identical vs full Python emit_wasm. Next: v17 short str.
  */
 #include <stdint.h>
 

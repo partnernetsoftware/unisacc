@@ -18,25 +18,27 @@
     WebGL / WebGPU · 输入 · 资源 · （将来）LLM / 音频 / 存储
 ```
 
-配套引擎：交付名 **`engine.wasm`**（=`ujs_full.wasm` 构建产物）。  
-命名不用 `gameEngine`：同一引擎还要跑 **wasm app**（AI harness、工具壳等），不只是游戏。  
-与 `{game|app}.wasm` **不合包**。
+配套引擎（path-A 演示）：交付名曾用 **`engine.wasm`**（=`ujs_full.wasm`）。  
+**P0 出货 Pages 不依赖它**：步进默认 path-B **`sim.wasm`**（`compiler_core` 编）。  
+命名不用 `gameEngine`：同一 Host 还要跑 **wasm app**（AI harness、工具壳等），不只是游戏。  
+与 `{game|app}.wasm` **不合包**（path-A 双核场景）；path-B 热路径甚至不再加载 `ujs_full`。
 
 ---
 
 ## 0. Ship 胶水（ship-js 现状）
 
-Asteroid / 无人机 **Pages 已走 ship-js**：`game.js` + 共享 `engine.js` + `engine.wasm`，**无** `{game}.wasm`、**无** `eng_boot` / `eng_sim_step` 双 memory 搬砖。  
-Asteroid + drone Pages **默认路径 B**：`ujs2wasm`→`sim.wasm` + `opts.directSim`（[`direct_step.js`](direct_step.js)），热路径不走 `wasm_run`。门禁：`./tests/ujs2wasm_step.sh` · `./tests/uxe_ship_js.sh` — 见 [`prd.md`](../prd.md) #2b / M1 / M1b。
+Asteroid / 无人机 **Pages 已走 ship-js**：`game.js` + 共享 `engine.js` + **`sim.wasm`**（`directSim`），**无** 出货 `engine.wasm`、**无** `{game}.wasm` 必经、**无** `eng_boot` / `eng_sim_step` 双 memory 搬砖。  
+编译：`compile.mjs` 默认 **`compiler_core.wasm`**（M3；非 IntNet）。门禁：`./tests/ujs2wasm_step.sh` · `./tests/uxe_ship_js.sh` · `./tests/ujs2wasm_compiler.sh` — 见 [`prd.md`](../prd.md) M1–M3 / P0。
 
 | 块 | 落点 |
 |---|---|
 | WebGL / WebGPU 译包 | Host（不可沉） |
 | UXEP/UXIN | Host 编解码 · 核只调 `host_*` |
 | 玩法调度 | `app-*.js`（Asteroid/drone：`directSim`+`sim.wasm`；禁拉 `compiler.gen`） |
-| 遗留 C 双 wasm + eng_* | `native/uxe_asteroid.c` · `ship/host-entry.js` · `build-asteroid.mjs` — **不再出货** |
+| 遗留 C 双 wasm + eng_* | `native/uxe_asteroid.c` · 旧 host-entry — **不再出货** |
+| path-A `ujs_full` | demo / `FORCE_WEB_BUILD`；**非** ship 必经 |
 
-门禁：`./tests/uxe_ship_js.sh`（无 eng_* · 无 asteroid.wasm · game-ready emit）。
+门禁：`./tests/uxe_ship_js.sh`（无 eng_* · 无强制 asteroid.wasm · game-ready emit）。
 
 ---
 
@@ -179,27 +181,27 @@ decode 接受 v1 与 v2。`encode` 在缓冲 ≥36 时写 v2，仅 20 时写 v1�
 
 ## 6. 交付面与 Host 的关系
 
-| | 开发 `engine/demo/` | 发布 `engine/ship/` · Pages `docs/uxe/` |
+| | 开发 `uxe/demo/` | 发布 `uxe/ship/` · Pages `docs/uxe/` |
 |---|---|---|
-| 玩法 | 页内 compile / 读 `.ujs` | 预编译进核或 embed |
-| 核 | `core-*.js` | `{game}.wasm` 或 ship-js 打包核 |
-| 引擎 | `ujs_full.wasm` | `engine.wasm` |
-| Host | 分模块 `host-browser.js` | 内联进 `index.html` 的薄胶水 |
+| 玩法 | 页内 compile / 读 `.ujs` | 预编译 **path-B** |
+| 核 | `app-*.js` | **`sim.wasm`** + `directSim`（UJS-1_ship · `compiler_core`） |
+| 引擎 VM | 可选 `ujs_full`（path-A） | **无** ship 必经 `engine.wasm`（P0） |
+| Host | 分模块 `host-browser.js` | 共享 `engine.js` + 薄页 |
 
 Pages 只镜像 **ship 静态面** + 游戏索引；不放源码 demo。
 
 ```
 docs/uxe/engine.js          # 共享 Host + GPU
 docs/uxe/{game}/index.html  # 薄页
-docs/uxe/{game}/game.js     # 本游戏胶水
-docs/uxe/{game}/*.wasm
+docs/uxe/{game}/game.js     # 本游戏胶水（directSim）
+docs/uxe/{game}/sim.wasm    # 玩法核（core 编）
 ```
 
 ```bash
-cd ujs && npm run ship:pages    # 先 engine.js，再 asteroid + drone
+cd ujs && npm run ship:pages    # 默认 compiler_core；无 python emit / 无 A 核
 ```
 
-两款均为 ship-js：`game.js` + `engine.wasm` + 共享 `../engine.js`（无 `{game}.wasm`）。
+两款均为 ship-js：`game.js` + **`sim.wasm`** + 共享 `../engine.js`（无出货 `engine.wasm`、无强制 `{game}.wasm`）。
 
 ---
 
@@ -246,18 +248,22 @@ cd ujs && npm run ship:pages    # 先 engine.js，再 asteroid + drone
 1. 核里碰 `canvas` / DOM / `fetch` / 文件系统。  
 2. 逐 draw 跨边界。  
 3. 为单一游戏开旁路 API（缺口进本表版本化）。  
-4. 游戏 wasm 与 `engine.wasm` 合包。  
+4. 出货 Pages 再引入 `engine.wasm` / 把玩法核与 path-A VM 合包。  
 5. 把 LLM Key 或用户隐私写进 packet / sim globals。
+6. 把 M3 `compiler_core` 叙述成 IntNet，或把全表 UJS-1 写成已由 core 交付。
 
 ---
 
 ## 9. 验收门禁
 
 ```bash
-cd ujs
-npm run test:uxe:all       # 一键无人门禁（uxe-gate.sh）
-# 分项：packet · input · uxe · ship · drone · drone:ship · drone:rules
-# 归档车（非默认）：test:uxe:monopoly*
+# 语言 / 构造脊
+./tests/ujs.sh
+# 出货脊（M3/P0）+ ship-js 合同
+./tests/ujs2wasm_compiler.sh
+./tests/uxe_ship_js.sh
+# UXE 无人（另门；不挡上两者）
+cd ujs && npm run test:uxe:all
 ```
 
-改 ABI 而未改本文件 / 门禁 = 文档债务。
+改 ABI 而未改本文件 / 门禁 = 文档债务。两脊与子集边界见 [`../prd.md`](../prd.md) · Paper B [`../../research/ujs-paper.md`](../../research/ujs-paper.md)。
