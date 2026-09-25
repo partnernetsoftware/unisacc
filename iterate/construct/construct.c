@@ -37,7 +37,8 @@
 #define QW ((MAXQ + QB - 1) / QB)   /* ceil(MAXQ / QB) */
 #define MAXR 80   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
 #define MAXU 128
-#define MAXCAND 96
+#define MAXCAND 288  /* candidate slots, a global count over all heads and T4 rounds; abi needs
+                        270 under its construction order (README) -- not a general bound */
 #define BUFSZ 262144
 #define MAXP 512
 
@@ -1064,7 +1065,10 @@ void factored(void) {
     for (pi = 0; pi < nparts; pi = pi + 1)
         for (mg = 0; mg < 2; mg = mg + 1)
             for (k = 0; k < lim; k = k + 1) {
-                if (ncand >= MAXCAND || nhc[ch] >= MAXCAND) die("more candidates than this constructor holds");
+                if (ncand >= MAXCAND || nhc[ch] >= MAXCAND) {   /* before slot ncand is written: exit 4 */
+                    printf("construct: %s: capacity: head %s: candidate slot %d (head's %d), more than %d\n", gpath, hname[ch], ncand + 1, nhc[ch] + 1, MAXCAND);
+                    exit(4);
+                }
                 tfatt = tfatt + 1;
                 if (!rep_factored(ncand, pi, mg, k)) { tfnone = tfnone + 1; continue; }
                 if (cn[ncand] < cn[hc[ch][0]]) {

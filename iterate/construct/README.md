@@ -769,3 +769,42 @@ Gates (check.sh globals `caph`, `caphn`):
 Verification: 14 stages byte-identical to the pre-step-1 build on cc,
 unisacc, UBSan (252 files, 0 differ); batches ok: 4.5 s, 4.0 s, 27.8 s.
 `__common` 9,183,288 -> 10,395,704 B (static, not RSS).
+
+## abi, step 4: MAXCAND 96 -> 288 (2026-09-25)
+
+`MAXCAND 288`; the candidate pool representation is unchanged (`cn`, and
+`ccube`/`cw` rows `ci * MAXU + u`).  The one candidate check is still in
+`factored()`, before each rep_factored attempt writes slot `ncand`:
+`ncand >= MAXCAND || nhc[ch] >= MAXCAND`.  It was `die` (exit 1) and is now
+a capacity exit **4**: `capacity: head H: candidate slot N (head's M), more
+than 288`.
+
+**270 is abi's minimum under the current construction order, not a
+general bound.**  ncand is one global count: every head's dlist slot plus
+every kept factored candidate, and T4 appends a head's factored candidates
+again after each accepted list without freeing the old ones.  On abi only
+sysno has factored candidates (64 kept of 72 per build), so the count before
+each of the 4 selections is 77 / 141 / 205 / 269, and the attempt that would
+take slot 270 needs `ncand < MAXCAND`.  Measured: a build with MAXCAND 269
+exits 4 on abi (`head arg0: candidate slot 270`), 270 builds it.  288 leaves
+18 slots; it does not cover every schema the reader accepts (e.g. the
+4-head negative below needs more), so the guard stays exact.
+
+Gates (check.sh globals `capk`, `capkn`), from regmap with its head copied:
+
+- **positive**, 3 copies: 3 x 73 = 219 slots (over the old 96).  `-d`
+  9,698 B identical to netdump.py on cc, unisacc, UBSan.  Its trace also
+  reaches branches no gold stage reaches: a multi-head stage with factored
+  candidates, each head chooses a factored one, pick moves heads (12 starts),
+  the pool flag changes a choice 6 times.
+- **negative**, 4 copies: slot 289 in round 3; exit exactly 4 with the
+  candidate diagnostic on cc, unisacc, UBSan.
+
+Memory (cc -O2): `size -m` `__common` 10,395,704 -> **23,175,224 B** after
+this step (static zerofill; `ccube`/`cw` are 66,560 B per slot).  Peak RSS of
+`construct weights/gold/abi.tsv`, one run of `/usr/bin/time -l`: maximum
+resident set 13,893,632 B (peak footprint 13,435,216 B), 0.09 s -- zerofill
+pages that are never touched are not resident.  No performance work done.
+
+Verification: 14 stages byte-identical to the pre-step-1 build on cc,
+unisacc, UBSan (252 files, 0 differ); batches ok: 4.8 s, 4.0 s, 27.8 s.

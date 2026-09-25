@@ -29,7 +29,7 @@ parse parse t i
 type type t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset sum reader capq capr caprn caph caphn capn capo capg capc"
+GLOBALS="qset sum reader capq capr caprn caph caphn capk capkn capn capo capg capc"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -293,6 +293,32 @@ for b in cc ua san; do
     else echo "head negative $b NOT A HEAD-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caphn.$b.out")"; fail=1; fi
 done
 if cmp -s "$T/caph.cc.t" "$T/caph.ua.t"; then sed "s/^/caph /" "$T/caph.cc.t"; else echo "caph trace differs between builds"; fail=1; fi
+# candidate capacity: regmap with its one head copied N times (heads y0..).
+# Every head keeps its dlist slot and 18 factored candidates, and T4 appends
+# 18 more per head per accepted list, all in the global slot count ncand.
+# POSITIVE N = 3: 3 + 216 = 219 slots (> the old MAXCAND 96): -d identical to
+# Python; multi-head factored (pick moves heads).  NEGATIVE N = 4: factored()
+# reaches slot 289 > MAXCAND 288 and must exit exactly 4.
+capk() {   # capk N name
+awk -F'	' -v NH=$1 -v NM=$2 'NR==1{print "# stage " NM ": regmap head x" NH ", synthetic"; next}
+/^#head/{for(h=0;h<NH;h++){ printf "#head\ty%d", h; for(i=3;i<=NF;i++) printf "\t%s", $i; printf "\n" } next}
+/^treg/{printf "treg\tarch"; for(h=0;h<NH;h++) printf "\t=> y%d", h; printf "\n"; next}
+/^#/{print; next}
+{printf "%s\t%s", $1, $2; for(h=0;h<NH;h++) printf "\t%s", $3; printf "\n"}' "$T/cap.src"
+}
+capk 3 capk > "$T/capk.tsv"
+capk 4 capkn > "$T/capkn.tsv"
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capk.tsv" > "$T/capk.py" || fail=1
+for b in cc ua san; do
+    B 30 "$T/c_$b" -d "$T/capk.tsv" > "$T/capk.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 0 ] && cmp -s "$T/capk.py" "$T/capk.$b.out"; then
+        echo "candidate positive $b: 3 heads, 219 candidate slots, -d identical to Python ($(wc -c < "$T/capk.py" | tr -d ' ') B)"
+    else echo "candidate positive $b FAILED (rc $rc): $(head -1 "$T/capk.$b.out")"; fail=1; fi
+    B 30 "$T/c_$b" "$T/capkn.tsv" > "$T/capkn.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: head y3: candidate slot 289 (head's 70), more than 288" "$T/capkn.$b.out" && ! grep -q 'runtime error' "$T/capkn.$b.out"; then
+        echo "candidate negative $b rejected: $(head -1 "$T/capkn.$b.out" | sed 's/.*: capacity/capacity/')"
+    else echo "candidate negative $b NOT A CANDIDATE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/capkn.$b.out")"; fail=1; fi
+done
 # capacity NEGATIVE: more quotient keys than MAXQ (3200) must be rejected
 # before any set is built: exit exactly 4 and the capacity diagnostic.
 # Fields of 15, 15 and 15 values, label class[(a + 3b + 5c) % 16]: a shift
