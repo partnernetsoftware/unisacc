@@ -208,7 +208,7 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return adr(IP1, text_va + off, text_va + off + 16) + \
             w(0xD1002000 | (7 << 5) | 7) + \
             w(0xF9000000 | (7 << 5) | IP1) + \
-            w(0xD61F0000 | (N(a[0]) << 5))           # br Xn
+            w(0xD63F0000 | (N(a[0]) << 5))           # blr Xn: pairs with ret
     if o in (".div", ".udiv"):                       # sdiv / udiv
         d = 0x9AC00C00 if o == ".div" else 0x9AC00800
         return w(d | (N(a[2]) << 16) | (N(a[1]) << 5) | N(a[0]))
@@ -273,7 +273,7 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
     if o == "ret":
         return w(0xF9400000 | (7 << 5) | IP1) + \
             w(0x91002000 | (7 << 5) | 7) + \
-            w(0xD61F0000 | (IP1 << 5))
+            w(0xD65F0000 | (IP1 << 5))   # ret x17: br's jump, predicted
     if o == "nop":
         return w(0xD503201F)
     if o == "itoa":
@@ -291,12 +291,13 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
     if o == "jump":
         return w(0x14000000 | _relfield(ins, labels[a[0]] - off))
     if o == "call":
-        # tape semantics: push the return address on the tape stack (x7).  `bl`
-        # would put it in lr, which recursion clobbers.
+        # tape semantics: push the return address on the tape stack (x7), and
+        # return through it.  The jump is still `bl`, whose lr nobody reads:
+        # it pushes the hardware return predictor, which `ret x17` pops.
         return adr(IP1, text_va + off, text_va + off + 16) + \
             w(0xD1002000 | (7 << 5) | 7) + \
             w(0xF9000000 | (7 << 5) | IP1) + \
-            w(0x14000000 | _relfield(ins, labels[a[0]] - (off + 12)))
+            w(0x94000000 | _relfield(ins, labels[a[0]] - (off + 12)))
     if o == "jumpz":                                 # cbz Xt, label
         return w(0xB4000000 | _relfield(ins, labels[a[1]] - off) | N(a[0]))
     return None

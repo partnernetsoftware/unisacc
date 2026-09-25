@@ -404,7 +404,7 @@ int bk_arm(int i, long off) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
-        ow(0xD61F0000 | (a[0] << 5));
+        ow(0xD63F0000 | (a[0] << 5));      /* blr: pairs with ret for the return predictor */
         return 1;
     }
     if (strsame(o, ".div") || strsame(o, ".udiv")) {
@@ -419,7 +419,7 @@ int bk_arm(int i, long off) {
     if (strsame(o, "ret")) {
         ow(0xF9400000 | (7 << 5) | A_IP1);
         ow(0x91002000 | (7 << 5) | 7);
-        ow(0xD61F0000 | (A_IP1 << 5));
+        ow(0xD65F0000 | (A_IP1 << 5));     /* ret x17: same jump as br, predicted */
         return 1;
     }
     if (strsame(o, "nop")) { ow(0xD503201F); return 1; }
@@ -431,7 +431,7 @@ int bk_arm(int i, long off) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
-        ow(0x14000000 | a_relf(i, bk_label(a[0]) - (off + 12)));
+        ow(0x94000000 | a_relf(i, bk_label(a[0]) - (off + 12)));   /* bl */
         return 1;
     }
     if (strsame(o, "jumpz")) {
