@@ -4,7 +4,7 @@
 #   no python3 emit on ship path; no A-core copy for Pages.
 #
 # UJS-1_ship fold: arith · fact · branch · f64 · list · setidx · dict · globals_fold ·
-#   list_f64 · unary_minus · elseif · logic · setidx_globals · sim/drone ship emit
+#   list_f64 · unary_minus · elseif · logic · str · setidx_globals · sim/drone ship emit
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -48,7 +48,7 @@ RUNNER="$ROOT/tests/ujs2wasm/run_wasm.mjs"
 STEP_RUNNER="$ROOT/tests/ujs2wasm/run_step.mjs"
 STEP_EXPECT="$ROOT/tests/ujs2wasm/step_expect.json"
 
-for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 unary_minus elseif logic; do
+for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 unary_minus elseif logic str; do
   src="tests/ujs2wasm/corpus/${name}.ujs"
   echo "-- compile $name via compile.mjs (no python3)"
   log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
@@ -58,7 +58,8 @@ for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 u
   [ "$magic" = "0061736d" ] || { echo "FAIL: $name not \\0asm ($magic)"; exit 1; }
   echo "$log" | grep -q '"bridge":"compiler_core.wasm"' \
     || { echo "FAIL: fold corpus expects compiler_core bridge, got: $log"; exit 1; }
-  got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm")
+  got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm" | node -e \
+    'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
   want=$(node -e "const e=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); process.stdout.write(String(e[process.argv[2]]))" "$EXPECT" "$name")
   [ "$got" = "$want" ] || { echo "FAIL: fold $name got=$got want=$want"; exit 1; }
   echo "OK $name fold=$got"
@@ -72,13 +73,6 @@ echo "$log" | grep -q '"bridge":"compiler_core.wasm"' \
 got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/arith_core.wasm")
 [ "$got" = "7" ] || { echo "FAIL: default-core arith fold=$got"; exit 1; }
 echo "OK default core arith fold=7"
-
-if perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs tests/ujs2wasm/corpus/str.ujs \
-    -o "$OUT/str.wasm" 2>"$OUT/str.err"; then
-  echo "FAIL: str.ujs should be out of subset"
-  exit 1
-fi
-echo "OK subset rejects str.ujs"
 
 echo "-- setidx_globals via compile.mjs (default core) + run_step (no python3)"
 # Exercise compiler_core → rebuild-main splice (stub NG patch), not stage0 alone.
@@ -432,5 +426,5 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v16 · fold corpus via compiler_core · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v17 · fold corpus via compiler_core · stage2≡stage1)"
 

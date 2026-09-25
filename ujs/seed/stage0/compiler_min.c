@@ -1,10 +1,9 @@
 /* M2/M3 stage0 (C): UJS-1_ship → \\0asm inside this module.
  * Build: ujs/seed/stage0/build-compiler-wasm.sh → ujs/iterate/compiler.wasm
  * Product default is stage1 core (compiler.ujs), not this file alone.
- * Cover (aligned v16): let/while/if/else/else-if/return · i64+f64 ·
- *   list/len/idx/setidx · dict/dot · unary -/! · &&/|| (i64) · host globals.
+ * Cover (aligned v17): v16 + short str lit (≤7 ASCII) · str+str · str return.
  * Gaps (UJS-1_ship residual): general long str / fn · baked gold ·
- *   byte-identical vs full Python emit_wasm. Next: v17 short str.
+ *   byte-identical vs full Python emit_wasm.
  */
 #include <stdint.h>
 
@@ -36,7 +35,7 @@ static char *strncpy(char *d, const char *s, uint32_t n) {
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
         HOST_SCRATCH = 950000, MEM_PAGES = 128 };
-enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4 };
+enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5 };
 
 static uint8_t  g_heap[256 * 1024];
 static uint32_t g_bump;
@@ -141,11 +140,11 @@ enum {
   T_EOF, T_NUM, T_FNUM, T_ID, T_LET, T_WHILE, T_RETURN, T_IF, T_ELSE,
   T_LP, T_RP, T_LB, T_RB, T_LS, T_RS, T_COMMA, T_COLON, T_DOT, T_SEMI, T_EQ,
   T_PLUS, T_MINUS, T_STAR, T_SLASH, T_PCT,
-  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_BAD
+  T_LT, T_GT, T_LE, T_GE, T_EQEQ, T_NE, T_NOT, T_AND, T_OR, T_STR, T_BAD
 };
 typedef struct {
   const char *src; uint32_t len, pos;
-  int tok; int64_t num; double fnum; char id[64];
+  int tok; int64_t num; double fnum; char id[64]; char str[8];
 } Lex;
 static int id0(char c) {
   return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';
@@ -181,6 +180,23 @@ static void next(Lex *L) {
       L->fnum = (double)tnum / (double)fden; L->tok = T_FNUM; return;
     }
     L->num = iv; L->tok = T_NUM; return;
+  }
+  if (c == '"') {
+    L->pos++;
+    uint32_t n = 0;
+    while (L->pos < L->len && L->src[L->pos] != '"') {
+      char ch = L->src[L->pos];
+      if (ch == '\\') { L->tok = T_BAD; return; }
+      if (n >= 7) { L->tok = T_BAD; return; }
+      if ((uint8_t)ch > 127) { L->tok = T_BAD; return; }
+      L->str[n++] = ch;
+      L->pos++;
+    }
+    if (L->pos >= L->len) { L->tok = T_BAD; return; }
+    L->str[n] = 0;
+    L->pos++;
+    L->tok = T_STR;
+    return;
   }
   if (id0(c)) {
     uint32_t n = 0;
@@ -235,7 +251,7 @@ enum {
   OP_IF0, OP_IF1, OP_IF2,
   OP_BOXI, OP_BOXF, OP_MKLIST, OP_MKLIST_DYN, OP_LSET, OP_IDXGET, OP_IDXSET, OP_LEN, OP_IWRAP,
   OP_GLOAD, OP_GSTORE,
-  OP_MKDICT, OP_DSET, OP_DOT, OP_SCONST,
+  OP_MKDICT, OP_DSET, OP_DOT, OP_SCONST, OP_STRADD,
   OP_I2F, OP_I2F_R, OP_F2I,
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
   OP_RET, OP_FRET, OP_HRET
@@ -343,6 +359,12 @@ static int bin_finish(Prog *P, int ty, int ty2, uint8_t oi, uint8_t of) {
 }
 
 static int pprim(Lex *L, Prog *P) {
+  if (L->tok == T_STR) {
+    int64_t key = pack_key(L->str);
+    if (!emit(P, OP_SCONST, key)) return 0;
+    next(L);
+    return TY_STR;
+  }
   if (L->tok == T_NUM) {
     if (!emit(P, OP_CONST, L->num)) return 0; next(L); return TY_I64;
   }
@@ -563,6 +585,14 @@ static int padd(Lex *L, Prog *P) {
     else if (L->tok==T_MINUS) { oi=OP_SUB; of=OP_FSUB; }
     else break;
     next(L); int ty2 = pmul(L, P); if (!ty2) return 0;
+    if (ty == TY_STR || ty2 == TY_STR) {
+      if (oi != OP_ADD || ty != TY_STR || ty2 != TY_STR) {
+        P->err = "bad bin"; return 0;
+      }
+      if (!emit(P, OP_STRADD, 0)) return 0;
+      ty = TY_STR;
+      continue;
+    }
     ty = bin_finish(P, ty, ty2, oi, of); if (!ty) return 0;
   }
   return ty;
@@ -691,7 +721,7 @@ static int pstmt(Lex *L, Prog *P) {
     int ty = pexpr(L, P); if (!ty) return 0;
     uint8_t op = OP_RET;
     if (ty == TY_F64) op = OP_FRET;
-    else if (ty == TY_LIST || ty == TY_DICT) op = OP_HRET;
+    else if (ty == TY_LIST || ty == TY_DICT || ty == TY_STR) op = OP_HRET;
     if (!emit(P, op, 0)) return 0;
     return expect(L, T_SEMI, P, "expected ;");
   }
@@ -914,6 +944,9 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x10) || !bleu(c, 15)) return 0;
       break;
     }
+    case OP_STRADD:
+      if (!bu8(c, 0x10) || !bleu(c, 18)) return 0;
+      break;
     case OP_SCONST: {
       /* pack_key → bytes at SCRATCH0, call mk_str */
       uint64_t v = (uint64_t)ins->a;
@@ -1003,7 +1036,8 @@ static int emit_locals(Buf *c, Prog *P) {
     if (!bleu(c, 1)) return 0;
     uint8_t wt = 0x7e; /* i64 */
     if (P->lty[i] == TY_F64) wt = 0x7c;
-    else if (P->lty[i] == TY_LIST || P->lty[i] == TY_DICT) wt = 0x7f;
+    else if (P->lty[i] == TY_LIST || P->lty[i] == TY_DICT || P->lty[i] == TY_STR)
+      wt = 0x7f;
     if (!bu8(c, wt)) return 0;
   }
   return 1;
@@ -1525,6 +1559,25 @@ static int str_ptr_body(Buf *c) {
 }
 
 
+static int str_cat_body(Buf *c) {
+  static const uint8_t body[] = {
+    1, 5, 0x7f, 0x20, 0x00, 0x10, 0x0a, 0x21, 0x02, 0x20, 0x01, 0x10, 0x0a, 0x21, 0x03,
+    0x41, 0x00, 0x28, 0x02, 0x00, 0x21, 0x06, 0x20, 0x06, 0x45, 0x04, 0x40, 0x41, 0x80, 0x20,
+    0x21, 0x06, 0x0b, 0x20, 0x06, 0x21, 0x04, 0x20, 0x04, 0x41, 0x04, 0x3a, 0x00, 0x00,
+    0x20, 0x04, 0x41, 0x04, 0x6a, 0x20, 0x02, 0x20, 0x03, 0x6a, 0x36, 0x02, 0x00, 0x41, 0x00,
+    0x21, 0x05, 0x02, 0x40, 0x03, 0x40, 0x20, 0x05, 0x20, 0x02, 0x4f, 0x0d, 0x01, 0x20, 0x04,
+    0x41, 0x08, 0x6a, 0x20, 0x05, 0x6a, 0x20, 0x00, 0x41, 0x08, 0x6a, 0x20, 0x05, 0x6a, 0x2d,
+    0x00, 0x00, 0x3a, 0x00, 0x00, 0x20, 0x05, 0x41, 0x01, 0x6a, 0x21, 0x05, 0x0c, 0x00, 0x0b,
+    0x0b, 0x41, 0x00, 0x21, 0x05, 0x02, 0x40, 0x03, 0x40, 0x20, 0x05, 0x20, 0x03, 0x4f, 0x0d,
+    0x01, 0x20, 0x04, 0x41, 0x08, 0x6a, 0x20, 0x02, 0x6a, 0x20, 0x05, 0x6a, 0x20, 0x01, 0x41,
+    0x08, 0x6a, 0x20, 0x05, 0x6a, 0x2d, 0x00, 0x00, 0x3a, 0x00, 0x00, 0x20, 0x05, 0x41, 0x01,
+    0x6a, 0x21, 0x05, 0x0c, 0x00, 0x0b, 0x0b, 0x20, 0x04, 0x41, 0x08, 0x20, 0x02, 0x20, 0x03,
+    0x6a, 0x6a, 0x6a, 0x41, 0x07, 0x6a, 0x41, 0x78, 0x71, 0x21, 0x06, 0x41, 0x00, 0x20, 0x06,
+    0x36, 0x02, 0x00, 0x20, 0x04, 0x0b
+  };
+  return braw(c, body, (uint32_t)sizeof body);
+}
+
 static int host_dict_set_body(Buf *c) {
   /* (param h i k v) — emit_wasm / run_step order */
   if (!bleu(c, 0)) return 0;
@@ -1553,9 +1606,9 @@ static int host_dict_set_body(Buf *c) {
 
 static int build_mod(Prog *P, Buf *mod) {
   Buf types, funcs, mems, exps, codes;
-  Buf cs[32];
+  Buf cs[33];
   int i, ng = P->ng > 0 ? P->ng : 1;
-  enum { NCORE = 18, NHOST = 14, NFUNCS = NCORE + NHOST };
+  enum { NCORE = 19, NHOST = 14, NFUNCS = NCORE + NHOST };
   if (!binit(&types,160)||!binit(&funcs,48)||!binit(&mems,16)||!binit(&exps,512)||!binit(&codes,16384))
     return 0;
   for (i = 0; i < NFUNCS; i++) if (!binit(&cs[i], i==1 ? 8192 : 256)) return 0;
@@ -1578,7 +1631,7 @@ static int build_mod(Prog *P, Buf *mod) {
 
   if (!bleu(&funcs, NFUNCS)) return 0;
   uint8_t fty[NFUNCS] = {
-    0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13,
+    0,1,2,3,4,5,2,6,7,7,2, 8,2, 9,10,11, 12,13, 6,
     1, 1, 1, 11, 2, 6, 6, 1, 1, 1, 2, 2,
     12, /* 30 host_dict_set (h,i,k,v) */
     1  /* 31 host_mk_null */
@@ -1596,12 +1649,12 @@ static int build_mod(Prog *P, Buf *mod) {
   EXP("tag_of_export", 0x00, 2);
   EXP("i64_of_export", 0x00, 3);
   EXP("f64_of_export", 0x00, 5);
-  EXP("run_step", 0x00, 19);
-  EXP("host_run", 0x00, 20);
-  EXP("host_reset", 0x00, 18);
-  EXP("clear_slots", 0x00, 27);
-  EXP("host_set_global", 0x00, 21);
-  EXP("host_get_global", 0x00, 22);
+  EXP("run_step", 0x00, 20);
+  EXP("host_run", 0x00, 21);
+  EXP("host_reset", 0x00, 19);
+  EXP("clear_slots", 0x00, 28);
+  EXP("host_set_global", 0x00, 22);
+  EXP("host_get_global", 0x00, 23);
   EXP("host_mk_i64", 0x00, 0);
   EXP("host_mk_f64", 0x00, 4);
   EXP("host_mk_list", 0x00, 6);
@@ -1610,14 +1663,14 @@ static int build_mod(Prog *P, Buf *mod) {
   EXP("host_len", 0x00, 10);
   EXP("host_mk_str", 0x00, 11);
   EXP("host_mk_dict", 0x00, 12);
-  EXP("host_dict_set", 0x00, 30);
-  EXP("host_dict_key", 0x00, 23);
-  EXP("host_dict_val", 0x00, 24);
-  EXP("host_scratch", 0x00, 25);
-  EXP("mem_base", 0x00, 26);
-  EXP("str_ptr_export", 0x00, 28);
-  EXP("str_len_export", 0x00, 29);
-  EXP("host_mk_null", 0x00, 31);
+  EXP("host_dict_set", 0x00, 31);
+  EXP("host_dict_key", 0x00, 24);
+  EXP("host_dict_val", 0x00, 25);
+  EXP("host_scratch", 0x00, 26);
+  EXP("mem_base", 0x00, 27);
+  EXP("str_ptr_export", 0x00, 29);
+  EXP("str_len_export", 0x00, 30);
+  EXP("host_mk_null", 0x00, 32);
   #undef EXP
 
   if (!mk_num_body(&cs[0], 0)) return 0;
@@ -1663,21 +1716,22 @@ static int build_mod(Prog *P, Buf *mod) {
   if (!gstore_body(&cs[15], 2)) return 0;
   if (!dict_set_hkvi_body(&cs[16])) return 0;
   if (!dict_get_body(&cs[17])) return 0;
+  if (!str_cat_body(&cs[18])) return 0;
 
-  if (!host_reset_body(&cs[18], ng)) return 0;
-  if (!run_step_body(&cs[19])) return 0;
-  if (!run_step_body(&cs[20])) return 0; /* host_run */
-  if (!host_set_global_body(&cs[21], ng)) return 0;
-  if (!host_get_global_body(&cs[22], ng)) return 0;
-  if (!host_dict_key_body(&cs[23])) return 0;
-  if (!host_dict_val_body(&cs[24])) return 0;
-  if (!const_i32_ret_body(&cs[25], HOST_SCRATCH)) return 0;
-  if (!const_i32_ret_body(&cs[26], 0)) return 0; /* mem_base */
-  if (!clear_slots_body(&cs[27], ng)) return 0;
-  if (!str_ptr_body(&cs[28])) return 0;
-  if (!len_of_body(&cs[29])) return 0;
-  if (!host_dict_set_body(&cs[30])) return 0;
-  if (!const_i32_ret_body(&cs[31], 0)) return 0; /* host_mk_null */
+  if (!host_reset_body(&cs[19], ng)) return 0;
+  if (!run_step_body(&cs[20])) return 0;
+  if (!run_step_body(&cs[21])) return 0; /* host_run */
+  if (!host_set_global_body(&cs[22], ng)) return 0;
+  if (!host_get_global_body(&cs[23], ng)) return 0;
+  if (!host_dict_key_body(&cs[24])) return 0;
+  if (!host_dict_val_body(&cs[25])) return 0;
+  if (!const_i32_ret_body(&cs[26], HOST_SCRATCH)) return 0;
+  if (!const_i32_ret_body(&cs[27], 0)) return 0; /* mem_base */
+  if (!clear_slots_body(&cs[28], ng)) return 0;
+  if (!str_ptr_body(&cs[29])) return 0;
+  if (!len_of_body(&cs[30])) return 0;
+  if (!host_dict_set_body(&cs[31])) return 0;
+  if (!const_i32_ret_body(&cs[32], 0)) return 0; /* host_mk_null */
 
   if (!bleu(&codes, NFUNCS)) return 0;
   for (i = 0; i < NFUNCS; i++) {

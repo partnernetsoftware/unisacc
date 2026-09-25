@@ -117,7 +117,7 @@ UJS inherits these by citation. **B’s extra P-2 obligation:** each new *table*
 
 **UJS-1 (spec):** values `null | bool | i64 | f64 | str | list | dict | fn | tup`; locals → lexical outer → globals; permanent reject outside tables (no `eval`, prototypes, `this`/`new`/`class`, async, RegExp engine). Full clause table: `ujs/prd.md` / `archive/prd-v1.0.md`.
 
-**UJS-1_ship (M3 / Pages path, as of compiler v16):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), globals inject / `host_*` / `run_step`. **Still out of M3 ship:** general long `str` / `fn`, baked gold/catalog, byte-identical module vs full Python `emit_wasm` (see `ujs/prd.md` M2 residual; next eng cut: v17 short str).
+**UJS-1_ship (M3 / Pages path, as of compiler v17):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **short str lit + concat + return**, globals inject / `host_*` / `run_step`. **Still out of M3 ship:** general long `str` / `fn`, baked gold/catalog, byte-identical module vs full Python `emit_wasm` (see `ujs/prd.md` M2 residual).
 
 Papers and release notes must say **which** face is meant.
 

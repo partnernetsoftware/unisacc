@@ -135,7 +135,16 @@ P1 构造迁 unisacc          可选
 | 门禁 | fold **logic**→7；stage2≡stage1 · sim+drone body≡stage0；setidx_globals 默认 core |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
 
-**下一刀**：v17 短 str（仍非 stage0 面；本刀未做）。
+#### M3 v17（✓ 短 str · fold corpus on core）
+
+| 件 | 说明 |
+|---|---|
+| `compiler_min.c` / `compiler.ujs` | v17：`"…"` 短字面量（≤7 ASCII、无转义）→ OP_SCONST/pack_key；`str+str` → `$str_cat`（func 18）；str handle 经 OP_HRET 返回 |
+| `compiler_rt_stub.wasm` | 与 stage0 同版 host（含 str_cat）；`compile.mjs` splice 模板 |
+| 门禁 | fold **str**→`hello ujs`；stage2≡stage1 · sim+drone body≡stage0 |
+| 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
+
+**下一刀**：v18+（长 str / fn 等仍 out of ship）。
 
 #### M3 v15（✓ else-if · fold corpus on core）
 
