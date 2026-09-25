@@ -95,7 +95,7 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 
 ## 5　布局上的取舍
 
-- **种子不再细分目录**：构造器和编译器种子都留在 `unisa/`。它们被两个前端、两个后端、测试和 `ujs/construct`（另一条产品线，直接 `import unisa.intnet`）共同引用，挪进子包会同时改动别人的代码。分类靠本文，不靠目录。
+- **种子不再细分目录**：构造器和编译器种子都留在 `unisa/`。它们被两个前端、两个后端、测试和 `ujs`（另一条产品线，直接 `import unisa.intnet`）共同引用，挪进子包会同时改动别人的代码。分类靠本文，不靠目录。**UJS 产品线**按同口径分了板块目录，见 [`ujs/ARCHITECTURE.md`](ujs/ARCHITECTURE.md)。
 - **对照臂单独成包**（`unisa/control/`）：它不在发布路径上。
 - **可复用层只放数据**：真值表有了 `.tsv` 形态，任何语言都能读取和核对，不必带上 Python。
 - **生成物提交进仓库**：`kernel/` 与 `unisacc.c` 是自举的起点（见 AGENTS.md 的 Generated files 一节）。

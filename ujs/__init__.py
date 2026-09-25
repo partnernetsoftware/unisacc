@@ -1,13 +1,13 @@
-"""UJS — JS 产品包根；Python 构造在 ``ujs.construct``。
+"""UJS — JS 产品包根；Python 构造在 ``ujs.construct``（``seed/construct``）。
 
 浏览器 / Node / Bun::
 
-    import { bootRuntime, wasm_run } from "ujs";  // 或 ./core/wasm_run.js
+    import { bootRuntime, wasm_run } from "ujs";  // 或 ./practice/core/wasm_run.js
 
 构造 / 出货::
 
     from ujs.construct import Runtime
-    python3 -m ujs web-build   # → ujs/core/
+    python3 -m ujs web-build   # → ujs/practice/core/
 """
 __version__ = "0.3.0"
 

@@ -1,6 +1,7 @@
 # UJS —— 产品规格 v1.3
 
 > **唯一耦合活文档**（规格 · 目标 · 思维树 · 记忆宫殿）。与代码同会话更新。  
+> **目录板块**：[`ARCHITECTURE.md`](ARCHITECTURE.md)（种子 · 权重 · 自迭代 · 实践）  
 > Host 契约真源：[`uxe/HOST_ABI.md`](uxe/HOST_ABI.md) · 开箱：[`README.md`](README.md)  
 > 归档：[`archive/`](archive/)（旧条款 / 旧路线 / 旧地图）
 
