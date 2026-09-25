@@ -6,6 +6,8 @@ vocab / BF / BH region, so this proves the declared mapping equals it:
     with ast, the names resolved in unisa.gold / unisa.front.lex), in order,
     with TYPEV at the typekw row's position;
   - each vocab row's TSV list == the named gold tuple (values, order, length);
+  - TYPEV's VALUES are not checked here: typekw_check.py judges typekw.tsv
+    against lex.TYPEKW;
   - the bfbh stage list == ckernel.py's literal stage tuple, in order;
   - per bfbh stage: STAGES[st].fields mapped through str() == the TSV #field
     lists, and the built nets' heads (weights/built.json) == the #head lists.
@@ -33,17 +35,31 @@ bfbh = [r[1] for r in rows if r[0] == "bfbh"]
 bad = []
 
 # ckernel.py's vocab loop and bfbh tuple, from its source
-tree = ast.parse(open(os.path.join(R, "unisa", "ckernel.py")).read())
-ck_voc, ck_bfbh = None, None
+# CKERNEL_SRC (test entry): a fixture copy of ckernel.py for the judge's own negatives
+tree = ast.parse(open(os.environ.get("CKERNEL_SRC") or os.path.join(R, "unisa", "ckernel.py")).read())
+# Hardened: every For over a literal tuple is classified; the vocab loop must
+# be exactly one tuple of (str constant, Name) pairs and the bfbh loop exactly
+# one tuple of str constants, both non-empty.  Anything else -- none, two, an
+# empty tuple, a pair of another shape -- exits non-zero.
+voc_hits, bfbh_hits = [], []
 for node in ast.walk(tree):
-    if isinstance(node, ast.For) and isinstance(node.iter, ast.Tuple):
+    if isinstance(node, ast.For) and isinstance(node.iter, (ast.Tuple, ast.List)):
         el = node.iter.elts
-        if el and all(isinstance(e, ast.Tuple) and len(e.elts) == 2 for e in el):
-            ck_voc = [(e.elts[0].value, e.elts[1].id) for e in el]
-        elif el and all(isinstance(e, ast.Constant) for e in el):
-            ck_bfbh = [e.value for e in el]
-if ck_voc is None or ck_bfbh is None:
-    sys.exit("vocab_check: ckernel.py vocab loop or bfbh tuple not found")
+        if not el:
+            sys.exit("vocab_check: ckernel.py has a for-loop over an EMPTY literal tuple (line %d)" % node.lineno)
+        if all(isinstance(e, ast.Tuple) and len(e.elts) == 2 for e in el):
+            if not all(isinstance(e.elts[0], ast.Constant) and isinstance(e.elts[0].value, str)
+                       and isinstance(e.elts[1], ast.Name) for e in el):
+                sys.exit("vocab_check: ckernel.py line %d: vocab pairs are not (str, Name)" % node.lineno)
+            voc_hits.append([(e.elts[0].value, e.elts[1].id) for e in el])
+        elif all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in el):
+            bfbh_hits.append([e.value for e in el])
+if len(voc_hits) != 1 or len(bfbh_hits) != 1:
+    sys.exit("vocab_check: ckernel.py: %d vocab loops and %d bfbh tuples found, want exactly 1 each"
+             % (len(voc_hits), len(bfbh_hits)))
+ck_voc, ck_bfbh = voc_hits[0], bfbh_hits[0]
+if not rows or not voc or not bfbh:
+    sys.exit("vocab_check: vocab.tsv has no vocab/typekw or no bfbh rows")
 
 if [r[1] for r in voc] != [n for n, _ in ck_voc]:
     bad.append("vocab order/symbols %s != ckernel %s" % ([r[1] for r in voc], [n for n, _ in ck_voc]))

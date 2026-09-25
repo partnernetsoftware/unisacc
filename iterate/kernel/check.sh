@@ -12,7 +12,8 @@
 # SKIP=<check> (test entry) drops that check's body -- `fault` uses it to
 # show a dropped check fails the run although nothing in it failed.
 set -u
-CHECKS_ALL="order build region empty sem oracle neg wfail label perm fault vocab region2 vneg vpos pool rename integ"
+CHECKS_ALL="order build region empty sem oracle neg wfail label perm fault vocab region2 vneg vpos pool rename integ tneg tpos tfunc"
+TNEGS="nofile dup empty quote bslash hibyte trigraph oct0 oct7 norow duprow"
 VNEGS="unkstage nofield nohead dupsym dupbfbh missrow extrarow unkkind quote bslash hibyte trigraph oct0 oct7 badident casefold existing"
 NEGS="notsv noorder nouns2 duporder missorder unkorder trunc trunchead trail badmagic dimval dimcls tsvtwice tsvunk hm15 hm17"
 BATCHES='order build region empty sem vocab region2
@@ -20,6 +21,7 @@ oracle
 neg wfail label
 perm fault
 vneg vpos pool rename
+tneg tpos tfunc
 integ'
 need() {
     case $1 in
@@ -27,6 +29,9 @@ need() {
     build) for b in cc ua san; do echo "build $b"; done ;;
     region) echo "region oracle=shipped"; for b in cc ua san; do echo "region $b"; done ;;
     empty) echo "empty source"; for b in cc ua; do echo "empty $b"; done; echo "empty typev" ;;
+    tneg) for n in $TNEGS; do for b in cc ua san; do echo "tneg $n $b"; done; done ;;
+    tpos) for n in oct8 oct9; do for b in cc ua san; do echo "tpos $n $b"; done; done ;;
+    tfunc) for n in rename reorder; do echo "tfunc $n bytes"; echo "tfunc $n judge"; for b in ua san; do echo "tfunc $n $b"; done; done ;;
     sem) for b in cc ua; do echo "sem $b"; done ;;
     oracle) echo "oracle build"; echo "oracle check" ;;
     neg) for n in $NEGS; do for b in cc ua san; do echo "neg $n $b"; done; done; echo "neg stride" ;;
@@ -34,7 +39,7 @@ need() {
     label) echo "label differs"; echo "label dense-only"; for b in cc ua; do echo "label reject $b"; done ;;
     perm) echo "perm oracle"; echo "perm ids"; echo "perm sem" ;;
     fault) echo "fault dropped" ;;
-    vocab) echo "vocab ckernel" ;;
+    vocab) echo "vocab ckernel"; echo "vocab typekw"; for n in ckempty cknone lexempty lexnone; do echo "vocab judge $n"; done ;;
     region2) echo "region2 oracle=shipped"; for b in cc ua san; do echo "region2 $b"; done ;;
     vneg) for n in $VNEGS; do for b in cc ua san; do echo "vneg $n $b"; done; done ;;
     vpos) for n in oct8 oct9; do for b in cc ua san; do echo "vpos $n $b"; done; done ;;
@@ -93,9 +98,9 @@ GOLD=$(ls weights/gold/*.tsv)
 gm() { b=$1; o=$2; shift 2
     if [ $# = 0 ]; then set -- $K/order.tsv weights/built.uns2 $GOLD; fi
     ord=$1; shift     # the vocab mapping goes second: VOC overrides it
-    B 30 "$T/gm.$b" -o "$o" "$ord" "${VOC:-$K/vocab.tsv}" "$@"; }
-# mix <new> <out> [old]: the scratch integrator (mix.awk): old's header,
-# TYPEV block and ENC_.. tail around new's S_* .. BF/BH region
+    B 30 "$T/gm.$b" -o "$o" "$ord" "${VOC:-$K/vocab.tsv}" "${TKW:-$K/typekw.tsv}" "$@"; }
+# mix <new> <out> [old]: the scratch integrator (mix.awk): old's header and
+# ENC_.. tail around new's S_* .. TYPEV .. BF/BH region
 mix() { awk -v NEW="$1" -f $K/mix.awk "${3:-kernel/unisa_model.inc}" > "$2"; }
 # vr <py|gm> <file>: the slice-2 region (vregion.awk), checked against $T/exp
 vr() { awk -v END_MODE=$1 -v EXP="$T/exp" -f $K/vregion.awk "$2"; }
@@ -109,7 +114,7 @@ semb() { { echo '#include <stdio.h>'; cat "$1"; grep -v '^#include "unisa_' kern
 region() { awk -f $K/region.awk "$1"; }
 # the expected slice-2 symbols, from vocab.tsv and the TSV schemas (an
 # independent list: awk, not genmodel)
-awk -F'\t' -v G=weights/gold '$1 == "vocab" { print $2; print "N" $2 }
+awk -F'\t' -v G=weights/gold '$1 == "vocab" || $1 == "typekw" { print $2; print "N" $2 }
     $1 == "bfbh" { st = $2; f = G "/" st ".tsv"; i = 0
         while ((getline l < f) > 0) { split(l, a, "\t")
             if (a[1] == "#field") { print "BF_" toupper(st) "_" i; print "NBF_" toupper(st) "_" i; i++ }
@@ -156,18 +161,21 @@ if sel empty; then
     n=$(grep -c 'fopen(' $K/genmodel.c); m=$(grep 'fopen(' $K/genmodel.c | grep -c -e 'fopen(path, "rb")' -e 'fopen(opath, "wb")')
     [ "$n" = 2 ] && [ "$m" = 2 ] && { echo "empty: genmodel.c opens only argv paths (fopen x2: input, output)"; P "empty source"; } || echo "empty: genmodel.c fopen sites $n (argv-only $m)"
     E=$T/empty; mkdir -p "$E/gold"
-    cp $K/order.tsv $K/vocab.tsv weights/built.uns2 "$E/"; cp $GOLD "$E/gold/"
+    cp $K/order.tsv $K/vocab.tsv $K/typekw.tsv weights/built.uns2 "$E/"; cp $GOLD "$E/gold/"
     for b in cc ua; do
         cp "$T/gm.$b" "$T/run.$b"
         ls -A "$E" | tr '\n' ' ' > "$T/ls.$b"
-        ( cd "$E" && B 30 "$T/run.$b" -o "$T/empty.$b" order.tsv vocab.tsv built.uns2 gold/*.tsv ) > "$T/e.$b" 2>&1; rc=$?
-        if [ $rc = 0 ] && [ "$(cat "$T/ls.$b")" = "built.uns2 gold order.tsv vocab.tsv " ] && cmp -s "$T/base.cc" "$T/empty.$b"; then
-            echo "empty $b: cwd holds only [$(cat "$T/ls.$b")] (no kernel/, no built.json, no lex.py/TYPEKW); output identical to the repo-root run ($(wc -c < "$T/empty.$b" | tr -d ' ') B)"; P "empty $b"
+        ( cd "$E" && B 30 "$T/run.$b" -o "$T/empty.$b" order.tsv vocab.tsv typekw.tsv built.uns2 gold/*.tsv ) > "$T/e.$b" 2>&1; rc=$?
+        if [ $rc = 0 ] && [ "$(cat "$T/ls.$b")" = "built.uns2 gold order.tsv typekw.tsv vocab.tsv " ] && cmp -s "$T/base.cc" "$T/empty.$b"; then
+            echo "empty $b: cwd holds only [$(cat "$T/ls.$b")] (no kernel/, no built.json, no lex.py); output identical to the repo-root run ($(wc -c < "$T/empty.$b" | tr -d ' ') B)"; P "empty $b"
         else echo "empty $b: FAILED (rc $rc, cwd [$(cat "$T/ls.$b")]): $(head -1 "$T/e.$b")"; fi
     done
-    # TYPEV needs no input: the empty-dir output has the placeholder and no TYPEV line
-    if [ -f "$T/empty.cc" ] && [ "$(grep -c -e '^/\* TYPEV: BEGIN placeholder' -e '^/\* TYPEV: END placeholder \*/$' "$T/empty.cc")" = 2 ] && ! grep -q -e '^char \*TYPEV' -e '^#define NTYPEV' "$T/empty.cc"; then
-        echo "empty typev: no TYPEKW input given; output holds the TYPEV placeholder pair and no TYPEV/NTYPEV line"; P "empty typev"
+    # TYPEV comes from the declared typekw.tsv alone: the empty-dir output's
+    # TYPEV / NTYPEV lines equal the shipped ones, and no placeholder is left
+    if [ -f "$T/empty.cc" ] && [ "$(grep -c -e '^char \*TYPEV = ' -e '^#define NTYPEV ' "$T/empty.cc")" = 2 ] \
+       && [ "$(grep -e '^char \*TYPEV = ' -e '^#define NTYPEV ' "$T/empty.cc")" = "$(grep -e '^char \*TYPEV = ' -e '^#define NTYPEV ' kernel/unisa_model.inc)" ] \
+       && ! grep -q 'placeholder' "$T/empty.cc"; then
+        echo "empty typev: TYPEV/NTYPEV from typekw.tsv only, equal to the shipped lines: $(grep '^#define NTYPEV ' "$T/empty.cc")"; P "empty typev"
     else echo "empty typev: FAILED"; fi
 fi
 
@@ -177,7 +185,7 @@ if sel sem; then
         semb "$T/mixed.inc" $b "$T/sem.$b" > "$T/sb.$b" 2>&1 || { echo "sem $b: build failed: $(head -2 "$T/sb.$b")"; continue; }
         B 30 "$T/sem.$b" > "$T/so.$b" 2>&1; rc=$?
         if [ $rc = 0 ] && grep -q '^sem: 18 stages, [0-9]* keys, [0-9]* (key, head) decisions, 0 wrong, 0 not unique, 0 layout errors$' "$T/so.$b"; then
-            echo "sem $b (MIXED model.inc: both genmodel regions + shipped header/TYPEV/ENC; real unisa_core.c infer): $(cat "$T/so.$b")"; P "sem $b"
+            echo "sem $b (MIXED model.inc: both genmodel regions incl. TYPEV + shipped header/ENC; real unisa_core.c infer): $(cat "$T/so.$b")"; P "sem $b"
         else echo "sem $b: FAILED (rc $rc): $(tail -3 "$T/so.$b")"; fi
     done
 fi
@@ -289,7 +297,7 @@ if sel wfail; then
         # a real short write: file size limit 1 block, SIGXFSZ ignored so
         # write(2) returns EFBIG; the ~200 KB output must not come back whole
         rm -f "$T/wf/big.inc"
-        B 30 sh -c 'ulimit -f 1; trap "" XFSZ; exec "$@"' sh "$T/gm.$b" -o "$T/wf/big.inc" $K/order.tsv $K/vocab.tsv weights/built.uns2 $GOLD > "$T/w.o" 2>&1; rc=$?
+        B 30 sh -c 'ulimit -f 1; trap "" XFSZ; exec "$@"' sh "$T/gm.$b" -o "$T/wf/big.inc" $K/order.tsv $K/vocab.tsv $K/typekw.tsv weights/built.uns2 $GOLD > "$T/w.o" 2>&1; rc=$?
         [ $rc = 7 ] && grep -q -e "short write" -e "close failed" "$T/w.o" && { echo "wfail rlimit $b: rc 7: $(head -1 "$T/w.o")"; P "wfail rlimit $b"; } || echo "wfail rlimit $b: FAILED (rc $rc): $(head -1 "$T/w.o")"
     done
 fi
@@ -348,6 +356,22 @@ fi
 # ================================================ second slice: vocab/BF/BH
 if sel vocab; then
     B 60 python3 $K/vocab_check.py > "$T/vc" 2>&1 && P "vocab ckernel"; cat "$T/vc"
+    B 30 python3 $K/typekw_check.py $K/typekw.tsv > "$T/tc" 2>&1 && P "vocab typekw"; cat "$T/tc"
+    # the judges fail CLOSED: a source whose expected structure is missing or
+    # EMPTY is an error (rc != 0, no traceback), never a silent pass
+    JN=$T/jn; mkdir -p "$JN"
+    awk '/^ *for nm, vals in \(\("TOKV", TOKS\)/ { print "    for nm, vals in ():"; skip = 1; next } skip { if (/\("IRRECV", RECIPE\)\):/) skip = 0; next } { print }' unisa/ckernel.py > "$JN/ckempty.py"
+    awk '/^ *for nm, vals in \(\("TOKV", TOKS\)/ { print "    for nm, vals in []:"; skip = 1; next } skip { if (/\("IRRECV", RECIPE\)\):/) skip = 0; next } { print }' unisa/ckernel.py | sed 's/^    for nm, vals in \[\]:$/    for nm, vals in VOCABS:/' > "$JN/cknone.py"
+    awk '/^TYPEKW = \(/ { print "TYPEKW = ()"; skip = 1; next } skip { if (/"restrict"\)/) skip = 0; next } { print }' unisa/front/lex.py > "$JN/lexempty.py"
+    sed 's/^TYPEKW = /TYPEKWX = /' unisa/front/lex.py > "$JN/lexnone.py"
+    for n in ckempty cknone lexempty lexnone; do
+        case $n in
+        ck*) CKERNEL_SRC="$JN/$n.py" B 30 python3 $K/vocab_check.py > "$JN/o" 2>&1; rc=$? ;;
+        *) LEX_SRC="$JN/$n.py" B 30 python3 $K/typekw_check.py > "$JN/o" 2>&1; rc=$? ;;
+        esac
+        if [ $rc != 0 ] && ! grep -q Traceback "$JN/o" && B 30 python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$JN/$n.py"; then echo "vocab judge $n: rc $rc: $(tail -1 "$JN/o")"; P "vocab judge $n"
+        else echo "vocab judge $n: FAILED (rc $rc): $(tail -1 "$JN/o")"; fi
+    done
 fi
 
 if sel region2; then
@@ -499,8 +523,8 @@ if sel rename; then
 fi
 
 if sel integ; then
-    # the MIXED file (both generated regions + the old header, TYPEV and
-    # ENC_ tail) equals the shipped one once whole-line comments are removed;
+    # the MIXED file (both generated regions, TYPEV included, + the old
+    # header and ENC_ tail) equals the shipped one once whole-line comments are removed;
     # then closure and nativeboot run through tests/snap.sh on a copy of the
     # tree whose kernel/unisa_model.inc is the MIXED file
     I=$T/integ; mkdir -p "$I"
@@ -519,6 +543,93 @@ if sel integ; then
         ( cd "$I/tree" && B 60 bash tests/snap.sh "$arg" ) > "$I/$s" 2>&1; rc=$?
         echo "integ $s: rc $rc, $(perl -e "printf '%.1f', $(now) - $t1") s: $(tail -1 "$I/$s")"
         [ $rc = 0 ] && P "integ $s"
+    done
+fi
+
+# ================================================ typekw slice: TYPEV
+# tk <awk program> <name>: a modified copy of typekw.tsv (ENVIRON, no escapes)
+tk() { LC_ALL=C awk -F'\t' -v OFS='\t' "$1" $K/typekw.tsv > "$TK/$2.tsv"; }
+tkrun() { b=$1; o=$2; tf=$3; voc=$4; rm -f "$o"; VOC=$voc; TKW=$tf; gm $b "$o" > "$TK/o" 2>&1; r=$?; unset VOC TKW; return $r; }
+if sel tneg; then
+    TK=$T/tn; mkdir -p "$TK"
+    tk '$2 == "long" { $2 = "char" } { print }' dup
+    tk '$2 == "long" { $2 = "" } { print }' empty
+    Q='a"b' tk '$2 == "long" { $2 = ENVIRON["Q"] } { print }' quote
+    Q='a\b' tk '$2 == "long" { $2 = ENVIRON["Q"] } { print }' bslash
+    Q="$(printf 'a\200b')" tk '$2 == "long" { $2 = ENVIRON["Q"] } { print }' hibyte
+    Q='a??b' tk '$2 == "long" { $2 = ENVIRON["Q"] } { print }' trigraph
+    tk '$2 == "long" { $2 = "0long" } { print }' oct0
+    tk '$2 == "long" { $2 = "7long" } { print }' oct7
+    awk -F'\t' '$1 != "typekw" { print }' $K/vocab.tsv > "$TK/norow.voc"
+    awk -F'\t' '{ print } $1 == "typekw" { print }' $K/vocab.tsv > "$TK/duprow.voc"
+    for b in cc ua san; do
+        for c in "nofile|$TK/none.tsv: cannot open" \
+                 "dup|line 7: duplicate value char" \
+                 "empty|TYPEKW value 2 is outside this tool's input domain: an empty value" \
+                 "quote|TYPEKW value 2 is outside this tool's input domain: a quote" \
+                 "bslash|TYPEKW value 2 is outside this tool's input domain: a backslash" \
+                 "hibyte|TYPEKW value 2 is outside this tool's input domain: a control or non-ASCII byte" \
+                 "trigraph|TYPEKW value 2 is outside this tool's input domain: \"??\"" \
+                 "oct0|TYPEKW value 2 is outside this tool's input domain: a non-first vocab value starting 0-7" \
+                 "oct7|TYPEKW value 2 is outside this tool's input domain: a non-first vocab value starting 0-7" \
+                 "norow|no typekw row" \
+                 "duprow|typekw row given twice"; do
+            n=${c%%|*}; want=${c#*|}
+            case $n in
+            nofile) tf="$TK/none.tsv"; voc=$K/vocab.tsv ;;
+            norow|duprow) tf=$K/typekw.tsv; voc="$TK/$n.voc" ;;
+            *) tf="$TK/$n.tsv"; voc=$K/vocab.tsv ;;
+            esac
+            tkrun $b "$TK/out" "$tf" "$voc"; rc=$?
+            if [ $rc = 1 ] && grep -qF "$want" "$TK/o" && [ ! -e "$TK/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$TK/o"; then
+                printf "%s\n" "tneg $n $b: rc 1, no output: $(head -1 "$TK/o" | LC_ALL=C tr -c '\n -~' '?')"; P "tneg $n $b"
+            else printf "%s\n" "tneg $n $b: FAILED (rc $rc, want 1 and '$want'): $(head -1 "$TK/o" | LC_ALL=C tr -c '\n -~' '?')"; fi
+        done
+    done
+fi
+
+if sel tpos; then
+    # a non-first value starting 8 or 9 is legal ("\08long" is \0 then '8');
+    # cc compiles the emitted TYPEV line and reads value 2 back
+    TK=$T/tp; mkdir -p "$TK"
+    for n in oct8 oct9; do
+        d=${n#oct}
+        tk "\$2 == \"long\" { \$2 = \"${d}long\" } { print }" $n
+        for b in cc ua san; do
+            tkrun $b "$TK/out" "$TK/$n.tsv" $K/vocab.tsv; rc=$?
+            { grep '^char \*TYPEV = ' "$TK/out"; echo 'int puts(const char *); int main(void) { char *p = TYPEV; int i; for (i = 0; i < 2; i = i + 1) while (*p++) ; puts(p); return 0; }'; } > "$TK/x.c" 2>/dev/null
+            B 60 cc -w -o "$TK/x" "$TK/x.c" > /dev/null 2>&1 && got=$(B 10 "$TK/x") || got="(no build)"
+            if [ $rc = 0 ] && grep -q "^char \*TYPEV = \".*\\\\0${d}long\\\\0" "$TK/out" && [ "$got" = "${d}long" ] && grep -qx '#define NTYPEV 18' "$TK/out"; then
+                printf '%s\n' "tpos $n $b: rc 0, TYPEV holds '\\0${d}long\\0'; cc reads value 2 back as '$got'"; P "tpos $n $b"
+            else echo "tpos $n $b: FAILED (rc $rc, value 2 '$got'): $(head -1 "$TK/o")"; fi
+        done
+    done
+fi
+
+if sel tfunc; then
+    # a legal rename (short -> shrt) and a legal reorder (int <-> char) of a
+    # temp typekw.tsv: the output differs from the base in the TYPEV line
+    # only, that line is exactly the predicted one, and the compatibility
+    # judge REPORTS the difference against lex.TYPEKW (rc 1)
+    TK=$T/tf; mkdir -p "$TK"
+    tk '$2 == "short" { $2 = "shrt" } { print }' rename
+    tk '$2 == "int" { $2 = "char"; print; next } $2 == "char" { $2 = "int" } { print }' reorder
+    base=$(grep '^char \*TYPEV = ' "$T/base.cc")
+    for n in rename reorder; do
+        case $n in
+        rename) want=$(printf '%s\n' "$base" | sed 's/\\0short\\0/\\0shrt\\0/') ;;
+        reorder) want=$(printf '%s\n' "$base" | sed 's/"int\\0char\\0/"char\\0int\\0/') ;;
+        esac
+        for b in cc ua san; do tkrun $b "$TK/out.$n.$b" "$TK/$n.tsv" $K/vocab.tsv || echo "tfunc $n $b: genmodel failed: $(head -1 "$TK/o")"; done
+        got=$(grep '^char \*TYPEV = ' "$TK/out.$n.cc")
+        nd=$(diff "$T/base.cc" "$TK/out.$n.cc" | grep -c '^[<>]')
+        if [ "$want" != "$base" ] && [ "$got" = "$want" ] && [ "$nd" = 2 ] && diff "$T/base.cc" "$TK/out.$n.cc" | grep -q '^> char \*TYPEV = '; then
+            printf "%s\n" "tfunc $n bytes: only the TYPEV line changed, to exactly the declared order: $(printf '%s' "$got" | cut -c1-60)..."; P "tfunc $n bytes"
+        else printf "%s\n" "tfunc $n bytes: FAILED ($nd diff lines): $got"; fi
+        B 30 python3 $K/typekw_check.py "$TK/$n.tsv" > "$TK/j.$n" 2>&1; rc=$?
+        if [ $rc = 1 ] && grep -q '^typekw_check: DIFFERENCE' "$TK/j.$n"; then printf "%s\n" "tfunc $n judge: rc 1: $(tr '\n' ' ' < "$TK/j.$n" | sed "s|$TK/||")"; P "tfunc $n judge"
+        else echo "tfunc $n judge: did NOT report a difference (rc $rc): $(cat "$TK/j.$n")"; fi
+        for b in ua san; do cmp -s "$TK/out.$n.cc" "$TK/out.$n.$b" && { echo "tfunc $n $b: output identical to cc"; P "tfunc $n $b"; } || echo "tfunc $n $b: DIFFERS from cc"; done
     done
 fi
 

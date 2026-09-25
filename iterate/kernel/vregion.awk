@@ -8,8 +8,8 @@
 #   gm  the line "/* genmodel: END of the vocab / BF / BH region ...", which
 #       must occur exactly once.
 # Removed: whole-line /* ... */ comment blocks (genmodel's comments name its
-# own inputs), and ONLY two exact lines: 'char *TYPEV = "...";' and
-# '#define NTYPEV <digits>' (TYPEV is not generated in this slice).
+# own inputs).  Nothing else: TYPEV / NTYPEV are generated (typekw slice) and
+# compared like every other vocab.
 # Checked after that: the region is complete and non-empty, and its symbols
 # (the name of every "char *X =" and "#define X" line) are EXACTLY the EXP
 # list (one per line): none missing, none extra, none twice.  Any failure
@@ -30,8 +30,6 @@ END_MODE == "gm" && $0 == GMEND { st = 2; ended = 1; next }
 END_MODE == "py" && index($0, "char *ENC_") == 1 { print "vregion: char *ENC_ before the first ENC comment" > "/dev/stderr"; bad = 1; exit 1 }
 incmt { if (index($0, "*/")) incmt = 0; next }
 /^\/\*/ { if (!index($0, "*/")) incmt = 1; next }
-/^char \*TYPEV = "[^"]*";$/ { ntyv++; next }
-/^#define NTYPEV [0-9]+$/ { nntyv++; next }
 {
     out[++n] = $0
     sym = ""
@@ -49,12 +47,11 @@ END {
     if (END_MODE == "gm" && ngmend != 1) e = e " [gm end anchor hit " ngmend + 0 " times]"
     if (END_MODE == "py" && !seenenc) e = e " [no char *ENC_ after the end anchor]"
     if (incmt) e = e " [unclosed comment]"
-    if (ntyv > 1 || nntyv > 1 || ntyv != nntyv) e = e " [TYPEV lines " ntyv + 0 "/" nntyv + 0 "]"
     if (nonblank == 0) e = e " [region empty]"
     if (dup != "") e = e " [symbols twice:" dup "]"
     for (s in want) if (!(s in got)) e = e " [missing " s "]"
     for (s in got) if (!(s in want)) e = e " [unexpected " s "]"
     if (e != "") { print "vregion(" END_MODE "): " FILENAME ":" e > "/dev/stderr"; exit 1 }
     for (i = 1; i <= n; i++) print out[i]
-    print "vregion(" END_MODE "): " n " lines, " ngot " symbols = EXP (" nwant "), TYPEV lines removed " ntyv + 0 "+" nntyv + 0 > "/dev/stderr"
+    print "vregion(" END_MODE "): " n " lines, " ngot " symbols = EXP (" nwant ")" > "/dev/stderr"
 }

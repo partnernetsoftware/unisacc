@@ -1,7 +1,7 @@
 /* genmodel.c -- the model region of kernel/unisa_model.inc, from declared
  * inputs only, in the C subset unisacc compiles. [J10 step 3, first slice]
  *
- *   genmodel -o OUT ORDER.tsv VOCAB.tsv BUILT.uns2 TSV...   (one TSV per stage)
+ *   genmodel -o OUT ORDER.tsv VOCAB.tsv TYPEKW.tsv BUILT.uns2 TSV...   (one TSV per stage)
  *
  * Reads ONLY the files named on its command line: the stage order
  * (iterate/kernel/order.tsv), the constructed weights (weights/built.uns2)
@@ -24,9 +24,10 @@
  * Exit codes: 1 bad input (reader, UNS2 decode, mismatch), 2 usage, 4
  * capacity, 7 the output could not be opened, written or closed.
  *   - [second slice] the vocabularies and BF_/BH_/HD_, from the TSVs through
- *     the mapping and order of VOCAB.tsv (iterate/kernel/vocab.tsv); TYPEV is
- *     a delimited placeholder, not generated.
- * Not written here: the provenance header, TYPEV's lines, ENC_.
+ *     the mapping and order of VOCAB.tsv (iterate/kernel/vocab.tsv);
+ *   - [third slice] TYPEV / NTYPEV, from TYPEKW.tsv (iterate/kernel/typekw.tsv),
+ *     at the typekw row of VOCAB.tsv, in the file's declared order.
+ * Not written here: the provenance header, ENC_.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -505,7 +506,7 @@ void blob_stage(int u, char *nm) {
 
 /* ------------------------------------------------ vocab.tsv (slice 2) -- */
 /* vocab.tsv is the mapping AND the order: 'vocab SYM stage field|head name',
-   'typekw SYM' (a placeholder: not generated), 'bfbh stage'.  Rows are
+   'typekw SYM' (its values from TYPEKW.tsv), 'bfbh stage'.  Rows are
    written in the file's order.  NVOCROW, NBFBH and the ABI list below are a
    CONSUMER ABI check -- the symbols kernel/unisa_core.c and src/ link against
    must all be declared -- not a second mapping: which stage, list and
@@ -533,6 +534,13 @@ int rhead[MAXROW];      /* vocab: 0 field, 1 head */
 int ridx[MAXROW];       /* vocab: the field or head index in that TSV */
 int rln[MAXROW];
 char *vpath;
+void okval(char *s, int octal0, char *sym, int j);
+/* TYPEKW.tsv: 'kw<TAB>value' rows, the declared order; '#' lines are comments */
+#define MAXTKW 256
+char kbuf[TSVSZ + 1];
+char *tkw[MAXTKW];
+int ntkw;
+int tkwrow;             /* the typekw row of vocab.tsv */
 char *gsym[MAXSYM];
 int ngsym;
 
@@ -547,7 +555,7 @@ void load_vocab(char *path) {
     char *s;
     vpath = path; gpath = path;
     n = slurp(path, vbuf, TSVSZ);
-    lp = vbuf; lend = vbuf + n; lno = 0; nrow = 0; nv = 0; nb = 0;
+    lp = vbuf; lend = vbuf + n; lno = 0; nrow = 0; nv = 0; nb = 0; tkwrow = -1;
     while ((s = nextline()) != 0) {
         if (s[0] == 0 || s[0] == '#') continue;
         split(s);
@@ -570,6 +578,8 @@ void load_vocab(char *path) {
             nv = nv + 1;
         } else if (streq(parts[0], "typekw")) {
             if (np != 2) vdie(lno, "want: typekw SYM", "");
+            if (tkwrow >= 0) vdie(lno, "typekw row given twice", "");
+            tkwrow = nrow;
             rkind[nrow] = 1; rsym[nrow] = pstr(parts[1]); rtsv[nrow] = -1;
             nv = nv + 1;
         } else if (streq(parts[0], "bfbh")) {
@@ -583,6 +593,7 @@ void load_vocab(char *path) {
         } else vdie(lno, "unknown row kind ", parts[0]);
         nrow = nrow + 1;
     }
+    if (tkwrow < 0) { printf("genmodel: %s: no typekw row\n", path); exit(1); }
     for (i = 0; i < nrow; i = i + 1)
         for (k = 0; k < i; k = k + 1)
             if (rkind[i] != 2 && rkind[k] != 2 && streq(rsym[i], rsym[k])) vdie(rln[i], "duplicate symbol ", rsym[i]);
@@ -590,6 +601,31 @@ void load_vocab(char *path) {
     if (nv > NVOCROW) { printf("genmodel: %s: extra row: %d vocab/typekw rows, want %d\n", path, nv, NVOCROW); exit(1); }
     if (nb < NBFBH) { printf("genmodel: %s: missing row: %d bfbh rows, want %d\n", path, nb, NBFBH); exit(1); }
     if (nb > NBFBH) { printf("genmodel: %s: extra row: %d bfbh rows, want %d\n", path, nb, NBFBH); exit(1); }
+}
+
+/* TYPEKW.tsv: the declared type keywords, in order.  Count and values come
+   only from this file; every value is checked by okval (the vocab rules)
+   and no value may repeat. */
+void load_typekw(char *path) {
+    int n, i, k;
+    char *s;
+    gpath = path;
+    n = slurp(path, kbuf, TSVSZ);
+    lp = kbuf; lend = kbuf + n; lno = 0; ntkw = 0;
+    while ((s = nextline()) != 0) {
+        if (s[0] == '#') continue;
+        if (s[0] == 0) dieln(lno, "empty line (want: kw<TAB>value)");
+        split(s);
+        if (np != 2 || !streq(parts[0], "kw")) dieln(lno, "want: kw<TAB>value");
+        if (ntkw >= MAXTKW) cap("typekw values", ntkw + 1, MAXTKW);
+        tkw[ntkw] = pstr(parts[1]);
+        for (k = 0; k < ntkw; k = k + 1)
+            if (streq(tkw[k], tkw[ntkw])) { printf("genmodel: %s: line %d: duplicate value %s\n", path, lno, tkw[ntkw]); exit(1); }
+        ntkw = ntkw + 1;
+    }
+    if (ntkw == 0) die("no kw rows");
+    vpath = path;
+    for (i = 0; i < ntkw; i = i + 1) okval(tkw[i], 1, "TYPEKW", i);
 }
 
 /* ---- names: every symbol written is built here and checked before output */
@@ -708,7 +744,7 @@ void vocab_names(void) {
         }
     }
     /* consumer ABI: every symbol the kernel links against is declared, and
-       the TYPEKW one is the typekw row (a placeholder, never generated) */
+       the TYPEKW one is the typekw row (its values from TYPEKW.tsv) */
     for (i = 0; i < NVOCROW; i = i + 1) {
         a = nth(ABI, i); f = -1;
         for (r = 0; r < nrow; r = r + 1) if (rkind[r] != 2 && streq(rsym[r], a)) f = r;
@@ -738,8 +774,10 @@ void emit_vocab(void) {
     for (r = 0; r < nrow; r = r + 1) {
         t = rtsv[r];
         if (rkind[r] == 1) {
-            os_("/* "); os_(rsym[r]); os_(": BEGIN placeholder -- not generated (unisa/front/lex.py TYPEKW has no gold TSV) */\n");
-            os_("/* "); os_(rsym[r]); os_(": END placeholder */\n\n");
+            os_("/* "); os_(rsym[r]); os_(": the typekw declaration (TYPEKW.tsv), in its order */\n");
+            os_("char *"); os_(rsym[r]); os_(" = \"");
+            for (i = 0; i < ntkw; i = i + 1) { os_(tkw[i]); os_("\\0"); }
+            os_("\";\n#define "); os_(rnsym[r]); oc(' '); od(ntkw); os_("\n\n");
         } else if (rkind[r] == 0) {
             if (rhead[r]) { b = (t * MAXH + ridx[r]) * MAXC; n = tncl[t][ridx[r]]; }
             else { b = (t * MAXF + ridx[r]) * MAXV; n = tnv[t][ridx[r]]; }
@@ -781,14 +819,14 @@ int main(int argc, char **argv) {
     FILE *fo;
     int n;
     int dl;
-    if (argc < 6 || !streq(argv[1], "-o")) {
-        printf("usage: genmodel -o OUT ORDER.tsv VOCAB.tsv BUILT.uns2 TSV...\n");
+    if (argc < 7 || !streq(argv[1], "-o")) {
+        printf("usage: genmodel -o OUT ORDER.tsv VOCAB.tsv TYPEKW.tsv BUILT.uns2 TSV...\n");
         exit(2);
     }
     opath = argv[2];
     load_order(argv[3]);
-    load_uns2(argv[5]);
-    for (ai = 6; ai < argc; ai = ai + 1) load_tsv(argv[ai]);
+    load_uns2(argv[6]);
+    for (ai = 7; ai < argc; ai = ai + 1) load_tsv(argv[ai]);
     if (ntsv != NST) { printf("genmodel: %d gold tables given, want exactly %d (one per stage)\n", ntsv, NST); exit(1); }
     /* match by name: every order.tsv stage is exactly one UNS2 section and
        exactly one TSV; the counts are all NST and each list has no repeat,
@@ -814,6 +852,7 @@ int main(int argc, char **argv) {
     /* second slice: the vocab mapping, every written name and string checked */
     load_vocab(argv[4]);
     vocab_names();
+    load_typekw(argv[5]);
     /* MODEL and DENSE in order.tsv order */
     mlen = 0; dl = 0;
     for (s = 0; s < NST; s = s + 1) {
