@@ -107,22 +107,26 @@ await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
 console.log("OK sim.ujs instantiate", fs.statSync(process.argv[1]).size, "B");
 ' "$OUT/sim.wasm"
 
-echo "-- ship builders emit via compiler.wasm (no python3)"
+echo "-- ship builders emit via compiler_core.wasm (no python3)"
 for f in ujs/uxe/ship/build-asteroid-pages.mjs ujs/uxe/ship/build-drone-pages.mjs; do
   if grep -E 'spawnSync\([\"'\'']python3|emit_wasm' "$f" >/dev/null; then
     echo "FAIL: $f still emits via python3/emit_wasm"
     exit 1
   fi
+  if ! grep -q 'UJS_COMPILER.*core\|UJS_COMPILER: "core"' "$f"; then
+    echo "FAIL: $f not using UJS_COMPILER=core"
+    exit 1
+  fi
 done
-# compile.mjs under PATH trap must succeed for both game cores
+# compile.mjs under PATH trap must succeed for both game cores via compiler.ujs
 TRAPBIN2="$OUT/bin"
-got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_REQUIRE_COMPILER_WASM=1 \
+got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_COMPILER=core \
   node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/ship_sim.wasm")
-echo "$got" | grep -q '"bridge":"compiler.wasm"' || { echo "FAIL ship sim emit: $got"; exit 1; }
-got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_REQUIRE_COMPILER_WASM=1 \
+echo "$got" | grep -q '"bridge":"compiler_core.wasm"' || { echo "FAIL ship sim emit: $got"; exit 1; }
+got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_COMPILER=core \
   node ujs/compile.mjs ujs/web/game/drone.ujs -o "$OUT/ship_drone.wasm")
-echo "$got" | grep -q '"bridge":"compiler.wasm"' || { echo "FAIL ship drone emit: $got"; exit 1; }
-echo "OK ship emit compiler.wasm (PATH without python3)"
+echo "$got" | grep -q '"bridge":"compiler_core.wasm"' || { echo "FAIL ship drone emit: $got"; exit 1; }
+echo "OK ship emit compiler_core.wasm (PATH without python3)"
 
 echo "-- ship builders: no A-core / web-build"
 for f in ujs/uxe/ship/build-asteroid-pages.mjs ujs/uxe/ship/build-drone-pages.mjs \
@@ -424,5 +428,5 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v11 + P0 ship no A-core · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v12 core-meta + ship via compiler.ujs · stage2≡stage1)"
 

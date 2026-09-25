@@ -7,9 +7,9 @@ UJS="$ROOT/ujs"
 CORE="$UJS/core"
 DOCS="$ROOT/docs"
 
-# Path B ship: compile.mjs + compiler.wasm only — no web-build / ujs_full
-if [[ ! -f "$CORE/compiler.wasm" ]]; then
-  echo "need ujs/core/compiler.wasm (./ujs/scripts/build-compiler-wasm.sh)" >&2
+# Path B ship: compiler_core.wasm (compiler.ujs) — no web-build / ujs_full
+if [[ ! -f "$CORE/compiler_core.wasm" || ! -f "$CORE/compiler_core.meta.json" ]]; then
+  echo "need ujs/core/compiler_core.wasm (node ujs/compile.mjs ujs/core/compiler.ujs -o ujs/core/compiler_core.wasm)" >&2
   exit 1
 fi
 

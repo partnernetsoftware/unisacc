@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build Asteroid Pages ship-js (no C game wasm / no eng_* bridge).
- * Path B default: compile.mjs (compiler.wasm) → sim.wasm + meta; no python3 emit.
+ * Path B: compile.mjs UJS_COMPILER=core (compiler.ujs) → sim.wasm + meta; no python3.
  */
 import fs from "fs";
 import path from "path";
@@ -21,14 +21,14 @@ const simUjs = path.join(ujs, "web/game/sim.ujs");
 const simWasm = path.join(here, "sim.wasm");
 const simMeta = path.join(here, "sim.meta.json");
 
-// Path B: compiler.wasm → sim.wasm + meta (globals order = host_set_global indices)
+// Path B: compiler.ujs core → sim.wasm + meta (globals order = host_set_global indices)
 const u2w = spawnSync(
   "node",
   [path.join(ujs, "compile.mjs"), simUjs, "-o", simWasm],
   {
     stdio: ["ignore", "pipe", "inherit"],
     cwd: root,
-    env: { ...process.env, UJS_REQUIRE_COMPILER_WASM: "1" },
+    env: { ...process.env, UJS_COMPILER: "core" },
     encoding: "utf8",
   },
 );
@@ -43,8 +43,8 @@ try {
   console.error("compile.mjs did not print JSON:", u2w.stdout);
   process.exit(1);
 }
-if (emitInfo.bridge !== "compiler.wasm") {
-  console.error("ship emit must use compiler.wasm, got", emitInfo.bridge);
+if (emitInfo.bridge !== "compiler_core.wasm") {
+  console.error("ship emit must use compiler_core.wasm, got", emitInfo.bridge);
   process.exit(1);
 }
 // compile.mjs writes <stem>.meta.json next to -o; normalize name for host-entry import

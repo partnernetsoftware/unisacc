@@ -94,7 +94,7 @@ M1b drone 切 B             ✓（对称产物）
         ↓
 M2 编译器 wasm 化          **✓**（compile+host+sim+ship emit 无 python3）
         ↓
-M3 UJS 自举                **v11✓** sim+drone body≡stage0
+M3 UJS 自举                **v12✓** sim+drone body≡ · core→meta · ship via core
         ↓
 P0 ship 无 A 核            **✓** 停拷 ujs_full；web-build 非 ship 必经
         ↓
@@ -115,9 +115,17 @@ P1 构造迁 unisacc          可选
 | `compiler.wasm` | len u32 · f64 lex ratio · MEM 128 |
 | 门禁 | **sim+drone body≡stage0** · stage2≡stage1 |
 
-**下一刀**：P1 构造迁 unisacc（可选）；或加厚 `compiler.ujs` 覆盖面。
+**下一刀**：ship 默认 `UJS_COMPILER=core`；加厚 `compiler.ujs` 覆盖面；或 P1 构造迁 unisacc。
 
-**P0（✓ ship）**：Pages/ship 只依赖 `compiler.wasm` + `sim.wasm`；`web-build`/`ujs_full` 仅 A-demo / `FORCE_WEB_BUILD=1` 重建，**非出货必经**。
+**P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm`（=`compiler.ujs` stage1）+ `sim.wasm`；`web-build`/`ujs_full` 非出货必经。
+
+#### M3 v12（✓ core→meta · ship via compiler.ujs）
+
+| 件 | 说明 |
+|---|---|
+| `compiler.ujs` | v12：`OUT` 尾部名表 + `MG`；供 host 写 `.meta.json` |
+| `compiler_core.wasm` | stage1 入树；`UJS_COMPILER=core` |
+| ship | asteroid+drone emit bridge=`compiler_core.wasm` |
 
 #### M2（✓）
 

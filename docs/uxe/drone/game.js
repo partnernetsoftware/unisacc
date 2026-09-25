@@ -1417,7 +1417,7 @@ async function runDroneCore(host, opts) {
 }
 
 // uxe/ship/drone/sim.meta.json
-var sim_meta_default = { globals: ["txs", "alive", "px", "py", "pz", "score", "ammo", "tys", "tzs", "thp", "iy", "ix", "fy", "speed_mul", "fx", "rx", "dt", "ry", "fz", "rz", "thit", "suicide"], locals: ["n", "i", "speed", "thrust", "strafe", "climb", "nk"] };
+var sim_meta_default = { globals: ["txs", "alive", "px", "py", "pz", "score", "ammo", "tys", "tzs", "thp", "iy", "ix", "fy", "speed_mul", "fx", "rx", "dt", "ry", "fz", "rz", "thit", "suicide"], locals: [] };
 
 // uxe/ship/drone-host-entry.js
 function helpLine(controls, touch) {

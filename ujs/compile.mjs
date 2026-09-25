@@ -1,12 +1,10 @@
 #!/usr/bin/env node
 /**
- * M2 host entry: UJS source → direct \\0asm (+ meta).
+ * M2/M3 host entry: UJS source → direct \\0asm (+ meta).
  *
- * Product path: WebAssembly.instantiate(compiler.wasm) when present.
+ * Default: WebAssembly.instantiate(compiler.wasm) when present.
+ * UJS_COMPILER=core: stage1 compiler_core.wasm (compiler.ujs) + splice.
  * Fallback: python3 -m ujs ujs2wasm --mode direct (until artifact exists).
- *
- * ABI (ujs/prd.md §M2):
- *   compile(src) → { wasm, meta: { locals, globals, slots } }
  *
  * Usage:
  *   node ujs/compile.mjs path/to/prog.ujs [-o out.wasm]
@@ -15,12 +13,18 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { compileWithCore } from "./scripts/run-compiler-core.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, "..");
 
 /** @typedef {{ locals: string[], globals: string[], slots: string[] }} CompileMeta */
 /** @typedef {{ wasm: Uint8Array, meta: CompileMeta }} CompileResult */
+
+function wantCore() {
+  const v = (process.env.UJS_COMPILER || "").toLowerCase();
+  return v === "core" || v === "compiler.ujs" || v === "compiler_core";
+}
 
 function findCompilerWasm() {
   for (const rel of [
@@ -30,6 +34,18 @@ function findCompilerWasm() {
   ]) {
     const p = path.join(REPO, rel);
     if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function findCompilerCore() {
+  for (const rel of [
+    "ujs/core/compiler_core.wasm",
+    "ujs/compiler_core.wasm",
+  ]) {
+    const p = path.join(REPO, rel);
+    if (fs.existsSync(p) && fs.existsSync(p.replace(/\.wasm$/i, "") + ".meta.json"))
+      return p;
   }
   return null;
 }
@@ -89,6 +105,20 @@ async function compileViaWasm(text) {
   return { wasm, meta };
 }
 
+async function compileViaCore(text) {
+  const corePath = findCompilerCore();
+  if (!corePath) return null;
+  const { wasm, meta } = await compileWithCore({ corePath, srcText: text });
+  return {
+    wasm,
+    meta: {
+      locals: meta.locals || [],
+      globals: meta.globals || [],
+      slots: [],
+    },
+  };
+}
+
 function compileViaPython(text) {
   const td = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "ujs-compile-"));
   const inPath = path.join(td, "in.ujs");
@@ -113,18 +143,26 @@ function compileViaPython(text) {
 }
 
 /**
- * Product contract. Prefer compiler.wasm; else python3 bridge.
+ * Product contract.
  * @param {Uint8Array|string} src
  * @returns {Promise<CompileResult>}
  */
 export async function compile(src) {
   const text = typeof src === "string" ? src : Buffer.from(src).toString("utf8");
+  if (wantCore()) {
+    const via = await compileViaCore(text);
+    if (via) return via;
+    throw new Error("UJS_COMPILER=core but compiler_core.wasm missing");
+  }
   const via = await compileViaWasm(text);
   if (via) return via;
   return compileViaPython(text);
 }
 
 export async function compileBackend() {
+  if (wantCore()) {
+    return findCompilerCore() ? "compiler_core.wasm" : "missing-core";
+  }
   const p = findCompilerWasm();
   return p ? "compiler.wasm" : "python3";
 }
@@ -151,8 +189,12 @@ async function main(argv) {
   if (files.length !== 1) usage();
   const srcPath = path.resolve(files[0]);
   const backend = await compileBackend();
-  if (process.env.UJS_REQUIRE_COMPILER_WASM === "1" && backend !== "compiler.wasm") {
+  if (process.env.UJS_REQUIRE_COMPILER_WASM === "1" && !wantCore()
+      && backend !== "compiler.wasm") {
     throw new Error("UJS_REQUIRE_COMPILER_WASM=1 but compiler.wasm missing");
+  }
+  if (wantCore() && backend !== "compiler_core.wasm") {
+    throw new Error("UJS_COMPILER=core but compiler_core.wasm missing");
   }
   const { wasm, meta } = await compile(fs.readFileSync(srcPath));
   const wasmPath = out || srcPath.replace(/\.ujs$/i, "") + ".wasm";

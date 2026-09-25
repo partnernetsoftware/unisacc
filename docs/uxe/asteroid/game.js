@@ -631,7 +631,7 @@ async function runAsteroidCore(host, opts) {
 }
 
 // uxe/ship/sim.meta.json
-var sim_meta_default = { globals: ["xs", "alive", "ys", "zs", "vxs", "vys", "vzs", "rs", "px", "py", "pz", "score", "ix", "dt", "iy"], locals: ["n", "i", "hit", "sx", "sy", "dx", "dy", "dz", "rr"] };
+var sim_meta_default = { globals: ["xs", "alive", "ys", "zs", "vxs", "vys", "vzs", "rs", "px", "py", "pz", "score", "ix", "dt", "iy"], locals: [] };
 
 // uxe/ship/asteroid-host-entry.js
 async function startShip(cfg) {

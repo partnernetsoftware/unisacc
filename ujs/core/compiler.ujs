@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v11: v10 + id drain>8 + GKEYS64 + f64 mul overflow-safe; sim+drone≡stage0.
+// v12: v11 + OUT-tail name table + MG for core→meta (ship via compiler.ujs).
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -13,6 +13,7 @@ let i = 0;
 let j = 0;
 let tnum = 0;
 let outn = 0;
+let bodyn = 0;
 let opsn = 0;
 let slot = 0;
 let found = 0;
@@ -55,6 +56,12 @@ let KEYS = list(96);
 let LTY = list(96);
 let GKEYS = list(64);
 let GTY = list(64);
+let GFLAT = list(2048);
+let GFOFF = list(64);
+let GFLEN = list(64);
+let gflatn = 0;
+let idch = list(32);
+let idlen = 0;
 let ST = list(128);
 let SOP = list(128);
 let SPR = list(128);
@@ -301,7 +308,7 @@ while (finished == 0) {
       slot = 0;
       if (want == 1) {
         // parse new ident → slot
-        k = 0; mul = 1; i = 0; done = 0;
+        k = 0; mul = 1; i = 0; idlen = 0; done = 0;
         while (done == 0) {
           if (pos >= n) { done = 1; }
           else {
@@ -369,7 +376,7 @@ while (finished == 0) {
       if (want == 3) {
         if (ok == 1) {
           if (finished == 0) {
-            k = 0; mul = 1; i = 0; done = 0;
+            k = 0; mul = 1; i = 0; idlen = 0; done = 0;
             while (done == 0) {
               if (pos >= n) { done = 1; }
               else {
@@ -381,7 +388,7 @@ while (finished == 0) {
                   if (ch == 95) { cd = 1; }
                   if (i > 0) { if (ch >= 48) { if (ch <= 57) { cd = 1; } } }
                   if (cd == 0) { done = 1; }
-                  else { pos = pos + 1; }
+                  else { idch[idlen] = ch; idlen = idlen + 1; pos = pos + 1; }
                 } else {
                   ch = SRC[pos];
                   cd = 0;
@@ -393,6 +400,7 @@ while (finished == 0) {
                   else {
                     k = k + ch * mul;
                     mul = mul * 256;
+                    idch[idlen] = ch; idlen = idlen + 1;
                     pos = pos + 1;
                     i = i + 1;
                   }
@@ -414,7 +422,15 @@ while (finished == 0) {
                   j = j + 1;
                 }
                 if (found == 0) {
-                  gs = gn; GKEYS[gn] = k; GTY[gn] = 2; gn = gn + 1;
+                  gs = gn; GKEYS[gn] = k; GTY[gn] = 2;
+                  GFOFF[gn] = gflatn; GFLEN[gn] = idlen;
+                  j = 0;
+                  while (j < idlen) {
+                    GFLAT[gflatn] = idch[j];
+                    gflatn = gflatn + 1;
+                    j = j + 1;
+                  }
+                  gn = gn + 1;
                 }
                 dst = gs;
                 done = 0;
@@ -818,7 +834,7 @@ while (finished == 0) {
                           ST[bsp - 1] = 2;
                         }
                     } else {
-                      k = 0; mul = 1; i = 0; done = 0;
+                      k = 0; mul = 1; i = 0; idlen = 0; done = 0;
                       while (done == 0) {
                         if (pos >= n) { done = 1; }
                         else {
@@ -830,7 +846,7 @@ while (finished == 0) {
                             if (ch == 95) { cd = 1; }
                             if (i > 0) { if (ch >= 48) { if (ch <= 57) { cd = 1; } } }
                             if (cd == 0) { done = 1; }
-                            else { pos = pos + 1; }
+                            else { idch[idlen] = ch; idlen = idlen + 1; pos = pos + 1; }
                           } else {
                             ch = SRC[pos];
                             cd = 0;
@@ -842,6 +858,7 @@ while (finished == 0) {
                             else {
                               k = k + ch * mul;
                               mul = mul * 256;
+                              idch[idlen] = ch; idlen = idlen + 1;
                               pos = pos + 1;
                               i = i + 1;
                             }
@@ -871,7 +888,15 @@ while (finished == 0) {
                             j = j + 1;
                           }
                           if (found == 0) {
-                            gs = gn; GKEYS[gn] = k; GTY[gn] = 2; gn = gn + 1;
+                            gs = gn; GKEYS[gn] = k; GTY[gn] = 2;
+                  GFOFF[gn] = gflatn; GFLEN[gn] = idlen;
+                  j = 0;
+                  while (j < idlen) {
+                    GFLAT[gflatn] = idch[j];
+                    gflatn = gflatn + 1;
+                    j = j + 1;
+                  }
+                  gn = gn + 1;
                           }
                           // promote to list: xs[i] or len(xs)
                           done = 0;
@@ -1821,5 +1846,20 @@ if (ok == 1) {
   outn = 8;
 }
 
-OUTN = outn;
+// v12 meta: name table after body; OUTN = body length; MG = global count
+bodyn = outn;
+i = 0;
+while (i < gn) {
+  OUT[outn] = GFLEN[i];
+  outn = outn + 1;
+  j = 0;
+  while (j < GFLEN[i]) {
+    OUT[outn] = GFLAT[GFOFF[i] + j];
+    outn = outn + 1;
+    j = j + 1;
+  }
+  i = i + 1;
+}
+OUTN = bodyn;
+MG = gn;
 return OUT;
