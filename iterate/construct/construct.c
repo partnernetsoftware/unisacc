@@ -40,7 +40,7 @@
 #define MAXG 124  /* value groups per field: a field's group set is GW words (ws_) */
 #define GW 2       /* ceil(MAXG / 62) */
 #define MAXR 96   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
-#define MAXU 128
+#define MAXU 200
 #define MAXCU MAXR  /* candidate row capacity: a candidate has <= nr <= MAXR units (README) */
 #define MAXCAND 288  /* candidate slots, a global count over all heads and T4 rounds; abi needs
                         270 under its construction order (README) -- not a general bound */
@@ -1386,6 +1386,11 @@ int samerules(int h) {
 
 long pall[MAXU][MAXF * GW];
 long ptmp[MAXF * GW];
+/* share's pool limit.  It is MAXU; only the TEST ENTRY -T pool (check.sh)
+   lowers it to 1.  The pool is the chosen selection's distinct units, which
+   total_units already bounded by MAXU, so no table reaches this check with
+   poolcap = MAXU (README): the test entry is how the check is exercised. */
+int poolcap = MAXU;
 
 /* T4 (build_net, `share and len(heads) > 1`): up to three rounds; each
    rebuilds every head's decision list with the pool of cubes the chosen
@@ -1402,7 +1407,10 @@ void share(void) {
                 dup = 0;
                 for (v = 0; v < nall; v = v + 1) if (samecube(pall[v], ccube[ci * MAXCU + u])) { dup = 1; break; }
                 if (!dup) {
-                    if (nall >= MAXU) die("more units than this constructor holds");
+                    if (nall >= poolcap) {   /* share's pool: exit 4 */
+                        printf("construct: %s: capacity: share pool has more than %d units%s\n", gpath, poolcap, poolcap < MAXU ? " (test entry -T pool)" : "");
+                        exit(4);
+                    }
                     cpcube(pall[nall], ccube[ci * MAXCU + u]);
                     nall = nall + 1;
                 }
@@ -1796,10 +1804,11 @@ int main(int argc, char **argv) {
             ai = ai + 1;
             if (streq(argv[ai], "bias")) tbreak = 1;
             else if (streq(argv[ai], "act")) tbreak = 2;
+            else if (streq(argv[ai], "pool")) poolcap = 1;   /* test entry: share-pool check */
             else if (streq(argv[ai], "summax")) sumtest(0);
             else if (streq(argv[ai], "sumover")) sumtest(1);
             else if (streq(argv[ai], "sumrun")) sumtest(2);
-            else { printf("construct: -T bias | act | summax | sumover | sumrun\n"); return 2; }
+            else { printf("construct: -T bias | act | pool | summax | sumover | sumrun\n"); return 2; }
         }
         else if (streq(argv[ai], "-u") && ai + 1 < argc && !upath) { ai = ai + 1; upath = argv[ai]; }
         else if (upath) {

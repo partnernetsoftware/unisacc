@@ -969,3 +969,40 @@ incl. the negatives: 408 files) is byte-identical after it (0 differ), and
 unisacc and UBSan agree with cc on every file.  `__common` 34,974,776 ->
 **27,438,136 B** (size -m, cc -O2).  Batches 6.6 / 9.5 / 29.7 / 15.2 s, 36
 receipts.
+
+## combo, step 3: MAXU 128 -> 200 (2026-09-25)
+
+`MAXU 200` (total_units' `ucube`, share's `pall`, T4's `pool`, `hfm`, the
+net's `b1`/`W2`/H).  Two capacity checks, each exit 4:
+
+- pick's total_units: `capacity: a selection has more than 200 distinct
+  units` (unchanged code, new limit).
+- share's pool: was `die` (exit 1), now `capacity: share pool has more than
+  N units`, against `poolcap`, which is MAXU.
+
+Gates (check.sh globals `capu`, `capun`, `capp`).  Fields a, b, c of 9
+values (729 keys); head y0 labelled class[(7a+b) % 16], y1 the same on
+(a, c), y2 on (b, c); each head needs 81 rules whose cubes leave its third
+field free, so heads share no cube:
+
+- **capu** (positive), 2 heads: 162 distinct units, net H 162 (exit 4
+  under the old MAXU 128, measured).  `-d` 29,622 B and UNS2 1,039 B
+  identical to Python on cc, unisacc, UBSan; round trip on cc, unisacc.
+  Python reference 14.0 s (netdump) + 7.0 s (uns2slice).
+- **capun** (negative), 3 heads: the all-dlist selection has 243 distinct
+  units; total_units exits 4 at unit 201 (cc, unisacc, UBSan).
+- **capp** -- a TEST ENTRY, not a real-table counterexample.  share's
+  pool is the chosen selection's distinct units, and every selection
+  selectall can choose went through total_units, which already exits 4
+  above MAXU; so with poolcap = MAXU no table reaches the pool check.
+  `-T pool` (check.sh only) sets poolcap = 1; on tyinfo it must exit 4
+  with `share pool has more than 1 units (test entry -T pool)` (cc,
+  unisacc, UBSan).
+- the net's `H >= MAXU` stays a `die`: H <= total_units of the chosen
+  selection, so it is unreachable for the same reason (uncovered).
+
+Verification: the step-2 baseline (408 files, 17 stages + 20 synthetic
+tables, cc/unisacc/UBSan) is byte-identical (0 differ).  `__common`
+27,438,136 -> **28,359,096 B**.  Batches 41.2 (global checks now carry
+capu's 21 s Python reference) / 10.1 / 30.2 / 15.1 s, 39 receipts (17
+stages + 22 globals).

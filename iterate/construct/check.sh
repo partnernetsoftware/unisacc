@@ -32,7 +32,7 @@ irsel irsel t i
 isel isel t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf"
+GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf capu capun capp"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -137,6 +137,7 @@ need() {    # need stage <s> | need global <g>: the required pass marks
     sum) echo "g sum sites"; for b in cc ua san; do for t in summax sumover sumrun run7; do echo "g sum $t $b"; done; done ;;
     reader) for n in missing duplicate badlabel extracol badkey; do for b in cc ua; do echo "g reader $n $b"; done; done ;;
     capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
+    capu) for b in cc ua san; do echo "g capu pos $b"; done; echo "g capu round cc"; echo "g capu round ua" ;;
     capr|capr81) for b in cc ua san; do echo "g $g pos $b"; done; echo "g $g round cc"; echo "g $g round ua" ;;
     caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
     capg) for b in cc ua san; do echo "g capg pos $b"; done; echo "g capg round cc"; echo "g capg round ua" ;;
@@ -537,6 +538,54 @@ done
 if [ $cft = 0 ] && cmp -s "$T/capcf.cc.t" "$T/capcf.ua.t" && grep -q "^trace head y: 19 candidates, chose 1 (factored), 17 units$" "$T/capcf.cc.t" && grep -q "kept 18$" "$T/capcf.cc.t"; then
     sed "s/^/capcf /" "$T/capcf.cc.t"; P "g capcf trace"
 else echo "capcf trace: not the factored choice, or differs between builds"; fail=1; fi
+# unit capacity (MAXU 200).  Fields a, b, c of 9 values (729 keys); head
+# y0 is labelled class[(7a+b) % 16], y1 the same on (a, c), y2 on (b, c):
+# each needs 81 decision-list rules whose cubes leave its third field free,
+# so no cube is shared between heads.
+# POSITIVE capu, 2 heads: 162 distinct units in a selection (over the old
+# MAXU 128; exit 4 there, measured), net H 162.  -d identical to Python,
+# UNS2 identical, deployed round trip.
+# NEGATIVE capun, 3 heads: the first selection (all dlist) has 243 distinct
+# units; pick's total_units must exit exactly 4 at unit 201.
+# share-pool check: the pool is the chosen selection's distinct units, which
+# total_units has already bounded by MAXU, so NO TABLE reaches it.  The
+# TEST ENTRY -T pool lowers its limit to 1 (it is not a real-table
+# counterexample): on tyinfo (multi-head, T4 runs) it must exit exactly 4
+# with the share-pool diagnostic.
+genu() {   # genu heads name
+awk -F'	' -v NH=$1 -v NM=$2 'NR==1{print "# stage " NM ": 9^3 keys, " NH " pair heads, synthetic"; next}
+/^#head/{for(f=0;f<3;f++){ printf "#field\t%s", substr("abc",f+1,1); for(i=0;i<9;i++) printf "\t%s%d", substr("vwx",f+1,1), i; printf "\n" }
+  for(h=0;h<NH;h++){ printf "#head\ty%d", h; for(i=3;i<=NF;i++) printf "\t%s", $i; printf "\n" }
+  for(i=4;i<=NF;i++) c[i-4]=$i
+  printf "a\tb\tc"; for(h=0;h<NH;h++) printf "\t=> y%d", h; printf "\n"
+  for(a=0;a<9;a++) for(b=0;b<9;b++) for(x=0;x<9;x++){ printf "v%d\tw%d\tx%d", a, b, x
+    for(h=0;h<NH;h++){ if(h==0){p=a;q=b} else if(h==1){p=a;q=x} else {p=b;q=x}; printf "\t%s", c[(7*p+q)%16] }
+    printf "\n" }
+  exit}' "$T/cap.src"
+}
+genu 2 capu > "$T/capu.tsv"
+genu 3 capun > "$T/capun.tsv"
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capu.tsv" > "$T/capu.py" || { fail=1; echo "capu python reference failed" > "$T/capu.py"; }
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capu.uns2" "$T/capu.tsv" > /dev/null || { fail=1; echo "capu python reference failed" > "$T/py.capu.uns2"; }
+for b in cc ua san; do
+    B 30 "$T/c_$b" -d "$T/capu.tsv" > "$T/capu.$b.out" 2>&1; rc=$?
+    B 30 "$T/c_$b" -u "$T/$b.capu.uns2" "$T/capu.tsv" > /dev/null 2>> "$T/capu.$b.out"; rc2=$?
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$(grep -c '^unit ' "$T/capu.$b.out")" = 162 ] && cmp -s "$T/capu.py" "$T/capu.$b.out" && cmp -s "$T/py.capu.uns2" "$T/$b.capu.uns2"; then
+        echo "unit positive $b: 162 units built, -d identical to Python ($(wc -c < "$T/capu.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.capu.uns2" | tr -d ' ') B)"; P "g capu pos $b"
+    else echo "unit positive $b FAILED (rc $rc/$rc2): $(head -1 "$T/capu.$b.out")"; fail=1; fi
+    if [ $b != san ]; then
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capu.uns2" "$T/capu.tsv" > "$T/r.$b.out" 2>&1 && P "g capu round $b" || fail=1
+        sed "s/^/unit positive $b deployed /" "$T/r.$b.out"
+    fi
+    B 30 "$T/c_$b" "$T/capun.tsv" > "$T/capun.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: a selection has more than 200 distinct units" "$T/capun.$b.out" && ! grep -q 'runtime error' "$T/capun.$b.out"; then
+        echo "unit negative $b rejected: $(head -1 "$T/capun.$b.out" | sed 's/.*: capacity/capacity/')"; P "g capun $b"
+    else echo "unit negative $b NOT A TOTAL-UNITS REJECTION (rc $rc): $(head -1 "$T/capun.$b.out")"; fail=1; fi
+    B 30 "$T/c_$b" -T pool weights/gold/tyinfo.tsv > "$T/capp.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: share pool has more than 1 units (test entry -T pool)" "$T/capp.$b.out" && ! grep -q 'runtime error' "$T/capp.$b.out"; then
+        echo "share-pool test entry $b rejected: $(head -1 "$T/capp.$b.out" | sed 's/.*: capacity/capacity/')"; P "g capp $b"
+    else echo "share-pool test entry $b NOT A POOL REJECTION (rc $rc): $(head -1 "$T/capp.$b.out")"; fail=1; fi
+done
 # the deployment invariants must be able to fire: the test entry breaks b1
 # of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
 # invariant 1 is the one reached.  Only exit 3 with that invariant's
