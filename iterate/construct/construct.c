@@ -735,8 +735,17 @@ long rankset(long s) {
 int gcode[MAXQ];
 long gcls[MAXQ];
 long bcls[MAXQ];
+/* The buckets of one part, flattened (was bmem[MAXQ][MAXQ]): every group
+   value t lands in exactly one bucket bof[t], so the members of all buckets
+   together are the ngv <= nq group values.  Bucket b (by identity, the
+   number it got when first seen) owns bpool[boff[b] .. boff[b] + bn[b] - 1],
+   filled in first-seen order; border only permutes bucket numbers, so the
+   offsets never move with the sort. */
 int bn[MAXQ];
-int bmem[MAXQ][MAXQ];
+int boff[MAXQ];
+int bfill[MAXQ];
+int bof[MAXQ];
+int bpool[MAXQ];
 int border[MAXQ];
 
 int codedigit(int code, int pi, int pp, int fi) {
@@ -783,9 +792,19 @@ int rep_factored(int ci, int pi, int merge, int k) {
             x = -1;
             for (b = 0; b < nbk; b = b + 1) if (bcls[b] == gcls[t]) { x = b; break; }
             if (x < 0) { x = nbk; bcls[x] = gcls[t]; bn[x] = 0; nbk = nbk + 1; }
-            bmem[x][bn[x]] = gcode[t];
+            bof[t] = x;
             bn[x] = bn[x] + 1;
         }
+        /* count (above), prefix sums, then fill in the original order */
+        s = 0;
+        for (b = 0; b < nbk; b = b + 1) { boff[b] = s; bfill[b] = 0; s = s + bn[b]; }
+        if (s != ngv || ngv > nq) die("internal: bucket members are not the group values");
+        for (t = 0; t < ngv; t = t + 1) {
+            x = bof[t];
+            bpool[boff[x] + bfill[x]] = gcode[t];
+            bfill[x] = bfill[x] + 1;
+        }
+        for (b = 0; b < nbk; b = b + 1) if (bfill[b] != bn[b]) die("internal: a bucket was not filled to its count");
         /* buckets sorted by the sorted names of their classes (stable) */
         for (b = 0; b < nbk; b = b + 1) border[b] = b;
         for (a = 1; a < nbk; a = a + 1) {
@@ -800,8 +819,8 @@ int rep_factored(int ci, int pi, int merge, int k) {
             /* gvs = sorted(bucket): codes are mixed-radix, first field most significant */
             for (s = 1; s < bn[b]; s = s + 1) {
                 t = s;
-                while (t > 0 && bmem[b][t - 1] > bmem[b][t]) {
-                    tmp = bmem[b][t]; bmem[b][t] = bmem[b][t - 1]; bmem[b][t - 1] = tmp;
+                while (t > 0 && bpool[boff[b] + t - 1] > bpool[boff[b] + t]) {
+                    tmp = bpool[boff[b] + t]; bpool[boff[b] + t] = bpool[boff[b] + t - 1]; bpool[boff[b] + t - 1] = tmp;
                     t = t - 1;
                 }
             }
@@ -810,7 +829,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
                 prod = 1;
                 for (fi = 0; fi < psz[pi][pp]; fi = fi + 1) {
                     pr = 0;
-                    for (s = 0; s < bn[b]; s = s + 1) pr = pr | bit(codedigit(bmem[b][s], pi, pp, fi));
+                    for (s = 0; s < bn[b]; s = s + 1) pr = pr | bit(codedigit(bpool[boff[b] + s], pi, pp, fi));
                     prod = prod * popc(pr);
                 }
                 prod = (prod == bn[b]);
@@ -822,7 +841,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
                 for (fi = 0; fi < psz[pi][pp]; fi = fi + 1) {
                     f = pf[pi * 4 + pp][fi];
                     sets[f] = 0;
-                    for (t = s; t < e; t = t + 1) sets[f] = sets[f] | bit(codedigit(bmem[b][t], pi, pp, fi));
+                    for (t = s; t < e; t = t + 1) sets[f] = sets[f] | bit(codedigit(bpool[boff[b] + t], pi, pp, fi));
                 }
                 u = newunit(ci, sets);
                 wmask = bcls[b];

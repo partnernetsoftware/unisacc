@@ -550,3 +550,20 @@ bias and -T act fire; -Q clean under UBSan.  Trace:
 
 New negative `capc`: 2 x 2 keys, 63 classes (labels c0/c1 only), every
 other limit met; exit 4 with the class diagnostic on cc, unisacc, UBSan.
+
+## type, step 1: bmem flattened at the current capacity (2026-09-25)
+
+`bmem[MAXQ][MAXQ]` (group-value codes per bucket, 4,194,304 B) is replaced
+by a member pool `bpool[MAXQ]` with per-bucket `boff`/`bn` (plus `bfill`,
+`bof`: 4 x 4,096 B).  Per part, rep_factored counts the members of each
+bucket, takes prefix sums, then fills the pool in the original first-seen
+order.  `boff`/`bn` are indexed by bucket IDENTITY; `border` only permutes
+bucket numbers, so the sort never moves an offset.  Every group value is in
+exactly one bucket: total members = ngv <= nq is asserted, and each bucket
+is checked to be filled to its count (both `die`, never reached -- uncovered).
+In-bucket sort and bucket order are unchanged.
+
+Verified: all 13 stages' `-d`, `-u` and `-t` outputs from cc, unisacc and
+UBSan builds are byte-identical to the pre-change build; `check.sh` ok.
+Static memory (`size -m`, cc -O2, `__common` zerofill): 12,294,848 B ->
+8,100,544 B.  This is static memory, not RSS.
