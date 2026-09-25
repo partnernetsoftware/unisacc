@@ -1006,3 +1006,25 @@ tables, cc/unisacc/UBSan) is byte-identical (0 differ).  `__common`
 27,438,136 -> **28,359,096 B**.  Batches 41.2 (global checks now carry
 capu's 21 s Python reference) / 10.1 / 30.2 / 15.1 s, 39 receipts (17
 stages + 22 globals).
+
+## combo, step 4: MAXCAND 288 -> 432 (2026-09-25)
+
+`MAXCAND 432`; the check is still factored()'s `ncand >= MAXCAND ||
+nhc[ch] >= MAXCAND`, exit 4.  Candidate rows stay MAXCU wide (step 2).
+
+- The old negative (regmap head x 4) is re-classified as a **positive**,
+  `capk4`: 4 + 288 = 292 slots (T5 288 calls, all kept; 4 selections, pick
+  moved 16 starts); `-d` 12,784 B identical to netdump.py on cc, unisacc,
+  UBSan.  It failed only on the old limit.
+- New **negative** `capkn`, regmap head x 6: slot 433 at head y5 (its
+  68th); exit exactly 4 with `capacity: head y5: candidate slot 433
+  (head's 68), more than 432` (cc, unisacc, UBSan).  x 5 builds (measured),
+  x 7 also exits 4 at slot 433.
+
+Verification: the step-2 baseline is byte-identical on every file except
+capkn's own (whose table changed meaning: 399 files, 0 differ; unisacc and
+UBSan agree with cc).  `__common` 28,359,096 -> **39,664,056 B** (size -m,
+cc -O2).  combo now builds: `construct weights/gold/combo.tsv` (cc -O2)
+exit 0, 0.79 s, maximum resident set 32,292,864 B, peak footprint
+31,785,296 B (one `/usr/bin/time -l` run).  Batches 41.6 / 10.1 / 30.2 /
+15.1 s, 40 receipts (17 stages + 23 globals).

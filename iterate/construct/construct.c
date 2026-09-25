@@ -42,7 +42,7 @@
 #define MAXR 96   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
 #define MAXU 200
 #define MAXCU MAXR  /* candidate row capacity: a candidate has <= nr <= MAXR units (README) */
-#define MAXCAND 288  /* candidate slots, a global count over all heads and T4 rounds; abi needs
+#define MAXCAND 432  /* candidate slots, a global count over all heads and T4 rounds; abi needs
                         270 under its construction order (README) -- not a general bound */
 #define BUFSZ 262144
 #define MAXP 512

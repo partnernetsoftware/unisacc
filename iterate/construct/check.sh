@@ -32,7 +32,7 @@ irsel irsel t i
 isel isel t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf capu capun capp"
+GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capk4 capkn capn capo capg capgn capc capcn capcf capu capun capp"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -383,8 +383,10 @@ if cmp -s "$T/caph.cc.t" "$T/caph.ua.t"; then sed "s/^/caph /" "$T/caph.cc.t"; [
 # Every head keeps its dlist slot and 18 factored candidates, and T4 appends
 # 18 more per head per accepted list, all in the global slot count ncand.
 # POSITIVE N = 3: 3 + 216 = 219 slots (> the old MAXCAND 96): -d identical to
-# Python; multi-head factored (pick moves heads).  NEGATIVE N = 4: factored()
-# reaches slot 289 > MAXCAND 288 and must exit exactly 4.
+# Python; multi-head factored (pick moves heads).  POSITIVE N = 4: 4 + 288 =
+# 292 slots, the old negative (slot 289 > the old MAXCAND 288), inside
+# MAXCAND 432: -d identical to Python.  NEGATIVE N = 6: factored() reaches
+# slot 433 > MAXCAND 432 and must exit exactly 4.
 capk() {   # capk N name
 awk -F'	' -v NH=$1 -v NM=$2 'NR==1{print "# stage " NM ": regmap head x" NH ", synthetic"; next}
 /^#head/{for(h=0;h<NH;h++){ printf "#head\ty%d", h; for(i=3;i<=NF;i++) printf "\t%s", $i; printf "\n" } next}
@@ -393,15 +395,18 @@ awk -F'	' -v NH=$1 -v NM=$2 'NR==1{print "# stage " NM ": regmap head x" NH ", s
 {printf "%s\t%s", $1, $2; for(h=0;h<NH;h++) printf "\t%s", $3; printf "\n"}' "$T/cap.src"
 }
 capk 3 capk > "$T/capk.tsv"
-capk 4 capkn > "$T/capkn.tsv"
-B 60 python3 iterate/construct/tools/netdump.py -d "$T/capk.tsv" > "$T/capk.py" || { fail=1; echo "capk python reference failed" > "$T/capk.py"; }
+capk 4 capk4 > "$T/capk4.tsv"
+capk 6 capkn > "$T/capkn.tsv"
+for x in capk capk4; do B 60 python3 iterate/construct/tools/netdump.py -d "$T/$x.tsv" > "$T/$x.py" || { fail=1; echo "$x python reference failed" > "$T/$x.py"; }; done
 for b in cc ua san; do
-    B 30 "$T/c_$b" -d "$T/capk.tsv" > "$T/capk.$b.out" 2>&1; rc=$?
-    if [ $rc -eq 0 ] && cmp -s "$T/capk.py" "$T/capk.$b.out"; then
-        echo "candidate positive $b: 3 heads, 219 candidate slots, -d identical to Python ($(wc -c < "$T/capk.py" | tr -d ' ') B)"; P "g capk $b"
-    else echo "candidate positive $b FAILED (rc $rc): $(head -1 "$T/capk.$b.out")"; fail=1; fi
+    for xs in capk:3:219 capk4:4:292; do x=${xs%%:*}; nn=${xs#*:}; sl=${nn#*:}; nn=${nn%%:*}
+    B 30 "$T/c_$b" -d "$T/$x.tsv" > "$T/$x.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 0 ] && cmp -s "$T/$x.py" "$T/$x.$b.out"; then
+        echo "candidate positive $x $b: $nn heads, $sl candidate slots, -d identical to Python ($(wc -c < "$T/$x.py" | tr -d ' ') B)"; P "g $x $b"
+    else echo "candidate positive $x $b FAILED (rc $rc): $(head -1 "$T/$x.$b.out")"; fail=1; fi
+    done
     B 30 "$T/c_$b" "$T/capkn.tsv" > "$T/capkn.$b.out" 2>&1; rc=$?
-    if [ $rc -eq 4 ] && grep -q "capacity: head y3: candidate slot 289 (head's 70), more than 288" "$T/capkn.$b.out" && ! grep -q 'runtime error' "$T/capkn.$b.out"; then
+    if [ $rc -eq 4 ] && grep -q "capacity: head y5: candidate slot 433 (head's 68), more than 432" "$T/capkn.$b.out" && ! grep -q 'runtime error' "$T/capkn.$b.out"; then
         echo "candidate negative $b rejected: $(head -1 "$T/capkn.$b.out" | sed 's/.*: capacity/capacity/')"; P "g capkn $b"
     else echo "candidate negative $b NOT A CANDIDATE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/capkn.$b.out")"; fail=1; fi
 done
