@@ -122,10 +122,11 @@ P1 构造迁 unisacc          可选
 | 件 | 说明 |
 |---|---|
 | `compiler.ujs` | v13：`[e,…]` → MKLIST/BOX/LSET；`.` → SCONST+DOT；`CST[slot]` 区分 dict/f64-list |
-| 门禁 | fold 子集经 **compiler_core**；stage2≡stage1 · sim+drone body≡stage0 |
+| 门禁 | fold 子集经 **compiler_core**；stage2≡stage1 · sim+drone body≡stage0；**setidx_globals 默认 core** |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
+| splice | `rebuild-main.mjs` 把 stub 的 `host_set/get_global` 边界从 ng=1 补到 MAXG=64（否则 inject 只写得进 idx0） |
 
-**下一刀**：`setidx_globals` 等 step corpus 默认 core（f64 inject 若仍有类型缝则修 emit）。
+**下一刀**：v14 视缺口（更大子集 / IC / 错误信息）；setidx_globals 已关。
 
 #### M3 v12（✓ core→meta · default compile=core）
 
