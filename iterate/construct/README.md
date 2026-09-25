@@ -146,9 +146,8 @@ diagnostic; check.sh accepts nothing else.
 
 ## What is not proven
 
-- The other 14 stages.  They are not attempted.  The capacity is at most 3
-  fields, 4 heads and 62 quotient keys, because each key set is one `long`
-  bitmask.
+- The other 6 stages (type, parse, irsel, isel, abi, combo).  They are
+  not attempted; each is over some limit (prd.md J10 limit matrix).
 - UNS2 for any stage other than prec, reloc, tyinfo and regmap, and the full
   `built.uns2` (header over all 18 stages).
 - The multi-head algorithm in general.  It is ported whole, but tyinfo (one
@@ -165,9 +164,10 @@ diagnostic; check.sh accepts nothing else.
   things are recorded separately: the nets' outputs agree on the whole
   domain; the constructed representation is identical byte for byte; and
   the verifier is trusted only as far as the compiler that built it.
-- Capacity.  A key set is one `long`, so a stage may have at most 62
-  quotient keys.  This limits which stages can be ported independently of
-  the multi-head work; the list of stages over the limit is not made yet.
+- Capacity.  A quotient-key set is QW = 16 longs (since the peep port), so a
+  stage may have at most MAXQ = 1024 quotient keys; MAXR (62 rules per
+  decision list), MAXC, MAXH, MAXOK and MAXS are unchanged.  prd.md J10
+  keeps the limit matrix.
 - Beyond the contract: Python rejects a file that is not valid UTF-8, and the
   C reader does not check the encoding.
 
@@ -298,3 +298,133 @@ change, rejects none; REDUCE aligns to a pool cube 12 times, the pool flag
 never changes a choice; 26 candidate units share down to H = 16 (10 merged).
 New against tyinfo: more changed lists and more sharing; still no T4
 rejection, early stop, or factored multi-head candidate.
+
+## peep: quotient-key sets become multi-word bitsets (2026-09-25)
+
+peep: 3 fields of 8, 17 and 12 values, 1 head, 10 classes, 1632 original
+keys, 6 x 8 x 11 = 528 quotient keys.  Only the quotient-key width (MAXQ 62,
+one `long`) blocked it.
+
+### Pre-audit (before any code change)
+
+(a) The Python reference on peep (`build_net`, observed from outside by
+wrapping `decision_list`, `rep_from_dl`, `rep_factored` and
+`_head_failures`; construct.py unchanged):
+
+| quantity | peep | C limit | fits |
+|---|---|---|---|
+| decision-list rules | 18 (one list; one head, no T4) | MAXR 62 | yes |
+| maximum rank | 3 | 60 (`a rank does not fit a long`) | yes |
+| candidates | 1 (dlist); 72 rep_factored calls (4 partitions x merge 2 x k 0..8), all None | MAXCAND 96 (a slot is only consumed when kept) | yes |
+| chosen units / candidate units | 18 / 18 | MAXU 128 | yes |
+| transient units inside rep_factored | `_head_failures` is never reached (every call returns None before it); the bound before the cap check is k + group values of the parts <= 8 + 6 + 8 x 11 = 102 | MAXU 128 | yes |
+| partitions | 4 (`partitions_of(3)`) | 4 slots | yes |
+| fields / heads / classes | 3 / 1 / 10 | MAXF 3 / MAXH 4 / MAXC 32 | yes |
+| raw values per field | 8 / 17 / 12 | MAXV 128 | yes |
+| original keys | 1632 | MAXOK 4096 | yes |
+| TSV size | 42,191 B, 1638 lines | BUFSZ 262,144 | yes |
+| quotient keys | 528 | MAXQ 62 | **no -- the only blocker** |
+
+Group sets per field (6, 8, 11 groups), class sets (10) and rank weights
+(2^3) all stay within one `long`.
+
+(b) Every quotient-key set (converted):
+
+| where | what |
+|---|---|
+| `qmask[i][g]` | field i, group g -> keys having it (now row `i * MAXV + g` of `long [MAXF*MAXV][QW]`: flat, no 3-D array) |
+| `ALL` | the domain, `bit(nq) - 1` before |
+| `cubemask` result | keys in a cube; now written into a caller buffer; `cmo` scratch |
+| `expand`: `cur[]`, `others`, `nm`, `badmask`, return | now globals `xcur`, `xoth`, `xnm`; result into a buffer |
+| `decision_list`: `labmask[MAXC]`, `rem`, `bad`, `cm`, `bcm`, `newly`; `popc(cm & rem)`; `qmask & newly` in REDUCE | now globals of QW words |
+| `ranks`: `m` (the rule's keys, to fill `fire`) | `rkm` |
+| `headfail`: `m[MAXU]` | global `hfm[MAXU][QW]` |
+| `rep_factored`: `covered`, `resid` | `fcov`, `fres`, `ftmp` |
+
+MAXQ-sized arrays that are NOT key sets (indexed by a key, a group value
+or a bucket, stored as ints or class sets; resized, not converted):
+`qk`, `qlab`, `fire`, `nfire`, `gcode`, `gcls` and `bcls` (class sets per
+group value / bucket), `bn`, `bmem` (group-value codes per bucket),
+`border`, `badj`.
+
+Not converted (other meanings): cubes `c[i]`, `FULL`, `bit(seed)`,
+`sup`, `sets`, `pr`, `bit(codedigit)`, `w1` (group sets within a field,
+at most 11 groups here); `gcls`, `bcls`, `rankset`, `wmask`, `cmpset`,
+`crank` (class sets); `bit(lv)`, `bit(k+1-i)`, `bit(k+2)` (rank weights);
+`tput`/`out*` (UNS2 bits).
+
+(c) Static memory, bytes (long 8, int 4), MAXQ 62 -> 1024, QW 16:
+
+| array | before | after |
+|---|---|---|
+| `bmem[MAXQ][MAXQ]` int | 15,376 | 4,194,304 |
+| `fire[MAXQ][MAXR]` int | 15,376 | 253,952 |
+| `qmask` | 3,072 | 49,152 |
+| `qk[MAXQ][MAXF]`, `qlab[MAXH][MAXQ]` | 744 + 992 | 12,288 + 16,384 |
+| `nfire`, `gcode`, `bn`, `border` (int) | 4 x 248 | 4 x 4,096 |
+| `gcls`, `bcls` (long) | 2 x 496 | 2 x 8,192 |
+| `ALL` | 8 | 128 |
+| `labmask` (was 256 B on the stack), `hfm` (was `m`, 1,024 B on the stack) | -- | 4,096 + 16,384 |
+| set scratch (`xcur`, `rem`..., `rkm`, `fcov`..., `cmo`, self-test) | -- | 2,304 |
+| `badj` (stack) | 248 | 4,096 |
+
+Measured on the cc -O2 build: `__common` (zerofill) 4,659,224 ->
+9,181,848 B, +4,522,624 B; `bmem` is 93 % of it.  All of it is bss.
+
+### Width
+
+MAXQ = 1024, QW = 16 words.  It covers 528 with a 1.9x margin, and is
+the next power of two, so `j >> 6` / `j & 63` never need a bound beyond
+QW.  Every in-matrix stage except type (3,150 quotient keys, also over
+MAXOK) is <= 414 quotient keys.  Only `nqw = (nq + 63) / 64` words are
+read or written, so the small stages loop over one word.
+
+Operations: `qzero qcopy qset qtest qand qor qandnot qempty qeq qmeets
+qmeets3 qpopc qpopcand qnext`.  `qandnot` cuts the result with `ALL`
+(`qtail`), and ALL has exactly nq bits, so no complement or difference
+yields a key >= nq.  Iteration (`qnext`) is ascending, the order of Python's
+`for j in range(D.n)` with a bit test; every loop that iterated `j < nq`
+with `(x >> j) & 1` now iterates `qnext` or tests `qtest` in the same
+order.
+
+`construct -Q` is the word-boundary self-test: for nq 1, 64, 65, 128, 129,
+528 and 1024 it checks ALL (no bit >= nq), set/test, popcount, ascending
+iteration, complement (disjoint, covering, tail cut even from an all-ones
+operand) and equality at keys 0, 63, 64, 127, 128 and nq - 1.  check.sh
+runs it on both builds (exit 5 on a failure).
+
+### Results (both builds: cc -O2, unisacc -O2 osx/arm64)
+
+- `-d` dump identical to `netdump.py -d`: 2,727 B.
+- single-stage UNS2 178 B raw-identical to `uns2slice.py`; section 162 B
+  identical to peep's in `weights/built.uns2`.
+- deployed round trip: 1632 keys, unique argmax = TSV label.
+- invariants hold; `-T bias` (unit 0 has b1 0, expected -1) and `-T act`
+  (unit 0 activation 2 on key 204) exit 3.
+- all 11 earlier stages still identical (dumps, blobs, sections, round
+  trips, traces unchanged); reader, capacity and invariant negatives green.
+- timings: construct on peep 0.01 s (cc), 0.03 s (unisacc); whole
+  check.sh 5 s.
+
+Trace (`-t`, identical on both builds): 1 candidate, chose 0 (dlist), 18
+units; T5 4 partitions, 72 rep_factored calls, **72 None**, 0 not shorter,
+0 kept; no T4 (one head).  No branch fires for the first time: peep's
+path is enc's path with a larger domain.  Still not exercised: a candidate
+dropped as not shorter, patch units.
+
+### Capacity gate
+
+- **Positive** (was the negative): the synthetic 9 x 7 table with 63
+  quotient keys now builds and verifies over its full domain.  Its label
+  had to change: `class[(7a+b) % 16]` needs 63 decision-list rules, over
+  MAXR 62 -- a separate limit, found by this positive and not widened.
+  The new label `class[a]` when b = 0, else `class[8 + b]`, still keeps
+  every slice distinct (9 + 7 singleton groups, 63 quotient keys) and needs
+  15 rules.  Both builds: `-d` identical to netdump.py on the same TSV
+  (1,215 B), UNS2 111 B identical to uns2slice.py, deployed round trip 63
+  keys unique argmax.
+- **Negative**: 11 x 11 x 9 values, label `class[(a + 3b + 5c) % 16]` (no
+  shift d <= 10 of one field is 0 mod 16, so nothing merges): 1089 quotient
+  keys.  Both builds exit exactly 4 with `capacity: 1089 quotient keys so
+  far, more than 1024 (a 16-word bitset)`, from `domain()`, before any
+  set is built.

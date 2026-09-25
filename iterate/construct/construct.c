@@ -8,6 +8,7 @@
  *   construct [-d] weights/gold/prec.tsv
  *   construct -u out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
  *   construct -t weights/gold/tyinfo.tsv
+ *   construct -Q      (self-test of the quotient-key sets at word boundaries)
  *
  * -u writes the UNS2 blob (unisa/uns2.py dump) of the stages given.  Every
  * mode checks the deployment invariants over the full domain (exit 3).
@@ -15,8 +16,8 @@
  * -d adds the intermediate dumps (quotient groups, decision list with ranks,
  * chosen units) so a divergence can be located at its first step.
  *
- * Scope: at most 3 fields, 4 heads and 62 quotient keys (every key set is
- * one long bitmask).  Checked stages: prec, reloc (one head) and tyinfo
+ * Scope: at most 3 fields, 4 heads and MAXQ (1024) quotient keys; a set of
+ * quotient keys is QW (16) longs, see "quotient-key sets" below.  Checked stages: prec, reloc (one head) and tyinfo
  * (three heads: per-head candidates, pick, T4 cross-head sharing).  -t
  * prints which multi-head branches a stage took; README.md lists the ones
  * tyinfo does not reach.
@@ -30,7 +31,8 @@
 #define MAXH 4
 #define MAXC 32
 #define MAXOK 4096
-#define MAXQ 62
+#define MAXQ 1024  /* quotient keys; a key set is QW longs (qset below) */
+#define QW 16      /* MAXQ / 64 */
 #define MAXR 62
 #define MAXU 128
 #define MAXCAND 96
@@ -207,8 +209,9 @@ int nq;
 int qk[MAXQ][MAXF];       /* quotient key -> group per field, product order */
 int qlab[MAXH][MAXQ];      /* head, quotient key -> class */
 int ch;                   /* the head being constructed */
-long qmask[MAXF][MAXV];   /* field, group -> keys having it */
-long ALL;
+long qmask[MAXF * MAXV][QW]; /* field i, group g at row i * MAXV + g -> keys having it */
+long ALL[QW];
+int nqw;                  /* words in use: (nq + 63) / 64 */
 long FULL[MAXF];
 int crank[MAXH][MAXC];     /* head, class -> its position in name order */
 
@@ -232,6 +235,100 @@ int popc(long m) {
     return c;
 }
 
+/* ------------------------------------------------- quotient-key sets ------ */
+/* A set of quotient keys is long s[QW]; key j is bit (j & 63) of word j >> 6.
+   Only words 0..nqw-1 are read or written.  Every result is a subset of an
+   operand that is already inside the domain, or is cut by qtail, so no bit
+   at or above nq is ever set: complements are taken only as ALL & ~x. */
+void qzero(long *d) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = 0; }
+void qcopy(long *d, long *a) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w]; }
+void qset(long *d, int j) { d[j >> 6] = d[j >> 6] | (((long)1) << (j & 63)); }
+int qtest(long *a, int j) { return (int)((a[j >> 6] >> (j & 63)) & 1); }
+void qand(long *d, long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w] & b[w]; }
+void qor(long *d, long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w] | b[w]; }
+void qtail(long *d) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = d[w] & ALL[w]; }
+void qandnot(long *d, long *a, long *b) {
+    int w;
+    for (w = 0; w < nqw; w = w + 1) d[w] = a[w] & ~b[w];
+    qtail(d);
+}
+int qempty(long *a) { int w; for (w = 0; w < nqw; w = w + 1) if (a[w]) return 0; return 1; }
+int qeq(long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) if (a[w] != b[w]) return 0; return 1; }
+int qmeets(long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) if (a[w] & b[w]) return 1; return 0; }
+int qmeets3(long *a, long *b, long *c) {
+    int w;
+    for (w = 0; w < nqw; w = w + 1) if (a[w] & b[w] & c[w]) return 1;
+    return 0;
+}
+int qpopc(long *a) { int w, n = 0; for (w = 0; w < nqw; w = w + 1) n = n + popc(a[w]); return n; }
+int qpopcand(long *a, long *b) { int w, n = 0; for (w = 0; w < nqw; w = w + 1) n = n + popc(a[w] & b[w]); return n; }
+/* the smallest member >= j, or -1: ascending, the order of range(D.n) */
+int qnext(long *a, int j) {
+    while (j < nq) {
+        if ((a[j >> 6] >> (j & 63)) == 0) { j = (j | 63) + 1; continue; }
+        if (qtest(a, j)) return j;
+        j = j + 1;
+    }
+    return -1;
+}
+void qsetall(void) {
+    int j;
+    nqw = (nq + 63) / 64;
+    for (j = 0; j < QW; j = j + 1) ALL[j] = 0;
+    for (j = 0; j < nq; j = j + 1) qset(ALL, j);
+}
+
+/* -Q: the set operations at the word boundaries (keys 63, 64, 127, 128 and
+   the last key) for several domain sizes; exit 5 on the first failure */
+long sa[QW], sb[QW], sc[QW];
+void qfail(int n, char *what) { printf("construct: qset self-test: nq %d: %s\n", n, what); exit(5); }
+void qselftest(void) {
+    int sizes[7], keys[6], t, i, j, n, cnt, prev, w;
+    sizes[0] = 1; sizes[1] = 64; sizes[2] = 65; sizes[3] = 128; sizes[4] = 129; sizes[5] = 528; sizes[6] = MAXQ;
+    for (t = 0; t < 7; t = t + 1) {
+        nq = sizes[t];
+        qsetall();
+        keys[0] = 0; keys[1] = 63; keys[2] = 64; keys[3] = 127; keys[4] = 128; keys[5] = nq - 1;
+        if (qpopc(ALL) != nq) qfail(nq, "popcount of ALL");
+        for (w = 0; w < QW; w = w + 1) {
+            for (j = 0; j < 64; j = j + 1) {
+                i = w * 64 + j;
+                if (((ALL[w] >> j) & 1) != (i < nq)) qfail(nq, "ALL has a bit outside the domain");
+            }
+        }
+        qzero(sa);
+        n = 0;
+        for (i = 0; i < 6; i = i + 1) if (keys[i] < nq && !qtest(sa, keys[i])) { qset(sa, keys[i]); n = n + 1; }
+        for (i = 0; i < 6; i = i + 1) if (keys[i] < nq && !qtest(sa, keys[i])) qfail(nq, "test after set");
+        if (qpopc(sa) != n) qfail(nq, "popcount");
+        /* iterate in order: strictly ascending, every member once */
+        cnt = 0; prev = -1;
+        for (j = qnext(sa, 0); j >= 0; j = qnext(sa, j + 1)) {
+            if (j <= prev || !qtest(sa, j)) qfail(nq, "iteration order");
+            prev = j; cnt = cnt + 1;
+        }
+        if (cnt != n) qfail(nq, "iteration count");
+        /* complement = ALL & ~a: disjoint, covers, nothing past nq */
+        qandnot(sb, ALL, sa);
+        if (qpopc(sb) != nq - n) qfail(nq, "complement size");
+        if (qmeets(sa, sb)) qfail(nq, "complement meets the set");
+        qor(sc, sa, sb);
+        if (!qeq(sc, ALL)) qfail(nq, "set | complement != ALL");
+        qand(sc, sa, sb);
+        if (!qempty(sc)) qfail(nq, "set & complement not empty");
+        /* a raw ~ past the tail must be cut: fill every word, then andnot */
+        for (w = 0; w < QW; w = w + 1) sc[w] = -1;
+        qandnot(sb, sc, sa);
+        if (qpopc(sb) != nq - n) qfail(nq, "tail bits survive andnot");
+        if (qeq(sa, sb)) qfail(nq, "equality");
+        qcopy(sc, sa);
+        if (!qeq(sa, sc)) qfail(nq, "equality of a copy");
+        printf("qset self-test nq %d (%d words): members", nq, nqw);
+        for (j = qnext(sa, 0); j >= 0; j = qnext(sa, j + 1)) printf(" %d", j);
+        printf(", complement %d, ok\n", qpopc(sb));
+    }
+}
+
 void domain(void) {
     int i, v, g, j, t, k, h;
     for (i = 0; i < nf; i = i + 1) {
@@ -247,7 +344,7 @@ void domain(void) {
     for (i = 0; i < nf; i = i + 1) {
         nq = nq * ng[i];
         if (nq > MAXQ) {   /* before any bit(nq) or bit(g): exit 4 */
-            printf("construct: %s: capacity: %d quotient keys so far, more than %d (one long bitmask)\n", gpath, nq, MAXQ);
+            printf("construct: %s: capacity: %d quotient keys so far, more than %d (a %d-word bitset)\n", gpath, nq, MAXQ, QW);
             exit(4);
         }
     }
@@ -258,13 +355,13 @@ void domain(void) {
         for (i = 0; i < nf; i = i + 1) k = k + gfirst[i][qk[j][i]] * ostride[i];
         for (h = 0; h < nh; h = h + 1) qlab[h][j] = olab[k][h];
     }
-    ALL = bit(nq) - 1;
+    qsetall();
     for (i = 0; i < nf; i = i + 1) {
         FULL[i] = bit(ng[i]) - 1;
-        for (g = 0; g < ng[i]; g = g + 1) qmask[i][g] = 0;
+        for (g = 0; g < ng[i]; g = g + 1) qzero(qmask[i * MAXV + g]);
     }
     for (j = 0; j < nq; j = j + 1)
-        for (i = 0; i < nf; i = i + 1) qmask[i][qk[j][i]] = qmask[i][qk[j][i]] | bit(j);
+        for (i = 0; i < nf; i = i + 1) qset(qmask[i * MAXV + qk[j][i]], j);
     for (h = 0; h < nh; h = h + 1)
         for (i = 0; i < ncl[h]; i = i + 1) {
             crank[h][i] = 0;
@@ -275,16 +372,17 @@ void domain(void) {
 /* ----------------------------------------------------------------- cubes -- */
 /* a cube is long c[MAXF]: per field, a bitset of groups; FULL = don't care */
 
-long cubemask(long *c) {
-    long m = ALL, o;
+long cmo[QW];
+/* m = the quotient keys inside cube c */
+void cubemask(long *c, long *m) {
     int i, g;
+    qcopy(m, ALL);
     for (i = 0; i < nf; i = i + 1) {
         if (c[i] == FULL[i]) continue;
-        o = 0;
-        for (g = 0; g < ng[i]; g = g + 1) if ((c[i] >> g) & 1) o = o | qmask[i][g];
-        m = m & o;
+        qzero(cmo);
+        for (g = 0; g < ng[i]; g = g + 1) if ((c[i] >> g) & 1) qor(cmo, cmo, qmask[i * MAXV + g]);
+        qand(m, m, cmo);
     }
-    return m;
 }
 
 int nlits(long *c) {
@@ -353,22 +451,23 @@ void orders(void) {
     ORD[5][0] = 2; ORD[5][1] = 0; ORD[5][2] = 1;
 }
 
-long expand(int *seed, long badmask, int *ord, long *cube) {
-    long cur[MAXF], others, nm;
+long xcur[MAXF][QW], xoth[QW], xnm[QW];
+/* out = the keys of the expanded cube */
+void expand(int *seed, long *badmask, int *ord, long *cube, long *out) {
     int t, i, j, v;
-    for (i = 0; i < nf; i = i + 1) { cur[i] = qmask[i][seed[i]]; cube[i] = bit(seed[i]); }
+    for (i = 0; i < nf; i = i + 1) { qcopy(xcur[i], qmask[i * MAXV + seed[i]]); cube[i] = bit(seed[i]); }
     for (t = 0; t < nf; t = t + 1) {
         i = ord[t];
-        others = ALL;
-        for (j = 0; j < nf; j = j + 1) if (j != i) others = others & cur[j];
-        if (!(others & badmask)) { cube[i] = FULL[i]; cur[i] = ALL; continue; }
+        qcopy(xoth, ALL);
+        for (j = 0; j < nf; j = j + 1) if (j != i) qand(xoth, xoth, xcur[j]);
+        if (!qmeets(xoth, badmask)) { cube[i] = FULL[i]; qcopy(xcur[i], ALL); continue; }
         for (v = 0; v < ng[i]; v = v + 1) {
             if ((cube[i] >> v) & 1) continue;
-            nm = cur[i] | qmask[i][v];
-            if (!(others & nm & badmask)) { cube[i] = cube[i] | bit(v); cur[i] = nm; }
+            qor(xnm, xcur[i], qmask[i * MAXV + v]);
+            if (!qmeets3(xoth, xnm, badmask)) { cube[i] = cube[i] | bit(v); qcopy(xcur[i], xnm); }
         }
     }
-    return cubemask(cube);
+    cubemask(cube, out);
 }
 
 int nr;
@@ -401,30 +500,29 @@ int betterthan(int cnt, int pl, int nl, long *cube, int L, int bcnt, int bpl, in
     return strcmp(cls[ch][L], cls[ch][bL]) < 0;
 }
 
+long labmask[MAXC][QW], rem[QW], bad[QW], cm[QW], bcm[QW], newly[QW];
 void decision_list(void) {
-    long labmask[MAXC], rem, bad, cm, bcm, newly;
     long cube[MAXF], bcube[MAXF], ncube[MAXF], sup[MAXF];
     int j, o, L, bL, cnt, bcnt, nl, bnl, have, i, g, pl, bpl, t, ok;
     int nL, ncnt, nnl;
-    for (j = 0; j < ncl[ch]; j = j + 1) labmask[j] = 0;
-    for (j = 0; j < nq; j = j + 1) labmask[qlab[ch][j]] = labmask[qlab[ch][j]] | bit(j);
-    rem = ALL;
+    for (j = 0; j < ncl[ch]; j = j + 1) qzero(labmask[j]);
+    for (j = 0; j < nq; j = j + 1) qset(labmask[qlab[ch][j]], j);
+    qcopy(rem, ALL);
     nr = 0;
-    bL = 0; bcnt = 0; bnl = 0; bcm = 0; bpl = 0;
+    bL = 0; bcnt = 0; bnl = 0; qzero(bcm); bpl = 0;
     nL = 0; ncnt = 0; nnl = 0;
-    while (rem) {
+    while (!qempty(rem)) {
         have = 0;
-        for (j = 0; j < nq; j = j + 1) {
-            if (!((rem >> j) & 1)) continue;
+        for (j = qnext(rem, 0); j >= 0; j = qnext(rem, j + 1)) {
             L = qlab[ch][j];
-            bad = rem & ~labmask[L];
+            qandnot(bad, rem, labmask[L]);
             for (o = 0; o < nord; o = o + 1) {
-                cm = expand(qk[j], bad, ORD[o], cube);
-                cnt = popc(cm & rem);
+                expand(qk[j], bad, ORD[o], cube, cm);
+                cnt = qpopcand(cm, rem);
                 nl = nlits(cube);
                 pl = npool ? inpool(cube) : 0;
                 if (!have || betterthan(cnt, pl, nl, cube, L, bcnt, bpl, bnl, bcube, bL)) {
-                    bcnt = cnt; bpl = pl; bnl = nl; bL = L; bcm = cm; cpcube(bcube, cube);
+                    bcnt = cnt; bpl = pl; bnl = nl; bL = L; qcopy(bcm, cm); cpcube(bcube, cube);
                 }
                 /* trace only: the same choice with the pool flag held at 0 */
                 if (!have || betterthan(cnt, 0, nl, cube, L, ncnt, 0, nnl, ncube, nL)) {
@@ -434,12 +532,12 @@ void decision_list(void) {
             }
         }
         if (bL != nL || !samecube(bcube, ncube)) ttie = ttie + 1;
-        newly = bcm & rem;
+        qand(newly, bcm, rem);
         if (nr >= MAXR) die("more rules than this constructor holds");
         /* REDUCE: the supercube of the keys this rule claims */
         for (i = 0; i < nf; i = i + 1) {
             sup[i] = 0;
-            for (g = 0; g < ng[i]; g = g + 1) if (qmask[i][g] & newly) sup[i] = sup[i] | bit(g);
+            for (g = 0; g < ng[i]; g = g + 1) if (qmeets(qmask[i * MAXV + g], newly)) sup[i] = sup[i] | bit(g);
         }
         cpcube(rc[nr], sup);
         /* T4: align to the first pool cube with sup <= pc <= prime */
@@ -455,7 +553,7 @@ void decision_list(void) {
         }
         rl[nr] = bL;
         nr = nr + 1;
-        rem = rem & ~newly;
+        qandnot(rem, rem, newly);
     }
 }
 
@@ -469,16 +567,17 @@ int addc(int a, int b) {
     return 0;
 }
 
+long rkm[QW];
 void ranks(void) {
-    long m, z[MAXC];
+    long z[MAXC];
     int zs[MAXC];
     int i, j, t, it, mx, b, grew, w, cstar, c, a, bb, ng2;
     int grpi[MAXR];
     for (j = 0; j < nq; j = j + 1) nfire[j] = 0;
     for (i = 0; i < nr; i = i + 1) {
-        m = cubemask(rc[i]);
-        for (j = 0; j < nq; j = j + 1)
-            if ((m >> j) & 1) { fire[j][nfire[j]] = i; nfire[j] = nfire[j] + 1; }
+        cubemask(rc[i], rkm);
+        for (j = qnext(rkm, 0); j >= 0; j = qnext(rkm, j + 1))
+            { fire[j][nfire[j]] = i; nfire[j] = nfire[j] + 1; }
     }
     for (i = 0; i < nr; i = i + 1) for (j = 0; j < nr; j = j + 1) cons[i][j] = 0;
     for (j = 0; j < nq; j = j + 1) {
@@ -576,14 +675,15 @@ void partitions(void) {
     nparts = nparts + 1;
 }
 
+long hfm[MAXU][QW];
 int headfail(int ci, int *badj) {
-    long m[MAXU], z[MAXC], mx;
+    long z[MAXC], mx;
     int u, j, c, nb = 0, cntmx, arg;
-    for (u = 0; u < cn[ci]; u = u + 1) m[u] = cubemask(ccube[ci * MAXU + u]);
+    for (u = 0; u < cn[ci]; u = u + 1) cubemask(ccube[ci * MAXU + u], hfm[u]);
     for (j = 0; j < nq; j = j + 1) {
         for (c = 0; c < ncl[ch]; c = c + 1) z[c] = 0;
         for (u = 0; u < cn[ci]; u = u + 1)
-            if ((m[u] >> j) & 1)
+            if (qtest(hfm[u], j))
                 for (c = 0; c < ncl[ch]; c = c + 1) z[c] = z[c] + cw[ci * MAXU + u][c];
         mx = z[0]; arg = 0;
         for (c = 1; c < ncl[ch]; c = c + 1) if (z[c] > mx) { mx = z[c]; arg = c; }
@@ -616,25 +716,27 @@ int codedigit(int code, int pi, int pp, int fi) {
 }
 
 /* T5; returns 1 and fills candidate ci, or 0 for None */
+long fcov[QW], fres[QW], ftmp[QW];
 int rep_factored(int ci, int pi, int merge, int k) {
-    long covered = 0, resid, sets[MAXF], wmask, pr;
+    long sets[MAXF], wmask, pr;
     int i, u, pp, j, code, fi, f, x, ngv, nbk, b, t, a, tmp, cap, it, nb, prod, cnt, s, e;
     int badj[MAXQ];
     cn[ci] = 0;
+    qzero(fcov);
     if (k) {
         if (k > nr) return 0;
         for (i = 0; i < k; i = i + 1) {
             u = newunit(ci, rc[i]);
             cw[ci * MAXU + u][rl[i]] = bit(k + 1 - i);
-            covered = covered | cubemask(rc[i]);
+            cubemask(rc[i], ftmp);
+            qor(fcov, fcov, ftmp);
         }
     }
-    resid = ALL & ~covered;
-    if (resid == 0) return 0;
+    qandnot(fres, ALL, fcov);
+    if (qempty(fres)) return 0;
     for (pp = 0; pp < npart[pi]; pp = pp + 1) {
         ngv = 0;
-        for (j = 0; j < nq; j = j + 1) {
-            if (!((resid >> j) & 1)) continue;
+        for (j = qnext(fres, 0); j >= 0; j = qnext(fres, j + 1)) {
             code = 0;
             for (fi = 0; fi < psz[pi][pp]; fi = fi + 1) {
                 f = pf[pi * 4 + pp][fi];
@@ -1265,6 +1367,7 @@ int main(int argc, char **argv) {
     for (ai = 1; ai < argc; ai = ai + 1) {
         if (streq(argv[ai], "-d")) dbg = 1;
         else if (streq(argv[ai], "-t")) tflag = 1;
+        else if (streq(argv[ai], "-Q")) { qselftest(); return 0; }
         else if (streq(argv[ai], "-T") && ai + 1 < argc) {
             ai = ai + 1;
             if (streq(argv[ai], "bias")) tbreak = 1;
