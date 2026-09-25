@@ -84,6 +84,8 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 | [`unisacc.c`](unisacc.c) | `kernel/` 与 `src/` 的拼接：单个 C 文件，cc 或 unisacc 都能直接编译，不需要 Python，也不读外部文件 |
 | `unisacc.com` | `make com` 用 `-O2` 构建的六目标单文件发行版 |
 
+[`iterate/construct/`](iterate/construct/) 是迭代层的**独立工具**（J10）：用 unisacc 能编译的 C 从 `weights/gold/*.tsv` 构造权重，由 unisacc 构建、单独运行，不进编译器的热路径。目前只覆盖 prec 和 reloc，与 Python 构造器逐字节对照（`iterate/construct/check.sh`）。
+
 `src/` 的七个文件没有头文件，也不互相 `#include`：`tests/build_ref.sh` 按上表顺序把它们拼进 `unisacc.c`，顺序即依赖。
 
 这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。新逻辑优先落在表里或这一层；种子只做孪生检验。
