@@ -283,3 +283,18 @@ with that invariant's diagnostic.  `-T` is a test entry only.
    by bytes).  Fixed in the C front end (`callptr`); probe
    `tests/c/a_callres.c`; construct.c is back to the single expression and
    still byte-identical to Python on prec and reloc.
+
+## opinfo (acceptance, no code change)
+
+With MAXV at 128, opinfo (1 field of 67 values, 3 heads, 16 classes, 18
+quotient keys) is within every capacity.  The existing constructor, unchanged,
+gives on both the cc and the unisacc build: canonical dump 6,428 B identical;
+single-stage UNS2 273 B identical to uns2.dump, section 257 B identical to
+weights/built.uns2; 67 keys x 3 heads deployed round trip, unique argmax equal
+to the TSV; invariants hold, -T bias / -T act fire (exit 3).
+Branches: every head has one candidate (dlist; one field, no T5); pick never
+moves a head (4 selections); T4 runs 3 rounds, accepts 9 lists of which 6
+change, rejects none; REDUCE aligns to a pool cube 12 times, the pool flag
+never changes a choice; 26 candidate units share down to H = 16 (10 merged).
+New against tyinfo: more changed lists and more sharing; still no T4
+rejection, early stop, or factored multi-head candidate.

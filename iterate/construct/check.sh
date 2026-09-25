@@ -11,7 +11,7 @@ B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 fail=0
 B 60 cc -std=c99 -O2 -w -o "$T/c_cc" iterate/construct/construct.c || { echo "cc build failed"; exit 1; }
 B 60 "$UA" -O2 iterate/construct/construct.c -b osx/arm64 -o "$T/c_ua" || { echo "unisacc build failed"; exit 1; }
-for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc; do
+for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo; do
     B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py" || fail=1
     for b in cc ua; do
         B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b" || fail=1
@@ -47,11 +47,11 @@ uns2 single weights/gold/prec.tsv weights/gold/reloc.tsv
 uns2 multi weights/gold/tyinfo.tsv
 uns2 regmap weights/gold/regmap.tsv
 # acceptance batch: one blob per stage (single-stage packs; MAXS is 8)
-for s in pp lex scope pfconv binsel enc; do uns2 $s weights/gold/$s.tsv; done
+for s in pp lex scope pfconv binsel enc opinfo; do uns2 $s weights/gold/$s.tsv; done
 # the multi-head branch trace (-t): which candidate each head chose, whether
 # pick moved, what T4 did.  A debug print, not compared with Python (the
 # counts were cross-checked once by hand); the two builds must agree.
-for s in tyinfo regmap pp lex scope pfconv binsel enc; do
+for s in tyinfo regmap pp lex scope pfconv binsel enc opinfo; do
     for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || fail=1; done
     if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; else echo "$s trace differs between builds"; fail=1; fi
 done
@@ -99,7 +99,7 @@ done
 # of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
 # invariant 1 is the one reached.  Only exit 3 with that invariant's
 # diagnostic counts.
-for s in prec tyinfo regmap pp lex scope pfconv binsel enc; do
+for s in prec tyinfo regmap pp lex scope pfconv binsel enc opinfo; do
 for c in "bias|has b1" "act|activation"; do
     t=${c%%|*}; want=${c#*|}
     for b in cc ua; do
