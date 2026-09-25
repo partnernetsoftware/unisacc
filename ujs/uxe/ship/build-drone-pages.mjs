@@ -221,7 +221,7 @@ try {
     reticle: document.getElementById("reticle"),
     prefer,
     controls: initial,
-    engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
+    engineUrl: new URL("./?v=${stamp}", location.href).href,
     simUrl: new URL("./sim.wasm?v=${stamp}", location.href).href,
     onControls: paintCtrl,
   });
@@ -240,19 +240,20 @@ try {
 }
 
 fs.writeFileSync(path.join(outLocal, "index.html"), bake("../../"));
-fs.copyFileSync(path.join(ujs, "core/ujs_full.wasm"), path.join(outLocal, "engine.wasm"));
+// Path B: no ujs_full → engine.wasm (web-build not required)
 
 fs.writeFileSync(path.join(outPages, "index.html"), bake("../../"));
-fs.copyFileSync(path.join(outLocal, "engine.wasm"), path.join(outPages, "engine.wasm"));
 fs.copyFileSync(simWasm, path.join(outPages, "sim.wasm"));
 fs.copyFileSync(simMeta, path.join(outPages, "sim.meta.json"));
 fs.copyFileSync(gameOut, path.join(outPages, "game.js"));
 
-// drop legacy path-A embed / fat host
+// drop legacy path-A embed / fat host / A-core engine.wasm
 for (const p of [
   path.join(here, "drone.embed.json"),
   path.join(outLocal, "uxe-host.js"),
   path.join(outPages, "uxe-host.js"),
+  path.join(outLocal, "engine.wasm"),
+  path.join(outPages, "engine.wasm"),
 ]) {
   try { fs.unlinkSync(p); } catch { /* */ }
 }

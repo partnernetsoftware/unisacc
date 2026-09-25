@@ -643,15 +643,6 @@ async function startShip(cfg) {
   window.__UXE_HOST__ = host;
   const engineUrl = cfg.engineUrl;
   const simUrl = cfg.simUrl || new URL("sim.wasm", new URL(".", engineUrl)).href;
-  const orig = host.host_asset_read.bind(host);
-  host.host_asset_read = async (path) => {
-    if (path === "ujs_full.wasm" || path === "engine.wasm" || path.endsWith("engine.wasm")) {
-      const r = await fetch(engineUrl);
-      if (!r.ok) throw new Error("fetch engine " + r.status);
-      return new Uint8Array(await r.arrayBuffer());
-    }
-    return orig(path);
-  };
   function paint(s) {
     window.__UXE__ = {
       ...s,
@@ -676,7 +667,6 @@ async function startShip(cfg) {
     throw new Error("sim.wasm bad magic");
   }
   await runAsteroidCore(host, {
-    wasmUrl: "engine.wasm",
     directSim: {
       wasm: simWasm,
       meta: { globals: sim_meta_default.globals || [], locals: sim_meta_default.locals || [] }

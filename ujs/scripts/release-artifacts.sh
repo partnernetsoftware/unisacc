@@ -41,7 +41,12 @@ if [[ "$SKIP_TESTS" -eq 0 ]]; then
   ./tests/ujs.sh
 else
   echo "== skip tests (requested) =="
-  python3 -m ujs web-build
+  # Prefer committed core/ fingerprint; FORCE_WEB_BUILD=1 to rebuild A-kernel
+  if [[ "${FORCE_WEB_BUILD:-0}" == "1" ]]; then
+    python3 -m ujs web-build
+  else
+    echo "== verify core/ (no web-build unless FORCE_WEB_BUILD=1) =="
+  fi
 fi
 
 test -f "$CORE/BUILD.json"

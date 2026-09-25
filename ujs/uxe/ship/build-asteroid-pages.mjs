@@ -172,7 +172,7 @@ try {
     banner: document.getElementById("banner"),
     finalEl: document.getElementById("final"),
     prefer,
-    engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
+    engineUrl: new URL("./?v=${stamp}", location.href).href,
     simUrl: new URL("./sim.wasm?v=${stamp}", location.href).href,
   });
 } catch (e) {
@@ -187,11 +187,9 @@ try {
 }
 
 fs.writeFileSync(path.join(outLocal, "index.html"), bake(homeLocal));
-fs.copyFileSync(path.join(ujs, "core/ujs_full.wasm"), path.join(outLocal, "engine.wasm"));
-// sim.wasm / sim.meta.json already in outLocal (= here)
+// Path B: no ujs_full → engine.wasm (web-build not required)
 
 fs.writeFileSync(path.join(outPages, "index.html"), bake(homePages));
-fs.copyFileSync(path.join(outLocal, "engine.wasm"), path.join(outPages, "engine.wasm"));
 fs.copyFileSync(simWasm, path.join(outPages, "sim.wasm"));
 fs.copyFileSync(simMeta, path.join(outPages, "sim.meta.json"));
 let pagesGame = fs.readFileSync(gameOut, "utf8")
@@ -199,11 +197,13 @@ let pagesGame = fs.readFileSync(gameOut, "utf8")
   .replaceAll("from './engine.js'", "from '../engine.js'");
 fs.writeFileSync(path.join(outPages, "game.js"), pagesGame);
 
-// drop legacy C / path-A embed artifacts
+// drop legacy C / path-A embed / A-core engine.wasm
 for (const p of [
   path.join(outLocal, "asteroid.wasm"),
   path.join(outPages, "asteroid.wasm"),
   path.join(outLocal, "asteroid.embed.json"),
+  path.join(outLocal, "engine.wasm"),
+  path.join(outPages, "engine.wasm"),
 ]) {
   try { fs.unlinkSync(p); } catch { /* */ }
 }

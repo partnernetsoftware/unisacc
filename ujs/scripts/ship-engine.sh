@@ -7,8 +7,9 @@ UJS="$ROOT/ujs"
 CORE="$UJS/core"
 DOCS="$ROOT/docs"
 
-if [[ ! -f "$CORE/compiler.gen.js" || ! -f "$CORE/ujs_full.wasm" ]]; then
-  echo "need web-build first: python3 -m ujs web-build" >&2
+# Path B ship: compile.mjs + compiler.wasm only — no web-build / ujs_full
+if [[ ! -f "$CORE/compiler.wasm" ]]; then
+  echo "need ujs/core/compiler.wasm (./ujs/scripts/build-compiler-wasm.sh)" >&2
   exit 1
 fi
 
@@ -36,8 +37,12 @@ if [[ -f "$DOCS/uxe/asteroid/asteroid.wasm" ]]; then
   echo "FAIL: pages still shipping asteroid.wasm (C path)" >&2
   exit 1
 fi
+if [[ -f "$DOCS/uxe/asteroid/engine.wasm" || -f "$UJS/uxe/ship/engine.wasm" ]]; then
+  echo "FAIL: path B ship must not ship engine.wasm (A-core / web-build)" >&2
+  exit 1
+fi
 
 echo "ship ok:"
 echo "  engine.js $DOCS/uxe/engine.js"
-echo "  asteroid  $DOCS/uxe/asteroid (ship-js)"
+echo "  asteroid  $DOCS/uxe/asteroid (ship-js path B, no A-core)"
 echo "local: http://127.0.0.1:8765/uxe/ship/"

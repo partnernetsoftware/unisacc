@@ -39,15 +39,6 @@ export async function startDroneShip(cfg) {
 
   const engineUrl = cfg.engineUrl;
   const simUrl = cfg.simUrl || new URL("sim.wasm", new URL(".", engineUrl)).href;
-  const orig = host.host_asset_read.bind(host);
-  host.host_asset_read = async (path) => {
-    if (path === "ujs_full.wasm" || path === "engine.wasm" || path.endsWith("engine.wasm")) {
-      const r = await fetch(engineUrl);
-      if (!r.ok) throw new Error("fetch engine " + r.status);
-      return new Uint8Array(await r.arrayBuffer());
-    }
-    return orig(path);
-  };
 
   function paint(s) {
     window.__UXE__ = {
@@ -83,8 +74,8 @@ export async function startDroneShip(cfg) {
     throw new Error("sim.wasm bad magic");
   }
 
+  // Path B: no ujs_full/engine.wasm — web-build not on ship path
   const api = await runDroneCore(host, {
-    wasmUrl: "engine.wasm",
     directSim: {
       wasm: simWasm,
       meta: { globals: simMeta.globals || [], locals: simMeta.locals || [] },

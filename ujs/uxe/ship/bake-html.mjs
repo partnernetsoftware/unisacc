@@ -86,7 +86,7 @@ try {
     finalEl: document.getElementById("final"),
     prefer,
     gameUrl: new URL("./asteroid.wasm?v=${stamp}", location.href).href,
-    engineUrl: new URL("./engine.wasm?v=${stamp}", location.href).href,
+    engineUrl: new URL("./?v=${stamp}", location.href).href,
   });
 } catch (e) {
   hud.innerHTML = '<span class="warn">boot failed</span><br>' + String(e.message || e);

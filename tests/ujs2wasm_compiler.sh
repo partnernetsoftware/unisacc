@@ -124,6 +124,16 @@ got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_REQUIRE_COMP
 echo "$got" | grep -q '"bridge":"compiler.wasm"' || { echo "FAIL ship drone emit: $got"; exit 1; }
 echo "OK ship emit compiler.wasm (PATH without python3)"
 
+echo "-- ship builders: no A-core / web-build"
+for f in ujs/uxe/ship/build-asteroid-pages.mjs ujs/uxe/ship/build-drone-pages.mjs \
+         ujs/scripts/ship-engine.sh ujs/scripts/ship-pages.sh; do
+  if grep -E 'ujs_full\.wasm|python3 -m ujs web-build' "$f" >/dev/null; then
+    echo "FAIL: $f still depends on ujs_full / web-build"
+    exit 1
+  fi
+done
+echo "OK ship path free of web-build / ujs_full"
+
 echo "-- M3 seed: compiler.ujs → core → splice return N"
 [ -f ujs/core/compiler_rt_stub.wasm ] || { echo "FAIL: missing ujs/core/compiler_rt_stub.wasm"; exit 1; }
 [ -f ujs/core/compiler.ujs ] || { echo "FAIL: missing ujs/core/compiler.ujs"; exit 1; }
@@ -414,5 +424,5 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v11 sim+drone body≡stage0 · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v11 + P0 ship no A-core · stage2≡stage1)"
 
