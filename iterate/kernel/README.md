@@ -168,3 +168,59 @@ The kernel layout itself was not changed.
   file, cc, ua and san. The MIXED file equals the shipped one modulo comments.
   --check-oracle shows 0 differences in 20,184. closure 582/0 and nativeboot
   pass. The six --batches take 4.2 / 4.5 / 4.9 / 4.7 / 6.5 / 36.2 s.
+
+## Typekw slice: TYPEV generated (2026-09-25)
+
+- **typekw.tsv** declares the 18 values as `kw<TAB>value` rows, in lex.TYPEKW
+  order. It is passed to genmodel explicitly, right after vocab.tsv:
+  `genmodel -o OUT order.tsv vocab.tsv typekw.tsv built.uns2 TSV...`. The
+  `typekw TYPEV` row of vocab.tsv decides where TYPEV goes. vocab.tsv must hold
+  exactly one such row ("no typekw row" and "typekw row given twice" are exit 1).
+  genmodel still opens only argv paths. It never reads lex.py or the old kernel.
+- **Values**: the count and the values come only from the file. TYPEV is
+  written with the vocab rules (comment line, `char *TYPEV = "v\0..."`, then
+  `#define NTYPEV n`), and okval enforces the same domain: no quote, no
+  backslash, no byte outside 0x20-0x7e, no "??", no empty value, and no
+  non-first value starting 0-7. A value starting 8 or 9 is fine. Two more
+  rules apply: no duplicate value, and at least one row. Both are exit 1.
+- **Consumer ABI** (what src/front_pp.c expects, as opposed to genmodel's own
+  choices):
+  - The symbol names TYPEV and NTYPEV are fixed. This is the ABI list in genmodel.c.
+  - The string is NUL-separated with no empty value, because the index walk
+    stops at `\0\0`.
+  - It is used only as a membership test: `vfind(...) >= 0` makes an
+    identifier a `type` token. Order has no meaning to the front end, but it
+    does to the byte comparison.
+  - Its per-list index holds V_NIDX = 1024 entries. Past that it falls back to
+    a walk, which is still correct.
+  - A value can match only if it is identifier-shaped. The lexer does not
+    enforce this, and neither does genmodel.
+  - genmodel's own cap is MAXTKW = 256 values. That is a tool limit, not an ABI
+    limit.
+- **Compatibility judge, not an authority**: `typekw_check.py [file]` checks
+  that the file equals lex.TYPEKW (read with ast) and prints each differing
+  index. Python does not consume typekw.tsv, so neither side is the single
+  source yet. vocab_check.py and typekw_check.py now fail closed. They exit 1
+  on a missing, duplicated, malformed or EMPTY structure. Their fixtures are
+  set with the CKERNEL_SRC and LEX_SRC environment variables (`vocab judge *`).
+- vregion.awk no longer removes TYPEV. The expected set now has 16 vocabs,
+  which is 158 symbols. mix.awk takes only the provenance header and the ENC
+  tail from OLD. It requires NEW to hold exactly one `char *TYPEV` and no
+  placeholder.
+- New checks:
+  - `tneg`: 11 negatives × 3 builds;
+  - `tpos`: 8long/9long × 3 builds;
+  - `tfunc`: a rename short->shrt and a reorder int<->char. Each changes only
+    the TYPEV line, to the predicted bytes, and the judge reports DIFFERENCE
+    with rc 1. ua and san are identical to cc.
+- Results:
+  - region2: 12,834 B / 224 lines / 158 symbols, identical for the oracle, the
+    shipped file, cc, ua and san;
+  - sem 0 wrong;
+  - --check-oracle 0 differences in 20,184;
+  - closure 582/0, nativeboot ok.
+  - The seven batches took 5.2 / 4.6 / 5.2 / 4.7 / 6.8 / 5.8 / 35.5 s.
+- **Still taken from the old file**: the provenance header, 14 lines and 796 B
+  with no symbols, and the ENC tail, 63 lines and 1,994 B holding
+  ENC_X86_ALU2, ENC_X86_SETCC, ENC_X86_SHIFTEXT, ENC_ARM_ALU3 and
+  ENC_ARM_INVCOND, each with its N* define.
