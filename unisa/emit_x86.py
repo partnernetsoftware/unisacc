@@ -28,7 +28,7 @@ def mov_rr(dst, src):
 
 def mov_ri(dst, imm):
     d = NUM[dst]
-    v = imm & ((1 << 64) - 1)
+    v = imm & MASK64
     # SHORT form: `mov r32, imm32` zero-extends to 64 bits, so any value that
     # fits in an unsigned 32-bit field needs five bytes (six for r8-r15)
     # rather than movabs' ten.  The value is a literal, final in the sizing
@@ -182,6 +182,7 @@ def store_w(reg, base, disp, width):
     return mem(0x88, reg, base, disp, w=0)
 
 
+from .bits import MASK64
 from .catalog import ENCSPEC as _ENC
 ALU2 = _ENC["x86_64"]["alu2"]         # [I5] one table, both back ends
 SETCC = _ENC["x86_64"]["setcc"]
@@ -329,7 +330,7 @@ def _winbody(ins, off, shift, text_va, imps):
         # data cache, and changing the protection does not flush it: the
         # first instruction raises STATUS_ILLEGAL_INSTRUCTION.  The current
         # process is the pseudo-handle -1, so nothing else is imported.
-        out += mov_ri("rcx", (-1) & 0xFFFFFFFFFFFFFFFF)
+        out += mov_ri("rcx", (-1) & MASK64)
         out += rip(0x8B, "rdx", pc + len(out) + 7, scr0)      # the address
         out += rip(0x8B, "r8", pc + len(out) + 7, scr1)       # the length
         pre2, _ = _align_pre(0)
@@ -626,7 +627,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     if o == "winstdh":
         out = b""
         for k in range(3):
-            out += mov_ri("rcx", (-10 - k) & 0xFFFFFFFFFFFFFFFF)
+            out += mov_ri("rcx", (-10 - k) & MASK64)
             pre, _ = _align_pre(0)
             out += pre
             out += _callimp(text_va + off + len(out), imps, "GetStdHandle")

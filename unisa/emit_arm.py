@@ -36,6 +36,7 @@ def mem(store, rt, rn, off, wd):
     return out + w(base | (IP0 << 5) | rt)
 
 
+from .bits import MASK64
 from .catalog import ENCSPEC as _ENC
 ALU3 = _ENC["arm64"]["alu3"]          # [I5] one table, both back ends
 INVCOND = _ENC["arm64"]["invcond"]    # cset encodes the INVERTED condition
@@ -128,7 +129,7 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
     if o == "mov":                                  # orr Xd, xzr, Xm
         return w(0xAA0003E0 | (N(a[1]) << 16) | N(a[0]))
     if o == "imm":
-        v, out, d = a[1] & ((1 << 64) - 1), b"", N(a[0])
+        v, out, d = a[1] & MASK64, b"", N(a[0])
         out += w(0xD2800000 | ((v & 0xFFFF) << 5) | d)          # movz
         for sh in (1, 2, 3):
             part = (v >> (16 * sh)) & 0xFFFF
@@ -149,7 +150,7 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
     if o == "setreg":
         k, v = a[1]
         if k == "imm":
-            return movimm(N(a[0]), v & ((1 << 64) - 1))
+            return movimm(N(a[0]), v & MASK64)
         if k == "reg":
             return w(0xAA0003E0 | (N(v) << 16) | N(a[0]))
         if k == "addr":

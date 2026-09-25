@@ -6,6 +6,7 @@ the scratch cells and the print buffer live in `data`, so the program writes to
 its own image.  Mach-O had already forced this lesson (I-8); ELF hid it until
 CI ran the file on a real kernel.
 """
+from ..bits import round_up
 import struct
 
 VADDR = 0x400000
@@ -16,7 +17,7 @@ MACHINE = {"x86_64": 0x3E, "arm64": 0xB7}
 
 
 def _round(v, a=PAGE):
-    return (v + a - 1) // a * a
+    return round_up(v, a)
 
 
 def HDRS(arch):

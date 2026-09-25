@@ -9,6 +9,7 @@ that cannot call kernel32 cannot write to a handle it does not have.
 
 TimeDateStamp is pinned to 0 -- a build stamp would break [D-5].
 """
+from ..bits import round_up
 import struct
 
 IMAGEBASE = 0x140000000
@@ -26,8 +27,7 @@ IMPORTS = ("GetStdHandle", "WriteFile", "ReadFile", "CloseHandle",
            "SetFilePointer", "DeleteFileA", "MoveFileExA")
 
 
-def _round(v, a):
-    return (v + a - 1) // a * a
+_round = round_up
 
 
 def HDRS(arch):

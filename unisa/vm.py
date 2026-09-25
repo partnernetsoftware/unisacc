@@ -4,13 +4,14 @@ Target-independent on purpose: it knows nothing about syscall numbers, ABIs or
 instruction encodings.  Everything target-specific lives in lower.py and
 exec_target.py, and the fold compares those six results against this one.
 """
+from .bits import MASK64
 from . import fp
 from .fp import OPS3 as FOPS3, OPS2 as FOPS2
 import os as _os
 
 from .tape import REGS, SP, MEM_SIZE, STACK_TOP, DATA_BASE
 
-MASK = (1 << 64) - 1
+MASK = MASK64
 SIGN = 1 << 63
 MAX_STEPS = 4_000_000_000   # the VM is the reference, not a speed target
 

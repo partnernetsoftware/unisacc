@@ -8,6 +8,7 @@ This is the honest first half of the multi-ISA claim.  It is one OS; a
 cosmopolitan-style file that is simultaneously an ELF, a Mach-O and a PE is a
 different problem and is not what this emits.
 """
+from ..bits import round_up
 import struct
 
 FAT_MAGIC = 0xCAFEBABE
@@ -15,8 +16,7 @@ CPU = {"x86_64": (0x01000007, 3), "arm64": (0x0100000C, 0)}
 ALIGN = {"x86_64": 12, "arm64": 14}       # log2; arm64 pages are 16 KB
 
 
-def _round(v, a):
-    return (v + a - 1) // a * a
+_round = round_up
 
 
 def write(slices):

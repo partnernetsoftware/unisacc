@@ -6,6 +6,7 @@ LC_BUILD_VERSION, and it enforces page alignment.  It also enforces segment
 protections, so the data -- which holds our scratch cells and therefore gets
 written -- has to live in a separate rw __DATA segment, not inside r-x __TEXT.
 """
+from ..bits import round_up
 import struct
 
 VMADDR = 0x100000000
@@ -48,7 +49,7 @@ IDENT = b"unisa\x00"        # fixed, so two runs give the same bytes
 
 
 def _round(v, a=PAGE):
-    return (v + a - 1) // a * a
+    return round_up(v, a)
 
 
 def _pad4(b):

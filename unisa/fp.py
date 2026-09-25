@@ -15,10 +15,11 @@ AArch64), round-to-nearest-even:
 - int -> float of a value past 2^53 is rounded straight to 24 bits, not via
   a double, which would round twice.
 """
+from .bits import MASK64
 import math
 import struct
 
-M64 = (1 << 64) - 1
+M64 = MASK64
 M32 = (1 << 32) - 1
 
 OPS3 = ("fadd64", "fsub64", "fmul64", "fdiv64", "flt64", "fle64", "feq64",

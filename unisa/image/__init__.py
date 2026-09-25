@@ -4,6 +4,7 @@ Structurally real headers, byte-reproducible (no timestamps, no paths, no build
 IDs). [D-5]  We wrap but never execve -- the fold interprets. [X-3]
 """
 from . import elf, macho, pe
+from ..bits import MASK64
 
 WRITER = {"lnx": elf.write, "osx": macho.write, "win": pe.write}
 MAGIC = {"lnx": "7f454c46", "osx": "cffaedfe", "win": "4d5a"}
@@ -44,7 +45,7 @@ def relocate(tp, data, shift):
     out = bytearray(data)
     for at in getattr(tp, "relocs", []):
         v = int.from_bytes(out[at:at + 8], "little")
-        out[at:at + 8] = ((v + shift) & ((1 << 64) - 1)).to_bytes(8, "little")
+        out[at:at + 8] = ((v + shift) & MASK64).to_bytes(8, "little")
     return bytes(out)
 
 
