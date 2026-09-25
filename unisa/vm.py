@@ -72,6 +72,19 @@ class VM:
             self.mem[p:p + len(b)] = b
             self.argv.append(p)
             p += len(b)
+        # ...then a NULL and the environment, where a Unix kernel puts envp:
+        # getenv walks `.argv` past argc [S-15 D2]
+        self.nargs = len(self.argv)
+        self.argv.append(0)
+        room = 65536
+        for k, v in _os.environ.items():
+            b = ("%s=%s" % (k, v)).encode("latin-1", "replace") + b"\x00"
+            if len(b) > room:
+                break
+            room -= len(b)
+            self.mem[p:p + len(b)] = b
+            self.argv.append(p)
+            p += len(b)
         self.r = [0] * 8
         self.r[SP] = STACK_TOP
         self.out = bytearray()
@@ -300,7 +313,7 @@ class VM:
                     self.out.extend(self.mem[p:p + n])
                     self._gate_clobber(r, n)
                 elif op == ".argc":
-                    r[ri[a[0]]] = len(self.argv)
+                    r[ri[a[0]]] = self.nargs
                 elif op == ".argv":
                     k = r[ri[a[1]]]
                     r[ri[a[0]]] = self.argv[k] if k < len(self.argv) else 0

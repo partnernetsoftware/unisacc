@@ -128,6 +128,7 @@ run bench      ./tests/bench.sh
 run consts     bash -c 'python3 tests/consts_check.py'
 run oracle     bash -c '"${UA:-/tmp/ua_ref}" --check-oracle'
 run docs       ./tests/docs.sh
+run kernel     ./tests/kernel.sh
 run gold_audit bash -c 'python3 tests/gold_audit.py'
 run abi_audit  bash -c 'python3 tests/abi_audit.py'
 run layout     ./tests/layout.sh

@@ -217,4 +217,19 @@ static int atexit(void (*fn)(void)) {
     return 0;
 }
 
+/* The environment is where a Unix kernel leaves it: after argv's NULL.
+   `__argv(k)` reads that array itself, so the walk starts past argc.  On
+   Windows nothing is there and getenv answers NULL. [S-15 D2] */
+static char *getenv(const char *name) {
+    int k; int i; char *e;
+    k = __argc() + 1;
+    while ((e = __argv(k)) != 0) {
+        i = 0;
+        while (name[i] && e[i] == name[i]) i = i + 1;
+        if (name[i] == 0 && e[i] == 61) return e + i + 1;
+        k = k + 1;
+    }
+    return 0;
+}
+
 #endif

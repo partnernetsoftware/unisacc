@@ -2471,7 +2471,7 @@ int bkfd = 1;    /* where the image goes: -o, else stdout.  DEFINED here,
                     lines, and the two back ends disagree about which of the
                     two addresses the name means. */
 long bk_run(char *t, int n, long argc, long argv);   /* -run [S-9] */
-char *runargv[256];
+char *runargv[4096];   /* argv, NULL, envp, NULL */
 int symlea(int i, int t, char *reg);
 int dkind(int flt);
 int setkind(int k);
@@ -8079,7 +8079,7 @@ int opt_stack(void) {
    follows the input belongs to the PROGRAM. */
 int main(void) {
     int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb;
-    char *a; char *t; long e; int n;
+    char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0;
@@ -8203,6 +8203,11 @@ int main(void) {
         k = 1;
         while (k < n) { runargv[k] = __argv(fi + ninput + k - 1); k = k + 1; }
         runargv[n] = 0;
+        /* ...and after the NULL, our own environment, where a kernel would
+           put envp: getenv walks __argv past argc [S-15 D2] */
+        k = n + 1; j = __argc() + 1;
+        while (k < 4095 && __argv(j) != 0) { runargv[k] = __argv(j); k = k + 1; j = j + 1; }
+        runargv[k] = 0;
         /* bk_run writes argc/argv into the program's own cells, so this call
            assumes nobody's calling convention */
         e = bk_run(out, nout, n, (long)runargv);
