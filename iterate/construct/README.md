@@ -1,4 +1,4 @@
-# iterate/construct: the weight constructor in C (J10 step 2, first slice)
+# iterate/construct: the weight constructor in C (J10 step 2)
 
 `construct.c` reads one gold table, `weights/gold/<stage>.tsv`, and prints the
 net that `unisa/construct.py` `build_net` builds from it. It uses only the C
@@ -31,7 +31,7 @@ has an alarm.
 Four separate ledgers.  One passing does not imply another.
 
 1. **Canonical-dump identity.**  `construct -d` equals `netdump.py -d`,
-   byte for byte: prec 855 B, reloc 348 B, for both builds.
+   byte for byte: prec 855 B, reloc 348 B, tyinfo 2657 B, for both builds.
 2. **UNS2 byte identity.**  `construct -u out.uns2 prec.tsv reloc.tsv`
    writes the UNS2 blob of just those stages (16 B header, sections in
    sorted name order, as `uns2.dump` does).  Two comparisons:
@@ -41,14 +41,18 @@ Four separate ledgers.  One passing does not imply another.
      builds;
    - each stage section against the section of the same name in the shipped
      `weights/built.uns2`, located by walking the format's length fields:
-     prec 83 B and reloc 47 B identical, both builds.  The 16 B header is
+     prec 83 B and reloc 47 B identical, both builds.
+   tyinfo is checked the same way in a blob of its own: `construct -u
+   out.uns2 tyinfo.tsv` is 104 B, raw-byte identical to `uns2slice.py`,
+   and its 88 B section is identical to the shipped one, both builds.  The 16 B header is
      not compared with the shipped one (nStages and nUnits differ by
      construction).
 3. **Deployed-semantics round trip.**  `tools/uns2round.py` decodes the
    C-written blob with the deployment loader, `uns2.load` (which derives b1
    from W1 rather than reading it), and runs `IntNet.predict`, the deployed
    arithmetic (a unit adds its W2 once when `hit + b1 > 0`), on every key of
-   the original domain from the TSV (19 prec, 6 reloc) and every head.  Each
+   the original domain from the TSV (19 prec, 6 reloc, 16 tyinfo x 3
+   heads) and every head.  Each
    answer equals the TSV label, and the logits (summed by predict's rule)
    have a unique maximum.  Both builds.
    Before any of that, `construct` itself checks the two **deployment
@@ -72,13 +76,14 @@ builds reject every copy with exit 1 and the matching diagnostic.
 
 ## What is not proven
 
-- The other 16 stages. They are not attempted. Multi-head stages need the T4
-  cross-head sharing and the multi-head `pick`, and neither is ported: the
-  constructor refuses any stage with `nh != 1`. The capacity is at most 3
-  fields and at most 62 quotient keys, because each key set is one `long`
+- The other 15 stages.  They are not attempted.  The capacity is at most 3
+  fields, 4 heads and 62 quotient keys, because each key set is one `long`
   bitmask.
-- UNS2 for any stage other than prec and reloc, and the full
+- UNS2 for any stage other than prec, reloc and tyinfo, and the full
   `built.uns2` (header over all 18 stages).
+- The multi-head algorithm in general.  It is ported whole, but tyinfo (one
+  field, 16 values, 10 quotient keys, 3 heads) reaches only part of it; see
+  the next section.
 - The factored path (T5, `rep_factored`). It is ported and it runs for reloc,
   but neither stage selects a factored representation (both are `dlist`).
   The dumps show only the chosen representation, so the factored candidates
@@ -95,6 +100,50 @@ builds reject every copy with exit 1 and the matching diagnostic.
 - Beyond the contract: Python rejects a file that is not valid UTF-8, and the
   C reader does not check the encoding.
 
+## Multi-head: what tyinfo exercises, and what it does not
+
+`construct -t weights/gold/tyinfo.tsv` prints the branch trace (check.sh
+prints it for both builds and requires them to agree).  The -d dump shows
+the same path step by step: every decision list T4 rebuilds (`dl <head>
+pool <n>`; a rule that is a pool cube ends in ` pool`) and every selection
+(`select`, `cands`, `pick <start>`, `chosen`).  netdump.py prints the Python
+side of that by wrapping `construct.decision_list` and the module's `min`
+for one build_net call; construct.py itself is unchanged.  The counts of
+REDUCE alignments and pool tie-breaks come from C only; they were checked
+once against an instrumented copy of the Python decision_list (4 and 0).
+
+Exercised by tyinfo:
+
+- The per-head decision lists (size 4 rules, uns 2, narrow 2) and their
+  winner-vs-loser ranks.
+- Every head picks candidate 0, the decision list.  No head has a factored
+  candidate: tyinfo has one field, `partitions_of(1)` is empty, so T5 never
+  runs.
+- `pick` runs from all 4 starts (all-dlist, and one start per head, which
+  equals all-dlist because each head has one candidate) and moves nothing.
+- T4 runs all 3 rounds.  All 9 rebuilt lists are accepted (none is longer);
+  3 of them differ from the old list (size, each round).  REDUCE is aligned
+  to a pool cube 4 times; the pool tie-break flag never changes which rule
+  is chosen.  The selection's unit count oscillates 8 -> 6 -> 8 -> 6, and
+  the build ends on 6.
+- Merging: the chosen candidates have 8 units in total; the net has H 6,
+  so 2 cubes are shared across heads (both narrow units are size cubes).
+- One W1/b1 layer shared by all heads, W2 per head, UNS2 with 3 head blocks.
+
+NOT exercised by tyinfo (ported, not checked by any stage):
+
+- Factored candidates of a multi-head stage (T5 with more than one field),
+  and so: pick choosing a factored candidate, pick moving any head, a
+  per-head shortest start differing from all-dlist, a head of kind
+  `factored`, T4 appending factored candidates after an accepted list.
+- A T4 list rejected because it is longer than the old one.
+- T4 ending early because no list was accepted (`if not improved: break`).
+- The pool flag in the decision-list score breaking a coverage tie.
+- A tie between two starts in the final selection (first minimum wins).
+- More than one field, and 4 heads (the declared maximum).
+
+The multi-head algorithm is therefore verified only on this one path.
+
 ## Deployment invariants: negative coverage
 
 `construct -T bias <tsv>` breaks b1 of unit 0 and must exit 3 on invariant 2
@@ -108,7 +157,7 @@ fields hit <= 1 - t + t = 1: invariant 1 follows from invariant 2, and only a
 broken b1 can reach it -- which is why the second case has to bypass the
 first.  That bypass only shows the activation check CAN fire; the normal
 construction path does not produce such a state.
-check.sh runs both, on the cc and the unisacc build, and counts only exit 3
+check.sh runs both on prec and on tyinfo, on the cc and the unisacc build, and counts only exit 3
 with that invariant's diagnostic.  `-T` is a test entry only.
 
 ## unisacc problems met on the way

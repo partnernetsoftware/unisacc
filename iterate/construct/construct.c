@@ -7,6 +7,7 @@
  *
  *   construct [-d] weights/gold/prec.tsv
  *   construct -u out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
+ *   construct -t weights/gold/tyinfo.tsv
  *
  * -u writes the UNS2 blob (unisa/uns2.py dump) of the stages given.  Every
  * mode checks the deployment invariants over the full domain (exit 3).
@@ -14,9 +15,11 @@
  * -d adds the intermediate dumps (quotient groups, decision list with ranks,
  * chosen units) so a divergence can be located at its first step.
  *
- * Scope of this slice: single-head stages with at most 3 fields and at most
- * 62 quotient keys (every key set is one long bitmask).  That is prec and
- * reloc.  Cross-head sharing (T4) and the multi-head pick are not ported.
+ * Scope: at most 3 fields, 4 heads and 62 quotient keys (every key set is
+ * one long bitmask).  Checked stages: prec, reloc (one head) and tyinfo
+ * (three heads: per-head candidates, pick, T4 cross-head sharing).  -t
+ * prints which multi-head branches a stage took; README.md lists the ones
+ * tyinfo does not reach.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,7 +33,7 @@
 #define MAXQ 62
 #define MAXR 62
 #define MAXU 128
-#define MAXCAND 48
+#define MAXCAND 96
 #define BUFSZ 262144
 #define MAXP 512
 
@@ -52,6 +55,7 @@ int ostride[MAXF];
 int olab[MAXOK][MAXH];
 int oseen[MAXOK];
 int dbg;
+int tflag;                   /* -t: print the branch trace instead of the net */
 int tbreak;                  /* test entry: 1 bias, 2 act (see build) */
 
 void die(char *msg) {
@@ -201,11 +205,12 @@ int ng[MAXF];
 int gfirst[MAXF][MAXV];   /* group -> its first (smallest) value */
 int nq;
 int qk[MAXQ][MAXF];       /* quotient key -> group per field, product order */
-int qlab[MAXQ];
+int qlab[MAXH][MAXQ];      /* head, quotient key -> class */
+int ch;                   /* the head being constructed */
 long qmask[MAXF][MAXV];   /* field, group -> keys having it */
 long ALL;
 long FULL[MAXF];
-int crank[MAXC];          /* class -> its position in name order */
+int crank[MAXH][MAXC];     /* head, class -> its position in name order */
 
 int odigit(int k, int i) { return (k / ostride[i]) % nv[i]; }
 
@@ -228,7 +233,7 @@ int popc(long m) {
 }
 
 void domain(void) {
-    int i, v, g, j, t, k;
+    int i, v, g, j, t, k, h;
     for (i = 0; i < nf; i = i + 1) {
         ng[i] = 0;
         for (v = 0; v < nv[i]; v = v + 1) {
@@ -248,7 +253,7 @@ void domain(void) {
         for (i = nf - 1; i >= 0; i = i - 1) { qk[j][i] = t % ng[i]; t = t / ng[i]; }
         k = 0;
         for (i = 0; i < nf; i = i + 1) k = k + gfirst[i][qk[j][i]] * ostride[i];
-        qlab[j] = olab[k][0];
+        for (h = 0; h < nh; h = h + 1) qlab[h][j] = olab[k][h];
     }
     ALL = bit(nq) - 1;
     for (i = 0; i < nf; i = i + 1) {
@@ -257,10 +262,11 @@ void domain(void) {
     }
     for (j = 0; j < nq; j = j + 1)
         for (i = 0; i < nf; i = i + 1) qmask[i][qk[j][i]] = qmask[i][qk[j][i]] | bit(j);
-    for (i = 0; i < ncl[0]; i = i + 1) {
-        crank[i] = 0;
-        for (j = 0; j < ncl[0]; j = j + 1) if (strcmp(cls[0][j], cls[0][i]) < 0) crank[i] = crank[i] + 1;
-    }
+    for (h = 0; h < nh; h = h + 1)
+        for (i = 0; i < ncl[h]; i = i + 1) {
+            crank[h][i] = 0;
+            for (j = 0; j < ncl[h]; j = j + 1) if (strcmp(cls[h][j], cls[h][i]) < 0) crank[h][i] = crank[h][i] + 1;
+        }
 }
 
 /* ----------------------------------------------------------------- cubes -- */
@@ -367,43 +373,82 @@ long rc[MAXR][MAXF];
 int rl[MAXR];
 int lv[MAXR];
 
+/* T4's pool: cubes other heads already pay for, sorted by cube_key.  It only
+   breaks coverage ties (score = count, in pool, -literals) and, after REDUCE,
+   replaces the supercube by the first pool cube between it and the prime. */
+long pool[MAXU][MAXF];
+int npool;
+int talign;                  /* trace: REDUCE aligned to a pool cube */
+int ttie;                    /* trace: the pool flag changed the chosen rule */
+
+int inpool(long *c) {
+    int t;
+    for (t = 0; t < npool; t = t + 1) if (samecube(pool[t], c)) return 1;
+    return 0;
+}
+
+/* is candidate (cnt, pl, nl, cube, L) better than the best so far */
+int betterthan(int cnt, int pl, int nl, long *cube, int L, int bcnt, int bpl, int bnl, long *bcube, int bL) {
+    int r;
+    if (cnt != bcnt) return cnt > bcnt;
+    if (pl != bpl) return pl > bpl;
+    if (nl != bnl) return nl < bnl;
+    r = cmpcube(cube, bcube);
+    if (r) return r < 0;
+    return strcmp(cls[ch][L], cls[ch][bL]) < 0;
+}
+
 void decision_list(void) {
     long labmask[MAXC], rem, bad, cm, bcm, newly;
-    long cube[MAXF], bcube[MAXF];
-    int j, o, L, bL, cnt, bcnt, nl, bnl, have, better, r, i, g;
-    for (j = 0; j < ncl[0]; j = j + 1) labmask[j] = 0;
-    for (j = 0; j < nq; j = j + 1) labmask[qlab[j]] = labmask[qlab[j]] | bit(j);
+    long cube[MAXF], bcube[MAXF], ncube[MAXF], sup[MAXF];
+    int j, o, L, bL, cnt, bcnt, nl, bnl, have, i, g, pl, bpl, t, ok;
+    int nL, ncnt, nnl;
+    for (j = 0; j < ncl[ch]; j = j + 1) labmask[j] = 0;
+    for (j = 0; j < nq; j = j + 1) labmask[qlab[ch][j]] = labmask[qlab[ch][j]] | bit(j);
     rem = ALL;
     nr = 0;
-    bL = 0; bcnt = 0; bnl = 0; bcm = 0;
+    bL = 0; bcnt = 0; bnl = 0; bcm = 0; bpl = 0;
+    nL = 0; ncnt = 0; nnl = 0;
     while (rem) {
         have = 0;
         for (j = 0; j < nq; j = j + 1) {
             if (!((rem >> j) & 1)) continue;
-            L = qlab[j];
+            L = qlab[ch][j];
             bad = rem & ~labmask[L];
             for (o = 0; o < nord; o = o + 1) {
                 cm = expand(qk[j], bad, ORD[o], cube);
                 cnt = popc(cm & rem);
                 nl = nlits(cube);
-                better = 0;
-                if (!have || cnt > bcnt) better = 1;
-                else if (cnt == bcnt) {
-                    if (nl < bnl) better = 1;
-                    else if (nl == bnl) {
-                        r = cmpcube(cube, bcube);
-                        if (r < 0 || (r == 0 && strcmp(cls[0][L], cls[0][bL]) < 0)) better = 1;
-                    }
+                pl = npool ? inpool(cube) : 0;
+                if (!have || betterthan(cnt, pl, nl, cube, L, bcnt, bpl, bnl, bcube, bL)) {
+                    bcnt = cnt; bpl = pl; bnl = nl; bL = L; bcm = cm; cpcube(bcube, cube);
                 }
-                if (better) { have = 1; bcnt = cnt; bnl = nl; bL = L; bcm = cm; cpcube(bcube, cube); }
+                /* trace only: the same choice with the pool flag held at 0 */
+                if (!have || betterthan(cnt, 0, nl, cube, L, ncnt, 0, nnl, ncube, nL)) {
+                    ncnt = cnt; nnl = nl; nL = L; cpcube(ncube, cube);
+                }
+                have = 1;
             }
         }
+        if (bL != nL || !samecube(bcube, ncube)) ttie = ttie + 1;
         newly = bcm & rem;
         if (nr >= MAXR) die("more rules than this constructor holds");
         /* REDUCE: the supercube of the keys this rule claims */
         for (i = 0; i < nf; i = i + 1) {
-            rc[nr][i] = 0;
-            for (g = 0; g < ng[i]; g = g + 1) if (qmask[i][g] & newly) rc[nr][i] = rc[nr][i] | bit(g);
+            sup[i] = 0;
+            for (g = 0; g < ng[i]; g = g + 1) if (qmask[i][g] & newly) sup[i] = sup[i] | bit(g);
+        }
+        cpcube(rc[nr], sup);
+        /* T4: align to the first pool cube with sup <= pc <= prime */
+        for (t = 0; t < npool; t = t + 1) {
+            ok = 1;
+            for (i = 0; i < nf; i = i + 1)
+                if ((sup[i] & ~pool[t][i]) || (pool[t][i] & ~bcube[i])) ok = 0;
+            if (ok) {
+                if (!samecube(pool[t], sup)) talign = talign + 1;
+                cpcube(rc[nr], pool[t]);
+                break;
+            }
         }
         rl[nr] = bL;
         nr = nr + 1;
@@ -451,13 +496,13 @@ void ranks(void) {
             if (nfire[j] < 2) continue;
             w = fire[j][0];
             cstar = rl[w];
-            for (c = 0; c < ncl[0]; c = c + 1) { z[c] = 0; zs[c] = 0; }
+            for (c = 0; c < ncl[ch]; c = c + 1) { z[c] = 0; zs[c] = 0; }
             for (t = 0; t < nfire[j]; t = t + 1) {
                 c = rl[fire[j][t]];
                 z[c] = z[c] + bit(lv[fire[j][t]]);
                 zs[c] = 1;
             }
-            for (c = 0; c < ncl[0]; c = c + 1) {
+            for (c = 0; c < ncl[ch]; c = c + 1) {
                 if (!zs[c] || c == cstar || z[c] < z[cstar]) continue;
                 ng2 = 0;
                 for (t = 0; t < nfire[j]; t = t + 1)
@@ -485,7 +530,7 @@ int newunit(int ci, long *cube) {
     int u = cn[ci], c;
     if (u >= MAXU) die("more units than this constructor holds");
     cpcube(ccube[ci * MAXU + u], cube);
-    for (c = 0; c < ncl[0]; c = c + 1) cw[ci * MAXU + u][c] = 0;
+    for (c = 0; c < MAXC; c = c + 1) cw[ci * MAXU + u][c] = 0;
     cn[ci] = u + 1;
     return u;
 }
@@ -533,15 +578,15 @@ int headfail(int ci, int *badj) {
     int u, j, c, nb = 0, cntmx, arg;
     for (u = 0; u < cn[ci]; u = u + 1) m[u] = cubemask(ccube[ci * MAXU + u]);
     for (j = 0; j < nq; j = j + 1) {
-        for (c = 0; c < ncl[0]; c = c + 1) z[c] = 0;
+        for (c = 0; c < ncl[ch]; c = c + 1) z[c] = 0;
         for (u = 0; u < cn[ci]; u = u + 1)
             if ((m[u] >> j) & 1)
-                for (c = 0; c < ncl[0]; c = c + 1) z[c] = z[c] + cw[ci * MAXU + u][c];
+                for (c = 0; c < ncl[ch]; c = c + 1) z[c] = z[c] + cw[ci * MAXU + u][c];
         mx = z[0]; arg = 0;
-        for (c = 1; c < ncl[0]; c = c + 1) if (z[c] > mx) { mx = z[c]; arg = c; }
+        for (c = 1; c < ncl[ch]; c = c + 1) if (z[c] > mx) { mx = z[c]; arg = c; }
         cntmx = 0;
-        for (c = 0; c < ncl[0]; c = c + 1) if (z[c] == mx) cntmx = cntmx + 1;
-        if (cntmx != 1 || arg != qlab[j]) { badj[nb] = j; nb = nb + 1; }
+        for (c = 0; c < ncl[ch]; c = c + 1) if (z[c] == mx) cntmx = cntmx + 1;
+        if (cntmx != 1 || arg != qlab[ch][j]) { badj[nb] = j; nb = nb + 1; }
     }
     return nb;
 }
@@ -550,7 +595,7 @@ int headfail(int ci, int *badj) {
 long rankset(long s) {
     long r = 0;
     int c;
-    for (c = 0; c < ncl[0]; c = c + 1) if ((s >> c) & 1) r = r | bit(crank[c]);
+    for (c = 0; c < ncl[ch]; c = c + 1) if ((s >> c) & 1) r = r | bit(crank[ch][c]);
     return r;
 }
 
@@ -595,7 +640,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
             x = -1;
             for (t = 0; t < ngv; t = t + 1) if (gcode[t] == code) { x = t; break; }
             if (x < 0) { x = ngv; gcode[x] = code; gcls[x] = 0; ngv = ngv + 1; }
-            gcls[x] = gcls[x] | bit(qlab[j]);
+            gcls[x] = gcls[x] | bit(qlab[ch][j]);
         }
         if (ngv == 0) return 0;
         nbk = 0;
@@ -646,7 +691,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
                 }
                 u = newunit(ci, sets);
                 wmask = bcls[b];
-                for (i = 0; i < ncl[0]; i = i + 1) if ((wmask >> i) & 1) cw[ci * MAXU + u][i] = 1;
+                for (i = 0; i < ncl[ch]; i = i + 1) if ((wmask >> i) & 1) cw[ci * MAXU + u][i] = 1;
                 s = e;
             }
         }
@@ -663,44 +708,173 @@ int rep_factored(int ci, int pi, int merge, int k) {
             for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXU + u], sets)) cnt = 1;
             if (cnt) return 0;
             u = newunit(ci, sets);
-            cw[ci * MAXU + u][qlab[j]] = bit(k + 2);
+            cw[ci * MAXU + u][qlab[ch][j]] = bit(k + 2);
         }
     }
     return 0;
 }
 
-int total_units(int ci) {
-    int u, v, n = 0, dup;
-    for (u = 0; u < cn[ci]; u = u + 1) {
-        dup = 0;
-        for (v = 0; v < u; v = v + 1) if (samecube(ccube[ci * MAXU + u], ccube[ci * MAXU + v])) { dup = 1; break; }
-        if (!dup) n = n + 1;
+/* ------------------------------------------ per head: candidates, pick -- */
+/* cands[hn] of build_net: head h's candidates are slots hc[h][0..nhc[h]-1];
+   slot hc[h][0] is the decision-list representation.  dl_rules[hn] is kept
+   per head (hnr, hrc, hrl, hlv) because T4 rebuilds it and the factored
+   candidates read it. */
+int hc[MAXH][MAXCAND];
+int nhc[MAXH];
+int hnr[MAXH];
+long hrc[MAXH * MAXR][MAXF];
+int hrl[MAXH][MAXR];
+int hlv[MAXH][MAXR];
+int chosen[MAXH];
+int tpickmoved;              /* trace: starts whose pick moved a head */
+int tsel;                    /* trace: selections made */
+
+void saverules(int h) {
+    int r;
+    hnr[h] = nr;
+    for (r = 0; r < nr; r = r + 1) { cpcube(hrc[h * MAXR + r], rc[r]); hrl[h][r] = rl[r]; hlv[h][r] = lv[r]; }
+}
+
+void loadrules(int h) {
+    int r;
+    nr = hnr[h];
+    for (r = 0; r < nr; r = r + 1) { cpcube(rc[r], hrc[h * MAXR + r]); rl[r] = hrl[h][r]; lv[r] = hlv[h][r]; }
+}
+
+long ucube[MAXU][MAXF];      /* scratch for total_units, then the net's units */
+
+/* total_units(sel): distinct cubes over every head's selected candidate */
+int total_units(int *sel) {
+    int h, u, v, ci, n = 0, dup;
+    for (h = 0; h < nh; h = h + 1) {
+        ci = hc[h][sel[h]];
+        for (u = 0; u < cn[ci]; u = u + 1) {
+            dup = 0;
+            for (v = 0; v < n; v = v + 1) if (samecube(ucube[v], ccube[ci * MAXU + u])) { dup = 1; break; }
+            if (!dup) {
+                if (n >= MAXU) die("more units than this constructor holds");
+                cpcube(ucube[n], ccube[ci * MAXU + u]);
+                n = n + 1;
+            }
+        }
     }
     return n;
 }
 
-int pick(int chosen) {
-    int pass, bi, bv, i, v;
+int candlen(int h, int i) { return cn[hc[h][i]]; }
+
+/* build_net's pick: up to five passes over the heads, each head moving to the
+   candidate with fewer total units (ties: the shorter candidate).  Returns
+   whether it moved anything (trace only). */
+int pick(int *sel) {
+    int pass, h, bi, bv, i, v, moved, any = 0;
+    int trial[MAXH];
     for (pass = 0; pass < 5; pass = pass + 1) {
-        bi = chosen; bv = total_units(chosen);
-        for (i = 0; i < ncand; i = i + 1) {
-            if (i == chosen) continue;
-            v = total_units(i);
-            if (v < bv || (v == bv && cn[i] < cn[bi])) { bi = i; bv = v; }
+        moved = 0;
+        for (h = 0; h < nh; h = h + 1) {
+            bi = sel[h]; bv = total_units(sel);
+            for (i = 0; i < nhc[h]; i = i + 1) {
+                if (i == sel[h]) continue;
+                for (v = 0; v < nh; v = v + 1) trial[v] = sel[v];
+                trial[h] = i;
+                v = total_units(trial);
+                if (v < bv || (v == bv && candlen(h, i) < candlen(h, bi))) { bi = i; bv = v; }
+            }
+            if (bi != sel[h]) { sel[h] = bi; moved = 1; any = 1; }
         }
-        if (bi == chosen) break;
-        chosen = bi;
+        if (!moved) break;
     }
-    return chosen;
+    return any;
+}
+
+int sumlen(int *sel) {
+    int h, n = 0;
+    for (h = 0; h < nh; h = h + 1) n = n + candlen(h, sel[h]);
+    return n;
+}
+
+/* chosen = min(pick(start) for start in starts) by (total units, summed
+   length), first minimum wins; starts: all dlist, then per head its
+   shortest candidate (first shortest) with the others at 0 */
+void selectall(void) {
+    int s, h, i, sel[MAXH], best[MAXH], have = 0, bt = 0, bl = 0, t, l, m;
+    tsel = tsel + 1;
+    for (s = 0; s <= nh; s = s + 1) {
+        for (h = 0; h < nh; h = h + 1) sel[h] = 0;
+        if (s > 0) {
+            h = s - 1; m = 0;
+            for (i = 1; i < nhc[h]; i = i + 1) if (candlen(h, i) < candlen(h, m)) m = i;
+            sel[h] = m;
+        }
+        if (pick(sel)) tpickmoved = tpickmoved + 1;
+        t = total_units(sel); l = sumlen(sel);
+        if (dbg && nh > 1) {
+            printf("pick %d:", s);
+            for (h = 0; h < nh; h = h + 1) printf(" %d", sel[h]);
+            printf(" units %d len %d\n", t, l);
+        }
+        if (!have || t < bt || (t == bt && l < bl)) {
+            have = 1; bt = t; bl = l;
+            for (h = 0; h < nh; h = h + 1) best[h] = sel[h];
+        }
+    }
+    for (h = 0; h < nh; h = h + 1) chosen[h] = best[h];
+    if (dbg && nh > 1) {
+        printf("chosen:");
+        for (h = 0; h < nh; h = h + 1) printf(" %d", chosen[h]);
+        printf(" units %d\n", bt);
+    }
+}
+
+void prrules(int npl) {
+    int j;
+    if (nh > 1) printf("dl %s pool %d rules %d\n", hname[ch], npl, nr);
+    for (j = 0; j < nr; j = j + 1) {
+        printf("rule %d:", j);
+        prcube(rc[j]);
+        printf(" => %s rank %d", cls[ch][rl[j]], lv[j]);
+        if (nh > 1 && npl && inpool(rc[j])) printf(" pool");
+        printf("\n");
+    }
+}
+
+void prcands(void) {
+    int h, i;
+    printf("select\n");
+    for (h = 0; h < nh; h = h + 1) {
+        printf("cands %s:", hname[h]);
+        for (i = 0; i < nhc[h]; i = i + 1) printf(" %d", candlen(h, i));
+        printf("\n");
+    }
+}
+
+/* T5 candidates of head ch from the rules in rc/rl (dl_rules[hn]); kept only
+   when shorter than the head's dlist candidate */
+void factored(void) {
+    int pi, mg, k, lim;
+    lim = nr < 9 ? nr : 9;
+    for (pi = 0; pi < nparts; pi = pi + 1)
+        for (mg = 0; mg < 2; mg = mg + 1)
+            for (k = 0; k < lim; k = k + 1) {
+                if (ncand >= MAXCAND || nhc[ch] >= MAXCAND) die("more candidates than this constructor holds");
+                if (rep_factored(ncand, pi, mg, k) && cn[ncand] < cn[hc[ch][0]]) {
+                    hc[ch][nhc[ch]] = ncand; nhc[ch] = nhc[ch] + 1;
+                    ncand = ncand + 1;
+                }
+            }
 }
 
 /* ------------------------------------------------------------- the net ---- */
 int H;
-long ucube[MAXU][MAXF];
 int offs[MAXF];
 int h0;
 int b1[MAXU];
-long W2[MAXU][MAXC];
+long W2[MAXH * MAXU][MAXC];  /* head h, unit j at row h * MAXU + j */
+int tunits;                  /* trace: summed length of the chosen candidates */
+int trounds;                 /* trace: T4 rounds run */
+int tacc;                    /* trace: T4 decision lists accepted */
+int trej;                    /* trace: T4 decision lists rejected (longer) */
+int tchg;                    /* trace: accepted lists that differ from the old */
 
 int w1(int i, int v, int j) {
     if (ucube[j][i] == FULL[i]) return 0;
@@ -709,17 +883,89 @@ int w1(int i, int v, int j) {
 
 long mxlog;
 
-/* Build the net for one gold table: the reader, T1-T5, the net, then the
-   verifier and the deployment invariants over the full original domain. */
+int samerules(int h) {
+    int r;
+    if (nr != hnr[h]) return 0;
+    for (r = 0; r < nr; r = r + 1)
+        if (!samecube(rc[r], hrc[h * MAXR + r]) || rl[r] != hrl[h][r]) return 0;
+    return 1;
+}
+
+long pall[MAXU][MAXF];
+long ptmp[MAXF];
+
+/* T4 (build_net, `share and len(heads) > 1`): up to three rounds; each
+   rebuilds every head's decision list with the pool of cubes the chosen
+   candidates pay for, minus the head's own dlist cubes; a list no longer
+   than the old one replaces it (its factored candidates are appended);
+   then re-select.  A round with no replacement ends it. */
+void share(void) {
+    int nall, round, h, u, v, ci, dup, improved, t, a;
+    for (round = 0; round < 3; round = round + 1) {
+        nall = 0;
+        for (h = 0; h < nh; h = h + 1) {
+            ci = hc[h][chosen[h]];
+            for (u = 0; u < cn[ci]; u = u + 1) {
+                dup = 0;
+                for (v = 0; v < nall; v = v + 1) if (samecube(pall[v], ccube[ci * MAXU + u])) { dup = 1; break; }
+                if (!dup) {
+                    if (nall >= MAXU) die("more units than this constructor holds");
+                    cpcube(pall[nall], ccube[ci * MAXU + u]);
+                    nall = nall + 1;
+                }
+            }
+        }
+        trounds = trounds + 1;
+        improved = 0;
+        for (h = 0; h < nh; h = h + 1) {
+            ch = h;
+            /* pool = the round's cubes that are not in this head's dlist
+               candidate, sorted by cube_key */
+            ci = hc[h][0];
+            npool = 0;
+            for (v = 0; v < nall; v = v + 1) {
+                dup = 0;
+                for (u = 0; u < cn[ci]; u = u + 1) if (samecube(pall[v], ccube[ci * MAXU + u])) { dup = 1; break; }
+                if (!dup) { cpcube(pool[npool], pall[v]); npool = npool + 1; }
+            }
+            for (a = 1; a < npool; a = a + 1) {
+                t = a;
+                while (t > 0 && cmpcube(pool[t - 1], pool[t]) > 0) {
+                    cpcube(ptmp, pool[t]); cpcube(pool[t], pool[t - 1]); cpcube(pool[t - 1], ptmp);
+                    t = t - 1;
+                }
+            }
+            decision_list();
+            ranks();
+            if (dbg) prrules(npool);
+            npool = 0;
+            if (nr <= hnr[h]) {
+                if (!samerules(h)) tchg = tchg + 1;
+                tacc = tacc + 1;
+                saverules(h);
+                rep_from_dl(hc[h][0]);
+                improved = 1;
+                factored();
+            } else trej = trej + 1;
+        }
+        if (!improved) break;
+        if (dbg) prcands();
+        selectall();
+    }
+}
+
+/* Build the net for one gold table: the reader, T1-T5 per head, pick, T4,
+   the net, then the verifier and the deployment invariants over the full
+   original domain. */
 void build(char *path) {
-    int k, j, pi, mg, i, u, c, s0, s1, a, b, chosen, found, v, arg, cntmx, bad, lim, t;
+    int k, j, h, i, u, c, a, b, found, v, arg, cntmx, bad, t, ci;
     long z[MAXC], mx, mn, hv;
     load(path);
-    if (nh != 1) die("multi-head stages are not in this slice");
     domain();
     orders();
-    decision_list();
-    ranks();
+    partitions();
+    ncand = 0; npool = 0; tunits = 0;
+    talign = 0; ttie = 0; tpickmoved = 0; tsel = 0; trounds = 0; tacc = 0; trej = 0; tchg = 0;
     if (dbg) {
         for (i = 0; i < nf; i = i + 1) {
             printf("groups %d:", i);
@@ -732,47 +978,43 @@ void build(char *path) {
             }
             printf("\n");
         }
-        for (j = 0; j < nr; j = j + 1) {
-            printf("rule %d:", j);
-            prcube(rc[j]);
-            printf(" => %s rank %d\n", cls[0][rl[j]], lv[j]);
-        }
     }
-    ncand = 1;
-    rep_from_dl(0);
-    partitions();
-    lim = nr < 9 ? nr : 9;
-    for (pi = 0; pi < nparts; pi = pi + 1)
-        for (mg = 0; mg < 2; mg = mg + 1)
-            for (k = 0; k < lim; k = k + 1) {
-                if (ncand >= MAXCAND) die("more candidates than this constructor holds");
-                if (rep_factored(ncand, pi, mg, k) && cn[ncand] < cn[0]) ncand = ncand + 1;
-            }
-    /* starts: all dlist, then the shortest candidate; min by (units, length) */
-    s1 = 0;
-    for (i = 1; i < ncand; i = i + 1) if (cn[i] < cn[s1]) s1 = i;
-    a = pick(0);
-    b = pick(s1);
-    chosen = a;
-    if (total_units(b) < total_units(a) || (total_units(b) == total_units(a) && cn[b] < cn[a])) chosen = b;
-    s0 = chosen;
+    for (h = 0; h < nh; h = h + 1) {
+        ch = h;
+        decision_list();
+        ranks();
+        if (dbg) prrules(0);
+        saverules(h);
+        hc[h][0] = ncand; nhc[h] = 1; ncand = ncand + 1;
+        rep_from_dl(hc[h][0]);
+        factored();
+    }
+    if (dbg && nh > 1) prcands();
+    selectall();
+    if (nh > 1) share();
+    /* the net: units in head order, each cube once; W2 per head */
     H = 0;
-    for (u = 0; u < cn[s0]; u = u + 1) {
-        found = -1;
-        for (j = 0; j < H; j = j + 1) if (samecube(ucube[j], ccube[s0 * MAXU + u])) { found = j; break; }
-        if (found < 0) {
-            found = H;
-            cpcube(ucube[H], ccube[s0 * MAXU + u]);
-            for (c = 0; c < ncl[0]; c = c + 1) W2[H][c] = 0;
-            b1[H] = -(nlits(ucube[H]) - 1);
-            H = H + 1;
+    for (h = 0; h < nh; h = h + 1) {
+        ci = hc[h][chosen[h]];
+        tunits = tunits + cn[ci];
+        for (u = 0; u < cn[ci]; u = u + 1) {
+            found = -1;
+            for (j = 0; j < H; j = j + 1) if (samecube(ucube[j], ccube[ci * MAXU + u])) { found = j; break; }
+            if (found < 0) {
+                if (H >= MAXU) die("more units than this constructor holds");
+                found = H;
+                cpcube(ucube[H], ccube[ci * MAXU + u]);
+                for (a = 0; a < nh; a = a + 1) for (c = 0; c < MAXC; c = c + 1) W2[a * MAXU + H][c] = 0;
+                b1[H] = -(nlits(ucube[H]) - 1);
+                H = H + 1;
+            }
+            for (c = 0; c < ncl[h]; c = c + 1) if (cw[ci * MAXU + u][c]) W2[h * MAXU + found][c] = cw[ci * MAXU + u][c];
         }
-        for (c = 0; c < ncl[0]; c = c + 1) if (cw[s0 * MAXU + u][c]) W2[found][c] = cw[s0 * MAXU + u][c];
     }
     h0 = 0;
     for (i = 0; i < nf; i = i + 1) { offs[i] = h0; h0 = h0 + nv[i]; }
     if (dbg) {
-        printf("kind %s %s\n", hname[0], s0 ? "factored" : "dlist");
+        for (h = 0; h < nh; h = h + 1) printf("kind %s %s\n", hname[h], chosen[h] ? "factored" : "dlist");
         for (j = 0; j < H; j = j + 1) { printf("unit %d:", j); prcube(ucube[j]); printf("\n"); }
     }
     /* test entry (check.sh only): -T bias breaks b1 of unit 0; -T act breaks
@@ -784,7 +1026,8 @@ void build(char *path) {
     /* deployment invariant 2, checked BEFORE the semantic enumeration so a
        bias fault is reported as one (exit 3), not as "not exact": uns2.load
        does not store b1, it derives b1 = 1 - (fields the unit's W1 touches);
-       the net must agree */
+       the net must agree.  W1 and b1 are ONE layer that every head shares
+       (T4), so the invariant is per unit and covers all heads at once. */
     for (j = 0; j < H && tbreak != 2; j = j + 1) {
         t = 0;
         for (i = 0; i < nf; i = i + 1) {
@@ -797,38 +1040,67 @@ void build(char *path) {
             exit(3);
         }
     }
-    /* verify over the FULL original domain; measure maxlogit as verify_int does */
+    /* verify over the FULL original domain, every head; maxlogit as verify_int */
     mxlog = 0;
     bad = 0;
     for (k = 0; k < nok; k = k + 1) {
-        for (c = 0; c < ncl[0]; c = c + 1) z[c] = 0;
-        for (j = 0; j < H; j = j + 1) {
-            hv = b1[j];
-            for (i = 0; i < nf; i = i + 1) hv = hv + w1(i, odigit(k, i), j);
-            /* deployment invariant 1: the deployed IntNet adds W2 once when
-               hv > 0, the verifier adds hv * W2; equal only for hv in {0,1} */
-            if (hv > 1) {
-                printf("construct: %s: deployment invariant broken: unit %d activation %ld on key %d (must be 0 or 1)\n", path, j, hv, k);
-                exit(3);
+        for (h = 0; h < nh; h = h + 1) {
+            for (c = 0; c < ncl[h]; c = c + 1) z[c] = 0;
+            for (j = 0; j < H; j = j + 1) {
+                hv = b1[j];
+                for (i = 0; i < nf; i = i + 1) hv = hv + w1(i, odigit(k, i), j);
+                /* deployment invariant 1: the deployed IntNet adds W2 once when
+                   hv > 0, the verifier adds hv * W2; equal only for hv in {0,1} */
+                if (hv > 1) {
+                    printf("construct: %s: deployment invariant broken: unit %d activation %ld on key %d (must be 0 or 1)\n", path, j, hv, k);
+                    exit(3);
+                }
+                if (hv > 0) for (c = 0; c < ncl[h]; c = c + 1) z[c] = z[c] + hv * W2[h * MAXU + j][c];
             }
-            if (hv > 0) for (c = 0; c < ncl[0]; c = c + 1) z[c] = z[c] + hv * W2[j][c];
+            mx = z[0]; mn = z[0]; arg = 0;
+            for (c = 1; c < ncl[h]; c = c + 1) {
+                if (z[c] > mx) { mx = z[c]; arg = c; }
+                if (z[c] < mn) mn = z[c];
+            }
+            if ((mx < 0 ? -mx : mx) > mxlog) mxlog = mx < 0 ? -mx : mx;
+            if (mn < -mxlog) mxlog = -mn;
+            cntmx = 0;
+            for (c = 0; c < ncl[h]; c = c + 1) if (z[c] == mx) cntmx = cntmx + 1;
+            if (cntmx != 1 || arg != olab[k][h]) bad = bad + 1;
         }
-        mx = z[0]; mn = z[0]; arg = 0;
-        for (c = 1; c < ncl[0]; c = c + 1) {
-            if (z[c] > mx) { mx = z[c]; arg = c; }
-            if (z[c] < mn) mn = z[c];
-        }
-        if ((mx < 0 ? -mx : mx) > mxlog) mxlog = mx < 0 ? -mx : mx;
-        if (mn < -mxlog) mxlog = -mn;
-        cntmx = 0;
-        for (c = 0; c < ncl[0]; c = c + 1) if (z[c] == mx) cntmx = cntmx + 1;
-        if (cntmx != 1 || arg != olab[k][0]) bad = bad + 1;
     }
     if (bad) { printf("construct: %s: construction not exact (%d wrong)\n", path, bad); exit(1); }
 }
 
+/* -t: which branches of the multi-head code this stage took (not compared
+   with Python; a debug print) */
+void trace(void) {
+    int h, ci, r, u, v, x, hit;
+    for (h = 0; h < nh; h = h + 1) {
+        ci = hc[h][chosen[h]];
+        printf("trace head %s: %d candidates, chose %d (%s), %d units\n", hname[h], nhc[h],
+               chosen[h], chosen[h] ? "factored" : "dlist", cn[ci]);
+        loadrules(h);
+        x = 0;
+        for (r = 0; r < nr; r = r + 1) {
+            hit = 0;
+            for (v = 0; v < nh; v = v + 1) {
+                if (v == h) continue;
+                for (u = 0; u < cn[hc[v][chosen[v]]]; u = u + 1)
+                    if (samecube(rc[r], ccube[hc[v][chosen[v]] * MAXU + u])) hit = 1;
+            }
+            x = x + hit;
+        }
+        printf("trace head %s: %d of %d final rules are cubes another head also uses\n", hname[h], x, nr);
+    }
+    printf("trace selections %d, starts whose pick moved a head %d\n", tsel, tpickmoved);
+    printf("trace T4 rounds %d, lists accepted %d (changed %d), rejected %d\n", trounds, tacc, tchg, trej);
+    printf("trace T4 REDUCE aligned to a pool cube %d, pool flag changed a rule's choice %d\n", talign, ttie);
+    printf("trace units: chosen candidates sum %d, net H %d, merged across heads %d\n", tunits, H, tunits - H);
+}
+
 void canon(void) {
-    int i, j, c, v;
+    int i, j, c, v, h;
     /* the canonical form: intnet.to_dict's fields, in its order */
     printf("stage %s\n", sname);
     printf("H %d\n", H);
@@ -836,20 +1108,26 @@ void canon(void) {
     for (i = 0; i < nf; i = i + 1) printf(" %d", offs[i]);
     printf("\nb1");
     for (j = 0; j < H; j = j + 1) printf(" %d", b1[j]);
-    printf("\nhead %s", hname[0]);
-    for (c = 0; c < ncl[0]; c = c + 1) printf(" %s", cls[0][c]);
-    printf("\nfeeds %d\n", h0);
+    printf("\n");
+    for (h = 0; h < nh; h = h + 1) {
+        printf("head %s", hname[h]);
+        for (c = 0; c < ncl[h]; c = c + 1) printf(" %s", cls[h][c]);
+        printf("\n");
+    }
+    printf("feeds %d\n", h0);
     for (i = 0; i < nf; i = i + 1)
         for (v = 0; v < nv[i]; v = v + 1) {
             printf("f %d:", offs[i] + v);
             for (j = 0; j < H; j = j + 1) if (w1(i, v, j)) printf(" %d", j);
             printf("\n");
         }
-    printf("w2 %s\n", hname[0]);
-    for (j = 0; j < H; j = j + 1) {
-        printf("r %d:", j);
-        for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c]) printf(" %d,%ld", c, W2[j][c]);
-        printf("\n");
+    for (h = 0; h < nh; h = h + 1) {
+        printf("w2 %s\n", hname[h]);
+        for (j = 0; j < H; j = j + 1) {
+            printf("r %d:", j);
+            for (c = 0; c < ncl[h]; c = c + 1) if (W2[h * MAXU + j][c]) printf(" %d,%ld", c, W2[h * MAXU + j][c]);
+            printf("\n");
+        }
     }
     printf("maxlogit %ld\n", mxlog);
     printf("exact %d\n", nok);
@@ -906,7 +1184,7 @@ void tflush(void) {
 int bitlen(long x) { int n = 0; while (x) { x = x >> 1; n = n + 1; } return n; }
 
 void section(int s) {
-    int i, j, v, c, n, cb, wb, sl;
+    int i, j, v, c, n, cb, wb, sl, h;
     long mw;
     cur = sec[s]; clen = 0; ccap = SECSZ;
     sl = (int)strlen(sname);
@@ -923,21 +1201,23 @@ void section(int s) {
         for (i = 0; i < nf; i = i + 1)
             for (v = 0; v < nv[i]; v = v + 1) tput(w1(i, v, j), 1);
     tflush();
-    mw = 0;
-    for (j = 0; j < H; j = j + 1) for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c] > mw) mw = W2[j][c];
-    if (mw == 0) mw = 1;
-    wb = bitlen(mw); if (wb < 1) wb = 1;
-    cb = bitlen(ncl[0] - 1); if (cb < 1) cb = 1;
-    out16(ncl[0]); outb(wb); outb(0);
-    tstart();
-    for (j = 0; j < H; j = j + 1) {
-        n = 0;
-        for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c]) n = n + 1;
-        if (n >= 256) die("a unit has 256 or more W2 entries");
-        tput(n, 8);
-        for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c]) { tput(c, cb); tput(W2[j][c], wb); }
+    for (h = 0; h < nh; h = h + 1) {
+        mw = 0;
+        for (j = 0; j < H; j = j + 1) for (c = 0; c < ncl[h]; c = c + 1) if (W2[h * MAXU + j][c] > mw) mw = W2[h * MAXU + j][c];
+        if (mw == 0) mw = 1;
+        wb = bitlen(mw); if (wb < 1) wb = 1;
+        cb = bitlen(ncl[h] - 1); if (cb < 1) cb = 1;
+        out16(ncl[h]); outb(wb); outb(0);
+        tstart();
+        for (j = 0; j < H; j = j + 1) {
+            n = 0;
+            for (c = 0; c < ncl[h]; c = c + 1) if (W2[h * MAXU + j][c]) n = n + 1;
+            if (n >= 256) die("a unit has 256 or more W2 entries");
+            tput(n, 8);
+            for (c = 0; c < ncl[h]; c = c + 1) if (W2[h * MAXU + j][c]) { tput(c, cb); tput(W2[h * MAXU + j][c], wb); }
+        }
+        tflush();
     }
-    tflush();
     seclen[s] = clen;
 }
 
@@ -972,6 +1252,7 @@ int main(int argc, char **argv) {
     dbg = 0;
     for (ai = 1; ai < argc; ai = ai + 1) {
         if (streq(argv[ai], "-d")) dbg = 1;
+        else if (streq(argv[ai], "-t")) tflag = 1;
         else if (streq(argv[ai], "-T") && ai + 1 < argc) {
             ai = ai + 1;
             if (streq(argv[ai], "bias")) tbreak = 1;
@@ -994,6 +1275,6 @@ int main(int argc, char **argv) {
     }
     if (!path) { printf("usage: construct [-d] <stage>.tsv | construct -u out.uns2 <stage>.tsv...\n"); return 2; }
     build(path);
-    canon();
+    if (tflag) trace(); else canon();
     return 0;
 }
