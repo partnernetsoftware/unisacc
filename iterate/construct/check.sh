@@ -29,58 +29,124 @@ parse parse t i
 type type t i
 abi abi t i
 irsel irsel t i
-isel isel t i'
+isel isel t i
+combo combo t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
 GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capk4 capkn capn capo capg capgn capc capcn capcf capu capun capp"
-# batch mode: each batch is "stages|global"; the union is checked below
-# type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
+# THE required-check list (need) is one function, used by the full run's
+# summary, by a PARTS sub-run, and by the --batches parent that aggregates
+# per-check receipts of split stages.  partof maps a stage mark to its kind:
+#   dump  = the -d dumps (cc, ua) and the UBSan dump/UNS2 check
+#   uns2  = UNS2 blob, shipped section, deployed round trip
+#   trace = the -t trace and the invariant negatives
+need() {    # need stage <s> | need global <g>: the required pass marks
+    if [ $1 = stage ]; then s=$2
+        for b in cc ua; do echo "s $s dump $b"; echo "s $s uns2 $b"; echo "s $s shipped $b"; echo "s $s round $b"; done
+        echo "s $s ubsan"
+        echo "$TABLE" | while read -r n tag tr iv; do [ $n = $s ] || continue
+            [ $tr = t ] && echo "s $s trace"
+            [ $iv = i ] && for t in bias act; do for b in cc ua; do echo "s $s inv $t $b"; done; done; done
+        return
+    fi
+    g=$2
+    case $g in
+    qset) for b in cc ua san; do echo "g qset $b"; done ;;
+    wset) for b in cc ua san; do echo "g wset $b"; done ;;
+    sum) echo "g sum sites"; for b in cc ua san; do for t in summax sumover sumrun run7; do echo "g sum $t $b"; done; done ;;
+    reader) for n in missing duplicate badlabel extracol badkey; do for b in cc ua; do echo "g reader $n $b"; done; done ;;
+    capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
+    capu) for b in cc ua san; do echo "g capu pos $b"; done; echo "g capu round cc"; echo "g capu round ua" ;;
+    capr|capr81) for b in cc ua san; do echo "g $g pos $b"; done; echo "g $g round cc"; echo "g $g round ua" ;;
+    caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
+    capg) for b in cc ua san; do echo "g capg pos $b"; done; echo "g capg round cc"; echo "g capg round ua" ;;
+    capc) for b in cc ua san; do echo "g capc pos $b"; done; echo "g capc round cc"; echo "g capc round ua" ;;
+    capcf) for b in cc ua san; do echo "g capcf pos $b"; done; echo "g capcf round cc"; echo "g capcf round ua"; echo "g capcf trace" ;;
+    *) for b in cc ua san; do echo "g $g $b"; done ;;
+    esac
+}
+partof() { case $3 in dump|ubsan) echo dump ;; uns2|shipped|round) echo uns2 ;; trace|inv) echo trace ;; *) echo "?" ;; esac; }
+KINDS="dump uns2 trace"
+# batch mode: each batch is "stages|global[|kinds]"; the union is checked
+# below.  type alone is ~30 s (its trace/invariants dominate), so it gets
+# its own batch.  combo is SPLIT by kind (its Python references alone are
+# netdump -d ~28 s + uns2slice ~14 s, measured; nothing is cached): a
+# kinds batch runs only those checks and hands back per-check receipts.
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
 pfconv binsel enc opinfo peep parse irsel isel|0
 type|0
-abi|0'
+abi|0
+combo|0|dump
+combo|0|uns2
+combo|0|trace'
 if [ "${1:-}" = --batches ]; then
     shift; UA=${1:-/tmp/ua_ref}
-    ub=$(echo "$BATCHES" | cut -d'|' -f1 | tr ' ' '\n' | sort | tr '\n' ' ')
-    ua=$(echo "$ALL" | tr ' ' '\n' | sort | tr '\n' ' ')
-    ng=$(echo "$BATCHES" | grep -c '|1$')
-    dup=$(echo "$BATCHES" | cut -d'|' -f1 | tr ' ' '\n' | sort | uniq -d)
-    if [ "$ub" != "$ua" ] || [ -n "$dup" ] || [ "$ng" != 1 ]; then
-        echo "batches: union is not the full list plus globals once (union: $ub; globals in $ng batches)"; exit 2
+    # the plan: every (stage, kind) exactly once -- a full batch covers all
+    # kinds of its stages -- and the global checks in exactly one batch
+    plan=$(echo "$BATCHES" | while IFS='|' read -r st gl ks; do
+        for s in $st; do for k in ${ks:-$KINDS}; do echo "$s $k"; done; done; done | sort)
+    full=$(for s in $ALL; do for k in $KINDS; do echo "$s $k"; done; done | sort)
+    ng=$(echo "$BATCHES" | cut -d'|' -f2 | grep -c '^1$')
+    badk=$(echo "$BATCHES" | cut -d'|' -f3 -s | tr ' ' '\n' | grep -v -x -e dump -e uns2 -e trace | grep .)
+    if [ "$plan" != "$full" ] || [ "$ng" != 1 ] || [ -n "$badk" ]; then
+        echo "batches: plan is not every (stage, kind) of the full list plus globals once (globals in $ng batches; bad kinds [$badk])"; exit 2
     fi
-    echo "batches: planned union = all $(echo $ALL | wc -w | tr -d ' ') stages + global checks, each exactly once"
-    # The plan above is not the result.  Each batch must hand back a receipt
-    # ("receipt stage <s>" / "receipt global <g>") for exactly what it was
-    # asked to check -- nothing missing, nothing extra, no duplicates -- and
-    # the receipts of all batches together must be every stage of TABLE and
-    # every global check, each exactly once.  rc 0 without them is a failure.
+    echo "batches: planned union = all $(echo $ALL | wc -w | tr -d ' ') stages x {$KINDS} + global checks, each exactly once"
+    # The plan above is not the result.  A full batch hands back "receipt
+    # stage <s>" / "receipt global <g>"; a kinds batch hands back "receipt
+    # check <mark>" for each mark of need(stage) of those kinds -- never a
+    # stage receipt.  Each batch must return exactly what it was asked for:
+    # nothing missing, nothing extra, no duplicates.  Then the parent
+    # aggregates: a stage without a full receipt gets one from the parent
+    # only if its check receipts over all batches are need(stage) exactly,
+    # each once.  The result must be every stage and global exactly once.
     W=${TMPDIR:-/tmp}/construct_batches.$$; mkdir -p "$W"
     bf=0; n=0; : > "$W/union"
     echo "$BATCHES" > "$W/list"
-    while IFS='|' read -r st gl; do
+    while IFS='|' read -r st gl ks; do
         n=$((n + 1))
         t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-        STAGES=$st GLOBAL=$gl perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "$W/out.$n" 2>&1; rc=$?
+        STAGES=$st GLOBAL=$gl PARTS=${ks:-all} perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "$W/out.$n" 2>&1; rc=$?
         t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
         sed "s/^/[batch $n] /" "$W/out.$n"
         el=$(perl -e "printf '%.1f', $t1 - $t0")
-        echo "batch $n: stages [$st] global $gl: rc $rc, $el s (limit 60 s)"
+        echo "batch $n: stages [$st] global $gl kinds [${ks:-all}]: rc $rc, $el s (limit 60 s)"
         if [ $rc -ne 0 ]; then bf=1; echo "batch $n: FAILED (rc $rc)"; break; fi
-        { for s in $st; do echo "receipt stage $s"; done
+        { for s in $st; do
+              if [ -z "$ks" ]; then echo "receipt stage $s"
+              else need stage $s | while read -r m; do case " $ks " in *" $(partof $m) "*) echo "receipt check $m" ;; esac; done; fi
+          done
           [ "$gl" = 1 ] && for g in $GLOBALS; do echo "receipt global $g"; done; } | sort > "$W/want.$n"
         grep '^receipt ' "$W/out.$n" | sort > "$W/got.$n"
         cat "$W/got.$n" >> "$W/union"
         mis=$(comm -23 "$W/want.$n" "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         ext=$(comm -13 "$W/want.$n" "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         dup=$(uniq -d "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
-        if [ -n "$mis$ext$dup" ]; then bf=1
+        if [ -n "$mis$ext$dup" ] || [ ! -s "$W/got.$n" ]; then bf=1
             echo "batch $n: RECEIPTS WRONG (rc $rc): missing [${mis}] extra [${ext}] duplicate [${dup}]"; break
         fi
         echo "batch $n: receipts $(wc -l < "$W/got.$n" | tr -d ' ') = requested, exactly"
     done < "$W/list"
     if [ $bf = 0 ]; then
+        grep -v '^receipt check ' "$W/union" > "$W/agg"
+        grep '^receipt check ' "$W/union" | sort > "$W/checks"
+        : > "$W/used"
+        for s in $ALL; do
+            grep -qx "receipt stage $s" "$W/agg" && continue
+            need stage $s | sed 's/^/receipt check /' | sort > "$W/need.$s"
+            grep "^receipt check s $s " "$W/checks" > "$W/got.$s"
+            cat "$W/got.$s" >> "$W/used"
+            if [ -s "$W/need.$s" ] && cmp -s "$W/need.$s" "$W/got.$s"; then
+                echo "receipt stage $s" >> "$W/agg"
+                echo "batches: stage $s: receipt aggregated from $(wc -l < "$W/got.$s" | tr -d ' ') check receipts = need(stage $s), each exactly once"
+            else
+                echo "batches: stage $s: no receipt; checks missing [$(comm -23 "$W/need.$s" "$W/got.$s" | sed 's/^receipt check //' | tr '\n' ',')] extra/dup [$(comm -13 "$W/need.$s" "$W/got.$s" | sed 's/^receipt check //' | tr '\n' ',')]"
+            fi
+        done
+        stray=$(sort "$W/used" | comm -13 - "$W/checks" | sed 's/^receipt check //' | tr '\n' ',' | sed 's/,$//')
+        [ -n "$stray" ] && { bf=1; echo "batches: check receipts not consumed by any stage: [$stray]"; }
         { for s in $ALL; do echo "receipt stage $s"; done; for g in $GLOBALS; do echo "receipt global $g"; done; } | sort > "$W/wantall"
-        sort "$W/union" > "$W/gotall"
+        sort "$W/agg" > "$W/gotall"
         mis=$(comm -23 "$W/wantall" "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         ext=$(comm -13 "$W/wantall" "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         dup=$(uniq -d "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
@@ -108,6 +174,14 @@ else
         echo "construct check: empty selection -- no stage and no global check selected (STAGES='${STAGES:-}' GLOBAL='${GLOBAL:-}'); nothing would be checked"; exit 2
     fi
 fi
+# PARTS (default all): the kinds of per-stage checks to run.  A kinds run
+# emits "receipt check <mark>" per passed mark, never a stage receipt, and
+# cannot carry the global checks.
+PARTS=${PARTS:-all}
+for k in $PARTS; do case $k in all|dump|uns2|trace) ;; *) echo "construct check: PARTS: unknown kind '$k' (all $KINDS)"; exit 2 ;; esac; done
+case " $PARTS " in *" all "*) PARTS=all ;; esac
+[ "$PARTS" != all ] && [ $GL = 1 ] && { echo "construct check: PARTS=$PARTS cannot carry the global checks"; exit 2; }
+pt() { case " $PARTS " in " all "|*" $1 "*) return 0 ;; esac; return 1; }
 sel() { case " $SEL " in *" $1 "*) return 0 ;; esac; return 1; }
 stages() { echo "$TABLE" | while read -r n tag tr iv; do sel $n || continue; case $1 in all) echo $n ;; t) [ $tr = t ] && echo $n ;; i) [ $iv = i ] && echo $n ;; esac; done; }
 T=${TMPDIR:-/tmp}/construct_check.$$
@@ -121,31 +195,6 @@ fail=0
 # its item with no receipt, whatever the exit status of anything else.
 PASS=$T/pass; : > "$PASS"
 P() { echo "$1" >> "$PASS"; }
-need() {    # need stage <s> | need global <g>: the required pass marks
-    if [ $1 = stage ]; then s=$2
-        for b in cc ua; do echo "s $s dump $b"; echo "s $s uns2 $b"; echo "s $s shipped $b"; echo "s $s round $b"; done
-        echo "s $s ubsan"
-        echo "$TABLE" | while read -r n tag tr iv; do [ $n = $s ] || continue
-            [ $tr = t ] && echo "s $s trace"
-            [ $iv = i ] && for t in bias act; do for b in cc ua; do echo "s $s inv $t $b"; done; done; done
-        return
-    fi
-    g=$2
-    case $g in
-    qset) for b in cc ua san; do echo "g qset $b"; done ;;
-    wset) for b in cc ua san; do echo "g wset $b"; done ;;
-    sum) echo "g sum sites"; for b in cc ua san; do for t in summax sumover sumrun run7; do echo "g sum $t $b"; done; done ;;
-    reader) for n in missing duplicate badlabel extracol badkey; do for b in cc ua; do echo "g reader $n $b"; done; done ;;
-    capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
-    capu) for b in cc ua san; do echo "g capu pos $b"; done; echo "g capu round cc"; echo "g capu round ua" ;;
-    capr|capr81) for b in cc ua san; do echo "g $g pos $b"; done; echo "g $g round cc"; echo "g $g round ua" ;;
-    caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
-    capg) for b in cc ua san; do echo "g capg pos $b"; done; echo "g capg round cc"; echo "g capg round ua" ;;
-    capc) for b in cc ua san; do echo "g capc pos $b"; done; echo "g capc round cc"; echo "g capc round ua" ;;
-    capcf) for b in cc ua san; do echo "g capcf pos $b"; done; echo "g capcf round cc"; echo "g capcf round ua"; echo "g capcf trace" ;;
-    *) for b in cc ua san; do echo "g $g $b"; done ;;
-    esac
-}
 missing() { need "$@" | while read -r m; do grep -qxF "$m" "$PASS" || printf "[%s] " "$m"; done; }
 B 60 cc -std=c99 -O2 -w -o "$T/c_cc" iterate/construct/construct.c || { echo "cc build failed"; exit 1; }
 B 60 "$UA" -O2 iterate/construct/construct.c -b osx/arm64 -o "$T/c_ua" || { echo "unisacc build failed"; exit 1; }
@@ -197,7 +246,7 @@ for b in cc ua san; do
     [ "$(grep -c '^sum self-test: run: [1-7] x' "$T/sum.sumrun.$b")" = 7 ] && P "g sum run7 $b" || { echo "sum self-test sumrun $b: the 7 terms below the limit did not all succeed"; fail=1; }
 done
 fi
-for s in $(stages all); do
+pt dump && for s in $(stages all); do
     B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py"; prc=$?; [ $prc -eq 0 ] || fail=1
     for b in cc ua; do
         B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b"; rc=$?; [ $rc -eq 0 ] || fail=1
@@ -242,12 +291,12 @@ uns2() {    # uns2 "<stages>" <tag> <tsv>...: the marks go to every stage in the
 for tag in $(echo "$TABLE" | awk '!s[$2]++{print $2}'); do
     ss=$(echo "$TABLE" | while read -r n t x y; do [ $t = $tag ] && sel $n && printf " %s" $n; done)
     f=$(for n in $ss; do printf " weights/gold/%s.tsv" $n; done)
-    [ -n "$f" ] && uns2 "$ss" $tag $f
+    [ -n "$f" ] && pt uns2 && uns2 "$ss" $tag $f
 done
 # the multi-head branch trace (-t): which candidate each head chose, whether
 # pick moved, what T4 did.  A debug print, not compared with Python (the
 # counts were cross-checked once by hand); the two builds must agree.
-for s in $(stages t); do
+pt trace && for s in $(stages t); do
     tf=0; for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || { fail=1; tf=1; }; done
     if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; [ $tf = 0 ] && P "s $s trace"; else echo "$s trace differs between builds"; fail=1; fi
 done
@@ -596,7 +645,7 @@ done
 # invariant 1 is the one reached.  Only exit 3 with that invariant's
 # diagnostic counts.
 fi
-for s in $(stages i); do
+pt trace && for s in $(stages i); do
 for c in "bias|has b1" "act|activation"; do
     t=${c%%|*}; want=${c#*|}
     for b in cc ua; do
@@ -619,6 +668,17 @@ echo "summary: builds cc, ua, ubsan (always)"
 : > "$T/rcpt"; np=0; nf=0; ns=0
 for s in $ALL; do
     if ! sel $s; then echo "summary: stage $s: skipped"; ns=$((ns + 1)); continue; fi
+    if [ "$PARTS" != all ]; then
+        # kinds run: per-check receipts for the marks of those kinds only
+        need stage $s | while read -r m; do pt $(partof $m) && echo "$m"; done > "$T/want.$s"
+        k=0; m=
+        while read -r x; do
+            if grep -qxF "$x" "$PASS"; then echo "receipt check $x" >> "$T/rcpt"; k=$((k + 1)); else m="$m[$x] "; fi
+        done < "$T/want.$s"
+        if [ -z "$m" ] && [ -s "$T/want.$s" ]; then np=$((np + 1)); echo "summary: stage $s: kinds [$PARTS] attempted, passed ($k check receipts, no stage receipt)"
+        else nf=$((nf + 1)); echo "summary: stage $s: kinds [$PARTS] attempted, FAILED; missing $m"; fi
+        continue
+    fi
     neg=none; stages i | grep -qx $s && neg="invariant bias+act"
     tr=; stages t | grep -qx $s && tr=", trace"
     m=$(missing stage $s)

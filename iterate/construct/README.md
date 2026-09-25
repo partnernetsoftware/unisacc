@@ -1028,3 +1028,65 @@ cc -O2).  combo now builds: `construct weights/gold/combo.tsv` (cc -O2)
 exit 0, 0.79 s, maximum resident set 32,292,864 B, peak footprint
 31,785,296 B (one `/usr/bin/time -l` run).  Batches 41.6 / 10.1 / 30.2 /
 15.1 s, 40 receipts (17 stages + 23 globals).
+
+## combo, step 5: acceptance, checks split by kind (2026-09-25)
+
+No construct.c change.  combo is a TABLE row (`combo combo t i`).  Its
+Python references are not cached; its checks are split by kind instead.
+
+check.sh, one required-check list: `need stage <s>` is the only list of
+marks a stage needs (moved above the batch code), and `partof` maps each
+mark to a kind -- `dump` (the -d dumps on cc and unisacc, the UBSan
+dump/UNS2 check), `uns2` (UNS2 blob, shipped section, round trip, cc and
+unisacc), `trace` (the -t trace, the four invariant negatives).
+
+- `PARTS="<kinds>"` (default all) runs only those kinds for the selected
+  stages and emits `receipt check <mark>` for every passed mark of those
+  kinds, never `receipt stage`; it refuses the global checks.
+- `BATCHES` lines are `stages|global[|kinds]`.  The plan must be every
+  (stage, kind) exactly once and the globals in one batch.  Each batch must
+  return exactly the receipts it was asked for (a full batch: stage and
+  global receipts; a kinds batch: the check receipts need() gives for those
+  kinds).  Then the parent aggregates: a stage without a full receipt gets
+  `receipt stage` from the parent only if its check receipts over all
+  batches are need(stage) exactly, each once; leftover check receipts fail.
+  The final union must be every stage and every global exactly once.
+- The full run (no --batches) uses the same need() and still emits one
+  `receipt stage combo` (it is not bounded to 60 s as a whole).
+
+Batch layout (measured, each under `alarm 60`): 41.9 s (7 stages +
+globals), 10.1 s (8 stages), 30.2 s (type), 15.1 s (abi), **44.8 s (combo
+dump: netdump -d ~28 s + cc/unisacc/UBSan)**, **22.3 s (combo uns2:
+uns2slice ~14 s + shipped + round trip)**, **20.0 s (combo trace +
+invariants)**.  14 check receipts aggregate to `receipt stage combo`; union
+41 receipts = 18 stages + 23 globals.
+
+Fault tests (temp copies, combo batches moved first): (1) the child drops
+the invariant marks and exits 0 -> batch RECEIPTS WRONG, missing the four
+`inv` checks; (2) a kinds child also emits `receipt stage combo` -> extra;
+(3) the trace batch removed from the plan -> plan rejected, exit 2; (4) the
+trace child prints no receipts, rc 0 -> missing all five; (5) child AND the
+parent's per-batch request both drop the `inv` marks, so every batch passes
+-> the aggregation refuses combo (`missing inv ...`) and the union lacks
+`stage combo`.  All five exit 1 (3: exit 2).  Also seen: a child that cannot
+be exec'd returns rc 0 with no output and is refused for missing receipts.
+
+combo acceptance (cc -O2, unisacc -O2 osx/arm64, UBSan):
+
+- `-d` **80,910 B**, identical to netdump.py -d on cc and unisacc; UBSan
+  exit 0, no report, same dump; 438 raw / 414 quotient keys.
+- UNS2 **3,224 B** identical to uns2slice.py; section **3,208 B** identical
+  to built.uns2; round trip **438 keys x 15 heads**, unique argmax (cc,
+  unisacc); invariants hold, `-T bias` / `-T act` exit 3 (cc, unisacc).
+- trace (cc = unisacc): symbol 181 candidates, factored 10 chosen (71
+  units, 93 rules); sysno 225 candidates, factored 43 chosen (34 units, 67
+  rules); every other head its dlist.  T5 4 partitions, 2,656 calls, 2,252
+  None, 404 kept; early rejections base 2,196, patch 36.  4 selections, pick
+  moved 64 starts; T4 3 rounds, 45 lists accepted; REDUCE aligned 252; the
+  pool flag changed no choice.  Chosen units 174, **H 99** (75 merged).
+- the 17 earlier stages are unchanged (their receipts in the same run;
+  construct.c is the step-4 file, whose outputs match the step-2 baseline).
+
+18/18 is **per-stage** acceptance only.  Writing the whole pack (all
+stages into one UNS2, MAXS 8) is unchanged and is a separate, later
+acceptance.
