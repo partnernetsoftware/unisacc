@@ -35,7 +35,7 @@
 #define MAXQ 3200  /* quotient keys; a key set is QW longs (qset below) */
 #define QB 62      /* key bits per word: bits 0..61, never bit 62 or the sign bit 63 */
 #define QW ((MAXQ + QB - 1) / QB)   /* ceil(MAXQ / QB) */
-#define MAXR 62
+#define MAXR 80   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
 #define MAXU 128
 #define MAXCAND 96
 #define BUFSZ 262144
@@ -593,7 +593,10 @@ void decision_list(void) {
         }
         if (bL != nL || !samecube(bcube, ncube)) ttie = ttie + 1;
         qand(newly, bcm, rem);
-        if (nr >= MAXR) die("more rules than this constructor holds");
+        if (nr >= MAXR) {   /* before rc[nr] is written: exit 4 */
+            printf("construct: %s: capacity: head %s needs more than %d decision-list rules\n", gpath, hname[ch], MAXR);
+            exit(4);
+        }
         /* REDUCE: the supercube of the keys this rule claims */
         for (i = 0; i < nf; i = i + 1) {
             sup[i] = 0;
@@ -951,7 +954,10 @@ int total_units(int *sel) {
             dup = 0;
             for (v = 0; v < n; v = v + 1) if (samecube(ucube[v], ccube[ci * MAXU + u])) { dup = 1; break; }
             if (!dup) {
-                if (n >= MAXU) die("more units than this constructor holds");
+                if (n >= MAXU) {   /* pick's total_units: exit 4 */
+                    printf("construct: %s: capacity: a selection has more than %d distinct units\n", gpath, MAXU);
+                    exit(4);
+                }
                 cpcube(ucube[n], ccube[ci * MAXU + u]);
                 n = n + 1;
             }
@@ -1494,6 +1500,7 @@ int main(int argc, char **argv) {
     char *path = 0;
     char *upath = 0;
     dbg = 0;
+    if (MAXR > MAXU) { printf("construct: MAXR %d > MAXU %d: rep_factored's cap = nr would pass MAXU\n", MAXR, MAXU); return 4; }
     if (sizeof(long) != 8) { printf("construct: long is not 64-bit; ladd's precondition fails\n"); return 6; }
     for (ai = 1; ai < argc; ai = ai + 1) {
         if (streq(argv[ai], "-d")) dbg = 1;

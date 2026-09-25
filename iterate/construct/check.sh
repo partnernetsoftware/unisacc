@@ -29,7 +29,7 @@ parse parse t i
 type type t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset sum reader capq capn capo capg capc"
+GLOBALS="qset sum reader capq capr caprn capn capo capg capc"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -206,8 +206,7 @@ done
 # values, label class[a] when b = 0 and class[8 + b] otherwise, so no two
 # values of a field have the same slice and nothing merges: 9 x 7 = 63.
 # (The old negative's label, class[(7a+b) % 16], needs 63 decision-list
-# rules, more than MAXR 62 -- a different limit, not widened here; this
-# label needs 15.)
+# rules; this label needs 15.  The 63-rule table is the rule positive below.)
 cp weights/gold/regmap.tsv "$T/cap.src"
 awk -F'	' 'NR==1{print "# stage capq: 63 keys, synthetic"; next}
 /^#head/{print "#field\ta\tv0\tv1\tv2\tv3\tv4\tv5\tv6\tv7\tv8"; print "#field\tb\tw0\tw1\tw2\tw3\tw4\tw5\tw6"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
@@ -228,6 +227,35 @@ for b in cc ua; do
     else echo "capacity positive $b: UNS2 DIFFERS"; fail=1; fi
     B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capq.uns2" "$T/capq.tsv" > "$T/r.$b.out" 2>&1 || fail=1
     sed "s/^/capacity positive $b deployed /" "$T/r.$b.out"
+done
+# rule-capacity POSITIVE: 9 x 7, label class[(7a+b) % 16]: 63 decision-list
+# rules, over the old MAXR 62, inside MAXR 80.  Must build, and match Python
+# (tsvgold on the same TSV): -d, UNS2 blob, deployed round trip.
+# rule-capacity NEGATIVE: 9 x 9, same label: 81 rules (Python's count), one
+# past MAXR 80; decision_list's nr >= MAXR check must exit exactly 4.
+awk -F'	' -v A=9 -v N=7 'NR==1{print "# stage capr: 63 rules, synthetic"; next}
+/^#head/{printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
+  for(a=0;a<A;a++) for(b=0;b<N;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src" > "$T/capr.tsv"
+awk -F'	' -v A=9 -v N=9 'NR==1{print "# stage caprn: 81 rules, synthetic"; next}
+/^#head/{printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
+  for(a=0;a<A;a++) for(b=0;b<N;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src" > "$T/caprn.tsv"
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capr.tsv" > "$T/capr.py" || fail=1
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capr.uns2" "$T/capr.tsv" > /dev/null || fail=1
+for b in cc ua san; do
+    B 30 "$T/c_$b" -d "$T/capr.tsv" > "$T/capr.$b.out" 2>&1; rc=$?
+    B 30 "$T/c_$b" -u "$T/$b.capr.uns2" "$T/capr.tsv" > /dev/null 2>> "$T/capr.$b.out"; rc2=$?
+    nrl=$(grep -c '^rule' "$T/capr.$b.out")
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$nrl" = 63 ] && cmp -s "$T/capr.py" "$T/capr.$b.out" && cmp -s "$T/py.capr.uns2" "$T/$b.capr.uns2"; then
+        echo "rule positive $b: 63 rules built, -d identical to Python ($(wc -c < "$T/capr.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.capr.uns2" | tr -d ' ') B)"
+    else echo "rule positive $b FAILED (rc $rc/$rc2, $nrl rules): $(head -1 "$T/capr.$b.out")"; fail=1; fi
+    if [ $b != san ]; then
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capr.uns2" "$T/capr.tsv" > "$T/r.$b.out" 2>&1 || fail=1
+        sed "s/^/rule positive $b deployed /" "$T/r.$b.out"
+    fi
+    B 30 "$T/c_$b" "$T/caprn.tsv" > "$T/caprn.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: head y needs more than 80 decision-list rules" "$T/caprn.$b.out" && ! grep -q 'runtime error' "$T/caprn.$b.out"; then
+        echo "rule negative $b rejected: $(head -1 "$T/caprn.$b.out" | sed 's/.*: capacity/capacity/')"
+    else echo "rule negative $b NOT A RULE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caprn.$b.out")"; fail=1; fi
 done
 # capacity NEGATIVE: more quotient keys than MAXQ (3200) must be rejected
 # before any set is built: exit exactly 4 and the capacity diagnostic.

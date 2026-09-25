@@ -710,3 +710,35 @@ Verification (cc -O2, unisacc -O2 osx/arm64, UBSan): all 14 stages' `-d`,
 files, 0 differ), and every build agrees with cc; `check.sh --batches`: ok,
 batch 1 (7 stages + global) 4.0 s, batch 2 (6 stages) 4.0 s, batch 3 (type)
 27.6 s; the three sum cases pass on all three builds.
+
+## abi, step 2: MAXR 62 -> 80 (2026-09-25)
+
+`MAXR 80`.  The one rule-capacity check is still decision_list's
+`nr >= MAXR`, before `rc[nr]` is written; it was `die` (exit 1) and is now
+a capacity exit **4**: `capacity: head H needs more than 80 decision-list
+rules`.  MAXR only sizes arrays (`rc`, `rl`, `lv`, `cons`, `fire`, `grpi`,
+`hrc`, `hrl`, `hlv`); rank bit weights depend on `lv`, not on the rule
+index, so no bit width changes.
+
+Kept and made explicit:
+
+- `nr <= MAXU` (rep_factored's cap = nr units): `main` exits 4 if
+  `MAXR > MAXU` (80 <= 128), and rep_factored's own entry check (nr in
+  1..MAXU, exit 4) stays.
+- total_units (pick) and the net's H are bounded by MAXU = 128: total_units'
+  bound was a `die`, now exit 4 `capacity: a selection has more than 128
+  distinct units`; share's pool and the net's H keep their `die` (both are
+  at most total_units of a selection already accepted).
+
+Gates (check.sh globals `capr`, `caprn`):
+
+- **positive**: 9 x 7 fields, label `class[(7a+b) % 16]` (the table the old
+  63-key negative used): **63 rules**, over the old 62.  cc, unisacc, UBSan:
+  exit 0, `-d` 4,461 B identical to netdump.py, UNS2 285 B identical to
+  uns2slice.py; deployed round trip 63 keys, unique argmax (cc, unisacc).
+- **negative**: 9 x 9, same label: 81 rules in Python, one past 80.  cc,
+  unisacc, UBSan: exit exactly 4 with the rule diagnostic, no UBSan report.
+
+Verification: 14 stages' `-d`/`-u`/`-t` byte-identical to the pre-step-1
+build on cc, unisacc, UBSan (252 files, 0 differ); batches ok: 4.2 s, 4.0 s,
+27.6 s.  `__common` 8,953,912 -> 9,183,288 B (static, not RSS).
