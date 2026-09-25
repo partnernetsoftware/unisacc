@@ -26,6 +26,40 @@ it occurs:
 `check.sh [ua]` runs the whole comparison. Run it from the repo root. Every step
 has an alarm.
 
+### Selecting stages, and batches (2026-09-25)
+
+A full run is ~32 s; the ceiling for one run is 60 s. So check.sh can run a
+subset, and can run the whole list as bounded batches.
+
+- **Stage list.** One table, `TABLE`, at the top of check.sh: stage name,
+  UNS2 blob tag (prec and reloc share `single`), whether it has a trace, and
+  whether it has invariant negatives (reloc has none). Every per-stage loop
+  (dump/UBSan, UNS2, trace, invariant negatives) is derived from it. To add a
+  stage, add one row there.
+- **Default** (neither `STAGES` nor `GLOBAL` set): every stage and every
+  global check, the same output as before, plus `summary:` lines.
+- **`STAGES="peep type"`** runs those stages only. `all` means every stage.
+  The pseudo-stage `global` turns on the checks that belong to no stage:
+  the qset `-Q` self-test, reader negatives, 63-key capacity positive, and
+  the capacity, raw-key, field-group and class-count negatives. `GLOBAL=1/0`
+  forces them on or off. Setting either variable makes the selection
+  explicit, so `GLOBAL=1` alone runs the global checks only.
+- **Fails with exit 2**: an empty selection (`STAGES=`), an unknown stage,
+  or any selection that checks nothing (`GLOBAL=0` alone,
+  `STAGES=global GLOBAL=0`).
+- **Summary.** Every run prints which stages ran and which were skipped, the
+  positive checks (dump, ubsan, uns2, trace) and negative checks (invariant
+  bias+act or none) run for each stage, and which global checks ran and
+  which were skipped. The three builds (cc, ua, UBSan) always happen.
+- **`check.sh --batches [ua]`** runs `BATCHES` (a `stages|global` row per
+  batch). Each batch is a separate check.sh run, bounded by `alarm 60`, and
+  its time is printed. Before it starts, it checks that the batches together
+  hold every stage in `TABLE` exactly once and the global checks exactly
+  once. The current batches and their times:
+  `prec reloc tyinfo regmap pp lex scope`+global 3.9 s,
+  `pfconv binsel enc opinfo peep parse` 4.0 s, `type` 27.9 s. type on its
+  own takes ~28 s, so the next heavy stage should go in a new batch.
+
 ## What is proven (2026-09-25; `check.sh`, cc -O2 and unisacc -O2 osx/arm64)
 
 Four separate ledgers.  One passing does not imply another.

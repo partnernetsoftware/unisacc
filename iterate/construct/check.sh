@@ -3,8 +3,83 @@
 # constructor for the stages in this slice, and check the C reader rejects
 # damaged tables.  Every step is bounded (alarm); run from the repo root.
 #   iterate/construct/check.sh [ua]      ua: a unisacc binary (default /tmp/ua_ref)
+#   STAGES="peep type" GLOBAL=0 iterate/construct/check.sh [ua]   a subset
+#   iterate/construct/check.sh --batches [ua]   the whole list, in batches
+# Selection: with neither STAGES nor GLOBAL set, every stage and every
+# global check runs.  Setting either one makes the selection explicit:
+# STAGES names stages from $ALL (or "all"; the pseudo-stage "global" turns
+# the global checks on), GLOBAL=1/0 forces them on/off.  A selection that
+# checks nothing, or names an unknown stage, fails with exit 2.
 set -u
+# THE stage list: name, UNS2 blob tag, trace (t/-), invariant negatives (i/-).
+# Every per-stage loop below is derived from this table.
+TABLE='prec single - i
+reloc single - -
+tyinfo multi t i
+regmap regmap t i
+pp pp t i
+lex lex t i
+scope scope t i
+pfconv pfconv t i
+binsel binsel t i
+enc enc t i
+opinfo opinfo t i
+peep peep t i
+parse parse t i
+type type t i'
+ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
+[ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
+GLOBALS="qset reader capq capn capo capg capc"
+# batch mode: each batch is "stages|global"; the union is checked below
+# type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
+BATCHES='prec reloc tyinfo regmap pp lex scope|1
+pfconv binsel enc opinfo peep parse|0
+type|0'
+if [ "${1:-}" = --batches ]; then
+    shift; UA=${1:-/tmp/ua_ref}
+    ub=$(echo "$BATCHES" | cut -d'|' -f1 | tr ' ' '\n' | sort | tr '\n' ' ')
+    ua=$(echo "$ALL" | tr ' ' '\n' | sort | tr '\n' ' ')
+    ng=$(echo "$BATCHES" | grep -c '|1$')
+    dup=$(echo "$BATCHES" | cut -d'|' -f1 | tr ' ' '\n' | sort | uniq -d)
+    if [ "$ub" != "$ua" ] || [ -n "$dup" ] || [ "$ng" != 1 ]; then
+        echo "batches: union is not the full list plus globals once (union: $ub; globals in $ng batches)"; exit 2
+    fi
+    echo "batches: union = all $(echo $ALL | wc -w | tr -d ' ') stages + global checks, each exactly once"
+    bf=0; n=0
+    echo "$BATCHES" > "${TMPDIR:-/tmp}/construct_batches.$$"
+    while IFS='|' read -r st gl; do
+        n=$((n + 1))
+        t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+        STAGES=$st GLOBAL=$gl perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "${TMPDIR:-/tmp}/construct_batch.$$.$n" 2>&1; rc=$?
+        t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
+        sed "s/^/[batch $n] /" "${TMPDIR:-/tmp}/construct_batch.$$.$n"; rm -f "${TMPDIR:-/tmp}/construct_batch.$$.$n"
+        el=$(perl -e "printf '%.1f', $t1 - $t0")
+        echo "batch $n: stages [$st] global $gl: rc $rc, $el s (limit 60 s)"
+        [ $rc -eq 0 ] || bf=1
+    done < "${TMPDIR:-/tmp}/construct_batches.$$"
+    rm -f "${TMPDIR:-/tmp}/construct_batches.$$"
+    [ $bf = 0 ] && echo "construct check batches: ok" || echo "construct check batches: FAILED"
+    exit $bf
+fi
 UA=${1:-/tmp/ua_ref}
+if [ -z "${STAGES+x}" ] && [ -z "${GLOBAL+x}" ]; then SEL=$ALL; GL=1
+else
+    SEL=; GL=0
+    for s in ${STAGES:-}; do
+        case $s in
+        all) SEL="$SEL $ALL" ;;
+        global) GL=1 ;;
+        *) case " $ALL " in *" $s "*) SEL="$SEL $s" ;;
+           *) echo "construct check: unknown stage '$s' (stages: $ALL global all)"; exit 2 ;; esac ;;
+        esac
+    done
+    case ${GLOBAL:-} in 1) GL=1 ;; 0) GL=0 ;; '') ;; *) echo "construct check: GLOBAL must be 0 or 1"; exit 2 ;; esac
+    if [ -z "$SEL" ] && [ $GL = 0 ]; then
+        echo "construct check: empty selection -- no stage and no global check selected (STAGES='${STAGES:-}' GLOBAL='${GLOBAL:-}'); nothing would be checked"; exit 2
+    fi
+fi
+sel() { case " $SEL " in *" $1 "*) return 0 ;; esac; return 1; }
+stages() { echo "$TABLE" | while read -r n tag tr iv; do sel $n || continue; case $1 in all) echo $n ;; t) [ $tr = t ] && echo $n ;; i) [ $iv = i ] && echo $n ;; esac; done; }
 T=${TMPDIR:-/tmp}/construct_check.$$
 mkdir -p "$T"
 B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
@@ -19,12 +94,14 @@ B 60 cc -std=c99 -O1 -w -fsanitize=undefined -fno-sanitize-recover=undefined -o 
 # iteration, equality and bits 62/63 clear at keys QB-1, QB, 2QB-1, 2QB,
 # the last word's boundary and the last key, for nq 1, 61, 62, 63, 123, 124,
 # 125, 528 and, at the end of MAXQ 3200 (QW 52), 3161, 3162, 3163, 3199, 3200
+if [ $GL = 1 ]; then
 for b in cc ua san; do
     B 30 "$T/c_$b" -Q > "$T/q.$b" 2>&1; rc=$?
     if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 13 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (13 sizes)"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
 done
-for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse type; do
+fi
+for s in $(stages all); do
     B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py" || fail=1
     for b in cc ua; do
         B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b" || fail=1
@@ -62,18 +139,21 @@ uns2() {    # uns2 <tag> <tsv>...
         sed "s/^/deployed $b /" "$T/r.$b.out"
     done
 }
-uns2 single weights/gold/prec.tsv weights/gold/reloc.tsv
-uns2 multi weights/gold/tyinfo.tsv
-uns2 regmap weights/gold/regmap.tsv
-# acceptance batch: one blob per stage (single-stage packs; MAXS is 8)
-for s in pp lex scope pfconv binsel enc opinfo peep parse type; do uns2 $s weights/gold/$s.tsv; done
+# one blob per tag of $TABLE, over the selected stages that carry it:
+# prec+reloc (single), tyinfo (multi), regmap, then one per stage for the
+# acceptance batch (single-stage packs; MAXS is 8)
+for tag in $(echo "$TABLE" | awk '!s[$2]++{print $2}'); do
+    f=$(echo "$TABLE" | while read -r n t x y; do [ $t = $tag ] && sel $n && printf " weights/gold/%s.tsv" $n; done)
+    [ -n "$f" ] && uns2 $tag $f
+done
 # the multi-head branch trace (-t): which candidate each head chose, whether
 # pick moved, what T4 did.  A debug print, not compared with Python (the
 # counts were cross-checked once by hand); the two builds must agree.
-for s in tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse type; do
+for s in $(stages t); do
     for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || fail=1; done
     if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; else echo "$s trace differs between builds"; fail=1; fi
 done
+if [ $GL = 1 ]; then
 # negative inputs: each damaged copy of prec.tsv must be REJECTED BY THE
 # READER -- exit status exactly 1 and the diagnostic for that damage.  A
 # signal (>128), the watchdog, or any other failure is not a rejection.
@@ -200,7 +280,8 @@ done
 # of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
 # invariant 1 is the one reached.  Only exit 3 with that invariant's
 # diagnostic counts.
-for s in prec tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse type; do
+fi
+for s in $(stages i); do
 for c in "bias|has b1" "act|activation"; do
     t=${c%%|*}; want=${c#*|}
     for b in cc ua; do
@@ -213,6 +294,18 @@ for c in "bias|has b1" "act|activation"; do
     done
 done
 done
+# summary: exactly what this run covered
+echo "summary: builds cc, ua, ubsan (always)"
+echo "summary: stages run ($(stages all | wc -l | tr -d " ") of $(echo $ALL | wc -w | tr -d " ")): $(stages all | tr "\n" " ")"
+for s in $(stages all); do
+    neg=none; stages i | grep -qx $s && neg="invariant bias+act"
+    tr=; stages t | grep -qx $s && tr=", trace"
+    echo "summary: stage $s: positive (dump, ubsan, uns2$tr) yes; negative $neg"
+done
+skipped=$(for s in $ALL; do sel $s || printf "%s " $s; done)
+echo "summary: stages skipped: ${skipped:-none}"
+if [ $GL = 1 ]; then echo "summary: global checks run: $GLOBALS"; echo "summary: global checks skipped: none"
+else echo "summary: global checks run: none"; echo "summary: global checks skipped: $GLOBALS"; fi
 rm -rf "$T"
 [ $fail = 0 ] && echo "construct check: ok" || echo "construct check: FAILED"
 exit $fail
