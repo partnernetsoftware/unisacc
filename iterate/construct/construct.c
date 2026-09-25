@@ -9,6 +9,7 @@
  *   construct -u out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
  *   construct -t weights/gold/tyinfo.tsv
  *   construct -Q      (self-test of the quotient-key sets at word boundaries)
+ *   construct -G      (self-test of the ws_ word-set layer, incl. lexicographic order)
  *
  * -u writes the UNS2 blob (unisa/uns2.py dump) of the stages given.  Every
  * mode checks the deployment invariants over the full domain (exit 3).
@@ -273,8 +274,124 @@ int popc(long m) {
     return c;
 }
 
+/* ------------------------------------------------------- word sets (ws_) -- */
+/* The one set layer every multi-word set goes through (quotient keys, and
+   the field-group and class sets built on it).  A set over a domain of n
+   elements 0..n-1 is long s[sw] (sw = the storage words); element j is bit
+   j % WB of word j / WB, WB = 62.  Each helper takes the domain explicitly:
+     nw   = ws_nw(n) = ceil(n / WB) active words (0 for the empty domain),
+     sw   = storage words, sw >= nw,
+     tail = ws_tail(n), the mask of the last active word (0 when n = 0).
+   Invariants: every active word is in [0, 2^62) and has no bit at or
+   above n; every word from nw to sw - 1 is 0.  Every writing helper
+   re-establishes both (it zeroes words nw..sw-1 and masks before anything
+   counts or shifts), so a leftover from an earlier, larger domain (another
+   field, another stage) can never reach equality, order or a count.  The
+   readers look at the active words only.  n = 0: nw = 0, tail = 0, every
+   set is empty, every loop runs zero times, ws_cmp says equal. */
+#define WB 62
+#define WM ((((long)1) << WB) - 1)   /* the 62 low bits: one full word */
+int ws_nw(int n) { if (n <= 0) return 0; return (n + WB - 1) / WB; }
+long ws_tail(int n) {
+    int r;
+    if (n <= 0) return 0;
+    r = n - (ws_nw(n) - 1) * WB;
+    if (r == WB) return WM;
+    return (((long)1) << r) - 1;
+}
+/* the mask of active word w */
+long ws_wm(int w, int nw, long tail) { return w == nw - 1 ? tail : WM; }
+void ws_zero(long *d, int nw, int sw) { int w; for (w = 0; w < sw; w = w + 1) d[w] = 0; }
+void ws_full(long *d, int nw, int sw, long tail) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) d[w] = ws_wm(w, nw, tail);
+    for (w = nw; w < sw; w = w + 1) d[w] = 0;
+}
+void ws_copy(long *d, long *a, int nw, int sw) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) d[w] = a[w];
+    for (w = nw; w < sw; w = w + 1) d[w] = 0;
+}
+/* element j < n: the caller's domain check */
+void ws_set(long *d, int j) { d[j / WB] = d[j / WB] | (((long)1) << (j % WB)); }
+int ws_test(long *a, int j) { return (int)((a[j / WB] >> (j % WB)) & 1); }
+void ws_and(long *d, long *a, long *b, int nw, int sw) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) d[w] = a[w] & b[w];
+    for (w = nw; w < sw; w = w + 1) d[w] = 0;
+}
+void ws_or(long *d, long *a, long *b, int nw, int sw) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) d[w] = a[w] | b[w];
+    for (w = nw; w < sw; w = w + 1) d[w] = 0;
+}
+/* a & ~b: the ~ makes a word negative when a is (a raw all-ones operand);
+   each word is masked to its active bits in the same expression, before
+   anything counts or shifts it */
+void ws_andnot(long *d, long *a, long *b, int nw, int sw, long tail) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) d[w] = (a[w] & ~b[w]) & ws_wm(w, nw, tail);
+    for (w = nw; w < sw; w = w + 1) d[w] = 0;
+}
+/* cut every active word to the domain (qtail) */
+void ws_mask(long *d, int nw, int sw, long tail) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) d[w] = d[w] & ws_wm(w, nw, tail);
+    for (w = nw; w < sw; w = w + 1) d[w] = 0;
+}
+int ws_empty(long *a, int nw) { int w; for (w = 0; w < nw; w = w + 1) if (a[w]) return 0; return 1; }
+int ws_eq(long *a, long *b, int nw) { int w; for (w = 0; w < nw; w = w + 1) if (a[w] != b[w]) return 0; return 1; }
+/* a is a subset of b */
+int ws_sub(long *a, long *b, int nw) { int w; for (w = 0; w < nw; w = w + 1) if (a[w] & ~b[w]) return 0; return 1; }
+int ws_meets(long *a, long *b, int nw) { int w; for (w = 0; w < nw; w = w + 1) if (a[w] & b[w]) return 1; return 0; }
+int ws_meets3(long *a, long *b, long *c, int nw) {
+    int w;
+    for (w = 0; w < nw; w = w + 1) if (a[w] & b[w] & c[w]) return 1;
+    return 0;
+}
+int ws_popc(long *a, int nw) { int w, n = 0; for (w = 0; w < nw; w = w + 1) n = n + popc(a[w]); return n; }
+int ws_popcand(long *a, long *b, int nw) { int w, n = 0; for (w = 0; w < nw; w = w + 1) n = n + popc(a[w] & b[w]); return n; }
+/* the smallest member >= j, or -1: ascending */
+int ws_next(long *a, int j, int n) {
+    while (j < n) {
+        if ((a[j / WB] >> (j % WB)) == 0) { j = (j / WB + 1) * WB; continue; }
+        if (ws_test(a, j)) return j;
+        j = j + 1;
+    }
+    return -1;
+}
+/* does a have a member above bit p of word w */
+int ws_above(long *a, int w, int p, int nw) {
+    int x;
+    if ((a[w] >> p) >> 1) return 1;
+    for (x = w + 1; x < nw; x = x + 1) if (a[x]) return 1;
+    return 0;
+}
+/* Python's order of the sorted member tuples (lexicographic): scan from the
+   LOW word up; at the lowest differing element p the set holding p is
+   smaller exactly when the other set has a member above p (else the other
+   is a proper prefix).  Not the order of the words as one big integer:
+   {0,62} < {1} here. */
+int ws_cmp(long *a, long *b, int nw) {
+    int w, p;
+    long d;
+    for (w = 0; w < nw; w = w + 1) {
+        d = a[w] ^ b[w];
+        if (d == 0) continue;
+        p = 0;
+        while (!((d >> p) & 1)) p = p + 1;
+        if ((a[w] >> p) & 1) return ws_above(b, w, p, nw) ? -1 : 1;
+        return ws_above(a, w, p, nw) ? 1 : -1;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------- quotient-key sets ------ */
-/* A set of quotient keys is long s[QW]; key j is bit j % QB of word j / QB.
+/* The q* functions are thin wrappers over ws_ on the quotient-key domain
+   (n = nq, nw = nqw, tail = the last word of ALL).  They keep their old
+   semantics exactly: storage is QW words but only words 0..nqw-1 are read
+   or written (sw = nqw), as before.
+   A set of quotient keys is long s[QW]; key j is bit j % QB of word j / QB.
    QB is 62, so every stored word is in [0, 2^62): no shift reaches bit 63
    (1 << b with b <= 61), popc never subtracts from a negative value or
    from LONG_MIN, and every right shift is of a non-negative word.  The one
@@ -283,42 +400,27 @@ int popc(long m) {
    Only words 0..nqw-1 are read or written.  Every result is a subset of an
    operand that is already inside the domain, or is cut by qtail, so no bit
    at or above nq is ever set: complements are taken only as ALL & ~x. */
-void qzero(long *d) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = 0; }
-void qcopy(long *d, long *a) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w]; }
-void qset(long *d, int j) { d[j / QB] = d[j / QB] | (((long)1) << (j % QB)); }
-int qtest(long *a, int j) { return (int)((a[j / QB] >> (j % QB)) & 1); }
-void qand(long *d, long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w] & b[w]; }
-void qor(long *d, long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w] | b[w]; }
-void qtail(long *d) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = d[w] & ALL[w]; }
-void qandnot(long *d, long *a, long *b) {
-    int w;
-    for (w = 0; w < nqw; w = w + 1) d[w] = a[w] & ~b[w];
-    qtail(d);
-}
-int qempty(long *a) { int w; for (w = 0; w < nqw; w = w + 1) if (a[w]) return 0; return 1; }
-int qeq(long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) if (a[w] != b[w]) return 0; return 1; }
-int qmeets(long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) if (a[w] & b[w]) return 1; return 0; }
-int qmeets3(long *a, long *b, long *c) {
-    int w;
-    for (w = 0; w < nqw; w = w + 1) if (a[w] & b[w] & c[w]) return 1;
-    return 0;
-}
-int qpopc(long *a) { int w, n = 0; for (w = 0; w < nqw; w = w + 1) n = n + popc(a[w]); return n; }
-int qpopcand(long *a, long *b) { int w, n = 0; for (w = 0; w < nqw; w = w + 1) n = n + popc(a[w] & b[w]); return n; }
+long qtl;                  /* ws_tail(nq): ALL's last active word */
+void qzero(long *d) { ws_zero(d, nqw, nqw); }
+void qcopy(long *d, long *a) { ws_copy(d, a, nqw, nqw); }
+void qset(long *d, int j) { ws_set(d, j); }
+int qtest(long *a, int j) { return ws_test(a, j); }
+void qand(long *d, long *a, long *b) { ws_and(d, a, b, nqw, nqw); }
+void qor(long *d, long *a, long *b) { ws_or(d, a, b, nqw, nqw); }
+void qtail(long *d) { ws_mask(d, nqw, nqw, qtl); }
+void qandnot(long *d, long *a, long *b) { ws_andnot(d, a, b, nqw, nqw, qtl); }
+int qempty(long *a) { return ws_empty(a, nqw); }
+int qeq(long *a, long *b) { return ws_eq(a, b, nqw); }
+int qmeets(long *a, long *b) { return ws_meets(a, b, nqw); }
+int qmeets3(long *a, long *b, long *c) { return ws_meets3(a, b, c, nqw); }
+int qpopc(long *a) { return ws_popc(a, nqw); }
+int qpopcand(long *a, long *b) { return ws_popcand(a, b, nqw); }
 /* the smallest member >= j, or -1: ascending, the order of range(D.n) */
-int qnext(long *a, int j) {
-    while (j < nq) {
-        if ((a[j / QB] >> (j % QB)) == 0) { j = (j / QB + 1) * QB; continue; }
-        if (qtest(a, j)) return j;
-        j = j + 1;
-    }
-    return -1;
-}
+int qnext(long *a, int j) { return ws_next(a, j, nq); }
 void qsetall(void) {
-    int j;
-    nqw = (nq + QB - 1) / QB;
-    for (j = 0; j < QW; j = j + 1) ALL[j] = 0;
-    for (j = 0; j < nq; j = j + 1) qset(ALL, j);
+    nqw = ws_nw(nq);
+    qtl = ws_tail(nq);
+    ws_full(ALL, nqw, QW, qtl);
 }
 
 /* -Q: the set operations at the word boundaries (keys QB-1, QB, 2QB-1, 2QB,
@@ -381,6 +483,131 @@ void qselftest(void) {
         printf("qset self-test nq %d (%d words): members", nq, nqw);
         for (j = qnext(sa, 0); j >= 0; j = qnext(sa, j + 1)) printf(" %d", j);
         printf(", complement %d, ok\n", qpopc(sb));
+    }
+}
+
+/* -G: the ws_ layer itself, independent of any stage: domain sizes 0, 1,
+   61, 62, 63, 96, 123, 124 in storage of GSW = 3 words (one more than the
+   124-element domain needs, so the unused-word zeroing is observable);
+   every operand starts as junk (all ones, negative words included) and
+   every result must be inside [0, 2^62), inside the domain, and zero in the
+   unused words.  ws_cmp is checked against an oracle that compares the
+   ascending member lists lexicographically, on fixed cases and on pseudo-
+   random pairs.  Exit 5 on the first failure. */
+#define GSW 3
+long ga[GSW], gb[GSW], gc[GSW], gd[GSW];
+int gla[GSW * WB], glb[GSW * WB];
+int gn, gnwt;
+void gfail(char *what) { printf("construct: wset self-test: n %d: %s\n", gn, what); exit(5); }
+/* every word in [0, 2^62), no bit at or above n, unused words 0 */
+void gwf(long *a, char *what) {
+    int w, j;
+    for (w = 0; w < GSW; w = w + 1) {
+        if (a[w] < 0 || (a[w] >> WB) != 0) gfail(what);
+        if (w >= gnwt && a[w] != 0) gfail(what);
+        for (j = 0; j < WB; j = j + 1) if (w * WB + j >= gn && ((a[w] >> j) & 1)) gfail(what);
+    }
+}
+void gjunk(long *a) { int w; for (w = 0; w < GSW; w = w + 1) a[w] = -1; }
+/* the oracle: member lists, compared as Python compares tuples */
+int glist(long *a, int *l) { int n = 0, j; for (j = 0; j < gn; j = j + 1) if ((a[j / WB] >> (j % WB)) & 1) { l[n] = j; n = n + 1; } return n; }
+int gorac(long *a, long *b) {
+    int na = glist(a, gla), nb = glist(b, glb), i;
+    for (i = 0; i < na && i < nb; i = i + 1) if (gla[i] != glb[i]) return gla[i] < glb[i] ? -1 : 1;
+    if (na != nb) return na < nb ? -1 : 1;
+    return 0;
+}
+int gncmp;
+void gcmp1(long *a, long *b, int want, char *what) {
+    int r = ws_cmp(a, b, gnwt), o = gorac(a, b), r2 = ws_cmp(b, a, gnwt);
+    if (r != o || r2 != -o) gfail(what);
+    if (want != 2 && r != want) gfail(what);
+    gncmp = gncmp + 1;
+}
+/* a set from a -1-terminated member list, members >= n dropped */
+void gmk(long *a, int m0, int m1, int m2) {
+    ws_zero(a, gnwt, GSW);
+    if (m0 >= 0 && m0 < gn) ws_set(a, m0);
+    if (m1 >= 0 && m1 < gn) ws_set(a, m1);
+    if (m2 >= 0 && m2 < gn) ws_set(a, m2);
+}
+long grs;
+int grnd(void) { grs = (grs * 1103515245 + 12345) % 2147483648; return (int)(grs / 65536); }
+void wselftest(void) {
+    int sizes[8], keys[8], t, i, j, k, n, cnt, prev;
+    long tl;
+    sizes[0] = 0; sizes[1] = 1; sizes[2] = 61; sizes[3] = 62; sizes[4] = 63;
+    sizes[5] = 96; sizes[6] = 123; sizes[7] = 124;
+    grs = 1;
+    for (t = 0; t < 8; t = t + 1) {
+        gn = sizes[t]; gnwt = ws_nw(gn); tl = ws_tail(gn); gncmp = 0;
+        if (gnwt != (gn + WB - 1) / WB || gnwt > GSW) gfail("ws_nw");
+        /* the tail: exactly the bits of the last active word below n */
+        for (j = 0; j < WB; j = j + 1)
+            if (((tl >> j) & 1) != (gn > 0 && (gnwt - 1) * WB + j < gn)) gfail("ws_tail bit");
+        if (tl < 0 || (tl >> WB) != 0) gfail("ws_tail has bit 62 or 63");
+        /* empty and full */
+        gjunk(ga); ws_zero(ga, gnwt, GSW); gwf(ga, "ws_zero");
+        if (!ws_empty(ga, gnwt) || ws_popc(ga, gnwt) != 0 || ws_next(ga, 0, gn) != -1) gfail("empty set");
+        gjunk(gb); ws_full(gb, gnwt, GSW, tl); gwf(gb, "ws_full");
+        if (ws_popc(gb, gnwt) != gn) gfail("popcount of the full set");
+        if (gn > 0 && (ws_empty(gb, gnwt) || ws_cmp(ga, gb, gnwt) != -1)) gfail("empty < full");
+        gjunk(gc); ws_andnot(gc, gb, gb, gnwt, GSW, tl); gwf(gc, "full andnot full");
+        if (!ws_empty(gc, gnwt)) gfail("full andnot full is not empty");
+        if (!ws_sub(ga, gb, gnwt) || (gn > 0 && ws_sub(gb, ga, gnwt))) gfail("subset of empty / full");
+        /* boundary members */
+        keys[0] = 0; keys[1] = WB - 1; keys[2] = WB; keys[3] = gn - 1; keys[4] = gn - 2;
+        keys[5] = (gnwt - 1) * WB - 1; keys[6] = (gnwt - 1) * WB; keys[7] = 2 * WB - 1;
+        gjunk(ga); ws_zero(ga, gnwt, GSW); n = 0;
+        for (i = 0; i < 8; i = i + 1) if (keys[i] >= 0 && keys[i] < gn && !ws_test(ga, keys[i])) { ws_set(ga, keys[i]); n = n + 1; }
+        gwf(ga, "ws_set");
+        for (i = 0; i < 8; i = i + 1) if (keys[i] >= 0 && keys[i] < gn && !ws_test(ga, keys[i])) gfail("test after set");
+        if (ws_popc(ga, gnwt) != n) gfail("popcount of the boundary members");
+        cnt = 0; prev = -1;
+        for (j = ws_next(ga, 0, gn); j >= 0; j = ws_next(ga, j + 1, gn)) {
+            if (j <= prev || !ws_test(ga, j)) gfail("iteration order");
+            prev = j; cnt = cnt + 1;
+        }
+        if (cnt != n) gfail("iteration count");
+        /* complement, union, meet, copy, equality */
+        gjunk(gc); ws_andnot(gc, gb, ga, gnwt, GSW, tl); gwf(gc, "complement");
+        if (ws_popc(gc, gnwt) != gn - n || ws_meets(ga, gc, gnwt)) gfail("complement");
+        gjunk(gd); ws_or(gd, ga, gc, gnwt, GSW); gwf(gd, "ws_or");
+        if (!ws_eq(gd, gb, gnwt)) gfail("set | complement != full");
+        gjunk(gd); ws_and(gd, ga, gc, gnwt, GSW); gwf(gd, "ws_and");
+        if (!ws_empty(gd, gnwt) || ws_popcand(ga, gc, gnwt) != 0 || ws_meets3(ga, gb, gc, gnwt)) gfail("set & complement");
+        gjunk(gd); ws_copy(gd, ga, gnwt, GSW); gwf(gd, "ws_copy");
+        if (!ws_eq(gd, ga, gnwt) || ws_cmp(gd, ga, gnwt) != 0) gfail("a copy is not equal");
+        if (n > 0 && ws_eq(ga, gc, gnwt)) gfail("equality");
+        /* andnot against a RAW all-ones operand (every word -1, negative):
+           masked before popc sees it */
+        gjunk(gd); gjunk(gc); ws_andnot(gc, gd, ga, gnwt, GSW, tl); gwf(gc, "all-ones andnot");
+        if (ws_popc(gc, gnwt) != gn - n) gfail("tail bits survive all-ones andnot");
+        gjunk(gd); gjunk(gc); ws_andnot(gc, ga, gd, gnwt, GSW, tl); gwf(gc, "andnot all-ones");
+        if (!ws_empty(gc, gnwt)) gfail("x andnot all-ones is not empty");
+        gjunk(gc); ws_mask(gc, gnwt, GSW, tl); gwf(gc, "ws_mask");
+        if (!ws_eq(gc, gb, gnwt)) gfail("all-ones masked != full");
+        /* lexicographic order: fixed cases (-1 = no member), want or 2 = oracle only */
+        gmk(ga, -1, -1, -1); gmk(gb, -1, -1, -1); gcmp1(ga, gb, 0, "empty vs empty");
+        if (gn > 0) { gmk(gb, 0, -1, -1); gcmp1(ga, gb, -1, "empty vs {0}"); }
+        gmk(ga, 0, gn - 1, -1); gmk(gb, 0, gn - 1, -1); gcmp1(ga, gb, 0, "equal sets");
+        if (gn > 2) { gmk(ga, 1, -1, -1); gmk(gb, 1, gn - 1, -1); gcmp1(ga, gb, -1, "a proper prefix"); }
+        if (gn > 63) {
+            gmk(ga, 0, 62, -1); gmk(gb, 1, -1, -1); gcmp1(ga, gb, -1, "{0,62} vs {1}");
+            gmk(ga, 5, 61, -1); gmk(gb, 5, 62, -1); gcmp1(ga, gb, -1, "first difference at the word boundary");
+            gmk(ga, 5, 62, -1); gmk(gb, 5, 63, -1); gcmp1(ga, gb, -1, "first difference in word 1");
+            gmk(ga, 5, 62, -1); gmk(gb, 5, 62, 63); gcmp1(ga, gb, -1, "a prefix ending in word 1");
+            gmk(ga, 61, -1, -1); gmk(gb, 62, -1, -1); gcmp1(ga, gb, -1, "{61} vs {62}");
+        }
+        if (gn > 70) { gmk(ga, 3, 70, -1); gmk(gb, 70, -1, -1); gcmp1(ga, gb, -1, "{3,70} vs {70}"); }
+        /* pseudo-random pairs; sparse ones so equal prefixes and prefixes occur */
+        for (k = 0; k < 400 && gn > 0; k = k + 1) {
+            ws_zero(ga, gnwt, GSW); ws_zero(gb, gnwt, GSW);
+            for (i = 0; i < 1 + k % 5; i = i + 1) { j = grnd() % gn; ws_set(ga, j); if (grnd() % 2) ws_set(gb, j); }
+            if (grnd() % 3 == 0) { j = grnd() % gn; ws_set(gb, j); }
+            gcmp1(ga, gb, 2, "random pair");
+        }
+        printf("wset self-test n %d (%d words, tail %d bits): %d boundary members, %d comparisons vs oracle, ok\n", gn, gnwt, popc(tl), n, gncmp);
     }
 }
 
@@ -1513,6 +1740,7 @@ int main(int argc, char **argv) {
         if (streq(argv[ai], "-d")) dbg = 1;
         else if (streq(argv[ai], "-t")) tflag = 1;
         else if (streq(argv[ai], "-Q")) { qselftest(); return 0; }
+        else if (streq(argv[ai], "-G")) { wselftest(); return 0; }
         else if (streq(argv[ai], "-T") && ai + 1 < argc) {
             ai = ai + 1;
             if (streq(argv[ai], "bias")) tbreak = 1;

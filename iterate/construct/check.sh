@@ -30,7 +30,7 @@ type type t i
 abi abi t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset sum reader capq capr caprn caph caphn capk capkn capn capo capg capc"
+GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capc"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -131,6 +131,7 @@ need() {    # need stage <s> | need global <g>: the required pass marks
     g=$2
     case $g in
     qset) for b in cc ua san; do echo "g qset $b"; done ;;
+    wset) for b in cc ua san; do echo "g wset $b"; done ;;
     sum) echo "g sum sites"; for b in cc ua san; do for t in summax sumover sumrun run7; do echo "g sum $t $b"; done; done ;;
     reader) for n in missing duplicate badlabel extracol badkey; do for b in cc ua; do echo "g reader $n $b"; done; done ;;
     capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
@@ -155,6 +156,17 @@ for b in cc ua san; do
     B 30 "$T/c_$b" -Q > "$T/q.$b" 2>&1; rc=$?
     if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 13 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (13 sizes)"; P "g qset $b"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
+done
+# the ws_ word-set layer (-G): domain sizes 0, 1, 61, 62, 63, 96, 123, 124
+# in 3 storage words, junk-filled operands, unused words zeroed, tails,
+# boundary members, empty/full, andnot against raw all-ones, every word in
+# [0, 2^62), and ws_cmp against a member-list lexicographic oracle (fixed
+# cases incl. {0,62} vs {1} and {3,70} vs {70}, plus pseudo-random pairs).
+# The three builds must print the same 8 "ok" lines.
+for b in cc ua san; do
+    B 30 "$T/c_$b" -G > "$T/g.$b" 2>&1; rc=$?
+    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/g.$b")" = 8 ] && ! grep -q 'runtime error' "$T/g.$b" && cmp -s "$T/g.cc" "$T/g.$b"; then echo "wset self-test $b ok (8 sizes, $(awk '{s += $(NF-4)} END {print s}' "$T/g.$b") comparisons vs oracle)"; P "g wset $b"
+    else echo "wset self-test $b FAILED (rc $rc): $(tail -1 "$T/g.$b")"; fail=1; fi
 done
 # checked accumulation: -T summax/sumover/sumrun drive the SAME ladd() that
 # every weight/logit sum calls.  max must succeed (exit 0); one past LONG_MAX
