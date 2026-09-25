@@ -12,18 +12,21 @@
 # SKIP=<check> (test entry) drops that check's body -- `fault` uses it to
 # show a dropped check fails the run although nothing in it failed.
 set -u
-CHECKS_ALL="order build region empty sem oracle neg wfail label perm fault"
+CHECKS_ALL="order build region empty sem oracle neg wfail label perm fault vocab region2 vneg vpos pool rename integ"
+VNEGS="unkstage nofield nohead dupsym dupbfbh missrow extrarow unkkind quote bslash hibyte trigraph oct0 oct7 badident casefold existing"
 NEGS="notsv noorder nouns2 duporder missorder unkorder trunc trunchead trail badmagic dimval dimcls tsvtwice tsvunk hm15 hm17"
-BATCHES='order build region empty sem
+BATCHES='order build region empty sem vocab region2
 oracle
 neg wfail label
-perm fault'
+perm fault
+vneg vpos pool rename
+integ'
 need() {
     case $1 in
     order) echo "order gold"; echo "order source" ;;
     build) for b in cc ua san; do echo "build $b"; done ;;
     region) echo "region oracle=shipped"; for b in cc ua san; do echo "region $b"; done ;;
-    empty) echo "empty source"; for b in cc ua; do echo "empty $b"; done ;;
+    empty) echo "empty source"; for b in cc ua; do echo "empty $b"; done; echo "empty typev" ;;
     sem) for b in cc ua; do echo "sem $b"; done ;;
     oracle) echo "oracle build"; echo "oracle check" ;;
     neg) for n in $NEGS; do for b in cc ua san; do echo "neg $n $b"; done; done; echo "neg stride" ;;
@@ -31,6 +34,13 @@ need() {
     label) echo "label differs"; echo "label dense-only"; for b in cc ua; do echo "label reject $b"; done ;;
     perm) echo "perm oracle"; echo "perm ids"; echo "perm sem" ;;
     fault) echo "fault dropped" ;;
+    vocab) echo "vocab ckernel" ;;
+    region2) echo "region2 oracle=shipped"; for b in cc ua san; do echo "region2 $b"; done ;;
+    vneg) for n in $VNEGS; do for b in cc ua san; do echo "vneg $n $b"; done; done ;;
+    vpos) for n in oct8 oct9; do for b in cc ua san; do echo "vpos $n $b"; done; done ;;
+    pool) echo "pool kept"; echo "pool only"; for b in ua san; do echo "pool $b"; done ;;
+    rename) echo "rename predicted"; echo "rename region1"; for b in ua san; do echo "rename $b"; done ;;
+    integ) echo "integ mixed=shipped"; echo "integ closure"; echo "integ nativeboot" ;;
     esac
 }
 B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
@@ -82,30 +92,29 @@ GOLD=$(ls weights/gold/*.tsv)
 # gm <build> <out> [order] [uns2] [tsv...]: run a genmodel build on the declared inputs
 gm() { b=$1; o=$2; shift 2
     if [ $# = 0 ]; then set -- $K/order.tsv weights/built.uns2 $GOLD; fi
-    B 30 "$T/gm.$b" -o "$o" "$@"; }
-# mix <new> <out> [old]: the old model.inc with its region replaced by new's
-mix() { old=${3:-kernel/unisa_model.inc}
-    awk -v NEW="$1" '
-        function span(f,   l, st, md, n) {   # print f from "/* S_<stage>" through model_dims "}"
-            st = 0; md = 0
-            while ((getline l < f) > 0) {
-                if (!st && index(l, "/* S_<stage>") == 1) st = 1
-                if (st) print l
-                if (st && md && l == "}") break
-                if (l == "int model_dims(void) {") md = 1
-            }
-            close(f)
-        }
-        phase == 0 && index($0, "/* S_<stage>") == 1 { phase = 1; span(NEW); next }
-        phase == 0 { print; next }
-        phase == 1 { if (md && $0 == "}") phase = 2; if ($0 == "int model_dims(void) {") md = 1; next }
-        { print }' "$old" > "$2"
-}
+    ord=$1; shift     # the vocab mapping goes second: VOC overrides it
+    B 30 "$T/gm.$b" -o "$o" "$ord" "${VOC:-$K/vocab.tsv}" "$@"; }
+# mix <new> <out> [old]: the scratch integrator (mix.awk): old's header,
+# TYPEV block and ENC_.. tail around new's S_* .. BF/BH region
+mix() { awk -v NEW="$1" -f $K/mix.awk "${3:-kernel/unisa_model.inc}" > "$2"; }
+# vr <py|gm> <file>: the slice-2 region (vregion.awk), checked against $T/exp
+vr() { awk -v END_MODE=$1 -v EXP="$T/exp" -f $K/vregion.awk "$2"; }
+# ren <old> <new> <in> <out>: rename one value everywhere it is a whole TSV
+# cell (schema and rows alike: a consistent rename); ENVIRON, so no escapes
+ren() { A="$1" Z="$2" LC_ALL=C awk -F'\t' -v OFS='\t' 'index($0, "# stage ") == 1 { print; next } { for (i = 1; i <= NF; i++) if ($i == ENVIRON["A"]) { $i = ENVIRON["Z"]; c++ } print } END { if (!c) exit 1 }' "$3" > "$4"; }
 # semb <model.inc> <build> <out>: the real kernel (kernel/unisa_core.c minus
 # its #include lines) + sem.c, over the given model, built by cc or unisacc
 semb() { { echo '#include <stdio.h>'; cat "$1"; grep -v '^#include "unisa_' kernel/unisa_core.c; cat $K/sem.c; } > "$3.c"
     if [ $2 = cc ]; then B 60 cc -std=c99 -O2 -w -o "$3" "$3.c"; else B 60 "$UA" -O2 "$3.c" -b osx/arm64 -o "$3"; fi; }
 region() { awk -f $K/region.awk "$1"; }
+# the expected slice-2 symbols, from vocab.tsv and the TSV schemas (an
+# independent list: awk, not genmodel)
+awk -F'\t' -v G=weights/gold '$1 == "vocab" { print $2; print "N" $2 }
+    $1 == "bfbh" { st = $2; f = G "/" st ".tsv"; i = 0
+        while ((getline l < f) > 0) { split(l, a, "\t")
+            if (a[1] == "#field") { print "BF_" toupper(st) "_" i; print "NBF_" toupper(st) "_" i; i++ }
+            else if (a[1] == "#head") { h = toupper(st) "_" toupper(a[2]); print "BH_" h; print "NBH_" h; print "HD_" h } }
+        close(f) }' $K/vocab.tsv > "$T/exp"
 
 t0=$(now)
 # ---- builds (every run needs them; the "build" check records them)
@@ -147,15 +156,19 @@ if sel empty; then
     n=$(grep -c 'fopen(' $K/genmodel.c); m=$(grep 'fopen(' $K/genmodel.c | grep -c -e 'fopen(path, "rb")' -e 'fopen(opath, "wb")')
     [ "$n" = 2 ] && [ "$m" = 2 ] && { echo "empty: genmodel.c opens only argv paths (fopen x2: input, output)"; P "empty source"; } || echo "empty: genmodel.c fopen sites $n (argv-only $m)"
     E=$T/empty; mkdir -p "$E/gold"
-    cp $K/order.tsv weights/built.uns2 "$E/"; cp $GOLD "$E/gold/"
+    cp $K/order.tsv $K/vocab.tsv weights/built.uns2 "$E/"; cp $GOLD "$E/gold/"
     for b in cc ua; do
         cp "$T/gm.$b" "$T/run.$b"
         ls -A "$E" | tr '\n' ' ' > "$T/ls.$b"
-        ( cd "$E" && B 30 "$T/run.$b" -o "$T/empty.$b" order.tsv built.uns2 gold/*.tsv ) > "$T/e.$b" 2>&1; rc=$?
-        if [ $rc = 0 ] && [ "$(cat "$T/ls.$b")" = "built.uns2 gold order.tsv " ] && cmp -s "$T/base.cc" "$T/empty.$b"; then
-            echo "empty $b: cwd holds only [$(cat "$T/ls.$b")] (no kernel/, no built.json); output identical to the repo-root run ($(wc -c < "$T/empty.$b" | tr -d ' ') B)"; P "empty $b"
+        ( cd "$E" && B 30 "$T/run.$b" -o "$T/empty.$b" order.tsv vocab.tsv built.uns2 gold/*.tsv ) > "$T/e.$b" 2>&1; rc=$?
+        if [ $rc = 0 ] && [ "$(cat "$T/ls.$b")" = "built.uns2 gold order.tsv vocab.tsv " ] && cmp -s "$T/base.cc" "$T/empty.$b"; then
+            echo "empty $b: cwd holds only [$(cat "$T/ls.$b")] (no kernel/, no built.json, no lex.py/TYPEKW); output identical to the repo-root run ($(wc -c < "$T/empty.$b" | tr -d ' ') B)"; P "empty $b"
         else echo "empty $b: FAILED (rc $rc, cwd [$(cat "$T/ls.$b")]): $(head -1 "$T/e.$b")"; fi
     done
+    # TYPEV needs no input: the empty-dir output has the placeholder and no TYPEV line
+    if [ -f "$T/empty.cc" ] && [ "$(grep -c -e '^/\* TYPEV: BEGIN placeholder' -e '^/\* TYPEV: END placeholder \*/$' "$T/empty.cc")" = 2 ] && ! grep -q -e '^char \*TYPEV' -e '^#define NTYPEV' "$T/empty.cc"; then
+        echo "empty typev: no TYPEKW input given; output holds the TYPEV placeholder pair and no TYPEV/NTYPEV line"; P "empty typev"
+    else echo "empty typev: FAILED"; fi
 fi
 
 if sel sem; then
@@ -164,7 +177,7 @@ if sel sem; then
         semb "$T/mixed.inc" $b "$T/sem.$b" > "$T/sb.$b" 2>&1 || { echo "sem $b: build failed: $(head -2 "$T/sb.$b")"; continue; }
         B 30 "$T/sem.$b" > "$T/so.$b" 2>&1; rc=$?
         if [ $rc = 0 ] && grep -q '^sem: 18 stages, [0-9]* keys, [0-9]* (key, head) decisions, 0 wrong, 0 not unique, 0 layout errors$' "$T/so.$b"; then
-            echo "sem $b (MIXED model.inc: genmodel region + shipped vocab/BF/BH/ENC/header; real unisa_core.c infer): $(cat "$T/so.$b")"; P "sem $b"
+            echo "sem $b (MIXED model.inc: both genmodel regions + shipped header/TYPEV/ENC; real unisa_core.c infer): $(cat "$T/so.$b")"; P "sem $b"
         else echo "sem $b: FAILED (rc $rc): $(tail -3 "$T/so.$b")"; fi
     done
 fi
@@ -177,7 +190,7 @@ if sel oracle; then
     cp tests/build_ref.sh tests/refshim.h tests/reffoot.h "$O/tests/"
     mix "$T/base.cc" "$O/kernel/unisa_model.inc"
     ( cd "$O" && B 60 sh tests/build_ref.sh "$O/ua.c" "$O/ua" ) > "$T/ob" 2>&1; rc=$?
-    if [ $rc = 0 ] && [ -x "$O/ua" ] && grep -qxF '/* S_<stage>: the stage order of order.tsv */' "$O/ua.c"; then
+    if [ $rc = 0 ] && [ -x "$O/ua" ] && grep -qxF '/* S_<stage>: the stage order of order.tsv */' "$O/ua.c" && grep -qxF '/* TOKV: gold TSV parse #field tok */' "$O/ua.c"; then
         echo "oracle: tests/build_ref.sh built the compiler over the MIXED model.inc"; P "oracle build"
         B 60 "$O/ua" --check-oracle > "$T/oo" 2>&1; rc=$?
         if [ $rc = 0 ]; then echo "oracle: --check-oracle rc 0: $(tail -2 "$T/oo" | tr '\n' ' ')"; P "oracle check"
@@ -276,7 +289,7 @@ if sel wfail; then
         # a real short write: file size limit 1 block, SIGXFSZ ignored so
         # write(2) returns EFBIG; the ~200 KB output must not come back whole
         rm -f "$T/wf/big.inc"
-        B 30 sh -c 'ulimit -f 1; trap "" XFSZ; exec "$@"' sh "$T/gm.$b" -o "$T/wf/big.inc" $K/order.tsv weights/built.uns2 $GOLD > "$T/w.o" 2>&1; rc=$?
+        B 30 sh -c 'ulimit -f 1; trap "" XFSZ; exec "$@"' sh "$T/gm.$b" -o "$T/wf/big.inc" $K/order.tsv $K/vocab.tsv weights/built.uns2 $GOLD > "$T/w.o" 2>&1; rc=$?
         [ $rc = 7 ] && grep -q -e "short write" -e "close failed" "$T/w.o" && { echo "wfail rlimit $b: rc 7: $(head -1 "$T/w.o")"; P "wfail rlimit $b"; } || echo "wfail rlimit $b: FAILED (rc $rc): $(head -1 "$T/w.o")"
     done
 fi
@@ -330,6 +343,182 @@ if sel fault; then
     CHECKS=order SKIP=order B 60 sh "$0" "$UA" > "$T/fo" 2>&1; rc=$?
     if [ $rc != 0 ] && grep -q '^summary: order: attempted, FAILED, no receipt' "$T/fo" && ! grep -q '^receipt order' "$T/fo"; then echo "fault: dropped check -> rc $rc, $(grep '^summary: order' "$T/fo")"; P "fault dropped"
     else echo "fault: a dropped check did NOT fail the run (rc $rc)"; fi
+fi
+
+# ================================================ second slice: vocab/BF/BH
+if sel vocab; then
+    B 60 python3 $K/vocab_check.py > "$T/vc" 2>&1 && P "vocab ckernel"; cat "$T/vc"
+fi
+
+if sel region2; then
+    # the same extractor (vregion.awk) on the Python oracle, the shipped file
+    # and genmodel's three builds; it fails on a missed anchor, an empty
+    # region, or a symbol set other than $T/exp
+    [ -f "$T/py/unisa_model.inc" ] || B 60 python3 -m unisa emit-kernel --out "$T/py" > /dev/null 2>&1 || echo "region2: emit-kernel failed"
+    vr py "$T/py/unisa_model.inc" > "$T/v.py" 2> "$T/v.py.e"; r1=$?
+    vr py kernel/unisa_model.inc > "$T/v.ship" 2> "$T/v.ship.e"; r2=$?
+    if [ $r1 = 0 ] && [ $r2 = 0 ] && [ -s "$T/v.py" ] && cmp -s "$T/v.py" "$T/v.ship"; then
+        echo "region2: oracle = shipped ($(wc -c < "$T/v.py" | tr -d ' ') B; $(cat "$T/v.py.e"))"; P "region2 oracle=shipped"
+    else echo "region2: oracle vs shipped FAILED (rc $r1/$r2): $(cat "$T/v.py.e" "$T/v.ship.e")"; fi
+    for b in cc ua san; do
+        vr gm "$T/base.$b" > "$T/v.$b" 2> "$T/v.$b.e"; rc=$?
+        if [ $rc = 0 ] && [ $r1 = 0 ] && [ -s "$T/v.py" ] && cmp -s "$T/v.py" "$T/v.$b"; then
+            echo "region2 $b: byte-identical to the oracle ($(wc -c < "$T/v.$b" | tr -d ' ') B; $(cat "$T/v.$b.e"))"; P "region2 $b"
+        else echo "region2 $b: DIFFERS (rc $rc): $(cat "$T/v.$b.e")"; diff "$T/v.py" "$T/v.$b" | head -4 | cut -c1-160; fi
+    done
+fi
+
+# vv <awk program> <name>: a broken copy of vocab.tsv
+vv() { awk -F'\t' -v OFS='\t' "$1" $K/vocab.tsv > "$V/$2.tsv"; }
+if sel vneg; then
+    V=$T/vn; mkdir -p "$V"
+    noprec=$(echo "$GOLD" | grep -v '/prec.tsv$'); noparse=$(echo "$GOLD" | grep -v '/parse.tsv$')
+    vv '$1 == "vocab" && $2 == "TOKV" { $3 = "parsex" } { print }' unkstage
+    vv '$2 == "TOKV" { $5 = "tokx" } { print }' nofield
+    vv '$2 == "PRODV" { $5 = "yy" } { print }' nohead
+    vv '$2 == "NTV" { $2 = "TOKV" } { print }' dupsym
+    vv '$1 == "bfbh" && $2 == "abi" { $2 = "enc" } { print }' dupbfbh
+    vv '$2 == "IRRECV" { next } { print }' missrow
+    vv '{ print } END { print "vocab\tXTRAV\tparse\tfield\ttok" }' extrarow
+    vv '{ print } END { print "vocabx\tXTRAV" }' unkkind
+    vv '$2 == "NTV" { $2 = "1NTV" } { print }' badident
+    vv '$2 == "NTV" { $2 = "tokv" } { print }' casefold
+    vv '$2 == "NTV" { $2 = "DENSE" } { print }' existing
+    ok=1
+    for n in quote bslash hibyte trigraph oct0 oct7; do mkdir -p "$V/$n"; done
+    ren '||' 'a"b' weights/gold/prec.tsv "$V/quote/prec.tsv" || ok=0
+    ren '||' 'a\b' weights/gold/prec.tsv "$V/bslash/prec.tsv" || ok=0
+    ren '||' "$(printf 'a\200b')" weights/gold/prec.tsv "$V/hibyte/prec.tsv" || ok=0
+    ren '||' 'a??b' weights/gold/prec.tsv "$V/trigraph/prec.tsv" || ok=0
+    ren if 0if weights/gold/parse.tsv "$V/oct0/parse.tsv" || ok=0
+    ren if 7if weights/gold/parse.tsv "$V/oct7/parse.tsv" || ok=0
+    [ $ok = 1 ] || echo "vneg: a fixture rename did not apply"
+    for b in cc ua san; do
+        for c in "unkstage|unknown stage parsex" \
+                 "nofield|stage parse has no #field tokx" \
+                 "nohead|stage parse has no #head yy" \
+                 "dupsym|duplicate symbol TOKV" \
+                 "dupbfbh|bfbh stage given twice: enc" \
+                 "missrow|missing row: 15 vocab/typekw rows, want 16" \
+                 "extrarow|extra row: 17 vocab/typekw rows, want 16" \
+                 "unkkind|unknown row kind vocabx" \
+                 "quote|BF_PREC_0 value 0 is outside this tool's input domain: a quote" \
+                 "bslash|BF_PREC_0 value 0 is outside this tool's input domain: a backslash" \
+                 "hibyte|BF_PREC_0 value 0 is outside this tool's input domain: a control or non-ASCII byte" \
+                 "trigraph|BF_PREC_0 value 0 is outside this tool's input domain: \"??\"" \
+                 "oct0|TOKV value 5 is outside this tool's input domain: a non-first vocab value starting 0-7" \
+                 "oct7|TOKV value 5 is outside this tool's input domain: a non-first vocab value starting 0-7" \
+                 "badident|symbol 1NTV is not a legal C identifier" \
+                 "casefold|symbol tokv collides with TOKV (case-folded)" \
+                 "existing|symbol DENSE collides with DENSE"; do
+            n=${c%%|*}; want=${c#*|}
+            case $n in
+            quote|bslash|hibyte|trigraph) voc=$K/vocab.tsv; set -- $K/order.tsv weights/built.uns2 $noprec "$V/$n/prec.tsv" ;;
+            oct0|oct7) voc=$K/vocab.tsv; set -- $K/order.tsv weights/built.uns2 $noparse "$V/$n/parse.tsv" ;;
+            *) voc="$V/$n.tsv"; set -- $K/order.tsv weights/built.uns2 $GOLD ;;
+            esac
+            rm -f "$V/out"
+            VOC=$voc gm $b "$V/out" "$@" > "$V/o" 2>&1; rc=$?
+            if [ $rc = 1 ] && grep -qF "$want" "$V/o" && [ ! -e "$V/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$V/o"; then
+                echo "vneg $n $b: rc 1, no output: $(head -1 "$V/o" | LC_ALL=C tr -c '\n -~' '?')"; P "vneg $n $b"
+            else echo "vneg $n $b: FAILED (rc $rc, want 1 and '$want'): $(head -1 "$V/o" | LC_ALL=C tr -c '\n -~' '?')"; fi
+        done
+    done
+fi
+
+if sel vpos; then
+    # a non-first vocab value starting 8 or 9 is legal: not an octal digit,
+    # so "\08if" is \0 then '8'.  cc compiles the emitted TOKV line and reads
+    # value 5 back.
+    V=$T/vp; noparse=$(echo "$GOLD" | grep -v '/parse.tsv$')
+    for n in oct8 oct9; do
+        d=${n#oct}; mkdir -p "$V/$n"
+        ren if ${d}if weights/gold/parse.tsv "$V/$n/parse.tsv" || echo "vpos: rename did not apply"
+        for b in cc ua san; do
+            rm -f "$V/out"
+            gm $b "$V/out" $K/order.tsv weights/built.uns2 $noparse "$V/$n/parse.tsv" > "$V/o" 2>&1; rc=$?
+            { grep '^char \*TOKV = ' "$V/out"; echo 'int printf(const char *, ...); int main(void) { char *p = TOKV; int i; for (i = 0; i < 5; i = i + 1) while (*p++) ; printf("%s\n", p); return 0; }'; } > "$V/x.c" 2>/dev/null
+            B 60 cc -w -o "$V/x" "$V/x.c" > /dev/null 2>&1 && got=$(B 10 "$V/x") || got="(no build)"
+            if [ $rc = 0 ] && grep -q "^char \*TOKV = \".*\\\\0${d}if\\\\0" "$V/out" && [ "$got" = "${d}if" ]; then
+                echo "vpos $n $b: rc 0, TOKV holds '\\0${d}if\\0'; cc reads value 5 back as '$got'"; P "vpos $n $b"
+            else echo "vpos $n $b: FAILED (rc $rc, value 5 '$got'): $(head -1 "$V/o")"; fi
+        done
+    done
+fi
+
+if sel pool; then
+    # enc.tsv (loaded FIRST) and reloc.tsv (loaded LAST) each get a different
+    # renamed string.  With one reused read buffer the earlier table's strings
+    # would point into the later file's bytes; with the pool, each keeps its own.
+    PL=$T/pool; mkdir -p "$PL"
+    ren lnx POOLA_lnx weights/gold/enc.tsv "$PL/enc.tsv" && ren jmp POOLB_a_different_jmp weights/gold/reloc.tsv "$PL/reloc.tsv" || echo "pool: rename did not apply"
+    mid=$(echo "$GOLD" | grep -v -e '/enc.tsv$' -e '/reloc.tsv$')
+    for b in cc ua san; do
+        gm $b "$PL/out.$b" $K/order.tsv weights/built.uns2 "$PL/enc.tsv" $mid "$PL/reloc.tsv" > "$PL/o.$b" 2>&1 || echo "pool $b: genmodel failed: $(head -1 "$PL/o.$b")"
+    done
+    vr gm "$T/base.cc" > "$PL/v0" 2>/dev/null; vr gm "$PL/out.cc" > "$PL/v1" 2>/dev/null
+    grep '^char \*BF_ENC_1 = ' "$PL/v0" | sed 's/"lnx\\000/"POOLA_lnx\\000/' > "$PL/want"
+    grep '^char \*BF_RELOC_0 = ' "$PL/v0" | sed 's/"jmp\\000/"POOLB_a_different_jmp\\000/' >> "$PL/want"
+    grep -e '^char \*BF_ENC_1 = ' -e '^char \*BF_RELOC_0 = ' "$PL/v1" > "$PL/got"
+    if [ -s "$PL/v1" ] && [ "$(wc -l < "$PL/want" | tr -d ' ')" = 2 ] && cmp -s "$PL/want" "$PL/got"; then
+        echo "pool kept: $(tr '\n' ' ' < "$PL/got")"; P "pool kept"
+    else echo "pool kept: FAILED: $(tr '\n' ' ' < "$PL/got")"; fi
+    nd=$(diff "$PL/v0" "$PL/v1" | grep -c '^[<>]'); ns=$(diff "$PL/v0" "$PL/v1" | grep '^>' | sed 's/^> char \*\([A-Z0-9_]*\) = .*/\1/' | sort | tr '\n' ' ')
+    if [ "$nd" = 4 ] && [ "$ns" = "BF_ENC_1 BF_RELOC_0 " ] && region "$T/base.cc" > "$PL/r0" && region "$PL/out.cc" > "$PL/r1" && cmp -s "$PL/r0" "$PL/r1"; then
+        echo "pool only: exactly BF_ENC_1 and BF_RELOC_0 changed; first-slice region unchanged"; P "pool only"
+    else echo "pool only: FAILED ($nd diff lines: $ns)"; fi
+    for b in ua san; do cmp -s "$PL/out.cc" "$PL/out.$b" && { echo "pool $b: output identical to cc"; P "pool $b"; } || echo "pool $b: DIFFERS from cc"; done
+fi
+
+if sel rename; then
+    # one value renamed consistently in opinfo.tsv (schema and rows): add64
+    # -> addq.  Predicted from the TSV schema and vocab.tsv alone: every list
+    # of the stage that holds the value, mapped to its symbol.
+    RN=$T/ren; mkdir -p "$RN"; st=opinfo; old=add64; new=addq
+    ren $old $new weights/gold/$st.tsv "$RN/$st.tsv" || echo "rename: did not apply"
+    awk -F'\t' -v st=$st -v v=$old -v VOC=$K/vocab.tsv '
+        BEGIN { while ((getline l < VOC) > 0) { split(l, a, "\t"); if (a[1] == "bfbh" && a[2] == st) bf = 1
+                    if (a[1] == "vocab" && a[3] == st) m[a[4] "|" a[5]] = a[2] } }
+        $1 == "#field" { hit = 0; for (i = 3; i <= NF; i++) if ($i == v) hit = 1
+            if (hit) { if (bf) print "BF_" toupper(st) "_" nf; if (("field|" $2) in m) print m["field|" $2] }; nf++ }
+        $1 == "#head" { hit = 0; for (i = 4; i <= NF; i++) if ($i == v) hit = 1
+            if (hit) { if (bf) print "BH_" toupper(st) "_" toupper($2); if (("head|" $2) in m) print m["head|" $2] } }' weights/gold/$st.tsv | sort | tr '\n' ' ' > "$RN/pred"
+    others=$(echo "$GOLD" | grep -v "/$st.tsv\$")
+    for b in cc ua san; do gm $b "$RN/out.$b" $K/order.tsv weights/built.uns2 $others "$RN/$st.tsv" > "$RN/o.$b" 2>&1 || echo "rename $b: genmodel failed: $(head -1 "$RN/o.$b")"; done
+    vr gm "$T/base.cc" > "$RN/v0" 2>/dev/null; vr gm "$RN/out.cc" > "$RN/v1" 2>/dev/null
+    diff "$RN/v0" "$RN/v1" | grep '^>' | sed 's/^> char \*\([A-Z0-9_]*\) = .*/\1/' | sort | tr '\n' ' ' > "$RN/obs"
+    diff "$RN/v0" "$RN/v1" | grep '^<' | sed -e 's/^< //' -e "s/\"$old\\\\000/\"$new\\\\000/" -e "s/\\\\000$old\\\\000/\\\\000$new\\\\000/g" > "$RN/wantl"
+    diff "$RN/v0" "$RN/v1" | grep '^>' | sed 's/^> //' > "$RN/gotl"
+    nl=$(diff "$RN/v0" "$RN/v1" | grep -c '^<')
+    if [ -s "$RN/v1" ] && [ -s "$RN/pred" ] && [ "$(cat "$RN/pred")" = "$(cat "$RN/obs")" ] && [ "$nl" = "$(wc -w < "$RN/pred" | tr -d ' ')" ] && cmp -s "$RN/wantl" "$RN/gotl"; then
+        echo "rename predicted: $st $old -> $new: predicted [$(cat "$RN/pred")] = observed [$(cat "$RN/obs")]; each changed line is the old line with the value replaced"; P "rename predicted"
+    else echo "rename predicted: FAILED: predicted [$(cat "$RN/pred")] observed [$(cat "$RN/obs")] ($nl lines)"; fi
+    region "$T/base.cc" > "$RN/r0"; region "$RN/out.cc" > "$RN/r1"
+    if [ -s "$RN/r0" ] && cmp -s "$RN/r0" "$RN/r1"; then echo "rename region1: first-slice region (MODEL, DENSE, ...) unchanged: a consistent rename moves no key and no label"; P "rename region1"; else echo "rename region1: FAILED"; fi
+    for b in ua san; do cmp -s "$RN/out.cc" "$RN/out.$b" && { echo "rename $b: output identical to cc"; P "rename $b"; } || echo "rename $b: DIFFERS from cc"; done
+fi
+
+if sel integ; then
+    # the MIXED file (both generated regions + the old header, TYPEV and
+    # ENC_ tail) equals the shipped one once whole-line comments are removed;
+    # then closure and nativeboot run through tests/snap.sh on a copy of the
+    # tree whose kernel/unisa_model.inc is the MIXED file
+    I=$T/integ; mkdir -p "$I"
+    mix "$T/base.cc" "$I/mixed.inc" 2> "$I/me"; rc=$?
+    nc() { awk 'c { if (index($0, "*/")) c = 0; next } /^\/\*/ { if (!index($0, "*/")) c = 1; next } { print }' "$1"; }
+    nc "$I/mixed.inc" > "$I/m.nc"; nc kernel/unisa_model.inc > "$I/s.nc"
+    if [ $rc = 0 ] && [ -s "$I/m.nc" ] && cmp -s "$I/m.nc" "$I/s.nc" && grep -qxF "$(grep '^char \*TYPEV = ' kernel/unisa_model.inc)" "$I/mixed.inc"; then
+        echo "integ mixed=shipped: MIXED ($(wc -c < "$I/mixed.inc" | tr -d ' ') B) = shipped ($(wc -c < kernel/unisa_model.inc | tr -d ' ') B) modulo whole-line comments ($(wc -c < "$I/m.nc" | tr -d ' ') B compared)"; P "integ mixed=shipped"
+    else echo "integ mixed=shipped: FAILED (rc $rc): $(cat "$I/me")"; fi
+    mkdir -p "$I/tree"
+    ( tar cf - --exclude=.git --exclude=corpus --exclude=ujs --exclude=research . ) | ( cd "$I/tree" && tar xf - )
+    cp "$I/mixed.inc" "$I/tree/kernel/unisa_model.inc"
+    for s in ${INTEG:-closure nativeboot}; do
+        t1=$(now)
+        ( cd "$I/tree" && B 60 bash tests/snap.sh $s ) > "$I/$s" 2>&1; rc=$?
+        echo "integ $s: rc $rc, $(perl -e "printf '%.1f', $(now) - $t1") s: $(tail -1 "$I/$s")"
+        [ $rc = 0 ] && P "integ $s"
+    done
 fi
 
 # ---- receipts

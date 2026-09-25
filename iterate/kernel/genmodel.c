@@ -1,7 +1,7 @@
 /* genmodel.c -- the model region of kernel/unisa_model.inc, from declared
  * inputs only, in the C subset unisacc compiles. [J10 step 3, first slice]
  *
- *   genmodel -o OUT ORDER.tsv BUILT.uns2 TSV...     (exactly one TSV per stage)
+ *   genmodel -o OUT ORDER.tsv VOCAB.tsv BUILT.uns2 TSV...   (one TSV per stage)
  *
  * Reads ONLY the files named on its command line: the stage order
  * (iterate/kernel/order.tsv), the constructed weights (weights/built.uns2)
@@ -23,8 +23,10 @@
  * between UNS2 and the TSV, or it exits.
  * Exit codes: 1 bad input (reader, UNS2 decode, mismatch), 2 usage, 4
  * capacity, 7 the output could not be opened, written or closed.
- * Not written here (out of this slice): the provenance header, the
- * vocabularies, BF_/BH_, ENC_.
+ *   - [second slice] the vocabularies and BF_/BH_/HD_, from the TSVs through
+ *     the mapping and order of VOCAB.tsv (iterate/kernel/vocab.tsv); TYPEV is
+ *     a delimited placeholder, not generated.
+ * Not written here: the provenance header, TYPEV's lines, ENC_.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +48,8 @@
 #define U2SZ 1048576
 #define OUTSZ 8388608
 #define MAXP 512
+#define POOLSZ 262144   /* the string pool: every schema string of every TSV */
+#define MAXSL 255       /* bytes in one schema string */
 
 char *gpath;
 void die(char *msg) { printf("genmodel: %s: %s\n", gpath, msg); exit(1); }
@@ -171,10 +175,27 @@ int tdoff[NST];          /* its answers in dpool: key-major, head-minor */
 char dpool[MAXD];
 int dplen;
 int ntsv;
-char *val[MAXF][MAXV];
-char *cls[MAXH][MAXC];
-char *fname[MAXF];
-char *hname[MAXH];
+/* Every schema string (field and head names, values, classes) is copied into
+   pool[] as it is read: tbuf is reused by the next file, so a pointer into it
+   would be overwritten.  Kept until the output is written.  Per table t:
+   field i's name tfn[t*MAXF+i], value j tval[(t*MAXF+i)*MAXV+j]; head i's
+   name thn[t*MAXH+i], class j tcls[(t*MAXH+i)*MAXC+j]. */
+char pool[POOLSZ];
+int pn;
+char *pstr(char *s) {
+    int n = (int)strlen(s), i;
+    char *r;
+    if (n > MAXSL) cap("string length", n, MAXSL);          /* checked before copying */
+    if (pn + n + 1 > POOLSZ) cap("string pool bytes", pn + n + 1, POOLSZ);
+    r = pool + pn;
+    for (i = 0; i <= n; i = i + 1) r[i] = s[i];
+    pn = pn + n + 1;
+    return r;
+}
+char *tfn[NST * MAXF];
+char *tval[NST * MAXF * MAXV];
+char *thn[NST * MAXH];
+char *tcls[NST * MAXH * MAXC];
 int seen[MAXK];
 
 void load_tsv(char *path) {
@@ -202,9 +223,9 @@ void load_tsv(char *path) {
             if (np < 3) dieln(lno, "a field with no values");
             if (nf >= MAXF) cap("fields", nf + 1, MAXF);
             if (np - 2 > MAXV) cap("values in a field", np - 2, MAXV);
-            fname[nf] = parts[1];
+            tfn[t * MAXF + nf] = pstr(parts[1]);
             tnv[t][nf] = np - 2;
-            for (i = 2; i < np; i = i + 1) val[nf][i - 2] = parts[i];
+            for (i = 2; i < np; i = i + 1) tval[(t * MAXF + nf) * MAXV + i - 2] = pstr(parts[i]);
             nf = nf + 1;
             continue;
         }
@@ -213,9 +234,9 @@ void load_tsv(char *path) {
             if (np < 4) dieln(lno, "a head with no classes");
             if (nh >= MAXH) cap("heads", nh + 1, MAXH);
             if (np - 3 > MAXC) cap("classes in a head", np - 3, MAXC);
-            hname[nh] = parts[1];
+            thn[t * MAXH + nh] = pstr(parts[1]);
             tncl[t][nh] = np - 3;
-            for (i = 3; i < np; i = i + 1) cls[nh][i - 3] = parts[i];
+            for (i = 3; i < np; i = i + 1) tcls[(t * MAXH + nh) * MAXC + i - 3] = pstr(parts[i]);
             nh = nh + 1;
             continue;
         }
@@ -224,10 +245,10 @@ void load_tsv(char *path) {
             if (nf == 0 || nh == 0) dieln(lno, "header before the schema");
             if (np != nf + nh) dieln(lno, "header is not the schema's");
             for (i = 0; i < nf; i = i + 1)
-                if (!streq(parts[i], fname[i])) dieln(lno, "header is not the schema's");
+                if (!streq(parts[i], tfn[t * MAXF + i])) dieln(lno, "header is not the schema's");
             for (i = 0; i < nh; i = i + 1) {
                 c = nf + i;
-                if (!prefix(parts[c], "=> ") || !streq(parts[c] + 3, hname[i])) dieln(lno, "header is not the schema's");
+                if (!prefix(parts[c], "=> ") || !streq(parts[c] + 3, thn[t * MAXH + i])) dieln(lno, "header is not the schema's");
             }
             header = 1;
             nk = 1;
@@ -245,7 +266,7 @@ void load_tsv(char *path) {
         k = 0;
         for (i = 0; i < nf; i = i + 1) {
             v = -1;
-            for (j = 0; j < tnv[t][i]; j = j + 1) if (streq(parts[i], val[i][j])) { v = j; break; }
+            for (j = 0; j < tnv[t][i]; j = j + 1) if (streq(parts[i], tval[(t * MAXF + i) * MAXV + j])) { v = j; break; }
             if (v < 0) dieln(lno, "not a value of its field");
             k = k + v * stride[i];
         }
@@ -253,22 +274,22 @@ void load_tsv(char *path) {
         seen[k] = 1;
         for (i = 0; i < nh; i = i + 1) {
             c = -1;
-            for (j = 0; j < tncl[t][i]; j = j + 1) if (streq(parts[nf + i], cls[i][j])) { c = j; break; }
+            for (j = 0; j < tncl[t][i]; j = j + 1) if (streq(parts[nf + i], tcls[(t * MAXH + i) * MAXC + j])) { c = j; break; }
             if (c < 0) dieln(lno, "not a class of its head");
             dpool[tdoff[t] + k * nh + i] = (char)c;
         }
     }
     if (sn == 0 || nf == 0 || nh == 0 || !header) die("not a gold table with a schema");
     for (i = 0; i < nf; i = i + 1)
-        for (j = 0; j < i; j = j + 1) if (streq(fname[i], fname[j])) die("field names repeat");
+        for (j = 0; j < i; j = j + 1) if (streq(tfn[t * MAXF + i], tfn[t * MAXF + j])) die("field names repeat");
     for (i = 0; i < nh; i = i + 1)
-        for (j = 0; j < i; j = j + 1) if (streq(hname[i], hname[j])) die("head names repeat");
+        for (j = 0; j < i; j = j + 1) if (streq(thn[t * MAXH + i], thn[t * MAXH + j])) die("head names repeat");
     for (i = 0; i < nf; i = i + 1)
         for (j = 0; j < tnv[t][i]; j = j + 1)
-            for (k = 0; k < j; k = k + 1) if (streq(val[i][j], val[i][k])) die("values repeat");
+            for (k = 0; k < j; k = k + 1) if (streq(tval[(t * MAXF + i) * MAXV + j], tval[(t * MAXF + i) * MAXV + k])) die("values repeat");
     for (i = 0; i < nh; i = i + 1)
         for (j = 0; j < tncl[t][i]; j = j + 1)
-            for (k = 0; k < j; k = k + 1) if (streq(cls[i][j], cls[i][k])) die("classes repeat");
+            for (k = 0; k < j; k = k + 1) if (streq(tcls[(t * MAXH + i) * MAXC + j], tcls[(t * MAXH + i) * MAXC + k])) die("classes repeat");
     for (k = 0; k < nk; k = k + 1) if (!seen[k]) die("keys do not cover the fields' product");
     for (i = 0; i < ntsv; i = i + 1)
         if (streq(tname[i], sn)) { printf("genmodel: %s: stage %s given twice\n", path, sn); exit(1); }
@@ -482,6 +503,274 @@ void blob_stage(int u, char *nm) {
     smw_last = W;
 }
 
+/* ------------------------------------------------ vocab.tsv (slice 2) -- */
+/* vocab.tsv is the mapping AND the order: 'vocab SYM stage field|head name',
+   'typekw SYM' (a placeholder: not generated), 'bfbh stage'.  Rows are
+   written in the file's order.  NVOCROW, NBFBH and the ABI list below are a
+   CONSUMER ABI check -- the symbols kernel/unisa_core.c and src/ link against
+   must all be declared -- not a second mapping: which stage, list and
+   position a symbol comes from is only in vocab.tsv. */
+#define NVOCROW 16      /* vocab + typekw rows */
+#define NBFBH 11        /* bfbh rows */
+#define MAXROW 64
+#define MAXSYM 1024     /* written symbols, for the collision check */
+/* packed as NUL-separated strings: the subset has no array-of-pointer initialiser */
+char *ABI = "TOKV\0PRODV\0ACTV\0TYPEV\0DIRV\0PPACTV\0NTV\0TYSV\0TOPSV\0TYOUTV\0SCTXV\0SKINDV\0SACTV\0IRFAMV\0IRFLAV\0IRRECV\0";
+char *ABI_TYPEKW = "TYPEV";
+char *FIXED = "MODEL\0NSTAGE\0STAGE_M\0STAGE_H\0STAGE_OFF\0STAGE_NCLS\0STAGE_MW\0STAGE_VN\0act\0z\0DENSE\0DENSE_LEN\0STAGE_DOFF\0STAGE_NH\0model_dims\0";
+#define NFIXED 15
+char *KW = "auto\0break\0case\0char\0const\0continue\0default\0do\0double\0else\0enum\0extern\0float\0for\0goto\0if\0inline\0int\0long\0register\0restrict\0return\0short\0signed\0sizeof\0static\0struct\0switch\0typedef\0union\0unsigned\0void\0volatile\0while\0_Bool\0";
+#define NKW 35
+char *nth(char *p, int i) { while (i > 0) { p = p + strlen(p) + 1; i = i - 1; } return p; }
+
+char vbuf[TSVSZ + 1];
+int nrow;
+int rkind[MAXROW];      /* 0 vocab, 1 typekw, 2 bfbh */
+char *rsym[MAXROW];     /* vocab/typekw: the declared symbol */
+char *rnsym[MAXROW];    /* vocab/typekw: N<symbol> */
+int rtsv[MAXROW];       /* vocab/bfbh: the stage's TSV index */
+int rhead[MAXROW];      /* vocab: 0 field, 1 head */
+int ridx[MAXROW];       /* vocab: the field or head index in that TSV */
+int rln[MAXROW];
+char *vpath;
+char *gsym[MAXSYM];
+int ngsym;
+
+void vdie(int ln, char *a, char *b) { printf("genmodel: %s: line %d: %s%s\n", vpath, ln, a, b); exit(1); }
+int stage_tsv(char *nm) {
+    int i;
+    for (i = 0; i < ntsv; i = i + 1) if (streq(tname[i], nm)) return i;
+    return -1;
+}
+void load_vocab(char *path) {
+    int n, t, i, nv, nb, k;
+    char *s;
+    vpath = path; gpath = path;
+    n = slurp(path, vbuf, TSVSZ);
+    lp = vbuf; lend = vbuf + n; lno = 0; nrow = 0; nv = 0; nb = 0;
+    while ((s = nextline()) != 0) {
+        if (s[0] == 0 || s[0] == '#') continue;
+        split(s);
+        if (nrow >= MAXROW) vdie(lno, "too many rows", "");
+        rln[nrow] = lno;
+        if (streq(parts[0], "vocab")) {
+            if (np != 5) vdie(lno, "want: vocab SYM stage field|head name", "");
+            t = stage_tsv(parts[2]);
+            if (t < 0) vdie(lno, "unknown stage ", parts[2]);
+            rkind[nrow] = 0; rsym[nrow] = pstr(parts[1]); rtsv[nrow] = t; ridx[nrow] = -1;
+            if (streq(parts[3], "field")) {
+                rhead[nrow] = 0;
+                for (i = 0; i < tnf[t]; i = i + 1) if (streq(tfn[t * MAXF + i], parts[4])) ridx[nrow] = i;
+                if (ridx[nrow] < 0) { printf("genmodel: %s: line %d: stage %s has no #field %s\n", path, lno, parts[2], parts[4]); exit(1); }
+            } else if (streq(parts[3], "head")) {
+                rhead[nrow] = 1;
+                for (i = 0; i < tnh[t]; i = i + 1) if (streq(thn[t * MAXH + i], parts[4])) ridx[nrow] = i;
+                if (ridx[nrow] < 0) { printf("genmodel: %s: line %d: stage %s has no #head %s\n", path, lno, parts[2], parts[4]); exit(1); }
+            } else vdie(lno, "want field or head, not ", parts[3]);
+            nv = nv + 1;
+        } else if (streq(parts[0], "typekw")) {
+            if (np != 2) vdie(lno, "want: typekw SYM", "");
+            rkind[nrow] = 1; rsym[nrow] = pstr(parts[1]); rtsv[nrow] = -1;
+            nv = nv + 1;
+        } else if (streq(parts[0], "bfbh")) {
+            if (np != 2) vdie(lno, "want: bfbh stage", "");
+            t = stage_tsv(parts[1]);
+            if (t < 0) vdie(lno, "unknown stage ", parts[1]);
+            for (k = 0; k < nrow; k = k + 1)
+                if (rkind[k] == 2 && rtsv[k] == t) vdie(lno, "bfbh stage given twice: ", parts[1]);
+            rkind[nrow] = 2; rsym[nrow] = 0; rtsv[nrow] = t;
+            nb = nb + 1;
+        } else vdie(lno, "unknown row kind ", parts[0]);
+        nrow = nrow + 1;
+    }
+    for (i = 0; i < nrow; i = i + 1)
+        for (k = 0; k < i; k = k + 1)
+            if (rkind[i] != 2 && rkind[k] != 2 && streq(rsym[i], rsym[k])) vdie(rln[i], "duplicate symbol ", rsym[i]);
+    if (nv < NVOCROW) { printf("genmodel: %s: missing row: %d vocab/typekw rows, want %d\n", path, nv, NVOCROW); exit(1); }
+    if (nv > NVOCROW) { printf("genmodel: %s: extra row: %d vocab/typekw rows, want %d\n", path, nv, NVOCROW); exit(1); }
+    if (nb < NBFBH) { printf("genmodel: %s: missing row: %d bfbh rows, want %d\n", path, nb, NBFBH); exit(1); }
+    if (nb > NBFBH) { printf("genmodel: %s: extra row: %d bfbh rows, want %d\n", path, nb, NBFBH); exit(1); }
+}
+
+/* ---- names: every symbol written is built here and checked before output */
+int isident(char *s) {
+    int i = 0;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z') || s[0] == '_')) return 0;
+    while (s[i]) {
+        if (!((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') || (s[i] >= '0' && s[i] <= '9') || s[i] == '_')) return 0;
+        i = i + 1;
+    }
+    for (i = 0; i < NKW; i = i + 1) if (streq(s, nth(KW, i))) return 0;
+    return 1;
+}
+int up(int c) { return (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c; }
+int foldeq(char *a, char *b) {
+    while (*a && *b) { if (up(*a) != up(*b)) return 0; a = a + 1; b = b + 1; }
+    return *a == *b;
+}
+/* a + b (b upper-cased when ub) + c upper-cased + (d >= 0 ? decimal d : ""), into the pool */
+char nbuf[600];
+char *mkname(char *a, char *b, int ub, char *c, int d) {
+    int n = 0, i, m = 0, len;
+    char dg[16];
+    len = (int)(strlen(a) + strlen(b) + strlen(c)) + 11;
+    if (len > MAXSL) cap("generated name length", len, MAXSL);
+    while (*a) { nbuf[n] = *a; n = n + 1; a = a + 1; }
+    while (*b) { nbuf[n] = (char)(ub ? up(*b) : *b); n = n + 1; b = b + 1; }
+    while (*c) { nbuf[n] = (char)up(*c); n = n + 1; c = c + 1; }
+    if (d >= 0) {
+        if (d == 0) { dg[0] = '0'; m = 1; }
+        while (d > 0) { dg[m] = (char)('0' + d % 10); d = d / 10; m = m + 1; }
+        for (i = m - 1; i >= 0; i = i - 1) { nbuf[n] = dg[i]; n = n + 1; }
+    }
+    nbuf[n] = 0;
+    return pstr(nbuf);
+}
+void addsym(char *s) {
+    int i;
+    if (!isident(s)) { printf("genmodel: %s: symbol %s is not a legal C identifier\n", vpath, s); exit(1); }
+    for (i = 0; i < ngsym; i = i + 1)
+        if (foldeq(gsym[i], s)) {
+            if (streq(gsym[i], s)) printf("genmodel: %s: symbol %s collides with %s\n", vpath, s, gsym[i]);
+            else printf("genmodel: %s: symbol %s collides with %s (case-folded)\n", vpath, s, gsym[i]);
+            exit(1);
+        }
+    if (ngsym >= MAXSYM) cap("written symbols", ngsym + 1, MAXSYM);
+    gsym[ngsym] = s; ngsym = ngsym + 1;
+}
+char *bfn[NST * MAXF]; char *nbfn[NST * MAXF];
+char *bhn[NST * MAXH]; char *nbhn[NST * MAXH]; char *hdn[NST * MAXH];
+
+/* This tool's conservative serialization domain.  Bytes are written as they
+   are, never escaped, so a value that would need an escape, could read as a
+   trigraph, or could extend an octal escape is refused (exit 1) instead.
+   Vocab strings end each value with \0, so a non-first value starting 0-7
+   would extend it (8 and 9 are not octal digits); BF/BH use \000, three
+   digits, so a leading digit is safe there. */
+void okval(char *s, int octal0, char *sym, int j) {
+    int i = 0, c;
+    char *why = 0;
+    if (s[0] == 0) why = "an empty value";
+    while (!why && s[i]) {
+        c = s[i] & 255;
+        if (c == '"') why = "a quote";
+        else if (c == '\\') why = "a backslash";
+        else if (c < 32 || c > 126) why = "a control or non-ASCII byte";
+        else if (c == '?' && s[i + 1] == '?') why = "\"??\" (a trigraph start)";
+        i = i + 1;
+    }
+    if (!why && octal0 && j > 0 && s[0] >= '0' && s[0] <= '7') why = "a non-first vocab value starting 0-7 (after \\0)";
+    if (why) { printf("genmodel: %s: %s value %d is outside this tool's input domain: %s\n", vpath, sym, j, why); exit(1); }
+}
+void commentok(char *s, char *what) {
+    int i = 0;
+    while (s[i]) {
+        if ((s[i] & 255) < 32 || (s[i] & 255) > 126 || (s[i] == '*' && s[i + 1] == '/') || (s[i] == '/' && s[i + 1] == '*')) {
+            printf("genmodel: %s: %s %s cannot be written in a comment\n", vpath, what, s);
+            exit(1);
+        }
+        i = i + 1;
+    }
+}
+
+void vocab_names(void) {
+    int i, r, t, f, h, k;
+    char *a;
+    ngsym = 0;
+    /* what the first slice writes */
+    for (i = 0; i < NFIXED; i = i + 1) addsym(nth(FIXED, i));
+    for (i = 0; i < NST; i = i + 1) addsym(mkname("S_", oname[i], 1, "", -1));
+    for (r = 0; r < nrow; r = r + 1) {
+        t = rtsv[r];
+        if (rkind[r] == 2) {
+            commentok(tname[t], "stage name");
+            for (f = 0; f < tnf[t]; f = f + 1) {
+                k = t * MAXF + f;
+                commentok(tfn[k], "field name");
+                bfn[k] = mkname("BF_", tname[t], 1, "_", f); addsym(bfn[k]);
+                nbfn[k] = mkname("N", bfn[k], 0, "", -1); addsym(nbfn[k]);
+            }
+            for (h = 0; h < tnh[t]; h = h + 1) {
+                k = t * MAXH + h;
+                a = mkname("_", tname[t], 1, "_", -1);
+                bhn[k] = mkname("BH", a, 0, thn[k], -1); addsym(bhn[k]);
+                nbhn[k] = mkname("N", bhn[k], 0, "", -1); addsym(nbhn[k]);
+                hdn[k] = mkname("HD", a, 0, thn[k], -1); addsym(hdn[k]);
+            }
+        } else {
+            if (rkind[r] == 0) {
+                commentok(tname[t], "stage name");
+                commentok(rhead[r] ? thn[t * MAXH + ridx[r]] : tfn[t * MAXF + ridx[r]], "list name");
+            }
+            addsym(rsym[r]);                           /* kept exactly as declared */
+            rnsym[r] = mkname("N", rsym[r], 0, "", -1);
+            addsym(rnsym[r]);
+        }
+    }
+    /* consumer ABI: every symbol the kernel links against is declared, and
+       the TYPEKW one is the typekw row (a placeholder, never generated) */
+    for (i = 0; i < NVOCROW; i = i + 1) {
+        a = nth(ABI, i); f = -1;
+        for (r = 0; r < nrow; r = r + 1) if (rkind[r] != 2 && streq(rsym[r], a)) f = r;
+        if (f < 0) { printf("genmodel: %s: consumer ABI: symbol %s is not declared\n", vpath, a); exit(1); }
+        if ((rkind[f] == 1) != streq(a, ABI_TYPEKW)) { printf("genmodel: %s: consumer ABI: %s is the wrong row kind\n", vpath, a); exit(1); }
+    }
+    /* the serialization domain, over every string that will be written */
+    for (r = 0; r < nrow; r = r + 1) {
+        t = rtsv[r];
+        if (rkind[r] == 0 && rhead[r] == 0)
+            for (i = 0; i < tnv[t][ridx[r]]; i = i + 1) okval(tval[(t * MAXF + ridx[r]) * MAXV + i], 1, rsym[r], i);
+        if (rkind[r] == 0 && rhead[r] == 1)
+            for (i = 0; i < tncl[t][ridx[r]]; i = i + 1) okval(tcls[(t * MAXH + ridx[r]) * MAXC + i], 1, rsym[r], i);
+        if (rkind[r] == 2) {
+            for (f = 0; f < tnf[t]; f = f + 1)
+                for (i = 0; i < tnv[t][f]; i = i + 1) okval(tval[(t * MAXF + f) * MAXV + i], 0, bfn[t * MAXF + f], i);
+            for (h = 0; h < tnh[t]; h = h + 1)
+                for (i = 0; i < tncl[t][h]; i = i + 1) okval(tcls[(t * MAXH + h) * MAXC + i], 0, bhn[t * MAXH + h], i);
+        }
+    }
+}
+
+/* the vocab / BF / BH region, rows in vocab.tsv order, laid out as ckernel.py */
+void emit_vocab(void) {
+    int r, t, f, h, i, n, b, k;
+    os_("\n");
+    for (r = 0; r < nrow; r = r + 1) {
+        t = rtsv[r];
+        if (rkind[r] == 1) {
+            os_("/* "); os_(rsym[r]); os_(": BEGIN placeholder -- not generated (unisa/front/lex.py TYPEKW has no gold TSV) */\n");
+            os_("/* "); os_(rsym[r]); os_(": END placeholder */\n\n");
+        } else if (rkind[r] == 0) {
+            if (rhead[r]) { b = (t * MAXH + ridx[r]) * MAXC; n = tncl[t][ridx[r]]; }
+            else { b = (t * MAXF + ridx[r]) * MAXV; n = tnv[t][ridx[r]]; }
+            os_("/* "); os_(rsym[r]); os_(": gold TSV "); os_(tname[t]); os_(rhead[r] ? " #head " : " #field ");
+            os_(rhead[r] ? thn[t * MAXH + ridx[r]] : tfn[t * MAXF + ridx[r]]); os_(" */\n");
+            os_("char *"); os_(rsym[r]); os_(" = \"");
+            for (i = 0; i < n; i = i + 1) { os_(rhead[r] ? tcls[b + i] : tval[b + i]); os_("\\0"); }
+            os_("\";\n#define "); os_(rnsym[r]); oc(' '); od(n); os_("\n\n");
+        } else {
+            for (f = 0; f < tnf[t]; f = f + 1) {
+                k = t * MAXF + f;
+                os_("/* "); os_(bfn[k]); os_(": gold TSV "); os_(tname[t]); os_(" #field "); od(f);
+                os_(" ("); os_(tfn[k]); os_(") */\n");
+                os_("char *"); os_(bfn[k]); os_(" = \"");
+                for (i = 0; i < tnv[t][f]; i = i + 1) { os_(tval[k * MAXV + i]); os_("\\000"); }
+                os_("\";\n#define "); os_(nbfn[k]); oc(' '); od(tnv[t][f]); os_("\n\n");
+            }
+            for (h = 0; h < tnh[t]; h = h + 1) {
+                k = t * MAXH + h;
+                os_("/* "); os_(bhn[k]); os_(": gold TSV "); os_(tname[t]); os_(" #head "); os_(thn[k]);
+                os_(", its class order */\n");
+                os_("char *"); os_(bhn[k]); os_(" = \"");
+                for (i = 0; i < tncl[t][h]; i = i + 1) { os_(tcls[k * MAXC + i]); os_("\\000"); }
+                os_("\";\n#define "); os_(nbhn[k]); oc(' '); od(tncl[t][h]);
+                os_("\n#define "); os_(hdn[k]); oc(' '); od(h); os_("\n\n");
+            }
+        }
+    }
+    os_("/* genmodel: END of the vocab / BF / BH region (ENC_* is not written here) */\n");
+}
+
 void upcase(char *s) {
     while (*s) { if (*s >= 'a' && *s <= 'z') oc(*s - 'a' + 'A'); else oc(*s); s = s + 1; }
 }
@@ -492,14 +781,14 @@ int main(int argc, char **argv) {
     FILE *fo;
     int n;
     int dl;
-    if (argc < 5 || !streq(argv[1], "-o")) {
-        printf("usage: genmodel -o OUT ORDER.tsv BUILT.uns2 TSV...\n");
+    if (argc < 6 || !streq(argv[1], "-o")) {
+        printf("usage: genmodel -o OUT ORDER.tsv VOCAB.tsv BUILT.uns2 TSV...\n");
         exit(2);
     }
     opath = argv[2];
     load_order(argv[3]);
-    load_uns2(argv[4]);
-    for (ai = 5; ai < argc; ai = ai + 1) load_tsv(argv[ai]);
+    load_uns2(argv[5]);
+    for (ai = 6; ai < argc; ai = ai + 1) load_tsv(argv[ai]);
     if (ntsv != NST) { printf("genmodel: %d gold tables given, want exactly %d (one per stage)\n", ntsv, NST); exit(1); }
     /* match by name: every order.tsv stage is exactly one UNS2 section and
        exactly one TSV; the counts are all NST and each list has no repeat,
@@ -522,6 +811,9 @@ int main(int argc, char **argv) {
         for (h = 0; h < tnh[t]; h = h + 1)
             if (usncl[u][h] != tncl[t][h]) { printf("genmodel: stage %s: head %d has %d classes in UNS2, %d in the TSV\n", oname[s], h, usncl[u][h], tncl[t][h]); exit(1); }
     }
+    /* second slice: the vocab mapping, every written name and string checked */
+    load_vocab(argv[4]);
+    vocab_names();
     /* MODEL and DENSE in order.tsv order */
     mlen = 0; dl = 0;
     for (s = 0; s < NST; s = s + 1) {
@@ -574,6 +866,7 @@ int main(int argc, char **argv) {
         }
     }
     os_("  return "); od(NST); os_(";\n}\n");
+    emit_vocab();
     fo = fopen(opath, "wb");
     if (!fo) { printf("genmodel: write: cannot open %s for writing\n", opath); exit(7); }
     n = (int)fwrite(out, 1, on, fo);
