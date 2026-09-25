@@ -1,6 +1,8 @@
 #!/bin/bash
 # The second generation: unisacc.c compiled by unisacc, running as a tape,
 # compiling programs.  Its output must match the first generation's. [A-22]
+# ARCHIVED 2026-09-25: superseded by tests/nativeboot.sh (N1 = N2 = N3).  It
+# expects a hand-made /tmp/self.tape and no suite calls it.
 set -u
 pass=0; fail=0
 for f in "$@"; do
