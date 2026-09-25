@@ -39,7 +39,7 @@
 #define QW ((MAXQ + QB - 1) / QB)   /* ceil(MAXQ / QB) */
 #define MAXG 124  /* value groups per field: a field's group set is GW words (ws_) */
 #define GW 2       /* ceil(MAXG / 62) */
-#define MAXR 80   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
+#define MAXR 96   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
 #define MAXU 128
 #define MAXCAND 288  /* candidate slots, a global count over all heads and T4 rounds; abi needs
                         270 under its construction order (README) -- not a general bound */

@@ -913,3 +913,25 @@ The q* functions are thin wrappers (sw = nqw, their old semantics).
   on all 420 keys, invariant negatives fire.  --batches: 16 stages + 18
   global checks, 34 receipts; the old over-limit negatives capg and capc
   are positives now, with capgn / capcn as the new negatives.
+
+## isel, step 1: MAXR 80 -> 96, isel accepted (2026-09-25)
+
+`MAXR 96` (<= MAXU 128; `main`'s `MAXR > MAXU` exit 4 stays).  The rule
+check is still decision_list's `nr >= MAXR`, exit 4.  Gates:
+
+- `capr` 9 x 7, 63 rules, and `capr81` 9 x 9, 81 rules (the old negative):
+  positives; capr81 `-d` 5,684 B and UNS2 371 B identical to Python on cc,
+  unisacc, UBSan; deployed round trip on cc, unisacc.
+- `caprn` is now 10 x 10, same label: 100 rules in Python; exit exactly 4
+  with `capacity: head y needs more than 96 decision-list rules` (cc,
+  unisacc, UBSan).
+
+isel is a TABLE stage (batch 2): 146 raw / 138 quotient keys, 2 heads;
+`-d` 21,661 B identical to netdump.py -d on cc and unisacc, UBSan clean;
+UNS2 1,129 B identical to uns2slice.py, section 1,113 B identical to
+built.uns2; round trip 146 keys x 2 heads, unique argmax; invariant
+negatives fire.  Trace: symbol has 93 rules and 73 candidates, factored
+chosen (71 units); T5 104 calls, 32 None, 72 kept, 28 early base
+rejections, 0 patch; 4 selections, pick moved 8 starts; T4 3 rounds, 6
+lists accepted; H 73.  `__common` 34,974,776 B.  Batches: 6.6 / 9.5 /
+29.7 / 14.9 s, 36 receipts (17 stages + 19 globals).

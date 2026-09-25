@@ -28,14 +28,15 @@ peep peep t i
 parse parse t i
 type type t i
 abi abi t i
-irsel irsel t i'
+irsel irsel t i
+isel isel t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf"
+GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
-pfconv binsel enc opinfo peep parse irsel|0
+pfconv binsel enc opinfo peep parse irsel isel|0
 type|0
 abi|0'
 if [ "${1:-}" = --batches ]; then
@@ -136,7 +137,7 @@ need() {    # need stage <s> | need global <g>: the required pass marks
     sum) echo "g sum sites"; for b in cc ua san; do for t in summax sumover sumrun run7; do echo "g sum $t $b"; done; done ;;
     reader) for n in missing duplicate badlabel extracol badkey; do for b in cc ua; do echo "g reader $n $b"; done; done ;;
     capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
-    capr) for b in cc ua san; do echo "g capr pos $b"; done; echo "g capr round cc"; echo "g capr round ua" ;;
+    capr|capr81) for b in cc ua san; do echo "g $g pos $b"; done; echo "g $g round cc"; echo "g $g round ua" ;;
     caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
     capg) for b in cc ua san; do echo "g capg pos $b"; done; echo "g capg round cc"; echo "g capg round ua" ;;
     capc) for b in cc ua san; do echo "g capc pos $b"; done; echo "g capc round cc"; echo "g capc round ua" ;;
@@ -304,32 +305,40 @@ for b in cc ua; do
     B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capq.uns2" "$T/capq.tsv" > "$T/r.$b.out" 2>&1 && P "g capq round $b" || fail=1
     sed "s/^/capacity positive $b deployed /" "$T/r.$b.out"
 done
-# rule-capacity POSITIVE: 9 x 7, label class[(7a+b) % 16]: 63 decision-list
-# rules, over the old MAXR 62, inside MAXR 80.  Must build, and match Python
-# (tsvgold on the same TSV): -d, UNS2 blob, deployed round trip.
-# rule-capacity NEGATIVE: 9 x 9, same label: 81 rules (Python's count), one
-# past MAXR 80; decision_list's nr >= MAXR check must exit exactly 4.
-awk -F'	' -v A=9 -v N=7 'NR==1{print "# stage capr: 63 rules, synthetic"; next}
+# rule-capacity POSITIVES, label class[(7a+b) % 16] on a x b keys: capr is
+# 9 x 7, 63 decision-list rules (over the old MAXR 62); capr81 is 9 x 9, 81
+# rules (the old negative, one past the old MAXR 80), inside MAXR 96.  Both
+# must build, and match Python (tsvgold on the same TSV): -d, UNS2 blob,
+# deployed round trip.
+# rule-capacity NEGATIVE: 10 x 10, same label: 100 rules (Python's count),
+# past MAXR 96; decision_list's nr >= MAXR check must exit exactly 4.
+genr() {   # genr A B name rules
+awk -F'	' -v A=$1 -v N=$2 -v NM=$3 -v NR_=$4 'NR==1{print "# stage " NM ": " NR_ " rules, synthetic"; next}
 /^#head/{printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
-  for(a=0;a<A;a++) for(b=0;b<N;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src" > "$T/capr.tsv"
-awk -F'	' -v A=9 -v N=9 'NR==1{print "# stage caprn: 81 rules, synthetic"; next}
-/^#head/{printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
-  for(a=0;a<A;a++) for(b=0;b<N;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src" > "$T/caprn.tsv"
-B 60 python3 iterate/construct/tools/netdump.py -d "$T/capr.tsv" > "$T/capr.py" || { fail=1; echo "capr python reference failed" > "$T/capr.py"; }
-B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capr.uns2" "$T/capr.tsv" > /dev/null || { fail=1; echo "capr python reference failed" > "$T/py.capr.uns2"; }
+  for(a=0;a<A;a++) for(b=0;b<N;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src"
+}
+genr 9 7 capr 63 > "$T/capr.tsv"
+genr 9 9 capr81 81 > "$T/capr81.tsv"
+genr 10 10 caprn 100 > "$T/caprn.tsv"
+for x in capr capr81; do
+    B 60 python3 iterate/construct/tools/netdump.py -d "$T/$x.tsv" > "$T/$x.py" || { fail=1; echo "$x python reference failed" > "$T/$x.py"; }
+    B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.$x.uns2" "$T/$x.tsv" > /dev/null || { fail=1; echo "$x python reference failed" > "$T/py.$x.uns2"; }
+done
 for b in cc ua san; do
-    B 30 "$T/c_$b" -d "$T/capr.tsv" > "$T/capr.$b.out" 2>&1; rc=$?
-    B 30 "$T/c_$b" -u "$T/$b.capr.uns2" "$T/capr.tsv" > /dev/null 2>> "$T/capr.$b.out"; rc2=$?
-    nrl=$(grep -c '^rule' "$T/capr.$b.out")
-    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$nrl" = 63 ] && cmp -s "$T/capr.py" "$T/capr.$b.out" && cmp -s "$T/py.capr.uns2" "$T/$b.capr.uns2"; then
-        echo "rule positive $b: 63 rules built, -d identical to Python ($(wc -c < "$T/capr.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.capr.uns2" | tr -d ' ') B)"; P "g capr pos $b"
-    else echo "rule positive $b FAILED (rc $rc/$rc2, $nrl rules): $(head -1 "$T/capr.$b.out")"; fail=1; fi
+    for xr in capr:63 capr81:81; do x=${xr%%:*}; want=${xr#*:}
+    B 30 "$T/c_$b" -d "$T/$x.tsv" > "$T/$x.$b.out" 2>&1; rc=$?
+    B 30 "$T/c_$b" -u "$T/$b.$x.uns2" "$T/$x.tsv" > /dev/null 2>> "$T/$x.$b.out"; rc2=$?
+    nrl=$(grep -c '^rule' "$T/$x.$b.out")
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$nrl" = $want ] && cmp -s "$T/$x.py" "$T/$x.$b.out" && cmp -s "$T/py.$x.uns2" "$T/$b.$x.uns2"; then
+        echo "rule positive $x $b: $want rules built, -d identical to Python ($(wc -c < "$T/$x.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.$x.uns2" | tr -d ' ') B)"; P "g $x pos $b"
+    else echo "rule positive $x $b FAILED (rc $rc/$rc2, $nrl rules): $(head -1 "$T/$x.$b.out")"; fail=1; fi
     if [ $b != san ]; then
-        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capr.uns2" "$T/capr.tsv" > "$T/r.$b.out" 2>&1 && P "g capr round $b" || fail=1
-        sed "s/^/rule positive $b deployed /" "$T/r.$b.out"
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.$x.uns2" "$T/$x.tsv" > "$T/r.$b.out" 2>&1 && P "g $x round $b" || fail=1
+        sed "s/^/rule positive $x $b deployed /" "$T/r.$b.out"
     fi
+    done
     B 30 "$T/c_$b" "$T/caprn.tsv" > "$T/caprn.$b.out" 2>&1; rc=$?
-    if [ $rc -eq 4 ] && grep -q "capacity: head y needs more than 80 decision-list rules" "$T/caprn.$b.out" && ! grep -q 'runtime error' "$T/caprn.$b.out"; then
+    if [ $rc -eq 4 ] && grep -q "capacity: head y needs more than 96 decision-list rules" "$T/caprn.$b.out" && ! grep -q 'runtime error' "$T/caprn.$b.out"; then
         echo "rule negative $b rejected: $(head -1 "$T/caprn.$b.out" | sed 's/.*: capacity/capacity/')"; P "g caprn $b"
     else echo "rule negative $b NOT A RULE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caprn.$b.out")"; fail=1; fi
 done
@@ -484,7 +493,7 @@ genc 97 capcn > "$T/capcn.tsv"
 # classes named so that name order REVERSES index order (class c is
 # "k<95-c>": high indices have low ranks), label of (a, b) = class
 # (37(9a + b) + 5) % 96 -- 72 distinct classes, one per key.  The decision
-# list needs 72 rules (<= MAXR 80); rep_factored's buckets (one per value
+# list needs 72 rules (<= MAXR 96); rep_factored's buckets (one per value
 # of a, one per value of b, each a 8- or 9-class set) give a 17-unit
 # factored candidate that is KEPT and CHOSEN.  Every bucket's class set,
 # and its rank set, has members on both sides of bit 61/62, and the bucket
