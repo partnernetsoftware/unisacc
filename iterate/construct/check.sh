@@ -30,7 +30,7 @@ type type t i
 abi abi t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capc"
+GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capgn capc"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -137,6 +137,7 @@ need() {    # need stage <s> | need global <g>: the required pass marks
     capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
     capr) for b in cc ua san; do echo "g capr pos $b"; done; echo "g capr round cc"; echo "g capr round ua" ;;
     caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
+    capg) for b in cc ua san; do echo "g capg pos $b"; done; echo "g capg round cc"; echo "g capg round ua" ;;
     *) for b in cc ua san; do echo "g $g $b"; done ;;
     esac
 }
@@ -394,7 +395,7 @@ done
 # Fields of 15, 15 and 15 values, label class[(a + 3b + 5c) % 16]: a shift
 # of one field's value by d changes the label by d, 3d or 5d mod 16, never
 # 0 for d <= 14, so no two values share a slice: 15^3 = 3375 quotient keys.
-# 3375 raw keys <= MAXOK 4352 and 15 groups <= 62, so the reader and the
+# 3375 raw keys <= MAXOK 4352 and 15 groups <= MAXG 124, so the reader and the
 # field-group check pass and domain()'s quotient-key check is the one reached.
 awk -F'	' 'NR==1{print "# stage capn: 3375 keys, synthetic"; next}
 /^#head/{printf "#field\ta"; for(i=0;i<15;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<15;i++) printf "\tw%d", i
@@ -423,21 +424,42 @@ for b in cc ua san; do
         echo "raw-key negative $b NOT A RAW-KEY REJECTION (rc $rc): $(head -1 "$T/capo.$b.out")"; fail=1
     fi
 done
-# field-group NEGATIVE: a field's group set is one long, so a field may have
-# at most 62 value groups.  Raw values are legal (70 <= MAXV 128) and there
-# are 140 <= 3200 quotient keys, but field a has 70 groups: exit exactly 4
-# with the field-group diagnostic, from domain() before any group shift.
+# field-group POSITIVE: field a has 70 value groups (the old negative:
+# a group set was one long, at most 62).  Group sets are GW = 2 words now
+# (MAXG 124), so it must BUILD, verify over its full domain (exit 0), and
+# match Python on the same TSV: -d (which prints the 70 groups and every
+# cube's group set, bits 62..69 included), UNS2 blob, deployed round trip.
 # Label (a, b) = class[b ? 8 + a / 16 : a % 16] with 16 classes: the pair
 # (label(a,0), label(a,1)) = (a % 16, 8 + a / 16) is distinct for every a.
-awk -F'	' 'NR==1{print "# stage capg: 70 x 2 keys, synthetic"; next}
-/^#head/{printf "#field\ta"; for(i=0;i<70;i++) printf "\tv%d", i; printf "\n#field\tb\tw0\tw1\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
-  for(a=0;a<70;a++) for(b=0;b<2;b++) print "v" a "\tw" b "\t" c[b ? 8 + int(a/16) : a%16]; exit}' "$T/cap.src" > "$T/capg.tsv"
+# field-group NEGATIVE: the same label on 125 values of a (<= MAXV 128, 250
+# raw and quotient keys, all inside their limits) gives 125 groups, one past
+# MAXG: exit exactly 4 with the field-group diagnostic, from domain()
+# before any field set is written.
+geng() {   # geng A name
+awk -F'	' -v A=$1 -v NM=$2 'NR==1{print "# stage " NM ": " A " x 2 keys, synthetic"; next}
+/^#head/{printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n#field\tb\tw0\tw1\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
+  for(a=0;a<A;a++) for(b=0;b<2;b++) print "v" a "\tw" b "\t" c[b ? 8 + int(a/16) : a%16]; exit}' "$T/cap.src"
+}
+geng 70 capg > "$T/capg.tsv"
+geng 125 capgn > "$T/capgn.tsv"
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capg.tsv" > "$T/capg.py" || { fail=1; echo "capg python reference failed" > "$T/capg.py"; }
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capg.uns2" "$T/capg.tsv" > /dev/null || { fail=1; echo "capg python reference failed" > "$T/py.capg.uns2"; }
 for b in cc ua san; do
-    B 30 "$T/c_$b" "$T/capg.tsv" > "$T/capg.$b.out" 2>&1; rc=$?
-    if [ $rc -eq 4 ] && grep -q "capacity: field a has 70 value groups, more than 62" "$T/capg.$b.out" && ! grep -q 'runtime error' "$T/capg.$b.out"; then
-        echo "field-group negative $b rejected: $(head -1 "$T/capg.$b.out")"; P "g capg $b"
+    B 30 "$T/c_$b" -d "$T/capg.tsv" > "$T/capg.$b.out" 2>&1; rc=$?
+    B 30 "$T/c_$b" -u "$T/$b.capg.uns2" "$T/capg.tsv" > /dev/null 2>> "$T/capg.$b.out"; rc2=$?
+    grp=$(grep '^groups 0' "$T/capg.$b.out" | tr -cd '[' | wc -c | tr -d ' ')
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$grp" = 70 ] && grep -q "^exact 140$" "$T/capg.$b.out" && cmp -s "$T/capg.py" "$T/capg.$b.out" && cmp -s "$T/py.capg.uns2" "$T/$b.capg.uns2"; then
+        echo "field-group positive $b: 70 groups built, exact over 140 keys, -d identical to Python ($(wc -c < "$T/capg.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.capg.uns2" | tr -d ' ') B)"; P "g capg pos $b"
+    else echo "field-group positive $b FAILED (rc $rc/$rc2, $grp groups): $(head -1 "$T/capg.$b.out")"; fail=1; fi
+    if [ $b != san ]; then
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capg.uns2" "$T/capg.tsv" > "$T/r.$b.out" 2>&1 && P "g capg round $b" || fail=1
+        sed "s/^/field-group positive $b deployed /" "$T/r.$b.out"
+    fi
+    B 30 "$T/c_$b" "$T/capgn.tsv" > "$T/capgn.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: field a has 125 value groups, more than 124" "$T/capgn.$b.out" && ! grep -q 'runtime error' "$T/capgn.$b.out"; then
+        echo "field-group negative $b rejected: $(head -1 "$T/capgn.$b.out")"; P "g capgn $b"
     else
-        echo "field-group negative $b NOT A FIELD-GROUP REJECTION (rc $rc): $(head -1 "$T/capg.$b.out")"; fail=1
+        echo "field-group negative $b NOT A FIELD-GROUP REJECTION (rc $rc): $(head -1 "$T/capgn.$b.out")"; fail=1
     fi
 done
 # class-count NEGATIVE: a class set is one long, so a head may have at most

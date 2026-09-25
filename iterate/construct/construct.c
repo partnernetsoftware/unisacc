@@ -36,6 +36,8 @@
 #define MAXQ 3200  /* quotient keys; a key set is QW longs (qset below) */
 #define QB 62      /* key bits per word: bits 0..61, never bit 62 or the sign bit 63 */
 #define QW ((MAXQ + QB - 1) / QB)   /* ceil(MAXQ / QB) */
+#define MAXG 124  /* value groups per field: a field's group set is GW words (ws_) */
+#define GW 2       /* ceil(MAXG / 62) */
 #define MAXR 80   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
 #define MAXU 128
 #define MAXCAND 288  /* candidate slots, a global count over all heads and T4 rounds; abi needs
@@ -230,7 +232,12 @@ int ch;                   /* the head being constructed */
 long qmask[MAXF * MAXV][QW]; /* field i, group g at row i * MAXV + g -> keys having it */
 long ALL[QW];
 int nqw;                  /* words in use: (nq + QB - 1) / QB */
-long FULL[MAXF];
+/* field-group sets: a cube is long c[MAXF * GW]; field i's group set is the
+   GW words at c + i * GW, over the domain of ng[i] groups (gnw[i] active
+   words, tail gtl[i]); FULLW holds the "don't care" set of every field */
+long FULLW[MAXF * GW];
+int gnw[MAXF];
+long gtl[MAXF];
 int crank[MAXH][MAXC];     /* head, class -> its position in name order */
 
 int odigit(int k, int i) { return (k / ostride[i]) % nv[i]; }
@@ -622,13 +629,12 @@ void domain(void) {
             if (grp[i][v] < 0) { gfirst[i][ng[i]] = v; grp[i][v] = ng[i]; ng[i] = ng[i] + 1; }
         }
     }
-    /* a field's group set is ONE long: group g is bit g, FULL = bit(ng) - 1.
-       ng <= 62 keeps every group bit <= 61 and bit(ng) <= bit(62), so no
-       group shift reaches the sign bit and every group set is >= 0 (popc,
-       cmpset's right shifts).  Checked before any group shift: exit 4. */
+    /* a field's group set is GW words of the ws_ layer: group g is bit
+       g % 62 of word g / 62.  ng <= MAXG = GW * 62 keeps every group inside
+       the storage.  Checked before any field set is written: exit 4. */
     for (i = 0; i < nf; i = i + 1)
-        if (ng[i] > 62) {
-            printf("construct: %s: capacity: field %s has %d value groups, more than 62\n", gpath, fname[i], ng[i]);
+        if (ng[i] > MAXG) {
+            printf("construct: %s: capacity: field %s has %d value groups, more than %d\n", gpath, fname[i], ng[i], MAXG);
             exit(4);
         }
     nq = 1;
@@ -648,7 +654,9 @@ void domain(void) {
     }
     qsetall();
     for (i = 0; i < nf; i = i + 1) {
-        FULL[i] = bit(ng[i]) - 1;
+        gnw[i] = ws_nw(ng[i]);
+        gtl[i] = ws_tail(ng[i]);
+        ws_full(FULLW + i * GW, gnw[i], GW, gtl[i]);
         for (g = 0; g < ng[i]; g = g + 1) qzero(qmask[i * MAXV + g]);
     }
     for (j = 0; j < nq; j = j + 1)
@@ -661,7 +669,9 @@ void domain(void) {
 }
 
 /* ----------------------------------------------------------------- cubes -- */
-/* a cube is long c[MAXF]: per field, a bitset of groups; FULL = don't care */
+/* a cube is long c[MAXF * GW]: per field, a GW-word set of groups; the
+   field's FULLW set = don't care */
+int isfull(long *c, int i) { return ws_eq(c + i * GW, FULLW + i * GW, gnw[i]); }
 
 long cmo[QW];
 /* m = the quotient keys inside cube c */
@@ -669,20 +679,22 @@ void cubemask(long *c, long *m) {
     int i, g;
     qcopy(m, ALL);
     for (i = 0; i < nf; i = i + 1) {
-        if (c[i] == FULL[i]) continue;
+        if (isfull(c, i)) continue;
         qzero(cmo);
-        for (g = 0; g < ng[i]; g = g + 1) if ((c[i] >> g) & 1) qor(cmo, cmo, qmask[i * MAXV + g]);
+        for (g = 0; g < ng[i]; g = g + 1) if (ws_test(c + i * GW, g)) qor(cmo, cmo, qmask[i * MAXV + g]);
         qand(m, m, cmo);
     }
 }
 
 int nlits(long *c) {
     int i, n = 0;
-    for (i = 0; i < nf; i = i + 1) if (c[i] != FULL[i]) n = n + 1;
+    for (i = 0; i < nf; i = i + 1) if (!isfull(c, i)) n = n + 1;
     return n;
 }
 
-/* Python compares sorted tuples of set members lexicographically. */
+/* Python compares sorted tuples of set members lexicographically.  One
+   word: the class sets (rankset) until they move to ws_cmp; cubes use
+   ws_cmp per field. */
 int cmpset(long a, long b) {
     long d = a ^ b, hi;
     int p = 0;
@@ -698,30 +710,30 @@ int cmpset(long a, long b) {
 
 int cmpcube(long *a, long *b) {
     int i, r;
-    for (i = 0; i < nf; i = i + 1) { r = cmpset(a[i], b[i]); if (r) return r; }
+    for (i = 0; i < nf; i = i + 1) { r = ws_cmp(a + i * GW, b + i * GW, gnw[i]); if (r) return r; }
     return 0;
 }
 
 int samecube(long *a, long *b) {
     int i;
-    for (i = 0; i < nf; i = i + 1) if (a[i] != b[i]) return 0;
+    for (i = 0; i < nf; i = i + 1) if (!ws_eq(a + i * GW, b + i * GW, gnw[i])) return 0;
     return 1;
 }
 
 void cpcube(long *d, long *s) {
     int i;
-    for (i = 0; i < nf; i = i + 1) d[i] = s[i];
+    for (i = 0; i < nf; i = i + 1) ws_copy(d + i * GW, s + i * GW, gnw[i], GW);
 }
 
 void prcube(long *c) {
     int i, g, first;
     for (i = 0; i < nf; i = i + 1) {
         printf(" ");
-        if (c[i] == FULL[i]) { printf("*"); continue; }
+        if (isfull(c, i)) { printf("*"); continue; }
         printf("{");
         first = 1;
         for (g = 0; g < ng[i]; g = g + 1)
-            if ((c[i] >> g) & 1) { if (!first) printf(","); printf("%d", g); first = 0; }
+            if (ws_test(c + i * GW, g)) { if (!first) printf(","); printf("%d", g); first = 0; }
         printf("}");
     }
 }
@@ -746,30 +758,30 @@ long xcur[MAXF][QW], xoth[QW], xnm[QW];
 /* out = the keys of the expanded cube */
 void expand(int *seed, long *badmask, int *ord, long *cube, long *out) {
     int t, i, j, v;
-    for (i = 0; i < nf; i = i + 1) { qcopy(xcur[i], qmask[i * MAXV + seed[i]]); cube[i] = bit(seed[i]); }
+    for (i = 0; i < nf; i = i + 1) { qcopy(xcur[i], qmask[i * MAXV + seed[i]]); ws_zero(cube + i * GW, gnw[i], GW); ws_set(cube + i * GW, seed[i]); }
     for (t = 0; t < nf; t = t + 1) {
         i = ord[t];
         qcopy(xoth, ALL);
         for (j = 0; j < nf; j = j + 1) if (j != i) qand(xoth, xoth, xcur[j]);
-        if (!qmeets(xoth, badmask)) { cube[i] = FULL[i]; qcopy(xcur[i], ALL); continue; }
+        if (!qmeets(xoth, badmask)) { ws_copy(cube + i * GW, FULLW + i * GW, gnw[i], GW); qcopy(xcur[i], ALL); continue; }
         for (v = 0; v < ng[i]; v = v + 1) {
-            if ((cube[i] >> v) & 1) continue;
+            if (ws_test(cube + i * GW, v)) continue;
             qor(xnm, xcur[i], qmask[i * MAXV + v]);
-            if (!qmeets3(xoth, xnm, badmask)) { cube[i] = cube[i] | bit(v); qcopy(xcur[i], xnm); }
+            if (!qmeets3(xoth, xnm, badmask)) { ws_set(cube + i * GW, v); qcopy(xcur[i], xnm); }
         }
     }
     cubemask(cube, out);
 }
 
 int nr;
-long rc[MAXR][MAXF];
+long rc[MAXR][MAXF * GW];
 int rl[MAXR];
 int lv[MAXR];
 
 /* T4's pool: cubes other heads already pay for, sorted by cube_key.  It only
    breaks coverage ties (score = count, in pool, -literals) and, after REDUCE,
    replaces the supercube by the first pool cube between it and the prime. */
-long pool[MAXU][MAXF];
+long pool[MAXU][MAXF * GW];
 int npool;
 int talign;                  /* trace: REDUCE aligned to a pool cube */
 int ttie;                    /* trace: the pool flag changed the chosen rule */
@@ -793,7 +805,7 @@ int betterthan(int cnt, int pl, int nl, long *cube, int L, int bcnt, int bpl, in
 
 long labmask[MAXC][QW], rem[QW], bad[QW], cm[QW], bcm[QW], newly[QW];
 void decision_list(void) {
-    long cube[MAXF], bcube[MAXF], ncube[MAXF], sup[MAXF];
+    long cube[MAXF * GW], bcube[MAXF * GW], ncube[MAXF * GW], sup[MAXF * GW];
     int j, o, L, bL, cnt, bcnt, nl, bnl, have, i, g, pl, bpl, t, ok;
     int nL, ncnt, nnl;
     for (j = 0; j < ncl[ch]; j = j + 1) qzero(labmask[j]);
@@ -830,15 +842,15 @@ void decision_list(void) {
         }
         /* REDUCE: the supercube of the keys this rule claims */
         for (i = 0; i < nf; i = i + 1) {
-            sup[i] = 0;
-            for (g = 0; g < ng[i]; g = g + 1) if (qmeets(qmask[i * MAXV + g], newly)) sup[i] = sup[i] | bit(g);
+            ws_zero(sup + i * GW, gnw[i], GW);
+            for (g = 0; g < ng[i]; g = g + 1) if (qmeets(qmask[i * MAXV + g], newly)) ws_set(sup + i * GW, g);
         }
         cpcube(rc[nr], sup);
         /* T4: align to the first pool cube with sup <= pc <= prime */
         for (t = 0; t < npool; t = t + 1) {
             ok = 1;
             for (i = 0; i < nf; i = i + 1)
-                if ((sup[i] & ~pool[t][i]) || (pool[t][i] & ~bcube[i])) ok = 0;
+                if (!ws_sub(sup + i * GW, pool[t] + i * GW, gnw[i]) || !ws_sub(pool[t] + i * GW, bcube + i * GW, gnw[i])) ok = 0;
             if (ok) {
                 if (!samecube(pool[t], sup)) talign = talign + 1;
                 cpcube(rc[nr], pool[t]);
@@ -920,7 +932,7 @@ void ranks(void) {
    (at 8d4011c) crashes on a 3-D array indexed by variables. */
 int ncand;
 int cn[MAXCAND];
-long ccube[MAXCAND * MAXU][MAXF];
+long ccube[MAXCAND * MAXU][MAXF * GW];
 long cw[MAXCAND * MAXU][MAXC];
 
 int newunit(int ci, long *cube) {
@@ -1025,7 +1037,7 @@ int codedigit(int code, int pi, int pp, int fi) {
 int tfearlyb, tfearlyp;      /* trace: early rejections (cap reached) on the base / patch path */
 long fcov[QW], fres[QW], ftmp[QW];
 int rep_factored(int ci, int pi, int merge, int k) {
-    long sets[MAXF], wmask, pr;
+    long sets[MAXF * GW], pr[GW], wmask;
     int i, u, pp, j, code, fi, f, x, ngv, nbk, b, t, a, tmp, cap, it, nb, prod, cnt, s, e;
     int badj[MAXQ];
     /* Early rejection needs cap = nr > 0 and cap <= MAXU: then no candidate
@@ -1102,20 +1114,21 @@ int rep_factored(int ci, int pi, int merge, int k) {
             if (merge && bn[b] > 1) {
                 prod = 1;
                 for (fi = 0; fi < psz[pi][pp]; fi = fi + 1) {
-                    pr = 0;
-                    for (s = 0; s < bn[b]; s = s + 1) pr = pr | bit(codedigit(bpool[boff[b] + s], pi, pp, fi));
-                    prod = prod * popc(pr);
+                    f = pf[pi * 4 + pp][fi];
+                    ws_zero(pr, gnw[f], GW);
+                    for (s = 0; s < bn[b]; s = s + 1) ws_set(pr, codedigit(bpool[boff[b] + s], pi, pp, fi));
+                    prod = prod * ws_popc(pr, gnw[f]);
                 }
                 prod = (prod == bn[b]);
             }
             s = 0;
             while (s < bn[b]) {
                 e = prod ? bn[b] : s + 1;
-                for (i = 0; i < nf; i = i + 1) sets[i] = FULL[i];
+                for (i = 0; i < nf; i = i + 1) ws_copy(sets + i * GW, FULLW + i * GW, gnw[i], GW);
                 for (fi = 0; fi < psz[pi][pp]; fi = fi + 1) {
                     f = pf[pi * 4 + pp][fi];
-                    sets[f] = 0;
-                    for (t = s; t < e; t = t + 1) sets[f] = sets[f] | bit(codedigit(bpool[boff[b] + t], pi, pp, fi));
+                    ws_zero(sets + f * GW, gnw[f], GW);
+                    for (t = s; t < e; t = t + 1) ws_set(sets + f * GW, codedigit(bpool[boff[b] + t], pi, pp, fi));
                 }
                 /* Python appends units only and returns None once len(units)
                    >= cap: reaching cap here already decides None */
@@ -1134,7 +1147,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
         if (nb == 0) return 1;
         for (t = 0; t < nb; t = t + 1) {
             j = badj[t];
-            for (i = 0; i < nf; i = i + 1) sets[i] = bit(qk[j][i]);
+            for (i = 0; i < nf; i = i + 1) { ws_zero(sets + i * GW, gnw[i], GW); ws_set(sets + i * GW, qk[j][i]); }
             cnt = 0;
             for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXU + u], sets)) cnt = 1;
             if (cnt) return 0;
@@ -1154,7 +1167,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
 int hc[MAXH][MAXCAND];
 int nhc[MAXH];
 int hnr[MAXH];
-long hrc[MAXH * MAXR][MAXF];
+long hrc[MAXH * MAXR][MAXF * GW];
 int hrl[MAXH][MAXR];
 int hlv[MAXH][MAXR];
 int chosen[MAXH];
@@ -1174,7 +1187,7 @@ void loadrules(int h) {
     for (r = 0; r < nr; r = r + 1) { cpcube(rc[r], hrc[h * MAXR + r]); rl[r] = hrl[h][r]; lv[r] = hlv[h][r]; }
 }
 
-long ucube[MAXU][MAXF];      /* scratch for total_units, then the net's units */
+long ucube[MAXU][MAXF * GW];      /* scratch for total_units, then the net's units */
 
 /* total_units(sel): distinct cubes over every head's selected candidate */
 int total_units(int *sel) {
@@ -1319,8 +1332,8 @@ int trej;                    /* trace: T4 decision lists rejected (longer) */
 int tchg;                    /* trace: accepted lists that differ from the old */
 
 int w1(int i, int v, int j) {
-    if (ucube[j][i] == FULL[i]) return 0;
-    return (int)((ucube[j][i] >> grp[i][v]) & 1);
+    if (isfull(ucube[j], i)) return 0;
+    return ws_test(ucube[j] + i * GW, grp[i][v]);
 }
 
 long mxlog;
@@ -1333,8 +1346,8 @@ int samerules(int h) {
     return 1;
 }
 
-long pall[MAXU][MAXF];
-long ptmp[MAXF];
+long pall[MAXU][MAXF * GW];
+long ptmp[MAXF * GW];
 
 /* T4 (build_net, `share and len(heads) > 1`): up to three rounds; each
    rebuilds every head's decision list with the pool of cubes the chosen
