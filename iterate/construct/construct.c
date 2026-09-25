@@ -31,7 +31,8 @@
 #define MAXF 3
 #define MAXV 128   /* raw values per field: storage only, never a bit index */
 #define MAXH 16   /* heads: storage only (no head bitset); checked by the reader, exit 4 */
-#define MAXC 62   /* a class set is ONE long: class c and rank crank[c] < 62 -> bits <= 61 */
+#define MAXC 96   /* classes per head; a class set is CW words of the ws_ layer */
+#define CW 2       /* ceil(MAXC / 62) */
 #define MAXOK 4352
 #define MAXQ 3200  /* quotient keys; a key set is QW longs (qset below) */
 #define QB 62      /* key bits per word: bits 0..61, never bit 62 or the sign bit 63 */
@@ -156,11 +157,11 @@ void load(char *path) {
                 printf("construct: %s: line %d: capacity: head %s is head %d, more than %d\n", gpath, ln, parts[1], nh + 1, MAXH);
                 exit(4);
             }
-            /* a class set (gcls, bcls, rankset, wmask) is ONE long: class c is
-               bit c and its rank crank[c] is bit crank[c], both < ncl.  ncl <= 62
-               keeps every class bit <= 61, so no class shift reaches the sign
-               bit and cmpset's right shifts see values >= 0.  Checked here,
-               before cls[] is stored and before any class shift: exit 4. */
+            /* a class set (gcls, bcls, rankset) is CW words of the ws_ layer:
+               class c is element c and its rank crank[c] is element crank[c],
+               both < ncl.  ncl <= MAXC = 96 keeps both inside CW = 2 words
+               (the second word holds 34).  Checked here, before cls[] is
+               stored and before any class set is written: exit 4. */
             if (np - 3 > MAXC) {
                 printf("construct: %s: capacity: head %s has %d classes, more than %d\n", gpath, parts[1], np - 3, MAXC);
                 exit(4);
@@ -692,22 +693,6 @@ int nlits(long *c) {
     return n;
 }
 
-/* Python compares sorted tuples of set members lexicographically.  One
-   word: the class sets (rankset) until they move to ws_cmp; cubes use
-   ws_cmp per field. */
-int cmpset(long a, long b) {
-    long d = a ^ b, hi;
-    int p = 0;
-    if (d == 0) return 0;
-    while (!((d >> p) & 1)) p = p + 1;
-    if ((a >> p) & 1) {
-        hi = b >> p;
-        return hi ? -1 : 1;
-    }
-    hi = a >> p;
-    return hi ? 1 : -1;
-}
-
 int cmpcube(long *a, long *b) {
     int i, r;
     for (i = 0; i < nf; i = i + 1) { r = ws_cmp(a + i * GW, b + i * GW, gnw[i]); if (r) return r; }
@@ -1003,17 +988,63 @@ int headfail(int ci, int *badj) {
     return nb;
 }
 
-/* class set -> the same set over name ranks, so cmpset orders by sorted names */
-long rankset(long s) {
-    long r = 0;
+/* class set s -> r, the same set over name ranks, so ws_cmp orders by
+   sorted names; both over the head's ncl classes (CW storage words) */
+void rankset(long *s, long *r, int *rk, int n) {
     int c;
-    for (c = 0; c < ncl[ch]; c = c + 1) if ((s >> c) & 1) r = r | bit(crank[ch][c]);
-    return r;
+    ws_zero(r, ws_nw(n), CW);
+    for (c = 0; c < n; c = c + 1) if (ws_test(s, c)) ws_set(r, rk[c]);
+}
+
+/* -G, class half: rankset over 96 classes (CW words) under a reversed name
+   order (class c has rank 95 - c: high indices -> low ranks) and under a
+   scrambled one (rank (37c + 5) % 96); sets that cross the word boundary
+   (classes and ranks 61, 62) must map member by member, and ws_cmp of two
+   ranksets must equal the oracle on the rank lists */
+int grk[MAXC];
+long gs1[CW], gs2[CW];
+void rselftest(void) {
+    int pm, t, c, j, k, n, nc = 0, cases[8][3];
+    gn = MAXC; gnwt = ws_nw(gn);
+    cases[0][0] = 0; cases[0][1] = 62; cases[0][2] = -1;
+    cases[1][0] = 1; cases[1][1] = -1; cases[1][2] = -1;
+    cases[2][0] = 61; cases[2][1] = 62; cases[2][2] = 95;
+    cases[3][0] = 3; cases[3][1] = 70; cases[3][2] = -1;
+    cases[4][0] = 70; cases[4][1] = -1; cases[4][2] = -1;
+    cases[5][0] = 33; cases[5][1] = 34; cases[5][2] = -1;
+    cases[6][0] = 0; cases[6][1] = 95; cases[6][2] = -1;
+    cases[7][0] = -1; cases[7][1] = -1; cases[7][2] = -1;
+    for (pm = 0; pm < 2; pm = pm + 1) {
+        for (c = 0; c < MAXC; c = c + 1) grk[c] = pm ? (37 * c + 5) % MAXC : MAXC - 1 - c;
+        for (t = 0; t < 8; t = t + 1) {
+            gmk(gs1, cases[t][0], cases[t][1], cases[t][2]);
+            /* a class set's storage is CW words: junk in those, word CW (the
+               test buffer's third) is outside it and stays 0 */
+            gjunk(ga); ga[CW] = 0; rankset(gs1, ga, grk, MAXC); gwf(ga, "rankset");
+            n = 0;
+            for (j = 0; j < 3; j = j + 1) if (cases[t][j] >= 0) { if (!ws_test(ga, grk[cases[t][j]])) gfail("rankset member"); n = n + 1; }
+            if (ws_popc(ga, gnwt) != n) gfail("rankset size");
+            for (k = 0; k < 8; k = k + 1) {
+                gmk(gs2, cases[k][0], cases[k][1], cases[k][2]);
+                gjunk(gb); rankset(gs2, gb, grk, MAXC);
+                gcmp1(ga, gb, 2, "rankset order");
+                nc = nc + 1;
+            }
+        }
+    }
+    /* reversed order: {0} has rank 95, {95} rank 0; {61,62} -> {34,33} */
+    for (c = 0; c < MAXC; c = c + 1) grk[c] = MAXC - 1 - c;
+    gmk(gs1, 0, -1, -1); gmk(gs2, 95, -1, -1); rankset(gs1, ga, grk, MAXC); rankset(gs2, gb, grk, MAXC);
+    if (ws_cmp(ga, gb, gnwt) != 1 || ws_cmp(gs1, gs2, gnwt) != -1) gfail("reversed ranks do not reverse the order");
+    gmk(gs1, 61, 62, -1); rankset(gs1, ga, grk, MAXC);
+    if (!ws_test(ga, 34) || !ws_test(ga, 33) || ws_popc(ga, gnwt) != 2) gfail("rankset across the word boundary");
+    printf("wset self-test rankset n %d (%d words): 2 orders, %d cross-word pairs vs oracle, ok\n", MAXC, gnwt, nc);
 }
 
 int gcode[MAXQ];
-long gcls[MAXQ];
-long bcls[MAXQ];
+long gcls[MAXQ][CW];
+long bcls[MAXQ][CW];
+long rsa[CW], rsb[CW];
 /* The buckets of one part, flattened (was bmem[MAXQ][MAXQ]): every group
    value t lands in exactly one bucket bof[t], so the members of all buckets
    together are the ngv <= nq group values.  Bucket b (by identity, the
@@ -1037,8 +1068,8 @@ int codedigit(int code, int pi, int pp, int fi) {
 int tfearlyb, tfearlyp;      /* trace: early rejections (cap reached) on the base / patch path */
 long fcov[QW], fres[QW], ftmp[QW];
 int rep_factored(int ci, int pi, int merge, int k) {
-    long sets[MAXF * GW], pr[GW], wmask;
-    int i, u, pp, j, code, fi, f, x, ngv, nbk, b, t, a, tmp, cap, it, nb, prod, cnt, s, e;
+    long sets[MAXF * GW], pr[GW];
+    int cnw, i, u, pp, j, code, fi, f, x, ngv, nbk, b, t, a, tmp, cap, it, nb, prod, cnt, s, e;
     int badj[MAXQ];
     /* Early rejection needs cap = nr > 0 and cap <= MAXU: then no candidate
        here passes nr units, so newunit's MAXU die cannot fire first. */
@@ -1047,6 +1078,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
         exit(4);
     }
     cn[ci] = 0;
+    cnw = ws_nw(ncl[ch]);
     qzero(fcov);
     if (k) {
         if (k > nr) return 0;
@@ -1069,15 +1101,15 @@ int rep_factored(int ci, int pi, int merge, int k) {
             }
             x = -1;
             for (t = 0; t < ngv; t = t + 1) if (gcode[t] == code) { x = t; break; }
-            if (x < 0) { x = ngv; gcode[x] = code; gcls[x] = 0; ngv = ngv + 1; }
-            gcls[x] = gcls[x] | bit(qlab[ch][j]);
+            if (x < 0) { x = ngv; gcode[x] = code; ws_zero(gcls[x], cnw, CW); ngv = ngv + 1; }
+            ws_set(gcls[x], qlab[ch][j]);
         }
         if (ngv == 0) return 0;
         nbk = 0;
         for (t = 0; t < ngv; t = t + 1) {
             x = -1;
-            for (b = 0; b < nbk; b = b + 1) if (bcls[b] == gcls[t]) { x = b; break; }
-            if (x < 0) { x = nbk; bcls[x] = gcls[t]; bn[x] = 0; nbk = nbk + 1; }
+            for (b = 0; b < nbk; b = b + 1) if (ws_eq(bcls[b], gcls[t], cnw)) { x = b; break; }
+            if (x < 0) { x = nbk; ws_copy(bcls[x], gcls[t], cnw, CW); bn[x] = 0; nbk = nbk + 1; }
             bof[t] = x;
             bn[x] = bn[x] + 1;
         }
@@ -1095,7 +1127,10 @@ int rep_factored(int ci, int pi, int merge, int k) {
         for (b = 0; b < nbk; b = b + 1) border[b] = b;
         for (a = 1; a < nbk; a = a + 1) {
             t = a;
-            while (t > 0 && cmpset(rankset(bcls[border[t - 1]]), rankset(bcls[border[t]])) > 0) {
+            while (t > 0) {
+                rankset(bcls[border[t - 1]], rsa, crank[ch], ncl[ch]);
+                rankset(bcls[border[t]], rsb, crank[ch], ncl[ch]);
+                if (ws_cmp(rsa, rsb, cnw) <= 0) break;
                 tmp = border[t]; border[t] = border[t - 1]; border[t - 1] = tmp;
                 t = t - 1;
             }
@@ -1134,8 +1169,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
                    >= cap: reaching cap here already decides None */
                 if (cn[ci] >= nr) { tfearlyb = tfearlyb + 1; return 0; }
                 u = newunit(ci, sets);
-                wmask = bcls[b];
-                for (i = 0; i < ncl[ch]; i = i + 1) if ((wmask >> i) & 1) cw[ci * MAXU + u][i] = 1;
+                for (i = 0; i < ncl[ch]; i = i + 1) if (ws_test(bcls[b], i)) cw[ci * MAXU + u][i] = 1;
                 s = e;
             }
         }
@@ -1753,7 +1787,7 @@ int main(int argc, char **argv) {
         if (streq(argv[ai], "-d")) dbg = 1;
         else if (streq(argv[ai], "-t")) tflag = 1;
         else if (streq(argv[ai], "-Q")) { qselftest(); return 0; }
-        else if (streq(argv[ai], "-G")) { wselftest(); return 0; }
+        else if (streq(argv[ai], "-G")) { wselftest(); rselftest(); return 0; }
         else if (streq(argv[ai], "-T") && ai + 1 < argc) {
             ai = ai + 1;
             if (streq(argv[ai], "bias")) tbreak = 1;

@@ -30,7 +30,7 @@ type type t i
 abi abi t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capgn capc"
+GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -138,6 +138,8 @@ need() {    # need stage <s> | need global <g>: the required pass marks
     capr) for b in cc ua san; do echo "g capr pos $b"; done; echo "g capr round cc"; echo "g capr round ua" ;;
     caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
     capg) for b in cc ua san; do echo "g capg pos $b"; done; echo "g capg round cc"; echo "g capg round ua" ;;
+    capc) for b in cc ua san; do echo "g capc pos $b"; done; echo "g capc round cc"; echo "g capc round ua" ;;
+    capcf) for b in cc ua san; do echo "g capcf pos $b"; done; echo "g capcf round cc"; echo "g capcf round ua"; echo "g capcf trace" ;;
     *) for b in cc ua san; do echo "g $g $b"; done ;;
     esac
 }
@@ -163,10 +165,12 @@ done
 # boundary members, empty/full, andnot against raw all-ones, every word in
 # [0, 2^62), and ws_cmp against a member-list lexicographic oracle (fixed
 # cases incl. {0,62} vs {1} and {3,70} vs {70}, plus pseudo-random pairs).
-# The three builds must print the same 8 "ok" lines.
+# The class half: rankset over 96 classes (2 words) under a reversed and a
+# scrambled name order, cross-word members and pairs vs the oracle.
+# The three builds must print the same 9 "ok" lines.
 for b in cc ua san; do
     B 30 "$T/c_$b" -G > "$T/g.$b" 2>&1; rc=$?
-    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/g.$b")" = 8 ] && ! grep -q 'runtime error' "$T/g.$b" && cmp -s "$T/g.cc" "$T/g.$b"; then echo "wset self-test $b ok (8 sizes, $(awk '{s += $(NF-4)} END {print s}' "$T/g.$b") comparisons vs oracle)"; P "g wset $b"
+    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/g.$b")" = 9 ] && ! grep -q 'runtime error' "$T/g.$b" && cmp -s "$T/g.cc" "$T/g.$b"; then echo "wset self-test $b ok (8 sizes + rankset, $(grep -v rankset "$T/g.$b" | awk '{s += $(NF-4)} END {print s}') comparisons vs oracle; $(grep rankset "$T/g.$b" | sed 's/.*: //')"; P "g wset $b"
     else echo "wset self-test $b FAILED (rc $rc): $(tail -1 "$T/g.$b")"; fail=1; fi
 done
 # checked accumulation: -T summax/sumover/sumrun drive the SAME ladd() that
@@ -462,22 +466,67 @@ for b in cc ua san; do
         echo "field-group negative $b NOT A FIELD-GROUP REJECTION (rc $rc): $(head -1 "$T/capgn.$b.out")"; fail=1
     fi
 done
-# class-count NEGATIVE: a class set is one long, so a head may have at most
-# MAXC = 62 classes.  A 2 x 2 table whose head lists 63 classes (labels use
-# only c0 and c1): raw values 2 and 2 (<= MAXV), 2 groups per field, 4
-# quotient keys, 2 rules -- every other limit is met, and the reader must
-# exit exactly 4 with the class diagnostic before any class shift.
-{ echo "# stage capc: 4 keys, 63 classes, synthetic"; printf '#field\ta\tv0\tv1\n#field\tb\tw0\tw1\n#head\ty\t-'
-  i=0; while [ $i -lt 63 ]; do printf '\tc%d' $i; i=$((i + 1)); done
-  printf '\na\tb\t=> y\nv0\tw0\tc0\nv0\tw1\tc0\nv1\tw0\tc1\nv1\tw1\tc1\n'; } > "$T/capc.tsv"
+# class-count POSITIVE: a 2 x 2 table whose head lists 63 classes (labels
+# use c0 and c1) -- the old negative, when a class set was one long (62).
+# Class sets are CW = 2 words now (MAXC 96): it must build and match Python
+# (-d, UNS2, deployed round trip).  class-count NEGATIVE: the same table
+# with 97 classes: every other limit is met, and the reader must exit
+# exactly 4 with the class diagnostic before any class set is written.
+genc() {   # genc classes name
+{ echo "# stage $2: 4 keys, $1 classes, synthetic"; printf '#field\ta\tv0\tv1\n#field\tb\tw0\tw1\n#head\ty\t-'
+  i=0; while [ $i -lt $1 ]; do printf '\tc%d' $i; i=$((i + 1)); done
+  printf '\na\tb\t=> y\nv0\tw0\tc0\nv0\tw1\tc0\nv1\tw0\tc1\nv1\tw1\tc1\n'; }
+}
+genc 63 capc > "$T/capc.tsv"
+genc 97 capcn > "$T/capcn.tsv"
+# class-set SYNTHETIC POSITIVE (capcf): fields a (8 values) x b (9), 96
+# classes named so that name order REVERSES index order (class c is
+# "k<95-c>": high indices have low ranks), label of (a, b) = class
+# (37(9a + b) + 5) % 96 -- 72 distinct classes, one per key.  The decision
+# list needs 72 rules (<= MAXR 80); rep_factored's buckets (one per value
+# of a, one per value of b, each a 8- or 9-class set) give a 17-unit
+# factored candidate that is KEPT and CHOSEN.  Every bucket's class set,
+# and its rank set, has members on both sides of bit 61/62, and the bucket
+# order is decided by ws_cmp over the rank sets: comparing index sets,
+# comparing the words as one integer, or not sorting all change the unit
+# order, so the -d dump would differ from Python (measured once by mutation,
+# README).  Must match Python byte for byte: -d, UNS2, round trip; the
+# trace must show the factored candidate chosen.
+awk 'BEGIN{A=8;N=9;K=96
+ print "# stage capcf: factored, 96 classes, synthetic"
+ printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n"
+ printf "#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"
+ printf "#head\ty\t-"; for(c=0;c<K;c++) printf "\tk%02d", K-1-c; printf "\n"
+ print "a\tb\t=> y"
+ for(a=0;a<A;a++) for(b=0;b<N;b++) printf "v%d\tw%d\tk%02d\n", a, b, K-1-((37*(9*a+b)+5)%96) }' > "$T/capcf.tsv"
+for x in capc capcf; do
+    B 60 python3 iterate/construct/tools/netdump.py -d "$T/$x.tsv" > "$T/$x.py" || { fail=1; echo "$x python reference failed" > "$T/$x.py"; }
+    B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.$x.uns2" "$T/$x.tsv" > /dev/null || { fail=1; echo "$x python reference failed" > "$T/py.$x.uns2"; }
+done
+cft=0
 for b in cc ua san; do
-    B 30 "$T/c_$b" "$T/capc.tsv" > "$T/capc.$b.out" 2>&1; rc=$?
-    if [ $rc -eq 4 ] && grep -q "capacity: head y has 63 classes, more than 62" "$T/capc.$b.out" && ! grep -q 'runtime error' "$T/capc.$b.out"; then
-        echo "class-count negative $b rejected: $(head -1 "$T/capc.$b.out")"; P "g capc $b"
+    for x in capc capcf; do
+        B 30 "$T/c_$b" -d "$T/$x.tsv" > "$T/$x.$b.out" 2>&1; rc=$?
+        B 30 "$T/c_$b" -u "$T/$b.$x.uns2" "$T/$x.tsv" > /dev/null 2>> "$T/$x.$b.out"; rc2=$?
+        if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && cmp -s "$T/$x.py" "$T/$x.$b.out" && cmp -s "$T/py.$x.uns2" "$T/$b.$x.uns2"; then
+            echo "class positive $x $b: built, -d identical to Python ($(wc -c < "$T/$x.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.$x.uns2" | tr -d ' ') B)"; P "g $x pos $b"
+        else echo "class positive $x $b FAILED (rc $rc/$rc2): $(head -1 "$T/$x.$b.out")"; fail=1; fi
+        if [ $b != san ]; then
+            B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.$x.uns2" "$T/$x.tsv" > "$T/r.$b.out" 2>&1 && P "g $x round $b" || fail=1
+            sed "s/^/class positive $b deployed /" "$T/r.$b.out"
+        fi
+    done
+    [ $b != san ] && { B 30 "$T/c_$b" -t "$T/capcf.tsv" > "$T/capcf.$b.t" 2>&1 || cft=1; }
+    B 30 "$T/c_$b" "$T/capcn.tsv" > "$T/capcn.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: head y has 97 classes, more than 96" "$T/capcn.$b.out" && ! grep -q 'runtime error' "$T/capcn.$b.out"; then
+        echo "class-count negative $b rejected: $(head -1 "$T/capcn.$b.out")"; P "g capcn $b"
     else
-        echo "class-count negative $b NOT A CLASS-COUNT REJECTION (rc $rc): $(head -1 "$T/capc.$b.out")"; fail=1
+        echo "class-count negative $b NOT A CLASS-COUNT REJECTION (rc $rc): $(head -1 "$T/capcn.$b.out")"; fail=1
     fi
 done
+if [ $cft = 0 ] && cmp -s "$T/capcf.cc.t" "$T/capcf.ua.t" && grep -q "^trace head y: 19 candidates, chose 1 (factored), 17 units$" "$T/capcf.cc.t" && grep -q "kept 18$" "$T/capcf.cc.t"; then
+    sed "s/^/capcf /" "$T/capcf.cc.t"; P "g capcf trace"
+else echo "capcf trace: not the factored choice, or differs between builds"; fail=1; fi
 # the deployment invariants must be able to fire: the test entry breaks b1
 # of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
 # invariant 1 is the one reached.  Only exit 3 with that invariant's

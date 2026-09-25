@@ -871,3 +871,37 @@ regmap pp lex scope + global), 4.0 s (pfconv binsel enc opinfo peep parse),
 28.0 s (type), 12.8 s (abi): all ok, 50.1 s in total.
 
 Scope: abi only.  Group and class bitsets and MAXS are unchanged.
+
+## Multi-word field-group and class sets (2026-09-25)
+
+Every multi-word set goes through one layer, `ws_*` in construct.c: a set
+over n elements is `long s[sw]`, element j is bit j % 62 of word j / 62;
+each helper takes nw = ceil(n / 62), the storage words sw and the last
+word's tail mask explicitly; n = 0 is the empty domain (nw 0, tail 0).
+Writers zero words nw..sw-1 and mask every word before anything counts or
+shifts it, so a leftover from a larger domain never reaches equality, order
+or a count.  `ws_cmp` is Python's order of the sorted member tuples: scan
+from the LOW word, decide at the lowest differing element p by whether the
+other set has a member above p -- not the big-integer order ({0,62} < {1}).
+The q* functions are thin wrappers (sw = nqw, their old semantics).
+
+- Step 0: the layer and `construct -G` (sizes 0, 1, 61, 62, 63, 96, 123,
+  124 in 3 storage words from junk; tails, boundary members, empty/full,
+  andnot against raw all-ones, words in [0, 2^62), ws_cmp vs a member-list
+  oracle incl. {0,62}/{1} and {3,70}/{70}; since step 2 also rankset over
+  96 classes under two name orders).  Global check `wset`.
+- Step 1: field-group sets are GW = 2 words (MAXG 124, independent of
+  MAXV 128; the over-limit gate stays in domain(), exit 4).  The 70 x 2
+  table (old negative) is the positive `capg`; 125 groups is `capgn`.
+  __common 23,175,224 -> 24,128,568 B (size -m).
+- Step 2: class sets (gcls, bcls, rankset, bucket order, W2 mask) are
+  CW = 2 words, MAXC 96 (second word 34 bits); the reader rejects 97
+  (`capcn`), the 63-class table is the positive `capc`.  `capcf` is the
+  synthetic class positive: 96 classes named in REVERSE index order, label
+  class (37(9a+b)+5) % 96 on 8 x 9 keys; 72 dlist rules, a 17-unit
+  factored candidate kept and chosen, every bucket class set and rank set
+  crossing bit 61/62.  Measured once by mutation (cc build, -d vs Python):
+  ordering buckets by index sets, comparing rank words as one integer, or
+  not sorting at all each makes the dump DIFFER from Python; the real code
+  is identical on cc, unisacc and UBSan.  __common 24,128,568 ->
+  34,745,400 B (cw and W2 per class); peak RSS on abi 19,988,480 B.
