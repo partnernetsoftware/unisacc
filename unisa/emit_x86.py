@@ -182,10 +182,10 @@ def store_w(reg, base, disp, width):
     return mem(0x88, reg, base, disp, w=0)
 
 
-ALU2 = {"add64": 0x01, "sub64": 0x29, "xor64": 0x31,
-        "and64": 0x21, "or64": 0x09}
-SETCC = {"slt64": 0x9C, "sle64": 0x9E, "eq": 0x94, "ne": 0x95,
-         "ult64": 0x92, "ule64": 0x96}        # l, le, e, ne, b, be
+from .catalog import ENCSPEC as _ENC
+ALU2 = _ENC["x86_64"]["alu2"]         # [I5] one table, both back ends
+SETCC = _ENC["x86_64"]["setcc"]
+SHIFTEXT = _ENC["x86_64"]["shiftext"]
 SCRATCH = 11                                                      # r11
 SCR = "r11"       # neither r11 nor rbx is in REGMAP, so neither is a tape
 SCR2 = "rbx"      # register; we exit by syscall and never return to a caller
@@ -487,7 +487,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         if a[0] != a[1]:
             pre += mov_rr(a[0], a[1])
         return pre + _alu(ALU2[o], a[0], src2)
-    if o in ("shl64", "shr64", "lshr64"):
+    if o in SHIFTEXT:
         # The count has to be in cl -- and rcx is a TAPE register (r4, also
         # arg3), so it must be saved and put back.  Do the whole thing in the
         # scratches so neither operand can be the register we are about to
@@ -496,7 +496,7 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
         out += push("rcx")                                   # save tape rcx
         out += mov_rr("rcx", SCR2)
         out += rex(1, 0, 0, 1) + b"\xd3" + \
-            modrm(3, {"shl64": 4, "shr64": 7, "lshr64": 5}[o], NUM[SCR])
+            modrm(3, SHIFTEXT[o], NUM[SCR])
         out += pop("rcx")                                    # restore
         return out + mov_rr(a[0], SCR)
     if o == "mul64":

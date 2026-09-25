@@ -1706,3 +1706,61 @@ char *BH_ABI_WINIMP = "none\000ExitProcess\000WriteFile\000ReadFile\000VirtualAl
 #define NBH_ABI_WINIMP 12
 #define HD_ABI_WINIMP 12
 
+char *ENC_X86_ALU2 = "add64\000sub64\000xor64\000and64\000or64\000";
+#define NENC_X86_ALU2 5
+long ENC_X86_ALU2_V(int i) {
+  if (i == 0) return 1;
+  if (i == 1) return 41;
+  if (i == 2) return 49;
+  if (i == 3) return 33;
+  if (i == 4) return 9;
+  return 0 - 1;
+}
+
+char *ENC_X86_SETCC = "slt64\000sle64\000eq\000ne\000ult64\000ule64\000";
+#define NENC_X86_SETCC 6
+long ENC_X86_SETCC_V(int i) {
+  if (i == 0) return 156;
+  if (i == 1) return 158;
+  if (i == 2) return 148;
+  if (i == 3) return 149;
+  if (i == 4) return 146;
+  if (i == 5) return 150;
+  return 0 - 1;
+}
+
+char *ENC_X86_SHIFTEXT = "shl64\000shr64\000lshr64\000";
+#define NENC_X86_SHIFTEXT 3
+long ENC_X86_SHIFTEXT_V(int i) {
+  if (i == 0) return 4;
+  if (i == 1) return 7;
+  if (i == 2) return 5;
+  return 0 - 1;
+}
+
+char *ENC_ARM_ALU3 = "add64\000sub64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000";
+#define NENC_ARM_ALU3 8
+long ENC_ARM_ALU3_V(int i) {
+  if (i == 0) return 2332033024;
+  if (i == 1) return 3405774848;
+  if (i == 2) return 3388997632;
+  if (i == 3) return 2315255808;
+  if (i == 4) return 2852126720;
+  if (i == 5) return 2596282368;
+  if (i == 6) return 2596284416;
+  if (i == 7) return 2596283392;
+  return 0 - 1;
+}
+
+char *ENC_ARM_INVCOND = "slt64\000sle64\000eq\000ne\000ult64\000ule64\000";
+#define NENC_ARM_INVCOND 6
+long ENC_ARM_INVCOND_V(int i) {
+  if (i == 0) return 10;
+  if (i == 1) return 12;
+  if (i == 2) return 1;
+  if (i == 3) return 0;
+  if (i == 4) return 2;
+  if (i == 5) return 8;
+  return 0 - 1;
+}
+

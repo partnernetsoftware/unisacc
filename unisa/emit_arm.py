@@ -36,13 +36,9 @@ def mem(store, rt, rn, off, wd):
     return out + w(base | (IP0 << 5) | rt)
 
 
-ALU3 = {"add64": 0x8B000000, "sub64": 0xCB000000, "xor64": 0xCA000000,
-        "and64": 0x8A000000, "or64": 0xAA000000,
-        "shl64": 0x9AC02000, "shr64": 0x9AC02800,
-        "lshr64": 0x9AC02400}
-# cset encodes the INVERTED condition: ge, gt, ne, eq, hs, hi
-INVCOND = {"slt64": 0xA, "sle64": 0xC, "eq": 0x1, "ne": 0x0,
-           "ult64": 0x2, "ule64": 0x8}
+from .catalog import ENCSPEC as _ENC
+ALU3 = _ENC["arm64"]["alu3"]          # [I5] one table, both back ends
+INVCOND = _ENC["arm64"]["invcond"]    # cset encodes the INVERTED condition
 IP0 = 16
 IP1 = 17          # x16 is the Darwin syscall-number register -- use IP1
 # Windows/arm64 [I-18].  A WinAPI call is an ordinary AAPCS64 call, so it

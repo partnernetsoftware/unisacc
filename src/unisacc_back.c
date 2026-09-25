@@ -517,6 +517,8 @@ int tkop[BK_MAXT]; long tka[BK_MAXT * 4]; int tkk[BK_MAXT * 4]; int tkn;
 /* gate metadata: form, gate, catalog op, return register */
 int tkg_rc[BK_MAXT]; int tkg_wi[BK_MAXT];
 int bk_impof(int c);                /* the IAT slot `winimp` names */
+/* an op's index in one of catalog.ENCSPEC's tables, or -1 [I5] */
+int enc_ix(char *tab, int n, char *o) { int L; L = 0; while (o[L]) L = L + 1; return vfind(tab, n, o, L); }
 int bk_str_is(char *a, char *b);
 int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
@@ -1123,27 +1125,16 @@ int bk_arm(int i, long off) {
             if (v) ow(0xF2800000 | (k << 21) | (v << 5) | a[0]); k = k + 1; }
         return 1;
     }
-    {   unsigned long alu; alu = 0;
-        if (bk_str_is(o, "add64")) alu = 0x8B000000;
-        if (bk_str_is(o, "sub64")) alu = 0xCB000000;
-        if (bk_str_is(o, "xor64")) alu = 0xCA000000;
-        if (bk_str_is(o, "and64")) alu = 0x8A000000;
-        if (bk_str_is(o, "or64")) alu = 0xAA000000;
-        if (bk_str_is(o, "shl64")) alu = 0x9AC02000;
-        if (bk_str_is(o, "shr64")) alu = 0x9AC02800;
-        if (bk_str_is(o, "lshr64")) alu = 0x9AC02400;
-        if (alu) { ow(alu | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
+    {   unsigned long alu; int j;              /* [I5] catalog.ENCSPEC */
+        j = enc_ix(ENC_ARM_ALU3, NENC_ARM_ALU3, o);
+        if (j >= 0) { alu = ENC_ARM_ALU3_V(j); ow(alu | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
     }
     if (bk_str_is(o, "mul64")) { ow(0x9B007C00 | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
     if (bk_str_is(o, "load64")) { a_mem(0, a[0], a[1], a[2], 8); return 1; }
     if (bk_str_is(o, "store64")) { a_mem(1, a[2], a[0], a[1], 8); return 1; }
-    {   int cc; cc = 0 - 1;
-        if (bk_str_is(o, "slt64")) cc = 0xA;
-        if (bk_str_is(o, "sle64")) cc = 0xC;
-        if (bk_str_is(o, "eq")) cc = 0x1;
-        if (bk_str_is(o, "ne")) cc = 0x0;
-        if (bk_str_is(o, "ult64")) cc = 0x2;
-        if (bk_str_is(o, "ule64")) cc = 0x8;
+    {   int cc; int j;                         /* [I5] catalog.ENCSPEC */
+        cc = 0 - 1; j = enc_ix(ENC_ARM_INVCOND, NENC_ARM_INVCOND, o);
+        if (j >= 0) cc = ENC_ARM_INVCOND_V(j);
         if (cc >= 0) {
             ow(0xEB00001F | (a[2] << 16) | (a[1] << 5));
             ow(0x9A9F07E0 | (cc << 12) | a[0]);
@@ -1663,12 +1654,9 @@ int bk_x86(int i, long off) {
     o = bk_nth(BKOPS, op);
     if (bk_str_is(o, "mov")) { x_movrr(a[0], a[1]); return 1; }
     if (bk_str_is(o, "imm")) { x_movri(a[0], a[1]); return 1; }
-    {   int alu; alu = 0 - 1;
-        if (bk_str_is(o, "add64")) alu = 0x01;
-        if (bk_str_is(o, "sub64")) alu = 0x29;
-        if (bk_str_is(o, "xor64")) alu = 0x31;
-        if (bk_str_is(o, "and64")) alu = 0x21;
-        if (bk_str_is(o, "or64")) alu = 0x09;
+    {   int alu; int j;                        /* [I5] catalog.ENCSPEC */
+        alu = 0 - 1; j = enc_ix(ENC_X86_ALU2, NENC_X86_ALU2, o);
+        if (j >= 0) alu = ENC_X86_ALU2_V(j);
         if (alu >= 0) {
             s2 = x_alias(a[0], a[1], a[2]);
             if (a[0] != a[1]) x_movrr(a[0], a[1]);
@@ -1676,12 +1664,12 @@ int bk_x86(int i, long off) {
             return 1;
         }
     }
-    if (bk_str_is(o, "shl64") || bk_str_is(o, "shr64") || bk_str_is(o, "lshr64")) {
+    if (enc_ix(ENC_X86_SHIFTEXT, NENC_X86_SHIFTEXT, o) >= 0) {
         x_movrr(X_R11, a[1]); x_movrr(X_RBX, a[2]);
         x_push(X_RCX);
         x_movrr(X_RCX, X_RBX);
         x_rex(1, 0, 0, 1); ob(0xD3);
-        x_modrm(3, bk_str_is(o, "shl64") ? 4 : (bk_str_is(o, "shr64") ? 7 : 5), X_R11);
+        x_modrm(3, ENC_X86_SHIFTEXT_V(enc_ix(ENC_X86_SHIFTEXT, NENC_X86_SHIFTEXT, o)), X_R11);
         x_pop(X_RCX);
         x_movrr(a[0], X_R11);
         return 1;
@@ -1694,13 +1682,9 @@ int bk_x86(int i, long off) {
     }
     if (bk_str_is(o, "load64")) { x_load(a[0], a[1], a[2], 8); return 1; }
     if (bk_str_is(o, "store64")) { x_store(a[2], a[0], a[1], 8); return 1; }
-    {   int cc; cc = 0 - 1;
-        if (bk_str_is(o, "slt64")) cc = 0x9C;
-        if (bk_str_is(o, "sle64")) cc = 0x9E;
-        if (bk_str_is(o, "eq")) cc = 0x94;
-        if (bk_str_is(o, "ne")) cc = 0x95;
-        if (bk_str_is(o, "ult64")) cc = 0x92;
-        if (bk_str_is(o, "ule64")) cc = 0x96;
+    {   int cc; int j;                         /* [I5] catalog.ENCSPEC */
+        cc = 0 - 1; j = enc_ix(ENC_X86_SETCC, NENC_X86_SETCC, o);
+        if (j >= 0) cc = ENC_X86_SETCC_V(j);
         if (cc >= 0) { x_cmpset(cc, a[0], a[1], a[2]); return 1; }
     }
     if (bk_str_is(o, ".frame")) {

@@ -202,6 +202,35 @@ _WINIMP = {"exit": "ExitProcess", "write": "WriteFile", "read": "ReadFile",
 WINIMPS = ("none",) + tuple(dict.fromkeys(_WINIMP.values()))
 
 
+# ---- [I5] machine-code data: opcodes by (arch, family, op) ----------------
+# The encoders' byte VALUES -- not decisions (the net decides which op, and
+# enc decides the form); what they were was a copy in each back end, typed
+# twice in C as if-chains.  unisa/emit_*.py read this; ckernel generates the
+# C side's lookups from it.
+ENCSPEC = {
+    "x86_64": {
+        # reg-reg ALU: opcode of `op r/m64, r64`
+        "alu2": {"add64": 0x01, "sub64": 0x29, "xor64": 0x31,
+                 "and64": 0x21, "or64": 0x09},
+        # compare-set: the setcc second byte -- l, le, e, ne, b, be
+        "setcc": {"slt64": 0x9C, "sle64": 0x9E, "eq": 0x94, "ne": 0x95,
+                  "ult64": 0x92, "ule64": 0x96},
+        # shifts by cl: the /r digit of D3 -- shl /4, sar /7, shr /5
+        "shiftext": {"shl64": 4, "shr64": 7, "lshr64": 5},
+    },
+    "arm64": {
+        # reg-reg ALU and variable shifts: the whole base word
+        "alu3": {"add64": 0x8B000000, "sub64": 0xCB000000,
+                 "xor64": 0xCA000000, "and64": 0x8A000000,
+                 "or64": 0xAA000000, "shl64": 0x9AC02000,
+                 "shr64": 0x9AC02800, "lshr64": 0x9AC02400},
+        # cset encodes the INVERTED condition: ge, gt, ne, eq, hs, hi
+        "invcond": {"slt64": 0xA, "sle64": 0xC, "eq": 0x1, "ne": 0x0,
+                    "ult64": 0x2, "ule64": 0x8},
+    },
+}
+
+
 def argshape(op, os_, arch):
     if (os_, arch) == ("lnx", "arm64") and op in _ATFD:
         return _ATFD[op]
