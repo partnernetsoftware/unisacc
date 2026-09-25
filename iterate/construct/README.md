@@ -101,9 +101,13 @@ builds reject every copy with exit 1 and the matching diagnostic.
 (`b1 = 1 - constrained fields`), which is checked BEFORE the semantic
 enumeration so a bias fault is not reported as "not exact".  `-T act` breaks
 b1 the same way but skips invariant 2, and must exit 3 on invariant 1
-(activation in {0,1}).  With W1 one-hot per field, activation = b1 + fields
-hit <= 1 - t + t = 1, so invariant 1 follows from invariant 2; only a broken
-b1 can reach it, which is why the second case has to bypass the first.
+(activation in {0,1}).  The INPUT is one-hot per field and W1 is 0/1, so
+each field contributes at most 1 to a unit (a unit may accept several values
+of a field; only one of them is present in a key).  Hence activation = b1 +
+fields hit <= 1 - t + t = 1: invariant 1 follows from invariant 2, and only a
+broken b1 can reach it -- which is why the second case has to bypass the
+first.  That bypass only shows the activation check CAN fire; the normal
+construction path does not produce such a state.
 check.sh runs both, on the cc and the unisacc build, and counts only exit 3
 with that invariant's diagnostic.  `-T` is a test entry only.
 
