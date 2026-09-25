@@ -139,20 +139,20 @@ P1 构造迁 unisacc          可选
 
 | 件 | 说明 |
 |---|---|
-| `compiler_min.c` / `compiler.ujs` | v17：`"…"` 短字面量（≤7 ASCII、无转义）→ OP_SCONST/pack_key；`str+str` → `$str_cat`（func 18）；str handle 经 OP_HRET 返回 |
+| `compiler_min.c` / `compiler.ujs` | v17：`"…"` 字面量 **0–7 ASCII、无转义**（界在字面量，非拼接结果）→ OP_SCONST/pack_key；`str+str` → `$str_cat`（func 18）；str handle 经 OP_HRET 返回 |
 | `compiler_rt_stub.wasm` | 与 stage0 同版 host（含 str_cat）；`compile.mjs` splice 模板 |
-| 门禁 | fold **str**→`hello ujs`；stage2≡stage1 · sim+drone body≡stage0 |
+| 门禁 | fold **str**→`hello ujs`（及边界回归）；stage2≡stage1 / body≡ = **code `fi===1` mainBody**；sim+drone 同 |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
 
 #### Practice twin：tinyvm（✓ 可选 module validate）
 
 | 件 | 说明 |
 |---|---|
-| 角色 | 伴生 `\0asm` 解释器；**校验面**孪生 oracle，不是第三 IR、不替代 M3 / construct |
-| 门禁 | `ujs2wasm_compiler.sh`：若找到 `tinyvm`，对 fold 语料 + sim/drone 做 `module validate`；`UJS_REQUIRE_TINYVM=1` 时缺二进制 = FAIL |
+| 角色 | 伴生 `\0asm` 解释器；**校验面** only——证明模块通过该校验器，**不是**语义执行孪生；不是第三 IR |
+| 门禁 | `ujs2wasm_compiler.sh`：若找到 `tinyvm`，对 fold + sim/drone 做 `module validate`；`UJS_REQUIRE_TINYVM=1` 时缺二进制 = FAIL |
 | 查找 | `PATH` · `../tinyvm/target/{release,debug}/tinyvm` · `$HOME/repos/tinyvm/...` |
 
-**下一刀**：v18+（长 str / fn 等仍 out of ship）；tinyvm **执行**孪生（invoke `main_export`）另开，非本刀。
+**下一刀**：v17 边界回归收尾后，**只选一个**由编译器/应用推动的缺口（长 lit 或 `fn`），写清输入与完成判据；不同时开 tinyvm 执行层。
 
 #### M3 v15（✓ else-if · fold corpus on core）
 

@@ -14,12 +14,12 @@
 
 ## Abstract
 
-We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; shipping accuracy is exact by construction and checked by full key-space enumeration. **Method-kernel obligations (P-8 / P-3 / P-5 / P-1, and a P-2 sample) are discharged in [cite A]** (enumeration + Lean theorems such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`); Paper B only *instantiates* them on a dynamic-language / Web pipeline and adds product gates.
+We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; shipping accuracy is exact by construction and checked by full key-space enumeration. **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel and *instantiates* a dynamic-language / Web pipeline with product gates; it does **not** claim that A’s discharges automatically transfer to every UJS table walker or to the M3 classical compiler.
 
-Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline on the **construct / jtape spine** (lex…irsel [+ IC], wasm lower when tables ship)—and ships browser/Node/Bun surfaces whose **product compile / step path** no longer requires Python. Separately, the **M3 spine** ships a *hand-written* UJS subset compiler (`compiler.ujs` → `compiler_core.wasm`) with stage2 ≡ stage1 and game bodies ≡ stage0. M3 is twin-test evidence for Python-free ship, **not** a claim that the shipping compiler is itself an IntNet. Claims are suite names already in the repository; we invent no throughput numbers.
+Where Paper A targets a C self-hosting shell, UJS applies the same oracle discipline on the **construct / jtape spine** (lex…irsel [+ IC], wasm lower when tables ship)—and ships browser/Node/Bun surfaces whose **product compile / step path** no longer requires Python. Separately, the **M3 spine** ships a *hand-written* UJS subset compiler (`compiler.ujs` → `compiler_core.wasm`) with **main-body** twin-tests (stage2 ≡ stage1; sim/drone body ≡ stage0—see §5.2). M3 is twin-test evidence for Python-free ship, **not** a claim that the shipping compiler is itself an IntNet. Claims are suite names already in the repository; we invent no throughput numbers.
 
 **摘要（可选）**  
-UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：方法核在 A 卸责；B 只证明**迁移 + 可命名产品门禁**。验收有两条脊——**构造/jtape**（表→IntNet）与 **M3 出货编译器**（手写子集自举、字节一致）；后者不是「Web 编译器 = 表网络」。出货默认 `compiler_core.wasm`；Python 限于构造臂，非 Pages/ship 必经。语言子集写 **UJS-1_ship（M3 已交付面）**，勿与全表 UJS-1 规格等同。
+UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：方法核在 A；B **引用**并加可命名产品门禁，**不**声称 A 的卸责自动覆盖每张 UJS 表或 M3 手写编译器。验收有两条脊——**构造/jtape**（表→IntNet）与 **M3 出货编译器**（手写子集自举、**mainBody** 字节对照）；后者不是「Web 编译器 = 表网络」。出货默认 `compiler_core.wasm`；Python 限于构造臂，非 Pages/ship 必经。语言子集写 **UJS-1_ship（M3 已交付面）**，勿与全表 UJS-1 规格等同。
 
 ---
 
@@ -36,7 +36,7 @@ Neural components in compilers and runtimes are usually *trained* heuristics wit
 ## 2. Contributions
 
 1. **Method transfer (not re-proof).** Same Shell proposition and P-discipline as [cite A], applied to UJS-1 *table* stages including **IC** (`shape × op × guard`) and wasm `isel`/`enc`/`reloc` when those tables ship. Novel writing is the *transfer* and product packaging; IntNet proofs stay in A.
-2. **Two spines, one discipline.** (a) **jtape / fold / acc / icfold** — construct path; method acceptance. (b) **M3** — `compiler.ujs` → `compiler_core.wasm`, stage2 ≡ stage1, sim/drone body ≡ stage0 — product compile without Python emit. Spines share P-style honesty; they are **not** the same artifact.
+2. **Two spines, one discipline.** (a) **jtape / fold / acc / icfold** — construct path; method acceptance. (b) **M3** — `compiler.ujs` → `compiler_core.wasm`; **code-section main body** (`fi===1`) stage2 ≡ stage1 and sim/drone body ≡ stage0 — product compile without Python emit. Spines share P-style honesty; they are **not** the same artifact.
 3. **Web product surface**: `wasm_run` / UXE Pages; default compile path **`compiler_core.wasm`** (P0); Python construct is not a ship dependency (`web-build` remains a *dev / engine* path, not Pages emit).
 4. **Cross-host front parity** where dual fronts still exist; parity reduces drift, it does not replace [cite A].
 5. **Layered ship gates** without selling compression over tables [cite A; Boniol et al.].
@@ -111,13 +111,15 @@ Weights from FULL gold via `build-weights`—not training. Discipline [cite A] �
 | **P-2** | Every ask key ∈ $K_s$ | Runtime assert; Lean L3 **sample** `asks_subset_K` (`reloc`); **full walker still open** |
 | **P-6** | gold ≡ language semantics | External referee—not claimed in A or B |
 
-UJS inherits these by citation. **B’s extra P-2 obligation:** each new *table* stage (especially **IC** and wasm `isel`/`enc`/`reloc`) must eventually supply an A-style domain-closure sample or keep the runtime assert + suite pressure. **M3’s classical compiler does not inherit a Lean P-2 proof**; its honesty is stage2≡ / body≡ / fold suites.
+UJS cites these by reference. **B’s extra P-2 obligation:** each new *table* stage (especially **IC** and wasm `isel`/`enc`/`reloc`) must eventually supply an A-style domain-closure sample or keep the runtime assert + suite pressure. **A’s reloc L3 sample is not a proof of any UJS walker.** **M3’s classical compiler does not inherit a Lean P-2 proof**; its honesty is mainBody twin-tests / fold suites.
 
 ### 5.2 UJS-1 language (closed) vs UJS-1_ship
 
 **UJS-1 (spec):** values `null | bool | i64 | f64 | str | list | dict | fn | tup`; locals → lexical outer → globals; permanent reject outside tables (no `eval`, prototypes, `this`/`new`/`class`, async, RegExp engine). Full clause table: `ujs/prd.md` / `archive/prd-v1.0.md`.
 
-**UJS-1_ship (M3 / Pages path, as of compiler v17):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **short str lit + concat + return**, globals inject / `host_*` / `run_step`. **Still out of M3 ship:** general long `str` / `fn`, baked gold/catalog, byte-identical module vs full Python `emit_wasm` (see `ujs/prd.md` M2 residual).
+**UJS-1_ship (M3 / Pages path, as of compiler v17):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **short string literals + concat + return**, globals inject / `host_*` / `run_step`.
+
+**Short-str literal bound (v17):** each `"…"` literal is **0–7 bytes of ASCII** with **no escapes** (`\` rejected; bytes >127 rejected). The bound is on the **literal**, not on concat results (`"hello" + " world"` may be 11 bytes). **Still out of M3 ship:** general long literals / `fn`, baked gold/catalog, whole-module ≡ full Python `emit_wasm` (see `ujs/prd.md` M2 residual).
 
 Papers and release notes must say **which** face is meant.
 
@@ -125,7 +127,7 @@ Papers and release notes must say **which** face is meant.
 
 **jtape** remains the semantic spine for the bytecode VM / construct path; fold equates jtape VM ↔ WasmProgram (host wasm when exercised).
 
-**M3** is the second spine: `compiler.ujs` compiled by stage0 yields `compiler_core.wasm`; recompilation yields stage2 ≡ stage1; game `sim.ujs` / `drone.ujs` main bodies ≡ stage0. Twin-test for **Python-free product compile**, not a re-proof of IntNet, and not a claim that stage0 C and stage1 UJS are table-constructed.
+**M3** is the second spine: `compiler.ujs` compiled by stage0 yields `compiler_core.wasm`; recompilation yields stage2 ≡ stage1; game `sim.ujs` / `drone.ujs` bodies ≡ stage0. **Compare object in the gate:** the **main function body** from the wasm code section (`fi===1`, locals+ops). That equality does **not** by itself prove whole-module identity, `*.meta.json` identity, RT-stub identity, or source-level semantic equivalence—claim those only with separate checks. Twin-test for **Python-free product compile**, not a re-proof of IntNet, and not a claim that stage0 C and stage1 UJS are table-constructed.
 
 ### 5.4 Inline cache stage
 
@@ -152,9 +154,10 @@ Where a JS front and a Python front both exist, packed images must match on shar
 | Method kernel | [cite A] Lean + `unisa acc` | Not re-run as B’s novelty |
 | UJS table exactness (when tables ship) | `acc` / construct via `ujs.sh` | FULL gold; SHIP_ACC |
 | Construct fold / icfold / front parity | `tests/ujs.sh` (where enabled) | agree / identical images |
-| Full path-B emit corpus | `tests/ujs2wasm.sh` (under `ujs.sh`) | includes probes **outside** UJS-1_ship (e.g. `str`, `arrow`, …) via Python/`emit` tools |
-| M3 compiler self-host + P0 | `ujs2wasm_compiler.sh` | stage2≡stage1; sim/drone body≡stage0; default bridge=`compiler_core.wasm`; no ship `emit_wasm` / no A-core copy |
+| Full path-B emit corpus | `tests/ujs2wasm.sh` (under `ujs.sh`) | includes probes **outside** UJS-1_ship (e.g. `arrow`, long-form `str` via Python tools, …) |
+| M3 compiler self-host + P0 | `ujs2wasm_compiler.sh` | **mainBody** stage2≡stage1; sim/drone **mainBody**≡stage0; default bridge=`compiler_core.wasm`; no ship `emit_wasm` / no A-core copy; missing `compiler.wasm` = FAIL |
 | UJS-1_ship fold on **core** | same | §6.2 corpus + inject step |
+| Optional tinyvm validate | same (when binary found / `UJS_REQUIRE_TINYVM=1`) | `module validate` only—**not** execution twin |
 | Ship-js contract | `uxe_ship_js.sh` | `sim.wasm` present; Pages load path B |
 | UXE unmanned | `npm run test:uxe:*` | **separate gate**; see `ujs/prd.md` #4 |
 
@@ -174,9 +177,10 @@ Exercised by `ujs2wasm_compiler.sh` with bridge forced to core (names ⊂ `tests
 | `unary_minus` | unary `-` | 3 |
 | `elseif` | else-if | 20 |
 | `logic` | `!` · `&&` · `||` (i64) | 7 |
+| `str` | short lit (≤7 ASCII, no escapes) + concat + return | `hello ujs` |
 
 Plus `setidx_globals` (host inject + `run_step`) and Asteroid/drone ship emit without `python3`.  
-**Not** on the core gate today (still construct / full emit): e.g. `str`, `arrow`, `forof`, `ternary`, `nullish`, `blockarrow`, `sum`, `switch`, `setidx_loop`—presence in `expect.json` must not be read as UJS-1_ship coverage.
+**Not** on the core gate today (still construct / full emit): e.g. `arrow`, `forof`, `ternary`, `nullish`, `blockarrow`, `sum`, `switch`, `setidx_loop`—presence in `expect.json` must not be read as UJS-1_ship coverage. Short-str **literals** are on core; **general long literals / `fn`** are not.
 
 **Relation to Paper A.** IntNet / enumeration / congruence / P-2 sample live in [cite A]. B emphasizes language self-host *gates*, Web ship path, IC packaging on the construct spine, and honest subset bounds.
 
@@ -184,15 +188,15 @@ Plus `setidx_globals` (host inject + `run_step`) and Asteroid/drone ship emit wi
 
 ## 7. Discussion and Limitations
 
-- **Closed language.** Opening to full ES breaks finite $K_s$ and P-3 on the construct spine.
+- **Closed language.** Full ES is **not** UJS-1: current table keys, schemas, and walker coverage are finite by construction for the closed subset. Opening to unrestricted ES would require **new** key/schema/coverage work and re-validation; we do **not** claim a theorem that “any infinite program set forces infinite local decision domains.”
 - **Two spines.** Overclaiming “the compiler is a table network” collapses product twin-tests with method proofs; keep them named separately.
-- **UJS-1_ship is incomplete.** Expanding M3 (short str, fn, …) is engineering schedule, not a silent widening of the paper’s ship claim.
+- **UJS-1_ship is incomplete.** Expanding M3 (long str, fn, …) is engineering schedule, not a silent widening of the paper’s ship claim.
 - **IC is not learning.** Another constructed table under the same oracle (construct spine).
-- **P-2 remains the hard transfer debt.** A’s Lean sample is a template; UJS *table* walkers still rely on asserts + suites. M3 adds suite/byte obligations, not Lean.
+- **P-2 remains the hard transfer debt.** A’s Lean sample is a template; each UJS *table* walker must carry its own domain evidence (assert + suite, eventually A-style sample). M3 adds mainBody/fold obligations, not Lean.
 - **Python constructor.** Allowed to shrink only; product compile must not grow new Python-only ship edges. P1 (construct → unisacc) is intentionally deferred (`ujs/prd.md`).
 - **Web vs A’s “no Web” for the C product.** Intentional split: A = C shell; B = Web/JS practice of the *same theory*.
 - **Layout is part of the claim hygiene.** Keeping generators in `seed/` and weight *bytes* in `weights/` (A/C rule) prevents rereading `gold.py` as “the reusable net.”
-- **Execution hosts are not the next IntNet.** Browser/Node already run `\0asm`; a portable wasm interpreter (e.g. companion `tinyvm`) would be another *practice* executor / twin oracle—not a third language spine and not a substitute for M3 or for construct tables.
+- **Execution hosts are not the next IntNet.** Browser/Node already run `\0asm`. Companion `tinyvm` may **validate** (and later, if budgeted, execute) ship modules as a practice oracle—**validate ≠ semantic twin**; not a third language spine and not a substitute for M3 or construct tables.
 
 ---
 
@@ -215,7 +219,7 @@ UJS shows that the UNISA SH method [cite A] extends to a closed JavaScript *spec
 ## Appendix A — Suite name checklist
 
 **Language / construct:** `acc` · `fold` · `icfold` · `difftest` · `determinism` · front parity · in-page `wasm_run` · `ujs.sh` · `ujs2wasm.sh` (full corpus ≠ ship; optional tinyvm validate)  
-**Product / M3 / P0:** **`ujs2wasm_compiler`** · ship builders without `emit_wasm` · §6.2 core probes · optional **tinyvm `module validate`** on fold+sim/drone (`UJS_REQUIRE_TINYVM=1` to require)  
+**Product / M3 / P0:** **`ujs2wasm_compiler`** · ship builders without `emit_wasm` · §6.2 core probes (incl. short `str`) · optional **tinyvm `module validate`** (not execute) on fold+sim/drone (`UJS_REQUIRE_TINYVM=1` to require)  
 **Ship-js:** `uxe_ship_js`  
 **UXE (separate):** `test:uxe:*`
 
@@ -234,7 +238,7 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 | “`web-build` is the ship path” | path-A residual; P0 ship uses `compiler_core` + `sim.wasm` |
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |
 | “`construct/` holds the reusable weights” | Generators are `seed/`; artifacts are `weights/` (A/C rule) |
-| “need a new UJS bytecode VM next” | Product path already emits `\0asm`; companion `tinyvm` is validate/execute *oracle*, not a third IR |
+| “need a new UJS bytecode VM next” | Product path already emits `\0asm`; companion `tinyvm` validate is optional hygiene—not a third IR or finished execute twin |
 
 ---
 

@@ -17,10 +17,14 @@ for cand in ujs/core/compiler.wasm ujs/compiler.wasm ujs/uxe/ship/compiler.wasm;
 done
 
 if [ -z "$COMPILER_WASM" ]; then
-  echo "skip: no compiler.wasm yet (M2 product artifact missing)"
-  echo "build: ./ujs/scripts/build-compiler-wasm.sh"
-  echo "scaffold: ujs/compile.mjs still shells python3 when artifact absent"
-  exit 0
+  echo "FAIL: no compiler.wasm (M2/M3 product artifact required)"
+  echo "build: ./ujs/seed/stage0/build-compiler-wasm.sh"
+  echo "scaffold escape only: UJS_ALLOW_MISSING_COMPILER_WASM=1 (counts as skip, not pass)"
+  if [[ "${UJS_ALLOW_MISSING_COMPILER_WASM:-}" == "1" ]]; then
+    echo "SKIP ujs2wasm_compiler (UJS_ALLOW_MISSING_COMPILER_WASM=1)"
+    exit 0
+  fi
+  exit 1
 fi
 
 command -v node >/dev/null || { echo "needs node"; exit 1; }
@@ -48,9 +52,9 @@ if [[ -z "$TINYVM" && "${UJS_REQUIRE_TINYVM:-}" == "1" ]]; then
   exit 1
 fi
 if [[ -n "$TINYVM" ]]; then
-  echo "tinyvm: $TINYVM (fold+ship module validate)"
+  echo "tinyvm: $TINYVM (fold+ship module validate; not execute twin)"
 else
-  echo "tinyvm: skip (not found; Node instantiate still gates)"
+  echo "tinyvm: skip validate (not found; Node instantiate still gates)"
 fi
 
 echo "artifact: $COMPILER_WASM ($(wc -c < "$COMPILER_WASM") bytes)"
@@ -96,6 +100,37 @@ done
 if [[ -n "$TINYVM" ]]; then
   echo "OK tinyvm validate fold corpus"
 fi
+
+echo "-- v17 str bounds (accept + reject; stage0≡core fold)"
+# Literal bound is 0–7 ASCII / no escapes; concat results may exceed 7.
+for pair in "str_empty:" "str_lit7:abcdefg" "str_cat_long:hello world"; do
+  name="${pair%%:*}"
+  want="${pair#*:}"
+  src="tests/ujs2wasm/corpus/${name}.ujs"
+  perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >/dev/null \
+    || { echo "FAIL: core compile $name"; exit 1; }
+  perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+    node ujs/compile.mjs "$src" -o "$OUT/${name}_s0.wasm" >/dev/null \
+    || { echo "FAIL: stage0 compile $name"; exit 1; }
+  got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm" | node -e \
+    'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
+  got0=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}_s0.wasm" | node -e \
+    'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
+  [ "$got" = "$want" ] || { echo "FAIL: $name core got=$got want=$want"; exit 1; }
+  [ "$got0" = "$want" ] || { echo "FAIL: $name stage0 got=$got0 want=$want"; exit 1; }
+  echo "OK $name fold=$got (core≡stage0)"
+done
+for neg in str_lit8 str_escape str_nonascii str_lit8_rhs; do
+  src="tests/ujs2wasm/neg/${neg}.ujs"
+  if perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" 2>"$OUT/${neg}.err"; then
+    echo "FAIL: core should reject $neg"; exit 1
+  fi
+  if perl -e 'alarm 30; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+      node ujs/compile.mjs "$src" -o "$OUT/${neg}_s0.wasm" 2>"$OUT/${neg}_s0.err"; then
+    echo "FAIL: stage0 should reject $neg"; exit 1
+  fi
+  echo "OK reject $neg (core+stage0)"
+done
 
 echo "-- default compile.mjs → compiler_core (product path)"
 log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
@@ -392,7 +427,7 @@ console.log("OK M3 === + f64 lit/arith/mix body≡stage0");
 # stage1 = stage0(compiler.ujs); stage2 = stage1(compiler.ujs); bodies must match
 perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/core/compiler.ujs -o "$OUT/stage1.wasm" >/dev/null
-perl -e 'alarm 90; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+perl -e 'alarm 60; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
   "$OUT/stage1.wasm" ujs/core/compiler.ujs -o "$OUT/stage2.wasm" >/dev/null
 perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
 import fs from "fs";
@@ -415,7 +450,7 @@ console.log("OK M3 stage2≡stage1 mainBody", a.length);
 echo "-- M3 v10: sim.ujs body≡stage0"
 perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/sim_s0.wasm" >/dev/null
-perl -e 'alarm 90; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+perl -e 'alarm 60; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
   "$OUT/stage1.wasm" ujs/web/game/sim.ujs -o "$OUT/sim_s1.wasm" >/dev/null
 perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
 import fs from "fs";
@@ -438,7 +473,7 @@ console.log("OK M3 sim.ujs body≡stage0", a.length);
 echo "-- M3 v11: drone.ujs body≡stage0"
 perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/web/game/drone.ujs -o "$OUT/drone_s0.wasm" >/dev/null
-perl -e 'alarm 90; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+perl -e 'alarm 60; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
   "$OUT/stage1.wasm" ujs/web/game/drone.ujs -o "$OUT/drone_s1.wasm" >/dev/null
 perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
 import fs from "fs";
