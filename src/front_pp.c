@@ -2050,6 +2050,30 @@ int splice(void) {
 }
 
 /* ---- the lexer ------------------------------------------------------- */
+/* Maximal munch looked at every TOKV entry for every operator, asking the
+   vocabulary for its length and offset each time: the lexer's share of the
+   vocabulary lookups.  The entries that can match are those whose first
+   byte is the operator's, so they are listed once per first byte, in TOKV
+   order -- the same candidates in the same order, so the same winner. [J9] */
+int pm_first[257]; int pm_k[1024]; int pm_len[1024]; int pm_off[1024]; int pm_built;
+int pm_build(void) {
+    int c; int k; int n; int p;
+    n = 0; c = 0;
+    while (c < 256) {
+        pm_first[c] = n;
+        k = 0;
+        while (k < NTOKV) {
+            p = voff(TOKV, k);
+            if (vlen(TOKV, k) > 0 && isal(TOKV[p] & 255) == 0 && (TOKV[p] & 255) == c && n < 1024) {
+                pm_k[n] = k; pm_len[n] = vlen(TOKV, k); pm_off[n] = p; n = n + 1;
+            }
+            k = k + 1;
+        }
+        c = c + 1;
+    }
+    pm_first[256] = n; pm_built = 1;
+    return 0;
+}
 int lex(void) {
     int i; int j; int a; int key[4]; int kind; int st;
     int best; int bl; int k; int p; int L;
@@ -2236,18 +2260,20 @@ int lex(void) {
         } else {
         if (a == 8) {                          /* op: maximal munch */
             best = 0 - 1; bl = 0;
-            k = 0;
-            while (k < NTOKV) {
-                L = vlen(TOKV, k);
-                if (L > bl) {
-                    p = voff(TOKV, k);
-                    if (isal(TOKV[p] & 255) == 0) {
+            if (pm_built == 0) pm_build();
+            {   int q; int qe; int c0;
+                c0 = at(i);
+                q = c0 >= 0 && c0 < 256 ? pm_first[c0] : 0; qe = c0 >= 0 && c0 < 256 ? pm_first[c0 + 1] : 0;
+                while (q < qe) {
+                    k = pm_k[q]; L = pm_len[q];
+                    if (L > bl) {
+                        p = pm_off[q];
                         j = 0;
                         while (j < L) { if (at(i + j) != (TOKV[p + j] & 255)) break; j = j + 1; }
                         if (j == L) { best = k; bl = L; }
                     }
+                    q = q + 1;
                 }
-                k = k + 1;
             }
             if (best < 0) { printf("lex: stray char at %d\n", i); return 0 - 1; }
             tkind[ntok] = best; tpos[ntok] = i; tlen[ntok] = bl;
