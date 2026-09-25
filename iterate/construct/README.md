@@ -31,7 +31,7 @@ has an alarm.
 Four separate ledgers.  One passing does not imply another.
 
 1. **Canonical-dump identity.**  `construct -d` equals `netdump.py -d`,
-   byte for byte: prec 855 B, reloc 348 B, tyinfo 2657 B, for both builds.
+   byte for byte: prec 855 B, reloc 348 B, tyinfo 2657 B, regmap 1097 B, for both builds.
 2. **UNS2 byte identity.**  `construct -u out.uns2 prec.tsv reloc.tsv`
    writes the UNS2 blob of just those stages (16 B header, sections in
    sorted name order, as `uns2.dump` does).  Two comparisons:
@@ -44,7 +44,9 @@ Four separate ledgers.  One passing does not imply another.
      prec 83 B and reloc 47 B identical, both builds.
    tyinfo is checked the same way in a blob of its own: `construct -u
    out.uns2 tyinfo.tsv` is 104 B, raw-byte identical to `uns2slice.py`,
-   and its 88 B section is identical to the shipped one, both builds.  The 16 B header is
+   and its 88 B section is identical to the shipped one, both builds.
+   regmap likewise: `construct -u out.uns2 regmap.tsv` is 99 B, raw-byte
+   identical, and its 83 B section equals the shipped one, both builds.  The 16 B header is
      not compared with the shipped one (nStages and nUnits differ by
      construction).
 3. **Deployed-semantics round trip.**  `tools/uns2round.py` decodes the
@@ -52,7 +54,7 @@ Four separate ledgers.  One passing does not imply another.
    from W1 rather than reading it), and runs `IntNet.predict`, the deployed
    arithmetic (a unit adds its W2 once when `hit + b1 > 0`), on every key of
    the original domain from the TSV (19 prec, 6 reloc, 16 tyinfo x 3
-   heads) and every head.  Each
+   heads, 16 regmap) and every head.  Each
    answer equals the TSV label, and the logits (summed by predict's rule)
    have a unique maximum.  Both builds.
    Before any of that, `construct` itself checks the two **deployment
@@ -76,18 +78,19 @@ builds reject every copy with exit 1 and the matching diagnostic.
 
 ## What is not proven
 
-- The other 15 stages.  They are not attempted.  The capacity is at most 3
+- The other 14 stages.  They are not attempted.  The capacity is at most 3
   fields, 4 heads and 62 quotient keys, because each key set is one `long`
   bitmask.
-- UNS2 for any stage other than prec, reloc and tyinfo, and the full
+- UNS2 for any stage other than prec, reloc, tyinfo and regmap, and the full
   `built.uns2` (header over all 18 stages).
 - The multi-head algorithm in general.  It is ported whole, but tyinfo (one
   field, 16 values, 10 quotient keys, 3 heads) reaches only part of it; see
   the next section.
-- The factored path (T5, `rep_factored`). It is ported and it runs for reloc,
-  but neither stage selects a factored representation (both are `dlist`).
-  The dumps show only the chosen representation, so the factored candidates
-  themselves are not compared.
+- The factored path (T5, `rep_factored`) beyond what regmap reaches (next
+  section but one).  The -d dump shows only the chosen representation, so
+  the candidates that were not chosen are compared with Python only by
+  their lengths, once, by hand (a wrapper around `construct.rep_factored`
+  gave the same 18 lengths as the C trace).
 - The semantic check alone is weak evidence. While the unisacc build produced
   a different `b1` (see below; since fixed), that net still passed
   it; only the byte comparison with Python caught the difference.  Three
@@ -144,6 +147,42 @@ NOT exercised by tyinfo (ported, not checked by any stage):
 
 The multi-head algorithm is therefore verified only on this one path.
 
+## Factored (T5): what regmap exercises, and what it does not
+
+regmap (2 fields of 8 and 2 values, 1 head, 16 classes, 16 keys, quotient
+16) is the first stage with more than one field.  `construct -t
+weights/gold/regmap.tsv`, identical for both builds:
+
+    trace head y: 19 candidates, chose 1 (factored), 10 units
+    trace head y: candidate units 16 10 11 11 12 12 13 13 14 14 10 11 11 12 12 13 13 14 14
+    trace T5 partitions 1, rep_factored calls 18, None 0, not shorter than dlist 0, kept 18
+    trace selections 1, starts whose pick moved a head 1
+    trace T4 rounds 0, ...
+
+Exercised by regmap:
+
+- `partitions_of(2)`: one partition, {0} | {1}.
+- 18 `rep_factored` calls (1 partition x merge 0/1 x k = 0..8); every one
+  returns a representation, and every one (10..14 units) is shorter than
+  the 16-unit dlist, so all 18 are kept.  Exceptions k = 1..8 (the
+  high-rank dlist rules kept before factoring) are therefore built.
+- Selection chooses a factored candidate: candidate 1 (merge 0, k 0, 10
+  units: 8 treg units + 2 arch units).  `pick` moves the head from the
+  dlist start to it; candidate 10 (merge 1, k 0) also has 10 units and
+  loses the tie to the earlier index.
+- A net of kind `factored`: b1 all 0 (each unit constrains one field),
+  maxlogit 2 (the gold class is the only one reachable from both parts).
+
+NOT exercised by regmap:
+
+- `rep_factored` returning None (no call did), and a candidate dropped as
+  not shorter than the dlist (none was).
+- Residual collision patch units: the dump's units are only the 10
+  partition units, so the chosen candidate has none; whether any
+  unchosen candidate built patch units is not shown by the trace.
+- Anything multi-head: T4 does not run (one head), no cross-head merging.
+- More than one partition, and 3 fields.
+
 ## Deployment invariants: negative coverage
 
 `construct -T bias <tsv>` breaks b1 of unit 0 and must exit 3 on invariant 2
@@ -157,7 +196,7 @@ fields hit <= 1 - t + t = 1: invariant 1 follows from invariant 2, and only a
 broken b1 can reach it -- which is why the second case has to bypass the
 first.  That bypass only shows the activation check CAN fire; the normal
 construction path does not produce such a state.
-check.sh runs both on prec and on tyinfo, on the cc and the unisacc build, and counts only exit 3
+check.sh runs both on prec, tyinfo and regmap, on the cc and the unisacc build, and counts only exit 3
 with that invariant's diagnostic.  `-T` is a test entry only.
 
 ## unisacc problems met on the way

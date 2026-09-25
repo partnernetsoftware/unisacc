@@ -728,6 +728,7 @@ int hlv[MAXH][MAXR];
 int chosen[MAXH];
 int tpickmoved;              /* trace: starts whose pick moved a head */
 int tsel;                    /* trace: selections made */
+int tfatt, tfnone, tfkept;   /* trace: T5 rep_factored calls, None results, kept */
 
 void saverules(int h) {
     int r;
@@ -857,7 +858,10 @@ void factored(void) {
         for (mg = 0; mg < 2; mg = mg + 1)
             for (k = 0; k < lim; k = k + 1) {
                 if (ncand >= MAXCAND || nhc[ch] >= MAXCAND) die("more candidates than this constructor holds");
-                if (rep_factored(ncand, pi, mg, k) && cn[ncand] < cn[hc[ch][0]]) {
+                tfatt = tfatt + 1;
+                if (!rep_factored(ncand, pi, mg, k)) { tfnone = tfnone + 1; continue; }
+                if (cn[ncand] < cn[hc[ch][0]]) {
+                    tfkept = tfkept + 1;
                     hc[ch][nhc[ch]] = ncand; nhc[ch] = nhc[ch] + 1;
                     ncand = ncand + 1;
                 }
@@ -965,7 +969,7 @@ void build(char *path) {
     orders();
     partitions();
     ncand = 0; npool = 0; tunits = 0;
-    talign = 0; ttie = 0; tpickmoved = 0; tsel = 0; trounds = 0; tacc = 0; trej = 0; tchg = 0;
+    talign = 0; ttie = 0; tpickmoved = 0; tfatt = 0; tfnone = 0; tfkept = 0; tsel = 0; trounds = 0; tacc = 0; trej = 0; tchg = 0;
     if (dbg) {
         for (i = 0; i < nf; i = i + 1) {
             printf("groups %d:", i);
@@ -1080,6 +1084,9 @@ void trace(void) {
         ci = hc[h][chosen[h]];
         printf("trace head %s: %d candidates, chose %d (%s), %d units\n", hname[h], nhc[h],
                chosen[h], chosen[h] ? "factored" : "dlist", cn[ci]);
+        printf("trace head %s: candidate units", hname[h]);
+        for (r = 0; r < nhc[h]; r = r + 1) printf(" %d", cn[hc[h][r]]);
+        printf("\n");
         loadrules(h);
         x = 0;
         for (r = 0; r < nr; r = r + 1) {
@@ -1093,6 +1100,8 @@ void trace(void) {
         }
         printf("trace head %s: %d of %d final rules are cubes another head also uses\n", hname[h], x, nr);
     }
+    printf("trace T5 partitions %d, rep_factored calls %d, None %d, not shorter than dlist %d, kept %d\n",
+           nparts, tfatt, tfnone, tfatt - tfnone - tfkept, tfkept);
     printf("trace selections %d, starts whose pick moved a head %d\n", tsel, tpickmoved);
     printf("trace T4 rounds %d, lists accepted %d (changed %d), rejected %d\n", trounds, tacc, tchg, trej);
     printf("trace T4 REDUCE aligned to a pool cube %d, pool flag changed a rule's choice %d\n", talign, ttie);
