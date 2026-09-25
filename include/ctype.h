@@ -4,25 +4,25 @@
 #ifndef _UNISA_CTYPE_H
 #define _UNISA_CTYPE_H
 
-static int isdigit(int c) { return c >= '0' && c <= '9'; }
-static int isxdigit(int c) {
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-        || (c >= 'A' && c <= 'F');
+static int isdigit(int __u_c) { return __u_c >= '0' && __u_c <= '9'; }
+static int isxdigit(int __u_c) {
+    return (__u_c >= '0' && __u_c <= '9') || (__u_c >= 'a' && __u_c <= 'f')
+        || (__u_c >= 'A' && __u_c <= 'F');
 }
-static int islower(int c) { return c >= 'a' && c <= 'z'; }
-static int isupper(int c) { return c >= 'A' && c <= 'Z'; }
-static int isalpha(int c) { return islower(c) || isupper(c); }
-static int isalnum(int c) { return isalpha(c) || isdigit(c); }
-static int isspace(int c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\v'
-        || c == '\f' || c == '\r';
+static int islower(int __u_c) { return __u_c >= 'a' && __u_c <= 'z'; }
+static int isupper(int __u_c) { return __u_c >= 'A' && __u_c <= 'Z'; }
+static int isalpha(int __u_c) { return islower(__u_c) || isupper(__u_c); }
+static int isalnum(int __u_c) { return isalpha(__u_c) || isdigit(__u_c); }
+static int isspace(int __u_c) {
+    return __u_c == ' ' || __u_c == '\t' || __u_c == '\n' || __u_c == '\v'
+        || __u_c == '\f' || __u_c == '\r';
 }
-static int isblank(int c) { return c == ' ' || c == '\t'; }
-static int iscntrl(int c) { return (c >= 0 && c < 32) || c == 127; }
-static int isprint(int c) { return c >= 32 && c < 127; }
-static int isgraph(int c) { return c > 32 && c < 127; }
-static int ispunct(int c) { return isgraph(c) && !isalnum(c); }
-static int toupper(int c) { if (islower(c)) return c - 32; return c; }
-static int tolower(int c) { if (isupper(c)) return c + 32; return c; }
+static int isblank(int __u_c) { return __u_c == ' ' || __u_c == '\t'; }
+static int iscntrl(int __u_c) { return (__u_c >= 0 && __u_c < 32) || __u_c == 127; }
+static int isprint(int __u_c) { return __u_c >= 32 && __u_c < 127; }
+static int isgraph(int __u_c) { return __u_c > 32 && __u_c < 127; }
+static int ispunct(int __u_c) { return isgraph(__u_c) && !isalnum(__u_c); }
+static int toupper(int __u_c) { if (islower(__u_c)) return __u_c - 32; return __u_c; }
+static int tolower(int __u_c) { if (isupper(__u_c)) return __u_c + 32; return __u_c; }
 
 #endif

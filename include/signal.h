@@ -21,24 +21,24 @@ typedef int sig_atomic_t;
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
 
-static void (*signal(int sig, void (*fn)(int)))(int) {
-    void (*old)(int);
-    if (sig <= 0 || sig >= _UNISA_NSIG) return SIG_ERR;
-    old = _unisa_sig[sig];
-    _unisa_sig[sig] = fn;
-    return old;
+static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
+    void (*__u_old)(int);
+    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return SIG_ERR;
+    __u_old = _unisa_sig[__u_sig];
+    _unisa_sig[__u_sig] = __u_fn;
+    return __u_old;
 }
 
-static int raise(int sig) {
-    void (*fn)(int);
-    if (sig <= 0 || sig >= _UNISA_NSIG) return 0 - 1;
-    fn = _unisa_sig[sig];
-    if (fn == SIG_IGN) return 0;
-    if (fn != SIG_DFL) {
-        fn(sig);
+static int raise(int __u_sig) {
+    void (*__u_fn)(int);
+    if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return 0 - 1;
+    __u_fn = _unisa_sig[__u_sig];
+    if (__u_fn == SIG_IGN) return 0;
+    if (__u_fn != SIG_DFL) {
+        __u_fn(__u_sig);
         return 0;
     }
-    __exit(128 + sig);
+    __exit(128 + __u_sig);
     return 0;
 }
 #endif

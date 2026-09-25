@@ -41,5 +41,5 @@
 
 typedef long intmax_t;
 typedef unsigned long uintmax_t;
-static long imaxabs(long v) { if (v < 0) return 0 - v; return v; }
+static long imaxabs(long __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v; }
 #endif

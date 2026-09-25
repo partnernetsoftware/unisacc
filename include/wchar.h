@@ -15,11 +15,11 @@ typedef int wchar_t;
 
 #define WEOF (0-1)
 
-static long wcslen(const wchar_t *s) {
-    long n;
-    n = 0;
-    while (s[n]) n = n + 1;
-    return n;
+static long wcslen(const wchar_t *__u_s) {
+    long __u_n;
+    __u_n = 0;
+    while (__u_s[__u_n]) __u_n = __u_n + 1;
+    return __u_n;
 }
 
 #endif

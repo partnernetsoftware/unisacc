@@ -22,32 +22,32 @@ typedef struct _UNISA_FILE FILE;
 
 int printf();
 
-static int _unisa_fd(FILE *f) { return (int)(long)f; }
+static int _unisa_fd(FILE *__u_f) { return (int)(long)__u_f; }
 
-static long _unisa_len(const char *s) {
-    long n;
-    n = 0;
-    while (s[n]) n = n + 1;
-    return n;
+static long _unisa_len(const char *__u_s) {
+    long __u_n;
+    __u_n = 0;
+    while (__u_s[__u_n]) __u_n = __u_n + 1;
+    return __u_n;
 }
 
 static char _unisa_ch;
 
-static int fputc(int c, FILE *f) {
-    _unisa_ch = c;
-    __write(_unisa_fd(f), &_unisa_ch, 1);
-    return c;
+static int fputc(int __u_c, FILE *__u_f) {
+    _unisa_ch = __u_c;
+    __write(_unisa_fd(__u_f), &_unisa_ch, 1);
+    return __u_c;
 }
 
-static int putchar(int c) { return fputc(c, stdout); }
+static int putchar(int __u_c) { return fputc(__u_c, stdout); }
 
-static int fputs(const char *s, FILE *f) {
-    __write(_unisa_fd(f), (char *)s, _unisa_len(s));
+static int fputs(const char *__u_s, FILE *__u_f) {
+    __write(_unisa_fd(__u_f), (char *)__u_s, _unisa_len(__u_s));
     return 0;
 }
 
-static int puts(const char *s) {
-    fputs(s, stdout);
+static int puts(const char *__u_s) {
+    fputs(__u_s, stdout);
     _unisa_ch = 10;
     __write(1, &_unisa_ch, 1);
     return 0;
@@ -75,25 +75,25 @@ static int puts(const char *s) {
  * answer larger than what was asked is treated as an error rather than
  * trusted, so `done` cannot overflow either.
  * The return is complete elements: done / sz, rounded down. */
-static long fwrite(const void *p, long sz, long n, FILE *f) {
-    long total; long done; long r;
-    if (sz <= 0 || n <= 0) return 0;
-    if (n > 0x7fffffffffffffff / sz) return 0;
-    total = sz * n;
-    done = 0;
-    while (done < total) {
-        r = __write(_unisa_fd(f), (char *)p + done, total - done);
-        if (r <= 0 || r > total - done) return done / sz;
-        done = done + r;
+static long fwrite(const void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
+    long __u_total; long __u_done; long __u_r;
+    if (__u_sz <= 0 || __u_n <= 0) return 0;
+    if (__u_n > 0x7fffffffffffffff / __u_sz) return 0;
+    __u_total = __u_sz * __u_n;
+    __u_done = 0;
+    while (__u_done < __u_total) {
+        __u_r = __write(_unisa_fd(__u_f), (char *)__u_p + __u_done, __u_total - __u_done);
+        if (__u_r <= 0 || __u_r > __u_total - __u_done) return __u_done / __u_sz;
+        __u_done = __u_done + __u_r;
     }
-    return n;
+    return __u_n;
 }
 
-static long fread(void *p, long sz, long n, FILE *f) {
-    long got;
-    got = __read(_unisa_fd(f), (char *)p, sz * n);
-    if (got < 0) return 0;
-    return got / sz;
+static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
+    long __u_got;
+    __u_got = __read(_unisa_fd(__u_f), (char *)__u_p, __u_sz * __u_n);
+    if (__u_got < 0) return 0;
+    return __u_got / __u_sz;
 }
 
 /* O_* are not portable numbers: Linux and the BSDs picked different bits,
@@ -110,105 +110,105 @@ static long fread(void *p, long sz, long n, FILE *f) {
 #define _U_O_APPEND  8
 #endif
 
-static FILE *fopen(const char *path, const char *mode) {
-    int fd;
+static FILE *fopen(const char *__u_path, const char *__u_mode) {
+    int __u_fd;
 #ifdef _WIN32
     /* Windows has no open(2), and CreateFileA wants its own shapes.  They
        are built HERE and not in the encoder, because this is the only place
        that knows whether the program is being compiled for Windows. */
-    long access;
-    long disp;
-    access = 0x80000000;                  /* GENERIC_READ  */
-    disp = 3;                             /* OPEN_EXISTING */
-    if (mode[0] == 119) { access = 0x40000000; disp = 2; }   /* 'w' CREATE_ALWAYS */
-    if (mode[0] == 97)  { access = 0x40000000; disp = 4; }   /* 'a' OPEN_ALWAYS   */
-    fd = __open((char *)path, access, disp);
+    long __u_access;
+    long __u_disp;
+    __u_access = 0x80000000;                  /* GENERIC_READ  */
+    __u_disp = 3;                             /* OPEN_EXISTING */
+    if (__u_mode[0] == 119) { __u_access = 0x40000000; __u_disp = 2; }   /* 'w' CREATE_ALWAYS */
+    if (__u_mode[0] == 97)  { __u_access = 0x40000000; __u_disp = 4; }   /* 'a' OPEN_ALWAYS   */
+    __u_fd = __open((char *)__u_path, __u_access, __u_disp);
 #else
-    int flags;
-    flags = 0;                            /* 'r': O_RDONLY */
-    if (mode[0] == 119)                   /* 'w' */
-        flags = 1 | _U_O_CREAT | _U_O_TRUNC;
-    if (mode[0] == 97)                    /* 'a' */
-        flags = 1 | _U_O_CREAT | _U_O_APPEND;
+    int __u_flags;
+    __u_flags = 0;                            /* 'r': O_RDONLY */
+    if (__u_mode[0] == 119)                   /* 'w' */
+        __u_flags = 1 | _U_O_CREAT | _U_O_TRUNC;
+    if (__u_mode[0] == 97)                    /* 'a' */
+        __u_flags = 1 | _U_O_CREAT | _U_O_APPEND;
     /* 0644.  Passing no mode at all left it at 0, so the file we had just
        created could not be opened again. */
-    fd = __open((char *)path, flags, 420);
+    __u_fd = __open((char *)__u_path, __u_flags, 420);
 #endif
-    if (fd < 0) return NULL;
-    return (FILE *)(long)fd;
+    if (__u_fd < 0) return NULL;
+    return (FILE *)(long)__u_fd;
 }
 
 /* Unbuffered: a FILE * here is a file descriptor, so there is nowhere to
    keep a buffer and every character costs a read.  Correct, not fast. */
-static int fgetc(FILE *f) {
-    unsigned char c;
-    if (fread(&c, 1, 1, f) != 1) return EOF;
-    return (int)c;
+static int fgetc(FILE *__u_f) {
+    unsigned char __u_c;
+    if (fread(&__u_c, 1, 1, __u_f) != 1) return EOF;
+    return (int)__u_c;
 }
 
-static int getc(FILE *f) { return fgetc(f); }
+static int getc(FILE *__u_f) { return fgetc(__u_f); }
 static int getchar(void) { return fgetc(stdin); }
 
-static char *fgets(char *s, int n, FILE *f) {
-    int i;
-    int c;
-    if (n <= 0) return NULL;
-    i = 0;
-    while (i < n - 1) {
-        c = fgetc(f);
-        if (c == EOF) break;
-        s[i] = (char)c;
-        i = i + 1;
-        if (c == 10) break;               /* '\n' ends the line, and stays */
+static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
+    int __u_i;
+    int __u_c;
+    if (__u_n <= 0) return NULL;
+    __u_i = 0;
+    while (__u_i < __u_n - 1) {
+        __u_c = fgetc(__u_f);
+        if (__u_c == EOF) break;
+        __u_s[__u_i] = (char)__u_c;
+        __u_i = __u_i + 1;
+        if (__u_c == 10) break;               /* '\n' ends the line, and stays */
     }
-    if (i == 0) return NULL;
-    s[i] = 0;
-    return s;
+    if (__u_i == 0) return NULL;
+    __u_s[__u_i] = 0;
+    return __u_s;
 }
 
-static int fclose(FILE *f) { return __close(_unisa_fd(f)); }
+static int fclose(FILE *__u_f) { return __close(_unisa_fd(__u_f)); }
 /* A FILE * is its descriptor and nothing is buffered, so the file offset
    is the stream's position: fseek and ftell are lseek.  [S-15 D2] */
-static int fseek(FILE *f, long off, int whence) {
-    return __lseek(_unisa_fd(f), off, whence) < 0 ? -1 : 0;
+static int fseek(FILE *__u_f, long __u_off, int __u_whence) {
+    return __lseek(_unisa_fd(__u_f), __u_off, __u_whence) < 0 ? -1 : 0;
 }
-static long ftell(FILE *f) { return __lseek(_unisa_fd(f), 0, SEEK_CUR); }
-static void rewind(FILE *f) { __lseek(_unisa_fd(f), 0, SEEK_SET); }
-static int remove(const char *path) { return __unlink((char *)path) < 0 ? -1 : 0; }
-static int rename(const char *from, const char *to) {
-    return __rename((char *)from, (char *)to) < 0 ? -1 : 0;
+static long ftell(FILE *__u_f) { return __lseek(_unisa_fd(__u_f), 0, SEEK_CUR); }
+static void rewind(FILE *__u_f) { __lseek(_unisa_fd(__u_f), 0, SEEK_SET); }
+static int remove(const char *__u_path) { return __unlink((char *)__u_path) < 0 ? -1 : 0; }
+static int rename(const char *__u_from, const char *__u_to) {
+    return __rename((char *)__u_from, (char *)__u_to) < 0 ? -1 : 0;
 }
-static int fflush(FILE *f) { return 0; }
+static int fflush(FILE *__u_f) { return 0; }
 
 /* ---- a runtime formatter ------------------------------------------------
  * `printf` is desugared by the walker against its static format string, which
  * is the fast path and the one that does not need varargs.  Everything that
  * takes a format at RUN time is written here, in the subset itself. */
 
-static void _u_put(char *out, long cap, long *n, FILE *f, int c) {
-    char ch;
-    if (out != NULL) {
-        if (cap < 0 | *n < cap - 1) out[*n] = c;
+static void _u_put(char *__u_out, long __u_cap, long *__u_n, FILE *__u_f, int __u_c) {
+    char __u_ch;
+    if (__u_out != NULL) {
+        if (__u_cap < 0 | *__u_n < __u_cap - 1) __u_out[*__u_n] = __u_c;
     } else {
-        ch = c;
-        __write(_unisa_fd(f), &ch, 1);
+        __u_ch = __u_c;
+        __write(_unisa_fd(__u_f), &__u_ch, 1);
     }
-    *n = *n + 1;
+    *__u_n = *__u_n + 1;
 }
 
-static long _u_digits(char *buf, unsigned long v, int base, int upper) {
-    long i;
-    int d;
-    i = 24;
-    if (v == 0) { i = i - 1; buf[i] = 48; return i; }
-    while (v) {
-        d = v % base;
-        v = v / base;
-        i = i - 1;
-        if (d < 10) buf[i] = 48 + d;
-        else { if (upper) buf[i] = 55 + d; else buf[i] = 87 + d; }
+static long _u_digits(char *__u_buf, unsigned long __u_v, int __u_base, int __u_upper) {
+    long __u_i;
+    int __u_d;
+    __u_i = 24;
+    if (__u_v == 0) { __u_i = __u_i - 1; __u_buf[__u_i] = 48; return __u_i; }
+    while (__u_v) {
+        __u_d = __u_v % __u_base;
+        __u_v = __u_v / __u_base;
+        __u_i = __u_i - 1;
+        if (__u_d < 10) __u_buf[__u_i] = 48 + __u_d;
+        else { if (__u_upper) __u_buf[__u_i] = 55 + __u_d; else __u_buf[__u_i] = 87 + __u_d; }
     }
-    return i;
+    return __u_i;
 }
 
 /* ---- floating conversions, exactly ------------------------------------
@@ -223,352 +223,352 @@ static long _u_digits(char *buf, unsigned long v, int base, int upper) {
 
 /* digits of v, most significant first; returns their count, and *x is how
    many of them are before the decimal point (<= 0 for |v| < 1) */
-static int _u_dexp(unsigned long bits, char *dig, int *x) {
-    unsigned long lim[_U_NL];
-    unsigned long m;
-    unsigned long t;
-    unsigned long carry;
-    unsigned long mul;
-    int n;
-    int e;
-    int k;
-    int j;
-    int nd;
-    int ex;
-    int first;
-    ex = (bits >> 52) & 2047;
-    m = bits & 4503599627370495;              /* 2^52 - 1 */
-    if (ex == 0) e = 0 - 1074; else { m = m | 4503599627370496; e = ex - 1075; }
-    if (m == 0) { dig[0] = 48; *x = 1; return 1; }
-    lim[0] = m % 1000000000; lim[1] = (m / 1000000000) % 1000000000;
-    lim[2] = m / 1000000000000000000; n = 3;
-    while (n > 1) { if (lim[n - 1] != 0) break; n = n - 1; }
-    k = e; if (k < 0) k = 0 - k;
-    while (k > 0) {                           /* by 2^e, or by 5^-e */
-        if (e > 0) { if (k >= 29) { mul = 536870912; k = k - 29; }
-                     else { mul = 1; while (k > 0) { mul = mul * 2; k = k - 1; } } }
-        else { if (k >= 13) { mul = 1220703125; k = k - 13; }
-               else { mul = 1; while (k > 0) { mul = mul * 5; k = k - 1; } } }
-        carry = 0; j = 0;
-        while (j < n) { t = lim[j] * mul + carry; lim[j] = t % 1000000000;
-                        carry = t / 1000000000; j = j + 1; }
-        while (carry) { lim[n] = carry % 1000000000; carry = carry / 1000000000; n = n + 1; }
+static int _u_dexp(unsigned long __u_bits, char *__u_dig, int *__u_x) {
+    unsigned long __u_lim[_U_NL];
+    unsigned long __u_m;
+    unsigned long __u_t;
+    unsigned long __u_carry;
+    unsigned long __u_mul;
+    int __u_n;
+    int __u_e;
+    int __u_k;
+    int __u_j;
+    int __u_nd;
+    int __u_ex;
+    int __u_first;
+    __u_ex = (__u_bits >> 52) & 2047;
+    __u_m = __u_bits & 4503599627370495;              /* 2^52 - 1 */
+    if (__u_ex == 0) __u_e = 0 - 1074; else { __u_m = __u_m | 4503599627370496; __u_e = __u_ex - 1075; }
+    if (__u_m == 0) { __u_dig[0] = 48; *__u_x = 1; return 1; }
+    __u_lim[0] = __u_m % 1000000000; __u_lim[1] = (__u_m / 1000000000) % 1000000000;
+    __u_lim[2] = __u_m / 1000000000000000000; __u_n = 3;
+    while (__u_n > 1) { if (__u_lim[__u_n - 1] != 0) break; __u_n = __u_n - 1; }
+    __u_k = __u_e; if (__u_k < 0) __u_k = 0 - __u_k;
+    while (__u_k > 0) {                           /* by 2^e, or by 5^-e */
+        if (__u_e > 0) { if (__u_k >= 29) { __u_mul = 536870912; __u_k = __u_k - 29; }
+                     else { __u_mul = 1; while (__u_k > 0) { __u_mul = __u_mul * 2; __u_k = __u_k - 1; } } }
+        else { if (__u_k >= 13) { __u_mul = 1220703125; __u_k = __u_k - 13; }
+               else { __u_mul = 1; while (__u_k > 0) { __u_mul = __u_mul * 5; __u_k = __u_k - 1; } } }
+        __u_carry = 0; __u_j = 0;
+        while (__u_j < __u_n) { __u_t = __u_lim[__u_j] * __u_mul + __u_carry; __u_lim[__u_j] = __u_t % 1000000000;
+                        __u_carry = __u_t / 1000000000; __u_j = __u_j + 1; }
+        while (__u_carry) { __u_lim[__u_n] = __u_carry % 1000000000; __u_carry = __u_carry / 1000000000; __u_n = __u_n + 1; }
     }
-    nd = 0; j = n - 1; first = 1;
-    while (j >= 0) {
+    __u_nd = 0; __u_j = __u_n - 1; __u_first = 1;
+    while (__u_j >= 0) {
         /* a limb's nine digits, low first into d9, then out high first */
-        char d9[9];
-        t = lim[j]; k = 8;
-        while (k >= 0) { d9[k] = 48 + t % 10; t = t / 10; k = k - 1; }
-        k = 0;
-        while (k < 9) {
-            if (first == 0 || d9[k] != 48) { dig[nd] = d9[k]; nd = nd + 1; first = 0; }
-            k = k + 1;
+        char __u_d9[9];
+        __u_t = __u_lim[__u_j]; __u_k = 8;
+        while (__u_k >= 0) { __u_d9[__u_k] = 48 + __u_t % 10; __u_t = __u_t / 10; __u_k = __u_k - 1; }
+        __u_k = 0;
+        while (__u_k < 9) {
+            if (__u_first == 0 || __u_d9[__u_k] != 48) { __u_dig[__u_nd] = __u_d9[__u_k]; __u_nd = __u_nd + 1; __u_first = 0; }
+            __u_k = __u_k + 1;
         }
-        j = j - 1;
+        __u_j = __u_j - 1;
     }
-    ex = (bits >> 52) & 2047;
-    k = ex == 0 ? 1074 : 1075 - ex;           /* -e: digits after the point */
-    if (k < 0) k = 0;
-    *x = nd - k;
-    return nd;
+    __u_ex = (__u_bits >> 52) & 2047;
+    __u_k = __u_ex == 0 ? 1074 : 1075 - __u_ex;           /* -e: digits after the point */
+    if (__u_k < 0) __u_k = 0;
+    *__u_x = __u_nd - __u_k;
+    return __u_nd;
 }
 
 /* keep r digits of dig[0..nd), rounding to nearest, ties to even; returns
    the new count, and bumps *x when the rounding carries out (9.99 -> 10.0) */
-static int _u_round(char *dig, int nd, int r, int *x) {
-    int up;
-    int j;
-    if (r >= nd) return nd;
-    if (r < 0) { dig[0] = 48; return 0; }
-    up = 0;
-    if (dig[r] > 53) up = 1;
-    if (dig[r] == 53) {
-        j = r + 1;
-        while (j < nd) { if (dig[j] != 48) { up = 1; break; } j = j + 1; }
-        if (up == 0) { if (r > 0) { if ((dig[r - 1] - 48) & 1) up = 1; } }
+static int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u_x) {
+    int __u_up;
+    int __u_j;
+    if (__u_r >= __u_nd) return __u_nd;
+    if (__u_r < 0) { __u_dig[0] = 48; return 0; }
+    __u_up = 0;
+    if (__u_dig[__u_r] > 53) __u_up = 1;
+    if (__u_dig[__u_r] == 53) {
+        __u_j = __u_r + 1;
+        while (__u_j < __u_nd) { if (__u_dig[__u_j] != 48) { __u_up = 1; break; } __u_j = __u_j + 1; }
+        if (__u_up == 0) { if (__u_r > 0) { if ((__u_dig[__u_r - 1] - 48) & 1) __u_up = 1; } }
     }
-    nd = r;
-    if (up) {
-        j = r - 1;
-        while (j >= 0) {
-            if (dig[j] != 57) { dig[j] = dig[j] + 1; break; }
-            dig[j] = 48; j = j - 1;
+    __u_nd = __u_r;
+    if (__u_up) {
+        __u_j = __u_r - 1;
+        while (__u_j >= 0) {
+            if (__u_dig[__u_j] != 57) { __u_dig[__u_j] = __u_dig[__u_j] + 1; break; }
+            __u_dig[__u_j] = 48; __u_j = __u_j - 1;
         }
-        if (j < 0) {                              /* carried out of the top */
-            j = nd; while (j > 0) { dig[j] = dig[j - 1]; j = j - 1; }
-            dig[0] = 49; nd = nd + 1; *x = *x + 1;
+        if (__u_j < 0) {                              /* carried out of the top */
+            __u_j = __u_nd; while (__u_j > 0) { __u_dig[__u_j] = __u_dig[__u_j - 1]; __u_j = __u_j - 1; }
+            __u_dig[0] = 49; __u_nd = __u_nd + 1; *__u_x = *__u_x + 1;
         }
     }
-    return nd;
+    return __u_nd;
 }
 
 /* the digit at position p of the number (0 = first integer digit) */
-static int _u_dat(char *dig, int nd, int x, int p) {
-    if (p < 0) return 48;
-    if (p >= nd) return 48;
-    return dig[p];
+static int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p) {
+    if (__u_p < 0) return 48;
+    if (__u_p >= __u_nd) return 48;
+    return __u_dig[__u_p];
 }
 
 /* %f %e %g (and upper case) of `bits` into out[]; returns the length.
    Sign, width and padding are the caller's. */
-static int _u_ffmt(char *out, unsigned long bits, int c, int prec, int alt) {
-    char dig[_U_ND];
-    int nd;
-    int x;
-    int n;
-    int j;
-    int e;
-    int ee;
-    int style;
-    int P;
-    int upper;
-    int strip;
-    upper = c == 70 || c == 69 || c == 71;
-    if (((bits >> 52) & 2047) == 2047) {
-        char *w;
-        if (bits & 4503599627370495) w = upper ? "NAN" : "nan";
-        else w = upper ? "INF" : "inf";
-        out[0] = w[0]; out[1] = w[1]; out[2] = w[2];
+static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_prec, int __u_alt) {
+    char __u_dig[_U_ND];
+    int __u_nd;
+    int __u_x;
+    int __u_n;
+    int __u_j;
+    int __u_e;
+    int __u_ee;
+    int __u_style;
+    int __u_P;
+    int __u_upper;
+    int __u_strip;
+    __u_upper = __u_c == 70 || __u_c == 69 || __u_c == 71;
+    if (((__u_bits >> 52) & 2047) == 2047) {
+        char *__u_w;
+        if (__u_bits & 4503599627370495) __u_w = __u_upper ? "NAN" : "nan";
+        else __u_w = __u_upper ? "INF" : "inf";
+        __u_out[0] = __u_w[0]; __u_out[1] = __u_w[1]; __u_out[2] = __u_w[2];
         return 3;
     }
-    if (prec < 0) prec = 6;
-    nd = _u_dexp(bits & 9223372036854775807, dig, &x);
-    if (dig[0] == 48) x = 1;                  /* zero: one integer digit */
-    style = c | 32;                           /* f e g */
-    strip = 0;
-    if (style == 103) {
+    if (__u_prec < 0) __u_prec = 6;
+    __u_nd = _u_dexp(__u_bits & 9223372036854775807, __u_dig, &__u_x);
+    if (__u_dig[0] == 48) __u_x = 1;                  /* zero: one integer digit */
+    __u_style = __u_c | 32;                           /* f e g */
+    __u_strip = 0;
+    if (__u_style == 103) {
         /* C99 7.19.6.1p8: P significant digits; the exponent X that %e would
            show decides between the two styles */
-        P = prec; if (P == 0) P = 1;
-        {   char d2[_U_ND]; int n2; int x2;
-            j = 0; while (j < nd) { d2[j] = dig[j]; j = j + 1; }
-            x2 = x; n2 = _u_round(d2, nd, P, &x2);
-            e = x2 - 1;
-            if (dig[0] == 48) e = 0;
+        __u_P = __u_prec; if (__u_P == 0) __u_P = 1;
+        {   char __u_d2[_U_ND]; int __u_n2; int __u_x2;
+            __u_j = 0; while (__u_j < __u_nd) { __u_d2[__u_j] = __u_dig[__u_j]; __u_j = __u_j + 1; }
+            __u_x2 = __u_x; __u_n2 = _u_round(__u_d2, __u_nd, __u_P, &__u_x2);
+            __u_e = __u_x2 - 1;
+            if (__u_dig[0] == 48) __u_e = 0;
         }
-        if (P > e && e >= 0 - 4) { style = 102; prec = P - 1 - e; }
-        else { style = 101; prec = P - 1; }
-        if (alt == 0) strip = 1;
+        if (__u_P > __u_e && __u_e >= 0 - 4) { __u_style = 102; __u_prec = __u_P - 1 - __u_e; }
+        else { __u_style = 101; __u_prec = __u_P - 1; }
+        if (__u_alt == 0) __u_strip = 1;
     }
-    n = 0;
-    if (style == 102) {
-        nd = _u_round(dig, nd, x + prec, &x);
-        if (x <= 0) { out[n] = 48; n = n + 1; }
-        else { j = 0; while (j < x) { out[n] = _u_dat(dig, nd, x, j); n = n + 1; j = j + 1; } }
-        if (prec > 0 || alt) { out[n] = 46; n = n + 1; }
-        j = 0;
-        while (j < prec) { out[n] = _u_dat(dig, nd, x, x + j); n = n + 1; j = j + 1; }
+    __u_n = 0;
+    if (__u_style == 102) {
+        __u_nd = _u_round(__u_dig, __u_nd, __u_x + __u_prec, &__u_x);
+        if (__u_x <= 0) { __u_out[__u_n] = 48; __u_n = __u_n + 1; }
+        else { __u_j = 0; while (__u_j < __u_x) { __u_out[__u_n] = _u_dat(__u_dig, __u_nd, __u_x, __u_j); __u_n = __u_n + 1; __u_j = __u_j + 1; } }
+        if (__u_prec > 0 || __u_alt) { __u_out[__u_n] = 46; __u_n = __u_n + 1; }
+        __u_j = 0;
+        while (__u_j < __u_prec) { __u_out[__u_n] = _u_dat(__u_dig, __u_nd, __u_x, __u_x + __u_j); __u_n = __u_n + 1; __u_j = __u_j + 1; }
     } else {
-        if (dig[0] == 48) e = 0;
-        else { nd = _u_round(dig, nd, prec + 1, &x); e = x - 1; }
-        out[n] = _u_dat(dig, nd, x, 0); n = n + 1;
-        if (prec > 0 || alt) { out[n] = 46; n = n + 1; }
-        j = 1;
-        while (j <= prec) { out[n] = _u_dat(dig, nd, x, j); n = n + 1; j = j + 1; }
-        if (strip) {
-            while (n > 0) { if (out[n - 1] != 48) break; n = n - 1; }
-            if (n > 0) { if (out[n - 1] == 46) n = n - 1; }
-            strip = 0;
+        if (__u_dig[0] == 48) __u_e = 0;
+        else { __u_nd = _u_round(__u_dig, __u_nd, __u_prec + 1, &__u_x); __u_e = __u_x - 1; }
+        __u_out[__u_n] = _u_dat(__u_dig, __u_nd, __u_x, 0); __u_n = __u_n + 1;
+        if (__u_prec > 0 || __u_alt) { __u_out[__u_n] = 46; __u_n = __u_n + 1; }
+        __u_j = 1;
+        while (__u_j <= __u_prec) { __u_out[__u_n] = _u_dat(__u_dig, __u_nd, __u_x, __u_j); __u_n = __u_n + 1; __u_j = __u_j + 1; }
+        if (__u_strip) {
+            while (__u_n > 0) { if (__u_out[__u_n - 1] != 48) break; __u_n = __u_n - 1; }
+            if (__u_n > 0) { if (__u_out[__u_n - 1] == 46) __u_n = __u_n - 1; }
+            __u_strip = 0;
         }
-        out[n] = upper ? 69 : 101; n = n + 1;
-        if (e < 0) { out[n] = 45; ee = 0 - e; } else { out[n] = 43; ee = e; }
-        n = n + 1;
-        if (ee >= 100) { out[n] = 48 + ee / 100; n = n + 1; }
-        out[n] = 48 + (ee / 10) % 10; n = n + 1;
-        out[n] = 48 + ee % 10; n = n + 1;
+        __u_out[__u_n] = __u_upper ? 69 : 101; __u_n = __u_n + 1;
+        if (__u_e < 0) { __u_out[__u_n] = 45; __u_ee = 0 - __u_e; } else { __u_out[__u_n] = 43; __u_ee = __u_e; }
+        __u_n = __u_n + 1;
+        if (__u_ee >= 100) { __u_out[__u_n] = 48 + __u_ee / 100; __u_n = __u_n + 1; }
+        __u_out[__u_n] = 48 + (__u_ee / 10) % 10; __u_n = __u_n + 1;
+        __u_out[__u_n] = 48 + __u_ee % 10; __u_n = __u_n + 1;
     }
-    if (strip) {                              /* %g without '#' */
-        j = 0;
-        while (j < n) { if (out[j] == 46) break; j = j + 1; }
-        if (j < n) {
-            while (n > 0) { if (out[n - 1] != 48) break; n = n - 1; }
-            if (n > 0) { if (out[n - 1] == 46) n = n - 1; }
+    if (__u_strip) {                              /* %g without '#' */
+        __u_j = 0;
+        while (__u_j < __u_n) { if (__u_out[__u_j] == 46) break; __u_j = __u_j + 1; }
+        if (__u_j < __u_n) {
+            while (__u_n > 0) { if (__u_out[__u_n - 1] != 48) break; __u_n = __u_n - 1; }
+            if (__u_n > 0) { if (__u_out[__u_n - 1] == 46) __u_n = __u_n - 1; }
         }
     }
-    return n;
+    return __u_n;
 }
 
-static int _u_vfmt(char *out, long cap, FILE *f, const char *fmt, va_list ap) {
-    long n;
-    long i;
-    long k;
-    long len;
-    long start;
-    int c;
-    int left;
-    int zero;
-    int width;
-    int prec;
-    int base;
-    int upper;
-    int sign;
-    int lng;
-    int plus;
-    int space;
-    int alt;
-    int neg;
-    long j;
-    long sv;
-    unsigned long uv;
-    char *sp;
-    char buf[24];
-    char fbuf[1300];
-    n = 0;
-    i = 0;
-    while (fmt[i]) {
-        if (fmt[i] != 37) { _u_put(out, cap, &n, f, fmt[i]); i = i + 1; continue; }
-        i = i + 1;
-        left = 0; zero = 0; width = 0; prec = 0 - 1;
-        plus = 0; space = 0; alt = 0;
-        while (fmt[i] == 45 | fmt[i] == 48 | fmt[i] == 43 | fmt[i] == 32
-               | fmt[i] == 35) {
-            if (fmt[i] == 45) left = 1;
-            if (fmt[i] == 48) zero = 1;
-            if (fmt[i] == 43) plus = 1;
-            if (fmt[i] == 32) space = 1;
-            if (fmt[i] == 35) alt = 1;
-            i = i + 1;
+static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
+    long __u_n;
+    long __u_i;
+    long __u_k;
+    long __u_len;
+    long __u_start;
+    int __u_c;
+    int __u_left;
+    int __u_zero;
+    int __u_width;
+    int __u_prec;
+    int __u_base;
+    int __u_upper;
+    int __u_sign;
+    int __u_lng;
+    int __u_plus;
+    int __u_space;
+    int __u_alt;
+    int __u_neg;
+    long __u_j;
+    long __u_sv;
+    unsigned long __u_uv;
+    char *__u_sp;
+    char __u_buf[24];
+    char __u_fbuf[1300];
+    __u_n = 0;
+    __u_i = 0;
+    while (__u_fmt[__u_i]) {
+        if (__u_fmt[__u_i] != 37) { _u_put(__u_out, __u_cap, &__u_n, __u_f, __u_fmt[__u_i]); __u_i = __u_i + 1; continue; }
+        __u_i = __u_i + 1;
+        __u_left = 0; __u_zero = 0; __u_width = 0; __u_prec = 0 - 1;
+        __u_plus = 0; __u_space = 0; __u_alt = 0;
+        while (__u_fmt[__u_i] == 45 | __u_fmt[__u_i] == 48 | __u_fmt[__u_i] == 43 | __u_fmt[__u_i] == 32
+               | __u_fmt[__u_i] == 35) {
+            if (__u_fmt[__u_i] == 45) __u_left = 1;
+            if (__u_fmt[__u_i] == 48) __u_zero = 1;
+            if (__u_fmt[__u_i] == 43) __u_plus = 1;
+            if (__u_fmt[__u_i] == 32) __u_space = 1;
+            if (__u_fmt[__u_i] == 35) __u_alt = 1;
+            __u_i = __u_i + 1;
         }
-        if (fmt[i] == 42) { width = va_arg(ap, int); i = i + 1;     /* `*` */
-            if (width < 0) { left = 1; width = 0 - width; } }
-        while (fmt[i] >= 48) { if (fmt[i] > 57) break;
-            width = width * 10 + (fmt[i] - 48); i = i + 1; }
-        if (fmt[i] == 46) {
-            i = i + 1; prec = 0;
-            if (fmt[i] == 42) { prec = va_arg(ap, int); i = i + 1;
-                if (prec < 0) prec = 0 - 1; }
-            while (fmt[i] >= 48) { if (fmt[i] > 57) break;
-                prec = prec * 10 + (fmt[i] - 48); i = i + 1; }
+        if (__u_fmt[__u_i] == 42) { __u_width = va_arg(__u_ap, int); __u_i = __u_i + 1;     /* `*` */
+            if (__u_width < 0) { __u_left = 1; __u_width = 0 - __u_width; } }
+        while (__u_fmt[__u_i] >= 48) { if (__u_fmt[__u_i] > 57) break;
+            __u_width = __u_width * 10 + (__u_fmt[__u_i] - 48); __u_i = __u_i + 1; }
+        if (__u_fmt[__u_i] == 46) {
+            __u_i = __u_i + 1; __u_prec = 0;
+            if (__u_fmt[__u_i] == 42) { __u_prec = va_arg(__u_ap, int); __u_i = __u_i + 1;
+                if (__u_prec < 0) __u_prec = 0 - 1; }
+            while (__u_fmt[__u_i] >= 48) { if (__u_fmt[__u_i] > 57) break;
+                __u_prec = __u_prec * 10 + (__u_fmt[__u_i] - 48); __u_i = __u_i + 1; }
         }
-        lng = 0;
-        while (fmt[i] == 104 | fmt[i] == 108 | fmt[i] == 122 | fmt[i] == 106
-               | fmt[i] == 116 | fmt[i] == 76) {
-            if (fmt[i] != 104) lng = 1;      /* l, z, j, t, L are 64-bit */
-            i = i + 1;
+        __u_lng = 0;
+        while (__u_fmt[__u_i] == 104 | __u_fmt[__u_i] == 108 | __u_fmt[__u_i] == 122 | __u_fmt[__u_i] == 106
+               | __u_fmt[__u_i] == 116 | __u_fmt[__u_i] == 76) {
+            if (__u_fmt[__u_i] != 104) __u_lng = 1;      /* l, z, j, t, L are 64-bit */
+            __u_i = __u_i + 1;
         }
-        c = fmt[i];
-        i = i + 1;
-        if (c == 37) { _u_put(out, cap, &n, f, 37); continue; }
-        sp = NULL; sign = 0; base = 10; upper = 0; neg = 0;
-        if (c == 102 | c == 70 | c == 101 | c == 69 | c == 103 | c == 71) {
+        __u_c = __u_fmt[__u_i];
+        __u_i = __u_i + 1;
+        if (__u_c == 37) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 37); continue; }
+        __u_sp = NULL; __u_sign = 0; __u_base = 10; __u_upper = 0; __u_neg = 0;
+        if (__u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69 | __u_c == 103 | __u_c == 71) {
             /* %f %e %g: a double -- a float argument was promoted to one */
-            double dv;
-            unsigned long bits;
-            dv = va_arg(ap, double);
-            bits = *(unsigned long *)&dv;
-            neg = (bits >> 63) & 1;
-            len = _u_ffmt(fbuf + 1, bits, c, prec, alt);
-            start = 1; sp = fbuf;
-            if (((bits >> 52) & 2047) == 2047) zero = 0;   /* inf, nan pad with spaces */
-            sign = neg;
+            double __u_dv;
+            unsigned long __u_bits;
+            __u_dv = va_arg(__u_ap, double);
+            __u_bits = *(unsigned long *)&__u_dv;
+            __u_neg = (__u_bits >> 63) & 1;
+            __u_len = _u_ffmt(__u_fbuf + 1, __u_bits, __u_c, __u_prec, __u_alt);
+            __u_start = 1; __u_sp = __u_fbuf;
+            if (((__u_bits >> 52) & 2047) == 2047) __u_zero = 0;   /* inf, nan pad with spaces */
+            __u_sign = __u_neg;
         } else {
-        if (c == 115) {
-            sp = va_arg(ap, char *);
-            if (sp == NULL) sp = "(null)";
-            len = _unisa_len(sp);
-            if (prec >= 0) { if (prec < len) len = prec; }
-            start = 0;
+        if (__u_c == 115) {
+            __u_sp = va_arg(__u_ap, char *);
+            if (__u_sp == NULL) __u_sp = "(null)";
+            __u_len = _unisa_len(__u_sp);
+            if (__u_prec >= 0) { if (__u_prec < __u_len) __u_len = __u_prec; }
+            __u_start = 0;
         } else {
-            if (c == 99) {
-                buf[23] = va_arg(ap, int);
-                start = 23; len = 1; sp = buf;
+            if (__u_c == 99) {
+                __u_buf[23] = va_arg(__u_ap, int);
+                __u_start = 23; __u_len = 1; __u_sp = __u_buf;
             } else {
-                if (c == 100 | c == 105) {
-                    sv = va_arg(ap, long);
-                    if (lng == 0) sv = (int)sv;       /* an int is 32 bits */
-                    if (sv < 0) { sign = 1; uv = 0 - sv; } else uv = sv;
-                    neg = sign;
+                if (__u_c == 100 | __u_c == 105) {
+                    __u_sv = va_arg(__u_ap, long);
+                    if (__u_lng == 0) __u_sv = (int)__u_sv;       /* an int is 32 bits */
+                    if (__u_sv < 0) { __u_sign = 1; __u_uv = 0 - __u_sv; } else __u_uv = __u_sv;
+                    __u_neg = __u_sign;
                 } else {
-                    if (c == 120) { base = 16; }
-                    if (c == 88) { base = 16; upper = 1; }
-                    if (c == 111) { base = 8; }
-                    if (c == 112) { base = 16; }
-                    uv = va_arg(ap, unsigned long);
-                    if (lng == 0) {
-                        if (c == 117 | c == 120 | c == 88 | c == 111)
-                            uv = uv & 4294967295;
+                    if (__u_c == 120) { __u_base = 16; }
+                    if (__u_c == 88) { __u_base = 16; __u_upper = 1; }
+                    if (__u_c == 111) { __u_base = 8; }
+                    if (__u_c == 112) { __u_base = 16; }
+                    __u_uv = va_arg(__u_ap, unsigned long);
+                    if (__u_lng == 0) {
+                        if (__u_c == 117 | __u_c == 120 | __u_c == 88 | __u_c == 111)
+                            __u_uv = __u_uv & 4294967295;
                     }
                 }
-                start = _u_digits(buf, uv, base, upper);
-                len = 24 - start;
+                __u_start = _u_digits(__u_buf, __u_uv, __u_base, __u_upper);
+                __u_len = 24 - __u_start;
                 /* C99 7.19.6.1p5: an integer's precision is the MINIMUM
                    number of digits -- `%.2x` of 0 is "00".  Zeros go in
                    before the sign does. */
-                while (len < prec) {
-                    if (start <= 1) break;
-                    start = start - 1; buf[start] = 48; len = len + 1;
+                while (__u_len < __u_prec) {
+                    if (__u_start <= 1) break;
+                    __u_start = __u_start - 1; __u_buf[__u_start] = 48; __u_len = __u_len + 1;
                 }
-                sp = buf;
-                if (prec >= 0) zero = 0;          /* 7.19.6.1p6: 0 ignored */
+                __u_sp = __u_buf;
+                if (__u_prec >= 0) __u_zero = 0;          /* 7.19.6.1p6: 0 ignored */
             }
         }
         }
         /* the sign character: '-', or '+' / ' ' when asked for (signed
            conversions only).  With '0' the zeros go AFTER it: -0042 */
-        {   int sc;
-            sc = 0;
-            if (c == 100 | c == 105 | c == 102 | c == 70 | c == 101 | c == 69
-                | c == 103 | c == 71) {
-                if (sign) sc = 45; else { if (plus) sc = 43; else { if (space) sc = 32; } }
+        {   int __u_sc;
+            __u_sc = 0;
+            if (__u_c == 100 | __u_c == 105 | __u_c == 102 | __u_c == 70 | __u_c == 101 | __u_c == 69
+                | __u_c == 103 | __u_c == 71) {
+                if (__u_sign) __u_sc = 45; else { if (__u_plus) __u_sc = 43; else { if (__u_space) __u_sc = 32; } }
             }
-            k = width - len;
-            if (sc) k = k - 1;
-            if (left == 0) { if (zero == 0) {
-                while (k > 0) { _u_put(out, cap, &n, f, 32); k = k - 1; } } }
-            if (sc) _u_put(out, cap, &n, f, sc);
-            if (left == 0) { if (zero) {
-                while (k > 0) { _u_put(out, cap, &n, f, 48); k = k - 1; } } }
-            j = 0;
-            while (j < len) { _u_put(out, cap, &n, f, sp[start + j] & 255); j = j + 1; }
-            if (left) { while (k > 0) { _u_put(out, cap, &n, f, 32); k = k - 1; } }
+            __u_k = __u_width - __u_len;
+            if (__u_sc) __u_k = __u_k - 1;
+            if (__u_left == 0) { if (__u_zero == 0) {
+                while (__u_k > 0) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 32); __u_k = __u_k - 1; } } }
+            if (__u_sc) _u_put(__u_out, __u_cap, &__u_n, __u_f, __u_sc);
+            if (__u_left == 0) { if (__u_zero) {
+                while (__u_k > 0) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 48); __u_k = __u_k - 1; } } }
+            __u_j = 0;
+            while (__u_j < __u_len) { _u_put(__u_out, __u_cap, &__u_n, __u_f, __u_sp[__u_start + __u_j] & 255); __u_j = __u_j + 1; }
+            if (__u_left) { while (__u_k > 0) { _u_put(__u_out, __u_cap, &__u_n, __u_f, 32); __u_k = __u_k - 1; } }
         }
     }
-    if (out != NULL) { if (cap != 0) {
-        if (cap < 0) out[n] = 0; else { if (n < cap) out[n] = 0;
-                                        else out[cap - 1] = 0; } } }
-    return (int)n;
+    if (__u_out != NULL) { if (__u_cap != 0) {
+        if (__u_cap < 0) __u_out[__u_n] = 0; else { if (__u_n < __u_cap) __u_out[__u_n] = 0;
+                                        else __u_out[__u_cap - 1] = 0; } } }
+    return (int)__u_n;
 }
 
-static int vsprintf(char *b, const char *fmt, va_list ap) {
-    return _u_vfmt(b, 0 - 1, NULL, fmt, ap);
+static int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
+    return _u_vfmt(__u_b, 0 - 1, NULL, __u_fmt, __u_ap);
 }
-static int vsnprintf(char *b, long cap, const char *fmt, va_list ap) {
-    return _u_vfmt(b, cap, NULL, fmt, ap);
+static int vsnprintf(char *__u_b, long __u_cap, const char *__u_fmt, va_list __u_ap) {
+    return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
 }
-static int vfprintf(FILE *f, const char *fmt, va_list ap) {
-    return _u_vfmt(NULL, 0, f, fmt, ap);
+static int vfprintf(FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
+    return _u_vfmt(NULL, 0, __u_f, __u_fmt, __u_ap);
 }
-static int sprintf(char *b, const char *fmt, ...) {
-    va_list ap; int r;
-    va_start(ap, fmt);
-    r = _u_vfmt(b, 0 - 1, NULL, fmt, ap);
-    va_end(ap);
-    return r;
+static int sprintf(char *__u_b, const char *__u_fmt, ...) {
+    va_list __u_ap; int __u_r;
+    va_start(__u_ap, __u_fmt);
+    __u_r = _u_vfmt(__u_b, 0 - 1, NULL, __u_fmt, __u_ap);
+    va_end(__u_ap);
+    return __u_r;
 }
-static int snprintf(char *b, long cap, const char *fmt, ...) {
-    va_list ap; int r;
-    va_start(ap, fmt);
-    r = _u_vfmt(b, cap, NULL, fmt, ap);
-    va_end(ap);
-    return r;
+static int snprintf(char *__u_b, long __u_cap, const char *__u_fmt, ...) {
+    va_list __u_ap; int __u_r;
+    va_start(__u_ap, __u_fmt);
+    __u_r = _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
+    va_end(__u_ap);
+    return __u_r;
 }
-static int fprintf(FILE *f, const char *fmt, ...) {
-    va_list ap; int r;
-    va_start(ap, fmt);
-    r = _u_vfmt(NULL, 0, f, fmt, ap);
-    va_end(ap);
-    return r;
+static int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
+    va_list __u_ap; int __u_r;
+    va_start(__u_ap, __u_fmt);
+    __u_r = _u_vfmt(NULL, 0, __u_f, __u_fmt, __u_ap);
+    va_end(__u_ap);
+    return __u_r;
 }
 /* The compiler desugars `printf` against a STATIC format string [W-9] -- the
  * fast path, and the common one.  A format that is not a literal cannot be
  * desugared at all, so it becomes an ordinary variadic call on this. */
-static int printf(const char *fmt, ...) {
-    va_list ap; int r;
-    va_start(ap, fmt);
-    r = _u_vfmt(NULL, 0, stdout, fmt, ap);
-    va_end(ap);
-    return r;
+static int printf(const char *__u_fmt, ...) {
+    va_list __u_ap; int __u_r;
+    va_start(__u_ap, __u_fmt);
+    __u_r = _u_vfmt(NULL, 0, stdout, __u_fmt, __u_ap);
+    va_end(__u_ap);
+    return __u_r;
 }
 /* ---- sscanf: the conversions a program reads numbers and words with --
    d i u x o c s f e g, the l and h length modifiers, a field width, `*`
@@ -576,142 +576,142 @@ static int printf(const char *fmt, ...) {
    it.  Returns the number of conversions stored, or EOF when the input
    ran out before the first one -- the same contract as the platform's,
    which is what a program comparing the two observes. [S-15 D2] */
-static int _u_isspace(int c) { return c == 32 || (c >= 9 && c <= 13); }
-static int _u_digit(int c, int base) {
-    int v;
-    v = 0 - 1;
-    if (c >= 48 && c <= 57) v = c - 48;
-    if (c >= 97 && c <= 122) v = c - 97 + 10;
-    if (c >= 65 && c <= 90) v = c - 65 + 10;
-    if (v >= base) return 0 - 1;
-    return v;
+static int _u_isspace(int __u_c) { return __u_c == 32 || (__u_c >= 9 && __u_c <= 13); }
+static int _u_digit(int __u_c, int __u_base) {
+    int __u_v;
+    __u_v = 0 - 1;
+    if (__u_c >= 48 && __u_c <= 57) __u_v = __u_c - 48;
+    if (__u_c >= 97 && __u_c <= 122) __u_v = __u_c - 97 + 10;
+    if (__u_c >= 65 && __u_c <= 90) __u_v = __u_c - 65 + 10;
+    if (__u_v >= __u_base) return 0 - 1;
+    return __u_v;
 }
-static int vsscanf(const char *in, const char *fmt, va_list ap) {
-    long i; long j; int stored; int c; int width; int skip; int lng; int base;
-    int neg; int any; long v; unsigned long uv; double d; double scale; int exp; int eneg;
-    char *sp; int *ip; long *lp; short *hp; double *dp; float *fp; long n;
-    i = 0; j = 0; stored = 0;
-    while (fmt[j]) {
-        c = fmt[j];
-        if (_u_isspace(c)) { while (_u_isspace(in[i])) i = i + 1; j = j + 1; continue; }
-        if (c != 37) { if (in[i] != c) break; i = i + 1; j = j + 1; continue; }
-        j = j + 1;
-        if (fmt[j] == 37) { if (in[i] != 37) break; i = i + 1; j = j + 1; continue; }
-        skip = 0; width = 0; lng = 0;
-        if (fmt[j] == 42) { skip = 1; j = j + 1; }
-        while (fmt[j] >= 48 && fmt[j] <= 57) { width = width * 10 + (fmt[j] - 48); j = j + 1; }
-        if (fmt[j] == 104) { lng = 0 - 1; j = j + 1; if (fmt[j] == 104) { lng = 0 - 2; j = j + 1; } }
-        if (fmt[j] == 108) { lng = 1; j = j + 1; if (fmt[j] == 108) j = j + 1; }
-        if (fmt[j] == 122 || fmt[j] == 106 || fmt[j] == 116) { lng = 1; j = j + 1; }
-        if (fmt[j] == 76) { lng = 1; j = j + 1; }
-        c = fmt[j]; j = j + 1;
-        if (width == 0) width = 1000000000;
-        if (c == 99) {                                   /* %c: no space skip */
-            if (width == 1000000000) width = 1;
-            if (in[i] == 0) { if (stored == 0) return EOF; return stored; }
-            if (skip == 0) sp = va_arg(ap, char *);
-            n = 0;
-            while (n < width) { if (in[i] == 0) break; if (skip == 0) sp[n] = in[i]; i = i + 1; n = n + 1; }
-            if (skip == 0) stored = stored + 1;
+static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
+    long __u_i; long __u_j; int __u_stored; int __u_c; int __u_width; int __u_skip; int __u_lng; int __u_base;
+    int __u_neg; int __u_any; long __u_v; unsigned long __u_uv; double __u_d; double __u_scale; int exp; int __u_eneg;
+    char *__u_sp; int *__u_ip; long *__u_lp; short *__u_hp; double *__u_dp; float *__u_fp; long __u_n;
+    __u_i = 0; __u_j = 0; __u_stored = 0;
+    while (__u_fmt[__u_j]) {
+        __u_c = __u_fmt[__u_j];
+        if (_u_isspace(__u_c)) { while (_u_isspace(__u_in[__u_i])) __u_i = __u_i + 1; __u_j = __u_j + 1; continue; }
+        if (__u_c != 37) { if (__u_in[__u_i] != __u_c) break; __u_i = __u_i + 1; __u_j = __u_j + 1; continue; }
+        __u_j = __u_j + 1;
+        if (__u_fmt[__u_j] == 37) { if (__u_in[__u_i] != 37) break; __u_i = __u_i + 1; __u_j = __u_j + 1; continue; }
+        __u_skip = 0; __u_width = 0; __u_lng = 0;
+        if (__u_fmt[__u_j] == 42) { __u_skip = 1; __u_j = __u_j + 1; }
+        while (__u_fmt[__u_j] >= 48 && __u_fmt[__u_j] <= 57) { __u_width = __u_width * 10 + (__u_fmt[__u_j] - 48); __u_j = __u_j + 1; }
+        if (__u_fmt[__u_j] == 104) { __u_lng = 0 - 1; __u_j = __u_j + 1; if (__u_fmt[__u_j] == 104) { __u_lng = 0 - 2; __u_j = __u_j + 1; } }
+        if (__u_fmt[__u_j] == 108) { __u_lng = 1; __u_j = __u_j + 1; if (__u_fmt[__u_j] == 108) __u_j = __u_j + 1; }
+        if (__u_fmt[__u_j] == 122 || __u_fmt[__u_j] == 106 || __u_fmt[__u_j] == 116) { __u_lng = 1; __u_j = __u_j + 1; }
+        if (__u_fmt[__u_j] == 76) { __u_lng = 1; __u_j = __u_j + 1; }
+        __u_c = __u_fmt[__u_j]; __u_j = __u_j + 1;
+        if (__u_width == 0) __u_width = 1000000000;
+        if (__u_c == 99) {                                   /* %c: no space skip */
+            if (__u_width == 1000000000) __u_width = 1;
+            if (__u_in[__u_i] == 0) { if (__u_stored == 0) return EOF; return __u_stored; }
+            if (__u_skip == 0) __u_sp = va_arg(__u_ap, char *);
+            __u_n = 0;
+            while (__u_n < __u_width) { if (__u_in[__u_i] == 0) break; if (__u_skip == 0) __u_sp[__u_n] = __u_in[__u_i]; __u_i = __u_i + 1; __u_n = __u_n + 1; }
+            if (__u_skip == 0) __u_stored = __u_stored + 1;
             continue;
         }
-        while (_u_isspace(in[i])) i = i + 1;
-        if (in[i] == 0) { if (stored == 0) return EOF; return stored; }
-        if (c == 115) {                                  /* %s */
-            if (skip == 0) sp = va_arg(ap, char *);
-            n = 0;
-            while (n < width) { if (in[i] == 0) break; if (_u_isspace(in[i])) break;
-                                if (skip == 0) sp[n] = in[i]; i = i + 1; n = n + 1; }
-            if (skip == 0) { sp[n] = 0; stored = stored + 1; }
+        while (_u_isspace(__u_in[__u_i])) __u_i = __u_i + 1;
+        if (__u_in[__u_i] == 0) { if (__u_stored == 0) return EOF; return __u_stored; }
+        if (__u_c == 115) {                                  /* %s */
+            if (__u_skip == 0) __u_sp = va_arg(__u_ap, char *);
+            __u_n = 0;
+            while (__u_n < __u_width) { if (__u_in[__u_i] == 0) break; if (_u_isspace(__u_in[__u_i])) break;
+                                if (__u_skip == 0) __u_sp[__u_n] = __u_in[__u_i]; __u_i = __u_i + 1; __u_n = __u_n + 1; }
+            if (__u_skip == 0) { __u_sp[__u_n] = 0; __u_stored = __u_stored + 1; }
             continue;
         }
-        if (c == 100 || c == 105 || c == 117 || c == 120 || c == 88 || c == 111) {
-            base = 10;
-            if (c == 120 || c == 88) base = 16;
-            if (c == 111) base = 8;
-            neg = 0; any = 0; uv = 0; n = 0;
-            if (in[i] == 45 || in[i] == 43) { if (n < width) { neg = in[i] == 45; i = i + 1; n = n + 1; } }
-            if (c == 105 || base == 16) { if (in[i] == 48) { if (in[i + 1] == 120 || in[i + 1] == 88) {
-                if (_u_digit(in[i + 2], 16) >= 0) { if (n + 2 < width) { base = 16; i = i + 2; n = n + 2; } } } } }
-            if (c == 105) { if (base == 10) { if (in[i] == 48) base = 8; } }
-            while (n < width) {
-                v = _u_digit(in[i], base);
-                if (v < 0) break;
-                uv = uv * base + v; i = i + 1; n = n + 1; any = 1;
+        if (__u_c == 100 || __u_c == 105 || __u_c == 117 || __u_c == 120 || __u_c == 88 || __u_c == 111) {
+            __u_base = 10;
+            if (__u_c == 120 || __u_c == 88) __u_base = 16;
+            if (__u_c == 111) __u_base = 8;
+            __u_neg = 0; __u_any = 0; __u_uv = 0; __u_n = 0;
+            if (__u_in[__u_i] == 45 || __u_in[__u_i] == 43) { if (__u_n < __u_width) { __u_neg = __u_in[__u_i] == 45; __u_i = __u_i + 1; __u_n = __u_n + 1; } }
+            if (__u_c == 105 || __u_base == 16) { if (__u_in[__u_i] == 48) { if (__u_in[__u_i + 1] == 120 || __u_in[__u_i + 1] == 88) {
+                if (_u_digit(__u_in[__u_i + 2], 16) >= 0) { if (__u_n + 2 < __u_width) { __u_base = 16; __u_i = __u_i + 2; __u_n = __u_n + 2; } } } } }
+            if (__u_c == 105) { if (__u_base == 10) { if (__u_in[__u_i] == 48) __u_base = 8; } }
+            while (__u_n < __u_width) {
+                __u_v = _u_digit(__u_in[__u_i], __u_base);
+                if (__u_v < 0) break;
+                __u_uv = __u_uv * __u_base + __u_v; __u_i = __u_i + 1; __u_n = __u_n + 1; __u_any = 1;
             }
-            if (any == 0) break;
-            if (neg) uv = 0 - uv;
-            if (skip == 0) {
-                if (lng == 1) { lp = va_arg(ap, long *); *lp = (long)uv; }
-                else { if (lng == 0 - 1) { hp = va_arg(ap, short *); *hp = (short)uv; }
-                       else { if (lng == 0 - 2) { sp = va_arg(ap, char *); *sp = (char)uv; }
-                              else { ip = va_arg(ap, int *); *ip = (int)uv; } } }
-                stored = stored + 1;
+            if (__u_any == 0) break;
+            if (__u_neg) __u_uv = 0 - __u_uv;
+            if (__u_skip == 0) {
+                if (__u_lng == 1) { __u_lp = va_arg(__u_ap, long *); *__u_lp = (long)__u_uv; }
+                else { if (__u_lng == 0 - 1) { __u_hp = va_arg(__u_ap, short *); *__u_hp = (short)__u_uv; }
+                       else { if (__u_lng == 0 - 2) { __u_sp = va_arg(__u_ap, char *); *__u_sp = (char)__u_uv; }
+                              else { __u_ip = va_arg(__u_ap, int *); *__u_ip = (int)__u_uv; } } }
+                __u_stored = __u_stored + 1;
             }
             continue;
         }
-        if (c == 102 || c == 101 || c == 103 || c == 70 || c == 69 || c == 71 || c == 97) {
-            neg = 0; any = 0; d = 0.0; n = 0;
-            if (in[i] == 45 || in[i] == 43) { if (n < width) { neg = in[i] == 45; i = i + 1; n = n + 1; } }
-            while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break; d = d * 10.0 + v; i = i + 1; n = n + 1; any = 1; }
-            if (in[i] == 46) { if (n < width) {
-                i = i + 1; n = n + 1; scale = 0.1;
-                while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break;
-                                    d = d + v * scale; scale = scale * 0.1; i = i + 1; n = n + 1; any = 1; }
+        if (__u_c == 102 || __u_c == 101 || __u_c == 103 || __u_c == 70 || __u_c == 69 || __u_c == 71 || __u_c == 97) {
+            __u_neg = 0; __u_any = 0; __u_d = 0.0; __u_n = 0;
+            if (__u_in[__u_i] == 45 || __u_in[__u_i] == 43) { if (__u_n < __u_width) { __u_neg = __u_in[__u_i] == 45; __u_i = __u_i + 1; __u_n = __u_n + 1; } }
+            while (__u_n < __u_width) { __u_v = _u_digit(__u_in[__u_i], 10); if (__u_v < 0) break; __u_d = __u_d * 10.0 + __u_v; __u_i = __u_i + 1; __u_n = __u_n + 1; __u_any = 1; }
+            if (__u_in[__u_i] == 46) { if (__u_n < __u_width) {
+                __u_i = __u_i + 1; __u_n = __u_n + 1; __u_scale = 0.1;
+                while (__u_n < __u_width) { __u_v = _u_digit(__u_in[__u_i], 10); if (__u_v < 0) break;
+                                    __u_d = __u_d + __u_v * __u_scale; __u_scale = __u_scale * 0.1; __u_i = __u_i + 1; __u_n = __u_n + 1; __u_any = 1; }
             } }
-            if (any == 0) break;
-            if (in[i] == 101 || in[i] == 69) { if (n < width) {
-                exp = 0; eneg = 0; j = j; 
-                if (in[i + 1] == 45 || in[i + 1] == 43) { eneg = in[i + 1] == 45;
-                    if (_u_digit(in[i + 2], 10) >= 0) { i = i + 2; n = n + 2;
-                        while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break; exp = exp * 10 + v; i = i + 1; n = n + 1; } } }
-                else { if (_u_digit(in[i + 1], 10) >= 0) { i = i + 1; n = n + 1;
-                        while (n < width) { v = _u_digit(in[i], 10); if (v < 0) break; exp = exp * 10 + v; i = i + 1; n = n + 1; } } }
-                while (exp > 0) { if (eneg) d = d / 10.0; else d = d * 10.0; exp = exp - 1; }
+            if (__u_any == 0) break;
+            if (__u_in[__u_i] == 101 || __u_in[__u_i] == 69) { if (__u_n < __u_width) {
+                exp = 0; __u_eneg = 0; __u_j = __u_j; 
+                if (__u_in[__u_i + 1] == 45 || __u_in[__u_i + 1] == 43) { __u_eneg = __u_in[__u_i + 1] == 45;
+                    if (_u_digit(__u_in[__u_i + 2], 10) >= 0) { __u_i = __u_i + 2; __u_n = __u_n + 2;
+                        while (__u_n < __u_width) { __u_v = _u_digit(__u_in[__u_i], 10); if (__u_v < 0) break; exp = exp * 10 + __u_v; __u_i = __u_i + 1; __u_n = __u_n + 1; } } }
+                else { if (_u_digit(__u_in[__u_i + 1], 10) >= 0) { __u_i = __u_i + 1; __u_n = __u_n + 1;
+                        while (__u_n < __u_width) { __u_v = _u_digit(__u_in[__u_i], 10); if (__u_v < 0) break; exp = exp * 10 + __u_v; __u_i = __u_i + 1; __u_n = __u_n + 1; } } }
+                while (exp > 0) { if (__u_eneg) __u_d = __u_d / 10.0; else __u_d = __u_d * 10.0; exp = exp - 1; }
             } }
-            if (neg) d = 0.0 - d;
-            if (skip == 0) {
-                if (lng == 1) { dp = va_arg(ap, double *); *dp = d; }
-                else { fp = va_arg(ap, float *); *fp = (float)d; }
-                stored = stored + 1;
+            if (__u_neg) __u_d = 0.0 - __u_d;
+            if (__u_skip == 0) {
+                if (__u_lng == 1) { __u_dp = va_arg(__u_ap, double *); *__u_dp = __u_d; }
+                else { __u_fp = va_arg(__u_ap, float *); *__u_fp = (float)__u_d; }
+                __u_stored = __u_stored + 1;
             }
             continue;
         }
-        if (c == 110) {                                  /* %n */
-            if (skip == 0) { ip = va_arg(ap, int *); *ip = (int)i; }
+        if (__u_c == 110) {                                  /* %n */
+            if (__u_skip == 0) { __u_ip = va_arg(__u_ap, int *); *__u_ip = (int)__u_i; }
             continue;
         }
         break;                                           /* an unknown conversion ends the scan */
     }
-    return stored;
+    return __u_stored;
 }
-static int sscanf(const char *in, const char *fmt, ...) {
-    va_list ap; int r;
-    va_start(ap, fmt);
-    r = vsscanf(in, fmt, ap);
-    va_end(ap);
-    return r;
+static int sscanf(const char *__u_in, const char *__u_fmt, ...) {
+    va_list __u_ap; int __u_r;
+    va_start(__u_ap, __u_fmt);
+    __u_r = vsscanf(__u_in, __u_fmt, __u_ap);
+    va_end(__u_ap);
+    return __u_r;
 }
 
 /* perror: the message, a colon, and errno's text -- the eleven codes
    <errno.h> defines, "Unknown error N" for the rest. */
-static char *strerror(int e) {
-    if (e == 0) return "Success";
-    if (e == 1) return "Operation not permitted";
-    if (e == 2) return "No such file or directory";
-    if (e == 5) return "Input/output error";
-    if (e == 9) return "Bad file descriptor";
-    if (e == 12) return "Cannot allocate memory";
-    if (e == 13) return "Permission denied";
-    if (e == 17) return "File exists";
-    if (e == 22) return "Invalid argument";
-    if (e == 28) return "No space left on device";
-    if (e == 33) return "Numerical argument out of domain";
-    if (e == 34) return "Numerical result out of range";
+static char *strerror(int __u_e) {
+    if (__u_e == 0) return "Success";
+    if (__u_e == 1) return "Operation not permitted";
+    if (__u_e == 2) return "No such file or directory";
+    if (__u_e == 5) return "Input/output error";
+    if (__u_e == 9) return "Bad file descriptor";
+    if (__u_e == 12) return "Cannot allocate memory";
+    if (__u_e == 13) return "Permission denied";
+    if (__u_e == 17) return "File exists";
+    if (__u_e == 22) return "Invalid argument";
+    if (__u_e == 28) return "No space left on device";
+    if (__u_e == 33) return "Numerical argument out of domain";
+    if (__u_e == 34) return "Numerical result out of range";
     return "Unknown error";
 }
-static void perror(const char *s) {
-    if (s) { if (*s) { fputs(s, stderr); fputs(": ", stderr); } }
+static void perror(const char *__u_s) {
+    if (__u_s) { if (*__u_s) { fputs(__u_s, stderr); fputs(": ", stderr); } }
     fputs(strerror(errno), stderr);
     fputc(10, stderr);
 }

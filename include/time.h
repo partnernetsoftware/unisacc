@@ -15,5 +15,5 @@ struct tm {
     int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon;
     int tm_year; int tm_wday; int tm_yday; int tm_isdst;
 };
-static double difftime(time_t a, time_t b) { return (double)(a - b); }
+static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u_b); }
 #endif
