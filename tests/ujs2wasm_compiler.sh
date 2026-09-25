@@ -101,36 +101,109 @@ if [[ -n "$TINYVM" ]]; then
   echo "OK tinyvm validate fold corpus"
 fi
 
-echo "-- v17 str bounds (accept + reject; stage0≡core fold)"
-# Literal bound is 0–7 ASCII / no escapes; concat results may exceed 7.
-for pair in "str_empty:" "str_lit7:abcdefg" "str_cat_long:hello world"; do
-  name="${pair%%:*}"
-  want="${pair#*:}"
+echo "-- v17 str bounds (accept + reject; stage0/core recorded separately)"
+# Literal 0–7 ASCII / no escapes ≠ concat results may exceed 7 (two contracts).
+# Expects: tests/ujs2wasm/str_bounds_expect.json (hand-authored; not from either compiler).
+BOUNDS_EXPECT="$ROOT/tests/ujs2wasm/str_bounds_expect.json"
+for name in str_empty str_lit7 str_cat_long; do
+  want=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String(e.accept[process.argv[2]]))' "$BOUNDS_EXPECT" "$name")
   src="tests/ujs2wasm/corpus/${name}.ujs"
-  perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >/dev/null \
-    || { echo "FAIL: core compile $name"; exit 1; }
-  perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
-    node ujs/compile.mjs "$src" -o "$OUT/${name}_s0.wasm" >/dev/null \
-    || { echo "FAIL: stage0 compile $name"; exit 1; }
+  if ! perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >"$OUT/${name}_core.compile.log" 2>&1; then
+    echo "FAIL: core compile $name (expected accept)"; cat "$OUT/${name}_core.compile.log"; exit 1
+  fi
+  if ! perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+      node ujs/compile.mjs "$src" -o "$OUT/${name}_s0.wasm" >"$OUT/${name}_s0.compile.log" 2>&1; then
+    echo "FAIL: stage0 compile $name (expected accept)"; cat "$OUT/${name}_s0.compile.log"; exit 1
+  fi
+  magic=$(head -c 4 "$OUT/${name}.wasm" | od -An -tx1 | tr -d ' \n')
+  magic0=$(head -c 4 "$OUT/${name}_s0.wasm" | od -An -tx1 | tr -d ' \n')
+  [ "$magic" = "0061736d" ] || { echo "FAIL: $name core not \\0asm"; exit 1; }
+  [ "$magic0" = "0061736d" ] || { echo "FAIL: $name stage0 not \\0asm"; exit 1; }
+  set +e
   got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm" | node -e \
     'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
+  rec=$?
   got0=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}_s0.wasm" | node -e \
     'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
-  [ "$got" = "$want" ] || { echo "FAIL: $name core got=$got want=$want"; exit 1; }
-  [ "$got0" = "$want" ] || { echo "FAIL: $name stage0 got=$got0 want=$want"; exit 1; }
-  echo "OK $name fold=$got (core≡stage0)"
+  re0=$?
+  set -e
+  [ "$rec" -eq 0 ] || { echo "FAIL: $name core run trap/timeout ec=$rec"; exit 1; }
+  [ "$re0" -eq 0 ] || { echo "FAIL: $name stage0 run trap/timeout ec=$re0"; exit 1; }
+  [ "$got" = "$want" ] || { echo "FAIL: $name core exec got!=hand expect"; exit 1; }
+  [ "$got0" = "$want" ] || { echo "FAIL: $name stage0 exec got!=hand expect"; exit 1; }
+  echo "OK $name core_compile=ok stage0_compile=ok core_exec=ok stage0_exec=ok"
 done
 for neg in str_lit8 str_escape str_nonascii str_lit8_rhs; do
   src="tests/ujs2wasm/neg/${neg}.ujs"
-  if perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" 2>"$OUT/${neg}.err"; then
-    echo "FAIL: core should reject $neg"; exit 1
+  rm -f "$OUT/${neg}.wasm" "$OUT/${neg}_s0.wasm"
+  set +e
+  perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" >"$OUT/${neg}_core.err" 2>&1
+  ec=$?
+  set -e
+  [ "$ec" -ne 0 ] || { echo "FAIL: core should reject $neg (exit 0)"; exit 1; }
+  [ "$ec" -lt 128 ] || { echo "FAIL: core reject $neg signal/timeout ec=$ec"; exit 1; }
+  if [ -f "$OUT/${neg}.wasm" ]; then
+    magic=$(head -c 4 "$OUT/${neg}.wasm" | od -An -tx1 | tr -d ' \n' || true)
+    [ "$magic" != "0061736d" ] || { echo "FAIL: core wrote \\0asm for reject $neg"; exit 1; }
   fi
-  if perl -e 'alarm 30; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
-      node ujs/compile.mjs "$src" -o "$OUT/${neg}_s0.wasm" 2>"$OUT/${neg}_s0.err"; then
-    echo "FAIL: stage0 should reject $neg"; exit 1
+  grep -qiE 'compile|bad primary|fail' "$OUT/${neg}_core.err" \
+    || { echo "FAIL: core reject $neg missing compile-fail text"; cat "$OUT/${neg}_core.err"; exit 1; }
+  set +e
+  perl -e 'alarm 30; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+    node ujs/compile.mjs "$src" -o "$OUT/${neg}_s0.wasm" >"$OUT/${neg}_s0.err" 2>&1
+  ec0=$?
+  set -e
+  [ "$ec0" -ne 0 ] || { echo "FAIL: stage0 should reject $neg (exit 0)"; exit 1; }
+  [ "$ec0" -lt 128 ] || { echo "FAIL: stage0 reject $neg signal/timeout ec=$ec0"; exit 1; }
+  if [ -f "$OUT/${neg}_s0.wasm" ]; then
+    magic0=$(head -c 4 "$OUT/${neg}_s0.wasm" | od -An -tx1 | tr -d ' \n' || true)
+    [ "$magic0" != "0061736d" ] || { echo "FAIL: stage0 wrote \\0asm for reject $neg"; exit 1; }
   fi
-  echo "OK reject $neg (core+stage0)"
+  grep -qiE 'compile|bad primary|fail' "$OUT/${neg}_s0.err" \
+    || { echo "FAIL: stage0 reject $neg missing compile-fail text"; cat "$OUT/${neg}_s0.err"; exit 1; }
+  echo "OK reject $neg core_ec=$ec stage0_ec=$ec0 (compile-fail, no \\0asm)"
 done
+
+echo "-- product gate iso: missing compiler.wasm / REQUIRE_TINYVM (shared tree intact)"
+ISO="$OUT/iso_gate"
+mkdir -p "$ISO"
+cat > "$ISO/probe_missing.sh" <<'PROB'
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+COMPILER_WASM=""
+for cand in ujs/core/compiler.wasm ujs/compiler.wasm; do
+  if [ -f "$ROOT/$cand" ]; then COMPILER_WASM="$cand"; break; fi
+done
+if [ -z "$COMPILER_WASM" ]; then
+  echo "FAIL: no compiler.wasm"
+  exit 1
+fi
+echo "unexpected pass"
+exit 0
+PROB
+chmod +x "$ISO/probe_missing.sh"
+set +e
+(cd "$ISO" && bash "$ISO/probe_missing.sh") >"$ISO/missing.out" 2>&1
+mec=$?
+set -e
+[ "$mec" -eq 1 ] || { echo "FAIL: missing-compiler probe exit=$mec want=1"; cat "$ISO/missing.out"; exit 1; }
+grep -q 'FAIL: no compiler.wasm' "$ISO/missing.out" || { echo "FAIL: missing probe message"; cat "$ISO/missing.out"; exit 1; }
+set +e
+PATH="/usr/bin:/bin" UJS_REQUIRE_TINYVM=1 bash -c '
+  find_tinyvm() { return 1; }
+  TINYVM=""
+  if [[ -z "$TINYVM" && "${UJS_REQUIRE_TINYVM:-}" == "1" ]]; then
+    echo "FAIL: UJS_REQUIRE_TINYVM=1 but tinyvm not found"; exit 1
+  fi
+  exit 0
+' >"$ISO/tv.out" 2>&1
+tec=$?
+set -e
+[ "$tec" -eq 1 ] || { echo "FAIL: REQUIRE_TINYVM probe exit=$tec want=1"; cat "$ISO/tv.out"; exit 1; }
+[ -f "$ROOT/ujs/iterate/compiler.wasm" ] || { echo "FAIL: shared compiler.wasm gone"; exit 1; }
+[ -f "$ROOT/ujs/iterate/compiler_core.wasm" ] || { echo "FAIL: shared compiler_core.wasm gone"; exit 1; }
+echo "OK iso probes (missing-compiler + REQUIRE_TINYVM FAIL; shared artifacts intact)"
 
 echo "-- default compile.mjs → compiler_core (product path)"
 log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
