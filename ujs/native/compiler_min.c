@@ -614,7 +614,12 @@ static int pstmt(Lex *L, Prog *P) {
     if (!emit(P, OP_IF1, 0)) return 0;
     if (L->tok == T_ELSE) {
       next(L);
-      if (!pblock(L, P)) return 0;
+      /* else if (...) … — reuse if path; else still requires { block */
+      if (L->tok == T_IF) {
+        if (!pstmt(L, P)) return 0;
+      } else {
+        if (!pblock(L, P)) return 0;
+      }
     }
     return emit(P, OP_IF2, 0);
   }

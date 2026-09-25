@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M2 gate: compiler.wasm callable from Node — no python3 on the product path.
 #
-# Subset: arith · fact · branch · f64 · list · setidx · dict · globals_fold · list_f64 · unary_minus
+# Subset: arith · fact · branch · f64 · list · setidx · dict · globals_fold · list_f64 · unary_minus · elseif
 # + setidx_globals (host inject + run_step) · sim.ujs compile · ship builders no python3 emit
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -46,7 +46,7 @@ RUNNER="$ROOT/tests/ujs2wasm/run_wasm.mjs"
 STEP_RUNNER="$ROOT/tests/ujs2wasm/run_step.mjs"
 STEP_EXPECT="$ROOT/tests/ujs2wasm/step_expect.json"
 
-for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 unary_minus; do
+for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 unary_minus elseif; do
   src="tests/ujs2wasm/corpus/${name}.ujs"
   echo "-- compile $name via compile.mjs (no python3)"
   log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
@@ -430,5 +430,5 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v14 · fold corpus via compiler_core · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v15 · fold corpus via compiler_core · stage2≡stage1)"
 

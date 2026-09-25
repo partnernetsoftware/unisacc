@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v14: v13 + unary minus on primary (-x / -(e) → OP_NEG / OP_FNEG).
+// v15: v14 + else if (...) (CST=4 wraps nested if; unwind IF2).
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -180,22 +180,61 @@ while (finished == 0) {
                   }
                   if (pos >= n) { ok = 0; finished = 1; }
                   else {
-                    if (SRC[pos] != 123) { ok = 0; finished = 1; }
-                    else {
+                    if (SRC[pos] == 123) {
                       pos = pos + 1;
                       OPS[opsn] = 5; opsn = opsn + 1;
                       CST[csp] = 3; csp = csp + 1;
                       depth = depth + 1;
+                    } else {
+                      // else if (...) — IF1 + CST=4; leave pos at if
+                      found = 0;
+                      if (pos + 2 < n) {
+                        if (SRC[pos] == 105) {
+                          if (SRC[pos + 1] == 102) {
+                            ch = SRC[pos + 2];
+                            if (ch == 32) { found = 1; }
+                            if (ch == 9) { found = 1; }
+                            if (ch == 40) { found = 1; }
+                          }
+                        }
+                      }
+                      if (found == 1) {
+                        OPS[opsn] = 5; opsn = opsn + 1;
+                        CST[csp] = 4; csp = csp + 1;
+                      } else { ok = 0; finished = 1; }
                     }
                   }
                 } else {
                   // stage0 always emits empty else before end
                   OPS[opsn] = 5; opsn = opsn + 1;
                   OPS[opsn] = 11; opsn = opsn + 1;
+                  // unwind else-if wrappers (outer IF2 per CST=4)
+                  done = 0;
+                  while (done == 0) {
+                    if (csp <= 0) { done = 1; }
+                    else {
+                      if (CST[csp - 1] != 4) { done = 1; }
+                      else {
+                        csp = csp - 1;
+                        OPS[opsn] = 11; opsn = opsn + 1;
+                      }
+                    }
+                  }
                 }
               } else {
                 if (op == 3) {
                   OPS[opsn] = 11; opsn = opsn + 1;
+                  done = 0;
+                  while (done == 0) {
+                    if (csp <= 0) { done = 1; }
+                    else {
+                      if (CST[csp - 1] != 4) { done = 1; }
+                      else {
+                        csp = csp - 1;
+                        OPS[opsn] = 11; opsn = opsn + 1;
+                      }
+                    }
+                  }
                 } else { ok = 0; finished = 1; }
               }
             }
