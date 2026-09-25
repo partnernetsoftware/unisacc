@@ -26,7 +26,8 @@ enc enc t i
 opinfo opinfo t i
 peep peep t i
 parse parse t i
-type type t i'
+type type t i
+abi abi t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
 GLOBALS="qset sum reader capq capr caprn caph caphn capk capkn capn capo capg capc"
@@ -34,7 +35,8 @@ GLOBALS="qset sum reader capq capr caprn caph caphn capk capkn capn capo capg ca
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
 pfconv binsel enc opinfo peep parse|0
-type|0'
+type|0
+abi|0'
 if [ "${1:-}" = --batches ]; then
     shift; UA=${1:-/tmp/ua_ref}
     ub=$(echo "$BATCHES" | cut -d'|' -f1 | tr ' ' '\n' | sort | tr '\n' ' ')

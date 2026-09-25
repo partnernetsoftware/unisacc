@@ -41,7 +41,9 @@ subset, and can run the whole list as bounded batches.
 - **`STAGES="peep type"`** runs those stages only. `all` means every stage.
   The pseudo-stage `global` turns on the checks that belong to no stage:
   the qset `-Q` self-test, reader negatives, 63-key capacity positive, and
-  the capacity, raw-key, field-group and class-count negatives. `GLOBAL=1/0`
+  the capacity, raw-key, field-group and class-count negatives, and (abi
+  steps 1-4) the sum self-test and the rule, head and candidate positives
+  and negatives (`sum capr caprn caph caphn capk capkn`). `GLOBAL=1/0`
   forces them on or off. Setting either variable makes the selection
   explicit, so `GLOBAL=1` alone runs the global checks only.
 - **Fails with exit 2**: an empty selection (`STAGES=`), an unknown stage,
@@ -59,6 +61,8 @@ subset, and can run the whole list as bounded batches.
   `prec reloc tyinfo regmap pp lex scope`+global 3.9 s,
   `pfconv binsel enc opinfo peep parse` 4.0 s, `type` 27.9 s. type on its
   own takes ~28 s, so the next heavy stage should go in a new batch.
+  Since abi step 5 there are four batches: 5.3 s (7 stages + global),
+  4.0 s, 28.0 s (type), 12.8 s (abi).
 
 ## What is proven (2026-09-25; `check.sh`, cc -O2 and unisacc -O2 osx/arm64)
 
@@ -182,8 +186,9 @@ diagnostic; check.sh accepts nothing else.
 
 ## What is not proven
 
-- The other 6 stages (type, parse, irsel, isel, abi, combo).  They are
-  not attempted; each is over some limit (prd.md J10 limit matrix).
+- The other 3 stages (irsel, isel, combo).  They are not attempted and
+  nothing here claims they pass; each is over some limit (prd.md J10 limit
+  matrix).  (type, parse and abi have since been accepted, below.)
 - UNS2 for any stage other than prec, reloc, tyinfo and regmap, and the full
   `built.uns2` (header over all 18 stages).
 - The multi-head algorithm in general.  It is ported whole, but tyinfo (one
@@ -808,3 +813,43 @@ pages that are never touched are not resident.  No performance work done.
 
 Verification: 14 stages byte-identical to the pre-step-1 build on cc,
 unisacc, UBSan (252 files, 0 differ); batches ok: 4.8 s, 4.0 s, 27.8 s.
+
+## abi, step 5: acceptance (2026-09-25)
+
+abi (3 fields, 13 heads, 438 raw keys) is a row of check.sh's TABLE
+(`abi abi t i`) and a batch of its own.  No construct.c change in this step.
+cc -O2, unisacc -O2 osx/arm64 and UBSan:
+
+- `-d` canonical dump **45,129 B**, byte-identical to `netdump.py -d` (all
+  three builds; UBSan exit 0 with no report).
+- single-stage UNS2 **1,544 B**, raw-byte identical to `uns2slice.py`; its
+  section **1,528 B** identical to abi's in `weights/built.uns2` (cc,
+  unisacc; the UBSan blob equals the cc blob).
+- deployed round trip (uns2.load + IntNet.predict): **438 keys x 13 heads**,
+  every argmax equals the TSV label, no tie (cc, unisacc).
+- deployment invariants hold; `-T bias` (unit 0 has b1 1, expected 0) and
+  `-T act` (unit 0 activation 2 on key 4) exit 3 on cc and unisacc.
+- `-t` trace, identical on cc, unisacc and UBSan:
+  - T5: 4 partitions, 2,208 rep_factored calls, 1,952 None, 0 not shorter,
+    256 kept; **early rejections: base path 1,916, patch path 24** (1,940,
+    as the pre-audit's Python count).
+  - candidates per selection (all heads, from `-d`'s `cands` lines): 77 /
+    141 / 205 / 269 (sysno 65 / 129 / 193 / 257; every other head 1).
+    269 slots used, so MAXCAND must be >= 270 (step 4).
+  - 4 selections; **starts whose pick moved a head: 52**; chosen sysno
+    candidate 10 (factored, 33 units), every other head its dlist; units per
+    selection 74 / 50 / 63 / 50.
+  - T4: 3 rounds, 39 lists accepted (39 changed), 0 rejected; REDUCE aligned
+    to a pool cube 149 times; the pool flag changed no choice.
+  - chosen candidates sum 97 units, net **H 50** (47 merged across heads).
+  - sysno has 67 rules (MAXR 80), every other head 3..13.
+- all 14 earlier stages: `-d`, `-u`, `-t` outputs and blobs byte-identical
+  to the pre-step-1 build on all three builds (252 files, 0 differ).
+
+Timings: construct abi cc 0.11 s, unisacc 0.50 s, UBSan 0.31 s;
+`netdump.py -d` 4.5 s; `STAGES=abi check.sh` 13.3 s.  Batches
+(`check.sh --batches`, each under `alarm 60`): 5.3 s (prec reloc tyinfo
+regmap pp lex scope + global), 4.0 s (pfconv binsel enc opinfo peep parse),
+28.0 s (type), 12.8 s (abi): all ok, 50.1 s in total.
+
+Scope: abi only.  Group and class bitsets and MAXS are unchanged.
