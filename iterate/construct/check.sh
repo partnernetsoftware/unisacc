@@ -27,14 +27,15 @@ opinfo opinfo t i
 peep peep t i
 parse parse t i
 type type t i
-abi abi t i'
+abi abi t i
+irsel irsel t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
 GLOBALS="qset wset sum reader capq capr caprn caph caphn capk capkn capn capo capg capgn capc capcn capcf"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
-pfconv binsel enc opinfo peep parse|0
+pfconv binsel enc opinfo peep parse irsel|0
 type|0
 abi|0'
 if [ "${1:-}" = --batches ]; then
@@ -198,7 +199,7 @@ for s in $(stages all); do
     B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py"; prc=$?; [ $prc -eq 0 ] || fail=1
     for b in cc ua; do
         B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b"; rc=$?; [ $rc -eq 0 ] || fail=1
-        if [ $prc -eq 0 ] && [ $rc -eq 0 ] && cmp -s "$T/$s.py" "$T/$s.$b"; then echo "$s $b identical ($(wc -c < "$T/$s.py" | tr -d ' ') B)"; P "s $s dump $b"
+        if [ $prc -eq 0 ] && [ $rc -eq 0 ] && cmp -s "$T/$s.py" "$T/$s.$b"; then echo "$s $b identical ($(wc -c < "$T/$s.py" | tr -d ' ') B; raw keys $(sed -n 's/^exact //p' "$T/$s.py"), quotient keys $(grep '^groups' "$T/$s.py" | awk '{n = gsub(/\[/, "["); q = (NR == 1 ? n : q * n)} END {print q}'))"; P "s $s dump $b"
         else echo "$s $b DIFFERS"; diff "$T/$s.py" "$T/$s.$b" | head -5; fail=1; fi
     done
     # every stage's dump and UNS2 under UBSan: exit 0, no report, same bytes

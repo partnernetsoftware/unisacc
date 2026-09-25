@@ -905,3 +905,11 @@ The q* functions are thin wrappers (sw = nqw, their old semantics).
   not sorting at all each makes the dump DIFFER from Python; the real code
   is identical on cc, unisacc and UBSan.  __common 24,128,568 ->
   34,745,400 B (cw and W2 per class); peak RSS on abi 19,988,480 B.
+- Step 3: irsel is a TABLE stage (batch 2): 420 raw keys, 414 quotient
+  keys (6 x 69 groups), 70 classes, 75 rules, H 75, dlist chosen (18
+  rep_factored calls, all None); -d 7310 B identical to netdump.py -d on
+  cc and unisacc, UBSan clean, UNS2 919 B identical to uns2slice.py, its
+  section 903 B identical to built.uns2, deployed round trip unique argmax
+  on all 420 keys, invariant negatives fire.  --batches: 16 stages + 18
+  global checks, 34 receipts; the old over-limit negatives capg and capc
+  are positives now, with capgn / capcn as the new negatives.
