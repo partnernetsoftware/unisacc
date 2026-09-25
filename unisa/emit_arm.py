@@ -138,6 +138,13 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return out
     if o in ALU3:
         return w(ALU3[o] | (N(a[2]) << 16) | (N(a[1]) << 5) | N(a[0]))
+    if o == "addi":                                 # add Xd, Xn, #imm12 [J9]
+        return w(0x91000000 | (a[2] << 10) | (N(a[1]) << 5) | N(a[0]))
+    if o == "subi":                                 # sub Xd, Xn, #imm12
+        return w(0xD1000000 | (a[2] << 10) | (N(a[1]) << 5) | N(a[0]))
+    if o == "lsli":                                 # lsl Xd, Xn, #s (ubfm)
+        return w(0xD3400000 | (((64 - a[2]) & 63) << 16) | ((63 - a[2]) << 10)
+                 | (N(a[1]) << 5) | N(a[0]))
     if o == "mul64":
         return w(0x9B007C00 | (N(a[2]) << 16) | (N(a[1]) << 5) | N(a[0]))
     if o == "load64":

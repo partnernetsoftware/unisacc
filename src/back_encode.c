@@ -285,6 +285,9 @@ int bk_arm(int i, long off) {
         return 1;
     }
     if (op == TO_SETMEM) { a_adrp_add(A_IP1, pc, a[0] + bk_shift); ow(0xF9000000 | (A_IP1 << 5) | a[1]); return 1; }
+    if (op == TO_ADDI) { ow(0x91000000 | (a[2] << 10) | (a[1] << 5) | a[0]); return 1; }   /* [J9] */
+    if (op == TO_SUBI) { ow(0xD1000000 | (a[2] << 10) | (a[1] << 5) | a[0]); return 1; }
+    if (op == TO_LSLI) { ow(0xD3400000 | (((64 - a[2]) & 63) << 16) | ((63 - a[2]) << 10) | (a[1] << 5) | a[0]); return 1; }
     if (op == TO_ITOA) { a_itoa(pc, a[0] + bk_shift, a[1] + bk_shift, a[2] + bk_shift); return 1; }
     if (op == TO_ARGSAVE) {
         /* Linux leaves argc at [sp] and argv at sp+8; Darwin hands x0, x1 */

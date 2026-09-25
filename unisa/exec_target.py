@@ -199,6 +199,12 @@ class Machine:
                     R[a[0]] = u64(R[a[1]] + R[a[2]])
                 elif o == "sub64":
                     R[a[0]] = u64(R[a[1]] - R[a[2]])
+                elif o == "addi":                   # [J9] fused imm forms
+                    R[a[0]] = u64(R[a[1]] + a[2])
+                elif o == "subi":
+                    R[a[0]] = u64(R[a[1]] - a[2])
+                elif o == "lsli":
+                    R[a[0]] = u64(R[a[1]] << a[2])
                 elif o == "mul64":
                     R[a[0]] = u64(R[a[1]] * R[a[2]])
                 elif o == "and64":

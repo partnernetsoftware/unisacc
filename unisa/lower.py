@@ -10,6 +10,62 @@ one changes the image -- tests/ablate.sh):
 """
 from . import catalog as C
 from .tape import REGS as TAPE_REGS
+from .tape import SHAPE as TAPE_SHAPE
+
+# [J9] arm64: `imm rK, c` then an add/sub/mul that takes rK as its second
+# source becomes one instruction with c in it, when rK is provably dead:
+# the op overwrites it, or a straight-line scan of at most 32 instructions
+# after the pair writes rK before anything reads it.  Only shapes whose
+# first register is the destination and that touch nothing implicitly are
+# walked through; a label, a branch, a call or any other shape ends the
+# scan as "live".  back_lower.c's bk_fuse_imm is the same test, line for line.
+_DEST_FIRST = {("r", "r", "r"), ("r", "r"), ("r", "i"), ("r", "s"),
+               ("r", "r", "i"), ("r", "r", "i", "i")}
+
+
+def _dead_after(code, targets, j, r):
+    n = 0
+    while j < len(code) and n < 32:
+        if j in targets:
+            return False
+        ins = code[j]
+        sh = TAPE_SHAPE[ins.op]
+        if ins.op == ".write" or sh not in _DEST_FIRST:
+            return False
+        regs = [x for x, k in zip(ins.args, sh) if k == "r"]
+        if r in regs[1:]:
+            return False
+        if regs[0] == r:
+            return True
+        j += 1
+        n += 1
+    return False
+
+
+def _fuse_imm(code, targets, pc):
+    """(op, c) for the fused form of code[pc], code[pc+1], or None."""
+    if pc + 1 >= len(code) or pc + 1 in targets:
+        return None
+    a, b = code[pc], code[pc + 1]
+    if a.op != "imm" or b.op not in ("add64", "sub64", "mul64"):
+        return None
+    k, c = a.args[0], a.args[1]
+    if b.args[2] != k or b.args[1] == k:
+        return None
+    if b.op == "mul64":
+        if c <= 0 or c & (c - 1):
+            return None
+        op, v = "lsli", c.bit_length() - 1
+    else:
+        v = c if b.op == "add64" else -c
+        op = "addi"
+        if v < 0:
+            op, v = "subi", -v
+        if v > 4095:
+            return None
+    if b.args[0] != k and not _dead_after(code, targets, pc + 2, k):
+        return None
+    return op, v
 
 # Scratch lives in the DATA area, not at a magic absolute address, so the same
 # offsets resolve for the interpreter (base 0x100) and for a real image (base
@@ -280,6 +336,14 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
               and tape.code[pc + 1].op == ".frame"
               and tape.code[pc + 1].args[0] == -8):
             tp.emit("pop", R(a[0]))
+            skip = True
+        elif arch == "arm64" and _fuse_imm(tape.code, targets, pc):
+            fop, v = _fuse_imm(tape.code, targets, pc)
+            b = tape.code[pc + 1]
+            for x in ("imm", b.op):                  # the facts both would ask
+                if x in C.OPS:
+                    facts(oracle, x, os_, arch, drive)
+            tp.emit(fop, R(b.args[0]), R(b.args[1]), v)
             skip = True
         elif o in ("jump", "jumpz", "call"):
             kind = JMPKIND[o]

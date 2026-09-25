@@ -16238,6 +16238,9 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
 #define TO_WINARGS 110
 #define TO_PUSH 111
 #define TO_POP 112
+#define TO_ADDI 113
+#define TO_SUBI 114
+#define TO_LSLI 115
 /* setreg's source kinds */
 #define SK_IMM 1
 #define SK_REG 2
@@ -16319,6 +16322,64 @@ int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k
     tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
     tkg_rc[g] = bkf_retconv; tkg_wi[g] = bkf_winimp;
     if (bkos == 2) tk(TO_WINREST, bk_save, bkf_ret, 0, 0);
+    return 0;
+}
+
+/* [J9] arm64: `imm rK, c` then add64/sub64/mul64 taking rK as its second
+   source is one instruction with c in it, when rK is provably dead -- the
+   same test as lower.py's _fuse_imm and _dead_after, line for line. */
+int bk_destfirst(char *sh) {
+    return strsame(sh, "rrr") || strsame(sh, "rr") || strsame(sh, "ri")
+        || strsame(sh, "rs") || strsame(sh, "rri") || strsame(sh, "rrii");
+}
+int bk_dead_after(int j, int r) {
+    int n; int k; int first; char *sh;
+    n = 0;
+    while (j < bkni && n < 32) {
+        if (bklab_first[j] >= 0) return 0;
+        sh = bk_nth(BKSHAPE, bkop[j]);
+        if (bk_is(bkop[j], ".write") || bk_destfirst(sh) == 0) return 0;
+        k = 0; first = 1;
+        while (sh[k]) {
+            if (sh[k] == 114) {
+                if (first == 0 && bkav[j * 8 + k] == r) return 0;
+                first = 0;
+            }
+            k = k + 1;
+        }
+        if (bkav[j * 8] == r) return 1;
+        j = j + 1; n = n + 1;
+    }
+    return 0;
+}
+int bkf_op; long bkf_v;               /* the fused form: TO_ADDI.., its constant */
+int bk_fuse_imm(int pc) {
+    int b; long c; long v; int k; int lg;
+    if (pc + 1 >= bkni || bklab_first[pc + 1] >= 0) return 0;
+    b = pc + 1;
+    if (bk_is(bkop[pc], "imm") == 0) return 0;
+    if (bk_is(bkop[b], "add64") == 0 && bk_is(bkop[b], "sub64") == 0 && bk_is(bkop[b], "mul64") == 0) return 0;
+    k = bkav[pc * 8]; c = bkav[pc * 8 + 1];
+    if (bkav[b * 8 + 2] != k || bkav[b * 8 + 1] == k) return 0;
+    if (bk_is(bkop[b], "mul64")) {
+        if (c <= 0 || (c & (c - 1))) return 0;
+        lg = 0; while (c > 1) { c = c / 2; lg = lg + 1; }
+        bkf_op = TO_LSLI; v = lg;
+    } else {
+        v = bk_is(bkop[b], "add64") ? c : 0 - c;
+        bkf_op = TO_ADDI;
+        if (v < 0) { bkf_op = TO_SUBI; v = 0 - v; }
+        if (v > 4095) return 0;
+    }
+    if (bkav[b * 8] != k && bk_dead_after(pc + 2, k) == 0) return 0;
+    bkf_v = v;
+    return 1;
+}
+int bk_genfacts(int op) {             /* the facts the generic path asks for op */
+    char nm2[16]; char *e; int L2;
+    e = bk_nth(BKOPS, op); L2 = 0;
+    while (e[L2] && L2 < 15) { nm2[L2] = e[L2]; L2 = L2 + 1; } nm2[L2] = 0;
+    if (bk_cop(nm2) >= 0) bk_facts(bk_cop(nm2));
     return 0;
 }
 
@@ -16456,6 +16517,10 @@ int bk_lower(void) {
                      && bk_is(bkop[pc + 1], ".frame") && bkav[(pc + 1) * 8] == 0 - 8) {
             tk(TO_POP, bk_rmap[bkav[pc * 8]], 0, 0, 0);
             pc = pc + 1;
+        } else { if (bkarch == 1 && bk_fuse_imm(pc)) {
+            bk_genfacts(bkop[pc]); bk_genfacts(bkop[pc + 1]);
+            tk(bkf_op, bk_rmap[bkav[(pc + 1) * 8]], bk_rmap[bkav[(pc + 1) * 8 + 1]], bkf_v, 0);
+            pc = pc + 1;
         } else {
             /* every other op, with its registers mapped; its facts are asked
                as lower.py asks them (jumps also ask reloc) */
@@ -16480,7 +16545,7 @@ int bk_lower(void) {
                 tkk[n * 4 + k] = bkak[pc * 8 + k];
                 k = k + 1;
             }
-        } } } } } } } } } }
+        } } } } } } } } } } }
         pc = pc + 1;
     }
     return tkn;
@@ -16773,6 +16838,9 @@ int bk_arm(int i, long off) {
         return 1;
     }
     if (op == TO_SETMEM) { a_adrp_add(A_IP1, pc, a[0] + bk_shift); ow(0xF9000000 | (A_IP1 << 5) | a[1]); return 1; }
+    if (op == TO_ADDI) { ow(0x91000000 | (a[2] << 10) | (a[1] << 5) | a[0]); return 1; }   /* [J9] */
+    if (op == TO_SUBI) { ow(0xD1000000 | (a[2] << 10) | (a[1] << 5) | a[0]); return 1; }
+    if (op == TO_LSLI) { ow(0xD3400000 | (((64 - a[2]) & 63) << 16) | ((63 - a[2]) << 10) | (a[1] << 5) | a[0]); return 1; }
     if (op == TO_ITOA) { a_itoa(pc, a[0] + bk_shift, a[1] + bk_shift, a[2] + bk_shift); return 1; }
     if (op == TO_ARGSAVE) {
         /* Linux leaves argc at [sp] and argv at sp+8; Darwin hands x0, x1 */
