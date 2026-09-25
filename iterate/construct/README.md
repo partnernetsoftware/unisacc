@@ -95,6 +95,18 @@ builds reject every copy with exit 1 and the matching diagnostic.
 - Beyond the contract: Python rejects a file that is not valid UTF-8, and the
   C reader does not check the encoding.
 
+## Deployment invariants: negative coverage
+
+`construct -T bias <tsv>` breaks b1 of unit 0 and must exit 3 on invariant 2
+(`b1 = 1 - constrained fields`), which is checked BEFORE the semantic
+enumeration so a bias fault is not reported as "not exact".  `-T act` breaks
+b1 the same way but skips invariant 2, and must exit 3 on invariant 1
+(activation in {0,1}).  With W1 one-hot per field, activation = b1 + fields
+hit <= 1 - t + t = 1, so invariant 1 follows from invariant 2; only a broken
+b1 can reach it, which is why the second case has to bypass the first.
+check.sh runs both, on the cc and the unisacc build, and counts only exit 3
+with that invariant's diagnostic.  `-T` is a test entry only.
+
 ## unisacc problems met on the way
 
 1. **Confirmed and fixed (2976a43).** A 3-D array indexed by variables

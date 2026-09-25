@@ -52,6 +52,7 @@ int ostride[MAXF];
 int olab[MAXOK][MAXH];
 int oseen[MAXOK];
 int dbg;
+int tbreak;                  /* test entry: 1 bias, 2 act (see build) */
 
 void die(char *msg) {
     printf("construct: %s: %s\n", gpath, msg);
@@ -774,6 +775,28 @@ void build(char *path) {
         printf("kind %s %s\n", hname[0], s0 ? "factored" : "dlist");
         for (j = 0; j < H; j = j + 1) { printf("unit %d:", j); prcube(ucube[j]); printf("\n"); }
     }
+    /* test entry (check.sh only): -T bias breaks b1 of unit 0; -T act breaks
+       it the same way but skips invariant 2, so that invariant 1 is the one
+       that must fire.  (With W1 one-hot per field, activation = b1 + fields
+       hit <= 1 - t + t = 1: invariant 1 follows from invariant 2, and only
+       a broken b1 can reach it.) */
+    if (tbreak && H > 0) b1[0] = b1[0] + 1;
+    /* deployment invariant 2, checked BEFORE the semantic enumeration so a
+       bias fault is reported as one (exit 3), not as "not exact": uns2.load
+       does not store b1, it derives b1 = 1 - (fields the unit's W1 touches);
+       the net must agree */
+    for (j = 0; j < H && tbreak != 2; j = j + 1) {
+        t = 0;
+        for (i = 0; i < nf; i = i + 1) {
+            found = 0;
+            for (v = 0; v < nv[i]; v = v + 1) if (w1(i, v, j)) found = 1;
+            t = t + found;
+        }
+        if (b1[j] != 1 - t) {
+            printf("construct: %s: deployment invariant broken: unit %d has b1 %d, 1 - constrained fields is %d\n", path, j, b1[j], 1 - t);
+            exit(3);
+        }
+    }
     /* verify over the FULL original domain; measure maxlogit as verify_int does */
     mxlog = 0;
     bad = 0;
@@ -802,20 +825,6 @@ void build(char *path) {
         if (cntmx != 1 || arg != olab[k][0]) bad = bad + 1;
     }
     if (bad) { printf("construct: %s: construction not exact (%d wrong)\n", path, bad); exit(1); }
-    /* deployment invariant 2: uns2.load does not store b1, it derives
-       b1 = 1 - (fields the unit's W1 touches); the net must agree */
-    for (j = 0; j < H; j = j + 1) {
-        t = 0;
-        for (i = 0; i < nf; i = i + 1) {
-            found = 0;
-            for (v = 0; v < nv[i]; v = v + 1) if (w1(i, v, j)) found = 1;
-            t = t + found;
-        }
-        if (b1[j] != 1 - t) {
-            printf("construct: %s: deployment invariant broken: unit %d has b1 %d, 1 - constrained fields is %d\n", path, j, b1[j], 1 - t);
-            exit(3);
-        }
-    }
 }
 
 void canon(void) {
@@ -963,6 +972,12 @@ int main(int argc, char **argv) {
     dbg = 0;
     for (ai = 1; ai < argc; ai = ai + 1) {
         if (streq(argv[ai], "-d")) dbg = 1;
+        else if (streq(argv[ai], "-T") && ai + 1 < argc) {
+            ai = ai + 1;
+            if (streq(argv[ai], "bias")) tbreak = 1;
+            else if (streq(argv[ai], "act")) tbreak = 2;
+            else { printf("construct: -T bias | -T act\n"); return 2; }
+        }
         else if (streq(argv[ai], "-u") && ai + 1 < argc && !upath) { ai = ai + 1; upath = argv[ai]; }
         else if (upath) {
             if (ns >= MAXS) { printf("construct: more than %d stages\n", MAXS); return 2; }

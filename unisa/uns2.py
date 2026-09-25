@@ -9,9 +9,12 @@ would be storing mostly zeros.
     per stage  : name[16] | h0 u16 | H u16 | nFields u8 | nHeads u8 | pad u16
                  fieldLens u16[nFields]
                  W1  : H * h0 bits, unit-major (the literal masks)
-                 per head: nClasses u16 | wBits u8 | pad u8
-                           presence H bits, then per present unit
-                           (classIdx, weight) packed at ceil(log2(nCls)) + wBits
+                 per head: nClasses u16 | wBits u8 | pad u8 | payloadLen u32
+                           payload: for each of the H units, an 8-bit count of
+                           its entries, then that many (classIdx, weight)
+                           packed at ceil(log2(nCls)) + wBits bits
+                           (an earlier note said "presence H bits": the code
+                           has always written the 8-bit count)
 
 Everything is byte-reproducible: no timestamps, no dict iteration order. [D-5]
 """

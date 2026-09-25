@@ -62,6 +62,21 @@ for c in "missing|keys do not cover" "duplicate|key repeats" "badlabel|not a cla
         fi
     done
 done
+# the deployment invariants must be able to fire: the test entry breaks b1
+# of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
+# invariant 1 is the one reached.  Only exit 3 with that invariant's
+# diagnostic counts.
+for c in "bias|has b1" "act|activation"; do
+    t=${c%%|*}; want=${c#*|}
+    for b in cc ua; do
+        B 30 "$T/c_$b" -T "$t" weights/gold/prec.tsv > "$T/inv.$t.$b" 2>&1; rc=$?
+        if [ $rc -eq 3 ] && grep -q "$want" "$T/inv.$t.$b"; then
+            echo "invariant negative $t $b fires: $(head -1 "$T/inv.$t.$b" | sed 's/.*broken: //')"
+        else
+            echo "invariant negative $t $b DID NOT FIRE (rc $rc): $(head -1 "$T/inv.$t.$b")"; fail=1
+        fi
+    done
+done
 rm -rf "$T"
 [ $fail = 0 ] && echo "construct check: ok" || echo "construct check: FAILED"
 exit $fail
