@@ -2664,6 +2664,10 @@ int emitrecipe(int r) {
     if (srcin(IRRECV + p, L, "print")) ec(46);
     if (srcin(IRRECV + p, L, "write")) ec(46);
     if (srcin(IRRECV + p, L, "exit")) ec(46);
+    if (srcin(IRRECV + p, L, "div")) ec(46);
+    if (srcin(IRRECV + p, L, "mod")) ec(46);
+    if (srcin(IRRECV + p, L, "udiv")) ec(46);
+    if (srcin(IRRECV + p, L, "umod")) ec(46);
     k = 0;
     while (k < L) { ec(IRRECV[p + k] & 255); k = k + 1; }
     return 0;
@@ -4376,6 +4380,7 @@ int cprec(int k);
 /* the walker's ladder starts at `|` (prec 3): || and && sit above it */
 int binop_level(int k) { int c; c = cprec(k); return c >= 3 ? c - 3 : 0 - 1; }
 
+int bs_done[64]; int bs_val[64];
 int emit_binop(int k) {
     pop1();
     /* narrow_pair on the Python side: an unsigned operation below 64 bits
@@ -4387,31 +4392,24 @@ int emit_binop(int k) {
         if (binwid == 4) en(4294967295);
         es("\n  @alu.and r0, r0, r2\n  @alu.and r1, r1, r2\n");
     } }
-    if (binuns) {
-        if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .udiv r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .umod r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  @alu.ult r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.ugt r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  @alu.ule r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.uge r0, r1, r0\n"); return 0; }
-        if (k == vfind(TOKV, NTOKV, ">>", 2)) { es("  @alu.lshr r0, r1, r0\n"); return 0; }
+    /* which alu flavour: the `binsel` table, keyed (operator, signedness),
+       asked once per pair [I3] -- this was a 23-branch chain */
+    {   int key[4]; int i; int c; char b[48]; char *f; int n; int j;
+        i = vfind(BF_BINSEL_0, NBF_BINSEL_0, TOKV + voff(TOKV, k), vlen(TOKV, k));
+        if (i < 0) i = vfind(BF_BINSEL_0, NBF_BINSEL_0, ">>", 2);
+        if (bs_done[i * 2 + (binuns ? 1 : 0)] == 0) {
+            key[0] = i; key[1] = binuns ? 1 : 0; key[2] = 0; key[3] = 0;
+            bs_val[i * 2 + (binuns ? 1 : 0)] = inf(S_BINSEL, key, 0);
+            bs_done[i * 2 + (binuns ? 1 : 0)] = 1;
+        }
+        c = bs_val[i * 2 + (binuns ? 1 : 0)];
+        f = BH_BINSEL_Y + voff(BH_BINSEL_Y, c); n = vlen(BH_BINSEL_Y, c);
+        j = 0; while ("  @alu."[j]) { b[j] = "  @alu."[j]; j = j + 1; }
+        while (n > 0 && j < 30) { b[j] = *f; f = f + 1; j = j + 1; n = n - 1; }
+        n = 0; while (" r0, r1, r0\n"[n]) { b[j] = " r0, r1, r0\n"[n]; j = j + 1; n = n + 1; }
+        b[j] = 0;
+        es(b);
     }
-    if (k == vfind(TOKV, NTOKV, "+", 1))  { es("  @alu.add r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "-", 1))  { es("  @alu.sub r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "*", 1))  { es("  @alu.mul r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "/", 1))  { es("  .div r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "%", 1))  { es("  .mod r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "<", 1))  { es("  @alu.lt r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, ">", 1))  { es("  @alu.gt r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "<=", 2)) { es("  @alu.le r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, ">=", 2)) { es("  @alu.ge r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "==", 2)) { es("  @alu.eq r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "!=", 2)) { es("  @alu.ne r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "&", 1))  { es("  @alu.and r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "|", 1))  { es("  @alu.or r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "^", 1))  { es("  @alu.xor r0, r1, r0\n"); return 0; }
-    if (k == vfind(TOKV, NTOKV, "<<", 2)) { es("  @alu.shl r0, r1, r0\n"); return 0; }
-    es("  @alu.shr r0, r1, r0\n");
     return 0;
 }
 
@@ -4893,7 +4891,7 @@ int binary(int level) {
         emit_binop(k);
         /* C99 6.5.6p9: the difference of two pointers counts ELEMENTS */
         if (lp) { if (curptr) { if (e > 1) { if (k == tidx("-", 1)) {
-            es("  @lit.imm r2, "); en(e); es("\n  .div r0, r0, r2\n");
+            es("  @lit.imm r2, "); en(e); es("\n  @alu.div r0, r0, r2\n");
         } } } }
         if (tyis(res, "ptr", 3) == 0) { if (tyuns(res)) zext(tysize(res)); }
         binuns = 0; binwid = 8;

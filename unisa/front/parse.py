@@ -2075,7 +2075,7 @@ class Walker:
         n = pty.to.size(self.sc.structs)
         if n != 1:
             self.em.imm(TMP, n)
-            self.em.emit(".div", ACC, ACC, TMP)
+            self.em.emit3("alu", "div", ACC, ACC, TMP)
 
     def ty_from(self, kind, t1, t2):
         if kind == "ptr":

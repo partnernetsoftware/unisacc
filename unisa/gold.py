@@ -306,7 +306,10 @@ IRSEL_MAP = {
             "ne": "ne", "neg": "sub64", "and": "and64", "or": "or64",
             "xor": "xor64", "shl": "shl64", "shr": "shr64",
             "ult": "ult64", "ule": "ule64", "ugt": "ult64_rev",
-            "uge": "ule64_rev", "lshr": "lshr64"},
+            "uge": "ule64_rev", "lshr": "lshr64",
+            # [I3] divide and remainder were written as raw `.div` text by
+            # both front ends -- the only binary ops that bypassed this table
+            "div": "div", "mod": "mod", "udiv": "udiv", "umod": "umod"},
     "mem": {"load": "load64", "store": "store64", "lea": "lea", "ld": "ld",
             "st": "st", "zero": "zero"},
     "ctrl": {"jump": "jump", "jumpz": "jumpz", "ret": "ret"},
@@ -430,6 +433,28 @@ def prec_label(op):
     """C99 6.5.5-6.5.14: the binding strength of a binary operator, 1 the
     loosest (||) to 10 the tightest (* / %); `none` for anything else."""
     return str(_PREC[op]) if op in _PREC else "none"
+
+
+# ---- binsel: which alu flavour a C binary operator is [I3] ---------------
+# (operator, signedness) -> the irsel flavour.  It was a 23-branch if-chain
+# in the C walker and the ALU/UNS dicts plus divmod_ in unisa/ir.py.
+BINSEL_OPS = ("+", "-", "*", "/", "%", "<", ">", "<=", ">=", "==", "!=",
+              "&", "|", "^", "<<", ">>")
+_BIN_S = {"+": "add", "-": "sub", "*": "mul", "/": "div", "%": "mod",
+          "<": "lt", ">": "gt", "<=": "le", ">=": "ge", "==": "eq",
+          "!=": "ne", "&": "and", "|": "or", "^": "xor", "<<": "shl",
+          ">>": "shr"}
+_BIN_U = {"/": "udiv", "%": "umod", "<": "ult", ">": "ugt", "<=": "ule",
+          ">=": "uge", ">>": "lshr"}
+BINSEL_FLAV = tuple(dict.fromkeys(list(_BIN_S.values()) + list(_BIN_U.values())))
+
+
+def binsel_label(op, sign):
+    """C99 6.5.5-6.5.14 on 64-bit registers: an unsigned operation differs
+    from a signed one only in division, remainder, ordering and >>."""
+    if sign == "u" and op in _BIN_U:
+        return _BIN_U[op]
+    return _BIN_S[op]
 
 
 class Stage:
@@ -579,6 +604,9 @@ def build():
                        C.nine,
                        dict(dims=(16, 8, 8), hidden=[48, 32], seed=7,
                             factor=12, bilinear=8))
+    S["binsel"] = Stage("binsel", [("op", BINSEL_OPS), ("sign", ("s", "u"))],
+                        [("y", BINSEL_FLAV, None)], _one(binsel_label),
+                        dict(d=6, hidden=[12], seed=67))
     S["prec"] = Stage("prec", [("op", PREC_OPS)], [("y", PREC_LEV, None)],
                       _one(prec_label), dict(d=6, hidden=[8], seed=61))
     S["opinfo"] = Stage("opinfo", [("op", OPINFO_OPS)],
@@ -596,6 +624,6 @@ STAGES = build()
 KEYWORDS_C = tuple(t for t in TOKS if t[0].isalpha() and t != "eof")
 
 TABLES = ("pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc",
-          "regmap", "tyinfo", "pfconv", "peep", "opinfo", "prec")
+          "regmap", "tyinfo", "pfconv", "peep", "opinfo", "prec", "binsel")
 STAGE_NETS = ("isel", "abi")
 ALL = TABLES + STAGE_NETS + ("combo",)

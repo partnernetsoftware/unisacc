@@ -33,18 +33,6 @@ ARGREGS = ("r0", "r1", "r2", "r3", "r4")
 CALLEE = "r5"
 
 # C operator -> (irsel family, flavor, swap operands?)
-ALU = {
-    "+": ("alu", "add", False), "-": ("alu", "sub", False),
-    "*": ("alu", "mul", False),
-    "<": ("alu", "lt", False), "<=": ("alu", "le", False),
-    ">": ("alu", "gt", False), ">=": ("alu", "ge", False),
-    "==": ("alu", "eq", False), "!=": ("alu", "ne", False),
-    "&": ("alu", "and", False), "|": ("alu", "or", False),
-    "^": ("alu", "xor", False), "<<": ("alu", "shl", False),
-    ">>": ("alu", "shr", False),
-}
-
-
 # irsel recipe name -> tape mnemonic (builtins carry a leading dot)
 RECIPE_OP = {
     "add64": "add64", "sub64": "sub64", "mul64": "mul64",
@@ -58,6 +46,7 @@ RECIPE_OP = {
     "and64": "and64", "or64": "or64", "xor64": "xor64",
     "shl64": "shl64", "shr64": "shr64",
     "ult64": "ult64", "ule64": "ule64", "lshr64": "lshr64",
+    "div": ".div", "mod": ".mod", "udiv": ".udiv", "umod": ".umod",
 }
 from .fp import OPS as _FOPS
 RECIPE_OP.update({op: op for op in _FOPS})     # the fpu recipes are the ops
@@ -154,7 +143,6 @@ class Emitter:
     def lea(self, reg, sym):
         self.emit(self.recipe("mem", "lea"), reg, sym)
 
-    UNS = {"<": "ult", "<=": "ule", ">": "ugt", ">=": "uge", ">>": "lshr"}
 
     # -- floating point [TP] ------------------------------------------------
     # A value's kind decides the op: "f64", "f32", or an integer kind.  Every
@@ -214,14 +202,15 @@ class Emitter:
         self.imm(TMP, 1)
         self.emit(self.recipe("alu", "xor"), ACC, ACC, TMP)
 
+    def binflav(self, op, uns):
+        """which alu flavour this operator is -- the `binsel` table [I3]"""
+        return self.o.ask("binsel", (op, "u" if uns else "s"))
+
     def binop(self, op, uns=False, width=8):
         """lhs on the stack, rhs in ACC -> result in ACC."""
-        fam, flav, swap = ALU[op]
-        if uns and op in self.UNS:
-            flav = self.UNS[op]
         self.pop(LHS)
         self.narrow_pair(uns, width)
-        self.emit3(fam, flav, ACC, LHS, ACC)
+        self.emit3("alu", self.binflav(op, uns), ACC, LHS, ACC)
 
     def bits_get(self, bitoff, width, signed, unit):
         """ACC holds the address of a bit-field's storage unit; leave the
@@ -297,10 +286,7 @@ class Emitter:
         self.emit(self.recipe("alu", "and"), LHS, LHS, TMP)
 
     def divmod_(self, op, uns=False, width=8):
-        self.pop(LHS)
-        self.narrow_pair(uns, width)
-        mn = (".div" if op == "/" else ".mod")
-        self.emit(("." + "u" + mn[1:]) if uns else mn, ACC, LHS, ACC)
+        self.binop(op, uns, width)
 
     def neg(self):
         self.emit(self.recipe("lit", "imm"), LHS, 0)
