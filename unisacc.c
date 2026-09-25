@@ -8789,8 +8789,8 @@ int oracle_pass(int dir) {
     while (s >= 0 && s < NSTAGE) {
         m = STAGE_M[s];
         h = 0;
-        while (h < 12) {
-            if (STAGE_NCLS[s * 12 + h] > 0) {
+        while (h < 16) {
+            if (STAGE_NCLS[s * 16 + h] > 0) {   /* HEADS_MAX, as the kernel indexes */
                 f = 0;
                 while (f < 4) {
                     lim[f] = f < m ? STAGE_VN[(s << 2) + f] : 1;
