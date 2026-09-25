@@ -591,3 +591,18 @@ whenever nq >= 1, and MAXR 62 < MAXU 128.  The k-prefix newunit needs no guard
 parse 14/0, the rest 0/0.  The patch-path guard is reached (pp).  Every other
 output is byte-identical to step 1, including the kept factored candidates of
 regmap (18), binsel (18) and parse (2).
+
+## type, step 3: capacity MAXOK 4352, MAXQ 3200 (2026-09-25)
+
+`MAXOK 4096 -> 4352`, `MAXQ 1024 -> 3200`, `QW` is now `(MAXQ + QB - 1) / QB`
+(= 52), not a literal.  The raw-key limit is a capacity check at the header,
+before `oseen`/`olab` are indexed: exit 4, `capacity: N raw keys so far, more
+than 4352` (it was a reader `die`, exit 1).  `-Q` now also covers the end of
+the capacity: nq 3161, 3162, 3163, 3199, 3200 and keys at the last word's
+boundary ((nqw-1)QB - 1, (nqw-1)QB) -- 13 sizes.  Negatives: quotient keys
+15^3 = 3375 > 3200 (raw 3375 <= 4352, groups 15 <= 62, so domain()'s check is
+the one reached; exit 4); raw keys 67 x 66 = 4422 > 4352 (exit 4); the
+field-group, class-count negatives and the 63-key positive are unchanged.
+All pass on cc, unisacc and UBSan.  13 stages' `-d`/`-u`/`-t` are
+byte-identical to step 2.  Static memory (`size -m`, `__common`):
+8,100,544 B -> 8,953,912 B (static, not RSS).

@@ -16,8 +16,8 @@
  * -d adds the intermediate dumps (quotient groups, decision list with ranks,
  * chosen units) so a divergence can be located at its first step.
  *
- * Scope: at most 3 fields, 4 heads and MAXQ (1024) quotient keys; a set of
- * quotient keys is QW (17) longs of QB (62) bits, see "quotient-key sets" below.  Checked stages: prec, reloc (one head) and tyinfo
+ * Scope: at most 3 fields, 4 heads, MAXOK raw keys and MAXQ quotient keys; a set
+ * of quotient keys is QW = ceil(MAXQ / QB) longs of QB (62) bits, see "quotient-key sets" below.  Checked stages: prec, reloc (one head) and tyinfo
  * (three heads: per-head candidates, pick, T4 cross-head sharing).  -t
  * prints which multi-head branches a stage took; README.md lists the ones
  * tyinfo does not reach.
@@ -30,10 +30,10 @@
 #define MAXV 128   /* raw values per field: storage only, never a bit index */
 #define MAXH 4
 #define MAXC 62   /* a class set is ONE long: class c and rank crank[c] < 62 -> bits <= 61 */
-#define MAXOK 4096
-#define MAXQ 1024  /* quotient keys; a key set is QW longs (qset below) */
+#define MAXOK 4352
+#define MAXQ 3200  /* quotient keys; a key set is QW longs (qset below) */
 #define QB 62      /* key bits per word: bits 0..61, never bit 62 or the sign bit 63 */
-#define QW 17      /* ceil(MAXQ / QB) = ceil(1024 / 62) */
+#define QW ((MAXQ + QB - 1) / QB)   /* ceil(MAXQ / QB) */
 #define MAXR 62
 #define MAXU 128
 #define MAXCAND 96
@@ -174,7 +174,10 @@ void load(char *path) {
             for (i = nf - 1; i >= 0; i = i - 1) {
                 ostride[i] = nok;
                 nok = nok * nv[i];
-                if (nok > MAXOK) die("more keys than this constructor holds");
+                if (nok > MAXOK) {   /* before oseen/olab are indexed: exit 4 */
+                    printf("construct: %s: capacity: %d raw keys so far, more than %d\n", gpath, nok, MAXOK);
+                    exit(4);
+                }
             }
             for (k = 0; k < nok; k = k + 1) oseen[k] = 0;
             continue;
@@ -292,21 +295,26 @@ void qsetall(void) {
     for (j = 0; j < nq; j = j + 1) qset(ALL, j);
 }
 
-/* -Q: the set operations at the word boundaries (keys QB-1, QB, 2QB-1, 2QB
-   and the last key: 61, 62, 123, 124, nq-1) for domain sizes around those
-   boundaries; every word must stay in [0, 2^62); exit 5 on the first failure */
+/* -Q: the set operations at the word boundaries (keys QB-1, QB, 2QB-1, 2QB,
+   the first key of the last word and the one before it, and the last key)
+   for domain sizes around those boundaries, at the start and at the end of
+   the capacity (MAXQ); every word must stay in [0, 2^62); exit 5 on the
+   first failure */
 long sa[QW], sb[QW], sc[QW];
 void qfail(int n, char *what) { printf("construct: qset self-test: nq %d: %s\n", n, what); exit(5); }
 void qselftest(void) {
-    int sizes[11], keys[6], t, i, j, n, cnt, prev, w;
+    int sizes[14], keys[8], t, i, j, n, cnt, prev, w;
     sizes[0] = 1; sizes[1] = QB - 1; sizes[2] = QB; sizes[3] = QB + 1; sizes[4] = 2 * QB - 1;
-    sizes[5] = 2 * QB; sizes[6] = 2 * QB + 1; sizes[7] = 528; sizes[8] = MAXQ - 1; sizes[9] = MAXQ;
-    sizes[10] = QW * QB;
-    for (t = 0; t < 11; t = t + 1) {
+    sizes[5] = 2 * QB; sizes[6] = 2 * QB + 1; sizes[7] = 528;
+    sizes[8] = (QW - 1) * QB - 1; sizes[9] = (QW - 1) * QB; sizes[10] = (QW - 1) * QB + 1;
+    sizes[11] = MAXQ - 1; sizes[12] = MAXQ;
+    sizes[13] = QW * QB;
+    for (t = 0; t < 14; t = t + 1) {
         nq = sizes[t];
-        if (nq > MAXQ) break;   /* QW * QB (1054) > MAXQ: not a legal domain */
+        if (nq > MAXQ) break;   /* QW * QB > MAXQ: not a legal domain */
         qsetall();
         keys[0] = 0; keys[1] = QB - 1; keys[2] = QB; keys[3] = 2 * QB - 1; keys[4] = 2 * QB; keys[5] = nq - 1;
+        keys[6] = (nqw - 1) * QB - 1; keys[7] = (nqw - 1) * QB;   /* the last word's boundary */
         if (qpopc(ALL) != nq) qfail(nq, "popcount of ALL");
         for (w = 0; w < QW; w = w + 1) {
             if (ALL[w] < 0 || (ALL[w] >> QB) != 0) qfail(nq, "ALL has bit 62 or 63 set");
@@ -317,8 +325,8 @@ void qselftest(void) {
         }
         qzero(sa);
         n = 0;
-        for (i = 0; i < 6; i = i + 1) if (keys[i] < nq && !qtest(sa, keys[i])) { qset(sa, keys[i]); n = n + 1; }
-        for (i = 0; i < 6; i = i + 1) if (keys[i] < nq && !qtest(sa, keys[i])) qfail(nq, "test after set");
+        for (i = 0; i < 8; i = i + 1) if (keys[i] >= 0 && keys[i] < nq && !qtest(sa, keys[i])) { qset(sa, keys[i]); n = n + 1; }
+        for (i = 0; i < 8; i = i + 1) if (keys[i] >= 0 && keys[i] < nq && !qtest(sa, keys[i])) qfail(nq, "test after set");
         if (qpopc(sa) != n) qfail(nq, "popcount");
         for (w = 0; w < nqw; w = w + 1) if (sa[w] < 0 || (sa[w] >> QB) != 0) qfail(nq, "set has bit 62 or 63");
         /* iterate in order: strictly ascending, every member once */

@@ -16,11 +16,12 @@ B 60 "$UA" -O2 iterate/construct/construct.c -b osx/arm64 -o "$T/c_ua" || { echo
 B 60 cc -std=c99 -O1 -w -fsanitize=undefined -fno-sanitize-recover=undefined -o "$T/c_san" iterate/construct/construct.c || { echo "ubsan build failed"; exit 1; }
 # quotient-key sets are QW-word bitsets of QB = 62 bits: the self-test (-Q)
 # checks set, test, and, or, andnot (tail cut), popcount, in-order
-# iteration, equality and bits 62/63 clear at keys QB-1, QB, 2QB-1, 2QB
-# and the last key, for nq 1, 61, 62, 63, 123, 124, 125, 528, 1023, 1024
+# iteration, equality and bits 62/63 clear at keys QB-1, QB, 2QB-1, 2QB,
+# the last word's boundary and the last key, for nq 1, 61, 62, 63, 123, 124,
+# 125, 528 and, at the end of MAXQ 3200 (QW 52), 3161, 3162, 3163, 3199, 3200
 for b in cc ua san; do
     B 30 "$T/c_$b" -Q > "$T/q.$b" 2>&1; rc=$?
-    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 10 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (10 sizes)"
+    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 13 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (13 sizes)"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
 done
 for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse; do
@@ -128,26 +129,43 @@ for b in cc ua; do
     B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capq.uns2" "$T/capq.tsv" > "$T/r.$b.out" 2>&1 || fail=1
     sed "s/^/capacity positive $b deployed /" "$T/r.$b.out"
 done
-# capacity NEGATIVE: more quotient keys than MAXQ (1024) must be rejected
+# capacity NEGATIVE: more quotient keys than MAXQ (3200) must be rejected
 # before any set is built: exit exactly 4 and the capacity diagnostic.
-# Fields of 11, 11 and 9 values, label class[(a + 3b + 5c) % 16]: a shift
+# Fields of 15, 15 and 15 values, label class[(a + 3b + 5c) % 16]: a shift
 # of one field's value by d changes the label by d, 3d or 5d mod 16, never
-# 0 for d <= 10, so no two values share a slice: 11 x 11 x 9 = 1089.
-awk -F'	' 'NR==1{print "# stage capn: 1089 keys, synthetic"; next}
-/^#head/{printf "#field\ta"; for(i=0;i<11;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<11;i++) printf "\tw%d", i
-  printf "\n#field\tc"; for(i=0;i<9;i++) printf "\tx%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\tc\t=> y"
-  for(a=0;a<11;a++) for(b=0;b<11;b++) for(x=0;x<9;x++) print "v" a "\tw" b "\tx" x "\t" c[(a+3*b+5*x)%16]; exit}' "$T/cap.src" > "$T/capn.tsv"
-for b in cc ua; do
+# 0 for d <= 14, so no two values share a slice: 15^3 = 3375 quotient keys.
+# 3375 raw keys <= MAXOK 4352 and 15 groups <= 62, so the reader and the
+# field-group check pass and domain()'s quotient-key check is the one reached.
+awk -F'	' 'NR==1{print "# stage capn: 3375 keys, synthetic"; next}
+/^#head/{printf "#field\ta"; for(i=0;i<15;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<15;i++) printf "\tw%d", i
+  printf "\n#field\tc"; for(i=0;i<15;i++) printf "\tx%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\tc\t=> y"
+  for(a=0;a<15;a++) for(b=0;b<15;b++) for(x=0;x<15;x++) print "v" a "\tw" b "\tx" x "\t" c[(a+3*b+5*x)%16]; exit}' "$T/cap.src" > "$T/capn.tsv"
+for b in cc ua san; do
     B 30 "$T/c_$b" "$T/capn.tsv" > "$T/capn.$b.out" 2>&1; rc=$?
-    if [ $rc -eq 4 ] && grep -q "capacity: 1089 quotient keys so far, more than 1024" "$T/capn.$b.out"; then
+    if [ $rc -eq 4 ] && grep -q "capacity: 3375 quotient keys so far, more than 3200" "$T/capn.$b.out" && ! grep -q 'runtime error' "$T/capn.$b.out"; then
         echo "capacity negative $b rejected: $(head -1 "$T/capn.$b.out")"
     else
         echo "capacity negative $b NOT A CAPACITY REJECTION (rc $rc): $(head -1 "$T/capn.$b.out")"; fail=1
     fi
 done
+# raw-key NEGATIVE: more raw keys than MAXOK (4352) must be rejected by the
+# reader at the header, before oseen/olab are indexed: exit exactly 4 and the
+# raw-key diagnostic.  Fields of 67 and 66 values (<= MAXV 128): 4422 keys.
+awk -F'	' 'NR==1{print "# stage capo: 4422 keys, synthetic"; next}
+/^#head/{printf "#field\ta"; for(i=0;i<67;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<66;i++) printf "\tw%d", i
+  printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
+  for(a=0;a<67;a++) for(b=0;b<66;b++) print "v" a "\tw" b "\t" c[(a+b)%16]; exit}' "$T/cap.src" > "$T/capo.tsv"
+for b in cc ua san; do
+    B 30 "$T/c_$b" "$T/capo.tsv" > "$T/capo.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: 4422 raw keys so far, more than 4352" "$T/capo.$b.out" && ! grep -q 'runtime error' "$T/capo.$b.out"; then
+        echo "raw-key negative $b rejected: $(head -1 "$T/capo.$b.out")"
+    else
+        echo "raw-key negative $b NOT A RAW-KEY REJECTION (rc $rc): $(head -1 "$T/capo.$b.out")"; fail=1
+    fi
+done
 # field-group NEGATIVE: a field's group set is one long, so a field may have
 # at most 62 value groups.  Raw values are legal (70 <= MAXV 128) and there
-# are 140 <= 1024 quotient keys, but field a has 70 groups: exit exactly 4
+# are 140 <= 3200 quotient keys, but field a has 70 groups: exit exactly 4
 # with the field-group diagnostic, from domain() before any group shift.
 # Label (a, b) = class[b ? 8 + a / 16 : a % 16] with 16 classes: the pair
 # (label(a,0), label(a,1)) = (a % 16, 8 + a / 16) is distinct for every a.
