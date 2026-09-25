@@ -4371,11 +4371,10 @@ int pf_call(int t) {
 }
 
 /* ---- binary expressions --------------------------------------------- */
-int BOP[16];
-int BLEV[16];
-int nbop;
 
-int binop_level(int k) { int i; i = 0; while (i < nbop) { if (BOP[i] == k) return BLEV[i]; i = i + 1; } return 0 - 1; }
+int cprec(int k);
+/* the walker's ladder starts at `|` (prec 3): || and && sit above it */
+int binop_level(int k) { int c; c = cprec(k); return c >= 3 ? c - 3 : 0 - 1; }
 
 int emit_binop(int k) {
     pop1();
@@ -5171,26 +5170,27 @@ int catom(void) {
 /* An integer constant expression (C99 6.6), with C's precedence.  It was
    a left-to-right chain of + - * /, so `N + 1 * 2` in an array bound was
    (N + 1) * 2, and `[1 && 1]` or `[1 ? 3 : 9]` were refused outright. */
+/* a binary operator's binding strength, 1 (||) to 10 (* / %), 0 for
+   anything else: the `prec` table's answer, asked once per token kind [I1].
+   It was a ladder of 18 comparisons here, and a second table beside it. */
+#define PR_MAX 128
+int pr_done[PR_MAX]; int pr_val[PR_MAX];
 int cprec(int k) {
-    if (k == tidx("||", 2)) return 1;
-    if (k == tidx("&&", 2)) return 2;
-    if (k == tidx("|", 1)) return 3;
-    if (k == tidx("^", 1)) return 4;
-    if (k == tidx("&", 1)) return 5;
-    if (k == tidx("==", 2)) return 6;
-    if (k == tidx("!=", 2)) return 6;
-    if (k == tidx("<", 1)) return 7;
-    if (k == tidx(">", 1)) return 7;
-    if (k == tidx("<=", 2)) return 7;
-    if (k == tidx(">=", 2)) return 7;
-    if (k == tidx("<<", 2)) return 8;
-    if (k == tidx(">>", 2)) return 8;
-    if (k == tidx("+", 1)) return 9;
-    if (k == tidx("-", 1)) return 9;
-    if (k == tidx("*", 1)) return 10;
-    if (k == tidx("/", 1)) return 10;
-    if (k == tidx("%", 1)) return 10;
-    return 0;
+    int key[4]; int i; int c; char *y;
+    if (k < 0 || k >= PR_MAX || k >= NTOKV) return 0;
+    if (pr_done[k]) return pr_val[k];
+    i = vfind(BF_PREC_0, NBF_PREC_0, TOKV + voff(TOKV, k), vlen(TOKV, k));
+    if (i < 0) i = vfind(BF_PREC_0, NBF_PREC_0, "other", 5);
+    key[0] = i; key[1] = 0; key[2] = 0; key[3] = 0;
+    c = inf(S_PREC, key, 0);
+    y = BH_PREC_Y + voff(BH_PREC_Y, c);
+    pr_val[k] = 0;
+    if (y[0] != 110) {                     /* "none" */
+        pr_val[k] = y[0] - 48;
+        if (y[1]) pr_val[k] = pr_val[k] * 10 + y[1] - 48;
+    }
+    pr_done[k] = 1;
+    return pr_val[k];
 }
 long cunary(void) {
     int w;
@@ -7101,7 +7101,6 @@ int unit(void) {
     return 0;
 }
 
-int bop(char *n, int L, int lev) { BOP[nbop] = tidx(n, L); BLEV[nbop] = lev; nbop = nbop + 1; return 0; }
 
 int setup_tables(void) {
     P_END = pidx("end", 3);          P_GLOBAL = pidx("global", 6);
@@ -7125,13 +7124,6 @@ int setup_tables(void) {
     T_EOF = tidx("eof", 3);          T_TYPE = tidx("type", 4);
     T_ID = tidx("id", 2);            T_NUM = tidx("num", 3);
     T_STR = tidx("str", 3);
-    nbop = 0;
-    bop("|", 1, 0);  bop("^", 1, 1);  bop("&", 1, 2);
-    bop("==", 2, 3); bop("!=", 2, 3);
-    bop("<", 1, 4);  bop(">", 1, 4);  bop("<=", 2, 4); bop(">=", 2, 4);
-    bop("<<", 2, 5); bop(">>", 2, 5);
-    bop("+", 1, 6);  bop("-", 1, 6);
-    bop("*", 1, 7);  bop("/", 1, 7);  bop("%", 1, 7);
     return 0;
 }
 

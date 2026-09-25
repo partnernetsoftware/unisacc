@@ -415,6 +415,23 @@ def opinfo_label(op):
     return {"simple": "1" if op in OPINFO_SIMPLE else "0", "acls": a, "bcls": b}
 
 
+# ---- prec: binary operator precedence [I1] -------------------------------
+# Four hand copies before this table: the C walker's BOP/BLEV and its
+# constant folder's cprec(), and parse.py's PREC and CPREC.
+PREC_OPS = ("||", "&&", "|", "^", "&", "==", "!=", "<", ">", "<=", ">=",
+            "<<", ">>", "+", "-", "*", "/", "%", "other")
+PREC_LEV = ("none", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10")
+_PREC = {"||": 1, "&&": 2, "|": 3, "^": 4, "&": 5, "==": 6, "!=": 6,
+         "<": 7, ">": 7, "<=": 7, ">=": 7, "<<": 8, ">>": 8, "+": 9, "-": 9,
+         "*": 10, "/": 10, "%": 10}
+
+
+def prec_label(op):
+    """C99 6.5.5-6.5.14: the binding strength of a binary operator, 1 the
+    loosest (||) to 10 the tightest (* / %); `none` for anything else."""
+    return str(_PREC[op]) if op in _PREC else "none"
+
+
 class Stage:
     def __init__(self, name, fields, heads, label, cfg, weight=None):
         self.name = name
@@ -562,6 +579,8 @@ def build():
                        C.nine,
                        dict(dims=(16, 8, 8), hidden=[48, 32], seed=7,
                             factor=12, bilinear=8))
+    S["prec"] = Stage("prec", [("op", PREC_OPS)], [("y", PREC_LEV, None)],
+                      _one(prec_label), dict(d=6, hidden=[8], seed=61))
     S["opinfo"] = Stage("opinfo", [("op", OPINFO_OPS)],
                         [("simple", ("0", "1"), None), ("acls", PEEP_A, None),
                          ("bcls", tuple(b for b in PEEP_B if b != "none"), None)],
@@ -577,6 +596,6 @@ STAGES = build()
 KEYWORDS_C = tuple(t for t in TOKS if t[0].isalpha() and t != "eof")
 
 TABLES = ("pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc",
-          "regmap", "tyinfo", "pfconv", "peep", "opinfo")
+          "regmap", "tyinfo", "pfconv", "peep", "opinfo", "prec")
 STAGE_NETS = ("isel", "abi")
 ALL = TABLES + STAGE_NETS + ("combo",)

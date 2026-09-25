@@ -1566,9 +1566,15 @@ class Walker:
         if not self.at("}"):
             self.stmt()
 
-    CPREC = [("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="),
-             ("<", ">", "<=", ">="), ("<<", ">>"), ("+", "-"),
-             ("*", "/", "%")]
+    def _prec(self, kind):
+        """a binary operator's binding strength, 1 (||) to 10 (* / %), 0 for
+        anything else -- the `prec` table's answer, asked once per kind [I1]"""
+        memo = self.__dict__.setdefault("_precmemo", {})
+        if kind not in memo:
+            from ..gold import PREC_OPS
+            y = self.o.ask("prec", (kind if kind in PREC_OPS else "other",))
+            memo[kind] = 0 if y == "none" else int(y)
+        return memo[kind]
 
     def const_expr(self, level=0):
         """Constant folding for case labels and array bounds.  Array sizes are
@@ -1584,10 +1590,10 @@ class Walker:
                 b = self.const_expr(0)
                 return a if v else b
             return v
-        if level >= len(self.CPREC):
+        if level > 10:
             return self.const_atom()
         v = self.const_expr(level + 1)
-        while self.peek().kind in self.CPREC[level]:
+        while self._prec(self.peek().kind) == level:
             op = self.next().kind
             r = self.const_expr(level + 1)
             if op == "+":
@@ -1974,11 +1980,9 @@ class Walker:
             ty = I32
         return ty
 
-    PREC = [("|",), ("^",), ("&",), ("==", "!="),
-            ("<", ">", "<=", ">="), ("<<", ">>"), ("+", "-"), ("*", "/", "%")]
-
     def binary(self, level):
-        if level >= len(self.PREC):
+        # level 0 is `|` (prec 3): || and && are the ladder above this one
+        if level >= 8:
             if self._pre is not None:            # parsed already, by assign
                 t, self._pre = self._pre, None
             else:
@@ -1986,7 +1990,7 @@ class Walker:
             self.load_if_lval()
             return t
         ty = self.binary(level + 1)
-        while self.peek().kind in self.PREC[level]:
+        while self._prec(self.peek().kind) == level + 3:
             self.load_if_lval()
             op = self.next().kind
             self.em.push()
