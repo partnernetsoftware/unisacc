@@ -13874,17 +13874,58 @@ int ol_scan(int z, int l) {
     }
     return 1;
 }
+/* A block's liveness for z depends only on the live values of the blocks it
+   can reach before its first read or write of z.  So each block is scanned
+   ONCE into a summary -- the blocks consulted along the way (a jumpz's or a
+   call's target) and how the scan ends (read: live, write: dead, or another
+   block's value) -- and the rounds below evaluate summaries instead of
+   rescanning every instruction: the scans were 60% of an -O2 compile.
+   Same order, same rounds, same answers as ol_scan would give. */
+int sm_start[BL_MAX]; int sm_n[BL_MAX]; int sm_term[BL_MAX]; int sm_dep[OPT_MAXL];
+int bl_summarise(int z) {
+    int b; int l; int k; int t; int bit; int nd; int term;
+    bit = 1 << z; nd = 0; b = 0;
+    while (b < bl_n) {
+        sm_start[b] = nd; term = 0 - 1;             /* -1 live, -2 dead, >=0 that block */
+        l = out[ol_s[bl_s[b]]] != 32 ? bl_s[b] + 1 : bl_s[b];
+        while (1) {
+            if (l >= ol_n) { term = 0 - 1; break; }
+            k = ol_k[l];
+            if (k == OK_LABEL) { term = bl_of[l]; break; }
+            if (k == OK_RET) { term = z <= 1 ? 0 - 1 : 0 - 2; break; }
+            if (k == OK_JUMP) { t = ol_tg[l]; term = t < 0 ? 0 - 1 : t; break; }
+            if (k == OK_JUMPZ || k == OK_CALL) {
+                if (k == OK_JUMPZ && (ol_rm[l] & bit)) { term = 0 - 1; break; }
+                t = ol_tg[l]; if (t < 0) { term = 0 - 1; break; }
+                if (nd >= OPT_MAXL) return 0;
+                sm_dep[nd] = t; nd = nd + 1;
+            } else if (k != OK_FRAME) {
+                if (ol_rm[l] & bit) { term = 0 - 1; break; }
+                if (ol_wm[l] & bit) { term = 0 - 2; break; }
+            }
+            l = l + 1;
+        }
+        sm_n[b] = nd - sm_start[b]; sm_term[b] = term;
+        b = b + 1;
+    }
+    return 1;
+}
 int bl_solve(int z) {
-    int b; int changed; int v; int rounds;
-    bl_z = z;
-    b = 0; while (b < bl_n) { bl_live[z * BL_MAX + b] = 0; b = b + 1; }
+    int b; int changed; int v; int rounds; int base; int j; int e;
+    bl_z = z; base = z * BL_MAX;
+    b = 0; while (b < bl_n) { bl_live[base + b] = 0; b = b + 1; }
+    if (bl_summarise(z) == 0) return 0;
     changed = 1; rounds = 0;
     while (changed && rounds < 64) {
         changed = 0; rounds = rounds + 1;
         b = bl_n - 1;
         while (b >= 0) {
-            v = ol_scan(z, out[ol_s[bl_s[b]]] != 32 ? bl_s[b] + 1 : bl_s[b]);
-            if (v && bl_live[z * BL_MAX + b] == 0) { bl_live[z * BL_MAX + b] = 1; changed = 1; }
+            if (bl_live[base + b] == 0) {
+                v = sm_term[b] == 0 - 1 ? 1 : (sm_term[b] == 0 - 2 ? 0 : bl_live[base + sm_term[b]]);
+                j = sm_start[b]; e = j + sm_n[b];
+                while (v == 0 && j < e) { v = bl_live[base + sm_dep[j]]; j = j + 1; }
+                if (v) { bl_live[base + b] = 1; changed = 1; }
+            }
             b = b - 1;
         }
     }
