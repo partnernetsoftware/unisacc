@@ -935,3 +935,37 @@ chosen (71 units); T5 104 calls, 32 None, 72 kept, 28 early base
 rejections, 0 patch; 4 selections, pick moved 8 starts; T4 3 rounds, 6
 lists accepted; H 73.  `__common` 34,974,776 B.  Batches: 6.6 / 9.5 /
 29.7 / 14.9 s, 36 receipts (17 stages + 19 globals).
+
+## combo, step 2: candidate rows are MAXCU = MAXR wide (2026-09-25)
+
+Candidate ci, unit u now lives at row `ci * MAXCU + u` with `MAXCU MAXR`
+(was `ci * MAXU + u`): `ccube` and `cw` declarations, every read and write
+(rep_from_dl, rep_factored's k prefix / base / patch, headfail's hfm fill,
+total_units, share, the net's unit merge, the T4 rule-hit test) and
+newunit.  MAXU still sizes total_units' `ucube`, share's `pall`, T4's
+`pool`, the net's `b1`/`W2`/H and `hfm`.
+
+Why a candidate never has more than nr <= MAXR units (nr = the current
+head's decision-list rule count, the only list the candidate is built from):
+
+- rep_from_dl: one unit per DISTINCT rule cube; merging equal cubes only
+  adds weights, so cn <= nr.
+- rep_factored, k prefix: `if (k > nr) return 0` precedes the k newunit
+  calls, so cn = k <= nr.
+- base path: `if (cn[ci] >= nr) return 0` (early rejection, Python's
+  `len(units) >= cap` with cap = nr) precedes each newunit; patch path: the
+  same test precedes each newunit.  Both return at cap = nr.
+- nr <= MAXR: decision_list exits 4 before rule MAXR + 1 is written.
+
+Guarded in code: newunit dies (`internal: candidate unit beyond cap = nr
+rules`) if `u >= nr || nr > MAXCU`, before the row is written; rep_factored's
+entry check is `nr in 1..MAXCU` (exit 4); main keeps `MAXR <= MAXU`.  The
+newunit guard is not reached by any table (uncovered, by the argument
+above).
+
+Gate: a frozen baseline taken before this step (cc, unisacc, UBSan builds;
+`-d`, `-u` output + blob, `-t` for 17 gold stages and 20 synthetic tables
+incl. the negatives: 408 files) is byte-identical after it (0 differ), and
+unisacc and UBSan agree with cc on every file.  `__common` 34,974,776 ->
+**27,438,136 B** (size -m, cc -O2).  Batches 6.6 / 9.5 / 29.7 / 15.2 s, 36
+receipts.

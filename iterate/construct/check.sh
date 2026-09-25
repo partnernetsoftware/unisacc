@@ -180,7 +180,7 @@ done
 # and a running sum of 2^60 crossing it must be rejected by the guard (exit
 # exactly 6, the overflow diagnostic), never by a UBSan report or a signal.
 # The static half: the four accumulation sites are ladd calls (README).
-nl=$(grep -cE '(z\[c\]|cw\[ci \* MAXU \+ found\]\[rl\[r\]\]) = ladd\(' iterate/construct/construct.c)
+nl=$(grep -cE '(z\[c\]|cw\[ci \* MAXCU \+ found\]\[rl\[r\]\]) = ladd\(' iterate/construct/construct.c)
 raw=$(grep -cE 'z\[c\] = z\[c\] \+|= cw\[.*\] \+' iterate/construct/construct.c)
 if [ "$nl" = 4 ] && [ "$raw" = 0 ]; then echo "sum sites: 4 accumulations call ladd (ranks, rep_from_dl, headfail, verifier)"; P "g sum sites"
 else echo "sum sites: expected 4 ladd accumulations and 0 raw ones, found $nl and $raw"; fail=1; fi

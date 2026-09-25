@@ -41,6 +41,7 @@
 #define GW 2       /* ceil(MAXG / 62) */
 #define MAXR 96   /* decision-list rules; <= MAXU (rep_factored cap = nr units), checked in main */
 #define MAXU 128
+#define MAXCU MAXR  /* candidate row capacity: a candidate has <= nr <= MAXR units (README) */
 #define MAXCAND 288  /* candidate slots, a global count over all heads and T4 rounds; abi needs
                         270 under its construction order (README) -- not a general bound */
 #define BUFSZ 262144
@@ -913,18 +914,21 @@ void ranks(void) {
 
 /* ------------------------------------------------------- representations -- */
 /* a representation: units, each a cube and W2 weights per class (0 = none).
-   Candidate ci, unit u lives at row ci * MAXU + u: flat 2-D, because unisacc
+   Candidate ci, unit u lives at row ci * MAXCU + u (MAXCU = MAXR): flat 2-D, because unisacc
    (at 8d4011c) crashes on a 3-D array indexed by variables. */
 int ncand;
 int cn[MAXCAND];
-long ccube[MAXCAND * MAXU][MAXF * GW];
-long cw[MAXCAND * MAXU][MAXC];
+long ccube[MAXCAND * MAXCU][MAXF * GW];
+long cw[MAXCAND * MAXCU][MAXC];
 
 int newunit(int ci, long *cube) {
     int u = cn[ci], c;
-    if (u >= MAXU) die("more units than this constructor holds");
-    cpcube(ccube[ci * MAXU + u], cube);
-    for (c = 0; c < MAXC; c = c + 1) cw[ci * MAXU + u][c] = 0;
+    /* every caller adds a unit only while cn[ci] < nr (README, candidate
+       rows): rep_from_dl one per distinct rule cube, the k prefix k <= nr,
+       the base and patch paths stop at cap = nr.  nr <= MAXR = MAXCU. */
+    if (u >= nr || nr > MAXCU) die("internal: candidate unit beyond cap = nr rules");
+    cpcube(ccube[ci * MAXCU + u], cube);
+    for (c = 0; c < MAXC; c = c + 1) cw[ci * MAXCU + u][c] = 0;
     cn[ci] = u + 1;
     return u;
 }
@@ -935,9 +939,9 @@ void rep_from_dl(int ci) {
     sumwhat = "rep_from_dl merged cube weight";
     for (r = 0; r < nr; r = r + 1) {
         found = -1;
-        for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXU + u], rc[r])) { found = u; break; }
+        for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXCU + u], rc[r])) { found = u; break; }
         if (found < 0) found = newunit(ci, rc[r]);
-        cw[ci * MAXU + found][rl[r]] = ladd(cw[ci * MAXU + found][rl[r]], bit(lv[r]));
+        cw[ci * MAXCU + found][rl[r]] = ladd(cw[ci * MAXCU + found][rl[r]], bit(lv[r]));
     }
 }
 
@@ -972,13 +976,13 @@ long hfm[MAXU][QW];
 int headfail(int ci, int *badj) {
     long z[MAXC], mx;
     int u, j, c, nb = 0, cntmx, arg;
-    for (u = 0; u < cn[ci]; u = u + 1) cubemask(ccube[ci * MAXU + u], hfm[u]);
+    for (u = 0; u < cn[ci]; u = u + 1) cubemask(ccube[ci * MAXCU + u], hfm[u]);
     sumwhat = "headfail z";
     for (j = 0; j < nq; j = j + 1) {
         for (c = 0; c < ncl[ch]; c = c + 1) z[c] = 0;
         for (u = 0; u < cn[ci]; u = u + 1)
             if (qtest(hfm[u], j))
-                for (c = 0; c < ncl[ch]; c = c + 1) z[c] = ladd(z[c], cw[ci * MAXU + u][c]);
+                for (c = 0; c < ncl[ch]; c = c + 1) z[c] = ladd(z[c], cw[ci * MAXCU + u][c]);
         mx = z[0]; arg = 0;
         for (c = 1; c < ncl[ch]; c = c + 1) if (z[c] > mx) { mx = z[c]; arg = c; }
         cntmx = 0;
@@ -1071,10 +1075,10 @@ int rep_factored(int ci, int pi, int merge, int k) {
     long sets[MAXF * GW], pr[GW];
     int cnw, i, u, pp, j, code, fi, f, x, ngv, nbk, b, t, a, tmp, cap, it, nb, prod, cnt, s, e;
     int badj[MAXQ];
-    /* Early rejection needs cap = nr > 0 and cap <= MAXU: then no candidate
-       here passes nr units, so newunit's MAXU die cannot fire first. */
-    if (nr <= 0 || nr > MAXU) {
-        printf("construct: %s: capacity: rep_factored cap %d rules, outside 1..%d units\n", gpath, nr, MAXU);
+    /* Early rejection needs cap = nr > 0 and cap <= MAXCU: then no candidate
+       here passes nr units, so newunit's row guard cannot fire first. */
+    if (nr <= 0 || nr > MAXCU) {
+        printf("construct: %s: capacity: rep_factored cap %d rules, outside 1..%d units\n", gpath, nr, MAXCU);
         exit(4);
     }
     cn[ci] = 0;
@@ -1084,7 +1088,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
         if (k > nr) return 0;
         for (i = 0; i < k; i = i + 1) {
             u = newunit(ci, rc[i]);
-            cw[ci * MAXU + u][rl[i]] = bit(k + 1 - i);
+            cw[ci * MAXCU + u][rl[i]] = bit(k + 1 - i);
             cubemask(rc[i], ftmp);
             qor(fcov, fcov, ftmp);
         }
@@ -1169,7 +1173,7 @@ int rep_factored(int ci, int pi, int merge, int k) {
                    >= cap: reaching cap here already decides None */
                 if (cn[ci] >= nr) { tfearlyb = tfearlyb + 1; return 0; }
                 u = newunit(ci, sets);
-                for (i = 0; i < ncl[ch]; i = i + 1) if (ws_test(bcls[b], i)) cw[ci * MAXU + u][i] = 1;
+                for (i = 0; i < ncl[ch]; i = i + 1) if (ws_test(bcls[b], i)) cw[ci * MAXCU + u][i] = 1;
                 s = e;
             }
         }
@@ -1183,11 +1187,11 @@ int rep_factored(int ci, int pi, int merge, int k) {
             j = badj[t];
             for (i = 0; i < nf; i = i + 1) { ws_zero(sets + i * GW, gnw[i], GW); ws_set(sets + i * GW, qk[j][i]); }
             cnt = 0;
-            for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXU + u], sets)) cnt = 1;
+            for (u = 0; u < cn[ci]; u = u + 1) if (samecube(ccube[ci * MAXCU + u], sets)) cnt = 1;
             if (cnt) return 0;
             if (cn[ci] >= nr) { tfearlyp = tfearlyp + 1; return 0; }
             u = newunit(ci, sets);
-            cw[ci * MAXU + u][qlab[ch][j]] = bit(k + 2);
+            cw[ci * MAXCU + u][qlab[ch][j]] = bit(k + 2);
         }
     }
     return 0;
@@ -1230,13 +1234,13 @@ int total_units(int *sel) {
         ci = hc[h][sel[h]];
         for (u = 0; u < cn[ci]; u = u + 1) {
             dup = 0;
-            for (v = 0; v < n; v = v + 1) if (samecube(ucube[v], ccube[ci * MAXU + u])) { dup = 1; break; }
+            for (v = 0; v < n; v = v + 1) if (samecube(ucube[v], ccube[ci * MAXCU + u])) { dup = 1; break; }
             if (!dup) {
                 if (n >= MAXU) {   /* pick's total_units: exit 4 */
                     printf("construct: %s: capacity: a selection has more than %d distinct units\n", gpath, MAXU);
                     exit(4);
                 }
-                cpcube(ucube[n], ccube[ci * MAXU + u]);
+                cpcube(ucube[n], ccube[ci * MAXCU + u]);
                 n = n + 1;
             }
         }
@@ -1396,10 +1400,10 @@ void share(void) {
             ci = hc[h][chosen[h]];
             for (u = 0; u < cn[ci]; u = u + 1) {
                 dup = 0;
-                for (v = 0; v < nall; v = v + 1) if (samecube(pall[v], ccube[ci * MAXU + u])) { dup = 1; break; }
+                for (v = 0; v < nall; v = v + 1) if (samecube(pall[v], ccube[ci * MAXCU + u])) { dup = 1; break; }
                 if (!dup) {
                     if (nall >= MAXU) die("more units than this constructor holds");
-                    cpcube(pall[nall], ccube[ci * MAXU + u]);
+                    cpcube(pall[nall], ccube[ci * MAXCU + u]);
                     nall = nall + 1;
                 }
             }
@@ -1414,7 +1418,7 @@ void share(void) {
             npool = 0;
             for (v = 0; v < nall; v = v + 1) {
                 dup = 0;
-                for (u = 0; u < cn[ci]; u = u + 1) if (samecube(pall[v], ccube[ci * MAXU + u])) { dup = 1; break; }
+                for (u = 0; u < cn[ci]; u = u + 1) if (samecube(pall[v], ccube[ci * MAXCU + u])) { dup = 1; break; }
                 if (!dup) { cpcube(pool[npool], pall[v]); npool = npool + 1; }
             }
             for (a = 1; a < npool; a = a + 1) {
@@ -1488,16 +1492,16 @@ void build(char *path) {
         tunits = tunits + cn[ci];
         for (u = 0; u < cn[ci]; u = u + 1) {
             found = -1;
-            for (j = 0; j < H; j = j + 1) if (samecube(ucube[j], ccube[ci * MAXU + u])) { found = j; break; }
+            for (j = 0; j < H; j = j + 1) if (samecube(ucube[j], ccube[ci * MAXCU + u])) { found = j; break; }
             if (found < 0) {
                 if (H >= MAXU) die("more units than this constructor holds");
                 found = H;
-                cpcube(ucube[H], ccube[ci * MAXU + u]);
+                cpcube(ucube[H], ccube[ci * MAXCU + u]);
                 for (a = 0; a < nh; a = a + 1) for (c = 0; c < MAXC; c = c + 1) W2[a * MAXU + H][c] = 0;
                 b1[H] = -(nlits(ucube[H]) - 1);
                 H = H + 1;
             }
-            for (c = 0; c < ncl[h]; c = c + 1) if (cw[ci * MAXU + u][c]) W2[h * MAXU + found][c] = cw[ci * MAXU + u][c];
+            for (c = 0; c < ncl[h]; c = c + 1) if (cw[ci * MAXCU + u][c]) W2[h * MAXU + found][c] = cw[ci * MAXCU + u][c];
         }
     }
     h0 = 0;
@@ -1584,7 +1588,7 @@ void trace(void) {
             for (v = 0; v < nh; v = v + 1) {
                 if (v == h) continue;
                 for (u = 0; u < cn[hc[v][chosen[v]]]; u = u + 1)
-                    if (samecube(rc[r], ccube[hc[v][chosen[v]] * MAXU + u])) hit = 1;
+                    if (samecube(rc[r], ccube[hc[v][chosen[v]] * MAXCU + u])) hit = 1;
             }
             x = x + hit;
         }
