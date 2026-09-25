@@ -138,6 +138,8 @@ def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
         return out
     if o in ALU3:
         return w(ALU3[o] | (N(a[2]) << 16) | (N(a[1]) << 5) | N(a[0]))
+    if o == "sext":                                 # sbfm Xd, Xn, #0, #8w-1 [J9]
+        return w(0x93400000 | ((8 * a[2] - 1) << 10) | (N(a[1]) << 5) | N(a[0]))
     if o == "addi":                                 # add Xd, Xn, #imm12 [J9]
         return w(0x91000000 | (a[2] << 10) | (N(a[1]) << 5) | N(a[0]))
     if o == "subi":                                 # sub Xd, Xn, #imm12

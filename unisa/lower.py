@@ -42,6 +42,24 @@ def _dead_after(code, targets, j, r):
     return False
 
 
+def _sext_trip(code, targets, pc):
+    """[J9] `.frame 8; .st [r7+0], rX, W; .ld rY, [r7+0], W; .frame -8` --
+    the walker's truncation of a return value -- is rY = rX sign-extended
+    from W bytes (.ld sign-extends), one sbfm on arm64.  The slot is below
+    the stack pointer afterwards, so nothing reads it.  (X, Y, W) or None."""
+    if pc + 3 >= len(code) or any(pc + k in targets for k in (1, 2, 3)):
+        return None
+    f, st, ld, g = code[pc], code[pc + 1], code[pc + 2], code[pc + 3]
+    if (f.op != ".frame" or f.args[0] != 8 or g.op != ".frame" or g.args[0] != -8
+            or st.op != ".st" or ld.op != ".ld"):
+        return None
+    if st.args[0] != "r7" or st.args[1] != 0 or ld.args[1] != "r7" or ld.args[2] != 0:
+        return None
+    if st.args[3] != ld.args[3] or st.args[3] not in (1, 2, 4):
+        return None
+    return st.args[2], ld.args[0], st.args[3]
+
+
 def _fuse_imm(code, targets, pc):
     """(op, c) for the fused form of code[pc], code[pc+1], or None."""
     if pc + 1 >= len(code) or pc + 1 in targets:
@@ -244,12 +262,12 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
     at_pc = {}
     for name, at in tape.labels.items():
         at_pc.setdefault(at, []).append(name)
-    skip = False
+    skip = 0
     for pc, ins in enumerate(tape.code):
         for name in at_pc.get(pc, ()):
             tp.labels[name] = len(tp.code)
-        if skip:                     # the second half of a fused pair
-            skip = False
+        if skip:                     # the rest of a fused group
+            skip -= 1
             continue
         if pc == entry_pc:
             # The tape's SP is a register; a real process has a real stack, so
@@ -330,13 +348,20 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
               and tape.code[pc + 1].args[1] == 0):
             # `.frame 8; store64 [r7+0], r` is a push -- one byte, or two
             tp.emit("push", R(tape.code[pc + 1].args[2]))
-            skip = True
+            skip = 1
         elif (arch == "x86_64" and o == "load64" and a[1] == "r7" and a[2] == 0
               and pc + 1 < len(tape.code) and pc + 1 not in targets
               and tape.code[pc + 1].op == ".frame"
               and tape.code[pc + 1].args[0] == -8):
             tp.emit("pop", R(a[0]))
-            skip = True
+            skip = 1
+        elif arch == "arm64" and _sext_trip(tape.code, targets, pc):
+            x, y, wd = _sext_trip(tape.code, targets, pc)
+            for q in range(4):                       # the facts all four would ask
+                if tape.code[pc + q].op in C.OPS:
+                    facts(oracle, tape.code[pc + q].op, os_, arch, drive)
+            tp.emit("sext", R(y), R(x), wd)
+            skip = 3
         elif arch == "arm64" and _fuse_imm(tape.code, targets, pc):
             fop, v = _fuse_imm(tape.code, targets, pc)
             b = tape.code[pc + 1]
@@ -344,7 +369,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                 if x in C.OPS:
                     facts(oracle, x, os_, arch, drive)
             tp.emit(fop, R(b.args[0]), R(b.args[1]), v)
-            skip = True
+            skip = 1
         elif o in ("jump", "jumpz", "call"):
             kind = JMPKIND[o]
             rk = oracle.ask("reloc", (kind, arch))             # [L-1]

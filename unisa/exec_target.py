@@ -199,6 +199,11 @@ class Machine:
                     R[a[0]] = u64(R[a[1]] + R[a[2]])
                 elif o == "sub64":
                     R[a[0]] = u64(R[a[1]] - R[a[2]])
+                elif o == "sext":                   # [J9] the return truncation
+                    v = R[a[1]] & ((1 << (8 * a[2])) - 1)
+                    if v >> (8 * a[2] - 1):
+                        v -= 1 << (8 * a[2])
+                    R[a[0]] = u64(v)
                 elif o == "addi":                   # [J9] fused imm forms
                     R[a[0]] = u64(R[a[1]] + a[2])
                 elif o == "subi":

@@ -16241,6 +16241,7 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
 #define TO_ADDI 113
 #define TO_SUBI 114
 #define TO_LSLI 115
+#define TO_SEXT 116
 /* setreg's source kinds */
 #define SK_IMM 1
 #define SK_REG 2
@@ -16351,6 +16352,21 @@ int bk_dead_after(int j, int r) {
         j = j + 1; n = n + 1;
     }
     return 0;
+}
+/* [J9] `.frame 8; .st [r7+0], rX, W; .ld rY, [r7+0], W; .frame -8` is
+   rY = rX sign-extended from W bytes: lower.py's _sext_trip */
+int bk_sext_trip(int pc) {
+    int st; int ld;
+    if (pc + 3 >= bkni) return 0;
+    if (bklab_first[pc + 1] >= 0 || bklab_first[pc + 2] >= 0 || bklab_first[pc + 3] >= 0) return 0;
+    st = pc + 1; ld = pc + 2;
+    if (bk_is(bkop[pc], ".frame") == 0 || bkav[pc * 8] != 8) return 0;
+    if (bk_is(bkop[pc + 3], ".frame") == 0 || bkav[(pc + 3) * 8] != 0 - 8) return 0;
+    if (bk_is(bkop[st], ".st") == 0 || bk_is(bkop[ld], ".ld") == 0) return 0;
+    if (bkav[st * 8] != 7 || bkav[st * 8 + 1] != 0 || bkav[ld * 8 + 1] != 7 || bkav[ld * 8 + 2] != 0) return 0;
+    if (bkav[st * 8 + 3] != bkav[ld * 8 + 3]) return 0;
+    if (bkav[st * 8 + 3] != 1 && bkav[st * 8 + 3] != 2 && bkav[st * 8 + 3] != 4) return 0;
+    return 1;
 }
 int bkf_op; long bkf_v;               /* the fused form: TO_ADDI.., its constant */
 int bk_fuse_imm(int pc) {
@@ -16517,6 +16533,10 @@ int bk_lower(void) {
                      && bk_is(bkop[pc + 1], ".frame") && bkav[(pc + 1) * 8] == 0 - 8) {
             tk(TO_POP, bk_rmap[bkav[pc * 8]], 0, 0, 0);
             pc = pc + 1;
+        } else { if (bkarch == 1 && bk_sext_trip(pc)) {
+            k = 0; while (k < 4) { bk_genfacts(bkop[pc + k]); k = k + 1; }
+            tk(TO_SEXT, bk_rmap[bkav[(pc + 2) * 8]], bk_rmap[bkav[(pc + 1) * 8 + 2]], bkav[(pc + 1) * 8 + 3], 0);
+            pc = pc + 3;
         } else { if (bkarch == 1 && bk_fuse_imm(pc)) {
             bk_genfacts(bkop[pc]); bk_genfacts(bkop[pc + 1]);
             tk(bkf_op, bk_rmap[bkav[(pc + 1) * 8]], bk_rmap[bkav[(pc + 1) * 8 + 1]], bkf_v, 0);
@@ -16545,7 +16565,7 @@ int bk_lower(void) {
                 tkk[n * 4 + k] = bkak[pc * 8 + k];
                 k = k + 1;
             }
-        } } } } } } } } } } }
+        } } } } } } } } } } } }
         pc = pc + 1;
     }
     return tkn;
@@ -16838,6 +16858,7 @@ int bk_arm(int i, long off) {
         return 1;
     }
     if (op == TO_SETMEM) { a_adrp_add(A_IP1, pc, a[0] + bk_shift); ow(0xF9000000 | (A_IP1 << 5) | a[1]); return 1; }
+    if (op == TO_SEXT) { ow(0x93400000 | ((8 * a[2] - 1) << 10) | (a[1] << 5) | a[0]); return 1; }   /* [J9] */
     if (op == TO_ADDI) { ow(0x91000000 | (a[2] << 10) | (a[1] << 5) | a[0]); return 1; }   /* [J9] */
     if (op == TO_SUBI) { ow(0xD1000000 | (a[2] << 10) | (a[1] << 5) | a[0]); return 1; }
     if (op == TO_LSLI) { ow(0xD3400000 | (((64 - a[2]) & 63) << 16) | ((63 - a[2]) << 10) | (a[1] << 5) | a[0]); return 1; }
