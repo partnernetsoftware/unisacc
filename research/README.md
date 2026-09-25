@@ -4,7 +4,7 @@
 
 | 文件 | 角色 |
 |---|---|
-| [`unisacc-paper.md`](unisacc-paper.md) | **Paper A** — UNISA SH / C 自举与构造方法 |
+| [`unisacc-paper.md`](unisacc-paper.md) | **Paper A** — UNISA SH / C 自举与构造方法（§3.4 形式化义务表） |
 | [`ujs-paper-outline.md`](ujs-paper-outline.md) | **Paper B** 一页提纲 |
 | [`ujs-paper.md`](ujs-paper.md) | **Paper B** 正文草稿 — UJS-1 + `wasm_run` |
 | [`prior-art.md`](prior-art.md) | 对抗性相关工作（两文共享） |
