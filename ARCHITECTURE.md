@@ -1,6 +1,15 @@
-# 仓库地图：种子、可复用数据、自迭代
+# 仓库地图
 
-unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件的角色；规格在 [`prd.md`](prd.md)，工作规则在 [`AGENTS.md`](AGENTS.md)，方法论在 [`research/`](research/)。
+**产品**是一个 C99 子集编译器：`unisacc.com`（六目标单文件）及其源码 `unisacc.c`（= `kernel/` + `src/`）与随带的 `include/`。它能编译自己（自举不需要 Python），也能编译运行其他 C99 程序。仓库里的其余东西都服务于它，分四类：
+
+| 类别 | 位置 | 说明 |
+|---|---|---|
+| 产品 | `src/`、`include/`、`kernel/`（生成物，提交在库）、`unisacc.c`、`unisacc.com` | 用户实际使用的编译器 |
+| 种子与参考实现 | `unisa/`（Python） | 真值表、权重构造、生成 `kernel/`、独立的第二套前后端（供逐字节对照）、`unisacc.com` 的 APE 打包 |
+| 静态输入与数据 | `weights/`（`built.uns2`、`gold/*.tsv`）、`include/*.h` | 构造与生成的输入；真值表的数据形态 |
+| 开发工具与参考裁判 | `iterate/`（C 写的权重构造器与 kernel 数据生成器，**不属于产品**）、`tests/`、各 `*_check.py` | 验证与复现，不进用户流程 |
+
+规格在 [`prd.md`](prd.md)，工作规则在 [`AGENTS.md`](AGENTS.md)，论文在 [`research/`](research/)。
 
 ```
   ┌──────────────── 种子（第 0 代）：unisa/，全是 Python ─────────────────┐
@@ -12,7 +21,7 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
   ┌──── 可复用（与语言无关的数据）────┐                │
   │ weights/built.json  built.uns2    │                │
   │ weights/gold/*.tsv  真值表        │                ▼
-  │ kernel/*.inc        C 形态        │ ─inf()─▶ ┌── 自迭代（第 1 代起）：C ──┐
+  │ kernel/*.inc        C 形态        │ ─inf()─▶ ┌──── 产品编译器：C ────┐
   └───────────────────────────────────┘          │ src/*.c include/ → unisacc.c │
                                                  │ 编译自己：N1 = N2 = N3        │
                                                  └──────────────────────────────┘
@@ -28,7 +37,7 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 | `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。18 个阶段共 8,484 行 | `python3 -m unisa gold-export`（`build-weights` 会顺带执行） |
 | `weights/built.json` | 构造出的权重，JSON，便于阅读和调试 | `python3 -m unisa build-weights`（约 20 s） |
 | `weights/built.uns2` | 同一份权重的紧凑二进制，发行时用 | 同上 |
-| `kernel/unisa_model.inc` | 权重、各阶段维度、词表、编码器操作码表的 C 形态，自迭代编译器读的就是它 | `python3 -m unisa emit-kernel` |
+| `kernel/unisa_model.inc` | 权重、各阶段维度、词表、编码器操作码表的 C 形态，产品编译器读的就是它 | `python3 -m unisa emit-kernel` |
 | `kernel/unisa_headers.inc` | 随身携带的 C 库（`include/*.h` 原文） | 同上 |
 | `kernel/unisa_cases.inc` | 每个阶段每个键的正确答案，供 C 端自测 | 同上 |
 
@@ -43,7 +52,7 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 
 ## 2　种子（第 0 代）：`unisa/`，全部是 Python
 
-它的职责是**造出第一代**编译器和第一批权重，之后退为参考实现与回退手段（见 [`research/paper-c-intent.md`](research/paper-c-intent.md)）。它的每个表状决策都经 `oracle.ask`。
+它的职责是造出第一代编译器和权重，之后作为参考实现与回退手段：C 编译器的输出要与它逐字节一致。它的每个表状决策都经 `oracle.ask`。
 
 **表与权重的构造器**
 
@@ -69,7 +78,7 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 | 入口 | [`__main__.py`](unisa/__main__.py) 命令行 · [`driver.py`](unisa/driver.py) 源码到 tape · [`docgen.py`](unisa/docgen.py) 生成文档里的阶段表 |
 | 对照臂 | [`control/`](unisa/control/)：SGD 训练与它的网络、权重格式，保留作负结果的证据，只有 `python3 -m unisa train` 用它 |
 
-## 3　自迭代（第 1 代起）：C，由 unisacc 编译自己
+## 3　产品：编译器（C），由 unisacc 编译自己
 
 | 文件 | 作用 |
 |---|---|
@@ -84,11 +93,11 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 | [`unisacc.c`](unisacc.c) | `kernel/` 与 `src/` 的拼接：单个 C 文件，cc 或 unisacc 都能直接编译，不需要 Python，也不读外部文件 |
 | `unisacc.com` | `make com` 用 `-O2` 构建的六目标单文件发行版 |
 
-[`iterate/construct/`](iterate/construct/) 是迭代层的**独立工具**（J10）：用 unisacc 能编译的 C 从 `weights/gold/*.tsv` 构造权重，由 unisacc 构建、单独运行，不进编译器的热路径。目前只覆盖 prec 和 reloc，与 Python 构造器逐字节对照（`iterate/construct/check.sh`）。
+[`iterate/`](iterate/) 是**开发工具**，不属于产品：`iterate/construct/` 用 C 从 `weights/gold/*.tsv` 构造权重（18 个阶段的 UNS2 整包与 `built.uns2` 逐字节相同），`iterate/kernel/` 用 C 从声明数据生成 `kernel/unisa_model.inc` 的大部分内容。它们由 unisacc 编译、单独运行，不进编译器的使用流程，也不是自举的前提；产品的 `kernel/` 仍由种子生成。这条迁移路线（prd 的 J10）已暂停，工具保留。
 
 `src/` 的七个文件没有头文件，也不互相 `#include`：`tests/build_ref.sh` 按上表顺序把它们拼进 `unisacc.c`，顺序即依赖。
 
-这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。新逻辑优先落在表里或这一层；种子只做孪生检验。
+这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。`unisacc.com` 的打包（`python3 -m unisa ape`）是唯一用到 Python 的发布步骤，其中各目标的镜像都由 unisacc 编译。
 
 ## 4　验证与工具
 
@@ -100,7 +109,7 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 | [`Makefile`](Makefile) | `make`（快检）、`make test`、`make com`、`make release` |
 | README、`prd.tree.md`、`prd.map.md` 里的阶段表 | `python3 -m unisa docs` 生成，`tests/docs.sh` 检查 |
 | [`archive/`](archive/) | 旧版 prd，只作历史 |
-| `dist/` | 发布产物的暂存 |
+| `dist/` | `tests/release.sh --com` 保留的 `unisacc.com`（不提交） |
 
 ## 5　布局上的取舍
 

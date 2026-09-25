@@ -8,7 +8,7 @@
 | [`ujs-paper-outline.md`](ujs-paper-outline.md) | **Paper B** 一页提纲 |
 | [`ujs-paper.md`](ujs-paper.md) | **Paper B** 正文草稿 — 构造脊 + M3 出货脊；UJS-1 / UJS-1_ship |
 | [`prior-art.md`](prior-art.md) | 对抗性相关工作（两文共享） |
-| [`paper-c-intent.md`](paper-c-intent.md) | **Paper C** 意向书 — 种子机与迭代脱离：把确定性模型推理推广为管道方法（引用 A、B） |
+| [`paper-c-intent.md`](paper-c-intent.md) | **Paper C** 意向书（**已暂停的历史设想**，不是当前产品路线）— 种子机与迭代脱离；保留作为记录 |
 | [`formalization-roadmap.md`](formalization-roadmap.md) | **Paper A 形式化义务** — Lean 4 L0–L3；B/C 引用钩子 |
 | [`lean/`](lean/) | Lean 4 契约内核（`lake build`） |
 | [`figures/`](figures/) | Paper A 插图（图 1 网络结构，IEEE 线稿） |

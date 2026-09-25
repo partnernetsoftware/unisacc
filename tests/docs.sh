@@ -10,7 +10,7 @@
 # marked region is out of date or a marker has gone missing.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-out=$(perl -e 'alarm 300; exec @ARGV' python3 -m unisa docs --check 2>&1); rc=$?
+out=$(perl -e 'alarm 60; exec @ARGV' python3 -m unisa docs --check 2>&1); rc=$?
 [ -n "$out" ] && echo "$out"
 n=$(grep -l "stages:begin" prd.tree.md prd.map.md README.md 2>/dev/null | wc -l | tr -d ' ')
 echo
