@@ -202,35 +202,42 @@ def cmd_gold_export(a):
 
 
 def _build_from_tsv(a):
-    """[J10] construct from weights/gold/*.tsv alone; --check requires the
-    result to be the shipped weights, byte for byte."""
-    import json
+    """[J10] construct from weights/gold/*.tsv alone.  --check compares RAW
+    bytes: the UNS2 blob with the shipped pack, and the weights cache as
+    save_all writes it with the shipped cache file.  Either missing or
+    different fails the check.  (The stage list and its order still come
+    from gold.ALL, and tsvgold still uses gold.Stage as a container: the
+    ANSWERS come from the files, gold.py's rules are not consulted.)"""
+    import tempfile
     from . import intnet, tsvgold, uns2
     from .gold import ALL
     reg = tsvgold.load_all(GOLD_DIR, ALL)
     nets = intnet.build_all(list(ALL), stages=reg)
     blob = uns2.dump(nets, reg)
-    js = json.dumps({n: intnet.to_dict(nets[n]) for n in sorted(nets)},
-                    sort_keys=True)
     if not a.check:
         with open(a.pack, "wb") as f:
             f.write(blob)
         print("from-tsv  %d stages  %d B  -> %s" % (len(nets), len(blob), a.pack))
         return 0
-    want = open(a.pack, "rb").read()
-    ok = blob == want
-    print("from-tsv  stages %d  uns2 %d B  shipped %d B  %s"
-          % (len(nets), len(blob), len(want), "IDENTICAL" if ok else "DIFFERENT"))
-    try:
-        cache = json.load(open(a.out))
-        cj = json.dumps({n: cache[n] for n in sorted(cache) if n in nets},
-                        sort_keys=True)
-        jok = cj == js
-        print("from-tsv  json cache %s" % ("IDENTICAL" if jok else "DIFFERENT"))
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        jok = True
-        print("from-tsv  json cache not compared: %s" % e)
-    return 0 if ok and jok else 1
+    ok = True
+    for what, path, got in (("uns2", a.pack, blob), ("json", a.out, None)):
+        if got is None:
+            with tempfile.TemporaryDirectory() as td:
+                t = os.path.join(td, "built.json")
+                intnet.save_all(nets, t)
+                got = open(t, "rb").read()
+        try:
+            want = open(path, "rb").read()
+        except OSError as e:
+            print("from-tsv  %s  MISSING shipped file: %s" % (what, e))
+            ok = False
+            continue
+        same = got == want
+        ok = ok and same
+        print("from-tsv  %s  stages %d  %d B  shipped %d B  raw bytes %s"
+              % (what, len(nets), len(got), len(want),
+                 "IDENTICAL" if same else "DIFFERENT"))
+    return 0 if ok else 1
 
 
 def cmd_build(a):
