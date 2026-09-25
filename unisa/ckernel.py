@@ -202,7 +202,35 @@ def emit_core(nets, path):
           'int STAGE_MW[%d];' % len(meta),
           'int STAGE_VN[%d];' % (len(meta) * 4),
           'int act[4096];', 'int z[512];', '']
+    # [J1] every answer of every stage, computed BY RUNNING the constructed
+    # net over the stage's full domain (never by reading the gold): the net
+    # in compiled form.  inf() looks answers up here; --check-oracle compares
+    # every one with infer() evaluating the weights, so the table and the
+    # net are proved equal on each build.
+    from .gold import STAGES as _ST
+    dense = bytearray()
+    doff = []
+    for st in ALL:
+        n = nets[st]
+        S = _ST[st]
+        doff.append(len(dense))
+        hc = {hn: {c: i for i, c in enumerate(cl)} for hn, cl in n.heads}
+        for key in S.keys():                        # field-major, as flat()
+            lab = n.predict(key)
+            for hn, cl in n.heads:
+                ci = hc[hn][lab[hn]]
+                assert ci < 256
+                dense.append(ci)
+    L += ["/* DENSE: each stage's answers for every key, head-minor, as the "
+          "constructed net\n * computes them (intnet.predict over the full "
+          "domain) -- the net compiled to a\n * table [J1] */"]
+    L += _cstr(bytes(dense), "DENSE")
+    L += ['#define DENSE_LEN %d' % len(dense),
+          'int STAGE_DOFF[%d]; int STAGE_NH[%d];' % (len(meta), len(meta)), '']
     L += ['int model_dims(void) {']
+    for i, (st, m, H, nh, off, ncls, vlen, mw) in enumerate(meta):
+        L.append('  STAGE_DOFF[%d] = %d; STAGE_NH[%d] = %d;'
+                 % (i, doff[i], i, len(nets[st].heads)))
     for i, (st, m, H, nh, off, ncls, vlen, mw) in enumerate(meta):
         L.append('  STAGE_M[%d] = %d; STAGE_H[%d] = %d; STAGE_OFF[%d] = %d;'
                  '  STAGE_MW[%d] = %d;' % (i, m, i, H, i, off, i, mw))

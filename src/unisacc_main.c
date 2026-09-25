@@ -2538,49 +2538,30 @@ int ec(int c) {
    (RECIPE_OP on the Python side), not a decision. */
 int nask[16];
 
-/* The oracle is a PURE FUNCTION of (stage, key, head) over a domain of
-   6,650 keys, and the compiler asks it once per token and once per lowered
-   instruction -- so the same question arrives thousands of times and a
-   sampling profile of the self-compile put `infer` at the top.
-   The answers are memoised.  This does not decide anything: a miss still
-   runs the net, the ANSWER is the net's, and `nask` still counts every
-   ask, so [A-33] `stages.sh` and `-c -v` see exactly what they saw before.
-   Direct-mapped, so a collision costs one extra inference and never a
-   wrong answer -- the tag is compared before the value is used. */
-#define INFC 16384
-/* The slot stores the WHOLE question -- stage, head and all four key
-   fields -- and a hit compares every one of them.  The first version
-   stored a hash and compared the hash: over the full domain two of the
-   15,221 questions share one, so a hit could hand back another question's
-   answer without a sound.  And that hash overflowed a signed int, which is
-   undefined behaviour, so clang and gcc computed different ones and the
-   wrong answer moved between compilers -- Linux CI (gcc) refused a C99
-   program the Mac (clang) compiled.  Now the hash only chooses the slot;
-   it cannot change an answer, and it cannot overflow: each step is
-   reduced before the next multiply. */
-int infc_st[INFC]; int infc_hd[INFC]; int infc_k0[INFC]; int infc_k1[INFC];
-int infc_k2[INFC]; int infc_k3[INFC]; int infc_val[INFC]; int infc_live[INFC];
-
+/* The oracle's answers come from DENSE [J1]: every answer of every stage,
+   computed when the kernel is emitted BY RUNNING the constructed net over
+   the stage's full domain -- the net in compiled form, not the gold.  An
+   ask is a bounds check (the P-2 domain assertion) and one load.  It used
+   to be a memo in front of infer(): a hash, six compares, and on a miss or
+   a collision a full evaluation.  `--check-oracle` walks every question and
+   compares this table with infer() evaluating the weights directly, so the
+   table and the net are proved equal on each build.  nask still counts
+   every ask ([A-33] stages.sh and `-c -v` read it). */
 int inf(int st, int *key, int head) {
-    int r; int h;
-    h = st & (INFC - 1);
-    h = (h * 31 + (head & 1023)) & (INFC - 1);
-    h = (h * 31 + (key[0] & 1023)) & (INFC - 1);
-    h = (h * 31 + (key[1] & 1023)) & (INFC - 1);
-    h = (h * 31 + (key[2] & 1023)) & (INFC - 1);
-    h = (h * 31 + (key[3] & 1023)) & (INFC - 1);
+    int f; int m; int x; int v;
     nask[st] = nask[st] + 1;
-    if (infc_live[h]) {
-        if (infc_st[h] == st && infc_hd[h] == head && infc_k0[h] == key[0]
-            && infc_k1[h] == key[1] && infc_k2[h] == key[2]
-            && infc_k3[h] == key[3]) return infc_val[h];
+    m = STAGE_M[st];
+    if (head < 0 || head >= STAGE_NH[st]) {
+        __write(2, "oracle: key outside the stage's domain\n", 39); __exit(1);
     }
-    r = infer(st, key, head);
-    if (r < 0) { __write(2, "oracle: key outside the stage's domain\n", 39); __exit(1); }
-    infc_st[h] = st; infc_hd[h] = head; infc_k0[h] = key[0];
-    infc_k1[h] = key[1]; infc_k2[h] = key[2]; infc_k3[h] = key[3];
-    infc_val[h] = r; infc_live[h] = 1;
-    return r;
+    x = 0; f = 0;
+    while (f < m) {                       /* fields past m are not the key's */
+        v = STAGE_VN[(st << 2) + f];
+        if (key[f] < 0 || key[f] >= v) { __write(2, "oracle: key outside the stage's domain\n", 39); __exit(1); }
+        x = x * v + key[f];
+        f = f + 1;
+    }
+    return DENSE[STAGE_DOFF[st] + x * STAGE_NH[st] + head] & 255;
 }
 
 /* `unisacc --check-oracle` [A-49]: every question the model can be asked,

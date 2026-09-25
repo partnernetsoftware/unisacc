@@ -3,7 +3,7 @@
  * The kernel, self-testing over the FULL gold corpus [P-3]: KERNEL_BODY in
  * unisa/ckernel.py.  The model and the cases are the files included below.
  * Inputs (sha256, first 12 hex digits):
- *   unisa/ckernel.py             8fe135ad8a52 */
+ *   unisa/ckernel.py             0a6caab12790 */
 
 #include "unisa_model.inc"
 #include "unisa_cases.inc"
