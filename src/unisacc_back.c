@@ -37,9 +37,9 @@
 #define BK_HOST_ARCH 0
 #endif
 
-#define BK_MAXI 262144              /* tape instructions */
-#define BK_MAXT 524288              /* lowered instructions */
-#define BK_MAXN 131072              /* names: labels and data symbols */
+#define BK_MAXI 1048576              /* tape instructions */
+#define BK_MAXT 2097152              /* lowered instructions */
+#define BK_MAXN 262144              /* names: labels and data symbols */
 #define BK_NPOOL 2097152            /* their spellings */
 #define BK_MAXDATA 4194304          /* initialised data bytes (zeros are not stored) */
 #define BK_MAXZ 65536               /* zero runs */

@@ -7233,8 +7233,8 @@ int infer(int s, int *key, int head) {
  * Stage 1: the lexer.  `unisacc -tokens f.c` prints the token stream.
  */
 
-#define MAXSRC 1048576
-#define MAXTOK 131072
+#define MAXSRC 4194304   /* 4 MB: unisacc.c itself had reached 1,042,362 of the old 1 MB */
+#define MAXTOK 524288
 
 char src[MAXSRC];
 int nsrc;
@@ -8490,7 +8490,7 @@ int idch(int c) { if (isal(c)) return 1; return isdi(c); }
    to sx_pre instead of rebuilding; the prepended bytes themselves (ending
    in a newline, so no identifier straddles the seam) are walked. */
 #define SX_SIZE 65536
-#define SX_MAXOCC 262144
+#define SX_MAXOCC 1048576
 int sx_tab[SX_SIZE];          /* name id + 1 */
 int sx_pos[SX_SIZE]; int sx_len[SX_SIZE]; int sx_cnt[SX_SIZE]; int sx_at[SX_SIZE];
 int sx_occ[SX_MAXOCC]; int sx_names; int srcix_on; int sx_pre;
@@ -9507,7 +9507,7 @@ int lex(void) {
 /* Recursive descent mirroring the Python walker.  Every production choice
  * goes through infer(S_PARSE, ...) -- classic control flow, neural table. */
 
-#define MAXOUT 4194304
+#define MAXOUT 16777216
 #define MAXSYM 4096
 
 char out[MAXOUT];
@@ -11044,9 +11044,9 @@ int primary(void) {
 
 
 /* ---- string literal pool --------------------------------------------- */
-#define MAXPOOL 1048576
+#define MAXPOOL 4194304
 char pool[MAXPOOL];
-#define MAXLIT 4096
+#define MAXLIT 16384
 int plpos[MAXLIT];
 int pllen[MAXLIT];
 int npool;
@@ -14810,7 +14810,7 @@ int ol_writes(int l, int z) {        /* z is written and not read on line l */
    iff a successor is).  A call reads z iff the callee's entry block has z
    live; anything outside the whitelist is taken to read every register;
    `ret` hands back r0/r1 only.  The least fixed point is the liveness. */
-#define BL_MAX 131072
+#define BL_MAX 262144
 int bl_of[OPT_MAXL]; int bl_s[BL_MAX]; int bl_n; char bl_live[6 * BL_MAX]; int bl_z;
 int ol_target(int l) {                /* the block a jump/call names, or -1 */
     int e; int p; int t;
@@ -15691,9 +15691,9 @@ int main(void) {
 #define BK_HOST_ARCH 0
 #endif
 
-#define BK_MAXI 262144              /* tape instructions */
-#define BK_MAXT 524288              /* lowered instructions */
-#define BK_MAXN 131072              /* names: labels and data symbols */
+#define BK_MAXI 1048576              /* tape instructions */
+#define BK_MAXT 2097152              /* lowered instructions */
+#define BK_MAXN 262144              /* names: labels and data symbols */
 #define BK_NPOOL 2097152            /* their spellings */
 #define BK_MAXDATA 4194304          /* initialised data bytes (zeros are not stored) */
 #define BK_MAXZ 65536               /* zero runs */
