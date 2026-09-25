@@ -120,8 +120,10 @@ the index that drives it.
 | `out16/out32 >>`, `tput`, `bacc <<` | UNS2 bytes/bits | byte/bit position; W1 bits are written one per raw value (`tput(w1(i,v,j), 1)`), not as a mask |
 
 No path shifts by a raw value index; no raw-indexed 64-bit mask exists.
-Every group bitset is bounded because ng[i] <= nq (each field has >= 1
-group) and nq <= MAXQ is checked before any `bit(nq)` or `bit(ng)`.
+Every group bitset is bounded by the field-group check in `domain()`:
+ng[i] <= 62 for every field, checked before any `bit(ng)` or `bit(g)`
+(exit 4).  (It used to follow from ng[i] <= nq <= MAXQ = 62; since MAXQ is
+1024 that no longer holds, see "UB audit" below.)
 
 Change: `MAXV 62 -> 128` (storage only).  MAXQ, MAXR, MAXC, MAXH, MAXS,
 rank bound and every other stage untouched.  The quotient check now exits
@@ -164,7 +166,7 @@ diagnostic; check.sh accepts nothing else.
   things are recorded separately: the nets' outputs agree on the whole
   domain; the constructed representation is identical byte for byte; and
   the verifier is trusted only as far as the compiler that built it.
-- Capacity.  A quotient-key set is QW = 16 longs (since the peep port), so a
+- Capacity.  A quotient-key set is QW = 17 longs of 62 bits, so a
   stage may have at most MAXQ = 1024 quotient keys; MAXR (62 rules per
   decision list), MAXC, MAXH, MAXOK and MAXS are unchanged.  prd.md J10
   keeps the limit matrix.
@@ -373,11 +375,12 @@ Measured on the cc -O2 build: `__common` (zerofill) 4,659,224 ->
 
 ### Width
 
-MAXQ = 1024, QW = 16 words.  It covers 528 with a 1.9x margin, and is
-the next power of two, so `j >> 6` / `j & 63` never need a bound beyond
-QW.  Every in-matrix stage except type (3,150 quotient keys, also over
-MAXOK) is <= 414 quotient keys.  Only `nqw = (nq + 63) / 64` words are
-read or written, so the small stages loop over one word.
+MAXQ = 1024, QB = 62 key bits per word, QW = ceil(1024 / 62) = 17 words
+(1,054 bits).  (It was 16 words of 64 bits; see "UB audit" below.)  It
+covers 528 with a 1.9x margin.  Every in-matrix stage except type (3,150
+quotient keys, also over MAXOK) is <= 414 quotient keys.  Only
+`nqw = (nq + QB - 1) / QB` words are read or written, so the small stages
+loop over one word.
 
 Operations: `qzero qcopy qset qtest qand qor qandnot qempty qeq qmeets
 qmeets3 qpopc qpopcand qnext`.  `qandnot` cuts the result with `ALL`
@@ -387,10 +390,12 @@ yields a key >= nq.  Iteration (`qnext`) is ascending, the order of Python's
 with `(x >> j) & 1` now iterates `qnext` or tests `qtest` in the same
 order.
 
-`construct -Q` is the word-boundary self-test: for nq 1, 64, 65, 128, 129,
-528 and 1024 it checks ALL (no bit >= nq), set/test, popcount, ascending
-iteration, complement (disjoint, covering, tail cut even from an all-ones
-operand) and equality at keys 0, 63, 64, 127, 128 and nq - 1.  check.sh
+`construct -Q` is the word-boundary self-test: for nq 1, 61, 62, 63, 123,
+124, 125, 528, 1023 and 1024 it checks ALL (no bit >= nq, bits 62 and 63
+clear in every word), set/test, popcount, ascending iteration, complement
+(disjoint, covering, tail cut even from an all-ones operand, bits 62/63
+clear afterwards) and equality at keys 0, QB-1 = 61, QB = 62,
+2QB-1 = 123, 2QB = 124 and nq - 1.  check.sh
 runs it on both builds (exit 5 on a failure).
 
 ### Results (both builds: cc -O2, unisacc -O2 osx/arm64)
@@ -428,3 +433,68 @@ dropped as not shorter, patch units.
   keys.  Both builds exit exactly 4 with `capacity: 1089 quotient keys so
   far, more than 1024 (a 16-word bitset)`, from `domain()`, before any
   set is built.
+
+## UB audit: 62-bit quotient words, field-group bound (2026-09-25)
+
+A review of the peep port found two defects; both are fixed, nothing else
+changed.
+
+1. `qset` did `((long)1) << 63` (undefined; a UBSan build aborted in
+   `-Q`), `popc` does `m - 1` (overflows for LONG_MIN), and `qtest`/`qnext`
+   right-shifted words that could be negative (implementation-defined).
+2. The field-group bound was lost: group sets are one `long` per field and
+   `FULL[i] = bit(ng[i]) - 1`, which was safe while ng <= nq <= 62; with
+   MAXQ 1024 and MAXV 128 a field could have up to 128 groups.
+
+**Choice: option (a), words that never touch the sign bit.**  Key j is bit
+`j % QB` of word `j / QB`, QB = 62, so every stored word is in [0, 2^62).
+That keeps `long` and the existing unisacc code paths (signed shifts,
+compares, `/` and `%` of non-negative ints, all already exercised by the
+byte-identical stages) instead of depending on unisacc's unsigned 64-bit
+shifts and compares, which nothing in this slice tests.  62 rather than 63
+so that the quotient words and the field-group sets obey one invariant:
+no value ever has bit 62 or 63 set, and the largest shift is `bit(62)`,
+only inside `FULL = bit(62) - 1`.
+
+Field groups: `domain()` checks ng[i] <= 62 for every field right after
+grouping, before the quotient count and before any shift, and exits 4
+with `capacity: field F has N value groups, more than 62`.  The bound is
+exact: group bits are 0..ng-1 <= 61, `bit(ng) <= bit(62) = 2^62` is
+representable, `FULL = 2^62 - 1 >= 0`; ng = 63 would need `bit(63)`.
+Group sets stay one word (not migrated).
+
+| operation | where | operand range | why defined |
+|---|---|---|---|
+| `1 << (j % QB)` | `qset` | shift 0..61 | < 63, result < 2^62 |
+| `a[j / QB] >> (j % QB)` | `qtest`, `qnext` | word in [0, 2^62), shift 0..61 | right shift of a non-negative value |
+| `j / QB`, `j % QB`, `(j / QB + 1) * QB` | `qset`, `qtest`, `qnext` | 0 <= j < nq <= 1024 | non-negative int division; <= 1054 |
+| `a & b`, `a \| b` | `qand`, `qor`, `qmeets*`, `qtail` | words in [0, 2^62) | bitwise; result in [0, 2^62) |
+| `a & ~b` then `& ALL` | `qandnot` (+`qtail`) | `~b` is negative; `a & ~b` with a >= 0 is >= 0 | bitwise ops only; nothing shifts, subtracts or counts it before qtail cuts it to ALL |
+| `m - 1`, `m & (m-1)` | `popc` via `qpopc`, `qpopcand` | m in [0, 2^62) (m != 0 in the loop) | m - 1 >= 0, no overflow |
+| `nqw = (nq + QB - 1) / QB` | `qsetall` | nq <= 1024 | int, <= 17 = QW |
+| self-test `sc[w] = -1` | `-Q` only | all-ones operand to `qandnot` | only `&`, `~`; the result is tail-cut before popc, then checked for bits 62/63 |
+| self-test `ALL[w] >> j`, `>> QB` | `-Q` only | ALL[w] in [0, 2^62), shift <= 62 | non-negative right shift |
+| `bit(g)`, `bit(v)`, `bit(seed)` | `expand`, REDUCE `sup`, `sets[i]` | g < ng <= 62, so g <= 61 | < 63, value < 2^62 |
+| `bit(ng[i]) - 1` | `FULL` in `domain()` | ng <= 62 (checked first) | 2^62 - 1, no overflow |
+| `c >> g`, `ucube >> grp` | `cubemask`, `prcube`, `w1`, `expand` | group set in [0, 2^62), g <= 61 | non-negative right shift |
+| `d >> p`, `a >> p`, `b >> p` | `cmpset` | group sets in [0, 2^62), p <= 61 (lowest bit of d != 0) | non-negative right shift |
+| `bit(codedigit)`, `popc(pr)` | T5 `rep_factored` | digit < ng <= 62 | as `bit(g)` |
+
+Other shifts (`bit(lv)`, `bit(k+2)`, `bit(qlab)`, `bit(crank)`, the UNS2
+writers) have their own bounds, listed in the table further up; they were
+not changed.  The UBSan run below executes every stage with them.
+
+Gates (check.sh):
+
+- a third build, `cc -O1 -fsanitize=undefined -fno-sanitize-recover=undefined`:
+  `-Q` passes all 10 sizes, and all 12 stages' `-d` dump and UNS2 run with
+  exit 0, no report, the dump identical to Python and the blob identical to
+  the cc build.
+- field-group negative: fields a (70 values) and b (2), label
+  `class[b ? 8 + a/16 : a%16]` (16 classes; `(label(a,0), label(a,1))` is
+  distinct for every a), so 70 groups in a, 140 quotient keys.  cc,
+  unisacc and UBSan builds all exit 4 with `capacity: field a has 70 value
+  groups, more than 62`.
+- unchanged and green: 63-key positive, 1089-key negative (now "a 17-word
+  bitset"), reader and invariant negatives, all 12 stages byte-identical on
+  both builds (dumps, UNS2, shipped sections, round trips, traces).

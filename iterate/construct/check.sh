@@ -11,12 +11,16 @@ B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 fail=0
 B 60 cc -std=c99 -O2 -w -o "$T/c_cc" iterate/construct/construct.c || { echo "cc build failed"; exit 1; }
 B 60 "$UA" -O2 iterate/construct/construct.c -b osx/arm64 -o "$T/c_ua" || { echo "unisacc build failed"; exit 1; }
-# quotient-key sets are QW-word bitsets: the self-test (-Q) checks set, test,
-# and, or, andnot (tail cut), popcount, in-order iteration and equality at
-# keys 63, 64, 127, 128 and the last key, for nq 1, 64, 65, 128, 129, 528, MAXQ
-for b in cc ua; do
+# UBSan build: every signed shift, subtraction and overflow is checked and
+# the first report aborts (no recovery).  Only exit 0 with no report counts.
+B 60 cc -std=c99 -O1 -w -fsanitize=undefined -fno-sanitize-recover=undefined -o "$T/c_san" iterate/construct/construct.c || { echo "ubsan build failed"; exit 1; }
+# quotient-key sets are QW-word bitsets of QB = 62 bits: the self-test (-Q)
+# checks set, test, and, or, andnot (tail cut), popcount, in-order
+# iteration, equality and bits 62/63 clear at keys QB-1, QB, 2QB-1, 2QB
+# and the last key, for nq 1, 61, 62, 63, 123, 124, 125, 528, 1023, 1024
+for b in cc ua san; do
     B 30 "$T/c_$b" -Q > "$T/q.$b" 2>&1; rc=$?
-    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 7 ]; then echo "qset self-test $b ok (7 sizes)"
+    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 10 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (10 sizes)"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
 done
 for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo peep; do
@@ -26,6 +30,12 @@ for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo peep; do
         if cmp -s "$T/$s.py" "$T/$s.$b"; then echo "$s $b identical ($(wc -c < "$T/$s.py" | tr -d ' ') B)"
         else echo "$s $b DIFFERS"; diff "$T/$s.py" "$T/$s.$b" | head -5; fail=1; fi
     done
+    # every stage's dump and UNS2 under UBSan: exit 0, no report, same bytes
+    B 30 "$T/c_san" -d "weights/gold/$s.tsv" > "$T/$s.san" 2> "$T/$s.san.err"; rc=$?
+    B 30 "$T/c_san" -u "$T/$s.san.uns2" "weights/gold/$s.tsv" > /dev/null 2>> "$T/$s.san.err"; rc2=$?
+    B 30 "$T/c_cc" -u "$T/$s.cc.uns2" "weights/gold/$s.tsv" > /dev/null 2>&1
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ ! -s "$T/$s.san.err" ] && cmp -s "$T/$s.py" "$T/$s.san" && cmp -s "$T/$s.cc.uns2" "$T/$s.san.uns2"; then echo "$s ubsan clean (dump, UNS2)"
+    else echo "$s ubsan FAILED (rc $rc/$rc2): $(head -1 "$T/$s.san.err")"; fail=1; fi
 done
 # UNS2: both builds write the prec+reloc blob.  It must equal, RAW BYTES, the
 # blob uns2.dump writes from the Python constructor (uns2slice.py); each
@@ -133,6 +143,23 @@ for b in cc ua; do
         echo "capacity negative $b rejected: $(head -1 "$T/capn.$b.out")"
     else
         echo "capacity negative $b NOT A CAPACITY REJECTION (rc $rc): $(head -1 "$T/capn.$b.out")"; fail=1
+    fi
+done
+# field-group NEGATIVE: a field's group set is one long, so a field may have
+# at most 62 value groups.  Raw values are legal (70 <= MAXV 128) and there
+# are 140 <= 1024 quotient keys, but field a has 70 groups: exit exactly 4
+# with the field-group diagnostic, from domain() before any group shift.
+# Label (a, b) = class[b ? 8 + a / 16 : a % 16] with 16 classes: the pair
+# (label(a,0), label(a,1)) = (a % 16, 8 + a / 16) is distinct for every a.
+awk -F'	' 'NR==1{print "# stage capg: 70 x 2 keys, synthetic"; next}
+/^#head/{printf "#field\ta"; for(i=0;i<70;i++) printf "\tv%d", i; printf "\n#field\tb\tw0\tw1\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
+  for(a=0;a<70;a++) for(b=0;b<2;b++) print "v" a "\tw" b "\t" c[b ? 8 + int(a/16) : a%16]; exit}' "$T/cap.src" > "$T/capg.tsv"
+for b in cc ua san; do
+    B 30 "$T/c_$b" "$T/capg.tsv" > "$T/capg.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: field a has 70 value groups, more than 62" "$T/capg.$b.out" && ! grep -q 'runtime error' "$T/capg.$b.out"; then
+        echo "field-group negative $b rejected: $(head -1 "$T/capg.$b.out")"
+    else
+        echo "field-group negative $b NOT A FIELD-GROUP REJECTION (rc $rc): $(head -1 "$T/capg.$b.out")"; fail=1
     fi
 done
 # the deployment invariants must be able to fire: the test entry breaks b1

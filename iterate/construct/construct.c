@@ -17,7 +17,7 @@
  * chosen units) so a divergence can be located at its first step.
  *
  * Scope: at most 3 fields, 4 heads and MAXQ (1024) quotient keys; a set of
- * quotient keys is QW (16) longs, see "quotient-key sets" below.  Checked stages: prec, reloc (one head) and tyinfo
+ * quotient keys is QW (17) longs of QB (62) bits, see "quotient-key sets" below.  Checked stages: prec, reloc (one head) and tyinfo
  * (three heads: per-head candidates, pick, T4 cross-head sharing).  -t
  * prints which multi-head branches a stage took; README.md lists the ones
  * tyinfo does not reach.
@@ -32,7 +32,8 @@
 #define MAXC 32
 #define MAXOK 4096
 #define MAXQ 1024  /* quotient keys; a key set is QW longs (qset below) */
-#define QW 16      /* MAXQ / 64 */
+#define QB 62      /* key bits per word: bits 0..61, never bit 62 or the sign bit 63 */
+#define QW 17      /* ceil(MAXQ / QB) = ceil(1024 / 62) */
 #define MAXR 62
 #define MAXU 128
 #define MAXCAND 96
@@ -211,7 +212,7 @@ int qlab[MAXH][MAXQ];      /* head, quotient key -> class */
 int ch;                   /* the head being constructed */
 long qmask[MAXF * MAXV][QW]; /* field i, group g at row i * MAXV + g -> keys having it */
 long ALL[QW];
-int nqw;                  /* words in use: (nq + 63) / 64 */
+int nqw;                  /* words in use: (nq + QB - 1) / QB */
 long FULL[MAXF];
 int crank[MAXH][MAXC];     /* head, class -> its position in name order */
 
@@ -236,14 +237,19 @@ int popc(long m) {
 }
 
 /* ------------------------------------------------- quotient-key sets ------ */
-/* A set of quotient keys is long s[QW]; key j is bit (j & 63) of word j >> 6.
+/* A set of quotient keys is long s[QW]; key j is bit j % QB of word j / QB.
+   QB is 62, so every stored word is in [0, 2^62): no shift reaches bit 63
+   (1 << b with b <= 61), popc never subtracts from a negative value or
+   from LONG_MIN, and every right shift is of a non-negative word.  The one
+   place a word goes negative is a ~b inside qandnot; a & ~b with a >= 0 is
+   >= 0 again, and qtail cuts it to ALL before anything counts or shifts it.
    Only words 0..nqw-1 are read or written.  Every result is a subset of an
    operand that is already inside the domain, or is cut by qtail, so no bit
    at or above nq is ever set: complements are taken only as ALL & ~x. */
 void qzero(long *d) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = 0; }
 void qcopy(long *d, long *a) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w]; }
-void qset(long *d, int j) { d[j >> 6] = d[j >> 6] | (((long)1) << (j & 63)); }
-int qtest(long *a, int j) { return (int)((a[j >> 6] >> (j & 63)) & 1); }
+void qset(long *d, int j) { d[j / QB] = d[j / QB] | (((long)1) << (j % QB)); }
+int qtest(long *a, int j) { return (int)((a[j / QB] >> (j % QB)) & 1); }
 void qand(long *d, long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w] & b[w]; }
 void qor(long *d, long *a, long *b) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = a[w] | b[w]; }
 void qtail(long *d) { int w; for (w = 0; w < nqw; w = w + 1) d[w] = d[w] & ALL[w]; }
@@ -265,7 +271,7 @@ int qpopcand(long *a, long *b) { int w, n = 0; for (w = 0; w < nqw; w = w + 1) n
 /* the smallest member >= j, or -1: ascending, the order of range(D.n) */
 int qnext(long *a, int j) {
     while (j < nq) {
-        if ((a[j >> 6] >> (j & 63)) == 0) { j = (j | 63) + 1; continue; }
+        if ((a[j / QB] >> (j % QB)) == 0) { j = (j / QB + 1) * QB; continue; }
         if (qtest(a, j)) return j;
         j = j + 1;
     }
@@ -273,26 +279,31 @@ int qnext(long *a, int j) {
 }
 void qsetall(void) {
     int j;
-    nqw = (nq + 63) / 64;
+    nqw = (nq + QB - 1) / QB;
     for (j = 0; j < QW; j = j + 1) ALL[j] = 0;
     for (j = 0; j < nq; j = j + 1) qset(ALL, j);
 }
 
-/* -Q: the set operations at the word boundaries (keys 63, 64, 127, 128 and
-   the last key) for several domain sizes; exit 5 on the first failure */
+/* -Q: the set operations at the word boundaries (keys QB-1, QB, 2QB-1, 2QB
+   and the last key: 61, 62, 123, 124, nq-1) for domain sizes around those
+   boundaries; every word must stay in [0, 2^62); exit 5 on the first failure */
 long sa[QW], sb[QW], sc[QW];
 void qfail(int n, char *what) { printf("construct: qset self-test: nq %d: %s\n", n, what); exit(5); }
 void qselftest(void) {
-    int sizes[7], keys[6], t, i, j, n, cnt, prev, w;
-    sizes[0] = 1; sizes[1] = 64; sizes[2] = 65; sizes[3] = 128; sizes[4] = 129; sizes[5] = 528; sizes[6] = MAXQ;
-    for (t = 0; t < 7; t = t + 1) {
+    int sizes[11], keys[6], t, i, j, n, cnt, prev, w;
+    sizes[0] = 1; sizes[1] = QB - 1; sizes[2] = QB; sizes[3] = QB + 1; sizes[4] = 2 * QB - 1;
+    sizes[5] = 2 * QB; sizes[6] = 2 * QB + 1; sizes[7] = 528; sizes[8] = MAXQ - 1; sizes[9] = MAXQ;
+    sizes[10] = QW * QB;
+    for (t = 0; t < 11; t = t + 1) {
         nq = sizes[t];
+        if (nq > MAXQ) break;   /* QW * QB (1054) > MAXQ: not a legal domain */
         qsetall();
-        keys[0] = 0; keys[1] = 63; keys[2] = 64; keys[3] = 127; keys[4] = 128; keys[5] = nq - 1;
+        keys[0] = 0; keys[1] = QB - 1; keys[2] = QB; keys[3] = 2 * QB - 1; keys[4] = 2 * QB; keys[5] = nq - 1;
         if (qpopc(ALL) != nq) qfail(nq, "popcount of ALL");
         for (w = 0; w < QW; w = w + 1) {
-            for (j = 0; j < 64; j = j + 1) {
-                i = w * 64 + j;
+            if (ALL[w] < 0 || (ALL[w] >> QB) != 0) qfail(nq, "ALL has bit 62 or 63 set");
+            for (j = 0; j < QB; j = j + 1) {
+                i = w * QB + j;
                 if (((ALL[w] >> j) & 1) != (i < nq)) qfail(nq, "ALL has a bit outside the domain");
             }
         }
@@ -301,6 +312,7 @@ void qselftest(void) {
         for (i = 0; i < 6; i = i + 1) if (keys[i] < nq && !qtest(sa, keys[i])) { qset(sa, keys[i]); n = n + 1; }
         for (i = 0; i < 6; i = i + 1) if (keys[i] < nq && !qtest(sa, keys[i])) qfail(nq, "test after set");
         if (qpopc(sa) != n) qfail(nq, "popcount");
+        for (w = 0; w < nqw; w = w + 1) if (sa[w] < 0 || (sa[w] >> QB) != 0) qfail(nq, "set has bit 62 or 63");
         /* iterate in order: strictly ascending, every member once */
         cnt = 0; prev = -1;
         for (j = qnext(sa, 0); j >= 0; j = qnext(sa, j + 1)) {
@@ -320,6 +332,7 @@ void qselftest(void) {
         for (w = 0; w < QW; w = w + 1) sc[w] = -1;
         qandnot(sb, sc, sa);
         if (qpopc(sb) != nq - n) qfail(nq, "tail bits survive andnot");
+        for (w = 0; w < nqw; w = w + 1) if (sb[w] < 0 || (sb[w] >> QB) != 0) qfail(nq, "andnot left bit 62 or 63");
         if (qeq(sa, sb)) qfail(nq, "equality");
         qcopy(sc, sa);
         if (!qeq(sa, sc)) qfail(nq, "equality of a copy");
@@ -340,6 +353,15 @@ void domain(void) {
             if (grp[i][v] < 0) { gfirst[i][ng[i]] = v; grp[i][v] = ng[i]; ng[i] = ng[i] + 1; }
         }
     }
+    /* a field's group set is ONE long: group g is bit g, FULL = bit(ng) - 1.
+       ng <= 62 keeps every group bit <= 61 and bit(ng) <= bit(62), so no
+       group shift reaches the sign bit and every group set is >= 0 (popc,
+       cmpset's right shifts).  Checked before any group shift: exit 4. */
+    for (i = 0; i < nf; i = i + 1)
+        if (ng[i] > 62) {
+            printf("construct: %s: capacity: field %s has %d value groups, more than 62\n", gpath, fname[i], ng[i]);
+            exit(4);
+        }
     nq = 1;
     for (i = 0; i < nf; i = i + 1) {
         nq = nq * ng[i];
