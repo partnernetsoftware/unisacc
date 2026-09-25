@@ -347,36 +347,6 @@ class Emitter:
         self.imm(LHS, len(s.encode("latin-1")))
         self.emit(self.recipe("lit", "write"), ACC, LHS)
 
-    def print_int(self, reg=ACC):
-        """Desugared into the emitted __itoa helper plus a write, so it lowers
-        to ordinary tape ops and therefore to real machine code.  `.print` stays
-        in the tape ISA for hand-written tapes; generated code no longer uses
-        it."""
-        self.need_itoa = True
-        if reg != ACC:
-            self.emit("mov", ACC, reg)
-        self.call("__itoa")                 # -> ACC = ptr, LHS = len
-        self.emit(self.recipe("lit", "write"), ACC, LHS)
-
-    def print_str(self, reg=ACC):
-        """ACC holds char*; length via the emitted __strlen helper."""
-        self.need_strlen = True
-        self.push(reg)
-        self.call("__strlen")
-        self.emit("mov", LHS, ACC)
-        self.pop(ACC)
-        self.emit(self.recipe("lit", "write"), ACC, LHS)
-
-    def print_char(self, reg=ACC):
-        if self.chbuf is None:
-            self.chbuf = "__chbuf"
-            self.t.string(self.chbuf, b"\x00")
-        self.emit("mov", TMP, reg)
-        self.lea(ACC, self.chbuf)
-        self.store(ACC, 0, TMP, 1)
-        self.imm(LHS, 1)
-        self.emit(self.recipe("lit", "write"), ACC, LHS)
-
     PADMAX = 64
 
     def _padstr(self, ch):

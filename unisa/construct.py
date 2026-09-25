@@ -550,86 +550,9 @@ def verify_int(p):
     return bad, mx_pre, mx_log
 
 
-def verify_float(p):
-    """Secondary: the same weights through a float64 kernel, to confirm the
-    integer switch changed nothing observable."""
-    D, S, bad = p["D"], p["D"].S, []
-    for kv, ki in zip(D.keys, D.kidx):
-        x = [0.0] * p["h0"]
-        for i, v in enumerate(ki):
-            x[p["offs"][i] + v] = 1.0
-        hid = []
-        for j in range(p["H"]):
-            a = float(p["b1"][j])
-            for i in range(p["h0"]):
-                if x[i]:
-                    a += float(p["W1"][i][j])
-            hid.append(a if a > 0.0 else 0.0)
-        lab = S.label(*kv)
-        for hn, cl in p["heads"]:
-            z = [0.0] * len(cl)
-            M = p["W2"][hn]
-            for j, hv in enumerate(hid):
-                if hv:
-                    r = M[j]
-                    for k in range(len(cl)):
-                        z[k] += hv * float(r[k])
-            if cl[argmax(z)] != lab[hn]:
-                bad.append((kv, hn))
-    return bad
-
-
-def verify_cubes(p):
-    """Third, independent route: evaluate straight from the cube algebra."""
-    D, S, bad = p["D"], p["D"].S, []
-    cm = [D.cube_mask(c) for c in p["units"]]
-    for j, kv in enumerate(D.keys):
-        fired = [u for u in range(p["H"]) if (cm[u] >> j) & 1]
-        lab = S.label(*kv)
-        for hn, cl in p["heads"]:
-            M = p["W2"][hn]
-            z = [0] * len(cl)
-            for u in fired:
-                for k in range(len(cl)):
-                    z[k] += M[u][k]
-            m = max(z)
-            if z.count(m) != 1 or cl[z.index(m)] != lab[hn]:
-                bad.append((kv, hn))
-    return bad
-
-
-def nonzeros(p):
-    """The constructed nets are extremely sparse: W1 is 0/1 with one block per
-    literal, W2 has one entry per (unit, head).  Reported next to dense theta
-    because the SGD nets are ~100% dense."""
-    n = sum(1 for i in range(p["h0"]) for j in range(p["H"]) if p["W1"][i][j])
-    n += p["H"]
-    n += sum(1 for hn, cl in p["heads"] for row in p["W2"][hn] for w in row if w)
-    return n
-
-
 def theta(p):
     NH = sum(len(cl) for _, cl in p["heads"])
     return p["h0"] * p["H"] + p["H"] + p["H"] * NH
-
-
-def literal_embed(p):
-    """Optional T6 (reported, not used by default): per field keep the one-hot
-    input OR swap it for a |V| x L 0/1 literal table, L = number of distinct
-    literal sets that field actually uses -- whichever is cheaper.  Tables are
-    counted the way prd counts the SGD embedding tables."""
-    D = p["D"]
-    NH = sum(len(cl) for _, cl in p["heads"])
-    w = tbl = 0
-    for i in range(D.m):
-        ss = {tuple(sorted(c[i])) for c in p["units"]
-              if len(c[i]) != len(D.vocabs[i])}
-        L = max(1, len(ss))
-        if len(D.vocabs[i]) * L + L * p["H"] < len(D.vocabs[i]) * p["H"]:
-            w += L; tbl += len(D.vocabs[i]) * L
-        else:
-            w += len(D.vocabs[i])
-    return w, tbl + w * p["H"] + p["H"] + p["H"] * NH
 
 
 # -------------------------------------------------------------------- main ---

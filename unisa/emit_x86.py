@@ -204,13 +204,6 @@ def _alias(dst, s1, s2):
     return b"", s2
 
 
-def abs_mem(opc, reg, addr):
-    """mod=00 rm=100 + SIB 0x25 -> [disp32]"""
-    r = NUM[reg]
-    return rex(1, r >> 3, 0, 0) + bytes([opc]) + modrm(0, r, 4) + \
-        b"\x25" + (addr & 0xFFFFFFFF).to_bytes(4, "little")
-
-
 def cmp_set(cc, dst, ra, rb):
     out = _alu(0x39, ra, rb)                       # cmp ra, rb
     out += b"\x41\x0f" + bytes([cc]) + modrm(3, 0, SCRATCH)   # setcc r11b
@@ -226,10 +219,6 @@ def REGS8():
 
 def _spsub(n):
     return rex(1, 0, 0, 0) + b"\x83" + modrm(3, 5, 4) + bytes([n])
-
-
-def _spadd(n):
-    return rex(1, 0, 0, 0) + b"\x83" + modrm(3, 0, 4) + bytes([n])
 
 
 # Win64 requires rsp to be 16-byte aligned at the call, and kernel32 uses

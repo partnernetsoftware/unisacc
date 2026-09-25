@@ -2848,10 +2848,6 @@ class Walker:
         return I32
 
 
-def compile_tokens(toks, oracle):
-    return compile_units([toks], oracle)
-
-
 def compile_units(streams, oracle):
     """Several translation units, one program.
 

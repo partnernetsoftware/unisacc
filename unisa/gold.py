@@ -90,12 +90,6 @@ TY_SIZE = {"void": 1, "i8": 1, "i16": 2, "i32": 4,
            "u8": 1, "u16": 2, "u32": 4}
 
 
-def _narrow(t1, t2):
-    """char and short promote to int; the walker keeps wider
-    arithmetic in i64. [G-2]"""
-    return RANK.get(t1, 9) < 3 or RANK.get(t2, 9) < 3
-
-
 def _promote(t):
     """C99 6.3.1.1: anything of lower rank than int becomes int -- signed,
     because int can represent every value of unsigned char and short."""

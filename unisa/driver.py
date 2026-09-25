@@ -7,10 +7,6 @@ from .front.lex import lex
 from .front.parse import compile_units, CError, CErrors
 
 
-def compile_c(src, oracle, target="lnx/x86_64", path=None, includes=()):
-    return compile_sources([src], oracle, target, [path], includes)
-
-
 def compile_sources(srcs, oracle, target="lnx/x86_64", paths=None,
                     includes=()):
     """Front end, with one retry per missing library function.
