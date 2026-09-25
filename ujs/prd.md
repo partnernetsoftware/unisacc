@@ -202,7 +202,7 @@ compile(src: Uint8Array|string) →
 | **M3** | `compiler.ujs` 自举 | body≡stage0 → stage2≡stage1 | **v11✓** sim+drone body≡stage0 |
 | **P0** | ship 无 web-build / 无 `engine.wasm`（A） | `ujs2wasm_compiler.sh` · `ship-engine` 拒 A 核 | **✓** |
 | **3** | 换核模板 | 按下表抄路径绿 | 骨架 ✓ |
-| **4** | 门禁即契约 | `ujs.sh` 含 ujs2wasm；ship-js 合同；uxe 无人 | 进行中 |
+| **4** | 门禁即契约 | **语言/ujs2wasm/ship-js**：`tests/ujs.sh` + `ujs2wasm_compiler.sh` + `uxe_ship_js` ✓。**UXE 无人**（`npm run test:uxe:all` / ship CDP）另门，不并入 `all.sh`；探针偶发 `never ready` 时修 UXE 门，不挡语言绿 | 语言 ✓ · UXE 另门 |
 | **5–6** | Host / llm | 有玩法再开 | 搁置 |
 
 ### 换核模板（#3 可抄）
