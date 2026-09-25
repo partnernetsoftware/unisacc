@@ -11435,6 +11435,20 @@ int argconv(int si, int k) {
     return 0;
 }
 /* what a call of si hands back: a float or double, when it returns one */
+/* The result's pointer-ness is the FUNCTION's, not whatever the last
+   argument left behind: `-(f(rows[i]) - 1)` scaled the 1 as if f returned
+   the row pointer its argument was, and `*(ip() + 2)` stepped by bytes.
+   A call of an unknown name, or of a function returning a scalar, is not a
+   pointer; one returning T* steps by T, T** by a pointer. [J10] */
+int callptr(int si) {
+    curptr = 0; curpd = 0;
+    if (si < 0) return 0;
+    if (symkind[si] != 2) return 0;
+    if (symptr[si] == 0) return 0;
+    curptr = 1; curpd = symptrd[si]; curbase = symbase[si];
+    curelem = curpd >= 2 ? 8 : symbase[si];
+    return 0;
+}
 int callres(int si) {
     curflt = 0; curcall = 1;
     if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) {
@@ -11601,7 +11615,7 @@ int pf_call(int t) {
             es("  @call.call "); etok(t); ec(10);
             if (n > 0) { es("  @call.frame -"); en(8 * n); ec(10); }
             lvalue = 0; curelem = 8;
-            callres(si);
+            callres(si); callptr(si);
             return postfix();
         }
     }
@@ -11612,7 +11626,7 @@ int pf_call(int t) {
     }
     es("  @call.call "); etok(t); ec(10);
     lvalue = 0; curelem = 8;
-    callres(sfind(t));
+    callres(sfind(t)); callptr(sfind(t));
     {
         int si; si = sfind(t);
         if (si >= 0) { if (symfpret[si]) { curfn = 1; curfnst = symrfst[si]; } }

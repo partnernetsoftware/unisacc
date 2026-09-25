@@ -19,7 +19,9 @@ for s in prec reloc; do
         else echo "$s $b DIFFERS"; diff "$T/$s.py" "$T/$s.$b" | head -5; fail=1; fi
     done
 done
-# negative inputs: each damaged copy of prec.tsv must exit non-zero
+# negative inputs: each damaged copy of prec.tsv must be REJECTED BY THE
+# READER -- exit status exactly 1 and the diagnostic for that damage.  A
+# signal (>128), the watchdog, or any other failure is not a rejection.
 src=weights/gold/prec.tsv
 first=$(grep -n -v '^#' $src | sed -n 2p | cut -d: -f1)     # first data row
 second=$((first + 1))
@@ -28,10 +30,16 @@ sed "${second}s/.*/$(sed -n ${first}p $src)/" $src > "$T/duplicate.tsv"
 sed "${first}s/	1\$/	NOPE/" $src > "$T/badlabel.tsv"
 sed "${first}s/\$/	x/" $src > "$T/extracol.tsv"
 sed "${first}s/^/zz/" $src > "$T/badkey.tsv"
-for n in missing duplicate badlabel extracol badkey; do
+for c in "missing|keys do not cover" "duplicate|key repeats" "badlabel|not a class of its head" \
+         "extracol|wrong number of columns" "badkey|not a value of its field"; do
+    n=${c%%|*}; want=${c#*|}
     for b in cc ua; do
-        if B 30 "$T/c_$b" "$T/$n.tsv" > "$T/$n.$b.out" 2>&1; then echo "$n $b ACCEPTED"; fail=1
-        else echo "$n $b rejected: $(head -1 "$T/$n.$b.out")"; fi
+        B 30 "$T/c_$b" "$T/$n.tsv" > "$T/$n.$b.out" 2>&1; rc=$?
+        if [ $rc -eq 1 ] && grep -q "$want" "$T/$n.$b.out"; then
+            echo "$n $b rejected: $(head -1 "$T/$n.$b.out")"
+        else
+            echo "$n $b NOT A READER REJECTION (rc $rc): $(head -1 "$T/$n.$b.out")"; fail=1
+        fi
     done
 done
 rm -rf "$T"

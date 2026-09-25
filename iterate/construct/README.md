@@ -54,17 +54,37 @@ has an alarm.
   but neither stage selects a factored representation (both are `dlist`).
   The dumps show only the chosen representation, so the factored candidates
   themselves are not compared.
-- The semantic check alone is weak evidence. While unisacc was miscompiling
-  `b1` (see below), the wrong net still passed it. Only the byte comparison
-  with Python caught the error.
+- The semantic check alone is weak evidence. While the unisacc build produced
+  a different `b1` (see below; since fixed), that net still passed
+  it; only the byte comparison with Python caught the difference.  Three
+  things are recorded separately: the nets' outputs agree on the whole
+  domain; the constructed representation is identical byte for byte; and
+  the verifier is trusted only as far as the compiler that built it.
+- Deployment semantics.  The C verifier computes `hv * W2`, while the
+  deployed IntNet adds a unit's W2 once when its activation is > 0.  They
+  agree only if every hidden activation is 0 or 1 and `b1 = 1 - (number of
+  constrained fields)`.  These construction invariants are NOT yet checked
+  explicitly; before a UNS2 writer, check them over the whole domain and
+  check the encode/decode round trip against the deployed arithmetic.
+- Capacity.  A key set is one `long`, so a stage may have at most 62
+  quotient keys.  This limits which stages can be ported independently of
+  the multi-head work; the list of stages over the limit is not made yet.
 - Beyond the contract: Python rejects a file that is not valid UTF-8, and the
   C reader does not check the encoding.
 
-## unisacc bugs found on the way (worked around in the source, not fixed)
+## unisacc problems met on the way
 
-1. A 3-D array indexed by variables crashes (SIGSEGV):
-   `long a[4][5][3]; int i=2,j=3; a[i][j][1]=7;`. The candidate store is
-   therefore flat 2-D (`row = ci * MAXU + u`).
-2. `b1[H] = -(nlits(ucube[H]) - 1);` stores 6 where -1 is expected. The same
-   expression through a local is correct. A repro is
-   `b1[H] = -(two(uc[H]) - 1)` with `two` returning 2.
+1. **Confirmed and fixed (2976a43).** A 3-D array indexed by variables
+   crashed (SIGSEGV at -O0 and -O2): `long a[4][5][3]; int i=2,j=3;
+   a[i][j][1]=7;`.  The index expression reset the inner dimension.
+   Regression probe: `tests/c/a_arr3v.c`.  The candidate store here is
+   still flat 2-D (`row = ci * MAXU + u`); that is harmless and stays.
+2. **Confirmed and fixed.**  `b1[H] = -(nlits(ucube[H]) - 1);` built by
+   unisacc gave the wrong b1 (7 where Python gives 0 on prec).  The first
+   minimal attempt missed it because its argument was not a pointer: a
+   call's result kept the pointer-ness the LAST ARGUMENT left behind
+   (`ucube[H]` is a row, so a pointer), and `- 1` was scaled by 8.
+   Pointer-returning calls were wrong the other way (`*(ip() + 2)` stepped
+   by bytes).  Fixed in the C front end (`callptr`); probe
+   `tests/c/a_callres.c`; construct.c is back to the single expression and
+   still byte-identical to Python on prec and reloc.

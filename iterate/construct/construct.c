@@ -762,9 +762,7 @@ int main(int argc, char **argv) {
             found = H;
             cpcube(ucube[H], ccube[s0 * MAXU + u]);
             for (c = 0; c < ncl[0]; c = c + 1) W2[H][c] = 0;
-            a = nlits(ucube[H]);     /* not folded into one expression: unisacc
-                                        (8d4011c) miscompiles -(f(row) - 1) stored to b1[H] */
-            b1[H] = -(a - 1);
+            b1[H] = -(nlits(ucube[H]) - 1);
             H = H + 1;
         }
         for (c = 0; c < ncl[0]; c = c + 1) if (cw[s0 * MAXU + u][c]) W2[found][c] = cw[s0 * MAXU + u][c];
