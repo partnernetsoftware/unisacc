@@ -10,10 +10,10 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"
-c=$(bound 20 python3 tests/tsv_contract.py 2>&1)
+c=$(bound 20 python3 tests/tsv_contract.py 2>&1); crc=$?
 printf '%s\n' "$c" | sed 's/^/  /'
-if [ "$(printf '%s\n' "$c" | grep -c 'rejected')" -ne 5 ] || ! printf '%s\n' "$c" | grep -q '^ok  *accepted'; then
-    echo "tsvbuild  FAIL: the input contract let a damaged table through"; exit 1
+if [ $crc -ne 0 ] || ! printf '%s\n' "$c" | grep -q 'contract  cases 6  wrong 0'; then
+    echo "tsvbuild  FAIL: input contract check (rc $crc)"; exit 1
 fi
 out=$(bound 58 python3 -m unisa build-weights --from-tsv --check 2>&1); rc=$?
 printf '%s\n' "$out" | sed 's/^/  /'

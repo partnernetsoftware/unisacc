@@ -16,6 +16,7 @@ cases = {
     'bad key': [('zz' + l) if i == body[0] else l for i, l in enumerate(L)],
 }
 d = tempfile.mkdtemp()
+wrong = []
 for name, lines in cases.items():
     p = os.path.join(d, 'prec.tsv'); open(p, 'w').write('\n'.join(lines))
     try:
@@ -23,6 +24,10 @@ for name, lines in cases.items():
     except tsvgold.GoldDataError as e:
         r = 'rejected: ' + str(e).split(': ', 1)[1]
     print('%-14s %s' % (name, r))
+    want = 'accepted' if name == 'ok' else 'rejected'
+    if not r.startswith(want):
+        wrong.append(name)
 shutil.rmtree(d)
 badn = sum(1 for n in cases if n != 'ok')
-print('contract  cases %d' % len(cases))
+print('contract  cases %d  wrong %d' % (len(cases), len(wrong)))
+sys.exit(1 if wrong else 0)
