@@ -76,6 +76,27 @@ unique names, values and classes.  `check.sh` damages prec.tsv in five ways
 (missing row, duplicate row, bad label, extra column, bad key), and both
 builds reject every copy with exit 1 and the matching diagnostic.
 
+## Acceptance batch: pp, lex, scope, pfconv, binsel (2026-09-25)
+
+Existing constructor, no change to construct.c.  `check.sh` covers them;
+each is a single-stage UNS2 pack (MAXS is 8, so no 9-stage pack is claimed).
+Both builds, all five items pass:
+
+| stage | -d dump | UNS2 blob | shipped section | round trip | trace |
+|---|---|---|---|---|---|
+| pp | 589 B | 74 B | 58 B | 18 keys | dlist 6 units; T5 1 partition, 12 calls, **12 None** |
+| lex | 1086 B | 109 B | 93 B | 144 keys | dlist 11 units; T5 1 partition, 18 calls, **18 None** |
+| scope | 942 B | 84 B | 68 B | 30 keys | dlist 9 units; T5 1 partition, 18 calls, **18 None** |
+| pfconv | 555 B | 73 B | 57 B | 9 keys | dlist 7 units; one field, T5 not run |
+| binsel | 1755 B | 157 B | 141 B | 32 keys | factored cand 1, 18 units; 18 calls, 0 None, all 18 kept, **18-way tie at 18 units** (first index wins) |
+
+New branches versus prec/reloc/tyinfo/regmap: `rep_factored` returning None
+(pp, lex, scope), and a tie among many equal-length factored candidates
+(binsel; regmap tied only two).  Still not exercised: a candidate dropped as
+not shorter, more than one partition, 3 fields, anything multi-head beyond
+tyinfo.  Patch units are not visible in the trace.  Invariant negatives
+(`-T bias`, `-T act`) fire on all five, both builds.
+
 ## What is not proven
 
 - The other 14 stages.  They are not attempted.  The capacity is at most 3
