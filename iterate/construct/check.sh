@@ -33,6 +33,12 @@ isel isel t i
 combo combo t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
+# THE whole-pack items: one 18-stage UNS2 written by one construct process.
+# py = bytes vs uns2.dump of the Python nets, ship = vs weights/built.uns2
+# with its header (uns2pack.py), round = deployed round trip of the C pack,
+# order.<b> = three argument orders in ONE process byte-identical, wfail =
+# the write-failure and pack-argument negatives.
+PACKS="py ship round order.cc order.ua order.san wfail"
 GLOBALS="qset wset sum reader capq capr capr81 caprn caph caphn capk capk4 capkn capn capo capg capgn capc capcn capcf capu capun capp"
 # THE required-check list (need) is one function, used by the full run's
 # summary, by a PARTS sub-run, and by the --batches parent that aggregates
@@ -47,6 +53,14 @@ need() {    # need stage <s> | need global <g>: the required pass marks
         echo "$TABLE" | while read -r n tag tr iv; do [ $n = $s ] || continue
             [ $tr = t ] && echo "s $s trace"
             [ $iv = i ] && for t in bias act; do for b in cc ua; do echo "s $s inv $t $b"; done; done; done
+        return
+    fi
+    if [ $1 = pack ]; then
+        case $2 in
+        py|ship|round) for b in cc ua san; do echo "p $2 $b"; done ;;
+        order.*) echo "p order ${2#order.}" ;;
+        wfail) for b in cc ua san; do for t in opendir opennodir short close dup maxs empty; do echo "p wfail $t $b"; done; done ;;
+        esac
         return
     fi
     g=$2
@@ -78,20 +92,25 @@ type|0
 abi|0
 combo|0|dump
 combo|0|uns2
-combo|0|trace'
+combo|0|trace
+|0||py ship round
+|0||order.ua
+|0||order.cc order.san wfail'
 if [ "${1:-}" = --batches ]; then
     shift; UA=${1:-/tmp/ua_ref}
     # the plan: every (stage, kind) exactly once -- a full batch covers all
     # kinds of its stages -- and the global checks in exactly one batch
-    plan=$(echo "$BATCHES" | while IFS='|' read -r st gl ks; do
+    plan=$(echo "$BATCHES" | while IFS='|' read -r st gl ks pk; do
         for s in $st; do for k in ${ks:-$KINDS}; do echo "$s $k"; done; done; done | sort)
     full=$(for s in $ALL; do for k in $KINDS; do echo "$s $k"; done; done | sort)
     ng=$(echo "$BATCHES" | cut -d'|' -f2 | grep -c '^1$')
     badk=$(echo "$BATCHES" | cut -d'|' -f3 -s | tr ' ' '\n' | grep -v -x -e dump -e uns2 -e trace | grep .)
-    if [ "$plan" != "$full" ] || [ "$ng" != 1 ] || [ -n "$badk" ]; then
-        echo "batches: plan is not every (stage, kind) of the full list plus globals once (globals in $ng batches; bad kinds [$badk])"; exit 2
+    pplan=$(echo "$BATCHES" | cut -d'|' -f4 -s | tr ' ' '\n' | grep . | sort)
+    pfull=$(echo $PACKS | tr ' ' '\n' | sort)
+    if [ "$plan" != "$full" ] || [ "$ng" != 1 ] || [ -n "$badk" ] || [ "$pplan" != "$pfull" ]; then
+        echo "batches: plan is not every (stage, kind) of the full list, globals once and every pack item once (globals in $ng batches; bad kinds [$badk]; pack items [$(echo $pplan)])"; exit 2
     fi
-    echo "batches: planned union = all $(echo $ALL | wc -w | tr -d ' ') stages x {$KINDS} + global checks, each exactly once"
+    echo "batches: planned union = all $(echo $ALL | wc -w | tr -d ' ') stages x {$KINDS} + global checks + pack items {$PACKS}, each exactly once"
     # The plan above is not the result.  A full batch hands back "receipt
     # stage <s>" / "receipt global <g>"; a kinds batch hands back "receipt
     # check <mark>" for each mark of need(stage) of those kinds -- never a
@@ -103,20 +122,21 @@ if [ "${1:-}" = --batches ]; then
     W=${TMPDIR:-/tmp}/construct_batches.$$; mkdir -p "$W"
     bf=0; n=0; : > "$W/union"
     echo "$BATCHES" > "$W/list"
-    while IFS='|' read -r st gl ks; do
+    while IFS='|' read -r st gl ks pk; do
         n=$((n + 1))
         t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-        STAGES=$st GLOBAL=$gl PARTS=${ks:-all} perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "$W/out.$n" 2>&1; rc=$?
+        STAGES=$st GLOBAL=$gl PARTS=${ks:-all} PACK=$pk perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "$W/out.$n" 2>&1; rc=$?
         t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
         sed "s/^/[batch $n] /" "$W/out.$n"
         el=$(perl -e "printf '%.1f', $t1 - $t0")
-        echo "batch $n: stages [$st] global $gl kinds [${ks:-all}]: rc $rc, $el s (limit 60 s)"
+        echo "batch $n: stages [$st] global $gl kinds [${ks:-all}] pack [$pk]: rc $rc, $el s (limit 60 s)"
         if [ $rc -ne 0 ]; then bf=1; echo "batch $n: FAILED (rc $rc)"; break; fi
         { for s in $st; do
               if [ -z "$ks" ]; then echo "receipt stage $s"
               else need stage $s | while read -r m; do case " $ks " in *" $(partof $m) "*) echo "receipt check $m" ;; esac; done; fi
           done
-          [ "$gl" = 1 ] && for g in $GLOBALS; do echo "receipt global $g"; done; } | sort > "$W/want.$n"
+          [ "$gl" = 1 ] && for g in $GLOBALS; do echo "receipt global $g"; done
+          for p in $pk; do echo "receipt pack $p"; done; } | sort > "$W/want.$n"
         grep '^receipt ' "$W/out.$n" | sort > "$W/got.$n"
         cat "$W/got.$n" >> "$W/union"
         mis=$(comm -23 "$W/want.$n" "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
@@ -145,22 +165,31 @@ if [ "${1:-}" = --batches ]; then
         done
         stray=$(sort "$W/used" | comm -13 - "$W/checks" | sed 's/^receipt check //' | tr '\n' ',' | sed 's/,$//')
         [ -n "$stray" ] && { bf=1; echo "batches: check receipts not consumed by any stage: [$stray]"; }
-        { for s in $ALL; do echo "receipt stage $s"; done; for g in $GLOBALS; do echo "receipt global $g"; done; } | sort > "$W/wantall"
+        { for s in $ALL; do echo "receipt stage $s"; done; for g in $GLOBALS; do echo "receipt global $g"; done
+          for p in $PACKS; do echo "receipt pack $p"; done; } | sort > "$W/wantall"
         sort "$W/agg" > "$W/gotall"
         mis=$(comm -23 "$W/wantall" "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         ext=$(comm -13 "$W/wantall" "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         dup=$(uniq -d "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
         if [ -n "$mis$ext$dup" ]; then bf=1; echo "batches: receipt union WRONG: missing [${mis}] extra [${ext}] duplicate [${dup}]"
-        else echo "batches: receipt union = all $(echo $ALL | wc -w | tr -d ' ') stages + $(echo $GLOBALS | wc -w | tr -d ' ') global checks, each exactly once ($(wc -l < "$W/gotall" | tr -d ' ') receipts)"; fi
+        else echo "batches: receipt union = all $(echo $ALL | wc -w | tr -d ' ') stages + $(echo $GLOBALS | wc -w | tr -d ' ') global checks + $(echo $PACKS | wc -w | tr -d ' ') pack items, each exactly once ($(wc -l < "$W/gotall" | tr -d ' ') receipts)"; fi
     fi
     rm -rf "$W"
     [ $bf = 0 ] && echo "construct check batches: ok" || echo "construct check batches: FAILED"
     exit $bf
 fi
 UA=${1:-/tmp/ua_ref}
-if [ -z "${STAGES+x}" ] && [ -z "${GLOBAL+x}" ]; then SEL=$ALL; GL=1
+# PACK: the whole-pack items to run ("all" = $PACKS).  Default: all of them
+# when nothing is selected; with an explicit selection, none unless named.
+if [ -z "${STAGES+x}" ] && [ -z "${GLOBAL+x}" ] && [ -z "${PACK+x}" ]; then SEL=$ALL; GL=1; PK=$PACKS
 else
-    SEL=; GL=0
+    SEL=; GL=0; PK=
+    for p in ${PACK:-}; do
+        case $p in all) PK="$PK $PACKS" ;;
+        *) case " $PACKS " in *" $p "*) PK="$PK $p" ;;
+           *) echo "construct check: unknown pack item '$p' (pack items: $PACKS all)"; exit 2 ;; esac ;;
+        esac
+    done
     for s in ${STAGES:-}; do
         case $s in
         all) SEL="$SEL $ALL" ;;
@@ -170,8 +199,8 @@ else
         esac
     done
     case ${GLOBAL:-} in 1) GL=1 ;; 0) GL=0 ;; '') ;; *) echo "construct check: GLOBAL must be 0 or 1"; exit 2 ;; esac
-    if [ -z "$SEL" ] && [ $GL = 0 ]; then
-        echo "construct check: empty selection -- no stage and no global check selected (STAGES='${STAGES:-}' GLOBAL='${GLOBAL:-}'); nothing would be checked"; exit 2
+    if [ -z "$SEL" ] && [ $GL = 0 ] && [ -z "$PK" ]; then
+        echo "construct check: empty selection -- no stage, no global check and no pack item selected (STAGES='${STAGES:-}' GLOBAL='${GLOBAL:-}' PACK='${PACK:-}'); nothing would be checked"; exit 2
     fi
 fi
 # PARTS (default all): the kinds of per-stage checks to run.  A kinds run
@@ -181,6 +210,8 @@ PARTS=${PARTS:-all}
 for k in $PARTS; do case $k in all|dump|uns2|trace) ;; *) echo "construct check: PARTS: unknown kind '$k' (all $KINDS)"; exit 2 ;; esac; done
 case " $PARTS " in *" all "*) PARTS=all ;; esac
 [ "$PARTS" != all ] && [ $GL = 1 ] && { echo "construct check: PARTS=$PARTS cannot carry the global checks"; exit 2; }
+[ "$PARTS" != all ] && [ -n "$PK" ] && { echo "construct check: PARTS=$PARTS cannot carry the pack items"; exit 2; }
+psel() { case " $PK " in *" $1 "*) return 0 ;; esac; return 1; }
 pt() { case " $PARTS " in " all "|*" $1 "*) return 0 ;; esac; return 1; }
 sel() { case " $SEL " in *" $1 "*) return 0 ;; esac; return 1; }
 stages() { echo "$TABLE" | while read -r n tag tr iv; do sel $n || continue; case $1 in all) echo $n ;; t) [ $tr = t ] && echo $n ;; i) [ $iv = i ] && echo $n ;; esac; done; }
@@ -658,6 +689,100 @@ for c in "bias|has b1" "act|activation"; do
     done
 done
 done
+# ---------------------------------------------------------- the whole pack --
+# ONE construct process builds every stage of $TABLE and writes one UNS2.
+# The argument order is TABLE order; construct sorts the sections by name
+# itself (as uns2.dump's sorted(nets)).  Python (uns2slice.py) is the test
+# oracle only.  Marks per build (cc, ua, san): "p py" raw bytes = uns2.dump
+# of the 18 Python nets; "p ship" = weights/built.uns2 via uns2pack.py
+# (header fields, stage order, names, length, then raw, header included);
+# "p round" = uns2round.py (uns2.load + IntNet.predict) on every stage,
+# head and key, unique argmax = TSV label.  UBSan's pack must also have no
+# report.
+PF=$(for s in $ALL; do printf " weights/gold/%s.tsv" $s; done)
+NST=$(echo $ALL | wc -w | tr -d ' ')
+if psel py || psel ship || psel round; then
+    for b in cc ua san; do
+        B 60 "$T/c_$b" -u "$T/pack.$b.uns2" $PF > "$T/pack.$b.out" 2>&1; rc=$?
+        if [ $rc -ne 0 ] || grep -q 'runtime error' "$T/pack.$b.out"; then echo "pack $b construct FAILED (rc $rc): $(head -1 "$T/pack.$b.out")"; fail=1; rm -f "$T/pack.$b.uns2"
+        else echo "pack $b: one process, $NST stages, $(wc -c < "$T/pack.$b.uns2" | tr -d ' ') B"; fi
+    done
+fi
+if psel py; then
+    B 60 python3 iterate/construct/tools/uns2slice.py "$T/pack.py.uns2" $PF > /dev/null 2>&1 || { echo "pack python reference failed"; fail=1; }
+    for b in cc ua san; do
+        if [ -s "$T/pack.py.uns2" ] && [ -s "$T/pack.$b.uns2" ] && cmp -s "$T/pack.py.uns2" "$T/pack.$b.uns2"; then
+            echo "pack $b identical to uns2.dump of the Python nets ($(wc -c < "$T/pack.py.uns2" | tr -d ' ') B, raw)"; P "p py $b"
+        else echo "pack $b DIFFERS from uns2.dump"; fail=1; fi
+    done
+fi
+if psel ship; then
+    for b in cc ua san; do
+        if [ -s "$T/pack.$b.uns2" ] && B 30 python3 iterate/construct/tools/uns2pack.py "$T/pack.$b.uns2" weights/built.uns2 $NST > "$T/pk.$b.out" 2>&1; then
+            sed "s/^/pack $b vs built.uns2: /" "$T/pk.$b.out"; P "p ship $b"
+        else sed "s/^/pack $b vs built.uns2: /" "$T/pk.$b.out" 2>/dev/null; echo "pack $b vs built.uns2 FAILED"; fail=1; fi
+    done
+fi
+if psel round; then
+    for b in cc ua san; do
+        if [ -s "$T/pack.$b.uns2" ] && B 60 python3 iterate/construct/tools/uns2round.py "$T/pack.$b.uns2" $PF > "$T/pr.$b.out" 2>&1 \
+           && [ "$(grep -c 'all equal the TSV, no tie$' "$T/pr.$b.out")" = $NST ]; then
+            echo "pack $b round trip: $NST stages, $(awk '/^round trip/ {k += $4; h += $4 * $7} END {print k " keys, " h " (key, head) pairs"}' "$T/pr.$b.out"), unique argmax = TSV label"; P "p round $b"
+        else echo "pack $b round trip FAILED: $(grep -v 'no tie$' "$T/pr.$b.out" | head -2)"; fail=1; fi
+    done
+fi
+# three argument orders in ONE process (-u a ... -u b ... -u c ...): each
+# stage is built after a different predecessor, so state one stage's build
+# leaves for the next would show up as a byte difference.  The shuffle is
+# fixed and puts next to each other: large/small (combo>reloc, type>tyinfo,
+# isel>enc, irsel>regmap, reloc>type, pp>isel, enc>irsel), multi-/single-
+# head (combo>reloc, abi>pp, isel>enc, opinfo>binsel, type>tyinfo,
+# pp>isel, pfconv>opinfo), factored/dlist (combo>reloc, abi>pp, isel>enc,
+# parse>pfconv, binsel>peep, tyinfo>abi, pp>isel, irsel>regmap, opinfo>binsel).
+SHUF="combo reloc type tyinfo abi pp isel enc irsel regmap parse pfconv opinfo binsel peep prec lex scope"
+REV=$(echo $ALL | tr ' ' '\n' | sed -n '1!G;h;$p' | tr '\n' ' ')
+for b in cc ua san; do
+    psel order.$b || continue
+    if [ "$(echo $SHUF | tr ' ' '\n' | sort)" != "$(echo $ALL | tr ' ' '\n' | sort)" ]; then echo "pack order: the shuffle is not a permutation of TABLE"; fail=1; continue; fi
+    SF=$(for s in $SHUF; do printf " weights/gold/%s.tsv" $s; done); RF=$(for s in $REV; do printf " weights/gold/%s.tsv" $s; done)
+    B 60 "$T/c_$b" -u "$T/o1.$b.uns2" $PF -u "$T/o2.$b.uns2" $RF -u "$T/o3.$b.uns2" $SF > "$T/o.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 0 ] && ! grep -q 'runtime error' "$T/o.$b.out" && cmp -s "$T/o1.$b.uns2" "$T/o2.$b.uns2" && cmp -s "$T/o1.$b.uns2" "$T/o3.$b.uns2" && cmp -s "$T/o1.$b.uns2" weights/built.uns2; then
+        echo "pack order $b: TABLE, reverse and shuffle in one process ($((3 * NST)) builds): byte-identical, = built.uns2"; P "p order $b"
+    else echo "pack order $b FAILED (rc $rc): $(head -1 "$T/o.$b.out")"; for x in 2 3; do cmp "$T/o1.$b.uns2" "$T/o$x.$b.uns2"; done; fail=1; fi
+done
+# write failures and pack-argument negatives: each must exit with exactly
+# its code and diagnostic.  REAL faults, no test entry: a directory as the
+# output and a path in a missing directory (fopen fails); RLIMIT_FSIZE
+# 1024 B (ulimit -f 1, SIGXFSZ ignored so write returns EFBIG) with the
+# 18-stage pack -> a section fwrite comes back short; with combo alone
+# (3,224 B, within one stdio buffer) every fwrite is buffered and the
+# flush at fclose fails.  Outputs go to $T only.  Plus a stage given twice
+# (exit 2), MAXS + 1 stage files (exit 4, before any build), an empty -u.
+if psel wfail; then
+    MX=$(sed -n 's/^#define MAXS \([0-9]*\).*/\1/p' iterate/construct/construct.c)
+    XF=; i=$NST; while [ $i -le $MX ]; do XF="$XF weights/gold/prec.tsv"; i=$((i + 1)); done
+    for b in cc ua san; do
+        mkdir -p "$T/wdir"
+        for c in "opendir|7|cannot open" "opennodir|7|cannot open" "short|7|short write" "close|7|close failed" \
+                 "dup|2|given twice" "maxs|4|more than $MX (MAXS)" "empty|2|a -u pack with no stage"; do
+            t=${c%%|*}; r=${c#*|}; want=${r#*|}; r=${r%%|*}; o="$T/wf.$t.$b.out"
+            case $t in
+            opendir) B 30 "$T/c_$b" -u "$T/wdir" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
+            opennodir) B 30 "$T/c_$b" -u "$T/nodir/x.uns2" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
+            short) ( trap '' XFSZ; ulimit -f 1; B 60 "$T/c_$b" -u "$T/wf.short.uns2" $PF > "$o" 2>&1 ); rc=$? ;;
+            close) ( trap '' XFSZ; ulimit -f 1; B 30 "$T/c_$b" -u "$T/wf.close.uns2" weights/gold/combo.tsv > "$o" 2>&1 ); rc=$? ;;
+            dup) B 30 "$T/c_$b" -u "$T/wf.dup.uns2" weights/gold/prec.tsv weights/gold/reloc.tsv weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
+            maxs) B 30 "$T/c_$b" -u "$T/wf.maxs.uns2" $PF $XF > "$o" 2>&1; rc=$? ;;
+            empty) B 30 "$T/c_$b" -u "$T/wf.e1.uns2" -u "$T/wf.e2.uns2" weights/gold/prec.tsv > "$o" 2>&1; rc=$? ;;
+            esac
+            if [ $rc -eq $r ] && grep -q "$want" "$o" && ! grep -q 'runtime error' "$o"; then
+                echo "write negative $t $b: exit $rc: $(head -1 "$o" | sed "s#$T#\$T#g")"; P "p wfail $t $b"
+            else echo "write negative $t $b WRONG (rc $rc, want $r): $(head -1 "$o")"; fail=1; fi
+        done
+        if [ -e "$T/wf.dup.uns2" ] || [ -e "$T/wf.maxs.uns2" ]; then echo "write negative $b: a rejected pack left an output file"; fail=1; fi
+        rm -f "$T"/wf.*.uns2
+    done
+fi
 # summary: built from the pass marks (results), not from the selection.
 # attempted = selected; passed = every required mark present (receipt);
 # failed = attempted without a receipt; skipped = not selected.  An attempted
@@ -691,6 +816,12 @@ for g in $GLOBALS; do
     m=$(missing global $g)
     if [ -z "$m" ]; then echo "receipt global $g" >> "$T/rcpt"; np=$((np + 1)); echo "summary: global $g: attempted, passed"
     else nf=$((nf + 1)); echo "summary: global $g: attempted, FAILED, no receipt; missing $m"; fi
+done
+for p in $PACKS; do
+    if ! psel $p; then echo "summary: pack $p: skipped"; ns=$((ns + 1)); continue; fi
+    m=$(missing pack $p)
+    if [ -z "$m" ]; then echo "receipt pack $p" >> "$T/rcpt"; np=$((np + 1)); echo "summary: pack $p: attempted, passed"
+    else nf=$((nf + 1)); echo "summary: pack $p: attempted, FAILED, no receipt; missing $m"; fi
 done
 echo "summary: attempted $((np + nf)), passed $np, failed $nf, skipped $ns"
 [ $nf = 0 ] || fail=1    # self-check: an attempted item without a receipt fails this run too

@@ -7,12 +7,17 @@
  *
  *   construct [-d] weights/gold/prec.tsv
  *   construct -u out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
+ *   construct -u a.uns2 <tsv...> -u b.uns2 <tsv...>   (several packs, one process)
  *   construct -t weights/gold/tyinfo.tsv
  *   construct -Q      (self-test of the quotient-key sets at word boundaries)
  *   construct -G      (self-test of the ws_ word-set layer, incl. lexicographic order)
  *
- * -u writes the UNS2 blob (unisa/uns2.py dump) of the stages given.  Every
- * mode checks the deployment invariants over the full domain (exit 3).
+ * -u writes the UNS2 blob (unisa/uns2.py dump) of the stages given, in
+ * sorted name order whatever the argument order.  Every mode checks the
+ * deployment invariants over the full domain (exit 3).
+ * Exit codes: 1 reader / not exact, 2 usage or a stage given twice,
+ * 3 deployment invariant, 4 capacity, 5 self-test, 6 overflow,
+ * 7 the output file could not be opened, written or closed.
  *
  * -d adds the intermediate dumps (quotient groups, decision list with ranks,
  * chosen units) so a divergence can be located at its first step.
@@ -1458,9 +1463,26 @@ void share(void) {
 /* Build the net for one gold table: the reader, T1-T5 per head, pick, T4,
    the net, then the verifier and the deployment invariants over the full
    original domain. */
+/* Per-stage state.  -u builds several stages in ONE process, so every
+   count that one stage's build leaves behind is reset here, explicitly,
+   before the next stage is read (README, "whole pack: state audit").
+   Arrays are not cleared: each is written before it is read, bounded by a
+   count reset here or recomputed by load/domain (listed in the README). */
+void resetstage(void) {
+    int h;
+    nf = 0; nh = 0; nok = 0; sname = 0;           /* reader */
+    nq = 0; nqw = 0; qtl = 0; nord = 0;           /* domain, orders */
+    nr = 0; npool = 0; ncand = 0; nparts = 0;     /* rules, T4 pool, candidates, T5 parts */
+    for (h = 0; h < MAXH; h = h + 1) { nhc[h] = 0; hnr[h] = 0; chosen[h] = 0; }
+    H = 0; h0 = 0; mxlog = 0; ch = 0;             /* the net */
+    tunits = 0; talign = 0; ttie = 0; tpickmoved = 0; tfatt = 0; tfnone = 0;   /* trace counters */
+    tfearlyb = 0; tfearlyp = 0; tfkept = 0; tsel = 0; trounds = 0; tacc = 0; trej = 0; tchg = 0;
+}
+
 void build(char *path) {
     int k, j, h, i, u, c, a, b, found, v, arg, cntmx, bad, t, ci;
     long z[MAXC], mx, mn, hv;
+    resetstage();
     load(path);
     domain();
     orders();
@@ -1652,7 +1674,7 @@ void canon(void) {
    len u32 | per unit: count 8 bits, then (class cb bits, weight wb bits).
    (The docstring of uns2.py says "presence H bits"; the code writes an
    8-bit count per unit, and the code is what is matched here.) */
-#define MAXS 8
+#define MAXS 24   /* stages in one -u pack: 18 shipped; checked in main before any build, exit 4 */
 #define SECSZ 65536
 char sec[MAXS][SECSZ];
 int seclen[MAXS];
@@ -1737,7 +1759,7 @@ char hdr[16];
 
 void writeuns2(char *opath, int ns) {
     FILE *f;
-    int ord[MAXS], i, t, tmp, units = 0;
+    int ord[MAXS], i, t, tmp, units = 0, n;
     for (i = 0; i < ns; i = i + 1) { ord[i] = i; units = units + secH[i]; }
     for (i = 1; i < ns; i = i + 1) {
         t = i;
@@ -1750,11 +1772,19 @@ void writeuns2(char *opath, int ns) {
     cur = hdr; clen = 0; ccap = 16;
     outb('U'); outb('N'); outb('S'); outb('2');
     outb(1); outb(0); out16(ns); out32(units); out32(0);
+    /* exit 7: the output could not be written.  Every stage is built and
+       checked before the file is opened, so a failure here is IO only.  A
+       short write or a failed close leaves an incomplete file behind; the
+       exit status is what says so. */
     f = fopen(opath, "wb");
-    if (!f) { printf("construct: cannot write %s\n", opath); exit(2); }
-    fwrite(hdr, 1, 16, f);
-    for (i = 0; i < ns; i = i + 1) fwrite(sec[ord[i]], 1, seclen[ord[i]], f);
-    fclose(f);
+    if (!f) { printf("construct: write: cannot open %s for writing\n", opath); exit(7); }
+    n = (int)fwrite(hdr, 1, 16, f);
+    if (n != 16) { printf("construct: write: %s: short write, header %d of 16 B\n", opath, n); exit(7); }
+    for (i = 0; i < ns; i = i + 1) {
+        n = (int)fwrite(sec[ord[i]], 1, seclen[ord[i]], f);
+        if (n != seclen[ord[i]]) { printf("construct: write: %s: short write, stage %s %d of %d B\n", opath, secname[ord[i]], n, seclen[ord[i]]); exit(7); }
+    }
+    if (fclose(f) != 0) { printf("construct: write: %s: close failed (buffered data not written)\n", opath); exit(7); }
 }
 
 /* -T summax | sumover | sumrun: the SAME ladd the accumulation sites call,
@@ -1789,7 +1819,7 @@ void sumtest(int which) {
 }
 
 int main(int argc, char **argv) {
-    int ai, ns = 0;
+    int ai, t, ns = 0;
     char *path = 0;
     char *upath = 0;
     dbg = 0;
@@ -1810,17 +1840,35 @@ int main(int argc, char **argv) {
             else if (streq(argv[ai], "sumrun")) sumtest(2);
             else { printf("construct: -T bias | act | pool | summax | sumover | sumrun\n"); return 2; }
         }
-        else if (streq(argv[ai], "-u") && ai + 1 < argc && !upath) { ai = ai + 1; upath = argv[ai]; }
+        else if (streq(argv[ai], "-u") && ai + 1 < argc && (!upath || ns > 0)) {
+            /* a further -u ends the previous pack (written now) and starts
+               the next one, IN THE SAME PROCESS: check.sh builds the stages
+               in three orders this way, so each stage is built after state
+               left by a different predecessor */
+            if (upath) { if (path || dbg) { printf("usage: construct -u out.uns2 <stage>.tsv... [-u out2.uns2 <stage>.tsv...]\n"); return 2; } writeuns2(upath, ns); ns = 0; }
+            ai = ai + 1; upath = argv[ai];
+        }
+        else if (streq(argv[ai], "-u")) { printf("usage: construct -u out.uns2 <stage>.tsv... [-u out2.uns2 <stage>.tsv...]: a -u pack with no stage\n"); return 2; }
         else if (upath) {
-            if (ns >= MAXS) { printf("construct: more than %d stages\n", MAXS); return 2; }
+            /* the stage count is checked before ANY stage is built */
+            if (ns == 0) {
+                t = ai;
+                while (t < argc && !streq(argv[t], "-u")) t = t + 1;
+                if (t - ai > MAXS) { printf("construct: capacity: %d stage files, more than %d (MAXS)\n", t - ai, MAXS); return 4; }
+            }
+            if (ns >= MAXS) { printf("construct: capacity: more than %d stages (MAXS)\n", MAXS); return 4; }
             build(argv[ai]);
+            /* a stage given twice: rejected when its second copy is built,
+               before the output is opened (exit 2) */
+            for (t = 0; t < ns; t = t + 1)
+                if (strncmp(secname[t], sname, 16) == 0) { printf("construct: stage %s is given twice\n", sname); return 2; }
             section(ns);
             ns = ns + 1;
         }
         else path = argv[ai];
     }
     if (upath) {
-        if (ns == 0 || path || dbg) { printf("usage: construct -u out.uns2 <stage>.tsv...\n"); return 2; }
+        if (ns == 0 || path || dbg) { printf("usage: construct -u out.uns2 <stage>.tsv... [-u out2.uns2 <stage>.tsv...]\n"); return 2; }
         writeuns2(upath, ns);
         return 0;
     }
