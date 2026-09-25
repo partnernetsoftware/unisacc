@@ -23,7 +23,7 @@ for b in cc ua san; do
     if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 10 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (10 sizes)"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
 done
-for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo peep; do
+for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse; do
     B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py" || fail=1
     for b in cc ua; do
         B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b" || fail=1
@@ -65,11 +65,11 @@ uns2 single weights/gold/prec.tsv weights/gold/reloc.tsv
 uns2 multi weights/gold/tyinfo.tsv
 uns2 regmap weights/gold/regmap.tsv
 # acceptance batch: one blob per stage (single-stage packs; MAXS is 8)
-for s in pp lex scope pfconv binsel enc opinfo peep; do uns2 $s weights/gold/$s.tsv; done
+for s in pp lex scope pfconv binsel enc opinfo peep parse; do uns2 $s weights/gold/$s.tsv; done
 # the multi-head branch trace (-t): which candidate each head chose, whether
 # pick moved, what T4 did.  A debug print, not compared with Python (the
 # counts were cross-checked once by hand); the two builds must agree.
-for s in tyinfo regmap pp lex scope pfconv binsel enc opinfo peep; do
+for s in tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse; do
     for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || fail=1; done
     if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; else echo "$s trace differs between builds"; fail=1; fi
 done
@@ -162,11 +162,27 @@ for b in cc ua san; do
         echo "field-group negative $b NOT A FIELD-GROUP REJECTION (rc $rc): $(head -1 "$T/capg.$b.out")"; fail=1
     fi
 done
+# class-count NEGATIVE: a class set is one long, so a head may have at most
+# MAXC = 62 classes.  A 2 x 2 table whose head lists 63 classes (labels use
+# only c0 and c1): raw values 2 and 2 (<= MAXV), 2 groups per field, 4
+# quotient keys, 2 rules -- every other limit is met, and the reader must
+# exit exactly 4 with the class diagnostic before any class shift.
+{ echo "# stage capc: 4 keys, 63 classes, synthetic"; printf '#field\ta\tv0\tv1\n#field\tb\tw0\tw1\n#head\ty\t-'
+  i=0; while [ $i -lt 63 ]; do printf '\tc%d' $i; i=$((i + 1)); done
+  printf '\na\tb\t=> y\nv0\tw0\tc0\nv0\tw1\tc0\nv1\tw0\tc1\nv1\tw1\tc1\n'; } > "$T/capc.tsv"
+for b in cc ua san; do
+    B 30 "$T/c_$b" "$T/capc.tsv" > "$T/capc.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: head y has 63 classes, more than 62" "$T/capc.$b.out" && ! grep -q 'runtime error' "$T/capc.$b.out"; then
+        echo "class-count negative $b rejected: $(head -1 "$T/capc.$b.out")"
+    else
+        echo "class-count negative $b NOT A CLASS-COUNT REJECTION (rc $rc): $(head -1 "$T/capc.$b.out")"; fail=1
+    fi
+done
 # the deployment invariants must be able to fire: the test entry breaks b1
 # of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
 # invariant 1 is the one reached.  Only exit 3 with that invariant's
 # diagnostic counts.
-for s in prec tyinfo regmap pp lex scope pfconv binsel enc opinfo peep; do
+for s in prec tyinfo regmap pp lex scope pfconv binsel enc opinfo peep parse; do
 for c in "bias|has b1" "act|activation"; do
     t=${c%%|*}; want=${c#*|}
     for b in cc ua; do

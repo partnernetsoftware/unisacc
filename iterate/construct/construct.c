@@ -29,7 +29,7 @@
 #define MAXF 3
 #define MAXV 128   /* raw values per field: storage only, never a bit index */
 #define MAXH 4
-#define MAXC 32
+#define MAXC 62   /* a class set is ONE long: class c and rank crank[c] < 62 -> bits <= 61 */
 #define MAXOK 4096
 #define MAXQ 1024  /* quotient keys; a key set is QW longs (qset below) */
 #define QB 62      /* key bits per word: bits 0..61, never bit 62 or the sign bit 63 */
@@ -148,7 +148,15 @@ void load(char *path) {
             if (header) dieln(ln, "schema after the header");
             if (np < 4) dieln(ln, "a head with no classes");
             if (nh >= MAXH) dieln(ln, "more heads than this constructor holds");
-            if (np - 3 > MAXC) dieln(ln, "more classes than this constructor holds");
+            /* a class set (gcls, bcls, rankset, wmask) is ONE long: class c is
+               bit c and its rank crank[c] is bit crank[c], both < ncl.  ncl <= 62
+               keeps every class bit <= 61, so no class shift reaches the sign
+               bit and cmpset's right shifts see values >= 0.  Checked here,
+               before cls[] is stored and before any class shift: exit 4. */
+            if (np - 3 > MAXC) {
+                printf("construct: %s: capacity: head %s has %d classes, more than %d\n", gpath, parts[1], np - 3, MAXC);
+                exit(4);
+            }
             hname[nh] = parts[1];
             ncl[nh] = np - 3;
             for (i = 3; i < np; i = i + 1) cls[nh][i - 3] = parts[i];

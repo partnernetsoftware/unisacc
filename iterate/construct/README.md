@@ -498,3 +498,55 @@ Gates (check.sh):
 - unchanged and green: 63-key positive, 1089-key negative (now "a 17-word
   bitset"), reader and invariant negatives, all 12 stages byte-identical on
   both builds (dumps, UNS2, shipped sections, round trips, traces).
+
+## parse: the class-set audit and MAXC 32 -> 62
+
+parse: 2 fields of 5 and 68 raw values, 1 head, 36 classes, 340 keys.
+The only limit it crossed was MAXC 32.  Audit, done BEFORE the change:
+every class set and every shift driven by a class or a rank.
+
+| operation | where | index source | max bit |
+|---|---|---|---|
+| `gcls[x] \|= bit(qlab[ch][j])` | rep_factored | class id | ncl - 1 |
+| `bcls[x] = gcls[t]`, `bcls[b] == gcls[t]` | rep_factored | copies/compares a class set | ncl - 1 |
+| `rankset`: `(s >> c) & 1` | rankset | class id, c < ncl | shift ncl - 1 |
+| `rankset`: `r \|= bit(crank[ch][c])` | rankset | class name rank, a permutation of 0..ncl-1 | ncl - 1 |
+| `cmpset(rankset(..), rankset(..))`: `d >> p`, `a >> p`, `b >> p` | bucket sort | lowest differing bit of two rank sets | ncl - 1 |
+| `wmask = bcls[b]`, `(wmask >> i) & 1` | rep_factored | class id, i < ncl | shift ncl - 1 |
+| `labmask[qlab]`, `cw[..][c]`, `W2[..][c]`, `z[c]`, `zs[c]`, `cls[h][c]`, `crank[h][c]` | everywhere | class id | storage (arrays of MAXC), never a bit index |
+| `tput(c, cb)`, `cb = bitlen(ncl - 1)` | UNS2 | class id as a value | 6 bits at 62 classes |
+| `bit(lv)` | rep_from_dl, ranks | rank, `lv <= 60` checked | 60 |
+| `bit(k + 1 - i)`, `bit(k + 2)` | rep_factored | k < min(nr, 9) | 10 |
+
+The rank-indexed shifts do not depend on the class count: `lv` is bounded by
+`ranks()` (`lv > 60` dies), `k` by `factored()` (`k < 9`).  Rank sets are a
+separate thing.  cmpset is only ever called on group sets (cubes, ng <= 62)
+and rank sets of classes (bits < ncl).
+
+**Bound.**  Every class set is one `long`, and its members are bits c or
+crank[c] with 0 <= c, crank[c] < ncl.  With ncl <= 62 the highest bit is
+61: no shift touches bit 62 or the sign bit 63, every class set is >= 0, and
+cmpset's right shifts see values >= 0.  At ncl = 63 `bit(62)` would still be
+defined but the value-bits <= 61 rule would break; at 64 `bit(63)` is
+signed-overflow UB.  So MAXC = 62, the same bound and argument as the field
+groups; class sets stay single `long`s (not raised to 128).  The reader
+checks it on the `#head` line, before `cls[]` is stored and before any class
+shift: exit 4, `capacity: head H has N classes, more than 62`.
+
+Other limits for parse against the Python reference (netdump -d, -t):
+145 quotient keys <= MAXQ 1024; groups 5 and 29 <= 62; 35 decision-list
+rules <= MAXR 62; 34 net units (35/34/34 per candidate) <= MAXU 128;
+3 candidates <= MAXCAND 96 (18 rep_factored calls); ranks <= 60 (no die);
+1 head <= MAXH 4; 1 section <= MAXS 8.  Nothing else blocks.
+
+Result (cc, unisacc, UBSan builds): -d identical to netdump.py (4305 B);
+UNS2 identical to uns2slice.py (559 B), section parse 543 B identical to
+weights/built.uns2; deployed round trip 340 keys, unique argmax = TSV; -T
+bias and -T act fire; -Q clean under UBSan.  Trace:
+
+    trace head y: 3 candidates, chose 1 (factored), 34 units
+    trace head y: candidate units 35 34 34
+    trace T5 partitions 1, rep_factored calls 18, None 16, not shorter than dlist 0, kept 2
+
+New negative `capc`: 2 x 2 keys, 63 classes (labels c0/c1 only), every
+other limit met; exit 4 with the class diagnostic on cc, unisacc, UBSan.
