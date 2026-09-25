@@ -606,3 +606,16 @@ field-group, class-count negatives and the 63-key positive are unchanged.
 All pass on cc, unisacc and UBSan.  13 stages' `-d`/`-u`/`-t` are
 byte-identical to step 2.  Static memory (`size -m`, `__common`):
 8,100,544 B -> 8,953,912 B (static, not RSS).
+
+## type, step 4: acceptance (2026-09-25)
+
+type is in every stage loop of `check.sh`.  `-d` dump 8,933 B, identical to
+`netdump.py -d` on cc, unisacc and UBSan; single-stage UNS2 593 B,
+raw-byte identical to `uns2slice.py`; its section (577 B) identical to the
+one in `weights/built.uns2`; deployed round trip: 4,275 raw keys, unique
+argmax equal to the TSV label; invariants hold and `-T bias` / `-T act` fire.
+Trace: 4 partitions, 72 rep_factored calls, all None (early rejections: base
+path 54, patch path 18); one candidate, the decision list, chosen; 62 rules,
+H = 62.  Timings: `netdump.py -d` 7.1 s, `uns2slice.py` 2.6 s, construct -d
+cc 0.19 s, unisacc 2.25 s, UBSan 1.39 s; full `check.sh` 31 s.  MAXR 62 is
+now exactly used by type (62 rules).
