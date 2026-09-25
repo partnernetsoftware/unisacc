@@ -46,20 +46,46 @@ if [ "${1:-}" = --batches ]; then
     if [ "$ub" != "$ua" ] || [ -n "$dup" ] || [ "$ng" != 1 ]; then
         echo "batches: union is not the full list plus globals once (union: $ub; globals in $ng batches)"; exit 2
     fi
-    echo "batches: union = all $(echo $ALL | wc -w | tr -d ' ') stages + global checks, each exactly once"
-    bf=0; n=0
-    echo "$BATCHES" > "${TMPDIR:-/tmp}/construct_batches.$$"
+    echo "batches: planned union = all $(echo $ALL | wc -w | tr -d ' ') stages + global checks, each exactly once"
+    # The plan above is not the result.  Each batch must hand back a receipt
+    # ("receipt stage <s>" / "receipt global <g>") for exactly what it was
+    # asked to check -- nothing missing, nothing extra, no duplicates -- and
+    # the receipts of all batches together must be every stage of TABLE and
+    # every global check, each exactly once.  rc 0 without them is a failure.
+    W=${TMPDIR:-/tmp}/construct_batches.$$; mkdir -p "$W"
+    bf=0; n=0; : > "$W/union"
+    echo "$BATCHES" > "$W/list"
     while IFS='|' read -r st gl; do
         n=$((n + 1))
         t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-        STAGES=$st GLOBAL=$gl perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "${TMPDIR:-/tmp}/construct_batch.$$.$n" 2>&1; rc=$?
+        STAGES=$st GLOBAL=$gl perl -e 'alarm 60; exec @ARGV' "$0" "$UA" > "$W/out.$n" 2>&1; rc=$?
         t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
-        sed "s/^/[batch $n] /" "${TMPDIR:-/tmp}/construct_batch.$$.$n"; rm -f "${TMPDIR:-/tmp}/construct_batch.$$.$n"
+        sed "s/^/[batch $n] /" "$W/out.$n"
         el=$(perl -e "printf '%.1f', $t1 - $t0")
         echo "batch $n: stages [$st] global $gl: rc $rc, $el s (limit 60 s)"
-        [ $rc -eq 0 ] || bf=1
-    done < "${TMPDIR:-/tmp}/construct_batches.$$"
-    rm -f "${TMPDIR:-/tmp}/construct_batches.$$"
+        if [ $rc -ne 0 ]; then bf=1; echo "batch $n: FAILED (rc $rc)"; break; fi
+        { for s in $st; do echo "receipt stage $s"; done
+          [ "$gl" = 1 ] && for g in $GLOBALS; do echo "receipt global $g"; done; } | sort > "$W/want.$n"
+        grep '^receipt ' "$W/out.$n" | sort > "$W/got.$n"
+        cat "$W/got.$n" >> "$W/union"
+        mis=$(comm -23 "$W/want.$n" "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
+        ext=$(comm -13 "$W/want.$n" "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
+        dup=$(uniq -d "$W/got.$n" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
+        if [ -n "$mis$ext$dup" ]; then bf=1
+            echo "batch $n: RECEIPTS WRONG (rc $rc): missing [${mis}] extra [${ext}] duplicate [${dup}]"; break
+        fi
+        echo "batch $n: receipts $(wc -l < "$W/got.$n" | tr -d ' ') = requested, exactly"
+    done < "$W/list"
+    if [ $bf = 0 ]; then
+        { for s in $ALL; do echo "receipt stage $s"; done; for g in $GLOBALS; do echo "receipt global $g"; done; } | sort > "$W/wantall"
+        sort "$W/union" > "$W/gotall"
+        mis=$(comm -23 "$W/wantall" "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
+        ext=$(comm -13 "$W/wantall" "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
+        dup=$(uniq -d "$W/gotall" | sed 's/^receipt //' | tr '\n' ',' | sed 's/,$//')
+        if [ -n "$mis$ext$dup" ]; then bf=1; echo "batches: receipt union WRONG: missing [${mis}] extra [${ext}] duplicate [${dup}]"
+        else echo "batches: receipt union = all $(echo $ALL | wc -w | tr -d ' ') stages + $(echo $GLOBALS | wc -w | tr -d ' ') global checks, each exactly once ($(wc -l < "$W/gotall" | tr -d ' ') receipts)"; fi
+    fi
+    rm -rf "$W"
     [ $bf = 0 ] && echo "construct check batches: ok" || echo "construct check batches: FAILED"
     exit $bf
 fi
@@ -86,6 +112,34 @@ T=${TMPDIR:-/tmp}/construct_check.$$
 mkdir -p "$T"
 B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 fail=0
+# RECEIPTS.  Every individual check appends a pass mark to $PASS at the point
+# where it has succeeded (P), never otherwise.  need() is the list of marks
+# each stage / global check requires; an item gets its receipt only when all
+# of them are present.  So a check that is skipped, removed, or fails leaves
+# its item with no receipt, whatever the exit status of anything else.
+PASS=$T/pass; : > "$PASS"
+P() { echo "$1" >> "$PASS"; }
+need() {    # need stage <s> | need global <g>: the required pass marks
+    if [ $1 = stage ]; then s=$2
+        for b in cc ua; do echo "s $s dump $b"; echo "s $s uns2 $b"; echo "s $s shipped $b"; echo "s $s round $b"; done
+        echo "s $s ubsan"
+        echo "$TABLE" | while read -r n tag tr iv; do [ $n = $s ] || continue
+            [ $tr = t ] && echo "s $s trace"
+            [ $iv = i ] && for t in bias act; do for b in cc ua; do echo "s $s inv $t $b"; done; done; done
+        return
+    fi
+    g=$2
+    case $g in
+    qset) for b in cc ua san; do echo "g qset $b"; done ;;
+    sum) echo "g sum sites"; for b in cc ua san; do for t in summax sumover sumrun run7; do echo "g sum $t $b"; done; done ;;
+    reader) for n in missing duplicate badlabel extracol badkey; do for b in cc ua; do echo "g reader $n $b"; done; done ;;
+    capq) for b in cc ua; do echo "g capq dump $b"; echo "g capq uns2 $b"; echo "g capq round $b"; done ;;
+    capr) for b in cc ua san; do echo "g capr pos $b"; done; echo "g capr round cc"; echo "g capr round ua" ;;
+    caph) for b in cc ua san; do echo "g caph pos $b"; done; echo "g caph round cc"; echo "g caph round ua"; echo "g caph trace" ;;
+    *) for b in cc ua san; do echo "g $g $b"; done ;;
+    esac
+}
+missing() { need "$@" | while read -r m; do grep -qxF "$m" "$PASS" || printf "[%s] " "$m"; done; }
 B 60 cc -std=c99 -O2 -w -o "$T/c_cc" iterate/construct/construct.c || { echo "cc build failed"; exit 1; }
 B 60 "$UA" -O2 iterate/construct/construct.c -b osx/arm64 -o "$T/c_ua" || { echo "unisacc build failed"; exit 1; }
 # UBSan build: every signed shift, subtraction and overflow is checked and
@@ -99,7 +153,7 @@ B 60 cc -std=c99 -O1 -w -fsanitize=undefined -fno-sanitize-recover=undefined -o 
 if [ $GL = 1 ]; then
 for b in cc ua san; do
     B 30 "$T/c_$b" -Q > "$T/q.$b" 2>&1; rc=$?
-    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 13 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (13 sizes)"
+    if [ $rc -eq 0 ] && [ "$(grep -c ', ok$' "$T/q.$b")" = 13 ] && ! grep -q 'runtime error' "$T/q.$b"; then echo "qset self-test $b ok (13 sizes)"; P "g qset $b"
     else echo "qset self-test $b FAILED (rc $rc): $(tail -1 "$T/q.$b")"; fail=1; fi
 done
 # checked accumulation: -T summax/sumover/sumrun drive the SAME ladd() that
@@ -109,7 +163,7 @@ done
 # The static half: the four accumulation sites are ladd calls (README).
 nl=$(grep -cE '(z\[c\]|cw\[ci \* MAXU \+ found\]\[rl\[r\]\]) = ladd\(' iterate/construct/construct.c)
 raw=$(grep -cE 'z\[c\] = z\[c\] \+|= cw\[.*\] \+' iterate/construct/construct.c)
-if [ "$nl" = 4 ] && [ "$raw" = 0 ]; then echo "sum sites: 4 accumulations call ladd (ranks, rep_from_dl, headfail, verifier)"
+if [ "$nl" = 4 ] && [ "$raw" = 0 ]; then echo "sum sites: 4 accumulations call ladd (ranks, rep_from_dl, headfail, verifier)"; P "g sum sites"
 else echo "sum sites: expected 4 ladd accumulations and 0 raw ones, found $nl and $raw"; fail=1; fi
 for b in cc ua san; do
     for c in "summax|0|= LONG_MAX ok" "sumover|6|9223372036854775802 + 6 exceeds LONG_MAX" \
@@ -117,24 +171,24 @@ for b in cc ua san; do
         t=${c%%|*}; r=${c#*|}; want=${r#*|}; r=${r%%|*}
         B 10 "$T/c_$b" -T $t > "$T/sum.$t.$b" 2>&1; rc=$?
         if [ $rc -eq $r ] && grep -q "$want" "$T/sum.$t.$b" && ! grep -q 'runtime error' "$T/sum.$t.$b"; then
-            echo "sum self-test $t $b ok (rc $rc): $(tail -1 "$T/sum.$t.$b")"
+            echo "sum self-test $t $b ok (rc $rc): $(tail -1 "$T/sum.$t.$b")"; P "g sum $t $b"
         else echo "sum self-test $t $b FAILED (rc $rc, want $r): $(tail -1 "$T/sum.$t.$b")"; fail=1; fi
     done
-    [ "$(grep -c '^sum self-test: run: [1-7] x' "$T/sum.sumrun.$b")" = 7 ] || { echo "sum self-test sumrun $b: the 7 terms below the limit did not all succeed"; fail=1; }
+    [ "$(grep -c '^sum self-test: run: [1-7] x' "$T/sum.sumrun.$b")" = 7 ] && P "g sum run7 $b" || { echo "sum self-test sumrun $b: the 7 terms below the limit did not all succeed"; fail=1; }
 done
 fi
 for s in $(stages all); do
-    B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py" || fail=1
+    B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py"; prc=$?; [ $prc -eq 0 ] || fail=1
     for b in cc ua; do
-        B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b" || fail=1
-        if cmp -s "$T/$s.py" "$T/$s.$b"; then echo "$s $b identical ($(wc -c < "$T/$s.py" | tr -d ' ') B)"
+        B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b"; rc=$?; [ $rc -eq 0 ] || fail=1
+        if [ $prc -eq 0 ] && [ $rc -eq 0 ] && cmp -s "$T/$s.py" "$T/$s.$b"; then echo "$s $b identical ($(wc -c < "$T/$s.py" | tr -d ' ') B)"; P "s $s dump $b"
         else echo "$s $b DIFFERS"; diff "$T/$s.py" "$T/$s.$b" | head -5; fail=1; fi
     done
     # every stage's dump and UNS2 under UBSan: exit 0, no report, same bytes
     B 30 "$T/c_san" -d "weights/gold/$s.tsv" > "$T/$s.san" 2> "$T/$s.san.err"; rc=$?
     B 30 "$T/c_san" -u "$T/$s.san.uns2" "weights/gold/$s.tsv" > /dev/null 2>> "$T/$s.san.err"; rc2=$?
     B 30 "$T/c_cc" -u "$T/$s.cc.uns2" "weights/gold/$s.tsv" > /dev/null 2>&1
-    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ ! -s "$T/$s.san.err" ] && cmp -s "$T/$s.py" "$T/$s.san" && cmp -s "$T/$s.cc.uns2" "$T/$s.san.uns2"; then echo "$s ubsan clean (dump, UNS2)"
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ ! -s "$T/$s.san.err" ] && cmp -s "$T/$s.py" "$T/$s.san" && cmp -s "$T/$s.cc.uns2" "$T/$s.san.uns2"; then echo "$s ubsan clean (dump, UNS2)"; P "s $s ubsan"
     else echo "$s ubsan FAILED (rc $rc/$rc2): $(head -1 "$T/$s.san.err")"; fail=1; fi
 done
 # UNS2: both builds write the prec+reloc blob.  It must equal, RAW BYTES, the
@@ -146,18 +200,19 @@ done
 # are checked inside construct over the full domain: a violation exits 3.
 # Three blobs: prec+reloc (single-head), tyinfo alone (multi-head, T4),
 # regmap alone (two fields, T5 factored).
-uns2() {    # uns2 <tag> <tsv>...
-    tag=$1; shift
-    B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.$tag.uns2" "$@" > /dev/null || { echo "uns2 $tag python reference failed"; fail=1; }
+PU() { for x in $us; do P "s $x $1"; done; }
+uns2() {    # uns2 "<stages>" <tag> <tsv>...: the marks go to every stage in the blob
+    us=$1; tag=$2; shift 2
+    B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.$tag.uns2" "$@" > /dev/null || { echo "uns2 $tag python reference failed"; fail=1; return; }
     for b in cc ua; do
         B 30 "$T/c_$b" -u "$T/$b.$tag.uns2" "$@" > "$T/u.$b.out" 2>&1; rc=$?
         if [ $rc -ne 0 ]; then echo "uns2 $tag $b construct failed (rc $rc): $(head -1 "$T/u.$b.out")"; fail=1; continue; fi
         echo "invariants $tag $b ok (activation 0/1, b1 = 1 - constrained fields; full domain)"
-        if cmp -s "$T/py.$tag.uns2" "$T/$b.$tag.uns2"; then echo "uns2 $tag $b identical to uns2.dump ($(wc -c < "$T/py.$tag.uns2" | tr -d ' ') B)"
+        if cmp -s "$T/py.$tag.uns2" "$T/$b.$tag.uns2"; then echo "uns2 $tag $b identical to uns2.dump ($(wc -c < "$T/py.$tag.uns2" | tr -d ' ') B)"; PU "uns2 $b"
         else echo "uns2 $tag $b DIFFERS from uns2.dump"; cmp "$T/py.$tag.uns2" "$T/$b.$tag.uns2" | head -2; fail=1; fi
-        B 60 python3 iterate/construct/tools/uns2slice.py --shipped "$T/$b.$tag.uns2" weights/built.uns2 > "$T/s.$b.out" 2>&1 || fail=1
+        B 60 python3 iterate/construct/tools/uns2slice.py --shipped "$T/$b.$tag.uns2" weights/built.uns2 > "$T/s.$b.out" 2>&1 && PU "shipped $b" || fail=1
         sed "s/^/uns2 $b shipped /" "$T/s.$b.out"
-        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.$tag.uns2" "$@" > "$T/r.$b.out" 2>&1 || fail=1
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.$tag.uns2" "$@" > "$T/r.$b.out" 2>&1 && PU "round $b" || fail=1
         sed "s/^/deployed $b /" "$T/r.$b.out"
     done
 }
@@ -165,15 +220,16 @@ uns2() {    # uns2 <tag> <tsv>...
 # prec+reloc (single), tyinfo (multi), regmap, then one per stage for the
 # acceptance batch (single-stage packs; MAXS is 8)
 for tag in $(echo "$TABLE" | awk '!s[$2]++{print $2}'); do
-    f=$(echo "$TABLE" | while read -r n t x y; do [ $t = $tag ] && sel $n && printf " weights/gold/%s.tsv" $n; done)
-    [ -n "$f" ] && uns2 $tag $f
+    ss=$(echo "$TABLE" | while read -r n t x y; do [ $t = $tag ] && sel $n && printf " %s" $n; done)
+    f=$(for n in $ss; do printf " weights/gold/%s.tsv" $n; done)
+    [ -n "$f" ] && uns2 "$ss" $tag $f
 done
 # the multi-head branch trace (-t): which candidate each head chose, whether
 # pick moved, what T4 did.  A debug print, not compared with Python (the
 # counts were cross-checked once by hand); the two builds must agree.
 for s in $(stages t); do
-    for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || fail=1; done
-    if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; else echo "$s trace differs between builds"; fail=1; fi
+    tf=0; for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || { fail=1; tf=1; }; done
+    if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; [ $tf = 0 ] && P "s $s trace"; else echo "$s trace differs between builds"; fail=1; fi
 done
 if [ $GL = 1 ]; then
 # negative inputs: each damaged copy of prec.tsv must be REJECTED BY THE
@@ -193,7 +249,7 @@ for c in "missing|keys do not cover" "duplicate|key repeats" "badlabel|not a cla
     for b in cc ua; do
         B 30 "$T/c_$b" "$T/$n.tsv" > "$T/$n.$b.out" 2>&1; rc=$?
         if [ $rc -eq 1 ] && grep -q "$want" "$T/$n.$b.out"; then
-            echo "$n $b rejected: $(head -1 "$T/$n.$b.out")"
+            echo "$n $b rejected: $(head -1 "$T/$n.$b.out")"; P "g reader $n $b"
         else
             echo "$n $b NOT A READER REJECTION (rc $rc): $(head -1 "$T/$n.$b.out")"; fail=1
         fi
@@ -213,21 +269,21 @@ cp weights/gold/regmap.tsv "$T/cap.src"
 awk -F'	' 'NR==1{print "# stage capq: 63 keys, synthetic"; next}
 /^#head/{print "#field\ta\tv0\tv1\tv2\tv3\tv4\tv5\tv6\tv7\tv8"; print "#field\tb\tw0\tw1\tw2\tw3\tw4\tw5\tw6"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
   for(a=0;a<9;a++) for(b=0;b<7;b++) print "v" a "\tw" b "\t" c[b ? 8 + b : a]; exit}' "$T/cap.src" > "$T/capq.tsv"
-B 60 python3 iterate/construct/tools/netdump.py -d "$T/capq.tsv" > "$T/capq.py" || fail=1
-B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capq.uns2" "$T/capq.tsv" > /dev/null || fail=1
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capq.tsv" > "$T/capq.py" || { fail=1; echo "capq python reference failed" > "$T/capq.py"; }
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capq.uns2" "$T/capq.tsv" > /dev/null || { fail=1; echo "capq python reference failed" > "$T/py.capq.uns2"; }
 for b in cc ua; do
     B 30 "$T/c_$b" -d "$T/capq.tsv" > "$T/capq.$b.out" 2>&1; rc=$?
     # 9 + 7 singleton groups, i.e. 9 x 7 = 63 quotient keys, none merged
     grp=$(grep '^groups' "$T/capq.$b.out" | tr -cd '[' | wc -c | tr -d ' ')
     if [ $rc -eq 0 ] && [ "$grp" = 16 ] && grep -q "^exact 63$" "$T/capq.$b.out" && cmp -s "$T/capq.py" "$T/capq.$b.out"; then
-        echo "capacity positive $b: 63 quotient keys built, exact over 63 keys, -d identical to Python ($(wc -c < "$T/capq.py" | tr -d ' ') B)"
+        echo "capacity positive $b: 63 quotient keys built, exact over 63 keys, -d identical to Python ($(wc -c < "$T/capq.py" | tr -d ' ') B)"; P "g capq dump $b"
     else
         echo "capacity positive $b FAILED (rc $rc): $(head -1 "$T/capq.$b.out")"; fail=1
     fi
-    B 30 "$T/c_$b" -u "$T/$b.capq.uns2" "$T/capq.tsv" > /dev/null 2>&1 || fail=1
-    if cmp -s "$T/py.capq.uns2" "$T/$b.capq.uns2"; then echo "capacity positive $b: UNS2 identical ($(wc -c < "$T/py.capq.uns2" | tr -d ' ') B)"
+    B 30 "$T/c_$b" -u "$T/$b.capq.uns2" "$T/capq.tsv" > /dev/null 2>&1; rc=$?; [ $rc -eq 0 ] || fail=1
+    if [ $rc -eq 0 ] && cmp -s "$T/py.capq.uns2" "$T/$b.capq.uns2"; then echo "capacity positive $b: UNS2 identical ($(wc -c < "$T/py.capq.uns2" | tr -d ' ') B)"; P "g capq uns2 $b"
     else echo "capacity positive $b: UNS2 DIFFERS"; fail=1; fi
-    B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capq.uns2" "$T/capq.tsv" > "$T/r.$b.out" 2>&1 || fail=1
+    B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capq.uns2" "$T/capq.tsv" > "$T/r.$b.out" 2>&1 && P "g capq round $b" || fail=1
     sed "s/^/capacity positive $b deployed /" "$T/r.$b.out"
 done
 # rule-capacity POSITIVE: 9 x 7, label class[(7a+b) % 16]: 63 decision-list
@@ -241,22 +297,22 @@ awk -F'	' -v A=9 -v N=7 'NR==1{print "# stage capr: 63 rules, synthetic"; next}
 awk -F'	' -v A=9 -v N=9 'NR==1{print "# stage caprn: 81 rules, synthetic"; next}
 /^#head/{printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
   for(a=0;a<A;a++) for(b=0;b<N;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src" > "$T/caprn.tsv"
-B 60 python3 iterate/construct/tools/netdump.py -d "$T/capr.tsv" > "$T/capr.py" || fail=1
-B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capr.uns2" "$T/capr.tsv" > /dev/null || fail=1
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capr.tsv" > "$T/capr.py" || { fail=1; echo "capr python reference failed" > "$T/capr.py"; }
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.capr.uns2" "$T/capr.tsv" > /dev/null || { fail=1; echo "capr python reference failed" > "$T/py.capr.uns2"; }
 for b in cc ua san; do
     B 30 "$T/c_$b" -d "$T/capr.tsv" > "$T/capr.$b.out" 2>&1; rc=$?
     B 30 "$T/c_$b" -u "$T/$b.capr.uns2" "$T/capr.tsv" > /dev/null 2>> "$T/capr.$b.out"; rc2=$?
     nrl=$(grep -c '^rule' "$T/capr.$b.out")
     if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && [ "$nrl" = 63 ] && cmp -s "$T/capr.py" "$T/capr.$b.out" && cmp -s "$T/py.capr.uns2" "$T/$b.capr.uns2"; then
-        echo "rule positive $b: 63 rules built, -d identical to Python ($(wc -c < "$T/capr.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.capr.uns2" | tr -d ' ') B)"
+        echo "rule positive $b: 63 rules built, -d identical to Python ($(wc -c < "$T/capr.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.capr.uns2" | tr -d ' ') B)"; P "g capr pos $b"
     else echo "rule positive $b FAILED (rc $rc/$rc2, $nrl rules): $(head -1 "$T/capr.$b.out")"; fail=1; fi
     if [ $b != san ]; then
-        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capr.uns2" "$T/capr.tsv" > "$T/r.$b.out" 2>&1 || fail=1
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.capr.uns2" "$T/capr.tsv" > "$T/r.$b.out" 2>&1 && P "g capr round $b" || fail=1
         sed "s/^/rule positive $b deployed /" "$T/r.$b.out"
     fi
     B 30 "$T/c_$b" "$T/caprn.tsv" > "$T/caprn.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: head y needs more than 80 decision-list rules" "$T/caprn.$b.out" && ! grep -q 'runtime error' "$T/caprn.$b.out"; then
-        echo "rule negative $b rejected: $(head -1 "$T/caprn.$b.out" | sed 's/.*: capacity/capacity/')"
+        echo "rule negative $b rejected: $(head -1 "$T/caprn.$b.out" | sed 's/.*: capacity/capacity/')"; P "g caprn $b"
     else echo "rule negative $b NOT A RULE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caprn.$b.out")"; fail=1; fi
 done
 # head-capacity POSITIVE: 4 x 3 keys, 6 heads (over the old MAXH 4); head h
@@ -274,27 +330,27 @@ awk -v A=$1 -v N=$2 -v NH=$3 -v NM=$4 'BEGIN{
   for(a=0;a<A;a++) for(b=0;b<N;b++){ printf "v%d\tw%d", a, b; for(h=0;h<NH;h++){ k=2+h%3; printf "\tc%d", (a*(h+1)+b*(h+2)+a*b*h)%k } printf "\n" }
 }'
 }
-genh 4 3 6 caph > "$T/caph.tsv"
+genh 4 3 6 caph > "$T/caph.tsv"; htf=0
 genh 2 2 17 caphn > "$T/caphn.tsv"
-B 60 python3 iterate/construct/tools/netdump.py -d "$T/caph.tsv" > "$T/caph.py" || fail=1
-B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.caph.uns2" "$T/caph.tsv" > /dev/null || fail=1
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/caph.tsv" > "$T/caph.py" || { fail=1; echo "caph python reference failed" > "$T/caph.py"; }
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.caph.uns2" "$T/caph.tsv" > /dev/null || { fail=1; echo "caph python reference failed" > "$T/py.caph.uns2"; }
 for b in cc ua san; do
     B 30 "$T/c_$b" -d "$T/caph.tsv" > "$T/caph.$b.out" 2>&1; rc=$?
     B 30 "$T/c_$b" -u "$T/$b.caph.uns2" "$T/caph.tsv" > /dev/null 2>> "$T/caph.$b.out"; rc2=$?
     if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && cmp -s "$T/caph.py" "$T/caph.$b.out" && cmp -s "$T/py.caph.uns2" "$T/$b.caph.uns2"; then
-        echo "head positive $b: 6 heads built, -d identical to Python ($(wc -c < "$T/caph.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.caph.uns2" | tr -d ' ') B)"
+        echo "head positive $b: 6 heads built, -d identical to Python ($(wc -c < "$T/caph.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.caph.uns2" | tr -d ' ') B)"; P "g caph pos $b"
     else echo "head positive $b FAILED (rc $rc/$rc2): $(head -1 "$T/caph.$b.out")"; fail=1; fi
     if [ $b != san ]; then
-        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.caph.uns2" "$T/caph.tsv" > "$T/r.$b.out" 2>&1 || fail=1
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.caph.uns2" "$T/caph.tsv" > "$T/r.$b.out" 2>&1 && P "g caph round $b" || fail=1
         sed "s/^/head positive $b deployed /" "$T/r.$b.out"
-        B 30 "$T/c_$b" -t "$T/caph.tsv" > "$T/caph.$b.t" 2>&1 || fail=1
+        B 30 "$T/c_$b" -t "$T/caph.tsv" > "$T/caph.$b.t" 2>&1 || { fail=1; htf=1; }
     fi
     B 30 "$T/c_$b" "$T/caphn.tsv" > "$T/caphn.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: head y16 is head 17, more than 16" "$T/caphn.$b.out" && ! grep -q 'runtime error' "$T/caphn.$b.out"; then
-        echo "head negative $b rejected: $(head -1 "$T/caphn.$b.out" | sed 's/.*: capacity/capacity/')"
+        echo "head negative $b rejected: $(head -1 "$T/caphn.$b.out" | sed 's/.*: capacity/capacity/')"; P "g caphn $b"
     else echo "head negative $b NOT A HEAD-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caphn.$b.out")"; fail=1; fi
 done
-if cmp -s "$T/caph.cc.t" "$T/caph.ua.t"; then sed "s/^/caph /" "$T/caph.cc.t"; else echo "caph trace differs between builds"; fail=1; fi
+if cmp -s "$T/caph.cc.t" "$T/caph.ua.t"; then sed "s/^/caph /" "$T/caph.cc.t"; [ $htf = 0 ] && P "g caph trace"; else echo "caph trace differs between builds"; fail=1; fi
 # candidate capacity: regmap with its one head copied N times (heads y0..).
 # Every head keeps its dlist slot and 18 factored candidates, and T4 appends
 # 18 more per head per accepted list, all in the global slot count ncand.
@@ -310,15 +366,15 @@ awk -F'	' -v NH=$1 -v NM=$2 'NR==1{print "# stage " NM ": regmap head x" NH ", s
 }
 capk 3 capk > "$T/capk.tsv"
 capk 4 capkn > "$T/capkn.tsv"
-B 60 python3 iterate/construct/tools/netdump.py -d "$T/capk.tsv" > "$T/capk.py" || fail=1
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/capk.tsv" > "$T/capk.py" || { fail=1; echo "capk python reference failed" > "$T/capk.py"; }
 for b in cc ua san; do
     B 30 "$T/c_$b" -d "$T/capk.tsv" > "$T/capk.$b.out" 2>&1; rc=$?
     if [ $rc -eq 0 ] && cmp -s "$T/capk.py" "$T/capk.$b.out"; then
-        echo "candidate positive $b: 3 heads, 219 candidate slots, -d identical to Python ($(wc -c < "$T/capk.py" | tr -d ' ') B)"
+        echo "candidate positive $b: 3 heads, 219 candidate slots, -d identical to Python ($(wc -c < "$T/capk.py" | tr -d ' ') B)"; P "g capk $b"
     else echo "candidate positive $b FAILED (rc $rc): $(head -1 "$T/capk.$b.out")"; fail=1; fi
     B 30 "$T/c_$b" "$T/capkn.tsv" > "$T/capkn.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: head y3: candidate slot 289 (head's 70), more than 288" "$T/capkn.$b.out" && ! grep -q 'runtime error' "$T/capkn.$b.out"; then
-        echo "candidate negative $b rejected: $(head -1 "$T/capkn.$b.out" | sed 's/.*: capacity/capacity/')"
+        echo "candidate negative $b rejected: $(head -1 "$T/capkn.$b.out" | sed 's/.*: capacity/capacity/')"; P "g capkn $b"
     else echo "candidate negative $b NOT A CANDIDATE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/capkn.$b.out")"; fail=1; fi
 done
 # capacity NEGATIVE: more quotient keys than MAXQ (3200) must be rejected
@@ -335,7 +391,7 @@ awk -F'	' 'NR==1{print "# stage capn: 3375 keys, synthetic"; next}
 for b in cc ua san; do
     B 30 "$T/c_$b" "$T/capn.tsv" > "$T/capn.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: 3375 quotient keys so far, more than 3200" "$T/capn.$b.out" && ! grep -q 'runtime error' "$T/capn.$b.out"; then
-        echo "capacity negative $b rejected: $(head -1 "$T/capn.$b.out")"
+        echo "capacity negative $b rejected: $(head -1 "$T/capn.$b.out")"; P "g capn $b"
     else
         echo "capacity negative $b NOT A CAPACITY REJECTION (rc $rc): $(head -1 "$T/capn.$b.out")"; fail=1
     fi
@@ -350,7 +406,7 @@ awk -F'	' 'NR==1{print "# stage capo: 4422 keys, synthetic"; next}
 for b in cc ua san; do
     B 30 "$T/c_$b" "$T/capo.tsv" > "$T/capo.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: 4422 raw keys so far, more than 4352" "$T/capo.$b.out" && ! grep -q 'runtime error' "$T/capo.$b.out"; then
-        echo "raw-key negative $b rejected: $(head -1 "$T/capo.$b.out")"
+        echo "raw-key negative $b rejected: $(head -1 "$T/capo.$b.out")"; P "g capo $b"
     else
         echo "raw-key negative $b NOT A RAW-KEY REJECTION (rc $rc): $(head -1 "$T/capo.$b.out")"; fail=1
     fi
@@ -367,7 +423,7 @@ awk -F'	' 'NR==1{print "# stage capg: 70 x 2 keys, synthetic"; next}
 for b in cc ua san; do
     B 30 "$T/c_$b" "$T/capg.tsv" > "$T/capg.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: field a has 70 value groups, more than 62" "$T/capg.$b.out" && ! grep -q 'runtime error' "$T/capg.$b.out"; then
-        echo "field-group negative $b rejected: $(head -1 "$T/capg.$b.out")"
+        echo "field-group negative $b rejected: $(head -1 "$T/capg.$b.out")"; P "g capg $b"
     else
         echo "field-group negative $b NOT A FIELD-GROUP REJECTION (rc $rc): $(head -1 "$T/capg.$b.out")"; fail=1
     fi
@@ -383,7 +439,7 @@ done
 for b in cc ua san; do
     B 30 "$T/c_$b" "$T/capc.tsv" > "$T/capc.$b.out" 2>&1; rc=$?
     if [ $rc -eq 4 ] && grep -q "capacity: head y has 63 classes, more than 62" "$T/capc.$b.out" && ! grep -q 'runtime error' "$T/capc.$b.out"; then
-        echo "class-count negative $b rejected: $(head -1 "$T/capc.$b.out")"
+        echo "class-count negative $b rejected: $(head -1 "$T/capc.$b.out")"; P "g capc $b"
     else
         echo "class-count negative $b NOT A CLASS-COUNT REJECTION (rc $rc): $(head -1 "$T/capc.$b.out")"; fail=1
     fi
@@ -399,25 +455,39 @@ for c in "bias|has b1" "act|activation"; do
     for b in cc ua; do
         B 30 "$T/c_$b" -T "$t" weights/gold/$s.tsv > "$T/inv.$t.$b" 2>&1; rc=$?
         if [ $rc -eq 3 ] && grep -q "$want" "$T/inv.$t.$b"; then
-            echo "invariant negative $s $t $b fires: $(head -1 "$T/inv.$t.$b" | sed 's/.*broken: //')"
+            echo "invariant negative $s $t $b fires: $(head -1 "$T/inv.$t.$b" | sed 's/.*broken: //')"; P "s $s inv $t $b"
         else
             echo "invariant negative $s $t $b DID NOT FIRE (rc $rc): $(head -1 "$T/inv.$t.$b")"; fail=1
         fi
     done
 done
 done
-# summary: exactly what this run covered
+# summary: built from the pass marks (results), not from the selection.
+# attempted = selected; passed = every required mark present (receipt);
+# failed = attempted without a receipt; skipped = not selected.  An attempted
+# item with no receipt fails the run even when no check set fail (a check
+# that silently never ran).  The "receipt" lines, last, are what --batches
+# reads: one per item that PASSED, nothing else.
 echo "summary: builds cc, ua, ubsan (always)"
-echo "summary: stages run ($(stages all | wc -l | tr -d " ") of $(echo $ALL | wc -w | tr -d " ")): $(stages all | tr "\n" " ")"
-for s in $(stages all); do
+: > "$T/rcpt"; np=0; nf=0; ns=0
+for s in $ALL; do
+    if ! sel $s; then echo "summary: stage $s: skipped"; ns=$((ns + 1)); continue; fi
     neg=none; stages i | grep -qx $s && neg="invariant bias+act"
     tr=; stages t | grep -qx $s && tr=", trace"
-    echo "summary: stage $s: positive (dump, ubsan, uns2$tr) yes; negative $neg"
+    m=$(missing stage $s)
+    if [ -z "$m" ]; then echo "receipt stage $s" >> "$T/rcpt"; np=$((np + 1))
+        echo "summary: stage $s: attempted, passed (dump, ubsan, uns2, shipped, round trip$tr; negative $neg)"
+    else nf=$((nf + 1)); echo "summary: stage $s: attempted, FAILED, no receipt; missing $m"; fi
 done
-skipped=$(for s in $ALL; do sel $s || printf "%s " $s; done)
-echo "summary: stages skipped: ${skipped:-none}"
-if [ $GL = 1 ]; then echo "summary: global checks run: $GLOBALS"; echo "summary: global checks skipped: none"
-else echo "summary: global checks run: none"; echo "summary: global checks skipped: $GLOBALS"; fi
+for g in $GLOBALS; do
+    if [ $GL = 0 ]; then echo "summary: global $g: skipped"; ns=$((ns + 1)); continue; fi
+    m=$(missing global $g)
+    if [ -z "$m" ]; then echo "receipt global $g" >> "$T/rcpt"; np=$((np + 1)); echo "summary: global $g: attempted, passed"
+    else nf=$((nf + 1)); echo "summary: global $g: attempted, FAILED, no receipt; missing $m"; fi
+done
+echo "summary: attempted $((np + nf)), passed $np, failed $nf, skipped $ns"
+[ $nf = 0 ] || fail=1    # self-check: an attempted item without a receipt fails this run too
+cat "$T/rcpt"
 rm -rf "$T"
 [ $fail = 0 ] && echo "construct check: ok" || echo "construct check: FAILED"
 exit $fail

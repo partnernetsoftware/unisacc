@@ -49,15 +49,33 @@ subset, and can run the whole list as bounded batches.
 - **Fails with exit 2**: an empty selection (`STAGES=`), an unknown stage,
   or any selection that checks nothing (`GLOBAL=0` alone,
   `STAGES=global GLOBAL=0`).
-- **Summary.** Every run prints which stages ran and which were skipped, the
-  positive checks (dump, ubsan, uns2, trace) and negative checks (invariant
-  bias+act or none) run for each stage, and which global checks ran and
-  which were skipped. The three builds (cc, ua, UBSan) always happen.
+- **Receipts.** Every individual check appends a pass mark at the point it
+  succeeds (`P "s peep uns2 cc"`), and only there. `need()` lists the marks
+  each item requires: a stage needs dump cc+ua, UBSan, UNS2 cc+ua, shipped
+  section cc+ua and round trip cc+ua, plus its trace and its invariant
+  negatives (bias, act x cc, ua) when `TABLE` says it has them; each global
+  check needs all of its own builds and cases. An item gets a receipt only
+  when every mark is present, so a check that fails, is skipped, or was
+  deleted leaves its item without one. A run ends with the receipt list,
+  one line per item that PASSED and nothing else: `receipt stage peep`,
+  `receipt global capq`.
+- **Summary.** Built from the marks, not from the selection: per stage and
+  per global check `attempted, passed`, `attempted, FAILED, no receipt;
+  missing [...]` (naming the missing marks), or `skipped`, then
+  `summary: attempted N, passed N, failed N, skipped N`. An attempted item
+  without a receipt fails the run by itself (exit 1), even when no check
+  set the failure flag. The three builds (cc, ua, UBSan) always happen.
 - **`check.sh --batches [ua]`** runs `BATCHES` (a `stages|global` row per
   batch). Each batch is a separate check.sh run, bounded by `alarm 60`, and
-  its time is printed. Before it starts, it checks that the batches together
-  hold every stage in `TABLE` exactly once and the global checks exactly
-  once. The current batches and their times:
+  its time is printed. Before it starts, it checks that the PLANNED batches
+  together hold every stage in `TABLE` exactly once and the global checks
+  exactly once. That is a plan; the result is the receipts. A batch with
+  rc != 0 stops the run at once. Otherwise its `receipt` lines must equal
+  exactly what that batch requested, or `batch N: RECEIPTS WRONG (rc 0):
+  missing [..] extra [..] duplicate [..]` fails the run; at the end the
+  receipts of all batches together must be every stage of `TABLE` plus
+  every global check, each exactly once (`batches: receipt union = all 15
+  stages + 14 global checks, each exactly once (29 receipts)`). The current batches and their times:
   `prec reloc tyinfo regmap pp lex scope`+global 3.9 s,
   `pfconv binsel enc opinfo peep parse` 4.0 s, `type` 27.9 s. type on its
   own takes ~28 s, so the next heavy stage should go in a new batch.
