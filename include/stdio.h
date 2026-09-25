@@ -53,8 +53,39 @@ static int puts(const char *s) {
     return 0;
 }
 
+/* fwrite: loops over __write until every byte is out or the gate stops.
+ * What __write answers, audited per back end (2026-09-25):
+ *   Linux  (arm64 svc / x86_64 syscall): bytes written, or -errno.
+ *   Darwin (svc #0x80 / syscall): the kernel flags failure in CARRY with
+ *          errno positive; the gate negates it (`b.cc`/`jnc` over `neg`),
+ *          so bytes written, or -errno -- same as Linux.
+ *   Windows (WriteFile via the winapi gate, retconv `wcount`): the gate
+ *          returns *lpNumberOfBytesWritten, NOT the BOOL.  WriteFile zeroes
+ *          that count first, so a failure reads back as 0, never negative.
+ *   Python VM (unisa/vm.py): fd 1/2 are captured whole (returns n); other
+ *          fds return os.write's count, or -1 on OSError.
+ *   exec_target (unisa/exec_target.py): count like the VM, but an OSError
+ *          is a Trap, not a return value.
+ * So "error" is a negative value on POSIX and the VM, and 0 on Windows;
+ * both stop the loop below (0 must stop anyway, or it would spin).
+ * Overflow: sz and n are signed long.  A negative sz or n, or sz*n above
+ * LONG_MAX (tested as n > LONG_MAX / sz before multiplying), describes no
+ * object that could exist; fwrite writes nothing and returns 0.  The
+ * running offset `done` never exceeds `total`, which fits, and a gate
+ * answer larger than what was asked is treated as an error rather than
+ * trusted, so `done` cannot overflow either.
+ * The return is complete elements: done / sz, rounded down. */
 static long fwrite(const void *p, long sz, long n, FILE *f) {
-    __write(_unisa_fd(f), (char *)p, sz * n);
+    long total; long done; long r;
+    if (sz <= 0 || n <= 0) return 0;
+    if (n > 0x7fffffffffffffff / sz) return 0;
+    total = sz * n;
+    done = 0;
+    while (done < total) {
+        r = __write(_unisa_fd(f), (char *)p + done, total - done);
+        if (r <= 0 || r > total - done) return done / sz;
+        done = done + r;
+    }
     return n;
 }
 
