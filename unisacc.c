@@ -9508,7 +9508,7 @@ int lex(void) {
  * goes through infer(S_PARSE, ...) -- classic control flow, neural table. */
 
 #define MAXOUT 16777216
-#define MAXSYM 4096
+#define MAXSYM 65536   /* tests/scale.sh: 12,000 globals filled the old 4,096 */
 
 char out[MAXOUT];
 int nout;
@@ -10045,7 +10045,7 @@ int elab(char *p, int n) { es(p); en(n); return 0; }
    reused.  A name of 32 or more characters is stored truncated, so what
    it matches is not its hash's business: those go on one chain of their
    own (SH_LONG) that every lookup merges in, and a long query walks. */
-#define SH_SIZE 8192
+#define SH_SIZE 65536
 #define SH_LONG SH_SIZE
 int sh_head[SH_SIZE + 1];                 /* index + 1, 0: empty */
 int sh_link[MAXSYM]; int sh_b[MAXSYM]; int sh_hi;
