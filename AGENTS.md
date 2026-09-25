@@ -22,7 +22,8 @@ All three platforms are here:
 
 `tests/crossnative.sh` skips a target whose VM is not up, so start the UTM
 machine before relying on the Windows result — and **stop it afterwards**, it
-is expensive on CPU.
+is expensive on CPU. `tests/vms.sh up` / `down` does both (down stops only
+what up started); `make release` calls them itself.
 
 **Why Linux goes through Lima and not UTM** (measured, 2026-09-21, so nobody
 has to re-litigate it): UTM does have `minicon-lnx-arm-64` and

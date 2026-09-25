@@ -914,7 +914,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | # | 事项 | 完成判据 |
 |---|---|---|
-| F1 | `make release` 自动起停两台虚机（现在要手动，而发布门要求零跳过） | 一条命令从起机到关机，失败也会关机 |
+| F1 | `make release` 自动起停两台虚机 —— **已达**（2026-09-25）：`tests/vms.sh up|down`，release.sh 在 STRICT=1 全量之前 up、`trap` 在退出（含失败）时 down；**只停自己起的**，原本在跑的保持原样；Windows 以 guest agent 应答为“起来了”，每步有界。实测：Lima default 原本在跑→未动；UTM Windows 起→应答→停。顺带：release 的 `.com` 改为 -O2 构建，与 `make com` 一致，界 1800→60 s | ✅ 一条命令从起机到关机，失败也会关机 |
 | F2 | **签名策略——主人决定**。Windows 直接执行 `.com` 里的 PE，未签名会触发 SmartScreen；组织的 Azure Artifact Signing 支持 APE `.com`。macOS 的切片是解到临时目录再跑的，不带下载隔离标记 | 本项只交付选项与代价；签不签由仓库主人定 |
 
 **G. C 扩展（P2）**

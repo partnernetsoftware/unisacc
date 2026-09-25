@@ -39,6 +39,12 @@ case "$v" in "unisacc "[0-9]*) say "version string" ok "$v";;
              *) say "version string" FAIL "$v";; esac
 
 # 3. every suite, with a skipped target counted as a failure
+# the machines crossnative needs: started here if they are not running, and
+# stopped on the way out -- failure included -- if this started them [S-15 F1]
+if [ "${VMS:-1}" = 1 ]; then
+    ./tests/vms.sh up
+    trap './tests/vms.sh down' EXIT
+fi
 LOG=$(mktemp)                        # not in the tree: nobody commits it
 STRICT=1 ./tests/all.sh > "$LOG" 2>&1
 rc=$?
@@ -63,7 +69,8 @@ say "nothing skipped" "$([ "$skipped" = 0 ] && echo ok || echo FAIL)" \
 # 4. the artifact, if asked: built here for all six targets, then run
 if [ "$com" = 1 ]; then
     T=$(scratch)
-    if bound 1800 python3 -m unisa ape unisacc.c --via "$UA" -o "$T/unisacc.com" \
+    # built as `make com` builds it: -O2 [H1]
+    if bound 60 python3 -m unisa ape unisacc.c --via "$UA" -O 2 -o "$T/unisacc.com" \
            > "$T/ape.log" 2>&1; then
         chmod +x "$T/unisacc.com"
         sz=$(wc -c < "$T/unisacc.com" | tr -d ' ')
