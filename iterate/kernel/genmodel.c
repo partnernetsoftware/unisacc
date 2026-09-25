@@ -34,6 +34,7 @@
 #define MAXF 4          /* fields per stage: the kernel's STAGE_VN stride */
 #define MAXV 256        /* values per field */
 #define MAXH 16         /* heads per stage (heads_max may not exceed it) */
+#define KERNEL_HEADS 16 /* the real kernel's STAGE_NCLS stride: (s << 4) + head */
 #define MAXC 256        /* classes per head: DENSE holds a class in a byte */
 #define MAXK 8192       /* keys per stage */
 #define MAXU 4096       /* units per stage: the kernel's act[4096] */
@@ -141,6 +142,17 @@ void load_order(char *path) {
                 i = i + 1;
             }
             if (headsmax < 1) dieln(lno, "heads_max < 1");
+            /* The real kernel indexes STAGE_NCLS[(s << 4) + head] (kernel/unisa_core.c,
+               inf): its per-stage stride is 16, fixed in the kernel's code.
+               heads_max is that stride, not a free choice -- any other value
+               lays the table out in a way the kernel does not read.  Refused
+               here, as soon as the number is read: before the capacity check,
+               before any layout, before the output is opened.  check.sh confirms
+               the kernel source still says `<< 4`, so this cannot go stale. */
+            if (headsmax != KERNEL_HEADS) {
+                printf("genmodel: %s: heads_max %d, the kernel's STAGE_NCLS stride is %d\n", path, headsmax, KERNEL_HEADS);
+                exit(8);
+            }
             if (headsmax > MAXH) cap("heads_max", headsmax, MAXH);
         } else dieln(lno, "unknown line kind");
     }

@@ -105,3 +105,21 @@ else, including blank lines, is compared byte for byte.
   ENC still come from `emit-kernel`.
 - `sem.c` indexes `STAGE_NCLS[s * 16 + h]` as the kernel does (`<< 4`). A
   heads_max other than 16 would pass genmodel's checks but not the kernel's.
+
+## heads_max contract (after review of 0197f45)
+
+The real kernel indexes `STAGE_NCLS[(s << 4) + head]` (kernel/unisa_core.c,
+inf): the per-stage stride is 16, fixed in the kernel's code.  heads_max in
+order.tsv is therefore that stride, not a free choice.  genmodel refuses any
+other value as soon as the number is read -- before the capacity check, before
+any layout, before the output is opened -- with exit 8 and "heads_max N, the
+kernel's STAGE_NCLS stride is 16" (constant KERNEL_HEADS).
+
+check.sh (neg): heads_max 15 and 17 are refused with exit 8, that diagnostic
+and no output file, on cc, unisacc and UBSan builds (17 used to hit the
+capacity check first with exit 4; the contract check now runs before it).
+`neg stride` confirms that the kernel source still contains
+`STAGE_NCLS[(s << 4) + head]`, that genmodel defines KERNEL_HEADS 16 and that
+order.tsv says heads_max 16 -- so the constant cannot go stale silently if the
+kernel changes its indexing (a copy of the kernel with `<< 5` does not match).
+The kernel layout itself was not changed.

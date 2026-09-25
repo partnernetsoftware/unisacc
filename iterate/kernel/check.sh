@@ -13,7 +13,7 @@
 # show a dropped check fails the run although nothing in it failed.
 set -u
 CHECKS_ALL="order build region empty sem oracle neg wfail label perm fault"
-NEGS="notsv noorder nouns2 duporder missorder unkorder trunc trunchead trail badmagic dimval dimcls tsvtwice tsvunk"
+NEGS="notsv noorder nouns2 duporder missorder unkorder trunc trunchead trail badmagic dimval dimcls tsvtwice tsvunk hm15 hm17"
 BATCHES='order build region empty sem
 oracle
 neg wfail label
@@ -26,7 +26,7 @@ need() {
     empty) echo "empty source"; for b in cc ua; do echo "empty $b"; done ;;
     sem) for b in cc ua; do echo "sem $b"; done ;;
     oracle) echo "oracle build"; echo "oracle check" ;;
-    neg) for n in $NEGS; do for b in cc ua san; do echo "neg $n $b"; done; done ;;
+    neg) for n in $NEGS; do for b in cc ua san; do echo "neg $n $b"; done; done; echo "neg stride" ;;
     wfail) for t in opendir nodir rlimit; do for b in cc ua san; do echo "wfail $t $b"; done; done ;;
     label) echo "label differs"; echo "label dense-only"; for b in cc ua; do echo "label reject $b"; done ;;
     perm) echo "perm oracle"; echo "perm ids"; echo "perm sem" ;;
@@ -240,6 +240,30 @@ if sel neg; then
             else echo "neg $n $b: FAILED (rc $rc, want 1 and '$want'): $(head -1 "$N/o")"; fi
         done
     done
+    # heads_max is the kernel's STAGE_NCLS stride, not a free choice: any other
+    # value must be refused (exit 8) before a layout is made or the output
+    # opened.  And the stride itself is checked against the REAL kernel source,
+    # so KERNEL_HEADS in genmodel.c cannot silently go stale if the kernel
+    # changes its indexing.
+    sed 's/^heads_max	16$/heads_max	15/' $K/order.tsv > "$N/hm15.tsv"
+    sed 's/^heads_max	16$/heads_max	17/' $K/order.tsv > "$N/hm17.tsv"
+    for b in cc ua san; do
+        for n in hm15 hm17; do
+            v=${n#hm}
+            rm -f "$N/out"
+            gm $b "$N/out" "$N/$n.tsv" weights/built.uns2 $GOLD > "$N/o" 2>&1; rc=$?
+            want="heads_max $v, the kernel's STAGE_NCLS stride is 16"
+            if [ $rc = 8 ] && grep -qF "$want" "$N/o" && [ ! -e "$N/out" ] && ! grep -q 'runtime error\|AddressSanitizer' "$N/o"; then
+                echo "neg $n $b: rc 8, no output: $(head -1 "$N/o")"; P "neg $n $b"
+            else echo "neg $n $b: FAILED (rc $rc, want 8 and '$want'): $(head -1 "$N/o")"; fi
+        done
+    done
+    ks=$(grep -c 'STAGE_NCLS\[(s << 4) + head\]' kernel/unisa_core.c)
+    gs=$(grep -c '^#define KERNEL_HEADS 16 ' $K/genmodel.c)
+    os=$(grep -c '^heads_max	16$' $K/order.tsv)
+    if [ "$ks" -ge 1 ] && [ "$gs" = 1 ] && [ "$os" = 1 ]; then
+        echo "neg stride: kernel indexes STAGE_NCLS[(s << 4) + head], genmodel KERNEL_HEADS 16, order.tsv heads_max 16"; P "neg stride"
+    else echo "neg stride: FAILED (kernel '<< 4' lines $ks, genmodel KERNEL_HEADS 16 lines $gs, order.tsv heads_max 16 lines $os)"; fi
 fi
 
 if sel wfail; then
