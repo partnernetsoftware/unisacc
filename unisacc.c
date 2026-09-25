@@ -7234,7 +7234,7 @@ int infer(int s, int *key, int head) {
  */
 
 #define MAXSRC 4194304   /* 4 MB: unisacc.c itself had reached 1,042,362 of the old 1 MB */
-#define MAXTOK 524288
+#define MAXTOK 2097152   /* about one token per two bytes of the 4 MB MAXSRC */
 
 char src[MAXSRC];
 int nsrc;
@@ -9507,7 +9507,7 @@ int lex(void) {
 /* Recursive descent mirroring the Python walker.  Every production choice
  * goes through infer(S_PARSE, ...) -- classic control flow, neural table. */
 
-#define MAXOUT 16777216
+#define MAXOUT 33554432   /* a tape runs to ~5 bytes per source byte: 4 MB of C needs ~20 MB */
 #define MAXSYM 65536   /* tests/scale.sh: 12,000 globals filled the old 4,096 */
 
 char out[MAXOUT];
