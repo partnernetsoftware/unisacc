@@ -742,3 +742,30 @@ Gates (check.sh globals `capr`, `caprn`):
 Verification: 14 stages' `-d`/`-u`/`-t` byte-identical to the pre-step-1
 build on cc, unisacc, UBSan (252 files, 0 differ); batches ok: 4.2 s, 4.0 s,
 27.6 s.  `__common` 8,953,912 -> 9,183,288 B (static, not RSS).
+
+## abi, step 3: MAXH 4 -> 16 (2026-09-25)
+
+`MAXH 16`.  Heads are storage only (no head bitset anywhere): `hname`,
+`ncl`, `cls`, `olab`, `qlab`, `crank`, `hc`, `nhc`, `hnr`, `hrc`, `hrl`,
+`hlv`, `chosen`, `W2` rows, and the per-selection `sel`/`best`/`trial`.
+The reader's head check (`nh >= MAXH` at a `#head` line, before
+`hname/ncl/cls[nh]` are written) was `dieln` (exit 1) and is now a capacity
+exit **4**: `line L: capacity: head NAME is head N, more than 16`.
+
+Gates (check.sh globals `caph`, `caphn`):
+
+- **positive**: 4 x 3 keys, **6 heads**; head h has 2 + h % 3 classes and
+  label (a(h+1) + b(h+2) + abh) % k.  cc, unisacc, UBSan: exit 0, `-d`
+  6,725 B identical to netdump.py, UNS2 188 B identical to uns2slice.py;
+  deployed round trip 12 keys x 6 heads, unique argmax (cc, unisacc); the
+  `-t` trace agrees between cc and unisacc: T5 1 partition, 240 calls, 240
+  None (early rejections 164 base / 36 patch); 4 selections, pick moves
+  nothing; T4 3 rounds, 18 accepted (15 changed), 0 rejected; REDUCE aligned
+  44 times, **the pool flag changed a rule's choice 4 times** (first stage
+  to reach that branch); 30 candidate units share down to H 10.
+- **negative**: 2 x 2 keys, 17 heads: exit exactly 4 at the 17th `#head`
+  line on cc, unisacc, UBSan.
+
+Verification: 14 stages byte-identical to the pre-step-1 build on cc,
+unisacc, UBSan (252 files, 0 differ); batches ok: 4.5 s, 4.0 s, 27.8 s.
+`__common` 9,183,288 -> 10,395,704 B (static, not RSS).

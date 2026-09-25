@@ -29,7 +29,7 @@ parse parse t i
 type type t i'
 ALL=$(echo "$TABLE" | cut -d" " -f1 | tr "\n" " " | sed "s/ $//")
 [ -n "$ALL" ] || { echo "construct check: stage table is empty"; exit 2; }
-GLOBALS="qset sum reader capq capr caprn capn capo capg capc"
+GLOBALS="qset sum reader capq capr caprn caph caphn capn capo capg capc"
 # batch mode: each batch is "stages|global"; the union is checked below
 # type alone is ~28 s (its trace/invariants dominate), so it gets its own batch
 BATCHES='prec reloc tyinfo regmap pp lex scope|1
@@ -257,6 +257,42 @@ for b in cc ua san; do
         echo "rule negative $b rejected: $(head -1 "$T/caprn.$b.out" | sed 's/.*: capacity/capacity/')"
     else echo "rule negative $b NOT A RULE-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caprn.$b.out")"; fail=1; fi
 done
+# head-capacity POSITIVE: 4 x 3 keys, 6 heads (over the old MAXH 4); head h
+# has k = 2 + h % 3 classes, label (a(h+1) + b(h+2) + abh) % k.  Must build
+# and match Python: -d, UNS2 blob, deployed round trip; the -t trace must
+# agree between cc and unisacc.  NEGATIVE: 2 x 2 keys, 17 heads: the reader
+# must exit exactly 4 at the 17th #head line.
+genh() {   # genh A B heads name
+awk -v A=$1 -v N=$2 -v NH=$3 -v NM=$4 'BEGIN{
+  print "# stage " NM ": " NH " heads, synthetic"
+  printf "#field\ta"; for(i=0;i<A;i++) printf "\tv%d", i; printf "\n"
+  printf "#field\tb"; for(i=0;i<N;i++) printf "\tw%d", i; printf "\n"
+  for(h=0;h<NH;h++){ k=2+h%3; printf "#head\ty%d\t-", h; for(c=0;c<k;c++) printf "\tc%d", c; printf "\n" }
+  printf "a\tb"; for(h=0;h<NH;h++) printf "\t=> y%d", h; printf "\n"
+  for(a=0;a<A;a++) for(b=0;b<N;b++){ printf "v%d\tw%d", a, b; for(h=0;h<NH;h++){ k=2+h%3; printf "\tc%d", (a*(h+1)+b*(h+2)+a*b*h)%k } printf "\n" }
+}'
+}
+genh 4 3 6 caph > "$T/caph.tsv"
+genh 2 2 17 caphn > "$T/caphn.tsv"
+B 60 python3 iterate/construct/tools/netdump.py -d "$T/caph.tsv" > "$T/caph.py" || fail=1
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.caph.uns2" "$T/caph.tsv" > /dev/null || fail=1
+for b in cc ua san; do
+    B 30 "$T/c_$b" -d "$T/caph.tsv" > "$T/caph.$b.out" 2>&1; rc=$?
+    B 30 "$T/c_$b" -u "$T/$b.caph.uns2" "$T/caph.tsv" > /dev/null 2>> "$T/caph.$b.out"; rc2=$?
+    if [ $rc -eq 0 ] && [ $rc2 -eq 0 ] && cmp -s "$T/caph.py" "$T/caph.$b.out" && cmp -s "$T/py.caph.uns2" "$T/$b.caph.uns2"; then
+        echo "head positive $b: 6 heads built, -d identical to Python ($(wc -c < "$T/caph.py" | tr -d ' ') B), UNS2 identical ($(wc -c < "$T/py.caph.uns2" | tr -d ' ') B)"
+    else echo "head positive $b FAILED (rc $rc/$rc2): $(head -1 "$T/caph.$b.out")"; fail=1; fi
+    if [ $b != san ]; then
+        B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.caph.uns2" "$T/caph.tsv" > "$T/r.$b.out" 2>&1 || fail=1
+        sed "s/^/head positive $b deployed /" "$T/r.$b.out"
+        B 30 "$T/c_$b" -t "$T/caph.tsv" > "$T/caph.$b.t" 2>&1 || fail=1
+    fi
+    B 30 "$T/c_$b" "$T/caphn.tsv" > "$T/caphn.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: head y16 is head 17, more than 16" "$T/caphn.$b.out" && ! grep -q 'runtime error' "$T/caphn.$b.out"; then
+        echo "head negative $b rejected: $(head -1 "$T/caphn.$b.out" | sed 's/.*: capacity/capacity/')"
+    else echo "head negative $b NOT A HEAD-CAPACITY REJECTION (rc $rc): $(head -1 "$T/caphn.$b.out")"; fail=1; fi
+done
+if cmp -s "$T/caph.cc.t" "$T/caph.ua.t"; then sed "s/^/caph /" "$T/caph.cc.t"; else echo "caph trace differs between builds"; fail=1; fi
 # capacity NEGATIVE: more quotient keys than MAXQ (3200) must be rejected
 # before any set is built: exit exactly 4 and the capacity diagnostic.
 # Fields of 15, 15 and 15 values, label class[(a + 3b + 5c) % 16]: a shift

@@ -16,7 +16,7 @@
  * -d adds the intermediate dumps (quotient groups, decision list with ranks,
  * chosen units) so a divergence can be located at its first step.
  *
- * Scope: at most 3 fields, 4 heads, MAXOK raw keys and MAXQ quotient keys; a set
+ * Scope: at most 3 fields, MAXH heads, MAXOK raw keys and MAXQ quotient keys; a set
  * of quotient keys is QW = ceil(MAXQ / QB) longs of QB (62) bits, see "quotient-key sets" below.  Checked stages: prec, reloc (one head) and tyinfo
  * (three heads: per-head candidates, pick, T4 cross-head sharing).  -t
  * prints which multi-head branches a stage took; README.md lists the ones
@@ -29,7 +29,7 @@
 
 #define MAXF 3
 #define MAXV 128   /* raw values per field: storage only, never a bit index */
-#define MAXH 4
+#define MAXH 16   /* heads: storage only (no head bitset); checked by the reader, exit 4 */
 #define MAXC 62   /* a class set is ONE long: class c and rank crank[c] < 62 -> bits <= 61 */
 #define MAXOK 4352
 #define MAXQ 3200  /* quotient keys; a key set is QW longs (qset below) */
@@ -148,7 +148,10 @@ void load(char *path) {
         if (streq(parts[0], "#head")) {
             if (header) dieln(ln, "schema after the header");
             if (np < 4) dieln(ln, "a head with no classes");
-            if (nh >= MAXH) dieln(ln, "more heads than this constructor holds");
+            if (nh >= MAXH) {   /* before hname/ncl/cls[nh] are written: exit 4 */
+                printf("construct: %s: line %d: capacity: head %s is head %d, more than %d\n", gpath, ln, parts[1], nh + 1, MAXH);
+                exit(4);
+            }
             /* a class set (gcls, bcls, rankset, wmask) is ONE long: class c is
                bit c and its rank crank[c] is bit crank[c], both < ncl.  ncl <= 62
                keeps every class bit <= 61, so no class shift reaches the sign
