@@ -42,7 +42,8 @@ for f in "$@"; do
         # In memory (-run), not from disk: a fresh file's first exec is a
         # 0.5-0.9 s XProtect scan, and the on-disk image is executed by
         # native.sh -- the same bytes, as the cmp above just proved.
-        (cd "$D" && perl -e 'alarm 30; exec @ARGV' "$UA" "$R/$f" -run > "$D/run.out" 2>/dev/null)
+        case "$f" in /*) src="$f";; *) src="$R/$f";; esac   # datashape passes absolute paths
+        (cd "$D" && perl -e 'alarm 30; exec @ARGV' "$UA" "$src" -run > "$D/run.out" 2>/dev/null)
         python3 -m unisa vm --os "${HOSTT%/*}" "$D/tape.$tt" > "$D/vm.out" 2>/dev/null
         cmp -s "$D/run.out" "$D/vm.out" && echo "ran" >> "$D/verdict" || echo "RANWRONG" >> "$D/verdict"
     fi
