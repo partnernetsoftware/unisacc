@@ -120,6 +120,24 @@ repo) and the Lima Linux VM.
 v0.0.1 (2026-09-23) was released this way: `python3 -m unisa ape` built
 `unisaccrun.com` here, `gh release create` uploaded it.
 
+## Generated files: kernel/
+
+Everything in `kernel/` is written by `python3 -m unisa emit-kernel`; never
+edit it by hand. Each file opens with its inputs and their sha256 prefixes,
+and each data block names its source:
+
+| file | contents | source |
+|---|---|---|
+| `unisa_model.inc` | weights blob, stage dimensions, vocabularies, per-stage field/head names, encoder opcode tables | `weights/built.json` (constructed from `unisa/gold.py` by `unisa build-weights`), `unisa/gold.py`, `unisa/catalog.py` (`ENCSPEC`), `unisa/front/lex.py` |
+| `unisa_headers.inc` | the C library carried inside the binary | `include/*.h`, verbatim |
+| `unisa_cases.inc` | every key of every stage with its gold class, for the self test | `unisa/gold.py` |
+| `unisa_core.c`, `unisa_self.c` | the integer inference kernel | `KERNEL_BODY` in `unisa/ckernel.py` |
+
+They are committed on purpose: `unisacc.c` is these files and `src/`
+concatenated, so the compiler builds -- and rebuilds itself -- with no
+Python and no file reads. `tests/kernel.sh` regenerates them and fails
+when the committed copies differ.
+
 ## The route
 
 Construction, not training. The shipped weights are derived from the gold
