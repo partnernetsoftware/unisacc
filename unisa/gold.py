@@ -347,9 +347,10 @@ PEEP_B = ("store64", "load64", "imm", "mov", "jump", "jumpz", "add64", "sub64",
           "mul64", "shl64", "shr64", "lshr64", "or64", "xor64", "and64",
           "other", "none")
 PEEP_REL = ("none", "same_slot", "same_slot_same_reg", "const0", "const1",
-            "pow2", "copy_dead", "to_next", "to_jump", "a_dead")
+            "pow2", "copy_dead", "to_next", "to_jump", "a_dead",
+            "dest_to_mov", "copy_into")
 PEEP_ACT = ("keep", "load_to_mov", "drop_b", "drop_a", "retarget", "to_mov",
-            "to_shl", "fold_imm")
+            "to_shl", "fold_imm", "retarget_dest", "fold_copy")
 
 
 def peep_label(a, b, rel):
@@ -383,6 +384,13 @@ def peep_label(a, b, rel):
         return "retarget"
     if rel == "a_dead" and a in ("imm", "mov", "alu", "load64"):
         return "drop_a"
+    # [H4] a result computed into rD only to be moved to rY is computed into
+    # rY; a copy read once and then dead is read at its source
+    if rel == "dest_to_mov" and b == "mov" and a in ("imm", "load64", "mov",
+                                                     "alu", "other"):
+        return "retarget_dest"
+    if rel == "copy_into" and a == "mov" and b != "none":
+        return "fold_copy"
     return "keep"
 
 

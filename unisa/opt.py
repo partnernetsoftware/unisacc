@@ -447,6 +447,28 @@ def _movat(ln):
     return (d, sr) if sr >= 0 else None
 
 
+def _rereg(ln, a, b, allr):
+    """ln with register a written as b: every token, or only the first
+    register token (the destination) [H4] -- as pp_rereg"""
+    out, p, done = [], 0, False
+    while p < len(ln):
+        c = ln[p]
+        if (not done and c == "r" and p > 0 and not _isal(ln[p - 1])
+                and p + 1 < len(ln) and ln[p + 1].isdigit()):
+            q = p + 1
+            while q < len(ln) and ln[q].isdigit():
+                q += 1
+            n = int(ln[p + 1:q])
+            out.append("r%d" % b if n == a else ln[p:q])
+            p = q
+            if not allr:
+                done = True
+            continue
+        out.append(c)
+        p += 1
+    return "".join(out)
+
+
 class _Peep(_Round):
     def __init__(self, lines, oracle):
         self.L = lines
@@ -532,6 +554,23 @@ class _Peep(_Round):
                     if mv is not None and mv[1] == x and mv[0] != x \
                             and self.dead(x, i + 2):
                         rel = "copy_dead"
+            if rel == "none" and i + 1 < n:                     # [H4]
+                ma = _movat(A)
+                if ma is not None:
+                    ya, xa = ma
+                    if (ya <= 5 and ya != xa and self.K[i + 1] == SIMPLEK
+                            and (self.RM[i + 1] >> ya) & 1
+                            and not (self.WM[i + 1] >> ya) & 1
+                            and self.dead(ya, i + 2)):
+                        rel, y, x = "copy_into", ya, xa
+                if rel == "none" and self.K[i] == SIMPLEK and \
+                        not _word(A, "store64") and not _word(A, ".st"):
+                    db = _firstreg(A)
+                    mb = _movat(L[i + 1])
+                    if (0 <= db <= 5 and (self.WM[i] >> db) & 1 and mb is not None
+                            and mb[1] == db and mb[0] != db
+                            and self.dead(db, i + 2)):
+                        rel, x, y = "dest_to_mov", db, mb[0]
             if rel == "none" and self.K[i] == SIMPLEK and not _word(A, "store64") \
                     and not _word(A, ".st"):
                 dd = _firstreg(A)
@@ -567,6 +606,12 @@ class _Peep(_Round):
                 dd, sr, _ = d3
                 out.append("  imm r%d, %d" % (x, v.bit_length() - 1))
                 out.append("  shl64 r%d, r%d, r%d" % (dd, sr, x))
+                i += 2
+            elif act == "retarget_dest":
+                out.append(_rereg(A, x, y, False))
+                i += 2
+            elif act == "fold_copy":
+                out.append(_rereg(L[i + 1], y, x, True))
                 i += 2
             elif act == "fold_imm":
                 out.append("  imm r%d, %d" % (mv[0], v))

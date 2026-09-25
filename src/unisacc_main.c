@@ -7968,6 +7968,25 @@ int pp_emitnum(long v) {
 int pp_nl(void) { out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
 int pp_rel(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BF_PEEP_2, NBF_PEEP_2, nm, n); }
 int pp_act(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BH_PEEP_Y, NBH_PEEP_Y, nm, n); }
+/* emit line l with register a written as b: every token (all) or only the
+   first -- the destination (all == 0) [H4] */
+int pp_rereg(int l, int a, int b, int all) {
+    int p; int e; int n; int q; int done;
+    p = ol_s[l]; e = ol_e[l]; done = 0;
+    while (p < e) {
+        if (done == 0 && out[p] == 114 && isal(out[p - 1] & 255) == 0 && p + 1 < e && isdi(out[p + 1] & 255)) {
+            q = p + 1; n = 0;
+            while (q < e && isdi(out[q] & 255)) { n = n * 10 + out[q] - 48; q = q + 1; }
+            if (n == a) { pp_emitreg(b); p = q; if (all == 0) done = 1; continue; }
+            ol_put(p, q); p = q;
+            if (all == 0) done = 1;       /* the first register was not a */
+            continue;
+        }
+        out2[nout2] = out[p]; nout2 = nout2 + 1; p = p + 1;
+    }
+    pp_nl();
+    return 0;
+}
 int pp_asks;
 int peep_round(void) {
     int i; int n; int a; int b; int rel; int act; int key[4]; int t; int u; int k; int x; int y;
@@ -8026,6 +8045,22 @@ int peep_round(void) {
                 if (pp_sr == x && pp_d != x && ol_dead(x, i + 2)) rel = pp_rel("copy_dead");
             }
         }
+        if (rel == none && i + 1 < n) {            /* [H4] */
+            int ya; int xa; int yb; int db;
+            if (pp_movat(i)) {
+                ya = pp_d; xa = pp_sr;
+                if (ya <= 5 && ya != xa && ol_k[i + 1] == OK_SIMPLE
+                    && (ol_rm[i + 1] & (1 << ya)) && (ol_wm[i + 1] & (1 << ya)) == 0
+                    && ol_dead(ya, i + 2)) { rel = pp_rel("copy_into"); y = ya; x = xa; }
+            }
+            if (rel == none && ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
+                db = ol_firstreg(i);
+                if (db >= 0 && db <= 5 && (ol_wm[i] & (1 << db)) && pp_movat(i + 1)) {
+                    yb = pp_d;
+                    if (pp_sr == db && yb != db && ol_dead(db, i + 2)) { rel = pp_rel("dest_to_mov"); x = db; y = yb; }
+                }
+            }
+        }
         if (rel == none) {
             if (ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
                 d = ol_firstreg(i);
@@ -8057,6 +8092,14 @@ int peep_round(void) {
             lg = 0; while (v > 1) { v = v / 2; lg = lg + 1; }
             ol_puts("  imm "); pp_emitreg(x); ol_puts(", "); pp_emitnum(lg); pp_nl();
             ol_puts("  shl64 "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); ol_puts(", "); pp_emitreg(x); pp_nl();
+            i = i + 2; continue;
+        }
+        if (act == pp_act("retarget_dest")) {       /* A writes rY; B goes */
+            pp_rereg(i, x, y, 0);
+            i = i + 2; continue;
+        }
+        if (act == pp_act("fold_copy")) {           /* A goes; B reads rX */
+            pp_rereg(i + 1, y, x, 1);
             i = i + 2; continue;
         }
         if (act == pp_act("fold_imm")) {
