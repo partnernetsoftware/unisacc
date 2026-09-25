@@ -14638,7 +14638,14 @@ int ol_c(int c) { out2[nout2] = c; nout2 = nout2 + 1; return 0; }
 int ol_put(int p, int e) { while (p < e) { ol_c(out[p]); p = p + 1; } return 0; }
 int ol_puts(char *t) { int k; k = 0; while (t[k]) { ol_c(t[k]); k = k + 1; } return 0; }
 int pk_nl(void) { return ol_c(10); }
-int ol_emit(int l) { ol_put(ol_s[l], ol_e[l]); return pk_nl(); }
+/* [J9] every line copied verbatim is remembered -- where it lands in out2
+   and which line it was -- so the next round's ol_prep can take the line's
+   facts over instead of reading its text again */
+int em_pos[OPT_MAXL]; int em_src[OPT_MAXL]; int em_n; int em_gen;
+int ol_emit(int l) {
+    if (em_n < OPT_MAXL) { em_pos[em_n] = nout2; em_src[em_n] = l; em_n = em_n + 1; }
+    ol_put(ol_s[l], ol_e[l]); return pk_nl();
+}
 int pk_emitreg(int r) {
     ol_c(114);
     if (r >= 10) ol_c(48 + r / 10);
@@ -14880,6 +14887,8 @@ int bl_split(void) {
 /* Each line once per round: its kind, the registers it reads and writes,
    and the block it jumps to -- the solver then never re-parses text. */
 int ol_k[OPT_MAXL]; int ol_rm[OPT_MAXL]; int ol_wm[OPT_MAXL]; int ol_tg[OPT_MAXL];
+int pv_k[OPT_MAXL]; int pv_rm[OPT_MAXL]; int pv_wm[OPT_MAXL]; int pv_n; int pv_gen;
+int ol_from[OPT_MAXL]; int ol_from_ok;
 #define OK_SIMPLE 0
 #define OK_LABEL 1
 #define OK_RET 2
@@ -14915,10 +14924,23 @@ int ol_prep(void) {
        whether that first register is read again -- ol_mask, ol_firstreg
        and ol_writes each re-read the line, and three reads per line per
        round were 40% of the optimiser.  Same answers. [J9] */
-    int l; int f; int m; int p; int e; int w; int wn; int n; int first; int sawbr; int again;
+    int l; int f; int m; int p; int e; int w; int wn; int n; int first; int sawbr; int again; int j; int use;
+    /* the facts of a line copied verbatim from the last round depend only on
+       its text, so they are taken over; only a branch's block (tg) is
+       looked up again, the labels having moved [J9] */
+    use = ol_from_ok && pv_gen == ol_gen - 1;
+    if (pv_gen == ol_gen - 1) {
+        j = 0; while (j < pv_n) { pv_k[j] = ol_k[j]; pv_rm[j] = ol_rm[j]; pv_wm[j] = ol_wm[j]; j = j + 1; }
+    }
     l = 0;
     while (l < ol_n) {
         ol_rm[l] = 0; ol_wm[l] = 0; ol_tg[l] = 0 - 1;
+        if (use && ol_from[l] >= 0) {
+            j = ol_from[l];
+            ol_k[l] = pv_k[j]; ol_rm[l] = pv_rm[j]; ol_wm[l] = pv_wm[j];
+            if (ol_k[l] == OK_JUMP || ol_k[l] == OK_JUMPZ || ol_k[l] == OK_CALL) ol_tg[l] = ol_target(l);
+            l = l + 1; continue;
+        }
         p = ol_s[l]; e = ol_e[l];
         if (out[p] != 32) { ol_k[l] = OK_LABEL; l = l + 1; continue; }
         w = p + 2; wn = 0; while (w + wn < e && out[w + wn] != 32) wn = wn + 1;
@@ -14953,6 +14975,7 @@ int ol_prep(void) {
         } else { ol_k[l] = OK_OTHER; ol_rm[l] = 255; }
         l = l + 1;
     }
+    pv_gen = ol_gen; pv_n = ol_n;
     return 0;
 }
 /* from line l on, is z read before written: 1 live, 0 dead */
@@ -15150,8 +15173,9 @@ int opt_round(void) {
     nout = nout2;
     return hits;
 }
+/* ol_from: line -> the last round's line it copies, or -1 */
 int ol_lines(void) {
-    int i;
+    int i; int k;
     ol_gen = ol_gen + 1;              /* every cached ol_opi answer is stale */
     ol_n = 0; i = 0;
     while (i < nout) {
@@ -15161,6 +15185,14 @@ int ol_lines(void) {
         ol_e[ol_n] = i; ol_n = ol_n + 1;
         i = i + 1;
     }
+    ol_from_ok = em_gen == ol_gen - 1 && em_gen > 0;
+    k = 0; i = 0;
+    while (i < ol_n) {
+        ol_from[i] = 0 - 1;
+        if (ol_from_ok && k < em_n && em_pos[k] == ol_s[i]) { ol_from[i] = em_src[k]; k = k + 1; }
+        i = i + 1;
+    }
+    em_n = 0; em_gen = ol_gen;
     return 1;
 }
 int ol_commit(void) {
