@@ -13,9 +13,17 @@ T=$(mktemp -d); R=$(pwd)
 # `python3 -m unisa` resolves against the cwd, and we are about to leave it
 PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"; export PYTHONPATH
 . "$R/tests/par.sh"
+# SHARD=k/n runs every n-th probe from the k-th, so each shard stays under
+# the 60 s ceiling (AGENTS.md); the default 1/1 is the whole list.
+FILES=""; i=0
+SHARD=${SHARD:-1/1}; SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
+for f in tests/c/*.c examples/*.c; do
+    [ $((i % SH_N)) -eq $((SH_K - 1)) ] && FILES="$FILES $f"
+    i=$((i + 1))
+done
 # A: every probe's reference build and both runs, PAR at a time.  Each probe
 # gets a directory of its own -- some probes write files.
-for f in tests/c/*.c examples/*.c; do
+for f in $FILES; do
     b=$(basename "$f" .c)
     [ "$b" = "host" ] && continue
     throttle
@@ -49,7 +57,7 @@ for f in tests/c/*.c examples/*.c; do
 done
 wait
 # B: the verdicts, in order.
-for f in tests/c/*.c examples/*.c; do
+for f in $FILES; do
     b=$(basename "$f" .c)
     [ "$b" = "host" ] && continue
     if [ ! -f "$T/$b.wcode" ]; then
