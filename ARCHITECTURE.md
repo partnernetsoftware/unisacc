@@ -18,7 +18,7 @@
   └──────────┬───────────────────────────────────────┬───────────────────┘
              │ build-weights / gold-export / emit-kernel
              ▼                                       │ 造出第 1 代
-  ┌──── 可复用（与语言无关的数据）────┐                │
+  ┌──── 可复用（跨实现的决策数据）────┐                │
   │ weights/built.json  built.uns2    │                │
   │ weights/gold/*.tsv  真值表        │                ▼
   │ kernel/*.inc        C 形态        │ ─inf()─▶ ┌──── 产品编译器：C ────┐
@@ -97,7 +97,7 @@
 
 `src/` 的七个文件没有头文件，也不互相 `#include`：`tests/build_ref.sh` 按上表顺序把它们拼进 `unisacc.c`，顺序即依赖。
 
-这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。`unisacc.com` 的打包（`python3 -m unisa ape`）是唯一用到 Python 的发布步骤，其中各目标的镜像都由 unisacc 编译。
+这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。`unisacc.com` 的打包（`python3 -m unisa ape`）是打包路径上唯一用到 Python 的步骤（完整发布门禁仍调用 Python 裁判），其中各目标的镜像都由 unisacc 编译。
 
 ## 4　验证与工具
 
