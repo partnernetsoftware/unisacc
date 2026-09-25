@@ -81,10 +81,27 @@ int ol_names(int l, int r) {          /* does line l name register r */
    and remembered: the answer is a function of the word. */
 #define OI_MAX 128
 int oi_done[OI_MAX]; int oi_simple[OI_MAX]; int oi_acls[OI_MAX]; int oi_bcls[OI_MAX];
+/* the op word -> vocabulary index, remembered by the word's bytes: a
+   program has a few dozen distinct op words and every line asks.  A
+   direct-mapped slot holds the whole word, so a hit is the same answer
+   vfind gives. [J9] */
+#define OW_SLOTS 512
+char ow_txt[OW_SLOTS * 16]; int ow_len[OW_SLOTS]; int ow_idx[OW_SLOTS];
 int oi_idx(char *w, int n) {
-    int i;
+    int i; int h; int k; int b;
+    h = n;
+    k = 0; while (k < n) { h = (h * 31 + (w[k] & 255)) & (OW_SLOTS - 1); k = k + 1; }
+    if (n <= 16 && ow_len[h] == n) {
+        b = h * 16; k = 0;
+        while (k < n && ow_txt[b + k] == w[k]) k = k + 1;
+        if (k == n) return ow_idx[h];
+    }
     i = vfind(BF_OPINFO_0, NBF_OPINFO_0, w, n);
     if (i < 0) i = vfind(BF_OPINFO_0, NBF_OPINFO_0, "other", 5);
+    if (n <= 16) {
+        b = h * 16; k = 0; while (k < n) { ow_txt[b + k] = w[k]; k = k + 1; }
+        ow_len[h] = n; ow_idx[h] = i;
+    }
     return i;
 }
 int oi_ask(int i) {
@@ -264,24 +281,53 @@ int ol_mask(int l) {                  /* every rN the line names */
     }
     return m;
 }
+/* ol_word's answer for the words ol_prep tells apart, from the word's
+   span: the same test (the word, then a space or the end of the line) */
+int op_is(int p, int n, char *w) {
+    int k; k = 0;
+    while (k < n) { if (w[k] == 0 || out[p + k] != w[k]) return 0; k = k + 1; }
+    return w[k] == 0;
+}
 int ol_prep(void) {
-    int l; int f; int m;
+    /* One pass over each line's text: the kind from the op word, and the
+       operand registers read once for the mask, the first register and
+       whether that first register is read again -- ol_mask, ol_firstreg
+       and ol_writes each re-read the line, and three reads per line per
+       round were 40% of the optimiser.  Same answers. [J9] */
+    int l; int f; int m; int p; int e; int w; int wn; int n; int first; int sawbr; int again;
     l = 0;
     while (l < ol_n) {
         ol_rm[l] = 0; ol_wm[l] = 0; ol_tg[l] = 0 - 1;
-        if (out[ol_s[l]] != 32) ol_k[l] = OK_LABEL;
-        else if (ol_word(l, "ret")) ol_k[l] = OK_RET;
-        else if (ol_word(l, "jump")) { ol_k[l] = OK_JUMP; ol_tg[l] = ol_target(l); }
-        else if (ol_word(l, "jumpz")) { ol_k[l] = OK_JUMPZ; ol_tg[l] = ol_target(l); ol_rm[l] = ol_mask(l); }
-        else if (ol_word(l, "call")) { ol_k[l] = OK_CALL; ol_tg[l] = ol_target(l); }
-        else if (ol_word(l, ".frame")) ol_k[l] = OK_FRAME;
+        p = ol_s[l]; e = ol_e[l];
+        if (out[p] != 32) { ol_k[l] = OK_LABEL; l = l + 1; continue; }
+        w = p + 2; wn = 0; while (w + wn < e && out[w + wn] != 32) wn = wn + 1;
+        /* the operands, from after the word */
+        m = 0; f = 0 - 1; first = 1; sawbr = 0; again = 0;
+        p = w + wn;
+        while (p < e) {
+            if (out[p] == 91) sawbr = 1;
+            if (out[p] == 114 && isal(out[p - 1] & 255) == 0 && p + 1 < e && isdi(out[p + 1] & 255)) {
+                n = 0; p = p + 1;
+                while (p < e && isdi(out[p] & 255)) { n = n * 10 + out[p] - 48; p = p + 1; }
+                if (n < 16) m = m | (1 << n);
+                if (first) { if (sawbr == 0) f = n; first = 0; }
+                else { if (f >= 0 && n == f) again = 1; }
+                continue;
+            }
+            p = p + 1;
+        }
+        if (op_is(w, wn, "ret")) ol_k[l] = OK_RET;
+        else if (op_is(w, wn, "jump")) { ol_k[l] = OK_JUMP; ol_tg[l] = ol_target(l); }
+        else if (op_is(w, wn, "jumpz")) { ol_k[l] = OK_JUMPZ; ol_tg[l] = ol_target(l); ol_rm[l] = m; }
+        else if (op_is(w, wn, "call")) { ol_k[l] = OK_CALL; ol_tg[l] = ol_target(l); }
+        else if (op_is(w, wn, ".frame")) ol_k[l] = OK_FRAME;
         else if (ol_simple(l)) {
-            ol_k[l] = OK_SIMPLE; m = ol_mask(l); f = 0 - 1;
-            if (ol_word(l, "store64") == 0 && ol_word(l, ".st") == 0) f = ol_firstreg(l);
+            ol_k[l] = OK_SIMPLE;
+            if (op_is(w, wn, "store64") || op_is(w, wn, ".st")) f = 0 - 1;
             if (f >= 0) {
                 ol_wm[l] = 1 << f;
                 ol_rm[l] = m & ~(1 << f);
-                if (ol_writes(l, f) == 0) ol_rm[l] = ol_rm[l] | (1 << f);
+                if (again) ol_rm[l] = ol_rm[l] | (1 << f);
             } else ol_rm[l] = m;
         } else { ol_k[l] = OK_OTHER; ol_rm[l] = 255; }
         l = l + 1;
