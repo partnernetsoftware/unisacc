@@ -461,7 +461,40 @@ int bk_regnum(char *nm) {
 }
 /* ask abi and enc for catalog op `cop` (an index into BF_ABI_0) -- only
    what the bytes use; isel is not a question the lowering obeys */
+/* bk_facts depends on (cop, os, arch) alone, and the lowering asks it for
+   every syscall-shaped instruction: fourteen table questions each time.
+   The facts are kept per cop for the target in hand [J5]; a change of
+   target (one process can write several) starts the cache over. */
+#define BKF_MAXC 128
+int bkfc_ok[BKF_MAXC]; int bkfc_os; int bkfc_arch;
+int bkfc_hasno[BKF_MAXC]; long bkfc_sysno[BKF_MAXC]; int bkfc_arg[BKF_MAXC * 6];
+int bkfc_ret[BKF_MAXC]; int bkfc_gate[BKF_MAXC]; int bkfc_nr[BKF_MAXC];
+int bkfc_shape[BKF_MAXC]; int bkfc_rc[BKF_MAXC]; int bkfc_wi[BKF_MAXC]; int bkfc_form[BKF_MAXC];
+int bk_facts_ask(int cop);
 int bk_facts(int cop) {
+    int k;
+    if (bkfc_os != bkos + 1 || bkfc_arch != bkarch + 1) {
+        k = 0; while (k < BKF_MAXC) { bkfc_ok[k] = 0; k = k + 1; }
+        bkfc_os = bkos + 1; bkfc_arch = bkarch + 1;
+    }
+    if (cop < 0 || cop >= BKF_MAXC) return bk_facts_ask(cop);
+    if (bkfc_ok[cop] == 0) {
+        bk_facts_ask(cop);
+        bkfc_hasno[cop] = bkf_hasno; bkfc_sysno[cop] = bkf_sysno;
+        k = 0; while (k < 6) { bkfc_arg[cop * 6 + k] = bkf_arg[k]; k = k + 1; }
+        bkfc_ret[cop] = bkf_ret; bkfc_gate[cop] = bkf_gate; bkfc_nr[cop] = bkf_nr;
+        bkfc_shape[cop] = bkf_argshape; bkfc_rc[cop] = bkf_retconv; bkfc_wi[cop] = bkf_winimp;
+        bkfc_form[cop] = bkf_form; bkfc_ok[cop] = 1;
+        return 0;
+    }
+    bkf_hasno = bkfc_hasno[cop]; bkf_sysno = bkfc_sysno[cop];
+    k = 0; while (k < 6) { bkf_arg[k] = bkfc_arg[cop * 6 + k]; k = k + 1; }
+    bkf_ret = bkfc_ret[cop]; bkf_gate = bkfc_gate[cop]; bkf_nr = bkfc_nr[cop];
+    bkf_argshape = bkfc_shape[cop]; bkf_retconv = bkfc_rc[cop]; bkf_winimp = bkfc_wi[cop];
+    bkf_form = bkfc_form[cop];
+    return 0;
+}
+int bk_facts_ask(int cop) {
     int key[4]; int c; char *nm;
     key[0] = cop; key[1] = bkos; key[2] = bkarch; key[3] = 0;
     c = inf(S_ABI, key, HD_ABI_SYSNO);

@@ -7997,7 +7997,17 @@ int pp_emitnum(long v) {
 }
 int pp_nl(void) { out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
 int pp_rel(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BF_PEEP_2, NBF_PEEP_2, nm, n); }
-int pp_act(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BH_PEEP_Y, NBH_PEEP_Y, nm, n); }
+/* an action's class index, by name -- asked for every candidate, so the
+   answers (fixed for the table in hand) are kept by the name's address [J5] */
+char *pa_nm[16]; int pa_v[16]; int pa_n;
+int pp_act(char *nm) {
+    int n; int k;
+    k = 0; while (k < pa_n) { if (pa_nm[k] == nm) return pa_v[k]; k = k + 1; }
+    n = 0; while (nm[n]) n = n + 1;
+    n = vfind(BH_PEEP_Y, NBH_PEEP_Y, nm, n);
+    if (pa_n < 16) { pa_nm[pa_n] = nm; pa_v[pa_n] = n; pa_n = pa_n + 1; }
+    return n;
+}
 /* emit line l with register a written as b: every token (all) or only the
    first -- the destination (all == 0) [H4] */
 int pp_rereg(int l, int a, int b, int all) {
