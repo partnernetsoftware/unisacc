@@ -60,7 +60,7 @@ if [ "${1:-}" = --batches ]; then
         echo "batch $n: [$cs]: rc $rc, $el s (limit 60 s)"
         [ $rc -eq 0 ] || { bf=1; echo "batch $n: FAILED (rc $rc)"; break; }
         for c in $cs; do echo "receipt $c"; done | sort > "$W/want.$n"
-        grep '^receipt ' "$W/out.$n" | sort > "$W/got.$n"
+        grep -a '^receipt ' "$W/out.$n" | sort > "$W/got.$n"
         if ! cmp -s "$W/want.$n" "$W/got.$n"; then bf=1; echo "batch $n: RECEIPTS WRONG: want [$(cat "$W/want.$n" | tr '\n' ',')] got [$(cat "$W/got.$n" | tr '\n' ',')]"; break; fi
         cat "$W/got.$n" >> "$W/union"
     done < "$W/list"

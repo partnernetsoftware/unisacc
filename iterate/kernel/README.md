@@ -133,3 +133,38 @@ capacity check first with exit 4; the contract check now runs before it).
 order.tsv says heads_max 16 -- so the constant cannot go stale silently if the
 kernel changes its indexing (a copy of the kernel with `<< 5` does not match).
 The kernel layout itself was not changed.
+
+## Second slice: vocab, BF/BH/HD (2026-09-25)
+
+- **vocab.tsv** holds the mapping and the order: 15 `vocab SYM stage field|head name`
+  rows, 1 `typekw TYPEV` placeholder row, 11 `bfbh stage` rows. genmodel's
+  fixed symbol list is a CONSUMER ABI check (the symbols the kernel links
+  against must be declared), not a second mapping. `vocab_check.py` asserts
+  that vocab.tsv equals ckernel.py's tuples (transition).
+- **Ordering contract:** rows are written in vocab.tsv order. Moving a row
+  moves its lines, and vregion.awk does not assume that TOKV comes first.
+- **TYPEV** is not generated. genmodel writes a delimited placeholder
+  (`/* TYPEV: BEGIN placeholder ...` / `/* TYPEV: END placeholder */`). Only
+  `mix.awk`, the scratch integrator, splices the old TYPEV block in, and it
+  finds it by markers. It needs no TYPEKW input (check `empty typev`).
+- **String pool:** every schema string of every TSV is copied into pool[],
+  with its length and the pool's capacity checked before the copy, because
+  tbuf is reused for each file.
+- **Symbols:** every name written (first slice, vocab + N*, BF_/NBF_,
+  BH_/NBH_/HD_) must be a legal C identifier (keywords rejected) and must not
+  collide with any other name under case folding. Exit 1 on failure.
+- **This tool's conservative input domain** (exit 1, no escaping is done): a
+  quote, a backslash, a byte outside 0x20-0x7e, "??", an empty value, or a
+  non-first vocab value that starts 0-7 (it would extend `\0`). 8 and 9 are
+  accepted. BF/BH use `\000`, so a leading digit is fine there. This describes
+  genmodel's accepted inputs; it does not say that Python writes broken C.
+- **vregion.awk:** the start anchor is the `}` that closes model_dims (the
+  opening line must appear exactly once). The end anchor is the first
+  `/* ENC_` (py) or genmodel's END line, which must appear exactly once.
+  Comments are removed, and so are ONLY the exact `char *TYPEV = "...";` and
+  `#define NTYPEV n` lines. After that the region must be non-empty and its
+  symbols must be exactly the 156 expected (15x2 vocab, 21x2 BF, 28x3 BH/HD).
+- Results: region 12,661 B / 222 lines, identical for the oracle, the shipped
+  file, cc, ua and san. The MIXED file equals the shipped one modulo comments.
+  --check-oracle shows 0 differences in 20,184. closure 582/0 and nativeboot
+  pass. The six --batches take 4.2 / 4.5 / 4.9 / 4.7 / 6.5 / 36.2 s.
