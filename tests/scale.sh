@@ -13,7 +13,7 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
 ok=0; bad=0
-cap() { grep -h "^#define $1 " src/unisacc_main.c src/unisacc_back.c | awk '{print $3}'; }
+cap() { grep -h "^#define $1 " src/*.c | awk '{print $3}'; }
 half() {   # half <what> <used> <limit>
     if [ "$2" -le $(( $3 / 2 )) ]; then ok=$((ok+1)); printf "  ok   %-26s %9s of %9s\n" "$1" "$2" "$3"
     else bad=$((bad+1)); printf "  FAIL %-26s %9s of %9s -- over half: raise the limit\n" "$1" "$2" "$3"; fi

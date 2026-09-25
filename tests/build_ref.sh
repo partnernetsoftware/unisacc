@@ -9,7 +9,7 @@ set -e
 # in where unisa_core.c's `#include` names it
 { cat kernel/unisa_model.inc kernel/unisa_headers.inc
   grep -v '^#include "unisa_' kernel/unisa_core.c
-  cat src/unisacc_main.c src/unisacc_back.c; } > unisacc.c.$$
+  cat src/front_pp.c src/front_parse.c src/opt.c src/main.c src/back_lower.c src/back_encode.c src/back_image.c; } > unisacc.c.$$
 mv -f unisacc.c.$$ unisacc.c
 cat tests/refshim.h unisacc.c tests/reffoot.h > "${1:-/tmp/ua_ref.c}.$$"
 mv -f "${1:-/tmp/ua_ref.c}.$$" "${1:-/tmp/ua_ref.c}"

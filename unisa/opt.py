@@ -1,4 +1,4 @@
-"""-O1/-O2 on the tape: the Python twin of opt_stack() in unisacc_main.c. [H1] [H2]
+"""-O1/-O2 on the tape: the Python twin of opt_stack() in src/opt.c. [H1] [H2]
 
 Both front ends answer table-shaped questions through the same nets, and both
 optimise the same way: `tests/optpy.sh` feeds the C front end's -O0 tape

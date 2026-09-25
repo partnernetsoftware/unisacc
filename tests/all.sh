@@ -47,7 +47,7 @@
 #   bench       what the compiler costs, as a ratchet: the self-compile, a
 #               small probe, and the price of emitting unoptimised code
 #               [A-45]
-#   consts      the numbers lower.py derives and unisacc_back.c hardcodes
+#   consts      the numbers lower.py derives and src/back_*.c hardcode
 #               are the same numbers [A-43]
 #   oracle      every question the model can be asked, through the cache,
 #               equals the net's own answer -- both orders [A-49]

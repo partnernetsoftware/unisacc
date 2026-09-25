@@ -1,7 +1,7 @@
 #!/bin/bash
 # The self-hosting closure, byte for byte. [S-7 item 7]
 #
-# unisacc now carries its own back end (src/unisacc_back.c): `unisacc FILE -b
+# unisacc now carries its own back end (src/back_*.c): `unisacc FILE -b
 # os/arch` writes the executable itself, with no Python anywhere.  That back
 # end is a PORT of unisa/lower.py, assemble.py, the two encoders and the three
 # image writers, so the check is the strictest one there is: for every probe

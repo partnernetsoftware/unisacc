@@ -73,11 +73,18 @@ unisacc 分三层，外加验证与工具。本文是索引，逐个说明文件
 
 | 文件 | 作用 |
 |---|---|
-| [`src/unisacc_main.c`](src/unisacc_main.c) | 前端（预处理、词法、walker）、tape 优化器（H1 栈顶缓存、块级活跃性、`peep`）、命令行 |
-| [`src/unisacc_back.c`](src/unisacc_back.c) | 后端：lowering、x86-64 与 arm64 编码器、ELF/Mach-O/PE 写出、`-run` |
+| [`src/front_pp.c`](src/front_pp.c) | 词表工具、预处理器（`#if`、`#include`、按需补头、宏展开）、诊断、词法 |
+| [`src/front_parse.c`](src/front_parse.c) | 解析与 tape 生成（walker）：类型、符号、表达式、调用、语句、初始化 |
+| [`src/opt.c`](src/opt.c) | tape 优化器：H1 栈顶缓存、块级活跃性、`peep` 表 |
+| [`src/main.c`](src/main.c) | 命令行 |
+| [`src/back_lower.c`](src/back_lower.c) | 后端前半：解析 tape、向网络问 facts、lowering |
+| [`src/back_encode.c`](src/back_encode.c) | arm64 与 x86-64 编码器、汇编器 |
+| [`src/back_image.c`](src/back_image.c) | ELF/Mach-O/PE 写出、SHA-256 签名、Windows 导入、`-run` |
 | [`include/*.h`](include/) | 随身携带的 C 库，以 `static` 定义，按需补头 |
 | [`unisacc.c`](unisacc.c) | `kernel/` 与 `src/` 的拼接：单个 C 文件，cc 或 unisacc 都能直接编译，不需要 Python，也不读外部文件 |
 | `unisacc.com` | `make com` 用 `-O2` 构建的六目标单文件发行版 |
+
+`src/` 的七个文件没有头文件，也不互相 `#include`：`tests/build_ref.sh` 按上表顺序把它们拼进 `unisacc.c`，顺序即依赖。
 
 这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。新逻辑优先落在表里或这一层；种子只做孪生检验。
 

@@ -19,7 +19,7 @@ def assemble(tp):
     # sits, and the round repeats until nothing more fits.  Shortening only
     # ever brings code closer together, so a branch that fits keeps
     # fitting: the rounds terminate, and the set they end with does not
-    # depend on the order branches are looked at.  unisacc_back.c's
+    # depend on the order branches are looked at.  back_encode.c's
     # bk_assemble runs the same rounds, and closure checks the two agree
     # byte for byte.
     # Sizes are measured ONCE, in the long form; a round only subtracts what

@@ -109,7 +109,7 @@ tables — every instruction name it emits is chosen by the `irsel` net at the
 moment it is written, and `tests/stages.sh` checks, probe by probe, that no
 stage the Python front end asks a net about is decided in code on the C side.
 
-It also carries its own back end (`src/unisacc_back.c`: lowering, both
+It also carries its own back end (`src/back_*.c`: lowering, both
 encoders, the ELF, Mach-O and PE writers), so `unisacc FILE -b os/arch`
 writes the executable itself. Two fixed points hold:
 
@@ -236,7 +236,7 @@ prd.md            the specification, with numbered clauses [T-*] [D-*] [P-*] ...
 prd.tree.md       tree + DAG views, for working
 prd.map.md        a memory palace, for the whole picture
 unisa/            the Python driver: nets, gold, construction, front end, lowering
-src/unisacc_main.c  the compiler, written in the C subset it compiles
+src/*.c           the compiler, written in the C subset it compiles (concatenated into unisacc.c)
 kernel/           generated: the model blob + the integer kernel, as C
 tests/            acceptance, differential (vs cc), native, self-hosting, bootstrap
 ```

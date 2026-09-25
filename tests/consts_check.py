@@ -7,7 +7,7 @@ build on each other:
     SCRATCH = 144 ... PRINTMAX = 24
     WIN_HSTD = SCRATCH + PRINTMAX ... WIN_EXTRA = WIN_ARGVA + 512
 
-`src/unisacc_back.c` is a hand port, and it carries the ANSWERS as bare
+`src/back_*.c` is a hand port, and it carries the ANSWERS as bare
 literals: `bk_hstd = base + 168`, `bk_zeros(776)`.  They are right today.
 The hazard is the cascade: changing PRINTMAX in Python silently invalidates
 six numbers in C, and the only thing that would notice is closure.sh
@@ -25,7 +25,7 @@ import sys
 R = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, R)
 
-BACK = os.path.join(R, "src", "unisacc_back.c")
+BACK = [os.path.join(R, "src", n) for n in ("back_lower.c", "back_encode.c", "back_image.c")]
 
 
 def c_literal(pattern, text, what):
@@ -40,7 +40,7 @@ def main():
     from unisa import lower
     from unisa.tape import DATA_BASE
 
-    c = open(BACK, encoding="latin-1").read()
+    c = "".join(open(f, encoding="latin-1").read() for f in BACK)
     L = lower
 
     # name -> (what Python says, how to find the C number)
@@ -91,7 +91,7 @@ def main():
             print("  FAIL %-22s %s" % (name, why))
             bad += 1
         elif got != want:
-            print("  FAIL %-22s unisacc_back.c says %d, lower.py says %d"
+            print("  FAIL %-22s back end says %d, lower.py says %d"
                   % (name, got, want))
             bad += 1
 
@@ -111,7 +111,7 @@ def main():
 
     n = len(checks) + 5
     print()
-    print("consts  agreed %d   differ %d   (unisa/lower.py vs src/unisacc_back.c)"
+    print("consts  agreed %d   differ %d   (unisa/lower.py vs src/back_*.c)"
           % (n - bad, bad))
     return 1 if bad else 0
 
