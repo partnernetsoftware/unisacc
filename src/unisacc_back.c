@@ -272,12 +272,15 @@ char *bk_lists[BK_NLISTS]; int bk_idx[BK_NLISTS * BK_NIDX];
 int bk_idxn[BK_NLISTS]; int bk_nlists;
 
 char *bk_lastlist; int bk_lastslot;  /* calls cluster: the same list, again */
+char *bkc_ptr[16]; int bkc_slot[16];  /* pointer -> slot, direct-mapped (see v_slot) */
 int bk_index(char *list) {           /* the slot holding this list's offsets */
-    int i; int k; int n;
+    int i; int k; int n; int h;
     if (list == bk_lastlist) return bk_lastslot;
+    h = (int)(((long)list >> 3) & 15);
+    if (bkc_ptr[h] == list) { bk_lastlist = list; bk_lastslot = bkc_slot[h]; return bkc_slot[h]; }
     i = 0;
     while (i < bk_nlists) {
-        if (bk_lists[i] == list) { bk_lastlist = list; bk_lastslot = i; return i; }
+        if (bk_lists[i] == list) { bk_lastlist = list; bk_lastslot = i; bkc_ptr[h] = list; bkc_slot[h] = i; return i; }
         i = i + 1;
     }
     if (bk_nlists >= BK_NLISTS) return 0 - 1;   /* fall back to the walk */

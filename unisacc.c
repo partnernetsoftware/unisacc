@@ -6224,12 +6224,18 @@ char *v_lists[V_NLISTS]; int v_idx[V_NLISTS * V_NIDX]; int v_n[V_NLISTS];
 int v_nlists;
 
 char *v_last; int v_lastslot;  /* the lexer asks the same list back to back */
+/* the list pointer -> slot, remembered in a small direct-mapped cache:
+   callers alternate between vocabularies, so "the last one" alone missed,
+   and the walk below was the self-compile's top line at -O2 */
+char *vc_ptr[16]; int vc_slot[16];
 int v_slot(char *v) {
-    int i; int p; int n;
+    int i; int p; int n; int h;
     if (v == v_last) return v_lastslot;
+    h = (int)(((long)v >> 3) & 15);
+    if (vc_ptr[h] == v) { v_last = v; v_lastslot = vc_slot[h]; return vc_slot[h]; }
     i = 0;
     while (i < v_nlists) {
-        if (v_lists[i] == v) { v_last = v; v_lastslot = i; return i; }
+        if (v_lists[i] == v) { v_last = v; v_lastslot = i; vc_ptr[h] = v; vc_slot[h] = i; return i; }
         i = i + 1;
     }
     if (v_nlists >= V_NLISTS) return 0 - 1;     /* fall back to the walk */
@@ -14751,12 +14757,15 @@ char *bk_lists[BK_NLISTS]; int bk_idx[BK_NLISTS * BK_NIDX];
 int bk_idxn[BK_NLISTS]; int bk_nlists;
 
 char *bk_lastlist; int bk_lastslot;  /* calls cluster: the same list, again */
+char *bkc_ptr[16]; int bkc_slot[16];  /* pointer -> slot, direct-mapped (see v_slot) */
 int bk_index(char *list) {           /* the slot holding this list's offsets */
-    int i; int k; int n;
+    int i; int k; int n; int h;
     if (list == bk_lastlist) return bk_lastslot;
+    h = (int)(((long)list >> 3) & 15);
+    if (bkc_ptr[h] == list) { bk_lastlist = list; bk_lastslot = bkc_slot[h]; return bkc_slot[h]; }
     i = 0;
     while (i < bk_nlists) {
-        if (bk_lists[i] == list) { bk_lastlist = list; bk_lastslot = i; return i; }
+        if (bk_lists[i] == list) { bk_lastlist = list; bk_lastslot = i; bkc_ptr[h] = list; bkc_slot[h] = i; return i; }
         i = i + 1;
     }
     if (bk_nlists >= BK_NLISTS) return 0 - 1;   /* fall back to the walk */
