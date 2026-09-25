@@ -1,0 +1,60 @@
+tests/fwrite -- probes for fwrite in include/stdio.h
+
+real.c, real.sh   REAL: `ulimit -f 1`, SIGXFSZ ignored; the kernel really
+                  refuses bytes.  Native, -run, and Python --drive built.
+
+sim.sh            SIMULATED: the authoritative simulated test.  It extracts
+                  the current `static long fwrite(` definition from
+                  include/stdio.h (awk, through the matching closing brace),
+                  renames it fwrite_under_test, textually replaces its one
+                  `__write(` call with a recording shim, and runs 11 cases on
+                  all three paths.  The shim records each call's (offset
+                  from buf, n, return), and the probe asserts them.
+                  This tests the CURRENT library function body as compiled
+                  by each front end.  It does NOT test macro-expansion
+                  consistency (see the known gap below).
+                  usage: tests/fwrite/sim.sh [ref-compiler] [stdio.h]
+
+sim.c             SIMULATED, SUPERSEDED by sim.sh.  It relies on
+                  `#define __write shim` before `#include <stdio.h>`, which
+                  only the Python front end honours.  On native and -run the
+                  shim is never called, and 6 of its 11 cases (complete,
+                  short_then_ok, short_then_err, zero_stops, round_down,
+                  over_answer) FAIL there with calls=0.  The 5 that print
+                  "ok" natively (sz0, n0, overflow, negative_sz, negative_n)
+                  expect zero calls, so they pass vacuously: the shim is
+                  not reached at all, not "reached zero times".  Treat
+                  native sim.c results as UNCOVERED, never as green.  No
+                  runner invokes sim.c.  It is kept only as the Python-side
+                  macro probe.
+
+KNOWN GAP (separate from fwrite; not fixed here): the native preprocessor
+does not expand a user macro, defined before #include, inside an
+embedded-header function body WHEN THE PROGRAM USES THAT FUNCTION.  The
+Python front end does expand it.
+
+  -E reproduction (native):
+    d.c:  #define __write shim
+          #include <stdio.h>
+          int main(void) { return 0; }
+    g.c:  #define __write shim
+          #include <stdio.h>
+          int main(void) { return (int)fwrite("abc", 1, 3, stdout); }
+
+    ua -E d.c | grep 'p + done'
+      ->  r =  shim (_unisa_fd(f), (char *)p + done, total - done);   expanded
+    ua -E g.c | grep 'p + done'
+      ->  r = __write(_unisa_fd(f), (char *)p + done, total - done);  NOT expanded
+
+  Behavioural reproduction (m.c):
+    static long shim(int fd, char *p, long n) { return 42; }
+    #define __write shim
+    #include <stdio.h>
+    int main(void) { return (int)fwrite("abc", 1, 3, stdout) == 3 ? 0 : 1; }
+
+    ua -run m.c                            -> prints "abc", exit 0
+                                              (real __write; macro ignored)
+    python3 -m unisa run m.c --drive built -> no output, exit 1
+                                              (shim called; 42 > 3 = error)
+
+  Measured 2026-09-25 with a ua built by tests/build_ref.sh.

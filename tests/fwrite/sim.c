@@ -1,6 +1,12 @@
 /* fwrite probes, SIMULATED: __write is replaced by a scripted shim so the
    partial, zero and error answers can be forced.  The shim writes nothing;
-   it records calls and answers from a script.  Exit status = failures. */
+   it records calls and answers from a script.  Exit status = failures.
+   SUPERSEDED by sim.sh.  PYTHON FRONT END ONLY: on native and -run the
+   `#define __write shim` below is not expanded inside the header's fwrite
+   (README, known gap), so the shim is never called.  There, complete,
+   short_then_ok, short_then_err, zero_stops, round_down and over_answer
+   FAIL with calls=0, and the zero-call cases pass vacuously.  Native results
+   from this file are UNCOVERED, not green.  No runner invokes it. */
 static long shim_ans[8];
 static long shim_k;
 static long shim_calls;
