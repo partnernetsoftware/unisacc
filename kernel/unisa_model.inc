@@ -6,7 +6,7 @@
  * gold tables in unisa/gold.py (no training); the vocabularies are the
  * tuples named at each string.  The kernel that reads this is unisa_core.c.
  * Inputs (sha256, first 12 hex digits):
- *   unisa/gold.py                f4c1944d990e
+ *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             a2a290ba91cf
  *   unisa/front/lex.py           5d9702eecf8c
  *   weights/built.json           20b5f05ffafd

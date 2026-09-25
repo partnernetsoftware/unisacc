@@ -15,10 +15,10 @@
 # ccrun (which also runs the tape) -- the point is direction, not depth.
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-UA=${UA:-/tmp/ua_ref}
+. "$REPO/tests/lib.sh"
 BASE=$REPO/tests/selfgap.baseline
-[ -x "$UA" ] || "$REPO/tests/build_ref.sh" >/dev/null || exit 1
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+ua_ready
+T=$(scratch)
 
 # A front-end bug can loop, and macOS has no timeout(1).
 # 10s is generous on real hardware and not enough in an emulated guest,
@@ -37,7 +37,7 @@ count() {           # count <tag> <file...>  -> accepted, listed in $T/got
         elif [ "${VERBOSE:-0}" = "1" ]; then
             # stdout is this function's RESULT -- diagnostics go to stderr
             printf "  no   %-28s %s\n" "$(basename "$f")" \
-                "$(perl -e 'alarm 10; exec @ARGV' "$UA" "$f" -c 2>&1 >/dev/null \
+                "$(bound 10 "$UA" "$f" -c 2>&1 >/dev/null \
                    | head -1 | cut -c1-48)" >&2
         fi
     done
@@ -67,7 +67,7 @@ if [ -d "$CORP" ]; then
     for f in "$CORP"/*.c "$REPO"/examples/*.c "$REPO"/tests/c/*.c; do
         [ -f "$f" ] || continue
         try "$f" && continue                    # unisacc took it: no debt
-        if perl -e 'alarm 20; exec @ARGV' python3 -m unisa tape "$f" \
+        if bound 20 python3 -m unisa tape "$f" \
                >/dev/null 2>&1; then
             gap=$((gap+1)); gapnames="$gapnames $(basename "$f")"
         fi

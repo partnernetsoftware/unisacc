@@ -10,7 +10,8 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 D=$R/tests/multi
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/lib.sh"
+T=$(scratch)
 U="python3 -m unisa"
 rc=0
 
@@ -66,18 +67,17 @@ fi
 
 # The SHIPPED compiler, not only the Python driver: `unisacc a.c b.c` is
 # what someone with one binary and two files actually types.
-UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || "$R/tests/build_ref.sh" >/dev/null || rc=1
+ua_ready
 if [ -x "$UA" ]; then
     check "unisacc -run m1 m2" \
-        "$(perl -e 'alarm 120; exec @ARGV' "$UA" -run "$D/m1.c" "$D/m2.c" 2>&1 | tail -1)"
+        "$(bound 120 "$UA" -run "$D/m1.c" "$D/m2.c" 2>&1 | tail -1)"
     check "unisacc m2 m1 -run" \
-        "$(perl -e 'alarm 120; exec @ARGV' "$UA" -run "$D/m2.c" "$D/m1.c" 2>&1 | tail -1)"
-    got=$(perl -e 'alarm 120; exec @ARGV' "$UA" -run "$D/n1.c" "$D/n2.c" 2>&1 | tail -1)
+        "$(bound 120 "$UA" -run "$D/m2.c" "$D/m1.c" 2>&1 | tail -1)"
+    got=$(bound 120 "$UA" -run "$D/n1.c" "$D/n2.c" 2>&1 | tail -1)
     if [ "$got" = "5" ]; then printf "  ok   %-24s %s\n" "unisacc libc on demand" "$got"
     else printf "  FAIL %-24s got '%s' want '5'\n" "unisacc libc on demand" "$got"; rc=1; fi
     if [ -n "$HOST" ]; then
-        if perl -e 'alarm 200; exec @ARGV' "$UA" "$D/m1.c" "$D/m2.c" \
+        if bound 200 "$UA" "$D/m1.c" "$D/m2.c" \
                -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
             chmod +x "$T/um"
             command -v codesign >/dev/null && codesign -f -s - "$T/um" >/dev/null 2>&1

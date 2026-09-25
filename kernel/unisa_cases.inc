@@ -4,7 +4,7 @@
  * full domain the self test enumerates [P-3]: unisa/gold.py STAGES[s].keys()
  * and .label(), packed as [stage][key indices][class per head].
  * Inputs (sha256, first 12 hex digits):
- *   unisa/gold.py                f4c1944d990e
+ *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             a2a290ba91cf */
 
 char *CASES =

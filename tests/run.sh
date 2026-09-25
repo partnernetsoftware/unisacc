@@ -11,13 +11,12 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 # `unisacc -run FILE.c` -- the compiler itself, no separate tool
-UA_RUN=${UA_RUN:-/tmp/ua_ref}
-[ -x "$UA_RUN" ] || ./tests/build_ref.sh >/dev/null || exit 1
+. "$R/tests/lib.sh"; ua_ready
 PROBES=${*:-examples/hello.c examples/fib.c examples/fact.c examples/switch.c
             examples/struct.c examples/do.c examples/ptr.c
             tests/c/b_float.c tests/c/b_argv.c tests/c/b_mmap.c
             tests/c/b_printf.c tests/c/b_static.c}
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+T=$(scratch)
 ok=0; bad=0; skip=0
 for f in $PROBES; do
     b=$(basename "$f" .c)
@@ -44,10 +43,10 @@ for f in $PROBES; do
             "$(grep -m1 error "$T/cc.err" | cut -c1-60)"
         continue
     fi
-    (cd "$T" && perl -e 'alarm 30; exec @ARGV' ./ref one two > ref.out 2>/dev/null)
+    (cd "$T" && bound 30 ./ref one two > ref.out 2>/dev/null)
     rc1=$?
     # from the repo root: unisacc looks for <stdio.h> under ./include
-    perl -e 'alarm 60; exec @ARGV' "$UA_RUN" -run "$f" one two > "$T/run.out" 2>/dev/null
+    bound 60 "$UA_RUN" -run "$f" one two > "$T/run.out" 2>/dev/null
     rc2=$?
     # argv[0] differs by construction (the source path vs the binary), so a
     # probe that prints it is compared on the rest of its output
@@ -63,7 +62,7 @@ done
 # (arm64 will not run code that is still only in the data cache).
 UTM=/Applications/UTM.app/Contents/MacOS/utmctl; VM=${WINVM:-minicon-win-arm-64}
 if [ -x "$UTM" ] && "$UTM" status "$VM" 2>/dev/null | grep -q started \
-   && perl -e 'alarm 20; exec @ARGV' "$UTM" exec "$VM" --cmd cmd.exe -- /c echo up >/dev/null 2>&1; then
+   && bound 20 "$UTM" exec "$VM" --cmd cmd.exe -- /c echo up >/dev/null 2>&1; then
     n=$(date +%s)$RANDOM
     for t in win/arm64 win/x86_64; do
         tt=$(echo "$t" | tr / _)
