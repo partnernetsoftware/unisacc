@@ -6,6 +6,10 @@ subset unisacc compiles, and it is standalone. It is not part of the compiler.
 
     construct [-d] weights/gold/prec.tsv
     python3 iterate/construct/tools/netdump.py [-d] weights/gold/prec.tsv
+    construct -u out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
+    python3 iterate/construct/tools/uns2slice.py ref.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
+    python3 iterate/construct/tools/uns2slice.py --shipped out.uns2 weights/built.uns2
+    python3 iterate/construct/tools/uns2round.py out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
 
 Both print the same canonical text. It holds the fields of `intnet.to_dict` in
 that function's order: `stage`, `H`, `offs`, `b1`, the head with its classes,
@@ -22,23 +26,49 @@ it occurs:
 `check.sh [ua]` runs the whole comparison. Run it from the repo root. Every step
 has an alarm.
 
-## What is proven (checked byte for byte, 2026-09-25, at 8d4011c)
+## What is proven (2026-09-25; `check.sh`, cc -O2 and unisacc -O2 osx/arm64)
 
-| stage | cc -O2 build | unisacc -O2 build (osx/arm64) |
-|---|---|---|
-| prec  | identical to netdump.py, with `-d` (855 B) | identical (855 B) |
-| reloc | identical to netdump.py, with `-d` (348 B) | identical (348 B) |
+Four separate ledgers.  One passing does not imply another.
 
-- Semantics: `construct` runs the integer kernel over every key of the full
-  original domain (19 keys for prec, 6 for reloc). For each key it requires a
-  unique argmax equal to the TSV label, and it exits 1 otherwise.
-  `exact <keys>` is printed only when that check passes.
-- The reader enforces the contract of `tsvgold.load_stage`. It checks
-  schema-before-header, the exact header, column counts, keys inside their
-  fields, labels inside their head's classes, no repeated key, full cover of
-  the product, and unique names, values and classes. `check.sh` damages
-  prec.tsv in five ways (missing row, duplicate row, bad label, extra column,
-  bad key). Both builds reject every copy with exit 1.
+1. **Canonical-dump identity.**  `construct -d` equals `netdump.py -d`,
+   byte for byte: prec 855 B, reloc 348 B, for both builds.
+2. **UNS2 byte identity.**  `construct -u out.uns2 prec.tsv reloc.tsv`
+   writes the UNS2 blob of just those stages (16 B header, sections in
+   sorted name order, as `uns2.dump` does).  Two comparisons:
+   - the whole blob (146 B) against `tools/uns2slice.py`, which writes
+     `uns2.dump` of the Python nets built by
+     `intnet.build(stages=tsvgold.load_all(...))`: raw bytes identical, both
+     builds;
+   - each stage section against the section of the same name in the shipped
+     `weights/built.uns2`, located by walking the format's length fields:
+     prec 83 B and reloc 47 B identical, both builds.  The 16 B header is
+     not compared with the shipped one (nStages and nUnits differ by
+     construction).
+3. **Deployed-semantics round trip.**  `tools/uns2round.py` decodes the
+   C-written blob with the deployment loader, `uns2.load` (which derives b1
+   from W1 rather than reading it), and runs `IntNet.predict`, the deployed
+   arithmetic (a unit adds its W2 once when `hit + b1 > 0`), on every key of
+   the original domain from the TSV (19 prec, 6 reloc) and every head.  Each
+   answer equals the TSV label, and the logits (summed by predict's rule)
+   have a unique maximum.  Both builds.
+   Before any of that, `construct` itself checks the two **deployment
+   invariants** over the full original domain: every hidden activation is
+   0 or 1, and `b1 = 1 - (fields the unit's W1 touches)`.  A violation exits
+   3 with `deployment invariant broken`.  (No input in this slice violates
+   them, so that exit path has not been exercised.)
+4. **Trust caveat.**  Ledgers 1 and 2 compare against Python and do not
+   depend on the C verifier.  The C verifier and invariant checks in the
+   unisacc build are trusted only as far as unisacc is: an earlier unisacc
+   miscompilation of `b1` passed the C semantic check and was caught only by
+   the byte comparison.  Ledger 3 runs in Python, so it does not share that
+   caveat.
+
+The reader enforces the contract of `tsvgold.load_stage`: schema before
+header, the exact header, column counts, keys inside their fields, labels
+inside their head's classes, no repeated key, full cover of the product, and
+unique names, values and classes.  `check.sh` damages prec.tsv in five ways
+(missing row, duplicate row, bad label, extra column, bad key), and both
+builds reject every copy with exit 1 and the matching diagnostic.
 
 ## What is not proven
 
@@ -47,9 +77,8 @@ has an alarm.
   constructor refuses any stage with `nh != 1`. The capacity is at most 3
   fields and at most 62 quotient keys, because each key set is one `long`
   bitmask.
-- The UNS2 bytes. The canonical dump lists everything `uns2.dump` reads, but
-  no UNS2 writer exists in C yet, and this slice does not compare against
-  `weights/built.uns2`.
+- UNS2 for any stage other than prec and reloc, and the full
+  `built.uns2` (header over all 18 stages).
 - The factored path (T5, `rep_factored`). It is ported and it runs for reloc,
   but neither stage selects a factored representation (both are `dlist`).
   The dumps show only the chosen representation, so the factored candidates
@@ -60,12 +89,6 @@ has an alarm.
   things are recorded separately: the nets' outputs agree on the whole
   domain; the constructed representation is identical byte for byte; and
   the verifier is trusted only as far as the compiler that built it.
-- Deployment semantics.  The C verifier computes `hv * W2`, while the
-  deployed IntNet adds a unit's W2 once when its activation is > 0.  They
-  agree only if every hidden activation is 0 or 1 and `b1 = 1 - (number of
-  constrained fields)`.  These construction invariants are NOT yet checked
-  explicitly; before a UNS2 writer, check them over the whole domain and
-  check the encode/decode round trip against the deployed arithmetic.
 - Capacity.  A key set is one `long`, so a stage may have at most 62
   quotient keys.  This limits which stages can be ported independently of
   the multi-head work; the list of stages over the limit is not made yet.

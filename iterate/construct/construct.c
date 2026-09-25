@@ -6,6 +6,10 @@
  * part of the compiler.
  *
  *   construct [-d] weights/gold/prec.tsv
+ *   construct -u out.uns2 weights/gold/prec.tsv weights/gold/reloc.tsv
+ *
+ * -u writes the UNS2 blob (unisa/uns2.py dump) of the stages given.  Every
+ * mode checks the deployment invariants over the full domain (exit 3).
  *
  * -d adds the intermediate dumps (quotient groups, decision list with ranks,
  * chosen units) so a divergence can be located at its first step.
@@ -702,16 +706,13 @@ int w1(int i, int v, int j) {
     return (int)((ucube[j][i] >> grp[i][v]) & 1);
 }
 
-int main(int argc, char **argv) {
-    int ai, k, j, pi, mg, i, u, c, s0, s1, a, b, chosen, found, v, arg, cntmx, bad, lim;
-    long z[MAXC], mx, mn, mxlog, hv;
-    char *path = 0;
-    dbg = 0;
-    for (ai = 1; ai < argc; ai = ai + 1) {
-        if (streq(argv[ai], "-d")) dbg = 1;
-        else path = argv[ai];
-    }
-    if (!path) { printf("usage: construct [-d] <stage>.tsv\n"); return 2; }
+long mxlog;
+
+/* Build the net for one gold table: the reader, T1-T5, the net, then the
+   verifier and the deployment invariants over the full original domain. */
+void build(char *path) {
+    int k, j, pi, mg, i, u, c, s0, s1, a, b, chosen, found, v, arg, cntmx, bad, lim, t;
+    long z[MAXC], mx, mn, hv;
     load(path);
     if (nh != 1) die("multi-head stages are not in this slice");
     domain();
@@ -781,6 +782,12 @@ int main(int argc, char **argv) {
         for (j = 0; j < H; j = j + 1) {
             hv = b1[j];
             for (i = 0; i < nf; i = i + 1) hv = hv + w1(i, odigit(k, i), j);
+            /* deployment invariant 1: the deployed IntNet adds W2 once when
+               hv > 0, the verifier adds hv * W2; equal only for hv in {0,1} */
+            if (hv > 1) {
+                printf("construct: %s: deployment invariant broken: unit %d activation %ld on key %d (must be 0 or 1)\n", path, j, hv, k);
+                exit(3);
+            }
             if (hv > 0) for (c = 0; c < ncl[0]; c = c + 1) z[c] = z[c] + hv * W2[j][c];
         }
         mx = z[0]; mn = z[0]; arg = 0;
@@ -794,7 +801,25 @@ int main(int argc, char **argv) {
         for (c = 0; c < ncl[0]; c = c + 1) if (z[c] == mx) cntmx = cntmx + 1;
         if (cntmx != 1 || arg != olab[k][0]) bad = bad + 1;
     }
-    if (bad) { printf("construct: %s: construction not exact (%d wrong)\n", path, bad); return 1; }
+    if (bad) { printf("construct: %s: construction not exact (%d wrong)\n", path, bad); exit(1); }
+    /* deployment invariant 2: uns2.load does not store b1, it derives
+       b1 = 1 - (fields the unit's W1 touches); the net must agree */
+    for (j = 0; j < H; j = j + 1) {
+        t = 0;
+        for (i = 0; i < nf; i = i + 1) {
+            found = 0;
+            for (v = 0; v < nv[i]; v = v + 1) if (w1(i, v, j)) found = 1;
+            t = t + found;
+        }
+        if (b1[j] != 1 - t) {
+            printf("construct: %s: deployment invariant broken: unit %d has b1 %d, 1 - constrained fields is %d\n", path, j, b1[j], 1 - t);
+            exit(3);
+        }
+    }
+}
+
+void canon(void) {
+    int i, j, c, v;
     /* the canonical form: intnet.to_dict's fields, in its order */
     printf("stage %s\n", sname);
     printf("H %d\n", H);
@@ -819,5 +844,141 @@ int main(int argc, char **argv) {
     }
     printf("maxlogit %ld\n", mxlog);
     printf("exact %d\n", nok);
+}
+
+/* ------------------------------------------------------------- UNS2 ------ */
+/* unisa/uns2.py dump, for the stages given: header 16 B, then per stage in
+   sorted name order: name[16] | h0 H u16 | nf nh u8 | pad u16 | flens u16[]
+   | w1len u32 | W1 bits unit-major | per head: ncl u16 wb u8 pad u8 |
+   len u32 | per unit: count 8 bits, then (class cb bits, weight wb bits).
+   (The docstring of uns2.py says "presence H bits"; the code writes an
+   8-bit count per unit, and the code is what is matched here.) */
+#define MAXS 8
+#define SECSZ 65536
+char sec[MAXS][SECSZ];
+int seclen[MAXS];
+char secname[MAXS][17];
+int secH[MAXS];
+char tmpb[SECSZ];
+int tlen;
+int bacc;
+int bcnt;
+char *cur;
+int clen;
+int ccap;
+
+void outb(int x) {
+    if (clen >= ccap) die("UNS2 section too large");
+    cur[clen] = (char)(x & 255);
+    clen = clen + 1;
+}
+void out16(int x) { outb(x); outb(x >> 8); }
+void out32(int x) { outb(x); outb(x >> 8); outb(x >> 16); outb(x >> 24); }
+
+void tput(long val, int bits) {
+    int i;
+    for (i = bits - 1; i >= 0; i = i - 1) {
+        bacc = (bacc << 1) | (int)((val >> i) & 1);
+        bcnt = bcnt + 1;
+        if (bcnt == 8) {
+            if (tlen >= SECSZ) die("UNS2 section too large");
+            tmpb[tlen] = (char)bacc; tlen = tlen + 1; bacc = 0; bcnt = 0;
+        }
+    }
+}
+void tstart(void) { tlen = 0; bacc = 0; bcnt = 0; }
+void tflush(void) {
+    int i;
+    if (bcnt) { tmpb[tlen] = (char)(bacc << (8 - bcnt)); tlen = tlen + 1; bacc = 0; bcnt = 0; }
+    out32(tlen);
+    for (i = 0; i < tlen; i = i + 1) outb(tmpb[i]);
+}
+
+int bitlen(long x) { int n = 0; while (x) { x = x >> 1; n = n + 1; } return n; }
+
+void section(int s) {
+    int i, j, v, c, n, cb, wb, sl;
+    long mw;
+    cur = sec[s]; clen = 0; ccap = SECSZ;
+    sl = (int)strlen(sname);
+    for (i = 0; i < 16; i = i + 1) {
+        if (i < sl) secname[s][i] = sname[i]; else secname[s][i] = 0;
+        outb(secname[s][i]);
+    }
+    secname[s][16] = 0;
+    secH[s] = H;
+    out16(h0); out16(H); outb(nf); outb(nh); out16(0);
+    for (i = 0; i < nf; i = i + 1) out16(nv[i]);
+    tstart();
+    for (j = 0; j < H; j = j + 1)
+        for (i = 0; i < nf; i = i + 1)
+            for (v = 0; v < nv[i]; v = v + 1) tput(w1(i, v, j), 1);
+    tflush();
+    mw = 0;
+    for (j = 0; j < H; j = j + 1) for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c] > mw) mw = W2[j][c];
+    if (mw == 0) mw = 1;
+    wb = bitlen(mw); if (wb < 1) wb = 1;
+    cb = bitlen(ncl[0] - 1); if (cb < 1) cb = 1;
+    out16(ncl[0]); outb(wb); outb(0);
+    tstart();
+    for (j = 0; j < H; j = j + 1) {
+        n = 0;
+        for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c]) n = n + 1;
+        if (n >= 256) die("a unit has 256 or more W2 entries");
+        tput(n, 8);
+        for (c = 0; c < ncl[0]; c = c + 1) if (W2[j][c]) { tput(c, cb); tput(W2[j][c], wb); }
+    }
+    tflush();
+    seclen[s] = clen;
+}
+
+char hdr[16];
+
+void writeuns2(char *opath, int ns) {
+    FILE *f;
+    int ord[MAXS], i, t, tmp, units = 0;
+    for (i = 0; i < ns; i = i + 1) { ord[i] = i; units = units + secH[i]; }
+    for (i = 1; i < ns; i = i + 1) {
+        t = i;
+        while (t > 0 && strcmp(secname[ord[t - 1]], secname[ord[t]]) > 0) {
+            tmp = ord[t]; ord[t] = ord[t - 1]; ord[t - 1] = tmp; t = t - 1;
+        }
+    }
+    for (i = 1; i < ns; i = i + 1)
+        if (strcmp(secname[ord[i - 1]], secname[ord[i]]) == 0) { printf("construct: a stage is given twice\n"); exit(2); }
+    cur = hdr; clen = 0; ccap = 16;
+    outb('U'); outb('N'); outb('S'); outb('2');
+    outb(1); outb(0); out16(ns); out32(units); out32(0);
+    f = fopen(opath, "wb");
+    if (!f) { printf("construct: cannot write %s\n", opath); exit(2); }
+    fwrite(hdr, 1, 16, f);
+    for (i = 0; i < ns; i = i + 1) fwrite(sec[ord[i]], 1, seclen[ord[i]], f);
+    fclose(f);
+}
+
+int main(int argc, char **argv) {
+    int ai, ns = 0;
+    char *path = 0;
+    char *upath = 0;
+    dbg = 0;
+    for (ai = 1; ai < argc; ai = ai + 1) {
+        if (streq(argv[ai], "-d")) dbg = 1;
+        else if (streq(argv[ai], "-u") && ai + 1 < argc && !upath) { ai = ai + 1; upath = argv[ai]; }
+        else if (upath) {
+            if (ns >= MAXS) { printf("construct: more than %d stages\n", MAXS); return 2; }
+            build(argv[ai]);
+            section(ns);
+            ns = ns + 1;
+        }
+        else path = argv[ai];
+    }
+    if (upath) {
+        if (ns == 0 || path || dbg) { printf("usage: construct -u out.uns2 <stage>.tsv...\n"); return 2; }
+        writeuns2(upath, ns);
+        return 0;
+    }
+    if (!path) { printf("usage: construct [-d] <stage>.tsv | construct -u out.uns2 <stage>.tsv...\n"); return 2; }
+    build(path);
+    canon();
     return 0;
 }

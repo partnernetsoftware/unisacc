@@ -19,6 +19,26 @@ for s in prec reloc; do
         else echo "$s $b DIFFERS"; diff "$T/$s.py" "$T/$s.$b" | head -5; fail=1; fi
     done
 done
+# UNS2: both builds write the prec+reloc blob.  It must equal, RAW BYTES, the
+# blob uns2.dump writes from the Python constructor (uns2slice.py); each
+# stage section must equal the same-named section of the shipped pack; and
+# the blob decoded by the deployment loader (uns2.load + IntNet.predict)
+# must give the TSV label, uniquely, on every key (uns2round.py).  The
+# deployment invariants (activation in {0,1}, b1 = 1 - constrained fields)
+# are checked inside construct over the full domain: a violation exits 3.
+G="weights/gold/prec.tsv weights/gold/reloc.tsv"
+B 60 python3 iterate/construct/tools/uns2slice.py "$T/py.uns2" $G > /dev/null || { echo "uns2 python reference failed"; fail=1; }
+for b in cc ua; do
+    B 30 "$T/c_$b" -u "$T/$b.uns2" $G > "$T/u.$b.out" 2>&1; rc=$?
+    if [ $rc -ne 0 ]; then echo "uns2 $b construct failed (rc $rc): $(head -1 "$T/u.$b.out")"; fail=1; continue; fi
+    echo "invariants $b ok (activation 0/1, b1 = 1 - constrained fields; full domain, prec reloc)"
+    if cmp -s "$T/py.uns2" "$T/$b.uns2"; then echo "uns2 $b identical to uns2.dump ($(wc -c < "$T/py.uns2" | tr -d ' ') B)"
+    else echo "uns2 $b DIFFERS from uns2.dump"; cmp "$T/py.uns2" "$T/$b.uns2" | head -2; fail=1; fi
+    B 60 python3 iterate/construct/tools/uns2slice.py --shipped "$T/$b.uns2" weights/built.uns2 > "$T/s.$b.out" 2>&1 || fail=1
+    sed "s/^/uns2 $b shipped /" "$T/s.$b.out"
+    B 60 python3 iterate/construct/tools/uns2round.py "$T/$b.uns2" $G > "$T/r.$b.out" 2>&1 || fail=1
+    sed "s/^/deployed $b /" "$T/r.$b.out"
+done
 # negative inputs: each damaged copy of prec.tsv must be REJECTED BY THE
 # READER -- exit status exactly 1 and the diagnostic for that damage.  A
 # signal (>128), the watchdog, or any other failure is not a rejection.
