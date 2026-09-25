@@ -49,15 +49,13 @@ STEP_EXPECT="$ROOT/tests/ujs2wasm/step_expect.json"
 for name in arith fact branch f64_arith list setidx dict globals_fold list_f64; do
   src="tests/ujs2wasm/corpus/${name}.ujs"
   echo "-- compile $name via compile.mjs (no python3)"
-  # Fold corpus still needs stage0 for [..] / dict.dot until compiler.ujs v13.
-  log=$(perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
-    node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
+  log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
   echo "$log"
   [ -f "$OUT/${name}.wasm" ] || { echo "FAIL: no wasm for $name"; exit 1; }
   magic=$(head -c 4 "$OUT/${name}.wasm" | od -An -tx1 | tr -d ' \n')
   [ "$magic" = "0061736d" ] || { echo "FAIL: $name not \\0asm ($magic)"; exit 1; }
-  echo "$log" | grep -q '"bridge":"compiler.wasm"' \
-    || { echo "FAIL: fold corpus expects stage0 bridge, got: $log"; exit 1; }
+  echo "$log" | grep -q '"bridge":"compiler_core.wasm"' \
+    || { echo "FAIL: fold corpus expects compiler_core bridge, got: $log"; exit 1; }
   got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm")
   want=$(node -e "const e=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); process.stdout.write(String(e[process.argv[2]]))" "$EXPECT" "$name")
   [ "$got" = "$want" ] || { echo "FAIL: fold $name got=$got want=$want"; exit 1; }
@@ -80,11 +78,15 @@ if perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs tests/ujs2wasm/corpus/str
 fi
 echo "OK subset rejects str.ujs"
 
-echo "-- setidx_globals via compile.mjs + run_step (no python3)"
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+echo "-- setidx_globals via compile.mjs (default core) + run_step (no python3)"
+# Exercise compiler_core → rebuild-main splice (stub NG patch), not stage0 alone.
+comp_json=$(perl -e 'alarm 60; exec @ARGV' env -u UJS_REQUIRE_COMPILER_WASM -u UJS_COMPILER \
   node ujs/compile.mjs \
-  tests/ujs2wasm/step_corpus/setidx_globals.ujs -o "$OUT/setidx_globals.wasm" >/dev/null
-# meta from compile.mjs (core); globals inject list from step_expect
+  tests/ujs2wasm/step_corpus/setidx_globals.ujs -o "$OUT/setidx_globals.wasm")
+echo "$comp_json" | grep -q 'compiler_core.wasm' || {
+  echo "FAIL setidx_globals must use compiler_core.wasm (got: $comp_json)"
+  exit 1
+}
 node -e '
 const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 require("fs").writeFileSync(process.argv[2], JSON.stringify(e.setidx_globals.globals));
@@ -428,5 +430,5 @@ if(!a||!b||a.length!==b.length||!a.every((v,i)=>v===b[i])){
 console.log("OK M3 drone.ujs body≡stage0", a.length);
 ' "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"
 
-echo "ujs2wasm_compiler OK (M2 + M3 v12 · compile.mjs default core · stage2≡stage1)"
+echo "ujs2wasm_compiler OK (M2 + M3 v13 · fold corpus via compiler_core · stage2≡stage1)"
 

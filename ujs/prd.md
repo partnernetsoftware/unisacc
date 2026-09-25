@@ -115,9 +115,17 @@ P1 构造迁 unisacc          可选
 | `compiler.wasm` | len u32 · f64 lex ratio · MEM 128 |
 | 门禁 | **sim+drone body≡stage0** · stage2≡stage1 |
 
-**下一刀**：`compiler.ujs` v13 — `[…]` 字面量 + `dict.dot`，使 fold corpus 也能默认 core。
+**P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm` + `sim.wasm`；`compile.mjs` **默认** core。
 
-**P0（✓ ship）**：Pages/ship 只依赖 `compiler_core.wasm` + `sim.wasm`；`compile.mjs` **默认** core（fold 子集仍 stage0 至 v13）。
+#### M3 v13（✓ `[…]` + `dict.field` · fold corpus on core）
+
+| 件 | 说明 |
+|---|---|
+| `compiler.ujs` | v13：`[e,…]` → MKLIST/BOX/LSET；`.` → SCONST+DOT；`CST[slot]` 区分 dict/f64-list |
+| 门禁 | fold 子集经 **compiler_core**；stage2≡stage1 · sim+drone body≡stage0 |
+| 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
+
+**下一刀**：`setidx_globals` 等 step corpus 默认 core（f64 inject 若仍有类型缝则修 emit）。
 
 #### M3 v12（✓ core→meta · default compile=core）
 
@@ -126,7 +134,6 @@ P1 构造迁 unisacc          可选
 | `compiler.ujs` | v12：`OUT` 尾部名表 + `MG`；供 host 写 `.meta.json` |
 | `compiler_core.wasm` | stage1 入树；`compile.mjs` **默认** |
 | ship | asteroid+drone bridge=`compiler_core.wasm` |
-| 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（fold `[`/`.`） |
 
 #### M2（✓）
 
