@@ -48,10 +48,11 @@
 ## 温故检查（改摘要前过一遍）
 
 - [ ] 两脊命名是否仍分清？
+- [ ] §4 板块表是否仍对齐 `ujs/ARCHITECTURE.md`？
 - [ ] §6.2 探针表是否与 `ujs2wasm_compiler.sh` 循环一致？
 - [ ] Appendix C 陷阱是否仍成立？
-- [ ] HOST_ABI §6 / prd 随身卡是否仍写 ship=`engine.wasm`？
-- [ ] `uxe_ship_js` / `ujs2wasm.sh` 头注释是否标明脊？
+- [ ] UXE 是否仍标「另门」？
+- [ ] 是否误把「下一刀」写成新 bytecode VM，而非 UJS-1_ship / 可移植 wasm 宿主？
 
 ---
 
