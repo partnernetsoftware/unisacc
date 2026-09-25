@@ -26,7 +26,7 @@
 #include <string.h>
 
 #define MAXF 3
-#define MAXV 62
+#define MAXV 128   /* raw values per field: storage only, never a bit index */
 #define MAXH 4
 #define MAXC 32
 #define MAXOK 4096
@@ -246,7 +246,10 @@ void domain(void) {
     nq = 1;
     for (i = 0; i < nf; i = i + 1) {
         nq = nq * ng[i];
-        if (nq > MAXQ) die("more quotient keys than this constructor holds");
+        if (nq > MAXQ) {   /* before any bit(nq) or bit(g): exit 4 */
+            printf("construct: %s: capacity: %d quotient keys so far, more than %d (one long bitmask)\n", gpath, nq, MAXQ);
+            exit(4);
+        }
     }
     for (j = 0; j < nq; j = j + 1) {
         t = j;

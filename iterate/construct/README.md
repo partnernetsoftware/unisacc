@@ -97,6 +97,53 @@ not shorter, more than one partition, 3 fields, anything multi-head beyond
 tyinfo.  Patch units are not visible in the trace.  Invariant negatives
 (`-T bias`, `-T act`) fire on all five, both builds.
 
+## enc: raw value capacity lifted (2026-09-25)
+
+enc has 3 fields of 73, 3 and 2 raw values, 1 head, 5 classes, 438 keys and
+8 quotient keys.  Only MAXV (raw values per field, was 62) blocked it.
+
+Audit, before the change: every MAXV use and every bit/shift operation, by
+the index that drives it.
+
+| where | what | driven by |
+|---|---|---|
+| `val[MAXF][MAXV]` | value names | raw value |
+| reader `np - 2 > MAXV` | the bound on the above | raw value count |
+| `grp[MAXF][MAXV]` | value -> group (an int, not a mask) | raw value |
+| `gfirst[MAXF][MAXV]` | group -> first value (int) | group (sized by MAXV, ng <= nv) |
+| `qmask[MAXF][MAXV]` | group -> keys, `long` | row: group; bits: quotient key |
+| `ALL = bit(nq)-1`, `qmask |= bit(j)`, `labmask`, `rem >> j`, `resid >> j`, `m[u] >> j`, `cubemask` result | key sets | quotient key |
+| `FULL = bit(ng)-1`, cube `c[i] >> g`, `bit(seed)`, `bit(v)` in expand, `sup |= bit(g)`, `sets = bit(qk)`, `bit(codedigit)`, `w1`: `ucube >> grp[i][v]` | cubes | quotient group (w1 maps a raw value to its group first) |
+| `gcls |= bit(qlab)`, `rankset`, `s >> c`, `wmask >> i`, `bit(crank)`, `cmpset` | class sets | class / class rank |
+| `bit(lv)`, `bit(k+1-i)`, `bit(k+2)` (`lv <= 60` checked) | W2 weights | rank |
+| `popc`, `bitlen` | counts | value being counted |
+| `out16/out32 >>`, `tput`, `bacc <<` | UNS2 bytes/bits | byte/bit position; W1 bits are written one per raw value (`tput(w1(i,v,j), 1)`), not as a mask |
+
+No path shifts by a raw value index; no raw-indexed 64-bit mask exists.
+Every group bitset is bounded because ng[i] <= nq (each field has >= 1
+group) and nq <= MAXQ is checked before any `bit(nq)` or `bit(ng)`.
+
+Change: `MAXV 62 -> 128` (storage only).  MAXQ, MAXR, MAXC, MAXH, MAXS,
+rank bound and every other stage untouched.  The quotient check now exits
+**4** (new code, capacity) with `capacity: <n> quotient keys so far, more
+than 62 (one long bitmask)`, instead of the generic exit 1.
+
+Results, both builds (cc -O2, unisacc -O2 osx/arm64): -d 1510 B identical;
+UNS2 115 B raw-identical to uns2slice.py; section 99 B identical to the
+shipped one; round trip 438 keys, unique argmax = TSV label; invariants
+hold; -T bias and -T act exit 3.
+
+Trace (`-t`, identical on both builds): 1 candidate, chose 0 (dlist), 5
+units; T5 **4 partitions** (first stage with more than one), 40
+rep_factored calls, **40 None**, 0 not shorter, 0 kept.  First time: 3
+fields, more than one partition.  Still not exercised: a candidate dropped
+as not shorter.
+
+Capacity negative: check.sh builds a table from a temp copy of regmap.tsv
+(fields of 9 and 7 values, label class[(7a+b) % 16], no two slices equal,
+so 63 quotient keys).  Both builds exit exactly 4 with the capacity
+diagnostic; check.sh accepts nothing else.
+
 ## What is not proven
 
 - The other 14 stages.  They are not attempted.  The capacity is at most 3

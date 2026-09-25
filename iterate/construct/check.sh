@@ -11,7 +11,7 @@ B() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 fail=0
 B 60 cc -std=c99 -O2 -w -o "$T/c_cc" iterate/construct/construct.c || { echo "cc build failed"; exit 1; }
 B 60 "$UA" -O2 iterate/construct/construct.c -b osx/arm64 -o "$T/c_ua" || { echo "unisacc build failed"; exit 1; }
-for s in prec reloc tyinfo regmap pp lex scope pfconv binsel; do
+for s in prec reloc tyinfo regmap pp lex scope pfconv binsel enc; do
     B 60 python3 iterate/construct/tools/netdump.py -d "weights/gold/$s.tsv" > "$T/$s.py" || fail=1
     for b in cc ua; do
         B 30 "$T/c_$b" -d "weights/gold/$s.tsv" > "$T/$s.$b" || fail=1
@@ -47,11 +47,11 @@ uns2 single weights/gold/prec.tsv weights/gold/reloc.tsv
 uns2 multi weights/gold/tyinfo.tsv
 uns2 regmap weights/gold/regmap.tsv
 # acceptance batch: one blob per stage (single-stage packs; MAXS is 8)
-for s in pp lex scope pfconv binsel; do uns2 $s weights/gold/$s.tsv; done
+for s in pp lex scope pfconv binsel enc; do uns2 $s weights/gold/$s.tsv; done
 # the multi-head branch trace (-t): which candidate each head chose, whether
 # pick moved, what T4 did.  A debug print, not compared with Python (the
 # counts were cross-checked once by hand); the two builds must agree.
-for s in tyinfo regmap pp lex scope pfconv binsel; do
+for s in tyinfo regmap pp lex scope pfconv binsel enc; do
     for b in cc ua; do B 30 "$T/c_$b" -t weights/gold/$s.tsv > "$T/t.$b" 2>&1 || fail=1; done
     if cmp -s "$T/t.cc" "$T/t.ua"; then sed "s/^/$s /" "$T/t.cc"; else echo "$s trace differs between builds"; fail=1; fi
 done
@@ -78,11 +78,28 @@ for c in "missing|keys do not cover" "duplicate|key repeats" "badlabel|not a cla
         fi
     done
 done
+# capacity: a synthetic table whose QUOTIENT has 63 keys (> MAXQ 62) must be
+# rejected before any bitmask is built: exit exactly 4 and the capacity
+# diagnostic.  Made from a temp copy of regmap.tsv (its #head line and 16
+# classes): fields of 9 and 7 values, label class[(7a+b) % 16], so no two
+# values of a field have the same slice and nothing merges: 9 x 7 = 63.
+cp weights/gold/regmap.tsv "$T/cap.src"
+awk -F'	' 'NR==1{print "# stage capq: 63 keys, synthetic"; next}
+/^#head/{print "#field\ta\tv0\tv1\tv2\tv3\tv4\tv5\tv6\tv7\tv8"; print "#field\tb\tw0\tw1\tw2\tw3\tw4\tw5\tw6"; print; for(i=4;i<=NF;i++) c[i-4]=$i; print "a\tb\t=> y"
+  for(a=0;a<9;a++) for(b=0;b<7;b++) print "v" a "\tw" b "\t" c[(7*a+b)%16]; exit}' "$T/cap.src" > "$T/capq.tsv"
+for b in cc ua; do
+    B 30 "$T/c_$b" "$T/capq.tsv" > "$T/capq.$b.out" 2>&1; rc=$?
+    if [ $rc -eq 4 ] && grep -q "capacity: 63 quotient keys" "$T/capq.$b.out"; then
+        echo "capacity negative $b rejected: $(head -1 "$T/capq.$b.out")"
+    else
+        echo "capacity negative $b NOT A CAPACITY REJECTION (rc $rc): $(head -1 "$T/capq.$b.out")"; fail=1
+    fi
+done
 # the deployment invariants must be able to fire: the test entry breaks b1
 # of unit 0 (-T bias), or breaks it and skips invariant 2 (-T act) so that
 # invariant 1 is the one reached.  Only exit 3 with that invariant's
 # diagnostic counts.
-for s in prec tyinfo regmap pp lex scope pfconv binsel; do
+for s in prec tyinfo regmap pp lex scope pfconv binsel enc; do
 for c in "bias|has b1" "act|activation"; do
     t=${c%%|*}; want=${c#*|}
     for b in cc ua; do
