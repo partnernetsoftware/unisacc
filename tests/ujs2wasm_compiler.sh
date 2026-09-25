@@ -19,11 +19,6 @@ done
 if [ -z "$COMPILER_WASM" ]; then
   echo "FAIL: no compiler.wasm (M2/M3 product artifact required)"
   echo "build: ./ujs/seed/stage0/build-compiler-wasm.sh"
-  echo "scaffold escape only: UJS_ALLOW_MISSING_COMPILER_WASM=1 (counts as skip, not pass)"
-  if [[ "${UJS_ALLOW_MISSING_COMPILER_WASM:-}" == "1" ]]; then
-    echo "SKIP ujs2wasm_compiler (UJS_ALLOW_MISSING_COMPILER_WASM=1)"
-    exit 0
-  fi
   exit 1
 fi
 
@@ -105,6 +100,43 @@ echo "-- v17 str bounds (accept + reject; stage0/core recorded separately)"
 # Literal 0–7 ASCII / no escapes ≠ concat results may exceed 7 (two contracts).
 # Expects: tests/ujs2wasm/str_bounds_expect.json (hand-authored; not from either compiler).
 BOUNDS_EXPECT="$ROOT/tests/ujs2wasm/str_bounds_expect.json"
+
+# Classify a failed compile attempt. Only "parse_reject" counts as the expected
+# negative for short-str bounds. Timeout/signal/crash/runtime-trap/wrote-wasm
+# must NOT be reported as OK reject.
+# Usage: classify_compile_outcome <ec> <errfile> <outwasm> → prints class to stdout
+classify_compile_outcome() {
+  local ec="$1" err="$2" wasm="$3"
+  if [ "$ec" -eq 0 ]; then echo accept; return; fi
+  if [ "$ec" -ge 128 ]; then echo timeout_or_signal; return; fi
+  if [ -f "$wasm" ]; then
+    local magic
+    magic=$(head -c 4 "$wasm" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)
+    if [ "$magic" = "0061736d" ]; then echo wrote_wasm; return; fi
+  fi
+  if [ ! -s "$err" ]; then echo empty_diag; return; fi
+  if grep -qiE 'RuntimeError|wasm trap|segmentation|SIG(SEGV|ABRT|BUS)|alarm|timed? out' "$err"; then
+    echo runtime_or_timeout_diag; return
+  fi
+  # Expected CLI parse/compile reject from compile.mjs / stage0
+  if [ "$ec" -eq 1 ] && grep -qE '^compile:' "$err"; then
+    echo parse_reject; return
+  fi
+  echo other_nonzero
+}
+
+# Assert outcome is parse_reject; otherwise FAIL with class name.
+require_parse_reject() {
+  local label="$1" ec="$2" err="$3" wasm="$4"
+  local cls
+  cls=$(classify_compile_outcome "$ec" "$err" "$wasm")
+  if [ "$cls" != "parse_reject" ]; then
+    echo "FAIL: $label expected parse_reject got class=$cls ec=$ec"
+    echo "--- diag ---"; cat "$err" 2>/dev/null || true; echo "---"
+    exit 1
+  fi
+}
+
 for name in str_empty str_lit7 str_cat_long; do
   want=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String(e.accept[process.argv[2]]))' "$BOUNDS_EXPECT" "$name")
   src="tests/ujs2wasm/corpus/${name}.ujs"
@@ -140,43 +172,64 @@ for neg in str_lit8 str_escape str_nonascii str_lit8_rhs; do
   perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" >"$OUT/${neg}_core.err" 2>&1
   ec=$?
   set -e
-  [ "$ec" -ne 0 ] || { echo "FAIL: core should reject $neg (exit 0)"; exit 1; }
-  [ "$ec" -lt 128 ] || { echo "FAIL: core reject $neg signal/timeout ec=$ec"; exit 1; }
-  if [ -f "$OUT/${neg}.wasm" ]; then
-    magic=$(head -c 4 "$OUT/${neg}.wasm" | od -An -tx1 | tr -d ' \n' || true)
-    [ "$magic" != "0061736d" ] || { echo "FAIL: core wrote \\0asm for reject $neg"; exit 1; }
-  fi
-  grep -qiE 'compile|bad primary|fail' "$OUT/${neg}_core.err" \
-    || { echo "FAIL: core reject $neg missing compile-fail text"; cat "$OUT/${neg}_core.err"; exit 1; }
+  require_parse_reject "core $neg" "$ec" "$OUT/${neg}_core.err" "$OUT/${neg}.wasm"
   set +e
   perl -e 'alarm 30; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
     node ujs/compile.mjs "$src" -o "$OUT/${neg}_s0.wasm" >"$OUT/${neg}_s0.err" 2>&1
   ec0=$?
   set -e
-  [ "$ec0" -ne 0 ] || { echo "FAIL: stage0 should reject $neg (exit 0)"; exit 1; }
-  [ "$ec0" -lt 128 ] || { echo "FAIL: stage0 reject $neg signal/timeout ec=$ec0"; exit 1; }
-  if [ -f "$OUT/${neg}_s0.wasm" ]; then
-    magic0=$(head -c 4 "$OUT/${neg}_s0.wasm" | od -An -tx1 | tr -d ' \n' || true)
-    [ "$magic0" != "0061736d" ] || { echo "FAIL: stage0 wrote \\0asm for reject $neg"; exit 1; }
-  fi
-  grep -qiE 'compile|bad primary|fail' "$OUT/${neg}_s0.err" \
-    || { echo "FAIL: stage0 reject $neg missing compile-fail text"; cat "$OUT/${neg}_s0.err"; exit 1; }
-  echo "OK reject $neg core_ec=$ec stage0_ec=$ec0 (compile-fail, no \\0asm)"
+  require_parse_reject "stage0 $neg" "$ec0" "$OUT/${neg}_s0.err" "$OUT/${neg}_s0.wasm"
+  echo "OK reject $neg class=parse_reject core_ec=$ec stage0_ec=$ec0"
 done
+
+echo "-- reject classifier fault-injection (timeout/crash must NOT pass as parse_reject)"
+FI="$OUT/fault_inject"
+mkdir -p "$FI"
+# Simulated outcomes — no real 30s wait.
+printf '' >"$FI/empty.err"
+printf 'compile: bad primary\n' >"$FI/parse.err"
+printf 'WebAssembly.RuntimeError: unreachable\n' >"$FI/trap.err"
+printf '\0asm' >"$FI/fake.wasm" 2>/dev/null || printf '\x00asm' >"$FI/fake.wasm"
+# Make a real \\0asm magic header
+printf '\x00asm\x01\x00\x00\x00' >"$FI/realish.wasm"
+cls=$(classify_compile_outcome 1 "$FI/parse.err" "$FI/missing.wasm")
+[ "$cls" = "parse_reject" ] || { echo "FAIL: inject parse_reject got $cls"; exit 1; }
+cls=$(classify_compile_outcome 142 "$FI/empty.err" "$FI/missing.wasm")
+[ "$cls" = "timeout_or_signal" ] || { echo "FAIL: inject timeout got $cls"; exit 1; }
+cls=$(classify_compile_outcome 139 "$FI/parse.err" "$FI/missing.wasm")
+[ "$cls" = "timeout_or_signal" ] || { echo "FAIL: inject SIGSEGV-class got $cls"; exit 1; }
+cls=$(classify_compile_outcome 1 "$FI/trap.err" "$FI/missing.wasm")
+[ "$cls" = "runtime_or_timeout_diag" ] || { echo "FAIL: inject RuntimeError got $cls"; exit 1; }
+cls=$(classify_compile_outcome 1 "$FI/parse.err" "$FI/realish.wasm")
+[ "$cls" = "wrote_wasm" ] || { echo "FAIL: inject wrote_wasm got $cls"; exit 1; }
+cls=$(classify_compile_outcome 1 "$FI/empty.err" "$FI/missing.wasm")
+[ "$cls" = "empty_diag" ] || { echo "FAIL: inject empty_diag got $cls"; exit 1; }
+cls=$(classify_compile_outcome 2 "$FI/parse.err" "$FI/missing.wasm")
+[ "$cls" = "other_nonzero" ] || { echo "FAIL: inject other_nonzero (ec=2) got $cls"; exit 1; }
+# require_parse_reject must FAIL (exit) on timeout class — run in subshell
+if ( require_parse_reject "inject-timeout" 142 "$FI/empty.err" "$FI/missing.wasm" ) >/dev/null 2>&1; then
+  echo "FAIL: require_parse_reject accepted timeout"; exit 1
+fi
+if ( require_parse_reject "inject-trap" 1 "$FI/trap.err" "$FI/missing.wasm" ) >/dev/null 2>&1; then
+  echo "FAIL: require_parse_reject accepted RuntimeError"; exit 1
+fi
+echo "OK fault-inject: timeout/signal/trap/wrote_wasm/empty/other ≠ parse_reject"
 
 echo "-- product gate iso: missing compiler.wasm / REQUIRE_TINYVM (shared tree intact)"
 ISO="$OUT/iso_gate"
 mkdir -p "$ISO"
+# Extract early checks from this script into an isolated copy without shared wasm.
+# Bare directory: no compiler.wasm → must exit 1 (no SKIP escape).
 cat > "$ISO/probe_missing.sh" <<'PROB'
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 COMPILER_WASM=""
-for cand in ujs/core/compiler.wasm ujs/compiler.wasm; do
+for cand in ujs/core/compiler.wasm ujs/compiler.wasm ujs/uxe/ship/compiler.wasm; do
   if [ -f "$ROOT/$cand" ]; then COMPILER_WASM="$cand"; break; fi
 done
 if [ -z "$COMPILER_WASM" ]; then
-  echo "FAIL: no compiler.wasm"
+  echo "FAIL: no compiler.wasm (M2/M3 product artifact required)"
   exit 1
 fi
 echo "unexpected pass"
@@ -189,6 +242,17 @@ mec=$?
 set -e
 [ "$mec" -eq 1 ] || { echo "FAIL: missing-compiler probe exit=$mec want=1"; cat "$ISO/missing.out"; exit 1; }
 grep -q 'FAIL: no compiler.wasm' "$ISO/missing.out" || { echo "FAIL: missing probe message"; cat "$ISO/missing.out"; exit 1; }
+# Prove ALLOW escape is gone from the live gate's missing-artifact branch
+if awk '/if \[ -z "\$COMPILER_WASM" \]/,/^fi$/' "$ROOT/tests/ujs2wasm_compiler.sh" \
+    | grep -q 'exit 0'; then
+  echo "FAIL: missing-compiler.wasm branch still contains exit 0 (skip-as-green)"
+  exit 1
+fi
+if awk '/if \[ -z "\$COMPILER_WASM" \]/,/^fi$/' "$ROOT/tests/ujs2wasm_compiler.sh" \
+    | grep -q 'UJS_ALLOW'; then
+  echo "FAIL: missing-compiler.wasm branch still mentions UJS_ALLOW escape"
+  exit 1
+fi
 set +e
 PATH="/usr/bin:/bin" UJS_REQUIRE_TINYVM=1 bash -c '
   find_tinyvm() { return 1; }
@@ -203,7 +267,7 @@ set -e
 [ "$tec" -eq 1 ] || { echo "FAIL: REQUIRE_TINYVM probe exit=$tec want=1"; cat "$ISO/tv.out"; exit 1; }
 [ -f "$ROOT/ujs/iterate/compiler.wasm" ] || { echo "FAIL: shared compiler.wasm gone"; exit 1; }
 [ -f "$ROOT/ujs/iterate/compiler_core.wasm" ] || { echo "FAIL: shared compiler_core.wasm gone"; exit 1; }
-echo "OK iso probes (missing-compiler + REQUIRE_TINYVM FAIL; shared artifacts intact)"
+echo "OK iso probes (missing-compiler FAIL; no ALLOW escape; REQUIRE_TINYVM FAIL; shared intact)"
 
 echo "-- default compile.mjs → compiler_core (product path)"
 log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
