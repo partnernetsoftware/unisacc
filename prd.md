@@ -998,11 +998,13 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | 步 | 内容 | 判据 | 状态 |
 |---|---|---|---|
-| 1 | .tsv 自带 schema（字段取值和头类别，按顺序）；只读 .tsv 就能构造权重 | `build-weights --from-tsv --check`：UNS2 与 JSON 缓存都和发布版逐字节相同；`tests/tsvbuild.sh` 进 all.sh | **已达**（ee74b8b），18 个阶段，9,124 B，Python 约 20 s |
+| 1 | .tsv 自带 schema（字段取值和头类别，按顺序）；答案只取自 .tsv，不再用 gold.py 的规则计算 | `build-weights --from-tsv --check`：UNS2 原始字节与发布版相同，JSON 缓存按 save_all 写出后与发布文件原始字节相同，缺失或不同都判失败；输入契约拒绝损坏的表（`tests/tsv_contract.py` 五种破坏全部拒绝）；`tests/tsvbuild.sh` 已登记进 all.sh | **已达**（ee74b8b、8d4011c），18 个阶段，9,124 B，Python 约 20 s。**尚未物理脱离 gold.py**：阶段清单与顺序仍取自 gold.ALL，Stage 仍借用 gold.Stage 作容器；C 入口不得暗中依赖这两点，要么由数据声明，要么显式列出 |
 | 2 | 用 unisacc 能编译的 C 子集实现构造器（读 .tsv，写 UNS2），由 unisacc 自己编译 | 18 个阶段的 UNS2 与 Python 逐字节相同；构造器由 unisacc 自编译后结果也相同；每次运行不超过 60 s | 下一步 |
-| 3 | 迭代层从 UNS2 生成内核的 DENSE 表（替代 ckernel.py 的这一段），并做全域核对 | 生成的内核文件与 ckernel.py 的输出逐字节相同；`--check-oracle` 差异为 0 | 待做 |
-| 4 | 闭环：改一张 .tsv，然后只用 unisacc 走完“构造 → 内核 → 编译器 → 自身”，全程无 Python | N1 = N2 = N3；Python 只作为冻结的第二实现做孪生检验 | 待做 |
+| 3 | 迭代层生成 ckernel.py 的**全部**产物，而不只是 DENSE：UNS2 不带字段值和类别名称；C 模型的阶段顺序来自 ALL，而 UNS2 用 sorted(nets)；MODEL 块、词表、维度、词法辅助表、ENCSPEC、头文件与自测用例各有来源。先列一张“产物 ← 来源（TSV / UNS2 / 其余声明数据）”的对照表，再逐项迁移 | 生成的内核文件与 ckernel.py 的输出逐字节相同；`--check-oracle` 差异为 0 | 待做 |
+| 4 | 闭环，先限定为 **schema 不变的表值修改**（不声称任意扩表已闭环）：在隔离环境里真实改一张 .tsv，只用 unisacc 走完“构造 → 内核 → 编译器 → 自身”，全程无 Python | 最终产物随这处修改而改变（不动点本身不能排除偷偷沿用旧权重），并且 N1 = N2 = N3；Python 只作为冻结的第二实现做孪生检验 | 待做 |
 
+工程边界：构造器是迭代层的**独立工具**（`iterate/construct/`），由 unisacc 构建、单独运行，不进编译器每次启动的热路径；ARCHITECTURE.md 在第 2 步落地时相应标注。
+第 2 步的对齐方法：先固定序列化和 tie-break 规则，沿“schema → 商化分组 → cube 与排序 → 权重 → UNS2”找**首次分歧**，不只反复比较最终 blob；字节一致、自举一致、全域语义一致（原始全部键、每个输出头与 TSV 逐项核对）分别记账。
 第 2 步的风险：construct.py 大量使用集合、字典和排序，C 子集里要换成定长数组和显式排序；任何枚举顺序或排序稳定性的差异都会改变权重字节。停止条件：先移植最小的阶段（prec、reloc），做到逐字节相同后再扩展；若某个阶段两次尝试仍无法对齐，就把它记为待办，不为全绿而修改 Python 侧的构造规则。
 
 **K. 抽象、复用与归档（P1，2026-09-25，主人：“解决完速度，下一步梳理代码的抽象与复用”）**
