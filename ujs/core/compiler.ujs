@@ -1,5 +1,5 @@
 // M3 compiler core — real wasm emit aligned with stage0 bodies.
-// v15: v14 + else if (...) (CST=4 wraps nested if; unwind IF2).
+// v16: v15 + ! + &&/|| (i64; IF* + lsc; UNY base3 unary).
 // Host splices OUT[0..OUTN) into RT.
 
 let pos = 0;
@@ -41,7 +41,7 @@ let fbits = 0;
 let fden = 0;
 let fexp = 0;
 let fsc = -1;
-let zzz = -1;
+let lsc = -1;
 let fl = 0;
 let dsc = -1;
 let dpn = 0;
@@ -860,10 +860,24 @@ while (finished == 0) {
                         }
                       }
                       if (fneg == 0) {
-                        // unary minus (stage0 pprim NEG/FNEG); apply at st==2 before postfix
+                        // unary minus — base3 digit 1 in UNY (LIFO)
                         pos = pos + 1;
-                        UNY[bsp - 1] = UNY[bsp - 1] + 1;
+                        UNY[bsp - 1] = UNY[bsp - 1] * 3 + 1;
                         cd = 3;
+                      }
+                    }
+                    if (cd == 0) {
+                      if (ch == 33) {
+                        // unary ! (not !=)
+                        cd = 2;
+                        if (pos + 1 < n) {
+                          if (SRC[pos + 1] == 61) { cd = 0; }
+                        }
+                        if (cd == 2) {
+                          pos = pos + 1;
+                          UNY[bsp - 1] = UNY[bsp - 1] * 3 + 2;
+                          cd = 3;
+                        }
                       }
                     }
                     if (cd == 3) {
@@ -1133,15 +1147,24 @@ while (finished == 0) {
                   }
                 } else {
                   if (st == 2) {
-                    // apply pending unary minus (stage0 OP_NEG / OP_FNEG) before postfix
+                    // apply pending unary - / ! (base3 LIFO in UNY)
                     while (UNY[bsp - 1] > 0) {
-                      UNY[bsp - 1] = UNY[bsp - 1] - 1;
-                      if (ety == 2) {
-                        OPS[opsn] = 154; opsn = opsn + 1;
+                      cd = UNY[bsp - 1] - (UNY[bsp - 1] / 3) * 3;
+                      UNY[bsp - 1] = UNY[bsp - 1] / 3;
+                      if (cd == 1) {
+                        if (ety == 2) {
+                          OPS[opsn] = 154; opsn = opsn + 1;
+                        } else {
+                          OPS[opsn] = 66; opsn = opsn + 1;
+                          OPS[opsn] = 127; opsn = opsn + 1;
+                          OPS[opsn] = 126; opsn = opsn + 1;
+                        }
                       } else {
-                        OPS[opsn] = 66; opsn = opsn + 1;
-                        OPS[opsn] = 127; opsn = opsn + 1;
-                        OPS[opsn] = 126; opsn = opsn + 1;
+                        if (ety != 1) { ok = 0; bsp = 0; }
+                        else {
+                          OPS[opsn] = 80; opsn = opsn + 1;
+                          OPS[opsn] = 173; opsn = opsn + 1;
+                        }
                       }
                     }
                     // binop or index or done
@@ -1301,6 +1324,16 @@ while (finished == 0) {
                           if (SRC[pos + 1] == 61) { op = 82; prec = 5; }
                         }
                       }
+                      if (ch == 38) {
+                        if (pos + 1 < n) {
+                          if (SRC[pos + 1] == 38) { op = 200; prec = 3; }
+                        }
+                      }
+                      if (ch == 124) {
+                        if (pos + 1 < n) {
+                          if (SRC[pos + 1] == 124) { op = 201; prec = 2; }
+                        }
+                      }
                     }
                     if (op == 0) {
                       bsp = bsp - 1;
@@ -1308,6 +1341,53 @@ while (finished == 0) {
                       if (prec < SPR[bsp - 1]) {
                         bsp = bsp - 1;
                       } else {
+                        if (op == 200) {
+                          // && — store LHS; if then RHS (stage0 pand)
+                          if (ety != 1) { ok = 0; bsp = 0; }
+                          else {
+                            if (lsc < 0) {
+                              lsc = kn; KEYS[kn] = 0; LTY[kn] = 126; kn = kn + 1;
+                            }
+                            OPS[opsn] = 33; opsn = opsn + 1;
+                            OPS[opsn] = lsc; opsn = opsn + 1;
+                            OPS[opsn] = 32; opsn = opsn + 1;
+                            OPS[opsn] = lsc; opsn = opsn + 1;
+                            OPS[opsn] = 167; opsn = opsn + 1;
+                            OPS[opsn] = 4; opsn = opsn + 1;
+                            OPS[opsn] = 64; opsn = opsn + 1;
+                            pos = pos + 2;
+                            ST[bsp - 1] = 4;
+                            SOP[bsp - 1] = 200;
+                            ST[bsp] = 1;
+                            SPR[bsp] = prec + 1;
+                            UNY[bsp] = 0;
+                            bsp = bsp + 1;
+                          }
+                        } else {
+                          if (op == 201) {
+                            // || — store LHS; if else RHS (stage0 por)
+                            if (ety != 1) { ok = 0; bsp = 0; }
+                            else {
+                              if (lsc < 0) {
+                                lsc = kn; KEYS[kn] = 0; LTY[kn] = 126; kn = kn + 1;
+                              }
+                              OPS[opsn] = 33; opsn = opsn + 1;
+                              OPS[opsn] = lsc; opsn = opsn + 1;
+                              OPS[opsn] = 32; opsn = opsn + 1;
+                              OPS[opsn] = lsc; opsn = opsn + 1;
+                              OPS[opsn] = 167; opsn = opsn + 1;
+                              OPS[opsn] = 4; opsn = opsn + 1;
+                              OPS[opsn] = 64; opsn = opsn + 1;
+                              OPS[opsn] = 5; opsn = opsn + 1;
+                              pos = pos + 2;
+                              ST[bsp - 1] = 4;
+                              SOP[bsp - 1] = 201;
+                              ST[bsp] = 1;
+                              SPR[bsp] = prec + 1;
+                              UNY[bsp] = 0;
+                              bsp = bsp + 1;
+                            }
+                          } else {
                         if (op == 87) { pos = pos + 2; }
                         else {
                           if (op == 89) { pos = pos + 2; }
@@ -1335,6 +1415,8 @@ while (finished == 0) {
                         SPR[bsp] = prec + 1;
                         UNY[bsp] = 0;
                         bsp = bsp + 1;
+                          }
+                        }
                       }
                     }
                     }
@@ -1343,6 +1425,33 @@ while (finished == 0) {
                       op = SOP[bsp - 1];
                       lx = op / 256;
                       op = op - lx * 256;
+                      if (op == 200) {
+                        // && finish: store RHS; else; end; load
+                        if (ety != 1) { ok = 0; bsp = 0; }
+                        else {
+                          OPS[opsn] = 33; opsn = opsn + 1;
+                          OPS[opsn] = lsc; opsn = opsn + 1;
+                          OPS[opsn] = 5; opsn = opsn + 1;
+                          OPS[opsn] = 11; opsn = opsn + 1;
+                          OPS[opsn] = 32; opsn = opsn + 1;
+                          OPS[opsn] = lsc; opsn = opsn + 1;
+                          ety = 1; elem_f = 0;
+                          ST[bsp - 1] = 2;
+                        }
+                      } else {
+                        if (op == 201) {
+                          // || finish: store RHS; end; load
+                          if (ety != 1) { ok = 0; bsp = 0; }
+                          else {
+                            OPS[opsn] = 33; opsn = opsn + 1;
+                            OPS[opsn] = lsc; opsn = opsn + 1;
+                            OPS[opsn] = 11; opsn = opsn + 1;
+                            OPS[opsn] = 32; opsn = opsn + 1;
+                            OPS[opsn] = lsc; opsn = opsn + 1;
+                            ety = 1; elem_f = 0;
+                            ST[bsp - 1] = 2;
+                          }
+                        } else {
                       fl = 0;
                       if (ety == 2) { fl = 1; }
                       if (elem_f == 1) { fl = 1; }
@@ -1455,6 +1564,8 @@ while (finished == 0) {
                         }
                       }
                       ST[bsp - 1] = 2;
+                        }
+                      }
                     } else {
                       if (st == 5) {
                         // after list(expr) expect )
