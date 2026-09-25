@@ -117,9 +117,9 @@ UJS cites these by reference. **B’s extra P-2 obligation:** each new *table* s
 
 **UJS-1 (spec):** values `null | bool | i64 | f64 | str | list | dict | fn | tup`; locals → lexical outer → globals; permanent reject outside tables (no `eval`, prototypes, `this`/`new`/`class`, async, RegExp engine). Full clause table: `ujs/prd.md` / `archive/prd-v1.0.md`.
 
-**UJS-1_ship (M3 / Pages path, as of compiler v17):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **short string literals + concat + return**, globals inject / `host_*` / `run_step`.
+**UJS-1_ship (M3 / Pages path, as of compiler v18):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **ASCII string literals 0–255 + concat + return**, globals inject / `host_*` / `run_step`.
 
-**Short-str literal bound (v17):** each `"…"` literal is **0–7 bytes of ASCII** with **no escapes** (`\` rejected; bytes >127 rejected). The bound is on the **literal**, not on concat results (`"hello" + " world"` may be 11 bytes). **Still out of M3 ship:** general long literals / `fn`, baked gold/catalog, whole-module ≡ full Python `emit_wasm` (see `ujs/prd.md` M2 residual).
+**Str literal bound (v18):** each `"…"` literal is **0–255 bytes of ASCII** with **no escapes** (`\` rejected; bytes >127 rejected). Length ≥256 rejected. The bound is on the **literal**, not on concat results. **Still out of M3 ship:** general `fn`, escapes/UTF-8, baked gold/catalog, whole-module ≡ full Python `emit_wasm` (see `ujs/prd.md` M2 residual).
 
 Papers and release notes must say **which** face is meant.
 
@@ -177,7 +177,7 @@ Exercised by `ujs2wasm_compiler.sh` with bridge forced to core (names ⊂ `tests
 | `unary_minus` | unary `-` | 3 |
 | `elseif` | else-if | 20 |
 | `logic` | `!` · `&&` · `||` (i64) | 7 |
-| `str` | short lit (≤7 ASCII, no escapes) + concat + return | `hello ujs` |
+| `str` | lit 0–255 ASCII, no escapes + concat + return | `hello ujs` |
 
 Plus `setidx_globals` (host inject + `run_step`) and Asteroid/drone ship emit without `python3`.  
 **Not** on the core gate today (still construct / full emit): e.g. `arrow`, `forof`, `ternary`, `nullish`, `blockarrow`, `sum`, `switch`, `setidx_loop`—presence in `expect.json` must not be read as UJS-1_ship coverage. Short-str **literals** are on core; **general long literals / `fn`** are not.
@@ -233,7 +233,7 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 |---|---|
 | “Web compiler = table network” | M3 is classical subset + twin-tests; IntNet lives on construct spine |
 | “language gate = only `ujs2wasm_compiler`” | Layered: `ujs.sh` + compiler + `uxe_ship_js`; UXE separate |
-| “UJS-1 done because v17 green” | UJS-1_ship ⊂ UJS-1; long `str`/`fn`/… still construct-side |
+| “UJS-1 done because v18 green” | UJS-1_ship ⊂ UJS-1; `fn`/escapes/UTF-8/… still construct-side |
 | “B re-proves IntNet” | [cite A] only; B has no UJS Lean |
 | “`web-build` is the ship path” | path-A residual; P0 ship uses `compiler_core` + `sim.wasm` |
 | “HOST_ABI / prd still say engine.wasm ships” | Was stale; living docs now: ship = `sim.wasm` + Host; `ujs_full` optional |

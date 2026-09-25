@@ -73,12 +73,12 @@ if [[ -n "$TINYVM" ]]; then
   echo "OK tinyvm validate fold corpus"
 fi
 
-echo "-- v17 str bounds (accept + reject; stage0/core recorded separately)"
-# Literal 0–7 ASCII / no escapes ≠ concat results may exceed 7 (two contracts).
+echo "-- v18 str bounds (accept + reject; stage0/core recorded separately)"
+# Literal 0–255 ASCII / no escapes ≠ concat results (two contracts).
 # Expects: tests/ujs2wasm/str_bounds_expect.json (hand-authored; not from either compiler).
 BOUNDS_EXPECT="$ROOT/tests/ujs2wasm/str_bounds_expect.json"
 
-for name in str_empty str_lit7 str_cat_long; do
+for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long; do
   want=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String(e.accept[process.argv[2]]))' "$BOUNDS_EXPECT" "$name")
   src="tests/ujs2wasm/corpus/${name}.ujs"
   if ! perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >"$OUT/${name}_core.compile.log" 2>&1; then
@@ -106,7 +106,7 @@ for name in str_empty str_lit7 str_cat_long; do
   [ "$got0" = "$want" ] || { echo "FAIL: $name stage0 exec got!=hand expect"; exit 1; }
   echo "OK $name core_compile=ok stage0_compile=ok core_exec=ok stage0_exec=ok"
 done
-for neg in str_lit8 str_escape str_nonascii str_lit8_rhs; do
+for neg in str_lit256 str_escape str_nonascii; do
   src="tests/ujs2wasm/neg/${neg}.ujs"
   rm -f "$OUT/${neg}.wasm" "$OUT/${neg}_s0.wasm"
   set +e
@@ -570,5 +570,5 @@ if [[ -n "$TINYVM" ]]; then
   echo "OK tinyvm validate sim+drone"
 fi
 
-echo "ujs2wasm_compiler OK (M2 + M3 v17 · fold corpus via compiler_core · stage2≡stage1 · tinyvm validate optional)"
+echo "ujs2wasm_compiler OK (M2 + M3 v18 · fold corpus via compiler_core · stage2≡stage1 · tinyvm validate optional)"
 

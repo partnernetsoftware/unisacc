@@ -1,7 +1,7 @@
 /* M2/M3 stage0 (C): UJS-1_ship → \\0asm inside this module.
  * Build: ujs/seed/stage0/build-compiler-wasm.sh → ujs/iterate/compiler.wasm
  * Product default is stage1 core (compiler.ujs), not this file alone.
- * Cover (aligned v17): v16 + short str lit (≤7 ASCII) · str+str · str return.
+ * Cover (aligned v18): v17 + ASCII str lit 0–255 (no escapes) · str+str · str return.
  * Gaps (UJS-1_ship residual): general long str / fn · baked gold ·
  *   byte-identical vs full Python emit_wasm.
  */
@@ -34,7 +34,7 @@ static char *strncpy(char *d, const char *s, uint32_t n) {
 
 enum { TAG_I64 = 2, TAG_F64 = 3, TAG_STR = 4, TAG_LIST = 5, TAG_DICT = 6,
         HEAP0 = 4096, GBASE = 2048, SCRATCH0 = 1024,
-        HOST_SCRATCH = 950000, MEM_PAGES = 128 };
+        HOST_SCRATCH = 950000, MEM_PAGES = 128, MAXSTRLIT = 255 };
 enum { TY_ERR = 0, TY_I64 = 1, TY_F64 = 2, TY_LIST = 3, TY_DICT = 4, TY_STR = 5 };
 
 static uint8_t  g_heap[256 * 1024];
@@ -144,7 +144,7 @@ enum {
 };
 typedef struct {
   const char *src; uint32_t len, pos;
-  int tok; int64_t num; double fnum; char id[64]; char str[8];
+  int tok; int64_t num; double fnum; char id[64]; char str[256];
 } Lex;
 static int id0(char c) {
   return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c=='_';
@@ -187,7 +187,7 @@ static void next(Lex *L) {
     while (L->pos < L->len && L->src[L->pos] != '"') {
       char ch = L->src[L->pos];
       if (ch == '\\') { L->tok = T_BAD; return; }
-      if (n >= 7) { L->tok = T_BAD; return; }
+      if (n >= MAXSTRLIT) { L->tok = T_BAD; return; }
       if ((uint8_t)ch > 127) { L->tok = T_BAD; return; }
       L->str[n++] = ch;
       L->pos++;
@@ -256,12 +256,13 @@ enum {
   OP_FLT, OP_FGT, OP_FLE, OP_FGE, OP_FEQ, OP_FNE,
   OP_RET, OP_FRET, OP_HRET
 };
-enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32 };
+enum { MAXC = 16384, MAXL = 128, MAXG = 64, MAXN = 32, MAXSDATA = 8192 };
 typedef struct { uint8_t op; int64_t a; } Ins;
 typedef struct {
   Ins code[MAXC]; int nc;
   char names[MAXL][MAXN]; uint8_t lty[MAXL]; uint8_t lety[MAXL]; int nl;
   char gnames[MAXG][MAXN]; uint8_t gty[MAXG]; uint8_t glety[MAXG]; int ng;
+  uint8_t sdata[MAXSDATA]; uint32_t sn; /* string pool for OP_SCONST */
   int scratch; /* i32 temp for list/dict init, or -1 */
   int fscratch; /* f64 temp for i64→f64 under, or -1 */
   int lscratch; /* i64 temp for && / || short-circuit, or -1 */
@@ -272,6 +273,19 @@ typedef struct {
 static int emit(Prog *P, uint8_t op, int64_t a) {
   if (P->nc >= MAXC) { P->err = "code overflow"; return 0; }
   P->code[P->nc].op = op; P->code[P->nc].a = a; P->nc++; return 1;
+}
+/* OP_SCONST a = (pool_off << 16) | len; bytes at P->sdata[off..]. */
+static int emit_sconst_bytes(Prog *P, const char *s, uint32_t n) {
+  if (n > MAXSTRLIT) { P->err = "string too long"; return 0; }
+  if (P->sn + n > MAXSDATA) { P->err = "string pool overflow"; return 0; }
+  uint32_t off = P->sn;
+  for (uint32_t i = 0; i < n; i++) P->sdata[P->sn++] = (uint8_t)s[i];
+  return emit(P, OP_SCONST, ((int64_t)off << 16) | (int64_t)n);
+}
+static int emit_sconst_cstr(Prog *P, const char *s) {
+  uint32_t n = 0;
+  while (s[n]) n++;
+  return emit_sconst_bytes(P, s, n);
 }
 static int loc(Prog *P, const char *name, int create) {
   for (int i = 0; i < P->nl; i++) if (!strcmp(P->names[i], name)) return i;
@@ -321,13 +335,7 @@ static int ensure_lscratch(Prog *P) {
   return P->nl++;
 }
 
-/* pack short ASCII key into int64 (len in low 8 bits, chars in higher bytes) */
-static int64_t pack_key(const char *s) {
-  uint64_t v = 0; uint32_t n = 0;
-  while (s[n] && n < 7) { v |= ((uint64_t)(uint8_t)s[n]) << (8 * (n + 1)); n++; }
-  v |= n;
-  return (int64_t)v;
-}
+/* emit_sconst_* copies into Prog.sdata; OP_SCONST a = off<<16|len. */
 
 static int pexpr(Lex *L, Prog *P);
 static int pstmt(Lex *L, Prog *P);
@@ -360,8 +368,9 @@ static int bin_finish(Prog *P, int ty, int ty2, uint8_t oi, uint8_t of) {
 
 static int pprim(Lex *L, Prog *P) {
   if (L->tok == T_STR) {
-    int64_t key = pack_key(L->str);
-    if (!emit(P, OP_SCONST, key)) return 0;
+    uint32_t n = 0;
+    while (L->str[n]) n++;
+    if (!emit_sconst_bytes(P, L->str, n)) return 0;
     next(L);
     return TY_STR;
   }
@@ -450,11 +459,12 @@ static int pprim(Lex *L, Prog *P) {
     if (!emit(P, OP_STORE, scratch)) return 0;
     for (int i = 0; i < n; i++) {
       if (L->tok != T_ID) { P->err = "dict key"; return 0; }
-      int64_t key = pack_key(L->id);
+      char kbuf[64];
+      strncpy(kbuf, L->id, 63); kbuf[63] = 0;
       next(L);
       if (!expect(L, T_COLON, P, "dict :")) return 0;
       if (!emit(P, OP_LOAD, scratch)) return 0;
-      if (!emit(P, OP_SCONST, key)) return 0;
+      if (!emit_sconst_cstr(P, kbuf)) return 0;
       int vty = pexpr(L, P); if (!vty) return 0;
       if (vty == TY_I64) { if (!emit(P, OP_BOXI, 0)) return 0; }
       else if (vty == TY_F64) { if (!emit(P, OP_BOXF, 0)) return 0; }
@@ -554,7 +564,7 @@ static int ppostfix(Lex *L, Prog *P) {
       if (ty != TY_DICT) { P->err = "dot non-dict"; return 0; }
       next(L);
       if (L->tok != T_ID) { P->err = "dot name"; return 0; }
-      if (!emit(P, OP_SCONST, pack_key(L->id))) return 0;
+      if (!emit_sconst_cstr(P, L->id)) return 0;
       next(L);
       if (!emit(P, OP_DOT, 0)) return 0;
       ty = TY_I64; /* subset: dot yields unboxed i64 (or f64 via tag — i64 for fold) */
@@ -948,11 +958,13 @@ static int emit_ops(Buf *c, Prog *P) {
       if (!bu8(c, 0x10) || !bleu(c, 18)) return 0;
       break;
     case OP_SCONST: {
-      /* pack_key → bytes at SCRATCH0, call mk_str */
+      /* a = (pool_off << 16) | len → bytes at SCRATCH0, call mk_str */
       uint64_t v = (uint64_t)ins->a;
-      uint32_t n = (uint32_t)(v & 0xff);
+      uint32_t n = (uint32_t)(v & 0xffff);
+      uint32_t off = (uint32_t)(v >> 16);
+      if (off + n > P->sn) return 0;
       for (uint32_t i = 0; i < n; i++) {
-        uint8_t ch = (uint8_t)((v >> (8 * (i + 1))) & 0xff);
+        uint8_t ch = P->sdata[off + i];
         if (!bi32(c, (int32_t)(SCRATCH0 + i))) return 0;
         if (!bi32(c, (int32_t)(ch))) return 0;
         if (!bu8(c, 0x3a) || !bu8(c, 0x00) || !bleu(c, 0)) return 0;

@@ -144,6 +144,15 @@ P1 构造迁 unisacc          可选
 | 门禁 | fold **str**→`hello ujs`（及边界回归）；stage2≡stage1 / body≡ = **code `fi===1` mainBody**；sim+drone 同 |
 | 回落 stage0 | `UJS_COMPILER=wasm` 或 `UJS_REQUIRE_COMPILER_WASM=1`（body≡ 对照 / 重建 core） |
 
+#### M3 v18（✓ ASCII 长 lit 0–255 · fold corpus on core）
+
+| 件 | 说明 |
+|---|---|
+| 完成判据 | `"…"` **0–255 ASCII、无转义**；≥256 / `\` / byte>127 → parse reject；stage0 与 core 同 fold 执行；stage2≡stage1；sim+drone body≡；**不开** `fn` / tinyvm execute |
+| `compiler_min.c` | 字面量池 `sdata`；`OP_SCONST a=(off<<16)\|len` → SCRATCH0 写字节 + `mk_str`（与 ≤7 路径同形，仅 len 放宽） |
+| `compiler.ujs` | `DKEY` 256；去掉 lit≤7；`i32.const` len 用正确 LEB（len≥64） |
+| 门禁 | `str_bounds`：accept empty/7/8/32/255/cat；reject 256/escape/nonascii；独立 `str_bounds_expect.json` |
+
 #### Practice twin：tinyvm（✓ 可选 module validate）
 
 | 件 | 说明 |
@@ -152,7 +161,7 @@ P1 构造迁 unisacc          可选
 | 门禁 | `ujs2wasm_compiler.sh`：若找到 `tinyvm`，对 fold + sim/drone 做 `module validate`；`UJS_REQUIRE_TINYVM=1` 时缺二进制 = FAIL |
 | 查找 | `PATH` · `../tinyvm/target/{release,debug}/tinyvm` · `$HOME/repos/tinyvm/...` |
 
-**下一刀**：v17 边界回归收尾后，**只选一个**由编译器/应用推动的缺口（长 lit 或 `fn`），写清输入与完成判据；不同时开 tinyvm 执行层。
+**下一刀**：v18 收尾后，**只选一个**由应用推动的缺口（优先 `fn`），写清输入与完成判据；不同时开 tinyvm 执行层。
 
 #### M3 v15（✓ else-if · fold corpus on core）
 

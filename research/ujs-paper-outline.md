@@ -17,7 +17,7 @@
 
 - **方法迁移（不重证）**：P-8/3/5/1 与 P-2 样板在 A；B 只 [cite A] + 定理名；**无 UJS 专用 Lean**；不暗示 A 卸责自动覆盖 UJS walker / M3。
 - **两条脊**：构造/jtape（表→IntNet）∥ **M3 出货编译器**（手写子集、**mainBody** stage2≡ / body≡）——同纪律、不同产物；勿写成「Web 编译器 = 表网络」。
-- **UJS-1（规格）** vs **UJS-1_ship（M3 已交付面，v17）**：短 str 字面量 0–7 ASCII、无转义（拼接可更长）；缺通用长 lit/`fn` 等须明说。
+- **UJS-1（规格）** vs **UJS-1_ship（M3 已交付面，v18）**：ASCII 字面量 0–255、无转义（拼接可更长）；缺 `fn`/转义/UTF-8 等须明说。
 - **产品面**：Pages/ship · `wasm_run` / UXE；默认 `compiler_core.wasm`；Python 非 ship 必经。
 - **门禁分层**（对齐 prd #4）：`ujs.sh` · `ujs2wasm_compiler.sh` · `uxe_ship_js` · UXE 另门；tinyvm 可选 **validate** 非执行孪生。
 - **验收**：套件名 + 写明比较对象；**不编造数字**。
