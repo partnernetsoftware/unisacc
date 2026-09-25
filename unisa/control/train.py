@@ -2,7 +2,7 @@
 import time
 from .rng import Rng
 from .net import Net
-from .gold import STAGES, ALL, TABLES
+from ..gold import STAGES, ALL, TABLES
 from . import uns1
 
 NET_READY = 0.85      # [F-1]

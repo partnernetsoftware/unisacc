@@ -3,14 +3,14 @@ import argparse
 import os
 import sys
 
-from . import uns1
+from .control import uns1
 from . import catalog as C
 from .driver import compile_file
 from .exec_target import execute
 from .gold import STAGES, ALL
 from .lower import lower, FAULTS
 from .oracle import Oracle
-from .train import train, report, build_nets, SHIP_ACC
+from .control.train import train, report, build_nets, SHIP_ACC
 from .vm import run as vm_run
 
 WEIGHTS = "weights"

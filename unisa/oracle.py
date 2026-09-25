@@ -14,7 +14,7 @@ Hard constraints, both of them load-bearing for the equivalence argument:
 """
 from .gold import STAGES
 from .linalg import argmax
-from .train import NET_READY
+from .control.train import NET_READY
 
 
 def _ablations():

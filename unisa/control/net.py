@@ -11,7 +11,7 @@ combo    : hidden=[48,32],    12 heads, factor=12 bilinear=8, shared W_reg
 """
 import math
 from .rng import Rng
-from .linalg import gemv, gemv_bwd, relu, relu_bwd, argmax, softmax_ce, Adam
+from ..linalg import gemv, gemv_bwd, relu, relu_bwd, argmax, softmax_ce, Adam
 
 
 class Tensor:

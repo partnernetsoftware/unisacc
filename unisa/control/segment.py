@@ -10,7 +10,7 @@ stages from accidentally sharing an embedding row).  Stages of lower arity pad
 with `-`.  Each sample supervises only its own stage's heads, so the segment is
 a masked multi-task net, not a net that must also learn "not applicable".
 """
-from .gold import STAGES
+from ..gold import STAGES
 
 SEGMENTS = {
     "s1": ("pp", "lex"),

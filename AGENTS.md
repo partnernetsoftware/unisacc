@@ -1,5 +1,8 @@
 # Working rules for this repo
 
+For where each file belongs (seed / core tables and weights / self-iterating
+C / generated), see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ## Testing: local machines, not GitHub Actions
 
 **Do not push in order to test.** The repository is public now, so the hosted
