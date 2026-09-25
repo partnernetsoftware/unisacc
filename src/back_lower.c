@@ -547,7 +547,6 @@ int tkg_rc[BK_MAXT]; int tkg_wi[BK_MAXT];
 int bk_impof(int c);                /* the IAT slot `winimp` names */
 /* an op's index in one of catalog.ENCSPEC's tables, or -1 [I5] */
 int enc_ix(char *tab, int n, char *o) { int L; L = 0; while (o[L]) L = L + 1; return vfind(tab, n, o, L); }
-int bk_str_is(char *a, char *b);
 int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
@@ -698,11 +697,11 @@ int bk_lower(void) {
                AT_FDCWD first, renameat2 twice and flags 0 fifth */
             bk_facts(cw);
             {   char *sh; sh = bk_nth(BH_ABI_ARGSHAPE, bkf_argshape);
-                if (bk_str_is(sh, "atfd_1"))
+                if (strsame(sh, "atfd_1"))
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen);
-                else { if (bk_str_is(sh, "atfd_1_zero"))
+                else { if (strsame(sh, "atfd_1_zero"))
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0, 0 - 1, 0);
-                else { if (bk_str_is(sh, "atfd_2_zero5")) {
+                else { if (strsame(sh, "atfd_2_zero5")) {
                     bk_a4k = SK_IMM; bk_a4v = 0;
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0 - 100, SK_MEM, bk_scr1);
                 } else

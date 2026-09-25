@@ -16,11 +16,6 @@ int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
 int ow(unsigned long v) {           /* a 32-bit little-endian word */
     ob(v & 255); ob((v >> 8) & 255); ob((v >> 16) & 255); ob((v >> 24) & 255); return 0;
 }
-int bk_str_is(char *a, char *b) {
-    int k; k = 0;
-    while (a[k] && b[k]) { if (a[k] != b[k]) return 0; k = k + 1; }
-    return a[k] == b[k];
-}
 /* a label's byte offset -- 0 while sizing, as size() passes {k: 0} */
 long bk_label(int id) {
     int t;
@@ -102,8 +97,8 @@ long a_relf(int i, long d) {
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
-    if (bk_str_is(r, "arm26")) return a_disp(d, 26) & 0x3FFFFFF;
-    if (bk_str_is(r, "arm19")) return (a_disp(d, 19) & 0x7FFFF) << 5;
+    if (strsame(r, "arm26")) return a_disp(d, 26) & 0x3FFFFFF;
+    if (strsame(r, "arm19")) return (a_disp(d, 19) & 0x7FFFF) << 5;
     __write(2, "back end: reloc class has no arm field\n", 39); __exit(1);
     return 0;
 }
@@ -130,10 +125,10 @@ int a_fd2handle(long pc, long hstd) {
 /* body, then the abi table's `retconv` tail; the import is `winimp` [I4] */
 int a_wintail(int rc, long pc, long written) {
     char *n; n = bk_nth(BH_ABI_RETCONV, rc);
-    if (bk_str_is(n, "wcount")) { a_adrp_add(A_IP0, pc, written); a_ldr(0, A_IP0, 0); return 0; }
-    if (bk_str_is(n, "bool_inv")) { ow(0xF100001F); ow(0x9A9F17E0); return 0; }   /* cmp; cset eq */
-    if (bk_str_is(n, "bool_neg")) { ow(0x7100001F); ow(0xDA9F13E0); return 0; }   /* cmp w0; csetm eq */
-    if (bk_str_is(n, "dword_sx")) { ow(0x93407C00); return 0; }                   /* sxtw x0, w0 */
+    if (strsame(n, "wcount")) { a_adrp_add(A_IP0, pc, written); a_ldr(0, A_IP0, 0); return 0; }
+    if (strsame(n, "bool_inv")) { ow(0xF100001F); ow(0x9A9F17E0); return 0; }   /* cmp; cset eq */
+    if (strsame(n, "bool_neg")) { ow(0x7100001F); ow(0xDA9F13E0); return 0; }   /* cmp w0; csetm eq */
+    if (strsame(n, "dword_sx")) { ow(0x93407C00); return 0; }                   /* sxtw x0, w0 */
     return 0;
 }
 int a_winbody(int i, long off);
@@ -150,19 +145,19 @@ int a_winbody(int i, long off) {
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
     s = bkol;
-    if (bk_str_is(nm, "exit")) { a_callimp(pc, bk_impof(tkg_wi[i])); return 1; }
-    if (bk_str_is(nm, "write") || bk_str_is(nm, "read")) {
+    if (strsame(nm, "exit")) { a_callimp(pc, bk_impof(tkg_wi[i])); return 1; }
+    if (strsame(nm, "write") || strsame(nm, "read")) {
         a_fd2handle(pc, hstd);
         a_adrp_add(3, pc + (bkol - s), written);
         ow(0xAA1F03E4);                              /* mov x4, xzr */
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "mmap")) {          /* VirtualAlloc, four args in x0..x3 */
+    if (strsame(nm, "mmap")) {          /* VirtualAlloc, four args in x0..x3 */
         a_callimp(pc, bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
+    if (strsame(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
         long scr0; long scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         a_adrp_add(3, pc, written);
@@ -176,18 +171,18 @@ int a_winbody(int i, long off) {
         a_callimp(pc + (bkol - s), 10);          /* FlushInstructionCache */
         return 1;
     }
-    if (bk_str_is(nm, "munmap")) {        /* VirtualFree(addr, 0, MEM_RELEASE) */
+    if (strsame(nm, "munmap")) {        /* VirtualFree(addr, 0, MEM_RELEASE) */
         ow(0xD2900002);
         ow(0xAA1F03E1);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "close")) {
+    if (strsame(nm, "close")) {
         a_fd2handle(pc, hstd);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "open")) {
+    if (strsame(nm, "open")) {
         ow(0xAA0203E4);                              /* x4 = x2 */
         a_movz(2, 3);
         ow(0xAA1F03E3);
@@ -196,15 +191,15 @@ int a_winbody(int i, long off) {
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "lseek")) {
+    if (strsame(nm, "lseek")) {
         ow(0xAA0203E3);                              /* x3 = x2 (method) */
         ow(0xAA1F03E2);                              /* x2 = 0 */
         a_fd2handle(pc + (bkol - s), hstd);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
-        if (bk_str_is(nm, "rename")) a_movz(2, 1);
+    if (strsame(nm, "unlink") || strsame(nm, "rename")) {
+        if (strsame(nm, "rename")) a_movz(2, 1);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
@@ -264,16 +259,16 @@ int a_fp(char *o, long *a) {
         ow(0x9A9F07E0 | (fc << 12) | a[0]);
         return 1;
     }
-    if (bk_str_is(o, "cvtid")) { ow(0x9E620000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "cvtud")) { ow(0x9E630000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "cvtis")) { ow(0x9E220000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
-    if (bk_str_is(o, "cvtus")) { ow(0x9E230000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
-    if (bk_str_is(o, "cvtdi")) { a_fmov_to(16, a[1], 1); ow(0x9E780000 | (16 << 5) | a[0]); return 1; }
-    if (bk_str_is(o, "cvtdu")) { a_fmov_to(16, a[1], 1); ow(0x9E790000 | (16 << 5) | a[0]); return 1; }
-    if (bk_str_is(o, "cvtsd")) { a_fmov_to(16, a[1], 0); ow(0x1E22C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "cvtds")) { a_fmov_to(16, a[1], 1); ow(0x1E624000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
-    if (bk_str_is(o, "fsqrt64")) { a_fmov_to(16, a[1], 1); ow(0x1E61C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "fsqrt32")) { a_fmov_to(16, a[1], 0); ow(0x1E21C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "cvtid")) { ow(0x9E620000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "cvtud")) { ow(0x9E630000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "cvtis")) { ow(0x9E220000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "cvtus")) { ow(0x9E230000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "cvtdi")) { a_fmov_to(16, a[1], 1); ow(0x9E780000 | (16 << 5) | a[0]); return 1; }
+    if (strsame(o, "cvtdu")) { a_fmov_to(16, a[1], 1); ow(0x9E790000 | (16 << 5) | a[0]); return 1; }
+    if (strsame(o, "cvtsd")) { a_fmov_to(16, a[1], 0); ow(0x1E22C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "cvtds")) { a_fmov_to(16, a[1], 1); ow(0x1E624000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "fsqrt64")) { a_fmov_to(16, a[1], 1); ow(0x1E61C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "fsqrt32")) { a_fmov_to(16, a[1], 0); ow(0x1E21C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
     return 0;
 }
 
@@ -347,8 +342,8 @@ int bk_arm(int i, long off) {
     }
     if (op == TO_GATE) {
         char *g; g = bk_nth(BH_ABI_GATE, tkg_gate[i]);
-        if (bk_str_is(g, "winapi")) return a_winapi(i, off);
-        if (bk_str_is(g, "svc80")) ow(0xD4001001); else ow(0xD4000001);
+        if (strsame(g, "winapi")) return a_winapi(i, off);
+        if (strsame(g, "svc80")) ow(0xD4001001); else ow(0xD4000001);
         /* Darwin puts a failed syscall in the CARRY flag and returns errno
            POSITIVE: `b.cc +8` over `neg x0, x0`, so the caller sees -errno
            the way it does everywhere else [I-20] */
@@ -356,8 +351,8 @@ int bk_arm(int i, long off) {
         return 1;
     }
     o = bk_nth(BKOPS, op);
-    if (bk_str_is(o, "mov")) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
-    if (bk_str_is(o, "imm")) {
+    if (strsame(o, "mov")) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
+    if (strsame(o, "imm")) {
         unsigned long u; u = a[1];
         ow(0xD2800000 | ((u & 0xFFFF) << 5) | a[0]);
         k = 1;
@@ -369,9 +364,9 @@ int bk_arm(int i, long off) {
         j = enc_ix(ENC_ARM_ALU3, NENC_ARM_ALU3, o);
         if (j >= 0) { alu = ENC_ARM_ALU3_V(j); ow(alu | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
     }
-    if (bk_str_is(o, "mul64")) { ow(0x9B007C00 | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
-    if (bk_str_is(o, "load64")) { a_mem(0, a[0], a[1], a[2], 8); return 1; }
-    if (bk_str_is(o, "store64")) { a_mem(1, a[2], a[0], a[1], 8); return 1; }
+    if (strsame(o, "mul64")) { ow(0x9B007C00 | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
+    if (strsame(o, "load64")) { a_mem(0, a[0], a[1], a[2], 8); return 1; }
+    if (strsame(o, "store64")) { a_mem(1, a[2], a[0], a[1], 8); return 1; }
     {   int cc; int j;                         /* [I5] catalog.ENCSPEC */
         cc = 0 - 1; j = enc_ix(ENC_ARM_INVCOND, NENC_ARM_INVCOND, o);
         if (j >= 0) cc = ENC_ARM_INVCOND_V(j);
@@ -381,7 +376,7 @@ int bk_arm(int i, long off) {
             return 1;
         }
     }
-    if (bk_str_is(o, ".frame")) {
+    if (strsame(o, ".frame")) {
         n = a[0];
         if (n > 0 - 4096 && n < 4096) {
             ow((n >= 0 ? 0xD1000000 : 0x91000000) | ((n >= 0 ? n : 0 - n) << 10) | (7 << 5) | 7);
@@ -391,11 +386,11 @@ int bk_arm(int i, long off) {
         ow((n >= 0 ? 0xCB000000 : 0x8B000000) | (A_IP0 << 16) | (7 << 5) | 7);
         return 1;
     }
-    if (bk_str_is(o, ".lea")) { a_adrp_add(a[0], pc, bk_leaaddr(i)); return 1; }
-    if (bk_str_is(o, ".ld")) { a_mem(0, a[0], a[1], a[2], a[3]); return 1; }
-    if (bk_str_is(o, ".st")) { a_mem(1, a[2], a[0], a[1], a[3]); return 1; }
+    if (strsame(o, ".lea")) { a_adrp_add(a[0], pc, bk_leaaddr(i)); return 1; }
+    if (strsame(o, ".ld")) { a_mem(0, a[0], a[1], a[2], a[3]); return 1; }
+    if (strsame(o, ".st")) { a_mem(1, a[2], a[0], a[1], a[3]); return 1; }
     if (a_fp(o, a)) return 1;
-    if (bk_str_is(o, ".zero")) {
+    if (strsame(o, ".zero")) {
         long kk; int wd;
         kk = 0;
         while (kk < a[2]) {
@@ -405,41 +400,41 @@ int bk_arm(int i, long off) {
         }
         return 1;
     }
-    if (bk_str_is(o, "callr")) {
+    if (strsame(o, "callr")) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
         ow(0xD61F0000 | (a[0] << 5));
         return 1;
     }
-    if (bk_str_is(o, ".div") || bk_str_is(o, ".udiv")) {
-        ow((bk_str_is(o, ".div") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | a[0]);
+    if (strsame(o, ".div") || strsame(o, ".udiv")) {
+        ow((strsame(o, ".div") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | a[0]);
         return 1;
     }
-    if (bk_str_is(o, ".mod") || bk_str_is(o, ".umod")) {
-        ow((bk_str_is(o, ".mod") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | A_IP1);
+    if (strsame(o, ".mod") || strsame(o, ".umod")) {
+        ow((strsame(o, ".mod") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | A_IP1);
         ow(0x9B008000 | (a[2] << 16) | (a[1] << 10) | (A_IP1 << 5) | a[0]);
         return 1;
     }
-    if (bk_str_is(o, "ret")) {
+    if (strsame(o, "ret")) {
         ow(0xF9400000 | (7 << 5) | A_IP1);
         ow(0x91002000 | (7 << 5) | 7);
         ow(0xD61F0000 | (A_IP1 << 5));
         return 1;
     }
-    if (bk_str_is(o, "nop")) { ow(0xD503201F); return 1; }
-    if (bk_str_is(o, "jump")) {
+    if (strsame(o, "nop")) { ow(0xD503201F); return 1; }
+    if (strsame(o, "jump")) {
         ow(0x14000000 | a_relf(i, bk_label(a[0]) - off));
         return 1;
     }
-    if (bk_str_is(o, "call")) {
+    if (strsame(o, "call")) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
         ow(0x14000000 | a_relf(i, bk_label(a[0]) - (off + 12)));
         return 1;
     }
-    if (bk_str_is(o, "jumpz")) {
+    if (strsame(o, "jumpz")) {
         ow(0xB4000000 | a_relf(i, bk_label(a[1]) - off) | a[0]);
         return 1;
     }
@@ -482,7 +477,7 @@ int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
-    if (bk_str_is(r, "rel32")) { x_d32(d); return 0; }
+    if (strsame(r, "rel32")) { x_d32(d); return 0; }
     __write(2, "back end: reloc class has no x86 field\n", 39); __exit(1);
     return 0;
 }
@@ -572,20 +567,20 @@ int x_fd2handle(long pc, long hstd) {
    table's `winimp`, the tail its `retconv` [I4] */
 int x_wintail(int rc, long pc, long written) {
     char *n; n = bk_nth(BH_ABI_RETCONV, rc);
-    if (bk_str_is(n, "wcount")) { x_rip(0x8B, X_RAX, pc + 7, written); return 0; }
-    if (bk_str_is(n, "bool_inv")) {
+    if (strsame(n, "wcount")) { x_rip(0x8B, X_RAX, pc + 7, written); return 0; }
+    if (strsame(n, "bool_inv")) {
         x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax, 0 */
         ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
         x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx rax, al */
         return 0;
     }
-    if (bk_str_is(n, "bool_neg")) {
+    if (strsame(n, "bool_neg")) {
         ob(0x85); ob(0xC0); ob(0x0F); ob(0x94); ob(0xC0);   /* test eax; sete al */
         ob(0x48); ob(0x0F); ob(0xB6); ob(0xC0);              /* movzx rax, al */
         ob(0x48); ob(0xF7); ob(0xD8);                        /* neg rax: 0 / -1 */
         return 0;
     }
-    if (bk_str_is(n, "dword_sx")) { ob(0x48); ob(0x63); ob(0xC0); return 0; }   /* movsxd */
+    if (strsame(n, "dword_sx")) { ob(0x48); ob(0x63); ob(0xC0); return 0; }   /* movsxd */
     return 0;
 }
 int x_winbody(int i, long off);
@@ -602,11 +597,11 @@ int x_winbody(int i, long off) {
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
     s = bkol;
-    if (bk_str_is(nm, "exit")) {
+    if (strsame(nm, "exit")) {
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "write") || bk_str_is(nm, "read")) {
+    if (strsame(nm, "write") || strsame(nm, "read")) {
         x_fd2handle(pc, hstd);
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);
         x_alignpre(1);
@@ -615,11 +610,11 @@ int x_winbody(int i, long off) {
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "mmap")) {
+    if (strsame(nm, "mmap")) {
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "mprotect")) {
+    if (strsame(nm, "mprotect")) {
         long scr0; long scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);   /* r9 = &old */
@@ -635,20 +630,20 @@ int x_winbody(int i, long off) {
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "munmap")) {
+    if (strsame(nm, "munmap")) {
         x_movri(X_R8, 0x8000);            /* MEM_RELEASE */
         x_movri(X_RDX, 0);                /* dwSize must be 0 */
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "close")) {
+    if (strsame(nm, "close")) {
         x_fd2handle(pc, hstd);
         x_alignpre(0);
         x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "open")) {
+    if (strsame(nm, "open")) {
         x_movrr(X_RAX, X_R8);
         x_alignpre(3);
         x_rex(1, 0, 0, 0); ob(0x89); x_modrm(1, 0, 4); ob(0x24); ob(0x20);
@@ -660,14 +655,14 @@ int x_winbody(int i, long off) {
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "lseek")) {        /* SetFilePointer(h, low, NULL, method) */
+    if (strsame(nm, "lseek")) {        /* SetFilePointer(h, low, NULL, method) */
         x_movrr(X_R9, X_R8); x_movri(X_R8, 0);
         x_fd2handle(pc + (bkol - s), hstd);
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
-        if (bk_str_is(nm, "rename")) x_movri(X_R8, 1);  /* REPLACE_EXISTING */
+    if (strsame(nm, "unlink") || strsame(nm, "rename")) {
+        if (strsame(nm, "rename")) x_movri(X_R8, 1);  /* REPLACE_EXISTING */
         x_alignpre(0);
         x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
@@ -771,12 +766,12 @@ int x_fp(char *o, long *a) {
         x_and1(a[0]);
         return 1;
     }
-    if (bk_str_is(o, "cvtid")) { x_sseg(0xF2, 0x2A, 0, a[1], 1, 0); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtis")) { x_sseg(0xF3, 0x2A, 0, a[1], 1, 0); x_movdg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtud")) { x_u2f(a[1], 1); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtus")) { x_u2f(a[1], 0); x_movdg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtdi")) { x_movqx(0, a[1]); x_sseg(0xF2, 0x2C, 0, a[0], 1, 1); return 1; }
-    if (bk_str_is(o, "cvtdu")) {
+    if (strsame(o, "cvtid")) { x_sseg(0xF2, 0x2A, 0, a[1], 1, 0); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "cvtis")) { x_sseg(0xF3, 0x2A, 0, a[1], 1, 0); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "cvtud")) { x_u2f(a[1], 1); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "cvtus")) { x_u2f(a[1], 0); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "cvtdi")) { x_movqx(0, a[1]); x_sseg(0xF2, 0x2C, 0, a[0], 1, 1); return 1; }
+    if (strsame(o, "cvtdu")) {
         int s; int bigstart;
         x_movqx(0, a[1]); x_movri(X_R11, 0x43E0000000000000); x_movqx(1, X_R11);
         x_ssex(0x66, 0x2E, 0, 1, 0 - 1);                                /* ucomisd */
@@ -790,10 +785,10 @@ int x_fp(char *o, long *a) {
         bkout[bigstart - 1] = bkol - bigstart;
         return 1;
     }
-    if (bk_str_is(o, "cvtsd")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x5A, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtds")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x5A, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
-    if (bk_str_is(o, "fsqrt64")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x51, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "fsqrt32")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x51, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "cvtsd")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x5A, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "cvtds")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x5A, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "fsqrt64")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x51, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "fsqrt32")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x51, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
     return 0;
 }
 /* x86's two-operand ALU: dst = s1 op s2 via mov dst,s1 -- unless dst IS s2 */
@@ -884,7 +879,7 @@ int bk_x86(int i, long off) {
         return 1;
     }
     if (op == TO_GATE) {
-        if (bk_str_is(bk_nth(BH_ENC_Y, tkg_form[i]), "winapi")) return x_winapi(i, off);
+        if (strsame(bk_nth(BH_ENC_Y, tkg_form[i]), "winapi")) return x_winapi(i, off);
         ob(0x0F); ob(0x05);
         /* Darwin: CF set means failure, rax holds errno -- `jnc +3` over
            `neg rax` [I-20] */
@@ -892,8 +887,8 @@ int bk_x86(int i, long off) {
         return 1;
     }
     o = bk_nth(BKOPS, op);
-    if (bk_str_is(o, "mov")) { x_movrr(a[0], a[1]); return 1; }
-    if (bk_str_is(o, "imm")) { x_movri(a[0], a[1]); return 1; }
+    if (strsame(o, "mov")) { x_movrr(a[0], a[1]); return 1; }
+    if (strsame(o, "imm")) { x_movri(a[0], a[1]); return 1; }
     {   int alu; int j;                        /* [I5] catalog.ENCSPEC */
         alu = 0 - 1; j = enc_ix(ENC_X86_ALU2, NENC_X86_ALU2, o);
         if (j >= 0) alu = ENC_X86_ALU2_V(j);
@@ -914,29 +909,29 @@ int bk_x86(int i, long off) {
         x_movrr(a[0], X_R11);
         return 1;
     }
-    if (bk_str_is(o, "mul64")) {
+    if (strsame(o, "mul64")) {
         s2 = x_alias(a[0], a[1], a[2]);
         if (a[0] != a[1]) x_movrr(a[0], a[1]);
         x_rex(1, a[0] >> 3, 0, s2 >> 3); ob(0x0F); ob(0xAF); x_modrm(3, a[0], s2);
         return 1;
     }
-    if (bk_str_is(o, "load64")) { x_load(a[0], a[1], a[2], 8); return 1; }
-    if (bk_str_is(o, "store64")) { x_store(a[2], a[0], a[1], 8); return 1; }
+    if (strsame(o, "load64")) { x_load(a[0], a[1], a[2], 8); return 1; }
+    if (strsame(o, "store64")) { x_store(a[2], a[0], a[1], 8); return 1; }
     {   int cc; int j;                         /* [I5] catalog.ENCSPEC */
         cc = 0 - 1; j = enc_ix(ENC_X86_SETCC, NENC_X86_SETCC, o);
         if (j >= 0) cc = ENC_X86_SETCC_V(j);
         if (cc >= 0) { x_cmpset(cc, a[0], a[1], a[2]); return 1; }
     }
-    if (bk_str_is(o, ".frame")) {
+    if (strsame(o, ".frame")) {
         long n; n = a[0];
         x_aluimm(X_RSP, n >= 0 ? 5 : 0, n >= 0 ? n : 0 - n);
         return 1;
     }
-    if (bk_str_is(o, ".lea")) { x_rip(0x8D, a[0], pc + 7, bk_leaaddr(i)); return 1; }
-    if (bk_str_is(o, ".ld")) { x_load(a[0], a[1], a[2], a[3]); return 1; }
-    if (bk_str_is(o, ".st")) { x_store(a[2], a[0], a[1], a[3]); return 1; }
+    if (strsame(o, ".lea")) { x_rip(0x8D, a[0], pc + 7, bk_leaaddr(i)); return 1; }
+    if (strsame(o, ".ld")) { x_load(a[0], a[1], a[2], a[3]); return 1; }
+    if (strsame(o, ".st")) { x_store(a[2], a[0], a[1], a[3]); return 1; }
     if (x_fp(o, a)) return 1;
-    if (bk_str_is(o, ".zero")) {
+    if (strsame(o, ".zero")) {
         long kk; int wd;
         ob(0x4D); ob(0x31); ob(0xDB);
         kk = 0;
@@ -947,12 +942,12 @@ int bk_x86(int i, long off) {
         }
         return 1;
     }
-    if (bk_str_is(o, "callr")) {           /* call r64: FF /2 [S-15 B1] */
+    if (strsame(o, "callr")) {           /* call r64: FF /2 [S-15 B1] */
         if (a[0] >= 8) x_rex(0, 0, 0, 1);
         ob(0xFF); x_modrm(3, 2, a[0]);
         return 1;
     }
-    if (bk_str_is(o, ".div") || bk_str_is(o, ".mod") || bk_str_is(o, ".udiv") || bk_str_is(o, ".umod")) {
+    if (strsame(o, ".div") || strsame(o, ".mod") || strsame(o, ".udiv") || strsame(o, ".umod")) {
         x_spadj(16, 5);
         x_mem(0x89, 0 - 1, X_RAX, X_RSP, 0, 1);
         x_mem(0x89, 0 - 1, X_RDX, X_RSP, 8, 1);
@@ -965,28 +960,28 @@ int bk_x86(int i, long off) {
             ob(0x48); ob(0x99);
             x_rex(1, 0, 0, 1); ob(0xF7); x_modrm(3, 7, 11);
         }
-        x_movrr(X_R11, (bk_str_is(o, ".div") || bk_str_is(o, ".udiv")) ? X_RAX : X_RDX);
+        x_movrr(X_R11, (strsame(o, ".div") || strsame(o, ".udiv")) ? X_RAX : X_RDX);
         x_mem(0x8B, 0 - 1, X_RAX, X_RSP, 0, 1);
         x_mem(0x8B, 0 - 1, X_RDX, X_RSP, 8, 1);
         x_spadj(16, 0);
         x_movrr(a[0], X_R11);
         return 1;
     }
-    if (bk_str_is(o, "ret")) { ob(0xC3); return 1; }   /* the machine's own */
-    if (bk_str_is(o, "nop")) { ob(0x90); return 1; }
-    if (bk_str_is(o, "jump")) {
+    if (strsame(o, "ret")) { ob(0xC3); return 1; }   /* the machine's own */
+    if (strsame(o, "nop")) { ob(0x90); return 1; }
+    if (strsame(o, "jump")) {
         tjk[i] = 2; tjt[i] = a[0];
         if (tshort[i]) { ob(0xEB); x_rel8(bk_label(a[0]) - (off + 2)); return 1; }
         ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1;
     }
-    if (bk_str_is(o, "call")) {            /* call rel32: the return address
+    if (strsame(o, "call")) {            /* call rel32: the return address
                                               lands where the old sequence put
                                               it, so ret and the frame walk
                                               are unchanged */
         ob(0xE8); x_rel(i, bk_label(a[0]) - (off + 5));
         return 1;
     }
-    if (bk_str_is(o, "jumpz")) {
+    if (strsame(o, "jumpz")) {
         int r; r = a[0];
         x_rex(1, r >> 3, 0, r >> 3); ob(0x85); x_modrm(3, r, r);
         tjk[i] = 3 + 2; tjt[i] = a[1];

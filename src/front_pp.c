@@ -959,7 +959,7 @@ int mdefb(char *s, int n, char *body, int bl, long v) {
 /* `-D NAME` and the target's own macros: defined as 1, and they expand to
    "1" as well -- a macro with a value but no body expands to NOTHING, which
    turns `printf("%d", LEVEL)` into `printf("%d", )`. */
-int mdef1(char *s) { int n; n = 0; while (s[n]) n = n + 1; return mdefb(s, n, "1", 1, 1); }
+int mdef1(char *s) { return mdefb(s, blen(s), "1", 1, 1); }
 
 int blen(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 int predef(void) {

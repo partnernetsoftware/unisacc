@@ -8185,7 +8185,7 @@ int mdefb(char *s, int n, char *body, int bl, long v) {
 /* `-D NAME` and the target's own macros: defined as 1, and they expand to
    "1" as well -- a macro with a value but no body expands to NOTHING, which
    turns `printf("%d", LEVEL)` into `printf("%d", )`. */
-int mdef1(char *s) { int n; n = 0; while (s[n]) n = n + 1; return mdefb(s, n, "1", 1, 1); }
+int mdef1(char *s) { return mdefb(s, blen(s), "1", 1, 1); }
 
 int blen(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 int predef(void) {
@@ -14611,6 +14611,25 @@ int undef_calls(void) {
 int ol_s[OPT_MAXL]; int ol_e[OPT_MAXL]; int ol_n;   /* line starts, and where each ends (its newline, or nout) */
 char out2[MAXOUT]; int nout2;
 int ol_len(int l) { return ol_e[l] - ol_s[l]; }
+/* ---- writing out2: every rewritten line goes through these ---- */
+int ol_c(int c) { out2[nout2] = c; nout2 = nout2 + 1; return 0; }
+int ol_put(int p, int e) { while (p < e) { ol_c(out[p]); p = p + 1; } return 0; }
+int ol_puts(char *t) { int k; k = 0; while (t[k]) { ol_c(t[k]); k = k + 1; } return 0; }
+int pk_nl(void) { return ol_c(10); }
+int ol_emit(int l) { ol_put(ol_s[l], ol_e[l]); return pk_nl(); }
+int pk_emitreg(int r) {
+    ol_c(114);
+    if (r >= 10) ol_c(48 + r / 10);
+    return ol_c(48 + r % 10);
+}
+int pk_emitnum(long v) {
+    char b[24]; int n;
+    n = 0;
+    if (v == 0) { b[0] = 48; n = 1; }
+    while (v > 0) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; ol_c(b[n]); }
+    return 0;
+}
 int ol_is(int l, char *t) {          /* line l is exactly t */
     int k; int p; p = ol_s[l]; k = 0;
     while (t[k]) { if (out[p + k] != t[k]) return 0; k = k + 1; }
@@ -14704,8 +14723,6 @@ int ol_simple(int l) {                /* straight-line, explicit operands only *
     i = ol_opi(l);
     return i >= 0 && oi_simple[i];
 }
-int ol_emit(int l) { int k; k = 0; while (k < ol_len(l)) { out2[nout2] = out[ol_s[l] + k]; nout2 = nout2 + 1; k = k + 1; }
-    out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
 int ol_mov(int y, int x) {
     char b[32]; int n;
     out2[nout2] = 32; out2[nout2 + 1] = 32; nout2 = nout2 + 2;
@@ -14964,8 +14981,6 @@ int ol_pre(int l, char *t) {         /* line l starts with t -> its length */
     while (t[k]) { if (p + k >= ol_e[l] || out[p + k] != t[k]) return 0; k = k + 1; }
     return k;
 }
-int ol_put(int p, int e) { while (p < e) { out2[nout2] = out[p]; nout2 = nout2 + 1; p = p + 1; } return 0; }
-int ol_puts(char *t) { int k; k = 0; while (t[k]) { out2[nout2] = t[k]; nout2 = nout2 + 1; k = k + 1; } return 0; }
 int ol_local(int i) {
     int a; int n0; int n1; int d; int q; int k; int ld;
     if (i + 2 >= ol_n || ol_zok[2] == 0) return 0;
@@ -15092,65 +15107,65 @@ int ol_commit(void) {
    jump, the instruction it lands on), and say how their operands relate.
    Whether that relation licenses a rewrite -- and which -- is the `peep`
    table's answer, asked of its net exactly as unisa/opt.py asks it. */
-int pp_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
+int pk_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
     int i;
     i = ol_opi(l);
     if (i < 0) return vfind(BF_PEEP_0, NBF_PEEP_0, "other", 5);
     return oi_acls[i];
 }
-int pp_bcls(int l) {                  /* index into BF_PEEP_1, from opinfo */
+int pk_bcls(int l) {                  /* index into BF_PEEP_1, from opinfo */
     int i;
     if (l >= ol_n) return vfind(BF_PEEP_1, NBF_PEEP_1, "none", 4);
     i = ol_opi(l);
     if (i < 0) return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
     return oi_bcls[i];
 }
-int pp_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
-int pp_real(int l) {                  /* the first line at or after l that is not a label */
-    while (l < ol_n && pp_islab(l)) l = l + 1;
+int pk_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
+int pk_real(int l) {                  /* the first line at or after l that is not a label */
+    while (l < ol_n && pk_islab(l)) l = l + 1;
     return l;
 }
-int pp_lastword(int l) {              /* where the line's last token starts */
+int pk_lastword(int l) {              /* where the line's last token starts */
     int p; p = ol_e[l]; while (p > ol_s[l] && out[p - 1] != 32) p = p - 1; return p;
 }
-int pp_same(int p, int e, int q, int f) {    /* out[p..e) == out[q..f) */
+int pk_same(int p, int e, int q, int f) {    /* out[p..e) == out[q..f) */
     if (e - p != f - q) return 0;
     while (p < e) { if (out[p] != out[q]) return 0; p = p + 1; q = q + 1; }
     return 1;
 }
-/* `  store64 [M], rX` -> X, M at pp_m0..pp_m1; else -1 */
-int pp_m0; int pp_m1; int pp_n0; int pp_n1;
-int pp_store(int l) {
+/* `  store64 [M], rX` -> X, M at pk_m0..pk_m1; else -1 */
+int pk_m0; int pk_m1; int pk_n0; int pk_n1;
+int pk_store(int l) {
     int p; int e; int q;
     if (ol_pre(l, "  store64 [") == 0) return 0 - 1;
     p = ol_s[l] + 11; e = ol_e[l]; q = p;
     while (q < e && out[q] != 93) q = q + 1;
     if (q + 3 >= e || out[q + 1] != 44 || out[q + 2] != 32) return 0 - 1;
-    pp_m0 = p; pp_m1 = q;
+    pk_m0 = p; pk_m1 = q;
     return ol_reg(q + 3, e);
 }
-/* `  load64 rY, [M]` -> Y, M at pp_n0..pp_n1 */
-int pp_load(int l) {
+/* `  load64 rY, [M]` -> Y, M at pk_n0..pk_n1 */
+int pk_load(int l) {
     int p; int e; int q; int y;
     if (ol_pre(l, "  load64 ") == 0) return 0 - 1;
     p = ol_s[l] + 9; e = ol_e[l]; q = p;
     while (q < e && out[q] != 44) q = q + 1;
     y = ol_reg(p, q);
     if (y < 0 || q + 3 >= e || out[q + 1] != 32 || out[q + 2] != 91 || out[e - 1] != 93) return 0 - 1;
-    pp_n0 = q + 3; pp_n1 = e - 1;
+    pk_n0 = q + 3; pk_n1 = e - 1;
     return y;
 }
-/* the same store shape as the SECOND of a pair: M at pp_n0..pp_n1 */
-int pp_store2(int l) {
+/* the same store shape as the SECOND of a pair: M at pk_n0..pk_n1 */
+int pk_store2(int l) {
     int y; int a; int b;
-    a = pp_m0; b = pp_m1;
-    y = pp_store(l);
-    pp_n0 = pp_m0; pp_n1 = pp_m1; pp_m0 = a; pp_m1 = b;
+    a = pk_m0; b = pk_m1;
+    y = pk_store(l);
+    pk_n0 = pk_m0; pk_n1 = pk_m1; pk_m0 = a; pk_m1 = b;
     return y;
 }
-/* `  imm rK, N` -> K, N in pp_imm (decimal digits only, at most 18) */
-long pp_imm;
-int pp_immat(int l) {
+/* `  imm rK, N` -> K, N in pk_imm (decimal digits only, at most 18) */
+long pk_imm;
+int pk_immat(int l) {
     int p; int e; int q; int k; long v;
     if (ol_pre(l, "  imm r") == 0) return 0 - 1;
     p = ol_s[l] + 6; e = ol_e[l]; q = p;
@@ -15160,53 +15175,38 @@ int pp_immat(int l) {
     q = q + 2; v = 0;
     if (e - q > 18) return 0 - 1;
     while (q < e) { if (isdi(out[q] & 255) == 0) return 0 - 1; v = v * 10 + out[q] - 48; q = q + 1; }
-    pp_imm = v;
+    pk_imm = v;
     return k;
 }
-/* `  OP rD, rS, rT` -> 1, with the three in pp_d pp_sr pp_t */
-int pp_d; int pp_sr; int pp_t;
-int pp_three(int l) {
+/* `  OP rD, rS, rT` -> 1, with the three in pk_d pk_sr pk_t */
+int pk_d; int pk_sr; int pk_t;
+int pk_three(int l) {
     int p; int e; int q;
     if (l >= ol_n || out[ol_s[l]] != 32) return 0;
     p = ol_s[l] + 2; e = ol_e[l];
     while (p < e && out[p] != 32) p = p + 1;
     p = p + 1; q = p; while (q < e && out[q] != 44) q = q + 1;
-    pp_d = ol_reg(p, q); if (pp_d < 0 || q + 2 >= e) return 0;
+    pk_d = ol_reg(p, q); if (pk_d < 0 || q + 2 >= e) return 0;
     p = q + 2; q = p; while (q < e && out[q] != 44) q = q + 1;
-    pp_sr = ol_reg(p, q); if (pp_sr < 0 || q + 2 >= e) return 0;
-    pp_t = ol_reg(q + 2, e); if (pp_t < 0) return 0;
+    pk_sr = ol_reg(p, q); if (pk_sr < 0 || q + 2 >= e) return 0;
+    pk_t = ol_reg(q + 2, e); if (pk_t < 0) return 0;
     return 1;
 }
-/* `  mov rY, rX` -> 1, Y and X in pp_d, pp_sr */
-int pp_movat(int l) {
+/* `  mov rY, rX` -> 1, Y and X in pk_d, pk_sr */
+int pk_movat(int l) {
     int p; int e; int q;
     if (ol_pre(l, "  mov r") == 0) return 0;
     p = ol_s[l] + 6; e = ol_e[l]; q = p;
     while (q < e && out[q] != 44) q = q + 1;
-    pp_d = ol_reg(p, q); if (pp_d < 0 || q + 2 >= e) return 0;
-    pp_sr = ol_reg(q + 2, e);
-    return pp_sr >= 0;
+    pk_d = ol_reg(p, q); if (pk_d < 0 || q + 2 >= e) return 0;
+    pk_sr = ol_reg(q + 2, e);
+    return pk_sr >= 0;
 }
-int pp_emitreg(int r) {
-    out2[nout2] = 114; nout2 = nout2 + 1;
-    if (r >= 10) { out2[nout2] = 48 + r / 10; nout2 = nout2 + 1; }
-    out2[nout2] = 48 + r % 10; nout2 = nout2 + 1;
-    return 0;
-}
-int pp_emitnum(long v) {
-    char b[24]; int n;
-    n = 0;
-    if (v == 0) { b[0] = 48; n = 1; }
-    while (v > 0) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; }
-    while (n > 0) { n = n - 1; out2[nout2] = b[n]; nout2 = nout2 + 1; }
-    return 0;
-}
-int pp_nl(void) { out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
-int pp_rel(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BF_PEEP_2, NBF_PEEP_2, nm, n); }
+int pk_rel(char *nm) { return vfind(BF_PEEP_2, NBF_PEEP_2, nm, blen(nm)); }
 /* an action's class index, by name -- asked for every candidate, so the
    answers (fixed for the table in hand) are kept by the name's address [J5] */
 char *pa_nm[16]; int pa_v[16]; int pa_n;
-int pp_act(char *nm) {
+int pk_act(char *nm) {
     int n; int k;
     k = 0; while (k < pa_n) { if (pa_nm[k] == nm) return pa_v[k]; k = k + 1; }
     n = 0; while (nm[n]) n = n + 1;
@@ -15216,21 +15216,21 @@ int pp_act(char *nm) {
 }
 /* emit line l with register a written as b: every token (all) or only the
    first -- the destination (all == 0) [H4] */
-int pp_rereg(int l, int a, int b, int all) {
+int pk_rereg(int l, int a, int b, int all) {
     int p; int e; int n; int q; int done;
     p = ol_s[l]; e = ol_e[l]; done = 0;
     while (p < e) {
         if (done == 0 && out[p] == 114 && isal(out[p - 1] & 255) == 0 && p + 1 < e && isdi(out[p + 1] & 255)) {
             q = p + 1; n = 0;
             while (q < e && isdi(out[q] & 255)) { n = n * 10 + out[q] - 48; q = q + 1; }
-            if (n == a) { pp_emitreg(b); p = q; if (all == 0) done = 1; continue; }
+            if (n == a) { pk_emitreg(b); p = q; if (all == 0) done = 1; continue; }
             ol_put(p, q); p = q;
             if (all == 0) done = 1;       /* the first register was not a */
             continue;
         }
         out2[nout2] = out[p]; nout2 = nout2 + 1; p = p + 1;
     }
-    pp_nl();
+    pk_nl();
     return 0;
 }
 /* -O2: a local's store, the mirror of ol_local [H4].  The walker writes
@@ -15238,7 +15238,7 @@ int pp_rereg(int l, int a, int b, int all) {
    and with rA and r2 dead after the store (S straight-line, naming neither)
    that is S... / .st [r6-N], rV, W -- two instructions fewer per store.
    Returns the line after the store, having written the result; 0 if not. */
-int pp_stfuse(int i) {
+int pk_stfuse(int i) {
     int k; int a; int j; int q; int p; int e; int v; int st; int n0; int n1;
     if (i + 3 >= ol_n) return 0;
     k = ol_pre(i, "  imm r2, "); if (k == 0) return 0;
@@ -15269,9 +15269,9 @@ int pp_stfuse(int i) {
             k = i + 2; while (k < j) { ol_emit(k); k = k + 1; }
             if (st == 1) ol_puts("  .st [r6-"); else ol_puts("  store64 [r6-");
             ol_put(n0, n1); ol_puts("], ");
-            pp_emitreg(v);
+            pk_emitreg(v);
             if (st == 1) ol_put(q, e);
-            pp_nl();
+            pk_nl();
             return j + 1;
         }
         if (ol_simple(j) == 0) return 0;
@@ -15280,7 +15280,7 @@ int pp_stfuse(int i) {
     }
     return 0;
 }
-int pp_asks;
+int pk_asks;
 int peep_round(void) {
     int i; int n; int a; int b; int rel; int act; int key[4]; int t; int u; int k; int x; int y;
     int hits; int p; int e; int q; long v; int lg; int d; int none;
@@ -15292,113 +15292,113 @@ int peep_round(void) {
         ol_prep();
         k = 0; while (k <= 5) { if (bl_solve(k) == 0) ol_zok[k] = 0; k = k + 1; }
     }
-    none = pp_rel("none");
+    none = pk_rel("none");
     nout2 = 0; hits = 0; i = 0; n = ol_n;
     while (i < n) {
         if (out[ol_s[i]] != 32) { ol_emit(i); i = i + 1; continue; }
-        k = pp_stfuse(i);
+        k = pk_stfuse(i);
         if (k > 0) { hits = hits + 1; i = k; continue; }
-        a = pp_acls(i); b = pp_bcls(i + 1); rel = none;
+        a = pk_acls(i); b = pk_bcls(i + 1); rel = none;
         t = 0 - 1; x = 0 - 1; y = 0 - 1; u = 0; v = 0;
         if (ol_word(i, "jump") || ol_word(i, "jumpz")) {
-            p = pp_lastword(i); e = ol_e[i];
+            p = pk_lastword(i); e = ol_e[i];
             k = i + 1;
-            while (k < n && pp_islab(k)) {
-                if (pp_same(ol_s[k], ol_e[k] - 1, p, e)) u = 1;
+            while (k < n && pk_islab(k)) {
+                if (pk_same(ol_s[k], ol_e[k] - 1, p, e)) u = 1;
                 k = k + 1;
             }
-            if (u) { rel = pp_rel("to_next"); b = pp_bcls(pp_real(i + 1)); }
+            if (u) { rel = pk_rel("to_next"); b = pk_bcls(pk_real(i + 1)); }
             else {
                 t = ol_lab(p, e);
                 if (t >= 0) {
-                    t = pp_real(t + 1);
+                    t = pk_real(t + 1);
                     if (t < n && ol_word(t, "jump")) {
-                        q = pp_lastword(t);
-                        if (pp_same(q, ol_e[t], p, e) == 0) { rel = pp_rel("to_jump"); b = pp_bcls(t); }
+                        q = pk_lastword(t);
+                        if (pk_same(q, ol_e[t], p, e) == 0) { rel = pk_rel("to_jump"); b = pk_bcls(t); }
                     }
                 }
             }
-        } else if (i + 1 < n && pp_store(i) >= 0) {
-            x = pp_store(i);
-            y = pp_load(i + 1);
-            if (y < 0) y = pp_store2(i + 1);
+        } else if (i + 1 < n && pk_store(i) >= 0) {
+            x = pk_store(i);
+            y = pk_load(i + 1);
+            if (y < 0) y = pk_store2(i + 1);
             /* not the expression stack's own slot: [r7+..] is what B1 turns
                into a real push and pop on x86, and a pop made a mov is a
                pop that costs more */
-            if (y >= 0 && pp_same(pp_m0, pp_m1, pp_n0, pp_n1) && (out[pp_m0] != 114 || out[pp_m0 + 1] != 55)) {
-                if (x == y) rel = pp_rel("same_slot_same_reg"); else rel = pp_rel("same_slot");
+            if (y >= 0 && pk_same(pk_m0, pk_m1, pk_n0, pk_n1) && (out[pk_m0] != 114 || out[pk_m0 + 1] != 55)) {
+                if (x == y) rel = pk_rel("same_slot_same_reg"); else rel = pk_rel("same_slot");
             }
-        } else if (i + 1 < n && pp_immat(i) >= 0) {
-            x = pp_immat(i); v = pp_imm;
-            if (x <= 5 && ol_word(i + 1, "mov") == 0 && pp_three(i + 1)) {
-                if (pp_t == x && pp_sr != x && ol_dead(x, i + 2)) {
-                    if (v == 0) rel = pp_rel("const0");
-                    else if (v == 1) rel = pp_rel("const1");
-                    else if ((v & (v - 1)) == 0) rel = pp_rel("pow2");
+        } else if (i + 1 < n && pk_immat(i) >= 0) {
+            x = pk_immat(i); v = pk_imm;
+            if (x <= 5 && ol_word(i + 1, "mov") == 0 && pk_three(i + 1)) {
+                if (pk_t == x && pk_sr != x && ol_dead(x, i + 2)) {
+                    if (v == 0) rel = pk_rel("const0");
+                    else if (v == 1) rel = pk_rel("const1");
+                    else if ((v & (v - 1)) == 0) rel = pk_rel("pow2");
                 }
-            } else if (x <= 5 && pp_movat(i + 1)) {
-                if (pp_sr == x && pp_d != x && ol_dead(x, i + 2)) rel = pp_rel("copy_dead");
+            } else if (x <= 5 && pk_movat(i + 1)) {
+                if (pk_sr == x && pk_d != x && ol_dead(x, i + 2)) rel = pk_rel("copy_dead");
             }
         }
         if (rel == none && i + 1 < n) {            /* [H4] */
             int ya; int xa; int yb; int db;
-            if (pp_movat(i)) {
-                ya = pp_d; xa = pp_sr;
+            if (pk_movat(i)) {
+                ya = pk_d; xa = pk_sr;
                 if (ya <= 5 && ya != xa && ol_k[i + 1] == OK_SIMPLE
                     && (ol_rm[i + 1] & (1 << ya)) && (ol_wm[i + 1] & (1 << ya)) == 0
-                    && ol_dead(ya, i + 2)) { rel = pp_rel("copy_into"); y = ya; x = xa; }
+                    && ol_dead(ya, i + 2)) { rel = pk_rel("copy_into"); y = ya; x = xa; }
             }
             if (rel == none && ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
                 db = ol_firstreg(i);
-                if (db >= 0 && db <= 5 && (ol_wm[i] & (1 << db)) && pp_movat(i + 1)) {
-                    yb = pp_d;
-                    if (pp_sr == db && yb != db && ol_dead(db, i + 2)) { rel = pp_rel("dest_to_mov"); x = db; y = yb; }
+                if (db >= 0 && db <= 5 && (ol_wm[i] & (1 << db)) && pk_movat(i + 1)) {
+                    yb = pk_d;
+                    if (pk_sr == db && yb != db && ol_dead(db, i + 2)) { rel = pk_rel("dest_to_mov"); x = db; y = yb; }
                 }
             }
         }
         if (rel == none) {
             if (ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
                 d = ol_firstreg(i);
-                if (d >= 0 && d <= 5) { if ((ol_wm[i] & (1 << d)) && ol_dead(d, i + 1)) rel = pp_rel("a_dead"); }
+                if (d >= 0 && d <= 5) { if ((ol_wm[i] & (1 << d)) && ol_dead(d, i + 1)) rel = pk_rel("a_dead"); }
             }
         }
         if (rel == none) { ol_emit(i); i = i + 1; continue; }
         key[0] = a; key[1] = b; key[2] = rel; key[3] = 0;
-        act = inf(S_PEEP, key, 0); pp_asks = pp_asks + 1;
-        if (act == pp_act("keep")) { ol_emit(i); i = i + 1; continue; }
+        act = inf(S_PEEP, key, 0); pk_asks = pk_asks + 1;
+        if (act == pk_act("keep")) { ol_emit(i); i = i + 1; continue; }
         hits = hits + 1;
-        if (act == pp_act("load_to_mov")) {
+        if (act == pk_act("load_to_mov")) {
             ol_emit(i);
-            ol_puts("  mov "); pp_emitreg(y); ol_puts(", "); pp_emitreg(x); pp_nl();
+            ol_puts("  mov "); pk_emitreg(y); ol_puts(", "); pk_emitreg(x); pk_nl();
             i = i + 2; continue;
         }
-        if (act == pp_act("drop_b")) { ol_emit(i); i = i + 2; continue; }
-        if (act == pp_act("drop_a")) { i = i + 1; continue; }
-        if (act == pp_act("retarget")) {
-            p = pp_lastword(i); ol_put(ol_s[i], p);
-            q = pp_lastword(t); ol_put(q, ol_e[t]); pp_nl();
+        if (act == pk_act("drop_b")) { ol_emit(i); i = i + 2; continue; }
+        if (act == pk_act("drop_a")) { i = i + 1; continue; }
+        if (act == pk_act("retarget")) {
+            p = pk_lastword(i); ol_put(ol_s[i], p);
+            q = pk_lastword(t); ol_put(q, ol_e[t]); pk_nl();
             i = i + 1; continue;
         }
-        if (act == pp_act("to_mov")) {
-            ol_puts("  mov "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); pp_nl();
+        if (act == pk_act("to_mov")) {
+            ol_puts("  mov "); pk_emitreg(pk_d); ol_puts(", "); pk_emitreg(pk_sr); pk_nl();
             i = i + 2; continue;
         }
-        if (act == pp_act("to_shl")) {
+        if (act == pk_act("to_shl")) {
             lg = 0; while (v > 1) { v = v / 2; lg = lg + 1; }
-            ol_puts("  imm "); pp_emitreg(x); ol_puts(", "); pp_emitnum(lg); pp_nl();
-            ol_puts("  shl64 "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); ol_puts(", "); pp_emitreg(x); pp_nl();
+            ol_puts("  imm "); pk_emitreg(x); ol_puts(", "); pk_emitnum(lg); pk_nl();
+            ol_puts("  shl64 "); pk_emitreg(pk_d); ol_puts(", "); pk_emitreg(pk_sr); ol_puts(", "); pk_emitreg(x); pk_nl();
             i = i + 2; continue;
         }
-        if (act == pp_act("retarget_dest")) {       /* A writes rY; B goes */
-            pp_rereg(i, x, y, 0);
+        if (act == pk_act("retarget_dest")) {       /* A writes rY; B goes */
+            pk_rereg(i, x, y, 0);
             i = i + 2; continue;
         }
-        if (act == pp_act("fold_copy")) {           /* A goes; B reads rX */
-            pp_rereg(i + 1, y, x, 1);
+        if (act == pk_act("fold_copy")) {           /* A goes; B reads rX */
+            pk_rereg(i + 1, y, x, 1);
             i = i + 2; continue;
         }
-        if (act == pp_act("fold_imm")) {
-            ol_puts("  imm "); pp_emitreg(pp_d); ol_puts(", "); pp_emitnum(pp_imm); pp_nl();
+        if (act == pk_act("fold_imm")) {
+            ol_puts("  imm "); pk_emitreg(pk_d); ol_puts(", "); pk_emitnum(pk_imm); pk_nl();
             i = i + 2; continue;
         }
         ol_emit(i); i = i + 1; hits = hits - 1;     /* an action this code does not know */
@@ -16181,7 +16181,6 @@ int tkg_rc[BK_MAXT]; int tkg_wi[BK_MAXT];
 int bk_impof(int c);                /* the IAT slot `winimp` names */
 /* an op's index in one of catalog.ENCSPEC's tables, or -1 [I5] */
 int enc_ix(char *tab, int n, char *o) { int L; L = 0; while (o[L]) L = L + 1; return vfind(tab, n, o, L); }
-int bk_str_is(char *a, char *b);
 int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
@@ -16332,11 +16331,11 @@ int bk_lower(void) {
                AT_FDCWD first, renameat2 twice and flags 0 fifth */
             bk_facts(cw);
             {   char *sh; sh = bk_nth(BH_ABI_ARGSHAPE, bkf_argshape);
-                if (bk_str_is(sh, "atfd_1"))
+                if (strsame(sh, "atfd_1"))
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen);
-                else { if (bk_str_is(sh, "atfd_1_zero"))
+                else { if (strsame(sh, "atfd_1_zero"))
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0, 0 - 1, 0);
-                else { if (bk_str_is(sh, "atfd_2_zero5")) {
+                else { if (strsame(sh, "atfd_2_zero5")) {
                     bk_a4k = SK_IMM; bk_a4v = 0;
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0 - 100, SK_MEM, bk_scr1);
                 } else
@@ -16437,11 +16436,6 @@ int ob(int b) { bkout[bkol] = b; bkol = bkol + 1; return 0; }
 int ow(unsigned long v) {           /* a 32-bit little-endian word */
     ob(v & 255); ob((v >> 8) & 255); ob((v >> 16) & 255); ob((v >> 24) & 255); return 0;
 }
-int bk_str_is(char *a, char *b) {
-    int k; k = 0;
-    while (a[k] && b[k]) { if (a[k] != b[k]) return 0; k = k + 1; }
-    return a[k] == b[k];
-}
 /* a label's byte offset -- 0 while sizing, as size() passes {k: 0} */
 long bk_label(int id) {
     int t;
@@ -16523,8 +16517,8 @@ long a_relf(int i, long d) {
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
-    if (bk_str_is(r, "arm26")) return a_disp(d, 26) & 0x3FFFFFF;
-    if (bk_str_is(r, "arm19")) return (a_disp(d, 19) & 0x7FFFF) << 5;
+    if (strsame(r, "arm26")) return a_disp(d, 26) & 0x3FFFFFF;
+    if (strsame(r, "arm19")) return (a_disp(d, 19) & 0x7FFFF) << 5;
     __write(2, "back end: reloc class has no arm field\n", 39); __exit(1);
     return 0;
 }
@@ -16551,10 +16545,10 @@ int a_fd2handle(long pc, long hstd) {
 /* body, then the abi table's `retconv` tail; the import is `winimp` [I4] */
 int a_wintail(int rc, long pc, long written) {
     char *n; n = bk_nth(BH_ABI_RETCONV, rc);
-    if (bk_str_is(n, "wcount")) { a_adrp_add(A_IP0, pc, written); a_ldr(0, A_IP0, 0); return 0; }
-    if (bk_str_is(n, "bool_inv")) { ow(0xF100001F); ow(0x9A9F17E0); return 0; }   /* cmp; cset eq */
-    if (bk_str_is(n, "bool_neg")) { ow(0x7100001F); ow(0xDA9F13E0); return 0; }   /* cmp w0; csetm eq */
-    if (bk_str_is(n, "dword_sx")) { ow(0x93407C00); return 0; }                   /* sxtw x0, w0 */
+    if (strsame(n, "wcount")) { a_adrp_add(A_IP0, pc, written); a_ldr(0, A_IP0, 0); return 0; }
+    if (strsame(n, "bool_inv")) { ow(0xF100001F); ow(0x9A9F17E0); return 0; }   /* cmp; cset eq */
+    if (strsame(n, "bool_neg")) { ow(0x7100001F); ow(0xDA9F13E0); return 0; }   /* cmp w0; csetm eq */
+    if (strsame(n, "dword_sx")) { ow(0x93407C00); return 0; }                   /* sxtw x0, w0 */
     return 0;
 }
 int a_winbody(int i, long off);
@@ -16571,19 +16565,19 @@ int a_winbody(int i, long off) {
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
     s = bkol;
-    if (bk_str_is(nm, "exit")) { a_callimp(pc, bk_impof(tkg_wi[i])); return 1; }
-    if (bk_str_is(nm, "write") || bk_str_is(nm, "read")) {
+    if (strsame(nm, "exit")) { a_callimp(pc, bk_impof(tkg_wi[i])); return 1; }
+    if (strsame(nm, "write") || strsame(nm, "read")) {
         a_fd2handle(pc, hstd);
         a_adrp_add(3, pc + (bkol - s), written);
         ow(0xAA1F03E4);                              /* mov x4, xzr */
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "mmap")) {          /* VirtualAlloc, four args in x0..x3 */
+    if (strsame(nm, "mmap")) {          /* VirtualAlloc, four args in x0..x3 */
         a_callimp(pc, bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
+    if (strsame(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
         long scr0; long scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         a_adrp_add(3, pc, written);
@@ -16597,18 +16591,18 @@ int a_winbody(int i, long off) {
         a_callimp(pc + (bkol - s), 10);          /* FlushInstructionCache */
         return 1;
     }
-    if (bk_str_is(nm, "munmap")) {        /* VirtualFree(addr, 0, MEM_RELEASE) */
+    if (strsame(nm, "munmap")) {        /* VirtualFree(addr, 0, MEM_RELEASE) */
         ow(0xD2900002);
         ow(0xAA1F03E1);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "close")) {
+    if (strsame(nm, "close")) {
         a_fd2handle(pc, hstd);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "open")) {
+    if (strsame(nm, "open")) {
         ow(0xAA0203E4);                              /* x4 = x2 */
         a_movz(2, 3);
         ow(0xAA1F03E3);
@@ -16617,15 +16611,15 @@ int a_winbody(int i, long off) {
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "lseek")) {
+    if (strsame(nm, "lseek")) {
         ow(0xAA0203E3);                              /* x3 = x2 (method) */
         ow(0xAA1F03E2);                              /* x2 = 0 */
         a_fd2handle(pc + (bkol - s), hstd);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
-    if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
-        if (bk_str_is(nm, "rename")) a_movz(2, 1);
+    if (strsame(nm, "unlink") || strsame(nm, "rename")) {
+        if (strsame(nm, "rename")) a_movz(2, 1);
         a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
@@ -16685,16 +16679,16 @@ int a_fp(char *o, long *a) {
         ow(0x9A9F07E0 | (fc << 12) | a[0]);
         return 1;
     }
-    if (bk_str_is(o, "cvtid")) { ow(0x9E620000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "cvtud")) { ow(0x9E630000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "cvtis")) { ow(0x9E220000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
-    if (bk_str_is(o, "cvtus")) { ow(0x9E230000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
-    if (bk_str_is(o, "cvtdi")) { a_fmov_to(16, a[1], 1); ow(0x9E780000 | (16 << 5) | a[0]); return 1; }
-    if (bk_str_is(o, "cvtdu")) { a_fmov_to(16, a[1], 1); ow(0x9E790000 | (16 << 5) | a[0]); return 1; }
-    if (bk_str_is(o, "cvtsd")) { a_fmov_to(16, a[1], 0); ow(0x1E22C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "cvtds")) { a_fmov_to(16, a[1], 1); ow(0x1E624000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
-    if (bk_str_is(o, "fsqrt64")) { a_fmov_to(16, a[1], 1); ow(0x1E61C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
-    if (bk_str_is(o, "fsqrt32")) { a_fmov_to(16, a[1], 0); ow(0x1E21C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "cvtid")) { ow(0x9E620000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "cvtud")) { ow(0x9E630000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "cvtis")) { ow(0x9E220000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "cvtus")) { ow(0x9E230000 | (a[1] << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "cvtdi")) { a_fmov_to(16, a[1], 1); ow(0x9E780000 | (16 << 5) | a[0]); return 1; }
+    if (strsame(o, "cvtdu")) { a_fmov_to(16, a[1], 1); ow(0x9E790000 | (16 << 5) | a[0]); return 1; }
+    if (strsame(o, "cvtsd")) { a_fmov_to(16, a[1], 0); ow(0x1E22C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "cvtds")) { a_fmov_to(16, a[1], 1); ow(0x1E624000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
+    if (strsame(o, "fsqrt64")) { a_fmov_to(16, a[1], 1); ow(0x1E61C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 1); return 1; }
+    if (strsame(o, "fsqrt32")) { a_fmov_to(16, a[1], 0); ow(0x1E21C000 | (16 << 5) | 16); a_fmov_from(a[0], 16, 0); return 1; }
     return 0;
 }
 
@@ -16768,8 +16762,8 @@ int bk_arm(int i, long off) {
     }
     if (op == TO_GATE) {
         char *g; g = bk_nth(BH_ABI_GATE, tkg_gate[i]);
-        if (bk_str_is(g, "winapi")) return a_winapi(i, off);
-        if (bk_str_is(g, "svc80")) ow(0xD4001001); else ow(0xD4000001);
+        if (strsame(g, "winapi")) return a_winapi(i, off);
+        if (strsame(g, "svc80")) ow(0xD4001001); else ow(0xD4000001);
         /* Darwin puts a failed syscall in the CARRY flag and returns errno
            POSITIVE: `b.cc +8` over `neg x0, x0`, so the caller sees -errno
            the way it does everywhere else [I-20] */
@@ -16777,8 +16771,8 @@ int bk_arm(int i, long off) {
         return 1;
     }
     o = bk_nth(BKOPS, op);
-    if (bk_str_is(o, "mov")) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
-    if (bk_str_is(o, "imm")) {
+    if (strsame(o, "mov")) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
+    if (strsame(o, "imm")) {
         unsigned long u; u = a[1];
         ow(0xD2800000 | ((u & 0xFFFF) << 5) | a[0]);
         k = 1;
@@ -16790,9 +16784,9 @@ int bk_arm(int i, long off) {
         j = enc_ix(ENC_ARM_ALU3, NENC_ARM_ALU3, o);
         if (j >= 0) { alu = ENC_ARM_ALU3_V(j); ow(alu | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
     }
-    if (bk_str_is(o, "mul64")) { ow(0x9B007C00 | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
-    if (bk_str_is(o, "load64")) { a_mem(0, a[0], a[1], a[2], 8); return 1; }
-    if (bk_str_is(o, "store64")) { a_mem(1, a[2], a[0], a[1], 8); return 1; }
+    if (strsame(o, "mul64")) { ow(0x9B007C00 | (a[2] << 16) | (a[1] << 5) | a[0]); return 1; }
+    if (strsame(o, "load64")) { a_mem(0, a[0], a[1], a[2], 8); return 1; }
+    if (strsame(o, "store64")) { a_mem(1, a[2], a[0], a[1], 8); return 1; }
     {   int cc; int j;                         /* [I5] catalog.ENCSPEC */
         cc = 0 - 1; j = enc_ix(ENC_ARM_INVCOND, NENC_ARM_INVCOND, o);
         if (j >= 0) cc = ENC_ARM_INVCOND_V(j);
@@ -16802,7 +16796,7 @@ int bk_arm(int i, long off) {
             return 1;
         }
     }
-    if (bk_str_is(o, ".frame")) {
+    if (strsame(o, ".frame")) {
         n = a[0];
         if (n > 0 - 4096 && n < 4096) {
             ow((n >= 0 ? 0xD1000000 : 0x91000000) | ((n >= 0 ? n : 0 - n) << 10) | (7 << 5) | 7);
@@ -16812,11 +16806,11 @@ int bk_arm(int i, long off) {
         ow((n >= 0 ? 0xCB000000 : 0x8B000000) | (A_IP0 << 16) | (7 << 5) | 7);
         return 1;
     }
-    if (bk_str_is(o, ".lea")) { a_adrp_add(a[0], pc, bk_leaaddr(i)); return 1; }
-    if (bk_str_is(o, ".ld")) { a_mem(0, a[0], a[1], a[2], a[3]); return 1; }
-    if (bk_str_is(o, ".st")) { a_mem(1, a[2], a[0], a[1], a[3]); return 1; }
+    if (strsame(o, ".lea")) { a_adrp_add(a[0], pc, bk_leaaddr(i)); return 1; }
+    if (strsame(o, ".ld")) { a_mem(0, a[0], a[1], a[2], a[3]); return 1; }
+    if (strsame(o, ".st")) { a_mem(1, a[2], a[0], a[1], a[3]); return 1; }
     if (a_fp(o, a)) return 1;
-    if (bk_str_is(o, ".zero")) {
+    if (strsame(o, ".zero")) {
         long kk; int wd;
         kk = 0;
         while (kk < a[2]) {
@@ -16826,41 +16820,41 @@ int bk_arm(int i, long off) {
         }
         return 1;
     }
-    if (bk_str_is(o, "callr")) {
+    if (strsame(o, "callr")) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
         ow(0xD61F0000 | (a[0] << 5));
         return 1;
     }
-    if (bk_str_is(o, ".div") || bk_str_is(o, ".udiv")) {
-        ow((bk_str_is(o, ".div") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | a[0]);
+    if (strsame(o, ".div") || strsame(o, ".udiv")) {
+        ow((strsame(o, ".div") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | a[0]);
         return 1;
     }
-    if (bk_str_is(o, ".mod") || bk_str_is(o, ".umod")) {
-        ow((bk_str_is(o, ".mod") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | A_IP1);
+    if (strsame(o, ".mod") || strsame(o, ".umod")) {
+        ow((strsame(o, ".mod") ? 0x9AC00C00 : 0x9AC00800) | (a[2] << 16) | (a[1] << 5) | A_IP1);
         ow(0x9B008000 | (a[2] << 16) | (a[1] << 10) | (A_IP1 << 5) | a[0]);
         return 1;
     }
-    if (bk_str_is(o, "ret")) {
+    if (strsame(o, "ret")) {
         ow(0xF9400000 | (7 << 5) | A_IP1);
         ow(0x91002000 | (7 << 5) | 7);
         ow(0xD61F0000 | (A_IP1 << 5));
         return 1;
     }
-    if (bk_str_is(o, "nop")) { ow(0xD503201F); return 1; }
-    if (bk_str_is(o, "jump")) {
+    if (strsame(o, "nop")) { ow(0xD503201F); return 1; }
+    if (strsame(o, "jump")) {
         ow(0x14000000 | a_relf(i, bk_label(a[0]) - off));
         return 1;
     }
-    if (bk_str_is(o, "call")) {
+    if (strsame(o, "call")) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
         ow(0x14000000 | a_relf(i, bk_label(a[0]) - (off + 12)));
         return 1;
     }
-    if (bk_str_is(o, "jumpz")) {
+    if (strsame(o, "jumpz")) {
         ow(0xB4000000 | a_relf(i, bk_label(a[1]) - off) | a[0]);
         return 1;
     }
@@ -16903,7 +16897,7 @@ int x_rel(int i, long d) {          /* emit_x86.RELBYTES */
     char *r;
     if (tkg_rel[i] < 0) { __write(2, "back end: branch without a reloc answer\n", 40); __exit(1); }
     r = bk_nth(BH_RELOC_Y, tkg_rel[i]);
-    if (bk_str_is(r, "rel32")) { x_d32(d); return 0; }
+    if (strsame(r, "rel32")) { x_d32(d); return 0; }
     __write(2, "back end: reloc class has no x86 field\n", 39); __exit(1);
     return 0;
 }
@@ -16993,20 +16987,20 @@ int x_fd2handle(long pc, long hstd) {
    table's `winimp`, the tail its `retconv` [I4] */
 int x_wintail(int rc, long pc, long written) {
     char *n; n = bk_nth(BH_ABI_RETCONV, rc);
-    if (bk_str_is(n, "wcount")) { x_rip(0x8B, X_RAX, pc + 7, written); return 0; }
-    if (bk_str_is(n, "bool_inv")) {
+    if (strsame(n, "wcount")) { x_rip(0x8B, X_RAX, pc + 7, written); return 0; }
+    if (strsame(n, "bool_inv")) {
         x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax, 0 */
         ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
         x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx rax, al */
         return 0;
     }
-    if (bk_str_is(n, "bool_neg")) {
+    if (strsame(n, "bool_neg")) {
         ob(0x85); ob(0xC0); ob(0x0F); ob(0x94); ob(0xC0);   /* test eax; sete al */
         ob(0x48); ob(0x0F); ob(0xB6); ob(0xC0);              /* movzx rax, al */
         ob(0x48); ob(0xF7); ob(0xD8);                        /* neg rax: 0 / -1 */
         return 0;
     }
-    if (bk_str_is(n, "dword_sx")) { ob(0x48); ob(0x63); ob(0xC0); return 0; }   /* movsxd */
+    if (strsame(n, "dword_sx")) { ob(0x48); ob(0x63); ob(0xC0); return 0; }   /* movsxd */
     return 0;
 }
 int x_winbody(int i, long off);
@@ -17023,11 +17017,11 @@ int x_winbody(int i, long off) {
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
     s = bkol;
-    if (bk_str_is(nm, "exit")) {
+    if (strsame(nm, "exit")) {
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "write") || bk_str_is(nm, "read")) {
+    if (strsame(nm, "write") || strsame(nm, "read")) {
         x_fd2handle(pc, hstd);
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);
         x_alignpre(1);
@@ -17036,11 +17030,11 @@ int x_winbody(int i, long off) {
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "mmap")) {
+    if (strsame(nm, "mmap")) {
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "mprotect")) {
+    if (strsame(nm, "mprotect")) {
         long scr0; long scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);   /* r9 = &old */
@@ -17056,20 +17050,20 @@ int x_winbody(int i, long off) {
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "munmap")) {
+    if (strsame(nm, "munmap")) {
         x_movri(X_R8, 0x8000);            /* MEM_RELEASE */
         x_movri(X_RDX, 0);                /* dwSize must be 0 */
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "close")) {
+    if (strsame(nm, "close")) {
         x_fd2handle(pc, hstd);
         x_alignpre(0);
         x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "open")) {
+    if (strsame(nm, "open")) {
         x_movrr(X_RAX, X_R8);
         x_alignpre(3);
         x_rex(1, 0, 0, 0); ob(0x89); x_modrm(1, 0, 4); ob(0x24); ob(0x20);
@@ -17081,14 +17075,14 @@ int x_winbody(int i, long off) {
         x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "lseek")) {        /* SetFilePointer(h, low, NULL, method) */
+    if (strsame(nm, "lseek")) {        /* SetFilePointer(h, low, NULL, method) */
         x_movrr(X_R9, X_R8); x_movri(X_R8, 0);
         x_fd2handle(pc + (bkol - s), hstd);
         x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
-    if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
-        if (bk_str_is(nm, "rename")) x_movri(X_R8, 1);  /* REPLACE_EXISTING */
+    if (strsame(nm, "unlink") || strsame(nm, "rename")) {
+        if (strsame(nm, "rename")) x_movri(X_R8, 1);  /* REPLACE_EXISTING */
         x_alignpre(0);
         x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
@@ -17192,12 +17186,12 @@ int x_fp(char *o, long *a) {
         x_and1(a[0]);
         return 1;
     }
-    if (bk_str_is(o, "cvtid")) { x_sseg(0xF2, 0x2A, 0, a[1], 1, 0); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtis")) { x_sseg(0xF3, 0x2A, 0, a[1], 1, 0); x_movdg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtud")) { x_u2f(a[1], 1); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtus")) { x_u2f(a[1], 0); x_movdg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtdi")) { x_movqx(0, a[1]); x_sseg(0xF2, 0x2C, 0, a[0], 1, 1); return 1; }
-    if (bk_str_is(o, "cvtdu")) {
+    if (strsame(o, "cvtid")) { x_sseg(0xF2, 0x2A, 0, a[1], 1, 0); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "cvtis")) { x_sseg(0xF3, 0x2A, 0, a[1], 1, 0); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "cvtud")) { x_u2f(a[1], 1); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "cvtus")) { x_u2f(a[1], 0); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "cvtdi")) { x_movqx(0, a[1]); x_sseg(0xF2, 0x2C, 0, a[0], 1, 1); return 1; }
+    if (strsame(o, "cvtdu")) {
         int s; int bigstart;
         x_movqx(0, a[1]); x_movri(X_R11, 0x43E0000000000000); x_movqx(1, X_R11);
         x_ssex(0x66, 0x2E, 0, 1, 0 - 1);                                /* ucomisd */
@@ -17211,10 +17205,10 @@ int x_fp(char *o, long *a) {
         bkout[bigstart - 1] = bkol - bigstart;
         return 1;
     }
-    if (bk_str_is(o, "cvtsd")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x5A, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "cvtds")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x5A, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
-    if (bk_str_is(o, "fsqrt64")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x51, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
-    if (bk_str_is(o, "fsqrt32")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x51, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "cvtsd")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x5A, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "cvtds")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x5A, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
+    if (strsame(o, "fsqrt64")) { x_movqx(0, a[1]); x_ssex(0xF2, 0x51, 0, 0, 0 - 1); x_movqg(a[0], 0); return 1; }
+    if (strsame(o, "fsqrt32")) { x_movdx(0, a[1]); x_ssex(0xF3, 0x51, 0, 0, 0 - 1); x_movdg(a[0], 0); return 1; }
     return 0;
 }
 /* x86's two-operand ALU: dst = s1 op s2 via mov dst,s1 -- unless dst IS s2 */
@@ -17305,7 +17299,7 @@ int bk_x86(int i, long off) {
         return 1;
     }
     if (op == TO_GATE) {
-        if (bk_str_is(bk_nth(BH_ENC_Y, tkg_form[i]), "winapi")) return x_winapi(i, off);
+        if (strsame(bk_nth(BH_ENC_Y, tkg_form[i]), "winapi")) return x_winapi(i, off);
         ob(0x0F); ob(0x05);
         /* Darwin: CF set means failure, rax holds errno -- `jnc +3` over
            `neg rax` [I-20] */
@@ -17313,8 +17307,8 @@ int bk_x86(int i, long off) {
         return 1;
     }
     o = bk_nth(BKOPS, op);
-    if (bk_str_is(o, "mov")) { x_movrr(a[0], a[1]); return 1; }
-    if (bk_str_is(o, "imm")) { x_movri(a[0], a[1]); return 1; }
+    if (strsame(o, "mov")) { x_movrr(a[0], a[1]); return 1; }
+    if (strsame(o, "imm")) { x_movri(a[0], a[1]); return 1; }
     {   int alu; int j;                        /* [I5] catalog.ENCSPEC */
         alu = 0 - 1; j = enc_ix(ENC_X86_ALU2, NENC_X86_ALU2, o);
         if (j >= 0) alu = ENC_X86_ALU2_V(j);
@@ -17335,29 +17329,29 @@ int bk_x86(int i, long off) {
         x_movrr(a[0], X_R11);
         return 1;
     }
-    if (bk_str_is(o, "mul64")) {
+    if (strsame(o, "mul64")) {
         s2 = x_alias(a[0], a[1], a[2]);
         if (a[0] != a[1]) x_movrr(a[0], a[1]);
         x_rex(1, a[0] >> 3, 0, s2 >> 3); ob(0x0F); ob(0xAF); x_modrm(3, a[0], s2);
         return 1;
     }
-    if (bk_str_is(o, "load64")) { x_load(a[0], a[1], a[2], 8); return 1; }
-    if (bk_str_is(o, "store64")) { x_store(a[2], a[0], a[1], 8); return 1; }
+    if (strsame(o, "load64")) { x_load(a[0], a[1], a[2], 8); return 1; }
+    if (strsame(o, "store64")) { x_store(a[2], a[0], a[1], 8); return 1; }
     {   int cc; int j;                         /* [I5] catalog.ENCSPEC */
         cc = 0 - 1; j = enc_ix(ENC_X86_SETCC, NENC_X86_SETCC, o);
         if (j >= 0) cc = ENC_X86_SETCC_V(j);
         if (cc >= 0) { x_cmpset(cc, a[0], a[1], a[2]); return 1; }
     }
-    if (bk_str_is(o, ".frame")) {
+    if (strsame(o, ".frame")) {
         long n; n = a[0];
         x_aluimm(X_RSP, n >= 0 ? 5 : 0, n >= 0 ? n : 0 - n);
         return 1;
     }
-    if (bk_str_is(o, ".lea")) { x_rip(0x8D, a[0], pc + 7, bk_leaaddr(i)); return 1; }
-    if (bk_str_is(o, ".ld")) { x_load(a[0], a[1], a[2], a[3]); return 1; }
-    if (bk_str_is(o, ".st")) { x_store(a[2], a[0], a[1], a[3]); return 1; }
+    if (strsame(o, ".lea")) { x_rip(0x8D, a[0], pc + 7, bk_leaaddr(i)); return 1; }
+    if (strsame(o, ".ld")) { x_load(a[0], a[1], a[2], a[3]); return 1; }
+    if (strsame(o, ".st")) { x_store(a[2], a[0], a[1], a[3]); return 1; }
     if (x_fp(o, a)) return 1;
-    if (bk_str_is(o, ".zero")) {
+    if (strsame(o, ".zero")) {
         long kk; int wd;
         ob(0x4D); ob(0x31); ob(0xDB);
         kk = 0;
@@ -17368,12 +17362,12 @@ int bk_x86(int i, long off) {
         }
         return 1;
     }
-    if (bk_str_is(o, "callr")) {           /* call r64: FF /2 [S-15 B1] */
+    if (strsame(o, "callr")) {           /* call r64: FF /2 [S-15 B1] */
         if (a[0] >= 8) x_rex(0, 0, 0, 1);
         ob(0xFF); x_modrm(3, 2, a[0]);
         return 1;
     }
-    if (bk_str_is(o, ".div") || bk_str_is(o, ".mod") || bk_str_is(o, ".udiv") || bk_str_is(o, ".umod")) {
+    if (strsame(o, ".div") || strsame(o, ".mod") || strsame(o, ".udiv") || strsame(o, ".umod")) {
         x_spadj(16, 5);
         x_mem(0x89, 0 - 1, X_RAX, X_RSP, 0, 1);
         x_mem(0x89, 0 - 1, X_RDX, X_RSP, 8, 1);
@@ -17386,28 +17380,28 @@ int bk_x86(int i, long off) {
             ob(0x48); ob(0x99);
             x_rex(1, 0, 0, 1); ob(0xF7); x_modrm(3, 7, 11);
         }
-        x_movrr(X_R11, (bk_str_is(o, ".div") || bk_str_is(o, ".udiv")) ? X_RAX : X_RDX);
+        x_movrr(X_R11, (strsame(o, ".div") || strsame(o, ".udiv")) ? X_RAX : X_RDX);
         x_mem(0x8B, 0 - 1, X_RAX, X_RSP, 0, 1);
         x_mem(0x8B, 0 - 1, X_RDX, X_RSP, 8, 1);
         x_spadj(16, 0);
         x_movrr(a[0], X_R11);
         return 1;
     }
-    if (bk_str_is(o, "ret")) { ob(0xC3); return 1; }   /* the machine's own */
-    if (bk_str_is(o, "nop")) { ob(0x90); return 1; }
-    if (bk_str_is(o, "jump")) {
+    if (strsame(o, "ret")) { ob(0xC3); return 1; }   /* the machine's own */
+    if (strsame(o, "nop")) { ob(0x90); return 1; }
+    if (strsame(o, "jump")) {
         tjk[i] = 2; tjt[i] = a[0];
         if (tshort[i]) { ob(0xEB); x_rel8(bk_label(a[0]) - (off + 2)); return 1; }
         ob(0xE9); x_rel(i, bk_label(a[0]) - (off + 5)); return 1;
     }
-    if (bk_str_is(o, "call")) {            /* call rel32: the return address
+    if (strsame(o, "call")) {            /* call rel32: the return address
                                               lands where the old sequence put
                                               it, so ret and the frame walk
                                               are unchanged */
         ob(0xE8); x_rel(i, bk_label(a[0]) - (off + 5));
         return 1;
     }
-    if (bk_str_is(o, "jumpz")) {
+    if (strsame(o, "jumpz")) {
         int r; r = a[0];
         x_rex(1, r >> 3, 0, r >> 3); ob(0x85); x_modrm(3, r, r);
         tjk[i] = 3 + 2; tjt[i] = a[1];

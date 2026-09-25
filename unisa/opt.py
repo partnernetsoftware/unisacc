@@ -449,7 +449,7 @@ def _movat(ln):
 
 def _rereg(ln, a, b, allr):
     """ln with register a written as b: every token, or only the first
-    register token (the destination) [H4] -- as pp_rereg"""
+    register token (the destination) [H4] -- as pk_rereg"""
     out, p, done = [], 0, False
     while p < len(ln):
         c = ln[p]
@@ -502,7 +502,7 @@ class _Peep(_Round):
         return l
 
     def stfuse(self, i, out):
-        """a local's store, the mirror of `local` [H4] -- pp_stfuse"""
+        """a local's store, the mirror of `local` [H4] -- pk_stfuse"""
         L, n = self.L, self.n
         if i + 3 >= n:
             return 0

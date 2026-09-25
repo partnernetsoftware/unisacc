@@ -12,6 +12,25 @@
 int ol_s[OPT_MAXL]; int ol_e[OPT_MAXL]; int ol_n;   /* line starts, and where each ends (its newline, or nout) */
 char out2[MAXOUT]; int nout2;
 int ol_len(int l) { return ol_e[l] - ol_s[l]; }
+/* ---- writing out2: every rewritten line goes through these ---- */
+int ol_c(int c) { out2[nout2] = c; nout2 = nout2 + 1; return 0; }
+int ol_put(int p, int e) { while (p < e) { ol_c(out[p]); p = p + 1; } return 0; }
+int ol_puts(char *t) { int k; k = 0; while (t[k]) { ol_c(t[k]); k = k + 1; } return 0; }
+int pk_nl(void) { return ol_c(10); }
+int ol_emit(int l) { ol_put(ol_s[l], ol_e[l]); return pk_nl(); }
+int pk_emitreg(int r) {
+    ol_c(114);
+    if (r >= 10) ol_c(48 + r / 10);
+    return ol_c(48 + r % 10);
+}
+int pk_emitnum(long v) {
+    char b[24]; int n;
+    n = 0;
+    if (v == 0) { b[0] = 48; n = 1; }
+    while (v > 0) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; ol_c(b[n]); }
+    return 0;
+}
 int ol_is(int l, char *t) {          /* line l is exactly t */
     int k; int p; p = ol_s[l]; k = 0;
     while (t[k]) { if (out[p + k] != t[k]) return 0; k = k + 1; }
@@ -105,8 +124,6 @@ int ol_simple(int l) {                /* straight-line, explicit operands only *
     i = ol_opi(l);
     return i >= 0 && oi_simple[i];
 }
-int ol_emit(int l) { int k; k = 0; while (k < ol_len(l)) { out2[nout2] = out[ol_s[l] + k]; nout2 = nout2 + 1; k = k + 1; }
-    out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
 int ol_mov(int y, int x) {
     char b[32]; int n;
     out2[nout2] = 32; out2[nout2 + 1] = 32; nout2 = nout2 + 2;
@@ -365,8 +382,6 @@ int ol_pre(int l, char *t) {         /* line l starts with t -> its length */
     while (t[k]) { if (p + k >= ol_e[l] || out[p + k] != t[k]) return 0; k = k + 1; }
     return k;
 }
-int ol_put(int p, int e) { while (p < e) { out2[nout2] = out[p]; nout2 = nout2 + 1; p = p + 1; } return 0; }
-int ol_puts(char *t) { int k; k = 0; while (t[k]) { out2[nout2] = t[k]; nout2 = nout2 + 1; k = k + 1; } return 0; }
 int ol_local(int i) {
     int a; int n0; int n1; int d; int q; int k; int ld;
     if (i + 2 >= ol_n || ol_zok[2] == 0) return 0;
@@ -493,65 +508,65 @@ int ol_commit(void) {
    jump, the instruction it lands on), and say how their operands relate.
    Whether that relation licenses a rewrite -- and which -- is the `peep`
    table's answer, asked of its net exactly as unisa/opt.py asks it. */
-int pp_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
+int pk_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
     int i;
     i = ol_opi(l);
     if (i < 0) return vfind(BF_PEEP_0, NBF_PEEP_0, "other", 5);
     return oi_acls[i];
 }
-int pp_bcls(int l) {                  /* index into BF_PEEP_1, from opinfo */
+int pk_bcls(int l) {                  /* index into BF_PEEP_1, from opinfo */
     int i;
     if (l >= ol_n) return vfind(BF_PEEP_1, NBF_PEEP_1, "none", 4);
     i = ol_opi(l);
     if (i < 0) return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
     return oi_bcls[i];
 }
-int pp_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
-int pp_real(int l) {                  /* the first line at or after l that is not a label */
-    while (l < ol_n && pp_islab(l)) l = l + 1;
+int pk_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
+int pk_real(int l) {                  /* the first line at or after l that is not a label */
+    while (l < ol_n && pk_islab(l)) l = l + 1;
     return l;
 }
-int pp_lastword(int l) {              /* where the line's last token starts */
+int pk_lastword(int l) {              /* where the line's last token starts */
     int p; p = ol_e[l]; while (p > ol_s[l] && out[p - 1] != 32) p = p - 1; return p;
 }
-int pp_same(int p, int e, int q, int f) {    /* out[p..e) == out[q..f) */
+int pk_same(int p, int e, int q, int f) {    /* out[p..e) == out[q..f) */
     if (e - p != f - q) return 0;
     while (p < e) { if (out[p] != out[q]) return 0; p = p + 1; q = q + 1; }
     return 1;
 }
-/* `  store64 [M], rX` -> X, M at pp_m0..pp_m1; else -1 */
-int pp_m0; int pp_m1; int pp_n0; int pp_n1;
-int pp_store(int l) {
+/* `  store64 [M], rX` -> X, M at pk_m0..pk_m1; else -1 */
+int pk_m0; int pk_m1; int pk_n0; int pk_n1;
+int pk_store(int l) {
     int p; int e; int q;
     if (ol_pre(l, "  store64 [") == 0) return 0 - 1;
     p = ol_s[l] + 11; e = ol_e[l]; q = p;
     while (q < e && out[q] != 93) q = q + 1;
     if (q + 3 >= e || out[q + 1] != 44 || out[q + 2] != 32) return 0 - 1;
-    pp_m0 = p; pp_m1 = q;
+    pk_m0 = p; pk_m1 = q;
     return ol_reg(q + 3, e);
 }
-/* `  load64 rY, [M]` -> Y, M at pp_n0..pp_n1 */
-int pp_load(int l) {
+/* `  load64 rY, [M]` -> Y, M at pk_n0..pk_n1 */
+int pk_load(int l) {
     int p; int e; int q; int y;
     if (ol_pre(l, "  load64 ") == 0) return 0 - 1;
     p = ol_s[l] + 9; e = ol_e[l]; q = p;
     while (q < e && out[q] != 44) q = q + 1;
     y = ol_reg(p, q);
     if (y < 0 || q + 3 >= e || out[q + 1] != 32 || out[q + 2] != 91 || out[e - 1] != 93) return 0 - 1;
-    pp_n0 = q + 3; pp_n1 = e - 1;
+    pk_n0 = q + 3; pk_n1 = e - 1;
     return y;
 }
-/* the same store shape as the SECOND of a pair: M at pp_n0..pp_n1 */
-int pp_store2(int l) {
+/* the same store shape as the SECOND of a pair: M at pk_n0..pk_n1 */
+int pk_store2(int l) {
     int y; int a; int b;
-    a = pp_m0; b = pp_m1;
-    y = pp_store(l);
-    pp_n0 = pp_m0; pp_n1 = pp_m1; pp_m0 = a; pp_m1 = b;
+    a = pk_m0; b = pk_m1;
+    y = pk_store(l);
+    pk_n0 = pk_m0; pk_n1 = pk_m1; pk_m0 = a; pk_m1 = b;
     return y;
 }
-/* `  imm rK, N` -> K, N in pp_imm (decimal digits only, at most 18) */
-long pp_imm;
-int pp_immat(int l) {
+/* `  imm rK, N` -> K, N in pk_imm (decimal digits only, at most 18) */
+long pk_imm;
+int pk_immat(int l) {
     int p; int e; int q; int k; long v;
     if (ol_pre(l, "  imm r") == 0) return 0 - 1;
     p = ol_s[l] + 6; e = ol_e[l]; q = p;
@@ -561,53 +576,38 @@ int pp_immat(int l) {
     q = q + 2; v = 0;
     if (e - q > 18) return 0 - 1;
     while (q < e) { if (isdi(out[q] & 255) == 0) return 0 - 1; v = v * 10 + out[q] - 48; q = q + 1; }
-    pp_imm = v;
+    pk_imm = v;
     return k;
 }
-/* `  OP rD, rS, rT` -> 1, with the three in pp_d pp_sr pp_t */
-int pp_d; int pp_sr; int pp_t;
-int pp_three(int l) {
+/* `  OP rD, rS, rT` -> 1, with the three in pk_d pk_sr pk_t */
+int pk_d; int pk_sr; int pk_t;
+int pk_three(int l) {
     int p; int e; int q;
     if (l >= ol_n || out[ol_s[l]] != 32) return 0;
     p = ol_s[l] + 2; e = ol_e[l];
     while (p < e && out[p] != 32) p = p + 1;
     p = p + 1; q = p; while (q < e && out[q] != 44) q = q + 1;
-    pp_d = ol_reg(p, q); if (pp_d < 0 || q + 2 >= e) return 0;
+    pk_d = ol_reg(p, q); if (pk_d < 0 || q + 2 >= e) return 0;
     p = q + 2; q = p; while (q < e && out[q] != 44) q = q + 1;
-    pp_sr = ol_reg(p, q); if (pp_sr < 0 || q + 2 >= e) return 0;
-    pp_t = ol_reg(q + 2, e); if (pp_t < 0) return 0;
+    pk_sr = ol_reg(p, q); if (pk_sr < 0 || q + 2 >= e) return 0;
+    pk_t = ol_reg(q + 2, e); if (pk_t < 0) return 0;
     return 1;
 }
-/* `  mov rY, rX` -> 1, Y and X in pp_d, pp_sr */
-int pp_movat(int l) {
+/* `  mov rY, rX` -> 1, Y and X in pk_d, pk_sr */
+int pk_movat(int l) {
     int p; int e; int q;
     if (ol_pre(l, "  mov r") == 0) return 0;
     p = ol_s[l] + 6; e = ol_e[l]; q = p;
     while (q < e && out[q] != 44) q = q + 1;
-    pp_d = ol_reg(p, q); if (pp_d < 0 || q + 2 >= e) return 0;
-    pp_sr = ol_reg(q + 2, e);
-    return pp_sr >= 0;
+    pk_d = ol_reg(p, q); if (pk_d < 0 || q + 2 >= e) return 0;
+    pk_sr = ol_reg(q + 2, e);
+    return pk_sr >= 0;
 }
-int pp_emitreg(int r) {
-    out2[nout2] = 114; nout2 = nout2 + 1;
-    if (r >= 10) { out2[nout2] = 48 + r / 10; nout2 = nout2 + 1; }
-    out2[nout2] = 48 + r % 10; nout2 = nout2 + 1;
-    return 0;
-}
-int pp_emitnum(long v) {
-    char b[24]; int n;
-    n = 0;
-    if (v == 0) { b[0] = 48; n = 1; }
-    while (v > 0) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; }
-    while (n > 0) { n = n - 1; out2[nout2] = b[n]; nout2 = nout2 + 1; }
-    return 0;
-}
-int pp_nl(void) { out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
-int pp_rel(char *nm) { int n; n = 0; while (nm[n]) n = n + 1; return vfind(BF_PEEP_2, NBF_PEEP_2, nm, n); }
+int pk_rel(char *nm) { return vfind(BF_PEEP_2, NBF_PEEP_2, nm, blen(nm)); }
 /* an action's class index, by name -- asked for every candidate, so the
    answers (fixed for the table in hand) are kept by the name's address [J5] */
 char *pa_nm[16]; int pa_v[16]; int pa_n;
-int pp_act(char *nm) {
+int pk_act(char *nm) {
     int n; int k;
     k = 0; while (k < pa_n) { if (pa_nm[k] == nm) return pa_v[k]; k = k + 1; }
     n = 0; while (nm[n]) n = n + 1;
@@ -617,21 +617,21 @@ int pp_act(char *nm) {
 }
 /* emit line l with register a written as b: every token (all) or only the
    first -- the destination (all == 0) [H4] */
-int pp_rereg(int l, int a, int b, int all) {
+int pk_rereg(int l, int a, int b, int all) {
     int p; int e; int n; int q; int done;
     p = ol_s[l]; e = ol_e[l]; done = 0;
     while (p < e) {
         if (done == 0 && out[p] == 114 && isal(out[p - 1] & 255) == 0 && p + 1 < e && isdi(out[p + 1] & 255)) {
             q = p + 1; n = 0;
             while (q < e && isdi(out[q] & 255)) { n = n * 10 + out[q] - 48; q = q + 1; }
-            if (n == a) { pp_emitreg(b); p = q; if (all == 0) done = 1; continue; }
+            if (n == a) { pk_emitreg(b); p = q; if (all == 0) done = 1; continue; }
             ol_put(p, q); p = q;
             if (all == 0) done = 1;       /* the first register was not a */
             continue;
         }
         out2[nout2] = out[p]; nout2 = nout2 + 1; p = p + 1;
     }
-    pp_nl();
+    pk_nl();
     return 0;
 }
 /* -O2: a local's store, the mirror of ol_local [H4].  The walker writes
@@ -639,7 +639,7 @@ int pp_rereg(int l, int a, int b, int all) {
    and with rA and r2 dead after the store (S straight-line, naming neither)
    that is S... / .st [r6-N], rV, W -- two instructions fewer per store.
    Returns the line after the store, having written the result; 0 if not. */
-int pp_stfuse(int i) {
+int pk_stfuse(int i) {
     int k; int a; int j; int q; int p; int e; int v; int st; int n0; int n1;
     if (i + 3 >= ol_n) return 0;
     k = ol_pre(i, "  imm r2, "); if (k == 0) return 0;
@@ -670,9 +670,9 @@ int pp_stfuse(int i) {
             k = i + 2; while (k < j) { ol_emit(k); k = k + 1; }
             if (st == 1) ol_puts("  .st [r6-"); else ol_puts("  store64 [r6-");
             ol_put(n0, n1); ol_puts("], ");
-            pp_emitreg(v);
+            pk_emitreg(v);
             if (st == 1) ol_put(q, e);
-            pp_nl();
+            pk_nl();
             return j + 1;
         }
         if (ol_simple(j) == 0) return 0;
@@ -681,7 +681,7 @@ int pp_stfuse(int i) {
     }
     return 0;
 }
-int pp_asks;
+int pk_asks;
 int peep_round(void) {
     int i; int n; int a; int b; int rel; int act; int key[4]; int t; int u; int k; int x; int y;
     int hits; int p; int e; int q; long v; int lg; int d; int none;
@@ -693,113 +693,113 @@ int peep_round(void) {
         ol_prep();
         k = 0; while (k <= 5) { if (bl_solve(k) == 0) ol_zok[k] = 0; k = k + 1; }
     }
-    none = pp_rel("none");
+    none = pk_rel("none");
     nout2 = 0; hits = 0; i = 0; n = ol_n;
     while (i < n) {
         if (out[ol_s[i]] != 32) { ol_emit(i); i = i + 1; continue; }
-        k = pp_stfuse(i);
+        k = pk_stfuse(i);
         if (k > 0) { hits = hits + 1; i = k; continue; }
-        a = pp_acls(i); b = pp_bcls(i + 1); rel = none;
+        a = pk_acls(i); b = pk_bcls(i + 1); rel = none;
         t = 0 - 1; x = 0 - 1; y = 0 - 1; u = 0; v = 0;
         if (ol_word(i, "jump") || ol_word(i, "jumpz")) {
-            p = pp_lastword(i); e = ol_e[i];
+            p = pk_lastword(i); e = ol_e[i];
             k = i + 1;
-            while (k < n && pp_islab(k)) {
-                if (pp_same(ol_s[k], ol_e[k] - 1, p, e)) u = 1;
+            while (k < n && pk_islab(k)) {
+                if (pk_same(ol_s[k], ol_e[k] - 1, p, e)) u = 1;
                 k = k + 1;
             }
-            if (u) { rel = pp_rel("to_next"); b = pp_bcls(pp_real(i + 1)); }
+            if (u) { rel = pk_rel("to_next"); b = pk_bcls(pk_real(i + 1)); }
             else {
                 t = ol_lab(p, e);
                 if (t >= 0) {
-                    t = pp_real(t + 1);
+                    t = pk_real(t + 1);
                     if (t < n && ol_word(t, "jump")) {
-                        q = pp_lastword(t);
-                        if (pp_same(q, ol_e[t], p, e) == 0) { rel = pp_rel("to_jump"); b = pp_bcls(t); }
+                        q = pk_lastword(t);
+                        if (pk_same(q, ol_e[t], p, e) == 0) { rel = pk_rel("to_jump"); b = pk_bcls(t); }
                     }
                 }
             }
-        } else if (i + 1 < n && pp_store(i) >= 0) {
-            x = pp_store(i);
-            y = pp_load(i + 1);
-            if (y < 0) y = pp_store2(i + 1);
+        } else if (i + 1 < n && pk_store(i) >= 0) {
+            x = pk_store(i);
+            y = pk_load(i + 1);
+            if (y < 0) y = pk_store2(i + 1);
             /* not the expression stack's own slot: [r7+..] is what B1 turns
                into a real push and pop on x86, and a pop made a mov is a
                pop that costs more */
-            if (y >= 0 && pp_same(pp_m0, pp_m1, pp_n0, pp_n1) && (out[pp_m0] != 114 || out[pp_m0 + 1] != 55)) {
-                if (x == y) rel = pp_rel("same_slot_same_reg"); else rel = pp_rel("same_slot");
+            if (y >= 0 && pk_same(pk_m0, pk_m1, pk_n0, pk_n1) && (out[pk_m0] != 114 || out[pk_m0 + 1] != 55)) {
+                if (x == y) rel = pk_rel("same_slot_same_reg"); else rel = pk_rel("same_slot");
             }
-        } else if (i + 1 < n && pp_immat(i) >= 0) {
-            x = pp_immat(i); v = pp_imm;
-            if (x <= 5 && ol_word(i + 1, "mov") == 0 && pp_three(i + 1)) {
-                if (pp_t == x && pp_sr != x && ol_dead(x, i + 2)) {
-                    if (v == 0) rel = pp_rel("const0");
-                    else if (v == 1) rel = pp_rel("const1");
-                    else if ((v & (v - 1)) == 0) rel = pp_rel("pow2");
+        } else if (i + 1 < n && pk_immat(i) >= 0) {
+            x = pk_immat(i); v = pk_imm;
+            if (x <= 5 && ol_word(i + 1, "mov") == 0 && pk_three(i + 1)) {
+                if (pk_t == x && pk_sr != x && ol_dead(x, i + 2)) {
+                    if (v == 0) rel = pk_rel("const0");
+                    else if (v == 1) rel = pk_rel("const1");
+                    else if ((v & (v - 1)) == 0) rel = pk_rel("pow2");
                 }
-            } else if (x <= 5 && pp_movat(i + 1)) {
-                if (pp_sr == x && pp_d != x && ol_dead(x, i + 2)) rel = pp_rel("copy_dead");
+            } else if (x <= 5 && pk_movat(i + 1)) {
+                if (pk_sr == x && pk_d != x && ol_dead(x, i + 2)) rel = pk_rel("copy_dead");
             }
         }
         if (rel == none && i + 1 < n) {            /* [H4] */
             int ya; int xa; int yb; int db;
-            if (pp_movat(i)) {
-                ya = pp_d; xa = pp_sr;
+            if (pk_movat(i)) {
+                ya = pk_d; xa = pk_sr;
                 if (ya <= 5 && ya != xa && ol_k[i + 1] == OK_SIMPLE
                     && (ol_rm[i + 1] & (1 << ya)) && (ol_wm[i + 1] & (1 << ya)) == 0
-                    && ol_dead(ya, i + 2)) { rel = pp_rel("copy_into"); y = ya; x = xa; }
+                    && ol_dead(ya, i + 2)) { rel = pk_rel("copy_into"); y = ya; x = xa; }
             }
             if (rel == none && ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
                 db = ol_firstreg(i);
-                if (db >= 0 && db <= 5 && (ol_wm[i] & (1 << db)) && pp_movat(i + 1)) {
-                    yb = pp_d;
-                    if (pp_sr == db && yb != db && ol_dead(db, i + 2)) { rel = pp_rel("dest_to_mov"); x = db; y = yb; }
+                if (db >= 0 && db <= 5 && (ol_wm[i] & (1 << db)) && pk_movat(i + 1)) {
+                    yb = pk_d;
+                    if (pk_sr == db && yb != db && ol_dead(db, i + 2)) { rel = pk_rel("dest_to_mov"); x = db; y = yb; }
                 }
             }
         }
         if (rel == none) {
             if (ol_k[i] == OK_SIMPLE && ol_word(i, "store64") == 0 && ol_word(i, ".st") == 0) {
                 d = ol_firstreg(i);
-                if (d >= 0 && d <= 5) { if ((ol_wm[i] & (1 << d)) && ol_dead(d, i + 1)) rel = pp_rel("a_dead"); }
+                if (d >= 0 && d <= 5) { if ((ol_wm[i] & (1 << d)) && ol_dead(d, i + 1)) rel = pk_rel("a_dead"); }
             }
         }
         if (rel == none) { ol_emit(i); i = i + 1; continue; }
         key[0] = a; key[1] = b; key[2] = rel; key[3] = 0;
-        act = inf(S_PEEP, key, 0); pp_asks = pp_asks + 1;
-        if (act == pp_act("keep")) { ol_emit(i); i = i + 1; continue; }
+        act = inf(S_PEEP, key, 0); pk_asks = pk_asks + 1;
+        if (act == pk_act("keep")) { ol_emit(i); i = i + 1; continue; }
         hits = hits + 1;
-        if (act == pp_act("load_to_mov")) {
+        if (act == pk_act("load_to_mov")) {
             ol_emit(i);
-            ol_puts("  mov "); pp_emitreg(y); ol_puts(", "); pp_emitreg(x); pp_nl();
+            ol_puts("  mov "); pk_emitreg(y); ol_puts(", "); pk_emitreg(x); pk_nl();
             i = i + 2; continue;
         }
-        if (act == pp_act("drop_b")) { ol_emit(i); i = i + 2; continue; }
-        if (act == pp_act("drop_a")) { i = i + 1; continue; }
-        if (act == pp_act("retarget")) {
-            p = pp_lastword(i); ol_put(ol_s[i], p);
-            q = pp_lastword(t); ol_put(q, ol_e[t]); pp_nl();
+        if (act == pk_act("drop_b")) { ol_emit(i); i = i + 2; continue; }
+        if (act == pk_act("drop_a")) { i = i + 1; continue; }
+        if (act == pk_act("retarget")) {
+            p = pk_lastword(i); ol_put(ol_s[i], p);
+            q = pk_lastword(t); ol_put(q, ol_e[t]); pk_nl();
             i = i + 1; continue;
         }
-        if (act == pp_act("to_mov")) {
-            ol_puts("  mov "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); pp_nl();
+        if (act == pk_act("to_mov")) {
+            ol_puts("  mov "); pk_emitreg(pk_d); ol_puts(", "); pk_emitreg(pk_sr); pk_nl();
             i = i + 2; continue;
         }
-        if (act == pp_act("to_shl")) {
+        if (act == pk_act("to_shl")) {
             lg = 0; while (v > 1) { v = v / 2; lg = lg + 1; }
-            ol_puts("  imm "); pp_emitreg(x); ol_puts(", "); pp_emitnum(lg); pp_nl();
-            ol_puts("  shl64 "); pp_emitreg(pp_d); ol_puts(", "); pp_emitreg(pp_sr); ol_puts(", "); pp_emitreg(x); pp_nl();
+            ol_puts("  imm "); pk_emitreg(x); ol_puts(", "); pk_emitnum(lg); pk_nl();
+            ol_puts("  shl64 "); pk_emitreg(pk_d); ol_puts(", "); pk_emitreg(pk_sr); ol_puts(", "); pk_emitreg(x); pk_nl();
             i = i + 2; continue;
         }
-        if (act == pp_act("retarget_dest")) {       /* A writes rY; B goes */
-            pp_rereg(i, x, y, 0);
+        if (act == pk_act("retarget_dest")) {       /* A writes rY; B goes */
+            pk_rereg(i, x, y, 0);
             i = i + 2; continue;
         }
-        if (act == pp_act("fold_copy")) {           /* A goes; B reads rX */
-            pp_rereg(i + 1, y, x, 1);
+        if (act == pk_act("fold_copy")) {           /* A goes; B reads rX */
+            pk_rereg(i + 1, y, x, 1);
             i = i + 2; continue;
         }
-        if (act == pp_act("fold_imm")) {
-            ol_puts("  imm "); pp_emitreg(pp_d); ol_puts(", "); pp_emitnum(pp_imm); pp_nl();
+        if (act == pk_act("fold_imm")) {
+            ol_puts("  imm "); pk_emitreg(pk_d); ol_puts(", "); pk_emitnum(pk_imm); pk_nl();
             i = i + 2; continue;
         }
         ol_emit(i); i = i + 1; hits = hits - 1;     /* an action this code does not know */
