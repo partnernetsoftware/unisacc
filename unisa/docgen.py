@@ -61,11 +61,60 @@ def table():
     return "\n".join(L)
 
 
-def rewrite(text, block):
-    pat = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.S)
+def rewrite(text, block, begin=BEGIN, end=END):
+    pat = re.compile(re.escape(begin) + r".*?" + re.escape(end), re.S)
     if not pat.search(text):
         return None
-    return pat.sub(BEGIN + "\n" + block + "\n" + END, text)
+    return pat.sub(lambda m: begin + "\n" + block + "\n" + end, text)
+
+
+# ---- the paper's table 1, in Chinese, with the accuracy column [E2] -----
+ZH_BEGIN = "<!-- stages-zh:begin -->"
+ZH_END = "<!-- stages-zh:end -->"
+PAPER = os.path.join("research", "unisacc-paper.md")
+ZH_FIELD = {"dir": "指令", "defined": "已定义", "c": "字符类", "peek": "前瞻",
+            "nt": "非终结符", "tok": "记号", "t1": "类型", "t2": "类型",
+            "op": "操作", "ctx": "上下文", "kind": "种类", "family": "族",
+            "flavor": "变体", "os": "OS", "arch": "架构", "treg": "tape 寄存器",
+            "t": "类型", "conv": "转换符", "a": "指令 A", "b": "指令 B",
+            "rel": "关系"}
+
+
+def _acc(nets, n):
+    """by enumeration over the FULL gold, ties counted wrong -- as `acc`"""
+    from .gold import STAGES
+    from .__main__ import _ties
+    st = STAGES[n]
+    wrong = 0
+    for key in st.keys():
+        want = st.label(*key)
+        got = nets[n].predict(key)
+        tie = _ties(nets[n], key)
+        for h, _, _ in st.heads:
+            if got[h] != want[h] or tie[h]:
+                wrong += 1
+    return "1.000" if wrong == 0 else "%d 错" % wrong
+
+
+def table_zh():
+    from .gold import STAGES, ALL
+    from .__main__ import _built
+    nets = _built()
+    L = ["| 阶段 | 键字段 × 词表大小 | 输出 | 键数 | 单元 | 精度 |",
+         "|---|---|---|---:|---:|---:|"]
+    tk = tu = 0
+    for n in ALL:
+        st = STAGES[n]
+        fields = " × ".join("%s %d" % (ZH_FIELD.get(f, f), len(v))
+                            for f, v in st.fields)
+        hs = st.heads
+        outs = "%d 头" % len(hs) if len(hs) > 1 else str(len(hs[0][1]))
+        k, u = st.rows(), nets[n].nunits()
+        tk += k; tu += u
+        L.append("| %s | %s | %s | %s | %d | %s |"
+                 % (n, fields, outs, format(k, ","), u, _acc(nets, n)))
+    L.append("| **合计** | | | **%s** | **%d** | |" % (format(tk, ","), tu))
+    return "\n".join(L)
 
 
 def main(argv, root):
@@ -87,6 +136,18 @@ def main(argv, root):
             else:
                 open(p, "w", encoding="utf-8").write(new)
                 print("  rewrote %s" % f)
+    p = os.path.join(root, PAPER)
+    if os.path.exists(p):
+        t = open(p, encoding="utf-8").read()
+        new = rewrite(t, table_zh(), ZH_BEGIN, ZH_END)
+        if new is None:
+            bad.append("%s: no %s ... %s markers" % (PAPER, ZH_BEGIN, ZH_END))
+        elif new != t:
+            if check:
+                bad.append("%s: table 1 is out of date" % PAPER)
+            else:
+                open(p, "w", encoding="utf-8").write(new)
+                print("  rewrote %s" % PAPER)
     for b in bad:
         print("  " + b)
     return 1 if (bad and check) else 0

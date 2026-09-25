@@ -906,8 +906,8 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 | # | 事项 | 完成判据 |
 |---|---|---|
-| E1 | 论文：刷新数字（corpus 216、C99 48/48、速度）；新增一节"**gold 本身会错**"——[G-2] 的来龙去脉与 A1 的审计结果，这是对 §8 所述局限的第一次实证回应 | 论文数字与 `all.sh` 当次输出一致 |
-| E2 | 论文结果表改为生成区，像 [A-48] 那样由 `docs.sh` 检查 | 表过期即失败 |
+| E1 | 论文：刷新数字；新增一节"**gold 本身会错**" —— **已达**（2026-09-25）：表 2 按当日实测（15 阶段、corpus 216、C99 57/57、闭环 564/564、编译器自身 867 KB/2,079 符号、各 -O 级 279/279、两前端优化 190/190、出货 4.0×）；新增 §6.2（优化器也走表：H1 结构 + `peep` 表，pow2 改表的实例）与 §8.1（gold 本身会错：[G-2] 与 gold_audit 1,399/1,400） | ✅ |
+| E2 | 论文表改为生成区 —— **已达**（2026-09-25）：表 1（阶段、键字段、键数、单元、**全域枚举精度**）由 `unisa docs` 生成进 `<!-- stages-zh -->` 区，`docs.sh` 过期即失败。表 2 的套件结果要跑全量才能得到，不放进 60 s 的检查，按日手刷 | ✅ 表 1 过期即失败 |
 | E3 | prd §2 补**出货编译器**的 CLI 契约（现在只写了 Python 驱动） | 每个 flag 一行，与 `cli` 套件一一对应 |
 
 **F. 发布与分发（P1，含主人决定）**
@@ -937,6 +937,20 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | H3′ | **各级对 cc -O2** —— **已达**（2026-09-25）：新套件 `difftest_o`：93 个探针由 cc -O2 编出并运行作为参考（按源码+cc 版本哈希缓存），unisacc 在 -O0/-O1/-O2 下 `-run`，**279/279 一致**（冷 42 s，热 4 s） | 各级都得是同一个程序 | ✅ |
 | H3 | **`-O0/-O1/-O2` 旗标生效**（今天接受但忽略） | 对接 Makefile 习惯 | 每级 closure、nativeboot N1=N2=N3、difftest 对 cc -O2 输出一致 |
 | H4 | 叶函数内联、强度削减 | 余下的差距 | bench 比值 ≤ 3× |
+
+**I. 抽象与复用：把仍然手写或重复的表状逻辑收进表（P1，2026-09-25 后台勘察）**
+
+出发点是“表状决策走网络、代码只做结构”。勘察（只读）发现四类仍是手写、且在 Python/C 或 x86/arm64 间重复的表状逻辑：
+
+| # | 事项 | 现状（重复处） | 提案 | 风险 | 判据 |
+|---|---|---|---|---|---|
+| I1 | **`prec` 表**：二元运算优先级 | C `bop()`/`BOP`/`BLEV`（setup_tables）；Python `PREC` 与 `CPREC`（同文件两份） | 字段 op(19)，头 lev(11)；`binop_level` 与 `binary()`/`const_expr()` 改问表，三份删去 | 低 | stages、selfhost、closure、bigclosure 不变 |
+| I2 | **`opinfo` 表**：优化器的操作分类 | 21 操作白名单与 ALU 列表在 C `ol_simple`/`pp_acls`/`pp_bcls`、`opt.py` `SIMPLE`/`ALU`、gold `PEEP_A/B` 三处 | 字段 op(~40+other)，头 simple(2)、acls(8)、bcls(17)、kind(8) | 低 | optpy 190/190、opt、-O2 closure |
+| I3 | **irsel 补行**：除/余/无符号比较 | C `emit_binop` 直写 `.udiv .umod .div .mod` 与 `@alu.ult…` 的手写 if 链；Python `parse.py` 直写 `.div` | irsel 加 binop×unsigned 的 flavor 行，两前端同问 | 低 | stages、closure |
+| I4 | **abi 加头**：argshape(4)、retconv(4)、winimp(15)、winextra(3) | openat/unlinkat/renameat2 的参数移位与第五参数通道（lower.py 与 bk_lower 各一份）；Windows 门的导入名、BOOL→0/-1、DWORD 符号扩展、CreateFileA 处置参数（四份：x86/arm × Python/C） | 门的前后序保留为结构，其余查表 | 中（Windows 只能靠 closure 与 UTM） | closure 全部 os×arch、crossnative |
+| I5 | **编码规格表**：机器码模板 | `enc` 只答 form；字节模板手写四份（emit_x86 约 34 例、emit_arm 约 40 例、C `bk_x86`/`bk_arm` 与 x_*/a_*）；`ALU2/SETCC/ALU3/INVCOND` 在 C 里重打成 if 链 | 一份 `unisa/encspec.py`：(op, arch) → (族, opc, cc, 固定寄存器, 宽)，族选择走网络，操作码作为生成的数据表（如 ckernel 生成 .inc）；分批：A 寄存器 ALU+C 移位 → B 比较置位 → D 访存宽度 → E/F 立即数与地址 → G 分支（碰松弛，加 bigclosure）→ I 除法 → H 浮点；J（门、itoa 等不透明块）不迁 | 中高 | 每批 closure 逐字节不变；预计 Python −150~200 行、C −200~250 行 |
+
+**顺序**：I2、I1（便宜、低风险，先证明“表 → 权重 → 两端同问”可复用）→ I3 → I4 → I5 分批。
 
 **明确不做**：目标文件与链接器（多单元已由一个 walker 解决）；训练（对照臂）；C11/C23 中 G 组之外的特性。
 
