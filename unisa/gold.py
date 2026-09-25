@@ -383,6 +383,38 @@ def peep_label(a, b, rel):
     return "keep"
 
 
+# ---- opinfo: what a tape op IS, for the optimiser [I2] ------------------
+# The optimiser's whitelist of ops with only explicit operands, and the
+# classes the peep table keys on, were three hand-kept lists (the C
+# optimiser, unisa/opt.py, and PEEP_A/PEEP_B here).  One table now.
+def _tape_ops():
+    from .tape import SHAPE
+    return tuple(SHAPE) + ("other",)
+
+
+OPINFO_OPS = _tape_ops()
+OPINFO_SIMPLE = ("imm", "load64", "store64", "sub64", ".ld", ".lea", ".st",
+                 "add64", "mul64", "eq", "mov", "slt64", "and64", "ne",
+                 "sle64", "or64", "shl64", "shr64", "lshr64", "xor64", "ult64")
+OPINFO_ALU = ("add64", "sub64", "mul64", "shl64", "shr64", "lshr64", "or64",
+              "xor64", "and64", "eq", "ne", "slt64", "sle64", "ult64")
+
+
+def opinfo_label(op):
+    """simple: straight-line, every operand explicit (no implicit registers,
+    no memory beyond its own operand) -- what the stack-top rewrite may move
+    across.  acls / bcls: the op's class as the first / second instruction
+    of a peep pair."""
+    if op in ("store64", "load64", "imm", "mov", "jump", "jumpz"):
+        a = op
+    elif op in OPINFO_ALU:
+        a = "alu"
+    else:
+        a = "other"
+    b = op if op in PEEP_B and op not in ("other", "none") else "other"
+    return {"simple": "1" if op in OPINFO_SIMPLE else "0", "acls": a, "bcls": b}
+
+
 class Stage:
     def __init__(self, name, fields, heads, label, cfg, weight=None):
         self.name = name
@@ -530,6 +562,10 @@ def build():
                        C.nine,
                        dict(dims=(16, 8, 8), hidden=[48, 32], seed=7,
                             factor=12, bilinear=8))
+    S["opinfo"] = Stage("opinfo", [("op", OPINFO_OPS)],
+                        [("simple", ("0", "1"), None), ("acls", PEEP_A, None),
+                         ("bcls", tuple(b for b in PEEP_B if b != "none"), None)],
+                        opinfo_label, dict(d=6, hidden=[12], seed=59))
     S["peep"] = Stage("peep", [("a", PEEP_A), ("b", PEEP_B), ("rel", PEEP_REL)],
                       [("y", PEEP_ACT, None)], _one(peep_label),
                       dict(d=8, hidden=[16], seed=53))
@@ -541,6 +577,6 @@ STAGES = build()
 KEYWORDS_C = tuple(t for t in TOKS if t[0].isalpha() and t != "eof")
 
 TABLES = ("pp", "lex", "parse", "type", "scope", "irsel", "enc", "reloc",
-          "regmap", "tyinfo", "pfconv", "peep")
+          "regmap", "tyinfo", "pfconv", "peep", "opinfo")
 STAGE_NETS = ("isel", "abi")
 ALL = TABLES + STAGE_NETS + ("combo",)

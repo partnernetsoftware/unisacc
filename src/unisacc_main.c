@@ -7464,14 +7464,38 @@ int ol_names(int l, int r) {          /* does line l name register r */
     }
     return 0;
 }
+/* what a tape op IS -- simple (explicit operands only), and its peep
+   classes -- is the `opinfo` table's answer [I2].  Asked once per op word
+   and remembered: the answer is a function of the word. */
+#define OI_MAX 128
+int oi_done[OI_MAX]; int oi_simple[OI_MAX]; int oi_acls[OI_MAX]; int oi_bcls[OI_MAX];
+int oi_idx(char *w, int n) {
+    int i;
+    i = vfind(BF_OPINFO_0, NBF_OPINFO_0, w, n);
+    if (i < 0) i = vfind(BF_OPINFO_0, NBF_OPINFO_0, "other", 5);
+    return i;
+}
+int oi_ask(int i) {
+    int key[4]; int c;
+    if (i < 0 || i >= OI_MAX) return 0 - 1;
+    if (oi_done[i]) return i;
+    key[0] = i; key[1] = 0; key[2] = 0; key[3] = 0;
+    c = inf(S_OPINFO, key, HD_OPINFO_SIMPLE);
+    oi_simple[i] = c == vfind(BH_OPINFO_SIMPLE, NBH_OPINFO_SIMPLE, "1", 1);
+    c = inf(S_OPINFO, key, HD_OPINFO_ACLS);
+    oi_acls[i] = vfind(BF_PEEP_0, NBF_PEEP_0, BH_OPINFO_ACLS + voff(BH_OPINFO_ACLS, c), vlen(BH_OPINFO_ACLS, c));
+    c = inf(S_OPINFO, key, HD_OPINFO_BCLS);
+    oi_bcls[i] = vfind(BF_PEEP_1, NBF_PEEP_1, BH_OPINFO_BCLS + voff(BH_OPINFO_BCLS, c), vlen(BH_OPINFO_BCLS, c));
+    oi_done[i] = 1;
+    return i;
+}
 int ol_simple(int l) {                /* straight-line, explicit operands only */
-    char *ok; int p; int e; int k; int w; int i;
+    int p; int e; int w; int i;
     p = ol_s[l]; e = p + ol_len(l);
     if (e - p < 3 || out[p] != 32 || out[p + 1] != 32) return 0;
     p = p + 2; w = p; while (w < e && out[w] != 32) w = w + 1;
-    ok = "imm\0load64\0store64\0sub64\0.ld\0.lea\0.st\0add64\0mul64\0eq\0mov\0slt64\0and64\0ne\0sle64\0or64\0shl64\0shr64\0lshr64\0xor64\0ult64\0";
-    i = vfind(ok, 21, out + p, w - p);
-    return i >= 0;
+    i = oi_ask(oi_idx(out + p, w - p));
+    return i >= 0 && oi_simple[i];
 }
 int ol_emit(int l) { int k; k = 0; while (k < ol_len(l)) { out2[nout2] = out[ol_s[l] + k]; nout2 = nout2 + 1; k = k + 1; }
     out2[nout2] = 10; nout2 = nout2 + 1; return 0; }
@@ -7834,26 +7858,20 @@ int pp_word(int l, char *w) {         /* the op word of line l into w */
     w[k] = 0;
     return k;
 }
-int pp_acls(int l) {                  /* index into BF_PEEP_0 */
-    char w[16]; int n; char *c;
+int pp_acls(int l) {                  /* index into BF_PEEP_0, from opinfo */
+    char w[16]; int n; int i;
     n = pp_word(l, w);
-    c = "other";
-    if (n) {
-        if (vfind("store64\0load64\0imm\0mov\0jump\0jumpz\0", 6, w, n) >= 0) c = w;
-        else if (vfind("add64\0sub64\0mul64\0shl64\0shr64\0lshr64\0or64\0xor64\0and64\0eq\0ne\0slt64\0sle64\0ult64\0", 14, w, n) >= 0) c = "alu";
-    }
-    n = 0; while (c[n]) n = n + 1;
-    return vfind(BF_PEEP_0, NBF_PEEP_0, c, n);
+    if (n == 0) return vfind(BF_PEEP_0, NBF_PEEP_0, "other", 5);
+    i = oi_ask(oi_idx(w, n));
+    return oi_acls[i];
 }
-int pp_bcls(int l) {                  /* index into BF_PEEP_1 */
+int pp_bcls(int l) {                  /* index into BF_PEEP_1, from opinfo */
     char w[16]; int n; int i;
     if (l >= ol_n) return vfind(BF_PEEP_1, NBF_PEEP_1, "none", 4);
     n = pp_word(l, w);
-    if (n) {
-        i = vfind(BF_PEEP_1, NBF_PEEP_1, w, n);
-        if (i >= 0 && vfind("other\0none\0", 2, w, n) < 0) return i;
-    }
-    return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
+    if (n == 0) return vfind(BF_PEEP_1, NBF_PEEP_1, "other", 5);
+    i = oi_ask(oi_idx(w, n));
+    return oi_bcls[i];
 }
 int pp_islab(int l) { return out[ol_s[l]] != 32 && out[ol_s[l]] != 46 && ol_len(l) > 1 && out[ol_e[l] - 1] == 58; }
 int pp_real(int l) {                  /* the first line at or after l that is not a label */

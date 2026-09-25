@@ -8,9 +8,6 @@ looks at -- a looser Python check would be a different optimiser.
 """
 import re
 
-SIMPLE = ("imm", "load64", "store64", "sub64", ".ld", ".lea", ".st", "add64",
-          "mul64", "eq", "mov", "slt64", "and64", "ne", "sle64", "or64",
-          "shl64", "shr64", "lshr64", "xor64", "ult64")
 _REG = re.compile(r"r(\d+)")
 LABEL, RET, JUMP, JUMPZ, CALL, FRAME, SIMPLEK, OTHER = range(8)
 
@@ -36,10 +33,22 @@ def _word(ln, w):
     return rest.startswith(w) and (len(rest) == len(w) or rest[len(w)] == " ")
 
 
+_INFO = {}
+
+
+def _info(op):
+    """the `opinfo` table's answer for a tape op word, asked once [I2]"""
+    if op not in _INFO:
+        from .gold import OPINFO_OPS
+        key = (op if op in OPINFO_OPS else "other",)
+        _INFO[op] = _oracle().ask("opinfo", key)
+    return _INFO[op]
+
+
 def _simple(ln):
     if len(ln) < 3 or not ln.startswith("  "):
         return False
-    return ln[2:].split(" ", 1)[0] in SIMPLE
+    return _info(ln[2:].split(" ", 1)[0])["simple"] == "1"
 
 
 def _firstreg(ln):
@@ -343,10 +352,6 @@ class _Round:
 
 
 # ---- -O2: the peep table [H2] -------------------------------------------
-ALU = ("add64", "sub64", "mul64", "shl64", "shr64", "lshr64", "or64", "xor64",
-       "and64", "eq", "ne", "slt64", "sle64", "ult64")
-
-
 def _opword(ln):
     return ln[2:].split(" ", 1)[0][:15] if ln.startswith(" ") else ""
 
@@ -461,16 +466,13 @@ class _Peep(_Round):
 
     def _acls(self, ln):
         w = _opword(ln)
-        if w in ("store64", "load64", "imm", "mov", "jump", "jumpz"):
-            return w
-        return "alu" if w in ALU else "other"
+        return _info(w)["acls"] if w else "other"
 
     def _bcls(self, l):
         if l >= self.n:
             return "none"
-        from .gold import PEEP_B
         w = _opword(self.L[l])
-        return w if w and w in PEEP_B and w not in ("other", "none") else "other"
+        return _info(w)["bcls"] if w else "other"
 
     def _real(self, l):
         while l < self.n and _islab(self.L[l]):
