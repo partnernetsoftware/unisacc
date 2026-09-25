@@ -15,21 +15,29 @@ TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
 ABL=${ABL:-"pp lex parse type scope irsel enc reloc regmap abi.sysno abi.arg0 abi.arg1 abi.arg2 abi.ret abi.gate abi.nrreg"}
 # SHARD=k/n keeps every n-th ablation starting at the k-th: each ablation is
 # 42 compiles, and all sixteen in one run were over the 60 s ceiling
-# (AGENTS.md).  all.sh runs 1/4 .. 4/4.
+# (AGENTS.md).  Run it as SHARD=1/8 .. 8/8: at 1/4 one shard still hit 58 s.
 if [ -n "${SHARD:-}" ]; then
     ABL=$(echo $ABL | tr ' ' '\n' | awk -v k="${SHARD%/*}" -v n="${SHARD#*/}" '(NR-1)%n==k-1' | tr '\n' ' ')
 fi
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 images() {   # images <tag> -> one line per probe/target: sha or REFUSED
+    hung=0
     for f in $PROBES; do
         for t in $TARGETS; do
             # a rotated answer can send the compiler into a loop: every
-            # compile has a watchdog, and a timeout counts as REFUSED
-            if perl -e 'alarm 60; exec @ARGV' python3 -m unisa compile "$f" \
-                   -o "$T/img" --target "$t" --drive built >/dev/null 2>&1; then
+            # compile has a watchdog, and a timeout counts as REFUSED.  One
+            # hang already proves the stage is used, and a rotated lexer
+            # hangs on every probe -- waiting out 42 watchdogs took minutes
+            # -- so after the first, the rest are marked without running.
+            if [ "$hung" = 1 ]; then echo "$f $t REFUSED"; continue; fi
+            perl -e 'alarm 5; exec @ARGV' python3 -m unisa compile "$f" \
+                   -o "$T/img" --target "$t" --drive built >/dev/null 2>&1
+            rc=$?
+            if [ $rc -eq 0 ]; then
                 echo "$f $t $(shasum < "$T/img" | cut -c1-16)"
             else
+                [ $rc -eq 142 ] && hung=1
                 echo "$f $t REFUSED"
             fi
         done
