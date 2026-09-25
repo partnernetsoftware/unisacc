@@ -205,9 +205,42 @@ tape 分别 lower 到 6 个目标 {lnx, osx, win} × {x86-64, arm64}。lower 过
 | 两个前端的优化一致 | C 的 -O0 tape 经 Python 优化 = C 的 -O1/-O2 tape | 190/190 |
 | 真实库代码 | crypto-algorithms 等的已知答案测试，多文件 | 11/11 |
 | 后端闭环 | 镜像与参考后端逐字节相同 | 564/564；编译器自身（867 KB、2,079 个数据符号）6/6 |
-| 出货编译器速度 | 自编译，对 cc -O2 构建的同一源码 | 4.0×（-O2；-O0 时约 11×） |
+| 出货编译器速度 | 自编译，对 cc -O2 构建的同一源码 | 5.4×（-O2；-O0 时约 14×），见 §7.1 |
 | 原生自举 | N1 = N2 = N3，无 Python | osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64 |
 | 浮点 | `%f/%e/%g` 与平台 libc 逐位一致 | 格式化代码中无浮点运算（十进制大数展开） |
+
+### 7.1　横向比较：与 tcc、cc
+
+所有数字出自同一台机器（osx/arm64），由 `TCC=<tcc 构建目录> tests/bench_vs.sh` 重跑，每项取三次中的最小值。tcc 为 0.9.28rc（mob 分支 3dc99db），cc 为系统 clang。比较只在输出相同时才有意义，所以第二部分的每个编译器都做同一件事（`-O2 unisacc.c -b osx/arm64`），并逐字节核对产物。
+
+**表 3　速度与大小**
+
+| 由谁构建 unisacc | 构建耗时 | 得到的二进制 | 该二进制编译 unisacc.c 的耗时 | 相对 cc -O2 |
+|---|---|---|---|---|
+| cc -O2 | 1.81 s | 569,384 B | 0.15 s | 1.0× |
+| cc -O0 | 0.15 s | 490,840 B | 0.49 s | 3.3× |
+| tcc | 0.02 s | 683,008 B | 0.55 s | 3.7× |
+| unisacc -O2（自己） | 0.15 s | 677,154 B | 0.81 s | 5.4× |
+| unisacc -O0（自己） | 0.10 s | 1,056,930 B | 2.05 s | 13.8× |
+
+五个产物逐字节相同。读法：
+
+- **生成代码的质量**：unisacc -O2 与 tcc 同档，慢约 1.5 倍，二进制大小相当。它明显不如 cc -O2，原因是栈机临时量、局部变量的地址计算和调用开销（prd 的 J 组），**不在模型推理**：推理已编译成查表（§3.5），全域核对差异为 0。
+- **编译器本身的速度**：tcc 自编译 3 万行只要 0.03 s；用 cc -O2 构建的 unisacc 编译 1 MB 的自身源码要 0.15 s，约为 tcc 的 7 倍。主因是每条指令都要经过一次文本形式的 tape（生成、优化、再解析），tcc 则一遍直接出机器码。
+- **结论**：unisacc 不以速度取胜。它能在 tcc 这一档的代码质量上，换来下表中 tcc 和 cc 都没有的性质。
+
+**表 4　性质对照**
+
+| 性质 | unisacc | tcc | cc（clang） |
+|---|---|---|---|
+| 表状决策可验证 | 每张表的网络在全部定义域上枚举证明精确（§3.3），并有外部裁判（§8.1） | 手写代码 | 手写代码 |
+| 一个二进制写出的目标 | 6 个：{Linux, macOS, Windows} × {x86-64, arm64} | 每个目标要单独构建一个 tcc | 可多目标，但每个目标要各自的链接器与 SDK/sysroot |
+| 外部链接器 | 不需要：ELF、Mach-O、PE 由自身写出，Mach-O 自带 ad-hoc 签名 | macOS 上用自带的 Mach-O 写出，依赖系统库 | 需要 ld |
+| 逐字节可复现 | 自举不动点 N1 = N2 = N3，在 5 个真实目标上全程无 Python（§6）；构造与推理只用整数 | 未作为性质声明 | 未作为性质声明 |
+| 分发形态 | 单个 C 文件（`unisacc.c`），cc 或它自己都能直接编译 | 多文件 | 大型工程 |
+| 语言覆盖 | C99 子集；c-testsuite 216/220 | C99 大部分，另有 C11 部分、GNU 扩展、内联汇编 | 完整 C17/C23 |
+
+表 4 里 tcc 和 cc 的各项描述只是公开事实的概括，本文没有逐项实测。unisacc 各项都有对应的门禁：`tests/closure.sh`、`tests/nativeboot.sh`、`tests/bigclosure.sh`、`tests/corpus.sh`。
 
 ## 8　局限与负结果
 
@@ -232,10 +265,11 @@ python3 -m unisa build-weights          # 由 gold 构造全部网络并枚举�
 python3 -m unisa acc                    # 表 1：各阶段在完整定义域上的精度
 python3 -m unisa run examples/hello.c --fold   # 六目标折叠，期望 6/6
 ./tests/build_ref.sh                    # 用 cc 编出参考 unisacc
-./tests/closure.sh examples/*.c tests/c/*.c    # 564/564 镜像逐字节相同
+./tests/closure.sh examples/*.c tests/c/*.c    # 570/570 镜像逐字节相同
 ./tests/nativeboot.sh                   # N1 = N2 = N3，无 Python
 ./tests/all.sh                          # 全部套件（约 9 分钟，6 并行）
 ./tests/linux.sh                        # 同一套件在 Lima 的 Linux 内核中运行
+TCC=<tcc 构建目录> ./tests/bench_vs.sh   # 表 3：与 tcc、cc 的横向比较
 python3 -m unisa train                  # 对照臂：SGD（数分钟全核，非发布路径）
 ```
 
