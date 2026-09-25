@@ -988,7 +988,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | K5 | cli、run、multi、selfgap、kernel 改用 `tests/lib.sh`；顺带修正 cli/run 在 snap 下用的是 `/tmp/ua_ref` 而非快照的 `$UA` | 已达 |
 | K6 | `unisa/bits.py`：四份 `_round`、五处 64 位掩码合一 | 已达 |
 | K7 | SGD 对照臂的 `weights/*.unisa` 移入 archive | **不做**：`--drive`、训练输出与 acceptance 都按路径读它们，约 150 KB，收益小于改动面 |
-| K8 | 余项：`ud_same`/`pk_same` 类区间比较合一；walker 其余 `es`+`en` 模式（load/store 帧槽）；其余套件迁 `lib.sh` | 待做 |
+| K8 | 复查后不合并：`ud_same`（到行终止符）、`pk_same`（两段等长）、`vsame`（NUL 结尾词表）契约不同；帧槽 load/store 约 20 处的符号写在文本里（`[r6-`/`[r7+`），合成助手要多一个符号参数且须保住 `-0`，得不偿失。其余套件迁 `lib.sh` 随改随迁 | 结案 |
 
 
 **明确不做**：目标文件与链接器（多单元已由一个 walker 解决）；训练（对照臂）；C11/C23 中 G 组之外的特性。
