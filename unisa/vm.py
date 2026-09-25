@@ -147,6 +147,24 @@ class VM:
                 return 0
             except OSError:
                 return u64(-1)
+        if name == "lseek":
+            try:
+                off = a1 - (1 << 64) if a1 >= 1 << 63 else a1
+                return _os.lseek(a0, off, a2)
+            except OSError:
+                return u64(-1)
+        if name == "unlink":
+            try:
+                _os.unlink(self.cstr(a0).decode())
+                return 0
+            except OSError:
+                return u64(-1)
+        if name == "rename":
+            try:
+                _os.rename(self.cstr(a0).decode(), self.cstr(a1).decode())
+                return 0
+            except OSError:
+                return u64(-1)
         if name == "exit":
             raise Halt(a0 & 0xFF)
         raise AssertionError("vm: unsupported syscall %r" % name)

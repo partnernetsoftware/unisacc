@@ -241,6 +241,18 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                 # here rather than in the table.  AT_FDCWD = -100.
                 syscall_seq("open", [("imm", -100), ("mem", SCR0),
                                      ("mem", SCR1), ("mem", PRINTLEN)])
+            elif a[0] == "unlink" and (os_, arch) == ("lnx", "arm64"):
+                # unlinkat(AT_FDCWD, path, 0), for the same reason
+                syscall_seq("unlink", [("imm", -100), ("mem", SCR0),
+                                       ("imm", 0)])
+            elif a[0] == "rename" and (os_, arch) == ("lnx", "arm64"):
+                # renameat2(AT_FDCWD, old, AT_FDCWD, new, 0): arm64 has no
+                # rename and no renameat either.  The fifth argument lands in
+                # x4, which is the tape's r4 -- scratch at a `.sys`, as r0-r2
+                # already are.
+                syscall_seq("rename", [("imm", -100), ("mem", SCR0),
+                                       ("imm", -100), ("mem", SCR1),
+                                       ("imm", 0)])
             else:
                 syscall_seq(a[0], [("mem", SCR0), ("mem", SCR1),
                                    ("mem", PRINTLEN)])

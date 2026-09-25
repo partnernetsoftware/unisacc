@@ -33,9 +33,15 @@ SYSCALLS = {
     "accept":        (43, 202, 30, "accept"),
     "clone":         (56, 220, 360, "CreateThread"),
     "execve":        (59, 221, 59, "CreateProcessW"),
+    # D2 [S-15]: fseek/ftell, remove, rename.  Linux/arm64 has neither
+    # unlink nor rename -- the numbers are unlinkat and renameat2, whose
+    # directory-fd arguments the lowering supplies, as it does for openat.
+    "lseek":         (8, 62, 199, "SetFilePointer"),
+    "unlink":        (87, 35, 10, "DeleteFileA"),
+    "rename":        (82, 276, 128, "MoveFileExA"),
 }
 
-SYSOPS = tuple(SYSCALLS.keys())                                        # 19
+SYSOPS = tuple(SYSCALLS.keys())                                        # 22
 MOPS = ("add64", "sub64", "xor64", "mul64", "slt64", "sle64", "load64",
         "store64", "jump", "jumpz", "call", "ret", "nop", "cas64", "fence",
         "syscall_gate", "tls_base", "cycle_counter", "stack_enter",

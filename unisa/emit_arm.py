@@ -416,6 +416,18 @@ def _winapi(ins, off, shift, text_va, imps):
         out += _movz(5, 0x80)                        # FILE_ATTRIBUTE_NORMAL
         out += w(0xAA1F03E6)                         # x6 = 0  (no template)
         return out + _callimp(pc + len(out), imps, "CreateFileA")
+    if op == "lseek":
+        out = w(0xAA0203E3)                          # x3 = x2 (method)
+        out += w(0xAA1F03E2)                         # x2 = 0  (no high word)
+        out += _fd2handle(pc + len(out), hstd)
+        out += _callimp(pc + len(out), imps, "SetFilePointer")
+        return out + w(0x93407C00)                   # sxtw x0, w0
+    if op in ("unlink", "rename"):
+        out = _movz(2, 1) if op == "rename" else b""  # MOVEFILE_REPLACE_EXISTING
+        out += _callimp(pc + len(out), imps,
+                        "DeleteFileA" if op == "unlink" else "MoveFileExA")
+        out += w(0x7100001F)                         # cmp w0, #0
+        return out + w(0xDA9F13E0)                   # csetm x0, eq
     return None
 
 

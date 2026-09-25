@@ -363,6 +363,28 @@ def _winapi(ins, off, shift, text_va, imps):
         out += _stackarg(48, 0)                              # hTemplateFile
         out += _callimp(pc + len(out), imps, "CreateFileA")
         return bytes(out) + _align_post()
+    if op == "lseek":
+        # SetFilePointer(handle, low, NULL, method): SEEK_SET/CUR/END are
+        # FILE_BEGIN/CURRENT/END.  It answers a DWORD, -1 on failure:
+        # sign-extended, that is POSIX's -1 (files under 2 GB).
+        out = mov_rr("r9", "r8") + mov_ri("r8", 0)
+        out += _fd2handle_x86(pc + len(out), hstd)
+        pre, _ = _align_pre(0)
+        out += pre
+        out += _callimp(pc + len(out), imps, "SetFilePointer")
+        return out + _align_post() + b"\x48\x63\xc0"          # movsxd rax, eax
+    if op in ("unlink", "rename"):
+        # DeleteFileA(path) / MoveFileExA(old, new, REPLACE_EXISTING): a BOOL,
+        # which POSIX spells 0 / -1
+        out = mov_ri("r8", 1) if op == "rename" else b""
+        pre, _ = _align_pre(0)
+        out += pre
+        out += _callimp(pc + len(out), imps,
+                        "DeleteFileA" if op == "unlink" else "MoveFileExA")
+        out += _align_post()
+        out += b"\x85\xc0" + b"\x0f\x94\xc0"               # test eax, eax; sete al
+        out += b"\x48\x0f\xb6\xc0" + b"\x48\xf7\xd8"      # movzx rax, al; neg rax
+        return out
     return None
 
 

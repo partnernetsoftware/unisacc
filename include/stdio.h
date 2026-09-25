@@ -136,6 +136,17 @@ static char *fgets(char *s, int n, FILE *f) {
 }
 
 static int fclose(FILE *f) { return __close(_unisa_fd(f)); }
+/* A FILE * is its descriptor and nothing is buffered, so the file offset
+   is the stream's position: fseek and ftell are lseek.  [S-15 D2] */
+static int fseek(FILE *f, long off, int whence) {
+    return __lseek(_unisa_fd(f), off, whence) < 0 ? -1 : 0;
+}
+static long ftell(FILE *f) { return __lseek(_unisa_fd(f), 0, SEEK_CUR); }
+static void rewind(FILE *f) { __lseek(_unisa_fd(f), 0, SEEK_SET); }
+static int remove(const char *path) { return __unlink((char *)path) < 0 ? -1 : 0; }
+static int rename(const char *from, const char *to) {
+    return __rename((char *)from, (char *)to) < 0 ? -1 : 0;
+}
 static int fflush(FILE *f) { return 0; }
 
 /* ---- a runtime formatter ------------------------------------------------

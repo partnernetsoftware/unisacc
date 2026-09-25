@@ -563,6 +563,8 @@ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
     return 0;
 }
 
+/* a fifth argument, for the one call that has one (renameat2); used once */
+int bk_a4k = 0 - 1; long bk_a4v;
 int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k3, long v3) {
     int g;
     bk_facts(cop);
@@ -573,6 +575,7 @@ int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k
     tk_setreg(bkf_arg[1], k1, v1);
     tk_setreg(bkf_arg[2], k2, v2);
     if (k3 >= 0) tk_setreg(bkf_arg[3], k3, v3);
+    if (bk_a4k >= 0) { tk_setreg(bkf_arg[4], bk_a4k, bk_a4v); bk_a4k = 0 - 1; }
     g = tk(TO_GATE, 0, 0, 0, 0);
     tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
     if (bkos == 2) tk(TO_WINREST, bk_save, bkf_ret, 0, 0);
@@ -655,9 +658,16 @@ int bk_lower(void) {
                 /* Linux/arm64 has no `open`: the number is openat's, whose
                    first argument is a directory fd, AT_FDCWD */
                 bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen);
+            } else { if (bkos == 0 && bkarch == 1 && bk_same(id, "unlink", 6)) {
+                /* unlinkat(AT_FDCWD, path, 0) */
+                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0, 0 - 1, 0);
+            } else { if (bkos == 0 && bkarch == 1 && bk_same(id, "rename", 6)) {
+                /* renameat2(AT_FDCWD, old, AT_FDCWD, new, 0) */
+                bk_a4k = SK_IMM; bk_a4v = 0;
+                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0 - 100, SK_MEM, bk_scr1);
             } else {
                 bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0);
-            }
+            } } }
             bk_facts(cw);
             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
         } else { if (bk_is(op, ".sys6")) {
@@ -738,7 +748,7 @@ int bk_lower(void) {
 char *bkout;                        /* where the current instruction's bytes go */
 int bkol;                           /* how many so far */
 long bk_textva; long bk_shift; int bk_sizing;
-#define BK_NIMP 11                  /* pe.IMPORTS */
+#define BK_NIMP 14                  /* pe.IMPORTS */
 long bk_imp[BK_NIMP];               /* Windows: the IAT slot of each import */
 long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
 /* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]
@@ -919,6 +929,21 @@ int a_winapi(int i, long off) {
         a_movz(5, 0x80);
         ow(0xAA1F03E6);
         a_callimp(pc + (bkol - s), 4);
+        return 1;
+    }
+    if (bk_str_is(nm, "lseek")) {
+        ow(0xAA0203E3);                              /* x3 = x2 (method) */
+        ow(0xAA1F03E2);                              /* x2 = 0 */
+        a_fd2handle(pc + (bkol - s), hstd);
+        a_callimp(pc + (bkol - s), 11);
+        ow(0x93407C00);                              /* sxtw x0, w0 */
+        return 1;
+    }
+    if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
+        if (bk_str_is(nm, "rename")) a_movz(2, 1);
+        a_callimp(pc + (bkol - s), bk_str_is(nm, "unlink") ? 12 : 13);
+        ow(0x7100001F);                              /* cmp w0, #0 */
+        ow(0xDA9F13E0);                              /* csetm x0, eq */
         return 1;
     }
     bkol = s;
@@ -1356,6 +1381,23 @@ int x_winapi(int i, long off) {
         x_alignpost();
         return 1;
     }
+    if (bk_str_is(nm, "lseek")) {        /* SetFilePointer(h, low, NULL, method) */
+        x_movrr(X_R9, X_R8); x_movri(X_R8, 0);
+        x_fd2handle(pc + (bkol - s), hstd);
+        x_alignpre(0); x_callimp(pc + (bkol - s), 11); x_alignpost();
+        ob(0x48); ob(0x63); ob(0xC0);                    /* movsxd rax, eax */
+        return 1;
+    }
+    if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
+        if (bk_str_is(nm, "rename")) x_movri(X_R8, 1);  /* REPLACE_EXISTING */
+        x_alignpre(0);
+        x_callimp(pc + (bkol - s), bk_str_is(nm, "unlink") ? 12 : 13);
+        x_alignpost();
+        ob(0x85); ob(0xC0); ob(0x0F); ob(0x94); ob(0xC0);   /* test eax; sete al */
+        ob(0x48); ob(0x0F); ob(0xB6); ob(0xC0);              /* movzx rax, al */
+        ob(0x48); ob(0xF7); ob(0xD8);                        /* neg rax: 0 / -1 */
+        return 1;
+    }
     bkol = s;
     return 0;
 }
@@ -1695,7 +1737,7 @@ int bk_enc(int i, long off) { if (bkarch) return bk_arm(i, off); return bk_x86(i
 long bk_round(long v, long a) { return (v + a - 1) / a * a; }
 
 /* Windows' import section layout (pe._idata) -- the same arithmetic */
-char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000";
+char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000";
 long bk_idata_len; long bk_iat_off; long bk_cfg_off;
 int bk_idata_layout(void) {
     long off; int k; int L; char *e;

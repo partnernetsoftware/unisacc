@@ -22,7 +22,8 @@ DLL = b"KERNEL32.dll"
 # `__imp_<name>` to that slot's address.
 IMPORTS = ("GetStdHandle", "WriteFile", "ReadFile", "CloseHandle",
            "CreateFileA", "ExitProcess", "GetCommandLineA", "VirtualAlloc",
-           "VirtualProtect", "VirtualFree", "FlushInstructionCache")
+           "VirtualProtect", "VirtualFree", "FlushInstructionCache",
+           "SetFilePointer", "DeleteFileA", "MoveFileExA")
 
 
 def _round(v, a):

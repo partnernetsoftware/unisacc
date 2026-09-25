@@ -27,7 +27,8 @@ sys.path.insert(0, R)
 # the header symbol each op means, per OS.  An op the OS has no syscall for
 # maps to None: the catalog must say "none" for it.
 NAME = {
-    "lnx": {"open": ["SYS_open", "SYS_openat"]},
+    "lnx": {"open": ["SYS_open", "SYS_openat"], "unlink": ["SYS_unlink", "SYS_unlinkat"],
+            "rename": ["SYS_rename", "SYS_renameat2"]},
     "osx": {"clock_gettime": None, "nanosleep": None,
             "futex": ["SYS_ulock_wait"], "clone": ["SYS_bsdthread_create"]},
 }

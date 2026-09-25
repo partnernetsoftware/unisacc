@@ -28,7 +28,8 @@ ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
 # still come from the abi/enc tables -- nothing here is hardcoded per target.
 INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
              "__close": "close", "__exit": "exit",
-             "__mprotect": "mprotect", "__munmap": "munmap"}
+             "__mprotect": "mprotect", "__munmap": "munmap",
+             "__lseek": "lseek", "__unlink": "unlink", "__rename": "rename"}
 # six arguments, so the six-register gate: a compiler that runs what it
 # compiles maps memory, and mmap takes six
 INTRINSIC6 = {"__mmap": "mmap"}

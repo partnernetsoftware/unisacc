@@ -4237,7 +4237,8 @@ int pf_call(int t) {
     if (isname(t, "__open", 6) || isname(t, "__read", 6) ||
         isname(t, "__write", 7) || isname(t, "__close", 7) ||
         isname(t, "__mprotect", 10) || isname(t, "__munmap", 8) ||
-        isname(t, "__exit", 6)) {
+        isname(t, "__exit", 6) || isname(t, "__lseek", 7) ||
+        isname(t, "__unlink", 8) || isname(t, "__rename", 8)) {
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {
@@ -4254,7 +4255,10 @@ int pf_call(int t) {
         else { if (isname(t, "__close", 7)) es("close");
         else { if (isname(t, "__mprotect", 10)) es("mprotect");
         else { if (isname(t, "__munmap", 8)) es("munmap");
-        else es("exit"); } } } } }
+        else { if (isname(t, "__lseek", 7)) es("lseek");
+        else { if (isname(t, "__unlink", 8)) es("unlink");
+        else { if (isname(t, "__rename", 8)) es("rename");
+        else es("exit"); } } } } } } } }
         es(", r0, r1, r2\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
