@@ -430,6 +430,28 @@ int en(long v) {
     return 0;
 }
 
+/* a whole instruction line goes to es() in ONE piece: a `_rev` recipe
+   finds its operands by the commas of the same string */
+char el_b[96]; int el_n;
+int el_s(char *t) { int k; k = 0; while (t[k]) { el_b[el_n] = t[k]; el_n = el_n + 1; k = k + 1; } return 0; }
+int el_num(long v) {
+    char b[24]; int n; unsigned long u;
+    u = v; n = 0;
+    if (v < 0) { el_s("-"); u = 0 - u; }
+    if (u == 0) { b[0] = 48; n = 1; }
+    while (u > 0) { b[n] = 48 + (u % 10); u = u / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; el_b[el_n] = b[n]; el_n = el_n + 1; }
+    return 0;
+}
+int el_out(void) { el_b[el_n] = 10; el_b[el_n + 1] = 0; el_n = 0; return es(el_b); }
+/* one immediate into rR: `  @lit.imm rR, V` */
+int eimm(int r, long v) { el_s("  @lit.imm r"); el_num(r); el_s(", "); el_num(v); return el_out(); }
+/* rD = the frame address FP - off, through scratch rT */
+int eframe(int d, int t, long off) {
+    eimm(t, off);
+    el_s("  @alu.sub r"); el_num(d); el_s(", r6, r"); el_num(t); return el_out();
+}
+
 /* C99 6.4.4.1: an integer constant may be hexadecimal, octal or decimal, and
    may carry a u/U/l/L suffix.  Four copies of `v = v * 10 + (c - 48)` got all
    three wrong -- `0xff` came out 7794, `010` came out 10, and `5L` came out
@@ -844,8 +866,8 @@ int eload(int w) {
            shift for a signed field, so the sign question answers itself */
         if (bfunit(w) == 8) es("  @mem.load r0, [r0+0]\n");
         else { es("  @mem.ld r0, [r0+0], "); en(bfunit(w)); ec(10); }
-        es("  @lit.imm r1, "); en(64 - bfofs(w) - bfwidth(w));
-        es("\n  @alu.shl r0, r0, r1\n  @lit.imm r1, "); en(64 - bfwidth(w));
+        eimm(1, 64 - bfofs(w) - bfwidth(w));
+        es("  @alu.shl r0, r0, r1\n  @lit.imm r1, "); en(64 - bfwidth(w));
         if (bfsig(w)) es("\n  @alu.shr r0, r0, r1\n");
         else es("\n  @alu.lshr r0, r0, r1\n");
         return 0;
@@ -881,12 +903,12 @@ int estore(int w) {                              /* [r1] = r0 */
         long mask;
         mask = 1;
         mask = (mask << bfwidth(w)) - 1;
-        es("  @lit.imm r2, "); en(mask); es("\n  @alu.and r3, r0, r2\n");
-        es("  @lit.imm r2, "); en(bfofs(w)); es("\n  @alu.shl r3, r3, r2\n");
+        eimm(2, mask); es("  @alu.and r3, r0, r2\n");
+        eimm(2, bfofs(w)); es("  @alu.shl r3, r3, r2\n");
         if (bfunit(w) == 8) es("  @mem.load r4, [r1+0]\n");
         else { es("  @mem.ld r4, [r1+0], "); en(bfunit(w)); ec(10); }
-        es("  @lit.imm r2, "); en(0 - (mask << bfofs(w)) - 1);
-        es("\n  @alu.and r4, r4, r2\n  @alu.or r4, r4, r3\n");
+        eimm(2, 0 - (mask << bfofs(w)) - 1);
+        es("  @alu.and r4, r4, r2\n  @alu.or r4, r4, r3\n");
         if (bfunit(w) == 8) es("  @mem.store [r1+0], r4\n");
         else { es("  @mem.st [r1+0], r4, "); en(bfunit(w)); ec(10); }
         return 0;
@@ -938,7 +960,7 @@ int cplitexpr(int w, int sst, int isarr, int n) {
         off = alloc_local(size);
         initisarr = isarr;
         initaggr(0, 0, off, w, sst, size);
-        es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
+        eframe(0, 0, off);
     } else {
         /* named after the `{` token, not a counter: expr() parses
            speculatively and rewinds, so this can run twice for one literal
@@ -964,7 +986,7 @@ int unary(void) {
     p = ask(2);
     if (p == P_NEG) { adv(); unary(); loadval();
         if (curflt) { if (curptr == 0) {        /* -x flips the sign bit, -0.0 too */
-            es("  @lit.imm r1, "); en(curflt == 8 ? (long)1 << 63 : 2147483648); es("\n  @alu.xor r0, r0, r1\n");
+            eimm(1, curflt == 8 ? (long)1 << 63 : 2147483648); es("  @alu.xor r0, r0, r1\n");
             return 0; } }
         es("  @lit.imm r1, 0\n  @alu.sub r0, r1, r0\n");
         if (curptr == 0) { if (curuns) { if (cursize == 4) zext(4); } }
@@ -1205,8 +1227,8 @@ int postfix(void) {
                 __exit(1);
             }
             if (mboff[mi]) {
-                es("  @lit.imm r2, "); en(mboff[mi]);
-                es("\n  @alu.add r0, r0, r2\n");
+                eimm(2, mboff[mi]);
+                es("  @alu.add r0, r0, r2\n");
             }
             lvalue = 1;
             curelem = mbwidth[mi];
@@ -1240,7 +1262,7 @@ int postfix(void) {
             loadval();
             push();
             expr(); loadval();
-            if (e != 1) { es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); }
+            if (e != 1) { eimm(2, e); es("  @alu.mul r0, r0, r2\n"); }
             pop1();
             es("  @alu.add r0, r1, r0\n");
             need(vfind(TOKV, NTOKV, "]", 1), "]");
@@ -1516,7 +1538,7 @@ int primary(void) {
             return postfix();
         }
         if (symkind[i] == 0) symlea(i, tp, "r0");
-        else { es("  @lit.imm r2, "); en(symoff[i]); es("\n  @alu.sub r0, r6, r2\n"); }
+        else { eframe(0, 2, symoff[i]); }
         curelem = symelem[i];
         curptr = symptr[i];
         /* a pointer to a struct steps by the STRUCT: its element width was
@@ -1980,7 +2002,7 @@ int pf_call(int t) {
         unary(); lvalue = 0; push();
         if (eat(tidx(",", 1))) { expr(); loadval(); }
         need(tidx(")", 1), ")");
-        es("  @lit.imm r0, "); en(16 + 8 * fnnfixed); es("\n  @alu.add r0, r6, r0\n");
+        eimm(0, 16 + 8 * fnnfixed); es("  @alu.add r0, r6, r0\n");
         pop1(); es("  @mem.store [r1+0], r0\n  @lit.imm r0, 0\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
@@ -2588,18 +2610,18 @@ int binary(int level) {
         if (lp == 0) { if (rp) { if (re > 1) { if (k == tidx("+", 1)) {
             /* `n + p`: the INTEGER is on the stack; scale it there */
             es("  @call.frame 8\n  @mem.store [r7+0], r0\n  @mem.load r0, [r7+8]\n");
-            es("  @lit.imm r2, "); en(re); es("\n  @alu.mul r0, r0, r2\n  @mem.store [r7+8], r0\n");
+            eimm(2, re); es("  @alu.mul r0, r0, r2\n  @mem.store [r7+8], r0\n");
             es("  @mem.load r0, [r7+0]\n  @call.frame -8\n");
         } } } }
         if (lp) { if (e > 1) {
-            if (k == tidx("+", 1)) { es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); }
+            if (k == tidx("+", 1)) { eimm(2, e); es("  @alu.mul r0, r0, r2\n"); }
             if (k == tidx("-", 1)) { if (curptr == 0) {
-                es("  @lit.imm r2, "); en(e); es("\n  @alu.mul r0, r0, r2\n"); } }
+                eimm(2, e); es("  @alu.mul r0, r0, r2\n"); } }
         } }
         emit_binop(k);
         /* C99 6.5.6p9: the difference of two pointers counts ELEMENTS */
         if (lp) { if (curptr) { if (e > 1) { if (k == tidx("-", 1)) {
-            es("  @lit.imm r2, "); en(e); es("\n  @alu.div r0, r0, r2\n");
+            eimm(2, e); es("  @alu.div r0, r0, r2\n");
         } } } }
         if (tyis(res, "ptr", 3) == 0) { if (tyuns(res)) zext(tysize(res)); }
         binuns = 0; binwid = 8;
@@ -2759,7 +2781,7 @@ int expr(void) {
             /* `p += n` moves n ELEMENTS, as `p = p + n` does */
             if (ptrl) { if (pel > 1) {
                 if (op == tidx("+", 1) || op == tidx("-", 1)) {
-                    es("  @lit.imm r2, "); en(pel); es("\n  @alu.mul r0, r0, r2\n");
+                    eimm(2, pel); es("  @alu.mul r0, r0, r2\n");
                 }
             } }
             /* `x op= y` is done in the common type (6.5.16.2p3): unsigned
@@ -3662,7 +3684,7 @@ int initaddr(int isglobal, int gt, int off, int delta) {
         if (delta) { es("\n  @lit.imm r2, "); en(delta); es("\n  @alu.add r1, r1, r2"); }
         ec(10);
     } else {
-        es("  @lit.imm r2, "); en(off - delta); es("\n  @alu.sub r1, r6, r2\n");
+        eframe(1, 2, off - delta);
     }
     return 0;
 }
@@ -4134,7 +4156,7 @@ int local_decl(void) {
             el = w;
             if (sst >= 0) el = declsz;
             if (declptr) el = 8;
-            es("  @lit.imm r2, "); en(el); es("\n  @alu.mul r0, r0, r2\n");
+            eimm(2, el); es("  @alu.mul r0, r0, r2\n");
             szs = alloc_local(8);
             es("  @mem.store [r6-"); en(szs); es("], r0\n");
             if (vlaslot[bdepth] == 0) {
@@ -4202,7 +4224,7 @@ int local_decl(void) {
                         while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
                     } else {
                         /* `struct S b = a;` -- a whole-struct copy */
-                        es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
+                        eframe(0, 0, off);
                         push(); expr(); loadval();
                         es("  mov r1, r0\n  @mem.load r0, [r7+0]\n  @call.frame -8\n");
                         scopy(declsz);
@@ -4238,17 +4260,17 @@ int local_decl(void) {
             else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
                 initstr(0, 0, off, n);
             } else { expr(); loadval();
-                es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
+                eframe(1, 2, off);
                 estore(8); } }
             else { int rt; rt = tp; curcall = 0; expr(); loadval();
                 intptr_check(lptr, rt);
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
-                es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
+                eframe(1, 2, off);
                 if (lptr) estore(8); else estore(w); } }
             else { int rt; rt = tp; curcall = 0; expr(); loadval();
                 intptr_check(lptr, rt);
                 fconv(fkind(), lk);                  /* C99 6.7.8p11 */
-                es("  @lit.imm r2, "); en(off); es("\n  @alu.sub r1, r6, r2\n");
+                eframe(1, 2, off);
                 if (lptr) estore(8); else estore(w); } }
         }
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
@@ -4371,8 +4393,8 @@ int stmt_(void) {
         expr(); loadval();
         need(tidx(")", 1), ")");
         slot = alloc_local(8);
-        es("  @lit.imm r2, "); en(slot);
-        es("\n  @alu.sub r1, r6, r2\n  @mem.store [r1+0], r0\n");
+        eframe(1, 2, slot);
+        es("  @mem.store [r1+0], r0\n");
         disp = newlab(); end = newlab();
         elab("  @ctrl.jump L", disp); ec(10);
         cbase = nswv; mysw = nsw;
@@ -4391,8 +4413,8 @@ int stmt_(void) {
         elab("L", disp); es(":\n");
         k = cbase;
         while (k < nswv) {
-            es("  @lit.imm r2, "); en(slot);
-            es("\n  @alu.sub r1, r6, r2\n  @mem.load r0, [r1+0]\n");
+            eframe(1, 2, slot);
+            es("  @mem.load r0, [r1+0]\n");
             es("  @lit.imm r1, "); en(swval[k]); ec(10);
             es("  @alu.ne r0, r0, r1\n");
             elab("  @ctrl.jumpz r0, L", swlab[k]); ec(10);
@@ -4581,7 +4603,7 @@ int function(int t, int w) {
             if (stacked) {
                 /* the registers are free in this convention */
                 es("  @mem.load r1, [r6+"); en(16 + 8 * np); es("]\n");
-                es("  @lit.imm r5, "); en(off); es("\n  @alu.sub r5, r6, r5\n  @mem.store [r5+0], r1\n");
+                eframe(5, 5, off); es("  @mem.store [r5+0], r1\n");
             } else {
                 /* Straight into the slot: the tape takes a negative
                    displacement, so no scratch register is needed.  There was
@@ -4619,7 +4641,7 @@ int function(int t, int w) {
     while (k < nsp) {
         off = alloc_local(stsize[symstruct[spsym[k]]]);
         es("  @mem.load r1, [r6-"); en(symoff[spsym[k]]); es("]\n");
-        es("  @lit.imm r0, "); en(off); es("\n  @alu.sub r0, r6, r0\n");
+        eframe(0, 0, off);
         scopy(stsize[symstruct[spsym[k]]]);
         symoff[spsym[k]] = off;
         k = k + 1;
