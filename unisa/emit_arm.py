@@ -359,29 +359,48 @@ def _fd2handle(pc, hstd):
 
 
 def _winapi(ins, off, shift, text_va, imps):
+    """body, then the abi table's `retconv` tail; the import is `winimp` [I4]"""
     m = ins.meta
+    out = _winbody(ins, off, shift, text_va, imps)
+    if out is None:
+        return None
+    return out + _wintail(m.get("retconv", "none"), text_va + off + len(out),
+                          m.get("written", 0) + shift)
+
+
+def _wintail(rc, pc, written):
+    if rc == "wcount":                                   # the bytes moved
+        return adrp_add(IP0, pc, written) + _ldr(0, IP0)
+    if rc == "bool_inv":                                 # BOOL -> 0 ok, 1 not
+        return w(0xF100001F) + w(0x9A9F17E0)             # cmp x0,#0; cset x0,eq
+    if rc == "bool_neg":                                 # BOOL -> 0 ok, -1 not
+        return w(0x7100001F) + w(0xDA9F13E0)             # cmp w0,#0; csetm x0,eq
+    if rc == "dword_sx":
+        return w(0x93407C00)                             # sxtw x0, w0
+    return b""
+
+
+def _winbody(ins, off, shift, text_va, imps):
+    m = ins.meta
+    imp = m.get("winimp")
     op = m.get("catop")
     hstd = m.get("hstd", 0) + shift
     written = m.get("written", 0) + shift
     pc = text_va + off
     if op == "exit":
-        return _callimp(pc, imps, "ExitProcess")
+        return _callimp(pc, imps, imp)
     if op in ("write", "read"):
         out = _fd2handle(pc, hstd)
         out += adrp_add(3, pc + len(out), written)   # x3 = &written
         out += w(0xAA1F03E4)                         # mov x4, xzr
-        out += _callimp(pc + len(out), imps,
-                        "WriteFile" if op == "write" else "ReadFile")
-        out += adrp_add(IP0, pc + len(out), written)
-        out += _ldr(0, IP0)                          # the POSIX return value
-        return out
+        return out + _callimp(pc + len(out), imps, imp)
     if op == "mmap":
-        return _callimp(pc, imps, "VirtualAlloc")       # four args, in x0..x3
+        return _callimp(pc, imps, imp)       # four args, in x0..x3
     if op == "mprotect":
         scr0 = m.get("scr0", 0) + shift
         scr1 = m.get("scr1", 0) + shift
         out = adrp_add(3, pc, written)                  # x3 = &old
-        out += _callimp(pc + len(out), imps, "VirtualProtect")
+        out += _callimp(pc + len(out), imps, imp)
         # see emit_x86: arm64 Windows needs the instruction cache flushed,
         # and GetCurrentProcess() is always the pseudo-handle -1
         out += _movn(0, -1)                             # x0 = -1
@@ -389,21 +408,14 @@ def _winapi(ins, off, shift, text_va, imps):
         out += _ldr(1, IP0)                             # x1 = the address
         out += adrp_add(IP0, pc + len(out), scr1)
         out += _ldr(2, IP0)                             # x2 = the length
-        out += _callimp(pc + len(out), imps, "FlushInstructionCache")
-        # POSIX returns 0 on success, VirtualProtect nonzero
-        out += w(0xF100001F)                            # cmp x0, #0
-        out += w(0x9A9F17E0)                            # cset x0, eq
-        return out
+        return out + _callimp(pc + len(out), imps, "FlushInstructionCache")
     if op == "munmap":
         out = w(0xD2900002)                             # x2 = 0x8000 MEM_RELEASE
         out += w(0xAA1F03E1)                            # x1 = 0 (dwSize)
-        out += _callimp(pc + len(out), imps, "VirtualFree")
-        out += w(0xF100001F)                            # cmp x0, #0
-        out += w(0x9A9F17E0)                            # cset x0, eq
-        return out
+        return out + _callimp(pc + len(out), imps, imp)
     if op == "close":
         out = _fd2handle(pc, hstd)
-        return out + _callimp(pc + len(out), imps, "CloseHandle")
+        return out + _callimp(pc + len(out), imps, imp)
     if op == "open":
         # The gate carries Windows' own shapes, because only the C library
         # knows which platform it is compiling for: arg1 is dwDesiredAccess
@@ -415,19 +427,15 @@ def _winapi(ins, off, shift, text_va, imps):
         out += w(0xAA1F03E3)                         # x3 = 0  (no security)
         out += _movz(5, 0x80)                        # FILE_ATTRIBUTE_NORMAL
         out += w(0xAA1F03E6)                         # x6 = 0  (no template)
-        return out + _callimp(pc + len(out), imps, "CreateFileA")
+        return out + _callimp(pc + len(out), imps, imp)
     if op == "lseek":
         out = w(0xAA0203E3)                          # x3 = x2 (method)
         out += w(0xAA1F03E2)                         # x2 = 0  (no high word)
         out += _fd2handle(pc + len(out), hstd)
-        out += _callimp(pc + len(out), imps, "SetFilePointer")
-        return out + w(0x93407C00)                   # sxtw x0, w0
+        return out + _callimp(pc + len(out), imps, imp)
     if op in ("unlink", "rename"):
         out = _movz(2, 1) if op == "rename" else b""  # MOVEFILE_REPLACE_EXISTING
-        out += _callimp(pc + len(out), imps,
-                        "DeleteFileA" if op == "unlink" else "MoveFileExA")
-        out += w(0x7100001F)                         # cmp w0, #0
-        return out + w(0xDA9F13E0)                   # csetm x0, eq
+        return out + _callimp(pc + len(out), imps, imp)
     return None
 
 

@@ -173,6 +173,7 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         # there. [I-20]
         tp.emit("gate", form=f["form"], gate=gate, carry=(os_ == "osx"),
                 winapi=C.WINAPI.get(op), catop=op, sysno=sysno,
+                retconv=f["retconv"], winimp=f["winimp"],
                 ret=f["ret"], hstd=HSTD, written=WRITTEN,
                 scr0=SCR0, scr1=SCR1)
         if win:
@@ -231,31 +232,18 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
         elif o == ".sys":
             for k in range(3):
                 tp.emit("setmem", [SCR0, SCR1, PRINTLEN][k], R(a[1 + k]))
-            if a[0] == "open" and (os_, arch) == ("lnx", "arm64"):
-                # Linux/arm64 has no `open` at all: the number in the catalog
-                # is `openat`, whose FIRST argument is a directory fd.  So
-                # every argument shifts up one and the mode ends up in a
-                # fourth register, which the abi net does not model -- its
-                # gold has three argument heads [C-1].  The shift is
-                # structural, like the relocation arithmetic, so it lives
-                # here rather than in the table.  AT_FDCWD = -100.
-                syscall_seq("open", [("imm", -100), ("mem", SCR0),
-                                     ("mem", SCR1), ("mem", PRINTLEN)])
-            elif a[0] == "unlink" and (os_, arch) == ("lnx", "arm64"):
-                # unlinkat(AT_FDCWD, path, 0), for the same reason
-                syscall_seq("unlink", [("imm", -100), ("mem", SCR0),
-                                       ("imm", 0)])
-            elif a[0] == "rename" and (os_, arch) == ("lnx", "arm64"):
-                # renameat2(AT_FDCWD, old, AT_FDCWD, new, 0): arm64 has no
-                # rename and no renameat either.  The fifth argument lands in
-                # x4, which is the tape's r4 -- scratch at a `.sys`, as r0-r2
-                # already are.
-                syscall_seq("rename", [("imm", -100), ("mem", SCR0),
-                                       ("imm", -100), ("mem", SCR1),
-                                       ("imm", 0)])
-            else:
-                syscall_seq(a[0], [("mem", SCR0), ("mem", SCR1),
-                                   ("mem", PRINTLEN)])
+            # how the three tape arguments become the call's: the abi
+            # table's `argshape` [I4].  Linux/arm64 has no open, unlink or
+            # rename -- the numbers are the *at forms, which take AT_FDCWD
+            # first; renameat2 takes it twice, and flags 0 in x4, the tape's
+            # r4 (scratch at a `.sys`, as r0-r2 already are).
+            shape = facts(oracle, a[0], os_, arch, drive)["argshape"]
+            A0, A1, A2 = ("mem", SCR0), ("mem", SCR1), ("mem", PRINTLEN)
+            FD, Z = ("imm", -100), ("imm", 0)
+            srcs = {"plain": [A0, A1, A2], "atfd_1": [FD, A0, A1, A2],
+                    "atfd_1_zero": [FD, A0, Z],
+                    "atfd_2_zero5": [FD, A0, FD, A1, Z]}[shape]
+            syscall_seq(a[0], srcs)
             tp.emit("mov", rmap["r0"],
                     facts(oracle, a[0], os_, arch, drive)["ret"])
         elif o == ".exit":

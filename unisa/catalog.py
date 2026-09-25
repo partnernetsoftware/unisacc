@@ -183,6 +183,39 @@ def nrreg(op, os_, arch):
     return NR_REG[(os_, arch)]
 
 
+# ---- [I4] how a call's arguments are shaped and its result converted ------
+# Linux/arm64 has no open/unlink/rename: the numbers are the *at forms, which
+# take a directory fd first (AT_FDCWD) -- renameat2 twice, plus flags 0.
+ARGSHAPES = ("plain", "atfd_1", "atfd_1_zero", "atfd_2_zero5")
+_ATFD = {"open": "atfd_1", "unlink": "atfd_1_zero", "rename": "atfd_2_zero5"}
+# What a WinAPI call's answer becomes: POSIX wants a count, 0/-1, or 0/1.
+RETCONVS = ("none", "wcount", "bool_inv", "bool_neg", "dword_sx")
+_RETCONV = {"write": "wcount", "read": "wcount", "mprotect": "bool_inv",
+            "munmap": "bool_inv", "unlink": "bool_neg", "rename": "bool_neg",
+            "lseek": "dword_sx"}
+# The KERNEL32 function each gated op calls -- what the image imports.
+_WINIMP = {"exit": "ExitProcess", "write": "WriteFile", "read": "ReadFile",
+           "mmap": "VirtualAlloc", "mprotect": "VirtualProtect",
+           "munmap": "VirtualFree", "close": "CloseHandle",
+           "open": "CreateFileA", "lseek": "SetFilePointer",
+           "unlink": "DeleteFileA", "rename": "MoveFileExA"}
+WINIMPS = ("none",) + tuple(dict.fromkeys(_WINIMP.values()))
+
+
+def argshape(op, os_, arch):
+    if (os_, arch) == ("lnx", "arm64") and op in _ATFD:
+        return _ATFD[op]
+    return "plain"
+
+
+def retconv(op, os_, arch):
+    return _RETCONV.get(op, "none") if os_ == "win" else "none"
+
+
+def winimp(op, os_, arch):
+    return _WINIMP.get(op, "none") if os_ == "win" else "none"
+
+
 def nine(op, os_, arch):
     """Every target fact of one catalog op, derived. [G-9] [S-6]
 
@@ -198,6 +231,8 @@ def nine(op, os_, arch):
         "gate": gate(op, os_, arch),
         "sysno": sysno(op, os_, arch),
         "arg0": a0, "arg1": a1, "arg2": a2, "ret": rt,
+        "argshape": argshape(op, os_, arch), "retconv": retconv(op, os_, arch),
+        "winimp": winimp(op, os_, arch),
     }
 
 

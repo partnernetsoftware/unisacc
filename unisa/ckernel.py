@@ -34,6 +34,7 @@ def _blob(nets):
     for st in ALL:
         n = nets[st]
         S = STAGES[st]
+        assert len(S.heads) <= HEADS_MAX, "%s: %d heads > HEADS_MAX" % (st, len(S.heads))
         m = len(S.fields)
         W = maskw(st)
         start = len(out)
@@ -103,6 +104,10 @@ def _cstr(b, name):
 # The generated files: the model changes whenever a table does, the kernel
 # does not, so they are written apart. [K-5]
 MODEL_INC = "unisa_model.inc"
+# Heads per stage the kernel has room for: its STAGE_NCLS is indexed s*16+h,
+# by a shift (the kernel has no multiply).  It was 12 until abi grew a 13th
+# head [I4] and the 13th wrote into the next stage's counts -- a bus error.
+HEADS_MAX = 16
 CASES_INC = "unisa_cases.inc"
 HEADERS_INC = "unisa_headers.inc"
 
@@ -159,7 +164,7 @@ def emit_core(nets, path):
           '']
     L += ['int STAGE_M[%d];' % len(meta), 'int STAGE_H[%d];' % len(meta),
           'int STAGE_OFF[%d];' % len(meta),
-          'int STAGE_NCLS[%d];' % (len(meta) * 12),
+          'int STAGE_NCLS[%d];' % (len(meta) * HEADS_MAX),
           'int STAGE_MW[%d];' % len(meta),
           'int STAGE_VN[%d];' % (len(meta) * 4),
           'int act[4096];', 'int z[512];', '']
@@ -168,7 +173,7 @@ def emit_core(nets, path):
         L.append('  STAGE_M[%d] = %d; STAGE_H[%d] = %d; STAGE_OFF[%d] = %d;'
                  '  STAGE_MW[%d] = %d;' % (i, m, i, H, i, off, i, mw))
         for k, c in enumerate(ncls):
-            L.append('  STAGE_NCLS[%d] = %d;' % (i * 12 + k, c))
+            L.append('  STAGE_NCLS[%d] = %d;' % (i * HEADS_MAX + k, c))
         for f, n in enumerate(vlen):
             L.append('  STAGE_VN[%d] = %d;' % (i * 4 + f, n))
     L += ['  return %d;' % len(meta), '}', '']
@@ -260,7 +265,7 @@ def emit(nets, hdr_path, c_path):
     h += ['', '/* stage, nfields, nunits, nheads, blob offset */',
           'int STAGE_M[%d];' % len(meta), 'int STAGE_H[%d];' % len(meta),
           'int STAGE_NH[%d];' % len(meta), 'int STAGE_OFF[%d];' % len(meta),
-          'int STAGE_NCLS[%d];' % (len(meta) * 12),
+          'int STAGE_NCLS[%d];' % (len(meta) * HEADS_MAX),
           'int STAGE_MW[%d];' % len(meta),
           'int STAGE_VLEN[%d];' % (len(meta) * 4), '',
           'int model_dims(void) {']
@@ -269,7 +274,7 @@ def emit(nets, hdr_path, c_path):
                  ' STAGE_OFF[%d] = %d; STAGE_MW[%d] = %d;   /* %s */'
                  % (i, m, i, H, i, nh, i, off, i, mw, st))
         for k, c in enumerate(ncls):
-            h.append('  STAGE_NCLS[%d] = %d;' % (i * 12 + k, c))
+            h.append('  STAGE_NCLS[%d] = %d;' % (i * HEADS_MAX + k, c))
         for k, c in enumerate(vlen):
             h.append('  STAGE_VLEN[%d] = %d;' % (i * 4 + k, c))
     h += ['  return %d;' % len(meta), '}']
@@ -341,7 +346,7 @@ int infer(int s, int *key, int head) {
     p = q;
     ne = getb(p) | (getb(p+1) << 8) | (getb(p+2) << 16) | (getb(p+3) << 24);
     p = p + 4;
-    ncls = STAGE_NCLS[(s << 3) + (s << 2) + head];
+    ncls = STAGE_NCLS[(s << 4) + head];
     c = 0;
     while (c < ncls) { z[c] = 0; c = c + 1; }
     k = 0;

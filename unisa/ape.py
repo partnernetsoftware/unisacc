@@ -57,7 +57,15 @@ def _script(table):
         # and GNU gzip have had forever (busybox spells it `gunzip -c`)
         'tail -c +$o "$0" | head -c $n | gzip -dc > "$t" || exit 1',
         'chmod +x "$t"',
-        '"$t" "$@"; r=$?',
+        # the compiler runs as this script's CHILD: a signal that ends the
+        # script (^C, a watchdog's SIGALRM, a kill) has to end it too, or it
+        # is orphaned -- one span at 97% CPU for nine hours after a bounded
+        # run timed out.  A background job's stdin would be /dev/null, so
+        # stdin is handed over on fd 3.
+        'exec 3<&0',
+        '"$t" "$@" <&3 3<&- & p=$!',
+        'trap \'kill $p 2>/dev/null; rm -f "$t"; exit 143\' HUP INT TERM ALRM',
+        'wait $p; r=$?',
         'rm -f "$t"',
         "exit $r",
     ]) + "\n").encode()

@@ -275,14 +275,42 @@ def _fd2handle_x86(pc, hstd):
 
 
 def _winapi(ins, off, shift, text_va, imps):
+    """a WinAPI gate: the op's own argument moves and call (the body), then
+    the conversion of its answer to POSIX's (the tail) -- which import it
+    calls and which tail it takes are the abi table's `winimp` and
+    `retconv` [I4]"""
     m = ins.meta
+    out = _winbody(ins, off, shift, text_va, imps)
+    if out is None:
+        return None
+    return out + _wintail(m.get("retconv", "none"), text_va + off + len(out),
+                          m.get("written", 0) + shift)
+
+
+def _wintail(rc, pc, written):
+    if rc == "wcount":                                   # the bytes moved
+        return rip(0x8B, "rax", pc + 7, written)
+    if rc == "bool_inv":                                 # BOOL -> 0 ok, 1 not
+        return (rex(1, 0, 0, 0) + b"\x83" + modrm(3, 7, 0) + b"\x00"   # cmp rax,0
+                + b"\x0f\x94\xc0" + rex(1, 0, 0, 0) + b"\x0f\xb6\xc0")   # sete; movzx
+    if rc == "bool_neg":                                 # BOOL -> 0 ok, -1 not
+        return (b"\x85\xc0" + b"\x0f\x94\xc0"             # test eax; sete al
+                + b"\x48\x0f\xb6\xc0" + b"\x48\xf7\xd8")  # movzx; neg rax
+    if rc == "dword_sx":                                 # DWORD, -1 on failure
+        return b"\x48\x63\xc0"                          # movsxd rax, eax
+    return b""
+
+
+def _winbody(ins, off, shift, text_va, imps):
+    m = ins.meta
+    imp = m.get("winimp")
     op = m.get("catop")
     hstd = m.get("hstd", 0) + shift
     written = m.get("written", 0) + shift
     pc = text_va + off
     if op == "exit":
         out, _ = _align_pre(0)
-        out += _callimp(pc + len(out), imps, "ExitProcess")
+        out += _callimp(pc + len(out), imps, imp)
         return out + _align_post()
     if op in ("write", "read"):
         out = _fd2handle_x86(pc, hstd)
@@ -290,16 +318,13 @@ def _winapi(ins, off, shift, text_va, imps):
         pre, _ = _align_pre(1)
         out += pre
         out += _stackarg(32, 0)                              # lpOverlapped
-        out += _callimp(pc + len(out), imps,
-                        "WriteFile" if op == "write" else "ReadFile")
-        out += _align_post()
-        out += rip(0x8B, "rax", pc + len(out) + 7, written)
-        return out
+        out += _callimp(pc + len(out), imps, imp)
+        return out + _align_post()
     if op == "mmap":
         # VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect) --
         # four arguments, which is exactly what Win64 passes in registers
         pre, _ = _align_pre(0)
-        out = pre + _callimp(pc + len(pre), imps, "VirtualAlloc")
+        out = pre + _callimp(pc + len(pre), imps, imp)
         return out + _align_post()
     if op == "mprotect":
         # VirtualProtect(addr, size, newProtect, &old): the old protection
@@ -309,7 +334,7 @@ def _winapi(ins, off, shift, text_va, imps):
         out = rip(0x8D, "r9", pc + 7, written)                # r9 = &old
         pre, _ = _align_pre(0)
         out += pre
-        out += _callimp(pc + len(out), imps, "VirtualProtect")
+        out += _callimp(pc + len(out), imps, imp)
         out += _align_post()
         # Windows on arm64 will not execute code that is still only in the
         # data cache, and changing the protection does not flush it: the
@@ -321,29 +346,19 @@ def _winapi(ins, off, shift, text_va, imps):
         pre2, _ = _align_pre(0)
         out += pre2
         out += _callimp(pc + len(out), imps, "FlushInstructionCache")
-        out += _align_post()
-        # POSIX says 0 on success; VirtualProtect says nonzero
-        out += rex(1, 0, 0, 0) + b"\x83" + modrm(3, 7, 0) + b"\x00"   # cmp rax,0
-        out += b"\x0f\x94\xc0"                        # sete al
-        out += rex(1, 0, 0, 0) + b"\x0f\xb6\xc0"      # movzx rax, al
-        return out
+        return out + _align_post()                # POSIX's 0/1: the tail
     if op == "munmap":
         out = mov_ri("r8", 0x8000)                      # MEM_RELEASE
         out += mov_ri("rdx", 0)                         # dwSize must be 0
         pre, _ = _align_pre(0)
         out += pre
-        out += _callimp(pc + len(out), imps, "VirtualFree")
-        out += _align_post()
-        # POSIX munmap returns 0 on success, VirtualFree nonzero
-        out += rex(1, 0, 0, 0) + b"\x83" + modrm(3, 7, 0) + b"\x00"
-        out += b"\x0f\x94\xc0"
-        out += rex(1, 0, 0, 0) + b"\x0f\xb6\xc0"
-        return out
+        out += _callimp(pc + len(out), imps, imp)
+        return out + _align_post()
     if op == "close":
         out = _fd2handle_x86(pc, hstd)
         pre, _ = _align_pre(0)
         out += pre
-        out += _callimp(pc + len(out), imps, "CloseHandle")
+        out += _callimp(pc + len(out), imps, imp)
         return out + _align_post()
     if op == "open":
         # arg1 (rdx) is already dwDesiredAccess and arg2 (r8) is
@@ -361,7 +376,7 @@ def _winapi(ins, off, shift, text_va, imps):
         out += mov_ri("r9", 0)                               # no security
         out += _stackarg(40, 0x80)                           # FILE_ATTR_NORMAL
         out += _stackarg(48, 0)                              # hTemplateFile
-        out += _callimp(pc + len(out), imps, "CreateFileA")
+        out += _callimp(pc + len(out), imps, imp)
         return bytes(out) + _align_post()
     if op == "lseek":
         # SetFilePointer(handle, low, NULL, method): SEEK_SET/CUR/END are
@@ -371,20 +386,16 @@ def _winapi(ins, off, shift, text_va, imps):
         out += _fd2handle_x86(pc + len(out), hstd)
         pre, _ = _align_pre(0)
         out += pre
-        out += _callimp(pc + len(out), imps, "SetFilePointer")
-        return out + _align_post() + b"\x48\x63\xc0"          # movsxd rax, eax
+        out += _callimp(pc + len(out), imps, imp)
+        return out + _align_post()
     if op in ("unlink", "rename"):
         # DeleteFileA(path) / MoveFileExA(old, new, REPLACE_EXISTING): a BOOL,
         # which POSIX spells 0 / -1
         out = mov_ri("r8", 1) if op == "rename" else b""
         pre, _ = _align_pre(0)
         out += pre
-        out += _callimp(pc + len(out), imps,
-                        "DeleteFileA" if op == "unlink" else "MoveFileExA")
-        out += _align_post()
-        out += b"\x85\xc0" + b"\x0f\x94\xc0"               # test eax, eax; sete al
-        out += b"\x48\x0f\xb6\xc0" + b"\x48\xf7\xd8"      # movzx rax, al; neg rax
-        return out
+        out += _callimp(pc + len(out), imps, imp)
+        return out + _align_post()
     return None
 
 

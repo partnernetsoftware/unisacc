@@ -442,6 +442,7 @@ int bkf_nr;                         /* the syscall-number register (abi nrreg) *
 int bkf_form; int bkf_gate; long bkf_sysno; int bkf_hasno;
 int bkf_arg[6]; int bkf_ret;        /* machine register numbers, -1 none */
 int bkf_sym;                        /* the symbol class index (isel), unused in bytes */
+int bkf_argshape; int bkf_retconv; int bkf_winimp;   /* [I4] abi heads */
 
 /* a class index's spelling -> a machine register number (-1 for none) */
 int bk_regnum(char *nm) {
@@ -475,6 +476,9 @@ int bk_facts(int cop) {
     bkf_ret = bk_regnum(bk_nth(BH_ABI_RET, inf(S_ABI, key, HD_ABI_RET)));
     bkf_gate = inf(S_ABI, key, HD_ABI_GATE);
     bkf_nr = bk_regnum(bk_nth(BH_ABI_NRREG, inf(S_ABI, key, HD_ABI_NRREG)));
+    bkf_argshape = inf(S_ABI, key, HD_ABI_ARGSHAPE);
+    bkf_retconv = inf(S_ABI, key, HD_ABI_RETCONV);
+    bkf_winimp = inf(S_ABI, key, HD_ABI_WINIMP);
     bkf_form = inf(S_ENC, key, 0);        /* enc is os-aware, and wins */
     return 0;
 }
@@ -511,6 +515,9 @@ int bk_formis(char *nm) { char *e; int k; e = bk_nth(BH_ENC_Y, bkf_form); k = 0;
 #define SK_ADDR 4
 int tkop[BK_MAXT]; long tka[BK_MAXT * 4]; int tkk[BK_MAXT * 4]; int tkn;
 /* gate metadata: form, gate, catalog op, return register */
+int tkg_rc[BK_MAXT]; int tkg_wi[BK_MAXT];
+int bk_impof(int c);                /* the IAT slot `winimp` names */
+int bk_str_is(char *a, char *b);
 int tkg_rel[BK_MAXT]; int tkg_form[BK_MAXT]; int tkg_gate[BK_MAXT]; int tkg_cop[BK_MAXT]; int tkg_ret[BK_MAXT];
 int bklab_tpc[BK_MAXN];            /* a label's lowered pc */
 int bklab_first[BK_MAXI + 1]; int bklab_next[BK_MAXN];
@@ -559,6 +566,7 @@ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
     }
     g = tk(TO_GATE, 0, 0, 0, 0);
     tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
+    tkg_rc[g] = bkf_retconv; tkg_wi[g] = bkf_winimp;
     if (bkos == 2) tk(TO_WINREST, bk_save, bkf_ret, 0, 0);
     return 0;
 }
@@ -578,6 +586,7 @@ int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k
     if (bk_a4k >= 0) { tk_setreg(bkf_arg[4], bk_a4k, bk_a4v); bk_a4k = 0 - 1; }
     g = tk(TO_GATE, 0, 0, 0, 0);
     tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
+    tkg_rc[g] = bkf_retconv; tkg_wi[g] = bkf_winimp;
     if (bkos == 2) tk(TO_WINREST, bk_save, bkf_ret, 0, 0);
     return 0;
 }
@@ -654,20 +663,22 @@ int bk_lower(void) {
             id = bkav[pc * 8]; L = bkname_len[id]; if (L > 31) L = 31;
             k = 0; while (k < L) { nm[k] = bkpool[bkname_at[id] + k]; k = k + 1; } nm[L] = 0;
             cw = bk_cop(nm);
-            if (bkos == 0 && bkarch == 1 && bk_same(id, "open", 4)) {
-                /* Linux/arm64 has no `open`: the number is openat's, whose
-                   first argument is a directory fd, AT_FDCWD */
-                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen);
-            } else { if (bkos == 0 && bkarch == 1 && bk_same(id, "unlink", 6)) {
-                /* unlinkat(AT_FDCWD, path, 0) */
-                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0, 0 - 1, 0);
-            } else { if (bkos == 0 && bkarch == 1 && bk_same(id, "rename", 6)) {
-                /* renameat2(AT_FDCWD, old, AT_FDCWD, new, 0) */
-                bk_a4k = SK_IMM; bk_a4v = 0;
-                bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0 - 100, SK_MEM, bk_scr1);
-            } else {
-                bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0);
-            } } }
+            /* how the three tape arguments become the call's: the abi
+               table's `argshape` [I4] -- Linux/arm64's *at forms take
+               AT_FDCWD first, renameat2 twice and flags 0 fifth */
+            bk_facts(cw);
+            {   char *sh; sh = bk_nth(BH_ABI_ARGSHAPE, bkf_argshape);
+                if (bk_str_is(sh, "atfd_1"))
+                    bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen);
+                else { if (bk_str_is(sh, "atfd_1_zero"))
+                    bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0, 0 - 1, 0);
+                else { if (bk_str_is(sh, "atfd_2_zero5")) {
+                    bk_a4k = SK_IMM; bk_a4v = 0;
+                    bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0 - 100, SK_MEM, bk_scr1);
+                } else
+                    bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0);
+                } }
+            }
             bk_facts(cw);
             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
         } else { if (bk_is(op, ".sys6")) {
@@ -749,6 +760,7 @@ char *bkout;                        /* where the current instruction's bytes go 
 int bkol;                           /* how many so far */
 long bk_textva; long bk_shift; int bk_sizing;
 #define BK_NIMP 14                  /* pe.IMPORTS */
+char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000";
 long bk_imp[BK_NIMP];               /* Windows: the IAT slot of each import */
 long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
 /* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]
@@ -873,53 +885,64 @@ int a_fd2handle(long pc, long hstd) {
     ow(0xF8607800 | (0 << 16) | (A_IP0 << 5) | 0);   /* ldr x0, [ip0, x0, lsl 3] */
     return 0;
 }
+/* body, then the abi table's `retconv` tail; the import is `winimp` [I4] */
+int a_wintail(int rc, long pc, long written) {
+    char *n; n = bk_nth(BH_ABI_RETCONV, rc);
+    if (bk_str_is(n, "wcount")) { a_adrp_add(A_IP0, pc, written); a_ldr(0, A_IP0, 0); return 0; }
+    if (bk_str_is(n, "bool_inv")) { ow(0xF100001F); ow(0x9A9F17E0); return 0; }   /* cmp; cset eq */
+    if (bk_str_is(n, "bool_neg")) { ow(0x7100001F); ow(0xDA9F13E0); return 0; }   /* cmp w0; csetm eq */
+    if (bk_str_is(n, "dword_sx")) { ow(0x93407C00); return 0; }                   /* sxtw x0, w0 */
+    return 0;
+}
+int a_winbody(int i, long off);
 int a_winapi(int i, long off) {
+    int s; long pc;
+    s = bkol; pc = bk_textva + off;
+    if (a_winbody(i, off) == 0) return 0;
+    a_wintail(tkg_rc[i], pc + (bkol - s), bk_written + bk_shift);
+    return 1;
+}
+int a_winbody(int i, long off) {
     long pc; long hstd; long written; char *nm; int s;
     pc = bk_textva + off;
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
     s = bkol;
-    if (bk_str_is(nm, "exit")) { a_callimp(pc, 5); return 1; }
+    if (bk_str_is(nm, "exit")) { a_callimp(pc, bk_impof(tkg_wi[i])); return 1; }
     if (bk_str_is(nm, "write") || bk_str_is(nm, "read")) {
         a_fd2handle(pc, hstd);
         a_adrp_add(3, pc + (bkol - s), written);
         ow(0xAA1F03E4);                              /* mov x4, xzr */
-        a_callimp(pc + (bkol - s), bk_str_is(nm, "write") ? 1 : 2);
-        a_adrp_add(A_IP0, pc + (bkol - s), written);
-        a_ldr(0, A_IP0, 0);
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
     if (bk_str_is(nm, "mmap")) {          /* VirtualAlloc, four args in x0..x3 */
-        a_callimp(pc, 7);
+        a_callimp(pc, bk_impof(tkg_wi[i]));
         return 1;
     }
     if (bk_str_is(nm, "mprotect")) {      /* VirtualProtect(addr,n,prot,&old) */
         long scr0; long scr1;
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         a_adrp_add(3, pc, written);
-        a_callimp(pc + (bkol - s), 8);
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         /* arm64 Windows will not execute code that is only in the data
            cache, and a protection change does not flush it.  The current
            process is the pseudo-handle -1. [S-9] */
         a_movn(0, 0 - 1);
         a_adrp_add(A_IP0, pc + (bkol - s), scr0); a_ldr(1, A_IP0, 0);
         a_adrp_add(A_IP0, pc + (bkol - s), scr1); a_ldr(2, A_IP0, 0);
-        a_callimp(pc + (bkol - s), 10);
-        ow(0xF100001F);                   /* cmp x0, #0 -- POSIX wants 0 = ok */
-        ow(0x9A9F17E0);                   /* cset x0, eq */
+        a_callimp(pc + (bkol - s), 10);          /* FlushInstructionCache */
         return 1;
     }
     if (bk_str_is(nm, "munmap")) {        /* VirtualFree(addr, 0, MEM_RELEASE) */
         ow(0xD2900002);
         ow(0xAA1F03E1);
-        a_callimp(pc + (bkol - s), 9);
-        ow(0xF100001F);                   /* POSIX wants 0 = ok */
-        ow(0x9A9F17E0);
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
     if (bk_str_is(nm, "close")) {
         a_fd2handle(pc, hstd);
-        a_callimp(pc + (bkol - s), 3);
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
     if (bk_str_is(nm, "open")) {
@@ -928,22 +951,19 @@ int a_winapi(int i, long off) {
         ow(0xAA1F03E3);
         a_movz(5, 0x80);
         ow(0xAA1F03E6);
-        a_callimp(pc + (bkol - s), 4);
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
     if (bk_str_is(nm, "lseek")) {
         ow(0xAA0203E3);                              /* x3 = x2 (method) */
         ow(0xAA1F03E2);                              /* x2 = 0 */
         a_fd2handle(pc + (bkol - s), hstd);
-        a_callimp(pc + (bkol - s), 11);
-        ow(0x93407C00);                              /* sxtw x0, w0 */
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
     if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
         if (bk_str_is(nm, "rename")) a_movz(2, 1);
-        a_callimp(pc + (bkol - s), bk_str_is(nm, "unlink") ? 12 : 13);
-        ow(0x7100001F);                              /* cmp w0, #0 */
-        ow(0xDA9F13E0);                              /* csetm x0, eq */
+        a_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         return 1;
     }
     bkol = s;
@@ -1298,6 +1318,12 @@ int x_stackarg(int slot, long val) {
     x_rex(1, 0, 0, 0); ob(0xC7); x_modrm(1, 0, 4); ob(0x24); ob(slot); x_d32(val);
     return 0;
 }
+/* which IAT slot the abi table's `winimp` names [I4] */
+int bk_impof(int c) {
+    char *n; int L;
+    n = bk_nth(BH_ABI_WINIMP, c); L = 0; while (n[L]) L = L + 1;
+    return vfind(BK_IMPS, BK_NIMP, n, L);
+}
 int x_callimp(long pc, int k) {
     x_rip(0x8B, X_RAX, pc + 7, bk_sizing ? 0 : bk_imp[k]);
     ob(0xFF); ob(0xD0);
@@ -1310,14 +1336,43 @@ int x_fd2handle(long pc, long hstd) {
     x_rex(1, 0, 0, 1); ob(0x8B); x_modrm(0, 1, 4); ob(0xCB);
     return 0;
 }
+/* a WinAPI gate is the op's own moves and call (x_winbody), then the
+   conversion of its answer to POSIX's (x_wintail): the import is the abi
+   table's `winimp`, the tail its `retconv` [I4] */
+int x_wintail(int rc, long pc, long written) {
+    char *n; n = bk_nth(BH_ABI_RETCONV, rc);
+    if (bk_str_is(n, "wcount")) { x_rip(0x8B, X_RAX, pc + 7, written); return 0; }
+    if (bk_str_is(n, "bool_inv")) {
+        x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax, 0 */
+        ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
+        x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx rax, al */
+        return 0;
+    }
+    if (bk_str_is(n, "bool_neg")) {
+        ob(0x85); ob(0xC0); ob(0x0F); ob(0x94); ob(0xC0);   /* test eax; sete al */
+        ob(0x48); ob(0x0F); ob(0xB6); ob(0xC0);              /* movzx rax, al */
+        ob(0x48); ob(0xF7); ob(0xD8);                        /* neg rax: 0 / -1 */
+        return 0;
+    }
+    if (bk_str_is(n, "dword_sx")) { ob(0x48); ob(0x63); ob(0xC0); return 0; }   /* movsxd */
+    return 0;
+}
+int x_winbody(int i, long off);
 int x_winapi(int i, long off) {
+    int s; long pc;
+    s = bkol; pc = bk_textva + off;
+    if (x_winbody(i, off) == 0) return 0;
+    x_wintail(tkg_rc[i], pc + (bkol - s), bk_written + bk_shift);
+    return 1;
+}
+int x_winbody(int i, long off) {
     long pc; long hstd; long written; char *nm; int s;
     pc = bk_textva + off;
     hstd = bk_hstd + bk_shift; written = bk_written + bk_shift;
     nm = bk_nth(BF_ABI_0, tkg_cop[i]);
     s = bkol;
     if (bk_str_is(nm, "exit")) {
-        x_alignpre(0); x_callimp(pc + (bkol - s), 5); x_alignpost();
+        x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
     if (bk_str_is(nm, "write") || bk_str_is(nm, "read")) {
@@ -1325,13 +1380,12 @@ int x_winapi(int i, long off) {
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);
         x_alignpre(1);
         x_stackarg(32, 0);
-        x_callimp(pc + (bkol - s), bk_str_is(nm, "write") ? 1 : 2);
+        x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
-        x_rip(0x8B, X_RAX, pc + (bkol - s) + 7, written);
         return 1;
     }
     if (bk_str_is(nm, "mmap")) {
-        x_alignpre(0); x_callimp(pc + (bkol - s), 7); x_alignpost();
+        x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
     if (bk_str_is(nm, "mprotect")) {
@@ -1339,33 +1393,27 @@ int x_winapi(int i, long off) {
         scr0 = bk_scr0 + bk_shift; scr1 = bk_scr1 + bk_shift;
         x_rip(0x8D, X_R9, pc + (bkol - s) + 7, written);   /* r9 = &old */
         x_alignpre(0);
-        x_callimp(pc + (bkol - s), 8);
+        x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
         /* flush the instruction cache -- see the arm64 gate */
         x_movri(X_RCX, 0 - 1);
         x_rip(0x8B, X_RDX, pc + (bkol - s) + 7, scr0);
         x_rip(0x8B, X_R8, pc + (bkol - s) + 7, scr1);
         x_alignpre(0);
-        x_callimp(pc + (bkol - s), 10);
+        x_callimp(pc + (bkol - s), 10);          /* FlushInstructionCache */
         x_alignpost();
-        x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax, 0 */
-        ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
-        x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx rax, al */
         return 1;
     }
     if (bk_str_is(nm, "munmap")) {
         x_movri(X_R8, 0x8000);            /* MEM_RELEASE */
         x_movri(X_RDX, 0);                /* dwSize must be 0 */
-        x_alignpre(0); x_callimp(pc + (bkol - s), 9); x_alignpost();
-        x_rex(1, 0, 0, 0); ob(0x83); x_modrm(3, 7, 0); ob(0);   /* cmp rax,0 */
-        ob(0x0F); ob(0x94); ob(0xC0);                          /* sete al */
-        x_rex(1, 0, 0, 0); ob(0x0F); ob(0xB6); ob(0xC0);       /* movzx */
+        x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
     if (bk_str_is(nm, "close")) {
         x_fd2handle(pc, hstd);
         x_alignpre(0);
-        x_callimp(pc + (bkol - s), 3);
+        x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
         return 1;
     }
@@ -1377,25 +1425,21 @@ int x_winapi(int i, long off) {
         x_movri(X_R9, 0);
         x_stackarg(40, 0x80);
         x_stackarg(48, 0);
-        x_callimp(pc + (bkol - s), 4);
+        x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
         return 1;
     }
     if (bk_str_is(nm, "lseek")) {        /* SetFilePointer(h, low, NULL, method) */
         x_movrr(X_R9, X_R8); x_movri(X_R8, 0);
         x_fd2handle(pc + (bkol - s), hstd);
-        x_alignpre(0); x_callimp(pc + (bkol - s), 11); x_alignpost();
-        ob(0x48); ob(0x63); ob(0xC0);                    /* movsxd rax, eax */
+        x_alignpre(0); x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i])); x_alignpost();
         return 1;
     }
     if (bk_str_is(nm, "unlink") || bk_str_is(nm, "rename")) {
         if (bk_str_is(nm, "rename")) x_movri(X_R8, 1);  /* REPLACE_EXISTING */
         x_alignpre(0);
-        x_callimp(pc + (bkol - s), bk_str_is(nm, "unlink") ? 12 : 13);
+        x_callimp(pc + (bkol - s), bk_impof(tkg_wi[i]));
         x_alignpost();
-        ob(0x85); ob(0xC0); ob(0x0F); ob(0x94); ob(0xC0);   /* test eax; sete al */
-        ob(0x48); ob(0x0F); ob(0xB6); ob(0xC0);              /* movzx rax, al */
-        ob(0x48); ob(0xF7); ob(0xD8);                        /* neg rax: 0 / -1 */
         return 1;
     }
     bkol = s;
@@ -1737,7 +1781,6 @@ int bk_enc(int i, long off) { if (bkarch) return bk_arm(i, off); return bk_x86(i
 long bk_round(long v, long a) { return (v + a - 1) / a * a; }
 
 /* Windows' import section layout (pe._idata) -- the same arithmetic */
-char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000";
 long bk_idata_len; long bk_iat_off; long bk_cfg_off;
 int bk_idata_layout(void) {
     long off; int k; int L; char *e;

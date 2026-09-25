@@ -588,14 +588,18 @@ def build():
                  ("arg3", C.REGS, "reg"), ("arg4", C.REGS, "reg"),
                  ("arg5", C.REGS, "reg"), ("ret", C.REGS, "reg"),
                  ("gate", C.GATES, None),
-                 ("nrreg", C.vocab("nrreg"), None)]
+                 ("nrreg", C.vocab("nrreg"), None),
+                 # [I4] argument shape, result conversion, WinAPI import
+                 ("argshape", C.ARGSHAPES, None), ("retconv", C.RETCONVS, None),
+                 ("winimp", C.WINIMPS, None)]
     S["abi"] = Stage("abi", [("op", C.OPS), ("os", C.OS), ("arch", C.ARCH)],
                      abi_heads,
                      lambda op, o, a: {k: v for k, v in C.nine(op, o, a).items()
                                        if k in ("sysno", "arg0", "arg1", "arg2",
                                                 "arg3", "arg4", "arg5",
                                                 "ret", "gate",
-                                                "nrreg")},
+                                                "nrreg", "argshape", "retconv",
+                                                "winimp")},
                      dict(dims=(12, 8, 8), hidden=[32, 20], seed=5,
                           bilinear=8))
     S["combo"] = Stage("combo", [("op", C.OPS), ("os", C.OS), ("arch", C.ARCH)],

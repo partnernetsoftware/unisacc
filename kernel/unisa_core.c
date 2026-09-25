@@ -67,7 +67,7 @@ int infer(int s, int *key, int head) {
     p = q;
     ne = getb(p) | (getb(p+1) << 8) | (getb(p+2) << 16) | (getb(p+3) << 24);
     p = p + 4;
-    ncls = STAGE_NCLS[(s << 3) + (s << 2) + head];
+    ncls = STAGE_NCLS[(s << 4) + head];
     c = 0;
     while (c < ncls) { z[c] = 0; c = c + 1; }
     k = 0;
