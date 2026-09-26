@@ -25,9 +25,23 @@ _LIB_R=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
 
 # ua_ready -- the self-hosted compiler exists, or build it.
 ua_ready() {
-    [ -x "$UA" ] && return 0
+    # A binary that exists is not a binary that is current: a stale
+    # /tmp/ua_ref once passed the old compiler off as the new one, on this
+    # host and inside the Linux VM.  The default build is stamped with the
+    # hash of the sources it came from and rebuilt when they differ; a UA
+    # the caller chose is used as given.
+    local want
+    if [ "$UA" = /tmp/ua_ref ]; then
+        want=$(cat "$_LIB_R"/kernel/*.inc "$_LIB_R"/kernel/*.c "$_LIB_R"/src/*.c \
+               "$_LIB_R"/tests/refshim.h "$_LIB_R"/tests/reffoot.h | cksum)
+        [ -x "$UA" ] && [ "$(cat "$UA.stamp" 2>/dev/null)" = "$want" ] && return 0
+    else
+        [ -x "$UA" ] && return 0
+    fi
     "$_LIB_R/tests/build_ref.sh" "$UA.c" "$UA" >/dev/null || {
         echo "  FAIL could not build the reference compiler ($UA)"; exit 1; }
+    [ -n "${want:-}" ] && printf '%s\n' "$want" > "$UA.stamp"
+    return 0
 }
 
 # bound N cmd... -- run with a hard limit.  macOS has no timeout(1).

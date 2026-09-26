@@ -24,8 +24,10 @@ static int part2(void)
     h = 0x8000000000000001ul; h /= 3; printf("%lu\n", h);
     u >>= 1; printf("%u %ld\n", u, (long)u);
     u = 0x80000001u; u /= 3; printf("%u\n", u);
-    c += 10; printf("%d %ld %ld\n", c, (long)(c += 250), (long)++c);
-    v -= 9; printf("%u %ld %ld %ld\n", v, (long)v, (long)(v -= 1), (long)~v);
+    /* one modification per statement: two in one argument list are
+       unsequenced, and gcc and clang evaluate them in opposite orders */
+    c += 10; printf("%d ", c); printf("%ld ", (long)(c += 250)); printf("%ld\n", (long)++c);
+    v -= 9; printf("%u %ld ", v, (long)v); printf("%ld ", (long)(v -= 1)); printf("%ld\n", (long)~v);
     printf("%ld %ld %ld\n", (long)-v, (long)-c, (long)(~c));
     return 0;
 }

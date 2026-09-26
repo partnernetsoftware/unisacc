@@ -9,7 +9,11 @@ int main(void)
     old = signal(SIGTERM, h);
     printf("%d\n", old == SIG_DFL);
     raise(SIGTERM);
-    printf("%d %d\n", (int)seen, signal(SIGTERM, SIG_IGN) == SIG_DFL);
+    /* whether delivery resets the handler to SIG_DFL is implementation-
+       defined (C99 7.14.1.1p3): glibc in strict C99 mode resets, BSD libc
+       does not, so only the handler's effect is printed */
+    printf("%d\n", (int)seen);
+    signal(SIGTERM, SIG_IGN);
     raise(SIGTERM);
     printf("still here\n");
     return 0;
