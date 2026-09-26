@@ -235,5 +235,9 @@ TARGET` is the separate actual-VM check; `MEMORY_CASES=io` selects the bounded
 file/allocator/error batch. The caller starts and stops the VM. Both Windows
 architectures have been run on Windows 11 ARM64 (x86_64 via emulation), using
 network-built drivers equal to reference-built PE files. The new memory route
-has also executed on macOS arm64 and x86_64/Rosetta. Linux memory execution
-has not yet been measured; cross-generated Linux images are separate evidence.
+has also executed on macOS arm64 and x86_64/Rosetta. Linux ARM64 was run in
+Lima with a network-built driver equal to the reference-built ELF.
+`posixmemoryrun.py DRIVER PACKAGE` checks nine programs at O0/O1/O2 against
+the guest system cc, plus argv/environment/exit and explicit missing input.
+Run it in a copied test tree with an outer 60 s bound; each compile/run has
+a 15 s timeout. Linux x86_64 memory execution remains unmeasured.
