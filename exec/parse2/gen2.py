@@ -315,7 +315,8 @@ PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double param
 FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
         "<": "flt64 r0, r1, r0", ">": "flt64 r0, r0, r1", "<=": "fle64 r0, r1, r0", ">=": "fle64 r0, r0, r1",
         "==": "feq64 r0, r1, r0"}   # measured (the reversed forms for > >=); != not measured: not covered   # double: stored, passed, returned and va_arg'd as a plain 64-bit move (measured, old E3 p63)
-TYPEW = {"type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
+FLT = E.FLT   # float: only `*p = (float) d` (cvtds, .st 4 -- measured by the old E3); any other float value is not covered
+TYPEW = {"type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
 
@@ -347,7 +348,10 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
 def types():
     width_dispatch(None, "LOADV", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n", masks=True)
     width_dispatch(None, "LOADRAW", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n")   # va_arg: no mask (measured, p62)
-    width_dispatch(None, "STOREV", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, %d\n")
+    P("STOREV").branch({1: "STF"}, "STOREV0", [("CMPI", "vb", FLT)])
+    P("STF").branch({1: "STF1"}, "STOREV0", [("CMPI", "vt", 0)])
+    P("STF1").o("  .st [r1+0], r0, 4\n").ret()
+    width_dispatch(None, "STOREV0", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, %d\n")
     # NARROW: a value to vb bytes through the stack (a return, a cast); 8 bytes and pointers: nothing
     q = P("NARROW")
     q.branch({(1, 2): "RET"}, "NARROW.b", [("CMPI", "vt", 1)])
@@ -520,7 +524,9 @@ def build():
     P("ELSZ.st").a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "es", "t", SSZ)).branch({1: "DEAD.inc"}, "RET", [("CMPI", "es", 0)])
     g.on("DEAD.inc", range(257), "DEAD", E.rej("not covered: incomplete struct"), "r")
     P("ELSZ.b").branch({1: "DEAD.void"}, "ELSZ.s", [("CMPI", "tb", 0)])
-    P("ELSZ.s").a(("COPYW", "es", "tb")).branch({1: "ELSZ.d"}, "ELSZ.s2", [("CMPI", "tb", DBL)])
+    P("ELSZ.s").a(("COPYW", "es", "tb")).branch({1: "ELSZ.d"}, "ELSZ.sf", [("CMPI", "tb", DBL)])
+    P("ELSZ.sf").branch({1: "ELSZ.f"}, "ELSZ.s2", [("CMPI", "tb", FLT)])
+    P("ELSZ.f").a(("LDI", "es", 4)).ret()
     P("ELSZ.d").a(("LDI", "es", 8)).ret()
     P("ELSZ.s2").branch({2: "ELSZ.u"}, "RET", [("CMPI", "tb", UNS)])
     P("ELSZ.u").a(("ALUI", "sub", "es", "tb", UNS)).ret()
@@ -677,7 +683,13 @@ def build():
     emit(p, "jump_b")
     emit(p, "label_a").vpush("b").call("NEXT").call("E%d" % LEVELS[0]).call("QTAIL").vpop("b").vpop("lt", "lb")
     emit(p, "label_b").branch({1: "QT.1"}, "DEAD.qt", [("CMP", "vt", "lt")])
-    P("QT.1").branch({1: "RET"}, "DEAD.qt", [("CMP", "vb", "lb")])
+    P("QT.1").branch({1: "RET"}, "QT.2", [("CMP", "vb", "lb")])
+    P("QT.2").branch({1: "QT.3"}, "DEAD.qt", [("CMPI", "vt", 0)])          # two integer arms of different sizes
+    P("QT.3").a(("LDI", "t", 0)).call("QT.int").a(("COPYW", "t2", "t"), ("COPYW", "x", "vb"), ("COPYW", "vb", "lb")).call("QT.int").a(("COPYW", "vb", "x"), ("LDI", "vb", 8)).ret()
+    p = P("QT.int")      # t += 1 when vb is a signed int or long (the pair must be those)
+    p.branch({1: "QT.i1"}, "QT.i8", [("CMPI", "vb", 4)])
+    P("QT.i8").branch({1: "QT.i1"}, "DEAD.qt", [("CMPI", "vb", 8)])
+    P("QT.i1").a(("ALUI", "add", "t", "t", 1)).ret()
     g.on("DEAD.qt", range(257), "DEAD", E.rej("not covered: ?: arms of different types"), "r")
     P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.cpf", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
     p = P("X.as")
@@ -803,7 +815,11 @@ def build():
     P("U.pe").call("EXPR").expect(")").call("NEXT").call("POSTIX").ret()
     q = P("U.cast")      # (T) e: narrowed through the stack to T; long and pointers: no code (measured)
     q.call("TSPEC").expect(")").vpush("td", "tb").call("NEXT").call("UNARY").call("ISDV").a(("COPYW", "sdv", "u")).vpop("vt", "vb").call("ISDV")
-    q.a(("COPYW", "tdv", "u")).branch({1: "UC.same"}, "UC.cv", [("CMP", "sdv", "tdv")])
+    q.a(("COPYW", "tdv", "u")).branch({1: "UC.flt"}, "UC.nf", [("CMPI", "vb", FLT)])
+    P("UC.flt").branch({1: "UC.flt1"}, "DEAD.dbl", [("CMPI", "sdv", 1)])
+    P("UC.flt1").branch({1: "UC.flt2"}, "DEAD.dbl", [("CMPI", "vt", 0)])
+    P("UC.flt2").o("  cvtds r0, r0\n").ret()
+    P("UC.nf").branch({1: "UC.same"}, "UC.cv", [("CMP", "sdv", "tdv")])
     P("UC.same").call("NARROW").ret()
     P("UC.cv").branch({1: "UC.id"}, "UC.di", [("CMPI", "tdv", 1)])
     P("UC.id").branch({1: "UC.id1"}, "DEAD.dbl", [("CMPI", "vt", 0)])
