@@ -394,6 +394,7 @@ assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
+ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
 FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
@@ -592,7 +593,22 @@ def build():
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
-    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", TK_ID: "TOP.id", "struct": "FN"}, bad("top-level construct"))
+    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "enum": "EN"}, bad("top-level construct"))
+    # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
+    p = P("EN")
+    p.call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
+    P("EN.tag").call("NEXT").expect("{").goto("EN.b")
+    p = P("EN.b")
+    p.a(("LDI", "env", 0)).call("NEXT").label("EN.l")
+    p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
+    p = P("EN.id")
+    p.a(("INTERN", "v", "ps", "pe")).call("NEXT").tok({"=": "EN.eq"}, "EN.put")
+    P("EN.eq").call("NEXT").tok({TK_NUM: "EN.n"}, bad("enum value"))
+    P("EN.n").a(("COPYW", "env", "nv")).call("NEXT").goto("EN.put")
+    p = P("EN.put")
+    p.a(("STX", "v", ENV, "env"), ("LDI", "t", 1), ("STX", "v", END_, "t"), ("ALUI", "add", "env", "env", 1)).tok({",": "EN.c", "}": "EN.e"}, bad("enum"))
+    P("EN.c").call("NEXT").goto("EN.l")
+    P("EN.e").call("NEXT").expect(";").call("NEXT").goto("UNIT")
     P("TOP.st").call("NEXT").goto("UNIT")        # static: the same code (measured)
     P("TOP.id").call("ISTD").branch({1: "FN"}, bad("top-level construct"))
     # typedef T [*]... NAME;  -- no code
@@ -1037,6 +1053,9 @@ def build():
         emit(q, "pop1").call("STOREV")
         emit(q, fix).call("NEXT").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
+    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", END_)).branch({1: "X.enum"}, "X.var1", [("CMPI", "t", 1)])
+    P("X.enum").a(("LDX", "n", "v", ENV)).o("  imm r0, ").call("PRN").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("C%d" % LEVELS[0]).call("QTAIL").ret()
+    p = P("X.var1")
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "X.fnv"}, "X.v2", [("CMPI", "isfn", 1)])
     P("X.fnv").a(("LDI", "rkok", 0)).call("POSTIX").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     p = P("X.v2")
@@ -1189,6 +1208,9 @@ def build():
     addr(q)
     q.tok({".": "MEMB"}, "U.vl")
     q = P("U.var0")
+    q.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", END_)).branch({1: "U.enum"}, "U.var0b", [("CMPI", "t", 1)])
+    P("U.enum").a(("LDX", "n", "v", ENV)).o("  imm r0, ").call("PRN").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("POSTIX").ret()
+    q = P("U.var0b")
     q.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "U.fnp"}, "U.var", [("CMPI", "isfn", 1)])
     P("U.fnp").a(("LDI", "rkok", 0)).goto("POSTIX")
     P("U.vl").call("VLOAD").call("POSTIX").ret()
