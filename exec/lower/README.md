@@ -5,13 +5,17 @@ zero-last layout and emits a data header followed by unchanged tape code.
 
 ```
 python3 exec/lower/gen.py data.json
+python3 exec/lower/gen.py arm-data.json --arm64
 python3 exec/lower/gen.py full.json --full
 ```
 
 `--full` also lowers Linux x86_64 instructions: register mapping, entry setup,
 argument access, syscall setup and adjacent push/pop fusion. It consumes raw
 tape, not a Python-lowered TargetProgram. `.print` is explicitly unsupported;
-other targets are not implemented here.
+ARM64 currently shares only the data pass; `--full --arm64` explicitly fails
+until its instruction rules are migrated. The data checks run both targets,
+assert the declared target, and compare sparse bytes, symbols and unchanged
+tape with the same reference layout.
 
 `data.py` and `code.py` compile hand algorithms into transition tables, not
 integer networks. `code.py` reads regmap/enc/abi/reloc TSV facts; scratch

@@ -7,7 +7,9 @@ next lowering pass. No Python tape parser or zero_last runs in this path.
 RAW, START, NAME, FLAG, NEW, REMAP, DEFINED, RSTART = (i << 40 for i in range(1,9))
 
 
-def install(E, done='ACCEPTDATA', code_start='H.code'):
+def install(E, done='ACCEPTDATA', code_start='H.code', target='lnx/x86_64'):
+    if target not in ('lnx/x86_64', 'lnx/arm64'):
+        raise ValueError('unsupported lowering target: '+target)
     from unisa.lower import SCRATCH, PRINTMAX
     P,g=E.P,E.g
     E.prn()
@@ -83,7 +85,7 @@ def install(E, done='ACCEPTDATA', code_start='H.code'):
     P('R.end').branch({1:'R.second'},'HEAD',[('CMPI','phase',0)])
     P('R.second').a(('LDI','phase',1),('LDI','bi',0)).goto('R.loop')
     # Empty terminal symbols map to the end (and retain their alignment).
-    p=P('HEAD');p.a(('ALUI','add','base','outn',7),('ALUI','and','base','base',-8),('ALUI','add','full','base',SCRATCH+PRINTMAX),('LDI','di',0)).o('@target lnx/x86_64\n@data ').branch({1:'H.empty'},'H.hex',[('CMPI','stored',0)])
+    p=P('HEAD');p.a(('ALUI','add','base','outn',7),('ALUI','and','base','base',-8),('ALUI','add','full','base',SCRATCH+PRINTMAX),('LDI','di',0)).o('@target '+target+'\n@data ').branch({1:'H.empty'},'H.hex',[('CMPI','stored',0)])
     P('H.empty').o('-').goto('H.syms')
     P('H.hex').branch({0:'H.byte'},'H.syms',[('CMP','di','stored')])
     P('H.byte').a(('LDX','b','di',NEW),('ALUI','sar','h','b',4)).call('HEX').a(('ALUI','and','h','b',15)).call('HEX').a(('ALUI','add','di','di',1)).goto('H.hex')

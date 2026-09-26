@@ -14,3 +14,7 @@ b python3 exec/opt/gen.py "$T/e4.json" 2
 b python3 exec/c/tbl.py "$T/e4.json" "$T/e4.tbl"
 b "$T/run" "$T/e4.tbl" "$T/fib0" > "$T/fib"
 b python3 exec/lower/check.py "$T/run" "$T/d.tbl" "$T/d.json" "$T/hello" "$T/fib"
+# Same layout transitions, explicit ARM target; instructions remain raw tape.
+b python3 exec/lower/gen.py "$T/arm.json" --arm64
+b python3 exec/c/tbl.py "$T/arm.json" "$T/arm.tbl"
+b env LOWER_TARGET=lnx/arm64 python3 exec/lower/check.py "$T/run" "$T/arm.tbl" "$T/arm.json" "$T/hello" "$T/fib"

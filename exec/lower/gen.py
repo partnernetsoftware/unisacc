@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Raw tape lowering on the generic executor.
-Default: data pass only. --full: Linux x86_64 target instructions and metadata.
+Default: data pass only, with --arm64 selecting its target header.
+--full: Linux x86_64 target instructions and metadata.
 """
 import importlib.util,json,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parents[2]
@@ -8,10 +9,14 @@ sys.path.insert(0,str(ROOT))
 spec=importlib.util.spec_from_file_location('lowerbase',ROOT/'exec/parse/gen.py')
 E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 from data import install
-if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2]!="--full"):
-    sys.exit("usage: gen.py OUT.json [--full]")
-full=len(sys.argv)==3
-install(E,code_start="C.prelude" if full else "H.code")
+args=sys.argv[2:]
+full='--full' in args
+target='lnx/arm64' if '--arm64' in args else 'lnx/x86_64'
+if len(sys.argv)<2 or len(args)!=len(set(args)) or any(a not in ('--full','--arm64') for a in args):
+    sys.exit("usage: gen.py OUT.json [--full] [--arm64]")
+if full and target=='lnx/arm64':
+    sys.exit("ARM64 instruction lowering is not yet implemented; use the data pass only")
+install(E,code_start="C.prelude" if full else "H.code",target=target)
 if full:
     from code import install as install_code
     install_code(E)

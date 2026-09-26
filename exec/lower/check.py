@@ -2,7 +2,7 @@
 """Data-pass checks: true tape inputs, independent of the runtime generator.
 The Python parser/zero_last are referees only, never fed into the delta.
 """
-import pathlib,subprocess,sys,tempfile
+import os,pathlib,subprocess,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 from unisa.tape import parse
 from unisa.lower import zero_last, SCRATCH, PRINTMAX
@@ -31,6 +31,7 @@ def main():
                 r=subprocess.run(cmd,capture_output=True,timeout=60)
                 if r.returncode:raise RuntimeError((name,r.returncode,r.stderr))
                 x=parse_header(r.stdout.decode())
+                assert x.os+'/'+x.arch==os.environ.get('LOWER_TARGET','lnx/x86_64'),(name,'target mismatch')
                 body='\n'.join(l for l in r.stdout.decode().splitlines() if not l.startswith('@'))
                 back=parse(body)
                 assert len(x.data)<=len(expected) and x.data==bytes(expected[:len(x.data)]) and not any(expected[len(x.data):]) and x.syms==syms,(name,'data/symbol mismatch')
