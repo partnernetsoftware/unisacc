@@ -2208,3 +2208,19 @@ This output is the existing C compiler compiled through transition tables.
 The tables are not constructed networks, and the shipped .com has not switched
 to the executor. Other targets, broader coverage, network execution, compact
 executor and E7 adoption remain open. No push or release.
+
+### S-17 ARM64 encoder started (2026-09-26)
+
+The remaining-target work now includes exec/enc/arm.py: integer constants,
+register ALU/shifts/comparisons, multiply, nop and tape callr/ret. ENCSPEC
+supplies ALU3 and condition values; packing and tape ABI sequences remain
+hand-written generator rules. Same generic executor, no new action. 220 states,
+10,059 B text table. This is not a network or a product-path change.
+
+Targeted armcheck passed: both executors match 60 reference instructions / 384
+bytes; eleven out-of-domain cases reject. On macOS arm64, 540 operations agree
+with system-assembler functions, ten full-width immediate values execute as
+expected, and the tape call/return bytes match independent expectations.
+Added exec-arm to the gate; the previous 51-suite run predates this entry, so
+no new full-gate total is claimed. Memory, labels, metadata, FP, image formats
+and integration with ARM lowering remain to be implemented.

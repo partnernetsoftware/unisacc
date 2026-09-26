@@ -1,0 +1,129 @@
+"""ARM64 straight-line encoder delta, executed by the existing generic runtime.
+
+ENCSPEC supplies ALU and inverted condition values. Instruction bit layouts,
+MOVZ/MOVK selection and operand contracts below are hand-written rules compiled
+into transitions, not new runtime primitives or constructed neural networks.
+Input is the existing TIns line syntax; this slice takes no labels or metadata.
+"""
+import json
+import sys
+import importlib.util
+from pathlib import Path
+_spec = importlib.util.spec_from_file_location('encoder_builder', Path(__file__).with_name('gen.py'))
+_enc = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_enc)
+E, P, g = _enc.E, _enc.P, _enc.g
+from unisa.catalog import ENCSPEC
+
+OP, REG, BASE = 70000000, 71000000, 72000000
+DIG = list(range(48, 58))
+END = [10, 256]
+SEP = [32, 44] + END
+
+
+def word(p):
+    for _ in range(4):
+        p.a(('OUTW', 'w'), ('A64I', 'shr', 'w', 'w', 8))
+    return p
+
+
+def build():
+    specs = {'mov': ('rr', 1), 'imm': ('ri', 2), 'mul64': ('rrr', 3),
+             'ret': ('', 4), 'nop': ('', 5), 'callr': ('r', 6)}
+    specs.update({k: ('rrr', 7) for k in ENCSPEC['arm64']['alu3']})
+    specs.update({k: ('rrr', 8) for k in ENCSPEC['arm64']['invcond']})
+    p = P('START')
+    for i, (op, (shape, cls)) in enumerate(specs.items(), 1):
+        p.a(('SBCLR',), [('SBOUT', c) for c in op.encode()], ('SBINTERN', 't'),
+            ('LDI', 'u', i), ('STX', 't', OP, 'u'))
+        val = ENCSPEC['arm64']['alu3'].get(op, ENCSPEC['arm64']['invcond'].get(op, 0))
+        p.a(('LDI', 'u', val), ('STX', 't', BASE, 'u'))
+    # x31 is intentionally excluded: SP/ZR interpretations differ by opcode.
+    for i in range(31):
+        p.a(('SBCLR',), [('SBOUT', c) for c in ('x%d' % i).encode()],
+            ('SBINTERN', 't'), ('LDI', 'u', i+1), ('STX', 't', REG, 'u'))
+    p.goto('LINE')
+    g.on('LINE', [256], 'DEAD', [('ACCEPT',)])
+    g.on('LINE', [10], 'LINE', [('ADV',)])
+    g.els('LINE', 'OP.scan', [('MARK', 'start')])
+    g.on('OP.scan', [32]+END, 'OP.end', [('MARK', 'end')])
+    g.els('OP.scan', 'OP.scan', [('ADV',)])
+    P('OP.end').a(('INTERN', 'oid', 'start', 'end'), ('LDX', 'cls', 'oid', OP),
+                   ('LDX', 'base', 'oid', BASE), ('LDI', 'n', 0)).goto('ARG')
+    g.on('ARG', [32], 'ARG', [('ADV',)])
+    g.on('ARG', END, 'ENC', [])
+    g.on('ARG', [45]+DIG, 'NUM', [('LDI', 'neg', 0), ('LDI', 'v', 0), ('LDI', 'kind', 2)])
+    g.els('ARG', 'REG.scan', [('MARK', 'start')])
+    g.on('REG.scan', SEP, 'REG.end', [('MARK', 'end')])
+    g.els('REG.scan', 'REG.scan', [('ADV',)])
+    P('REG.end').a(('INTERN', 't', 'start', 'end'), ('LDX', 'v', 't', REG)).branch({1:'FAIL'}, 'REG.ok', [('CMPI','v',0)])
+    P('REG.ok').a(('ALUI','sub','v','v',1),('LDI','kind',1)).goto('PUT')
+    g.on('NUM', [45], 'NUM.first', [('LDI','neg',1),('ADV',)])
+    g.els('NUM', 'NUM.first', [])
+    g.on('NUM.first', DIG, 'NUM.digit', [])
+    g.els('NUM.first','FAIL',[])
+    # Unsigned magnitude <= 2^64-1; overflow checked before each multiply.
+    P('NUM.digit').a(('LDI','limit',1844674407370955161)).branch({2:'FAIL'},'NUM.mul',[('C64U','v','limit')])
+    P('NUM.mul').a(('BYTE','digit'),('ALUI','sub','digit','digit',48)).branch({1:'NUM.last'},'NUM.add',[('C64U','v','limit')])
+    P('NUM.last').branch({2:'FAIL'},'NUM.add',[('CMPI','digit',5)])
+    P('NUM.add').a(('A64I','mul','v','v',10),('A64','add','v','v','digit'),('ADV',)).goto('NUM.more')
+    g.on('NUM.more',DIG,'NUM.digit',[])
+    g.on('NUM.more',SEP,'NUM.sign',[])
+    g.els('NUM.more','FAIL',[])
+    P('NUM.sign').branch({1:'NUM.neg'},'PUT',[('CMPI','neg',1)])
+    P('NUM.neg').a(('LDI','limit',-9223372036854775808)).branch({2:'FAIL'},'NUM.negate',[('C64U','v','limit')])
+    P('NUM.negate').a(('LDI','zero',0),('A64','sub','v','zero','v')).goto('PUT')
+    p=P('PUT')
+    for i in range(3):
+        p.branch({1:'PUT.%d'%i},'PUT.next%d'%i,[('CMPI','n',i)])
+        P('PUT.%d'%i).a(('COPYW','a%d'%i,'v'),('COPYW','k%d'%i,'kind'),('ALUI','add','n','n',1)).goto('AFTER')
+        p=P('PUT.next%d'%i)
+    p.goto('FAIL')
+    g.on('AFTER',[32],'AFTER',[('ADV',)])
+    g.on('AFTER',[44],'REQUIRED',[('ADV',)])
+    g.on('AFTER',END,'ENC',[])
+    g.els('AFTER','FAIL',[])
+    g.on('REQUIRED',[32],'REQUIRED',[('ADV',)])
+    g.on('REQUIRED',END,'FAIL',[])
+    g.els('REQUIRED','ARG',[])
+    P('ENC').branch({i:'CHECK.'+op for i,op in enumerate(specs,1)},'FAIL',[('RLD','cls')])
+    for op,(shape,cls) in specs.items():
+        p=P('CHECK.'+op)
+        p.branch({1:'CHECK.'+op+'.n'},'FAIL',[('CMPI','n',len(shape))]); p=P('CHECK.'+op+'.n')
+        for i,k in enumerate(shape):
+            nxt='CHECK.'+op+'.k%d'%i
+            p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,1 if k=='r' else 2)]);p=P(nxt)
+        p.goto('EMIT.%d'%cls)
+    word(P('EMIT.1').a(('ALUI','shl','w','a1',16),('ALUI','or','w','w',0xAA0003E0),('ALU','or','w','w','a0'))).goto('LINE')
+    for cls,base in ((3,0x9B007C00),(7,None)):
+        p=P('EMIT.%d'%cls).a(('ALUI','shl','w','a2',16),('ALUI','shl','t','a1',5),('ALU','or','w','w','t'),('ALU','or','w','w','a0'))
+        p.a(('ALU','or','w','w','base') if base is None else ('ALUI','or','w','w',base))
+        word(p).goto('LINE')
+    # Tape ABI returns through x17 saved on x7, rather than host LR.
+    p=P('EMIT.4')
+    for base in (0xF94000F1, 0x910020E7, 0xD65F0220):
+        word(p.a(('LDI','w',base)))
+    p.goto('LINE')
+    for cls,base in ((5,0xD503201F),):
+        word(P('EMIT.%d'%cls).a(('LDI','w',base))).goto('LINE')
+    P('EMIT.6').branch({1:'FAIL'},'CALLR.emit',[('CMPI','a0',17)])
+    p=P('CALLR.emit')
+    for base in (0x10000091, 0xD10020E7, 0xF90000F1):
+        word(p.a(('LDI','w',base)))
+    word(p.a(('ALUI','shl','w','a0',5),('ALUI','or','w','w',0xD63F0000))).goto('LINE')
+    p=P('EMIT.8').a(('ALUI','shl','w','a2',16),('ALUI','shl','t','a1',5),('ALU','or','w','w','t'),('ALUI','or','w','w',0xEB00001F))
+    word(p).a(('ALUI','shl','w','base',12),('ALUI','or','w','w',0x9A9F07E0),('ALU','or','w','w','a0'))
+    word(p).goto('LINE')
+    p=P('EMIT.2').a(('A64I','and','w','a1',65535),('ALUI','shl','w','w',5),('ALUI','or','w','w',0xD2800000),('ALU','or','w','w','a0'))
+    word(p).goto('IMM.1')
+    for sh in (1,2,3):
+        nxt='IMM.%d'%(sh+1) if sh<3 else 'LINE'
+        P('IMM.%d'%sh).a(('A64I','shr','w','a1',16*sh),('ALUI','and','w','w',65535)).branch({1:nxt},'IMM.put%d'%sh,[('CMPI','w',0)])
+        word(P('IMM.put%d'%sh).a(('ALUI','shl','w','w',5),('ALUI','or','w','w',0xF2800000|(sh<<21)),('ALU','or','w','w','a0'))).goto(nxt)
+    g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
+    g.finish()
+    return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
+
+if __name__=='__main__':
+    d=build();open(sys.argv[1],'w').write(json.dumps(d,separators=(',',':')))
+    print('ARM64 states',len(d['states']),file=sys.stderr)
