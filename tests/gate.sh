@@ -43,6 +43,7 @@ job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==3')
 job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
 job stages      ./tests/stages.sh examples/*.c tests/c/*.c
 job exec-chain  env CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt)   # S-17: one C executor, E2/E1/E3
+job exec-e3self ./exec/parse2/selfcheck.sh                       # complete current compiler source -> tape
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
 job exec-e4     env E4STRICT=1 ./exec/opt/check.sh examples/*.c tests/c/*.c   # S-17 E4: -O1 and -O2 as deltas
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
@@ -54,6 +55,7 @@ job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 comp
 job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
 job nativeboot  ./tests/nativeboot.sh
+job staticinit  ./tests/staticinit.sh
 job cli         ./tests/cli.sh
 job ccparity    ./tests/ccparity.sh
 job run         ./tests/run.sh
@@ -65,7 +67,7 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 if [ "$COM" = 1 ]; then
     [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
-    for s in cli ccparity run multi diag hostile; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
+    for s in cli ccparity run multi diag hostile staticinit; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
     job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
 fi
 wait

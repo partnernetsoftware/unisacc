@@ -22,6 +22,11 @@ _spec = importlib.util.spec_from_file_location(
 E = importlib.util.module_from_spec(_spec)   # the token reader, the assembler P, the gold tables, the tape constants
 _spec.loader.exec_module(E)
 
+# Intrinsic names come from the product declaration, not a second hand list.
+sys.path.insert(0, E.ROOT)
+from unisa.front.parse import INTRINSIC, INTRINSIC6
+SYSCALLS = [(name, op, 3) for name, op in INTRINSIC.items()] + [(name, op, 6) for name, op in INTRINSIC6.items()]
+
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
 DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges two states silently
 
@@ -88,9 +93,13 @@ SPANS = {"@name": ("fns", "fne"), "@callee": ("cls", "cle"), "@var": ("ips", "ip
 def addr(p):
     """a variable's address: a local's frame slot, or a global's symbol"""
     gl, lc, dn = p.fresh("ga"), p.fresh("la"), p.fresh("ad")
+    st, fr, auto = p.fresh("sa"), p.fresh("fa"), p.fresh("auto")
     p.branch({1: gl}, lc, [("CMPI", "s", E.GMARK)])
     emit(P(gl), "gaddr").goto(dn)
-    emit(P(lc), "addr").goto(dn)
+    P(lc).branch({0: st}, fr, [("CMPI", "s", 0)])
+    P(st).a(("LDI", "t", 0), ("ALU", "sub", "t", "t", "s"), ("ALUI", "sub", "t", "t", 1)).o("  .lea r0, ls").num("t").o("\n").goto(dn)
+    P(fr).branch({1: auto}, "DEAD.staticauto", [("CMPI", "si_active", 0)])
+    emit(P(auto), "addr").goto(dn)
     p.cur = dn
     return p
 
@@ -394,9 +403,11 @@ TYOP = {"&": "|", "<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
-GSK = 43 * 10 ** 6     # GSK[the token position of a global pointer's string] = its pool number, taken in source order
-GIBLOB, GIEND = 44 * 10 ** 6, 45 * 10 ** 6  # initialiser tape and end token, produced once in source order
-SKIPS = 42 * 10 ** 6   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
+POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
+TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
+GSK = 4 * POSSPAN     # GSK[the token position of a global pointer's string] = its pool number, taken in source order
+GIBLOB, GIEND = 5 * POSSPAN, 6 * POSSPAN  # initialiser tape and end token, produced once in source order
+SKIPS = 7 * POSSPAN   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
 GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
@@ -631,8 +642,12 @@ def build():
     types()
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
+    from statics import install as static_install
+    static_install(E, P, TIX, SINIT, SIEND, LOC)
+    g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
-    p = P("START")
+    P("START").branch({0: "START.ok"}, bad("token input exceeds position domain"), [("XLEN", "toklen"), ("CMPI", "toklen", POSSPAN)])
+    p = P("START.ok")
     tops = [o for lv in LEVELS for o in OPS[lv] if o not in SHORT]
     for l in range(16):
         for r in range(16):
@@ -645,14 +660,14 @@ def build():
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"), ("MARK", "x0"), ("LDI", "sk", 0))
     # the reference auto-includes a header when one of its functions is called and not defined here
     # (src/front_pp.c autoinc): the old E3's check, reused -- such a unit is not covered
-    for k, (nm, _, _) in enumerate(E.SYSCALLS, 1):
+    for k, (nm, _, _) in enumerate(SYSCALLS, 1):
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sy%d" % k))
     for k, nm in enumerate(("va_start", "va_arg", "va_end")):
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "va%d" % k))
     p.a(("SBCLR",), [("SBOUT", c) for c in b"__argc"], ("SBINTERN", "acid"), ("SBCLR",), [("SBOUT", c) for c in b"__argv"], ("SBINTERN", "avid"))
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
-    p.call("AUTO").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
+    p.call("AUTO").a(("JUMP", "x0")).call("INDEX").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
     p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "EN"}, bad("top-level construct"))
     # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
     p = P("EN")
@@ -681,6 +696,8 @@ def build():
     P("END.x2").o("  .exit r0\n").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").a(("ACCEPT",)).goto("DEAD")
     p = P("INITS")
     p.call("NEXT").label("IN.l")
+    p.branch({1: "IN.scan"}, "IN.static", [("LDX", "si_blob", "tpos", SINIT), ("CMPI", "si_blob", 0)])
+    p = P("IN.scan")
     p.tok({"eof": "RET", "{": "IN.o", "}": "IN.c", TK_ID: "IN.id", "=": "IN.eqd"}, "IN.nx")
     P("IN.eqd").branch({1: "IN.eq"}, "IN.nx", [("CMPI", "dep", 0)])
     P("IN.o").a(("ALUI", "add", "dep", "dep", 1)).goto("IN.nx")
@@ -825,7 +842,11 @@ def build():
     p = P("GV.an")
     p.call("ELSZ").a(("ALU", "mul", "gsz", "prd", "es"), ("COPYW", "gar", "drk")).call("GV.emit").goto("GV.end")
     p = P("GV.emit")
+    p.a(("INTERN", "v", "fns", "fne"), ("LDX", "u", "v", LOC)).branch({1: "GV.record"}, "GV.storage", [("CMPI", "u", E.GMARK)])
+    p = P("GV.storage")
     p.o(".bss g_").a(("SPAN2", "fns", "fne")).o(" ").num("gsz").o("\n")
+    p.goto("GV.record")
+    p = P("GV.record")
     p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", GSZ, "gsz"), ("LDI", "t", E.GMARK), ("STX", "v", LOC, "t"), ("STX", "v", E.BASE, "tb"), ("STX", "v", E.ARR, "gar"),
         ("COPYW", "t", "td")).branch({1: "GV.e1"}, "GV.e2", [("CMPI", "gar", 0)])
     P("GV.e2").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("GV.e1")
@@ -891,11 +912,18 @@ def build():
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
     P("DECLN").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).goto("DECL")
+    p = P("BIND")       # one scope record, shared by automatic and static objects
+    p.a(("INTERN", "v", "ps", "pe"), ("STX", "usp", E.UNDO, "v"))
+    for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
+        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
+    p.a(("ALUI", "mul", "u", "v", 8))
+    for j in range(8):
+        p.a(("LDX", "t", "u", DIM + j), ("STX", "usp", E.UNDO + 5 + j, "t"))
+    for j, table in enumerate((END_, ENV), 13):
+        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
+    p.a(("LDI", "t", 0), ("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", 15)).ret()
     p = P("DECL")
-    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", LOC), ("STX", "usp", E.UNDO, "v"), ("STX", "usp", E.UNDO + 1, "t"),
-        ("LDX", "t", "v", E.PTR), ("STX", "usp", E.UNDO + 2, "t"), ("LDX", "t", "v", E.BASE), ("STX", "usp", E.UNDO + 3, "t"), ("ALUI", "add", "usp", "usp", 4),
-        ("LDX", "t", "v", E.ARR), ("STX", "usp", E.UNDO + 4, "t"), ("ALUI", "add", "usp", "usp", 1),
-        ("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("STX", "v", E.BASE, "tb"),
+    p.call("BIND").a(("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("STX", "v", E.BASE, "tb"),
         ("STX", "v", E.ARR, "dar"), ("COPYW", "s", "cur")).call("MAXF").a(("COPYW", "t", "td")).branch({1: "DC.p"}, "DC.a", [("CMPI", "dar", 0)])
     P("DC.a").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("DC.p")
     P("DC.p").a(("STX", "v", E.PTR, "t")).ret()
@@ -908,7 +936,7 @@ def build():
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
     p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl",
-           "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
+           "type=static": "SC.start", "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
     P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
     # NAME: stmt -- the label u_NAME (measured, b_goto); otherwise back to the name, an expression
     p = P("S.idl")
@@ -924,9 +952,16 @@ def build():
     p = P("UNWIND")
     p.label("S.uw")
     p.branch({2: "S.uw1"}, "RET", [("CMP", "usp", "sv")])
-    P("S.uw1").a(("ALUI", "sub", "usp", "usp", 5), ("LDX", "v", "usp", E.UNDO), ("LDX", "t", "usp", E.UNDO + 1), ("STX", "v", LOC, "t"),
-                  ("LDX", "t", "usp", E.UNDO + 4), ("STX", "v", E.ARR, "t"),
-                  ("LDX", "t", "usp", E.UNDO + 2), ("STX", "v", E.PTR, "t"), ("LDX", "t", "usp", E.UNDO + 3), ("STX", "v", E.BASE, "t")).goto("S.uw")
+    p = P("S.uw1")
+    p.a(("ALUI", "sub", "usp", "usp", 15), ("LDX", "v", "usp", E.UNDO))
+    for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
+        p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
+    p.a(("ALUI", "mul", "u", "v", 8))
+    for j in range(8):
+        p.a(("LDX", "t", "usp", E.UNDO + 5 + j), ("STX", "u", DIM + j, "t"))
+    for j, table in enumerate((END_, ENV), 13):
+        p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
+    p.goto("S.uw")
 
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
@@ -1368,7 +1403,8 @@ def build():
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "RET"}, "UD.v2", [("CMPI", "isfn", 1)])
     p = P("UD.v2")
     p.call("LOOKUP").branch({1: "UD.f1"}, "UD.gv", [("CMPI", "vb", FPB)])
-    P("UD.f1").branch({1: "UD.gv"}, "UD.f2", [("CMPI", "s", E.GMARK)])
+    P("UD.f1").branch({1: "UD.gv"}, "UD.fs", [("CMPI", "s", E.GMARK)])
+    P("UD.fs").branch({0: "UD.gv"}, "UD.f2", [("CMPI", "s", 0)])
     P("UD.f2").branch({1: "UD.gv"}, "UD.f3", [("CMPI", "ar", 1)])
     P("UD.f3").o("  load64 r0, [r6-").num("s").o("]\n").ret()
     p = P("UD.gv")
@@ -1404,7 +1440,12 @@ def build():
     P("U.pq").call("ISTD").branch({1: "U.cast"}, "U.pe")
     P("U.pe").call("CEXPR").expect(")").call("NEXT").a(("LDI", "rkok", 0)).call("POSTIX").ret()
     q = P("U.cast")      # (T) e: narrowed through the stack to T; long and pointers: no code (measured)
-    q.call("TSPEC").expect(")").vpush("td", "tb").call("NEXT").call("UNARY").call("ISDV").a(("COPYW", "sdv", "u")).vpop("vt", "vb").call("ISDV")
+    q.call("TSPEC").tok({"(": "UC.fp"}, "UC.type")
+    P("UC.fp").branch({1: "UC.fp0"}, bad("function pointer cast result type"), [("CMPI", "td", 0)])
+    P("UC.fp0").branch({1: "UC.fp1"}, bad("function pointer cast result type"), [("CMPI", "tb", 4)])
+    P("UC.fp1").call("NEXT").expect("*").call("NEXT").expect(")").call("FPD.c").goto("UC.type")
+    q = P("UC.type")
+    q.expect(")").vpush("td", "tb").call("NEXT").call("UNARY").call("ISDV").a(("COPYW", "sdv", "u")).vpop("vt", "vb").call("ISDV")
     q.a(("COPYW", "tdv", "u")).branch({1: "UC.flt"}, "UC.nf", [("CMPI", "vb", FLT)])
     P("UC.flt").branch({1: "UC.flt1"}, "DEAD.dbl", [("CMPI", "sdv", 1)])
     P("UC.flt1").branch({1: "UC.flt2"}, "DEAD.dbl", [("CMPI", "vt", 0)])
@@ -1528,15 +1569,16 @@ def build():
     # CALL: at '(' after ips..ipe: arguments pushed left to right, popped into r(n-1)..r0, call
     p = P("CALL")
     # the callee must be defined above (the reference rejects a call to an undefined function: probe r1)
-    # syscall builtins (the old E3's declared table E.SYSCALLS), __argc(), __argv(k) -- measured there
+    # syscall builtins (the old E3's declared table SYSCALLS), __argc(), __argv(k) -- measured there
     p.a(("INTERN", "v", "ips", "ipe"), ("LDI", "sys", 0), ("LDX", "t", "v", LOC)).branch({1: "CL.va0"}, "CL.fpv", [("CMPI", "t", 0)])
     p = P("CL.fpv")      # the callee's value: a local's `load64 r0, [r6-N]`, a global's .lea + load64 (measured)
     p.call("LOOKUP").branch({1: "CL.fpv1"}, bad("call through a non-function"), [("CMPI", "vb", FPB)])
     q = P("CL.fpv1")
-    q.branch({1: "CL.fpg"}, "CL.fpl", [("CMPI", "s", E.GMARK)])
+    q.branch({1: "CL.fpg"}, "CL.fps", [("CMPI", "s", E.GMARK)])
+    P("CL.fps").branch({0: "CL.fpg"}, "CL.fpl", [("CMPI", "s", 0)])
     P("CL.fpl").o("  load64 r0, [r6-").num("s").o("]\n").goto("FPCALL")
     q = P("CL.fpg")
-    emit(q, "gaddr").o("  load64 r0, [r0+0]\n").goto("FPCALL")
+    addr(q).o("  load64 r0, [r0+0]\n").goto("FPCALL")
     p = P("FPCALL")      # r0 = the callee; current '(' -- pushed first, then the arguments; callr r5 (measured)
     emit(p, "push").vpush("cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).vpush("sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     for k, nx in ((0, "CL.va1"), (1, "CL.va2"), (2, "CL.b1")):
@@ -1562,10 +1604,10 @@ def build():
     # va_end(ap): ap evaluated; value 0
     p = P("VA2")
     p.call("NEXT").call("EXPR").expect(")").o("  imm r0, 0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
-    for k in range(1, len(E.SYSCALLS) + 1):
+    for k in range(1, len(SYSCALLS) + 1):
         P("CL.b%d" % k).branch({1: "CL.s%d" % k}, "CL.b%d" % (k + 1), [("CMP", "v", "sy%d" % k)])
         P("CL.s%d" % k).a(("LDI", "sys", k)).goto("CL.ok")
-    P("CL.b%d" % (len(E.SYSCALLS) + 1)).branch({1: "CL.ac"}, "CL.av0", [("CMP", "v", "acid")])
+    P("CL.b%d" % (len(SYSCALLS) + 1)).branch({1: "CL.ac"}, "CL.av0", [("CMP", "v", "acid")])
     P("CL.ac").call("NEXT").expect(")").o("  .argc r0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     P("CL.av0").branch({1: "CL.av"}, "CL.def", [("CMP", "v", "avid")])
     P("CL.av").call("NEXT").call("EXPR").expect(")").o("  .argv r0, r0\n").a(("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").ret()
@@ -1609,8 +1651,8 @@ def build():
     P("CL.s100").branch({1: "CL.callr"}, "CL.sysz", [("CMPI", "sys", 100)])
     P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     # a syscall: r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5`
-    for k, (_, sc, w) in enumerate(E.SYSCALLS, 1):
-        nx = "CL.w%d" % (k + 1) if k < len(E.SYSCALLS) else "DEAD"
+    for k, (_, sc, w) in enumerate(SYSCALLS, 1):
+        nx = "CL.w%d" % (k + 1) if k < len(SYSCALLS) else "DEAD"
         P("CL.sysz" if k == 1 else "CL.w%d" % k).branch({1: "CL.y%d" % k}, nx, [("CMPI", "sys", k)])
         q = P("CL.y%d" % k)
         q.a(("LDI", "w", w)).label("CL.z%d" % k)
