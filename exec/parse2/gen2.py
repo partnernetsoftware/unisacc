@@ -59,6 +59,13 @@ TEMPL = {
     "post_dec": "  imm r2, 1\n  add64 r0, r0, r2\n",
     "pre_inc":  "  imm r1, 1\n  add64 r0, r0, r1\n",
     "pre_dec":  "  imm r1, 1\n  sub64 r0, r0, r1\n",
+    # printf, the reference's builtin lowering (measured, examples/hello.c and a %d probe)
+    "pf_spill": "  store64 [r6-{cur}], r0\n",
+    "pf_write": "  .lea r0, S{sk}\n  imm r1, {cnt}\n  .write r0, r1\n",
+    "pf_print": "  load64 r0, [r6-{as}]\n  .print r0\n",
+    "pf_value": "  imm r0, 0\n",
+    "pool_open": ".str S{sk} \"",
+    "pool_close": "\\x00\"\n",
 }
 SPANS = {"@name": ("fns", "fne"), "@callee": ("cls", "cle")}
 
@@ -122,6 +129,91 @@ def ladder(prefix, bottom):
     g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
 
 
+HEX = "0123456789abcdef"
+ESC = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, "\\": 92, "'": 39, '"': 34, "?": 63, "0": 0}
+
+
+def fmtwalk(pre, on_byte, on_d, on_end):
+    """a printf format in the pushed reader frame, byte by byte: literal bytes (escapes
+    decoded into W[bv]) -> on_byte state; %d -> on_d; %% is the byte '%'; the end -> on_end.
+    Every other conversion or escape is not covered."""
+    w = pre + ".w"
+    g.on(w, [37], pre + ".pc", [("ADV",)])
+    g.on(w, [92], pre + ".es", [("ADV",)])
+    g.on(w, [256], on_end, [("INPOP",)])
+    for c in range(256):
+        if c not in (37, 92):
+            g.on(w, [c], on_byte, [("ADV",), ("LDI", "bv", c)])
+    g.on(pre + ".pc", [37], on_byte, [("ADV",), ("LDI", "bv", 37)])
+    g.on(pre + ".pc", [ord("d")], on_d, [("ADV",)])
+    g.els(pre + ".pc", "DEAD", E.rej("not covered: printf conversion"))
+    for ch, v in ESC.items():
+        g.on(pre + ".es", [ord(ch)], on_byte, [("ADV",), ("LDI", "bv", v)])
+    g.els(pre + ".es", "DEAD", E.rej("not covered: printf escape"))
+    return w
+
+
+def printf():
+    # PF: at '(' after printf.  The arguments are evaluated first, each into a fresh slot
+    # (store64 [r6-N], r0); then the format's literal runs become .write of pooled strings
+    # and each %d prints the next slot (.print); the value is 0.
+    p = P("PF")
+    p.call("NEXT").tok({E.TK_STR: "PF.s"}, bad("printf format"))
+    p = P("PF.s")
+    p.a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1)).vpush("fs", "fe").a(("ALU", "add", "as", "cur", "z0"), ("ALUI", "add", "as", "as", 8)).vpush("as")
+    p.call("NEXT").label("PF.args")
+    p.tok({",": "PF.arg", ")": "PF.go"}, bad("argument list"))
+    q = P("PF.arg")
+    q.call("NEXT").call("EXPR").a(("ALUI", "add", "cur", "cur", 8)).call("MAXF")
+    emit(q, "pf_spill").goto("PF.args")
+    q = P("PF.go")
+    q.vpop("as").vpop("fs", "fe").a(("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PF.w")
+    fmtwalk("PF", "PF.b", "PF.d", "PF.end")
+    P("PF.b").a(("ALUI", "add", "cnt", "cnt", 1)).goto("PF.w")
+    q = P("PF.d")
+    q.call("PF.flush")
+    emit(q, "pf_print").a(("ALUI", "add", "as", "as", 8)).goto("PF.w")
+    q = P("PF.end")
+    q.call("PF.flush")
+    emit(q, "pf_value").call("NEXT").ret()
+    q = P("PF.flush")
+    q.branch({1: "RET"}, "PF.fw", [("CMPI", "cnt", 0)])
+    q = P("PF.fw")
+    emit(q, "pf_write").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).ret()
+    # POOL: after the footer, the formats again from the top, in the same order: each
+    # non-empty literal run is `.str Sk "..."` -- printable bytes as they are, others \xHH, then \x00
+    p = P("POOL")
+    p.call("NEXT").label("PO.l")
+    p.tok({"eof": "RET", TK_ID: "PO.id"}, "PO.nx")
+    P("PO.nx").call("NEXT").goto("PO.l")
+    P("PO.id").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf"}, "PO.nx", [("CMP", "v", "pfid")])
+    P("PO.pf").call("NEXT").tok({"(": "PO.p1"}, "PO.l")
+    P("PO.p1").call("NEXT").tok({E.TK_STR: "PO.s"}, "PO.l")
+    P("PO.s").a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PO.w")
+    fmtwalk("PO", "PO.b", "PO.d", "PO.end")
+    q = P("PO.b")
+    q.branch({1: "PO.open"}, "PO.byte", [("CMPI", "cnt", 0)])
+    q = P("PO.open")
+    emit(q, "pool_open").goto("PO.byte")
+    q = P("PO.byte")
+    q.a(("ALUI", "add", "cnt", "cnt", 1), ("RLD", "bv")).goto("PO.out")
+    for c in range(256):
+        if c in (34, 92):     # measured (probe p12): \" and \\
+            g.on("PO.out", [c], "PO.w", [("OUT", 92), ("OUT", c)], "r")
+        elif 32 <= c < 127:
+            g.on("PO.out", [c], "PO.w", [("OUT", c)], "r")
+        else:
+            g.on("PO.out", [c], "PO.w", [("OUT", 92), ("OUT", ord("x")), ("OUT", ord(HEX[c >> 4])), ("OUT", ord(HEX[c & 15]))], "r")
+    q = P("PO.d")
+    q.call("PO.close").goto("PO.w")
+    q = P("PO.end")
+    q.call("PO.close").call("NEXT").goto("PO.l")
+    q = P("PO.close")
+    q.branch({1: "RET"}, "PO.cw", [("CMPI", "cnt", 0)])
+    q = P("PO.cw")
+    emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).ret()
+
+
 def build():
     E.tokenizer()
     E.prn()
@@ -129,16 +221,17 @@ def build():
     E.fconv()
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     p = P("START")
-    p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid")).o(E.HEADER).call("NEXT").label("UNIT")
+    p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid"),
+        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("MARK", "x0"), ("LDI", "sk", 0)).o(E.HEADER).call("NEXT").label("UNIT")
     p.tok({"type": "FN", "eof": "END"}, bad("top-level construct"))
     # a unit without main is an error in the reference (measured, probe r2)
     P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
-    P("END.ok").o(E.FOOTER).a(("ACCEPT",)).goto("DEAD")
+    P("END.ok").o(E.FOOTER).a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").a(("ACCEPT",)).goto("DEAD")
     # function: int NAME ( params ) { body }
     p = P("FN")
     p.call("NEXT").tok({TK_ID: "FN.id"}, bad("declarator"))
     p = P("FN.id")
-    p.a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe"), ("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("LDI", "cur", 0), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
+    p.a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe"), ("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
     emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").call("NEXT").expect("(").call("NEXT").a(("LDI", "pk", 0))
     p.tok({")": "FN.body", "type": "FN.par", "type=void": "FN.void"}, bad("parameter"))
     P("FN.void").call("NEXT").tok({")": "FN.body"}, bad("parameter"))
@@ -150,17 +243,25 @@ def build():
     P("FN.pn").call("NEXT").tok({"type": "FN.par"}, bad("parameter"))
     p = P("FN.body")
     p.call("NEXT").expect("{").call("NEXT").call("STMTS")
-    emit(p, "fn_tail").a(("OFILL", "frm", "cur", 7)).call("NEXT").goto("UNIT")
+    emit(p, "fn_tail").a(("OFILL", "frm", "max", 7)).call("NEXT").goto("UNIT")
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     p = P("DECL")
-    p.a(("INTERN", "v", "ps", "pe"), ("ALUI", "add", "cur", "cur", 8), ("STX", "v", LOC, "cur"), ("COPYW", "s", "cur")).ret()
+    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", LOC), ("STX", "usp", E.UNDO, "v"), ("STX", "usp", E.UNDO + 1, "t"), ("ALUI", "add", "usp", "usp", 2),
+        ("ALUI", "add", "cur", "cur", 8), ("STX", "v", LOC, "cur"), ("COPYW", "s", "cur")).call("MAXF").ret()
+    # the frame is the deepest point reached: a block's slots are reused after it ends (measured, probe p12)
+    P("MAXF").branch({2: "MAXF.u"}, "RET", [("CMP", "cur", "max")])
+    P("MAXF.u").a(("COPYW", "max", "cur")).ret()
     # statements
     p = P("STMTS")
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
     p.tok({"{": "S.blk", "type": "S.decl", "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", ";": "S.empty"}, "S.expr")
-    P("S.blk").call("NEXT").call("STMTS").call("NEXT").ret()
+    p = P("S.blk")
+    p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur").label("S.uw")
+    p.branch({2: "S.uw1"}, "S.uwd", [("CMP", "usp", "sv")])
+    P("S.uw1").a(("ALUI", "sub", "usp", "usp", 2), ("LDX", "v", "usp", E.UNDO), ("LDX", "t", "usp", E.UNDO + 1), ("STX", "v", LOC, "t")).goto("S.uw")
+    P("S.uwd").call("NEXT").ret()
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
     p.call("NEXT").tok({TK_ID: "S.did"}, bad("declaration"))
@@ -205,7 +306,7 @@ def build():
     # expressions: EXPR = assignment | the ladder
     p = P("EXPR")
     p.tok({TK_ID: "X.id"}, "E%d" % LEVELS[0])
-    P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.call", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
+    P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.cpf", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
     p = P("X.as")
     p.call("LOOKUP")
     emit(p, "addr")
@@ -238,6 +339,8 @@ def build():
     p.call("LOOKUP")
     emit(p, "addr")
     emit(p, "load_int").call("C%d" % LEVELS[0]).ret()
+    P("X.cpf").a(("INTERN", "v", "ips", "ipe")).branch({1: "X.pf"}, "X.call", [("CMP", "v", "pfid")])
+    P("X.pf").call("PF").call("C%d" % LEVELS[0]).ret()
     P("X.call").call("CALL").call("C%d" % LEVELS[0]).ret()
     ladder("E", "UNARY")
     ladder("C", None)
@@ -265,6 +368,7 @@ def build():
     emit(q, "imm").call("NEXT").ret()
     P("U.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "U.call"}, "U.var")
     P("U.call").call("CALL").ret()
+    printf()
     q = P("U.var")
     q.call("LOOKUP")
     emit(q, "addr")
