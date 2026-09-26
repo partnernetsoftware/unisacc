@@ -2141,3 +2141,40 @@ Frozen 47ef8c3 / product 1f3ba5b validation: gate --com 45/45, JOBS=2,
 product-suite claim. Rebuilt .com 1345056 B, SHA256
 44e0fe5ca0194ef567a92181b7e9984619ebf2e2a7963fecb5b46f33865bf25d.
 The .com conditional regression also matches cc at -O0/-O1/-O2.
+
+### S-17 current self-source milestone (2026-09-26, bb4b4b8)
+
+The generic C executor now runs E2 -> E1 -> E3 on the complete current
+unisacc.c. Its 3,918,249-byte tape equals the native reference exactly;
+exec/parse2/selfcheck.sh enforces this in the gate. This is a frontend
+self-source result, not bootstrap of the replacement compiler or net execution.
+E3's fixed set is 207 equal (old 200 retained, plus s44-s49 and b_static).
+The seven additions also agree through the C executor. The added rules cover
+block static storage and scalar initialisation, saved array dimensions and
+enum shadowing, int-return function-pointer casts, repeated tentative global
+definitions, and the product's declared syscall list. gen2.py is 1,678 lines
+(+42 from the preceding 1,636), plus statics.py 45 lines; rules and source grew.
+3918 states, JSON 21,449,911 B; this is still a generated transition table.
+
+Product 7d50875 rejects automatic objects referenced from static initialisers;
+sizeof non-VLA objects remains legal and discards both output buffers. Python's
+constant sizeof now also accepts expression operands. staticinit checks nine
+compile-only rejections, including addresses and array decay; b_staticsize
+checks the legal path. Calls and ordinary global-value reads in C static
+initialisers remain known nonconformances; this is not a full constant-expression
+validator. E3 isolates automatic-storage initialisers with a named not-covered
+rejection. Static aggregate initialisers and other function-pointer cast return
+types remain outside this slice's coverage.
+
+Frozen validation: gate --com 49/49, JOBS=2, 186s total, every suite <=60s;
+exec-chain 68/68, source-to-ELF's fixed 68 retained, fat 118/118. macOS arm64
+and Rosetta only. Product .com: 1,345,808 B, SHA256
+60b396834a71d96e93a942c1c33d75e8b4e955709b6dbaffad069f51ca150908.
+No push or release. The shipped compile path is still the handwritten compiler.
+
+The preceding self-source tape also passed E4 -O2 equality. Full lowering hit
+alarm 60: its data pass expands 609,909,154 bytes of declared zero storage,
+scans and copies them byte by byte, and emits hex. Next is sparse zero-region
+layout with unchanged symbol addresses and image bytes, not a higher watchdog.
+The full six-target route, constructed-network runtime, compact executor and
+E7 product adoption remain outstanding.
