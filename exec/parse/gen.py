@@ -67,7 +67,7 @@ FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
          "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue",
-         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]"]
+         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]", "..."]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
@@ -81,6 +81,8 @@ PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/sto
 BASE = 11 * 10 ** 6  # BASE[v]: size of v's base type (int 4, char 1, long 8; 0 unknown), the scale of depth-1 +-
 CUNK = 0          # base size unknown (void, a typedef name): +- and dereference to depth 0 not covered
 FRD, FRB = 12 * 10 ** 6, 13 * 10 ** 6  # per function: return pointer depth and base size
+VAR = 17 * 10 ** 6  # VAR[f] = 1: f was defined `(..., ...)` (its parameters arrive on the stack)
+VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy is undefined there: measured)
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
 
 g = G()
@@ -800,7 +802,12 @@ def expr():
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
     p.branch({1: "IT.ok"}, "IT.nd", [("CMP", "t", "pass")])
     p = P("IT.nd")
+    for k, nm in enumerate(VANAMES):
+        nx = "IT.va%d" % (k + 1) if k + 1 < len(VANAMES) else "IT.nd0"
+        p.branch({1: "VA." + nm}, nx, [("CMP", "v", "va%d" % k)])
+        p = P(nx)
     p.branch({1: "PF"}, "IT.nw", [("CMP", "v", "pfid")])
+    va()
     # syscall builtins (SYSCALLS): arguments pushed as for a call, popped to r(n-1)..r0,
     # r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5` (w 6) -- measured
     for k, (nm, _, _) in enumerate(SYSCALLS, 1):
@@ -813,6 +820,9 @@ def expr():
     p.branch({1: "DEADPF"}, "IT.ok1")
     g.on("DEADPF", range(257), "DEAD", rej("not covered: printf defined in the unit"), "r")
     p = P("IT.ok1")
+    p.a(("LDX", "t", "v", VAR)).branch({1: "DEADV"}, "IT.ok1v", [("CMPI", "t", 1)])
+    g.on("DEADV", range(257), "DEAD", rej("not covered: call to a variadic function"), "r")
+    p = P("IT.ok1v")
     p.a(("LDX", "t", "v", LOC))
     p.branch({1: "IT.ok2"}, ("rej", "not covered: call through a local"), [("CMPI", "t", 0)])
     P("IT.ok2").a(("LDI", "sys", 0)).goto("IT.ok3")
@@ -848,6 +858,38 @@ def expr():
     # last argument: g(v) / 2 is .div for long g(unsigned long)
     p.call("NEXT").ret()
     g.on("DEAD0", range(257), "DEAD", rej("not covered: identifier is not a local"), "r")
+
+
+def va():
+    """va_start / va_arg / va_end, measured on probes p61 p62 (typedef char *va_list):
+    va_start(ap, last): &ap pushed, `last` evaluated (value unused), ap = r6 + 16 + 8 * np
+      (the first stack argument past the named ones), value `imm r0, 0`;
+    va_arg(ap, T): &ap pushed, ap loaded and pushed, ap += 8 stored back, the old ap
+      popped into r0, then T loaded at its size (unsigned char/short NOT masked);
+    va_end(ap): ap evaluated, then `imm r0, 0`."""
+    p = P("VA.va_start")
+    p.call("NEXT").tok({TK_ID: "VS.id"}, ("rej", "not covered: va_start operand"))
+    p = P("VS.id")
+    lookup(p, "ps", "pe")
+    addr(p, "r0")
+    p.o(PUSH).call("NEXT").expect(",").call("NEXT").call("EXPR").expect(")")
+    p.o("  imm r0, ").a(("ALUI", "mul", "n", "np", 8), ("ALUI", "add", "n", "n", 16)).call("PRN")
+    p.o("\n  add64 r0, r6, r0\n" + POP1 + "  store64 [r1+0], r0\n  imm r0, 0\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
+    p = P("VA.va_end")
+    p.call("NEXT").call("EXPR").expect(")").o("  imm r0, 0\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
+    p = P("VA.va_arg")
+    p.call("NEXT").tok({TK_ID: "VR.id"}, ("rej", "not covered: va_arg operand"))
+    p = P("VR.id")
+    lookup(p, "ps", "pe")
+    addr(p, "r0")
+    p.o(PUSH + "  load64 r0, [r0+0]\n" + PUSH + "  imm r2, 8\n  add64 r0, r0, r2\n  load64 r1, [r7+8]\n"
+        "  store64 [r1+0], r0\n" + POP1 + "  .frame -8\n  mov r0, r1\n")
+    p.call("NEXT").expect(",").call("NEXT").call("SPEC").a(("LDI", "ptd", 0)).label("VR.st")
+    p.tok({"*": "VR.star", ")": "VR.cl"}, ("rej", "not covered: va_arg type"))
+    P("VR.star").a(("ALUI", "add", "ptd", "ptd", 1)).call("NEXT").goto("VR.st")
+    p = P("VR.cl")
+    vwidth(p, "ptd", "bsz", LDR)
+    p.a(("COPYW", "pt", "ptd"), ("COPYW", "pb", "bsz")).call("NEXT").ret()
 
 
 # builtin -> (.sys name, register width): the one declared table of syscall builtins
@@ -1166,6 +1208,7 @@ def unit():
     p = P("START")
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"),
+        [x for k, nm in enumerate(VANAMES) for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "va%d" % k)]],
         [x for k, (nm, _, _) in enumerate(SYSCALLS, 1)
          for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "sy%d" % k)]])
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
@@ -1206,7 +1249,7 @@ def unit():
     P("FN.r").a(("COPYW", "rptr", "ptd"), ("COPYW", "rbsz", "bsz")).goto("FN.id")
     p = P("FN.id")
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "v", FND, "pass"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"),
-        ("COPYW", "fv", "v"), ("STX", "v", FRD, "rptr"), ("STX", "v", FRB, "rbsz"), ("LDI", "cur", 0), ("LDI", "max", 0))
+        ("COPYW", "fv", "v"), ("STX", "v", FRD, "rptr"), ("STX", "v", FRB, "rbsz"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "vfn", 0))
     p.call("NEXT").tok({"(": "FN.open", ";": "FN.gv", "=": "FN.gv", ",": "FN.gv"}, ("rej", "not covered: declarator"))
     P("FN.gv").branch({(1, 2): "FN.gp"}, "GV", [("CMPI", "rptr", 1)])
     g.on("FN.gp", range(257), "DEAD", rej("not covered: global pointer"), "r")
@@ -1236,7 +1279,8 @@ def unit():
     p = P("FN.open")
     p.call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
-    p.tok({TK_ID: "FN.ptd", "type=void": "FN.pv"}, "FN.psp")
+    p.tok({TK_ID: "FN.ptd", "type=void": "FN.pv", "...": "FN.dots"}, "FN.psp")
+    P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.close"}, ("rej", "not covered: parameter after ..."))
     P("FN.psp").a(("LDI", "sd0", 0)).call("SPEC").goto("FN.pst")
     p = P("FN.ptd")
     p.a(("LDI", "bni", 1), ("INTERN", "v", "ps", "pe"), ("LDX", "bsz", "v", TDB), ("LDX", "sd0", "v", TDD), ("LDX", "t", "v", TDN))
@@ -1254,7 +1298,7 @@ def unit():
     p.branch({2: "FN.many"}, "FN.hd", [("CMPI", "cur", 48)])
     g.on("FN.many", range(257), "DEAD", rej("not covered: more than 6 parameters"), "r")
     p = P("FN.hd")
-    p.a(("ALUI", "div", "np", "cur", 8)).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
+    p.a(("ALUI", "div", "np", "cur", 8), ("STX", "fv", VAR, "vfn")).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
     # prototype NAME(...);  -- no code; the name is not a definition
     p = P("FN.proto")
     p.a(("LDI", "z0", 0), ("STX", "fv", FND, "z0"), ("LDI", "z", 0))
@@ -1269,6 +1313,12 @@ def unit():
     p.call("PRNW").o("\n").a(("LDI", "k2", 0)).label("FN.st")
     p.branch({0: "FN.st1"}, "FN.go", [("CMP", "k2", "np")])
     p = P("FN.st1")
+    p.branch({1: "FN.sv"}, "FN.sr", [("CMPI", "vfn", 1)])
+    p = P("FN.sv")    # variadic: every parameter comes from the caller's stack (measured: h(int a, long b, ...))
+    p.a(("ALUI", "mul", "n", "k2", 8), ("ALUI", "add", "n", "n", 16)).o("  load64 r1, [r6+").call("PRN")
+    p.a(("ALUI", "add", "k2", "k2", 1), ("ALUI", "mul", "n", "k2", 8)).o("]\n  imm r5, ").call("PRN")
+    p.o("\n  sub64 r5, r6, r5\n  store64 [r5+0], r1\n").goto("FN.st")
+    p = P("FN.sr")
     p.a(("ALUI", "add", "k2", "k2", 1), ("ALUI", "mul", "n", "k2", 8)).o("  store64 [r6-").call("PRN")
     p.o("], r").a(("ALUI", "sub", "n", "k2", 1)).call("PRN").o("\n").goto("FN.st")
     p = P("FN.go")
