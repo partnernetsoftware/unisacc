@@ -359,6 +359,15 @@ assert SZ == {"char": 1, "short": 2, "int": 4, "long": 8} and PSZ == 8, (SZ, PSZ
 assert not any(TY[k][1] for k in CTY.values())
 LD = {n: ("  load64 r0, [r0+0]\n" if n == 8 else "  .ld r0, [r0+0], %d\n" % n) for n in set(SZ.values())}
 ST = {n: ("  store64 [r1+0], r0\n" if n == 8 else "  .st [r1+0], r0, %d\n" % n) for n in set(SZ.values())}
+# unsigned char / short: base code UNS + size; stored at the size, loaded then masked (measured:
+# `imm r2, 255|65535; and64 r0, r0, r2` after the .ld).  unsigned int/long are not in the slice
+# (the reference switches to unsigned compares and divides for them).
+UNS = 16
+for n in (SZ["char"], SZ["short"]):
+    LD[UNS + n] = LD[n] + "  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << 8 * n) - 1)
+    ST[UNS + n] = ST[n]
+LDR = {k: LD[k % UNS] for k in LD}   # x++ / x--: the load is not masked (measured)
+MSK = {k: LD[k][len(LD[k % UNS]):] for k in LD}   # op= and ++x: the result masked again before the store (measured)
 
 
 def vwidth(p, ptr, bs, tab):  # a variable's access: W[ptr] >= 1 -> pointer size; else by W[bs] (tyinfo size); 0 (unknown) -> int
@@ -466,7 +475,9 @@ def expr():
         q.o(PUSH)
         vwidth(q, "pt", "pb", LD)
         q.o(PUSH).vpush("pb").call("NEXT").call("EXPR").vpop("pb")
-        q.o(POP1 + optext(o) + POP1)
+        q.o(POP1 + optext(o))
+        vwidth(q, "pt", "pb", MSK)
+        q.o(POP1)
         vwidth(q, "pt", "pb", ST)
         q.ret()
     # *E = e  |  *E as an rvalue.  E is a pointer value (PV): W[pt] = its depth
@@ -610,7 +621,9 @@ def expr():
         addr(q, "r0")
         q.o(PUSH)
         vwidth(q, "pt", "pb", LD)
-        q.o("  imm r1, 1\n  %s r0, r0, r1\n" % sp + POP1)
+        q.o("  imm r1, 1\n  %s r0, r0, r1\n" % sp)
+        vwidth(q, "pt", "pb", MSK)
+        q.o(POP1)
         vwidth(q, "pt", "pb", ST)
         q.call("NEXT").ret()
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
@@ -658,7 +671,7 @@ def expr():
         noptr(q)
         addr(q, "r0")
         q.o(PUSH)
-        vwidth(q, "pt", "pb", LD)
+        vwidth(q, "pt", "pb", LDR)
         q.o(PUSH + "  imm r0, 1\n" + POP1 + optext(o) + POP1)
         vwidth(q, "pt", "pb", ST)
         q.o("  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
@@ -847,7 +860,11 @@ def stmt():
     p.a(("COPYW", "cur", "sc")).call("NEXT").ret()
     # declaration
     p = P("S.decl")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh"}, "S.dnx")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh",
+                                                   "type=unsigned": "S.dun"}, "S.dnx")
+    P("S.dun").call("NEXT").tok({"type=char": "S.duc", "type=short": "S.dus"}, ("rej", "not covered: unsigned int/long declaration"))
+    P("S.duc").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["char"])).goto("S.dnx")
+    P("S.dus").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["short"])).goto("S.dnx")
     P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("S.dnx")
     P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("S.dnx")
     P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("S.dnx")
