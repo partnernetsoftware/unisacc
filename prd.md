@@ -1000,6 +1000,25 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 已达并保留为开发工具（`iterate/`，不属于产品）：`iterate/construct/` 用 C 构造 18 个阶段的 UNS2 整包，与 built.uns2 逐字节相同；`iterate/kernel/genmodel` 生成 model.inc 的 MODEL/DENSE/维度、16 个词表、BF/BH/HD 与 TYPEV，与 Python 裁判逐字节相同。未做：ENC_*、cases.inc、headers.inc、模板、来源头部；ENC 切片（c78f7d0）不合入。全部过程、判据与回执见 [`archive/prd-history.md`](archive/prd-history.md) 的“J10 全文”。
 
+**S-16 0.0.8 计划**（2026-09-26 定；0.0.7 已于同日发布，v0.0.7，unisacc.com 1,254,432 B，sha256 00d25edb…）。
+
+目标不变：像 tinycc / `tcc -run` / cc 那样，一个能编译自己、也能编译其他 C99 项目的编译器，达到可用于生产的级别。0.0.7 的教训（主人，2026-09-26）：`.com` 启动 1.6 s 与“不带选项输出词法转储”都不是测试发现的，而是使用时发现的——**测试套件要持续扩展，去倒逼问题**。每项带可测判据，单次运行不超过 60 s。
+
+| 序 | 项 | 为什么 | 完成判据 |
+|---|---|---|---|
+| T1 | **正式的分片门禁** `tests/gate.sh` | 0.0.7 的门禁靠临时脚本，两轮约 10 分钟且有重复 | 一条命令；每片 ≤60 s；独立套件 2 路并发；整套 ≤4 分钟；`release.sh` 调用它 |
+| T2 | **对出货物测试**：门禁里一组套件以 `UA=unisacc.com` 运行 | 0.0.7 的两个缺陷只在 `.com` 上可见 | cli、run、multi、diag、hostile、closure 用 `.com` 跑；另加启动时间回归（第二次运行 < 0.1 s） |
+| T3 | **像用户那样用**：cc 行为对照套件 `ccparity` | 退出码、错误输出、产物命名、失败不留产物，此前无人检查 | 与 cc 对照 ≥30 例（无选项、`-o`、多个 `-o`、缺文件、空文件、无 main、编译失败、stdin、argv、退出码…），差异 0 或写明理由 |
+| T4 | **平台覆盖补齐** | 0.0.7 未在 Linux x86_64 与 Windows x86_64 实跑 | Linux x86_64（Lima，模拟）每片 ≤60 s 的最小套件；Windows x86_64 实机或 UTM 跑 `.com` 与 `-b win/x86_64` 产物 |
+| T5 | **UB 与实现定义的探针审计** | Linux 上两处“失败”其实是探针本身依赖未定次序与实现定义行为 | 扫描 tests/c 与 tests/c99 中同一实参列表内的多次修改、依赖 libc 实现定义行为的输出；逐个改写 |
+| P1 | C1 的余项：`-c` 越界时的提示 | `-c lib.c` 现在报“undefined function main”，用户看不懂 | 提示改为说明“一次调用编译整个程序” |
+| A1 | type 表对照 cc 审计（S-15 A1） | 表本身会错（[G-2]） | `gold_audit` 分歧 0 |
+| A2 | syscall 号对照系统头（S-15 A2） | 手录 | Linux 两架构、macOS 分歧 0 |
+| B2 | `.com` 的 Windows 部分自解压（S-15 B2） | PE 占约 62% | `.com` 降 ≥30%；两台 Windows 通过 |
+| R1 | **论文 A 的推导** | 主人：理论要支撑生产级 | 论文 A 只陈述已证的（T1：网络 = 表）；[`research/delta-framework.md`](research/delta-framework.md) 是未证草稿，不进论文；推导的每一步有对应的实测或证明 |
+
+**不进 0.0.8**：G1–G3（C11/GNU 扩展，超出 C99 边界）；J7 SIMD；J10（已暂停）；delta 框架的实现（只做理论）。F2 签名策略仍待主人决定。
+
 ## 6. 实验发现 [E] —— 面向论文
 
 本章随实现推进累积。**只记实测，不记预期**；每条含可复现命令，供论文直接引用。
