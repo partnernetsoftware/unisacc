@@ -5,6 +5,9 @@
 #include "run.c"
 #undef UNISA_RUNTIME_LIBRARY
 #include "memory.c"
+#ifdef _WIN32
+#include "winprocess.c"
+#endif
 
 #ifdef __aarch64__
 #define NATIVE_ARCH "arm64"
@@ -103,9 +106,6 @@ int main(int argc, char **argv) {
     }
     if (!src) return clierror("expected a C source file");
     if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
-#ifdef _WIN32
-    if (runit) return clierror("native memory imports not migrated on Windows");
-#endif
     if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
     char route[96];
     int n = mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
-    ResourceInput cli[8];
+    ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
     unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8];
     char **runargs=0;
     if (runit) {
@@ -135,6 +135,9 @@ int main(int argc, char **argv) {
         cli[4].name=(const unsigned char *)"\0process/argc";cli[4].n=13;cli[4].data=process_argc;cli[4].len=8;
         cli[5].name=(const unsigned char *)"\0process/argv";cli[5].n=13;cli[5].data=process_argv;cli[5].len=8;
         NRI=6;
+#ifdef _WIN32
+        nimports=process_own_imports(cli+8,248,(long)process_own_imports);NRI=8+nimports;
+#endif
     }
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; in.b = !strcmp(src,"-") ? readstream(0,"stdin",&in.n) : readfile(src,&in.n,0);
@@ -149,7 +152,7 @@ int main(int argc, char **argv) {
             resource_u64(memory_text,(long)mapping.base);resource_u64(memory_data,(long)(mapping.base+mapping.dataoff));
             cli[6].name=(const unsigned char *)"\0memory/text";cli[6].n=12;cli[6].data=memory_text;cli[6].len=8;
             cli[7].name=(const unsigned char *)"\0memory/data";cli[7].n=12;cli[7].data=memory_data;cli[7].len=8;
-            NRI=8;rc=runroute(route,&in,src);
+            NRI=8+nimports;rc=runroute(route,&in,src);
         }
     }
     unpackage(); RI=0; NRI=0;

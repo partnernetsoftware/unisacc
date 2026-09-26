@@ -51,7 +51,7 @@ def install(E,word):
     P('HDR.storecheck').a(('INTERN','sid','hv','hne'),('LDX','t','sid',PRESENT)).branch({1:'HDR.store'},'FAIL',[('CMPI','t',0)])
     P('HDR.store').a(('STX','sid',SYM,'ha'),('LDI','t',1),('STX','sid',PRESENT,'t')).goto('LINE')
     from memorylayout import install as memory_layout
-    memory_layout(E,'FAIL')
+    memory_layout(E,'FAIL','length')
     P('LAY.default').a(('OLEN','length')).branch({1:'LAY.lnx',2:'LAY.osx',3:'LAY.win'},'FAIL',[('RLD','target_os')])
     for os,m,base in (('lnx',elf,elf.VADDR),('osx',macho,macho.VMADDR)):
         h=m.HDRS('arm64');pg=m.PAGE

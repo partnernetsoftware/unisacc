@@ -87,12 +87,21 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     # A native-memory image has no OS file headers or signature. It carries
     # exact code/data bytes and a declared zero-filled extent; all relocation
     # and entry arithmetic above is reused, still performed by the model.
-    p=P('MI.begin').o('UNIMEM1\n')
-    for value in ('endo','memlen','stored','entryoff'):
+    P('MI.begin').a(('COPYW','mi_textlen','endo'),('A64','add','mi_extent','memlen','extra_bss')).branch({1:'MI.winlen'},'MI.header',[('CMPI','target_os',3)])
+    from unisa.image.pe import IMPORTS
+    P('MI.winlen').a(('A64I','add','mi_textlen','ml_iatoff',8*len(IMPORTS))).goto('MI.header')
+    p=P('MI.header').o('UNIMEM1\n')
+    for value in ('mi_textlen','mi_extent','stored','entryoff'):
         p.a(('COPYW','lb_v',value),('LDI','lb_n',8)).call('EI.bytes')
     p.a(('INPUSH','text_blob')).goto('MI.copy')
-    g.on('MI.copy',[256],'EI.data',[('INPOP',)])
+    g.on('MI.copy',[256],'MI.tail',[('INPOP',)])
     g.els('MI.copy','MI.copy',[('COPY',),('ADV',)])
+    P('MI.tail').branch({1:'MI.align'},'EI.data',[('CMPI','target_os',3)])
+    P('MI.align').a(('OLEN','mi_pos'),('A64I','sub','mi_pos','mi_pos',40)).branch({0:'MI.pad'},'MI.iat',[('C64','mi_pos','ml_iatoff')])
+    byte(P('MI.pad'),0).goto('MI.align')
+    p=P('MI.iat')
+    for i in range(len(IMPORTS)):p.a(('COPYW','lb_v','ml_imp_'+str(i)),('LDI','lb_n',8)).call('EI.bytes')
+    p.goto('EI.data')
     if image_format=='pe':
         from pedelta import install as install_pe
         install_pe(E,byte,arch)

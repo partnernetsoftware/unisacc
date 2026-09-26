@@ -70,6 +70,11 @@ job exec-net python3 ./exec/c/netcheck.py
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh
 job exec-memory ./exec/c/memorycheck.sh
+if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
+    job exec-memx86 env MEMORY_ARCH=x86_64 ./exec/c/memorycheck.sh
+fi
+job exec-memwinarm ./exec/c/winmemorycheck.sh arm64
+job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64
 job exec-tableself env NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas
 job exec-armself env TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines

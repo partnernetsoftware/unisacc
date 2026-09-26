@@ -149,13 +149,13 @@ Build a driver with `cc -O2 exec/c/compiler.c -o driver` (or unisacc), and use
 `--models FILE` for an external package, or APE's `--payload` for a self-contained
 development executable. The normal options currently connected are `-E`,
 `-S`/`-c`, `-b`/`-t TARGET`, `-O`/`-O0`/`-O1`/`-O2`, `-o`, `-D`/`-U`,
-`-include`, POSIX `-run`, one `-I` directory,
+`-include`, native `-run`, one `-I` directory,
 and one source file or stdin (`-`). The mode/target defaults match the current
 product; `-b` without `-o` writes stdout, default image mode writes a.out/a.exe.
 No output is opened until the selected route accepts. File writes loop over
 partial writes and fail on a stopped write or failed close.
 
-This is staged adoption, not a CLI compatibility claim. Windows `-run`, multiple
+This is staged adoption, not a CLI compatibility claim. Multiple
 translation units, dependency output, warning and
 instrumentation flags, and further optimisation aliases still need migration;
 unsupported options fail, with no reference fallback.
@@ -177,7 +177,7 @@ An absent resource means no such arguments. Both executors use the same
 raw-resource fixture tests. Invalid macro syntax remains a named model
 rejection; exact diagnostic rendering is still outside the migration.
 
-### Native-memory route (POSIX adoption)
+### Native-memory route
 
 `-run` selects the native target and compiles through the `run/O0..O2`
 route, ending in lowered target text. The same encoder network is then run
@@ -207,6 +207,33 @@ retained backend's actual bk_run mappings, then tests native output, status,
 arguments and environment with cc/unisacc drivers. The normal image route
 continues to generate ELF/Mach-O/PE; absent process resources keep its old
 behaviour. The model rejects partial address bindings and argument-cell
-headers outside memory mode. Windows native run imports are not connected
-and fail explicitly; its ordinary PE route remains available. Multiple
-translation units and exact diagnostic compatibility remain unfinished.
+headers outside memory mode. Multiple translation units and exact diagnostic
+compatibility remain unfinished.
+
+On Windows, `winprocess.c` enumerates this process's named PE32+ imports and
+provides `NUL process/import/lowercase-dll/ExactFunctionName` resources, each
+an eight-byte resolved address. It has no compiler import-name list. The
+encoder model reads the declared `pe.IMPORTS` names, requires every address,
+places aligned read-only slots after the code, and encodes calls against
+those slots. The memory image's text extent includes the slots; its data
+extent includes the Windows stack reserve. The C adapter still only copies
+bytes and uses the existing platform allocation/protection gates (the latter
+also flushes the instruction cache). No runtime Python or reference backend
+supplies code or layout.
+
+The native Windows open gate has no errno classification. Optional SBFIND
+lookups therefore follow the product's header search: an unsuccessful open
+tries the next source, including carried headers. Explicit inputs and reported
+read/close errors still fail. This is not a claim of POSIX errno fidelity.
+The Windows adapter uses unisacc's 64-bit-long ABI, not a Windows host-cc build.
+
+`memorycheck.sh` runs natively, or with `MEMORY_ARCH=x86_64` under Rosetta on
+macOS arm64. `winmemorycheck.sh arm64|x86_64` checks bound lowering/encoding
+against the action oracle and existing assembler with **simulated** process
+addresses, plus the production PE enumerator. `winmemoryrun.py DIR DRIVER
+TARGET` is the separate actual-VM check; `MEMORY_CASES=io` selects the bounded
+file/allocator/error batch. The caller starts and stops the VM. Both Windows
+architectures have been run on Windows 11 ARM64 (x86_64 via emulation), using
+network-built drivers equal to reference-built PE files. The new memory route
+has also executed on macOS arm64 and x86_64/Rosetta. Linux memory execution
+has not yet been measured; cross-generated Linux images are separate evidence.

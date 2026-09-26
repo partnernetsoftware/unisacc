@@ -1,6 +1,5 @@
 /* Native loading of UNIMEM1 byte images. No source/tape/ISA decoding.
-   The model supplies relocated bytes and the entry offset. POSIX first;
-   Windows requires an import resolver and is explicitly not enabled yet. */
+   The model supplies relocated bytes, import slots and the entry offset. */
 #if !defined(__UNISA__) && !defined(_WIN32)
 #include <sys/mman.h>
 #endif
@@ -28,7 +27,7 @@ static void memory_map(MemoryImage *m, MemoryMap *x) {
     x->size=x->dataoff+(((long)m->extent+16383)&-16384);
     if (x->size>2147483647) die("memory mapping exceeds relative-address range");
 #ifdef _WIN32
-    die("native memory imports not migrated on Windows"); x->base=0;
+    x->base=(unsigned char *)__mmap(0,x->size,0x3000,4,0,0);
 #else
 #ifdef __UNISA__
 #ifdef __linux__
@@ -39,8 +38,8 @@ static void memory_map(MemoryImage *m, MemoryMap *x) {
 #else
     x->base=mmap(0,(size_t)x->size,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
 #endif
-    if ((long)x->base<0 || !x->base) die("cannot map native memory");
 #endif
+    if ((long)x->base<0 || !x->base) die("cannot map native memory");
 }
 static int memory_enter(MemoryMap *x,MemoryImage *plan,Buf *bytes) {
     MemoryImage m; memory_image(bytes,&m);
@@ -50,7 +49,8 @@ static int memory_enter(MemoryMap *x,MemoryImage *plan,Buf *bytes) {
     memcpy(x->base+x->dataoff,bytes->b+40+m.text,m.stored);
     free(bytes->b); bytes->b=0;
 #ifdef _WIN32
-    die("native memory imports not migrated on Windows");
+    /* The platform gate performs VirtualProtect and FlushInstructionCache. */
+    if (__mprotect((long)x->base,x->dataoff,0x20)) die("cannot protect native code");
 #else
 #ifdef __UNISA__
     if (__mprotect((long)x->base,x->dataoff,5)) die("cannot protect native code");

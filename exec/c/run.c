@@ -31,8 +31,9 @@ static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) di
 
 /* File operations are OS adaptation, not compiler actions. The native
    POSIX gates return -errno; the host wrapper normalises libc to that form.
-   Windows native gates currently lack errno classification: an open failure
-   remains an IO error, never silently accepted as an absent optional file. */
+   Windows native gates lack errno classification. Optional lookup follows
+   the product's header-search contract: an unsuccessful open tries the next
+   source. Explicit inputs and reported read/close errors still fail. */
 #ifdef __UNISA__
 static long io_open(const char *path) {
 #ifdef _WIN32
@@ -65,7 +66,11 @@ static unsigned char *readstream(long fd, const char *path, int *len) {
 static unsigned char *readfile(const char *path, int *len, int optional) {
     long fd = io_open(path);
     if (fd < 0) {
+#if defined(__UNISA__) && defined(_WIN32)
+        if (optional) return 0;
+#else
         if (optional && fd == -ENOENT) return 0;
+#endif
         fprintf(stderr, "run: cannot open %s\n", path); exit(2);
     }
     unsigned char *b = readstream(fd,path,len);
