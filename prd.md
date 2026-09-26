@@ -2728,3 +2728,13 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - s58 固定 3 字节结构体、多结构体实参、连续结构体返回和超过六参数的栈约定：cc、现有 .com 与网络产物输出 `924 44 3 4 5`，调用后原对象仍是 `3 4 5`。另外三例的网络完整镜像等于参考，实际输出等于 cc。旧 224 项先通过再扩至 228；source-to-ELF 固定清单 85→89，89 项全部通过。nativecheck 再次通过网络执行器自身重建及真实写失败。
 - 同一 130 输入重新检查：99 equal、31 not-covered、0 DIFF（通用复制顺带使 b_struct3 一致）。保留未覆盖清单，不称全部 C99 产品测试已迁移。日志 /tmp/unisacc-structargs-{keep,frontier,srcelf,native,network}.log。
 - gen2.py +26/-13（净 +13 行），4007 状态，JSON 21,971,103 B。仅定向回归，没有把前一提交的 70/70 称为此提交的完整门禁；产品 .com、源码哈希沿用上一记录。下一重点仍是这些真实语料的拒绝缺口与最终产品接入，不以 equal 数量代替收尾。
+
+
+### S-17：共享聚合初始化与静态数组声明（2026-09-27）
+
+- 删除 E3 全局数字列表的独立 walker；全局、自动、静态聚合初始化共用 INITLIST，只由 INITADDR 区分地址来源。全局/静态初始化在声明处生成并缓存，随后回放到 __init，保留字符串编号和声明顺序。静态路径复用同一 walker，未增加执行器原语。无括号 `sizeof lines[0]` 复用已有维度求积，修正先消费名字后留下下标的缺口。
+- 新探针 s59 同时覆盖三种存储期的二维短行、零填充、指针和结构体成员；calc 与 b_ptrdepth 也由共享路径通过。旧 228 E3 项先保持，再加入三例，231/231 equal；chain/ELF 固定清单 89→92。三个完整网络 macOS ARM64 镜像逐字节等于参考，实跑等于 cc；b_ptrdepth 给宿主 cc 显式包含 stdio.h（其源码依赖产品自动包含），没有把宿主缺声明的首次编译失败写成编译器差异。
+- 探针发现产品静态局部数组只解析一维，合法的二维声明被拒。C 前端抽出 dimtail，自动、静态、全局声明共用第二/第三维处理，并给静态聚合初始化传入行尺寸。Python 已支持，不改其实现。产品 b_staticarray 覆盖二维/三维、逗号声明、sizeof、跨调用持久性，cc、Python、最终 .com O0/O1/O2 均输出 `24 48 6 2 0 9 1 / 24 48 6 4 0 9 3`。不据此称网络 frontend 已支持三维嵌套初始化。
+- gen2.py 净 -33 行，statics.py 净 +4 行，合计 -29；状态 4007→3969，JSON 21,971,103→21,768,127 B。减少的是重复初始化逻辑；未把规则搬到执行器或另一个生成脚本。任意嵌套聚合、designator、完整 C99 初始化语义仍未覆盖。
+- 冻结代码 gate --com 70/70，JOBS=2，合计 298 s，每套件 ≤60 s；fat 125/0 两架构实跑，chain 92/92，source-to-ELF 固定清单通过，六目标网络自源码镜像相同，nativecheck 18 s。Linux/Windows 本轮未启动 VM，仅验证生成字节。日志 `/tmp/unisacc-init-gate.log`、`/tmp/unisacc-init-final-keep.log`、`/tmp/unisacc-init-network.log`。
+- 重建 .com：1,348,432 B，SHA256 `d1d29056f7d8fb32e2173d8c6fd71ac8872580ab575d0834fc8251a903b22e83`；unisacc.c SHA256 `1442c8ee298439f6adf3ea934ea012dd1292f21a26790d5abe9c30dafd7ed3b9`。未推送、未发布。产品入口仍未切换为网络运行时，重构未完成；cc-unisacc 保持暂停。

@@ -3111,6 +3111,17 @@ int dim3decl(void) {
     return 0;
 }
 
+/* Shared trailing dimensions for automatic, static and global arrays. */
+int dimtail(int n) {
+    decldim2 = 0; decldim3 = 0;
+    if (cur() == tidx("[", 1)) {
+        adv(); decldim2 = cexpr(); need(tidx("]", 1), "]");
+        n = n * decldim2;
+        dim3decl(); n = n * dim3n;
+    }
+    return n;
+}
+
 int alloc_local(int n) { frameoff = frameoff + n; if (frameoff > framemax) framemax = frameoff; return frameoff; }
 
 int is_typetok(void) {
@@ -4205,6 +4216,7 @@ int local_decl(void) {
                     if (sst >= 0) { int per; per = structslots(sst); n = (n + per - 1) / per; }
                 } else n = cexpr();
                 need(tidx("]", 1), "]");
+                n = dimtail(n);
             }
             ew = w;
             if (sst >= 0) ew = declsz;
@@ -4224,7 +4236,7 @@ int local_decl(void) {
                 initflt = lflt0;
                 toinit = 1; hasinit = 1;
                 if (cur() == tidx("{", 1)) {
-                    if (isarr) { initisarr = 1; }
+                    if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
                     initaggr(3, t, 0, isarr ? ew : w, sst, nb);
                 } else { if (cur() == T_STR) { if (isarr) { initstr(3, t, 0, n); }
                     else { expr(); loadval(); es("  @mem.lea r1, ls"); en(t); ec(10); estore(8); } }
@@ -4282,15 +4294,7 @@ int local_decl(void) {
             need(vfind(TOKV, NTOKV, "]", 1), "]");
             /* `a[n][m]` is n*m elements in a row; the FIRST index strides a
                whole row, which is what decldim2 records */
-            decldim2 = 0; decldim3 = 0;
-            if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
-                adv();
-                decldim2 = cexpr();
-                need(vfind(TOKV, NTOKV, "]", 1), "]");
-                n = n * decldim2;
-                dim3decl();
-                n = n * dim3n;
-            }
+            n = dimtail(n);
             if (sst >= 0) w = declsz;
             apd = declpd;
             if (apd > 0) w = 8;            /* an array of POINTERS: 8 each */
@@ -4860,15 +4864,7 @@ int unit(void) {
                 else n = cexpr();
                 need(vfind(TOKV, NTOKV, "]", 1), "]");
                 isarr = 1;
-                decldim2 = 0; decldim3 = 0;
-                if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
-                    adv();
-                    decldim2 = cexpr();
-                    need(vfind(TOKV, NTOKV, "]", 1), "]");
-                    n = n * decldim2;
-                    dim3decl();
-                    n = n * dim3n;
-                }
+                n = dimtail(n);
                 if (gstruct >= 0) w = declsz;
             }
             gpd = declpd;

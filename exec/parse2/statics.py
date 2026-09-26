@@ -31,11 +31,15 @@ def install(E, P, TIX, SINIT, SIEND, LOC):
     P('SC.after').tok({'=':'SC.init',',':'SC.more'},'SC.end')
     P('SC.more').call('DSTARS').goto('SC.name')
     P('SC.end').expect(';').call('NEXT').ret()
-    P('SC.init').branch({1:'SC.scalar'},('rej','not covered: static aggregate initializer'),[('CMPI','dar',0)])
-    P('SC.scalar').a(('OLEN','si_out'),('LDI','si_active',1)).vpush('si_pos','si_lab','si_out','v','bd','tb').call('NEXT').call('EXPR').a(('LDI','si_active',0)).call('SC.nof32').call('ISDV').a(('COPYW','sdv','u')).vpop('si_pos','si_lab','si_out','v','bd','tb').a(
+    # Scalar and aggregate initialization both emit once into the deferred __init blob.
+    saved = ('si_pos','si_lab','si_out','v','bd','tb','td','dar','dsz')
+    P('SC.init').a(('OLEN','si_out'),('LDI','si_active',1)).vpush(*saved).call('NEXT').tok({'{':'SC.aggr'},'SC.scalar')
+    P('SC.aggr').a(('LDI','imode',2),('COPYW','inlabel','si_lab'),('COPYW','ivv','v'),('COPYW','ibytes','dsz')).call('INITLIST').vpop(*saved).goto('SC.cache')
+    P('SC.scalar').branch({1:'SC.expr'},('rej','not covered: static array initializer'),[('CMPI','dar',0)])
+    P('SC.expr').call('EXPR').call('SC.nof32').call('ISDV').a(('COPYW','sdv','u')).vpop(*saved).a(
         ('LDX','vt','v',E.PTR),('LDX','vb','v',E.BASE)).call('SC.nof32').call('ISDV').branch({1:'SC.store'},'DEAD.dbl',[('CMP','u','sdv')])
-    P('SC.store').o('  .lea r1, ls').num('si_lab').o('\n').call('STOREV').a(
-        ('OCUT','si_blob','si_out'),('STX','si_pos',SINIT,'si_blob'),('STX','si_pos',SIEND,'tpos')).goto('SC.after')
+    P('SC.store').o('  .lea r1, ls').num('si_lab').o('\n').call('STOREV').goto('SC.cache')
+    P('SC.cache').a(('LDI','si_active',0),('OCUT','si_blob','si_out'),('STX','si_pos',SINIT,'si_blob'),('STX','si_pos',SIEND,'tpos')).goto('SC.after')
     P('IN.static').a(('LDX','si_end','tpos',SIEND),('INPUSH','si_blob')).goto('IN.scopy')
     g.on('IN.scopy',[256],'IN.sdone',[('INPOP',),('JUMP','si_end')])
     g.els('IN.scopy','IN.scopy',[('COPY',),('ADV',)])

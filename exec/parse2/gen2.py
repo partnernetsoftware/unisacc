@@ -405,6 +405,7 @@ CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a s
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
 POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
 TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
+GIFULL = 15 * POSSPAN  # cached complete aggregate initialization, including stores
 PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
 GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
 ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
@@ -716,7 +717,7 @@ def build():
     P("IN.id").branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dep", 0)])
     P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("IN.nx")
     P("IN.eq").a(("LDX", "ips", "tpos", GINPS), ("LDX", "ipe", "tpos", GINPE)).branch({2: "IN.eq0"}, "DEAD.ginit", [("CMP", "ipe", "ips")])
-    P("IN.eq0").call("NEXT").tok({TK_NUM: "IN.v", "-": "IN.v", "+": "IN.v", "!": "IN.v", "~": "IN.v", "(": "IN.v", "{": "IN.br", "&": "IN.amp", TK_ID: "IN.fn", E.TK_STR: "IN.s0"}, "IN.l")
+    P("IN.eq0").call("NEXT").tok({TK_NUM: "IN.v", "-": "IN.v", "+": "IN.v", "!": "IN.v", "~": "IN.v", "(": "IN.v", "{": "IN.v", "&": "IN.amp", TK_ID: "IN.fn", E.TK_STR: "IN.s0"}, "IN.l")
     p = P("IN.s0")          # (measured, s34) .lea/.zero, then each byte and the 0 while inside the array
     p.a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.sp", [("CMPI", "t", 1)])
     P("IN.sp").a(("LDX", "t", "tpos", GSK)).o("  .lea r0, S").num("t").goto("IN.as")   # (measured, s35: numbered where it stands)   # (measured, s35)
@@ -744,54 +745,12 @@ def build():
     P("IN.fa").o("  .lea r0, ").a(("SPAN2", "ps", "pe")).goto("IN.as")
     P("IN.ga").o("  .lea r0, g_").a(("SPAN2", "ps", "pe")).goto("IN.as")
     P("IN.as").o("\n  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  store64 [r1+0], r0\n").call("NEXT").goto("IN.l")
-    q = P("IN.br")          # (measured, globals) .lea r1, g_X; .zero r1, 0, SIZE
-    q.a(("INTERN", "iv", "ips", "ipe"), ("LDX", "t", "iv", GSZ), ("LDX", "ivt", "iv", E.PTR), ("LDX", "ivb", "iv", E.BASE),
-        ("LDX", "iar", "iv", E.ARR), ("LDI", "ix", 0), ("LDI", "ibr", 0), ("LDI", "inx", 0))
-    q.o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  .zero r1, 0, ").num("t").o("\n").call("NEXT").label("IN.el")
-    q.tok({TK_NUM: "IN.en", "}": "IN.ed", "{": "IN.ib"}, "DEAD.ginit")
-    # T a[N][M] = {{..}, {..}}: the same stores as the flat list (measured, s36); a row's braces
-    # start where the previous row ended, and closing one moves to the next row (the rest is .zero)
-    q = P("IN.ib")
-    q.branch({2: "IN.ib1"}, "DEAD.ginit", [("CMPI", "iar", 1)])
-    P("IN.ib1").branch({1: "IN.ib2"}, "DEAD.ginit", [("CMPI", "iar", 2)])
-    P("IN.ib2").branch({1: "IN.ib3"}, "DEAD.ginit", [("CMPI", "ibr", 0)])
-    P("IN.ib3").branch({1: "IN.ib4"}, "DEAD.ginit", [("CMP", "ix", "inx")])
-    P("IN.ib4").a(("ALUI", "mul", "u", "iv", 8), ("ALUI", "add", "u", "u", 1), ("LDX", "u", "u", DIM), ("ALU", "add", "inx", "ix", "u"),
-        ("LDI", "ibr", 1)).call("NEXT").tok({TK_NUM: "IN.en", "}": "IN.ed"}, "DEAD.ginit")
-    q = P("IN.en")          # the element's offset and type: an array's k-th, or a struct's k-th member
-    q.branch({1: "IN.en1"}, "IN.ea", [("CMPI", "iar", 0)])
-    P("IN.en1").branch({1: "IN.es"}, "IN.ea", [("CMPI", "ibr", 0)])
-    q = P("IN.ea")
-    q.a(("ALUI", "sub", "td", "ivt", 1), ("COPYW", "tb", "ivb")).call("ELSZ").a(("ALU", "mul", "ioff", "ix", "es"),
-        ("ALUI", "sub", "vt", "ivt", 1), ("COPYW", "vb", "ivb")).goto("IN.ew")
-    q = P("IN.es")
-    q.branch({1: "IN.es1"}, "DEAD.ginit", [("CMPI", "ivt", 0)])
-    q = P("IN.es1")
-    q.branch({(1, 2): "IN.es2"}, "DEAD.ginit", [("CMPI", "ivb", SBB)])
-    q = P("IN.es2")
-    q.a(("ALUI", "sub", "t", "ivb", SBB), ("LDX", "u", "t", SMN)).branch({0: "IN.es3"}, "DEAD.ginit", [("CMP", "ix", "u")])
-    q = P("IN.es3")
-    q.a(("ALUI", "mul", "u", "t", 64), ("ALU", "add", "u", "u", "ix"), ("LDX", "u", "u", SMEM), ("LDX", "ioff", "u", MOF),
-        ("LDX", "vt", "u", MPT), ("LDX", "vb", "u", MBS), ("LDX", "t", "u", MAR)).branch({1: "IN.ew"}, "DEAD.ginit", [("CMPI", "t", 0)])
-    q = P("IN.ew")          # imm r0, V; .lea r1, g_X; [imm r2, OFF; add64 r1, r1, r2]; the store at the element's width
-    q.branch({1: "IN.ew2"}, "DEAD.ginit", [("CMPI", "vt", 0)])
-    q = P("IN.ew2")
-    q.branch({(1, 2): "DEAD.ginit"}, "IN.ew3", [("CMPI", "vb", SBB)])
-    q = P("IN.ew3")
-    emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").branch({1: "IN.st"}, "IN.off", [("CMPI", "ioff", 0)])
-    P("IN.off").o("  imm r2, ").num("ioff").o("\n  add64 r1, r1, r2\n").goto("IN.st")
-    q = P("IN.st")
-    q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "IN.st1"}, "IN.st2", [("CMPI", "ibr", 1)])
-    P("IN.st1").branch({2: "DEAD.ginit"}, "IN.st2", [("CMP", "ix", "inx")])   # past the row: not covered
-    P("IN.st2").call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
-    P("IN.ec").call("NEXT").goto("IN.el")
-    P("IN.ed").branch({1: "IN.ic"}, "IN.ed0", [("CMPI", "ibr", 1)])
-    P("IN.ed0").call("NEXT").goto("IN.l")
-    P("IN.ic").a(("COPYW", "ix", "inx"), ("LDI", "ibr", 0)).call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
-    P("IN.v").a(("LDX", "gi_blob", "tpos", GIBLOB), ("LDX", "gi_end", "tpos", GIEND), ("INPUSH", "gi_blob")).goto("IN.vcopy")
+    P("IN.v").a(("LDX", "gi_full", "tpos", GIFULL), ("LDX", "gi_blob", "tpos", GIBLOB), ("LDX", "gi_end", "tpos", GIEND), ("INPUSH", "gi_blob")).goto("IN.vcopy")
     g.on("IN.vcopy", [256], "IN.vdone", [("INPOP",), ("JUMP", "gi_end")])
     g.els("IN.vcopy", "IN.vcopy", [("COPY",), ("ADV",)])
-    q = P("IN.vdone")
+    P("IN.vdone").branch({1: "IN.full"}, "IN.scalar", [("CMPI", "gi_full", 1)])
+    P("IN.full").call("NEXT").goto("IN.l")
+    q = P("IN.scalar")
     q.call("NEXT").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").a(("INTERN", "v", "ips", "ipe"), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("STOREV").goto("IN.l")
     # function: int NAME ( params ) { body }
     p = P("FN")
@@ -832,18 +791,14 @@ def build():
     p = P("GV.gf")          # NAME: a function defined before
     p.a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.FND)).branch({1: "GV.gok"}, "DEAD.ginit", [("CMPI", "u", 1)])
     P("GV.gok").call("NEXT").goto("GV.end")
-    P("GV.bi").a(("LDI", "dep", 1)).call("NEXT").goto("GV.bl")     # a struct's `= { ... }`
+    p = P("GV.bi")
+    p.a(("OLEN", "gi_out"), ("COPYW", "gi_pos", "tpos"), ("INTERN", "ivv", "fns", "fne"), ("LDI", "imode", 1),
+        ("COPYW", "inps", "fns"), ("COPYW", "inpe", "fne"), ("COPYW", "ibytes", "gsz"))
+    p.vpush("gi_out", "gi_pos", "fns", "fne", "td", "tb", "bd", "gar", "gsz").call("INITLIST").vpop("gi_out", "gi_pos", "fns", "fne", "td", "tb", "bd", "gar", "gsz")
+    p.a(("OCUT", "gi_blob", "gi_out"), ("STX", "gi_pos", GIBLOB, "gi_blob"), ("STX", "gi_pos", GIEND, "tpos"),
+        ("LDI", "t", 1), ("STX", "gi_pos", GIFULL, "t")).goto("GV.end")
     P("GV.iv").a(("OLEN", "gi_out"), ("COPYW", "gi_pos", "tpos")).vpush("gi_out", "gi_pos", "fns", "fne", "td", "tb", "gar", "gsz").call("EXPR").vpop("gi_out", "gi_pos", "fns", "fne", "td", "tb", "gar", "gsz").a(("OCUT", "gi_blob", "gi_out"), ("STX", "gi_pos", GIBLOB, "gi_blob"), ("STX", "gi_pos", GIEND, "tpos")).goto("GV.end")
     P("GV.end").tok({",": "GV.cm", "=": "GV.init"}, "GV.e0")
-    P("GV.brace").call("NEXT").expect("{").a(("LDI", "dep", 1)).call("NEXT").goto("GV.bl")
-    p = P("GV.bl0")
-    p.label("GV.bl")
-    p = P("GV.bl")
-    p.tok({"{": "GV.bo", "}": "GV.bc", "eof": "DEAD.ginit"}, "GV.bn")
-    P("GV.bo").a(("ALUI", "add", "dep", "dep", 1)).goto("GV.bn")
-    P("GV.bc").a(("ALUI", "sub", "dep", "dep", 1)).branch({1: "GV.bd"}, "GV.bn", [("CMPI", "dep", 0)])
-    P("GV.bn").call("NEXT").goto("GV.bl")
-    P("GV.bd").call("NEXT").goto("GV.end")
     g.on("DEAD.ginit", range(257), "DEAD", E.rej("not covered: global initialiser"), "r")
     P("GV.e0").expect(";").call("NEXT").goto("UNIT")
     P("GV.cm").call("DSTARS").tok({TK_ID: "GV.cid"}, bad("declarator"))
@@ -1017,21 +972,21 @@ def build():
     P("LS.d").call("NEXT").tok({",": "S.dcm"}, "S.dend")
     P("S.din0").a(("JUMP", "lpp")).call("NEXT").goto("S.din00")       # back to '=' (re-read) for the scalar path
     P("S.din00").branch({1: "S.din1"}, bad("array initialiser"), [("CMPI", "dar", 0)])
-    # T x[N] = { e, ... } / struct T x = { e, ... } (measured, local): imm r2, S; sub64 r1, r6, r2; .zero r1, 0, SIZE;
-    # then each element's value, imm r2, S - OFF; sub64 r1, r6, r2; the store at the element's width
-    q = P("S.lbr")
-    q.a(("LDX", "ivt", "v", E.PTR), ("LDX", "ivb", "v", E.BASE), ("COPYW", "iar", "dar"), ("COPYW", "isl", "s"), ("LDI", "ix", 0),
-        ("COPYW", "ivv", "v"), ("LDI", "ibr", 0), ("LDI", "inx", 0))
-    q.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n  .zero r1, 0, ").num("dsz").o("\n").call("NEXT").label("LB.el")
+    # One initializer walker; only the address mode differs across storage classes.
+    P("S.lbr").a(("LDI", "imode", 0), ("COPYW", "ivv", "v"), ("COPYW", "ibytes", "dsz")).call("INITLIST").tok({",": "S.dcm"}, "S.dend")
+    q = P("INITLIST")
+    q.a(("LDX", "ivt", "ivv", E.PTR), ("LDX", "ivb", "ivv", E.BASE), ("LDX", "iar", "ivv", E.ARR),
+        ("LDX", "isl", "ivv", LOC), ("LDI", "ix", 0), ("LDI", "ibr", 0), ("LDI", "inx", 0), ("LDI", "ioff", 0))
+    q.call("INITADDR").o("  .zero r1, 0, ").num("ibytes").o("\n").call("NEXT").label("LB.el")
     q.tok({"}": "LB.ed", "{": "LB.ib"}, "LB.e")
-    q = P("LB.ib")          # a row's braces in T a[N][M] (as IN.ib, measured s36)
+    q = P("LB.ib")          # a row's braces in T a[N][M] (shared across storage classes, measured s36/s59)
     q.branch({1: "LB.ib2"}, "DEAD.linit", [("CMPI", "iar", 2)])
     P("LB.ib2").branch({1: "LB.ib3"}, "DEAD.linit", [("CMPI", "ibr", 0)])
     P("LB.ib3").branch({1: "LB.ib4"}, "DEAD.linit", [("CMP", "ix", "inx")])
     P("LB.ib4").a(("ALUI", "mul", "u", "ivv", 8), ("ALUI", "add", "u", "u", 1), ("LDX", "u", "u", DIM), ("ALU", "add", "inx", "ix", "u"),
         ("LDI", "ibr", 1)).call("NEXT").tok({"}": "LB.ed"}, "LB.e")
     q = P("LB.e")
-    q.vpush("ivt", "ivb", "iar", "isl", "ix", "bd", "tb", "ivv", "ibr", "inx").call("EXPR").vpop("ivt", "ivb", "iar", "isl", "ix", "bd", "tb", "ivv", "ibr", "inx")
+    q.vpush("ivt", "ivb", "iar", "isl", "ix", "bd", "tb", "ivv", "ibr", "inx", "imode", "inps", "inpe", "inlabel", "ibytes").call("EXPR").vpop("ivt", "ivb", "iar", "isl", "ix", "bd", "tb", "ivv", "ibr", "inx", "imode", "inps", "inpe", "inlabel", "ibytes")
     q.branch({1: "LB.en1"}, "LB.ea", [("CMPI", "iar", 0)])
     P("LB.en1").branch({1: "LB.es"}, "LB.ea", [("CMPI", "ibr", 0)])
     q = P("LB.ea")
@@ -1052,14 +1007,21 @@ def build():
     q = P("LB.w2")
     q.branch({(1, 2): "DEAD.linit"}, "LB.w3", [("CMPI", "vb", SBB)])
     q = P("LB.w3")
-    q.a(("ALU", "sub", "t", "isl", "ioff")).o("  imm r2, ").num("t").o("\n  sub64 r1, r6, r2\n")
+    q.call("INITADDR")
     q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "LB.st1"}, "LB.st2", [("CMPI", "ibr", 1)])
     P("LB.st1").branch({2: "DEAD.linit"}, "LB.st2", [("CMP", "ix", "inx")])
     P("LB.st2").tok({",": "LB.ec", "}": "LB.ed"}, "DEAD.linit")
     P("LB.ec").call("NEXT").goto("LB.el")
     P("LB.ed").branch({1: "LB.ic"}, "LB.ed0", [("CMPI", "ibr", 1)])
     P("LB.ic").a(("COPYW", "ix", "inx"), ("LDI", "ibr", 0)).call("NEXT").tok({",": "LB.ec", "}": "LB.ed"}, "DEAD.linit")
-    P("LB.ed0").call("NEXT").tok({",": "S.dcm"}, "S.dend")
+    P("LB.ed0").call("NEXT").ret()
+    P("INITADDR").branch({1: "IA.local"}, "IA.named", [("CMPI", "imode", 0)])
+    P("IA.local").a(("ALU", "sub", "t", "isl", "ioff")).o("  imm r2, ").num("t").o("\n  sub64 r1, r6, r2\n").ret()
+    P("IA.named").branch({1: "IA.global"}, "IA.static", [("CMPI", "imode", 1)])
+    P("IA.global").o("  .lea r1, g_").a(("SPAN2", "inps", "inpe")).goto("IA.offset")
+    P("IA.static").o("  .lea r1, ls").num("inlabel").goto("IA.offset")
+    P("IA.offset").o("\n").branch({1: "RET"}, "IA.add", [("CMPI", "ioff", 0)])
+    P("IA.add").o("  imm r2, ").num("ioff").o("\n  add64 r1, r1, r2\n").ret()
     q = P("S.din1")
     q.vpush("s", "v", "bd", "tb").call("NEXT").call("EXPR").call("ISDV").a(("COPYW", "sdv", "u")).vpop("s", "v", "bd", "tb")
     q.a(("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("ISDV").branch({1: "S.din2"}, "DEAD.dbl", [("CMP", "u", "sdv")])
@@ -1361,12 +1323,17 @@ def build():
     P("U.szof").call("NEXT").a(("COPYW","szpos","tpos"),("LDI","szparen",0)).tok({"(": "SZ.p", "*": "SZ.star", TK_ID: "SZ.id"}, "SZ.expr")
     P("SZ.p").a(("LDI","szparen",1)).call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", "union": "SZ.t", "enum": "SZ.t", "*": "SZ.star", TK_ID: "SZ.pid"}, "SZ.expr")
     P("SZ.t").call("TSPEC").expect(")").call("ELSZ").a(("COPYW", "sz", "es")).goto("SZ.out")
-    P("SZ.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("LOOKUP").goto("SZ.var")
+    P("SZ.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("NEXT").tok(
+        {"(": "SZ.expr", ".": "SZ.expr", "->": "SZ.expr", "++": "SZ.expr", "--": "SZ.expr"}, "SZ.idvalue")
+    P("SZ.idvalue").call("LOOKUP").goto("SZ.sub")
     P("SZ.pid").call("ISTD").branch({1: "SZ.t"}, "SZ.pvalue")
     P("SZ.pvalue").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("NEXT").tok({")":"SZ.pidvar", "[":"SZ.pidvar"}, "SZ.expr")
     P("SZ.pidvar").call("LOOKUP").goto("SZ.sub")
     p = P("SZ.sub")
-    p.tok({"[": "SZ.sk", ")":"SZ.cl"}, "SZ.expr")
+    p.tok({"[": "SZ.sk"}, "SZ.subend")
+    P("SZ.subend").branch({1: "SZ.pend"}, "SZ.nend", [("CMPI", "szparen", 1)])
+    P("SZ.pend").tok({")": "SZ.cl"}, "SZ.expr")
+    P("SZ.nend").call("SZ.calc").goto("SZ.exprout")
     P("SZ.cl").expect(")").goto("SZ.var")
     p = P("SZ.sk")       # skip to the matching ']'
     p.a(("LDI", "dep", 1)).call("NEXT").label("SZ.sl")
