@@ -2135,3 +2135,9 @@ retained inputs pass; s43 agrees on both executors, bringing the fixed set
 to 200. Delta 3659 states, JSON 19929833 B, text table 411066 B.
 Current self-source E2/E1 succeeds; E3 next stops at main.c's block-scope
 `static char dname[520]`. No self-source success is claimed yet.
+
+Frozen 47ef8c3 / product 1f3ba5b validation: gate --com 45/45, JOBS=2,
+187s total, each suite <=60s. macOS arm64/Rosetta only; no new Linux/Windows
+product-suite claim. Rebuilt .com 1345056 B, SHA256
+44e0fe5ca0194ef567a92181b7e9984619ebf2e2a7963fecb5b46f33865bf25d.
+The .com conditional regression also matches cc at -O0/-O1/-O2.
