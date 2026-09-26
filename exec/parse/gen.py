@@ -672,11 +672,13 @@ def expr():
     p.branch({1: "IT.ok"}, "IT.nd", [("CMP", "t", "pass")])
     p = P("IT.nd")
     p.branch({1: "PF"}, "IT.nw", [("CMP", "v", "pfid")])
-    # __write / __read (e1, e2, e3): arguments pushed as for a call, popped to r2 r1 r0, `.sys write|read` (measured)
-    P("IT.nw").branch({1: "IT.sw"}, "IT.nr", [("CMP", "v", "wrid")])
-    P("IT.nr").branch({1: "IT.sr"}, ("rej", "not covered: call to a function not defined before"), [("CMP", "v", "rdid")])
-    P("IT.sw").a(("LDI", "sys", 1)).goto("IT.ok3")
-    P("IT.sr").a(("LDI", "sys", 2)).goto("IT.ok3")
+    # syscall builtins (SYSCALLS): arguments pushed as for a call, popped to r(n-1)..r0,
+    # r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5` (w 6) -- measured
+    for k, (nm, _, _) in enumerate(SYSCALLS, 1):
+        last = k == len(SYSCALLS)
+        nxt = ("rej", "not covered: call to a function not defined before") if last else "IT.n%d" % (k + 1)
+        P("IT.nw" if k == 1 else "IT.n%d" % k).branch({1: "IT.s%d" % k}, nxt, [("CMP", "v", "sy%d" % k)])
+        P("IT.s%d" % k).a(("LDI", "sys", k)).goto("IT.ok3")
     p = P("IT.ok")
     p.a(("CMP", "v", "pfid"))
     p.branch({1: "DEADPF"}, "IT.ok1")
@@ -700,15 +702,26 @@ def expr():
     p.a(("ALUI", "sub", "na", "na", 1)).o("  load64 r").num("na").o(", [r7+0]\n  .frame -8\n").goto("IT.pop")
     p = P("IT.emit")
     p.vpop("sps", "spe", "sys").branch({1: "IT.ecall"}, "IT.esys", [("CMPI", "sys", 0)])
-    p = P("IT.esys")
-    p.branch({1: "IT.e3"}, ("rej", "not covered: __write/__read arity"), [("CMPI", "nar", 3)])
-    p = P("IT.e3")
-    p.branch({1: "IT.ew"}, "IT.er", [("CMPI", "sys", 1)])
-    P("IT.ew").o("  .sys write, r0, r1, r2\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
-    P("IT.er").o("  .sys read, r0, r1, r2\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
+    for k, (_, _, w) in enumerate(SYSCALLS, 1):
+        nxt = "IT.w%d" % (k + 1) if k < len(SYSCALLS) else ("rej", "not covered: syscall builtin")
+        P("IT.esys" if k == 1 else "IT.w%d" % k).branch({1: "IT.v%d" % k}, nxt, [("CMPI", "sys", k)])
+        P("IT.v%d" % k).a(("LDI", "w", w)).goto("IT.zf")
+    P("IT.zf").branch({0: "IT.zf1"}, "IT.sd", [("CMP", "nar", "w")])
+    P("IT.zf1").o("  imm r").num("nar").o(", 0\n").a(("ALUI", "add", "nar", "nar", 1)).goto("IT.zf")
+    for k, (_, sc, w) in enumerate(SYSCALLS, 1):
+        nxt = "IT.d%d" % (k + 1) if k < len(SYSCALLS) else ("rej", "not covered: syscall builtin")
+        P("IT.sd" if k == 1 else "IT.d%d" % k).branch({1: "IT.x%d" % k}, nxt, [("CMPI", "sys", k)])
+        regs = ", ".join("r%d" % i for i in range(w))
+        P("IT.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
     p = P("IT.ecall")
     p.o("  call ").a(("SPAN2", "sps", "spe")).o("\n").a(("INTERN", "v", "sps", "spe"), ("LDX", "pt", "v", FRD), ("LDX", "pb", "v", FRB)).call("NEXT").ret()
     g.on("DEAD0", range(257), "DEAD", rej("not covered: identifier is not a local"), "r")
+
+
+# builtin -> (.sys name, register width): the one declared table of syscall builtins
+SYSCALLS = [("__write", "write", 3), ("__read", "read", 3), ("__open", "open", 3), ("__close", "close", 3),
+            ("__lseek", "lseek", 3), ("__unlink", "unlink", 3), ("__rename", "rename", 3), ("__exit", "exit", 3),
+            ("__mmap", "mmap", 6), ("__munmap", "munmap", 3)]
 
 
 def printf():
@@ -933,8 +946,8 @@ def unit():
     p = P("START")
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"),
-        ("SBCLR",), [("SBOUT", c) for c in b"__write"], ("SBINTERN", "wrid"),
-        ("SBCLR",), [("SBOUT", c) for c in b"__read"], ("SBINTERN", "rdid"))
+        [x for k, (nm, _, _) in enumerate(SYSCALLS, 1)
+         for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "sy%d" % k)]])
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
     p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
