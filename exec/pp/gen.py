@@ -44,6 +44,26 @@ _inc = open(os.path.join(ROOT, "kernel", "unisa_model.inc"), encoding="latin-1")
 DIRV = tuple(re.search(r'char \*DIRV = "((?:[^"\\]|\\.)*)";', _inc).group(1).split("\\0")[:-1])
 
 
+# autoinc (src/front_pp.c autoinc/hdrneeded), DATA only -- not yet wired
+# into the delta.  Order is the reference's; trigger names are derived from
+# include/*.h by hdrneeded's line rule (a line opening `static` with `(` and
+# a `{` after it names the identifier before the first `(`).
+AUTOINC_ORDER = ("assert.h", "ctype.h", "stdlib.h", "string.h", "wchar.h", "stdio.h")
+
+
+def autoinc_map():
+    m = {}
+    for h in AUTOINC_ORDER:
+        names = []
+        for ln in open(os.path.join(ROOT, "include", h), encoding="latin-1").read().split("\n"):
+            if len(ln) > 7 and ln.startswith("static") and "(" in ln and "{" in ln[ln.index("("):]:
+                mm = re.search(r"([A-Za-z0-9_]+)\s*$", ln[:ln.index("(")])
+                if mm:
+                    names.append(mm.group(1))
+        m[h] = names
+    return m
+
+
 def load_pp_table():
     head, T = None, {}
     for ln in open(os.path.join(ROOT, "weights", "gold", "pp.tsv"), encoding="utf-8"):

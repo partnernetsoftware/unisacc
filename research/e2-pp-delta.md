@@ -465,3 +465,7 @@ Probes 12: 10 equal, 2 not covered (F(1); `2L` suffix), 0 DIFF.
 Shards: ex.aa..af (104 files in this split): 79 equal, 20 equal-noauto,
 5 not covered, 0 DIFF; corpus.aa..ag 249: 201 equal (+2), 25 equal-noauto
 (+2), 17 not covered (-4), 6 reject-agree, 0 DIFF.
+
+## autoinc (measured 2026-09-26, not yet in the delta)
+
+Reference: autoinc() runs after decomment(), before preprocess(). For each header in the fixed order assert.h ctype.h stdlib.h string.h wchar.h stdio.h, if some `static NAME(...){` definition line of include/H is *called* in the source and never *defined* there (srcuse==1; printf excluded), it PREPENDS the line `#include <H>` at byte 0 (so later headers land above earlier ones), which P3 then processes as a normal include. Afterwards, a printf format with a width/flag/precision prepends `#include <stdio.h>`. Measured: strcpy+strlen with no include -> ref -E emits string.h text, noauto does not. gen.autoinc_map() derives the trigger names from include/*.h (ctype 14, stdlib 28, string 15, wchar 1, stdio 40, assert 0). Not wired: the trigger needs a call/definition scan (paren matching to `{`) before P3; verdicts unchanged (45 noauto, 0 DIFF).
