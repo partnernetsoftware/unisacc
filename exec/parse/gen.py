@@ -123,16 +123,43 @@ def tokenizer():
     g.on("SPANSTR", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_STR)])
     g.on("SPANSTR", [256], "DEAD", rej("not covered: truncated token dump"))
     g.els("SPANSTR", "SPANSTR", [("ADV",)])
-    # decimal, no suffix, no leading 0 unless the literal is 0, <= 9 digits
-    g.on("SPANNUM", [48], "NUM0", [("ADV",)])
-    g.on("SPANNUM", range(49, 58), "NUMD", [("ADV",)])
+    # decimal: copied as written (<= 19 digits), suffixes u/l dropped (measured);
+    # hex/octal: value in W[nv] (64-bit), printed signed decimal (nx = 1)
+    SUF = [ord(c) for c in "uUlL"]
+    DIGS = range(48, 58)
+    g.on("SPANNUM", [48], "NUM0", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", 0), ("LDI", "nd", 0)])
+    g.on("SPANNUM", range(49, 58), "NUMD", [("ADV",), ("LDI", "nx", 0)])
     g.els("SPANNUM", "SKIPO", [("LDI", "tk", TK_BADNUM)])
     g.on("NUM0", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_NUM)])
+    g.on("NUM0", SUF, "NUMS", [("MARK", "pe"), ("ADV",), ("LDI", "ns", 1)])
+    g.on("NUM0", [ord("x"), ord("X")], "NUMX", [("ADV",), ("LDI", "nx", 1)])
+    for d in range(8):
+        g.on("NUM0", [48 + d], "NUMO", [("ADV",), ("LDI", "nx", 1), ("LDI", "nv", d), ("LDI", "nd", 1)])
     g.els("NUM0", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.on("NUMD", range(48, 58), "NUMD", [("ADV",)])
-    g.on("NUMD", [10], "NUMLEN", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 10)])
+    g.on("NUMD", DIGS, "NUMD", [("ADV",)])
+    g.on("NUMD", [10], "NUMLEN", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
+    g.on("NUMD", SUF, "NUMDS", [("MARK", "pe"), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
     g.els("NUMD", "SKIPO", [("LDI", "tk", TK_BADNUM)])
     g.r("NUMLEN", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
+    g.r("NUMDS", {0: ("NUMS", [("ADV",), ("LDI", "ns", 1)]), (1, 2): ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
+    # suffix: at most 3 of u U l L (the reference drops them)
+    g.on("NUMS", SUF, "NUMS", [("ADV",), ("ALUI", "add", "ns", "ns", 1)])
+    g.on("NUMS", [10], "NUMSN", [("ADV",), ("CMPI", "ns", 4)])
+    g.els("NUMS", "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    g.r("NUMSN", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
+    for d in range(8):   # octal: <= 21 digits (< 2**63)
+        g.on("NUMO", [48 + d], "NUMO", [("ADV",), ("A64I", "shl", "nv", "nv", 3), ("A64I", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
+    g.on("NUMO", [10], "NUMOK", [("MARK", "pe"), ("ADV",), ("CMPI", "nd", 22)])
+    g.on("NUMO", SUF, "NUMOS", [("MARK", "pe"), ("CMPI", "nd", 22)])
+    g.els("NUMO", "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    hx = [(c, c - 48) for c in DIGS] + [(c, c - 87) for c in range(97, 103)] + [(c, c - 55) for c in range(65, 71)]
+    for c, d in hx:      # hex: 1..16 digits
+        g.on("NUMX", [c], "NUMX", [("ADV",), ("A64I", "shl", "nv", "nv", 4), ("A64I", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
+    g.on("NUMX", [10], "NUMOK", [("MARK", "pe"), ("ADV",), ("ALUI", "sub", "t", "nd", 1), ("CMPI", "t", 16)])
+    g.on("NUMX", SUF, "NUMOS", [("MARK", "pe"), ("ALUI", "sub", "t", "nd", 1), ("CMPI", "t", 16)])
+    g.els("NUMX", "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    g.r("NUMOK", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
+    g.r("NUMOS", {0: ("NUMS", [("ADV",), ("LDI", "ns", 1)]), (1, 2): ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
 
 
 # ---- a small structured assembler onto (state, r) rows ---------------------
@@ -249,6 +276,27 @@ def prn():
         p.branch({1: nm + ".done"}, nm + ".out", [("CMPI", "k", 0)])
         p.cur = nm + ".done"
         p.ret()
+
+
+def numout():
+    # NUMOUT: the current literal as the reference prints it -- decimal: its
+    # digits as written; hex/octal (nx = 1): W[nv] as signed 64-bit decimal
+    p = P("NUMOUT")
+    p.branch({1: "NO.v"}, "NO.s", [("CMPI", "nx", 1)])
+    p.cur = "NO.s"
+    p.a(("SPAN2", "ps", "pe")).ret()
+    p.cur = "NO.v"
+    p.a(("LDI", "z0", 0), ("LDI", "k", 0)).branch({0: "NO.neg"}, "NO.loop", [("C64", "nv", "z0")])
+    p.cur = "NO.neg"
+    p.o("-").a(("A64", "sub", "nv", "z0", "nv")).goto("NO.loop")
+    p.cur = "NO.loop"
+    p.a(("A64I", "urem", "t", "nv", 10), ("STX", "k", DIG, "t"), ("ALUI", "add", "k", "k", 1), ("A64I", "udiv", "nv", "nv", 10))
+    p.branch({1: "NO.out"}, "NO.loop", [("LDI", "z0", 0), ("C64", "nv", "z0")])
+    p.cur = "NO.out"
+    p.a(("ALUI", "sub", "k", "k", 1), ("LDX", "t", "k", DIG), ("ALUI", "add", "t", "t", 48), ("OUTW", "t"))
+    p.branch({1: "NO.done"}, "NO.out", [("CMPI", "k", 0)])
+    p.cur = "NO.done"
+    p.ret()
 
 
 def addr(p, reg):             # address of local slot W[s] (or global x[gs..ge)) into reg
@@ -598,7 +646,7 @@ def expr():
         r.a(("LDI", "pt", 0), ("LDI", "pb", n)).ret()
         q = P(nx)
     q.branch({}, ("rej", "not covered: cast to a non-scalar"))
-    P("U.num").o("  imm r0, ").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").ret()
+    P("U.num").o("  imm r0, ").call("NUMOUT").o("\n").call("NEXT").ret()
     P("U.id").a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT").call("IDTAIL").ret()
 
     # IDTAIL: saved id x[sps..spe), current token follows it
@@ -1014,13 +1062,14 @@ def inits():
     p.a(("COPYW", "gs", "ps"), ("COPYW", "ge", "pe")).call("NEXT").tok({"=": "IN.eq"}, "IN.loop")
     P("IN.eq").call("NEXT").tok({TK_NUM: "IN.num"}, "IN.loop")
     p = P("IN.num")
-    p.o("  imm r0, ").a(("SPAN2", "ps", "pe")).o("\n  .lea r1, g_").a(("SPAN2", "gs", "ge"))
+    p.o("  imm r0, ").call("NUMOUT").o("\n  .lea r1, g_").a(("SPAN2", "gs", "ge"))
     p.o("\n  .st [r1+0], r0, 4\n").goto("IN.nx")
 
 
 def build():
     tokenizer()
     prn()
+    numout()
     expr()
     stmt()
     printf()
