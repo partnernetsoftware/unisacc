@@ -2738,3 +2738,13 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - gen2.py 净 -33 行，statics.py 净 +4 行，合计 -29；状态 4007→3969，JSON 21,971,103→21,768,127 B。减少的是重复初始化逻辑；未把规则搬到执行器或另一个生成脚本。任意嵌套聚合、designator、完整 C99 初始化语义仍未覆盖。
 - 冻结代码 gate --com 70/70，JOBS=2，合计 298 s，每套件 ≤60 s；fat 125/0 两架构实跑，chain 92/92，source-to-ELF 固定清单通过，六目标网络自源码镜像相同，nativecheck 18 s。Linux/Windows 本轮未启动 VM，仅验证生成字节。日志 `/tmp/unisacc-init-gate.log`、`/tmp/unisacc-init-final-keep.log`、`/tmp/unisacc-init-network.log`。
 - 重建 .com：1,348,432 B，SHA256 `d1d29056f7d8fb32e2173d8c6fd71ac8872580ab575d0834fc8251a903b22e83`；unisacc.c SHA256 `1442c8ee298439f6adf3ea934ea012dd1292f21a26790d5abe9c30dafd7ed3b9`。未推送、未发布。产品入口仍未切换为网络运行时，重构未完成；cc-unisacc 保持暂停。
+
+
+### S-17：递归聚合上下文与成员数组（2026-09-27）
+
+- 全局、自动、静态初始化继续共用一个 INITLIST；用嵌套上下文记录当前聚合的标量槽范围，右括号跳过省略成员，designator 在当前层解析。成员偏移/槽数来自已解析布局，宽度复用 ELSZ/STOREV；默认 union 只遍历第一成员。原二维专用循环被替换，新增 initializers.py 仅组织生成器过程，没有执行器原语。省略维度按聚合槽计数；全局标量表达式也共用 EXPR/STOREV，删除独立地址/字符串指针初始化路径。PWIDTH 复用 ELSZ，修复 double 指针步长。
+- s60 固定三种存储期的嵌套结构体数组、三维数组、designator、零填充、跨调用持久性、默认 union 与 double 元素。b_init6/b_init7 由同一机制通过。期间发现并修复逗号声明类型状态未保存、&function 被新公共表达式路径拒绝的回归；旧 231 项先全部通过，再扩至 234/234。chain/ELF 92→95，全通过。实际产品语料 132 项：104 equal、28 not-covered、0 DIFF，不称前端完整覆盖。
+- 独立 cc 对照发现 C 产品把结构体数组成员当成结构体值，取下标步长错误。新增显式 mbarr（包括长度 1），随匿名/复制成员传播；成员数组衰变时设置指针深度与元素宽度。Python 原本正确。b_structarrmember 的 cc、最终 .com O0/O1/O2、Python 结果为 `3 4 20 9 10 30 16 16`；该产品回归在 E3 仍因 sizeof 复杂成员表达式未覆盖，不虚列入 equal。s60 覆盖不含该 sizeof 的成员数组路径。
+- 三个新增 E3 输入的六网络 osx/arm64 完整镜像等于参考，实际输出等于 cc；b_init6/b_init7 为宿主显式包含 stdio.h。gen2.py 净 -60 行，initializers.py +81，合计 +21；状态 3969→4033，JSON 21,768,127→22,187,240 B。这是统一规则路径与补齐已测形状，不是源码净缩减；任意初始化语义、非首 union designator 等不在完成主张内。
+- 最终冻结 gate --com 70/70，JOBS=2，297 s aggregate，每套件 ≤60 s；fat 126/0，两架构实际执行；六目标网络 self-source 等于参考，nativecheck 18 s。Linux/Windows 本轮未启动 VM，仅验证生成字节。日志 /tmp/unisacc-aggr-{finalkeep,frontier,network,gate}.log。
+- .com 重建为 1,348,784 B，SHA256 `66d466a7d2a48796b62a30a71167d7befd4a08b6e301317a73806b11ce28041a`；unisacc.c SHA256 `577e9261925d3c3c2becbd3247b2c12ab6f85e650e7dd5180ed14507dc835d6e`。未推送、未发布。cc-unisacc 保持暂停；完整前端、失败契约、紧凑内核与单份模型 .com 切换仍需继续。
