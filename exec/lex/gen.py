@@ -199,16 +199,25 @@ D = Delta()
 A = ("ADV",)
 
 
+# --typed: write tokens.typed (exec/pipeline/formats.md) -- a `type` token also
+# carries its spelling, the same generic SPAN copy as id/num/str.  Default
+# output (tokens.plain) is unchanged.
+TYPED = "--typed" in sys.argv
+if TYPED:
+    sys.argv.remove("--typed")
+
+
 def OUT(s):
     return [("OUT", ord(ch)) for ch in s]
 
 
 def emit_kind(k, span=("S", None)):
     """The -dump-tokens line of a token of kind k: name, and for id/num/str
-    '=' and the spelling.  kind 1 (`type`) prints no spelling."""
+    '=' and the spelling.  kind 1 (`type`) prints no spelling
+    unless --typed."""
     name = TOKS[k]
     acts = OUT(name)
-    if k in (2, 3, 4):
+    if k in (2, 3, 4) or (TYPED and k == 1):
         acts += OUT("=")
         acts += [("SPAN2", span[0], span[1])] if span[1] else [("SPAN", span[0])]
     acts += OUT("\n") + [("INC", "NT")]
