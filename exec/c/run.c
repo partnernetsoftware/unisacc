@@ -50,12 +50,7 @@ static long io_open(const char *path) { int fd = open(path, O_RDONLY); return fd
 static long io_read(long fd, void *p, long n) { long r = read((int)fd, p, (size_t)n); return r < 0 ? -errno : r; }
 static long io_close(long fd) { return close((int)fd); }
 #endif
-static unsigned char *readfile(const char *path, int *len, int optional) {
-    long fd = io_open(path);
-    if (fd < 0) {
-        if (optional && fd == -ENOENT) return 0;
-        fprintf(stderr, "run: cannot open %s\n", path); exit(2);
-    }
+static unsigned char *readstream(long fd, const char *path, int *len) {
     int n = 0, cap = 65536; unsigned char *b = xrealloc(0, cap);
     for (;;) {
         if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = xrealloc(b, cap); }
@@ -65,8 +60,17 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
         if (r > cap-n) die("invalid read length");
         n += (int)r;
     }
-    if (io_close(fd) < 0) die("close failed");
     *len = n; return b;
+}
+static unsigned char *readfile(const char *path, int *len, int optional) {
+    long fd = io_open(path);
+    if (fd < 0) {
+        if (optional && fd == -ENOENT) return 0;
+        fprintf(stderr, "run: cannot open %s\n", path); exit(2);
+    }
+    unsigned char *b = readstream(fd,path,len);
+    if (io_close(fd) < 0) die("close failed");
+    return b;
 }
 
 /* Decimal model reader: no scanf dependency, and 64-bit arguments are
@@ -171,10 +175,12 @@ static void loadbytes(unsigned char *data, int len) {
     }
 }
 
+#ifndef UNISA_RUNTIME_LIBRARY
 static void load(const char *path) {
     int n = 0; unsigned char *data = readfile(path, &n, 0);
     loadbytes(data, n); free(data); LB = 0;
 }
+#endif
 
 /* A package carries generic named byte-stream routes, not compiler stages.
    Shared model spans are kept once. All directory bounds and format edges
@@ -277,6 +283,7 @@ static void transition(int q, int key, int *nx, int *sq) {
     } else { *nx = ROWN[q][key]; *sq = ROWQ[q][key]; }
 }
 
+#ifndef UNISA_RUNTIME_LIBRARY
 static int checknet(const char *table, const char *net) {
     load(table); if (ISNET) die("expected reference table");
     int ns = NS, nq = NQ, nr = NRG, nstr = NSTR, start = START, top = TOPMAX, nqa = NQA;
@@ -303,6 +310,8 @@ static int checknet(const char *table, const char *net) {
     printf("network = table: %zu observations, %d states; actions/strings identical\n", at, ns);
     return 0;
 }
+
+#endif
 
 /* ---- byte buffers ---- */
 typedef struct { unsigned char *b; I *at; int n, cap; } Buf;
@@ -528,6 +537,22 @@ finished:
     return status;
 }
 
+/* Route dispatch owns only byte-stream lifetimes, never compiler semantics. */
+static int runroute(const char *route, Buf *in, const char *src) {
+    int count = 0;
+    for (int i = 0; i < PS; i++) {
+        if (strcmp(STAGES[i].route, route)) continue;
+        int m = STAGES[i].model; loadbytes(PB+POFF[m], PLEN[m]);
+        Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
+        unload(); free(in->b); in->b = out.b; in->n = out.n;
+        if (rc) return rc;
+        count++;
+    }
+    if (!count) die("unknown package route");
+    return 0;
+}
+
+#ifndef UNISA_RUNTIME_LIBRARY
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
     int chain = argc > 1 && !strcmp(argv[1], "--chain");
@@ -546,22 +571,21 @@ int main(int argc, char **argv) {
         package(path ? path : argv[0]);
     }
     Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
-    int first = bundled ? 0 : chain ? 5 : 1, end = bundled ? PS : chain ? argc : 2;
-    int count = 0;
-    for (int i = first; i < end; i++) {
-        if (bundled) {
-            if (strcmp(STAGES[i].route, argv[routearg])) continue;
-            int m = STAGES[i].model;
-            loadbytes(PB+POFF[m], PLEN[m]);
-        } else load(argv[i]);
-        count++;
-        Buf out = {0}; int rc = execute(in.b, in.n, src, &out);
-        unload(); free(in.b);
-        if (rc) { if (bundled) unpackage(); return rc; }
-        in.b = out.b; in.n = out.n;
+    if (bundled) {
+        int rc = runroute(argv[routearg], &in, src); unpackage();
+        if (rc) return rc;
+    } else {
+        int first = chain ? 5 : 1, end = chain ? argc : 2;
+        for (int i = first; i < end; i++) {
+            load(argv[i]);
+            Buf out = {0}; int rc = execute(in.b, in.n, src, &out);
+            unload(); free(in.b);
+            if (rc) return rc;
+            in.b = out.b; in.n = out.n;
+        }
     }
-    if (!count) die("unknown package route");
-    if (bundled) unpackage();
     if (fwrite(in.b, 1, in.n, stdout) != (size_t)in.n || fclose(stdout)) die("cannot write output");
     free(in.b); return 0;
 }
+
+#endif

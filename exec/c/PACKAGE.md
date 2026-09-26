@@ -132,3 +132,31 @@ The existing payload-free `.com` packaging is unchanged. The generic embedded
 fixture tests two containers with identical executable slices but different
 networks, paths containing spaces, and execution after external package files
 have been removed. It runs on the host, not all target systems.
+
+## Compiler driver adoption
+
+`compiler.c` shares the runtime implementation and supplies the compiler's
+file/CLI shell. It does not parse source, produce tape, optimise, lower or
+encode. `compiler-routes.tsv` names the preprocessing/tape/image endpoints
+and optimisation choices; `compilerpack.py` expands existing image manifests
+into those routes, retaining exact-body deduplication and carried headers.
+An O1 model is supplied explicitly; O0 omits the optimiser, O2 uses the image
+manifest's existing optimiser. All compile operations remain networks.
+
+Build a driver with `cc -O2 exec/c/compiler.c -o driver` (or unisacc), and use
+`--models FILE` for an external package, or APE's `--payload` for a self-contained
+development executable. The normal options currently connected are `-E`,
+`-S`/`-c`, `-b`/`-t TARGET`, `-O`/`-O0`/`-O1`/`-O2`, `-o`, one `-I` directory,
+and one source file or stdin (`-`). The mode/target defaults match the current
+product; `-b` without `-o` writes stdout, default image mode writes a.out/a.exe.
+No output is opened until the selected route accepts. File writes loop over
+partial writes and fail on a stopped write or failed close.
+
+This is staged adoption, not a CLI compatibility claim. `-run`, multiple
+translation units, `-D`/`-U`, forced includes, dependency output, warning and
+instrumentation flags, and further optimisation aliases still need migration;
+unsupported options fail, with no reference fallback. The E2 include search
+contract also needs the complete product-option comparison before switching.
+The compiler does not overwrite the shipped unisacc.com. `compilercheck.sh`
+constructs fresh host models and checks cc/unisacc drivers plus an embedded
+container against the current product, including real output-limit failure.

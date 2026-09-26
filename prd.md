@@ -2784,3 +2784,12 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - 隔离目录中只有开发容器和 hello.c：六目标输出均与外置同包路线逐字节相同，osx/arm64 镜像实际打印 hello from C99；其余为字节检查，本轮未开 Linux/Windows VM。通用 embeddedcheck 检查两容器共用同一执行器切片但携带不同模型、路径含空格、删除外置包后仍输出各自结果。netcheck 在 cc/unisacc 构建上拒绝尾部截断、错误 magic、零长度与超界长度，无 stdout。E3 对 runtime 源码保持 equal。
 - 默认无 payload 的打包结果 SHA256 仍为 `66d466a7d2a48796b62a30a71167d7befd4a08b6e301317a73806b11ce28041a`，与现有产品逐字节相同。冻结 gate --com 71/71，JOBS=2，362 s aggregate；nativecheck 55 s、新增 embeddedcheck 3 s，单套件均 ≤60 s。日志 `/tmp/unisacc-embedded-gate.log`。
 - Python 用于离线模型构造与 APE 包装，开发容器执行阶段不调用它。运行器仍包含加载/IO/校验等，独立几 KB 内核尚未完成；产品 CLI/默认路线尚未切换，前端与失败契约仍有缺口。单份模型嵌入已落地不等于完整重构完成。未推送、未发布；cc-unisacc 保持暂停。
+
+### S-17：普通编译命令接入网络包（2026-09-27）
+
+- 新 `exec/c/compiler.c` 复用 run.c 的字节流执行器，独立入口只做参数/文件/路线选择；没有源码解析、tape 生成、优化、lowering 或编码代码，也不调用参考编译器。run.c 的工具入口与 --check-net 在库构建中排除；runroute 共用于开发执行器与新驱动，readstream 支持 stdin。产品 unisacc.com 未切换。
+- `compiler-routes.tsv` 声明 pp、tape/O0/O1/O2、image/O0/O1/O2；compilerpack.py 将已有 image 清单展开为路线目录，O0 跳过优化器，O1 使用显式构造的 O1 网络，O2 复用原网络。六目标包 42 条路线、174 阶段项、22 个去重模型体、19 资源；编译的动作仍由网络执行，没有复制各目标的模型体来实现 CLI。
+- 已接 `-E`、`-S/-c`、`-b/-t`、`-O/-O0/-O1/-O2`、`-o`、一个 `-I`、单文件及 stdin。默认目标/输出模式与现产品对应。成功接受后才打开输出文件；短写循环推进、写入停止与关闭失败均拒绝。`-run`、多单元、宏/强制 include、依赖输出、告警/仪器等尚未迁移，显式拒绝，不默默退回旧实现。完整 CLI/失败诊断一致性仍未达成。
+- 新 compilercheck 每次构造模型；O1 的 49,538 个观测全域等价检查通过。cc/unisacc 驱动 18 组模式×优化级输出与当前产品逐字节相同，另核对 stdin、无效输入不截断既有文件、未迁移选项、未知路线、打不开输出与真实 RLIMIT 短写。六网络构建新驱动自身，镜像与 unisacc 构建相同；该网络构建驱动再编译 hello 输出相同。隔离目录仅有嵌入式开发容器及 hello.c，普通 hello.c -O2 生成 a.out 并实际打印 hello from C99。E3 对 compiler.c 与 run.c 均 equal。
+- 产物：六目标包 2,675,518 B（gzip-9 388,434 B），SHA256 `4c04fbddbcdbcfc4e051d89f676ad5bec92f41588e433e4daa3057046c27a98d`；独立 `/tmp/compiler-model.com` 2,861,502 B（整个文件 gzip-9 499,295 B），SHA256 `6e46ec4168d6da8169be3b5b446015f37b85326ac85b0954e23d2c475869f3f5`。运行时包不解压，这里 gzip 仅为账目参考。cc 驱动整体 __text 20,176 B/文件 57,808 B，unisacc 驱动整体 __text 95,368 B/文件 115,746 B（含随带库），仍不是独立几 KB 内核。新驱动 105 行，包展开 43 行；功能尚不等于旧 main，不把行数差说成整个产品缩减。
+- 冻结 gate --com 72/72，JOBS=2，370 s aggregate，最长 54 s；新 exec-driver 23 s。日志 `/tmp/unisacc-driver-gate.log`。当前产品源码与 .com 均未改；本轮实际执行 macOS，Linux/Windows 未开 VM。后续继续其余 CLI、前端/失败契约、紧凑内核与最终默认切换。未推送、未发布；cc-unisacc 继续暂停。
