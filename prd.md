@@ -1852,3 +1852,18 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
     External referees now cover 4 of 18 stages (type partly, abi, prec, tyinfo).
   - **ablate** is in release.sh as 8 shards. prec is in ablate's list; peep and opinfo are registered as not covered on the Python path.
   - **pfconv:** since printf became a real call, pfconv is asked only by the fallback for a unit with no printf declared.
+- 2026-09-26 (S-17), **the C executor**, measured (4b37a77):
+  - **What it is.** `exec/c/run.c` is the generic executor in C; it copies `exec/pp/sim.py` action for action (55 actions). `exec/c/tbl.py` renumbers a JSON delta into an integer table, and nothing in either file is specific to a language.
+  - **E3 check.** `exec/c/check.sh` compares its verdict with sim.py's over all 225 files. All 225 match: 164 identical tapes and 61 identical reject reasons.
+  - **E2 check.** 32 files (examples/ and tests/c/a_*) give byte-identical output, with headers read through the file dictionary.
+  - **Speed**, one file (tests/c/a_for.c), wall time including the table load:
+
+    | stage | C | Python |
+    |---|---|---|
+    | E3 | 0.07 s | 0.44 s |
+    | E2 | 0.01 s | 0.06 s |
+  - **Remaining steps toward the slice:**
+    - E1 on the same executor (its nets have their own simulator today);
+    - a binary table format;
+    - the table as nets.
+  - **Product fix.** `-nostdinc` no longer adds `<stdio.h>`. A printf there takes the compile-time lowering (`do_printf`); `tests/cli.sh` now runs this path.
