@@ -2178,3 +2178,33 @@ scans and copies them byte by byte, and emits hex. Next is sparse zero-region
 layout with unchanged symbol addresses and image bytes, not a higher watchdog.
 The full six-target route, constructed-network runtime, compact executor and
 E7 product adoption remain outstanding.
+
+### S-17 sparse self-source ELF milestone (2026-09-26, 1775315)
+
+The zero-storage blocker above is resolved. Lowering keeps virtual storage
+separate from literal bytes; ELF records the omitted zero tail in p_memsz.
+No executor action was added. The complete six-delta route now processes
+unisacc.c (product source 7d50875) into a 671,404-byte Linux x86-64 ELF,
+byte-identical to the reference. Generator/runtime source: 1775315.
+SHA256: d8f7586e1d0250064c248cfbb1bfe8ad8dc8021abf6f9f6e86da5d50b58d1979.
+
+Actual provenance: exec/pipeline/elf.sh produced
+/tmp/unisacc-self-route/final-pipeline/unisacc.elf. That image was copied as
+n1 into /tmp/unisacc-delta-self-7ba6f76 in Lima minicon-lnx-x86_64. There,
+`n1 -O2 -b lnx/x86_64 unisacc.c -o n2` and the same command using n2 to
+produce n3 gave N1=N2=N3 with the hash above. Each command was bounded at
+50 s in the guest and 60 s on the host. All six examples/apps programs ran
+via n1 -run, exited 0 and matched host cc stdout. This VM is emulated on
+arm64, not native x86 hardware; it was stopped afterwards.
+
+Frozen gate --com: 51/51, JOBS=2, 191 s total; exec-selfelf took 16 s.
+Standalone exec/pipeline/selfcheck.sh (table generation, six stages, reference
+tape and ELF comparisons): 15.68 s wall, 14.56 s user, 0.34 s system.
+The 60 s watchdog is unchanged. Supplemental alias/duplicate and sparse
+relocation boundary checks passed on both executors after the full gate;
+the sparse-input substitution now asserts exactly one matching data line.
+
+This output is the existing C compiler compiled through transition tables.
+The tables are not constructed networks, and the shipped .com has not switched
+to the executor. Other targets, broader coverage, network execution, compact
+executor and E7 adoption remain open. No push or release.

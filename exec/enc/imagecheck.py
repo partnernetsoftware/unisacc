@@ -29,7 +29,9 @@ def main():
                 # Oracle retains full data; only the tested declaration omits zeros.
                 tp.data_len=len(tp.data)
                 text=dump(tp,full=True)
-                text=text.replace('@data '+tp.data.hex(), '@data '+(tp.data.rstrip(b'\x00').hex() or '-'))
+                data_line = '@data ' + tp.data.hex()
+                assert text.splitlines().count(data_line) == 1, 'expected exactly one data line'
+                text=text.replace(data_line + '\n', '@data '+(tp.data.rstrip(b'\x00').hex() or '-') + '\n', 1)
             p.write_text(text)
             code,st=assemble(tp)
             assert st['encoded']==st['insns']
