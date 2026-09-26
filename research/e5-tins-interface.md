@@ -42,3 +42,5 @@ The existing fixtures stay valid unchanged.
   - `reloc`, when given, must be `rel32`; anything else is rejected, never overridden silently. The rel32 default for the old fixtures without meta is only a compatibility convention.
   - `role` is informational and ignored, and the file says so.
   - A duplicate key, an unknown key, or an encoding-relevant key this slice does not support is rejected.
+
+**Scope of the round trip.** `tins.parse` rebuilds instructions, meta and labels. data and syms come back empty and the target is the default lnx/x86_64. This is therefore an instruction/meta/label round trip, not TargetProgram fidelity. roundtrip.py compares by type and value (True is not 1), and a controlled bool → int mutation makes it fail.

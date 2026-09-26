@@ -46,6 +46,7 @@ X86 = ENCSPEC["x86_64"]
 DIGIT = list(range(48, 58))
 NL = [10, EOF]
 OPC, REGN = 70 * 10 ** 6, 71 * 10 ** 6       # OPC[op id] = class; REGN[name id] = register + 1
+MSN = 84 * 10 ** 6                           # MSN[meta key id] = the line it was last given on
 LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the next instruction + 1
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
@@ -211,7 +212,7 @@ def build():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
-    p.a(("LDI", "npc", 0)).goto("LINE")
+    p.a(("LDI", "npc", 0), ("LDI", "lnum", 0)).goto("LINE")
     # LINE: the op word, then up to four comma-separated arguments into a0..a3 (a register's number or an integer)
     g.on("LINE", [EOF], "DONE", [])
     g.on("LINE", [10], "LINE", [("ADV",)])
@@ -225,7 +226,8 @@ def build():
     P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
     g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
     p = P("LW.i")
-    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("OLEN", "omark"))
+    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("OLEN", "omark"),
+        ("ALUI", "add", "lnum", "lnum", 1))
     p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
     P("LW.i1").branch({1: "BR.c"}, "LW.i2", [("CMP", "opid", "id_call")])
     # call NAME: E8 rel32, always 5 bytes (no short form: assemble's short_size is None)
@@ -260,7 +262,12 @@ def build():
     g.on("BRM.vv", [32] + NL, "BRM.e", [("MARK", "ve")])
     g.els("BRM.vv", "BRM.vv", [("ADV",)])
     p = P("BRM.e")
-    p.a(("INTERN", "mk", "ts", "ke")).branch({1: "BR.m"}, "BRM.k2", [("CMP", "mk", "id_role")])
+    p.a(("INTERN", "mk", "ts", "ke")).call("MSEEN").branch({1: "BR.m"}, "BRM.k2", [("CMP", "mk", "id_role")])
+    # MSEEN: a meta key given twice on one instruction is rejected (tins.parse does the same)
+    p = P("MSEEN")
+    p.a(("LDX", "t", "mk", MSN)).branch({1: "DEAD.mdup"}, "MS.set", [("CMP", "t", "lnum")])
+    P("MS.set").a(("STX", "mk", MSN, "lnum")).ret()
+    g.on("DEAD.mdup", range(257), "DEAD", E.rej("not covered: a meta key given twice"), "r")
     P("BRM.k2").branch({1: "BR.m"}, "BRM.k3", [("CMP", "mk", "id_form")])
     P("BRM.k3").branch({1: "BRM.rl"}, "DEAD.meta", [("CMP", "mk", "id_reloc")])
     P("BRM.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "BR.m"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
@@ -309,7 +316,7 @@ def build():
     g.on("META.vv", [32] + NL, "META.e", [("MARK", "ve")])
     g.els("META.vv", "META.vv", [("ADV",)])
     p = P("META.e")
-    p.a(("INTERN", "mk", "ts", "ke")).branch({1: "META.ok"}, "META.k2", [("CMP", "mk", "id_role")])
+    p.a(("INTERN", "mk", "ts", "ke")).call("MSEEN").branch({1: "META.ok"}, "META.k2", [("CMP", "mk", "id_role")])
     P("META.k2").branch({1: "META.ok"}, "META.k3", [("CMP", "mk", "id_form")])
     P("META.k3").branch({1: "META.rl"}, "DEAD.meta", [("CMP", "mk", "id_reloc")])
     P("META.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
