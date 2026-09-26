@@ -2322,3 +2322,27 @@ ARM text checks, both image suites, large sparse extent and x86 self-source
 671,404-byte ELF equality all reran green. exec-armelf added to gate, but this
 batch does not claim a new full-gate count. Product .com unchanged. Next: ARM
 lowering on the executor, then remaining formats/targets and network adoption.
+
+
+### S-17 ARM lowering and source route (2026-09-27)
+
+Shared data/register/ABI lowering now selects Linux ARM64. armfuse.py encodes
+sext and immediate peepholes, including the 32-instruction dead-after scan,
+as ordinary actions. These are migrated hand rules, not removal of algorithms
+or a constructed network. No executor primitive added. ARM lowering table:
+1,482 states, 134,562 B compressed text.
+
+Both executors match setup/sext fixture (96 instructions) and immediate fixture
+(131), including 4095/4096, signed constants, power-of-two multiply through
+2^63, labels, aliases and 31/32 scan boundary. C executor matches hello/fib
+full typed lowering and current self-source: 103,254 target instructions plus
+labels/data/metadata. x86 self-source route rerun: 671,404 B equal.
+
+TARGET=lnx/arm64 elf.sh now runs all six deltas from source. Optimized hello
+28,982 B sha256 54008849528a13e1d1168e7c3e706d55d9cdac08e8f9f8f56f261257b6d50e34;
+fib 28,970 B sha256 ab4f92611388643a4a21805ae089d7f0f26798458ab3de52a5fb8c4bdbe738fd.
+Both match ua_ref -O2 ARM ELF and run in existing Lima default (aarch64), exact
+stdout, rc 0, empty stderr; guest 10 s, host 60 s. VM was already running.
+Self-source reaches encoder but rejects; .zero is still unmigrated. This is
+not an ARM self-bootstrap or E7 adoption. exec-armlower added to gate; no new
+full-gate result claimed. Product source/.com unchanged, no push/release.

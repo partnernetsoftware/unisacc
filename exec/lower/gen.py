@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Raw tape lowering on the generic executor.
 Default: data pass only, with --arm64 selecting its target header.
---full: Linux target instructions and metadata (ARM fusions still pending).
+--full: Linux target instructions and metadata for x86_64 or arm64.
 """
 import importlib.util,json,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parents[2]

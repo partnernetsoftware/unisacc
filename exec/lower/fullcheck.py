@@ -38,10 +38,26 @@ def main():
                 for barrier in ('','blocked'+str(width)+':\n'):
                     fixture += f'  .frame 8\n  .st [r7+0], r2, {width}\n{barrier}  .ld r1, [r7+0], {width}\n  .frame -8\n'
         cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
+        if os.environ.get('LOWER_TARGET')=='lnx/arm64':
+            # Immediate limits, power-of-two multiply, aliasing and liveness.
+            chunks=['_start:']
+            for op in ('add64','sub64','mul64'):
+                for value in (0,1,-1,4095,4096,-4095,-4096,8,3,9223372036854775808,-9223372036854775808):
+                    chunks += [f'imm r2, {value}',f'{op} r2, r1, r2']
+            chunks += ['imm r2, 3','add64 r0, r1, r2','imm r2, 9',
+                       'imm r2, 3','add64 r0, r1, r2','mov r3, r2',
+                       'imm r2, 3','add64 r0, r1, r2','barrier:','imm r2, 9',
+                       'imm r2, 3','pairbarrier:','add64 r2, r1, r2',
+                       'imm r2, 3','add64 r2, r2, r2']
+            for count in (31,32):
+                chunks += ['imm r2, 3','add64 r0, r1, r2']+['mov r4, r5']*count+['imm r2, 9']
+            chunks += ['ret']
+            cases.insert(1,('immediate','\n'.join(chunks)+'\n'))
+
         for name,raw in cases:
             p.write_text(raw)
             commands=[[sys.argv[1],sys.argv[2],str(p)]]
-            if name=='fixture':commands.append([sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)])
+            if name in ('fixture','immediate'):commands.append([sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)])
             for cmd in commands:
                 r=subprocess.run(cmd,capture_output=True,timeout=60)
                 if r.returncode:raise RuntimeError((name,r.returncode,r.stderr))

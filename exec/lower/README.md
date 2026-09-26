@@ -12,14 +12,20 @@ python3 exec/lower/gen.py full.json --full
 `--full` also lowers Linux x86_64 instructions: register mapping, entry setup,
 argument access, syscall setup and adjacent push/pop fusion. It consumes raw
 tape, not a Python-lowered TargetProgram. `.print` is explicitly unsupported;
-`--full --arm64` is an incomplete development path: it shares register mapping,
-entry setup and syscall lowering, including the three Linux ARM *at argument
-shapes read from ABI facts. `armcheck.sh` checks 96 fixture instructions against
-the typed reference on both executors. The four-instruction stack truncation is now fused into sext for widths
-1/2/4, with labels blocking lookahead; width 8 is left unchanged. Immediate
-fusion remains pending: real hello currently differs in labels/instruction layout, so this
-mode is not connected to the source-to-ELF pipeline. The data checks run both
-targets and compare sparse bytes, symbols and unchanged tape.
+`--full --arm64` shares register mapping, entry setup and syscall lowering,
+including the three Linux ARM *at argument shapes read from ABI facts. ARM
+sext fusion and immediate fusion (including the bounded 32-instruction dead
+register scan) run as ordinary delta actions. `armcheck.sh` compares 96 setup/
+sext instructions and 131 immediate/liveness instructions on both executors,
+then complete hello/fib on the C executor. The current compiler's optimized
+tape also matches all 103,254 reference ARM target instructions, labels and
+metadata. These checks establish measured agreement, not full equivalence.
+
+`TARGET=lnx/arm64 ../pipeline/elf.sh OUT hello.c` selects ARM lowering and ELF.
+hello/fib completed the six-delta source route and ran in native aarch64 Lima.
+The compiler self-source reaches the ARM encoder but is rejected: it contains
+`.zero`, which that encoder has not migrated yet. The generated table is still
+a lookup table; Python generates it, but does not lower the source at runtime.
 
 `data.py` and `code.py` compile hand algorithms into transition tables, not
 integer networks. `code.py` reads regmap/enc/abi/reloc TSV facts; scratch

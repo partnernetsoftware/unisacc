@@ -54,6 +54,7 @@ job exec-armelf ./exec/enc/armimagecheck.sh                      # shared ELF wr
 job exec-sparse ./exec/lower/sparsecheck.sh                      # large zero storage, independent layout assertions
 job exec-lowdata ./exec/lower/check.sh                           # raw E4 tape data decoding/layout through delta
 job exec-lower ./exec/lower/fullcheck.sh                        # typed full Linux lowering comparison
+job exec-armlower ./exec/lower/armcheck.sh                     # ARM ABI, sext/immediate fusion and real tapes
 job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas
 job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 complete source-to-ELF paths
 job difftest_o  ./tests/difftest_o.sh

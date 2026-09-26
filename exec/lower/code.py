@@ -1,5 +1,5 @@
 """Linux instruction lowering delta. Hand control rules, declared facts.
-ARM shares setup and syscalls; its immediate fusion is still pending.
+ARM shares setup and syscalls, with its own transition peepholes.
 regmap/enc/abi/reloc are read from TSV; no reference lower() is run by generator.
 """
 from pathlib import Path
@@ -66,9 +66,10 @@ def install(E, arch="x86_64"):
     p=P('C.setup');p.o('spinit '+regmap['r7']+'\nargsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', true\n').goto('C.dispatch')
     special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
     if arch=='arm64':
-        special['.frame']='armframe'; special.pop('load64')
-        from armfuse import install as install_armfuse
+        special['imm']='armimm'; special['.frame']='armframe'; special.pop('load64')
+        from armfuse import install as install_armfuse, immediate
         install_armfuse(E,ids,OP,KIND,ARG)
+        immediate(E,ids,OP,KIND,ARG,TXT)
     p=P('C.dispatch')
     for op,tag in special.items():
         p.branch({1:'DO.'+tag},'CD.'+tag,[('CMP','op',ids[op])]);p=P('CD.'+tag)
