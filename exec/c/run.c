@@ -18,13 +18,10 @@
 #include <stdint.h>
 #include <errno.h>
 
-typedef int64_t I;
-enum { ADV, MARK, JUMP, LDI, COPYW, ALU, ALUI, CMP, CMPI, RLD, LDX, STX, OUT, OUTW, COPY, COPYT,
-       SPAN, SPANT, SPAN2, OLAST, ODROP, OLEN, OCUT, ORES, OFILL, OCLR, OSEL, SETOT, XATTR, PUSH, POP,
-       INTERN, BLOBSAVE, INPUSH, INPUSHX, INPUSHXE, INPOP, SBCLR, SBOUT, SBSPAN, SBBLOB, SBINTERN,
-       SBSAVE, SBFIND, BLEN, BYTE, XLEN, DIVMOD10, SWAP, ACCEPT, REJECT, A64, A64I, C64, C64U, INC, NOP_ };
-static const int ARITY[NOP_] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,
-                                0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+#include "core.h"
+#ifndef UNISA_CORE_EXTERNAL
+#include "core.c"
+#endif
 
 static void die(const char *m) { fprintf(stderr, "run: %s\n", m); exit(2); }
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
@@ -273,26 +270,33 @@ static void unload(void) {
     free(NLO); free(NHI); free(BN); free(BQ);
 }
 
-/* The selected bank is sparse evaluation of a one-hot state-conditioned net.
-   Each hidden activation is H(key-threshold); output weights are signed.
-   No answer table is materialised. int weights/count bound sums within int64. */
-static void transition(int q, int key, int *nx, int *sq) {
-    *nx = -1; *sq = 0;
-    if (ISNET) {
-        if (key < NLO[q] || key > NHI[q]) die("observation outside network domain");
-        I n = BN[q], s = BQ[q];
-        for (int j = 0; j < ROWC[q]; j++) {
-            int h = key >= ROWK[q][j];
-            n += (I)ROWN[q][j] * h; s += (I)ROWQ[q][j] * h;
-        }
-        if (n < -1 || n >= NS || s < 0 || s >= NQ) die("invalid network output");
-        *nx = (int)n; *sq = (int)s;
-    } else if (SMODE[q] == 1) {
-        for (int j = 0; j < ROWC[q]; j++) if (ROWK[q][j] == key) { *nx = ROWN[q][j]; *sq = ROWQ[q][j]; break; }
-    } else { *nx = ROWN[q][key]; *sq = ROWQ[q][key]; }
+static void core_model(CoreModel *m) {
+    m->ns=NS;
+    m->nq=NQ;
+    m->nrg=NRG;
+    m->start=START;
+    m->isnet=ISNET;
+    m->str=STR;
+    m->strl=STRL;
+    m->qoff=QOFF;
+    m->qlen=QLEN;
+    m->qa=QA;
+    m->mode=SMODE;
+    m->count=ROWC;
+    m->keys=ROWK;
+    m->next=ROWN;
+    m->seq=ROWQ;
+    m->lo=NLO;
+    m->hi=NHI;
+    m->base_next=BN;
+    m->base_seq=BQ;
+}
+#ifndef UNISA_RUNTIME_LIBRARY
+static void transition(int q,int key,int *nx,int *sq) {
+    CoreModel m; core_model(&m);
+    const char *why=core_transition(&m,q,key,nx,sq); if (why) die(why);
 }
 
-#ifndef UNISA_RUNTIME_LIBRARY
 static int checknet(const char *table, const char *net) {
     load(table); if (ISNET) die("expected reference table");
     int ns = NS, nq = NQ, nr = NRG, nstr = NSTR, start = START, top = TOPMAX, nqa = NQA;
@@ -322,230 +326,41 @@ static int checknet(const char *table, const char *net) {
 
 #endif
 
-/* ---- byte buffers ---- */
-typedef struct { unsigned char *b; I *at; int n, cap; } Buf;
-static void bput(Buf *o, int c, I at) {
-    if (o->n >= o->cap) { o->cap = o->cap ? o->cap * 2 : 256; o->b = xrealloc(o->b, o->cap); o->at = xrealloc(o->at, sizeof(I) * o->cap); }
-    o->b[o->n] = (unsigned char)c; o->at[o->n] = at; o->n++;
+/* Exact resource lookup and filesystem naming belong to the host adapter. */
+void core_host_panic(const char *reason) { die(reason); }
+static const char *INCDIR=0;
+int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
+    for (int j=0;j<NRI;j++) if (RI[j].n==n && !memcmp(RI[j].name,p,n)) {
+        *bytes=(unsigned char *)RI[j].data; *len=RI[j].len; return 1;
+    }
+    for (int j=0;j<NR;j++) if (RES[j].n==n && !memcmp(PB+RES[j].name,p,n)) {
+        *bytes=PB+RES[j].data; *len=RES[j].len; return 1;
+    }
+    char path[4096];
+    int header=n>=5 && !memcmp(p,"\0hdr/",5);
+    if (header && !INCDIR) die("a bundled header was asked for and no include directory was given");
+    if (header) snprintf(path,sizeof path,"%s/%.*s",INCDIR,n-5,p+5);
+    else snprintf(path,sizeof path,"%.*s",n,p);
+    if ((int)strlen(path)!=(header ? (int)strlen(INCDIR)+1+n-5 : n)) return 0;
+    *bytes=readfile(path,len,1); return *bytes ? 2 : 0;
 }
-
-/* ---- W: registers and the indexed memory (a hash map) ---- */
-static I *R;
-static I *MK, *MV; static char *MU; static size_t MCAP, MN;
-static size_t mslot(I k) { uint64_t h = (uint64_t)k * 0x9E3779B97F4A7C15ull; return (size_t)(h >> 20) & (MCAP - 1); }
-static I mget(I k) { if (!MCAP) return 0; size_t s = mslot(k); while (MU[s]) { if (MK[s] == k) return MV[s]; s = (s + 1) & (MCAP - 1); } return 0; }
-static void mset(I k, I v) {
-    if ((MN + 1) * 2 > MCAP) {
-        size_t oc = MCAP; I *ok = MK, *ov = MV; char *ou = MU;
-        MCAP = oc ? oc * 2 : 1 << 16; MK = calloc(MCAP, sizeof(I)); MV = calloc(MCAP, sizeof(I)); MU = calloc(MCAP, 1); MN = 0;
-        if (!MK || !MV || !MU) die("out of memory");
-        for (size_t j = 0; j < oc; j++) if (ou[j]) mset(ok[j], ov[j]);
-        free(ok); free(ov); free(ou);
-    }
-    size_t s = mslot(k); while (MU[s] && MK[s] != k) s = (s + 1) & (MCAP - 1);
-    if (!MU[s]) { MU[s] = 1; MK[s] = k; MN++; }
-    MV[s] = v;
+#ifdef UNISA_RUNTIME_LIBRARY
+/* CLI byte framing is host IO, not a machine action. */
+static void bput(Buf *o,int c,I at) {
+    if (o->n>=o->cap) { o->cap=o->cap ? o->cap*2 : 256;
+        o->b=xrealloc(o->b,o->cap); o->at=xrealloc(o->at,sizeof(I)*o->cap); }
+    o->b[o->n]=(unsigned char)c; o->at[o->n]=at; o->n++;
 }
-
-/* ---- blobs and interning ---- */
-typedef struct { unsigned char *b; int n; } Blob;
-static Blob *BL; static int NBL, CBL;
-static int blob_add(const unsigned char *b, int n) {
-    if (NBL >= CBL) { CBL = CBL ? CBL * 2 : 64; BL = xrealloc(BL, sizeof(Blob) * CBL); }
-    BL[NBL].b = xrealloc(0, n + 1); memcpy(BL[NBL].b, b, n); BL[NBL].n = n; return NBL++;
-}
-typedef struct { unsigned char *b; int n; I v; } Ent;
-static Ent *IT; static size_t ICAP, IN_;
-static uint64_t hbytes(const unsigned char *b, int n) { uint64_t h = 1469598103934665603ull; for (int j = 0; j < n; j++) h = (h ^ b[j]) * 1099511628211ull; return h; }
-static I intern(const unsigned char *b, int n) {
-    if ((IN_ + 1) * 2 > ICAP) {
-        size_t oc = ICAP; Ent *o = IT; ICAP = oc ? oc * 2 : 1024; IT = calloc(ICAP, sizeof(Ent)); if (!IT) die("out of memory");
-        for (size_t j = 0; j < oc; j++) if (o[j].b) { size_t s = hbytes(o[j].b, o[j].n) & (ICAP - 1); while (IT[s].b) s = (s + 1) & (ICAP - 1); IT[s] = o[j]; }
-        free(o);
-    }
-    size_t s = hbytes(b, n) & (ICAP - 1);
-    while (IT[s].b) { if (IT[s].n == n && !memcmp(IT[s].b, b, n)) return IT[s].v; s = (s + 1) & (ICAP - 1); }
-    IT[s].b = xrealloc(0, n + 1); memcpy(IT[s].b, b, n); IT[s].n = n; IT[s].v = (I)++IN_;
-    return IT[s].v;
-}
-/* SBFIND: file path -> blob id (0: absent), cached */
-typedef struct { unsigned char *p; int n; int id; } FEnt;
-static FEnt *FC; static int NFC;
-static const char *INCDIR = 0;   /* the 4th argument; SBFIND of a bundled header without it is an error */
-static int sbfind(const unsigned char *p, int n) {
-    for (int j = 0; j < NFC; j++) if (FC[j].n == n && !memcmp(FC[j].p, p, n)) return FC[j].id;
-    char path[4096]; int id = 0;
-    for (int j = 0; j < NRI; j++) if (RI[j].n == n && !memcmp(RI[j].name,p,n)) {
-        id = blob_add(RI[j].data,RI[j].len); goto cached;
-    }
-    for (int j = 0; j < NR; j++) if (RES[j].n == n && !memcmp(PB+RES[j].name, p, n)) {
-        id = blob_add(PB+RES[j].data, RES[j].len); goto cached;
-    }
-    if (n >= 5 && !memcmp(p, "\0hdr/", 5) && !INCDIR) die("a bundled header was asked for and no include directory was given");
-    if (n >= 5 && !memcmp(p, "\0hdr/", 5)) snprintf(path, sizeof path, "%s/%.*s", INCDIR, n - 5, p + 5);
-    else snprintf(path, sizeof path, "%.*s", n, p);
-    if ((int)strlen(path) == (n >= 5 && !memcmp(p, "\0hdr/", 5) ? (int)strlen(INCDIR) + 1 + n - 5 : n)) {   /* else truncated: absent */
-        int m = 0; unsigned char *b = readfile(path, &m, 1);
-        if (b) { id=blob_add(b,m); free(b); }
-    }
-cached:
-    FC = xrealloc(FC, sizeof(FEnt) * (NFC + 1)); FC[NFC].p = xrealloc(0, n + 1); memcpy(FC[NFC].p, p, n); FC[NFC].n = n; FC[NFC].id = id; NFC++;
-    return id;
-}
-
-static int32_t w32(I v) { return (int32_t)(uint32_t)(uint64_t)v; }
-static I alu32(int op, I a64, I b64) {
-    int32_t a = w32(a64), b = w32(b64);
-    switch (op) {
-    case 0: return (int32_t)((uint32_t)a + (uint32_t)b);
-    case 1: return (int32_t)((uint32_t)a - (uint32_t)b);
-    case 2: return (int32_t)((uint32_t)a * (uint32_t)b);
-    case 3: if (!b) return 0; if (a == INT32_MIN && b == -1) return INT32_MIN; return a / b;
-    case 4: if (!b) return 0; if (a == INT32_MIN && b == -1) return 0; return a % b;
-    case 5: return a & b; case 6: return a | b; case 7: return a ^ b;
-    case 8: return (int32_t)((uint32_t)a << (b & 31));
-    case 9: return a >> (b & 31);
-    }
-    die("bad alu op"); return 0;
-}
-static I alu64(int op, I a, I b, int *z) {
-    uint64_t ua = (uint64_t)a, ub = (uint64_t)b; *z = 0;
-    switch (op) {
-    case 0: return (I)(ua + ub); case 1: return (I)(ua - ub); case 2: return (I)(ua * ub);
-    case 10: if (!b) { *z = 1; return 0; } if (a == INT64_MIN && b == -1) return INT64_MIN; return a / b;
-    case 11: if (!b) { *z = 1; return 0; } if (a == INT64_MIN && b == -1) return 0; return a % b;
-    case 12: if (!b) { *z = 1; return 0; } return (I)(ua / ub);
-    case 13: if (!b) { *z = 1; return 0; } return (I)(ua % ub);
-    case 5: return a & b; case 6: return a | b; case 7: return a ^ b;
-    case 14: return ~a;
-    case 8: return (I)(ua << (b & 63));
-    case 15: return (I)(ua >> (b & 63));
-    case 9: return a >> (b & 63);
-    }
-    die("bad alu64 op"); return 0;
-}
-
-typedef struct { const unsigned char *b; const I *at; I i, end; } Frame;
-
-/* Run one model over a byte stream. The caller owns input and receives
-   only accepted output. Registers, indexed memory, blobs and file cache are
-   stage-local; the include directory is an explicit process configuration. */
-static int execute(unsigned char *input, int inputn, const char *src, Buf *result) {
-    int status = 0;
-    R = calloc(NRG + 1, sizeof(I));
-    blob_add((const unsigned char *)"", 0);
-    blob_add((const unsigned char *)src, (int)strlen(src));
-    unsigned char *x = input; I *xattr = calloc(inputn + 1, sizeof(I)); I xn = inputn;
-    int NFR = 1, CFR = 16; Frame *fr = xrealloc(0, sizeof(Frame) * CFR);
-    fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn;
-    Buf o = {0}, e = {0}; int osel = 0; I OT = 0;
-    Buf sb = {0};
-    int *stk = 0; int nst = 0, cst = 0;
-    long long maxsteps = getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"), 0, 10) : 200000000LL, steps = 0;
-    int q = START; I r = 0;
-    for (;;) {
-        if (++steps > maxsteps) { fprintf(stderr, "timeout\n"); status = 3; goto finished; }
-        Frame *F = &fr[NFR - 1];
-        int nx = -1, sq = -1;
-        int key = SMODE[q] == 1 ? (nst ? stk[nst - 1] : -1) :
-            SMODE[q] == 0 ? (F->i < F->end ? F->b[F->i] : 256) : (r >= 0 && r <= 256 ? (int)r : 256);
-        transition(q, key, &nx, &sq);
-        if (nx < 0) { fprintf(stderr, "run: no transition\n"); status = 2; goto finished; }
-        q = nx;
-        const I *a = QA + QOFF[sq];
-        for (int k = 0; k < QLEN[sq]; k++) {
-            int op = (int)a[0];
-            F = &fr[NFR - 1];
-            switch (op) {
-            case ADV: F->i++; break;
-            case MARK: R[a[1]] = F->i; break;
-            case JUMP: F->i = R[a[1]]; break;
-            case LDI: R[a[1]] = a[2]; break;
-            case COPYW: R[a[1]] = R[a[2]]; break;
-            case ALU: R[a[2]] = alu32((int)a[1], R[a[3]], R[a[4]]); break;
-            case ALUI: R[a[2]] = alu32((int)a[1], R[a[3]], a[4]); break;
-            case CMP: case CMPI: { I u = R[a[1]], v = op == CMP ? R[a[2]] : a[2]; r = u < v ? 0 : u == v ? 1 : 2; } break;
-            case A64: case A64I: { int z; R[a[2]] = alu64((int)a[1], R[a[3]], op == A64 ? R[a[4]] : a[4], &z); r = z; } break;
-            case C64: { I u = R[a[1]], v = R[a[2]]; r = u < v ? 0 : u == v ? 1 : 2; } break;
-            case C64U: { uint64_t u = (uint64_t)R[a[1]], v = (uint64_t)R[a[2]]; r = u < v ? 0 : u == v ? 1 : 2; } break;
-            case INC: R[a[1]] = (I)(((uint64_t)R[a[1]] + 1) & 0xFFFFFFFFull); break;
-            case RLD: { I v = R[a[1]]; r = v >= 0 && v <= 256 ? v : 256; } break;
-            case LDX: R[a[1]] = mget(R[a[2]] + a[3]); break;
-            case STX: mset(R[a[1]] + a[2], R[a[3]]); break;
-            case OUT: if (osel == 0) bput(&o, (int)a[1], OT); else bput(&e, (int)a[1], 0); break;
-            case OUTW: if (osel == 0) bput(&o, (int)(R[a[1]] & 255), OT); else bput(&e, (int)(R[a[1]] & 255), 0); break;
-            case COPYT: if (F->i < F->end) { if (osel == 0) bput(&o, F->b[F->i], OT); else bput(&e, F->b[F->i], 0); } break;
-            case COPY: if (F->i < F->end) { if (osel == 0) bput(&o, F->b[F->i], F->at ? F->at[F->i] : OT); else bput(&e, F->b[F->i], 0); } break;
-            case SPAN: case SPANT: case SPAN2: {
-                I s0 = R[a[1]], s1 = op == SPAN2 ? R[a[2]] : F->i; if (s1 > F->end) s1 = F->end;
-                for (I j = s0 < 0 ? 0 : s0; j < s1; j++) {
-                    if (osel == 1) bput(&e, F->b[j], 0);
-                    else bput(&o, F->b[j], (op == SPANT || !F->at) ? OT : F->at[j]);
-                }
-            } break;
-            case OLAST: r = o.n ? o.b[o.n - 1] : 256; break;
-            case ODROP: if (o.n) o.n--; break;
-            case OLEN: R[a[1]] = o.n; break;
-            case OCUT: { I s0 = R[a[2]]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n;
-                         R[a[1]] = blob_add(o.b + s0, (int)(o.n - s0)); o.n = (int)s0; } break;
-            case ORES: R[a[1]] = o.n; for (I j = 0; j < a[2]; j++) bput(&o, ' ', OT); break;
-            case OFILL: { char t[32]; int n = snprintf(t, sizeof t, "%lld", (long long)R[a[2]]); I w = a[3], at = R[a[1]];
-                          if (n > w) { fprintf(stderr, "reject: field overflow\n"); fwrite(e.b, 1, e.n, stderr); status = 1; goto finished; }
-                          if (at < 0 || at + w > o.n) die("fill past the reservation");
-                          for (I j = 0; j < w; j++) o.b[at + j] = j < w - n ? ' ' : (unsigned char)t[j - (w - n)]; } break;
-            case OCLR: o.n = 0; break;
-            case OSEL: osel = (int)a[1]; break;
-            case SETOT: OT = R[a[1]]; break;
-            case XATTR: R[a[1]] = (F->at && F->i < F->end) ? F->at[F->i] : 0; break;
-            case PUSH: if (nst >= cst) { cst = cst ? cst * 2 : 1024; stk = xrealloc(stk, sizeof(int) * cst); } stk[nst++] = (int)a[1]; break;
-            case POP: if (!nst) die("pop of an empty stack"); nst--; break;
-            case INTERN: case SBINTERN: {
-                if (op == INTERN) { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
-                                    R[a[1]] = s0 < s1 ? intern(F->b + s0, (int)(s1 - s0)) : intern((const unsigned char *)"", 0); }
-                else R[a[1]] = intern(sb.b ? sb.b : (unsigned char *)"", sb.n);
-            } break;
-            case BLOBSAVE: { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
-                             R[a[1]] = s0 < s1 ? blob_add(F->b + s0, (int)(s1 - s0)) : blob_add((const unsigned char *)"", 0); } break;
-            case SBSAVE: R[a[1]] = blob_add(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
-            case INPUSH: case INPUSHX: case INPUSHXE: {
-                if (NFR >= CFR) { CFR *= 2; fr = xrealloc(fr, sizeof(Frame) * CFR); }
-                Frame *G = &fr[NFR++];
-                if (op == INPUSH) { Blob *B = &BL[R[a[1]]]; G->b = B->b; G->at = 0; G->i = 0; G->end = B->n; }
-                else { G->b = x; G->at = xattr; G->i = R[a[1]]; G->end = xn;
-                       if (op == INPUSHXE && R[a[2]] < xn) G->end = R[a[2]]; }
-            } break;
-            case INPOP: if (NFR > 1) NFR--; break;
-            case SBCLR: sb.n = 0; break;
-            case SBOUT: bput(&sb, (int)a[1], 0); break;
-            case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) bput(&sb, F->b[j], 0); } break;
-            case SBBLOB: { Blob *B = &BL[R[a[1]]]; for (int j = 0; j < B->n; j++) bput(&sb, B->b[j], 0); } break;
-            case SBFIND: R[a[1]] = sbfind(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
-            case BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
-            case XLEN: R[a[1]] = F->end; break;
-            case BLEN: R[a[1]] = BL[R[a[2]]].n; break;
-            case DIVMOD10: { uint64_t v = (uint32_t)(uint64_t)R[a[1]]; R[a[1]] = (I)(v / 10); r = (I)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
-            case SWAP: { unsigned char *nb = xrealloc(0, o.n + 1); I *na = xrealloc(0, sizeof(I) * (o.n + 1));
-                         memcpy(nb, o.b, o.n); memcpy(na, o.at, sizeof(I) * o.n);
-                         if (x != input) free(x); free(xattr);
-                         x = nb; xattr = na; xn = o.n; o.n = 0; NFR = 1; fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn; } break;
-            case ACCEPT: goto finished;
-            case REJECT: fprintf(stderr, "reject: %.*s\n", STRL[a[1]], STR[a[1]]); fwrite(e.b, 1, e.n, stderr); status = 1; goto finished;
-            default: die("bad action");
-            }
-            a += 1 + ARITY[op];
-        }
-    }
-finished:
-    if (!status) { result->b = o.b; result->n = o.n; o.b = 0; }
-    free(o.b); free(o.at); free(e.b); free(e.at); free(sb.b); free(sb.at);
-    free(fr); free(stk); if (x != input) free(x); free(xattr); free(R);
-    free(MK); free(MV); free(MU); MK = 0; MV = 0; MU = 0; MCAP = 0; MN = 0;
-    for (int i = 0; i < NBL; i++) free(BL[i].b);
-    free(BL); BL = 0; NBL = 0; CBL = 0;
-    for (size_t i = 0; i < ICAP; i++) if (IT[i].b) free(IT[i].b);
-    free(IT); IT = 0; ICAP = 0; IN_ = 0;
-    for (int i = 0; i < NFC; i++) free(FC[i].p);
-    free(FC); FC = 0; NFC = 0;
+#endif
+static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
+    CoreModel m; core_model(&m);
+    I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : 200000000LL;
+    CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
+    if (status==1) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
+    if (status==2) fprintf(stderr,"run: %s\n",r.reason);
+    if (status==3) fprintf(stderr,"timeout\n");
+    if (status==1) fwrite(r.err.b,1,r.err.n,stderr);
+    free(r.err.b); result->b=r.out.b; result->n=r.out.n;
     return status;
 }
 

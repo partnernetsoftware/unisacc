@@ -269,3 +269,11 @@ is an independent behaviour referee; the current product is the tape oracle.
 The framing network is also enumerated against its table, with the Python
 action executor checking valid and malformed frames. `-E` with several inputs
 remains explicitly unsupported. No final default-product switch is implied.
+
+### Isolated execution kernel
+
+The machine is now in [core.c](core.c) and [core.h](core.h), independently
+linkable from the package/route loader. [CORE.md](CORE.md) records its exact
+boundary, ownership, two ISA object sizes and external dependencies. Package
+bytes, network/action formats and route behavior are unchanged. The default
+build includes the C core; this is not yet the assembly or product switch.

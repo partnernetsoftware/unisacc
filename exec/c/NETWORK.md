@@ -76,3 +76,8 @@ file 56,520 B, dynamic libSystem excluded; unisacc runtime `__text` 85,220 B,
 file 115,746 B, carried library included. These include loading, verification,
 IO and execution; they are not isolated core sizes and do not meet the few-KB
 claim. Runtime memory is dynamic and is not measured by these file sizes.
+
+The subsequent C-kernel isolation is measured directly as a separate object
+in [CORE.md](CORE.md), including all generic action/storage helpers. The older
+whole-tool ledger above remains historical; it must not be used as a current
+core measurement.

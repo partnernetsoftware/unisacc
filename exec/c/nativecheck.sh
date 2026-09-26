@@ -52,6 +52,7 @@ for exe in [p/'run',ua,netrun]:
 print('stream chain: three runtime builds, including network self-rebuild, equal')
 isolated=p/'isolated';isolated.mkdir()
 shutil.copyfile(root/'exec/c/run.c',isolated/'runtime.c')
+for name in ['core.c','core.h']: shutil.copyfile(root/'exec/c'/name,isolated/name)
 shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
 for exe in [p/'run',ua,netrun]:
     got=run([exe,'--bundle','models.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated)

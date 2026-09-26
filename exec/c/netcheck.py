@@ -18,7 +18,9 @@ def require(r):
 
 with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
     d=pathlib.Path(td); exe=d/'run'
-    require(run([os.environ.get('EXEC_CC','cc'),'-O2','-Wall','-Wextra','-o',exe,ROOT/'exec/c/run.c']))
+    build=[os.environ.get('EXEC_CC','cc'),'-O2','-Wall','-Wextra','-o',exe,ROOT/'exec/c/run.c']
+    if os.environ.get('CORE_EXTERNAL')=='1': build += ['-DUNISA_CORE_EXTERNAL',ROOT/'exec/c/core.c']
+    require(run(build))
     # Byte -> non-state stack symbol -> register observation -> acceptance.
     # Unspecified byte keys stay missing, even between real transitions.
     src=('T 4 4 1 0 0\n'

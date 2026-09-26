@@ -67,6 +67,7 @@ job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, re
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
 job exec-native ./exec/c/nativecheck.sh
 job exec-net python3 ./exec/c/netcheck.py
+job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh
 job exec-multi ./exec/c/multicheck.sh
