@@ -10,12 +10,14 @@
 # reported UNUSED, and the suite fails.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-PROBES=${*:-examples/hello.c examples/fib.c examples/switch.c examples/struct.c tests/c/b_float.c tests/c/b_file.c tests/c/b_argv.c}
+PROBES=${*:-tests/c/a_precmix.c examples/hello.c examples/fib.c examples/switch.c examples/struct.c tests/c/b_float.c tests/c/b_file.c tests/c/b_argv.c}
 TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
-# binsel is asked on this (Python) path; prec, peep and opinfo are asked only by
-# the C compiler and show UNUSED here (measured 2026-09-26) -- they need a C-side
-# ablation, which does not exist yet, so they are not listed
-ABL=${ABL:-"pp lex parse type scope irsel binsel enc reloc regmap abi.sysno abi.arg0 abi.arg1 abi.arg2 abi.ret abi.gate abi.nrreg"}
+# prec shows USED only with a probe that mixes precedence levels
+# (tests/c/a_precmix.c; measured 2026-09-26: 6 of 6 refused). peep and opinfo are
+# asked by unisa/opt.py, which `unisa compile` does not run (only tests/optpy.sh
+# does), so this path cannot see them: NOT covered here -- revisit when opt.py is
+# on the compile path or a C-side ablation exists (register, not a pass)
+ABL=${ABL:-"pp lex parse prec type scope irsel binsel enc reloc regmap abi.sysno abi.arg0 abi.arg1 abi.arg2 abi.ret abi.gate abi.nrreg"}
 # SHARD=k/n keeps every n-th ablation starting at the k-th: each ablation is
 # 42 compiles, and all sixteen in one run were over the 60 s ceiling
 # (AGENTS.md).  Run it as SHARD=1/8 .. 8/8: at 1/4 one shard still hit 58 s.

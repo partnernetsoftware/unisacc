@@ -60,6 +60,12 @@ rc=$?
 say "all suites (STRICT=1)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" \
     "$(tail -3 "$LOG" | head -1)"
 [ $rc -eq 0 ] || sed -n '/=== summary/,$p' "$LOG" | grep FAIL | head -10
+# 3a'. ablate: every listed stage's answer must change an image; eight shards,
+# each under the 60 s ceiling
+for k in 1 2 3 4 5 6 7 8; do
+    SHARD=$k/8 perl -e 'alarm 60; exec @ARGV' ./tests/ablate.sh > "$LOG.a$k" 2>&1 || { arc=1; tail -3 "$LOG.a$k"; }
+done
+say "ablate (8 shards)" "$([ ${arc:-0} -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.a8")"
 # 3a. the gate: ccparity and malloc are in no other suite list [S-16 T1]
 ./tests/gate.sh --com > "$LOG.g" 2>&1
 rc=$?
