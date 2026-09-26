@@ -25,10 +25,20 @@ perl -e 'alarm shift; exec @ARGV' ${TERM_SH_ALARM:-600} $q > '$d/out' 2>&1
 echo \$? > '$d/rc.tmp' && mv '$d/rc.tmp' '$d/rc'
 EOS
 chmod +x "$d/run.sh"
-# the caller's environment does not cross into Terminal: pass what the
-# suites read
-env | grep -E '^(UA|UA_RUN|PAR|SHARD|LIMA_VM|STRICT|DRIVE|CC)=' \
-    | sed "s/^/export /; s/=\(.*\)/='\1'/" > "$d/env"
+# Explicit suite settings only. Quote values as shell literals (including
+# apostrophes and newlines), preserving the distinction between unset and empty.
+: > "$d/env"
+for name in UA UA_RUN PAR SHARD LIMA_VM STRICT DRIVE CC CFLAGS JOBS TARGET \
+    E4STRICT CHAINKEEP CHAINV E3KEEP E3V E3REF E3DUMP E3DELTA \
+    E2_AUTOINC E2REF E2NOAUTO; do
+    eval 'present=${'"$name"'+x}'
+    if [ "$present" = x ]; then
+        eval 'value=${'"$name"'}'
+        escaped=$(printf '%s' "$value" | sed "s/'/'\\\\''/g"; printf x)
+        escaped=${escaped%x}
+        printf "export %s='%s'\n" "$name" "$escaped" >> "$d/env"
+    fi
+done
 sed -i '' "2i\\
 . '$d/env'
 " "$d/run.sh"
