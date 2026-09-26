@@ -12,11 +12,11 @@
    the first argument that is not a flag is the input, and for `-run` what
    follows the input belongs to the PROGRAM. */
 int main(void) {
-    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok;
+    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror;
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
-    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0;
+    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0;
     ninput = 0;
     i = 1;
     while (i < __argc()) {
@@ -65,6 +65,7 @@ int main(void) {
             } else { if (strsame(a, "-include")) {         /* -include FILE */
                 i = i + 1;
                 if (nopti < 8) { opti[nopti] = __argv(i); nopti = nopti + 1; }
+            } else { if (strsame(a, "-Werror")) { werror = 1; warnall = 1;
             } else { if (strsame(a, "-Wall") || strsame(a, "-Wextra")) { warnall = 1;
             } else { if (strpre(a, "-ferror-limit=")) { maxerr = 0; k = 14;
                 while (a[k] >= 48 && a[k] <= 57) { maxerr = maxerr * 10 + (a[k] - 48); k = k + 1; }
@@ -94,7 +95,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } } } }
+            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -111,12 +112,11 @@ int main(void) {
     }
     if (fi == 0) {
         model_dims(); setup();
-        printf("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
+        return emsg("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
                " FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens] [-o out]"
                " [-- args...]\n"
                "  -S  write the tape, this compiler's assembly-level IR"
-               " (-c is a synonym: there are no object files)\n");
-        return 1;
+               " (-c is a synonym: there are no object files)", 0);
     }
     if (depfile) { if (depfile[0] == 0) {
         static char dname[520]; char *base; int k; int dot;
@@ -129,6 +129,7 @@ int main(void) {
     } }
     if (runit) {
         if (fe_units(inputs, ninput, HOST_TARGET)) return 1;
+        if (werror && nwarn > 0) return 1;           /* -Werror: nothing runs */
         /* argv[0] is the program, which is its first source file; the rest
            of the line follows the inputs */
         n = __argc() - (fi + ninput) + 1;
@@ -170,7 +171,7 @@ int main(void) {
         ofd = 1;
         if (outpath && pponly) {
             ofd = wopen(outpath);
-            if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
+            if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);
         }
         bkfd = ofd;
         if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
@@ -178,10 +179,11 @@ int main(void) {
             r = fe_units(inputs, ninput, t);
             if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
             if (r) return 1;
+            if (werror && nwarn > 0) return 1;       /* -Werror: nothing written */
         }
         if (outpath && pponly == 0) {
             ofd = wopen(outpath);
-            if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
+            if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);
             bkfd = ofd;
         }
         if (depfile) { if (writedeps(outpath ? outpath : "a.out", inputs, ninput)) return 1; }
@@ -212,7 +214,7 @@ int main(void) {
     if (fd < 0) return enoinput(srcpath);
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
-    if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }
+    if (nsrc >= MAXSRC - 1) return emsg("unisacc: error: source too large", 0);
     tgt = "lnx/x86_64";
     splice();
     decomment();

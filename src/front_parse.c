@@ -391,6 +391,15 @@ int emitrecipe(int r) {
     return 0;
 }
 
+/* a message and an optional name, on stderr where cc puts them */
+int emsg(char *m, char *p) {
+    int k; k = 0;
+    while (m[k]) k = k + 1;
+    __write(2, m, k);
+    if (p) { k = 0; while (p[k]) k = k + 1; __write(2, p, k); }
+    __write(2, "\n", 1);
+    return 1;
+}
 /* a file we cannot read: named, on stderr, as cc says it */
 int enoinput(char *p) {
     int k; k = 0;
