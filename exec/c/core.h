@@ -17,6 +17,10 @@ typedef struct { unsigned char *b; I *at; int n, cap; } Buf;
 typedef struct { I *keys, *values; unsigned char *used; size_t cap, n; } CoreMemory;
 typedef struct { unsigned char *b; int n; I v; } CoreInternEntry;
 typedef struct { CoreInternEntry *entries; size_t cap, n; } CoreIntern;
+typedef struct { unsigned char *b; int n; } CoreBlob;
+typedef struct { CoreBlob *entries; int n, cap; } CoreBlobs;
+typedef struct { unsigned char *p; int n, id; } CoreResourceEntry;
+typedef struct { CoreResourceEntry *entries; int n; } CoreResources;
 typedef struct {
     int ns, nq, nrg, start, isnet;
     char **str; int *strl;

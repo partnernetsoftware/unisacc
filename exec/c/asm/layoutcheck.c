@@ -21,3 +21,13 @@ ICHECK(entries,INTERN_ENTRIES); ICHECK(cap,INTERN_CAP); ICHECK(n,INTERN_COUNT);
 #define ECHECK(field,off) typedef char echeck_##field[(offsetof(CoreInternEntry,field)==off)?1:-1]
 ECHECK(b,ENTRY_BYTES); ECHECK(n,ENTRY_LENGTH); ECHECK(v,ENTRY_VALUE);
 typedef char icheck_size[(sizeof(CoreIntern)==INTERN_SIZE && sizeof(CoreInternEntry)==ENTRY_SIZE)?1:-1];
+
+#define BSCHECK(field,off) typedef char bscheck_##field[(offsetof(CoreBlobs,field)==off)?1:-1]
+BSCHECK(entries,BLOBS_ENTRIES); BSCHECK(n,BLOBS_COUNT); BSCHECK(cap,BLOBS_CAP);
+#define BECHECK(field,off) typedef char becheck_##field[(offsetof(CoreBlob,field)==off)?1:-1]
+BECHECK(b,BLOB_BYTES); BECHECK(n,BLOB_LENGTH);
+#define RSCHECK(field,off) typedef char rscheck_##field[(offsetof(CoreResources,field)==off)?1:-1]
+RSCHECK(entries,RES_ENTRIES); RSCHECK(n,RES_COUNT);
+#define RECHECK(field,off) typedef char recheck_##field[(offsetof(CoreResourceEntry,field)==off)?1:-1]
+RECHECK(p,RES_KEY); RECHECK(n,RES_LENGTH); RECHECK(id,RES_ID);
+typedef char blob_resource_sizes[(sizeof(CoreBlobs)==BLOBS_SIZE && sizeof(CoreBlob)==BLOB_SIZE && sizeof(CoreResources)==RES_SIZE && sizeof(CoreResourceEntry)==RES_ENTRY_SIZE)?1:-1];

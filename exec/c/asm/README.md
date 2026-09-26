@@ -1,7 +1,7 @@
 # Assembly kernel migration
 
 This directory implements **`core_transition` and the 32/64-bit arithmetic
-primitives, byte-buffer append, sparse memory and byte-string interning** by hand for AArch64 and x86-64 System V. Action dispatch, the remaining blob/frame storage and cleanup are still
+primitives, byte-buffer append, sparse memory byte-string interning, blob copies and resource caching** by hand for AArch64 and x86-64 System V. Action dispatch, frame storage and cleanup are still
 the generic C kernel. Allocation remains libc. The shipped product and default runtime still
 select C. This is not a completed assembly kernel or product switch.
 
@@ -22,7 +22,7 @@ explicitly not implemented. Mach-O native arm64 and Rosetta x86-64 were run;
 the ELF assembler spelling is present but has not yet been run on Linux.
 
 `cc.sh` builds an explicit development runtime: it omits the C transition
-arithmetic, buffer-append, sparse-memory and intern implementations and links their assembly symbols. It is a build adapter, not a
+arithmetic, buffer-append, sparse-memory intern, blob and resource implementations and links their assembly symbols. It is a build adapter, not a
 runtime fallback. `transitioncheck.c` separately retains the actual C body
 under a different name for 537,620 comparisons per ISA, including independent
 missing/domain/output expectations, signed limits and sums that would wrap a
@@ -30,24 +30,24 @@ missing/domain/output expectations, signed limits and sums that would wrap a
 
 Run `../asmcheck.sh`, or `CORE_ASM_ARCH=x86_64 ../asmcheck.sh` on this ARM Mac.
 Each job builds fresh models, runs the network/resource/error checks and all
-six full-domain checks, produces five complete images through assembly
-inference, compares them to the reference, and executes four against system
-cc. The fifth image is the C runtime; executing it does not turn it into an
+six full-domain checks, produces six complete images through assembly
+inference, compares them to the reference, and executes five against system
+cc. The sixth image is the C runtime; executing it does not turn it into an
 assembly action engine. Test Python constructs models and compares results;
 no Python stage handles source at runtime.
 
 Measured uncompressed __text on macOS (object section, no subtraction):
 
-| ISA | transition | arithmetic | buffer | sparse memory | intern/hash | remaining C (`cc -Os`) | sum |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 4,144 B | 6,128 B |
-| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 5,533 B | 7,439 B |
+| ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | remaining C (`cc -Os`) | sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 548 B | 3,848 B | 6,380 B |
+| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 5,153 B | 7,572 B |
 
 Error strings are 58 B per transition, 24 B per arithmetic object, and 39 B
-each for buffer, sparse-memory and intern objects. Host/library/model costs
+each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B. Host/library/model costs
 remain outside this object sum, accounted separately in ../CORE.md. The C-only
 baseline with the capacity guards and explicit memory/intern state is
-6,528/7,641 B. These are migration measurements, not a performance claim.
+6,664/7,707 B. These are migration measurements, not a performance claim.
 
 ## Word arithmetic contract
 
@@ -131,3 +131,28 @@ core_string_intern; the assembly implementation calls its own core_hash_bytes.
 The full route also checks prefix_members.c against cc and the independent
 exit value 40. This E3 path was needed by the new core's ++t->n expression;
 it reuses model member/index addressing, not a language-specific C primitive.
+
+## Blob and resource ownership
+
+CoreBlobs owns copies with stable zero-based IDs. Capacity starts at 64 and
+doubles; doubling is checked before int overflow. The copied length is
+nonnegative, and the spare allocated byte is not a promised NUL terminator.
+core_run reserves ID zero for a missing resource before looking anything up.
+CoreResources caches byte keys by length and content, including absent results.
+On a miss it calls the host once: borrowed bytes are copied, malloc-owned bytes
+are copied and freed exactly once, and absence is cached as zero. Empty but
+present bytes get a nonzero blob ID. Cleanup/reset remains in C.
+
+bytescheck.c uses the real C functions under alternate names and a moving
+allocator: 300 blocks, 256 binary resource keys, reverse cached lookups,
+borrowed/owned/empty/absent responses, input mutation and reset. Ten explicit
+SIMULATED C/ASM failures cover blob-array/blob-byte and cache-array/key
+allocations plus blob capacity overflow. The resource count overflow guard
+requires INT32_MAX cache entries and was not exercised. The host contract
+remains trusted for valid lengths and ownership flags.
+
+Both actual ISA runs pass the full network checks and six-image route.
+member_index_address.c independently expects exit 25: E3 must load a pointer
+member before evaluating its subscript under address-of. Native C network
+self-reconstruction and C ASan/UBSan network checks also pass. These are
+migration checks, not a claim of smaller code or a completed assembly kernel.

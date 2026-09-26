@@ -97,12 +97,26 @@ CORE_MEMORY_LINKAGE void core_mset(CoreMemory *m,I k,I v) {
 #define mset(k,v) core_mset(&memory,(k),(v))
 
 /* ---- blobs and interning ---- */
-typedef struct { unsigned char *b; int n; } Blob;
-static Blob *BL; static int NBL, CBL;
-static int blob_add(const unsigned char *b, int n) {
-    if (NBL >= CBL) { CBL = CBL ? CBL * 2 : 64; BL = core_alloc(BL, sizeof(Blob) * CBL); }
-    BL[NBL].b = core_alloc(0, n + 1); memcpy(BL[NBL].b, b, n); BL[NBL].n = n; return NBL++;
+static CoreBlobs blobs;
+#ifdef UNISA_CORE_ASM_BYTES
+int core_blob_add(CoreBlobs *t,const unsigned char *b,int n);
+#define core_badd core_blob_add
+#else
+#ifndef CORE_BYTES_LINKAGE
+#define CORE_BYTES_LINKAGE static
+#endif
+CORE_BYTES_LINKAGE int core_badd(CoreBlobs *t,const unsigned char *b,int n) {
+    if (t->n>=t->cap) {
+        if (t->cap>INT32_MAX/2) core_die("blob capacity overflow");
+        t->cap=t->cap ? t->cap*2 : 64;
+        t->entries=core_alloc(t->entries,sizeof(CoreBlob)*t->cap);
+    }
+    t->entries[t->n].b=core_alloc(0,(size_t)n+1);
+    memcpy(t->entries[t->n].b,b,n); t->entries[t->n].n=n;
+    return t->n++;
 }
+#endif
+#define blob_add(b,n) core_badd(&blobs,(b),(n))
 static CoreIntern strings;
 #ifdef UNISA_CORE_ASM_INTERN
 I core_string_intern(CoreIntern *t,const unsigned char *b,int n);
@@ -142,19 +156,27 @@ CORE_INTERN_LINKAGE I core_intern(CoreIntern *t,const unsigned char *b,int n) {
 }
 #endif
 #define intern(b,n) core_intern(&strings,(b),(n))
-/* SBFIND: file path -> blob id (0: absent), cached */
-typedef struct { unsigned char *p; int n; int id; } FEnt;
-static FEnt *FC; static int NFC;
-static int sbfind(const unsigned char *p, int n) {
-    for (int j = 0; j < NFC; j++) if (FC[j].n == n && !memcmp(FC[j].p,p,n)) return FC[j].id;
-    unsigned char *b=0; int len=0, id=0;
+/* SBFIND: opaque resource key -> blob id (0: absent), cached. Blob zero
+   is reserved by core_run before a resource can be queried. */
+static CoreResources resources;
+#ifdef UNISA_CORE_ASM_BYTES
+int core_resource_find(CoreResources *t,CoreBlobs *bs,const unsigned char *p,int n);
+#define core_rfind core_resource_find
+#else
+CORE_BYTES_LINKAGE int core_rfind(CoreResources *t,CoreBlobs *bs,const unsigned char *p,int n) {
+    for (int j=0;j<t->n;j++) if (t->entries[j].n==n && !memcmp(t->entries[j].p,p,n)) return t->entries[j].id;
+    if (t->n==INT32_MAX) core_die("resource cache capacity overflow");
+    unsigned char *b=0; int len=0,id=0;
     int owned=core_host_fetch(p,n,&b,&len);
-    if (owned) id=blob_add(b,len);
+    if (owned) id=core_badd(bs,b,len);
     if (owned==2) free(b);
-    FC=core_alloc(FC,sizeof(FEnt)*(NFC+1)); FC[NFC].p=core_alloc(0,n+1);
-    memcpy(FC[NFC].p,p,n); FC[NFC].n=n; FC[NFC].id=id; NFC++;
+    t->entries=core_alloc(t->entries,sizeof(CoreResourceEntry)*((size_t)t->n+1));
+    t->entries[t->n].p=core_alloc(0,(size_t)n+1);
+    memcpy(t->entries[t->n].p,p,n); t->entries[t->n].n=n; t->entries[t->n].id=id; t->n++;
     return id;
 }
+#endif
+#define sbfind(p,n) core_rfind(&resources,&blobs,(p),(n))
 
 #ifdef UNISA_CORE_ASM_ALU
 I core_alu32(int op,I a,I b);
@@ -287,7 +309,7 @@ int core_run(const CoreModel *m, unsigned char *input,
             case INPUSH: case INPUSHX: case INPUSHXE: {
                 if (NFR >= CFR) { CFR *= 2; fr = core_alloc(fr, sizeof(Frame) * CFR); }
                 Frame *G = &fr[NFR++];
-                if (op == INPUSH) { Blob *B = &BL[R[a[1]]]; G->b = B->b; G->at = 0; G->i = 0; G->end = B->n; }
+                if (op == INPUSH) { CoreBlob *B = &blobs.entries[R[a[1]]]; G->b = B->b; G->at = 0; G->i = 0; G->end = B->n; }
                 else { G->b = x; G->at = xattr; G->i = R[a[1]]; G->end = xn;
                        if (op == INPUSHXE && R[a[2]] < xn) G->end = R[a[2]]; }
             } break;
@@ -295,11 +317,11 @@ int core_run(const CoreModel *m, unsigned char *input,
             case SBCLR: sb.n = 0; break;
             case SBOUT: core_put(&sb, (int)a[1], 0); break;
             case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) core_put(&sb, F->b[j], 0); } break;
-            case SBBLOB: { Blob *B = &BL[R[a[1]]]; for (int j = 0; j < B->n; j++) core_put(&sb, B->b[j], 0); } break;
+            case SBBLOB: { CoreBlob *B = &blobs.entries[R[a[1]]]; for (int j = 0; j < B->n; j++) core_put(&sb, B->b[j], 0); } break;
             case SBFIND: R[a[1]] = sbfind(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
             case BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
             case XLEN: R[a[1]] = F->end; break;
-            case BLEN: R[a[1]] = BL[R[a[2]]].n; break;
+            case BLEN: R[a[1]] = blobs.entries[R[a[2]]].n; break;
             case DIVMOD10: { uint64_t v = (uint32_t)(uint64_t)R[a[1]]; R[a[1]] = (I)(v / 10); r = (I)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
             case SWAP: { unsigned char *nb = core_alloc(0, o.n + 1); I *na = core_alloc(0, sizeof(I) * (o.n + 1));
                          memcpy(nb, o.b, o.n); memcpy(na, o.at, sizeof(I) * o.n);
@@ -318,12 +340,12 @@ finished:
     free(o.b); free(o.at); free(e.b); free(e.at); free(sb.b); free(sb.at);
     free(fr); free(stk); if (x != input) free(x); free(xattr); free(R);
     free(memory.keys); free(memory.values); free(memory.used); memset(&memory,0,sizeof memory);
-    for (int i = 0; i < NBL; i++) free(BL[i].b);
-    free(BL); BL = 0; NBL = 0; CBL = 0;
+    for (int i=0;i<blobs.n;i++) free(blobs.entries[i].b);
+    free(blobs.entries); memset(&blobs,0,sizeof blobs);
     for (size_t i=0;i<strings.cap;i++) if (strings.entries[i].b) free(strings.entries[i].b);
     free(strings.entries); memset(&strings,0,sizeof strings);
-    for (int i = 0; i < NFC; i++) free(FC[i].p);
-    free(FC); FC = 0; NFC = 0;
+    for (int i=0;i<resources.n;i++) free(resources.entries[i].p);
+    free(resources.entries); memset(&resources,0,sizeof resources);
     return status;
 }
 

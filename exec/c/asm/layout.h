@@ -35,3 +35,18 @@
 #define ENTRY_LENGTH 8
 #define ENTRY_VALUE 16
 #define ENTRY_SIZE 24
+
+#define BLOBS_ENTRIES 0
+#define BLOBS_COUNT 8
+#define BLOBS_CAP 12
+#define BLOBS_SIZE 16
+#define BLOB_BYTES 0
+#define BLOB_LENGTH 8
+#define BLOB_SIZE 16
+#define RES_ENTRIES 0
+#define RES_COUNT 8
+#define RES_SIZE 16
+#define RES_KEY 0
+#define RES_LENGTH 8
+#define RES_ID 12
+#define RES_ENTRY_SIZE 16

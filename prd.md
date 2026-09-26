@@ -2891,3 +2891,29 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - Per ISA: 20,000 distinct strings, five fixed hash vectors, empty/NUL/prefix distinctions, 16 engineered wrapping collisions, growth on duplicate, reverse lookup, mutated input-buffer ownership and reset pass. Eight explicitly simulated C/ASM fault runs cover table/byte allocation, rehash allocation and 64-bit extent overflow. Fresh network/stream/error/package tests, five complete images and four actual native/Rosetta executions also pass.
 - C-only external linkage and ASan+UBSan network/resource/reset/failure checks passed (leak detection disabled for fatal-exit cases). nativecheck passes six full-domain checks, 18 outputs, network-built runtime self-reconstruction, isolated packages and three real short writes. Logs /tmp/unisacc-intern-c-baseline.log, /tmp/unisacc-intern-sanitizer.log and /tmp/unisacc-intern-native.log.
 - Intern/hash __text **508/479 B** (arm64/x86-64), strings 39 B each. Remaining C **4,144/5,533 B**; assembly plus remaining C text **6,128/7,439 B**. Current C-only baseline 6,528/7,641 B. This slice used targeted checks; last complete **82/82** gate belongs to de81ff3, not this new source/model state. Model schema/actions unchanged, E3's constructed model changes with its new path. Product sources and .com unchanged; no push/release; cc-unisacc remains paused. Full core and final product-route completion remain active.
+
+
+### Assembly core: blob copies/resource ownership and required E3 addressing fix
+
+- cc-unisacc remains paused. Product source and .com unchanged; no push/release.
+- Explicit CoreBlobs/CoreResources state is shared by C and both assembly
+  helpers. Blob IDs, cached absence, copied borrowed buffers and exactly-once
+  freeing of host-owned buffers are preserved. Cleanup still belongs to C.
+- Both macOS arm64 and Rosetta x86-64 pass 300 moving-allocation blocks,
+  256 resource keys, cache/reset checks and ten simulated failure invocations.
+  Resource count INT32_MAX guard is not exercised. Network tests, six full
+  images per ISA and five native behavior comparisons per ISA pass.
+- The new C source exposed E3's early return on &s.pointer[index]. The model
+  now loads the pointer before resolving the final element address. Old 238
+  fixed files passed in four bounded batches before adding the independently
+  checked member_index_address probe (exit 25), making 239. No executor
+  language-specific primitive was introduced.
+- Blob/resource __text is 548/513 B (arm64/x86-64), strings 70 B each;
+  remaining C 3,848/5,153 B; mixed text sums 6,380/7,572 B. C-only baseline
+  6,664/7,707 B. This is migration, not size reduction. Host/libc/model costs
+  remain separate. Native C network self-reconstruction and ASan/UBSan
+  network checks pass. Logs: /tmp/unisacc-bytes-{arm-final,x86-final,native,core,sanitize}.log
+  and /tmp/unisacc-bytes-keep-{0,1,2,3}.log.
+- Only targeted checks were run for this slice; the last full 82/82 gate
+  remains de81ff3. Complete assembly dispatch, platform bindings and the final
+  product switch remain unfinished.
