@@ -93,8 +93,13 @@ compiler is the existing C compiler; this is not E7 adoption in the product.
 `TARGET=win/arm64 ./exec/pipeline/selfcheck.sh` checks all five Windows target
 macros against the native front end, optimized tape and whole PE bytes against
 the current reference. It does not claim native execution on a macOS host.
+Windows `__LP64__` matches this compiler's current predefined macros and
+64-bit `long`; it does not describe the Windows system's LLP64 C ABI.
 For an already-running Windows ARM64 UTM VM, the separate opt-in command is
 `perl -e 'alarm 60; exec @ARGV' python3 exec/pipeline/winbootstrap.py OUTPUT_DIR unisacc.c`.
 It copies and verifies inputs, compiles N2 and N3 in the guest, checks explicit
 per-run exit receipts and byte equality. Guest timeout cleanup uses taskkill
 on the process tree; VM lifecycle remains the caller's responsibility.
+The outer 60 s budget covers both generations and transfers: it can expire
+before the two separate 30 s guest watchdogs. Such a run fails; it is not a
+successful bootstrap. Missing exit-receipt files are retried while polling.
