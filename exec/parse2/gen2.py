@@ -1346,15 +1346,24 @@ def build():
     P("DOWN.1").a(("ALUI", "sub", "vt", "vt", 1)).branch({1: "DOWN.2"}, "RET", [("CMPI", "vt", 0)])
     P("DOWN.2").branch({1: "DEAD.void"}, "RET", [("CMPI", "vb", 0)])
     g.on("DEAD.void", range(257), "DEAD", E.rej("not covered: dereference of void"), "r")
+    # Prefix updates share the existing member/subscript address walk. The
+    # address is evaluated once; its value kind then selects step/load/store.
+    P("PRE.addr").tok({TK_ID: "PRE.id"}, bad("prefix increment operand"))
+    q = P("PRE.id")
+    q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NEXT")
+    addr(q).tok({".": "PRE.member", "->": "PRE.ptr", "[": "PRE.index"}, "PRE.bare")
+    P("PRE.bare").call("NOARR").ret()
+    P("PRE.ptr").call("LOADV").goto("PRE.member")
+    P("PRE.member").vpush("amp").a(("LDI", "amp", 1)).call("MEMB").goto("PRE.done")
+    P("PRE.index").call("VLOAD").vpush("amp").a(("LDI", "amp", 1)).call("POSTIX").goto("PRE.done")
+    P("PRE.done").branch({1: "PRE.value"}, bad("prefix increment operand"), [("CMPI", "amp", 0)])
+    P("PRE.value").vpop("amp").call("DOWN").ret()
     for nm, fix in (("U.pinc", "pre_inc"), ("U.pdec", "pre_dec")):
-        q = P(nm)           # addr; push; load; +-1; pop; store
-        q.call("NEXT").tok({TK_ID: nm + ".id"}, bad("expression"))
-        q = P(nm + ".id")
-        q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NOARR").call("STEPTY")
-        addr(q)
+        q = P(nm)           # addr; push; load; +-step; pop; store
+        q.call("NEXT").call("PRE.addr").call("STEPTY")
         emit(q, "push").call("LOADV")
         emit(q, fix).call("NARU")
-        emit(q, "pop1").call("STOREV").call("NEXT").ret()
+        emit(q, "pop1").call("STOREV").ret()
     P("U.pos").call("NEXT").call("UNARY").call("NODBL0").ret()     # +x: no code (the old E3, p7)
     q = P("U.neg")
     q.call("NEXT").call("UNARY").call("NODBL0").branch({1: "DEAD.ui"}, "U.ng1", [("CMPI", "vb", UNS + 4)])
