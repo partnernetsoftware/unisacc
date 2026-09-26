@@ -11,7 +11,7 @@
 | **Paper B** | UJS：封闭 JavaScript 子集的构造式表网络 | 同一方法在第二门语言上是否成立 | [`ujs-paper.md`](ujs-paper.md) | 草稿 | csr |
 | **Paper C** | 把“确定性模型推理替代编译”推广为管道方法 | 为什么能推广、需要什么条件、能否机械化 | [`paper-c-intent.md`](paper-c-intent.md) | 意向书 | 待定 |
 
-A 和 B 各自证明方法能做成一个编译器；C 不再重复这一点，只把 A、B 当作证据引用。
+A 与 B 分别提供 C99 子集与 UJS 的实现及验证证据；C 不重复这些工作，只把 A、B 当作证据引用。
 B 的方法命题一律引用 A；不编造延迟或准确率数字；不把 M3 写成 IntNet。
 
 ## 每条主线的文件
@@ -21,8 +21,8 @@ B 的方法命题一律引用 A；不编造延迟或准确率数字；不把 M3 
 | 文件 | 角色 |
 |---|---|
 | [`unisacc-paper.md`](unisacc-paper.md) | 正文 |
-| [`paper-a-notes.md`](paper-a-notes.md) | 实现侧给正文的修改建议（待并入正文后删除） |
-| [`delta-framework.md`](delta-framework.md) | 理论草稿：编译 = 通用执行器 ∘ δ*（未证；正文 §1.1 只引用其定义） |
+| [`paper-a-notes.md`](paper-a-notes.md) | 实现侧的修改建议与投稿待办（含原始日志归档、历史性能版本核对）；已并入正文的条目删去，余下移入投稿待办后再删文件 |
+| [`delta-framework.md`](delta-framework.md) | 理论草稿：编译 = 通用执行器 ∘ δ*（未证；只此一份，A §1.1 与 C 交叉引用其定义） |
 | [`formalization-roadmap.md`](formalization-roadmap.md) | 形式化义务：Lean 4 L0–L3 |
 | [`lean/`](lean/) | Lean 4 契约内核（`lake build`） |
 | [`figures/`](figures/) | 插图（图 1 网络结构） |
