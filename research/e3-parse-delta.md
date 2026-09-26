@@ -98,3 +98,15 @@ add `(void)` parameter lists, prototypes/calls to undefined externals and
 `++`/compound assignment before the corpus measures anything.
 
 No reference bug found in this slice.
+
+## printf defined in the unit (measured 2026-09-26, not yet handled)
+
+Allowing a call to the bundled `<stdio.h>` printf as an ordinary variadic call
+exposed 14 differences. (B) The reference keeps its builtin printf lowering
+even when printf is defined: each argument still gets a fresh frame slot
+(`.frame` grows by 8 per argument). So the fix is to keep the builtin path,
+not to treat it as a call. (A) With several headers, the reference's body
+order is the reverse of their prepending (a later `#include` lands above an
+earlier one); the delta's reading of the prelude must follow the token
+stream's physical order. Both stay rejected ("printf defined in the unit")
+until the structured E3 (research/e3-structured.md) handles them.
