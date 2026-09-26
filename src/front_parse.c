@@ -540,7 +540,7 @@ long numval(int t) {
 }
 
 /* One string, in one place: a release is identifiable from the binary. */
-#define UNISACC_VERSION "0.0.6"
+#define UNISACC_VERSION "0.0.7"
 /* Are two NUL-terminated strings the same? */
 int strpre(char *a, char *p) {          /* a starts with p */
     int k;
