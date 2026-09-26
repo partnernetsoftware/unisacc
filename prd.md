@@ -1892,3 +1892,23 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
   - **Speed:** one E3 file takes 0.02 s warm.
   - **Checks:** check.sh gives 225/225 the same verdict as the Python executor. The chain of three stages keeps its 54 files equal and is in the gate (exec-chain, gate 30/30).
   - **Still missing:** a binary format, the stages after E3 (lowering and encoding), and the tables as nets.
+- 2026-09-26 (S-17), **E4 met on the tested inputs** (522f746, 1d4a953, 9a705d4). `exec/opt/gen.py` turns the tape optimiser into a delta that runs on the generic executor. The reference's -O0 tape run through it equals its -O1 and -O2 tapes, byte for byte:
+  - on examples/ and tests/c (113 files at each level);
+  - on unisacc.c itself: a 3.9 MB tape, 11 s on the C executor.
+
+  **The delta:** the -O1 table has 191 states; the -O2 table has 904 states.
+
+  **What -O2 contains**, each computed by the delta itself, not by the executor:
+  - the per-line facts of `ol_prep`;
+  - blocks, labels and targets;
+  - the liveness solver;
+  - the push/pop rule with the carry through r3..r5, and `ol_local`;
+  - `stfuse`;
+  - the peep relations. The peep table (1,632 keys) and opinfo's `simple`/`acls`/`bcls` columns are loaded into memory at START.
+
+  **Gate:** exec-e4 (28 s) and exec-e4self (12 s); the gate is 33/33.
+
+  **Still missing:**
+  - E1–E3 coverage: E3 matches 164 of 225 files, and the source-to-tape chain 54 of 113;
+  - E5 (lowering and encoding, six targets), E6 (image writing) and E7 (.com layout);
+  - the tables as nets.
