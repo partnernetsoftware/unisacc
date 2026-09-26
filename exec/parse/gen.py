@@ -75,6 +75,7 @@ CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
 GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 TDN = 8 * 10 ** 6  # TDN[v] = 1: v was declared a typedef name at file scope
+ARR = 14 * 10 ** 6  # ARR[v] = 1: the visible v is an array (its value is its address; PTR[v] = depth after decay)
 PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/store64)
 BASE = 11 * 10 ** 6  # BASE[v]: size of v's base type (int 4, char 1, long 8; 0 unknown), the scale of depth-1 +-
 CUNK = 0          # base size unknown (void, a typedef name): +- and dereference to depth 0 not covered
@@ -128,7 +129,8 @@ def tokenizer():
     SUF = [ord(c) for c in "uUlL"]
     DIGS = range(48, 58)
     g.on("SPANNUM", [48], "NUM0", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", 0), ("LDI", "nd", 0)])
-    g.on("SPANNUM", range(49, 58), "NUMD", [("ADV",), ("LDI", "nx", 0)])
+    for d in range(1, 10):   # the decimal value too (W[nv]): an array bound
+        g.on("SPANNUM", [48 + d], "NUMD", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", d)])
     g.els("SPANNUM", "SKIPO", [("LDI", "tk", TK_BADNUM)])
     g.on("NUM0", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_NUM)])
     g.on("NUM0", SUF, "NUMS", [("MARK", "pe"), ("ADV",), ("LDI", "ns", 1)])
@@ -136,7 +138,8 @@ def tokenizer():
     for d in range(8):
         g.on("NUM0", [48 + d], "NUMO", [("ADV",), ("LDI", "nx", 1), ("LDI", "nv", d), ("LDI", "nd", 1)])
     g.els("NUM0", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.on("NUMD", DIGS, "NUMD", [("ADV",)])
+    for d in range(10):
+        g.on("NUMD", [48 + d], "NUMD", [("ADV",), ("A64I", "mul", "nv", "nv", 10), ("A64I", "add", "nv", "nv", d)])
     g.on("NUMD", [10], "NUMLEN", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
     g.on("NUMD", SUF, "NUMDS", [("MARK", "pe"), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
     g.els("NUMD", "SKIPO", [("LDI", "tk", TK_BADNUM)])
@@ -305,22 +308,23 @@ def addr(p, reg):             # address of local slot W[s] (or global x[gs..ge))
     p.cur = gl
     p.o("  .lea %s, g_" % reg).a(("SPAN2", "gs", "ge")).o("\n").goto(dn)
     p.cur = lc
-    p.o("  imm r2, ").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("\n  sub64 %s, r6, r2\n" % reg).goto(dn)
+    p.o("  imm r2, ").a(("COPYW", "n", "s")).call("PRN").o("\n  sub64 %s, r6, r2\n" % reg).goto(dn)
     p.cur = dn
 
 
 def lookup(p, lo, hi):        # s := slot of the local spelled x[W[lo]..W[hi])
-    p.a(("INTERN", "v", lo, hi), ("LDX", "s", "v", LOC), ("LDX", "pt", "v", PTR), ("LDX", "pb", "v", BASE), ("COPYW", "gs", lo), ("COPYW", "ge", hi))
+    p.a(("INTERN", "v", lo, hi), ("LDX", "s", "v", LOC), ("LDX", "pt", "v", PTR), ("LDX", "pb", "v", BASE), ("LDX", "ar", "v", ARR), ("COPYW", "gs", lo), ("COPYW", "ge", hi))
     ok = p.fresh("ok")
     p.branch({1: "DEAD0"}, ok, [("CMPI", "s", 0)])
     p.cur = ok
 
 
-def declare(p):               # declare x[ps..pe) as a new local (pointer iff W[ptd]); slot in W[s]
-    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "o", "v", LOC), ("LDX", "op", "v", PTR),
+def declare(p, lo="ps", hi="pe"):   # declare x[lo..hi) as a new local of W[dsz] bytes (array iff W[dar]); frame offset in W[s]
+    p.a(("INTERN", "v", lo, hi), ("LDX", "o", "v", LOC), ("LDX", "op", "v", PTR),
         ("STX", "usp", UNDO, "v"), ("STX", "usp", UNDO + 1, "o"), ("STX", "usp", UNDO + 2, "op"),
-        ("LDX", "ob", "v", BASE), ("STX", "usp", UNDO + 3, "ob"), ("ALUI", "add", "usp", "usp", 4),
-        ("ALUI", "add", "cur", "cur", 1), ("STX", "v", LOC, "cur"), ("STX", "v", PTR, "ptd"), ("STX", "v", BASE, "bsz"), ("COPYW", "s", "cur"))
+        ("LDX", "ob", "v", BASE), ("STX", "usp", UNDO + 3, "ob"), ("LDX", "oa", "v", ARR), ("STX", "usp", UNDO + 4, "oa"),
+        ("ALUI", "add", "usp", "usp", 5), ("STX", "v", ARR, "dar"),
+        ("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("STX", "v", PTR, "ptd"), ("STX", "v", BASE, "bsz"), ("COPYW", "s", "cur"))
     up, nx = p.fresh("mx"), p.fresh("dn")
     p.branch({2: up}, nx, [("CMP", "cur", "max")])
     p.cur = up
@@ -333,7 +337,7 @@ def unwind(p, saved):         # restore the scope to undo depth W[saved]
     p.label(top)
     p.branch({2: body}, done, [("CMP", "usp", saved)])
     p.cur = body
-    p.a(("ALUI", "sub", "usp", "usp", 4), ("LDX", "v", "usp", UNDO), ("LDX", "o", "usp", UNDO + 1),
+    p.a(("ALUI", "sub", "usp", "usp", 5), ("LDX", "v", "usp", UNDO), ("LDX", "o", "usp", UNDO + 1), ("LDX", "oa", "usp", UNDO + 4), ("STX", "v", ARR, "oa"),
         ("LDX", "op", "usp", UNDO + 2), ("LDX", "ob", "usp", UNDO + 3), ("STX", "v", LOC, "o"), ("STX", "v", PTR, "op"),
         ("STX", "v", BASE, "ob")).goto(top)
     p.cur = done
@@ -385,6 +389,21 @@ def vwidth(p, ptr, bs, tab):  # a variable's access: W[ptr] >= 1 -> pointer size
         q = P(nx)
     q.o(tab[SZ["int"]]).goto(d)
     p.cur = d
+
+
+def vload(p):                 # a variable's value: an array's is its address (decay, no load: measured)
+    ld, dn = p.fresh("vl"), p.fresh("va")
+    p.branch({1: dn}, ld, [("CMPI", "ar", 1)])
+    p.cur = ld
+    vwidth(p, "pt", "pb", LD)
+    p.goto(dn)
+    p.cur = dn
+
+
+def noarr(p):                 # assignment / ++ -- / op= to an array: not C
+    ok = p.fresh("na")
+    p.branch({1: "DEADR"}, ok, [("CMPI", "ar", 1)])
+    p.cur = ok
 
 
 def noptr(p):                 # arithmetic on a pointer is not in this step
@@ -534,11 +553,20 @@ def expr():
     p = P("PV.amq")
     lookup(p, "ps", "pe")
     addr(p, "r0")
-    p.a(("ALUI", "add", "pt", "pt", 1)).call("NEXT").call("NOPOST").ret()
+    p.call("NEXT").tok({"[": "PV.amx"}, "PV.amv")
+    P("PV.amv").a(("ALUI", "add", "pt", "pt", 1)).call("NOPOST").ret()
+    p = P("PV.amx")     # &a[i]: the element's address, as a[i] without the load (measured)
+    vload(p)
+    p.call("IDX").a(("ALUI", "add", "pt", "pt", 1)).call("NOPOST").ret()
     p = P("PV.id")
     lookup(p, "ps", "pe")
     addr(p, "r0")
+    ld, dn = p.fresh("pl"), p.fresh("pd")
+    p.branch({1: dn}, ld, [("CMPI", "ar", 1)])
+    p.cur = ld
     width(p, "pt", "  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n")
+    p.goto(dn)
+    p.cur = dn
     p.call("NEXT").call("NOPOST").ret()
     p = P("NOPOST")
     p.tok({"(": "DEADX", "++": "DEADX", "--": "DEADX"}, "RET")
@@ -579,13 +607,13 @@ def expr():
     p = P("IXV")      # id '[' ... as an rvalue
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    vwidth(p, "pt", "pb", LD)
+    vload(p)
     p.call("IDX").call("LDA").call("NOPOST").ret()
     for nm, extra in (("EXPR.ix", {}), ("VEXPR.ixs", {";": "RET", ",": "EXPR.dis", ")": "EXPR.dis"})):
         p = P(nm)     # id '[' ... = e  |  as an rvalue; statement level `p[i];` computes the address only (measured)
         lookup(p, "sps", "spe")
         addr(p, "r0")
-        vwidth(p, "pt", "pb", LD)
+        vload(p)
         p.call("IDX").tok(dict([("=", "EXPR.ixa")] + [(o + "=", "EXPR.ixc") for o in CASOPS], **extra), "EXPR.ixu")
     g.on("EXPR.ixc", range(257), "DEAD", rej("not covered: compound assignment to a subscript"), "r")
     P("EXPR.ixu").call("LDA").call("NOPOST").call("BINCONT").goto("EXPR.tail")
@@ -636,6 +664,7 @@ def expr():
     g.on("EXPR.bad", range(257), "DEAD", rej("not covered: assignment to a non-identifier"), "r")
     p = P("EXPR.as")
     lookup(p, "sps", "spe")
+    noarr(p)
     addr(p, "r0")
     p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
     vwidth(p, "pt", "pb", ST)
@@ -643,6 +672,7 @@ def expr():
     p = P("NOPTR")
     noptr(p)
     p.ret()
+    g.on("DEADR", range(257), "DEAD", rej("not covered: assignment to an array"), "r")
     g.on("DEADP", range(257), "DEAD", rej("not covered: pointer arithmetic"), "r")
 
     # UNARY
@@ -721,7 +751,7 @@ def expr():
     p = P("IT.var")
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    vwidth(p, "pt", "pb", LD)
+    vload(p)
     p.ret()
     p = P("IT.call")
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
@@ -796,13 +826,13 @@ def printf():
     p.tok({",": "PF.arg", ")": "PF.go"}, ("rej", "not covered: printf format"))
     p = P("PF.arg")
     p.vpush("na", "pb").call("NEXT").call("EXPR").vpop("na", "pb")
-    p.a(("ALUI", "add", "cur", "cur", 1), ("COPYW", "s", "cur"))
+    p.a(("ALUI", "add", "cur", "cur", 8), ("COPYW", "s", "cur"))
     up, nx = p.fresh("mx"), p.fresh("dn")
     p.branch({2: up}, nx, [("CMP", "cur", "max")])
     p.cur = up
     p.a(("COPYW", "max", "cur")).goto(nx)
     p.cur = nx
-    p.o("  store64 [r6-").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("], r0\n")
+    p.o("  store64 [r6-").a(("COPYW", "n", "s")).call("PRN").o("], r0\n")
     p.vpush("s").a(("ALUI", "add", "na", "na", 1))
     p.tok({",": "PF.arg", ")": "PF.go"}, ("rej", "not covered: printf arguments"))
     p = P("PF.go")
@@ -828,7 +858,7 @@ def printf():
     p.branch({0: "PFW.d1"}, ("rej", "not covered: printf arguments"), [("CMP", "ai", "na")])
     p = P("PFW.d1")
     p.a(("ALU", "add", "t", "pb", "ai"), ("LDX", "s", "t", VS), ("ALUI", "add", "ai", "ai", 1))
-    p.o("  load64 r0, [r6-").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("]\n  .print r0\n").goto("PFW")
+    p.o("  load64 r0, [r6-").a(("COPYW", "n", "s")).call("PRN").o("]\n  .print r0\n").goto("PFW")
     p = P("PFW.e1")
     p.call("PFW.flush")
     p.branch({1: "PFW.e2"}, ("rej", "not covered: printf arguments"), [("CMP", "ai", "na")])
@@ -920,9 +950,34 @@ def stmt():
     P("S.dw").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).goto("S.dnx")
     p = P("D.one")
     stars(p, "D.id")
-    p = P("D.id")
-    declare(p)
-    p.call("NEXT").tok({"=": "D.init"}, "D.next")
+    p = P("D.id")     # T x | T x[N]: an array takes N * (element size) bytes, packed (measured: char c[5]; int y; -> c at 5, y at 13)
+    p.a(("COPYW", "dps", "ps"), ("COPYW", "dpe", "pe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("NEXT").tok({"[": "D.arr"}, "D.decl")
+    p = P("D.decl")
+    declare(p, "dps", "dpe")
+    p.tok({"=": "D.init"}, "D.next")
+    p = P("D.arr")
+    p.call("NEXT").tok({TK_NUM: "D.an"}, ("rej", "not covered: array bound"))
+    p = P("D.an")
+    p.a(("COPYW", "dn", "nv")).call("NEXT").expect("]").call("NEXT")
+    ep, e1 = p.fresh("ep"), p.fresh("e1")
+    p.branch({(1, 2): ep}, e1, [("CMPI", "ptd", 1)])
+    P(ep).a(("LDI", "es", PSZ)).goto("D.asz")
+    q = P(e1)
+    for n in sorted(set(SZ.values())):
+        for b in ((n, UNS + n) if n in (1, 2, 8) else (n,)):
+            hit, nx = q.fresh("es"), q.fresh("en")
+            q.branch({1: hit}, nx, [("CMPI", "bsz", b)])
+            P(hit).a(("LDI", "es", n)).goto("D.asz")
+            q = P(nx)
+    q.goto("D.abad")
+    g.on("D.abad", range(257), "DEAD", rej("not covered: array of an unknown element type"), "r")
+    p = P("D.asz")
+    p.a(("ALU", "mul", "dsz", "dn", "es"), ("LDI", "dar", 1), ("ALUI", "add", "ptd", "ptd", 1)).call("D.decl1")
+    p.a(("ALUI", "sub", "ptd", "ptd", 1)).tok({"=": "D.ainit"}, "D.next")
+    g.on("D.ainit", range(257), "DEAD", rej("not covered: array initialiser"), "r")
+    p = P("D.decl1")
+    declare(p, "dps", "dpe")
+    p.ret()
     p = P("D.init")
     p.vpush("s", "ptd", "bni", "bsz").call("NEXT").call("EXPR").vpop("s", "ptd", "bni", "bsz")
     addr(p, "r1")
@@ -1116,14 +1171,15 @@ def unit():
     p = P("FN.pst")
     stars(p, "FN.pid")
     p = P("FN.pid")
+    p.a(("LDI", "dsz", 8), ("LDI", "dar", 0))
     declare(p)
     p.call("NEXT").tok({",": "FN.comma", ")": "FN.close"}, ("rej", "not covered: parameter list"))
     P("FN.comma").call("NEXT").goto("FN.par")
     p = P("FN.close")
-    p.branch({2: "FN.many"}, "FN.hd", [("CMPI", "cur", 6)])
+    p.branch({2: "FN.many"}, "FN.hd", [("CMPI", "cur", 48)])
     g.on("FN.many", range(257), "DEAD", rej("not covered: more than 6 parameters"), "r")
     p = P("FN.hd")
-    p.a(("COPYW", "np", "cur")).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
+    p.a(("ALUI", "div", "np", "cur", 8)).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
     # prototype NAME(...);  -- no code; the name is not a definition
     p = P("FN.proto")
     p.a(("LDI", "z0", 0), ("STX", "fv", FND, "z0"), ("LDI", "z", 0))
@@ -1142,7 +1198,7 @@ def unit():
     p.o("], r").a(("ALUI", "sub", "n", "k2", 1)).call("PRN").o("\n").goto("FN.st")
     p = P("FN.go")
     p.call("BLOCK").o("R").num("rl").o(":\n  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n")
-    p.a(("ALUI", "mul", "t", "max", 8), ("STX", "fn", FR, "t"), ("ALUI", "add", "fn", "fn", 1), ("LDI", "z", 0))
+    p.a(("ALUI", "add", "t", "max", 7), ("ALUI", "div", "t", "t", 8), ("ALUI", "mul", "t", "t", 8), ("STX", "fn", FR, "t"), ("ALUI", "add", "fn", "fn", 1), ("LDI", "z", 0))
     unwind(p, "z")
     p.a(("CMP", "fv", "mainid"))
     p.branch({1: "FN.main"}, "TOP")
