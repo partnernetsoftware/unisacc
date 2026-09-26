@@ -8,7 +8,7 @@ names; integers).  Output: the machine code bytes, as unisa/emit_x86.encode
 writes them.  Ops: mov, imm, add64/sub64/xor64/and64/or64, mul64, load64,
 store64, .ld/.st (1, 2, 4, 8 bytes), setcc, register shifts, ret, jump/jumpz,
 call/callr, push/pop, nop, .frame, .zero, setreg imm/reg, spinit without an
-address, .div/.mod/.udiv/.umod, and FP_OPS (via fp.py). Other forms are rejected as not covered.
+address, .div/.mod/.udiv/.umod, FP_OPS (via fp.py), and non-WinAPI gate. Other forms are rejected as not covered.
 
 Read, not copied: catalog.ENCSPEC's alu2 opcodes and setcc bytes, and
 emit_x86.NUM's register numbers (the reference's declaration, read at generation
@@ -42,6 +42,7 @@ g, P, EOF = E.g, E.P, 256
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from unisa.catalog import ENCSPEC   # noqa: E402  (generation time only)
 from unisa.emit_x86 import NUM      # noqa: E402
+from tins import META as META_KEYS
 from fp import FP_IDS, install as install_fp  # local delta generator, not an encoder oracle
 
 X86 = ENCSPEC["x86_64"]
@@ -53,7 +54,7 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD = range(1, 24)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD, C_GATE = range(1, 25)
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -195,6 +196,7 @@ def build():
     p = P("START")
     classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     classes.update(FP_IDS)
+    classes["gate"] = C_GATE
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -213,6 +215,8 @@ def build():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", n + 1), ("STX", "t", REGN, "u"))
     for w, nm in (("imm", "tagimm"), ("reg", "tagreg"), ("role", "role"), ("form", "form"), ("reloc", "reloc"), ("rel32", "rel32")):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
+    for w in ("true", "false", "winapi", "carry", *[k for k in META_KEYS if k not in ("role", "form", "reloc", "carry", "winapi")]):
+        p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     p.a(("LDI", "npc", 0), ("LDI", "lnum", 0)).goto("LINE")
@@ -229,7 +233,7 @@ def build():
     P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
     g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
     p = P("LW.i")
-    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("OLEN", "omark"),
+    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("LDI", "gcarry", 0), ("OLEN", "omark"),
         ("ALUI", "add", "lnum", "lnum", 1))
     p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
     P("LW.i1").branch({1: "BR.c"}, "LW.i2", [("CMP", "opid", "id_call")])
@@ -312,28 +316,49 @@ def build():
     g.on("ARG.sep", NL, "ARGS.d", [])
     g.els("ARG.sep", "ARG", [])                 # a token after a space: meta (checked there) or an error
     # META: `key=value` after the args.  role: informational, ignored.  form: informational for the
-    # ops of these slices (the x86 encoder reads it only for gate, which is not migrated).  reloc:
-    # must be rel32.  Any other key -- carry, gate, or unknown -- is rejected, never dropped.
+    # ordinary ops. For gate, winapi is rejected and carry must be true/false.
+    # Other declared gate metadata is informational for the non-WinAPI encoder;
+    # reloc must be rel32. Unknown keys and duplicate keys are rejected.
     g.on("META.v", [32] + NL, "META.e", [("MARK", "vs"), ("MARK", "ve")])
     g.els("META.v", "META.vv", [("MARK", "vs")])
     g.on("META.vv", [32] + NL, "META.e", [("MARK", "ve")])
     g.els("META.vv", "META.vv", [("ADV",)])
     p = P("META.e")
     p.a(("INTERN", "mk", "ts", "ke")).call("MSEEN").branch({1: "META.ok"}, "META.k2", [("CMP", "mk", "id_role")])
-    P("META.k2").branch({1: "META.ok"}, "META.k3", [("CMP", "mk", "id_form")])
-    P("META.k3").branch({1: "META.rl"}, "DEAD.meta", [("CMP", "mk", "id_reloc")])
+    P("META.k2").branch({1: "META.form"}, "META.k3", [("CMP", "mk", "id_form")])
+    P("META.k3").branch({1: "META.rl"}, "META.gate", [("CMP", "mk", "id_reloc")])
     P("META.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
     g.on("DEAD.meta", range(257), "DEAD", E.rej("not covered: meta this slice does not take (or reloc other than rel32)"), "r")
+    P("META.form").branch({1: "META.gf"}, "META.ok", [("CMPI", "cls", C_GATE)])
+    P("META.gf").a(("INTERN", "mv", "vs", "ve")).branch({1: "DEAD.meta"}, "META.ok", [("CMP", "mv", "id_winapi")])
+    P("META.gate").branch({1: "META.gkeys"}, "DEAD.meta", [("CMPI", "cls", C_GATE)])
+    P("META.gkeys").branch({1: "META.carry"}, "META.gother", [("CMP", "mk", "id_carry")])
+    p = P("META.gother")
+    for k in META_KEYS:
+        if k in ("role", "form", "reloc", "carry"): continue
+        nx = "META.after." + k
+        p.branch({1: "META.ok"}, nx, [("CMP", "mk", "id_" + k)])
+        p = P(nx)
+    p.goto("DEAD.meta")
+    P("META.carry").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ct"}, "META.cf", [("CMP", "mv", "id_true")])
+    P("META.ct").a(("LDI", "gcarry", 1)).goto("META.ok")
+    P("META.cf").branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_false")])
     P("META.ok").goto("ARG.sep")
     # ARGS.d: at the end of the line: the class decides
     p = P("ARGS.d")
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
               C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
-              C_SETREG: "E.setreg", C_SPINIT: "E.spinit",
+              C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate",
               C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
               **{v: "FP." + k for k, v in FP_IDS.items()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
+    P("E.gate").branch({1: "EG.emit"}, "DEAD.meta", [("CMPI", "na", 0)])
+    p = byte(byte(P("EG.emit"), 0x0f), 0x05)
+    p.branch({1: "EG.carry"}, "NEXTL", [("CMPI", "gcarry", 1)])
+    p = P("EG.carry")
+    for b in (0x73, 3, 0x48, 0xf7, 0xd8): byte(p, b)
+    p.goto("NEXTL")
     # mov d, s
     p = P("E.mov")
     p.a(("LDI", "al_o", 0x89), ("COPYW", "al_d", "a0"), ("COPYW", "al_s", "a1")).call("ALU").goto("NEXTL")

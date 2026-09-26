@@ -29,7 +29,7 @@ A few terms used in the table:
 | setreg (imm/reg) | migrated | hand | no |
 | setreg (addr/mem), setmem, .lea | not migrated | hand (rip-relative) | **yes**: text_va, the shift, syms |
 | itoa | not migrated | hand (a fixed digit loop) | **yes**: data addresses |
-| gate, non-winapi form | not migrated | hand (0F 05 syscall; on Darwin with `carry`, jnc +3 / neg rax) | no |
+| gate, non-winapi form | migrated | hand (0F 05 syscall; on Darwin with `carry`, jnc +3 / neg rax) | no |
 | gate, winapi form | not migrated | hand (_winapi) | **yes**: imports, text_va |
 | spinit with no second operand | migrated | hand (mov rN, rsp) | no |
 | spinit with a second operand (Windows) | not migrated | hand (rip-relative lea) | **yes** |
@@ -38,7 +38,7 @@ A few terms used in the table:
 
 (Corrected after cdx's review: the argument set-up and the data cells are lowering's and other ops' business, not a dependency of the gate's own encoding.)
 
-**What remains without a layout dependency:** non-WinAPI gate, including the Darwin carry handling.
+**No remaining dispatch branch is address-independent:** non-WinAPI gate is now covered, including the Darwin carry handling. This does not mean arbitrary operands or metadata are all covered.
 
 **Other unmigrated forms need addresses.** It should come after a declared, external layout input (text_va, data_va, the shift, symbol addresses and imports, given as input and not taken from the reference's final bytes), or together with E6.
 
@@ -72,3 +72,13 @@ through Rosetta. It includes unordered comparisons and high unsigned
 conversions, but is not exhaustive over floating values or rounding modes.
 Other than macOS and Linux x86_64, execution is explicitly reported NOT RUN.
 Delta: 723 states, JSON 3,697,112 bytes; the product .com remains unchanged.
+
+## Non-WinAPI gate
+
+The delta emits syscall and conditionally jnc/neg rax for Darwin. A fixed hand
+byte fixture checks carry=true, false, then omitted (per-instruction reset).
+`x86-gate.txt` retains all gate instructions and metadata extracted from real
+hello lowering for Linux and macOS x86_64. Both executors match reference bytes.
+This does not execute syscalls. WinAPI and non-boolean carry remain rejected.
+Other known gate metadata is ignored only because the non-WinAPI reference
+encoder does not consume it. No executor action added.

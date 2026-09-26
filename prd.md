@@ -1931,3 +1931,14 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 - This is not complete test coverage: E3 remains partial; E5 is not lowering or
   full six-target image generation. These changes have not rerun Linux/Windows.
   No product source changed, so the existing .com artifact is unchanged.
+
+### E5 non-WinAPI gate continuation (2026-09-26)
+
+- Migrated syscall and Darwin carry correction as delta transitions, no new
+  executor primitive. Known non-WinAPI metadata accepted; winapi and malformed
+  carry rejected. `exec/enc/check.sh`: 38 ok, 0 bad, including the 550 independent
+  FP execution cases retained from the preceding batch. Syscall bytes compared,
+  syscall execution not claimed.
+- Real hello/fib lowering audit now identifies address-dependent forms as the
+  next encoder boundary: .lea, setmem, setreg mem, argsave, argvget. Full lowering,
+  address layout and image generation remain to be migrated; no product switch.
