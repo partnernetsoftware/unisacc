@@ -76,4 +76,6 @@ compiler through this route does not switch its implementation to the executor.
 the data header also records osx. Both x86_64 and arm64 lowering are compared
 with the typed reference by fullcheck.sh / armcheck.sh. They use the same
 hello/fib input tapes, isolating lowering from target-specific preprocessing.
-The source-to-image script is still Linux-only until Mach-O writing is migrated.
+The source-to-image script now accepts these Darwin targets and writes `.macho`
+outputs; E2 selects Darwin macros too. `selfcheck.sh` compares target-specific
+tape and image, and runs N1=N2=N3 where the host can execute the target.

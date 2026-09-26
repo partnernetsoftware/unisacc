@@ -195,3 +195,15 @@ relocation and sparse extent are shared with ELF; SHA/page signature is all
 ordinary delta actions. `machocheck.sh` compares full bytes, independently
 checks each page hash, and executes hello/fib. `ARCH=x86_64` selects the other
 encoder. These tests still use Python lowering as their input producer.
+
+
+## Complete macOS source route
+
+`TARGET=osx/arm64 exec/pipeline/elf.sh OUT unisacc.c` now selects Darwin E2,
+lowering and Mach-O output (`OUT/unisacc.macho`). The historical script name
+remains for compatibility with Linux callers. Self-source output is 743,202 B,
+sha256 d2bf5cc5f485f3b7ad16f01dbd9b459d4a130d84206c9dea1e8fa1f00425cc55.
+Reference bytes and native N1=N2=N3 match. The x86_64 route is 693,666 B,
+sha256 f971def83f4cb8e6cb085c84c62ce28b8c36637b3a5eb8188bd7b41474f6409f,
+with the same checks under Rosetta. These compile the existing C product source;
+they are not the new executor/model packaged as the product.

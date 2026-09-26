@@ -2441,3 +2441,29 @@ states1189. Both ELF suites reran green after shared changes. Registered
 exec-macharm/exec-machx86; only targeted suites run this batch, not full gate.
 Input producer is still Python lowering for these tests; source-to-Mach-O,
 self-bootstrap and E7 product adoption are not claimed. Product .com unchanged.
+
+
+### S-17 both macOS source routes/self-bootstrap (2026-09-27)
+
+elf.sh now selects all four POSIX OS/arch combinations, preserving Linux's
+.elf path and writing .macho for Darwin. E2 supplies __APPLE__, __MACH__,
+__unix__, the architecture macro, __LP64__ and __UNISA__; selfcheck explicitly
+checks all six values and absence of other target macros using both E2 and
+product -E. It compares the target-specific -O2 tape and full image.
+
+osx/arm64: 743,202 B, SHA256
+d2bf5cc5f485f3b7ad16f01dbd9b459d4a130d84206c9dea1e8fa1f00425cc55.
+osx/x86_64: 693,666 B, SHA256
+f971def83f4cb8e6cb085c84c62ce28b8c36637b3a5eb8188bd7b41474f6409f.
+Both six-delta images equal the reference; N1 compiles unisacc.c to N2, N2 to
+N3 with -O2 -b TARGET, all bytes identical. ARM native, x86 via Rosetta on
+macOS arm64. Artifacts /tmp/unisacc-osx-{arm,x86}-source. Product source is
+still 7d50875. Added native bootstrap to supported-host selfcheck, otherwise
+explicitly reports not executed. Individual commands remain <=60 s.
+
+Mach-O additionally rejects a header/text size mismatch, padding overrun and
+file/signature extent exceeding 32-bit fields. Both Darwin selfchecks passed
+after these guards; Linux x86 source selfcheck still 671,404 B equal. Registered
+exec-macself and exec-macxself; no new full-gate result claimed for this batch.
+Windows/PE and executor/model product adoption remain outstanding; tables are
+not neural networks. No product-source/.com changes, no push/release.

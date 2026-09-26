@@ -1,6 +1,6 @@
 """E2 feasibility, MINIMUM slice: the preprocessor as one finite delta.
 
-    python3 exec/pp/gen.py [out.json] [lnx/x86_64|lnx/arm64]      -> writes the table, prints sizes
+    python3 exec/pp/gen.py [out.json] [OS/ARCH]      -> writes the table, prints sizes
 
 Machine and primitives: exec/pp/sim.py (generic, option A); design:
 research/e2-pp-delta.md.  The delta runs the reference's passes in order,
@@ -32,7 +32,7 @@ Derived, not typed in: the directive vocabulary from DIRV
 (kernel/unisa_model.inc), and what each (directive, defined) pair does from
 weights/gold/pp.tsv (the shipped pp table).  Transcribed from
 src/front_pp.c: byte classes, the predefined macros of predef() for the
-selected Linux target (default x86_64), the include search order.
+selected POSIX target (default x86_64), the include search order.
 """
 import json
 import os
@@ -593,9 +593,11 @@ def build_hx(g, NC):
 
 
 def build(target="lnx/x86_64"):
-    if target not in ("lnx/x86_64", "lnx/arm64"):
+    if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64"):
         raise ValueError("unsupported preprocessor target: "+target)
-    predef=["__aarch64__" if target=="lnx/arm64" and x=="__x86_64__" else x for x in PREDEF]
+    predef=list(PREDEF)
+    if target.startswith("osx/"):predef[:3]=["__APPLE__","__MACH__","__unix__"]
+    if target.endswith("/arm64"):predef[3]="__aarch64__"
     g = G()
     NC = lambda what: [("REJECT", "not covered: " + what)]   # noqa: E731
 
@@ -693,7 +695,7 @@ def build(target="lnx/x86_64"):
 
     # ---- P3: directives -------------------------------------------------------
     g.els("P3START", "P3S2", [("RLD", "RUN")])
-    # predef(): six object-like macros with body "1" for selected Linux arch
+    # predef(): six object-like macros with body "1" for selected POSIX target
     chain = "P3PD0"
     g.r("P3S2", {0: (chain, [("LDI", "RUN", 1), ("LDI", "CURSEG", 0), ("SETOT", "CURSEG")]),
                  1: ("P3L0", [("LDI", "Z", 0), ("SPAN2", "Z", "RESUME"), ("JUMP", "RESUME")])})
@@ -1173,7 +1175,7 @@ def sizes(g):
 
 def main():
     if len(sys.argv)>3:
-        sys.exit("usage: gen.py [OUT.json] [lnx/x86_64|lnx/arm64]")
+        sys.exit("usage: gen.py [OUT.json] [OS/ARCH]")
     g = build(sys.argv[2] if len(sys.argv)>2 else "lnx/x86_64")
     out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/e2delta.json"
     json.dump({"start": "START", "states": {k: [m, {str(kk): list(v) for kk, v in r.items()}]

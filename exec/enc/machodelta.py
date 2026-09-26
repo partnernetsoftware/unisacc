@@ -26,6 +26,8 @@ def install(E,byte,arch):
     p.a(('A64I','add','mh_datava','mh_text',M.VMADDR),('A64','add','mh_linkva','mh_datava','mh_vm'),
         ('A64','add','mh_bssva','mh_datava','stored'),('A64','sub','mh_bsslen','memlen','stored'),
         ('A64I','add','mh_entry','entryoff',M.HDRS(arch)))
+    p.a(('A64','add','mh_filesz','mh_sigoff','mh_siglen'),('LDI','mh_max',4294967295)).branch({2:'DEAD.image'},'MH.header',[('C64U','mh_filesz','mh_max')])
+    p=P('MH.header')
     def field(w,v,big=False):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','mb_v',v),('LDI','mb_n',w)).call('MB.big' if big else 'MB.little')
     def fields(items,big=False):
@@ -56,7 +58,9 @@ def install(E,byte,arch):
     fields([(4,M.LC_DYSYMTAB),(4,80)]+[(4,0)]*18)
     fields([(4,M.LC_CODE_SIGNATURE),(4,16),(4,'mh_sigoff'),(4,'mh_siglen')])
     for _ in range(M.SLACK):byte(p,0)
-    p.a(('INPUSH','text_blob')).call('MH.copy').a(('COPYW','mh_pad','mh_text')).call('MH.pad').a(('LDI','di',0)).goto('MH.data')
+    p.a(('OLEN','mh_pos')).branch({1:'MH.text'},'DEAD.image',[('CMPI','mh_pos',M.HDRS(arch))])
+    p=P('MH.text').a(('INPUSH','text_blob')).call('MH.copy').a(('OLEN','mh_pos')).branch({1:'MH.textpad'},'DEAD.image',[('C64','mh_pos','mh_end')])
+    p=P('MH.textpad').a(('COPYW','mh_pad','mh_text')).call('MH.pad').a(('LDI','di',0)).goto('MH.data')
     P('MH.data').branch({0:'MH.byte'},'MH.afterdata',[('CMP','di','stored')])
     P('MH.byte').a(('LDX','db','di',DATA),('OUTW','db'),('ALUI','add','di','di',1)).goto('MH.data')
     p=P('MH.afterdata').a(('COPYW','mh_pad','mh_sigoff')).call('MH.pad')
@@ -73,7 +77,7 @@ def install(E,byte,arch):
     P('MH.last').a(('COPYW','mh_pageend','mh_sigoff')).goto('MH.hashpage')
     P('MH.hashpage').a(('INPUSH','mh_blob'),('BLOBSAVE','sh_blob','mh_page','mh_pageend'),('INPOP',)).call('SHA256').a(('COPYW','mh_page','mh_pageend')).goto('MH.hash')
     g.on('MH.copy',[256],'RET',[('INPOP',)]);g.els('MH.copy','MH.copy',[('COPY',),('ADV',)])
-    P('MH.pad').a(('OLEN','mh_pos')).branch({0:'MH.zero'},'RET',[('C64','mh_pos','mh_pad')])
+    P('MH.pad').a(('OLEN','mh_pos')).branch({0:'MH.zero',1:'RET'},'DEAD.image',[('C64','mh_pos','mh_pad')])
     byte(P('MH.zero'),0).goto('MH.pad')
     P('MB.little').branch({2:'MB.lebyte'},'RET',[('CMPI','mb_n',0)])
     P('MB.lebyte').a(('OUTW','mb_v'),('A64I','shr','mb_v','mb_v',8),('ALUI','sub','mb_n','mb_n',1)).goto('MB.little')

@@ -60,6 +60,8 @@ job exec-lower ./exec/lower/fullcheck.sh                        # typed full Lin
 job exec-armlower ./exec/lower/armcheck.sh                     # ARM ABI, sext/immediate fusion and real tapes
 job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas
 job exec-armself env TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines
+job exec-macself env TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh # Mach-O source route and native bootstrap
+job exec-macxself env TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh # x86/Rosetta bootstrap
 job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 complete source-to-ELF paths
 job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
