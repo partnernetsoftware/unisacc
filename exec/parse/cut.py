@@ -39,7 +39,7 @@ def main():
     for k in range(lo, len(out)):
         f = os.path.join(tmp, "cut%d.c" % k)
         open(f, "w").write("\n".join(out[:k + 1]) + "\nint main() { return 0; }\n")
-        r = subprocess.run(["python3", "exec/parse/compare.py", "/tmp/e3delta.json", f],
+        r = subprocess.run(["python3", "exec/parse/compare.py", os.environ.get("E3DELTA", "/tmp/e3delta.json"), f],
                            capture_output=True, text=True, timeout=50)
         last = r.stdout.strip().splitlines()
         res = [l for l in last if l.startswith("files")][0]
