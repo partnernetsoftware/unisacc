@@ -66,7 +66,7 @@ FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 
 WORDS = ["type=int", "type=void", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
-         "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC)
+         "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
@@ -524,7 +524,8 @@ def printf():
 def stmt():
     p = P("STMT")
     p.tok({"{": "BLOCK", "type": "S.decl", ";": "S.empty", "return": "S.ret", "if": "S.if",
-           "while": "S.while", "for": "S.for"}, "S.expr")
+           "while": "S.while", "for": "S.for",
+           "do": "S.do", "break": "S.brk", "continue": "S.cnt"}, "S.expr")
     P("S.empty").call("NEXT").ret()
     P("S.expr").call("VEXPR").expect(";").call("NEXT").ret()
     # block: '{' ... '}' with its own scope
@@ -553,7 +554,23 @@ def stmt():
     # return e;
     p = P("S.ret")
     p.call("NEXT").tok({";": "S.retv"}, "S.rete")
-    g.on("S.retv", range(257), "DEAD", rej("not covered: return without a value"), "r")
+    p = P("S.retv")
+    p.o("  jump R").num("rl").o("\n").call("NEXT").ret()
+    # break; continue; -- jump to the innermost loop's labels (0: none)
+    for nm, sl in (("S.brk", "brk"), ("S.cnt", "cnt")):
+        p = P(nm)
+        p.branch({1: "S.noloop"}, nm + "1", [("CMPI", sl, 0)])
+        p = P(nm + "1")
+        p.o("  jump ").lab(sl).o("\n").call("NEXT").expect(";").call("NEXT").ret()
+    g.on("S.noloop", range(257), "DEAD", rej("not covered: break/continue outside a loop"), "r")
+    # do s while (e);  labels: a top, b break, c continue
+    p = P("S.do")
+    p.vpush("brk", "cnt").newlab("a").newlab("b").newlab("c").a(("COPYW", "brk", "b"), ("COPYW", "cnt", "c"))
+    p.lab("a").o(":\n").vpush("a", "b", "c").call("NEXT").call("STMT").vpop("a", "b", "c")
+    p.lab("c").o(":\n").vpush("a", "b", "c").expect("while").call("NEXT").expect("(").call("NEXT").call("CEXPR")
+    p.expect(")").call("NEXT").expect(";").vpop("a", "b", "c")
+    p.o("  jumpz r0, ").lab("b").o("\n  jump ").lab("a").o("\n").lab("b").o(":\n").vpop("brk", "cnt")
+    p.call("NEXT").ret()
     p = P("S.rete")
     p.call("CEXPR").expect(";")
     p.o("  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R").num("rl").o("\n")
@@ -569,17 +586,17 @@ def stmt():
     p.vpop("b").lab("b").o(":\n").ret()
     # while (e) s
     p = P("S.while")
-    p.newlab("a").newlab("b").lab("a").o(":\n").vpush("a", "b")
+    p.vpush("brk", "cnt").newlab("a").newlab("b").a(("COPYW", "brk", "b"), ("COPYW", "cnt", "a")).lab("a").o(":\n").vpush("a", "b")
     p.call("NEXT").expect("(").call("NEXT").call("CEXPR").expect(")")
     p.vpop("a", "b").o("  jumpz r0, ").lab("b").o("\n").vpush("a", "b").call("NEXT").call("STMT")
-    p.vpop("a", "b").o("  jump ").lab("a").o("\n").lab("b").o(":\n").ret()
+    p.vpop("a", "b").o("  jump ").lab("a").o("\n").lab("b").o(":\n").vpop("brk", "cnt").ret()
     # for (e; e; e) s -- the step is parsed after the body: skip it, run the
     # body, JUMP the reader back to it, then JUMP forward past the body
     p = P("S.for")
-    p.call("NEXT").expect("(").call("NEXT").tok({";": "F.no", "type": "F.no"}, "F.init")
+    p.vpush("brk", "cnt").call("NEXT").expect("(").call("NEXT").tok({";": "F.no", "type": "F.no"}, "F.init")
     g.on("F.no", range(257), "DEAD", rej("not covered: for clause"), "r")
     p = P("F.init")
-    p.call("VEXPR").expect(";").newlab("a").newlab("b").newlab("c").lab("a").o(":\n")
+    p.call("VEXPR").expect(";").newlab("a").newlab("b").newlab("c").a(("COPYW", "brk", "b"), ("COPYW", "cnt", "c")).lab("a").o(":\n")
     p.vpush("a", "b", "c").call("NEXT").tok({";": "F.no"}, "F.cond")
     p = P("F.cond")
     p.call("CEXPR").expect(";").vpop("a", "b", "c").o("  jumpz r0, ").lab("b").o("\n").vpush("a", "b", "c")
@@ -596,7 +613,7 @@ def stmt():
     p.vpush("sp").call("NEXT").call("STMT").vpop("sp").a(("COPYW", "ep", "tpos"), ("JUMP", "sp"))
     p.vpush("ep").call("NEXT").vpop("ep").vpop("a", "b", "c").lab("c").o(":\n").vpush("a", "b", "c", "ep")
     p.call("VEXPR").expect(")").vpop("a", "b", "c", "ep").o("  jump ").lab("a").o("\n").lab("b").o(":\n")
-    p.a(("JUMP", "ep")).call("NEXT").ret()
+    p.a(("JUMP", "ep")).vpop("brk", "cnt").call("NEXT").ret()
 
 
 def unit():
@@ -604,8 +621,8 @@ def unit():
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"))
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
-                      ("LDI", "vsp", 0), ("LDI", "sk", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "eof": "END"}, ("rej", "not covered: top-level construct"))
+                      ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "eof": "END"}, ("rej", "not covered: top-level construct"))
     p = P("FN")
     p.call("NEXT").tok({TK_ID: "FN.id"}, ("rej", "not covered: declarator"))
     p = P("FN.id")
