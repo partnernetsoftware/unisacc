@@ -1455,7 +1455,9 @@ def build():
     P("MB.dot2").goto("MEMB")          # s.inner.m: the inner struct's address, then its member
     P("MB.ptr").call("LOADV").goto("MEMB")
     P("MB.ld").branch({1: "MB.ld1"}, "MB.arr", [("CMPI", "marr", 0)])
-    P("MB.ld1").branch({1: "MB.address"}, "MB.value", [("CMPI", "amp", 1)])
+    # &s.ptr[i] needs the pointer value before taking the final element address.
+    P("MB.ld1").tok({"[": "MB.value"}, "MB.addrtest")
+    P("MB.addrtest").branch({1: "MB.address"}, "MB.value", [("CMPI", "amp", 1)])
     P("MB.address").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0)).ret()
     P("MB.value").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
     P("MB.arr").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "rkok", 0)).branch({1: "MB.arrayaddr"}, "POSTIX", [("CMPI", "amp", 1)])   # s.arr: the address, decayed
