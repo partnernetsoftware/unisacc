@@ -2719,3 +2719,12 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - 扩清单前旧 218 E3 全通过；最终 224/224 equal（含真实 runtime）。chain/ELF 79→85，全部一致。新探针六网络 macOS 镜像实际运行与 cc 相同。gen2.py +59/-49（净 +10 行），状态 3967→3991，JSON 21,725,618→21,869,510 B；复用减少重复路径，但本批源码没有净缩减。
 - 最终冻结代码 gate --com：70/70、294 s aggregate、JOBS=2，每套件 ≤60 s；exec-native 19 s，fat 124/0 两架构实跑，六目标完整源码镜像相同。Linux/Windows 本轮仅核对生成字节，未启动 VM；没有新的跨平台运行主张。日志 /tmp/unisacc-runtime-model-gate.log、/tmp/unisacc-runtime-model-keep.log。
 - `.com` 1,348,688 B，SHA256 `c018f8275910808d8e7e750b437faa298ab815a93ef1699080fbb923b6ef7967`；unisacc.c SHA256 `aab9b9378dd5d81a0df3066cf514e81742d737be0fe609886a5880812f464edc`。未推送、未发布；cc-unisacc 保持暂停，重构目标继续。
+
+
+### S-17：产品语料中的三处接受差异（2026-09-27）
+
+- 在 `0d3358b` 的 70 项门禁后，额外检查 examples、examples/apps、tests/c 共 130 个输入：95 equal、32 not-covered、3 DIFF。固定清单通过不能替代这一探索结果。差异为 queens 的 unsigned 按位取反缺少截断，以及 b_fuzzfound/b_structarg 的按值结构体参数没有局部副本；未把接受差异改名为 not-covered。
+- unsigned int 的 `~` 复用 NARU。参数全部 spill 后，才为结构体逐个分配局部副本；调用端同样建立临时副本，避免后一次结构体返回覆盖前一实参。赋值、参数、实参临时值、返回共用 COPYSTRUCT，删除原来返回只支持 8 字节倍数的重复循环。没有执行器原语或产品源码改动。
+- s58 固定 3 字节结构体、多结构体实参、连续结构体返回和超过六参数的栈约定：cc、现有 .com 与网络产物输出 `924 44 3 4 5`，调用后原对象仍是 `3 4 5`。另外三例的网络完整镜像等于参考，实际输出等于 cc。旧 224 项先通过再扩至 228；source-to-ELF 固定清单 85→89，89 项全部通过。nativecheck 再次通过网络执行器自身重建及真实写失败。
+- 同一 130 输入重新检查：99 equal、31 not-covered、0 DIFF（通用复制顺带使 b_struct3 一致）。保留未覆盖清单，不称全部 C99 产品测试已迁移。日志 /tmp/unisacc-structargs-{keep,frontier,srcelf,native,network}.log。
+- gen2.py +26/-13（净 +13 行），4007 状态，JSON 21,971,103 B。仅定向回归，没有把前一提交的 70/70 称为此提交的完整门禁；产品 .com、源码哈希沿用上一记录。下一重点仍是这些真实语料的拒绝缺口与最终产品接入，不以 equal 数量代替收尾。

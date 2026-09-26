@@ -405,6 +405,7 @@ CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a s
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
 POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
 TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
+PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
 GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
 ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
 GSK = 4 * POSSPAN     # GSK[the token position of a global pointer's string] = its pool number, taken in source order
@@ -882,11 +883,11 @@ def build():
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
     p = P("FN.par")
     p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.pn", ")": "FN.body", "(": "FN.pfp"}, bad("parameter"))   # unnamed: a prototype
-    P("FN.pfp").call("FPDECL").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
+    P("FN.pfp").call("FPDECL").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
     p = P("FN.pid")
     p.a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u"))   # depth * 4096 + base: a double* is not a double
-    p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL")
+    p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"))
     p.a(("ALUI", "add", "pk", "pk", 1)).call("NEXT").tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par", "...": "FN.dots"}, bad("parameter"))
     p = P("FN.body")
@@ -903,13 +904,23 @@ def build():
     p = P("FN.def1")
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
     emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").a(("LDI", "sk2", 0)).label("FN.sp")
-    p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).branch({0: "FN.sp0"}, "FN.go", [("CMP", "sk2", "pk")])
+    p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).branch({0: "FN.sp0"}, "FN.copies", [("CMP", "sk2", "pk")])
     P("FN.sp0").branch({1: "FN.spv"}, "FN.sp1", [("CMPI", "vfn", 1)])
     q = P("FN.spv")      # variadic: from the caller's stack (measured): load64 r1, [r6+16+8k]; imm r5, slot; sub64 r5, r6, r5; store64 [r5+0], r1
     q.a(("ALUI", "mul", "t", "sk2", 8), ("ALUI", "add", "t", "t", 16), ("ALUI", "add", "pks", "sk2", 1), ("ALUI", "mul", "pks", "pks", 8))
     q.o("  load64 r1, [r6+").num("t").o("]\n  imm r5, ").num("pks").o("\n  sub64 r5, r6, r5\n  store64 [r5+0], r1\n").a(("ALUI", "add", "sk2", "sk2", 1)).goto("FN.sp")
     q = P("FN.sp1")      # the parameters' spills: store64 [r6-8(k+1)], rk (measured)
     q.a(("ALUI", "add", "pks", "sk2", 1), ("ALUI", "mul", "pks", "pks", 8)).o("  store64 [r6-").num("pks").o("], r").num("sk2").o("\n").a(("ALUI", "add", "sk2", "sk2", 1)).goto("FN.sp")
+    # Spill every incoming argument before any copy clobbers r0-r2.
+    P("FN.copies").a(("LDI", "cpi", 0)).goto("FN.copyloop")
+    P("FN.copyloop").branch({0: "FN.copytype"}, "FN.go", [("CMP", "cpi", "pk")])
+    P("FN.copytype").a(("LDX", "cpv", "cpi", PIDS), ("LDX", "t", "cpv", E.PTR)).branch({1: "FN.copybase"}, "FN.copynext", [("CMPI", "t", 0)])
+    P("FN.copybase").a(("LDX", "cpb", "cpv", E.BASE)).branch({(1, 2): "FN.copy"}, "FN.copynext", [("CMPI", "cpb", SBB)])
+    q = P("FN.copy")
+    q.a(("ALUI", "sub", "t", "cpb", SBB), ("LDX", "sz", "t", SSZ), ("ALU", "add", "cur", "cur", "sz"), ("LDX", "cps", "cpv", LOC)).call("MAXF")
+    q.o("  load64 r1, [r6-").num("cps").o("]\n  imm r0, ").num("cur").o("\n  sub64 r0, r6, r0\n").call("COPYSTRUCT")
+    q.a(("STX", "cpv", LOC, "cur")).goto("FN.copynext")
+    P("FN.copynext").a(("ALUI", "add", "cpi", "cpi", 1)).goto("FN.copyloop")
     p = P("FN.go")
     p.call("NEXT").call("STMTS").a(("INTERN", "v", "fns", "fne")).branch({1: "FN.m0"}, "FN.tl", [("CMP", "v", "mnid")])
     P("FN.m0").o("  imm r0, 0\n").goto("FN.tl")      # reaching main's } returns 0 (C99 5.1.2.2.3; product 18c8f22)
@@ -1071,13 +1082,8 @@ def build():
     addr(q)
     q.o("  mov r1, r0\n  .lea r0, __rv_").a(("SPAN2", "fns", "fne")).o("\n").call("NEXT").expect(";").call("WCOPY")
     q.o("  jump R").num("rl").o("\n").call("NEXT").ret()
-    # WCOPY: [r1] -> [r0], the struct rb's size in 8-byte words (a size not a multiple of 8: not covered)
-    q = P("WCOPY")
-    q.a(("ALUI", "sub", "t", "rb", SBB), ("LDX", "sz", "t", SSZ), ("ALUI", "and", "t", "sz", 7)).branch({1: "WC.0"}, bad("struct size"), [("CMPI", "t", 0)])
-    q = P("WC.0")
-    q.a(("LDI", "k2", 0)).label("WC.l")
-    q.branch({0: "WC.w"}, "RET", [("CMP", "k2", "sz")])
-    P("WC.w").o("  load64 r2, [r1+").num("k2").o("]\n  store64 [r0+").num("k2").o("], r2\n").a(("ALUI", "add", "k2", "k2", 8)).goto("WC.l")
+    # Returns, arguments and assignment all use the same aggregate copy.
+    P("WCOPY").a(("ALUI", "sub", "t", "rb", SBB), ("LDX", "sz", "t", SSZ)).goto("COPYSTRUCT")
     p = P("S.re1")
     p.call("EXPR").expect(";").branch({1: "S.rf0"}, "S.rn", [("CMPI", "rb", FLT)])
     # a float function returns a float value as it is (measured, p76: return (float) g(a) -- cvtds, no narrowing)
@@ -1346,7 +1352,7 @@ def build():
     P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("LDI", "vb", 1), ("LDI", "rkok", 0)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "POSTIX")
     g.on("DEAD.adj", range(257), "DEAD", E.rej("not covered: adjacent string literals"), "r")
     q = P("U.cpl")       # ~x: imm r1, -1; xor64 (measured); the operand's type is kept
-    q.call("NEXT").call("UNARY").call("NODBL0").o("  imm r1, -1\n  xor64 r0, r0, r1\n").ret()
+    q.call("NEXT").call("UNARY").call("NODBL0").o("  imm r1, -1\n  xor64 r0, r0, r1\n").branch({1: "NARU"}, "RET", [("CMPI", "vb", UNS + 4)])
     P("NODBL0").branch({1: "NODBL0.1"}, "NODBL0.p", [("CMPI", "vb", DBL)])
     P("NODBL0.1").branch({1: "DEAD.dbl"}, "NODBL0.p", [("CMPI", "vt", 0)])
     P("NODBL0.p").branch({1: "RET"}, "DEAD.pa", [("CMPI", "vt", 0)])
@@ -1580,7 +1586,9 @@ def build():
     P("AS.struct").branch({1: "AS.same"}, bad("struct assignment"), [("CMPI", "vt", 0)])
     P("AS.same").branch({1: "AS.copy"}, bad("struct assignment"), [("CMP", "vb", "lb")])
     q = P("AS.copy")
-    q.a(("ALUI", "sub", "t", "vb", SBB), ("LDX", "sz", "t", SSZ), ("LDI", "k2", 0)).o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -8\n").label("AS.loop")
+    q.a(("ALUI", "sub", "t", "vb", SBB), ("LDX", "sz", "t", SSZ)).o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -8\n").goto("COPYSTRUCT")
+    q = P("COPYSTRUCT")
+    q.a(("LDI", "k2", 0)).label("AS.loop")
     q.branch({0: "AS.width"}, "RET", [("CMP", "k2", "sz")])
     P("AS.width").a(("LDI", "copyw", 8)).label("AS.fit").branch({2: "AS.half"}, "AS.emit", [("ALU", "add", "t", "k2", "copyw"), ("CMP", "t", "sz")])
     P("AS.half").a(("ALUI", "div", "copyw", "copyw", 2)).goto("AS.fit")
@@ -1655,8 +1663,13 @@ def build():
     g.on("DEAD.vc", range(257), "DEAD", E.rej("not covered: call to a variadic function"), "r")
     p = P("CL.ok")
     p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe"), ("INTERN", "fid", "ips", "ipe")).vpush("cls", "cle", "sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
+    P("ARGCOPY").branch({1: "AC.base"}, "RET", [("CMPI", "vt", 0)])
+    P("AC.base").branch({(1, 2): "AC.copy"}, "RET", [("CMPI", "vb", SBB)])
+    q = P("AC.copy")
+    q.a(("ALUI", "sub", "t", "vb", SBB), ("LDX", "sz", "t", SSZ), ("ALU", "add", "cur", "cur", "sz")).call("MAXF")
+    q.o("  mov r1, r0\n  imm r0, ").num("cur").o("\n  sub64 r0, r6, r0\n").goto("COPYSTRUCT")
     p = P("CL.arg")
-    p.vpush("na", "fid").call("EXPR").vpop("na", "fid")
+    p.vpush("na", "fid").call("EXPR").vpop("na", "fid").call("ARGCOPY")
     p.a(("ALUI", "mul", "t", "fid", 16), ("ALU", "add", "t", "t", "na"), ("LDX", "t", "t", PDB)).branch({1: "CL.ad"}, "CL.a2", [("CMPI", "t", DBL)])
     P("CL.ad").call("ISDV").branch({1: "CL.a2"}, "CL.ad1", [("CMPI", "u", 1)])
     P("CL.ad1").branch({1: "CL.ad2"}, "DEAD.dbl", [("CMPI", "vt", 0)])
