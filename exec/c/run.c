@@ -57,14 +57,14 @@ static void load(const char *path) {
     SMODE = xrealloc(0, sizeof(int) * NS); ROWC = xrealloc(0, sizeof(int) * NS);
     ROWK = xrealloc(0, sizeof(int *) * NS); ROWN = xrealloc(0, sizeof(int *) * NS); ROWQ = xrealloc(0, sizeof(int *) * NS);
     for (int s = 0; s < NS; s++) {
-        int m, n; if (fscanf(f, " R %d %d", &m, &n) != 2) die("bad state");
+        int m, n, dn, dq; if (fscanf(f, " R %d %d %d %d", &m, &n, &dn, &dq) != 4) die("bad state");
         SMODE[s] = m; ROWC[s] = n;
         if (m == 1) {                                   /* keyed by the stack top: a short list */
             ROWK[s] = xrealloc(0, sizeof(int) * n); ROWN[s] = xrealloc(0, sizeof(int) * n); ROWQ[s] = xrealloc(0, sizeof(int) * n);
             for (int j = 0; j < n; j++) if (fscanf(f, "%d %d %d", &ROWK[s][j], &ROWN[s][j], &ROWQ[s][j]) != 3) die("bad row");
         } else {                                        /* keyed 0..256: direct */
             ROWN[s] = xrealloc(0, sizeof(int) * 257); ROWQ[s] = xrealloc(0, sizeof(int) * 257); ROWK[s] = 0;
-            for (int j = 0; j < 257; j++) ROWN[s][j] = -1;
+            for (int j = 0; j < 257; j++) { ROWN[s][j] = dn; ROWQ[s][j] = dq; }
             for (int j = 0; j < n; j++) { int k, nx, q; if (fscanf(f, "%d %d %d", &k, &nx, &q) != 3 || k < 0 || k > 256) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
         }
     }

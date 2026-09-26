@@ -10,7 +10,10 @@ the table is the delta, renumbered.  Text format, one record per line:
     S hex                      a string (REJECT reason)
     Q n  op a1 a2 ...  ...     an action sequence: n actions, each an opcode
                                followed by exactly ARITY[op] integers
-    R mode n  key next seq ... a state: mode 0 b / 1 t / 2 r; key -1 = BOT
+    R mode n dnext dseq  key next seq ...
+                               a state: mode 0 b / 1 t / 2 r; key -1 = BOT;
+                               (dnext, dseq) answers every key not listed
+                               (dnext -1: none -- a t row, or an empty one)
 """
 import json
 import sys
@@ -74,11 +77,20 @@ def main():
     for n in names:
         mode, row = d["states"].get(n, ["b", {}])
         m = {"b": 0, "t": 1, "r": 2}[mode]
-        ents = []
+        ents, dflt = [], (-1, 0)
+        if m != 1 and row:
+            # the commonest (next, seq) is the row's default; only the other keys are listed
+            cnt = {}
+            for nx, sq in row.values():
+                cnt[(nx, sq)] = cnt.get((nx, sq), 0) + 1
+            best = max(cnt, key=cnt.get)
+            dflt = (six[best[0]], best[1])
         for k, (nx, sq) in row.items():
             key = (-1 if k == "BOT" else sym(k)) if m == 1 else int(k)
+            if m != 1 and (six[nx], sq) == dflt:
+                continue
             ents.append("%d %d %d" % (key, six[nx], sq))
-        lines.append("R %d %d %s" % (m, len(ents), " ".join(ents)))
+        lines.append("R %d %d %d %d %s" % (m, len(ents), dflt[0], dflt[1], " ".join(ents)))
     with open(sys.argv[2], "w") as f:
         f.write("T %d %d %d %d %d\n" % (len(names), len(seqs), len(regs), len(strs), six[d.get("start", "DISPATCH")]))
         for s in sorted(strs, key=strs.get):
