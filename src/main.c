@@ -160,8 +160,11 @@ int main(void) {
         int ofd; int r;
         /* the destination is opened FIRST: `-E -o x.i` writes from inside
            the front end, before there is a tape to write */
+        /* ...but only for -E.  Anything else is opened after the front end
+           has succeeded: a failed compile must not leave an empty a.out
+           behind, newer than its sources, for make to trust. */
         ofd = 1;
-        if (outpath) {
+        if (outpath && pponly) {
             ofd = wopen(outpath);
             if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
         }
@@ -171,6 +174,11 @@ int main(void) {
             r = fe_units(inputs, ninput, t);
             if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
             if (r) return 1;
+        }
+        if (outpath && pponly == 0) {
+            ofd = wopen(outpath);
+            if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
+            bkfd = ofd;
         }
         if (depfile) { if (writedeps(outpath ? outpath : "a.out", inputs, ninput)) return 1; }
         if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
@@ -197,7 +205,7 @@ int main(void) {
     setup();
     srcpath = __argv(fi);
     fd = ropen(srcpath);
-    if (fd < 0) { printf("cannot open input\n"); return 1; }
+    if (fd < 0) return enoinput(srcpath);
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }

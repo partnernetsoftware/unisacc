@@ -10808,6 +10808,15 @@ int emitrecipe(int r) {
     return 0;
 }
 
+/* a file we cannot read: named, on stderr, as cc says it */
+int enoinput(char *p) {
+    int k; k = 0;
+    while (p[k]) k = k + 1;
+    __write(2, "unisacc: error: cannot open ", 28);
+    __write(2, p, k);
+    __write(2, "\n", 1);
+    return 1;
+}
 int es(char *s) {
     int i; int fs; int fe; int vs; int ve; int r; int k;
     i = 0;
@@ -15327,7 +15336,7 @@ int fe_read(char *path) {
     model_dims();
     setup();
     fd = ropen(path);
-    if (fd < 0) { printf("cannot open %s\n", path); return 1; }
+    if (fd < 0) return enoinput(path);
     nout = __read(fd, out, MAXOUT);
     __close(fd);
     if (nout < 0) { printf("cannot read %s\n", path); return 1; }
@@ -15383,7 +15392,7 @@ int fe_load(char *path, char *t) {
         }
     } else {
         fd = ropen(path);
-        if (fd < 0) { printf("cannot open input\n"); return 1; }
+        if (fd < 0) return enoinput(path);
         nsrc = __read(fd, src, MAXSRC);
         __close(fd);
     }
@@ -16626,8 +16635,11 @@ int main(void) {
         int ofd; int r;
         /* the destination is opened FIRST: `-E -o x.i` writes from inside
            the front end, before there is a tape to write */
+        /* ...but only for -E.  Anything else is opened after the front end
+           has succeeded: a failed compile must not leave an empty a.out
+           behind, newer than its sources, for make to trust. */
         ofd = 1;
-        if (outpath) {
+        if (outpath && pponly) {
             ofd = wopen(outpath);
             if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
         }
@@ -16637,6 +16649,11 @@ int main(void) {
             r = fe_units(inputs, ninput, t);
             if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
             if (r) return 1;
+        }
+        if (outpath && pponly == 0) {
+            ofd = wopen(outpath);
+            if (ofd < 0) { printf("cannot write %s\n", outpath); return 1; }
+            bkfd = ofd;
         }
         if (depfile) { if (writedeps(outpath ? outpath : "a.out", inputs, ninput)) return 1; }
         if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
@@ -16663,7 +16680,7 @@ int main(void) {
     setup();
     srcpath = __argv(fi);
     fd = ropen(srcpath);
-    if (fd < 0) { printf("cannot open input\n"); return 1; }
+    if (fd < 0) return enoinput(srcpath);
     nsrc = __read(fd, src, MAXSRC);
     __close(fd);
     if (nsrc >= MAXSRC - 1) { printf("source too large\n"); return 1; }

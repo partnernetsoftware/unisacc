@@ -391,6 +391,15 @@ int emitrecipe(int r) {
     return 0;
 }
 
+/* a file we cannot read: named, on stderr, as cc says it */
+int enoinput(char *p) {
+    int k; k = 0;
+    while (p[k]) k = k + 1;
+    __write(2, "unisacc: error: cannot open ", 28);
+    __write(2, p, k);
+    __write(2, "\n", 1);
+    return 1;
+}
 int es(char *s) {
     int i; int fs; int fe; int vs; int ve; int r; int k;
     i = 0;
@@ -4910,7 +4919,7 @@ int fe_read(char *path) {
     model_dims();
     setup();
     fd = ropen(path);
-    if (fd < 0) { printf("cannot open %s\n", path); return 1; }
+    if (fd < 0) return enoinput(path);
     nout = __read(fd, out, MAXOUT);
     __close(fd);
     if (nout < 0) { printf("cannot read %s\n", path); return 1; }
@@ -4966,7 +4975,7 @@ int fe_load(char *path, char *t) {
         }
     } else {
         fd = ropen(path);
-        if (fd < 0) { printf("cannot open input\n"); return 1; }
+        if (fd < 0) return enoinput(path);
         nsrc = __read(fd, src, MAXSRC);
         __close(fd);
     }

@@ -147,6 +147,13 @@ say "FILE.c alone writes a.out" "plain build" "$( (cd "$T" && bound 10 ./a.out) 
 say "FILE.c -o names it" "plain build" "$( (cd "$T" && bound 10 ./plainx) 2>&1)"
 say "-dump-tokens" "6 tokens" "$( (cd "$T" && printf 'int x = 1;\n' > tk.c && bound 20 "$UA_RUN" -dump-tokens tk.c) | tail -1)"
 
+# a failed compile leaves nothing behind; a missing input is named on stderr
+printf 'int main(void){ int x = ; }\n' > "$T/bad.c"; rm -f "$T/a.out"
+(cd "$T" && bound 60 "$UA_RUN" bad.c >/dev/null 2>&1)
+say "error leaves no a.out" "none" "$([ -e "$T/a.out" ] && echo left || echo none)"
+say "missing input on stderr" "unisacc: error: cannot open nope.c" \
+    "$( (cd "$T" && bound 20 "$UA_RUN" nope.c 2>&1 >/dev/null) | head -1)"
+
 echo
 echo "cli  ok $ok   wrong $bad   (from a scratch dir, no repo in sight)"
 # A suite that checked nothing is not green: `closure.sh` with no
