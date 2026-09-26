@@ -68,7 +68,7 @@ SEGINF = 1000000000
 # W regions (addresses; plain named slots are strings)
 DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
 SPLB, IRLN, IRNL = 11 * 10 ** 7, 12 * 10 ** 7, 121 * 10 ** 6
-F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV = 0, 1, 2, 3, 4, 5
+F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV, F_ACT, F_UP = 0, 1, 2, 3, 4, 5, 6, 7
 FSZ = 8
 
 
@@ -116,6 +116,11 @@ class G:
                         row[k] = ("DEAD", self.seq([("REJECT", "unreachable")]))
                         self.unreach += 1
         self.els("DEAD", "DEAD", [("REJECT", "unreachable")])
+
+
+PUSHM = [("STX", "me", F_UP, "CUR"), ("COPYW", "CUR", "me"), ("LDI", "one", 1),
+         ("STX", "me", F_ACT, "one"), ("ALUI", "add", "DEP", "DEP", 1),
+         ("LDX", "BB", "me", F_BODY), ("INPUSH", "BB")]
 
 
 def ea(dst, e):              # W[dst] := address of macro entry W[e]
@@ -431,36 +436,84 @@ def build():
                  (1, 2): ("ERM3", ea("me", "M") + [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
     # function-like: only an invocation (name, blanks/newlines, `(`) is out of scope
     g.r("ERM3", {1: ("ERFN", []),
-                 0: ("EB", [("OUT", 32), ("LDX", "BB", "me", F_BODY), ("INPUSH", "BB"),
-                            ("LDI", "PJ", 0)])})
+                 0: ("EB", [("OUT", 32), ("LDI", "DEP", 0), ("LDI", "SEP", 0), ("LDI", "CUR", 0)]
+                     + PUSHM)})
     g.on("ERFN", [32, 9, 10], "ERFN", [("ADV",)])
     g.on("ERFN", [40], "DEAD", NC("function-like macro invocation"))
     g.els("ERFN", "ERL", [("JUMP", "IE"), ("SPANT", "IS")])
-    # emitbody(m, isfn = 0): copy the body; `##` pastes; no rescan in this round
-    g.on("EB", [EOF], "ERL", [("INPOP",), ("OUT", 32), ("LDI", "CHANGED", 1)])
-    g.on("EB", [35], "EBH", [("MARK", "BH"), ("ADV",)])
-    g.on("EB", [34], "EBS", [("COPYT",), ("ADV",)])
-    g.on("EB", AL, "EBID", [("MARK", "BIS")])
-    pj = [("RLD", "PJ")]
-    g.els("EB", "EBPJ", [("COPYT",), ("ADV",)] + pj)
-    g.r("EBPJ", {1: ("EB", [("OUT", 32), ("LDI", "PJ", 0)]), 0: ("EB", [])})
-    g.on("EBS", [92], "EBSE", [("COPYT",), ("ADV",)])
-    g.on("EBS", [34], "EB", [("COPYT",), ("ADV",)])
-    g.on("EBS", [EOF], "EB")
-    g.els("EBS", "EBS", [("COPYT",), ("ADV",)])
-    g.on("EBSE", [EOF], "EB")
-    g.els("EBSE", "EBS", [("COPYT",), ("ADV",)])
+    # token-level rescan of an object-like body (reference: tokens joined by
+    # one space, the whole expansion padded by one space each side).  The
+    # hide set of an object-like body token is the set of active macros:
+    # F_ACT marks them, F_UP chains them (CUR is the innermost).
+    g.on("EB", [EOF], "EBX", [("INPOP",), ("STX", "CUR", F_ACT, "Z0"), ("LDX", "CUR", "CUR", F_UP),
+                              ("ALUI", "sub", "DEP", "DEP", 1), ("CMPI", "DEP", 0)])
+    g.r("EBX", {1: ("ERL", [("OUT", 32), ("LDI", "CHANGED", 1)]), (0, 2): ("EB", [])})
+    g.on("EB", [32, 9, 10], "EB", [("ADV",)])
+    g.on("EB", [35], "DEAD", NC("# or ## in an object-like body"))
+    sep = [("RLD", "SEP")]
+    g.on("EB", AL, "EBSP", [("MARK", "BIS")] + sep)
+    g.r("EBSP", {1: ("EBID", [("OUT", 32)]), 0: ("EBID", [("LDI", "SEP", 1)])})
+    g.on("EB", ID - AL, "EBN0", sep)
+    g.on("EB", [46], "EBDT", [("MARK", "BIS"), ("ADV",)])
+    g.on("EBDT", DI, "EBN0", [("JUMP", "BIS")] + sep)
+    g.els("EBDT", "EBP0", [("JUMP", "BIS")] + sep)
+    g.on("EB", [34, 39], "EBQ0", sep)
+    g.els("EB", "EBP0", sep)
+    for pre, nxt in (("EBN0", "EBN"), ("EBQ0", "EBQ"), ("EBP0", "EBP")):
+        g.r(pre, {1: (nxt, [("OUT", 32)]), 0: (nxt, [("LDI", "SEP", 1)])})
+    # pp-number
+    g.on("EBN", [101, 69, 112, 80], "EBNE", [("COPYT",), ("ADV",)])
+    g.on("EBN", ID | {46}, "EBN", [("COPYT",), ("ADV",)])
+    g.els("EBN", "EB")
+    g.on("EBNE", [43, 45], "EBN", [("COPYT",), ("ADV",)])
+    g.els("EBNE", "EBN")
+    # character constant / string literal
+    g.on("EBQ", [34], "EBS34", [("COPYT",), ("ADV",)])
+    g.on("EBQ", [39], "EBS39", [("COPYT",), ("ADV",)])
+    for q in (34, 39):
+        g.on("EBS%d" % q, [92], "EBS%dE" % q, [("COPYT",), ("ADV",)])
+        g.on("EBS%d" % q, [q], "EB", [("COPYT",), ("ADV",)])
+        g.on("EBS%d" % q, [EOF], "EB")
+        g.els("EBS%d" % q, "EBS%d" % q, [("COPYT",), ("ADV",)])
+        g.on("EBS%dE" % q, [EOF], "EB")
+        g.els("EBS%dE" % q, "EBS%d" % q, [("COPYT",), ("ADV",)])
+    # punctuators, longest match
+    P = ["...", "<<=", ">>=", "->", "++", "--", "<<", ">>", "<=", ">=", "==", "!=", "&&", "||",
+         "*=", "/=", "%=", "+=", "-=", "&=", "^=", "|=", "<:", ":>", "<%", "%>"]
+    pre = {}
+    for t in P:
+        for k in range(1, len(t)):
+            pre.setdefault(t[:k], set()).add(t[k])
+    def pn(s):
+        return "EBP_" + "_".join(str(ord(c)) for c in s)
+    for c in range(256):
+        if chr(c) in pre:
+            g.on("EBP", [c], pn(chr(c)), [("COPYT",), ("ADV",)])
+    g.els("EBP", "EB", [("COPYT",), ("ADV",)])
+    for s_, nx in pre.items():
+        for c in nx:
+            t = s_ + c
+            if t in pre:
+                g.on(pn(s_), [ord(c)], pn(t), [("COPYT",), ("ADV",)])
+            elif t in P:
+                g.on(pn(s_), [ord(c)], "EB", [("COPYT",), ("ADV",)])
+        g.els(pn(s_), "EB") if s_ != ".." else g.els(pn(s_), "DEAD", NC("`..` in a body"))
+    # identifier in a body: expand when an inactive object-like macro
     g.on("EBID", ID, "EBID", [("ADV",)])
-    g.els("EBID", "EBPJ", [("SPANT", "BIS")] + pj)
-    g.on("EBH", [35], "EBT", [("ADV",), ("OLAST",)])
-    g.els("EBH", "EBPJ", [("JUMP", "BH"), ("COPYT",), ("ADV",)] + pj)
-    g.r("EBT", {(32, 9): ("EBT", [("ODROP",), ("OLAST",)]),
-                tuple(k for k in range(257) if k not in (32, 9)): ("EBW", [])})
-    g.on("EBW", WS, "EBW", [("ADV",)])
-    g.els("EBW", "EB", [("LDI", "PJ", 1)])
+    g.on("EBID", [92], "DEAD", NC("UCN in a body"))
+    sub2, pu2 = g.call("MFIND", "EBM")
+    g.els("EBID", "EBPR", [("MARK", "BIE"), ("INTERN", "NID", "BIS", "BIE"), ("CMP", "NID", "ID_PRAGMAOP")])
+    g.r("EBPR", {1: ("DEAD", NC("_Pragma")), (0, 2): (sub2, pu2)})
+    g.els("EBM", "EBM2", [("CMPI", "M", 0)])
+    g.r("EBM2", {0: ("EB", [("SPANT", "BIS")]),
+                 (1, 2): ("EBM3", ea("me", "M") + [("LDX", "act", "me", F_ACT), ("RLD", "act")])})
+    g.r("EBM3", {1: ("EB", [("SPANT", "BIS")]),
+                 0: ("EBM4", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
+    g.r("EBM4", {1: ("DEAD", NC("function-like macro name in a body")),
+                 0: ("EB", PUSHM)})
     # end of a round: none changed -> x is the result; else again, at most 8
     g.r("P4END", {1: ("ACC", [("OCLR",), ("LDI", "Z", 0), ("XLEN", "XE"), ("SPAN2", "Z", "XE")]),
-                  (0, 2): ("P4N", [("ALUI", "add", "RND", "RND", 1), ("CMPI", "RND", 8)])})
+                  (0, 2): ("ACC", [])})  # the token rescan is complete: one round
     g.r("P4N", {1: ("ACC", []), (0, 2): ("P4", [("SWAP",)])})
     g.els("ACC", "ACC", [("ACCEPT",)])
     g.finish()

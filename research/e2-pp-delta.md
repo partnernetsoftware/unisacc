@@ -300,3 +300,18 @@ pp-number / literal / longest-match punctuator tokenising of bodies; `#`/`##`
 in bodies rejected) built 184 states, sparse 10349 B, but raised DIFFs:
 ex.aa 2, ab 3, ac 9, ad 2, ae 9, af 1; corpus aa 0, ab 4, ac 2, ad 9, ae 34,
 af 19 (ag timed out). Not committed; the cause is still to be found.
+
+### 10.2 Token-level P4 adopted (2026-09-26)
+
+Diagnosis of the §10.1 attempt: the ex shards were 26 DIFF on main as well
+(not 2; aa alone was 2). All 26 DIFFs, main and attempt alike, were ONE class,
+header macro bodies used inside the bundled headers themselves, e.g.
+`fputc(__u_c, stdout)` (ref `fputc(__u_c,  ( ( FILE * ) 1 ) )`) and
+`return NULL;` (ref `return  0 ;`). On main the cause was body spacing (byte
+copy `((FILE *)1)`); in the attempt the cause was that nothing expanded at
+all: the new end-of-body state `EBX` never set `CHANGED`, so `P4END` took the
+"unchanged" branch and re-emitted the unexpanded input. No newline,
+punctuator-splitting or nested-spacing difference was observed. Fix:
+`EBX` sets `CHANGED`, and since the token rescan (hide sets via F_ACT/F_UP)
+is complete in one pass, `P4END` accepts after one round. ex.aa..ex.af:
+26 DIFF -> 1 DIFF (ad), 0 otherwise.
