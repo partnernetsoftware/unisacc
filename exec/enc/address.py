@@ -33,7 +33,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
     for key in ('data','src_os','data_len','bss','relocs'):
         # Keep the exact declaration blob for the future image writer; no output.
         p=P('HDR.'+key).a(('BLOBSAVE','header_'+key,'hv','hend'))
-        if key == 'relocs': p.a(('LDI','has_relocs',1))
+        if key in ('relocs','data_len','bss'): p.a(('LDI','has_'+key,1))
         p.goto('SKIPL')
     P('HDR.sym').a(('JUMP','hv')).goto('HDR.sn')
     g.on('HDR.sn',[32],'HDR.sa',[('MARK','hne'),('ADV',),('LDI','ha',0)])

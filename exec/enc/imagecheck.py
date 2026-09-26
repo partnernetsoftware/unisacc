@@ -23,8 +23,14 @@ def main():
         raise SystemExit('usage: imagecheck.py RUN DELTA.tbl DELTA.json')
     with tempfile.TemporaryDirectory() as d:
         p=pathlib.Path(d)/'in.txt'
-        def verify(tp, name, both=False):
-            p.write_text(dump(tp,full=True))
+        def verify(tp, name, both=False, sparse=False):
+            text=dump(tp,full=True)
+            if sparse:
+                # Oracle retains full data; only the tested declaration omits zeros.
+                tp.data_len=len(tp.data)
+                text=dump(tp,full=True)
+                text=text.replace('@data '+tp.data.hex(), '@data '+(tp.data.rstrip(b'\x00').hex() or '-'))
+            p.write_text(text)
             code,st=assemble(tp)
             assert st['encoded']==st['insns']
             want=image.build(tp,code,image.relocate(tp,tp.data,st['data_va']-DATA_BASE),st['entry'])
@@ -48,6 +54,13 @@ def main():
             assert rx==(1,5,0,0x400000,0x400000,187,187,4096)
             assert rw==(1,6,4096,0x401000,0x401000,9,length,4096)
             assert len(b)==4105 and b[4096:4104]==(0x401008).to_bytes(8,'little') and b[-1:]==b'q'
+        tp=TargetProgram('lnx/x86_64',b'x'+bytes(63),{})
+        tp.emit('ret');tp.relocs=[16]
+        verify(tp,'relocation-in-omitted-zero-tail',True,sparse=True)
+        for at,name in ((16,'straddling-stored-tail'),(56,'last-valid-relocation')):
+            raw=bytearray(64);raw[at:at+8]=(DATA_BASE+8).to_bytes(8,'little')
+            tp=TargetProgram('lnx/x86_64',bytes(raw),{});tp.relocs=[at];tp.emit('ret')
+            verify(tp,name,True,sparse=True)
         # Real lowering, no op filtering, including stdio. All image bytes match.
         oracle=_oracle('built')
         for f in ('examples/hello.c','examples/fib.c'):
@@ -59,6 +72,15 @@ def main():
         for cmd in ([sys.argv[1],sys.argv[2],str(p)],[sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)]):
             r=subprocess.run(cmd,capture_output=True,timeout=60)
             assert r.returncode==1 and not r.stdout and b'ELF input or relocation' in r.stderr
-        print('ELF relocation bounds: both reject; no Linux execution on this host claimed',flush=True)
+        p.write_text('@target lnx/x86_64\n@data -\n@data_len 64\n@relocs 57\nret\n')
+        for cmd in ([sys.argv[1],sys.argv[2],str(p)],[sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)]):
+            r=subprocess.run(cmd,capture_output=True,timeout=60)
+            assert r.returncode==1 and not r.stdout and b'ELF input or relocation' in r.stderr
+        for size in ('7','-1','2147483648','abc'):
+            p.write_text('@target lnx/x86_64\n@data 3132333435363738\n@data_len '+size+'\nret\n')
+            for cmd in ([sys.argv[1],sys.argv[2],str(p)],[sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)]):
+                r=subprocess.run(cmd,capture_output=True,timeout=60)
+                assert r.returncode==1 and not r.stdout and b'ELF input or relocation' in r.stderr
+        print('ELF relocation/extent bounds: both reject; no Linux execution on this host claimed',flush=True)
 
 if __name__=='__main__':main()

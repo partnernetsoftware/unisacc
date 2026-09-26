@@ -2,14 +2,16 @@
 Input is the actual textual tape; non-data lines are retained verbatim for the
 next lowering pass. No Python tape parser or zero_last runs in this path.
 """
-RAW, START, NAME, FLAG, NEW, REMAP, DEFINED = (i*10**6 for i in range(94,101))
+# Separate virtual addresses from compact byte indices. A large .bss never
+# allocates byte cells; wide namespaces prevent virtual offsets aliasing tables.
+RAW, START, NAME, FLAG, NEW, REMAP, DEFINED, RSTART = (i << 40 for i in range(1,9))
 
 
 def install(E, done='ACCEPTDATA', code_start='H.code'):
     from unisa.lower import SCRATCH, PRINTMAX
     P,g=E.P,E.g
     E.prn()
-    p=P('START');p.a(('LDI','dn',0),('LDI','ns',0))
+    p=P('START');p.a(('LDI','dn',0),('LDI','ns',0),('LDI','rn',0),('LDI','data_limit',2147483647-SCRATCH-PRINTMAX-7))
     for word,key in [('.str','str'),('.bss','bss')]:
         p.a(('SBCLR',),[('SBOUT',c) for c in word.encode()],('SBINTERN','id_'+key))
     p.goto('LINE')
@@ -33,14 +35,15 @@ def install(E, done='ACCEPTDATA', code_start='H.code'):
     P('D.ne').a(('INTERN','ni','nstart','nend'),('LDX','t','ni',DEFINED)).branch({1:'D.add'},'SKIP',[('CMPI','t',0)])
     P('D.add').a(('LDI','t',1),('STX','ni',DEFINED,'t')).branch({1:'D.align'},'D.record',[('CMPI','is_bss',1)])
     P('D.align').a(('ALUI','add','dn','dn',7),('ALUI','and','dn','dn',-8)).goto('D.record')
-    P('D.record').a(('STX','ns',START,'dn'),('BLOBSAVE','nb','nstart','nend'),('STX','ns',NAME,'nb'),('ALUI','add','ns','ns',1)).goto('D.value')
+    P('D.record').a(('STX','ns',START,'dn'),('STX','ns',RSTART,'rn'),('BLOBSAVE','nb','nstart','nend'),('STX','ns',NAME,'nb'),('ALUI','add','ns','ns',1)).goto('D.value')
     g.on('D.value',[32,9],'D.value',[('ADV',)]);g.els('D.value','D.which',[])
     P('D.which').branch({1:'BSS'},'STR',[('CMPI','is_bss',1)])
     g.on('BSS',range(48,58),'BSS.n',[('LDI','count',0)])
     g.els('BSS','FAIL',[])
-    g.on('BSS.n',range(48,58),'BSS.n',[('BYTE','b'),('ALUI','sub','b','b',48),('ALUI','mul','count','count',10),('ALU','add','count','count','b'),('ADV',)])
+    g.on('BSS.n',range(48,58),'BSS.bound',[('BYTE','b'),('ALUI','sub','b','b',48),('A64I','mul','count','count',10),('A64','add','count','count','b'),('ADV',)])
+    P('BSS.bound').branch({2:'FAIL'},'BSS.n',[('C64U','count','data_limit')])
     g.els('BSS.n','BSS.end',[])
-    P('BSS.end').a(('ALU','add','dn','dn','count')).goto('SKIP')
+    P('BSS.end').a(('A64','add','dn','dn','count')).branch({2:'FAIL'},'SKIP',[('C64U','dn','data_limit')])
     g.on('STR',[34],'STR.byte',[('ADV',)]);g.els('STR','FAIL',[])
     g.on('STR.byte',[34],'SKIP',[('ADV',)])
     g.on('STR.byte',[92],'STR.esc',[('ADV',)])
@@ -57,30 +60,32 @@ def install(E, done='ACCEPTDATA', code_start='H.code'):
         g.on('STR.hex1',[c],'STR.hex2',[('LDI','b',v*16),('ADV',)])
         g.on('STR.hex2',[c],'STR.put',[('ALUI','add','b','b',v),('ADV',)])
     g.els('STR.hex1','FAIL',[]);g.els('STR.hex2','FAIL',[])
-    P('STR.put').a(('STX','dn',RAW,'b'),('ALUI','add','dn','dn',1)).goto('STR.byte')
+    P('STR.put').a(('STX','rn',RAW,'b'),('ALUI','add','rn','rn',1),('ALUI','add','dn','dn',1)).branch({2:'FAIL'},'STR.byte',[('C64U','dn','data_limit')])
     g.on('SKIP',[10],'LINE',[('ADV',)]);g.on('SKIP',[256],'LAY',[]);g.els('SKIP','SKIP',[('ADV',)])
     # Blob bounds are symbol start -> next distinct symbol start, or data end.
-    P('BOUNDS').a(('LDX','s','bi',START),('ALUI','add','nx','bi',1),('COPYW','e','dn')).branch({0:'BO.next'},'RET',[('CMP','nx','ns')])
-    P('BO.next').a(('LDX','e','nx',START)).ret()
+    P('BOUNDS').a(('LDX','s','bi',START),('ALUI','add','nx','bi',1),('COPYW','e','dn'),('LDX','rs','bi',RSTART),('COPYW','re','rn')).branch({0:'BO.next'},'RET',[('CMP','nx','ns')])
+    P('BO.next').a(('LDX','e','nx',START),('LDX','re','nx',RSTART)).ret()
     P('LAY').a(('LDI','zero',0),('OCUT','code','zero'),('LDI','bi',0)).label('L.loop').branch({0:'L.blob'},'REORDER',[('CMP','bi','ns')])
-    P('L.blob').call('BOUNDS').a(('LDI','nz',0),('COPYW','di','s')).label('L.scan').branch({0:'L.byte'},'L.save',[('CMP','di','e')])
+    P('L.blob').call('BOUNDS').a(('LDI','nz',0),('COPYW','di','rs')).label('L.scan').branch({0:'L.byte'},'L.save',[('CMP','di','re')])
     P('L.byte').a(('LDX','b','di',RAW),('ALU','or','nz','nz','b'),('ALUI','add','di','di',1)).goto('L.scan')
     P('L.save').a(('STX','bi',FLAG,'nz'),('ALUI','add','bi','bi',1)).goto('L.loop')
-    P('REORDER').a(('LDI','phase',0),('LDI','outn',0),('LDI','bi',0)).goto('R.loop')
+    P('REORDER').a(('LDI','phase',0),('LDI','outn',0),('LDI','stored',0),('LDI','bi',0)).goto('R.loop')
     P('R.loop').branch({0:'R.blob'},'R.end',[('CMP','bi','ns')])
     P('R.blob').call('BOUNDS').branch({1:'R.empty'},'R.flag',[('CMP','s','e')])
     P('R.empty').branch({0:'R.next'},'R.flag',[('CMP','nx','ns')])
     P('R.flag').a(('LDX','nz','bi',FLAG)).branch({1:'R.zero'},'R.nz',[('CMPI','nz',0)])
     P('R.zero').branch({1:'R.copy'},'R.next',[('CMPI','phase',1)])
     P('R.nz').branch({1:'R.copy'},'R.next',[('CMPI','phase',0)])
-    P('R.copy').a(('ALU','sub','pad','s','outn'),('ALUI','and','pad','pad',7),('ALU','add','outn','outn','pad'),('STX','s',REMAP,'outn'),('COPYW','di','s')).label('R.bytes').branch({0:'R.byte'},'R.next',[('CMP','di','e')])
-    P('R.byte').a(('LDX','b','di',RAW),('STX','outn',NEW,'b'),('ALUI','add','outn','outn',1),('ALUI','add','di','di',1)).goto('R.bytes')
+    P('R.copy').a(('ALU','sub','pad','s','outn'),('ALUI','and','pad','pad',7),('ALU','add','outn','outn','pad'),('STX','s',REMAP,'outn'),('COPYW','dest','outn'),('ALU','sub','span','e','s'),('ALU','add','outn','outn','span'),('COPYW','di','rs')).label('R.bytes').branch({0:'R.byte'},'R.next',[('CMP','di','re')])
+    P('R.byte').a(('LDX','b','di',RAW),('STX','dest',NEW,'b'),('ALUI','add','dest','dest',1),('ALUI','add','di','di',1)).branch({1:'R.bytes'},'R.nonzero',[('CMPI','b',0)])
+    P('R.nonzero').a(('COPYW','stored','dest')).goto('R.bytes')
     P('R.next').a(('ALUI','add','bi','bi',1)).goto('R.loop')
     P('R.end').branch({1:'R.second'},'HEAD',[('CMPI','phase',0)])
     P('R.second').a(('LDI','phase',1),('LDI','bi',0)).goto('R.loop')
     # Empty terminal symbols map to the end (and retain their alignment).
-    p=P('HEAD');p.a(('ALUI','add','base','outn',7),('ALUI','and','base','base',-8),('ALUI','add','full','base',SCRATCH+PRINTMAX),('LDI','di',0)).o('@target lnx/x86_64\n@data ').goto('H.hex')
-    P('H.hex').branch({0:'H.byte'},'H.syms',[('CMP','di','full')])
+    p=P('HEAD');p.a(('ALUI','add','base','outn',7),('ALUI','and','base','base',-8),('ALUI','add','full','base',SCRATCH+PRINTMAX),('LDI','di',0)).o('@target lnx/x86_64\n@data ').branch({1:'H.empty'},'H.hex',[('CMPI','stored',0)])
+    P('H.empty').o('-').goto('H.syms')
+    P('H.hex').branch({0:'H.byte'},'H.syms',[('CMP','di','stored')])
     P('H.byte').a(('LDX','b','di',NEW),('ALUI','sar','h','b',4)).call('HEX').a(('ALUI','and','h','b',15)).call('HEX').a(('ALUI','add','di','di',1)).goto('H.hex')
     P('HEX').branch({0:'HEX.d'},'HEX.a',[('CMPI','h',10)])
     P('HEX.d').a(('ALUI','add','h','h',48),('OUTW','h')).ret()

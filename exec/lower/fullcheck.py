@@ -17,7 +17,8 @@ def same(a,b):
 
 def check(raw,out,oracle):
     ref=lower(parse(raw),'lnx/x86_64',oracle,drive='built');got=parse_tins(out)
-    assert same({k:v for k,v in vars(ref).items() if k!='code'},{k:v for k,v in vars(got).items() if k!='code'}),'layout/labels differ'
+    assert len(got.data)<=len(ref.data) and got.data==ref.data[:len(got.data)] and not any(ref.data[len(got.data):]),'data differs'
+    assert same({k:v for k,v in vars(ref).items() if k not in ('code','data')},{k:v for k,v in vars(got).items() if k not in ('code','data')}),'layout/labels differ'
     assert len(ref.code)==len(got.code),'instruction count differs'
     for i,(a,b) in enumerate(zip(ref.code,got.code)):
         assert a.op==b.op and same(list(a.args),list(b.args)) and same(a.meta,b.meta),(i,vars(a),vars(b))

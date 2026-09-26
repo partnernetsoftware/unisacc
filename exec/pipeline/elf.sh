@@ -26,6 +26,7 @@ for f in "$@"; do
         out="$OUT/$name.$s"
         case $s in
             e2) b "$OUT/run" "$OUT/$s.tbl" "$in" "$f" "$R/include" > "$out" ;;
+            e4) b env UNISA_MAXSTEPS=400000000000 "$OUT/run" "$OUT/$s.tbl" "$in" "$f" > "$out" ;; # same step budget as exec/opt/check.sh; wall bound stays 60 s
             *) b "$OUT/run" "$OUT/$s.tbl" "$in" "$f" > "$out" ;;
         esac
         in=$out

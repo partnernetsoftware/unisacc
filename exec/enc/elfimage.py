@@ -22,7 +22,19 @@ def install(E, byte, OFF, LABD):
         g.on('ED.lo',[c],'ED.put',[('ALUI','add','db','db',v),('ADV',)])
     g.els('ED.hi','DEAD.image',[]);g.els('ED.lo','DEAD.image',[])
     P('ED.put').a(('STX','dlen',DATA,'db'),('ALUI','add','dlen','dlen',1)).goto('ED.hi')
-    P('ED.end').a(('INPOP',)).branch({1:'ER.init'},'ER.trim',[('CMPI','has_relocs',1)])
+    # @data may omit its zero tail. data_len is its logical extent. The Linux route
+    # requires bss=0 (the extra stack field belongs to Windows).
+    P('ED.end').a(('INPOP',),('LDI','extent_max',2147483647),('COPYW','vlen','dlen')).branch({1:'EM.len'},'EM.bss',[('CMPI','has_data_len',1)])
+    P('EM.len').a(('INPUSH','header_data_len')).call('EM.num').branch({0:'DEAD.image'},'EM.length',[('C64','mn','dlen')])
+    P('EM.length').a(('COPYW','vlen','mn')).goto('EM.bss')
+    P('EM.bss').a(('COPYW','memlen','vlen')).branch({1:'EM.extra'},'EM.ready',[('CMPI','has_bss',1)])
+    P('EM.extra').a(('INPUSH','header_bss')).call('EM.num').branch({1:'EM.ready'},'DEAD.image',[('CMPI','mn',0)]) # Linux route has no additional Windows stack BSS
+    P('EM.num').a(('LDI','mn',0),('LDI','nd',0)).goto('EM.digit')
+    g.on('EM.digit',range(48,58),'EM.bound',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','mn','mn',10),('A64','add','mn','mn','bt'),('ALUI','add','nd','nd',1),('ADV',)])
+    P('EM.bound').branch({2:'DEAD.image'},'EM.digit',[('C64U','mn','extent_max')])
+    g.on('EM.digit',[256],'EM.end',[]);g.els('EM.digit','DEAD.image',[])
+    P('EM.end').a(('INPOP',)).branch({1:'DEAD.image'},'RET',[('CMPI','nd',0)])
+    P('EM.ready').branch({1:'ER.init'},'ER.trim',[('CMPI','has_relocs',1)])
     P('ER.init').a(('INPUSH','header_relocs')).goto('ER.first')
     g.on('ER.first',[45],'ER.empty',[('ADV',)])
     g.els('ER.first','ER.start',[])
@@ -31,8 +43,10 @@ def install(E, byte, OFF, LABD):
     g.on('ER.digit',range(48,58),'ER.digit',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','ra','ra',10),('A64','add','ra','ra','bt'),('ALUI','add','nd','nd',1),('ADV',)])
     g.on('ER.digit',[44,256],'ER.bound',[]);g.els('ER.digit','DEAD.image',[])
     P('ER.bound').branch({1:'DEAD.image'},'ER.b2',[('CMPI','nd',0)])
-    P('ER.b2').a(('A64I','add','rend','ra',8)).branch({2:'DEAD.image'},'ER.read',[('C64U','rend','dlen')])
-    p=P('ER.read');p.a(('LDI','rv',0))
+    P('ER.b2').a(('A64I','add','rend','ra',8)).branch({2:'DEAD.image'},'ER.read',[('C64U','rend','vlen')])
+    P('ER.read').branch({2:'ER.extend'},'ER.value',[('C64','rend','dlen')])
+    P('ER.extend').a(('COPYW','dlen','rend')).goto('ER.value')
+    p=P('ER.value');p.a(('LDI','rv',0))
     for j in range(8):
         p.a(('ALUI','add','di','ra',j),('LDX','db','di',DATA),('A64I','shl','db','db',8*j),('A64','or','rv','rv','db'))
     p.a(('A64','add','rv','rv','data_shift'))
@@ -54,7 +68,7 @@ def install(E, byte, OFF, LABD):
     def field(width,v):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('LEBYTES')
     for w,v in [(2,2),(2,elf.MACHINE['x86_64']),(4,1),(8,'entryva'),(8,elf.EHDR),(8,0),(4,0),(2,elf.EHDR),(2,elf.PHDR),(2,elf.NPH),(2,0),(2,0),(2,0)]:field(w,v)
-    for flags,offset,va,fs,ms in [(5,0,elf.VADDR,'tend','tend'),(6,'doff','data_va','stored','dlen')]:
+    for flags,offset,va,fs,ms in [(5,0,elf.VADDR,'tend','tend'),(6,'doff','data_va','stored','memlen')]:
         for w,v in [(4,1),(4,flags),(8,offset),(8,va),(8,va),(8,fs),(8,ms),(8,elf.PAGE)]:field(w,v)
     p.a(('INPUSH','text_blob')).goto('EI.copy')
     g.on('EI.copy',[256],'EI.pad',[('INPOP',)])
