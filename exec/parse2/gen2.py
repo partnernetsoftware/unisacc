@@ -443,15 +443,15 @@ def types():
     P("NARROW.ui").goto("NARROW.n")
     P("NARROW.m").o(UIM).ret()
     q = P("NARROW.n")
-    # tyinfo.narrow picks the rows that narrow; signed: through the stack at their size; unsigned int:
-    # the mask (measured). u8/u16 casts are not measured: not covered, stated here, not guessed
+    # tyinfo.narrow picks the rows that narrow; signed: through the stack at their size; unsigned:
+    # masked to their size (measured: a cast and a return of unsigned char/short/int)
     for t, vb, size, uns, narrow in TYINT:
-        if not narrow or t in ("u8", "u16"):
+        if not narrow:
             continue
         hit, nx = q.fresh("w"), q.fresh("x")
         q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
         if uns:
-            P(hit).goto("NARROW.m")
+            P(hit).o("  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << (8 * size)) - 1)).ret()
         else:
             P(hit).o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n" % (size, size)).ret()
         q = P(nx)
