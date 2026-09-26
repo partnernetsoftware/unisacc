@@ -1912,3 +1912,4 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
   - E1–E3 coverage: E3 matches 164 of 225 files, and the source-to-tape chain 54 of 113;
   - E5 (lowering and encoding, six targets), E6 (image writing) and E7 (.com layout);
   - the tables as nets.
+- 2026-09-26, **working rule** (the owner caught this): after every batch of product source changes, rebuild unisacc.com (`make com`) and run `tests/gate.sh --com`. Committing the sources alone is not enough; the .com had not been rebuilt for most of a day. It was rebuilt at 04a127b's tree (1,342,224 B), and gate --com passed 41/41. The exec/ migration is still a parallel path that unisacc.com does not use. S-17's switch rule, which moves the default path to the new implementation only after its gate passes, has not been applied yet.
