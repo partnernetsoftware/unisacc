@@ -69,11 +69,11 @@ TEMPL = {
     "label_e":  "L{e}:\n",
     "or_skip":  "  jumpz r0, L{on}\n  imm r0, 1\n  jump L{od}\nL{on}:\n",
     "label_d":  "L{od}:\n",
-    "one":      "  imm r0, 1\n",
-    "post_inc": "  imm r2, 1\n  sub64 r0, r0, r2\n",
-    "post_dec": "  imm r2, 1\n  add64 r0, r0, r2\n",
-    "pre_inc":  "  imm r1, 1\n  add64 r0, r0, r1\n",
-    "pre_dec":  "  imm r1, 1\n  sub64 r0, r0, r1\n",
+    "one":      "  imm r0, {stp}\n",          # the step: 1, or a pointer's element size (measured)
+    "post_inc": "  imm r2, {stp}\n  sub64 r0, r0, r2\n",
+    "post_dec": "  imm r2, {stp}\n  add64 r0, r0, r2\n",
+    "pre_inc":  "  imm r1, {stp}\n  add64 r0, r0, r1\n",
+    "pre_dec":  "  imm r1, {stp}\n  sub64 r0, r0, r1\n",
     # printf, the reference's builtin lowering (measured, examples/hello.c and a %d probe)
     "pf_spill": "  store64 [r6-{cur}], r0\n",
     "pf_write": "  .lea r0, S{sk}\n  imm r1, {cnt}\n  .write r0, r1\n",
@@ -787,15 +787,22 @@ def build():
     P("SD.cv1").branch({1: "SD.cv2"}, "DEAD.dbl", [("CMPI", "rvt", 0)])
     P("SD.cv2").o("  cvtid r0, r0\n").ret()
     for o in E.CASOPS:
-        q = P("X.c" + o)    # addr; push; load; push; rhs; pop; op; pop; store
-        q.call("LOOKUP").call("NOARR").call("INTONLY")
+        q = P("X.c" + o)    # addr; push; load; push; rhs (a pointer's scaled); pop; op; pop; store
+        q.call("LOOKUP").call("NOARR").call("STEPTY")
+        if o in ("/", "%", ">>"):   # the unsigned forms: not covered here
+            q.branch({2: "DEAD.nint"}, (nx := "X.c%s.k" % o), [("CMPI", "vb", UNS)])
+            q = P(nx)
+        if o not in ("+", "-"):
+            q.branch({1: (nx2 := "X.c%s.i" % o)}, "DEAD.nint", [("CMPI", "vt", 0)])
+            q = P(nx2)
         addr(q)
-        emit(q, "push")
-        emit(q, "load_int")
-        emit(q, "push").call("NEXT").call("EXPR")
-        emit(q, "pop1").o(E.optext(o))
-        emit(q, "pop1")
-        emit(q, "store_int").ret()
+        emit(q, "push").call("LOADV")
+        emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").call("NODBL0").vpop("vt", "vb", "stp")
+        q.branch({1: "X.c%s.m" % o}, "X.c%s.s" % o, [("CMPI", "stp", 1)])
+        P("X.c%s.s" % o).o("  imm r2, ").num("stp").o("\n  mul64 r0, r0, r2\n").goto("X.c%s.m" % o)
+        q = P("X.c%s.m" % o)
+        emit(q, "pop1").o(E.optext(o)).call("NARU")
+        emit(q, "pop1").call("STOREV").ret()
     P("ISDV").a(("LDI", "u", 0)).branch({1: "ISDV.1"}, "ISDV.x", [("CMPI", "vb", DBL)])
     P("ISDV.1").branch({1: "ISDV.y"}, "ISDV.x", [("CMPI", "vt", 0)])
     P("ISDV.y").a(("LDI", "u", 1)).goto("ISDV.x")
@@ -805,19 +812,33 @@ def build():
     P("NODBL.r").branch({1: "NODBL.r2"}, "RET", [("CMPI", "vb", DBL)])
     P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
     g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
+    # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
+    P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
+    P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
+    P("NARU.2").branch({1: "NARU.s"}, "RET", [("CMPI", "vb", UNS + 2)])
+    P("NARU.c").o("  imm r2, 255\n  and64 r0, r0, r2\n").ret()
+    P("NARU.s").o("  imm r2, 65535\n  and64 r0, r0, r2\n").ret()
+    P("NARU.b").ret()
+    P("STEPTY").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
+    P("STY.s").goto("STY.s0")
+    P("STY.s0").branch({1: "DEAD.nint"}, "STY.s1", [("CMPI", "vb", 0)])
+    P("STY.s1").branch({(0, 1): "RET"}, "STY.s2", [("CMPI", "vb", 8)])
+    P("STY.s2").branch({(0, 1): "STY.s3"}, "DEAD.nint", [("CMPI", "vb", UNS + 8)])
+    P("STY.s3").branch({2: "RET"}, "DEAD.nint", [("CMPI", "vb", UNS)])
+    P("STY.p").branch({1: "DEAD.nint"}, "STY.p1", [("CMPI", "vb", FPB)])
+    P("STY.p1").a(("COPYW", "td", "vt"), ("ALUI", "sub", "td", "td", 1), ("COPYW", "tb", "vb")).call("ELSZ").a(("COPYW", "stp", "es")).ret()
+    g.on("DEAD.nint", range(257), "DEAD", E.rej("not covered: pointer or non-int in op= ++ --"), "r")
     P("INTONLY").branch({1: "IO.b"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vt", 0)])
     P("IO.b").branch({1: "RET"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vb", 4)])
     for nm, o, fix in (("X.inc", "+", "post_inc"), ("X.dec", "-", "post_dec")):
         q = P(nm)           # addr; push; load; push; 1; pop; op; pop; store; undo to the old value
-        q.call("LOOKUP").call("NOARR").call("INTONLY")
+        q.call("LOOKUP").call("NOARR").call("STEPTY")
         addr(q)
-        emit(q, "push")
-        emit(q, "load_int")
+        emit(q, "push").call("LOADRAW")
         emit(q, "push")
         emit(q, "one")
         emit(q, "pop1").o(E.optext(o))
-        emit(q, "pop1")
-        emit(q, "store_int")
+        emit(q, "pop1").call("STOREV")
         emit(q, fix).call("NEXT").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "X.fnv"}, "X.v2", [("CMPI", "isfn", 1)])
@@ -905,13 +926,11 @@ def build():
         q = P(nm)           # addr; push; load; +-1; pop; store
         q.call("NEXT").tok({TK_ID: nm + ".id"}, bad("expression"))
         q = P(nm + ".id")
-        q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NOARR").call("INTONLY")
+        q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NOARR").call("STEPTY")
         addr(q)
-        emit(q, "push")
-        emit(q, "load_int")
-        emit(q, fix)
-        emit(q, "pop1")
-        emit(q, "store_int").call("NEXT").ret()
+        emit(q, "push").call("LOADV")
+        emit(q, fix).call("NARU")
+        emit(q, "pop1").call("STOREV").call("NEXT").ret()
     q = P("U.neg")
     q.call("NEXT").call("UNARY").call("INTONLY")
     emit(q, "neg").ret()
