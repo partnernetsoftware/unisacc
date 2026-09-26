@@ -87,7 +87,9 @@ Not done in E0: the table is not built as an integer net through the
 `OUTPUT_DIR/unisacc.exe` through six generated deltas on the generic C executor.
 The same entry supports Windows x86_64 and the four POSIX targets (`.elf` / `.macho`). Python is
 still used to generate transition tables, not to process source between these
-six stages. The tables remain lookup tables, not networks. The generated
+six stages. By default these remain lookup tables. `NETWORK=1` instead constructs
+and exhaustively checks integer threshold networks, then evaluates them at
+runtime (see [c/NETWORK.md](c/NETWORK.md)). The generated
 compiler is the existing C compiler; this is not E7 adoption in the product.
 
 `TARGET=win/arm64 ./exec/pipeline/selfcheck.sh` checks all five Windows target

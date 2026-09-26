@@ -22,7 +22,8 @@ printf '%s\n' $osnames "$arch" __LP64__ __UNISA__ > "$T/macros.c"
 for name in "$other" $absent; do
     printf '#ifdef %s\nWRONG_TARGET\n#endif\n' "$name" >> "$T/macros.c"
 done
-b "$T/run" "$T/e2.tbl" "$T/macros.c" > "$T/macros.delta"
+MODEL=tbl; [ "${NETWORK:-0}" != 1 ] || MODEL=net
+b "$T/run" "$T/e2.$MODEL" "$T/macros.c" > "$T/macros.delta"
 b "$UA" -b "$TARGET" -E "$T/macros.c" > "$T/macros.ref"
 for file in "$T/macros.delta" "$T/macros.ref"; do
     [ "$(tr -d '[:space:]' < "$file")" = "$expected" ] || { echo 'target predefines differ' >&2; exit 1; }

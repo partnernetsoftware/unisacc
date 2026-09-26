@@ -1,6 +1,7 @@
 /* exec/c/run.c -- the generic delta executor in C: the machine of
    exec/pp/sim.py, action for action, on the integer table exec/c/tbl.py
-   writes.  It knows no language; every decision is the table's.
+   writes, or the integer threshold network exec/c/net.py constructs.
+   It knows no language; transition decisions belong to the loaded model.
 
        run TABLE INPUT [SRCPATH] [INCLUDE_DIR]
 
@@ -30,13 +31,19 @@ static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) di
 static int NS, NQ, NRG, NSTR, START;
 static char **STR; static int *STRL;
 static int *QOFF, *QLEN; static I *QA; static int NQA;          /* actions, flattened */
+static int ISNET, TOPMAX;
+static int *NLO, *NHI, *BN, *BQ;
 static int *SMODE; static int **ROWK, **ROWN, **ROWQ; static int *ROWC;
 
 static int hexv(int c) { return c <= '9' ? c - '0' : c - 'a' + 10; }
 
 static void load(const char *path) {
     FILE *f = fopen(path, "r"); if (!f) die("cannot open the table");
-    if (fscanf(f, " T %d %d %d %d %d", &NS, &NQ, &NRG, &NSTR, &START) != 5) die("bad header");
+    char kind;
+    if (fscanf(f, " %c %d %d %d %d %d", &kind, &NS, &NQ, &NRG, &NSTR, &START) != 6 ||
+        (kind != 'T' && kind != 'N') || NS <= 0 || NQ <= 0 || NRG < 0 || NSTR < 0 || START < 0 || START >= NS) die("bad header");
+    ISNET = kind == 'N'; TOPMAX = NS - 1;
+    if (ISNET && (fscanf(f, "%d", &TOPMAX) != 1 || TOPMAX < NS - 1 || TOPMAX == INT32_MAX)) die("bad network domain");
     STR = xrealloc(0, sizeof *STR * (NSTR + 1)); STRL = xrealloc(0, sizeof *STRL * (NSTR + 1));
     for (int k = 0; k < NSTR; k++) {
         static char buf[1 << 16];
@@ -60,7 +67,22 @@ static void load(const char *path) {
     }
     SMODE = xrealloc(0, sizeof(int) * NS); ROWC = xrealloc(0, sizeof(int) * NS);
     ROWK = xrealloc(0, sizeof(int *) * NS); ROWN = xrealloc(0, sizeof(int *) * NS); ROWQ = xrealloc(0, sizeof(int *) * NS);
+    NLO = xrealloc(0, sizeof(int) * NS); NHI = xrealloc(0, sizeof(int) * NS);
+    BN = xrealloc(0, sizeof(int) * NS); BQ = xrealloc(0, sizeof(int) * NS);
     for (int s = 0; s < NS; s++) {
+        if (ISNET) {
+            int m, lo, hi, n, bn, bq;
+            if (fscanf(f, " H %d %d %d %d %d %d", &m, &lo, &hi, &n, &bn, &bq) != 6 || m < 0 || m > 2 ||
+                lo != (m == 1 ? -1 : 0) || hi != (m == 1 ? TOPMAX : 256) || n < 0 || (I)n > (I)hi - lo) die("bad network bank");
+            SMODE[s] = m; NLO[s] = lo; NHI[s] = hi; ROWC[s] = n; BN[s] = bn; BQ[s] = bq;
+            ROWK[s] = xrealloc(0, sizeof(int) * n); ROWN[s] = xrealloc(0, sizeof(int) * n); ROWQ[s] = xrealloc(0, sizeof(int) * n);
+            int prev = lo;
+            for (int j = 0; j < n; j++) {
+                if (fscanf(f, "%d %d %d", &ROWK[s][j], &ROWN[s][j], &ROWQ[s][j]) != 3 || ROWK[s][j] <= prev || ROWK[s][j] > hi) die("bad network unit");
+                prev = ROWK[s][j];
+            }
+            continue;
+        }
         int m, n, dn, dq; if (fscanf(f, " R %d %d %d %d", &m, &n, &dn, &dq) != 4) die("bad state");
         SMODE[s] = m; ROWC[s] = n;
         if (m == 1) {                                   /* keyed by the stack top: a short list */
@@ -73,6 +95,58 @@ static void load(const char *path) {
         }
     }
     fclose(f);
+    if (!ISNET) {
+        for (int s = 0; s < NS; s++) if (SMODE[s] == 1)
+            for (int j = 0; j < ROWC[s]; j++) if (ROWK[s][j] > TOPMAX) TOPMAX = ROWK[s][j];
+        for (int i = 0; i < NQA; i += 1 + ARITY[QA[i]])
+            if (QA[i] == PUSH && QA[i+1] > TOPMAX) TOPMAX = (int)QA[i+1];
+    }
+}
+
+/* The selected bank is sparse evaluation of a one-hot state-conditioned net.
+   Each hidden activation is H(key-threshold); output weights are signed.
+   No answer table is materialised. int weights/count bound sums within int64. */
+static void transition(int q, int key, int *nx, int *sq) {
+    *nx = -1; *sq = 0;
+    if (ISNET) {
+        if (key < NLO[q] || key > NHI[q]) die("observation outside network domain");
+        I n = BN[q], s = BQ[q];
+        for (int j = 0; j < ROWC[q]; j++) {
+            int h = key >= ROWK[q][j];
+            n += (I)ROWN[q][j] * h; s += (I)ROWQ[q][j] * h;
+        }
+        if (n < -1 || n >= NS || s < 0 || s >= NQ) die("invalid network output");
+        *nx = (int)n; *sq = (int)s;
+    } else if (SMODE[q] == 1) {
+        for (int j = 0; j < ROWC[q]; j++) if (ROWK[q][j] == key) { *nx = ROWN[q][j]; *sq = ROWQ[q][j]; break; }
+    } else { *nx = ROWN[q][key]; *sq = ROWQ[q][key]; }
+}
+
+static int checknet(const char *table, const char *net) {
+    load(table); if (ISNET) die("expected reference table");
+    int ns = NS, nq = NQ, nr = NRG, nstr = NSTR, start = START, top = TOPMAX, nqa = NQA;
+    int *modes = SMODE, *qlen = QLEN, *sl = STRL; I *qa = QA; char **str = STR;
+    size_t total = 0;
+    for (int q = 0; q < ns; q++) total += modes[q] == 1 ? (size_t)top + 2 : 257;
+    int *en = xrealloc(0, total * sizeof(int)), *es = xrealloc(0, total * sizeof(int));
+    size_t at = 0;
+    for (int q = 0; q < ns; q++) for (int k = modes[q] == 1 ? -1 : 0, hi = modes[q] == 1 ? top : 256; k <= hi; k++)
+        transition(q, k, &en[at], &es[at]), at++;
+    load(net);
+    if (!ISNET || NS != ns || NQ != nq || NRG != nr || NSTR != nstr || START != start || TOPMAX != top || NQA != nqa ||
+        memcmp(qa, QA, sizeof(I)*nqa) || memcmp(qlen, QLEN, sizeof(int)*nq)) die("network changed action declarations");
+    for (int i = 0; i < nstr; i++) if (sl[i] != STRL[i] || memcmp(str[i], STR[i], sl[i])) die("network changed strings");
+    at = 0;
+    for (int q = 0; q < ns; q++) {
+        if (modes[q] != SMODE[q]) die("network changed observation mode");
+        for (int k = NLO[q]; k <= NHI[q]; k++) {
+            int n, s; transition(q, k, &n, &s);
+            if (n != en[at] || s != es[at]) { fprintf(stderr, "network differs: state %d key %d\n", q, k); return 1; }
+            at++;
+        }
+    }
+    printf("network = table: %zu observations, %d states; actions/strings identical\n", at, ns);
+    return 0;
 }
 
 /* ---- byte buffers ---- */
@@ -180,6 +254,7 @@ static I alu64(int op, I a, I b, int *z) {
 typedef struct { const unsigned char *b; const I *at; I i, end; } Frame;
 
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
     if (argc < 3) { fprintf(stderr, "usage: run TABLE INPUT [SRCPATH] [INCLUDE_DIR, absolute]\n"); return 2; }
     load(argv[1]);
     if (argc > 4) INCDIR = argv[4];
@@ -202,13 +277,9 @@ int main(int argc, char **argv) {
         if (++steps > maxsteps) { fprintf(stderr, "timeout\n"); return 3; }
         Frame *F = &fr[NFR - 1];
         int nx = -1, sq = -1;
-        if (SMODE[q] == 1) {
-            int top = nst ? stk[nst - 1] : -1;
-            for (int j = 0; j < ROWC[q]; j++) if (ROWK[q][j] == top) { nx = ROWN[q][j]; sq = ROWQ[q][j]; break; }
-        } else {
-            int key = SMODE[q] == 0 ? (F->i < F->end ? F->b[F->i] : 256) : (r >= 0 && r <= 256 ? (int)r : 256);
-            nx = ROWN[q][key]; sq = ROWQ[q][key];
-        }
+        int key = SMODE[q] == 1 ? (nst ? stk[nst - 1] : -1) :
+            SMODE[q] == 0 ? (F->i < F->end ? F->b[F->i] : 256) : (r >= 0 && r <= 256 ? (int)r : 256);
+        transition(q, key, &nx, &sq);
         if (nx < 0) { fprintf(stderr, "run: no transition\n"); return 2; }
         q = nx;
         const I *a = QA + QOFF[sq];

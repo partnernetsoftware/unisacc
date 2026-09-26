@@ -19,7 +19,15 @@ case $TARGET in win/*) OSFLAG=--win; IMAGE=pe;; osx/*) OSFLAG=--osx; IMAGE=macho
 case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=arm.py;; *) ARCHFLAG=; ENCODER=gen.py;; esac
 b python3 exec/lower/gen.py "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
 b python3 "exec/enc/$ENCODER" "$OUT/elf.json" "--$IMAGE"
-for s in e2 e1 e3 e4 lower elf; do b python3 exec/c/tbl.py "$OUT/$s.json" "$OUT/$s.tbl"; done
+MODEL=tbl
+case ${NETWORK:-0} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
+for s in e2 e1 e3 e4 lower elf; do
+    b python3 exec/c/tbl.py "$OUT/$s.json" "$OUT/$s.tbl"
+    if [ "$MODEL" = net ]; then
+        b python3 exec/c/net.py "$OUT/$s.tbl" "$OUT/$s.net"
+        b "$OUT/run" --check-net "$OUT/$s.tbl" "$OUT/$s.net"
+    fi
+done
 case $IMAGE in pe) EXT=exe;; *) EXT=$IMAGE;; esac
 : > "$OUT/inputs"
 for f in "$@"; do
@@ -30,9 +38,9 @@ for f in "$@"; do
     for s in e2 e1 e3 e4 lower elf; do
         out="$OUT/$name.$s"
         case $s in
-            e2) b "$OUT/run" "$OUT/$s.tbl" "$in" "$f" "$R/include" > "$out" ;;
-            e4) b env UNISA_MAXSTEPS=400000000000 "$OUT/run" "$OUT/$s.tbl" "$in" "$f" > "$out" ;; # same step budget as exec/opt/check.sh; wall bound stays 60 s
-            *) b "$OUT/run" "$OUT/$s.tbl" "$in" "$f" > "$out" ;;
+            e2) b "$OUT/run" "$OUT/$s.$MODEL" "$in" "$f" "$R/include" > "$out" ;;
+            e4) b env UNISA_MAXSTEPS=400000000000 "$OUT/run" "$OUT/$s.$MODEL" "$in" "$f" > "$out" ;; # same step budget as exec/opt/check.sh; wall bound stays 60 s
+            *) b "$OUT/run" "$OUT/$s.$MODEL" "$in" "$f" > "$out" ;;
         esac
         in=$out
     done

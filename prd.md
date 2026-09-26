@@ -2658,3 +2658,14 @@ passed gate --com: 67 suites, 0 failed, 264 s aggregate, JOBS=2, each suite
 self-source routes pass; macOS native/Rosetta self-bootstrap remains in those
 checks. No new Linux/Windows native run is claimed for the sizeof batch.
 Log /tmp/unisacc-sizeof-gate.log. No push/release.
+
+
+### S-17：实际阈值网络执行首片（2026-09-27）
+
+- `exec/c/net.py` 按有限行的相邻差分构造整数阈值网络；`run.c` 实际计算隐藏阈值与整数输出，不展开成查表。状态选择网络 bank；下一状态、动作序列号是两个线性整数输出。证明与边界见 `exec/c/NETWORK.md`，不借用旧 18 阶段的验证替代本次证明。
+- `NETWORK=1 exec/pipeline/elf.sh ...` 为可选开发路线，默认表路线仍保留。六段的动作和字符串声明不变；Python 仍构造模型，生成器的手写编译规则未消失。
+- osx/arm64 六段全域：E2 159,188 / E1 86,625 / E3 1,013,168 / E4 232,976 / lowering 366,362 / image 399,644，共 2,257,963 个观测（含缺项），网络与表完全相同。E3 的同一检查在 UBSan 下通过。
+- 六份 `.net` 文本含动作与字符串的字节数依次为 59,840 / 42,873 / 453,241 / 105,323 / 137,869 / 111,969；这是完整声明文件口径，不是仅网络权重或执行内核大小。
+- s50 的六段输出逐字节等于表路线；完整 `unisacc.c` 经六段网络生成 osx/arm64 镜像 743,202 B，与参考相同，实跑 N1=N2=N3。生成的仍是现有 C 编译器，不是 E7 发布切换。
+- `netcheck.py`：三种观测、非状态栈符号、缺项、接受路径以及改坏 bias 必须失败。`gate --com` 新增 net/netself：69/69，JOBS=2 总 277 s，每套件 ≤60 s；netself 19 s。产品 `.com` 本轮未改变。其他五目标本轮通过的是原表路线，网络路线尚不借此声称已验收。
+- 仍未完成：前端全部覆盖、失败诊断等价、几 KB 内核与单份模型 `.com`；T2/T3 仍未证。cc-unisacc 保持暂停，本片无其独立复核。
