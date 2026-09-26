@@ -75,8 +75,7 @@ def build_autoinc(g):
     """P2 autoinc, first run only (RUN == 0), between decomment and P3.
     One scan over x: every maximal identifier run followed (spaces, tabs,
     newlines) by `(` is a call; the `(`'s matching `)` followed by `{` is a
-    definition; the first string after `printf (` is checked for a
-    width/flag/precision.  Then, per header in AUTOINC_ORDER, a name of
+    definition; a call to printf sets RTP (991d337: stdio.h for any printf call).  Then, per header in AUTOINC_ORDER, a name of
     autoinc_map() (printf excluded, as hdrneeded does) with status exactly
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
@@ -94,17 +93,8 @@ def build_autoinc(g):
                               ("CMP", "aid", "ID_PRINTF")])
     g.els("ASW", "AS", [])
     pm = ("APM", [("JUMP", "AP"), ("LDI", "ad", 0)])
-    g.r("ASC", {1: ("AF0", [("ADV",)]), (0, 2): pm})
-    # rtprintf: the first string literal after `printf (`
-    g.on("AF0", WSN, "AF0", [("ADV",)])
-    g.on("AF0", [34], "AF1", [("ADV",)])
-    g.els("AF0", *pm)
-    g.on("AF1", [34, EOF], *pm)
-    g.on("AF1", [92], "AF1", [("ADV",), ("ADV",)])
-    g.on("AF1", [37], "AF2", [("ADV",)])
-    g.els("AF1", "AF1", [("ADV",)])
-    g.on("AF2", DI | {45, 43, 32, 35, 46}, pm[0], [("LDI", "RTP", 1)] + pm[1])
-    g.els("AF2", "AF1", [("ADV",)])
+    # rtprintf (product 991d337): any `printf (` pulls stdio.h in -- no format test any more
+    g.r("ASC", {1: ("APM", [("LDI", "RTP", 1)] + pm[1]), (0, 2): pm})
     # paren match from the `(`
     back = ("AS", [("JUMP", "AE")])
     g.on("APM", [40], "APM", [("ALUI", "add", "ad", "ad", 1), ("ADV",)])
