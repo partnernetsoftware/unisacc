@@ -26,6 +26,22 @@ for bits,ops in [(32,[-1,10,2147483647]),(64,[-1,3,4,16,2147483647])]:
    assert (r.returncode,r.stdout,r.stderr)==(2,b'',message),(bits,op,version,r)
 print('word arithmetic invalid operations: C/ASM both reject, 16 checks')
 PYTEST
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_BUFFER_LINKAGE= -Dcore_put=core_put_c -Drealloc=buffer_realloc \
+    exec/c/core.c "exec/c/asm/buffer_$ARCH.S" exec/c/asm/layoutcheck.c exec/c/asm/buffercheck.c -o "$T/buffer"
+b "$T/buffer"
+b python3 - "$T/buffer" <<'PYBUFFER'
+import subprocess,sys
+for case in range(1,4):
+ for version in ['c','a']:
+  r=subprocess.run([sys.argv[1],version,str(case)],capture_output=True,timeout=10)
+  reason='buffer capacity overflow' if case==3 else 'out of memory'
+  calls=0 if case==3 else case
+  message=f'SIMULATED panic checked: {reason}, calls {calls}\n'.encode()
+  assert (r.returncode,r.stdout,r.stderr)==(2,message,b''),(case,version,r)
+print('buffer failure paths: C/ASM both reject, 6 simulated checks')
+PYBUFFER
+b cc $ARCHFLAG -c "exec/c/asm/buffer_$ARCH.S" -o "$T/buffer.o"
+if [ "$OS" = osx ]; then b size -m "$T/buffer.o"; else b size -A "$T/buffer.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/arith_$ARCH.S" -o "$T/arith.o"
 if [ "$OS" = osx ]; then b size -m "$T/arith.o"; else b size -A "$T/arith.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/transition_$ARCH.S" -o "$T/transition.o"
@@ -53,5 +69,5 @@ for src in ['examples/hello.c','examples/fib.c','tests/c/b_strderef.c','exec/c/r
 # execution must not be mistaken for a fully assembly-built action engine.
 model=p/'e1.net';source=p/'hello.e2'
 assert ok([p/('run.'+ext),model,source])==ok([p/'run',model,source])
-print('ASM inference/arithmetic route: four full images equal; three native runs equal; C-runtime output equal')
+print('ASM inference/arithmetic/buffer route: four full images equal; three native runs equal; C-runtime output equal')
 PY

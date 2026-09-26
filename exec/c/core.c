@@ -40,10 +40,22 @@ const char *CORE_TRANSITION_NAME(const CoreModel *m, int q, int key, int *nx, in
 #endif
 
 /* ---- byte buffers ---- */
-static void core_put(Buf *o, int c, I at) {
-    if (o->n >= o->cap) { o->cap = o->cap ? o->cap * 2 : 256; o->b = core_alloc(o->b, o->cap); o->at = core_alloc(o->at, sizeof(I) * o->cap); }
+#ifdef UNISA_CORE_ASM_BUFFER
+void core_buffer_put(Buf *o,int c,I at);
+#define core_put core_buffer_put
+#else
+#ifndef CORE_BUFFER_LINKAGE
+#define CORE_BUFFER_LINKAGE static
+#endif
+CORE_BUFFER_LINKAGE void core_put(Buf *o, int c, I at) {
+    if (o->n >= o->cap) {
+        if (o->cap > INT32_MAX/2) core_die("buffer capacity overflow");
+        o->cap = o->cap ? o->cap * 2 : 256;
+        o->b = core_alloc(o->b, o->cap); o->at = core_alloc(o->at, sizeof(I) * o->cap);
+    }
     o->b[o->n] = (unsigned char)c; o->at[o->n] = at; o->n++;
 }
+#endif
 
 /* ---- W: registers and the indexed memory (a hash map) ---- */
 static I *R;

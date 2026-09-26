@@ -13,3 +13,9 @@
 #define CM_BASE_NEXT 120
 #define CM_BASE_SEQ 128
 #define CM_SIZE 136
+
+#define BUF_BYTES 0
+#define BUF_ATTR 8
+#define BUF_LENGTH 16
+#define BUF_CAPACITY 20
+#define BUF_SIZE 24
