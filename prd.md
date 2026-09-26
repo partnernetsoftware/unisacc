@@ -2079,3 +2079,34 @@ Self-source E3 now passes the large MODEL declaration and next stops on an
 array bound constant expression (64 * 1024). Full frontend self-compilation,
 other targets, constructed-network execution and product-path replacement
 remain incomplete; this is not a self-bootstrap result for the new route.
+
+### Self-source: constant bounds and postfix values (2026-09-26)
+
+E3 now evaluates integer bound/enum expressions using the shared prec rows
+and generic integer actions. `constexpr.py` adds 49 lines of hand parser
+rules; it is not a newly constructed network. Current limits: signed 64-bit
+arithmetic without full C conversion/overflow handling; sizeof and casts
+are not yet covered; a zero divisor is refused even in an unselected arm.
+These are prototype coverage limits, not C language restrictions.
+Global numeric expressions reuse EXPR once, saving the resulting initializer
+tape and source end position for later emission, preserving source-order
+label allocation. String and function-call values now reuse POSTIX, clearing
+stale array rank before subscript processing. No executor action was added.
+
+All old 194 retained inputs stayed equal; s39 (bounds/enum), s40 (global
+expressions), s41 (literal subscripts), s42 (call-result subscripts) and the
+product b_strderef regression pass on both executors and join the fixed set:
+199 equal, 0 lost/differ/tool-fail. gen2.py 1629 -> 1633 lines, plus the new
+49-line evaluator; rules were added/reused, not removed. Delta: 3647 states,
+938024 entries, JSON 19854065 B, text table 410815 B. Full current self-source
+E2/E1 succeeds; E3 stops at optimizer `t < 0 ? 1 : bl_live[base+t]`, whose
+integer arms differ in width. This remains an incomplete frontend self-run.
+
+The walk found a product type-projection defect, fixed separately in fb5e167:
+binary i64 & i64 asked the table's address-of sentinel row, so `(5L & 3L)+1`
+scaled by eight and yielded 9. Binary & now asks the | arithmetic row, leaving
+unary address-of unchanged; E3 uses the same contextual projection. System
+cc, the rebuilt native reference at -O0/-O1/-O2 and Python built all give
+`2 0 2 8 1` for b_longand. That regression is still outside E3 coverage because
+of its sizeof-expression form, so it is not added to E3's retained set.
+Full rebuilt-product gate results are recorded after the frozen run below.

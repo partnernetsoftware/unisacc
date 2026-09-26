@@ -390,11 +390,12 @@ assert TYINFO["u32"][1] == 1
 # the premises the derivations lean on, pinned: a table that changes shape must fail here, not silently
 assert len(AX) == 16 and AX[-1] == "illegal"
 assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
-TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
+TYOP = {"&": "|", "<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
 GSK = 43 * 10 ** 6     # GSK[the token position of a global pointer's string] = its pool number, taken in source order
+GIBLOB, GIEND = 44 * 10 ** 6, 45 * 10 ** 6  # initialiser tape and end token, produced once in source order
 SKIPS = 42 * 10 ** 6   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
 GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
@@ -478,7 +479,7 @@ def types():
     P("FPD.d").a(("LDI", "td", 1), ("LDI", "tb", FPB)).call("NEXT").ret()
     p = P("DIMS")
     p.a(("LDI", "drk", 0), ("LDI", "prd", 1)).label("DM.l")
-    p.call("NEXT").tok({TK_NUM: "DM.n", "]": "DM.open"}, bad("array bound"))
+    p.call("NEXT").tok({"]": "DM.open"}, "DM.expr")
     # T a[] = { e, ... }: the length is the number of elements, counted ahead (then back to ']')
     P("DM.open").branch({1: "DM.o1"}, bad("array bound"), [("CMPI", "drk", 0)])
     p = P("DM.o1")
@@ -504,7 +505,7 @@ def types():
     p = P("DM.cd")
     p.a(("JUMP", "dm_back"), ("COPYW", "nv", "dm_n")).call("NEXT").goto("DM.n0")
     P("DM.n0").a(("STX", "drk", TDIM, "nv"), ("ALUI", "add", "drk", "drk", 1), ("ALU", "mul", "prd", "prd", "nv")).call("NEXT").tok({"[": "DM.l"}, "RET")
-    P("DM.n").a(("STX", "drk", TDIM, "nv"), ("ALUI", "add", "drk", "drk", 1), ("ALU", "mul", "prd", "prd", "nv")).call("NEXT").expect("]").call("NEXT").tok({"[": "DM.l"}, "RET")
+    P("DM.expr").call("CE").expect("]").a(("COPYW", "nv", "cv")).goto("DM.n0")
     p = P("DIMSAVE")     # TDIM -> DIM[v * 8 + k] for the declared v
     p.a(("LDI", "k2", 0)).label("DS.l")
     p.branch({0: "DS.1"}, "RET", [("CMP", "k2", "drk")])
@@ -628,6 +629,8 @@ def build():
     E.fconv()
     E.autoscan()
     types()
+    from constexpr import install as const_install
+    const_install(E, P, LEVELS, OPS, ENV, END_)
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     p = P("START")
     tops = [o for lv in LEVELS for o in OPS[lv] if o not in SHORT]
@@ -660,8 +663,7 @@ def build():
     p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
     p = P("EN.id")
     p.a(("INTERN", "v", "ps", "pe")).call("NEXT").tok({"=": "EN.eq"}, "EN.put")
-    P("EN.eq").call("NEXT").tok({TK_NUM: "EN.n"}, bad("enum value"))
-    P("EN.n").a(("COPYW", "env", "nv")).call("NEXT").goto("EN.put")
+    P("EN.eq").call("NEXT").call("CE").a(("COPYW", "env", "cv")).goto("EN.put")
     p = P("EN.put")
     p.a(("STX", "v", ENV, "env"), ("LDI", "t", 1), ("STX", "v", END_, "t"), ("ALUI", "add", "env", "env", 1)).tok({",": "EN.c", "}": "EN.e"}, bad("enum"))
     P("EN.c").call("NEXT").goto("EN.l")
@@ -686,7 +688,7 @@ def build():
     P("IN.nx").call("NEXT").goto("IN.l")
     P("IN.id").branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dep", 0)])
     P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("IN.nx")
-    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v", "{": "IN.br", "&": "IN.amp", TK_ID: "IN.fn", E.TK_STR: "IN.s0"}, "IN.l")
+    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v", "-": "IN.v", "+": "IN.v", "!": "IN.v", "~": "IN.v", "(": "IN.v", "{": "IN.br", "&": "IN.amp", TK_ID: "IN.fn", E.TK_STR: "IN.s0"}, "IN.l")
     p = P("IN.s0")          # (measured, s34) .lea/.zero, then each byte and the 0 while inside the array
     p.a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.sp", [("CMPI", "t", 1)])
     P("IN.sp").a(("LDX", "t", "tpos", GSK)).o("  .lea r0, S").num("t").goto("IN.as")   # (measured, s35: numbered where it stands)   # (measured, s35)
@@ -758,8 +760,11 @@ def build():
     P("IN.ed").branch({1: "IN.ic"}, "IN.ed0", [("CMPI", "ibr", 1)])
     P("IN.ed0").call("NEXT").goto("IN.l")
     P("IN.ic").a(("COPYW", "ix", "inx"), ("LDI", "ibr", 0)).call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
-    q = P("IN.v")
-    emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").a(("INTERN", "v", "ips", "ipe"), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("STOREV").goto("IN.nx")
+    P("IN.v").a(("LDX", "gi_blob", "tpos", GIBLOB), ("LDX", "gi_end", "tpos", GIEND), ("INPUSH", "gi_blob")).goto("IN.vcopy")
+    g.on("IN.vcopy", [256], "IN.vdone", [("INPOP",), ("JUMP", "gi_end")])
+    g.els("IN.vcopy", "IN.vcopy", [("COPY",), ("ADV",)])
+    q = P("IN.vdone")
+    q.call("NEXT").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").a(("INTERN", "v", "ips", "ipe"), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("STOREV").goto("IN.l")
     # function: int NAME ( params ) { body }
     p = P("FN")
     p.call("TSPEC").a(("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).tok({TK_ID: "FN.id", ";": "FN.semi", "(": "GV.fp"}, bad("declarator"))
@@ -778,7 +783,7 @@ def build():
     P("GV.p8").a(("LDI", "gsz", 8)).goto("GV.reg")
     p = P("GV.reg")
     p.a(("LDI", "gar", 0)).call("GV.emit").tok({"=": "GV.init"}, "GV.end")
-    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv", "{": "GV.bi", "&": "GV.ga", TK_ID: "GV.gf", E.TK_STR: "GV.gs"}, bad("global initialiser"))
+    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv", "-": "GV.iv", "+": "GV.iv", "!": "GV.iv", "~": "GV.iv", "(": "GV.iv", "{": "GV.bi", "&": "GV.ga", TK_ID: "GV.gf", E.TK_STR: "GV.gs"}, bad("global initialiser"))
     p = P("GV.gs")          # char NAME[..] = "...": bytes, not a pooled string
     p.call("CHARR").branch({1: "GV.gs1"}, "GV.gsp", [("CMPI", "u", 1)])
     P("GV.gsp").branch({1: "GV.gsq"}, "GV.gsk", [("CMPI", "gar", 0)])    # T *NAME = "...": a pooled string's address
@@ -800,8 +805,7 @@ def build():
     p.a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.FND)).branch({1: "GV.gok"}, "DEAD.ginit", [("CMPI", "u", 1)])
     P("GV.gok").call("NEXT").goto("GV.end")
     P("GV.bi").a(("LDI", "dep", 1)).call("NEXT").goto("GV.bl")     # a struct's `= { ... }`
-    P("GV.iv").a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "DEAD.big"}, "GV.iv1")
-    P("GV.iv1").call("NEXT").goto("GV.end")
+    P("GV.iv").a(("OLEN", "gi_out"), ("COPYW", "gi_pos", "tpos")).vpush("gi_out", "gi_pos", "fns", "fne", "td", "tb", "gar", "gsz").call("EXPR").vpop("gi_out", "gi_pos", "fns", "fne", "td", "tb", "gar", "gsz").a(("OCUT", "gi_blob", "gi_out"), ("STX", "gi_pos", GIBLOB, "gi_blob"), ("STX", "gi_pos", GIEND, "tpos")).goto("GV.end")
     P("GV.end").tok({",": "GV.cm", "=": "GV.init"}, "GV.e0")
     P("GV.brace").call("NEXT").expect("{").a(("LDI", "dep", 1)).call("NEXT").goto("GV.bl")
     p = P("GV.bl0")
@@ -1287,7 +1291,7 @@ def build():
         emit(q, fix).call("NEXT").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
     p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", END_)).branch({1: "X.enum"}, "X.var1", [("CMPI", "t", 1)])
-    P("X.enum").a(("LDX", "n", "v", ENV)).o("  imm r0, ").call("PRN").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("C%d" % LEVELS[0]).call("QTAIL").ret()
+    P("X.enum").a(("LDX", "nv", "v", ENV), ("LDI", "nx", 1)).o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("C%d" % LEVELS[0]).call("QTAIL").ret()
     p = P("X.var1")
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "X.fnv"}, "X.v2", [("CMPI", "isfn", 1)])
     P("X.fnv").a(("LDI", "rkok", 0)).call("POSTIX").call("C%d" % LEVELS[0]).call("QTAIL").ret()
@@ -1301,10 +1305,10 @@ def build():
     P("X.mb").call("MEMB").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     P("X.cpf").a(("INTERN", "v", "ips", "ipe")).branch({1: "X.pf"}, "X.call", [("CMP", "v", "pfid")])
     P("X.pf").call("PF").call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    P("X.call").call("CALL").call("C%d" % LEVELS[0]).call("QTAIL").ret()
+    P("X.call").call("U.call").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     ladder("E", "UNARY")
     ladder("C", None)
-    P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "RET")
+    P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("LDI", "vb", 1), ("LDI", "rkok", 0)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "POSTIX")
     g.on("DEAD.adj", range(257), "DEAD", E.rej("not covered: adjacent string literals"), "r")
     q = P("U.cpl")       # ~x: imm r1, -1; xor64 (measured); the operand's type is kept
     q.call("NEXT").call("UNARY").call("NODBL0").o("  imm r1, -1\n  xor64 r0, r0, r1\n").ret()
@@ -1356,7 +1360,7 @@ def build():
     P("UD.gen").call("UNARY").goto("UD.dn")
     P("UD.dn").call("DOWN").branch({1: "RET"}, "LOADV", [("CMPI", "vb", FPB)])
     P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call"}, "UD.v")
-    P("UD.call").call("CALL").goto("UD.dn")
+    P("UD.call").call("U.call").goto("UD.dn")
     p = P("UD.v")        # *f with f a local function pointer: `load64 r0, [r6-N]` as for a callee (measured, p70)
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "RET"}, "UD.v2", [("CMPI", "isfn", 1)])
     p = P("UD.v2")
@@ -1434,7 +1438,7 @@ def build():
     q = P("U.num1")
     emit(q, "imm").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     P("U.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "U.call"}, "U.var0")
-    P("U.call").call("CALL").ret()
+    P("U.call").call("CALL").a(("LDI", "rkok", 0)).call("POSTIX").ret()
     printf()
     q = P("U.var")
     q.call("LOOKUP")
@@ -1442,7 +1446,7 @@ def build():
     q.tok({".": "MEMB"}, "U.vl")
     q = P("U.var0")
     q.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", END_)).branch({1: "U.enum"}, "U.var0b", [("CMPI", "t", 1)])
-    P("U.enum").a(("LDX", "n", "v", ENV)).o("  imm r0, ").call("PRN").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("POSTIX").ret()
+    P("U.enum").a(("LDX", "nv", "v", ENV), ("LDI", "nx", 1)).o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("POSTIX").ret()
     q = P("U.var0b")
     q.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "U.fnp"}, "U.var", [("CMPI", "isfn", 1)])
     P("U.fnp").a(("LDI", "rkok", 0)).goto("POSTIX")
