@@ -439,6 +439,10 @@ def expr():
                     nx = t.fresh("sn")
                     t.branch({1: sc[n]}, nx, [("CMPI", "pb", n)])
                     t = P(nx)
+                    if n in (1, 2):   # unsigned char/short *: scaled by the size (measured)
+                        nx = t.fresh("sn")
+                        t.branch({1: sc[n]}, nx, [("CMPI", "pb", UNS + n)])
+                        t = P(nx)
                 t.goto("DEADP")
                 for k in sc:
                     r = P(sc[k])
@@ -538,6 +542,10 @@ def expr():
         t.branch({1: hit}, nx, [("CMPI", "pb", n)])
         P(hit).o("" if n == 1 else "  imm r2, %d\n  mul64 r0, r0, r2\n" % n).goto("IX.add")
         t = P(nx)
+        if n in (1, 2):
+            nx = t.fresh("xn")
+            t.branch({1: hit}, nx, [("CMPI", "pb", UNS + n)])
+            t = P(nx)
     t.goto("DEADP")
     p = P("IX.add")
     p.o(POP1 + "  add64 r0, r1, r0\n").a(("ALUI", "sub", "pt", "pt", 1)).call("NEXT")
@@ -959,6 +967,40 @@ def stmt():
     p.a(("JUMP", "ep")).vpop("brk", "cnt").call("NEXT").ret()
 
 
+def spec():
+    """SPEC: a run of type words (int char short long unsigned signed) -> W[bni] 0, W[bsz]
+    (tyinfo size; UNS + size for unsigned char/short).  Anything the slice cannot
+    type exactly is rejected: unsigned int/long, void mixed in, char/short twice."""
+    p = P("SPEC")
+    p.a(("LDI", "sz", 0), ("LDI", "un", 0)).label("SP.loop")
+    p.tok({"type": "SP.int", "type=char": "SP.ch", "type=short": "SP.sh", "type=long": "SP.lg",
+           "type=unsigned": "SP.un", "type=signed": "SP.sg"}, "SP.end")
+    bad = ("rej", "not covered: type specifier")
+    P("SP.int").branch({1: "SP.i4"}, "SP.nx", [("CMPI", "sz", 0)])
+    P("SP.i4").a(("LDI", "sz", 4)).goto("SP.nx")
+    P("SP.ch").branch({1: "SP.c1"}, bad, [("CMPI", "sz", 0)])
+    P("SP.c1").a(("LDI", "sz", 1)).goto("SP.nx")
+    P("SP.sh").branch({(0, 1): "SP.s2"}, bad, [("CMPI", "sz", 4)])   # sz 0 or 4
+    P("SP.s2").branch({1: "SP.shx"}, "SP.s3", [("CMPI", "sz", 1)])
+    g.on("SP.shx", range(257), "DEAD", rej("not covered: type specifier"), "r")
+    P("SP.s3").a(("LDI", "sz", 2)).goto("SP.nx")
+    P("SP.lg").branch({1: "SP.shx"}, "SP.l1", [("CMPI", "sz", 1)])
+    P("SP.l1").branch({1: "SP.shx"}, "SP.l8", [("CMPI", "sz", 2)])
+    P("SP.l8").a(("LDI", "sz", 8)).goto("SP.nx")
+    P("SP.un").a(("LDI", "un", 1)).goto("SP.nx")
+    P("SP.sg").goto("SP.nx")
+    P("SP.nx").call("NEXT").goto("SP.loop")
+    p = P("SP.end")
+    p.a(("LDI", "bni", 0)).branch({1: "SP.u"}, "SP.s", [("CMPI", "un", 1)])
+    P("SP.s").branch({1: "SP.s0"}, "SP.sk", [("CMPI", "sz", 0)])
+    P("SP.s0").a(("LDI", "bsz", SZ["int"])).ret()
+    P("SP.sk").a(("COPYW", "bsz", "sz")).ret()
+    P("SP.u").branch({1: "SP.u1"}, "SP.u2", [("CMPI", "sz", 1)])
+    P("SP.u1").a(("LDI", "bsz", UNS + 1)).ret()
+    P("SP.u2").branch({1: "SP.u3"}, ("rej", "not covered: unsigned int/long"), [("CMPI", "sz", 2)])
+    P("SP.u3").a(("LDI", "bsz", UNS + 2)).ret()
+
+
 def unit():
     p = P("START")
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
@@ -1023,21 +1065,13 @@ def unit():
     p = P("FN.open")
     p.call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "FN.pi", "type=void": "FN.pv", "type=char": "FN.pc", "type=long": "FN.pl",
-                                 "type=unsigned": "FN.pt", "type=short": "FN.ps", "type=signed": "FN.pt",
-                                 TK_ID: "FN.ptd"}, ("rej", "not covered: parameter"))
+    p.tok({TK_ID: "FN.ptd", "type=void": "FN.pv"}, "FN.psp")
+    P("FN.psp").call("SPEC").goto("FN.pst")
     p = P("FN.ptd")
-    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
-    P("FN.pi").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("FN.pt")
-    P("FN.pc").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.pt")
-    P("FN.pl").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("FN.pt")
-    P("FN.ps").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("FN.pt")
-    P("FN.pw").a(("LDI", "bsz", 0)).goto("FN.pt")
-    P("FN.pv").call("NEXT").tok({")": "FN.close", "*": "FN.pvs"}, ("rej", "not covered: parameter"))
-    P("FN.pvs").a(("LDI", "bni", 1)).goto("FN.pvk")
-    P("FN.pt").call("NEXT").goto("FN.pvk")
-    p = P("FN.pvk")
-    p.tok(dict((w, "FN.pw") for w in TWORDS), "FN.pst")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN))
+    p.branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
+    P("FN.pt").call("NEXT").goto("FN.pst")
+    P("FN.pv").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).call("NEXT").tok({")": "FN.close", "*": "FN.pst"}, ("rej", "not covered: parameter"))
     p = P("FN.pst")
     stars(p, "FN.pid")
     p = P("FN.pid")
@@ -1105,6 +1139,7 @@ def build():
     numout()
     expr()
     stmt()
+    spec()
     printf()
     inits()
     unit()
