@@ -466,6 +466,57 @@ Shards: ex.aa..af (104 files in this split): 79 equal, 20 equal-noauto,
 5 not covered, 0 DIFF; corpus.aa..ag 249: 201 equal (+2), 25 equal-noauto
 (+2), 17 not covered (-4), 6 reject-agree, 0 DIFF.
 
+## §13 Nested call arguments; function-like names in a body (2026-09-26)
+
+Measured on the reference (`ua_ref -E`, main f0c2e8c), token algorithm of
+src/front_pp.c xstep/xcall/xsubst (Prosser hide sets, arguments expanded on
+their own first, the rescan continuing into the rest of the source):
+
+| input | reference |
+|---|---|
+| `F(G(1),2)` (`F(a,b) a+b*a`, `G(x) [x]`) | ` [ 1 ] + 2 * [ 1 ] ` |
+| `F((a,b),c)` | ` ( a , b ) + c * ( a , b ) ` |
+| `F(F(1,2),3)` | ` 1 + 2 * 1 + 3 * 1 + 2 * 1 ` |
+| `xstr(glue(a,b))` / `str(glue(a,b))` | ` "ab" ` / ` "glue(a,b)" ` |
+| `f(2)(9)` (`f(a) a*g`, `g(a) f(a)`) | ` 2 * 9 * g ` (the `(9)` read after the body ended) |
+| `I(G)(6)` / `I(I)(7)` / `G(G)(5)` | ` [ 6 ] ` / ` I (7)` / ` [ G ] (5)` |
+| `H` NL `(3)` (`H G`) | ` [ 3 ] ` NL (the newline moves after) |
+| `xstr(V(5,6))` (`V(a,b) ((a) * 100 + (b))`) | `"((5) * 100 + (6))"`: an expanded argument keeps each token's own preceding-blank flag |
+| C99 6.10.3.5 ex. 3 (`f(y+1) + f(f(z)) % t(t(g)(0) + t)(1); ...`) | equal, except `h 5)` below |
+
+Delta (exec/pp/gen.py `CF`; one new executor action, `OCUT d s`: the output
+from W[s] on becomes a blob and is cut off -- language-agnostic):
+- argument collection counts parentheses (DP); only a depth-0 comma splits;
+  raw spans go into a call record on a stack (CRB, CL deep: the macro, the
+  argument index, saved registers, raw and expanded blob per argument);
+- each argument is expanded on its own: the body scan EB runs on the raw
+  blob pushed as a frame whose end is a barrier (BDEP = DEP at the push;
+  EOF there RETurns), in PRE mode writing to o, then OCUT to a blob.  A name
+  left unexpanded because its macro is active is painted (byte 1 before it:
+  never expands again, as its hide set says).  In PRE mode the separator
+  before a token is a space when blanks preceded it and byte 2 (a token
+  boundary without a blank) otherwise, so a later `#` spells it as the
+  reference does;
+- every function-like body now goes through HX: `#`/`##` operands take the
+  raw argument, every other parameter the expanded one (a parameter
+  followed by `##` is detected by a lookahead); the rewrite is pushed with
+  PUSHMB (the old lazy ARGE substitution is unused: FNE = -1);
+- a function-like name met in EB is a call when `(` follows: the peek skips
+  blanks, pops body frames it reaches the end of, and at the outermost
+  (DEP = 0, not PRE) looks into the pass input (newlines counted; restored
+  when no `(`).  It never passes an argument's barrier.
+
+Hide sets stay the active chain (F_ACT/F_UP) plus painting; they agree with
+Prosser's rule on every probe and shard.  Not covered (rejected, never
+guessed): a call whose argument list runs past the end of the body frame it
+started in (`#define h g(~` / `h 5)`), `#` of an argument holding a painted
+name, and the rest of §10.5/§12's list minus the two items removed here.
+
+Probes 8 (the rows above plus spacing/stringize mixes): 6 equal, 2 not
+covered (both `h 5)`/`E 4)` crossing a body end), 0 DIFF.
+ex.aa..af 107: 102 equal (+2), 5 not covered, 0 DIFF;
+corpus.aa..ag 249: 235 equal (+7), 8 not covered (-7), 6 reject-agree, 0 DIFF.
+
 ## autoinc (measured 2026-09-26; in the delta as P2, build_autoinc)
 
 Reference: autoinc() runs after decomment(), before preprocess(). For each header in the fixed order assert.h ctype.h stdlib.h string.h wchar.h stdio.h, if some `static NAME(...){` definition line of include/H is *called* in the source and never *defined* there (srcuse==1; printf excluded), it PREPENDS the line `#include <H>` at byte 0 (so later headers land above earlier ones), which P3 then processes as a normal include. Afterwards, a printf format with a width/flag/precision prepends `#include <stdio.h>`. Measured: strcpy+strlen with no include -> ref -E emits string.h text, noauto does not. gen.autoinc_map() derives the trigger names from include/*.h (ctype 14, stdlib 28, string 15, wchar 1, stdio 40, assert 0). Wired (gen.build_autoinc, first run only, between P1 and P3): one scan of x marks W[AIB+id] bit 1 for an identifier run followed (space/tab/newline) by `(`, bit 2 when that `(`'s matching `)` is followed by `{` (srcuse returns 2 on any definition-shaped occurrence, else 1 on any call: the bits encode exactly that); after `printf (` the first string literal is checked for `%` followed by `- + space # .` or a digit (rtprintf). Per header in order, a name of autoinc_map() (printf excluded) with status exactly 1 sets NEED_h; the output is rtprintf's stdio.h line, then the needed headers last-to-first, then x -- the byte-0 prepend order. No new sim actions. Verdicts: 6 hand probes equal against the reference (strcpy/strlen/isalpha/abs; printf width; a defined strlen; plain printf + malloc; a commented-out call and `(strcmp)(`; assert/wcslen/memcpy); examples+tests 107: 99 equal, 8 not covered, 0 noauto, 0 DIFF; corpus 249: 226 equal (+25), 0 noauto, 17 not covered, 6 reject-agree, 0 DIFF.

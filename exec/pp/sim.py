@@ -30,6 +30,8 @@ Every action (and nothing else runs):
   LDX d b off | STX b off s                W[d] := W[W[b]+off] / W[W[b]+off] := W[s]
   OUT c | OUTW s | COPY | COPYT | SPAN s | SPANT s | SPAN2 s e
   OLAST (r := last byte of o, 256 if none) | ODROP | OLEN d | OCLR | OSEL k
+  OCUT d s                                 W[d] := a new blob of o[W[s]:]; o (and its
+                                           attrs) truncated to W[s]  (added for s13)
   SETOT s | XATTR d
   PUSH g | POP
   INTERN d s e | BLOBSAVE d s e | INPUSH b | INPUSHX s | INPUSHXE s e | INPOP
@@ -278,6 +280,12 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
                     oattr.pop()
             elif op == "OLEN":
                 W[a[1]] = len(o)
+            elif op == "OCUT":
+                s0 = max(0, min(W.get(a[2], 0), len(o)))
+                blobs.append(bytes(o[s0:]))
+                W[a[1]] = len(blobs) - 1
+                del o[s0:]
+                del oattr[s0:]
             elif op == "OCLR":
                 o = bytearray()
                 oattr = []
