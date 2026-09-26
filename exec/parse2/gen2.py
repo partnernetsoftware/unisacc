@@ -149,7 +149,20 @@ def ladder(prefix, bottom):
                 q.branch({1: bn + ".r"}, bn + ".pc", [("ALU", "or", "t", "vt", "lt"), ("CMPI", "t", 0)])
                 P(bn + ".pc").goto(bn + ".r" if o in ("<", ">", "<=", ">=", "==", "!=") else "DEAD.pa")
                 q = P(bn + ".r")
-            emit(q, "pop1").o(E.optext(o)).a(("LDI", "vt", 0), ("LDI", "vb", 4)).goto(nm + ".l")
+            emit(q, "pop1")
+            cmp = o in ("<", ">", "<=", ">=", "==", "!=")
+            q.branch({1: bn + ".u"}, bn + ".u0", [("CMPI", "lb", UNS + 8)])
+            P(bn + ".u0").branch({1: bn + ".u"}, bn + ".s", [("CMPI", "vb", UNS + 8)])
+            P(bn + ".u").o(E.optext(o, True)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 8)).goto(nm + ".l")
+            q = P(bn + ".s")
+            q.o(E.optext(o))
+            if cmp:
+                q.a(("LDI", "vt", 0), ("LDI", "vb", 4)).goto(nm + ".l")
+            else:
+                q.branch({1: bn + ".l8"}, bn + ".l0", [("CMPI", "lb", 8)])
+                P(bn + ".l0").branch({1: bn + ".l8"}, bn + ".i4", [("CMPI", "vb", 8)])
+                P(bn + ".l8").a(("LDI", "vt", 0), ("LDI", "vb", 8)).goto(nm + ".l")
+                P(bn + ".i4").a(("LDI", "vt", 0), ("LDI", "vb", 4)).goto(nm + ".l")
     g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
     g.on("DEAD.pa", range(257), "DEAD", E.rej("not covered: pointer arithmetic"), "r")
 
@@ -239,13 +252,14 @@ def printf():
     emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).ret()
 
 
+UNS = E.UNS   # unsigned char/short/long: UNS + size (unsigned int: not covered)
 SBB = 1000   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
 STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
 TYPEW = {"type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
-TWORDS = tuple(TYPEW)
+TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
 
-def width_dispatch(p, name, tab8, tabn):
+def width_dispatch(p, name, tab8, tabn, masks=False):
     """one procedure per access kind, shared by every construct: the width comes from the
     value descriptor (vt >= 1 or vb == 8: 8 bytes; else vb), the text from the template"""
     q = P(name)
@@ -258,16 +272,25 @@ def width_dispatch(p, name, tab8, tabn):
         q.branch({1: hit}, nx, [("CMPI", "vb", w)])
         P(hit).o(tabn % w).ret()
         q = P(nx)
+    for w, mask in ((1, 255), (2, 65535), (8, None)):
+        hit, nx = q.fresh("u"), q.fresh("y")
+        q.branch({1: hit}, nx, [("CMPI", "vb", UNS + w)])
+        if w == 8:
+            P(hit).o(tab8).ret()
+        else:
+            P(hit).o(tabn % w + (masks and "  imm r2, %d\n  and64 r0, r0, r2\n" % mask or "")).ret()
+        q = P(nx)
     q.goto("DEAD.w")
 
 
 def types():
-    width_dispatch(None, "LOADV", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n")
+    width_dispatch(None, "LOADV", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n", masks=True)
     width_dispatch(None, "STOREV", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, %d\n")
     # NARROW: a value to vb bytes through the stack (a return, a cast); 8 bytes and pointers: nothing
     q = P("NARROW")
     q.branch({(1, 2): "RET"}, "NARROW.b", [("CMPI", "vt", 1)])
-    P("NARROW.b").branch({1: "RET"}, "NARROW.n", [("CMPI", "vb", 8)])
+    P("NARROW.b").branch({1: "RET"}, "NARROW.u", [("CMPI", "vb", 8)])
+    P("NARROW.u").branch({1: "RET"}, "NARROW.n", [("CMPI", "vb", UNS + 8)])
     q = P("NARROW.n")
     for w in (1, 2, 4):
         hit, nx = q.fresh("w"), q.fresh("x")
@@ -279,7 +302,7 @@ def types():
     P("ISTD").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN), ("CMPI", "u", 1)).ret()
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
     p = P("TSPEC")
-    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct"}, bad("type"))
+    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "type=unsigned": "TS.type=unsigned"}, bad("type"))
     P("TS.struct").call("NEXT").tok({TK_ID: "TS.tag", "{": "TS.anon"}, bad("type"))
     P("TS.anon").a(("LDI", "tg", 0)).call("SBODY").call("NEXT").goto("TS.sb")
     p = P("TS.tag")
@@ -306,7 +329,8 @@ def types():
     P("SB.p").a(("LDI", "msz", 8)).goto("SB.put")
     P("SB.v").branch({(1, 2): "DEAD.sm"}, "SB.v1", [("CMPI", "tb", SBB)])
     P("SB.v1").branch({1: "DEAD.void"}, "SB.v2", [("CMPI", "tb", 0)])
-    P("SB.v2").a(("COPYW", "msz", "tb")).goto("SB.put")
+    P("SB.v2").a(("COPYW", "msz", "tb")).branch({2: "SB.vu"}, "SB.put", [("CMPI", "tb", UNS)])
+    P("SB.vu").a(("ALUI", "sub", "msz", "tb", UNS)).goto("SB.put")
     g.on("DEAD.sm", range(257), "DEAD", E.rej("not covered: a struct member of struct type"), "r")
     p = P("SB.put")
     p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "msz"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "msz"), ("ALU", "and", "soff", "t", "m"),
@@ -321,9 +345,13 @@ def types():
         ("STX", "sid", SSZ, "t"), ("COPYW", "nsid", "sid")).vpop("td", "tb").ret()
     P("TS.id").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN)).branch({1: "TS.td"}, bad("type"), [("CMPI", "u", 1)])
     P("TS.td").a(("LDX", "tb", "t", E.TDB), ("LDX", "td", "t", E.TDD)).call("NEXT").goto("TS.l")
-    for w, n in TYPEW.items():
+    for w, n in TYPEW.items():   # (unsigned is read by its own states below)
         P("TS." + w).a(("LDI", "tb", n)).call("NEXT").goto("TS.l" if w != "type=long" else "TS.ll")
     P("TS.ll").tok({"type=long": "TS.ll2"}, "TS.l")    # long long: a long
+    P("TS.type=unsigned").call("NEXT").tok({"type=char": "TS.u1", "type=short": "TS.u2", "type=long": "TS.u8"}, bad("unsigned int"))
+    P("TS.u1").a(("LDI", "tb", UNS + 1)).call("NEXT").goto("TS.l")
+    P("TS.u2").a(("LDI", "tb", UNS + 2)).call("NEXT").goto("TS.l")
+    P("TS.u8").a(("LDI", "tb", UNS + 8)).call("NEXT").goto("TS.ll")
     P("TS.ll2").call("NEXT").goto("TS.l")
     P("TS.l").tok({"*": "TS.st"}, "RET")
     P("TS.st").a(("ALUI", "add", "td", "td", 1)).call("NEXT").goto("TS.l")
@@ -331,7 +359,9 @@ def types():
     q = P("SCALE")
     q.branch({2: "SC.8"}, "SC.1", [("CMPI", "lt", 1)])
     P("SC.8").o("  imm r2, 8\n  mul64 r0, r0, r2\n").ret()
-    P("SC.1").branch({1: "RET"}, "SC.n", [("CMPI", "lb", 1)])
+    P("SC.1").branch({2: "SC.u"}, "SC.1b", [("CMPI", "lb", UNS)])
+    P("SC.u").a(("ALUI", "sub", "lb", "lb", UNS)).goto("SC.1b")
+    P("SC.1b").branch({1: "RET"}, "SC.n", [("CMPI", "lb", 1)])
     P("SC.n").o("  imm r2, ").num("lb").o("\n  mul64 r0, r0, r2\n").ret()
 
 
@@ -406,7 +436,8 @@ def build():
     P("ELSZ.st").a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "es", "t", SSZ)).branch({1: "DEAD.inc"}, "RET", [("CMPI", "es", 0)])
     g.on("DEAD.inc", range(257), "DEAD", E.rej("not covered: incomplete struct"), "r")
     P("ELSZ.b").branch({1: "DEAD.void"}, "ELSZ.s", [("CMPI", "tb", 0)])
-    P("ELSZ.s").a(("COPYW", "es", "tb")).ret()
+    P("ELSZ.s").a(("COPYW", "es", "tb")).branch({2: "ELSZ.u"}, "RET", [("CMPI", "tb", UNS)])
+    P("ELSZ.u").a(("ALUI", "sub", "es", "tb", UNS)).ret()
     P("ELSZ.8").a(("LDI", "es", 8)).ret()
     p = P("FN.fn")
     p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0))
@@ -588,8 +619,13 @@ def build():
     P("U.pe").call("EXPR").expect(")").call("NEXT").call("POSTIX").ret()
     q = P("U.cast")      # (T) e: narrowed through the stack to T; long and pointers: no code (measured)
     q.call("TSPEC").expect(")").vpush("td", "tb").call("NEXT").call("UNARY").vpop("vt", "vb").call("NARROW").ret()
-    q = P("U.num")       # an int constant only: a larger one is long or unsigned in C (not in this step)
-    q.a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "DEAD.big"}, "U.num1")
+    q = P("U.num")       # an int constant; beyond int: long when it fits (printed as NUMOUT does), unsigned kinds not covered
+    q.a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "U.big"}, "U.num1")
+    q = P("U.big")       # decimal beyond int: long; hex/octal: unsigned int up to 0xffffffff (not covered), then long up to LONG_MAX
+    q.branch({1: "U.bh"}, "U.bl", [("CMPI", "nx", 1)])
+    P("U.bh").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.bl"}, "DEAD.big")
+    P("U.bl").a(("LDI", "t", 0)).a(("C64", "nv", "t")).branch({0: "DEAD.big"}, "U.long")
+    P("U.long").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
     g.on("DEAD.big", range(257), "DEAD", E.rej("not covered: constant beyond int"), "r")
     q = P("U.num1")
     emit(q, "imm").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
