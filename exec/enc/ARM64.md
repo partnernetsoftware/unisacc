@@ -246,3 +246,30 @@ executors, seven invalid metadata/restore contracts, and full hello/fib Windows
 lowering outputs (56,304 / 56,648 text bytes). No PE file is produced and no
 Windows execution is claimed. The POSIX ARM suite remains green. The table
 continues to be a lookup table, not a constructed neural network.
+
+### PE output
+
+`arm.py OUT.json --pe` writes the complete PE32+ image. Shared payload decoding
+applies relocations, retaining the logical data length separately from the
+stored zero-trimmed prefix. `pedelta.py` computes section/file extents, emits
+imports and load configuration, adds its relocatable cookie pointer, sorts and
+deduplicates relocation RVAs and groups DIR64 entries by page. Its format fields
+are explicit rules; only import names/constants are declaration inputs. No PE
+or sort action was added to the executor. Relocation insertion is quadratic in
+the number of records; large-record performance is not claimed.
+
+`pecheck.sh` compares whole bytes and independently decodes PE directories,
+section alignments, import names, cookie and relocation blocks. Cases include
+empty data, extra stack BSS, unordered/duplicate and cross-page relocations,
+and 2,000,100 bytes of data. The smaller cases use both executors. Real hello
+and fib PE outputs are 59,392 and 59,904 bytes and equal the reference.
+An initial duplicate-insertion error was caught by the unordered fixture and
+fixed before acceptance. ELF and Mach-O writer regressions also passed.
+
+Native check on Windows 11 ARM64 / UTM: both delta PE files exit 0 and produce
+the host cc output (host examples compiled with `-include stdio.h`, since the
+examples omit that declaration). No Windows x86_64 claim. `PE_OUT=DIR` keeps
+artifacts from pecheck.sh; with the VM already running, use an outer 60 s alarm
+on `python3 exec/enc/pevmcheck.py DIR`. It reads independent per-run guest exit
+receipts, not utmctl's asynchronous command return. The VM started for this
+measurement was stopped afterwards.

@@ -2514,3 +2514,20 @@ winrest with result other than x0 (review22). Existing ARM native arithmetic,
 FP/memory and Darwin execution suite passed. Logs /tmp/unisacc-arm-winapi.log
 and /tmp/unisacc-arm-winapi-regression.log. Added exec-armwin gate entry;
 no new full-gate result claimed. PE writer and native Windows execution remain.
+
+### ARM64 PE writer and first native Windows evidence (2026-09-27)
+
+Complete ARM PE emitted by the delta, not a Python image wrapper. Whole-file
+reference comparison plus independent structure checks passed for sparse/BSS,
+relocation duplicates/order/page boundaries and 2 MB data; small fixtures on
+both executors. ELF/Mach-O regressions passed. Initial duplicate relocation
+sort corruption was caught and fixed; fixture retained.
+Windows 11 ARM64 UTM actual runs, separate process timeout 30 s: hello/fib
+exit 0, stdout equals host cc. hello 59,392 B SHA256
+`3de62f3522f36f6831d70a99c8be451231bc3246323fe36f9b17786ab5fc1153`;
+fib 59,904 B SHA256
+`a59d240caa6f4ab8d861224b6ea0761b210782c2ad0c8b1f65a7f76604774ffa`.
+Artifacts /tmp/unisacc-delta-pe; logs /tmp/unisacc-pe-final.log and
+/tmp/unisacc-pe-native.log. VM was stopped after use. Reference lowering is
+still the input producer in this test, not the full source pipeline. Windows
+x86 encoding/PE route, self-source, E7 and network runtime remain unfinished.

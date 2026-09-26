@@ -11,8 +11,8 @@ DATA = 1 << 40  # byte offsets are bounded below 2^31; separate wide region
 def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format="elf"):
     assert arch in elf.MACHINE
     P,g=E.P,E.g
-    P('ELF').branch({1:'ELF.begin'},'DEAD.image',[('CMPI','target_os',2 if image_format=='macho' else 1)])
-    P('ELF.begin').a(('LDI','zero',0),('OCUT','text_blob','zero'),('LDI','dlen',0),('INPUSH','header_data')).goto('ED.first')
+    P('ELF').branch({1:'ELF.begin'},'DEAD.image',[('CMPI','target_os',{'macho':2,'pe':3,'elf':1}[image_format])])
+    P('ELF.begin').a(('LDI','zero',0),('OCUT','text_blob','zero'),('LDI','dlen',0),('LDI','extra_bss',0),('LDI','nr_relocs',0),('INPUSH','header_data')).goto('ED.first')
     g.on('ED.first',[45],'ED.empty',[('ADV',)])
     g.els('ED.first','ED.hi',[])
     g.on('ED.empty',[256],'ED.end',[])
@@ -29,7 +29,9 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     P('EM.len').a(('INPUSH','header_data_len')).call('EM.num').branch({0:'DEAD.image'},'EM.length',[('C64','mn','dlen')])
     P('EM.length').a(('COPYW','vlen','mn')).goto('EM.bss')
     P('EM.bss').a(('COPYW','memlen','vlen')).branch({1:'EM.extra'},'EM.ready',[('CMPI','has_bss',1)])
-    P('EM.extra').a(('INPUSH','header_bss')).call('EM.num').branch({1:'EM.ready'},'DEAD.image',[('CMPI','mn',0)]) # Linux route has no additional Windows stack BSS
+    p=P('EM.extra').a(('INPUSH','header_bss')).call('EM.num')
+    if image_format=='pe':p.a(('COPYW','extra_bss','mn')).goto('EM.ready')
+    else:p.branch({1:'EM.ready'},'DEAD.image',[('CMPI','mn',0)])
     P('EM.num').a(('LDI','mn',0),('LDI','nd',0)).goto('EM.digit')
     g.on('EM.digit',range(48,58),'EM.bound',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','mn','mn',10),('A64','add','mn','mn','bt'),('ALUI','add','nd','nd',1),('ADV',)])
     P('EM.bound').branch({2:'DEAD.image'},'EM.digit',[('C64U','mn','extent_max')])
@@ -49,6 +51,9 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     P('ER.read').branch({2:'ER.extend'},'ER.value',[('C64','rend','dlen')])
     P('ER.extend').a(('COPYW','dlen','rend')).goto('ER.value')
     p=P('ER.value');p.a(('LDI','rv',0))
+    if image_format=='pe':
+        from pedelta import RELOCS
+        p.a(('STX','nr_relocs',RELOCS,'ra'),('ALUI','add','nr_relocs','nr_relocs',1))
     for j in range(8):
         p.a(('ALUI','add','di','ra',j),('LDX','db','di',DATA),('A64I','shl','db','db',8*j),('A64','or','rv','rv','db'))
     p.a(('A64','add','rv','rv','data_shift'))
@@ -68,7 +73,10 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         P('EH.entry').a(('ALUI','sub','ei','ei',1)).branch({0:'EH.in'},'EH.end',[('CMP','ei','npc')])
         P('EH.in').a(('LDX','entryoff','ei',OFF)).goto('EH.write')
         P('EH.end').a(('COPYW','entryoff','endo')).goto('EH.write')
-    P('EH.write').goto('MACHO' if image_format=='macho' else 'EH.elfwrite')
+    P('EH.write').goto({'macho':'MACHO','pe':'PE','elf':'EH.elfwrite'}[image_format])
+    if image_format=='pe':
+        from pedelta import install as install_pe
+        install_pe(E,byte,arch)
     if image_format=='macho':
         from machodelta import install as install_macho
         install_macho(E,byte,arch)
@@ -88,4 +96,4 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     P('EI.byte').a(('LDX','db','di',DATA),('OUTW','db'),('ALUI','add','di','di',1)).goto('EI.loop')
     P('EI.bytes').branch({2:'EI.nextbyte'},'RET',[('CMPI','lb_n',0)])
     P('EI.nextbyte').a(('OUTW','lb_v'),('A64I','shr','lb_v','lb_v',8),('ALUI','sub','lb_n','lb_n',1)).goto('EI.bytes')
-    g.on('DEAD.image',range(257),'DEAD',E.rej('not covered: '+('Mach-O' if image_format=='macho' else 'ELF')+' input or relocation'),'r')
+    g.on('DEAD.image',range(257),'DEAD',E.rej('not covered: '+{'macho':'Mach-O','pe':'PE','elf':'ELF'}[image_format]+' input or relocation'),'r')
