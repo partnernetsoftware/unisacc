@@ -296,19 +296,34 @@ def width(p, ptr, i4, i8):    # emit i8 if W[ptr] else i4
     p.cur = d
 
 
-def vwidth(p, ptr, bs, i4, i8, i1):   # a variable: W[ptr] >= 1 -> i8; else by W[bs]: 1 -> i1, 8 -> i8, else i4 (measured)
-    a, c, e, b, d = p.fresh("v8"), p.fresh("vc"), p.fresh("vl"), p.fresh("v4"), p.fresh("vd")
-    p.branch({(1, 2): a}, c, [("CMPI", ptr, 1)])
-    P(c).branch({1: e}, b, [("CMPI", bs, 1)])
-    P(b).branch({1: a}, d + "4", [("CMPI", bs, 8)])
-    P(a).o(i8).goto(d)
-    P(e).o(i1).goto(d)
-    P(d + "4").o(i4).goto(d)
+def tyinfo():                 # stage tyinfo (weights/gold/tyinfo.tsv): type key -> (size, unsigned)
+    return {f[0]: (int(f[1]), int(f[2])) for f in gold("tyinfo") if len(f) >= 3 and f[1].isdigit()}
+
+
+TY = tyinfo()
+CTY = {"char": "i8", "short": "i16", "int": "i32", "long": "i64"}   # the signed spellings in this slice
+SZ = {c: TY[k][0] for c, k in CTY.items()}
+PSZ = TY["ptr"][0]
+assert SZ == {"char": 1, "short": 2, "int": 4, "long": 8} and PSZ == 8, (SZ, PSZ)   # measured widths
+assert not any(TY[k][1] for k in CTY.values())
+LD = {n: ("  load64 r0, [r0+0]\n" if n == 8 else "  .ld r0, [r0+0], %d\n" % n) for n in set(SZ.values())}
+ST = {n: ("  store64 [r1+0], r0\n" if n == 8 else "  .st [r1+0], r0, %d\n" % n) for n in set(SZ.values())}
+
+
+def vwidth(p, ptr, bs, tab):  # a variable's access: W[ptr] >= 1 -> pointer size; else by W[bs] (tyinfo size); 0 (unknown) -> int
+    d, pw, ot = p.fresh("vd"), p.fresh("vp"), p.fresh("vo")
+    p.branch({(1, 2): pw}, ot, [("CMPI", ptr, 1)])
+    P(pw).o(tab[PSZ]).goto(d)
+    q = P(ot)
+    for n in sorted(tab):
+        if n == SZ["int"]:
+            continue
+        hit, nx = q.fresh("vs"), q.fresh("vn")
+        q.branch({1: hit}, nx, [("CMPI", bs, n)])
+        P(hit).o(tab[n]).goto(d)
+        q = P(nx)
+    q.o(tab[SZ["int"]]).goto(d)
     p.cur = d
-
-
-LD = ("  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], 1\n")
-ST = ("  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, 1\n")
 
 
 def noptr(p):                 # arithmetic on a pointer is not in this step
@@ -396,10 +411,10 @@ def expr():
         noptr(q)
         addr(q, "r0")
         q.o(PUSH)
-        vwidth(q, "pt", "pb", *LD)
+        vwidth(q, "pt", "pb", LD)
         q.o(PUSH).vpush("pb").call("NEXT").call("EXPR").vpop("pb")
         q.o(POP1 + optext(o) + POP1)
-        vwidth(q, "pt", "pb", *ST)
+        vwidth(q, "pt", "pb", ST)
         q.ret()
     # *E = e  |  *E as an rvalue.  E is a pointer value (PV): W[pt] = its depth
     p = P("EXPR.st")
@@ -413,7 +428,7 @@ def expr():
     P("VEXPR.stu").call("EXPR.stu").goto("VEXPR.c")
     p = P("EXPR.sta")
     p.a(("ALUI", "sub", "pt", "pt", 1)).o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
-    vwidth(p, "pt", "pb", *ST)     # depth 0: the pointee's base width (char *p: .st 1, measured)
+    vwidth(p, "pt", "pb", ST)     # depth 0: the pointee's base width (char *p: .st 1, measured)
     p.ret()
     P("EXPR.stu").call("DEREF").call("BINCONT").goto("EXPR.tail")
     # PV: '*' PV | '&' id | id  -> r0 = the pointer value, W[pt] = its depth
@@ -438,7 +453,7 @@ def expr():
     p.branch({(1, 2): "RET"}, ("rej", "not covered: dereference of a non-pointer"), [("CMPI", "pt", 1)])
     p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type
     p.a(("ALUI", "sub", "pt", "pt", 1))
-    vwidth(p, "pt", "pb", *LD)     # depth 0: the pointee's base width (char *p: .ld 1, measured)
+    vwidth(p, "pt", "pb", LD)     # depth 0: the pointee's base width (char *p: .ld 1, measured)
     p.ret()
     p = P("EXPR.use")
     p.call("IDTAIL").call("BINCONT").goto("EXPR.tail")
@@ -476,7 +491,7 @@ def expr():
     lookup(p, "sps", "spe")
     addr(p, "r0")
     p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
-    vwidth(p, "pt", "pb", *ST)
+    vwidth(p, "pt", "pb", ST)
     p.ret()
     p = P("NOPTR")
     noptr(p)
@@ -495,9 +510,9 @@ def expr():
         noptr(q)
         addr(q, "r0")
         q.o(PUSH)
-        vwidth(q, "pt", "pb", *LD)
+        vwidth(q, "pt", "pb", LD)
         q.o("  imm r1, 1\n  %s r0, r0, r1\n" % sp + POP1)
-        vwidth(q, "pt", "pb", *ST)
+        vwidth(q, "pt", "pb", ST)
         q.call("NEXT").ret()
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
@@ -518,14 +533,14 @@ def expr():
         noptr(q)
         addr(q, "r0")
         q.o(PUSH)
-        vwidth(q, "pt", "pb", *LD)
+        vwidth(q, "pt", "pb", LD)
         q.o(PUSH + "  imm r0, 1\n" + POP1 + optext(o) + POP1)
-        vwidth(q, "pt", "pb", *ST)
+        vwidth(q, "pt", "pb", ST)
         q.o("  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
     p = P("IT.var")
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    vwidth(p, "pt", "pb", *LD)
+    vwidth(p, "pt", "pb", LD)
     p.ret()
     p = P("IT.call")
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
@@ -681,9 +696,9 @@ def stmt():
     # declaration
     p = P("S.decl")
     p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg"}, "S.dnx")
-    P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", 4)).goto("S.dnx")
-    P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", 1)).goto("S.dnx")
-    P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", 8)).goto("S.dnx")
+    P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("S.dnx")
+    P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("S.dnx")
+    P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("S.dnx")
     P("S.dnx").call("NEXT").tok(dict((w, "S.dw") for w in TWORDS), "D.one")
     P("S.dw").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).goto("S.dnx")
     p = P("D.one")
@@ -694,7 +709,7 @@ def stmt():
     p = P("D.init")
     p.vpush("s", "ptd", "bni", "bsz").call("NEXT").call("EXPR").vpop("s", "ptd", "bni", "bsz")
     addr(p, "r1")
-    vwidth(p, "ptd", "bsz", *ST)
+    vwidth(p, "ptd", "bsz", ST)
     p.goto("D.next")
     p = P("D.next")
     p.tok({",": "D.comma", ";": "S.empty"}, ("rej", "not covered: declaration"))
@@ -786,9 +801,9 @@ def unit():
     p = P("FN")
     p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l"}, "FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
-    P("FN.i4").a(("LDI", "bsz", 4)).goto("FN.n")
-    P("FN.c").a(("LDI", "bsz", 1)).goto("FN.n")
-    P("FN.l").a(("LDI", "bsz", 8)).goto("FN.n")
+    P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
+    P("FN.c").a(("LDI", "bsz", SZ["char"])).goto("FN.n")
+    P("FN.l").a(("LDI", "bsz", SZ["long"])).goto("FN.n")
     p = P("FN.n")
     p.call("NEXT")
     stars(p, "FN.r")
@@ -818,9 +833,9 @@ def unit():
                                  TK_ID: "FN.ptd"}, ("rej", "not covered: parameter"))
     p = P("FN.ptd")
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
-    P("FN.pi").a(("LDI", "bni", 0), ("LDI", "bsz", 4)).goto("FN.pt")
-    P("FN.pc").a(("LDI", "bsz", 1)).goto("FN.pt")
-    P("FN.pl").a(("LDI", "bsz", 8)).goto("FN.pt")
+    P("FN.pi").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("FN.pt")
+    P("FN.pc").a(("LDI", "bsz", SZ["char"])).goto("FN.pt")
+    P("FN.pl").a(("LDI", "bsz", SZ["long"])).goto("FN.pt")
     P("FN.pw").a(("LDI", "bsz", 0)).goto("FN.pt")
     P("FN.pv").call("NEXT").tok({")": "FN.close", "*": "FN.pvs"}, ("rej", "not covered: parameter"))
     P("FN.pvs").a(("LDI", "bni", 1)).goto("FN.pvk")
