@@ -394,6 +394,7 @@ assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
+SAL = 37 * 10 ** 6   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
@@ -507,22 +508,26 @@ def types():
     p = P("SB.nm")
     p.branch({1: "SB.v"}, "SB.p", [("CMPI", "td", 0)])
     P("SB.p").a(("LDI", "msz", 8)).goto("SB.put")
-    P("SB.v").branch({(1, 2): "DEAD.sm"}, "SB.v1", [("CMPI", "tb", SBB)])
+    P("SB.v").branch({(1, 2): "SB.st"}, "SB.v1", [("CMPI", "tb", SBB)])
+    # a member of struct type: its size SSZ, aligned to its own alignment SAL (its widest member)
+    p = P("SB.st")
+    p.a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "msz", "t", SSZ), ("LDX", "mal", "t", SAL)).branch({1: "DEAD.sm"}, "SB.put2", [("CMPI", "msz", 0)])
     P("SB.v1").branch({1: "DEAD.void"}, "SB.v2", [("CMPI", "tb", 0)])
     P("SB.v2").a(("COPYW", "msz", "tb")).branch({2: "SB.vu"}, "SB.put", [("CMPI", "tb", UNS)])
     P("SB.vu").a(("ALUI", "sub", "msz", "tb", UNS)).goto("SB.put")
     g.on("DEAD.sm", range(257), "DEAD", E.rej("not covered: a struct member of struct type"), "r")
-    p = P("SB.put")
-    p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "msz"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "msz"), ("ALU", "and", "soff", "t", "m"),
+    P("SB.put").a(("COPYW", "mal", "msz")).goto("SB.put2")      # a scalar: aligned to its size
+    p = P("SB.put2")
+    p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
         ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
         ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("ALU", "add", "soff", "soff", "msz"))
-    p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "msz", "smal")])
-    P("SB.mx").a(("COPYW", "smal", "msz")).goto("SB.nx")
+    p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
+    P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
     P("SB.nx").call("NEXT").tok({";": "SB.semi"}, bad("struct member"))
     P("SB.semi").call("NEXT").goto("SB.m")
     p = P("SB.end")
     p.a(("ALU", "add", "t", "soff", "smal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "smal"), ("ALU", "and", "t", "t", "m"),
-        ("STX", "sid", SSZ, "t"), ("COPYW", "nsid", "sid")).vpop("td", "tb").ret()
+        ("STX", "sid", SSZ, "t"), ("STX", "sid", SAL, "smal"), ("COPYW", "nsid", "sid")).vpop("td", "tb").ret()
     P("TS.id").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN)).branch({1: "TS.td"}, bad("type"), [("CMPI", "u", 1)])
     P("TS.td").a(("LDX", "tb", "t", E.TDB), ("LDX", "td", "t", E.TDD)).call("NEXT").goto("TS.b")
     for w, n in TYPEW.items():   # (unsigned is read by its own states below)
@@ -1244,7 +1249,8 @@ def build():
         ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "vt", "k", MPT), ("LDX", "vb", "k", MBS)).branch({1: "DEAD.mb"}, "MB.has", [("CMPI", "ms", 0)])
     P("MB.has").branch({1: "MB.z"}, "MB.off", [("CMPI", "mo", 0)])
     P("MB.off").o("  imm r2, ").num("mo").o("\n  add64 r0, r0, r2\n").goto("MB.z")
-    P("MB.z").call("NEXT").tok({"=": "PX.as", "->": "MB.ptr"}, "MB.ld")
+    P("MB.z").call("NEXT").tok({"=": "PX.as", "->": "MB.ptr", ".": "MB.dot2"}, "MB.ld")
+    P("MB.dot2").goto("MEMB")          # s.inner.m: the inner struct's address, then its member
     P("MB.ptr").call("LOADV").goto("MEMB")
     P("MB.ld").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
     p = P("POSTIX")
