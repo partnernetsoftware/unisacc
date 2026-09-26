@@ -348,6 +348,9 @@ def build():
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("MARK", "x0"), ("LDI", "sk", 0))
     # the reference auto-includes a header when one of its functions is called and not defined here
     # (src/front_pp.c autoinc): the old E3's check, reused -- such a unit is not covered
+    for k, (nm, _, _) in enumerate(E.SYSCALLS, 1):
+        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sy%d" % k))
+    p.a(("SBCLR",), [("SBOUT", c) for c in b"__argc"], ("SBINTERN", "acid"), ("SBCLR",), [("SBOUT", c) for c in b"__argv"], ("SBINTERN", "avid"))
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
@@ -643,15 +646,24 @@ def build():
     # CALL: at '(' after ips..ipe: arguments pushed left to right, popped into r(n-1)..r0, call
     p = P("CALL")
     # the callee must be defined above (the reference rejects a call to an undefined function: probe r1)
-    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", E.FND)).branch({1: "CL.ok"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
+    # syscall builtins (the old E3's declared table E.SYSCALLS), __argc(), __argv(k) -- measured there
+    p.a(("INTERN", "v", "ips", "ipe"), ("LDI", "sys", 0)).goto("CL.b1")
+    for k in range(1, len(E.SYSCALLS) + 1):
+        P("CL.b%d" % k).branch({1: "CL.s%d" % k}, "CL.b%d" % (k + 1), [("CMP", "v", "sy%d" % k)])
+        P("CL.s%d" % k).a(("LDI", "sys", k)).goto("CL.ok")
+    P("CL.b%d" % (len(E.SYSCALLS) + 1)).branch({1: "CL.ac"}, "CL.av0", [("CMP", "v", "acid")])
+    P("CL.ac").call("NEXT").expect(")").o("  .argc r0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
+    P("CL.av0").branch({1: "CL.av"}, "CL.def", [("CMP", "v", "avid")])
+    P("CL.av").call("NEXT").call("EXPR").expect(")").o("  .argv r0, r0\n").a(("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").ret()
+    P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.ok"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
     p = P("CL.ok")
-    p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe")).vpush("cls", "cle").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
+    p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe")).vpush("cls", "cle", "sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     p = P("CL.arg")
     p.vpush("na").call("EXPR").vpop("na")
     emit(p, "push").a(("ALUI", "add", "na", "na", 1)).tok({",": "CL.more", ")": "CL.done"}, bad("argument list"))
     P("CL.more").call("NEXT").goto("CL.arg")
     p = P("CL.done")
-    p.branch({2: "DEAD.na"}, "CL.pop", [("CMPI", "na", 6)])
+    p.a(("COPYW", "nar", "na")).branch({2: "DEAD.na"}, "CL.pop", [("CMPI", "na", 6)])
     g.on("DEAD.na", range(257), "DEAD", E.rej("not covered: more than 6 arguments"), "r")
     p = P("CL.pop")
     p.branch({1: "CL.emit"}, "CL.p1", [("CMPI", "na", 0)])
@@ -659,7 +671,18 @@ def build():
     p.a(("ALUI", "sub", "na", "na", 1), ("COPYW", "ak", "na"))
     emit(p, "pop_arg").goto("CL.pop")
     p = P("CL.emit")
-    p.vpop("cls", "cle")
+    p.vpop("cls", "cle", "sys").branch({1: "CL.call"}, "CL.sysz", [("CMPI", "sys", 0)])
+    # a syscall: r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5`
+    for k, (_, sc, w) in enumerate(E.SYSCALLS, 1):
+        nx = "CL.w%d" % (k + 1) if k < len(E.SYSCALLS) else "DEAD"
+        P("CL.sysz" if k == 1 else "CL.w%d" % k).branch({1: "CL.y%d" % k}, nx, [("CMPI", "sys", k)])
+        q = P("CL.y%d" % k)
+        q.a(("LDI", "w", w)).label("CL.z%d" % k)
+        q.branch({0: "CL.zz%d" % k}, "CL.x%d" % k, [("CMP", "nar", "w")])
+        P("CL.zz%d" % k).o("  imm r").num("nar").o(", 0\n").a(("ALUI", "add", "nar", "nar", 1)).goto("CL.z%d" % k)
+        regs = ", ".join("r%d" % i for i in range(w))
+        P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 0)).call("NEXT").ret()
+    p = P("CL.call")
     emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
