@@ -668,7 +668,10 @@ def expr():
         q = P(nm).call("NEXT").call("UNARY")
         if nm != "U.not":      # - ~ of a pointer: not covered
             noptr(q)
-        q.o(txt).ret()         # !p keeps p's type in the reference (measured: a + !q scales a by 8)
+        q.o(txt)
+        if nm == "U.not":      # !x is an int whatever x was (C99 6.5.3.3p5): a + !q does not scale a
+            q.a(("LDI", "pt", 0), ("LDI", "pb", 0))
+        q.ret()
     P("U.pos").call("NEXT").goto("UNARY")
     P("U.star").call("NEXT").call("PV").call("PVCHK").call("DEREF").ret()
     P("U.amp").goto("PV")

@@ -11912,7 +11912,10 @@ int unary(void) {
             if (curflt == 8) es("  @fpu.deq r0, r0, r1\n"); else es("  @fpu.seq r0, r0, r1\n");
             setkind(0); cursize = 4; curelem = 4;
             return 0; } }
-        es("  @lit.imm r1, 0\n  @alu.eq r0, r0, r1\n"); return 0; }
+        es("  @lit.imm r1, 0\n  @alu.eq r0, r0, r1\n");
+        /* C99 6.5.3.3p5: !x is an int whatever x was -- `a + !q` must not
+           scale a by q's element */
+        setkind(0); curuns = 0; cursize = 4; curelem = 4; return 0; }
     if (p == P_DEREF) {
         adv(); unary(); loadval();
         if (curfn) { lvalue = 0; return 0; }     /* *fp is fp */
