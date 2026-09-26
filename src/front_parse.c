@@ -40,6 +40,7 @@ int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
 int symflt[MAXSYM];
 int sympk[MAXSYM * 8];         /* a function's parameter kinds (fkind), first 8 */
 int symnpk[MAXSYM];            /* how many; -1: no prototype seen */
+int symretw[MAXSYM];        /* a function's int return width: 1 2 4, or 0 for 8/other */
 int symfpret[MAXSYM];        /* calling it yields a function pointer */
 int symrfst[MAXSYM];         /* ...whose call returns a pointer to this struct */
 int symcst[MAXSYM];          /* a pointer variable: its call returns this struct's pointer */         /* a VLA: the frame slot holding its byte count */
@@ -719,6 +720,7 @@ int sadd(int t, int kind, int off, int elem) {
     symbool[nsym] = declbool;
     symfp[nsym] = declfp;
     symvla[nsym] = 0;
+    symretw[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
     symflt[nsym] = declflt; symnpk[nsym] = 0 - 1;
     symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
@@ -1968,6 +1970,7 @@ int callres(int si) {
     if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) { curuns = 0;
         curflt = symflt[si]; cursize = curflt; curelem = curflt;
     } } } }
+    if (si >= 0) { if (symkind[si] == 2) { if (symretw[si]) { cursize = symretw[si]; curelem = cursize; } } }
     return 0;
 }
 
@@ -4769,6 +4772,11 @@ int unit(void) {
                    of it yields a function pointer */
                 if (declspecfp || gfpfn) symfpret[nsym - 1] = 1;
                 symrfst[nsym - 1] = declspecfpst;
+                /* `unsigned u(void)`: the call's value is 4 bytes wide
+                   (6.5.2.2p5), so u() - 1 wraps at 32 bits */
+                if (w < 8) { if (w > 0) { if (declptr == 0) { if (gflt0 == 0) {
+                    if (gstruct < 0) { if (symfpret[nsym - 1] == 0) symretw[nsym - 1] = w; }
+                } } } }
                 if (function(t, w) == 2) { adv(); continue; }
                 break;
             }
