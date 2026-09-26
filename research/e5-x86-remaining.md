@@ -24,7 +24,7 @@ A few terms used in the table:
 | nop | migrated | hand (90) | no |
 | .frame | migrated | hand (alu_imm: sub/add by |n|, imm8/imm32); the SP register read from REGMAP x86 r7 | no |
 | .div .mod .udiv .umod | not migrated | hand (cqo/xor rdx, idiv/div, rdx/rax save) | no |
-| .zero | not migrated | hand (r11 cleared, widest stores) | no |
+| .zero | migrated | hand (xor r11 once; the widest store 8/4/2/1 that fits, via the migrated store forms) | no |
 | FP_OPS (fadd64 … cvt*) | not migrated | hand (SSE via xmm0/1, movq) | no |
 | setreg (imm/reg) | not migrated | hand | no |
 | setreg (addr/mem), setmem, .lea | not migrated | hand (rip-relative) | **yes**: text_va, the shift, syms |
@@ -38,7 +38,7 @@ A few terms used in the table:
 
 (Corrected after cdx's review: the argument set-up and the data cells are lowering's and other ops' business, not a dependency of the gate's own encoding.)
 
-**What remains without a layout dependency:** the four divisions, .zero, the FP group, and setreg for imm/reg. These can be done as fixture slices exactly as so far.
+**What remains without a layout dependency:** the four divisions, the FP group, and setreg for imm/reg. These can be done as fixture slices exactly as so far.
 
 **Everything else needs addresses.** It should come after a declared, external layout input (text_va, data_va, the shift, symbol addresses and imports, given as input and not taken from the reference's final bytes), or together with E6.
 

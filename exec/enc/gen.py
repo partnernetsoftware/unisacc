@@ -50,7 +50,7 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME = range(1, 17)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO = range(1, 18)
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -190,7 +190,7 @@ def build():
     E.prn()
     procs()
     p = P("START")
-    classes = {"push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
+    classes = {".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -283,7 +283,7 @@ def build():
     p = P("ARGS.d")
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
-              C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame"}, "DEAD.op", [("RLD", "cls")])
+              C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero"}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     # mov d, s
     p = P("E.mov")
@@ -373,6 +373,25 @@ def build():
     p = P("EF.l")
     byte(p, 0x81)
     p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "fx"), ("LDI", "mr_b", SPREG)).call("MODRM").a(("COPYW", "lb_v", "fn"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("NEXTL")
+    # .zero base, disp, n: xor r11, r11 once, then the widest store (8, 4, 2, 1) that fits the rest,
+    # at disp + k, until n bytes are zero (emit_x86) -- the split is a hand rule; r11 may not be the base
+    p = P("E.zero")
+    p.branch({1: "DEAD.zb"}, "EZ.x", [("CMPI", "a0", SCR)])
+    g.on("DEAD.zb", range(257), "DEAD", E.rej("not covered: .zero with the scratch r11 as its base"), "r")
+    p = P("EZ.x")
+    for c in (0x4D, 0x31, 0xDB):
+        byte(p, c)
+    p.a(("LDI", "zk", 0)).label("EZ.l")
+    p.branch({0: "EZ.w"}, "NEXTL", [("C64", "zk", "a2")])
+    p = P("EZ.w")
+    p.a(("LDI", "zw", 8)).label("EZ.fit")
+    p.a(("A64", "add", "t", "zk", "zw")).branch({2: "EZ.half"}, "EZ.st", [("C64", "t", "a2")])
+    P("EZ.half").a(("ALUI", "sar", "zw", "zw", 1)).goto("EZ.fit")
+    p = P("EZ.st")
+    p.a(("LDI", "me_r", SCR), ("COPYW", "me_b", "a0"), ("A64", "add", "me_d", "a1", "zk"), ("LDI", "me_two", 0), ("LDI", "me_o2", 0))
+    p.branch({8: "EZ.8", 4: "EZ.4", 2: "EZ.2", 1: "EZ.1"}, "DEAD.op", [("RLD", "zw")])
+    for w, o1, ww, p66 in ((8, 0x89, 1, 0), (4, 0x89, 0, 0), (2, 0x89, 0, 1), (1, 0x88, 0, 0)):
+        P("EZ.%d" % w).a(("LDI", "me_o1", o1), ("LDI", "me_w", ww), ("LDI", "me_66", p66)).call("MEM").a(("A64", "add", "zk", "zk", "zw")).goto("EZ.l")
     # callr r: FF /2 modrm(3, 2, r), a REX.B (0x41, no W) first for r8..r15
     p = P("E.callr")
     p.branch({(1, 2): "ECR.x"}, "ECR.o", [("CMPI", "a0", 8)])
