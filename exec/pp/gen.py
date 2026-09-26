@@ -16,7 +16,8 @@ each pass reading x and writing o, SWAP between passes:
                            macros only, <= 8 rounds, segment per byte
 
 NOT covered (the delta rejects with a `not covered: ...` code, never guesses):
-#if/#elif expressions, invoking a function-like macro, _Pragma.  Also not
+#if/#elif expressions, _Pragma; function-like calls with zero parameters,
+variadic, # or ##, an argument containing `(`, or a function-like name in a body.  Also not
 modelled: autoinc() (the on-demand header prepend -- compare against the
 reference built without it, see compare.py), #pragma push_macro/pop_macro
 (rejected as not covered when live and spelled exactly; the reference's
@@ -69,7 +70,11 @@ SEGINF = 1000000000
 DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
 SPLB, IRLN, IRNL = 11 * 10 ** 7, 12 * 10 ** 7, 121 * 10 ** 6
 F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV, F_ACT, F_UP = 0, 1, 2, 3, 4, 5, 6, 7
-FSZ = 8
+F_NP, F_P0, MAXP = 8, 9, 8          # function-like: parameter count, parameter ids
+FSZ = F_P0 + MAXP
+ARGB, ARGE = 62 * 10 ** 6, 63 * 10 ** 6   # argument blobs; the argument frame's entry
+# F_FN: 0 object-like, 1 function-like (covered), 2 function-like not covered
+# (zero parameters, variadic, more than MAXP, malformed)
 
 
 class G:
@@ -357,7 +362,24 @@ def build():
     # parameters and body are not parsed in this slice -- invoking it rejects
     g.els("DEFFN", "MDEF", [("PUSH", "DEFFNR")])
     g.labels.add("DEFFNR")
-    g.els("DEFFNR", "P3BLANK", [("LDI", "one", 1), ("STX", "EA", F_FN, "one"), ("JUMP", "LS")])
+    fn2 = ("P3BLANK", [("LDI", "t", 2), ("STX", "EA", F_FN, "t"), ("JUMP", "LS")])
+    g.els("DEFFNR", "DP0", [("ADV",), ("LDI", "NP", 0)])
+    g.on("DP0", WS, "DP0", [("ADV",)])
+    g.on("DP0", AL, "DPID", [("MARK", "PS_")])
+    g.els("DP0", *fn2)
+    g.on("DPID", ID, "DPID", [("ADV",)])
+    g.els("DPID", "DPIDS", [("MARK", "PE_"), ("INTERN", "pid", "PS_", "PE_"), ("CMPI", "NP", MAXP)])
+    g.r("DPIDS", {0: ("DP1", [("ALUI", "add", "pa", "EA", F_P0), ("ALU", "add", "pa", "pa", "NP"),
+                              ("STX", "pa", 0, "pid"), ("ALUI", "add", "NP", "NP", 1)]),
+                  (1, 2): fn2})
+    g.on("DP1", WS, "DP1", [("ADV",)])
+    g.on("DP1", [44], "DP0", [("ADV",)])
+    g.on("DP1", [41], "DBF", [("ADV",), ("STX", "EA", F_NP, "NP")])
+    g.els("DP1", *fn2)
+    g.on("DBF", WS, "DBF", [("ADV",)])
+    g.els("DBF", "P3BLANK", [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE"),
+                             ("STX", "EA", F_BODY, "BODY"), ("LDI", "one", 1),
+                             ("STX", "EA", F_FN, "one"), ("JUMP", "LS")])
     g.on("DB_WS", WS, "DB_WS", [("ADV",)])
     sub, pu = g.call("MDEF", "DB_R")
     g.els("DB_WS", sub, [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE")] + pu)
@@ -435,9 +457,36 @@ def build():
     g.r("ERM2", {0: ("ERL", [("SPANT", "IS")]),
                  (1, 2): ("ERM3", ea("me", "M") + [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
     # function-like: only an invocation (name, blanks/newlines, `(`) is out of scope
-    g.r("ERM3", {1: ("ERFN", []),
-                 0: ("EB", [("OUT", 32), ("LDI", "DEP", 0), ("LDI", "SEP", 0), ("LDI", "CUR", 0)]
-                     + PUSHM)})
+    start = [("OUT", 32), ("LDI", "DEP", 0), ("LDI", "SEP", 0), ("LDI", "CUR", 0)]
+    g.r("ERM3", {2: ("ERFN", []), 1: ("ERFC", [("LDI", "NLC", 0)]),
+                 0: ("EB", [("LDI", "NLC", 0), ("LDI", "FNE", 0)] + start + [("LDI", "O0", -1)] + PUSHM)})
+    # function-like call: name, blanks/newlines (counted, re-emitted after
+    # the expansion), `(`, arguments split at commas, `)`
+    g.on("ERFC", [32, 9], "ERFC", [("ADV",)])
+    g.on("ERFC", [10], "ERFC", [("ADV",), ("ALUI", "add", "NLC", "NLC", 1)])
+    g.on("ERFC", [40], "ARG", [("ADV",), ("LDI", "NA", 0), ("MARK", "AS")])
+    g.els("ERFC", "ERL", [("JUMP", "IE"), ("SPANT", "IS")])
+    save = [("MARK", "AE"), ("BLOBSAVE", "ab", "AS", "AE"), ("ALUI", "add", "a", "NA", ARGB),
+            ("STX", "a", 0, "ab"), ("ALUI", "add", "NA", "NA", 1), ("ADV",)]
+    g.on("ARG", [40], "DEAD", NC("nested call args"))
+    g.on("ARG", [44], "ARGC", save + [("CMPI", "NA", MAXP)])
+    g.r("ARGC", {0: ("ARG", [("MARK", "AS")]), (1, 2): ("DEAD", NC("argument count"))})
+    g.on("ARG", [41], "ARGN", save + [("LDX", "np", "me", F_NP), ("CMP", "NA", "np")])
+    # a function-like expansion that emits nothing is padded by one space only
+    g.r("ARGN", {1: ("EB", [("COPYW", "FNE", "me")] + start + [("OLEN", "O0")] + PUSHM),
+                 (0, 2): ("DEAD", NC("argument count"))})
+    g.on("ARG", [10], "ARG", [("ADV",), ("ALUI", "add", "NLC", "NLC", 1)])
+    g.on("ARG", [EOF], "DEAD", NC("unterminated macro call"))
+    g.on("ARG", [34], "ARQ34", [("ADV",)])
+    g.on("ARG", [39], "ARQ39", [("ADV",)])
+    g.els("ARG", "ARG", [("ADV",)])
+    for q in (34, 39):
+        g.on("ARQ%d" % q, [92], "ARQ%dE" % q, [("ADV",)])
+        g.on("ARQ%d" % q, [q], "ARG", [("ADV",)])
+        g.on("ARQ%d" % q, [10, EOF], "DEAD", NC("unterminated literal in a call"))
+        g.els("ARQ%d" % q, "ARQ%d" % q, [("ADV",)])
+        g.on("ARQ%dE" % q, [EOF], "DEAD", NC("unterminated literal in a call"))
+        g.els("ARQ%dE" % q, "ARQ%d" % q, [("ADV",)])
     g.on("ERFN", [32, 9, 10], "ERFN", [("ADV",)])
     g.on("ERFN", [40], "DEAD", NC("function-like macro invocation"))
     g.els("ERFN", "ERL", [("JUMP", "IE"), ("SPANT", "IS")])
@@ -447,7 +496,11 @@ def build():
     # F_ACT marks them, F_UP chains them (CUR is the innermost).
     g.on("EB", [EOF], "EBX", [("INPOP",), ("STX", "CUR", F_ACT, "Z0"), ("LDX", "CUR", "CUR", F_UP),
                               ("ALUI", "sub", "DEP", "DEP", 1), ("CMPI", "DEP", 0)])
-    g.r("EBX", {1: ("ERL", [("OUT", 32), ("LDI", "CHANGED", 1)]), (0, 2): ("EB", [])})
+    g.r("EBX", {1: ("EBX2", [("OLEN", "t"), ("CMP", "t", "O0")]), (0, 2): ("EB", [])})
+    fin = [("LDI", "CHANGED", 1), ("LDI", "FNE", 0), ("CMPI", "NLC", 0)]
+    g.r("EBX2", {1: ("EBNL", fin), (0, 2): ("EBNL", [("OUT", 32)] + fin)})
+    g.r("EBNL", {2: ("EBNL", [("OUT", 10), ("ALUI", "sub", "NLC", "NLC", 1), ("CMPI", "NLC", 0)]),
+                 (0, 1): ("ERL", [])})
     g.on("EB", [32, 9, 10], "EB", [("ADV",)])
     g.on("EB", [35], "DEAD", NC("# or ## in an object-like body"))
     sep = [("RLD", "SEP")]
@@ -505,14 +558,24 @@ def build():
     g.on("EBID", [92], "DEAD", NC("UCN in a body"))
     sub2, pu2 = g.call("MFIND", "EBM")
     g.els("EBID", "EBPR", [("MARK", "BIE"), ("INTERN", "NID", "BIS", "BIE"), ("CMP", "NID", "ID_PRAGMAOP")])
-    g.r("EBPR", {1: ("DEAD", NC("_Pragma")), (0, 2): (sub2, pu2)})
+    g.r("EBPR", {1: ("DEAD", NC("_Pragma")), (0, 2): ("EBPB", [("CMP", "CUR", "FNE")])})
+    # directly in a function-like body: a parameter name pushes its argument
+    # (the argument frame is the entry ARGE, so the hide-set rule is unchanged)
+    g.r("EBPB", {1: ("EBPL", [("LDI", "PK", 0), ("LDX", "FNP", "FNE", F_NP), ("CMP", "PK", "FNP")]),
+                 (0, 2): (sub2, pu2)})
+    g.r("EBPL", {0: ("EBPC", [("ALUI", "add", "pa", "FNE", F_P0), ("ALU", "add", "pa", "pa", "PK"),
+                              ("LDX", "pv", "pa", 0), ("CMP", "pv", "NID")]),
+                 (1, 2): (sub2, pu2)})
+    g.r("EBPC", {1: ("EB", [("ALUI", "add", "pa", "PK", ARGB), ("LDX", "ab", "pa", 0),
+                            ("LDI", "me", ARGE), ("STX", "me", F_BODY, "ab")] + PUSHM),
+                 (0, 2): ("EBPL", [("ALUI", "add", "PK", "PK", 1), ("CMP", "PK", "FNP")])})
     g.els("EBM", "EBM2", [("CMPI", "M", 0)])
     g.r("EBM2", {0: ("EBNX", [("RLD", "PS")]),
                  (1, 2): ("EBM3", ea("me", "M") + [("LDX", "act", "me", F_ACT), ("RLD", "act")])})
     g.r("EBNX", {1: ("EB", [("OUT", 32), ("SPANT", "BIS")]), 0: ("EB", [("LDI", "SEP", 1), ("SPANT", "BIS")])})
     g.r("EBM3", {1: ("EBNX", [("RLD", "PS")]),
                  0: ("EBM4", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
-    g.r("EBM4", {1: ("DEAD", NC("function-like macro name in a body")),
+    g.r("EBM4", {(1, 2): ("DEAD", NC("function-like macro name in a body")),
                  0: ("EB", PUSHM)})
     # end of a round: none changed -> x is the result; else again, at most 8
     g.r("P4END", {1: ("ACC", [("OCLR",), ("LDI", "Z", 0), ("XLEN", "XE"), ("SPAN2", "Z", "XE")]),

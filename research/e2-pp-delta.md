@@ -366,3 +366,26 @@ shards stay at the 10.3 totals (ex 0 DIFF; corpus 181 equal / 0 DIFF).
 Next: argument spans recorded by the executor (MARK pairs per argument,
 stride table as for macros), body scanned with parameter ids mapped to
 an INPUSH of the argument span, hide set as in 10.2.
+
+### 10.5 Function-like macros, smallest form (2026-09-26)
+
+exec/pp/gen.py: `#define F(p1,...,pn) body` records n (F_NP) and the
+parameter ids (F_P0.., at most 8) in the fixed-stride entry (FSZ 17);
+F_FN = 1 covered, 2 not covered (zero parameters, variadic, malformed, > 8).
+A call skips blanks/newlines (counted) to `(`, MARKs each argument's span and
+BLOBSAVEs it (split at commas, literals skipped; an argument containing `(`
+rejects `not covered: nested call args`), checks the count, and scans the
+body with PUSHM.  Directly in the body (CUR = the called entry) a parameter
+name pushes its argument blob through a fixed argument entry ARGE with the
+same PUSHM, so the hide-set rule of 10.2 applies unchanged (`G(G)(5)` ->
+` [ G ] (5);`).  Spacing per 10.4, the counted newlines emitted after the
+closing pad; measured extra: an expansion that emits nothing is padded by
+ONE space, not two (`return F(, 1) 0;` -> `return   0;`; corpus 00122.c and
+tests/c/b_decl2.c DIFFed until fixed).  No new primitive.  Still not
+covered: F(), variadic, # / ##, nested call arguments, a function-like name
+inside a body.
+
+| shard | equal | equal-noauto | not-covered | reject-agree | DIFF |
+|---|---|---|---|---|---|
+| ex.aa..af (127) | 77 | 20 | 8 | 0 | 0 |
+| corpus.aa..ag (249) | 191 | 23 | 29 | 6 | 0 |
