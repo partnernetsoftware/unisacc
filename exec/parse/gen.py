@@ -630,10 +630,10 @@ def expr():
     p = P("EXPR.tail")
     p.tok({"=": "EXPR.bad", "?": "EXPR.q"}, "RET")
     p = P("EXPR.q")     # c ? a : b  (labels as if/else, measured)
-    p.newlab("a").o("  jumpz r0, ").lab("a").o("\n").vpush("a").call("NEXT").call("CEXPR").expect(":")
+    p.newlab("a").newlab("b").o("  jumpz r0, ").lab("a").o("\n").vpush("a", "b").call("NEXT").call("CEXPR").expect(":")
     p.call("UFLAG").branch({1: "DEADU"}, "EXPR.q2", [("CMPI", "uf", 1)])
     p = P("EXPR.q2")
-    p.vpop("a").newlab("b").o("  jump ").lab("b").o("\n").lab("a").o(":\n").vpush("b").call("NEXT").call("EXPR")
+    p.vpop("a", "b").o("  jump ").lab("b").o("\n").lab("a").o(":\n").vpush("b").call("NEXT").call("EXPR")
     p.call("UFLAG").branch({1: "DEADU"}, "EXPR.q3", [("CMPI", "uf", 1)])
     P("EXPR.q3").vpop("b").lab("b").o(":\n").ret()
     g.on("DEADU", range(257), "DEAD", rej("not covered: unsigned long in ?:"), "r")
@@ -679,7 +679,7 @@ def expr():
     p = P("UNARY")
     p.a(("LDI", "pt", 0), ("LDI", "pb", 0))   # a primary is an int unless it says otherwise
     p.tok({"-": "U.neg", "!": "U.not", "~": "U.cpl", "+": "U.pos", "(": "U.par",
-           TK_NUM: "U.num", TK_ID: "U.id", "*": "U.star", "&": "U.amp", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
+           TK_NUM: "U.num", TK_STR: "U.str", TK_ID: "U.id", "*": "U.star", "&": "U.amp", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
     for nm, sp in (("U.pinc", "add64"), ("U.pdec", "sub64")):
         P(nm).call("NEXT").tok({TK_ID: nm + ".id"}, ("rej", "not covered: operand of ++/--"))
         q = P(nm + ".id")
@@ -732,7 +732,22 @@ def expr():
         r.a(("LDI", "pt", 0), ("LDI", "pb", n)).ret()
         q = P(nx)
     q.branch({}, ("rej", "not covered: cast to a non-scalar"))
-    P("U.num").o("  imm r0, ").call("NUMOUT").o("\n").call("NEXT").ret()
+    # a hex/octal literal in (INT_MAX, UINT_MAX] is an unsigned int (C99 6.4.4.1): the reference masks
+    # the operands to 32 bits (measured: g() - 0x80000000) -- not in the slice
+    p = P("U.num")
+    p.branch({1: "U.nx"}, "U.num1", [("CMPI", "nx", 1)])
+    p = P("U.nx")
+    p.a(("LDI", "t", 0x7fffffff)).branch({2: "U.nx2"}, "U.num1", [("C64", "nv", "t")])
+    p = P("U.nx2")
+    p.a(("A64I", "shr", "t", "nv", 32), ("LDI", "z0", 0)).branch({1: "U.nxu"}, "U.num1", [("C64", "t", "z0")])
+    g.on("U.nxu", range(257), "DEAD", rej("not covered: unsigned int constant"), "r")
+    P("U.num1").o("  imm r0, ").call("NUMOUT").o("\n").call("NEXT").ret()
+    # a string literal: `.lea r0, Sk`, k counted with the printf segments in source order; it also takes a label
+    # number (measured: `p = "ab"; if (u)` -> L3); ?: takes both of its labels up front (u ? "x" : "y" -> L4 L5, then 6 7)
+    p = P("U.str")
+    p.o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "pt", 1), ("LDI", "pb", SZ["char"])).call("NEXT")
+    p.tok({TK_STR: "U.strs"}, "RET")
+    g.on("U.strs", range(257), "DEAD", rej("not covered: adjacent string literals"), "r")
     P("U.id").a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT").call("IDTAIL").ret()
 
     # IDTAIL: saved id x[sps..spe), current token follows it
@@ -869,7 +884,7 @@ def printf():
     # literal segments again, in order, as `.str Sk "..\x00"`
     p = P("POOL")
     p.a(("JUMP", "x0"), ("LDI", "sk", 0)).call("NEXT").label("PO.loop")
-    p.tok({"eof": "RET", TK_ID: "PO.id"}, "PO.nx")
+    p.tok({"eof": "RET", TK_ID: "PO.id", TK_STR: "PO.lit"}, "PO.nx")
     P("PO.nx").call("NEXT").goto("PO.loop")
     p = P("PO.id")
     p.a(("INTERN", "v", "ps", "pe"), ("CMP", "v", "pfid"))
@@ -904,6 +919,28 @@ def printf():
         cases[b] = "PL.c%d" % b
         g.on("PL.c%d" % b, range(257), "PL", O(t), "r")
     p.branch(cases, ("rej", "unreachable"), [("RLD", "c")])
+    # a string literal outside a printf format: the whole literal, escapes decoded, NUL-terminated
+    p = P("PO.lit")
+    p.a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("INPUSHXE", "fs", "fe")).o('.str S').num("sk").o(' "').goto("PS")
+    g.on("PS", [92], "PS.esc", [("ADV",)])
+    g.on("PS", [256], "PS.e1", [])
+    g.els("PS", "PS.ch", [("BYTE", "c"), ("ADV",)])
+    for ch, v in zip("ntr\\\"'", (10, 9, 13, 92, 34, 39)):
+        g.on("PS.esc", [ord(ch)], "PS.ch", [("ADV",), ("LDI", "c", v)])
+    g.els("PS.esc", "DEAD", rej("not covered: escape in a string literal"))
+    p = P("PS.ch")
+    cases = {}
+    for b in range(256):
+        if 32 <= b < 127 and b not in (34, 92):
+            t = chr(b)
+        elif b in (34, 92):
+            t = "\\" + chr(b)
+        else:
+            t = "\\x%02x" % b
+        cases[b] = "PS.c%d" % b
+        g.on("PS.c%d" % b, range(257), "PS", O(t), "r")
+    p.branch(cases, ("rej", "unreachable"), [("RLD", "c")])
+    P("PS.e1").o('\\x00"\n').a(("ALUI", "add", "sk", "sk", 1), ("INPOP",)).call("NEXT").goto("PO.loop")
     p = P("PL.close")
     p.branch({1: "PL.cl1"}, "PL", [("CMPI", "st", 1)])
     P("PL.cl1").o('\\x00"\n').a(("LDI", "st", 0), ("ALUI", "add", "sk", "sk", 1)).goto("PL")
