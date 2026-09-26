@@ -167,13 +167,13 @@ def build(image=False):
     if image:
         from elfimage import install as install_elf
         from armbranch import LABELS
-        install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True)
+        install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True,image_format='macho' if image=='macho' else 'elf')
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
 
 if __name__=='__main__':
-    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2]!='--elf'):
-        sys.exit('usage: arm.py OUT.json [--elf]')
-    d=build(image=len(sys.argv)==3);open(sys.argv[1],'w').write(json.dumps(d,separators=(',',':')))
+    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ('--elf','--macho')):
+        sys.exit('usage: arm.py OUT.json [--elf|--macho]')
+    d=build(image=('macho' if sys.argv[2]=='--macho' else True) if len(sys.argv)==3 else False);open(sys.argv[1],'w').write(json.dumps(d,separators=(',',':')))
     print('ARM64 states',len(d['states']),file=sys.stderr)

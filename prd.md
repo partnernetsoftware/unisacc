@@ -2416,3 +2416,28 @@ binary inputs checked against hashlib: 55/56,63/64/65,119/120,127/128 and
 5,786 B table. exec-sha registered in gate; only targeted suite run this batch.
 Next integrate header/layout and CodeDirectory/SuperBlob, then full Mach-O
 byte comparison and native execution. Product .com unchanged; no push.
+
+
+### S-17 shared Mach-O writer (2026-09-27)
+
+arm.py/gen.py --macho select one machodelta.py for both architectures. Common
+payload decoding, sparse extent, relocation and trimming stay in elfimage.py;
+Mach-O emits its load commands, aligned segments, LC_MAIN and ad-hoc signature.
+CodeDirectory/SuperBlob and per-4KB SHA hashes use ordinary actions. No native
+signer or hash/image-specific runtime primitive; the Python writer is only a
+test oracle. Static format constants/templates come from unisa.image.macho.
+
+Read-only review found DATA at 93e6 could overlap SHA W/K at 95/96e6. DATA,
+W and K now occupy distinct 1<<40 regions (byte extent <2^31). A 2,000,100-byte
+stored data fixture with relocation at 2,000,000 matches the complete reference
+image (2,047,650 B) and independently validates all 497 page hashes. Small
+empty/16/16385-byte data fixtures compare both executors. A Linux-target
+payload in Mach-O mode is rejected by both runtimes, with no output.
+
+Complete hello/fib images: ARM 82,722 B each, x86 66,210 B each, match reference.
+Both run on macOS arm64 host (x86 via Rosetta), expected stdout/rc0/no stderr.
+Every signature page is separately checked with hashlib. ARM states1332, x86
+states1189. Both ELF suites reran green after shared changes. Registered
+exec-macharm/exec-machx86; only targeted suites run this batch, not full gate.
+Input producer is still Python lowering for these tests; source-to-Mach-O,
+self-bootstrap and E7 product adoption are not claimed. Product .com unchanged.

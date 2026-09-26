@@ -185,3 +185,13 @@ supplied __x86_64__ regardless of backend). Its full compiler ELF is 716,458 B,
 sha256 5e95f0dc9efbcbfacf3552d5e1b505a5fe9010b4cf57ecec8f828002c8bc07ef.
 It equals ua_ref -O2 -b lnx/arm64 and executed N1=N2=N3 in the already-running
 Lima default ARM64 VM. This rebuilds the existing C compiler, not E7 adoption.
+
+
+## Mach-O image mode
+
+`arm.py OUT --macho` accepts an osx/arm64 payload and writes the full signed
+Mach-O. The writer is shared with `gen.py OUT --macho` for x86_64. Payload
+relocation and sparse extent are shared with ELF; SHA/page signature is all
+ordinary delta actions. `machocheck.sh` compares full bytes, independently
+checks each page hash, and executes hello/fib. `ARCH=x86_64` selects the other
+encoder. These tests still use Python lowering as their input producer.

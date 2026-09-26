@@ -572,7 +572,7 @@ def build(image=False):
     p = P("DONE").call("RELAX").call("LAYOUT").call("WRITE")
     if image:
         from elfimage import install as install_elf
-        install_elf(E, byte, OFF, LABD)
+        install_elf(E, byte, OFF, LABD,image_format="macho" if image=="macho" else "elf")
         p.call("ELF")
     p.a(("ACCEPT",)).goto("DEAD")
     g.finish()
@@ -581,9 +581,9 @@ def build(image=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2]!="--elf"):
-        sys.exit("usage: gen.py OUT.json [--elf]")
-    d = build(image=len(sys.argv)==3)
+    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ("--elf","--macho")):
+        sys.exit("usage: gen.py OUT.json [--elf|--macho]")
+    d = build(image=("macho" if sys.argv[2]=="--macho" else True) if len(sys.argv)==3 else False)
     s = json.dumps(d, separators=(",", ":"))
     open(sys.argv[1], "w").write(s)
     st, ent, live, ns, na = E.sizes(d)

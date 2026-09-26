@@ -5,13 +5,13 @@ relocation, zero-tail trimming and output are ordinary delta actions. Linux x86_
 are explicit generation parameters.
 """
 from unisa.image import elf
-DATA = 93 * 10**6
+DATA = 1 << 40  # byte offsets are bounded below 2^31; separate wide region
 
 
-def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False):
+def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format="elf"):
     assert arch in elf.MACHINE
     P,g=E.P,E.g
-    P('ELF').branch({1:'ELF.begin'},'DEAD.image',[('CMPI','target_os',1)])
+    P('ELF').branch({1:'ELF.begin'},'DEAD.image',[('CMPI','target_os',2 if image_format=='macho' else 1)])
     P('ELF.begin').a(('LDI','zero',0),('OCUT','text_blob','zero'),('LDI','dlen',0),('INPUSH','header_data')).goto('ED.first')
     g.on('ED.first',[45],'ED.empty',[('ADV',)])
     g.els('ED.first','ED.hi',[])
@@ -68,7 +68,11 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False):
         P('EH.entry').a(('ALUI','sub','ei','ei',1)).branch({0:'EH.in'},'EH.end',[('CMP','ei','npc')])
         P('EH.in').a(('LDX','entryoff','ei',OFF)).goto('EH.write')
         P('EH.end').a(('COPYW','entryoff','endo')).goto('EH.write')
-    p=P('EH.write');p.a(('A64','add','entryva','text_va','entryoff'),('A64I','add','tend','endo',elf.HDRS(arch)),('A64I','sub','doff','data_va',elf.VADDR))
+    P('EH.write').goto('MACHO' if image_format=='macho' else 'EH.elfwrite')
+    if image_format=='macho':
+        from machodelta import install as install_macho
+        install_macho(E,byte,arch)
+    p=P('EH.elfwrite');p.a(('A64','add','entryva','text_va','entryoff'),('A64I','add','tend','endo',elf.HDRS(arch)),('A64I','sub','doff','data_va',elf.VADDR))
     for b in b'\x7fELF'+bytes([2,1,1,0])+bytes(8):byte(p,b)
     def field(width,v):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('EI.bytes')
@@ -84,4 +88,4 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False):
     P('EI.byte').a(('LDX','db','di',DATA),('OUTW','db'),('ALUI','add','di','di',1)).goto('EI.loop')
     P('EI.bytes').branch({2:'EI.nextbyte'},'RET',[('CMPI','lb_n',0)])
     P('EI.nextbyte').a(('OUTW','lb_v'),('A64I','shr','lb_v','lb_v',8),('ALUI','sub','lb_n','lb_n',1)).goto('EI.bytes')
-    g.on('DEAD.image',range(257),'DEAD',E.rej('not covered: ELF input or relocation'),'r')
+    g.on('DEAD.image',range(257),'DEAD',E.rej('not covered: '+('Mach-O' if image_format=='macho' else 'ELF')+' input or relocation'),'r')

@@ -5,7 +5,7 @@ compression and padding algorithm is explicitly compiled into ordinary actions.
 """
 import re
 from pathlib import Path
-W, K = 95000000, 96000000
+W, K = 2 << 40, 3 << 40  # distinct from the image DATA byte region
 
 
 def constants():

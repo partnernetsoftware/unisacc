@@ -52,6 +52,8 @@ job exec-arm    ./exec/enc/armcheck.sh                            # ARM64 intege
 job exec-elf    ./exec/enc/imagecheck.sh                          # S-17: complete Linux x86 ELF from lowering payload
 job exec-armelf ./exec/enc/armimagecheck.sh                      # shared ELF writer, ARM64 machine/byte labels
 job exec-sha ./exec/enc/shacheck.sh                             # Mach-O page hashes through ordinary actions
+job exec-macharm ./exec/enc/machocheck.sh                      # ARM Mach-O/signature, native execution
+job exec-machx86 env ARCH=x86_64 ./exec/enc/machocheck.sh         # x86 Mach-O/signature, native/Rosetta
 job exec-sparse ./exec/lower/sparsecheck.sh                      # large zero storage, independent layout assertions
 job exec-lowdata ./exec/lower/check.sh                           # raw E4 tape data decoding/layout through delta
 job exec-lower ./exec/lower/fullcheck.sh                        # typed full Linux lowering comparison
