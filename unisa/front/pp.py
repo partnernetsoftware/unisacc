@@ -28,39 +28,67 @@ def predefines(target):
 
 _PPNUM = re.compile(r"0[xX][0-9a-fA-F]+|\d+")
 _PPID = re.compile(r"[A-Za-z_]\w*")
+_ESC = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11}
+_M64 = (1 << 64) - 1
+
+
+def _pp_char(e, i):
+    """e[i] is the opening quote of a character constant -> (value, end)."""
+    j, v = i + 1, 0
+    while j < len(e) and e[j] != "'":
+        c = e[j]
+        j += 1
+        if c == "\\" and j < len(e):
+            c = e[j]
+            j += 1
+            if c in _ESC:
+                c = _ESC[c]
+            elif c == "x":
+                k = j
+                while j < len(e) and e[j] in "0123456789abcdefABCDEF":
+                    j += 1
+                c = int(e[k:j] or "0", 16)
+            elif c in "01234567":
+                k = j - 1
+                while j < len(e) and j - k < 3 and e[j] in "01234567":
+                    j += 1
+                c = int(e[k:j], 8)
+            else:
+                c = ord(c)
+        else:
+            c = ord(c)
+        v = ((v << 8) | (c & 255)) & _M64
+    return v, j + 1
 
 
 def _pp_tokens(e):
-    """Tokenise a preprocessor constant expression."""
+    """Tokenise a preprocessor constant expression.  A number is
+    ("num", (value, unsigned))."""
     out, i = [], 0
     ops = ("<<=", ">>=", "&&", "||", "==", "!=", "<=", ">=", "<<", ">>")
     while i < len(e):
         c = e[i]
-        if c in " \t":
+        if c in " \t\n":
             i += 1
             continue
-        if c == "'":                            # a character constant
-            j = i + 1
-            v = 0
-            while j < len(e) and e[j] != "'":
-                if e[j] == "\\":
-                    j += 1
-                    v = {"n": 10, "t": 9, "r": 13, "0": 0}.get(e[j], ord(e[j]))
-                else:
-                    v = ord(e[j])
-                j += 1
-            out.append(("num", v))
-            i = j + 1
+        if c == "'" or (c == "L" and e[i + 1:i + 2] == "'"):
+            v, i = _pp_char(e, i + (c == "L"))
+            out.append(("num", (v, False)))
             continue
         m = _PPNUM.match(e, i)
         if m:
             t = m.group(0)
             i = m.end()
+            uns = False
             while i < len(e) and e[i] in "uUlL":
+                uns = uns or e[i] in "uU"
                 i += 1
-            out.append(("num", int(t, 8) if (len(t) > 1 and t[0] == "0"
-                                             and t[1] not in "xX")
-                        else int(t, 0)))
+            if len(t) > 1 and t[0] == "0" and t[1] not in "xX":
+                v = int(re.match(r"[0-7]*", t).group(0) or "0", 8)
+            else:
+                v = int(t, 0)
+            v &= _M64
+            out.append(("num", (v, uns or v >> 63 != 0)))
             continue
         m = _PPID.match(e, i)
         if m:
@@ -79,14 +107,23 @@ def _pp_tokens(e):
     return out
 
 
+def _s64(v):
+    v &= _M64
+    return v - (1 << 64) if v >> 63 else v
+
+
 class _PPExpr:
-    """C's integer constant expression, the subset `#if` can contain."""
-    LEVELS = (("||",), ("&&",), ("|",), ("^",), ("&",), ("==", "!="),
+    """C's integer constant expression in intmax_t / uintmax_t (C99 6.10.1).
+    A value is (bits, unsigned) with bits in [0, 2**64).  Operands that are
+    not evaluated (the right of a decided && or ||, the untaken arm of ?:)
+    are parsed with `skip` raised, so a division by zero there is fine."""
+    LEVELS = (("|",), ("^",), ("&",), ("==", "!="),
               ("<", ">", "<=", ">="), ("<<", ">>"), ("+", "-"),
               ("*", "/", "%"))
 
-    def __init__(self, toks):
-        self.t, self.i = toks, 0
+    def __init__(self, toks, macros=None):
+        self.t, self.i, self.skip, self.div0 = toks, 0, 0, False
+        self.macros = macros or {}
 
     def peek(self):
         return self.t[self.i]
@@ -105,64 +142,91 @@ class _PPExpr:
             v = self.apply(o, v, r)
         return v
 
-    def cond(self):
+    def land(self):
         v = self.expr()
-        if self.peek() == ("op", "?"):
+        while self.peek() == ("op", "&&"):
             self.take()
-            a = self.cond()
-            if self.peek() == ("op", ":"):
-                self.take()
-            b = self.cond()
-            return a if v else b
+            self.skip += v[0] == 0
+            r = self.expr()
+            self.skip -= v[0] == 0
+            v = (1 if (v[0] and r[0]) else 0, False)
         return v
 
-    @staticmethod
-    def apply(o, a, b):
-        if o == "||":
-            return 1 if (a or b) else 0
-        if o == "&&":
-            return 1 if (a and b) else 0
-        if o == "|":
-            return a | b
-        if o == "^":
-            return a ^ b
-        if o == "&":
-            return a & b
+    def lor(self):
+        v = self.land()
+        while self.peek() == ("op", "||"):
+            self.take()
+            self.skip += v[0] != 0
+            r = self.land()
+            self.skip -= v[0] != 0
+            v = (1 if (v[0] or r[0]) else 0, False)
+        return v
+
+    def cond(self):
+        v = self.lor()
+        if self.peek() == ("op", "?"):
+            self.take()
+            self.skip += v[0] == 0
+            a = self.cond()
+            self.skip -= v[0] == 0
+            if self.peek() == ("op", ":"):
+                self.take()
+            self.skip += v[0] != 0
+            b = self.cond()
+            self.skip -= v[0] != 0
+            u = a[1] or b[1]
+            return ((a if v[0] else b)[0], u)
+        return v
+
+    def apply(self, o, a, b):
+        (x, ux), (y, uy) = a, b
+        if o in ("<<", ">>"):
+            n = y & 63
+            if o == "<<":
+                return ((x << n) & _M64, ux)
+            return ((x >> n) if ux else (_s64(x) >> n) & _M64, ux)
+        u = ux or uy
+        sx, sy = (x, y) if u else (_s64(x), _s64(y))
         if o == "==":
-            return 1 if a == b else 0
+            return (1 if x == y else 0, False)
         if o == "!=":
-            return 1 if a != b else 0
-        if o == "<":
-            return 1 if a < b else 0
-        if o == ">":
-            return 1 if a > b else 0
-        if o == "<=":
-            return 1 if a <= b else 0
-        if o == ">=":
-            return 1 if a >= b else 0
-        if o == "<<":
-            return a << (b & 63)
-        if o == ">>":
-            return a >> (b & 63)
+            return (1 if x != y else 0, False)
+        if o in ("<", ">", "<=", ">="):
+            r = {"<": sx < sy, ">": sx > sy, "<=": sx <= sy, ">=": sx >= sy}[o]
+            return (1 if r else 0, False)
+        if o == "|":
+            return (x | y, u)
+        if o == "^":
+            return (x ^ y, u)
+        if o == "&":
+            return (x & y, u)
         if o == "+":
-            return a + b
+            return ((x + y) & _M64, u)
         if o == "-":
-            return a - b
+            return ((x - y) & _M64, u)
         if o == "*":
-            return a * b
-        if b == 0:
-            return 0
+            return ((x * y) & _M64, u)
+        if y == 0:
+            if not self.skip:
+                self.div0 = True
+            return (0, u)
+        q = sx // sy if u or (sx < 0) == (sy < 0) else -(abs(sx) // abs(sy))
         if o == "/":
-            return int(a / b) if (a < 0) != (b < 0) else a // b
-        return a - b * (int(a / b) if (a < 0) != (b < 0) else a // b)
+            return (q & _M64, u)
+        return ((sx - sy * q) & _M64, u)
 
     def unary(self):
         k, v = self.peek()
         if k == "op" and v in ("!", "~", "-", "+"):
             self.take()
-            x = self.unary()
-            return {"!": lambda y: 1 if not y else 0, "~": lambda y: ~y,
-                    "-": lambda y: -y, "+": lambda y: y}[v](x)
+            x, u = self.unary()
+            if v == "!":
+                return (1 if x == 0 else 0, False)
+            if v == "~":
+                return (~x & _M64, u)
+            if v == "-":
+                return (-x & _M64, u)
+            return (x, u)
         if k == "op" and v == "(":
             self.take()
             x = self.cond()
@@ -174,23 +238,35 @@ class _PPExpr:
             return v
         if k == "id":
             self.take()
-            return 0                 # C99 6.10.1: an unknown name is 0
+            if v == "defined":            # produced by a macro body
+                p = self.peek() == ("op", "(")
+                if p:
+                    self.take()
+                n = self.take()
+                if p and self.peek() == ("op", ")"):
+                    self.take()
+                return (1 if n[0] == "id" and n[1] in self.macros else 0, False)
+            return (0, False)        # C99 6.10.1: an unknown name is 0
         self.take()
-        return 0
+        return (0, False)
 
 
-def _truth(expr, macros):
+def _truth(expr, macros, live=True):
     """#if / #elif over a real integer constant expression: `defined(X)`
     first, then macro expansion, then any name left standing is 0. [W-1]"""
-    e = re.sub(r"defined\s*\(\s*(\w+)\s*\)",
+    e = re.sub(r"\bdefined\s*\(\s*(\w+)\s*\)",
                lambda m: "1" if m.group(1) in macros else "0", expr)
-    e = re.sub(r"defined\s+(\w+)",
+    e = re.sub(r"\bdefined\s+(\w+)",
                lambda m: "1" if m.group(1) in macros else "0", e)
     e = expand(e, macros)
     try:
-        return _PPExpr(_pp_tokens(e)).cond() != 0
+        x = _PPExpr(_pp_tokens(e), macros)
+        r = x.cond()[0] != 0
     except Exception:
         return False
+    if x.div0 and live:
+        raise ValueError("division by zero in #if")
+    return r
 
 
 def _find_header(name, angled, here, paths):
@@ -343,7 +419,10 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
         if d in ("ifdef", "ifndef"):
             flag = "1" if rest.split()[0] in macros else "0"
         elif d in ("if", "elif"):
-            flag = "1" if _truth(rest, macros) else "0"
+            ol = live if d == "if" else (
+                bool(stack) and not stack[-1][1] and
+                all(x for (x, _) in stack[:-1]))
+            flag = "1" if _truth(rest, macros, ol) else "0"
         elif d == "else":
             flag = "0" if (stack and stack[-1][1]) else "1"
         else:

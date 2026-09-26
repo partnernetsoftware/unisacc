@@ -336,229 +336,346 @@ int macstash(int from, int to) {
 
 
 /* ---- #if: a real integer constant expression ------------------------- */
+/* C99 6.10.1: the controlling expression is macro-expanded FIRST -- after
+   `defined X` has been replaced by 0 or 1 -- and then evaluated as an
+   integer constant expression in intmax_t / uintmax_t.  The evaluator used
+   to read the directive's own text and take a macro's value from the
+   leading decimal digits of its body, so `#define X 0x10` made `#if X`
+   false and `#define Y (1)` made `#if Y` 0.  Now the line is expanded by
+   the same expander as the program text, into ebuf, and evaluated there. */
 int wsat(int i);
-int ppp;             /* cursor into src, while an #if is being evaluated */
-int ppe;             /* one past the directive's last character */
+char *ppb;           /* the expanded expression */
+int ppp;             /* cursor into ppb */
+int ppe;             /* one past its end */
+int ppu;             /* the value just computed is unsigned (uintmax_t) */
+int ppskip;          /* > 0: inside an operand that is not evaluated */
+int ppdiv0;          /* a division by zero was evaluated */
+int ppnow;           /* expanding an #if line: resolve names in the table as it stands */
 
-int ppcond(void);
+long ppcond(void);
+int srcis(int p, int L, char *nm);
 
-void ppws(void) { while (ppp < ppe) { if (wsat(ppp) == 0) break; ppp = ppp + 1; } }
-
-int pplit(char *w, int n) {          /* does the cursor sit on this word? */
-    int k;
-    if (ppp + n > ppe) return 0;
-    k = 0;
-    while (k < n) { if ((src[ppp + k] & 255) != (w[k] & 255)) return 0; k = k + 1; }
-    if (ppp + n < ppe) { if (isal(src[ppp + n] & 255)) return 0;
-                         if (isdi(src[ppp + n] & 255)) return 0; }
-    return 1;
-}
+int ppwsc(int c) { if (c == 32) return 1; if (c == 9) return 1; if (c == 10) return 1; return 0; }
+void ppws(void) { while (ppp < ppe) { if (ppwsc(ppb[ppp] & 255) == 0) break; ppp = ppp + 1; } }
 
 int ppop(char *w, int n) {           /* consume this operator if it is here */
     int k;
     ppws();
     if (ppp + n > ppe) return 0;
     k = 0;
-    while (k < n) { if ((src[ppp + k] & 255) != (w[k] & 255)) return 0; k = k + 1; }
+    while (k < n) { if ((ppb[ppp + k] & 255) != (w[k] & 255)) return 0; k = k + 1; }
     ppp = ppp + n;
     return 1;
 }
 
-int ppnum(void) {                    /* a decimal, hex or octal constant */
-    int v; int c; int base;
-    v = 0; base = 10;
-    if (src[ppp] == 48) {
-        if (ppp + 1 < ppe) { c = src[ppp + 1] & 255;
-            if (c == 120 | c == 88) { base = 16; ppp = ppp + 2; }
-            else { base = 8; ppp = ppp + 1; } }
-        else ppp = ppp + 1;
+/* the next operator is exactly this one, not a longer one starting with it */
+int ppop1(int c, int no1, int no2) {
+    ppws();
+    if (ppp >= ppe) return 0;
+    if ((ppb[ppp] & 255) != c) return 0;
+    if (ppp + 1 < ppe) { if ((ppb[ppp + 1] & 255) == no1) return 0;
+                         if ((ppb[ppp + 1] & 255) == no2) return 0; }
+    ppp = ppp + 1;
+    return 1;
+}
+
+int pphexv(int c) {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 97 && c <= 102) return c - 87;
+    if (c >= 65 && c <= 70) return c - 55;
+    return 0 - 1;
+}
+
+long ppnum(void) {                   /* a decimal, hex or octal constant */
+    unsigned long v; int c; int base; int d; int big;
+    v = 0; base = 10; big = 0;
+    if ((ppb[ppp] & 255) == 48) {
+        base = 8; ppp = ppp + 1;
+        if (ppp < ppe) { c = ppb[ppp] & 255;
+            if (c == 120 || c == 88) { base = 16; ppp = ppp + 1; } }
     }
     while (ppp < ppe) {
-        c = src[ppp] & 255;
-        if (isdi(c)) { if (c - 48 >= base) break; v = v * base + (c - 48); }
-        else { if (base == 16) {
-                   if (c >= 97) { if (c <= 102) { v = v * 16 + (c - 87); }
-                                  else break; }
-                   else { if (c >= 65) { if (c <= 70) { v = v * 16 + (c - 55); }
-                                         else break; }
-                          else break; } }
-               else break; }
+        d = pphexv(ppb[ppp] & 255);
+        if (d < 0 || d >= base) break;
+        v = v * base + d;
         ppp = ppp + 1;
     }
-    while (ppp < ppe) { c = src[ppp] & 255;
-        if (c == 117 | c == 85 | c == 108 | c == 76) ppp = ppp + 1; else break; }
+    ppu = 0;
+    if ((v >> 63) != 0) ppu = 1;      /* does not fit intmax_t */
+    while (ppp < ppe) { c = ppb[ppp] & 255;
+        if (c == 117 || c == 85) { ppu = 1; ppp = ppp + 1; continue; }
+        if (c == 108 || c == 76) { ppp = ppp + 1; continue; }
+        break; }
     return v;
 }
 
-int ppprim(void) {
-    int v; int ns; int ne2; int m; int paren;
+long ppchar(void) {                  /* ppb[ppp] is the opening quote */
+    long v; int c; int d; int n;
+    ppp = ppp + 1;
+    v = 0;
+    while (ppp < ppe) {
+        c = ppb[ppp] & 255;
+        if (c == 39) { ppp = ppp + 1; break; }
+        ppp = ppp + 1;
+        if (c == 92 && ppp < ppe) {
+            c = ppb[ppp] & 255; ppp = ppp + 1;
+            if (c == 110) c = 10;
+            else if (c == 116) c = 9;
+            else if (c == 114) c = 13;
+            else if (c == 97) c = 7;
+            else if (c == 98) c = 8;
+            else if (c == 102) c = 12;
+            else if (c == 118) c = 11;
+            else if (c == 120) {
+                c = 0;
+                while (ppp < ppe) { d = pphexv(ppb[ppp] & 255); if (d < 0) break;
+                                    c = c * 16 + d; ppp = ppp + 1; }
+            }
+            else if (c >= 48 && c <= 55) {
+                c = c - 48; n = 1;
+                while (ppp < ppe && n < 3) { d = ppb[ppp] & 255;
+                    if (d < 48 || d > 55) break;
+                    c = c * 8 + d - 48; ppp = ppp + 1; n = n + 1; }
+            }
+        }
+        v = (v << 8) | (c & 255);
+    }
+    ppu = 0;
+    return v;
+}
+
+long ppprim(void) {
+    long v; int paren; int c;
     ppws();
+    ppu = 0;
     if (ppp >= ppe) return 0;
-    if (ppop("!", 1)) { if (ppprim()) return 0; return 1; }
-    if (ppop("~", 1)) return 0 - ppprim() - 1;
-    if (ppop("-", 1)) return 0 - ppprim();
-    if (ppop("+", 1)) return ppprim();
-    if (ppop("(", 1)) { v = ppcond(); ppop(")", 1); return v; }
-    if (isdi(src[ppp] & 255)) return ppnum();
-    if (src[ppp] == 39) {                        /* a character constant */
-        ppp = ppp + 1;
-        v = src[ppp] & 255;
-        if (v == 92) { ppp = ppp + 1; v = src[ppp] & 255;
-                       if (v == 110) v = 10; if (v == 116) v = 9;
-                       if (v == 48) v = 0; if (v == 114) v = 13; }
-        ppp = ppp + 1;
-        if (src[ppp] == 39) ppp = ppp + 1;
-        return v;
-    }
-    if (pplit("defined", 7)) {
-        ppp = ppp + 7;
-        ppws();
-        paren = 0;
-        if (ppop("(", 1)) paren = 1;
-        ppws();
-        ns = ppp;
-        while (ppp < ppe) { if (isal(src[ppp] & 255) == 0) {
-                                if (isdi(src[ppp] & 255) == 0) break; }
+    if (ppop1(33, 61, 0)) { v = ppprim(); ppu = 0; if (v) return 0; return 1; }
+    if (ppop("~", 1)) { v = ppprim(); return ~v; }
+    if (ppop1(45, 45, 61)) { v = ppprim(); return 0 - v; }
+    if (ppop1(43, 43, 61)) return ppprim();
+    if (ppop("(", 1)) { v = ppcond(); c = ppu; ppop(")", 1); ppu = c; return v; }
+    c = ppb[ppp] & 255;
+    if (isdi(c)) return ppnum();
+    if (c == 39) return ppchar();
+    if (c == 76 && ppp + 1 < ppe) { if ((ppb[ppp + 1] & 255) == 39) {
+        ppp = ppp + 1; return ppchar(); } }
+    if (isal(c)) {
+        /* what is left of an identifier after expansion is 0, C99 6.10.1p4 --
+           except `defined`, which a macro body may have produced */
+        int ns; ns = ppp;
+        while (ppp < ppe) { if (isal(ppb[ppp] & 255) == 0) {
+                                if (isdi(ppb[ppp] & 255) == 0) break; }
                             ppp = ppp + 1; }
-        ne2 = ppp;
-        if (paren) ppop(")", 1);
-        if (mfind(src + ns, ne2 - ns) >= 0) return 1;
+        if (ppp - ns == 7) { if (vsame("defined", 0, ppb + ns, 7)) {
+            int s2;
+            paren = 0;
+            if (ppop("(", 1)) paren = 1;
+            ppws(); s2 = ppp;
+            while (ppp < ppe) { if (isal(ppb[ppp] & 255) == 0) {
+                                    if (isdi(ppb[ppp] & 255) == 0) break; }
+                                ppp = ppp + 1; }
+            v = 0;
+            if (mfind(ppb + s2, ppp - s2) >= 0) v = 1;
+            if (paren) ppop(")", 1);
+            ppu = 0;
+            return v;
+        } }
         return 0;
-    }
-    if (isal(src[ppp] & 255)) {
-        ns = ppp;
-        while (ppp < ppe) { if (isal(src[ppp] & 255) == 0) {
-                                if (isdi(src[ppp] & 255) == 0) break; }
-                            ppp = ppp + 1; }
-        m = mfind(src + ns, ppp - ns);
-        if (m >= 0) { if (machas[m]) return macval[m]; }
-        return 0;                                /* C99 6.10.1: unknown is 0 */
     }
     ppp = ppp + 1;
     return 0;
 }
 
-int ppmul(void) {
-    int v; int r;
-    v = ppprim();
+/* intmax_t division truncates toward zero; the one overflowing case,
+   INTMAX_MIN / -1, is left to wrap */
+long ppdiv(long a, long b, int u, int rem) {
+    unsigned long ua; unsigned long ub;
+    if (b == 0) { if (ppskip == 0) ppdiv0 = 1; return 0; }
+    if (u) { ua = a; ub = b; if (rem) return ua % ub; return ua / ub; }
+    if (b == 0 - 1) { if (rem) return 0; return 0 - a; }
+    if (rem) return a % b;
+    return a / b;
+}
+
+long ppmul(void) {
+    long v; long r; int u;
+    v = ppprim(); u = ppu;
     while (1) {
-        ppws();
-        if (ppop("*", 1)) { v = v * ppprim(); }
-        else { if (ppop("/", 1)) { r = ppprim(); if (r) v = v / r; else v = 0; }
-        else { if (ppop("%", 1)) { r = ppprim(); if (r) v = v % r; else v = 0; }
-        else break; } }
+        if (ppop1(42, 61, 0)) { r = ppprim(); u = u | ppu; v = v * r; }
+        else if (ppop1(47, 61, 0)) { r = ppprim(); u = u | ppu; v = ppdiv(v, r, u, 0); }
+        else if (ppop1(37, 61, 0)) { r = ppprim(); u = u | ppu; v = ppdiv(v, r, u, 1); }
+        else break;
     }
+    ppu = u;
     return v;
 }
 
-int ppadd(void) {
-    int v;
-    v = ppmul();
+long ppadd(void) {
+    long v; long r; int u;
+    v = ppmul(); u = ppu;
     while (1) {
-        ppws();
-        if (ppop("+", 1)) v = v + ppmul();
-        else { if (ppop("-", 1)) v = v - ppmul(); else break; }
+        if (ppop1(43, 43, 61)) { r = ppmul(); u = u | ppu; v = v + r; }
+        else if (ppop1(45, 45, 61)) { r = ppmul(); u = u | ppu; v = v - r; }
+        else break;
     }
+    ppu = u;
     return v;
 }
 
-int ppshift(void) {
-    int v;
-    v = ppadd();
+long ppshift(void) {
+    long v; long r; int u; unsigned long uv;
+    v = ppadd(); u = ppu;
     while (1) {
-        ppws();
-        if (ppop("<<", 2)) v = v << ppadd();
-        else { if (ppop(">>", 2)) v = v >> ppadd(); else break; }
+        if (ppop("<<", 2)) { r = ppadd(); v = v << (r & 63); }
+        else if (ppop(">>", 2)) { r = ppadd();
+            if (u) { uv = v; uv = uv >> (r & 63); v = uv; }
+            else v = v >> (r & 63); }
+        else break;
     }
+    ppu = u;
     return v;
 }
 
-int pprel(void) {
-    int v;
-    v = ppshift();
+/* a < b in the common type */
+int pplt(long a, long b, int u) {
+    unsigned long ua; unsigned long ub;
+    if (u) { ua = a; ub = b; if (ua < ub) return 1; return 0; }
+    if (a < b) return 1;
+    return 0;
+}
+
+long pprel(void) {
+    long v; long r; int u;
+    v = ppshift(); u = ppu;
     while (1) {
-        ppws();
-        if (ppop("<=", 2)) { if (v <= ppshift()) v = 1; else v = 0; }
-        else { if (ppop(">=", 2)) { if (v >= ppshift()) v = 1; else v = 0; }
-        else { if (ppop("<", 1)) { if (v < ppshift()) v = 1; else v = 0; }
-        else { if (ppop(">", 1)) { if (v > ppshift()) v = 1; else v = 0; }
-        else break; } } }
+        if (ppop("<=", 2)) { r = ppshift(); u = u | ppu; v = 1 - pplt(r, v, u); }
+        else if (ppop(">=", 2)) { r = ppshift(); u = u | ppu; v = 1 - pplt(v, r, u); }
+        else if (ppop1(60, 60, 61)) { r = ppshift(); u = u | ppu; v = pplt(v, r, u); }
+        else if (ppop1(62, 62, 61)) { r = ppshift(); u = u | ppu; v = pplt(r, v, u); }
+        else break;
+        u = 0;
     }
+    ppu = u;
     return v;
 }
 
-int ppeq(void) {
-    int v;
+long ppeq(void) {
+    long v; long r;
     v = pprel();
     while (1) {
-        ppws();
-        if (ppop("==", 2)) { if (v == pprel()) v = 1; else v = 0; }
-        else { if (ppop("!=", 2)) { if (v != pprel()) v = 1; else v = 0; }
-        else break; }
+        if (ppop("==", 2)) { r = pprel(); if (v == r) v = 1; else v = 0; ppu = 0; }
+        else if (ppop("!=", 2)) { r = pprel(); if (v != r) v = 1; else v = 0; ppu = 0; }
+        else break;
     }
     return v;
 }
 
-int ppband(void) {
-    int v;
-    v = ppeq();
-    while (1) { ppws();
-        if (ppp + 1 < ppe) { if (src[ppp] == 38) { if (src[ppp+1] == 38) break; } }
-        if (ppop("&", 1)) v = v & ppeq(); else break; }
+long ppband(void) {
+    long v; long r; int u;
+    v = ppeq(); u = ppu;
+    while (ppop1(38, 38, 61)) { r = ppeq(); u = u | ppu; v = v & r; }
+    ppu = u;
     return v;
 }
 
-int ppbxor(void) {
-    int v;
-    v = ppband();
-    while (1) { ppws(); if (ppop("^", 1)) v = v ^ ppband(); else break; }
+long ppbxor(void) {
+    long v; long r; int u;
+    v = ppband(); u = ppu;
+    while (ppop1(94, 61, 0)) { r = ppband(); u = u | ppu; v = v ^ r; }
+    ppu = u;
     return v;
 }
 
-int ppbor(void) {
-    int v;
-    v = ppbxor();
-    while (1) { ppws();
-        if (ppp + 1 < ppe) { if (src[ppp] == 124) { if (src[ppp+1] == 124) break; } }
-        if (ppop("|", 1)) v = v | ppbxor(); else break; }
+long ppbor(void) {
+    long v; long r; int u;
+    v = ppbxor(); u = ppu;
+    while (ppop1(124, 124, 61)) { r = ppbxor(); u = u | ppu; v = v | r; }
+    ppu = u;
     return v;
 }
 
-int ppland(void) {
-    int v; int r;
+long ppland(void) {
+    long v; long r;
     v = ppbor();
-    while (1) { ppws(); if (ppop("&&", 2)) { r = ppbor();
-                    if (v) { if (r) v = 1; else v = 0; } else v = 0; }
-                else break; }
+    while (ppop("&&", 2)) {
+        if (v == 0) ppskip = ppskip + 1;
+        r = ppbor();
+        if (v == 0) ppskip = ppskip - 1;
+        if (v) { if (r) v = 1; else v = 0; } else v = 0;
+        ppu = 0;
+    }
     return v;
 }
 
-int pplor(void) {
-    int v; int r;
+long pplor(void) {
+    long v; long r;
     v = ppland();
-    while (1) { ppws(); if (ppop("||", 2)) { r = ppland();
-                    if (v) v = 1; else { if (r) v = 1; else v = 0; } }
-                else break; }
+    while (ppop("||", 2)) {
+        if (v) ppskip = ppskip + 1;
+        r = ppland();
+        if (v) ppskip = ppskip - 1;
+        if (v) v = 1; else { if (r) v = 1; else v = 0; }
+        ppu = 0;
+    }
     return v;
 }
 
-int ppcond(void) {
-    int v; int a; int b;
+long ppcond(void) {
+    long v; long a; long b; int u;
     v = pplor();
-    ppws();
     if (ppop("?", 1)) {
-        a = ppcond();
+        if (v == 0) ppskip = ppskip + 1;
+        a = ppcond(); u = ppu;
+        if (v == 0) ppskip = ppskip - 1;
         ppop(":", 1);
-        b = ppcond();
+        if (v) ppskip = ppskip + 1;
+        b = ppcond(); u = u | ppu;
+        if (v) ppskip = ppskip - 1;
+        ppu = u;
         if (v) return a;
         return b;
     }
     return v;
 }
 
-int ppeval(int from, int to) {
-    ppp = from; ppe = to;
-    if (ppcond()) return 1;
+int ppexpandline(int from, int to);  /* expands src[from..to) into ppb/ppe */
+
+/* `defined X` and `defined ( X )` become 1 or 0 in place -- the directive
+   line is blanked afterwards anyway -- so that expansion cannot touch X. */
+int ppdefined(int from, int to) {
+    int j; int k; int ns; int ne; int paren; int v;
+    j = from;
+    while (j < to) {
+        if (isal(src[j] & 255) == 0) { j = j + 1; continue; }
+        if (j > from) { if (isdi(src[j - 1] & 255)) { j = j + 1; continue; } }
+        k = j;
+        while (k < to) { if (isal(src[k] & 255) == 0) { if (isdi(src[k] & 255) == 0) break; } k = k + 1; }
+        if (k - j != 7 || srcis(j, 7, "defined") == 0) { j = k; continue; }
+        while (k < to && wsat(k)) k = k + 1;
+        paren = 0;
+        if (k < to) { if ((src[k] & 255) == 40) { paren = 1; k = k + 1; } }
+        while (k < to && wsat(k)) k = k + 1;
+        ns = k;
+        while (k < to) { if (isal(src[k] & 255) == 0) { if (isdi(src[k] & 255) == 0) break; } k = k + 1; }
+        ne = k;
+        if (paren) { while (k < to && wsat(k)) k = k + 1;
+                     if (k < to) { if ((src[k] & 255) == 41) k = k + 1; } }
+        v = 0;
+        if (ne > ns) { if (mfind(src + ns, ne - ns) >= 0) v = 1; }
+        src[j] = 48 + v; j = j + 1;
+        while (j < k) { src[j] = 32; j = j + 1; }
+    }
+    return 0;
+}
+
+int ppeval(int from, int to, int live) {
+    long v;
+    ppdefined(from, to);
+    ppexpandline(from, to);
+    ppp = 0; ppskip = 0; ppdiv0 = 0;
+    if (live == 0) ppskip = 1;          /* a skipped group's #elif is not diagnosed */
+    v = ppcond();
+    if (v) return 1;
     return 0;
 }
 
@@ -1062,6 +1179,12 @@ int pushpop(int ls, int p, int e) {
     return 1;
 }
 
+int ppdiv0at(int ls, int live) {
+    if (ppdiv0) { if (live) { err_at(ls, "division by zero in #if"); nerr = nerr + 1; } }
+    ppdiv0 = 0;
+    return 0;
+}
+
 int preprocess(void) {
     int i; int ls; int j; int ws; int we; int live; int d; int flag;
     int a; int k; int ns; int ne;
@@ -1103,8 +1226,12 @@ int preprocess(void) {
                    skipped: a double negation that went unseen only because
                    unisacc.c has no include guards of its own. */
                 if (d == 1) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
-                if (d == 2) { if (ppeval(ns, i)) flag = 1; }   /* #if */
-                if (d == 3) { if (ppeval(ns, i)) flag = 1; }   /* #elif */
+                if (d == 2) { if (ppeval(ns, i, live)) flag = 1; ppdiv0at(ls, live); }   /* #if */
+                if (d == 3) {                                  /* #elif */
+                    int ol; ol = 0;
+                    if (ndepth > 0) { if (seenst[ndepth-1] == 0) { ol = 1;
+                        k = 0; while (k < ndepth - 1) { if (takest[k] == 0) ol = 0; k = k + 1; } } }
+                    if (ppeval(ns, i, ol)) flag = 1; ppdiv0at(ls, ol); }
                 if (d == 4) { if (ndepth > 0) { if (seenst[ndepth-1] == 0) flag = 1; } }
                 if (d > 4) flag = 1;
                 key[0] = d; key[1] = flag; key[2] = 0; key[3] = 0;
@@ -1854,6 +1981,7 @@ int emitrange(int from, int to, int depth) {
             if (j > to) j = to;
             /* the name means what it meant WHERE it is */
             eseg = srcseg[i]; pp_seg = eseg;
+            if (ppnow) { eseg = 0; pp_seg = 0 - 1; }
             /* C99 6.10.9: `_Pragma ( string-literal )` is the operator form
                of `#pragma`, and this compiler honours no pragma -- the
                directive form is already dropped -- so the operator form is
@@ -1949,6 +2077,32 @@ int emitrange(int from, int to, int depth) {
         }
         eput(c); i = i + 1;
     }
+    return 0;
+}
+
+/* An #if line, expanded with the table as it stands (not by segment). */
+int ppexpandline(int from, int to) {
+    int sv; int base; int n; int k; int r; int sn;
+    /* rescanning is done in rounds over the whole text; an #if line gets
+       its own rounds, in scratch space past the end of the source */
+    sv = nebuf; sn = nsrc; base = nsrc + 1; n = to - from;
+    if (base + 4 * n + 4096 >= MAXSRC) { ppb = src + from; ppe = n; return 0; }
+    k = 0; while (k < n) { src[base + k] = src[from + k]; k = k + 1; }
+    ppnow = 1;
+    r = 0;
+    while (r < 8) {
+        nebuf = 0; gchanged = 0; nsrc = base + n;
+        emitrange(base, base + n, 0);
+        nsrc = sn;
+        if (base + nebuf + 4096 >= MAXSRC) break;
+        k = 0; while (k < nebuf) { src[base + k] = ebuf[k]; k = k + 1; }
+        n = nebuf;
+        if (gchanged == 0) break;
+        r = r + 1;
+    }
+    ppnow = 0; pp_seg = 0 - 1;
+    ppb = src + base; ppe = n;
+    nebuf = sv;
     return 0;
 }
 

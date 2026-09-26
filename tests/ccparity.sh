@@ -140,6 +140,13 @@ rm -f x.i; ua -E -Iinc -o x.i pp.c
 say "-E -o file, stdout quiet"  "yes empty" "$(ex x.i) $(has o.ua)"
 cc_ -E -Iinc pp.c; say "-E -o file content" "$(norm o.cc)" "$(norm x.i)"
 
+# #if is a real constant expression: dividing by zero in an evaluated
+# operand is an error, in an unevaluated one it is not (C99 6.10.1)
+printf '#if 1 / 0\n#endif\nint main(void) { return 0; }\n' > ppdiv.c
+printf '#if 0 && 1 / 0\n#endif\n#if 0\n#if 1 %% 0\n#endif\n#endif\nint main(void) { return 0; }\n' > ppdivok.c
+both "#if division by zero" ppdiv.c
+both "#if unevaluated 1/0"  ppdivok.c
+
 # --- warnings --------------------------------------------------------------
 cc_ -Wall warn.c; w=$(nz $?); rm -f a.out
 ua -Wall warn.c; say "warning keeps exit 0" "$w a.out=yes" "$(nz $?) a.out=$(ex a.out)"
