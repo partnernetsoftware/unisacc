@@ -4218,7 +4218,11 @@ int local_decl(void) {
         n = 1; isarr = 0;
         lfp = declfp;
         if (lstat) {
-            int ew; long nb; int lk2;
+            int ew; long nb; int lk2; int slabel;
+            /* Token ordinals restart in every unit. There are at most 64
+               inputs and MAXTOK tokens each, so these ranges are disjoint
+               and fit an int; unit zero retains its existing labels. */
+            slabel = curunit * MAXTOK + t;
             if (cur() == tidx("[", 1)) {
                 adv(); isarr = 1;
                 if (cur() == tidx("]", 1)) {
@@ -4233,10 +4237,10 @@ int local_decl(void) {
             if (declptr) { if (isarr) { if (declpd > 0) ew = 8; } else ew = 8; }
             nb = n * ew;
             if (declptr == 0) { if (sst >= 0) { if (isarr == 0) nb = declsz; } }
-            es(".bss ls"); en(t); ec(32); en(nb < 8 ? 8 : nb); ec(10);
+            es(".bss ls"); en(slabel); ec(32); en(nb < 8 ? 8 : nb); ec(10);
             declbytes = nb;
             sadd(t, 0, 0, isarr ? ew : w);
-            symlab[nsym - 1] = t;
+            symlab[nsym - 1] = slabel;
             if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symptrd[nsym - 1] = declpd + 1; }
             else { if (declptr == 0) { if (sst >= 0) {
                 symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symelem[nsym - 1] = declsz; } } }
@@ -4247,12 +4251,12 @@ int local_decl(void) {
                 toinit = 1; hasinit = 1;
                 if (cur() == tidx("{", 1)) {
                     if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
-                    initaggr(3, t, 0, isarr ? ew : w, sst, nb);
-                } else { if (cur() == T_STR) { if (isarr) { initstr(3, t, 0, n); }
-                    else { expr(); loadval(); es("  @mem.lea r1, ls"); en(t); ec(10); estore(8); } }
+                    initaggr(3, slabel, 0, isarr ? ew : w, sst, nb);
+                } else { if (cur() == T_STR) { if (isarr) { initstr(3, slabel, 0, n); }
+                    else { expr(); loadval(); es("  @mem.lea r1, ls"); en(slabel); ec(10); estore(8); } }
                 else { int sptr; sptr = declptr;   /* before the RHS */
                     expr(); loadval(); fconv(fkind(), lk2);
-                    es("  @mem.lea r1, ls"); en(t); ec(10);
+                    es("  @mem.lea r1, ls"); en(slabel); ec(10);
                     if (sptr) estore(8); else estore(w); } }
                 toinit = 0;
             }
