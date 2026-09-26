@@ -1,6 +1,6 @@
 # Referee ledger: what checks each table against C
 
-The data is `research/referee.tsv`: one row per stage, with its class and a runnable provider. `tests/docs.sh` fails when its stage set is not exactly `unisa/gold.py` `ALL` or when a named provider is missing. The table below is narrative and does not promise to be complete; the TSV is the ledger.
+The data is `research/referee.tsv`: one row per stage, with its class and a runnable provider. `tests/docs.sh` fails when its stage set is not exactly `unisa/gold.py` `ALL` or when a named provider is missing, or when a class and its provider disagree (a named class needs a provider; unnamed and offpath have none). This page is narrative and does not promise to be complete; the TSV is the ledger.
 
 The ledger records facts only (2026-09-26, HEAD 827f2be). The enumeration (`unisa acc`, 8,484 keys) proves **net = table** for every stage. It says nothing about **table = C**. The ledger splits each stage's evidence into three kinds:
 
