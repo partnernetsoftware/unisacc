@@ -22,7 +22,7 @@ for F in $D/br-*.txt; do
     [ "$n" -eq 1 ] || { echo "  BAD $F: $n expectations (want 1)"; bad=$((bad+1)); }
 done
 for f in $(echo "$exp" | awk '{print $1}'); do [ -f "$D/$f" ] || { echo "  BAD expectation for a missing fixture: $f"; bad=$((bad+1)); }; done
-for F in $D/x86-fixture.txt $D/br-*.txt; do
+for F in $D/x86-*.txt $D/br-*.txt; do
     case $F in *br-expect.txt) continue ;; esac
     b 60 python3 $D/ref.py "$F" > "$T/ref" || { echo "  BAD $F: the referee failed"; bad=$((bad+1)); continue; }
     b 60 "$T/run" "$T/d.tbl" "$F" > "$T/c"; rc=$?

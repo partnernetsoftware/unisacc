@@ -50,7 +50,9 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET = range(1, 11)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF = range(1, 12)
+SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
+SCR2 = 3                                     # rbx: emit_x86.SCR2
 SCR = 11                                     # r11: emit_x86.SCR
 
 
@@ -191,12 +193,16 @@ def build():
         classes[op] = C_ALU
     for op in X86["setcc"]:
         classes[op] = C_SET
+    for op in X86["shiftext"]:
+        classes[op] = C_SHF
     for op, c in classes.items():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in op.encode()], ("SBINTERN", "t"), ("LDI", "u", c), ("STX", "t", OPC, "u"))
         if op in X86["alu2"]:
             p.a(("LDI", "u", X86["alu2"][op]), ("STX", "t", AOPC, "u"))
         if op in X86["setcc"]:
             p.a(("LDI", "u", X86["setcc"][op]), ("STX", "t", ACC, "u"))
+        if op in X86["shiftext"]:
+            p.a(("LDI", "u", X86["shiftext"][op]), ("STX", "t", SHX, "u"))
     for nm, n in NUM.items():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", n + 1), ("STX", "t", REGN, "u"))
     for w in ("jump", "jumpz", "call"):
@@ -274,7 +280,7 @@ def build():
     # ARGS.d: at the end of the line: the class decides
     p = P("ARGS.d")
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
-              C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret"}, "DEAD.op", [("RLD", "cls")])
+              C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf"}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     # mov d, s
     p = P("E.mov")
@@ -343,6 +349,19 @@ def build():
     byte(p, 0xB6)
     p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "a0"), ("LDI", "mr_b", SCR)).call("MODRM").goto("NEXTL")
     byte(P("E.ret"), 0xC3).goto("NEXTL")
+    # shl64/shr64/lshr64 d, s, c (emit_x86, [I-14]): mov r11, s; mov rbx, c; push rcx; mov rcx, rbx;
+    # rex.WB D3 /ext r11; pop rcx; mov d, r11 -- the count must be in cl, and rcx is a tape register (r4).
+    # r11 and rbx are no tape register (catalog.REGMAP), so no tape operand can alias them.
+    p = P("E.shf")
+    p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", SCR), ("COPYW", "al_s", "a1")).call("ALU")
+    p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", SCR2), ("COPYW", "al_s", "a2")).call("ALU")
+    byte(p, 0x51)                                                     # push rcx
+    p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", 1), ("LDI", "al_s", SCR2)).call("ALU")
+    byte(p, 0x49)                                                     # rex(1, 0, 0, 1)
+    byte(p, 0xD3)
+    p.a(("LDI", "mr_m", 3), ("LDX", "mr_r", "opid", SHX), ("LDI", "mr_b", SCR)).call("MODRM")
+    byte(p, 0x59)                                                     # pop rcx
+    p.a(("LDI", "al_o", 0x89), ("COPYW", "al_d", "a0"), ("LDI", "al_s", SCR)).call("ALU").goto("NEXTL")
     p = P("NEXTL")          # a non-branch: its bytes become a blob, its size known
     p.a(("OCUT", "blob", "omark"), ("STX", "npc", BLB, "blob"), ("BLEN", "t", "blob"), ("STX", "npc", SZ, "t"),
         ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
