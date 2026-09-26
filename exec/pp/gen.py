@@ -216,7 +216,15 @@ def build_xe(g, NC):
     # identifier: only `defined`
     g.on("XID", ID, "XID", [("ADV",)])
     g.els("XID", "XID1", [("MARK", "XE_"), ("INTERN", "t", "XS", "XE_"), ("CMP", "t", "ID_DEFD")])
-    g.r("XID1", {1: ("XD", [("LDI", "xpar", 0)]), (0, 2): ("DEAD", NC("#if macro name"))})
+    # any other identifier: not a macro -> 0 (as the reference, which
+    # expands first and then reads leftover identifiers as 0); a macro
+    # name is not covered (no expansion on the #if line yet)
+    sub_u, pu_u = g.call("MFIND", "XUM")
+    g.r("XID1", {1: ("XD", [("LDI", "xpar", 0)]),
+                 (0, 2): (sub_u, [("COPYW", "NID", "t"), ("LDI", "SEGQ", -1)] + pu_u)})
+    g.els("XUM", "XUM1", [("CMPI", "M", 0)])
+    g.r("XUM1", {0: ("XR", [("LDI", "xr", 0), ("LDI", "xrp", 0)] + XPUSHV),
+                 (1, 2): ("DEAD", NC("#if macro name"))})
     g.on("XD", WS, "XD", [("ADV",)])
     g.on("XD", [40], "XDP", [("ADV",), ("LDI", "xpar", 1)])
     g.on("XD", AL, "XDI", [("MARK", "XS")])

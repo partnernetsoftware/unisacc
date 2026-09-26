@@ -437,3 +437,16 @@ is the next step), char constants, u/l suffixes, octal, malformed lines.
 
 Measured: 18 probes (12 equal, 6 not covered, 0 DIFF); ex + corpus (353
 files): 276 equal, 43 equal-noauto, 6 reject-agree, 28 not covered, 0 DIFF.
+
+### 11.2a #if: identifiers that are not macros read as 0
+
+Slice of the expansion step: an identifier other than `defined` on a live
+#if/#elif line is looked up (MFIND); not a macro -> the value 0 is pushed
+(the reference expands first and reads leftover identifiers as 0; with no
+macro on the line the two agree). A macro name is still not covered -- the
+expansion of the line into a scratch area through P4 is the next step.
+Probes 10 (/tmp/xp/q*.c): 7 equal, 3 not covered (macro name, f(1) syntax,
+division by zero). Per shard, like for like against main's gen.py:
+ex.aa..af 107: 78 equal, 20 equal-noauto, 9 not covered, 0 DIFF (unchanged);
+corpus.aa..ag 249: 199 equal (+1), 23 equal-noauto, 21 not covered (-1),
+6 reject-agree, 0 DIFF.
