@@ -9,33 +9,29 @@ This audit asks, for each semantic rule in `exec/parse2/gen2.py`, one question: 
 | operator → IR instruction, signed or unsigned | `binsel`, `irsel` | `E.optext` |
 | operator precedence | `prec` | `ladder()` |
 
-## Rules written by hand that a gold table already holds
+## What the gold type tables can and cannot replace (narrowed after cdx review)
 
-The product reads `type.tsv` and `tyinfo.tsv` at runtime through `tyask` and `tyax`. E3 re-derives the same facts as hand-written branch ladders.
+- **`type.tsv` gives the result type only.** A comparison's result is i32, and that says nothing about the common type the operands are compared in. The product asks two separate questions (`src/front_parse.c` `binary()`, about line 2632): the conversion row `ck = tyask(lax, "+", rax)` and the result row `res`. E3 needs both. One result-type lookup cannot delete the conversion rules.
+- **`tyax` folds every pointer into `ptr`.** It cannot stand in for:
+  - the pointer depth,
+  - the pointee type or size,
+  - array dimensions,
+  - struct identity,
+  - lvalue position.
 
-| rule in gen2 | procedures | gold table that holds it |
-|---|---|---|
-| result type of `a op b`: promotion, the long/unsigned pairing, compare → int | `OPX.*` `.x1`–`.x4`, `.w*`, `.u`, `.s`, `.l8`/`.i4` | `type` (t1, op, t2 → y), 4,275 keys |
-| whether an unsigned int operand needs its operands masked | `UICHK`, `.w6` | `tyinfo.uns` / `tyinfo.size` |
-| narrowing on return or cast, and masks on loads | `NARROW`, `NARU`, `width_dispatch` masks | `tyinfo.narrow`, `tyinfo.size` |
-| element size and pointer step | `ELSZ`, `SCALE`, `DSCALE`, `STEPTY` | `tyinfo.size` (and the struct layout tables) |
-| which operands are legal | `NODBL`, `NOFLT`, `INTONLY`, `DEAD.pa` | `type` → `illegal` |
+  `tyinfo(ptr).size = 8` is the pointer's width, not the element size. `tyinfo(struct).size` is not a struct's layout. So the value descriptor keeps (vt, vb, rank/dims, sid), and a `tyax` class is only an added field.
+- **`type.tsv` rules on one finite abstraction.** It does not hold every C constraint: `i64 < void` gives i32 there. So `illegal` does not replace the context checks. NODBL and NOFLT are coverage limits of this prototype, not language illegality, and they stay.
 
-## Rules written by hand with no gold table
+## Minimal slice (the only step planned)
 
-These rules were measured from the reference's output. They stay hand-written until a table exists for them:
+1. In `OPX`, take the arithmetic common type (the `ck` row) and the result type (the `res` row) from `type.tsv`, as the product does. Keep the pointer and struct information and every not-covered verdict. Size, step and narrowing are judged separately, later, by whether the table carries enough information for them. They are not removed in this step.
+2. **Acceptance:**
+   - the fixed list of 162 equal files at the current reference commit;
+   - the independent value probes stay;
+   - list the special branches actually deleted and the rules added;
+   - check that no equal amount of logic moved into `gen.py` or a table script;
+   - report JSON size and step changes separately.
 
-- the frame and slot layout;
-- the variadic push reversal;
-- the struct word copy;
-- the `__rv_` return buffer.
+   A lower `gen2.py` line count is only a secondary sign.
 
-## Minimal convergence plan
-
-No third generator and no new framework.
-
-1. Let E3's value descriptor carry the TYS axis index (`tyax`) instead of the pair (vt, vb).
-2. Replace `OPX`'s type ladders with one table lookup. The lookup is loaded from `type.tsv` at generation time and keyed on (t1, op, t2). The mask, narrow and size decisions follow from `tyinfo`.
-3. Acceptance: `E3KEEP` with the current 162 equal files stays green, and `gen2.py` gets shorter. Count its physical lines before and after.
-
-Honest status: E3 is still a structured table/state-machine prototype, not a net. Lower state counts do not show that maintenance got simpler.
+Honest status: E3 is still a structured table/state-machine prototype, not a net.
