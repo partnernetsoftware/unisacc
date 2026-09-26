@@ -47,6 +47,18 @@ TEMPL = {
     "jump_a":   "  jump L{a}\n",
     "label_a":  "L{a}:\n",
     "label_b":  "L{b}:\n",
+    "label_c":  "L{c}:\n",
+    "jumpz_b":  "  jumpz r0, L{b}\n",
+    "bool":     "  imm r1, 0\n  ne r0, r0, r1\n",
+    "and_skip": "  jumpz r0, L{e}\n",
+    "label_e":  "L{e}:\n",
+    "or_skip":  "  jumpz r0, L{on}\n  imm r0, 1\n  jump L{od}\nL{on}:\n",
+    "label_d":  "L{od}:\n",
+    "one":      "  imm r0, 1\n",
+    "post_inc": "  imm r2, 1\n  sub64 r0, r0, r2\n",
+    "post_dec": "  imm r2, 1\n  add64 r0, r0, r2\n",
+    "pre_inc":  "  imm r1, 1\n  add64 r0, r0, r1\n",
+    "pre_dec":  "  imm r1, 1\n  sub64 r0, r0, r1\n",
 }
 SPANS = {"@name": ("fns", "fne"), "@callee": ("cls", "cle")}
 
@@ -91,8 +103,18 @@ def ladder(prefix, bottom):
         p.tok(cases, "RET")
         for o in OPS[lv]:
             q = P("%s.%s" % (nm, o))
-            if o in SHORT:
-                q.goto("DEAD.short")
+            nxt = "E%d" % LEVELS[i + 1] if i + 1 < len(LEVELS) else "UNARY"
+            if o == "&&":
+                q.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "e", "lab"))
+                emit(q, "and_skip").vpush("e").call("NEXT").call(nxt).vpop("e")
+                emit(q, "bool")
+                emit(q, "label_e").goto(nm + ".l")
+                continue
+            if o == "||":
+                q.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "od", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "on", "lab"))
+                emit(q, "or_skip").vpush("od").call("NEXT").call(nxt).vpop("od")
+                emit(q, "bool")
+                emit(q, "label_d").goto(nm + ".l")
                 continue
             # left in r0: push; the right operand at the next level; pop; the instruction (binsel -> irsel)
             emit(q, "push").call("NEXT").call("E%d" % LEVELS[i + 1] if i + 1 < len(LEVELS) else "UNARY")
@@ -110,7 +132,7 @@ def build():
     p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid")).o(E.HEADER).call("NEXT").label("UNIT")
     p.tok({"type": "FN", "eof": "END"}, bad("top-level construct"))
     # a unit without main is an error in the reference (measured, probe r2)
-    P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, ("rej", "no main"), [("CMPI", "t", 1)])
+    P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
     P("END.ok").o(E.FOOTER).a(("ACCEPT",)).goto("DEAD")
     # function: int NAME ( params ) { body }
     p = P("FN")
@@ -118,7 +140,8 @@ def build():
     p = P("FN.id")
     p.a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe"), ("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("LDI", "cur", 0), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
     emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").call("NEXT").expect("(").call("NEXT").a(("LDI", "pk", 0))
-    p.tok({")": "FN.body", "type": "FN.par"}, bad("parameter"))
+    p.tok({")": "FN.body", "type": "FN.par", "type=void": "FN.void"}, bad("parameter"))
+    P("FN.void").call("NEXT").tok({")": "FN.body"}, bad("parameter"))
     p = P("FN.par")
     p.call("NEXT").tok({TK_ID: "FN.pid"}, bad("parameter"))
     p = P("FN.pid")
@@ -136,7 +159,7 @@ def build():
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
-    p.tok({"{": "S.blk", "type": "S.decl", "return": "S.ret", "if": "S.if", "while": "S.while", ";": "S.empty"}, "S.expr")
+    p.tok({"{": "S.blk", "type": "S.decl", "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", ";": "S.empty"}, "S.expr")
     P("S.blk").call("NEXT").call("STMTS").call("NEXT").ret()
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
@@ -163,16 +186,54 @@ def build():
     q.o("  jumpz r0, L").num("b").o("\n").vpush("a", "b").call("NEXT").call("STMT").vpop("a", "b")
     emit(q, "jump_a")
     emit(q, "label_b").ret()
+    p = P("S.for")
+    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),
+        ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab")).vpush("a", "b", "c")
+    p.call("NEXT").expect("(").call("NEXT").call("EXPR").expect(";").vpop("a", "b", "c")
+    emit(p, "label_a").vpush("a", "b", "c").call("NEXT").call("EXPR").expect(";").vpop("a", "b", "c")
+    emit(p, "jumpz_b").call("NEXT").a(("COPYW", "stp", "tpos"), ("LDI", "dep", 0)).label("F.skip")
+    p.tok({"(": "F.open", ")": "F.close"}, "F.nx")
+    P("F.open").a(("ALUI", "add", "dep", "dep", 1)).goto("F.nx")
+    P("F.close").branch({1: "F.body"}, "F.cl", [("CMPI", "dep", 0)])
+    P("F.cl").a(("ALUI", "sub", "dep", "dep", 1)).goto("F.nx")
+    P("F.nx").call("NEXT").goto("F.skip")
+    p = P("F.body")
+    p.vpush("a", "b", "c", "stp").call("NEXT").call("STMT").vpop("a", "b", "c", "stp").a(("COPYW", "aft", "tpos"))
+    emit(p, "label_c").vpush("a", "b", "aft").a(("JUMP", "stp")).call("NEXT").call("EXPR").expect(")").vpop("a", "b", "aft")
+    emit(p, "jump_a")
+    emit(p, "label_b").a(("JUMP", "aft")).call("NEXT").ret()
     # expressions: EXPR = assignment | the ladder
     p = P("EXPR")
     p.tok({TK_ID: "X.id"}, "E%d" % LEVELS[0])
-    P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"=": "X.as", "(": "X.call"}, "X.var")
+    P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.call", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
     p = P("X.as")
     p.call("LOOKUP")
     emit(p, "addr")
     emit(p, "push").call("NEXT").call("EXPR")
     emit(p, "pop1")
     emit(p, "store_int").ret()
+    for o in E.CASOPS:
+        q = P("X.c" + o)    # addr; push; load; push; rhs; pop; op; pop; store
+        q.call("LOOKUP")
+        emit(q, "addr")
+        emit(q, "push")
+        emit(q, "load_int")
+        emit(q, "push").call("NEXT").call("EXPR")
+        emit(q, "pop1").o(E.optext(o))
+        emit(q, "pop1")
+        emit(q, "store_int").ret()
+    for nm, o, fix in (("X.inc", "+", "post_inc"), ("X.dec", "-", "post_dec")):
+        q = P(nm)           # addr; push; load; push; 1; pop; op; pop; store; undo to the old value
+        q.call("LOOKUP")
+        emit(q, "addr")
+        emit(q, "push")
+        emit(q, "load_int")
+        emit(q, "push")
+        emit(q, "one")
+        emit(q, "pop1").o(E.optext(o))
+        emit(q, "pop1")
+        emit(q, "store_int")
+        emit(q, fix).call("NEXT").call("C%d" % LEVELS[0]).ret()
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
     p.call("LOOKUP")
     emit(p, "addr")
@@ -181,7 +242,18 @@ def build():
     ladder("E", "UNARY")
     ladder("C", None)
     p = P("UNARY")
-    p.tok({"-": "U.neg", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id"}, bad("expression"))
+    p.tok({"-": "U.neg", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec"}, bad("expression"))
+    for nm, fix in (("U.pinc", "pre_inc"), ("U.pdec", "pre_dec")):
+        q = P(nm)           # addr; push; load; +-1; pop; store
+        q.call("NEXT").tok({TK_ID: nm + ".id"}, bad("expression"))
+        q = P(nm + ".id")
+        q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP")
+        emit(q, "addr")
+        emit(q, "push")
+        emit(q, "load_int")
+        emit(q, fix)
+        emit(q, "pop1")
+        emit(q, "store_int").call("NEXT").ret()
     q = P("U.neg")
     q.call("NEXT").call("UNARY")
     emit(q, "neg").ret()
@@ -203,7 +275,7 @@ def build():
     # CALL: at '(' after ips..ipe: arguments pushed left to right, popped into r(n-1)..r0, call
     p = P("CALL")
     # the callee must be defined above (the reference rejects a call to an undefined function: probe r1)
-    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", E.FND)).branch({1: "CL.ok"}, ("rej", "call to a function not defined before"), [("CMPI", "t", 1)])
+    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", E.FND)).branch({1: "CL.ok"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
     p = P("CL.ok")
     p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe")).vpush("cls", "cle").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     p = P("CL.arg")
