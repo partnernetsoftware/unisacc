@@ -1867,3 +1867,15 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
     - a binary table format;
     - the table as nets.
   - **Product fix.** `-nostdinc` no longer adds `<stdio.h>`. A printf there takes the compile-time lowering (`do_printf`); `tests/cli.sh` now runs this path.
+- 2026-09-26 (S-17), **one executor, three tables, source to tape** (exec/c/chain.sh). One generic C executor, `exec/c/run.c`, runs all three stages:
+  - E2, the preprocessor delta. It now follows the product's rule that any `printf(` pulls in stdio.h.
+  - E1, the typed lexer.
+  - E3, the parser.
+
+  **Result:** on examples/ and tests/c (113 files), 54 compile from source to a tape identical to the reference's, 59 are not covered by some stage, and 0 differ. Checked alone, each stage agrees with its Python executor: E3 on 225 files, E2 and E1 on 32 each.
+
+  **Still missing:**
+  - chain.sh in the gate;
+  - a binary table format;
+  - E4 and later (lowering and encoding), which have no delta yet;
+  - the tables as nets.
