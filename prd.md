@@ -2503,3 +2503,14 @@ program execution retained. Table: 1,073 states, 54,766 B text. Encoding rules
 remain explicit in generator; declarations supply imports and standard-handle
 numbers. No new runtime primitive. PE files/native Windows and the remaining
 WinAPI sequences are not yet covered. Log: /tmp/unisacc-win-armsetup-final.log.
+
+### Windows ARM64 gate text (2026-09-27)
+
+ARM delta now encodes reference-supported WinAPI bodies and return conversions;
+winargs retains the explicitly declared machine-code parser template. Tested
+fixture 132 instructions / 2,772 B on both executors; Windows hello/fib complete
+text 56,304 / 56,648 B equals reference. Seven bad contracts reject, including
+winrest with result other than x0 (review22). Existing ARM native arithmetic,
+FP/memory and Darwin execution suite passed. Logs /tmp/unisacc-arm-winapi.log
+and /tmp/unisacc-arm-winapi-regression.log. Added exec-armwin gate entry;
+no new full-gate result claimed. PE writer and native Windows execution remain.

@@ -225,3 +225,24 @@ stack addresses, saves/restores and Windows standard handles on both runtimes,
 with complete reference bytes compared. Existing native arithmetic/FP and
 Darwin hello/fib execution checks still pass. This is not yet a PE writer or a
 Windows execution claim: `winargs`, WinAPI gates and PE output remain pending.
+
+### Windows gate bodies and argument setup
+
+`armwin.py` implements the reference's 11 encodable WinAPI bodies, indirect
+calls through IAT, descriptor-to-standard-handle conversion and the four
+return conversions. Per-line metadata is reset; import names must exist and
+numeric cell addresses are bounded before use. `winrest` now accepts only x0
+as return register: this matches current Windows ABI rows and makes explicit
+that only x1..x7 are restored. A future different return register requires a
+new restore rule, not silent acceptance.
+
+`winargs` emits address/call setup around the existing declared ARM
+`WINARGS_BODY` machine-code template. The parser inside that template was not
+migrated to transition logic; it remains an explicit static-code dependency.
+The generator never calls the reference encoder for byte answers.
+
+`armwincheck.sh` checks 132 setup/call instructions (2,772 bytes) on both
+executors, seven invalid metadata/restore contracts, and full hello/fib Windows
+lowering outputs (56,304 / 56,648 text bytes). No PE file is produced and no
+Windows execution is claimed. The POSIX ARM suite remains green. The table
+continues to be a lookup table, not a constructed neural network.

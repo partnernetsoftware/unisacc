@@ -3,6 +3,7 @@
 Python remains the lowering producer and reference assembler. No image claim.
 """
 import platform
+import os
 import pathlib
 import subprocess
 import sys
@@ -24,7 +25,8 @@ def main():
     oracle = _oracle('built')
     with tempfile.TemporaryDirectory() as d:
         path = pathlib.Path(d) / 'program.txt'
-        for target in ('lnx/'+arch, 'osx/'+arch):
+        for target in os.environ.get('REAL_TARGETS', 'lnx/'+arch+' osx/'+arch).split():
+            assert target in ('lnx/'+arch,'osx/'+arch,'win/'+arch)
             for f in ('examples/hello.c', 'examples/fib.c'):
                 tp = lower(compile_file([f], oracle, target), target, oracle, drive='built')
                 if arch=='arm64' and target.startswith('osx'):

@@ -35,7 +35,7 @@ def build(image=False):
              '.ld': ('rrii',11), '.st': ('riri',12),
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
              'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27),
-             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31),'.zero':('rii',32),'winsave':('i',33),'winrest':('ir',34),'winstdh':('i',35)}
+             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31),'.zero':('rii',32),'winsave':('i',33),'winrest':('ir',34),'winstdh':('i',35),'winargs':('iii',36)}
     from armint import SPECS, install as install_int
     specs.update(SPECS)
     from armfp import SPECS as FP_SPECS, install as install_fp
@@ -57,6 +57,8 @@ def build(image=False):
     init(p)
     from armlayout import init as init_layout, install as install_layout
     init_layout(p)
+    from armwin import init as init_win, reset as reset_win, install as install_win
+    init_win(p)
     p.a(('LDI','pass',0),('LDI','lnum',0)).goto('LINE')
     g.on('LINE',[64],'HDR.key',[('MARK','hs'),('ADV',)])
     g.on('LINE', [256], 'FINISH', [])
@@ -65,7 +67,7 @@ def build(image=False):
     g.on('OP.scan', [58], 'LABEL', [('MARK','end'),('ADV',)])
     g.on('OP.scan', [32]+END, 'OP.end', [('MARK', 'end')])
     g.els('OP.scan', 'OP.scan', [('ADV',)])
-    P('OP.end').a(('INTERN', 'oid', 'start', 'end'), ('LDX', 'cls', 'oid', OP),
+    reset_win(P('OP.end')).a(('INTERN', 'oid', 'start', 'end'), ('LDX', 'cls', 'oid', OP),
                    ('LDX', 'base', 'oid', BASE), ('LDX','labelpos','oid',LP), ('LDI', 'n', 0),('LDI','started',1),('LDI','stag',0),('LDI','tagkind',0),('LDI','gcarry',0),('LDI','gkind',0),('ALUI','add','lnum','lnum',1)).goto('ARG')
     g.on('ARG', [32], 'ARG', [('ADV',)])
     g.on('ARG', END, 'ENC', [])
@@ -166,6 +168,7 @@ def build(image=False):
     install_fp(E,word)
     install_input(E,word)
     install_layout(E,word)
+    install_win(E,word)
     if image:
         from elfimage import install as install_elf
         from armbranch import LABELS
