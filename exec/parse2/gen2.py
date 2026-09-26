@@ -203,6 +203,20 @@ def tytail():
     q.goto("DEAD.ty")
 
 
+def strwalk(pre, body, done):
+    """the bytes of the current string literal's text [ps+1, pe-1), escapes decoded, one at a time:
+    bv := the byte, then the state `body` (which must go back to pre + '.w'); `done` at the end"""
+    P(pre).a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("INPUSHXE", "fs", "fe")).goto(pre + ".w")
+    g.on(pre + ".w", [92], pre + ".es", [("ADV",)])
+    g.on(pre + ".w", [256], done, [("INPOP",)])
+    for c in range(256):
+        if c != 92:
+            g.on(pre + ".w", [c], body, [("ADV",), ("LDI", "bv", c)])
+    for ch, v in ESC.items():
+        g.on(pre + ".es", [ord(ch)], body, [("ADV",), ("LDI", "bv", v)])
+    g.els(pre + ".es", "DEAD", E.rej("not covered: string escape"))
+
+
 def ladder(prefix, bottom):
     """E<lv>: operand, then (op E<lv+1>)* for the ops of level lv.
     prefix "E": from scratch (bottom = UNARY); prefix "C": the left operand is
@@ -313,7 +327,8 @@ def printf():
     p = P("POOL")
     p.call("NEXT").label("PO.l")
     p.tok({"eof": "RET", TK_ID: "PO.id", E.TK_STR: "PO.lit"}, "PO.nx")
-    P("PO.lit").a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PL.w")
+    P("PO.lit").a(("LDX", "t", "tpos", SKIPS)).branch({1: "PO.nx"}, "PO.lit1", [("CMPI", "t", 1)])
+    P("PO.lit1").a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PL.w")
     g.on("PL.w", [92], "PL.es", [("ADV",)])
     g.on("PL.w", [256], "PL.end", [("INPOP",)])
     for c in range(256):
@@ -395,6 +410,7 @@ TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # ty
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
+SKIPS = 42 * 10 ** 6   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
 GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
@@ -481,7 +497,12 @@ def types():
     # T a[] = { e, ... }: the length is the number of elements, counted ahead (then back to ']')
     P("DM.open").branch({1: "DM.o1"}, bad("array bound"), [("CMPI", "drk", 0)])
     p = P("DM.o1")
-    p.a(("COPYW", "dm_back", "tpos")).call("NEXT").expect("=").call("NEXT").expect("{")
+    p.a(("COPYW", "dm_back", "tpos"), ("LDI", "dm_n", 0)).call("NEXT").expect("=").call("NEXT").tok({E.TK_STR: "DM.s"}, "DM.o2")
+    strwalk("DM.s", "DM.sb", "DM.se")
+    P("DM.sb").a(("ALUI", "add", "dm_n", "dm_n", 1)).goto("DM.s.w")
+    P("DM.se").a(("ALUI", "add", "dm_n", "dm_n", 1)).goto("DM.cd")         # the terminating 0
+    p = P("DM.o2")
+    p.expect("{")
     p.a(("LDI", "dm_n", 0), ("LDI", "dm_d", 1), ("LDI", "dm_need", 1)).call("NEXT").label("DM.cl")
     p.tok({"{": "DM.co", "}": "DM.cc", ",": "DM.cm", "eof": "DEAD.dmx"}, "DM.ct")
     g.on("DEAD.dmx", range(257), "DEAD", E.rej("not covered: array bound"), "r")
@@ -678,7 +699,25 @@ def build():
     P("IN.nx").call("NEXT").goto("IN.l")
     P("IN.id").branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dep", 0)])
     P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("IN.nx")
-    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v", "{": "IN.br", "&": "IN.amp", TK_ID: "IN.fn"}, "IN.l")
+    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v", "{": "IN.br", "&": "IN.amp", TK_ID: "IN.fn", E.TK_STR: "IN.s0"}, "IN.l")
+    p = P("IN.s0")          # (measured, s34) .lea/.zero, then each byte and the 0 while inside the array
+    p.a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.l", [("CMPI", "t", 1)])
+    p = P("IN.s1")
+    p.a(("INTERN", "iv", "ips", "ipe"), ("LDX", "isz", "iv", GSZ), ("LDI", "ix", 0), ("LDI", "idn", 0))
+    p.o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  .zero r1, 0, ").num("isz").o("\n").goto("IN.sw")
+    strwalk("IN.sw", "IN.sb", "IN.se")
+    p = P("IN.sb")
+    p.branch({0: "IN.sb1"}, "DEAD.ginit", [("CMP", "ix", "isz")])
+    p = P("IN.sb1")
+    p.o("  imm r0, ").a(("COPYW", "n", "bv")).call("PRN").goto("IN.sb2")
+    p = P("IN.sb2")
+    p.o("\n  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").branch({1: "IN.sb3"}, "IN.sbo", [("CMPI", "ix", 0)])
+    P("IN.sbo").o("  imm r2, ").num("ix").o("\n  add64 r1, r1, r2\n").goto("IN.sb3")
+    P("IN.sb3").o("  .st [r1+0], r0, 1\n").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "IN.sd"}, "IN.sw.w", [("CMPI", "idn", 1)])
+    p = P("IN.se")          # the terminating 0, when the array has room for it
+    p.branch({0: "IN.s0z"}, "IN.sd", [("CMP", "ix", "isz")])
+    P("IN.s0z").a(("LDI", "bv", 0), ("LDI", "idn", 1)).goto("IN.sb1")   # the walker has popped: stop after it
+    P("IN.sd").call("NEXT").goto("IN.l")
     # = &NAME / = FUNCTION: the address (measured): .lea r0, g_NAME (a global) or .lea r0, NAME (a function);
     # .lea r1, g_X; store64 [r1+0], r0
     P("IN.amp").call("NEXT").tok({TK_ID: "IN.fn"}, "IN.l")
@@ -737,7 +776,17 @@ def build():
     P("GV.p8").a(("LDI", "gsz", 8)).goto("GV.reg")
     p = P("GV.reg")
     p.a(("LDI", "gar", 0)).call("GV.emit").tok({"=": "GV.init"}, "GV.end")
-    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv", "{": "GV.bi", "&": "GV.ga", TK_ID: "GV.gf"}, bad("global initialiser"))
+    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv", "{": "GV.bi", "&": "GV.ga", TK_ID: "GV.gf", E.TK_STR: "GV.gs"}, bad("global initialiser"))
+    p = P("GV.gs")          # char NAME[..] = "...": bytes, not a pooled string
+    p.call("CHARR").branch({1: "GV.gs1"}, "DEAD.ginit", [("CMPI", "u", 1)])
+    P("GV.gs1").a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t")).call("NEXT").goto("GV.end")
+    # CHARR: u := 1 when the declaration being read (gar/dar, td, tb) is an array of char
+    p = P("CHARR")
+    p.a(("LDI", "u", 0), ("ALU", "or", "t", "gar", "dar")).branch({1: "RET"}, "CH.1", [("CMPI", "t", 0)])
+    P("CH.1").branch({1: "CH.2"}, "RET", [("CMPI", "td", 0)])
+    P("CH.2").branch({1: "CH.y"}, "CH.3", [("CMPI", "tb", 1)])
+    P("CH.3").branch({1: "CH.y"}, "RET", [("CMPI", "tb", UNS + 1)])
+    P("CH.y").a(("LDI", "u", 1)).ret()
     P("GV.ga").call("NEXT").tok({TK_ID: "GV.ga1"}, bad("global initialiser"))
     p = P("GV.ga1")         # &NAME: a global or a function defined before
     p.a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", LOC)).branch({1: "GV.gok"}, "GV.ga2", [("CMPI", "u", E.GMARK)])
@@ -885,7 +934,22 @@ def build():
     P("S.dend").expect(";").call("NEXT").ret()
     P("S.dcm").call("DSTARS").tok({TK_ID: "S.did0"}, bad("declarator"))
     p = P("S.din")
-    p.a(("COPYW", "lpp", "tpos")).call("NEXT").tok({"{": "S.lbr"}, "S.din0")
+    p.a(("COPYW", "lpp", "tpos")).call("NEXT").tok({"{": "S.lbr", E.TK_STR: "S.ls"}, "S.din0")
+    p = P("S.ls")           # (measured, s34) imm r2, S; sub64 r1, r6, r2; .zero; each byte then the 0 at S - k
+    p.call("CHARR").branch({1: "S.ls1"}, "S.din0", [("CMPI", "u", 1)])   # char *p = "...": the expression path
+    p = P("S.ls1")
+    p.a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t"), ("COPYW", "isl", "s"), ("COPYW", "isz", "dsz"), ("LDI", "ix", 0), ("LDI", "idn", 0))
+    p.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n  .zero r1, 0, ").num("dsz").o("\n").goto("LS.w")
+    strwalk("LS.w", "LS.b", "LS.e")
+    p = P("LS.b")
+    p.branch({0: "LS.b1"}, "DEAD.linit", [("CMP", "ix", "isz")])
+    p = P("LS.b1")
+    p.o("  imm r0, ").a(("COPYW", "n", "bv")).call("PRN").a(("ALU", "sub", "t", "isl", "ix")).o("\n  imm r2, ").num("t")
+    p.o("\n  sub64 r1, r6, r2\n  .st [r1+0], r0, 1\n").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "LS.d"}, "LS.w.w", [("CMPI", "idn", 1)])
+    p = P("LS.e")
+    p.branch({0: "LS.z"}, "LS.d", [("CMP", "ix", "isz")])
+    P("LS.z").a(("LDI", "bv", 0), ("LDI", "idn", 1)).goto("LS.b1")
+    P("LS.d").call("NEXT").tok({",": "S.dcm"}, "S.dend")
     P("S.din0").a(("JUMP", "lpp")).call("NEXT").goto("S.din00")       # back to '=' (re-read) for the scalar path
     P("S.din00").branch({1: "S.din1"}, bad("array initialiser"), [("CMPI", "dar", 0)])
     # T x[N] = { e, ... } / struct T x = { e, ... } (measured, local): imm r2, S; sub64 r1, r6, r2; .zero r1, 0, SIZE;
