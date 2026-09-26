@@ -380,8 +380,9 @@ def build_str():
             D.put("STR", c, "STR", [A, A])
         elif c == 34:
             D.put("STR", c, "STRWS", [A, ("MARK", "E")])
-        elif c == EOF:          # unterminated: see e1-lexer-delta.md s6
-            D.put("STR", c, "DISPATCH", [("MARK", "E")] + STREMIT[1:])
+        elif c == EOF:          # unterminated: rejected at the literal's start,
+                                # as the reference now does (e1-lexer-delta.md s6)
+            D.put("STR", c, "HALT", [("JUMP", "S"), ("REJECT", "missing terminating '\"' character")])
         else:
             D.put("STR", c, "STR", [A])
         # after the closing quote: white space, an optional prefix, and
@@ -406,7 +407,7 @@ def build_str():
         elif c == 92:
             D.put("CH", c, "CH", [A, A])
         elif c == EOF:
-            D.put("CH", c, "DISPATCH", NUMEMIT)
+            D.put("CH", c, "HALT", [("JUMP", "S"), ("REJECT", "missing terminating ' character")])
         else:
             D.put("CH", c, "CH", [A])
 

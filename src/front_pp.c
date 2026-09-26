@@ -2223,6 +2223,10 @@ int lex(void) {
                 while (at(j) >= 0) {
                     if (at(j) == 92) { j = j + 2; } else {
                     if (at(j) == 34) break; else j = j + 1; } }
+                /* no closing quote before the end: the token's length used
+                   to count one byte past the buffer [E1] */
+                if (at(j) < 0) { err_at(i, "missing terminating '\"' character");
+                    nerr = nerr + 1; return 0 - 1; }
                 /* C concatenates adjacent string literals [W-12] */
                 q = j + 1;
                 while (at(q) >= 0) {
@@ -2254,6 +2258,8 @@ int lex(void) {
                 if (at(j) == 92) j = j + 1;
                 j = j + 1;
             }
+            if (at(j) < 0) { err_at(i, "missing terminating ' character");
+                nerr = nerr + 1; return 0 - 1; }
             tkind[ntok] = 3; tpos[ntok] = i; tlen[ntok] = j + 1 - i;
             ntok = ntok + 1;
             i = j + 1;

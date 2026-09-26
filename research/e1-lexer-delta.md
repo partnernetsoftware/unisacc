@@ -178,3 +178,6 @@ ACCEPT / REJECT k  k ∈ {unexpected character, stray char, unreachable}
 动作，不需要字典原语，也不需要分类原语。与参考在全部 lexdiff 语料与语料库上
 逐记号相同；唯一的不同来自参考读缓冲区之外的一个字节。表的主体是关键字 trie；
 按本文的直接编码，稀疏约 82 KB、稠密约 342 KB。这个数字只描述词法层。
+
+
+**2026-09-26 更新**：参考实现已修正（`src/front_pp.c`，字符串或字符常量到文件尾仍未闭合时报 `missing terminating … character`，不再越界读一个字节），δ 同步改为在字面量起点拒绝。重跑：lexdiff 语料 103/103、探针 15/15、`unisacc.c` 1/1 全部相同。

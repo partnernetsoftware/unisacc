@@ -62,10 +62,10 @@ def main():
             got = (0, val, b"")
         else:
             rejects += 1
-            r3, o3, e3 = sh([PRE, "-dump-tokens", f], {"UA_LEXREJ": str(val[1])})
-            got = (r3, o3, e3)
-            if val[0] != "unexpected character":
-                got = ("reject " + val[0], b"", b"")
+            got = ("reject " + val[0], b"", b"")
+            if val[0] in ("unexpected character", "missing terminating '\"' character",
+                          "missing terminating ' character"):
+                got = sh([PRE, "-dump-tokens", f], {"UA_LEXREJ": str(val[1]), "UA_LEXMSG": val[0]})
         if got == (rc, out, err):
             ok += 1
         else:
