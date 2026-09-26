@@ -1,4 +1,4 @@
-/* Every decoded action is executed by the actual C body and ARM assembly.
+/* Every decoded action is executed by the actual C body and assembly.
    Helpers also have independent value/ownership suites; this checks wiring,
    branch/stop semantics and all mutable state after each action. */
 #include "../core.h"

@@ -2980,3 +2980,22 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   3,855 B, mixed text 6,774 B. C-only baseline 6,396/7,106 B, static C state
   zero. Host/libc/model bytes still excluded from object sums. No product
   switch or all-assembly self-rebuild claimed. No push/release.
+
+
+### Frozen gate and x86-64 action dispatch
+
+- Frozen 8743d4f: JOBS=2 gate --com **82/82**, 428 s total, all per-suite
+  bounds <=60 s. exec-native 56 s, exec-asm 10 s, exec-asmx86 12 s; fat
+  executed both slices, 128/0. Log /tmp/unisacc-action-full-gate.log. No edits
+  overlapped that run. ARM action state comparisons additionally pass ASan/
+  UBSan; this macOS sanitizer does not support leak detection, which was off.
+- After that gate, x86-64 assembly dispatch was integrated. It passes the
+  same 1,050 full-state comparisons over all 56 actions, bad-action rejection,
+  all primitive checks, network checks and six-image/five-native route under
+  Rosetta. Log /tmp/unisacc-action-x86-final.log. This is targeted evidence
+  for the later x86 change, not a new full-gate result.
+- x86 action text 2,116 B, diagnostic strings 41 B. Remaining C 1,135 B;
+  total mixed text 6,170 B (ARM remains 980 B C / 6,040 B mixed). Both selected
+  action engines now execute all actions in assembly; outer loop, initialization
+  and cleanup remain C. Host/libc/model costs are still separate. Product
+  .com unchanged, no push/release, cc-unisacc remains paused.

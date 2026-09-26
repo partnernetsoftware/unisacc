@@ -3,8 +3,8 @@
 This directory implements **`core_transition` and the 32/64-bit arithmetic
 primitives, byte-buffer append, sparse memory, byte-string interning, blob
 copies, resource caching, decimal field rendering and control/input stacks**
-by hand for AArch64 and x86-64 System V. AArch64 also implements all 56 action
-handlers and their dispatch in assembly. x86-64 action dispatch remains C.
+by hand for AArch64 and x86-64 System V. Both ISAs also implement all 56 action
+handlers and their dispatch in assembly.
 The outer transition loop, initialization and cleanup remain C on both ISAs. Allocation remains libc. The shipped product and default runtime still
 select C. This is not a completed assembly kernel or product switch.
 
@@ -44,10 +44,10 @@ Measured uncompressed __text on macOS (object section, no subtraction):
 | ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | decimal/fill | stacks | action dispatch | remaining C (`cc -Os`) | sum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 548 B | 272 B | 288 B | 1,968 B | 980 B | 6,040 B |
-| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 225 B | 275 B | C | 3,855 B | 6,774 B |
+| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 225 B | 275 B | 2,116 B | 1,135 B | 6,170 B |
 
 Error strings are 58 B per transition, 24 B per arithmetic object, and 39 B
-each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B and field rendering 26 B; stacks add 84 B; arm64 action diagnostics add 41 B. Host/library/model costs
+each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B and field rendering 26 B; stacks add 84 B; each action object adds 41 B. Host/library/model costs
 remain outside this object sum, accounted separately in ../CORE.md. The C-only
 baseline with the capacity guards and explicit memory/intern state is
 6,396/7,106 B. These are migration measurements, not a performance claim.
@@ -196,7 +196,7 @@ each capacity guard, and empty control pop. Both real ISA jobs preserve the
 six-image route and five native comparisons. Native C network self-rebuild
 and ASan/UBSan checks pass. No parser/compiler-specific primitive was added.
 
-## Explicit action state and ARM action dispatch
+## Explicit action state and assembly action dispatch
 
 CoreMachine holds registers, comparison result, buffers, both stacks, indexed
 memory, blobs, interned strings, resource cache and borrowed model/result/input
@@ -204,13 +204,12 @@ references. Its 280-byte layout is asserted field by field. Working state is
 now invocation-local rather than stored in C globals. The host concurrency
 contract is unchanged. Decoded action numbers are asserted against core.h.
 
-On arm64 cc.sh selects core_action and every primitive in assembly. A compile
+On both ISAs cc.sh selects core_action and every primitive in assembly. A compile
 error prevents selecting this action engine while silently keeping C primitive
 implementations. The only remaining C work is the transition/step-limit loop,
-initial ownership setup and final ownership transfer/free. On x86-64 cc.sh
-explicitly keeps the C action engine, with the same state API.
+initial ownership setup and final ownership transfer/free. The unselected C action engine remains the test oracle, with the same state API.
 
-actioncheck.c runs the actual retained C action body and ARM assembly on
+actioncheck.c runs the actual retained C action body and each ISA assembly on
 independent states, checking all registers, byte/attribute buffers, frames,
 control stack, memory, intern/blob/cache entries and halt/error results after
 each action. Its 1,050 comparisons cover all 56 actions, signed/unsigned edges,
@@ -224,3 +223,10 @@ Both ISA integration jobs pass six-image/five-native comparisons. C network
 self-reconstruction and ASan/UBSan pass. This is not an assembly self-compiler:
 the generated run.c image is still C, and the shipped product route is unchanged.
 SWAP allocation failures are not directly injected by the action suite.
+
+The full 82-suite gate (--com, JOBS=2) passed on 8743d4f in 428 s, including
+arm64 action dispatch and the explicit-state C engine on x86-64; the longest
+native job took 56 s. x86-64 dispatch was integrated afterward and passed its
+own complete asmcheck (all helper/action tests, network cases, six images and
+five native runs). The full-gate claim is tied to that earlier commit, not
+silently extended to later changes. Only macOS native/Rosetta were executed.

@@ -90,6 +90,5 @@ guards and explicit CoreMachine invocation state. Product routing is unchanged.
 
 CoreMachine now makes the complete mutable action state explicit. core_run
 allocates it locally, invokes the selected action engine and transfers/frees
-its owned buffers at exit. The arm64 action engine is assembly; x86-64 remains
-C. All decoded actions are low-level machine operations. See asm/README.md for
+its owned buffers at exit. Both ISA action engines are assembly. All decoded actions are low-level machine operations. See asm/README.md for
 per-action state comparisons and the remaining lifecycle migration boundary.
