@@ -822,20 +822,23 @@ def build():
     for o in E.CASOPS:
         q = P("X.c" + o)    # addr; push; load; push; rhs (a pointer's scaled); pop; op; pop; store
         q.call("LOOKUP").call("NOARR").call("STEPTY")
-        if o in ("/", "%", ">>"):   # the unsigned forms: not covered here
-            q.branch({2: "DEAD.nint"}, (nx := "X.c%s.k" % o), [("CMPI", "vb", UNS)])
-            q = P(nx)
         if o not in ("+", "-"):
             q.branch({1: (nx2 := "X.c%s.i" % o)}, "DEAD.nint", [("CMPI", "vt", 0)])
             q = P(nx2)
         addr(q)
         emit(q, "push").call("LOADV")
-        emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").call("NODBL0").vpop("vt", "vb", "stp")
+        emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").call("NODBL0").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb", "stp")
         q.branch({1: "X.c%s.m" % o}, "X.c%s.s" % o, [("CMPI", "stp", 1)])
         P("X.c%s.s" % o).o("  imm r2, ").num("stp").o("\n  mul64 r0, r0, r2\n").goto("X.c%s.m" % o)
         q = P("X.c%s.m" % o)
-        emit(q, "pop1").branch({1: "X.c%s.w" % o}, "X.c%s.n" % o, [("CMPI", "vb", UNS + 4)])
-        P("X.c%s.w" % o).branch({1: "X.c%s.w1" % o}, "X.c%s.n" % o, [("CMPI", "vt", 0)])
+        # the variable's class picks the form: unsigned long (the unsigned spelling), unsigned int (masked),
+        # else signed; an unsigned right side of another class is not covered (measured, p49/p50)
+        emit(q, "pop1").branch({1: "X.c%s.v" % o}, "X.c%s.n" % o, [("CMPI", "vt", 0)])
+        P("X.c%s.v" % o).branch({1: "X.c%s.U" % o}, "X.c%s.v1" % o, [("CMPI", "vb", UNS + 8)])
+        P("X.c%s.U" % o).o(E.optext(o, True)).goto("X.c%s.st" % o)
+        P("X.c%s.v1" % o).branch({1: "X.c%s.w" % o}, "X.c%s.v2" % o, [("CMPI", "vb", UNS + 4)])
+        P("X.c%s.v2" % o).call("RUNS").goto("X.c%s.n" % o)
+        P("X.c%s.w" % o).branch({1: "DEAD.ui"}, "X.c%s.w1" % o, [("CMPI", "rvb", UNS + 8)])
         P("X.c%s.w1" % o).o("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" + E.optext(o, True) + UIM).goto("X.c%s.st" % o)
         q = P("X.c%s.n" % o)
         q.o(E.optext(o)).call("NARU").goto("X.c%s.st" % o)
@@ -851,6 +854,10 @@ def build():
     P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
     g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
     # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
+    # RUNS: an unsigned int / unsigned long right side (a value) under a signed op=: not covered
+    P("RUNS").branch({1: "RUNS.1"}, "RET", [("CMPI", "rvt", 0)])
+    P("RUNS.1").branch({1: "DEAD.ui"}, "RUNS.2", [("CMPI", "rvb", UNS + 8)])
+    P("RUNS.2").branch({1: "DEAD.ui"}, "RET", [("CMPI", "rvb", UNS + 4)])
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
     P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
     P("NARU.2").branch({1: "NARU.s"}, "NARU.3", [("CMPI", "vb", UNS + 2)])
@@ -971,8 +978,12 @@ def build():
         emit(q, fix).call("NARU")
         emit(q, "pop1").call("STOREV").call("NEXT").ret()
     q = P("U.neg")
-    q.call("NEXT").call("UNARY").call("INTONLY")
-    emit(q, "neg").ret()
+    q.call("NEXT").call("UNARY").call("NODBL0").branch({1: "DEAD.ui"}, "U.ng1", [("CMPI", "vb", UNS + 4)])
+    q = P("U.ng1")       # -x on any integer but unsigned int: imm r1, 0; sub64 (measured); a narrow operand gives an int
+    emit(q, "neg").branch({(0, 1): "U.ng4"}, "U.ng2", [("CMPI", "vb", 2)])
+    P("U.ng2").branch({(1, 2): "U.ng3"}, "RET", [("CMPI", "vb", UNS + 1)])
+    P("U.ng3").branch({0: "U.ng4"}, "RET", [("CMPI", "vb", UNS + 3)])
+    P("U.ng4").a(("LDI", "vb", 4)).ret()
     q = P("U.not")
     q.call("NEXT").call("UNARY")
     emit(q, "not").a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
