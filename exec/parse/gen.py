@@ -336,9 +336,12 @@ def expr():
             elif op == "||":
                 q.newlab("a").newlab("b").vpush("a")
                 q.o("  jumpz r0, ").lab("b").o("\n  imm r0, 1\n  jump ").lab("a").o("\n").lab("b").o(":\n")
-                q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").goto("LOOP%d" % L)
-            else:
-                q.o(PUSH).call("NEXT").call(sub).o(POP1 + optext(op)).goto("LOOP%d" % L)
+                q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+            else:     # a pointer operand is not covered: the reference scales it
+                noptr(q)
+                q.o(PUSH).call("NEXT").call(sub)
+                noptr(q)
+                q.o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
     # BINCONT: the operand is already emitted; resume every level's loop
     p = P("BINCONT")
     for L in levels[:-1]:
@@ -441,6 +444,7 @@ def expr():
 
     # UNARY
     p = P("UNARY")
+    p.a(("LDI", "pt", 0))   # a primary is an int unless it says otherwise
     p.tok({"-": "U.neg", "!": "U.not", "~": "U.cpl", "+": "U.pos", "(": "U.par",
            TK_NUM: "U.num", TK_ID: "U.id", "*": "U.star", "&": "U.amp", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
     for nm, sp in (("U.pinc", "add64"), ("U.pdec", "sub64")):
@@ -502,7 +506,7 @@ def expr():
     p = P("IT.pop1")
     p.a(("ALUI", "sub", "na", "na", 1)).o("  load64 r").num("na").o(", [r7+0]\n  .frame -8\n").goto("IT.pop")
     p = P("IT.emit")
-    p.vpop("sps", "spe").o("  call ").a(("SPAN2", "sps", "spe")).o("\n").call("NEXT").ret()
+    p.vpop("sps", "spe").o("  call ").a(("SPAN2", "sps", "spe")).o("\n").a(("LDI", "pt", 0)).call("NEXT").ret()
     g.on("DEAD0", range(257), "DEAD", rej("not covered: identifier is not a local"), "r")
 
 
