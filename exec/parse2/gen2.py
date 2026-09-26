@@ -394,7 +394,8 @@ assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
-SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
+SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
+GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
@@ -530,6 +531,8 @@ def types():
     p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
         ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
         ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("STX", "k", MAR, "marr"),
+        ("LDX", "t", "sid", SMN), ("ALUI", "mul", "u", "sid", 64), ("ALU", "add", "u", "u", "t"), ("STX", "u", SMEM, "k"),
+        ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t"),
         ("ALU", "add", "soff", "soff", "msz"))
     p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
     P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
@@ -642,8 +645,42 @@ def build():
     P("IN.c").a(("ALUI", "sub", "dep", "dep", 1)).goto("IN.nx")
     P("IN.nx").call("NEXT").goto("IN.l")
     P("IN.id").branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dep", 0)])
-    P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"=": "IN.eq"}, "IN.l")
-    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v"}, "IN.l")
+    P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"=": "IN.eq", "[": "IN.ar"}, "IN.l")
+    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v", "{": "IN.br"}, "IN.l")
+    P("IN.ar").call("NEXT").tok({TK_NUM: "IN.ar1", "]": "IN.ar2"}, "IN.l")
+    P("IN.ar1").call("NEXT").tok({"]": "IN.ar2"}, "IN.l")
+    P("IN.ar2").call("NEXT").tok({"=": "IN.ar3"}, "IN.l")
+    P("IN.ar3").call("NEXT").tok({"{": "IN.br"}, "IN.l")
+    q = P("IN.br")          # (measured, globals) .lea r1, g_X; .zero r1, 0, SIZE
+    q.a(("INTERN", "iv", "ips", "ipe"), ("LDX", "t", "iv", GSZ), ("LDX", "ivt", "iv", E.PTR), ("LDX", "ivb", "iv", E.BASE),
+        ("LDX", "iar", "iv", E.ARR), ("LDI", "ix", 0))
+    q.o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  .zero r1, 0, ").num("t").o("\n").call("NEXT").label("IN.el")
+    q.tok({TK_NUM: "IN.en", "}": "IN.ed"}, "DEAD.ginit")
+    q = P("IN.en")          # the element's offset and type: an array's k-th, or a struct's k-th member
+    q.branch({1: "IN.ea"}, "IN.es", [("CMPI", "iar", 1)])
+    q = P("IN.ea")
+    q.a(("ALUI", "sub", "td", "ivt", 1), ("COPYW", "tb", "ivb")).call("ELSZ").a(("ALU", "mul", "ioff", "ix", "es"),
+        ("ALUI", "sub", "vt", "ivt", 1), ("COPYW", "vb", "ivb")).goto("IN.ew")
+    q = P("IN.es")
+    q.branch({1: "IN.es1"}, "DEAD.ginit", [("CMPI", "ivt", 0)])
+    q = P("IN.es1")
+    q.branch({(1, 2): "IN.es2"}, "DEAD.ginit", [("CMPI", "ivb", SBB)])
+    q = P("IN.es2")
+    q.a(("ALUI", "sub", "t", "ivb", SBB), ("LDX", "u", "t", SMN)).branch({0: "IN.es3"}, "DEAD.ginit", [("CMP", "ix", "u")])
+    q = P("IN.es3")
+    q.a(("ALUI", "mul", "u", "t", 64), ("ALU", "add", "u", "u", "ix"), ("LDX", "u", "u", SMEM), ("LDX", "ioff", "u", MOF),
+        ("LDX", "vt", "u", MPT), ("LDX", "vb", "u", MBS), ("LDX", "t", "u", MAR)).branch({1: "IN.ew"}, "DEAD.ginit", [("CMPI", "t", 0)])
+    q = P("IN.ew")          # imm r0, V; .lea r1, g_X; [imm r2, OFF; add64 r1, r1, r2]; the store at the element's width
+    q.branch({1: "IN.ew2"}, "DEAD.ginit", [("CMPI", "vt", 0)])
+    q = P("IN.ew2")
+    q.branch({(1, 2): "DEAD.ginit"}, "IN.ew3", [("CMPI", "vb", SBB)])
+    q = P("IN.ew3")
+    emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").branch({1: "IN.st"}, "IN.off", [("CMPI", "ioff", 0)])
+    P("IN.off").o("  imm r2, ").num("ioff").o("\n  add64 r1, r1, r2\n").goto("IN.st")
+    q = P("IN.st")
+    q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
+    P("IN.ec").call("NEXT").goto("IN.el")
+    P("IN.ed").call("NEXT").goto("IN.l")
     q = P("IN.v")
     emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").a(("INTERN", "v", "ips", "ipe"), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("STOREV").goto("IN.nx")
     # function: int NAME ( params ) { body }
@@ -664,10 +701,19 @@ def build():
     P("GV.p8").a(("LDI", "gsz", 8)).goto("GV.reg")
     p = P("GV.reg")
     p.a(("LDI", "gar", 0)).call("GV.emit").tok({"=": "GV.init"}, "GV.end")
-    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv"}, bad("global initialiser"))
+    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv", "{": "GV.bi"}, bad("global initialiser"))
+    P("GV.bi").a(("LDI", "dep", 1)).call("NEXT").goto("GV.bl")     # a struct's `= { ... }`
     P("GV.iv").a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "DEAD.big"}, "GV.iv1")
     P("GV.iv1").call("NEXT").goto("GV.end")
-    P("GV.end").tok({",": "GV.cm"}, "GV.e0")
+    P("GV.end").tok({",": "GV.cm", "=": "GV.brace"}, "GV.e0")
+    P("GV.brace").call("NEXT").expect("{").a(("LDI", "dep", 1)).call("NEXT").label("GV.bl")
+    p = P("GV.bl")
+    p.tok({"{": "GV.bo", "}": "GV.bc", "eof": "DEAD.ginit"}, "GV.bn")
+    P("GV.bo").a(("ALUI", "add", "dep", "dep", 1)).goto("GV.bn")
+    P("GV.bc").a(("ALUI", "sub", "dep", "dep", 1)).branch({1: "GV.bd"}, "GV.bn", [("CMPI", "dep", 0)])
+    P("GV.bn").call("NEXT").goto("GV.bl")
+    P("GV.bd").call("NEXT").goto("GV.end")
+    g.on("DEAD.ginit", range(257), "DEAD", E.rej("not covered: global initialiser"), "r")
     P("GV.e0").expect(";").call("NEXT").goto("UNIT")
     P("GV.cm").call("DSTARS").tok({TK_ID: "GV.cid"}, bad("declarator"))
     P("GV.cid").a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe")).call("NEXT").tok({";": "GV.sc", "=": "GV.sc", ",": "GV.sc", "[": "GV.ar"}, bad("declarator"))
@@ -677,7 +723,7 @@ def build():
     p.call("ELSZ").a(("ALU", "mul", "gsz", "prd", "es"), ("COPYW", "gar", "drk")).call("GV.emit").goto("GV.end")
     p = P("GV.emit")
     p.o(".bss g_").a(("SPAN2", "fns", "fne")).o(" ").num("gsz").o("\n")
-    p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", E.GMARK), ("STX", "v", LOC, "t"), ("STX", "v", E.BASE, "tb"), ("STX", "v", E.ARR, "gar"),
+    p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", GSZ, "gsz"), ("LDI", "t", E.GMARK), ("STX", "v", LOC, "t"), ("STX", "v", E.BASE, "tb"), ("STX", "v", E.ARR, "gar"),
         ("COPYW", "t", "td")).branch({1: "GV.e1"}, "GV.e2", [("CMPI", "gar", 0)])
     P("GV.e2").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("GV.e1")
     P("GV.e1").a(("STX", "v", E.PTR, "t")).ret()
