@@ -32,6 +32,8 @@ Every action (and nothing else runs):
   OLAST (r := last byte of o, 256 if none) | ODROP | OLEN d | OCLR | OSEL k
   OCUT d s                                 W[d] := a new blob of o[W[s]:]; o (and its
                                            attrs) truncated to W[s]  (added for s13)
+  ORES d n | OFILL d s n                   reserve n bytes, W[d] := their offset / fill them
+                                           with W[s] right-aligned (backpatch; generic bytes)
   SETOT s | XATTR d
   PUSH g | POP
   INTERN d s e | BLOBSAVE d s e | INPUSH b | INPUSHX s | INPUSHXE s e | INPOP
@@ -286,6 +288,17 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
                 W[a[1]] = len(blobs) - 1
                 del o[s0:]
                 del oattr[s0:]
+            elif op == "ORES":     # reserve a[2] bytes (spaces) at the end of o; W[a[1]] := their offset
+                W[a[1]] = len(o)
+                o += b" " * a[2]
+                oattr += [OT] * a[2]
+            elif op == "OFILL":    # write W[a[2]] in decimal, right-aligned, into the a[3] bytes reserved at W[a[1]]
+                t = str(W.get(a[2], 0)).encode()
+                w = a[3]
+                if len(t) <= w:
+                    o[W.get(a[1], 0):W.get(a[1], 0) + w] = b" " * (w - len(t)) + t
+                else:
+                    return ("reject", ("field overflow", bytes(e)), steps)
             elif op == "OCLR":
                 o = bytearray()
                 oattr = []
