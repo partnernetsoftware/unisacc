@@ -10,7 +10,10 @@ export E2REF=$T/ua_ref E2NOAUTO=$T/ua_noauto
 case "$1" in
 gen)      $B ./tests/build_ref.sh "$T/ua_ref.c" "$T/ua_ref" && $B exec/pp/mknoauto.sh "$T/ua_ref.c" "$T/ua_noauto" &&
           $B python3 exec/pp/gen.py "$T/d.json" ;;
-ex.*)     [ -f "$T/ex.aa" ] || { ls examples/*.c tests/c/*.c > "$T/ex.txt"; split -l 20 "$T/ex.txt" "$T/ex."; }
+ex.*)     # the list is rebuilt when the probe set changes: a cached one
+         # silently skipped three probes added after it was written
+         ls examples/*.c tests/c/*.c > "$T/ex.new"
+         cmp -s "$T/ex.new" "$T/ex.txt" || { mv "$T/ex.new" "$T/ex.txt"; rm -f "$T"/ex.a?; split -l 20 "$T/ex.txt" "$T/ex."; }
           $B python3 exec/pp/compare.py "$T/d.json" "@$T/$1" ;;
 corpus.*) [ -f "$T/corpus.aa" ] || { find "${CORPUS:-../../corpus}" -name '*.c' | sort > "$T/corpus.txt"
                                      split -l 40 "$T/corpus.txt" "$T/corpus."; }
