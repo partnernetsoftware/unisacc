@@ -66,13 +66,15 @@ FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 
 WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
-         "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue"]
+         "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue",
+         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
 CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
 GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
+TDN = 8 * 10 ** 6  # TDN[v] = 1: v was declared a typedef name at file scope
 
 g = G()
 
@@ -629,7 +631,15 @@ def unit():
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"))
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=static": "TOP.st", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
+    TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
+          "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
+    P("TD").call("NEXT").tok(dict(TW, struct="TD.s"), ("rej", "not covered: typedef"))
+    P("TD.s").call("NEXT").tok({TK_ID: "TD.w"}, ("rej", "not covered: typedef"))
+    P("TD.w").call("NEXT").tok({**TW, "*": "TD.w", TK_ID: "TD.id"}, ("rej", "not covered: typedef"))
+    p = P("TD.id")
+    p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t")).call("NEXT").expect(";").call("NEXT").goto("TOP")
     P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN"}, ("rej", "not covered: static declaration"))
     p = P("FN")
     p.call("NEXT").tok({TK_ID: "FN.id"}, ("rej", "not covered: declarator"))
@@ -662,7 +672,12 @@ def unit():
     p.branch({2: "FN.many"}, "FN.hd", [("CMPI", "cur", 6)])
     g.on("FN.many", range(257), "DEAD", rej("not covered: more than 6 parameters"), "r")
     p = P("FN.hd")
-    p.a(("COPYW", "np", "cur")).call("NEXT").tok({"{": "FN.body"}, ("rej", "not covered: declaration"))
+    p.a(("COPYW", "np", "cur")).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
+    # prototype NAME(...);  -- no code; the name is not a definition
+    p = P("FN.proto")
+    p.a(("LDI", "z0", 0), ("STX", "fv", FND, "z0"), ("LDI", "z", 0))
+    unwind(p, "z")
+    p.call("NEXT").goto("TOP")
     p = P("FN.body")
     p.newlab("rl").a(("SPAN2", "fps", "fpe")).o(":\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame ")
     p.branch({1: "FN.f2"}, "FN.f1", [("CMPI", "pass", 2)])
