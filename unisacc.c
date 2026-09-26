@@ -11991,7 +11991,7 @@ int unary(void) {
                 }
                 need(tidx(")", 1), ")");
                 es("  @lit.imm r0, "); en(sz); ec(10);
-                lvalue = 0; curelem = 8; curptr = 0;
+                setkind(1); curpd = 0; curbase = 8; curvla = 0; /* size_t: unsigned 64-bit */
                 return 0;
             }
         }
@@ -12008,7 +12008,7 @@ int unary(void) {
         sz = cursize;
         if (curvla) { es("  @mem.load r0, [r6-"); en(curvla); es("]\n"); curvla = 0; }
         else { es("  @lit.imm r0, "); en(sz); ec(10); }
-        lvalue = 0; curelem = 8; curptr = 0;
+        setkind(1); curpd = 0; curbase = 8; curvla = 0;
         return 0;
     }
     if (p == P_ADDR) { adv(); unary();

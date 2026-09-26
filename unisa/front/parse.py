@@ -2245,9 +2245,9 @@ class Walker:
                 if vla:
                     # C99 6.5.3.4p2: `sizeof` a VLA is evaluated at run time
                     self.em.load(ACC, FP, -self.vla_size[self._vla_name(m)], 8)
-                    return I64
+                    return U64
             self.em.imm(ACC, n)
-            return I64
+            return U64
         return self.primary()
 
     def _vla_name(self, m):
