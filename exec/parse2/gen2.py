@@ -405,6 +405,7 @@ CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a s
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
 POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
 TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
+ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
 GSK = 4 * POSSPAN     # GSK[the token position of a global pointer's string] = its pool number, taken in source order
 GIBLOB, GIEND = 5 * POSSPAN, 6 * POSSPAN  # initialiser tape and end token, produced once in source order
 SKIPS = 7 * POSSPAN   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
@@ -523,7 +524,10 @@ def types():
     P("DS.1").a(("LDX", "dt", "k2", TDIM), ("ALUI", "mul", "u", "v", 8), ("ALU", "add", "u", "u", "k2"), ("STX", "u", DIM, "dt"), ("ALUI", "add", "k2", "k2", 1)).goto("DS.l")
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
     p = P("TSPEC")
-    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "union": "TS.union", "type=unsigned": "TS.type=unsigned"}, bad("type"))
+    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "union": "TS.union", "enum": "TS.enum", "type=unsigned": "TS.type=unsigned"}, bad("type"))
+    P("TS.enum").call("NEXT").tok({TK_ID: "TS.etag"}, bad("enum type"))
+    P("TS.etag").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", ETAG)).branch({1: "TS.eint"}, bad("unknown enum tag"), [("CMPI", "u", 1)])
+    P("TS.eint").a(("LDI", "tb", 4)).call("NEXT").goto("TS.b")
     # union: a struct whose members all sit at offset 0, its size the largest member's (measured)
     P("TS.struct").a(("LDI", "sun_n", 0)).goto("TS.su")
     P("TS.union").a(("LDI", "sun_n", 1)).goto("TS.su")
@@ -672,7 +676,7 @@ def build():
     # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
     p = P("EN")
     p.call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
-    P("EN.tag").call("NEXT").expect("{").goto("EN.b")
+    P("EN.tag").a(("INTERN", "t", "ps", "pe"), ("LDI", "u", 1), ("STX", "t", ETAG, "u")).call("NEXT").expect("{").goto("EN.b")
     p = P("EN.b")
     p.a(("LDI", "env", 0)).call("NEXT").label("EN.l")
     p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
@@ -935,7 +939,7 @@ def build():
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
-    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl",
+    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl", "enum": "S.decl",
            "type=static": "SC.start", "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
     P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
     # NAME: stmt -- the label u_NAME (measured, b_goto); otherwise back to the name, an expression
@@ -1134,13 +1138,17 @@ def build():
     emit(q, "jump_a")
     emit(q, "label_b").ret()
     p = P("S.for")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),
-        ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab")).vpush("a", "b", "c")
-    p.call("NEXT").expect("(").call("NEXT").tok({";": "F.i0"}, "F.i1")
+    p.vpush("usp", "cur").call("NEXT").expect("(").call("NEXT").tok(
+        {";": "F.i0", **{w: "F.decl" for w in TWORDS}, "struct": "F.decl",
+         "union": "F.decl", "enum": "F.decl", TK_ID: "F.id"}, "F.i1")
+    P("F.id").call("ISTD").branch({1: "F.decl"}, "F.i1")
+    P("F.decl").call("S.decl").goto("F.ready")
     P("F.i1").a(("LDI", "stl", 1)).call("CEXPR").expect(";").goto("F.i0")
-    p = P("F.i0")       # init done; the condition may be empty (then no jumpz: measured for(;;))
-    p.vpop("a", "b", "c")
-    emit(p, "label_a").vpush("a", "b", "c").call("NEXT").tok({";": "F.c0"}, "F.c1")
+    P("F.i0").call("NEXT").goto("F.ready")
+    p = P("F.ready")     # labels follow initializer labels; declaration consumed its semicolon
+    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),
+        ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab"))
+    emit(p, "label_a").vpush("a", "b", "c").tok({";": "F.c0"}, "F.c1")
     q = P("F.c1")
     q.call("CEXPR").expect(";").vpop("a", "b", "c")
     emit(q, "jumpz_b").goto("F.c2")
@@ -1159,7 +1167,7 @@ def build():
     p = P("F.s0")
     p.vpop("a", "b", "aft")
     emit(p, "jump_a")
-    emit(p, "label_b").a(("JUMP", "aft")).call("NEXT").ret()
+    emit(p, "label_b").a(("JUMP", "aft")).call("NEXT").vpop("sv", "cur").call("UNWIND").ret()
     # do body while (cond);  labels a top, b break, c continue (measured)
     p = P("S.do")
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),

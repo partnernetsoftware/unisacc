@@ -15326,6 +15326,9 @@ int stmt_(void) {
     }
     if (p == P_FOR) {
         int stept; int bodyt; int aftert;
+        int savesym; int saveoff; int savetd; int savest;
+        savesym = nsym; saveoff = frameoff; savetd = ntd; savest = nstruct;
+        bdepth = bdepth + 1; vlaslot[bdepth] = 0;
         adv(); need(tidx("(", 1), "(");
         if (eat(tidx(";", 1)) == 0) {
             if (is_typeat(tp)) local_decl();
@@ -15359,6 +15362,13 @@ int stmt_(void) {
         tp = aftert;
         elab("  @ctrl.jump L", top); ec(10);
         elab("L", a); es(":\n");
+        if (vlaslot[bdepth]) {
+            es("  @mem.load r7, [r6-"); en(vlaslot[bdepth]); es("]\n");
+            vlaslot[bdepth] = 0;
+        }
+        nsym = savesym; frameoff = saveoff; ntd = savetd;
+        bdepth = bdepth - 1;
+        while (savest < nstruct) { stdead[savest] = 1; savest = savest + 1; }
         return 0;
     }
     if (p == P_SWITCH) {

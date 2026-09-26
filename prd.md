@@ -2688,3 +2688,13 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - 规模：cc -O2 runtime __text 16,620 B / 文件 56,520 B（动态 libSystem 不计）；unisacc -O2 __text 85,220 B / 文件 115,746 B（含随带库）。均为加载、IO、校验、执行合计，不是单独内核，也未达几 KB 目标。
 - `.com` 已随产品修复重建：1,345,792 B，SHA-256 `236aee387020e2f5d04f8d4a18bff05cb44121eb11f0ae553332d2480c8e1c13`；源 `unisacc.c` SHA-256 `caa8a5ba4b8685403505f299fd8ce2a90d50af999339b136f48164fb70aeea2b`。本地 gate --com 70/70，JOBS=2 总 287 s，每套件 ≤60 s；fat 121/0，两架构均执行；六目标网络 self-source 全部相同。未推送、未发布。
 - 仍有实质缺口：b_fortype 在 E3 为 `not covered: identifier is not a local`（产品修复不代表 prototype 已覆盖）；b_toknames 已端到端 tape 相同。native Windows IO 错误分类未闭合；Linux/Windows 本轮未实跑自建 runtime；发布 `.com` 仍为手写 C 编译器路径。cc-unisacc 继续暂停。
+
+
+### S-17：for 声明与作用域（2026-09-27）
+
+- cc-unisacc 保持暂停，由 cdx-unisacc 继续。E3 的 for 初始化接入已有 TSPEC/S.decl，识别内置类型、typedef、struct/union 与已声明 enum tag；标签在初始化之后分配，避免条件表达式先分配标签时错位。循环用现有 BIND/UNWIND 保存和恢复局部作用域，没有新增执行器原语。enum tag 使用独立命名空间，不混用 typedef 或值名。
+- 独立执行暴露产品缺陷：外层 i=7，`for (int i=0;i<2;i++) {}` 后返回 i，旧 `.com` 返回 2。C 前端补循环作用域的符号、帧偏移、类型及 VLA 栈恢复；Python 已有循环作用域，不改其算法。回归 b_forscope 覆盖同名遮蔽、嵌套、continue/break、条件初始化及表达式初始化；cc、C O0/O1/O2、Python 输出 `7 2 9`，rc 0。
+- 固定清单扩大之前，原 E3 213 项全部 equal；b_fortype 与 b_forscope 再加入，现 215 项。两例通过六段实际网络生成 macOS ARM64 镜像，完整字节等于参考，实际运行等于 cc。chain/ELF 清单 74→76；门禁 source-to-tape 76/76。未声称前端全覆盖：exec/c/run.c 仍停在 `sizeof non-scalar expression`。
+- 规模：gen2.py +18/-10（净 +8 行），状态 3928→3942，JSON 21,506,653→21,584,161 B。属于行为补齐，不是代码缩减；既有类型/声明机制被复用，未把语言规则放进执行器。
+- 已重建 `.com`：1,347,184 B，SHA256 `0475e2c62a3835c6a5104479dda948a4c11456be5cb87af8d658fcc9e0af9fa9`；unisacc.c SHA256 `ce491daefe821f8eacda919fc94acfbd697b05e0873d246ced89115efd894157`。
+- 冻结树 gate --com 70/70，JOBS=2，总 285 s，每套件 ≤60 s；fat 122/0（两架构实跑），六目标网络 self-source 与参考相同，macOS 自举沿用门禁实跑。Linux/Windows 本轮仅字节核对，未启动 VM。日志 /tmp/unisacc-for-gate.log；旧 E3 清单证据 /tmp/unisacc-for-keep.log。未推送、未发布；完整重构与 E7 产品切换仍未完成。
