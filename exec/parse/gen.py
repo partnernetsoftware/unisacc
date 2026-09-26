@@ -913,6 +913,10 @@ def expr():
             r.o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n" % (n, n))
         r.a(("LDI", "pt", 0), ("LDI", "pb", n)).ret()
         q = P(nx)
+    hit, nx = q.fresh("cs"), q.fresh("cn")   # (unsigned long)e: no code, the value unsigned (measured, p73)
+    q.branch({1: hit}, nx, [("CMPI", "cb", UNS + 8)])
+    P(hit).a(("LDI", "pt", 0), ("LDI", "pb", UNS + 8)).ret()
+    q = P(nx)
     q.branch({}, ("rej", "not covered: cast to a non-scalar"))
     # a hex/octal literal in (INT_MAX, UINT_MAX] is an unsigned int (C99 6.4.4.1): the reference masks
     # the operands to 32 bits (measured: g() - 0x80000000; see ubin)
@@ -1304,7 +1308,8 @@ def stmt():
     p = P("S.rete")
     p.call("CEXPRD").expect(";").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb"), ("COPYW", "pt", "rptr"), ("COPYW", "pb", "rbsz")).call("DMATCH")
     p.branch({(1, 2): "S.retp"}, "S.retd", [("CMPI", "rptr", 1)])
-    P("S.retd").branch({1: "S.retp"}, "S.reti", [("CMPI", "rbsz", DBL)])   # double: the plain 64-bit move (measured)
+    P("S.retd").branch({1: "S.retp"}, "S.retu", [("CMPI", "rbsz", DBL)])   # double: the plain 64-bit move (measured)
+    P("S.retu").branch({1: "S.retp"}, "S.reti", [("CMPI", "rbsz", UNS + 8)])   # unsigned long: as long (measured, p73)
     P("S.retp").o("  jump R").num("rl").o("\n").call("NEXT").ret()
     p = P("S.reti")     # a scalar return narrows through the stack at its tyinfo size; 8 (long) as a pointer (measured)
     q = p
@@ -1453,7 +1458,7 @@ def unit():
     autoscan()
     p = P("START")
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
-        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"),
+        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"),
         [x for k, nm in enumerate(VANAMES) for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "va%d" % k)]],
         [x for k, (nm, _, _) in enumerate(SYSCALLS, 1)
          for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "sy%d" % k)]])
@@ -1461,7 +1466,7 @@ def unit():
     p.call("AUTO")
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=unsigned": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
@@ -1480,12 +1485,15 @@ def unit():
     P("TD.idu").a(("LDI", "tdb", CUNK)).goto("TD.id3")
     p = P("TD.id3")
     p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t"), ("STX", "v", TDD, "tdd"), ("STX", "v", TDB, "tdb")).call("NEXT").expect(";").call("NEXT").goto("TOP")
-    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
+    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=unsigned": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
     p = P("TOP.sid")   # static TYPEDEFNAME ...: base size unknown (CUNK)
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "TOP.std"}, ("rej", "not covered: static declaration"), [("CMPI", "t", 1)])
     P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK), ("LDI", "sd0", 0), ("LDI", "gtu", 1)).goto("FN.n")
     p = P("FN")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0), ("LDI", "gtu", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d"}, "FN.n")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0), ("LDI", "gtu", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d", "type=unsigned": "FN.u"}, "FN.n")
+    # unsigned long NAME: the base code UNS + 8 (as a local's); the other unsigned types not covered here
+    P("FN.u").call("NEXT").tok({"type=long": "FN.ul"}, ("rej", "not covered: unsigned return or global type"))
+    P("FN.ul").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["long"])).goto("FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
     P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
     P("FN.c").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.n")
@@ -1628,7 +1636,10 @@ def unit():
     P("END1").a(("OCLR",), ("LDI", "pass", 2)).goto("PASS")
     p = P("END2")
     p.branch({1: "END3"}, ("rej", "undefined function 'main'"), [("CMPI", "hasmain", 2)])
-    P("END3").o("__init:\n").call("INITS").o(FOOTER[len("__init:\n"):]).call("POOL").a(("ACCEPT",)).goto("DEAD")
+    # a unit that defines exit: __main_ret calls it before .exit (measured: the stdlib.h prelude)
+    P("END3").o("__init:\n").call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", FND)).branch({1: "END4"}, "END5", [("CMPI", "t", 2)])
+    P("END4").o("  call exit\n").goto("END5")
+    P("END5").o(FOOTER[len("__init:\n  ret\n__main_ret:\n"):]).call("POOL").a(("ACCEPT",)).goto("DEAD")
 
 
 def inits():
