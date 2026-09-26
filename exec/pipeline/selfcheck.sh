@@ -22,7 +22,7 @@ printf '%s\n' $osnames "$arch" __LP64__ __UNISA__ > "$T/macros.c"
 for name in "$other" $absent; do
     printf '#ifdef %s\nWRONG_TARGET\n#endif\n' "$name" >> "$T/macros.c"
 done
-MODEL=tbl; [ "${NETWORK:-0}" != 1 ] || MODEL=net
+MODEL=tbl; [ "${NETWORK:-1}" != 1 ] || MODEL=net
 b "$T/run" "$T/e2.$MODEL" "$T/macros.c" > "$T/macros.delta"
 b "$UA" -b "$TARGET" -E "$T/macros.c" > "$T/macros.ref"
 for file in "$T/macros.delta" "$T/macros.ref"; do
@@ -38,7 +38,7 @@ case "$(uname -s)/$(uname -m):$TARGET" in
         b "$T/unisacc.$IMAGE" -O2 -b "$TARGET" unisacc.c -o "$T/n2"
         b "$T/n2" -O2 -b "$TARGET" unisacc.c -o "$T/n3"
         cmp "$T/unisacc.$IMAGE" "$T/n2" && cmp "$T/n2" "$T/n3"
-        echo "delta bootstrap $TARGET: N1=N2=N3" ;;
-    *) echo "delta bootstrap $TARGET: not executed on this host" ;;
+        echo "$MODEL bootstrap $TARGET: N1=N2=N3" ;;
+    *) echo "$MODEL bootstrap $TARGET: not executed on this host" ;;
 esac
-echo "delta self-source $TARGET: $(wc -c < "$T/unisacc.$IMAGE" | tr -d ' ') bytes equal; bootstrap result above"
+echo "$MODEL self-source $TARGET: $(wc -c < "$T/unisacc.$IMAGE" | tr -d ' ') bytes equal; bootstrap result above"

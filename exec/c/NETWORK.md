@@ -1,8 +1,8 @@
 # Constructed transition networks
 
-`NETWORK=1 exec/pipeline/elf.sh OUT source.c ...` constructs six integer
-threshold networks and runs them on the generic C executor. The default
-remains the table route. Python constructs the models; it does not process
+`exec/pipeline/elf.sh OUT source.c ...` constructs six integer
+threshold networks and runs them on the generic C executor. `NETWORK=0` selects the reference table route.
+`exec/c/chain.sh` uses the same default and explicit override. Python constructs the models; it does not process
 source during the six execution stages. This is a development route, not
 adoption by the shipped `.com`.
 

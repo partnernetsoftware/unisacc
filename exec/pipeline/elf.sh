@@ -1,6 +1,7 @@
 #!/bin/sh
 # Development route: C source -> ELF, Mach-O or PE, six deltas on one generic C executor.
-# Python generates tables only; after that no Python stage processes a source.
+# Python constructs models only; after that no Python stage processes a source.
+# NETWORK=0 selects the reference lookup-table execution; default is inference.
 # Linux/macOS x86_64 or arm64, Windows x86_64 or arm64; frontend coverage limits apply.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
@@ -20,7 +21,7 @@ case $TARGET in */arm64) ARCHFLAG=--arm64; ENCODER=arm.py;; *) ARCHFLAG=; ENCODE
 b python3 exec/lower/gen.py "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
 b python3 "exec/enc/$ENCODER" "$OUT/elf.json" "--$IMAGE"
 MODEL=tbl
-case ${NETWORK:-0} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
+case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
 for s in e2 e1 e3 e4 lower elf; do
     b python3 exec/c/tbl.py "$OUT/$s.json" "$OUT/$s.tbl"
     if [ "$MODEL" = net ]; then
@@ -46,5 +47,5 @@ for f in "$@"; do
     done
     if [ "$EXT" != elf ]; then mv "$OUT/$name.elf" "$OUT/$name.$EXT"; fi
     chmod +x "$OUT/$name.$EXT"
-    echo "delta $IMAGE: $f -> $OUT/$name.$EXT"
+    echo "$MODEL $IMAGE: $f -> $OUT/$name.$EXT"
 done

@@ -28,7 +28,7 @@ chmod +x "$d/run.sh"
 # Explicit suite settings only. Quote values as shell literals (including
 # apostrophes and newlines), preserving the distinction between unset and empty.
 : > "$d/env"
-for name in UA UA_RUN PAR SHARD LIMA_VM STRICT DRIVE CC CFLAGS JOBS TARGET \
+for name in UA UA_RUN PAR SHARD LIMA_VM STRICT DRIVE CC CFLAGS JOBS TARGET NETWORK \
     E4STRICT CHAINKEEP CHAINV E3KEEP E3V E3REF E3DUMP E3DELTA \
     E2_AUTOINC E2REF E2NOAUTO; do
     eval 'present=${'"$name"'+x}'

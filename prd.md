@@ -2669,3 +2669,11 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - s50 的六段输出逐字节等于表路线；完整 `unisacc.c` 经六段网络生成 osx/arm64 镜像 743,202 B，与参考相同，实跑 N1=N2=N3。生成的仍是现有 C 编译器，不是 E7 发布切换。
 - `netcheck.py`：三种观测、非状态栈符号、缺项、接受路径以及改坏 bias 必须失败。`gate --com` 新增 net/netself：69/69，JOBS=2 总 277 s，每套件 ≤60 s；netself 19 s。产品 `.com` 本轮未改变。其他五目标本轮通过的是原表路线，网络路线尚不借此声称已验收。
 - 仍未完成：前端全部覆盖、失败诊断等价、几 KB 内核与单份模型 `.com`；T2/T3 仍未证。cc-unisacc 保持暂停，本片无其独立复核。
+
+
+### S-17：六目标网络路线与默认切换（2026-09-27）
+
+- 在 `004d28e` 上显式 `NETWORK=1`，其余五目标 selfcheck 全通过：lnx/x86_64 671,404 B（17.6 s）；lnx/arm64 716,458 B（17.3 s）；osx/x86_64 693,666 B（21.2 s）；win/arm64 741,888 B（18.4 s）；win/x86_64 694,272 B（17.5 s）。每项重新构造六段网络并全域核对，完整 tape/镜像等于参考；macOS x86_64 经 Rosetta 实跑 N1=N2=N3。Linux/Windows 本轮只验证生成字节，未重启 VM 实跑。
+- `elf.sh` 与 `chain.sh` 默认网络推理，`NETWORK=0` 为显式查表对照；回执标明 net/tbl，Terminal 环境传递 NETWORK。门禁的六个 selfcheck 因默认切换而测网络，另保留 osx/arm64 查表 selfcheck。
+- 切换后：默认网络 source-to-tape 74/74、source-to-ELF 固定 74 项全等；显式 NETWORK=0 的同一 74 项 tape 全等。产品代码及 `.com` 未改，最近完整 gate --com 仍是上一片 69/69；本片没有把定向复跑写成新一轮全门禁。
+- 下一处实际依赖：`unisacc.com -O2 exec/c/run.c` 目前在三个 typedef 形式的 for 初始化处报未知标识符。执行器尚不能称为自托管或产品路径；继续沿真实构建错误处理。
