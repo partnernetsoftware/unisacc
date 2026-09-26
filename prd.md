@@ -1996,3 +1996,19 @@ register mapping, entry setup, syscall shapes and adjacent push/pop fusion
 must then be executed by the delta. Serialising an already lowered program
 does not complete that dependency. Its interface must eventually consume E4's
 actual tape output, rather than moving the Python lowering behind an adapter.
+
+### Lowering starts at raw E4 tape data (2026-09-26)
+
+`exec/lower/gen.py` now generates a 153-state data-pass delta. It parses .str
+(including byte escapes) and .bss, aligns data, performs zero-last reordering,
+rewrites symbol addresses and allocates Linux scratch cells. Non-data code
+and label meaning remain unchanged. It outputs a data header plus tape code,
+not yet target instructions. No executor primitive was added.
+
+The fixed `exec-lowdata` gate includes five edge fixtures on C and Python
+executors (escapes, empty data, all-zero data, aliases and terminal alignment),
+plus actual hello -S input and fib output produced by the E4 delta. Bytes and
+symbols match the Python referee; code/labels survive. Python parsing and
+zero_last only judge results, not supply intermediate answers to the delta.
+This is a hand algorithm compiled into a state table, not a new network.
+Instruction lowering and remaining architectures are still pending.
