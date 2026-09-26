@@ -2110,3 +2110,14 @@ cc, the rebuilt native reference at -O0/-O1/-O2 and Python built all give
 `2 0 2 8 1` for b_longand. That regression is still outside E3 coverage because
 of its sizeof-expression form, so it is not added to E3's retained set.
 Full rebuilt-product gate results are recorded after the frozen run below.
+
+Frozen b06170a/fb5e167 product run: gate --com 45/45, JOBS=2, 191s total,
+with each suite bounded by 60s. This is macOS arm64/Rosetta evidence only.
+Rebuilt unisacc.com: 1343904 B, SHA256
+58df0c97b398a600b344b967be3a2b3033422f057a5b753d5d78d2385ac1d7b5.
+The .com b_longand check at -O0/-O1/-O2 also agrees with host cc.
+The next self-source blocker exposed another reference defect: for
+`sizeof(k ? 1 : c)`, `sizeof(k ? c : 1)`, `sizeof(k ? c : c)` with char c,
+host cc gives 4/4/4, native gives 1/4/1, Python gives 4/1/1. Mixed signed and
+unsigned arms also inherit only one arm's type. This must be corrected
+against the common-type rule before it is used as a migration reference.
