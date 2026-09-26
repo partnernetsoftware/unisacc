@@ -1761,11 +1761,20 @@ class Walker:
             self.expect(")")
             return v
         if t.kind == "sizeof":
-            self.expect("(")
-            b = self.declspec()
-            while self.eat("*"):
-                b = ptr(b)
-            self.expect(")")
+            a = self.sc.act("sizeof", self.peek(1)) if self.at("(") else None
+            if a == "type_name":
+                self.next()
+                b = self.abstract_type()
+                self.expect(")")
+            else:
+                m = self.mark()
+                b = self.unary() or I64
+                end = self.i
+                self.rewind(m)
+                self.i = end
+                self.lval = None
+                if b.kind == "arr" and b.n < 0:
+                    raise CError("line %d: constant size required" % t.line)
             return b.size(self.sc.structs)
         raise CError("line %d: constant expected, got %r" % (t.line, t.text))
 

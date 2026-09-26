@@ -15,6 +15,7 @@ int nout;
 char ibuf[MAXIBUF];
 int nibuf;
 int toinit;              /* 1 => ec() writes the __init body instead */
+int unevaluated;         /* nesting of non-evaluated sizeof operands */
 int hasinit;
 
 char symname[MAXSYM * 32];
@@ -1089,7 +1090,7 @@ int unary(void) {
         return 0;
     }
     if (p == P_SIZEOF) {
-        int sz; int nsave;
+        int sz; int nsave; int isave;
         adv();
         if (cur() == tidx("(", 1)) {
             /* the TABLE decides whether `sizeof (` opens a type name */
@@ -1109,11 +1110,14 @@ int unary(void) {
         }
         /* sizeof EXPR: walk it for its type and throw the code away -- the
            operand of sizeof is not evaluated [C99 6.5.3.4p2]. */
-        nsave = nout;
+        nsave = nout; isave = nibuf;
+        unevaluated = unevaluated + 1;
         cursize = 8;                       /* an expression with no symbol */
         curvla = 0;
         unary();
-        nout = nsave;
+        unevaluated = unevaluated - 1;
+        nout = nsave; nibuf = isave;
+        if (toinit && curvla) err_tok(tp, "static initializer requires a constant size");
         sz = cursize;
         if (curvla) { es("  @mem.load r0, [r6-"); en(curvla); es("]\n"); curvla = 0; }
         else { es("  @lit.imm r0, "); en(sz); ec(10); }
@@ -1525,6 +1529,11 @@ int primary(void) {
     }
     if (t == T_ID) {
         scopewant("expr", 4, tp, "lookup", 6);
+        if (toinit && unevaluated == 0) {
+            int ai; ai = sfind(tp);
+            if (ai >= 0) { if (symkind[ai] == 1 || symkind[ai] == 3)
+                err_tok(tp, "static initializer refers to an automatic object"); }
+        }
         { int ui; ui = sfind(tp); if (ui >= 0) { if (kind(tp + 1) == tidx("(", 1)) symused[ui] = 1; } }
         if (kind(tp + 1) == vfind(TOKV, NTOKV, "(", 1)) {
             i = sfind(tp);
@@ -5013,7 +5022,7 @@ int fe_load(char *path, char *t) {
         if (k > 0 && optincdir[k - 1] != 47) { optincdir[k] = 47; k = k + 1; }
         optincdir[k] = 0; optincdl = k;
     }
-    toinit = 0; hasinit = 0;
+    toinit = 0; hasinit = 0; unevaluated = 0;
     fnresume = 0 - 1;
     /* `-` is standard input: the whole of it, in pieces */
     if (path[0] == 45 && path[1] == 0) {
