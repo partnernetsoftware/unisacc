@@ -2371,3 +2371,13 @@ ARM selfcheck is now a gate item with target-specific -S and ELF reference.
 Both ARM (716,458 B) and x86 (671,404 B) selfchecks reran green. ARM ELF table
 1,112 states / 56,816 B; text table 1,014 / 50,134 B. Full ARM suite green.
 No product-source or .com change; no push/release. Full-gate status separately.
+
+
+Post-70f7c9a full local gate --com: 55/55, 115 s, slowest suite 43 s;
+ARM and x86 source-to-ELF selfchecks each 16 s. Actual concurrency was the
+wrapper default 4: JOBS=2 outside term.sh was not forwarded. Do not report 2.
+Use explicit `tests/term.sh env JOBS=2 ...` until wrapper propagation is fixed.
+After this gate, only selfcheck's target-macro fixture was strengthened: the
+six Linux names must each expand to 1 and the other architecture/Apple/Mach/
+Windows names must be absent. Generated E2 and product -E both checked; ARM
+and x86 selfchecks reran green with this fixture. No new full-gate run claimed.
