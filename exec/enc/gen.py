@@ -50,7 +50,9 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR = range(1, 13)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME = range(1, 17)
+from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
+SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
 SCR2 = 3                                     # rbx: emit_x86.SCR2
 SCR = 11                                     # r11: emit_x86.SCR
@@ -188,7 +190,7 @@ def build():
     E.prn()
     procs()
     p = P("START")
-    classes = {"callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
+    classes = {"push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -280,7 +282,8 @@ def build():
     # ARGS.d: at the end of the line: the class decides
     p = P("ARGS.d")
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
-              C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr"}, "DEAD.op", [("RLD", "cls")])
+              C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
+              C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame"}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     # mov d, s
     p = P("E.mov")
@@ -349,6 +352,27 @@ def build():
     byte(p, 0xB6)
     p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "a0"), ("LDI", "mr_b", SCR)).call("MODRM").goto("NEXTL")
     byte(P("E.ret"), 0xC3).goto("NEXTL")
+    # push/pop r: 50+r / 58+r, a REX.B (0x41) first for r8..r15 (emit_x86 push/pop)
+    for nm, base in (("E.push", 0x50), ("E.pop", 0x58)):
+        p = P(nm)
+        p.branch({(1, 2): nm + ".x"}, nm + ".o", [("CMPI", "a0", 8)])
+        byte(P(nm + ".x"), 0x41).goto(nm + ".o")
+        P(nm + ".o").a(("ALUI", "and", "t", "a0", 7), ("ALUI", "add", "t", "t", base), ("OUTW", "t")).goto("NEXTL")
+    byte(P("E.nop"), 0x90).goto("NEXTL")
+    # .frame n: on the tape SP's register, sub (/5) for n >= 0, add (/0) for n < 0, by |n|:
+    # 83 /r ib when |n| <= 127, else 81 /r id (emit_x86 alu_imm) -- hand rules, stated
+    p = P("E.frame")
+    p.a(("LDI", "z0", 0), ("LDI", "fx", 5), ("COPYW", "fn", "a0")).branch({0: "EF.neg"}, "EF.r", [("C64", "a0", "z0")])
+    P("EF.neg").a(("LDI", "fx", 0), ("A64", "sub", "fn", "z0", "a0")).goto("EF.r")
+    p = P("EF.r")
+    p.a(("LDI", "rx_w", 1), ("LDI", "rx_r", 0), ("LDI", "rx_b", SPREG)).call("REX")
+    p.a(("LDI", "z0", 127)).branch({2: "EF.l"}, "EF.s", [("C64", "fn", "z0")])
+    p = P("EF.s")
+    byte(p, 0x83)
+    p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "fx"), ("LDI", "mr_b", SPREG)).call("MODRM").a(("OUTW", "fn")).goto("NEXTL")
+    p = P("EF.l")
+    byte(p, 0x81)
+    p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "fx"), ("LDI", "mr_b", SPREG)).call("MODRM").a(("COPYW", "lb_v", "fn"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("NEXTL")
     # callr r: FF /2 modrm(3, 2, r), a REX.B (0x41, no W) first for r8..r15
     p = P("E.callr")
     p.branch({(1, 2): "ECR.x"}, "ECR.o", [("CMPI", "a0", 8)])
