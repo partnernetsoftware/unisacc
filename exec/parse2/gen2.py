@@ -409,7 +409,7 @@ def build():
     P("ELSZ.s").a(("COPYW", "es", "tb")).ret()
     P("ELSZ.8").a(("LDI", "es", 8)).ret()
     p = P("FN.fn")
-    p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
+    p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0))
     p.call("NEXT").a(("LDI", "pk", 0))
     p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
     P("FN.void").call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid"}, bad("parameter"))
@@ -425,7 +425,8 @@ def build():
     p.call("NEXT").tok({"{": "FN.def", ";": "FN.proto"}, bad("expected {"))
     p = P("FN.proto")     # a prototype: nothing written; its parameters' names are dropped
     p.a(("LDI", "sv", 0)).call("UNWIND").a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 0), ("STX", "v", E.FND, "t")).call("NEXT").goto("UNIT")
-    p = P("FN.def")
+    p = P("FN.def")      # the return label is taken here: a prototype takes none (measured)
+    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
     emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").a(("LDI", "sk2", 0)).label("FN.sp")
     p.branch({0: "FN.sp1"}, "FN.go", [("CMP", "sk2", "pk")])
     q = P("FN.sp1")      # the parameters' spills: store64 [r6-8(k+1)], rk (measured)
