@@ -22,6 +22,7 @@ Windows on arm64 runs the x86-64 PE under its own emulation, which is how
 tests/crossnative.sh already exercises that target.
 """
 import gzip
+import hashlib
 import struct
 
 from .image import pe
@@ -36,38 +37,36 @@ PAD = 40                    # slack the script is padded back up to, so its
 
 
 def _script(table):
-    """`table`: [(os|arch, offset, length)] -- offsets are 1-based, for tail."""
+    """`table`: [(os|arch, offset, length, key)] -- offsets are 1-based, for
+    tail; `key` is 16 hex digits naming the slice's bytes."""
     cases = []
-    for (name, off, ln) in table:
+    for (name, off, ln, key) in table:
         o, a = name.split("|")
         pat = o + a
         if a == "aarch64":
             pat = o + "aarch64|" + o + "arm64"
         # PLAIN decimal: BSD tail reads a leading-zero count as OCTAL, so
         # a zero-padded offset seeks to the wrong place on macOS
-        cases.append('%s) o=%d n=%d;;' % (pat, off, ln))
+        cases.append('%s) o=%d n=%d k=%s;;' % (pat, off, ln, key))
     return ("\n".join([
         "u=$(uname -s)$(uname -m)",
         "case \"$u\" in",
         "  " + "\n  ".join(cases),
         '  *) echo "unisacc: no slice for $u" >&2; exit 1;;',
         "esac",
-        't="${TMPDIR:-/tmp}/unisacc.$$"',
-        # the slices are gzipped; `gzip -dc` is the spelling both Apple gzip
-        # and GNU gzip have had forever (busybox spells it `gunzip -c`)
-        'tail -c +$o "$0" | head -c $n | gzip -dc > "$t" || exit 1',
-        'chmod +x "$t"',
-        # the compiler runs as this script's CHILD: a signal that ends the
-        # script (^C, a watchdog's SIGALRM, a kill) has to end it too, or it
-        # is orphaned -- one span at 97% CPU for nine hours after a bounded
-        # run timed out.  A background job's stdin would be /dev/null, so
-        # stdin is handed over on fd 3.
-        'exec 3<&0',
-        '"$t" "$@" <&3 3<&- & p=$!',
-        'trap \'kill $p 2>/dev/null; rm -f "$t"; exit 143\' HUP INT TERM ALRM',
-        'wait $p; r=$?',
-        'rm -f "$t"',
-        "exit $r",
+        # The slice is unpacked ONCE into a cache named by its content and
+        # exec'd from there.  Unpacking to a fresh temp file on every run
+        # cost ~1.6 s a call on macOS: every new binary gets a first-launch
+        # scan.  A cached file is scanned once.  exec, not a child, so a
+        # signal that ends the script ends the compiler, and stdin is its own.
+        'd="${XDG_CACHE_HOME:-$HOME/.cache}/unisacc"',
+        '[ -n "$HOME" ] && mkdir -p "$d" 2>/dev/null || d="${TMPDIR:-/tmp}"',
+        't="$d/unisacc-$k"',
+        'if [ ! -x "$t" ]; then',
+        '  tail -c +$o "$0" | head -c $n | gzip -dc > "$t.$$" &&'
+        ' chmod +x "$t.$$" && mv -f "$t.$$" "$t" || { rm -f "$t.$$"; exit 1; }',
+        'fi',
+        'exec "$t" "$@"',
     ]) + "\n").encode()
 
 
@@ -104,7 +103,7 @@ def build(compile_target, out):
     # at offset 0 is NOT compressed: Windows executes it in place.
     imgs = {t: gzip.compress(compile_target(t), mtime=0) for (_, t) in SLICES}
     # pass 1: plausible numbers, padded to a fixed length
-    guess = [(name, 1 << 30, len(imgs[t])) for (name, t) in SLICES]
+    guess = [(name, 1 << 30, len(imgs[t]), "0" * 16) for (name, t) in SLICES]
     want = len(_script(guess)) + PAD
     head = compile_target("win/x86_64",
                           stub=_stub(_pad(_script(guess), want)))
@@ -112,7 +111,8 @@ def build(compile_target, out):
     off = base
     table = []
     for (name, t) in SLICES:
-        table.append((name, off + 1, len(imgs[t])))    # tail -c counts from 1
+        table.append((name, off + 1, len(imgs[t]),    # tail -c counts from 1
+                      hashlib.sha256(imgs[t]).hexdigest()[:16]))
         off += (len(imgs[t]) + 15) // 16 * 16
     stub = _stub(_pad(_script(table), want))
     head2 = compile_target("win/x86_64", stub=stub)

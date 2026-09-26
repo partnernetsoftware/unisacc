@@ -191,6 +191,16 @@ int eatstar(void);
 #define HOST_TARGET "osx/x86_64"
 #endif
 #endif
+/* what a plain `unisacc FILE.c` builds: this machine, Windows included */
+#ifdef _WIN32
+#ifdef __aarch64__
+#define DEFAULT_TARGET "win/arm64"
+#else
+#define DEFAULT_TARGET "win/x86_64"
+#endif
+#else
+#define DEFAULT_TARGET HOST_TARGET
+#endif
 
 int bk_build(char *t, int n, char *target);
 int bkfd = 1;    /* where the image goes: -o, else stdout.  DEFINED here,

@@ -4,7 +4,7 @@ set -u
 UA=${UA:-/tmp/ua_ref}
 pass=0; fail=0
 for f in "$@"; do
-    a=$($UA "$f" | sed '$d')
+    a=$($UA -dump-tokens "$f" | sed '$d')
     b=$(python3 - "$f" <<'PY'
 import sys
 sys.path.insert(0, '.')

@@ -137,6 +137,16 @@ got=$( (cd "$T" && bound 30 "$UA_RUN" --version 2>&1) )
 case "$got" in "unisacc "[0-9]*) got="a version";; esac
 say "--version" "a version" "$got"
 
+# No mode at all: what `cc FILE.c` does -- a.out for this machine, not the
+# lexer's token dump (which is -dump-tokens now)
+printf '#include <stdio.h>\nint main(void){puts("plain build");return 0;}\n' > "$T/plain.c"
+rm -f "$T/a.out"
+(cd "$T" && bound 60 "$UA_RUN" plain.c >/dev/null 2>&1)
+say "FILE.c alone writes a.out" "plain build" "$( (cd "$T" && bound 10 ./a.out) 2>&1)"
+(cd "$T" && bound 60 "$UA_RUN" plain.c -o plainx >/dev/null 2>&1)
+say "FILE.c -o names it" "plain build" "$( (cd "$T" && bound 10 ./plainx) 2>&1)"
+say "-dump-tokens" "6 tokens" "$( (cd "$T" && printf 'int x = 1;\n' > tk.c && bound 20 "$UA_RUN" -dump-tokens tk.c) | tail -1)"
+
 echo
 echo "cli  ok $ok   wrong $bad   (from a scratch dir, no repo in sight)"
 # A suite that checked nothing is not green: `closure.sh` with no

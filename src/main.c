@@ -12,11 +12,11 @@
    the first argument that is not a flag is the input, and for `-run` what
    follows the input belongs to the PROGRAM. */
 int main(void) {
-    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb;
+    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok;
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
-    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0;
+    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0;
     ninput = 0;
     i = 1;
     while (i < __argc()) {
@@ -61,6 +61,7 @@ int main(void) {
                     if (a[2]) optu[noptu] = a + 2; else { i = i + 1; optu[noptu] = __argv(i); }
                     noptu = noptu + 1;
                 }
+            } else { if (strsame(a, "-dump-tokens")) { dumptok = 1;   /* the lexer's instrument */
             } else { if (strsame(a, "-include")) {         /* -include FILE */
                 i = i + 1;
                 if (nopti < 8) { opti[nopti] = __argv(i); nopti = nopti + 1; }
@@ -93,7 +94,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } } }
+            } else { printf("unisacc: unknown option %s\n", a); return 1; } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -111,7 +112,7 @@ int main(void) {
     if (fi == 0) {
         model_dims(); setup();
         printf("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
-               " FILE.c [FILE.c...] [-S | -b os/arch] [-o out]"
+               " FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens] [-o out]"
                " [-- args...]\n"
                "  -S  write the tape, this compiler's assembly-level IR"
                " (-c is a synonym: there are no object files)\n");
@@ -147,6 +148,13 @@ int main(void) {
         e = bk_run(out, nout, n, (long)runargv);
         entry = (int (*)(long, long))e;
         return entry(0, 0);
+    }
+    /* No mode given: what `cc FILE.c` does -- an executable for this machine,
+       named a.out unless -o says otherwise.  The token dump used to be the
+       default here and printed the lexer's view instead. */
+    if (dump == 0 && dumptok == 0) {
+        dump = 2; t = DEFAULT_TARGET;
+        if (outpath == 0) outpath = "a.out";
     }
     if (dump) {
         int ofd; int r;

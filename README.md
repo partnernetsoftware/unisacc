@@ -20,6 +20,7 @@ as a PE; a Unix shell runs it as a script that picks the slice for the
 machine). The C headers it needs travel inside it.
 
 ```bash
+./unisacc.com hello.c                       # like cc: a.out for this machine
 ./unisacc.com -run hello.c [args]          # compile and run in memory, nothing on disk
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target
 ./unisacc.com -O2 a.c b.c -b lnx/x86_64 -o prog
