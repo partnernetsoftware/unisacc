@@ -31,12 +31,15 @@ def main():
         for cmd in cmds:
             r=run(cmd+[str(inp)]); assert r.returncode==0 and r.stdout==want,(cmd,r.returncode,r.stderr,[(i,a,b) for i,(a,b) in enumerate(zip(r.stdout,want)) if a!=b][:12],len(r.stdout),len(want))
         print('ARM64 reference:',len(lines),'instructions,',len(want),'bytes; both executors equal')
-        for bad in ['imm x0, 18446744073709551616','imm x0, -9223372036854775809','imm x0, -','mov x31, x0','mov x0, 1','add64 x0, x1','ret x0','mov x0, x1,','jump L','mov x0, x1 role=a','callr x17']:
+        for bad in ['imm x0, 18446744073709551616','imm x0, -9223372036854775809','imm x0, -','mov x31, x0','mov x0, 1','add64 x0, x1','ret x0','mov x0, x1,','jump L','mov x0, x1 role=a','callr x17','callr x7']:
             inp.write_text(bad+'\n')
             for cmd in cmds:
                 r=run(cmd+[str(inp)]); assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(bad,r.returncode,r.stderr)
-        print('ARM64 declared input boundary: 11 rejects on both executors')
-        if sys.platform!='darwin' or platform.machine()!='arm64':
+        print('ARM64 declared input boundary: 12 rejects on both executors')
+        native_host = sys.platform=='darwin' and platform.machine()=='arm64'
+        from armmemcheck import check
+        check(sys.argv[1:],native_host)
+        if not native_host:
             print('ARM64 native assembler/execution: SKIPPED (needs macOS arm64)'); return
         # Separate assembler reference, never calls the Python encoder.
         asm=['.text']; decl=[]; checks=[]

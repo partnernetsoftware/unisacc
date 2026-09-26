@@ -2224,3 +2224,19 @@ expected, and the tape call/return bytes match independent expectations.
 Added exec-arm to the gate; the previous 51-suite run predates this entry, so
 no new full-gate total is claimed. Memory, labels, metadata, FP, image formats
 and integration with ARM lowering remain to be implemented.
+
+ARM64 memory follow-up: load64/store64 and .ld/.st support widths 1/2/4/8,
+scaled imm12, signed imm9 and MOVIMM/ADD-or-SUB long-address fallback. Opcode
+constants come from emit_arm's LDS/STS/LDU/STU declarations; selection and
+packing are still hand generator rules. Fallback rejects a clobbered x16 base
+or store source; x16 as load destination is allowed. callr now also rejects
+x7, which its software push changes. regmap maps tape r7 to x7 (SP), not an
+ordinary value register; x17 has no regmap row.
+
+Frozen gate --com: 52/52, JOBS=2, 191 s, max suite 40 s, macOS arm64/Rosetta.
+ARM memory initially checked 92 instructions; afterwards a test-only addition
+covers -2^63 offsets for all widths. Targeted rerun: 100 instructions / 768 B
+match on both executors, four memory-domain rejects, 64 native load/store
+cases match C memcpy and signed values. The earlier 550 native arithmetic and
+constant checks still pass. 313 states, 13,213 B table; no new executor action,
+no product source change, no .com rebuild or publication needed for this slice.
