@@ -11,6 +11,8 @@
  *   exec delta.tbl [input]      run once (input from file, else stdin)
  *   exec -r N delta.tbl input   run N times (timing), output once
  *   exec -dump delta.tbl        print the dense delta on its whole domain
+ *   exec -fdump delta.tbl       the same, factored: per state only the components
+ *                               it reads (-1 = not read, cannot change the entry)
  *
  * Accept: o on stdout, exit 0.  Reject(k): "reject k at i" on stderr,
  * nothing on stdout, exit 1.  Bad table / usage: exit 2.
@@ -23,18 +25,25 @@ typedef unsigned int u32;
 /* All storage is static and fixed: no allocator.  Running out of any of it
  * is exit 3 ("exhausted"), never a reject -- the abstract machine's stack,
  * output and W are unbounded, this executor's are not. */
-#define MAXD (1 << 18)          /* dense delta entries: |Q|*|R|*257*(|G|+1) */
+#define MAXD (1 << 20)          /* dense delta entries, factored per state (below) */
+#define MAXQ (1 << 12)          /* states */
 #define MAXP (1 << 16)          /* action pool ints */
-#define MAXX (1 << 18)          /* input bytes, table bytes */
+#define MAXX (1 << 21)          /* input bytes, table bytes */
 #define MAXS (1 << 16)          /* stack depth */
-#define MAXO (1 << 18)          /* output bytes */
+#define MAXO (1 << 23)          /* output bytes */
 #define MAXW (1 << 12)          /* working-store keys (power of two) */
 
 static int NQ, NR, NG, Q0;
 static int dense[MAXD];         /* obs -> offset into pool */
+/* The dense map is factored per state: state q is indexed only by the
+ * observation components some row for q names (bit 1 r, 2 b, 4 t); a
+ * component no row names cannot change q's entry, so leaving it out loses
+ * nothing.  qb[q] is q's first cell, qr/qbd/qt its dimensions (1 = unread). */
+static int qm[MAXQ], qb[MAXQ], qr[MAXQ], qbd[MAXQ], qt[MAXQ];
 static int pool[MAXP]; static int npool;
 /* arity of each action code, 0..14 */
-static const int arity[15] = {0,1,0,1,0,1,0,1,2,1,4,2,2,2,1};
+#define NACT 19
+static const int arity[NACT] = {0,1,0,1,0,1,0,1,2,1,4,2,2,2,1,1,1,2,1};
 
 static unsigned char x[MAXX]; static int nx;
 static int stk[MAXS]; static int sp;
@@ -76,37 +85,58 @@ static int entry(void) {
     put(tok()); if (pool[at] < 0 || pool[at] >= NQ) die("table: bad q'");
     n = tok(); put(n);
     for (k = 0; k < n; k++) {
-        a = tok(); if (a < 0 || a > 14) die("table: bad action");
+        a = tok(); if (a < 0 || a >= NACT) die("table: bad action");
         put(a);
         for (j = 0; j < arity[a]; j++) put(tok());
         if (a == 3 && (pool[npool - 1] < 0 || pool[npool - 1] >= NG)) die("table: bad push");
         if (a == 7 && (pool[npool - 1] < 0 || pool[npool - 1] >= NR)) die("table: bad r");
+        if (a == 10 && (pool[npool - 4] < 0 || pool[npool - 4] > 10)) die("table: bad alu op");
     }
     return at;
 }
 static int lo(int w, int m) { return w < 0 ? 0 : w; }
 static int hi(int w, int m) { return w < 0 ? m : w + 1; }
 
+static int cell(int q, int r, int b, int t) {
+    int m = qm[q];
+    return qb[q] + (((m & 1 ? r : 0) * qbd[q] + (m & 2 ? b : 0)) * qt[q] + (m & 4 ? t : 0));
+}
+
 static void load(const char *path) {
-    FILE *f = fopen(path, "rb"); int d, nd, rows, k, q, r, b, t, e, a[4], m[4];
+    FILE *f = fopen(path, "rb"); int d, nd, rows, k, q, r, b, t, e, a[4], m[4], pass, j;
     if (!f) die("table: cannot open");
-    tn = slurp(f, tb); fclose(f); tp = 0;
-    NQ = tok(); NR = tok(); NG = tok(); Q0 = tok();
-    if (NQ < 1 || NR < 3 || NG < 0 || Q0 < 0 || Q0 >= NQ) die("table: bad header");
-    nd = NQ * NR * 257 * (NG + 1);
-    if (nd > MAXD) full();
-    d = entry();
-    for (k = 0; k < nd; k++) dense[k] = d;
-    rows = tok();
-    m[0] = NQ; m[1] = NR; m[2] = 257; m[3] = NG + 1;
-    while (rows-- > 0) {
-        for (k = 0; k < 4; k++) { a[k] = tok(); if (a[k] < -1 || a[k] >= m[k]) die("table: bad obs"); }
-        e = entry();
-        for (q = lo(a[0], 0); q < hi(a[0], m[0]); q++)
-        for (r = lo(a[1], 0); r < hi(a[1], m[1]); r++)
-        for (b = lo(a[2], 0); b < hi(a[2], m[2]); b++)
-        for (t = lo(a[3], 0); t < hi(a[3], m[3]); t++)
-            dense[((q * NR + r) * 257 + b) * (NG + 1) + t] = e;
+    tn = slurp(f, tb); fclose(f);
+    for (pass = 0; pass < 2; pass++) {
+        /* pass 0 learns which components each state's rows name; pass 1 fills */
+        tp = 0; npool = 0;
+        NQ = tok(); NR = tok(); NG = tok(); Q0 = tok();
+        if (NQ < 1 || NQ > MAXQ || NR < 3 || NG < 0 || Q0 < 0 || Q0 >= NQ) die("table: bad header");
+        m[0] = NQ; m[1] = NR; m[2] = 257; m[3] = NG + 1;
+        d = entry();
+        if (pass == 1) {
+            nd = 0;
+            for (q = 0; q < NQ; q++) {
+                qr[q] = qm[q] & 1 ? NR : 1; qbd[q] = qm[q] & 2 ? 257 : 1; qt[q] = qm[q] & 4 ? NG + 1 : 1;
+                qb[q] = nd; nd += qr[q] * qbd[q] * qt[q];
+                if (nd > MAXD) full();
+            }
+            for (k = 0; k < nd; k++) dense[k] = d;
+        } else for (q = 0; q < NQ; q++) qm[q] = 0;
+        rows = tok();
+        while (rows-- > 0) {
+            for (k = 0; k < 4; k++) { a[k] = tok(); if (a[k] < -1 || a[k] >= m[k]) die("table: bad obs"); }
+            e = entry();
+            if (pass == 0) {
+                j = (a[1] >= 0 ? 1 : 0) | (a[2] >= 0 ? 2 : 0) | (a[3] >= 0 ? 4 : 0);
+                for (q = lo(a[0], 0); q < hi(a[0], m[0]); q++) qm[q] |= j;
+                continue;
+            }
+            for (q = lo(a[0], 0); q < hi(a[0], m[0]); q++)
+            for (r = lo(a[1], 0); r < hi(a[1], qr[q]); r++)
+            for (b = lo(a[2], 0); b < hi(a[2], qbd[q]); b++)
+            for (t = lo(a[3], 0); t < hi(a[3], qt[q]); t++)
+                dense[qb[q] + (r * qbd[q] + b) * qt[q] + t] = e;
+        }
     }
 }
 
@@ -133,6 +163,7 @@ static u32 alu(int op, u32 a, u32 b) {
     case 4: return b ? a % b : a;     case 5: return a & b;
     case 6: return a | b;             case 7: return a ^ b;
     case 8: return a << (b & 31);     case 9: return a >> (b & 31);
+    case 10: return a < b;
     }
     return 0;
 }
@@ -145,7 +176,7 @@ static int run(int *at) {
     while (h == -2) {
         b = i < nx ? x[i] : 256;
         t = sp ? stk[sp - 1] : NG;
-        p = pool + dense[((q * NR + r) * 257 + b) * (NG + 1) + t];
+        p = pool + dense[cell(q, r, b, t)];
         q = p[0]; n = p[1]; p += 2; r = 0;
         while (n-- > 0 && h == -2) {
             a = *p++;
@@ -167,6 +198,14 @@ static int run(int *at) {
             case 12: wset((u32)p[0], wget(wget((u32)p[1]))); break;  /* LOAD d k */
             case 13: wset(wget((u32)p[0]), wget((u32)p[1])); break;  /* STORE k v */
             case 14: emit((int)(wget((u32)p[0]) & 255)); break;      /* OUTW k */
+            case 15: wset((u32)p[0], (u32)i); break;                 /* GETI k */
+            case 16: { u32 v = wget((u32)p[0]);                      /* SETI k */
+                       i = v > (u32)nx ? nx : (int)v; } break;
+            case 17: { u32 u = wget((u32)p[0]), v = wget((u32)p[1]); /* SPAN a b */
+                       if (v > (u32)nx) v = (u32)nx;
+                       while (u < v) emit(x[u++]); } break;
+            case 18: { u32 v = wget((u32)p[0]);                      /* SETRW k */
+                       if (v >= (u32)NR) h = 252; else r = (int)v; } break;
             }
             p += arity[a];
         }
@@ -178,11 +217,14 @@ static int run(int *at) {
 int main(int argc, char **argv) {
     int reps = 1, k, at, q, r, b, t, *p, n, j;
     FILE *f;
-    if (argc >= 3 && argv[1][0] == '-' && argv[1][1] == 'd') {
+    if (argc >= 3 && argv[1][0] == '-' && (argv[1][1] == 'd' || argv[1][1] == 'f')) {
+        int fa = argv[1][1] == 'f';     /* -fdump: only the components q reads; -1 = unread */
         load(argv[2]);
-        for (q = 0; q < NQ; q++) for (r = 0; r < NR; r++) for (b = 0; b < 257; b++) for (t = 0; t <= NG; t++) {
-            p = pool + dense[((q * NR + r) * 257 + b) * (NG + 1) + t];
-            printf("%d %d %d %d %d %d", q, r, b, t, p[0], p[1]);
+        for (q = 0; q < NQ; q++) for (r = 0; r < (fa ? qr[q] : NR); r++)
+        for (b = 0; b < (fa ? qbd[q] : 257); b++) for (t = 0; t < (fa ? qt[q] : NG + 1); t++) {
+            p = pool + dense[cell(q, r, b, t)];
+            if (fa) printf("%d %d %d %d %d %d", q, qm[q] & 1 ? r : -1, qm[q] & 2 ? b : -1, qm[q] & 4 ? t : -1, p[0], p[1]);
+            else printf("%d %d %d %d %d %d", q, r, b, t, p[0], p[1]);
             n = p[1]; p += 2;
             while (n-- > 0) { printf(" %d", *p); for (j = 0; j < arity[*p]; j++) printf(" %d", p[1 + j]); p += 1 + arity[*p]; }
             printf("\n");

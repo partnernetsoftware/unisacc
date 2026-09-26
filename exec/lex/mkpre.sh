@@ -7,8 +7,10 @@
 #   UA_LEXREJ=p     render reject position p (message UA_LEXMSG, default
 #                   "unexpected character") with the reference's own
 #                   err_at (the file:line:col map belongs to the pp layer), exit 1
+#   UA_LEXREP=N     run lex() N times on the same buffer before the normal
+#                   path (timing: wall(N) - wall(1) is N-1 lex() calls)
 set -e
 IN=${1:-/tmp/ua_ref.c}; OUT=${2:-/tmp/ua_pre}
-perl -0pe 's/(    expandsrc\(\);\n)(    if \(lex\(\) < 0\) return 1;\n    i = 0;\n    while \(i < ntok\))/$1    { char *e_; e_ = getenv("UA_LEXIN"); if (e_) { int f_; f_ = open(e_, O_WRONLY|O_CREAT|O_TRUNC, 0644); write(f_, src, nsrc); close(f_); return 0; }\n      e_ = getenv("UA_LEXREJ"); if (e_) { char *m_; m_ = getenv("UA_LEXMSG"); err_at(atol(e_), m_ ? m_ : "unexpected character"); return 1; } }\n$2/' "$IN" > "$OUT.c"
+perl -0pe 's/(    expandsrc\(\);\n)(    if \(lex\(\) < 0\) return 1;\n    i = 0;\n    while \(i < ntok\))/$1    { char *e_; e_ = getenv("UA_LEXIN"); if (e_) { int f_; f_ = open(e_, O_WRONLY|O_CREAT|O_TRUNC, 0644); write(f_, src, nsrc); close(f_); return 0; }\n      e_ = getenv("UA_LEXREP"); if (e_) { int n_; n_ = atoi(e_); while (n_-- > 1) lex(); }\n      e_ = getenv("UA_LEXREJ"); if (e_) { char *m_; m_ = getenv("UA_LEXMSG"); err_at(atol(e_), m_ ? m_ : "unexpected character"); return 1; } }\n$2/' "$IN" > "$OUT.c"
 grep -q UA_LEXIN "$OUT.c"
-cc -w -std=c99 -O1 -o "$OUT" "$OUT.c"
+cc -w -std=c99 ${CFLAGS:--O2} -o "$OUT" "$OUT.c"

@@ -188,3 +188,15 @@ ACCEPT / REJECT k  k ∈ {unexpected character, stray char, unreachable}
 `unisa/tsvgold.py` 读取；`gen.py` 由其推导，并逐字节/逐词断言与
 `src/front_pp.c` 的 `charclass()`/`lex()` 及 `src/front_parse.c` 的 `OPCH` 一致。
 生成的 δ 与改动前逐字节相同。数的扫描规则仍是转写。
+
+**2026-09-26 更新（在 C 执行器上运行）**：`exec/exec.c`（E0 执行器）加了 4 个通用动作
+（`GETI`/`SETI`/`SPAN a b`/`SETRW`）与 ALU 的 `ltu`，稠密映射按“每个状态只按其行所涉及的分量
+索引”分解存放（字面观测积 20,662,800 格放不进 `MAXD`）。`exec/lex/tbl.py` 把 13 个 E1 动作
+逐个降为这些通用动作（`DIVMOD10` = 7 个 ALU/LDI/SETRW，`INC`、`COPYW` = ALU）。
+T1：两种构建载入的映射与 δ 在 85,123 个观测上全等。对照（执行器结果 = `sim.py` = 参考）：
+lexdiff 103/103、探针 15/15、`unisacc.c` 1/1（cc 与 unisacc 两种构建），语料库 243/243
+（unisacc 构建；6 个 pre-lex 同前）。量（`exec/lex/ledger.sh`）：`__text` cc -Os 4,748 B、
+unisacc 100,592 B；表（文本）353,860 B；`unisacc.c` 的词法输入 1,016,623 B 上，
+每次运行中位数（5 次，(N 次 − 1 次)/(N−1)）：执行器 cc 9.9 ms（102.6 MB/s）、
+unisacc 构建 45.7 ms（22.3 MB/s），参考 `lex()` 2.66 ms（382.4 MB/s）。计时边界：执行器
+= `run()`（步进 + 在内存中生成 -dump-tokens 文本），参考 = `lex()`（记号入数组，不打印）。

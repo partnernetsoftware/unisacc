@@ -35,6 +35,14 @@ Storage is static and bounded (`MAX*` in exec.c); running out is exit 3
 | 12 | LOAD | d k | W[d] := W[W[k]] |
 | 13 | STORE | k v | W[W[k]] := W[v] |
 | 14 | OUTW | k | append W[k] & 255 |
+| 15 | GETI | k | W[k] := i |
+| 16 | SETI | k | i := min(W[k], \|x\|) |
+| 17 | SPAN | a b | append x[W[a] .. min(W[b], \|x\|)) (nothing if W[a] ≥ that) |
+| 18 | SETRW | k | r := W[k]; W[k] ≥ NR: reject(252) |
+
+ALU op 10 is ltu: W[a] < W[b] (unsigned) as 0/1.  Codes 15-18 and ALU op
+10 were added for E1 (exec/lex/tbl.py lowers the E1 lexer delta's actions to
+these); like the rest they name positions, bytes and integers, no language.
 
 W is a dictionary u32 → u32, missing keys read 0. NR ≥ 3 (CMP's codes).
 
@@ -48,7 +56,10 @@ W is a dictionary u32 → u32, missing keys read 0. NR ≥ 3 (CMP's codes).
 
 Every observation starts at the default entry; rows are applied in order,
 later rows overriding earlier ones. The loader expands this to the dense map
-over the whole domain NQ×NR×257×(NG+1); `exec -dump` prints that map, and
+over the whole domain NQ×NR×257×(NG+1), stored factored: state q is indexed
+only by the components (r, b, t) that some row for q names -- a component no
+row names cannot change q's entries.  `exec -fdump` prints the factored cells
+(-1 = unread); `exec -dump` prints the whole domain, and
 `toy/gen.py check` compares it line for line with `delta_ref` (T1 for the toy).
 
 ## Toy
@@ -61,3 +72,9 @@ hand-written recursive-descent reference.
 
 Not done in E0: the table is not built as an integer net through the
 `unisa build-weights` route; T1 here is the enumeration check only.
+
+## E1: the lexer delta on this executor
+
+    exec/lex/run.sh gen; exec/lex/run.sh xbuild          # table, cc + unisacc builds, T1
+    E1EXEC=/tmp/e1x/exec_ua:/tmp/e1x/e1.tbl exec/lex/run.sh lexdiff   # (probes, self, corpus.*)
+    exec/lex/ledger.sh                                   # __text, table bytes, speed
