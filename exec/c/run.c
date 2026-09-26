@@ -190,6 +190,10 @@ static unsigned char *PFILE, *PB; static int PN, PM, PS;
 static int *POFF, *PLEN; static Stage *STAGES;
 typedef struct { int name, n, data, len; } Resource;
 static Resource *RES; static int NR;
+/* Borrowed process inputs override carried resources by exact byte key.
+   The caller keeps these immutable spans alive for the whole route. */
+typedef struct { const unsigned char *name; int n; const unsigned char *data; int len; } ResourceInput;
+static ResourceInput *RI; static int NRI;
 static char *pword(void) {
     lskip(); int first = LP;
     while (LP < LN && LB[LP] > 32) {
@@ -366,6 +370,9 @@ static const char *INCDIR = 0;   /* the 4th argument; SBFIND of a bundled header
 static int sbfind(const unsigned char *p, int n) {
     for (int j = 0; j < NFC; j++) if (FC[j].n == n && !memcmp(FC[j].p, p, n)) return FC[j].id;
     char path[4096]; int id = 0;
+    for (int j = 0; j < NRI; j++) if (RI[j].n == n && !memcmp(RI[j].name,p,n)) {
+        id = blob_add(RI[j].data,RI[j].len); goto cached;
+    }
     for (int j = 0; j < NR; j++) if (RES[j].n == n && !memcmp(PB+RES[j].name, p, n)) {
         id = blob_add(PB+RES[j].data, RES[j].len); goto cached;
     }

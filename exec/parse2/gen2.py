@@ -1294,7 +1294,22 @@ def build():
     # For a general operand, reuse unary/expression parsing and discard its
     # emitted instructions. Save marks on the value stack for nested sizeof.
     # The existing named-array route above retains full dimension sizes.
-    P("SZ.expr").a(("JUMP","szpos"),("OLEN","szmark")).vpush("szmark","si_active").a(("LDI","si_active",0)).call("NEXT").call("UNARY").vpop("szmark","si_active").a(("OCUT","szdiscard","szmark")).branch({1:"SZ.exprsize"},bad("sizeof non-scalar expression"),[("CMPI","vt",0)])
+    # Preserve a literal array's decoded extent under sizeof. Recognise only
+    # the complete unary operand (with redundant parentheses); other syntax
+    # returns to the common expression/type path without changing pool ids.
+    P("SZ.expr").a(("JUMP","szpos"),("LDI","szlp",0)).call("NEXT").goto("SZ.literal0")
+    P("SZ.literal0").tok({"(":"SZ.literalpar",E.TK_STR:"SZ.literal"},"SZ.general")
+    P("SZ.literalpar").a(("ALUI","add","szlp","szlp",1)).call("NEXT").goto("SZ.literal0")
+    P("SZ.literal").a(("LDI","szlit",1)).goto("SZ.lwalk")
+    strwalk("SZ.lwalk","SZ.lbyte","SZ.lend")
+    P("SZ.lbyte").a(("ALUI","add","szlit","szlit",1)).goto("SZ.lwalk.w")
+    P("SZ.lend").call("NEXT").goto("SZ.lclose")
+    P("SZ.lclose").branch({1:"SZ.ltail"},"SZ.lparen",[("CMPI","szlp",0)])
+    P("SZ.lparen").tok({")":"SZ.lpop"},"SZ.general")
+    P("SZ.lpop").a(("ALUI","sub","szlp","szlp",1)).call("NEXT").goto("SZ.lclose")
+    P("SZ.ltail").tok({k:"SZ.general" for k in ("[","(",".","->","++","--")},"SZ.lvalue")
+    P("SZ.lvalue").a(("COPYW","sz","szlit"),("ALUI","add","sk","sk",1),("ALUI","add","lab","lab",1)).goto("SZ.exprout")
+    P("SZ.general").a(("JUMP","szpos"),("OLEN","szmark")).vpush("szmark","si_active").a(("LDI","si_active",0)).call("NEXT").call("UNARY").vpop("szmark","si_active").a(("OCUT","szdiscard","szmark")).branch({1:"SZ.exprsize"},bad("sizeof non-scalar expression"),[("CMPI","vt",0)])
     P("SZ.exprsize").a(("COPYW","td","vt"),("COPYW","tb","vb")).call("ELSZ").a(("COPYW","sz","es")).goto("SZ.exprout")
     P("SZ.exprout").o("  imm r0, ").num("sz").o("\n").a(("LDI","vt",0),("LDI","vb",UNS + 8)).ret()
     g.on("DEAD.szx", range(257), "DEAD", E.rej("not covered: sizeof operand"), "r")

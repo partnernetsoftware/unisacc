@@ -24,7 +24,7 @@ autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
 its trigger names read from include/*.h (E2_AUTOINC=0 builds without it).
 Also not modelled: #pragma push_macro/pop_macro
 (rejected as not covered when live and spelled exactly; the reference's
-prefix match `push_macroX` is not reproduced), -D/-U/-I/-include, the
+prefix match `push_macroX` is not reproduced), the
 file:line:col rendering of diagnostics (the reject kind is compared, not the
 text).
 
@@ -592,6 +592,45 @@ def build_hx(g, NC):
     g.els("HSC", "HS1", one)
 
 
+def build_cli(g, NC):
+    """Raw NUL-separated CLI values from named byte resources. All language
+    decisions live here: -include source prefixes, MDEF bodies, and -U masks.
+    No CLI directive text is inserted for -D/-U, so source positions stay put.
+    """
+    g.els("CLI.INC", "CLI.INC.have", sbconst("\0cli/includes") + [("SBFIND", "CLI_B"), ("RLD", "CLI_B")])
+    g.r("CLI.INC.have", {0: ("P0S", []), tuple(range(1,257)): ("CLI.INC.next", [("INPUSH", "CLI_B")])})
+    g.on("CLI.INC.next", [EOF], "P0S", [("INPOP",), ("LDI", "CLI_Z", 0), ("XLEN", "CLI_E"),
+                                         ("SPAN2", "CLI_Z", "CLI_E"), ("SWAP",)])
+    g.els("CLI.INC.next", "CLI.INC.path", [("OUT", c) for c in b'#include "'])
+    g.on("CLI.INC.path", [0], "CLI.INC.next", [("ADV",), ("OUT", 34), ("OUT", 10)])
+    g.on("CLI.INC.path", [EOF], "DEAD", NC("unterminated CLI include"))
+    g.els("CLI.INC.path", "CLI.INC.path", [("COPY",), ("ADV",)])
+
+    for what,key,done in [('D','defines','P3PD0'),('U','undefines','P3L0')]:
+        q='CLI.'+what
+        g.els(q, q+'.have', sbconst('\0cli/'+key)+[("SBFIND","CLI_B"),("RLD","CLI_B")])
+        g.r(q+'.have', {0:(done,[]),tuple(range(1,257)):(q+'.next',[("INPUSH","CLI_B")])})
+        g.on(q+'.next',[EOF],done,[("INPOP",)])
+        g.on(q+'.next',AL,q+'.name',[("MARK","CLI_S"),("ADV",)])
+        g.els(q+'.next','DEAD',NC('invalid CLI macro name'))
+        g.on(q+'.name',ID,q+'.name',[("ADV",)])
+        g.els(q+'.name',q+'.end',[("MARK","CLI_E"),("INTERN","NID","CLI_S","CLI_E")])
+        if what=='D':
+            sub,pu=g.call('MDEF',q+'.store')
+            g.on(q+'.end',[0],sub,sbconst('1')+[("SBSAVE","CLI_BODY")]+pu)
+            g.on(q+'.end',[61],q+'.body',[("ADV",),("MARK","CLI_S")])
+            g.els(q+'.end','DEAD',NC('invalid CLI macro name'))
+            g.on(q+'.body',[0],sub,[("MARK","CLI_E"),("BLOBSAVE","CLI_BODY","CLI_S","CLI_E")]+pu)
+            g.on(q+'.body',[EOF],'DEAD',NC('unterminated CLI macro body'))
+            g.els(q+'.body',q+'.body',[("ADV",)])
+            g.els(q+'.store',q+'.next',[("STX","EA",F_BODY,"CLI_BODY"),("ADV",)])
+        else:
+            g.on(q+'.end',[0],q+'.found',[("ALUI","add","a","NID",NEWB),("LDX","t","a",0),
+                                          ("ALUI","sub","M","t",1),("CMPI","M",0)])
+            g.els(q+'.end','DEAD',NC('invalid CLI undefine'))
+            g.r(q+'.found',{0:(q+'.next',[("ADV",)]),(1,2):(q+'.next',ea('EA','M')+[("LDI","t",0),("STX","EA",F_TO,"t"),("ADV",)])})
+
+
 def build(target="lnx/x86_64"):
     if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"):
         raise ValueError("unsupported preprocessor target: "+target)
@@ -616,7 +655,8 @@ def build(target="lnx/x86_64"):
         init += sbconst(w) + [("SBINTERN", nm)]
     init += sbconst("printf") + [("SBINTERN", "ID_PRINTF")]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
-    g.els("START", "P0S", init)
+    g.els("START", "CLI.INC", init)
+    build_cli(g, NC)
 
     # ---- P0: shebang, then splice -----------------------------------------
     g.on("P0S", [35], "P0S1", [("MARK", "A"), ("ADV",)])
@@ -698,10 +738,10 @@ def build(target="lnx/x86_64"):
     g.els("P3START", "P3S2", [("RLD", "RUN")])
     # predef(): object-like macros with body "1" for the selected target
     chain = "P3PD0"
-    g.r("P3S2", {0: (chain, [("LDI", "RUN", 1), ("LDI", "CURSEG", 0), ("SETOT", "CURSEG")]),
+    g.r("P3S2", {0: ("CLI.D", [("LDI", "RUN", 1), ("LDI", "CURSEG", 0), ("SETOT", "CURSEG")]),
                  1: ("P3L0", [("LDI", "Z", 0), ("SPAN2", "Z", "RESUME"), ("JUMP", "RESUME")])})
     for k, nm in enumerate(predef):
-        nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "P3L0"
+        nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
         sub, pu = g.call("MDEF", "P3PDR%d" % k)
         g.els("P3PD%d" % k, sub, sbconst(nm) + [("SBINTERN", "NID")] + pu)
         g.els("P3PDR%d" % k, nxt, sbconst("1") + [("SBSAVE", "t"), ("STX", "EA", F_BODY, "t")])
@@ -885,12 +925,15 @@ def build(target="lnx/x86_64"):
     g.els("INC2", "INC2Q", [("RLD", "IQ")])
     # "x.h": the source file's directory first (dir = srcpath up to its last '/')
     g.r("INC2Q", {34: ("SRCD", [("LDI", "DL", 0), ("LDI", "SRCB", 1), ("INPUSH", "SRCB")]),
-                  60: ("INC5", trydisk)})
+                  60: ("CLI.IP", [])})
     g.on("SRCD", [47], "SRCD", [("ADV",), ("MARK", "DL")])
     g.on("SRCD", [EOF], "INC4", [("LDI", "Z", 0), ("SBCLR",), ("SBSPAN", "Z", "DL"), ("INPOP",),
                                  ("SBSPAN", "NM", "NME"), ("SBFIND", "HB"), ("CMPI", "HB", 0)])
     g.els("SRCD", "SRCD", [("ADV",)])
-    g.r("INC4", {1: ("INC5", trydisk), (0, 2): ("INCOK", [])})
+    g.r("INC4", {1: ("CLI.IP", []), (0, 2): ("INCOK", [])})
+    g.els("CLI.IP", "CLI.IP.have", sbconst("\0cli/include-dir")+[("SBFIND","CLI_DIR"),("BLEN","CLI_LEN","CLI_DIR"),("CMPI","CLI_LEN",0)])
+    g.r("CLI.IP.have", {1:("INC5",trydisk),(0,2):("CLI.IP.try",[("SBCLR",),("SBBLOB","CLI_DIR"),("SBOUT",47),("SBSPAN","NM","NME"),("SBFIND","HB"),("CMPI","HB",0)])})
+    g.r("CLI.IP.try", {1:("INC5",trydisk),(0,2):("INCOK",[])})
     g.r("INC5", {1: ("INC6", sbconst("\0hdr/") + [("SBSPAN", "NM", "NME"), ("SBFIND", "HB"),
                                                   ("CMPI", "HB", 0)]),
                  (0, 2): ("INCOK", [])})
@@ -947,8 +990,8 @@ def build(target="lnx/x86_64"):
              ("LDI", "BDEP", -1), ("LDI", "PRE", 0), ("LDI", "EDEP", 0),
              ("LDI", "SEPB", 32), ("LDI", "SEPB0", 32)]
     g.r("ERM3", {2: ("ERFN", []), 1: ("ERFC", [("LDI", "NLC", 0)]),
-                 0: ("ERH", [("LDI", "NLC", 0), ("LDI", "FNE", 0)] + start + [("LDI", "O0", -1)]
-                     + [("LDX", "hh", "me", F_HASH), ("RLD", "hh")])})
+                 0: ("ERH", [("LDI", "NLC", 0), ("LDI", "FNE", 0)] + start
+                     + [("OLEN", "O0"), ("LDX", "hh", "me", F_HASH), ("RLD", "hh")])})
     subx, pux = g.call("HX", "ERHR")
     g.r("ERH", {0: ("EB", PUSHM), 1: (subx, pux), tuple(range(2, 257)): ("DEAD", NC("hash flag"))})
     g.els("ERHR", "EB", PUSHMB)

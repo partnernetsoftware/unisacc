@@ -1,7 +1,8 @@
 # Model package v1 / resource extension v2
 
-This is a construction/development artifact for the generic runtime. It is
-not yet an embedded `.com` payload or a replacement compiler CLI.
+This is a construction/development artifact for the generic runtime, also
+used by the embedded development container below. It has not replaced the
+shipped compiler CLI.
 
 ## Construction
 
@@ -96,7 +97,8 @@ Keys are nonempty and may contain NUL; content may be empty. The runtime
 checks lengths and duplicate keys before executing any model. Version 1
 remains readable and is still emitted when no resources are present.
 
-The existing SBFIND action first consults the package's exact byte keys,
+The existing SBFIND action first consults process-supplied exact byte keys,
+then the package's exact byte keys,
 then uses the existing filesystem adapter when absent. Both paths return a
 stage-local blob; repeated reads use the existing per-stage cache. Resources
 remain immutable package spans across stages. No new model action or
@@ -146,17 +148,31 @@ manifest's existing optimiser. All compile operations remain networks.
 Build a driver with `cc -O2 exec/c/compiler.c -o driver` (or unisacc), and use
 `--models FILE` for an external package, or APE's `--payload` for a self-contained
 development executable. The normal options currently connected are `-E`,
-`-S`/`-c`, `-b`/`-t TARGET`, `-O`/`-O0`/`-O1`/`-O2`, `-o`, one `-I` directory,
+`-S`/`-c`, `-b`/`-t TARGET`, `-O`/`-O0`/`-O1`/`-O2`, `-o`, `-D`/`-U`,
+`-include`, one `-I` directory,
 and one source file or stdin (`-`). The mode/target defaults match the current
 product; `-b` without `-o` writes stdout, default image mode writes a.out/a.exe.
 No output is opened until the selected route accepts. File writes loop over
 partial writes and fail on a stopped write or failed close.
 
 This is staged adoption, not a CLI compatibility claim. `-run`, multiple
-translation units, `-D`/`-U`, forced includes, dependency output, warning and
+translation units, dependency output, warning and
 instrumentation flags, and further optimisation aliases still need migration;
-unsupported options fail, with no reference fallback. The E2 include search
-contract also needs the complete product-option comparison before switching.
+unsupported options fail, with no reference fallback.
 The compiler does not overwrite the shipped unisacc.com. `compilercheck.sh`
 constructs fresh host models and checks cc/unisacc drivers plus an embedded
 container against the current product, including real output-limit failure.
+
+### Process inputs to E2
+
+The driver supplies four immutable resources with keys beginning with NUL:
+`cli/defines`, `cli/undefines`, `cli/includes`, and `cli/include-dir`.
+The first three contain raw argv values, each terminated by NUL; the last
+contains one directory without a terminator. The C driver does not parse
+macro names or replacement bodies. E2 constructs forced-include directives,
+defines macros, then target predefines, then applies undefines (the current
+product's ordering, even when argv interleaves `-D` and `-U`). Source-relative
+quoted headers precede `-I`, which precedes `include/` and carried headers.
+An absent resource means no such arguments. Both executors use the same
+raw-resource fixture tests. Invalid macro syntax remains a named model
+rejection; exact diagnostic rendering is still outside the migration.

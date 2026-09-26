@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Driver contract checks; compiler semantics stay in freshly built models."""
-import os,pathlib,resource,signal,subprocess,sys
+import json,os,pathlib,resource,signal,subprocess,sys
 p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ua=sys.argv[3]
 def run(cmd, **kw):
     return subprocess.run(list(map(str,cmd)),capture_output=True,timeout=60,**kw)
@@ -27,7 +27,7 @@ for exe in [p/'driver-cc',p/'driver-ua']:
     bad=p/'bad.c';bad.write_text('int main( { this is invalid; }')
     out=p/'sentinel';out.write_bytes(b'preserve')
     r=run([*base,bad,'-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'
-    for args in [['-run',src],['-DNAME=1',src],[src,src],['-o'],['-b']]:
+    for args in [['-run',src],['-nostdinc',src],[src,src],['-o'],['-b'],['-D'],['-U'],['-include']]:
         r=run([*base,*args]);assert r.returncode==1 and not r.stdout
     r=run([*base,src,'-b','unknown/target','-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'
     r=run([*base,src,'-o',p]);assert r.returncode==1 and b'cannot open output' in r.stderr
@@ -35,6 +35,40 @@ for exe in [p/'driver-cc',p/'driver-ua']:
         resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024));signal.signal(signal.SIGXFSZ,signal.SIG_IGN)
     r=run([*base,src,'-b',target,'-o',p/'limited'],preexec_fn=limit)
     assert r.returncode==1 and b'short output write' in r.stderr,(r.returncode,r.stderr)
+# Raw CLI resources are interpreted by E2, in both the Python action oracle
+# and the actual threshold-network runtime. No C-side macro parser is used.
+sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()))
+import sim
+delta=json.loads((p/'e2.json').read_text());loaded=sim.load(delta)
+probe=p/'cli.c';probe.write_text('#ifdef X\nX\n#else\n17\n#endif\n__UNISA__\n')
+def cli(opts,defs=(),undefs=(),includes=(),incdir=''):
+    flags=['-b',target,'-E',*opts]
+    want=ok([ua,probe,*flags])
+    for exe in [p/'driver-cc',p/'driver-ua']:
+        assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==want,opts
+    files=sim.Files()
+    for key,values in [('defines',defs),('undefines',undefs),('includes',includes)]:
+        files.cache[('\0cli/'+key).encode()]=b''.join(str(v).encode()+b'\0' for v in values)
+    files.cache[b'\0cli/include-dir']=str(incdir).encode()
+    verdict,out,_=sim.run(delta,probe.read_bytes(),str(probe),files,maxsteps=50000000,loaded=loaded)
+    assert verdict=='accept' and out==want,(opts,verdict,out,want)
+for opts,ds,us in [(['-DX=3'],['X=3'],[]),(['-D','X'],['X'],[]),
+    (['-DX='],['X='],[]),(['-DX=1+2'],['X=1+2'],[]),(['-DX=-3'],['X=-3'],[]),
+    (['-DX=1','-DX=2'],['X=1','X=2'],[]),(['-DX=1','-UX'],['X=1'],['X']),
+    (['-U','X','-DX=1'],['X=1'],['X']),(['-D__UNISA__=4'],['__UNISA__=4'],[]),
+    (['-U__UNISA__'],[],['__UNISA__'])]: cli(opts,ds,us)
+h1=p/'first.h';h2=p/'second.h'
+h1.write_text('#define X 7\n');h2.write_text('#undef X\n#define X 9\n')
+cli(['-include',h1,'-include',h2,'-DX=4'],['X=4'],includes=[h1,h2])
+# Quoted source-relative headers outrank -I; -I outranks carried headers.
+idir=p/'headers';idir.mkdir();(idir/'stdio.h').write_text('#define PICK 29\n')
+(p/'local.h').write_text('#define LOCAL 31\n');(idir/'local.h').write_text('#define LOCAL 99\n')
+probe.write_text('#include <stdio.h>\n#include "local.h"\nPICK LOCAL\n')
+cli(['-I',idir],incdir=idir);cli(['-I'+str(idir)],incdir=idir)
+probe.write_text('int main(void) { return VALUE; }\n')
+flags=['-DVALUE=7','-b',target,'-O2']
+for exe in [p/'driver-cc',p/'driver-ua']:
+    assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
 # Public-shaped commands operate with only the container and source in cwd.
 isolated=p/'isolated';isolated.mkdir()
 com=isolated/'compiler.com';com.write_bytes((p/'driver.com').read_bytes())
@@ -46,4 +80,4 @@ for mode in ['-E','-S']:
 ok([*base,'hello.c','-O2'],cwd=isolated)
 assert (isolated/'a.out').read_bytes()==ok([ua,src,'-b',target,'-O2'])
 assert ok([isolated/'a.out'])==b'hello from C99\n'
-print(f'compiler driver: {n} mode/level matches, stdin, fail-before-output, IO failures, embedded default image ran')
+print(f'compiler driver: {n} mode/level matches, CLI resource/model checks, stdin, fail-before-output, IO failures, embedded default image ran')

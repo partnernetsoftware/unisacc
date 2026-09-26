@@ -45,13 +45,27 @@ static long output_write(long fd, const void *p, long n) {
     return write((int)fd, p, (size_t)n);
 #endif
 }
+static void argbytes(Buf *b, const char *s) {
+    while (*s) { bput(b,(unsigned char)*s,0); s++; }
+    bput(b,0,0);
+}
+#define ARGRESOURCE(i,k,v) cli[i].name=(const unsigned char *)k; cli[i].n=sizeof(k)-1; cli[i].data=v.b; cli[i].len=v.n
+
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0;
     int mode = 0, level = 0, explicit_image = 0;
+    Buf defs={0}, undefs={0}, forced={0}, incdir={0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
+        else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
+            const char *value=a+2;
+            if (!*value) { if (++i >= argc) return clierror("missing macro argument"); value=argv[i]; }
+            argbytes(a[1]=='D' ? &defs : &undefs,value);
+        } else if (!strcmp(a,"-include")) {
+            if (++i >= argc) return clierror("missing forced include"); argbytes(&forced,argv[i]);
+        }
         else if (!strcmp(a,"-b") || !strcmp(a,"-t")) {
             mode = a[1] == 'b' ? 0 : 2; explicit_image = mode == 0;
             if (++i >= argc) return clierror("missing target"); target = argv[i];
@@ -77,9 +91,18 @@ int main(int argc, char **argv) {
         snprintf(route,sizeof route,"%s/%s/O%d",target,mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
+    if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
+    ResourceInput cli[4];
+    ARGRESOURCE(0,"\0cli/defines",defs);
+    ARGRESOURCE(1,"\0cli/undefines",undefs);
+    ARGRESOURCE(2,"\0cli/includes",forced);
+    ARGRESOURCE(3,"\0cli/include-dir",incdir);
+    RI=cli; NRI=4;
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; in.b = !strcmp(src,"-") ? readstream(0,"stdin",&in.n) : readfile(src,&in.n,0);
-    int rc = runroute(route,&in,src); unpackage();
+    int rc = runroute(route,&in,src); unpackage(); RI=0; NRI=0;
+    free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
+    free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
     if (rc) return rc;
     if (!out && !mode && !explicit_image) {
 #ifdef _WIN32
