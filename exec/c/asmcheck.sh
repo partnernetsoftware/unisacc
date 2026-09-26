@@ -13,6 +13,21 @@ b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_TRANSITION_NAME=core_transition_c \
     exec/c/core.c "exec/c/asm/transition_$ARCH.S" exec/c/asm/layoutcheck.c \
     exec/c/asm/transitioncheck.c -o "$T/check"
 b "$T/check"
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_ALU_LINKAGE= -Dalu32=core_alu32_c -Dalu64=core_alu64_c \
+    exec/c/core.c "exec/c/asm/arith_$ARCH.S" exec/c/asm/arithcheck.c -o "$T/arith"
+b "$T/arith"
+b python3 - "$T/arith" <<'PYTEST'
+import subprocess,sys
+for bits,ops in [(32,[-1,10,2147483647]),(64,[-1,3,4,16,2147483647])]:
+ for op in ops:
+  for version in ['c','a']:
+   r=subprocess.run([sys.argv[1],version+str(bits),str(op)],capture_output=True,timeout=10)
+   message=b'panic:bad alu op\n' if bits==32 else b'panic:bad alu64 op\n'
+   assert (r.returncode,r.stdout,r.stderr)==(2,b'',message),(bits,op,version,r)
+print('word arithmetic invalid operations: C/ASM both reject, 16 checks')
+PYTEST
+b cc $ARCHFLAG -c "exec/c/asm/arith_$ARCH.S" -o "$T/arith.o"
+if [ "$OS" = osx ]; then b size -m "$T/arith.o"; else b size -A "$T/arith.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/transition_$ARCH.S" -o "$T/transition.o"
 if [ "$OS" = osx ]; then b size -m "$T/transition.o"; else b size -A "$T/transition.o"; fi
 b env EXEC_CC="$R/exec/c/asm/cc.sh" python3 exec/c/netcheck.py
@@ -38,5 +53,5 @@ for src in ['examples/hello.c','examples/fib.c','tests/c/b_strderef.c','exec/c/r
 # execution must not be mistaken for a fully assembly-built action engine.
 model=p/'e1.net';source=p/'hello.e2'
 assert ok([p/('run.'+ext),model,source])==ok([p/'run',model,source])
-print('ASM transition route: four full images equal; three native runs equal; C-runtime output equal')
+print('ASM inference/arithmetic route: four full images equal; three native runs equal; C-runtime output equal')
 PY

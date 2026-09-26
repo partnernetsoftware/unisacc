@@ -98,8 +98,17 @@ static int sbfind(const unsigned char *p, int n) {
     return id;
 }
 
+#ifdef UNISA_CORE_ASM_ALU
+I core_alu32(int op,I a,I b);
+I core_alu64(int op,I a,I b,int *z);
+#define alu32 core_alu32
+#define alu64 core_alu64
+#else
+#ifndef CORE_ALU_LINKAGE
+#define CORE_ALU_LINKAGE static
+#endif
 static int32_t w32(I v) { return (int32_t)(uint32_t)(uint64_t)v; }
-static I alu32(int op, I a64, I b64) {
+CORE_ALU_LINKAGE I alu32(int op, I a64, I b64) {
     int32_t a = w32(a64), b = w32(b64);
     switch (op) {
     case 0: return (int32_t)((uint32_t)a + (uint32_t)b);
@@ -113,7 +122,7 @@ static I alu32(int op, I a64, I b64) {
     }
     core_die("bad alu op"); return 0;
 }
-static I alu64(int op, I a, I b, int *z) {
+CORE_ALU_LINKAGE I alu64(int op, I a, I b, int *z) {
     uint64_t ua = (uint64_t)a, ub = (uint64_t)b; *z = 0;
     switch (op) {
     case 0: return (I)(ua + ub); case 1: return (I)(ua - ub); case 2: return (I)(ua * ub);
@@ -129,6 +138,8 @@ static I alu64(int op, I a, I b, int *z) {
     }
     core_die("bad alu64 op"); return 0;
 }
+
+#endif
 
 typedef struct { const unsigned char *b; const I *at; I i, end; } Frame;
 
