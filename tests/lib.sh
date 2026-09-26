@@ -21,7 +21,8 @@
 # would flatten them all into the same one.
 : "${UA:=/tmp/ua_ref}"
 UA_RUN=${UA_RUN:-$UA}
-_LIB_R=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)
+# callers set R (the repo root) first; BASH_SOURCE is a bashism dash rejects
+_LIB_R=${R:-$(cd "$(dirname "$0")/.." && pwd)}
 
 # ua_ready -- the self-hosted compiler exists, or build it.
 ua_ready() {
