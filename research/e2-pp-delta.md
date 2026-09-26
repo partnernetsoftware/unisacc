@@ -401,3 +401,18 @@ evaluator (64-bit ALU width, signed/unsigned, precedence climbing) is NOT
 done: the executor ALU is int32 and widening it is the next step.
 Measured: ex 104 files, 0 DIFF, 6 not covered; corpus 249 files, 0 DIFF,
 25 not covered (was 29), 6 reject-agree.
+
+### 11.1 64-bit ALU actions (executor, language-agnostic)
+
+Added beside the int32 `ALU`/`ALUI`/`CMP` (whose semantics are unchanged, so
+E3 is unaffected): `A64 op d a b`, `A64I op d a v`, `C64 a b`, `C64U a b`.
+Width/overflow rules: a word is read as a signed 64-bit two's-complement
+value (its value mod 2^64); every result is wrapped mod 2^64 and stored
+signed.  `add sub mul` wrap; `and or xor not` bitwise (`not` ignores b);
+`shl` / `shr` (logical) / `sar` (arithmetic) take the count mod 64; `sdiv`
+truncates toward zero, `srem` = a - (a sdiv b)*b, INT64_MIN sdiv -1 =
+INT64_MIN, INT64_MIN srem -1 = 0; `udiv`/`urem` operate on the unsigned
+images.  Divide-by-zero is a result code, not a trap: `A64`/`A64I` set
+r := 1 and W[d] := 0 when a div/rem divisor is 0, else r := 0, so the delta
+decides what a zero divisor means.  `C64` / `C64U` set r := 0,1,2 for <,=,>
+on the signed / unsigned images.

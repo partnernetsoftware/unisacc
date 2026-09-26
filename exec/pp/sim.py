@@ -42,6 +42,14 @@ Every action (and nothing else runs):
 ALU ops: add sub mul div rem and or xor shl sar (int32; div/rem truncate
 toward zero, x/0 = 0, x%0 = 0, INT_MIN/-1 = INT_MIN, INT_MIN%-1 = 0; shift
 count taken mod 32).
+64-bit (added for #if; research/e2-pp-delta.md s11.1; old actions unchanged):
+  A64 op d a b | A64I op d a v             W[d] := op64(W[a], W[b] | v); r := 0,
+                                           or 1 when a div/rem divisor is 0 (W[d] := 0)
+  C64 a b | C64U a b                       r := 0,1,2 for <,=,> (signed / unsigned 64)
+A64 ops: add sub mul sdiv srem udiv urem and or xor not(a) shl shr(logical)
+sar -- operands read as signed 64 (value mod 2^64), results wrapped to
+signed 64; shift count taken mod 64; sdiv truncates, INT64_MIN/-1 = INT64_MIN,
+INT64_MIN%-1 = 0.
 """
 import json
 import os
@@ -85,6 +93,33 @@ def alu(op, a, b):
     if op == "sar":
         return w32(a >> (b & 31))
     raise ValueError(op)
+
+
+M64 = (1 << 64) - 1
+
+
+def w64(v):
+    v &= M64
+    return v - (1 << 64) if v >> 63 else v
+
+
+def alu64(op, a, b):
+    """-> (value, divide_by_zero)"""
+    a, b = w64(a), w64(b)
+    if op in ("sdiv", "srem", "udiv", "urem"):
+        if b == 0:
+            return 0, 1
+        if op[0] == "u":
+            ua, ub = a & M64, b & M64
+            return w64(ua // ub if op == "udiv" else ua % ub), 0
+        q = abs(a) // abs(b)
+        q = q if (a < 0) == (b < 0) else -q
+        return w64(q if op == "sdiv" else a - q * b), 0
+    f = {"add": lambda: a + b, "sub": lambda: a - b, "mul": lambda: a * b,
+         "and": lambda: a & b, "or": lambda: a | b, "xor": lambda: a ^ b,
+         "not": lambda: ~a, "shl": lambda: a << (b & 63),
+         "shr": lambda: (a & M64) >> (b & 63), "sar": lambda: a >> (b & 63)}
+    return w64(f[op]()), 0
 
 
 class Files:
@@ -200,6 +235,13 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
             elif op == "CMP" or op == "CMPI":
                 u = W.get(a[1], 0)
                 v = W.get(a[2], 0) if op == "CMP" else a[2]
+                r = 0 if u < v else (1 if u == v else 2)
+            elif op == "A64" or op == "A64I":
+                W[a[2]], r = alu64(a[1], W.get(a[3], 0), W.get(a[4], 0) if op == "A64" else a[4])
+            elif op == "C64" or op == "C64U":
+                u, v = w64(W.get(a[1], 0)), w64(W.get(a[2], 0))
+                if op == "C64U":
+                    u, v = u & M64, v & M64
                 r = 0 if u < v else (1 if u == v else 2)
             elif op == "RLD":
                 v = W.get(a[1], 0)
