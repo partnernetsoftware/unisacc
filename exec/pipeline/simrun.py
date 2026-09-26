@@ -13,7 +13,11 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pp"))
 import sim  # noqa: E402
 
-res, val, _ = sim.run(json.load(open(sys.argv[1])), open(sys.argv[2], "rb").read(), sys.argv[2])
+try:
+    res, val, _ = sim.run(json.load(open(sys.argv[1])), open(sys.argv[2], "rb").read(), sys.argv[2])
+except (RuntimeError, OSError) as ex:     # a bad table or an unreadable file: 2, as exec/c/run.c
+    sys.stderr.write("run: %s\n" % ex)
+    sys.exit(2)
 if res == "accept":
     sys.stdout.buffer.write(val)
     sys.exit(0)

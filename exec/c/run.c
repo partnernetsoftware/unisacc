@@ -137,6 +137,7 @@ static int sbfind(const unsigned char *p, int n) {
         if (f) {
             unsigned char *b = 0; int m = 0, c = 0; int ch;
             while ((ch = fgetc(f)) != EOF) { if (m >= c) { c = c ? c * 2 : 4096; b = xrealloc(b, c); } b[m++] = (unsigned char)ch; }
+            if (ferror(f)) { fprintf(stderr, "run: cannot read %s\n", path); exit(2); }   /* glibc opens a directory; reading it fails */
             fclose(f); id = blob_add(b ? b : (unsigned char *)"", m); free(b);
         }
     }

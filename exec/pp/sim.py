@@ -404,7 +404,11 @@ def main():
     delta = json.load(open(sys.argv[1]))
     path = sys.argv[2]
     x = open(path, "rb").read()
-    res, val, steps = run(delta, x, path)
+    try:
+        res, val, steps = run(delta, x, path)
+    except (RuntimeError, OSError) as ex:      # a bad table or an unreadable file: 2, as run.c
+        sys.stderr.write("run: %s\n" % ex)
+        return 2
     if res == "accept":
         sys.stdout.buffer.write(val)
         return 0
