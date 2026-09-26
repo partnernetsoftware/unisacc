@@ -2748,3 +2748,12 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - 三个新增 E3 输入的六网络 osx/arm64 完整镜像等于参考，实际输出等于 cc；b_init6/b_init7 为宿主显式包含 stdio.h。gen2.py 净 -60 行，initializers.py +81，合计 +21；状态 3969→4033，JSON 21,768,127→22,187,240 B。这是统一规则路径与补齐已测形状，不是源码净缩减；任意初始化语义、非首 union designator 等不在完成主张内。
 - 最终冻结 gate --com 70/70，JOBS=2，297 s aggregate，每套件 ≤60 s；fat 126/0，两架构实际执行；六目标网络 self-source 等于参考，nativecheck 18 s。Linux/Windows 本轮未启动 VM，仅验证生成字节。日志 /tmp/unisacc-aggr-{finalkeep,frontier,network,gate}.log。
 - .com 重建为 1,348,784 B，SHA256 `66d466a7d2a48796b62a30a71167d7befd4a08b6e301317a73806b11ce28041a`；unisacc.c SHA256 `577e9261925d3c3c2becbd3247b2c12ab6f85e650e7dd5180ed14507dc835d6e`。未推送、未发布。cc-unisacc 保持暂停；完整前端、失败契约、紧凑内核与单份模型 .com 切换仍需继续。
+
+
+### S-17：单进程网络字节流（2026-09-27）
+
+- `run.c` 抽出 execute，新增开发入口 `--chain INPUT SRCPATH INCLUDE_DIR MODEL...`。列表显式、有序、长度不限于六段；驱动不认识 C 阶段或目标架构。每次只把上一段接受的字节交给下一段，与原文件边界相同，不传递输出属性。每段释放模型与临时状态，只有接受的输出存活；stdout 在全部接受后才写出。旧单模型与全域核对接口保留，没有新增模型动作。
+- 普通运行的寄存器、索引内存、栈、reader frame、blob、intern、文件缓存逐段重置；SWAP 释放已替换的输入。netcheck 对同一带状态模型连续运行 20 次，检查空输出、拒绝/步数超限后不打开后续不存在的模型、无半成品 stdout。cc 与 unisacc 构建均通过；nativecheck 的三种构建（cc、unisacc、六网络生成）对 hello/b_toknames/runtime 源码跑内存链，均与原六进程镜像相同，含网络执行器重建自身。ASan+UBSan 在 hello/b_printf3/runtime 三个真实六段输入上通过，无报告；未把它称为全平台内存证明。
+- 同批删除 E3 对已定义 printf 的专用格式预扫描，直接 CALL；只有未定义 fallback 才要求字面量。b_printf3 动态格式通过且 macOS 网络产物实跑等于 cc。旧 234 项先保持，再扩至 235；chain/ELF 95→96。gen2.py 净 -11 行，4029 状态，JSON 22,169,415 B。不是新增 printf 规则，也未把规则放进执行器。
+- macOS ARM64 六网络文本合计 917,921 B；cc -O2 runtime __text 16,688 B / 文件 56,496 B（动态 libSystem 不计），网络/unisacc 构建 runtime __text 87,808 B / 文件 115,746 B（含库）。这是加载/IO/校验/执行合计，不是独立几 KB 内核。run.c 净 +43 行，用于重入、清理与字节流驱动。模型仍是显式六文件，尚未合成 E7 单份 payload，也没有对外切换 .com CLI。
+- 冻结 gate --com 70/70，JOBS=2，312 s aggregate；各套件 ≤60 s，最大 40 s，新增 nativecheck 39 s。fat 126/0，六目标 self-source 字节对齐。Linux/Windows 未启动 VM，单进程本轮实际运行仅 macOS ARM64。日志 /tmp/unisacc-stream-{native,network,gate}.log 与 /tmp/unisacc-call-keep.log。产品源码/.com 未改变，沿用 dec6553 的产物哈希；未推送、未发布。下一步仍须完成产品驱动/单份模型接入、紧凑内核与前端/错误路径缺口，目标未完成。

@@ -4,6 +4,7 @@
    It knows no language; transition decisions belong to the loaded model.
 
        run TABLE INPUT [SRCPATH] [INCLUDE_DIR]
+       run --chain INPUT SRCPATH INCLUDE_DIR MODEL...
 
    INCLUDE_DIR (where the bundled headers are) should be ABSOLUTE: a relative
    one read from another CWD is ENOENT, i.e. "absent", not an error.
@@ -169,6 +170,15 @@ static void load(const char *path) {
     }
 }
 
+/* Model lifetime is one stage. No model-specific state survives unload. */
+static void unload(void) {
+    for (int i = 0; i < NSTR; i++) free(STR[i]);
+    for (int i = 0; i < NS; i++) { free(ROWK[i]); free(ROWN[i]); free(ROWQ[i]); }
+    free(STR); free(STRL); free(QOFF); free(QLEN); free(QA);
+    free(SMODE); free(ROWC); free(ROWK); free(ROWN); free(ROWQ);
+    free(NLO); free(NHI); free(BN); free(BQ);
+}
+
 /* The selected bank is sparse evaluation of a one-hot state-conditioned net.
    Each hidden activation is H(key-threshold); output weights are signed.
    No answer table is materialised. int weights/count bound sums within int64. */
@@ -313,17 +323,15 @@ static I alu64(int op, I a, I b, int *z) {
 
 typedef struct { const unsigned char *b; const I *at; I i, end; } Frame;
 
-int main(int argc, char **argv) {
-    if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
-    if (argc < 3) { fprintf(stderr, "usage: run TABLE INPUT [SRCPATH] [INCLUDE_DIR, absolute]\n"); return 2; }
-    load(argv[1]);
-    if (argc > 4) INCDIR = argv[4];
-    Buf xin = {0}; xin.b=readfile(argv[2], &xin.n, 0);
-    const char *src = argc > 3 ? argv[3] : argv[2];
+/* Run one model over a byte stream. The caller owns input and receives
+   only accepted output. Registers, indexed memory, blobs and file cache are
+   stage-local; the include directory is an explicit process configuration. */
+static int execute(unsigned char *input, int inputn, const char *src, Buf *result) {
+    int status = 0;
     R = calloc(NRG + 1, sizeof(I));
     blob_add((const unsigned char *)"", 0);
     blob_add((const unsigned char *)src, (int)strlen(src));
-    unsigned char *x = xin.b ? xin.b : (unsigned char *)""; I *xattr = calloc(xin.n + 1, sizeof(I)); I xn = xin.n;
+    unsigned char *x = input; I *xattr = calloc(inputn + 1, sizeof(I)); I xn = inputn;
     int NFR = 1, CFR = 16; Frame *fr = xrealloc(0, sizeof(Frame) * CFR);
     fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn;
     Buf o = {0}, e = {0}; int osel = 0; I OT = 0;
@@ -332,13 +340,13 @@ int main(int argc, char **argv) {
     long long maxsteps = getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"), 0, 10) : 200000000LL, steps = 0;
     int q = START; I r = 0;
     for (;;) {
-        if (++steps > maxsteps) { fprintf(stderr, "timeout\n"); return 3; }
+        if (++steps > maxsteps) { fprintf(stderr, "timeout\n"); status = 3; goto finished; }
         Frame *F = &fr[NFR - 1];
         int nx = -1, sq = -1;
         int key = SMODE[q] == 1 ? (nst ? stk[nst - 1] : -1) :
             SMODE[q] == 0 ? (F->i < F->end ? F->b[F->i] : 256) : (r >= 0 && r <= 256 ? (int)r : 256);
         transition(q, key, &nx, &sq);
-        if (nx < 0) { fprintf(stderr, "run: no transition\n"); return 2; }
+        if (nx < 0) { fprintf(stderr, "run: no transition\n"); status = 2; goto finished; }
         q = nx;
         const I *a = QA + QOFF[sq];
         for (int k = 0; k < QLEN[sq]; k++) {
@@ -378,7 +386,7 @@ int main(int argc, char **argv) {
                          R[a[1]] = blob_add(o.b + s0, (int)(o.n - s0)); o.n = (int)s0; } break;
             case ORES: R[a[1]] = o.n; for (I j = 0; j < a[2]; j++) bput(&o, ' ', OT); break;
             case OFILL: { char t[32]; int n = snprintf(t, sizeof t, "%lld", (long long)R[a[2]]); I w = a[3], at = R[a[1]];
-                          if (n > w) { fprintf(stderr, "reject: field overflow\n"); fwrite(e.b, 1, e.n, stderr); return 1; }
+                          if (n > w) { fprintf(stderr, "reject: field overflow\n"); fwrite(e.b, 1, e.n, stderr); status = 1; goto finished; }
                           if (at < 0 || at + w > o.n) die("fill past the reservation");
                           for (I j = 0; j < w; j++) o.b[at + j] = j < w - n ? ' ' : (unsigned char)t[j - (w - n)]; } break;
             case OCLR: o.n = 0; break;
@@ -414,12 +422,47 @@ int main(int argc, char **argv) {
             case DIVMOD10: { uint64_t v = (uint32_t)(uint64_t)R[a[1]]; R[a[1]] = (I)(v / 10); r = (I)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
             case SWAP: { unsigned char *nb = xrealloc(0, o.n + 1); I *na = xrealloc(0, sizeof(I) * (o.n + 1));
                          memcpy(nb, o.b, o.n); memcpy(na, o.at, sizeof(I) * o.n);
+                         if (x != input) free(x); free(xattr);
                          x = nb; xattr = na; xn = o.n; o.n = 0; NFR = 1; fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn; } break;
-            case ACCEPT: if (fwrite(o.b, 1, o.n, stdout) != (size_t)o.n || fclose(stdout)) die("cannot write output"); return 0;
-            case REJECT: fprintf(stderr, "reject: %.*s\n", STRL[a[1]], STR[a[1]]); fwrite(e.b, 1, e.n, stderr); return 1;
+            case ACCEPT: goto finished;
+            case REJECT: fprintf(stderr, "reject: %.*s\n", STRL[a[1]], STR[a[1]]); fwrite(e.b, 1, e.n, stderr); status = 1; goto finished;
             default: die("bad action");
             }
             a += 1 + ARITY[op];
         }
     }
+finished:
+    if (!status) { result->b = o.b; result->n = o.n; o.b = 0; }
+    free(o.b); free(o.at); free(e.b); free(e.at); free(sb.b); free(sb.at);
+    free(fr); free(stk); if (x != input) free(x); free(xattr); free(R);
+    free(MK); free(MV); free(MU); MK = 0; MV = 0; MU = 0; MCAP = 0; MN = 0;
+    for (int i = 0; i < NBL; i++) free(BL[i].b);
+    free(BL); BL = 0; NBL = 0; CBL = 0;
+    for (size_t i = 0; i < ICAP; i++) if (IT[i].b) free(IT[i].b);
+    free(IT); IT = 0; ICAP = 0; IN_ = 0;
+    for (int i = 0; i < NFC; i++) free(FC[i].p);
+    free(FC); FC = 0; NFC = 0;
+    return status;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
+    int chain = argc > 1 && !strcmp(argv[1], "--chain");
+    if ((!chain && argc < 3) || (chain && argc < 6)) {
+        fprintf(stderr, "usage: run MODEL INPUT [SRCPATH] [INCLUDE_DIR]\n       run --chain INPUT SRCPATH INCLUDE_DIR MODEL...\n");
+        return 2;
+    }
+    const char *src = chain || argc > 3 ? argv[3] : argv[2];
+    if (argc > 4) INCDIR = argv[4];
+    Buf in = {0}; in.b = readfile(argv[2], &in.n, 0);
+    int first = chain ? 5 : 1, end = chain ? argc : 2;
+    for (int i = first; i < end; i++) {
+        load(argv[i]);
+        Buf out = {0}; int rc = execute(in.b, in.n, src, &out);
+        unload(); free(in.b);
+        if (rc) return rc;
+        in.b = out.b; in.n = out.n;
+    }
+    if (fwrite(in.b, 1, in.n, stdout) != (size_t)in.n || fclose(stdout)) die("cannot write output");
+    free(in.b); return 0;
 }

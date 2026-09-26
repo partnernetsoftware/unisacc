@@ -54,4 +54,32 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
     for old,new in [('-9223372036854775808','-9223372036854775809'),('9223372036854775807','9223372036854775808')]:
         wide.write_text(convert(source.replace(old,new))[0])
         r=run([exe,wide,inp]);assert r.returncode==2 and b'overflow' in r.stderr,(r.returncode,r.stderr)
-    print('network check: ok (execution, holes, mutation, signed-64 decoding/bounds)')
+    # A pipeline is a sequence of arbitrary byte-stream transducers. No C
+    # stage name is built into it. Compare same-process and fresh-process runs.
+    def model(name, acts, rows='R 0 0 0 0', strings=()):
+        tokens=' '.join(' '.join(map(str,(CODE[a[0]],*a[1:]))) for a in acts)
+        body=f'T 1 1 8 {len(strings)} 0\n'+''.join('S '+v.hex()+'\n' for v in strings)
+        path=d/(name+'.net')
+        path.write_text(convert(body+f'Q {len(acts)} '+tokens+'\n'+rows+'\n')[0])
+        return path
+    # Leave nonzero registers, indexed memory, a stack entry, an intern and
+    # a blob behind. Every subsequent invocation must begin with fresh state.
+    reset=model('reset', [('ORES',2,1),('OFILL',2,3,1),('LDX',1,0,100),
+        ('ORES',2,1),('OFILL',2,1,1),('LDI',3,7),('STX',0,100,3),
+        ('SBCLR',),('SBOUT',97),('SBSAVE',4),('SBINTERN',5),
+        ('ORES',2,1),('OFILL',2,4,1),('ORES',2,1),('OFILL',2,5,1),
+        ('PUSH',9),('ACCEPT',)], 'R 1 1 -1 0 -1 0 0')
+    empty=model('empty-output',[('ACCEPT',)])
+    reject=model('reject',[('OUT',88),('REJECT',0)],strings=(b'stopped',))
+    loop=model('loop',[('LDI',0,0)])
+    inp=d/'input';inp.write_bytes(bytes([0,128,255,10]))
+    argv=[exe,'--chain',inp,inp,d]
+    for stages,want in [([reset]*20,b'0021'),([empty,reset],b'0021'),([reset,empty],b'')]:
+        got=require(run([*argv,*stages]));assert got.stdout==want and not got.stderr
+    # A failed stage does not publish an accepted prefix or run a later model.
+    missing=d/'must-not-be-opened.net'
+    r=run([*argv,reset,reject,missing]);assert (r.returncode,r.stdout,r.stderr)==(1,b'',b'reject: stopped\n')
+    r=run(['env','UNISA_MAXSTEPS=2',*argv,reset,loop,missing])
+    assert (r.returncode,r.stdout,r.stderr)==(3,b'',b'timeout\n')
+    r=run([*argv]);assert r.returncode==2 and not r.stdout
+    print('network check: ok (inference, bounds, stream chain/reset/failure propagation)')

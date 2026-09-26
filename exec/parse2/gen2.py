@@ -284,23 +284,12 @@ def fmtwalk(pre, on_byte, on_d, on_end):
 
 
 def printf():
-    # PF: at '(' after printf.  The arguments are evaluated first, each into a fresh slot
-    # (store64 [r6-N], r0); then the format's literal runs become .write of pooled strings
-    # and each %d prints the next slot (.print); the value is 0.
-    p = P("PF")
-    p.a(("COPYW", "lpp", "tpos")).call("NEXT").tok({E.TK_STR: "PF.q"}, bad("printf format"))
-    p = P("PF.q")       # pre-scan: only %d and %% -> the builtin lowering
-    p.a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "pfo", 0), ("INPUSHXE", "fs", "fe")).goto("PQ.w")
-    g.on("PQ.w", [37], "PQ.p", [("ADV",)])
-    g.on("PQ.w", [256], "PQ.end", [("INPOP",)])
-    g.els("PQ.w", "PQ.w", [("ADV",)])
-    g.on("PQ.p", [37, ord("d")], "PQ.w", [("ADV",)])
-    g.on("PQ.p", [256], "PQ.end", [("INPOP",)])
-    g.els("PQ.p", "PQ.w", [("ADV",), ("LDI", "pfo", 1)])
-    # printf is a real call whenever the unit has <stdio.h>'s printf (product 991d337); the lowering only without one
-    P("PQ.end").a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.s", [("CMPI", "t", 1)])
-    p = P("PF.real")    # back to '(' and an ordinary call (printf must be defined here: the bundled stdio.h)
-    p.a(("JUMP", "lpp")).call("NEXT").call("CALL").ret()
+    # PF is at '(' with the callee name still in ips..ipe. Defined printf
+    # uses the ordinary variadic call path, including nonliteral formats.
+    # Only the undefined fallback requires a literal and lowers %d/%% itself.
+    P("PF").a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.fallback", [("CMPI", "t", 1)])
+    P("PF.real").call("CALL").ret()
+    P("PF.fallback").call("NEXT").tok({E.TK_STR: "PF.s"}, bad("printf format"))
     p = P("PF.s")
     p.a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1)).vpush("fs", "fe").a(("ALU", "add", "as", "cur", "z0"), ("ALUI", "add", "as", "as", 8)).vpush("as")
     p.call("NEXT").label("PF.args")

@@ -42,6 +42,15 @@ for stage in ['e2','e1','e3','e4','lower','elf']:
     if got!=want.read_bytes():raise SystemExit(f'network-built runtime self stage {stage}: differs')
     inp=p/('run.self.'+stage);inp.write_bytes(got)
 print('network-built runtime: six self stages and image equal; six domain checks passed')
+# The same stages also run within a single process, passing only bytes.
+models=[p/(stage+'.net') for stage in ['e2','e1','e3','e4','lower','elf']]
+for exe in [p/'run',ua,netrun]:
+    for src in ['examples/hello.c','tests/c/b_toknames.c','exec/c/run.c']:
+        got=run([exe,'--chain',src,src,root/'include',*models])
+        want=p/(pathlib.Path(src).stem+'.macho')
+        if got!=want.read_bytes():raise SystemExit(f'{exe} in-memory chain differs: {src}')
+print('stream chain: three runtime builds, including network self-rebuild, equal')
+
 # Both buffered host stdio and the unbuffered carried libc must report a
 # real short output. Only the disposable output file has its size limited.
 def limit():

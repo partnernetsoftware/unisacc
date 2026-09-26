@@ -1,4 +1,12 @@
-# exec/ — E0: a generic delta executor on a toy delta
+# exec/ — model-driven compiler development route
+
+The current source-to-image route is `pipeline/elf.sh`, using `c/run.c` and
+six constructed threshold networks. `c/run.c --chain` also connects explicit
+models in one process (see below). This remains a development route; the
+shipped compiler has not adopted it. The following E0 machine and toy are
+retained as their original, separate experiment.
+
+## E0 toy experiment
 
 Milestone E0 of prd.md S-17. `exec.c` runs the machine of
 research/delta-framework.md §2 with option A primitives (§3); it knows no
@@ -120,13 +128,47 @@ via x86_64 emulation, not on x86_64 hardware: N1=N2=N3, 694,272 B, SHA256
 Source: f360ba0's unisacc.c, SHA256
 `11ef59801d8c18f637e67b2a5b0e988ad31baec1859fabdd06dc879935574307`.
 This closes the measured self-source route for six targets. Frontend coverage
-is still partial, runtime tables are not networks, Python still generates
-tables, and the shipped .com has not switched to this executor.
+is still partial. The current default evaluates constructed threshold networks;
+Python still generates the models, and the shipped .com has not switched to
+this executor.
 
 E3 sizeof scalar expressions now reuse expression parsing and discard emitted
 instructions, including nested sizeof and unevaluated static-initializer
 operands. General non-scalar sizeof expressions still reject; named-array
 sizes retain the existing dimension path. The independent host-cc probe also
 corrected the product's sizeof result descriptor to unsigned 64-bit size_t.
-`keep-e3.txt` is 213 cases; the end-to-end source/tape and ELF lists are 74.
-These are fixed regression sets, not claims of complete C99 coverage.
+The authoritative fixed regression sets are `parse2/keep-e3.txt`,
+`c/keep-chain.txt` and `pipeline/keep-elf.txt`; they do not claim complete
+C99 coverage.
+
+
+## One-process byte-stream chain
+
+After `pipeline/elf.sh` constructs and checks a target's six models, its
+runtime can run them in one process without intermediate files:
+
+```sh
+perl -e 'alarm 60; exec @ARGV' env UNISA_MAXSTEPS=400000000000 \
+  OUT/run --chain examples/hello.c examples/hello.c "$PWD/include" \
+  OUT/e2.net OUT/e1.net OUT/e3.net OUT/e4.net OUT/lower.net OUT/elf.net > hello.image
+```
+
+`--chain INPUT SRCPATH INCLUDE_DIR MODEL...` is a development interface.
+The list is arbitrary and ordered; no C stage names, target selection or
+compiler decisions are built into the driver. Each model receives only the
+preceding accepted bytes, like the file boundary of the existing pipeline.
+Output attributes do not cross this boundary. Source path and include directory
+are explicit configuration shared by the stages.
+
+Every stage starts with fresh registers, indexed memory, stack, input frames,
+blobs, intern table and file cache. Stage allocations and the previous input
+are released; only accepted output survives into the next input. The final
+bytes go to stdout once all stages accept. Reject/bad-model/step-limit status
+stops the chain, preserves its diagnostic and publishes no partial image.
+This does not change the existing single-model or `--check-net` interfaces.
+
+`c/netcheck.py` checks repeated-stage reset, empty streams and failure
+propagation. `c/nativecheck.sh` compares the chain against the six-process
+route using cc-, unisacc- and network-built runtimes, including runtime
+self-reconstruction. This is preparation for product integration, not a new
+`.com` CLI, a single embedded model package, or completion of E7.
