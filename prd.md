@@ -2286,3 +2286,21 @@ pass; all prior ARM checks remain green. 822 states / 41,672 B. Inspection of
 real hello lowering found remaining address/setup forms (.lea, setmem, setreg
 mem, argsave, argvget); no whole real ARM program claim yet. Product unchanged,
 no new full-gate run claimed. Next is actual payload/address layout integration.
+
+### S-17 ARM64 real code encoding (2026-09-27)
+
+armlayout now derives text/data addresses from measured text size and format
+constants, resolves data/code symbols and emits ADRP/ADD and POSIX setup forms.
+Whole hello/fib lowering outputs encode identically: lnx/arm64 54,352/54,696 B;
+osx/arm64 54,476/54,820 B. macOS images execute with expected output/exit 0.
+No instructions were filtered. Python remains the lowering producer and image
+wrapper; ARM delta lowering/image output and product adoption are still open.
+Payload headers are retained, not certified as valid image data by this encoder.
+
+Address fixtures cover both layouts, page crossings and data-over-code name
+precedence (same as reference); actual ADRP/ADD bytes are decoded to assert
+addresses in fixtures and all four real encodings. Thirteen malformed header,
+unknown symbol and scratch alias inputs reject on both executors. 981 states /
+48,726 B table. Gate --com: 52/52, JOBS=2, 196 s, ARM suite 13 s and Linux
+self-source suite 16 s. Test-only strengthening after the gate passed the full
+ARM suite again. Product source/.com unchanged; no push or release.

@@ -18,14 +18,17 @@ from tins import dump
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit('usage: realcheck.py RUN DELTA.tbl')
+    if len(sys.argv) not in (3,4) or (len(sys.argv)==4 and sys.argv[3]!='arm64'):
+        raise SystemExit('usage: realcheck.py RUN DELTA.tbl [arm64]')
+    arch = 'arm64' if len(sys.argv)==4 else 'x86_64'
     oracle = _oracle('built')
     with tempfile.TemporaryDirectory() as d:
         path = pathlib.Path(d) / 'program.txt'
-        for target in ('lnx/x86_64', 'osx/x86_64'):
+        for target in ('lnx/'+arch, 'osx/'+arch):
             for f in ('examples/hello.c', 'examples/fib.c'):
                 tp = lower(compile_file([f], oracle, target), target, oracle, drive='built')
+                if arch=='arm64' and target.startswith('osx'):
+                    assert all(i.meta.get('gate')=='svc80' and i.meta.get('carry') is True for i in tp.code if i.op=='gate')
                 path.write_text(dump(tp, full=True))
                 ref, stats = assemble(tp)
                 if stats['encoded'] != stats['insns']:
@@ -34,9 +37,23 @@ def main():
                 if r.returncode or r.stdout != ref:
                     at = next((i for i,(a,b) in enumerate(zip(r.stdout,ref)) if a!=b), min(len(r.stdout),len(ref)))
                     raise RuntimeError('%s %s rc %d first diff %d (%d/%d bytes): %s' % (target,f,r.returncode,at,len(r.stdout),len(ref),r.stderr.decode(errors='replace')))
+                if arch=='arm64':
+                    from unisa.emit_arm import size
+                    offset=0;checked=0
+                    for ins in tp.code:
+                        if ins.op=='.lea' and ins.args[1] in tp.syms:
+                            w0=int.from_bytes(r.stdout[offset:offset+4],'little')
+                            w1=int.from_bytes(r.stdout[offset+4:offset+8],'little')
+                            pages=((w0>>29)&3)|(((w0>>5)&0x7ffff)<<2)
+                            if pages&(1<<20): pages-=1<<21
+                            actual=((stats['text_va']+offset)&~4095)+pages*4096+((w1>>10)&4095)
+                            assert actual==tp.syms[ins.args[1]]+stats['data_va']-DATA_BASE
+                            checked+=1
+                        offset+=size(ins,tp.labels)
+                    assert checked>0, 'no ARM data address decoded'
                 print('real encoding',target,f,stats['insns'],'instructions',len(ref),'bytes equal',flush=True)
-                host = 'osx' if sys.platform == 'darwin' else 'lnx' if sys.platform.startswith('linux') and platform.machine() == 'x86_64' else None
-                if target == str(host) + '/x86_64':
+                host = 'osx' if sys.platform == 'darwin' else 'lnx' if sys.platform.startswith('linux') and platform.machine() == arch else None
+                if target == str(host) + '/'+arch:
                     # Transitional wrapper only: lowering/layout metadata and image writer
                     # remain Python. The executable's complete code comes from the delta.
                     data = image.relocate(tp, tp.data, stats['data_va'] - DATA_BASE)

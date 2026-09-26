@@ -34,7 +34,8 @@ def build():
              'load64': ('rri',9), 'store64': ('rir',10),
              '.ld': ('rrii',11), '.st': ('riri',12),
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
-             'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27)}
+             'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27),
+             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31)}
     from armint import SPECS, install as install_int
     specs.update(SPECS)
     from armfp import SPECS as FP_SPECS, install as install_fp
@@ -54,7 +55,10 @@ def build():
             ('SBINTERN', 't'), ('LDI', 'u', i+1), ('STX', 't', REG, 'u'))
     from arminput import init, install as install_input
     init(p)
+    from armlayout import init as init_layout, install as install_layout
+    init_layout(p)
     p.a(('LDI','pass',0),('LDI','lnum',0)).goto('LINE')
+    g.on('LINE',[64],'HDR.key',[('MARK','hs'),('ADV',)])
     g.on('LINE', [256], 'FINISH', [])
     g.on('LINE', [10], 'LINE', [('ADV',)])
     g.els('LINE', 'OP.scan', [('MARK', 'start')])
@@ -62,7 +66,7 @@ def build():
     g.on('OP.scan', [32]+END, 'OP.end', [('MARK', 'end')])
     g.els('OP.scan', 'OP.scan', [('ADV',)])
     P('OP.end').a(('INTERN', 'oid', 'start', 'end'), ('LDX', 'cls', 'oid', OP),
-                   ('LDX', 'base', 'oid', BASE), ('LDX','labelpos','oid',LP), ('LDI', 'n', 0),('LDI','stag',0),('LDI','gcarry',0),('LDI','gkind',0),('ALUI','add','lnum','lnum',1)).goto('ARG')
+                   ('LDX', 'base', 'oid', BASE), ('LDX','labelpos','oid',LP), ('LDI', 'n', 0),('LDI','started',1),('LDI','stag',0),('LDI','tagkind',0),('LDI','gcarry',0),('LDI','gkind',0),('ALUI','add','lnum','lnum',1)).goto('ARG')
     g.on('ARG', [32], 'ARG', [('ADV',)])
     g.on('ARG', END, 'ENC', [])
     g.els('ARG','ARG.type',[])
@@ -114,9 +118,9 @@ def build():
         for i,k in enumerate(shape):
             nxt='CHECK.'+op+'.k%d'%i
             if k=='v':
-                p.branch({1:nxt},'FAIL',[('CMP','k%d'%i,'stag')])
+                p.branch({1:nxt},'FAIL',[('CMP','k%d'%i,'tagkind')])
             else:
-                p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,{'r':1,'i':2,'l':3}[k])])
+                p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,{'r':1,'i':2,'l':3,'b':4}[k])])
             p=P(nxt)
             if k=='i' and op!='imm':
                 checked=nxt+'.signed'; bound=nxt+'.positive'
@@ -159,6 +163,7 @@ def build():
     install_int(E,word)
     install_fp(E,word)
     install_input(E,word)
+    install_layout(E,word)
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}

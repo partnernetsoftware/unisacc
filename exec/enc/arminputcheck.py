@@ -26,7 +26,7 @@ def check(args,native):
         for source,expected in [('gate gate=svc0\n','010000d4'),('gate gate=svc80 carry=true\n','011000d443000054e00300cb'),('spinit x7\n','e7030091')]:
             f.write_text(source);r=subprocess.run(cmds[0]+[str(f)],capture_output=True,timeout=60)
             assert r.returncode==0 and r.stdout.hex()==expected
-        bad=['setreg x0, mem 256','setreg x0, addr 256','setreg x0, reg 5','setreg x0, imm x1','setreg x0, 5',
+        bad=['setreg x0, mem x1','setreg x0, addr x1','setreg x0, reg 5','setreg x0, imm x1','setreg x0, 5',
              'spinit x7, 256','gate gate=winapi','gate gate=svc0 carry=1','gate form=winapi',
              'mov x0, x1 carry=true','mov x0, x1 role=a role=b','jump x reloc=arm19\nx:',
              'jumpz x0, x reloc=arm26\nx:','jump x reloc=arm26 reloc=arm26\nx:',

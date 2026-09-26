@@ -5,7 +5,7 @@ SEEN=76000000
 
 
 def init(p):
-    for key in ('imm','reg','setreg','gate','jump','jumpz','call','true','false','svc0','svc80','svc','arm','winapi','arm19','arm26'):
+    for key in ('imm','reg','mem','addr','setreg','gate','jump','jumpz','call','true','false','svc0','svc80','svc','arm','winapi','arm19','arm26'):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','id_'+key))
     for n,key in enumerate(META,1):
         p.a(('SBCLR',),[('SBOUT',c) for c in key.encode()],('SBINTERN','t'),('LDI','u',n),('STX','t',KEYS,'u'))
@@ -13,13 +13,21 @@ def init(p):
 
 def install(E,word):
     P,g=E.P,E.g
-    P('TAG.check').branch({1:'TAG.pos'},'REG.value',[('CMP','oid','id_setreg')])
+    P('TAG.check').branch({1:'TAG.pos'},'BOOL.check',[('CMP','oid','id_setreg')])
     P('TAG.pos').branch({1:'TAG.unset'},'REG.value',[('CMPI','n',1)])
     P('TAG.unset').branch({1:'TAG.match'},'REG.value',[('CMPI','stag',0)])
     P('TAG.match').branch({1:'TAG.imm'},'TAG.reg',[('CMP','t','id_imm')])
-    P('TAG.imm').a(('LDI','stag',2)).goto('ARG')
-    P('TAG.reg').branch({1:'TAG.regok'},'FAIL',[('CMP','t','id_reg')])
-    P('TAG.regok').a(('LDI','stag',1)).goto('ARG')
+    P('TAG.imm').a(('LDI','stag',2),('LDI','tagkind',2)).goto('ARG')
+    P('TAG.reg').branch({1:'TAG.regok'},'TAG.mem',[('CMP','t','id_reg')])
+    P('TAG.regok').a(('LDI','stag',1),('LDI','tagkind',1)).goto('ARG')
+    P('TAG.mem').branch({1:'TAG.memok'},'TAG.addr',[('CMP','t','id_mem')])
+    P('TAG.memok').a(('LDI','stag',4),('LDI','tagkind',2)).goto('ARG')
+    P('TAG.addr').branch({1:'TAG.addrok'},'FAIL',[('CMP','t','id_addr')])
+    P('TAG.addrok').a(('LDI','stag',3),('LDI','tagkind',2)).goto('ARG')
+    P('BOOL.check').branch({1:'BOOL.true'},'BOOL.other',[('CMP','t','id_true')])
+    P('BOOL.other').branch({1:'BOOL.false'},'REG.value',[('CMP','t','id_false')])
+    P('BOOL.true').a(('LDI','v',1),('LDI','kind',4)).goto('PUT')
+    P('BOOL.false').a(('LDI','v',0),('LDI','kind',4)).goto('PUT')
     g.on('META.key',[61],'META.begin',[('MARK','end'),('ADV',)])
     g.on('META.key',[32,10,256],'FAIL',[])
     g.els('META.key','META.key',[('ADV',)])
@@ -46,7 +54,7 @@ def install(E,word):
     P('META.gcarry').branch({1:'AFTER'},'META.true',[('CMP','mv','id_false')])
     P('META.true').branch({1:'META.setcarry'},'FAIL',[('CMP','mv','id_true')])
     P('META.setcarry').a(('LDI','gcarry',1)).goto('AFTER')
-    P('EMIT.25').branch({1:'E.movalias'},'E.immalias',[('CMPI','stag',1)])
+    P('EMIT.25').branch({1:'E.movalias',2:'EMIT.2',3:'AD.addr',4:'AD.mem'},'FAIL',[('RLD','stag')])
     P('E.movalias').goto('EMIT.1')
     P('E.immalias').branch({1:'EMIT.2'},'FAIL',[('CMPI','stag',2)])
     word(P('EMIT.26').a(('ALUI','or','w','a0',0x910003E0))).goto('LINE')

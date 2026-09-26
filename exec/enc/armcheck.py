@@ -47,6 +47,8 @@ def main():
         fpcheck(sys.argv[1:],native_host)
         from arminputcheck import check as inputcheck
         inputcheck(sys.argv[1:],native_host)
+        from armlayoutcheck import check as layoutcheck
+        layoutcheck(sys.argv[1:],native_host)
         if not native_host:
             print('ARM64 native assembler/execution: SKIPPED (needs macOS arm64)'); return
         # Separate assembler reference, never calls the Python encoder.

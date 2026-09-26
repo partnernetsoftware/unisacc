@@ -10,9 +10,9 @@ def install(E, word):
     P,g=E.P,E.g
     P('FINISH').branch({1:'ACCEPT'},'REWIND',[('CMPI','pass',1)])
     P('ACCEPT').a(('ACCEPT',)).goto('DEAD')
-    P('REWIND').a(('LDI','zero',0),('OCUT','discard','zero'),('LDI','pass',1),('JUMP','zero')).goto('LINE')
+    P('REWIND').call('LAYOUT').a(('LDI','zero',0),('OCUT','discard','zero'),('LDI','pass',1),('JUMP','zero')).goto('LINE')
     P('LABEL').branch({1:'FAIL'},'LABEL.id',[('CMP','start','end')])
-    P('LABEL.id').a(('INTERN','lid','start','end'),('OLEN','pos'),('ALUI','add','pos','pos',1),('LDX','prev','lid',LABELS)).branch({1:'LABEL.verify'},'LABEL.new',[('CMPI','pass',1)])
+    P('LABEL.id').a(('LDI','started',1),('INTERN','lid','start','end'),('OLEN','pos'),('ALUI','add','pos','pos',1),('LDX','prev','lid',LABELS)).branch({1:'LABEL.verify'},'LABEL.new',[('CMPI','pass',1)])
     P('LABEL.new').branch({1:'LABEL.save'},'FAIL',[('CMPI','prev',0)])
     P('LABEL.save').a(('STX','lid',LABELS,'pos')).goto('LABEL.end')
     P('LABEL.verify').branch({1:'LABEL.end'},'FAIL',[('CMP','prev','pos')])

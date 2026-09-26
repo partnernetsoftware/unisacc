@@ -16,7 +16,7 @@ Memory opcode declarations are read from emit_arm LDS/STS/LDU/STU; form
 selection and packing remain hand rules. A scaled positive offset is preferred,
 then signed imm9, otherwise MOVIMM plus ADD/SUB through x16. Fallback rejects
 an x16 base or store source, whose value would be clobbered. Direct forms
-allow them. Section-local labels, jump/jumpz/call are supported. Data-address layout and images remain unsupported.
+allow them. Section-local labels, jump/jumpz/call are supported. POSIX text/data address layout is supported; image output remains outside this encoder.
 
 `ret` pops x17 from tape SP x7 and returns through x17. `callr` stores its
 continuation on that software stack before BLR. These are not host ABI calls.
@@ -36,7 +36,7 @@ Memory checks add 100 instructions / 768 bytes compared on both executors,
 four width/scratch rejects, and 64 native load/store cases checked with C
 memcpy and signed-width values.
 
-Current size: 822 states, 41,672 B compressed text table. The new gate entry is
+Current size: 981 states, 48,726 B compressed text table. The new gate entry is
 exec-arm. This does not change .com or claim complete ARM64 lowering/encoding.
 
 ## Section-local branches
@@ -98,7 +98,7 @@ obligation. The native C integer referee excludes these cases.
 setreg imm/reg uses the existing immediate/move rules; spinit without a data
 address copies host SP. Non-WinAPI gate emits SVC #0 or #0x80, optionally the
 Darwin carry-to-negative-errno sequence. Syscall words are byte-tested, not
-executed by the small fixture harness. Windows and address-bearing forms reject.
+executed by the small fixture harness. Windows-specific setup forms still reject.
 
 Declared metadata keys come from tins.META. Duplicate/unknown/empty fields
 reject. gate/carry apply only to gate and are validated; gate form must be svc.
@@ -111,6 +111,34 @@ instructions or on the second scan are not mistaken for duplicates.
 Five whole fixtures compare with the reference on both runtimes; three worked
 setup/syscall byte strings and seventeen invalid forms are checked. The earlier
 role=a rejection becomes an unknown-key rejection, since role is now accepted.
-Real hello lowering was inspected in full: address .lea/setmem/setreg mem,
-argsave/argvget and payload layout still prevent whole-program ARM encoding.
-No instruction filtering is presented as a successful real-program encoding.
+The following address slice now covers the POSIX address forms used by hello/fib.
+
+## POSIX payload addresses and real code
+
+armlayout reads @target (lnx/arm64 or osx/arm64), @sym and payload headers.
+Symbol addresses are decimal, bounded at 2^31-1; repeated declarations and
+headers after instructions/labels reject. Data headers are retained opaque for
+a later image writer: this text encoder does not claim image-data validation.
+Header processing happens only in pass zero; the second scan uses the retained
+declarations. Code labels and data symbols use separate maps. As in emit_arm,
+a data symbol takes precedence over a same-name code label.
+
+The delta derives text/data virtual addresses from the measured text length
+and ELF/Mach-O format constants. ADRP/ADD checks signed page range and uses the
+actual output PC. .lea resolves names, setreg mem/addr resolves numeric data
+addresses, setmem stores through x17, argsave handles entry-stack/register ABI,
+and argvget loads through the declared argv cell. Scratch aliases that would
+clobber a source reject. Numeric .lea spellings and Windows setup are not yet
+claimed. No image-layout or encoding oracle runs in the executor.
+
+realcheck now consumes **whole** hello/fib lowering outputs for Linux and macOS
+ARM64. All code matches the reference: Linux 54,352 / 54,696 B; macOS 54,476 /
+54,820 B. Both macOS images run and print the expected result. Python still
+produces lowering and wraps the delta text in an image, so this is not the full
+ARM route or a product replacement. The output ADRP/ADD pairs are independently
+decoded and checked against declared data-symbol addresses. Four small layout
+fixtures cover both OSes, page crossings and same-name precedence on both
+executors; thirteen invalid header/address/alias fixtures reject.
+
+Frozen gate --com: 52/52, JOBS=2, 196 s total, ARM suite 13 s. Subsequent
+changes only strengthened address assertions; the complete ARM suite was rerun.
