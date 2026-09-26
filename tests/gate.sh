@@ -51,6 +51,7 @@ job multi       ./tests/multi.sh
 job diag        ./tests/diag.sh
 job hostile     ./tests/hostile.sh
 job kernel      ./tests/kernel.sh
+job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 if [ "$COM" = 1 ]; then
     [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }

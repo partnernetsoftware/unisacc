@@ -1,6 +1,6 @@
-/* <stdlib.h> for the unisa C subset.  The allocator is a bump allocator over
- * a static arena: `free` is a no-op and the arena is part of the image, which
- * is honest about what this compiler is for.  Nothing here needs a linker. */
+/* <stdlib.h> for the unisa C subset.  The allocator takes its memory from the
+ * OS through the __mmap/__munmap gates and reuses what is freed; nothing here
+ * needs a linker. */
 #ifndef _UNISA_STDLIB_H
 #define _UNISA_STDLIB_H
 #include <stddef.h>
@@ -11,20 +11,80 @@
 
 int exit();
 
-#define _UNISA_ARENA 65536
-static char _unisa_heap[_UNISA_ARENA];
-static long _unisa_brk = 0;
+/* The allocator.  Memory comes from the OS in 1 MB chunks (mmap, or
+ * VirtualAlloc on Windows); a block is a 16-byte header -- its size, then its
+ * class -- and the payload, so every pointer handed out is 16-aligned.
+ *   small: header + request <= 64 KB is rounded up to a power of two, 32 ..
+ *          65536 (classes 0 .. 11).  A freed block goes on its class's list
+ *          (the link lives in the payload) and the next request of that class
+ *          takes it back.  Nothing is split or coalesced, so nothing can be
+ *          corrupted by it: a block is always exactly its class's size.
+ *   large: anything bigger is mapped on its own, rounded to 64 KB, class -1,
+ *          and `free` returns it to the OS. */
+#ifdef _WIN32
+#define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 0x3000, 4, 0, 0)
+#else
+#ifdef __linux__
+#define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 3, 0x22, 0 - 1, 0)
+#else
+#define _UNISA_MAP(__u_n) __mmap(0, (__u_n), 3, 0x1002, 0 - 1, 0)
+#endif
+#endif
+#define _UNISA_CHUNK 1048576
+static char *_unisa_freel[12];
+static char *_unisa_cur = 0;
+static long _unisa_left = 0;
 
-static void *malloc(long __u_n) {
-    char *__u_p;
-    __u_n = (__u_n + 15) & ~15;
-    if (_unisa_brk + __u_n > _UNISA_ARENA) return NULL;
-    __u_p = _unisa_heap + _unisa_brk;
-    _unisa_brk = _unisa_brk + __u_n;
-    return __u_p;
+static char *_unisa_map(long __u_n) {
+    long __u_r;
+    __u_r = (long)_UNISA_MAP(__u_n);
+    if (__u_r == 0 - 1 || __u_r == 0) return NULL;
+    return (char *)__u_r;
 }
 
-static void free(void *__u_p) { }
+static void *malloc(long __u_n) {
+    long __u_sz; int __u_k; char *__u_p;
+    if (__u_n < 0 || __u_n > 0x100000000000) return NULL;
+    __u_sz = __u_n + 16;
+    if (__u_sz > 65536) {
+        __u_sz = (__u_sz + 65535) & ~65535;
+        __u_p = _unisa_map(__u_sz);
+        if (__u_p == NULL) return NULL;
+        *(long *)__u_p = __u_sz;
+        *(long *)(__u_p + 8) = 0 - 1;
+        return __u_p + 16;
+    }
+    __u_k = 0;
+    while ((32 << __u_k) < __u_sz) __u_k = __u_k + 1;
+    __u_sz = 32 << __u_k;
+    __u_p = _unisa_freel[__u_k];
+    if (__u_p != NULL) {
+        _unisa_freel[__u_k] = *(char **)(__u_p + 16);
+        return __u_p + 16;
+    }
+    if (_unisa_left < __u_sz) {
+        __u_p = _unisa_map(_UNISA_CHUNK);
+        if (__u_p == NULL) return NULL;
+        _unisa_cur = __u_p;
+        _unisa_left = _UNISA_CHUNK;
+    }
+    __u_p = _unisa_cur;
+    _unisa_cur = _unisa_cur + __u_sz;
+    _unisa_left = _unisa_left - __u_sz;
+    *(long *)__u_p = __u_sz;
+    *(long *)(__u_p + 8) = __u_k;
+    return __u_p + 16;
+}
+
+static void free(void *__u_q) {
+    char *__u_p; long __u_k;
+    if (__u_q == NULL) return;
+    __u_p = (char *)__u_q - 16;
+    __u_k = *(long *)(__u_p + 8);
+    if (__u_k < 0) { __munmap(__u_p, *(long *)__u_p); return; }
+    *(char **)(__u_p + 16) = _unisa_freel[__u_k];
+    _unisa_freel[__u_k] = __u_p;
+}
 
 /* `exit` is the one libc function that cannot be written in C: it must not
  * return.  `__exit` is the tape's gate to the OS, so this is a one-line
@@ -43,24 +103,33 @@ static void exit(int __u_code) {
 static void abort(void) { __exit(134); }
 
 static void *calloc(long __u_n, long __u_sz) {
-    char *__u_p; long __u_total; long __u_i;
+    long *__u_p; long __u_total; long __u_i;
+    if (__u_n < 0 || __u_sz < 0) return NULL;
+    if (__u_sz != 0 && __u_n > 0x100000000000 / __u_sz) return NULL;
     __u_total = __u_n * __u_sz;
-    __u_p = (char *)malloc(__u_total);
+    __u_p = (long *)malloc(__u_total);
     if (__u_p == NULL) return NULL;
+    /* a payload is a multiple of 16 bytes, so whole longs stay inside it */
+    __u_total = (__u_total + 7) / 8;
     __u_i = 0;
     while (__u_i < __u_total) { __u_p[__u_i] = 0; __u_i = __u_i + 1; }
     return __u_p;
 }
 
 static void *realloc(void *__u_old, long __u_n) {
-    char *__u_p; char *__u_o; long __u_i;
-    __u_p = (char *)malloc(__u_n);
+    long *__u_p; long *__u_o; long __u_i; long __u_cap;
+    if (__u_old == NULL) return malloc(__u_n);
+    if (__u_n < 0) return NULL;
+    __u_cap = *(long *)((char *)__u_old - 16) - 16;
+    if (__u_n <= __u_cap && (__u_cap <= 65536 || __u_n > __u_cap / 2)) return __u_old;
+    __u_p = (long *)malloc(__u_n);
     if (__u_p == NULL) return NULL;
-    if (__u_old != NULL) {
-        __u_o = (char *)__u_old;
-        __u_i = 0;
-        while (__u_i < __u_n) { __u_p[__u_i] = __u_o[__u_i]; __u_i = __u_i + 1; }
-    }
+    if (__u_n < __u_cap) __u_cap = __u_n;
+    __u_cap = (__u_cap + 7) / 8;
+    __u_o = (long *)__u_old;
+    __u_i = 0;
+    while (__u_i < __u_cap) { __u_p[__u_i] = __u_o[__u_i]; __u_i = __u_i + 1; }
+    free(__u_old);
     return __u_p;
 }
 
