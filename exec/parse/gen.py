@@ -83,6 +83,7 @@ CUNK = 0          # base size unknown (void, a typedef name): +- and dereference
 FRD, FRB = 12 * 10 ** 6, 13 * 10 ** 6  # per function: return pointer depth and base size
 DPR = 18 * 10 ** 6  # DPR[f] = 1: f has a double parameter (an int argument would be converted: not covered)
 VAR = 17 * 10 ** 6  # VAR[f] = 1: f was defined `(..., ...)` (its parameters arrive on the stack)
+AUT, AUD = 19 * 10 ** 6, 20 * 10 ** 6  # AUT[v] = 1: v is a header function the reference auto-includes; AUD[v] = 2: defined here
 VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy is undefined there: measured)
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
 
@@ -1333,13 +1334,67 @@ def spec():
     P("SP.u3").a(("LDI", "bsz", UNS + 2)).ret()
 
 
+def autonames():
+    """The reference's autoinc (src/front_pp.c): for each of these headers, a
+    raw line opening `static` with `NAME(` and `{` on it names a function;
+    if NAME is followed by `(` somewhere in the source and never by
+    `( ... ) {`, the whole header is prepended -- tokens the dump does not
+    show.  printf is the walker's own (exempt).  Read from include/, as the
+    reference reads it."""
+    out = []
+    for h in "assert.h ctype.h stdlib.h string.h wchar.h stdio.h".split():
+        for ln in open(os.path.join(ROOT, "include", h), encoding="utf-8", errors="replace"):
+            ln = ln.rstrip("\n")
+            if len(ln) <= 7 or not ln.startswith("static") or "(" not in ln or "{" not in ln:
+                continue
+            b = ln[:ln.index("(")].rstrip(" ")
+            a = len(b)
+            while a > 0 and (b[a - 1].isalnum() or b[a - 1] == "_"):
+                a -= 1
+            if a < len(b) and b[a:] != "printf" and b[a:] not in out:
+                out.append(b[a:])
+    return out
+
+
+def autoscan():
+    """Two scans of x before the first pass: definitions `NAME ( ... ) {`
+    (AUD), then any `NAME (` of a header function not defined here is
+    rejected -- the reference compiles the header too."""
+    p = P("AUTO")
+    p.a(("JUMP", "x0")).call("NEXT").label("AU.loop")
+    p.tok({"eof": "AU.two", TK_ID: "AU.id"}, "AU.nx")
+    P("AU.nx").call("NEXT").goto("AU.loop")
+    p = P("AU.id")
+    p.a(("INTERN", "av", "ps", "pe"), ("LDX", "t", "av", AUT)).branch({1: "AU.c"}, "AU.nx", [("CMPI", "t", 1)])
+    P("AU.c").call("NEXT").tok({"(": "AU.p"}, "AU.loop")
+    P("AU.p").a(("LDI", "ad", 1)).call("NEXT").label("AU.pl")
+    P("AU.pl").tok({"(": "AU.po", ")": "AU.pc", "eof": "AU.two"}, "AU.pn")
+    P("AU.pn").call("NEXT").goto("AU.pl")
+    P("AU.po").a(("ALUI", "add", "ad", "ad", 1)).goto("AU.pn")
+    P("AU.pc").a(("ALUI", "sub", "ad", "ad", 1)).branch({1: "AU.cl"}, "AU.pn", [("CMPI", "ad", 0)])
+    P("AU.cl").call("NEXT").tok({"{": "AU.def"}, "AU.loop")
+    P("AU.def").a(("LDI", "t", 2), ("STX", "av", AUD, "t")).goto("AU.nx")
+    p = P("AU.two")
+    p.a(("JUMP", "x0")).call("NEXT").label("AV.loop")
+    p.tok({"eof": "RET", TK_ID: "AV.id"}, "AV.nx")
+    P("AV.nx").call("NEXT").goto("AV.loop")
+    p = P("AV.id")
+    p.a(("INTERN", "av", "ps", "pe"), ("LDX", "t", "av", AUT)).branch({1: "AV.c"}, "AV.nx", [("CMPI", "t", 1)])
+    P("AV.c").a(("LDX", "t", "av", AUD)).branch({1: "AV.nx"}, "AV.c2", [("CMPI", "t", 2)])
+    P("AV.c2").call("NEXT").tok({"(": "AV.rej"}, "AV.loop")
+    g.on("AV.rej", range(257), "DEAD", rej("not covered: the reference auto-includes a header"), "r")
+
+
 def unit():
+    autoscan()
     p = P("START")
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"),
         [x for k, nm in enumerate(VANAMES) for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "va%d" % k)]],
         [x for k, (nm, _, _) in enumerate(SYSCALLS, 1)
          for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "sy%d" % k)]])
+    p.a([x for nm in autonames() for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "av"), ("LDI", "t", 1), ("STX", "av", AUT, "t")]])
+    p.call("AUTO")
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
     p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
@@ -1364,9 +1419,9 @@ def unit():
     P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
     p = P("TOP.sid")   # static TYPEDEFNAME ...: base size unknown (CUNK)
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "TOP.std"}, ("rej", "not covered: static declaration"), [("CMPI", "t", 1)])
-    P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK), ("LDI", "sd0", 0)).goto("FN.n")
+    P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK), ("LDI", "sd0", 0), ("LDI", "gtu", 1)).goto("FN.n")
     p = P("FN")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d"}, "FN.n")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0), ("LDI", "gtu", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d"}, "FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
     P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
     P("FN.c").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.n")
@@ -1380,23 +1435,38 @@ def unit():
     p = P("FN.id")
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "v", FND, "pass"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"),
         ("COPYW", "fv", "v"), ("STX", "v", FRD, "rptr"), ("STX", "v", FRB, "rbsz"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "vfn", 0), ("LDI", "fdp", 0))
-    p.call("NEXT").tok({"(": "FN.open", ";": "FN.gv", "=": "FN.gv", ",": "FN.gv"}, ("rej", "not covered: declarator"))
-    P("FN.gv").branch({(1, 2): "FN.gp"}, "GV", [("CMPI", "rptr", 1)])
-    g.on("FN.gp", range(257), "DEAD", rej("not covered: global pointer"), "r")
+    p.call("NEXT").tok({"(": "FN.open", ";": "FN.gv", "=": "FN.gv", ",": "FN.gv", "[": "FN.ga"}, ("rej", "not covered: declarator"))
+    # a global of a typedef name: its base is not carried here (static size_t n;) -- not covered
+    P("FN.gv").a(("LDI", "gar", 0)).branch({1: "FN.gt"}, "GV", [("CMPI", "gtu", 1)])
+    g.on("FN.gt", range(257), "DEAD", rej("not covered: global of a typedef name"), "r")
+    # T NAME[N]: N * element bytes (measured: static char *a[12] -> .bss g_a 96; int b[3] -> 12)
+    P("FN.ga").call("NEXT").tok({TK_NUM: "FN.gan"}, ("rej", "not covered: array bound"))
+    P("FN.gan").a(("COPYW", "gdn", "nv"), ("LDI", "gar", 1)).call("NEXT").expect("]").call("NEXT").branch({1: "FN.gt"}, "GV", [("CMPI", "gtu", 1)])
     # file-scope int: `.bss g_NAME 4` where declared; `= literal` goes to __init
     p = P("GV")
-    # file-scope char/short/long: `.bss g_NAME <tyinfo size>` (measured); BASE[v] carries the width
-    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0"), ("STX", "v", PTR, "z0"),
-                     ("STX", "v", BASE, "rbsz"))
-    q = p
+    # file-scope char/short/long: `.bss g_NAME <tyinfo size>` (measured); BASE[v] carries the width;
+    # a pointer (PTR[v] = depth) is 8 bytes; an array is N elements, ARR[v] = 1, PTR[v] = depth + 1
+    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0"),
+                     ("STX", "v", PTR, "rptr"), ("STX", "v", BASE, "rbsz"), ("STX", "v", ARR, "gar"))
+    p.branch({(1, 2): "GV.p8"}, "GV.w", [("CMPI", "rptr", 1)])
+    P("GV.p8").a(("LDI", "gsz", PSZ)).goto("GV.a")
+    q = P("GV.w")
     for n in [0] + sorted(set(SZ.values())):   # 0: plain `int` leaves bsz 0 (the int default)
         hit, nx = q.fresh("gz"), q.fresh("gn")
         q.branch({1: hit}, nx, [("CMPI", "rbsz", n)])
-        P(hit).o(" %d\n" % (n or SZ["int"])).goto("GV.sz")
+        P(hit).a(("LDI", "gsz", n or SZ["int"])).goto("GV.a")
         q = P(nx)
     g.on(q.cur, range(257), "DEAD", rej("not covered: global of an unknown type"), "r")
+    P("GV.a").branch({1: "GV.arr"}, "GV.o", [("CMPI", "gar", 1)])
+    P("GV.arr").a(("ALU", "mul", "gsz", "gsz", "gdn"), ("ALUI", "add", "t", "rptr", 1), ("STX", "v", PTR, "t")).goto("GV.o")
+    P("GV.o").o(" ").num("gsz").o("\n").goto("GV.sz")
     p = P("GV.sz")
-    p.tok({"=": "GV.eq4"}, "GV.nx")
+    p.tok({"=": "GV.eqa"}, "GV.nx")
+    P("GV.eqa").branch({1: "GV.eqr"}, "GV.eqp", [("CMPI", "gar", 1)])
+    g.on("GV.eqr", range(257), "DEAD", rej("not covered: global array initialiser"), "r")
+    # a pointer or long: `imm r0, N; .lea r1, g_NAME; store64 [r1+0], r0` in __init (measured)
+    P("GV.eqp").branch({(1, 2): "GV.eq"}, "GV.eql", [("CMPI", "rptr", 1)])
+    P("GV.eql").branch({1: "GV.eq"}, "GV.eq4", [("CMPI", "rbsz", SZ["long"])])
     P("GV.eq4").branch({1: "GV.eq"}, "GV.eq0", [("CMPI", "rbsz", SZ["int"])])
     P("GV.eq0").branch({1: "GV.eq"}, ("rej", "not covered: non-int global initialiser"), [("CMPI", "rbsz", 0)])
     P("GV.eq").call("NEXT").tok({TK_NUM: "GV.num"}, ("rej", "not covered: global initialiser"))
@@ -1404,7 +1474,11 @@ def unit():
     p = P("GV.nx")
     p.tok({";": "GV.end", ",": "GV.comma"}, ("rej", "not covered: global declaration"))
     P("GV.end").call("NEXT").goto("TOP")
-    P("GV.comma").call("NEXT").tok({TK_ID: "GV.id"}, ("rej", "not covered: declarator"))
+    # `T *a, b` / `T a[N], b`: each declarator's own stars and bound are not re-read here
+    P("GV.comma").branch({(1, 2): "GV.cbad"}, "GV.c1", [("CMPI", "rptr", 1)])
+    P("GV.c1").branch({1: "GV.cbad"}, "GV.c2", [("CMPI", "gar", 1)])
+    g.on("GV.cbad", range(257), "DEAD", rej("not covered: global declarator list"), "r")
+    P("GV.c2").call("NEXT").tok({TK_ID: "GV.id"}, ("rej", "not covered: declarator"))
     P("GV.id").a(("INTERN", "v", "ps", "pe"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe")).call("NEXT").goto("GV")
     p = P("FN.open")
     p.call("NEXT").tok({")": "FN.close"}, "FN.par")
@@ -1487,7 +1561,10 @@ def inits():
     P("IN.eq").call("NEXT").tok({TK_NUM: "IN.num"}, "IN.loop")
     p = P("IN.num")
     p.o("  imm r0, ").call("NUMOUT").o("\n  .lea r1, g_").a(("SPAN2", "gs", "ge"))
-    p.o("\n  .st [r1+0], r0, 4\n").goto("IN.nx")
+    p.a(("INTERN", "v", "gs", "ge"), ("LDX", "t", "v", PTR), ("LDX", "u", "v", BASE)).branch({(1, 2): "IN.w8"}, "IN.wl", [("CMPI", "t", 1)])
+    P("IN.wl").branch({1: "IN.w8"}, "IN.w4", [("CMPI", "u", SZ["long"])])
+    P("IN.w8").o("\n  store64 [r1+0], r0\n").goto("IN.nx")
+    P("IN.w4").o("\n  .st [r1+0], r0, 4\n").goto("IN.nx")
 
 
 def build():

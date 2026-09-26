@@ -6,6 +6,8 @@ The prelude is `#include <HEADER>` preprocessed by the reference (/tmp/ua_ref -E
 tokenised and split into top-level declarations (after a depth-0 `;`, or the
 `}` that closes a function body).  Cut k is declarations 0..k plus an empty
 main; each cut goes through compare.py until the first one that is not equal.
+A cut the delta rejects because the reference would auto-include a header
+(a prototype such as `int exit();` whose definition comes later) is skipped.
 """
 import json, os, re, subprocess, sys, tempfile
 
@@ -42,6 +44,8 @@ def main():
         last = r.stdout.strip().splitlines()
         res = [l for l in last if l.startswith("files")][0]
         print(k, out[k][:40], "|", res, "|", [l for l in last if "reasons" in l or "DIFF" in l][:2])
+        if "auto-includes a header" in r.stdout and "not-covered 1" in res:
+            continue   # a prototype before its header definition: the reference prepends the header
         if "equal 1" not in res:
             print("blocked at", k, "of", len(out), "--", f); break
     else:
