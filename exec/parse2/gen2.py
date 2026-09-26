@@ -394,7 +394,7 @@ assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
-SAL = 37 * 10 ** 6   # a struct's alignment (its widest member's)
+SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
@@ -506,7 +506,12 @@ def types():
     p = P("SB.mem")
     p.vpush("sid", "soff", "smal").call("TSPEC").vpop("sid", "soff", "smal").tok({TK_ID: "SB.nm"}, bad("struct member"))
     p = P("SB.nm")
-    p.branch({1: "SB.v"}, "SB.p", [("CMPI", "td", 0)])
+    p.a(("LDI", "marr", 0), ("COPYW", "mnm_s", "ps"), ("COPYW", "mnm_e", "pe"), ("COPYW", "mtd", "td")).call("NEXT").tok({"[": "SB.arr"}, "SB.nm1")
+    p = P("SB.arr")         # NAME [N]: N elements; more dimensions are not covered
+    p.call("NEXT").tok({TK_NUM: "SB.arn"}, bad("struct member array bound"))
+    P("SB.arn").a(("COPYW", "marr", "nv")).call("NEXT").expect("]").call("NEXT").tok({";": "SB.nm1"}, bad("struct member"))
+    p = P("SB.nm1")         # back to the name for the layout (the current token is ';')
+    p.a(("COPYW", "ps", "mnm_s"), ("COPYW", "pe", "mnm_e"), ("COPYW", "td", "mtd")).branch({1: "SB.v"}, "SB.p", [("CMPI", "td", 0)])
     P("SB.p").a(("LDI", "msz", 8)).goto("SB.put")
     P("SB.v").branch({(1, 2): "SB.st"}, "SB.v1", [("CMPI", "tb", SBB)])
     # a member of struct type: its size SSZ, aligned to its own alignment SAL (its widest member)
@@ -517,13 +522,18 @@ def types():
     P("SB.vu").a(("ALUI", "sub", "msz", "tb", UNS)).goto("SB.put")
     g.on("DEAD.sm", range(257), "DEAD", E.rej("not covered: a struct member of struct type"), "r")
     P("SB.put").a(("COPYW", "mal", "msz")).goto("SB.put2")      # a scalar: aligned to its size
+    # SB.put2 with marr > 0: the element's size times marr, the element's alignment (see SB.am)
     p = P("SB.put2")
+    p.branch({1: "SB.put3"}, "SB.am", [("CMPI", "marr", 0)])
+    P("SB.am").a(("ALU", "mul", "msz", "msz", "marr")).goto("SB.put3")
+    p = P("SB.put3")
     p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
         ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
-        ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("ALU", "add", "soff", "soff", "msz"))
+        ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("STX", "k", MAR, "marr"),
+        ("ALU", "add", "soff", "soff", "msz"))
     p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
     P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
-    P("SB.nx").call("NEXT").tok({";": "SB.semi"}, bad("struct member"))
+    P("SB.nx").tok({";": "SB.semi"}, bad("struct member"))     # (the name's next token was read in SB.nm)
     P("SB.semi").call("NEXT").goto("SB.m")
     p = P("SB.end")
     p.a(("ALU", "add", "t", "soff", "smal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "smal"), ("ALU", "and", "t", "t", "m"),
@@ -1246,13 +1256,15 @@ def build():
     p.a(("ALUI", "sub", "sid", "vb", SBB)).call("NEXT").tok({TK_ID: "MB.nm"}, bad("member access"))
     p = P("MB.nm")
     p.a(("INTERN", "v", "ps", "pe"), ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
-        ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "vt", "k", MPT), ("LDX", "vb", "k", MBS)).branch({1: "DEAD.mb"}, "MB.has", [("CMPI", "ms", 0)])
+        ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "vt", "k", MPT), ("LDX", "vb", "k", MBS), ("LDX", "marr", "k", MAR)).branch({1: "DEAD.mb"}, "MB.has", [("CMPI", "ms", 0)])
     P("MB.has").branch({1: "MB.z"}, "MB.off", [("CMPI", "mo", 0)])
     P("MB.off").o("  imm r2, ").num("mo").o("\n  add64 r0, r0, r2\n").goto("MB.z")
     P("MB.z").call("NEXT").tok({"=": "PX.as", "->": "MB.ptr", ".": "MB.dot2"}, "MB.ld")
     P("MB.dot2").goto("MEMB")          # s.inner.m: the inner struct's address, then its member
     P("MB.ptr").call("LOADV").goto("MEMB")
-    P("MB.ld").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
+    P("MB.ld").branch({1: "MB.ld1"}, "MB.arr", [("CMPI", "marr", 0)])
+    P("MB.ld1").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
+    P("MB.arr").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "rkok", 0)).goto("POSTIX")   # s.arr: the address, decayed
     p = P("POSTIX")
     p.tok({"[": "PX.i", "->": "MEMB", "(": "PX.fc"}, "RET")
     P("PX.fc").branch({1: "PX.fc1"}, "RET", [("CMPI", "vb", FPB)])
