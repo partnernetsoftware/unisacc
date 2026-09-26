@@ -75,6 +75,8 @@ CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
 GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 TDN = 8 * 10 ** 6  # TDN[v] = 1: v was declared a typedef name at file scope
+PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/store64)
+TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
 
 g = G()
 
@@ -255,16 +257,17 @@ def addr(p, reg):             # address of local slot W[s] (or global x[gs..ge))
 
 
 def lookup(p, lo, hi):        # s := slot of the local spelled x[W[lo]..W[hi])
-    p.a(("INTERN", "v", lo, hi), ("LDX", "s", "v", LOC), ("COPYW", "gs", lo), ("COPYW", "ge", hi))
+    p.a(("INTERN", "v", lo, hi), ("LDX", "s", "v", LOC), ("LDX", "pt", "v", PTR), ("COPYW", "gs", lo), ("COPYW", "ge", hi))
     ok = p.fresh("ok")
     p.branch({1: "DEAD0"}, ok, [("CMPI", "s", 0)])
     p.cur = ok
 
 
-def declare(p):               # declare x[ps..pe) as a new local; slot in W[s]
-    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "o", "v", LOC),
-        ("STX", "usp", UNDO, "v"), ("STX", "usp", UNDO + 1, "o"), ("ALUI", "add", "usp", "usp", 2),
-        ("ALUI", "add", "cur", "cur", 1), ("STX", "v", LOC, "cur"), ("COPYW", "s", "cur"))
+def declare(p):               # declare x[ps..pe) as a new local (pointer iff W[ptd]); slot in W[s]
+    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "o", "v", LOC), ("LDX", "op", "v", PTR),
+        ("STX", "usp", UNDO, "v"), ("STX", "usp", UNDO + 1, "o"), ("STX", "usp", UNDO + 2, "op"),
+        ("ALUI", "add", "usp", "usp", 3),
+        ("ALUI", "add", "cur", "cur", 1), ("STX", "v", LOC, "cur"), ("STX", "v", PTR, "ptd"), ("COPYW", "s", "cur"))
     up, nx = p.fresh("mx"), p.fresh("dn")
     p.branch({2: up}, nx, [("CMP", "cur", "max")])
     p.cur = up
@@ -277,9 +280,34 @@ def unwind(p, saved):         # restore the scope to undo depth W[saved]
     p.label(top)
     p.branch({2: body}, done, [("CMP", "usp", saved)])
     p.cur = body
-    p.a(("ALUI", "sub", "usp", "usp", 2), ("LDX", "v", "usp", UNDO), ("LDX", "o", "usp", UNDO + 1),
-        ("STX", "v", LOC, "o")).goto(top)
+    p.a(("ALUI", "sub", "usp", "usp", 3), ("LDX", "v", "usp", UNDO), ("LDX", "o", "usp", UNDO + 1),
+        ("LDX", "op", "usp", UNDO + 2), ("STX", "v", LOC, "o"), ("STX", "v", PTR, "op")).goto(top)
     p.cur = done
+
+
+def width(p, ptr, i4, i8):    # emit i8 if W[ptr] else i4
+    a, b, d = p.fresh("w8"), p.fresh("w4"), p.fresh("wd")
+    p.branch({1: a}, b, [("CMPI", ptr, 1)])
+    P(a).o(i8).goto(d)
+    P(b).o(i4).goto(d)
+    p.cur = d
+
+
+def noptr(p):                 # arithmetic on a pointer is not in this step
+    ok = p.fresh("np")
+    p.branch({1: "DEADP"}, ok, [("CMPI", "pt", 1)])
+    p.cur = ok
+
+
+def stars(p, then):           # '*'... then an identifier; W[ptd] = 1 iff any star; bni: base needs one
+    lp, st, idk, bad, ok = p.fresh("sl"), p.fresh("ss"), p.fresh("si"), p.fresh("sb"), p.fresh("so")
+    p.a(("LDI", "ptd", 0)).label(lp)
+    p.tok({"*": st, TK_ID: idk}, ("rej", "not covered: declarator"))
+    P(st).a(("LDI", "ptd", 1)).call("NEXT").goto(lp)
+    q = P(idk)
+    q.branch({0: bad}, ok, [("CMP", "ptd", "bni")])
+    g.on(bad, range(257), "DEAD", [("REJECT", "not covered: non-int, non-pointer declaration")], "r")
+    P(ok).goto(then)
 
 
 PUSH = "  .frame 8\n  store64 [r7+0], r0\n"
@@ -328,6 +356,7 @@ def expr():
     for o in CASOPS:     # a op= e: address, load, push, e, op, store (measured)
         q = P("EXPR.c" + o)
         lookup(q, "sps", "spe")
+        noptr(q)
         addr(q, "r0")
         q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH).call("NEXT").call("EXPR")
         q.o(POP1 + optext(o) + POP1 + "  .st [r1+0], r0, 4\n").ret()
@@ -366,7 +395,10 @@ def expr():
     p = P("EXPR.as")
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    p.o(PUSH).call("NEXT").call("EXPR").o(POP1 + "  .st [r1+0], r0, 4\n").ret()
+    p.o(PUSH).vpush("pt").call("NEXT").call("EXPR").vpop("pt").o(POP1)
+    width(p, "pt", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    p.ret()
+    g.on("DEADP", range(257), "DEAD", rej("not covered: pointer arithmetic"), "r")
 
     # UNARY
     p = P("UNARY")
@@ -376,6 +408,7 @@ def expr():
         P(nm).call("NEXT").tok({TK_ID: nm + ".id"}, ("rej", "not covered: operand of ++/--"))
         q = P(nm + ".id")
         lookup(q, "ps", "pe")
+        noptr(q)
         addr(q, "r0")
         q.o(PUSH + "  .ld r0, [r0+0], 4\n  imm r1, 1\n  %s r0, r0, r1\n" % sp + POP1
             + "  .st [r1+0], r0, 4\n").call("NEXT").ret()
@@ -393,13 +426,15 @@ def expr():
     for nm, o, undo in (("IT.inc", "+", "sub64"), ("IT.dec", "-", "add64")):
         q = P(nm)   # a++ : a += 1, then the old value back (measured)
         lookup(q, "sps", "spe")
+        noptr(q)
         addr(q, "r0")
         q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH + "  imm r0, 1\n" + POP1 + optext(o) + POP1
             + "  .st [r1+0], r0, 4\n  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
     p = P("IT.var")
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    p.o("  .ld r0, [r0+0], 4\n").ret()
+    width(p, "pt", "  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n")
+    p.ret()
     p = P("IT.call")
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
     p.branch({1: "IT.ok"}, "IT.nd", [("CMP", "t", "pass")])
@@ -532,10 +567,14 @@ def printf():
 
 def stmt():
     p = P("STMT")
-    p.tok({"{": "BLOCK", "type": "S.decl", ";": "S.empty", "return": "S.ret", "if": "S.if",
+    p.tok({"{": "BLOCK", "type": "S.decl", "type=char": "S.decl", "type=long": "S.decl", "type=void": "S.decl",
+           "type=unsigned": "S.decl", "type=short": "S.decl", "type=signed": "S.decl", TK_ID: "S.idq", ";": "S.empty", "return": "S.ret", "if": "S.if",
            "while": "S.while", "for": "S.for",
            "do": "S.do", "break": "S.brk", "continue": "S.cnt"}, "S.expr")
     P("S.empty").call("NEXT").ret()
+    p = P("S.idq")        # a typedef name starts a declaration
+    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "S.tdd"}, "S.expr", [("CMPI", "t", 1)])
+    P("S.tdd").a(("LDI", "bni", 1)).call("NEXT").goto("D.one")
     P("S.expr").call("VEXPR").expect(";").call("NEXT").ret()
     # block: '{' ... '}' with its own scope
     p = P("BLOCK")
@@ -549,14 +588,20 @@ def stmt():
     p.a(("COPYW", "cur", "sc")).call("NEXT").ret()
     # declaration
     p = P("S.decl")
-    p.call("NEXT").label("D.one").tok({TK_ID: "D.id"}, ("rej", "not covered: declarator"))
+    p.a(("LDI", "bni", 1)).tok({"type": "S.dint"}, "S.dnx")
+    P("S.dint").a(("LDI", "bni", 0)).goto("S.dnx")
+    P("S.dnx").call("NEXT").tok(dict((w, "S.dw") for w in TWORDS), "D.one")
+    P("S.dw").a(("LDI", "bni", 1)).goto("S.dnx")
+    p = P("D.one")
+    stars(p, "D.id")
     p = P("D.id")
     declare(p)
     p.call("NEXT").tok({"=": "D.init"}, "D.next")
     p = P("D.init")
-    p.vpush("s").call("NEXT").call("EXPR").vpop("s")
+    p.vpush("s", "ptd", "bni").call("NEXT").call("EXPR").vpop("s", "ptd", "bni")
     addr(p, "r1")
-    p.o("  .st [r1+0], r0, 4\n").goto("D.next")
+    width(p, "ptd", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    p.goto("D.next")
     p = P("D.next")
     p.tok({",": "D.comma", ";": "S.empty"}, ("rej", "not covered: declaration"))
     P("D.comma").call("NEXT").goto("D.one")
@@ -582,6 +627,9 @@ def stmt():
     p.call("NEXT").ret()
     p = P("S.rete")
     p.call("CEXPR").expect(";")
+    p.branch({1: "S.retp"}, "S.reti", [("CMPI", "rptr", 1)])
+    P("S.retp").o("  jump R").num("rl").o("\n").call("NEXT").ret()
+    p = P("S.reti")
     p.o("  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R").num("rl").o("\n")
     p.call("NEXT").ret()
     # if (e) s [else s]
@@ -631,7 +679,7 @@ def unit():
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"))
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
@@ -640,16 +688,23 @@ def unit():
     P("TD.w").call("NEXT").tok({**TW, "*": "TD.w", TK_ID: "TD.id"}, ("rej", "not covered: typedef"))
     p = P("TD.id")
     p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t")).call("NEXT").expect(";").call("NEXT").goto("TOP")
-    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN"}, ("rej", "not covered: static declaration"))
+    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN"}, ("rej", "not covered: static declaration"))
     p = P("FN")
-    p.call("NEXT").tok({TK_ID: "FN.id"}, ("rej", "not covered: declarator"))
+    p.a(("LDI", "bni", 1)).tok({"type": "FN.i", "type=void": "FN.i"}, "FN.n")
+    P("FN.i").a(("LDI", "bni", 0)).goto("FN.n")
+    p = P("FN.n")
+    p.call("NEXT")
+    stars(p, "FN.r")
+    P("FN.r").a(("COPYW", "rptr", "ptd")).goto("FN.id")
     p = P("FN.id")
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "v", FND, "pass"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"),
         ("COPYW", "fv", "v"), ("LDI", "cur", 0), ("LDI", "max", 0))
-    p.call("NEXT").tok({"(": "FN.open", ";": "GV", "=": "GV", ",": "GV"}, ("rej", "not covered: declarator"))
+    p.call("NEXT").tok({"(": "FN.open", ";": "FN.gv", "=": "FN.gv", ",": "FN.gv"}, ("rej", "not covered: declarator"))
+    P("FN.gv").branch({1: "FN.gp"}, "GV", [("CMPI", "rptr", 1)])
+    g.on("FN.gp", range(257), "DEAD", rej("not covered: global pointer"), "r")
     # file-scope int: `.bss g_NAME 4` where declared; `= literal` goes to __init
     p = P("GV")
-    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0")).o(" 4\n")
+    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0"), ("STX", "v", PTR, "z0")).o(" 4\n")
     p.tok({"=": "GV.eq"}, "GV.nx")
     P("GV.eq").call("NEXT").tok({TK_NUM: "GV.num"}, ("rej", "not covered: global initialiser"))
     P("GV.num").call("NEXT").goto("GV.nx")
@@ -661,9 +716,19 @@ def unit():
     p = P("FN.open")
     p.call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
-    p.tok({"type": "FN.pt", "type=void": "FN.pv"}, ("rej", "not covered: parameter"))
-    P("FN.pv").call("NEXT").tok({")": "FN.close"}, ("rej", "not covered: parameter"))
-    P("FN.pt").call("NEXT").tok({TK_ID: "FN.pid"}, ("rej", "not covered: parameter"))
+    p.a(("LDI", "bni", 1)).tok({"type": "FN.pi", "type=void": "FN.pv", "type=char": "FN.pt", "type=long": "FN.pt",
+                                 "type=unsigned": "FN.pt", "type=short": "FN.pt", "type=signed": "FN.pt",
+                                 TK_ID: "FN.ptd"}, ("rej", "not covered: parameter"))
+    p = P("FN.ptd")
+    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
+    P("FN.pi").a(("LDI", "bni", 0)).goto("FN.pt")
+    P("FN.pv").call("NEXT").tok({")": "FN.close", "*": "FN.pvs"}, ("rej", "not covered: parameter"))
+    P("FN.pvs").a(("LDI", "bni", 1)).goto("FN.pvk")
+    P("FN.pt").call("NEXT").goto("FN.pvk")
+    p = P("FN.pvk")
+    p.tok(dict((w, "FN.pt") for w in TWORDS), "FN.pst")
+    p = P("FN.pst")
+    stars(p, "FN.pid")
     p = P("FN.pid")
     declare(p)
     p.call("NEXT").tok({",": "FN.comma", ")": "FN.close"}, ("rej", "not covered: parameter list"))
