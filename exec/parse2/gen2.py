@@ -22,7 +22,21 @@ _spec = importlib.util.spec_from_file_location(
 E = importlib.util.module_from_spec(_spec)   # the token reader, the assembler P, the gold tables, the tape constants
 _spec.loader.exec_module(E)
 
-P, O, TK, TK_ID, TK_NUM, LOC = E.P, E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
+O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
+DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges two states silently
+
+
+class P(E.P):
+    def __init__(self, name):
+        DEFS[name, "P"] = DEFS.get((name, "P"), 0) + 1
+        super().__init__(name)
+
+    def label(self, lab):
+        DEFS[lab, "L"] = DEFS.get((lab, "L"), 0) + 1
+        return super().label(lab)
+
+
+E.P = P
 g = E.g
 
 # ---- declared data 1: tape templates (measured once from the reference) -------------
@@ -805,13 +819,11 @@ def build():
     ladder("C", None)
     P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "RET")
     g.on("DEAD.adj", range(257), "DEAD", E.rej("not covered: adjacent string literals"), "r")
-    p = P("UNARY")
     q = P("U.cpl")       # ~x: imm r1, -1; xor64 (measured); the operand's type is kept
     q.call("NEXT").call("UNARY").call("NODBL0").o("  imm r1, -1\n  xor64 r0, r0, r1\n").ret()
     P("NODBL0").branch({1: "NODBL0.1"}, "NODBL0.p", [("CMPI", "vb", DBL)])
     P("NODBL0.1").branch({1: "DEAD.dbl"}, "NODBL0.p", [("CMPI", "vt", 0)])
     P("NODBL0.p").branch({1: "RET"}, "DEAD.pa", [("CMPI", "vt", 0)])
-    p = P("UNARY")
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
     P("U.szof").call("NEXT").tok({"(": "SZ.p", TK_ID: "SZ.id"}, bad("sizeof operand"))
@@ -1091,6 +1103,8 @@ def build():
 
 if __name__ == "__main__":
     d = build()
+    twice = sorted(k for k, n in DEFS.items() if n > 1)
+    assert not twice, "defined twice: %r" % twice
     s = json.dumps(d, separators=(",", ":"))
     open(sys.argv[1], "w").write(s)
     st, ent, live, ns, na = E.sizes(d)
