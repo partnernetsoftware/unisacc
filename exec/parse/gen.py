@@ -337,6 +337,13 @@ def expr():
                 q.newlab("a").newlab("b").vpush("a")
                 q.o("  jumpz r0, ").lab("b").o("\n  imm r0, 1\n  jump ").lab("a").o("\n").lab("b").o(":\n")
                 q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+            elif op in ("+", "-"):   # p +- n, p of depth >= 2: n scaled by 8 (measured); depth 1 has an
+                ok, pp = q.fresh("pa"), q.fresh("pp")    # unknown base (int/char/typedef) -> not covered
+                q.branch({2: pp, 1: "DEADP"}, ok, [("CMPI", "pt", 1)])
+                P(ok).o(PUSH).call("NEXT").call(sub).call("NOPTR").o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+                r = P(pp)
+                r.vpush("pt").o(PUSH).call("NEXT").call(sub).call("NOPTR").vpop("pt")
+                r.o("  imm r2, 8\n  mul64 r0, r0, r2\n" + POP1 + optext(op)).goto("LOOP%d" % L)
             else:     # a pointer operand is not covered: the reference scales it
                 noptr(q)
                 q.o(PUSH).call("NEXT").call(sub)
@@ -439,6 +446,9 @@ def expr():
     addr(p, "r0")
     p.o(PUSH).vpush("pt").call("NEXT").call("EXPR").vpop("pt").o(POP1)
     width(p, "pt", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    p.ret()
+    p = P("NOPTR")
+    noptr(p)
     p.ret()
     g.on("DEADP", range(257), "DEAD", rej("not covered: pointer arithmetic"), "r")
 
