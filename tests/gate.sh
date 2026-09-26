@@ -43,6 +43,7 @@ job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%3==0')
 job stages      ./tests/stages.sh examples/*.c tests/c/*.c
 job exec-chain  env CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt)   # S-17: one C executor, E2/E1/E3
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
+job exec-e4     ./exec/opt/check.sh examples/*.c tests/c/*.c unisacc.c   # S-17 E4: -O1 as a delta
 job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
 job nativeboot  ./tests/nativeboot.sh
