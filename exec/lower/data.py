@@ -8,7 +8,7 @@ RAW, START, NAME, FLAG, NEW, REMAP, DEFINED, RSTART = (i << 40 for i in range(1,
 
 
 def install(E, done='ACCEPTDATA', code_start='H.code', target='lnx/x86_64'):
-    if target not in ('lnx/x86_64', 'lnx/arm64'):
+    if target not in ('lnx/x86_64', 'lnx/arm64', 'osx/x86_64', 'osx/arm64'):
         raise ValueError('unsupported lowering target: '+target)
     from unisa.lower import SCRATCH, PRINTMAX
     P,g=E.P,E.g
@@ -98,6 +98,6 @@ def install(E, done='ACCEPTDATA', code_start='H.code', target='lnx/x86_64'):
     P('H.addr').a(('LDX','s','bi',START)).goto('H.normal')
     P('H.normal').a(('LDX','n','s',REMAP)).goto('H.num')
     P('H.num').o(' ').a(('ALUI','add','n','n',256)).call('PRN').o('\n').a(('ALUI','add','bi','bi',1)).goto('H.sl')
-    P('H.end').o('@src_os lnx\n@data_len ').a(('COPYW','n','full')).call('PRN').o('\n@bss 0\n@relocs -\n').a(('INPUSH','code')).goto(code_start)
+    P('H.end').o('@src_os '+target.split('/')[0]+'\n@data_len ').a(('COPYW','n','full')).call('PRN').o('\n@bss 0\n@relocs -\n').a(('INPUSH','code')).goto(code_start)
     g.on('H.code',[256],done,[('INPOP',)]);g.els('H.code','H.code',[('COPY',),('ADV',)])
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: tape data directive'),'r')

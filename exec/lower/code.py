@@ -1,4 +1,4 @@
-"""Linux instruction lowering delta. Hand control rules, declared facts.
+"""POSIX instruction lowering delta. Hand control rules, declared facts.
 ARM shares setup and syscalls, with its own transition peepholes.
 regmap/enc/abi/reloc are read from TSV; no reference lower() is run by generator.
 """
@@ -11,14 +11,14 @@ def rows(name):
     return [s.split('\t') for s in lines if s and not s.startswith('#') and '=>' not in s]
 
 
-def install(E, arch="x86_64"):
+def install(E, arch="x86_64", os_="lnx"):
     P,g=E.P,E.g
     from unisa.tape import SHAPE
     from unisa.catalog import WINAPI
     from unisa.lower import WIN_HSTD, WIN_WRITTEN, SYSA, SYSFP, SYSSP
     regmap={r[0]:r[2] for r in rows('regmap') if r[1]==arch}
-    enc={r[0]:r[3] for r in rows('enc') if r[1:3]==['lnx',arch]}
-    abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==['lnx',arch]}
+    enc={r[0]:r[3] for r in rows('enc') if r[1:3]==[os_,arch]}
+    abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==[os_,arch]}
     reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
     p=P('C.init');p.a(('LDI','nc',0),('LDI','entry',-1),('LDI','firstop',-1),('LDI','pending',0))
@@ -63,7 +63,7 @@ def install(E, arch="x86_64"):
     p.branch({1:'C.labprint'},'C.enter',[('CMPI','kind',1)])
     P('C.labprint').a(('COPYW','tok','op')).call('PRINT').o('\n').goto('C.advance')
     P('C.enter').branch({1:'C.setup'},'C.dispatch',[('CMP','ci','entry')])
-    p=P('C.setup');p.o('spinit '+regmap['r7']+'\nargsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', true\n').goto('C.dispatch')
+    p=P('C.setup');p.o('spinit '+regmap['r7']+'\nargsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', '+('true' if os_=='lnx' else 'false')+'\n').goto('C.dispatch')
     special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
     if arch=='arm64':
         special['imm']='armimm'; special['.frame']='armframe'; special.pop('load64')
@@ -165,7 +165,7 @@ def install(E, arch="x86_64"):
             q.goto('SC.'+op+'.gate');p=P('SC.'+op+'.n'+str(mode))
         p.goto('C.fail')
         def val(v):return "'"+v if v=='none' or v.startswith(('0','1','2','3','4','5','6','7','8','9')) else v
-        p=P('SC.'+op+'.gate').o('gate form='+enc[op]+' gate='+f[8]+' carry=false winapi='+('none' if WINAPI.get(op) is None else WINAPI[op])+' catop='+op+' sysno='+val(f[0])+' retconv='+val(f[11])+' winimp='+val(f[12])+' ret='+f[7])
+        p=P('SC.'+op+'.gate').o('gate form='+enc[op]+' gate='+f[8]+' carry='+('true' if os_=='osx' else 'false')+' winapi='+('none' if WINAPI.get(op) is None else WINAPI[op])+' catop='+op+' sysno='+val(f[0])+' retconv='+val(f[11])+' winimp='+val(f[12])+' ret='+f[7])
         for name,off in [('hstd',WIN_HSTD),('written',WIN_WRITTEN),('scr0',0),('scr1',8)]:p.o(' '+name+'=').a(('LDI','offset',off)).call('ADDR')
         p.o('\n').ret()
     P('C.done').a(('INPOP',),('ACCEPT',)).goto('DEAD')

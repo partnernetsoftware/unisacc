@@ -32,13 +32,13 @@ def main():
         p=pathlib.Path(d)/'input'
         # Fusion blockers, multiple labels, entry not first, syscall argument aliasing.
         fixture='f:\n  ret\n_start:\nsecond:\n  .frame 8\n  store64 [r7+0], r0\n  load64 r1, [r7+0]\n  .frame -8\n  .frame 8\nbarrier:\n  store64 [r7+0], r2\n  .sys write, r2, r1, r0\n  .sys6 mmap, r0, r1, r2, r3, r4, r5\n  .exit r0\n'
-        if os.environ.get('LOWER_TARGET')=='lnx/arm64':
+        if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in ('open','unlink','rename'))
             for width in (1,2,4,8):
                 for barrier in ('','blocked'+str(width)+':\n'):
                     fixture += f'  .frame 8\n  .st [r7+0], r2, {width}\n{barrier}  .ld r1, [r7+0], {width}\n  .frame -8\n'
         cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
-        if os.environ.get('LOWER_TARGET')=='lnx/arm64':
+        if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             # Immediate limits, power-of-two multiply, aliasing and liveness.
             chunks=['_start:']
             for op in ('add64','sub64','mul64'):
@@ -62,7 +62,7 @@ def main():
                 r=subprocess.run(cmd,capture_output=True,timeout=60)
                 if r.returncode:raise RuntimeError((name,r.returncode,r.stderr))
                 n=check(raw,r.stdout.decode(),oracle)
-                if name=='fixture' and os.environ.get('LOWER_TARGET')=='lnx/arm64':
+                if name=='fixture' and os.environ.get('LOWER_TARGET','').endswith('/arm64'):
                     sexts=[tuple(i.args) for i in parse_tins(r.stdout.decode()).code if i.op=='sext']
                     assert sexts==[('x1','x2',1),('x1','x2',2),('x1','x2',4)],sexts
             print('lower full',name,n,'instructions equal; executors',len(commands),flush=True)

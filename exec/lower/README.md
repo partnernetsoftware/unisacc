@@ -7,6 +7,7 @@ zero-last layout and emits a data header followed by unchanged tape code.
 python3 exec/lower/gen.py data.json
 python3 exec/lower/gen.py arm-data.json --arm64
 python3 exec/lower/gen.py full.json --full
+python3 exec/lower/gen.py darwin-arm.json --full --arm64 --osx
 ```
 
 `--full` also lowers Linux x86_64 instructions: register mapping, entry setup,
@@ -69,3 +70,10 @@ ELF program header are independently specified. `../pipeline/selfcheck.sh`
 checks the complete current compiler source through all six deltas against the
 reference optimized tape and Linux x86_64 image. Compiling the existing C
 compiler through this route does not switch its implementation to the executor.
+
+
+`--osx` selects Darwin regmap/enc/abi/reloc facts, carry=true and argsave=false;
+the data header also records osx. Both x86_64 and arm64 lowering are compared
+with the typed reference by fullcheck.sh / armcheck.sh. They use the same
+hello/fib input tapes, isolating lowering from target-specific preprocessing.
+The source-to-image script is still Linux-only until Mach-O writing is migrated.

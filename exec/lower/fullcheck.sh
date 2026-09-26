@@ -10,3 +10,6 @@ b python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl"
 b "$UA" -S examples/hello.c -o "$T/hello"
 b "$UA" -O2 -S examples/fib.c -o "$T/fib"
 b python3 exec/lower/fullcheck.py "$T/run" "$T/d.tbl" "$T/d.json" "$T/hello" "$T/fib"
+b python3 exec/lower/gen.py "$T/osx.json" --full --osx
+b python3 exec/c/tbl.py "$T/osx.json" "$T/osx.tbl"
+b env LOWER_TARGET=osx/x86_64 python3 exec/lower/fullcheck.py "$T/run" "$T/osx.tbl" "$T/osx.json" "$T/hello" "$T/fib"

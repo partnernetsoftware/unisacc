@@ -2381,3 +2381,19 @@ After this gate, only selfcheck's target-macro fixture was strengthened: the
 six Linux names must each expand to 1 and the other architecture/Apple/Mach/
 Windows names must be absent. Generated E2 and product -E both checked; ARM
 and x86 selfchecks reran green with this fixture. No new full-gate run claimed.
+
+
+### S-17 Darwin lowering preparation (2026-09-27)
+
+`gen.py --full --osx [--arm64]` reuses the POSIX lowering transitions. ABI
+facts select Darwin syscall numbers and svc80/syscall; gates carry=true and
+argsave takes loader registers (false), with @src_os osx. Tests compare all
+TargetProgram fields, not only code bytes. Darwin ARM fixture93/immediate131
+on both executors, hello/fib12395/5824 instructions; Darwin x86 fixture41 on
+both, hello/fib9791/5530. Both Linux suites reran green. Mach-O image writing
+is not yet a delta; no complete Darwin source-route claim.
+
+Test wrapper repair 81294d2 forwards explicit JOBS, TARGET and E2/E3/E4/chain
+settings through Terminal, quoting apostrophes/newlines and preserving empty
+versus unset. Actual Terminal probe checked those values and exit7 propagation.
+No compiler/product-source change, no .com rebuild or push.
