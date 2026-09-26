@@ -1879,3 +1879,16 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
   - a binary table format;
   - E4 and later (lowering and encoding), which have no delta yet;
   - the tables as nets.
+- 2026-09-26 (S-17), **table sizes after row defaults** (acc894f). Each byte-keyed or r-keyed row now lists only the keys that differ from its most common (next, seq) pair; that pair answers every key not listed. The tables are still text, not yet a binary format.
+
+  | table | size |
+  |---|---|
+  | E3 | 9,772,470 → 368,976 B |
+  | E1 | 155,080 B |
+  | E2 | 72,226 B |
+  | executor binary (cc -O2) | 54,120 B |
+
+  So the whole front end, from source to tape, is one 54 KB executor plus about 0.6 MB of text tables.
+  - **Speed:** one E3 file takes 0.02 s warm.
+  - **Checks:** check.sh gives 225/225 the same verdict as the Python executor. The chain of three stages keeps its 54 files equal and is in the gate (exec-chain, gate 30/30).
+  - **Still missing:** a binary format, the stages after E3 (lowering and encoding), and the tables as nets.
