@@ -167,6 +167,11 @@ def optail(o):
         q = P(bn + ".r")
     emit(q, "pop1")
     cmp = o in ("<", ">", "<=", ">=", "==", "!=")
+    q.branch({1: bn + ".w"}, bn + ".w0", [("CMPI", "lb", UNS + 4)])
+    P(bn + ".w0").branch({1: bn + ".w" if o not in ("<<", ">>") else "DEAD.ui"}, bn + ".v", [("CMPI", "vb", UNS + 4)])
+    P(bn + ".w").call("UICHK").goto(bn + ".w6")
+    P(bn + ".w6").o("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" + E.optext(o, True) + ("" if cmp else UIM)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 4)).ret()
+    q = P(bn + ".v")
     q.branch({1: bn + ".u"}, bn + ".u0", [("CMPI", "lb", UNS + 8)])
     P(bn + ".u0").branch({1: bn + ".u"}, bn + ".s", [("CMPI", "vb", UNS + 8)])
     P(bn + ".u").o(E.optext(o, True)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 8)).ret()
@@ -217,6 +222,11 @@ def ladder(prefix, bottom):
                     optail(o)
     g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
     g.on("DEAD.pa", range(257), "DEAD", E.rej("not covered: pointer arithmetic"), "r")
+    # UICHK: an unsigned int with an 8-byte or pointer operand is not covered (not measured)
+    for k, (r, c) in enumerate((("lb", 8), ("lb", UNS + 8), ("vb", 8), ("vb", UNS + 8), ("lt", 0), ("vt", 0)) if prefix == "E" else ()):
+        nx = "UICHK.%d" % (k + 1) if k < 5 else "RET"
+        P("UICHK" if k == 0 else "UICHK.%d" % k).branch({1: "DEAD.ui" if r not in ("lt", "vt") else nx}, "DEAD.ui" if r in ("lt", "vt") else nx, [("CMPI", r, c)])
+    g.on("DEAD.ui", range(257), "DEAD", E.rej("not covered: unsigned int with this operand"), "r")
 
 
 HEX = "0123456789abcdef"
@@ -342,7 +352,8 @@ def printf():
     emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).ret()
 
 
-UNS = E.UNS   # unsigned char/short/long: UNS + size (unsigned int: not covered)
+UNS = E.UNS   # unsigned char/short/int/long: UNS + size
+UIM = "  imm r2, 4294967295\n  and64 r0, r0, r2\n"   # an unsigned int kept to 32 bits (measured)
 SBB = 1000   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
 STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
 FPB = E.FPB   # a function pointer: depth 1, base FPB (its call result is taken as int)
@@ -371,7 +382,7 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
         q.branch({1: hit}, nx, [("CMPI", "vb", w)])
         P(hit).o(tabn % w).ret()
         q = P(nx)
-    for w, mask in ((1, 255), (2, 65535), (8, None)):
+    for w, mask in ((1, 255), (2, 65535), (4, 4294967295), (8, None)):
         hit, nx = q.fresh("u"), q.fresh("y")
         q.branch({1: hit}, nx, [("CMPI", "vb", UNS + w)])
         if w == 8:
@@ -394,7 +405,9 @@ def types():
     q.branch({(1, 2): "RET"}, "NARROW.b", [("CMPI", "vt", 1)])
     P("NARROW.b").branch({1: "RET"}, "NARROW.u", [("CMPI", "vb", 8)])
     P("NARROW.u").branch({1: "RET"}, "NARROW.dd", [("CMPI", "vb", UNS + 8)])
-    P("NARROW.dd").branch({1: "RET"}, "NARROW.n", [("CMPI", "vb", DBL)])
+    P("NARROW.dd").branch({1: "RET"}, "NARROW.ui", [("CMPI", "vb", DBL)])
+    P("NARROW.ui").branch({1: "NARROW.m"}, "NARROW.n", [("CMPI", "vb", UNS + 4)])
+    P("NARROW.m").o(UIM).ret()
     q = P("NARROW.n")
     for w in (1, 2, 4):
         hit, nx = q.fresh("w"), q.fresh("x")
@@ -473,7 +486,9 @@ def types():
     for w, n in TYPEW.items():   # (unsigned is read by its own states below)
         P("TS." + w).a(("LDI", "tb", n)).call("NEXT").goto("TS.b" if w != "type=long" else "TS.ll")
     P("TS.ll").tok({"type=long": "TS.ll2"}, "TS.b")    # long long: a long
-    P("TS.type=unsigned").call("NEXT").tok({"type=char": "TS.u1", "type=short": "TS.u2", "type=long": "TS.u8"}, bad("unsigned int"))
+    P("TS.type=unsigned").call("NEXT").tok({"type=char": "TS.u1", "type=short": "TS.u2", "type=long": "TS.u8", "type=int": "TS.u4i"}, "TS.u4")
+    P("TS.u4i").call("NEXT").goto("TS.u4")
+    P("TS.u4").a(("LDI", "tb", UNS + 4)).goto("TS.b")
     P("TS.u1").a(("LDI", "tb", UNS + 1)).call("NEXT").goto("TS.b")
     P("TS.u2").a(("LDI", "tb", UNS + 2)).call("NEXT").goto("TS.b")
     P("TS.u8").a(("LDI", "tb", UNS + 8)).call("NEXT").goto("TS.ll")
@@ -801,7 +816,12 @@ def build():
         q.branch({1: "X.c%s.m" % o}, "X.c%s.s" % o, [("CMPI", "stp", 1)])
         P("X.c%s.s" % o).o("  imm r2, ").num("stp").o("\n  mul64 r0, r0, r2\n").goto("X.c%s.m" % o)
         q = P("X.c%s.m" % o)
-        emit(q, "pop1").o(E.optext(o)).call("NARU")
+        emit(q, "pop1").branch({1: "X.c%s.w" % o}, "X.c%s.n" % o, [("CMPI", "vb", UNS + 4)])
+        P("X.c%s.w" % o).branch({1: "X.c%s.w1" % o}, "X.c%s.n" % o, [("CMPI", "vt", 0)])
+        P("X.c%s.w1" % o).o("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" + E.optext(o, True) + UIM).goto("X.c%s.st" % o)
+        q = P("X.c%s.n" % o)
+        q.o(E.optext(o)).call("NARU").goto("X.c%s.st" % o)
+        q = P("X.c%s.st" % o)
         emit(q, "pop1").call("STOREV").ret()
     P("ISDV").a(("LDI", "u", 0)).branch({1: "ISDV.1"}, "ISDV.x", [("CMPI", "vb", DBL)])
     P("ISDV.1").branch({1: "ISDV.y"}, "ISDV.x", [("CMPI", "vt", 0)])
@@ -815,7 +835,8 @@ def build():
     # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
     P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
-    P("NARU.2").branch({1: "NARU.s"}, "RET", [("CMPI", "vb", UNS + 2)])
+    P("NARU.2").branch({1: "NARU.s"}, "NARU.3", [("CMPI", "vb", UNS + 2)])
+    P("NARU.3").branch({1: "NARROW.m"}, "RET", [("CMPI", "vb", UNS + 4)])
     P("NARU.c").o("  imm r2, 255\n  and64 r0, r0, r2\n").ret()
     P("NARU.s").o("  imm r2, 65535\n  and64 r0, r0, r2\n").ret()
     P("NARU.b").ret()
@@ -957,7 +978,8 @@ def build():
     q.a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "U.big"}, "U.num1")
     q = P("U.big")       # decimal beyond int: long; hex/octal: unsigned int up to 0xffffffff (not covered), then long up to LONG_MAX
     q.branch({1: "U.bh"}, "U.bl", [("CMPI", "nx", 1)])
-    P("U.bh").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.bl"}, "DEAD.big")
+    P("U.bh").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.bl"}, "U.ui")
+    P("U.ui").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", UNS + 4)).call("NEXT").ret()
     P("U.bl").a(("LDI", "t", 0)).a(("C64", "nv", "t")).branch({0: "DEAD.big"}, "U.long")
     P("U.long").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
     g.on("DEAD.big", range(257), "DEAD", E.rej("not covered: constant beyond int"), "r")
