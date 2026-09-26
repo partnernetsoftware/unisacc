@@ -416,3 +416,24 @@ images.  Divide-by-zero is a result code, not a trap: `A64`/`A64I` set
 r := 1 and W[d] := 0 when a div/rem divisor is 0, else r := 0, so the delta
 decides what a zero divisor means.  `C64` / `C64U` set r := 0,1,2 for <,=,>
 on the signed / unsigned images.
+
+### 11.2 #if / #elif expressions without macros (2026-09-26)
+
+`exec/pp/gen.py` XE: a shunting-yard evaluator in the delta. Operator stack
+at W[64e6..], value and poison stacks at W[65e6..] / W[66e6..], precedence
+table at W[67e6..] (written at init). Covered tokens: decimal (<= 18 digits)
+and hex (<= 15 digits) constants without suffix, `0`, `defined X`,
+`defined(X)`, `( )`, unary `! ~ - +`, binary `* / % + - << >> < <= > >= ==
+!= & ^ | && ||`, `?:`. Arithmetic is A64 / C64 (intmax_t, signed).
+
+Division by zero: each value carries a poison bit; `/ %` with a zero divisor
+sets it, `&& || ?:` drop the poison of the operand they do not evaluate
+(matches `ppskip` in front_pp.c). A poisoned result is **not covered**: the
+reference prints `division by zero in #if` on stderr and still writes the
+text with exit 0 under -E, which the one-channel delta cannot reproduce.
+
+Not covered: any other identifier (`#if macro name`; macro expansion in #if
+is the next step), char constants, u/l suffixes, octal, malformed lines.
+
+Measured: 18 probes (12 equal, 6 not covered, 0 DIFF); ex + corpus (353
+files): 276 equal, 43 equal-noauto, 6 reject-agree, 28 not covered, 0 DIFF.

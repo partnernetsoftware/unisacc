@@ -136,6 +136,186 @@ def sbconst(s):
     return [("SBCLR",)] + [("SBOUT", c) for c in s.encode()]
 
 
+# ---- XE: #if expression evaluator (research/e2-pp-delta.md s11.2) ---------
+# shunting-yard over an operator stack (XOB) and value/poison stacks (XVB,
+# XPB) in W; 64-bit signed via A64/C64.  A division by zero sets the value's
+# poison bit; && || ?: drop the poison of the operand they do not evaluate.
+XOB, XVB, XPB, XPRB = 64 * 10 ** 6, 65 * 10 ** 6, 66 * 10 ** 6, 67 * 10 ** 6
+# code: (spelling, prec, arity)
+XOPS = {1: ("(", 0, 0), 2: ("?", 1, 0), 3: ("tern", 2, 3),
+        4: ("||", 3, 2), 5: ("&&", 4, 2), 6: ("|", 5, 2), 7: ("^", 6, 2), 8: ("&", 7, 2),
+        9: ("==", 8, 2), 10: ("!=", 8, 2), 11: ("<", 9, 2), 12: ("<=", 9, 2), 13: (">", 9, 2),
+        14: (">=", 9, 2), 15: ("<<", 10, 2), 16: (">>", 10, 2), 17: ("+", 11, 2), 18: ("-", 11, 2),
+        19: ("*", 12, 2), 20: ("/", 12, 2), 21: ("%", 12, 2),
+        22: ("u!", 13, 1), 23: ("u~", 13, 1), 24: ("u-", 13, 1), 25: ("u+", 13, 1)}
+XCODE = {v[0]: k for k, v in XOPS.items()}
+
+
+def xe_init():
+    a = []
+    for c, (_, p, _) in list(XOPS.items()) + [(0, (None, -1, 0))]:
+        a += [("LDI", "xc", XPRB + c), ("LDI", "xq", p), ("STX", "xc", 0, "xq")]
+    return a
+
+
+def xpushop(code):
+    return [("ALUI", "add", "xa", "XOS", XOB), ("LDI", "xc", code), ("STX", "xa", 0, "xc"),
+            ("ALUI", "add", "XOS", "XOS", 1)]
+
+
+XPUSHV = [("ALUI", "add", "xa", "XVS", XVB), ("STX", "xa", 0, "xr"),
+          ("ALUI", "add", "xa", "XVS", XPB), ("STX", "xa", 0, "xrp"), ("ALUI", "add", "XVS", "XVS", 1)]
+XTOP = [("ALUI", "add", "xa", "XOS", XOB - 1), ("LDX", "xt", "xa", 0),
+        ("ALUI", "add", "xa", "xt", XPRB), ("LDX", "xq", "xa", 0)]
+
+
+def xpopv(v, p):
+    return [("ALUI", "sub", "XVS", "XVS", 1), ("ALUI", "add", "xa", "XVS", XVB), ("LDX", v, "xa", 0),
+            ("ALUI", "add", "xa", "XVS", XPB), ("LDX", p, "xa", 0)]
+
+
+def build_xe(g, NC):
+    nc = ("DEAD", NC("#if expression"))
+    g.els("XE", "XO", [("LDI", "XOS", 1), ("LDI", "XVS", 0), ("LDI", "xz", 0),
+                       ("ALUI", "add", "xa", "XOS", XOB - 1), ("STX", "xa", 0, "xz")])
+
+    def popwhile(name, p, nxt, acts):
+        g.els(name, name + "c", XTOP + [("CMPI", "xq", p)])
+        sub, pu = g.call("XRED", name)
+        g.r(name + "c", {(1, 2): (sub, pu), 0: (nxt, acts)})
+
+    # operand expected
+    g.on("XO", WS, "XO", [("ADV",)])
+    g.on("XO", [40], "XO", [("ADV",)] + xpushop(1))
+    for ch, sp in ((33, "u!"), (126, "u~"), (45, "u-"), (43, "u+")):
+        g.on("XO", [ch], "XO", [("ADV",)] + xpushop(XCODE[sp]))
+    g.on("XO", [48], "XN0", [("ADV",), ("LDI", "xr", 0), ("LDI", "xrp", 0)])
+    g.on("XO", DI, "XND", [("LDI", "xr", 0), ("LDI", "xrp", 0), ("LDI", "xnc", 0)])
+    g.on("XO", AL, "XID", [("MARK", "XS")])
+    g.els("XO", *nc)
+    g.on("XN0", [120, 88], "XNH0", [("ADV",), ("LDI", "xnc", 0)])
+    g.on("XN0", ID | {46, 39}, *nc)
+    g.els("XN0", "XR", XPUSHV)
+    for c in DI:
+        g.on("XND", [c], "XND", [("ADV",), ("A64I", "mul", "xr", "xr", 10),
+                                 ("A64I", "add", "xr", "xr", c - 48), ("ALUI", "add", "xnc", "xnc", 1)])
+    g.on("XND", AL | {46, 39}, *nc)
+    g.els("XND", "XNDE", [("CMPI", "xnc", 18)])
+    g.r("XNDE", {(0, 1): ("XR", XPUSHV), 2: nc})
+    hx = {c: c - 48 for c in DI}
+    hx.update({c: c - 87 for c in range(97, 103)})
+    hx.update({c: c - 55 for c in range(65, 71)})
+    for st in ("XNH0", "XNH"):
+        for c, v in hx.items():
+            g.on(st, [c], "XNH", [("ADV",), ("A64I", "shl", "xr", "xr", 4),
+                                  ("A64I", "or", "xr", "xr", v), ("ALUI", "add", "xnc", "xnc", 1)])
+    g.els("XNH0", *nc)
+    g.on("XNH", ID | {46, 39}, *nc)
+    g.els("XNH", "XNHE", [("CMPI", "xnc", 15)])
+    g.r("XNHE", {(0, 1): ("XR", XPUSHV), 2: nc})
+    # identifier: only `defined`
+    g.on("XID", ID, "XID", [("ADV",)])
+    g.els("XID", "XID1", [("MARK", "XE_"), ("INTERN", "t", "XS", "XE_"), ("CMP", "t", "ID_DEFD")])
+    g.r("XID1", {1: ("XD", [("LDI", "xpar", 0)]), (0, 2): ("DEAD", NC("#if macro name"))})
+    g.on("XD", WS, "XD", [("ADV",)])
+    g.on("XD", [40], "XDP", [("ADV",), ("LDI", "xpar", 1)])
+    g.on("XD", AL, "XDI", [("MARK", "XS")])
+    g.els("XD", *nc)
+    g.on("XDP", WS, "XDP", [("ADV",)])
+    g.on("XDP", AL, "XDI", [("MARK", "XS")])
+    g.els("XDP", *nc)
+    g.on("XDI", ID, "XDI", [("ADV",)])
+    g.els("XDI", "XDW", [("MARK", "XE_"), ("INTERN", "NID", "XS", "XE_"), ("CMPI", "xpar", 1)])
+    sub, pu = g.call("MFIND", "XDM")
+    g.r("XDW", {1: ("XDC", []), (0, 2): (sub, [("LDI", "SEGQ", -1)] + pu)})
+    g.on("XDC", WS, "XDC", [("ADV",)])
+    g.on("XDC", [41], sub, [("ADV",), ("LDI", "SEGQ", -1)] + pu)
+    g.els("XDC", *nc)
+    g.els("XDM", "XDM1", [("CMPI", "M", 0)])
+    g.r("XDM1", {0: ("XR", [("LDI", "xr", 0), ("LDI", "xrp", 0)] + XPUSHV),
+                 (1, 2): ("XR", [("LDI", "xr", 1), ("LDI", "xrp", 0)] + XPUSHV)})
+    # operator expected
+    g.on("XR", WS, "XR", [("ADV",)])
+    g.on("XR", [10, EOF], "XEND", [])
+    single = {42: "*", 47: "/", 37: "%", 43: "+", 45: "-", 94: "^"}
+    for ch, sp in single.items():
+        g.on("XR", [ch], "XB%d" % XCODE[sp], [("ADV",)])
+    for ch, sp, sp2 in ((38, "&", "&&"), (124, "|", "||")):
+        g.on("XR", [ch], "XR%d" % ch, [("ADV",)])
+        g.on("XR%d" % ch, [ch], "XB%d" % XCODE[sp2], [("ADV",)])
+        g.els("XR%d" % ch, "XB%d" % XCODE[sp])
+    for ch, sp in ((60, "<"), (62, ">")):
+        g.on("XR", [ch], "XR%d" % ch, [("ADV",)])
+        g.on("XR%d" % ch, [ch], "XB%d" % XCODE[sp + sp], [("ADV",)])
+        g.on("XR%d" % ch, [61], "XB%d" % XCODE[sp + "="], [("ADV",)])
+        g.els("XR%d" % ch, "XB%d" % XCODE[sp])
+    for ch, sp in ((61, "=="), (33, "!=")):
+        g.on("XR", [ch], "XR%d" % ch, [("ADV",)])
+        g.on("XR%d" % ch, [61], "XB%d" % XCODE[sp], [("ADV",)])
+        g.els("XR%d" % ch, *nc)
+    g.on("XR", [63], "XQ", [("ADV",)])
+    g.on("XR", [58], "XC", [("ADV",)])
+    g.on("XR", [41], "XP", [("ADV",)])
+    g.els("XR", *nc)
+    for c, (sp, p, ar) in XOPS.items():
+        if ar == 2:
+            popwhile("XB%d" % c, p, "XO", xpushop(c))
+    popwhile("XQ", 3, "XO", xpushop(2))
+    popwhile("XC", 2, "XC2", [("CMPI", "xt", 2)])
+    g.r("XC2", {1: ("XO", [("ALUI", "add", "xa", "XOS", XOB - 1), ("LDI", "xc", 3), ("STX", "xa", 0, "xc")]),
+                (0, 2): nc})
+    popwhile("XP", 1, "XP2", [("CMPI", "xt", 1)])
+    g.r("XP2", {1: ("XR", [("ALUI", "sub", "XOS", "XOS", 1)]), (0, 2): nc})
+    popwhile("XEND", 2, "XEND2", [("CMPI", "XOS", 1)])
+    g.r("XEND2", {1: ("RET", xpopv("XV", "XP")), (0, 2): nc})
+
+    # XRED: pop one operator and apply it
+    g.els("XRED", "XRD", [("ALUI", "sub", "XOS", "XOS", 1), ("ALUI", "add", "xa", "XOS", XOB),
+                          ("LDX", "xc", "xa", 0), ("RLD", "xc")])
+    cases = {}
+    or_p = [("ALU", "or", "xrp", "xap", "xbp")]
+    ab = xpopv("xb", "xbp") + xpopv("xa_", "xap")
+    arith = {"*": "mul", "+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor",
+             "<<": "shl", ">>": "sar"}
+    for c, (sp, p, ar) in XOPS.items():
+        if sp in arith:
+            cases[c] = ("RET", ab + [("A64", arith[sp], "xr", "xa_", "xb")] + or_p + XPUSHV)
+        elif sp in ("/", "%"):
+            cases[c] = ("XDV", ab + or_p + [("A64", "sdiv" if sp == "/" else "srem", "xr", "xa_", "xb")])
+        elif sp in ("==", "!=", "<", "<=", ">", ">="):
+            cases[c] = ("XCMP%d" % c, ab + or_p + [("C64", "xa_", "xb")])
+            tv = {"==": (0, 1, 0), "!=": (1, 0, 1), "<": (1, 0, 0), "<=": (1, 1, 0),
+                  ">": (0, 0, 1), ">=": (0, 1, 1)}[sp]
+            g.r("XCMP%d" % c, {k: ("RET", [("LDI", "xr", tv[k])] + XPUSHV) for k in (0, 1, 2)})
+        elif sp in ("&&", "||"):
+            cases[c] = ("XL%d" % c, ab + [("C64", "xa_", "xz")])
+            short = 0 if sp == "&&" else 1
+            dec = (1,) if sp == "&&" else (0, 2)      # the left operand decides
+            rest = tuple(k for k in (0, 1, 2) if k not in dec)
+            g.r("XL%d" % c, {dec: ("RET", [("LDI", "xr", short), ("COPYW", "xrp", "xap")] + XPUSHV),
+                             rest: ("XLB", or_p + [("C64", "xb", "xz")])})
+        elif sp == "tern":
+            cases[c] = ("XT", xpopv("xb", "xbp") + xpopv("xa_", "xap") + xpopv("xk", "xkp") +
+                        [("C64", "xk", "xz")])
+        elif sp == "u!":
+            cases[c] = ("XLB", xpopv("xb", "xrp") + [("C64", "xb", "xz")])
+        elif sp == "u~":
+            cases[c] = ("RET", xpopv("xb", "xrp") + [("A64", "not", "xr", "xb", "xz")] + XPUSHV)
+        elif sp == "u-":
+            cases[c] = ("RET", xpopv("xb", "xrp") + [("A64", "sub", "xr", "xz", "xb")] + XPUSHV)
+        elif sp == "u+":
+            cases[c] = ("RET", xpopv("xr", "xrp") + XPUSHV)
+    g.r("XRD", cases)
+    g.r("XDV", {0: ("RET", XPUSHV), 1: ("RET", [("LDI", "xrp", 1)] + XPUSHV)})
+    # XLB: xr := (compared value != 0); `!` then inverts
+    g.r("XLB", {1: ("XLBX", [("LDI", "xr", 0), ("RLD", "xc")]),
+                (0, 2): ("XLBX", [("LDI", "xr", 1), ("RLD", "xc")])})
+    g.r("XLBX", {XCODE["u!"]: ("RET", [("LDI", "xt", 1), ("ALU", "sub", "xr", "xt", "xr")] + XPUSHV),
+                 (XCODE["&&"], XCODE["||"]): ("RET", XPUSHV)})
+    g.r("XT", {1: ("RET", [("COPYW", "xr", "xb"), ("ALU", "or", "xrp", "xkp", "xbp")] + XPUSHV),
+               (0, 2): ("RET", [("COPYW", "xr", "xa_"), ("ALU", "or", "xrp", "xkp", "xap")] + XPUSHV)})
+
+
 def build():
     g = G()
     NC = lambda what: [("REJECT", "not covered: " + what)]   # noqa: E731
@@ -152,7 +332,7 @@ def build():
     init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
     for w, nm in (("0", "ID_0"), ("1", "ID_1"), ("defined", "ID_DEFD")):
         init += sbconst(w) + [("SBINTERN", nm)]
-    init += [("LDI", "RUN", 0), ("LDI", "FP", 0)]
+    init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
     g.els("START", "P0S", init)
 
     # ---- P0: shebang, then splice -----------------------------------------
@@ -335,48 +515,22 @@ def build():
     for d, w in enumerate(DIRV):
         st = "D_%s" % w
         if w in ("if", "elif"):
-            # smallest #if/#elif: `0`, `1`, `defined X`, `defined ( X )`
-            # alone on the line; a dead #if is not evaluated (as the
-            # reference); anything else: not covered
-            nc = ("DEAD", NC("#%s expression" % w))
-            ev = st + "_e"
+            # #if/#elif: integer constants, defined, the C operators;
+            # evaluated by XE (64-bit); a dead #if is not evaluated (as the
+            # reference); any macro name: not covered
+            sub, pu = g.call("XE", st + "_x")
             if w == "if":
                 g.els(st, st + "_l", [("RLD", "LIVE")])
                 g.r(st + "_l", {0: (st + "_a0", [("RLD", "LIVE")]),
-                                tuple(range(1, 257)): (ev, [("CMP", "NID", "ID_0")])})
+                                tuple(range(1, 257)): (sub, [("JUMP", "NS")] + pu)})
             else:
-                g.els(st, ev, [("CMP", "NID", "ID_0")])
-            g.r(ev, {1: (st + "_z0", [("JUMP", "NE")]), (0, 2): (ev + "1", [("CMP", "NID", "ID_1")])})
-            g.r(ev + "1", {1: (st + "_z1", [("JUMP", "NE")]), (0, 2): (ev + "2", [("CMP", "NID", "ID_DEFD")])})
-            g.r(ev + "2", {1: (st + "_d", [("JUMP", "NE"), ("LDI", "par", 0)]), (0, 2): nc})
-            for v in (0, 1):                        # constant: rest of line blank
-                z = st + "_z%d" % v
-                g.on(z, WS, z, [("ADV",)])
-                g.on(z, [10, EOF], st + "_a%d" % v, [("RLD", "LIVE")])
-                g.els(z, *nc)
-            g.on(st + "_d", WS, st + "_d", [("ADV",)])
-            g.on(st + "_d", [40], st + "_dp", [("ADV",), ("LDI", "par", 1)])
-            g.on(st + "_d", AL, st + "_di", [("MARK", "NS")])
-            g.els(st + "_d", *nc)
-            g.on(st + "_dp", WS, st + "_dp", [("ADV",)])
-            g.on(st + "_dp", AL, st + "_di", [("MARK", "NS")])
-            g.els(st + "_dp", *nc)
-            g.on(st + "_di", ID, st + "_di", [("ADV",)])
-            g.els(st + "_di", st + "_dw", [("MARK", "NE"), ("INTERN", "NID", "NS", "NE"), ("RLD", "par")],
-                  )
-            g.els(st + "_dw", st + "_dw0", [])
-            g.on(st + "_dw0", WS, st + "_dw0", [("ADV",)])
-            g.on(st + "_dw0", [10, EOF], st + "_dq", [("CMPI", "par", 0)])
-            g.on(st + "_dw0", [41], st + "_dr", [("ADV",), ("CMPI", "par", 1)])
-            g.els(st + "_dw0", *nc)
-            g.on(st + "_dr", WS, st + "_dr", [("ADV",)])
-            g.on(st + "_dr", [10, EOF], st + "_dq", [])
-            g.els(st + "_dr", *nc)
-            sub, pu = g.call("MFIND", st + "_m")
-            g.r(st + "_dq", {1: (sub, [("LDI", "SEGQ", -1)] + pu), (0, 2): nc})
-            g.els(st + "_m", st + "_f", [("CMPI", "M", 0)])
-            flag = {0: 0, 1: 1, 2: 1}
-            g.r(st + "_f", {k: (st + "_a%d" % flag[k], [("RLD", "LIVE")]) for k in (0, 1, 2)})
+                g.els(st, sub, [("JUMP", "NS")] + pu)
+            g.els(st + "_x", st + "_xp", [("CMPI", "XP", 0), ])
+            g.r(st + "_xp", {1: (st + "_xv", [("C64", "XV", "xz")]),
+                             (0, 2): ("DEAD", NC("#if division by zero"))})
+            # (the reference reports it on stderr and still writes the text,
+            # -E exit 0; one channel here, so: not covered)
+            g.r(st + "_xv", {1: (st + "_a0", [("RLD", "LIVE")]), (0, 2): (st + "_a1", [("RLD", "LIVE")])})
         elif w in ("ifdef", "ifndef"):
             sub, pu = g.call("MFIND", st + "_m")
             g.els(st, sub, [("LDI", "SEGQ", -1)] + pu)
@@ -624,6 +778,7 @@ def build():
                   (0, 2): ("ACC", [])})  # the token rescan is complete: one round
     g.r("P4N", {1: ("ACC", []), (0, 2): ("P4", [("SWAP",)])})
     g.els("ACC", "ACC", [("ACCEPT",)])
+    build_xe(g, NC)
     g.finish()
     return g
 
