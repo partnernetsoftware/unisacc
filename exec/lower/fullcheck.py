@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Full Linux lowering referee: all typed fields, code and labels; no filtering."""
-import pathlib,subprocess,sys,tempfile
+import os,pathlib,subprocess,sys,tempfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 from unisa.tape import parse
 from unisa.lower import lower
@@ -16,7 +16,7 @@ def same(a,b):
 
 
 def check(raw,out,oracle):
-    ref=lower(parse(raw),'lnx/x86_64',oracle,drive='built');got=parse_tins(out)
+    ref=lower(parse(raw),os.environ.get('LOWER_TARGET','lnx/x86_64'),oracle,drive='built');got=parse_tins(out)
     assert len(got.data)<=len(ref.data) and got.data==ref.data[:len(got.data)] and not any(ref.data[len(got.data):]),'data differs'
     assert same({k:v for k,v in vars(ref).items() if k not in ('code','data')},{k:v for k,v in vars(got).items() if k not in ('code','data')}),'layout/labels differ'
     assert len(ref.code)==len(got.code),'instruction count differs'
@@ -32,6 +32,8 @@ def main():
         p=pathlib.Path(d)/'input'
         # Fusion blockers, multiple labels, entry not first, syscall argument aliasing.
         fixture='f:\n  ret\n_start:\nsecond:\n  .frame 8\n  store64 [r7+0], r0\n  load64 r1, [r7+0]\n  .frame -8\n  .frame 8\nbarrier:\n  store64 [r7+0], r2\n  .sys write, r2, r1, r0\n  .sys6 mmap, r0, r1, r2, r3, r4, r5\n  .exit r0\n'
+        if os.environ.get('LOWER_TARGET')=='lnx/arm64':
+            fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in ('open','unlink','rename'))
         cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
         for name,raw in cases:
             p.write_text(raw)

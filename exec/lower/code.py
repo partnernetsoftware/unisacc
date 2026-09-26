@@ -1,4 +1,5 @@
-"""Linux x86_64 instruction lowering delta. Hand control rules, declared facts.
+"""Linux instruction lowering delta. Hand control rules, declared facts.
+ARM shares setup and syscalls; its instruction fusions are pending.
 regmap/enc/abi/reloc are read from TSV; no reference lower() is run by generator.
 """
 from pathlib import Path
@@ -10,15 +11,15 @@ def rows(name):
     return [s.split('\t') for s in lines if s and not s.startswith('#') and '=>' not in s]
 
 
-def install(E):
+def install(E, arch="x86_64"):
     P,g=E.P,E.g
     from unisa.tape import SHAPE
     from unisa.catalog import WINAPI
     from unisa.lower import WIN_HSTD, WIN_WRITTEN, SYSA, SYSFP, SYSSP
-    regmap={r[0]:r[2] for r in rows('regmap') if r[1]=='x86_64'}
-    enc={r[0]:r[3] for r in rows('enc') if r[1:3]==['lnx','x86_64']}
-    abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==['lnx','x86_64']}
-    reloc={r[0]:r[2] for r in rows('reloc') if r[1]=='x86_64'}
+    regmap={r[0]:r[2] for r in rows('regmap') if r[1]==arch}
+    enc={r[0]:r[3] for r in rows('enc') if r[1:3]==['lnx',arch]}
+    abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==['lnx',arch]}
+    reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
     p=P('C.init');p.a(('LDI','nc',0),('LDI','entry',-1),('LDI','firstop',-1),('LDI','pending',0))
     words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','8','-8','_start:','write','exit']))
@@ -64,6 +65,8 @@ def install(E):
     P('C.enter').branch({1:'C.setup'},'C.dispatch',[('CMP','ci','entry')])
     p=P('C.setup');p.o('spinit '+regmap['r7']+'\nargsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', true\n').goto('C.dispatch')
     special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
+    if arch=='arm64':
+        special.pop('.frame'); special.pop('load64')
     p=P('C.dispatch')
     for op,tag in special.items():
         p.branch({1:'DO.'+tag},'CD.'+tag,[('CMP','op',ids[op])]);p=P('CD.'+tag)
@@ -136,18 +139,23 @@ def install(E):
     p.goto('C.fail')
     for op,f in abi.items():
         if f[0]=='none':continue
-        if f[10]!='plain':raise ValueError('new Linux x86 argument shape requires migration')
         p=P('SC.'+op)
         p.a(('SBCLR',),[('SBOUT',c) for c in f[7].encode()],('SBSAVE','retblob')).o('setreg '+f[9]+', imm '+str(int(f[0],0))+' role=sysno\n')
         for mode in range(4):
             p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
             q=P('SC.'+op+'.m'+str(mode))
-            for i in range(6 if mode==1 else 3):
-                q.o('setreg '+f[1+i]+', ')
-                if (mode==2 and i==0) or (mode==3 and i>0):q.o('imm '+('1' if mode==2 else '0'))
-                else:
-                    off=(SYSA+i*8) if mode==1 else ((i-1)*8 if mode==2 else i*8)
-                    q.o('mem ').a(('LDI','offset',off)).call('ADDR')
+            if mode==0:
+                sources={'plain':[('mem',0),('mem',8),('mem',16)],
+                         'atfd_1':[('imm',-100),('mem',0),('mem',8),('mem',16)],
+                         'atfd_1_zero':[('imm',-100),('mem',0),('imm',0)],
+                         'atfd_2_zero5':[('imm',-100),('mem',0),('imm',-100),('mem',8),('imm',0)]}[f[10]]
+            elif mode==1:sources=[('mem',SYSA+i*8) for i in range(6)]
+            elif mode==2:sources=[('imm',1),('mem',0),('mem',8)]
+            else:sources=[('mem',0),('imm',0),('imm',0)]
+            for i,(kind,value) in enumerate(sources):
+                q.o('setreg '+f[1+i]+', '+kind+' ')
+                if kind=='imm':q.o(str(value))
+                else:q.a(('LDI','offset',value)).call('ADDR')
                 q.o(' role=arg'+str(i)+'\n')
             q.goto('SC.'+op+'.gate');p=P('SC.'+op+'.n'+str(mode))
         p.goto('C.fail')
@@ -156,4 +164,4 @@ def install(E):
         for name,off in [('hstd',WIN_HSTD),('written',WIN_WRITTEN),('scr0',0),('scr1',8)]:p.o(' '+name+'=').a(('LDI','offset',off)).call('ADDR')
         p.o('\n').ret()
     P('C.done').a(('INPOP',),('ACCEPT',)).goto('DEAD')
-    g.on('C.fail',range(257),'DEAD',E.rej('not covered: Linux x86 lowering'),'r')
+    g.on('C.fail',range(257),'DEAD',E.rej('not covered: Linux '+arch+' lowering'),'r')
