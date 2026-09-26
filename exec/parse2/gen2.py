@@ -222,7 +222,34 @@ def printf():
     # non-empty literal run is `.str Sk "..."` -- printable bytes as they are, others \xHH, then \x00
     p = P("POOL")
     p.call("NEXT").label("PO.l")
-    p.tok({"eof": "RET", TK_ID: "PO.id"}, "PO.nx")
+    p.tok({"eof": "RET", TK_ID: "PO.id", E.TK_STR: "PO.lit"}, "PO.nx")
+    P("PO.lit").a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PL.w")
+    g.on("PL.w", [92], "PL.es", [("ADV",)])
+    g.on("PL.w", [256], "PL.end", [("INPOP",)])
+    for c in range(256):
+        if c != 92:
+            g.on("PL.w", [c], "PL.b", [("ADV",), ("LDI", "bv", c)])
+    for ch, v in ESC.items():
+        g.on("PL.es", [ord(ch)], "PL.b", [("ADV",), ("LDI", "bv", v)])
+    g.els("PL.es", "DEAD", E.rej("not covered: string escape"))
+    q = P("PL.b")
+    q.branch({1: "PL.open"}, "PL.byte", [("CMPI", "cnt", 0)])
+    q = P("PL.open")
+    emit(q, "pool_open").goto("PL.byte")
+    P("PL.byte").a(("ALUI", "add", "cnt", "cnt", 1), ("RLD", "bv")).goto("PL.out")
+    for c in range(256):
+        if c in (34, 92):
+            g.on("PL.out", [c], "PL.w", [("OUT", 92), ("OUT", c)], "r")
+        elif 32 <= c < 127:
+            g.on("PL.out", [c], "PL.w", [("OUT", c)], "r")
+        else:
+            g.on("PL.out", [c], "PL.w", [("OUT", 92), ("OUT", ord("x")), ("OUT", ord(HEX[c >> 4])), ("OUT", ord(HEX[c & 15]))], "r")
+    q = P("PL.end")     # an empty literal still has its \x00
+    q.branch({1: "PL.e0"}, "PL.e1", [("CMPI", "cnt", 0)])
+    q = P("PL.e0")
+    emit(q, "pool_open").goto("PL.e1")
+    q = P("PL.e1")
+    emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).call("NEXT").goto("PO.l")
     P("PO.nx").call("NEXT").goto("PO.l")
     P("PO.id").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf"}, "PO.nx", [("CMP", "v", "pfid")])
     P("PO.pf").call("NEXT").tok({"(": "PO.p1"}, "PO.l")
@@ -621,8 +648,10 @@ def build():
     P("X.call").call("CALL").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     ladder("E", "UNARY")
     ladder("C", None)
+    P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "RET")
+    g.on("DEAD.adj", range(257), "DEAD", E.rej("not covered: adjacent string literals"), "r")
     p = P("UNARY")
-    p.tok({"-": "U.neg", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec", "&": "U.amp", "*": "U.deref"}, bad("expression"))
+    p.tok({E.TK_STR: "U.str", "-": "U.neg", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec", "&": "U.amp", "*": "U.deref"}, bad("expression"))
     P("U.amp").call("NEXT").tok({TK_ID: "U.amp1"}, bad("address of"))
     q = P("U.amp1")
     q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP")
