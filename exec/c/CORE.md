@@ -44,10 +44,10 @@ The signed decimal renderer covers INT64_MIN without signed negation overflow.
 
 | Object section | arm64 | x86_64 |
 |---|---:|---:|
-| machine code `__text` | 6,532 B | 7,758 B |
+| machine code `__text` | 6,396 B | 7,106 B |
 | constants `__const` | 380 B | 224 B |
 | diagnostic strings `__cstring` | 372 B | 372 B |
-| static zero storage | 104 B | 104 B |
+| static zero storage | 0 B | 0 B |
 | compact unwind | 800 B | 768 B |
 | eh_frame | 0 B | 1,024 B |
 
@@ -85,4 +85,11 @@ The next migration slice is documented in [asm/README.md](asm/README.md):
 handwritten inference, word arithmetic, buffer append, sparse indexed
 memory, binary string interning, blob copies, resource caching decimal field rendering and control/input stacks on arm64 and x86-64, with remaining C actions retained and an explicit
 build selector. The C-only measurement above includes the current capacity
-guards and explicit CoreMemory/CoreIntern/CoreBlobs/CoreResources/CoreStack/CoreFrames state. Product routing is unchanged.
+guards and explicit CoreMachine invocation state. Product routing is unchanged.
+
+
+CoreMachine now makes the complete mutable action state explicit. core_run
+allocates it locally, invokes the selected action engine and transfers/frees
+its owned buffers at exit. The arm64 action engine is assembly; x86-64 remains
+C. All decoded actions are low-level machine operations. See asm/README.md for
+per-action state comparisons and the remaining lifecycle migration boundary.

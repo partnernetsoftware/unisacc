@@ -4,8 +4,13 @@
 #include "core.h"
 #include <stdlib.h>
 #include <string.h>
+#if defined(UNISA_CORE_ASM_ACTION) && (!defined(UNISA_CORE_ASM_ALU) || !defined(UNISA_CORE_ASM_BUFFER) || !defined(UNISA_CORE_ASM_MEMORY) || !defined(UNISA_CORE_ASM_INTERN) || !defined(UNISA_CORE_ASM_BYTES) || !defined(UNISA_CORE_ASM_FORMAT) || !defined(UNISA_CORE_ASM_STACK))
+#error Assembly_actions_require_all_assembly_primitives
+#endif
+#ifndef UNISA_CORE_ASM_ACTION
 static void core_die(const char *s) { core_host_panic(s); abort(); }
 static void *core_alloc(void *p,size_t n) { p=realloc(p,n ? n : 1); if (!p) core_die("out of memory"); return p; }
+#endif
 #ifdef UNISA_CORE_ASM_FORMAT
 int core_decimal(char *s,I v);
 int core_field_fill(Buf *o,I at,I width,I value);
@@ -76,8 +81,6 @@ CORE_BUFFER_LINKAGE void core_put(Buf *o, int c, I at) {
 #endif
 
 /* ---- W: registers and the indexed memory (a hash map) ---- */
-static I *R;
-static CoreMemory memory;
 #ifdef UNISA_CORE_ASM_MEMORY
 I core_memory_get(const CoreMemory *m,I k);
 void core_memory_set(CoreMemory *m,I k,I v);
@@ -111,11 +114,8 @@ CORE_MEMORY_LINKAGE void core_mset(CoreMemory *m,I k,I v) {
     m->values[s]=v;
 }
 #endif
-#define mget(k) core_mget(&memory,(k))
-#define mset(k,v) core_mset(&memory,(k),(v))
 
 /* ---- blobs and interning ---- */
-static CoreBlobs blobs;
 #ifdef UNISA_CORE_ASM_BYTES
 int core_blob_add(CoreBlobs *t,const unsigned char *b,int n);
 #define core_badd core_blob_add
@@ -134,8 +134,6 @@ CORE_BYTES_LINKAGE int core_badd(CoreBlobs *t,const unsigned char *b,int n) {
     return t->n++;
 }
 #endif
-#define blob_add(b,n) core_badd(&blobs,(b),(n))
-static CoreIntern strings;
 #ifdef UNISA_CORE_ASM_INTERN
 I core_string_intern(CoreIntern *t,const unsigned char *b,int n);
 #define core_intern core_string_intern
@@ -173,10 +171,8 @@ CORE_INTERN_LINKAGE I core_intern(CoreIntern *t,const unsigned char *b,int n) {
     return t->entries[k].v;
 }
 #endif
-#define intern(b,n) core_intern(&strings,(b),(n))
 /* SBFIND: opaque resource key -> blob id (0: absent), cached. Blob zero
    is reserved by core_run before a resource can be queried. */
-static CoreResources resources;
 #ifdef UNISA_CORE_ASM_BYTES
 int core_resource_find(CoreResources *t,CoreBlobs *bs,const unsigned char *p,int n);
 #define core_rfind core_resource_find
@@ -194,7 +190,6 @@ CORE_BYTES_LINKAGE int core_rfind(CoreResources *t,CoreBlobs *bs,const unsigned 
     return id;
 }
 #endif
-#define sbfind(p,n) core_rfind(&resources,&blobs,(p),(n))
 
 #ifdef UNISA_CORE_ASM_ALU
 I core_alu32(int op,I a,I b);
@@ -275,128 +270,132 @@ CORE_STACK_LINKAGE void frame_push(CoreFrames *s,const CoreFrame *value) {
 CORE_STACK_LINKAGE void frame_pop(CoreFrames *s) { if (s->n>1) s->n--; }
 #endif
 
-/* Run one model over a byte stream. The caller owns input and receives
-   only accepted output. Registers, indexed memory, blobs and file cache are
-   stage-local; the include directory is an explicit process configuration. */
-int core_run(const CoreModel *m, unsigned char *input,
-             int inputn, const char *src, I maxsteps, CoreResult *result) {
+#ifdef UNISA_CORE_ASM_ACTION
+int core_action(CoreMachine *s,const I *a);
+#define action_run core_action
+#else
+#ifndef CORE_ACTION_LINKAGE
+#define CORE_ACTION_LINKAGE static
+#endif
+CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
+    const CoreModel *m=s->model; CoreResult *result=s->result; I *R=s->regs;
+    CoreFrame *F=&s->frames.entries[s->frames.n-1]; int op=(int)a[0];
+    switch (op) {
+    case ADV: F->i++; break;
+    case MARK: R[a[1]] = F->i; break;
+    case JUMP: F->i = R[a[1]]; break;
+    case LDI: R[a[1]] = a[2]; break;
+    case COPYW: R[a[1]] = R[a[2]]; break;
+    case ALU: R[a[2]] = alu32((int)a[1], R[a[3]], R[a[4]]); break;
+    case ALUI: R[a[2]] = alu32((int)a[1], R[a[3]], a[4]); break;
+    case CMP: case CMPI: { I u = R[a[1]], v = op == CMP ? R[a[2]] : a[2]; s->r = u < v ? 0 : u == v ? 1 : 2; } break;
+    case A64: case A64I: { int z; R[a[2]] = alu64((int)a[1], R[a[3]], op == A64 ? R[a[4]] : a[4], &z); s->r = z; } break;
+    case C64: { I u = R[a[1]], v = R[a[2]]; s->r = u < v ? 0 : u == v ? 1 : 2; } break;
+    case C64U: { uint64_t u = (uint64_t)R[a[1]], v = (uint64_t)R[a[2]]; s->r = u < v ? 0 : u == v ? 1 : 2; } break;
+    case INC: R[a[1]] = (I)(((uint64_t)R[a[1]] + 1) & 0xFFFFFFFFull); break;
+    case RLD: { I v = R[a[1]]; s->r = v >= 0 && v <= 256 ? v : 256; } break;
+    case LDX: R[a[1]] = core_mget(&s->memory,R[a[2]] + a[3]); break;
+    case STX: core_mset(&s->memory,R[a[1]] + a[2], R[a[3]]); break;
+    case OUT: if (s->osel == 0) core_put(&s->out, (int)a[1], s->ot); else core_put(&s->err, (int)a[1], 0); break;
+    case OUTW: if (s->osel == 0) core_put(&s->out, (int)(R[a[1]] & 255), s->ot); else core_put(&s->err, (int)(R[a[1]] & 255), 0); break;
+    case COPYT: if (F->i < F->end) { if (s->osel == 0) core_put(&s->out, F->b[F->i], s->ot); else core_put(&s->err, F->b[F->i], 0); } break;
+    case COPY: if (F->i < F->end) { if (s->osel == 0) core_put(&s->out, F->b[F->i], F->at ? F->at[F->i] : s->ot); else core_put(&s->err, F->b[F->i], 0); } break;
+    case SPAN: case SPANT: case SPAN2: {
+        I s0 = R[a[1]], s1 = op == SPAN2 ? R[a[2]] : F->i; if (s1 > F->end) s1 = F->end;
+        for (I j = s0 < 0 ? 0 : s0; j < s1; j++) {
+            if (s->osel == 1) core_put(&s->err, F->b[j], 0);
+            else core_put(&s->out, F->b[j], (op == SPANT || !F->at) ? s->ot : F->at[j]);
+        }
+    } break;
+    case OLAST: s->r = s->out.n ? s->out.b[s->out.n - 1] : 256; break;
+    case ODROP: if (s->out.n) s->out.n--; break;
+    case OLEN: R[a[1]] = s->out.n; break;
+    case OCUT: { I s0 = R[a[2]]; if (s0 < 0) s0 = 0; if (s0 > s->out.n) s0 = s->out.n;
+                 R[a[1]] = core_badd(&s->blobs,s->out.b + s0, (int)(s->out.n - s0)); s->out.n = (int)s0; } break;
+    case ORES: R[a[1]] = s->out.n; for (I j = 0; j < a[2]; j++) core_put(&s->out, ' ', s->ot); break;
+    case OFILL: if (field_fill(&s->out,R[a[1]],a[3],R[a[2]])) {
+                    result->reason="field overflow"; result->reason_n=14; s->status=1; return 1;
+                } break;
+    case OCLR: s->out.n = 0; break;
+    case OSEL: s->osel = (int)a[1]; break;
+    case SETOT: s->ot = R[a[1]]; break;
+    case XATTR: R[a[1]] = (F->at && F->i < F->end) ? F->at[F->i] : 0; break;
+    case PUSH: stack_push(&s->stack,(int)a[1]); break;
+    case POP: stack_pop(&s->stack); break;
+    case INTERN: case SBINTERN: {
+        if (op == INTERN) { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
+                            R[a[1]] = s0 < s1 ? core_intern(&s->strings,F->b + s0, (int)(s1 - s0)) : core_intern(&s->strings,(const unsigned char *)"", 0); }
+        else R[a[1]] = core_intern(&s->strings,s->scratch.b ? s->scratch.b : (unsigned char *)"", s->scratch.n);
+    } break;
+    case BLOBSAVE: { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
+                     R[a[1]] = s0 < s1 ? core_badd(&s->blobs,F->b + s0, (int)(s1 - s0)) : core_badd(&s->blobs,(const unsigned char *)"", 0); } break;
+    case SBSAVE: R[a[1]] = core_badd(&s->blobs,s->scratch.b ? s->scratch.b : (unsigned char *)"", s->scratch.n); break;
+    case INPUSH: case INPUSHX: case INPUSHXE: {
+        CoreFrame added; CoreFrame *G=&added;
+        if (op == INPUSH) { CoreBlob *B = &s->blobs.entries[R[a[1]]]; G->b = B->b; G->at = 0; G->i = 0; G->end = B->n; }
+        else { G->b = s->x; G->at = s->xattr; G->i = R[a[1]]; G->end = s->xn;
+               if (op == INPUSHXE && R[a[2]] < s->xn) G->end = R[a[2]]; }
+        frame_push(&s->frames,G);
+    } break;
+    case INPOP: frame_pop(&s->frames); break;
+    case SBCLR: s->scratch.n = 0; break;
+    case SBOUT: core_put(&s->scratch, (int)a[1], 0); break;
+    case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) core_put(&s->scratch, F->b[j], 0); } break;
+    case SBBLOB: { CoreBlob *B = &s->blobs.entries[R[a[1]]]; for (int j = 0; j < B->n; j++) core_put(&s->scratch, B->b[j], 0); } break;
+    case SBFIND: R[a[1]] = core_rfind(&s->resources,&s->blobs,s->scratch.b ? s->scratch.b : (unsigned char *)"", s->scratch.n); break;
+    case BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
+    case XLEN: R[a[1]] = F->end; break;
+    case BLEN: R[a[1]] = s->blobs.entries[R[a[2]]].n; break;
+    case DIVMOD10: { uint64_t v = (uint32_t)(uint64_t)R[a[1]]; R[a[1]] = (I)(v / 10); s->r = (I)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
+    case SWAP: { unsigned char *nb = core_alloc(0, s->out.n + 1); I *na = core_alloc(0, sizeof(I) * (s->out.n + 1));
+                 memcpy(nb, s->out.b, s->out.n); memcpy(na, s->out.at, sizeof(I) * s->out.n);
+                 if (s->x != s->input) free(s->x); free(s->xattr);
+                 s->x = nb; s->xattr = na; s->xn = s->out.n; s->out.n = 0; s->frames.n=1; s->frames.entries[0].b=s->x; s->frames.entries[0].at=s->xattr; s->frames.entries[0].i=0; s->frames.entries[0].end=s->xn; } break;
+    case ACCEPT: return 1;
+    case REJECT: result->reason=m->str[a[1]]; result->reason_n=m->strl[a[1]]; s->status = 1; return 1;
+    default: core_die("bad action");
+    }
+    return 0;
+}
+#endif
+
+/* Run one model; all mutable ownership is explicit and invocation-local. */
+int core_run(const CoreModel *m,unsigned char *input,
+             int inputn,const char *src,I maxsteps,CoreResult *result) {
     memset(result,0,sizeof *result);
-    int status = 0;
-    R = calloc(m->nrg + 1, sizeof(I));
-    blob_add((const unsigned char *)"", 0);
-    blob_add((const unsigned char *)src, (int)strlen(src));
-    unsigned char *x = input; I *xattr = calloc(inputn + 1, sizeof(I)); I xn = inputn;
-    CoreFrames frames={0}; CoreFrame first;
-    first.b=x; first.at=xattr; first.i=0; first.end=xn; frame_push(&frames,&first);
-    Buf o = {0}, e = {0}; int osel = 0; I OT = 0;
-    Buf sb = {0};
-    CoreStack stack={0};
-    I steps=0;
-    int q = m->start; I r = 0;
+    CoreMachine s={0}; s.model=m; s.result=result; s.input=input; s.x=input;
+    s.regs=calloc(m->nrg+1,sizeof(I));
+    core_badd(&s.blobs,(const unsigned char *)"",0);
+    core_badd(&s.blobs,(const unsigned char *)src,(int)strlen(src));
+    s.xattr=calloc(inputn+1,sizeof(I)); s.xn=inputn;
+    CoreFrame first; first.b=s.x; first.at=s.xattr; first.i=0; first.end=s.xn;
+    frame_push(&s.frames,&first);
+    I steps=0; int q=m->start;
     for (;;) {
-        if (++steps > maxsteps) { result->reason="timeout"; status = 3; goto finished; }
-        CoreFrame *F = &frames.entries[frames.n-1];
-        int nx = -1, sq = -1;
-        int key = m->mode[q] == 1 ? (stack.n ? stack.entries[stack.n-1] : -1) :
-            m->mode[q] == 0 ? (F->i < F->end ? F->b[F->i] : 256) : (r >= 0 && r <= 256 ? (int)r : 256);
+        if (++steps>maxsteps) { result->reason="timeout"; s.status=3; break; }
+        CoreFrame *F=&s.frames.entries[s.frames.n-1]; int nx=-1,sq=-1;
+        int key=m->mode[q]==1 ? (s.stack.n ? s.stack.entries[s.stack.n-1] : -1) :
+            m->mode[q]==0 ? (F->i<F->end ? F->b[F->i] : 256) : (s.r>=0 && s.r<=256 ? (int)s.r : 256);
         result->reason=core_transition(m,q,key,&nx,&sq);
-        if (result->reason) { status=2; goto finished; }
-        if (nx < 0) { result->reason="no transition"; status = 2; goto finished; }
-        q = nx;
-        const I *a = m->qa + m->qoff[sq];
-        for (int k = 0; k < m->qlen[sq]; k++) {
-            int op = (int)a[0];
-            F = &frames.entries[frames.n-1];
-            switch (op) {
-            case ADV: F->i++; break;
-            case MARK: R[a[1]] = F->i; break;
-            case JUMP: F->i = R[a[1]]; break;
-            case LDI: R[a[1]] = a[2]; break;
-            case COPYW: R[a[1]] = R[a[2]]; break;
-            case ALU: R[a[2]] = alu32((int)a[1], R[a[3]], R[a[4]]); break;
-            case ALUI: R[a[2]] = alu32((int)a[1], R[a[3]], a[4]); break;
-            case CMP: case CMPI: { I u = R[a[1]], v = op == CMP ? R[a[2]] : a[2]; r = u < v ? 0 : u == v ? 1 : 2; } break;
-            case A64: case A64I: { int z; R[a[2]] = alu64((int)a[1], R[a[3]], op == A64 ? R[a[4]] : a[4], &z); r = z; } break;
-            case C64: { I u = R[a[1]], v = R[a[2]]; r = u < v ? 0 : u == v ? 1 : 2; } break;
-            case C64U: { uint64_t u = (uint64_t)R[a[1]], v = (uint64_t)R[a[2]]; r = u < v ? 0 : u == v ? 1 : 2; } break;
-            case INC: R[a[1]] = (I)(((uint64_t)R[a[1]] + 1) & 0xFFFFFFFFull); break;
-            case RLD: { I v = R[a[1]]; r = v >= 0 && v <= 256 ? v : 256; } break;
-            case LDX: R[a[1]] = mget(R[a[2]] + a[3]); break;
-            case STX: mset(R[a[1]] + a[2], R[a[3]]); break;
-            case OUT: if (osel == 0) core_put(&o, (int)a[1], OT); else core_put(&e, (int)a[1], 0); break;
-            case OUTW: if (osel == 0) core_put(&o, (int)(R[a[1]] & 255), OT); else core_put(&e, (int)(R[a[1]] & 255), 0); break;
-            case COPYT: if (F->i < F->end) { if (osel == 0) core_put(&o, F->b[F->i], OT); else core_put(&e, F->b[F->i], 0); } break;
-            case COPY: if (F->i < F->end) { if (osel == 0) core_put(&o, F->b[F->i], F->at ? F->at[F->i] : OT); else core_put(&e, F->b[F->i], 0); } break;
-            case SPAN: case SPANT: case SPAN2: {
-                I s0 = R[a[1]], s1 = op == SPAN2 ? R[a[2]] : F->i; if (s1 > F->end) s1 = F->end;
-                for (I j = s0 < 0 ? 0 : s0; j < s1; j++) {
-                    if (osel == 1) core_put(&e, F->b[j], 0);
-                    else core_put(&o, F->b[j], (op == SPANT || !F->at) ? OT : F->at[j]);
-                }
-            } break;
-            case OLAST: r = o.n ? o.b[o.n - 1] : 256; break;
-            case ODROP: if (o.n) o.n--; break;
-            case OLEN: R[a[1]] = o.n; break;
-            case OCUT: { I s0 = R[a[2]]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n;
-                         R[a[1]] = blob_add(o.b + s0, (int)(o.n - s0)); o.n = (int)s0; } break;
-            case ORES: R[a[1]] = o.n; for (I j = 0; j < a[2]; j++) core_put(&o, ' ', OT); break;
-            case OFILL: if (field_fill(&o,R[a[1]],a[3],R[a[2]])) {
-                            result->reason="field overflow"; result->reason_n=14; status=1; goto finished;
-                        } break;
-            case OCLR: o.n = 0; break;
-            case OSEL: osel = (int)a[1]; break;
-            case SETOT: OT = R[a[1]]; break;
-            case XATTR: R[a[1]] = (F->at && F->i < F->end) ? F->at[F->i] : 0; break;
-            case PUSH: stack_push(&stack,(int)a[1]); break;
-            case POP: stack_pop(&stack); break;
-            case INTERN: case SBINTERN: {
-                if (op == INTERN) { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
-                                    R[a[1]] = s0 < s1 ? intern(F->b + s0, (int)(s1 - s0)) : intern((const unsigned char *)"", 0); }
-                else R[a[1]] = intern(sb.b ? sb.b : (unsigned char *)"", sb.n);
-            } break;
-            case BLOBSAVE: { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
-                             R[a[1]] = s0 < s1 ? blob_add(F->b + s0, (int)(s1 - s0)) : blob_add((const unsigned char *)"", 0); } break;
-            case SBSAVE: R[a[1]] = blob_add(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
-            case INPUSH: case INPUSHX: case INPUSHXE: {
-                CoreFrame added; CoreFrame *G=&added;
-                if (op == INPUSH) { CoreBlob *B = &blobs.entries[R[a[1]]]; G->b = B->b; G->at = 0; G->i = 0; G->end = B->n; }
-                else { G->b = x; G->at = xattr; G->i = R[a[1]]; G->end = xn;
-                       if (op == INPUSHXE && R[a[2]] < xn) G->end = R[a[2]]; }
-                frame_push(&frames,G);
-            } break;
-            case INPOP: frame_pop(&frames); break;
-            case SBCLR: sb.n = 0; break;
-            case SBOUT: core_put(&sb, (int)a[1], 0); break;
-            case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) core_put(&sb, F->b[j], 0); } break;
-            case SBBLOB: { CoreBlob *B = &blobs.entries[R[a[1]]]; for (int j = 0; j < B->n; j++) core_put(&sb, B->b[j], 0); } break;
-            case SBFIND: R[a[1]] = sbfind(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
-            case BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
-            case XLEN: R[a[1]] = F->end; break;
-            case BLEN: R[a[1]] = blobs.entries[R[a[2]]].n; break;
-            case DIVMOD10: { uint64_t v = (uint32_t)(uint64_t)R[a[1]]; R[a[1]] = (I)(v / 10); r = (I)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;
-            case SWAP: { unsigned char *nb = core_alloc(0, o.n + 1); I *na = core_alloc(0, sizeof(I) * (o.n + 1));
-                         memcpy(nb, o.b, o.n); memcpy(na, o.at, sizeof(I) * o.n);
-                         if (x != input) free(x); free(xattr);
-                         x = nb; xattr = na; xn = o.n; o.n = 0; frames.n=1; frames.entries[0].b=x; frames.entries[0].at=xattr; frames.entries[0].i=0; frames.entries[0].end=xn; } break;
-            case ACCEPT: goto finished;
-            case REJECT: result->reason=m->str[a[1]]; result->reason_n=m->strl[a[1]]; status = 1; goto finished;
-            default: core_die("bad action");
-            }
-            a += 1 + ARITY[op];
+        if (result->reason) { s.status=2; break; }
+        if (nx<0) { result->reason="no transition"; s.status=2; break; }
+        q=nx; const I *a=m->qa+m->qoff[sq];
+        for (int k=0;k<m->qlen[sq];k++) {
+            if (action_run(&s,a)) goto finished;
+            a+=1+ARITY[(int)a[0]];
         }
     }
 finished:
-    if (!status) { result->out.b=o.b; result->out.n=o.n; o.b=0; }
-    result->err.b=e.b; result->err.n=e.n; e.b=0;
-    free(o.b); free(o.at); free(e.b); free(e.at); free(sb.b); free(sb.at);
-    free(frames.entries); free(stack.entries); if (x != input) free(x); free(xattr); free(R);
-    free(memory.keys); free(memory.values); free(memory.used); memset(&memory,0,sizeof memory);
-    for (int i=0;i<blobs.n;i++) free(blobs.entries[i].b);
-    free(blobs.entries); memset(&blobs,0,sizeof blobs);
-    for (size_t i=0;i<strings.cap;i++) if (strings.entries[i].b) free(strings.entries[i].b);
-    free(strings.entries); memset(&strings,0,sizeof strings);
-    for (int i=0;i<resources.n;i++) free(resources.entries[i].p);
-    free(resources.entries); memset(&resources,0,sizeof resources);
-    return status;
+    if (!s.status) { result->out.b=s.out.b; result->out.n=s.out.n; s.out.b=0; }
+    result->err.b=s.err.b; result->err.n=s.err.n; s.err.b=0;
+    free(s.out.b);free(s.out.at);free(s.err.b);free(s.err.at);free(s.scratch.b);free(s.scratch.at);
+    free(s.frames.entries);free(s.stack.entries);if (s.x!=input) free(s.x);free(s.xattr);free(s.regs);
+    free(s.memory.keys);free(s.memory.values);free(s.memory.used);
+    for (int i=0;i<s.blobs.n;i++) free(s.blobs.entries[i].b);
+    free(s.blobs.entries);
+    for (size_t i=0;i<s.strings.cap;i++) if (s.strings.entries[i].b) free(s.strings.entries[i].b);
+    free(s.strings.entries);
+    for (int i=0;i<s.resources.n;i++) free(s.resources.entries[i].p);
+    free(s.resources.entries);
+    return s.status;
 }
-

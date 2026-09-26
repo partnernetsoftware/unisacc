@@ -36,6 +36,16 @@ typedef struct {
 int core_host_fetch(const unsigned char *key,int n,unsigned char **bytes,int *len);
 void core_host_panic(const char *reason); /* fatal; must not return */
 typedef struct { Buf out, err; const char *reason; int reason_n; } CoreResult;
+/* Mutable state shared with the action engine. Byte owners are cleaned up by
+   core_run; model/result and the original input are borrowed. */
+typedef struct {
+    const CoreModel *model; CoreResult *result; I *regs;
+    unsigned char *input,*x; I *xattr; I xn,r,ot;
+    int osel,status;
+    Buf out,err,scratch;
+    CoreStack stack; CoreFrames frames; CoreMemory memory;
+    CoreBlobs blobs; CoreIntern strings; CoreResources resources;
+} CoreMachine;
 const char *core_transition(const CoreModel *m, int q, int key, int *nx, int *sq);
 int core_run(const CoreModel *m, unsigned char *input,
              int inputn, const char *src, I maxsteps, CoreResult *result);

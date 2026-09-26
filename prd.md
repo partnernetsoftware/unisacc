@@ -2956,3 +2956,27 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   full assembly kernel or product-route switch is complete. Product unchanged;
   no push. Last complete gate remains de81ff3 82/82; this slice uses targeted
   checks and actual self-reconstruction.
+
+
+### Assembly core: explicit machine state and all ARM action handlers
+
+- All mutable action state is now one invocation-local CoreMachine (280 B,
+  layout asserted), replacing C globals. C reference network checks and actual
+  C network self-reconstruction passed before enabling the assembly dispatcher.
+- arm64 now selects hand-written dispatch plus all 56 action implementations,
+  calling only the migrated assembly primitives and generic host/libc entries.
+  Its build rejects a mixed C primitive fallback. x86-64 still selects the C
+  action engine explicitly; its existing assembly helpers continue to pass.
+- The action test compares 1,050 full states across all 56 actions and two
+  bad-action failures; includes both output selections, absent attributes,
+  clipped/reversed spans, signed/unsigned values, cache reuse and repeated SWAP.
+  A missing address-add caused by an assembly semicolon comment was caught and
+  fixed. SWAP allocator failures are not injected by this suite.
+- Both ISA jobs retain six image/five native comparisons. ASan/UBSan and C
+  network self-reconstruction pass. Logs /tmp/unisacc-action-{context,
+  context-native,arm-route,x86-route,sanitize}.log. Targeted checks only.
+- ARM action __text 1,968 B, strings 41 B. Remaining C 980 B (outer inference
+  loop, initialization, cleanup), full mixed text 6,040 B. x86 remaining C
+  3,855 B, mixed text 6,774 B. C-only baseline 6,396/7,106 B, static C state
+  zero. Host/libc/model bytes still excluded from object sums. No product
+  switch or all-assembly self-rebuild claimed. No push/release.
