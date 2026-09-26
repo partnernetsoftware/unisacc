@@ -3,6 +3,8 @@
 # through unisa/opt.py, is the C front end's -O1 / -O2 tape byte for byte --
 # on every probe and on the compiler itself.  A decision the optimiser
 # takes (the peep table) is asked of the same net on both sides.
+# Same net => this checks that the two implementations AGREE, not that the
+# peep table is right C (no external referee here).
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready

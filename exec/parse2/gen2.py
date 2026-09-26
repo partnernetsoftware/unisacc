@@ -167,29 +167,39 @@ def optail(o):
         P(bn + ".pc").goto(bn + ".r" if o in ("<", ">", "<=", ">=", "==", "!=") else "DEAD.pa")
         q = P(bn + ".r")
     emit(q, "pop1")
-    cmp = o in ("<", ">", "<=", ">=", "==", "!=")
-    # a signed long with an unsigned int: the signed long form (measured, p59)
-    q.branch({1: bn + ".v"}, bn + ".x1", [("CMPI", "lb", 8)])
-    P(bn + ".x1").branch({1: bn + ".v"}, bn + ".x3", [("CMPI", "vb", 8)])
-    P(bn + ".x3").branch({1: bn + ".v"}, bn + ".x4", [("CMPI", "lb", UNS + 8)])     # with an unsigned long: its form (measured)
-    P(bn + ".x4").branch({1: bn + ".v"}, bn + ".x2", [("CMPI", "vb", UNS + 8)])
-    P(bn + ".x2").branch({1: bn + ".w"}, bn + ".w0", [("CMPI", "lb", UNS + 4)])
-    P(bn + ".w0").branch({1: bn + ".w" if o not in ("<<", ">>") else "DEAD.ui"}, bn + ".v", [("CMPI", "vb", UNS + 4)])
-    P(bn + ".w").call("UICHK").goto(bn + ".w6")
-    P(bn + ".w6").o("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" + E.optext(o, True) + ("" if cmp else UIM)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 4)).ret()
-    q = P(bn + ".v")
-    q.branch({1: bn + ".u"}, bn + ".u0", [("CMPI", "lb", UNS + 8)])
-    P(bn + ".u0").branch({1: bn + ".u"}, bn + ".s", [("CMPI", "vb", UNS + 8)])
-    P(bn + ".u").o(E.optext(o, True)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 8)).ret()
-    q = P(bn + ".s")
-    q.o(E.optext(o))
-    if cmp:
-        q.a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
-    else:
-        q.branch({1: bn + ".l8"}, bn + ".l0", [("CMPI", "lb", 8)])
-        P(bn + ".l0").branch({1: bn + ".l8"}, bn + ".i4", [("CMPI", "vb", 8)])
-        P(bn + ".l8").a(("LDI", "vt", 0), ("LDI", "vb", 8)).ret()
-        P(bn + ".i4").a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
+    tops = [x for lv in LEVELS for x in OPS[lv] if x not in SHORT]
+    oi = tops.index(o)
+    q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("TAX").a(("COPYW", "axl", "ax"),
+        ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("TAX")
+    q.a(("ALUI", "mul", "t", "axl", 16), ("ALU", "add", "t", "t", "ax"), ("LDX", "ck", "t", CKT), ("ALUI", "add", "t", "t", oi * 256), ("LDX", "rs", "t", RST))
+    # CKM (shared): ck unsigned below 8 bytes masks both; the spelling by ck's signedness; RESD (shared): res
+    q.call("CKM").branch({1: bn + ".us"}, bn + ".ss", [("CMPI", "cku", 1)])
+    P(bn + ".us").o(E.optext(o, True)).goto("RESD")
+    P(bn + ".ss").o(E.optext(o)).goto("RESD")
+
+
+def tytail():
+    """the operator-independent halves of the integer tail, once for every operator"""
+    q = P("CKM")
+    q.a(("LDI", "cku", 0))
+    for w, m in ((1, 255), (2, 65535), (4, 4294967295)):
+        q.branch({1: "CKM.m%d" % w}, (nx := "CKM.k%d" % w), [("CMPI", "ck", AX.index("u%d" % (8 * w)))])
+        P("CKM.m%d" % w).o("  imm r2, %d\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" % m).a(("LDI", "cku", 1)).ret()
+        q = P(nx)
+    q.branch({1: "CKM.u"}, "RET", [("CMPI", "ck", AX.index("u64"))])
+    P("CKM.u").a(("LDI", "cku", 1)).ret()
+    q = P("RESD")        # res: an unsigned result below 8 bytes is masked (zext); the descriptor is res's
+    q.a(("LDI", "vt", 0))
+    for name, code, m in (("i32", 4, None), ("i64", 8, None), ("u64", UNS + 8, None), ("u32", UNS + 4, 4294967295),
+                          ("u16", UNS + 2, 65535), ("u8", UNS + 1, 255), ("i16", 2, None), ("i8", 1, None)):
+        hit, nx = "RESD." + name, "RESD.n" + name
+        q.branch({1: hit}, nx, [("CMPI", "rs", AX.index(name))])
+        h = P(hit)
+        if m:
+            h.o("  imm r2, %d\n  and64 r0, r0, r2\n" % m)
+        h.a(("LDI", "vb", code)).ret()
+        q = P(nx)
+    q.goto("DEAD.ty")
 
 
 def ladder(prefix, bottom):
@@ -226,12 +236,11 @@ def ladder(prefix, bottom):
             for o in OPS[lv]:
                 if o not in SHORT:
                     optail(o)
+        tytail()
     g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
     g.on("DEAD.pa", range(257), "DEAD", E.rej("not covered: pointer arithmetic"), "r")
-    # UICHK: an unsigned int with an 8-byte or pointer operand is not covered (not measured)
-    for k, (r, c) in enumerate((("lt", 0), ("vt", 0)) if prefix == "E" else ()):
-        nx = "UICHK.%d" % (k + 1) if k < 1 else "RET"
-        P("UICHK" if k == 0 else "UICHK.%d" % k).branch({1: "DEAD.ui" if r not in ("lt", "vt") else nx}, "DEAD.ui" if r in ("lt", "vt") else nx, [("CMPI", r, c)])
+    if prefix == "E":
+        g.on("DEAD.ty", range(257), "DEAD", E.rej("not covered: operand types (the type table's result)"), "r")
     g.on("DEAD.ui", range(257), "DEAD", E.rej("not covered: unsigned int with this operand"), "r")
 
 
@@ -366,6 +375,15 @@ SBB = 1000   # a struct's base code: SBB + sid; layouts in the old E3's tables (
 STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
 FPB = E.FPB   # a function pointer: depth 1, base FPB (its call result is taken as int)
 DBL = E.DBL
+# ---- declared data: the product's type tables (weights/gold/type.tsv, tyinfo.tsv) -------------
+# binary() asks two rows: ck = type(t1 "+" t2), the common type the operands are converted to
+# (its signedness picks the spelling, a width below 8 masks both), and res = type(t1 op t2), the
+# result (unsigned below 8: masked).  E3 reads the same rows instead of re-deriving them.
+AX = ["void", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "ptr", "arr", "struct", "fn", "f32", "f64", "illegal"]
+TYROW = {(f[0], f[1], f[2]): f[3] for f in E.gold("type")}
+TYINFO = {f[0]: (int(f[1]), int(f[2])) for f in E.gold("tyinfo") if f[1].isdigit()}
+TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
+CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
 FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
@@ -537,6 +555,14 @@ def build():
     types()
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     p = P("START")
+    tops = [o for lv in LEVELS for o in OPS[lv] if o not in SHORT]
+    for l in range(16):
+        for r in range(16):
+            ck = TYROW.get((AX[l], "+", AX[r]), "illegal")
+            p.a(("LDI", "t", l * 16 + r), ("LDI", "u", AX.index(ck)), ("STX", "t", CKT, "u"))
+            for i, o in enumerate(tops):
+                y = TYROW.get((AX[l], TYOP.get(o, o), AX[r]), "illegal")
+                p.a(("LDI", "t", i * 256 + l * 16 + r), ("LDI", "u", AX.index(y)), ("STX", "t", RST, "u"))
     p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"), ("MARK", "x0"), ("LDI", "sk", 0))
     # the reference auto-includes a header when one of its functions is called and not defined here
@@ -907,6 +933,17 @@ def build():
     P("NOFLT.1").branch({1: "DEAD.dbl"}, "NOFLT.2", [("CMPI", "vt", 0)])
     P("NOFLT.2").branch({1: "NOFLT.3"}, "RET", [("CMPI", "lb", FLT)])
     P("NOFLT.3").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "lt", 0)])
+    P("TAX").branch({(1, 2): "TAX.p"}, "TAX.0", [("CMPI", "vt", 1)])
+    P("TAX.p").a(("LDI", "ax", AX.index("ptr"))).ret()
+    q = P("TAX.0")
+    for code, name in ((1, "i8"), (2, "i16"), (4, "i32"), (8, "i64"), (UNS + 1, "u8"), (UNS + 2, "u16"), (UNS + 4, "u32"), (UNS + 8, "u64"),
+                       (0, "void"), (DBL, "f64"), (FLT, "f32"), (FPB, "ptr")):
+        hit, nx = q.fresh("h"), q.fresh("n")
+        q.branch({1: hit}, nx, [("CMPI", "vb", code)])
+        P(hit).a(("LDI", "ax", AX.index(name))).ret()
+        q = P(nx)
+    q.branch({(1, 2): "TAX.s"}, "DEAD.w", [("CMPI", "vb", SBB)])
+    P("TAX.s").a(("LDI", "ax", AX.index("struct"))).ret()
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
     P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
     P("NARU.2").branch({1: "NARU.s"}, "NARU.3", [("CMPI", "vb", UNS + 2)])
@@ -1251,7 +1288,7 @@ def build():
         q.branch({0: "CL.zz%d" % k}, "CL.x%d" % k, [("CMP", "nar", "w")])
         P("CL.zz%d" % k).o("  imm r").num("nar").o(", 0\n").a(("ALUI", "add", "nar", "nar", 1)).goto("CL.z%d" % k)
         regs = ", ".join("r%d" % i for i in range(w))
-        P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 0)).call("NEXT").ret()
+        P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()   # a call's value is an i64 (pf_call)
     p = P("CL.call")
     emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
     g.finish()
