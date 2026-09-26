@@ -42,5 +42,7 @@ for F in $D/neg-*.txt; do     # must be rejected (exit 1 with a reason), on both
     if [ $rc -eq 1 ] && [ $rp -eq 1 ] && grep -q "^reject: not covered" "$T/e" && grep -q "^reject: not covered" "$T/pe"; then ok=$((ok+1)); else
         echo "  BAD $F: not rejected (run.c $rc, sim.py $rp)"; bad=$((bad+1)); fi
 done
+# the TIns text survives a dump and parse of real TargetPrograms (unisa/lower.py) -- no encoding claimed
+b 60 python3 $D/roundtrip.py examples/hello.c examples/fib.c tests/c/a_for.c > "$T/rt" 2>&1 && ok=$((ok+1)) || { echo "  BAD roundtrip:"; tail -3 "$T/rt"; bad=$((bad+1)); }
 echo "e5 x86  fixtures ok $ok   bad $bad"
 [ $bad -eq 0 ] && [ $ok -gt 0 ]

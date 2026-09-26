@@ -31,3 +31,14 @@ The existing fixtures stay valid unchanged.
 
 - gate's winapi form, the divisions, FP, and anything with addresses.
 - Lowering itself (tape → TIns): it stays in Python as the input producer until its own slice.
+
+## Revision after cdx's review
+
+- **Arg types.** Args also include `None` and bools. `spinit(sp, None)` is what lowering emits; this slice normalises a None second operand to "omitted", a stated normalisation that keeps the meaning. A non-None second operand is rejected. A None is never printed as a label.
+- **Two kinds of address.** Addresses that lowering itself outputs (setreg's `addr`/`mem` values, the DATA_BASE-relative `syms`) are instruction data, printed as integers or names when their slice comes. `text_va`, `data_va` and the imports come from image.layout. They are external layout, which lowering does not provide, and the dump never claims them. No `@` layout header is implemented now.
+- **Meta syntax.**
+  - The form is ` key=value`, separated by spaces, after the last arg.
+  - `carry` is a bool: `carry=0` is false, `carry=1` true, and nothing else is accepted.
+  - `reloc`, when given, must be `rel32`; anything else is rejected, never overridden silently. The rel32 default for the old fixtures without meta is only a compatibility convention.
+  - `role` is informational and ignored, and the file says so.
+  - A duplicate key, an unknown key, or an encoding-relevant key this slice does not support is rejected.

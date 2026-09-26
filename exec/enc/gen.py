@@ -50,7 +50,7 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO = range(1, 18)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT = range(1, 20)
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -190,7 +190,7 @@ def build():
     E.prn()
     procs()
     p = P("START")
-    classes = {".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
+    classes = {"setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -207,6 +207,8 @@ def build():
             p.a(("LDI", "u", X86["shiftext"][op]), ("STX", "t", SHX, "u"))
     for nm, n in NUM.items():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", n + 1), ("STX", "t", REGN, "u"))
+    for w, nm in (("imm", "tagimm"), ("reg", "tagreg"), ("role", "role"), ("form", "form"), ("reloc", "reloc"), ("rel32", "rel32")):
+        p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     p.a(("LDI", "npc", 0)).goto("LINE")
@@ -223,7 +225,7 @@ def build():
     P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
     g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
     p = P("LW.i")
-    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("OLEN", "omark"))
+    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("OLEN", "omark"))
     p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
     P("LW.i1").branch({1: "BR.c"}, "LW.i2", [("CMP", "opid", "id_call")])
     # call NAME: E8 rel32, always 5 bytes (no short form: assemble's short_size is None)
@@ -243,10 +245,25 @@ def build():
     P("BR.zr3").a(("ALUI", "sub", "t", "t", 1), ("STX", "npc", BRG, "t")).goto("BR.zs")
     g.on("BR.zs", [32, 44], "BR.zs", [("ADV",)])
     g.els("BR.zs", "BR.name", [("MARK", "ts")])
-    g.on("BR.name", [32] + NL, "BR.ne", [("MARK", "te")])
+    g.on("BR.name", [32] + NL, "BR.ne", [("MARK", "te")])       # (meta, if any, follows: see BR.ne)
     g.els("BR.name", "BR.name", [("ADV",)])
     p = P("BR.ne")
-    p.a(("INTERN", "t", "ts", "te"), ("STX", "npc", TGT, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
+    p.a(("INTERN", "t", "ts", "te"), ("STX", "npc", TGT, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("BR.m")
+    g.on("BR.m", [32], "BR.m", [("ADV",)])
+    g.on("BR.m", NL, "SKIPL", [])
+    g.els("BR.m", "BR.mk", [("MARK", "ts")])
+    g.on("BR.mk", [61], "BRM.v", [("MARK", "ke"), ("ADV",)])
+    g.on("BR.mk", [32] + NL, "DEAD.meta", [])
+    g.els("BR.mk", "BR.mk", [("ADV",)])
+    g.on("BRM.v", [32] + NL, "BRM.e", [("MARK", "vs"), ("MARK", "ve")])
+    g.els("BRM.v", "BRM.vv", [("MARK", "vs")])
+    g.on("BRM.vv", [32] + NL, "BRM.e", [("MARK", "ve")])
+    g.els("BRM.vv", "BRM.vv", [("ADV",)])
+    p = P("BRM.e")
+    p.a(("INTERN", "mk", "ts", "ke")).branch({1: "BR.m"}, "BRM.k2", [("CMP", "mk", "id_role")])
+    P("BRM.k2").branch({1: "BR.m"}, "BRM.k3", [("CMP", "mk", "id_form")])
+    P("BRM.k3").branch({1: "BRM.rl"}, "DEAD.meta", [("CMP", "mk", "id_reloc")])
+    P("BRM.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "BR.m"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
     g.on("SKIPL", [10], "LINE", [("ADV",)])
     g.on("SKIPL", [EOF], "DONE", [])
     g.els("SKIPL", "SKIPL", [("ADV",)])
@@ -263,9 +280,14 @@ def build():
     p.branch({1: "AN.neg"}, "ARG.put", [("CMPI", "neg", 1)])
     P("AN.neg").a(("LDI", "z0", 0), ("A64", "sub", "av", "z0", "av")).goto("ARG.put")
     g.on("AR", [44, 32] + NL, "AR.e", [("MARK", "te")])
+    g.on("AR", [61], "META.v", [("MARK", "ke"), ("ADV",)])        # key=value: meta, not an operand
     g.els("AR", "AR", [("ADV",)])
     p = P("AR.e")
-    p.a(("INTERN", "rid", "ts", "te"), ("LDX", "av", "rid", REGN)).branch({1: "DEAD.reg"}, "AR.r", [("CMPI", "av", 0)])
+    p.a(("INTERN", "rid", "ts", "te")).branch({1: "AR.tag"}, "AR.e1", [("CMP", "rid", "id_tagimm")])
+    P("AR.e1").branch({1: "AR.tag"}, "AR.e2", [("CMP", "rid", "id_tagreg")])
+    P("AR.tag").a(("COPYW", "stag", "rid")).goto("ARG")          # setreg's tag word: the value follows
+    p = P("AR.e2")
+    p.a(("LDX", "av", "rid", REGN)).branch({1: "DEAD.reg"}, "AR.r", [("CMPI", "av", 0)])
     g.on("DEAD.reg", range(257), "DEAD", E.rej("not covered: an operand that is not a register or an integer"), "r")
     P("AR.r").a(("ALUI", "sub", "av", "av", 1)).goto("ARG.put")
     p = P("ARG.put")
@@ -278,12 +300,27 @@ def build():
     g.on("ARG.sep", [32], "ARG.sep", [("ADV",)])
     g.on("ARG.sep", [44], "ARG", [("ADV",)])
     g.on("ARG.sep", NL, "ARGS.d", [])
-    g.els("ARG.sep", "DEAD.reg", [])
+    g.els("ARG.sep", "ARG", [])                 # a token after a space: meta (checked there) or an error
+    # META: `key=value` after the args.  role: informational, ignored.  form: informational for the
+    # ops of these slices (the x86 encoder reads it only for gate, which is not migrated).  reloc:
+    # must be rel32.  Any other key -- carry, gate, or unknown -- is rejected, never dropped.
+    g.on("META.v", [32] + NL, "META.e", [("MARK", "vs"), ("MARK", "ve")])
+    g.els("META.v", "META.vv", [("MARK", "vs")])
+    g.on("META.vv", [32] + NL, "META.e", [("MARK", "ve")])
+    g.els("META.vv", "META.vv", [("ADV",)])
+    p = P("META.e")
+    p.a(("INTERN", "mk", "ts", "ke")).branch({1: "META.ok"}, "META.k2", [("CMP", "mk", "id_role")])
+    P("META.k2").branch({1: "META.ok"}, "META.k3", [("CMP", "mk", "id_form")])
+    P("META.k3").branch({1: "META.rl"}, "DEAD.meta", [("CMP", "mk", "id_reloc")])
+    P("META.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
+    g.on("DEAD.meta", range(257), "DEAD", E.rej("not covered: meta this slice does not take (or reloc other than rel32)"), "r")
+    P("META.ok").goto("ARG.sep")
     # ARGS.d: at the end of the line: the class decides
     p = P("ARGS.d")
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
-              C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero"}, "DEAD.op", [("RLD", "cls")])
+              C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
+              C_SETREG: "E.setreg", C_SPINIT: "E.spinit"}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     # mov d, s
     p = P("E.mov")
@@ -392,6 +429,15 @@ def build():
     p.branch({8: "EZ.8", 4: "EZ.4", 2: "EZ.2", 1: "EZ.1"}, "DEAD.op", [("RLD", "zw")])
     for w, o1, ww, p66 in ((8, 0x89, 1, 0), (4, 0x89, 0, 0), (2, 0x89, 0, 1), (1, 0x88, 0, 0)):
         P("EZ.%d" % w).a(("LDI", "me_o1", o1), ("LDI", "me_w", ww), ("LDI", "me_66", p66)).call("MEM").a(("A64", "add", "zk", "zk", "zw")).goto("EZ.l")
+    # setreg rX, imm V -> the imm path; setreg rX, reg rY -> the mov path (emit_x86: mov_ri / mov_rr);
+    # mem/addr (addresses) are not covered
+    p = P("E.setreg")
+    p.branch({1: "E.imm"}, "ESR.r", [("CMP", "stag", "id_tagimm")])
+    P("ESR.r").branch({1: "E.mov"}, "DEAD.op", [("CMP", "stag", "id_tagreg")])
+    # spinit rN (lowering's spinit(rN, None), the None normalised away): mov rN, rsp
+    p = P("E.spinit")
+    p.branch({1: "ESI.m"}, "DEAD.op", [("CMPI", "na", 1)])
+    P("ESI.m").a(("LDI", "a1", SPREG)).goto("E.mov")
     # callr r: FF /2 modrm(3, 2, r), a REX.B (0x41, no W) first for r8..r15
     p = P("E.callr")
     p.branch({(1, 2): "ECR.x"}, "ECR.o", [("CMPI", "a0", 8)])
