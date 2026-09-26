@@ -107,6 +107,55 @@ def bad(k):
     return ("rej", "not covered: " + k)
 
 
+def optail(o):
+    """OPX.<o>: the left operand pushed (descriptor lt/lb), the right in r0 (vt/vb): one copy
+    per operator, shared by both ladders -- double, pointer scaling, unsigned, int forms"""
+    bn = "OPX." + o
+    q = P(bn)
+    q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("ISDV").a(("COPYW", "ldv", "u"),
+        ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("ISDV").a(("ALU", "or", "t", "u", "ldv"))
+    q.branch({1: bn + ".f"}, bn + ".nf", [("CMPI", "t", 1)])
+    f = P(bn + ".f")
+    if o in FOPS:
+        # right in r0: cvtid if an integer; push; the left from [r7+8] (cvtid if an integer); mov r1, r0; the right back; .frame -16
+        f.branch({1: bn + ".f1"}, bn + ".fc", [("CMPI", "u", 1)])
+        P(bn + ".fc").o("  cvtid r0, r0\n").goto(bn + ".f1")
+        f = P(bn + ".f1")
+        emit(f, "push").o("  load64 r0, [r7+8]\n").branch({1: bn + ".f2"}, bn + ".fl", [("CMPI", "ldv", 1)])
+        P(bn + ".fl").o("  cvtid r0, r0\n").goto(bn + ".f2")
+        cmpf = o in ("<", ">", "<=", ">=", "==")
+        P(bn + ".f2").o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n  %s\n" % FOPS[o]).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmpf else DBL)).ret()
+    else:
+        f.goto("DEAD.dbl")
+    q = P(bn + ".nf")
+    if o in ("+", "-"):
+        q.branch({1: bn + ".i"}, bad("pointer on the right"), [("CMPI", "vt", 0)])
+        q = P(bn + ".i")
+        q.branch({1: bn + ".n"}, bn + ".p", [("CMPI", "lt", 0)])
+        r = P(bn + ".p")
+        r.call("SCALE")
+        emit(r, "pop1").o(E.optext(o)).a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).ret()
+        q = P(bn + ".n")
+    else:
+        q.branch({1: bn + ".r"}, bn + ".pc", [("ALU", "or", "t", "vt", "lt"), ("CMPI", "t", 0)])
+        P(bn + ".pc").goto(bn + ".r" if o in ("<", ">", "<=", ">=", "==", "!=") else "DEAD.pa")
+        q = P(bn + ".r")
+    emit(q, "pop1")
+    cmp = o in ("<", ">", "<=", ">=", "==", "!=")
+    q.branch({1: bn + ".u"}, bn + ".u0", [("CMPI", "lb", UNS + 8)])
+    P(bn + ".u0").branch({1: bn + ".u"}, bn + ".s", [("CMPI", "vb", UNS + 8)])
+    P(bn + ".u").o(E.optext(o, True)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 8)).ret()
+    q = P(bn + ".s")
+    q.o(E.optext(o))
+    if cmp:
+        q.a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
+    else:
+        q.branch({1: bn + ".l8"}, bn + ".l0", [("CMPI", "lb", 8)])
+        P(bn + ".l0").branch({1: bn + ".l8"}, bn + ".i4", [("CMPI", "vb", 8)])
+        P(bn + ".l8").a(("LDI", "vt", 0), ("LDI", "vb", 8)).ret()
+        P(bn + ".i4").a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
+
+
 def ladder(prefix, bottom):
     """E<lv>: operand, then (op E<lv+1>)* for the ops of level lv.
     prefix "E": from scratch (bottom = UNARY); prefix "C": the left operand is
@@ -134,52 +183,13 @@ def ladder(prefix, bottom):
                 emit(q, "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
                 emit(q, "label_d").goto(nm + ".l")
                 continue
-            # left in r0: push; the right operand at the next level; [scale]; pop; the instruction (binsel -> irsel)
-            bn = "%s.%s" % (nm, o)
-            emit(q, "push").vpush("vt", "vb").call("NEXT").call(nxt).vpop("lt", "lb")
-            q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("ISDV").a(("COPYW", "ldv", "u"),
-                ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("ISDV").a(("ALU", "or", "t", "u", "ldv"))
-            q.branch({1: bn + ".f"}, bn + ".nf", [("CMPI", "t", 1)])
-            f = P(bn + ".f")
-            if o in FOPS:
-                # right in r0: cvtid if an integer; push; the left from [r7+8] (cvtid if an integer); mov r1, r0; the right back; .frame -16
-                f.branch({1: bn + ".f1"}, bn + ".fc", [("CMPI", "u", 1)])
-                P(bn + ".fc").o("  cvtid r0, r0\n").goto(bn + ".f1")
-                f = P(bn + ".f1")
-                emit(f, "push").o("  load64 r0, [r7+8]\n").branch({1: bn + ".f2"}, bn + ".fl", [("CMPI", "ldv", 1)])
-                P(bn + ".fl").o("  cvtid r0, r0\n").goto(bn + ".f2")
-                cmpf = o in ("<", ">", "<=", ">=", "==")
-                P(bn + ".f2").o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n  %s\n" % FOPS[o]).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmpf else DBL)).goto(nm + ".l")
-            else:
-                f.goto("DEAD.dbl")
-            q = P(bn + ".nf")
-            bn = "%s.%s" % (nm, o)
-            if o in ("+", "-"):
-                q.branch({1: bn + ".i"}, bad("pointer on the right"), [("CMPI", "vt", 0)])
-                q = P(bn + ".i")
-                q.branch({1: bn + ".n"}, bn + ".p", [("CMPI", "lt", 0)])
-                r = P(bn + ".p")
-                r.call("SCALE")
-                emit(r, "pop1").o(E.optext(o)).a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).goto(nm + ".l")
-                q = P(bn + ".n")
-            else:
-                q.branch({1: bn + ".r"}, bn + ".pc", [("ALU", "or", "t", "vt", "lt"), ("CMPI", "t", 0)])
-                P(bn + ".pc").goto(bn + ".r" if o in ("<", ">", "<=", ">=", "==", "!=") else "DEAD.pa")
-                q = P(bn + ".r")
-            emit(q, "pop1")
-            cmp = o in ("<", ">", "<=", ">=", "==", "!=")
-            q.branch({1: bn + ".u"}, bn + ".u0", [("CMPI", "lb", UNS + 8)])
-            P(bn + ".u0").branch({1: bn + ".u"}, bn + ".s", [("CMPI", "vb", UNS + 8)])
-            P(bn + ".u").o(E.optext(o, True)).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmp else UNS + 8)).goto(nm + ".l")
-            q = P(bn + ".s")
-            q.o(E.optext(o))
-            if cmp:
-                q.a(("LDI", "vt", 0), ("LDI", "vb", 4)).goto(nm + ".l")
-            else:
-                q.branch({1: bn + ".l8"}, bn + ".l0", [("CMPI", "lb", 8)])
-                P(bn + ".l0").branch({1: bn + ".l8"}, bn + ".i4", [("CMPI", "vb", 8)])
-                P(bn + ".l8").a(("LDI", "vt", 0), ("LDI", "vb", 8)).goto(nm + ".l")
-                P(bn + ".i4").a(("LDI", "vt", 0), ("LDI", "vb", 4)).goto(nm + ".l")
+            # left in r0: push; the right operand at the next level; then the operator's shared tail (OPX)
+            emit(q, "push").vpush("vt", "vb").call("NEXT").call(nxt).vpop("lt", "lb").call("OPX." + o).goto(nm + ".l")
+    if prefix == "E":
+        for lv in LEVELS:
+            for o in OPS[lv]:
+                if o not in SHORT:
+                    optail(o)
     g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
     g.on("DEAD.pa", range(257), "DEAD", E.rej("not covered: pointer arithmetic"), "r")
 
