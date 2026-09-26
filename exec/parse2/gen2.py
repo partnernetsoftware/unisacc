@@ -31,6 +31,7 @@ TEMPL = {
     "fn_head":  "{@name}:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame",
     "spill":    "  store64 [r6-{s}], r{pk}\n",
     "addr":     "  imm r2, {s}\n  sub64 r0, r6, r2\n",
+    "gaddr":    "  .lea r0, g_{@var}\n",
     "load_int": "  .ld r0, [r0+0], 4\n",
     "store_int": "  .st [r1+0], r0, 4\n",
     "imm":      "  imm r0, {nv}\n",
@@ -67,7 +68,17 @@ TEMPL = {
     "pool_open": ".str S{sk} \"",
     "pool_close": "\\x00\"\n",
 }
-SPANS = {"@name": ("fns", "fne"), "@callee": ("cls", "cle")}
+SPANS = {"@name": ("fns", "fne"), "@callee": ("cls", "cle"), "@var": ("ips", "ipe")}
+
+
+def addr(p):
+    """a variable's address: a local's frame slot, or a global's symbol"""
+    gl, lc, dn = p.fresh("ga"), p.fresh("la"), p.fresh("ad")
+    p.branch({1: gl}, lc, [("CMPI", "s", E.GMARK)])
+    emit(P(gl), "gaddr").goto(dn)
+    emit(P(lc), "addr").goto(dn)
+    p.cur = dn
+    return p
 
 
 def emit(p, name):
@@ -293,30 +304,71 @@ def build():
     p.tok(dict({w: "FN" for w in TWORDS}, eof="END"), bad("top-level construct"))
     # a unit without main is an error in the reference (measured, probe r2)
     P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
-    P("END.ok").o(E.FOOTER).a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").a(("ACCEPT",)).goto("DEAD")
+    P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n  .exit r0\n").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").a(("ACCEPT",)).goto("DEAD")
+    p = P("INITS")
+    p.call("NEXT").label("IN.l")
+    p.tok({"eof": "RET", "{": "IN.o", "}": "IN.c", TK_ID: "IN.id"}, "IN.nx")
+    P("IN.o").a(("ALUI", "add", "dep", "dep", 1)).goto("IN.nx")
+    P("IN.c").a(("ALUI", "sub", "dep", "dep", 1)).goto("IN.nx")
+    P("IN.nx").call("NEXT").goto("IN.l")
+    P("IN.id").branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dep", 0)])
+    P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"=": "IN.eq"}, "IN.l")
+    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v"}, "IN.l")
+    q = P("IN.v")
+    emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").a(("INTERN", "v", "ips", "ipe"), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("STOREV").goto("IN.nx")
     # function: int NAME ( params ) { body }
     p = P("FN")
     p.call("TSPEC").a(("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).tok({TK_ID: "FN.id"}, bad("declarator"))
     p = P("FN.id")
-    p.a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe"), ("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
-    emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").call("NEXT").expect("(").call("NEXT").a(("LDI", "pk", 0))
+    p.a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe")).call("NEXT").tok({"(": "FN.fn", ";": "GV.sc", "=": "GV.sc", "[": "GV.ar"}, bad("declarator"))
+    # a global: `.bss g_NAME SIZE` where it is declared; its initialiser goes to __init (measured)
+    p = P("GV.sc")
+    p.branch({1: "GV.sc0"}, "GV.p8", [("CMPI", "td", 0)])
+    P("GV.sc0").branch({1: "DEAD.void"}, "GV.scb", [("CMPI", "tb", 0)])
+    P("GV.scb").a(("COPYW", "gsz", "tb")).goto("GV.reg")
+    P("GV.p8").a(("LDI", "gsz", 8)).goto("GV.reg")
+    p = P("GV.reg")
+    p.a(("LDI", "gar", 0)).call("GV.emit").tok({"=": "GV.init"}, "GV.end")
+    P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv"}, bad("global initialiser"))
+    P("GV.iv").a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "DEAD.big"}, "GV.iv1")
+    P("GV.iv1").call("NEXT").goto("GV.end")
+    P("GV.end").expect(";").call("NEXT").goto("UNIT")
+    p = P("GV.ar")       # T NAME[N]: N * element size (a pointer element: 8)
+    p.call("NEXT").tok({TK_NUM: "GV.an"}, bad("array bound"))
+    p = P("GV.an")
+    p.call("ELSZ").a(("ALU", "mul", "gsz", "nv", "es"), ("LDI", "gar", 1)).call("NEXT").expect("]").call("NEXT").call("GV.emit").goto("GV.end")
+    p = P("GV.emit")
+    p.o(".bss g_").a(("SPAN2", "fns", "fne")).o(" ").num("gsz").o("\n")
+    p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", E.GMARK), ("STX", "v", LOC, "t"), ("STX", "v", E.BASE, "tb"), ("STX", "v", E.ARR, "gar"),
+        ("ALU", "add", "t", "td", "gar"), ("STX", "v", E.PTR, "t")).ret()
+    P("ELSZ").branch({1: "ELSZ.b"}, "ELSZ.8", [("CMPI", "td", 0)])
+    P("ELSZ.b").branch({1: "DEAD.void"}, "ELSZ.s", [("CMPI", "tb", 0)])
+    P("ELSZ.s").a(("COPYW", "es", "tb")).ret()
+    P("ELSZ.8").a(("LDI", "es", 8)).ret()
+    p = P("FN.fn")
+    p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
+    emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").call("NEXT").a(("LDI", "pk", 0))
     p.tok(dict({")": "FN.body", "type=void": "FN.void"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
     P("FN.void").call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid"}, bad("parameter"))
     P("FN.vend").branch({1: "FN.body"}, bad("parameter"), [("CMPI", "td", 0)])
     p = P("FN.par")
     p.call("TSPEC").tok({TK_ID: "FN.pid"}, bad("parameter"))
     p = P("FN.pid")
-    p.call("DECL")
+    p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL")
     emit(p, "spill").a(("ALUI", "add", "pk", "pk", 1)).call("NEXT").tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.pn").call("NEXT").tok({w: "FN.par" for w in TWORDS}, bad("parameter"))
     p = P("FN.body")
     p.call("NEXT").expect("{").call("NEXT").call("STMTS")
-    emit(p, "fn_tail").a(("OFILL", "frm", "max", 7)).call("NEXT").goto("UNIT")
+    emit(p, "fn_tail").a(("ALUI", "add", "t", "max", 7), ("ALUI", "and", "t", "t", -8), ("OFILL", "frm", "t", 7)).call("NEXT").goto("UNIT")
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
+    # DECLN: the name was saved in ips..ipe (the current token is after it)
+    P("DECLN").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).goto("DECL")
     p = P("DECL")
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", LOC), ("STX", "usp", E.UNDO, "v"), ("STX", "usp", E.UNDO + 1, "t"),
         ("LDX", "t", "v", E.PTR), ("STX", "usp", E.UNDO + 2, "t"), ("LDX", "t", "v", E.BASE), ("STX", "usp", E.UNDO + 3, "t"), ("ALUI", "add", "usp", "usp", 4),
-        ("ALUI", "add", "cur", "cur", 8), ("STX", "v", LOC, "cur"), ("STX", "v", E.PTR, "td"), ("STX", "v", E.BASE, "tb"), ("COPYW", "s", "cur")).call("MAXF").ret()
+        ("LDX", "t", "v", E.ARR), ("STX", "usp", E.UNDO + 4, "t"), ("ALUI", "add", "usp", "usp", 1),
+        ("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("ALU", "add", "t", "td", "dar"), ("STX", "v", E.PTR, "t"), ("STX", "v", E.BASE, "tb"),
+        ("STX", "v", E.ARR, "dar"), ("COPYW", "s", "cur")).call("MAXF").ret()
     # the frame is the deepest point reached: a block's slots are reused after it ends (measured, probe p12)
     P("MAXF").branch({2: "MAXF.u"}, "RET", [("CMP", "cur", "max")])
     P("MAXF.u").a(("COPYW", "max", "cur")).ret()
@@ -329,13 +381,18 @@ def build():
     p = P("S.blk")
     p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur").label("S.uw")
     p.branch({2: "S.uw1"}, "S.uwd", [("CMP", "usp", "sv")])
-    P("S.uw1").a(("ALUI", "sub", "usp", "usp", 4), ("LDX", "v", "usp", E.UNDO), ("LDX", "t", "usp", E.UNDO + 1), ("STX", "v", LOC, "t"),
+    P("S.uw1").a(("ALUI", "sub", "usp", "usp", 5), ("LDX", "v", "usp", E.UNDO), ("LDX", "t", "usp", E.UNDO + 1), ("STX", "v", LOC, "t"),
+                  ("LDX", "t", "usp", E.UNDO + 4), ("STX", "v", E.ARR, "t"),
                   ("LDX", "t", "usp", E.UNDO + 2), ("STX", "v", E.PTR, "t"), ("LDX", "t", "usp", E.UNDO + 3), ("STX", "v", E.BASE, "t")).goto("S.uw")
     P("S.uwd").call("NEXT").ret()
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
-    p.call("TSPEC").tok({TK_ID: "S.did"}, bad("declaration"))
-    P("S.did").call("DECL").call("NEXT").expect(";").call("NEXT").ret()
+    p.call("TSPEC").tok({TK_ID: "S.did0"}, bad("declaration"))
+    P("S.did0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("S.did")
+    P("S.did").a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("NEXT").tok({"[": "S.darr"}, "S.dd")
+    P("S.dd").call("DECLN").expect(";").call("NEXT").ret()
+    P("S.darr").call("NEXT").tok({TK_NUM: "S.dan"}, bad("array bound"))
+    P("S.dan").call("ELSZ").a(("ALU", "mul", "dsz", "nv", "es"), ("LDI", "dar", 1)).call("NEXT").expect("]").call("NEXT").goto("S.dd")
     p = P("S.ret")
     p.call("NEXT").call("EXPR").expect(";").a(("COPYW", "vt", "rd"), ("COPYW", "vb", "rb")).call("NARROW")
     p.o("  jump R").num("rl").o("\n").call("NEXT").ret()
@@ -378,14 +435,14 @@ def build():
     p.a(("COPYW", "st1", "stl"), ("LDI", "stl", 0)).tok({TK_ID: "X.id"}, "E%d" % LEVELS[0])
     P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.cpf", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
     p = P("X.as")
-    p.call("LOOKUP")
-    emit(p, "addr")
+    p.call("LOOKUP").call("NOARR")
+    addr(p)
     emit(p, "push").vpush("vt", "vb").call("NEXT").call("EXPR").vpop("vt", "vb")
     emit(p, "pop1").call("STOREV").ret()
     for o in E.CASOPS:
         q = P("X.c" + o)    # addr; push; load; push; rhs; pop; op; pop; store
-        q.call("LOOKUP").call("INTONLY")
-        emit(q, "addr")
+        q.call("LOOKUP").call("NOARR").call("INTONLY")
+        addr(q)
         emit(q, "push")
         emit(q, "load_int")
         emit(q, "push").call("NEXT").call("EXPR")
@@ -396,8 +453,8 @@ def build():
     P("IO.b").branch({1: "RET"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vb", 4)])
     for nm, o, fix in (("X.inc", "+", "post_inc"), ("X.dec", "-", "post_dec")):
         q = P(nm)           # addr; push; load; push; 1; pop; op; pop; store; undo to the old value
-        q.call("LOOKUP").call("INTONLY")
-        emit(q, "addr")
+        q.call("LOOKUP").call("NOARR").call("INTONLY")
+        addr(q)
         emit(q, "push")
         emit(q, "load_int")
         emit(q, "push")
@@ -408,8 +465,8 @@ def build():
         emit(q, fix).call("NEXT").call("C%d" % LEVELS[0]).ret()
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
     p.call("LOOKUP")
-    emit(p, "addr")
-    p.call("LOADV").call("POSTIX").call("C%d" % LEVELS[0]).ret()
+    addr(p)
+    p.call("VLOAD").call("POSTIX").call("C%d" % LEVELS[0]).ret()
     P("X.cpf").a(("INTERN", "v", "ips", "ipe")).branch({1: "X.pf"}, "X.call", [("CMP", "v", "pfid")])
     P("X.pf").call("PF").call("C%d" % LEVELS[0]).ret()
     P("X.call").call("CALL").call("C%d" % LEVELS[0]).ret()
@@ -420,7 +477,7 @@ def build():
     P("U.amp").call("NEXT").tok({TK_ID: "U.amp1"}, bad("address of"))
     q = P("U.amp1")
     q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP")
-    emit(q, "addr").a(("ALUI", "add", "vt", "vt", 1)).call("NEXT").ret()
+    addr(q).a(("ALUI", "add", "vt", "vt", 1)).call("NEXT").ret()
     q = P("U.deref")     # * operand: its value is the address; one level down, then a load at the new width
     q.call("NEXT").call("UNARY").call("DOWN").call("LOADV").ret()
     P("DOWN").branch({(1, 2): "DOWN.1"}, bad("dereference of a non-pointer"), [("CMPI", "vt", 1)])
@@ -431,8 +488,8 @@ def build():
         q = P(nm)           # addr; push; load; +-1; pop; store
         q.call("NEXT").tok({TK_ID: nm + ".id"}, bad("expression"))
         q = P(nm + ".id")
-        q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("INTONLY")
-        emit(q, "addr")
+        q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NOARR").call("INTONLY")
+        addr(q)
         emit(q, "push")
         emit(q, "load_int")
         emit(q, fix)
@@ -458,8 +515,11 @@ def build():
     printf()
     q = P("U.var")
     q.call("LOOKUP")
-    emit(q, "addr")
-    q.call("LOADV").call("POSTIX").ret()
+    addr(q)
+    q.call("VLOAD").call("POSTIX").ret()
+    P("VLOAD").branch({1: "RET"}, "LOADV", [("CMPI", "ar", 1)])
+    P("NOARR").branch({1: "DEAD.arr"}, "RET", [("CMPI", "ar", 1)])
+    g.on("DEAD.arr", range(257), "DEAD", E.rej("not covered: assignment to an array"), "r")
     p = P("POSTIX")
     p.tok({"[": "PX.i"}, "RET")
     q = P("PX.i")
@@ -482,7 +542,7 @@ def build():
     emit(q, "pop1").call("STOREV").expect(";").call("NEXT").ret()
     P("SS.rv").call("LOADV").call("C%d" % LEVELS[0]).expect(";").call("NEXT").ret()
     p = P("LOOKUP")     # s := the slot of ips..ipe (0: not a local of this slice)
-    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "s", "v", LOC), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).branch({1: "DEAD.nl"}, "RET", [("CMPI", "s", 0)])
+    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "s", "v", LOC), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE), ("LDX", "ar", "v", E.ARR)).branch({1: "DEAD.nl"}, "RET", [("CMPI", "s", 0)])
     g.on("DEAD.nl", range(257), "DEAD", E.rej("not covered: identifier is not a local"), "r")
     # CALL: at '(' after ips..ipe: arguments pushed left to right, popped into r(n-1)..r0, call
     p = P("CALL")
