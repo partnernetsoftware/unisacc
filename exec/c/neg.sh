@@ -9,17 +9,23 @@ b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "neg: cc failed"; exit 1; }
 printf 'x' > "$T/in"
 ok=0; bad=0
-t() {   # t NAME WANT JSON [INCLUDE_DIR]
-    printf '%s' "$3" > "$T/d.json"
+t() {   # t NAME WANT C_STDERR_PREFIX PY_STDERR_PREFIX JSON [INCLUDE_DIR] -- the first stderr line names the path taken
+    printf '%s' "$5" > "$T/d.json"
     b 60 python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl" || { echo "neg: tbl $1 failed"; bad=$((bad+1)); return; }
-    b 10 "$T/run" "$T/d.tbl" "$T/in" "$T/in" ${4:-} >/dev/null 2>&1; c=$?
-    b 10 python3 exec/pp/sim.py "$T/d.json" "$T/in" >/dev/null 2>&1; p=$?
-    if [ $c -eq "$2" ] && [ $p -eq "$2" ]; then ok=$((ok+1)); else bad=$((bad+1)); echo "  FAIL $1: run.c $c, sim.py $p, want $2"; fi
+    b 10 "$T/run" "$T/d.tbl" "$T/in" "$T/in" ${6:-} >/dev/null 2>"$T/ce"; c=$?
+    b 10 python3 exec/pp/sim.py "$T/d.json" "$T/in" >/dev/null 2>"$T/pe"; p=$?
+    ce=$(head -1 "$T/ce"); pe=$(head -1 "$T/pe")
+    case "$ce" in "$3"*) cm=1 ;; *) cm=0 ;; esac
+    case "$pe" in "$4"*) pm=1 ;; *) pm=0 ;; esac
+    if [ $c -eq "$2" ] && [ $p -eq "$2" ] && [ $cm = 1 ] && [ $pm = 1 ]; then ok=$((ok+1))
+    else bad=$((bad+1)); echo "  FAIL $1: run.c $c [$ce], sim.py $p [$pe], want $2 [$3] [$4]"; fi
 }
-t pop-empty 2 '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["POP"]]]}'
-# an empty bundled-header name is the include directory itself: opened, not readable
-t read-dir 2 '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["SBCLR"],["SBOUT",0],["SBOUT",104],["SBOUT",100],["SBOUT",114],["SBOUT",47],["SBFIND","f"]]]}' "$R/include"
-t reject 1 '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["REJECT","k"]]]}'
-t accept 0 '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["ACCEPT"]]]}'
+t pop-empty 2 "run: pop of an empty stack" "run: pop of an empty stack" '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["POP"]]]}'
+# an empty bundled-header name is the include directory itself: fopen succeeds
+# (macOS and glibc), the read fails -- run.c's ferror branch, 'cannot read'
+# ('cannot open' is the errno branch)
+t read-dir 2 "run: cannot read" "run: [Errno 21] Is a directory" '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["SBCLR"],["SBOUT",0],["SBOUT",104],["SBOUT",100],["SBOUT",114],["SBOUT",47],["SBFIND","f"]]]}' "$R/include"
+t reject 1 "reject: k" "reject: k" '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["REJECT","k"]]]}'
+t accept 0 "" "" '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["ACCEPT"]]]}'
 echo "neg  ok $ok   fail $bad"
 [ $bad -eq 0 ] && [ $ok -gt 0 ]

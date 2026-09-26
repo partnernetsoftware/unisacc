@@ -133,7 +133,7 @@ static int sbfind(const unsigned char *p, int n) {
     else snprintf(path, sizeof path, "%.*s", n, p);
     if ((int)strlen(path) == (n >= 5 && !memcmp(p, "\0hdr/", 5) ? (int)strlen(INCDIR) + 1 + n - 5 : n)) {   /* else truncated: absent */
         FILE *f = fopen(path, "rb");
-        if (!f && errno != ENOENT) { fprintf(stderr, "run: cannot read %s\n", path); exit(2); }   /* unreadable is not absent */
+        if (!f && errno != ENOENT) { fprintf(stderr, "run: cannot open %s\n", path); exit(2); }   /* unreadable is not absent */
         if (f) {
             unsigned char *b = 0; int m = 0, c = 0; int ch;
             while ((ch = fgetc(f)) != EOF) { if (m >= c) { c = c ? c * 2 : 4096; b = xrealloc(b, c); } b[m++] = (unsigned char)ch; }
