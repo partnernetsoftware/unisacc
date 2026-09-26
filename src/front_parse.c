@@ -1035,9 +1035,15 @@ int unary(void) {
     if (p == P_DEREF) {
         adv(); unary(); loadval();
         if (curfn) { lvalue = 0; return 0; }     /* *fp is fp */
+        if (curdim2 > 0) {                       /* *a of a[n][m] is an array row */
+            cursize = curelem * curdim2;
+            curdim2 = curdim3; curdim3 = 0;
+            curptr = 1; curpd = 0; lvalue = 0;
+            return 0;
+        }
         lvalue = 1;
         if (curpd >= 2) {                        /* *q of int **q is an int * */
-            curpd = curpd - 1; curptr = 1;
+            curpd = curpd - 1; curptr = 1; cursize = 8;
             curelem = curpd >= 2 ? 8 : curbase;
         } else { curptr = 0; curpd = 0;
                  /* and as wide as the pointee: `*b` of an `int *b` kept the
@@ -1049,7 +1055,7 @@ int unary(void) {
                     whose value is its address, so nothing more is loaded.
                     `sum(*p)` used to load its first eight bytes and pass
                     THOSE as the address -- a segfault in the callee */
-                 if (curstruct >= 0) curelem = 0; }
+                 if (curstruct >= 0) { cursize = stsize[curstruct]; curelem = 0; } }
         return 0;
     }
     if (p == P_BNOT) {                  /* ~x is x ^ -1 */

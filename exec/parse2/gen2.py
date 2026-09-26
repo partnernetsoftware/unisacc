@@ -556,7 +556,7 @@ def types():
     p.a(("LDI", "marr", 0), ("COPYW", "mnm_s", "ps"), ("COPYW", "mnm_e", "pe"), ("COPYW", "mtd", "td")).call("NEXT").tok({"[": "SB.arr"}, "SB.nm1")
     p = P("SB.arr")         # NAME [N]: N elements; more dimensions are not covered
     p.call("NEXT").tok({TK_NUM: "SB.arn"}, bad("struct member array bound"))
-    P("SB.arn").a(("COPYW", "marr", "nv")).call("NEXT").expect("]").call("NEXT").tok({";": "SB.nm1"}, bad("struct member"))
+    P("SB.arn").a(("COPYW", "marr", "nv")).call("NEXT").expect("]").call("NEXT").tok({";": "SB.nm1", ",": "SB.nm1"}, bad("struct member"))
     p = P("SB.nm1")         # back to the name for the layout (the current token is ';')
     p.a(("COPYW", "ps", "mnm_s"), ("COPYW", "pe", "mnm_e"), ("COPYW", "td", "mtd")).branch({1: "SB.v"}, "SB.p", [("CMPI", "td", 0)])
     P("SB.p").a(("LDI", "msz", 8)).goto("SB.put")
@@ -588,7 +588,8 @@ def types():
     p = P("SB.al")
     p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
     P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
-    P("SB.nx").tok({";": "SB.semi"}, bad("struct member"))     # (the name's next token was read in SB.nm)
+    P("SB.more").call("DSTARS").tok({TK_ID: "SB.nm"}, bad("struct member"))
+    P("SB.nx").tok({";": "SB.semi", ",": "SB.more"}, bad("struct member"))     # (the name's next token was read in SB.nm)
     P("SB.semi").call("NEXT").goto("SB.m")
     p = P("SB.end")
     p.a(("COPYW", "soff", "umax"),                              # a struct's extent is its last member's end
@@ -1363,11 +1364,12 @@ def build():
     P("NODBL0.p").branch({1: "RET"}, "DEAD.pa", [("CMPI", "vt", 0)])
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
-    P("U.szof").call("NEXT").a(("COPYW","szpos","tpos")).tok({"(": "SZ.p", TK_ID: "SZ.id"}, "SZ.expr")
-    P("SZ.p").call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", "union": "SZ.t", TK_ID: "SZ.pid"}, "SZ.expr")
+    P("U.szof").call("NEXT").a(("COPYW","szpos","tpos"),("LDI","szparen",0)).tok({"(": "SZ.p", "*": "SZ.star", TK_ID: "SZ.id"}, "SZ.expr")
+    P("SZ.p").a(("LDI","szparen",1)).call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", "union": "SZ.t", "enum": "SZ.t", "*": "SZ.star", TK_ID: "SZ.pid"}, "SZ.expr")
     P("SZ.t").call("TSPEC").expect(")").call("ELSZ").a(("COPYW", "sz", "es")).goto("SZ.out")
     P("SZ.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("LOOKUP").goto("SZ.var")
-    P("SZ.pid").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("NEXT").tok({")":"SZ.pidvar", "[":"SZ.pidvar"}, "SZ.expr")
+    P("SZ.pid").call("ISTD").branch({1: "SZ.t"}, "SZ.pvalue")
+    P("SZ.pvalue").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("NEXT").tok({")":"SZ.pidvar", "[":"SZ.pidvar"}, "SZ.expr")
     P("SZ.pidvar").call("LOOKUP").goto("SZ.sub")
     p = P("SZ.sub")
     p.tok({"[": "SZ.sk", ")":"SZ.cl"}, "SZ.expr")
@@ -1380,16 +1382,27 @@ def build():
     P("SZ.sx").a(("ALUI", "sub", "dep", "dep", 1)).branch({1: "SZ.sd"}, "SZ.sn", [("CMPI", "dep", 0)])
     P("SZ.sd").a(("ALUI", "add", "drop", "drop", 1)).call("NEXT").goto("SZ.sub")
     p = P("SZ.var")      # vt vb ar vid from LOOKUP
+    p.call("SZ.calc").goto("SZ.out")
+    p = P("SZ.calc")
     p.a(("COPYW", "td", "vt"), ("COPYW", "tb", "vb")).branch({1: "SZ.sc"}, "SZ.ar", [("CMPI", "ar", 0)])
     P("SZ.sc").branch({1: "SZ.sc1"}, "SZ.pd", [("CMPI", "drop", 0)])
-    P("SZ.pd").a(("ALU", "sub", "td", "td", "drop")).goto("SZ.sc1")
-    P("SZ.sc1").call("ELSZ").a(("COPYW", "sz", "es")).goto("SZ.out")
+    P("SZ.pd").a(("ALU", "sub", "td", "td", "drop")).branch({0: "DEAD.szx"}, "SZ.sc1", [("CMPI", "td", 0)])
+    P("SZ.sc1").call("ELSZ").a(("COPYW", "sz", "es")).ret()
     q = P("SZ.ar")
     q.branch({2: "DEAD.szx"}, "SZ.ar1", [("CMP", "drop", "ar")])
     q = P("SZ.ar1")
     q.a(("ALUI", "sub", "td", "td", 1)).call("ELSZ").a(("COPYW", "sz", "es"), ("COPYW", "k2", "drop")).label("SZ.al")
-    q.branch({0: "SZ.a1"}, "SZ.out", [("CMP", "k2", "ar")])
+    q.branch({0: "SZ.a1"}, "RET", [("CMP", "k2", "ar")])
     P("SZ.a1").a(("ALUI", "mul", "u", "vid", 8), ("ALU", "add", "u", "u", "k2"), ("LDX", "u", "u", DIM), ("ALU", "mul", "sz", "sz", "u"), ("ALUI", "add", "k2", "k2", 1)).goto("SZ.al")
+    # sizeof *name / **name: inspect the same descriptor as named arrays,
+    # without decaying a remaining array dimension or evaluating a load.
+    P("SZ.star").a(("LDI", "drop", 0)).label("SZ.stars").tok({"*": "SZ.stars.next", TK_ID: "SZ.starid"}, "SZ.expr")
+    P("SZ.stars.next").a(("ALUI", "add", "drop", "drop", 1)).call("NEXT").goto("SZ.stars")
+    P("SZ.starid").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(
+        {"[": "SZ.expr", "(": "SZ.expr", ".": "SZ.expr", "->": "SZ.expr", "++": "SZ.expr", "--": "SZ.expr"}, "SZ.starcalc")
+    P("SZ.starcalc").call("LOOKUP").call("SZ.calc").branch({1: "SZ.starclose"}, "SZ.exprout", [("CMPI", "szparen", 1)])
+    P("SZ.starclose").tok({")": "SZ.stardone"}, "SZ.expr")
+    P("SZ.stardone").call("NEXT").goto("SZ.exprout")
     # For a general operand, reuse unary/expression parsing and discard its
     # emitted instructions. Save marks on the value stack for nested sizeof.
     # The existing named-array route above retains full dimension sizes.

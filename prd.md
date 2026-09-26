@@ -2698,3 +2698,14 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - 规模：gen2.py +18/-10（净 +8 行），状态 3928→3942，JSON 21,506,653→21,584,161 B。属于行为补齐，不是代码缩减；既有类型/声明机制被复用，未把语言规则放进执行器。
 - 已重建 `.com`：1,347,184 B，SHA256 `0475e2c62a3835c6a5104479dda948a4c11456be5cb87af8d658fcc9e0af9fa9`；unisacc.c SHA256 `ce491daefe821f8eacda919fc94acfbd697b05e0873d246ced89115efd894157`。
 - 冻结树 gate --com 70/70，JOBS=2，总 285 s，每套件 ≤60 s；fat 122/0（两架构实跑），六目标网络 self-source 与参考相同，macOS 自举沿用门禁实跑。Linux/Windows 本轮仅字节核对，未启动 VM。日志 /tmp/unisacc-for-gate.log；旧 E3 清单证据 /tmp/unisacc-for-keep.log。未推送、未发布；完整重构与 E7 产品切换仍未完成。
+
+
+### S-17：执行器源码的尺寸与成员声明（2026-09-27）
+
+- E3 sizeof 识别 typedef 与 enum 类型；`sizeof *name`/多重解引用复用命名对象的 DIM/ELSZ 计算，保留数组剩余维度，不把数组退化为 8 字节指针。复杂操作数仍走既有表达式解析，未覆盖者继续明确拒绝。结构体逗号声明复用 DSTARS 与同一成员布局，支持每个声明符独立的指针深度与数组长度。无新执行器原语。
+- 独立 cc 对照发现产品错误：sizeof 解引用结构体指针原为 8、实际应为 16；二维数组解引用原为 4、应为一行的 12。C 前端解引用现在记录聚合尺寸与剩余维度，指针结果明确为 8。b_sizeofderef 在 cc、C O0/O1/O2、Python 的输出相同：`8 1 8 16 8 16 4 / 24 12 4 / 96 48 16 4`。Python 原本正确，未改。s51 核对同一声明的 char 指针/char/指针、int、数组成员，布局与 cc 相同。
+- 新直接分支一度抢先 LOOKUP，令旧有 `sizeof *f()` 从 equal 退为 not-covered。补测发现后，改为先分派复杂操作数，再查直接对象；s52 固定此回归，cc、.com、Python 与六段网络均为 `4 4 0`、rc 0（函数未被调用）。没有把旧覆盖损失当作可以接受的扩展代价。
+- 扩清单前旧 215 E3 项全部通过；最终 218/218 equal。chain 从 76 增至 79，最终网络路径 79/79，无拒绝/丢项。三例均通过六网络生成 macOS ARM64 镜像，原始字节等于参考，实跑等于 cc。E3 网络全域 1,023,230 观测相等，3967 banks / 7445 hidden units / 含动作字符串的文本 455,303 B。
+- gen2.py +21/-8（净 +13），状态 3942→3967，JSON 21,584,161→21,725,618 B：覆盖进展而非代码缩减。执行器源码已越过 sizeof 和逗号成员声明，当前真实阻挡是 `o->n++`，未称整个 runtime 源码已经由网络编译。
+- 产品已重建：.com 1,347,504 B，SHA256 `cd19cca573d7a9fc44eccb4ffb4d88d72617c2f096e452cec2cec9aa64aa04b7`；unisacc.c SHA256 `c20e182aa65723f4315673c461d2929d8ada0d2081e90e7bcd0825a137c9f912`。冻结产品/前端初版 gate --com 70/70、287 s、JOBS=2，各套件 ≤60 s；fat 123/0，六目标网络镜像等于参考（Linux/Windows 本轮不宣称 VM 实跑）。日志 /tmp/unisacc-szd-gate.log。
+- gate 之后只有上述 E3 分派回退及 s52/固定清单改变，产品未变；最终再跑 E3 218、chain 79、s52 六段完整镜像，以及 osx/arm64 网络 selfcheck（743,202 B、N1=N2=N3），均通过。没有把前一轮 70 项门禁冒称为最后两行解析调整后的全量复跑。日志 /tmp/unisacc-szd-final-{keep,chain,self}.log。未推送、未发布；cc-unisacc 保持暂停。
