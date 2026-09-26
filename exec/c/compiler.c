@@ -156,6 +156,7 @@ int main(int argc, char **argv) {
         }
     }
     free(sources);
+    free(in.at); in.at=0; /* Framing positions are not input to model inference. */
     if (!rc) rc = runroute(route,&in,src);
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
