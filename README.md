@@ -160,6 +160,7 @@ in a twentieth of a second, and the SGD control arm lives in
 | `ablate` | each stage's answer is rotated to a wrong one: an image must change, or the compile must be refused — asking a net is not the same as obeying it |
 | `run` | `unisacc -run` compiles a file and runs it in memory, against the system `cc` |
 | `cli` | the compiler as a tool, from a scratch directory: built-in headers, `-I`, `-D`, shebang, exit status |
+| `ccparity` | unisacc next to `cc -std=c99` as a user sees it: a.out, `-o`, exit status, stderr, files left after a failed compile, `-E`/`-D`/`-U`/`-I`, `-Werror`, and the documented `-c` difference |
 | `ape` | `unisacc.com` is built and run on this host: one file, a PE for Windows and a script for Unix |
 | `layout` | the data layout **enumerated**, not sampled: every tape of up to three data definitions, each also with one symbol defined twice — 762 tapes, 4,572 image comparisons across all six targets, in twelve seconds |
 | `datashape` | generated programs whose globals are declared in one order and allocated in another; the suite asserts the shape is present before it asserts the bytes match |

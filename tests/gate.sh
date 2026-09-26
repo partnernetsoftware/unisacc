@@ -45,6 +45,7 @@ job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
 job nativeboot  ./tests/nativeboot.sh
 job cli         ./tests/cli.sh
+job ccparity    ./tests/ccparity.sh
 job run         ./tests/run.sh
 job multi       ./tests/multi.sh
 job diag        ./tests/diag.sh
@@ -53,7 +54,7 @@ job kernel      ./tests/kernel.sh
 job docs        ./tests/docs.sh
 if [ "$COM" = 1 ]; then
     [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
-    for s in cli run multi diag hostile; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
+    for s in cli ccparity run multi diag hostile; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
     job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
 fi
 wait
