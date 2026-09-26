@@ -108,3 +108,27 @@ the runtime source and resource package, with no include directory argument.
 The resulting self image must equal the ordinary build. A package without
 resources must fail in that directory. User/project include files still use
 the filesystem; this does not claim an arbitrary project has no file inputs.
+
+## Embedded development container
+
+`python3 -m unisa ape exec/c/run.c --via COMPILER -O2 --payload models.pkg
+-o model-runtime.com` appends the package once after the ordinary executable
+slices. The last 16 bytes are `UNIPKG1\n` and an unsigned little-endian 64-bit
+package length. The reader validates the length against the file before
+forming a package span; all existing package checks still apply.
+
+On Unix the launcher exports `UNISA_CONTAINER` with the original container
+path. The extracted native slice runs `--embedded ROUTE INPUT [SRCPATH]
+[INCLUDE_DIR]` and reopens that container. This is necessary because different
+packages may share the same cached executable slice. Without that variable,
+the runtime tries argv[0], intended for the Windows PE overlay; that Windows
+startup path has not yet been executed in a VM. `--bundle` also accepts an
+explicit container path. The runtime owns the whole input file allocation,
+while the package and models are bounded spans within it.
+
+This is a developer interface, not the shipped compiler CLI. Packaging uses
+Python; execution uses the native runtime and the carried networks/resources.
+The existing payload-free `.com` packaging is unchanged. The generic embedded
+fixture tests two containers with identical executable slices but different
+networks, paths containing spaces, and execution after external package files
+have been removed. It runs on the host, not all target systems.

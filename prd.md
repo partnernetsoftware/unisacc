@@ -2776,3 +2776,11 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - nativecheck：隔离目录只有 runtime.c 和 models.pkg，没有 include/，也不给 include-directory 参数；cc、unisacc、网络构建的三种 runtime 都生成相同自身镜像。去掉资源的同源包在该目录以 2 拒绝、无 stdout，避免隐式读回仓库的假通过。ASan+UBSan 对同一隔离资源路线生成自身通过，无报告。netcheck 覆盖含 NUL/高字节的内容、空资源、重复读取缓存、两段间重置、冲突挂载、缺目录及截断/越界资源。
 - 运行器净 +17 行 C；cc -O2 整体 __text 19,140 B，文件 57,904 B，gzip-9 16,240 B；unisacc runtime __text 94,448 B，文件 115,746 B，gzip-9 21,516 B。包含加载/IO/校验/执行及各自库口径，不以这些数字冒称独立几 KB 内核。产品程序源码与用户自备头文件仍是文件输入。
 - 冻结 gate --com 70/70，JOBS=2，364 s aggregate；各套件 ≤60 s，nativecheck 54 s、余量 6 s，六目标包自源码字节一致；fat 126/0，两架构实际执行。Linux/Windows 本轮未启动 VM。日志 /tmp/unisacc-resource-{native,gate}.log。E3 对修改后的 runtime 源码单独 equal；固定清单仍 235/96。产品源码/.com 未改，仍沿用 dec6553 的哈希；未推送、未发布。单份 payload 嵌入、产品驱动/CLI、紧凑内核与剩余前端/错误契约继续推进，cc-unisacc 保持暂停。
+
+### S-17：单份模型包嵌入开发 .com（2026-09-27）
+
+- APE 打包增加可选 `--payload`，包在所有切片之后只存一次；16 B 尾部由 `UNIPKG1\n` 与 LE64 长度组成。runtime 先验证范围，再复用已有包/模型加载器。Unix 启动脚本把原容器路径放入 UNISA_CONTAINER，避免缓存的架构切片丢失包来源；`--embedded ROUTE INPUT` 为开发入口。无环境变量时尝试 argv[0]，Windows PE 路径尚未实跑，不称已通过。
+- 六目标合包含 21 个共享模型体、36 个阶段目录项和 19 个头文件资源，2,659,887 B，SHA256 `f3edc4e9ff9faf172f4f39105e01678623f7aaf5c23a2adb37b663704ce0e23a`。独立开发容器 `/tmp/model-runtime.com` 为 2,845,967 B，SHA256 `d342972ce88e278d77ba1f4db4a88fc4d67db16f920a644efc0ed4479fb345cb`。使用当前 runtime 源码与此前已验收六路线模型构建；不覆盖产品 unisacc.com。
+- 隔离目录中只有开发容器和 hello.c：六目标输出均与外置同包路线逐字节相同，osx/arm64 镜像实际打印 hello from C99；其余为字节检查，本轮未开 Linux/Windows VM。通用 embeddedcheck 检查两容器共用同一执行器切片但携带不同模型、路径含空格、删除外置包后仍输出各自结果。netcheck 在 cc/unisacc 构建上拒绝尾部截断、错误 magic、零长度与超界长度，无 stdout。E3 对 runtime 源码保持 equal。
+- 默认无 payload 的打包结果 SHA256 仍为 `66d466a7d2a48796b62a30a71167d7befd4a08b6e301317a73806b11ce28041a`，与现有产品逐字节相同。冻结 gate --com 71/71，JOBS=2，362 s aggregate；nativecheck 55 s、新增 embeddedcheck 3 s，单套件均 ≤60 s。日志 `/tmp/unisacc-embedded-gate.log`。
+- Python 用于离线模型构造与 APE 包装，开发容器执行阶段不调用它。运行器仍包含加载/IO/校验等，独立几 KB 内核尚未完成；产品 CLI/默认路线尚未切换，前端与失败契约仍有缺口。单份模型嵌入已落地不等于完整重构完成。未推送、未发布；cc-unisacc 保持暂停。

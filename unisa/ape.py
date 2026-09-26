@@ -36,7 +36,7 @@ PAD = 40                    # slack the script is padded back up to, so its
                             # length does not change when the numbers do
 
 
-def _script(table):
+def _script(table, embedded=False):
     """`table`: [(os|arch, offset, length, key)] -- offsets are 1-based, for
     tail; `key` is 16 hex digits naming the slice's bytes."""
     cases = []
@@ -66,6 +66,7 @@ def _script(table):
         '  tail -c +$o "$0" | head -c $n | gzip -dc > "$t.$$" &&'
         ' chmod +x "$t.$$" && mv -f "$t.$$" "$t" || { rm -f "$t.$$"; exit 1; }',
         'fi',
+        *(['UNISA_CONTAINER="$0"; export UNISA_CONTAINER'] if embedded else []),
         'exec "$t" "$@"',
     ]) + "\n").encode()
 
@@ -90,7 +91,7 @@ def _stub(script):
     return b"qFpD='\n" + filler + b"....'\n" + script
 
 
-def build(compile_target, out):
+def build(compile_target, out, payload=b""):
     """`compile_target(target, stub=b"")` -> the image for that target.
 
     Two passes: the first learns how long everything is with a placeholder
@@ -104,9 +105,9 @@ def build(compile_target, out):
     imgs = {t: gzip.compress(compile_target(t), mtime=0) for (_, t) in SLICES}
     # pass 1: plausible numbers, padded to a fixed length
     guess = [(name, 1 << 30, len(imgs[t]), "0" * 16) for (name, t) in SLICES]
-    want = len(_script(guess)) + PAD
+    want = len(_script(guess, bool(payload))) + PAD
     head = compile_target("win/x86_64",
-                          stub=_stub(_pad(_script(guess), want)))
+                          stub=_stub(_pad(_script(guess, bool(payload)), want)))
     base = (len(head) + 15) // 16 * 16
     off = base
     table = []
@@ -114,7 +115,7 @@ def build(compile_target, out):
         table.append((name, off + 1, len(imgs[t]),    # tail -c counts from 1
                       hashlib.sha256(imgs[t]).hexdigest()[:16]))
         off += (len(imgs[t]) + 15) // 16 * 16
-    stub = _stub(_pad(_script(table), want))
+    stub = _stub(_pad(_script(table, bool(payload)), want))
     head2 = compile_target("win/x86_64", stub=stub)
     assert len(head2) == len(head), (len(head2), len(head))
     blob = bytearray(head2.ljust(base, b"\x00"))
@@ -122,5 +123,10 @@ def build(compile_target, out):
         img = imgs[t]
         blob += img
         blob += b"\x00" * ((-len(img)) % 16)
+    if payload:
+        if not payload.startswith((b"P 1 ", b"P 2 ")):
+            raise ValueError("embedded payload must be a model package")
+        blob += payload
+        blob += b"UNIPKG1\n" + struct.pack("<Q", len(payload))
     open(out, "wb").write(bytes(blob))
     return bytes(blob)

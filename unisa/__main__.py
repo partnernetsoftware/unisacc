@@ -438,7 +438,9 @@ def cmd_ape(a):
         print("  %-12s %8d B" % (target, len(img)), file=sys.stderr)
         return img
 
-    blob = ape_build(one, a.out)
+    from pathlib import Path
+    payload = Path(a.payload).read_bytes() if a.payload else b""
+    blob = ape_build(one, a.out, payload=payload)
     print("%s  %d B  (%s, and a shell script for the rest)"
           % (a.out, len(blob), blob[:2].decode()))
     return 0
@@ -726,6 +728,7 @@ def main(argv=None):
     apx.add_argument("-O", dest="olevel", default="0",
                      help="optimisation level passed to --via (the tape is "
                           "optimised by the C front end) [H1]")
+    apx.add_argument("--payload", help="development model package carried once in the container")
     apx.set_defaults(fn=cmd_ape)
 
     vm = sub.add_parser("vm")

@@ -67,6 +67,7 @@ job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, re
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
 job exec-native ./exec/c/nativecheck.sh
 job exec-net python3 ./exec/c/netcheck.py
+job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-tableself env NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas
 job exec-armself env TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines

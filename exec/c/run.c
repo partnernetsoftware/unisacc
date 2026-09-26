@@ -180,7 +180,7 @@ static void load(const char *path) {
    Shared model spans are kept once. All directory bounds and format edges
    are checked before a route is executed. Model bodies use the same loader. */
 typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
-static unsigned char *PB; static int PN, PM, PS;
+static unsigned char *PFILE, *PB; static int PN, PM, PS;
 static int *POFF, *PLEN; static Stage *STAGES;
 typedef struct { int name, n, data, len; } Resource;
 static Resource *RES; static int NR;
@@ -195,7 +195,18 @@ static char *pword(void) {
     char *v = xrealloc(0, n+1); memcpy(v, LB+first, n); v[n] = 0; return v;
 }
 static void package(const char *path) {
-    PB = readfile(path, &PN, 0); LB = PB; LN = PN; LP = 0;
+    PFILE = readfile(path, &PN, 0); PB = PFILE;
+    if (PN < 2 || PB[0] != 'P' || PB[1] != ' ') {
+        if (PN < 16 || memcmp(PB+PN-16, "UNIPKG1\n", 8)) die("missing package footer");
+        I len = 0;
+        for (int i = 7; i >= 0; i--) {
+            len = len*256 + PB[PN-8+i];
+            if (len > PN-16) die("bad package footer extent");
+        }
+        if (!len) die("empty embedded package");
+        PB += PN-16-(int)len; PN = (int)len;
+    }
+    LB = PB; LN = PN; LP = 0;
     ltag('P'); int version = lint();
     if (version != 1 && version != 2) die("unknown package version");
     PM = lint(); PS = lint(); NR = version == 2 ? lint() : 0;
@@ -235,7 +246,7 @@ static void unpackage(void) {
     for (int i = 0; i < PS; i++) {
         free(STAGES[i].route); free(STAGES[i].name); free(STAGES[i].in); free(STAGES[i].out);
     }
-    free(STAGES); free(POFF); free(PLEN); free(RES); RES = 0; NR = 0; free(PB);
+    free(STAGES); free(POFF); free(PLEN); free(RES); RES = 0; NR = 0; free(PFILE);
 }
 
 /* Model lifetime is one stage. No model-specific state survives unload. */
@@ -520,21 +531,26 @@ finished:
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
     int chain = argc > 1 && !strcmp(argv[1], "--chain");
-    int bundled = argc > 1 && !strcmp(argv[1], "--bundle");
-    if ((!chain && !bundled && argc < 3) || (chain && argc < 6) || (bundled && argc < 5)) {
-        fprintf(stderr, "usage: run MODEL INPUT [SRCPATH] [INCLUDE_DIR]\n       run --chain INPUT SRCPATH INCLUDE_DIR MODEL...\n       run --bundle PACKAGE ROUTE INPUT [SRCPATH] [INCLUDE_DIR]\n");
+    int embedded = argc > 1 && !strcmp(argv[1], "--embedded");
+    int bundled = embedded || (argc > 1 && !strcmp(argv[1], "--bundle"));
+    if ((!chain && !bundled && argc < 3) || (chain && argc < 6) || (bundled && argc < (embedded ? 4 : 5))) {
+        fprintf(stderr, "usage: run MODEL INPUT [SRCPATH] [INCLUDE_DIR]\n       run --chain INPUT SRCPATH INCLUDE_DIR MODEL...\n       run --bundle PACKAGE ROUTE INPUT [SRCPATH] [INCLUDE_DIR]\n       run --embedded ROUTE INPUT [SRCPATH] [INCLUDE_DIR]\n");
         return 2;
     }
-    int inputarg = bundled ? 4 : 2;
+    int routearg = embedded ? 2 : 3;
+    int inputarg = bundled ? routearg+1 : 2;
     const char *src = argc > inputarg+1 ? argv[inputarg+1] : argv[inputarg];
     if (argc > inputarg+2) INCDIR = argv[inputarg+2];
-    if (bundled) package(argv[2]);
+    if (bundled) {
+        const char *path = embedded ? getenv("UNISA_CONTAINER") : argv[2];
+        package(path ? path : argv[0]);
+    }
     Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
     int first = bundled ? 0 : chain ? 5 : 1, end = bundled ? PS : chain ? argc : 2;
     int count = 0;
     for (int i = first; i < end; i++) {
         if (bundled) {
-            if (strcmp(STAGES[i].route, argv[3])) continue;
+            if (strcmp(STAGES[i].route, argv[routearg])) continue;
             int m = STAGES[i].model;
             loadbytes(PB+POFF[m], PLEN[m]);
         } else load(argv[i]);
