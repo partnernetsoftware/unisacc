@@ -87,27 +87,26 @@ Things that cost time here before they were written down:
   `ps -eo pid,pcpu,command | awk '$2 > 20'`.
 - **`pkill -f` fails under this shell's locale** ("illegal byte sequence").
   Kill by PID (`ps -eo pid,command | grep …`).
-- `nativeboot` (~18 s) compiles `unisacc.c` with unisacc three times over,
-  then cross-writes five more targets. It and `bigclosure` used to take
-  minutes; that was two O(n*m) loops in the Python back end (a label dict
-  rebuilt per instruction, a label scan per tape pc), fixed 2026-09-25.
-  `make com` went 182 s -> 17 s. unisacc compiling itself takes ~0.25 s per
-  target, so a suite that takes minutes is waiting on Python or on macOS's
-  first-launch scan of new binaries (`native`, ~44 s) -- profile before
-  blaming the compiler.
+- unisacc compiling itself takes ~0.25 s per target, so a suite that takes
+  minutes is waiting on Python or on macOS's first-launch scan of new
+  binaries -- profile before blaming the compiler.
 - **The heat is XProtect, not the compiler** (measured 2026-09-25). Every
   freshly written binary's FIRST exec costs 0.5-0.9 s while
   `XprotectService` scans it at ~35% CPU; the second exec of the same file
   is 0.02 s, and unisacc compiling a probe is 0.01 s. Thirteen suites
   write-sign-exec a new binary per probe (closure, native, corpus, tools,
   fat, ...), so a full run is thousands of scans. `unisacc -run` maps the
-  code in memory and is never scanned. Adding the terminal app under
-  System Settings > Privacy & Security > Developer Tools exempts what it
-  launches -- that is the owner's machine setting, not ours to flip.
+  code in memory and is never scanned. The exemption (Privacy & Security >
+  Developer Tools) follows the RESPONSIBLE app, and a shell under a
+  long-lived tmux server is nobody's: `tests/term.sh CMD` runs CMD inside
+  Terminal.app so the scan is skipped (0.3-0.9 s -> 0.00 s per new binary).
 
-## Pushing
+## The gate
 
-Batch the work and push once. Every push used to trigger three billed jobs.
+`./tests/gate.sh [--com]` runs every release suite side by side (4 at a
+time, each bounded at 60 s) inside Terminal.app, one line per suite, about
+a minute in all; `--com` adds the user-facing suites run through the
+shipped `unisacc.com`. Use it instead of `all.sh`.
 
 ## Building and releasing
 
@@ -119,9 +118,6 @@ a second opinion on a clean machine, never the thing that produces the
 binary. Local cross-machine testing goes through the UTM machines
 (`tests/crossnative.sh`, and the `utm-court` helper that lives outside this
 repo) and the Lima Linux VM.
-
-v0.0.1 (2026-09-23) was released this way: `python3 -m unisa ape` built
-`unisaccrun.com` here, `gh release create` uploaded it.
 
 ## Generated files: kernel/
 
@@ -149,3 +145,13 @@ tables (`unisa build-weights`, exact by construction, verified by enumeration);
 `unisa train` is a control arm and is not on the shipping path. Every
 `--drive` default is `built`. Do not run training without being asked — it is
 minutes of full-core work and it has overheated this machine before.
+
+## Model migration: exec/
+
+`exec/` is the S-17 migration (prd.md): each compiler stage as a finite
+delta run by a generic executor, compared byte for byte with the current
+compiler (the behavioural reference). `exec/pipeline/run.py FILE` chains the
+stages by `exec/pipeline/stages.tsv`; `exec/stamp.sh` rebuilds any generated
+artefact whose inputs changed -- do not trust a cached file in /tmp. A delta
+that ACCEPTS input and differs from the reference is a bug; anything it
+cannot match exactly must be rejected as "not covered".
