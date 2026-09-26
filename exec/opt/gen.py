@@ -10,7 +10,15 @@ becomes `mov rY, rX` (left out when X == Y) followed by M, when the pop is at
 most line i+18, every line of M is `simple` (the opinfo table's answer for its
 op word) and does not name r7, no line of M names rY, and M is empty when
 X == Y.  Anything else is copied as it stands.  A round that rewrites nothing
-ends the pass.  -O2 (liveness, the peep table) is not here yet.
+ends the pass.
+
+-O2 (gen.py delta.json 2) adds, per round, the per-line facts, blocks and labels,
+the liveness of r2..r5 and with it the carry through r3..r5 and ol_local; then
+up to four peep rounds: liveness of r0..r5, stfuse, and each line's relation
+with its neighbour, the action for which is the peep table's (loaded at START).
+This is the optimiser's algorithm compiled into an action table: the rules are
+maintained here, in the generator, not removed; the old src/opt.c and
+unisa/opt.py stay the behaviour reference.
 
 The opinfo table is read, not copied: its `simple` column is interned into a
 set at START.  Everything else is the byte-level control of the rule.

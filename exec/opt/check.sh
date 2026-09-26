@@ -20,7 +20,9 @@ for f in "$@"; do
     for L in 1 2; do
         b 30 "$UA" -O$L "$f" -S -o - > "$T/oL" 2>/dev/null; rl=$?
         if [ $r0 -ne 0 ] || [ $rl -ne 0 ]; then
-            if [ $r0 -eq $rl ] && [ $r0 -lt 128 ]; then skip=$((skip+1)); continue; fi   # both refuse the program
+            # both refuse the program: an exploration skip -- but with E4STRICT=1 (the gate's fixed
+            # sets) every listed file must compile at both levels, so a refusal fails
+            if [ -z "${E4STRICT:-}" ] && [ $r0 -eq $rl ] && [ $r0 -lt 128 ]; then skip=$((skip+1)); continue; fi
             bad=$((bad+1)); echo "  BAD $f -O$L  reference -O0 $r0 -O$L $rl"; continue
         fi
         UNISA_MAXSTEPS=400000000000 b 60 "$T/run" "$T/e4_$L.tbl" "$T/o0" > "$T/m" 2> "$T/e"; rc=$?
