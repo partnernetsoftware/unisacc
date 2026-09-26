@@ -555,7 +555,9 @@ def types():
     q = P("SCALE")
     q.branch({2: "SC.8"}, "SC.1", [("CMPI", "lt", 1)])
     P("SC.8").o("  imm r2, 8\n  mul64 r0, r0, r2\n").ret()
-    P("SC.1").a(("COPYW", "scl", "lb")).branch({2: "SC.u"}, "SC.1b", [("CMPI", "scl", UNS)])   # lb itself is kept
+    P("SC.1").a(("COPYW", "scl", "lb")).branch({(1, 2): "SC.st"}, "SC.1a", [("CMPI", "scl", SBB)])   # lb itself is kept
+    P("SC.st").a(("ALUI", "sub", "scl", "scl", SBB), ("LDX", "scl", "scl", SSZ)).goto("SC.1b")   # a struct element: its size
+    P("SC.1a").branch({2: "SC.u"}, "SC.1b", [("CMPI", "scl", UNS)])
     P("SC.u").a(("ALUI", "sub", "scl", "scl", UNS)).goto("SC.1b")
     P("SC.1b").branch({1: "RET"}, "SC.n", [("CMPI", "scl", 1)])
     P("SC.n").o("  imm r2, ").num("scl").o("\n  mul64 r0, r0, r2\n").ret()
@@ -1232,7 +1234,7 @@ def build():
     emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("ALUI", "sub", "rk", "rk", 1), ("LDI", "rkok", 1)).call("NEXT").goto("POSTIX")
     q = P("PX.one")
     emit(q, "push").vpush("vt", "vb", "st1", "amp").a(("LDI", "amp", 0)).call("NEXT").call("EXPR").expect("]").vpop("lt", "lb", "st1", "amp").call("SCALE")
-    emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("DOWN").call("NEXT").tok({"=": "PX.as"}, "PX.ld")
+    emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("DOWN").call("NEXT").tok({"=": "PX.as", ".": "MEMB"}, "PX.ld")   # a[i].m: the element's address, then the member
     # a statement that is only `p[i];` computes the address and stops (measured, probe p39)
     P("PX.ld").branch({1: "PX.am"}, "PX.ld1", [("CMPI", "amp", 1)])
     P("PX.am").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0)).ret()
