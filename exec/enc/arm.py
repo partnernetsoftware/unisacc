@@ -3,7 +3,8 @@
 ENCSPEC supplies ALU and inverted condition values. Instruction bit layouts,
 MOVZ/MOVK selection and operand contracts below are hand-written rules compiled
 into transitions, not new runtime primitives or constructed neural networks.
-Input is the existing TIns line syntax; this slice takes no labels or metadata.
+Input is the existing TIns line syntax with section-local labels; metadata
+is not taken yet. Two passes resolve branches after all lengths are measured.
 """
 import json
 import sys
@@ -15,7 +16,7 @@ _spec.loader.exec_module(_enc)
 E, P, g = _enc.E, _enc.P, _enc.g
 from unisa.catalog import ENCSPEC
 
-OP, REG, BASE = 70000000, 71000000, 72000000
+OP, REG, BASE, LP = 70000000, 71000000, 72000000, 73000000
 DIG = list(range(48, 58))
 END = [10, 256]
 SEP = [32, 44] + END
@@ -31,31 +32,40 @@ def build():
     specs = {'mov': ('rr', 1), 'imm': ('ri', 2), 'mul64': ('rrr', 3),
              'ret': ('', 4), 'nop': ('', 5), 'callr': ('r', 6),
              'load64': ('rri',9), 'store64': ('rir',10),
-             '.ld': ('rrii',11), '.st': ('riri',12)}
+             '.ld': ('rrii',11), '.st': ('riri',12),
+             'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15)}
     specs.update({k: ('rrr', 7) for k in ENCSPEC['arm64']['alu3']})
     specs.update({k: ('rrr', 8) for k in ENCSPEC['arm64']['invcond']})
     p = P('START')
     for i, (op, (shape, cls)) in enumerate(specs.items(), 1):
         p.a(('SBCLR',), [('SBOUT', c) for c in op.encode()], ('SBINTERN', 't'),
-            ('LDI', 'u', i), ('STX', 't', OP, 'u'))
+            ('LDI', 'u', i), ('STX', 't', OP, 'u'),
+            ('LDI', 'u', shape.find('l')), ('STX', 't', LP, 'u'))
         val = ENCSPEC['arm64']['alu3'].get(op, ENCSPEC['arm64']['invcond'].get(op, 0))
         p.a(('LDI', 'u', val), ('STX', 't', BASE, 'u'))
     # x31 is intentionally excluded: SP/ZR interpretations differ by opcode.
     for i in range(31):
         p.a(('SBCLR',), [('SBOUT', c) for c in ('x%d' % i).encode()],
             ('SBINTERN', 't'), ('LDI', 'u', i+1), ('STX', 't', REG, 'u'))
-    p.goto('LINE')
-    g.on('LINE', [256], 'DEAD', [('ACCEPT',)])
+    p.a(('LDI','pass',0)).goto('LINE')
+    g.on('LINE', [256], 'FINISH', [])
     g.on('LINE', [10], 'LINE', [('ADV',)])
     g.els('LINE', 'OP.scan', [('MARK', 'start')])
+    g.on('OP.scan', [58], 'LABEL', [('MARK','end'),('ADV',)])
     g.on('OP.scan', [32]+END, 'OP.end', [('MARK', 'end')])
     g.els('OP.scan', 'OP.scan', [('ADV',)])
     P('OP.end').a(('INTERN', 'oid', 'start', 'end'), ('LDX', 'cls', 'oid', OP),
-                   ('LDX', 'base', 'oid', BASE), ('LDI', 'n', 0)).goto('ARG')
+                   ('LDX', 'base', 'oid', BASE), ('LDX','labelpos','oid',LP), ('LDI', 'n', 0)).goto('ARG')
     g.on('ARG', [32], 'ARG', [('ADV',)])
     g.on('ARG', END, 'ENC', [])
-    g.on('ARG', [45]+DIG, 'NUM', [('LDI', 'neg', 0), ('LDI', 'v', 0), ('LDI', 'kind', 2)])
-    g.els('ARG', 'REG.scan', [('MARK', 'start')])
+    g.els('ARG','ARG.type',[])
+    P('ARG.type').branch({1:'NAME'},'VALUE',[('CMP','n','labelpos')])
+    g.els('NAME','NAME.scan',[('MARK','start')])
+    g.on('NAME.scan',SEP,'NAME.end',[('MARK','end')])
+    g.els('NAME.scan','NAME.scan',[('ADV',)])
+    P('NAME.end').a(('INTERN','v','start','end'),('LDI','kind',3)).goto('PUT')
+    g.on('VALUE', [45]+DIG, 'NUM', [('LDI', 'neg', 0), ('LDI', 'v', 0), ('LDI', 'kind', 2)])
+    g.els('VALUE', 'REG.scan', [('MARK', 'start')])
     g.on('REG.scan', SEP, 'REG.end', [('MARK', 'end')])
     g.els('REG.scan', 'REG.scan', [('ADV',)])
     P('REG.end').a(('INTERN', 't', 'start', 'end'), ('LDX', 'v', 't', REG)).branch({1:'FAIL'}, 'REG.ok', [('CMPI','v',0)])
@@ -94,7 +104,7 @@ def build():
         p.branch({1:'CHECK.'+op+'.n'},'FAIL',[('CMPI','n',len(shape))]); p=P('CHECK.'+op+'.n')
         for i,k in enumerate(shape):
             nxt='CHECK.'+op+'.k%d'%i
-            p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,1 if k=='r' else 2)]);p=P(nxt)
+            p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,{'r':1,'i':2,'l':3}[k])]);p=P(nxt)
         p.goto('EMIT.%d'%cls)
     word(P('EMIT.1').a(('ALUI','shl','w','a1',16),('ALUI','or','w','w',0xAA0003E0),('ALU','or','w','w','a0'))).goto('LINE')
     for cls,base in ((3,0x9B007C00),(7,None)):
@@ -126,6 +136,8 @@ def build():
         word(P('IMM.put%d'%sh).a(('ALUI','shl','w','w',5),('ALUI','or','w','w',0xF2800000|(sh<<21)),('ALU','or','w','w','md'))).goto(nxt)
     from armmem import install
     install(E,word)
+    from armbranch import install as install_branch
+    install_branch(E,word)
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}

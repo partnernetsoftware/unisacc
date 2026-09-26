@@ -2240,3 +2240,14 @@ match on both executors, four memory-domain rejects, 64 native load/store
 cases match C memcpy and signed values. The earlier 550 native arithmetic and
 constant checks still pass. 313 states, 13,213 B table; no new executor action,
 no product source change, no .com rebuild or publication needed for this slice.
+
+ARM64 branch follow-up: section-local jump/jumpz/call and shared/end labels now
+run on the same executor. Two passes measure actual lengths, discard provisional
+bytes, then resolve offsets. Calls use the BL position after three setup words.
+RELFIELD supplies bit width/shift; layout/range logic remains hand-written in
+the generator. Duplicate/undefined labels reject. 367 states, 16,297 B table.
+Targeted armcheck passes all earlier checks plus ten branch fixtures on both
+runtimes, six hand-worked byte expectations, seven rejects, eight synthetic
+helper boundary contexts for imm19/imm26, and native loop/direct-call results
+5/42. No new full-gate run is claimed after the previous 52/52. Metadata,
+remaining ops, ARM lowering and images are still outstanding; .com unchanged.

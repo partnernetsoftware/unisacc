@@ -16,7 +16,8 @@ Memory opcode declarations are read from emit_arm LDS/STS/LDU/STU; form
 selection and packing remain hand rules. A scaled positive offset is preferred,
 then signed imm9, otherwise MOVIMM plus ADD/SUB through x16. Fallback rejects
 an x16 base or store source, whose value would be clobbered. Direct forms
-allow them. Labels, metadata, address layout, FP and images remain unsupported.
+allow them. Section-local labels, jump/jumpz/call are supported. Metadata, data-address
+layout, FP and images remain unsupported.
 
 `ret` pops x17 from tape SP x7 and returns through x17. `callr` stores its
 continuation on that software stack before BLR. These are not host ABI calls.
@@ -36,5 +37,21 @@ Memory checks add 100 instructions / 768 bytes compared on both executors,
 four width/scratch rejects, and 64 native load/store cases checked with C
 memcpy and signed-width values.
 
-Current size: 313 states, 13,213 B compressed text table. The new gate entry is
+Current size: 367 states, 16,297 B compressed text table. The new gate entry is
 exec-arm. This does not change .com or claim complete ARM64 lowering/encoding.
+
+## Section-local branches
+
+Two scans of the same input measure actual instruction lengths and then encode
+resolved displacements. Pass one output is discarded; pass two checks label
+positions are unchanged. Duplicate and undefined labels reject. Shared/end
+labels are legal. Relocation widths and shifts are read from RELFIELD; the
+signed-range check and two-pass algorithm are hand-written transition rules.
+ARM has no branch shortening here. The call displacement is measured at the BL
+(after the three software-stack setup instructions), not at the start of call.
+
+armbranchcheck: ten layout fixtures on both runtimes, six independently worked
+byte strings, seven rejects; a backward loop and a software-stack direct call
+execute natively. Eight synthetic contexts enter the real displacement helper
+to test signed imm19/imm26 edges; these do not claim full-size image coverage.
+All earlier integer and memory checks remain in armcheck.
