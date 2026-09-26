@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 typedef int64_t I;
 enum { ADV, MARK, JUMP, LDI, COPYW, ALU, ALUI, CMP, CMPI, RLD, LDX, STX, OUT, OUTW, COPY, COPYT,
@@ -120,14 +121,16 @@ static I intern(const unsigned char *b, int n) {
 /* SBFIND: file path -> blob id (0: absent), cached */
 typedef struct { unsigned char *p; int n; int id; } FEnt;
 static FEnt *FC; static int NFC;
-static const char *INCDIR = "include";
+static const char *INCDIR = 0;   /* the 4th argument; SBFIND of a bundled header without it is an error */
 static int sbfind(const unsigned char *p, int n) {
     for (int j = 0; j < NFC; j++) if (FC[j].n == n && !memcmp(FC[j].p, p, n)) return FC[j].id;
     char path[4096]; int id = 0;
+    if (n >= 5 && !memcmp(p, "\0hdr/", 5) && !INCDIR) die("a bundled header was asked for and no include directory was given");
     if (n >= 5 && !memcmp(p, "\0hdr/", 5)) snprintf(path, sizeof path, "%s/%.*s", INCDIR, n - 5, p + 5);
     else snprintf(path, sizeof path, "%.*s", n, p);
-    if ((int)strlen(path) == (n >= 5 && !memcmp(p, "\0hdr/", 5) ? (int)strlen(INCDIR) + 1 + n - 5 : n)) {
+    if ((int)strlen(path) == (n >= 5 && !memcmp(p, "\0hdr/", 5) ? (int)strlen(INCDIR) + 1 + n - 5 : n)) {   /* else truncated: absent */
         FILE *f = fopen(path, "rb");
+        if (!f && errno != ENOENT) { fprintf(stderr, "run: cannot read %s\n", path); exit(2); }   /* unreadable is not absent */
         if (f) {
             unsigned char *b = 0; int m = 0, c = 0; int ch;
             while ((ch = fgetc(f)) != EOF) { if (m >= c) { c = c ? c * 2 : 4096; b = xrealloc(b, c); } b[m++] = (unsigned char)ch; }
@@ -243,6 +246,7 @@ int main(int argc, char **argv) {
             case ORES: R[a[1]] = o.n; for (I j = 0; j < a[2]; j++) bput(&o, ' ', OT); break;
             case OFILL: { char t[32]; int n = snprintf(t, sizeof t, "%lld", (long long)R[a[2]]); I w = a[3], at = R[a[1]];
                           if (n > w) { fprintf(stderr, "reject: field overflow\n"); fwrite(e.b, 1, e.n, stderr); return 1; }
+                          if (at < 0 || at + w > o.n) die("fill past the reservation");
                           for (I j = 0; j < w; j++) o.b[at + j] = j < w - n ? ' ' : (unsigned char)t[j - (w - n)]; } break;
             case OCLR: o.n = 0; break;
             case OSEL: osel = (int)a[1]; break;

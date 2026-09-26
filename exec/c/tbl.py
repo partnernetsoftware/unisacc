@@ -34,7 +34,20 @@ ALUOPS = ["add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar",
           "sdiv", "srem", "udiv", "urem", "not", "shr"]
 
 
+def crosscheck():
+    """run.c's enum and ARITY are a second copy of OPS: they must agree, name for name"""
+    import os
+    import re
+    c = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "run.c")).read()
+    enum = re.search(r"enum \{(.*?)\};", c, re.S).group(1).replace("\n", " ")
+    names = [x.strip() for x in enum.split(",") if x.strip()]
+    ar = [int(x) for x in re.search(r"ARITY\[NOP_\] = \{(.*?)\};", c, re.S).group(1).replace("\n", " ").split(",")]
+    assert names[-1] == "NOP_" and names[:-1] == [n for n, _ in OPS], "run.c enum differs from OPS"
+    assert ar == [len(k) for _, k in OPS], "run.c ARITY differs from OPS"
+
+
 def main():
+    crosscheck()
     d = json.load(open(sys.argv[1]))
     names = list(d["states"])
     # a target with no row (E1's HALT: always entered by a REJECT) gets an empty one

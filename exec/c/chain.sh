@@ -13,7 +13,8 @@
 #   bad          the tape differs; or a stage exits other than 0/1 (bad
 #                table, out of steps, killed); or the reference times out or
 #                dies on a signal -- a tool failure is never hidden
-# With CHAINKEEP=LIST every listed file must be `equal` (and be an input).
+# With CHAINKEEP=LIST every listed file must be `equal` (and be an input);
+# names are compared as strings, so pass them as the list spells them.
 # Every step is bounded (AGENTS.md: 60 s).
 set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
@@ -36,8 +37,8 @@ for f in "$@"; do
     in=$f
     for s in e2 e1 e3; do
         case $s in
-        e2) b 10 "$T/run" "$T/e2.tbl" "$in" "$f" include > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;
-        e1) b 10 "$T/run" "$T/e1.tbl" "$in" > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;
+        e2) b 10 "$T/run" "$T/e2.tbl" "$in" "$f" "$R/include" > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;
+        e1) b 10 "$T/run" "$T/e1.tbl" "$in" "$f" > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;
         e3) b 10 "$T/run" "$T/e3.tbl" "$in" "$f" > "$T/$s.out" 2> "$T/$s.err"; rc=$? ;;
         esac
         [ $rc -eq 0 ] || { stage=$s; why=$(head -1 "$T/$s.err"); break; }
