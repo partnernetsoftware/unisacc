@@ -10206,7 +10206,7 @@ int gchanged;
    mentions itself would otherwise never finish. */
 int emitrange(int from, int to, int depth) {
     int i; int j; int k; int c; int m; int ni;
-    int sargo[MAXMPARAM]; int sargl[MAXMPARAM]; int snargs;
+    int sargo[MAXMPARAM]; int sargl[MAXMPARAM]; int snargs; int k2;
     i = from;
     if (depth > 8) { eputsrc(from, to); return 0; }
     while (i < to) {
@@ -10275,7 +10275,26 @@ int emitrange(int from, int to, int depth) {
                     k = j;
                     while (k < to) { if (wsat(k) == 0) { if ((src[k] & 255) != 10) break; } k = k + 1; }
                     if (k < to) { if ((src[k] & 255) == 40) {
+                        /* The caller's arguments first: this may be the
+                           expansion of an ARGUMENT of an outer call, and
+                           collectargs overwrites the one argument table --
+                           `F(G(1), 2)` lost the 2 when the table was saved
+                           only after it. */
+                        k2 = 0;
+                        while (k2 < MAXMPARAM) {
+                            sargo[k2] = argo[k2]; sargl[k2] = argl[k2];
+                            k2 = k2 + 1;
+                        }
+                        snargs = nargs;
                         ni = collectargs(k);
+                        if (ni <= 0) {
+                            k2 = 0;
+                            while (k2 < MAXMPARAM) {
+                                argo[k2] = sargo[k2]; argl[k2] = sargl[k2];
+                                k2 = k2 + 1;
+                            }
+                            nargs = snargs;
+                        }
                         if (ni > 0) {
                             if (macnp[m] == 0) { if (nargs == 1) {
                                 if (argl[0] == 0) nargs = 0; } }
@@ -10302,12 +10321,6 @@ int emitrange(int from, int to, int depth) {
                                would re-lex as `++`.  A real preprocessor
                                works on tokens and cannot merge them. */
                             eput(32);
-                            k = 0;
-                            while (k < MAXMPARAM) {
-                                sargo[k] = argo[k]; sargl[k] = argl[k];
-                                k = k + 1;
-                            }
-                            snargs = nargs;
                             emitbody(m, 1, depth);
                             k = 0;
                             while (k < MAXMPARAM) {

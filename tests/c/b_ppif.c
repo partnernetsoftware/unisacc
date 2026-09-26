@@ -44,7 +44,7 @@ int sc = 0;
 int sc = 1;
 #endif
 #define M(a, b) ((a) > (b) ? (a) : (b))
-#if M(3, 7) == 7 && M(9, 4) == 9
+#if M(3, 7) == 7 && M(9, M(2, 4)) == 9 && M(M(1, 8), 2) == 8
 int f = 1;
 #else
 int f = 0;

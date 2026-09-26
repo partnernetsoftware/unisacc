@@ -140,6 +140,17 @@ rm -f x.i; ua -E -Iinc -o x.i pp.c
 say "-E -o file, stdout quiet"  "yes empty" "$(ex x.i) $(has o.ua)"
 cc_ -E -Iinc pp.c; say "-E -o file content" "$(norm o.cc)" "$(norm x.i)"
 
+# ecase NAME TEXT: `-E` of TEXT against `cc -E -P`, tokens only
+ecase() {
+    printf '%s\n' "$2" > e.c
+    cc_ -E -P e.c; local w; w=$(norm o.cc)
+    ua  -E e.c;    say "$1" "$w" "$(norm o.ua)"
+}
+# a macro call in an argument that is not the last (C99 6.10.3.1)
+ecase "-E nested call, 1st arg" '#define F(a,b) [a|b]
+#define G(x) x
+F(G(1), 2) F(3, G(4)) F(G(G(5)), G(6))'
+
 # #if is a real constant expression: dividing by zero in an evaluated
 # operand is an error, in an unevaluated one it is not (C99 6.10.1)
 printf '#if 1 / 0\n#endif\nint main(void) { return 0; }\n' > ppdiv.c
