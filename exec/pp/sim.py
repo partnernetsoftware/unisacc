@@ -70,6 +70,7 @@ def w32(v):
 
 
 def alu(op, a, b):
+    a, b = w32(a), w32(b)        # int32 in, as the header says (and exec/c/run.c does)
     if op == "add":
         return w32(a + b)
     if op == "sub":
@@ -140,9 +141,10 @@ class Files:
                 p = path.decode("latin-1")
                 if p.startswith("\0hdr/"):       # the bundled copies: include/ of this tree
                     p = os.path.join(BUNDLED, p[5:])
-                self.cache[path] = open(p, "rb").read() if os.path.isfile(p) else None
-            except (OSError, ValueError):
+                self.cache[path] = open(p, "rb").read() if os.path.exists(p) else None
+            except ValueError:
                 self.cache[path] = None
+            # an OSError on a path that exists (unreadable, a directory) propagates: not absent
         return self.cache[path]
 
 
@@ -262,7 +264,7 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
                 else:
                     e.append(c)
             elif op in ("SPAN", "SPANT", "SPAN2"):
-                s0 = W.get(a[1], 0)
+                s0 = max(0, W.get(a[1], 0))       # a negative offset is 0 (as run.c)
                 s1 = W.get(a[2], 0) if op == "SPAN2" else fr[2]
                 s1 = min(s1, fr[3])
                 if s0 < s1:
@@ -295,8 +297,11 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
             elif op == "OFILL":    # write W[a[2]] in decimal, right-aligned, into the a[3] bytes reserved at W[a[1]]
                 t = str(W.get(a[2], 0)).encode()
                 w = a[3]
+                at = W.get(a[1], 0)
+                if at < 0 or at + w > len(o):
+                    raise RuntimeError("fill past the reservation")      # run.c dies too
                 if len(t) <= w:
-                    o[W.get(a[1], 0):W.get(a[1], 0) + w] = b" " * (w - len(t)) + t
+                    o[at:at + w] = b" " * (w - len(t)) + t
                 else:
                     return ("reject", ("field overflow", bytes(e)), steps)
             elif op == "OCLR":
@@ -312,10 +317,12 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
             elif op == "PUSH":
                 stack.append(a[1])
             elif op == "POP":
+                if not stack:
+                    raise RuntimeError("pop of an empty stack")          # run.c dies too
                 stack.pop()
             elif op == "INTERN" or op == "SBINTERN":
                 if op == "INTERN":
-                    s0 = W.get(a[2], 0)
+                    s0 = max(0, W.get(a[2], 0))
                     s1 = min(W.get(a[3], 0), fr[3])
                     key = bytes(fr[0][s0:s1]) if s0 < s1 else b""
                 else:
@@ -326,7 +333,7 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
                 W[a[1]] = v
             elif op == "BLOBSAVE" or op == "SBSAVE":
                 if op == "BLOBSAVE":
-                    s0 = W.get(a[2], 0)
+                    s0 = max(0, W.get(a[2], 0))
                     s1 = min(W.get(a[3], 0), fr[3])
                     data = bytes(fr[0][s0:s1]) if s0 < s1 else b""
                 else:
@@ -351,7 +358,7 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
             elif op == "SBOUT":
                 sb.append(a[1])
             elif op == "SBSPAN":
-                s0 = W.get(a[1], 0)
+                s0 = max(0, W.get(a[1], 0))
                 s1 = min(W.get(a[2], 0), fr[3])
                 if s0 < s1:
                     sb += fr[0][s0:s1]
@@ -402,6 +409,7 @@ def main():
         sys.stdout.buffer.write(val)
         return 0
     if res == "reject":
+        sys.stderr.write("reject: %s\n" % (val[0],))                 # the same form as run.c
         sys.stderr.buffer.write(val[1])
         return 1
     sys.stderr.write("timeout\n")

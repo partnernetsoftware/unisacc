@@ -25,6 +25,8 @@ Storage is static and bounded (`MAX*` in exec.c); running out is exit 3
 | 2 | ADV | – | i := i+1 if i < \|x\| |
 | 3 | PUSH | g | push g (0 ≤ g < NG) |
 | 4 | POP | – | pop; empty stack: reject(254) |
+
+> The E0 table above is the 19-action toy machine of exec.c. The machine E1-E3 run on has 56 actions; its authority is the header of `exec/pp/sim.py`, and `exec/c/run.c` implements the same. There, a POP on an empty stack is a bad-table error on both sides, not a reject (2026-09-26, bdy review).
 | 5 | EMIT | c | append byte c |
 | 6 | COPY | – | append x[i]; at EOF: reject(253) |
 | 7 | SETR | v | r := v (0 ≤ v < NR) |

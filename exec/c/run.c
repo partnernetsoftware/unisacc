@@ -256,13 +256,13 @@ int main(int argc, char **argv) {
             case SETOT: OT = R[a[1]]; break;
             case XATTR: R[a[1]] = (F->at && F->i < F->end) ? F->at[F->i] : 0; break;
             case PUSH: if (nst >= cst) { cst = cst ? cst * 2 : 1024; stk = xrealloc(stk, sizeof(int) * cst); } stk[nst++] = (int)a[1]; break;
-            case POP: if (nst) nst--; break;
+            case POP: if (!nst) die("pop of an empty stack"); nst--; break;
             case INTERN: case SBINTERN: {
-                if (op == INTERN) { I s0 = R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
+                if (op == INTERN) { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
                                     R[a[1]] = s0 < s1 ? intern(F->b + s0, (int)(s1 - s0)) : intern((const unsigned char *)"", 0); }
                 else R[a[1]] = intern(sb.b ? sb.b : (unsigned char *)"", sb.n);
             } break;
-            case BLOBSAVE: { I s0 = R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
+            case BLOBSAVE: { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
                              R[a[1]] = s0 < s1 ? blob_add(F->b + s0, (int)(s1 - s0)) : blob_add((const unsigned char *)"", 0); } break;
             case SBSAVE: R[a[1]] = blob_add(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
             case INPUSH: case INPUSHX: case INPUSHXE: {
@@ -275,7 +275,7 @@ int main(int argc, char **argv) {
             case INPOP: if (NFR > 1) NFR--; break;
             case SBCLR: sb.n = 0; break;
             case SBOUT: bput(&sb, (int)a[1], 0); break;
-            case SBSPAN: { I s0 = R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) bput(&sb, F->b[j], 0); } break;
+            case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) bput(&sb, F->b[j], 0); } break;
             case SBBLOB: { Blob *B = &BL[R[a[1]]]; for (int j = 0; j < B->n; j++) bput(&sb, B->b[j], 0); } break;
             case SBFIND: R[a[1]] = sbfind(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
             case BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
