@@ -11,9 +11,11 @@ E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 from data import install
 args=sys.argv[2:]
 full='--full' in args
-target=('osx' if '--osx' in args else 'lnx')+'/'+('arm64' if '--arm64' in args else 'x86_64')
-if len(sys.argv)<2 or len(args)!=len(set(args)) or any(a not in ('--full','--arm64','--osx') for a in args):
-    sys.exit("usage: gen.py OUT.json [--full] [--arm64] [--osx]")
+target=('win' if '--win' in args else 'osx' if '--osx' in args else 'lnx')+'/'+('arm64' if '--arm64' in args else 'x86_64')
+if len(sys.argv)<2 or len(args)!=len(set(args)) or any(a not in ('--full','--arm64','--osx','--win') for a in args):
+    sys.exit("usage: gen.py OUT.json [--full] [--arm64] [--osx|--win]")
+if '--win' in args and '--osx' in args:
+    sys.exit("choose one OS")
 install(E,code_start="C.prelude" if full else "H.code",target=target)
 if full:
     from code import install as install_code

@@ -18,3 +18,10 @@ b python3 exec/lower/check.py "$T/run" "$T/d.tbl" "$T/d.json" "$T/hello" "$T/fib
 b python3 exec/lower/gen.py "$T/arm.json" --arm64
 b python3 exec/c/tbl.py "$T/arm.json" "$T/arm.tbl"
 b env LOWER_TARGET=lnx/arm64 python3 exec/lower/check.py "$T/run" "$T/arm.tbl" "$T/arm.json" "$T/hello" "$T/fib"
+# Windows has extra runtime cells and a logical software-stack BSS region.
+for ARCH in x86_64 arm64; do
+    case $ARCH in arm64) FLAG=--arm64;; *) FLAG=;; esac
+    b python3 exec/lower/gen.py "$T/win.json" --win $FLAG
+    b python3 exec/c/tbl.py "$T/win.json" "$T/win.tbl"
+    b env LOWER_TARGET=win/$ARCH python3 exec/lower/check.py "$T/run" "$T/win.tbl" "$T/win.json" "$T/hello" "$T/fib"
+done

@@ -5,12 +5,14 @@ The Python parser/zero_last are referees only, never fed into the delta.
 import os,pathlib,subprocess,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 from unisa.tape import parse
-from unisa.lower import zero_last, SCRATCH, PRINTMAX
+from unisa.lower import zero_last, SCRATCH, PRINTMAX, WIN_EXTRA, WIN_STACK
 from exec.enc.tins import parse as parse_header
 
 
 def main():
     if len(sys.argv)<5:raise SystemExit('usage: check.py RUN TABLE JSON TAPE...')
+    target=os.environ.get('LOWER_TARGET','lnx/x86_64')
+    win=target.startswith('win/')
     cases=[('escapes','.bss z 24\n.str s "a;\\x00\\xff\\\\\\\""\n.str empty ""\n_start:\n  ret\n'),
            ('empty','_start:\n  ret\n'),('zero',' .bss a 19\n.str b "\\x00"\n  ret\n'),
            ('alias','.str a ""\n.str b "ab"\n.str c ""\n.bss z 8\n.str end ""\nret\n'),
@@ -24,7 +26,7 @@ def main():
         for i,(name,text) in enumerate(cases):
             path.write_text(text);t=parse(text)
             expected,syms=zero_last(t.data,t.syms,256)
-            expected+=bytes((-len(expected))%8+SCRATCH+PRINTMAX)
+            expected+=bytes((-len(expected))%8+(WIN_EXTRA if win else SCRATCH+PRINTMAX))
             commands=[[sys.argv[1],sys.argv[2],str(path)]]
             if i<builtin:commands.append([sys.executable,'exec/pp/sim.py',sys.argv[3],str(path)])
             for cmd in commands:
@@ -35,7 +37,7 @@ def main():
                 body='\n'.join(l for l in r.stdout.decode().splitlines() if not l.startswith('@'))
                 back=parse(body)
                 assert len(x.data)<=len(expected) and x.data==bytes(expected[:len(x.data)]) and not any(expected[len(x.data):]) and x.syms==syms,(name,'data/symbol mismatch')
-                assert x.data_len==len(expected) and x.bss==0 and x.relocs==[]
+                assert x.data_len==len(expected) and x.bss==(WIN_STACK if win else 0) and x.relocs==[]
                 if name=='alias-nonzero':assert x.syms=={'first':256,'z':272,'empty':264,'next':264}
                 if name=='duplicate':assert x.data==b'ab' and x.syms=={'first':256,'other':257}
                 assert back.labels==t.labels and [(i.op,i.args) for i in back.code]==[(i.op,i.args) for i in t.code],(name,'code changed')

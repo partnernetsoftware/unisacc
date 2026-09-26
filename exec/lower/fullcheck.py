@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full Linux lowering referee: all typed fields, code and labels; no filtering."""
+"""Typed lowering referee: all typed fields, code and labels; no filtering."""
 import os,pathlib,subprocess,sys,tempfile
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 from unisa.tape import parse
@@ -37,6 +37,9 @@ def main():
             for width in (1,2,4,8):
                 for barrier in ('','blocked'+str(width)+':\n'):
                     fixture += f'  .frame 8\n  .st [r7+0], r2, {width}\n{barrier}  .ld r1, [r7+0], {width}\n  .frame -8\n'
+        if os.environ.get('LOWER_TARGET','').startswith('win/'):
+            from unisa.catalog import WINAPI
+            fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in WINAPI)
         cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
         if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             # Immediate limits, power-of-two multiply, aliasing and liveness.

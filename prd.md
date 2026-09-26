@@ -2480,3 +2480,15 @@ SHA256 `d1583b832d7bb4d0020a8448af3c008dd597cfcc4bcf1ba3d063d0a9051ffe82`.
 Frozen-tree local `gate --com`: 60 suites, 0 failed, 138 s total, each suite
 bounded at 60 s; macOS host evidence, not a new Linux/Windows native run.
 Log: `/tmp/unisacc-u-gate.log`. No release or push.
+
+### Windows typed lowering (2026-09-27)
+
+Windows data/extra-stack layout and full typed lowering now share the existing
+transition generator with POSIX. `wincheck.sh` covers x86_64 and arm64, all
+catalog WINAPI calls, mmap's argument truncation, setup/save/restore and
+hello/fib; compares complete typed fields and layout, not selected bytes.
+Both executor fixtures and C-executor real tapes passed. Existing four POSIX
+lowering comparisons passed unchanged. Added `exec-winlower` to gate; the last
+full gate remains the preceding 60/60 run, not a claim for the new 61-suite list.
+No new executor primitive. This is lookup-table migration, not network runtime;
+Windows encoding/PE/native execution and E7 product adoption remain unfinished.

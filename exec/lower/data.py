@@ -8,12 +8,15 @@ RAW, START, NAME, FLAG, NEW, REMAP, DEFINED, RSTART = (i << 40 for i in range(1,
 
 
 def install(E, done='ACCEPTDATA', code_start='H.code', target='lnx/x86_64'):
-    if target not in ('lnx/x86_64', 'lnx/arm64', 'osx/x86_64', 'osx/arm64'):
+    if target not in ('lnx/x86_64', 'lnx/arm64', 'osx/x86_64', 'osx/arm64', 'win/x86_64', 'win/arm64'):
         raise ValueError('unsupported lowering target: '+target)
-    from unisa.lower import SCRATCH, PRINTMAX
+    from unisa.lower import SCRATCH, PRINTMAX, WIN_EXTRA, WIN_STACK
+    win=target.startswith("win/")
+    extra=WIN_EXTRA if win else SCRATCH+PRINTMAX
+    bss=WIN_STACK if win else 0
     P,g=E.P,E.g
     E.prn()
-    p=P('START');p.a(('LDI','dn',0),('LDI','ns',0),('LDI','rn',0),('LDI','data_limit',2147483647-SCRATCH-PRINTMAX-7))
+    p=P('START');p.a(('LDI','dn',0),('LDI','ns',0),('LDI','rn',0),('LDI','data_limit',2147483647-extra-bss-7))
     for word,key in [('.str','str'),('.bss','bss')]:
         p.a(('SBCLR',),[('SBOUT',c) for c in word.encode()],('SBINTERN','id_'+key))
     p.goto('LINE')
@@ -85,7 +88,7 @@ def install(E, done='ACCEPTDATA', code_start='H.code', target='lnx/x86_64'):
     P('R.end').branch({1:'R.second'},'HEAD',[('CMPI','phase',0)])
     P('R.second').a(('LDI','phase',1),('LDI','bi',0)).goto('R.loop')
     # Empty terminal symbols map to the end (and retain their alignment).
-    p=P('HEAD');p.a(('ALUI','add','base','outn',7),('ALUI','and','base','base',-8),('ALUI','add','full','base',SCRATCH+PRINTMAX),('LDI','di',0)).o('@target '+target+'\n@data ').branch({1:'H.empty'},'H.hex',[('CMPI','stored',0)])
+    p=P('HEAD');p.a(('ALUI','add','base','outn',7),('ALUI','and','base','base',-8),('ALUI','add','full','base',extra),('LDI','di',0)).o('@target '+target+'\n@data ').branch({1:'H.empty'},'H.hex',[('CMPI','stored',0)])
     P('H.empty').o('-').goto('H.syms')
     P('H.hex').branch({0:'H.byte'},'H.syms',[('CMP','di','stored')])
     P('H.byte').a(('LDX','b','di',NEW),('ALUI','sar','h','b',4)).call('HEX').a(('ALUI','and','h','b',15)).call('HEX').a(('ALUI','add','di','di',1)).goto('H.hex')
@@ -98,6 +101,6 @@ def install(E, done='ACCEPTDATA', code_start='H.code', target='lnx/x86_64'):
     P('H.addr').a(('LDX','s','bi',START)).goto('H.normal')
     P('H.normal').a(('LDX','n','s',REMAP)).goto('H.num')
     P('H.num').o(' ').a(('ALUI','add','n','n',256)).call('PRN').o('\n').a(('ALUI','add','bi','bi',1)).goto('H.sl')
-    P('H.end').o('@src_os '+target.split('/')[0]+'\n@data_len ').a(('COPYW','n','full')).call('PRN').o('\n@bss 0\n@relocs -\n').a(('INPUSH','code')).goto(code_start)
+    P('H.end').o('@src_os '+target.split('/')[0]+'\n@data_len ').a(('COPYW','n','full')).call('PRN').o('\n@bss '+str(bss)+'\n@relocs -\n').a(('INPUSH','code')).goto(code_start)
     g.on('H.code',[256],done,[('INPOP',)]);g.els('H.code','H.code',[('COPY',),('ADV',)])
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: tape data directive'),'r')

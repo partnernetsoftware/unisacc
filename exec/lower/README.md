@@ -79,3 +79,22 @@ hello/fib input tapes, isolating lowering from target-specific preprocessing.
 The source-to-image script now accepts these Darwin targets and writes `.macho`
 outputs; E2 selects Darwin macros too. `selfcheck.sh` compares target-specific
 tape and image, and runs N1=N2=N3 where the host can execute the target.
+
+## Windows lowering
+
+`--win [--arm64]` selects Windows data layout and typed instruction lowering.
+The same sparse data pass appends `WIN_EXTRA` runtime cells and declares
+`WIN_STACK` as separate BSS. The instruction delta initializes standard handles
+and argv before the stack, uses a data-backed stack on ARM64, and emits
+`winsave`/`winrest` around WinAPI gates. ABI register `none` ends argument setup
+(the Win64 fifth/sixth arguments are not emitted); sysno `none` does not emit a
+number-register write. These are explicit generator control rules. Register,
+encoding, ABI and relocation facts come from the existing TSVs; Windows cell
+sizes and API names come from lower/catalog declarations.
+
+`wincheck.sh` compares both architectures with reference typed instructions,
+metadata, labels and data layout, including all declared WINAPI operations,
+six-argument mmap, hello/fib and ARM fusion fixtures. Small fixtures run on
+both executors. The data-only `check.sh` also covers Windows on both executors.
+Windows instruction encoding, PE output and native execution are not established
+by this lowering check; the source-to-image pipeline still accepts POSIX only.

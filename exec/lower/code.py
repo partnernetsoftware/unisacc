@@ -1,4 +1,4 @@
-"""POSIX instruction lowering delta. Hand control rules, declared facts.
+"""Instruction lowering delta. Hand control rules, declared facts.
 ARM shares setup and syscalls, with its own transition peepholes.
 regmap/enc/abi/reloc are read from TSV; no reference lower() is run by generator.
 """
@@ -15,7 +15,7 @@ def install(E, arch="x86_64", os_="lnx"):
     P,g=E.P,E.g
     from unisa.tape import SHAPE
     from unisa.catalog import WINAPI
-    from unisa.lower import WIN_HSTD, WIN_WRITTEN, SYSA, SYSFP, SYSSP
+    from unisa.lower import WIN_HSTD, WIN_WRITTEN, WIN_SAVE, WIN_ARGVA, WIN_EXTRA, WIN_STACK, SYSA, SYSFP, SYSSP
     regmap={r[0]:r[2] for r in rows('regmap') if r[1]==arch}
     enc={r[0]:r[3] for r in rows('enc') if r[1:3]==[os_,arch]}
     abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==[os_,arch]}
@@ -63,7 +63,14 @@ def install(E, arch="x86_64", os_="lnx"):
     p.branch({1:'C.labprint'},'C.enter',[('CMPI','kind',1)])
     P('C.labprint').a(('COPYW','tok','op')).call('PRINT').o('\n').goto('C.advance')
     P('C.enter').branch({1:'C.setup'},'C.dispatch',[('CMP','ci','entry')])
-    p=P('C.setup');p.o('spinit '+regmap['r7']+'\nargsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', '+('true' if os_=='lnx' else 'false')+'\n').goto('C.dispatch')
+    p=P('C.setup')
+    if os_=='win':
+        p.o('winstdh ').a(('LDI','offset',WIN_HSTD)).call('ADDR').o('\nwinargs ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', ').a(('LDI','offset',WIN_ARGVA)).call('ADDR').o('\n')
+    p.o('spinit '+regmap['r7'])
+    if os_=='win' and arch=='arm64':p.o(', ').a(('LDI','offset',WIN_EXTRA+WIN_STACK)).call('ADDR')
+    p.o('\n')
+    if os_!='win':p.o('argsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', '+('true' if os_=='lnx' else 'false')+'\n')
+    p.goto('C.dispatch')
     special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
     if arch=='arm64':
         special['imm']='armimm'; special['.frame']='armframe'; special.pop('load64')
@@ -137,13 +144,15 @@ def install(E, arch="x86_64", os_="lnx"):
     P('DO.print').goto('C.fail')  # fallback integer printer needs itoa encoder.
     p=P('SYSCALL')
     for op,f in abi.items():
-        if f[0]=='none':continue
+        if f[0]=='none' and os_!='win':continue
         p.branch({1:'SC.'+op},'SC.next.'+op,[('CMP','sop','sysid_'+op)]);p=P('SC.next.'+op)
     p.goto('C.fail')
     for op,f in abi.items():
-        if f[0]=='none':continue
+        if f[0]=='none' and os_!='win':continue
         p=P('SC.'+op)
-        p.a(('SBCLR',),[('SBOUT',c) for c in f[7].encode()],('SBSAVE','retblob')).o('setreg '+f[9]+', imm '+str(int(f[0],0))+' role=sysno\n')
+        p.a(('SBCLR',),[('SBOUT',c) for c in f[7].encode()],('SBSAVE','retblob'))
+        if f[0]!='none':p.o('setreg '+f[9]+', imm '+str(int(f[0],0))+' role=sysno\n')
+        if os_=='win':p.o('winsave ').a(('LDI','offset',WIN_SAVE)).call('ADDR').o('\n')
         for mode in range(4):
             p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
             q=P('SC.'+op+'.m'+str(mode))
@@ -158,6 +167,9 @@ def install(E, arch="x86_64", os_="lnx"):
             elif mode==2:sources=[('imm',1),('mem',0),('mem',8)]
             else:sources=[('mem',0),('imm',0),('imm',0)]
             for i,(kind,value) in enumerate(sources):
+                if f[1+i]=='none':
+                    if os_=='win':break
+                    raise ValueError('unsupported stack syscall argument')
                 q.o('setreg '+f[1+i]+', '+kind+' ')
                 if kind=='imm':q.o(str(value))
                 else:q.a(('LDI','offset',value)).call('ADDR')
@@ -167,6 +179,8 @@ def install(E, arch="x86_64", os_="lnx"):
         def val(v):return "'"+v if v=='none' or v.startswith(('0','1','2','3','4','5','6','7','8','9')) else v
         p=P('SC.'+op+'.gate').o('gate form='+enc[op]+' gate='+f[8]+' carry='+('true' if os_=='osx' else 'false')+' winapi='+('none' if WINAPI.get(op) is None else WINAPI[op])+' catop='+op+' sysno='+val(f[0])+' retconv='+val(f[11])+' winimp='+val(f[12])+' ret='+f[7])
         for name,off in [('hstd',WIN_HSTD),('written',WIN_WRITTEN),('scr0',0),('scr1',8)]:p.o(' '+name+'=').a(('LDI','offset',off)).call('ADDR')
-        p.o('\n').ret()
+        p.o('\n')
+        if os_=='win':p.o('winrest ').a(('LDI','offset',WIN_SAVE)).call('ADDR').o(', '+f[7]+'\n')
+        p.ret()
     P('C.done').a(('INPOP',),('ACCEPT',)).goto('DEAD')
-    g.on('C.fail',range(257),'DEAD',E.rej('not covered: Linux '+arch+' lowering'),'r')
+    g.on('C.fail',range(257),'DEAD',E.rej('not covered: '+os_+'/'+arch+' lowering'),'r')
