@@ -21,8 +21,9 @@ rel32: 5 bytes; test + jz rel32: 9), each round lays the code out and marks at
 once every branch whose short form (jmp rel8: 2; test + jz rel8: 5) would reach
 its target, measured from the end of the short instruction; repeat until no
 more fit -- and the code is written.  The offsets and the short set are the
-delta's own; a duplicate or an undefined label is rejected.  The displacement
-width (4 bytes) is the reloc table's rel32 for x86_64.
+delta's own; a duplicate or an undefined label is rejected.  The rel32 width
+(4 bytes) is a local constant here, equal to emit_x86.RELBYTES["rel32"]; the reloc
+table is not read by this slice.
 """
 import importlib.util
 import json
