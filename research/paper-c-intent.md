@@ -1,6 +1,7 @@
 # Paper C 意向书：种子机与迭代脱离——把"确定性模型推理替代编译"推广为管道方法
 
 **状态**：意向书（2026-09-25）。不是草稿，也不做任何结果声称。
+**2026-09-26 注**：A、B、C 是三条并行主线，C 不是暂停的设想。另：自 `prd.md` S-17 起，A 的方向是把“结构性粘合”也交给模型推理（通用执行器 ∘ δ*，理论见 [`delta-framework.md`](delta-framework.md)）。下文 §1、§3 把粘合交给经典代码，描述的是 A、B 当前的实现，C 成文时要按新方向修订。
 **关系**：独立成文。引用 Paper A（[`unisacc-paper.md`](unisacc-paper.md)，C99 编译器）与 Paper B（[`ujs-paper.md`](ujs-paper.md)，UJS → WebAssembly），把两者当作**两个可复现、门禁已钉的迁移实例**（B：构造脊 + M3 出货脊；UJS-1_ship ≠ 全表 UJS-1；无 UJS Lean），而不重复它们的内容、也不把「门禁绿」写成「全管道 Lean 闭合」。
 
 ---
