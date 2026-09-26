@@ -95,7 +95,7 @@ def rej(k):
 # ---- the token reader: a byte trie over the dump's lines -------------------
 def tokenizer():
     pre = {""}
-    for w in WORDS + ["id=", "num=", "str="]:
+    for w in WORDS + ["id=", "num=", "str=", "type=const", "type=volatile"]:
         for i in range(1, len(w) + 1):
             pre.add(w[:i])
     g.on("NEXT", range(257), "NX", [("MARK", "tpos")], "r")
@@ -108,7 +108,9 @@ def tokenizer():
             c = chr(b)
             if p + c in pre:
                 g.on(st, [b], "NX" + p + c, [("ADV",)])
-        if p in TK:
+        if p in ("type=const", "type=volatile"):   # a qualifier: no code in the reference; skipped
+            g.on(st, [10], "NEXT", [("ADV",)])
+        elif p in TK:
             g.on(st, [10], "RET", [("ADV",), ("LDI", "tk", TK[p])])
         g.on(st, [256], "DEAD", rej("not covered: truncated token dump"))
         g.els(st, "SKIPO", [("LDI", "tk", TK_OTHER)])
