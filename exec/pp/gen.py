@@ -17,9 +17,10 @@ each pass reading x and writing o, SWAP between passes:
 
 NOT covered (the delta rejects with a `not covered: ...` code, never guesses):
 #if/#elif expressions, _Pragma; function-like calls with zero parameters,
-variadic, # or ##, an argument containing `(`, or a function-like name in a body.  Also not
-modelled: autoinc() (the on-demand header prepend -- compare against the
-reference built without it, see compare.py), #pragma push_macro/pop_macro
+variadic, # or ##, an argument containing `(`, or a function-like name in a body.
+autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
+its trigger names read from include/*.h (E2_AUTOINC=0 builds without it).
+Also not modelled: #pragma push_macro/pop_macro
 (rejected as not covered when live and spelled exactly; the reference's
 prefix match `push_macroX` is not reproduced), -D/-U/-I/-include, the
 file:line:col rendering of diagnostics (the reject kind is compared, not the
@@ -44,8 +45,8 @@ _inc = open(os.path.join(ROOT, "kernel", "unisa_model.inc"), encoding="latin-1")
 DIRV = tuple(re.search(r'char \*DIRV = "((?:[^"\\]|\\.)*)";', _inc).group(1).split("\\0")[:-1])
 
 
-# autoinc (src/front_pp.c autoinc/hdrneeded), DATA only -- not yet wired
-# into the delta.  Order is the reference's; trigger names are derived from
+# autoinc (src/front_pp.c autoinc/hdrneeded): the trigger data build_autoinc
+# puts in the delta.  Order is the reference's; trigger names are derived from
 # include/*.h by hdrneeded's line rule (a line opening `static` with `(` and
 # a `{` after it names the identifier before the first `(`).
 AUTOINC_ORDER = ("assert.h", "ctype.h", "stdlib.h", "string.h", "wchar.h", "stdio.h")
@@ -62,6 +63,84 @@ def autoinc_map():
                     names.append(mm.group(1))
         m[h] = names
     return m
+
+
+AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta without it
+AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
+
+
+def build_autoinc(g):
+    """P2 autoinc, first run only (RUN == 0), between decomment and P3.
+    One scan over x: every maximal identifier run followed (spaces, tabs,
+    newlines) by `(` is a call; the `(`'s matching `)` followed by `{` is a
+    definition; the first string after `printf (` is checked for a
+    width/flag/precision.  Then, per header in AUTOINC_ORDER, a name of
+    autoinc_map() (printf excluded, as hdrneeded does) with status exactly
+    `called` pulls it in; the lines are emitted in prepend order (rtprintf's
+    stdio.h first, then the headers last-to-first) and x copied after."""
+    g.els("AISTART", "AIS1", [("RLD", "RUN")])
+    g.r("AIS1", {0: ("AS", [("LDI", "RTP", 0)]), (1, 2): ("P3START", [])})
+    WSN = [32, 9, 10]
+    g.on("AS", ID, "ASI", [("MARK", "AS0"), ("ADV",)])
+    g.on("AS", [EOF], "AH0_0", [])
+    g.els("AS", "AS", [("ADV",)])
+    g.on("ASI", ID, "ASI", [("ADV",)])
+    g.els("ASI", "ASW", [("MARK", "AE"), ("INTERN", "aid", "AS0", "AE")])
+    g.on("ASW", WSN, "ASW", [("ADV",)])
+    g.on("ASW", [40], "ASC", [("MARK", "AP"), ("ALUI", "add", "aa", "aid", AIB), ("LDX", "av", "aa", 0),
+                              ("ALUI", "or", "av", "av", 1), ("STX", "aa", 0, "av"),
+                              ("CMP", "aid", "ID_PRINTF")])
+    g.els("ASW", "AS", [])
+    pm = ("APM", [("JUMP", "AP"), ("LDI", "ad", 0)])
+    g.r("ASC", {1: ("AF0", [("ADV",)]), (0, 2): pm})
+    # rtprintf: the first string literal after `printf (`
+    g.on("AF0", WSN, "AF0", [("ADV",)])
+    g.on("AF0", [34], "AF1", [("ADV",)])
+    g.els("AF0", *pm)
+    g.on("AF1", [34, EOF], *pm)
+    g.on("AF1", [92], "AF1", [("ADV",), ("ADV",)])
+    g.on("AF1", [37], "AF2", [("ADV",)])
+    g.els("AF1", "AF1", [("ADV",)])
+    g.on("AF2", DI | {45, 43, 32, 35, 46}, pm[0], [("LDI", "RTP", 1)] + pm[1])
+    g.els("AF2", "AF1", [("ADV",)])
+    # paren match from the `(`
+    back = ("AS", [("JUMP", "AE")])
+    g.on("APM", [40], "APM", [("ALUI", "add", "ad", "ad", 1), ("ADV",)])
+    g.on("APM", [41], "APC", [("ALUI", "sub", "ad", "ad", 1), ("CMPI", "ad", 0), ("ADV",)])
+    g.on("APM", [EOF], *back)
+    g.els("APM", "APM", [("ADV",)])
+    g.r("APC", {1: ("APW", []), (0, 2): ("APM", [])})
+    g.on("APW", WSN, "APW", [("ADV",)])
+    g.on("APW", [123], "AS", [("ALUI", "add", "aa", "aid", AIB), ("LDX", "av", "aa", 0),
+                              ("ALUI", "or", "av", "av", 2), ("STX", "aa", 0, "av"), ("JUMP", "AE")])
+    g.els("APW", *back)
+    # per header: does some name have status exactly `called`?
+    amap = autoinc_map()
+    H = list(AUTOINC_ORDER)
+    for h, hn in enumerate(H):
+        names = [n for n in amap[hn] if n != "printf"]
+        nxt_h = "AH%d_0" % (h + 1) if h + 1 < len(H) else "AEM"
+        g.els("AH%d_0" % h, "AH%d_n0" % h, [("LDI", "NEED%d" % h, 0)])
+        for k, nm in enumerate(names):
+            g.els("AH%d_n%d" % (h, k), "AH%d_r%d" % (h, k),
+                  sbconst(nm) + [("SBINTERN", "at"), ("ALUI", "add", "aa", "at", AIB),
+                                 ("LDX", "av", "aa", 0), ("CMPI", "av", 1)])
+            g.r("AH%d_r%d" % (h, k), {1: (nxt_h, [("LDI", "NEED%d" % h, 1)]),
+                                      (0, 2): ("AH%d_n%d" % (h, k + 1), [])})
+        g.els("AH%d_n%d" % (h, len(names)), nxt_h)
+
+    def line(hn):
+        return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()]
+    g.els("AEM", "AEMR", [("RLD", "RTP")])
+    first = "AEM%d" % (len(H) - 1)
+    g.r("AEMR", {1: (first, line("stdio.h")), (0, 2): (first, [])})
+    for h in range(len(H) - 1, -1, -1):
+        g.els("AEM%d" % h, "AEM%dr" % h, [("RLD", "NEED%d" % h)])
+        nx = "AEM%d" % (h - 1) if h else "ACP0"
+        g.r("AEM%dr" % h, {1: (nx, line(H[h])), (0, 2): (nx, [])})
+    g.els("ACP0", "ACP", [("LDI", "az", 0), ("JUMP", "az")])
+    g.on("ACP", [EOF], "P3START", [("SWAP",)])
+    g.els("ACP", "ACP", [("COPY",), ("ADV",)])
 
 
 def load_pp_table():
@@ -375,6 +454,7 @@ def build():
     init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
     for w, nm in (("0", "ID_0"), ("1", "ID_1"), ("defined", "ID_DEFD")):
         init += sbconst(w) + [("SBINTERN", nm)]
+    init += sbconst("printf") + [("SBINTERN", "ID_PRINTF")]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
     g.els("START", "P0S", init)
 
@@ -400,7 +480,7 @@ def build():
     g.on("P1", [34], "P1Q34", [("COPY",), ("ADV",)])
     g.on("P1", [39], "P1Q39", [("COPY",), ("ADV",)])
     g.on("P1", [47], "P1SL", [("MARK", "A"), ("ADV",)])
-    g.on("P1", [EOF], "P3START", [("SWAP",)])
+    g.on("P1", [EOF], "AISTART" if AUTOINC else "P3START", [("SWAP",)])
     g.els("P1", "P1", [("COPY",), ("ADV",)])
     for q in (34, 39):
         g.on("P1Q%d" % q, [92], "P1Q%dE" % q, [("COPY",), ("ADV",)])
@@ -450,6 +530,9 @@ def build():
         ("STX", "EA", F_BODY, "mdt"), ("STX", "EA", F_FN, "mdt"),
         ("ALUI", "add", "mda", "NID", NEWB), ("ALUI", "add", "mdt", "NMAC", 1),
         ("STX", "mda", 0, "mdt"), ("ALUI", "add", "NMAC", "NMAC", 1)])
+
+    if AUTOINC:
+        build_autoinc(g)
 
     # ---- P3: directives -------------------------------------------------------
     g.els("P3START", "P3S2", [("RLD", "RUN")])
