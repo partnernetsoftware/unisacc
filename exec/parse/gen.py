@@ -77,6 +77,7 @@ LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 
 TDN = 8 * 10 ** 6  # TDN[v] = 1: v was declared a typedef name at file scope
 PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/store64)
 BASE = 11 * 10 ** 6  # BASE[v]: size of v's base type (int 4, char 1, long 8; 0 unknown), the scale of depth-1 +-
+CUNK = 0          # base size unknown (void, a typedef name): +- and dereference to depth 0 not covered
 FRD, FRB = 12 * 10 ** 6, 13 * 10 ** 6  # per function: return pointer depth and base size
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
 
@@ -435,7 +436,8 @@ def expr():
     P("EXPR.stu").call("DEREF").call("BINCONT").goto("EXPR.tail")
     # PV: '*' PV | '&' id | id  -> r0 = the pointer value, W[pt] = its depth
     p = P("PV")
-    p.tok({"*": "PV.st", "&": "PV.amp", TK_ID: "PV.id"}, ("rej", "not covered: operand of *"))
+    p.tok({"*": "PV.st", "&": "PV.amp", TK_ID: "PV.id", "(": "PV.par"}, ("rej", "not covered: operand of *"))
+    P("PV.par").call("U.par").call("NOPOST").ret()   # *(T *)e, *(p + 1)
     P("PV.st").call("NEXT").call("PV").call("PVCHK").call("DEREF").ret()
     p = P("PV.amp")
     p.call("NEXT").tok({TK_ID: "PV.amq"}, ("rej", "not covered: operand of &"))
@@ -455,6 +457,10 @@ def expr():
     p.branch({(1, 2): "RET"}, ("rej", "not covered: dereference of a non-pointer"), [("CMPI", "pt", 1)])
     p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type
     p.a(("ALUI", "sub", "pt", "pt", 1))
+    d0, dk = p.fresh("d0"), p.fresh("dk")
+    p.branch({1: d0}, dk, [("CMPI", "pt", 0)])
+    P(d0).branch({(0, 2): dk}, ("rej", "not covered: dereference of an unknown base"), [("CMPI", "pb", CUNK)])
+    p.cur = dk
     vwidth(p, "pt", "pb", LD)     # depth 0: the pointee's base width (char *p: .ld 1, measured)
     p.ret()
     p = P("EXPR.use")
@@ -522,7 +528,33 @@ def expr():
     P("U.pos").call("NEXT").goto("UNARY")
     P("U.star").call("NEXT").call("PV").call("PVCHK").call("DEREF").ret()
     P("U.amp").goto("PV")
-    P("U.par").call("NEXT").call("CEXPR").expect(")").call("NEXT").ret()
+    # '(' : a cast when a type word or a typedef name (TDN) follows, else a parenthesised expression
+    P("U.par").call("NEXT").tok({"type": "CA.int", "type=char": "CA.char", "type=short": "CA.short",
+                                 "type=long": "CA.long", "type=void": "CA.void", TK_ID: "U.pid"}, "U.pe")
+    P("U.pe").call("CEXPR").expect(")").call("NEXT").ret()
+    p = P("U.pid")
+    p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "CA.void"}, "U.pe", [("CMPI", "t", 1)])
+    for c in ("int", "char", "short", "long"):
+        P("CA." + c).a(("LDI", "cb", SZ[c])).goto("CA.st")
+    P("CA.void").a(("LDI", "cb", CUNK)).goto("CA.st")    # void / typedef name: only as a pointer cast
+    p = P("CA.st")
+    p.a(("LDI", "cd", 0)).call("NEXT").label("CA.sl")
+    p.tok({"*": "CA.star", ")": "CA.cl"}, ("rej", "not covered: cast"))
+    P("CA.star").a(("ALUI", "add", "cd", "cd", 1)).call("NEXT").goto("CA.sl")
+    p = P("CA.cl")     # (T)e: the operand is a unary expression
+    p.vpush("cb", "cd").call("NEXT").call("UNARY").vpop("cb", "cd")
+    p.branch({(1, 2): "CA.ptr"}, "CA.sc", [("CMPI", "cd", 1)])
+    P("CA.ptr").a(("COPYW", "pt", "cd"), ("COPYW", "pb", "cb")).ret()   # (T *)e: no code (measured)
+    q = P("CA.sc")     # (T)e, T scalar: narrowed through the stack at T's size; long: no code (measured)
+    for n in sorted(set(SZ.values())):
+        hit, nx = q.fresh("cs"), q.fresh("cn")
+        q.branch({1: hit}, nx, [("CMPI", "cb", n)])
+        r = P(hit)
+        if n != PSZ:
+            r.o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n" % (n, n))
+        r.a(("LDI", "pt", 0), ("LDI", "pb", n)).ret()
+        q = P(nx)
+    q.branch({}, ("rej", "not covered: cast to a non-scalar"))
     P("U.num").o("  imm r0, ").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").ret()
     P("U.id").a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT").call("IDTAIL").ret()
 
