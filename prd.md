@@ -2467,3 +2467,16 @@ after these guards; Linux x86 source selfcheck still 671,404 B equal. Registered
 exec-macself and exec-macxself; no new full-gate result claimed for this batch.
 Windows/PE and executor/model product adoption remain outstanding; tables are
 not neural networks. No product-source/.com changes, no push/release.
+
+### Product follow-up: target predefinitions and `-U` (2026-09-27)
+
+Moved native `predef()`'s `-U` loop after all target predefinitions. Previously
+Darwin, Windows, architecture, `__LP64__` and `__UNISA__` names were defined
+after the removal loop. `tests/cli.sh` now checks every such name across all
+six targets, including command exit status: 64 passed, 0 wrong. This does not
+claim full ordered `-D`/`-U` compatibility or add `-U` to the delta preprocessor.
+Regenerated `unisacc.c`, rebuilt `unisacc.com`: 1,345,792 B,
+SHA256 `d1583b832d7bb4d0020a8448af3c008dd597cfcc4bcf1ba3d063d0a9051ffe82`.
+Frozen-tree local `gate --com`: 60 suites, 0 failed, 138 s total, each suite
+bounded at 60 s; macOS host evidence, not a new Linux/Windows native run.
+Log: `/tmp/unisacc-u-gate.log`. No release or push.

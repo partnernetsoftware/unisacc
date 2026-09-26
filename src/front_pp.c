@@ -1099,6 +1099,11 @@ int predef(void) {
     }
     t = tgt;
     if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
+    if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
+    if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
+    if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
+    mdef1("__LP64__");
+    mdef1("__UNISA__");
     /* -U NAME: applied after every predefinition, so it can remove one */
     i = 0;
     while (i < noptu) {
@@ -1107,11 +1112,6 @@ int predef(void) {
         if (m >= 0) macto[m] = 0;               /* live in no segment */
         i = i + 1;
     }
-    if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
-    if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
-    if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
-    mdef1("__LP64__");
-    mdef1("__UNISA__");
     return 0;
 }
 

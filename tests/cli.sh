@@ -103,6 +103,18 @@ say "-c is the same" "$a" "$b"
 # predefined name), -include prepends a file, -l/-L/-x are accepted, `-` is
 # stdin and `-o -` is stdout, -nostdinc drops the built-in headers.
 say "-U undoes -D"  "off" "$(run -DFEATURE -UFEATURE def.c)"
+# Every target predefinition must be removable, including those after Linux's.
+for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
+    case "$target" in lnx/*) names="__linux__ __unix__ __ELF__";; osx/*) names="__APPLE__ __MACH__ __unix__";; win/*) names="_WIN32 _WIN64";; esac
+    case "$target" in */x86_64) names="$names __x86_64__";; *) names="$names __aarch64__";; esac
+    for name in $names __LP64__ __UNISA__; do
+        printf '#ifdef %s\n1\n#else\n0\n#endif\n' "$name" > "$T/predef.c"
+        got=$(cd "$T" && bound 30 "$UA_RUN" -b "$target" -U "$name" -E predef.c 2>&1)
+        rc=$?
+        if [ "$rc" != 0 ]; then got="exit $rc: $got"; else got=$(printf '%s' "$got" | tr -d '[:space:]'); fi
+        say "-U $target $name" "0" "$got"
+    done
+done
 printf '#define LEVEL 9\n' > "$T/pre.h"
 say "-include"      "on 9" "$(run -DFEATURE -include pre.h def.c)"
 say "-lm -L -x c accepted" "off" "$(run -lm -L/nowhere -x c def.c)"
