@@ -1229,11 +1229,12 @@ def stmt():
     P("S.dus").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["short"])).goto("S.dnx")
     P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("S.dnx")
     P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("S.dnx")
-    P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("S.dnx")
+    P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).call("NEXT").tok({"type=long": "S.dnx"}, "S.dn1")   # long long: a long (p77)
     P("S.ddb").a(("LDI", "bni", 0), ("LDI", "bsz", DBL)).goto("S.dnx")
     P("S.dfl").a(("LDI", "bni", 1), ("LDI", "bsz", FLT)).goto("S.dnx")   # float *p only
     P("S.dsh").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("S.dnx")
-    P("S.dnx").call("NEXT").tok(dict([(w, "S.dw") for w in TWORDS] + [("(", "D.fp")]), "D.one")
+    P("S.dnx").call("NEXT").goto("S.dn1")
+    P("S.dn1").tok(dict([(w, "S.dw") for w in TWORDS] + [("(", "D.fp")]), "D.one")
     P("D.fp").call("FPDECL").goto("D.id")
     # FPDECL: at '(' of `T (*NAME)(...)`: NAME in ps/pe, ptd 1, bsz FPB; ends on the closing ')'
     p = P("FPDECL")
@@ -1309,7 +1310,8 @@ def stmt():
     p.call("CEXPRD").expect(";").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb"), ("COPYW", "pt", "rptr"), ("COPYW", "pb", "rbsz")).call("DMATCH")
     p.branch({(1, 2): "S.retp"}, "S.retd", [("CMPI", "rptr", 1)])
     P("S.retd").branch({1: "S.retp"}, "S.retu", [("CMPI", "rbsz", DBL)])   # double: the plain 64-bit move (measured)
-    P("S.retu").branch({1: "S.retp"}, "S.reti", [("CMPI", "rbsz", UNS + 8)])   # unsigned long: as long (measured, p73)
+    P("S.retu").branch({1: "S.retp"}, "S.retf", [("CMPI", "rbsz", UNS + 8)])
+    P("S.retf").branch({1: "S.retp"}, "S.reti", [("CMPI", "rbsz", FLT)])   # float: cvtds already done by the cast (p76)   # unsigned long: as long (measured, p73)
     P("S.retp").o("  jump R").num("rl").o("\n").call("NEXT").ret()
     p = P("S.reti")     # a scalar return narrows through the stack at its tyinfo size; 8 (long) as a pointer (measured)
     q = p
@@ -1466,7 +1468,7 @@ def unit():
     p.call("AUTO")
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=unsigned": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=float": "FN", "type=unsigned": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
@@ -1485,23 +1487,25 @@ def unit():
     P("TD.idu").a(("LDI", "tdb", CUNK)).goto("TD.id3")
     p = P("TD.id3")
     p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t"), ("STX", "v", TDD, "tdd"), ("STX", "v", TDB, "tdb")).call("NEXT").expect(";").call("NEXT").goto("TOP")
-    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=unsigned": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
+    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=float": "FN", "type=unsigned": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
     p = P("TOP.sid")   # static TYPEDEFNAME ...: base size unknown (CUNK)
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "TOP.std"}, ("rej", "not covered: static declaration"), [("CMPI", "t", 1)])
     P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK), ("LDI", "sd0", 0), ("LDI", "gtu", 1)).goto("FN.n")
     p = P("FN")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0), ("LDI", "gtu", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d", "type=unsigned": "FN.u"}, "FN.n")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0), ("LDI", "gtu", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d", "type=unsigned": "FN.u", "type=float": "FN.fl"}, "FN.n")
+    # float NAME(...): its value is returned as is, only a float (the (float) of a double) matches (measured, p76)
+    P("FN.fl").a(("LDI", "bni", 0), ("LDI", "bsz", FLT)).goto("FN.n")
     # unsigned long NAME: the base code UNS + 8 (as a local's); the other unsigned types not covered here
     P("FN.u").call("NEXT").tok({"type=long": "FN.ul"}, ("rej", "not covered: unsigned return or global type"))
     P("FN.ul").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["long"])).goto("FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
     P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
     P("FN.c").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.n")
-    P("FN.l").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("FN.n")
+    P("FN.l").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).call("NEXT").tok({"type=long": "FN.n"}, "FN.n1")   # long long: a long (p77)
     P("FN.d").a(("LDI", "bni", 0), ("LDI", "bsz", DBL)).goto("FN.n")
     P("FN.s").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("FN.n")
-    p = P("FN.n")
-    p.call("NEXT").tok({"(": "FN.fp"}, "FN.n2")
+    P("FN.n").call("NEXT").goto("FN.n1")
+    P("FN.n1").tok({"(": "FN.fp"}, "FN.n2")
     p = P("FN.n2")
     stars(p, "FN.r")
     # a file-scope function pointer `T (*NAME)(...);` or array `T (*NAME[N])(...);`: stored as a
