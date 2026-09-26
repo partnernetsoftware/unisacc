@@ -389,3 +389,15 @@ inside a body.
 |---|---|---|---|---|---|
 | ex.aa..af (127) | 77 | 20 | 8 | 0 | 0 |
 | corpus.aa..ag (249) | 191 | 23 | 29 | 6 | 0 |
+
+## §11 #if / #elif, smallest form (2026-09-26)
+
+Covered: a line that is exactly `0`, `1`, `defined X` or `defined ( X )`
+(whitespace free).  A dead `#if` is not evaluated (as the reference); its
+level is pushed as skip.  `#elif` is always evaluated.  Everything else --
+other constants, operators, `!`, macro expansion of the line -- still rejects
+`not covered: #if expression`.  The full integer-constant-expression
+evaluator (64-bit ALU width, signed/unsigned, precedence climbing) is NOT
+done: the executor ALU is int32 and widening it is the next step.
+Measured: ex 104 files, 0 DIFF, 6 not covered; corpus 249 files, 0 DIFF,
+25 not covered (was 29), 6 reject-agree.

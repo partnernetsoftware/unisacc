@@ -150,6 +150,8 @@ def build():
     init += sbconst("_Pragma") + [("SBINTERN", "ID_PRAGMAOP")]
     init += sbconst("push_macro") + [("SBINTERN", "ID_PUSHM")]
     init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
+    for w, nm in (("0", "ID_0"), ("1", "ID_1"), ("defined", "ID_DEFD")):
+        init += sbconst(w) + [("SBINTERN", nm)]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)]
     g.els("START", "P0S", init)
 
@@ -288,8 +290,8 @@ def build():
     def act(d, a, name):
         """the code after `a = inf(S_PP, key)` in preprocess(), for (d, a)."""
         w = DIRV[d]
-        if w in ("if", "elif"):
-            raise AssertionError
+        if w == "if":
+            d = 0                                   # a pushed level, as #ifdef
         if d == 7 and a == 3:                       # include (when live)
             g.r(name, {1: ("INC0", [("JUMP", "WE")]), 0: blank})
             return
@@ -333,9 +335,49 @@ def build():
     for d, w in enumerate(DIRV):
         st = "D_%s" % w
         if w in ("if", "elif"):
-            g.els(st, "DEAD", NC("#%s expression" % w))
-            continue
-        if w in ("ifdef", "ifndef"):
+            # smallest #if/#elif: `0`, `1`, `defined X`, `defined ( X )`
+            # alone on the line; a dead #if is not evaluated (as the
+            # reference); anything else: not covered
+            nc = ("DEAD", NC("#%s expression" % w))
+            ev = st + "_e"
+            if w == "if":
+                g.els(st, st + "_l", [("RLD", "LIVE")])
+                g.r(st + "_l", {0: (st + "_a0", [("RLD", "LIVE")]),
+                                tuple(range(1, 257)): (ev, [("CMP", "NID", "ID_0")])})
+            else:
+                g.els(st, ev, [("CMP", "NID", "ID_0")])
+            g.r(ev, {1: (st + "_z0", [("JUMP", "NE")]), (0, 2): (ev + "1", [("CMP", "NID", "ID_1")])})
+            g.r(ev + "1", {1: (st + "_z1", [("JUMP", "NE")]), (0, 2): (ev + "2", [("CMP", "NID", "ID_DEFD")])})
+            g.r(ev + "2", {1: (st + "_d", [("JUMP", "NE"), ("LDI", "par", 0)]), (0, 2): nc})
+            for v in (0, 1):                        # constant: rest of line blank
+                z = st + "_z%d" % v
+                g.on(z, WS, z, [("ADV",)])
+                g.on(z, [10, EOF], st + "_a%d" % v, [("RLD", "LIVE")])
+                g.els(z, *nc)
+            g.on(st + "_d", WS, st + "_d", [("ADV",)])
+            g.on(st + "_d", [40], st + "_dp", [("ADV",), ("LDI", "par", 1)])
+            g.on(st + "_d", AL, st + "_di", [("MARK", "NS")])
+            g.els(st + "_d", *nc)
+            g.on(st + "_dp", WS, st + "_dp", [("ADV",)])
+            g.on(st + "_dp", AL, st + "_di", [("MARK", "NS")])
+            g.els(st + "_dp", *nc)
+            g.on(st + "_di", ID, st + "_di", [("ADV",)])
+            g.els(st + "_di", st + "_dw", [("MARK", "NE"), ("INTERN", "NID", "NS", "NE"), ("RLD", "par")],
+                  )
+            g.els(st + "_dw", st + "_dw0", [])
+            g.on(st + "_dw0", WS, st + "_dw0", [("ADV",)])
+            g.on(st + "_dw0", [10, EOF], st + "_dq", [("CMPI", "par", 0)])
+            g.on(st + "_dw0", [41], st + "_dr", [("ADV",), ("CMPI", "par", 1)])
+            g.els(st + "_dw0", *nc)
+            g.on(st + "_dr", WS, st + "_dr", [("ADV",)])
+            g.on(st + "_dr", [10, EOF], st + "_dq", [])
+            g.els(st + "_dr", *nc)
+            sub, pu = g.call("MFIND", st + "_m")
+            g.r(st + "_dq", {1: (sub, [("LDI", "SEGQ", -1)] + pu), (0, 2): nc})
+            g.els(st + "_m", st + "_f", [("CMPI", "M", 0)])
+            flag = {0: 0, 1: 1, 2: 1}
+            g.r(st + "_f", {k: (st + "_a%d" % flag[k], [("RLD", "LIVE")]) for k in (0, 1, 2)})
+        elif w in ("ifdef", "ifndef"):
             sub, pu = g.call("MFIND", st + "_m")
             g.els(st, sub, [("LDI", "SEGQ", -1)] + pu)
             g.els(st + "_m", st + "_f", [("CMPI", "M", 0)])
