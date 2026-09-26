@@ -8,7 +8,8 @@ names; integers).  Output: the machine code bytes, as unisa/emit_x86.encode
 writes them.  Ops: mov, imm, add64/sub64/xor64/and64/or64, mul64, load64,
 store64, .ld/.st (1, 2, 4, 8 bytes), setcc, register shifts, ret, jump/jumpz,
 call/callr, push/pop, nop, .frame, .zero, setreg imm/reg, spinit without an
-address, .div/.mod/.udiv/.umod, FP_OPS (via fp.py), and non-WinAPI gate. Other forms are rejected as not covered.
+address, .div/.mod/.udiv/.umod, FP_OPS (via fp.py), non-WinAPI gate,
+.lea, setreg mem/addr, setmem, argsave and argvget. Other forms are rejected as not covered.
 
 Read, not copied: catalog.ENCSPEC's alu2 opcodes and setcc bytes, and
 emit_x86.NUM's register numbers (the reference's declaration, read at generation
@@ -42,6 +43,7 @@ g, P, EOF = E.g, E.P, 256
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from unisa.catalog import ENCSPEC   # noqa: E402  (generation time only)
 from unisa.emit_x86 import NUM      # noqa: E402
+from address import install as install_address
 from tins import META as META_KEYS
 from fp import FP_IDS, install as install_fp  # local delta generator, not an encoder oracle
 
@@ -54,7 +56,7 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD, C_GATE = range(1, 25)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD, C_GATE, C_LEA, C_SETMEM, C_ARGSAVE, C_ARGVGET = range(1, 29)
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -125,7 +127,8 @@ def relax():
     p.a(("COPYW", "endo", "off"), ("LDI", "q", 0), ("LDI", "nfit", 0)).label("RX.fl")
     p.branch({0: "RX.f1"}, "RX.m", [("CMP", "q", "npc")])
     p = P("RX.f1")
-    p.a(("LDX", "k", "q", KND)).branch({1: "RX.nx"}, "RX.f15", [("CMPI", "k", 0)])
+    p.a(("LDX", "k", "q", KND)).branch({1: "RX.nx"}, "RX.addr", [("CMPI", "k", 0)])
+    P("RX.addr").branch({(1,2):"RX.nx"}, "RX.f15", [("CMPI","k",4)])
     P("RX.f15").branch({1: "RX.nx"}, "RX.f2", [("CMPI", "k", 3)])          # a call never shortens
     p = P("RX.f2")
     p.a(("LDX", "t", "q", SHT)).branch({1: "RX.f3"}, "RX.nx", [("CMPI", "t", 0)])
@@ -164,7 +167,7 @@ def relax():
     p.a(("LDI", "q", 0)).label("WR.l")
     p.branch({0: "WR.i"}, "RET", [("CMP", "q", "npc")])
     p = P("WR.i")
-    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c"}, "WR.blob", [("RLD", "k")])
+    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c", 4:"WR.addr", 5:"WR.argsave", 6:"WR.argvget"}, "WR.blob", [("RLD", "k")])
     p = P("WR.c")           # call rel32: E8, target - (the call's final offset + 5)
     p.call("LADDR").a(("LDX", "o_", "q", OFF), ("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"),
                      ("LDI", "t", 0xE8), ("OUTW", "t"), ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
@@ -196,7 +199,7 @@ def build():
     p = P("START")
     classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     classes.update(FP_IDS)
-    classes["gate"] = C_GATE
+    classes.update({"gate": C_GATE, ".lea": C_LEA, "setmem": C_SETMEM, "argsave":C_ARGSAVE, "argvget":C_ARGVGET})
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -217,10 +220,14 @@ def build():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     for w in ("true", "false", "winapi", "carry", *[k for k in META_KEYS if k not in ("role", "form", "reloc", "carry", "winapi")]):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
+    for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs")]:
+        p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
+    p.a(("LDI", "target_os", 1))
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     p.a(("LDI", "npc", 0), ("LDI", "lnum", 0)).goto("LINE")
     # LINE: the op word, then up to four comma-separated arguments into a0..a3 (a register's number or an integer)
+    g.on("LINE", [64], "HDR.key", [("MARK", "ws"), ("ADV",)])
     g.on("LINE", [EOF], "DONE", [])
     g.on("LINE", [10], "LINE", [("ADV",)])
     g.els("LINE", "LW", [("MARK", "ws"), ("LDI", "lc", 0)])
@@ -233,7 +240,7 @@ def build():
     P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
     g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
     p = P("LW.i")
-    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("LDI", "gcarry", 0), ("OLEN", "omark"),
+    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("LDI", "gcarry", 0), ("LDI", "anamed", 0), ("LDI", "a2", 0), ("OLEN", "omark"),
         ("ALUI", "add", "lnum", "lnum", 1))
     p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
     P("LW.i1").branch({1: "BR.c"}, "LW.i2", [("CMP", "opid", "id_call")])
@@ -298,7 +305,17 @@ def build():
     g.els("AR", "AR", [("ADV",)])
     p = P("AR.e")
     p.a(("INTERN", "rid", "ts", "te")).branch({1: "AR.tag"}, "AR.e1", [("CMP", "rid", "id_tagimm")])
-    P("AR.e1").branch({1: "AR.tag"}, "AR.e2", [("CMP", "rid", "id_tagreg")])
+    P("AR.e1").branch({1: "AR.tag"}, "AR.mem", [("CMP", "rid", "id_tagreg")])
+    P("AR.mem").branch({1:"AR.tag"}, "AR.addr", [("CMP","rid","id_tagmem")])
+    P("AR.addr").branch({1:"AR.tag"}, "AR.lea", [("CMP","rid","id_tagaddr")])
+    P("AR.lea").branch({1:"AR.l1"}, "AR.bool", [("CMPI","cls",C_LEA)])
+    P("AR.bool").branch({1:"AR.b1"}, "AR.e2", [("CMPI","cls",C_ARGSAVE)])
+    P("AR.b1").branch({1:"AR.bt"}, "AR.b2", [("CMP","rid","id_true")])
+    P("AR.bt").a(("LDI","av",1)).goto("ARG.put")
+    P("AR.b2").branch({1:"AR.bf"}, "AR.e2", [("CMP","rid","id_false")])
+    P("AR.bf").a(("LDI","av",0)).goto("ARG.put")
+    P("AR.l1").branch({1:"AR.name"}, "AR.e2", [("CMPI","na",1)])
+    P("AR.name").a(("COPYW","av","rid"),("LDI","anamed",1)).goto("ARG.put")
     P("AR.tag").a(("COPYW", "stag", "rid")).goto("ARG")          # setreg's tag word: the value follows
     p = P("AR.e2")
     p.a(("LDX", "av", "rid", REGN)).branch({1: "DEAD.reg"}, "AR.r", [("CMPI", "av", 0)])
@@ -349,7 +366,7 @@ def build():
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
               C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
-              C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate",
+              C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate", C_LEA:"AD.lea", C_SETMEM:"AD.setmem", C_ARGSAVE:"AD.argsave", C_ARGVGET:"AD.argvget",
               C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
               **{v: "FP." + k for k, v in FP_IDS.items()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
@@ -515,10 +532,12 @@ def build():
     for w, o1, ww, p66 in ((8, 0x89, 1, 0), (4, 0x89, 0, 0), (2, 0x89, 0, 1), (1, 0x88, 0, 0)):
         P("EZ.%d" % w).a(("LDI", "me_o1", o1), ("LDI", "me_w", ww), ("LDI", "me_66", p66)).call("MEM").a(("A64", "add", "zk", "zk", "zw")).goto("EZ.l")
     # setreg rX, imm V -> the imm path; setreg rX, reg rY -> the mov path (emit_x86: mov_ri / mov_rr);
-    # mem/addr (addresses) are not covered
+    # mem/addr is deferred until layout; imm/reg reuse existing encoders
     p = P("E.setreg")
     p.branch({1: "E.imm"}, "ESR.r", [("CMP", "stag", "id_tagimm")])
-    P("ESR.r").branch({1: "E.mov"}, "DEAD.op", [("CMP", "stag", "id_tagreg")])
+    P("ESR.r").branch({1: "E.mov"}, "ESR.mem", [("CMP", "stag", "id_tagreg")])
+    P("ESR.mem").branch({1:"AD.mem"}, "ESR.addr", [("CMP","stag","id_tagmem")])
+    P("ESR.addr").branch({1:"AD.addr"}, "DEAD.op", [("CMP","stag","id_tagaddr")])
     # spinit rN (lowering's spinit(rN, None), the None normalised away): mov rN, rsp
     p = P("E.spinit")
     p.branch({1: "ESI.m"}, "DEAD.op", [("CMPI", "na", 1)])
@@ -547,8 +566,9 @@ def build():
     p.a(("OCUT", "blob", "omark"), ("STX", "npc", BLB, "blob"), ("BLEN", "t", "blob"), ("STX", "npc", SZ, "t"),
         ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
     install_fp(E, byte)
+    install_address(E, byte, KND, SZ, OFF, LABD)
     relax()
-    P("DONE").call("RELAX").call("WRITE").a(("ACCEPT",)).goto("DEAD")
+    P("DONE").call("RELAX").call("LAYOUT").call("WRITE").a(("ACCEPT",)).goto("DEAD")
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

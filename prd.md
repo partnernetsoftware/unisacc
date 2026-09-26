@@ -1952,3 +1952,17 @@ TargetProgram attribute and typed instruction/meta field, not just code.
 Three real programs across six targets are now fixed gate checks; E5 gate
 43 ok, 0 bad. This is transport, not six-platform execution or header support
 in the delta encoder. Relaxed layout/address encoding remains the next step.
+
+### Address encoding reaches complete real code sections (2026-09-26)
+
+- Delta now computes Linux/macOS x86 layout from final relaxed text size and
+  emits .lea, setreg mem/addr, setmem, argsave and argvget at final positions.
+  Format constants are read declarations; layout/RIP algorithms are hand rules
+  in `address.py`. No new executor primitive and no network claim.
+- `realcheck.py`: whole hello/fib lowering (including stdio, no filtering),
+  10,009/10,072 instructions each; exact reference bytes on Linux and macOS x86.
+  macOS x86 execution of delta code wrapped by the existing Python image writer
+  gives expected outputs and rc 0. E5 gate: 48 ok, 0 bad.
+- Header payload is now consumed for target and symbols; data-related headers
+  are retained but image writing is not migrated. Lowering, remaining targets,
+  image emission and product adoption remain unfinished.

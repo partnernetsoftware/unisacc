@@ -27,13 +27,13 @@ A few terms used in the table:
 | .zero | migrated | hand (xor r11 once; the widest store 8/4/2/1 that fits, via the migrated store forms) | no |
 | FP_OPS (24 arithmetic/compare/conversion/sqrt forms) | migrated (non-stack tape registers) | opcode declarations read; SSE packing and conversion algorithms hand-generated in fp.py | no |
 | setreg (imm/reg) | migrated | hand | no |
-| setreg (addr/mem), setmem, .lea | not migrated | hand (rip-relative) | **yes**: text_va, the shift, syms |
+| setreg (addr/mem), setmem, .lea | migrated, Linux/macOS x86 | hand RIP packing; delta layout after relaxation, data symbols from input | **yes**, computed by delta |
 | itoa | not migrated | hand (a fixed digit loop) | **yes**: data addresses |
 | gate, non-winapi form | migrated | hand (0F 05 syscall; on Darwin with `carry`, jnc +3 / neg rax) | no |
 | gate, winapi form | not migrated | hand (_winapi) | **yes**: imports, text_va |
 | spinit with no second operand | migrated | hand (mov rN, rsp) | no |
 | spinit with a second operand (Windows) | not migrated | hand (rip-relative lea) | **yes** |
-| argsave, argvget | not migrated | hand (SysV/Mach-O entry) | **yes**: data cells |
+| argsave, argvget | migrated | hand SysV/Mach-O entry | **yes**, computed by delta |
 | winsave, winrest, winargs, winstdh | not migrated | hand | **yes**: win data and imports |
 
 (Corrected after cdx's review: the argument set-up and the data cells are lowering's and other ops' business, not a dependency of the gate's own encoding.)
@@ -82,3 +82,21 @@ hello lowering for Linux and macOS x86_64. Both executors match reference bytes.
 This does not execute syscalls. WinAPI and non-boolean carry remain rejected.
 Other known gate metadata is ignored only because the non-WinAPI reference
 encoder does not consume it. No executor action added.
+
+## Complete Linux/macOS text encoding (2026-09-26)
+
+`address.py` reads ELF/Mach-O header/page/base declarations at generation, then
+its delta calculates data placement from final relaxed text length. Symbol
+addresses come only from the lowering payload. RIP displacements are emitted
+after relaxation, with a shared routine using the actual output position.
+Header data/BSS/relocations are retained as blobs for a later image writer,
+not emitted yet. These layout and encoding algorithms are hand rules compiled
+into the delta; no executor primitive was introduced and no network is claimed.
+
+Full hello/fib lowering, without dropping any instruction, now matches the
+reference: Linux 40,837/41,068 bytes; macOS 40,898/41,129 bytes. Each contains
+10,009/10,072 instructions, including stdio. The macOS x86_64 machine code,
+wrapped using the existing Python image writer, runs under Rosetta and produces
+`hello from C99` / `55`, exit 0. Fixed `realcheck.py` retains these checks.
+Python still supplies lowering and image wrapping; this is not the complete
+model compiler. The gate is 48 checks, 0 bad including prior fixtures.

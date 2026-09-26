@@ -46,6 +46,8 @@ done
 for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
     b 60 env ROUNDTRIP_TARGET="$target" python3 $D/roundtrip.py examples/hello.c examples/fib.c tests/c/a_for.c > "$T/rt" 2>&1 && ok=$((ok+1)) || { echo "  BAD roundtrip $target:"; tail -3 "$T/rt"; bad=$((bad+1)); }
 done
+# No filtering: entire real lowering output, including the stdio implementation.
+b 60 python3 $D/realcheck.py "$T/run" "$T/d.tbl" && ok=$((ok+1)) || bad=$((bad+1))
 # Independent execution of the emitted FP bytes, not another encoder oracle.
 case "$(uname -s):$(uname -m)" in
     Darwin:*|Linux:x86_64)
