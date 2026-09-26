@@ -629,7 +629,7 @@ def build():
     P("FN.pfp").call("FPDECL").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
     p = P("FN.pid")
-    p.a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("STX", "t", PDB, "tb"))
+    p.a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u"))   # depth * 4096 + base: a double* is not a double
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL")
     p.a(("ALUI", "add", "pk", "pk", 1)).call("NEXT").tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "...": "FN.dots"}, bad("parameter"))
