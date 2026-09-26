@@ -65,7 +65,7 @@ static void load(const char *path) {
         } else {                                        /* keyed 0..256: direct */
             ROWN[s] = xrealloc(0, sizeof(int) * 257); ROWQ[s] = xrealloc(0, sizeof(int) * 257); ROWK[s] = 0;
             for (int j = 0; j < 257; j++) { ROWN[s][j] = dn; ROWQ[s][j] = dq; }
-            for (int j = 0; j < n; j++) { int k, nx, q; if (fscanf(f, "%d %d %d", &k, &nx, &q) != 3 || k < 0 || k > 256) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
+            for (int j = 0; j < n; j++) { int k, nx, q; if (fscanf(f, "%d %d %d", &k, &nx, &q) != 3 || k < 0 || k > 256 || nx < -1 || nx >= NS) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
         }
     }
     fclose(f);

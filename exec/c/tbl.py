@@ -78,18 +78,18 @@ def main():
         mode, row = d["states"].get(n, ["b", {}])
         m = {"b": 0, "t": 1, "r": 2}[mode]
         ents, dflt = [], (-1, 0)
-        if m != 1 and row:
-            # the commonest (next, seq) is the row's default; only the other keys are listed
+        if m != 1:
+            # all 257 keys, a missing one as (-1, 0) -- no transition -- so the default
+            # can never turn a missing key into a transition; only the others are listed
+            full = [(six[row[str(k)][0]], row[str(k)][1]) if str(k) in row else (-1, 0) for k in range(257)]
             cnt = {}
-            for nx, sq in row.values():
-                cnt[(nx, sq)] = cnt.get((nx, sq), 0) + 1
-            best = max(cnt, key=cnt.get)
-            dflt = (six[best[0]], best[1])
-        for k, (nx, sq) in row.items():
-            key = (-1 if k == "BOT" else sym(k)) if m == 1 else int(k)
-            if m != 1 and (six[nx], sq) == dflt:
-                continue
-            ents.append("%d %d %d" % (key, six[nx], sq))
+            for e in full:
+                cnt[e] = cnt.get(e, 0) + 1
+            dflt = max(sorted(cnt), key=cnt.get)
+            ents = ["%d %d %d" % (k, e[0], e[1]) for k, e in enumerate(full) if e != dflt]
+        else:
+            for k, (nx, sq) in row.items():
+                ents.append("%d %d %d" % (-1 if k == "BOT" else sym(k), six[nx], sq))
         lines.append("R %d %d %d %d %s" % (m, len(ents), dflt[0], dflt[1], " ".join(ents)))
     with open(sys.argv[2], "w") as f:
         f.write("T %d %d %d %d %d\n" % (len(names), len(seqs), len(regs), len(strs), six[d.get("start", "DISPATCH")]))
