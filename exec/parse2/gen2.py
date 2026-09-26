@@ -204,17 +204,8 @@ def tytail():
 
 
 def strwalk(pre, body, done):
-    """the bytes of the current string literal's text [ps+1, pe-1), escapes decoded, one at a time:
-    bv := the byte, then the state `body` (which must go back to pre + '.w'); `done` at the end"""
-    P(pre).a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("INPUSHXE", "fs", "fe")).goto(pre + ".w")
-    g.on(pre + ".w", [92], pre + ".es", [("ADV",)])
-    g.on(pre + ".w", [256], done, [("INPOP",)])
-    for c in range(256):
-        if c != 92:
-            g.on(pre + ".w", [c], body, [("ADV",), ("LDI", "bv", c)])
-    for ch, v in ESC.items():
-        g.on(pre + ".es", [ord(ch)], body, [("ADV",), ("LDI", "bv", v)])
-    g.els(pre + ".es", "DEAD", E.rej("not covered: string escape"))
+    from strings import walk
+    walk(E, P, ESC, pre, body, done)
 
 
 def ladder(prefix, bottom):
@@ -328,15 +319,8 @@ def printf():
     p.call("NEXT").label("PO.l")
     p.tok({"eof": "RET", TK_ID: "PO.id", E.TK_STR: "PO.lit"}, "PO.nx")
     P("PO.lit").a(("LDX", "t", "tpos", SKIPS)).branch({1: "PO.nx"}, "PO.lit1", [("CMPI", "t", 1)])
-    P("PO.lit1").a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PL.w")
-    g.on("PL.w", [92], "PL.es", [("ADV",)])
-    g.on("PL.w", [256], "PL.end", [("INPOP",)])
-    for c in range(256):
-        if c != 92:
-            g.on("PL.w", [c], "PL.b", [("ADV",), ("LDI", "bv", c)])
-    for ch, v in ESC.items():
-        g.on("PL.es", [ord(ch)], "PL.b", [("ADV",), ("LDI", "bv", v)])
-    g.els("PL.es", "DEAD", E.rej("not covered: string escape"))
+    P("PO.lit1").a(("LDI", "cnt", 0)).goto("PL")
+    strwalk("PL", "PL.b", "PL.end")
     q = P("PL.b")
     q.branch({1: "PL.open"}, "PL.byte", [("CMPI", "cnt", 0)])
     q = P("PL.open")
@@ -637,6 +621,8 @@ def types():
 
 def build():
     E.tokenizer()
+    from strings import token_span
+    token_span(E, P)
     E.prn()
     E.numout()
     E.fconv()
