@@ -63,3 +63,18 @@ no reference-produced text offsets or encoded bytes are part of this payload.
 
 Earlier statements that data/syms always come back empty describe the old
 instruction-only interface. Carry syntax is true/false, not 0/1.
+
+## ELF-output route
+
+`gen.py OUT.json --elf` now constructs a delta that consumes the full lowering
+payload and writes an ELF64 Linux x86_64 executable, with no host image wrapper
+at execution time. It shares the text encoder, then decodes @data, applies
+@relocs using the computed data shift, trims stored trailing zeros while
+preserving p_memsz, and emits both PT_LOADs and padding. The algorithm and
+format template live in `elfimage.py`; these remain hand-written generator
+rules, not a constructed network. TargetProgram production is still Python.
+
+`imagecheck.sh` is a separate <=60 s gate. Both executors check a synthetic
+relocated pointer with small/large zero tails, with independent ELF field
+expectations. C executor output for complete hello/fib equals the reference
+ELF byte-for-byte. This run was on macOS: Linux execution is not claimed.

@@ -1966,3 +1966,17 @@ in the delta encoder. Relaxed layout/address encoding remains the next step.
 - Header payload is now consumed for target and symbols; data-related headers
   are retained but image writing is not migrated. Lowering, remaining targets,
   image emission and product adoption remain unfinished.
+
+### E6 first image route: Linux x86_64 ELF (2026-09-26)
+
+- `gen.py --elf` compiles the ELF image writer into the delta, sharing the
+  address/text encoder. Generic executor unchanged. Data decoding, pointer
+  relocation, zero-tail trimming, entry point and two load segments are emitted
+  by ordinary actions; no Python image writer in this execution path.
+- Whole hello/fib ELF output equals reference (45,366 / 45,358 bytes). Two
+  synthetic relocated-pointer cases match on C and Python executors, plus
+  independent entry/segment/address/file-length assertions. Out-of-data
+  relocation rejected on both. `exec-elf` added as a bounded gate batch.
+- Input lowering is still Python; Linux native execution not run in this batch
+  (the x86 Lima VM is stopped). Other formats/architectures and frontend
+  completion remain required; current .com unchanged.

@@ -46,6 +46,7 @@ job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 
 job exec-e4     env E4STRICT=1 ./exec/opt/check.sh examples/*.c tests/c/*.c   # S-17 E4: -O1 and -O2 as deltas
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
 job exec-e5     ./exec/enc/check.sh                               # S-17 E5, first slice: x86 encoder on a fixture
+job exec-elf    ./exec/enc/imagecheck.sh                          # S-17: complete Linux x86 ELF from lowering payload
 job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
 job nativeboot  ./tests/nativeboot.sh

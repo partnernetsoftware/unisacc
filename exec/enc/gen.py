@@ -193,7 +193,7 @@ def relax():
     P("WR.nx").a(("ALUI", "add", "q", "q", 1)).goto("WR.l")
 
 
-def build():
+def build(image=False):
     E.prn()
     procs()
     p = P("START")
@@ -222,7 +222,8 @@ def build():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs")]:
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
-    p.a(("LDI", "target_os", 1))
+    p.a(("LDI", "target_os", 1), ("LDI", "has_relocs", 0))
+    p.a(("SBCLR",), [("SBOUT", ch) for ch in b"_start"], ("SBINTERN", "id_entry"))
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     p.a(("LDI", "npc", 0), ("LDI", "lnum", 0)).goto("LINE")
@@ -568,14 +569,21 @@ def build():
     install_fp(E, byte)
     install_address(E, byte, KND, SZ, OFF, LABD)
     relax()
-    P("DONE").call("RELAX").call("LAYOUT").call("WRITE").a(("ACCEPT",)).goto("DEAD")
+    p = P("DONE").call("RELAX").call("LAYOUT").call("WRITE")
+    if image:
+        from elfimage import install as install_elf
+        install_elf(E, byte, OFF, LABD)
+        p.call("ELF")
+    p.a(("ACCEPT",)).goto("DEAD")
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
 
 
 if __name__ == "__main__":
-    d = build()
+    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2]!="--elf"):
+        sys.exit("usage: gen.py OUT.json [--elf]")
+    d = build(image=len(sys.argv)==3)
     s = json.dumps(d, separators=(",", ":"))
     open(sys.argv[1], "w").write(s)
     st, ent, live, ns, na = E.sizes(d)
