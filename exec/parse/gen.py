@@ -67,7 +67,7 @@ FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
          "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue",
-         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]", "...", "type=double", "type=float"]
+         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]", "...", "type=double", "type=float", ".", "->"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR, TK_FNUM = 100, 101, 102, 103, 104, 105
@@ -89,6 +89,7 @@ VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy
 # MOF offset, MSZ size, MPT pointer depth, MBS base size.  Measured: each member is
 # aligned to its own size, the struct's size is rounded up to its largest member
 # (struct { char c; long x; short s; int *p; int i; }: c@0 x@8 s@16 p@24 i@32, size 40).
+SBB = 1000       # base code of a struct: SBB + sid (a local's BASE; its size is SSZ[sid])
 STAG, SSZ, MOF, MSZ, MPT, MBS = (21 * 10 ** 6, 22 * 10 ** 6, 23 * 10 ** 6, 24 * 10 ** 6,
                                  25 * 10 ** 6, 26 * 10 ** 6)
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
@@ -459,6 +460,9 @@ def vwidth(p, ptr, bs, tab):  # a variable's access: W[ptr] >= 1 -> pointer size
     p.branch({(1, 2): pw}, ot, [("CMPI", ptr, 1)])
     P(pw).o(tab[PSZ]).goto(d)
     q = P(ot)
+    sv = q.fresh("sv")
+    q.branch({(1, 2): "DEADSV"}, sv, [("CMPI", bs, SBB)])
+    q = P(sv)
     for n in sorted(tab):
         if n == SZ["int"]:
             continue
@@ -651,7 +655,7 @@ def expr():
     p.call("BIN%d" % levels[0]).goto("EXPR.tail")
     p = P("EXPR.id")
     p.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
-    p.tok(dict([("=", "EXPR.as"), ("[", "EXPR.ix")] + [(o + "=", "EXPR.c" + o) for o in CASOPS]), "EXPR.use")
+    p.tok(dict([("=", "EXPR.as"), ("[", "EXPR.ix"), (".", "EXPR.mb"), ("->", "EXPR.mb")] + [(o + "=", "EXPR.c" + o) for o in CASOPS]), "EXPR.use")
     for o in CASOPS:     # a op= e: address, load, push, e, op, store (measured)
         q = P("EXPR.c" + o)
         lookup(q, "sps", "spe")
@@ -759,6 +763,42 @@ def expr():
     p.o(POP1 + "  add64 r0, r1, r0\n").a(("ALUI", "sub", "pt", "pt", 1)).call("NEXT")
     p.tok({"[": "IX.more"}, "RET")
     P("IX.more").call("LDA").goto("IX.top")
+    p = P("MEMB")
+    p.tok({".": "MB.dot", "->": "MB.arr"}, ("rej", "not covered: member access"))
+    P("MB.dot").branch({1: "MB.d1"}, "DEADMB", [("CMPI", "pt", 0)])
+    P("MB.d1").branch({(1, 2): "MB.ok"}, "DEADMB", [("CMPI", "pb", SBB)])
+    P("MB.arr").branch({1: "MB.d1"}, "DEADMB", [("CMPI", "pt", 1)])
+    p = P("MB.ok")
+    p.a(("ALUI", "sub", "sid", "pb", SBB)).call("NEXT").tok({TK_ID: "MB.nm"}, ("rej", "not covered: member access"))
+    p = P("MB.nm")
+    p.a(("INTERN", "v", "ps", "pe"), ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
+        ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "pt", "k", MPT), ("LDX", "pb", "k", MBS),
+        ("LDI", "ar", 0)).branch({1: "DEADMB"}, "MB.has", [("CMPI", "ms", 0)])
+    P("MB.has").branch({1: "MB.z"}, "MB.off", [("CMPI", "mo", 0)])
+    P("MB.off").o("  imm r2, ").num("mo").o("\n  add64 r0, r0, r2\n").goto("MB.z")
+    P("MB.z").call("NEXT").tok({".": "MEMB", "->": "MB.ld"}, "RET")
+    p = P("MB.ld")     # s.p->m: the member's value is the pointer
+    vwidth(p, "pt", "pb", LD)
+    p.goto("MEMB")
+    for nm, extra in (("EXPR.mb", {}), ("VEXPR.mbs", {";": "RET", ",": "EXPR.dis", ")": "EXPR.dis"})):
+        p = P(nm)     # id '.'/'->' member  = e | as an rvalue
+        lookup(p, "sps", "spe")
+        addr(p, "r0")
+        p.tok({"->": nm + ".v"}, nm + ".m")
+        q = P(nm + ".v")
+        vload(q)
+        q.goto(nm + ".m")
+        P(nm + ".m").call("MEMB").tok(dict([("=", "EXPR.ixa")] + [(o + "=", "EXPR.ixc") for o in CASOPS], **extra), "EXPR.ixu")
+    p = P("MBV")      # id '.'/'->' ... as an rvalue
+    lookup(p, "sps", "spe")
+    addr(p, "r0")
+    p.tok({"->": "MBV.v"}, "MBV.m")
+    q = P("MBV.v")
+    vload(q)
+    q.goto("MBV.m")
+    P("MBV.m").call("MEMB").call("LDA").call("POSTC").ret()
+    for lab, why in (("DEADSV", "struct value"), ("DEADST", "unknown struct tag"), ("DEADMB", "member access")):
+        g.on(lab, range(257), "DEAD", rej("not covered: " + why), "r")
     p = P("IXV")      # id '[' ... as an rvalue
     lookup(p, "sps", "spe")
     addr(p, "r0")
@@ -815,11 +855,12 @@ def expr():
         P(nm + ".e").call("EXPR").goto(nm + ".c")
         q = P(nm + ".id")
         q.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
-        q.tok(dict([(k, nm + ".addr") for k in stops] + [("=", nm + ".as"), ("[", nm + ".ix")]
+        q.tok(dict([(k, nm + ".addr") for k in stops] + [("=", nm + ".as"), ("[", nm + ".ix"), (".", nm + ".mb"), ("->", nm + ".mb")]
                    + [(o + "=", nm + ".c" + o) for o in CASOPS]), nm + ".use")
         P(nm + ".use").call("EXPR.use").goto(nm + ".c")
         P(nm + ".as").call("EXPR.as").goto(nm + ".c")
         P(nm + ".ix").call("EXPR.ix" if nm == "CEXPRD" else "VEXPR.ixs").goto(nm + ".c")
+        P(nm + ".mb").call("EXPR.mb" if nm == "CEXPRD" else "VEXPR.mbs").goto(nm + ".c")
         for o in CASOPS:
             P(nm + ".c" + o).call("EXPR.c" + o).goto(nm + ".c")
         q = P(nm + ".addr")
@@ -945,7 +986,7 @@ def expr():
 
     # IDTAIL: saved id x[sps..spe), current token follows it
     p = P("IDTAIL")
-    p.tok({"(": "IT.call", "++": "IT.inc", "--": "IT.dec", "[": "IXV"}, "IT.var")
+    p.tok({"(": "IT.call", "++": "IT.inc", "--": "IT.dec", "[": "IXV", ".": "MBV", "->": "MBV"}, "IT.var")
     for nm, o, undo in (("IT.inc", "+", "sub64"), ("IT.dec", "-", "add64")):
         q = P(nm)   # a++ : a += 1, then the old value back (measured)
         lookup(q, "sps", "spe")
@@ -1207,7 +1248,7 @@ def printf():
 def stmt():
     p = P("STMT")
     p.tok({"{": "BLOCK", "type": "S.decl", "type=char": "S.decl", "type=long": "S.decl", "type=void": "S.decl",
-           "type=unsigned": "S.decl", "type=short": "S.decl", "type=signed": "S.decl", "type=double": "S.decl", "type=float": "S.decl", TK_ID: "S.idq", ";": "S.empty", "return": "S.ret", "if": "S.if",
+           "type=unsigned": "S.decl", "type=short": "S.decl", "type=signed": "S.decl", "type=double": "S.decl", "type=float": "S.decl", "struct": "S.decl", TK_ID: "S.idq", ";": "S.empty", "return": "S.ret", "if": "S.if",
            "while": "S.while", "for": "S.for",
            "do": "S.do", "break": "S.brk", "continue": "S.cnt"}, "S.expr")
     P("S.empty").call("NEXT").ret()
@@ -1228,7 +1269,7 @@ def stmt():
     # declaration
     p = P("S.decl")
     p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh", "type=double": "S.ddb", "type=float": "S.dfl",
-                                                   "type=unsigned": "S.dun"}, "S.dnx")
+                                                   "type=unsigned": "S.dun", "struct": "S.dst"}, "S.dnx")
     P("S.dun").call("NEXT").tok({"type=char": "S.duc", "type=short": "S.dus", "type=long": "S.dul"}, ("rej", "not covered: unsigned int declaration"))
     P("S.dul").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["long"])).goto("S.dnx")
     P("S.duc").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["char"])).goto("S.dnx")
@@ -1240,6 +1281,10 @@ def stmt():
     P("S.dfl").a(("LDI", "bni", 1), ("LDI", "bsz", FLT)).goto("S.dnx")   # float *p only
     P("S.dsh").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("S.dnx")
     P("S.dnx").call("NEXT").goto("S.dn1")
+    P("S.dst").call("NEXT").tok({TK_ID: "S.dst1"}, ("rej", "not covered: struct declaration"))
+    p = P("S.dst1")
+    p.a(("INTERN", "tg", "ps", "pe"), ("LDX", "t", "tg", STAG)).branch({1: "DEADST"}, "S.dst2", [("CMPI", "t", 0)])
+    P("S.dst2").a(("LDI", "bni", 0), ("ALUI", "add", "bsz", "t", SBB)).goto("S.dnx")
     P("S.dn1").tok(dict([(w, "S.dw") for w in TWORDS] + [("(", "D.fp")]), "D.one")
     P("D.fp").call("FPDECL").goto("D.id")
     # FPDECL: at '(' of `T (*NAME)(...)`: NAME in ps/pe, ptd 1, bsz FPB; ends on the closing ')'
@@ -1256,7 +1301,10 @@ def stmt():
     p = P("D.one")
     stars(p, "D.id")
     p = P("D.id")     # T x | T x[N]: an array takes N * (element size) bytes, packed (measured: char c[5]; int y; -> c at 5, y at 13)
-    p.a(("COPYW", "dps", "ps"), ("COPYW", "dpe", "pe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("NEXT").tok({"[": "D.arr"}, "D.decl")
+    p.a(("COPYW", "dps", "ps"), ("COPYW", "dpe", "pe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).branch({1: "D.id.p"}, "D.id.n", [("CMPI", "ptd", 0)])
+    P("D.id.p").branch({(1, 2): "D.id.s"}, "D.id.n", [("CMPI", "bsz", SBB)])
+    P("D.id.s").a(("ALUI", "sub", "t", "bsz", SBB), ("LDX", "dsz", "t", SSZ)).goto("D.id.n")
+    P("D.id.n").call("NEXT").tok({"[": "D.arr"}, "D.decl")
     p = P("D.decl")
     declare(p, "dps", "dpe")
     p.tok({"=": "D.init"}, "D.next")
@@ -1284,6 +1332,9 @@ def stmt():
     declare(p, "dps", "dpe")
     p.ret()
     p = P("D.init")
+    p.branch({1: "D.init.p"}, "D.init.k", [("CMPI", "ptd", 0)])
+    P("D.init.p").branch({(1, 2): "DEADSV"}, "D.init.k", [("CMPI", "bsz", SBB)])
+    p = P("D.init.k")
     p.vpush("s", "ptd", "bni", "bsz").call("NEXT").call("EXPR").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb")).vpop("s", "ptd", "bni", "bsz")
     p.a(("COPYW", "pt", "ptd"), ("COPYW", "pb", "bsz")).call("DMATCH")
     addr(p, "r1")
@@ -1377,7 +1428,14 @@ def spec():
     p = P("SPEC")
     p.a(("LDI", "sz", 0), ("LDI", "un", 0)).label("SP.loop")
     p.tok({"type": "SP.int", "type=char": "SP.ch", "type=short": "SP.sh", "type=long": "SP.lg",
-           "type=unsigned": "SP.un", "type=signed": "SP.sg", "type=double": "SP.db", "type=float": "SP.fl"}, "SP.end")
+           "type=unsigned": "SP.un", "type=signed": "SP.sg", "type=double": "SP.db", "type=float": "SP.fl",
+           "struct": "SP.st"}, "SP.end")
+    # struct TAG: alone (no other type word); the declarator decides pointer or value
+    P("SP.st").branch({1: "SP.st0"}, ("rej", "not covered: type specifier"), [("CMPI", "sz", 0)])
+    P("SP.st0").call("NEXT").tok({TK_ID: "SP.st1"}, ("rej", "not covered: type specifier"))
+    p = P("SP.st1")
+    p.a(("INTERN", "t", "ps", "pe"), ("LDX", "t", "t", STAG)).branch({1: "DEADST"}, "SP.st2", [("CMPI", "t", 0)])
+    P("SP.st2").a(("LDI", "bni", 0), ("ALUI", "add", "bsz", "t", SBB)).call("NEXT").ret()
     bad = ("rej", "not covered: type specifier")
     P("SP.int").branch({1: "SP.i4"}, "SP.nx", [("CMPI", "sz", 0)])
     P("SP.i4").a(("LDI", "sz", 4)).goto("SP.nx")
@@ -1491,15 +1549,21 @@ def unit():
     p.a(("ALUI", "add", "nsid", "nsid", 1), ("LDI", "soff", 0), ("LDI", "smal", 1), ("LDI", "z0", 0))
     p.branch({0: "SB.ok"}, ("rej", "not covered: more than 63 structs"), [("CMPI", "nsid", 64)])
     p = P("SB.ok")
-    p.branch({0: "SB.m"}, "SB.tag", [("CMPI", "tg", 0)])
+    p.branch({1: "SB.m"}, "SB.tag", [("CMPI", "tg", 0)])
     P("SB.tag").a(("STX", "tg", STAG, "nsid")).goto("SB.m")
     P("SB.m").call("NEXT").tok({"}": "SB.end", "type": "SB.i", "type=char": "SB.c", "type=short": "SB.s",
-                                "type=long": "SB.l"}, ("rej", "not covered: struct member"))
+                                "type=long": "SB.l", "struct": "SB.st"}, ("rej", "not covered: struct member"))
+    # struct TAG *name: only as a pointer (msz 0 marks "no star yet"); the tag may be the one being defined
+    P("SB.st").call("NEXT").tok({TK_ID: "SB.st1"}, ("rej", "not covered: struct member"))
+    p = P("SB.st1")
+    p.a(("INTERN", "t", "ps", "pe"), ("LDX", "t", "t", STAG)).branch({1: "DEADST"}, "SB.st2", [("CMPI", "t", 0)])
+    P("SB.st2").a(("ALUI", "add", "mbs", "t", SBB), ("LDI", "msz", 0), ("LDI", "mpt", 0)).call("NEXT").goto("SB.d")
     for nm, n in (("SB.i", SZ["int"]), ("SB.c", SZ["char"]), ("SB.s", SZ["short"]), ("SB.l", SZ["long"])):
         P(nm).a(("LDI", "msz", n), ("LDI", "mbs", n), ("LDI", "mpt", 0)).call("NEXT").goto("SB.d")
     P("SB.d").tok({"*": "SB.p", TK_ID: "SB.nm"}, ("rej", "not covered: struct member"))
     P("SB.p").a(("ALUI", "add", "mpt", "mpt", 1), ("LDI", "msz", 8)).call("NEXT").goto("SB.d")
-    p = P("SB.nm")
+    P("SB.nm").branch({1: "DEADSV"}, "SB.nm1", [("CMPI", "msz", 0)])
+    p = P("SB.nm1")
     p.a(("INTERN", "v", "ps", "pe"),
         ("ALU", "add", "t", "soff", "msz"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "msz"), ("ALU", "and", "soff", "t", "m"),
         ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "nsid"),
