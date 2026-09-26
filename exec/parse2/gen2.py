@@ -393,6 +393,7 @@ assert len(AX) == 16 and AX[-1] == "illegal"
 assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
+CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
 FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
@@ -577,7 +578,7 @@ def build():
             for i, o in enumerate(tops):
                 y = TYROW.get((AX[l], TYOP.get(o, o), AX[r]), "illegal")
                 p.a(("LDI", "t", i * 256 + l * 16 + r), ("LDI", "u", AX.index(y)), ("STX", "t", RST, "u"))
-    p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid"),
+    p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("LDI", "csp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"), ("MARK", "x0"), ("LDI", "sk", 0))
     # the reference auto-includes a header when one of its functions is called and not defined here
     # (src/front_pp.c autoinc): the old E3's check, reused -- such a unit is not covered
@@ -717,7 +718,8 @@ def build():
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
-    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl"}, "S.expr")
+    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl",
+           "switch": "S.sw", "case": "S.case", "default": "S.dflt"}, "S.expr")
     P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.expr")
     p = P("S.blk")
     p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur").call("UNWIND").call("NEXT").ret()
@@ -794,6 +796,43 @@ def build():
     emit(q, "jump_b")
     emit(q, "label_a").vpush("b").call("NEXT").call("STMT").vpop("b")
     emit(q, "label_b").ret()
+    # switch (e) body: e kept in a new 8-byte slot (not reused after); `jump La`; the body, whose
+    # case/default labels are numbered as met; then `jump Lb`, La: one compare per case in order
+    # (the slot reloaded 64-bit, `ne`, `jumpz Lcase`), `jump Ldefault` or `jump Lb`; Lb: (measured)
+    p = P("S.sw")
+    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
+    p.call("NEXT").expect("(").call("NEXT").vpush("a", "b").call("EXPR").vpop("a", "b").expect(")")
+    p.a(("ALUI", "add", "cur", "cur", 8), ("COPYW", "sws", "cur")).call("MAXF")
+    p.o("  imm r2, ").num("sws").o("\n  sub64 r1, r6, r2\n  store64 [r1+0], r0\n")
+    emit(p, "jump_a")
+    # its own a, b, slot across the body; the enclosing break target, case base and default restored after
+    p.vpush("a", "b", "sws").vpush("lbrk", "csb", "dfl").a(("COPYW", "lbrk", "b"), ("COPYW", "csb", "csp"), ("LDI", "dfl", -1))
+    p.call("NEXT").call("STMT").a(("COPYW", "swd", "dfl"), ("COPYW", "swk", "csb")).vpop("lbrk", "csb", "dfl").vpop("a", "b", "sws")
+    p.a(("COPYW", "swb", "swk"))
+    emit(p, "jump_b")
+    emit(p, "label_a").label("SW.l")
+    p.branch({0: "SW.c"}, "SW.d", [("CMP", "swk", "csp")])
+    q = P("SW.c")
+    q.a(("LDX", "swv", "swk", CSV), ("LDX", "swl", "swk", CSL))
+    q.o("  imm r2, ").num("sws").o("\n  sub64 r1, r6, r2\n  load64 r0, [r1+0]\n  imm r1, ").num("swv")
+    q.o("\n  ne r0, r0, r1\n  jumpz r0, L").num("swl").o("\n").a(("ALUI", "add", "swk", "swk", 1)).goto("SW.l")
+    p = P("SW.d")
+    p.a(("COPYW", "csp", "swb")).branch({0: "SW.nd"}, "SW.df", [("CMPI", "swd", 0)])
+    P("SW.df").o("  jump L").num("swd").o("\n").goto("SW.e")
+    P("SW.nd").goto("SW.jb")
+    p = P("SW.jb")
+    emit(p, "jump_b").goto("SW.e")
+    p = P("SW.e")
+    emit(p, "label_b").ret()
+    # case N: -- a non-negative constant (a number or a character); the label numbered here
+    p = P("S.case")
+    p.call("NEXT").tok({TK_NUM: "SW.cn"}, bad("case value"))
+    p = P("SW.cn")
+    p.a(("ALUI", "add", "lab", "lab", 1), ("STX", "csp", CSV, "nv"), ("STX", "csp", CSL, "lab"), ("ALUI", "add", "csp", "csp", 1))
+    p.o("L").num("lab").o(":\n").call("NEXT").expect(":").call("NEXT").call("STMT").ret()
+    p = P("S.dflt")
+    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "dfl", "lab")).o("L").num("lab").o(":\n")
+    p.call("NEXT").expect(":").call("NEXT").call("STMT").ret()
     p = P("S.while")
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
     emit(p, "label_a").call("NEXT").expect("(").call("NEXT").vpush("a", "b").call("EXPR").vpop("a", "b").expect(")")
