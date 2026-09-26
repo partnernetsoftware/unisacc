@@ -273,7 +273,8 @@ def printf():
     g.on("PQ.p", [37, ord("d")], "PQ.w", [("ADV",)])
     g.on("PQ.p", [256], "PQ.end", [("INPOP",)])
     g.els("PQ.p", "PQ.w", [("ADV",), ("LDI", "pfo", 1)])
-    P("PQ.end").branch({1: "PF.real"}, "PF.s", [("CMPI", "pfo", 1)])
+    # printf is a real call whenever the unit has <stdio.h>'s printf (product 991d337); the lowering only without one
+    P("PQ.end").a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.s", [("CMPI", "t", 1)])
     p = P("PF.real")    # back to '(' and an ordinary call (printf must be defined here: the bundled stdio.h)
     p.a(("JUMP", "lpp")).call("NEXT").call("CALL").ret()
     p = P("PF.s")
@@ -330,7 +331,8 @@ def printf():
     q = P("PL.e1")
     emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).call("NEXT").goto("PO.l")
     P("PO.nx").call("NEXT").goto("PO.l")
-    P("PO.id").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf"}, "PO.nx", [("CMP", "v", "pfid")])
+    P("PO.id").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf0"}, "PO.nx", [("CMP", "v", "pfid")])
+    P("PO.pf0").a(("LDX", "t", "pfid", E.FND)).branch({1: "PO.nx"}, "PO.pf", [("CMPI", "t", 1)])   # a real printf: its format pools whole
     P("PO.pf").call("NEXT").tok({"(": "PO.p1"}, "PO.l")
     P("PO.p1").call("NEXT").tok({E.TK_STR: "PO.s"}, "PO.l")
     P("PO.s").a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("LDI", "cnt", 0), ("INPUSHXE", "fs", "fe")).goto("PO.w")
