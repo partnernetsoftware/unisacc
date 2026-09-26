@@ -9,9 +9,20 @@ writes them.  Ops: mov, imm, add64/sub64/xor64/and64/or64, mul64, load64,
 store64, .ld/.st (1, 2, 4, 8 bytes), the six setcc ops, ret; anything else is
 rejected as not covered.
 
-Read, not copied: catalog.ENCSPEC's alu2 opcodes and setcc bytes (generated
-into memory at START).  Hand structure, stated: the register numbers
-(emit_x86.NUM) and the REX / ModRM / SIB / displacement packing below.
+Read, not copied: catalog.ENCSPEC's alu2 opcodes and setcc bytes, and
+emit_x86.NUM's register numbers (the reference's declaration, read at generation
+and put into memory at START).  Local constants: SCR = 11 (r11).  Hand structure,
+stated: the REX / ModRM / SIB / displacement packing below.
+
+Second slice: jump L and jumpz rX, L inside the fixture, with `name:` label
+lines.  Every instruction is first encoded (a branch in no form yet), then the
+branches are relaxed as unisa/assemble.py does -- all in their long form (jmp
+rel32: 5 bytes; test + jz rel32: 9), each round lays the code out and marks at
+once every branch whose short form (jmp rel8: 2; test + jz rel8: 5) would reach
+its target, measured from the end of the short instruction; repeat until no
+more fit -- and the code is written.  The offsets and the short set are the
+delta's own; a duplicate or an undefined label is rejected.  The displacement
+width (4 bytes) is the reloc table's rel32 for x86_64.
 """
 import importlib.util
 import json
@@ -30,7 +41,10 @@ from unisa.emit_x86 import NUM      # noqa: E402
 X86 = ENCSPEC["x86_64"]
 DIGIT = list(range(48, 58))
 NL = [10, EOF]
-OPC, REGN = 70 * 10 ** 6, 71 * 10 ** 6       # OPC[op id] = class + 1; REGN[name id] = register + 1
+OPC, REGN = 70 * 10 ** 6, 71 * 10 ** 6       # OPC[op id] = class; REGN[name id] = register + 1
+LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the next instruction + 1
+KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
+                                         80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
 C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET = range(1, 11)
 SCR = 11                                     # r11: emit_x86.SCR
@@ -87,6 +101,79 @@ def procs():
     byte(P("ME.sib"), 0x24).ret()
 
 
+def relax():
+    """RELAX: the rounds of unisa/assemble.py; WRITE: every instruction in its final form"""
+    p = P("RELAX")
+    p.a(("LDI", "rround", 0)).label("RX.r")
+    p.a(("ALUI", "add", "rround", "rround", 1), ("LDI", "q", 0), ("LDI", "off", 0)).label("RX.o")      # offsets
+    p.branch({0: "RX.o1"}, "RX.f", [("CMP", "q", "npc")])
+    P("RX.o1").a(("STX", "q", OFF, "off"), ("LDX", "t", "q", SZ), ("ALU", "add", "off", "off", "t"),
+                 ("ALUI", "add", "q", "q", 1)).goto("RX.o")
+    p = P("RX.f")           # every long branch whose short form would reach
+    p.a(("COPYW", "endo", "off"), ("LDI", "q", 0), ("LDI", "nfit", 0)).label("RX.fl")
+    p.branch({0: "RX.f1"}, "RX.m", [("CMP", "q", "npc")])
+    p = P("RX.f1")
+    p.a(("LDX", "k", "q", KND)).branch({1: "RX.nx"}, "RX.f2", [("CMPI", "k", 0)])
+    p = P("RX.f2")
+    p.a(("LDX", "t", "q", SHT)).branch({1: "RX.f3"}, "RX.nx", [("CMPI", "t", 0)])
+    p = P("RX.f3")
+    p.a(("LDI", "ns", 2)).branch({1: "RX.f4"}, "RX.f35", [("CMPI", "k", 1)])
+    P("RX.f35").a(("LDI", "ns", 5)).goto("RX.f4")
+    p = P("RX.f4")
+    p.call("LADDR").a(("LDX", "t", "q", OFF), ("ALU", "add", "t", "t", "ns"), ("ALU", "sub", "d", "la", "t"))
+    p.branch({0: "RX.nx"}, "RX.f5", [("CMPI", "d", -128)])
+    p = P("RX.f5")
+    p.branch({2: "RX.nx"}, "RX.fit", [("CMPI", "d", 127)])
+    P("RX.fit").a(("STX", "q", FIT, "rround"), ("ALUI", "add", "nfit", "nfit", 1)).goto("RX.nx")
+    P("RX.nx").a(("ALUI", "add", "q", "q", 1)).goto("RX.fl")
+    p = P("RX.m")           # none fit: done; else all of this round's fits become short
+    p.branch({1: "RET"}, "RX.m0", [("CMPI", "nfit", 0)])
+    p = P("RX.m0")
+    p.a(("LDI", "q", 0)).label("RX.ml")
+    p.branch({0: "RX.m1"}, "RX.r", [("CMP", "q", "npc")])
+    p = P("RX.m1")
+    p.a(("LDX", "t", "q", FIT)).branch({1: "RX.m2"}, "RX.m3", [("CMP", "t", "rround")])
+    p = P("RX.m2")
+    p.a(("LDI", "t", 1), ("STX", "q", SHT, "t"), ("LDX", "k", "q", KND), ("LDI", "t", 2)).branch({1: "RX.m2s"}, "RX.m2z", [("CMPI", "k", 1)])
+    P("RX.m2z").a(("LDI", "t", 5)).goto("RX.m2s")
+    P("RX.m2s").a(("STX", "q", SZ, "t")).goto("RX.m3")
+    P("RX.m3").a(("ALUI", "add", "q", "q", 1)).goto("RX.ml")
+    # LADDR(q) -> la: the offset of branch q's target label (the end past the last instruction)
+    p = P("LADDR")
+    p.a(("LDX", "t", "q", TGT), ("LDX", "t", "t", LABD)).branch({1: "DEAD.undef"}, "LA.1", [("CMPI", "t", 0)])
+    g.on("DEAD.undef", range(257), "DEAD", E.rej("not covered: a branch to an undefined label"), "r")
+    p = P("LA.1")
+    p.a(("ALUI", "sub", "t", "t", 1)).branch({0: "LA.in"}, "LA.end", [("CMP", "t", "npc")])
+    P("LA.in").a(("LDX", "la", "t", OFF)).ret()
+    P("LA.end").a(("COPYW", "la", "endo")).ret()
+    # WRITE
+    p = P("WRITE")
+    p.a(("LDI", "q", 0)).label("WR.l")
+    p.branch({0: "WR.i"}, "RET", [("CMP", "q", "npc")])
+    p = P("WR.i")
+    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z"}, "WR.blob", [("RLD", "k")])
+    p = P("WR.blob")
+    p.a(("LDX", "t", "q", BLB), ("INPUSH", "t")).goto("WR.cp")
+    g.on("WR.cp", [EOF], "WR.cpd", [("INPOP",)])
+    g.els("WR.cp", "WR.cp", [("COPY",), ("ADV",)])
+    P("WR.cpd").goto("WR.nx")
+    p = P("WR.j")           # jmp: short EB rel8 / long E9 rel32, from the instruction's end
+    p.call("LADDR").a(("LDX", "o_", "q", OFF), ("LDX", "t", "q", SHT)).branch({1: "WR.js"}, "WR.jl", [("CMPI", "t", 1)])
+    P("WR.js").a(("ALUI", "add", "o_", "o_", 2), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0xEB), ("OUTW", "t"), ("OUTW", "d")).goto("WR.nx")
+    p = P("WR.jl")
+    p.a(("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0xE9), ("OUTW", "t"),
+        ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
+    p = P("WR.z")           # test r, r (rex(1, r>>3, 0, r>>3) 85 modrm(3, r, r)); jz rel8 74 / rel32 0F 84
+    p.a(("LDX", "zr", "q", BRG), ("LDI", "rx_w", 1), ("COPYW", "rx_r", "zr"), ("COPYW", "rx_b", "zr")).call("REX")
+    p.a(("LDI", "t", 0x85), ("OUTW", "t"), ("LDI", "mr_m", 3), ("COPYW", "mr_r", "zr"), ("COPYW", "mr_b", "zr")).call("MODRM")
+    p.call("LADDR").a(("LDX", "o_", "q", OFF), ("LDX", "t", "q", SHT)).branch({1: "WR.zs"}, "WR.zl", [("CMPI", "t", 1)])
+    P("WR.zs").a(("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0x74), ("OUTW", "t"), ("OUTW", "d")).goto("WR.nx")
+    p = P("WR.zl")
+    p.a(("ALUI", "add", "o_", "o_", 9), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0x0F), ("OUTW", "t"), ("LDI", "t", 0x84), ("OUTW", "t"),
+        ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
+    P("WR.nx").a(("ALUI", "add", "q", "q", 1)).goto("WR.l")
+
+
 def build():
     E.prn()
     procs()
@@ -104,15 +191,46 @@ def build():
             p.a(("LDI", "u", X86["setcc"][op]), ("STX", "t", ACC, "u"))
     for nm, n in NUM.items():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", n + 1), ("STX", "t", REGN, "u"))
-    p.goto("LINE")
+    for w in ("jump", "jumpz"):
+        p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
+    p.a(("LDI", "npc", 0)).goto("LINE")
     # LINE: the op word, then up to four comma-separated arguments into a0..a3 (a register's number or an integer)
     g.on("LINE", [EOF], "DONE", [])
     g.on("LINE", [10], "LINE", [("ADV",)])
-    g.els("LINE", "LW", [("MARK", "ws")])
+    g.els("LINE", "LW", [("MARK", "ws"), ("LDI", "lc", 0)])
     g.on("LW", [32] + NL, "LW.e", [("MARK", "we")])
-    g.els("LW", "LW", [("ADV",)])
+    g.els("LW", "LW", [("BYTE", "lc"), ("ADV",)])
     p = P("LW.e")
-    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0)).goto("ARG")
+    p.branch({1: "LAB"}, "LW.i", [("CMPI", "lc", 58)])
+    p = P("LAB")            # `name:` -- the next instruction's index; a name defined twice is rejected
+    p.a(("ALUI", "sub", "t", "we", 1), ("INTERN", "lid", "ws", "t"), ("LDX", "t", "lid", LABD)).branch({1: "LAB.s"}, "DEAD.dup", [("CMPI", "t", 0)])
+    P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
+    g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
+    p = P("LW.i")
+    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("OLEN", "omark"))
+    p.branch({1: "BR.j"}, "LW.i2", [("CMP", "opid", "id_jump")])
+    P("LW.i2").branch({1: "BR.z"}, "ARG", [("CMP", "opid", "id_jumpz")])
+    # jump NAME / jumpz rX, NAME: recorded, encoded later
+    g.els("BR.j", "BR.j0", [("LDI", "t", 1), ("STX", "npc", KND, "t"), ("LDI", "t", 5), ("STX", "npc", SZ, "t")])
+    g.on("BR.j0", [32], "BR.j0", [("ADV",)])
+    g.els("BR.j0", "BR.name", [("MARK", "ts")])
+    g.els("BR.z", "BR.z0", [("LDI", "t", 2), ("STX", "npc", KND, "t"), ("LDI", "t", 9), ("STX", "npc", SZ, "t")])
+    g.on("BR.z0", [32], "BR.z0", [("ADV",)])
+    g.els("BR.z0", "BR.zr", [("MARK", "ts")])
+    g.on("BR.zr", [44, 32] + NL, "BR.zr2", [("MARK", "te")])
+    g.els("BR.zr", "BR.zr", [("ADV",)])
+    p = P("BR.zr2")
+    p.a(("INTERN", "rid", "ts", "te"), ("LDX", "t", "rid", REGN)).branch({1: "DEAD.reg"}, "BR.zr3", [("CMPI", "t", 0)])
+    P("BR.zr3").a(("ALUI", "sub", "t", "t", 1), ("STX", "npc", BRG, "t")).goto("BR.zs")
+    g.on("BR.zs", [32, 44], "BR.zs", [("ADV",)])
+    g.els("BR.zs", "BR.name", [("MARK", "ts")])
+    g.on("BR.name", [32] + NL, "BR.ne", [("MARK", "te")])
+    g.els("BR.name", "BR.name", [("ADV",)])
+    p = P("BR.ne")
+    p.a(("INTERN", "t", "ts", "te"), ("STX", "npc", TGT, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
+    g.on("SKIPL", [10], "LINE", [("ADV",)])
+    g.on("SKIPL", [EOF], "DONE", [])
+    g.els("SKIPL", "SKIPL", [("ADV",)])
     g.on("ARG", [32], "ARG", [("ADV",)])
     g.on("ARG", NL, "ARGS.d", [])
     g.on("ARG", [45] + DIGIT, "AN", [("LDI", "neg", 0), ("LDI", "av", 0)])
@@ -214,10 +332,11 @@ def build():
     byte(p, 0xB6)
     p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "a0"), ("LDI", "mr_b", SCR)).call("MODRM").goto("NEXTL")
     byte(P("E.ret"), 0xC3).goto("NEXTL")
-    g.on("NEXTL", [10], "LINE", [("ADV",)])
-    g.on("NEXTL", [EOF], "DONE", [])
-    g.els("NEXTL", "NEXTL", [("ADV",)])
-    P("DONE").a(("ACCEPT",)).goto("DEAD")
+    p = P("NEXTL")          # a non-branch: its bytes become a blob, its size known
+    p.a(("OCUT", "blob", "omark"), ("STX", "npc", BLB, "blob"), ("BLEN", "t", "blob"), ("STX", "npc", SZ, "t"),
+        ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
+    relax()
+    P("DONE").call("RELAX").call("WRITE").a(("ACCEPT",)).goto("DEAD")
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

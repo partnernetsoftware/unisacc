@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""The referee for the x86_64 encoder slice (research/e5-slice.md): each line of
-a TIns fixture through unisa/emit_x86.encode; every line must encode (a None
-would be a UD2 placeholder downstream), the bytes concatenated on stdout."""
+"""The referee for the x86_64 encoder slices (research/e5-slice.md): the TIns
+fixture (with `name:` label lines) through unisa/assemble.py -- its relaxation
+rounds and unisa/emit_x86.encode; every instruction must encode (encoded ==
+insns: no UD2 placeholder), the bytes on stdout."""
 import os
 import sys
 
@@ -18,15 +19,23 @@ def arg(s):
         return s
 
 
-out = bytearray()
+from unisa.lower import TargetProgram   # noqa: E402
+from unisa.assemble import assemble     # noqa: E402
+
+tp = TargetProgram("lnx/x86_64", b"", {})
 for n, ln in enumerate(open(sys.argv[1]), 1):
     ln = ln.strip()
     if not ln:
         continue
+    if ln.endswith(":") and " " not in ln:
+        if ln[:-1] in tp.labels:
+            sys.exit("ref: label defined twice at line %d" % n)
+        tp.labels[ln[:-1]] = len(tp.code)
+        continue
     op, _, rest = ln.partition(" ")
-    ins = TIns(op, [arg(a) for a in rest.split(",")] if rest else [])
-    b = emit_x86.encode(ins, 0, {}, "x86_64")
-    if b is None:
-        sys.exit("ref: line %d does not encode: %s" % (n, ln))
-    out += b
-sys.stdout.buffer.write(bytes(out))
+    args = [arg(a) for a in rest.split(",")] if rest else []
+    tp.emit(op, *args, **({"reloc": "rel32"} if op in ("jump", "jumpz") else {}))
+code, st = assemble(tp)       # unisa/assemble.py: the relaxation rounds, then encode
+if st["encoded"] != st["insns"]:
+    sys.exit("ref: %d of %d instructions encode (the rest would be UD2)" % (st["encoded"], st["insns"]))
+sys.stdout.buffer.write(code)
