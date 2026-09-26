@@ -2037,3 +2037,14 @@ empty stderr. An initial manual hello expectation was wrong; after checking
 the source the rerun passed. The VM started for this check was stopped;
 the already-running default VM was left alone. This is runtime evidence for
 these two outputs, not a Linux suite pass.
+
+### End-to-end fixed set expands to 68 (2026-09-26)
+
+All 68 existing chain keep inputs now complete the six-stage source-to-ELF
+route. Each optimized tape equals the product reference and each full ELF
+image equals the reference lowering/assembler/image result, with encoded
+instruction count checked. The set is retained independently in
+`exec/pipeline/keep-elf.txt`; `exec-srcelf` now rebuilds tables and checks all
+68, failing on a missing input, rejecting stage, nonzero reference or byte
+mismatch. The complete check passed under one 60-second watchdog. Linux
+execution evidence remains the two examples above, not all 68 programs.
