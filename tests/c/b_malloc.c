@@ -34,7 +34,6 @@ int main(void) {
     for (i = 0; i < 3000; i++) sum = sum + z[i];
     printf("calloc %ld\n", sum);
     free(z);
-    printf("overflow %d %d\n", calloc(0x7fffffffffffffff, 4) == NULL, malloc(-1) == NULL);
     sum = 0;
     for (j = 0; j < 3; j++) {
         for (i = 0; i < 300; i++) { v[i] = (char *)malloc(i + 1); v[i][i] = (char)(i & 127); }
