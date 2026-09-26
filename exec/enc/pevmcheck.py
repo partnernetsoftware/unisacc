@@ -12,7 +12,7 @@ for name in ('hello','fib'):
  exe='C:\\u\\delta-pe-'+name+'-'+uuid.uuid4().hex[:8]+'.exe';out=exe+'.out';err=exe+'.err';rc=exe+'.rc';ps=exe+'.ps1'
  data=(root/(name+'.exe')).read_bytes();tool('file','push',vm,exe,data=data)
  assert tool('file','pull',vm,exe)==data
- script=f"$p = New-Object System.Diagnostics.Process; $p.StartInfo.FileName = 'cmd.exe'; $p.StartInfo.Arguments = '/c {exe} >{out} 2>{err}'; $p.StartInfo.UseShellExecute = $false; $p.Start() | Out-Null; if (-not $p.WaitForExit(30000)) {{ $p.Kill(); 'TIMEOUT' | Set-Content '{rc}' }} else {{ $p.ExitCode | Set-Content '{rc}' }}"
+ script=f"$p = New-Object System.Diagnostics.Process; $p.StartInfo.FileName = 'cmd.exe'; $p.StartInfo.Arguments = '/c {exe} >{out} 2>{err}'; $p.StartInfo.UseShellExecute = $false; $p.Start() | Out-Null; if (-not $p.WaitForExit(30000)) {{ & taskkill.exe /PID $p.Id /T /F | Out-Null; 'TIMEOUT' | Set-Content '{rc}' }} else {{ $p.ExitCode | Set-Content '{rc}' }}"
  tool('file','push',vm,ps,data=script.encode())
  tool('exec',vm,'--cmd','cmd.exe','--','/c','powershell.exe -NoProfile -ExecutionPolicy Bypass -File '+ps)
  deadline=time.monotonic()+35

@@ -32,7 +32,7 @@ Derived, not typed in: the directive vocabulary from DIRV
 (kernel/unisa_model.inc), and what each (directive, defined) pair does from
 weights/gold/pp.tsv (the shipped pp table).  Transcribed from
 src/front_pp.c: byte classes, the predefined macros of predef() for the
-selected POSIX target (default x86_64), the include search order.
+selected target (default Linux x86_64), the include search order.
 """
 import json
 import os
@@ -593,11 +593,12 @@ def build_hx(g, NC):
 
 
 def build(target="lnx/x86_64"):
-    if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64"):
+    if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"):
         raise ValueError("unsupported preprocessor target: "+target)
     predef=list(PREDEF)
     if target.startswith("osx/"):predef[:3]=["__APPLE__","__MACH__","__unix__"]
     if target.endswith("/arm64"):predef[3]="__aarch64__"
+    if target.startswith("win/"):predef[:3]=["_WIN32","_WIN64"]
     g = G()
     NC = lambda what: [("REJECT", "not covered: " + what)]   # noqa: E731
 
@@ -695,7 +696,7 @@ def build(target="lnx/x86_64"):
 
     # ---- P3: directives -------------------------------------------------------
     g.els("P3START", "P3S2", [("RLD", "RUN")])
-    # predef(): six object-like macros with body "1" for selected POSIX target
+    # predef(): object-like macros with body "1" for the selected target
     chain = "P3PD0"
     g.r("P3S2", {0: (chain, [("LDI", "RUN", 1), ("LDI", "CURSEG", 0), ("SETOT", "CURSEG")]),
                  1: ("P3L0", [("LDI", "Z", 0), ("SPAN2", "Z", "RESUME"), ("JUMP", "RESUME")])})

@@ -2554,3 +2554,25 @@ Artifacts /tmp/unisacc-delta-pe; logs /tmp/unisacc-pe-final.log and
 /tmp/unisacc-pe-native.log. VM was stopped after use. Reference lowering is
 still the input producer in this test, not the full source pipeline. Windows
 x86 encoding/PE route, self-source, E7 and network runtime remain unfinished.
+
+### Windows ARM64 full source route and bootstrap (2026-09-27)
+
+E2 now selects the five Windows predefines; source pipeline accepts win/arm64
+and writes .exe. Source is unisacc.c at f360ba0, SHA256
+`11ef59801d8c18f637e67b2a5b0e988ad31baec1859fabdd06dc879935574307`.
+Six-delta output, reference image, Windows-native N2 and N3 are identical:
+741,888 B, SHA256
+`a831d9b1000f7661e6db4346cd9f17a1bd0c0c568a12c40b78a4208430ffa08f`.
+Actual Windows 11 ARM64 execution through UTM, independent exit receipts,
+30 s per guest compile; started VM stopped after use. Artifacts in
+/tmp/unisacc-win-arm-source and log /tmp/unisacc-pe-bootstrap.log.
+The self-source input has zero data relocations (@relocs -); quadratic sorting
+is a general scaling limitation, not a measured self-source timeout.
+
+Code-frozen local gate --com: 64 suites, 0 failed, 147 s total; exec-winself
+17 s, exec-armwin 3 s, exec-pearm 4 s, every suite bounded at 60 s. Log
+/tmp/unisacc-win-source-gate.log. The peer's prd-only 1435ed3 was retained during
+this run; product/code inputs were unchanged. Windows native bootstrap was a
+separate run, not implied by the macOS gate. No push/release. This closes the
+fifth source-to-image target, not Windows x86_64, full frontend coverage,
+network inference or product adoption. WINARGS_BODY remains a named template.

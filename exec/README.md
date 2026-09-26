@@ -80,3 +80,21 @@ Not done in E0: the table is not built as an integer net through the
     exec/lex/run.sh gen; exec/lex/run.sh xbuild          # table, cc + unisacc builds, T1
     E1EXEC=/tmp/e1x/exec_ua:/tmp/e1x/e1.tbl exec/lex/run.sh lexdiff   # (probes, self, corpus.*)
     exec/lex/ledger.sh                                   # __text, table bytes, speed
+
+## Source-to-image development route
+
+`TARGET=win/arm64 ./exec/pipeline/elf.sh OUTPUT_DIR unisacc.c` now produces
+`OUTPUT_DIR/unisacc.exe` through six generated deltas on the generic C executor.
+The same entry supports the four POSIX targets (`.elf` / `.macho`). Python is
+still used to generate transition tables, not to process source between these
+six stages. The tables remain lookup tables, not networks. The generated
+compiler is the existing C compiler; this is not E7 adoption in the product.
+
+`TARGET=win/arm64 ./exec/pipeline/selfcheck.sh` checks all five Windows target
+macros against the native front end, optimized tape and whole PE bytes against
+the current reference. It does not claim native execution on a macOS host.
+For an already-running Windows ARM64 UTM VM, the separate opt-in command is
+`perl -e 'alarm 60; exec @ARGV' python3 exec/pipeline/winbootstrap.py OUTPUT_DIR unisacc.c`.
+It copies and verifies inputs, compiles N2 and N3 in the guest, checks explicit
+per-run exit receipts and byte equality. Guest timeout cleanup uses taskkill
+on the process tree; VM lifecycle remains the caller's responsibility.
