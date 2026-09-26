@@ -13,6 +13,15 @@ b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "e5: cc failed"; exit
 b 60 python3 $D/gen.py "$T/d.json" 2>/dev/null || { echo "e5: gen failed"; exit 1; }
 b 60 python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl" || { echo "e5: tbl failed"; exit 1; }
 ok=0; bad=0
+# the expectations file: every line a comment or `br-NAME.txt OFFSET HEX`, one per br-* fixture, no other
+exp=$(grep -v '^#' $D/br-expect.txt | grep -v '^ *$')
+echo "$exp" | awk 'NF < 3 || $1 !~ /^br-.*\.txt$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9a-f]+$/ || length($3) % 2 {print "  BAD expectation line: " $0; b=1} END {exit b}' || bad=$((bad+1))
+for F in $D/br-*.txt; do
+    case $F in *br-expect.txt) continue ;; esac
+    n=$(echo "$exp" | awk -v f="$(basename "$F")" '$1 == f' | wc -l | tr -d ' ')
+    [ "$n" -eq 1 ] || { echo "  BAD $F: $n expectations (want 1)"; bad=$((bad+1)); }
+done
+for f in $(echo "$exp" | awk '{print $1}'); do [ -f "$D/$f" ] || { echo "  BAD expectation for a missing fixture: $f"; bad=$((bad+1)); }; done
 for F in $D/x86-fixture.txt $D/br-*.txt; do
     case $F in *br-expect.txt) continue ;; esac
     b 60 python3 $D/ref.py "$F" > "$T/ref" || { echo "  BAD $F: the referee failed"; bad=$((bad+1)); continue; }
@@ -30,8 +39,8 @@ for F in $D/x86-fixture.txt $D/br-*.txt; do
 done
 for F in $D/neg-*.txt; do     # must be rejected (exit 1 with a reason), on both executors
     b 60 "$T/run" "$T/d.tbl" "$F" > /dev/null 2> "$T/e"; rc=$?
-    b 60 python3 exec/pp/sim.py "$T/d.json" "$F" > /dev/null 2>&1; rp=$?
-    if [ $rc -eq 1 ] && [ $rp -eq 1 ] && grep -q "not covered" "$T/e"; then ok=$((ok+1)); else
+    b 60 python3 exec/pp/sim.py "$T/d.json" "$F" > /dev/null 2> "$T/pe"; rp=$?
+    if [ $rc -eq 1 ] && [ $rp -eq 1 ] && grep -q "^reject: not covered" "$T/e" && grep -q "^reject: not covered" "$T/pe"; then ok=$((ok+1)); else
         echo "  BAD $F: not rejected (run.c $rc, sim.py $rp)"; bad=$((bad+1)); fi
 done
 echo "e5 x86  fixtures ok $ok   bad $bad"
