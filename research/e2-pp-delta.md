@@ -341,3 +341,28 @@ the paths where the name does not expand (EBNX). In slice, fixed; not rejected.
 | corpus total | 249 | 181 | 18 | 44 | 6 | 0 |
 
 Function-like macros are still out of scope (the bulk of not-covered).
+
+### 10.4 Function-like spacing measured; delta not yet extended (2026-09-26)
+
+Reference (`/tmp/ua_ref -E`) on `#define F(a,b) a+b*a`, `#define G(x) [x]`:
+
+| input | output |
+|---|---|
+| `int y=F(1,2);` | `int y= 1 + 2 * 1 ;` |
+| `F( p , q )z;` | ` p + q * p z;` |
+| `x F (u,v) y;` | `x  u + v * u  y;` |
+| `G(F(1,2));` | ` [ 1 + 2 * 1 ] ;` |
+| `F` NL `(3,4);` | ` 3 + 4 * 3 ` NL `;` (the call's newline moves after it) |
+| `G(G)(5);` | ` [ G ] (5);` (hide set: inner G not re-invoked) |
+| `G(a  b);` | ` [ a b ] ;` (argument re-tokenised, one space between tokens) |
+
+So the rule is the object-like one: every body token (argument tokens
+included, blanks around arguments dropped) is joined by one space, the
+whole expansion padded by one space each side, and text between the name
+and `(` (blanks, newlines) is consumed, a newline re-emitted after the
+expansion. The delta was not extended in this round (time budget): P4
+still rejects any function-like invocation as `not covered`, so all
+shards stay at the 10.3 totals (ex 0 DIFF; corpus 181 equal / 0 DIFF).
+Next: argument spans recorded by the executor (MARK pairs per argument,
+stride table as for macros), body scanned with parameter ids mapped to
+an INPUSH of the argument span, hide set as in 10.2.
