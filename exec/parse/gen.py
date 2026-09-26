@@ -433,6 +433,10 @@ LD[DBL], ST[DBL], LDR[DBL], MSK[DBL] = LD[8], ST[8], LD[8], ""
 # `.st [r1+0], r0, 4`); a float value loaded is not covered (None: vwidth rejects)
 FLT = 65
 LD[FLT], ST[FLT], LDR[FLT], MSK[FLT] = None, ST[4], None, None
+# a function pointer: depth 1, base code FPB (measured, probes p70..p72).  Its value is the
+# function's address (`.lea r0, NAME`); a call through it pushes the callee value first, then the
+# arguments, pops them to r(n-1)..r0, then `load64 r5, [r7+0]; .frame -8; callr r5`.  *f is f.
+FPB = 67
 FPU = {f[1]: f[2] for f in gold("irsel") if f[0] == "fpu"}   # stage irsel, class fpu: dadd -> fadd64, i2d -> cvtid ...
 FOPS = {"+": "dadd", "-": "dsub", "*": "dmul", "/": "ddiv"}
 
@@ -688,6 +692,11 @@ def expr():
     p.call("IDX").a(("ALUI", "add", "pt", "pt", 1)).call("NOPOST").ret()
     p = P("PV.id")
     lookup(p, "ps", "pe")
+    p.branch({1: "PV.idf"}, "PV.ida", [("CMPI", "pb", FPB)])
+    p = P("PV.idf")
+    p.branch({1: "PV.ida"}, "PV.idl", [("CMPI", "s", GMARK)])
+    P("PV.idl").call("FPLD").call("NEXT").ret()
+    p = P("PV.ida")
     addr(p, "r0")
     ld, dn = p.fresh("pl"), p.fresh("pd")
     p.branch({1: dn}, ld, [("CMPI", "ar", 1)])
@@ -701,12 +710,17 @@ def expr():
     g.on("DEADX", range(257), "DEAD", rej("not covered: postfix on a * or & operand"), "r")
     p = P("PVCHK")    # dereferencing needs a pointer
     p.branch({(1, 2): "RET"}, ("rej", "not covered: dereference of a non-pointer"), [("CMPI", "pt", 1)])
-    p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type
-    p.a(("ALUI", "sub", "pt", "pt", 1)).call("LDA").ret()
+    p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type; *f is f (a function designator)
+    p.branch({1: "DRF.f"}, "DRF.n", [("CMPI", "pb", FPB)])
+    P("DRF.f").branch({1: "RET"}, "DRF.n", [("CMPI", "pt", 1)])
+    P("DRF.n").a(("ALUI", "sub", "pt", "pt", 1)).call("LDA").ret()
     p = P("LDA")      # r0 := *r0 for an address whose value has depth W[pt], base W[pb]
     d0, dk = p.fresh("d0"), p.fresh("dk")
     p.branch({1: d0}, dk, [("CMPI", "pt", 0)])
-    P(d0).branch({(0, 2): dk}, ("rej", "not covered: dereference of an unknown base"), [("CMPI", "pb", CUNK)])
+    d1 = d0 + "f"
+    P(d0).branch({(0, 2): d1}, ("rej", "not covered: dereference of an unknown base"), [("CMPI", "pb", CUNK)])
+    P(d1).branch({1: "DEADF"}, dk, [("CMPI", "pb", FPB)])
+    g.on("DEADF", range(257), "DEAD", rej("not covered: a function used as an object"), "r")
     p.cur = dk
     vwidth(p, "pt", "pb", LD)     # depth 0: the pointee's base width (char *p: .ld 1, measured)
     p.ret()
@@ -736,7 +750,16 @@ def expr():
     lookup(p, "sps", "spe")
     addr(p, "r0")
     vload(p)
-    p.call("IDX").call("LDA").call("NOPOST").ret()
+    p.call("IDX").call("LDA").call("POSTC").ret()
+    p = P("POSTC")    # a call through a function pointer value in r0, else no postfix
+    p.tok({"(": "POSTC.c", "++": "DEADX", "--": "DEADX"}, "RET")
+    P("POSTC.c").branch({1: "CALLR"}, "DEADX", [("CMPI", "pb", FPB)])
+    p = P("POSTP")
+    p.tok({"(": "POSTC.c"}, "RET")
+    p = P("FPLD")     # a local function pointer as a callee: load64 r0, [r6-N] (measured)
+    p.o("  load64 r0, [r6-").num("s").o("]\n").ret()
+    p = P("CALLR")    # r0 = the callee; current token '(' (measured: callee pushed before the arguments)
+    p.o(PUSH).a(("LDI", "sys", 99)).goto("IT.ok3")
     for nm, extra in (("EXPR.ix", {}), ("VEXPR.ixs", {";": "RET", ",": "EXPR.dis", ")": "EXPR.dis"})):
         p = P(nm)     # id '[' ... = e  |  as an rvalue; statement level `p[i];` computes the address only (measured)
         lookup(p, "sps", "spe")
@@ -744,7 +767,7 @@ def expr():
         vload(p)
         p.call("IDX").tok(dict([("=", "EXPR.ixa")] + [(o + "=", "EXPR.ixc") for o in CASOPS], **extra), "EXPR.ixu")
     g.on("EXPR.ixc", range(257), "DEAD", rej("not covered: compound assignment to a subscript"), "r")
-    P("EXPR.ixu").call("LDA").call("NOPOST").call("BINCONT").goto("EXPR.tail")
+    P("EXPR.ixu").call("LDA").call("POSTC").call("BINCONT").goto("EXPR.tail")
     p = P("EXPR.ixa")
     d0, dk = p.fresh("a0"), p.fresh("ak")
     p.branch({1: d0}, dk, [("CMPI", "pt", 0)])
@@ -847,7 +870,7 @@ def expr():
                                  "type=double": "CA.sp", "type=float": "CA.sp", TK_ID: "U.pid"}, "U.pe")
     # (unsigned T *...) / (double *...): the type words through SPEC; a scalar cast to them is not covered
     P("CA.sp").call("SPEC").a(("COPYW", "cb", "bsz"), ("LDI", "cd", 0)).goto("CA.sl")
-    P("U.pe").call("CEXPR").expect(")").call("NEXT").ret()
+    P("U.pe").call("CEXPR").expect(")").call("NEXT").call("POSTP").ret()
     p = P("U.pid")
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "CA.void"}, "U.pe", [("CMPI", "t", 1)])
     for c in ("int", "char", "short", "long"):
@@ -912,11 +935,26 @@ def expr():
         vwidth(q, "pt", "pb", ST)
         q.o("  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
     p = P("IT.var")
+    p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", LOC)).branch({1: "IT.fnv"}, "IT.var1", [("CMPI", "t", 0)])
+    p = P("IT.fnv")   # a function defined before, as a value: its address (measured: .lea r0, add)
+    p.a(("LDX", "t", "v", FND)).branch({1: "IT.fnl"}, "DEAD0", [("CMP", "t", "pass")])
+    P("IT.fnl").o("  .lea r0, ").a(("SPAN2", "sps", "spe")).o("\n").a(("LDI", "pt", 1), ("LDI", "pb", FPB)).ret()
+    p = P("IT.var1")
     lookup(p, "sps", "spe")
     addr(p, "r0")
     vload(p)
     p.ret()
     p = P("IT.call")
+    p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", LOC), ("LDX", "u", "v", BASE)).branch({1: "IT.call0"}, "IT.cv", [("CMPI", "t", 0)])
+    P("IT.cv").branch({1: "IT.fpv"}, "IT.call0", [("CMPI", "u", FPB)])
+    p = P("IT.fpv")
+    lookup(p, "sps", "spe")
+    p.branch({1: "IT.fpg"}, "IT.fpl", [("CMPI", "s", GMARK)])
+    P("IT.fpl").call("FPLD").call("CALLR").ret()
+    p = P("IT.fpg")
+    addr(p, "r0")
+    p.o("  load64 r0, [r0+0]\n").call("CALLR").ret()
+    p = P("IT.call0")
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
     p.branch({1: "IT.ok"}, "IT.nd", [("CMP", "t", "pass")])
     p = P("IT.nd")
@@ -961,7 +999,9 @@ def expr():
     p = P("IT.pop1")
     p.a(("ALUI", "sub", "na", "na", 1)).o("  load64 r").num("na").o(", [r7+0]\n  .frame -8\n").goto("IT.pop")
     p = P("IT.emit")
-    p.vpop("sps", "spe", "sys").branch({1: "IT.ecall"}, "IT.esys", [("CMPI", "sys", 0)])
+    p.vpop("sps", "spe", "sys").branch({1: "IT.ecall"}, "IT.ecq", [("CMPI", "sys", 0)])
+    P("IT.ecq").branch({1: "IT.ecr"}, "IT.esys", [("CMPI", "sys", 99)])
+    P("IT.ecr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
     for k, (_, _, w) in enumerate(SYSCALLS, 1):
         nxt = "IT.w%d" % (k + 1) if k < len(SYSCALLS) else ("rej", "not covered: syscall builtin")
         P("IT.esys" if k == 1 else "IT.w%d" % k).branch({1: "IT.v%d" % k}, nxt, [("CMPI", "sys", k)])
@@ -1176,7 +1216,18 @@ def stmt():
     P("S.ddb").a(("LDI", "bni", 0), ("LDI", "bsz", DBL)).goto("S.dnx")
     P("S.dfl").a(("LDI", "bni", 1), ("LDI", "bsz", FLT)).goto("S.dnx")   # float *p only
     P("S.dsh").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("S.dnx")
-    P("S.dnx").call("NEXT").tok(dict((w, "S.dw") for w in TWORDS), "D.one")
+    P("S.dnx").call("NEXT").tok(dict([(w, "S.dw") for w in TWORDS] + [("(", "D.fp")]), "D.one")
+    P("D.fp").call("FPDECL").goto("D.id")
+    # FPDECL: at '(' of `T (*NAME)(...)`: NAME in ps/pe, ptd 1, bsz FPB; ends on the closing ')'
+    p = P("FPDECL")
+    p.call("NEXT").expect("*").call("NEXT").tok({TK_ID: "FPD.id"}, ("rej", "not covered: declarator"))
+    p = P("FPD.id")
+    p.a(("COPYW", "fqs", "ps"), ("COPYW", "fqe", "pe")).call("NEXT").expect(")").call("NEXT").expect("(").a(("LDI", "ad", 1)).call("NEXT").label("FPD.l")
+    p.tok({"(": "FPD.o", ")": "FPD.x", "eof": "FN.fpbad"}, "FPD.k")
+    P("FPD.k").call("NEXT").goto("FPD.l")
+    P("FPD.o").a(("ALUI", "add", "ad", "ad", 1)).goto("FPD.k")
+    P("FPD.x").a(("ALUI", "sub", "ad", "ad", 1)).branch({1: "FPD.d"}, "FPD.k", [("CMPI", "ad", 0)])
+    P("FPD.d").a(("COPYW", "ps", "fqs"), ("COPYW", "pe", "fqe"), ("LDI", "ptd", 1), ("LDI", "bsz", FPB)).ret()
     P("S.dw").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).goto("S.dnx")
     p = P("D.one")
     stars(p, "D.id")
@@ -1437,7 +1488,7 @@ def unit():
     # return type and parameters are skipped -- a call through it is not in the slice
     P("FN.fp").call("NEXT").expect("*").call("NEXT").tok({TK_ID: "FN.fpi"}, ("rej", "not covered: declarator"))
     p = P("FN.fpi")
-    p.a(("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"), ("LDI", "rptr", 1), ("LDI", "rbsz", CUNK), ("LDI", "gar", 0))
+    p.a(("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"), ("LDI", "rptr", 1), ("LDI", "rbsz", FPB), ("LDI", "gar", 0))
     p.call("NEXT").tok({"[": "FN.fpa", ")": "FN.fpc"}, ("rej", "not covered: declarator"))
     P("FN.fpa").call("NEXT").tok({TK_NUM: "FN.fpn"}, ("rej", "not covered: array bound"))
     P("FN.fpn").a(("COPYW", "gdn", "nv"), ("LDI", "gar", 1)).call("NEXT").expect("]").call("NEXT").expect(")").goto("FN.fpc")
@@ -1510,8 +1561,10 @@ def unit():
     p.a(("LDI", "bni", 1), ("INTERN", "v", "ps", "pe"), ("LDX", "bsz", "v", TDB), ("LDX", "sd0", "v", TDD), ("LDX", "t", "v", TDN))
     p.branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
     P("FN.pt").call("NEXT").goto("FN.pst")
-    P("FN.pv").a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).call("NEXT").tok({")": "FN.close", "*": "FN.pst"}, ("rej", "not covered: parameter"))
-    p = P("FN.pst")
+    P("FN.pv").a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).call("NEXT").tok({")": "FN.close", "*": "FN.pst", "(": "FN.pfp"}, ("rej", "not covered: parameter"))
+    P("FN.pst").tok({"(": "FN.pfp"}, "FN.pst0")
+    P("FN.pfp").call("FPDECL").goto("FN.pid")
+    p = P("FN.pst0")
     stars(p, "FN.pid")
     p = P("FN.pid")
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0))
