@@ -315,3 +315,29 @@ punctuator-splitting or nested-spacing difference was observed. Fix:
 `EBX` sets `CHANGED`, and since the token rescan (hide sets via F_ACT/F_UP)
 is complete in one pass, `P4END` accepts after one round. ex.aa..ex.af:
 26 DIFF -> 1 DIFF (ad), 0 otherwise.
+
+### 10.3 Nested object-like spacing; all shards 0 DIFF (2026-09-26)
+
+The last ex DIFF (ex.ad `tests/c/b_mmap.c`: `0x2 |  0x20` vs reference
+`0x2 | 0x20`) and the one corpus DIFF it hid (corpus.af
+`c-testsuite/single-exec/00211.c`: `[  0x1E + 1 ]`) were the same defect: a
+body identifier emitted its separating space (or set SEP) before it was known
+whether it expands, and the nested expansion's first token then brought its
+own. The reference joins the tokens of the fully rescanned expansion with one
+space, so a nested expansion contributes no padding of its own. Fix
+(exec/pp/gen.py): the space is pending in PS and emitted, and SEP set, only on
+the paths where the name does not expand (EBNX). In slice, fixed; not rejected.
+
+| shard | files | equal | equal-noauto | not-covered | reject-agree | DIFF |
+|---|---|---|---|---|---|---|
+| ex.aa..af | 127 | 73 | 18 | 16 | 0 | 0 |
+| corpus.aa | 40 | 38 | 1 | 1 | 0 | 0 |
+| corpus.ab | 40 | 32 | 0 | 8 | 0 | 0 |
+| corpus.ac | 40 | 37 | 0 | 3 | 0 | 0 |
+| corpus.ad | 40 | 31 | 0 | 9 | 0 | 0 |
+| corpus.ae | 40 | 31 | 4 | 5 | 0 | 0 |
+| corpus.af | 40 | 12 | 13 | 15 | 0 | 0 |
+| corpus.ag | 9 | 0 | 0 | 3 | 6 | 0 |
+| corpus total | 249 | 181 | 18 | 44 | 6 | 0 |
+
+Function-like macros are still out of scope (the bulk of not-covered).

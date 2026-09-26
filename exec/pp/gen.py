@@ -452,7 +452,9 @@ def build():
     g.on("EB", [35], "DEAD", NC("# or ## in an object-like body"))
     sep = [("RLD", "SEP")]
     g.on("EB", AL, "EBSP", [("MARK", "BIS")] + sep)
-    g.r("EBSP", {1: ("EBID", [("OUT", 32)]), 0: ("EBID", [("LDI", "SEP", 1)])})
+    # the separating space of an identifier is pending (PS) until it is known
+    # not to expand: an expanded name's first body token brings its own space
+    g.r("EBSP", {1: ("EBID", [("LDI", "PS", 1)]), 0: ("EBID", [("LDI", "PS", 0)])})
     g.on("EB", ID - AL, "EBN0", sep)
     g.on("EB", [46], "EBDT", [("MARK", "BIS"), ("ADV",)])
     g.on("EBDT", DI, "EBN0", [("JUMP", "BIS")] + sep)
@@ -505,9 +507,10 @@ def build():
     g.els("EBID", "EBPR", [("MARK", "BIE"), ("INTERN", "NID", "BIS", "BIE"), ("CMP", "NID", "ID_PRAGMAOP")])
     g.r("EBPR", {1: ("DEAD", NC("_Pragma")), (0, 2): (sub2, pu2)})
     g.els("EBM", "EBM2", [("CMPI", "M", 0)])
-    g.r("EBM2", {0: ("EB", [("SPANT", "BIS")]),
+    g.r("EBM2", {0: ("EBNX", [("RLD", "PS")]),
                  (1, 2): ("EBM3", ea("me", "M") + [("LDX", "act", "me", F_ACT), ("RLD", "act")])})
-    g.r("EBM3", {1: ("EB", [("SPANT", "BIS")]),
+    g.r("EBNX", {1: ("EB", [("OUT", 32), ("SPANT", "BIS")]), 0: ("EB", [("LDI", "SEP", 1), ("SPANT", "BIS")])})
+    g.r("EBM3", {1: ("EBNX", [("RLD", "PS")]),
                  0: ("EBM4", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
     g.r("EBM4", {1: ("DEAD", NC("function-like macro name in a body")),
                  0: ("EB", PUSHM)})
