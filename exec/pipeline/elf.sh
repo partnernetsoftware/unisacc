@@ -1,12 +1,12 @@
 #!/bin/sh
-# Development route: C source -> ELF, Mach-O or ARM64 PE, six deltas on one generic C executor.
+# Development route: C source -> ELF, Mach-O or PE, six deltas on one generic C executor.
 # Python generates tables only; after that no Python stage processes a source.
-# Linux/macOS x86_64 or arm64, Windows arm64; frontend coverage limits apply.
+# Linux/macOS x86_64 or arm64, Windows x86_64 or arm64; frontend coverage limits apply.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -ge 2 ] || { echo 'usage: elf.sh OUTPUT_DIR FILE.c...' >&2; exit 2; }
 TARGET=${TARGET:-lnx/x86_64}
-case $TARGET in lnx/x86_64|lnx/arm64|osx/x86_64|osx/arm64|win/arm64) ;; *) echo "unsupported target: $TARGET" >&2; exit 2;; esac
+case $TARGET in lnx/x86_64|lnx/arm64|osx/x86_64|osx/arm64|win/arm64|win/x86_64) ;; *) echo "unsupported target: $TARGET" >&2; exit 2;; esac
 OUT=$1; shift
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 b() { perl -e 'alarm 60; exec @ARGV' "$@"; }

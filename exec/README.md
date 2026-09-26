@@ -85,7 +85,7 @@ Not done in E0: the table is not built as an integer net through the
 
 `TARGET=win/arm64 ./exec/pipeline/elf.sh OUTPUT_DIR unisacc.c` now produces
 `OUTPUT_DIR/unisacc.exe` through six generated deltas on the generic C executor.
-The same entry supports the four POSIX targets (`.elf` / `.macho`). Python is
+The same entry supports Windows x86_64 and the four POSIX targets (`.elf` / `.macho`). Python is
 still used to generate transition tables, not to process source between these
 six stages. The tables remain lookup tables, not networks. The generated
 compiler is the existing C compiler; this is not E7 adoption in the product.
@@ -104,10 +104,20 @@ The outer 60 s budget covers both generations and transfers: it can expire
 before the two separate 30 s guest watchdogs. Such a run fails; it is not a
 successful bootstrap. Missing exit-receipt files are retried while polling.
 
-Windows x86 setup is now encoded by `exec/enc/x86win.py`: winsave,
+Windows x86 setup and WinAPI gates are encoded by `exec/enc/x86win.py`: winsave,
 winrest (result in rax), winstdh and winargs. Fixed sizes are measured before
 branch relaxation; bytes are regenerated afterwards with final RIP addresses,
 and the final sizes must match. `x86wincheck.sh` compares both executors with
 the reference, including a shortening branch before these instructions.
-WINARGS_BODY remains an explicit machine-code template. WinAPI gate bodies
-and the full Windows x86 PE route are still pending; this is not target closure.
+WINARGS_BODY remains an explicit machine-code template. Eleven WinAPI bodies
+and their ABI-selected return conversions use the same deferred output path.
+`TARGET=win/x86_64 ./exec/pipeline/elf.sh OUTPUT_DIR unisacc.c` produces the
+sixth target's complete PE. `TARGET=win/x86_64` also selects that target for
+`winbootstrap.py`; the PE machine field must match. Tested on Windows 11 ARM64
+via x86_64 emulation, not on x86_64 hardware: N1=N2=N3, 694,272 B, SHA256
+`19bfcf3d809ac42e6120a4cbc033b9002de3d556c1634c6f59ad23647b312fc8`.
+Source: f360ba0's unisacc.c, SHA256
+`11ef59801d8c18f637e67b2a5b0e988ad31baec1859fabdd06dc879935574307`.
+This closes the measured self-source route for six targets. Frontend coverage
+is still partial, runtime tables are not networks, Python still generates
+tables, and the shipped .com has not switched to this executor.

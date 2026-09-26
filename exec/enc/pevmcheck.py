@@ -18,10 +18,13 @@ for name in ('hello','fib'):
  deadline=time.monotonic()+35
  code=''
  while time.monotonic()<deadline:
-  code=tool('file','pull',vm,rc).decode().strip()
+  try:code=tool('file','pull',vm,rc).decode().strip()
+  except RuntimeError:
+   time.sleep(.25)
+   continue
   if code:break
   time.sleep(0.25)
  got=tool('file','pull',vm,out);stderr=tool('file','pull',vm,err)
  assert code=='0',(name,code,stderr)
  assert got.replace(b'\r\n',b'\n')==(root/(name+'.want')).read_bytes(),(name,got)
- print(name,'Windows ARM64 exit 0, output equals host cc; sha256',hashlib.sha256(data).hexdigest(),flush=True)
+ print(name,'Windows VM exit 0, output equals host cc; sha256',hashlib.sha256(data).hexdigest(),flush=True)

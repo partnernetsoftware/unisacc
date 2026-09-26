@@ -201,6 +201,8 @@ def build(image=False):
     classes.update(FP_IDS)
     from x86win import IDS as WIN_IDS
     classes.update(WIN_IDS)
+    from x86win import init as win_init, reset as win_reset, META as WIN_META
+    win_init(p)
     classes.update({"gate": C_GATE, ".lea": C_LEA, "setmem": C_SETMEM, "argsave":C_ARGSAVE, "argvget":C_ARGVGET})
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
@@ -242,7 +244,7 @@ def build(image=False):
     p.a(("ALUI", "sub", "t", "we", 1), ("INTERN", "lid", "ws", "t"), ("LDX", "t", "lid", LABD)).branch({1: "LAB.s"}, "DEAD.dup", [("CMPI", "t", 0)])
     P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
     g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
-    p = P("LW.i")
+    p = win_reset(P("LW.i"))
     p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("LDI", "gcarry", 0), ("LDI", "anamed", 0), ("LDI", "a2", 0), ("OLEN", "omark"),
         ("ALUI", "add", "lnum", "lnum", 1))
     p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
@@ -336,7 +338,7 @@ def build(image=False):
     g.on("ARG.sep", NL, "ARGS.d", [])
     g.els("ARG.sep", "ARG", [])                 # a token after a space: meta (checked there) or an error
     # META: `key=value` after the args.  role: informational, ignored.  form: informational for the
-    # ordinary ops. For gate, winapi is rejected and carry must be true/false.
+    # ordinary ops. For gate, winapi uses deferred encoding; carry must be true/false.
     # Other declared gate metadata is informational for the non-WinAPI encoder;
     # reloc must be rel32. Unknown keys and duplicate keys are rejected.
     g.on("META.v", [32] + NL, "META.e", [("MARK", "vs"), ("MARK", "ve")])
@@ -350,14 +352,15 @@ def build(image=False):
     P("META.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
     g.on("DEAD.meta", range(257), "DEAD", E.rej("not covered: meta this slice does not take (or reloc other than rel32)"), "r")
     P("META.form").branch({1: "META.gf"}, "META.ok", [("CMPI", "cls", C_GATE)])
-    P("META.gf").a(("INTERN", "mv", "vs", "ve")).branch({1: "DEAD.meta"}, "META.ok", [("CMP", "mv", "id_winapi")])
+    P("META.winform").a(("LDI","gwin",1)).goto("META.ok")
+    P("META.gf").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.winform"}, "META.ok", [("CMP", "mv", "id_winapi")])
     P("META.gate").branch({1: "META.gkeys"}, "DEAD.meta", [("CMPI", "cls", C_GATE)])
     P("META.gkeys").branch({1: "META.carry"}, "META.gother", [("CMP", "mk", "id_carry")])
     p = P("META.gother")
     for k in META_KEYS:
         if k in ("role", "form", "reloc", "carry"): continue
         nx = "META.after." + k
-        p.branch({1: "META.ok"}, nx, [("CMP", "mk", "id_" + k)])
+        p.branch({1: "WX.meta."+k if k in WIN_META else "META.ok"}, nx, [("CMP", "mk", "id_" + k)])
         p = P(nx)
     p.goto("DEAD.meta")
     P("META.carry").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ct"}, "META.cf", [("CMP", "mv", "id_true")])
@@ -373,7 +376,8 @@ def build(image=False):
               C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
               **{v: "FP." + k for k, v in FP_IDS.items()}, **{v:"WX.store" for v in WIN_IDS.values()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
-    P("E.gate").branch({1: "EG.emit"}, "DEAD.meta", [("CMPI", "na", 0)])
+    P("EG.choose").branch({1:"WX.store"},"EG.emit",[("CMPI","gwin",1)])
+    P("E.gate").branch({1: "EG.choose"}, "DEAD.meta", [("CMPI", "na", 0)])
     p = byte(byte(P("EG.emit"), 0x0f), 0x05)
     p.branch({1: "EG.carry"}, "NEXTL", [("CMPI", "gcarry", 1)])
     p = P("EG.carry")
@@ -576,7 +580,7 @@ def build(image=False):
     p = P("DONE").call("RELAX").call("LAYOUT").call("WRITE")
     if image:
         from elfimage import install as install_elf
-        install_elf(E, byte, OFF, LABD,image_format="macho" if image=="macho" else "elf")
+        install_elf(E, byte, OFF, LABD,image_format=image if isinstance(image,str) else "elf")
         p.call("ELF")
     p.a(("ACCEPT",)).goto("DEAD")
     g.finish()
@@ -585,9 +589,9 @@ def build(image=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ("--elf","--macho")):
-        sys.exit("usage: gen.py OUT.json [--elf|--macho]")
-    d = build(image=("macho" if sys.argv[2]=="--macho" else True) if len(sys.argv)==3 else False)
+    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ("--elf","--macho","--pe")):
+        sys.exit("usage: gen.py OUT.json [--elf|--macho|--pe]")
+    d = build(image=sys.argv[2][2:] if len(sys.argv)==3 else False)
     s = json.dumps(d, separators=(",", ":"))
     open(sys.argv[1], "w").write(s)
     st, ent, live, ns, na = E.sizes(d)

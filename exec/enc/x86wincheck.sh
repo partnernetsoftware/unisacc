@@ -7,3 +7,4 @@ b cc -O2 -o "$T/run" exec/c/run.c
 b python3 exec/enc/gen.py "$T/d.json"
 b python3 exec/c/tbl.py "$T/d.json" "$T/d.tbl"
 b python3 exec/enc/x86wincheck.py "$T/run" "$T/d.tbl" "$T/d.json"
+b env REAL_TARGETS=win/x86_64 python3 exec/enc/realcheck.py "$T/run" "$T/d.tbl"

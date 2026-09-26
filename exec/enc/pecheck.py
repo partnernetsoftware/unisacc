@@ -1,17 +1,17 @@
 """PE writer reference bytes plus independent section/import/relocation checks."""
-import pathlib,struct,subprocess,sys,tempfile
+import pathlib,struct,subprocess,sys,tempfile,os
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[2]))
 from unisa.assemble import assemble
 from unisa import image
 from tins import parse
 
 
-def verify(buf):
+def verify(buf,arch="arm64"):
     u16=lambda p:struct.unpack_from('<H',buf,p)[0]
     u32=lambda p:struct.unpack_from('<I',buf,p)[0]
     u64=lambda p:struct.unpack_from('<Q',buf,p)[0]
     assert buf[:2]==b'MZ';p=u32(60);assert buf[p:p+4]==b'PE\0\0'
-    assert u16(p+4)==0xaa64 and u16(p+6)==4 and u32(p+8)==0
+    assert u16(p+4)=={"arm64":0xaa64,"x86_64":0x8664}[arch] and u16(p+6)==4 and u32(p+8)==0
     o=p+24;assert u16(o)==0x20b and u16(p+20)==240
     ib=u64(o+24);assert ib==0x140000000
     sa,fa=u32(o+32),u32(o+36);assert (sa,fa)==(4096,512)
@@ -51,6 +51,7 @@ def verify(buf):
 
 def main():
     assert len(sys.argv)==4
+    arch=os.environ.get("PE_ARCH","arm64");assert arch in ("arm64","x86_64")
     cmds=[[sys.argv[1],sys.argv[2]],[sys.executable,'exec/pp/sim.py',sys.argv[3]]]
     cases=[(0,0,[]),(16,65536,[]),(64,65536,[56,0,8,0]),(8200,64,[8192,4088,4096]),(2000100,65536,[2000000])]
     with tempfile.TemporaryDirectory() as d:
@@ -59,6 +60,7 @@ def main():
             data=bytearray(size)
             for at in rels:data[at:at+8]=(256).to_bytes(8,'little')
             src='@target win/arm64\n@data '+(data.hex() or '-')+'\n@data_len '+str(size)+'\n@bss '+str(bss)+'\n@relocs '+(','.join(map(str,rels)) or '-')+'\n_start:\nimm x0, 0\nret\n'
+            src=src.replace('win/arm64','win/'+arch).replace('imm x0','imm rax' if arch=='x86_64' else 'imm x0')
             tp=parse(src);text,st=assemble(tp);assert st['encoded']==st['insns']
             want=image.build(tp,text,image.relocate(tp,tp.data,st['data_va']-256),st['entry'])
             f.write_text(src)
@@ -67,10 +69,10 @@ def main():
                 if r.returncode or r.stdout!=want:
                     at=next((i for i,(a,b) in enumerate(zip(r.stdout,want)) if a!=b),min(len(want),len(r.stdout)))
                     raise AssertionError((size,bss,rels,r.returncode,r.stderr,at,len(want),len(r.stdout)))
-                fix,cookie,dt=verify(r.stdout);assert fix==sorted(set([cookie]+[dt+x for x in rels]))
-            print('PE ARM',size,'data',bss,'BSS',len(rels),'relocs',len(want),'bytes equal',flush=True)
+                fix,cookie,dt=verify(r.stdout,arch);assert fix==sorted(set([cookie]+[dt+x for x in rels]))
+            print('PE',arch,size,'data',bss,'BSS',len(rels),'relocs',len(want),'bytes equal',flush=True)
         for src in ['@target lnx/arm64\nret','@target win/arm64\n@data -\n@data_len 7\n@relocs 0\nret','@target win/arm64\n@data -\n@bss -1\nret']:
-            f.write_text(src+'\n')
+            f.write_text(src.replace('/arm64','/'+arch)+'\n')
             for cmd in cmds:
                 r=subprocess.run(cmd+[str(f)],capture_output=True,timeout=60)
                 assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr

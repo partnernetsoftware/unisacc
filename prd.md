@@ -2588,3 +2588,37 @@ reference on C and Python executors; wrong return register, target and arity
 are rejected. WINARGS_BODY is a declared template, not a migrated algorithm.
 No executor primitive added. WinAPI gate bodies and full x86 PE/source closure
 remain pending. Existing x86 fixture regression passes; product unchanged.
+
+### Windows x86 full source route and bootstrap (2026-09-27)
+
+Eleven WinAPI bodies and ABI-selected return conversions now run as deferred
+x86 encoding transitions. The final RIP bytes follow relaxation, with fixed
+length rechecked. No executor primitive was added. The reference's short
+zero-extending immediate form is preserved (the first gate fixture caught
+an overlong MOVABS in the new implementation, corrected before acceptance).
+132 real lowered instructions / 2,381 B agree on both executors. Shared PE
+fixtures include unsorted/duplicate DIR64 entries, a page crossing, and
+2,000,100 B data with a relocation at 2,000,000; the machine field is checked.
+Real hello/fib PE files are 46,080 / 46,592 B, identical to the reference.
+
+Six-stage source pipeline and selfcheck pass for win/x86_64 (target macros,
+optimized tape and complete PE). Source is f360ba0's unisacc.c, SHA256
+`11ef59801d8c18f637e67b2a5b0e988ad31baec1859fabdd06dc879935574307`.
+N1/N2/N3 are all 694,272 B, SHA256
+`19bfcf3d809ac42e6120a4cbc033b9002de3d556c1634c6f59ad23647b312fc8`.
+Actual execution: Windows 11 ARM64 UTM, **x86_64 emulation**, not x86 hardware;
+each guest compile has a 30 s timeout, command has a 60 s outer watchdog.
+hello/fib each exit 0 with host-cc expected output. VM started here was stopped
+and is not left running. Artifacts: /tmp/unisacc-win-x86-source,
+/tmp/unisacc-winx86-pe; logs: /tmp/unisacc-winx86-bootstrap.log and
+/tmp/unisacc-winx86-exec.log. WINARGS_BODY remains a template. All six measured
+self-source routes exist; frontend completeness, networks, compact executor
+and E7 product adoption remain open. Product sources/.com unchanged.
+
+Frozen-tree gate --com: 67 suites, 0 failed, 264 s aggregate with JOBS=2;
+each suite <=60 s. exec-x86win 2 s, exec-pex86 2 s, exec-winx86self 16 s;
+ARM PE/self-source regression also green. Log /tmp/unisacc-winx86-gate.log.
+Windows x86 PE transition table: 1,401 states; JSON 7,548,924 B, text table
+94,862 B. x86win.py 125 lines (setup and gate rules); no code-shrink claim.
+No push/release. The reviewer is paused at the owner's request and did not
+review this batch; the test and Windows execution evidence above is mine.

@@ -61,6 +61,8 @@ job exec-armlower ./exec/lower/armcheck.sh                     # ARM ABI, sext/i
 job exec-winlower ./exec/lower/wincheck.sh                     # Windows typed setup, syscall preservation, both architectures
 job exec-x86win ./exec/enc/x86wincheck.sh                      # Deferred Windows x86 setup after relaxation
 job exec-armwin ./exec/enc/armwincheck.sh                      # Windows ARM setup/gates, real text bytes
+job exec-pex86 env PE_ARCH=x86_64 ./exec/enc/pecheck.sh           # Shared PE writer, x86 text
+job exec-winx86self env TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, relocations, real ARM images
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
 job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas
