@@ -2397,3 +2397,22 @@ Test wrapper repair 81294d2 forwards explicit JOBS, TARGET and E2/E3/E4/chain
 settings through Terminal, quoting apostrophes/newlines and preserving empty
 versus unset. Actual Terminal probe checked those values and exit7 propagation.
 No compiler/product-source change, no .com rebuild or push.
+
+
+### S-17 Mach-O prerequisite: SHA-256 transitions (2026-09-27)
+
+The existing Mach-O writer requires ad-hoc page signatures. sha256delta.py
+compiles SHA-256 padding, schedule, rounds and digest emission into ordinary
+A64/LDX/STX/input/output actions; no runtime hash/image primitive added. The
+64 round constants and eight initial words are read as declarations from
+src/back_image.c, with counts/indices/ranges checked. SHA256 takes a blob,
+appends 32 bytes, restores input and returns. This is an explicitly migrated
+algorithm, not a constructed network and not yet a complete Mach-O writer.
+
+shacheck: 17 inputs, both C and Python executors, each hashes twice in one run.
+Three fixed known digests (empty, abc, long standard text) plus deterministic
+binary inputs checked against hashlib: 55/56,63/64/65,119/120,127/128 and
+4095/4096/4097/8192 boundaries. All passed. Standalone harness has 30 states,
+5,786 B table. exec-sha registered in gate; only targeted suite run this batch.
+Next integrate header/layout and CodeDirectory/SuperBlob, then full Mach-O
+byte comparison and native execution. Product .com unchanged; no push.
