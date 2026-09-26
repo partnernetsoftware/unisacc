@@ -169,7 +169,9 @@ def optail(o):
     cmp = o in ("<", ">", "<=", ">=", "==", "!=")
     # a signed long with an unsigned int: the signed long form (measured, p59)
     q.branch({1: bn + ".v"}, bn + ".x1", [("CMPI", "lb", 8)])
-    P(bn + ".x1").branch({1: bn + ".v"}, bn + ".x2", [("CMPI", "vb", 8)])
+    P(bn + ".x1").branch({1: bn + ".v"}, bn + ".x3", [("CMPI", "vb", 8)])
+    P(bn + ".x3").branch({1: bn + ".v"}, bn + ".x4", [("CMPI", "lb", UNS + 8)])     # with an unsigned long: its form (measured)
+    P(bn + ".x4").branch({1: bn + ".v"}, bn + ".x2", [("CMPI", "vb", UNS + 8)])
     P(bn + ".x2").branch({1: bn + ".w"}, bn + ".w0", [("CMPI", "lb", UNS + 4)])
     P(bn + ".w0").branch({1: bn + ".w" if o not in ("<<", ">>") else "DEAD.ui"}, bn + ".v", [("CMPI", "vb", UNS + 4)])
     P(bn + ".w").call("UICHK").goto(bn + ".w6")
@@ -226,8 +228,8 @@ def ladder(prefix, bottom):
     g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
     g.on("DEAD.pa", range(257), "DEAD", E.rej("not covered: pointer arithmetic"), "r")
     # UICHK: an unsigned int with an 8-byte or pointer operand is not covered (not measured)
-    for k, (r, c) in enumerate((("lb", 8), ("lb", UNS + 8), ("vb", 8), ("vb", UNS + 8), ("lt", 0), ("vt", 0)) if prefix == "E" else ()):
-        nx = "UICHK.%d" % (k + 1) if k < 5 else "RET"
+    for k, (r, c) in enumerate((("lt", 0), ("vt", 0)) if prefix == "E" else ()):
+        nx = "UICHK.%d" % (k + 1) if k < 1 else "RET"
         P("UICHK" if k == 0 else "UICHK.%d" % k).branch({1: "DEAD.ui" if r not in ("lt", "vt") else nx}, "DEAD.ui" if r in ("lt", "vt") else nx, [("CMPI", r, c)])
     g.on("DEAD.ui", range(257), "DEAD", E.rej("not covered: unsigned int with this operand"), "r")
 
@@ -1010,13 +1012,26 @@ def build():
     P("UC.id1").o("  cvtid r0, r0\n").ret()
     P("UC.di").branch({1: "UC.di1"}, "DEAD.dbl", [("CMPI", "vt", 0)])
     P("UC.di1").o("  cvtdi r0, r0\n").call("NARROW").ret()
-    q = P("U.num")       # an int constant; beyond int: long when it fits (printed as NUMOUT does), unsigned kinds not covered
+    # the suffix (the dump's text from pe to the line end): u -> unsigned, l/ll -> long (measured)
+    q = P("U.num")
+    q.a(("LDI", "nu", 0), ("LDI", "nl", 0), ("INPUSHX", "pe")).goto("SFX.w")
+    g.on("SFX.w", [ord("u"), ord("U")], "SFX.w", [("ADV",), ("LDI", "nu", 1)])
+    g.on("SFX.w", [ord("l"), ord("L")], "SFX.w", [("ADV",), ("LDI", "nl", 1)])
+    g.els("SFX.w", "SFX.x", [("INPOP",)])
+    P("SFX.x").branch({1: "SFX.u"}, "SFX.l", [("CMPI", "nu", 1)])
+    P("SFX.l").branch({1: "SFX.lo"}, "U.num0", [("CMPI", "nl", 1)])
+    P("SFX.lo").a(("LDI", "t", 0), ("C64", "nv", "t")).branch({0: "DEAD.big"}, "U.long")
+    P("SFX.u").branch({1: "U.ulong"}, "SFX.u4", [("CMPI", "nl", 1)])
+    P("SFX.u4").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.ulong"}, "U.ui")
+    q = P("U.num0")      # an int constant; beyond int: long when it fits (printed as NUMOUT does)
     q.a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "U.big"}, "U.num1")
     q = P("U.big")       # decimal beyond int: long; hex/octal: unsigned int up to 0xffffffff (not covered), then long up to LONG_MAX
     q.branch({1: "U.bh"}, "U.bl", [("CMPI", "nx", 1)])
     P("U.bh").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.bl"}, "U.ui")
     P("U.ui").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", UNS + 4)).call("NEXT").ret()
-    P("U.bl").a(("LDI", "t", 0)).a(("C64", "nv", "t")).branch({0: "DEAD.big"}, "U.long")
+    P("U.bl").a(("LDI", "t", 0)).a(("C64", "nv", "t")).branch({0: "U.bu"}, "U.long")
+    P("U.bu").branch({1: "U.ulong"}, "DEAD.big", [("CMPI", "nx", 1)])     # hex beyond LONG_MAX: unsigned long, printed signed (p43)
+    P("U.ulong").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", UNS + 8)).call("NEXT").ret()
     P("U.long").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
     g.on("DEAD.big", range(257), "DEAD", E.rej("not covered: constant beyond int"), "r")
     q = P("U.num1")

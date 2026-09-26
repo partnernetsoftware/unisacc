@@ -1414,6 +1414,9 @@ int primary(void) {
         /* C99 6.4.4.1: a constant is an int if it fits, else a long; an
            l/L suffix makes it a long outright.  `sizeof 1L` is 8. */
         cursize = 4;
+        /* a constant's own kind: these were left from the previous operand -- a unit's first
+           expression saw curstruct 0, "a struct", and 1 + 10u lost its unsignedness */
+        curuns = 0; curflt = 0; curstruct = 0 - 1;
         if (v > 2147483647) cursize = 8;
         if (v < 0 - 2147483647) cursize = 8;
         k = 0;
