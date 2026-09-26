@@ -10,17 +10,7 @@ The ledger records facts only (2026-09-26, HEAD 827f2be). The enumeration (`unis
 
 `stages` shows that a stage is asked. `ablate` shows that its answer is used. Which stages ablate covers is listed only in the `ABL=` line of `tests/ablate.sh`; this page no longer copies that list, because a hand copy drifted (bdy review).
 
-| stage | external, per key | agreement | end-to-end |
-|---|---|---|---|
-| type | **A-50** `gold_audit.py`: cc `_Generic`, 1,400 of 4,275 keys (10 numeric types × 14 operators) | — | yes |
-| abi | **A-51** `abi_audit.py`: syscall numbers against this machine's `<sys/syscall.h>`, one cell per machine | — | yes |
-| lex | none | `lexdiff`: the C lexer vs the Python one | yes |
-| peep | none | `optpy`: the C -O0 tape run through `unisa/opt.py` vs C -O1/-O2 | through -O levels (`difftest_o`) |
-| opinfo | none | `optpy` | through -O levels |
-| enc, reloc, regmap | none (no disassembler referee yet) | `closure`: the C back end vs the Python back end, byte for byte on one tape | yes (`native`, `crossnative` run the images) |
-| prec | **`prec_audit.py`**: cc's value for every ordered operator pair; 291 of 324 pairs separate the two groupings and all 291 agree; 33 are undetermined | — | yes |
-| tyinfo | **`tyinfo_audit.py`**: sizeof, signedness and narrowness against cc; 27 facts agree; void, arr, fn, struct and illegal are skipped as representation choices | — | yes |
-| pp, parse, scope, irsel, binsel, pfconv | none | — (not named yet) | yes |
-| isel, combo | — | off the C compiler's path | — |
+The per-stage rows, their notes and the totals are in `research/referee.tsv` and nowhere else; the grouping used to be copied here and was a second source (bdy review). Count the classes with:
 
-Honest totals: four of the 18 tables have a per-key external referee (`type` partly, `abi`, `prec`, `tyinfo`). Every other table on the path is covered only end to end, through whole programs, plus agreement where the table says so. A stage with no external referee is registered here as such. Skipped is not passed.
+    grep -v "^#" research/referee.tsv | cut -f2 | sort | uniq -c
+

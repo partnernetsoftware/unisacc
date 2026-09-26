@@ -20,7 +20,7 @@ led=$(python3 - <<'PY'
 import os
 from unisa.gold import ALL
 rows = [l.rstrip("\n").split("\t") for l in open("research/referee.tsv") if l.strip() and not l.startswith("#")]
-bad = [r for r in rows if len(r) != 3 or r[1] not in ("external", "agreement", "unnamed", "offpath")
+bad = [r for r in rows if len(r) != 4 or r[1] not in ("external", "agreement", "unnamed", "offpath")
        or (r[2] != "-" and not os.path.isfile(r[2])) or (r[1] in ("external", "agreement")) != (r[2] != "-")]
 st = [r[0] for r in rows]
 if bad or sorted(st) != sorted(ALL) or len(st) != len(set(st)):
