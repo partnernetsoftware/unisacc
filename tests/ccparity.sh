@@ -151,6 +151,61 @@ ecase "-E nested call, 1st arg" '#define F(a,b) [a|b]
 #define G(x) x
 F(G(1), 2) F(3, G(4)) F(G(G(5)), G(6))'
 
+# hide sets: a name is not replaced during the rescan of its own
+# replacement (C99 6.10.3.4)
+ecase "-E self-reference" '#define foo foo + 1
+foo
+#define AA BB
+#define BB AA
+AA BB
+#define ff(a) a
+ff(ff)(1)'
+ecase "-E f(2)(9)" '#define f(a) a*g
+#define g(a) f(a)
+f(2)(9)'
+# C99 6.10.3.5 examples 3, 4 and 7, verbatim but for h -> h9
+ecase "-E C99 6.10.3.5 ex3" '#define x 3
+#define f(a) f(x * (a))
+#undef x
+#define x 2
+#define g f
+#define z z[0]
+#define h9 g(~
+#define m(a) a(w)
+#define w 0,1
+#define t(a) a
+#define p() int
+#define q(x) x
+#define r(x,y) x ## y
+#define str(x) # x
+f(y+1) + f(f(z)) % t(t(g)(0) + t)(1);
+g(x+(3,4)-w) | h9 5) & m(f)^m(m);
+p() i[q()] = { q(1), r(2,3), r(4,), r(,5), r(,) };
+char c[2][6] = { str(hello), str() };'
+ecase "-E C99 6.10.3.5 ex4" '#define str(s) # s
+#define xstr(s) str(s)
+#define INCFILE(n) vers ## n
+#define glue(a, b) a ## b
+#define xglue(a, b) glue(a, b)
+#define HIGHLOW "hello"
+#define LOW LOW ", world"
+xstr(INCFILE(2).h)
+glue(HIGH, LOW);
+xglue(HIGH, LOW)
+#define hash_hash # ## #
+#define mkstr(a) # a
+#define in_between(a) mkstr(a)
+#define join(c, d) in_between(c hash_hash d)
+char p[] = join(x, y);
+#define t(x,y,z) x ## y ## z
+int j[] = { t(1,2,3), t(,4,5), t(6,,7), t(8,9,), t(10,,), t(,11,), t(,,12), t(,,) };'
+# (the standard's example calls puts/printf; renamed so -E does not also
+# emit the bundled <stdio.h> that unisacc injects for those names)
+ecase "-E C99 6.10.3.5 ex7" '#define showlist(...) show(#__VA_ARGS__)
+#define report(test, ...) ((test)?show(#test): pr(__VA_ARGS__))
+showlist(The first, second, and third items.);
+report(x>y, "x is %d but y is %d", x, y);'
+
 # #if is a real constant expression: dividing by zero in an evaluated
 # operand is an error, in an unevaluated one it is not (C99 6.10.1)
 printf '#if 1 / 0\n#endif\nint main(void) { return 0; }\n' > ppdiv.c

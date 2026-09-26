@@ -1698,7 +1698,6 @@ int decomment(void) {
        `FF(d,a,b,c)` on `#define FF(a,b,c,d)` then writes the wrong variable
        (E-45 caught exactly that on the Python side). */
 char ebuf[MAXSRC]; int nebuf;
-int argo[MAXMPARAM]; int argl[MAXMPARAM]; int nargs;
 
 int ebseg[MAXSRC];       /* the segment each byte of ebuf came from */
 int eput(int c) {
@@ -1749,380 +1748,547 @@ int identend(int i) {
     return j;
 }
 
-/* Is the identifier at macpool[bo..bo+n) one of this macro's parameters? */
-int paramat(int mi, int bo, int n) {
-    int p; int L; int ok; int j;
-    p = 0;
-    while (p < macnp[mi]) {
-        if (p < MAXMPARAM) {
-            L = macplen[mi * MAXMPARAM + p];
-            if (L == n) {
-                ok = 1; j = 0;
-                while (j < L) {
-                    if (macpool[macpoff[mi * MAXMPARAM + p] + j] != macpool[bo + j]) ok = 0;
-                    j = j + 1;
-                }
-                if (ok) return p;
+/* ---- expansion on tokens, with hide sets (C99 6.10.3) ----------------
+   Every preprocessing token in an expansion carries a HIDE SET: the macros
+   whose replacement produced it.  A name in its own hide set is never
+   replaced again (6.10.3.4p2, "painted blue"), so `#define foo foo + 1`
+   gives `foo + 1` and stops.  The text engine this replaces rescanned the
+   whole source in up to eight rounds, and gave `foo + 1 + 1 ... + 1`.
+   An object-like expansion's tokens get HS(name) + {name}; a function-like
+   one's get (HS(name) & HS(`)`)) + {name} (Prosser's rule), which is what
+   makes `#define f(a) a*g` / `#define g(a) f(a)` / `f(2)(9)` give `2*9*g`.
+   Arguments are fully expanded on their own first, except as operands of
+   # and ##, and a replacement is rescanned together with the rest of the
+   source.  Text outside a macro invocation is copied through untouched;
+   an expansion is written with a space between its tokens, so no two can
+   re-lex as one.  The Python front end does the same, token for token.
+
+   Tokens live in an arena that is emptied after each invocation in the
+   source ("an episode"): kind 0 is text in src, 1 in macpool, 2 in xpool
+   (made by # and ##).  A hide set is a list of cells, 0 the empty set. */
+#define XTOK 262144
+int xk[XTOK]; int xo[XTOK]; int xl[XTOK]; int xh[XTOK]; int xw[XTOK]; int xs[XTOK];
+int nxt;
+#define XPOOL 1048576
+char xpool[XPOOL]; int nxpool;
+#define XHS 524288
+int hsm[XHS]; int hsn[XHS]; int nhs;
+#define XST 262144
+int xst[XST]; int nxst;      /* tokens waiting to be rescanned; the top is next */
+int xol[XST]; int nxol;      /* token lists: arguments, bodies, results */
+int xbase;                   /* the stack floor of the expansion in hand */
+int xsrcon;                  /* below the floor is the rest of the source */
+int xsp; int xend; int xnl;  /* the source cursor, its end, newlines passed */
+
+int xfull(char *what) {
+    __write(2, "macro expansion too large: ", 27); __write(2, what, blen(what));
+    __write(2, "\n", 1); __exit(1);
+    return 0;
+}
+
+char *xp(int t) {
+    if (xk[t] == 0) return src + xo[t];
+    if (xk[t] == 1) return macpool + xo[t];
+    return xpool + xo[t];
+}
+
+int xnew(int k, int o, int l, int h, int w, int s) {
+    if (nxt >= XTOK) xfull("tokens");
+    xk[nxt] = k; xo[nxt] = o; xl[nxt] = l; xh[nxt] = h; xw[nxt] = w; xs[nxt] = s;
+    nxt = nxt + 1;
+    return nxt - 1;
+}
+
+int xcopy(int t, int w) { return xnew(xk[t], xo[t], xl[t], xh[t], w, xs[t]); }
+
+int xpush_ol(int t) {
+    if (nxol >= XST) xfull("lists");
+    xol[nxol] = t; nxol = nxol + 1;
+    return 0;
+}
+
+int hs_has(int h, int m) {
+    while (h) { if (hsm[h] == m) return 1; h = hsn[h]; }
+    return 0;
+}
+int hs_add(int h, int m) {
+    if (hs_has(h, m)) return h;
+    if (nhs >= XHS) xfull("hide sets");
+    hsm[nhs] = m; hsn[nhs] = h; nhs = nhs + 1;
+    return nhs - 1;
+}
+int hs_union(int a, int b) {
+    if (a == 0) return b;
+    while (b) { a = hs_add(a, hsm[b]); b = hsn[b]; }
+    return a;
+}
+int hs_inter(int a, int b) {
+    int r; r = 0;
+    while (a) { if (hs_has(b, hsm[a])) r = hs_add(r, hsm[a]); a = hsn[a]; }
+    return r;
+}
+
+int xisws(int c) {
+    if (c == 32 || c == 9 || c == 10 || c == 13 || c == 12 || c == 11) return 1;
+    return 0;
+}
+
+/* b[i] starts a token (not whitespace); where does it end? */
+int xlex(char *b, int i, int e) {
+    int c; int d; int q; int j;
+    c = b[i] & 255;
+    j = i;
+    if (isal(c)) {
+        while (j < e) {
+            d = b[j] & 255;
+            if (isal(d) || isdi(d)) { j = j + 1; continue; }
+            if (d == 92 && j + 1 < e) {                      /* a UCN */
+                int n; int k2; n = 0;
+                if ((b[j + 1] & 255) == 117) n = 4;
+                if ((b[j + 1] & 255) == 85) n = 8;
+                if (n == 0 || j + 2 + n > e) break;
+                k2 = 0;
+                while (k2 < n) { if (ishexc(b[j + 2 + k2] & 255) == 0) break; k2 = k2 + 1; }
+                if (k2 < n) break;
+                j = j + 2 + n; continue;
             }
+            break;
+        }
+        /* L"x", u'x', u8"x": a prefix, not a name */
+        if (j < e) { d = b[j] & 255;
+            if (d == 34 || d == 39) {
+                if ((j - i == 1 && (c == 76 || c == 117 || c == 85)) ||
+                    (j - i == 2 && c == 117 && (b[i + 1] & 255) == 56)) { i = j; c = d; }
+                else return j;
+            } else return j; }
+        else return j;
+    }
+    if (c == 34 || c == 39) {
+        q = c; j = i + 1;
+        while (j < e) {
+            d = b[j] & 255;
+            if (d == 92) { j = j + 2; continue; }
+            if (d == 10) break;
+            j = j + 1;
+            if (d == q) break;
+        }
+        if (j > e) j = e;
+        return j;
+    }
+    if (isdi(c) || (c == 46 && i + 1 < e && isdi(b[i + 1] & 255))) {
+        j = i + 1;
+        while (j < e) {
+            d = b[j] & 255;
+            if ((d == 101 || d == 69 || d == 112 || d == 80) && j + 1 < e &&
+                ((b[j + 1] & 255) == 43 || (b[j + 1] & 255) == 45)) { j = j + 2; continue; }
+            if (isal(d) || isdi(d) || d == 46) { j = j + 1; continue; }
+            break;
+        }
+        return j;
+    }
+    if (i + 2 < e) {
+        d = b[i + 1] & 255; q = b[i + 2] & 255;
+        if (c == 46 && d == 46 && q == 46) return i + 3;
+        if ((c == 60 && d == 60 && q == 61) || (c == 62 && d == 62 && q == 61)) return i + 3;
+    }
+    if (i + 1 < e) {
+        d = b[i + 1] & 255;
+        if (c == 45 && (d == 62 || d == 45 || d == 61)) return i + 2;      /* -> -- -= */
+        if (c == 43 && (d == 43 || d == 61)) return i + 2;                 /* ++ += */
+        if ((c == 60 || c == 62) && (d == c || d == 61)) return i + 2;     /* << >> <= >= */
+        if ((c == 61 || c == 33 || c == 42 || c == 47 || c == 37 || c == 94) && d == 61) return i + 2;
+        if ((c == 38 || c == 124) && (d == c || d == 61)) return i + 2;    /* && || &= |= */
+        if (c == 35 && d == 35) return i + 2;                              /* ## */
+    }
+    return i + 1;
+}
+
+int xis(int t, int c) {
+    if (xl[t] != 1) return 0;
+    return (xp(t)[0] & 255) == c;
+}
+int xis2(int t, int c) {                      /* the two-character c c */
+    if (xl[t] != 2) return 0;
+    return (xp(t)[0] & 255) == c && (xp(t)[1] & 255) == c;
+}
+int xisid(int t) {
+    char *p; int c;
+    p = xp(t);
+    if (isal(p[0] & 255) == 0) return 0;
+    c = p[xl[t] - 1] & 255;
+    if (c == 34 || c == 39) return 0;
+    return 1;
+}
+int xsame(int a, int b) {
+    int k; char *p; char *q;
+    if (xl[a] != xl[b]) return 0;
+    p = xp(a); q = xp(b); k = 0;
+    while (k < xl[a]) { if (p[k] != q[k]) return 0; k = k + 1; }
+    return 1;
+}
+
+int xnext(void) {
+    int ws; int c; int e; int t;
+    if (nxst > xbase) { nxst = nxst - 1; return xst[nxst]; }
+    if (xsrcon == 0) return 0 - 1;
+    ws = 0;
+    while (xsp < xend) {
+        c = src[xsp] & 255;
+        if (c == 10) { xnl = xnl + 1; ws = 1; xsp = xsp + 1; continue; }
+        if (xisws(c)) { ws = 1; xsp = xsp + 1; continue; }
+        break;
+    }
+    if (xsp >= xend) return 0 - 1;
+    e = xlex(src, xsp, xend);
+    t = xnew(0, xsp, e - xsp, 0, ws, 0);
+    if (ppnow == 0) xs[t] = srcseg[xsp];
+    xsp = e;
+    return t;
+}
+
+int xparen(void) {
+    int p;
+    if (nxst > xbase) return xis(xst[nxst - 1], 40);
+    if (xsrcon == 0) return 0;
+    p = xsp;
+    while (p < xend) { if (xisws(src[p] & 255) == 0) break; p = p + 1; }
+    if (p < xend) { if ((src[p] & 255) == 40) return 1; }
+    return 0;
+}
+
+int xout(int t, int tolist) {
+    int k; char *p;
+    if (tolist) { xpush_ol(t); return 0; }
+    eseg = xs[t];
+    eput(32);
+    p = xp(t); k = 0;
+    while (k < xl[t]) { eput(p[k] & 255); k = k + 1; }
+    return 0;
+}
+
+int xstep(int t, int tolist);
+
+/* Run the expansion in hand: until the stack is down to its floor when the
+   source lies below it (the rest is copied as text), or until the input is
+   exhausted (an argument, expanded on its own). */
+int xrun(int tolist) {
+    int t;
+    while (1) {
+        if (xsrcon && nxst <= xbase) break;
+        t = xnext();
+        if (t < 0) break;
+        xstep(t, tolist);
+    }
+    return 0;
+}
+
+/* `#`: the argument's spelling, one space where it had any, `"` and `\`
+   escaped inside its literals */
+int xstringize(int ao, int al, int w, int seg) {
+    int k; int j; int t; int lit; int c; int off; char *p;
+    off = nxpool;
+    if (nxpool + 2 >= XPOOL) xfull("text");
+    xpool[nxpool] = 34; nxpool = nxpool + 1;
+    k = 0;
+    while (k < al) {
+        t = xol[ao + k];
+        if (k > 0 && xw[t]) { xpool[nxpool] = 32; nxpool = nxpool + 1; }
+        p = xp(t);
+        c = p[xl[t] - 1] & 255;
+        lit = 0; if (c == 34 || c == 39) lit = 1;
+        j = 0;
+        while (j < xl[t]) {
+            if (nxpool + 3 >= XPOOL) xfull("text");
+            c = p[j] & 255;
+            if (lit && (c == 34 || c == 92)) { xpool[nxpool] = 92; nxpool = nxpool + 1; }
+            xpool[nxpool] = c; nxpool = nxpool + 1;
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    xpool[nxpool] = 34; nxpool = nxpool + 1;
+    return xnew(2, off, nxpool - off, 0, w, seg);
+}
+
+/* the parameter index of body token t of macro m, or -1 */
+int xparam(int m, int t) {
+    int p; int L; int j; int ok; char *q;
+    if (xisid(t) == 0) return 0 - 1;
+    q = xp(t);
+    p = 0;
+    while (p < macnp[m] && p < MAXMPARAM) {
+        L = macplen[m * MAXMPARAM + p];
+        if (L == xl[t]) {
+            ok = 1; j = 0;
+            while (j < L) { if (macpool[macpoff[m * MAXMPARAM + p] + j] != q[j]) { ok = 0; break; } j = j + 1; }
+            if (ok) return p;
         }
         p = p + 1;
     }
     return 0 - 1;
 }
 
-/* `i` is at the `(`.  Returns the index just past the matching `)`, or -1. */
-/* An argument's leading and trailing whitespace is not part of it.  `##`
-   pastes the TEXT, so `CAT(cat, ab)` with the space kept produces `cat ab`
-   and the paste silently does not happen. */
-int argpush(int st, int en) {
-    while (st < en) { if (wsat(st) == 0) break; st = st + 1; }
-    while (en > st) { if (wsat(en - 1) == 0) break; en = en - 1; }
-    if (nargs < MAXMPARAM) { argo[nargs] = st; argl[nargs] = en - st; }
-    nargs = nargs + 1;
+/* Expand one argument on its own, appending the result to xol. */
+int xexparg(int ao, int al) {
+    int sb; int ss; int k;
+    sb = xbase; ss = xsrcon;
+    xbase = nxst; xsrcon = 0;
+    if (nxst + al >= XST) xfull("stack");
+    k = al - 1;
+    while (k >= 0) { xst[nxst] = xol[ao + k]; nxst = nxst + 1; k = k - 1; }
+    xrun(1);
+    xbase = sb; xsrcon = ss;
     return 0;
 }
 
-int collectargs(int i) {
-    int depth; int st; int c;
-    nargs = 0; depth = 1;
-    i = i + 1; st = i;
-    while (i < nsrc) {
-        c = src[i] & 255;
-        if (c == 34) {                                   /* a string */
-            i = i + 1;
-            while (i < nsrc) {
-                if ((src[i] & 255) == 92) { i = i + 2; continue; }
-                if ((src[i] & 255) == 34) break;
-                i = i + 1;
-            }
-            i = i + 1; continue;
-        }
-        if (c == 39) {                                   /* a character */
-            i = i + 1;
-            while (i < nsrc) {
-                if ((src[i] & 255) == 92) { i = i + 2; continue; }
-                if ((src[i] & 255) == 39) break;
-                i = i + 1;
-            }
-            i = i + 1; continue;
-        }
-        if (c == 40) depth = depth + 1;
-        if (c == 41) {
-            depth = depth - 1;
-            if (depth == 0) {
-                argpush(st, i);
-                return i + 1;
-            }
-        }
-        if (c == 44) { if (depth == 1) {
-            argpush(st, i);
-            st = i + 1;
-        } }
-        i = i + 1;
+/* Substitute macro m's body (arguments ao/al, or none), give every token
+   of the result hide set hs, and push it for rescanning.  xol above
+   `mark` is scratch and is released here. */
+int xsubst(int m, int isfn, int hs, int ws0, int seg, int *ao, int *al, int mark) {
+    int b; int e; int j; int je; int w; int nb; int b0; int i; int t; int k;
+    int eo[MAXMPARAM]; int el[MAXMPARAM]; int need[MAXMPARAM];
+    int r0; int paste; int lastempty; int lo; int ln; int single; int raw; int va;
+    int nx; int lhs; int off; int q; char *p;
+    /* the body, as tokens */
+    b = macboff[m]; e = b + macblen[m];
+    b0 = nxol; j = b; w = 0;
+    while (j < e) {
+        if (xisws(macpool[j] & 255)) { w = 1; j = j + 1; continue; }
+        je = xlex(macpool, j, e);
+        xpush_ol(xnew(1, j, je - j, 0, w, seg));
+        w = 0; j = je;
     }
-    return 0 - 1;
-}
-
-
-int emitstring(int p) {          /* #param */
-    int k; int e; int c;
-    eput(34);
-    if (p < nargs) { if (p < MAXMPARAM) {
-        k = argo[p]; e = k + argl[p];
-        while (k < e) {
-            c = src[k] & 255;
-            if (c == 34) eput(92);
-            if (c == 92) eput(92);
-            eput(c);
+    nb = nxol - b0;
+    va = 0 - 1;
+    if (isfn && macvar[m]) va = macnp[m] - 1;
+    /* the arguments that are substituted expanded, expanded once each */
+    k = 0; while (k < MAXMPARAM) { need[k] = 0; k = k + 1; }
+    if (isfn) {
+        i = 0;
+        while (i < nb) {
+            t = xol[b0 + i];
+            k = xparam(m, t);
+            if (k >= 0 && k < MAXMPARAM) {
+                raw = 0;
+                if (i > 0) { if (xis2(xol[b0 + i - 1], 35)) raw = 1;
+                             if (xis(xol[b0 + i - 1], 35)) raw = 1; }
+                if (i + 1 < nb) { if (xis2(xol[b0 + i + 1], 35)) raw = 1; }
+                if (raw == 0) need[k] = 1;
+            }
+            i = i + 1;
+        }
+        k = 0;
+        while (k < macnp[m] && k < MAXMPARAM) {
+            if (need[k]) { eo[k] = nxol; xexparg(ao[k], al[k]); el[k] = nxol - eo[k]; }
             k = k + 1;
         }
-    } }
-    eput(34);
-    return 0;
-}
-
-int emitrange(int from, int to, int depth);
-
-int emitbody(int mi, int isfn, int depth) {
-    int b; int e; int j; int je; int k; int c; int pi; int pastejust;
-    b = macboff[mi]; e = b + macblen[mi];
-    j = b; pastejust = 0;
-    while (j < e) {
-        c = macpool[j] & 255;
-        if (c == 35) {                                   /* `#` or `##` */
-            if (j + 1 < e) { if ((macpool[j + 1] & 255) == 35) {
-                while (nebuf > 0) {
-                    if (ebuf[nebuf - 1] != 32) { if (ebuf[nebuf - 1] != 9) break; }
-                    nebuf = nebuf - 1;
-                }
-                j = j + 2;
-                while (j < e) {
-                    if ((macpool[j] & 255) != 32) { if ((macpool[j] & 255) != 9) break; }
-                    j = j + 1;
-                }
-                /* `, ## __VA_ARGS__` with NO variable arguments: the comma
-                   goes too.  Strictly a GNU extension -- C99 6.10.3p4 wants
-                   at least one argument for `...` -- but it is in so much
-                   real code (every logging macro) that refusing it refuses
-                   the code. */
-                if (isfn) { if (j + 11 <= e) {
-                    int q; int isva; isva = 1; q = 0;
-                    while (q < 11) {
-                        if ((macpool[j + q] & 255) != ("__VA_ARGS__"[q] & 255)) isva = 0;
-                        q = q + 1;
-                    }
-                    if (isva) {
-                        int vp; vp = macnp[mi] - 1;
-                        if (vp >= nargs || argl[vp] == 0) {
-                            if (nebuf > 0) { if (ebuf[nebuf - 1] == 44) nebuf = nebuf - 1; }
-                            j = j + 11;
-                            pastejust = 0;
-                            continue;
-                        }
-                    }
-                } }
-                pastejust = 1;
-                continue;
-            } }
-            if (isfn) {
-                k = j + 1;
-                while (k < e) { if ((macpool[k] & 255) != 32) break; k = k + 1; }
-                if (k < e) { if (isal(macpool[k] & 255)) {
-                    je = k;
-                    while (je < e) {
-                        if (isal(macpool[je] & 255)) { je = je + 1; continue; }
-                        if (isdi(macpool[je] & 255)) { je = je + 1; continue; }
-                        break;
-                    }
-                    pi = paramat(mi, k, je - k);
-                    if (pi >= 0) { emitstring(pi); j = je; continue; }
-                } }
-            }
-        }
-        if (c == 34) {                                   /* a literal body */
-            eput(c); j = j + 1;
-            while (j < e) {
-                if ((macpool[j] & 255) == 92) { eput(92); j = j + 1;
-                    if (j < e) { eput(macpool[j] & 255); j = j + 1; } continue; }
-                eput(macpool[j] & 255);
-                if ((macpool[j] & 255) == 34) { j = j + 1; break; }
-                j = j + 1;
-            }
-            continue;
-        }
-        if (isal(c)) {
-            je = j;
-            while (je < e) {
-                if (isal(macpool[je] & 255)) { je = je + 1; continue; }
-                if (isdi(macpool[je] & 255)) { je = je + 1; continue; }
-                break;
-            }
-            pi = 0 - 1;
-            if (isfn) pi = paramat(mi, j, je - j);
-            if (pi >= 0) {
-                /* C99 6.10.3.1: an argument is fully macro-expanded BEFORE
-                   it is substituted -- unless it is an operand of # or ##,
-                   which are handled above and use the raw text.  Without
-                   this, `XSTR(VER)` stringizes `VER` instead of its value. */
-                if (pi < nargs) { if (pi < MAXMPARAM) {
-                    emitrange(argo[pi], argo[pi] + argl[pi], depth + 1);
-                } }
-            }
-            else { k = j; while (k < je) { eput(macpool[k] & 255); k = k + 1; } }
-            j = je;
-            /* A paste makes ONE token; whatever follows it in the body is a
-               different one.  `#define Q(A,B) A ## B+` used with `Q(+,)3`
-               must give `+ +3`, not `++3`. */
-            if (pastejust) { eput(32); pastejust = 0; }
-            continue;
-        }
-        eput(c); j = j + 1;
-        if (pastejust) { eput(32); pastejust = 0; }
     }
+    /* the replacement */
+    r0 = nxol; paste = 0; lastempty = 0;
+    i = 0;
+    while (i < nb) {
+        t = xol[b0 + i];
+        if (xis2(t, 35) && i > 0 && i < nb - 1) { paste = 1; i = i + 1; continue; }
+        single = 0 - 1; lo = 0; ln = 0; k = 0 - 1;
+        if (isfn && xis(t, 35) && i + 1 < nb && xparam(m, xol[b0 + i + 1]) >= 0) {
+            k = xparam(m, xol[b0 + i + 1]);
+            single = xstringize(ao[k], al[k], xw[t], seg);
+            k = 0 - 1;
+            i = i + 2;
+        } else {
+            if (isfn) k = xparam(m, t);
+            if (k >= 0) {
+                raw = paste;
+                if (i + 1 < nb) { if (xis2(xol[b0 + i + 1], 35)) raw = 1; }
+                if (raw) { lo = ao[k]; ln = al[k]; }
+                else { lo = eo[k]; ln = el[k]; }
+            } else single = t;
+            i = i + 1;
+        }
+        if (single >= 0) { nx = 1; } else { nx = ln; }
+        if (paste) {
+            paste = 0;
+            if (k >= 0 && k == va && nxol > r0 && lastempty == 0) {
+                if (xis(xol[nxol - 1], 44)) {
+                    /* `, ## __VA_ARGS__`: with no variable arguments the
+                       comma goes too (GNU; every logging macro); with some,
+                       nothing is pasted */
+                    if (ln == 0) nxol = nxol - 1;
+                    else { q = 0; while (q < ln) { xpush_ol(xcopy(xol[lo + q], xw[xol[lo + q]])); q = q + 1; }
+                           xw[xol[nxol - ln]] = xw[t]; }
+                    lastempty = 0;
+                    continue;
+                }
+            }
+            if (lastempty || nxol == r0) {
+                /* the left operand was empty: nothing to paste to */
+                if (single >= 0) xpush_ol(xcopy(single, xw[single]));
+                else { q = 0; while (q < ln) { xpush_ol(xcopy(xol[lo + q], xw[xol[lo + q]])); q = q + 1; }
+                       if (ln > 0) xw[xol[nxol - ln]] = xw[t]; }
+                lastempty = 0; if (nx == 0) lastempty = 1;
+                continue;
+            }
+            if (nx == 0) continue;
+            /* glue the last token so far to the first of the operand, and
+               lex the result -- normally one token */
+            lhs = xol[nxol - 1]; nxol = nxol - 1;
+            if (single < 0) single = xol[lo];
+            off = nxpool;
+            if (nxpool + xl[lhs] + xl[single] >= XPOOL) xfull("text");
+            p = xp(lhs); q = 0; while (q < xl[lhs]) { xpool[nxpool] = p[q]; nxpool = nxpool + 1; q = q + 1; }
+            p = xp(single); q = 0; while (q < xl[single]) { xpool[nxpool] = p[q]; nxpool = nxpool + 1; q = q + 1; }
+            j = off; w = xw[lhs];
+            while (j < nxpool) {
+                if (xisws(xpool[j] & 255)) { j = j + 1; continue; }
+                je = xlex(xpool, j, nxpool);
+                xpush_ol(xnew(2, j, je - j, 0, w, xs[lhs]));
+                w = 0; j = je;
+            }
+            if (nx > 1) { q = 1; while (q < ln) { xpush_ol(xcopy(xol[lo + q], xw[xol[lo + q]])); q = q + 1; } }
+            lastempty = 0;
+            continue;
+        }
+        if (single >= 0) xpush_ol(xcopy(single, xw[single]));
+        else { q = 0; while (q < ln) { xpush_ol(xcopy(xol[lo + q], xw[xol[lo + q]])); q = q + 1; }
+               if (ln > 0) xw[xol[nxol - ln]] = xw[t]; }
+        lastempty = 0; if (nx == 0) lastempty = 1;
+    }
+    /* hide sets, and back onto the stack for the rescan */
+    j = r0;
+    while (j < nxol) { t = xol[j]; xh[t] = hs_union(xh[t], hs); j = j + 1; }
+    if (nxol > r0) xw[xol[r0]] = ws0;
+    if (nxst + (nxol - r0) >= XST) xfull("stack");
+    j = nxol - 1;
+    while (j >= r0) { xst[nxst] = xol[j]; nxst = nxst + 1; j = j - 1; }
+    nxol = mark;
     return 0;
 }
 
-int gchanged;
+/* At a `(`: collect the call's arguments into xol, or restore everything
+   and return 0.  m < 0 takes any number (for _Pragma). */
+int xrp;                     /* the call's `)` */
+int xcall(int m, int *ao, int *al) {
+    int ssp; int snl; int sst; int mark; int t; int depth; int na; int np; int var;
+    ssp = xsp; snl = xnl; sst = nxst; mark = nxol;
+    np = 0; var = 0;
+    if (m >= 0) { np = macnp[m]; var = macvar[m]; }
+    xnext();                                         /* the ( */
+    depth = 0; na = 0; ao[0] = nxol; al[0] = 0;
+    while (1) {
+        t = xnext();
+        if (t < 0) break;
+        if (xis(t, 41) && depth == 0) {
+            if (na < MAXMPARAM) al[na] = nxol - ao[na];
+            na = na + 1;
+            xrp = t;
+            if (m < 0) return 1;
+            if (np == 0 && na == 1 && al[0] == 0) na = 0;
+            if (var && na == np - 1 && na < MAXMPARAM) { ao[na] = nxol; al[na] = 0; na = na + 1; }
+            if (na == np) return 1;
+            break;
+        }
+        if (xis(t, 40)) depth = depth + 1;
+        if (xis(t, 41)) depth = depth - 1;
+        if (xis(t, 44) && depth == 0) {
+            if (var == 0 || na + 1 < np) {
+                if (na < MAXMPARAM) al[na] = nxol - ao[na];
+                na = na + 1;
+                if (na < MAXMPARAM) { ao[na] = nxol; al[na] = 0; }
+                continue;
+            }
+        }
+        xpush_ol(t);
+    }
+    /* not a call after all */
+    xsp = ssp; xnl = snl; nxst = sst; nxol = mark;
+    return 0;
+}
 
-/* One pass over src[from..to), writing the expansion into ebuf.  `depth` is
-   how deep we are inside macro arguments -- bounded, because a macro that
-   mentions itself would otherwise never finish. */
-int emitrange(int from, int to, int depth) {
-    int i; int j; int k; int c; int m; int ni;
-    int sargo[MAXMPARAM]; int sargl[MAXMPARAM]; int snargs; int k2;
+int xstep(int t, int tolist) {
+    int m; int h; int mark; char *p;
+    int ao[MAXMPARAM + 1]; int al[MAXMPARAM + 1];
+    if (xisid(t) == 0) { xout(t, tolist); return 0; }
+    p = xp(t);
+    /* C99 6.10.9: `_Pragma ( string-literal )` is the operator form of
+       #pragma; no pragma is honoured, so it goes, whole */
+    if (xl[t] == 7 && vsame("_Pragma", 0, p, 7) && xparen()) {
+        mark = nxol;
+        if (xcall(0 - 1, ao, al)) { nxol = mark; return 0; }
+    }
+    pp_seg = xs[t];
+    if (ppnow) pp_seg = 0 - 1;
+    m = mfind(p, xl[t]);
+    if (m < 0 || hs_has(xh[t], m + 1)) { xout(t, tolist); return 0; }
+    if (macfn[m] == 0) {
+        h = hs_add(xh[t], m + 1);
+        xsubst(m, 0, h, xw[t], xs[t], ao, al, nxol);
+        return 0;
+    }
+    if (xparen() == 0) { xout(t, tolist); return 0; }
+    mark = nxol;
+    if (xcall(m, ao, al) == 0) { xout(t, tolist); return 0; }
+    h = hs_add(hs_inter(xh[t], xh[xrp]), m + 1);
+    xsubst(m, 1, h, xw[t], xs[t], ao, al, mark);
+    return 0;
+}
+
+/* One pass over src[from..to), writing into ebuf: text is copied, and each
+   macro invocation is expanded -- to the end of its rescan -- as tokens. */
+int xrange(int from, int to) {
+    int i; int j; int c; int m; int k; int t; int q;
     i = from;
-    if (depth > 8) { eputsrc(from, to); return 0; }
     while (i < to) {
         c = src[i] & 255;
-        if (c == 34) {
-            eput(c); i = i + 1;
-            while (i < to) {
-                if ((src[i] & 255) == 92) { eput(92); i = i + 1;
-                    if (i < to) { eput(src[i] & 255); i = i + 1; } continue; }
-                eput(src[i] & 255);
-                if ((src[i] & 255) == 34) { i = i + 1; break; }
-                i = i + 1;
-            }
-            continue;
+        eseg = srcseg[i];
+        if (ppnow) eseg = 0;
+        if (c == 34 || c == 39) {
+            j = xlex(src, i, to);
+            eputsrc(i, j); i = j; continue;
         }
-        if (c == 39) {
-            eput(c); i = i + 1;
-            while (i < to) {
-                if ((src[i] & 255) == 92) { eput(92); i = i + 1;
-                    if (i < to) { eput(src[i] & 255); i = i + 1; } continue; }
-                eput(src[i] & 255);
-                if ((src[i] & 255) == 39) { i = i + 1; break; }
-                i = i + 1;
-            }
-            continue;
+        if (isdi(c) || (c == 46 && i + 1 < to && isdi(src[i + 1] & 255))) {
+            j = xlex(src, i, to);                    /* a pp-number: 0x1f, 1e10 */
+            eputsrc(i, j); i = j; continue;
         }
-        if (isal(c)) {
-            j = identend(i);
-            if (j > to) j = to;
-            /* the name means what it meant WHERE it is */
-            eseg = srcseg[i]; pp_seg = eseg;
-            if (ppnow) { eseg = 0; pp_seg = 0 - 1; }
-            /* C99 6.10.9: `_Pragma ( string-literal )` is the operator form
-               of `#pragma`, and this compiler honours no pragma -- the
-               directive form is already dropped -- so the operator form is
-               dropped too, whole, the moment it is seen. */
-            if (j - i == 7) { if ((src[i] & 255) == 95 && (src[i+1] & 255) == 80
-                && (src[i+2] & 255) == 114 && (src[i+3] & 255) == 97
-                && (src[i+4] & 255) == 103 && (src[i+5] & 255) == 109
-                && (src[i+6] & 255) == 97) {                  /* _Pragma */
-                k = j;
-                while (k < to) { if (wsat(k) == 0) break; k = k + 1; }
-                if (k < to) { if ((src[k] & 255) == 40) {
-                    int dep; int inq;
-                    dep = 0; inq = 0;
-                    while (k < to) {
-                        c = src[k] & 255;
-                        if (inq) {
-                            if (c == 92) k = k + 1;
-                            else { if (c == 34) inq = 0; }
-                        } else {
-                            if (c == 34) inq = 1;
-                            if (c == 40) dep = dep + 1;
-                            if (c == 41) { dep = dep - 1; if (dep == 0) { k = k + 1; break; } }
-                        }
-                        k = k + 1;
-                    }
-                    eput(32);
-                    i = k;
-                    continue;
-                } }
-            } }
-            m = mfind(src + i, j - i);
-            if (m >= 0) {
-                if (macfn[m]) {
-                    k = j;
-                    while (k < to) { if (wsat(k) == 0) { if ((src[k] & 255) != 10) break; } k = k + 1; }
-                    if (k < to) { if ((src[k] & 255) == 40) {
-                        /* The caller's arguments first: this may be the
-                           expansion of an ARGUMENT of an outer call, and
-                           collectargs overwrites the one argument table --
-                           `F(G(1), 2)` lost the 2 when the table was saved
-                           only after it. */
-                        k2 = 0;
-                        while (k2 < MAXMPARAM) {
-                            sargo[k2] = argo[k2]; sargl[k2] = argl[k2];
-                            k2 = k2 + 1;
-                        }
-                        snargs = nargs;
-                        ni = collectargs(k);
-                        if (ni <= 0) {
-                            k2 = 0;
-                            while (k2 < MAXMPARAM) {
-                                argo[k2] = sargo[k2]; argl[k2] = sargl[k2];
-                                k2 = k2 + 1;
-                            }
-                            nargs = snargs;
-                        }
-                        if (ni > 0) {
-                            if (macnp[m] == 0) { if (nargs == 1) {
-                                if (argl[0] == 0) nargs = 0; } }
-                            /* `P("x")` for `P(fmt, ...)`: the variable part is
-                               empty, not missing */
-                            if (macvar[m]) { if (nargs == macnp[m] - 1) {
-                                if (nargs < MAXMPARAM) {
-                                    argo[nargs] = ni - 1; argl[nargs] = 0;
-                                    nargs = nargs + 1;
-                                } } }
-                            /* `...` takes everything that is left, commas
-                               included -- it is ONE argument spelled
-                               __VA_ARGS__ */
-                            if (macvar[m]) { if (nargs > macnp[m]) {
-                                if (macnp[m] > 0) { if (nargs <= MAXMPARAM) {
-                                    argl[macnp[m] - 1] =
-                                        argo[nargs - 1] + argl[nargs - 1]
-                                        - argo[macnp[m] - 1];
-                                    nargs = macnp[m];
-                                } }
-                            } }
-                            /* A space on each side: this substitutes TEXT,
-                               and a body ending in `+` next to a source `+`
-                               would re-lex as `++`.  A real preprocessor
-                               works on tokens and cannot merge them. */
-                            eput(32);
-                            emitbody(m, 1, depth);
-                            k = 0;
-                            while (k < MAXMPARAM) {
-                                argo[k] = sargo[k]; argl[k] = sargl[k];
-                                k = k + 1;
-                            }
-                            nargs = snargs;
-                            eput(32);
-                            i = ni; gchanged = 1;
-                            continue;
-                        }
-                    } }
-                } else {
-                    eput(32);
-                    emitbody(m, 0, depth);
-                    eput(32);
-                    i = j; gchanged = 1;
-                    continue;
-                }
+        if (isal(c) == 0) { eput(c); i = i + 1; continue; }
+        j = identend(i);
+        if (j > to) j = to;
+        if (j < to) { q = src[j] & 255;
+            if (q == 34 || q == 39) { j = xlex(src, i, to); eputsrc(i, j); i = j; continue; } }
+        pp_seg = srcseg[i];
+        if (ppnow) pp_seg = 0 - 1;
+        m = mfind(src + i, j - i);
+        k = 0;
+        if (m >= 0) { k = 1; if (macfn[m]) k = 0; }
+        if (m >= 0 || (j - i == 7 && srcis(i, 7, "_Pragma"))) {
+            if (k == 0) {                             /* is a `(` next? */
+                q = j;
+                while (q < to) { if (xisws(src[q] & 255) == 0) break; q = q + 1; }
+                if (q < to) { if ((src[q] & 255) == 40) k = 1; }
             }
-            eputsrc(i, j);
-            i = j;
-            continue;
         }
-        eput(c); i = i + 1;
+        if (k == 0) { eputsrc(i, j); i = j; continue; }
+        /* an episode */
+        nxt = 0; nhs = 1; nxst = 0; nxol = 0; nxpool = 0;
+        xbase = 0; xsrcon = 1; xsp = i; xend = to; xnl = 0;
+        t = xnext();
+        xstep(t, 0);
+        xrun(0);
+        eput(32);
+        while (xnl > 0) { eput(10); xnl = xnl - 1; }
+        i = xsp;
     }
     return 0;
 }
 
 /* An #if line, expanded with the table as it stands (not by segment). */
 int ppexpandline(int from, int to) {
-    int sv; int base; int n; int k; int r; int sn;
-    /* rescanning is done in rounds over the whole text; an #if line gets
-       its own rounds, in scratch space past the end of the source */
-    sv = nebuf; sn = nsrc; base = nsrc + 1; n = to - from;
-    if (base + 4 * n + 4096 >= MAXSRC) { ppb = src + from; ppe = n; return 0; }
-    k = 0; while (k < n) { src[base + k] = src[from + k]; k = k + 1; }
-    ppnow = 1;
-    r = 0;
-    while (r < 8) {
-        nebuf = 0; gchanged = 0; nsrc = base + n;
-        emitrange(base, base + n, 0);
-        nsrc = sn;
-        if (base + nebuf + 4096 >= MAXSRC) break;
-        k = 0; while (k < nebuf) { src[base + k] = ebuf[k]; k = k + 1; }
-        n = nebuf;
-        if (gchanged == 0) break;
-        r = r + 1;
-    }
+    int sv;
+    sv = nebuf; nebuf = 0; ppnow = 1;
+    xrange(from, to);
     ppnow = 0; pp_seg = 0 - 1;
-    ppb = src + base; ppe = n;
+    ppb = ebuf; ppe = nebuf;
     nebuf = sv;
     return 0;
-}
-
-int expround(void) {
-    nebuf = 0; gchanged = 0;
-    emitrange(0, nsrc, 0);
-    return gchanged;
 }
 
 int expandsrc(void) {
@@ -2133,14 +2299,11 @@ int expandsrc(void) {
         while (k < nsegpos && segpos[k] <= r) { sg = sg + 1; k = k + 1; }
         srcseg[r] = sg; r = r + 1;
     }
-    r = 0;
-    while (r < 8) {
-        if (expround() == 0) break;
-        k = 0;
-        while (k < nebuf) { src[k] = ebuf[k]; srcseg[k] = ebseg[k]; k = k + 1; }
-        nsrc = nebuf;
-        r = r + 1;
-    }
+    nebuf = 0;
+    xrange(0, nsrc);
+    k = 0;
+    while (k < nebuf) { src[k] = ebuf[k]; srcseg[k] = ebseg[k]; k = k + 1; }
+    nsrc = nebuf;
     pp_seg = 0 - 1;
     return 0;
 }

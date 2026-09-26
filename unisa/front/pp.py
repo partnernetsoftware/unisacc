@@ -488,7 +488,7 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
                     parts = rest.split(None, 1)
                     if parts:
                         macros[parts[0]] = \
-                            parts[1].strip() if len(parts) > 1 else "1"
+                            parts[1].strip() if len(parts) > 1 else ""
             elif d == "undef" and rest.split():
                 macros.pop(rest.split()[0], None)
             pending[0] = True
@@ -499,222 +499,276 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
     return "\n".join(out), macros
 
 
-def _subst(body, params, args):
-    """Substitute a function-like macro's arguments, honouring `#` and `##`.
+# ---- macro expansion: tokens with hide sets (C99 6.10.3) ------------------
+#
+# Expansion works on preprocessing tokens, each carrying a HIDE SET: the
+# names of the macros whose expansion produced it.  A name in its own hide
+# set is never replaced again (6.10.3.4p2, "painted blue"), so
+# `#define foo foo + 1` gives `foo + 1` and stops -- the text engine this
+# replaces rescanned in rounds and gave `foo + 1 + 1 ... + 1`, eight times.
+# An object-like expansion's tokens get HS(name) + {name}; a function-like
+# one's get (HS(name) & HS(`)`)) + {name}, which is what makes
+# `#define f(a) a*g` / `#define g(a) f(a)` / `f(2)(9)` give `2*9*g`.
+# Arguments are fully expanded on their own before substitution, except as
+# operands of # and ##, and the result is rescanned together with the rest
+# of the source.  Text outside a macro invocation is copied through
+# untouched, so lines and columns hold; an expansion is written with one
+# space between its tokens, so no two can re-lex as one.
 
-    Stringize and paste are the reason a `#` can show up outside a directive,
-    which the lexer refuses -- six corpus programs died on `bad character '#'`
-    with no other problem."""
-    if not params:
-        return body
-    amap = dict(zip(params, args))
-    pat = "|".join(re.escape(p) for p in params)
-    body = re.sub(r"(?<!#)#\s*(" + pat + r")\b",
-                  lambda m: '"%s"' % amap[m.group(1)]
-                  .replace("\\", "\\\\").replace('"', '\\"'), body)
-    if "##" in body:
-        return _paste(body, amap)
-    # ONE pass, all parameters at once.  Substituting them in turn rewrites
-    # text that an earlier argument had just put there, and the names in
-    # question are usually the same few letters:
-    #
-    #   #define FF(a,b,c,d,...) { a += F(b,c,d); a = b + ROT(a,s); }
-    #   FF(d,a,b,c,...)
-    #
-    # a->d makes every `a` a `d`, and then d->c turns all of them into `c`.
-    # MD5 is written exactly like that, and the rounds that should have
-    # written b and d wrote c instead -- a wrong digest, no diagnostic.
-    return re.sub(r"\b(" + pat + r")\b", lambda m: amap[m.group(1)], body)
-
-
-
-# One preprocessing token, plus whitespace runs so that `a ## b` can find its
-# operands.  Literals are already placeholders by this point.
-_PTOK = re.compile(r"##|[A-Za-z_]\w*|[0-9][\w.]*|\x00\d+\x01|\s+|.")
+_PPTOK = re.compile(
+    r'(?P<ws>[ \t\r\f\v]+)|(?P<nl>\n)'
+    r'|(?P<str>(?:u8|[LuU])?"(?:\\.|[^"\\\n])*"?)'
+    r"|(?P<chr>[LuU]?'(?:\\.|[^'\\\n])*'?)"
+    r'|(?P<num>\.?[0-9](?:[eEpP][+-]|[A-Za-z0-9_.])*)'
+    r'|(?P<id>[A-Za-z_](?:[A-Za-z0-9_]|\\u[0-9a-fA-F]{4}|\\U[0-9a-fA-F]{8})*)'
+    r'|(?P<p>\.\.\.|<<=|>>=|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||'
+    r'[*/%+\-&^|]=|##|.)', re.S)
+_EMPTY = frozenset()
+_IDSTART = re.compile(r"[A-Za-z_]")
+_LITERAL = re.compile(r"(?:u8|[LuU])?[\"']")
 
 
-def _paste(body, amap):
-    """Substitute a macro body containing `##`.
+def _pieces(text):
+    """The text as a list of token spellings, whitespace runs and newlines
+    included, so that joining them gives the text back."""
+    return [m.group(0) for m in _PPTOK.finditer(text)]
 
-    `##` joins the token immediately before it with the token immediately
-    after -- not the two halves of the body.  Splitting on `##` and
-    concatenating the halves is what turned `#define Q(A,B) A ## B+` with an
-    empty B into `++`: the trailing `+` is an ordinary token that merely
-    happens to follow the pasted one, and once B vanishes it ends up glued to
-    it.  So we emit token by token and put a space between neighbours, except
-    across a paste, where the whole point is that there is none.
 
-    A pasted operand substitutes BARE -- `x ## y` must not become `(a) ## (b)`,
-    which pastes to garbage."""
-    toks = _PTOK.findall(body)
-    pieces, glue = [], []               # glue[i]: join piece i to piece i-1
-    i, join_next = 0, False
-    while i < len(toks):
-        t = toks[i]
-        if t == "##":
-            join_next = True
-            i += 1
-            while i < len(toks) and toks[i].isspace():
+def _body_tokens(body):
+    """A replacement list as [(spelling, preceded-by-whitespace)]."""
+    out, ws = [], False
+    for s in _pieces(body):
+        if s.isspace():
+            ws = True
+        else:
+            out.append((s, ws))
+            ws = False
+    return out
+
+
+def _stringize(arg):
+    """`#param`: the argument's spelling, one space where it had any."""
+    parts = []
+    for k, (s, _, ws) in enumerate(arg):
+        if k and ws:
+            parts.append(" ")
+        if _LITERAL.match(s):
+            s = s.replace("\\", "\\\\").replace('"', '\\"')
+        parts.append(s)
+    return '"' + "".join(parts) + '"'
+
+
+class _Expander:
+    """One expansion.  `stack` holds tokens waiting to be rescanned (the top
+    is next); below it, if `src` is set, is the rest of the source."""
+
+    def __init__(self, macros, src=None, pos=0):
+        self.m, self.stack, self.src, self.pos, self.nl = macros, [], src, pos, 0
+
+    def next(self):
+        if self.stack:
+            return self.stack.pop()
+        if self.src is None:
+            return None
+        ws = False
+        while self.pos < len(self.src):
+            s = self.src[self.pos]
+            self.pos += 1
+            if s == "\n":
+                self.nl += 1
+                ws = True
+            elif s.isspace():
+                ws = True
+            else:
+                return (s, _EMPTY, ws)
+        return None
+
+    def next_is_paren(self):
+        if self.stack:
+            return self.stack[-1][0] == "("
+        if self.src is None:
+            return False
+        p = self.pos
+        while p < len(self.src) and self.src[p].isspace():
+            p += 1
+        return p < len(self.src) and self.src[p] == "("
+
+    def run(self, out, until_empty):
+        while not (until_empty and not self.stack):
+            t = self.next()
+            if t is None:
+                return
+            self.step(t, out)
+
+    def step(self, t, out):
+        name, hs, ws = t
+        if name == "_Pragma" and self.next_is_paren():
+            # C99 6.10.9: the operator form of #pragma; no pragma is
+            # honoured, so it goes, whole
+            args = self.call()
+            if args is not None:
+                return
+        d = self.m.get(name) if _IDSTART.match(name) else None
+        if d is None or name in hs:
+            out.append(t)
+            return
+        if not isinstance(d, tuple):
+            self.push(self.subst(_body_tokens(d), None, None, hs | {name}, ws))
+            return
+        params, body = d
+        if not self.next_is_paren():
+            out.append(t)
+            return
+        got = self.call(params)
+        if got is None:
+            out.append(t)
+            return
+        args, rp = got
+        self.push(self.subst(_body_tokens(body), params, args,
+                             (hs & rp[1]) | {name}, ws))
+
+    def call(self, params=None):
+        """At the `(` of a call: its arguments and its `)`, or None -- and
+        then nothing is consumed."""
+        pos, nl, saved = self.pos, self.nl, list(self.stack)
+        variadic = bool(params) and params[-1] == "..."
+        n = len(params) if params is not None else 0
+        self.next()                                  # the `(`
+        args, depth = [[]], 0
+        while True:
+            t = self.next()
+            if t is None:
+                break
+            s = t[0]
+            if s == ")" and depth == 0:
+                if params is None:
+                    return args, t
+                if not params and args == [[]]:
+                    args = []
+                if variadic and len(args) == n - 1:
+                    args.append([])
+                if len(args) == n:
+                    return args, t
+                break
+            if s == "(":
+                depth += 1
+            elif s == ")":
+                depth -= 1
+            elif s == "," and depth == 0 and not (variadic and len(args) >= n):
+                args.append([])
+                continue
+            args[-1].append(t)
+        # not a call after all: put back what was taken
+        self.pos, self.nl, self.stack = pos, nl, saved
+        return None
+
+    def push(self, toks):
+        self.stack.extend(reversed(toks))
+
+    def expand_arg(self, arg):
+        sub = _Expander(self.m)
+        sub.push(arg)
+        out = []
+        sub.run(out, False)
+        return out
+
+    def subst(self, body, params, args, hs, ws0):
+        pidx = {}
+        if params is not None:
+            for k, p in enumerate(params):
+                pidx["__VA_ARGS__" if p == "..." else p] = k
+        va = pidx.get("__VA_ARGS__", -1) if params and params[-1] == "..." else -1
+        done = {}
+        R, paste, lastempty, i = [], False, False, 0
+        while i < len(body):
+            s, w = body[i]
+            if s == "##" and 0 < i < len(body) - 1:
+                paste = True
                 i += 1
+                continue
+            if s == "#" and params is not None and i + 1 < len(body) \
+                    and body[i + 1][0] in pidx:
+                L = [(_stringize(args[pidx[body[i + 1][0]]]), _EMPTY, w)]
+                i += 2
+            elif s in pidx:
+                k = pidx[s]
+                raw = paste or (i + 1 < len(body) and body[i + 1][0] == "##")
+                if raw:
+                    L = list(args[k])
+                else:
+                    if k not in done:
+                        done[k] = self.expand_arg(args[k])
+                    L = list(done[k])
+                if L:
+                    L[0] = (L[0][0], L[0][1], w)
+                i += 1
+            else:
+                L = [(s, _EMPTY, w)]
+                i += 1
+            if paste:
+                paste = False
+                if s in pidx and pidx[s] == va and R and R[-1][0] == "," \
+                        and not lastempty:
+                    # `, ## __VA_ARGS__`: with no variable arguments the
+                    # comma goes too (GNU, in every logging macro); with
+                    # some, nothing is pasted
+                    if not args[va]:
+                        R.pop()
+                    else:
+                        R.extend(L)
+                    lastempty = False
+                    continue
+                if lastempty or not R:
+                    R.extend(L)
+                    lastempty = not L
+                elif L:
+                    lhs = R.pop()
+                    glued = _body_tokens(lhs[0] + L[0][0])
+                    R.extend((g, _EMPTY, lhs[2] if j == 0 else gw)
+                             for j, (g, gw) in enumerate(glued))
+                    R.extend(L[1:])
+                continue
+            R.extend(L)
+            lastempty = not L
+        out = [(s, h | hs, w) for (s, h, w) in R]
+        if out:
+            out[0] = (out[0][0], out[0][1], ws0)
+        return out
+
+
+def expand(text, macros):
+    """Macro-expand `text` with the table `macros`."""
+    if not macros:
+        return text
+    src = _pieces(text)
+    out, i, n = [], 0, len(src)
+    while i < n:
+        s = src[i]
+        d = macros.get(s) if s[:1].isalpha() or s[:1] == "_" else None
+        if s == "_Pragma" or (d is not None and (not isinstance(d, tuple) or
+                                                 _paren_follows(src, i + 1))):
+            x = _Expander(macros, src, i)
+            toks = []
+            t = x.next()
+            x.step(t, toks)
+            x.run(toks, True)
+            if x.pos == i + 1 and len(toks) == 1 and toks[0][0] == s:
+                out.append(s)
+                i += 1
+                continue
+            out.append(" " + " ".join(t[0] for t in toks) + " ")
+            out.append("\n" * x.nl)
+            i = x.pos
             continue
-        if t.isspace():
-            i += 1
-            continue
-        # `, ## __VA_ARGS__` with no variable arguments: the comma goes too.
-        # A GNU extension, but in every logging macro; the C front end does
-        # the same, so the two keep compiling the same programs.
-        if (t == "__VA_ARGS__" and join_next and amap.get(t, None) == ""
-                and pieces and pieces[-1].strip() == ","):
-            pieces.pop()
-            glue.pop()
-            join_next = False
-            i += 1
-            continue
-        pasted = join_next or (i + 1 < len(toks) and
-                               _next_is_paste(toks, i + 1))
-        v = amap.get(t, t)
-        if t in amap and not pasted:
-            v = _paren(v)
-        pieces.append(v)
-        glue.append(join_next)
-        join_next = False
+        out.append(s)
         i += 1
-    out = []
-    for k, v in enumerate(pieces):
-        if k and not glue[k]:
-            out.append(" ")
-        out.append(v)
     return "".join(out)
 
 
-def _next_is_paste(toks, i):
-    """Is the next non-space token a `##`?  Then toks[i-1] is its left operand."""
-    while i < len(toks) and toks[i].isspace():
+def _paren_follows(src, i):
+    while i < len(src) and src[i].isspace():
         i += 1
-    return i < len(toks) and toks[i] == "##"
-
-
-# `\x00N\x01` is a string or character literal that _protect() has stashed:
-# by the time a macro is expanded the literals are already placeholders, so an
-# argument that IS one has to be recognised in that form.
-_ATOM = re.compile(r'^\s*(?:[A-Za-z_]\w*|[0-9][\w.]*|\x00\d+\x01)\s*$')
-
-
-def _paren(av):
-    """Wrap a macro argument, unless wrapping would change its meaning.
-
-    A real preprocessor never adds parentheses; we do, because the walker has
-    no re-scan.  But `__VA_ARGS__` is an argument LIST -- parenthesising it
-    turns N arguments into one comma expression -- and a bare literal needs no
-    help, which matters because `printf`'s format has to stay a `str` token."""
-    if not av.strip():
-        return ""              # an empty argument substitutes to nothing
-    if _ATOM.match(av) or _top_comma(av):
-        return av
-    return "(" + av + ")"
-
-
-def _top_comma(s):
-    d = 0
-    for c in s:
-        if c in "([":
-            d += 1
-        elif c in ")]":
-            d -= 1
-        elif c == "," and d == 0:
-            return True
-    return False
-
-
-def _split_args(s, i):
-    """s[i] == '(' -> (args, index just past the matching ')')"""
-    depth, start, args = 0, i + 1, []
-    j = i
-    while j < len(s):
-        c = s[j]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-            if depth == 0:
-                args.append(s[start:j])
-                return [a.strip() for a in args], j + 1
-        elif c == "," and depth == 1:
-            args.append(s[start:j])
-            start = j + 1
-        j += 1
-    return None, i
-
-
-# A macro name inside a string or character constant is not a macro.  With
-# `#define NULL 0` in scope, printf("c is NULL\n") printed "c is 0".  [E-32]
-# Neither alternative may cross a newline, and a character constant is at
-# most four items long: an apostrophe in an English comment (`the key's
-# value`) otherwise opens a literal that swallows the rest of the file.
-_LIT = re.compile(r'"(?:\\.|[^"\\\n])*"' + r"|'(?:\\.|[^'\\\n]){1,4}'")
-_HOLE = re.compile("\x00(\\d+)\x01")
-
-
-def _protect(text):
-    """Stash literals behind placeholders, numbered past any already there.
-
-    Expansion nests -- a macro argument is expanded on its own, and that text
-    already carries the outer level's placeholders.  Numbering from 0 again
-    would make the inner _restore() hand back the wrong literal, or run off
-    the end of its own list."""
-    base = max((int(m.group(1)) for m in _HOLE.finditer(text)), default=-1) + 1
-    lits = []
-
-    def keep(m):
-        lits.append(m.group(0))
-        return "\x00%d\x01" % (base + len(lits) - 1)
-    return _LIT.sub(keep, text), lits, base
-
-
-def _restore(text, lits, base=0):
-    # re.sub does not rescan what the replacement inserts, so a literal whose
-    # own bytes look like a placeholder is safe.  A placeholder outside our
-    # own range belongs to an enclosing level and is left alone.
-    def back(m):
-        k = int(m.group(1)) - base
-        return lits[k] if 0 <= k < len(lits) else m.group(0)
-    return _HOLE.sub(back, text)
-
-
-
-def _raw_operands(body, params):
-    """Which parameters appear as an operand of `#` or `##` in this body.
-
-    Those are the only ones that substitute unexpanded (C99 6.10.3.1p1)."""
-    toks = _PTOK.findall(body)
-    raw, prev = set(), None
-    for i, t in enumerate(toks):
-        if t.isspace():
-            continue
-        if t in ("#", "##"):
-            j = i + 1
-            while j < len(toks) and toks[j].isspace():
-                j += 1
-            if j < len(toks) and toks[j] in params:
-                raw.add(toks[j])
-            if t == "##" and prev in params:
-                raw.add(prev)
-        prev = t
-    return raw
-
-
-def _preexpand(body, params, args, macros, _depth=0):
-    """Macro-expand each argument before it is substituted.
-
-    This is what makes the `#define XSTR(x) STR(x)` idiom work: `x` is not an
-    operand of `#` in XSTR's body, so it is expanded first, and only the
-    result reaches STR's `#`.  Without it the rescan loop reaches STR one
-    round later and stringizes the unexpanded text."""
-    if _depth > 8:
-        return args
-    raw = _raw_operands(body, params)
-    return [a if p in raw else expand(a, macros)
-            for p, a in zip(params, args)]
+    return i < len(src) and src[i] == "("
 
 
 def expand_positional(text, macros):
@@ -727,52 +781,3 @@ def expand_positional(text, macros):
     for i in range(1, len(parts), 2):
         out.append(expand(parts[i + 1], SNAPS[int(parts[i])]))
     return "".join(out)
-
-
-def expand(text, macros):
-    """Object-like and function-like substitution, fixed point up to 8 rounds."""
-    if not macros:
-        return text
-    obj = {k: v for k, v in macros.items() if not isinstance(v, tuple)}
-    fn = {k: v for k, v in macros.items() if isinstance(v, tuple)}
-    for _ in range(8):
-        new, lits, base = _protect(text)
-        if fn:
-            out, i = [], 0
-            while i < len(new):
-                m = re.compile(r"\b(" + "|".join(re.escape(k) for k in fn) +
-                               r")\s*\(").search(new, i)
-                if not m:
-                    out.append(new[i:])
-                    break
-                out.append(new[i:m.start()])
-                params, body = fn[m.group(1)]
-                args, end = _split_args(new, m.end() - 1)
-                if args == [""] and not params:
-                    args = []          # `F()` for `#define F() ...`
-                if args is not None and params and params[-1] == "...":
-                    # C99 variadic macro: the rest becomes __VA_ARGS__
-                    fixed = len(params) - 1
-                    if len(args) >= fixed:
-                        args = args[:fixed] + [", ".join(args[fixed:])]
-                        params = params[:fixed] + ["__VA_ARGS__"]
-                if args is None or len(args) != len(params):
-                    out.append(new[m.start():m.end()])
-                    i = m.end()
-                    continue
-                out.append(_subst(body, params,
-                                  _preexpand(body, params, args, macros)))
-                i = end
-            new = "".join(out)
-        # `#x` has just MADE a string literal, and a macro name inside it is
-        # not a macro: without this second pass `#define VER 3` turned
-        # STR(VER) into "3" instead of "VER".
-        new, lits2, base2 = _protect(new)
-        if obj:
-            pat = re.compile(r"\b(" + "|".join(re.escape(k) for k in obj) + r")\b")
-            new = pat.sub(lambda m: obj[m.group(1)], new)
-        new = _restore(_restore(new, lits2, base2), lits, base)
-        if new == text:
-            break
-        text = new
-    return text

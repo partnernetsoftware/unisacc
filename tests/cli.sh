@@ -81,10 +81,10 @@ cat > "$T/pp.c" <<'EOF'
 #define TWICE(x) ((x) + (x))
 int v = TWICE(21);
 EOF
-got=$( (cd "$T" && bound 60 "$UA_RUN" -E pp.c 2>&1) | tr -s ' \n' ' ')
-# macro expansion leaves its own spacing, exactly as cc -E does; what
-# matters is that the argument was substituted twice
-case "$got" in *"int v = ((21) + (21))"*) got="expanded";; esac
+got=$( (cd "$T" && bound 60 "$UA_RUN" -E pp.c 2>&1) | tr -d ' \n')
+# spacing between tokens is the preprocessor's own (C leaves it
+# unspecified); what matters is that the argument was substituted twice
+case "$got" in *"intv=((21)+(21))"*) got="expanded";; esac
 say "-E preprocesses" "expanded" "$got"
 
 # the flags a Makefile passes that mean nothing here must not be refused:
