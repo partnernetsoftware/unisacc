@@ -439,6 +439,13 @@ LD[FLT], ST[FLT], LDR[FLT], MSK[FLT] = None, ST[4], None, None
 FPB = 67
 FPU = {f[1]: f[2] for f in gold("irsel") if f[0] == "fpu"}   # stage irsel, class fpu: dadd -> fadd64, i2d -> cvtid ...
 FOPS = {"+": "dadd", "-": "dsub", "*": "dmul", "/": "ddiv"}
+# double comparisons (measured, p74 p75): the same operand tape, then f<cmp>64 (stage irsel: dgt = flt64_rev); an int result
+DCMP = {"<": "dlt", "<=": "dle", ">": "dgt", ">=": "dge", "==": "deq"}
+
+
+def fspell(key):
+    sp = FPU[key]
+    return "  %s r0, r0, r1\n" % sp[:-4] if sp.endswith("_rev") else "  %s r0, r1, r0\n" % sp
 
 
 def vwidth(p, ptr, bs, tab):  # a variable's access: W[ptr] >= 1 -> pointer size; else by W[bs] (tyinfo size); 0 (unknown) -> int
@@ -510,7 +517,7 @@ def ubin(q, op, sub, cmp, after, pre=()):
         x(q)
     q.call("UFLAG").vpop("ul")
     ok1, ok2, ok3, ok4 = q.fresh("d1"), q.fresh("d2"), q.fresh("d3"), q.fresh("d4")
-    dl = q.fresh("dl") if (op in FOPS and not cmp) else "DEADD"
+    dl = q.fresh("dl") if ((op in FOPS and not cmp) or (cmp and op in DCMP)) else "DEADD"
     q.branch({1: dl}, ok1, [("CMPI", "ul", 4)])
     P(ok1).branch({1: dl}, ok3, [("CMPI", "uf", 4)])
     P(ok3).branch({1: "DEADD"}, ok4, [("CMPI", "ul", 5)])
@@ -529,7 +536,7 @@ def ubin(q, op, sub, cmp, after, pre=()):
         P(l1).branch({1: lk + "c"}, l1 + "l", [("CMPI", "ul", 0)])
         P(lk + "c").o(cv).goto(lk)
         P(l1 + "l").branch({1: lk + "c"}, "DEADD", [("CMPI", "ul", 3)])
-        P(lk).o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n  %s r0, r1, r0\n" % FPU[FOPS[op]]).a(("LDI", "pt", 0), ("LDI", "pb", DBL)).goto(after)
+        P(lk).o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n" + fspell(DCMP[op] if cmp else FOPS[op])).a(("LDI", "pt", 0), ("LDI", "pb", 0 if cmp else DBL)).goto(after)
     q = P(ok2)
     # class (UFLAG): 1 unsigned long, 3 other 8-wide, 2 unsigned int, 0 int-width.  1 wins, then 3 (signed
     # 64-bit, result long), then 2: the 32-bit unsigned tape -- both operands masked to 32 bits, the u
@@ -883,7 +890,13 @@ def expr():
     p = P("CA.cl")     # (T)e: the operand is a unary expression
     p.vpush("cb", "cd").call("NEXT").call("UNARY").vpop("cb", "cd")
     p.branch({(1, 2): "CA.cl2"}, "CA.cf", [("CMPI", "cd", 1)])
-    P("CA.cf").branch({1: "CA.cf1"}, "CA.cl2", [("CMPI", "cb", FLT)])
+    P("CA.cf").branch({1: "CA.cf1"}, "CA.cdb", [("CMPI", "cb", FLT)])
+    # (double)e, e an int-width or long value: cvtid (stage irsel i2d; measured p74); of a double or anything else not covered
+    P("CA.cdb").branch({1: "CA.cd1"}, "CA.cl2", [("CMPI", "cb", DBL)])
+    P("CA.cd1").call("UFLAG").branch({1: "CA.cd2"}, "CA.cd3", [("CMPI", "uf", 0)])
+    P("CA.cd3").branch({1: "CA.cd4"}, "DEADD", [("CMPI", "uf", 3)])
+    P("CA.cd4").branch({1: "CA.cd2"}, "DEADD", [("CMPI", "pt", 0)])
+    P("CA.cd2").o("  %s r0, r0\n" % FPU["i2d"]).a(("LDI", "pt", 0), ("LDI", "pb", DBL)).ret()
     # (float)d, d a double: cvtds (stage irsel d2s), a float value (measured, p65); of anything else not covered
     P("CA.cf1").branch({1: "CA.cf2"}, "DEADD", [("CMPI", "pt", 0)])
     P("CA.cf2").branch({1: "CA.cf3"}, "DEADD", [("CMPI", "pb", DBL)])
