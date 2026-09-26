@@ -6,7 +6,7 @@ set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
-b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "neg: cc failed"; exit 1; }
+b 60 "${EXEC_CC:-cc}" -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "neg: cc failed"; exit 1; }
 printf 'x' > "$T/in"
 ok=0; bad=0
 t() {   # t NAME WANT C_STDERR_PREFIX PY_STDERR_PREFIX JSON [INCLUDE_DIR] -- the first stderr line names the path taken
@@ -23,7 +23,7 @@ t() {   # t NAME WANT C_STDERR_PREFIX PY_STDERR_PREFIX JSON [INCLUDE_DIR] -- the
 }
 t pop-empty 2 "run: pop of an empty stack" "run: pop of an empty stack" '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["POP"]]]}'
 # an empty bundled-header name is the include directory itself: fopen succeeds
-# (macOS and glibc), the read fails -- run.c's ferror branch, 'cannot read'
+# (macOS and glibc), the read fails -- run.c's read-error branch, 'cannot read'
 # ('cannot open' is the errno branch)
 t read-dir 2 "run: cannot read" "run: [Errno 21]" '{"start":"A","states":{"A":["b",{"120":["A",0]}]},"seqs":[[["SBCLR"],["SBOUT",0],["SBOUT",104],["SBOUT",100],["SBOUT",114],["SBOUT",47],["SBFIND","f"]]]}' "$R/include"
 # the same name with a plain FILE as the include directory: fopen fails with ENOTDIR -- the errno branch

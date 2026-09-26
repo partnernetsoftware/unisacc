@@ -65,6 +65,7 @@ job exec-pex86 env PE_ARCH=x86_64 ./exec/enc/pecheck.sh           # Shared PE wr
 job exec-winx86self env TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, relocations, real ARM images
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
+job exec-native ./exec/c/nativecheck.sh
 job exec-net python3 ./exec/c/netcheck.py
 job exec-tableself env NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
 job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas

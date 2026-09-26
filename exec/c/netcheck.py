@@ -3,7 +3,7 @@
 Optional .tbl arguments are exhaustively checked too; no generated model cache.
 Each compiler/executor invocation has its own 60-second bound.
 """
-import pathlib, subprocess, sys, tempfile
+import os, pathlib, subprocess, sys, tempfile
 from net import convert
 from tbl import CODE
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -17,7 +17,7 @@ def require(r):
 
 with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
     d=pathlib.Path(td); exe=d/'run'
-    require(run(['cc','-O2','-Wall','-Wextra','-o',exe,ROOT/'exec/c/run.c']))
+    require(run([os.environ.get('EXEC_CC','cc'),'-O2','-Wall','-Wextra','-o',exe,ROOT/'exec/c/run.c']))
     # Byte -> non-state stack symbol -> register observation -> acceptance.
     # Unspecified byte keys stay missing, even between real transitions.
     src=('T 4 4 1 0 0\n'
@@ -43,4 +43,15 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
         words=lines[index].split();words[5]=str(int(words[5])+1);lines[index]=' '.join(words)
         bad=d/'bad.net';bad.write_text('\n'.join(lines)+'\n')
         assert run([exe,'--check-net',table,bad]).returncode != 0,'mutated weight passed'
-    print('network check: ok (execution, missing transitions, mutated bias)')
+    # Exact signed 64-bit decoding, observable through the production OFILL.
+    acts=[('LDI',0,-9223372036854775808),('ORES',1,20),('OFILL',1,0,20),('OUT',10),
+          ('LDI',0,9223372036854775807),('ORES',1,20),('OFILL',1,0,20),('OUT',10),('ACCEPT',)]
+    tokens=' '.join(' '.join(map(str,(CODE[a[0]],*a[1:]))) for a in acts)
+    source='T 1 1 2 0 0\nQ 9 '+tokens+'\nR 0 0 0 0\n'
+    wide=d/'wide.net';wide.write_text(convert(source)[0]);inp=d/'empty';inp.write_bytes(b'')
+    r=require(run([exe,wide,inp]))
+    assert r.stdout==b'-9223372036854775808\n 9223372036854775807\n',r.stdout
+    for old,new in [('-9223372036854775808','-9223372036854775809'),('9223372036854775807','9223372036854775808')]:
+        wide.write_text(convert(source.replace(old,new))[0])
+        r=run([exe,wide,inp]);assert r.returncode==2 and b'overflow' in r.stderr,(r.returncode,r.stderr)
+    print('network check: ok (execution, holes, mutation, signed-64 decoding/bounds)')

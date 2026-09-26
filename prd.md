@@ -2677,3 +2677,14 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - `elf.sh` 与 `chain.sh` 默认网络推理，`NETWORK=0` 为显式查表对照；回执标明 net/tbl，Terminal 环境传递 NETWORK。门禁的六个 selfcheck 因默认切换而测网络，另保留 osx/arm64 查表 selfcheck。
 - 切换后：默认网络 source-to-tape 74/74、source-to-ELF 固定 74 项全等；显式 NETWORK=0 的同一 74 项 tape 全等。产品代码及 `.com` 未改，最近完整 gate --com 仍是上一片 69/69；本片没有把定向复跑写成新一轮全门禁。
 - 下一处实际依赖：`unisacc.com -O2 exec/c/run.c` 目前在三个 typedef 形式的 for 初始化处报未知标识符。执行器尚不能称为自托管或产品路径；继续沿真实构建错误处理。
+
+
+### S-17：执行器由 unisacc 构建（2026-09-27）
+
+- 真实构建发现并修复两处产品问题：for 初始化只看内置 type token，现改用已有 `is_typeat`，Python 同步允许 enum/struct/union 类型；词法器把内部类名 `str`/`num` 当成字面量，现将前五个 TOKV 类名都视为普通标识符。E1 生成器同步修正，未把参考误编译继续抄入网络。回归 `b_fortype.c`、`b_toknames.c`：cc、`.com` 的 O0/O1/O2、Python 全部一致；旧产物对两例以 1 失败。隔离的 `char **str` 复现原先还会把变量读成字符串地址。
+- `run.c` 移除 fscanf/ferror/atoll 依赖，用显式整数读取器与分块 IO。动作语义不变；64 位边界以实际 OFILL 输出核对，越界拒绝；输出 fwrite/fclose 失败以 IO 错误 2 退出。native POSIX read/open 保留负 errno，原有 read-dir / ENOTDIR 等五个负例在自建执行器上通过。
+- `nativecheck.sh`：先由 unisacc 生成编译器，再用它构建执行器；六段全域核对通过；hello/fib/b_toknames 的 18 份阶段输出等于 cc 构建执行器；两种执行器在真实 1,024 B 文件限制下都报告写失败。入门禁 `exec-native`，11 s。
+- 完整负载：自建执行器对先前冻结的 3.9 MB self tape 跑 E4，26.81 s，2,231,188 B 等于 cc 执行器。另在当前源码上 `.com` → native compiler → native executor → 六段网络 → osx/arm64 编译器，完整 selfcheck 在 alarm 60 内通过；743,202 B 等于参考，N1=N2=N3。这里没有把旧负载的计时当作新源码或跨平台性能。
+- 规模：cc -O2 runtime __text 16,620 B / 文件 56,520 B（动态 libSystem 不计）；unisacc -O2 __text 85,220 B / 文件 115,746 B（含随带库）。均为加载、IO、校验、执行合计，不是单独内核，也未达几 KB 目标。
+- `.com` 已随产品修复重建：1,345,792 B，SHA-256 `236aee387020e2f5d04f8d4a18bff05cb44121eb11f0ae553332d2480c8e1c13`；源 `unisacc.c` SHA-256 `caa8a5ba4b8685403505f299fd8ce2a90d50af999339b136f48164fb70aeea2b`。本地 gate --com 70/70，JOBS=2 总 287 s，每套件 ≤60 s；fat 121/0，两架构均执行；六目标网络 self-source 全部相同。未推送、未发布。
+- 仍有实质缺口：b_fortype 在 E3 为 `not covered: identifier is not a local`（产品修复不代表 prototype 已覆盖）；b_toknames 已端到端 tape 相同。native Windows IO 错误分类未闭合；Linux/Windows 本轮未实跑自建 runtime；发布 `.com` 仍为手写 C 编译器路径。cc-unisacc 继续暂停。

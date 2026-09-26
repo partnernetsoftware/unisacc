@@ -27,6 +27,69 @@ static const int ARITY[NOP_] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,
 static void die(const char *m) { fprintf(stderr, "run: %s\n", m); exit(2); }
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
 
+/* File operations are OS adaptation, not compiler actions. The native
+   POSIX gates return -errno; the host wrapper normalises libc to that form.
+   Windows native gates currently lack errno classification: an open failure
+   remains an IO error, never silently accepted as an absent optional file. */
+#ifdef __UNISA__
+static long io_open(const char *path) {
+#ifdef _WIN32
+    return __open((char *)path, 0x80000000, 3);
+#else
+    return __open((char *)path, 0, 0);
+#endif
+}
+static long io_read(long fd, void *p, long n) { return __read(fd, p, n); }
+static long io_close(long fd) { return __close(fd); }
+#else
+#include <unistd.h>
+#include <fcntl.h>
+static long io_open(const char *path) { int fd = open(path, O_RDONLY); return fd < 0 ? -errno : fd; }
+static long io_read(long fd, void *p, long n) { long r = read((int)fd, p, (size_t)n); return r < 0 ? -errno : r; }
+static long io_close(long fd) { return close((int)fd); }
+#endif
+static unsigned char *readfile(const char *path, int *len, int optional) {
+    long fd = io_open(path);
+    if (fd < 0) {
+        if (optional && fd == -ENOENT) return 0;
+        fprintf(stderr, "run: cannot open %s\n", path); exit(2);
+    }
+    int n = 0, cap = 65536; unsigned char *b = xrealloc(0, cap);
+    for (;;) {
+        if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = xrealloc(b, cap); }
+        long r = io_read(fd, b+n, cap-n);
+        if (r < 0) { fprintf(stderr, "run: cannot read %s\n", path); exit(2); }
+        if (!r) break;
+        if (r > cap-n) die("invalid read length");
+        n += (int)r;
+    }
+    if (io_close(fd) < 0) die("close failed");
+    *len = n; return b;
+}
+
+/* Decimal model reader: no scanf dependency, and 64-bit arguments are
+   checked before multiply/add (including the INT64_MIN magnitude). */
+static unsigned char *LB; static int LP, LN;
+static void lskip(void) { while (LP < LN && LB[LP] <= 32) LP++; }
+static int lchar(void) {
+    lskip(); if (LP == LN) die("truncated model");
+    int c = LB[LP++]; if (LP < LN && LB[LP] > 32) die("bad model tag"); return c;
+}
+static void ltag(int c) { if (lchar() != c) die("bad model tag"); }
+static I lnum(void) {
+    lskip(); int neg = 0, count = 0;
+    if (LP < LN && LB[LP] == '-') { neg = 1; LP++; }
+    uint64_t v = 0, lim = neg ? 9223372036854775808ull : 9223372036854775807ull;
+    while (LP < LN && LB[LP] > 32) {
+        int d = LB[LP++] - '0'; if (d < 0 || d > 9) die("bad model number");
+        if (v > (lim - d)/10) die("model number overflow");
+        v = v*10+d; count++;
+    }
+    if (!count) die("missing model number");
+    return neg ? (I)(0-v) : (I)v;
+}
+static int lint(void) { I n = lnum(); if (n < INT32_MIN || n > INT32_MAX) die("model index overflow"); return (int)n; }
+
 /* ---- the table ---- */
 static int NS, NQ, NRG, NSTR, START;
 static char **STR; static int *STRL;
@@ -35,20 +98,21 @@ static int ISNET, TOPMAX;
 static int *NLO, *NHI, *BN, *BQ;
 static int *SMODE; static int **ROWK, **ROWN, **ROWQ; static int *ROWC;
 
-static int hexv(int c) { return c <= '9' ? c - '0' : c - 'a' + 10; }
+static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
 
 static void load(const char *path) {
-    FILE *f = fopen(path, "r"); if (!f) die("cannot open the table");
-    char kind;
-    if (fscanf(f, " %c %d %d %d %d %d", &kind, &NS, &NQ, &NRG, &NSTR, &START) != 6 ||
-        (kind != 'T' && kind != 'N') || NS <= 0 || NQ <= 0 || NRG < 0 || NSTR < 0 || START < 0 || START >= NS) die("bad header");
+    LB = readfile(path, &LN, 0); LP = 0;
+    int kind = lchar(); NS=lint(); NQ=lint(); NRG=lint(); NSTR=lint(); START=lint();
+    if ((kind != 'T' && kind != 'N') || NS <= 0 || NQ <= 0 || NRG < 0 || NSTR < 0 || START < 0 || START >= NS) die("bad header");
     ISNET = kind == 'N'; TOPMAX = NS - 1;
-    if (ISNET && (fscanf(f, "%d", &TOPMAX) != 1 || TOPMAX < NS - 1 || TOPMAX == INT32_MAX)) die("bad network domain");
+    if (ISNET) { TOPMAX=lint(); if (TOPMAX < NS-1 || TOPMAX == INT32_MAX) die("bad network domain"); }
     STR = xrealloc(0, sizeof *STR * (NSTR + 1)); STRL = xrealloc(0, sizeof *STRL * (NSTR + 1));
     for (int k = 0; k < NSTR; k++) {
-        static char buf[1 << 16];
-        if (fscanf(f, " S %65535s", buf) != 1) die("bad string");
-        int n = buf[0] == '-' ? 0 : (int)strlen(buf) / 2;
+        ltag('S'); lskip(); int begin = LP;
+        while (LP < LN && LB[LP] > 32) LP++;
+        int size = LP-begin; unsigned char *buf = LB+begin;
+        int n = size == 1 && buf[0] == '-' ? 0 : size/2;
+        if (size == 0 || ((size & 1) && !(size == 1 && buf[0] == '-'))) die("bad string");
         STR[k] = xrealloc(0, n + 1); STRL[k] = n;
         for (int j = 0; j < n; j++) STR[k][j] = (char)(hexv(buf[2 * j]) * 16 + hexv(buf[2 * j + 1]));
         STR[k][n] = 0;
@@ -56,13 +120,13 @@ static void load(const char *path) {
     QOFF = xrealloc(0, sizeof(int) * NQ); QLEN = xrealloc(0, sizeof(int) * NQ);
     int cap = 1 << 16; QA = xrealloc(0, sizeof(I) * cap); NQA = 0;
     for (int k = 0; k < NQ; k++) {
-        int n; if (fscanf(f, " Q %d", &n) != 1) die("bad sequence");
+        ltag('Q'); int n = lint(); if (n < 0) die("bad sequence");
         QOFF[k] = NQA; QLEN[k] = n;
         for (int a = 0; a < n; a++) {
-            long long op; if (fscanf(f, "%lld", &op) != 1 || op < 0 || op >= NOP_) die("bad opcode");
+            int op = lint(); if (op < 0 || op >= NOP_) die("bad opcode");
             if (NQA + 6 > cap) { cap *= 2; QA = xrealloc(QA, sizeof(I) * cap); }
             QA[NQA++] = op;
-            for (int j = 0; j < ARITY[op]; j++) { long long v; if (fscanf(f, "%lld", &v) != 1) die("bad argument"); QA[NQA++] = v; }
+            for (int j = 0; j < ARITY[op]; j++) QA[NQA++] = lnum();
         }
     }
     SMODE = xrealloc(0, sizeof(int) * NS); ROWC = xrealloc(0, sizeof(int) * NS);
@@ -71,30 +135,32 @@ static void load(const char *path) {
     BN = xrealloc(0, sizeof(int) * NS); BQ = xrealloc(0, sizeof(int) * NS);
     for (int s = 0; s < NS; s++) {
         if (ISNET) {
-            int m, lo, hi, n, bn, bq;
-            if (fscanf(f, " H %d %d %d %d %d %d", &m, &lo, &hi, &n, &bn, &bq) != 6 || m < 0 || m > 2 ||
+            ltag('H'); int m=lint(), lo=lint(), hi=lint(), n=lint(), bn=lint(), bq=lint();
+            if (m < 0 || m > 2 ||
                 lo != (m == 1 ? -1 : 0) || hi != (m == 1 ? TOPMAX : 256) || n < 0 || (I)n > (I)hi - lo) die("bad network bank");
             SMODE[s] = m; NLO[s] = lo; NHI[s] = hi; ROWC[s] = n; BN[s] = bn; BQ[s] = bq;
             ROWK[s] = xrealloc(0, sizeof(int) * n); ROWN[s] = xrealloc(0, sizeof(int) * n); ROWQ[s] = xrealloc(0, sizeof(int) * n);
             int prev = lo;
             for (int j = 0; j < n; j++) {
-                if (fscanf(f, "%d %d %d", &ROWK[s][j], &ROWN[s][j], &ROWQ[s][j]) != 3 || ROWK[s][j] <= prev || ROWK[s][j] > hi) die("bad network unit");
+                ROWK[s][j]=lint(); ROWN[s][j]=lint(); ROWQ[s][j]=lint();
+                if (ROWK[s][j] <= prev || ROWK[s][j] > hi) die("bad network unit");
                 prev = ROWK[s][j];
             }
             continue;
         }
-        int m, n, dn, dq; if (fscanf(f, " R %d %d %d %d", &m, &n, &dn, &dq) != 4) die("bad state");
+        ltag('R'); int m=lint(), n=lint(), dn=lint(), dq=lint();
+        if (m < 0 || m > 2 || n < 0) die("bad state");
         SMODE[s] = m; ROWC[s] = n;
         if (m == 1) {                                   /* keyed by the stack top: a short list */
             ROWK[s] = xrealloc(0, sizeof(int) * n); ROWN[s] = xrealloc(0, sizeof(int) * n); ROWQ[s] = xrealloc(0, sizeof(int) * n);
-            for (int j = 0; j < n; j++) if (fscanf(f, "%d %d %d", &ROWK[s][j], &ROWN[s][j], &ROWQ[s][j]) != 3) die("bad row");
+            for (int j = 0; j < n; j++) { ROWK[s][j]=lint(); ROWN[s][j]=lint(); ROWQ[s][j]=lint(); }
         } else {                                        /* keyed 0..256: direct */
             ROWN[s] = xrealloc(0, sizeof(int) * 257); ROWQ[s] = xrealloc(0, sizeof(int) * 257); ROWK[s] = 0;
             for (int j = 0; j < 257; j++) { ROWN[s][j] = dn; ROWQ[s][j] = dq; }
-            for (int j = 0; j < n; j++) { int k, nx, q; if (fscanf(f, "%d %d %d", &k, &nx, &q) != 3 || k < 0 || k > 256 || nx < -1 || nx >= NS) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
+            for (int j = 0; j < n; j++) { int k=lint(), nx=lint(), q=lint(); if (k < 0 || k > 256 || nx < -1 || nx >= NS) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
         }
     }
-    fclose(f);
+    lskip(); if (LP != LN) die("trailing model data"); free(LB); LB=0;
     if (!ISNET) {
         for (int s = 0; s < NS; s++) if (SMODE[s] == 1)
             for (int j = 0; j < ROWC[s]; j++) if (ROWK[s][j] > TOPMAX) TOPMAX = ROWK[s][j];
@@ -206,14 +272,8 @@ static int sbfind(const unsigned char *p, int n) {
     if (n >= 5 && !memcmp(p, "\0hdr/", 5)) snprintf(path, sizeof path, "%s/%.*s", INCDIR, n - 5, p + 5);
     else snprintf(path, sizeof path, "%.*s", n, p);
     if ((int)strlen(path) == (n >= 5 && !memcmp(p, "\0hdr/", 5) ? (int)strlen(INCDIR) + 1 + n - 5 : n)) {   /* else truncated: absent */
-        FILE *f = fopen(path, "rb");
-        if (!f && errno != ENOENT) { fprintf(stderr, "run: cannot open %s\n", path); exit(2); }   /* unreadable is not absent */
-        if (f) {
-            unsigned char *b = 0; int m = 0, c = 0; int ch;
-            while ((ch = fgetc(f)) != EOF) { if (m >= c) { c = c ? c * 2 : 4096; b = xrealloc(b, c); } b[m++] = (unsigned char)ch; }
-            if (ferror(f)) { fprintf(stderr, "run: cannot read %s\n", path); exit(2); }   /* glibc opens a directory; reading it fails */
-            fclose(f); id = blob_add(b ? b : (unsigned char *)"", m); free(b);
-        }
+        int m = 0; unsigned char *b = readfile(path, &m, 1);
+        if (b) { id=blob_add(b,m); free(b); }
     }
     FC = xrealloc(FC, sizeof(FEnt) * (NFC + 1)); FC[NFC].p = xrealloc(0, n + 1); memcpy(FC[NFC].p, p, n); FC[NFC].n = n; FC[NFC].id = id; NFC++;
     return id;
@@ -258,9 +318,7 @@ int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: run TABLE INPUT [SRCPATH] [INCLUDE_DIR, absolute]\n"); return 2; }
     load(argv[1]);
     if (argc > 4) INCDIR = argv[4];
-    FILE *f = fopen(argv[2], "rb"); if (!f) die("cannot open the input");
-    Buf xin = {0};
-    { int ch; while ((ch = fgetc(f)) != EOF) bput(&xin, ch, 0); fclose(f); }
+    Buf xin = {0}; xin.b=readfile(argv[2], &xin.n, 0);
     const char *src = argc > 3 ? argv[3] : argv[2];
     R = calloc(NRG + 1, sizeof(I));
     blob_add((const unsigned char *)"", 0);
@@ -271,7 +329,7 @@ int main(int argc, char **argv) {
     Buf o = {0}, e = {0}; int osel = 0; I OT = 0;
     Buf sb = {0};
     int *stk = 0; int nst = 0, cst = 0;
-    long long maxsteps = getenv("UNISA_MAXSTEPS") ? atoll(getenv("UNISA_MAXSTEPS")) : 200000000LL, steps = 0;
+    long long maxsteps = getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"), 0, 10) : 200000000LL, steps = 0;
     int q = START; I r = 0;
     for (;;) {
         if (++steps > maxsteps) { fprintf(stderr, "timeout\n"); return 3; }
@@ -357,7 +415,7 @@ int main(int argc, char **argv) {
             case SWAP: { unsigned char *nb = xrealloc(0, o.n + 1); I *na = xrealloc(0, sizeof(I) * (o.n + 1));
                          memcpy(nb, o.b, o.n); memcpy(na, o.at, sizeof(I) * o.n);
                          x = nb; xattr = na; xn = o.n; o.n = 0; NFR = 1; fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn; } break;
-            case ACCEPT: fwrite(o.b, 1, o.n, stdout); return 0;
+            case ACCEPT: if (fwrite(o.b, 1, o.n, stdout) != (size_t)o.n || fclose(stdout)) die("cannot write output"); return 0;
             case REJECT: fprintf(stderr, "reject: %.*s\n", STRL[a[1]], STR[a[1]]); fwrite(e.b, 1, e.n, stderr); return 1;
             default: die("bad action");
             }
