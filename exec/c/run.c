@@ -15,9 +15,9 @@ typedef int64_t I;
 enum { ADV, MARK, JUMP, LDI, COPYW, ALU, ALUI, CMP, CMPI, RLD, LDX, STX, OUT, OUTW, COPY, COPYT,
        SPAN, SPANT, SPAN2, OLAST, ODROP, OLEN, OCUT, ORES, OFILL, OCLR, OSEL, SETOT, XATTR, PUSH, POP,
        INTERN, BLOBSAVE, INPUSH, INPUSHX, INPUSHXE, INPOP, SBCLR, SBOUT, SBSPAN, SBBLOB, SBINTERN,
-       SBSAVE, SBFIND, BLEN, BYTE, XLEN, DIVMOD10, SWAP, ACCEPT, REJECT, A64, A64I, C64, C64U, NOP_ };
+       SBSAVE, SBFIND, BLEN, BYTE, XLEN, DIVMOD10, SWAP, ACCEPT, REJECT, A64, A64I, C64, C64U, INC, NOP_ };
 static const int ARITY[NOP_] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,
-                                0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2};
+                                0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
 
 static void die(const char *m) { fprintf(stderr, "run: %s\n", m); exit(2); }
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
@@ -220,6 +220,7 @@ int main(int argc, char **argv) {
             case A64: case A64I: { int z; R[a[2]] = alu64((int)a[1], R[a[3]], op == A64 ? R[a[4]] : a[4], &z); r = z; } break;
             case C64: { I u = R[a[1]], v = R[a[2]]; r = u < v ? 0 : u == v ? 1 : 2; } break;
             case C64U: { uint64_t u = (uint64_t)R[a[1]], v = (uint64_t)R[a[2]]; r = u < v ? 0 : u == v ? 1 : 2; } break;
+            case INC: R[a[1]] = (I)(((uint64_t)R[a[1]] + 1) & 0xFFFFFFFFull); break;
             case RLD: { I v = R[a[1]]; r = v >= 0 && v <= 256 ? v : 256; } break;
             case LDX: R[a[1]] = mget(R[a[2]] + a[3]); break;
             case STX: mset(R[a[1]] + a[2], R[a[3]]); break;

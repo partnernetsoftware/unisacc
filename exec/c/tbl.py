@@ -25,7 +25,7 @@ OPS = [("ADV", ""), ("MARK", "r"), ("JUMP", "r"), ("LDI", "ri"), ("COPYW", "rr")
        ("INPUSHXE", "rr"), ("INPOP", ""), ("SBCLR", ""), ("SBOUT", "i"), ("SBSPAN", "rr"), ("SBBLOB", "r"),
        ("SBINTERN", "r"), ("SBSAVE", "r"), ("SBFIND", "r"), ("BLEN", "rr"), ("BYTE", "r"), ("XLEN", "r"),
        ("DIVMOD10", "r"), ("SWAP", ""), ("ACCEPT", ""), ("REJECT", "s"), ("A64", "arrr"), ("A64I", "arri"),
-       ("C64", "rr"), ("C64U", "rr")]
+       ("C64", "rr"), ("C64U", "rr"), ("INC", "r")]   # INC: exec/lex/sim.py's, W := W + 1 mod 2^32
 CODE = {n: k for k, (n, _) in enumerate(OPS)}
 ALUOPS = ["add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar",
           "sdiv", "srem", "udiv", "urem", "not", "shr"]
@@ -34,8 +34,17 @@ ALUOPS = ["add", "sub", "mul", "div", "rem", "and", "or", "xor", "shl", "sar",
 def main():
     d = json.load(open(sys.argv[1]))
     names = list(d["states"])
+    # a target with no row (E1's HALT: always entered by a REJECT) gets an empty one
+    for mode, row in list(d["states"].values()):
+        for nx, _ in row.values():
+            if nx not in d["states"] and nx not in names:
+                names.append(nx)
     six = {n: k for k, n in enumerate(names)}
-    regs, strs = {}, {}
+    regs, strs, syms = {}, {}, {}
+
+    def sym(v):
+        """a stack symbol: a state's index, or a number past the states (E1 pushes its own)"""
+        return six[v] if v in six else len(names) + syms.setdefault(v, len(syms))
 
     def reg(n):
         return regs.setdefault(n, len(regs))
@@ -44,7 +53,7 @@ def main():
         if kind == "r":
             return reg(v)
         if kind == "g":
-            return six[v]
+            return sym(v)
         if kind == "s":
             if isinstance(v, int):
                 v = str(v)
@@ -63,15 +72,15 @@ def main():
         seqs.append(out)
     lines = []
     for n in names:
-        mode, row = d["states"][n]
+        mode, row = d["states"].get(n, ["b", {}])
         m = {"b": 0, "t": 1, "r": 2}[mode]
         ents = []
         for k, (nx, sq) in row.items():
-            key = (-1 if k == "BOT" else six[k]) if m == 1 else int(k)
+            key = (-1 if k == "BOT" else sym(k)) if m == 1 else int(k)
             ents.append("%d %d %d" % (key, six[nx], sq))
         lines.append("R %d %d %s" % (m, len(ents), " ".join(ents)))
     with open(sys.argv[2], "w") as f:
-        f.write("T %d %d %d %d %d\n" % (len(names), len(seqs), len(regs), len(strs), six[d["start"]]))
+        f.write("T %d %d %d %d %d\n" % (len(names), len(seqs), len(regs), len(strs), six[d.get("start", "DISPATCH")]))
         for s in sorted(strs, key=strs.get):
             f.write("S %s\n" % (s.encode("latin-1", "replace").hex() or "-"))
         for q in seqs:
