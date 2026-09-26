@@ -78,3 +78,9 @@ rules, not a constructed network. TargetProgram production is still Python.
 relocated pointer with small/large zero tails, with independent ELF field
 expectations. C executor output for complete hello/fib equals the reference
 ELF byte-for-byte. This run was on macOS: Linux execution is not claimed.
+
+Linux runtime follow-up: the two complete ELF files from f506dc6 ran in the
+local x86_64 Lima/QEMU VM on the ARM host, outputting `hello from C99` and
+`55`, respectively, both rc 0 and empty stderr. The VM was stopped after the
+check. This adds emulated Linux execution evidence; it does not cover other
+programs, native x86_64 hardware, or an independent lowering implementation.

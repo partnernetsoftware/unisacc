@@ -1980,3 +1980,19 @@ in the delta encoder. Relaxed layout/address encoding remains the next step.
 - Input lowering is still Python; Linux native execution not run in this batch
   (the x86 Lima VM is stopped). Other formats/architectures and frontend
   completion remain required; current .com unchanged.
+
+### E6 Linux execution evidence (2026-09-26, f506dc6)
+
+The actual delta-produced hello.elf and fib.elf were copied unchanged into
+`minicon-lnx-x86_64` (Lima/QEMU on the ARM host). Each ran under a 10 s guest
+watchdog: hello stdout `hello from C99\n`, fib stdout `55\n`, both rc 0 and
+empty stderr. This is Linux x86_64 emulation, not a native x86_64 machine.
+The VM was initially stopped, started for this check and stopped afterwards
+(shutdown confirmed). The separately running default ARM VM was untouched.
+
+Lowering remains the next algorithmic dependency: raw tape data directives
+must be decoded and reordered by zero_last before scratch cells are assigned;
+register mapping, entry setup, syscall shapes and adjacent push/pop fusion
+must then be executed by the delta. Serialising an already lowered program
+does not complete that dependency. Its interface must eventually consume E4's
+actual tape output, rather than moving the Python lowering behind an adapter.
