@@ -135,7 +135,7 @@ def ladder(prefix, bottom):
                 emit(q, "label_d").goto(nm + ".l")
                 continue
             # left in r0: push; the right operand at the next level; [scale]; pop; the instruction (binsel -> irsel)
-            emit(q, "push").vpush("vt", "vb").call("NEXT").call(nxt).vpop("lt", "lb")
+            emit(q, "push").vpush("vt", "vb").call("NEXT").call(nxt).vpop("lt", "lb").call("NODBL")
             bn = "%s.%s" % (nm, o)
             if o in ("+", "-"):
                 q.branch({1: bn + ".i"}, bad("pointer on the right"), [("CMPI", "vt", 0)])
@@ -282,7 +282,8 @@ def printf():
 UNS = E.UNS   # unsigned char/short/long: UNS + size (unsigned int: not covered)
 SBB = 1000   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
 STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
-TYPEW = {"type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
+DBL = E.DBL   # double: stored, passed, returned and va_arg'd as a plain 64-bit move (measured, old E3 p63)
+TYPEW = {"type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
 
@@ -291,7 +292,8 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
     value descriptor (vt >= 1 or vb == 8: 8 bytes; else vb), the text from the template"""
     q = P(name)
     q.branch({(1, 2): name + ".8"}, name + ".b", [("CMPI", "vt", 1)])
-    P(name + ".b").branch({1: name + ".8"}, name + ".n", [("CMPI", "vb", 8)])
+    P(name + ".b").branch({1: name + ".8"}, name + ".d", [("CMPI", "vb", 8)])
+    P(name + ".d").branch({1: name + ".8"}, name + ".n", [("CMPI", "vb", DBL)])
     P(name + ".8").o(tab8).ret()
     q = P(name + ".n")
     for w in (1, 2, 4):
@@ -318,7 +320,8 @@ def types():
     q = P("NARROW")
     q.branch({(1, 2): "RET"}, "NARROW.b", [("CMPI", "vt", 1)])
     P("NARROW.b").branch({1: "RET"}, "NARROW.u", [("CMPI", "vb", 8)])
-    P("NARROW.u").branch({1: "RET"}, "NARROW.n", [("CMPI", "vb", UNS + 8)])
+    P("NARROW.u").branch({1: "RET"}, "NARROW.dd", [("CMPI", "vb", UNS + 8)])
+    P("NARROW.dd").branch({1: "RET"}, "NARROW.n", [("CMPI", "vb", DBL)])
     q = P("NARROW.n")
     for w in (1, 2, 4):
         hit, nx = q.fresh("w"), q.fresh("x")
@@ -466,7 +469,9 @@ def build():
     P("ELSZ.st").a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "es", "t", SSZ)).branch({1: "DEAD.inc"}, "RET", [("CMPI", "es", 0)])
     g.on("DEAD.inc", range(257), "DEAD", E.rej("not covered: incomplete struct"), "r")
     P("ELSZ.b").branch({1: "DEAD.void"}, "ELSZ.s", [("CMPI", "tb", 0)])
-    P("ELSZ.s").a(("COPYW", "es", "tb")).branch({2: "ELSZ.u"}, "RET", [("CMPI", "tb", UNS)])
+    P("ELSZ.s").a(("COPYW", "es", "tb")).branch({1: "ELSZ.d"}, "ELSZ.s2", [("CMPI", "tb", DBL)])
+    P("ELSZ.d").a(("LDI", "es", 8)).ret()
+    P("ELSZ.s2").branch({2: "ELSZ.u"}, "RET", [("CMPI", "tb", UNS)])
     P("ELSZ.u").a(("ALUI", "sub", "es", "tb", UNS)).ret()
     P("ELSZ.8").a(("LDI", "es", 8)).ret()
     p = P("FN.fn")
@@ -619,8 +624,16 @@ def build():
     p = P("X.as")
     p.call("LOOKUP").call("NOARR")
     addr(p)
-    emit(p, "push").vpush("vt", "vb").call("NEXT").call("EXPR").vpop("vt", "vb")
+    emit(p, "push").vpush("vt", "vb").call("NEXT").call("EXPR").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb").call("SAMEDBL")
     emit(p, "pop1").call("STOREV").ret()
+    # = between a double and an integer needs a conversion (cvtid/cvtdi): not covered yet
+    P("SAMEDBL").a(("LDI", "u", 0)).branch({1: "SD.l"}, "SD.r", [("CMPI", "vb", DBL)])
+    P("SD.l").branch({1: "SD.l2"}, "SD.r", [("CMPI", "vt", 0)])
+    P("SD.l2").a(("LDI", "u", 1)).goto("SD.r")
+    P("SD.r").a(("LDI", "w", 0)).branch({1: "SD.r1"}, "SD.c", [("CMPI", "rvb", DBL)])
+    P("SD.r1").branch({1: "SD.r2"}, "SD.c", [("CMPI", "rvt", 0)])
+    P("SD.r2").a(("LDI", "w", 1)).goto("SD.c")
+    P("SD.c").branch({1: "RET"}, "DEAD.dbl", [("CMP", "u", "w")])
     for o in E.CASOPS:
         q = P("X.c" + o)    # addr; push; load; push; rhs; pop; op; pop; store
         q.call("LOOKUP").call("NOARR").call("INTONLY")
@@ -631,6 +644,11 @@ def build():
         emit(q, "pop1").o(E.optext(o))
         emit(q, "pop1")
         emit(q, "store_int").ret()
+    P("NODBL").branch({1: "NODBL.l"}, "NODBL.r", [("CMPI", "lb", DBL)])      # a double VALUE (not a pointer to one)
+    P("NODBL.l").branch({1: "DEAD.dbl"}, "NODBL.r", [("CMPI", "lt", 0)])
+    P("NODBL.r").branch({1: "NODBL.r2"}, "RET", [("CMPI", "vb", DBL)])
+    P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
+    g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
     P("INTONLY").branch({1: "IO.b"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vt", 0)])
     P("IO.b").branch({1: "RET"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vb", 4)])
     for nm, o, fix in (("X.inc", "+", "post_inc"), ("X.dec", "-", "post_dec")):
