@@ -2304,3 +2304,21 @@ unknown symbol and scratch alias inputs reject on both executors. 981 states /
 48,726 B table. Gate --com: 52/52, JOBS=2, 196 s, ARM suite 13 s and Linux
 self-source suite 16 s. Test-only strengthening after the gate passed the full
 ARM suite again. Product source/.com unchanged; no push or release.
+
+### S-17 Linux ARM64 ELF writer (2026-09-27)
+
+ARM --elf reuses elfimage.py; e_machine and label representation are explicit
+parameters, with no architecture-specific image logic in the executor. Shared
+ELF byte output is self-contained and relocation-index digits are bounded
+before overflow. ARM requires a data declaration and Linux target. ELF mode
+1,079 states / 55,788 B; no new runtime primitive.
+
+hello/fib complete ELF images match reference (57,654/57,646 B) and execute in
+existing Lima default aarch64: expected stdout, no stderr, exit 0, guest timeout
+10 / host 60 s. Hashes: hello 1f227471a8d2cb471fcc2eb8b7a2e90319266b982663be152138d3575937e2b2;
+fib d4efd5598e6d77f9c342189b350fad35287ad63d5a1af8171c86ac7a71e9181f.
+No VM was started; the existing VM was left running. Python still does lowering.
+ARM text checks, both image suites, large sparse extent and x86 self-source
+671,404-byte ELF equality all reran green. exec-armelf added to gate, but this
+batch does not claim a new full-gate count. Product .com unchanged. Next: ARM
+lowering on the executor, then remaining formats/targets and network adoption.

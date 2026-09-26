@@ -6,10 +6,14 @@ from unisa.emit_arm import RELFIELD
 LABELS=74000000
 
 
-def install(E, word):
+def install(E, word, image=False):
     P,g=E.P,E.g
     P('FINISH').branch({1:'ACCEPT'},'REWIND',[('CMPI','pass',1)])
-    P('ACCEPT').a(('ACCEPT',)).goto('DEAD')
+    p=P('ACCEPT').a(('OLEN','endo'))
+    if image:
+        p.branch({1:'IMAGE.ready'},'FAIL',[('CMPI','has_data',1)])
+        p=P('IMAGE.ready').call('ELF')
+    p.a(('ACCEPT',)).goto('DEAD')
     P('REWIND').call('LAYOUT').a(('LDI','zero',0),('OCUT','discard','zero'),('LDI','pass',1),('JUMP','zero')).goto('LINE')
     P('LABEL').branch({1:'FAIL'},'LABEL.id',[('CMP','start','end')])
     P('LABEL.id').a(('LDI','started',1),('INTERN','lid','start','end'),('OLEN','pos'),('ALUI','add','pos','pos',1),('LDX','prev','lid',LABELS)).branch({1:'LABEL.verify'},'LABEL.new',[('CMPI','pass',1)])

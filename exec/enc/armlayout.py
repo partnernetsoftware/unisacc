@@ -9,7 +9,7 @@ SYM,PRESENT,HSEEN=77000000,78000000,79000000
 
 
 def init(p):
-    p.a(('LDI','target_os',1))
+    p.a(('LDI','target_os',1),('SBCLR',),[('SBOUT',c) for c in b'_start'],('SBINTERN','id_entry'))
     for key in ('target','data','src_os','data_len','bss','relocs','sym'):
         p.a(('SBCLR',),[('SBOUT',c) for c in ('@'+key).encode()],('SBINTERN','h_'+key))
     for key,value in (('lnx','lnx/arm64'),('osx','osx/arm64')):
@@ -33,7 +33,9 @@ def install(E,word):
         p.branch({1:'HDR.'+key},'HDR.next.'+key,[('CMP','hk','h_'+key)]);p=P('HDR.next.'+key)
     p.goto('FAIL')
     for key in ('data','src_os','data_len','bss','relocs'):
-        P('HDR.'+key).a(('BLOBSAVE','header_'+key,'hv','hend')).goto('LINE')
+        p=P('HDR.'+key).a(('BLOBSAVE','header_'+key,'hv','hend'))
+        if key in ('data','data_len','bss','relocs'):p.a(('LDI','has_'+key,1))
+        p.goto('LINE')
     P('HDR.target').a(('INTERN','t','hv','hend')).branch({1:'HDR.lnx'},'HDR.osxcheck',[('CMP','t','target_lnx')])
     P('HDR.osxcheck').branch({1:'HDR.osx'},'FAIL',[('CMP','t','target_osx')])
     for os,n in (('lnx',1),('osx',2)):P('HDR.'+os).a(('LDI','target_os',n)).goto('LINE')

@@ -16,7 +16,7 @@ Memory opcode declarations are read from emit_arm LDS/STS/LDU/STU; form
 selection and packing remain hand rules. A scaled positive offset is preferred,
 then signed imm9, otherwise MOVIMM plus ADD/SUB through x16. Fallback rejects
 an x16 base or store source, whose value would be clobbered. Direct forms
-allow them. Section-local labels, jump/jumpz/call are supported. POSIX text/data address layout is supported; image output remains outside this encoder.
+allow them. Section-local labels, jump/jumpz/call are supported. POSIX text/data address layout is supported; --elf also writes Linux ARM64 ELF.
 
 `ret` pops x17 from tape SP x7 and returns through x17. `callr` stores its
 continuation on that software stack before BLR. These are not host ABI calls.
@@ -36,7 +36,7 @@ Memory checks add 100 instructions / 768 bytes compared on both executors,
 four width/scratch rejects, and 64 native load/store cases checked with C
 memcpy and signed-width values.
 
-Current size: 981 states, 48,726 B compressed text table. The new gate entry is
+Text mode: 981 states, 48,824 B compressed text table. The new gate entry is
 exec-arm. This does not change .com or claim complete ARM64 lowering/encoding.
 
 ## Section-local branches
@@ -117,8 +117,8 @@ The following address slice now covers the POSIX address forms used by hello/fib
 
 armlayout reads @target (lnx/arm64 or osx/arm64), @sym and payload headers.
 Symbol addresses are decimal, bounded at 2^31-1; repeated declarations and
-headers after instructions/labels reject. Data headers are retained opaque for
-a later image writer: this text encoder does not claim image-data validation.
+headers after instructions/labels reject. Text mode retains data headers opaque; --elf validates and decodes them in
+the shared ELF writer. Text-only success does not certify image payloads.
 Header processing happens only in pass zero; the second scan uses the retained
 declarations. Code labels and data symbols use separate maps. As in emit_arm,
 a data symbol takes precedence over a same-name code label.
@@ -142,3 +142,31 @@ executors; thirteen invalid header/address/alias fixtures reject.
 
 Frozen gate --com: 52/52, JOBS=2, 196 s total, ARM suite 13 s. Subsequent
 changes only strengthened address assertions; the complete ARM suite was rerun.
+
+## Linux ELF mode
+
+`arm.py OUT.json --elf` uses the same elfimage.py writer as x86: one shared
+implementation for data hex, relocation, sparse zero tails, two PT_LOADs and
+output. Generation parameters select e_machine and whether labels contain
+instruction indices (x86) or byte offsets (ARM). A small little-endian field
+writer now belongs to ELF itself rather than depending on an x86 helper.
+ARM ELF requires @data; @target must resolve to Linux. Text mode is unchanged.
+
+Relocation decimal indices are checked after each digit, preventing wrapping
+of an oversized index before the final data bound check. Both architectures'
+image checks cover this. `armimagecheck.sh` is in the gate as exec-armelf.
+ELF mode: 1,079 states, 55,788 B table. No new executor action.
+
+2026-09-27: generated hello/fib images equal the complete Python reference,
+including headers/data: 57,654 / 57,646 B. They ran in the already-running
+Lima default aarch64 VM with 10 s guest limits and 60 s host limits; exact stdout,
+empty stderr and exit 0 were checked. SHA256:
+
+- hello: 1f227471a8d2cb471fcc2eb8b7a2e90319266b982663be152138d3575937e2b2
+- fib: d4efd5598e6d77f9c342189b350fad35287ad63d5a1af8171c86ac7a71e9181f
+
+No VM was started or stopped. Python still supplies lowering input; this is
+not source-to-ELF through ARM deltas yet. Mach-O/PE image output and the product
+switch remain outstanding. Targeted regressions: ARM text/native checks, both
+ELF checks, 610,000,200-byte sparse extent and Linux x86 self-source equality.
+No new full-gate result is claimed for the newly added exec-armelf entry.

@@ -1,14 +1,15 @@
 """ELF image-writing delta, after code generation. No image-specific executor op.
 
 The binary format's fields are a template here; runtime layout, data decoding,
-relocation, zero-tail trimming and output are ordinary delta actions. Only
-Linux x86_64 is selected by this first image route.
+relocation, zero-tail trimming and output are ordinary delta actions. Linux x86_64 and ARM64 share this writer; machine and label representation
+are explicit generation parameters.
 """
 from unisa.image import elf
 DATA = 93 * 10**6
 
 
-def install(E, byte, OFF, LABD):
+def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False):
+    assert arch in elf.MACHINE
     P,g=E.P,E.g
     P('ELF').branch({1:'ELF.begin'},'DEAD.image',[('CMPI','target_os',1)])
     P('ELF.begin').a(('LDI','zero',0),('OCUT','text_blob','zero'),('LDI','dlen',0),('INPUSH','header_data')).goto('ED.first')
@@ -40,7 +41,8 @@ def install(E, byte, OFF, LABD):
     g.els('ER.first','ER.start',[])
     g.on('ER.empty',[256],'ER.end',[]);g.els('ER.empty','DEAD.image',[])
     g.els('ER.start','ER.digit',[('LDI','ra',0),('LDI','nd',0)])
-    g.on('ER.digit',range(48,58),'ER.digit',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','ra','ra',10),('A64','add','ra','ra','bt'),('ALUI','add','nd','nd',1),('ADV',)])
+    g.on('ER.digit',range(48,58),'ER.digitbound',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','ra','ra',10),('A64','add','ra','ra','bt'),('ALUI','add','nd','nd',1),('ADV',)])
+    P('ER.digitbound').branch({2:'DEAD.image'},'ER.digit',[('C64U','ra','extent_max')])
     g.on('ER.digit',[44,256],'ER.bound',[]);g.els('ER.digit','DEAD.image',[])
     P('ER.bound').branch({1:'DEAD.image'},'ER.b2',[('CMPI','nd',0)])
     P('ER.b2').a(('A64I','add','rend','ra',8)).branch({2:'DEAD.image'},'ER.read',[('C64U','rend','vlen')])
@@ -60,14 +62,17 @@ def install(E, byte, OFF, LABD):
     P('ET.drop').a(('ALUI','sub','stored','stored',1)).goto('ET.loop')
     # Entry label is resolved from the same final layout as branch targets.
     P('EH').a(('LDX','ei','id_entry',LABD),('LDI','entryoff',0)).branch({1:'EH.write'},'EH.entry',[('CMPI','ei',0)])
-    P('EH.entry').a(('ALUI','sub','ei','ei',1)).branch({0:'EH.in'},'EH.end',[('CMP','ei','npc')])
-    P('EH.in').a(('LDX','entryoff','ei',OFF)).goto('EH.write')
-    P('EH.end').a(('COPYW','entryoff','endo')).goto('EH.write')
-    p=P('EH.write');p.a(('A64','add','entryva','text_va','entryoff'),('A64I','add','tend','endo',elf.HDRS('x86_64')),('A64I','sub','doff','data_va',elf.VADDR))
+    if direct_labels:
+        P('EH.entry').a(('ALUI','sub','entryoff','ei',1)).goto('EH.write')
+    else:
+        P('EH.entry').a(('ALUI','sub','ei','ei',1)).branch({0:'EH.in'},'EH.end',[('CMP','ei','npc')])
+        P('EH.in').a(('LDX','entryoff','ei',OFF)).goto('EH.write')
+        P('EH.end').a(('COPYW','entryoff','endo')).goto('EH.write')
+    p=P('EH.write');p.a(('A64','add','entryva','text_va','entryoff'),('A64I','add','tend','endo',elf.HDRS(arch)),('A64I','sub','doff','data_va',elf.VADDR))
     for b in b'\x7fELF'+bytes([2,1,1,0])+bytes(8):byte(p,b)
     def field(width,v):
-        p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('LEBYTES')
-    for w,v in [(2,2),(2,elf.MACHINE['x86_64']),(4,1),(8,'entryva'),(8,elf.EHDR),(8,0),(4,0),(2,elf.EHDR),(2,elf.PHDR),(2,elf.NPH),(2,0),(2,0),(2,0)]:field(w,v)
+        p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('EI.bytes')
+    for w,v in [(2,2),(2,elf.MACHINE[arch]),(4,1),(8,'entryva'),(8,elf.EHDR),(8,0),(4,0),(2,elf.EHDR),(2,elf.PHDR),(2,elf.NPH),(2,0),(2,0),(2,0)]:field(w,v)
     for flags,offset,va,fs,ms in [(5,0,elf.VADDR,'tend','tend'),(6,'doff','data_va','stored','memlen')]:
         for w,v in [(4,1),(4,flags),(8,offset),(8,va),(8,va),(8,fs),(8,ms),(8,elf.PAGE)]:field(w,v)
     p.a(('INPUSH','text_blob')).goto('EI.copy')
@@ -77,4 +82,6 @@ def install(E, byte, OFF, LABD):
     byte(P('EI.zero'),0).goto('EI.pad')
     P('EI.data').a(('LDI','di',0)).label('EI.loop').branch({0:'EI.byte'},'RET',[('CMP','di','stored')])
     P('EI.byte').a(('LDX','db','di',DATA),('OUTW','db'),('ALUI','add','di','di',1)).goto('EI.loop')
+    P('EI.bytes').branch({2:'EI.nextbyte'},'RET',[('CMPI','lb_n',0)])
+    P('EI.nextbyte').a(('OUTW','lb_v'),('A64I','shr','lb_v','lb_v',8),('ALUI','sub','lb_n','lb_n',1)).goto('EI.bytes')
     g.on('DEAD.image',range(257),'DEAD',E.rej('not covered: ELF input or relocation'),'r')
