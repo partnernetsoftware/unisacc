@@ -484,8 +484,11 @@ def types():
     P("DS.1").a(("LDX", "dt", "k2", TDIM), ("ALUI", "mul", "u", "v", 8), ("ALU", "add", "u", "u", "k2"), ("STX", "u", DIM, "dt"), ("ALUI", "add", "k2", "k2", 1)).goto("DS.l")
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
     p = P("TSPEC")
-    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "type=unsigned": "TS.type=unsigned"}, bad("type"))
-    P("TS.struct").call("NEXT").tok({TK_ID: "TS.tag", "{": "TS.anon"}, bad("type"))
+    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "union": "TS.union", "type=unsigned": "TS.type=unsigned"}, bad("type"))
+    # union: a struct whose members all sit at offset 0, its size the largest member's (measured)
+    P("TS.struct").a(("LDI", "sun_n", 0)).goto("TS.su")
+    P("TS.union").a(("LDI", "sun_n", 1)).goto("TS.su")
+    P("TS.su").call("NEXT").tok({TK_ID: "TS.tag", "{": "TS.anon"}, bad("type"))
     P("TS.anon").a(("LDI", "tg", 0)).call("SBODY").call("NEXT").goto("TS.sb")
     p = P("TS.tag")
     p.a(("INTERN", "tg", "ps", "pe")).call("NEXT").tok({"{": "TS.tbody"}, "TS.tref")
@@ -502,10 +505,10 @@ def types():
     p = P("SB.re")      # (a tag seen before without a body is completed in place)
     p.a(("COPYW", "sid", "t"), ("COPYW", "nsid", "t")).branch({1: "SB.go"}, "SB.tg", [("CMPI", "tg", 0)])
     P("SB.tg").a(("STX", "tg", STAG, "sid")).goto("SB.go")
-    P("SB.go").a(("LDI", "soff", 0), ("LDI", "smal", 1)).call("NEXT").label("SB.m")
+    P("SB.go").a(("LDI", "soff", 0), ("LDI", "smal", 1), ("COPYW", "sun", "sun_n"), ("LDI", "umax", 0)).call("NEXT").label("SB.m")
     P("SB.m").tok({"}": "SB.end"}, "SB.mem")
     p = P("SB.mem")
-    p.vpush("sid", "soff", "smal").call("TSPEC").vpop("sid", "soff", "smal").tok({TK_ID: "SB.nm"}, bad("struct member"))
+    p.vpush("sid", "soff", "smal", "sun", "umax").call("TSPEC").vpop("sid", "soff", "smal", "sun", "umax").tok({TK_ID: "SB.nm"}, bad("struct member"))
     p = P("SB.nm")
     p.a(("LDI", "marr", 0), ("COPYW", "mnm_s", "ps"), ("COPYW", "mnm_e", "pe"), ("COPYW", "mtd", "td")).call("NEXT").tok({"[": "SB.arr"}, "SB.nm1")
     p = P("SB.arr")         # NAME [N]: N elements; more dimensions are not covered
@@ -528,18 +531,25 @@ def types():
     p.branch({1: "SB.put3"}, "SB.am", [("CMPI", "marr", 0)])
     P("SB.am").a(("ALU", "mul", "msz", "msz", "marr")).goto("SB.put3")
     p = P("SB.put3")
+    p.branch({1: "SB.put0"}, "SB.put4", [("CMPI", "sun", 1)])
+    P("SB.put0").a(("LDI", "soff", 0)).goto("SB.put4")         # a union member: at 0
+    p = P("SB.put4")
     p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
         ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
         ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("STX", "k", MAR, "marr"),
         ("LDX", "t", "sid", SMN), ("ALUI", "mul", "u", "sid", 64), ("ALU", "add", "u", "u", "t"), ("STX", "u", SMEM, "k"),
         ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t"),
         ("ALU", "add", "soff", "soff", "msz"))
+    p.branch({2: "SB.um"}, "SB.al", [("CMP", "soff", "umax")])
+    P("SB.um").a(("COPYW", "umax", "soff")).goto("SB.al")      # the extent so far (a union's size)
+    p = P("SB.al")
     p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
     P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
     P("SB.nx").tok({";": "SB.semi"}, bad("struct member"))     # (the name's next token was read in SB.nm)
     P("SB.semi").call("NEXT").goto("SB.m")
     p = P("SB.end")
-    p.a(("ALU", "add", "t", "soff", "smal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "smal"), ("ALU", "and", "t", "t", "m"),
+    p.a(("COPYW", "soff", "umax"),                              # a struct's extent is its last member's end
+        ("ALU", "add", "t", "soff", "smal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "smal"), ("ALU", "and", "t", "t", "m"),
         ("STX", "sid", SSZ, "t"), ("STX", "sid", SAL, "smal"), ("COPYW", "nsid", "sid")).vpop("td", "tb").ret()
     P("TS.id").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN)).branch({1: "TS.td"}, bad("type"), [("CMPI", "u", 1)])
     P("TS.td").a(("LDX", "tb", "t", E.TDB), ("LDX", "td", "t", E.TDD)).call("NEXT").goto("TS.b")
@@ -611,7 +621,7 @@ def build():
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
-    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "enum": "EN"}, bad("top-level construct"))
+    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "EN"}, bad("top-level construct"))
     # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
     p = P("EN")
     p.call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
@@ -742,7 +752,7 @@ def build():
     p = P("FN.fn")
     p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0))
     p.call("NEXT").a(("LDI", "pk", 0), ("LDI", "vfn", 0))
-    p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
+    p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
     P("FN.void").call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid", "(": "FN.pfp"}, bad("parameter"))
     P("FN.vend").branch({1: "FN.body"}, bad("parameter"), [("CMPI", "td", 0)])
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
@@ -754,7 +764,7 @@ def build():
     p.a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u"))   # depth * 4096 + base: a double* is not a double
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL")
     p.a(("ALUI", "add", "pk", "pk", 1)).call("NEXT").tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
-    P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "...": "FN.dots"}, bad("parameter"))
+    P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par", "...": "FN.dots"}, bad("parameter"))
     p = P("FN.body")
     p.call("NEXT").tok({"{": "FN.def", ";": "FN.proto"}, bad("expected {"))
     p = P("FN.proto")     # a prototype: nothing written; its parameters' names are dropped
@@ -804,7 +814,7 @@ def build():
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
-    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl",
+    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl",
            "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
     P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
     # NAME: stmt -- the label u_NAME (measured, b_goto); otherwise back to the name, an expression
@@ -1188,7 +1198,7 @@ def build():
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
     P("U.szof").call("NEXT").tok({"(": "SZ.p", TK_ID: "SZ.id"}, bad("sizeof operand"))
-    P("SZ.p").call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", TK_ID: "SZ.pid"}, bad("sizeof operand"))
+    P("SZ.p").call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", "union": "SZ.t", TK_ID: "SZ.pid"}, bad("sizeof operand"))
     P("SZ.t").call("TSPEC").expect(")").call("ELSZ").a(("COPYW", "sz", "es")).goto("SZ.out")
     P("SZ.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("LOOKUP").goto("SZ.var")
     P("SZ.pid").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("LOOKUP").call("NEXT").goto("SZ.sub")
@@ -1267,7 +1277,7 @@ def build():
     q = P("U.not")
     q.call("NEXT").call("UNARY")
     emit(q, "not").a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
-    P("U.par").call("NEXT").tok({**{w: "U.cast" for w in TWORDS}, TK_ID: "U.pq", "struct": "U.cast"}, "U.pe")
+    P("U.par").call("NEXT").tok({**{w: "U.cast" for w in TWORDS}, TK_ID: "U.pq", "struct": "U.cast", "union": "U.cast"}, "U.pe")
     P("U.pq").call("ISTD").branch({1: "U.cast"}, "U.pe")
     P("U.pe").call("CEXPR").expect(")").call("NEXT").a(("LDI", "rkok", 0)).call("POSTIX").ret()
     q = P("U.cast")      # (T) e: narrowed through the stack to T; long and pointers: no code (measured)
