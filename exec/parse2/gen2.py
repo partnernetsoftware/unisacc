@@ -740,8 +740,17 @@ def build():
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT")
     p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl",
-           "switch": "S.sw", "case": "S.case", "default": "S.dflt"}, "S.expr")
-    P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.expr")
+           "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
+    P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
+    # NAME: stmt -- the label u_NAME (measured, b_goto); otherwise back to the name, an expression
+    p = P("S.idl")
+    p.a(("COPYW", "lpp", "tpos"), ("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({":": "S.lab"}, "S.idb")
+    P("S.idb").a(("JUMP", "lpp")).call("NEXT").goto("S.expr")
+    P("S.lab").o("u_").a(("SPAN2", "ips", "ipe")).o(":\n").call("NEXT").call("STMT").ret()
+    # goto NAME;
+    p = P("S.goto")
+    p.call("NEXT").tok({TK_ID: "S.gt"}, bad("goto"))
+    P("S.gt").o("  jump u_").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").expect(";").call("NEXT").ret()
     p = P("S.blk")
     p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur").call("UNWIND").call("NEXT").ret()
     p = P("UNWIND")
