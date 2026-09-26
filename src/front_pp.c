@@ -1511,29 +1511,12 @@ int srcuse(char *nm, int nl) {
     return called;
 }
 /* does some literal printf format need the runtime formatter? */
-int rtprintf(void) {
-    int i; int j; int c;
+int rtprintf(void) {   /* a call to printf: <stdio.h>'s runtime printf, always (no compile-time lowering) */
+    int i; int j;
     i = srcfind("printf", 6, 0);
     while (i >= 0) {
         j = skipws(i + 6);
-        if (j < nsrc) { if ((src[j] & 255) == 40) {
-            j = skipws(j + 1);
-            if (j < nsrc) { if ((src[j] & 255) == 34) {
-                j = j + 1;
-                while (j < nsrc) {
-                    c = src[j] & 255;
-                    if (c == 34) break;
-                    if (c == 92) { j = j + 2; continue; }
-                    if (c == 37) {
-                        c = src[j + 1] & 255;
-                        if (c == 45 || c == 43 || c == 32 || c == 35 || c == 46) return 1;
-                        if (isdi(c)) return 1;
-                        j = j + 2; continue;
-                    }
-                    j = j + 1;
-                }
-            } }
-        } }
+        if (j < nsrc) { if ((src[j] & 255) == 40) return 1; }
         i = srcfind("printf", 6, i + 1);
     }
     return 0;

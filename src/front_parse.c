@@ -1988,7 +1988,7 @@ int pf_call(int t) {
         useit = 0;
         ps = sfind(t);
         if (ps >= 0) { if (symvar[ps]) {
-            if (kind(tp + 1) == T_STR) { if (fmtneedsrt(tp + 1)) useit = 1; }
+            useit = 1;   /* printf is an ordinary call whenever <stdio.h>'s is there */
         } }
         if (ps >= 0) { if (symvar[ps]) { if (kind(tp + 1) != T_STR) useit = 1; } }
         if (kind(tp + 1) == T_STR) pf_dryrun(tp + 1);
