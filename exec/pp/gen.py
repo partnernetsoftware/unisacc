@@ -17,7 +17,9 @@ each pass reading x and writing o, SWAP between passes:
 
 NOT covered (the delta rejects with a `not covered: ...` code, never guesses):
 #if/#elif expressions, _Pragma; function-like calls with zero parameters,
-variadic, # or ##, an argument containing `(`, or a function-like name in a body.
+variadic, an argument containing `(`, or a function-like name in a body;
+`#` in an object-like body, a `##` operand whose boundary byte is not an
+identifier/digit byte (build_hx, s12), # / ## bodies on an #if line.
 autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
 its trigger names read from include/*.h (E2_AUTOINC=0 builds without it).
 Also not modelled: #pragma push_macro/pop_macro
@@ -170,7 +172,8 @@ DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7,
 SPLB, IRLN, IRNL = 11 * 10 ** 7, 12 * 10 ** 7, 121 * 10 ** 6
 F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV, F_ACT, F_UP = 0, 1, 2, 3, 4, 5, 6, 7
 F_NP, F_P0, MAXP = 8, 9, 8          # function-like: parameter count, parameter ids
-FSZ = F_P0 + MAXP
+F_HASH = F_P0 + MAXP     # 1: the body has `#` outside literals (s12)
+FSZ = F_HASH + 1
 ARGB, ARGE = 62 * 10 ** 6, 63 * 10 ** 6   # argument blobs; the argument frame's entry
 # F_FN: 0 object-like, 1 function-like (covered), 2 function-like not covered
 # (zero parameters, variadic, more than MAXP, malformed)
@@ -225,6 +228,8 @@ class G:
 PUSHM = [("STX", "me", F_UP, "CUR"), ("COPYW", "CUR", "me"), ("LDI", "one", 1),
          ("STX", "me", F_ACT, "one"), ("ALUI", "add", "DEP", "DEP", 1),
          ("LDX", "BB", "me", F_BODY), ("INPUSH", "BB")]
+# the same, pushing the body HX rewrote (# and ## applied) instead of F_BODY
+PUSHMB = PUSHM[:-2] + [("INPUSH", "NB")]
 
 
 def ea(dst, e):              # W[dst] := address of macro entry W[e]
@@ -337,8 +342,10 @@ def build_xe(g, NC):
     g.r("XUM1", {0: zero,
                  (1, 2): ("XUM2", ea("me", "M") + [("LDX", "act", "me", F_ACT), ("RLD", "act")])})
     g.r("XUM2", {1: zero, (0, 2): ("XUM3", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
-    g.r("XUM3", {0: ("XO", PUSHM + [("ALUI", "add", "xdp", "xdp", 1)]),
+    g.r("XUM3", {0: ("XUM4", [("LDX", "hh", "me", F_HASH), ("RLD", "hh")]),
                  (1, 2): ("DEAD", NC("#if function-like macro name"))})
+    g.r("XUM4", {0: ("XO", PUSHM + [("ALUI", "add", "xdp", "xdp", 1)]),
+                 tuple(range(1, 257)): ("DEAD", NC("#if macro with # or ##"))})
     g.on("XD", WS, "XD", [("ADV",)])
     g.on("XD", [40], "XDP", [("ADV",), ("LDI", "xpar", 1)])
     g.on("XD", AL, "XDI", [("MARK", "XS")])
@@ -436,6 +443,141 @@ def build_xe(g, NC):
                  (XCODE["&&"], XCODE["||"]): ("RET", XPUSHV)})
     g.r("XT", {1: ("RET", [("COPYW", "xr", "xb"), ("ALU", "or", "xrp", "xkp", "xbp")] + XPUSHV),
                (0, 2): ("RET", [("COPYW", "xr", "xa_"), ("ALU", "or", "xrp", "xkp", "xap")] + XPUSHV)})
+
+
+# ---- # and ## (research/e2-pp-delta.md s12) -------------------------------
+# HSCAN (at #define): F_HASH := 1 when the body has `#` outside literals.
+# HX (at expansion, `me` = the macro, arguments in ARGB): the body is
+# rewritten into the string builder and saved as blob NB, which is then
+# rescanned exactly like a body (PUSHMB):
+#   `# p`     -> `"` + the argument's spelling, blanks trimmed, inner blank
+#               runs one space, `"` and `\` escaped inside literals + `"`
+#   `a ## b`  -> the two spellings concatenated (no space); a placemarker
+#               (empty argument) contributes nothing
+#   other parameters -> the argument text (blank runs one space), padded by
+#               a space each side, so the rescan tokenises it on its own
+# Covered paste operands: both boundary bytes are identifier/digit bytes, or
+# the operand is an empty argument.  Anything else -> not covered (the
+# reference re-tokenises invalid pastes; `+ ## -` etc. are not modelled).
+# Vars: GLUE (a `##` is pending), PSP (a space is owed), LASTK (the last
+# operand's final byte: 1 identifier/digit, 2 placemarker, 0 other).
+def build_hx(g, NC):
+    OTH = set(range(256)) - ID - WS - {10, 34, 39, 35}
+    # define-time scan
+    g.els("HSCAN", "HS0", [("LDI", "hz", 0), ("STX", "EA", F_HASH, "hz"), ("INPUSH", "BODY")])
+    g.on("HS0", [35], "HS0", [("ADV",), ("LDI", "hz", 1), ("STX", "EA", F_HASH, "hz")])
+    g.on("HS0", [EOF], "RET", [("INPOP",)])
+    for q in (34, 39):
+        g.on("HS0", [q], "HSQ%d" % q, [("ADV",)])
+        g.on("HSQ%d" % q, [92], "HSQ%dE" % q, [("ADV",)])
+        g.on("HSQ%d" % q, [q], "HS0", [("ADV",)])
+        g.on("HSQ%d" % q, [EOF], "RET", [("INPOP",)])
+        g.els("HSQ%d" % q, "HSQ%d" % q, [("ADV",)])
+        g.on("HSQ%dE" % q, [EOF], "RET", [("INPOP",)])
+        g.els("HSQ%dE" % q, "HSQ%d" % q, [("ADV",)])
+    g.els("HS0", "HS0", [("ADV",)])
+
+    one = [("MARK", "hc0"), ("ADV",), ("MARK", "hc1"), ("SBSPAN", "hc0", "hc1")]
+    g.els("HX", "HW", [("SBCLR",), ("LDI", "GLUE", 0), ("LDI", "PSP", 0), ("LDI", "LASTK", 0),
+                       ("LDX", "hfn", "me", F_FN), ("LDX", "hb", "me", F_BODY), ("INPUSH", "hb")])
+
+    # pre-emission of one byte (still at the cursor) in context c, then copy
+    def pre(c, back):
+        g.r("HPG" + c, {1: ("HPG1" + c, []), 0: ("HPS" + c, [("RLD", "PSP")])})
+        g.on("HPG1" + c, ID, "HCP" + c, [("LDI", "GLUE", 0), ("LDI", "PSP", 0)])
+        g.els("HPG1" + c, "DEAD", NC("## operand"))
+        g.r("HPS" + c, {1: ("HCP" + c, [("SBOUT", 32), ("LDI", "PSP", 0)]), 0: ("HCP" + c, [])})
+        # copy: an identifier/digit byte, a literal, or one other byte
+        g.on("HCP" + c, ID, back, one + [("LDI", "LASTK", 1)])
+        g.on("HCP" + c, OTH, back, one + [("LDI", "LASTK", 0)])
+        for q in (34, 39):
+            L = "HL%d%s" % (q, c)
+            g.on("HCP" + c, [q], L, one + [("LDI", "LASTK", 0)])
+            g.on(L, [92], L + "E", one)
+            g.on(L, [q], back, one)
+            g.on(L, [10, EOF], "DEAD", NC("unterminated literal in a body"))
+            g.els(L, L, one)
+            g.on(L + "E", [EOF], "DEAD", NC("unterminated literal in a body"))
+            g.els(L + "E", L, one)
+        g.els("HCP" + c, "DEAD", NC("hash rewrite"))
+    pre("W", "HW")
+    pre("A", "HA1")
+
+    # body walk
+    g.on("HW", WS | {10}, "HW", [("ADV",), ("LDI", "PSP", 1)])
+    g.on("HW", AL, "HID", [("MARK", "hs")])
+    g.on("HW", [EOF], "HWE", [("RLD", "GLUE")])
+    g.r("HWE", {0: ("RET", [("INPOP",), ("SBSAVE", "NB")]),
+                tuple(range(1, 257)): ("DEAD", NC("## at the end of a body"))})
+    g.on("HW", [35], "HH", [("ADV",)])
+    g.els("HW", "HPGW", [("RLD", "GLUE")])
+    # identifier: a parameter (function-like) or copied
+    g.on("HID", ID, "HID", [("ADV",)])
+    g.on("HID", [92], "DEAD", NC("UCN in a body"))
+    g.els("HID", "HPL0I", [("MARK", "he"), ("INTERN", "hid", "hs", "he"), ("RLD", "hfn")])
+
+    def plook(c, found, notp):
+        g.r("HPL0" + c, {1: ("HPL" + c, [("LDI", "hk", 0), ("LDX", "hnp", "me", F_NP),
+                                          ("CMP", "hk", "hnp")]),
+                         tuple(k for k in range(257) if k != 1): notp})
+        g.r("HPL" + c, {0: ("HPC" + c, [("ALUI", "add", "hpa", "me", F_P0), ("ALU", "add", "hpa", "hpa", "hk"),
+                                         ("LDX", "hpv", "hpa", 0), ("CMP", "hpv", "hid")]),
+                        (1, 2): notp})
+        g.r("HPC" + c, {1: found, (0, 2): ("HPL" + c, [("ALUI", "add", "hk", "hk", 1), ("CMP", "hk", "hnp")])})
+    getarg = [("ALUI", "add", "hpa", "hk", ARGB), ("LDX", "hab", "hpa", 0)]
+    # not a parameter: the spelling (an identifier is a valid paste operand)
+    plook("I", ("HAP", getarg + [("RLD", "GLUE")]), ("HNP", [("RLD", "GLUE")]))
+    g.r("HNP", {1: ("HW", [("LDI", "GLUE", 0), ("LDI", "PSP", 0), ("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)]),
+                0: ("HNP2", [("RLD", "PSP")])})
+    g.r("HNP2", {1: ("HW", [("SBOUT", 32), ("LDI", "PSP", 0), ("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)]),
+                 0: ("HW", [("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)])})
+    # a parameter: its argument, padded unless pasted
+    g.r("HAP", {1: ("HA0", [("INPUSH", "hab")]),
+                0: ("HA0", [("LDI", "PSP", 1), ("LDI", "LASTK", 2), ("INPUSH", "hab")])})
+    g.on("HA0", WS | {10}, "HA0", [("ADV",)])
+    g.on("HA0", [EOF], "HW", [("INPOP",), ("LDI", "PSP", 1), ("LDI", "GLUE", 0)])
+    g.els("HA0", "HPGA", [("RLD", "GLUE")])
+    g.on("HA1", WS | {10}, "HA1", [("ADV",), ("LDI", "PSP", 1)])
+    g.on("HA1", [EOF], "HW", [("INPOP",), ("LDI", "PSP", 1), ("LDI", "GLUE", 0)])
+    g.els("HA1", "HPGA", [("RLD", "GLUE")])
+    # `#`: `##` or stringize
+    g.on("HH", [35], "HPP", [("ADV",), ("RLD", "LASTK")])
+    g.r("HPP", {(1, 2): ("HW", [("LDI", "GLUE", 1), ("LDI", "PSP", 0)]),
+                0: ("DEAD", NC("## operand"))})
+    g.els("HH", "HH1", [("RLD", "hfn")])
+    g.r("HH1", {1: ("HH2", [("RLD", "GLUE")]), (0, 2): ("DEAD", NC("# in an object-like body"))})
+    g.r("HH2", {0: ("HH3", []), 1: ("DEAD", NC("## operand"))})
+    g.on("HH3", WS, "HH3", [("ADV",)])
+    g.on("HH3", AL, "HHI", [("MARK", "hs")])
+    g.els("HH3", "DEAD", NC("# not followed by a parameter"))
+    g.on("HHI", ID, "HHI", [("ADV",)])
+    g.els("HHI", "HPL0S", [("MARK", "he"), ("INTERN", "hid", "hs", "he"), ("LDI", "one", 1), ("RLD", "one")])
+    plook("S", ("HSQ", getarg + [("RLD", "PSP")]), ("DEAD", NC("# not followed by a parameter")))
+    g.r("HSQ", {1: ("HS", [("SBOUT", 32), ("SBOUT", 34), ("LDI", "SPS", 0), ("INPUSH", "hab")]),
+                0: ("HS", [("SBOUT", 34), ("LDI", "SPS", 0), ("INPUSH", "hab")])})
+    # stringize walk: leading blanks dropped, inner runs pending as one space
+    g.on("HS", WS | {10}, "HS", [("ADV",)])
+    g.on("HS", [EOF], "HW", [("INPOP",), ("SBOUT", 34), ("LDI", "LASTK", 0), ("LDI", "PSP", 0)])
+    g.els("HS", "HSP", [("RLD", "SPS")])
+    g.r("HSP", {1: ("HSC", [("SBOUT", 32), ("LDI", "SPS", 0)]), 0: ("HSC", [])})
+    g.on("HS1", WS | {10}, "HS1", [("ADV",), ("LDI", "SPS", 1)])
+    g.on("HS1", [EOF], "HW", [("INPOP",), ("SBOUT", 34), ("LDI", "LASTK", 0), ("LDI", "PSP", 0)])
+    g.els("HS1", "HSP", [("RLD", "SPS")])
+    for q in (34, 39):
+        L = "HSL%d" % q
+        g.on("HSC", [q], L, ([("SBOUT", 92)] if q == 34 else []) + one)
+        g.on(L, [92], L + "E", [("SBOUT", 92)] + one)
+        if q == 39:
+            g.on(L, [34], L, [("SBOUT", 92)] + one)
+            g.on(L, [39], "HS1", one)
+        else:
+            g.on(L, [34], "HS1", [("SBOUT", 92)] + one)
+        g.on(L, [10, EOF], "DEAD", NC("unterminated literal in a stringized argument"))
+        g.els(L, L, one)
+        g.on(L + "E", [92, 34], L, [("SBOUT", 92)] + one)
+        g.on(L + "E", [EOF], "DEAD", NC("unterminated literal in a stringized argument"))
+        g.els(L + "E", L, one)
+    g.els("HSC", "HS1", one)
 
 
 def build():
@@ -699,13 +841,17 @@ def build():
     g.on("DP1", [41], "DBF", [("ADV",), ("STX", "EA", F_NP, "NP")])
     g.els("DP1", *fn2)
     g.on("DBF", WS, "DBF", [("ADV",)])
-    g.els("DBF", "P3BLANK", [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE"),
-                             ("STX", "EA", F_BODY, "BODY"), ("LDI", "one", 1),
-                             ("STX", "EA", F_FN, "one"), ("JUMP", "LS")])
+    subh, puh = g.call("HSCAN", "DBFR")
+    g.els("DBF", subh, [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE"),
+                        ("STX", "EA", F_BODY, "BODY"), ("LDI", "one", 1),
+                        ("STX", "EA", F_FN, "one"), ("JUMP", "LS")] + puh)
+    g.els("DBFR", "P3BLANK")
     g.on("DB_WS", WS, "DB_WS", [("ADV",)])
     sub, pu = g.call("MDEF", "DB_R")
     g.els("DB_WS", sub, [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE")] + pu)
-    g.els("DB_R", "P3BLANK", [("STX", "EA", F_BODY, "BODY"), ("JUMP", "LS")])
+    subh, puh = g.call("HSCAN", "DB_RR")
+    g.els("DB_R", subh, [("STX", "EA", F_BODY, "BODY"), ("JUMP", "LS")] + puh)
+    g.els("DB_RR", "P3BLANK")
 
     # #include: incdo()
     g.on("INC0", WS, "INC0", [("ADV",)])
@@ -781,7 +927,11 @@ def build():
     # function-like: only an invocation (name, blanks/newlines, `(`) is out of scope
     start = [("OUT", 32), ("LDI", "DEP", 0), ("LDI", "SEP", 0), ("LDI", "CUR", 0)]
     g.r("ERM3", {2: ("ERFN", []), 1: ("ERFC", [("LDI", "NLC", 0)]),
-                 0: ("EB", [("LDI", "NLC", 0), ("LDI", "FNE", 0)] + start + [("LDI", "O0", -1)] + PUSHM)})
+                 0: ("ERH", [("LDI", "NLC", 0), ("LDI", "FNE", 0)] + start + [("LDI", "O0", -1)]
+                     + [("LDX", "hh", "me", F_HASH), ("RLD", "hh")])})
+    subx, pux = g.call("HX", "ERHR")
+    g.r("ERH", {0: ("EB", PUSHM), 1: (subx, pux), tuple(range(2, 257)): ("DEAD", NC("hash flag"))})
+    g.els("ERHR", "EB", PUSHMB)
     # function-like call: name, blanks/newlines (counted, re-emitted after
     # the expansion), `(`, arguments split at commas, `)`
     g.on("ERFC", [32, 9], "ERFC", [("ADV",)])
@@ -795,7 +945,12 @@ def build():
     g.r("ARGC", {0: ("ARG", [("MARK", "AS")]), (1, 2): ("DEAD", NC("argument count"))})
     g.on("ARG", [41], "ARGN", save + [("LDX", "np", "me", F_NP), ("CMP", "NA", "np")])
     # a function-like expansion that emits nothing is padded by one space only
-    g.r("ARGN", {1: ("EB", [("COPYW", "FNE", "me")] + start + [("OLEN", "O0")] + PUSHM),
+    subx, pux = g.call("HX", "ARHR")
+    g.r("ARH", {0: ("EB", PUSHM), 1: (subx, pux), tuple(range(2, 257)): ("DEAD", NC("hash flag"))})
+    # the rewritten body has its parameters substituted: FNE matches no entry
+    g.els("ARHR", "EB", [("LDI", "FNE", -1)] + PUSHMB)
+    g.r("ARGN", {1: ("ARH", [("COPYW", "FNE", "me")] + start + [("OLEN", "O0"),
+                                                                ("LDX", "hh", "me", F_HASH), ("RLD", "hh")]),
                  (0, 2): ("DEAD", NC("argument count"))})
     g.on("ARG", [10], "ARG", [("ADV",), ("ALUI", "add", "NLC", "NLC", 1)])
     g.on("ARG", [EOF], "DEAD", NC("unterminated macro call"))
@@ -898,13 +1053,17 @@ def build():
     g.r("EBM3", {1: ("EBNX", [("RLD", "PS")]),
                  0: ("EBM4", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
     g.r("EBM4", {(1, 2): ("DEAD", NC("function-like macro name in a body")),
-                 0: ("EB", PUSHM)})
+                 0: ("EBH", [("LDX", "hh", "me", F_HASH), ("RLD", "hh")])})
+    subx, pux = g.call("HX", "EBHR")
+    g.r("EBH", {0: ("EB", PUSHM), 1: (subx, pux), tuple(range(2, 257)): ("DEAD", NC("hash flag"))})
+    g.els("EBHR", "EB", PUSHMB)
     # end of a round: none changed -> x is the result; else again, at most 8
     g.r("P4END", {1: ("ACC", [("OCLR",), ("LDI", "Z", 0), ("XLEN", "XE"), ("SPAN2", "Z", "XE")]),
                   (0, 2): ("ACC", [])})  # the token rescan is complete: one round
     g.r("P4N", {1: ("ACC", []), (0, 2): ("P4", [("SWAP",)])})
     g.els("ACC", "ACC", [("ACCEPT",)])
     build_xe(g, NC)
+    build_hx(g, NC)
     g.finish()
     return g
 

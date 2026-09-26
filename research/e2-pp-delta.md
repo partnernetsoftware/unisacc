@@ -469,3 +469,40 @@ Shards: ex.aa..af (104 files in this split): 79 equal, 20 equal-noauto,
 ## autoinc (measured 2026-09-26; in the delta as P2, build_autoinc)
 
 Reference: autoinc() runs after decomment(), before preprocess(). For each header in the fixed order assert.h ctype.h stdlib.h string.h wchar.h stdio.h, if some `static NAME(...){` definition line of include/H is *called* in the source and never *defined* there (srcuse==1; printf excluded), it PREPENDS the line `#include <H>` at byte 0 (so later headers land above earlier ones), which P3 then processes as a normal include. Afterwards, a printf format with a width/flag/precision prepends `#include <stdio.h>`. Measured: strcpy+strlen with no include -> ref -E emits string.h text, noauto does not. gen.autoinc_map() derives the trigger names from include/*.h (ctype 14, stdlib 28, string 15, wchar 1, stdio 40, assert 0). Wired (gen.build_autoinc, first run only, between P1 and P3): one scan of x marks W[AIB+id] bit 1 for an identifier run followed (space/tab/newline) by `(`, bit 2 when that `(`'s matching `)` is followed by `{` (srcuse returns 2 on any definition-shaped occurrence, else 1 on any call: the bits encode exactly that); after `printf (` the first string literal is checked for `%` followed by `- + space # .` or a digit (rtprintf). Per header in order, a name of autoinc_map() (printf excluded) with status exactly 1 sets NEED_h; the output is rtprintf's stdio.h line, then the needed headers last-to-first, then x -- the byte-0 prepend order. No new sim actions. Verdicts: 6 hand probes equal against the reference (strcpy/strlen/isalpha/abs; printf width; a defined strlen; plain printf + malloc; a commented-out call and `(strcmp)(`; assert/wcslen/memcpy); examples+tests 107: 99 equal, 8 not covered, 0 noauto, 0 DIFF; corpus 249: 226 equal (+25), 0 noauto, 17 not covered, 6 reject-agree, 0 DIFF.
+
+## §12 `#` and `##` (2026-09-26)
+
+Measured on the reference (`ua_ref -E`, main f74b61a), then modelled.
+Stringize: the argument's spelling, leading/trailing blanks and newlines
+dropped, every inner run one space (`S(  a+  b  )` -> `"a+ b"`, `S(a` NL
+` b)` -> `"a b"`; NOT re-tokenised: `S(a+b)` -> `"a+b"`), `"` and `\`
+escaped only inside string/char literals (`S(\)` -> `"\"`, `S('"')` ->
+`"'\"'"`, `S("\"")` -> `"\"\\\"\""`). Paste: spellings concatenated, a
+placemarker (empty argument) contributes nothing (C99 6.10.3.5 ex. 3/5:
+`t(,,12)` -> `12`, `t(,,)` -> nothing, `glue(a b,c d)` -> `a bc d`), the
+result rescanned (`glue(f,oo)` -> `7` when `foo` is 7; `glue(g,)(1,2)` ->
+`g (1,2)`, the macro's own name hidden). An invalid paste is re-tokenised
+by the reference (`glue(+,-)` -> `+ -`); a lone `#` in an object-like body
+is a punctuator (`a # b`).
+
+Delta (exec/pp/gen.py `build_hx`, no new sim action): at `#define`, HSCAN
+sets F_HASH (FSZ 17 -> 18) when the body has `#` outside literals. At an
+expansion with F_HASH, HX rewrites the body into the string builder --
+`# p` stringized, `##` gluing its neighbours, any other parameter replaced by
+its argument text padded by a space each side -- saves it as a blob and
+pushes it in place of the body (PUSHMB: same hide-set bookkeeping; FNE := -1
+so nothing in it is taken for a parameter). The rescan (EB) is unchanged, so
+spacing follows §10. Textual substitution of non-pasted arguments matches
+the ARGE frame route: the argument is rescanned with the macro active in
+both.
+
+Not covered (never guessed): a `##` operand whose boundary byte is not an
+identifier/digit byte (`+ ## -`, `x ## "s"`, a stringized operand), `#` in
+an object-like body (hash_hash, 6.10.3.5 ex. 4), `#` not followed by a
+parameter, a # / ## macro on an #if line, and everything §10.5 leaves out
+(nested call arguments, a function-like name in a body: `xstr(glue(a,b))`).
+
+Probes 13 (6.10.3.5 ex. 3 and 5, str/glue/xstr, spacing, escaping): 8 equal,
+5 not covered, 0 DIFF. ex.aa..af 107: 100 equal (+1), 7 not covered, 0 DIFF;
+corpus.aa..ag 249: 228 equal (+2), 15 not covered, 6 reject-agree, 0 DIFF.
+Table 603 states.
