@@ -730,11 +730,21 @@ def build():
     P("IN.as").o("\n  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  store64 [r1+0], r0\n").call("NEXT").goto("IN.l")
     q = P("IN.br")          # (measured, globals) .lea r1, g_X; .zero r1, 0, SIZE
     q.a(("INTERN", "iv", "ips", "ipe"), ("LDX", "t", "iv", GSZ), ("LDX", "ivt", "iv", E.PTR), ("LDX", "ivb", "iv", E.BASE),
-        ("LDX", "iar", "iv", E.ARR), ("LDI", "ix", 0))
+        ("LDX", "iar", "iv", E.ARR), ("LDI", "ix", 0), ("LDI", "ibr", 0), ("LDI", "inx", 0))
     q.o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  .zero r1, 0, ").num("t").o("\n").call("NEXT").label("IN.el")
-    q.tok({TK_NUM: "IN.en", "}": "IN.ed"}, "DEAD.ginit")
+    q.tok({TK_NUM: "IN.en", "}": "IN.ed", "{": "IN.ib"}, "DEAD.ginit")
+    # T a[N][M] = {{..}, {..}}: the same stores as the flat list (measured, s36); a row's braces
+    # start where the previous row ended, and closing one moves to the next row (the rest is .zero)
+    q = P("IN.ib")
+    q.branch({2: "IN.ib1"}, "DEAD.ginit", [("CMPI", "iar", 1)])
+    P("IN.ib1").branch({1: "IN.ib2"}, "DEAD.ginit", [("CMPI", "iar", 2)])
+    P("IN.ib2").branch({1: "IN.ib3"}, "DEAD.ginit", [("CMPI", "ibr", 0)])
+    P("IN.ib3").branch({1: "IN.ib4"}, "DEAD.ginit", [("CMP", "ix", "inx")])
+    P("IN.ib4").a(("ALUI", "mul", "u", "iv", 8), ("ALUI", "add", "u", "u", 1), ("LDX", "u", "u", DIM), ("ALU", "add", "inx", "ix", "u"),
+        ("LDI", "ibr", 1)).call("NEXT").tok({TK_NUM: "IN.en", "}": "IN.ed"}, "DEAD.ginit")
     q = P("IN.en")          # the element's offset and type: an array's k-th, or a struct's k-th member
-    q.branch({1: "IN.ea"}, "IN.es", [("CMPI", "iar", 1)])
+    q.branch({1: "IN.en1"}, "IN.ea", [("CMPI", "iar", 0)])
+    P("IN.en1").branch({1: "IN.es"}, "IN.ea", [("CMPI", "ibr", 0)])
     q = P("IN.ea")
     q.a(("ALUI", "sub", "td", "ivt", 1), ("COPYW", "tb", "ivb")).call("ELSZ").a(("ALU", "mul", "ioff", "ix", "es"),
         ("ALUI", "sub", "vt", "ivt", 1), ("COPYW", "vb", "ivb")).goto("IN.ew")
@@ -755,9 +765,13 @@ def build():
     emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").branch({1: "IN.st"}, "IN.off", [("CMPI", "ioff", 0)])
     P("IN.off").o("  imm r2, ").num("ioff").o("\n  add64 r1, r1, r2\n").goto("IN.st")
     q = P("IN.st")
-    q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
+    q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "IN.st1"}, "IN.st2", [("CMPI", "ibr", 1)])
+    P("IN.st1").branch({2: "DEAD.ginit"}, "IN.st2", [("CMP", "ix", "inx")])   # past the row: not covered
+    P("IN.st2").call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
     P("IN.ec").call("NEXT").goto("IN.el")
-    P("IN.ed").call("NEXT").goto("IN.l")
+    P("IN.ed").branch({1: "IN.ic"}, "IN.ed0", [("CMPI", "ibr", 1)])
+    P("IN.ed0").call("NEXT").goto("IN.l")
+    P("IN.ic").a(("COPYW", "ix", "inx"), ("LDI", "ibr", 0)).call("NEXT").tok({",": "IN.ec", "}": "IN.ed"}, "DEAD.ginit")
     q = P("IN.v")
     emit(q, "imm").o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").a(("INTERN", "v", "ips", "ipe"), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("STOREV").goto("IN.nx")
     # function: int NAME ( params ) { body }
@@ -960,12 +974,20 @@ def build():
     # T x[N] = { e, ... } / struct T x = { e, ... } (measured, local): imm r2, S; sub64 r1, r6, r2; .zero r1, 0, SIZE;
     # then each element's value, imm r2, S - OFF; sub64 r1, r6, r2; the store at the element's width
     q = P("S.lbr")
-    q.a(("LDX", "ivt", "v", E.PTR), ("LDX", "ivb", "v", E.BASE), ("COPYW", "iar", "dar"), ("COPYW", "isl", "s"), ("LDI", "ix", 0))
+    q.a(("LDX", "ivt", "v", E.PTR), ("LDX", "ivb", "v", E.BASE), ("COPYW", "iar", "dar"), ("COPYW", "isl", "s"), ("LDI", "ix", 0),
+        ("COPYW", "ivv", "v"), ("LDI", "ibr", 0), ("LDI", "inx", 0))
     q.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n  .zero r1, 0, ").num("dsz").o("\n").call("NEXT").label("LB.el")
-    q.tok({"}": "LB.ed"}, "LB.e")
+    q.tok({"}": "LB.ed", "{": "LB.ib"}, "LB.e")
+    q = P("LB.ib")          # a row's braces in T a[N][M] (as IN.ib, measured s36)
+    q.branch({1: "LB.ib2"}, "DEAD.linit", [("CMPI", "iar", 2)])
+    P("LB.ib2").branch({1: "LB.ib3"}, "DEAD.linit", [("CMPI", "ibr", 0)])
+    P("LB.ib3").branch({1: "LB.ib4"}, "DEAD.linit", [("CMP", "ix", "inx")])
+    P("LB.ib4").a(("ALUI", "mul", "u", "ivv", 8), ("ALUI", "add", "u", "u", 1), ("LDX", "u", "u", DIM), ("ALU", "add", "inx", "ix", "u"),
+        ("LDI", "ibr", 1)).call("NEXT").tok({"}": "LB.ed"}, "LB.e")
     q = P("LB.e")
-    q.vpush("ivt", "ivb", "iar", "isl", "ix", "bd", "tb").call("EXPR").vpop("ivt", "ivb", "iar", "isl", "ix", "bd", "tb")
-    q.branch({1: "LB.ea"}, "LB.es", [("CMPI", "iar", 1)])
+    q.vpush("ivt", "ivb", "iar", "isl", "ix", "bd", "tb", "ivv", "ibr", "inx").call("EXPR").vpop("ivt", "ivb", "iar", "isl", "ix", "bd", "tb", "ivv", "ibr", "inx")
+    q.branch({1: "LB.en1"}, "LB.ea", [("CMPI", "iar", 0)])
+    P("LB.en1").branch({1: "LB.es"}, "LB.ea", [("CMPI", "ibr", 0)])
     q = P("LB.ea")
     q.a(("ALUI", "sub", "td", "ivt", 1), ("COPYW", "tb", "ivb")).call("ELSZ").a(("ALU", "mul", "ioff", "ix", "es"),
         ("ALUI", "sub", "vt", "ivt", 1), ("COPYW", "vb", "ivb")).goto("LB.w")
@@ -985,9 +1007,13 @@ def build():
     q.branch({(1, 2): "DEAD.linit"}, "LB.w3", [("CMPI", "vb", SBB)])
     q = P("LB.w3")
     q.a(("ALU", "sub", "t", "isl", "ioff")).o("  imm r2, ").num("t").o("\n  sub64 r1, r6, r2\n")
-    q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).tok({",": "LB.ec", "}": "LB.ed"}, "DEAD.linit")
+    q.call("STOREV").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "LB.st1"}, "LB.st2", [("CMPI", "ibr", 1)])
+    P("LB.st1").branch({2: "DEAD.linit"}, "LB.st2", [("CMP", "ix", "inx")])
+    P("LB.st2").tok({",": "LB.ec", "}": "LB.ed"}, "DEAD.linit")
     P("LB.ec").call("NEXT").goto("LB.el")
-    P("LB.ed").call("NEXT").tok({",": "S.dcm"}, "S.dend")
+    P("LB.ed").branch({1: "LB.ic"}, "LB.ed0", [("CMPI", "ibr", 1)])
+    P("LB.ic").a(("COPYW", "ix", "inx"), ("LDI", "ibr", 0)).call("NEXT").tok({",": "LB.ec", "}": "LB.ed"}, "DEAD.linit")
+    P("LB.ed0").call("NEXT").tok({",": "S.dcm"}, "S.dend")
     q = P("S.din1")
     q.vpush("s", "v", "bd", "tb").call("NEXT").call("EXPR").call("ISDV").a(("COPYW", "sdv", "u")).vpop("s", "v", "bd", "tb")
     q.a(("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("ISDV").branch({1: "S.din2"}, "DEAD.dbl", [("CMP", "u", "sdv")])
