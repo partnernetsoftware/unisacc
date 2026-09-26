@@ -1056,7 +1056,12 @@ def expr():
         nx = "IT.va%d" % (k + 1) if k + 1 < len(VANAMES) else "IT.nd0"
         p.branch({1: "VA." + nm}, nx, [("CMP", "v", "va%d" % k)])
         p = P(nx)
-    p.branch({1: "PF"}, "IT.nw", [("CMP", "v", "pfid")])
+    p.branch({1: "PF"}, "IT.ac", [("CMP", "v", "pfid")])
+    # __argc() -> `.argc r0` (int); __argv(k) -> k, then `.argv r0, r0` (char *) -- measured
+    P("IT.ac").branch({1: "IT.acx"}, "IT.av", [("CMP", "v", "acid")])
+    P("IT.acx").call("NEXT").expect(")").o("  .argc r0\n").a(("LDI", "pt", 0), ("LDI", "pb", SZ["int"])).call("NEXT").ret()
+    P("IT.av").branch({1: "IT.avx"}, "IT.nw", [("CMP", "v", "avid")])
+    P("IT.avx").call("NEXT").call("CEXPR").expect(")").o("  .argv r0, r0\n").a(("LDI", "pt", 1), ("LDI", "pb", SZ["char"])).call("NEXT").ret()
     va()
     # syscall builtins (SYSCALLS): arguments pushed as for a call, popped to r(n-1)..r0,
     # r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5` (w 6) -- measured
@@ -1565,7 +1570,7 @@ def unit():
     autoscan()
     p = P("START")
     p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
-        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"),
+        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"), ("SBCLR",), [("SBOUT", c) for c in b"__argc"], ("SBINTERN", "acid"), ("SBCLR",), [("SBOUT", c) for c in b"__argv"], ("SBINTERN", "avid"),
         [x for k, nm in enumerate(VANAMES) for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "va%d" % k)]],
         [x for k, (nm, _, _) in enumerate(SYSCALLS, 1)
          for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "sy%d" % k)]])
