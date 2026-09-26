@@ -2578,3 +2578,13 @@ this run; product/code inputs were unchanged. Windows native bootstrap was a
 separate run, not implied by the macOS gate. No push/release. This closes the
 fifth source-to-image target, not Windows x86_64, full frontend coverage,
 network inference or product adoption. WINARGS_BODY remains a named template.
+
+### Windows x86 setup after relaxation (2026-09-27)
+
+The encoder retains per-instruction setup operands, measures fixed sizes, and
+regenerates winsave/winrest/winstdh/winargs after branch relaxation and PE
+address layout. A 359-byte fixture with a shortened preceding jump equals the
+reference on C and Python executors; wrong return register, target and arity
+are rejected. WINARGS_BODY is a declared template, not a migrated algorithm.
+No executor primitive added. WinAPI gate bodies and full x86 PE/source closure
+remain pending. Existing x86 fixture regression passes; product unchanged.

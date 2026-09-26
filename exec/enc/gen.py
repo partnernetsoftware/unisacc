@@ -167,7 +167,7 @@ def relax():
     p.a(("LDI", "q", 0)).label("WR.l")
     p.branch({0: "WR.i"}, "RET", [("CMP", "q", "npc")])
     p = P("WR.i")
-    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c", 4:"WR.addr", 5:"WR.argsave", 6:"WR.argvget"}, "WR.blob", [("RLD", "k")])
+    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c", 4:"WR.addr", 5:"WR.argsave", 6:"WR.argvget", 7:"WR.win"}, "WR.blob", [("RLD", "k")])
     p = P("WR.c")           # call rel32: E8, target - (the call's final offset + 5)
     p.call("LADDR").a(("LDX", "o_", "q", OFF), ("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"),
                      ("LDI", "t", 0xE8), ("OUTW", "t"), ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
@@ -199,6 +199,8 @@ def build(image=False):
     p = P("START")
     classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     classes.update(FP_IDS)
+    from x86win import IDS as WIN_IDS
+    classes.update(WIN_IDS)
     classes.update({"gate": C_GATE, ".lea": C_LEA, "setmem": C_SETMEM, "argsave":C_ARGSAVE, "argvget":C_ARGVGET})
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
@@ -220,7 +222,7 @@ def build(image=False):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     for w in ("true", "false", "winapi", "carry", *[k for k in META_KEYS if k not in ("role", "form", "reloc", "carry", "winapi")]):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
-    for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs")]:
+    for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2"), ("win/x86_64", "target3")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs")]:
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     p.a(("LDI", "target_os", 1), ("LDI", "has_relocs", 0))
     p.a(("SBCLR",), [("SBOUT", ch) for ch in b"_start"], ("SBINTERN", "id_entry"))
@@ -369,7 +371,7 @@ def build(image=False):
               C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
               C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate", C_LEA:"AD.lea", C_SETMEM:"AD.setmem", C_ARGSAVE:"AD.argsave", C_ARGVGET:"AD.argvget",
               C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
-              **{v: "FP." + k for k, v in FP_IDS.items()}}, "DEAD.op", [("RLD", "cls")])
+              **{v: "FP." + k for k, v in FP_IDS.items()}, **{v:"WX.store" for v in WIN_IDS.values()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     P("E.gate").branch({1: "EG.emit"}, "DEAD.meta", [("CMPI", "na", 0)])
     p = byte(byte(P("EG.emit"), 0x0f), 0x05)
@@ -568,6 +570,8 @@ def build(image=False):
         ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
     install_fp(E, byte)
     install_address(E, byte, KND, SZ, OFF, LABD)
+    from x86win import install as install_win
+    install_win(E, byte, KND, SZ)
     relax()
     p = P("DONE").call("RELAX").call("LAYOUT").call("WRITE")
     if image:

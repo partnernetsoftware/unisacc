@@ -59,6 +59,7 @@ job exec-lowdata ./exec/lower/check.sh                           # raw E4 tape d
 job exec-lower ./exec/lower/fullcheck.sh                        # typed full Linux lowering comparison
 job exec-armlower ./exec/lower/armcheck.sh                     # ARM ABI, sext/immediate fusion and real tapes
 job exec-winlower ./exec/lower/wincheck.sh                     # Windows typed setup, syscall preservation, both architectures
+job exec-x86win ./exec/enc/x86wincheck.sh                      # Deferred Windows x86 setup after relaxation
 job exec-armwin ./exec/enc/armwincheck.sh                      # Windows ARM setup/gates, real text bytes
 job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, relocations, real ARM images
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes

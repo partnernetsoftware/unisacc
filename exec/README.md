@@ -103,3 +103,11 @@ on the process tree; VM lifecycle remains the caller's responsibility.
 The outer 60 s budget covers both generations and transfers: it can expire
 before the two separate 30 s guest watchdogs. Such a run fails; it is not a
 successful bootstrap. Missing exit-receipt files are retried while polling.
+
+Windows x86 setup is now encoded by `exec/enc/x86win.py`: winsave,
+winrest (result in rax), winstdh and winargs. Fixed sizes are measured before
+branch relaxation; bytes are regenerated afterwards with final RIP addresses,
+and the final sizes must match. `x86wincheck.sh` compares both executors with
+the reference, including a shortening branch before these instructions.
+WINARGS_BODY remains an explicit machine-code template. WinAPI gate bodies
+and the full Windows x86 PE route are still pending; this is not target closure.

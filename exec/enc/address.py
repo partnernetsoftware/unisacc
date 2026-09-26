@@ -4,7 +4,7 @@ No reference layout or encoder is called at runtime. Format constants are read
 at generation; page rounding, symbol resolution and displacements are delta
 operations. This slice outputs text only; header data is not an image yet.
 """
-from unisa.image import elf, macho
+from unisa.image import elf, macho, pe
 from unisa.tape import DATA_BASE
 SYM, PRESENT, DEST, VALUE, NAMED, OPCODE, VALUE2 = (i * 10**6 for i in range(85, 92))
 
@@ -25,7 +25,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
         p=P('HDR.next.'+key)
     p.goto('DEAD.addr')
     p=P('HDR.target');p.a(('INTERN','ht','hv','hend'))
-    for i,t in enumerate(('lnx/x86_64','osx/x86_64'),1):
+    for i,t in enumerate(('lnx/x86_64','osx/x86_64','win/x86_64'),1):
         p.branch({1:'HDR.target'+str(i)},'HDR.tnext'+str(i),[('CMP','ht','id_target'+str(i))])
         P('HDR.target'+str(i)).a(('LDI','target_os',i)).goto('SKIPL')
         p=P('HDR.tnext'+str(i))
@@ -51,10 +51,14 @@ def install(E, byte, KND, SZ, OFF, LABD):
     P('AD.mem').a(('COPYW','ad_r','a0'),('COPYW','ad_v','a1'),('LDI','ad_o',0x8b),('LDI','anamed',0)).goto('AD.store')
     P('AD.addr').a(('LDI','anamed',0)).goto('AD.lea')
     # Layout format declarations read here, algorithm remains explicit.
-    p=P('LAYOUT');p.branch({1:'LAY.lnx',2:'LAY.osx'},'DEAD.addr',[('RLD','target_os')])
+    p=P('LAYOUT');p.branch({1:'LAY.lnx',2:'LAY.osx',3:'LAY.win'},'DEAD.addr',[('RLD','target_os')])
     for tag,m,base in [('lnx',elf,elf.VADDR),('osx',macho,macho.VMADDR)]:
         h=m.HDRS('x86_64'); page=m.PAGE
         P('LAY.'+tag).a(('LDI','text_va',base+h),('A64I','add','data_va','endo',h+page-1),('A64I','and','data_va','data_va',-page),('A64I','add','data_va','data_va',base),('A64I','sub','data_shift','data_va',DATA_BASE)).ret()
+    idata=40+16*(len(pe.IMPORTS)+1)+sum((len(n.encode())+4)&-2 for n in pe.IMPORTS)+len(pe.DLL)+1
+    idata=((idata+7)&-8)+pe.LOADCFG
+    pg=pe.SECT_ALIGN
+    P('LAY.win').a(('LDI','text_va',pe.IMAGEBASE+pe.TEXT_RVA),('A64I','add','data_va','endo',pg-1),('A64I','and','data_va','data_va',-pg),('A64I','add','imp_base','data_va',pe.IMAGEBASE+pe.TEXT_RVA+40+8*(len(pe.IMPORTS)+1)),('A64I','add','data_va','data_va',pe.IMAGEBASE+pe.TEXT_RVA+((idata+pg-1)&-pg)),('A64I','sub','data_shift','data_va',DATA_BASE)).ret()
     # Resolve names after offsets are final; unknown symbols are errors.
     p=P('WR.addr');p.a(('LDX','ad_v','q',VALUE),('LDX','t','q',NAMED)).branch({1:'AD.name'},'AD.data',[('CMPI','t',1)])
     P('AD.name').a(('LDX','t','ad_v',PRESENT)).branch({1:'AD.sym'},'AD.label',[('CMPI','t',1)])
