@@ -12,7 +12,10 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 PROBES=${*:-examples/hello.c examples/fib.c examples/switch.c examples/struct.c tests/c/b_float.c tests/c/b_file.c tests/c/b_argv.c}
 TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
-ABL=${ABL:-"pp lex parse type scope irsel enc reloc regmap abi.sysno abi.arg0 abi.arg1 abi.arg2 abi.ret abi.gate abi.nrreg"}
+# binsel is asked on this (Python) path; prec, peep and opinfo are asked only by
+# the C compiler and show UNUSED here (measured 2026-09-26) -- they need a C-side
+# ablation, which does not exist yet, so they are not listed
+ABL=${ABL:-"pp lex parse type scope irsel binsel enc reloc regmap abi.sysno abi.arg0 abi.arg1 abi.arg2 abi.ret abi.gate abi.nrreg"}
 # SHARD=k/n keeps every n-th ablation starting at the k-th: each ablation is
 # 42 compiles, and all sixteen in one run were over the 60 s ceiling
 # (AGENTS.md).  Run it as SHARD=1/8 .. 8/8: at 1/4 one shard still hit 58 s.

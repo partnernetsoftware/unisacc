@@ -60,6 +60,11 @@ rc=$?
 say "all suites (STRICT=1)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" \
     "$(tail -3 "$LOG" | head -1)"
 [ $rc -eq 0 ] || sed -n '/=== summary/,$p' "$LOG" | grep FAIL | head -10
+# 3a. the gate: ccparity and malloc are in no other suite list [S-16 T1]
+./tests/gate.sh --com > "$LOG.g" 2>&1
+rc=$?
+say "gate (--com)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.g")"
+[ $rc -eq 0 ] || grep -v 'rc=0' "$LOG.g" | head -10
 
 # 3b. ...and a suite that SKIPPED is not a suite that passed.  fat is macOS
 #     only, corpus and tools need their corpora present, crossnative needs
