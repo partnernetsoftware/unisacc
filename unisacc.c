@@ -9879,7 +9879,7 @@ int autoinc(void) {
         k = k + 1;
     }
     if (srcix_on == 0) srcix_build();
-    if (rtprintf()) incappend("stdio.h", 7);
+    if (nostdinc == 0) { if (rtprintf()) incappend("stdio.h", 7); }   /* -nostdinc: no header is added; printf is lowered (W-9) */
     srcix_on = 0;
     return 0;
 }

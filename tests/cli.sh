@@ -114,6 +114,10 @@ say "-o - is stdout" "_start:" \
 got=$( (cd "$T" && bound 120 "$UA_RUN" -nostdinc lib.c -S 2>&1) | head -1)
 case "$got" in *"no such file for #include"*) got="refused, as cc does";; esac
 say "-nostdinc refuses <stdio.h>" "refused, as cc does" "$got"
+# -nostdinc and printf with no declaration: the only path left to the
+# compile-time lowering (do_printf, W-9) since printf became a real call
+printf 'int main(void){ int n; n = 42; printf("hi %%d %%s%%c\\n", n, "ok", 33); return 0; }\n' > "$T/nsi.c"
+say "-nostdinc printf lowered" "hi 42 ok!" "$( (cd "$T" && bound 120 "$UA_RUN" -nostdinc -run nsi.c 2>&1) )"
 
 # -MD writes what make wants: `target: input headers`, only files that were
 # really opened (the built-in header copies are not files) [S-15 C2]
