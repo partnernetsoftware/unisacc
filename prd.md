@@ -1839,3 +1839,16 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
     - cc prints `0 0 0 1`.
     - The fixed compiler prints the same at -O0, -O1 and -O2.
     - The compiler before the fix (9052993^) prints `1 1 0 1`.
+- 2026-09-26 (S-17 / reviews by cdx and bdy-ds4flash), measured:
+  - **E3 now reads the type table.** OPX's integer tail asks type.tsv the way the product's binary() does (549e88d): `ck = type(t1 + t2)` gives the masks and the spelling, `res = type(t1 op t2)` gives the result. The fixed set exec/parse2/keep-e3.txt (164 files) stays all equal. States went 3,212 → 3,014, but gen2.py grew by 37 lines: the rules moved into the table, the code did not shrink.
+  - **printf is always a real call** in both front ends: the C one in 991d337, the Python one in 18c8f22.
+  - **main falls off its `}` with 0** in both front ends (C99 5.1.2.2.3). This was a bug exposed by the real printf: corpus 00206/11/12 exited 12.
+  - **%p prints 0x** followed by the hex digits.
+  - **The referee ledger is now data**: research/referee.tsv, ratcheted to gold ALL by tests/docs.sh.
+  - **New external referees:**
+    - `tests/prec_audit.py`: 291 of 324 operator pairs agree, 33 are undetermined, and the level domain 1..10 is asserted.
+    - `tests/tyinfo_audit.py`: 27 facts agree.
+
+    External referees now cover 4 of 18 stages (type partly, abi, prec, tyinfo).
+  - **ablate** is in release.sh as 8 shards. prec is in ablate's list; peep and opinfo are registered as not covered on the Python path.
+  - **pfconv:** since printf became a real call, pfconv is asked only by the fallback for a unit with no printf declared.
