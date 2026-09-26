@@ -410,6 +410,7 @@ TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # ty
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
 SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
+GSK = 43 * 10 ** 6     # GSK[the token position of a global pointer's string] = its pool number, taken in source order
 SKIPS = 42 * 10 ** 6   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
 GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
@@ -701,7 +702,8 @@ def build():
     P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("IN.nx")
     P("IN.eq").call("NEXT").tok({TK_NUM: "IN.v", "{": "IN.br", "&": "IN.amp", TK_ID: "IN.fn", E.TK_STR: "IN.s0"}, "IN.l")
     p = P("IN.s0")          # (measured, s34) .lea/.zero, then each byte and the 0 while inside the array
-    p.a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.l", [("CMPI", "t", 1)])
+    p.a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.sp", [("CMPI", "t", 1)])
+    P("IN.sp").a(("LDX", "t", "tpos", GSK)).o("  .lea r0, S").num("t").goto("IN.as")   # (measured, s35: numbered where it stands)   # (measured, s35)
     p = P("IN.s1")
     p.a(("INTERN", "iv", "ips", "ipe"), ("LDX", "isz", "iv", GSZ), ("LDI", "ix", 0), ("LDI", "idn", 0))
     p.o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  .zero r1, 0, ").num("isz").o("\n").goto("IN.sw")
@@ -778,7 +780,10 @@ def build():
     p.a(("LDI", "gar", 0)).call("GV.emit").tok({"=": "GV.init"}, "GV.end")
     P("GV.init").call("NEXT").tok({TK_NUM: "GV.iv", "{": "GV.bi", "&": "GV.ga", TK_ID: "GV.gf", E.TK_STR: "GV.gs"}, bad("global initialiser"))
     p = P("GV.gs")          # char NAME[..] = "...": bytes, not a pooled string
-    p.call("CHARR").branch({1: "GV.gs1"}, "DEAD.ginit", [("CMPI", "u", 1)])
+    p.call("CHARR").branch({1: "GV.gs1"}, "GV.gsp", [("CMPI", "u", 1)])
+    P("GV.gsp").branch({1: "GV.gsq"}, "GV.gsk", [("CMPI", "gar", 0)])    # T *NAME = "...": a pooled string's address
+    P("GV.gsq").branch({1: "DEAD.ginit"}, "GV.gsk", [("CMPI", "td", 0)])
+    P("GV.gsk").a(("STX", "tpos", GSK, "sk"), ("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1)).goto("GV.gok")
     P("GV.gs1").a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t")).call("NEXT").goto("GV.end")
     # CHARR: u := 1 when the declaration being read (gar/dar, td, tb) is an array of char
     p = P("CHARR")
@@ -1335,7 +1340,8 @@ def build():
     q = P("U.ams")       # &a[i]...: the element's address, no load (measured, p53)
     addr(q).call("VLOAD").a(("LDI", "amp", 1)).call("POSTIX").a(("LDI", "amp", 0)).ret()
     q = P("U.deref")     # * operand: its value is the address; one level down, then a load at the new width
-    q.call("NEXT").tok({TK_ID: "UD.id"}, "UD.gen")
+    q.call("NEXT").tok({TK_ID: "UD.id", E.TK_STR: "DEAD.dstr"}, "UD.gen")
+    g.on("DEAD.dstr", range(257), "DEAD", E.rej("not covered: * of a string literal"), "r")   # the reference loads nothing (measured, s35)
     P("UD.gen").call("UNARY").goto("UD.dn")
     P("UD.dn").call("DOWN").branch({1: "RET"}, "LOADV", [("CMPI", "vb", FPB)])
     P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call"}, "UD.v")
