@@ -11,7 +11,7 @@ OUT=$1; shift
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
 b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
 b cc -O2 -o "$OUT/run" exec/c/run.c
-b python3 exec/pp/gen.py "$OUT/e2.json"
+b python3 exec/pp/gen.py "$OUT/e2.json" "$TARGET"
 b python3 exec/lex/gen.py --typed "$OUT/e1.json"
 b python3 exec/parse2/gen2.py "$OUT/e3.json"
 b python3 exec/opt/gen.py "$OUT/e4.json" 2

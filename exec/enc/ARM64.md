@@ -170,3 +170,18 @@ not source-to-ELF through ARM deltas yet. Mach-O/PE image output and the product
 switch remain outstanding. Targeted regressions: ARM text/native checks, both
 ELF checks, 610,000,200-byte sparse extent and Linux x86 self-source equality.
 No new full-gate result is claimed for the newly added exec-armelf entry.
+
+
+## Zero-fill and complete Linux ARM self-source
+
+`.zero base,off,n` uses XZR stores in widest 8/4/2/1 pieces, reusing the
+scaled/unscaled/fallback memory transitions. n must be nonnegative; signed
+address-offset overflow and fallback base x16 are rejected. No runtime primitive
+was added. 136 memory instructions (1,128 bytes) match the seed on both runtimes;
+71 native memory cases include seven zero-fill cases, checked against memset.
+
+The six-delta ARM route now also supplies __aarch64__ to E2 (it previously
+supplied __x86_64__ regardless of backend). Its full compiler ELF is 716,458 B,
+sha256 5e95f0dc9efbcbfacf3552d5e1b505a5fe9010b4cf57ecec8f828002c8bc07ef.
+It equals ua_ref -O2 -b lnx/arm64 and executed N1=N2=N3 in the already-running
+Lima default ARM64 VM. This rebuilds the existing C compiler, not E7 adoption.

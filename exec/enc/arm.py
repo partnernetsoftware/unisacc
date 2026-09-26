@@ -35,7 +35,7 @@ def build(image=False):
              '.ld': ('rrii',11), '.st': ('riri',12),
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
              'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27),
-             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31)}
+             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31),'.zero':('rii',32)}
     from armint import SPECS, install as install_int
     specs.update(SPECS)
     from armfp import SPECS as FP_SPECS, install as install_fp

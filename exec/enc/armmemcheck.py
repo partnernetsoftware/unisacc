@@ -19,13 +19,14 @@ def check(args, native_host):
         for w in (1,2,4,8):
             for off in (0,1,-1,-256,-257,255,256,4095*w,4096*w,32769,-32769,-9223372036854775808):
                 lines+=['.ld x0, x1, %d, %d'%(off,w),'.st x1, %d, x2, %d'%(off,w)]
+        lines += ['.zero x1, %d, %d'%(off,n) for off in (0,120,255,32760,32768,-257) for n in (0,1,2,4,8,15)]
         lines+=['load64 x16, x1, 32768','store64 x1, -257, x2', '.ld x0, x16, 0, 8','.st x1, 0, x16, 8']
         f.write_text('\n'.join(lines)+'\n');tp=parse(f.read_text());parts=[encode(i,0,{}) for i in tp.code]
         assert all(x is not None for x in parts); want=b''.join(parts)
         for cmd in cmds:
             r=call(cmd+[str(f)]);assert r.returncode==0 and r.stdout==want,(r.returncode,r.stderr)
         print('ARM64 memory:',len(lines),'instructions,',len(want),'bytes; both executors equal')
-        for text in ['.ld x0, x1, 0, 3','.st x1, 0, x2, 16','.ld x0, x16, 32768, 8','.st x1, -257, x16, 8']:
+        for text in ['.zero x1, 0, -1','.zero x16, 32768, 8','.zero x1, 9223372036854775807, 15','.ld x0, x1, 0, 3','.st x1, 0, x2, 16','.ld x0, x16, 32768, 8','.st x1, -257, x16, 8']:
             f.write_text(text+'\n')
             for cmd in cmds:
                 r=call(cmd+[str(f)]);assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr
@@ -47,6 +48,14 @@ def check(args, native_host):
                         typ={1:'int8_t',2:'int16_t',4:'int32_t',8:'int64_t'}[wd]
                         checks+=['memset(a,0x80,sizeof a);%s v;memcpy(&v,a+40000+(%d),%d);if(%s(a+40000,0)!=(U)(int64_t)v)return %d;'%(typ,off,wd,name,n+1)]
                     n+=1
+        for off,count in ((0,0),(0,1),(1,15),(255,15),(-257,15),(32760,15),(32768,15)):
+            f.write_text('.zero x0, %d, %d\n'%(off,count))
+            r=call(cmds[0]+[str(f)]);assert r.returncode==0
+            name='m%d'%n
+            asm+=['.globl _'+name,'_'+name+':','.byte '+','.join(map(str,r.stdout)) if r.stdout else '', 'ret']
+            decl+=['extern U '+name+'(void *,U);']
+            checks+=['memset(a,0xa5,sizeof a);memset(b,0xa5,sizeof b);memset(b+40000+(%d),0,%d);%s(a+40000,0);if(memcmp(a,b,sizeof a))return %d;'%(off,count,name,n+1)]
+            n+=1
         (d/'p.s').write_text('\n'.join(asm)+'\n')
         (d/'p.c').write_text('#include <stdint.h>\n#include <string.h>\ntypedef uint64_t U;\n'+ '\n'.join(decl)+'\nstatic unsigned char a[100000],b[100000];\nint main(void){'+''.join('{'+c+'}' for c in checks)+'return 0;}')
         r=call(['cc','-o',str(d/'p'),str(d/'p.c'),str(d/'p.s')]);assert r.returncode==0,r.stderr

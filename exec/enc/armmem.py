@@ -8,7 +8,7 @@ def install(E, word):
     P=E.P
     for cls,store,wide in ((9,False,True),(10,True,True),(11,False,False),(12,True,False)):
         p=P('EMIT.%d'%cls)
-        p.a(('COPYW','mt','a2' if store else 'a0'),('COPYW','mb','a0' if store else 'a1'),
+        p.a(('LDI','zeroing',0),('COPYW','mt','a2' if store else 'a0'),('COPYW','mb','a0' if store else 'a1'),
             ('COPYW','off','a1' if store else 'a2'),('LDI','store',int(store)))
         p.a(('LDI','width',8) if wide else ('COPYW','width','a3')).goto('MEM.width')
     P('MEM.width').a(('LDI','limit',8)).branch({2:'FAIL'},'MEM.width32',[('C64U','width','limit')])
@@ -39,4 +39,16 @@ def install(E, word):
     p.a(('ALUI','shl','w','mb',5),('ALUI','or','w','w',(IP0<<16)|IP0),('ALU','or','w','w','addrbase'))
     word(p).a(('LDI','mb',IP0),('COPYW','w','scaled')).goto('MEM.pack')
     p=P('MEM.pack').a(('ALUI','shl','t','mb',5),('ALU','or','w','w','t'),('ALU','or','w','w','mt'))
-    word(p).goto('LINE')
+    word(p).branch({1:'ZERO.next'},'LINE',[('CMPI','zeroing',1)])
+    # Store from XZR, splitting into the widest pieces that fit. Reuse exactly
+    # the memory encoder above, including scratch-alias rejection on fallback.
+    P('EMIT.32').a(('LDI','z',0)).branch({0:'FAIL'},'ZERO.init',[('C64','a2','z')])
+    P('ZERO.init').a(('LDI','zeroing',1),('COPYW','zleft','a2'),('COPYW','zoff','a1')).goto('ZERO.loop')
+    P('ZERO.loop').a(('LDI','z',0)).branch({1:'LINE'},'ZERO.width',[('C64','zleft','z')])
+    P('ZERO.width').a(('LDI','width',8)).goto('ZERO.fit')
+    P('ZERO.fit').branch({2:'ZERO.halve'},'ZERO.store',[('C64','width','zleft')])
+    P('ZERO.halve').a(('ALUI','sar','width','width',1)).goto('ZERO.fit')
+    P('ZERO.store').a(('LDI','store',1),('LDI','mt',31),('COPYW','mb','a0'),('COPYW','off','zoff')).goto('MEM.width')
+    P('ZERO.next').a(('A64','sub','zleft','zleft','width'),('LDI','z',0)).branch({1:'LINE'},'ZERO.advance',[('C64','zleft','z')])
+    P('ZERO.advance').a(('A64','add','zn','zoff','width')).branch({0:'FAIL'},'ZERO.save',[('C64','zn','zoff')])
+    P('ZERO.save').a(('COPYW','zoff','zn')).goto('ZERO.loop')

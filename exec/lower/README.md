@@ -23,8 +23,9 @@ metadata. These checks establish measured agreement, not full equivalence.
 
 `TARGET=lnx/arm64 ../pipeline/elf.sh OUT hello.c` selects ARM lowering and ELF.
 hello/fib completed the six-delta source route and ran in native aarch64 Lima.
-The compiler self-source reaches the ARM encoder but is rejected: it contains
-`.zero`, which that encoder has not migrated yet. The generated table is still
+The compiler self-source also completes this route: its 716,458-byte ARM ELF
+matches the reference, and N1=N2=N3 was executed in Linux ARM64. The preprocessor
+now selects the target architecture macro as well as the lowering/image target. The generated table is still
 a lookup table; Python generates it, but does not lower the source at runtime.
 
 `data.py` and `code.py` compile hand algorithms into transition tables, not
