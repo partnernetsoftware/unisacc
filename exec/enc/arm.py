@@ -34,6 +34,8 @@ def build():
              'load64': ('rri',9), 'store64': ('rir',10),
              '.ld': ('rrii',11), '.st': ('riri',12),
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15)}
+    from armint import SPECS, install as install_int
+    specs.update(SPECS)
     specs.update({k: ('rrr', 7) for k in ENCSPEC['arm64']['alu3']})
     specs.update({k: ('rrr', 8) for k in ENCSPEC['arm64']['invcond']})
     p = P('START')
@@ -88,7 +90,7 @@ def build():
     p=P('PUT')
     for i in range(4):
         p.branch({1:'PUT.%d'%i},'PUT.next%d'%i,[('CMPI','n',i)])
-        P('PUT.%d'%i).a(('COPYW','a%d'%i,'v'),('COPYW','k%d'%i,'kind'),('ALUI','add','n','n',1)).goto('AFTER')
+        P('PUT.%d'%i).a(('COPYW','a%d'%i,'v'),('COPYW','k%d'%i,'kind'),('COPYW','neg%d'%i,'neg'),('ALUI','add','n','n',1)).goto('AFTER')
         p=P('PUT.next%d'%i)
     p.goto('FAIL')
     g.on('AFTER',[32],'AFTER',[('ADV',)])
@@ -105,6 +107,11 @@ def build():
         for i,k in enumerate(shape):
             nxt='CHECK.'+op+'.k%d'%i
             p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,{'r':1,'i':2,'l':3}[k])]);p=P(nxt)
+            if k=='i' and op!='imm':
+                checked=nxt+'.signed'; bound=nxt+'.positive'
+                p.branch({1:checked},bound,[('CMPI','neg%d'%i,1)])
+                P(bound).a(('LDI','limit',9223372036854775807)).branch({2:'FAIL'},checked,[('C64U','a%d'%i,'limit')])
+                p=P(checked)
         p.goto('EMIT.%d'%cls)
     word(P('EMIT.1').a(('ALUI','shl','w','a1',16),('ALUI','or','w','w',0xAA0003E0),('ALU','or','w','w','a0'))).goto('LINE')
     for cls,base in ((3,0x9B007C00),(7,None)):
@@ -138,6 +145,7 @@ def build():
     install(E,word)
     from armbranch import install as install_branch
     install_branch(E,word)
+    install_int(E,word)
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}

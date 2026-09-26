@@ -11,7 +11,8 @@ def install(E, word):
         p.a(('COPYW','mt','a2' if store else 'a0'),('COPYW','mb','a0' if store else 'a1'),
             ('COPYW','off','a1' if store else 'a2'),('LDI','store',int(store)))
         p.a(('LDI','width',8) if wide else ('COPYW','width','a3')).goto('MEM.width')
-    P('MEM.width').branch({w:'MEM.w%d'%w for w in (1,2,4,8)},'FAIL',[('RLD','width')])
+    P('MEM.width').a(('LDI','limit',8)).branch({2:'FAIL'},'MEM.width32',[('C64U','width','limit')])
+    P('MEM.width32').branch({w:'MEM.w%d'%w for w in (1,2,4,8)},'FAIL',[('RLD','width')])
     for wd in (1,2,4,8):
         sh={1:0,2:1,4:2,8:3}[wd]
         P('MEM.w%d'%wd).branch({1:'MEM.s%d'%wd},'MEM.l%d'%wd,[('CMPI','store',1)])

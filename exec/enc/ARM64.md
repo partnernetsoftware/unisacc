@@ -37,7 +37,7 @@ Memory checks add 100 instructions / 768 bytes compared on both executors,
 four width/scratch rejects, and 64 native load/store cases checked with C
 memcpy and signed-width values.
 
-Current size: 367 states, 16,297 B compressed text table. The new gate entry is
+Current size: 524 states, 22,355 B compressed text table. The new gate entry is
 exec-arm. This does not change .com or claim complete ARM64 lowering/encoding.
 
 ## Section-local branches
@@ -55,3 +55,21 @@ byte strings, seven rejects; a backward loop and a software-stack direct call
 execute natively. Eight synthetic contexts enter the real displacement helper
 to test signed imm19/imm26 edges; these do not claim full-size image coverage.
 All earlier integer and memory checks remain in armcheck.
+
+## Integer lowering forms
+
+Added .div/.udiv/.mod/.umod, sext (1/2/4/8-byte source), addi/subi (0..4095),
+lsli (0..63), and .frame. Division is SDIV/UDIV; remainder uses x17 plus MSUB
+and rejects an x17 source, but allows x17 as destination. Frame operations
+adjust software SP x7, using the immediate form below 4096 or MOVIMM into
+x16 plus register ADD/SUB. These opcode/layout rules are hand-written here.
+
+Apart from imm's full 64-bit bit-pattern domain, integer operands must fit
+signed 64-bit. Unsigned positive values above INT64_MAX are not silently
+reinterpreted as negative offsets. Width values are checked before a 32-bit
+selector can truncate them.
+
+armintcheck adds 28 reference instructions / 152 bytes on both runtimes,
+ten signed-domain/field-width/scratch rejections, and 24 native functions
+checked against C arithmetic and modular frame-address results. C division
+checks exclude division by zero and signed MIN/-1; no claim about C UB is made.

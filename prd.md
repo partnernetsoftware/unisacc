@@ -2251,3 +2251,14 @@ runtimes, six hand-worked byte expectations, seven rejects, eight synthetic
 helper boundary contexts for imm19/imm26, and native loop/direct-call results
 5/42. No new full-gate run is claimed after the previous 52/52. Metadata,
 remaining ops, ARM lowering and images are still outstanding; .com unchanged.
+
+ARM64 integer lowering forms: .div/.udiv/.mod/.umod, sext, addi/subi/lsli and
+.frame now encode through the same executor. Remainder rejects x17 source
+clobbers; frame changes software SP x7. These are hand-written encoding rules,
+not table-derived semantics. Immediate field checks use full width before
+narrow selectors; only imm accepts unsigned positive 64-bit bit patterns.
+Targeted armcheck retains all prior checks and adds 28 instructions / 152 B
+on both runtimes, ten domain/scratch rejections and 24 native functions checked
+against defined C arithmetic/frame results. 524 states / 22,355 B. No new full
+gate claim; product sources and .com unchanged. Metadata, setreg/address forms,
+FP, syscall setup and image/ARM-lowering integration remain outstanding.
