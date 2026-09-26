@@ -16,7 +16,11 @@ static int decimal(char *s,I v) {
 /* The selected bank is sparse evaluation of a one-hot state-conditioned net.
    Each hidden activation is H(key-threshold); output weights are signed.
    No answer table is materialised. int weights/count bound sums within int64. */
-const char *core_transition(const CoreModel *m, int q, int key, int *nx, int *sq) {
+#ifndef UNISA_CORE_ASM_TRANSITION
+#ifndef CORE_TRANSITION_NAME
+#define CORE_TRANSITION_NAME core_transition
+#endif
+const char *CORE_TRANSITION_NAME(const CoreModel *m, int q, int key, int *nx, int *sq) {
     *nx = -1; *sq = 0;
     if (m->isnet) {
         if (key < m->lo[q] || key > m->hi[q]) return "observation outside network domain";
@@ -32,6 +36,8 @@ const char *core_transition(const CoreModel *m, int q, int key, int *nx, int *sq
     } else { *nx = m->next[q][key]; *sq = m->seq[q][key]; }
     return 0;
 }
+
+#endif
 
 /* ---- byte buffers ---- */
 static void core_put(Buf *o, int c, I at) {

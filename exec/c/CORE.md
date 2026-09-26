@@ -78,3 +78,7 @@ complete per-component release ledger is still required at final switching.
 The former 603-line run.c is now 418 lines, plus 254 lines of core.c and 32
 of core.h (704 combined). This is an explicit API/ownership split, not a
 source-code reduction. It establishes a measurable C baseline for assembly.
+
+The next migration slice is documented in [asm/README.md](asm/README.md):
+handwritten inference on arm64 and x86-64, with C actions retained and an
+explicit build selector. It does not change the default C baseline above.
