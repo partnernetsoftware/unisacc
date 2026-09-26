@@ -118,7 +118,7 @@ for case in range(1,8):
   assert (r.returncode,r.stdout,r.stderr)==(2,('SIMULATED stack panic: '+reason+'\n').encode(),b''),(case,version,r)
 print('stack failure paths: C/ASM both reject, 14 simulated checks')
 PYSTACK
-b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_ACTION_LINKAGE= -Daction_run=action_run_c -DCORE_TRANSITION_NAME=core_transition_c \
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_RUN_NAME=core_run_c -DCORE_ACTION_LINKAGE= -Daction_run=action_run_c -DCORE_TRANSITION_NAME=core_transition_c \
     exec/c/core.c exec/c/asm/*_"$ARCH".S exec/c/asm/layoutcheck.c exec/c/asm/actioncheck.c -o "$T/action"
 b "$T/action"
 b python3 - "$T/action" <<'PYACTION'
@@ -128,6 +128,17 @@ for version in ['c','a']:
  assert (r.returncode,r.stdout,r.stderr)==(2,b'bad action rejected\n',b''),r
 print('bad action: C/ASM both reject')
 PYACTION
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_RUN_NAME=core_run_c -DCORE_TRANSITION_NAME=core_transition_c -Dcalloc=run_calloc -Drealloc=run_realloc -Dfree=run_free \
+    exec/c/core.c exec/c/asm/*_"$ARCH".S exec/c/asm/layoutcheck.c exec/c/asm/runcheck.c -o "$T/lifecycle"
+b "$T/lifecycle"
+b python3 - "$T/lifecycle" <<'PYRUN'
+import subprocess,sys
+for allocation in [1,2]:
+ for version in ['c','a']:
+  r=subprocess.run([sys.argv[1],version,str(allocation)],capture_output=True,timeout=10)
+  assert (r.returncode,r.stdout,r.stderr)==(2,f'SIMULATED initial calloc {allocation} rejected\n'.encode(),b''),r
+print('initial allocation failure: C/ASM both reject, 4 simulated checks')
+PYRUN
 b env EXEC_CC="$R/exec/c/asm/cc.sh" python3 exec/c/netcheck.py
 b env EXEC_CC="$R/exec/c/asm/cc.sh" NETWORK=1 TARGET="$OS/$ARCH" \
     ./exec/pipeline/elf.sh "$T" examples/hello.c examples/fib.c tests/c/b_strderef.c exec/parse2/probes/prefix_members.c exec/parse2/probes/member_index_address.c exec/c/run.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }

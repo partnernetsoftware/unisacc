@@ -81,14 +81,9 @@ The former 603-line run.c is now 418 lines, plus 254 lines of core.c and 32
 of core.h (704 combined). This is an explicit API/ownership split, not a
 source-code reduction. It establishes a measurable C baseline for assembly.
 
-The next migration slice is documented in [asm/README.md](asm/README.md):
-handwritten inference, word arithmetic, buffer append, sparse indexed
-memory, binary string interning, blob copies, resource caching decimal field rendering and control/input stacks on arm64 and x86-64, with remaining C actions retained and an explicit
-build selector. The C-only measurement above includes the current capacity
-guards and explicit CoreMachine invocation state. Product routing is unchanged.
-
-
-CoreMachine now makes the complete mutable action state explicit. core_run
-allocates it locally, invokes the selected action engine and transfers/frees
-its owned buffers at exit. Both ISA action engines are assembly. All decoded actions are low-level machine operations. See asm/README.md for
-per-action state comparisons and the remaining lifecycle migration boundary.
+The complete assembly execution kernel is documented in [asm/README.md](asm/README.md).
+Both ISA adapters now select assembly for inference, all actions and storage,
+the step loop, initialization and ownership cleanup; they do not link core.c.
+The retained C implementation is the differential reference. CoreMachine keeps
+mutable state explicit and invocation-local. The loader, IO, host callbacks and
+library allocation remain outside this kernel. Product routing is unchanged.

@@ -230,3 +230,33 @@ native job took 56 s. x86-64 dispatch was integrated afterward and passed its
 own complete asmcheck (all helper/action tests, network cases, six images and
 five native runs). The full-gate claim is tied to that earlier commit, not
 silently extended to later changes. Only macOS native/Rosetta were executed.
+
+## Complete run lifecycle (supersedes the remaining-C boundary above)
+
+run_arm64.S and run_x86_64.S implement core_run: initialize the explicit state,
+select byte/stack/register observations, infer transitions, execute each action
+sequence, enforce the step limit, transfer accepted/error bytes, and free all
+temporary owners. cc.sh no longer links core.c. The action arity list is shared
+by C and assembly in core.h and checked against the model generator's OPS list.
+The step counter checks before incrementing, including at INT64_MAX.
+
+runcheck.c compares 62 exits against the retained C engine, using an allocator
+ledger that rejects freeing borrowed input or retaining temporary owners. It
+covers empty accepts, all observation modes, missing transitions, invalid net
+outputs, action stopping, timeouts, cached resources, repeated SWAP and nested
+input frames. Four SIMULATED runs check first/second initialization allocation
+failure in both engines. Fatal host panic remains non-returning; it does not
+promise in-process recovery or cleanup. Both ISA integration jobs pass all
+primitive/action/lifecycle checks, six image comparisons, five native runs and
+the generated C runtime comparison. Native C network self-reconstruction and
+C ASan/UBSan pass; leak sanitizer is unavailable on this macOS installation.
+
+Uncompressed object __text: lifecycle 916 B arm64 / 1,160 B x86-64; complete
+assembly kernel 5,976 / 6,195 B. Current cc -Os C-only baseline is 6,436 / 7,146 B.
+These sums exclude diagnostic strings, shared arity data, loader/IO, host
+callbacks, libc, heap and model bytes. They are not complete executable sizes.
+Only macOS arm64 and Rosetta x86-64 were run. System V/Mach-O test bindings do
+not establish Windows bindings or compatibility with the product's internal
+calling convention. The default .com is unchanged; assembly self-rebuilding
+and the final product switch remain unfinished. These are targeted checks,
+not a new full-gate result.

@@ -39,10 +39,10 @@ CORE_FORMAT_LINKAGE int field_fill(Buf *o,I at,I width,I value) {
 /* The selected bank is sparse evaluation of a one-hot state-conditioned net.
    Each hidden activation is H(key-threshold); output weights are signed.
    No answer table is materialised. int weights/count bound sums within int64. */
-#ifndef UNISA_CORE_ASM_TRANSITION
 #ifndef CORE_TRANSITION_NAME
 #define CORE_TRANSITION_NAME core_transition
 #endif
+#ifndef UNISA_CORE_ASM_TRANSITION
 const char *CORE_TRANSITION_NAME(const CoreModel *m, int q, int key, int *nx, int *sq) {
     *nx = -1; *sq = 0;
     if (m->isnet) {
@@ -360,23 +360,30 @@ CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
 #endif
 
 /* Run one model; all mutable ownership is explicit and invocation-local. */
-int core_run(const CoreModel *m,unsigned char *input,
+#ifndef UNISA_CORE_ASM_RUN
+#ifndef CORE_RUN_NAME
+#define CORE_RUN_NAME core_run
+#endif
+int CORE_RUN_NAME(const CoreModel *m,unsigned char *input,
              int inputn,const char *src,I maxsteps,CoreResult *result) {
     memset(result,0,sizeof *result);
     CoreMachine s={0}; s.model=m; s.result=result; s.input=input; s.x=input;
     s.regs=calloc(m->nrg+1,sizeof(I));
+    if (!s.regs) core_host_panic("out of memory");
     core_badd(&s.blobs,(const unsigned char *)"",0);
     core_badd(&s.blobs,(const unsigned char *)src,(int)strlen(src));
     s.xattr=calloc(inputn+1,sizeof(I)); s.xn=inputn;
+    if (!s.xattr) core_host_panic("out of memory");
     CoreFrame first; first.b=s.x; first.at=s.xattr; first.i=0; first.end=s.xn;
     frame_push(&s.frames,&first);
     I steps=0; int q=m->start;
     for (;;) {
-        if (++steps>maxsteps) { result->reason="timeout"; s.status=3; break; }
+        if (steps>=maxsteps) { result->reason="timeout"; s.status=3; break; }
+        steps++;
         CoreFrame *F=&s.frames.entries[s.frames.n-1]; int nx=-1,sq=-1;
         int key=m->mode[q]==1 ? (s.stack.n ? s.stack.entries[s.stack.n-1] : -1) :
             m->mode[q]==0 ? (F->i<F->end ? F->b[F->i] : 256) : (s.r>=0 && s.r<=256 ? (int)s.r : 256);
-        result->reason=core_transition(m,q,key,&nx,&sq);
+        result->reason=CORE_TRANSITION_NAME(m,q,key,&nx,&sq);
         if (result->reason) { s.status=2; break; }
         if (nx<0) { result->reason="no transition"; s.status=2; break; }
         q=nx; const I *a=m->qa+m->qoff[sq];
@@ -399,3 +406,5 @@ finished:
     free(s.resources.entries);
     return s.status;
 }
+
+#endif

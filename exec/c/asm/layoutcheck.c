@@ -118,3 +118,8 @@ SCHECK(CoreMachine,resources,M_RESOURCES);
 SCHECK(CoreResult,reason,RESULT_REASON); SCHECK(CoreResult,reason_n,RESULT_REASON_N);
 SCHECK(CoreModel,str,CM_STR); SCHECK(CoreModel,strl,CM_STRL);
 typedef char machine_size[(sizeof(CoreMachine)==MACHINE_SIZE)?1:-1];
+
+SCHECK(CoreModel,nrg,CM_NRG); SCHECK(CoreModel,start,CM_START);
+SCHECK(CoreModel,qoff,CM_QOFF); SCHECK(CoreModel,qlen,CM_QLEN); SCHECK(CoreModel,qa,CM_QA);
+SCHECK(CoreResult,out,RESULT_OUT); SCHECK(CoreResult,err,RESULT_ERR);
+typedef char result_size[(sizeof(CoreResult)==RESULT_SIZE)?1:-1];

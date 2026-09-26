@@ -2999,3 +2999,22 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   action engines now execute all actions in assembly; outer loop, initialization
   and cleanup remain C. Host/libc/model costs are still separate. Product
   .com unchanged, no push/release, cc-unisacc remains paused.
+
+
+### Complete assembly execution lifecycle
+
+- Both ISA adapters now use assembly for the run loop, initialization and
+  ownership transfer/cleanup as well as all actions/primitives; core.c is no
+  longer linked by asm/cc.sh. Shared action arities remain checked against OPS.
+- Lifecycle differential checks: 62 exits with an allocation ledger, plus four
+  simulated initial-allocation failures. Both macOS ISA jobs retain six image
+  comparisons, five native runs and the generated C runtime comparison. Native
+  C network self-rebuild and C ASan/UBSan pass. Logs:
+  /tmp/unisacc-lifecycle-{arm,x86,native,sanitize}.log. No edits overlapped tests.
+- Uncompressed assembly __text totals 5,976/6,195 B (arm64/x86-64), including
+  lifecycle 916/1,160 B. Current C-only -Os baseline 6,436/7,146 B. Host, libc,
+  data/strings, loader and model costs remain outside these sums.
+- Targeted verification only; the latest full 82/82 gate remains 8743d4f.
+  Product .com unchanged. Actual product ABI/OS bindings and the default
+  switch remain unfinished; no assembly self-rebuild is claimed. Local work
+  continues; cc-unisacc remains paused, no push/release.

@@ -3,6 +3,8 @@
    may be active at a time; all working state is discarded on return. */
 #ifndef UNISA_EXEC_CORE_H
 #define UNISA_EXEC_CORE_H
+#define CORE_ACTION_ARITIES 0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1
+#ifndef __ASSEMBLER__
 #include <stdint.h>
 #include <stddef.h>
 typedef int64_t I;
@@ -10,8 +12,7 @@ enum { ADV, MARK, JUMP, LDI, COPYW, ALU, ALUI, CMP, CMPI, RLD, LDX, STX, OUT, OU
        SPAN, SPANT, SPAN2, OLAST, ODROP, OLEN, OCUT, ORES, OFILL, OCLR, OSEL, SETOT, XATTR, PUSH, POP,
        INTERN, BLOBSAVE, INPUSH, INPUSHX, INPUSHXE, INPOP, SBCLR, SBOUT, SBSPAN, SBBLOB, SBINTERN,
        SBSAVE, SBFIND, BLEN, BYTE, XLEN, DIVMOD10, SWAP, ACCEPT, REJECT, A64, A64I, C64, C64U, INC, NOP_ };
-static const int ARITY[NOP_] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,3,0,1,1,1,1,0,3,3,1,1,2,0,
-                                0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
+static const int ARITY[NOP_] = {CORE_ACTION_ARITIES};
 
 typedef struct { unsigned char *b; I *at; int n, cap; } Buf;
 typedef struct { const unsigned char *b; const I *at; I i,end; } CoreFrame;
@@ -49,4 +50,5 @@ typedef struct {
 const char *core_transition(const CoreModel *m, int q, int key, int *nx, int *sq);
 int core_run(const CoreModel *m, unsigned char *input,
              int inputn, const char *src, I maxsteps, CoreResult *result);
+#endif /* C interface */
 #endif

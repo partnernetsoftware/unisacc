@@ -41,7 +41,11 @@ def crosscheck():
     c = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "core.h")).read()
     enum = re.search(r"enum \{(.*?)\};", c, re.S).group(1).replace("\n", " ")
     names = [x.strip() for x in enum.split(",") if x.strip()]
-    ar = [int(x) for x in re.search(r"ARITY\[NOP_\] = \{(.*?)\};", c, re.S).group(1).replace("\n", " ").split(",")]
+    arrays = re.findall(r"ARITY\[NOP_\] = \{(.*?)\};", c, re.S)
+    assert arrays == ["CORE_ACTION_ARITIES"], "core.h must use the shared action arities"
+    definitions = re.findall(r"^#define CORE_ACTION_ARITIES ([0-9,]+)$", c, re.M)
+    assert len(definitions) == 1, "missing or duplicate action arity definition"
+    ar = [int(x) for x in definitions[0].split(",")]
     assert names[-1] == "NOP_" and names[:-1] == [n for n, _ in OPS], "core.h enum differs from OPS"
     assert ar == [len(k) for _, k in OPS], "core.h ARITY differs from OPS"
 

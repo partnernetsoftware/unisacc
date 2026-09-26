@@ -86,3 +86,12 @@
 #define RESULT_REASON_N 56
 #define CM_STR 24
 #define CM_STRL 32
+
+#define CM_NRG 8
+#define CM_START 12
+#define CM_QOFF 40
+#define CM_QLEN 48
+#define CM_QA 56
+#define RESULT_OUT 0
+#define RESULT_ERR 24
+#define RESULT_SIZE 64
