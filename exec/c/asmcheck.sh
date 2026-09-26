@@ -58,13 +58,29 @@ print('sparse memory failure paths: C/ASM both reject, 8 simulated checks')
 PYMEMORY
 b cc $ARCHFLAG -c "exec/c/asm/memory_$ARCH.S" -o "$T/memory.o"
 if [ "$OS" = osx ]; then b size -m "$T/memory.o"; else b size -A "$T/memory.o"; fi
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_INTERN_LINKAGE= -Dcore_hbytes=core_hbytes_c -Dcore_intern=core_intern_c -Dcalloc=intern_calloc -Drealloc=intern_realloc \
+    exec/c/core.c "exec/c/asm/intern_$ARCH.S" exec/c/asm/layoutcheck.c exec/c/asm/interncheck.c -o "$T/intern"
+b "$T/intern"
+b python3 - "$T/intern" <<'PYINTERN'
+import subprocess,sys
+for case in range(1,5):
+ for version in ['c','a']:
+  r=subprocess.run([sys.argv[1],version,str(case)],capture_output=True,timeout=10)
+  reason='intern capacity overflow' if case==3 else 'out of memory'
+  nc=0 if case==3 else 1; nr=1 if case==2 else 0
+  message=f'SIMULATED intern panic checked: {reason}, calloc {nc}, realloc {nr}\n'.encode()
+  assert (r.returncode,r.stdout,r.stderr)==(2,message,b''),(case,version,r)
+print('intern failure paths: C/ASM both reject, 8 simulated checks')
+PYINTERN
+b cc $ARCHFLAG -c "exec/c/asm/intern_$ARCH.S" -o "$T/intern.o"
+if [ "$OS" = osx ]; then b size -m "$T/intern.o"; else b size -A "$T/intern.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/arith_$ARCH.S" -o "$T/arith.o"
 if [ "$OS" = osx ]; then b size -m "$T/arith.o"; else b size -A "$T/arith.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/transition_$ARCH.S" -o "$T/transition.o"
 if [ "$OS" = osx ]; then b size -m "$T/transition.o"; else b size -A "$T/transition.o"; fi
 b env EXEC_CC="$R/exec/c/asm/cc.sh" python3 exec/c/netcheck.py
 b env EXEC_CC="$R/exec/c/asm/cc.sh" NETWORK=1 TARGET="$OS/$ARCH" \
-    ./exec/pipeline/elf.sh "$T" examples/hello.c examples/fib.c tests/c/b_strderef.c exec/c/run.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
+    ./exec/pipeline/elf.sh "$T" examples/hello.c examples/fib.c tests/c/b_strderef.c exec/parse2/probes/prefix_members.c exec/c/run.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }
 b python3 - "$T" "$OS/$ARCH" "$UA" <<'PY'
 import pathlib,subprocess,sys
 p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ua=sys.argv[3]
@@ -72,7 +88,7 @@ def run(cmd):return subprocess.run(list(map(str,cmd)),capture_output=True,timeou
 def ok(cmd):
  r=run(cmd);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
 ext='macho' if target.startswith('osx/') else 'elf'
-for src in ['examples/hello.c','examples/fib.c','tests/c/b_strderef.c','exec/c/run.c']:
+for src in ['examples/hello.c','examples/fib.c','tests/c/b_strderef.c','exec/parse2/probes/prefix_members.c','exec/c/run.c']:
  image=p/(pathlib.Path(src).stem+'.'+ext)
  assert image.read_bytes()==ok([ua,'-O2',src,'-b',target]),src
  if src!='exec/c/run.c':
@@ -80,10 +96,11 @@ for src in ['examples/hello.c','examples/fib.c','tests/c/b_strderef.c','exec/c/r
   if sys.platform=='darwin':args[1:1]=['-arch',target.split('/')[1]]
   ok(args);a=run([image]);b=run([host])
   assert (a.returncode,a.stdout,a.stderr)==(b.returncode,b.stdout,b.stderr),(src,a,b)
+  if src.endswith('prefix_members.c'):assert (a.returncode,a.stdout,a.stderr)==(40,b'',b''),a
  print('assembly inference six-stage image equal:',src)
 # The image produced through ASM inference is the same C runtime. Its
 # execution must not be mistaken for a fully assembly-built action engine.
 model=p/'e1.net';source=p/'hello.e2'
 assert ok([p/('run.'+ext),model,source])==ok([p/'run',model,source])
-print('ASM inference/arithmetic/storage route: four full images equal; three native runs equal; C-runtime output equal')
+print('ASM inference/arithmetic/storage route: five full images equal; four native runs equal; C-runtime output equal')
 PY

@@ -26,3 +26,12 @@
 #define MEM_CAP 24
 #define MEM_COUNT 32
 #define MEM_SIZE 40
+
+#define INTERN_ENTRIES 0
+#define INTERN_CAP 8
+#define INTERN_COUNT 16
+#define INTERN_SIZE 24
+#define ENTRY_BYTES 0
+#define ENTRY_LENGTH 8
+#define ENTRY_VALUE 16
+#define ENTRY_SIZE 24

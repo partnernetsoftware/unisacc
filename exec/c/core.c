@@ -103,20 +103,45 @@ static int blob_add(const unsigned char *b, int n) {
     if (NBL >= CBL) { CBL = CBL ? CBL * 2 : 64; BL = core_alloc(BL, sizeof(Blob) * CBL); }
     BL[NBL].b = core_alloc(0, n + 1); memcpy(BL[NBL].b, b, n); BL[NBL].n = n; return NBL++;
 }
-typedef struct { unsigned char *b; int n; I v; } Ent;
-static Ent *IT; static size_t ICAP, IN_;
-static uint64_t hbytes(const unsigned char *b, int n) { uint64_t h = 1469598103934665603ull; for (int j = 0; j < n; j++) h = (h ^ b[j]) * 1099511628211ull; return h; }
-static I intern(const unsigned char *b, int n) {
-    if ((IN_ + 1) * 2 > ICAP) {
-        size_t oc = ICAP; Ent *o = IT; ICAP = oc ? oc * 2 : 1024; IT = calloc(ICAP, sizeof(Ent)); if (!IT) core_die("out of memory");
-        for (size_t j = 0; j < oc; j++) if (o[j].b) { size_t s = hbytes(o[j].b, o[j].n) & (ICAP - 1); while (IT[s].b) s = (s + 1) & (ICAP - 1); IT[s] = o[j]; }
+static CoreIntern strings;
+#ifdef UNISA_CORE_ASM_INTERN
+I core_string_intern(CoreIntern *t,const unsigned char *b,int n);
+#define core_intern core_string_intern
+#else
+#ifndef CORE_INTERN_LINKAGE
+#define CORE_INTERN_LINKAGE static
+#endif
+CORE_INTERN_LINKAGE uint64_t core_hbytes(const unsigned char *b,int n) {
+    uint64_t h=1469598103934665603ull;
+    for (int j=0;j<n;j++) h=(h^b[j])*1099511628211ull;
+    return h;
+}
+CORE_INTERN_LINKAGE I core_intern(CoreIntern *t,const unsigned char *b,int n) {
+    if ((t->n+1)*2 > t->cap) {
+        size_t oc=t->cap; CoreInternEntry *o=t->entries;
+        /* 64-bit storage ABI, 24-byte entries, doubled capacity. */
+        if (oc > 0x0555555555555555ull) core_die("intern capacity overflow");
+        t->cap=oc ? oc*2 : 1024;
+        t->entries=calloc(t->cap,sizeof(CoreInternEntry));
+        if (!t->entries) core_die("out of memory");
+        for (size_t j=0;j<oc;j++) if (o[j].b) {
+            size_t k=core_hbytes(o[j].b,o[j].n)&(t->cap-1);
+            while (t->entries[k].b) k=(k+1)&(t->cap-1);
+            t->entries[k]=o[j];
+        }
         free(o);
     }
-    size_t s = hbytes(b, n) & (ICAP - 1);
-    while (IT[s].b) { if (IT[s].n == n && !memcmp(IT[s].b, b, n)) return IT[s].v; s = (s + 1) & (ICAP - 1); }
-    IT[s].b = core_alloc(0, n + 1); memcpy(IT[s].b, b, n); IT[s].n = n; IT[s].v = (I)++IN_;
-    return IT[s].v;
+    size_t k=core_hbytes(b,n)&(t->cap-1);
+    while (t->entries[k].b) {
+        if (t->entries[k].n==n && !memcmp(t->entries[k].b,b,n)) return t->entries[k].v;
+        k=(k+1)&(t->cap-1);
+    }
+    t->entries[k].b=core_alloc(0,(size_t)n+1);
+    memcpy(t->entries[k].b,b,n); t->entries[k].n=n; t->entries[k].v=(I)++t->n;
+    return t->entries[k].v;
 }
+#endif
+#define intern(b,n) core_intern(&strings,(b),(n))
 /* SBFIND: file path -> blob id (0: absent), cached */
 typedef struct { unsigned char *p; int n; int id; } FEnt;
 static FEnt *FC; static int NFC;
@@ -295,8 +320,8 @@ finished:
     free(memory.keys); free(memory.values); free(memory.used); memset(&memory,0,sizeof memory);
     for (int i = 0; i < NBL; i++) free(BL[i].b);
     free(BL); BL = 0; NBL = 0; CBL = 0;
-    for (size_t i = 0; i < ICAP; i++) if (IT[i].b) free(IT[i].b);
-    free(IT); IT = 0; ICAP = 0; IN_ = 0;
+    for (size_t i=0;i<strings.cap;i++) if (strings.entries[i].b) free(strings.entries[i].b);
+    free(strings.entries); memset(&strings,0,sizeof strings);
     for (int i = 0; i < NFC; i++) free(FC[i].p);
     free(FC); FC = 0; NFC = 0;
     return status;
