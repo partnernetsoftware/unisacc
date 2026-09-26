@@ -19,7 +19,8 @@ NOT covered (the delta rejects with a `not covered: ...` code, never guesses):
 #if/#elif expressions, invoking a function-like macro, _Pragma.  Also not
 modelled: autoinc() (the on-demand header prepend -- compare against the
 reference built without it, see compare.py), #pragma push_macro/pop_macro
-(treated like any other #pragma: blanked), -D/-U/-I/-include, the
+(rejected as not covered when live and spelled exactly; the reference's
+prefix match `push_macroX` is not reproduced), -D/-U/-I/-include, the
 file:line:col rendering of diagnostics (the reject kind is compared, not the
 text).
 
@@ -137,6 +138,8 @@ def build():
     init += sbconst("pragma") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
                                  ("LDI", "v", 100), ("STX", "a", 0, "v")]
     init += sbconst("_Pragma") + [("SBINTERN", "ID_PRAGMAOP")]
+    init += sbconst("push_macro") + [("SBINTERN", "ID_PUSHM")]
+    init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)]
     g.els("START", "P0S", init)
 
@@ -256,7 +259,17 @@ def build():
                                     ("LDX", "DC", "a", 0), ("RLD", "DC")])
     g.els("DEOL", "DEOL", [("ADV",)])
     # DC: 0 unknown, k+1 = DIRV[k], 100 = pragma (push/pop_macro not covered: blanked)
-    cases = {(0, 100): blank}
+    cases = {0: blank, 100: ("PRAG", [("RLD", "LIVE")])}
+    # #pragma push_macro / pop_macro (live) are outside the slice: reject, do
+    # not guess; any other #pragma is blanked, as pushpop() leaves it
+    g.r("PRAG", {0: blank, 1: ("PRAG1", [("JUMP", "WE")])})
+    g.on("PRAG1", WS, "PRAG1", [("ADV",)])
+    g.els("PRAG1", "PRAG2", [("MARK", "PA")])
+    g.on("PRAG2", AL, "PRAG2", [("ADV",)])
+    g.els("PRAG2", "PRAG3", [("MARK", "PB"), ("INTERN", "t", "PA", "PB"), ("CMP", "t", "ID_PUSHM")])
+    g.r("PRAG3", {1: ("DEAD", NC("#pragma push_macro")),
+                  (0, 2): ("PRAG4", [("CMP", "t", "ID_POPM")])})
+    g.r("PRAG4", {1: ("DEAD", NC("#pragma pop_macro")), (0, 2): blank})
     for k, w in enumerate(DIRV):
         cases[k + 1] = ("D_%s" % w, [])
     g.r("DSW", cases)
