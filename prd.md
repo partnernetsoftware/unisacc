@@ -2048,3 +2048,34 @@ instruction count checked. The set is retained independently in
 68, failing on a missing input, rejecting stage, nonzero reference or byte
 mismatch. The complete check passed under one 60-second watchdog. Linux
 execution evidence remains the two examples above, not all 68 programs.
+
+### Self-source blocker: literal tokens and escape decoding (2026-09-26)
+
+E2 and E1 accept unisacc.c. E3 formerly stopped at MODEL's multiline adjacent
+string token: its reader stopped at the first newline. 6bf71f7 makes the token
+span quote-aware and shares a byte decoder between pooling and character
+array initialization. Ordinary adjacent literals, hex escapes and one-to-three
+digit octal escapes are covered by s37/s38; the old 192 E3 keep inputs stayed
+equal and the two new probes agree on both executors (194 retained). Wide
+prefixes remain unsupported. This is added hand parser logic in a delta,
+not network construction or removal of the original parser.
+
+The new probes found a product defect, fixed independently in 8a87421:
+C decode assumed exactly two hex digits and could read through a closing
+quote; it also reinterpreted octal results 'r'/'x' as escape instructions.
+Python limited hex to two digits and lacked four standard simple escapes.
+The fixed paths decode each escape once and stop at the literal boundary.
+`tests/c/b_stresc.c` agrees with system cc in the reference, Python and rebuilt
+.com at all three optimization levels. Kernel provenance was regenerated.
+
+Frozen-tree gate --com, JOBS=2: 45 suites passed, none failed, 183 seconds total,
+each at most 60 seconds; exec-srcelf (68 programs) 46s, fat 115/0, nativeboot,
+bigclosure 6/6, difftest_o 342/0, kernel 23/0. This run was macOS arm64 plus
+Rosetta, not a fresh Linux/Windows product gate. The rebuilt .com is 1,343,904 B,
+SHA256 736a6c86ff71b1b34e29de969ba6501572f622cb37a7a0455073b0d617378f3c,
+from the product inputs in 8a87421. Nothing was pushed or released.
+
+Self-source E3 now passes the large MODEL declaration and next stops on an
+array bound constant expression (64 * 1024). Full frontend self-compilation,
+other targets, constructed-network execution and product-path replacement
+remain incomplete; this is not a self-bootstrap result for the new route.
