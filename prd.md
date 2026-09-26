@@ -2121,3 +2121,17 @@ The next self-source blocker exposed another reference defect: for
 host cc gives 4/4/4, native gives 1/4/1, Python gives 4/1/1. Mixed signed and
 unsigned arms also inherit only one arm's type. This must be corrected
 against the common-type rule before it is used as a migration reference.
+
+### Conditional integer types follow the shared table (2026-09-26)
+
+The product's two frontends now ask type(t1 + t2) for two integer arms of
+?:, retain that result's width and signedness, and mask a narrow unsigned
+selected value at the merge. Neither the first nor the second arm alone
+supplies the type. b_condkind agrees with host cc: `4 4 4 0 0`, in native
+-O0/-O1/-O2 and Python built; the pre-fix outputs are recorded above.
+E3 reuses its existing CKT and RESD procedures for the same decision,
+replacing the earlier hand check limited to signed int/long. The old 199
+retained inputs pass; s43 agrees on both executors, bringing the fixed set
+to 200. Delta 3659 states, JSON 19929833 B, text table 411066 B.
+Current self-source E2/E1 succeeds; E3 next stops at main.c's block-scope
+`static char dname[520]`. No self-source success is claimed yet.

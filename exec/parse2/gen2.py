@@ -1156,13 +1156,16 @@ def build():
     emit(p, "jump_b")
     emit(p, "label_a").vpush("b").call("NEXT").call("E%d" % LEVELS[0]).call("QTAIL").vpop("b").vpop("lt", "lb")
     emit(p, "label_b").branch({1: "QT.1"}, "DEAD.qt", [("CMP", "vt", "lt")])
-    P("QT.1").branch({1: "RET"}, "QT.2", [("CMP", "vb", "lb")])
-    P("QT.2").branch({1: "QT.3"}, "DEAD.qt", [("CMPI", "vt", 0)])          # two integer arms of different sizes
-    P("QT.3").a(("LDI", "t", 0)).call("QT.int").a(("COPYW", "t2", "t"), ("COPYW", "x", "vb"), ("COPYW", "vb", "lb")).call("QT.int").a(("COPYW", "vb", "x"), ("LDI", "vb", 8)).ret()
-    p = P("QT.int")      # t += 1 when vb is a signed int or long (the pair must be those)
-    p.branch({1: "QT.i1"}, "QT.i8", [("CMPI", "vb", 4)])
-    P("QT.i8").branch({1: "QT.i1"}, "DEAD.qt", [("CMPI", "vb", 8)])
-    P("QT.i1").a(("ALUI", "add", "t", "t", 1)).ret()
+    P("QT.1").branch({1: "QT.scalar"}, "QT.same", [("CMPI", "vt", 0)])
+    P("QT.same").branch({1: "RET"}, "DEAD.qt", [("CMP", "vb", "lb")])
+    q = P("QT.scalar")
+    for _, code, *_ in TYINT:
+        nx = q.fresh("next")
+        q.branch({1: "QT.int"}, nx, [("CMPI", "vb", code)])
+        q = P(nx)
+    q.goto("QT.same")
+    # Common integer type is the existing type(t1 + t2) row, not a new ladder.
+    P("QT.int").call("TAX").a(("COPYW", "axr", "ax"), ("COPYW", "vb", "lb")).call("TAX").a(("ALUI", "mul", "t", "ax", 16), ("ALU", "add", "t", "t", "axr"), ("LDX", "rs", "t", CKT)).goto("RESD")
     g.on("DEAD.qt", range(257), "DEAD", E.rej("not covered: ?: arms of different types"), "r")
     P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.cpf", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
     p = P("X.as")
