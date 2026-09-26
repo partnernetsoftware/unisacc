@@ -4,6 +4,9 @@
 
        run TABLE INPUT [SRCPATH] [INCLUDE_DIR]
 
+   INCLUDE_DIR (where the bundled headers are) should be ABSOLUTE: a relative
+   one read from another CWD is ENOENT, i.e. "absent", not an error.
+
    exit 0 accept (o on stdout); 1 reject (the reason, then e, on stderr);
    2 a bad table; 3 out of steps (UNISA_MAXSTEPS, default 2e8). */
 #include <stdio.h>
@@ -176,7 +179,7 @@ static I alu64(int op, I a, I b, int *z) {
 typedef struct { const unsigned char *b; const I *at; I i, end; } Frame;
 
 int main(int argc, char **argv) {
-    if (argc < 3) { fprintf(stderr, "usage: run TABLE INPUT [SRCPATH] [INCLUDE_DIR]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "usage: run TABLE INPUT [SRCPATH] [INCLUDE_DIR, absolute]\n"); return 2; }
     load(argv[1]);
     if (argc > 4) INCDIR = argv[4];
     FILE *f = fopen(argv[2], "rb"); if (!f) die("cannot open the input");
