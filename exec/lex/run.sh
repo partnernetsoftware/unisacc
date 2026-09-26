@@ -1,6 +1,6 @@
 #!/bin/sh
 # E1 feasibility, reproducible.  Every step is bounded (macOS: no timeout).
-# Usage: exec/lex/run.sh SHARD      SHARD = gen | xbuild | lexdiff | probes | self | corpus.aa .. corpus.ad
+# Usage: exec/lex/run.sh SHARD      SHARD = gen | xbuild | net | lexdiff | probes | self | corpus.aa .. corpus.ad
 # xbuild: the delta as an exec/exec.c table, the executor built with cc and
 # with unisacc, T1 of each build's loaded map against the delta.  After it,
 # E1EXEC=/tmp/e1x/exec_cc:/tmp/e1x/e1.tbl (or exec_ua) makes the comparison
@@ -19,6 +19,8 @@ xbuild)  mkdir -p /tmp/e1x && $B python3 exec/lex/tbl.py $D /tmp/e1x/e1.tbl &&
            $B /tmp/e1x/exec_$x -fdump /tmp/e1x/e1.tbl > /tmp/e1x/fd_$x &&
            printf '%s ' $x && $B python3 exec/lex/tbl.py check $D /tmp/e1x/fd_$x || exit 1
          done ;;
+net)     $B python3 exec/lex/net.py $D /tmp/e1x && $B python3 exec/lex/tbl.py /tmp/e1x/e1net.json /tmp/e1x/e1net.tbl &&
+         cmp /tmp/e1x/e1net.tbl /tmp/e1x/e1.tbl && echo "net-derived table identical to /tmp/e1x/e1.tbl" ;;
 lexdiff) $B python3 exec/lex/compare.py $D examples/*.c tests/c/*.c ;;
 probes)  $B python3 exec/lex/compare.py $D exec/lex/probes/*.c ;;
 self)    $B python3 exec/lex/compare.py $D unisacc.c ;;
