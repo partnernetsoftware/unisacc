@@ -381,7 +381,10 @@ DBL = E.DBL
 # result (unsigned below 8: masked).  E3 reads the same rows instead of re-deriving them.
 AX = ["void", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "ptr", "arr", "struct", "fn", "f32", "f64", "illegal"]
 TYROW = {(f[0], f[1], f[2]): f[3] for f in E.gold("type")}
-TYINFO = {f[0]: (int(f[1]), int(f[2])) for f in E.gold("tyinfo") if f[1].isdigit()}
+TYINFO = {f[0]: (int(f[1]), int(f[2]), int(f[3])) for f in E.gold("tyinfo") if f[1].isdigit()}   # t -> (size, uns, narrow)
+# the integer rows of tyinfo as value-descriptor codes: an unsigned type is UNS + size (E3's encoding)
+TYINT = [(t, (UNS if TYINFO[t][1] else 0) + TYINFO[t][0], TYINFO[t][0], TYINFO[t][1], TYINFO[t][2])
+         for t in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")]      # (t, vb, size, uns, narrow)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
@@ -403,18 +406,16 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
     P(name + ".d").branch({1: name + ".8"}, name + ".n", [("CMPI", "vb", DBL)])
     P(name + ".8").o(tab8).ret()
     q = P(name + ".n")
-    for w in (1, 2, 4):
+    # the width and the zero-extension mask come from tyinfo (size, uns), row by row
+    for t, vb, size, uns, _ in TYINT:
+        if vb == 8:
+            continue                          # the signed 8-byte row: taken above
         hit, nx = q.fresh("w"), q.fresh("x")
-        q.branch({1: hit}, nx, [("CMPI", "vb", w)])
-        P(hit).o(tabn % w).ret()
-        q = P(nx)
-    for w, mask in ((1, 255), (2, 65535), (4, 4294967295), (8, None)):
-        hit, nx = q.fresh("u"), q.fresh("y")
-        q.branch({1: hit}, nx, [("CMPI", "vb", UNS + w)])
-        if w == 8:
+        q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
+        if size == 8:
             P(hit).o(tab8).ret()
         else:
-            P(hit).o(tabn % w + (masks and "  imm r2, %d\n  and64 r0, r0, r2\n" % mask or "")).ret()
+            P(hit).o(tabn % size + (masks and uns and "  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << (8 * size)) - 1) or "")).ret()
         q = P(nx)
     q.goto("DEAD.w")
 
@@ -432,13 +433,20 @@ def types():
     P("NARROW.b").branch({1: "RET"}, "NARROW.u", [("CMPI", "vb", 8)])
     P("NARROW.u").branch({1: "RET"}, "NARROW.dd", [("CMPI", "vb", UNS + 8)])
     P("NARROW.dd").branch({1: "RET"}, "NARROW.ui", [("CMPI", "vb", DBL)])
-    P("NARROW.ui").branch({1: "NARROW.m"}, "NARROW.n", [("CMPI", "vb", UNS + 4)])
+    P("NARROW.ui").goto("NARROW.n")
     P("NARROW.m").o(UIM).ret()
     q = P("NARROW.n")
-    for w in (1, 2, 4):
+    # tyinfo.narrow picks the rows that narrow; signed: through the stack at their size; unsigned int:
+    # the mask (measured). u8/u16 casts are not measured: not covered, stated here, not guessed
+    for t, vb, size, uns, narrow in TYINT:
+        if not narrow or t in ("u8", "u16"):
+            continue
         hit, nx = q.fresh("w"), q.fresh("x")
-        q.branch({1: hit}, nx, [("CMPI", "vb", w)])
-        P(hit).o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n" % (w, w)).ret()
+        q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
+        if uns:
+            P(hit).goto("NARROW.m")
+        else:
+            P(hit).o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n" % (size, size)).ret()
         q = P(nx)
     q.goto("DEAD.w")
     g.on("DEAD.w", range(257), "DEAD", E.rej("not covered: width"), "r")
