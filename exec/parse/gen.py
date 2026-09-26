@@ -428,6 +428,10 @@ POP1 = "  load64 r1, [r7+0]\n  .frame -8\n"
 NORM = "  imm r1, 0\n  ne r0, r0, r1\n"
 
 
+M32 = "  imm r2, 4294967295\n  and64 r0, r0, r2\n"
+M32 = [M32, M32 + "  and64 r1, r1, r2\n"]
+
+
 def ubin(q, op, sub, cmp, after, pre=()):
     """left operand in r0 (its type in pt/pb): push, right operand, then the signed or
     unsigned spelling (binsel sign u iff either operand is
@@ -436,18 +440,33 @@ def ubin(q, op, sub, cmp, after, pre=()):
     for x in pre:
         x(q)
     q.call("UFLAG").vpop("ul")
-    uu, ss, u2 = q.fresh("uu"), q.fresh("us"), q.fresh("u2")
-    q.branch({1: uu}, u2, [("CMPI", "ul", 1)])
-    P(u2).branch({1: uu}, ss, [("CMPI", "uf", 1)])
+    # class (UFLAG): 1 unsigned long, 3 other 8-wide, 2 unsigned int, 0 int-width.  1 wins, then 3 (signed
+    # 64-bit, result long), then 2: the 32-bit unsigned tape -- both operands masked to 32 bits, the u
+    # spelling, the result masked again unless a comparison (measured: x - 0x80000000, 0x80000000 >> x,
+    # c == 0xffffffff; y + 0x80000000 with long y is add64)
+    uu, ss, sl, u4 = q.fresh("uu"), q.fresh("us"), q.fresh("ul"), q.fresh("u4")
+    c1, c2, c3, c4 = q.fresh("c1"), q.fresh("c2"), q.fresh("c3"), q.fresh("c4")
+    q.branch({1: uu}, c1, [("CMPI", "ul", 1)])
+    P(c1).branch({1: uu}, c2, [("CMPI", "uf", 1)])
+    P(c2).branch({1: sl}, c3, [("CMPI", "ul", 3)])
+    P(c3).branch({1: sl}, c4, [("CMPI", "uf", 3)])
+    t = P(c4)
+    c5 = t.fresh("c5")
+    t.branch({1: u4}, c5, [("CMPI", "ul", 2)])
+    P(c5).branch({1: u4}, ss, [("CMPI", "uf", 2)])
     P(uu).o(POP1 + optext(op, True)).a(("LDI", "pt", 0), ("LDI", "pb", 0 if cmp else UNS + 8)).goto(after)
+    P(sl).o(POP1 + optext(op)).a(("LDI", "pt", 0), ("LDI", "pb", 0 if cmp else SZ["long"])).goto(after)
+    P(u4).o(POP1 + M32[1] + optext(op, True) + ("" if cmp else M32[0])).a(("LDI", "pt", 0), ("LDI", "pb", 0 if cmp else UNS + 4)).goto(after)
     P(ss).o(POP1 + optext(op)).a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto(after)
 
 
 def expr():
-    p = P("UFLAG")    # W[uf] = 1 iff the value is an unsigned long (depth 0, base UNS + 8)
-    p.a(("LDI", "uf", 0)).branch({1: "UF.1"}, "RET", [("CMPI", "pt", 0)])
-    P("UF.1").branch({1: "UF.2"}, "RET", [("CMPI", "pb", UNS + 8)])
-    P("UF.2").a(("LDI", "uf", 1)).ret()
+    p = P("UFLAG")    # W[uf]: 1 unsigned long (depth 0, base UNS + 8); 2 unsigned int (UNS + 4); 3 long or a pointer; else 0
+    p.a(("LDI", "uf", 3)).branch({1: "UF.1"}, "RET", [("CMPI", "pt", 0)])
+    P("UF.1").a(("LDI", "uf", 1)).branch({1: "RET"}, "UF.2", [("CMPI", "pb", UNS + 8)])
+    P("UF.2").a(("LDI", "uf", 3)).branch({1: "RET"}, "UF.3", [("CMPI", "pb", SZ["long"])])
+    P("UF.3").a(("LDI", "uf", 2)).branch({1: "RET"}, "UF.4", [("CMPI", "pb", UNS + 4)])
+    P("UF.4").a(("LDI", "uf", 0)).ret()
     levels = sorted(set(PREC.values()))
     top = levels[-1]
     for L in levels:
@@ -520,7 +539,9 @@ def expr():
         q.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").call("UFLAG").vpop("pt", "pb")
         uu, ss, u2, dn = q.fresh("cu"), q.fresh("cs"), q.fresh("c2"), q.fresh("cd")
         q.branch({1: uu}, u2, [("CMPI", "pb", UNS + 8)])    # unsigned iff either side is (measured)
-        P(u2).branch({1: uu}, ss, [("CMPI", "uf", 1)])
+        u3 = u2 + "x"
+        P(u2).branch({1: uu, 2: "DEADU4"}, u3, [("CMPI", "uf", 1)])
+        P(u3).branch({1: "DEADU4"}, ss, [("CMPI", "uf", 2)])
         P(uu).o(POP1 + optext(o, True)).goto(dn)
         P(ss).o(POP1 + optext(o)).goto(dn)
         q.cur = dn
@@ -631,12 +652,15 @@ def expr():
     p.tok({"=": "EXPR.bad", "?": "EXPR.q"}, "RET")
     p = P("EXPR.q")     # c ? a : b  (labels as if/else, measured)
     p.newlab("a").newlab("b").o("  jumpz r0, ").lab("a").o("\n").vpush("a", "b").call("NEXT").call("CEXPR").expect(":")
-    p.call("UFLAG").branch({1: "DEADU"}, "EXPR.q2", [("CMPI", "uf", 1)])
+    p.call("UFLAG").branch({1: "DEADU", 2: "EXPR.qu2"}, "EXPR.q2", [("CMPI", "uf", 1)])
+    P("EXPR.qu2").branch({1: "DEADU"}, "EXPR.q2", [("CMPI", "uf", 2)])
     p = P("EXPR.q2")
     p.vpop("a", "b").o("  jump ").lab("b").o("\n").lab("a").o(":\n").vpush("b").call("NEXT").call("EXPR")
-    p.call("UFLAG").branch({1: "DEADU"}, "EXPR.q3", [("CMPI", "uf", 1)])
+    p.call("UFLAG").branch({1: "DEADU", 2: "EXPR.qu3"}, "EXPR.q3", [("CMPI", "uf", 1)])
+    P("EXPR.qu3").branch({1: "DEADU"}, "EXPR.q3", [("CMPI", "uf", 2)])
     P("EXPR.q3").vpop("b").lab("b").o(":\n").ret()
-    g.on("DEADU", range(257), "DEAD", rej("not covered: unsigned long in ?:"), "r")
+    g.on("DEADU4", range(257), "DEAD", rej("not covered: unsigned int operand"), "r")
+    g.on("DEADU", range(257), "DEAD", rej("not covered: unsigned long or unsigned int in ?:"), "r")
     # comma.  A bare identifier whose value is discarded emits its address
     # only (measured: `a;`, `a, 1`).  VEXPR: statement level / for clauses
     # (discarded when followed by ; , or )); CEXPR: value context (discarded
@@ -696,8 +720,11 @@ def expr():
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
         q = P(nm).call("NEXT").call("UNARY")
-        if nm != "U.not":      # - ~ of a pointer: not covered
+        if nm != "U.not":      # - ~ of a pointer, or of an unsigned int: not covered
             noptr(q)
+            ok = q.fresh("n4")
+            q.branch({1: "DEADU4"}, ok, [("CMPI", "pb", UNS + 4)])
+            q.cur = ok
         q.o(txt)
         if nm == "U.not":      # !x is an int whatever x was (C99 6.5.3.3p5): a + !q does not scale a
             q.a(("LDI", "pt", 0), ("LDI", "pb", 0))
@@ -733,14 +760,14 @@ def expr():
         q = P(nx)
     q.branch({}, ("rej", "not covered: cast to a non-scalar"))
     # a hex/octal literal in (INT_MAX, UINT_MAX] is an unsigned int (C99 6.4.4.1): the reference masks
-    # the operands to 32 bits (measured: g() - 0x80000000) -- not in the slice
+    # the operands to 32 bits (measured: g() - 0x80000000; see ubin)
     p = P("U.num")
     p.branch({1: "U.nx"}, "U.num1", [("CMPI", "nx", 1)])
     p = P("U.nx")
     p.a(("LDI", "t", 0x7fffffff)).branch({2: "U.nx2"}, "U.num1", [("C64", "nv", "t")])
     p = P("U.nx2")
     p.a(("A64I", "shr", "t", "nv", 32), ("LDI", "z0", 0)).branch({1: "U.nxu"}, "U.num1", [("C64", "t", "z0")])
-    g.on("U.nxu", range(257), "DEAD", rej("not covered: unsigned int constant"), "r")
+    P("U.nxu").o("  imm r0, ").call("NUMOUT").o("\n").call("NEXT").a(("LDI", "pb", UNS + 4)).ret()
     P("U.num1").o("  imm r0, ").call("NUMOUT").o("\n").call("NEXT").ret()
     # a string literal: `.lea r0, Sk`, k counted with the printf segments in source order; it also takes a label
     # number (measured: `p = "ab"; if (u)` -> L3); ?: takes both of its labels up front (u ? "x" : "y" -> L4 L5, then 6 7)
