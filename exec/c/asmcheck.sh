@@ -106,6 +106,18 @@ for case in range(5):
   assert (r.returncode,r.stdout,r.stderr)==(2,b'field bounds: rejected before writing\n',b''),(case,version,r)
 print('field bounds: C/ASM both reject, 10 checks')
 PYFORMAT
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_STACK_LINKAGE= -Dstack_push=stack_push_c -Dstack_pop=stack_pop_c -Dframe_push=frame_push_c -Dframe_pop=frame_pop_c -Drealloc=stack_realloc \
+    exec/c/core.c "exec/c/asm/stack_$ARCH.S" exec/c/asm/layoutcheck.c exec/c/asm/stackcheck.c -o "$T/stack"
+b "$T/stack"
+b python3 - "$T/stack" <<'PYSTACK'
+import subprocess,sys
+for case in range(1,8):
+ for version in ['c','a']:
+  r=subprocess.run([sys.argv[1],version,str(case)],capture_output=True,timeout=10)
+  reason='out of memory' if case<=4 else 'stack capacity overflow' if case==5 else 'frame capacity overflow' if case==6 else 'pop of an empty stack'
+  assert (r.returncode,r.stdout,r.stderr)==(2,('SIMULATED stack panic: '+reason+'\n').encode(),b''),(case,version,r)
+print('stack failure paths: C/ASM both reject, 14 simulated checks')
+PYSTACK
 b env EXEC_CC="$R/exec/c/asm/cc.sh" python3 exec/c/netcheck.py
 b env EXEC_CC="$R/exec/c/asm/cc.sh" NETWORK=1 TARGET="$OS/$ARCH" \
     ./exec/pipeline/elf.sh "$T" examples/hello.c examples/fib.c tests/c/b_strderef.c exec/parse2/probes/prefix_members.c exec/parse2/probes/member_index_address.c exec/c/run.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }

@@ -239,7 +239,41 @@ CORE_ALU_LINKAGE I alu64(int op, I a, I b, int *z) {
 
 #endif
 
-typedef struct { const unsigned char *b; const I *at; I i, end; } Frame;
+#ifdef UNISA_CORE_ASM_STACK
+void core_stack_push(CoreStack *s,int value);
+void core_stack_pop(CoreStack *s);
+void core_frame_push(CoreFrames *s,const CoreFrame *value);
+void core_frame_pop(CoreFrames *s);
+#define stack_push core_stack_push
+#define stack_pop core_stack_pop
+#define frame_push core_frame_push
+#define frame_pop core_frame_pop
+#else
+#ifndef CORE_STACK_LINKAGE
+#define CORE_STACK_LINKAGE static
+#endif
+CORE_STACK_LINKAGE void stack_push(CoreStack *s,int value) {
+    if (s->n>=s->cap) {
+        if (s->cap>INT32_MAX/2) core_die("stack capacity overflow");
+        s->cap=s->cap ? s->cap*2 : 1024;
+        s->entries=core_alloc(s->entries,sizeof(int)*s->cap);
+    }
+    s->entries[s->n++]=value;
+}
+CORE_STACK_LINKAGE void stack_pop(CoreStack *s) {
+    if (!s->n) core_die("pop of an empty stack");
+    s->n--;
+}
+CORE_STACK_LINKAGE void frame_push(CoreFrames *s,const CoreFrame *value) {
+    if (s->n>=s->cap) {
+        if (s->cap>INT32_MAX/2) core_die("frame capacity overflow");
+        s->cap=s->cap ? s->cap*2 : 16;
+        s->entries=core_alloc(s->entries,sizeof(CoreFrame)*s->cap);
+    }
+    s->entries[s->n++]=*value;
+}
+CORE_STACK_LINKAGE void frame_pop(CoreFrames *s) { if (s->n>1) s->n--; }
+#endif
 
 /* Run one model over a byte stream. The caller owns input and receives
    only accepted output. Registers, indexed memory, blobs and file cache are
@@ -252,18 +286,18 @@ int core_run(const CoreModel *m, unsigned char *input,
     blob_add((const unsigned char *)"", 0);
     blob_add((const unsigned char *)src, (int)strlen(src));
     unsigned char *x = input; I *xattr = calloc(inputn + 1, sizeof(I)); I xn = inputn;
-    int NFR = 1, CFR = 16; Frame *fr = core_alloc(0, sizeof(Frame) * CFR);
-    fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn;
+    CoreFrames frames={0}; CoreFrame first;
+    first.b=x; first.at=xattr; first.i=0; first.end=xn; frame_push(&frames,&first);
     Buf o = {0}, e = {0}; int osel = 0; I OT = 0;
     Buf sb = {0};
-    int *stk = 0; int nst = 0, cst = 0;
+    CoreStack stack={0};
     I steps=0;
     int q = m->start; I r = 0;
     for (;;) {
         if (++steps > maxsteps) { result->reason="timeout"; status = 3; goto finished; }
-        Frame *F = &fr[NFR - 1];
+        CoreFrame *F = &frames.entries[frames.n-1];
         int nx = -1, sq = -1;
-        int key = m->mode[q] == 1 ? (nst ? stk[nst - 1] : -1) :
+        int key = m->mode[q] == 1 ? (stack.n ? stack.entries[stack.n-1] : -1) :
             m->mode[q] == 0 ? (F->i < F->end ? F->b[F->i] : 256) : (r >= 0 && r <= 256 ? (int)r : 256);
         result->reason=core_transition(m,q,key,&nx,&sq);
         if (result->reason) { status=2; goto finished; }
@@ -272,7 +306,7 @@ int core_run(const CoreModel *m, unsigned char *input,
         const I *a = m->qa + m->qoff[sq];
         for (int k = 0; k < m->qlen[sq]; k++) {
             int op = (int)a[0];
-            F = &fr[NFR - 1];
+            F = &frames.entries[frames.n-1];
             switch (op) {
             case ADV: F->i++; break;
             case MARK: R[a[1]] = F->i; break;
@@ -313,8 +347,8 @@ int core_run(const CoreModel *m, unsigned char *input,
             case OSEL: osel = (int)a[1]; break;
             case SETOT: OT = R[a[1]]; break;
             case XATTR: R[a[1]] = (F->at && F->i < F->end) ? F->at[F->i] : 0; break;
-            case PUSH: if (nst >= cst) { cst = cst ? cst * 2 : 1024; stk = core_alloc(stk, sizeof(int) * cst); } stk[nst++] = (int)a[1]; break;
-            case POP: if (!nst) core_die("pop of an empty stack"); nst--; break;
+            case PUSH: stack_push(&stack,(int)a[1]); break;
+            case POP: stack_pop(&stack); break;
             case INTERN: case SBINTERN: {
                 if (op == INTERN) { I s0 = R[a[2]] < 0 ? 0 : R[a[2]], s1 = R[a[3]]; if (s1 > F->end) s1 = F->end;
                                     R[a[1]] = s0 < s1 ? intern(F->b + s0, (int)(s1 - s0)) : intern((const unsigned char *)"", 0); }
@@ -324,13 +358,13 @@ int core_run(const CoreModel *m, unsigned char *input,
                              R[a[1]] = s0 < s1 ? blob_add(F->b + s0, (int)(s1 - s0)) : blob_add((const unsigned char *)"", 0); } break;
             case SBSAVE: R[a[1]] = blob_add(sb.b ? sb.b : (unsigned char *)"", sb.n); break;
             case INPUSH: case INPUSHX: case INPUSHXE: {
-                if (NFR >= CFR) { CFR *= 2; fr = core_alloc(fr, sizeof(Frame) * CFR); }
-                Frame *G = &fr[NFR++];
+                CoreFrame added; CoreFrame *G=&added;
                 if (op == INPUSH) { CoreBlob *B = &blobs.entries[R[a[1]]]; G->b = B->b; G->at = 0; G->i = 0; G->end = B->n; }
                 else { G->b = x; G->at = xattr; G->i = R[a[1]]; G->end = xn;
                        if (op == INPUSHXE && R[a[2]] < xn) G->end = R[a[2]]; }
+                frame_push(&frames,G);
             } break;
-            case INPOP: if (NFR > 1) NFR--; break;
+            case INPOP: frame_pop(&frames); break;
             case SBCLR: sb.n = 0; break;
             case SBOUT: core_put(&sb, (int)a[1], 0); break;
             case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) core_put(&sb, F->b[j], 0); } break;
@@ -343,7 +377,7 @@ int core_run(const CoreModel *m, unsigned char *input,
             case SWAP: { unsigned char *nb = core_alloc(0, o.n + 1); I *na = core_alloc(0, sizeof(I) * (o.n + 1));
                          memcpy(nb, o.b, o.n); memcpy(na, o.at, sizeof(I) * o.n);
                          if (x != input) free(x); free(xattr);
-                         x = nb; xattr = na; xn = o.n; o.n = 0; NFR = 1; fr[0].b = x; fr[0].at = xattr; fr[0].i = 0; fr[0].end = xn; } break;
+                         x = nb; xattr = na; xn = o.n; o.n = 0; frames.n=1; frames.entries[0].b=x; frames.entries[0].at=xattr; frames.entries[0].i=0; frames.entries[0].end=xn; } break;
             case ACCEPT: goto finished;
             case REJECT: result->reason=m->str[a[1]]; result->reason_n=m->strl[a[1]]; status = 1; goto finished;
             default: core_die("bad action");
@@ -355,7 +389,7 @@ finished:
     if (!status) { result->out.b=o.b; result->out.n=o.n; o.b=0; }
     result->err.b=e.b; result->err.n=e.n; e.b=0;
     free(o.b); free(o.at); free(e.b); free(e.at); free(sb.b); free(sb.at);
-    free(fr); free(stk); if (x != input) free(x); free(xattr); free(R);
+    free(frames.entries); free(stack.entries); if (x != input) free(x); free(xattr); free(R);
     free(memory.keys); free(memory.values); free(memory.used); memset(&memory,0,sizeof memory);
     for (int i=0;i<blobs.n;i++) free(blobs.entries[i].b);
     free(blobs.entries); memset(&blobs,0,sizeof blobs);

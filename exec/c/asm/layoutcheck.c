@@ -31,3 +31,8 @@ RSCHECK(entries,RES_ENTRIES); RSCHECK(n,RES_COUNT);
 #define RECHECK(field,off) typedef char recheck_##field[(offsetof(CoreResourceEntry,field)==off)?1:-1]
 RECHECK(p,RES_KEY); RECHECK(n,RES_LENGTH); RECHECK(id,RES_ID);
 typedef char blob_resource_sizes[(sizeof(CoreBlobs)==BLOBS_SIZE && sizeof(CoreBlob)==BLOB_SIZE && sizeof(CoreResources)==RES_SIZE && sizeof(CoreResourceEntry)==RES_ENTRY_SIZE)?1:-1];
+#define SCHECK(t,f,o) typedef char check_##t##_##f[(offsetof(t,f)==o)?1:-1]
+SCHECK(CoreStack,entries,STACK_ENTRIES); SCHECK(CoreStack,n,STACK_COUNT); SCHECK(CoreStack,cap,STACK_CAP);
+SCHECK(CoreFrames,entries,STACK_ENTRIES); SCHECK(CoreFrames,n,STACK_COUNT); SCHECK(CoreFrames,cap,STACK_CAP);
+SCHECK(CoreFrame,b,FRAME_BYTES); SCHECK(CoreFrame,at,FRAME_ATTR); SCHECK(CoreFrame,i,FRAME_CURSOR); SCHECK(CoreFrame,end,FRAME_END);
+typedef char check_stacks[(sizeof(CoreStack)==STACK_SIZE && sizeof(CoreFrames)==STACK_SIZE && sizeof(CoreFrame)==FRAME_SIZE)?1:-1];

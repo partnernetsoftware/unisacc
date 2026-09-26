@@ -1,7 +1,7 @@
 # Assembly kernel migration
 
 This directory implements **`core_transition` and the 32/64-bit arithmetic
-primitives, byte-buffer append, sparse memory byte-string interning, blob copies, resource caching and decimal field rendering** by hand for AArch64 and x86-64 System V. Action dispatch, frame storage and cleanup are still
+primitives, byte-buffer append, sparse memory byte-string interning, blob copies, resource caching decimal field rendering and control/input stacks** by hand for AArch64 and x86-64 System V. Action dispatch, initialization and cleanup are still
 the generic C kernel. Allocation remains libc. The shipped product and default runtime still
 select C. This is not a completed assembly kernel or product switch.
 
@@ -22,7 +22,7 @@ explicitly not implemented. Mach-O native arm64 and Rosetta x86-64 were run;
 the ELF assembler spelling is present but has not yet been run on Linux.
 
 `cc.sh` builds an explicit development runtime: it omits the C transition
-arithmetic, buffer-append, sparse-memory intern, blob, resource and field-rendering implementations and links their assembly symbols. It is a build adapter, not a
+arithmetic, buffer-append, sparse-memory intern, blob, resource, field-rendering and stack implementations and links their assembly symbols. It is a build adapter, not a
 runtime fallback. `transitioncheck.c` separately retains the actual C body
 under a different name for 537,620 comparisons per ISA, including independent
 missing/domain/output expectations, signed limits and sums that would wrap a
@@ -38,16 +38,16 @@ no Python stage handles source at runtime.
 
 Measured uncompressed __text on macOS (object section, no subtraction):
 
-| ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | decimal/fill | remaining C (`cc -Os`) | sum |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 548 B | 272 B | 3,504 B | 6,308 B |
-| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 225 B | 4,612 B | 7,256 B |
+| ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | decimal/fill | stacks | remaining C (`cc -Os`) | sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 548 B | 272 B | 288 B | 3,240 B | 6,332 B |
+| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 225 B | 275 B | 4,215 B | 7,134 B |
 
 Error strings are 58 B per transition, 24 B per arithmetic object, and 39 B
-each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B and field rendering 26 B. Host/library/model costs
+each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B and field rendering 26 B; stacks add 84 B. Host/library/model costs
 remain outside this object sum, accounted separately in ../CORE.md. The C-only
 baseline with the capacity guards and explicit memory/intern state is
-6,664/7,715 B. These are migration measurements, not a performance claim.
+6,532/7,758 B. These are migration measurements, not a performance claim.
 
 ## Word arithmetic contract
 
@@ -173,3 +173,22 @@ for 10,013 values and 250,325 fields; untouched bytes and attributes are checked
 Ten C/ASM bad-offset/width runs check failure before writes, including INT64_MAX.
 Both real ISA jobs retain all network and six-image checks. C ASan/UBSan and
 network-built C self-reconstruction also pass. Dispatch and cleanup remain C.
+
+## Control stack and input-frame stack
+
+CoreStack owns 32-bit symbols; capacity begins at 1024 and doubles. Empty pop
+is fatal. CoreFrames owns 32-byte records, starting at 16 and doubling. A frame
+borrows its byte and optional attribute arrays and stores signed 64-bit cursor
+and end positions; pushing copies all four fields. The push source is external
+to the backing array, because realloc may move that array. Frame pop preserves
+the bottom record and is a no-op for zero or one record. Both capacity doublings
+are checked before signed int overflow. Allocator failure is fatal; cleanup
+of backing storage still belongs to the C run lifecycle.
+
+stackcheck.c compares the real C helpers and assembly using an always-moving
+allocator: 20,000 symbols and frames, all retained fields, full reverse pops,
+bottom-frame preservation and reuse without allocation. Fourteen explicit
+SIMULATED failure runs cover first/growth allocation failure for both stacks,
+each capacity guard, and empty control pop. Both real ISA jobs preserve the
+six-image route and five native comparisons. Native C network self-rebuild
+and ASan/UBSan checks pass. No parser/compiler-specific primitive was added.

@@ -50,3 +50,13 @@
 #define RES_LENGTH 8
 #define RES_ID 12
 #define RES_ENTRY_SIZE 16
+
+#define STACK_ENTRIES 0
+#define STACK_COUNT 8
+#define STACK_CAP 12
+#define STACK_SIZE 16
+#define FRAME_BYTES 0
+#define FRAME_ATTR 8
+#define FRAME_CURSOR 16
+#define FRAME_END 24
+#define FRAME_SIZE 32

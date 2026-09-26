@@ -44,12 +44,12 @@ The signed decimal renderer covers INT64_MIN without signed negation overflow.
 
 | Object section | arm64 | x86_64 |
 |---|---:|---:|
-| machine code `__text` | 6,664 B | 7,715 B |
+| machine code `__text` | 6,532 B | 7,758 B |
 | constants `__const` | 380 B | 224 B |
-| diagnostic strings `__cstring` | 324 B | 324 B |
+| diagnostic strings `__cstring` | 372 B | 372 B |
 | static zero storage | 104 B | 104 B |
-| compact unwind | 704 B | 672 B |
-| eh_frame | 0 B | 904 B |
+| compact unwind | 800 B | 768 B |
+| eh_frame | 0 B | 1,024 B |
 
 `corecheck.sh` rebuilds and prints these sections, checks the external-linkage
 runtime, and audits undefined symbols. Its allowed imports are the two host
@@ -83,6 +83,6 @@ source-code reduction. It establishes a measurable C baseline for assembly.
 
 The next migration slice is documented in [asm/README.md](asm/README.md):
 handwritten inference, word arithmetic, buffer append, sparse indexed
-memory, binary string interning, blob copies, resource caching and decimal field rendering on arm64 and x86-64, with remaining C actions retained and an explicit
+memory, binary string interning, blob copies, resource caching decimal field rendering and control/input stacks on arm64 and x86-64, with remaining C actions retained and an explicit
 build selector. The C-only measurement above includes the current capacity
-guards and explicit CoreMemory/CoreIntern/CoreBlobs/CoreResources state. Product routing is unchanged.
+guards and explicit CoreMemory/CoreIntern/CoreBlobs/CoreResources/CoreStack/CoreFrames state. Product routing is unchanged.

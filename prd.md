@@ -2936,3 +2936,23 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   initialization and cleanup are still C, so full assembly migration remains
   incomplete. Product unchanged, no push. Targeted checks only; last full gate
   still de81ff3 82/82.
+
+
+### Assembly core: control symbols and input-frame stacks
+
+- The two stacks now have explicit ABI-checked state and real assembly push/pop
+  implementations. Symbols retain 32-bit storage; frame records retain borrowed
+  byte/attribute pointers and 64-bit cursor/end. The bottom input frame is never
+  popped. Signed capacity overflow is rejected before doubling; no new model
+  limit. Initialization, action dispatch and final cleanup are still C.
+- Per actual macOS arm64/Rosetta ISA: 20,000 symbols and frames checked through
+  moving allocation, all values, reverse pops and reuse; fourteen simulated
+  allocation/overflow/empty-pop failures; existing six images/five native
+  comparisons pass. Network-built C self-reconstruction and ASan/UBSan pass.
+  Logs /tmp/unisacc-stack-{arm,x86,native,sanitize}.log.
+- Stack text 288/275 B, strings 84 B each. Remaining C 3,240/4,215 B;
+  full assembly-helper-plus-C text 6,332/7,134 B. C-only baseline 6,532/7,758 B.
+  These object sums exclude linked host/libc/model data, and do not mean the
+  full assembly kernel or product-route switch is complete. Product unchanged;
+  no push. Last complete gate remains de81ff3 82/82; this slice uses targeted
+  checks and actual self-reconstruction.
