@@ -282,7 +282,7 @@ key 空间互不相干，共享 trunk 没有结构可共享、只有互相挤占
 | **K-2** | 部署期**无 softmax、无 libm、热路径无 malloc** |
 | **K-3** | 整数 dtype 用 `int32` 累加器，scale 每个输出只乘一次——**内层循环无浮点** |
 | **K-5** | **整数构造后端（E-21 / E-22）**：`W1 ∈ {0,1}`、`b1 ∈ {0,−1,−2}` 且**无需存储**（由字面量数恢复）、`W2 ∈ {1,2,4,8,16}`。输入是恰含 m 个 1 的 one-hot ⇒ 第一层是 **m 次加法 + bias**，不是矩阵乘；隐激活恒为 0 或 1 ⇒ 第二层是**条件整数加**，连移位都不需要。全链路**零乘法、零移位、零浮点**。最小覆盖下 max\|pre\| = 2、max logit = 19 ⇒ **int8 足够** |
-| **K-4** | Python 参考实现 `unisa/linalg.py`，C 部署实现 `kernel/unisa_boot.c`，两者在 FULL gold 上必须逐 key 同类 |
+| **K-4** | Python 参考实现 `unisa/linalg.py`，C 部署实现 `kernel/unisa_core.c`，两者在 FULL gold 上必须逐 key 同类 |
 
 ### 3.2 TableNet [N]
 
@@ -524,7 +524,7 @@ TOTAL           ...
 更好的预测量是**头数**与**参数量**——真正压垮 q4 的是逐行误差在多少个独立决策上复利，
 而不是最坏的那一个有多紧。margin 仅作弱排序提示，且不承担任何证明责任（P-4）。
 
-**Q-10** kit = `weights/*.unisa` + `MANIFEST.json` + `kernel/unisa_boot.c` + 镜像。
+**Q-10** kit = `weights/*.unisa` + `MANIFEST.json` + `kernel/unisa_core.c` + 镜像。
 
 ---
 
@@ -775,7 +775,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **A-13** | `unisa quant` → 每个出货阶段在其记录 dtype 下 argmax 不变 | Q-6, P-4 |
 | **A-14** | 构造两次 → `built.uns2` 字节相同。**套件不再训练**：训练是分钟级满核工作、不在出货路径上，曾把套件变成两小时的活 | D-3, D-6, U-5 |
 | **A-15** | `unisa ship` → kit 四件套齐全 | Q-10 |
-| **A-16** | Python kernel 与 `unisa_boot.c` 在 FULL gold 上逐 key 同类 | K-4 |
+| **A-16** | Python kernel 与 `unisa_core.c` 在 FULL gold 上逐 key 同类 | K-4 |
 | **A-25** | `tests/corpus.sh` → `wrong = 0`，且 `pass` 不低于 `tests/corpus.baseline` | P-6 |
 | **A-26** | 在**真 Linux 内核**上执行发出的 ELF（不是解释它）。默认由本机 Lima 虚机承担（[A-32]），GitHub 的 runner 只在把目录挪回来之后作为无尘室复核 | I-1, I-12, X-3 |
 | **A-27** | `tests/crossnative.sh` → lnx/x86_64、lnx/arm64、osx/x86_64、win/arm64、win/x86_64 在真机上与解释器逐例一致；**虚机没开就跳过并点名**，`STRICT=1` 时跳过算失败 | I-12..14, X-3 |
@@ -813,7 +813,7 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 | **B-2** | kit 字节 | `unisa ship` 按逐阶段最低 dtype | 权重 **≤ 32 KB**；kit ≤ 64 KB |
 | **B-2a** | **对比基线必须写明** | **训练**权重比裸表大（E-3），故其体积主张只能对"手写算法代码"成立；**构造**权重比裸表小 2.19×（E-22），无此限制 | 报告时并列四列：裸表 / 训练权重 / 构造权重 / tcc |
 | **B-3** | 对比 tinycc | `size $(which tcc)` 或 tcc 发布二进制 | 记录比值 |
-| **B-4** | 决策吞吐 | `unisa bench`，逐阶段，冷 | Python ≥ 50k/s；`unisa_boot.c` ≥ 5M/s |
+| **B-4** | 决策吞吐 | `unisa bench`，逐阶段，冷 | Python ≥ 50k/s；`unisa_core.c` ≥ 5M/s |
 | **B-5** | 端到端编译 | `unisa run examples/fact.c` | ≤ 1 s |
 
 **B-6** `unisa bench` 必须报**冷**数据。在确定性全函数上加 memo 缓存是正当工程手段，`run` 可开；但 `bench`/`acc`/`quant` 必须关——否则测的是 dict，不是 kernel。
@@ -1784,7 +1784,7 @@ M3 tape 与 VM     tape → vm                               ⟦手写 tape 跑�
 M4 C99 前端       pp → lex → parse → sema → ir            ⟦七样例出 tape 且 VM 正确⟧
 M5 Lowering       lower → exec_target                     ⟦A-5, A-8⟧ ★主目标
 M6 镜像           emit_x86/arm → image/*                  ⟦A-9, A-10⟧
-M7 Ship           ship + kernel/unisa_boot.c              ⟦A-15, A-16, B-2⟧
+M7 Ship           ship + kernel/unisa_core.c              ⟦A-15, A-16, B-2⟧
 M8 验收与度量     tests/acceptance.sh + bench             ⟦B-1..B-6⟧
 ```
 

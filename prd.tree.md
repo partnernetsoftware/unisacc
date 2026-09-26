@@ -30,7 +30,7 @@ UNISA SH
 └─ ③ 唯一 kernel（inference）—— 换权重不换它
     └─ embed → gemv → ReLU → gemv → argmax
         ├─ Python 参考实现      unisa/linalg.py，累加顺序固定
-        └─ C 部署实现           kernel/unisa_boot.c，无 softmax / 无 libm / 热路径无 malloc
+        └─ C 部署实现           kernel/unisa_core.c，无 softmax / 无 libm / 热路径无 malloc
 ```
 
 **DAG 边**
@@ -83,7 +83,7 @@ unisa/
 │   └─ pe.py          4d5a       MZ stub + PE\0\0 + 0x20b + .text
 │
 ├─ ship.py            kit.zip = weights/ + MANIFEST.json + kernel/ + images
-└─ kernel/unisa_boot.c   部署 kernel
+└─ kernel/unisa_core.c   部署 kernel
 
 examples/  hello fact ptr fib switch struct do host
 weights/   *.unisa
@@ -188,7 +188,7 @@ unisa/
 │   └─ pe.py          4d5a       MZ stub + PE\0\0 + 0x20b + .text
 │
 ├─ ship.py            kit.zip = weights/ + MANIFEST.json + kernel/ + images
-└─ kernel/unisa_boot.c   部署 kernel
+└─ kernel/unisa_core.c   部署 kernel
 
 examples/  hello fact ptr fib switch struct do host
 weights/   *.unisa
@@ -316,7 +316,7 @@ M6 镜像
 │   ⟦门禁⟧ 三个魔数正确；同输入两次编译字节相同
 ▼
 M7 Ship
-│   ship.py + kernel/unisa_boot.c
+│   ship.py + kernel/unisa_core.c
 │   ⟦门禁⟧ kit.zip 四件套齐全；权重 ≤ 32KB；acc 全 1.000 否则拒绝出货
 ▼
 M8 验收 + 度量
