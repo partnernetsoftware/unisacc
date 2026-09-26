@@ -2012,3 +2012,28 @@ symbols match the Python referee; code/labels survive. Python parsing and
 zero_last only judge results, not supply intermediate answers to the delta.
 This is a hand algorithm compiled into a state table, not a new network.
 Instruction lowering and remaining architectures are still pending.
+
+### Raw source through six deltas to Linux ELF (2026-09-26)
+
+The 1,063-state full lowering delta now consumes raw tape and handles Linux
+x86_64 register mapping, entry setup, argument/syscall rules and adjacent
+push/pop fusion. It reads regmap/enc/abi/reloc facts; control algorithms remain
+hand-written in the generator. `.print` and other targets remain unsupported.
+The full typed TargetProgram comparison passes a 41-instruction fixture on
+both executors, hello (9,791 instructions) and optimized fib (5,530) on C.
+Data-only checks remain green after introducing the full-mode hook.
+
+`exec/pipeline/elf.sh` generates six tables, then runs source through E2/E1/E3/
+E4/lowering/ELF on one generic C executor. No Python stage processes source
+once tables have been generated. `exec-srcelf` checks hello and fib: optimized
+tapes match the product reference, and complete ELF files match the Python
+image referee (28,982 and 28,970 bytes). `exec-lower` checks lowering separately.
+These two examples establish an end-to-end route, not C99 completeness, six-
+target support, network implementation or replacement of the product path.
+
+The two new source-to-ELF outputs were executed on local Lima Linux x86_64
+(emulated on the arm64 host): stdout `hello from C99\n` and `55\n`, exit 0,
+empty stderr. An initial manual hello expectation was wrong; after checking
+the source the rerun passed. The VM started for this check was stopped;
+the already-running default VM was left alone. This is runtime evidence for
+these two outputs, not a Linux suite pass.

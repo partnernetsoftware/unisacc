@@ -1,21 +1,29 @@
 # Lowering through the generic executor
 
-Current scope: Linux data layout, directly from raw E3/E4 tape text.
+The data-only mode decodes raw E3/E4 `.str` and `.bss` directives, performs
+zero-last layout and emits a data header followed by unchanged tape code.
 
 ```
 python3 exec/lower/gen.py data.json
-python3 exec/c/tbl.py data.json data.tbl
-run data.tbl input.tape > data-and-tape.txt
+python3 exec/lower/gen.py full.json --full
 ```
 
-The delta decodes `.str`/`.bss`, aligns and reorders data using the existing
-zero-last policy, updates symbol addresses, and allocates scratch space.
-It emits the full data header followed by still-unlowered tape instructions.
-Do **not** send that output straight to the target encoder: register mapping,
-entry setup, syscall rules and push/pop fusion remain to be implemented.
+`--full` also lowers Linux x86_64 instructions: register mapping, entry setup,
+argument access, syscall setup and adjacent push/pop fusion. It consumes raw
+tape, not a Python-lowered TargetProgram. `.print` is explicitly unsupported;
+other targets are not implemented here.
 
-`data.py` holds the hand algorithm; the generated artifact is a transition
-table, not an integer network. The runtime executor is unchanged. Escape and
-scratch-size declarations are imported at generation, not the Python layout
-algorithm. `check.sh` uses Python parsing/layout only as the test referee,
-and feeds real E4 output into the delta.
+`data.py` and `code.py` compile hand algorithms into transition tables, not
+integer networks. `code.py` reads regmap/enc/abi/reloc TSV facts; scratch
+constants and tape shape declarations are imported at generation. No new
+executor primitive was added. Python lower() is used only by the referee.
+
+`check.sh` checks data layout, including real E4 output. `fullcheck.sh` checks
+all instruction arguments and metadata, labels and data against the reference:
+a fixed syscall/fusion/entry fixture on both executors, plus hello and fib on
+the C executor. These are bounded examples, not full lowering coverage.
+
+`../pipeline/elf.sh OUTPUT_DIR FILE.c...` runs E2, E1, E3, E4, lowering and ELF
+encoding using the same C executor. Python generates the tables beforehand;
+no Python stage processes the input source after generation. It is a developer
+route, not the shipped `.com` implementation. Frontend coverage limits remain.

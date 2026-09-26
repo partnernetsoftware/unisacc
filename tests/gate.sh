@@ -48,6 +48,8 @@ job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    
 job exec-e5     ./exec/enc/check.sh                               # S-17 E5, first slice: x86 encoder on a fixture
 job exec-elf    ./exec/enc/imagecheck.sh                          # S-17: complete Linux x86 ELF from lowering payload
 job exec-lowdata ./exec/lower/check.sh                           # raw E4 tape data decoding/layout through delta
+job exec-lower ./exec/lower/fullcheck.sh                        # typed full Linux lowering comparison
+job exec-srcelf ./exec/pipeline/check-elf.sh                     # two complete source-to-ELF paths
 job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
 job nativeboot  ./tests/nativeboot.sh

@@ -5,7 +5,7 @@ next lowering pass. No Python tape parser or zero_last runs in this path.
 RAW, START, NAME, FLAG, NEW, REMAP, DEFINED = (i*10**6 for i in range(94,101))
 
 
-def install(E, done='ACCEPTDATA'):
+def install(E, done='ACCEPTDATA', code_start='H.code'):
     from unisa.lower import SCRATCH, PRINTMAX
     P,g=E.P,E.g
     E.prn()
@@ -91,6 +91,6 @@ def install(E, done='ACCEPTDATA'):
     P('H.addr').a(('LDX','s','bi',START)).goto('H.normal')
     P('H.normal').a(('LDX','n','s',REMAP)).goto('H.num')
     P('H.num').o(' ').a(('ALUI','add','n','n',256)).call('PRN').o('\n').a(('ALUI','add','bi','bi',1)).goto('H.sl')
-    P('H.end').o('@src_os lnx\n@data_len ').a(('COPYW','n','full')).call('PRN').o('\n@bss 0\n@relocs -\n').a(('INPUSH','code')).goto('H.code')
+    P('H.end').o('@src_os lnx\n@data_len ').a(('COPYW','n','full')).call('PRN').o('\n@bss 0\n@relocs -\n').a(('INPUSH','code')).goto(code_start)
     g.on('H.code',[256],done,[('INPOP',)]);g.els('H.code','H.code',[('COPY',),('ADV',)])
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: tape data directive'),'r')
