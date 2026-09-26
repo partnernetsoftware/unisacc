@@ -7,13 +7,14 @@ def run(cmd, **kw):
 def ok(cmd, **kw):
     r=run(cmd,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
 src=pathlib.Path('examples/hello.c').resolve();n=0
+drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
 # The migrated pipeline builds the driver itself, not just its input programs.
 netdriver=p/'driver-net'
 netdriver.write_bytes(ok([p/'run','--bundle',p/'models.pkg',target,'exec/c/compiler.c']))
 assert netdriver.read_bytes()==(p/'driver-ua').read_bytes(), 'network-built driver differs'
 netdriver.chmod(0o755)
 assert ok([netdriver,'--models',p/'compiler.pkg',src,'-b',target,'-O2'])==ok([ua,src,'-b',target,'-O2'])
-for exe in [p/'driver-cc',p/'driver-ua']:
+for exe in drivers:
     base=[exe,'--models',p/'compiler.pkg']
     for level in range(3):
         for mode in ['-E','-S','-b']:
@@ -44,7 +45,7 @@ probe=p/'cli.c';probe.write_text('#ifdef X\nX\n#else\n17\n#endif\n__UNISA__\n')
 def cli(opts,defs=(),undefs=(),includes=(),incdir=''):
     flags=['-b',target,'-E',*opts]
     want=ok([ua,probe,*flags])
-    for exe in [p/'driver-cc',p/'driver-ua']:
+    for exe in drivers:
         assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==want,opts
     files=sim.Files()
     for key,values in [('defines',defs),('undefines',undefs),('includes',includes)]:
@@ -67,8 +68,25 @@ probe.write_text('#include <stdio.h>\n#include "local.h"\nPICK LOCAL\n')
 cli(['-I',idir],incdir=idir);cli(['-I'+str(idir)],incdir=idir)
 probe.write_text('int main(void) { return VALUE; }\n')
 flags=['-DVALUE=7','-b',target,'-O2']
-for exe in [p/'driver-cc',p/'driver-ua']:
+for exe in drivers:
     assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
+# Assembly driver consumes the same explicit package from an isolated cwd;
+# this is the real compiler CLI, not a standalone core_run harness.
+asmdir=p/'asm-isolated';asmdir.mkdir()
+asm=asmdir/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
+(asmdir/'models.pkg').write_bytes((p/'compiler.pkg').read_bytes())
+(asmdir/'hello.c').write_bytes(src.read_bytes())
+base=[asm,'--models','models.pkg']
+for mode in ['-E','-S']:
+    flags=['-b',target,mode,'-O2']
+    assert ok([*base,'hello.c',*flags],cwd=asmdir)==ok([ua,src,*flags])
+ok([*base,'hello.c','-O2'],cwd=asmdir)
+assert (asmdir/'a.out').read_bytes()==ok([ua,src,'-b',target,'-O2'])
+assert ok([asmdir/'a.out'])==b'hello from C99\n'
+before=set(asmdir.iterdir())
+assert ok([*base,'-run','hello.c'],cwd=asmdir)==b'hello from C99\n'
+assert set(asmdir.iterdir())==before
+print('assembly compiler driver: isolated package, native output and memory run pass')
 # Public-shaped commands operate with only the container and source in cwd.
 isolated=p/'isolated';isolated.mkdir()
 com=isolated/'compiler.com';com.write_bytes((p/'driver.com').read_bytes())

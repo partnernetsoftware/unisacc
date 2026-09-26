@@ -3018,3 +3018,21 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   Product .com unchanged. Actual product ABI/OS bindings and the default
   switch remain unfinished; no assembly self-rebuild is claimed. Local work
   continues; cc-unisacc remains paused, no push/release.
+
+
+### Assembly kernel through the compiler CLI
+
+- Existing compiler, multi-unit and memory suites now require a third driver,
+  linked against the full assembly kernel (no core.c). Native macOS checks:
+  27 mode/level matches, 36 multi-unit tape comparisons, isolated package/file
+  compilation and memory execution, macro/include handling, failure-before-
+  output and real short writes. Memory suite: 36 runs per ISA across all three
+  drivers, plus argv/env/O1/exit-status checks, on arm64 and Rosetta x86-64.
+- Logs /tmp/unisacc-asm-{driver,multi,memory-arm,memory-x86}.log; all four suites
+  exited 0, each bounded by 60 s. These are new required paths in existing
+  gates, not optional tests. The package remains unchanged (host route:
+  1,092,744 B arm64, 1,072,876 B x86-64). No fresh full-gate claim.
+- The host-linked assembly driver is not the shipped .com. Product-internal
+  ABI/carried-library binding remains necessary; x7 is the ARM tape stack and
+  the first x86 tape argument is rax rather than System V rdi. Product sources
+  and .com unchanged. Local commit only, cc-unisacc paused, no push/release.

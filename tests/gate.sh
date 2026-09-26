@@ -68,7 +68,7 @@ job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source
 job exec-native ./exec/c/nativecheck.sh
 job exec-net python3 ./exec/c/netcheck.py
 job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
-job exec-asm ./exec/c/asmcheck.sh       # actual assembly inference/actions; C lifecycle
+job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel
 if [ "$(uname -s)" = Darwin ]; then job exec-asmx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asmcheck.sh; fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh

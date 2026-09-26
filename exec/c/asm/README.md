@@ -5,8 +5,9 @@ primitives, byte-buffer append, sparse memory, byte-string interning, blob
 copies, resource caching, decimal field rendering and control/input stacks**
 by hand for AArch64 and x86-64 System V. Both ISAs also implement all 56 action
 handlers and their dispatch in assembly.
-The outer transition loop, initialization and cleanup remain C on both ISAs. Allocation remains libc. The shipped product and default runtime still
-select C. This is not a completed assembly kernel or product switch.
+The transition loop, initialization and cleanup are also assembly on both ISAs.
+Allocation remains libc. The shipped product and default runtime still select
+C; product ABI/platform binding and default switching remain unfinished.
 
 Both transition routines evaluate the threshold network directly: initialize the two
 signed 64-bit outputs, visit every threshold, activate `key >= threshold`,
@@ -24,8 +25,8 @@ rbx/r12–r15 on every return. Windows object/calling-convention bindings are
 explicitly not implemented. Mach-O native arm64 and Rosetta x86-64 were run;
 the ELF assembler spelling is present but has not yet been run on Linux.
 
-`cc.sh` builds an explicit development runtime: it omits the C transition
-arithmetic, buffer-append, sparse-memory intern, blob, resource, field-rendering and stack implementations and links their assembly symbols. It is a build adapter, not a
+`cc.sh` builds an explicit development runtime: it omits core.c entirely
+and links all assembly symbols. It is a build adapter, not a
 runtime fallback. `transitioncheck.c` separately retains the actual C body
 under a different name for 537,620 comparisons per ISA, including independent
 missing/domain/output expectations, signed limits and sums that would wrap a
@@ -39,7 +40,8 @@ cc. The sixth image is the C runtime; executing it does not turn it into an
 assembly action engine. Test Python constructs models and compares results;
 no Python stage handles source at runtime.
 
-Measured uncompressed __text on macOS (object section, no subtraction):
+Historical action-dispatch slice, before the complete lifecycle below
+(uncompressed macOS object __text, no subtraction):
 
 | ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | decimal/fill | stacks | action dispatch | remaining C (`cc -Os`) | sum |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -260,3 +262,17 @@ not establish Windows bindings or compatibility with the product's internal
 calling convention. The default .com is unchanged; assembly self-rebuilding
 and the final product switch remain unfinished. These are targeted checks,
 not a new full-gate result.
+
+## Compiler-driver integration
+
+compilercheck.sh, multicheck.sh and memorycheck.sh now build driver-asm through
+cc.sh and require it alongside the host-C and unisacc-built C drivers. The
+actual compiler CLI consumes the same networks/resources: 27 mode/level
+comparisons, macro/include inputs, failure-before-output and short writes;
+36 multi-unit tape comparisons, both unit orders, static namespaces and real
+memory runs. An isolated directory contains only the assembly-backed driver,
+its package and source, and compiles/executes hello both as a file and via -run.
+The memory suite passes 36 native runs per ISA plus argv/environment/O1/status
+checks on macOS arm64 and Rosetta x86-64. These counts include all three drivers.
+The existing C-only embedded .com check remains separate. The assembly driver
+is host-linked, not yet linked with the product's carried library/internal ABI.

@@ -16,5 +16,6 @@ b "$T/run" --check-net "$T/o1.tbl" "$T/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
 b cc -O2 -Wall -Wextra exec/c/compiler.c -o "$T/driver-cc"
 b "$UA" -O2 exec/c/compiler.c -o "$T/driver-ua"
+b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.sh -O2 exec/c/compiler.c -o "$T/driver-asm"
 b python3 -m unisa ape exec/c/compiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" -o "$T/driver.com" > "$T/ape.log" 2>&1 || { cat "$T/ape.log"; exit 1; }
 b python3 exec/c/compilercheck.py "$T" "$TARGET" "$UA"

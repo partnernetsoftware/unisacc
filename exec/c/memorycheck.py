@@ -44,7 +44,8 @@ for missing in [('memory/text',),('memory/data',),('process/argc','process/argv'
 print('memory context: missing paired bases or process context rejected by both executors')
 # Behaviour includes real stdio, arguments, pointers, static storage, all levels.
 probes=['examples/hello.c','examples/fib.c','examples/struct.c','tests/c/b_argv.c','tests/c/b_printf.c','tests/c/b_static.c']
-for exe in [p/'driver-cc',p/'driver-ua']:
+drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
+for exe in drivers:
     for f in probes:
         for level in (0,2):
             flags=['-O'+str(level),'-run',f,'one','two']
@@ -56,7 +57,7 @@ for exe in [p/'driver-cc',p/'driver-ua']:
     # Exact intended argv contract, independent of the old driver's -- quirk.
     got=run([exe,'--models',p/'compiler.pkg',*args],env=env)
     assert got.returncode==7 and got.stdout==b'2 -argument present\n',(exe,got.returncode,got.stdout,got.stderr)
-print('memory run: 24 native runs match, argv/env/O1 and exit status pass; no executable file written')
+print(f'memory run: {len(drivers)*len(probes)*2} native runs match (C/UA/ASM), argv/env/O1 and exit status pass; no executable file written')
 # The decoder is the production loader's, not a second format parser.
 root=pathlib.Path.cwd()
 check=p/'bounds.c';check.write_text('#define UNISA_RUNTIME_LIBRARY\n#include "run.c"\n#include "memory.c"\nint main(int n,char **v){ Buf b={0}; MemoryImage m; if(n!=2)return 1; b.b=readfile(v[1],&b.n,0); memory_image(&b,&m); free(b.b); return 0; }\n')

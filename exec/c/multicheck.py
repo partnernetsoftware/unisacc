@@ -5,7 +5,7 @@ p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ua=sys.argv[3]
 def run(cmd,**kw):return subprocess.run(list(map(str,cmd)),capture_output=True,timeout=60,**kw)
 def ok(cmd,**kw):
     r=run(cmd,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
-drivers=[p/'driver-cc',p/'driver-ua'];count=0
+drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm'];count=0
 pairs=[['tests/multi/m1.c','tests/multi/m2.c'],['tests/multi/n1.c','tests/multi/n2.c']]
 for pair in pairs:
     for files in (pair,pair[::-1]):
