@@ -25,7 +25,8 @@ import json          # noqa: E402
 import sim           # noqa: E402
 import tbl           # noqa: E402
 
-REF, PRE = "/tmp/ua_ref", "/tmp/ua_pre"
+# exec/lex/run.sh sets these to its stamped, per-checkout artefacts
+REF, PRE = os.environ.get("E1REF", "/tmp/ua_ref"), os.environ.get("E1PRE", "/tmp/ua_pre")
 
 
 def sh(argv, env=None, t=10):

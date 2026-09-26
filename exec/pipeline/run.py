@@ -19,6 +19,13 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 T = 58
+# every artefact (reference binaries, deltas) lives in the per-checkout dir of
+# exec/stamp.sh and is rebuilt by its `fresh` when its sources change
+X = subprocess.run(["sh", "exec/stamp.sh", "dir"], cwd=ROOT, capture_output=True,
+                   text=True, check=True).stdout.strip()
+os.makedirs(os.path.join(X, "pipe"), exist_ok=True)
+for k, v in (("E2REF", "ua_ref"), ("E1REF", "ua_ref"), ("E3REF", "ua_ref"), ("E3DUMP", "ua_tdump")):
+    os.environ[k] = os.path.join(X, v)
 
 
 def manifest():
@@ -26,6 +33,7 @@ def manifest():
     for l in open(os.path.join(HERE, "stages.tsv")):
         if l.strip() and not l.startswith("#"):
             f = l.rstrip("\n").split("\t")
+            f = [c.replace("{x}", X) for c in f]
             rows.append(dict(zip(("name", "gen", "exec", "in", "out", "ref", "delta", "refin"), f)))
     return rows
 
@@ -36,6 +44,38 @@ def sh(cmd):
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired:
         return "timeout", b"", b""
+
+
+def fresh(out, cmd, inputs):
+    """exec/stamp.sh fresh: rebuild out unless its stamp matches cmd + inputs."""
+    p = subprocess.run(["sh", "-c", '. exec/stamp.sh; fresh "$@"', "fresh", out] + cmd + ["--"] + inputs,
+                       cwd=ROOT, capture_output=True, timeout=T)
+    return p.returncode, p.stderr
+
+
+def refs():
+    b = ["perl", "-e", "alarm(58);exec(@ARGV)"]
+    src = subprocess.run(["sh", "-c", '. exec/stamp.sh; echo $REFSRC'], cwd=ROOT,
+                         capture_output=True, text=True).stdout.split()
+    r, e = fresh(os.path.join(X, "ua_ref"), b + ["./tests/build_ref.sh", os.path.join(X, "ua_ref.c"),
+                                                  os.path.join(X, "ua_ref")], src)
+    if r == 0:
+        r, e = fresh(os.path.join(X, "ua_tdump"), b + ["exec/parse/mkdump.sh", os.path.join(X, "ua_ref.c"),
+                                                        os.path.join(X, "ua_tdump")],
+                     [os.path.join(X, "ua_ref.c"), "exec/parse/mkdump.sh"])
+    return r, e
+
+
+def gen_inputs(cmd):
+    """what a delta generator reads: its directory, exec/pp (the shared table
+    builder), unisa/ and the reference it may consult."""
+    d = os.path.dirname(shlex.split(cmd)[1])
+    fs = set()
+    for top in (d, "exec/pp", "unisa"):
+        for dp, _, names in os.walk(os.path.join(ROOT, top)):
+            fs.update(os.path.relpath(os.path.join(dp, n), ROOT) for n in names
+                      if n.endswith((".py", ".tsv")) and top == "unisa" or n.endswith(".py"))
+    return sorted(fs) + [os.path.join(X, "ua_ref.stamp")]
 
 
 def check(fmt, path):
@@ -58,6 +98,10 @@ def main():
     src = [x for x in a if not x.startswith("--")][0]
     src = os.path.abspath(src)
     rows = manifest()
+    r, e = refs()
+    if r != 0:
+        print("could not build the reference binaries: %s" % e[-300:])
+        return 1
     # connection check: the whole manifest, before running anything
     prev = "src.c"
     for s in rows:
@@ -90,8 +134,10 @@ def main():
         if bad:
             print("%s: input fails %s check: %s" % (n, fmt, bad))
             return 1
-        if gen or not os.path.exists(s["delta"]):
-            r, _, e = sh(s["gen"].format(delta=s["delta"]))
+        if gen and os.path.exists(s["delta"] + ".stamp"):
+            os.unlink(s["delta"] + ".stamp")
+        r, e = fresh(s["delta"], shlex.split(s["gen"].format(delta=s["delta"])), gen_inputs(s["gen"]))
+        if True:
             if r != 0:
                 print("%s: gen failed (%s) %s" % (n, r, e[-200:]))
                 return 1
