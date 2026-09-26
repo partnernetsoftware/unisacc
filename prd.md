@@ -2492,3 +2492,14 @@ lowering comparisons passed unchanged. Added `exec-winlower` to gate; the last
 full gate remains the preceding 60/60 run, not a claim for the new 61-suite list.
 No new executor primitive. This is lookup-table migration, not network runtime;
 Windows encoding/PE/native execution and E7 product adoption remain unfinished.
+
+### Windows ARM64 text setup (2026-09-27)
+
+Raw encoder now computes PE text/import/data addresses and emits addressed
+spinit, winsave/winrest and winstdh, including indirect GetStdHandle calls.
+`armcheck.sh` passed within its 60 s bound: three OS address layouts and page
+crossings on both executors; prior native arithmetic, memory, FP and Darwin
+program execution retained. Table: 1,073 states, 54,766 B text. Encoding rules
+remain explicit in generator; declarations supply imports and standard-handle
+numbers. No new runtime primitive. PE files/native Windows and the remaining
+WinAPI sequences are not yet covered. Log: /tmp/unisacc-win-armsetup-final.log.

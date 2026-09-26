@@ -35,7 +35,7 @@ def build(image=False):
              '.ld': ('rrii',11), '.st': ('riri',12),
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
              'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27),
-             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31),'.zero':('rii',32)}
+             '.lea':('rl',28),'setmem':('ir',29),'argsave':('iib',30),'argvget':('rri',31),'.zero':('rii',32),'winsave':('i',33),'winrest':('ir',34),'winstdh':('i',35)}
     from armint import SPECS, install as install_int
     specs.update(SPECS)
     from armfp import SPECS as FP_SPECS, install as install_fp
@@ -114,6 +114,8 @@ def build(image=False):
     P('ENC').branch({i:'CHECK.'+op for i,op in enumerate(specs,1)},'FAIL',[('RLD','cls')])
     for op,(shape,cls) in specs.items():
         p=P('CHECK.'+op)
+        if op=='spinit':
+            p.branch({1:'SP.address'},'CHECK.spinit.one',[('CMPI','n',2)]);p=P('CHECK.spinit.one')
         p.branch({1:'CHECK.'+op+'.n'},'FAIL',[('CMPI','n',len(shape))]); p=P('CHECK.'+op+'.n')
         for i,k in enumerate(shape):
             nxt='CHECK.'+op+'.k%d'%i

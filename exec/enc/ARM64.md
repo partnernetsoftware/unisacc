@@ -207,3 +207,21 @@ Reference bytes and native N1=N2=N3 match. The x86_64 route is 693,666 B,
 sha256 f971def83f4cb8e6cb085c84c62ce28b8c36637b3a5eb8188bd7b41474f6409f,
 with the same checks under Rosetta. These compile the existing C product source;
 they are not the new executor/model packaged as the product.
+
+## Windows address/setup migration
+
+The raw text encoder accepts `@target win/arm64`. It computes text, import-slot
+and data addresses from the text length and PE declarations (section alignment,
+image base, import names, DLL and load-config size); it does not call the
+reference assembler or image writer to obtain addresses. Existing ADRP/ADD
+transitions implement the relocatable addresses. `spinit rd, address`,
+`winsave`, `winrest`, and `winstdh` now encode through the same executor.
+`winstdh` calls GetStdHandle via its computed IAT slot three times. The explicit
+register save/restore and call sequences are hand-written encoding rules;
+IMPORTS and STD_FIRST are declaration inputs. No executor primitive was added.
+
+The address fixture covers Linux, Darwin and Windows, text page crossings,
+stack addresses, saves/restores and Windows standard handles on both runtimes,
+with complete reference bytes compared. Existing native arithmetic/FP and
+Darwin hello/fib execution checks still pass. This is not yet a PE writer or a
+Windows execution claim: `winargs`, WinAPI gates and PE output remain pending.
