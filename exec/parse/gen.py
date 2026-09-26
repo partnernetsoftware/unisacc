@@ -412,8 +412,8 @@ def expr():
     P("VEXPR.sta").call("EXPR.sta").goto("VEXPR.c")
     P("VEXPR.stu").call("EXPR.stu").goto("VEXPR.c")
     p = P("EXPR.sta")
-    p.a(("ALUI", "sub", "pt", "pt", 1)).o(PUSH).vpush("pt").call("NEXT").call("EXPR").vpop("pt").o(POP1)
-    width(p, "pt", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    p.a(("ALUI", "sub", "pt", "pt", 1)).o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
+    vwidth(p, "pt", "pb", *ST)     # depth 0: the pointee's base width (char *p: .st 1, measured)
     p.ret()
     P("EXPR.stu").call("DEREF").call("BINCONT").goto("EXPR.tail")
     # PV: '*' PV | '&' id | id  -> r0 = the pointer value, W[pt] = its depth
@@ -438,7 +438,7 @@ def expr():
     p.branch({(1, 2): "RET"}, ("rej", "not covered: dereference of a non-pointer"), [("CMPI", "pt", 1)])
     p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type
     p.a(("ALUI", "sub", "pt", "pt", 1))
-    width(p, "pt", "  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n")
+    vwidth(p, "pt", "pb", *LD)     # depth 0: the pointee's base width (char *p: .ld 1, measured)
     p.ret()
     p = P("EXPR.use")
     p.call("IDTAIL").call("BINCONT").goto("EXPR.tail")
