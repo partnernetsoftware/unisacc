@@ -44,12 +44,12 @@ def gold(name):
 
 
 PREC = {f[0]: int(f[1]) for f in gold("prec") if f[1].isdigit()}
-BINSEL = {f[0]: f[2] for f in gold("binsel") if f[1] == "s"}
+BINSEL = {(f[0], f[1]): f[2] for f in gold("binsel") if f[1] in ("s", "u")}
 IRSEL = {f[1]: f[2] for f in gold("irsel") if f[0] == "alu"}
 
 
-def optext(op):
-    sp = IRSEL[BINSEL[op]]
+def optext(op, u=False):
+    sp = IRSEL[BINSEL[(op, "u" if u else "s")]]
     rev = sp.endswith("_rev")
     sp = sp[:-4] if rev else sp
     if sp in ("div", "mod", "udiv", "umod"):
@@ -366,6 +366,7 @@ UNS = 16
 for n in (SZ["char"], SZ["short"]):
     LD[UNS + n] = LD[n] + "  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << 8 * n) - 1)
     ST[UNS + n] = ST[n]
+LD[UNS + 8], ST[UNS + 8] = LD[8], ST[8]   # unsigned long: the long access; its ops are the unsigned ones
 LDR = {k: LD[k % UNS] for k in LD}   # x++ / x--: the load is not masked (measured)
 MSK = {k: LD[k][len(LD[k % UNS]):] for k in LD}   # op= and ++x: the result masked again before the store (measured)
 
@@ -408,7 +409,26 @@ POP1 = "  load64 r1, [r7+0]\n  .frame -8\n"
 NORM = "  imm r1, 0\n  ne r0, r0, r1\n"
 
 
+def ubin(q, op, sub, cmp, after, pre=()):
+    """left operand in r0 (its type in pt/pb): push, right operand, then the signed or
+    unsigned spelling (binsel sign u iff either operand is
+    unsigned long -- shifts too: s >> v is lshr64, measured); result: int for a comparison, else unsigned long iff u."""
+    q.call("UFLAG").vpush("uf").o(PUSH).call("NEXT").call(sub)
+    for x in pre:
+        x(q)
+    q.call("UFLAG").vpop("ul")
+    uu, ss, u2 = q.fresh("uu"), q.fresh("us"), q.fresh("u2")
+    q.branch({1: uu}, u2, [("CMPI", "ul", 1)])
+    P(u2).branch({1: uu}, ss, [("CMPI", "uf", 1)])
+    P(uu).o(POP1 + optext(op, True)).a(("LDI", "pt", 0), ("LDI", "pb", 0 if cmp else UNS + 8)).goto(after)
+    P(ss).o(POP1 + optext(op)).a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto(after)
+
+
 def expr():
+    p = P("UFLAG")    # W[uf] = 1 iff the value is an unsigned long (depth 0, base UNS + 8)
+    p.a(("LDI", "uf", 0)).branch({1: "UF.1"}, "RET", [("CMPI", "pt", 0)])
+    P("UF.1").branch({1: "UF.2"}, "RET", [("CMPI", "pb", UNS + 8)])
+    P("UF.2").a(("LDI", "uf", 1)).ret()
     levels = sorted(set(PREC.values()))
     top = levels[-1]
     for L in levels:
@@ -425,11 +445,11 @@ def expr():
             q = P(cases[op])
             if op == "&&":
                 q.newlab("a").vpush("a").o("  jumpz r0, ").lab("a").o("\n").call("NEXT").call(sub)
-                q.o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+                q.o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto("LOOP%d" % L)
             elif op == "||":
                 q.newlab("a").newlab("b").vpush("a")
                 q.o("  jumpz r0, ").lab("b").o("\n  imm r0, 1\n  jump ").lab("a").o("\n").lab("b").o(":\n")
-                q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+                q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto("LOOP%d" % L)
             elif op in ("+", "-"):   # p +- n: n scaled by 8 at depth >= 2, by BASE (4/1/8) at depth 1
                 ok, pp, p1 = q.fresh("pa"), q.fresh("pp"), q.fresh("p1")    # (measured); unknown base -> not covered
                 sc = {n: q.fresh("s%d" % n) for n in sorted(set(SZ.values()))}   # scale = tyinfo size of the base
@@ -439,7 +459,7 @@ def expr():
                     nx = t.fresh("sn")
                     t.branch({1: sc[n]}, nx, [("CMPI", "pb", n)])
                     t = P(nx)
-                    if n in (1, 2):   # unsigned char/short *: scaled by the size (measured)
+                    if n in (1, 2, 8):   # unsigned char/short/long *: scaled by the size (measured)
                         nx = t.fresh("sn")
                         t.branch({1: sc[n]}, nx, [("CMPI", "pb", UNS + n)])
                         t = P(nx)
@@ -448,18 +468,15 @@ def expr():
                     r = P(sc[k])
                     r.vpush("pt", "pb").o(PUSH).call("NEXT").call(sub).call("NOPTR").vpop("pt", "pb")
                     r.o(("" if k == 1 else "  imm r2, %d\n  mul64 r0, r0, r2\n" % k) + POP1 + optext(op)).goto("LOOP%d" % L)
-                P(ok).o(PUSH).call("NEXT").call(sub).call("NOPTR").o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+                ubin(P(ok), op, sub, False, "LOOP%d" % L, [lambda x: x.call("NOPTR")])
                 r = P(pp)
                 r.vpush("pt").o(PUSH).call("NEXT").call(sub).call("NOPTR").vpop("pt")
                 r.o("  imm r2, %d\n  mul64 r0, r0, r2\n" % PSZ + POP1 + optext(op)).goto("LOOP%d" % L)
             elif op in ("==", "!=", "<", "<=", ">", ">="):   # pointers compare as the ints do (measured: p < q is slt64)
-                q.o(PUSH).call("NEXT").call(sub)
-                q.o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+                ubin(q, op, sub, True, "LOOP%d" % L)
             else:     # a pointer operand is not covered: the reference scales it
                 noptr(q)
-                q.o(PUSH).call("NEXT").call(sub)
-                noptr(q)
-                q.o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
+                ubin(q, op, sub, False, "LOOP%d" % L, [noptr])
     # BINCONT: the operand is already emitted; resume every level's loop
     p = P("BINCONT")
     for L in levels[:-1]:
@@ -481,8 +498,13 @@ def expr():
         addr(q, "r0")
         q.o(PUSH)
         vwidth(q, "pt", "pb", LD)
-        q.o(PUSH).vpush("pb").call("NEXT").call("EXPR").vpop("pb")
-        q.o(POP1 + optext(o))
+        q.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").call("UFLAG").vpop("pt", "pb")
+        uu, ss, u2, dn = q.fresh("cu"), q.fresh("cs"), q.fresh("c2"), q.fresh("cd")
+        q.branch({1: uu}, u2, [("CMPI", "pb", UNS + 8)])    # unsigned iff either side is (measured)
+        P(u2).branch({1: uu}, ss, [("CMPI", "uf", 1)])
+        P(uu).o(POP1 + optext(o, True)).goto(dn)
+        P(ss).o(POP1 + optext(o)).goto(dn)
+        q.cur = dn
         vwidth(q, "pt", "pb", MSK)
         q.o(POP1)
         vwidth(q, "pt", "pb", ST)
@@ -545,7 +567,7 @@ def expr():
         t.branch({1: hit}, nx, [("CMPI", "pb", n)])
         P(hit).o("" if n == 1 else "  imm r2, %d\n  mul64 r0, r0, r2\n" % n).goto("IX.add")
         t = P(nx)
-        if n in (1, 2):
+        if n in (1, 2, 8):
             nx = t.fresh("xn")
             t.branch({1: hit}, nx, [("CMPI", "pb", UNS + n)])
             t = P(nx)
@@ -581,8 +603,12 @@ def expr():
     p.tok({"=": "EXPR.bad", "?": "EXPR.q"}, "RET")
     p = P("EXPR.q")     # c ? a : b  (labels as if/else, measured)
     p.newlab("a").o("  jumpz r0, ").lab("a").o("\n").vpush("a").call("NEXT").call("CEXPR").expect(":")
+    p.call("UFLAG").branch({1: "DEADU"}, "EXPR.q2", [("CMPI", "uf", 1)])
+    p = P("EXPR.q2")
     p.vpop("a").newlab("b").o("  jump ").lab("b").o("\n").lab("a").o(":\n").vpush("b").call("NEXT").call("EXPR")
-    p.vpop("b").lab("b").o(":\n").ret()
+    p.call("UFLAG").branch({1: "DEADU"}, "EXPR.q3", [("CMPI", "uf", 1)])
+    P("EXPR.q3").vpop("b").lab("b").o(":\n").ret()
+    g.on("DEADU", range(257), "DEAD", rej("not covered: unsigned long in ?:"), "r")
     # comma.  A bare identifier whose value is discarded emits its address
     # only (measured: `a;`, `a, 1`).  VEXPR: statement level / for clauses
     # (discarded when followed by ; , or )); CEXPR: value context (discarded
@@ -621,7 +647,7 @@ def expr():
 
     # UNARY
     p = P("UNARY")
-    p.a(("LDI", "pt", 0))   # a primary is an int unless it says otherwise
+    p.a(("LDI", "pt", 0), ("LDI", "pb", 0))   # a primary is an int unless it says otherwise
     p.tok({"-": "U.neg", "!": "U.not", "~": "U.cpl", "+": "U.pos", "(": "U.par",
            TK_NUM: "U.num", TK_ID: "U.id", "*": "U.star", "&": "U.amp", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
     for nm, sp in (("U.pinc", "add64"), ("U.pdec", "sub64")):
@@ -715,9 +741,9 @@ def expr():
     p.branch({1: "IT.ok2"}, ("rej", "not covered: call through a local"), [("CMPI", "t", 0)])
     P("IT.ok2").a(("LDI", "sys", 0)).goto("IT.ok3")
     p = P("IT.ok3")
-    p.vpush("sps", "spe", "sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "IT.close"}, "IT.arg")
+    p.vpush("sps", "spe", "sys").a(("LDI", "na", 0), ("LDI", "la", 0)).call("NEXT").tok({")": "IT.close"}, "IT.arg")
     p = P("IT.arg")
-    p.vpush("na").call("EXPR").vpop("na").o(PUSH).a(("ALUI", "add", "na", "na", 1))
+    p.vpush("na").call("EXPR").call("UFLAG").vpop("na").o(PUSH).a(("ALUI", "add", "na", "na", 1), ("COPYW", "la", "uf"))
     p.tok({",": "IT.comma", ")": "IT.close"}, ("rej", "not covered: argument list"))
     P("IT.comma").call("NEXT").goto("IT.arg")
     p = P("IT.close")
@@ -741,7 +767,13 @@ def expr():
         regs = ", ".join("r%d" % i for i in range(w))
         P("IT.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
     p = P("IT.ecall")
-    p.o("  call ").a(("SPAN2", "sps", "spe")).o("\n").a(("INTERN", "v", "sps", "spe"), ("LDX", "pt", "v", FRD), ("LDX", "pb", "v", FRB)).call("NEXT").ret()
+    p.o("  call ").a(("SPAN2", "sps", "spe")).o("\n").a(("INTERN", "v", "sps", "spe"), ("LDX", "pt", "v", FRD), ("LDX", "pb", "v", FRB))
+    # a call's value is unsigned iff its last argument was (measured: g(v) / 2 is .udiv for long g(long),
+    # h(v, s) / 4 .div; no arguments: signed)
+    p.branch({1: "IT.eu"}, "IT.en", [("CMPI", "la", 1)])
+    P("IT.eu").branch({1: "IT.eu1"}, "IT.en", [("CMPI", "pt", 0)])
+    P("IT.eu1").a(("LDI", "pb", UNS + 8)).goto("IT.en")
+    P("IT.en").call("NEXT").ret()
     g.on("DEAD0", range(257), "DEAD", rej("not covered: identifier is not a local"), "r")
 
 
@@ -801,7 +833,7 @@ def printf():
     p.call("PFW.flush")
     p.branch({1: "PFW.e2"}, ("rej", "not covered: printf arguments"), [("CMP", "ai", "na")])
     p = P("PFW.e2")
-    p.a(("INPOP",), ("ALUI", "sub", "vsp", "pb", 2)).o("  imm r0, 0\n").call("NEXT").ret()
+    p.a(("INPOP",), ("ALUI", "sub", "vsp", "pb", 2), ("LDI", "pt", 0), ("LDI", "pb", 0)).o("  imm r0, 0\n").call("NEXT").ret()
 
     # the pool: a third scan of x after the footer; every printf format's
     # literal segments again, in order, as `.str Sk "..\x00"`
@@ -876,7 +908,8 @@ def stmt():
     p = P("S.decl")
     p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh",
                                                    "type=unsigned": "S.dun"}, "S.dnx")
-    P("S.dun").call("NEXT").tok({"type=char": "S.duc", "type=short": "S.dus"}, ("rej", "not covered: unsigned int/long declaration"))
+    P("S.dun").call("NEXT").tok({"type=char": "S.duc", "type=short": "S.dus", "type=long": "S.dul"}, ("rej", "not covered: unsigned int declaration"))
+    P("S.dul").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["long"])).goto("S.dnx")
     P("S.duc").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["char"])).goto("S.dnx")
     P("S.dus").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["short"])).goto("S.dnx")
     P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("S.dnx")
@@ -1003,7 +1036,9 @@ def spec():
     P("SP.sk").a(("COPYW", "bsz", "sz")).ret()
     P("SP.u").branch({1: "SP.u1"}, "SP.u2", [("CMPI", "sz", 1)])
     P("SP.u1").a(("LDI", "bsz", UNS + 1)).ret()
-    P("SP.u2").branch({1: "SP.u3"}, ("rej", "not covered: unsigned int/long"), [("CMPI", "sz", 2)])
+    P("SP.u2").branch({1: "SP.u3"}, "SP.u4", [("CMPI", "sz", 2)])
+    P("SP.u4").branch({1: "SP.u8"}, ("rej", "not covered: unsigned int"), [("CMPI", "sz", 8)])
+    P("SP.u8").a(("LDI", "bsz", UNS + 8)).ret()
     P("SP.u3").a(("LDI", "bsz", UNS + 2)).ret()
 
 
