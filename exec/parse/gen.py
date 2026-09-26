@@ -85,6 +85,12 @@ DPR = 18 * 10 ** 6  # DPR[f] = 1: f has a double parameter (an int argument woul
 VAR = 17 * 10 ** 6  # VAR[f] = 1: f was defined `(..., ...)` (its parameters arrive on the stack)
 AUT, AUD = 19 * 10 ** 6, 20 * 10 ** 6  # AUT[v] = 1: v is a header function the reference auto-includes; AUD[v] = 2: defined here
 VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy is undefined there: measured)
+# struct layouts: STAG[tag] = sid (1..63); SSZ[sid] = size; member key v*64 + sid ->
+# MOF offset, MSZ size, MPT pointer depth, MBS base size.  Measured: each member is
+# aligned to its own size, the struct's size is rounded up to its largest member
+# (struct { char c; long x; short s; int *p; int i; }: c@0 x@8 s@16 p@24 i@32, size 40).
+STAG, SSZ, MOF, MSZ, MPT, MBS = (21 * 10 ** 6, 22 * 10 ** 6, 23 * 10 ** 6, 24 * 10 ** 6,
+                                 25 * 10 ** 6, 26 * 10 ** 6)
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
 
 g = G()
@@ -1468,15 +1474,47 @@ def unit():
     p.call("AUTO")
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=float": "FN", "type=unsigned": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=float": "FN", "type=unsigned": "FN", "type=static": "TOP.st", "typedef": "TD", "struct": "SD", "eof": "END"}, ("rej", "not covered: top-level construct"))
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
     # the base is known only for a lone char/short/int/long word (else CUNK); '*' counts the depth
     P("TD").a(("LDI", "tdd", 0), ("LDI", "tdb", CUNK), ("LDI", "tdw", 0)).call("NEXT").tok(dict(TW, struct="TD.s", **{"type": "TD.wi", "type=char": "TD.wc", "type=short": "TD.ws", "type=long": "TD.wl"}), ("rej", "not covered: typedef"))
-    P("TD.s").a(("LDI", "tdw", 2)).call("NEXT").tok({TK_ID: "TD.w"}, ("rej", "not covered: typedef"))
+    P("TD.s").a(("LDI", "tdw", 2)).call("NEXT").tok({TK_ID: "TD.st", "{": "TD.sa"}, ("rej", "not covered: typedef"))
+    P("TD.st").a(("INTERN", "tg", "ps", "pe")).call("NEXT").tok({"{": "TD.sb"}, "TD.wx")
+    P("TD.sa").a(("LDI", "tg", 0)).goto("TD.sb")
+    P("TD.sb").call("SBODY").call("NEXT").goto("TD.wx")
+    P("SD").call("NEXT").tok({TK_ID: "SD.t"}, ("rej", "not covered: struct"))
+    P("SD.t").a(("INTERN", "tg", "ps", "pe")).call("NEXT").expect("{").call("SBODY").call("NEXT").expect(";").call("NEXT").goto("TOP")
+    # { members } : the layout only -- a definition emits no code (measured)
+    p = P("SBODY")
+    p.a(("ALUI", "add", "nsid", "nsid", 1), ("LDI", "soff", 0), ("LDI", "smal", 1), ("LDI", "z0", 0))
+    p.branch({0: "SB.ok"}, ("rej", "not covered: more than 63 structs"), [("CMPI", "nsid", 64)])
+    p = P("SB.ok")
+    p.branch({0: "SB.m"}, "SB.tag", [("CMPI", "tg", 0)])
+    P("SB.tag").a(("STX", "tg", STAG, "nsid")).goto("SB.m")
+    P("SB.m").call("NEXT").tok({"}": "SB.end", "type": "SB.i", "type=char": "SB.c", "type=short": "SB.s",
+                                "type=long": "SB.l"}, ("rej", "not covered: struct member"))
+    for nm, n in (("SB.i", SZ["int"]), ("SB.c", SZ["char"]), ("SB.s", SZ["short"]), ("SB.l", SZ["long"])):
+        P(nm).a(("LDI", "msz", n), ("LDI", "mbs", n), ("LDI", "mpt", 0)).call("NEXT").goto("SB.d")
+    P("SB.d").tok({"*": "SB.p", TK_ID: "SB.nm"}, ("rej", "not covered: struct member"))
+    P("SB.p").a(("ALUI", "add", "mpt", "mpt", 1), ("LDI", "msz", 8)).call("NEXT").goto("SB.d")
+    p = P("SB.nm")
+    p.a(("INTERN", "v", "ps", "pe"),
+        ("ALU", "add", "t", "soff", "msz"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "msz"), ("ALU", "and", "soff", "t", "m"),
+        ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "nsid"),
+        ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "mpt"), ("STX", "k", MBS, "mbs"),
+        ("ALU", "add", "soff", "soff", "msz"))
+    p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "msz", "smal")])
+    P("SB.mx").a(("COPYW", "smal", "msz")).goto("SB.nx")
+    P("SB.nx").call("NEXT").expect(";").goto("SB.m")
+    p = P("SB.end")
+    p.a(("ALU", "add", "t", "soff", "smal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "smal"), ("ALU", "and", "t", "t", "m"),
+        ("STX", "nsid", SSZ, "t")).ret()
     p = P("TD.w")
-    p.a(("ALUI", "add", "tdw", "tdw", 1)).call("NEXT").tok({**{w: "TD.w" for w in TW if w not in ("type", "type=char", "type=short", "type=long")},
+    p.a(("ALUI", "add", "tdw", "tdw", 1)).call("NEXT").goto("TD.wx")
+    p = P("TD.wx")
+    p.tok({**{w: "TD.w" for w in TW if w not in ("type", "type=char", "type=short", "type=long")},
                                                            "type": "TD.wi", "type=char": "TD.wc", "type=short": "TD.ws", "type=long": "TD.wl",
                                                            "*": "TD.ws1", TK_ID: "TD.id"}, ("rej", "not covered: typedef"))
     for nm, n in (("TD.wi", SZ["int"]), ("TD.wc", SZ["char"]), ("TD.ws", SZ["short"]), ("TD.wl", SZ["long"])):
