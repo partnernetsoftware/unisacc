@@ -8,7 +8,12 @@ is C.  Here cc is the referee: for each pair (o1, o2) the line
     a o1 b o2 c
 is compiled by cc and its value compared with the value the TABLE implies --
 o2 binds tighter when prec(o2) > prec(o1), else (a o1 b) o2 c (all these
-operators are left-associative).  A pair counts only where the two groupings
+operators are left-associative).  L and R come from this file's c_op, a model
+of C; cc supplies the actual value -- the premise is that c_op equals C on
+this constant domain (small non-negative ints, shifts bounded).
+This checks the table's ORDER.  Its VALUES are consumed as numbers too
+(front_parse.c binop_level: c - 3; binary(): level > 7; parse.py: level > 10),
+so the value domain is asserted separately: exactly 1..10, each level used.  A pair counts only where the two groupings
 give different values for some constants tried; a pair no constants tell
 apart is reported as undetermined, not as passed.
 """
@@ -55,6 +60,9 @@ def grouped(o1, o2, a, b, c, right):
 
 
 def main():
+    if sorted(set(PREC.values())) != list(range(1, 11)):
+        print("prec_audit  the levels are %s, not exactly 1..10 (binop_level and binary() assume it)" % sorted(set(PREC.values())))
+        return 1
     lines, keys = [], []
     for o1, o2 in itertools.product(sorted(PREC), repeat=2):
         for a, b, c in CONSTS:

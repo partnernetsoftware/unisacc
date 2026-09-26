@@ -4723,6 +4723,7 @@ int function(int t, int w) {
         if (isname(t, "main", 4) == 0)
             warn_at(tpos[tp - 1], "non-void function does not return a value in all control paths [-Wreturn-type]");
     } } } } }
+    if (isname(t, "main", 4)) es("  @lit.imm r0, 0\n");   /* reaching main's } returns 0 (C99 5.1.2.2.3) */
     elab("R", retlab); es(":\n");
     es("  mov r7, r6\n  @mem.load r6, [r7+0]\n  @call.frame -8\n  @ctrl.ret\n");
     patchnum(fpatch, 6, (framemax + 7) / 8 * 8);

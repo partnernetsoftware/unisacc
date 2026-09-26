@@ -1102,6 +1102,8 @@ class Walker:
             self.em.emit(self.em.recipe("alu", "sub"), ACC, FP, ACC)
             self.em.blockcopy(ACC, LHS, ty.size(self.sc.structs))
         self.block(new_scope=False)
+        if sym == "main":
+            self.em.imm(ACC, 0)   # reaching main's } returns 0 (C99 5.1.2.2.3)
         self.em.label(self.ret_label)
         self.em.epilogue()
         self.em.t.code[self.frame_ix].args[0] = (self.maxoff + 7) // 8 * 8
@@ -2506,9 +2508,8 @@ class Walker:
 
     def call(self, name):
         self.expect("(")
-        if name == "printf" and self.at("str") \
-                and not self._rt_format(self.peek().val):
-            return self.printf()          # [W-9] static format string
+        # printf is an ordinary call to <stdio.h>'s printf, as in the C front end
+        # (991d337): the driver appends the header when it is undefined
         if name in ("va_start", "va_arg", "va_end"):
             return self.va(name)
         if name in ("__builtin_sqrt", "__builtin_sqrtf"):

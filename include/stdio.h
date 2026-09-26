@@ -492,6 +492,10 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                 }
                 __u_start = _u_digits(__u_buf, __u_uv, __u_base, __u_upper);
                 __u_len = 24 - __u_start;
+                /* %p: 0x and the hex digits, as both host C libraries print it (7.19.6.1p8
+                   leaves the form implementation-defined) */
+                if (__u_c == 112) { __u_start = __u_start - 2; __u_buf[__u_start] = 48;
+                                    __u_buf[__u_start + 1] = 120; __u_len = __u_len + 2; }
                 /* C99 7.19.6.1p5: an integer's precision is the MINIMUM
                    number of digits -- `%.2x` of 0 is "00".  Zeros go in
                    before the sign does. */
