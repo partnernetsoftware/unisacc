@@ -312,6 +312,7 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
 
 def types():
     width_dispatch(None, "LOADV", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n", masks=True)
+    width_dispatch(None, "LOADRAW", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n")   # va_arg: no mask (measured, p62)
     width_dispatch(None, "STOREV", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, %d\n")
     # NARROW: a value to vb bytes through the stack (a return, a cast); 8 bytes and pointers: nothing
     q = P("NARROW")
@@ -407,6 +408,8 @@ def build():
     # (src/front_pp.c autoinc): the old E3's check, reused -- such a unit is not covered
     for k, (nm, _, _) in enumerate(E.SYSCALLS, 1):
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sy%d" % k))
+    for k, nm in enumerate(("va_start", "va_arg", "va_end")):
+        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "va%d" % k))
     p.a(("SBCLR",), [("SBOUT", c) for c in b"__argc"], ("SBINTERN", "acid"), ("SBCLR",), [("SBOUT", c) for c in b"__argv"], ("SBINTERN", "avid"))
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
@@ -468,17 +471,18 @@ def build():
     P("ELSZ.8").a(("LDI", "es", 8)).ret()
     p = P("FN.fn")
     p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0))
-    p.call("NEXT").a(("LDI", "pk", 0))
+    p.call("NEXT").a(("LDI", "pk", 0), ("LDI", "vfn", 0))
     p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
     P("FN.void").call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid"}, bad("parameter"))
     P("FN.vend").branch({1: "FN.body"}, bad("parameter"), [("CMPI", "td", 0)])
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
     p = P("FN.par")
     p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.pn", ")": "FN.body"}, bad("parameter"))   # unnamed: a prototype
+    P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
     p = P("FN.pid")
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL")
     p.a(("ALUI", "add", "pk", "pk", 1)).call("NEXT").tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
-    P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par"}, bad("parameter"))
+    P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "...": "FN.dots"}, bad("parameter"))
     p = P("FN.body")
     p.call("NEXT").tok({"{": "FN.def", ";": "FN.proto"}, bad("expected {"))
     p = P("FN.proto")     # a prototype: nothing written; its parameters' names are dropped
@@ -486,7 +490,11 @@ def build():
     p = P("FN.def")      # the return label is taken here: a prototype takes none (measured)
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
     emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").a(("LDI", "sk2", 0)).label("FN.sp")
-    p.branch({0: "FN.sp1"}, "FN.go", [("CMP", "sk2", "pk")])
+    p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).branch({0: "FN.sp0"}, "FN.go", [("CMP", "sk2", "pk")])
+    P("FN.sp0").branch({1: "FN.spv"}, "FN.sp1", [("CMPI", "vfn", 1)])
+    q = P("FN.spv")      # variadic: from the caller's stack (measured): load64 r1, [r6+16+8k]; imm r5, slot; sub64 r5, r6, r5; store64 [r5+0], r1
+    q.a(("ALUI", "mul", "t", "sk2", 8), ("ALUI", "add", "t", "t", 16), ("ALUI", "add", "pks", "sk2", 1), ("ALUI", "mul", "pks", "pks", 8))
+    q.o("  load64 r1, [r6+").num("t").o("]\n  imm r5, ").num("pks").o("\n  sub64 r5, r6, r5\n  store64 [r5+0], r1\n").a(("ALUI", "add", "sk2", "sk2", 1)).goto("FN.sp")
     q = P("FN.sp1")      # the parameters' spills: store64 [r6-8(k+1)], rk (measured)
     q.a(("ALUI", "add", "pks", "sk2", 1), ("ALUI", "mul", "pks", "pks", 8)).o("  store64 [r6-").num("pks").o("], r").num("sk2").o("\n").a(("ALUI", "add", "sk2", "sk2", 1)).goto("FN.sp")
     p = P("FN.go")
@@ -749,7 +757,30 @@ def build():
     p = P("CALL")
     # the callee must be defined above (the reference rejects a call to an undefined function: probe r1)
     # syscall builtins (the old E3's declared table E.SYSCALLS), __argc(), __argv(k) -- measured there
-    p.a(("INTERN", "v", "ips", "ipe"), ("LDI", "sys", 0)).goto("CL.b1")
+    p.a(("INTERN", "v", "ips", "ipe"), ("LDI", "sys", 0)).goto("CL.va0")
+    for k, nx in ((0, "CL.va1"), (1, "CL.va2"), (2, "CL.b1")):
+        P("CL.va%d" % k).branch({1: "VA%d" % k}, nx, [("CMP", "v", "va%d" % k)])
+    # va_start(ap, last): &ap pushed; last evaluated (unused); ap = r6 + 16 + 8 * named parameters; value 0 (measured)
+    p = P("VA0")
+    p.call("NEXT").tok({TK_ID: "VA0.ap"}, bad("va_start"))
+    q = P("VA0.ap")
+    q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP")
+    addr(q)
+    emit(q, "push").call("NEXT").expect(",").call("NEXT").call("EXPR").expect(")").a(("ALUI", "mul", "t", "pk", 8), ("ALUI", "add", "t", "t", 16))
+    q.o("  imm r0, ").num("t").o("\n  add64 r0, r6, r0\n")
+    emit(q, "pop1").o("  store64 [r1+0], r0\n  imm r0, 0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
+    # va_arg(ap, T): &ap and ap pushed; ap + 8 stored; the old ap loaded at T's width (measured)
+    p = P("VA1")
+    p.call("NEXT").tok({TK_ID: "VA1.ap"}, bad("va_arg"))
+    q = P("VA1.ap")
+    q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP")
+    addr(q)
+    emit(q, "push").o("  load64 r0, [r0+0]\n")
+    emit(q, "push").o("  imm r2, 8\n  add64 r0, r0, r2\n  load64 r1, [r7+8]\n  store64 [r1+0], r0\n  load64 r1, [r7+0]\n  .frame -8\n  .frame -8\n  mov r0, r1\n")
+    q.call("NEXT").expect(",").call("NEXT").call("TSPEC").expect(")").a(("COPYW", "vt", "td"), ("COPYW", "vb", "tb")).call("LOADRAW").call("NEXT").ret()
+    # va_end(ap): ap evaluated; value 0
+    p = P("VA2")
+    p.call("NEXT").call("EXPR").expect(")").o("  imm r0, 0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     for k in range(1, len(E.SYSCALLS) + 1):
         P("CL.b%d" % k).branch({1: "CL.s%d" % k}, "CL.b%d" % (k + 1), [("CMP", "v", "sy%d" % k)])
         P("CL.s%d" % k).a(("LDI", "sys", k)).goto("CL.ok")
@@ -757,7 +788,9 @@ def build():
     P("CL.ac").call("NEXT").expect(")").o("  .argc r0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     P("CL.av0").branch({1: "CL.av"}, "CL.def", [("CMP", "v", "avid")])
     P("CL.av").call("NEXT").call("EXPR").expect(")").o("  .argv r0, r0\n").a(("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").ret()
-    P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.ok"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
+    P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.def1"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
+    P("CL.def1").a(("LDX", "t", "v", E.VAR)).branch({1: "DEAD.vc"}, "CL.ok", [("CMPI", "t", 1)])
+    g.on("DEAD.vc", range(257), "DEAD", E.rej("not covered: call to a variadic function"), "r")
     p = P("CL.ok")
     p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe")).vpush("cls", "cle", "sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     p = P("CL.arg")
