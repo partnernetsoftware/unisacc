@@ -134,7 +134,10 @@ class Files:
 
     def __init__(self, bundled=None):
         self.cache = {}
-        self.bundled = bundled or BUNDLED     # where \0hdr/ points (run.c: its INCLUDE_DIR argument)
+        # where \0hdr/ points.  The default is this tree's include/, found from __file__;
+        # exec/c/run.c has no default (C cannot find itself) and dies without its
+        # INCLUDE_DIR argument -- so the two CLIs differ when it is left out: pass it
+        self.bundled = bundled or BUNDLED
 
     def get(self, path):
         if path not in self.cache:
