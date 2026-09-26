@@ -1366,8 +1366,7 @@ def build():
     q = P("U.ams")       # &a[i]...: the element's address, no load (measured, p53)
     addr(q).call("VLOAD").a(("LDI", "amp", 1)).call("POSTIX").a(("LDI", "amp", 0)).ret()
     q = P("U.deref")     # * operand: its value is the address; one level down, then a load at the new width
-    q.call("NEXT").tok({TK_ID: "UD.id", E.TK_STR: "DEAD.dstr"}, "UD.gen")
-    g.on("DEAD.dstr", range(257), "DEAD", E.rej("not covered: * of a string literal"), "r")   # the reference loads nothing (measured, s35)
+    q.call("NEXT").tok({TK_ID: "UD.id"}, "UD.gen")
     P("UD.gen").call("UNARY").goto("UD.dn")
     P("UD.dn").call("DOWN").branch({1: "RET"}, "LOADV", [("CMPI", "vb", FPB)])
     P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call"}, "UD.v")

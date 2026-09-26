@@ -12384,6 +12384,9 @@ int primary(void) {
         i = nlab; nlab = nlab + 1;
         i = addlit(lbuf, decode(adv(), lbuf));
         es("  @mem.lea r0, S"); en(i); ec(10);
+        /* a char *: the kind is set whole, so `*"z"` loads its first char --
+           a stale curpd/curstruct from before once left it the address */
+        setkind(0); cursize = 8; curuns = 0; curpd = 1; curbase = 1;
         lvalue = 0; curelem = 1; curptr = 1;
         return postfix();
     }
