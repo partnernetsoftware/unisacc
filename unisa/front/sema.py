@@ -32,11 +32,12 @@ from ..gold import TYOUT as _TYOUT                # noqa: E402
 
 # The type table's TOPS axis is canonical: one relational op stands for all
 # four, one equality op for both.  Projecting onto it is classic key encoding,
-# and [P-2] means it must be total before the oracle is asked.
+# Binary & uses the | arithmetic row: i64 & i64 is reserved for address-of.
+# [P-2] means the projection must be total before the oracle is asked.
 TOP_CANON = {"<": "<", ">": "<", "<=": "<", ">=": "<",
              "==": "==", "!=": "==",
              "+": "+", "-": "-", "*": "*", "/": "/", "%": "%",
-             "=": "=", "&": "&", "[]": "[]", ".": ".",
+             "=": "=", "&": "|", "[]": "[]", ".": ".",
              "call": "call", "sizeof": "sizeof", ",": ",", "un*": "un*",
              "|": "|", "^": "^", "<<": "<<", ">>": ">>"}
 

@@ -13493,6 +13493,9 @@ int tycanon(int k, char *buf) {
     if (k == tidx("<=", 2)) { buf[0] = 60; return 1; }
     if (k == tidx(">=", 2)) { buf[0] = 60; return 1; }
     if (k == tidx("!=", 2)) { buf[0] = 61; buf[1] = 61; return 2; }
+    /* Binary &: same arithmetic result types as |. The table's i64 & i64
+       row is the address-of convention, not this binary operation. */
+    if (k == tidx("&", 1)) { buf[0] = 124; return 1; }
     buf[0] = TOKV[p];
     if (L > 1) buf[1] = TOKV[p + 1];
     return L;
