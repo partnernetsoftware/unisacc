@@ -425,7 +425,7 @@ def expr():
             q = P(cases[op])
             if op == "&&":
                 q.newlab("a").vpush("a").o("  jumpz r0, ").lab("a").o("\n").call("NEXT").call(sub)
-                q.o(NORM).vpop("a").lab("a").o(":\n").goto("LOOP%d" % L)
+                q.o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0)).goto("LOOP%d" % L)
             elif op == "||":
                 q.newlab("a").newlab("b").vpush("a")
                 q.o("  jumpz r0, ").lab("b").o("\n  imm r0, 1\n  jump ").lab("a").o("\n").lab("b").o(":\n")
@@ -452,6 +452,9 @@ def expr():
                 r = P(pp)
                 r.vpush("pt").o(PUSH).call("NEXT").call(sub).call("NOPTR").vpop("pt")
                 r.o("  imm r2, %d\n  mul64 r0, r0, r2\n" % PSZ + POP1 + optext(op)).goto("LOOP%d" % L)
+            elif op in ("==", "!=", "<", "<=", ">", ">="):   # pointers compare as the ints do (measured: p < q is slt64)
+                q.o(PUSH).call("NEXT").call(sub)
+                q.o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
             else:     # a pointer operand is not covered: the reference scales it
                 noptr(q)
                 q.o(PUSH).call("NEXT").call(sub)
@@ -636,7 +639,10 @@ def expr():
         q.call("NEXT").ret()
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
-        P(nm).call("NEXT").call("UNARY").o(txt).ret()
+        q = P(nm).call("NEXT").call("UNARY")
+        if nm != "U.not":      # - ~ of a pointer: not covered
+            noptr(q)
+        q.o(txt).ret()         # !p keeps p's type in the reference (measured: a + !q scales a by 8)
     P("U.pos").call("NEXT").goto("UNARY")
     P("U.star").call("NEXT").call("PV").call("PVCHK").call("DEREF").ret()
     P("U.amp").goto("PV")
