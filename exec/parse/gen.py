@@ -64,11 +64,13 @@ HEADER = ("_start:\n  call __init\n  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n
           "  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n")
 FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 
-WORDS = ["type=int", "return", "if", "else", "while", "for", "eof",
-         "(", ")", "{", "}", ";", ",", "=", "!", "~"] + sorted(PREC)
+WORDS = ["type=int", "type=void", "return", "if", "else", "while", "for", "eof",
+         "(", ")", "{", "}", ";", ",", "=", "!", "~",
+         "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC)
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER = 100, 101, 102, 103
+CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 
 g = G()
@@ -310,11 +312,44 @@ def expr():
     p.call("BIN%d" % levels[0]).goto("EXPR.tail")
     p = P("EXPR.id")
     p.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
-    p.tok({"=": "EXPR.as"}, "EXPR.use")
+    p.tok(dict([("=", "EXPR.as")] + [(o + "=", "EXPR.c" + o) for o in CASOPS]), "EXPR.use")
+    for o in CASOPS:     # a op= e: address, load, push, e, op, store (measured)
+        q = P("EXPR.c" + o)
+        lookup(q, "sps", "spe")
+        addr(q, "r0")
+        q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH).call("NEXT").call("EXPR")
+        q.o(POP1 + optext(o) + POP1 + "  .st [r1+0], r0, 4\n").ret()
     p = P("EXPR.use")
     p.call("IDTAIL").call("BINCONT").goto("EXPR.tail")
     p = P("EXPR.tail")
-    p.tok({"=": "EXPR.bad"}, "RET")
+    p.tok({"=": "EXPR.bad", "?": "EXPR.q"}, "RET")
+    p = P("EXPR.q")     # c ? a : b  (labels as if/else, measured)
+    p.newlab("a").o("  jumpz r0, ").lab("a").o("\n").vpush("a").call("NEXT").call("CEXPR").expect(":")
+    p.vpop("a").newlab("b").o("  jump ").lab("b").o("\n").lab("a").o(":\n").vpush("b").call("NEXT").call("EXPR")
+    p.vpop("b").lab("b").o(":\n").ret()
+    # comma.  A bare identifier whose value is discarded emits its address
+    # only (measured: `a;`, `a, 1`).  VEXPR: statement level / for clauses
+    # (discarded when followed by ; , or )); CEXPR: value context (discarded
+    # only when a comma follows).
+    for nm, stops in (("VEXPR", (";", ",", ")")), ("CEXPR", (",",))):
+        q = P(nm)
+        q.tok({TK_ID: nm + ".id"}, nm + ".e")
+        P(nm + ".e").call("EXPR").goto(nm + ".c")
+        q = P(nm + ".id")
+        q.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
+        q.tok(dict([(k, nm + ".addr") for k in stops] + [("=", nm + ".as")]
+                   + [(o + "=", nm + ".c" + o) for o in CASOPS]), nm + ".use")
+        P(nm + ".use").call("EXPR.use").goto(nm + ".c")
+        P(nm + ".as").call("EXPR.as").goto(nm + ".c")
+        for o in CASOPS:
+            P(nm + ".c" + o).call("EXPR.c" + o).goto(nm + ".c")
+        q = P(nm + ".addr")
+        lookup(q, "sps", "spe")
+        addr(q, "r0")
+        q.goto(nm + ".c")
+        q = P(nm + ".c")
+        q.tok({",": nm + ".more"}, "RET")
+        P(nm + ".more").call("NEXT").goto(nm)
     g.on("EXPR.bad", range(257), "DEAD", rej("not covered: assignment to a non-identifier"), "r")
     p = P("EXPR.as")
     lookup(p, "sps", "spe")
@@ -324,18 +359,31 @@ def expr():
     # UNARY
     p = P("UNARY")
     p.tok({"-": "U.neg", "!": "U.not", "~": "U.cpl", "+": "U.pos", "(": "U.par",
-           TK_NUM: "U.num", TK_ID: "U.id"}, ("rej", "not covered: expression"))
+           TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
+    for nm, sp in (("U.pinc", "add64"), ("U.pdec", "sub64")):
+        P(nm).call("NEXT").tok({TK_ID: nm + ".id"}, ("rej", "not covered: operand of ++/--"))
+        q = P(nm + ".id")
+        lookup(q, "ps", "pe")
+        addr(q, "r0")
+        q.o(PUSH + "  .ld r0, [r0+0], 4\n  imm r1, 1\n  %s r0, r0, r1\n" % sp + POP1
+            + "  .st [r1+0], r0, 4\n").call("NEXT").ret()
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
         P(nm).call("NEXT").call("UNARY").o(txt).ret()
     P("U.pos").call("NEXT").goto("UNARY")
-    P("U.par").call("NEXT").call("EXPR").expect(")").call("NEXT").ret()
+    P("U.par").call("NEXT").call("CEXPR").expect(")").call("NEXT").ret()
     P("U.num").o("  imm r0, ").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").ret()
     P("U.id").a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT").call("IDTAIL").ret()
 
     # IDTAIL: saved id x[sps..spe), current token follows it
     p = P("IDTAIL")
-    p.tok({"(": "IT.call"}, "IT.var")
+    p.tok({"(": "IT.call", "++": "IT.inc", "--": "IT.dec"}, "IT.var")
+    for nm, o, undo in (("IT.inc", "+", "sub64"), ("IT.dec", "-", "add64")):
+        q = P(nm)   # a++ : a += 1, then the old value back (measured)
+        lookup(q, "sps", "spe")
+        addr(q, "r0")
+        q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH + "  imm r0, 1\n" + POP1 + optext(o) + POP1
+            + "  .st [r1+0], r0, 4\n  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
     p = P("IT.var")
     lookup(p, "sps", "spe")
     addr(p, "r0")
@@ -369,7 +417,7 @@ def stmt():
     p.tok({"{": "BLOCK", "type": "S.decl", ";": "S.empty", "return": "S.ret", "if": "S.if",
            "while": "S.while", "for": "S.for"}, "S.expr")
     P("S.empty").call("NEXT").ret()
-    P("S.expr").call("EXPR").expect(";").call("NEXT").ret()
+    P("S.expr").call("VEXPR").expect(";").call("NEXT").ret()
     # block: '{' ... '}' with its own scope
     p = P("BLOCK")
     p.vpush("usp", "cur").call("NEXT").label("B.loop")
@@ -398,12 +446,12 @@ def stmt():
     p.call("NEXT").tok({";": "S.retv"}, "S.rete")
     g.on("S.retv", range(257), "DEAD", rej("not covered: return without a value"), "r")
     p = P("S.rete")
-    p.call("EXPR").expect(";")
+    p.call("CEXPR").expect(";")
     p.o("  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R").num("rl").o("\n")
     p.call("NEXT").ret()
     # if (e) s [else s]
     p = P("S.if")
-    p.call("NEXT").expect("(").call("NEXT").call("EXPR").expect(")")
+    p.call("NEXT").expect("(").call("NEXT").call("CEXPR").expect(")")
     p.newlab("a").o("  jumpz r0, ").lab("a").o("\n").vpush("a").call("NEXT").call("STMT").vpop("a")
     p.tok({"else": "IF.else"}, "IF.end")
     P("IF.end").lab("a").o(":\n").ret()
@@ -413,7 +461,7 @@ def stmt():
     # while (e) s
     p = P("S.while")
     p.newlab("a").newlab("b").lab("a").o(":\n").vpush("a", "b")
-    p.call("NEXT").expect("(").call("NEXT").call("EXPR").expect(")")
+    p.call("NEXT").expect("(").call("NEXT").call("CEXPR").expect(")")
     p.vpop("a", "b").o("  jumpz r0, ").lab("b").o("\n").vpush("a", "b").call("NEXT").call("STMT")
     p.vpop("a", "b").o("  jump ").lab("a").o("\n").lab("b").o(":\n").ret()
     # for (e; e; e) s -- the step is parsed after the body: skip it, run the
@@ -422,10 +470,10 @@ def stmt():
     p.call("NEXT").expect("(").call("NEXT").tok({";": "F.no", "type": "F.no"}, "F.init")
     g.on("F.no", range(257), "DEAD", rej("not covered: for clause"), "r")
     p = P("F.init")
-    p.call("EXPR").expect(";").newlab("a").newlab("b").newlab("c").lab("a").o(":\n")
+    p.call("VEXPR").expect(";").newlab("a").newlab("b").newlab("c").lab("a").o(":\n")
     p.vpush("a", "b", "c").call("NEXT").tok({";": "F.no"}, "F.cond")
     p = P("F.cond")
-    p.call("EXPR").expect(";").vpop("a", "b", "c").o("  jumpz r0, ").lab("b").o("\n").vpush("a", "b", "c")
+    p.call("CEXPR").expect(";").vpop("a", "b", "c").o("  jumpz r0, ").lab("b").o("\n").vpush("a", "b", "c")
     p.call("NEXT").tok({")": "F.no"}, "F.step")
     p = P("F.step")
     p.a(("COPYW", "sp", "tpos"), ("LDI", "dp", 0))
@@ -438,7 +486,7 @@ def stmt():
     p = P("F.body")
     p.vpush("sp").call("NEXT").call("STMT").vpop("sp").a(("COPYW", "ep", "tpos"), ("JUMP", "sp"))
     p.vpush("ep").call("NEXT").vpop("ep").vpop("a", "b", "c").lab("c").o(":\n").vpush("a", "b", "c", "ep")
-    p.call("EXPR").expect(")").vpop("a", "b", "c", "ep").o("  jump ").lab("a").o("\n").lab("b").o(":\n")
+    p.call("VEXPR").expect(")").vpop("a", "b", "c", "ep").o("  jump ").lab("a").o("\n").lab("b").o(":\n")
     p.a(("JUMP", "ep")).call("NEXT").ret()
 
 
@@ -455,7 +503,8 @@ def unit():
         ("COPYW", "fv", "v"), ("LDI", "cur", 0), ("LDI", "max", 0))
     p.call("NEXT").expect("(").call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
-    p.tok({"type": "FN.pt"}, ("rej", "not covered: parameter"))
+    p.tok({"type": "FN.pt", "type=void": "FN.pv"}, ("rej", "not covered: parameter"))
+    P("FN.pv").call("NEXT").tok({")": "FN.close"}, ("rej", "not covered: parameter"))
     P("FN.pt").call("NEXT").tok({TK_ID: "FN.pid"}, ("rej", "not covered: parameter"))
     p = P("FN.pid")
     declare(p)
