@@ -13626,7 +13626,7 @@ int lor(void) {
 /* `a ? b : c` -- only one arm is evaluated, so each gets its own label and
    the value they share is r0. */
 int cond(void) {
-    int els; int end; int p1; int e1;
+    int els; int end; int p1; int e1; int ci;
     lor();
     if (cur() != tidx("?", 1)) return 0;
     loadval(); ftruthy(); adv();
@@ -13639,6 +13639,11 @@ int cond(void) {
         elab("L", els); es(":\n");
         need(tidx(":", 1), ":");
         cond(); loadval(); k2 = fkind();
+        ci = 0 - 1;
+        if (p1 == 0 && curptr == 0 && k1 < 4 && k2 < 4) {
+            int ct; ct = tyask(a1, "+", 1, tyax());
+            if (!tyis(ct, "illegal", 7)) ci = ct;
+        }
         if ((k1 >= 4 || k2 >= 4) && k1 != k2) {
             /* C99 6.5.15p5: the arms meet in their common type.  The first
                was emitted before the second's type was known: again. */
@@ -13653,6 +13658,12 @@ int cond(void) {
         }
     }
     elab("L", end); es(":\n");
+    if (ci >= 0) {
+        /* Both integer arms meet in the type table's arithmetic row.
+           Convert the selected value once, after the branch merge. */
+        setkind(0); curuns = tyuns(ci); cursize = tysize(ci); curelem = cursize;
+        if (curuns && cursize < 8) zext(cursize);
+    }
     /* C99 6.5.15p6: one arm a pointer and the other a null pointer
        constant -- the result is the pointer's type */
     if (p1) { if (curptr == 0) { curptr = 1; curelem = e1; } }

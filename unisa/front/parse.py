@@ -1940,6 +1940,12 @@ class Walker:
                 self.convto(self.rvalue(), cty)
                 t1 = cty
             self.em.label(end)
+            if t1.kind.startswith(("i", "u")) and t2.kind.startswith(("i", "u")):
+                # Integer promotions/common type come from the same table as +.
+                ck = self.sc.combine(t1, "+", t2)
+                t1 = self.ty_from(ck, t1, t2)
+                if ck in NARROW_UNS:
+                    self.em.zext(NARROW_UNS[ck])
             return t1
         return ty
 
