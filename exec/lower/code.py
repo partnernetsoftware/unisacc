@@ -1,5 +1,5 @@
 """Linux instruction lowering delta. Hand control rules, declared facts.
-ARM shares setup and syscalls; its instruction fusions are pending.
+ARM shares setup and syscalls; its immediate fusion is still pending.
 regmap/enc/abi/reloc are read from TSV; no reference lower() is run by generator.
 """
 from pathlib import Path
@@ -22,7 +22,7 @@ def install(E, arch="x86_64"):
     reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
     p=P('C.init');p.a(('LDI','nc',0),('LDI','entry',-1),('LDI','firstop',-1),('LDI','pending',0))
-    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','8','-8','_start:','write','exit']))
+    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','4','8','-8','_start:','write','exit']))
     ids={w:'idc'+str(i) for i,w in enumerate(words)}
     for w,d in ids.items():
         p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN',d),('SBSAVE','blob'),('STX',d,TXT,'blob'))
@@ -66,7 +66,9 @@ def install(E, arch="x86_64"):
     p=P('C.setup');p.o('spinit '+regmap['r7']+'\nargsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', true\n').goto('C.dispatch')
     special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
     if arch=='arm64':
-        special.pop('.frame'); special.pop('load64')
+        special['.frame']='armframe'; special.pop('load64')
+        from armfuse import install as install_armfuse
+        install_armfuse(E,ids,OP,KIND,ARG)
     p=P('C.dispatch')
     for op,tag in special.items():
         p.branch({1:'DO.'+tag},'CD.'+tag,[('CMP','op',ids[op])]);p=P('CD.'+tag)
@@ -145,6 +147,8 @@ def install(E, arch="x86_64"):
             p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
             q=P('SC.'+op+'.m'+str(mode))
             if mode==0:
+                if f[10] not in ('plain','atfd_1','atfd_1_zero','atfd_2_zero5'):
+                    raise ValueError('new Linux '+arch+' argument shape requires migration: '+f[10])
                 sources={'plain':[('mem',0),('mem',8),('mem',16)],
                          'atfd_1':[('imm',-100),('mem',0),('mem',8),('mem',16)],
                          'atfd_1_zero':[('imm',-100),('mem',0),('imm',0)],

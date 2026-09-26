@@ -1,6 +1,6 @@
 #!/bin/sh
 # ARM common lowering: entry, registers and syscall ABI shapes, both executors.
-# ARM-specific instruction fusions are still pending.
+# Checks sext fusion and label/width blockers; immediate fusion is pending.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT

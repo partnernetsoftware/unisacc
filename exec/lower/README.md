@@ -14,9 +14,10 @@ argument access, syscall setup and adjacent push/pop fusion. It consumes raw
 tape, not a Python-lowered TargetProgram. `.print` is explicitly unsupported;
 `--full --arm64` is an incomplete development path: it shares register mapping,
 entry setup and syscall lowering, including the three Linux ARM *at argument
-shapes read from ABI facts. `armcheck.sh` checks 73 fixture instructions against
-the typed reference on both executors. ARM sext and immediate fusions are still
-pending: real hello currently differs in labels/instruction layout, so this
+shapes read from ABI facts. `armcheck.sh` checks 96 fixture instructions against
+the typed reference on both executors. The four-instruction stack truncation is now fused into sext for widths
+1/2/4, with labels blocking lookahead; width 8 is left unchanged. Immediate
+fusion remains pending: real hello currently differs in labels/instruction layout, so this
 mode is not connected to the source-to-ELF pipeline. The data checks run both
 targets and compare sparse bytes, symbols and unchanged tape.
 
