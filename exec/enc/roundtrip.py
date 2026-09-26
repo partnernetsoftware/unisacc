@@ -2,9 +2,8 @@
 """exec/enc/roundtrip.py FILE.c... -- real TargetPrograms (the Python front end
 and unisa/lower.py, lnx/x86_64) dumped as TIns text and parsed back: the
 instructions' op, args and meta and the label positions must survive, compared
-by type as well as value (True is not 1).  This is an instruction/meta/label
-round trip, not TargetProgram fidelity: data, syms and the target are not in
-the text.  A program with a form the text lacks is reported, not cut.
+by type as well as value (True is not 1).  The full header additionally preserves data bytes, symbol addresses and target.
+It does not contain image layout or encoded bytes.  A program with a form the text lacks is reported, not cut.
 With ROUNDTRIP_MUTATE=1 one bool meta is turned into an int after the dump's
 parse, and the comparison must then fail (a control)."""
 import os
@@ -34,10 +33,11 @@ if len(sys.argv) < 2:
 bad = 0
 o = _oracle("built")
 for f in sys.argv[1:]:
-    tape = compile_file([f], o, "lnx/x86_64")
-    tp = lower(tape, "lnx/x86_64", o, drive="built")
+    target = os.environ.get("ROUNDTRIP_TARGET", "lnx/x86_64")
+    tape = compile_file([f], o, target)
+    tp = lower(tape, target, o, drive="built")
     try:
-        text = tins.dump(tp)
+        text = tins.dump(tp, full=True)
     except ValueError as e:
         print("  NO FORM %s: %s" % (f, e)); bad += 1; continue
     back = tins.parse(text)
@@ -47,7 +47,8 @@ for f in sys.argv[1:]:
             if b:
                 ins.meta[b[0]] = int(ins.meta[b[0]])
                 break
-    ok = (len(back.code) == len(tp.code) and same(back.labels, tp.labels) and
+    ok = (same({k:v for k,v in vars(back).items() if k not in ("code", "labels")},
+               {k:v for k,v in vars(tp).items() if k not in ("code", "labels")}) and same(back.data, tp.data) and same(back.syms, tp.syms) and back.target == tp.target and len(back.code) == len(tp.code) and same(back.labels, tp.labels) and
           all(a.op == b.op and same(list(a.args), list(b.args)) and same(a.meta, b.meta) for a, b in zip(tp.code, back.code)))
     print("  %s %s  insns %d  labels %d" % ("same" if ok else "DIFFER", f, len(tp.code), len(tp.labels)))
     bad += not ok

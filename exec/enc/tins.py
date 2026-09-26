@@ -25,11 +25,26 @@ def _arg(v):
     raise ValueError("no text form for %r" % (v,))
 
 
-def dump(tp):
+def dump(tp, full=False):
     at = {}
     for name, pc in tp.labels.items():
         at.setdefault(pc, []).append(name)
     out = []
+    if full:
+        # Lowering data only: no layout addresses, instruction offsets or bytes.
+        out = ["@target " + tp.target, "@data " + (tp.data.hex() or "-")]
+        for attr in ("src_os", "data_len", "bss", "relocs"):
+            if hasattr(tp, attr):
+                value = getattr(tp, attr)
+                if attr == "relocs":
+                    value = ",".join(str(v) for v in value) or "-"
+                out.append("@%s %s" % (attr, value))
+        for name, addr in tp.syms.items():
+            if not isinstance(name, str) or not name or any(c.isspace() for c in name):
+                raise ValueError("invalid data symbol name")
+            if type(addr) is not int:
+                raise ValueError("data symbol address is not an integer")
+            out.append("@sym %s %d" % (name, addr))
     for pc, ins in enumerate(tp.code + [None]):
         for name in at.get(pc, []):
             out.append(name + ":")
@@ -50,10 +65,56 @@ def dump(tp):
 def parse(text, target="lnx/x86_64"):
     from unisa.lower import TargetProgram
     tp = TargetProgram(target, b"", {})
+    header = set()
+    started = False
     for ln in text.split("\n"):
         ln = ln.strip()
         if not ln:
             continue
+        if ln.startswith("@"):
+            if started:
+                raise ValueError("header after instructions or labels")
+            words = ln.split()
+            tag = words[0]
+            if tag in ("@target", "@data"):
+                if tag in header or len(words) != 2:
+                    raise ValueError("duplicate or malformed " + tag)
+                header.add(tag)
+                if tag == "@target":
+                    if words[1] not in {o + "/" + a for o in ("lnx", "osx", "win") for a in ("x86_64", "arm64")}:
+                        raise ValueError("unknown target")
+                    tp.target = words[1]
+                    tp.os, tp.arch = tp.target.split("/")
+                else:
+                    value = words[1]
+                    if value != "-" and (len(value) % 2 or any(c not in "0123456789abcdef" for c in value)):
+                        raise ValueError("invalid data bytes")
+                    tp.data = b"" if value == "-" else bytes.fromhex(value)
+            elif tag in ("@src_os", "@data_len", "@bss", "@relocs"):
+                if tag in header or len(words) != 2:
+                    raise ValueError("duplicate or malformed " + tag)
+                header.add(tag)
+                value = words[1]
+                if tag == "@src_os":
+                    if value not in ("lnx", "osx", "win"):
+                        raise ValueError("unknown source OS")
+                elif tag == "@relocs":
+                    value = [] if value == "-" else [int(v, 10) for v in value.split(",")]
+                    if any(v < 0 for v in value):
+                        raise ValueError("negative relocation offset")
+                else:
+                    value = int(value, 10)
+                    if value < 0:
+                        raise ValueError("negative size")
+                setattr(tp, tag[1:], value)
+            elif tag == "@sym" and len(words) == 3:
+                if words[1] in tp.syms:
+                    raise ValueError("duplicate data symbol")
+                tp.syms[words[1]] = int(words[2], 10)
+            else:
+                raise ValueError("unknown or malformed header")
+            continue
+        started = True
         if ln.endswith(":") and " " not in ln:
             if ln[:-1] in tp.labels:
                 raise ValueError("label defined twice: " + ln)
@@ -72,6 +133,9 @@ def parse(text, target="lnx/x86_64"):
         if op == "spinit" and len(args) == 1:
             args.append(None)
         tp.emit(op, *args, **meta)
+    if header or tp.syms:
+        if not {"@target", "@data"}.issubset(header):
+            raise ValueError("full header requires target and data")
     return tp
 
 

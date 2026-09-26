@@ -44,3 +44,22 @@ The existing fixtures stay valid unchanged.
   - A duplicate key, an unknown key, or an encoding-relevant key this slice does not support is rejected.
 
 **Scope of the round trip.** `tins.parse` rebuilds instructions, meta and labels. data and syms come back empty and the target is the default lnx/x86_64. This is therefore an instruction/meta/label round trip, not TargetProgram fidelity. roundtrip.py compares by type and value (True is not 1), and a controlled bool → int mutation makes it fail.
+
+## Full lowering payload (2026-09-26)
+
+`dump(tp, full=True)` adds @target, @data (hex or - for empty), @sym
+(name, DATA_BASE-relative address), and the optional lowering attributes
+@src_os, @data_len, @bss, @relocs (comma-separated offsets or -). These are
+input data, not computed image addresses. Headers precede all labels/code;
+duplicate, incomplete and unknown headers are rejected. The compatibility
+`dump(tp)` form remains instruction-only for the current encoder fixtures.
+
+The round-trip gate now compares all TargetProgram attributes and typed code,
+including relocation lists and BSS, on three programs for all six targets.
+This is host-side transport verification, not execution on six platforms.
+The delta encoder does not yet consume these headers. Its next step is to
+compute layout from relaxed text length and resolve address-dependent forms;
+no reference-produced text offsets or encoded bytes are part of this payload.
+
+Earlier statements that data/syms always come back empty describe the old
+instruction-only interface. Carry syntax is true/false, not 0/1.

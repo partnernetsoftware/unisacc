@@ -1942,3 +1942,13 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 - Real hello/fib lowering audit now identifies address-dependent forms as the
   next encoder boundary: .lea, setmem, setreg mem, argsave, argvget. Full lowering,
   address layout and image generation remain to be migrated; no product switch.
+
+### Complete lowering payload transport (2026-09-26)
+
+`exec/enc/tins.py` now has an explicit full form for target, data bytes,
+DATA_BASE-relative symbols, src_os, data_len, BSS and relocation offsets.
+The instruction-only form remains compatible. `roundtrip.py` compares every
+TargetProgram attribute and typed instruction/meta field, not just code.
+Three real programs across six targets are now fixed gate checks; E5 gate
+43 ok, 0 bad. This is transport, not six-platform execution or header support
+in the delta encoder. Relaxed layout/address encoding remains the next step.
