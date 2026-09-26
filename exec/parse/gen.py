@@ -287,7 +287,7 @@ def unwind(p, saved):         # restore the scope to undo depth W[saved]
 
 def width(p, ptr, i4, i8):    # emit i8 if W[ptr] else i4
     a, b, d = p.fresh("w8"), p.fresh("w4"), p.fresh("wd")
-    p.branch({1: a}, b, [("CMPI", ptr, 1)])
+    p.branch({(1, 2): a}, b, [("CMPI", ptr, 1)])
     P(a).o(i8).goto(d)
     P(b).o(i4).goto(d)
     p.cur = d
@@ -295,7 +295,7 @@ def width(p, ptr, i4, i8):    # emit i8 if W[ptr] else i4
 
 def noptr(p):                 # arithmetic on a pointer is not in this step
     ok = p.fresh("np")
-    p.branch({1: "DEADP"}, ok, [("CMPI", "pt", 1)])
+    p.branch({(1, 2): "DEADP"}, ok, [("CMPI", "pt", 1)])
     p.cur = ok
 
 
@@ -303,7 +303,7 @@ def stars(p, then):           # '*'... then an identifier; W[ptd] = 1 iff any st
     lp, st, idk, bad, ok = p.fresh("sl"), p.fresh("ss"), p.fresh("si"), p.fresh("sb"), p.fresh("so")
     p.a(("LDI", "ptd", 0)).label(lp)
     p.tok({"*": st, TK_ID: idk}, ("rej", "not covered: declarator"))
-    P(st).a(("LDI", "ptd", 1)).call("NEXT").goto(lp)
+    P(st).a(("ALUI", "add", "ptd", "ptd", 1)).call("NEXT").goto(lp)
     q = P(idk)
     q.branch({0: bad}, ok, [("CMP", "ptd", "bni")])
     g.on(bad, range(257), "DEAD", [("REJECT", "not covered: non-int, non-pointer declaration")], "r")
@@ -347,7 +347,7 @@ def expr():
 
     # ASSIGN: id '=' ASSIGN | BIN
     p = P("EXPR")
-    p.tok({TK_ID: "EXPR.id"}, "EXPR.bin")
+    p.tok({TK_ID: "EXPR.id", "*": "EXPR.st"}, "EXPR.bin")
     p = P("EXPR.bin")
     p.call("BIN%d" % levels[0]).goto("EXPR.tail")
     p = P("EXPR.id")
@@ -360,6 +360,45 @@ def expr():
         addr(q, "r0")
         q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH).call("NEXT").call("EXPR")
         q.o(POP1 + optext(o) + POP1 + "  .st [r1+0], r0, 4\n").ret()
+    # *E = e  |  *E as an rvalue.  E is a pointer value (PV): W[pt] = its depth
+    p = P("EXPR.st")
+    p.call("NEXT").call("PV").call("PVCHK")
+    p.tok({"=": "EXPR.sta"}, "EXPR.stu")
+    p = P("VEXPR.st")   # statement level: `*p;` loads p only (measured)
+    p.call("NEXT").call("PV").call("PVCHK")
+    p.tok({"=": "VEXPR.sta", ";": "RET", ",": "EXPR.dis", ")": "EXPR.dis"}, "VEXPR.stu")
+    g.on("EXPR.dis", range(257), "DEAD", rej("not covered: discarded dereference"), "r")
+    P("VEXPR.sta").call("EXPR.sta").goto("VEXPR.c")
+    P("VEXPR.stu").call("EXPR.stu").goto("VEXPR.c")
+    p = P("EXPR.sta")
+    p.a(("ALUI", "sub", "pt", "pt", 1)).o(PUSH).vpush("pt").call("NEXT").call("EXPR").vpop("pt").o(POP1)
+    width(p, "pt", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    p.ret()
+    P("EXPR.stu").call("DEREF").call("BINCONT").goto("EXPR.tail")
+    # PV: '*' PV | '&' id | id  -> r0 = the pointer value, W[pt] = its depth
+    p = P("PV")
+    p.tok({"*": "PV.st", "&": "PV.amp", TK_ID: "PV.id"}, ("rej", "not covered: operand of *"))
+    P("PV.st").call("NEXT").call("PV").call("PVCHK").call("DEREF").ret()
+    p = P("PV.amp")
+    p.call("NEXT").tok({TK_ID: "PV.amq"}, ("rej", "not covered: operand of &"))
+    p = P("PV.amq")
+    lookup(p, "ps", "pe")
+    addr(p, "r0")
+    p.a(("ALUI", "add", "pt", "pt", 1)).call("NEXT").call("NOPOST").ret()
+    p = P("PV.id")
+    lookup(p, "ps", "pe")
+    addr(p, "r0")
+    width(p, "pt", "  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n")
+    p.call("NEXT").call("NOPOST").ret()
+    p = P("NOPOST")
+    p.tok({"(": "DEADX", "++": "DEADX", "--": "DEADX"}, "RET")
+    g.on("DEADX", range(257), "DEAD", rej("not covered: postfix on a * or & operand"), "r")
+    p = P("PVCHK")    # dereferencing needs a pointer
+    p.branch({(1, 2): "RET"}, ("rej", "not covered: dereference of a non-pointer"), [("CMPI", "pt", 1)])
+    p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type
+    p.a(("ALUI", "sub", "pt", "pt", 1))
+    width(p, "pt", "  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n")
+    p.ret()
     p = P("EXPR.use")
     p.call("IDTAIL").call("BINCONT").goto("EXPR.tail")
     p = P("EXPR.tail")
@@ -374,7 +413,7 @@ def expr():
     # only when a comma follows).
     for nm, stops in (("VEXPR", (";", ",", ")")), ("CEXPR", (",",))):
         q = P(nm)
-        q.tok({TK_ID: nm + ".id"}, nm + ".e")
+        q.tok({TK_ID: nm + ".id"} if nm == "CEXPR" else {TK_ID: nm + ".id", "*": nm + ".st"}, nm + ".e")
         P(nm + ".e").call("EXPR").goto(nm + ".c")
         q = P(nm + ".id")
         q.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
@@ -403,7 +442,7 @@ def expr():
     # UNARY
     p = P("UNARY")
     p.tok({"-": "U.neg", "!": "U.not", "~": "U.cpl", "+": "U.pos", "(": "U.par",
-           TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
+           TK_NUM: "U.num", TK_ID: "U.id", "*": "U.star", "&": "U.amp", "++": "U.pinc", "--": "U.pdec"}, ("rej", "not covered: expression"))
     for nm, sp in (("U.pinc", "add64"), ("U.pdec", "sub64")):
         P(nm).call("NEXT").tok({TK_ID: nm + ".id"}, ("rej", "not covered: operand of ++/--"))
         q = P(nm + ".id")
@@ -416,6 +455,8 @@ def expr():
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
         P(nm).call("NEXT").call("UNARY").o(txt).ret()
     P("U.pos").call("NEXT").goto("UNARY")
+    P("U.star").call("NEXT").call("PV").call("PVCHK").call("DEREF").ret()
+    P("U.amp").goto("PV")
     P("U.par").call("NEXT").call("CEXPR").expect(")").call("NEXT").ret()
     P("U.num").o("  imm r0, ").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").ret()
     P("U.id").a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT").call("IDTAIL").ret()
@@ -627,7 +668,7 @@ def stmt():
     p.call("NEXT").ret()
     p = P("S.rete")
     p.call("CEXPR").expect(";")
-    p.branch({1: "S.retp"}, "S.reti", [("CMPI", "rptr", 1)])
+    p.branch({(1, 2): "S.retp"}, "S.reti", [("CMPI", "rptr", 1)])
     P("S.retp").o("  jump R").num("rl").o("\n").call("NEXT").ret()
     p = P("S.reti")
     p.o("  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R").num("rl").o("\n")
@@ -700,7 +741,7 @@ def unit():
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "v", FND, "pass"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"),
         ("COPYW", "fv", "v"), ("LDI", "cur", 0), ("LDI", "max", 0))
     p.call("NEXT").tok({"(": "FN.open", ";": "FN.gv", "=": "FN.gv", ",": "FN.gv"}, ("rej", "not covered: declarator"))
-    P("FN.gv").branch({1: "FN.gp"}, "GV", [("CMPI", "rptr", 1)])
+    P("FN.gv").branch({(1, 2): "FN.gp"}, "GV", [("CMPI", "rptr", 1)])
     g.on("FN.gp", range(257), "DEAD", rej("not covered: global pointer"), "r")
     # file-scope int: `.bss g_NAME 4` where declared; `= literal` goes to __init
     p = P("GV")
