@@ -695,10 +695,11 @@ def stmt():
     p.a(("COPYW", "cur", "sc")).call("NEXT").ret()
     # declaration
     p = P("S.decl")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg"}, "S.dnx")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh"}, "S.dnx")
     P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("S.dnx")
     P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("S.dnx")
     P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("S.dnx")
+    P("S.dsh").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("S.dnx")
     P("S.dnx").call("NEXT").tok(dict((w, "S.dw") for w in TWORDS), "D.one")
     P("S.dw").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).goto("S.dnx")
     p = P("D.one")
@@ -738,9 +739,16 @@ def stmt():
     p.call("CEXPR").expect(";")
     p.branch({(1, 2): "S.retp"}, "S.reti", [("CMPI", "rptr", 1)])
     P("S.retp").o("  jump R").num("rl").o("\n").call("NEXT").ret()
-    p = P("S.reti")
-    p.o("  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R").num("rl").o("\n")
-    p.call("NEXT").ret()
+    p = P("S.reti")     # a scalar return narrows through the stack at its tyinfo size; 8 (long) as a pointer (measured)
+    q = p
+    for n in sorted(set(SZ.values()) - {SZ["int"]}):
+        hit, nx = q.fresh("rs"), q.fresh("rn")
+        q.branch({1: "S.retp" if n == PSZ else hit}, nx, [("CMPI", "rbsz", n)])
+        if n != PSZ:
+            P(hit).o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n  jump R" % (n, n)).num("rl").o("\n").call("NEXT").ret()
+        q = P(nx)
+    q.o("  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R").num("rl").o("\n")
+    q.call("NEXT").ret()
     # if (e) s [else s]
     p = P("S.if")
     p.call("NEXT").expect("(").call("NEXT").call("CEXPR").expect(")")
@@ -788,7 +796,7 @@ def unit():
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"))
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
@@ -797,13 +805,14 @@ def unit():
     P("TD.w").call("NEXT").tok({**TW, "*": "TD.w", TK_ID: "TD.id"}, ("rej", "not covered: typedef"))
     p = P("TD.id")
     p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t")).call("NEXT").expect(";").call("NEXT").goto("TOP")
-    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN"}, ("rej", "not covered: static declaration"))
+    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN"}, ("rej", "not covered: static declaration"))
     p = P("FN")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l"}, "FN.n")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s"}, "FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
     P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
-    P("FN.c").a(("LDI", "bsz", SZ["char"])).goto("FN.n")
-    P("FN.l").a(("LDI", "bsz", SZ["long"])).goto("FN.n")
+    P("FN.c").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.n")
+    P("FN.l").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("FN.n")
+    P("FN.s").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("FN.n")
     p = P("FN.n")
     p.call("NEXT")
     stars(p, "FN.r")
@@ -829,13 +838,14 @@ def unit():
     p.call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
     p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "FN.pi", "type=void": "FN.pv", "type=char": "FN.pc", "type=long": "FN.pl",
-                                 "type=unsigned": "FN.pt", "type=short": "FN.pt", "type=signed": "FN.pt",
+                                 "type=unsigned": "FN.pt", "type=short": "FN.ps", "type=signed": "FN.pt",
                                  TK_ID: "FN.ptd"}, ("rej", "not covered: parameter"))
     p = P("FN.ptd")
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
     P("FN.pi").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("FN.pt")
-    P("FN.pc").a(("LDI", "bsz", SZ["char"])).goto("FN.pt")
-    P("FN.pl").a(("LDI", "bsz", SZ["long"])).goto("FN.pt")
+    P("FN.pc").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.pt")
+    P("FN.pl").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("FN.pt")
+    P("FN.ps").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("FN.pt")
     P("FN.pw").a(("LDI", "bsz", 0)).goto("FN.pt")
     P("FN.pv").call("NEXT").tok({")": "FN.close", "*": "FN.pvs"}, ("rej", "not covered: parameter"))
     P("FN.pvs").a(("LDI", "bni", 1)).goto("FN.pvk")
