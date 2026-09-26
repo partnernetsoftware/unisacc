@@ -16,8 +16,7 @@ Memory opcode declarations are read from emit_arm LDS/STS/LDU/STU; form
 selection and packing remain hand rules. A scaled positive offset is preferred,
 then signed imm9, otherwise MOVIMM plus ADD/SUB through x16. Fallback rejects
 an x16 base or store source, whose value would be clobbered. Direct forms
-allow them. Section-local labels, jump/jumpz/call are supported. Metadata, data-address
-layout and images remain unsupported.
+allow them. Section-local labels, jump/jumpz/call are supported. Data-address layout and images remain unsupported.
 
 `ret` pops x17 from tape SP x7 and returns through x17. `callr` stores its
 continuation on that software stack before BLR. These are not host ABI calls.
@@ -37,7 +36,7 @@ Memory checks add 100 instructions / 768 bytes compared on both executors,
 four width/scratch rejects, and 64 native load/store cases checked with C
 memcpy and signed-width values.
 
-Current size: 744 states, 37,347 B compressed text table. The new gate entry is
+Current size: 822 states, 41,672 B compressed text table. The new gate entry is
 exec-arm. This does not change .com or claim complete ARM64 lowering/encoding.
 
 ## Section-local branches
@@ -93,3 +92,25 @@ proof over all floating-point bit patterns or rounding modes.
 Cross-target UB note: ARM integer division returns zero on zero divisor and
 MIN on signed MIN/-1; x86 IDIV traps. Neither is a C-defined-input equivalence
 obligation. The native C integer referee excludes these cases.
+
+## TIns setup and metadata
+
+setreg imm/reg uses the existing immediate/move rules; spinit without a data
+address copies host SP. Non-WinAPI gate emits SVC #0 or #0x80, optionally the
+Darwin carry-to-negative-errno sequence. Syscall words are byte-tested, not
+executed by the small fixture harness. Windows and address-bearing forms reject.
+
+Declared metadata keys come from tins.META. Duplicate/unknown/empty fields
+reject. gate/carry apply only to gate and are validated; gate form must be svc.
+reloc must match jump/call arm26 or jumpz arm19. Other declared fields are
+informational here (including Windows annotations carried on POSIX lowering),
+not address inputs. Tags and operand types must agree. Seen-key stamps use a
+monotonic instruction number across both passes, so repeated keys on different
+instructions or on the second scan are not mistaken for duplicates.
+
+Five whole fixtures compare with the reference on both runtimes; three worked
+setup/syscall byte strings and seventeen invalid forms are checked. The earlier
+role=a rejection becomes an unknown-key rejection, since role is now accepted.
+Real hello lowering was inspected in full: address .lea/setmem/setreg mem,
+argsave/argvget and payload layout still prevent whole-program ARM encoding.
+No instruction filtering is presented as a successful real-program encoding.

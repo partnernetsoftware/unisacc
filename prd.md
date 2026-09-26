@@ -2276,3 +2276,13 @@ cases are not full FP semantic proof.
 Cross-target known UB behaviour: ARM SDIV/UDIV return zero for divide by zero,
 and SDIV returns MIN for MIN/-1; x86 IDIV traps. C-defined-input tests exclude
 these cases, so a difference on them is not evidence of a delta regression.
+
+ARM64 TIns interface: setreg imm/reg, host-sp spinit and POSIX gate forms now
+encode. Metadata keys follow tins.META; duplicates, unknown/empty fields and
+incompatible reloc/gate/carry values reject. Tags retain argument types.
+Windows annotations on POSIX gate remain informational. Five whole fixtures
+match both executors/reference, three worked byte strings and seventeen rejects
+pass; all prior ARM checks remain green. 822 states / 41,672 B. Inspection of
+real hello lowering found remaining address/setup forms (.lea, setmem, setreg
+mem, argsave, argvget); no whole real ARM program claim yet. Product unchanged,
+no new full-gate run claimed. Next is actual payload/address layout integration.

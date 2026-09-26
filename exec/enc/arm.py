@@ -3,8 +3,8 @@
 ENCSPEC supplies ALU and inverted condition values. Instruction bit layouts,
 MOVZ/MOVK selection and operand contracts below are hand-written rules compiled
 into transitions, not new runtime primitives or constructed neural networks.
-Input is the existing TIns line syntax with section-local labels; metadata
-is not taken yet. Two passes resolve branches after all lengths are measured.
+Input is the TIns line syntax with section-local labels and declared metadata.
+Two passes resolve branches after all lengths are measured.
 """
 import json
 import sys
@@ -33,7 +33,8 @@ def build():
              'ret': ('', 4), 'nop': ('', 5), 'callr': ('r', 6),
              'load64': ('rri',9), 'store64': ('rir',10),
              '.ld': ('rrii',11), '.st': ('riri',12),
-             'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15)}
+             'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
+             'setreg': ('rv',25), 'spinit': ('r',26), 'gate': ('',27)}
     from armint import SPECS, install as install_int
     specs.update(SPECS)
     from armfp import SPECS as FP_SPECS, install as install_fp
@@ -51,7 +52,9 @@ def build():
     for i in range(31):
         p.a(('SBCLR',), [('SBOUT', c) for c in ('x%d' % i).encode()],
             ('SBINTERN', 't'), ('LDI', 'u', i+1), ('STX', 't', REG, 'u'))
-    p.a(('LDI','pass',0)).goto('LINE')
+    from arminput import init, install as install_input
+    init(p)
+    p.a(('LDI','pass',0),('LDI','lnum',0)).goto('LINE')
     g.on('LINE', [256], 'FINISH', [])
     g.on('LINE', [10], 'LINE', [('ADV',)])
     g.els('LINE', 'OP.scan', [('MARK', 'start')])
@@ -59,7 +62,7 @@ def build():
     g.on('OP.scan', [32]+END, 'OP.end', [('MARK', 'end')])
     g.els('OP.scan', 'OP.scan', [('ADV',)])
     P('OP.end').a(('INTERN', 'oid', 'start', 'end'), ('LDX', 'cls', 'oid', OP),
-                   ('LDX', 'base', 'oid', BASE), ('LDX','labelpos','oid',LP), ('LDI', 'n', 0)).goto('ARG')
+                   ('LDX', 'base', 'oid', BASE), ('LDX','labelpos','oid',LP), ('LDI', 'n', 0),('LDI','stag',0),('LDI','gcarry',0),('LDI','gkind',0),('ALUI','add','lnum','lnum',1)).goto('ARG')
     g.on('ARG', [32], 'ARG', [('ADV',)])
     g.on('ARG', END, 'ENC', [])
     g.els('ARG','ARG.type',[])
@@ -70,9 +73,11 @@ def build():
     P('NAME.end').a(('INTERN','v','start','end'),('LDI','kind',3)).goto('PUT')
     g.on('VALUE', [45]+DIG, 'NUM', [('LDI', 'neg', 0), ('LDI', 'v', 0), ('LDI', 'kind', 2)])
     g.els('VALUE', 'REG.scan', [('MARK', 'start')])
+    g.on('REG.scan',[61],'META.begin',[('MARK','end'),('ADV',)])
     g.on('REG.scan', SEP, 'REG.end', [('MARK', 'end')])
     g.els('REG.scan', 'REG.scan', [('ADV',)])
-    P('REG.end').a(('INTERN', 't', 'start', 'end'), ('LDX', 'v', 't', REG)).branch({1:'FAIL'}, 'REG.ok', [('CMPI','v',0)])
+    P('REG.end').a(('INTERN', 't', 'start', 'end')).goto('TAG.check')
+    P('REG.value').a(('LDX', 'v', 't', REG)).branch({1:'FAIL'}, 'REG.ok', [('CMPI','v',0)])
     P('REG.ok').a(('ALUI','sub','v','v',1),('LDI','kind',1)).goto('PUT')
     g.on('NUM', [45], 'NUM.first', [('LDI','neg',1),('ADV',)])
     g.els('NUM', 'NUM.first', [])
@@ -98,7 +103,7 @@ def build():
     g.on('AFTER',[32],'AFTER',[('ADV',)])
     g.on('AFTER',[44],'REQUIRED',[('ADV',)])
     g.on('AFTER',END,'ENC',[])
-    g.els('AFTER','FAIL',[])
+    g.els('AFTER','META.key',[('MARK','start')])
     g.on('REQUIRED',[32],'REQUIRED',[('ADV',)])
     g.on('REQUIRED',END,'FAIL',[])
     g.els('REQUIRED','ARG',[])
@@ -108,7 +113,11 @@ def build():
         p.branch({1:'CHECK.'+op+'.n'},'FAIL',[('CMPI','n',len(shape))]); p=P('CHECK.'+op+'.n')
         for i,k in enumerate(shape):
             nxt='CHECK.'+op+'.k%d'%i
-            p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,{'r':1,'i':2,'l':3}[k])]);p=P(nxt)
+            if k=='v':
+                p.branch({1:nxt},'FAIL',[('CMP','k%d'%i,'stag')])
+            else:
+                p.branch({1:nxt},'FAIL',[('CMPI','k%d'%i,{'r':1,'i':2,'l':3}[k])])
+            p=P(nxt)
             if k=='i' and op!='imm':
                 checked=nxt+'.signed'; bound=nxt+'.positive'
                 p.branch({1:checked},bound,[('CMPI','neg%d'%i,1)])
@@ -149,6 +158,7 @@ def build():
     install_branch(E,word)
     install_int(E,word)
     install_fp(E,word)
+    install_input(E,word)
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
