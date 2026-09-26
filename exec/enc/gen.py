@@ -14,6 +14,9 @@ emit_x86.NUM's register numbers (the reference's declaration, read at generation
 and put into memory at START).  Local constants: SCR = 11 (r11).  Hand structure,
 stated: the REX / ModRM / SIB / displacement packing below.
 
+Third slice: call L inside the fixture -- E8 rel32 from the call's final offset
+(after relaxation), always 5 bytes; only the encoding, not call semantics.
+
 Second slice: jump L and jumpz rX, L inside the fixture, with `name:` label
 lines.  Every instruction is first encoded (a branch in no form yet), then the
 branches are relaxed as unisa/assemble.py does -- all in their long form (jmp
@@ -114,7 +117,8 @@ def relax():
     p.a(("COPYW", "endo", "off"), ("LDI", "q", 0), ("LDI", "nfit", 0)).label("RX.fl")
     p.branch({0: "RX.f1"}, "RX.m", [("CMP", "q", "npc")])
     p = P("RX.f1")
-    p.a(("LDX", "k", "q", KND)).branch({1: "RX.nx"}, "RX.f2", [("CMPI", "k", 0)])
+    p.a(("LDX", "k", "q", KND)).branch({1: "RX.nx"}, "RX.f15", [("CMPI", "k", 0)])
+    P("RX.f15").branch({1: "RX.nx"}, "RX.f2", [("CMPI", "k", 3)])          # a call never shortens
     p = P("RX.f2")
     p.a(("LDX", "t", "q", SHT)).branch({1: "RX.f3"}, "RX.nx", [("CMPI", "t", 0)])
     p = P("RX.f3")
@@ -152,7 +156,10 @@ def relax():
     p.a(("LDI", "q", 0)).label("WR.l")
     p.branch({0: "WR.i"}, "RET", [("CMP", "q", "npc")])
     p = P("WR.i")
-    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z"}, "WR.blob", [("RLD", "k")])
+    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c"}, "WR.blob", [("RLD", "k")])
+    p = P("WR.c")           # call rel32: E8, target - (the call's final offset + 5)
+    p.call("LADDR").a(("LDX", "o_", "q", OFF), ("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"),
+                     ("LDI", "t", 0xE8), ("OUTW", "t"), ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
     p = P("WR.blob")
     p.a(("LDX", "t", "q", BLB), ("INPUSH", "t")).goto("WR.cp")
     g.on("WR.cp", [EOF], "WR.cpd", [("INPOP",)])
@@ -192,7 +199,7 @@ def build():
             p.a(("LDI", "u", X86["setcc"][op]), ("STX", "t", ACC, "u"))
     for nm, n in NUM.items():
         p.a(("SBCLR",), [("SBOUT", ch) for ch in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", n + 1), ("STX", "t", REGN, "u"))
-    for w in ("jump", "jumpz"):
+    for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     p.a(("LDI", "npc", 0)).goto("LINE")
     # LINE: the op word, then up to four comma-separated arguments into a0..a3 (a register's number or an integer)
@@ -209,7 +216,10 @@ def build():
     g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
     p = P("LW.i")
     p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("OLEN", "omark"))
-    p.branch({1: "BR.j"}, "LW.i2", [("CMP", "opid", "id_jump")])
+    p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
+    P("LW.i1").branch({1: "BR.c"}, "LW.i2", [("CMP", "opid", "id_call")])
+    # call NAME: E8 rel32, always 5 bytes (no short form: assemble's short_size is None)
+    g.els("BR.c", "BR.j0", [("LDI", "t", 3), ("STX", "npc", KND, "t"), ("LDI", "t", 5), ("STX", "npc", SZ, "t")])
     P("LW.i2").branch({1: "BR.z"}, "ARG", [("CMP", "opid", "id_jumpz")])
     # jump NAME / jumpz rX, NAME: recorded, encoded later
     g.els("BR.j", "BR.j0", [("LDI", "t", 1), ("STX", "npc", KND, "t"), ("LDI", "t", 5), ("STX", "npc", SZ, "t")])

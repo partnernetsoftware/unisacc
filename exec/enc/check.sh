@@ -29,12 +29,11 @@ for F in $D/x86-fixture.txt $D/br-*.txt; do
     b 60 python3 exec/pp/sim.py "$T/d.json" "$F" > "$T/p"; rp=$?
     if [ -s "$T/ref" ] && [ $rc -eq 0 ] && [ $rp -eq 0 ] && cmp -s "$T/c" "$T/ref" && cmp -s "$T/p" "$T/ref"; then :; else
         echo "  BAD $F: run.c $rc, sim.py $rp, or the bytes differ"; bad=$((bad+1)); continue; fi
-    x=$(grep "^$(basename "$F") " $D/br-expect.txt | awk '{print $2, $3}')
-    if [ -n "$x" ]; then
-        set -- $x
+    case $F in *br-*)       # its one expectation, taken exactly as validated above
+        set -- $(echo "$exp" | awk -v f="$(basename "$F")" '$1 == f {print $2, $3}')
         got=$(dd if="$T/c" bs=1 skip="$1" count=$(( ${#2} / 2 )) 2>/dev/null | xxd -p | tr -d '\n')
-        [ "$got" = "$2" ] || { echo "  BAD $F: at $1 got $got, worked by hand $2"; bad=$((bad+1)); continue; }
-    fi
+        [ "$got" = "$2" ] || { echo "  BAD $F: at $1 got $got, worked by hand $2"; bad=$((bad+1)); continue; } ;;
+    esac
     ok=$((ok+1))
 done
 for F in $D/neg-*.txt; do     # must be rejected (exit 1 with a reason), on both executors

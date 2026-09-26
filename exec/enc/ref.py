@@ -34,7 +34,7 @@ for n, ln in enumerate(open(sys.argv[1]), 1):
         continue
     op, _, rest = ln.partition(" ")
     args = [arg(a) for a in rest.split(",")] if rest else []
-    tp.emit(op, *args, **({"reloc": "rel32"} if op in ("jump", "jumpz") else {}))
+    tp.emit(op, *args, **({"reloc": "rel32"} if op in ("jump", "jumpz", "call") else {}))
 code, st = assemble(tp)       # unisa/assemble.py: the relaxation rounds, then encode
 if st["encoded"] != st["insns"]:
     sys.exit("ref: %d of %d instructions encode (the rest would be UD2)" % (st["encoded"], st["insns"]))
