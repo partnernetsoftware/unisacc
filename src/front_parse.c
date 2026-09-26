@@ -1958,8 +1958,11 @@ int callptr(int si) {
     return 0;
 }
 int callres(int si) {
-    curflt = 0; curcall = 1;
-    if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) {
+    /* signedness from the callee's return type, not the last argument
+       evaluated: `long g(unsigned long)`'s g(v)/2 divides signed */
+    curflt = 0; curcall = 1; curuns = 0; cursize = 8;
+    if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) curuns = symuns[si]; } }
+    if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) { curuns = 0;
         curflt = symflt[si]; cursize = curflt; curelem = curflt;
     } } } }
     return 0;

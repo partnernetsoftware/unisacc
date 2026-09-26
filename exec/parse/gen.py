@@ -768,12 +768,9 @@ def expr():
         P("IT.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "pt", 0), ("LDI", "pb", 0)).call("NEXT").ret()
     p = P("IT.ecall")
     p.o("  call ").a(("SPAN2", "sps", "spe")).o("\n").a(("INTERN", "v", "sps", "spe"), ("LDX", "pt", "v", FRD), ("LDX", "pb", "v", FRB))
-    # a call's value is unsigned iff its last argument was (measured: g(v) / 2 is .udiv for long g(long),
-    # h(v, s) / 4 .div; no arguments: signed)
-    p.branch({1: "IT.eu"}, "IT.en", [("CMPI", "la", 1)])
-    P("IT.eu").branch({1: "IT.eu1"}, "IT.en", [("CMPI", "pt", 0)])
-    P("IT.eu1").a(("LDI", "pb", UNS + 8)).goto("IT.en")
-    P("IT.en").call("NEXT").ret()
+    # a call's value is typed by the function's declared return type (FRD/FRB), not by its
+    # last argument: g(v) / 2 is .div for long g(unsigned long)
+    p.call("NEXT").ret()
     g.on("DEAD0", range(257), "DEAD", rej("not covered: identifier is not a local"), "r")
 
 
