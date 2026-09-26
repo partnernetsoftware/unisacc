@@ -4441,7 +4441,7 @@ int stmt_(void) {
         int stept; int bodyt; int aftert;
         adv(); need(tidx("(", 1), "(");
         if (eat(tidx(";", 1)) == 0) {
-            if (is_typetok()) local_decl();
+            if (is_typeat(tp)) local_decl();
             else { exprc(); need(tidx(";", 1), ";"); }
         }
         top = newlab(); a = newlab(); c = newlab();

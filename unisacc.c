@@ -10745,9 +10745,9 @@ int lex(void) {
                 if (wide) { strpfx = i; i = j; continue; }
             }
             kind = vfind(TOKV, NTOKV, src + i, j - i);
-            if (kind < 0) kind = 2;            /* id */
-            if (kind == 0) kind = 2;           /* "eof" is not a keyword */
-            if (kind == 1) kind = 2;           /* nor is "type" */
+            /* The first five TOKV entries name token classes, not C
+               keywords: eof/type/id/num/str are ordinary identifiers. */
+            if (kind < 5) kind = 2;
             if (vfind(TYPEV, NTYPEV, src + i, j - i) >= 0) kind = 1;
             tkind[ntok] = kind; tpos[ntok] = i; tlen[ntok] = j - i;
             ntok = ntok + 1;
@@ -15328,7 +15328,7 @@ int stmt_(void) {
         int stept; int bodyt; int aftert;
         adv(); need(tidx("(", 1), "(");
         if (eat(tidx(";", 1)) == 0) {
-            if (is_typetok()) local_decl();
+            if (is_typeat(tp)) local_decl();
             else { exprc(); need(tidx(";", 1), ";"); }
         }
         top = newlab(); a = newlab(); c = newlab();

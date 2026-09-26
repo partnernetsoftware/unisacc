@@ -274,7 +274,7 @@ def handler(a, c):
 KWKIND = {}
 for k, t in enumerate(TOKS):
     if isal(ord(t[0])):
-        KWKIND[t] = KID if k in (0, 1) else k     # `eof`, `type` are not keywords
+        KWKIND[t] = KID if k < 5 else k          # eof/type/id/num/str are token-class names
 for t in TYPEKW:
     KWKIND[t] = 1
 WORDS = set(KWKIND) | set(SKIPPAREN) | set(DROP) | set(CHARPFX) | set(STRPFX)

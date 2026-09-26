@@ -1479,7 +1479,7 @@ class Walker:
         self.sc.push()
         save = self.off
         if not self.eat(";"):
-            if self.tokclass() == "type":
+            if self.istype(self.peek()):
                 self.local_decl()
             else:
                 self.expr_comma()
