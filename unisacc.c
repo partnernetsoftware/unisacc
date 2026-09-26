@@ -16629,7 +16629,11 @@ int main(void) {
        default here and printed the lexer's view instead. */
     if (dump == 0 && dumptok == 0) {
         dump = 2; t = DEFAULT_TARGET;
+#ifdef _WIN32
+        if (outpath == 0) outpath = "a.exe";      /* what Windows can run */
+#else
         if (outpath == 0) outpath = "a.out";
+#endif
     }
     if (dump) {
         int ofd; int r;
