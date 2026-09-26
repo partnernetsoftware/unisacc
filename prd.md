@@ -1841,3 +1841,17 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
   - **Product fix (9052993):** a constant now resets curuns, curflt and curstruct. Before, a unit's first expression saw curstruct 0 ("a struct"), so `1 + 10u` lost its unsignedness.
   - **compare.py (cdx review):** tool failures, an empty file list and an empty keep list now all fail. reject-both is an observation only.
   - **Status:** still a structured state machine / lookup-table prototype. E3 is not yet a net.
+- 2026-09-26 (S-17, cdx review of 97fd265): **exact byte count.** Both deltas are serialized the same way (`json.dumps(separators=(",", ":"))`) and built from gen.py at acb6f58 and gen2.py at a8ae6fb.
+
+  | | raw bytes | gzip -9 |
+  |---|---|---|
+  | old | 29,938,744 | 3,147,912 |
+  | new | 17,262,831 | 1,903,000 |
+
+  The "23.9 → 13.3 MB" in the first version of the 97fd265 message was wrong. The message was amended before it was pushed.
+  - **Speed:** not yet compared per file on the same file set.
+  - **Dependency:** only the old *generator entry* is retired. gen2.py still imports exec/parse/gen.py as its token reader, table assembler and constants, so that file stays live code.
+  - **Product regression:** added tests/c/b_constkind.c, for the constant-kind fix 9052993. It checks `-1 < 1u` as a unit's first expression and again right after a struct operand, plus a hex constant above INT_MAX.
+    - cc prints `0 0 0 1`.
+    - The fixed compiler prints the same at -O0, -O1 and -O2.
+    - The compiler before the fix (9052993^) prints `1 1 0 1`.
