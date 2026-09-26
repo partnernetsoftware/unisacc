@@ -450,3 +450,18 @@ division by zero). Per shard, like for like against main's gen.py:
 ex.aa..af 107: 78 equal, 20 equal-noauto, 9 not covered, 0 DIFF (unchanged);
 corpus.aa..ag 249: 199 equal (+1), 23 equal-noauto, 21 not covered (-1),
 6 reject-agree, 0 DIFF.
+
+### 11.2b #if: object-like macro names expand before evaluation
+
+XE meeting an identifier that MFIND finds: an active macro (F_ACT, the
+hide-set rule the body rescan uses) reads 0 like any leftover identifier;
+an inactive object-like macro pushes its body (INPUSH via PUSHM, active
+chain CUR / F_UP, counter xdp) and XE keeps reading operands and operators
+from it; at the body's end (EOF with xdp > 0, in XO or XR) the frame is
+popped, the mark cleared, and the rest of the line continues. So `A -> B
+-> 2`, `#define X X` (0), `A B / B A` (0), empty bodies and hex / paren
+bodies evaluate as the reference does. A function-like name is not covered.
+Probes 12: 10 equal, 2 not covered (F(1); `2L` suffix), 0 DIFF.
+Shards: ex.aa..af (104 files in this split): 79 equal, 20 equal-noauto,
+5 not covered, 0 DIFF; corpus.aa..ag 249: 201 equal (+2), 25 equal-noauto
+(+2), 17 not covered (-4), 6 reject-agree, 0 DIFF.

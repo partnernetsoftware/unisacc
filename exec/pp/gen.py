@@ -176,7 +176,7 @@ def xpopv(v, p):
 
 def build_xe(g, NC):
     nc = ("DEAD", NC("#if expression"))
-    g.els("XE", "XO", [("LDI", "XOS", 1), ("LDI", "XVS", 0), ("LDI", "xz", 0),
+    g.els("XE", "XO", [("LDI", "XOS", 1), ("LDI", "XVS", 0), ("LDI", "xz", 0), ("LDI", "xdp", 0),
                        ("ALUI", "add", "xa", "XOS", XOB - 1), ("STX", "xa", 0, "xz")])
 
     def popwhile(name, p, nxt, acts):
@@ -184,6 +184,14 @@ def build_xe(g, NC):
         sub, pu = g.call("XRED", name)
         g.r(name + "c", {(1, 2): (sub, pu), 0: (nxt, acts)})
 
+    # end of a macro body pushed on the #if line (s11.2b): pop the frame,
+    # clear the macro's active mark, continue with the enclosing text
+    xpop = [("INPOP",), ("STX", "CUR", F_ACT, "xz"), ("LDX", "CUR", "CUR", F_UP),
+            ("ALUI", "sub", "DEP", "DEP", 1), ("ALUI", "sub", "xdp", "xdp", 1)]
+    for st in ("XO", "XR"):
+        g.on(st, [EOF], st + "EOF", [("CMPI", "xdp", 0)])
+    g.r("XOEOF", {2: ("XO", xpop), (0, 1): nc})
+    g.r("XREOF", {2: ("XR", xpop), (0, 1): ("XEND", [])})
     # operand expected
     g.on("XO", WS, "XO", [("ADV",)])
     g.on("XO", [40], "XO", [("ADV",)] + xpushop(1))
@@ -223,8 +231,15 @@ def build_xe(g, NC):
     g.r("XID1", {1: ("XD", [("LDI", "xpar", 0)]),
                  (0, 2): (sub_u, [("COPYW", "NID", "t"), ("LDI", "SEGQ", -1)] + pu_u)})
     g.els("XUM", "XUM1", [("CMPI", "M", 0)])
-    g.r("XUM1", {0: ("XR", [("LDI", "xr", 0), ("LDI", "xrp", 0)] + XPUSHV),
-                 (1, 2): ("DEAD", NC("#if macro name"))})
+    # a macro name: an active one (hide set) reads 0 like any leftover
+    # identifier; an inactive object-like one pushes its body (s11.2b);
+    # a function-like one is not covered
+    zero = ("XR", [("LDI", "xr", 0), ("LDI", "xrp", 0)] + XPUSHV)
+    g.r("XUM1", {0: zero,
+                 (1, 2): ("XUM2", ea("me", "M") + [("LDX", "act", "me", F_ACT), ("RLD", "act")])})
+    g.r("XUM2", {1: zero, (0, 2): ("XUM3", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
+    g.r("XUM3", {0: ("XO", PUSHM + [("ALUI", "add", "xdp", "xdp", 1)]),
+                 (1, 2): ("DEAD", NC("#if function-like macro name"))})
     g.on("XD", WS, "XD", [("ADV",)])
     g.on("XD", [40], "XDP", [("ADV",), ("LDI", "xpar", 1)])
     g.on("XD", AL, "XDI", [("MARK", "XS")])
@@ -244,7 +259,7 @@ def build_xe(g, NC):
                  (1, 2): ("XR", [("LDI", "xr", 1), ("LDI", "xrp", 0)] + XPUSHV)})
     # operator expected
     g.on("XR", WS, "XR", [("ADV",)])
-    g.on("XR", [10, EOF], "XEND", [])
+    g.on("XR", [10], "XEND", [])
     single = {42: "*", 47: "/", 37: "%", 43: "+", 45: "-", 94: "^"}
     for ch, sp in single.items():
         g.on("XR", [ch], "XB%d" % XCODE[sp], [("ADV",)])
