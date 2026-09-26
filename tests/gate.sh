@@ -37,9 +37,10 @@ job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done
 for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
 job closure-ex  ./tests/closure.sh examples/*.c
-job closure-c1  ./tests/closure.sh $(echo "$TC" | awk 'NR%3==1')
-job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%3==2')
-job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%3==0')
+job closure-c1  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==1')   # four shards: three ran 22 s alone
+job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # but 61 s beside three other suites
+job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==3')
+job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
 job stages      ./tests/stages.sh examples/*.c tests/c/*.c
 job exec-chain  env CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt)   # S-17: one C executor, E2/E1/E3
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
