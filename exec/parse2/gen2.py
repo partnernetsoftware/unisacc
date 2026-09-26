@@ -512,10 +512,10 @@ def types():
     q = P("SCALE")
     q.branch({2: "SC.8"}, "SC.1", [("CMPI", "lt", 1)])
     P("SC.8").o("  imm r2, 8\n  mul64 r0, r0, r2\n").ret()
-    P("SC.1").branch({2: "SC.u"}, "SC.1b", [("CMPI", "lb", UNS)])
-    P("SC.u").a(("ALUI", "sub", "lb", "lb", UNS)).goto("SC.1b")
-    P("SC.1b").branch({1: "RET"}, "SC.n", [("CMPI", "lb", 1)])
-    P("SC.n").o("  imm r2, ").num("lb").o("\n  mul64 r0, r0, r2\n").ret()
+    P("SC.1").a(("COPYW", "scl", "lb")).branch({2: "SC.u"}, "SC.1b", [("CMPI", "scl", UNS)])   # lb itself is kept
+    P("SC.u").a(("ALUI", "sub", "scl", "scl", UNS)).goto("SC.1b")
+    P("SC.1b").branch({1: "RET"}, "SC.n", [("CMPI", "scl", 1)])
+    P("SC.n").o("  imm r2, ").num("scl").o("\n  mul64 r0, r0, r2\n").ret()
 
 
 def build():
@@ -837,7 +837,9 @@ def build():
         P("X.c%s.v" % o).branch({1: "X.c%s.U" % o}, "X.c%s.v1" % o, [("CMPI", "vb", UNS + 8)])
         P("X.c%s.U" % o).o(E.optext(o, True)).goto("X.c%s.st" % o)
         P("X.c%s.v1" % o).branch({1: "X.c%s.w" % o}, "X.c%s.v2" % o, [("CMPI", "vb", UNS + 4)])
-        P("X.c%s.v2" % o).call("RUNS").goto("X.c%s.n" % o)
+        P("X.c%s.v2" % o).branch({1: "X.c%s.v3" % o}, "X.c%s.n" % o, [("CMPI", "rvt", 0)])
+        P("X.c%s.v3" % o).branch({1: "X.c%s.U" % o}, "X.c%s.v4" % o, [("CMPI", "rvb", UNS + 8)])   # an unsigned long right side: the unsigned spelling (p50)
+        P("X.c%s.v4" % o).branch({1: "DEAD.ui"}, "X.c%s.n" % o, [("CMPI", "rvb", UNS + 4)])
         P("X.c%s.w" % o).branch({1: "DEAD.ui"}, "X.c%s.w1" % o, [("CMPI", "rvb", UNS + 8)])
         P("X.c%s.w1" % o).o("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" + E.optext(o, True) + UIM).goto("X.c%s.st" % o)
         q = P("X.c%s.n" % o)
@@ -854,10 +856,6 @@ def build():
     P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
     g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
     # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
-    # RUNS: an unsigned int / unsigned long right side (a value) under a signed op=: not covered
-    P("RUNS").branch({1: "RUNS.1"}, "RET", [("CMPI", "rvt", 0)])
-    P("RUNS.1").branch({1: "DEAD.ui"}, "RUNS.2", [("CMPI", "rvb", UNS + 8)])
-    P("RUNS.2").branch({1: "DEAD.ui"}, "RET", [("CMPI", "rvb", UNS + 4)])
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
     P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
     P("NARU.2").branch({1: "NARU.s"}, "NARU.3", [("CMPI", "vb", UNS + 2)])
