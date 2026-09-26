@@ -67,7 +67,7 @@ FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
          "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue",
-         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed"]
+         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
@@ -407,7 +407,7 @@ def expr():
     p.call("BIN%d" % levels[0]).goto("EXPR.tail")
     p = P("EXPR.id")
     p.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
-    p.tok(dict([("=", "EXPR.as")] + [(o + "=", "EXPR.c" + o) for o in CASOPS]), "EXPR.use")
+    p.tok(dict([("=", "EXPR.as"), ("[", "EXPR.ix")] + [(o + "=", "EXPR.c" + o) for o in CASOPS]), "EXPR.use")
     for o in CASOPS:     # a op= e: address, load, push, e, op, store (measured)
         q = P("EXPR.c" + o)
         lookup(q, "sps", "spe")
@@ -456,12 +456,52 @@ def expr():
     p = P("PVCHK")    # dereferencing needs a pointer
     p.branch({(1, 2): "RET"}, ("rej", "not covered: dereference of a non-pointer"), [("CMPI", "pt", 1)])
     p = P("DEREF")    # r0 := *r0; the pointee's width follows the pointee type
-    p.a(("ALUI", "sub", "pt", "pt", 1))
+    p.a(("ALUI", "sub", "pt", "pt", 1)).call("LDA").ret()
+    p = P("LDA")      # r0 := *r0 for an address whose value has depth W[pt], base W[pb]
     d0, dk = p.fresh("d0"), p.fresh("dk")
     p.branch({1: d0}, dk, [("CMPI", "pt", 0)])
     P(d0).branch({(0, 2): dk}, ("rej", "not covered: dereference of an unknown base"), [("CMPI", "pb", CUNK)])
     p.cur = dk
     vwidth(p, "pt", "pb", LD)     # depth 0: the pointee's base width (char *p: .ld 1, measured)
+    p.ret()
+    p = P("IDX")      # p[i] = *(p + i) (measured, same tape); chained p[i][j] loads between
+    p.label("IX.top").branch({(1, 2): "IX.ok"}, ("rej", "not covered: subscript of a non-pointer"), [("CMPI", "pt", 1)])
+    p = P("IX.ok")
+    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("CEXPR").call("NOPTR").vpop("pt", "pb").expect("]")
+    pp, p1 = p.fresh("xp"), p.fresh("x1")
+    p.branch({2: pp}, p1, [("CMPI", "pt", 1)])
+    P(pp).o("  imm r2, %d\n  mul64 r0, r0, r2\n" % PSZ).goto("IX.add")
+    t = P(p1)
+    for n in sorted(set(SZ.values())):
+        hit, nx = t.fresh("xs"), t.fresh("xn")
+        t.branch({1: hit}, nx, [("CMPI", "pb", n)])
+        P(hit).o("" if n == 1 else "  imm r2, %d\n  mul64 r0, r0, r2\n" % n).goto("IX.add")
+        t = P(nx)
+    t.goto("DEADP")
+    p = P("IX.add")
+    p.o(POP1 + "  add64 r0, r1, r0\n").a(("ALUI", "sub", "pt", "pt", 1)).call("NEXT")
+    p.tok({"[": "IX.more"}, "RET")
+    P("IX.more").call("LDA").goto("IX.top")
+    p = P("IXV")      # id '[' ... as an rvalue
+    lookup(p, "sps", "spe")
+    addr(p, "r0")
+    vwidth(p, "pt", "pb", LD)
+    p.call("IDX").call("LDA").call("NOPOST").ret()
+    for nm, extra in (("EXPR.ix", {}), ("VEXPR.ixs", {";": "RET", ",": "EXPR.dis", ")": "EXPR.dis"})):
+        p = P(nm)     # id '[' ... = e  |  as an rvalue; statement level `p[i];` computes the address only (measured)
+        lookup(p, "sps", "spe")
+        addr(p, "r0")
+        vwidth(p, "pt", "pb", LD)
+        p.call("IDX").tok(dict([("=", "EXPR.ixa")] + [(o + "=", "EXPR.ixc") for o in CASOPS], **extra), "EXPR.ixu")
+    g.on("EXPR.ixc", range(257), "DEAD", rej("not covered: compound assignment to a subscript"), "r")
+    P("EXPR.ixu").call("LDA").call("NOPOST").call("BINCONT").goto("EXPR.tail")
+    p = P("EXPR.ixa")
+    d0, dk = p.fresh("a0"), p.fresh("ak")
+    p.branch({1: d0}, dk, [("CMPI", "pt", 0)])
+    P(d0).branch({(0, 2): dk}, ("rej", "not covered: dereference of an unknown base"), [("CMPI", "pb", CUNK)])
+    p.cur = dk
+    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
+    vwidth(p, "pt", "pb", ST)
     p.ret()
     p = P("EXPR.use")
     p.call("IDTAIL").call("BINCONT").goto("EXPR.tail")
@@ -481,10 +521,11 @@ def expr():
         P(nm + ".e").call("EXPR").goto(nm + ".c")
         q = P(nm + ".id")
         q.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
-        q.tok(dict([(k, nm + ".addr") for k in stops] + [("=", nm + ".as")]
+        q.tok(dict([(k, nm + ".addr") for k in stops] + [("=", nm + ".as"), ("[", nm + ".ix")]
                    + [(o + "=", nm + ".c" + o) for o in CASOPS]), nm + ".use")
         P(nm + ".use").call("EXPR.use").goto(nm + ".c")
         P(nm + ".as").call("EXPR.as").goto(nm + ".c")
+        P(nm + ".ix").call("EXPR.ix" if nm == "CEXPR" else "VEXPR.ixs").goto(nm + ".c")
         for o in CASOPS:
             P(nm + ".c" + o).call("EXPR.c" + o).goto(nm + ".c")
         q = P(nm + ".addr")
@@ -560,7 +601,7 @@ def expr():
 
     # IDTAIL: saved id x[sps..spe), current token follows it
     p = P("IDTAIL")
-    p.tok({"(": "IT.call", "++": "IT.inc", "--": "IT.dec"}, "IT.var")
+    p.tok({"(": "IT.call", "++": "IT.inc", "--": "IT.dec", "[": "IXV"}, "IT.var")
     for nm, o, undo in (("IT.inc", "+", "sub64"), ("IT.dec", "-", "add64")):
         q = P(nm)   # a++ : a += 1, then the old value back (measured)
         lookup(q, "sps", "spe")
