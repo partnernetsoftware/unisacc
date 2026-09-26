@@ -1,5 +1,7 @@
 # Referee ledger: what checks each table against C
 
+The data is `research/referee.tsv`: one row per stage, with its class and a runnable provider. `tests/docs.sh` fails when its stage set is not exactly `unisa/gold.py` `ALL` or when a named provider is missing. The table below is narrative and does not promise to be complete; the TSV is the ledger.
+
 The ledger records facts only (2026-09-26, HEAD 827f2be). The enumeration (`unisa acc`, 8,484 keys) proves **net = table** for every stage. It says nothing about **table = C**. The ledger splits each stage's evidence into three kinds:
 
 - **External**: something outside the project, such as the system cc, OS headers or a disassembler, answers each key.
