@@ -38,7 +38,11 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, "t.c"), "w").write("\n".join(src) + "\n")
         subprocess.run(["cc", "-w", "-o", os.path.join(d, "t"), os.path.join(d, "t.c")], check=True, timeout=60)
-        out = subprocess.run([os.path.join(d, "t")], capture_output=True, timeout=10).stdout.decode().split("\n")
+        pr = subprocess.run([os.path.join(d, "t")], capture_output=True, timeout=10)
+        out = pr.stdout.decode().split("\n")
+    if pr.returncode != 0 or len([l for l in out if l]) != len(ts):
+        print("tyinfo_audit  the probe exited %d with %d of %d lines" % (pr.returncode, len([l for l in out if l]), len(ts)))
+        return 1
     agree = differ = 0
     for t, line in zip(ts, out):
         size, uns, narrow = (int(x) for x in line.split())

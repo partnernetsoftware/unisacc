@@ -78,7 +78,11 @@ def main():
     with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, "p.c"), "w").write(src)
         subprocess.run(["cc", "-w", "-Wno-error", "-Wno-parentheses", "-o", os.path.join(d, "p"), os.path.join(d, "p.c")], check=True, timeout=60)
-        out = subprocess.run([os.path.join(d, "p")], capture_output=True, timeout=10).stdout.split()
+        pr = subprocess.run([os.path.join(d, "p")], capture_output=True, timeout=10)
+        out = pr.stdout.split()
+    if pr.returncode != 0 or len(out) != len(lines):
+        print("prec_audit  the probe exited %d with %d of %d values" % (pr.returncode, len(out), len(lines)))
+        return 1
     got = iter(int(x) for x in out)
     agree = differ = undet = 0
     for o1, o2, abc, L, R in keys:

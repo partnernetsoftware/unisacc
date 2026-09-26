@@ -1,6 +1,6 @@
-/* A format string that is not a literal.  The compiler desugars printf
-   against a STATIC format [W-9]; this one cannot be desugared at all, so it
-   has to become a real variadic call on the printf in <stdio.h>. */
+/* A format string that is not a literal: a real variadic call on the printf
+   in <stdio.h>.  Since 991d337 / 18c8f22 every printf call is one, in both
+   front ends [W-9]. */
 #include <stdio.h>
 
 static const char *pick(int i)
