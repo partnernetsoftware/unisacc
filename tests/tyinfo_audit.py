@@ -4,7 +4,8 @@ against the system compiler.  [referee ledger: tyinfo]
 
 For each type the table answers, cc prints sizeof(T), whether (T)-1 < 0
 (signedness, integer types only), and whether sizeof(T) < sizeof(long)
-(narrower than a register, integer types only).  Rows that are a
+(narrower than a register, integer types only) -- an LP64 host is assumed
+and checked.  Rows that are a
 representation choice, not a C fact -- void's size, the 8 given to arr, fn,
 struct and illegal, narrow on floats -- are skipped and listed.
 """
@@ -21,6 +22,12 @@ INT = ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")
 
 
 def main():
+    # narrow is judged against sizeof(long): the audit holds on LP64 hosts only
+    # (on LLP64, Windows x64, long is 4 and i32/u32 would read as not narrow)
+    import struct
+    if struct.calcsize("l") != 8:
+        print("tyinfo_audit  SKIPPED: not an LP64 host (sizeof(long) = %d) -- a skip, not a pass" % struct.calcsize("l"))
+        return 1
     rows = {}
     for ln in open(os.path.join(ROOT, "weights", "gold", "tyinfo.tsv")):
         f = ln.rstrip("\n").split("\t")
