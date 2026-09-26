@@ -126,6 +126,7 @@ def optail(o):
     per operator, shared by both ladders -- double, pointer scaling, unsigned, int forms"""
     bn = "OPX." + o
     q = P(bn)
+    q.call("NOFLT")
     q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("ISDV").a(("COPYW", "ldv", "u"),
         ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("ISDV").a(("ALU", "or", "t", "u", "ldv"))
     q.branch({1: bn + ".f"}, bn + ".nf", [("CMPI", "t", 1)])
@@ -729,7 +730,14 @@ def build():
     q.branch({0: "WC.w"}, "RET", [("CMP", "k2", "sz")])
     P("WC.w").o("  load64 r2, [r1+").num("k2").o("]\n  store64 [r0+").num("k2").o("], r2\n").a(("ALUI", "add", "k2", "k2", 8)).goto("WC.l")
     p = P("S.re1")
-    p.call("EXPR").expect(";").a(("COPYW", "vt", "rd"), ("COPYW", "vb", "rb")).call("NARROW")
+    p.call("EXPR").expect(";").branch({1: "S.rf0"}, "S.rn", [("CMPI", "rb", FLT)])
+    # a float function returns a float value as it is (measured, p76: return (float) g(a) -- cvtds, no narrowing)
+    P("S.rf0").branch({1: "S.rf1"}, "S.rn", [("CMPI", "rd", 0)])
+    P("S.rf1").branch({1: "S.rf2"}, "DEAD.dbl", [("CMPI", "vb", FLT)])
+    P("S.rf2").branch({1: "S.rj"}, "DEAD.dbl", [("CMPI", "vt", 0)])
+    p = P("S.rn")
+    p.a(("COPYW", "vt", "rd"), ("COPYW", "vb", "rb")).call("NARROW").goto("S.rj")
+    p = P("S.rj")
     p.o("  jump R").num("rl").o("\n").call("NEXT").ret()
     P("S.expr").a(("LDI", "stl", 1)).call("CEXPR").expect(";").call("NEXT").ret()
     p = P("S.if")
@@ -893,6 +901,10 @@ def build():
     P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
     g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
     # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
+    P("NOFLT").branch({1: "NOFLT.1"}, "NOFLT.2", [("CMPI", "vb", FLT)])
+    P("NOFLT.1").branch({1: "DEAD.dbl"}, "NOFLT.2", [("CMPI", "vt", 0)])
+    P("NOFLT.2").branch({1: "NOFLT.3"}, "RET", [("CMPI", "lb", FLT)])
+    P("NOFLT.3").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "lt", 0)])
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
     P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
     P("NARU.2").branch({1: "NARU.s"}, "NARU.3", [("CMPI", "vb", UNS + 2)])
