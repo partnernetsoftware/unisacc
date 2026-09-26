@@ -1826,3 +1826,12 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 §3.3 bilinear 形式 · `SYMS` 拼写 · fib/ptr/struct 常量 · §3.7 亚字节打包顺序。**除此之外全部承重。**
 
 - 2026-09-26 (S-17, gen2 54cbaee): multi-dimensional arrays measured and done. `b[i][j][k]`: each subscript that is not the last multiplies by (element size × the remaining dimensions) and adds, with no load. A DIM table per variable holds the dimensions. Also: printf with any conversion other than %d/%% is a real variadic call. mkdump now runs autoinc on the dump path. The old E3 has 1 DIFF (p67) on the corrected input. Structured E3: 2,371 states, 96 equal, 0 differ.
+- 2026-09-26 (S-17, gen2 up to 3404ebc): new measured rules, all done in the structured E3.
+  - **sizeof** is a constant `imm` and its operand emits nothing.
+  - **Pointer difference** is sub64 then `.div` by the element size, giving a long. **n + p** scales the pushed n in place.
+  - **Local initialisers** emit: the value; `imm r2, slot; sub64 r1, r6, r2`; then a store at the variable's width. **Comma declarators** add their stars on the base depth.
+  - **A statement `*p;` alone** computes the address only.
+  - **++, -- and op=** work on every width and on pointers (the step is the element size). Postfix loads raw. Prefix and op= load masked and mask an unsigned narrow result again.
+  - **unsigned int** loads and casts are masked to 32 bits. Operators mask both operands, use the unsigned form, and mask the result. Hex constants above INT_MAX are unsigned int.
+  - **Tooling:** a name defined twice is now a build error (it had silently merged DSCALE with DIMSAVE).
+  - **Status:** 2,828 states; 127 equal, 0 differ. The old E3 matches 110. What remains is where the old one covered and the new does not yet: p43/p58/p59 (the pairing of long and unsigned int), p47 (parameter), p53 and p7, p65 (double), p76/p81/p83/p84 (width).
