@@ -4,6 +4,7 @@
 #define UNISA_RUNTIME_LIBRARY
 #include "run.c"
 #undef UNISA_RUNTIME_LIBRARY
+#include "memory.c"
 
 #ifdef __aarch64__
 #define NATIVE_ARCH "arm64"
@@ -49,15 +50,31 @@ static void argbytes(Buf *b, const char *s) {
     while (*s) { bput(b,(unsigned char)*s,0); s++; }
     bput(b,0,0);
 }
+static char *process_environment(int argc,char **argv,int i) {
+#ifdef __UNISA__
+    /* main's argv is a compiler-created copy; the intrinsic names the
+       process vector, which also contains envp after its terminating NULL. */
+    return __argv(__argc()+1+i);
+#else
+    return argv[argc+1+i];
+#endif
+}
 #define ARGRESOURCE(i,k,v) cli[i].name=(const unsigned char *)k; cli[i].n=sizeof(k)-1; cli[i].data=v.b; cli[i].len=v.n
 
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0;
-    int mode = 0, level = 0, explicit_image = 0;
+    int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a,"-E")) mode = 1;
+        if (!strcmp(a,"-run")) runit = 1;
+        else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
+        else if (runit && src && a[0]!='-') {
+            size_t len=strlen(a);
+            if (len>=2 && !strcmp(a+len-2,".c")) return clierror("multiple inputs not migrated");
+            argstart=i; break;
+        }
+        else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
         else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
             const char *value=a+2;
@@ -86,24 +103,60 @@ int main(int argc, char **argv) {
     }
     if (!src) return clierror("expected a C source file");
     if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
+#ifdef _WIN32
+    if (runit) return clierror("native memory imports not migrated on Windows");
+#endif
+    if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
     char route[96];
     int n = mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
-        snprintf(route,sizeof route,"%s/%s/O%d",target,mode==2 ? "tape" : "image",level);
+        snprintf(route,sizeof route,"%s/%s/O%d",target,mode==3 ? "run" : mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
-    ResourceInput cli[4];
+    ResourceInput cli[8];
+    unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8];
+    char **runargs=0;
+    if (runit) {
+        int count=1+argc-argstart;
+        int envn=0; while (process_environment(argc,argv,envn)) envn++;
+        runargs=xrealloc(0,(count+envn+2)*sizeof(char *));
+        runargs[0]=(char *)src;
+        for (int j=argstart;j<argc;j++) runargs[j-argstart+1]=argv[j];
+        runargs[count]=0;
+        for (int j=0;j<=envn;j++) runargs[count+1+j]=process_environment(argc,argv,j);
+        resource_u64(process_argc,count); resource_u64(process_argv,(long)runargs);
+    }
     ARGRESOURCE(0,"\0cli/defines",defs);
     ARGRESOURCE(1,"\0cli/undefines",undefs);
     ARGRESOURCE(2,"\0cli/includes",forced);
     ARGRESOURCE(3,"\0cli/include-dir",incdir);
     RI=cli; NRI=4;
+    if (runit) {
+        cli[4].name=(const unsigned char *)"\0process/argc";cli[4].n=13;cli[4].data=process_argc;cli[4].len=8;
+        cli[5].name=(const unsigned char *)"\0process/argv";cli[5].n=13;cli[5].data=process_argv;cli[5].len=8;
+        NRI=6;
+    }
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; in.b = !strcmp(src,"-") ? readstream(0,"stdin",&in.n) : readfile(src,&in.n,0);
-    int rc = runroute(route,&in,src); unpackage(); RI=0; NRI=0;
+    int rc = runroute(route,&in,src);
+    MemoryImage plan; MemoryMap mapping;
+    if (!rc && runit) {
+        snprintf(route,sizeof route,"%s/memory",target);
+        Buf first={0};first.n=in.n;first.b=xrealloc(0,in.n);memcpy(first.b,in.b,in.n);
+        rc=runroute(route,&first,src);
+        if (!rc) {
+            memory_image(&first,&plan);memory_map(&plan,&mapping);free(first.b);
+            resource_u64(memory_text,(long)mapping.base);resource_u64(memory_data,(long)(mapping.base+mapping.dataoff));
+            cli[6].name=(const unsigned char *)"\0memory/text";cli[6].n=12;cli[6].data=memory_text;cli[6].len=8;
+            cli[7].name=(const unsigned char *)"\0memory/data";cli[7].n=12;cli[7].data=memory_data;cli[7].len=8;
+            NRI=8;rc=runroute(route,&in,src);
+        }
+    }
+    unpackage(); RI=0; NRI=0;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
     if (rc) return rc;
+    if (runit) return memory_enter(&mapping,&plan,&in);
     if (!out && !mode && !explicit_image) {
 #ifdef _WIN32
         out = "a.exe";

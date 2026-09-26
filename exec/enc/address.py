@@ -20,7 +20,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
     g.on('HDR.val',[10,256],'HDR.end',[('MARK','hend')])
     g.els('HDR.val','HDR.val',[('ADV',)])
     p=P('HDR.end');p.a(('INTERN','hk','ws','he'))
-    for key in ('target','sym','data','src_os','data_len','bss','relocs'):
+    for key in ('target','sym','data','src_os','data_len','bss','relocs','argc','argv'):
         p.branch({1:'HDR.'+key},'HDR.next.'+key,[('CMP','hk','id_h_'+key)])
         p=P('HDR.next.'+key)
     p.goto('DEAD.addr')
@@ -30,10 +30,10 @@ def install(E, byte, KND, SZ, OFF, LABD):
         P('HDR.target'+str(i)).a(('LDI','target_os',i)).goto('SKIPL')
         p=P('HDR.tnext'+str(i))
     p.goto('DEAD.addr')
-    for key in ('data','src_os','data_len','bss','relocs'):
+    for key in ('data','src_os','data_len','bss','relocs','argc','argv'):
         # Keep the exact declaration blob for the future image writer; no output.
         p=P('HDR.'+key).a(('BLOBSAVE','header_'+key,'hv','hend'))
-        if key in ('relocs','data_len','bss'): p.a(('LDI','has_'+key,1))
+        if key in ('relocs','data_len','bss','argc','argv'): p.a(('LDI','has_'+key,1))
         p.goto('SKIPL')
     P('HDR.sym').a(('JUMP','hv')).goto('HDR.sn')
     g.on('HDR.sn',[32],'HDR.sa',[('MARK','hne'),('ADV',),('LDI','ha',0)])
@@ -50,8 +50,10 @@ def install(E, byte, KND, SZ, OFF, LABD):
     P('AD.setmem').a(('COPYW','ad_r','a1'),('COPYW','ad_v','a0'),('LDI','ad_o',0x89),('LDI','anamed',0)).goto('AD.store')
     P('AD.mem').a(('COPYW','ad_r','a0'),('COPYW','ad_v','a1'),('LDI','ad_o',0x8b),('LDI','anamed',0)).goto('AD.store')
     P('AD.addr').a(('LDI','anamed',0)).goto('AD.lea')
+    from memorylayout import install as memory_layout
+    memory_layout(E,'DEAD.addr')
     # Layout format declarations read here, algorithm remains explicit.
-    p=P('LAYOUT');p.branch({1:'LAY.lnx',2:'LAY.osx',3:'LAY.win'},'DEAD.addr',[('RLD','target_os')])
+    p=P('LAY.default');p.branch({1:'LAY.lnx',2:'LAY.osx',3:'LAY.win'},'DEAD.addr',[('RLD','target_os')])
     for tag,m,base in [('lnx',elf,elf.VADDR),('osx',macho,macho.VMADDR)]:
         h=m.HDRS('x86_64'); page=m.PAGE
         P('LAY.'+tag).a(('LDI','text_va',base+h),('A64I','add','data_va','endo',h+page-1),('A64I','and','data_va','data_va',-page),('A64I','add','data_va','data_va',base),('A64I','sub','data_shift','data_va',DATA_BASE)).ret()

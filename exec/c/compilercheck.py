@@ -27,7 +27,7 @@ for exe in [p/'driver-cc',p/'driver-ua']:
     bad=p/'bad.c';bad.write_text('int main( { this is invalid; }')
     out=p/'sentinel';out.write_bytes(b'preserve')
     r=run([*base,bad,'-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'
-    for args in [['-run',src],['-nostdinc',src],[src,src],['-o'],['-b'],['-D'],['-U'],['-include']]:
+    for args in [['-nostdinc',src],[src,src],['-o'],['-b'],['-D'],['-U'],['-include']]:
         r=run([*base,*args]);assert r.returncode==1 and not r.stdout
     r=run([*base,src,'-b','unknown/target','-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'
     r=run([*base,src,'-o',p]);assert r.returncode==1 and b'cannot open output' in r.stderr
@@ -80,4 +80,7 @@ for mode in ['-E','-S']:
 ok([*base,'hello.c','-O2'],cwd=isolated)
 assert (isolated/'a.out').read_bytes()==ok([ua,src,'-b',target,'-O2'])
 assert ok([isolated/'a.out'])==b'hello from C99\n'
+before=set(isolated.iterdir())
+assert ok([*base,'-run','hello.c'],cwd=isolated)==b'hello from C99\n'
+assert set(isolated.iterdir())==before, 'memory run created a file'
 print(f'compiler driver: {n} mode/level matches, CLI resource/model checks, stdin, fail-before-output, IO failures, embedded default image ran')

@@ -20,6 +20,8 @@ def compiler_package(manifests, o1, includes):
         targets.add(target)
         names=[s[1] for s in stages]
         if names!=['e2','e1','e3','e4','lower','elf']: raise ValueError('unexpected image stages')
+        _,name,inp,out,model=stages[-1]
+        rows.append('\t'.join([target+'/memory',name,inp,'memory-v1',str((path.parent/model).resolve())]))
         for suffix,last,opt in specs:
             for _,name,inp,out,model in stages:
                 if name=='e4' and opt=='none': continue

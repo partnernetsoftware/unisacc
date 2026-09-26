@@ -37,7 +37,7 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     P('EM.bound').branch({2:'DEAD.image'},'EM.digit',[('C64U','mn','extent_max')])
     g.on('EM.digit',[256],'EM.end',[]);g.els('EM.digit','DEAD.image',[])
     P('EM.end').a(('INPOP',)).branch({1:'DEAD.image'},'RET',[('CMPI','nd',0)])
-    P('EM.ready').branch({1:'ER.init'},'ER.trim',[('CMPI','has_relocs',1)])
+    P('EM.ready').branch({1:'ER.init'},'MI.args',[('CMPI','has_relocs',1)])
     P('ER.init').a(('INPUSH','header_relocs')).goto('ER.first')
     g.on('ER.first',[45],'ER.empty',[('ADV',)])
     g.els('ER.first','ER.start',[])
@@ -61,7 +61,16 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         p.a(('ALUI','add','di','ra',j),('A64I','and','db','rv',255),('STX','di',DATA,'db'),('A64I','shr','rv','rv',8))
     p.goto('ER.sep')
     g.on('ER.sep',[44],'ER.start',[('ADV',)]);g.on('ER.sep',[256],'ER.end',[])
-    P('ER.end').a(('INPOP',)).goto('ER.trim')
+    P('ER.end').a(('INPOP',)).goto('MI.args')
+    P('MI.args').branch({1:'ER.trim'},'MI.argc',[('CMPI','memory_mode',0)])
+    for key,value,nxt in [('argc','ml_argc','MI.argv'),('argv','ml_argv','ER.trim')]:
+        P('MI.'+key).branch({1:'MI.'+key+'.read'},'DEAD.image',[('CMPI','has_'+key,1)])
+        P('MI.'+key+'.read').a(('INPUSH','header_'+key)).call('EM.num').a(('A64I','sub','mi_at','mn',256),('A64I','add','mi_end','mi_at',8)).branch({0:'DEAD.image'},'MI.'+key+'.bound',[('C64','mi_at','zero')])
+        P('MI.'+key+'.bound').branch({2:'DEAD.image'},'MI.'+key+'.store',[('C64U','mi_end','vlen')])
+        p=P('MI.'+key+'.store').a(('COPYW','mi_v',value))
+        for j in range(8):p.a(('ALUI','add','di','mi_at',j),('A64I','and','db','mi_v',255),('STX','di',DATA,'db'),('A64I','shr','mi_v','mi_v',8))
+        p.branch({2:'MI.'+key+'.extend'},nxt,[('C64','mi_end','dlen')])
+        P('MI.'+key+'.extend').a(('COPYW','dlen','mi_end')).goto(nxt)
     P('ER.trim').a(('COPYW','stored','dlen')).label('ET.loop').branch({1:'EH'},'ET.last',[('CMPI','stored',0)])
     P('ET.last').a(('ALUI','sub','di','stored',1),('LDX','db','di',DATA)).branch({1:'ET.drop'},'EH',[('CMPI','db',0)])
     P('ET.drop').a(('ALUI','sub','stored','stored',1)).goto('ET.loop')
@@ -73,7 +82,17 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         P('EH.entry').a(('ALUI','sub','ei','ei',1)).branch({0:'EH.in'},'EH.end',[('CMP','ei','npc')])
         P('EH.in').a(('LDX','entryoff','ei',OFF)).goto('EH.write')
         P('EH.end').a(('COPYW','entryoff','endo')).goto('EH.write')
-    P('EH.write').goto({'macho':'MACHO','pe':'PE','elf':'EH.elfwrite'}[image_format])
+    P('EH.write').branch({1:'EH.file'},'MI.begin',[('CMPI','memory_mode',0)])
+    P('EH.file').goto({'macho':'MACHO','pe':'PE','elf':'EH.elfwrite'}[image_format])
+    # A native-memory image has no OS file headers or signature. It carries
+    # exact code/data bytes and a declared zero-filled extent; all relocation
+    # and entry arithmetic above is reused, still performed by the model.
+    p=P('MI.begin').o('UNIMEM1\n')
+    for value in ('endo','memlen','stored','entryoff'):
+        p.a(('COPYW','lb_v',value),('LDI','lb_n',8)).call('EI.bytes')
+    p.a(('INPUSH','text_blob')).goto('MI.copy')
+    g.on('MI.copy',[256],'EI.data',[('INPOP',)])
+    g.els('MI.copy','MI.copy',[('COPY',),('ADV',)])
     if image_format=='pe':
         from pedelta import install as install_pe
         install_pe(E,byte,arch)

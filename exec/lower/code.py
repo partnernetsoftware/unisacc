@@ -65,10 +65,15 @@ def install(E, arch="x86_64", os_="lnx"):
     P('C.enter').branch({1:'C.setup'},'C.dispatch',[('CMP','ci','entry')])
     p=P('C.setup')
     if os_=='win':
-        p.o('winstdh ').a(('LDI','offset',WIN_HSTD)).call('ADDR').o('\nwinargs ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', ').a(('LDI','offset',WIN_ARGVA)).call('ADDR').o('\n')
+        p.o('winstdh ').a(('LDI','offset',WIN_HSTD)).call('ADDR').o('\n')
+        p.branch({1:'C.winargs'},'C.spinit',[('CMPI','run_mode',0)])
+        p=P('C.winargs').o('winargs ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', ').a(('LDI','offset',WIN_ARGVA)).call('ADDR').o('\n').goto('C.spinit')
+        p=P('C.spinit')
     p.o('spinit '+regmap['r7'])
     if os_=='win' and arch=='arm64':p.o(', ').a(('LDI','offset',WIN_EXTRA+WIN_STACK)).call('ADDR')
     p.o('\n')
+    p.branch({1:'C.processargs'},'C.dispatch',[('CMPI','run_mode',0)])
+    p=P('C.processargs')
     if os_!='win':p.o('argsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', '+('true' if os_=='lnx' else 'false')+'\n')
     p.goto('C.dispatch')
     special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
@@ -126,7 +131,14 @@ def install(E, arch="x86_64", os_="lnx"):
     p=P('C.prelude')
     for i in range(8):p.a(('SBCLR',),('SBOUT',48+i),('SBINTERN','inum'+str(i)))
     for op in abi:p.a(('SBCLR',),[('SBOUT',c) for c in op.encode()],('SBINTERN','sysid_'+op))
-    p.goto('C.init')
+    from modelinput import u64
+    u64(E,'C.runargc',b'\0process/argc','run_argc','run_mode','C.fail')
+    u64(E,'C.runargv',b'\0process/argv','run_argv','run_hasargv','C.fail')
+    p.call('C.runargc').branch({1:'C.init'},'C.argv',[('CMPI','run_mode',0)])
+    P('C.argv').call('C.runargv').branch({1:'C.fail'},'C.runheaders',[('CMPI','run_hasargv',0)])
+    # Data cells are initialised by the image model, just as bk_run does;
+    # there are no extra instructions in the compiled entry sequence.
+    P('C.runheaders').o('@argc ').a(('LDI','offset',48)).call('ADDR').o('\n@argv ').a(('LDI','offset',56)).call('ADDR').o('\n').goto('C.init')
     # Syscall source preparation: spill before overwriting ABI registers.
     def spill(p,token,offset):
         p.o('setmem ').a(('LDI','offset',offset)).call('ADDR').o(', ').a(('COPYW','tok',token)).call('PRINT').o('\n')

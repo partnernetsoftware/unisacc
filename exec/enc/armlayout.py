@@ -10,7 +10,7 @@ SYM,PRESENT,HSEEN=77000000,78000000,79000000
 
 def init(p):
     p.a(('LDI','target_os',1),('SBCLR',),[('SBOUT',c) for c in b'_start'],('SBINTERN','id_entry'))
-    for key in ('target','data','src_os','data_len','bss','relocs','sym'):
+    for key in ('target','data','src_os','data_len','bss','relocs','argc','argv','sym'):
         p.a(('SBCLR',),[('SBOUT',c) for c in ('@'+key).encode()],('SBINTERN','h_'+key))
     for key,value in (('lnx','lnx/arm64'),('osx','osx/arm64'),('win','win/arm64')):
         p.a(('SBCLR',),[('SBOUT',c) for c in value.encode()],('SBINTERN','target_'+key))
@@ -29,12 +29,12 @@ def install(E,word):
     p.branch({1:'HDR.sym'},'HDR.seen',[('CMP','hk','h_sym')])
     P('HDR.seen').a(('LDX','t','hk',HSEEN)).branch({1:'HDR.unique'},'FAIL',[('CMPI','t',0)])
     p=P('HDR.unique').a(('LDI','t',1),('STX','hk',HSEEN,'t'))
-    for key in ('target','data','src_os','data_len','bss','relocs'):
+    for key in ('target','data','src_os','data_len','bss','relocs','argc','argv'):
         p.branch({1:'HDR.'+key},'HDR.next.'+key,[('CMP','hk','h_'+key)]);p=P('HDR.next.'+key)
     p.goto('FAIL')
-    for key in ('data','src_os','data_len','bss','relocs'):
+    for key in ('data','src_os','data_len','bss','relocs','argc','argv'):
         p=P('HDR.'+key).a(('BLOBSAVE','header_'+key,'hv','hend'))
-        if key in ('data','data_len','bss','relocs'):p.a(('LDI','has_'+key,1))
+        if key in ('data','data_len','bss','relocs','argc','argv'):p.a(('LDI','has_'+key,1))
         p.goto('LINE')
     P('HDR.target').a(('INTERN','t','hv','hend')).branch({1:'HDR.lnx'},'HDR.osxcheck',[('CMP','t','target_lnx')])
     P('HDR.osxcheck').branch({1:'HDR.osx'},'HDR.wincheck',[('CMP','t','target_osx')])
@@ -50,7 +50,9 @@ def install(E,word):
     g.on('HDR.num',[10,256],'HDR.storecheck',[]);g.els('HDR.num','FAIL',[])
     P('HDR.storecheck').a(('INTERN','sid','hv','hne'),('LDX','t','sid',PRESENT)).branch({1:'HDR.store'},'FAIL',[('CMPI','t',0)])
     P('HDR.store').a(('STX','sid',SYM,'ha'),('LDI','t',1),('STX','sid',PRESENT,'t')).goto('LINE')
-    P('LAYOUT').a(('OLEN','length')).branch({1:'LAY.lnx',2:'LAY.osx',3:'LAY.win'},'FAIL',[('RLD','target_os')])
+    from memorylayout import install as memory_layout
+    memory_layout(E,'FAIL')
+    P('LAY.default').a(('OLEN','length')).branch({1:'LAY.lnx',2:'LAY.osx',3:'LAY.win'},'FAIL',[('RLD','target_os')])
     for os,m,base in (('lnx',elf,elf.VADDR),('osx',macho,macho.VMADDR)):
         h=m.HDRS('arm64');pg=m.PAGE
         P('LAY.'+os).a(('LDI','text_va',base+h),('A64I','add','data_va','length',h+pg-1),('A64I','and','data_va','data_va',-pg),('A64I','add','data_va','data_va',base),('A64I','sub','data_shift','data_va',DATA_BASE)).ret()

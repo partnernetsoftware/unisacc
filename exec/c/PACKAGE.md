@@ -149,13 +149,13 @@ Build a driver with `cc -O2 exec/c/compiler.c -o driver` (or unisacc), and use
 `--models FILE` for an external package, or APE's `--payload` for a self-contained
 development executable. The normal options currently connected are `-E`,
 `-S`/`-c`, `-b`/`-t TARGET`, `-O`/`-O0`/`-O1`/`-O2`, `-o`, `-D`/`-U`,
-`-include`, one `-I` directory,
+`-include`, POSIX `-run`, one `-I` directory,
 and one source file or stdin (`-`). The mode/target defaults match the current
 product; `-b` without `-o` writes stdout, default image mode writes a.out/a.exe.
 No output is opened until the selected route accepts. File writes loop over
 partial writes and fail on a stopped write or failed close.
 
-This is staged adoption, not a CLI compatibility claim. `-run`, multiple
+This is staged adoption, not a CLI compatibility claim. Windows `-run`, multiple
 translation units, dependency output, warning and
 instrumentation flags, and further optimisation aliases still need migration;
 unsupported options fail, with no reference fallback.
@@ -176,3 +176,37 @@ quoted headers precede `-I`, which precedes `include/` and carried headers.
 An absent resource means no such arguments. Both executors use the same
 raw-resource fixture tests. Invalid macro syntax remains a named model
 rejection; exact diagnostic rendering is still outside the migration.
+
+### Native-memory route (POSIX adoption)
+
+`-run` selects the native target and compiles through the `run/O0..O2`
+route, ending in lowered target text. The same encoder network is then run
+via the `memory` route. Its two passes across bindings are:
+
+1. With `NUL process/argc` and `NUL process/argv` resources (each exactly
+   eight little-endian bytes), lowering omits process-entry argument capture
+   and declares the two argument cells. The encoder emits a size plan using
+   its ordinary layout. That plan is not executed.
+2. The OS adapter allocates adjacent writable text/data mappings, supplies
+   `NUL memory/text` and `NUL memory/data` as eight-byte addresses, and runs
+   the same encoder again. Addressing, relocation, argc/argv cell writes and
+   entry selection all remain model actions. The loader checks that code
+   size, logical data extent and entry did not change, copies the model's
+   bytes, makes only the text read-execute, and calls the entry.
+
+The output format is `UNIMEM1\n`, then four little-endian u64 fields:
+text length, logical data extent, stored data length, entry offset. Exactly
+text length plus stored length raw bytes follow. The rest of data is zero.
+The current adapter limits each field and the combined rounded mapping to
+2^31-1 bytes (also keeping x86 relative addresses in range). It validates
+extents before copying. No native executable file or reference compilation
+is used. No new executor action is needed.
+
+`memorycheck.sh` compares the model's bound code, data and entry with the
+retained backend's actual bk_run mappings, then tests native output, status,
+arguments and environment with cc/unisacc drivers. The normal image route
+continues to generate ELF/Mach-O/PE; absent process resources keep its old
+behaviour. The model rejects partial address bindings and argument-cell
+headers outside memory mode. Windows native run imports are not connected
+and fail explicitly; its ordinary PE route remains available. Multiple
+translation units and exact diagnostic compatibility remain unfinished.

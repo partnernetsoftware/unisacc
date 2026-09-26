@@ -224,7 +224,7 @@ def build(image=False):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     for w in ("true", "false", "winapi", "carry", *[k for k in META_KEYS if k not in ("role", "form", "reloc", "carry", "winapi")]):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
-    for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2"), ("win/x86_64", "target3")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs")]:
+    for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2"), ("win/x86_64", "target3")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs","argc","argv")]:
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
     p.a(("LDI", "target_os", 1), ("LDI", "has_relocs", 0))
     p.a(("SBCLR",), [("SBOUT", ch) for ch in b"_start"], ("SBINTERN", "id_entry"))

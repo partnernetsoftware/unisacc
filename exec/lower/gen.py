@@ -6,6 +6,7 @@ Default: data pass only, with --arm64 selecting its target header.
 import importlib.util,json,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
+sys.path.insert(0,str(ROOT/"exec"))
 spec=importlib.util.spec_from_file_location('lowerbase',ROOT/'exec/parse/gen.py')
 E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 from data import install
