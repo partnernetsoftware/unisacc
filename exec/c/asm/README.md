@@ -1,7 +1,9 @@
 # Assembly kernel migration
 
 This directory implements **`core_transition` and the 32/64-bit arithmetic
-primitives, byte-buffer append, sparse memory byte-string interning, blob copies, resource caching decimal field rendering and control/input stacks** by hand for AArch64 and x86-64 System V. Action dispatch, initialization and cleanup are still
+primitives, byte-buffer append, sparse memory, byte-string interning, blob
+copies, resource caching, decimal field rendering and control/input stacks**
+by hand for AArch64 and x86-64 System V. Action dispatch, initialization and cleanup are still
 the generic C kernel. Allocation remains libc. The shipped product and default runtime still
 select C. This is not a completed assembly kernel or product switch.
 
