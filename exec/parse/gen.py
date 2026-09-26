@@ -69,7 +69,7 @@ WORDS = ["type=int", "type=void", "return", "if", "else", "while", "for", "eof",
          "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC)
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
-TK_ID, TK_NUM, TK_BADNUM, TK_OTHER = 100, 101, 102, 103
+TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
 CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 
@@ -87,14 +87,14 @@ def rej(k):
 # ---- the token reader: a byte trie over the dump's lines -------------------
 def tokenizer():
     pre = {""}
-    for w in WORDS + ["id=", "num="]:
+    for w in WORDS + ["id=", "num=", "str="]:
         for i in range(1, len(w) + 1):
             pre.add(w[:i])
     g.on("NEXT", range(257), "NX", [("MARK", "tpos")], "r")
     for p in sorted(pre):
         st = "NX" + p
-        if p == "id=" or p == "num=":
-            g.on(st, range(257), "SPANID" if p == "id=" else "SPANNUM", [("MARK", "ps")], "r")
+        if p in ("id=", "num=", "str="):
+            g.on(st, range(257), {"id=": "SPANID", "num=": "SPANNUM", "str=": "SPANSTR"}[p], [("MARK", "ps")], "r")
             continue
         for b in range(256):
             c = chr(b)
@@ -110,6 +110,9 @@ def tokenizer():
     g.on("SPANID", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_ID)])
     g.on("SPANID", [256], "DEAD", rej("not covered: truncated token dump"))
     g.els("SPANID", "SPANID", [("ADV",)])
+    g.on("SPANSTR", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_STR)])
+    g.on("SPANSTR", [256], "DEAD", rej("not covered: truncated token dump"))
+    g.els("SPANSTR", "SPANSTR", [("ADV",)])
     # decimal, no suffix, no leading 0 unless the literal is 0, <= 9 digits
     g.on("SPANNUM", [48], "NUM0", [("ADV",)])
     g.on("SPANNUM", range(49, 58), "NUMD", [("ADV",)])
@@ -390,8 +393,14 @@ def expr():
     p.o("  .ld r0, [r0+0], 4\n").ret()
     p = P("IT.call")
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
-    p.branch({1: "IT.ok"}, ("rej", "not covered: call to a function not defined before"), [("CMP", "t", "pass")])
+    p.branch({1: "IT.ok"}, "IT.nd", [("CMP", "t", "pass")])
+    p = P("IT.nd")
+    p.branch({1: "PF"}, ("rej", "not covered: call to a function not defined before"), [("CMP", "v", "pfid")])
     p = P("IT.ok")
+    p.a(("CMP", "v", "pfid"))
+    p.branch({1: "DEADPF"}, "IT.ok1")
+    g.on("DEADPF", range(257), "DEAD", rej("not covered: printf defined in the unit"), "r")
+    p = P("IT.ok1")
     p.a(("LDX", "t", "v", LOC))
     p.branch({1: "IT.ok2"}, ("rej", "not covered: call through a local"), [("CMPI", "t", 0)])
     p = P("IT.ok2")
@@ -410,6 +419,106 @@ def expr():
     p = P("IT.emit")
     p.vpop("sps", "spe").o("  call ").a(("SPAN2", "sps", "spe")).o("\n").call("NEXT").ret()
     g.on("DEAD0", range(257), "DEAD", rej("not covered: identifier is not a local"), "r")
+
+
+def printf():
+    """printf("lit %d ...", e, ...) is expanded inline by the reference
+    (measured): every argument is evaluated and spilled to a fresh slot of
+    the current scope, then each literal segment is `.write`n from a pooled
+    `.str Sk` and each %d is `.print`ed; the value is `imm r0, 0`.  Only %d
+    and %% are in the slice; escapes n t r backslash dquote squote."""
+    p = P("PF")
+    p.call("NEXT").tok({TK_STR: "PF.s"}, ("rej", "not covered: printf format"))
+    p = P("PF.s")
+    p.vpush("ps", "pe").a(("COPYW", "pb", "vsp"), ("LDI", "na", 0)).call("NEXT")
+    p.tok({",": "PF.arg", ")": "PF.go"}, ("rej", "not covered: printf format"))
+    p = P("PF.arg")
+    p.vpush("na", "pb").call("NEXT").call("EXPR").vpop("na", "pb")
+    p.a(("ALUI", "add", "cur", "cur", 1), ("COPYW", "s", "cur"))
+    up, nx = p.fresh("mx"), p.fresh("dn")
+    p.branch({2: up}, nx, [("CMP", "cur", "max")])
+    p.cur = up
+    p.a(("COPYW", "max", "cur")).goto(nx)
+    p.cur = nx
+    p.o("  store64 [r6-").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("], r0\n")
+    p.vpush("s").a(("ALUI", "add", "na", "na", 1))
+    p.tok({",": "PF.arg", ")": "PF.go"}, ("rej", "not covered: printf arguments"))
+    p = P("PF.go")
+    p.a(("ALUI", "sub", "t", "pb", 2), ("LDX", "fs", "t", VS), ("ALUI", "sub", "t", "pb", 1), ("LDX", "fe", "t", VS),
+        ("ALUI", "add", "fs", "fs", 1), ("ALUI", "sub", "fe", "fe", 1), ("INPUSHXE", "fs", "fe"),
+        ("LDI", "sl", 0), ("LDI", "ai", 0)).goto("PFW")
+    g.on("PFW", [37], "PFW.pc", [("ADV",)])
+    g.on("PFW", [92], "PFW.esc", [("ADV",)])
+    g.on("PFW", [256], "PFW.e1", [])
+    g.els("PFW", "PFW", [("ADV",), ("ALUI", "add", "sl", "sl", 1)])
+    g.on("PFW.esc", [ord(c) for c in "ntr\\\"'"], "PFW", [("ADV",), ("ALUI", "add", "sl", "sl", 1)])
+    g.els("PFW.esc", "DEAD", rej("not covered: escape in a printf format"))
+    g.on("PFW.pc", [37], "PFW", [("ADV",), ("ALUI", "add", "sl", "sl", 1)])
+    g.on("PFW.pc", [100], "PFW.d", [("ADV",)])
+    g.els("PFW.pc", "DEAD", rej("not covered: printf conversion"))
+    p = P("PFW.flush")      # a proc: write the pending literal segment
+    p.branch({2: "PFW.f1"}, "RET", [("CMPI", "sl", 0)])
+    p = P("PFW.f1")
+    p.o("  .lea r0, S").num("sk").o("\n  imm r1, ").num("sl").o("\n  .write r0, r1\n")
+    p.a(("ALUI", "add", "sk", "sk", 1), ("LDI", "sl", 0)).ret()
+    p = P("PFW.d")
+    p.call("PFW.flush")
+    p.branch({0: "PFW.d1"}, ("rej", "not covered: printf arguments"), [("CMP", "ai", "na")])
+    p = P("PFW.d1")
+    p.a(("ALU", "add", "t", "pb", "ai"), ("LDX", "s", "t", VS), ("ALUI", "add", "ai", "ai", 1))
+    p.o("  load64 r0, [r6-").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("]\n  .print r0\n").goto("PFW")
+    p = P("PFW.e1")
+    p.call("PFW.flush")
+    p.branch({1: "PFW.e2"}, ("rej", "not covered: printf arguments"), [("CMP", "ai", "na")])
+    p = P("PFW.e2")
+    p.a(("INPOP",), ("ALUI", "sub", "vsp", "pb", 2)).o("  imm r0, 0\n").call("NEXT").ret()
+
+    # the pool: a third scan of x after the footer; every printf format's
+    # literal segments again, in order, as `.str Sk "..\x00"`
+    p = P("POOL")
+    p.a(("JUMP", "x0"), ("LDI", "sk", 0)).call("NEXT").label("PO.loop")
+    p.tok({"eof": "RET", TK_ID: "PO.id"}, "PO.nx")
+    P("PO.nx").call("NEXT").goto("PO.loop")
+    p = P("PO.id")
+    p.a(("INTERN", "v", "ps", "pe"), ("CMP", "v", "pfid"))
+    p.branch({1: "PO.pf"}, "PO.nx")
+    P("PO.pf").call("NEXT").tok({"(": "PO.par"}, "PO.loop")
+    P("PO.par").call("NEXT").tok({TK_STR: "PO.s"}, "PO.loop")
+    p = P("PO.s")
+    p.a(("ALUI", "add", "fs", "ps", 1), ("ALUI", "sub", "fe", "pe", 1), ("INPUSHXE", "fs", "fe"), ("LDI", "st", 0))
+    p.goto("PL")
+    g.on("PL", [37], "PL.pc", [("ADV",)])
+    g.on("PL", [92], "PL.esc", [("ADV",)])
+    g.on("PL", [256], "PL.e1", [])
+    g.els("PL", "PL.lit", [("BYTE", "c"), ("ADV",)])
+    for ch, v in zip("ntr\\\"'", (10, 9, 13, 92, 34, 39)):
+        g.on("PL.esc", [ord(ch)], "PL.lit", [("ADV",), ("LDI", "c", v)])
+    g.els("PL.esc", "DEAD", rej("unreachable"))
+    g.on("PL.pc", [37], "PL.lit", [("ADV",), ("LDI", "c", 37)])
+    g.els("PL.pc", "PL.close", [("ADV",)])
+    p = P("PL.lit")
+    p.branch({1: "PL.hd"}, "PL.ch", [("CMPI", "st", 0)])
+    p = P("PL.hd")
+    p.o('.str S').num("sk").o(' "').a(("LDI", "st", 1)).goto("PL.ch")
+    p = P("PL.ch")
+    cases = {}
+    for b in range(256):
+        if 32 <= b < 127 and b not in (34, 92):
+            t = chr(b)
+        elif b in (34, 92):
+            t = "\\" + chr(b)
+        else:
+            t = "\\x%02x" % b
+        cases[b] = "PL.c%d" % b
+        g.on("PL.c%d" % b, range(257), "PL", O(t), "r")
+    p.branch(cases, ("rej", "unreachable"), [("RLD", "c")])
+    p = P("PL.close")
+    p.branch({1: "PL.cl1"}, "PL", [("CMPI", "st", 1)])
+    P("PL.cl1").o('\\x00"\n').a(("LDI", "st", 0), ("ALUI", "add", "sk", "sk", 1)).goto("PL")
+    p = P("PL.e1")
+    p.branch({1: "PL.e2"}, "PL.e3", [("CMPI", "st", 1)])
+    P("PL.e2").o('\\x00"\n').a(("LDI", "st", 0), ("ALUI", "add", "sk", "sk", 1)).goto("PL.e3")
+    P("PL.e3").a(("INPOP",)).call("NEXT").goto("PO.loop")
 
 
 def stmt():
@@ -492,9 +601,10 @@ def stmt():
 
 def unit():
     p = P("START")
-    p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"))
+    p.a(("LDI", "x0", 0), ("LDI", "pass", 1), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mainid"),
+        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"))
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
-                      ("LDI", "vsp", 0)).o(HEADER).call("NEXT")
+                      ("LDI", "vsp", 0), ("LDI", "sk", 0)).o(HEADER).call("NEXT")
     p.label("TOP").tok({"type": "FN", "eof": "END"}, ("rej", "not covered: top-level construct"))
     p = P("FN")
     p.call("NEXT").tok({TK_ID: "FN.id"}, ("rej", "not covered: declarator"))
@@ -538,7 +648,7 @@ def unit():
     P("END1").a(("OCLR",), ("LDI", "pass", 2)).goto("PASS")
     p = P("END2")
     p.branch({1: "END3"}, ("rej", "undefined function 'main'"), [("CMPI", "hasmain", 2)])
-    P("END3").o(FOOTER).a(("ACCEPT",)).goto("DEAD")
+    P("END3").o(FOOTER).call("POOL").a(("ACCEPT",)).goto("DEAD")
 
 
 def build():
@@ -546,6 +656,7 @@ def build():
     prn()
     expr()
     stmt()
+    printf()
     unit()
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
