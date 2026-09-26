@@ -372,12 +372,14 @@ def expr():
                 q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0)).goto("LOOP%d" % L)
             elif op in ("+", "-"):   # p +- n: n scaled by 8 at depth >= 2, by BASE (4/1/8) at depth 1
                 ok, pp, p1 = q.fresh("pa"), q.fresh("pp"), q.fresh("p1")    # (measured); unknown base -> not covered
-                sc = {4: q.fresh("s4"), 1: q.fresh("s1"), 8: q.fresh("s8")}
-                s1b, s1c = q.fresh("sb"), q.fresh("sc")
+                sc = {n: q.fresh("s%d" % n) for n in sorted(set(SZ.values()))}   # scale = tyinfo size of the base
                 q.branch({2: pp, 1: p1}, ok, [("CMPI", "pt", 1)])
-                P(p1).branch({1: sc[4]}, s1b, [("CMPI", "pb", 4)])
-                P(s1b).branch({1: sc[1]}, s1c, [("CMPI", "pb", 1)])
-                P(s1c).branch({1: sc[8]}, "DEADP", [("CMPI", "pb", 8)])
+                t = P(p1)
+                for n in sc:
+                    nx = t.fresh("sn")
+                    t.branch({1: sc[n]}, nx, [("CMPI", "pb", n)])
+                    t = P(nx)
+                t.goto("DEADP")
                 for k in sc:
                     r = P(sc[k])
                     r.vpush("pt", "pb").o(PUSH).call("NEXT").call(sub).call("NOPTR").vpop("pt", "pb")
@@ -385,7 +387,7 @@ def expr():
                 P(ok).o(PUSH).call("NEXT").call(sub).call("NOPTR").o(POP1 + optext(op)).a(("LDI", "pt", 0)).goto("LOOP%d" % L)
                 r = P(pp)
                 r.vpush("pt").o(PUSH).call("NEXT").call(sub).call("NOPTR").vpop("pt")
-                r.o("  imm r2, 8\n  mul64 r0, r0, r2\n" + POP1 + optext(op)).goto("LOOP%d" % L)
+                r.o("  imm r2, %d\n  mul64 r0, r0, r2\n" % PSZ + POP1 + optext(op)).goto("LOOP%d" % L)
             else:     # a pointer operand is not covered: the reference scales it
                 noptr(q)
                 q.o(PUSH).call("NEXT").call(sub)
