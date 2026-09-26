@@ -64,13 +64,14 @@ HEADER = ("_start:\n  call __init\n  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n
           "  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n")
 FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 
-WORDS = ["type=int", "type=void", "return", "if", "else", "while", "for", "eof",
+WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
          "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
 CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
+GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 
 g = G()
@@ -241,12 +242,18 @@ def prn():
         p.ret()
 
 
-def addr(p, reg):             # address of local slot W[s] into reg
-    p.o("  imm r2, ").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("\n  sub64 %s, r6, r2\n" % reg)
+def addr(p, reg):             # address of local slot W[s] (or global x[gs..ge)) into reg
+    gl, lc, dn = p.fresh("ga"), p.fresh("la"), p.fresh("ad")
+    p.branch({1: gl}, lc, [("CMPI", "s", GMARK)])
+    p.cur = gl
+    p.o("  .lea %s, g_" % reg).a(("SPAN2", "gs", "ge")).o("\n").goto(dn)
+    p.cur = lc
+    p.o("  imm r2, ").a(("ALUI", "mul", "n", "s", 8)).call("PRN").o("\n  sub64 %s, r6, r2\n" % reg).goto(dn)
+    p.cur = dn
 
 
 def lookup(p, lo, hi):        # s := slot of the local spelled x[W[lo]..W[hi])
-    p.a(("INTERN", "v", lo, hi), ("LDX", "s", "v", LOC))
+    p.a(("INTERN", "v", lo, hi), ("LDX", "s", "v", LOC), ("COPYW", "gs", lo), ("COPYW", "ge", hi))
     ok = p.fresh("ok")
     p.branch({1: "DEAD0"}, ok, [("CMPI", "s", 0)])
     p.cur = ok
@@ -622,13 +629,27 @@ def unit():
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"))
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=static": "TOP.st", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN"}, ("rej", "not covered: static declaration"))
     p = P("FN")
     p.call("NEXT").tok({TK_ID: "FN.id"}, ("rej", "not covered: declarator"))
     p = P("FN.id")
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "v", FND, "pass"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"),
         ("COPYW", "fv", "v"), ("LDI", "cur", 0), ("LDI", "max", 0))
-    p.call("NEXT").expect("(").call("NEXT").tok({")": "FN.close"}, "FN.par")
+    p.call("NEXT").tok({"(": "FN.open", ";": "GV", "=": "GV", ",": "GV"}, ("rej", "not covered: declarator"))
+    # file-scope int: `.bss g_NAME 4` where declared; `= literal` goes to __init
+    p = P("GV")
+    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0")).o(" 4\n")
+    p.tok({"=": "GV.eq"}, "GV.nx")
+    P("GV.eq").call("NEXT").tok({TK_NUM: "GV.num"}, ("rej", "not covered: global initialiser"))
+    P("GV.num").call("NEXT").goto("GV.nx")
+    p = P("GV.nx")
+    p.tok({";": "GV.end", ",": "GV.comma"}, ("rej", "not covered: global declaration"))
+    P("GV.end").call("NEXT").goto("TOP")
+    P("GV.comma").call("NEXT").tok({TK_ID: "GV.id"}, ("rej", "not covered: declarator"))
+    P("GV.id").a(("INTERN", "v", "ps", "pe"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe")).call("NEXT").goto("GV")
+    p = P("FN.open")
+    p.call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
     p.tok({"type": "FN.pt", "type=void": "FN.pv"}, ("rej", "not covered: parameter"))
     P("FN.pv").call("NEXT").tok({")": "FN.close"}, ("rej", "not covered: parameter"))
@@ -665,7 +686,26 @@ def unit():
     P("END1").a(("OCLR",), ("LDI", "pass", 2)).goto("PASS")
     p = P("END2")
     p.branch({1: "END3"}, ("rej", "undefined function 'main'"), [("CMPI", "hasmain", 2)])
-    P("END3").o(FOOTER).call("POOL").a(("ACCEPT",)).goto("DEAD")
+    P("END3").o("__init:\n").call("INITS").o(FOOTER[len("__init:\n"):]).call("POOL").a(("ACCEPT",)).goto("DEAD")
+
+
+def inits():
+    """__init body: a scan of x for `id = num` at brace depth 0 (only a
+    global initialiser has that shape at file scope), in order."""
+    p = P("INITS")
+    p.a(("JUMP", "x0"), ("LDI", "dp", 0)).call("NEXT").label("IN.loop")
+    p.tok({"eof": "RET", "{": "IN.o", "}": "IN.c", TK_ID: "IN.id"}, "IN.nx")
+    P("IN.nx").call("NEXT").goto("IN.loop")
+    P("IN.o").a(("ALUI", "add", "dp", "dp", 1)).goto("IN.nx")
+    P("IN.c").a(("ALUI", "sub", "dp", "dp", 1)).goto("IN.nx")
+    p = P("IN.id")
+    p.branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dp", 0)])
+    p = P("IN.id0")
+    p.a(("COPYW", "gs", "ps"), ("COPYW", "ge", "pe")).call("NEXT").tok({"=": "IN.eq"}, "IN.loop")
+    P("IN.eq").call("NEXT").tok({TK_NUM: "IN.num"}, "IN.loop")
+    p = P("IN.num")
+    p.o("  imm r0, ").a(("SPAN2", "ps", "pe")).o("\n  .lea r1, g_").a(("SPAN2", "gs", "ge"))
+    p.o("\n  .st [r1+0], r0, 4\n").goto("IN.nx")
 
 
 def build():
@@ -674,6 +714,7 @@ def build():
     expr()
     stmt()
     printf()
+    inits()
     unit()
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
