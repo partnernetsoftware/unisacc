@@ -44,5 +44,11 @@ for F in $D/neg-*.txt; do     # must be rejected (exit 1 with a reason), on both
 done
 # the TIns text survives a dump and parse of real TargetPrograms (unisa/lower.py) -- no encoding claimed
 b 60 python3 $D/roundtrip.py examples/hello.c examples/fib.c tests/c/a_for.c > "$T/rt" 2>&1 && ok=$((ok+1)) || { echo "  BAD roundtrip:"; tail -3 "$T/rt"; bad=$((bad+1)); }
+# Independent execution of the emitted FP bytes, not another encoder oracle.
+case "$(uname -s):$(uname -m)" in
+    Darwin:*|Linux:x86_64)
+        b 60 python3 $D/fpcheck.py "$T/run" "$T/d.tbl" && ok=$((ok+1)) || bad=$((bad+1)) ;;
+    *) echo "fp execution NOT RUN: host cannot execute x86_64 harness" ;;
+esac
 echo "e5 x86  fixtures ok $ok   bad $bad"
 [ $bad -eq 0 ] && [ $ok -gt 0 ]

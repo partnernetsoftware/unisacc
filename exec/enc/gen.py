@@ -8,7 +8,7 @@ names; integers).  Output: the machine code bytes, as unisa/emit_x86.encode
 writes them.  Ops: mov, imm, add64/sub64/xor64/and64/or64, mul64, load64,
 store64, .ld/.st (1, 2, 4, 8 bytes), setcc, register shifts, ret, jump/jumpz,
 call/callr, push/pop, nop, .frame, .zero, setreg imm/reg, spinit without an
-address, and .div/.mod/.udiv/.umod. Other forms are rejected as not covered.
+address, .div/.mod/.udiv/.umod, and FP_OPS (via fp.py). Other forms are rejected as not covered.
 
 Read, not copied: catalog.ENCSPEC's alu2 opcodes and setcc bytes, and
 emit_x86.NUM's register numbers (the reference's declaration, read at generation
@@ -42,6 +42,7 @@ g, P, EOF = E.g, E.P, 256
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from unisa.catalog import ENCSPEC   # noqa: E402  (generation time only)
 from unisa.emit_x86 import NUM      # noqa: E402
+from fp import FP_IDS, install as install_fp  # local delta generator, not an encoder oracle
 
 X86 = ENCSPEC["x86_64"]
 DIGIT = list(range(48, 58))
@@ -193,6 +194,7 @@ def build():
     procs()
     p = P("START")
     classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
+    classes.update(FP_IDS)
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -329,7 +331,8 @@ def build():
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
               C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
               C_SETREG: "E.setreg", C_SPINIT: "E.spinit",
-              C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod"}, "DEAD.op", [("RLD", "cls")])
+              C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
+              **{v: "FP." + k for k, v in FP_IDS.items()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     # mov d, s
     p = P("E.mov")
@@ -518,6 +521,7 @@ def build():
     p = P("NEXTL")          # a non-branch: its bytes become a blob, its size known
     p.a(("OCUT", "blob", "omark"), ("STX", "npc", BLB, "blob"), ("BLEN", "t", "blob"), ("STX", "npc", SZ, "t"),
         ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
+    install_fp(E, byte)
     relax()
     P("DONE").call("RELAX").call("WRITE").a(("ACCEPT",)).goto("DEAD")
     g.finish()
