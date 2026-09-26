@@ -143,6 +143,29 @@ def tokenizer():
     g.on("SPANNUM", [48], "NUM0", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", 0), ("LDI", "nd", 0)])
     for d in range(1, 10):   # the decimal value too (W[nv]): an array bound
         g.on("SPANNUM", [48 + d], "NUMD", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", d)])
+    # a character constant: its value, printed as a decimal (measured: '0' 48, '\\n' 10, '\\xff' 255, '\\101' 65)
+    g.on("SPANNUM", [39], "CQ0", [("ADV",), ("LDI", "nx", 1), ("LDI", "nv", 0), ("LDI", "nd", 0)])
+    for c in range(256):
+        if c not in (10, 39, 92):
+            g.on("CQ0", [c], "CQC", [("ADV",), ("LDI", "nv", c)])
+    g.on("CQ0", [92], "CQE", [("ADV",)])
+    g.els("CQ0", "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    for ch, v in (("n", 10), ("t", 9), ("r", 13), ("a", 7), ("b", 8), ("f", 12), ("v", 11), ("\\", 92), ("'", 39), ('"', 34), ("?", 63)):
+        g.on("CQE", [ord(ch)], "CQC", [("ADV",), ("LDI", "nv", v)])
+    for d in range(8):
+        g.on("CQE", [48 + d], "CQO", [("ADV",), ("LDI", "nv", d), ("LDI", "nd", 1)])
+        g.on("CQO", [48 + d], "CQO", [("ADV",), ("ALUI", "shl", "nv", "nv", 3), ("ALUI", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
+    g.on("CQE", [ord("x")], "CQX", [("ADV",), ("LDI", "nd", 0)])
+    for d, c in enumerate("0123456789abcdef"):
+        for ch in {c, c.upper()}:
+            g.on("CQX", [ord(ch)], "CQX", [("ADV",), ("ALUI", "shl", "nv", "nv", 4), ("ALUI", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
+    g.els("CQE", "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    for st in ("CQC", "CQO", "CQX"):
+        g.on(st, [39], "CQN", [("ADV",)])
+        g.els(st, "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    g.on("CQN", [10], "CQV", [("MARK", "pe"), ("ADV",), ("CMPI", "nv", 256)])
+    g.els("CQN", "SKIPO", [("LDI", "tk", TK_BADNUM)])
+    g.r("CQV", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
     g.els("SPANNUM", "SKIPO", [("LDI", "tk", TK_BADNUM)])
     g.on("NUM0", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_NUM)])
     g.on("NUM0", SUF, "NUMS", [("MARK", "pe"), ("ADV",), ("LDI", "ns", 1)])
