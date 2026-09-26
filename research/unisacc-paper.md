@@ -8,6 +8,23 @@
 
 ---
 
+### 发布版本证据：v0.0.7（2026-09-26）
+
+以下为 [v0.0.7 发布记录](https://github.com/partnernetsoftware/unisacc/releases/tag/v0.0.7)，与表 2、表 3 的历史实验分开。提交与附件元数据已核对；平台结果引用发布说明，本次文档更新未重新执行这些测试。
+
+| 项目 | 记录 |
+|---|---|
+| 源码 | tag `v0.0.7`，提交 `f301df3` |
+| 产物 | `unisacc.com`，1,254,432 B |
+| SHA-256 | `00d25edb8cf35fce7ec3be5dcf50afd2af0d658b9a1e19abac615c94e3816bf0` |
+| macOS arm64 | 原生与发布 `.com` 两轮套件；closure 618，difftest 102/0，difftest_o 306/0，C99 57/57，corpus 216/220（另 4 个已知范围外用例），tools 11/11，原生自举 |
+| macOS x86_64 | Rosetta 下 103/0；非 x86_64 物理宿主验证 |
+| Linux arm64 | Lima：run、multi、C99、difftest_o、closure、stages、nativeboot，以及 `.com` 入口 |
+| Windows 11 arm64 | UTM：`.com` 的 x86_64 PE 经仿真运行，验证 `-run`、默认 `a.exe` 与 `-b win/arm64`；不称完整 Windows 套件通过 |
+| 本版未验证 | Linux x86_64 运行、Windows x86_64 实机；交叉输出字节一致不替代目标执行 |
+
+本版发布不扩大理论结论：已枚举验证的是网络与给定表的等价性（T1）。完整编译过程的模拟与源语言语义保持不能由此推出；未证的 δ 框架不纳入本文。
+
 ## 摘要
 
 编译器里有一类决策本质上是**有限表**：词法字符类、语法产生式选择、类型提升、指令选择、系统调用号与调用约定。我们把这类决策全部交给同一拓扑的确定性前馈网络——**one-hot 嵌入 → 整数仿射 → ReLU → 整数仿射 → 严格 argmax**（图 1；部署期等价为位掩码合取与整数累加，无 softmax / 浮点 / 乘法）——而把结构性工作（递归下降、符号表、镜像布局、重定位算术）留给经典代码。
