@@ -902,8 +902,20 @@ def unit():
     g.on("FN.gp", range(257), "DEAD", rej("not covered: global pointer"), "r")
     # file-scope int: `.bss g_NAME 4` where declared; `= literal` goes to __init
     p = P("GV")
-    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0"), ("STX", "v", PTR, "z0")).o(" 4\n")
-    p.tok({"=": "GV.eq"}, "GV.nx")
+    # file-scope char/short/long: `.bss g_NAME <tyinfo size>` (measured); BASE[v] carries the width
+    p.o(".bss g_").a(("SPAN2", "fps", "fpe"), ("LDI", "t", GMARK), ("STX", "v", LOC, "t"), ("LDI", "z0", 0), ("STX", "v", FND, "z0"), ("STX", "v", PTR, "z0"),
+                     ("STX", "v", BASE, "rbsz"))
+    q = p
+    for n in [0] + sorted(set(SZ.values())):   # 0: plain `int` leaves bsz 0 (the int default)
+        hit, nx = q.fresh("gz"), q.fresh("gn")
+        q.branch({1: hit}, nx, [("CMPI", "rbsz", n)])
+        P(hit).o(" %d\n" % (n or SZ["int"])).goto("GV.sz")
+        q = P(nx)
+    g.on(q.cur, range(257), "DEAD", rej("not covered: global of an unknown type"), "r")
+    p = P("GV.sz")
+    p.tok({"=": "GV.eq4"}, "GV.nx")
+    P("GV.eq4").branch({1: "GV.eq"}, "GV.eq0", [("CMPI", "rbsz", SZ["int"])])
+    P("GV.eq0").branch({1: "GV.eq"}, ("rej", "not covered: non-int global initialiser"), [("CMPI", "rbsz", 0)])
     P("GV.eq").call("NEXT").tok({TK_NUM: "GV.num"}, ("rej", "not covered: global initialiser"))
     P("GV.num").call("NEXT").goto("GV.nx")
     p = P("GV.nx")
