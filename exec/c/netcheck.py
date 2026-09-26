@@ -101,4 +101,26 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
                 data.replace(b'bytes bytes 0',b'bytes bytes 9',1)]:
         pack.write_bytes(bad);r=run([exe,'--bundle',pack,'first',inp])
         assert r.returncode==2 and not r.stdout,(r.returncode,r.stderr)
-    print('network check: ok (inference, bounds, stream reset/failures, package sharing/formats/extents)')
+    resources=d/'resources';resources.mkdir()
+    (resources/'data').write_bytes(b'\0\x80\n');(resources/'empty').write_bytes(b'')
+    acts=[('SBCLR',)]+[('SBOUT',c) for c in b'\0data']
+    acts += [('SBFIND',0),('SBFIND',1),('ORES',2,1),('OFILL',2,0,1),('ORES',2,1),('OFILL',2,1,1),
+             ('INPUSH',0),('COPY',),('ADV',),('COPY',),('ADV',),('COPY',),('INPOP',),('SBCLR',)]
+    acts += [('SBOUT',c) for c in b'\0empty']
+    acts += [('SBFIND',0),('BLEN',1,0),('ORES',2,1),('OFILL',2,0,1),('ORES',2,1),('OFILL',2,1,1),('ACCEPT',)]
+    model('resources',acts)
+    manifest.write_text('resource\ta\tbytes\tbytes\tresources.net\nresource\tb\tbytes\tbytes\tresources.net\n')
+    data=package_build([manifest],[('00',resources),('00',resources)])
+    assert data.startswith(b'P 2 1 2 2\n'), 'identical mounted resources not shared'
+    pack.write_bytes(data)
+    r=require(run([exe,'--bundle',pack,'resource',inp]));assert r.stdout==b'22\0\x80\n30',r.stdout
+    # Packaged bytes take precedence over disk; missing mount/conflicts fail.
+    other=d/'other';other.mkdir();(other/'data').write_bytes(b'wrong')
+    for mounts in [[('00',resources),('00',other)],[('00',d/'absent')]]:
+        try: package_build([manifest],mounts)
+        except ValueError: pass
+        else: raise AssertionError('invalid mount accepted')
+    for bad in [data[:-1],data.replace(b'F 6 0\n',b'F 6 9\n')]:
+        pack.write_bytes(bad);r=run([exe,'--bundle',pack,'resource',inp])
+        assert r.returncode==2 and not r.stdout,(r.returncode,r.stderr)
+    print('network check: ok (inference, stream reset/failures, package bounds, binary/empty resources)')

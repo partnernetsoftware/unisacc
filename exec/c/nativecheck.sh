@@ -12,10 +12,10 @@ b "$T/compiler" -O2 exec/c/run.c -o "$T/run-ua"
 b env EXEC_CC="$T/compiler" python3 exec/c/netcheck.py
 b env EXEC_CC="$T/compiler" ./exec/c/neg.sh
 b python3 - "$T" "$R" <<'PY'
-import os,pathlib,resource,signal,subprocess,sys
+import os,pathlib,resource,shutil,signal,subprocess,sys
 p=pathlib.Path(sys.argv[1]);root=pathlib.Path(sys.argv[2]);ua=p/'run-ua'
-def run(cmd):
-    r=subprocess.run(list(map(str,cmd)),capture_output=True,timeout=60,
+def run(cmd, cwd=None):
+    r=subprocess.run(list(map(str,cmd)),capture_output=True,timeout=60,cwd=cwd,
                      env=dict(os.environ,UNISA_MAXSTEPS='400000000000'))
     if r.returncode:raise SystemExit(f'{cmd}: rc {r.returncode}: {r.stderr.decode(errors="replace")}')
     return r.stdout
@@ -50,10 +50,19 @@ for exe in [p/'run',ua,netrun]:
         want=p/(pathlib.Path(src).stem+'.macho')
         if got!=want.read_bytes():raise SystemExit(f'{exe} in-memory chain differs: {src}')
 print('stream chain: three runtime builds, including network self-rebuild, equal')
+isolated=p/'isolated';isolated.mkdir()
+shutil.copyfile(root/'exec/c/run.c',isolated/'runtime.c')
+shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
 for exe in [p/'run',ua,netrun]:
-    got=run([exe,'--bundle',p/'models.pkg','osx/arm64','exec/c/run.c','exec/c/run.c',root/'include'])
-    if got!=netrun.read_bytes():raise SystemExit(f'{exe} packaged self route differs')
-print('package: three runtime builds reproduce the network runtime image')
+    got=run([exe,'--bundle','models.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated)
+    if got!=netrun.read_bytes():raise SystemExit(f'{exe} resource-packaged self route differs')
+print('resource package: three runtime builds reproduce self, no include directory, isolated cwd')
+sys.path.insert(0,str(root/'exec/c'))
+from pack import build as package_build
+(isolated/'without-resources.pkg').write_bytes(package_build([p/'route.tsv']))
+r=subprocess.run([str(netrun),'--bundle','without-resources.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated,capture_output=True,timeout=60)
+assert r.returncode==2 and not r.stdout and b'no include directory' in r.stderr,(r.returncode,r.stderr)
+print('resource-free control: isolated self build refuses, no partial output')
 
 
 # Both buffered host stdio and the unbuffered carried libc must report a

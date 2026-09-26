@@ -182,6 +182,8 @@ static void load(const char *path) {
 typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
 static unsigned char *PB; static int PN, PM, PS;
 static int *POFF, *PLEN; static Stage *STAGES;
+typedef struct { int name, n, data, len; } Resource;
+static Resource *RES; static int NR;
 static char *pword(void) {
     lskip(); int first = LP;
     while (LP < LN && LB[LP] > 32) {
@@ -194,8 +196,11 @@ static char *pword(void) {
 }
 static void package(const char *path) {
     PB = readfile(path, &PN, 0); LB = PB; LN = PN; LP = 0;
-    ltag('P'); if (lint() != 1) die("unknown package version");
-    PM = lint(); PS = lint();
+    ltag('P'); int version = lint();
+    if (version != 1 && version != 2) die("unknown package version");
+    PM = lint(); PS = lint(); NR = version == 2 ? lint() : 0;
+    if (NR < 0 || NR > PN/5) die("bad resource count");
+    RES = xrealloc(0, sizeof(Resource)*NR);
     if (PM <= 0 || PS <= 0 || PM > PN/8 || PS > PN/10) die("bad package count");
     POFF = xrealloc(0, sizeof(int)*PM); PLEN = xrealloc(0, sizeof(int)*PM);
     STAGES = xrealloc(0, sizeof(Stage)*PS);
@@ -216,13 +221,21 @@ static void package(const char *path) {
         if (LB[LP] != 'N') die("package requires networks");
         POFF[i] = LP; PLEN[i] = n; LP += n;
     }
+    for (int i = 0; i < NR; i++) {
+        ltag('F'); int n = lint(), len = lint();
+        if (LP >= LN || LB[LP++] != 10 || n <= 0 || len < 0 || n > LN-LP || len > LN-LP-n) die("bad resource extent");
+        RES[i].name = LP; RES[i].n = n; RES[i].data = LP+n; RES[i].len = len;
+        for (int j = 0; j < i; j++)
+            if (RES[j].n == n && !memcmp(PB+RES[j].name, PB+LP, n)) die("duplicate resource name");
+        LP += n+len;
+    }
     if (LP != LN) die("trailing package data");
 }
 static void unpackage(void) {
     for (int i = 0; i < PS; i++) {
         free(STAGES[i].route); free(STAGES[i].name); free(STAGES[i].in); free(STAGES[i].out);
     }
-    free(STAGES); free(POFF); free(PLEN); free(PB);
+    free(STAGES); free(POFF); free(PLEN); free(RES); RES = 0; NR = 0; free(PB);
 }
 
 /* Model lifetime is one stage. No model-specific state survives unload. */
@@ -333,6 +346,9 @@ static const char *INCDIR = 0;   /* the 4th argument; SBFIND of a bundled header
 static int sbfind(const unsigned char *p, int n) {
     for (int j = 0; j < NFC; j++) if (FC[j].n == n && !memcmp(FC[j].p, p, n)) return FC[j].id;
     char path[4096]; int id = 0;
+    for (int j = 0; j < NR; j++) if (RES[j].n == n && !memcmp(PB+RES[j].name, p, n)) {
+        id = blob_add(PB+RES[j].data, RES[j].len); goto cached;
+    }
     if (n >= 5 && !memcmp(p, "\0hdr/", 5) && !INCDIR) die("a bundled header was asked for and no include directory was given");
     if (n >= 5 && !memcmp(p, "\0hdr/", 5)) snprintf(path, sizeof path, "%s/%.*s", INCDIR, n - 5, p + 5);
     else snprintf(path, sizeof path, "%.*s", n, p);
@@ -340,6 +356,7 @@ static int sbfind(const unsigned char *p, int n) {
         int m = 0; unsigned char *b = readfile(path, &m, 1);
         if (b) { id=blob_add(b,m); free(b); }
     }
+cached:
     FC = xrealloc(FC, sizeof(FEnt) * (NFC + 1)); FC[NFC].p = xrealloc(0, n + 1); memcpy(FC[NFC].p, p, n); FC[NFC].n = n; FC[NFC].id = id; NFC++;
     return id;
 }

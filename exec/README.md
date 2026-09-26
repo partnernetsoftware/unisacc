@@ -190,3 +190,12 @@ combines explicit routes and stores equal network bodies once. See
 [c/PACKAGE.md](c/PACKAGE.md) for the directory and execution contract. The
 package is an external development input; embedding it in `.com`, preserving
 the product CLI and isolating the small execution core remain unfinished.
+
+
+The constructed package now also carries `include/` as named byte resources.
+The packaged route can therefore omit the final include-directory argument
+and run from an empty directory containing only its source and package.
+These 19 header files remain explicit source resources, separate from the
+network weights. `--mount` is a construction-time generic byte-name mapping;
+the runtime serves it through SBFIND. External project headers still resolve
+through the filesystem. See the v2 section of [c/PACKAGE.md](c/PACKAGE.md).

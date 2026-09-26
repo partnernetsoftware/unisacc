@@ -1,4 +1,4 @@
-# Model package v1
+# Model package v1 / resource extension v2
 
 This is a construction/development artifact for the generic runtime. It is
 not yet an embedded `.com` payload or a replacement compiler CLI.
@@ -72,3 +72,39 @@ format checks, duplicate stages, invalid indices and truncated bodies.
 unisacc- and network-built runtimes. `pipeline/selfcheck.sh` compares the
 packaged full compiler source against the separate-stage image for each
 network target. These are measured evidence, not T2/T3 proofs.
+
+
+## Named byte resources (version 2)
+
+`pack.py --mount PREFIX_HEX DIRECTORY ...` appends regular files under the
+explicit directory. Keys are the decoded byte prefix plus each relative
+UTF-8 POSIX path; content is verbatim. Files are visited in sorted order.
+Identical mounts coalesce, but conflicting content for the same key fails.
+A missing or empty mount fails. For the current E2 protocol, the prefix
+`006864722f` is the byte name `NUL hdr/`, so `--mount 006864722f include`
+provides the carried headers without teaching the resource loader C syntax.
+
+With resources, the header is `P 2 MODELS STAGES RESOURCES`. Stage/model
+records are unchanged. After the last model come RESOURCES records:
+
+```
+F KEY_BYTE_LENGTH CONTENT_BYTE_LENGTH\n
+<exact key bytes><exact content bytes>
+```
+
+Keys are nonempty and may contain NUL; content may be empty. The runtime
+checks lengths and duplicate keys before executing any model. Version 1
+remains readable and is still emitted when no resources are present.
+
+The existing SBFIND action first consults the package's exact byte keys,
+then uses the existing filesystem adapter when absent. Both paths return a
+stage-local blob; repeated reads use the existing per-stage cache. Resources
+remain immutable package spans across stages. No new model action or
+language-specific resource decoder is added. The raw carried headers are
+input resources, not model weights, and must be counted separately.
+
+`nativecheck.sh` runs three builds from an isolated directory containing only
+the runtime source and resource package, with no include directory argument.
+The resulting self image must equal the ordinary build. A package without
+resources must fail in that directory. User/project include files still use
+the filesystem; this does not claim an arbitrary project has no file inputs.

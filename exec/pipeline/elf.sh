@@ -32,7 +32,7 @@ for s in $STAGES; do
 done
 if [ "$MODEL" = net ]; then
     awk -v route="$TARGET" '!/^#/ && NF {print route "\t" $0}' exec/pipeline/image-stages.tsv > "$OUT/route.tsv"
-    b python3 exec/c/pack.py -o "$OUT/models.pkg" "$OUT/route.tsv"
+    b python3 exec/c/pack.py --mount 006864722f "$R/include" -o "$OUT/models.pkg" "$OUT/route.tsv"
 fi
 case $IMAGE in pe) EXT=exe;; *) EXT=$IMAGE;; esac
 : > "$OUT/inputs"

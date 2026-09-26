@@ -10,7 +10,7 @@ import re
 NAME = re.compile(r'[A-Za-z0-9_./-]+\Z')
 
 
-def build(manifests):
+def build(manifests, mounts=()):
     stages, models, index, seen, last = [], [], {}, set(), {}
     for manifest in map(pathlib.Path, manifests):
         for line, text in enumerate(manifest.read_text().splitlines(), 1):
@@ -34,9 +34,26 @@ def build(manifests):
             seen.add((route, stage)); last[route] = out
     if not stages:
         raise ValueError('empty package')
-    head = f'P 1 {len(models)} {len(stages)}\n'
+    resources = {}
+    for prefix, directory in mounts:
+        keyprefix = bytes.fromhex(prefix)
+        root = pathlib.Path(directory)
+        if not root.is_dir():
+            raise ValueError(f'resource mount is not a directory: {root}')
+        files = sorted(p for p in root.rglob('*') if p.is_file())
+        if not files:
+            raise ValueError(f'empty resource mount: {root}')
+        for path in files:
+            key = keyprefix + path.relative_to(root).as_posix().encode('utf-8')
+            data = path.read_bytes()
+            if key in resources and resources[key] != data:
+                raise ValueError(f'conflicting resource {key!r}')
+            resources[key] = data
+    head = (f'P 2 {len(models)} {len(stages)} {len(resources)}\n' if resources
+            else f'P 1 {len(models)} {len(stages)}\n')
     head += ''.join('D ' + ' '.join(map(str, row)) + '\n' for row in stages)
     result = head.encode('ascii') + b''.join(f'M {len(b)}\n'.encode() + b for b in models)
+    result += b''.join(f'F {len(k)} {len(v)}\n'.encode() + k + v for k, v in resources.items())
     if len(result) >= 2**31:
         raise ValueError('package exceeds runtime byte extent')
     return result
@@ -45,10 +62,11 @@ def build(manifests):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('-o', '--output', required=True, type=pathlib.Path)
+    ap.add_argument('--mount', nargs=2, action='append', default=[], metavar=('PREFIX_HEX', 'DIRECTORY'))
     ap.add_argument('manifests', nargs='+', type=pathlib.Path)
     args = ap.parse_args()
     try:
-        data = build(args.manifests)
+        data = build(args.manifests, args.mount)
         args.output.write_bytes(data)
     except (OSError, ValueError) as exc:
         ap.exit(1, f'pack: {exc}\n')

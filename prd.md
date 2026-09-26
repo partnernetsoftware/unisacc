@@ -2767,3 +2767,12 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - cc/unisacc 的 netcheck 通过共享体、路线选择、格式失配、重复阶段、越界索引、截断包；nativecheck 在 cc、unisacc、网络构建执行器上从包重建 runtime，输出相同。ASan+UBSan 对包内 hello 和 runtime 全六段通过、无报告；E3 对新增包加载器源码仍 equal。单目标 macOS ARM64 包 918,211 B。
 - 规模：cc -O2 runtime __text 18,636 B，文件 57,648 B，gzip-9 15,780 B；网络/unisacc runtime __text 92,452 B，文件 115,746 B，gzip-9 21,090 B。动态 libSystem 不计入 cc 文件，unisacc 包含随带库；这些都是整个工具而非独立内核。运行器净 +66 行用于目录与加载，未增加模型动作。几 KB 内核和 .com 内嵌单份模型仍未达成，包也未包含产品内嵌头文件资源。
 - 冻结 gate --com 70/70，JOBS=2，360 s aggregate；各套件 ≤60 s，nativecheck 53 s（余量仅 7 s），六目标包自源码各 29–33 s。fat 126/0、chain 96/96。macOS 实际执行，Linux/Windows 本轮未启动 VM，仅生成字节对齐。日志 /tmp/unisacc-package-{native,network,gate}.log；六目标合包产物 /tmp/unisacc-package-six/all.pkg。产品源码/.com 未改，沿用 dec6553 的哈希。未推送、未发布；cc-unisacc 继续暂停。
+
+
+### S-17：包内命名字节资源（2026-09-27）
+
+- 包格式增加兼容 v1 的 v2 资源目录：非空字节名、任意内容（可为空），长度在索引前检查。构造期 `--mount PREFIX_HEX DIRECTORY` 显式读取目录；相同键/相同内容合并，冲突拒绝。runtime 通过现有 SBFIND 先读精确字节键资源，再走原文件系统适配；缓存仍逐阶段清理，资源本身保持不可变。不新增模型动作、不包含语言相关解码规则。
+- elf.sh 将 19 份 include/*.h 以 E2 既有的 NUL-hdr/ 名称挂入包。它们是 103,636 B 的源文本资源，不是网络权重；单目标 osx/arm64 包 1,022,275 B，gzip-9 参考 157,046 B（运行时不解压），SHA256 `a91b49311e348a91b3e4fd91b1a4280e4c98e0077e13ee7162fd776d636d44c2`。这不是已嵌入 .com 的发布产物。
+- nativecheck：隔离目录只有 runtime.c 和 models.pkg，没有 include/，也不给 include-directory 参数；cc、unisacc、网络构建的三种 runtime 都生成相同自身镜像。去掉资源的同源包在该目录以 2 拒绝、无 stdout，避免隐式读回仓库的假通过。ASan+UBSan 对同一隔离资源路线生成自身通过，无报告。netcheck 覆盖含 NUL/高字节的内容、空资源、重复读取缓存、两段间重置、冲突挂载、缺目录及截断/越界资源。
+- 运行器净 +17 行 C；cc -O2 整体 __text 19,140 B，文件 57,904 B，gzip-9 16,240 B；unisacc runtime __text 94,448 B，文件 115,746 B，gzip-9 21,516 B。包含加载/IO/校验/执行及各自库口径，不以这些数字冒称独立几 KB 内核。产品程序源码与用户自备头文件仍是文件输入。
+- 冻结 gate --com 70/70，JOBS=2，364 s aggregate；各套件 ≤60 s，nativecheck 54 s、余量 6 s，六目标包自源码字节一致；fat 126/0，两架构实际执行。Linux/Windows 本轮未启动 VM。日志 /tmp/unisacc-resource-{native,gate}.log。E3 对修改后的 runtime 源码单独 equal；固定清单仍 235/96。产品源码/.com 未改，仍沿用 dec6553 的哈希；未推送、未发布。单份 payload 嵌入、产品驱动/CLI、紧凑内核与剩余前端/错误契约继续推进，cc-unisacc 保持暂停。
