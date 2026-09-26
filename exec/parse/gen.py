@@ -67,7 +67,7 @@ FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 WORDS = ["type=int", "type=void", "type=static", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~",
          "++", "--", "?", ":"] + [o + "=" for o in ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")] + sorted(PREC) + ["do", "break", "continue",
-         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]", "..."]
+         "typedef", "struct", "type=long", "type=char", "type=unsigned", "type=short", "type=signed", "[", "]", "...", "type=double"]
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
 TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
@@ -81,6 +81,7 @@ PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/sto
 BASE = 11 * 10 ** 6  # BASE[v]: size of v's base type (int 4, char 1, long 8; 0 unknown), the scale of depth-1 +-
 CUNK = 0          # base size unknown (void, a typedef name): +- and dereference to depth 0 not covered
 FRD, FRB = 12 * 10 ** 6, 13 * 10 ** 6  # per function: return pointer depth and base size
+DPR = 18 * 10 ** 6  # DPR[f] = 1: f has a double parameter (an int argument would be converted: not covered)
 VAR = 17 * 10 ** 6  # VAR[f] = 1: f was defined `(..., ...)` (its parameters arrive on the stack)
 VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy is undefined there: measured)
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
@@ -376,6 +377,12 @@ for n in (SZ["char"], SZ["short"]):
 LD[UNS + 8], ST[UNS + 8] = LD[8], ST[8]   # unsigned long: the long access; its ops are the unsigned ones
 LDR = {k: LD[k % UNS] for k in LD}   # x++ / x--: the load is not masked (measured)
 MSK = {k: LD[k][len(LD[k % UNS]):] for k in LD}   # op= and ++x: the result masked again before the store (measured)
+# double: base code DBL.  Storage only -- measured (probe p63): a double local, parameter, return value,
+# va_arg(ap, double) and `*(unsigned long *)&d` are the plain 64-bit moves of a long (load64/store64,
+# integer registers, no floating instruction).  Every other use converts or compares in floating point
+# (cvtid/cvtdi, feq64: probe p64) and is rejected (DNO / DEADD / the DMATCH of an assignment).
+DBL = 64
+LD[DBL], ST[DBL], LDR[DBL], MSK[DBL] = LD[8], ST[8], LD[8], ""
 
 
 def vwidth(p, ptr, bs, tab):  # a variable's access: W[ptr] >= 1 -> pointer size; else by W[bs] (tyinfo size); 0 (unknown) -> int
@@ -443,6 +450,10 @@ def ubin(q, op, sub, cmp, after, pre=()):
     for x in pre:
         x(q)
     q.call("UFLAG").vpop("ul")
+    ok1, ok2 = q.fresh("d1"), q.fresh("d2")
+    q.branch({1: "DEADD"}, ok1, [("CMPI", "ul", 4)])
+    P(ok1).branch({1: "DEADD"}, ok2, [("CMPI", "uf", 4)])
+    q = P(ok2)
     # class (UFLAG): 1 unsigned long, 3 other 8-wide, 2 unsigned int, 0 int-width.  1 wins, then 3 (signed
     # 64-bit, result long), then 2: the 32-bit unsigned tape -- both operands masked to 32 bits, the u
     # spelling, the result masked again unless a comparison (measured: x - 0x80000000, 0x80000000 >> x,
@@ -468,7 +479,20 @@ def expr():
     p.a(("LDI", "uf", 3)).branch({1: "UF.1"}, "RET", [("CMPI", "pt", 0)])
     P("UF.1").a(("LDI", "uf", 1)).branch({1: "RET"}, "UF.2", [("CMPI", "pb", UNS + 8)])
     P("UF.2").a(("LDI", "uf", 3)).branch({1: "RET"}, "UF.3", [("CMPI", "pb", SZ["long"])])
-    P("UF.3").a(("LDI", "uf", 2)).branch({1: "RET"}, "UF.4", [("CMPI", "pb", UNS + 4)])
+    P("UF.3").a(("LDI", "uf", 2)).branch({1: "RET"}, "UF.3d", [("CMPI", "pb", UNS + 4)])
+    P("UF.3d").a(("LDI", "uf", 4)).branch({1: "RET"}, "UF.4", [("CMPI", "pb", DBL)])
+    p = P("DNO")      # a double value where only an integer is covered (conversion / float compare)
+    p.branch({1: "DNO.1"}, "RET", [("CMPI", "pt", 0)])
+    P("DNO.1").branch({1: "DEADD"}, "RET", [("CMPI", "pb", DBL)])
+    g.on("DEADD", range(257), "DEAD", rej("not covered: double operand"), "r")
+    p = P("DMATCH")   # assignment: double-ness of target (pt pb) and source (spt spb) must agree
+    p.a(("LDI", "d1", 0), ("LDI", "d2", 0)).branch({1: "DM.a"}, "DM.b", [("CMPI", "pt", 0)])
+    P("DM.a").branch({1: "DM.a1"}, "DM.b", [("CMPI", "pb", DBL)])
+    P("DM.a1").a(("LDI", "d1", 1)).goto("DM.b")
+    P("DM.b").branch({1: "DM.c"}, "DM.d", [("CMPI", "spt", 0)])
+    P("DM.c").branch({1: "DM.c1"}, "DM.d", [("CMPI", "spb", DBL)])
+    P("DM.c1").a(("LDI", "d2", 1)).goto("DM.d")
+    P("DM.d").branch({1: "RET"}, "DEADD", [("CMP", "d1", "d2")])
     P("UF.4").a(("LDI", "uf", 0)).ret()
     levels = sorted(set(PREC.values()))
     top = levels[-1]
@@ -485,12 +509,12 @@ def expr():
         for op in cases:
             q = P(cases[op])
             if op == "&&":
-                q.newlab("a").vpush("a").o("  jumpz r0, ").lab("a").o("\n").call("NEXT").call(sub)
-                q.o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto("LOOP%d" % L)
+                q.call("DNO").newlab("a").vpush("a").o("  jumpz r0, ").lab("a").o("\n").call("NEXT").call(sub)
+                q.call("DNO").o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto("LOOP%d" % L)
             elif op == "||":
-                q.newlab("a").newlab("b").vpush("a")
+                q.call("DNO").newlab("a").newlab("b").vpush("a")
                 q.o("  jumpz r0, ").lab("b").o("\n  imm r0, 1\n  jump ").lab("a").o("\n").lab("b").o(":\n")
-                q.call("NEXT").call(sub).o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto("LOOP%d" % L)
+                q.call("NEXT").call(sub).call("DNO").o(NORM).vpop("a").lab("a").o(":\n").a(("LDI", "pt", 0), ("LDI", "pb", 0)).goto("LOOP%d" % L)
             elif op in ("+", "-"):   # p +- n: n scaled by 8 at depth >= 2, by BASE (4/1/8) at depth 1
                 ok, pp, p1 = q.fresh("pa"), q.fresh("pp"), q.fresh("p1")    # (measured); unknown base -> not covered
                 sc = {n: q.fresh("s%d" % n) for n in sorted(set(SZ.values()))}   # scale = tyinfo size of the base
@@ -536,10 +560,11 @@ def expr():
         q = P("EXPR.c" + o)
         lookup(q, "sps", "spe")
         noptr(q)
+        q.call("DNO")
         addr(q, "r0")
         q.o(PUSH)
         vwidth(q, "pt", "pb", LD)
-        q.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").call("UFLAG").vpop("pt", "pb")
+        q.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").call("DNO").call("UFLAG").vpop("pt", "pb")
         uu, ss, u2, dn = q.fresh("cu"), q.fresh("cs"), q.fresh("c2"), q.fresh("cd")
         q.branch({1: uu}, u2, [("CMPI", "pb", UNS + 8)])    # unsigned iff either side is (measured)
         u3 = u2 + "x"
@@ -563,7 +588,7 @@ def expr():
     P("VEXPR.sta").call("EXPR.sta").goto("VEXPR.c")
     P("VEXPR.stu").call("EXPR.stu").goto("VEXPR.c")
     p = P("EXPR.sta")
-    p.a(("ALUI", "sub", "pt", "pt", 1)).o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
+    p.a(("ALUI", "sub", "pt", "pt", 1)).o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb")).vpop("pt", "pb").call("DMATCH").o(POP1)
     vwidth(p, "pt", "pb", ST)     # depth 0: the pointee's base width (char *p: .st 1, measured)
     p.ret()
     P("EXPR.stu").call("DEREF").call("BINCONT").goto("EXPR.tail")
@@ -646,7 +671,7 @@ def expr():
     p.branch({1: d0}, dk, [("CMPI", "pt", 0)])
     P(d0).branch({(0, 2): dk}, ("rej", "not covered: dereference of an unknown base"), [("CMPI", "pb", CUNK)])
     p.cur = dk
-    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
+    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb")).vpop("pt", "pb").call("DMATCH").o(POP1)
     vwidth(p, "pt", "pb", ST)
     p.ret()
     p = P("EXPR.use")
@@ -654,12 +679,12 @@ def expr():
     p = P("EXPR.tail")
     p.tok({"=": "EXPR.bad", "?": "EXPR.q"}, "RET")
     p = P("EXPR.q")     # c ? a : b  (labels as if/else, measured)
-    p.newlab("a").newlab("b").o("  jumpz r0, ").lab("a").o("\n").vpush("a", "b").call("NEXT").call("CEXPR").expect(":")
-    p.call("UFLAG").branch({1: "DEADU", 2: "EXPR.qu2"}, "EXPR.q2", [("CMPI", "uf", 1)])
+    p.call("DNO").newlab("a").newlab("b").o("  jumpz r0, ").lab("a").o("\n").vpush("a", "b").call("NEXT").call("CEXPR").expect(":")
+    p.call("DNO").call("UFLAG").branch({1: "DEADU", 2: "EXPR.qu2"}, "EXPR.q2", [("CMPI", "uf", 1)])
     P("EXPR.qu2").branch({1: "DEADU"}, "EXPR.q2", [("CMPI", "uf", 2)])
     p = P("EXPR.q2")
     p.vpop("a", "b").o("  jump ").lab("b").o("\n").lab("a").o(":\n").vpush("b").call("NEXT").call("EXPR")
-    p.call("UFLAG").branch({1: "DEADU", 2: "EXPR.qu3"}, "EXPR.q3", [("CMPI", "uf", 1)])
+    p.call("DNO").call("UFLAG").branch({1: "DEADU", 2: "EXPR.qu3"}, "EXPR.q3", [("CMPI", "uf", 1)])
     P("EXPR.qu3").branch({1: "DEADU"}, "EXPR.q3", [("CMPI", "uf", 2)])
     P("EXPR.q3").vpop("b").lab("b").o(":\n").ret()
     g.on("DEADU4", range(257), "DEAD", rej("not covered: unsigned int operand"), "r")
@@ -668,9 +693,10 @@ def expr():
     # only (measured: `a;`, `a, 1`).  VEXPR: statement level / for clauses
     # (discarded when followed by ; , or )); CEXPR: value context (discarded
     # only when a comma follows).
-    for nm, stops in (("VEXPR", (";", ",", ")")), ("CEXPR", (",",))):
+    P("CEXPR").call("CEXPRD").call("DNO").ret()   # a value context: a double value is not covered
+    for nm, stops in (("VEXPR", (";", ",", ")")), ("CEXPRD", (",",))):
         q = P(nm)
-        q.tok({TK_ID: nm + ".id"} if nm == "CEXPR" else {TK_ID: nm + ".id", "*": nm + ".st"}, nm + ".e")
+        q.tok({TK_ID: nm + ".id"} if nm == "CEXPRD" else {TK_ID: nm + ".id", "*": nm + ".st"}, nm + ".e")
         P(nm + ".e").call("EXPR").goto(nm + ".c")
         q = P(nm + ".id")
         q.a(("COPYW", "sps", "ps"), ("COPYW", "spe", "pe")).call("NEXT")
@@ -678,7 +704,7 @@ def expr():
                    + [(o + "=", nm + ".c" + o) for o in CASOPS]), nm + ".use")
         P(nm + ".use").call("EXPR.use").goto(nm + ".c")
         P(nm + ".as").call("EXPR.as").goto(nm + ".c")
-        P(nm + ".ix").call("EXPR.ix" if nm == "CEXPR" else "VEXPR.ixs").goto(nm + ".c")
+        P(nm + ".ix").call("EXPR.ix" if nm == "CEXPRD" else "VEXPR.ixs").goto(nm + ".c")
         for o in CASOPS:
             P(nm + ".c" + o).call("EXPR.c" + o).goto(nm + ".c")
         q = P(nm + ".addr")
@@ -693,12 +719,12 @@ def expr():
     lookup(p, "sps", "spe")
     noarr(p)
     addr(p, "r0")
-    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
+    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb")).vpop("pt", "pb").call("DMATCH").o(POP1)
     vwidth(p, "pt", "pb", ST)
     p.ret()
     p = P("NOPTR")
     noptr(p)
-    p.ret()
+    p.call("DNO").ret()
     g.on("DEADR", range(257), "DEAD", rej("not covered: assignment to an array"), "r")
     g.on("DEADP", range(257), "DEAD", rej("not covered: pointer arithmetic"), "r")
 
@@ -712,6 +738,7 @@ def expr():
         q = P(nm + ".id")
         lookup(q, "ps", "pe")
         noptr(q)
+        q.call("DNO")
         addr(q, "r0")
         q.o(PUSH)
         vwidth(q, "pt", "pb", LD)
@@ -722,7 +749,7 @@ def expr():
         q.call("NEXT").ret()
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
-        q = P(nm).call("NEXT").call("UNARY")
+        q = P(nm).call("NEXT").call("UNARY").call("DNO")
         if nm != "U.not":      # - ~ of a pointer, or of an unsigned int: not covered
             noptr(q)
             ok = q.fresh("n4")
@@ -737,7 +764,10 @@ def expr():
     P("U.amp").goto("PV")
     # '(' : a cast when a type word or a typedef name (TDN) follows, else a parenthesised expression
     P("U.par").call("NEXT").tok({"type": "CA.int", "type=char": "CA.char", "type=short": "CA.short",
-                                 "type=long": "CA.long", "type=void": "CA.void", TK_ID: "U.pid"}, "U.pe")
+                                 "type=long": "CA.long", "type=void": "CA.void", "type=unsigned": "CA.sp",
+                                 "type=double": "CA.sp", TK_ID: "U.pid"}, "U.pe")
+    # (unsigned T *...) / (double *...): the type words through SPEC; a scalar cast to them is not covered
+    P("CA.sp").call("SPEC").a(("COPYW", "cb", "bsz"), ("LDI", "cd", 0)).goto("CA.sl")
     P("U.pe").call("CEXPR").expect(")").call("NEXT").ret()
     p = P("U.pid")
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "CA.void"}, "U.pe", [("CMPI", "t", 1)])
@@ -749,7 +779,7 @@ def expr():
     p.tok({"*": "CA.star", ")": "CA.cl"}, ("rej", "not covered: cast"))
     P("CA.star").a(("ALUI", "add", "cd", "cd", 1)).call("NEXT").goto("CA.sl")
     p = P("CA.cl")     # (T)e: the operand is a unary expression
-    p.vpush("cb", "cd").call("NEXT").call("UNARY").vpop("cb", "cd")
+    p.vpush("cb", "cd").call("NEXT").call("UNARY").call("DNO").vpop("cb", "cd")
     p.branch({(1, 2): "CA.ptr"}, "CA.sc", [("CMPI", "cd", 1)])
     P("CA.ptr").a(("COPYW", "pt", "cd"), ("COPYW", "pb", "cb")).ret()   # (T *)e: no code (measured)
     q = P("CA.sc")     # (T)e, T scalar: narrowed through the stack at T's size; long: no code (measured)
@@ -787,6 +817,7 @@ def expr():
         q = P(nm)   # a++ : a += 1, then the old value back (measured)
         lookup(q, "sps", "spe")
         noptr(q)
+        q.call("DNO")
         addr(q, "r0")
         q.o(PUSH)
         vwidth(q, "pt", "pb", LDR)
@@ -823,13 +854,16 @@ def expr():
     p.a(("LDX", "t", "v", VAR)).branch({1: "DEADV"}, "IT.ok1v", [("CMPI", "t", 1)])
     g.on("DEADV", range(257), "DEAD", rej("not covered: call to a variadic function"), "r")
     p = P("IT.ok1v")
+    p.a(("LDX", "t", "v", DPR)).branch({1: "DEADDP"}, "IT.ok1w", [("CMPI", "t", 1)])
+    g.on("DEADDP", range(257), "DEAD", rej("not covered: call to a function with a double parameter"), "r")
+    p = P("IT.ok1w")
     p.a(("LDX", "t", "v", LOC))
     p.branch({1: "IT.ok2"}, ("rej", "not covered: call through a local"), [("CMPI", "t", 0)])
     P("IT.ok2").a(("LDI", "sys", 0)).goto("IT.ok3")
     p = P("IT.ok3")
     p.vpush("sps", "spe", "sys").a(("LDI", "na", 0), ("LDI", "la", 0)).call("NEXT").tok({")": "IT.close"}, "IT.arg")
     p = P("IT.arg")
-    p.vpush("na").call("EXPR").call("UFLAG").vpop("na").o(PUSH).a(("ALUI", "add", "na", "na", 1), ("COPYW", "la", "uf"))
+    p.vpush("na").call("EXPR").call("DNO").call("UFLAG").vpop("na").o(PUSH).a(("ALUI", "add", "na", "na", 1), ("COPYW", "la", "uf"))
     p.tok({",": "IT.comma", ")": "IT.close"}, ("rej", "not covered: argument list"))
     P("IT.comma").call("NEXT").goto("IT.arg")
     p = P("IT.close")
@@ -910,7 +944,7 @@ def printf():
     p.vpush("ps", "pe").a(("COPYW", "pb", "vsp"), ("LDI", "na", 0)).call("NEXT")
     p.tok({",": "PF.arg", ")": "PF.go"}, ("rej", "not covered: printf format"))
     p = P("PF.arg")
-    p.vpush("na", "pb").call("NEXT").call("EXPR").vpop("na", "pb")
+    p.vpush("na", "pb").call("NEXT").call("EXPR").call("DNO").vpop("na", "pb")
     p.a(("ALUI", "add", "cur", "cur", 8), ("COPYW", "s", "cur"))
     up, nx = p.fresh("mx"), p.fresh("dn")
     p.branch({2: up}, nx, [("CMP", "cur", "max")])
@@ -1023,7 +1057,7 @@ def printf():
 def stmt():
     p = P("STMT")
     p.tok({"{": "BLOCK", "type": "S.decl", "type=char": "S.decl", "type=long": "S.decl", "type=void": "S.decl",
-           "type=unsigned": "S.decl", "type=short": "S.decl", "type=signed": "S.decl", TK_ID: "S.idq", ";": "S.empty", "return": "S.ret", "if": "S.if",
+           "type=unsigned": "S.decl", "type=short": "S.decl", "type=signed": "S.decl", "type=double": "S.decl", TK_ID: "S.idq", ";": "S.empty", "return": "S.ret", "if": "S.if",
            "while": "S.while", "for": "S.for",
            "do": "S.do", "break": "S.brk", "continue": "S.cnt"}, "S.expr")
     P("S.empty").call("NEXT").ret()
@@ -1043,7 +1077,7 @@ def stmt():
     p.a(("COPYW", "cur", "sc")).call("NEXT").ret()
     # declaration
     p = P("S.decl")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh",
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh", "type=double": "S.ddb",
                                                    "type=unsigned": "S.dun"}, "S.dnx")
     P("S.dun").call("NEXT").tok({"type=char": "S.duc", "type=short": "S.dus", "type=long": "S.dul"}, ("rej", "not covered: unsigned int declaration"))
     P("S.dul").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["long"])).goto("S.dnx")
@@ -1052,6 +1086,7 @@ def stmt():
     P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["int"])).goto("S.dnx")
     P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("S.dnx")
     P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("S.dnx")
+    P("S.ddb").a(("LDI", "bni", 0), ("LDI", "bsz", DBL)).goto("S.dnx")
     P("S.dsh").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("S.dnx")
     P("S.dnx").call("NEXT").tok(dict((w, "S.dw") for w in TWORDS), "D.one")
     P("S.dw").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).goto("S.dnx")
@@ -1086,7 +1121,8 @@ def stmt():
     declare(p, "dps", "dpe")
     p.ret()
     p = P("D.init")
-    p.vpush("s", "ptd", "bni", "bsz").call("NEXT").call("EXPR").vpop("s", "ptd", "bni", "bsz")
+    p.vpush("s", "ptd", "bni", "bsz").call("NEXT").call("EXPR").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb")).vpop("s", "ptd", "bni", "bsz")
+    p.a(("COPYW", "pt", "ptd"), ("COPYW", "pb", "bsz")).call("DMATCH")
     addr(p, "r1")
     vwidth(p, "ptd", "bsz", ST)
     p.goto("D.next")
@@ -1114,8 +1150,9 @@ def stmt():
     p.o("  jumpz r0, ").lab("b").o("\n  jump ").lab("a").o("\n").lab("b").o(":\n").vpop("brk", "cnt")
     p.call("NEXT").ret()
     p = P("S.rete")
-    p.call("CEXPR").expect(";")
-    p.branch({(1, 2): "S.retp"}, "S.reti", [("CMPI", "rptr", 1)])
+    p.call("CEXPRD").expect(";").a(("COPYW", "spt", "pt"), ("COPYW", "spb", "pb"), ("COPYW", "pt", "rptr"), ("COPYW", "pb", "rbsz")).call("DMATCH")
+    p.branch({(1, 2): "S.retp"}, "S.retd", [("CMPI", "rptr", 1)])
+    P("S.retd").branch({1: "S.retp"}, "S.reti", [("CMPI", "rbsz", DBL)])   # double: the plain 64-bit move (measured)
     P("S.retp").o("  jump R").num("rl").o("\n").call("NEXT").ret()
     p = P("S.reti")     # a scalar return narrows through the stack at its tyinfo size; 8 (long) as a pointer (measured)
     q = p
@@ -1175,7 +1212,7 @@ def spec():
     p = P("SPEC")
     p.a(("LDI", "sz", 0), ("LDI", "un", 0)).label("SP.loop")
     p.tok({"type": "SP.int", "type=char": "SP.ch", "type=short": "SP.sh", "type=long": "SP.lg",
-           "type=unsigned": "SP.un", "type=signed": "SP.sg"}, "SP.end")
+           "type=unsigned": "SP.un", "type=signed": "SP.sg", "type=double": "SP.db"}, "SP.end")
     bad = ("rej", "not covered: type specifier")
     P("SP.int").branch({1: "SP.i4"}, "SP.nx", [("CMPI", "sz", 0)])
     P("SP.i4").a(("LDI", "sz", 4)).goto("SP.nx")
@@ -1185,7 +1222,10 @@ def spec():
     P("SP.s2").branch({1: "SP.shx"}, "SP.s3", [("CMPI", "sz", 1)])
     g.on("SP.shx", range(257), "DEAD", rej("not covered: type specifier"), "r")
     P("SP.s3").a(("LDI", "sz", 2)).goto("SP.nx")
-    P("SP.lg").branch({1: "SP.shx"}, "SP.l1", [("CMPI", "sz", 1)])
+    P("SP.db").branch({1: "SP.d8"}, bad, [("CMPI", "sz", 0)])
+    P("SP.d8").a(("LDI", "sz", DBL)).goto("SP.nx")
+    P("SP.lg").branch({1: "SP.shx"}, "SP.l0", [("CMPI", "sz", DBL)])
+    P("SP.l0").branch({1: "SP.shx"}, "SP.l1", [("CMPI", "sz", 1)])
     P("SP.l1").branch({1: "SP.shx"}, "SP.l8", [("CMPI", "sz", 2)])
     P("SP.l8").a(("LDI", "sz", 8)).goto("SP.nx")
     P("SP.un").a(("LDI", "un", 1)).goto("SP.nx")
@@ -1213,7 +1253,7 @@ def unit():
          for x in [("SBCLR",)] + [("SBOUT", c) for c in nm.encode()] + [("SBINTERN", "sy%d" % k)]])
     p.label("PASS").a(("JUMP", "x0"), ("LDI", "lab", 0), ("LDI", "fn", 0), ("LDI", "usp", 0),
                       ("LDI", "vsp", 0), ("LDI", "sk", 0), ("LDI", "brk", 0), ("LDI", "cnt", 0)).o(HEADER).call("NEXT")
-    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
+    p.label("TOP").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", "type=static": "TOP.st", "typedef": "TD", "eof": "END"}, ("rej", "not covered: top-level construct"))
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
@@ -1232,16 +1272,17 @@ def unit():
     P("TD.idu").a(("LDI", "tdb", CUNK)).goto("TD.id3")
     p = P("TD.id3")
     p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t"), ("STX", "v", TDD, "tdd"), ("STX", "v", TDB, "tdb")).call("NEXT").expect(";").call("NEXT").goto("TOP")
-    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
+    P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", "type=double": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
     p = P("TOP.sid")   # static TYPEDEFNAME ...: base size unknown (CUNK)
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "TOP.std"}, ("rej", "not covered: static declaration"), [("CMPI", "t", 1)])
     P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK), ("LDI", "sd0", 0)).goto("FN.n")
     p = P("FN")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s"}, "FN.n")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s", "type=double": "FN.d"}, "FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
     P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
     P("FN.c").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.n")
     P("FN.l").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["long"])).goto("FN.n")
+    P("FN.d").a(("LDI", "bni", 0), ("LDI", "bsz", DBL)).goto("FN.n")
     P("FN.s").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["short"])).goto("FN.n")
     p = P("FN.n")
     p.call("NEXT")
@@ -1249,7 +1290,7 @@ def unit():
     P("FN.r").a(("COPYW", "rptr", "ptd"), ("COPYW", "rbsz", "bsz")).goto("FN.id")
     p = P("FN.id")
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "v", FND, "pass"), ("COPYW", "fps", "ps"), ("COPYW", "fpe", "pe"),
-        ("COPYW", "fv", "v"), ("STX", "v", FRD, "rptr"), ("STX", "v", FRB, "rbsz"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "vfn", 0))
+        ("COPYW", "fv", "v"), ("STX", "v", FRD, "rptr"), ("STX", "v", FRB, "rbsz"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "vfn", 0), ("LDI", "fdp", 0))
     p.call("NEXT").tok({"(": "FN.open", ";": "FN.gv", "=": "FN.gv", ",": "FN.gv"}, ("rej", "not covered: declarator"))
     P("FN.gv").branch({(1, 2): "FN.gp"}, "GV", [("CMPI", "rptr", 1)])
     g.on("FN.gp", range(257), "DEAD", rej("not covered: global pointer"), "r")
@@ -1291,6 +1332,11 @@ def unit():
     stars(p, "FN.pid")
     p = P("FN.pid")
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0))
+    dp, dn = p.fresh("fd"), p.fresh("fe")
+    p.branch({1: dp}, dn, [("CMPI", "ptd", 0)])
+    P(dp).branch({1: dp + "x"}, dn, [("CMPI", "bsz", DBL)])
+    P(dp + "x").a(("LDI", "fdp", 1)).goto(dn)
+    p.cur = dn
     declare(p)
     p.call("NEXT").tok({",": "FN.comma", ")": "FN.close"}, ("rej", "not covered: parameter list"))
     P("FN.comma").call("NEXT").goto("FN.par")
@@ -1298,7 +1344,7 @@ def unit():
     p.branch({2: "FN.many"}, "FN.hd", [("CMPI", "cur", 48)])
     g.on("FN.many", range(257), "DEAD", rej("not covered: more than 6 parameters"), "r")
     p = P("FN.hd")
-    p.a(("ALUI", "div", "np", "cur", 8), ("STX", "fv", VAR, "vfn")).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
+    p.a(("ALUI", "div", "np", "cur", 8), ("STX", "fv", VAR, "vfn"), ("STX", "fv", DPR, "fdp")).call("NEXT").tok({"{": "FN.body", ";": "FN.proto"}, ("rej", "not covered: declaration"))
     # prototype NAME(...);  -- no code; the name is not a definition
     p = P("FN.proto")
     p.a(("LDI", "z0", 0), ("STX", "fv", FND, "z0"), ("LDI", "z", 0))
