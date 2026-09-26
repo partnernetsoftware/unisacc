@@ -289,3 +289,14 @@ object-like expansion itself now differs: shard ex.aa = 17 equal, 2 DIFF
 calls are not yet added: P4 must first be re-cut as a token-level pass
 (token emitted with its hide set, body re-tokenised with inter-token
 spaces) before function-like argument collection is layered on it.
+
+### 10.1 First token-level P4 attempt (2026-09-26, not adopted)
+
+Reference rule, measured with `ua_ref -E`: a top-level object-like expansion
+is emitted as ` ` + its fully rescanned tokens joined by one space + ` `
+(empty body -> one space); nested expansions add no padding. An attempt
+(active-macro flags F_ACT/F_UP as the object-like hide set, one round,
+pp-number / literal / longest-match punctuator tokenising of bodies; `#`/`##`
+in bodies rejected) built 184 states, sparse 10349 B, but raised DIFFs:
+ex.aa 2, ab 3, ac 9, ad 2, ae 9, af 1; corpus aa 0, ab 4, ac 2, ad 9, ae 34,
+af 19 (ag timed out). Not committed; the cause is still to be found.
