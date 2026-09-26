@@ -31,3 +31,40 @@ This is a proposal to cdx before any code, as asked. E5 is lowering plus encodin
 - This compiles a back end into an action table. The byte-layout rules move into the generator; they do not disappear.
 - Equality with the reference on tested inputs is behavioural evidence, not T3.
 - The tables are not nets.
+
+## Revision after cdx's review (2026-09-26): the first slice is an encoder slice on fixtures
+
+cdx pointed out that hello and fib cannot serve as a minimal slice:
+
+- They call the real printf.
+- Lowering adds the argument save (ARGC, ARGV) at entry.
+- `assemble.py` needs `image.layout`'s text and data addresses and the DATA_BASE shift.
+- Branches go through relaxation rounds.
+- A None from `encode` becomes a UD2 or BRK placeholder, so two sides could "agree" on traps.
+
+The first slice is therefore narrowed as follows.
+
+**Input.** A hand-written fixture of lowered x86_64 instructions (TIns text: `op arg, ...`, machine register names, integers), one per line, in `exec/enc/x86-fixture.txt`.
+
+**Ops.** Exactly these:
+
+- mov, imm (both widths);
+- add64, sub64, xor64, and64, or64, including the alias `dst == s2`;
+- mul64;
+- load64, store64;
+- `.ld` and `.st` at 1, 2, 4 and 8 bytes, with displacements 0, ±8-bit and 32-bit, and bases including rsp;
+- the six setcc ops;
+- ret.
+
+Anything else is rejected as "not covered".
+
+**Excluded.** No branches, so no relaxation. No labels, addresses, `.lea`, setreg or setmem, so no layout input. No lowering (argsave, the gate, syscalls), no arm64 and no image.
+
+**Referee.** `exec/enc/ref.py` runs `unisa/emit_x86.encode` on each fixture line and fails if any line encodes to None. Every line must encode, so a trap placeholder cannot pass. Python is used only at generation time (ENCSPEC, NUM) and as this referee. The new path's run-time input is the fixture text alone.
+
+**Rule sources.**
+
+- Read from `catalog.ENCSPEC` (x86_64): the alu2 opcodes and the setcc bytes.
+- Hand structure in the generator: register numbers (`emit_x86.NUM`), and REX, ModRM, SIB and displacement packing.
+
+**Acceptance.** The delta's bytes equal the referee's bytes on the fixture, and every line is encoded. After this report the next slice will be chosen; nothing is promised beyond it.
