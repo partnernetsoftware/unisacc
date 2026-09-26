@@ -1840,6 +1840,7 @@ class Walker:
         while self.at(","):
             self.next()
             ty = self.rvalue()
+            if ty.kind == "arr": ty = ptr(ty.to)
         return ty
 
     def assign(self):
@@ -1940,6 +1941,8 @@ class Walker:
             self.expect(":")
             self.em.label(els)
             t2 = self.rvalue()
+            if t1.kind == "arr": t1 = ptr(t1.to)
+            if t2.kind == "arr": t2 = ptr(t2.to)
             if (self.isflt(t1) or self.isflt(t2)) and t1.kind != t2.kind:
                 # C99 6.5.15p5: the arithmetic operands meet in their common
                 # type.  The first arm was emitted before the second's type
@@ -2101,8 +2104,9 @@ class Walker:
 
     def ty_from(self, kind, t1, t2):
         if kind == "ptr":
-            return t1 if t1.kind in ("ptr", "arr") else (
+            t = t1 if t1.kind in ("ptr", "arr") else (
                 t2 if t2.kind in ("ptr", "arr") else ptr(I8))
+            return ptr(t.to) if t.kind == "arr" else t
         if kind == "illegal":
             return I64
         return {"void": VOID, "i8": I8, "i16": I16, "i32": I32, "i64": I64,
@@ -2282,7 +2286,7 @@ class Walker:
             # them, so hand it to assign() instead of rewinding -- the rewind
             # parsed every operand again per enclosing parenthesis, 2^depth.
             self._pre = ty
-            ty = self.assign()
+            ty = self.expr_comma()
             self.expect(")")
             return self.postfix_chain(ty)
         if t.kind == "num":
@@ -2298,9 +2302,9 @@ class Walker:
             self.next()
             if _wide(t):
                 self.em.lea(ACC, self.em.intern_wide(t.val))
-                return self.postfix_chain(ptr(I32))
+                return self.postfix_chain(Type("arr", to=I32, n=len(t.val)+1))
             self.em.lea(ACC, self.em.intern(t.val))
-            return self.postfix_chain(ptr(I8))
+            return self.postfix_chain(Type("arr", to=I8, n=len(t.val)+1))
         if t.kind == "id":
             name = t.text
             if self.peek(1).kind == "(":

@@ -12332,11 +12332,14 @@ int primary(void) {
         if ((src[tpos[tp]] & 255) == 48) { if (tlen[tp] > 1) {
             if (v > 2147483647) { if (v <= 4294967295) { cursize = 4; curuns = 1; } }
         } }
-        k = 0;
-        while (k < tlen[tp]) {
-            if ((src[tpos[tp] + k] & 255) == 117) curuns = 1;   /* u */
-            if ((src[tpos[tp] + k] & 255) == 85) curuns = 1;    /* U */
-            k = k + 1;
+        /* Character contents are not integer suffixes: 'U' is an int. */
+        if ((src[tpos[tp]] & 255) != 39) {
+            k = 0;
+            while (k < tlen[tp]) {
+                if ((src[tpos[tp] + k] & 255) == 117) curuns = 1;   /* u */
+                if ((src[tpos[tp] + k] & 255) == 85) curuns = 1;    /* U */
+                k = k + 1;
+            }
         }
         /* C99 6.4.4.1 again: a decimal constant with a u suffix is the
            first of unsigned int, unsigned long that holds it -- so
@@ -12370,6 +12373,7 @@ int primary(void) {
         }
         i = addlit(lbuf, (wn + 1) * 4);
         es("  @mem.lea r0, S"); en(i); ec(10);
+        setkind(0); cursize = (wn + 1) * 4; curpd = 1; curbase = 4;
         lvalue = 0; curelem = 4; curptr = 1;
         return postfix();
     } }
@@ -12394,12 +12398,13 @@ int primary(void) {
         return postfix();
     } }
     if (t == T_STR) {
+        int sl;
         i = nlab; nlab = nlab + 1;
-        i = addlit(lbuf, decode(adv(), lbuf));
+        sl = decode(adv(), lbuf); i = addlit(lbuf, sl);
         es("  @mem.lea r0, S"); en(i); ec(10);
         /* a char *: the kind is set whole, so `*"z"` loads its first char --
            a stale curpd/curstruct from before once left it the address */
-        setkind(0); cursize = 8; curuns = 0; curpd = 1; curbase = 1;
+        setkind(0); cursize = sl + 1; curuns = 0; curpd = 1; curbase = 1;
         lvalue = 0; curelem = 1; curptr = 1;
         return postfix();
     }
@@ -13685,13 +13690,14 @@ int cond(void) {
     /* C99 6.5.15p6: one arm a pointer and the other a null pointer
        constant -- the result is the pointer's type */
     if (p1) { if (curptr == 0) { curptr = 1; curelem = e1; } }
+    if (curptr) cursize = 8;       /* array arms decay in ?: */
     lvalue = 0;
     return 0;
 }
 
 int exprc(void) {                   /* the comma operator */
     expr();
-    while (cur() == tidx(",", 1)) { adv(); expr(); }
+    while (cur() == tidx(",", 1)) { adv(); expr(); if (curptr) cursize = 8; }
     return 0;
 }
 
