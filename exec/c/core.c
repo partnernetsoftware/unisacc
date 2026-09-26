@@ -6,13 +6,31 @@
 #include <string.h>
 static void core_die(const char *s) { core_host_panic(s); abort(); }
 static void *core_alloc(void *p,size_t n) { p=realloc(p,n ? n : 1); if (!p) core_die("out of memory"); return p; }
-static int decimal(char *s,I v) {
+#ifdef UNISA_CORE_ASM_FORMAT
+int core_decimal(char *s,I v);
+int core_field_fill(Buf *o,I at,I width,I value);
+#define decimal core_decimal
+#define field_fill core_field_fill
+#else
+#ifndef CORE_FORMAT_LINKAGE
+#define CORE_FORMAT_LINKAGE static
+#endif
+CORE_FORMAT_LINKAGE int decimal(char *s,I v) {
     char t[20]; int n=0,k=0; uint64_t u=(uint64_t)v;
     if (v<0) { s[k++]='-'; u=0-u; }
     do { t[n++]=(char)('0'+u%10); u/=10; } while (u);
     while (n) s[k++]=t[--n];
     return k;
 }
+CORE_FORMAT_LINKAGE int field_fill(Buf *o,I at,I width,I value) {
+    char t[32]; int n=decimal(t,value);
+    if (n>width) return 1;
+    /* Subtraction after the range check cannot overflow. */
+    if (at<0 || at>o->n || width>o->n-at) core_die("fill past the reservation");
+    for (I j=0;j<width;j++) o->b[at+j]=j<width-n ? ' ' : (unsigned char)t[j-(width-n)];
+    return 0;
+}
+#endif
 /* The selected bank is sparse evaluation of a one-hot state-conditioned net.
    Each hidden activation is H(key-threshold); output weights are signed.
    No answer table is materialised. int weights/count bound sums within int64. */
@@ -288,10 +306,9 @@ int core_run(const CoreModel *m, unsigned char *input,
             case OCUT: { I s0 = R[a[2]]; if (s0 < 0) s0 = 0; if (s0 > o.n) s0 = o.n;
                          R[a[1]] = blob_add(o.b + s0, (int)(o.n - s0)); o.n = (int)s0; } break;
             case ORES: R[a[1]] = o.n; for (I j = 0; j < a[2]; j++) core_put(&o, ' ', OT); break;
-            case OFILL: { char t[32]; int n = decimal(t,R[a[2]]); I w = a[3], at = R[a[1]];
-                          if (n > w) { result->reason="field overflow"; result->reason_n=14; status = 1; goto finished; }
-                          if (at < 0 || at + w > o.n) core_die("fill past the reservation");
-                          for (I j = 0; j < w; j++) o.b[at + j] = j < w - n ? ' ' : (unsigned char)t[j - (w - n)]; } break;
+            case OFILL: if (field_fill(&o,R[a[1]],a[3],R[a[2]])) {
+                            result->reason="field overflow"; result->reason_n=14; status=1; goto finished;
+                        } break;
             case OCLR: o.n = 0; break;
             case OSEL: osel = (int)a[1]; break;
             case SETOT: OT = R[a[1]]; break;

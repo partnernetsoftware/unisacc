@@ -95,6 +95,17 @@ b cc $ARCHFLAG -c "exec/c/asm/arith_$ARCH.S" -o "$T/arith.o"
 if [ "$OS" = osx ]; then b size -m "$T/arith.o"; else b size -A "$T/arith.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/transition_$ARCH.S" -o "$T/transition.o"
 if [ "$OS" = osx ]; then b size -m "$T/transition.o"; else b size -A "$T/transition.o"; fi
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_FORMAT_LINKAGE= -Ddecimal=decimal_c -Dfield_fill=field_fill_c \
+    exec/c/core.c "exec/c/asm/format_$ARCH.S" exec/c/asm/layoutcheck.c exec/c/asm/formatcheck.c -o "$T/format"
+b "$T/format"
+b python3 - "$T/format" <<'PYFORMAT'
+import subprocess,sys
+for case in range(5):
+ for version in ['c','a']:
+  r=subprocess.run([sys.argv[1],version,str(case)],capture_output=True,timeout=10)
+  assert (r.returncode,r.stdout,r.stderr)==(2,b'field bounds: rejected before writing\n',b''),(case,version,r)
+print('field bounds: C/ASM both reject, 10 checks')
+PYFORMAT
 b env EXEC_CC="$R/exec/c/asm/cc.sh" python3 exec/c/netcheck.py
 b env EXEC_CC="$R/exec/c/asm/cc.sh" NETWORK=1 TARGET="$OS/$ARCH" \
     ./exec/pipeline/elf.sh "$T" examples/hello.c examples/fib.c tests/c/b_strderef.c exec/parse2/probes/prefix_members.c exec/parse2/probes/member_index_address.c exec/c/run.c > "$T/build.log" 2>&1 || { cat "$T/build.log"; exit 1; }

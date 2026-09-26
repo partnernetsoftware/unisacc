@@ -1,7 +1,7 @@
 # Assembly kernel migration
 
 This directory implements **`core_transition` and the 32/64-bit arithmetic
-primitives, byte-buffer append, sparse memory byte-string interning, blob copies and resource caching** by hand for AArch64 and x86-64 System V. Action dispatch, frame storage and cleanup are still
+primitives, byte-buffer append, sparse memory byte-string interning, blob copies, resource caching and decimal field rendering** by hand for AArch64 and x86-64 System V. Action dispatch, frame storage and cleanup are still
 the generic C kernel. Allocation remains libc. The shipped product and default runtime still
 select C. This is not a completed assembly kernel or product switch.
 
@@ -22,7 +22,7 @@ explicitly not implemented. Mach-O native arm64 and Rosetta x86-64 were run;
 the ELF assembler spelling is present but has not yet been run on Linux.
 
 `cc.sh` builds an explicit development runtime: it omits the C transition
-arithmetic, buffer-append, sparse-memory intern, blob and resource implementations and links their assembly symbols. It is a build adapter, not a
+arithmetic, buffer-append, sparse-memory intern, blob, resource and field-rendering implementations and links their assembly symbols. It is a build adapter, not a
 runtime fallback. `transitioncheck.c` separately retains the actual C body
 under a different name for 537,620 comparisons per ISA, including independent
 missing/domain/output expectations, signed limits and sums that would wrap a
@@ -38,16 +38,16 @@ no Python stage handles source at runtime.
 
 Measured uncompressed __text on macOS (object section, no subtraction):
 
-| ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | remaining C (`cc -Os`) | sum |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 548 B | 3,848 B | 6,380 B |
-| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 5,153 B | 7,572 B |
+| ISA | transition | arithmetic | buffer | sparse memory | intern/hash | blobs/resources | decimal/fill | remaining C (`cc -Os`) | sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| arm64 | 332 B | 436 B | 208 B | 500 B | 508 B | 548 B | 272 B | 3,504 B | 6,308 B |
+| x86_64 | 334 B | 450 B | 170 B | 473 B | 479 B | 513 B | 225 B | 4,612 B | 7,256 B |
 
 Error strings are 58 B per transition, 24 B per arithmetic object, and 39 B
-each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B. Host/library/model costs
+each for buffer, sparse-memory and intern objects; blob/resource strings add 70 B and field rendering 26 B. Host/library/model costs
 remain outside this object sum, accounted separately in ../CORE.md. The C-only
 baseline with the capacity guards and explicit memory/intern state is
-6,664/7,707 B. These are migration measurements, not a performance claim.
+6,664/7,715 B. These are migration measurements, not a performance claim.
 
 ## Word arithmetic contract
 
@@ -156,3 +156,20 @@ member_index_address.c independently expects exit 25: E3 must load a pointer
 member before evaluating its subscript under address-of. Native C network
 self-reconstruction and C ASan/UBSan network checks also pass. These are
 migration checks, not a claim of smaller code or a completed assembly kernel.
+
+## Signed decimal and reserved fields
+
+core_decimal writes the signed 64-bit number without a trailing NUL and
+returns its byte count. INT64_MIN is converted through its unsigned magnitude.
+core_field_fill right-aligns those bytes with spaces inside a reserved output
+span, retaining output length, capacity and every attribute. A narrow or
+negative width returns field-overflow before destination access. Otherwise
+negative/out-of-range offsets or a width larger than the remaining output
+extent fail through core_host_panic before writing. The bounds use subtraction
+after validating the offset, avoiding overflow of at + width.
+
+formatcheck.c compares the actual C and assembly routines against snprintf
+for 10,013 values and 250,325 fields; untouched bytes and attributes are checked.
+Ten C/ASM bad-offset/width runs check failure before writes, including INT64_MAX.
+Both real ISA jobs retain all network and six-image checks. C ASan/UBSan and
+network-built C self-reconstruction also pass. Dispatch and cleanup remain C.

@@ -2917,3 +2917,22 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - Only targeted checks were run for this slice; the last full 82/82 gate
   remains de81ff3. Complete assembly dispatch, platform bindings and the final
   product switch remain unfinished.
+
+
+### Assembly core: signed decimal and reserved output fields
+
+- Both ISA helpers now own signed decimal conversion and OFILL byte writes.
+  They retain no-terminator output, INT64_MIN, right alignment, untouched
+  attributes and field-overflow precedence. Bounds are checked by subtraction
+  after the offset is validated, avoiding signed overflow in at + width.
+- Each actual macOS arm64/Rosetta run passes 10,013 numbers and 250,325 fields
+  against independent snprintf output, plus ten C/ASM bounds failures. Existing
+  network checks and six images/five program executions stay equal. Native C
+  network self-reconstruction and ASan/UBSan pass. Logs:
+  /tmp/unisacc-format-{arm,x86,native,sanitize}.log.
+- Format text 272/225 B, strings 26 B per ISA; remaining C 3,504/4,612 B;
+  combined text 6,308/7,256 B. C-only 6,664/7,715 B. Allocation/host/model
+  bytes remain outside these object sums. No speed claim. Dispatch, frames,
+  initialization and cleanup are still C, so full assembly migration remains
+  incomplete. Product unchanged, no push. Targeted checks only; last full gate
+  still de81ff3 82/82.
