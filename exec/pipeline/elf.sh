@@ -22,13 +22,18 @@ b python3 exec/lower/gen.py "$OUT/lower.json" --full $OSFLAG $ARCHFLAG
 b python3 "exec/enc/$ENCODER" "$OUT/elf.json" "--$IMAGE"
 MODEL=tbl
 case ${NETWORK:-1} in 0) ;; 1) MODEL=net;; *) echo "NETWORK must be 0 or 1" >&2; exit 2;; esac
-for s in e2 e1 e3 e4 lower elf; do
+STAGES=$(awk '!/^#/ && NF {print $1}' exec/pipeline/image-stages.tsv)
+for s in $STAGES; do
     b python3 exec/c/tbl.py "$OUT/$s.json" "$OUT/$s.tbl"
     if [ "$MODEL" = net ]; then
         b python3 exec/c/net.py "$OUT/$s.tbl" "$OUT/$s.net"
         b "$OUT/run" --check-net "$OUT/$s.tbl" "$OUT/$s.net"
     fi
 done
+if [ "$MODEL" = net ]; then
+    awk -v route="$TARGET" '!/^#/ && NF {print route "\t" $0}' exec/pipeline/image-stages.tsv > "$OUT/route.tsv"
+    b python3 exec/c/pack.py -o "$OUT/models.pkg" "$OUT/route.tsv"
+fi
 case $IMAGE in pe) EXT=exe;; *) EXT=$IMAGE;; esac
 : > "$OUT/inputs"
 for f in "$@"; do
@@ -36,7 +41,7 @@ for f in "$@"; do
     if grep -Fxq "$name" "$OUT/inputs"; then echo "duplicate output name: $name" >&2; exit 2; fi
     printf '%s\n' "$name" >> "$OUT/inputs"
     in=$f
-    for s in e2 e1 e3 e4 lower elf; do
+    for s in $STAGES; do
         out="$OUT/$name.$s"
         case $s in
             e2) b "$OUT/run" "$OUT/$s.$MODEL" "$in" "$f" "$R/include" > "$out" ;;

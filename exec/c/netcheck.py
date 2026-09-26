@@ -6,6 +6,7 @@ Each compiler/executor invocation has its own 60-second bound.
 import os, pathlib, subprocess, sys, tempfile
 from net import convert
 from tbl import CODE
+from pack import build as package_build
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 def run(args):
@@ -82,4 +83,22 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
     r=run(['env','UNISA_MAXSTEPS=2',*argv,reset,loop,missing])
     assert (r.returncode,r.stdout,r.stderr)==(3,b'',b'timeout\n')
     r=run([*argv]);assert r.returncode==2 and not r.stdout
-    print('network check: ok (inference, bounds, stream chain/reset/failure propagation)')
+    manifest=d/'routes.tsv'
+    manifest.write_text('first\ta\tbytes\tbytes\treset.net\nfirst\tb\tbytes\tbytes\treset.net\nsecond\ta\tbytes\tbytes\tempty-output.net\nthird\ta\tbytes\tbytes\treset.net\n')
+    data=package_build([manifest]);assert data.startswith(b'P 1 2 4\n')
+    assert data.count(reset.read_bytes())==1, 'shared model duplicated'
+    pack=d/'models.pkg';pack.write_bytes(data)
+    for route,want in [('first',b'0021'),('second',b''),('third',b'0021')]:
+        r=require(run([exe,'--bundle',pack,route,inp]));assert r.stdout==want and not r.stderr
+    r=run([exe,'--bundle',pack,'absent',inp]);assert r.returncode==2 and not r.stdout
+    # Both construction and runtime enforce the declared format boundary.
+    manifest.write_text(manifest.read_text().replace('first\tb\tbytes','first\tb\twrong'))
+    try: package_build([manifest])
+    except ValueError as e: assert 'format mismatch' in str(e)
+    else: raise AssertionError('bad manifest accepted')
+    for bad in [data[:-1],data.replace(b'D first b bytes',b'D first b wrong'),
+                data.replace(b'D first b bytes',b'D first a bytes'),
+                data.replace(b'bytes bytes 0',b'bytes bytes 9',1)]:
+        pack.write_bytes(bad);r=run([exe,'--bundle',pack,'first',inp])
+        assert r.returncode==2 and not r.stdout,(r.returncode,r.stderr)
+    print('network check: ok (inference, bounds, stream reset/failures, package sharing/formats/extents)')

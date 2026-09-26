@@ -2757,3 +2757,13 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - 同批删除 E3 对已定义 printf 的专用格式预扫描，直接 CALL；只有未定义 fallback 才要求字面量。b_printf3 动态格式通过且 macOS 网络产物实跑等于 cc。旧 234 项先保持，再扩至 235；chain/ELF 95→96。gen2.py 净 -11 行，4029 状态，JSON 22,169,415 B。不是新增 printf 规则，也未把规则放进执行器。
 - macOS ARM64 六网络文本合计 917,921 B；cc -O2 runtime __text 16,688 B / 文件 56,496 B（动态 libSystem 不计），网络/unisacc 构建 runtime __text 87,808 B / 文件 115,746 B（含库）。这是加载/IO/校验/执行合计，不是独立几 KB 内核。run.c 净 +43 行，用于重入、清理与字节流驱动。模型仍是显式六文件，尚未合成 E7 单份 payload，也没有对外切换 .com CLI。
 - 冻结 gate --com 70/70，JOBS=2，312 s aggregate；各套件 ≤60 s，最大 40 s，新增 nativecheck 39 s。fat 126/0，六目标 self-source 字节对齐。Linux/Windows 未启动 VM，单进程本轮实际运行仅 macOS ARM64。日志 /tmp/unisacc-stream-{native,network,gate}.log 与 /tmp/unisacc-call-keep.log。产品源码/.com 未改变，沿用 dec6553 的产物哈希；未推送、未发布。下一步仍须完成产品驱动/单份模型接入、紧凑内核与前端/错误路径缺口，目标未完成。
+
+
+### S-17：共享模型包与声明路线（2026-09-27）
+
+- 新增构造期 pack.py：读显式 TSV 清单（路线、阶段、输入格式、输出格式、网络路径），按完整网络字节去重。runtime `--bundle PACKAGE ROUTE INPUT [SRCPATH] [INCLUDE_DIR]` 只读一个包，先核对目录、邻接格式、重复阶段、索引与范围，再复用既有 loadbytes/execute；不含 C 阶段或架构决策，不启动 Python。包格式 P1 及边界写入 exec/c/PACKAGE.md。发布 CLI 未改变。
+- image-stages.tsv 声明六段顺序和格式；elf.sh 用其顺序，构造与全域核对后写 route.tsv/models.pkg。原逐段文件路线仍作为比较对象。旧 pipeline/stages.tsv/run.py 仍是早期三段参考工具，没有冒称所有历史工具已共用唯一清单；独立格式检查与产品参数接入仍需收敛。
+- 六目标 36 个条目合为 21 份唯一网络：原分散网络合计 5,595,439 B，单包 2,555,823 B，gzip-9 参考值 359,340 B（运行器不解压）；SHA256 `5b69ca54701e191f7b7f59aee9537532f514f8d889a3337539d49823618ae379`。合包的 hello 六目标镜像均等于各自散文件路线。另在门禁中，各目标完整 unisacc.c 从各自包生成的镜像均与逐段及产品参考相同；没有把 hello 合包测试写成六目标合包的完整自源码实跑。
+- cc/unisacc 的 netcheck 通过共享体、路线选择、格式失配、重复阶段、越界索引、截断包；nativecheck 在 cc、unisacc、网络构建执行器上从包重建 runtime，输出相同。ASan+UBSan 对包内 hello 和 runtime 全六段通过、无报告；E3 对新增包加载器源码仍 equal。单目标 macOS ARM64 包 918,211 B。
+- 规模：cc -O2 runtime __text 18,636 B，文件 57,648 B，gzip-9 15,780 B；网络/unisacc runtime __text 92,452 B，文件 115,746 B，gzip-9 21,090 B。动态 libSystem 不计入 cc 文件，unisacc 包含随带库；这些都是整个工具而非独立内核。运行器净 +66 行用于目录与加载，未增加模型动作。几 KB 内核和 .com 内嵌单份模型仍未达成，包也未包含产品内嵌头文件资源。
+- 冻结 gate --com 70/70，JOBS=2，360 s aggregate；各套件 ≤60 s，nativecheck 53 s（余量仅 7 s），六目标包自源码各 29–33 s。fat 126/0、chain 96/96。macOS 实际执行，Linux/Windows 本轮未启动 VM，仅生成字节对齐。日志 /tmp/unisacc-package-{native,network,gate}.log；六目标合包产物 /tmp/unisacc-package-six/all.pkg。产品源码/.com 未改，沿用 dec6553 的哈希。未推送、未发布；cc-unisacc 继续暂停。

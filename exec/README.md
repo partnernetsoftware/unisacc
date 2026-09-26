@@ -172,3 +172,21 @@ propagation. `c/nativecheck.sh` compares the chain against the six-process
 route using cc-, unisacc- and network-built runtimes, including runtime
 self-reconstruction. This is preparation for product integration, not a new
 `.com` CLI, a single embedded model package, or completion of E7.
+
+
+## A shared model package
+
+Network construction now also writes `OUT/models.pkg`, using the ordered
+format declarations in `pipeline/image-stages.tsv`. Run it without Python:
+
+```sh
+perl -e 'alarm 60; exec @ARGV' env UNISA_MAXSTEPS=400000000000 \
+  OUT/run --bundle OUT/models.pkg osx/arm64 examples/hello.c examples/hello.c "$PWD/include" > hello.image
+```
+
+Choose the route that was constructed; the runtime does not infer a target
+from the host. `python3 exec/c/pack.py -o all.pkg OUT1/route.tsv OUT2/route.tsv`
+combines explicit routes and stores equal network bodies once. See
+[c/PACKAGE.md](c/PACKAGE.md) for the directory and execution contract. The
+package is an external development input; embedding it in `.com`, preserving
+the product CLI and isolating the small execution core remain unfinished.

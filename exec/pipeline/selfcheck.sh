@@ -32,6 +32,11 @@ b "$UA" -O2 -b "$TARGET" -S unisacc.c -o "$T/ref.tape"
 [ -s "$T/unisacc.e4" ] && cmp "$T/ref.tape" "$T/unisacc.e4"
 b "$UA" -O2 -b "$TARGET" unisacc.c -o "$T/ref.elf"
 [ -s "$T/unisacc.$IMAGE" ] && cmp "$T/ref.elf" "$T/unisacc.$IMAGE"
+if [ "$MODEL" = net ]; then
+    b env UNISA_MAXSTEPS=400000000000 "$T/run" --bundle "$T/models.pkg" "$TARGET" unisacc.c unisacc.c "$R/include" > "$T/pack.image"
+    cmp "$T/pack.image" "$T/unisacc.$IMAGE"
+    echo "package self-source $TARGET: same image as separate stages"
+fi
 # Execute the resulting compiler only on a host that can run this image.
 case "$(uname -s)/$(uname -m):$TARGET" in
     Darwin/arm64:osx/*|Darwin/x86_64:osx/x86_64)

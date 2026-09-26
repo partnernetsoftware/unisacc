@@ -50,6 +50,11 @@ for exe in [p/'run',ua,netrun]:
         want=p/(pathlib.Path(src).stem+'.macho')
         if got!=want.read_bytes():raise SystemExit(f'{exe} in-memory chain differs: {src}')
 print('stream chain: three runtime builds, including network self-rebuild, equal')
+for exe in [p/'run',ua,netrun]:
+    got=run([exe,'--bundle',p/'models.pkg','osx/arm64','exec/c/run.c','exec/c/run.c',root/'include'])
+    if got!=netrun.read_bytes():raise SystemExit(f'{exe} packaged self route differs')
+print('package: three runtime builds reproduce the network runtime image')
+
 
 # Both buffered host stdio and the unbuffered carried libc must report a
 # real short output. Only the disposable output file has its size limited.

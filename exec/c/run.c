@@ -5,6 +5,7 @@
 
        run TABLE INPUT [SRCPATH] [INCLUDE_DIR]
        run --chain INPUT SRCPATH INCLUDE_DIR MODEL...
+       run --bundle PACKAGE ROUTE INPUT [SRCPATH] [INCLUDE_DIR]
 
    INCLUDE_DIR (where the bundled headers are) should be ABSOLUTE: a relative
    one read from another CWD is ENOENT, i.e. "absent", not an error.
@@ -101,8 +102,8 @@ static int *SMODE; static int **ROWK, **ROWN, **ROWQ; static int *ROWC;
 
 static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
 
-static void load(const char *path) {
-    LB = readfile(path, &LN, 0); LP = 0;
+static void loadbytes(unsigned char *data, int len) {
+    LB = data; LN = len; LP = 0;
     int kind = lchar(); NS=lint(); NQ=lint(); NRG=lint(); NSTR=lint(); START=lint();
     if ((kind != 'T' && kind != 'N') || NS <= 0 || NQ <= 0 || NRG < 0 || NSTR < 0 || START < 0 || START >= NS) die("bad header");
     ISNET = kind == 'N'; TOPMAX = NS - 1;
@@ -161,13 +162,67 @@ static void load(const char *path) {
             for (int j = 0; j < n; j++) { int k=lint(), nx=lint(), q=lint(); if (k < 0 || k > 256 || nx < -1 || nx >= NS) die("bad row"); ROWN[s][k] = nx; ROWQ[s][k] = q; }
         }
     }
-    lskip(); if (LP != LN) die("trailing model data"); free(LB); LB=0;
+    lskip(); if (LP != LN) die("trailing model data");
     if (!ISNET) {
         for (int s = 0; s < NS; s++) if (SMODE[s] == 1)
             for (int j = 0; j < ROWC[s]; j++) if (ROWK[s][j] > TOPMAX) TOPMAX = ROWK[s][j];
         for (int i = 0; i < NQA; i += 1 + ARITY[QA[i]])
             if (QA[i] == PUSH && QA[i+1] > TOPMAX) TOPMAX = (int)QA[i+1];
     }
+}
+
+static void load(const char *path) {
+    int n = 0; unsigned char *data = readfile(path, &n, 0);
+    loadbytes(data, n); free(data); LB = 0;
+}
+
+/* A package carries generic named byte-stream routes, not compiler stages.
+   Shared model spans are kept once. All directory bounds and format edges
+   are checked before a route is executed. Model bodies use the same loader. */
+typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
+static unsigned char *PB; static int PN, PM, PS;
+static int *POFF, *PLEN; static Stage *STAGES;
+static char *pword(void) {
+    lskip(); int first = LP;
+    while (LP < LN && LB[LP] > 32) {
+        int c = LB[LP++];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' || c == '/')) die("bad package name");
+    }
+    int n = LP-first; if (!n) die("missing package name");
+    char *v = xrealloc(0, n+1); memcpy(v, LB+first, n); v[n] = 0; return v;
+}
+static void package(const char *path) {
+    PB = readfile(path, &PN, 0); LB = PB; LN = PN; LP = 0;
+    ltag('P'); if (lint() != 1) die("unknown package version");
+    PM = lint(); PS = lint();
+    if (PM <= 0 || PS <= 0 || PM > PN/8 || PS > PN/10) die("bad package count");
+    POFF = xrealloc(0, sizeof(int)*PM); PLEN = xrealloc(0, sizeof(int)*PM);
+    STAGES = xrealloc(0, sizeof(Stage)*PS);
+    for (int i = 0; i < PS; i++) {
+        ltag('D'); Stage *s = &STAGES[i];
+        s->route = pword(); s->name = pword(); s->in = pword(); s->out = pword(); s->model = lint();
+        if (s->model < 0 || s->model >= PM) die("bad package model index");
+        int previous = -1;
+        for (int j = 0; j < i; j++) if (!strcmp(s->route, STAGES[j].route)) {
+            if (!strcmp(s->name, STAGES[j].name)) die("duplicate package stage");
+            previous = j;
+        }
+        if (previous >= 0 && strcmp(STAGES[previous].out, s->in)) die("package format mismatch");
+    }
+    for (int i = 0; i < PM; i++) {
+        ltag('M'); int n = lint();
+        if (LP >= LN || LB[LP++] != 10 || n <= 0 || n > LN-LP) die("bad package model extent");
+        if (LB[LP] != 'N') die("package requires networks");
+        POFF[i] = LP; PLEN[i] = n; LP += n;
+    }
+    if (LP != LN) die("trailing package data");
+}
+static void unpackage(void) {
+    for (int i = 0; i < PS; i++) {
+        free(STAGES[i].route); free(STAGES[i].name); free(STAGES[i].in); free(STAGES[i].out);
+    }
+    free(STAGES); free(POFF); free(PLEN); free(PB);
 }
 
 /* Model lifetime is one stage. No model-specific state survives unload. */
@@ -448,21 +503,32 @@ finished:
 int main(int argc, char **argv) {
     if (argc == 4 && !strcmp(argv[1], "--check-net")) return checknet(argv[2], argv[3]);
     int chain = argc > 1 && !strcmp(argv[1], "--chain");
-    if ((!chain && argc < 3) || (chain && argc < 6)) {
-        fprintf(stderr, "usage: run MODEL INPUT [SRCPATH] [INCLUDE_DIR]\n       run --chain INPUT SRCPATH INCLUDE_DIR MODEL...\n");
+    int bundled = argc > 1 && !strcmp(argv[1], "--bundle");
+    if ((!chain && !bundled && argc < 3) || (chain && argc < 6) || (bundled && argc < 5)) {
+        fprintf(stderr, "usage: run MODEL INPUT [SRCPATH] [INCLUDE_DIR]\n       run --chain INPUT SRCPATH INCLUDE_DIR MODEL...\n       run --bundle PACKAGE ROUTE INPUT [SRCPATH] [INCLUDE_DIR]\n");
         return 2;
     }
-    const char *src = chain || argc > 3 ? argv[3] : argv[2];
-    if (argc > 4) INCDIR = argv[4];
-    Buf in = {0}; in.b = readfile(argv[2], &in.n, 0);
-    int first = chain ? 5 : 1, end = chain ? argc : 2;
+    int inputarg = bundled ? 4 : 2;
+    const char *src = argc > inputarg+1 ? argv[inputarg+1] : argv[inputarg];
+    if (argc > inputarg+2) INCDIR = argv[inputarg+2];
+    if (bundled) package(argv[2]);
+    Buf in = {0}; in.b = readfile(argv[inputarg], &in.n, 0);
+    int first = bundled ? 0 : chain ? 5 : 1, end = bundled ? PS : chain ? argc : 2;
+    int count = 0;
     for (int i = first; i < end; i++) {
-        load(argv[i]);
+        if (bundled) {
+            if (strcmp(STAGES[i].route, argv[3])) continue;
+            int m = STAGES[i].model;
+            loadbytes(PB+POFF[m], PLEN[m]);
+        } else load(argv[i]);
+        count++;
         Buf out = {0}; int rc = execute(in.b, in.n, src, &out);
         unload(); free(in.b);
-        if (rc) return rc;
+        if (rc) { if (bundled) unpackage(); return rc; }
         in.b = out.b; in.n = out.n;
     }
+    if (!count) die("unknown package route");
+    if (bundled) unpackage();
     if (fwrite(in.b, 1, in.n, stdout) != (size_t)in.n || fclose(stdout)) die("cannot write output");
     free(in.b); return 0;
 }
