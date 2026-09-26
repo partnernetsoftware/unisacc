@@ -56,6 +56,8 @@
 #   gold_audit  the type table against the system compiler, key by key:
 #               enumeration proves the net equals the gold, this asks
 #               whether the gold is C [A-50]
+#   prec_audit  the prec table against the system compiler: every ordered
+#               operator pair's grouping, by value (undetermined pairs listed)
 #   abi_audit   the syscall numbers against this machine's <sys/syscall.h>;
 #               each host checks its own column [A-51]
 #   layout      the data layout ENUMERATED, not sampled: every tape of up to
@@ -134,6 +136,7 @@ run docs       ./tests/docs.sh
 run kernel     ./tests/kernel.sh
 run tsvbuild   ./tests/tsvbuild.sh
 run gold_audit bash -c 'python3 tests/gold_audit.py'
+run prec_audit bash -c 'python3 tests/prec_audit.py'
 run abi_audit  bash -c 'python3 tests/abi_audit.py'
 run layout     ./tests/layout.sh
 run datashape  ./tests/datashape.sh

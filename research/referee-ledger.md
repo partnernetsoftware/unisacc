@@ -18,7 +18,8 @@ The ledger records facts only (2026-09-26, HEAD 827f2be). The enumeration (`unis
 | peep | none | `optpy`: the C -O0 tape run through `unisa/opt.py` vs C -O1/-O2 | through -O levels (`difftest_o`) | **not covered** (opt.py is off the compile path) |
 | opinfo | none | `optpy` | through -O levels | **not covered** |
 | enc, reloc, regmap | none (no disassembler referee yet) | `closure`: the C back end vs the Python back end, byte for byte on one tape | yes (`native`, `crossnative` run the images) | yes |
-| pp, parse, scope, irsel, binsel, prec, tyinfo, pfconv | none | — (not named yet) | yes | yes, except tyinfo and pfconv, which ablate does not list |
+| prec | **`prec_audit.py`**: cc's value for every ordered operator pair; 291 of 324 pairs separate the two groupings and all 291 agree; 33 are undetermined | — | yes | yes |
+| pp, parse, scope, irsel, binsel, tyinfo, pfconv | none | — (not named yet) | yes | yes, except tyinfo and pfconv, which ablate does not list |
 | isel, combo | — | off the C compiler's path | — | — |
 
-Honest totals: two of the 18 tables have a per-key external referee, and `type` is only partly covered by one. Every other table on the path is covered only end to end, through whole programs, plus agreement where the table says so. A stage with no external referee is registered here as such. Skipped is not passed.
+Honest totals: three of the 18 tables have a per-key external referee (`type` partly, `abi`, `prec`). Every other table on the path is covered only end to end, through whole programs, plus agreement where the table says so. A stage with no external referee is registered here as such. Skipped is not passed.
