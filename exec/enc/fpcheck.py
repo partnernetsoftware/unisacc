@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Execute delta-produced x86 FP bytes against host C arithmetic/conversions.
+"""Execute delta-produced x86/ARM64 FP bytes against host C arithmetic/conversions.
 
-Usage: fpcheck.py C_EXECUTOR DELTA.tbl. macOS uses an x86_64 host harness
-(Rosetta on arm64); Linux x86_64 runs natively. Other hosts exit 77, not pass.
+Usage: fpcheck.py C_EXECUTOR DELTA.tbl [arm64]. Default macOS uses an x86_64 host harness
+(Rosetta on arm64); Linux x86_64 runs natively. ARM64 mode currently requires macOS arm64. Other hosts exit 77, not pass.
 The reference encoder is not called here. Only defined conversion inputs are
 used. rbx is preserved by the harness because the tape ABI reserves it while
 host SysV treats it as callee-saved. Every subprocess is bounded at 60 s.
@@ -22,9 +22,12 @@ def run(cmd, **kw):
 
 
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit('usage: fpcheck.py C_EXECUTOR DELTA.tbl')
+    if len(sys.argv) not in (3,4) or (len(sys.argv)==4 and sys.argv[3]!='arm64'):
+        raise SystemExit('usage: fpcheck.py C_EXECUTOR DELTA.tbl [arm64]')
+    arm = len(sys.argv)==4
     darwin = sys.platform == 'darwin'
+    if arm and not (darwin and platform.machine()=='arm64'):
+        print('ARM64 fp execution skipped: requires macOS arm64'); return 77
     if not darwin and not (sys.platform.startswith('linux') and platform.machine() == 'x86_64'):
         print('fp execution not run: requires macOS Rosetta/x86_64 or Linux x86_64')
         return 77
@@ -34,13 +37,13 @@ def main():
         for op in OPS:
             binary = op[:3] in ('feq', 'flt', 'fle') or op[:4] in ('fadd', 'fsub', 'fmul', 'fdiv')
             inp = p / 'in.txt'
-            inp.write_text(op + ' rax, rdi' + (', rsi' if binary else '') + '\n')
+            inp.write_text(op + (' x0, x0' if arm else ' rax, rdi') + ((', x1' if arm else ', rsi') if binary else '') + '\n')
             blob = run([sys.argv[1], sys.argv[2], str(inp)], capture_output=True).stdout
             if not blob:
                 raise RuntimeError('no bytes for ' + op)
             name = ('_' if darwin else '') + 'probe_' + op
-            asm += ['.globl ' + name, name + ':', 'pushq %rbx',
-                    '.byte ' + ','.join(str(b) for b in blob), 'popq %rbx', 'ret']
+            asm += ['.globl ' + name, name + ':'] + ([] if arm else ['pushq %rbx']) + [
+                    '.byte ' + ','.join(str(b) for b in blob)] + ([] if arm else ['popq %rbx']) + ['ret']
             decls.append('extern U probe_' + op + '(U,U);')
             call = 'probe_' + op
             w = op[-2:]; typ = 'double' if w == '64' else 'float'; pack = 'd' if w == '64' else 's'
@@ -81,7 +84,7 @@ static int n,bad;
 static void check(char *op,U got,U want){n++;if(got!=want){bad++;printf("FAIL %s %llx != %llx\\n",op,got,want);}}
 '''+ '\n'.join(decls)+'\nint main(void){\n'+'\n'.join(checks)+'\nprintf("fp execution cases %d bad %d\\n",n,bad);return bad!=0 || n==0;}\n'
         (p/'check.c').write_text(source)
-        run(['cc', *(['-arch','x86_64'] if darwin else []), '-O2', '-fno-fast-math', str(p/'check.c'),str(p/'code.s'),'-lm','-o',str(p/'check')])
+        run(['cc', *(['-arch','arm64' if arm else 'x86_64'] if darwin else []), '-O2', '-fno-fast-math', str(p/'check.c'),str(p/'code.s'),'-lm','-o',str(p/'check')])
         run([str(p/'check')])
     return 0
 

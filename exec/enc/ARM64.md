@@ -17,7 +17,7 @@ selection and packing remain hand rules. A scaled positive offset is preferred,
 then signed imm9, otherwise MOVIMM plus ADD/SUB through x16. Fallback rejects
 an x16 base or store source, whose value would be clobbered. Direct forms
 allow them. Section-local labels, jump/jumpz/call are supported. Metadata, data-address
-layout, FP and images remain unsupported.
+layout and images remain unsupported.
 
 `ret` pops x17 from tape SP x7 and returns through x17. `callr` stores its
 continuation on that software stack before BLR. These are not host ABI calls.
@@ -37,7 +37,7 @@ Memory checks add 100 instructions / 768 bytes compared on both executors,
 four width/scratch rejects, and 64 native load/store cases checked with C
 memcpy and signed-width values.
 
-Current size: 524 states, 22,355 B compressed text table. The new gate entry is
+Current size: 744 states, 37,347 B compressed text table. The new gate entry is
 exec-arm. This does not change .com or claim complete ARM64 lowering/encoding.
 
 ## Section-local branches
@@ -73,3 +73,23 @@ armintcheck adds 28 reference instructions / 152 bytes on both runtimes,
 ten signed-domain/field-width/scratch rejections, and 24 native functions
 checked against C arithmetic and modular frame-address results. C division
 checks exclude division by zero and signed MIN/-1; no claim about C UB is made.
+
+## Floating-point forms
+
+All 24 seed FP operations now emit through integer executor actions. Values
+are bit patterns in GPRs, moved into v16/v17 for arithmetic and back afterwards.
+FARITH/FCMP_INV/FP_OPS are read declarations; the transfer, conversion and
+packing sequences are hand rules in armfp.py. No native FP executor action or
+runtime call to the reference encoder was added.
+
+Byte coverage: 72 operand/alias combinations, 960 bytes, both executors.
+Numerical coverage: the shared fpcheck.py harness runs 550 C comparisons on
+macOS arm64 (arithmetic, NaN/Inf comparisons, signed/unsigned conversions,
+precision changes and square root). Float-to-integer checks use representable
+inputs. The same 550-case harness and all 48 x86 encoding fixtures were rerun
+successfully after sharing the harness. These are finite test cases, not a
+proof over all floating-point bit patterns or rounding modes.
+
+Cross-target UB note: ARM integer division returns zero on zero divisor and
+MIN on signed MIN/-1; x86 IDIV traps. Neither is a C-defined-input equivalence
+obligation. The native C integer referee excludes these cases.

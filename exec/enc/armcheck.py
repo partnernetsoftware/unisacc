@@ -43,6 +43,8 @@ def main():
         branchcheck(sys.argv[1:],native_host)
         from armintcheck import check as intcheck
         intcheck(sys.argv[1:],native_host)
+        from armfpcheck import check as fpcheck
+        fpcheck(sys.argv[1:],native_host)
         if not native_host:
             print('ARM64 native assembler/execution: SKIPPED (needs macOS arm64)'); return
         # Separate assembler reference, never calls the Python encoder.

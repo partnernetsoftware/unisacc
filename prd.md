@@ -2262,3 +2262,17 @@ on both runtimes, ten domain/scratch rejections and 24 native functions checked
 against defined C arithmetic/frame results. 524 states / 22,355 B. No new full
 gate claim; product sources and .com unchanged. Metadata, setreg/address forms,
 FP, syscall setup and image/ARM-lowering integration remain outstanding.
+
+ARM64 FP follow-up: all 24 FP operations emit on the generic integer executor,
+with v16/v17 used by generated machine code. Opcode declarations are read from
+FARITH/FCMP_INV/FP_OPS; packing/conversion sequences remain hand rules. 72
+operand/alias fixtures / 960 bytes agree on both runtimes; the shared native
+C referee passes 550 cases on macOS arm64. x86's 48 fixtures, real hello/fib
+encoding/execution, and its 550 numerical cases were rerun successfully after
+the harness gained an explicit arm64 mode. 744 states / 37,347 B table. No full
+gate rerun or .com change is claimed. Reference equality and finite numerical
+cases are not full FP semantic proof.
+
+Cross-target known UB behaviour: ARM SDIV/UDIV return zero for divide by zero,
+and SDIV returns MIN for MIN/-1; x86 IDIV traps. C-defined-input tests exclude
+these cases, so a difference on them is not evidence of a delta regression.

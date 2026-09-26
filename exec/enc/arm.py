@@ -36,6 +36,8 @@ def build():
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15)}
     from armint import SPECS, install as install_int
     specs.update(SPECS)
+    from armfp import SPECS as FP_SPECS, install as install_fp
+    specs.update(FP_SPECS)
     specs.update({k: ('rrr', 7) for k in ENCSPEC['arm64']['alu3']})
     specs.update({k: ('rrr', 8) for k in ENCSPEC['arm64']['invcond']})
     p = P('START')
@@ -146,6 +148,7 @@ def build():
     from armbranch import install as install_branch
     install_branch(E,word)
     install_int(E,word)
+    install_fp(E,word)
     g.on('FAIL',range(257),'DEAD',E.rej('not covered: ARM64 operand or instruction'),'r')
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
