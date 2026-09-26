@@ -8,7 +8,7 @@
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             a2a290ba91cf
- *   unisa/front/lex.py           5d9702eecf8c
+ *   unisa/front/lex.py           67f2248c3a8a
  *   weights/built.json           20b5f05ffafd
  *   unisa/ckernel.py             0a6caab12790 */
 

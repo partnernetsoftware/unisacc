@@ -8,7 +8,7 @@
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             a2a290ba91cf
- *   unisa/front/lex.py           5d9702eecf8c
+ *   unisa/front/lex.py           67f2248c3a8a
  *   weights/built.json           20b5f05ffafd
  *   unisa/ckernel.py             0a6caab12790 */
 
@@ -12549,31 +12549,37 @@ int decode(int t, char *buf) {
         if (c == 92) {
             k = k + 1;
             c = src[tpos[t] + k] & 255;
-            if (c == 110) c = 10;
-            else { if (c == 116) c = 9; else {
-                   if (c >= 48) { if (c <= 55) {    /* \N, \NN, \NNN octal */
-                       int ov; int od;
-                       ov = 0; od = 0;
-                       while (od < 3) {
-                           c = src[tpos[t] + k] & 255;
-                           if (c < 48) break;
-                           if (c > 55) break;
-                           ov = ov * 8 + (c - 48);
-                           k = k + 1; od = od + 1;
-                       }
-                       k = k - 1;
-                       c = ov & 255;
-                   } }
-                   if (c == 114) c = 13; else {
-                   if (c == 120) {            /* \xNN */
-                       int h1; int h2;
-                       h1 = src[tpos[t] + k + 1] & 255;
-                       h2 = src[tpos[t] + k + 2] & 255;
-                       if (h1 >= 97) h1 = h1 - 87; else { if (h1 >= 65) h1 = h1 - 55; else h1 = h1 - 48; }
-                       if (h2 >= 97) h2 = h2 - 87; else { if (h2 >= 65) h2 = h2 - 55; else h2 = h2 - 48; }
-                       c = h1 * 16 + h2;
-                       k = k + 2;
-                   } } } }
+            if (c >= 48 && c <= 55) {       /* one to three octal digits */
+                int ov; int od;
+                ov = 0; od = 0;
+                while (od < 3 && k < tlen[t] - 1) {
+                    c = src[tpos[t] + k] & 255;
+                    if (c < 48 || c > 55) break;
+                    ov = ov * 8 + c - 48;
+                    k = k + 1; od = od + 1;
+                }
+                k = k - 1; c = ov & 255;
+            } else if (c == 120) {          /* all hex digits, within this literal */
+                int hv; int hd; int hn;
+                hv = 0; hn = 0; k = k + 1;
+                while (k < tlen[t] - 1) {
+                    hd = src[tpos[t] + k] & 255;
+                    if (hd >= 48 && hd <= 57) hd = hd - 48;
+                    else if (hd >= 65 && hd <= 70) hd = hd - 55;
+                    else if (hd >= 97 && hd <= 102) hd = hd - 87;
+                    else break;
+                    hv = (hv * 16 + hd) & 255;
+                    hn = hn + 1; k = k + 1;
+                }
+                if (hn == 0) { err_tok(t, "hex escape requires a digit"); return 0; }
+                k = k - 1; c = hv;
+            } else if (c == 110) c = 10;
+            else if (c == 116) c = 9;
+            else if (c == 114) c = 13;
+            else if (c == 97) c = 7;
+            else if (c == 98) c = 8;
+            else if (c == 102) c = 12;
+            else if (c == 118) c = 11;
         }
         buf[n] = c; n = n + 1;
         k = k + 1;

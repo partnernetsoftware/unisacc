@@ -89,7 +89,7 @@ def charclass(c):
     return "other"
 
 
-ESC = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\",
+ESC = {"a": "\a", "b": "\b", "f": "\f", "v": "\v", "n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\",
        '"': '"', "'": "'"}
 
 
@@ -100,7 +100,7 @@ def _escape(s, i):
     n = s[i + 1]
     if n == "x":
         j = i + 2
-        while j < len(s) and s[j] in "0123456789abcdefABCDEF" and j < i + 4:
+        while j < len(s) and s[j] in "0123456789abcdefABCDEF":
             j += 1
         return chr(int(s[i + 2:j], 16) & 0xFF), j
     if n in "01234567":                      # octal: one to three digits
