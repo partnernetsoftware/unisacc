@@ -21,6 +21,22 @@ def token_span(E, P):
     g.els('QS.gap', 'RET', [('JUMP','pe'), ('ADV',), ('LDI','tk',E.TK_STR)])
 
 
+def initializer(E, P, esc):
+    """Shared byte stores for automatic, global and block-static arrays.
+    The caller sets ibytes and INITADDR's storage descriptor. NEXT is read
+    once after the literal; address spelling remains in the shared helper.
+    """
+    P('STRINGINIT').a(('LDI','ioff',0),('LDI','str_done',0)).call('INITADDR').o('  .zero r1, 0, ').num('ibytes').o('\n').goto('SI.walk')
+    walk(E,P,esc,'SI.walk','SI.byte','SI.end')
+    P('SI.byte').branch({0:'SI.store'},'SI.bad',[('CMP','ioff','ibytes')])
+    P('SI.bad').branch({1:'DEAD.ginit'},'DEAD.linit',[('CMPI','imode',1)])
+    p=P('SI.store').o('  imm r0, ').num('bv').o('\n').call('INITADDR')
+    p.o('  .st [r1+0], r0, 1\n').a(('ALUI','add','ioff','ioff',1)).branch({1:'SI.done'},'SI.walk.w',[('CMPI','str_done',1)])
+    P('SI.end').branch({0:'SI.nul'},'SI.done',[('CMP','ioff','ibytes')])
+    P('SI.nul').a(('LDI','bv',0),('LDI','str_done',1)).goto('SI.store')
+    P('SI.done').call('NEXT').ret()
+
+
 def walk(E, P, esc, pre, body, done):
     """Decode [ps+1,pe-1) a byte at a time in bv; resume at pre+'.w'."""
     g = E.g

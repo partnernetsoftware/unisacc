@@ -69,6 +69,7 @@ job exec-native ./exec/c/nativecheck.sh
 job exec-net python3 ./exec/c/netcheck.py
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh
+job exec-multi ./exec/c/multicheck.sh
 job exec-memory ./exec/c/memorycheck.sh
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job exec-memx86 env MEMORY_ARCH=x86_64 ./exec/c/memorycheck.sh
@@ -85,6 +86,7 @@ job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
 job nativeboot  ./tests/nativeboot.sh
 job staticinit  ./tests/staticinit.sh
+job staticunits ./tests/staticunits.sh
 job cli         ./tests/cli.sh
 job ccparity    ./tests/ccparity.sh
 job run         ./tests/run.sh
@@ -96,7 +98,7 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 if [ "$COM" = 1 ]; then
     [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
-    for s in cli ccparity run multi diag hostile staticinit; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
+    for s in cli ccparity run multi diag hostile staticinit staticunits; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
     job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
 fi
 wait

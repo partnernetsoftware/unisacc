@@ -150,13 +150,13 @@ Build a driver with `cc -O2 exec/c/compiler.c -o driver` (or unisacc), and use
 development executable. The normal options currently connected are `-E`,
 `-S`/`-c`, `-b`/`-t TARGET`, `-O`/`-O0`/`-O1`/`-O2`, `-o`, `-D`/`-U`,
 `-include`, native `-run`, one `-I` directory,
-and one source file or stdin (`-`). The mode/target defaults match the current
+and source files or stdin (`-`). The mode/target defaults match the current
 product; `-b` without `-o` writes stdout, default image mode writes a.out/a.exe.
 No output is opened until the selected route accepts. File writes loop over
 partial writes and fail on a stopped write or failed close.
 
-This is staged adoption, not a CLI compatibility claim. Multiple
-translation units, dependency output, warning and
+This is staged adoption, not a CLI compatibility claim. Multiple `-E`
+outputs, dependency output, warning and
 instrumentation flags, and further optimisation aliases still need migration;
 unsupported options fail, with no reference fallback.
 The compiler does not overwrite the shipped unisacc.com. `compilercheck.sh`
@@ -207,8 +207,8 @@ retained backend's actual bk_run mappings, then tests native output, status,
 arguments and environment with cc/unisacc drivers. The normal image route
 continues to generate ELF/Mach-O/PE; absent process resources keep its old
 behaviour. The model rejects partial address bindings and argument-cell
-headers outside memory mode. Multiple translation units and exact diagnostic
-compatibility remain unfinished.
+headers outside memory mode. Multiple translation units now use the framing
+route described below; exact diagnostic compatibility remains unfinished.
 
 On Windows, `winprocess.c` enumerates this process's named PE32+ imports and
 provides `NUL process/import/lowercase-dll/ExactFunctionName` resources, each
@@ -241,3 +241,31 @@ Lima with a network-built driver equal to the reference-built ELF.
 the guest system cc, plus argv/environment/exit and explicit missing input.
 Run it in a copied test tree with an outer 60 s bound; each compile/run has
 a 15 s timeout. Linux x86_64 memory execution remains unmeasured.
+
+### Translation-unit boundaries
+
+For multiple files the driver runs the E2/E1 unit route separately with each
+source path and fresh runtime state. Thus macros, include guards and header
+selection do not leak between files. It frames each resulting byte stream as
+LE32 length plus bytes, without inspecting a token or rewriting a name.
+`parse2/units.py` constructs the shared framing/static-isolation network. It
+validates up to 64 frames, scans file-static declarations, preserves typed
+token bytes and supplies the product's `__uN` suffix for later units. This is
+a hand-written declaration rule compiled into a network, not a gold-table
+rule or a reduction in generator code. Inline aggregate static specifiers
+remain a named refusal; this does not claim every C declarator is covered.
+
+The merged stream carries unit markers. E3 retains a program-wide symbol,
+label and string pool, records the unit of each global declaration, and uses
+per-unit token ordinals for block statics. Local storage labels are
+`unit * MAXTOK + token` (the MAXTOK declaration is read at construction from
+front_pp.c), matching the corrected product. First-unit/single-file labels
+are unchanged. No instruction stream is linked or rewritten by the driver.
+
+`multicheck.sh` covers two existing pairs in both orders, O0/O1/O2 tapes,
+native memory execution, independent macro/guard/static-pointer initialisers,
+block-static storage isolation and failure before opening output. System cc
+is an independent behaviour referee; the current product is the tape oracle.
+The framing network is also enumerated against its table, with the Python
+action executor checking valid and malformed frames. `-E` with several inputs
+remains explicitly unsupported. No final default-product switch is implied.

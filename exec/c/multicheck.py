@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Multi-unit tape, native behaviour, preprocessing isolation and framing."""
+import json,pathlib,struct,subprocess,sys
+p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ua=sys.argv[3]
+def run(cmd,**kw):return subprocess.run(list(map(str,cmd)),capture_output=True,timeout=60,**kw)
+def ok(cmd,**kw):
+    r=run(cmd,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
+drivers=[p/'driver-cc',p/'driver-ua'];count=0
+pairs=[['tests/multi/m1.c','tests/multi/m2.c'],['tests/multi/n1.c','tests/multi/n2.c']]
+for pair in pairs:
+    for files in (pair,pair[::-1]):
+        for level in (0,1,2):
+            flags=['-t',target,'-O'+str(level)]
+            want=ok([ua,*files,*flags])
+            for driver in drivers:
+                got=ok([driver,'--models',p/'compiler.pkg',*files,*flags])
+                assert got==want,(files,level,driver);count+=1
+        want=ok([ua,'-run',*files,'-O2'])
+        for driver in drivers:
+            assert ok([driver,'--models',p/'compiler.pkg','-run',*files,'-O2'])==want
+    print('multi-unit both orders, O0/O1/O2 tapes and native memory:',pair,flush=True)
+# Each input starts preprocessing afresh, including macros and include guards.
+# Static pointer declarators and global initialisers use distinct unit names.
+(p/'local.h').write_text('#ifndef LOCAL_H\n#define LOCAL_H\n#define VALUE PICK\n#endif\n')
+a=p/'a.c';b=p/'b.c'
+a.write_text('#define PICK 2\n#include "local.h"\nstatic int value=VALUE; static int helper(void){return value;} int other(void); int main(void){return helper()*10+other();}\n')
+b.write_text('#define PICK 7\n#include "local.h"\nstatic int value=VALUE; static int helper(void){return value;} static int (*choose)(void)=helper; int other(void){return choose();}\n')
+ref=p/'reference';ok(['cc',a,b,'-o',ref]);r=run([ref]);assert r.returncode==27 and not r.stdout and not r.stderr
+for files in ([a,b],[b,a]):
+    want=ok([ua,*files,'-t',target])
+    for driver in drivers:
+        base=[driver,'--models',p/'compiler.pkg']
+        assert ok([*base,*files,'-t',target])==want
+        r=run([*base,'-run',*files]);assert (r.returncode,r.stdout,r.stderr)==(27,b'',b''),r
+        # Failure in a later unit must not truncate an existing destination.
+        out=p/'sentinel';out.write_bytes(b'preserve')
+        r=run([*base,a,p/'absent.c','-o',out]);assert r.returncode and out.read_bytes()==b'preserve'
+print('unit-local macros/guards/static function-pointer/global init: system cc exit 27, both orders',flush=True)
+for files in (['tests/multi/static1.c','tests/multi/static2.c'],['tests/multi/static2.c','tests/multi/static1.c']):
+    want=ok([ua,*files,'-t',target])
+    for driver in drivers:
+        base=[driver,'--models',p/'compiler.pkg']
+        assert ok([*base,*files,'-t',target])==want,files
+        r=run([*base,'-run',*files]);assert (r.returncode,r.stdout,r.stderr)==(19,b'',b''),r
+print('block-static unit namespaces: both orders, reference tapes and exit 19',flush=True)
+
+sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()));import sim
+d=json.loads((p/'units.json').read_text());loaded=sim.load(d)
+tokens=b'type=int\nid=main\n(\n)\n{\nreturn\nnum=0\n;\n}\neof\n10 tokens\n'
+framed=struct.pack('<I',len(tokens))+tokens
+path=p/'framed';path.write_bytes(framed)
+expected=b'@unit0\n'+tokens.split(b'eof\n')[0]+b'eof\n'
+assert ok([p/'run',p/'units.net',path])==expected
+r,out,_=sim.run(d,framed,'frame',loaded=loaded);assert r=='accept' and out==expected
+for bad in [b'',b'\1',b'\0'*4,framed[:-1],framed+b'\1',struct.pack('<I',len(tokens)+1)+tokens,framed[:-10]+b'x'*10]:
+    path.write_bytes(bad);r=run([p/'run',p/'units.net',path]);assert r.returncode!=0 and not r.stdout
+    verdict,_,_=sim.run(d,bad,'bad-frame',loaded=loaded);assert verdict!='accept'
+print('multi-unit:',count,'tape comparisons; bounded framing accepts/rejects on both executors')

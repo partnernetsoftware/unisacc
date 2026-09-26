@@ -67,6 +67,7 @@ static char *process_environment(int argc,char **argv,int i) {
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
+    const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -74,8 +75,8 @@ int main(int argc, char **argv) {
         else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
         else if (runit && src && a[0]!='-') {
             size_t len=strlen(a);
-            if (len>=2 && !strcmp(a+len-2,".c")) return clierror("multiple inputs not migrated");
-            argstart=i; break;
+            if (len>=2 && !strcmp(a+len-2,".c")) sources[nsources++]=a;
+            else { argstart=i; break; }
         }
         else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
@@ -102,14 +103,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-O1")) level = 1;
         else if (!strcmp(a,"-O2")) level = 2;
         else if (a[0]=='-' && a[1]) return clierror("option not migrated");
-        else { if (src) return clierror("multiple inputs not migrated"); src = a; }
+        else { sources[nsources++]=a; if (!src) src = a; }
     }
     if (!src) return clierror("expected a C source file");
+    if (nsources>1 && mode==1) return clierror("multiple preprocessing outputs not migrated");
     if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
     if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
     char route[96];
     int n = mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
-        snprintf(route,sizeof route,"%s/%s/O%d",target,mode==3 ? "run" : mode==2 ? "tape" : "image",level);
+        snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
@@ -140,8 +142,21 @@ int main(int argc, char **argv) {
 #endif
     }
     package(pkg ? pkg : argv[0]);
-    Buf in = {0}; in.b = !strcmp(src,"-") ? readstream(0,"stdin",&in.n) : readfile(src,&in.n,0);
-    int rc = runroute(route,&in,src);
+    Buf in = {0}; int rc=0;
+    if (nsources==1) in.b = !strcmp(src,"-") ? readstream(0,"stdin",&in.n) : readfile(src,&in.n,0);
+    else {
+        char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/unit",target);
+        for (int j=0;j<nsources;j++) {
+            Buf unit={0}; unit.b=!strcmp(sources[j],"-") ? readstream(0,"stdin",&unit.n) : readfile(sources[j],&unit.n,0);
+            rc=runroute(unitroute,&unit,sources[j]);
+            if (rc) { free(unit.b); break; }
+            for (int k=0;k<4;k++) bput(&in,(unit.n>>(8*k))&255,0);
+            for (int k=0;k<unit.n;k++) bput(&in,unit.b[k],0);
+            free(unit.b);
+        }
+    }
+    free(sources);
+    if (!rc) rc = runroute(route,&in,src);
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
         snprintf(route,sizeof route,"%s/memory",target);

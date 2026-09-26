@@ -5,6 +5,7 @@ Only construction: the runtime reads the resulting package without Python.
 import argparse
 from pathlib import Path
 import tempfile
+import subprocess,sys
 from pack import build
 
 def compiler_package(manifests, o1, includes):
@@ -20,6 +21,8 @@ def compiler_package(manifests, o1, includes):
         targets.add(target)
         names=[s[1] for s in stages]
         if names!=['e2','e1','e3','e4','lower','elf']: raise ValueError('unexpected image stages')
+        for _,name,inp,out,model in stages[:2]:
+            rows.append('\t'.join([target+'/unit',name,inp,out,str((path.parent/model).resolve())]))
         _,name,inp,out,model=stages[-1]
         rows.append('\t'.join([target+'/memory',name,inp,'memory-v1',str((path.parent/model).resolve())]))
         for suffix,last,opt in specs:
@@ -29,6 +32,22 @@ def compiler_package(manifests, o1, includes):
                 rows.append('\t'.join([target+'/'+suffix,name,inp,out,str(model)]))
                 if name==last: break
     with tempfile.TemporaryDirectory(prefix='compiler-package-') as td:
+        # Offline construction of the shared unit-framing network. Runtime
+        # does not invoke these Python tools or parse declarations in C.
+        here=Path(__file__).resolve().parent
+        uj=Path(td)/'units.json';ut=Path(td)/'units.tbl';un=Path(td)/'units.net'
+        for script,args in [(here.parent/'parse2/units.py',[uj]),(here/'tbl.py',[uj,ut]),(here/'net.py',[ut,un])]:
+            subprocess.run([sys.executable,str(script),*map(str,args)],check=True,timeout=60)
+        base=list(rows)
+        for target in sorted(targets):
+            for suffix,last,opt in specs:
+                if suffix=='pp': continue
+                route=target+'/multi/'+suffix
+                rows.append('\t'.join([route,'units','units.typed','tokens.typed',str(un)]))
+                for row in base:
+                    cols=row.split('\t')
+                    if cols[0]==target+'/'+suffix and cols[1] not in ('e2','e1'):
+                        cols[0]=route;rows.append('\t'.join(cols))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         return build([manifest],[('006864722f',includes)])
 

@@ -3,7 +3,14 @@ LOC encodes a static object's label as -(token ordinal + 1); positive slots
 still mean frame offsets or GMARK. No language primitive is added to run.c.
 """
 
-def install(E, P, TIX, SINIT, SIEND, LOC):
+def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS):
+    import pathlib,re
+    # Same bounded ordinal namespace as the product; single-unit labels stay
+    # unchanged. This is a declaration constant, not emitted reference code.
+    source=(pathlib.Path(E.ROOT)/'src/front_pp.c').read_text()
+    limits=re.findall(r'^#define MAXTOK ([0-9]+)\b',source,re.M)
+    assert len(limits)==1 and 0<int(limits[0])<(1<<25)
+    unit_span=int(limits[0])
     g = E.g
     # A first token walk assigns source ordinals, including skipped qualifiers.
     # Cache by byte position: later rewinds must not allocate another ordinal.
@@ -16,6 +23,7 @@ def install(E, P, TIX, SINIT, SIEND, LOC):
     P('SC.name').tok({E.TK_ID:'SC.id'}, ('rej','not covered: static declarator'))
     P('SC.id').a(('COPYW','ips','ps'),('COPYW','ipe','pe'),('COPYW','si_pos','tpos'),
         ('LDX','si_lab','tpos',TIX),('ALUI','sub','si_lab','si_lab',1),
+        ('ALUI','mul','si_unit','unit_epoch',unit_span),('ALU','add','si_lab','si_lab','si_unit'),
         ('LDI','prd',1),('LDI','drk',0)).call('NEXT').tok({'[':'SC.arr'},'SC.size')
     P('SC.arr').call('DIMS').goto('SC.size')
     P('SC.size').call('ELSZ').a(('ALU','mul','dsz','prd','es'),('COPYW','dar','drk'),
@@ -33,8 +41,12 @@ def install(E, P, TIX, SINIT, SIEND, LOC):
     P('SC.end').expect(';').call('NEXT').ret()
     # Scalar and aggregate initialization both emit once into the deferred __init blob.
     saved = ('si_pos','si_lab','si_out','v','bd','tb','td','dar','dsz')
-    P('SC.init').a(('OLEN','si_out'),('LDI','si_active',1)).vpush(*saved).call('NEXT').tok({'{':'SC.aggr'},'SC.scalar')
+    P('SC.init').a(('OLEN','si_out'),('LDI','si_active',1)).vpush(*saved).call('NEXT').tok({'{':'SC.aggr',E.TK_STR:'SC.string'},'SC.scalar')
     P('SC.aggr').a(('LDI','imode',2),('COPYW','inlabel','si_lab'),('COPYW','ivv','v'),('COPYW','ibytes','dsz')).call('INITLIST').vpop(*saved).goto('SC.cache')
+    P('SC.string').branch({1:'SC.scalar'},'SC.char',[('CMPI','dar',0)])
+    P('SC.char').call('CHARR').branch({1:'SC.strinit'},'SC.scalar',[('CMPI','u',1)])
+    P('SC.strinit').a(('LDI','t',1),('STX','tpos',SKIPS,'t'),('LDI','imode',2),
+        ('COPYW','inlabel','si_lab'),('COPYW','ibytes','dsz')).call('STRINGINIT').vpop(*saved).goto('SC.cache')
     P('SC.scalar').branch({1:'SC.expr'},('rej','not covered: static array initializer'),[('CMPI','dar',0)])
     P('SC.expr').call('EXPR').call('SC.nof32').call('ISDV').a(('COPYW','sdv','u')).vpop(*saved).a(
         ('LDX','vt','v',E.PTR),('LDX','vb','v',E.BASE)).call('SC.nof32').call('ISDV').branch({1:'SC.store'},'DEAD.dbl',[('CMP','u','sdv')])

@@ -395,6 +395,7 @@ SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
 POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
 TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
 SFLAT, MFLAT = 16 * POSSPAN, 17 * POSSPAN  # scalar slots in a struct/member
+GUNIT = 15 * POSSPAN  # global symbol -> last declaration unit epoch
 PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
 GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
 ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
@@ -630,9 +631,24 @@ def types():
 
 
 def build():
+    # Unit markers are emitted only by the model framing pass. Each scan's
+    # first marker resets the epoch; single-unit token dumps keep epoch zero.
+    E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
     E.tokenizer()
+    del g.st["NX"][1][64]
+    g.on("NX", [64], "MU0", [("ADV",)])
+    for i, c in enumerate(b"unit"):
+        g.on("MU"+str(i), [c], "MU"+str(i+1), [("ADV",)])
+        g.els("MU"+str(i), "DEAD", E.rej("not covered: unit marker"))
+    g.on("MU4", [48], "MUend", [("ADV",), ("LDI", "unit_epoch", 0), ("LDI", "ixcount", 0)])
+    g.on("MU4", [43], "MUend", [("ADV",), ("ALUI", "add", "unit_epoch", "unit_epoch", 1), ("LDI", "ixcount", 0)])
+    g.els("MU4", "DEAD", E.rej("not covered: unit marker"))
+    g.on("MUend", [10], "NEXT", [("ADV",)])
+    g.els("MUend", "DEAD", E.rej("not covered: unit marker"))
     from strings import token_span
     token_span(E, P)
+    from strings import initializer as string_initializer
+    string_initializer(E, P, ESC)
     E.prn()
     E.numout()
     E.fconv()
@@ -641,7 +657,7 @@ def build():
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
     from statics import install as static_install
-    static_install(E, P, TIX, SINIT, SIEND, LOC)
+    static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS)
     from initializers import install as init_install
     init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT)
     g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
@@ -668,7 +684,7 @@ def build():
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).call("INDEX").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
-    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "EN"}, bad("top-level construct"))
+    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", "type=extern": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "EN"}, bad("top-level construct"))
     # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
     p = P("EN")
     p.call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
@@ -708,22 +724,8 @@ def build():
     P("IN.eq").a(("LDX", "ips", "tpos", GINPS), ("LDX", "ipe", "tpos", GINPE)).branch({2: "IN.eq0"}, "DEAD.ginit", [("CMP", "ipe", "ips")])
     P("IN.eq0").call("NEXT").tok({E.TK_STR: "IN.s0"}, "IN.v")
     P("IN.s0").a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.v", [("CMPI", "t", 1)])
-    p = P("IN.s1")
-    p.a(("INTERN", "iv", "ips", "ipe"), ("LDX", "isz", "iv", GSZ), ("LDI", "ix", 0), ("LDI", "idn", 0))
-    p.o("  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n  .zero r1, 0, ").num("isz").o("\n").goto("IN.sw")
-    strwalk("IN.sw", "IN.sb", "IN.se")
-    p = P("IN.sb")
-    p.branch({0: "IN.sb1"}, "DEAD.ginit", [("CMP", "ix", "isz")])
-    p = P("IN.sb1")
-    p.o("  imm r0, ").a(("COPYW", "n", "bv")).call("PRN").goto("IN.sb2")
-    p = P("IN.sb2")
-    p.o("\n  .lea r1, g_").a(("SPAN2", "ips", "ipe")).o("\n").branch({1: "IN.sb3"}, "IN.sbo", [("CMPI", "ix", 0)])
-    P("IN.sbo").o("  imm r2, ").num("ix").o("\n  add64 r1, r1, r2\n").goto("IN.sb3")
-    P("IN.sb3").o("  .st [r1+0], r0, 1\n").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "IN.sd"}, "IN.sw.w", [("CMPI", "idn", 1)])
-    p = P("IN.se")          # the terminating 0, when the array has room for it
-    p.branch({0: "IN.s0z"}, "IN.sd", [("CMP", "ix", "isz")])
-    P("IN.s0z").a(("LDI", "bv", 0), ("LDI", "idn", 1)).goto("IN.sb1")   # the walker has popped: stop after it
-    P("IN.sd").call("NEXT").goto("IN.l")
+    P("IN.s1").a(("INTERN", "iv", "ips", "ipe"), ("LDX", "ibytes", "iv", GSZ),
+        ("LDI", "imode", 1), ("COPYW", "inps", "ips"), ("COPYW", "inpe", "ipe")).call("STRINGINIT").goto("IN.l")
     # Every non-string-array initializer was emitted once at its declaration.
     P("IN.v").a(("LDX", "gi_blob", "tpos", GIBLOB), ("LDX", "gi_end", "tpos", GIEND), ("INPUSH", "gi_blob")).goto("IN.vcopy")
     g.on("IN.vcopy", [256], "IN.vdone", [("INPOP",), ("JUMP", "gi_end")])
@@ -776,9 +778,10 @@ def build():
     p = P("GV.an")
     p.call("ELSZ").a(("ALU", "mul", "gsz", "prd", "es"), ("COPYW", "gar", "drk")).call("GV.emit").goto("GV.end")
     p = P("GV.emit")
-    p.a(("INTERN", "v", "fns", "fne"), ("LDX", "u", "v", LOC)).branch({1: "GV.record"}, "GV.storage", [("CMPI", "u", E.GMARK)])
+    p.a(("INTERN", "v", "fns", "fne"), ("LDX", "u", "v", LOC)).branch({1: "GV.epoch"}, "GV.storage", [("CMPI", "u", E.GMARK)])
+    P("GV.epoch").branch({1: "GV.record"}, "GV.storage", [("LDX", "u", "v", GUNIT), ("CMP", "u", "unit_epoch")])
     p = P("GV.storage")
-    p.o(".bss g_").a(("SPAN2", "fns", "fne")).o(" ").num("gsz").o("\n")
+    p.a(("STX", "v", GUNIT, "unit_epoch")).o(".bss g_").a(("SPAN2", "fns", "fne")).o(" ").num("gsz").o("\n")
     p.goto("GV.record")
     p = P("GV.record")
     p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", GSZ, "gsz"), ("LDI", "t", E.GMARK), ("STX", "v", LOC, "t"), ("STX", "v", E.BASE, "tb"), ("STX", "v", E.ARR, "gar"),
@@ -925,19 +928,8 @@ def build():
     p.a(("COPYW", "lpp", "tpos")).call("NEXT").tok({"{": "S.lbr", E.TK_STR: "S.ls"}, "S.din0")
     p = P("S.ls")           # (measured, s34) imm r2, S; sub64 r1, r6, r2; .zero; each byte then the 0 at S - k
     p.call("CHARR").branch({1: "S.ls1"}, "S.din0", [("CMPI", "u", 1)])   # char *p = "...": the expression path
-    p = P("S.ls1")
-    p.a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t"), ("COPYW", "isl", "s"), ("COPYW", "isz", "dsz"), ("LDI", "ix", 0), ("LDI", "idn", 0))
-    p.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n  .zero r1, 0, ").num("dsz").o("\n").goto("LS.w")
-    strwalk("LS.w", "LS.b", "LS.e")
-    p = P("LS.b")
-    p.branch({0: "LS.b1"}, "DEAD.linit", [("CMP", "ix", "isz")])
-    p = P("LS.b1")
-    p.o("  imm r0, ").a(("COPYW", "n", "bv")).call("PRN").a(("ALU", "sub", "t", "isl", "ix")).o("\n  imm r2, ").num("t")
-    p.o("\n  sub64 r1, r6, r2\n  .st [r1+0], r0, 1\n").a(("ALUI", "add", "ix", "ix", 1)).branch({1: "LS.d"}, "LS.w.w", [("CMPI", "idn", 1)])
-    p = P("LS.e")
-    p.branch({0: "LS.z"}, "LS.d", [("CMP", "ix", "isz")])
-    P("LS.z").a(("LDI", "bv", 0), ("LDI", "idn", 1)).goto("LS.b1")
-    P("LS.d").call("NEXT").tok({",": "S.dcm"}, "S.dend")
+    P("S.ls1").a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t"), ("COPYW", "isl", "s"),
+        ("COPYW", "ibytes", "dsz"), ("LDI", "imode", 0)).call("STRINGINIT").tok({",": "S.dcm"}, "S.dend")
     P("S.din0").a(("JUMP", "lpp")).call("NEXT").goto("S.din00")       # back to '=' (re-read) for the scalar path
     P("S.din00").branch({1: "S.din1"}, bad("array initialiser"), [("CMPI", "dar", 0)])
     # One initializer walker; only the address mode differs across storage classes.
