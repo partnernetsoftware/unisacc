@@ -19,10 +19,13 @@ Where the data comes from -- derived, not typed in:
   * token kinds, their names and order, the punctuators for maximal munch,
     the keywords: unisa.gold.TOKS (== TOKV in kernel/unisa_model.inc, checked);
   * the words that lex as `type`: unisa.front.lex.TYPEKW (== TYPEV, checked).
-Transcribed from src/front_pp.c lex()/charclass(), because they are declared
-nowhere else (listed here so the transcription is visible, see the design
-doc s5): the byte -> class partition, the GCC words that are dropped or
-skipped with their parenthesised argument, and the string/char prefixes.
+  * the byte -> class split and the attribute look-ahead's white space:
+    weights/gold/lexcls.tsv; the GCC words that are skipped with their
+    parenthesised argument or dropped, and the string/char prefixes:
+    weights/gold/lexword.tsv.  Both are declared data read with the gold-table
+    reader (unisa/tsvgold.py), and _check_decl() asserts they agree with
+    src/front_pp.c charclass()/lex() and src/front_parse.c's OPCH.
+Still transcribed: the number scanning rules (design doc s8).
 """
 import json
 import os
@@ -50,55 +53,107 @@ def _cvocab(name):
 assert _cvocab("TOKV") == tuple(TOKS), "TOKS != TOKV"
 assert _cvocab("TYPEV") == tuple(TYPEKW), "TYPEKW != TYPEV"
 
-# ---- transcribed from src/front_pp.c ---------------------------------------
-SKIPPAREN = ("__attribute__", "__asm__", "asm")          # word [ws] ( ... )
-DROP = ("__extension__", "__inline", "__inline__", "__restrict",
-        "__restrict__", "__const", "__volatile__", "__signed__")
-CHARPFX = ("L", "u", "U", "u8")                          # before ' : dropped
-STRPFX = ("L", "u", "U", "u8")                           # before " : kept
-WS_SKIP = (32, 9, 10, 13)                                # the attribute look-ahead
+# ---- declared data: weights/gold/lexcls.tsv, weights/gold/lexword.tsv ----------
+# Read with the gold-table reader (same input contract as every stage), then
+# checked against what src/front_pp.c actually does.
+from unisa.tsvgold import load_stage             # noqa: E402
+
+_G = os.path.join(ROOT, "weights", "gold")
+_LC = load_stage(os.path.join(_G, "lexcls.tsv"))
+_LW = load_stage(os.path.join(_G, "lexword.tsv"))
+_CLS = {}
+WS_SKIP = []                                             # the attribute look-ahead
+for (bv,) in _LC.keys():
+    c = EOF if bv == "eof" else int(bv)
+    lab = _LC.label(bv)
+    _CLS[c] = lab["c"]
+    if lab["attws"] == "yes":
+        WS_SKIP.append(c)
+WS_SKIP = tuple(WS_SKIP)
+_W = [(w, _LW.label(w)) for (w,) in _LW.keys()]
+SKIPPAREN = tuple(w for w, l in _W if l["gcc"] == "skipparen")   # word [ws] ( ... )
+DROP = tuple(w for w, l in _W if l["gcc"] == "drop")
+CHARPFX = tuple(w for w, l in _W if l["pfxch"] == "yes")         # before ' : dropped
+STRPFX = tuple(w for w, l in _W if l["pfxstr"] == "yes")         # before " : kept
 
 
 def isal(c):
-    return 97 <= c <= 122 or 65 <= c <= 90 or c == 95
+    return c != EOF and _CLS[c] == "A"
 
 
 def isdi(c):
-    return 48 <= c <= 57
+    return c != EOF and _CLS[c] == "d"
 
 
 def ishex(c):
     return isdi(c) or 97 <= c <= 102 or 65 <= c <= 70
 
 
+def charclass(c):                     # the declared split
+    return _CLS[c]
+
+
 PUNCTS = [t for t in TOKS if t and not isal(ord(t[0]))]
-OPCH = set(ord(t[0]) for t in PUNCTS) | {47, 42}
 
 
-def charclass(c):                     # src/front_pp.c charclass(), byte for byte
-    if c == EOF:
-        return "eof"
-    if c == 10:
-        return "nl"
-    if c in (32, 9, 13):
-        return "ws"
-    if isal(c):
-        return "A"
-    if isdi(c):
-        return "d"
-    if c == 34:
-        return "q"
-    if c == 39:
-        return "sq"
-    if c == 47:
-        return "slash"
-    if c == 42:
-        return "star"
-    if c == 46:
-        return "dot"
-    if c < 128 and c in OPCH:
-        return "punct"
-    return "other"
+# ---- agreement with the C lexer (src/front_pp.c, src/front_parse.c) ----------
+def _check_decl():
+    pp = open(os.path.join(ROOT, "src", "front_pp.c"), encoding="latin-1").read()
+    fp = open(os.path.join(ROOT, "src", "front_parse.c"), encoding="latin-1").read()
+    # the class names in charclass()'s return order are lex.tsv's `c` field order
+    cfield = [ln.rstrip("\n").split("\t")[2:] for ln in
+              open(os.path.join(_G, "lex.tsv"), encoding="utf-8") if ln.startswith("#field\tc\t")][0]
+    assert list(_LC.heads[0][1]) == cfield, "lexcls classes != lex.tsv c field"
+    body = re.search(r"int charclass\(int c\) \{(.*?)\n\}", pp, re.S).group(1)
+    # isal/isdi: the C ranges
+    def ranges(fn):
+        b = re.search(r"int %s\(int c\) \{(.*?)return 0;" % fn, pp, re.S).group(1)
+        rs = [(int(x), int(y)) for x, y in re.findall(r"c >= (\d+)\) \{ if \(c <= (\d+)\)", b)]
+        rs += [(int(x), int(x)) for x in re.findall(r"c == (\d+)\) return 1", b)]
+        return set(c for x, y in rs for c in range(x, y + 1))
+    AL, DI = ranges("isal"), ranges("isdi")
+    # OPCH: first bytes of TOKV, plus the ones front_parse.c adds by hand
+    opch = set(ord(t[0]) for t in TOKS if t) | set(int(x) for x in re.findall(r"OPCH\[(\d+)\] = 1", fp))
+    def cref(c):                                  # charclass(), statement by statement
+        if c == EOF:
+            k = int(re.search(r"c < 0\) return (\d+)", body).group(1))
+            return cfield[k]
+        for v, k in re.findall(r"if \(c == (\d+)\) return (\d+);", body):
+            if c == int(v):
+                return cfield[int(k)]
+        if c in AL:
+            return cfield[int(re.search(r"isal\(c\)\) return (\d+)", body).group(1))]
+        if c in DI:
+            return cfield[int(re.search(r"isdi\(c\)\) return (\d+)", body).group(1))]
+        if c < 128 and c in opch:
+            return cfield[int(re.search(r"OPCH\[c\]\) return (\d+)", body).group(1))]
+        return cfield[int(re.search(r"\n    return (\d+);", body).group(1))]
+    for c in range(257):
+        assert _CLS[c] == cref(c), "lexcls: byte %d is %s, charclass() says %s" % (c, _CLS[c], cref(c))
+    lx = pp[pp.index("/* ident */"):pp.index("/* a wide CHARACTER")]
+    sp = lx[:lx.index("k = j;")]
+    dr = lx[lx.index("__extension__") - 20:]
+    assert set(re.findall(r'srcis\(i, j - i, "(\w+)"\)', sp)) == set(SKIPPAREN), "SKIPPAREN != lex()"
+    assert set(re.findall(r'srcis\(i, j - i, "(\w+)"\)', dr)) == set(DROP), "DROP != lex()"
+    ws = lx[lx.index("k = j;"):lx.index("if (at(k) == 40)")]
+    assert set(int(v) for v in re.findall(r"at\(k\) == (\d+)", ws)) == set(c for c in WS_SKIP), "attws != lex()"
+    # prefixes, from the two branches of the ident action: before `'` and before `"`
+    def pfx(block):
+        one = set(chr(int(v)) for v in re.findall(r"at\(i\) == (\d+)", block[:block.index("j - i == 2")]))
+        two = re.findall(r"at\(i\) == (\d+)\) \{ if \(at\(i\+1\) == (\d+)", block)
+        return one | set(chr(int(x)) + chr(int(y)) for x, y in two)
+    w0 = pp.index("/* a wide CHARACTER")
+    w1 = pp.index("if (at(j) == 34) {", w0)
+    w2 = pp.index("kind = vfind(TOKV", w1)
+    assert pfx(pp[w0:w1]) == set(CHARPFX), "CHARPFX != lex()"
+    assert pfx(pp[w1:w2]) == set(STRPFX), "STRPFX != lex()"
+    # an adjacent literal may carry the same prefixes
+    nxt = pp[pp.index("the next literal may carry"):]
+    nxt = nxt[:nxt.index("if (at(q) == 34) { j")]
+    one = set(chr(int(v)) for v in re.findall(r"at\(q\) == (\d+)", nxt))
+    assert one == set(w for w in STRPFX if len(w) == 1) and "at(q + 1) == 56" in nxt, "STRPFX != adjacent literal"
+
+_check_decl()
 
 
 def load_lex_table():

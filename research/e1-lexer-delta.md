@@ -181,3 +181,10 @@ ACCEPT / REJECT k  k ∈ {unexpected character, stray char, unreachable}
 
 
 **2026-09-26 更新**：参考实现已修正（`src/front_pp.c`，字符串或字符常量到文件尾仍未闭合时报 `missing terminating … character`，不再越界读一个字节），δ 同步改为在字面量起点拒绝。重跑：lexdiff 语料 103/103、探针 15/15、`unisacc.c` 1/1 全部相同。
+
+**2026-09-26 更新（§8 的三项声明）**：字节到类的划分（连同 `__attribute__` 前瞻的空白集合）
+与跳过/丢弃的 GCC 词、字符串/字符前缀，现以数据声明于 `weights/gold/lexcls.tsv`
+（257 键）与 `weights/gold/lexword.tsv`（15 键），格式即 gold 表格式、由
+`unisa/tsvgold.py` 读取；`gen.py` 由其推导，并逐字节/逐词断言与
+`src/front_pp.c` 的 `charclass()`/`lex()` 及 `src/front_parse.c` 的 `OPCH` 一致。
+生成的 δ 与改动前逐字节相同。数的扫描规则仍是转写。
