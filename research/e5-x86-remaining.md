@@ -23,10 +23,10 @@ A few terms used in the table:
 | push pop | migrated | hand (50+r / 58+r, REX.B) | no |
 | nop | migrated | hand (90) | no |
 | .frame | migrated | hand (alu_imm: sub/add by |n|, imm8/imm32); the SP register read from REGMAP x86 r7 | no |
-| .div .mod .udiv .umod | not migrated | hand (cqo/xor rdx, idiv/div, rdx/rax save) | no |
+| .div .mod .udiv .umod | migrated (non-stack tape registers) | hand sequence; shared ALU/MEM encoders, REGMAP/NUM read | no |
 | .zero | migrated | hand (xor r11 once; the widest store 8/4/2/1 that fits, via the migrated store forms) | no |
 | FP_OPS (fadd64 … cvt*) | not migrated | hand (SSE via xmm0/1, movq) | no |
-| setreg (imm/reg) | not migrated | hand | no |
+| setreg (imm/reg) | migrated | hand | no |
 | setreg (addr/mem), setmem, .lea | not migrated | hand (rip-relative) | **yes**: text_va, the shift, syms |
 | itoa | not migrated | hand (a fixed digit loop) | **yes**: data addresses |
 | gate, non-winapi form | not migrated | hand (0F 05 syscall; on Darwin with `carry`, jnc +3 / neg rax) | no |
@@ -46,3 +46,15 @@ A few terms used in the table:
 - Lowering (tape to TIns: lower.py, with the enc/abi/reloc/regmap tables) is untouched.
 - arm64 (emit_arm.py and its lowering peepholes) is untouched.
 - Images (ELF, Mach-O, PE) are untouched.
+
+## Integer division update
+
+The four division/remainder forms share one delta path for saving rax/rdx on
+the tape stack, encoding div/idiv, and restoring them. This remains a hand
+algorithm in the generator, not a new constructed truth table. The executor
+is unchanged. Declared operands are REGMAP x86 registers r0..r6; rsp and scratch
+registers are outside this slice. Six persistent alias fixtures and one hand
+byte sequence join the gate. A one-off exhaustive byte comparison over all
+4 × 7³ = 1,372 op/register combinations matched both executors to the reference
+(59,682 bytes); this is encoding evidence, not execution of division-by-zero
+or overflow cases, and not a C semantic proof.

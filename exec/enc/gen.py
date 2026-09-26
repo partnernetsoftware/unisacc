@@ -6,8 +6,9 @@ lowered instructions, as a delta for the generic executor.
 Input: TIns text, one instruction per line (`op arg, ...`; machine register
 names; integers).  Output: the machine code bytes, as unisa/emit_x86.encode
 writes them.  Ops: mov, imm, add64/sub64/xor64/and64/or64, mul64, load64,
-store64, .ld/.st (1, 2, 4, 8 bytes), the six setcc ops, ret; anything else is
-rejected as not covered.
+store64, .ld/.st (1, 2, 4, 8 bytes), setcc, register shifts, ret, jump/jumpz,
+call/callr, push/pop, nop, .frame, .zero, setreg imm/reg, spinit without an
+address, and .div/.mod/.udiv/.umod. Other forms are rejected as not covered.
 
 Read, not copied: catalog.ENCSPEC's alu2 opcodes and setcc bytes, and
 emit_x86.NUM's register numbers (the reference's declaration, read at generation
@@ -51,7 +52,7 @@ LABD = 74 * 10 ** 6                          # LABD[label id] = the index of the
 KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 6, 78 * 10 ** 6, 79 * 10 ** 6,
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
-C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT = range(1, 20)
+C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD = range(1, 24)
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -191,7 +192,7 @@ def build():
     E.prn()
     procs()
     p = P("START")
-    classes = {"setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
+    classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -327,7 +328,8 @@ def build():
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
               C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
-              C_SETREG: "E.setreg", C_SPINIT: "E.spinit"}, "DEAD.op", [("RLD", "cls")])
+              C_SETREG: "E.setreg", C_SPINIT: "E.spinit",
+              C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod"}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     # mov d, s
     p = P("E.mov")
@@ -361,6 +363,54 @@ def build():
             byte(p, 0x0F)
             byte(p, 0xAF)
             p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "a0"), ("COPYW", "mr_b", "src2")).call("MODRM").goto("NEXTL")
+    # Integer division/remainder: hand sequence from emit_x86, with the existing
+    # ALU/MEM encoders reused. Save rax/rdx in the tape stack (not push/pop).
+    # Operand domain is the non-stack tape registers; r11 is reserved scratch.
+    for nm, unsigned, remainder in (("div", 0, 0), ("mod", 0, 1), ("udiv", 1, 0), ("umod", 1, 1)):
+        P("E." + nm).a(("LDI", "dv_unsigned", unsigned), ("LDI", "dv_rem", remainder)).goto("DV.check")
+    p = P("DV.check")
+    p.branch({3: "DV.reg0"}, "DEAD.op", [("RLD", "na")])
+    allowed = tuple(NUM[r] for r in REGMAP["x86_64"][:7])
+    for i in range(3):
+        P("DV.reg%d" % i).branch({allowed: "DV.reg%d" % (i + 1) if i < 2 else "DV.save"}, "DEAD.op", [("RLD", "a%d" % i)])
+
+    def dmov(p, dst, src):
+        p.a(("LDI", "al_o", 0x89), ("LDI" if isinstance(dst, int) else "COPYW", "al_d", dst),
+            ("LDI" if isinstance(src, int) else "COPYW", "al_s", src)).call("ALU")
+
+    def dmem(p, opcode, reg, disp):
+        p.a(("LDI", "me_o1", opcode), ("LDI", "me_two", 0), ("LDI", "me_o2", 0),
+            ("LDI", "me_w", 1), ("LDI", "me_66", 0), ("LDI", "me_r", reg),
+            ("LDI", "me_b", SPREG), ("LDI", "me_d", disp)).call("MEM")
+
+    def dadj(p, ext):
+        p.a(("LDI", "rx_w", 1), ("LDI", "rx_r", 0), ("LDI", "rx_b", SPREG)).call("REX")
+        byte(p, 0x83)
+        p.a(("LDI", "mr_m", 3), ("LDI", "mr_r", ext), ("LDI", "mr_b", SPREG)).call("MODRM")
+        byte(p, 16)
+
+    p = P("DV.save")
+    dadj(p, 5)
+    dmem(p, 0x89, NUM["rax"], 0)
+    dmem(p, 0x89, NUM["rdx"], 8)
+    dmov(p, SCR, "a2")
+    dmov(p, NUM["rax"], "a1")
+    p.branch({1: "DV.u"}, "DV.s", [("RLD", "dv_unsigned")])
+    p = P("DV.u")
+    for b in (0x48, 0x31, 0xD2, 0x49, 0xF7, 0xF3): byte(p, b)
+    p.goto("DV.result")
+    p = P("DV.s")
+    for b in (0x48, 0x99, 0x49, 0xF7, 0xFB): byte(p, b)
+    p.goto("DV.result")
+    P("DV.result").branch({1: "DV.rem"}, "DV.quot", [("RLD", "dv_rem")])
+    p = P("DV.rem"); dmov(p, SCR, NUM["rdx"]); p.goto("DV.restore")
+    p = P("DV.quot"); dmov(p, SCR, NUM["rax"]); p.goto("DV.restore")
+    p = P("DV.restore")
+    dmem(p, 0x8B, NUM["rax"], 0)
+    dmem(p, 0x8B, NUM["rdx"], 8)
+    dadj(p, 0)
+    dmov(p, "a0", SCR)
+    p.goto("NEXTL")
     # memory: load64 r, base, disp / store64 base, disp, r / .ld r, base, disp, w / .st base, disp, r, w
     def mem(p, o1, o2=None, w=1, p66=0):
         p.a(("LDI", "me_o1", o1), ("LDI", "me_two", 1 if o2 is not None else 0), ("LDI", "me_o2", o2 or 0),
