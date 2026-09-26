@@ -296,6 +296,21 @@ def width(p, ptr, i4, i8):    # emit i8 if W[ptr] else i4
     p.cur = d
 
 
+def vwidth(p, ptr, bs, i4, i8, i1):   # a variable: W[ptr] >= 1 -> i8; else by W[bs]: 1 -> i1, 8 -> i8, else i4 (measured)
+    a, c, e, b, d = p.fresh("v8"), p.fresh("vc"), p.fresh("vl"), p.fresh("v4"), p.fresh("vd")
+    p.branch({(1, 2): a}, c, [("CMPI", ptr, 1)])
+    P(c).branch({1: e}, b, [("CMPI", bs, 1)])
+    P(b).branch({1: a}, d + "4", [("CMPI", bs, 8)])
+    P(a).o(i8).goto(d)
+    P(e).o(i1).goto(d)
+    P(d + "4").o(i4).goto(d)
+    p.cur = d
+
+
+LD = ("  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], 1\n")
+ST = ("  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, 1\n")
+
+
 def noptr(p):                 # arithmetic on a pointer is not in this step
     ok = p.fresh("np")
     p.branch({(1, 2): "DEADP"}, ok, [("CMPI", "pt", 1)])
@@ -380,8 +395,12 @@ def expr():
         lookup(q, "sps", "spe")
         noptr(q)
         addr(q, "r0")
-        q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH).call("NEXT").call("EXPR")
-        q.o(POP1 + optext(o) + POP1 + "  .st [r1+0], r0, 4\n").ret()
+        q.o(PUSH)
+        vwidth(q, "pt", "pb", *LD)
+        q.o(PUSH).vpush("pb").call("NEXT").call("EXPR").vpop("pb")
+        q.o(POP1 + optext(o) + POP1)
+        vwidth(q, "pt", "pb", *ST)
+        q.ret()
     # *E = e  |  *E as an rvalue.  E is a pointer value (PV): W[pt] = its depth
     p = P("EXPR.st")
     p.call("NEXT").call("PV").call("PVCHK")
@@ -456,8 +475,8 @@ def expr():
     p = P("EXPR.as")
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    p.o(PUSH).vpush("pt").call("NEXT").call("EXPR").vpop("pt").o(POP1)
-    width(p, "pt", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    p.o(PUSH).vpush("pt", "pb").call("NEXT").call("EXPR").vpop("pt", "pb").o(POP1)
+    vwidth(p, "pt", "pb", *ST)
     p.ret()
     p = P("NOPTR")
     noptr(p)
@@ -475,8 +494,11 @@ def expr():
         lookup(q, "ps", "pe")
         noptr(q)
         addr(q, "r0")
-        q.o(PUSH + "  .ld r0, [r0+0], 4\n  imm r1, 1\n  %s r0, r0, r1\n" % sp + POP1
-            + "  .st [r1+0], r0, 4\n").call("NEXT").ret()
+        q.o(PUSH)
+        vwidth(q, "pt", "pb", *LD)
+        q.o("  imm r1, 1\n  %s r0, r0, r1\n" % sp + POP1)
+        vwidth(q, "pt", "pb", *ST)
+        q.call("NEXT").ret()
     for nm, txt in (("U.neg", "  imm r1, 0\n  sub64 r0, r1, r0\n"), ("U.not", "  imm r1, 0\n  eq r0, r0, r1\n"),
                     ("U.cpl", "  imm r1, -1\n  xor64 r0, r0, r1\n")):
         P(nm).call("NEXT").call("UNARY").o(txt).ret()
@@ -495,12 +517,15 @@ def expr():
         lookup(q, "sps", "spe")
         noptr(q)
         addr(q, "r0")
-        q.o(PUSH + "  .ld r0, [r0+0], 4\n" + PUSH + "  imm r0, 1\n" + POP1 + optext(o) + POP1
-            + "  .st [r1+0], r0, 4\n  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
+        q.o(PUSH)
+        vwidth(q, "pt", "pb", *LD)
+        q.o(PUSH + "  imm r0, 1\n" + POP1 + optext(o) + POP1)
+        vwidth(q, "pt", "pb", *ST)
+        q.o("  imm r2, 1\n  %s r0, r0, r2\n" % undo).call("NEXT").ret()
     p = P("IT.var")
     lookup(p, "sps", "spe")
     addr(p, "r0")
-    width(p, "pt", "  .ld r0, [r0+0], 4\n", "  load64 r0, [r0+0]\n")
+    vwidth(p, "pt", "pb", *LD)
     p.ret()
     p = P("IT.call")
     p.a(("INTERN", "v", "sps", "spe"), ("LDX", "t", "v", FND))
@@ -657,8 +682,8 @@ def stmt():
     p = P("S.decl")
     p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg"}, "S.dnx")
     P("S.dint").a(("LDI", "bni", 0), ("LDI", "bsz", 4)).goto("S.dnx")
-    P("S.dch").a(("LDI", "bsz", 1)).goto("S.dnx")
-    P("S.dlg").a(("LDI", "bsz", 8)).goto("S.dnx")
+    P("S.dch").a(("LDI", "bni", 0), ("LDI", "bsz", 1)).goto("S.dnx")
+    P("S.dlg").a(("LDI", "bni", 0), ("LDI", "bsz", 8)).goto("S.dnx")
     P("S.dnx").call("NEXT").tok(dict((w, "S.dw") for w in TWORDS), "D.one")
     P("S.dw").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).goto("S.dnx")
     p = P("D.one")
@@ -669,7 +694,7 @@ def stmt():
     p = P("D.init")
     p.vpush("s", "ptd", "bni", "bsz").call("NEXT").call("EXPR").vpop("s", "ptd", "bni", "bsz")
     addr(p, "r1")
-    width(p, "ptd", "  .st [r1+0], r0, 4\n", "  store64 [r1+0], r0\n")
+    vwidth(p, "ptd", "bsz", *ST)
     p.goto("D.next")
     p = P("D.next")
     p.tok({",": "D.comma", ";": "S.empty"}, ("rej", "not covered: declaration"))
