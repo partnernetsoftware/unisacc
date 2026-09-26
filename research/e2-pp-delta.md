@@ -277,3 +277,15 @@ In order: function-like invocation (the P4 design above, including B1-faithful
 argument saving), `#`/`##` in function-like bodies, `#if` (§4), `autoinc`
 (P2, or a listed trusted component), the DIAG pass, then `pushpop`, `-D/-U/-I`.
 The measurement above says nothing about the size of those parts.
+
+## 10. Against the fixed reference (2026-09-26, main 61e4044)
+
+The reference now expands on tokens (f74b61a, Prosser hide sets) and pads
+replacements with spaces: `((FILE *)1)` is emitted as `( ( FILE * ) 1 )`.
+The byte-segment P4 of this slice reproduces the OLD textual expansion, so
+object-like expansion itself now differs: shard ex.aa = 17 equal, 2 DIFF
+(tests/c/a_callres.c: spacing of an expanded body), 1 not covered; table
+154 states, dense 161376 B, sparse 9127 B, pool 3882 B. Function-like
+calls are not yet added: P4 must first be re-cut as a token-level pass
+(token emitted with its hide set, body re-tokenised with inter-token
+spaces) before function-like argument collection is layered on it.
