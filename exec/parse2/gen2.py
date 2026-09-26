@@ -182,7 +182,7 @@ def tytail():
     """the operator-independent halves of the integer tail, once for every operator"""
     q = P("CKM")
     q.a(("LDI", "cku", 0))
-    for w, m in ((1, 255), (2, 65535), (4, 4294967295)):
+    for w, m in [(sz, (1 << (8 * sz)) - 1) for t, vb, sz, un, nr in TYINT if un and sz < 8]:
         q.branch({1: "CKM.m%d" % w}, (nx := "CKM.k%d" % w), [("CMPI", "ck", AX.index("u%d" % (8 * w)))])
         P("CKM.m%d" % w).o("  imm r2, %d\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" % m).a(("LDI", "cku", 1)).ret()
         q = P(nx)
@@ -190,8 +190,7 @@ def tytail():
     P("CKM.u").a(("LDI", "cku", 1)).ret()
     q = P("RESD")        # res: an unsigned result below 8 bytes is masked (zext); the descriptor is res's
     q.a(("LDI", "vt", 0))
-    for name, code, m in (("i32", 4, None), ("i64", 8, None), ("u64", UNS + 8, None), ("u32", UNS + 4, 4294967295),
-                          ("u16", UNS + 2, 65535), ("u8", UNS + 1, 255), ("i16", 2, None), ("i8", 1, None)):
+    for name, code, m in [(t, vb, (1 << (8 * sz)) - 1 if un and sz < 8 else None) for t, vb, sz, un, nr in TYINT]:
         hit, nx = "RESD." + name, "RESD.n" + name
         q.branch({1: hit}, nx, [("CMPI", "rs", AX.index(name))])
         h = P(hit)
@@ -370,8 +369,7 @@ def printf():
 
 
 UNS = E.UNS   # unsigned char/short/int/long: UNS + size
-UIM = "  imm r2, 4294967295\n  and64 r0, r0, r2\n"   # an unsigned int kept to 32 bits (measured)
-SBB = 1000   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
+SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
 STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
 FPB = E.FPB   # a function pointer: depth 1, base FPB (its call result is taken as int)
 DBL = E.DBL
@@ -379,12 +377,15 @@ DBL = E.DBL
 # binary() asks two rows: ck = type(t1 "+" t2), the common type the operands are converted to
 # (its signedness picks the spelling, a width below 8 masks both), and res = type(t1 op t2), the
 # result (unsigned below 8: masked).  E3 reads the same rows instead of re-deriving them.
-AX = ["void", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "ptr", "arr", "struct", "fn", "f32", "f64", "illegal"]
+AX = [f[0] for f in E.gold("tyinfo") if f[1].isdigit()]   # the type axis, in tyinfo's own order (16 names)
 TYROW = {(f[0], f[1], f[2]): f[3] for f in E.gold("type")}
 TYINFO = {f[0]: (int(f[1]), int(f[2]), int(f[3])) for f in E.gold("tyinfo") if f[1].isdigit()}   # t -> (size, uns, narrow)
 # the integer rows of tyinfo as value-descriptor codes: an unsigned type is UNS + size (E3's encoding)
 TYINT = [(t, (UNS if TYINFO[t][1] else 0) + TYINFO[t][0], TYINFO[t][0], TYINFO[t][1], TYINFO[t][2])
          for t in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")]      # (t, vb, size, uns, narrow)
+U32M = (1 << (8 * TYINFO["u32"][0])) - 1          # an unsigned int kept to 32 bits (measured), from tyinfo
+UIM = "  imm r2, %d\n  and64 r0, r0, r2\n" % U32M
+assert TYINFO["u32"][1] == 1
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
@@ -924,7 +925,7 @@ def build():
         P("X.c%s.v3" % o).branch({1: "X.c%s.U" % o}, "X.c%s.v4" % o, [("CMPI", "rvb", UNS + 8)])   # an unsigned long right side: the unsigned spelling (p50)
         P("X.c%s.v4" % o).branch({1: "DEAD.ui"}, "X.c%s.n" % o, [("CMPI", "rvb", UNS + 4)])
         P("X.c%s.w" % o).branch({1: "DEAD.ui"}, "X.c%s.w1" % o, [("CMPI", "rvb", UNS + 8)])
-        P("X.c%s.w1" % o).o("  imm r2, 4294967295\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" + E.optext(o, True) + UIM).goto("X.c%s.st" % o)
+        P("X.c%s.w1" % o).o("  imm r2, %d\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" % U32M + E.optext(o, True) + UIM).goto("X.c%s.st" % o)
         q = P("X.c%s.n" % o)
         q.o(E.optext(o)).call("NARU").goto("X.c%s.st" % o)
         q = P("X.c%s.st" % o)
@@ -955,11 +956,15 @@ def build():
     q.branch({(1, 2): "TAX.s"}, "DEAD.w", [("CMPI", "vb", SBB)])
     P("TAX.s").a(("LDI", "ax", AX.index("struct"))).ret()
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
-    P("NARU.1").branch({1: "NARU.c"}, "NARU.2", [("CMPI", "vb", UNS + 1)])
-    P("NARU.2").branch({1: "NARU.s"}, "NARU.3", [("CMPI", "vb", UNS + 2)])
-    P("NARU.3").branch({1: "NARROW.m"}, "RET", [("CMPI", "vb", UNS + 4)])
-    P("NARU.c").o("  imm r2, 255\n  and64 r0, r0, r2\n").ret()
-    P("NARU.s").o("  imm r2, 65535\n  and64 r0, r0, r2\n").ret()
+    q = P("NARU.1")          # the unsigned narrow rows of tyinfo: masked back to their size
+    for t, vb, sz, un, nr in TYINT:
+        if not (un and sz < 8):
+            continue
+        hit, nx = q.fresh("h"), q.fresh("n")
+        q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
+        P(hit).o("  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << (8 * sz)) - 1)).ret()
+        q = P(nx)
+    q.ret()
     P("NARU.b").ret()
     P("STEPTY").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
     P("STY.s").goto("STY.s0")
@@ -1113,12 +1118,12 @@ def build():
     P("SFX.l").branch({1: "SFX.lo"}, "U.num0", [("CMPI", "nl", 1)])
     P("SFX.lo").a(("LDI", "t", 0), ("C64", "nv", "t")).branch({0: "DEAD.big"}, "U.long")
     P("SFX.u").branch({1: "U.ulong"}, "SFX.u4", [("CMPI", "nl", 1)])
-    P("SFX.u4").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.ulong"}, "U.ui")
+    P("SFX.u4").a(("LDI", "t", U32M), ("C64U", "nv", "t")).branch({2: "U.ulong"}, "U.ui")
     q = P("U.num0")      # an int constant; beyond int: long when it fits (printed as NUMOUT does)
     q.a(("LDI", "t", 2147483647), ("C64U", "nv", "t")).branch({2: "U.big"}, "U.num1")
     q = P("U.big")       # decimal beyond int: long; hex/octal: unsigned int up to 0xffffffff (not covered), then long up to LONG_MAX
     q.branch({1: "U.bh"}, "U.bl", [("CMPI", "nx", 1)])
-    P("U.bh").a(("LDI", "t", 4294967295), ("C64U", "nv", "t")).branch({2: "U.bl"}, "U.ui")
+    P("U.bh").a(("LDI", "t", U32M), ("C64U", "nv", "t")).branch({2: "U.bl"}, "U.ui")
     P("U.ui").o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", UNS + 4)).call("NEXT").ret()
     P("U.bl").a(("LDI", "t", 0)).a(("C64", "nv", "t")).branch({0: "U.bu"}, "U.long")
     P("U.bu").branch({1: "U.ulong"}, "DEAD.big", [("CMPI", "nx", 1)])     # hex beyond LONG_MAX: unsigned long, printed signed (p43)
