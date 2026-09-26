@@ -132,16 +132,22 @@ class Files:
     builds; values are bytes.  Backed by the disk (relative to cwd, as the
     reference reads it) -- data, not code."""
 
-    def __init__(self):
+    def __init__(self, bundled=None):
         self.cache = {}
+        self.bundled = bundled or BUNDLED     # where \0hdr/ points (run.c: its INCLUDE_DIR argument)
 
     def get(self, path):
         if path not in self.cache:
             try:
                 p = path.decode("latin-1")
                 if p.startswith("\0hdr/"):       # the bundled copies: include/ of this tree
-                    p = os.path.join(BUNDLED, p[5:])
-                self.cache[path] = open(p, "rb").read() if os.path.exists(p) else None
+                    p = os.path.join(self.bundled, p[5:])
+                try:
+                    os.stat(p)
+                    found = True
+                except FileNotFoundError:      # ENOENT only is absent (run.c: errno == ENOENT)
+                    found = False
+                self.cache[path] = open(p, "rb").read() if found else None
             except ValueError:
                 self.cache[path] = None
             # an OSError on a path that exists (unreadable, a directory) propagates: not absent
@@ -405,7 +411,7 @@ def main():
     path = sys.argv[2]
     x = open(path, "rb").read()
     try:
-        res, val, steps = run(delta, x, path)
+        res, val, steps = run(delta, x, path, Files(sys.argv[3]) if len(sys.argv) > 3 else None)
     except (RuntimeError, OSError) as ex:      # a bad table or an unreadable file: 2, as run.c
         sys.stderr.write("run: %s\n" % ex)
         return 2
