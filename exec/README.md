@@ -121,3 +121,11 @@ Source: f360ba0's unisacc.c, SHA256
 This closes the measured self-source route for six targets. Frontend coverage
 is still partial, runtime tables are not networks, Python still generates
 tables, and the shipped .com has not switched to this executor.
+
+E3 sizeof scalar expressions now reuse expression parsing and discard emitted
+instructions, including nested sizeof and unevaluated static-initializer
+operands. General non-scalar sizeof expressions still reject; named-array
+sizes retain the existing dimension path. The independent host-cc probe also
+corrected the product's sizeof result descriptor to unsigned 64-bit size_t.
+`keep-e3.txt` is 213 cases; the end-to-end source/tape and ELF lists are 74.
+These are fixed regression sets, not claims of complete C99 coverage.

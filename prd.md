@@ -2622,3 +2622,39 @@ Windows x86 PE transition table: 1,401 states; JSON 7,548,924 B, text table
 94,862 B. x86win.py 125 lines (setup and gate rules); no code-shrink claim.
 No push/release. The reviewer is paused at the owner's request and did not
 review this batch; the test and Windows execution evidence above is mine.
+
+### E3 sizeof expressions and reference type correction (2026-09-27)
+
+General scalar sizeof operands reuse UNARY/expression parsing, then discard
+emitted instructions using a stack-saved output mark. Static-initializer
+frame checks are suppressed only during that unevaluated walk and restored.
+The existing named-array/dimension path is retained; general non-scalar
+sizeof expressions remain explicitly not covered. No executor primitive or
+new hand type ladder: ELSZ derives the size from the existing descriptor.
+
+Independent cc execution of the new probe found a product defect that tape
+comparison alone had hidden: sizeof(sizeof x) was 4 in C, and sizeof returned
+a signed type in Python. Both frontends now return the compiler ABI's unsigned
+64-bit size_t; C resets the result kind instead of inheriting operand state.
+Regression tests/c/b_sizeoftype.c and exec/parse2/probes/s50.c: host cc,
+rebuilt .com at O0/O1/O2 and Python agree, exit 0. Nested sizeof is 8, unsigned
+comparisons agree, ++ and a function call inside sizeof have no side effect.
+
+Before growing lists, old keep-e3 207 all pass; full exploration: 258 files,
+221 equal, 37 not-covered, 0 DIFF/tool-fail/LOST. Six additions are fixed:
+s50, b_sizeoftype, b_notint, b_shift, b_condkind, b_longand. Source-to-tape:
+old 68 plus these six = 74/74 equal, no rejection or loss. Five new cases
+(excluding b_longand) ran through all six deltas to macOS ARM64 images:
+whole image equals reference, native output/exit equals host cc. Logs:
+/tmp/unisacc-e3-sizeof-fixed.log and /tmp/unisacc-sizeof-chain.log.
+Rebuilt .com: 1,345,824 B, SHA256
+`dfb14d6bb8f0df5a774feec3fd8a78fb9dc6b255e473026172244c782da58f5c`.
+Earlier route/bootstrap hashes remain historical evidence for their recorded
+source commits; no claim that those old hashes describe this new product.
+
+Product correction committed as c4ba1c4; the same frozen source tree
+passed gate --com: 67 suites, 0 failed, 264 s aggregate, JOBS=2, each suite
+<=60 s. exec-chain 74/74, exec-srcelf all 74 complete images equal, all six
+self-source routes pass; macOS native/Rosetta self-bootstrap remains in those
+checks. No new Linux/Windows native run is claimed for the sizeof batch.
+Log /tmp/unisacc-sizeof-gate.log. No push/release.

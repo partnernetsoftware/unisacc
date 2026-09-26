@@ -1355,13 +1355,14 @@ def build():
     P("NODBL0.p").branch({1: "RET"}, "DEAD.pa", [("CMPI", "vt", 0)])
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
-    P("U.szof").call("NEXT").tok({"(": "SZ.p", TK_ID: "SZ.id"}, bad("sizeof operand"))
-    P("SZ.p").call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", "union": "SZ.t", TK_ID: "SZ.pid"}, bad("sizeof operand"))
+    P("U.szof").call("NEXT").a(("COPYW","szpos","tpos")).tok({"(": "SZ.p", TK_ID: "SZ.id"}, "SZ.expr")
+    P("SZ.p").call("NEXT").tok({**{w: "SZ.t" for w in TWORDS}, "struct": "SZ.t", "union": "SZ.t", TK_ID: "SZ.pid"}, "SZ.expr")
     P("SZ.t").call("TSPEC").expect(")").call("ELSZ").a(("COPYW", "sz", "es")).goto("SZ.out")
     P("SZ.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("LOOKUP").goto("SZ.var")
-    P("SZ.pid").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("LOOKUP").call("NEXT").goto("SZ.sub")
+    P("SZ.pid").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "drop", 0)).call("NEXT").tok({")":"SZ.pidvar", "[":"SZ.pidvar"}, "SZ.expr")
+    P("SZ.pidvar").call("LOOKUP").goto("SZ.sub")
     p = P("SZ.sub")
-    p.tok({"[": "SZ.sk"}, "SZ.cl")
+    p.tok({"[": "SZ.sk", ")":"SZ.cl"}, "SZ.expr")
     P("SZ.cl").expect(")").goto("SZ.var")
     p = P("SZ.sk")       # skip to the matching ']'
     p.a(("LDI", "dep", 1)).call("NEXT").label("SZ.sl")
@@ -1381,8 +1382,14 @@ def build():
     q.a(("ALUI", "sub", "td", "td", 1)).call("ELSZ").a(("COPYW", "sz", "es"), ("COPYW", "k2", "drop")).label("SZ.al")
     q.branch({0: "SZ.a1"}, "SZ.out", [("CMP", "k2", "ar")])
     P("SZ.a1").a(("ALUI", "mul", "u", "vid", 8), ("ALU", "add", "u", "u", "k2"), ("LDX", "u", "u", DIM), ("ALU", "mul", "sz", "sz", "u"), ("ALUI", "add", "k2", "k2", 1)).goto("SZ.al")
+    # For a general operand, reuse unary/expression parsing and discard its
+    # emitted instructions. Save marks on the value stack for nested sizeof.
+    # The existing named-array route above retains full dimension sizes.
+    P("SZ.expr").a(("JUMP","szpos"),("OLEN","szmark")).vpush("szmark","si_active").a(("LDI","si_active",0)).call("NEXT").call("UNARY").vpop("szmark","si_active").a(("OCUT","szdiscard","szmark")).branch({1:"SZ.exprsize"},bad("sizeof non-scalar expression"),[("CMPI","vt",0)])
+    P("SZ.exprsize").a(("COPYW","td","vt"),("COPYW","tb","vb")).call("ELSZ").a(("COPYW","sz","es")).goto("SZ.exprout")
+    P("SZ.exprout").o("  imm r0, ").num("sz").o("\n").a(("LDI","vt",0),("LDI","vb",UNS + 8)).ret()
     g.on("DEAD.szx", range(257), "DEAD", E.rej("not covered: sizeof operand"), "r")
-    P("SZ.out").o("  imm r0, ").num("sz").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
+    P("SZ.out").o("  imm r0, ").num("sz").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", UNS + 8)).call("NEXT").ret()
     P("U.fnum").o("  imm r0, ").a(("LDI", "nx", 1)).call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", DBL)).call("NEXT").ret()
     p = P("UNARY")
     p.tok({"sizeof": "U.szof", E.TK_FNUM: "U.fnum", E.TK_STR: "U.str", "~": "U.cpl", "-": "U.neg", "+": "U.pos", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec", "&": "U.amp", "*": "U.deref"}, bad("expression"))
