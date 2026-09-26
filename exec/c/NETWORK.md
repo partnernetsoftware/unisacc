@@ -55,10 +55,21 @@ self-built runtime IO is therefore not claimed verified.
 with that compiler. It checks all six networks, compares 18 stage outputs on
 hello/fib/token-name probes against the cc-built runtime, runs the existing
 five error cases, checks signed-64 boundaries, and requires real file-size-limit
-write errors to fail on both runtimes. The runtime checks its output write and
+write errors to fail on all three runtime builds. The runtime checks its output write and
 close results. The macOS full self-source route was also run with a compiler
 built by `.com`: its network-built compiler equals the reference and reaches
 N1=N2=N3. This still generates the existing C compiler, not an E7 replacement.
+
+
+The same check now also sends `exec/c/run.c` through the six network stages.
+Its resulting macOS ARM64 executable must equal the compiler-built runtime.
+That network-built runtime then checks every model's finite domain and runs
+all six stages on its own source. Every intermediate output, including the
+second runtime image, must match the first route. Thus this measured route
+rebuilds the executor itself, not only the old C compiler. Python still
+constructs the models; it does not process source in these six stages. The
+shipped `.com` has not switched to this driver, and frontend coverage remains
+partial. `nativecheck.sh` is in the bounded local gate.
 
 Size ledger, macOS arm64, both `-O2` (2026-09-27): cc runtime `__text` 16,620 B,
 file 56,520 B, dynamic libSystem excluded; unisacc runtime `__text` 85,220 B,

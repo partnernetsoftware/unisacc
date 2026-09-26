@@ -166,7 +166,7 @@ int tidx(char *n, int L) { return vfind(TOKV, NTOKV, n, L); }
 int expr(void);
 int exprc(void);
 int unary(void);
-int cexpr(void);
+long cexpr(void);
 int cond(void);
 int mbfind(int si, int t);
 int eload(int w);
@@ -2954,8 +2954,8 @@ int vlaback(int dep) {
    known once the body has been walked.  The control value goes to a frame
    slot first: the chain reloads it for every comparison, and the body may
    have clobbered every register by then. */
-int swval[256]; int swlab[256]; int nswv;
-int swdef[16]; int swslot[16]; int nsw;
+long swval[256]; int swlab[256]; int nswv;
+int swdef[16]; int swslot[16]; int swsize[16]; int swuns[16]; int nsw;
 
 int patchnum(int at, int w, int v) {
     int k; int d;
@@ -2966,10 +2966,10 @@ int patchnum(int at, int w, int v) {
     return 0;
 }
 
-int cexpr(void);
+long cexpr(void);
 
-int catom(void) {
-    int v; int k; int i;
+long catom(void) {
+    long v; int k; int i;
     if (cur() == T_NUM) {
         v = 0; k = 0;
         v = numval(tp);
@@ -3086,7 +3086,7 @@ int isconstdim(int j) {
     return 1;
 }
 
-int cexpr(void) {
+long cexpr(void) {
     long c; long a; long b;
     c = cbin(1);
     if (eat(tidx("?", 1))) {
@@ -4494,6 +4494,9 @@ int stmt_(void) {
         int slot; int disp; int end; int k; int cbase; int mysw;
         adv(); need(tidx("(", 1), "(");
         expr(); loadval();
+        /* Case constants convert to the promoted controlling type. */
+        swsize[nsw] = cursize; swuns[nsw] = curuns;
+        if (cursize < 4) { swsize[nsw] = 4; swuns[nsw] = 0; }
         need(tidx(")", 1), ")");
         slot = alloc_local(8);
         eframe(1, 2, slot);
@@ -4530,8 +4533,12 @@ int stmt_(void) {
         return 0;
     }
     if (p == P_CASE) {
-        int v; int lab;
+        long v; int lab;
         adv(); v = cexpr(); need(tidx(":", 1), ":");
+        if (nsw > 0) { if (swsize[nsw - 1] == 4) {
+            if (swuns[nsw - 1]) v = v & 4294967295;
+            else v = (int)v;
+        } }
         lab = newlab();
         swval[nswv] = v; swlab[nswv] = lab; nswv = nswv + 1;
         elab("L", lab); es(":\n");

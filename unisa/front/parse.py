@@ -1518,13 +1518,13 @@ class Walker:
     def switch_stmt(self):
         self.next()
         self.expect("(")
-        self.rvalue()
+        ty = self.rvalue()
         self.expect(")")
         slot = self.alloc(I64)
         self.em.store(FP, -slot, ACC)
         disp, end = self.em.new_label("sdisp"), self.em.new_label("send")
         self.em.jump(disp)
-        ctx = {"slot": slot, "cases": [], "default": None}
+        ctx = {"slot": slot, "cases": [], "default": None, "type": ty.kind}
         self.switch.append(ctx)
         # C99 6.8.6.2p1: `continue` belongs to the enclosing ITERATION
         # statement, never to a switch.  Pushing `end` as the continue target
@@ -1553,6 +1553,11 @@ class Walker:
             self.switch[-1]["default"] = lab
         else:
             v = self.const_expr()
+            kind = self.switch[-1]["type"]
+            bits = 64 if kind in ("i64", "u64") else 32
+            v &= (1 << bits) - 1
+            if kind != "u32" and v >= (1 << (bits - 1)):
+                v -= 1 << bits  # tape immediates carry signed 64-bit bit patterns
             self.switch[-1]["cases"].append((v, lab))
         self.expect(":")
         self.em.label(lab)

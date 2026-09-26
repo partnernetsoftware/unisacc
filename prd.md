@@ -2709,3 +2709,13 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - gen2.py +21/-8（净 +13），状态 3942→3967，JSON 21,584,161→21,725,618 B：覆盖进展而非代码缩减。执行器源码已越过 sizeof 和逗号成员声明，当前真实阻挡是 `o->n++`，未称整个 runtime 源码已经由网络编译。
 - 产品已重建：.com 1,347,504 B，SHA256 `cd19cca573d7a9fc44eccb4ffb4d88d72617c2f096e452cec2cec9aa64aa04b7`；unisacc.c SHA256 `c20e182aa65723f4315673c461d2929d8ada0d2081e90e7bcd0825a137c9f912`。冻结产品/前端初版 gate --com 70/70、287 s、JOBS=2，各套件 ≤60 s；fat 123/0，六目标网络镜像等于参考（Linux/Windows 本轮不宣称 VM 实跑）。日志 /tmp/unisacc-szd-gate.log。
 - gate 之后只有上述 E3 分派回退及 s52/固定清单改变，产品未变；最终再跑 E3 218、chain 79、s52 六段完整镜像，以及 osx/arm64 网络 selfcheck（743,202 B、N1=N2=N3），均通过。没有把前一轮 70 项门禁冒称为最后两行解析调整后的全量复跑。日志 /tmp/unisacc-szd-final-{keep,chain,self}.log。未推送、未发布；cc-unisacc 保持暂停。
+
+
+### S-17：网络路线重建通用执行器（2026-09-27）
+
+- `exec/c/run.c` 现在由六段实际阈值网络生成 osx/arm64 可执行文件，字节等于原编译器构建结果；该执行器再加载同一组网络，重编自身源码，六个中间结果与最终镜像逐字节相同。`nativecheck.sh` 固定这条检查，并保留六段全域核对、原有 18 份输出比较、三种执行器的真实写失败。Python 仍构造模型，未参与六段的源码处理；`.com` 尚未切换路线，前端完整覆盖、几 KB 内核和单份模型打包仍未完成。
+- 实际源码驱动的 E3 修改：命名/成员/下标左值共享后缀增减与赋值，结构体复制统一到同一例程；指针成员初始化复用既有 8 字节存储；地址/成员遍历复用 MEMB；case 复用 CE；全局初始化根据首次声明记录的名字处理，不再被数组界限中的 enum 名覆盖。没有增加执行器原语。s53/s54/s55/s57 分别固定左值、聚合复制、指针初始化、含 enum 界限的全局声明与 64 位常量。
+- 独立 cc 比较发现产品宽 case 标签被 int 截断：旧产物输出 `1 2 3 5 4`，应为 `1 2 3 4 5`。catom/cexpr 与 case 存储保持 long；case 按控制表达式的提升类型转换，32 位有符号/无符号及嵌套状态分别处理。C/Python/E3 同步；b_casewide 在 cc、最终 .com O0/O1/O2、Python 输出 `1 2 3 4 5 / 6 7 8 9 10`。这是已测整数路径，不声称完整 C 常量表达式语义已证明。
+- 扩清单前旧 218 E3 全通过；最终 224/224 equal（含真实 runtime）。chain/ELF 79→85，全部一致。新探针六网络 macOS 镜像实际运行与 cc 相同。gen2.py +59/-49（净 +10 行），状态 3967→3991，JSON 21,725,618→21,869,510 B；复用减少重复路径，但本批源码没有净缩减。
+- 最终冻结代码 gate --com：70/70、294 s aggregate、JOBS=2，每套件 ≤60 s；exec-native 19 s，fat 124/0 两架构实跑，六目标完整源码镜像相同。Linux/Windows 本轮仅核对生成字节，未启动 VM；没有新的跨平台运行主张。日志 /tmp/unisacc-runtime-model-gate.log、/tmp/unisacc-runtime-model-keep.log。
+- `.com` 1,348,688 B，SHA256 `c018f8275910808d8e7e750b437faa298ab815a93ef1699080fbb923b6ef7967`；unisacc.c SHA256 `aab9b9378dd5d81a0df3066cf514e81742d737be0fe609886a5880812f464edc`。未推送、未发布；cc-unisacc 保持暂停，重构目标继续。
