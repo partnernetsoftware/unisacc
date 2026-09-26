@@ -1835,3 +1835,9 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
   - **unsigned int** loads and casts are masked to 32 bits. Operators mask both operands, use the unsigned form, and mask the result. Hex constants above INT_MAX are unsigned int.
   - **Tooling:** a name defined twice is now a build error (it had silently merged DSCALE with DIMSAVE).
   - **Status:** 2,828 states; 127 equal, 0 differ. The old E3 matches 110. What remains is where the old one covered and the new does not yet: p43/p58/p59 (the pairing of long and unsigned int), p47 (parameter), p53 and p7, p65 (double), p76/p81/p83/p84 (width).
+- 2026-09-26 (S-17): **E3 switched to the structured delta** (97fd265, exec/pipeline/stages.tsv).
+  - **Switch gate:** `E3KEEP=exec/parse2/keep-old-e3.txt` passes with exit 0. All 110 files the old E3 matched are kept. In total 141 files are equal and 0 differ.
+  - **Sizes, old vs new:** states 5,233 → 3,210; entries 1,345,252 → 825,517; json 29.9 → 17.3 MB.
+  - **Product fix (9052993):** a constant now resets curuns, curflt and curstruct. Before, a unit's first expression saw curstruct 0 ("a struct"), so `1 + 10u` lost its unsignedness.
+  - **compare.py (cdx review):** tool failures, an empty file list and an empty keep list now all fail. reject-both is an observation only.
+  - **Status:** still a structured state machine / lookup-table prototype. E3 is not yet a net.
