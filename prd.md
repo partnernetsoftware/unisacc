@@ -1824,3 +1824,5 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 ### 7.4 仍可重选
 
 §3.3 bilinear 形式 · `SYMS` 拼写 · fib/ptr/struct 常量 · §3.7 亚字节打包顺序。**除此之外全部承重。**
+
+- 2026-09-26 (S-17, gen2 54cbaee): multi-dimensional arrays measured and done. `b[i][j][k]`: each subscript that is not the last multiplies by (element size × the remaining dimensions) and adds, with no load. A DIM table per variable holds the dimensions. Also: printf with any conversion other than %d/%% is a real variadic call. mkdump now runs autoinc on the dump path. The old E3 has 1 DIFF (p67) on the corrected input. Structured E3: 2,371 states, 96 equal, 0 differ.
