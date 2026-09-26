@@ -3,7 +3,8 @@
     python3 exec/parse/gen.py [out.json]      -> writes the table, prints sizes
 
 Machine and primitives: exec/pp/sim.py, unchanged (generic, option A).  x is
-the reference's token dump (`ua_ref -dump-tokens FILE`, one token per line);
+the reference's token dump with type spellings (`UA_TYPESPELL=1 ua_tdump
+-dump-tokens FILE`, exec/parse/mkdump.sh; one token per line);
 o is the reference's `-S` tape.  Design: research/e3-parse-delta.md.
 
 Slice: `int f(int a, ...) { ... }` definitions only, <= 6 parameters; int
@@ -63,9 +64,10 @@ HEADER = ("_start:\n  call __init\n  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n
           "  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n")
 FOOTER = "__init:\n  ret\n__main_ret:\n  .exit r0\n"
 
-WORDS = ["type", "return", "if", "else", "while", "for", "eof",
+WORDS = ["type=int", "return", "if", "else", "while", "for", "eof",
          "(", ")", "{", "}", ";", ",", "=", "!", "~"] + sorted(PREC)
 TK = {w: k + 1 for k, w in enumerate(WORDS)}
+TK["type"] = TK["type=int"]   # x is the UA_TYPESPELL dump: every other spelling is TK_OTHER
 TK_ID, TK_NUM, TK_BADNUM, TK_OTHER = 100, 101, 102, 103
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
 
