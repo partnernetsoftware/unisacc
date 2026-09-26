@@ -42,6 +42,22 @@ print('buffer failure paths: C/ASM both reject, 6 simulated checks')
 PYBUFFER
 b cc $ARCHFLAG -c "exec/c/asm/buffer_$ARCH.S" -o "$T/buffer.o"
 if [ "$OS" = osx ]; then b size -m "$T/buffer.o"; else b size -A "$T/buffer.o"; fi
+b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_MEMORY_LINKAGE= -Dcore_mget=core_mget_c -Dcore_mset=core_mset_c -Dcalloc=memory_calloc \
+    exec/c/core.c "exec/c/asm/memory_$ARCH.S" exec/c/asm/layoutcheck.c exec/c/asm/memorycheck.c -o "$T/memory"
+b "$T/memory"
+b python3 - "$T/memory" <<'PYMEMORY'
+import subprocess,sys
+for case in range(1,5):
+ for version in ['c','a']:
+  r=subprocess.run([sys.argv[1],version,str(case)],capture_output=True,timeout=10)
+  reason='memory capacity overflow' if case==4 else 'out of memory'
+  calls=0 if case==4 else 3
+  message=f'SIMULATED map panic checked: {reason}, calls {calls}\n'.encode()
+  assert (r.returncode,r.stdout,r.stderr)==(2,message,b''),(case,version,r)
+print('sparse memory failure paths: C/ASM both reject, 8 simulated checks')
+PYMEMORY
+b cc $ARCHFLAG -c "exec/c/asm/memory_$ARCH.S" -o "$T/memory.o"
+if [ "$OS" = osx ]; then b size -m "$T/memory.o"; else b size -A "$T/memory.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/arith_$ARCH.S" -o "$T/arith.o"
 if [ "$OS" = osx ]; then b size -m "$T/arith.o"; else b size -A "$T/arith.o"; fi
 b cc $ARCHFLAG -c "exec/c/asm/transition_$ARCH.S" -o "$T/transition.o"
@@ -69,5 +85,5 @@ for src in ['examples/hello.c','examples/fib.c','tests/c/b_strderef.c','exec/c/r
 # execution must not be mistaken for a fully assembly-built action engine.
 model=p/'e1.net';source=p/'hello.e2'
 assert ok([p/('run.'+ext),model,source])==ok([p/'run',model,source])
-print('ASM inference/arithmetic/buffer route: four full images equal; three native runs equal; C-runtime output equal')
+print('ASM inference/arithmetic/storage route: four full images equal; three native runs equal; C-runtime output equal')
 PY

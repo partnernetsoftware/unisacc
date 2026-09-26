@@ -19,3 +19,10 @@
 #define BUF_LENGTH 16
 #define BUF_CAPACITY 20
 #define BUF_SIZE 24
+
+#define MEM_KEYS 0
+#define MEM_VALUES 8
+#define MEM_USED 16
+#define MEM_CAP 24
+#define MEM_COUNT 32
+#define MEM_SIZE 40

@@ -44,12 +44,12 @@ The signed decimal renderer covers INT64_MIN without signed negation overflow.
 
 | Object section | arm64 | x86_64 |
 |---|---:|---:|
-| machine code `__text` | 6,468 B | 7,496 B |
+| machine code `__text` | 6,480 B | 7,548 B |
 | constants `__const` | 380 B | 224 B |
-| diagnostic strings `__cstring` | 193 B | 193 B |
+| diagnostic strings `__cstring` | 243 B | 243 B |
 | static zero storage | 104 B | 104 B |
-| compact unwind | 544 B | 512 B |
-| eh_frame | 0 B | 704 B |
+| compact unwind | 608 B | 576 B |
+| eh_frame | 0 B | 784 B |
 
 `corecheck.sh` rebuilds and prints these sections, checks the external-linkage
 runtime, and audits undefined symbols. Its allowed imports are the two host
@@ -64,6 +64,8 @@ in nativecheck.sh. Its isolated input directory now explicitly includes core.c
 and core.h alongside runtime.c: those are real source inputs, not copied model
 answers. Product unisacc.com still uses the retained reference compiler route.
 
+The following compression/whole-tool measurements are the initial 8b3be84
+baseline, before the assembly-interface changes; they are not current sizes.
 For compression reference only, gzip-9 of the object __text bytes is 4,004 B
 (arm64) and 4,232 B (x86_64); runtime does not decompress these objects and
 those numbers are not the kernel-size criterion. On the same macOS arm64
@@ -80,6 +82,7 @@ of core.h (704 combined). This is an explicit API/ownership split, not a
 source-code reduction. It establishes a measurable C baseline for assembly.
 
 The next migration slice is documented in [asm/README.md](asm/README.md):
-handwritten inference and word arithmetic on arm64 and x86-64, with the
-remaining C actions retained and an
-explicit build selector. It does not change the default C baseline above.
+handwritten inference, word arithmetic, buffer append and sparse indexed
+memory on arm64 and x86-64, with remaining C actions retained and an explicit
+build selector. The C-only measurement above includes the current capacity
+guards and explicit CoreMemory state. Product routing is unchanged.

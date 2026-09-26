@@ -11,3 +11,7 @@ typedef char check_size[(sizeof(CoreModel)==CM_SIZE && sizeof(void*)==8 && sizeo
 #define BCHECK(field,off) typedef char bcheck_##field[(offsetof(Buf,field)==off)?1:-1]
 BCHECK(b,BUF_BYTES); BCHECK(at,BUF_ATTR); BCHECK(n,BUF_LENGTH); BCHECK(cap,BUF_CAPACITY);
 typedef char bcheck_size[(sizeof(Buf)==BUF_SIZE)?1:-1];
+
+#define MCHECK(field,off) typedef char mcheck_##field[(offsetof(CoreMemory,field)==off)?1:-1]
+MCHECK(keys,MEM_KEYS); MCHECK(values,MEM_VALUES); MCHECK(used,MEM_USED); MCHECK(cap,MEM_CAP); MCHECK(n,MEM_COUNT);
+typedef char mcheck_size[(sizeof(CoreMemory)==MEM_SIZE && sizeof(size_t)==8)?1:-1];

@@ -1,8 +1,8 @@
 # Assembly kernel migration
 
 This directory implements **`core_transition` and the 32/64-bit arithmetic
-primitives and byte-buffer append** by hand for AArch64 and x86-64 System V. Action dispatch, working
-storage, allocation and cleanup are still the generic C kernel. The shipped product and default runtime still
+primitives, byte-buffer append and sparse memory** by hand for AArch64 and x86-64 System V. Action dispatch, the remaining blob/intern/frame storage and cleanup are still
+the generic C kernel. Allocation remains libc. The shipped product and default runtime still
 select C. This is not a completed assembly kernel or product switch.
 
 Both transition routines evaluate the threshold network directly: initialize the two
@@ -22,7 +22,7 @@ explicitly not implemented. Mach-O native arm64 and Rosetta x86-64 were run;
 the ELF assembler spelling is present but has not yet been run on Linux.
 
 `cc.sh` builds an explicit development runtime: it omits the C transition
-arithmetic and buffer-append implementations and links their assembly symbols. It is a build adapter, not a
+arithmetic, buffer-append and sparse-memory implementations and links their assembly symbols. It is a build adapter, not a
 runtime fallback. `transitioncheck.c` separately retains the actual C body
 under a different name for 537,620 comparisons per ISA, including independent
 missing/domain/output expectations, signed limits and sums that would wrap a
@@ -38,16 +38,16 @@ no Python stage handles source at runtime.
 
 Measured uncompressed __text on macOS (object section, no subtraction):
 
-| ISA | transition | arithmetic | buffer append | remaining C (`cc -Os`) | sum |
-|---|---:|---:|---:|---:|---:|
-| arm64 | 332 B | 436 B | 208 B | 5,232 B | 6,208 B |
-| x86_64 | 334 B | 450 B | 170 B | 6,562 B | 7,516 B |
+| ISA | transition | arithmetic | buffer | sparse memory | remaining C (`cc -Os`) | sum |
+|---|---:|---:|---:|---:|---:|---:|
+| arm64 | 332 B | 436 B | 208 B | 500 B | 4,636 B | 6,112 B |
+| x86_64 | 334 B | 450 B | 170 B | 473 B | 6,016 B | 7,443 B |
 
-Error strings are 58 B per transition, 24 B per arithmetic object and 39 B
-per buffer object. Host/library/model costs remain outside this object sum,
-accounted separately in ../CORE.md. The C-only baseline with the buffer
-capacity guard is 6,508/7,530 B. The mixed sum grew from 6,128/7,439 B in
-the previous slice; this is implementation migration, not a size win.
+Error strings are 58 B per transition, 24 B per arithmetic object, and 39 B
+each for buffer and sparse-memory objects. Host/library/model costs remain
+outside this object sum, accounted separately in ../CORE.md. The C-only
+baseline with the two capacity guards and explicit memory state is
+6,480/7,548 B. These are migration measurements, not a performance claim.
 
 ## Word arithmetic contract
 
@@ -81,3 +81,27 @@ attributes, truncation, reset and reuse. Six C/ASM fault invocations check
 first/second allocation failure and capacity overflow, explicitly SIMULATED.
 Both ISAs also pass the full existing network checks and four-image route.
 Allocation, other storage helpers and action dispatch remain C/libc.
+
+## Sparse memory contract
+
+CoreMemory carries keys, values, occupancy bytes, capacity and entry count.
+The hash multiplies a 64-bit key modulo 2^64, shifts by 20 and masks by cap-1;
+linear probing wraps. Absent keys read zero, including before allocation.
+Writing zero still creates an occupied entry. Growth happens before insertion
+when (n+1)*2 exceeds capacity, even for an overwrite; the first capacity is
+65536 and later capacities double. All occupied entries are reinserted before
+the old arrays are freed. Cleanup/reset remains in core_run, in C.
+
+Both versions reject doubling whose eight-byte array would overflow the
+64-bit storage extent. This is an explicit representation guard, not a new
+model limit. The C implementation now receives one state pointer; both
+assembly routines use its build-asserted layout. The selected C object imports
+core_memory_get/set, whose definitions are in assembly, not C fallbacks.
+
+memorycheck.c checks 140,000 keys through multiple growths, zero overwrites,
+64 deliberately colliding keys wrapping at the last slot, signed/extreme
+addresses, absent reads, full backing-array equality, and cleanup/reuse.
+Eight C/ASM fault runs simulate each of three allocation failures and extent
+overflow, checking the panic, allocation count and resulting state. Actual
+execution remains macOS arm64 and Rosetta x86-64. libc calloc/free remain
+external generic primitives, not model or compiler rules.

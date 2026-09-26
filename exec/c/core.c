@@ -59,21 +59,42 @@ CORE_BUFFER_LINKAGE void core_put(Buf *o, int c, I at) {
 
 /* ---- W: registers and the indexed memory (a hash map) ---- */
 static I *R;
-static I *MK, *MV; static char *MU; static size_t MCAP, MN;
-static size_t mslot(I k) { uint64_t h = (uint64_t)k * 0x9E3779B97F4A7C15ull; return (size_t)(h >> 20) & (MCAP - 1); }
-static I mget(I k) { if (!MCAP) return 0; size_t s = mslot(k); while (MU[s]) { if (MK[s] == k) return MV[s]; s = (s + 1) & (MCAP - 1); } return 0; }
-static void mset(I k, I v) {
-    if ((MN + 1) * 2 > MCAP) {
-        size_t oc = MCAP; I *ok = MK, *ov = MV; char *ou = MU;
-        MCAP = oc ? oc * 2 : 1 << 16; MK = calloc(MCAP, sizeof(I)); MV = calloc(MCAP, sizeof(I)); MU = calloc(MCAP, 1); MN = 0;
-        if (!MK || !MV || !MU) core_die("out of memory");
-        for (size_t j = 0; j < oc; j++) if (ou[j]) mset(ok[j], ov[j]);
-        free(ok); free(ov); free(ou);
-    }
-    size_t s = mslot(k); while (MU[s] && MK[s] != k) s = (s + 1) & (MCAP - 1);
-    if (!MU[s]) { MU[s] = 1; MK[s] = k; MN++; }
-    MV[s] = v;
+static CoreMemory memory;
+#ifdef UNISA_CORE_ASM_MEMORY
+I core_memory_get(const CoreMemory *m,I k);
+void core_memory_set(CoreMemory *m,I k,I v);
+#define core_mget core_memory_get
+#define core_mset core_memory_set
+#else
+#ifndef CORE_MEMORY_LINKAGE
+#define CORE_MEMORY_LINKAGE static
+#endif
+static size_t mslot(const CoreMemory *m,I k) { uint64_t h = (uint64_t)k * 0x9E3779B97F4A7C15ull; return (size_t)(h >> 20) & (m->cap - 1); }
+CORE_MEMORY_LINKAGE I core_mget(const CoreMemory *m,I k) {
+    if (!m->cap) return 0;
+    size_t s=mslot(m,k);
+    while (m->used[s]) { if (m->keys[s]==k) return m->values[s]; s=(s+1)&(m->cap-1); }
+    return 0;
 }
+CORE_MEMORY_LINKAGE void core_mset(CoreMemory *m,I k,I v) {
+    if ((m->n+1)*2 > m->cap) {
+        size_t oc=m->cap; I *ok=m->keys, *ov=m->values; unsigned char *ou=m->used;
+        /* 64-bit storage ABI: doubled capacity times eight must fit. */
+        if (oc > 0x0fffffffffffffffull) core_die("memory capacity overflow");
+        m->cap=oc ? oc*2 : 1<<16;
+        m->keys=calloc(m->cap,sizeof(I)); m->values=calloc(m->cap,sizeof(I)); m->used=calloc(m->cap,1); m->n=0;
+        if (!m->keys || !m->values || !m->used) core_die("out of memory");
+        for (size_t j=0;j<oc;j++) if (ou[j]) core_mset(m,ok[j],ov[j]);
+        free(ok);free(ov);free(ou);
+    }
+    size_t s=mslot(m,k);
+    while (m->used[s] && m->keys[s]!=k) s=(s+1)&(m->cap-1);
+    if (!m->used[s]) { m->used[s]=1; m->keys[s]=k; m->n++; }
+    m->values[s]=v;
+}
+#endif
+#define mget(k) core_mget(&memory,(k))
+#define mset(k,v) core_mset(&memory,(k),(v))
 
 /* ---- blobs and interning ---- */
 typedef struct { unsigned char *b; int n; } Blob;
@@ -271,7 +292,7 @@ finished:
     result->err.b=e.b; result->err.n=e.n; e.b=0;
     free(o.b); free(o.at); free(e.b); free(e.at); free(sb.b); free(sb.at);
     free(fr); free(stk); if (x != input) free(x); free(xattr); free(R);
-    free(MK); free(MV); free(MU); MK = 0; MV = 0; MU = 0; MCAP = 0; MN = 0;
+    free(memory.keys); free(memory.values); free(memory.used); memset(&memory,0,sizeof memory);
     for (int i = 0; i < NBL; i++) free(BL[i].b);
     free(BL); BL = 0; NBL = 0; CBL = 0;
     for (size_t i = 0; i < ICAP; i++) if (IT[i].b) free(IT[i].b);

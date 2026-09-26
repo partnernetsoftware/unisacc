@@ -14,6 +14,7 @@ static const int ARITY[NOP_] = {0,1,1,2,2,4,4,2,2,1,3,3,1,1,0,0,1,1,2,0,0,1,2,2,
                                 0,1,2,1,1,1,1,2,1,1,1,0,0,1,4,4,2,2,1};
 
 typedef struct { unsigned char *b; I *at; int n, cap; } Buf;
+typedef struct { I *keys, *values; unsigned char *used; size_t cap, n; } CoreMemory;
 typedef struct {
     int ns, nq, nrg, start, isnet;
     char **str; int *strl;
