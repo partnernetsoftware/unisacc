@@ -190,6 +190,8 @@ def tytail():
     P("CKM.u").a(("LDI", "cku", 1)).ret()
     q = P("RESD")        # res: an unsigned result below 8 bytes is masked (zext); the descriptor is res's
     q.a(("LDI", "vt", 0))
+    # the rows are tried in tyinfo's order (i8 first), so the table's row order changes the
+    # step count of every generated compile -- a reorder is not a regression (ade4848: +0.4%)
     for name, code, m in [(t, vb, (1 << (8 * sz)) - 1 if un and sz < 8 else None) for t, vb, sz, un, nr in TYINT]:
         hit, nx = "RESD." + name, "RESD.n" + name
         q.branch({1: hit}, nx, [("CMPI", "rs", AX.index(name))])
@@ -386,6 +388,9 @@ TYINT = [(t, (UNS if TYINFO[t][1] else 0) + TYINFO[t][0], TYINFO[t][0], TYINFO[t
 U32M = (1 << (8 * TYINFO["u32"][0])) - 1          # an unsigned int kept to 32 bits (measured), from tyinfo
 UIM = "  imm r2, %d\n  and64 r0, r0, r2\n" % U32M
 assert TYINFO["u32"][1] == 1
+# the premises the derivations lean on, pinned: a table that changes shape must fail here, not silently
+assert len(AX) == 16 and AX[-1] == "illegal"
+assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
