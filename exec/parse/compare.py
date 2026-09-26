@@ -11,8 +11,9 @@ UA_TYPESPELL=1, so a type token carries its spelling (`type=char`); the delta
 itself decides what it covers -- there is no filter outside it.
 Verdicts:
   equal         sim accept, o == ref stdout, ref exit 0
-  reject-both   sim reject k (not `not covered`), ref exit in 1..127 (a compile
-                rejection; the diagnostics and exit codes are NOT compared)
+  reject-both   sim reject k (not `not covered`), ref exit in 1..127: both ends did
+                not succeed -- NOT confirmed to be the same rejection (the
+                diagnostics and exit codes are not compared); an observation only
   not-covered   sim reject `not covered: ...`, or src-type
   tool-fail     the token dump did not exit 0, or the reference timed out or died
                 on a signal -- a harness failure, never a pass
@@ -51,6 +52,9 @@ def main():
         print("no input files")
         return 1
     keep = set(open(os.environ["E3KEEP"]).read().split()) if os.environ.get("E3KEEP") else set()
+    if os.environ.get("E3KEEP") and not keep:
+        print("E3KEEP names an empty list")
+        return 1
     lost = []
     for f in sys.argv[2:]:
         rc0, x, _ = sh([DUMP, "-dump-tokens", f], env=dict(os.environ, UA_TYPESPELL="1"))
