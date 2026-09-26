@@ -74,6 +74,7 @@ TK_ID, TK_NUM, TK_BADNUM, TK_OTHER, TK_STR = 100, 101, 102, 103, 104
 CASOPS = ("+", "-", "*", "/", "%", "<<", ">>", "&", "^", "|")
 GMARK = 900000   # LOC[v] of a file-scope int (shadowed/restored like any local)
 LOC, FND, UNDO, FR, DIG, VS = 10 ** 6, 2 * 10 ** 6, 3 * 10 ** 6, 5 * 10 ** 6, 6 * 10 ** 6, 7 * 10 ** 6
+TDD, TDB = 15 * 10 ** 6, 16 * 10 ** 6  # a typedef name's pointer depth and base size (typedef char *va_list: 1, 1)
 TDN = 8 * 10 ** 6  # TDN[v] = 1: v was declared a typedef name at file scope
 ARR = 14 * 10 ** 6  # ARR[v] = 1: the visible v is an array (its value is its address; PTR[v] = depth after decay)
 PTR = 9 * 10 ** 6  # PTR[v] = 1: the visible v is a pointer (8 bytes: load64/store64)
@@ -414,7 +415,7 @@ def noptr(p):                 # arithmetic on a pointer is not in this step
 
 def stars(p, then):           # '*'... then an identifier; W[ptd] = 1 iff any star; bni: base needs one
     lp, st, idk, bad, ok = p.fresh("sl"), p.fresh("ss"), p.fresh("si"), p.fresh("sb"), p.fresh("so")
-    p.a(("LDI", "ptd", 0)).label(lp)
+    p.a(("COPYW", "ptd", "sd0")).label(lp)   # sd0: the depth a typedef name brings (0 otherwise)
     p.tok({"*": st, TK_ID: idk}, ("rej", "not covered: declarator"))
     P(st).a(("ALUI", "add", "ptd", "ptd", 1)).call("NEXT").goto(lp)
     q = P(idk)
@@ -986,7 +987,7 @@ def stmt():
     P("S.empty").call("NEXT").ret()
     p = P("S.idq")        # a typedef name starts a declaration
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "S.tdd"}, "S.expr", [("CMPI", "t", 1)])
-    P("S.tdd").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).call("NEXT").goto("D.one")
+    P("S.tdd").a(("LDI", "bni", 1), ("LDX", "bsz", "v", TDB), ("LDX", "sd0", "v", TDD)).call("NEXT").goto("D.one")
     P("S.expr").call("VEXPR").expect(";").call("NEXT").ret()
     # block: '{' ... '}' with its own scope
     p = P("BLOCK")
@@ -1000,7 +1001,7 @@ def stmt():
     p.a(("COPYW", "cur", "sc")).call("NEXT").ret()
     # declaration
     p = P("S.decl")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh",
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "S.dint", "type=char": "S.dch", "type=long": "S.dlg", "type=short": "S.dsh",
                                                    "type=unsigned": "S.dun"}, "S.dnx")
     P("S.dun").call("NEXT").tok({"type=char": "S.duc", "type=short": "S.dus", "type=long": "S.dul"}, ("rej", "not covered: unsigned int declaration"))
     P("S.dul").a(("LDI", "bni", 0), ("LDI", "bsz", UNS + SZ["long"])).goto("S.dnx")
@@ -1173,17 +1174,27 @@ def unit():
     # typedef <type words | struct TAG> *... NAME;  -- no code; NAME recorded in TDN
     TW = {"type": "TD.w", "type=void": "TD.w", "type=long": "TD.w", "type=char": "TD.w",
           "type=unsigned": "TD.w", "type=short": "TD.w", "type=signed": "TD.w"}
-    P("TD").call("NEXT").tok(dict(TW, struct="TD.s"), ("rej", "not covered: typedef"))
-    P("TD.s").call("NEXT").tok({TK_ID: "TD.w"}, ("rej", "not covered: typedef"))
-    P("TD.w").call("NEXT").tok({**TW, "*": "TD.w", TK_ID: "TD.id"}, ("rej", "not covered: typedef"))
+    # the base is known only for a lone char/short/int/long word (else CUNK); '*' counts the depth
+    P("TD").a(("LDI", "tdd", 0), ("LDI", "tdb", CUNK), ("LDI", "tdw", 0)).call("NEXT").tok(dict(TW, struct="TD.s", **{"type": "TD.wi", "type=char": "TD.wc", "type=short": "TD.ws", "type=long": "TD.wl"}), ("rej", "not covered: typedef"))
+    P("TD.s").a(("LDI", "tdw", 2)).call("NEXT").tok({TK_ID: "TD.w"}, ("rej", "not covered: typedef"))
+    p = P("TD.w")
+    p.a(("ALUI", "add", "tdw", "tdw", 1)).call("NEXT").tok({**{w: "TD.w" for w in TW if w not in ("type", "type=char", "type=short", "type=long")},
+                                                           "type": "TD.wi", "type=char": "TD.wc", "type=short": "TD.ws", "type=long": "TD.wl",
+                                                           "*": "TD.ws1", TK_ID: "TD.id"}, ("rej", "not covered: typedef"))
+    for nm, n in (("TD.wi", SZ["int"]), ("TD.wc", SZ["char"]), ("TD.ws", SZ["short"]), ("TD.wl", SZ["long"])):
+        P(nm).a(("LDI", "tdb", n)).goto("TD.w")
+    P("TD.ws1").a(("ALUI", "add", "tdd", "tdd", 1), ("ALUI", "sub", "tdw", "tdw", 1)).goto("TD.w")
     p = P("TD.id")
-    p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t")).call("NEXT").expect(";").call("NEXT").goto("TOP")
+    p.branch({1: "TD.id3"}, "TD.idu", [("CMPI", "tdw", 1)])
+    P("TD.idu").a(("LDI", "tdb", CUNK)).goto("TD.id3")
+    p = P("TD.id3")
+    p.a(("INTERN", "v", "ps", "pe"), ("LDI", "t", 1), ("STX", "v", TDN, "t"), ("STX", "v", TDD, "tdd"), ("STX", "v", TDB, "tdb")).call("NEXT").expect(";").call("NEXT").goto("TOP")
     P("TOP.st").call("NEXT").tok({"type": "FN", "type=void": "FN", "type=char": "FN", "type=long": "FN", "type=short": "FN", TK_ID: "TOP.sid"}, ("rej", "not covered: static declaration"))
     p = P("TOP.sid")   # static TYPEDEFNAME ...: base size unknown (CUNK)
     p.a(("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN)).branch({1: "TOP.std"}, ("rej", "not covered: static declaration"), [("CMPI", "t", 1)])
-    P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK)).goto("FN.n")
+    P("TOP.std").a(("LDI", "bni", 0), ("LDI", "bsz", CUNK), ("LDI", "sd0", 0)).goto("FN.n")
     p = P("FN")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s"}, "FN.n")
+    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).tok({"type": "FN.i", "type=void": "FN.i", "type=char": "FN.c", "type=long": "FN.l", "type=short": "FN.s"}, "FN.n")
     P("FN.i").a(("LDI", "bni", 0)).tok({"type": "FN.i4"}, "FN.n")
     P("FN.i4").a(("LDI", "bsz", SZ["int"])).goto("FN.n")
     P("FN.c").a(("LDI", "bni", 0), ("LDI", "bsz", SZ["char"])).goto("FN.n")
@@ -1226,12 +1237,12 @@ def unit():
     p.call("NEXT").tok({")": "FN.close"}, "FN.par")
     p = P("FN.par")
     p.tok({TK_ID: "FN.ptd", "type=void": "FN.pv"}, "FN.psp")
-    P("FN.psp").call("SPEC").goto("FN.pst")
+    P("FN.psp").a(("LDI", "sd0", 0)).call("SPEC").goto("FN.pst")
     p = P("FN.ptd")
-    p.a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("INTERN", "v", "ps", "pe"), ("LDX", "t", "v", TDN))
+    p.a(("LDI", "bni", 1), ("INTERN", "v", "ps", "pe"), ("LDX", "bsz", "v", TDB), ("LDX", "sd0", "v", TDD), ("LDX", "t", "v", TDN))
     p.branch({1: "FN.pt"}, ("rej", "not covered: parameter"), [("CMPI", "t", 1)])
     P("FN.pt").call("NEXT").goto("FN.pst")
-    P("FN.pv").a(("LDI", "bni", 1), ("LDI", "bsz", 0)).call("NEXT").tok({")": "FN.close", "*": "FN.pst"}, ("rej", "not covered: parameter"))
+    P("FN.pv").a(("LDI", "bni", 1), ("LDI", "bsz", 0), ("LDI", "sd0", 0)).call("NEXT").tok({")": "FN.close", "*": "FN.pst"}, ("rej", "not covered: parameter"))
     p = P("FN.pst")
     stars(p, "FN.pid")
     p = P("FN.pid")
