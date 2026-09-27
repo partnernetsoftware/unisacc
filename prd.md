@@ -4901,3 +4901,7 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第十一批并行决定：E3完整ladder优先级/短路组，lower armfuse完整融合组，elfimage共享输入/重定位/写出控制完整组迁现有声明。动态prec/opinfo/SHAPE/布局/byte等绑定原来源；E/C或双架构必须共享参数化规则，不逐实例复制。隔离基线f253fd0，每窗约8分钟、子步骤60秒；父审查实际逻辑替换，拒绝机械包装膨胀，集中验证。
 
 第十一批验收（ac11995）：三小代理隔离并行完成ladder、ARM融合、共享镜像控制。Python分别净减10/30/56，共96行；TSV新增70/214/191，共475行，源合计净增379，不能称整体瘦身。E/C优先级共享24参数规则；ARM按动态SHAPE共用匹配模板；镜像六wrapper共用187规则。各路完整图和动作核对相同，优先级/token/SHAPE扰动保持新旧一致。父冻结后双槽队列10/10全部rc0，33.55秒：chain实际网络167/167、ARM lower、双ELF、双Mach-O含本机执行、双PE、sparse、warnings。队列证据/tmp/unisacc-parallel-eleventh-gate。保留ABI/SYS主体、ARM目标形状选择、ELF字段/import枚举及格式子安装，不称全部迁完；本批未重打.com，实际候选仍2273f3e。
+
+第十二批并行决定：以d5dcda4为隔离基线，三个小代理分别迁完整聚合初始化、普通字符串解码/初始化、PE镜像控制；各自仅改所属模块及TSV。共享walk/存储/字段写出保持参数化，动态ESC/类型布局/导入字段保留真实来源；不扩loader、不复制参考算法到新Python。每窗8分钟、每子步骤60秒，完整图动作核对加既有真实网络或镜像检查，父冻结后集中验收。
+
+第十一批实际产物补验：d5dcda4在私有UA下重建/tmp/unisacc-parallel-eleventh-candidate/unisacc-next.com，6,005,111 B，sha256 3ffcb9bdada262e13bc9a9e8ac3c638059e8eab465690e90ffe7c44f3565cf64。六目标hello镜像同参考、六程序O0/O1/O2共18本机运行同cc；两编译单元含浮点调用/INT64_MIN的三优化级也同cc。相对2273f3e包增19,592 B，不称压缩；父独立全图核对E3每观测/后继/动作相同、9806隐藏单元不变，但state/sequence排序不同，E3.net增9761 B。证据同目录acceptance.json、multiunit-acceptance.json、migration-size.json。
