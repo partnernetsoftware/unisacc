@@ -4991,3 +4991,5 @@ corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28�
 队列耗时隔离决定：实际模型429差分全部通过（四片108/108/108/105，/tmp/unisacc-call-label-diffo2-928）；PAR1首次两片53秒超时如实失败，PAR2两轮完成。历史耗时目前仅按仓库路径，使classic约5秒污染model约30秒预测，窗口末尾两片错误启动后defer浪费时间。改为按执行配置（UA/TOOLS_UA/CORPUS_UA/PAR等）分离历史，不改55秒窗口/结果判据/原清单；实际候选固定路径不覆写。
 
 实际候选e5c56cb：6,225,287 B，sha256 81c04285acba68ef72cbe902f1474d551e457995c7b167e279b615d6de2cf3a6；/tmp/unisacc-call-label-candidate-928。原143源×三个优化级429全部agree，0wrong/0refuse；PAR2四片32.52/36.25/29.62/29.79秒，窗口末预测错配两次defer后同队列续完，历史配置隔离已修。外部corpus双槽/PAR2在19.79秒四片完成：206通过、0wrong、10拒绝、4原knownfail，仍低于216基线并记rc1。剩00087/00089/00124/00130声明与函数指针、00170/00209枚举前声明、00174浮点一元、00144条件指针、00217 cast左值、00204 long double结构成员。00130后续共享括号声明已合但未计入旧候选通过数。三镜像固定收尾、lower终结、FP与ARM分派并行交付合入，六/十六完整图扰动和双架构550浮点实际NET均通过，最终整体候选还需重验。
+
+新增实际MODEL_COM客机入口tests/modelcross.py：显式hash验证、无ua_ready/classic回退、按目标独立运行、不可用rc77不算pass。代理实跑候选81c04285…在已开的Lima Linux arm64，hello/fib/整数printf三程序的模型-run及客机编译后执行全部同hostcc，guest核对hash；不称自举/全部平台。Windows已查停机，接口尚未客机验，父强制Windows --probe单例以免三例串行越过60秒预算。Linux x86停机未测，最终候选需再次选择正确hash后验。

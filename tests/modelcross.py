@@ -3,7 +3,7 @@
 Usage: MODEL_COM=/absolute/candidate.com python3 tests/modelcross.py lnx/arm64
 Targets: lnx/arm64, lnx/x86_64, win/arm64, win/x86_64. No VM is started.
 Exit 77 means unavailable/unexecuted, never pass. --status checks availability only.
-Use --probe hello/fib/convert to schedule Windows probes in separate <=60s calls.
+Windows requires --probe hello/fib/convert in separate <=60s calls.
 Windows APE runs its x86_64 PE driver; -run uses that default target. The separate
 compile/native-execution probe uses the requested Windows target. This is model
 product smoke coverage, not bootstrap or a six-platform completeness claim.
@@ -61,6 +61,8 @@ def main():
         status=run([utm,'status',vm],5,okay=False)
         if status.returncode or status.stdout.strip()!=b'started':unavailable(vm+' not started')
     if args.status:unavailable('status-only; probes not run')
+    if not linux and args.probe is None:
+        raise RuntimeError('Windows requires --probe hello|fib|convert for a bounded single-probe run')
     with tempfile.TemporaryDirectory(prefix='unisacc-modelcross-') as td:
         t=pathlib.Path(td);expected={}
         for name,source in sources.items():
