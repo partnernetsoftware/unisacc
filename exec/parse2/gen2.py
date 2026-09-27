@@ -1040,7 +1040,11 @@ def build(locations=False, warnings=False, errors=False):
     P("S.ls1").a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t"), ("COPYW", "isl", "s"),
         ("COPYW", "ibytes", "dsz"), ("LDI", "imode", 0)).call("STRINGINIT").tok({",": "S.dcm"}, "S.dend")
     P("S.din0").a(("JUMP", "lpp")).call("NEXT").goto("S.din00")       # back to '=' (re-read) for the scalar path
-    P("S.din00").branch({1: "S.din1"}, bad("array initialiser"), [("CMPI", "dar", 0)])
+    P("S.din00").branch({1: "S.initkind"}, bad("array initialiser"), [("CMPI", "dar", 0)])
+    P("S.initkind").branch({1:"S.initbase"},"S.din1",[("LDX","lt","v",E.PTR),("CMPI","lt",0)])
+    P("S.initbase").branch({(1,2):"S.dstruct"},"S.din1",[("LDX","lb","v",E.BASE),("CMPI","lb",SBB)])
+    q = P("S.dstruct")
+    q.o("  imm r0, ").num("s").o("\n  sub64 r0, r6, r0\n"); emit(q,"push").vpush("s","v","bd","tb","lt","lb").call("NEXT").call("EXPR").vpop("s","v","bd","tb","lt","lb").call("AS.struct").tok({",":"S.dcm"},"S.dend")
     # One initializer walker; only the address mode differs across storage classes.
     P("S.lbr").a(("LDI", "imode", 0), ("COPYW", "ivv", "v"), ("COPYW", "ibytes", "dsz")).vpush("bd", "tb").call("INITLIST").vpop("bd", "tb").tok({",": "S.dcm"}, "S.dend")
     P("INITADDR").branch({1: "IA.local"}, "IA.named", [("CMPI", "imode", 0)])

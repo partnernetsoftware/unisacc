@@ -4423,3 +4423,15 @@ atexit/div/labs aggregate-return case. Full reconstruction remains open.
 产品 `.com` 已重建：1,355,008 B，SHA256 `b3ef68bc2e2e9941309ea394ca7b81138ebebd3cfffe95760ac736b51d61dc53`。独立模型候选 `/tmp/unisacc-flex-candidate/unisacc-next.com`：5,884,843 B，SHA256 `05dce8d8bbd154c46e7b75fe85850910e2c84955ad6e5689a1e3ccfd2025e7e4`。候选真实运行：s61与b_memberptrarray在O0/O1/O2均同host cc；union柔性成员、首个柔性成员、非最后柔性成员均rc1无输出。解析网络4,871状态、535,474 B、1,256,462个观测network=table（含动作与字符串）。本轮增加布局分支与产品基类型元数据，不称代码减少。
 
 模型C99现为53/57、wrong0、refused4、rc1，保留原57基线。余项：自动VLA、结构体复合字面量、数组复合字面量、atexit/div/labs聚合返回初始化。没有切换默认产品路线、发布或推送；cc会话的系统调用扩展与Windows winimp=none修复仍在隔离分支，待本轮提交后另审，不能快进覆盖候选树。
+
+### 系统调用隔离分支合入审查（9228faa，暂未合入）
+
+审查发现：新增execve/getdents与目录头文件仅改abi_audit映射，无持久功能回归；需保存真实execve成功/失败、目录多批读取与Windows双目标拒绝、合法WinAPI不受影响的测试。C/Python guard方向正确，但 exec/lower/code.py 的两个abi循环仍只排除非Windows sysno=none，Windows winapi+winimp=none仍被生成；合入必须同步模型拒绝，不能只修参考。新DIR内部fd/pos/len/base/ent/buf字段未用实现保留名，重现既有头文件宏污染风险；需与先定义同名宏的输入核对。共享/tmp输出必须私有化。本轮不快进，不采用分支的unisacc.c覆盖主线成员指针数组修复，后续合入按最终源码重生成。
+
+### 模型结构体表达式初始化（进行中）
+
+剩余C99的div/ldiv用例拒绝于width：局部 `struct S x = expression` 错走标量STOREV，已有结构体赋值COPYSTRUCT未复用。按参考先保存目标地址，再求RHS并调用已有同类型结构体复制；初始列表保留原路径，无新执行器动作。先用私有参考固定265项回归，再测真实模型候选。
+
+结构体表达式初始化固定清单：旧265项与新增5d/s62（带填充字段、函数返回、声明逗号、3字节结构体、独立副本、调用次数）共267项与私有参考tape一致；新增两项网络链路相同后加入chain，现120项。解析网络4,881状态、536,676 B、1,259,042观测与表相同。实现只将目标地址保留与RHS求值接到已有AS.struct/COPYSTRUCT，不新增动作或复制算法。
+
+结构体表达式初始化收尾：双槽队列 `/tmp/unisacc-structinit-final` chain120/120（12.33s）、自身3,946,271 B tape相等（3.32s）、unitlocations（3.41s），3/3通过，窗口12.37s。真实模型候选 `/tmp/unisacc-structinit-candidate/unisacc-next.com` 5,887,318 B，SHA256 `50399aa6bf889ea83106ba36a400f327a275fd858c78556e3d6750e3595a0910`；5d/s62三个优化级别均同host cc。原C99清单54/57、wrong0、refused3、rc1，未降57基线；剩余自动VLA与两类复合字面量。本片只改模型生成与固定测试集，未改产品源/出货.com，无推送；全重构仍未完成。
