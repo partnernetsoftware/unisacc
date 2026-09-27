@@ -93,6 +93,7 @@ static char *process_environment(int argc,char **argv,int i) {
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
+    int warnings=0; Buf werror={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0};
     for (int i = 1; i < argc; i++) {
@@ -100,6 +101,8 @@ int main(int argc, char **argv) {
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
             printf("unisacc %s\n",UNISACC_VERSION); return 0;
         }
+        else if (!strcmp(a,"-Wall") || !strcmp(a,"-Wextra")) warnings=1;
+        else if (!strcmp(a,"-Werror")) { warnings=1; if (!werror.n) bput(&werror,1,0); }
         else if (!strcmp(a,"-run")) runit = 1;
         else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
         else if (runit && src && a[0]!='-') {
@@ -158,6 +161,11 @@ int main(int argc, char **argv) {
         mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
         snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
+    if (warnings && mode!=1 && mode!=4) {
+        if (nsources>1) return clierror("multi-unit warning locations not migrated");
+        n=snprintf(route,sizeof route,"%s/warn/%s/O%d",target,mode==3 ? "run" : mode==2 ? "tape" : "image",level);
+        if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
+    }
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
     ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
@@ -184,9 +192,10 @@ int main(int argc, char **argv) {
         cli[6].name=(const unsigned char *)"\0process/argv";cli[6].n=13;cli[6].data=process_argv;cli[6].len=8;
         NRI=7;
 #ifdef _WIN32
-        nimports=process_own_imports(cli+9,247,(long)process_own_imports);NRI=9+nimports;
+        nimports=process_own_imports(cli+9,246,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
+    ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; int rc=0;
@@ -220,6 +229,7 @@ int main(int argc, char **argv) {
     unpackage(); RI=0; NRI=0;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
+    free(werror.b); free(werror.at);
     if (rc) return rc;
     if (deps && mode!=1 && mode!=4 && !runit) {
         char *name=0;

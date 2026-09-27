@@ -102,7 +102,9 @@ last-statement heuristic and main/void exemptions, plus `-Wint-conversion`
 for assignments and local scalar initializers. The latter preserves the
 reference's syntactic lone-zero and call-result exemptions. Included-header
 warnings are suppressed. It is not a
-full `-Wall` mode and is not selected by the compiler CLI. Multi-unit integration and `-Werror` remain pending.
+complete warning implementation for every input. The development compiler CLI
+selects it for single-unit `-Wall`/`-Wextra`/`-Werror`; multi-unit integration
+remains pending.
 
 The model renderer derives file, line and column from retained preprocessing
 records and emits the source line/caret to stderr. `diagnosticcheck.py` compares
@@ -139,3 +141,24 @@ the ordinary parser route. An argument with no recorded formal kind now goes
 through the existing float-to-double conversion. `probes/vararg_float.c`
 checks both a float variable and a cast; this does not assert completeness of
 all parameter conversions.
+
+
+## Warning CLI routes
+
+`compilerpack.py` constructs target-specific located preprocessors and shared
+located lexer/warning parser networks, under `<target>/warn/...`. The driver
+selects those routes for a single source with `-Wall`, `-Wextra`, or `-Werror`.
+Preprocessing and token-dump modes keep their ordinary routes. Public token
+dumping deliberately disables implicit header selection, like the reference.
+
+`-Werror` supplies the opaque `\0cli/werror` resource. After rendering the
+warning summary, the parser rejects with an empty reason if its count is
+nonzero and the resource is nonempty. Existing runtime rejection carries
+stderr and discards partial stdout. The driver never opens destinations or
+runs code after that rejection. No C-side diagnostic-text parsing or new
+executor action is involved.
+
+Multi-source warning mode currently refuses explicitly: the ordinary unit
+merger has no per-unit source map. This is an outstanding migration item,
+not a claim of full CLI/source/diagnostic parity. `c/warningcheck.sh` compares
+60 complete results across host-C, unisacc-C and assembly-backed drivers.

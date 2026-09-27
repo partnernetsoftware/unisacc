@@ -1,5 +1,5 @@
 """The reference's laststmt/return warning, not a new flow analysis.
-Enabled only by the development --warnings mode. Multi-unit framing and CLI integration remain pending; this is not the compiler's -Wall route.
+Enabled only by the development --warnings mode. The development CLI uses it for single units; multi-unit framing remains pending.
 """
 from tokenlocations import TOKEN_POS
 MESSAGE=b'non-void function does not return a value in all control paths [-Wreturn-type]'
@@ -49,3 +49,11 @@ def install(E,P,SBB):
         {1:'WR.one'},'WR.many',[('CMPI','wr_count',1)])
     P('WR.one').o(' warning generated.\n').a(('OSEL',0)).ret()
     P('WR.many').o(' warnings generated.\n').a(('OSEL',0)).ret()
+
+    # CLI policy is an explicit byte resource; the model decides whether its
+    # warning count prevents acceptance. Empty rejection preserves diagnostics.
+    P('WR.error').branch({1:'RET'},'WR.errorflag',[('CMPI','wr_count',0)])
+    P('WR.errorflag').a(('SBCLR',),*[('SBOUT',c) for c in b'\0cli/werror'],
+        ('SBFIND','wr_flag'),('BLEN','wr_flaglen','wr_flag')).branch(
+        {1:'RET'},'WR.reject',[('CMPI','wr_flaglen',0)])
+    P('WR.reject').a(('REJECT','')).goto('DEAD')

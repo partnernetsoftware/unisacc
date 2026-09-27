@@ -3688,3 +3688,35 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   CLI selection, multi-unit locations and -Werror remain. No default product
   switch, new Linux/Windows execution claim, push or release. Reconstruction
   remains active; FX conjectures do not add implementation scope.
+
+
+### Single-unit warning CLI and Werror acceptance barrier
+
+- The development package now carries target-specific located preprocessors
+  plus shared located lexer/warning-parser networks. Its driver routes
+  single-source -Wall/-Wextra/-Werror to them. Warning decisions stay in the
+  parser model; -Werror is an explicit byte resource, and the model rejects
+  after its summary when the warning count is nonzero. Empty rejection keeps
+  the reference stderr without adding a runtime reason. No executor action
+  added, and no C-side diagnostic-text classification.
+- c/warningcheck.sh passes 60 complete rc/stdout/stderr comparisons across
+  host-C, unisacc-C and assembly-backed drivers, under alarm 60. It covers
+  all three flags, three optimization levels, preprocessing/token dumping,
+  and rejection before output/dependency mutation or execution. A clean
+  -Werror program still runs. Multi-unit warning mode remains an explicit
+  refusal until its source maps are integrated; no full-parity claim.
+- This test exposed an existing token-dump mismatch: its preprocessor was
+  performing implicit header selection. That route now constructs E2 with
+  E2_AUTOINC=0, matching the reference lexer instrument; explicit includes
+  remain supported. Compilation routes retain implicit header selection.
+- compilercheck.sh remains green (27 mode/level comparisons and its other
+  contracts). A rebuilt development container passes tests/cli.sh 64/64
+  from an isolated directory, plus six full warning-mode tape/run result
+  comparisons. Container: 4,830,280 B; SHA-256
+  a4f47e3f329ba8a5a135e460dd8c694a6b7cca24ff986052e02b5e707ac189f6.
+  Warning models increased the container from 3,265,512 B; no size reduction
+  claimed. Offline generation still uses Python; runtime does not.
+- These are local macOS arm64 results, not a full gate or cross-platform
+  release result. The default shipped .com is unchanged. No push/release.
+  Next: per-unit located framing and warning diagnostics for multiple inputs;
+  the complete reconstruction goal remains active.

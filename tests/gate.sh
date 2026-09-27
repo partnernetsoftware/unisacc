@@ -88,6 +88,7 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh
+job exec-warningdriver ./exec/c/warningcheck.sh
 job exec-multi ./exec/c/multicheck.sh
 job exec-memory ./exec/c/memorycheck.sh
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then

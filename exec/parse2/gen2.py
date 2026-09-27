@@ -7,7 +7,8 @@ templates -- by one generic compiler, instead of being grown state by state.
     python3 exec/parse2/gen2.py --warnings OUT.json
 
 Optional --warnings implements return-type, int-conversion, unused-variable
-and format warnings, implies --locations, and is not connected to the compiler CLI.
+and format warnings and implies --locations. The development compiler CLI
+selects it for single-unit -Wall/-Wextra/-Werror.
 
 Step 1 covers: int functions and parameters, int locals, expression
 statements, assignment, calls, unary - !, the binary operators of every
@@ -756,7 +757,7 @@ def build(locations=False, warnings=False):
     P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", E.FND)).branch({1: "END.ex"}, "END.x2", [("CMPI", "t", 1)])
     P("END.ex").o("  call exit\n").goto("END.x2")     # a unit that defines exit calls it on return from main (measured)
     p = P("END.x2").o("  .exit r0\n").call("PF.helpers").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").call("UD.check")
-    if warnings: p.call("WR.summary")
+    if warnings: p.call("WR.summary").call("WR.error")
     p.a(("ACCEPT",)).goto("DEAD")
     p = P("INITS")
     p.call("NEXT").label("IN.l")
