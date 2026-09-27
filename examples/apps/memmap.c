@@ -169,6 +169,16 @@ int main(int argc, char **argv)
         if (f == 0) { fprintf(stderr, "memmap: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
+        /* Deliberately NOT reading this process's own /proc/self/maps here:
+         * it is real data, but the map is a property of the SPECIFIC
+         * binary asking (a cc build and a unisacc build of the same
+         * source have different segments), so it would break the
+         * cc-vs-unisacc byte-for-byte check every other example in this
+         * directory relies on, and ASLR makes it change between runs of
+         * the same binary too. That is a real reason, not a shortcut. */
+        fprintf(stderr, "memmap: no input given -- showing a built-in "
+                        "SAMPLE, not real data. Try:\n"
+                        "  cat /proc/PID/maps | unisacc -run memmap.c -\n");
         for (i = 0; sample[i]; i++) add_line(sample[i]);
     }
     if (NR == 0) { fprintf(stderr, "memmap: no regions\n"); return 1; }

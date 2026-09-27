@@ -126,6 +126,15 @@ int main(int argc, char **argv)
         if (f == 0) { fprintf(stderr, "winlayout: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
+        /* No window-server access is possible from this compiler's own C
+         * library: reading real geometry needs X11/Wayland sockets, the
+         * Win32 API or CoreGraphics, none of which this front end binds.
+         * That is a real gap, not a shortcut -- say so plainly instead of
+         * letting the realistic-looking sample pass as live data. */
+        fprintf(stderr, "winlayout: no input given -- showing a built-in "
+                        "SAMPLE, not real data. Try:\n"
+                        "  wmctrl -lG | awk '{print $3,$4,$5,$6,$7}' | "
+                        "unisacc -run winlayout.c -\n");
         for (i = 0; sample[i]; i++) {
             strcpy(buf, sample[i]);
             add_line(buf);
