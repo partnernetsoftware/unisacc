@@ -202,54 +202,20 @@ def build(image=False):
     g.on("SKIPL", [10], "LINE", [("ADV",)])
     g.on("SKIPL", [EOF], "DONE", [])
     g.els("SKIPL", "SKIPL", [("ADV",)])
-    g.on("ARG", [32], "ARG", [("ADV",)])
-    g.on("ARG", NL, "ARGS.d", [])
-    g.on("ARG", [45] + DIGIT, "AN", [("LDI", "neg", 0), ("LDI", "av", 0), ("LDI","akind",1), ("LDI","ndigit",0)])
-    g.els("ARG", "AR", [("MARK", "ts"),("LDI","akind",0)])
-    g.on("AN", [45], "AN.d", [("LDI", "neg", 1), ("ADV",)])
-    g.els("AN", "AN.d", [])
-    g.on("AN.d", DIGIT, "AN.guard", [("BYTE", "bt"), ("ALUI", "sub", "bt", "bt", 48), ("A64I", "mul", "av", "av", 10),
-                                 ("A64", "add", "av", "av", "bt"), ("LDI","ndigit",1), ("ADV",)])
-    P("AN.guard").branch({1:"ITO.digit"},"AN.d",[("CMPI","cls",C_ITOA)])
-    P("ITO.digit").a(("LDI","limit",2147483647)).branch({2:"DEAD.itoa"},"AN.d",[("C64U","av","limit")])
-    g.els("AN.d", "AN.s", [])
-    P("AN.s").branch({1:"ITO.numend"},"AN.sign",[("CMPI","cls",C_ITOA)])
-    P("ITO.numend").branch({1:"AN.sign"},"DEAD.itoa",[("CMPI","ndigit",1)])
-    p = P("AN.sign")
-    p.branch({1: "AN.neg"}, "ARG.put", [("CMPI", "neg", 1)])
-    P("AN.neg").a(("LDI", "z0", 0), ("A64", "sub", "av", "z0", "av")).goto("ARG.put")
-    g.on("AR", [44, 32] + NL, "AR.e", [("MARK", "te")])
-    g.on("AR", [61], "META.v", [("MARK", "ke"), ("ADV",)])        # key=value: meta, not an operand
-    g.els("AR", "AR", [("ADV",)])
-    p = P("AR.e")
-    p.a(("INTERN", "rid", "ts", "te")).branch({1: "AR.tag"}, "AR.e1", [("CMP", "rid", "id_tagimm")])
-    P("AR.e1").branch({1: "AR.tag"}, "AR.mem", [("CMP", "rid", "id_tagreg")])
-    P("AR.mem").branch({1:"AR.tag"}, "AR.addr", [("CMP","rid","id_tagmem")])
-    P("AR.addr").branch({1:"AR.tag"}, "AR.lea", [("CMP","rid","id_tagaddr")])
-    P("AR.lea").branch({1:"AR.l1"}, "AR.bool", [("CMPI","cls",C_LEA)])
-    P("AR.bool").branch({1:"AR.b1"}, "AR.e2", [("CMPI","cls",C_ARGSAVE)])
-    P("AR.b1").branch({1:"AR.bt"}, "AR.b2", [("CMP","rid","id_true")])
-    P("AR.bt").a(("LDI","av",1)).goto("ARG.put")
-    P("AR.b2").branch({1:"AR.bf"}, "AR.e2", [("CMP","rid","id_false")])
-    P("AR.bf").a(("LDI","av",0)).goto("ARG.put")
-    P("AR.l1").branch({1:"AR.name"}, "AR.e2", [("CMPI","na",1)])
-    P("AR.name").a(("COPYW","av","rid"),("LDI","anamed",1)).goto("ARG.put")
-    P("AR.tag").a(("COPYW", "stag", "rid")).goto("ARG")          # setreg's tag word: the value follows
-    p = P("AR.e2")
-    p.a(("LDX", "av", "rid", REGN)).branch({1: "DEAD.reg"}, "AR.r", [("CMPI", "av", 0)])
-    g.on("DEAD.reg", range(257), "DEAD", E.rej("not covered: an operand that is not a register or an integer"), "r")
-    P("AR.r").a(("ALUI", "sub", "av", "av", 1)).goto("ARG.put")
-    p = P("ARG.put")
-    for k in range(4):
-        hit, nx = "AP.%d" % k, "AP.n%d" % k
-        p.branch({1: hit}, nx, [("CMPI", "na", k)])
-        P(hit).a(("COPYW", "a%d" % k, "av"), ("COPYW","ak%d" % k,"akind"), ("ALUI", "add", "na", "na", 1)).goto("ARG.sep")
-        p = P(nx)
-    p.goto("DEAD.reg")
-    g.on("ARG.sep", [32], "ARG.sep", [("ADV",)])
-    g.on("ARG.sep", [44], "ARG", [("ADV",)])
-    g.on("ARG.sep", NL, "ARGS.d", [])
-    g.els("ARG.sep", "ARG", [])                 # a token after a space: meta (checked there) or an error
+    from finite_rules import install as install_rules
+    bindings = {name: globals()[name] for name in ('REGN', 'C_ITOA', 'C_LEA', 'C_ARGSAVE')}
+    for line in open(os.path.join(HERE, 'x86-operand-names.tsv')):
+        if not line.startswith('#'):
+            name, owner, kind = line.rstrip('\n').split('\t')
+            bindings[name] = P(owner).fresh(kind)
+    install_rules(g, HERE, 'x86-operand', section='scan', bindings=bindings,
+                  sequences={'register_reject': E.rej('not covered: an operand that is not a register or an integer')})
+    for i in range(4):
+        entry = 'ARG.put' if i == 0 else 'AP.n%d' % (i - 1)
+        install_rules(g, HERE, 'x86-operand', section='put', bindings=dict(
+            entry=entry, test=P(entry).fresh('b'), hit='AP.%d' % i, next='AP.n%d' % i,
+            index=i, value='a%d' % i, kind='ak%d' % i))
+    install_rules(g, HERE, 'x86-operand', section='tail')
     # META: `key=value` after the args.  role: informational, ignored.  form: informational for the
     # ordinary ops. For gate, winapi uses deferred encoding; carry must be true/false.
     # Other declared gate metadata is informational for the non-WinAPI encoder;
