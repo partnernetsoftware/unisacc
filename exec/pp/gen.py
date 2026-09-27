@@ -71,7 +71,7 @@ AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta w
 AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
 
 
-def build_autoinc(g):
+def build_autoinc(g, locations=False):
     """P2 autoinc, first run only (RUN == 0), between decomment and P3.
     One scan over x: every maximal identifier run followed (spaces, tabs,
     newlines) by `(` is a call; the `(`'s matching `)` followed by `{` is a
@@ -123,7 +123,7 @@ def build_autoinc(g):
         g.els("AH%d_n%d" % (h, len(names)), nxt_h)
 
     def line(hn):
-        return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()]
+        return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()] + ([("ALUI","add","AI_LINES","AI_LINES",1)] if locations else [])
     g.els("AEM", "AEMR", [("RLD", "RTP")])
     first = "AEM%d" % (len(H) - 1)
     g.r("AEMR", {1: (first, line("stdio.h")), (0, 2): (first, [])})
@@ -593,7 +593,7 @@ def build_hx(g, NC):
     g.els("HSC", "HS1", one)
 
 
-def build_cli(g, NC):
+def build_cli(g, NC, locations=False):
     """Raw NUL-separated CLI values from named byte resources. All language
     decisions live here: -include source prefixes, MDEF bodies, and -U masks.
     No CLI directive text is inserted for -D/-U, so source positions stay put.
@@ -607,7 +607,7 @@ def build_cli(g, NC):
     g.on("CLI.INC.next", [EOF], "P0S", [("INPOP",), ("LDI", "CLI_Z", 0), ("XLEN", "CLI_E"),
                                          ("SPAN2", "CLI_Z", "CLI_E"), ("SWAP",)])
     g.els("CLI.INC.next", "CLI.INC.path", [("OUT", c) for c in b'#include "'])
-    g.on("CLI.INC.path", [0], "CLI.INC.next", [("ADV",), ("OUT", 34), ("OUT", 10)])
+    g.on("CLI.INC.path", [0], "CLI.INC.next", [("ADV",), ("OUT", 34), ("OUT", 10)] + ([("ALUI","add","CLI_PRELINES","CLI_PRELINES",1)] if locations else []))
     g.on("CLI.INC.path", [EOF], "DEAD", NC("unterminated CLI include"))
     g.els("CLI.INC.path", "CLI.INC.path", [("COPY",), ("ADV",)])
 
@@ -636,7 +636,7 @@ def build_cli(g, NC):
             g.r(q+'.found',{0:(q+'.next',[("ADV",)]),(1,2):(q+'.next',ea('EA','M')+[("LDI","t",0),("STX","EA",F_TO,"t"),("ADV",)])})
 
 
-def build(target="lnx/x86_64"):
+def build(target="lnx/x86_64", locations=False):
     if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"):
         raise ValueError("unsupported preprocessor target: "+target)
     predef=list(PREDEF)
@@ -661,7 +661,7 @@ def build(target="lnx/x86_64"):
     init += sbconst("printf") + [("SBINTERN", "ID_PRINTF")]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
     g.els("START", "CLI.FLAGS", init)
-    build_cli(g, NC)
+    build_cli(g, NC, locations)
 
     # ---- P0: shebang, then splice -----------------------------------------
     g.on("P0S", [35], "P0S1", [("MARK", "A"), ("ADV",)])
@@ -737,7 +737,7 @@ def build(target="lnx/x86_64"):
         ("STX", "mda", 0, "mdt"), ("ALUI", "add", "NMAC", "NMAC", 1)])
 
     if AUTOINC:
-        build_autoinc(g)
+        build_autoinc(g, locations)
 
     # ---- P3: directives -------------------------------------------------------
     g.els("P3START", "P3S2", [("RLD", "RUN")])
@@ -947,7 +947,15 @@ def build(target="lnx/x86_64"):
     g.r("INC6", {1: ("DEAD", [("REJECT", "no such file for #include")]), (0, 2): ("INCOK", [])})
     # found: o holds the buffer up to LS; write the file, a newline, the rest
     # of x from LE, and run P0, P1 and P3 again (P3 resumes at LS)
-    g.els("INCOK", "INCH", [("OLEN", "RESUME"), ("ALUI", "add", "a", "NIREG", IRLN),
+    inc_entry="INCOK"
+    if locations:
+        from locations import IRNAME
+        # incname in the reference diagnostic map retains at most 62 bytes.
+        g.els("INCOK","INC.location",[("ALUI","add","loc_end","NM",62),("CMP","NME","loc_end")])
+        g.r("INC.location",{(0,1):("INC.record",[("COPYW","loc_end","NME")]),2:("INC.record",[])})
+        g.els("INC.record","INC.body",[("BLOBSAVE","loc_name","NM","loc_end"),("STX","NIREG",IRNAME,"loc_name")])
+        inc_entry="INC.body"
+    g.els(inc_entry, "INCH", [("OLEN", "RESUME"), ("ALUI", "add", "a", "NIREG", IRLN),
                             ("ALUI", "add", "t", "LINES", 1), ("STX", "a", 0, "t"),
                             ("LDI", "HNL", 1), ("INPUSH", "HB")])
     g.on("INCH", [10], "INCH", [("COPYT",), ("ADV",), ("ALUI", "add", "HNL", "HNL", 1)])
@@ -1198,7 +1206,11 @@ def build(target="lnx/x86_64"):
     g.r("P4END", {1: ("ACC", [("OCLR",), ("LDI", "Z", 0), ("XLEN", "XE"), ("SPAN2", "Z", "XE")]),
                   (0, 2): ("ACC", [])})  # the token rescan is complete: one round
     g.r("P4N", {1: ("ACC", []), (0, 2): ("P4", [("SWAP",)])})
-    g.els("ACC", "ACC", [("ACCEPT",)])
+    if locations:
+        from locations import install
+        install(g, SPLB, IRLN, IRNL)
+    else:
+        g.els("ACC", "ACC", [("ACCEPT",)])
     build_xe(g, NC)
     build_hx(g, NC)
     g.finish()
@@ -1225,9 +1237,11 @@ def sizes(g):
 
 
 def main():
+    locations="--locations" in sys.argv
+    if locations: sys.argv.remove("--locations")
     if len(sys.argv)>3:
-        sys.exit("usage: gen.py [OUT.json] [OS/ARCH]")
-    g = build(sys.argv[2] if len(sys.argv)>2 else "lnx/x86_64")
+        sys.exit("usage: gen.py [OUT.json] [OS/ARCH] [--locations]")
+    g = build(sys.argv[2] if len(sys.argv)>2 else "lnx/x86_64", locations=locations)
     out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/e2delta.json"
     json.dump({"start": "START", "states": {k: [m, {str(kk): list(v) for kk, v in r.items()}]
                                             for k, (m, r) in g.st.items()},

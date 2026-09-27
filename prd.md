@@ -3474,3 +3474,32 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   E1/E3; token streams do not yet carry source positions. Do not infer source
   locations by searching token text. Default product unchanged; no push,
   release, full-gate claim or new Linux/Windows run in this batch.
+
+### Warning source-location prerequisite: E2 diagnostic envelope
+
+- Optional offline `exec/pp/gen.py --locations` now constructs an E2 network
+  that emits pp.locations: the exact preprocessed text plus forced/automatic
+  prefix counts, splice offsets, and ordered header insertion regions/names.
+  The binary envelope is specified in exec/pipeline/formats.md. All framing
+  is generated model actions; no host parser or new executor primitive.
+- Header names follow the reference diagnostic map's first-62-byte limit.
+  A forced-include test in the long macOS scratch path exposed this; the
+  diagnostic-only model now reproduces it explicitly. Actual file lookup
+  still uses the complete path.
+- locationcheck.py builds a scratch-only instrumented current reference at
+  the real expandsrc/lex boundary. Nine complete records+text are byte-equal:
+  plain, macro, LF/CRLF splice, multiline comment, nested/repeated includes,
+  forced include and automatic stdio. Five small cases additionally agree
+  with the Python action oracle. cc, unisacc and both macOS ISA assembly
+  runtimes pass all nine. Logs /tmp/unisacc-location-{check,ua,arm,x86}.log.
+- Default E2 states and action sequences compare exactly with the pre-change
+  generator for all six targets (/tmp/unisacc-location-default.log). No
+  default container rebuild is needed for this unused optional mode; the
+  existing container and default product are unchanged. exec-pploc joins the
+  bounded local gate; no full-gate or Linux/Windows native claim in this batch.
+- This exports the actual position-recovery inputs only. E1/E3 do not consume
+  the envelope yet, the compiler route does not select it, and warning rules
+  are not migrated. CLI remains 63/64, not a completed -Wall implementation.
+  Next is model consumption/token positions and warning analysis, retaining
+  header suppression and the reference's macro-expanded-column convention.
+  Local commit only; no push/release. Reconstruction remains active.
