@@ -51,6 +51,15 @@ def compiler_package(manifests, o1, includes, kernels=None):
         uj=Path(td)/'units.json';ut=Path(td)/'units.tbl';un=Path(td)/'units.net'
         for script,args in [(here.parent/'parse2/units.py',[uj]),(here/'tbl.py',[uj,ut]),(here/'net.py',[ut,un])]:
             subprocess.run([sys.executable,str(script),*map(str,args)],check=True,timeout=60)
+        # Public token dump uses the reference's fixed Linux/x86 predefines
+        # and the plain E1 output, independently of image-target selection.
+        for name,script,args,inp,out in [
+                ('tokenpp',here.parent/'pp/gen.py',['lnx/x86_64'],'src.c','pp.text'),
+                ('tokenlex',here.parent/'lex/gen.py',[],'pp.text','tokens.plain')]:
+            j=Path(td)/(name+'.json');t=Path(td)/(name+'.tbl');n=Path(td)/(name+'.net')
+            for tool,argv in [(script,[j,*args]),(here/'tbl.py',[j,t]),(here/'net.py',[t,n])]:
+                subprocess.run([sys.executable,str(tool),*map(str,argv)],check=True,timeout=60)
+            rows.append('\t'.join(['tokens',name,inp,out,str(n)]))
         base=list(rows)
         for target in sorted(targets):
             for suffix,last,opt in specs:

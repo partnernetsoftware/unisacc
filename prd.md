@@ -3368,3 +3368,21 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   dependency target/header output, undefined-function diagnostic, token dump.
   /tmp/unisacc-pf-cli.log. No full-gate or Linux/Windows execution claimed.
   Default product unchanged; no push/release; FX conjectures remain unscheduled.
+
+### Model compiler token-dump route
+
+- -dump-tokens selects a package route containing E2 and the existing plain
+  E1 network. Runtime C does not decode tokens. The route uses Linux/x86_64
+  predefines, matching the reference token instrument's fixed target; normal
+  compilation keeps typed E1 output and its selected target. Multiple-source
+  token dumps remain explicitly rejected.
+- Fresh compilercheck: cc, unisacc and assembly drivers match full reference
+  output for declarations, macro expansion, string/hex literals and predefines;
+  existing driver/printf tests also pass. /tmp/unisacc-token-driver.log.
+- Rebuilt container: 3,254,497 B, SHA256
+  14eec9e7764e1c59ed80ef4ab4aa15ba77308545a54e043ad209e755844f7cb6.
+  Embedded route executed on macOS arm64 and Rosetta x86_64 and matched the
+  reference; /tmp/unisacc-token-native.log. No Linux/Windows run claimed.
+- Candidate CLI: 60/64, exit 1. Remaining: warning options, dependency target
+  and header output, undefined-function diagnostic. /tmp/unisacc-token-cli.log.
+  No full gate claimed. Default product unchanged; local commit, no push.

@@ -96,6 +96,7 @@ int main(int argc, char **argv) {
             else { argstart=i; break; }
         }
         else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
+        else if (!strcmp(a,"-dump-tokens")) mode = 4;
         else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
         else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
@@ -133,11 +134,12 @@ int main(int argc, char **argv) {
         else { sources[nsources++]=a; if (!src) src = a; }
     }
     if (!src) return clierror("expected a C source file");
-    if (nsources>1 && mode==1) return clierror("multiple preprocessing outputs not migrated");
+    if (nsources>1 && (mode==1 || mode==4)) return clierror("multiple preprocessing outputs not migrated");
     if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
     if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
     char route[96];
-    int n = mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
+    int n = mode == 4 ? snprintf(route,sizeof route,"tokens") :
+        mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
         snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
