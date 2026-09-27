@@ -4105,6 +4105,9 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
             braced = bracedstr(tp);
             text = cur() == T_STR && iswide(tp) == 0;
             if (braced || text) {
+                if (i < 0 || rows > nbytes || i > nbytes - rows)
+                    err_tok(tp, "string row exceeds array bounds");
+                if (i % rows) err_tok(tp, "string initializer is not at a row boundary");
                 if (braced) adv();
                 initstr(isglobal, gt, off, rows, i);
                 if (braced) { eat(tidx(",", 1)); need(tidx("}", 1), "}"); }
