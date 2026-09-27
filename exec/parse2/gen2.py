@@ -18,6 +18,7 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 
 import importlib.util
 _spec = importlib.util.spec_from_file_location(
@@ -58,6 +59,7 @@ class P(E.P):
 E.P = P
 g = E.g
 from unresolved import install as ud_install
+from finite_rules import install as install_rules, load as load_rules
 
 # Tape text uses JSON string escaping; PUSH/POP1 retain their shared E bindings.
 # {name} prints W[name] in decimal; declared spans print input slices.
@@ -1010,24 +1012,17 @@ def build(locations=False, warnings=False, errors=False):
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
     P("DECLN").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).goto("DECL")
-    p = P("BIND")       # one scope record, shared by automatic and static objects
-    p.a(("INTERN", "v", "ps", "pe"), ("STX", "usp", E.UNDO, "v"))
-    if warnings: p.call("WU.bind")
-    for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
-        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
-    p.a(("ALUI", "mul", "u", "v", 8))
-    for j in range(8):
-        p.a(("LDX", "t", "u", DIM + j), ("STX", "usp", E.UNDO + 5 + j, "t"))
-    for j, table in enumerate((END_, ENV), 13):
-        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
-    for j, table in enumerate((E.TDN, E.TDB, E.TDD), 16):
-        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO+j, "t"))
-    for j, table in enumerate((E.FND, E.FRD, E.FRB, E.VAR), 19):
-        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO+j, "t"))
-    p.a(("ALUI", "mul", "u", "v", 16))
-    for j in range(16): p.a(("LDX", "t", "u", PDB+j), ("STX", "usp", E.UNDO+23+j, "t"))
-    p.a(("LDI", "t", 0), ("STX", "v", E.TDN, "t"))
-    p.a(("LDX","t","v",VLSIZE),("STX","usp",E.UNDO+15,"t"),("LDI","t",0),("STX","v",VLSIZE,"t"),("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", UNDO_SIZE)).ret()
+    # Scope record fields are declared once; bind/unwind share their layout bindings.
+    scope_bindings = {name: getattr(E, name) for name in
+                      ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
+    scope_bindings.update(LOC=LOC, END_=END_, ENV=ENV, VLSIZE=VLSIZE, UNDO_SIZE=UNDO_SIZE)
+    for name, base, size in (("UNDO", E.UNDO, UNDO_SIZE), ("DIM", DIM, 8), ("PDB", PDB, 16)):
+        scope_bindings.update((name + "_" + str(i), base + i) for i in range(size))
+    scope_sequences = {name: row[0][1] for name, row in load_rules(
+        Path(__file__).with_name("scope-actions.tsv"), {}, domain=[0], bindings=scope_bindings).items()}
+    if warnings: scope_bindings["bind_return"] = P("BIND").fresh("r")
+    install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
+                  sequences=scope_sequences, section="bind-warnings" if warnings else "bind")
     p = P("DECL")
     p.call("BIND")
     if warnings: p.call("WU.local")
@@ -1061,26 +1056,10 @@ def build(locations=False, warnings=False, errors=False):
     p.vpush("usp", "cur").call("VL.enter").call("TAG.enter").call("NEXT").call("STMTS").call("TAG.leave").call("VL.leave").vpop("sv", "cur")
     if warnings: p.a(("COPYW", "wu_lo", "sv")).call("WU.block")
     p.call("UNWIND").call("NEXT").ret()
-    p = P("UNWIND")
-    p.label("S.uw")
-    p.branch({2: "S.uw1"}, "RET", [("CMP", "usp", "sv")])
-    p = P("S.uw1")
-    p.a(("ALUI", "sub", "usp", "usp", UNDO_SIZE), ("LDX", "v", "usp", E.UNDO))
-    if warnings: p.call("WU.unbind")
-    for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
-        p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
-    p.a(("ALUI", "mul", "u", "v", 8))
-    for j in range(8):
-        p.a(("LDX", "t", "usp", E.UNDO + 5 + j), ("STX", "u", DIM + j, "t"))
-    for j, table in enumerate((END_, ENV), 13):
-        p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
-    for j, table in enumerate((E.TDN, E.TDB, E.TDD), 16):
-        p.a(("LDX", "t", "usp", E.UNDO+j), ("STX", "v", table, "t"))
-    for j, table in enumerate((E.FND, E.FRD, E.FRB, E.VAR), 19):
-        p.a(("LDX", "t", "usp", E.UNDO+j), ("STX", "v", table, "t"))
-    p.a(("ALUI", "mul", "u", "v", 16))
-    for j in range(16): p.a(("LDX", "t", "usp", E.UNDO+23+j), ("STX", "u", PDB+j, "t"))
-    p.a(("LDX","t","usp",E.UNDO+15),("STX","v",VLSIZE,"t")).goto("S.uw")
+    scope_bindings["scope_compare"] = P("S.uw").fresh("b")
+    if warnings: scope_bindings["unbind_return"] = P("S.uw1").fresh("r")
+    install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
+                  sequences=scope_sequences, section="unwind-warnings" if warnings else "unwind")
 
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
