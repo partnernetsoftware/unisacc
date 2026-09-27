@@ -47,7 +47,7 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 - Only then adopt the model path as the default product and update its docs.
   The current shipped `unisacc.com` has not switched.
 
-The latest rebuilt candidate, from checkpoint d5dcda4, is 6,005,111 bytes, SHA256
+The earlier checkpoint d5dcda4 candidate was 6,005,111 bytes, SHA256
 `3ffcb9bdada262e13bc9a9e8ac3c638059e8eab465690e90ffe7c44f3565cf64`.
 It grew by 19,592 bytes after rule renumbering; this is not a compression result.
 The E3 graph is identical to checkpoint 2273f3e, including every action, and
