@@ -467,6 +467,16 @@ def global_control(section, warnings):
             structured_control(rules, False, bindings)
 
 
+def local_control(section, warnings):
+    bindings = dict(SKIPS=SKIPS, PTR=E.PTR, BASE=E.BASE)
+    for part, mode, prefix, kind, key in tape_rows("local-fresh.tsv"):
+        if part == section and mode in ("common", "warnings" if warnings else "plain"):
+            bindings[key] = P(prefix + ".local_" + key).fresh(kind)
+    for owner, mode, rules in tape_rows("local-sections.tsv"):
+        if owner == section and mode in ("common", "warnings" if warnings else "plain"):
+            structured_control(rules, False, bindings)
+
+
 def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
@@ -594,78 +604,18 @@ def build(locations=False, warnings=False, errors=False):
     install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
                   sequences=scope_sequences, section="unwind-warnings" if warnings else "unwind")
 
-    P("S.empty").call("NEXT").ret()
-    p = P("S.decl")
-    p.call("TSPEC").a(("COPYW", "local_base", "tb")).tok({TK_ID: "S.did0", "(": "S.dfp", ";": "S.empty"}, bad("declaration"))
-    p = P("S.dfp")
-    p.call("FPDECL").a(("LDI", "dsz", 8), ("LDI", "dar", 0)).branch({1: "S.dd"}, "S.dfa", [("CMPI", "fpn", 0)])
-    P("S.dfa").a(("ALUI", "mul", "dsz", "fpn", 8), ("LDI", "dar", 1)).goto("S.dd")
-    P("S.did0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("S.did")
-    P("S.did").a(("LDI", "dsz", 8), ("LDI", "dar", 0)).branch({1: "S.plaintype"}, "S.aliastype", [("CMPI", "type_shape", 0)])
+    local_control("local0", warnings)
     shape_control("local-type")
-    P("S.dst").branch({(1, 2): "S.dst1"}, "S.dnx", [("CMPI", "tb", SBB)])
-    P("S.dst1").call("ELSZ").a(("COPYW", "dsz", "es")).goto("S.dnx")
-    P("S.dnx").call("NEXT").tok({"[": "S.darr", "(": "S.prototype"}, "S.dd")
+    local_control("local2", warnings)
     # Same parameter parser, no frame or parameter bindings for a prototype.
     function_control("function9", warnings)
-    P("S.dd.enumraw").call("DECLN").call("S.aliassave").tok({"=": "S.din", ",": "S.dcm"}, "S.dend")
+    local_control("local4", warnings)
     shape_control("local-binding")
-    P("S.dend").expect(";").call("NEXT").ret()
+    local_control("local6", warnings)
     install_rules(g, os.path.dirname(__file__), "local-declarators",
                   classes=dict(identifier=[TK_ID], paren=[TK["("]]),
                   sequences=dict(reject=E.rej("not covered: declarator")), section="main")
-    p = P("S.din")
-    p.a(("COPYW", "lpp", "tpos")).call("NEXT").tok({"{": "S.lbr", E.TK_STR: "S.ls"}, "S.din0")
-    p = P("S.ls")           # (measured, s34) imm r2, S; sub64 r1, r6, r2; .zero; each byte then the 0 at S - k
-    p.call("CHARR").branch({1: "S.ls1"}, "S.din0", [("CMPI", "u", 1)])   # char *p = "...": the expression path
-    P("S.ls1").a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t"), ("COPYW", "isl", "s"),
-        ("COPYW", "ibytes", "dsz"), ("LDI", "imode", 0)).call("STRINGINIT").tok({",": "S.dcm"}, "S.dend")
-    P("S.din0").a(("JUMP", "lpp")).call("NEXT").goto("S.din00")       # back to '=' (re-read) for the scalar path
-    P("S.din00").branch({1: "S.initkind"}, bad("array initialiser"), [("CMPI", "dar", 0)])
-    P("S.initkind").branch({1:"S.initbase"},"S.din1",[("LDX","lt","v",E.PTR),("CMPI","lt",0)])
-    P("S.initbase").branch({(1,2):"S.dstruct"},"S.din1",[("LDX","lb","v",E.BASE),("CMPI","lb",SBB)])
-    P("S.dstruct").call("NEXT").call("CP.tryinit").branch({1:"S.cpinit"},"S.structexpr",[("CMPI","cp_match",1)])
-    P("S.cpinit").a(("LDI","imode",0),("COPYW","ivv","v"),("COPYW","ibytes","dsz")).vpush("bd","tb","cp_pars").call("INITLIST").vpop("bd","tb","cp_pars").goto("S.cpclose")
-    P("S.cpclose").branch({1:"S.cpdone"},"S.cpnext",[("CMPI","cp_pars",0)])
-    P("S.cpnext").expect(")").a(("ALUI","sub","cp_pars","cp_pars",1)).call("NEXT").goto("S.cpclose")
-    P("S.cpdone").tok({",":"S.dcm"},"S.dend")
-    q = P("S.structexpr")
-    q.o("  imm r0, ").num("s").o("\n  sub64 r0, r6, r0\n"); emit(q,"push").vpush("s","v","bd","tb","lt","lb").call("EXPR").vpop("s","v","bd","tb","lt","lb").call("AS.struct").tok({",":"S.dcm"},"S.dend")
-    # Reference cplit lookahead: token recognition only, never trial-parse an expression.
-    P("CP.tryinit").a(("COPYW","cp_scanback","tpos"),("LDI","cp_pars",0),("LDI","cp_match",0)).goto("CP.leading")
-    P("CP.leading").tok({"(":"CP.morepar"},"CP.istype")
-    P("CP.morepar").a(("ALUI","add","cp_pars","cp_pars",1)).call("NEXT").goto("CP.leading")
-    P("CP.istype").branch({2:"CP.istype1"},"CP.nomatch",[("CMPI","cp_pars",0)])
-    P("CP.istype1").tok({**{w:"CP.scanstart" for w in TWORDS},"struct":"CP.scanstart","union":"CP.scanstart","enum":"CP.scanstart",TK_ID:"CP.typedef"},"CP.nomatch")
-    P("CP.typedef").call("ISTD").branch({1:"CP.scanstart"},"CP.nomatch")
-    P("CP.scanstart").a(("LDI","cp_depth",0)).goto("CP.scan")
-    P("CP.scan").tok({"(":"CP.scanopen",")":"CP.scanclose","eof":"CP.nomatch"},"CP.scanmore")
-    P("CP.scanopen").a(("ALUI","add","cp_depth","cp_depth",1)).goto("CP.scanmore")
-    P("CP.scanclose").branch({1:"CP.aftertype"},"CP.scandown",[("CMPI","cp_depth",0)])
-    P("CP.scandown").a(("ALUI","sub","cp_depth","cp_depth",1)).goto("CP.scanmore")
-    P("CP.scanmore").call("NEXT").goto("CP.scan")
-    P("CP.aftertype").call("NEXT").tok({"{":"CP.matched"},"CP.nomatch")
-    P("CP.matched").a(("LDI","cp_match",1),("ALUI","sub","cp_pars","cp_pars",1)).ret()
-    P("CP.nomatch").a(("JUMP","cp_scanback")).call("NEXT").ret()
-    # One initializer walker; only the address mode differs across storage classes.
-    P("S.lbr").a(("LDI", "imode", 0), ("COPYW", "ivv", "v"), ("COPYW", "ibytes", "dsz")).vpush("bd", "tb").call("INITLIST").vpop("bd", "tb").tok({",": "S.dcm"}, "S.dend")
-    P("INITADDR").branch({1: "IA.local"}, "IA.named", [("CMPI", "imode", 0)])
-    P("IA.local").a(("ALU", "sub", "t", "isl", "ioff")).o("  imm r2, ").num("t").o("\n  sub64 r1, r6, r2\n").ret()
-    P("IA.named").branch({1: "IA.global"}, "CP.ia.mode", [("CMPI", "imode", 1)])
-    P("IA.global").o("  .lea r1, g_").a(("SPAN2", "inps", "inpe")).goto("IA.offset")
-    P("IA.static").o("  .lea r1, ls").num("inlabel").goto("IA.offset")
-    P("IA.offset").o("\n").branch({1: "RET"}, "IA.add", [("CMPI", "ioff", 0)])
-    P("IA.add").o("  imm r2, ").num("ioff").o("\n  add64 r1, r1, r2\n").ret()
-    q = P("S.din1")
-    q.vpush("s", "v", "bd", "tb").call("NEXT")
-    if warnings: q.a(("LDX", "wi_target", "v", E.PTR)).call("WI.expr")
-    else: q.call("EXPR")
-    q.a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).vpop("s", "v", "bd", "tb")
-    q.a(("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("ASSIGNCV").goto("S.din2")
-    q = P("S.din2")
-    q.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n").call("STOREV").tok({",": "S.dcm"}, "S.dend")
-    P("S.darr").call("VL.classify").branch({1:"VL.decl"},"S.fixedarray",[("CMPI","vl_dynamic",1)])
-    P("S.fixedarray").call("SH.suffix").call("DIMS").call("ELSZ").a(("ALU", "mul", "dsz", "prd", "es"), ("COPYW", "dar", "drk")).goto("S.dd")
+    local_control("local8", warnings)
     p = P("S.ret")
     p.call("NEXT").tok({";": "S.rv"}, "S.re")
     P("S.rv").o("  jump R").num("rl").o("\n").call("NEXT").ret()     # return; (measured, old E3)
