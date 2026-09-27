@@ -784,8 +784,10 @@ def build(locations=False, warnings=False, errors=False):
     p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", "type=extern": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "EN"}, bad("top-level construct"))
     # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
     p = P("EN")
-    p.call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
-    P("EN.tag").a(("INTERN", "t", "ps", "pe"), ("LDI", "u", 1), ("STX", "t", ETAG, "u")).call("NEXT").expect("{").goto("EN.b")
+    p.a(("COPYW", "enstart", "tpos")).call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
+    P("EN.tag").a(("INTERN", "entag", "ps", "pe")).call("NEXT").tok({"{": "EN.register"}, "EN.object")
+    P("EN.register").a(("LDI", "u", 1), ("STX", "entag", ETAG, "u")).goto("EN.b")
+    P("EN.object").a(("JUMP", "enstart")).call("NEXT").goto("FN")
     p = P("EN.b")
     p.a(("LDI", "env", 0)).call("NEXT").label("EN.l")
     p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
