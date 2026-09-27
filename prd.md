@@ -4221,3 +4221,21 @@ External example updates 76bf9a0/31e033d/2287f58 are cc-unisacc's independent
 work. Optional user-facing process/directory/syscall bindings are reported
 as absent, not scheduled in this repair. Their new VM claims were not rerun
 by cdx; no such claim is inferred from the image-comparison gates above.
+
+Next compatibility slice: declaration-only `restrict` and `inline` follow the
+reference's qualifier handling. Share the token-reader skip policy with the
+unit-framing pass, which must preserve physical tokens and static-name spans.
+Do not fold static/extern into this policy: they affect storage/linkage. Verify
+the C99 probes and fixed E3 list; this does not claim full C99 coverage.
+
+Qualifier slice verified: old E3 247 plus s56_qualifiers all equal on the C
+table executor; the new probe is also equal through all three threshold
+networks. Old network chain 100/100 remains green. Located multi-unit test
+now includes a static inline function with a restrict parameter and passes
+independent framing bytes plus reference tape/diagnostics. Both gate jobs
+ran in a two-slot bounded queue: 3.26 s and 9.84 s, wall 9.88 s. After those
+checks the E3/chain keep sets become 248/101. No executor action added.
+Actual rebuilt development container at /tmp/unisacc-qual-candidate:
+C99 44/57, 0 wrong, 13 refusals (previously 42/57); restrict and inline
+are now accepted with correct output. The suite correctly exits 1 against
+the unchanged 57 baseline. No default switch or completeness claim.

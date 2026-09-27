@@ -694,7 +694,7 @@ def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
-    E.tokenizer()
+    E.tokenizer(("type=const", "type=volatile", "type=restrict", "type=inline"))
     del g.st["NX"][1][64]
     g.on("NX", [64], "MU0", [("ADV",)])
     for i, c in enumerate(b"unit"):

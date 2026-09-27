@@ -13,10 +13,10 @@ BAD=('rej','not covered: multi-unit static declarator')
 def build(locations=False):
     # This pass copies physical tokens, including qualifiers. The parser's
     # reader skips qualifiers, but doing that here merges two framing spans.
-    for name in ('type=const','type=volatile'):
+    for name in ('type=const','type=volatile','type=restrict','type=inline'):
         E.WORDS.append(name);E.TK[name]=max(E.TK.values())+1
     E.tokenizer();E.prn();E.fconv()
-    for name in ('type=const','type=volatile'):
+    for name in ('type=const','type=volatile','type=restrict','type=inline'):
         g.st['NX'+name][1][10]=('RET',g.seq([('ADV',),('LDI','tk',E.TK[name])]))
     from strings import token_span
     token_span(E,P)
