@@ -65,47 +65,29 @@ def install(E, arch="x86_64", os_="lnx"):
     for op,tag in special.items():
         p.branch({1:'DO.'+tag},'CD.'+tag,[('CMP','op',ids[op])]);p=P('CD.'+tag)
     p.goto('GENERIC')
-    # Print a mapped register, otherwise the exact token.
-    P('PRINT').a(('LDX','pb','tok',REG)).branch({1:'PRINT.raw'},'PRINT.go',[('CMPI','pb',0)])
-    P('PRINT.raw').a(('LDX','pb','tok',TXT)).goto('PRINT.go')
-    P('PRINT.go').a(('INPUSH','pb')).goto('PCOPY')
-    g.on('PCOPY',[256],'RET',[('INPOP',)]);g.els('PCOPY','PCOPY',[('COPY',),('ADV',)])
-    P('ADDR').a(('ALUI','add','n','base',256),('ALU','add','n','n','offset')).call('PRN').ret()
-    p=P('GENERIC');p.a(('COPYW','tok','op')).call('PRINT').a(('LDI','argj',0)).label('G.args').branch({0:'G.arg'},'G.meta',[('CMP','argj','na')])
-    P('G.arg').branch({1:'G.space'},'G.comma',[('CMPI','argj',0)])
-    P('G.space').o(' ').goto('G.value');P('G.comma').o(', ').goto('G.value')
-    P('G.value').a(('ALU','add','aj','ai','argj'),('LDX','tok','aj',ARG)).call('PRINT').a(('ALUI','add','argj','argj',1)).goto('G.args')
-    P('G.meta').a(('LDX','pb','op',FORM)).branch({1:'G.reloc'},'G.form',[('CMPI','pb',0)])
-    P('G.form').a(('INPUSH','pb')).call('PCOPY').goto('G.reloc')
-    p=P('G.reloc')
-    for op,kind in [('jump','jmp'),('jumpz','jz'),('call','call')]:
-        p.branch({1:'GR.'+op},'GN.'+op,[('CMP','op',ids[op])]);P('GR.'+op).o(' reloc='+reloc[kind]).goto('C.nl');p=P('GN.'+op)
-    p.goto('C.nl')
-    P('C.nl').o('\n').goto('C.advance')
-    P('C.advance').a(('ALUI','add','ci','ci',1)).goto('C.loop')
-    # Adjacent x86 push/pop fusion; any intervening label prevents it.
-    P('NEXTOP').a(('ALUI','add','next','ci',1),('LDI','fuse',0)).branch({0:'NX.load'},'RET',[('CMP','next','nc')])
-    P('NX.load').a(('LDX','nk','next',KIND)).branch({1:'NX.op'},'RET',[('CMPI','nk',2)])
-    p=P('NX.op');p.a(('LDI','fuse',1),('LDX','nop','next',OP),('ALUI','mul','ni','next',8))
-    for i in range(3):p.a(('ALUI','add','nj','ni',i),('LDX','b'+str(i),'nj',ARG))
-    p.ret()
-    P('DO.frame').call('NEXTOP').branch({1:'PF.a'},'GENERIC',[('CMPI','fuse',1)])
-    checks=[('PF.a','a0',ids['8']),('PF.b','nop',ids['store64']),('PF.c','b0',ids['r7']),('PF.d','b1',ids['0'])]
-    for i,(st,r,v) in enumerate(checks):P(st).branch({1:checks[i+1][0] if i+1<len(checks) else 'PF.emit'},'GENERIC',[('CMP',r,v)])
-    P('PF.emit').o('push ').a(('COPYW','tok','b2')).call('PRINT').a(('ALUI','add','ci','ci',1)).goto('C.nl')
-    P('DO.load').call('NEXTOP').branch({1:'PL.a'},'GENERIC',[('CMPI','fuse',1)])
-    checks=[('PL.a','a1',ids['r7']),('PL.b','a2',ids['0']),('PL.c','nop',ids['.frame']),('PL.d','b0',ids['-8'])]
-    for i,(st,r,v) in enumerate(checks):P(st).branch({1:checks[i+1][0] if i+1<len(checks) else 'PL.emit'},'GENERIC',[('CMP',r,v)])
-    P('PL.emit').o('pop ').a(('COPYW','tok','a0')).call('PRINT').a(('ALUI','add','ci','ci',1)).goto('C.nl')
-    P('DO.argc').o('setreg ').a(('COPYW','tok','a0')).call('PRINT').o(', mem ').a(('LDI','offset',48)).call('ADDR').o(' role=argc').goto('C.nl')
-    P('DO.argv').o('argvget ').a(('COPYW','tok','a0')).call('PRINT').o(', ').a(('COPYW','tok','a1')).call('PRINT').o(', ').a(('LDI','offset',56)).call('ADDR').goto('C.nl')
-    p=P('DO.arg')
-    # .arg number comes from a numeric token, not an intern id's magnitude.
-    for i in range(8):
-        # Populate these ids during init below through a separate init prelude.
-        p.branch({1:'DA.'+str(i)},'DA.n'+str(i),[('CMP','a0','inum'+str(i))])
-        P('DA.'+str(i)).o('mov '+regmap['r'+str(i)]+', ').a(('COPYW','tok','a1')).call('PRINT').goto('C.nl');p=P('DA.n'+str(i))
-    p.goto('C.fail')
+    # Generic output and fixed fusion/argument control; facts stay in their original maps.
+    print_labels = (('PRINT', 'b'), ('ADDR', 'r'), ('GENERIC', 'r'), ('G', 'b'),
+                    ('G', 'b'), ('G', 'r'), ('G', 'b'), ('G', 'r'),
+                    ('G', 'b'), ('GN', 'b'), ('GN', 'b'), ('NEXTOP', 'b'),
+                    ('NX', 'b'), ('DO', 'r'), ('DO', 'b'), ('PF', 'b'),
+                    ('PF', 'b'), ('PF', 'b'), ('PF', 'b'), ('PF', 'r'),
+                    ('DO', 'r'), ('DO', 'b'), ('PL', 'b'), ('PL', 'b'),
+                    ('PL', 'b'), ('PL', 'b'), ('PL', 'r'), ('DO', 'r'),
+                    ('DO', 'r'), ('DO', 'r'), ('DO', 'r'), ('DO', 'r'),
+                    ('DO', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'),
+                    ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'),
+                    ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'),
+                    ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'))
+    print_bindings = {'label'+str(i): P(owner).fresh(kind)
+                      for i, (owner, kind) in enumerate(print_labels)}
+    print_bindings.update(OP=OP, KIND=KIND, ARG=ARG, TXT=TXT, REG=REG, FORM=FORM)
+    print_bindings.update({'id:'+name: value for name, value in ids.items()})
+    print_sequences = {'text'+str(i): E.O(text) for i, text in enumerate((
+        ' ', ', ', ' reloc='+reloc['jmp'], ' reloc='+reloc['jz'], ' reloc='+reloc['call'], '\n',
+        'push ', 'pop ', 'setreg ', ', mem ', ' role=argc', 'argvget ', ', ', ', ',
+    ) + tuple('mov '+regmap['r'+str(i)]+', ' for i in range(8)))}
+    install_rules(g, Path(__file__).parent, 'code-print', bindings=print_bindings,
+                  sequences=print_sequences)
     # Wrapper around init, for the eight numeric spellings and syscall ids.
     p=P('C.prelude')
     for i in range(8):p.a(('SBCLR',),('SBOUT',48+i),('SBINTERN','inum'+str(i)))
