@@ -4288,3 +4288,25 @@ Actual /tmp/unisacc-lvalue-candidate/unisacc-next.com SHA-256
 6d0e545a03ed637b69b359d17bd835231ad700e186b3ced9d28c5c31e5515aa8:
 C99 46/57, 0 wrong, 11 refusals, rc 1 against baseline 57. No product
 default switch, release, or platform-validation claim.
+
+Next declaration slice: signal.h exposes a general missing shape, a function
+returning a function pointer (`T (*name(params))(result_params)`). Reuse the
+existing parameter/body walk and FP signature skipper; carry the wrapper
+explicitly until the outer declarator closes. Enable void-return function
+pointer casts through the existing FP descriptor. No signal-specific model
+rule; test a renamed factory plus the actual header and preserve fixed lists.
+
+Function-pointer return declarations verified: old E3 252 plus signal and
+s58 factory = 254 equal. Old network chain 105/105 remains green; both new
+files separately equal through threshold networks. Keeps raised afterwards
+to 254/107. Self-source tape remains 3933309 B identical. Queue two jobs
+3.33/10.12 s, wall 10.16 s. No executor primitive or signal-specific rule.
+Actual new container at -O0/-O1/-O2 equals host cc: signal prints
+1 / 15 / still here; factory prints 8 4 7 1 12. The factory includes a
+prototype, callback parameter, immediate call of the returned pointer,
+void callback return/cast and an ordinary function after the wrapped one.
+/tmp/unisacc-fpret-candidate/unisacc-next.com SHA-256
+11561d7b3c450faeecbd3556f9e2af7dd64a944bb833b345102a2c66edd44f19.
+Fresh model C99 47/57, 0 wrong, 10 refusals, rc 1 against baseline 57.
+This does not extend the bundled signal implementation to external OS
+signal delivery. Product sources and the default product remain unchanged.
