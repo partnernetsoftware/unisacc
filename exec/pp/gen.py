@@ -723,31 +723,12 @@ def build(target="lnx/x86_64", locations=False):
             for key, (target, actions) in row.items():
                 g.on(state, [key], links.get(target, target), actions, mode)
 
-    # ---- MFIND: M := entry for id NID live in segment SEGQ (-1: now) -------
-    g.els("MFIND", "MF1", [("ALUI", "add", "mfa", "NID", NEWB), ("LDX", "mft", "mfa", 0),
-                            ("ALUI", "sub", "M", "mft", 1), ("CMPI", "SEGQ", 0)])
-    g.r("MF1", {0: ("MFN", [("CMPI", "M", 0)]), (1, 2): ("MFW", [("CMPI", "M", 0)])})
-    g.r("MFN", {0: ("RET", []), (1, 2): ("MFN2", ea("mfe", "M") + [("LDX", "mft", "mfe", F_TO),
-                                                                   ("CMPI", "mft", SEGINF)])})
-    g.r("MFN2", {0: ("RET", [("LDI", "M", -1)]), (1, 2): ("RET", [])})
-    g.r("MFW", {0: ("RET", []), (1, 2): ("MFW2", ea("mfe", "M") + [("LDX", "mft", "mfe", F_FROM),
-                                                                   ("CMP", "mft", "SEGQ")])})
-    prev = ("MFW", [("LDX", "M", "mfe", F_PREV), ("CMPI", "M", 0)])
-    g.r("MFW2", {2: prev, (0, 1): ("MFW3", [("LDX", "mft", "mfe", F_TO), ("CMP", "SEGQ", "mft")])})
-    g.r("MFW3", {0: ("RET", []), (1, 2): prev})
-
-    # ---- MDEF: a new entry for NID (mdef), address in EA ---------------------
-    g.els("MDEF", "MD1", [("ALUI", "add", "mda", "NID", NEWB), ("LDX", "mdt", "mda", 0),
-                           ("ALUI", "sub", "OLD", "mdt", 1), ("CMPI", "OLD", 0)])
-    g.r("MD1", {0: ("MD2", []), (1, 2): ("MD1B", ea("mde", "OLD") + [("LDX", "mdt", "mde", F_TO),
-                                                                     ("CMPI", "mdt", SEGINF)])})
-    g.r("MD1B", {0: ("MD2", []), (1, 2): ("MD2", [("STX", "mde", F_TO, "CURSEG")])})
-    g.els("MD2", "RET", ea("EA", "NMAC") + [
-        ("STX", "EA", F_FROM, "CURSEG"), ("LDI", "mdt", SEGINF), ("STX", "EA", F_TO, "mdt"),
-        ("STX", "EA", F_PREV, "OLD"), ("STX", "EA", F_NAME, "NID"), ("LDI", "mdt", 0),
-        ("STX", "EA", F_BODY, "mdt"), ("STX", "EA", F_FN, "mdt"), ("STX", "EA", F_VAR, "mdt"),
-        ("ALUI", "add", "mda", "NID", NEWB), ("ALUI", "add", "mdt", "NMAC", 1),
-        ("STX", "mda", 0, "mdt"), ("ALUI", "add", "NMAC", "NMAC", 1)])
+    # Macro history and definition rules; bindings describe record layout only.
+    macro_layout = {'NEWB': NEWB, 'FSZ': FSZ, 'MACB': MACB, 'F_TO': F_TO, 'SEGINF': SEGINF, 'F_FROM': F_FROM, 'F_PREV': F_PREV, 'F_NAME': F_NAME, 'F_BODY': F_BODY, 'F_FN': F_FN, 'F_VAR': F_VAR}
+    for filename, mode in (("macro-byte.tsv", "b"), ("macro-result.tsv", "r")):
+        for state, row in load_rules(Path(HERE) / filename, {}, bindings=macro_layout).items():
+            for key, (target, actions) in row.items():
+                g.on(state, [key], target, actions, mode)
 
     if AUTOINC:
         build_autoinc(g, locations)
