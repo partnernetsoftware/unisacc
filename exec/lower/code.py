@@ -27,7 +27,7 @@ def install(E, arch="x86_64", os_="lnx"):
     abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==[os_,arch]}
     reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
-    p=P('C.init');p.a(('LDI','nc',0),('LDI','entry',-1),('LDI','firstop',-1),('LDI','pending',0))
+    p=P('C.init')
     words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','4','8','-8','_start:','write','exit']))
     ids={w:'idc'+str(i) for i,w in enumerate(words)}
     for w,d in ids.items():
@@ -36,9 +36,10 @@ def install(E, arch="x86_64", os_="lnx"):
             p.a(('SBCLR',),[('SBOUT',c) for c in regmap[w].encode()],('SBSAVE','blob'),('STX',d,REG,'blob'))
         if w in enc:
             p.a(('SBCLR',),[('SBOUT',c) for c in (' form='+enc[w]).encode()],('SBSAVE','blob'),('STX',d,FORM,'blob'))
-    p.goto('C.line')
-    # Complete token/buffer traversal group; setup and dynamic dispatch follow below.
     from finite_rules import install as install_rules
+    install_rules(g, Path(__file__).parent, 'code-shell',
+                  sequences={'data': p.acts}, section='init')
+    # Complete token/buffer traversal group; setup and dynamic dispatch follow below.
     scan_labels = (('C', 'r'), ('C', 'b'), ('C', 'b'), ('C', 'b'),
                    ('C', 'b'), ('C', 'r'), ('C', 'b'), ('C', 'b'),
                    ('C', 'b'), ('C', 'b'), ('C', 'r'), ('C', 'b'))
@@ -186,5 +187,5 @@ def install(E, arch="x86_64", os_="lnx"):
             dict(labels, entry='SC.'+op+'.gate', WIN_HSTD=WIN_HSTD,
                  WIN_WRITTEN=WIN_WRITTEN, WIN_SAVE=WIN_SAVE, zero=0, eight=8),
             {name: E.O(value) for name,value in facts.items()})
-    P('C.done').a(('INPOP',),('ACCEPT',)).goto('DEAD')
-    g.on('C.fail',range(257),'DEAD',E.rej('not covered: '+os_+'/'+arch+' lowering'),'r')
+    install_rules(g, Path(__file__).parent, 'code-shell',
+                  sequences={'reject': E.rej('not covered: '+os_+'/'+arch+' lowering')}, section='exit')
