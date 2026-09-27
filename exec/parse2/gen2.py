@@ -510,6 +510,49 @@ def return_control(section, extra=None):
     return b
 
 
+def update_control(section, extra=None):
+    b = {name: globals()[name] for name in ("SBB", "UNS", "DBL", "FLT", "BOOL", "FPB", "FPV", "ENV", "END_", "LOC", "FPS_FN", "FPS_VAR")}
+    b.update((name, getattr(E, name)) for name in ("FND", "VAR", "PTR", "BASE", "ARR"))
+    b.update(("U"+str(size), UNS+size) for size in (1,2,4,8))
+    b.update(tail_entry="C%d" % LEVELS[0], axis_ptr=AX.index("ptr"), axis_struct=AX.index("struct"))
+    b.update(extra or {})
+    for key,template in tape_rows("update-states.tsv"):
+        b[key] = template.format(op=b.get("op",""), name=b.get("name",""), suffix=b.get("suffix",""))
+    p = P("update.bindings."+section+"."+str(P.n)+"."+b.get("op","")+"."+b.get("suffix",""))
+    for part,owner,kind,key in tape_rows("update-fresh.tsv"):
+        if part == section:
+            p.cur = b[owner[1:]] if owner.startswith("$") else owner
+            b[key] = p.fresh(kind)
+    texts = {name:json.loads(value) for name,value in tape_rows("update-text.tsv")}
+    sequences = {name:O(value) for name,value in texts.items()}
+    sequences.update((name,E.rej(message)) for name,message in tape_rows("update-reject.tsv"))
+    for name,template,index in tape_rows("update-template.tsv"):
+        template = b.get(template[1:]) if template.startswith("$") else template
+        if template is not None: sequences[name]=O(re.split(r"(\{[^}]*\})",TEMPL[template])[int(index)])
+    for name,method,slots in tape_rows("update-stack.tsv"):
+        p.acts = []
+        sequences[name] = getattr(p,method)(*slots.split(",")).acts
+    if "op" in b:
+        sequences["operator"] = O(E.optext(b["op"]))
+    if "integer" in b:
+        sequences["bool_step"] = O(texts["bool_step"] % b["integer"])
+    if "bits" in b:
+        sequences["fp_step"] = O(texts["fp_step"] % (b["bits"],FPU[b["suffix"]+b["floating"]]))
+    tokens=dict(TK,identifier=TK_ID)
+    classes={name:[tokens[token]] for name,token in tape_rows("update-tokens.tsv")}
+    classes.update(BOOL=[BOOL],float_types=[DBL,FLT],float_axes=[AX.index("f32"),AX.index("f64")])
+    install_rules(g,os.path.dirname(__file__),"update",bindings=b,sequences=sequences,classes=classes,section=section)
+    if section == "id0":
+        compound={TK[o+"="]:"X.c"+o for o in E.CASOPS}
+        for domain,selected,additions in [(set(range(257))-compound.keys(),"id0",{})]+[
+                ([key],"compound",dict(id_dispatch=b["f1"],operation=target)) for key,target in compound.items()]:
+            for state,row in load_rules(Path(__file__).with_name("update-dispatch.tsv"),sequences,
+                    domain=domain,bindings=dict(b,**additions),classes=classes,section=selected).items():
+                for key, (target, actions) in row.items():
+                    g.on(state, [key], target, actions, "r")
+    return b
+
+
 def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
@@ -666,10 +709,8 @@ def build(locations=False, warnings=False, errors=False):
         b=return_control("integer", dict(integer_current=current,integer_code=code))
         current=b["f92"]
     return_control("qt3", dict(integer_end=current))
-    P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.cpf", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
-    p = P("X.as")
-    p.call("LOOKUP").call("NOARR")
-    addr(p).goto("PX.as")       # names and computed lvalues share assignment
+    b=update_control("id0")
+    update_control("id1",dict(address_end=addr(P(b["f3"])).cur))
     # Target dispatch is declared once; four conversion calls share the saved descriptor.
     bindings = dict(BOOL=BOOL, DBL=DBL, FLT=FLT, UNSIGNED_WIDE=UNS + 8)
     bindings.update((key, P(owner).fresh("b")) for key, owner in
@@ -685,50 +726,26 @@ def build(locations=False, warnings=False, errors=False):
         install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings,
                       sequences={"save": save, "restore": restore}, section="convert")
     shape_control("update-entry")
-    P("CSTEP.scalar").branch({(DBL, FLT): "CSTEP.fp"}, "STEPTY", [("RLD", "vb")])
-    P("CSTEP.fp").a(("LDI", "stp", 1)).ret()
-    for o in E.CASOPS:
-        q = P("X.c" + o)    # addr; push; load; push; rhs (a pointer's scaled); pop; op; pop; store
-        q.call("LOOKUP").call("NOARR")
-        addr(q).goto("LV.c" + o)
-        q = P("LV.c" + o).call("CSTEP")
-        if o not in ("+", "-"):
-            q.branch({1: (nx2 := "X.c%s.i" % o)}, "DEAD.nint", [("CMPI", "vt", 0)])
-            q = P(nx2)
-        q.a(("COPYW", "bc_targetvt", "vt"), ("COPYW", "bc_targetvb", "vb"))
-        emit(q, "push").call("BF.READ")
-        emit(q, "push").vpush("vt", "vb", "stp", "lshapeok", "lshape", "lrank", "bf_width", "bf_offset", "bf_signed", "bf_unit", "bc_targetvt", "bc_targetvb").call("NEXT").call("EXPR").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb", "stp", "lshapeok", "lshape", "lrank", "bf_width", "bf_offset", "bf_signed", "bf_unit", "bc_targetvt", "bc_targetvb")
-        # Compound assignment uses the ordinary gold-table operation, then
-        # converts back to the saved destination without reevaluating its address.
-        q.vpush("bc_targetvt", "bc_targetvb").a(("COPYW", "lt", "vt"), ("COPYW", "lb", "vb"),
-                              ("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).call("OPX." + o)
-        q.call("TAX").a(("COPYW", "bc_axis", "ax"), ("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).vpop("vt", "vb").call("ASSIGNCV")
-        # OPX already normalizes its result type, and ASSIGNCV owns bool/float conversion.
-        q.branch({(AX.index("f32"), AX.index("f64")): "BC.store" + o}, "BC.target" + o, [("RLD", "bc_axis")])
-        P("BC.target" + o).branch({1: "BC.store" + o}, "BC.same" + o, [("CMPI", "vb", BOOL)])
-        P("BC.same" + o).branch({1: "BC.base" + o}, "BC.narrow" + o, [("CMP", "vt", "rvt")])
-        P("BC.base" + o).branch({1: "BC.wide" + o}, "BC.narrow" + o, [("CMP", "vb", "rvb")])
-        install_rules(g, os.path.dirname(__file__), "functiontypes", section="compound",
-                      bindings=dict(wide="BC.wide"+o, test="BC.widetest"+o, narrow="BC.narrow"+o, store="BC.store"+o))
-        P("BC.narrow" + o).call("NARROW").goto("BC.store" + o)
-        emit(P("BC.store" + o), "pop1").call("BF.WRITE").call("SH.RESULT").ret()
-    P("NODBL").branch({1: "NODBL.l"}, "NODBL.r", [("CMPI", "lb", DBL)])      # a double VALUE (not a pointer to one)
-    P("NODBL.l").branch({1: "DEAD.dbl"}, "NODBL.r", [("CMPI", "lt", 0)])
-    P("NODBL.r").branch({1: "NODBL.r2"}, "RET", [("CMPI", "vb", DBL)])
-    P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
-    g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
-    # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
-    P("TAX.enumraw").branch({(1, 2): "TAX.p"}, "TAX.0", [("CMPI", "vt", 1)])
-    P("TAX.p").a(("LDI", "ax", AX.index("ptr"))).ret()
-    q = P("TAX.0")
-    for code, name in ((1, "i8"), (2, "i16"), (4, "i32"), (8, "i64"), (UNS + 1, "u8"), (UNS + 2, "u16"), (UNS + 4, "u32"), (UNS + 8, "u64"),
-                       (BOOL, "u8"), (0, "void"), (DBL, "f64"), (FLT, "f32"), (FPB, "ptr"), (FPV, "ptr")):
-        hit, nx = q.fresh("h"), q.fresh("n")
-        q.branch({1: hit}, nx, [("CMPI", "vb", code)])
-        P(hit).a(("LDI", "ax", AX.index(name))).ret()
-        q = P(nx)
-    q.branch({(1, 2): "TAX.s"}, "DEAD.w", [("CMPI", "vb", SBB)])
-    P("TAX.s").a(("LDI", "ax", AX.index("struct"))).ret()
+    update_control("step-entry")
+    pointer_ops={row[0] for row in tape_rows("update-pointer.tsv")}
+    for op in E.CASOPS:
+        b=update_control("compound0",dict(op=op))
+        b=update_control("compound1",dict(b,address_end=addr(P(b["f6"])).cur))
+        body=b["f7"]
+        if op not in pointer_ops:
+            b=update_control("compound-check",b)
+            body="X.c"+op+".i"
+        b=update_control("compound-body",dict(b,compound_body=body,compound_owner="LV" if op in pointer_ops else "X"))
+        install_rules(g,os.path.dirname(__file__),"functiontypes",section="compound",
+                      bindings=dict(wide="BC.wide"+op,test="BC.widetest"+op,narrow="BC.narrow"+op,store="BC.store"+op))
+        update_control("compound-tail",b)
+    update_control("taxonomy")
+    current="TAX.0"
+    for code,name in ((1,"i8"),(2,"i16"),(4,"i32"),(8,"i64"),(UNS+1,"u8"),(UNS+2,"u16"),(UNS+4,"u32"),(UNS+8,"u64"),
+                      (BOOL,"u8"),(0,"void"),(DBL,"f64"),(FLT,"f32"),(FPB,"ptr"),(FPV,"ptr")):
+        b=update_control("type-row",dict(type_current=current,type_code=code,type_axis=AX.index(name)))
+        current=b["f28"]
+    update_control("type-tail",dict(type_end=current))
     bindings = dict(BOOL=BOOL, entry_test=P("NARU").fresh("b"), bool_test=P("NARU.1").fresh("b"))
     install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned")
     q = P("NARU.integer")
@@ -739,66 +756,19 @@ def build(locations=False, warnings=False, errors=False):
         q = P(bindings["next"])
     bindings["current"] = q.cur
     install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned-end")
-    P("STEPTY.enumraw").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
-    P("STY.s").branch({1: "RET"}, "STY.s0", [("CMPI", "vb", BOOL)])
-    P("STY.s0").branch({1: "DEAD.nint"}, "STY.s1", [("CMPI", "vb", 0)])
-    P("STY.s1").branch({(0, 1): "RET"}, "STY.s2", [("CMPI", "vb", 8)])
-    P("STY.s2").branch({(0, 1): "STY.s3"}, "DEAD.nint", [("CMPI", "vb", UNS + 8)])
-    P("STY.s3").branch({2: "RET"}, "DEAD.nint", [("CMPI", "vb", UNS)])
-    P("STY.p").call("ISFP").branch({1: "DEAD.nint"}, "STY.p1", [])
+    update_control("step0")
     shape_control("pointee-width")
-    g.on("DEAD.nint", range(257), "DEAD", E.rej("not covered: pointer or non-int in op= ++ --"), "r")
-    P("INTONLY").branch({1: "IO.b"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vt", 0)])
-    P("IO.b").branch({1: "RET"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vb", 4)])
-    for op, name in (("+", "add"), ("-", "sub")):
-        P("FPSTEP." + op).branch({1: "FPSTEP.d" + op}, "FPSTEP.s" + op, [("CMPI", "vb", DBL)])
-        for suffix, bits in (("d", 4607182418800017408), ("s", 1065353216)):
-            P("FPSTEP." + suffix + op).o("  imm r1, %d\n  %s r0, r0, r1\n" % (bits, FPU[suffix + name])).ret()
-    for nm, o, fix in (("X.inc", "+", "post_inc"), ("X.dec", "-", "post_dec")):
-        q = P(nm)           # addr; push; load; push; 1; pop; op; pop; store; undo to the old value
-        q.call("LOOKUP").call("NOARR").call("CSTEP")
-        addr(q)
-        q.call("POST." + o).call("C%d" % LEVELS[0]).call("QTAIL").ret()
-        # A computed member/element address uses the same update as a name.
-        q = P("POST." + o)
-        q.branch({1: "POST.ordinary" + o}, "BF.post" + o, [("CMPI", "bf_width", 0)])
-        q = P("POST.ordinary" + o)
-        q.branch({1: "POST.booltest" + o}, "POST.normal" + o, [("CMPI", "vt", 0)])
-        P("POST.booltest" + o).branch({BOOL: "POST.bool" + o, (DBL, FLT): "POST.float" + o}, "POST.normal" + o, [("RLD", "vb")])
-        qf = P("POST.float" + o)
-        emit(qf, "push").call("LOADRAW")
-        emit(qf, "push").call("FPSTEP." + o).o("  load64 r1, [r7+8]\n").call("STOREV").o("  load64 r0, [r7+0]\n  .frame -16\n").call("NEXT").ret()
-        qb = P("POST.bool" + o)
-        emit(qb, "push").call("LOADRAW")
-        emit(qb, "push").o("  imm r1, 1\n  %s r0, r0, r1\n" % ("add64" if o == "+" else "sub64")).call("TO.b").o("  load64 r1, [r7+8]\n").call("STOREV").o("  load64 r0, [r7+0]\n  .frame -16\n").call("NEXT").ret()
-        q = P("POST.normal" + o)
-        emit(q, "push").call("LOADRAW")
-        emit(q, "push")
-        emit(q, "one")
-        emit(q, "pop1").o(E.optext(o))
-        emit(q, "pop1").call("STOREV")
-        emit(q, fix).call("NEXT").call("SH.RESULT").ret()
-        P("PX." + nm[2:]).call("CSTEP").goto("POST." + o)
-        P("MB." + nm[2:]).branch({1: "PX." + nm[2:]}, bad("increment of array member"), [("CMPI", "marr", 0)])
-    p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
-    p.a(("INTERN", "v", "ips", "ipe")).branch({1:"X.func"},"X.enumcheck",[("CMP","v","funcid")])
-    P("X.enumcheck").a(("LDX","t","v",END_)).branch({1:"X.enum"},"X.var1",[("CMPI","t",1)])
-    P("X.func").call("UF").call("POSTIX").call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    P("X.enum").a(("LDX", "nv", "v", ENV), ("LDI", "nx", 1)).o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    p = P("X.var1")
-    p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "X.fnv"}, "X.v2", [("CMPI", "isfn", 1)])
-    P("X.fnv").a(("LDI", "rkok", 0)).call("POSTIX").call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    p = P("X.v2")
-    p.call("LOOKUP")
-    addr(p)
-    p.tok({".": "X.mb", ",": "X.cm", ";": "X.sm"}, "X.vl")
-    P("X.cm").branch({1: "RET"}, "X.vl", [("CMPI", "cv1", 1)])
-    P("X.sm").branch({1: "RET"}, "X.vl", [("CMPI", "st1", 1)])
-    P("X.vl").call("VLOAD").call("POSTIX").call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    P("X.mb").call("MEMB").call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    P("X.cpf").a(("INTERN", "v", "ips", "ipe")).branch({1: "X.pf"}, "X.call", [("CMP", "v", "pfid")])
-    P("X.pf").call("PF").call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    P("X.call").call("U.call").call("C%d" % LEVELS[0]).call("QTAIL").ret()
+    update_control("step1")
+    for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
+        update_control("fp-test",dict(op=op))
+        for suffix,bits in tape_rows("update-float.tsv"):
+            update_control("fp-output",dict(op=op,suffix=suffix,bits=int(bits),floating=floating))
+    for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
+        b=update_control("post0",dict(name=name,op=op,postfix=postfix,integer=integer))
+        b=update_control("post1",dict(b,address_end=addr(P(b["f44"])).cur))
+        update_control("post-body",b)
+    b=update_control("variable0")
+    update_control("variable1",dict(address_end=addr(P(b["f81"])).cur))
     ladder("E", "UNARY")
     ladder("C", None)
     P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("COPYW", "vb", "sw"), ("LDI", "rkok", 0)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "POSTIX")
@@ -855,14 +825,8 @@ def build(locations=False, warnings=False, errors=False):
     g.on("DEAD.void", range(257), "DEAD", E.rej("not covered: dereference of void"), "r")
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
-    for nm, fix in (("U.pinc", "pre_inc"), ("U.pdec", "pre_dec")):
-        q = P(nm)           # addr; push; load; +-step; pop; store
-        q.call("NEXT").call("PRE.addr").call("CSTEP")
-        emit(q, "push").call("BF.READ").branch({1: nm + ".scalar"}, nm + ".integer", [("CMPI", "vt", 0)])
-        P(nm + ".scalar").branch({(DBL, FLT): nm + ".float"}, nm + ".integer", [("RLD", "vb")])
-        P(nm + ".float").call("FPSTEP." + ("+" if nm == "U.pinc" else "-")).goto(nm + ".store")
-        emit(P(nm + ".integer"), fix).call("NARU").goto(nm + ".store")
-        emit(P(nm + ".store"), "pop1").call("BF.WRITE").call("SH.RESULT").ret()
+    for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
+        update_control("prefix",dict(name=prefixname,op=op,prefixfix=prefixfix))
     install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="positive",
                   bindings=dict(INT=TYINFO["i32"][0]),
                   classes=dict(promote=[BOOL] + [code for _, code, size, _, _ in TYINT if size < TYINFO["i32"][0]],
@@ -894,14 +858,9 @@ def build(locations=False, warnings=False, errors=False):
     P("SS.rv").tok({";": "SS.x"}, "SS.rv1")     # `*p;` alone: the address only (measured, p20)
     P("SS.x").call("NEXT").ret()
     P("SS.rv1").call("LOADV").call("C%d" % LEVELS[0]).expect(";").call("NEXT").ret()
-    p = P("FNVAL")
-    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", LOC)).branch({1: "FNV.f"}, "RET", [("CMPI", "t", 0)])
-    P("FNV.f").a(("LDX", "t", "v", E.FND)).branch({1: "FNV.y"}, "RET", [("CMPI", "t", 1)])
-    P("FNV.y").o("  .lea r0, ").a(("SPAN2", "ips", "ipe")).o("\n").a(("LDI", "vt", 1), ("LDI", "isfn", 1), ("LDX", "vb", "v", FPS_FN), ("LDX", "t", "v", E.VAR), ("STX", "vb", FPS_VAR, "t")).ret()
-    p = P("LOOKUP")     # s := the slot of ips..ipe (0: not a local of this slice)
-    if warnings: p.call("WU.use")
-    p.a(("LDI", "bf_width", 0), ("INTERN", "v", "ips", "ipe"), ("LDX", "s", "v", LOC), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE), ("LDX", "ar", "v", E.ARR), ("COPYW", "vid", "v")).branch({1: "DEAD.nl"}, "RET", [("CMPI", "s", 0)])
-    g.on("DEAD.nl", range(257), "DEAD", E.rej("not covered: identifier is not a local"), "r")
+    update_control("fnvalue")
+    lookup_entry=update_control("lookup-warn")["f112"] if warnings else "LOOKUP"
+    update_control("lookup-body",dict(lookup_entry=lookup_entry))
     from callcontrol import install as call_control
     call_facts = dict(LOC=LOC, SBB=SBB, SSZ=SSZ, FPS_FN=FPS_FN, PDB=PDB, DBL=DBL, FLT=FLT, BOOL=BOOL)
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
