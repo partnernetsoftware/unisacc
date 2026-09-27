@@ -79,16 +79,20 @@ SPANS = {name: (start, end) for name, start, end in tape_rows("tape-spans.tsv")}
 
 
 def addr(p):
-    """a variable's address: a local's frame slot, or a global's symbol"""
-    gl, lc, dn = p.fresh("ga"), p.fresh("la"), p.fresh("ad")
-    st, fr, auto = p.fresh("sa"), p.fresh("fa"), p.fresh("auto")
-    p.branch({1: gl}, lc, [("CMPI", "s", E.GMARK)])
-    emit(P(gl), "gaddr").goto(dn)
-    P(lc).branch({0: st}, fr, [("CMPI", "s", 0)])
-    P(st).a(("LDI", "t", 0), ("ALU", "sub", "t", "t", "s"), ("ALUI", "sub", "t", "t", 1)).o("  .lea r0, ls").num("t").o("\n").goto(dn)
-    P(fr).branch({1: auto}, "DEAD.staticauto", [("CMPI", "si_active", 0)])
-    emit(P(auto), "addr").goto(dn)
-    p.cur = dn
+    """Bind variable address selection to shared templates and fresh continuations."""
+    bindings = dict(zip(('global','local','done','static','frame','auto'),
+                        (p.fresh(k) for k in ('ga','la','ad','sa','fa','auto'))))
+    bindings.update(entry=p.cur, entry_test=p.fresh('b'), GMARK=E.GMARK)
+    global_out = emit(P(bindings['global']), 'gaddr')
+    bindings['local_test'] = P(bindings['local']).fresh('b')
+    bindings['static_return'] = P(bindings['static']).fresh('r')
+    bindings['frame_test'] = P(bindings['frame']).fresh('b')
+    auto_out = emit(P(bindings['auto']), 'addr')
+    bindings.update(global_end=global_out.cur, auto_end=auto_out.cur)
+    install_rules(g, os.path.dirname(__file__), 'helpers', bindings=bindings,
+                  sequences=dict(pending=p.acts, global_tail=global_out.acts, auto_tail=auto_out.acts,
+                                 static_prefix=O('  .lea r0, ls'), newline=O('\n')), section='address')
+    p.cur, p.acts = bindings['done'], []
     return p
 
 
@@ -216,27 +220,21 @@ ESC = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, "\\": 92, "'"
 
 
 def fmtwalk(pre, on_byte, on_d, on_end):
-    """Walk already-decoded format bytes; modifiers follow the product grammar.
-    The fallback ignores their formatting effect, unlike declared libc printf.
-    """
-    w=pre+".w"
-    g.on(w,[37],pre+".pc",[("ADV",)])
-    g.on(w,[256],on_end,[("INPOP",)])
-    for c in range(256):
-        if c!=37:g.on(w,[c],on_byte,[("ADV",),("LDI","bv",c)])
-    g.on(pre+".pc",list(b"-+ #0"),pre+".pc",[("ADV",)])
-    g.els(pre+".pc",pre+".width",[])
-    g.on(pre+".width",range(48,58),pre+".width",[("ADV",)])
-    g.on(pre+".width",[46],pre+".precision",[("ADV",)])
-    g.els(pre+".width",pre+".length",[])
-    g.on(pre+".precision",range(48,58),pre+".precision",[("ADV",)])
-    g.els(pre+".precision",pre+".length",[])
-    g.on(pre+".length",list(b"hlLzjt"),pre+".length",[("ADV",)])
-    g.on(pre+".length",[37],on_byte,[("ADV",),("LDI","bv",37)])
-    for byte,kind in PFCONV.items():
-        g.on(pre+".length",[byte],on_d,[("ADV",),("LDI","pfkind",kind)])
-    g.els(pre+".length","DEAD",E.rej("not covered: printf conversion"))
-    return w
+    """Bind decoded format scanning to the current conversion catalog."""
+    bindings = {key:pre+'.'+suffix for key,suffix in
+                [('walk','w'),('percent','pc'),('width','width'),('precision','precision'),('length','length')]}
+    bindings.update(on_byte=on_byte, on_d=on_d, on_end=on_end)
+    classes = {name:json.loads(value) for name,value in tape_rows('helpers-classes.tsv')}
+    sequences = dict(reject=E.rej('not covered: printf conversion'))
+    install_rules(g, os.path.dirname(__file__), 'helpers', bindings=bindings, classes=classes,
+                  sequences=sequences, section='format')
+    rows = [('length', set(range(257))-PFCONV.keys(), bindings)] + [
+        ('conversion', [byte], dict(bindings, kind=kind)) for byte,kind in PFCONV.items()]
+    for section,domain,facts in rows:
+        for state,row in load_rules(Path(__file__).with_name('helpers-byte.tsv'), sequences,
+                                    domain=domain, bindings=facts, classes=classes, section=section).items():
+            for byte,(target,actions) in row.items(): g.on(state, [byte], target, actions)
+    return bindings['walk']
 
 
 def printf(warnings=False):
