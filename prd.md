@@ -4485,3 +4485,12 @@ VLA冻结验收完成：`/tmp/unisacc-vla-full`双槽117项与`/tmp/unisacc-vla-
 
 浮点二元片实测：type.tsv的ck/res选择f32/f64公共类型与合法性，TO.d/TO.s共享转换，irsel提供运算码及_rev。移除了NOFLT拒绝与写死signed cvtid、手写64位opcode清单；gen2净+2行（+25/-23），无执行器改动。发现并修复旧模型接受错误：u=9223372036854775808UL与double 2.25的u>d、d<u，上一候选输出0 0，本片及host cc输出1 1；s66_float_binary已固定覆盖。20种有浮点操作数的类型配对×10运算转储同私有参考；20程序加s66在实际网络候选O0/O1/O2共63次输出同host cc。旧278项先过，再加s66，E3固定279；网络chain固定132/132。
 定向双槽队列`/tmp/unisacc-fpbin-gate`12/12全rc0，两窗口51.95/10.63s，最长43.012s：source-to-ELF、chain、自身转储、位置/错误/警告检查；自身3,956,608 B相同，3.46s。实际候选C9957/57、wrong0/refused0。plain delta5085状态、1,307,897项、28,371,917 B；候选.com 5,944,703 B，SHA256 568518181e26c058c7d27790b97989b5ec53de25c53a7707893cbf991ddde2e3。产品源码和出货.com未改，本轮不是新的118项全门禁。综合b_float/b_compoundkind仍有初始化等double operand拒绝，b_fconv仍有expression拒绝，继续迁移；未推送/发布/切默认。
+
+### 初始化/赋值共用转换（进行中）
+把SAMEDBL的局部double特判替换为ASSIGNCV：目标类型选择已有TO.d/s/i/u或BOOLCV，源描述与目标描述分别保留；局部标量初始化、聚合元素、全局值与普通赋值复用同一入口。不改执行器；逐项对照参考转储和host cc运行，旧固定清单先验收再扩充。
+
+参考缺陷实证（私有UA为9da574d产品状态）：unsigned long数组、结构体成员、复合字面量由9223372036854779904.0初始化，cc输出1 1 1，参考输出0 0 0。initflt/slotflt只携带浮点与bool，漏掉u64槽位的转换kind。统一从宽度/指针/unsigned/float/bool生成kind，覆盖成员、数组及匿名对象；不把参考错误复制进模型。需产品回归、重建.com与完整冻结门禁。
+
+初始化/赋值片完成验收：ASSIGNCV供局部标量、聚合槽、静态标量、全局值与普通赋值共用TO转换；删除ISDV及静态f32拒绝等重复分支，模型相关源码净-18行。产品valuekind供dkind和数组/成员/复合字面量槽共用，修复unsigned long大浮点初始化；新增b_aggrunsigned的9个宽无符号比较全为1，控制输出3 4 5 1，cc/C三档/Python/新.com一致。s67另覆盖f32/f64/int/u64/bool的声明、普通赋值、聚合与静态初始化；三个新增用例在实际模型三档优化9次输出同cc。旧279项先过，再纳入三项固定E3=282，网络chain=135全过。
+冻结门禁：`/tmp/unisacc-assigncv-full`117项双槽+`/tmp/unisacc-assigncv-core`独占1项49.95s，精确并集118项各一次、全rc0，最大52.62s。difftest-2因窗口余6s延期，完整预算15.87s通过，延期不记pass。产品与实际模型的C9957/57，wrong0/refused0；difftest_o405，fat136；自身转储3,958,707 B一致。产品.com 1,358,336 B，SHA256 38f13433a6ab2bd3f3ebb2915bb527e657d34f1cc4fee66f05d2ae976e1a1e3d；私有UA SHA256 1fc4fdc26a4c881b44b38cb5e028983e33c9d86c25104c1b292d201fef4ff4b1。模型候选5,942,919 B，SHA256 552604d99d6baf6a3017a5aa6bc57732f6d812facbdeff2847ae6870460994e0；plain delta5054状态、28,200,821 B。未推送/发布/切默认。
+后续返回转换缺口已实测：`double f(void){return 3;}`再打印(int)f()，私有产品输出3、当前模型候选输出0。S.re1只改目标描述并NARROW，没有转换返回表达式；这是既有模型缺陷，不是已修复的初始化问题。下一片让返回复用同一转换入口并保存回归，不能以本轮固定清单全绿声称全域正确。系统调用/procview隔离分支继续未合并。

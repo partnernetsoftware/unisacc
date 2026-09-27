@@ -216,6 +216,7 @@ long bk_run(char *t, int n, long argc, long argv);   /* -run [S-9] */
 char *runargv[4096];   /* argv, NULL, envp, NULL */
 int symlea(int i, int t, char *reg);
 int dkind(int flt);
+int valuekind(int width, int ptr, int uns, int flt, int bl);
 int setkind(int k);
 int fltlit(int t);
 unsigned long fdec2bin(int p, int n, int f32);
@@ -992,8 +993,7 @@ int cplitexpr(int w, int sst, int isarr, int n) {
         size = n * el;
     } else size = el;
     w = el;
-    initflt = 0;
-    if (pd == 0) { initflt = flt; if (bl) initflt = 9; }
+    initflt = valuekind(el, pd, uns, flt, bl);
     if (infunc) {
         off = alloc_local(size);
         initisarr = isarr;
@@ -3809,20 +3809,17 @@ int slotat(int i, int w, int sst) {
             if (mbelem[mi] > 0) sub = mbbytes[mi] / mbelem[mi];
             if (k < cnt + sub) {
                 slotoff = el * stsize[sst] + mboff[mi] + (k - cnt) * mbelem[mi];
-                slotflt = mbflt[mi];
-                if (mbbool[mi] && mbptr[mi] == 0) slotflt = 9;
                 slotw = mbelem[mi];
                 if (slotw == 0) slotw = 8;
+                slotflt = valuekind(slotw, mbptr[mi], mbuns[mi], mbflt[mi], mbbool[mi]);
                 return 0;
             }
             cnt = cnt + sub;
         } else {
             if (k == cnt) {
                 slotoff = el * stsize[sst] + mboff[mi];
-                slotflt = mbflt[mi];
-                if (mbptr[mi]) slotflt = 0;
-                else { if (mbbool[mi]) slotflt = 9; }
                 slotw = mbwidth[mi];
+                slotflt = valuekind(slotw, mbptr[mi], mbuns[mi], mbflt[mi], mbbool[mi]);
                 return 0;
             }
             cnt = cnt + 1;
@@ -4212,12 +4209,16 @@ int fpdecl(void) {
 
 int lfp; int lfpret; int lflt0; int gflt0;
 /* the conversion kind of the object being declared */
-int dkind(int flt) {
-    if (declbool) { if (declptr == 0) return 9; }   /* the _Bool conversion */
-    if (declptr) return 1;
+/* Conversion kind of a scalar slot, including elements and members. */
+int valuekind(int width, int ptr, int uns, int flt, int bl) {
+    if (ptr) return 1;
+    if (bl) return 9;
     if (flt) return flt;
-    if (declunsigned) { if (declsz == 8) return 1; }
+    if (uns) { if (width == 8) return 1; }
     return 0;
+}
+int dkind(int flt) {
+    return valuekind(declsz, declptr, declunsigned, flt, declbool);
 }
 int local_decl(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool;
@@ -4299,7 +4300,7 @@ int local_decl(void) {
             if (eat(tidx("=", 1))) {
                 /* once, at program start: into __init, like a global's */
                 lk2 = dkind(lflt0);
-                initflt = (declbool && declpd == 0) ? 9 : lflt0;
+                initflt = valuekind(ew, declpd, declunsigned, lflt0, declbool);
                 toinit = 1; hasinit = 1;
                 if (cur() == tidx("{", 1)) {
                     if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
@@ -4419,7 +4420,7 @@ int local_decl(void) {
                stack held.  It passed here by luck and printed garbage on
                a GitHub runner. */
             lptr = declptr;
-            initflt = (declbool && declpd == 0) ? 9 : lflt0;
+            initflt = valuekind(w, declpd, declunsigned, lflt0, declbool);
             if (cur() == tidx("{", 1)) {
                 if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
                 initaggr(0, 0, off, w, sst, n * w);
@@ -4986,7 +4987,7 @@ int unit(void) {
                 adv();
                 toinit = 1; hasinit = 1;
                 gk = dkind(gflt0);
-                initflt = (declbool && declptr == 0) ? 9 : gflt0;
+                initflt = valuekind(w, gpd, declunsigned, gflt0, declbool);
                 cpn = 0 - 1;
                 if (cur() == tidx("(", 1)) cpn = cplit();
                 if (cur() == tidx("{", 1)) {

@@ -53,17 +53,11 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
     P('SC.strinit').a(('LDI','t',1),('STX','tpos',SKIPS,'t'),('LDI','imode',2),
         ('COPYW','inlabel','si_lab'),('COPYW','ibytes','dsz')).call('STRINGINIT').vpop(*saved).goto('SC.cache')
     P('SC.scalar').branch({1:'SC.expr'},('rej','not covered: static array initializer'),[('CMPI','dar',0)])
-    P('SC.expr').call('EXPR').a(('COPYW','rvt','vt'),('COPYW','rvb','vb')).call('ISDV').a(('COPYW','sdv','u')).vpop(*saved).a(
-        ('LDX','vt','v',E.PTR),('LDX','vb','v',E.BASE)).branch({1:'SC.booltest'},'SC.kind',[('CMPI','vt',0)])
-    P('SC.booltest').branch({1:'SC.bool'},'SC.kind',[('CMPI','vb',BOOL)])
-    P('SC.bool').call('BOOLCV').goto('SC.store')
-    P('SC.kind').vpush('vt','vb').a(('COPYW','vt','rvt'),('COPYW','vb','rvb')).call('SC.nof32').vpop('vt','vb').call('SC.nof32').call('ISDV').branch({1:'SC.store'},'DEAD.dbl',[('CMP','u','sdv')])
+    P('SC.expr').call('EXPR').a(('COPYW','rvt','vt'),('COPYW','rvb','vb')).vpop(*saved).a(
+        ('LDX','vt','v',E.PTR),('LDX','vb','v',E.BASE)).call('ASSIGNCV').goto('SC.store')
     P('SC.store').o('  .lea r1, ls').num('si_lab').o('\n').call('STOREV').goto('SC.cache')
     P('SC.cache').a(('LDI','si_active',0),('OCUT','si_blob','si_out'),('STX','si_pos',SINIT,'si_blob'),('STX','si_pos',SIEND,'tpos')).goto('SC.after')
     P('IN.static').a(('LDX','si_end','tpos',SIEND),('INPUSH','si_blob')).goto('IN.scopy')
     g.on('IN.scopy',[256],'IN.sdone',[('INPOP',),('JUMP','si_end')])
     g.els('IN.scopy','IN.scopy',[('COPY',),('ADV',)])
     P('IN.sdone').call('NEXT').goto('IN.l')
-
-    P('SC.nof32').branch({1:'SC.nof32v'},'RET',[('CMPI','vt',0)])
-    P('SC.nof32v').branch({1:'DEAD.dbl'},'RET',[('CMPI','vb',E.FLT)])
