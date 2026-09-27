@@ -59,50 +59,19 @@ E.P = P
 g = E.g
 from unresolved import install as ud_install
 
-# ---- declared data 1: tape templates (measured once from the reference) -------------
-# {name} prints W[name] in decimal; text is copied as is.
-TEMPL = {
-    "fn_head":  "{@name}:\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame",
-    "spill":    "  store64 [r6-{s}], r{pk}\n",
-    "addr":     "  imm r2, {s}\n  sub64 r0, r6, r2\n",
-    "gaddr":    "  .lea r0, g_{@var}\n",
-    "load_int": "  .ld r0, [r0+0], 4\n",
-    "store_int": "  .st [r1+0], r0, 4\n",
-    "imm":      "  imm r0, {nv}\n",
-    "push":     E.PUSH,
-    "pop1":     E.POP1,
-    "pop_arg":  "  load64 r{ak}, [r7+0]\n  .frame -8\n",
-    "call":     "  call {@callee}\n",
-    "neg":      "  imm r1, 0\n  sub64 r0, r1, r0\n",
-    "not":      "  imm r1, 0\n  eq r0, r0, r1\n",
-    "ret_int":  "  .frame 8\n  .st [r7+0], r0, 4\n  .ld r0, [r7+0], 4\n  .frame -8\n  jump R{rl}\n",
-    "fn_tail":  "R{rl}:\n  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n",
-    "jumpz":    "  jumpz r0, L{a}\n",
-    "jump_b":   "  jump L{b}\n",
-    "jump_a":   "  jump L{a}\n",
-    "label_a":  "L{a}:\n",
-    "label_b":  "L{b}:\n",
-    "label_c":  "L{c}:\n",
-    "jumpz_b":  "  jumpz r0, L{b}\n",
-    "bool":     "  imm r1, 0\n  ne r0, r0, r1\n",
-    "and_skip": "  jumpz r0, L{e}\n",
-    "label_e":  "L{e}:\n",
-    "or_skip":  "  jumpz r0, L{on}\n  imm r0, 1\n  jump L{od}\nL{on}:\n",
-    "label_d":  "L{od}:\n",
-    "one":      "  imm r0, {stp}\n",          # the step: 1, or a pointer's element size (measured)
-    "post_inc": "  imm r2, {stp}\n  sub64 r0, r0, r2\n",
-    "post_dec": "  imm r2, {stp}\n  add64 r0, r0, r2\n",
-    "pre_inc":  "  imm r1, {stp}\n  add64 r0, r0, r1\n",
-    "pre_dec":  "  imm r1, {stp}\n  sub64 r0, r0, r1\n",
-    # printf, the reference's builtin lowering (measured, examples/hello.c and a %d probe)
-    "pf_spill": "  store64 [r6-{cur}], r0\n",
-    "pf_write": "  .lea r0, S{sk}\n  imm r1, {cnt}\n  .write r0, r1\n",
-    "pf_print": "  load64 r0, [r6-{as}]\n  .print r0\n",
-    "pf_value": "  imm r0, 0\n",
-    "pool_open": ".str S{sk} \"",
-    "pool_close": "\\x00\"\n",
-}
-SPANS = {"@name": ("fns", "fne"), "@callee": ("cls", "cle"), "@var": ("ips", "ipe")}
+# Tape text uses JSON string escaping; PUSH/POP1 retain their shared E bindings.
+# {name} prints W[name] in decimal; declared spans print input slices.
+def tape_rows(filename):
+    with open(os.path.join(os.path.dirname(__file__), filename), encoding="utf-8") as source:
+        next(source)  # column names
+        return [line.rstrip("\n").split("\t") for line in source]
+
+
+TEMPL = {}
+for name, kind, value in tape_rows("tape-templates.tsv"):
+    assert name not in TEMPL and kind in ("literal", "binding"), name
+    TEMPL[name] = {"PUSH": E.PUSH, "POP1": E.POP1}[value] if kind == "binding" else json.loads(value)
+SPANS = {name: (start, end) for name, start, end in tape_rows("tape-spans.tsv")}
 
 
 def addr(p):
