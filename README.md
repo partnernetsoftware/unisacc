@@ -57,8 +57,9 @@ make com                        # unisacc.com for all six targets (-O2)
 compiler rebuilds itself to the same bytes (`N1 = N2 = N3`,
 `tests/nativeboot.sh`). The one step that does use Python is *packaging* the
 six slices into `unisacc.com` (`python3 -m unisa ape`); the slices themselves
-are compiled by `unisacc`. Releases are cut locally with `tests/release.sh`
-(see AGENTS.md); CI only re-runs tests.
+are compiled by `unisacc`. `tests/release.sh` performs bounded local acceptance of an explicit, already-built
+model candidate (see [model build instructions](exec/c/BUILDING.md)); it does not
+build a replacement or assert cross-platform release readiness. CI only re-runs tests.
 
 ## How the decisions are made
 

@@ -90,8 +90,8 @@ model-com:
 	@case "$(MODEL_STEP)" in shared|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64|pack) ;; *) echo 'model-com: set MODEL_STEP=shared|OS/ARCH|pack (see exec/c/BUILDING.md)' >&2; exit 2;; esac
 	@UA="$(UA)" perl tests/bound.pl 55 ./exec/c/buildcompiler.sh "$(MODEL_DIR)" "$(MODEL_STEP)"
 
-release: ref
-	@./tests/release.sh --com
+release:
+	@UA="$(UA)" ./tests/release.sh --com
 
 # The guest is emulated when its architecture differs from this host's;
 # linux.sh notices and scales the watchdogs.

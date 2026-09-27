@@ -92,3 +92,20 @@ pair by both SHA256 values; route duplicates share a pair. These are offline aud
 inputs, not package resources. Run the existing `run --check-net TABLE NETWORK`
 over these pairs when validating the final candidate. Retention alone is not a
 passing verification result. The package and runtime formats are unchanged.
+
+## Local acceptance of the exact candidate
+
+After pack, use an existing private classic reference as `UA` and an explicit
+candidate path. This never builds a replacement at the end of acceptance:
+
+```sh
+./tests/term.sh env MODEL_COM=/tmp/my-container/unisacc-next.com \
+  UA=/absolute/private/seed GATE_STATE=/tmp/my-release-queue \
+  ./tests/release.sh --com
+```
+
+Repeat the same command on exit 75; each window is bounded to 55 seconds, with
+at most two test jobs. Exit 0 means the local gate completed for that exact hash.
+It does not establish six-platform release readiness. Optional `RELEASE_OUT`
+copies only the same checked artifact. `SUITES=0` is rejected. No VM is started,
+and no tag, upload or default-product replacement is performed.

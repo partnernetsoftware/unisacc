@@ -5097,3 +5097,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 普通unary/deref 289cfe4合b128044，含ID.inc/dec共享模板及staticauto；三处冲突为声明append与SS/FNVAL相邻组，保留两组新实现。父在11a0d56复验五模式全图全部与70d3952基线同（6.41/8.29/8.52/6.84/6.90s），/tmp/unisacc-complete-controls-928；原实际NET 1549292观察全等和五probe O0/O2十运行见代理证据。exec/rules.md同步已声明全组及保留的生成期绑定，不把旧候选当新产物。
 
 最终parser审计11a0d56未发现完整固定过程遗漏；仅strings.py普通escape的保留字符策略/ADV-LDI模板仍明文分支。为避免声明边界含糊，最后小修将此策略及共享escape模板纳入现有strings声明，esc真实映射继续动态绑定；ADR.object单边连接保留为共享过程装配，不另迁。产品燃料7f528cd已验证私有driver默认self 20.57s同前hash、显式预算1拒绝，现合入待新包实测。
+
+最终源冻结准备：escape小策略88e4b46、显式构建9e33bdb与不可变候选验收fbf00d0/72e421e已合。make release去除ref副作用；每次队列55秒、双槽，pending75可续，同hash通过才复制，零skip不误拒，不称本机gate等于跨平台发布。默认com仍classic，冻结新包后以实际artifact完成全部门禁/平台/性能，再决定切换。
