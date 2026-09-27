@@ -5091,3 +5091,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 四组已合7ebfe09/114444d/b8edf74/ff5e0b5。父联合验证ff5e0b5的plain/errors/both/locations/warnings完整展开图均与70d3952全等，各6.45/8.26/8.50/6.59/6.75秒，分两次≤55秒；证据/tmp/unisacc-joint-finalcontrols-928。这包含errors/update与startup组合，units另有普通/located全图及NET证据，不把五模式检查误称全部包已重建。E3普通解引用组私有并行；E4 lower/opt只读审计未发现新增完整待迁控制，但保留ABI/目标模板选择、事实物化、格式绑定，不宣称Python纯通用loader；报告/tmp/unisacc-lower-opt-source-audit-928.md。默认产品未切换、无推送。
 
 最终产品入口收口决定：release.sh旧路径会先验根.com再另造classic包且SUITES=0仍称ready，不满足同一产物验收。独立修改为显式不可变候选与有界队列/证据，未完成队列返回pending，验收前后hash一致，只复制已验候选；不自动发布、不把skip算pass。Makefile模型构建需复用现有shared/六target/pack步骤和双槽队列，保留classic种子入口，默认切换待最终候选全验收。两域私有并行实现，先交最小可审版本；不新增编译器或调度框架。
+
+固定a1115126候选性能/容量实测：同fib源/同osx-arm64/O2/新进程到镜像，5次中位数classic 0.0613s、model 0.6430s（10.48倍），镜像hash相同；含加载不含产物执行。编译unisacc.c默认在11.02s以rc3 timeout（2e8步燃料）拒绝；使用现有自编译测试的UNISA_MAXSTEPS=400000000000后19.37s成功，外45s未触发。这是产品默认燃料与既有selfcheck契约不一致，不能隐藏为bench跳过。修正仅产品驱动默认与已有selfcheck燃料一致，显式环境上限仍生效，独立通用测试runner默认不变；真实后续产物重新验证，性能如实列风险。首轮9s探针外限过窄已失败，不记通过。证据/tmp/unisacc-final-perf-928。
