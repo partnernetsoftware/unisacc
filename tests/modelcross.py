@@ -96,9 +96,11 @@ def main():
             stem=r'C:\u\modelcross-'+token
             def push(name,data):run([utm,'file','push',vm,stem+name],8,data)
             def pull(name):return run([utm,'file','pull',vm,stem+name],8).stdout
-            push('.exe',blob)
-            if hashlib.sha256(pull('.exe')).hexdigest()!=digest:raise RuntimeError('guest candidate hash differs')
             try:
+                push('.exe',blob)
+                received=pull('.exe');actual=hashlib.sha256(received).hexdigest()
+                if actual!=digest:
+                    raise RuntimeError(f'guest candidate hash differs: expected {len(blob)} bytes {digest}; received {len(received)} bytes {actual}')
                 for name,source in sources.items():
                     push('-'+name+'.c',source.encode())
                     # Synchronous exec gets enough budget; each guest child owns a shorter timeout.

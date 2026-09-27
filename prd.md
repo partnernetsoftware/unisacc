@@ -5001,3 +5001,5 @@ corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28�
 父主树a090c3a联合验收：exec-x86win与exec-driver-resources双槽2/2，3.46/50.39秒、墙钟50.55秒，日志/tmp/unisacc-xwin-resource-928；资源含新括号声明且实际ASM/network。固定完整候选81c04285另验：TOOLS_UA显式指向候选，11真实库程序11pass/0wrong/0unsupported/0skip，40.72秒；UA/UA_RUN同指候选，C99 57/57、CLI64/64双槽31.03秒，均rc0。分别/tmp/unisacc-call-label-tools-928、/tmp/unisacc-call-label-cli-c99-928。这些输入与原429差分、206/220 corpus互补，不外推未覆盖corpus或未交付FP修改；主树未在测试运行期间改动，产品默认仍经典。
 
 本轮并行收口决定：enc最终来源审计已落exec/enc/CONTROL_AUDIT.md，承认字段模板调用边/初始化动作仍属Python装配，未称Python零控制。持久x86win门禁加入net构造、全域check-net与原全套夹具，父主树3a17d96复跑6.15秒全过。modelboot入口已合，父用固定81c04285候选独立prepare/bootstrap/probe均通过，N1=N2完整字节cebaed0a…13f96，后代空PATH的O0/O2内存/native同host且缺包拒绝；/tmp/unisacc-parent-modelboot-928。接下来构建脚本按shared/六独立target/pack提供分步入口以便双槽并发，不改默认产品、不另造调度框架；E3完整函数指针组继续，Windows真实候选验收独立执行，客机hash不符先停并诊断而非跳过核对。
+
+Windows候选smoke首次在guest hash核对处失败，尚未执行模型，不归因编译器；独立6MB传输15秒超时。保留真实失败及日志，停止/关闭本次启动VM。父补入口清理范围：push与hash也必须在finally内，hash错误显示实际/期望字节及摘要，便于区分传输不完整；不放宽校验，不重算期望，不把未测计pass。
