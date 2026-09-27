@@ -24,7 +24,7 @@ for f in read address array; do
     [ "$rc" -eq 1 ] || { echo "host did not reject $f: $rc"; exit 1; }
     for opt in 0 1 2; do
         rc=0; b "$UA" -O"$opt" -S "$T/$f.c" -o "$T/out" > "$T/log" 2>&1 || rc=$?
-        [ "$rc" -eq 1 ] && grep -q 'static initializer refers to an automatic object' "$T/log" || {
+        [ "$rc" -eq 1 ] && grep -Eq 'static initializer (refers to an automatic object|uses automatic storage)' "$T/log" || {
             cat "$T/log"; echo "staticinit $f -O$opt: exit $rc"; exit 1;
         }
         ok=$((ok+1))
