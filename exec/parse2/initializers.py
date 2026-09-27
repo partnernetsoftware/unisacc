@@ -5,6 +5,7 @@ closing it advances to its end, while designators resolve in that level.
 Member counts/offsets come from the parsed type layout, widths from ELSZ/STOREV.
 This is the reference initaggr/slotat algorithm compiled into generic actions,
 not a new executor primitive or a claim of complete C initializer semantics.
+Braced character-array strings use C string initialization, correcting the old reference.
 """
 
 
@@ -13,9 +14,10 @@ from pathlib import Path
 from finite_rules import install as install_rules
 
 
-def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE):
+def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS):
     bindings = dict(SBB=SBB, LOC=LOC, SSZ=SSZ, SMN=SMN, SMEM=SMEM, MOF=MOF, MPT=MPT, MBS=MBS,
-                    MAR=MAR, SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE)
+                    MAR=MAR, SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE,
+                    SKIPS=SKIPS, UCHAR=E.UNS + 1)
     bindings.update(PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM1=DIM + 1, DIM2=DIM + 2)
     root = Path(__file__).parent
     def rows(name):
@@ -36,5 +38,7 @@ def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT,
         bindings[key] = p.fresh(kind)
     sequences.update((name, E.O(json.loads(text))) for name, text in rows("text"))
     sequences.update((name, E.rej(message)) for name, message in rows("reject"))
-    classes = {name: [E.TK_ID if token == "identifier" else E.TK[token]] for name, token in rows("tokens")}
+    classes = {name: [E.TK_STR if token == "string" else E.TK_ID if token == "identifier" else E.TK[token]] for name, token in rows("tokens")}
+    # Compose the existing aggregate counter behind the declared string lookahead.
+    E.g.st["INITCOUNT.aggregate"] = E.g.st.pop("INITCOUNT")
     install_rules(E.g, root, "initializers", bindings=bindings, sequences=sequences, classes=classes, section="main")

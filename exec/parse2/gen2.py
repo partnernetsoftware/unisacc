@@ -547,7 +547,8 @@ def build(locations=False, warnings=False, errors=False):
     from statics import install as static_install
     static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL)
     from initializers import install as init_install
-    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE)
+    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS)
+    strwalk("IC.string", "IC.string_byte", "IC.string_end")
     g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     P("START").branch({0: "START.ok"}, bad("token input exceeds position domain"), [("XLEN", "toklen"), ("CMPI", "toklen", POSSPAN)])
