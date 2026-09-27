@@ -4933,3 +4933,7 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 复合赋值参考缺陷实证及修正决定：char x=127; int y=(x+=1)在当前经典.com打印-128 128，hostcc为-128 -128，均rc0（/tmp/unisacc-compound-ref-928）。目标存储正确但表达式结果未按目标类型转换。模型共享OPX修复不可为错误参考删除目标窄化；父在C/Python参考复用现有窄化路径修正不同整数类型回写，保持同类型已有结果不重复转换。C抽共用signed窄化辅助替代cast内联，非扩第二套类型阶梯。
 
 复合赋值参考修复实测：目标是否需额外signed窄化由实际运算RST与目标比较，CKT只选操作数转换（避免int<<unsignedlong的冗余窄化）。tests/c/b_compound_result.c覆盖char/short/int(long RHS)的存储值与表达式值，hostcc、C O0/O1/O2和Python原生输出全同，/tmp/unisacc-compound-ref-928/result.json。只读独立审查未发现新增错误；另证经典C位域compound仍返回截断前值（5位signed/unsigned加1：host -16 -16 0 0，旧C -16 16 0 32），本片未修，不把普通标量证明扩大到位域。
+
+测试基础设施收口决定：核查nativeboot.sh仍有alarm300、未检查rc的进程替换cmp和Windows最长450秒轮询。隔离小任务将本地自举/跨写编译改成逐步≤60秒、先检查退出码再比较；Windows保持独立可验证入口，不将跳过算通过，不开新VM框架。主树仍在完成shape/compound/lower真实兼容组，不开启其它迁移功能。
+
+复合赋值与lower合并验收（961c50c）：lower ARG/TXT百万间距改为独立2^40区域，相关索引A64；完整regex2网络链已由隔离任务实跑同hostcc，父三lower门禁3/3、6.59秒。compound共享OPX及ASSIGNCV替代旧整数阶梯，gen2净减13行；旧keep316项309不变、7必要窄化与修正参考全同，实际网络整数/指针/浮点三组同cc。父合并后双槽chain167/167与compiler资源2/2、37.27秒（/tmp/unisacc-compound-network-gate-928）。经典.com按e8d0041重建1,367,408 B，sha256 79b42f2fa1adf6fde62c179778e9e8e919c82eb97c4f1effdc1abfcbfa8d5f7d；13个--com项加difftest_o及nativeboot共15/15、14.55秒。上述不是新网络候选的tools11全绿：该候选仍待shape合并重建实测。
