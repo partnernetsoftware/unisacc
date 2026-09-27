@@ -48,6 +48,30 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 - Only then adopt the model path as the default product and update its docs.
   The current shipped `unisacc.com` has not switched.
 
+## Fixed-control inventory (source review at 6a208f8)
+
+Declarations and dynamic gold/catalog/template bindings are separate concerns.
+The following fixed controls still need declaration sources; merely importing a
+helper does not discharge the obligation. This is source review, not new test evidence.
+
+- In `gen2.py`: startup/unit markers; return handling; CEXPR/lvalue lookahead;
+  conditional expressions; update/compound-assignment/type-axis dispatch;
+  identifier lookup and dereference; sizeof; scalar TO conversions.
+- Member/postfix/assignment/copy and local declaration/initialization are assigned
+  to two independent workers; completion requires their delivered evidence.
+- Ordinary imports: `truth.py`, `booleans.py`, `floatconst.py`, and tokenizer
+  terminal/default/qualifier policies in `parse/gen.py`.
+- Product diagnostic modes: `tokenlocations.py`, `diagnostics.py`, `errors.py`,
+  `returnwarnings.py`, `intwarnings.py`, `unusedwarnings.py`, `formatwarnings.py`.
+- Product unit framing models: `units.py` and `unitlocations.py`; preserve their
+  existing declared label handling and shared location-reader interface.
+
+Already declared: width/types/optail/tytail/ladder, addr/fmtwalk/printf,
+bitfields, callcontrol, conditional proof rules, constexpr, enum/function types,
+aggregate initialization, statics, unresolved names, VLA and the migrated unary
+subgroup. Their remaining dynamic installations are not another runtime parser.
+The ordinary conditional and unary shells listed above remain distinct work.
+
 ## Current evidence and remaining work
 
 The immutable candidate from `70d3952` is 6,278,823 bytes, SHA256
