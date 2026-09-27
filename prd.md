@@ -4907,3 +4907,9 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第十一批实际产物补验：d5dcda4在私有UA下重建/tmp/unisacc-parallel-eleventh-candidate/unisacc-next.com，6,005,111 B，sha256 3ffcb9bdada262e13bc9a9e8ac3c638059e8eab465690e90ffe7c44f3565cf64。六目标hello镜像同参考、六程序O0/O1/O2共18本机运行同cc；两编译单元含浮点调用/INT64_MIN的三优化级也同cc。相对2273f3e包增19,592 B，不称压缩；父独立全图核对E3每观测/后继/动作相同、9806隐藏单元不变，但state/sequence排序不同，E3.net增9761 B。证据同目录acceptance.json、multiunit-acceptance.json、migration-size.json。
 
 第十二批验收（0a9377a）：聚合初始化163规则、普通字符串共享walk及初始化、PE固定控制82规则已合入；Python净减42/25/27共94行，TSV新增253/103/86共442行，总净增348。动态类型布局/ESC/import及布局常量扰动下旧新完整图相同；聚合5网络探针、字符串三存储类/转义探针和双PE字节边界检查通过。父双槽6/6全rc0，20.34秒，含chain实际网络167/167、双PE、多单元位置、警告诊断、sparse。父合并后完整E3图5300states每观测/后继/动作0差异；序列化字节不相同，固定PYTHONHASHSEED=0仍不同，确认为state/seq顺序差异，未把它写成字节不变。证据/tmp/unisacc-parallel-twelfth-gate/combined-graph.json。保留类型ctx共享装配、ESC保留字符筛选、PE字段/import装配；没有新loader原语；本批不重复打包，最近实际候选仍d5dcda4。
+
+第十三批并行决定：d1df8b8隔离基线，完整常量表达式控制、块静态存储控制、Mach-O布局/签名驱动控制三组；算术/比较/布尔规则按运算类别共享参数模板，静态标签MAXTOK与现有布局仍动态来源，Mach-O字段枚举及SHA共用保持不复制。只改所属模块与TSV，现有loader不扩张。每窗8分钟、每步60秒；完整图加动态绑定扰动与实际网络/原生镜像，父组合门禁。
+
+第十三批父任务补充：同步迁sha256delta固定压缩/填充控制，保留src/back_image.c常量真实抽取，以共用初始化序列绑定进声明。Mach-O代理不改该文件；父最后联合验证完整封装图及FIPS/边界摘要。
+
+第十三批验收（5a7a5d3）：三代理完成constexpr76规则、statics完整块静态组、Mach-O43规则；父完成SHA固定控制33规则。Python分别+4/-30/-12/-42，共净减80；声明158/128/47/43，共新增376，总净增296。constexpr装配增加4行，明确不是代码缩减；没有另写运算控制体。五模式、levels/ops/token/enum、MAXTOK/布局及Mach-O参数扰动核对通过，实际常量/块静态/多单元网络与双架构原生镜像通过。父SHA原图及常量/W/K/fresh扰动一致；FIPS3向量与14边界输入重复摘要，查表+模拟和另一次实际net+模拟均正确（30banks/16hidden，7484观测network=table）。父合并后Mach-O两架构1819/1687状态全部观测/后继/动作同旧图。双槽6/6全rc0，29.02秒，日志/tmp/unisacc-parallel-thirteenth-gate，SHA与组合图证据/tmp/unisacc-sha-rules-928。仍保留格式字段枚举、实际常量读取、动态绑定与其他未迁控制；本批未重打包，候选仍d5dcda4。
