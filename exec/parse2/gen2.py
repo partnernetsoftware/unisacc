@@ -496,6 +496,8 @@ def types():
         structured_control("type-word", False, dict(word_state=p.cur, word_return=p.fresh("r"),
                            type_value=value, word_follow=follows.get(word, follows["*"])))
     structured_control("type-tail", False)
+    install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="long-double",
+                  bindings=dict(DBL=DBL), classes=dict(double=[TK["type=double"]]))
 
 
 def shape_control(section):
@@ -1306,7 +1308,11 @@ def build(locations=False, warnings=False, errors=False):
         P(nm + ".float").call("FPSTEP." + ("+" if nm == "U.pinc" else "-")).goto(nm + ".store")
         emit(P(nm + ".integer"), fix).call("NARU").goto(nm + ".store")
         emit(P(nm + ".store"), "pop1").call("BF.WRITE").call("SH.RESULT").ret()
-    P("U.pos").call("NEXT").call("UNARY").call("BF.RVALUE").call("NODBL0").ret()     # +x: no code (the old E3, p7)
+    install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="positive",
+                  bindings=dict(INT=TYINFO["i32"][0]),
+                  classes=dict(promote=[BOOL] + [code for _, code, size, _, _ in TYINT if size < TYINFO["i32"][0]],
+                               arithmetic=[DBL, FLT] + [code for _, code, size, _, _ in TYINT if size >= TYINFO["i32"][0]]),
+                  sequences=dict(reject=E.rej("not covered: unary + requires arithmetic operand")))
     q = P("U.neg")
     q.call("NEXT").call("UNARY").call("BF.RVALUE").branch({1: "U.negscalar"}, "U.negint", [("CMPI", "vt", 0)])
     P("U.negscalar").branch({1: "U.negdouble"}, "U.negsingle", [("CMPI", "vb", DBL)])
