@@ -54,10 +54,9 @@ Declarations and dynamic gold/catalog/template bindings are separate concerns.
 The following fixed controls still need declaration sources; merely importing a
 helper does not discharge the obligation. This is source review, not new test evidence.
 
-- In `gen2.py`: startup/unit markers; return handling; CEXPR/lvalue lookahead;
-  conditional expressions; update/compound-assignment/type-axis dispatch;
-  identifier lookup and dereference. Return/CEXPR/LP/QTAIL, sizeof and scalar TO
-  conversions are now declared.
+- In `gen2.py`: startup/unit markers; update/compound-assignment/type-axis
+  dispatch; identifier lookup and ordinary unary/string/dereference shells.
+  Return/CEXPR/LP/QTAIL, sizeof and scalar TO conversions are now declared.
 - Member/postfix/assignment/copy and local declaration/initialization controls
   are now declared (`be71979`, `07c42b6`), with complete graph comparisons and
   targeted actual network/native checks. Scalar truth/boolean/TO controls are
