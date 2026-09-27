@@ -103,8 +103,7 @@ for assignments and local scalar initializers. The latter preserves the
 reference's syntactic lone-zero and call-result exemptions. Included-header
 warnings are suppressed. It is not a
 complete warning implementation for every input. The development compiler CLI
-selects it for single-unit `-Wall`/`-Wextra`/`-Werror`; multi-unit integration
-remains pending.
+selects it for single- and multi-unit `-Wall`/`-Wextra`/`-Werror`.
 
 The model renderer derives file, line and column from retained preprocessing
 records and emits the source line/caret to stderr. `diagnosticcheck.py` compares
@@ -147,7 +146,7 @@ all parameter conversions.
 
 `compilerpack.py` constructs target-specific located preprocessors and shared
 located lexer/warning parser networks, under `<target>/warn/...`. The driver
-selects those routes for a single source with `-Wall`, `-Wextra`, or `-Werror`.
+selects those routes for a source with `-Wall`, `-Wextra`, or `-Werror`.
 Preprocessing and token-dump modes keep their ordinary routes. Public token
 dumping deliberately disables implicit header selection, like the reference.
 
@@ -158,7 +157,34 @@ stderr and discards partial stdout. The driver never opens destinations or
 runs code after that rejection. No C-side diagnostic-text parsing or new
 executor action is involved.
 
-Multi-source warning mode currently refuses explicitly: the ordinary unit
-merger has no per-unit source map. This is an outstanding migration item,
-not a claim of full CLI/source/diagnostic parity. `c/warningcheck.sh` compares
-60 complete results across host-C, unisacc-C and assembly-backed drivers.
+Multi-source warning mode uses `<target>/warn/unit` to preprocess and lex each
+source independently, then `<target>/warn/multi/...` to isolate static names
+and parse one program. `c/warningcheck.sh` compares 60 complete single-unit
+results across host-C, unisacc-C and assembly-backed drivers;
+`c/multiwarningcheck.sh` compares 120 multi-unit results.
+
+## Located translation-unit directory (`UNITOK2`)
+
+The driver frames each unit as LE32 payload length followed by LE32 filename
+byte length, filename bytes, and its existing UNITOK1 envelope. It interprets
+no source/token data. `units.py --locations` reuses the static-declaration
+scanner, preserving physical qualifiers and multiline adjacent string tokens.
+Its output is:
+
+- Eight-byte magic `UNITOK2\0`, then LE32 unit count (1..64).
+- In unit order: LE32 filename byte length, filename bytes, LE32 UNIPP1 length,
+  and the exact UNIPP1 envelope (source, splice map and include map).
+- Typed token stream. Each prefix is `@`, LE32 unit index, LE32 source offset,
+  LF, then the ordinary typed token. The existing @unit0/@unit+ marker tokens
+  also receive a prefix. There is one final prefixed eof token.
+
+E3 stores a source context for each unit and selects it at every token read,
+including rewinds. Include/splice tables use disjoint unit-indexed regions;
+unit records live at 48<<40. The separate framing network uses 49<<40 for its
+map blobs. Parser warning-context token ordinals also include the unit epoch,
+so a later unit cannot overwrite an earlier unit's neighboring-token facts.
+Diagnostics and format recognition use original preprocessed spelling rather
+than the static-isolation suffix. Counts/extents/unit indices/source offsets
+are checked before access. `unitlocationcheck.py` independently serializes a
+valid two-unit case, checks UTF-8 filenames and reference diagnostics, and
+rejects ten bad map containers and seven bad input frames.

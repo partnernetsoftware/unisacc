@@ -8,9 +8,9 @@ networks and two carried assembly cores. It runs without loose model/core files
 or Python; offline construction still uses the seed tools. See
 [the assembly binding and tests](c/asm/README.md#carried-kernel-and-compiler-container).
 The shipped compiler has not adopted this route: CLI/source/error parity is
-still incomplete. Single-source `-Wall`, `-Wextra` and `-Werror` now use the
-located warning models; multi-source warning mode explicitly refuses until
-its per-unit maps are migrated. `c/warningcheck.sh` checks this contract.
+still incomplete. `-Wall`, `-Wextra` and `-Werror` use the located warning
+models for one or several source files. `c/warningcheck.sh` and
+`c/multiwarningcheck.sh` check this contract.
 The following E0 machine and toy are
 retained as their original, separate experiment.
 

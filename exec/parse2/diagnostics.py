@@ -24,19 +24,19 @@ def install(E,P):
     P('DP.advance').a(('ADV',),('ALUI','add','dp_i','dp_i',1)).goto('DP.scan')
     g.on('DP.endline',[10,256],'DP.regions0',[('MARK','dp_end'),('INPOP',)])
     g.els('DP.endline','DP.endline',[('ADV',)])
-    P('DP.regions0').a(('LDI','dp_inside',-1),('LDI','dp_file',1),
+    P('DP.regions0').a(('LDI','dp_inside',-1),('COPYW','dp_file','diag_filename'),
         ('ALUI','sub','dp_i','diag_ninclude',1)).goto('DP.regions')
     P('DP.regions').branch({0:'DP.outside'},'DP.region',[('CMPI','dp_i',0)])
-    P('DP.region').a(('LDX','dp_ln','dp_i',INCLUDE_LINE),('LDX','dp_nl','dp_i',INCLUDE_LINES),
+    P('DP.region').a(('ALU','add','dp_slot','diag_mapbase','dp_i'),('LDX','dp_ln','dp_slot',INCLUDE_LINE),('LDX','dp_nl','dp_slot',INCLUDE_LINES),
         ('A64','add','dp_last','dp_ln','dp_nl')).branch({2:'DP.after'},'DP.within',[('C64','dp_line','dp_last')])
     P('DP.after').a(('A64','sub','dp_line','dp_line','dp_nl')).goto('DP.previous')
     P('DP.within').branch({(1,2):'DP.inside'},'DP.previous',[('C64','dp_line','dp_ln')])
-    P('DP.inside').a(('COPYW','dp_inside','dp_i'),('LDX','dp_file','dp_i',INCLUDE_NAME),
+    P('DP.inside').a(('COPYW','dp_inside','dp_i'),('LDX','dp_file','dp_slot',INCLUDE_NAME),
         ('A64','sub','dp_line','dp_line','dp_ln'),('A64I','add','dp_line','dp_line',1)).goto('DP.suppress')
     P('DP.previous').a(('ALUI','sub','dp_i','dp_i',1)).goto('DP.regions')
     P('DP.outside').a(('A64','sub','dp_line','dp_line','diag_auto'),('LDI','dp_i',0)).goto('DP.splices')
     P('DP.splices').branch({0:'DP.splice'},'DP.emit',[('CMP','dp_i','diag_nsplice')])
-    P('DP.splice').a(('LDX','dp_v','dp_i',SPLICES)).branch({0:'DP.joined'},'DP.nextsplice',[('CMP','dp_v','dp_p')])
+    P('DP.splice').a(('ALU','add','dp_slot','diag_mapbase','dp_i'),('LDX','dp_v','dp_slot',SPLICES)).branch({0:'DP.joined'},'DP.nextsplice',[('CMP','dp_v','dp_p')])
     P('DP.joined').a(('A64I','add','dp_line','dp_line',1)).goto('DP.nextsplice')
     P('DP.nextsplice').a(('ALUI','add','dp_i','dp_i',1)).goto('DP.splices')
     P('DP.suppress').branch({1:'RET'},'DP.emit',[('CMPI','diag_warning',1)])

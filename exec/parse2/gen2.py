@@ -8,7 +8,7 @@ templates -- by one generic compiler, instead of being grown state by state.
 
 Optional --warnings implements return-type, int-conversion, unused-variable
 and format warnings and implies --locations. The development compiler CLI
-selects it for single-unit -Wall/-Wextra/-Werror.
+selects it for single- and multi-unit -Wall/-Wextra/-Werror.
 
 Step 1 covers: int functions and parameters, int locals, expression
 statements, assignment, calls, unary - !, the binary operators of every

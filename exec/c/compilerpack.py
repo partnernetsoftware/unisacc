@@ -72,9 +72,12 @@ def compiler_package(manifests, o1, includes, kernels=None):
             return n
         warning_models['e1']=warning_model('warnlex',here.parent/'lex/gen.py',['--locations'])
         warning_models['e3']=warning_model('warnparse',here.parent/'parse2/gen2.py',['--warnings'])
+        located_units=warning_model('warnunits',here.parent/'parse2/units.py',['--locations'])
         ordinary=list(rows)
         for target in sorted(targets):
             warning_models['e2']=warning_model('warnpp-'+target.replace('/','-'),here.parent/'pp/gen.py',[target,'--locations'])
+            rows.append('\t'.join([target+'/warn/unit','e2','src.c','pp.locations',str(warning_models['e2'])]))
+            rows.append('\t'.join([target+'/warn/unit','e1','pp.locations','tokens.locations',str(warning_models['e1'])]))
             for suffix,last,opt in specs:
                 if suffix=='pp': continue
                 for row in ordinary:
@@ -95,6 +98,15 @@ def compiler_package(manifests, o1, includes, kernels=None):
                 for row in base:
                     cols=row.split('\t')
                     if cols[0]==target+'/'+suffix and cols[1] not in ('e2','e1'):
+                        cols[0]=route;rows.append('\t'.join(cols))
+        for target in sorted(targets):
+            for suffix,last,opt in specs:
+                if suffix=='pp': continue
+                route=target+'/warn/multi/'+suffix
+                rows.append('\t'.join([route,'units','units.locations','tokens.locations',str(located_units)]))
+                for row in base:
+                    cols=row.split('\t')
+                    if cols[0]==target+'/warn/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         return build([manifest],mounts)

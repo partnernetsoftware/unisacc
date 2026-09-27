@@ -203,4 +203,4 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
         if ('[-W'+category+']').encode() in ref.stderr: positives+=1
         print(category+' warning',name,'tape and diagnostics match',flush=True)
     assert positives>0
-    print(category+' warning:',len(cases),'cases;',positives,'with warnings; shard',shard,'of',total,'cases; CLI integration pending')
+    print(category+' warning:',len(cases),'cases;',positives,'with warnings; shard',shard,'of',total,'cases; single-unit rule check')

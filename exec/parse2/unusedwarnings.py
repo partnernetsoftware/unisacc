@@ -15,21 +15,25 @@ KIND=47<<40
 def install(E,P,TIX):
     # INDEX visits the full token stream before declarations are parsed.
     # Later reads/replays overwrite the same immutable token facts.
-    P('WU.token').a(('LDX','wu_ix','tpos',TIX),('STX','wu_ix',KIND,'tk')).tok({E.TK_ID:'WU.idtoken'},'RET')
+    P('WU.token').a(('LDX','wu_ix','tpos',TIX),('ALUI','mul','wu_unitbase','unit_epoch',1<<26),('ALU','add','wu_ix','wu_ix','wu_unitbase'),('STX','wu_ix',KIND,'tk')).tok({E.TK_ID:'WU.idtoken'},'RET')
     P('WU.idtoken').a(('STX','ps',NAME_TOKEN,'tpos')).ret()
     P('WU.bind').a(('LDX','wu_prev','v',ACTIVE),('STX','usp',PREVIOUS,'wu_prev'),
         ('ALUI','add','wu_active','usp',1),('STX','v',ACTIVE,'wu_active'),
         ('LDI','wu_zero',0),('STX','usp',USED,'wu_zero'),('STX','usp',ELIGIBLE,'wu_zero'),
-        ('LDX','wu_tok','ps',NAME_TOKEN),('LDX','wu_pos','wu_tok',TOKEN_POS),('STX','usp',POSITION,'wu_pos'),
-        ('ALUI','add','wu_end','ps',24)).branch({2:'WU.short'},'WU.name',[('CMP','wu_end','pe')])
-    P('WU.short').a(('COPYW','wu_end','pe')).goto('WU.name')
-    P('WU.name').a(('SBCLR',),('SBSPAN','ps','wu_end'),('SBSAVE','wu_name'),('STX','usp',NAME,'wu_name')).ret()
+        ('LDX','wu_tok','ps',NAME_TOKEN),('LDX','wu_pos','wu_tok',TOKEN_POS),('STX','usp',POSITION,'wu_pos')).goto('WU.name')
+    # Multi-unit static isolation rewrites token names. Diagnostics use the
+    # original preprocessed spelling at the retained source position.
+    P('WU.name').a(('SBCLR',),('INPUSH','diag_source'),('JUMP','wu_pos'),('LDI','wu_nc',0)).goto('WU.namechar')
+    E.g.on('WU.namechar',list(b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789'),'WU.nameadd',[('ADV',),('ALUI','add','wu_nc','wu_nc',1)])
+    E.g.els('WU.namechar','WU.namedone')
+    P('WU.nameadd').branch({0:'WU.namechar'},'WU.namedone',[('CMPI','wu_nc',24)])
+    P('WU.namedone').a(('MARK','wu_end'),('SBSPAN','wu_pos','wu_end'),('INPOP',),('SBSAVE','wu_name'),('STX','usp',NAME,'wu_name')).ret()
     P('WU.local').a(('ALUI','sub','wu_slot','usp',15),('LDI','wu_one',1),('STX','wu_slot',ELIGIBLE,'wu_one')).ret()
     # UNWIND calls after decrementing usp and loading the bound id in v.
     P('WU.unbind').a(('LDX','wu_prev','usp',PREVIOUS),('STX','v',ACTIVE,'wu_prev')).ret()
     P('WU.use').a(('INTERN','wu_id','ips','ipe'),('LDX','wu_active','wu_id',ACTIVE)).branch(
         {1:'RET'},'WU.context',[('CMPI','wu_active',0)])
-    P('WU.context').a(('LDX','wu_tok','ips',NAME_TOKEN),('LDX','wu_ix','wu_tok',TIX),
+    P('WU.context').a(('LDX','wu_tok','ips',NAME_TOKEN),('LDX','wu_ix','wu_tok',TIX),('ALUI','mul','wu_unitbase','unit_epoch',1<<26),('ALU','add','wu_ix','wu_ix','wu_unitbase'),
         ('ALUI','add','wu_next','wu_ix',1),('LDX','wu_kind','wu_next',KIND)).branch(
         {1:'WU.previous'},'WU.mark',[('CMPI','wu_kind',E.TK['='])])
     P('WU.previous').a(('ALUI','sub','wu_previous','wu_ix',1),('LDX','wu_kind','wu_previous',KIND)).goto('WU.previous.test')

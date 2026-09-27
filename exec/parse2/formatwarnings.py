@@ -4,12 +4,21 @@ are rewound before the real call. Diagnostics and reference label allocation
 are retained. This is the existing warning policy, not full format checking.
 """
 from tokenlocations import TOKEN_POS
+from unusedwarnings import NAME_TOKEN
 
 def install(E,P,DBL,FLT,FPB,SBB):
     g=E.g
     saved=('wf_start','wf_mark','wf_pool','wf_blob','wf_offset','wf_long','wf_char','wf_at',
            'ips','ipe','v','sys','pfblob')
-    P('WF.entry').a(('INTERN','wf_name','ips','ipe')).branch({1:'WF.begin'},'RET',[('CMP','wf_name','pfid')])
+    # Unit isolation can rename the carried static printf. The public source
+    # spelling, not its internal symbol suffix, selects the reference check.
+    P('WF.entry').a(('LDX','wf_nametok','ips',NAME_TOKEN),('LDX','wf_namepos','wf_nametok',TOKEN_POS),('INPUSH','diag_source'),('JUMP','wf_namepos')).goto('WF.name0')
+    for i,c in enumerate(b'printf'):
+        g.on('WF.name'+str(i),[c],'WF.name'+str(i+1),[('ADV',)])
+        g.els('WF.name'+str(i),'WF.notname')
+    g.on('WF.name6',list(b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789'),'WF.notname',[])
+    g.els('WF.name6','WF.begin',[('INPOP',)])
+    P('WF.notname').a(('INPOP',)).ret()
     P('WF.begin').vpush(*saved).a(('COPYW','wf_start','tpos'),('OLEN','wf_mark'),('COPYW','wf_pool','sk')).call('NEXT').tok({E.TK_STR:'WF.literal'},'WF.finish')
     P('WF.literal').call('FMT.decode').a(('COPYW','wf_blob','pfblob')).call('NEXT').a(('INPUSH','wf_blob')).goto('WF.scan')
     g.on('WF.scan',[37],'WF.flags',[('ADV',)])

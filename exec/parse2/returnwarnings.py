@@ -1,5 +1,5 @@
 """The reference's laststmt/return warning, not a new flow analysis.
-Enabled only by the development --warnings mode. The development CLI uses it for single units; multi-unit framing remains pending.
+Enabled only by the development --warnings mode. The development CLI uses it with single- and multi-unit location maps.
 """
 from tokenlocations import TOKEN_POS
 MESSAGE=b'non-void function does not return a value in all control paths [-Wreturn-type]'

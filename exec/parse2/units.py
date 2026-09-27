@@ -10,8 +10,16 @@ P=E.P;g=E.g;TK_ID=E.TK_ID
 STATIC=1<<40
 BAD=('rej','not covered: multi-unit static declarator')
 
-def build():
+def build(locations=False):
+    # This pass copies physical tokens, including qualifiers. The parser's
+    # reader skips qualifiers, but doing that here merges two framing spans.
+    for name in ('type=const','type=volatile'):
+        E.WORDS.append(name);E.TK[name]=max(E.TK.values())+1
     E.tokenizer();E.prn();E.fconv()
+    for name in ('type=const','type=volatile'):
+        g.st['NX'+name][1][10]=('RET',g.seq([('ADV',),('LDI','tk',E.TK[name])]))
+    from strings import token_span
+    token_span(E,P)
     P('START').a(('LDI','unit',0),('LDI','zero',0)).goto('FRAME')
     g.on('FRAME',[256],'FINAL',[])
     g.on('FRAME',range(256),'L0',[('LDI','len',0)])
@@ -81,9 +89,12 @@ def build():
     P('FINAL').branch({1:'DEAD.frame'},'DONE',[('CMPI','unit',0)])
     P('DONE').o('eof\n').a(('ACCEPT',)).goto('DEAD')
     g.on('DEAD.frame',range(257),'DEAD',E.rej('not covered: malformed unit frame'),'r')
+    if locations:
+        from unitlocations import install
+        install(E,P)
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in r.items()}] for n,(m,r) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
 
 if __name__=='__main__':
-    d=build();pathlib.Path(sys.argv[1]).write_text(json.dumps(d,separators=(',',':')))
+    d=build("--locations" in sys.argv);pathlib.Path(sys.argv[1]).write_text(json.dumps(d,separators=(',',':')))
     print('unit framing/static isolation:',len(d['states']),'states')

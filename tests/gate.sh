@@ -89,6 +89,8 @@ fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh
 job exec-warningdriver ./exec/c/warningcheck.sh
+job exec-multiwarn ./exec/c/multiwarningcheck.sh
+job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py
 job exec-multi ./exec/c/multicheck.sh
 job exec-memory ./exec/c/memorycheck.sh
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
@@ -104,6 +106,7 @@ job exec-macxself env TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh # x86/Roset
 job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 complete source-to-ELF paths
 job difftest_o  ./tests/difftest_o.sh
 job warn        ./tests/warn.sh
+job diag-units  ./tests/diagunits.sh
 job nativeboot  ./tests/nativeboot.sh
 job staticinit  ./tests/staticinit.sh
 job staticunits ./tests/staticunits.sh
@@ -118,7 +121,7 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 if [ "$COM" = 1 ]; then
     [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
-    for s in cli ccparity run multi diag hostile staticinit staticunits; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
+    for s in cli ccparity run multi diag diagunits hostile staticinit staticunits; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
     job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
 fi
 wait

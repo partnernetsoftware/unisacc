@@ -5050,6 +5050,8 @@ int istape(char *p) {
 int fe_load(char *path, char *t) {
     int fd; int k;
     srcpath = path;
+    /* Source maps belong to this unit; warning counts belong to the program. */
+    nspl = 0; nireg = 0; nfnpool = 0; nautoinc = 0;
     optincdl = 0;
     if (optinc) {
         k = 0;

@@ -162,8 +162,7 @@ int main(int argc, char **argv) {
         snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (warnings && mode!=1 && mode!=4) {
-        if (nsources>1) return clierror("multi-unit warning locations not migrated");
-        n=snprintf(route,sizeof route,"%s/warn/%s/O%d",target,mode==3 ? "run" : mode==2 ? "tape" : "image",level);
+        n=snprintf(route,sizeof route,"%s/warn/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
         if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
     }
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
@@ -201,12 +200,19 @@ int main(int argc, char **argv) {
     Buf in = {0}; int rc=0;
     if (nsources==1) in.b = source_read(src,&in.n);
     else {
-        char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/unit",target);
+        char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/%sunit",target,warnings ? "warn/" : "");
         for (int j=0;j<nsources;j++) {
             Buf unit={0}; unit.b=source_read(sources[j],&unit.n);
             rc=runroute(unitroute,&unit,sources[j]);
             if (rc) { free(unit.b); break; }
-            for (int k=0;k<4;k++) bput(&in,(unit.n>>(8*k))&255,0);
+            int namelen=warnings ? strlen(sources[j]) : 0;
+            long framed=(long)unit.n+(warnings ? 4+(long)namelen : 0);
+            if (framed>0x7fffffff) return clierror("unit frame too large");
+            for (int k=0;k<4;k++) bput(&in,(framed>>(8*k))&255,0);
+            if (warnings) {
+                for (int k=0;k<4;k++) bput(&in,(namelen>>(8*k))&255,0);
+                for (int k=0;k<namelen;k++) bput(&in,(unsigned char)sources[j][k],0);
+            }
             for (int k=0;k<unit.n;k++) bput(&in,unit.b[k],0);
             free(unit.b);
         }

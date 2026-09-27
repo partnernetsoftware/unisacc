@@ -3720,3 +3720,46 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   release result. The default shipped .com is unchanged. No push/release.
   Next: per-unit located framing and warning diagnostics for multiple inputs;
   the complete reconstruction goal remains active.
+
+### Multi-unit warning maps and per-file diagnostic state
+
+- The located unit-framing model emits UNITOK2: filenames and independent
+  UNIPP1 source maps followed by unit-indexed positioned tokens. E3 reloads
+  the appropriate context on every read/rewind. Static-name isolation stays
+  in the existing scanner; C only frames bytes and selects routes.
+- The physical-token scanner now retains qualifiers and shares the parser's
+  multiline adjacent-string reader. Warning neighbor facts include the unit
+  epoch. Warning names and printf recognition use original preprocessed
+  spelling, avoiding internal __uN suffixes in diagnostics or missed checks.
+- c/multiwarningcheck.sh passes 120 complete rc/tape/stderr comparisons across
+  host-C, unisacc-C and assembly-backed drivers: both file orders, four warning
+  kinds, headers, splices, static shadowing, adjacent strings, empty/clean units,
+  optimization, run and Werror barriers. Single-unit entry points remain.
+- unitlocationcheck.py passes on cc, unisacc and both macOS assembly ISAs:
+  independently serialized bytes, UTF-8 filenames, reference diagnostics,
+  ten malformed map containers and seven malformed input frames. No executor
+  primitive added. This is migration evidence, not a proof over all inputs.
+- Testing found a product defect: fe_load retained prior units' splice,
+  include-name/region and automatic-include maps. It now resets nspl, nireg,
+  nfnpool and nautoinc per file, while program warning counts remain shared.
+  tests/diagunits checks 18 fixed file/line/column expectations at O0/O1/O2 in
+  both orders; host cc independently confirms the warned source line. The
+  old shipped artifact fails this check (missing a warning); the rebuilt
+  reference passes. Another pre-fix observation reported line 5 for line 4.
+- Frozen-tree gate evidence: 101 distinct suites, all rc 0 and each at most
+  60 s. The serial aggregate's existing 900 s outer watchdog expired (142)
+  after 71 saved successful receipts; a scratch copy of the same gate skipped
+  exactly those names and ran the remaining 30 successfully in 208 s. This
+  is complete coverage across two invocations, not a successful first aggregate.
+- Rebuilt reference unisacc.com: 1,350,016 B, SHA-256
+  bbff6f182d8b90060b0e9527432869d180cd58046e48ab972f197aac6e1c9165.
+  Its product-facing gate cases passed, including diagunits and CLI 64/64.
+- Separate development assembly/network container: 5,294,871 B, SHA-256
+  788155c72a685ec924efb16de3c07a5565f98fe4f75f8c51b8d6622b0c5d2cbf.
+  Actual container CLI passes 64/64 from an isolated directory, plus 10 full
+  result comparisons for multi-unit warning/tape/run modes in both orders,
+  including Werror output/dependency preservation. Size increased; no reduction
+  claimed. Offline construction still uses Python.
+- These are macOS arm64/Rosetta results and cross-generation checks; no Linux
+  or Windows VM was run for this batch. No default model-route switch, push
+  or release. The overall reconstruction goal remains active.

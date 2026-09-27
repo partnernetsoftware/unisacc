@@ -30,9 +30,6 @@ for name in ['cc','ua','asm']:
         assert out.read_bytes()==b'keep' and dep.read_bytes()==b'dep'
         count+=1
     args=[clean,'-Werror','-run'];equal(run(base+args),run([ref,*args]));count+=1
-    # Located multi-unit framing is not implemented yet: named refusal.
-    a=run(base+[f,clean,'-Wall','-S'])
-    assert a.returncode==1 and not a.stdout and b'multi-unit warning locations not migrated' in a.stderr
     print(name+': warning modes, preprocessing, Werror output/run barrier pass',flush=True)
 assert count==60,count
-print('warning driver:',count,'full-result comparisons; single-unit only')
+print('warning driver:',count,'full-result comparisons; single-unit checks')
