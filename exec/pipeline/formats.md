@@ -22,10 +22,10 @@ valid, 1 invalid with the reason on stderr).  `run.py` checks every stream.
 
 `exec/pp/gen.py --locations` emits **pp.locations**, while its default remains
 plain **pp.text**. The envelope is produced by model actions; the C/ASM host
-does not interpret its fields. It is not yet connected to the compiler route
-or consumed by E1/E3, and does not make `-Wall` available.
+does not interpret its fields. The optional E1/E3 location modes consume it as described below. It is not
+yet connected to the compiler CLI route and does not make `-Wall` available.
 
-- Magic: seven bytes `UNIPP1` followed by NUL.
+- Magic: `UNIPP1` followed by NUL (7 bytes total).
 - Five little-endian unsigned 32-bit words: preprocessed text byte length,
   forced-include prefix line count, automatically inserted include line count,
   splice-record count, include-record count.
@@ -61,6 +61,33 @@ This mode implies `--typed`; ordinary/default generation is unchanged.
 Offsets are emitted by model actions from the lexer's saved start cursor,
 not reconstructed by searching for spelling. `positioncheck.py` compares
 against the reference lexer's actual `tpos` array in a scratch build, plus
-ordinary typed output after removing the fixed-size prefixes. The optional
-pp.locations envelope is still separate: connecting its text and mapping to
-this stream and E3 is remaining work, and `-Wall` is still unavailable.
+ordinary typed output after removing the fixed-size prefixes. The optional joined envelope below carries this stream and the preprocessing
+map together. `-Wall` is still unavailable.
+
+
+## Joined token locations (development)
+
+`exec/lex/gen.py --locations` consumes **pp.locations** and emits
+**tokens.locations**: `UNITOK1` plus NUL (8 bytes total), one little-endian
+32-bit length, that many bytes containing the complete pp.locations envelope,
+then tokens.positions through its final count line. It validates framing,
+record extents and splice positions before emitting anything. Declared lengths
+must fit nonnegative signed 32-bit input cursors. The lexer scans a bounded
+copy of the preprocessed text, so its offsets remain text-relative.
+
+`exec/parse2/gen2.py --locations` consumes tokens.locations. It retains the
+source text blob, forced/automatic line counts, splice offsets and include
+records for diagnostic use. It reads each token's position prefix before
+entering the ordinary token reader; parser token-buffer positions still point
+to the prefix. This preserves original-buffer rewinds and bounded views used
+for strings and initialisers. `source_pos` is the current text offset;
+`TOKEN_POS[token_buffer_position]` retains it across subsequent reads. The
+normal tape output has no location prefixes or metadata.
+
+`exec/lex/locationcheck.py` checks the E2/E1 join and malformed frames.
+`exec/parse2/locationcheck.py` checks the E2/E1/E3 join against ordinary tape
+output and reads every saved map field back through a test-only model
+continuation. Neither test inserts a language-specific executor primitive.
+The compiler CLI does not select these modes yet. Multi-unit location framing,
+position-to-file/line rendering, warning decisions and -Werror handling remain
+to be connected; these tests do not claim warning compatibility.

@@ -203,8 +203,11 @@ A = ("ADV",)
 # carries its spelling, the same generic SPAN copy as id/num/str.  Default
 # output (tokens.plain) is unchanged. --positions implies typed and adds
 # fixed-size byte-offset prefixes; see tokens.positions in formats.md.
-POSITIONS = "--positions" in sys.argv
-if POSITIONS:
+LOCATIONS = "--locations" in sys.argv
+if LOCATIONS:
+    sys.argv.remove("--locations")
+POSITIONS = "--positions" in sys.argv or LOCATIONS
+if "--positions" in sys.argv:
     sys.argv.remove("--positions")
 TYPED = "--typed" in sys.argv or POSITIONS
 if "--typed" in sys.argv:
@@ -595,6 +598,10 @@ build_num()
 build_str()
 build_cmt()
 build_op()
+START = "DISPATCH"
+if LOCATIONS:
+    from locations import install
+    START = install(D)
 
 # ---- totality: every state total over what it reads -------------------------
 GAMMA = ["BOT", "P"] + ["D%d" % d for d in range(10)]
@@ -611,7 +618,7 @@ for name, (mode, row) in D.states.items():
             row[v] = ("HALT", D.seq([("REJECT", "unreachable")]))
             D.unreach += 1
 # forward reachability over the state graph
-reach, todo = {"DISPATCH"}, ["DISPATCH"]
+reach, todo = {START}, [START]
 while todo:
     s = todo.pop()
     for nx, _ in D.states[s][1].values():
@@ -667,7 +674,7 @@ if __name__ == "__main__":
     st, classes = stats()
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "delta.json")
     with open(out, "w") as f:
-        json.dump({"states": {k: [m, {str(v): list(e) for v, e in row.items()}]
+        json.dump({**({"start": START} if LOCATIONS else {}), "states": {k: [m, {str(v): list(e) for v, e in row.items()}]
                               for k, (m, row) in D.states.items()},
                    "seqs": [list(map(list, s)) for s in D.seqs],
                    "tok_names": list(TOKS)}, f, separators=(",", ":"))

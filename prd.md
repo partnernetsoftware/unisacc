@@ -3524,3 +3524,32 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - Remaining: connect pp.locations and token offsets to E3, then implement
   warning decisions and rendering. This does not make -Wall available;
   CLI remains last measured 63/64. FX-3 remains an unscheduled conjecture.
+
+### Located E2/E1/E3 route — optional diagnostic input plumbing
+
+- E1 --locations now consumes pp.locations, validates its framing, preserves
+  the complete map and emits positioned typed tokens in tokens.locations.
+  E3 --locations reads that envelope and retains source text, splice records,
+  forced/automatic prefix counts and include-region/name records. Each NEXT
+  records source_pos and TOKEN_POS keyed by the original token-buffer position;
+  parser rewinds and bounded string/initializer views still use that buffer.
+  All operations are model actions; no language-specific host primitive.
+- Six E2/E1 joined cases match direct positioned lexing and the Python action
+  oracle; eleven bad preprocessing frames reject without output. Eight joined
+  E2/E1/E3 cases produce unchanged tape: small, macro, splice, explicit header,
+  adjacent strings/array initializer, automatic printf header, fib, strderef.
+  A test-only model continuation reads every retained map field back out and
+  reproduces the E2 envelope exactly. Ten malformed token frames reject with
+  no partial tape. E3 join tests pass on cc, unisacc and both macOS assembly
+  runtimes (x86_64 through Rosetta): /tmp/unisacc-e3-location-{chain,ua,arm,x86}.log.
+- E1 default/typed/positions serialized models are unchanged. E3 default is
+  byte-identical to ac3009d with the same PYTHONHASHSEED=0 (24,349,909 B); an
+  initial comparison without a fixed seed differed because generator set
+  iteration is seed-dependent. No runtime semantics change is inferred from
+  that uncontrolled serialization comparison.
+- exec-lexloc and exec-parseloc join the bounded gate. This batch did not run
+  the whole gate or Linux/Windows native tests. No product/container rebuild
+  or switch: compiler routes do not select this mode. Remaining is diagnostic
+  rendering and warning rules, plus multi-unit location framing and CLI
+  -Wall/-Wextra/-Werror integration. Last measured CLI remains 63/64.
+  Local commit only; no push/release. Full reconstruction remains active.

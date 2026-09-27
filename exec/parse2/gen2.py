@@ -662,7 +662,7 @@ def types():
         P(name + ".emit").o("  imm r2, ").num("scl").o("\n  " + op + " r0, r0, r2\n").ret()
 
 
-def build():
+def build(locations=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
@@ -1688,13 +1688,20 @@ def build():
     p = P("CL.call")
     emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
     ud_install(P)
+    start = "START"
+    if locations:
+        from tokenlocations import install as location_install
+        start = location_install(E, P)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
-    return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
+    return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
 
 
 if __name__ == "__main__":
-    d = build()
+    locations = "--locations" in sys.argv
+    if locations:
+        sys.argv.remove("--locations")
+    d = build(locations=locations)
     twice = sorted(k for k, n in DEFS.items() if n > 1)
     assert not twice, "defined twice: %r" % twice
     s = json.dumps(d, separators=(",", ":"))
