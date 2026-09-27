@@ -1171,8 +1171,26 @@ def build(locations=False, warnings=False, errors=False):
     P("CX.c").a(("COPYW", "stl", "sst")).call("NEXT").goto("CX.l")
     P("CX.e").vpop("cv").ret()
     p = P("EXPR")     # st1: this EXPR is a whole expression statement (nested ones are not); cv1: a comma operand
-    p.a(("COPYW", "st1", "stl"), ("LDI", "stl", 0), ("COPYW", "cv1", "cv"), ("LDI", "cv", 0)).tok({TK_ID: "X.id"}, "EX.l")
+    p.a(("COPYW", "st1", "stl"), ("LDI", "stl", 0), ("COPYW", "cv1", "cv"), ("LDI", "cv", 0)).tok({TK_ID: "X.id", "(": "LP.scan"}, "EX.l")
     P("EX.l").call("E%d" % LEVELS[0]).call("QTAIL").ret()
+    # Parentheses preserve lvalues. Scan syntax before emitting anything;
+    # the address walker evaluates the accepted operand exactly once.
+    P("LP.scan").a(("COPYW", "lp_start", "tpos"), ("LDI", "lp_depth", 1)).call("NEXT").tok(
+        {**{w: "LP.fallback" for w in TWORDS}, "struct": "LP.fallback", "union": "LP.fallback", "enum": "LP.fallback", TK_ID: "LP.typedef"}, "LP.scan0")
+    P("LP.typedef").call("ISTD").branch({1: "LP.fallback"}, "LP.scan0")
+    P("LP.scan0").tok({"(": "LP.open", ")": "LP.close", "eof": "LP.fallback"}, "LP.next")
+    P("LP.open").a(("ALUI", "add", "lp_depth", "lp_depth", 1)).goto("LP.next")
+    P("LP.close").a(("ALUI", "sub", "lp_depth", "lp_depth", 1)).branch({1: "LP.after"}, "LP.next", [("CMPI", "lp_depth", 0)])
+    P("LP.next").call("NEXT").goto("LP.scan0")
+    lops = {"=": "PX.as", "++": "LP.inc", "--": "LP.dec", **{o+"=": "LV.c"+o for o in E.CASOPS}}
+    P("LP.after").call("NEXT").tok({o: "LP.parse" for o in lops}, "LP.fallback")
+    P("LP.fallback").a(("JUMP", "lp_start")).call("NEXT").goto("EX.l")
+    P("LP.parse").a(("JUMP", "lp_start")).call("NEXT").call("LP.addr").tok(lops, bad("parenthesized lvalue"))
+    P("LP.addr").tok({"(": "LP.par", "*": "LP.star", TK_ID: "PRE.addr"}, bad("parenthesized lvalue"))
+    P("LP.par").call("NEXT").call("LP.addr").expect(")").call("NEXT").ret()
+    P("LP.star").call("NEXT").call("UNARY").call("DOWN").ret()
+    for name, op in (("inc", "+"), ("dec", "-")):
+        P("LP."+name).call("STEPTY").call("POST."+op).call("C%d" % LEVELS[0]).call("QTAIL").ret()
     # c ? a : b -- labels as if/else (measured): jumpz L a; a; jump L b; L a: b; L b:
     P("QTAIL").tok({"?": "QT"}, "RET")
     p = P("QT")
@@ -1209,11 +1227,12 @@ def build(locations=False, warnings=False, errors=False):
     P("SD.cv2").o("  cvtid r0, r0\n").ret()
     for o in E.CASOPS:
         q = P("X.c" + o)    # addr; push; load; push; rhs (a pointer's scaled); pop; op; pop; store
-        q.call("LOOKUP").call("NOARR").call("STEPTY")
+        q.call("LOOKUP").call("NOARR")
+        addr(q).goto("LV.c" + o)
+        q = P("LV.c" + o).call("STEPTY")
         if o not in ("+", "-"):
             q.branch({1: (nx2 := "X.c%s.i" % o)}, "DEAD.nint", [("CMPI", "vt", 0)])
             q = P(nx2)
-        addr(q)
         emit(q, "push").call("LOADV")
         emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").call("NODBL0").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb", "stp")
         q.branch({1: "X.c%s.m" % o}, "X.c%s.s" % o, [("CMPI", "stp", 1)])

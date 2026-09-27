@@ -4261,3 +4261,30 @@ Rebuilt /tmp/unisacc-hex-candidate/unisacc-next.com SHA-256
 048f9444d5bc86fabc88dd0b8857a6f006f1eea273c957c58f7528a7f7f620bf:
 actual C99 45/57, wrong 0, refused 12, rc 1 against unchanged baseline 57.
 The reference product was not changed; no release/default switch.
+
+va_copy investigation: stdarg.h already expands it to ((destination) =
+(source)); the missing model rule is parenthesized lvalues, not a va_copy
+builtin. Add a syntax-only lookahead for parenthesized assignment/update,
+then compute its address once using existing name/member/index/dereference
+walkers. Share the assignment, compound-update and postfix emitters. Verify
+ordinary parenthesized rvalues stay unchanged, nested/index side effects
+occur once, and copied va_list cursors advance independently.
+
+Parenthesized assignment/update slice verified: old E3 249 plus three
+probes equal. The first keep run rejected exec/c/run.c because (I)++n was
+misclassified as postfix update; type-name lookahead now preserves the
+cast/prefix interpretation, with a dedicated regression in s57. Old chain
+102/102 and the three new files independently pass network execution.
+Keep sets raised afterwards to 252/105. Self-source tape 3933309 B is
+identical; two queued gate jobs took 3.28/9.97 s, wall 10.02 s.
+Actual network compiler matches host cc on va_copy, b_lvalue and s57 at
+-O0/-O1/-O2: 14; 9 8 9 22 / 9 9; 1 6 7 5 18 respectively. s57 tests
+copy after consuming one variadic argument, independent cursor advances,
+nested parentheses, one index side effect and cast/prefix disambiguation.
+This adds expression-entry parenthesized lvalue handling; it is not a claim
+that every possible nested lvalue grammar is covered. No va_copy intrinsic
+or executor primitive was added.
+Actual /tmp/unisacc-lvalue-candidate/unisacc-next.com SHA-256
+6d0e545a03ed637b69b359d17bd835231ad700e186b3ced9d28c5c31e5515aa8:
+C99 46/57, 0 wrong, 11 refusals, rc 1 against baseline 57. No product
+default switch, release, or platform-validation claim.
