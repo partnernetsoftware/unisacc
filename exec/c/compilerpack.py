@@ -4,11 +4,33 @@ Only construction: the runtime reads the resulting package without Python.
 """
 import argparse,os
 from pathlib import Path
-import tempfile,struct
+import tempfile,struct,hashlib,json,shutil
 import subprocess,sys
 from pack import build
 
-def compiler_package(manifests, o1, includes, kernels=None):
+def retain_models(directory, rows):
+    """Keep the exact constructed pairs for the existing full-domain checker."""
+    directory=Path(directory)
+    directory.mkdir(parents=True,exist_ok=True)
+    record=directory/'models.json'
+    record.unlink(missing_ok=True)
+    models={}
+    for row in rows:
+        network=Path(row.split('\t')[4]); table=network.with_suffix('.tbl')
+        raw=network.read_bytes(); source=table.read_bytes()
+        nh=hashlib.sha256(raw).hexdigest(); th=hashlib.sha256(source).hexdigest()
+        # Several routes may share one network. Retain distinct source tables
+        # too: equivalent networks do not prove their source tables identical.
+        key=nh+'-'+th
+        if key in models: continue
+        shutil.copyfile(network,directory/(key+'.net'))
+        shutil.copyfile(table,directory/(key+'.tbl'))
+        models[key]={'network_sha256':nh,'table_sha256':th}
+    if not models: raise ValueError('empty model audit')
+    record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
+
+
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -117,7 +139,9 @@ def compiler_package(manifests, o1, includes, kernels=None):
                     if cols[0]==target+'/warn/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
-        return build([manifest],mounts)
+        payload=build([manifest],mounts)
+        if audit_dir is not None: retain_models(audit_dir, rows)
+        return payload
 
 if __name__=='__main__':
     ap=argparse.ArgumentParser(description=__doc__)
@@ -125,9 +149,10 @@ if __name__=='__main__':
     ap.add_argument('--o1',required=True,type=Path)
     ap.add_argument('--include',required=True,type=Path)
     ap.add_argument('--kernels',type=Path,help='explicit directory containing both ISA kernel blobs')
+    ap.add_argument('--audit-dir',type=Path,help='retain exact table/network pairs for offline --check-net')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')

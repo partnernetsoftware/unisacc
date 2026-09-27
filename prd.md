@@ -5057,3 +5057,5 @@ printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开
 语言队列拆片实跑：13正例+6拒绝37.88秒，12正例29.25秒，两片全部rc0；同一25项清单不重不漏。此次父单槽与代理构图单槽并行，不宣称这两个时长为双槽总耗时；各片比原52.75秒有余量。第三批局部声明dea5899和成员/后缀/赋值656ba4b已合，各全图/扰动同及真实NET分别5probe/12运行对host同；标量真假/TO仍独立进行。下一两个互斥完整组为floatconst常量扫描/limb/舍入和diagnostics位置呈现，保留已有共享输入与普通/告警模式接口，不添加语言。
 
 并行调度续行：标量真假/TO组5a1258c合3520fbb，五模式及动态类型/fpu扰动10全图相同，5现有probe真实六阶段NET O2原生与host的stdout/rc一致；Python净+22、TSV+48，如实计为规则源迁移而非缩码。E3继续diagnostics完整组、E4继续floatconst完整组，E5下一独立组为gen2的U.szof/SZ完整sizeof控制；三私有文件域并行静态修改，重型构图/测试全机两槽，E5待任一槽释放才执行。父只集成与固定候选验证，不向这三域插入编辑。
+
+父验收收口决定：buildcompiler的22个shared/target全域检查未包含compilerpack临时产生的token/warning/error/unit模型，不能由22项推称整包32项全证。为最终包保留临时构造的tbl/net配对及SHA清单（仅离线审计目录，不进入运行时），沿用run --check-net逐项检验；不加新模型或新的通用框架，不改变现有compiler_package调用接口默认行为。最终证据按实际互异网络/产物hash核对。

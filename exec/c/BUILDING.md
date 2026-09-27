@@ -29,3 +29,10 @@ A failed stage removes its completion record before writing and cannot count as 
 If sources change between stages, rebuild affected stages in a fresh output directory;
 the conservative identity may require rebuilding all seven. There is no new scheduler,
 model interpreter, result cache, default-product change, or runtime Python dependency.
+
+Pack also retains every referenced table/network pair in `model-audit/`, including
+its temporary diagnostic, token and unit models. `models.json` identifies each
+pair by both SHA256 values; route duplicates share a pair. These are offline audit
+inputs, not package resources. Run the existing `run --check-net TABLE NETWORK`
+over these pairs when validating the final candidate. Retention alone is not a
+passing verification result. The package and runtime formats are unchanged.
