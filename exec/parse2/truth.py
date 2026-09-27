@@ -1,15 +1,49 @@
-"""Scalar condition conversion, matching front_parse.c ftruthy/unary !.
-Floating +0/-0 are false; NaN is true. Pointer/integer values retain the
-existing tests. Type descriptors choose f32/f64; no host primitive added.
-"""
-def install(P,DBL,FLT):
-    P('FTRUTH').branch({1:'FT.kind'},'RET',[('CMPI','vt',0)])
-    P('FT.kind').branch({1:'FT.double'},'FT.single',[('CMPI','vb',DBL)])
-    P('FT.single').branch({1:'FT.float'},'RET',[('CMPI','vb',FLT)])
-    for name,width in [('double',64),('float',32)]:
-        P('FT.'+name).o('  imm r1, 0\n  feq%d r0, r0, r1\n  imm r1, 1\n  xor64 r0, r0, r1\n'%width).a(('LDI','vb',4)).ret()
-    P('FNOT').branch({1:'FN.kind'},'FN.integer',[('CMPI','vt',0)])
-    P('FN.kind').branch({1:'FN.double'},'FN.single',[('CMPI','vb',DBL)])
-    P('FN.single').branch({1:'FN.float'},'FN.integer',[('CMPI','vb',FLT)])
-    for name,op in [('double','feq64'),('float','feq32'),('integer','eq')]:
-        P('FN.'+name).o('  imm r1, 0\n  %s r0, r0, r1\n'%op).a(('LDI','vt',0),('LDI','vb',4)).ret()
+"""Bind scalar condition/conversion declarations to current type and opcode facts."""
+import json
+from pathlib import Path
+from finite_rules import install as install_rules
+
+ROOT = Path(__file__).parent
+
+
+def rows(name):
+    return [line.split('\t') for line in (ROOT / ('scalar-' + name + '.tsv')).read_text().splitlines()[1:]]
+
+
+def rules(E, section, bindings=None, sequences=None):
+    install_rules(E.g, ROOT, 'scalar', bindings=bindings, sequences=sequences, section=section)
+
+
+def classify(E, P, DBL, FLT, entry, base, floating, double, single, integer, pointer):
+    b = dict(entry=entry, base=base, float=floating, double=double, single=single,
+             integer=integer, pointer=pointer, DBL=DBL, FLT=FLT)
+    b.update((key + '_test', P(b[key]).fresh('b')) for key in ('entry', 'base', 'float'))
+    rules(E, 'classify', b)
+
+
+def outputs(E, group):
+    texts = {name:json.loads(text) for name,text in rows('text')}
+    for selected,entry,template,argument,result in rows('outputs'):
+        if selected == group:
+            text = texts[template] if argument == '-' else texts[template] % argument
+            rules(E, 'output', dict(entry=entry), dict(output=E.O(text), result=json.loads(result)))
+
+
+def install(E, P, DBL, FLT):
+    classify(E, P, DBL, FLT, 'FTRUTH', 'FT.kind', 'FT.single', 'FT.double', 'FT.float', 'RET', 'RET')
+    outputs(E, 'truth')
+    classify(E, P, DBL, FLT, 'FNOT', 'FN.kind', 'FN.single', 'FN.double', 'FN.float', 'FN.integer', 'FN.integer')
+    outputs(E, 'not')
+
+
+def conversions(E, P, DBL, FLT, unsigned_wide, fpu):
+    paths = {(source,target):ops.split(',') for source,target,ops in rows('conversions')}
+    text = dict((name,json.loads(value)) for name,value in rows('text'))['convert']
+    for suffix in ('d', 's', 'i', 'u'):
+        cv = 'TO.' + suffix
+        classify(E, P, DBL, FLT, cv, cv+'.base', cv+'.float', cv+'.d', cv+'.s', cv+'.int', cv+'.u')
+        rules(E, 'unsigned', dict(entry=cv+'.int', test=P(cv+'.int').fresh('b'),
+              UNSIGNED_WIDE=unsigned_wide, unsigned=cv+'.u', integer=cv+'.i'))
+        for source in ('d', 's', 'i', 'u'):
+            output = E.O(''.join(text % fpu[op] for op in paths.get((source,suffix), [])))
+            rules(E, 'output', dict(entry=cv+'.'+source), dict(output=output, result=[]))

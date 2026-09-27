@@ -506,9 +506,9 @@ def build(locations=False, warnings=False, errors=False):
     from functiontypes import install as functiontypes_install
     functiontypes_install(E, P, dict(FPS_FIRST=FPS_FIRST, SBB=SBB, FPS_RD=FPS_RD, FPS_RB=FPS_RB, FPS_VAR=FPS_VAR, FPS_PARAM=FPS_PARAM, FPS_RSH=FPS_RSH, FPS_FN=FPS_FN, FPS_COUNT=FPS_COUNT, FPS_PSH=FPS_PSH, SHAPE=SHAPE, ARR=E.ARR, DIM=DIM, PDB=PDB, FPB=FPB, FPV=FPV), TYINT)
     from truth import install as truth_install
-    truth_install(P, DBL, FLT)
+    truth_install(E, P, DBL, FLT)
     from booleans import install as bool_install
-    bool_install(P, BOOL, DBL, FLT)
+    bool_install(E, P, BOOL, DBL, FLT)
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
     from statics import install as static_install
@@ -1023,20 +1023,8 @@ def build(locations=False, warnings=False, errors=False):
     call_facts = dict(LOC=LOC, SBB=SBB, SSZ=SSZ, FPS_FN=FPS_FN, PDB=PDB, DBL=DBL, FLT=FLT, BOOL=BOOL)
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
     call_bindings = call_control(E, P, warnings, TEMPL, addr, call_facts, SYSCALLS, fpu, "begin")
-    for suffix in ("d", "s", "i", "u"):
-        cv = "TO." + suffix  # shared fkind/fconv for casts, sqrt and typed arguments
-        P(cv).branch({1: cv + ".base"}, cv + ".u", [("CMPI", "vt", 0)])
-        P(cv + ".base").branch({1: cv + ".d"}, cv + ".float", [("CMPI", "vb", DBL)])
-        P(cv + ".float").branch({1: cv + ".s"}, cv + ".int", [("CMPI", "vb", FLT)])
-        P(cv + ".int").branch({1: cv + ".u"}, cv + ".i", [("CMPI", "vb", UNS + 8)])
-        for source in ("d", "s", "i", "u"):
-            q = P(cv + "." + source)
-            if source != suffix and not (source in ("i", "u") and suffix in ("i", "u")):
-                if source == "s" and suffix in ("i", "u"):
-                    q.o("  %s r0, r0\n" % fpu["s2d"])
-                    source = "d"
-                q.o("  %s r0, r0\n" % fpu[source + "2" + suffix])
-            q.ret()
+    from truth import conversions as scalar_conversions
+    scalar_conversions(E, P, DBL, FLT, UNS + 8, fpu)
     call_control(E, P, warnings, TEMPL, addr, call_facts, SYSCALLS, fpu, "finish", call_bindings)
     ud_install(E, P)
     start = "START"
