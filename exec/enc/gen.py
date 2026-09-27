@@ -140,69 +140,21 @@ def build(image=False):
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     p.a(("LDI", "npc", 0), ("LDI", "lnum", 0)).goto("LINE")
-    # LINE: the op word, then up to four comma-separated arguments into a0..a3 (a register's number or an integer)
-    g.on("LINE", [64], "HDR.key", [("MARK", "ws"), ("ADV",)])
-    g.on("LINE", [EOF], "DONE", [])
-    g.on("LINE", [10], "LINE", [("ADV",)])
-    g.els("LINE", "LW", [("MARK", "ws"), ("LDI", "lc", 0)])
-    g.on("LW", [32] + NL, "LW.e", [("MARK", "we")])
-    g.els("LW", "LW", [("BYTE", "lc"), ("ADV",)])
-    p = P("LW.e")
-    p.branch({1: "LAB"}, "LW.i", [("CMPI", "lc", 58)])
-    p = P("LAB")            # `name:` -- the next instruction's index; a name defined twice is rejected
-    p.a(("ALUI", "sub", "t", "we", 1), ("INTERN", "lid", "ws", "t"), ("LDX", "t", "lid", LABD)).branch({1: "LAB.s"}, "DEAD.dup", [("CMPI", "t", 0)])
-    P("LAB.s").a(("ALUI", "add", "t", "npc", 1), ("STX", "lid", LABD, "t")).goto("SKIPL")
-    g.on("DEAD.dup", range(257), "DEAD", E.rej("not covered: a label defined twice"), "r")
-    p = win_reset(P("LW.i"))
-    p.a(("INTERN", "opid", "ws", "we"), ("LDX", "cls", "opid", OPC), ("LDI", "na", 0), ("LDI", "stag", 0), ("LDI", "gcarry", 0), ("LDI", "anamed", 0), ("LDI", "a2", 0), ("OLEN", "omark"),
-        ("ALUI", "add", "lnum", "lnum", 1))
-    p.branch({1: "BR.j"}, "LW.i1", [("CMP", "opid", "id_jump")])
-    P("LW.i1").branch({1: "BR.c"}, "LW.i2", [("CMP", "opid", "id_call")])
-    # call NAME: E8 rel32, always 5 bytes (no short form: assemble's short_size is None)
-    g.els("BR.c", "BR.j0", [("LDI", "t", 3), ("STX", "npc", KND, "t"), ("LDI", "t", 5), ("STX", "npc", SZ, "t")])
-    P("LW.i2").branch({1: "BR.z"}, "ARG", [("CMP", "opid", "id_jumpz")])
-    # jump NAME / jumpz rX, NAME: recorded, encoded later
-    g.els("BR.j", "BR.j0", [("LDI", "t", 1), ("STX", "npc", KND, "t"), ("LDI", "t", 5), ("STX", "npc", SZ, "t")])
-    g.on("BR.j0", [32], "BR.j0", [("ADV",)])
-    g.els("BR.j0", "BR.name", [("MARK", "ts")])
-    g.els("BR.z", "BR.z0", [("LDI", "t", 2), ("STX", "npc", KND, "t"), ("LDI", "t", 9), ("STX", "npc", SZ, "t")])
-    g.on("BR.z0", [32], "BR.z0", [("ADV",)])
-    g.els("BR.z0", "BR.zr", [("MARK", "ts")])
-    g.on("BR.zr", [44, 32] + NL, "BR.zr2", [("MARK", "te")])
-    g.els("BR.zr", "BR.zr", [("ADV",)])
-    p = P("BR.zr2")
-    p.a(("INTERN", "rid", "ts", "te"), ("LDX", "t", "rid", REGN)).branch({1: "DEAD.reg"}, "BR.zr3", [("CMPI", "t", 0)])
-    P("BR.zr3").a(("ALUI", "sub", "t", "t", 1), ("STX", "npc", BRG, "t")).goto("BR.zs")
-    g.on("BR.zs", [32, 44], "BR.zs", [("ADV",)])
-    g.els("BR.zs", "BR.name", [("MARK", "ts")])
-    g.on("BR.name", [32] + NL, "BR.ne", [("MARK", "te")])       # (meta, if any, follows: see BR.ne)
-    g.els("BR.name", "BR.name", [("ADV",)])
-    p = P("BR.ne")
-    p.a(("INTERN", "t", "ts", "te"), ("STX", "npc", TGT, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("BR.m")
-    g.on("BR.m", [32], "BR.m", [("ADV",)])
-    g.on("BR.m", NL, "SKIPL", [])
-    g.els("BR.m", "BR.mk", [("MARK", "ts")])
-    g.on("BR.mk", [61], "BRM.v", [("MARK", "ke"), ("ADV",)])
-    g.on("BR.mk", [32] + NL, "DEAD.meta", [])
-    g.els("BR.mk", "BR.mk", [("ADV",)])
-    g.on("BRM.v", [32] + NL, "BRM.e", [("MARK", "vs"), ("MARK", "ve")])
-    g.els("BRM.v", "BRM.vv", [("MARK", "vs")])
-    g.on("BRM.vv", [32] + NL, "BRM.e", [("MARK", "ve")])
-    g.els("BRM.vv", "BRM.vv", [("ADV",)])
-    p = P("BRM.e")
-    p.a(("INTERN", "mk", "ts", "ke")).call("MSEEN").branch({1: "BR.m"}, "BRM.k2", [("CMP", "mk", "id_role")])
-    # MSEEN: a meta key given twice on one instruction is rejected (tins.parse does the same)
-    p = P("MSEEN")
-    p.a(("LDX", "t", "mk", MSN)).branch({1: "DEAD.mdup"}, "MS.set", [("CMP", "t", "lnum")])
-    P("MS.set").a(("STX", "mk", MSN, "lnum")).ret()
-    g.on("DEAD.mdup", range(257), "DEAD", E.rej("not covered: a meta key given twice"), "r")
-    P("BRM.k2").branch({1: "BR.m"}, "BRM.k3", [("CMP", "mk", "id_form")])
-    P("BRM.k3").branch({1: "BRM.rl"}, "DEAD.meta", [("CMP", "mk", "id_reloc")])
-    P("BRM.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "BR.m"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
-    g.on("SKIPL", [10], "LINE", [("ADV",)])
-    g.on("SKIPL", [EOF], "DONE", [])
-    g.els("SKIPL", "SKIPL", [("ADV",)])
     from finite_rules import install as install_rules
+    from functools import partial
+    line_rules = partial(install_rules, g, HERE, 'x86-line')
+    line_bindings = {name: globals()[name] for name in
+                     ('LABD', 'OPC', 'KND', 'SZ', 'REGN', 'BRG', 'TGT', 'MSN', 'C_GATE')}
+    line_names = [line.rstrip('\n').split('\t') for line in
+                  open(os.path.join(HERE, 'x86-line-names.tsv')) if not line.startswith('#')]
+    line_sequences = {name: E.rej(reason) for name, reason in
+                      (line.rstrip('\n').split('\t') for line in
+                       open(os.path.join(HERE, 'x86-line-reject.tsv')) if not line.startswith('#'))}
+    line_sequences['reset'] = win_reset(P('reset.binding')).acts
+    line_bindings.update({name: P(owner).fresh(kind) for part, name, owner, kind in line_names if part == 'line'})
+    line_rules(section='line', bindings=line_bindings, sequences=line_sequences)
+    for prefix in ('BRM', 'META'):
+        line_rules(section='value', bindings=dict(entry=prefix + '.v', body=prefix + '.vv', end=prefix + '.e'))
     bindings = {name: globals()[name] for name in ('REGN', 'C_ITOA', 'C_LEA', 'C_ARGSAVE')}
     for line in open(os.path.join(HERE, 'x86-operand-names.tsv')):
         if not line.startswith('#'):
@@ -216,36 +168,18 @@ def build(image=False):
             entry=entry, test=P(entry).fresh('b'), hit='AP.%d' % i, next='AP.n%d' % i,
             index=i, value='a%d' % i, kind='ak%d' % i))
     install_rules(g, HERE, 'x86-operand', section='tail')
-    # META: `key=value` after the args.  role: informational, ignored.  form: informational for the
-    # ordinary ops. For gate, winapi uses deferred encoding; carry must be true/false.
-    # Other declared gate metadata is informational for the non-WinAPI encoder;
-    # reloc must be rel32. Unknown keys and duplicate keys are rejected.
-    g.on("META.v", [32] + NL, "META.e", [("MARK", "vs"), ("MARK", "ve")])
-    g.els("META.v", "META.vv", [("MARK", "vs")])
-    g.on("META.vv", [32] + NL, "META.e", [("MARK", "ve")])
-    g.els("META.vv", "META.vv", [("ADV",)])
-    p = P("META.e")
-    p.a(("INTERN", "mk", "ts", "ke")).call("MSEEN").branch({1: "META.ok"}, "META.k2", [("CMP", "mk", "id_role")])
-    P("META.k2").branch({1: "META.form"}, "META.k3", [("CMP", "mk", "id_form")])
-    P("META.k3").branch({1: "META.rl"}, "META.gate", [("CMP", "mk", "id_reloc")])
-    P("META.rl").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_rel32")])
-    g.on("DEAD.meta", range(257), "DEAD", E.rej("not covered: meta this slice does not take (or reloc other than rel32)"), "r")
-    P("META.form").branch({1: "META.gf"}, "META.ok", [("CMPI", "cls", C_GATE)])
-    P("META.winform").a(("LDI","gwin",1)).goto("META.ok")
-    P("META.gf").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.winform"}, "META.ok", [("CMP", "mv", "id_winapi")])
-    P("META.gate").branch({1: "META.gkeys"}, "DEAD.meta", [("CMPI", "cls", C_GATE)])
-    P("META.gkeys").branch({1: "META.carry"}, "META.gother", [("CMP", "mk", "id_carry")])
-    p = P("META.gother")
-    for k in META_KEYS:
-        if k in ("role", "form", "reloc", "carry"): continue
-        nx = "META.after." + k
-        p.branch({1: "WX.meta."+k if k in WIN_META else "META.ok"}, nx, [("CMP", "mk", "id_" + k)])
-        p = P(nx)
-    p.goto("DEAD.meta")
-    P("META.carry").a(("INTERN", "mv", "vs", "ve")).branch({1: "META.ct"}, "META.cf", [("CMP", "mv", "id_true")])
-    P("META.ct").a(("LDI", "gcarry", 1)).goto("META.ok")
-    P("META.cf").branch({1: "META.ok"}, "DEAD.meta", [("CMP", "mv", "id_false")])
-    P("META.ok").goto("ARG.sep")
+    line_bindings.update({name: P(owner).fresh(kind) for part, name, owner, kind in line_names if part == 'meta-head'})
+    line_rules(section='meta-head', bindings=line_bindings, sequences=line_sequences)
+    entry = 'META.gother'
+    for key in META_KEYS:
+        if key in ('role', 'form', 'reloc', 'carry'): continue
+        nxt = 'META.after.' + key
+        line_rules(section='key', bindings=dict(entry=entry, test=P(entry).fresh('b'),
+            key='id_' + key, yes='WX.meta.' + key if key in WIN_META else 'META.ok', next=nxt))
+        entry = nxt
+    line_rules(section='key-end', bindings={'entry': entry})
+    line_bindings.update({name: P(owner).fresh(kind) for part, name, owner, kind in line_names if part == 'meta-tail'})
+    line_rules(section='meta-tail', bindings=line_bindings, sequences=line_sequences)
     # ARGS.d: at the end of the line: the class decides
     p = P("ARGS.d")
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
