@@ -4413,3 +4413,13 @@ atexit/div/labs aggregate-return case. Full reconstruction remains open.
 **已安排修复**（同一个后台代理续做，在同一个 worktree 里）：在 lowering 阶段加一道通用检查——`gate` 为 `winapi` 但 `winimp` 恰好是字面量 `"none"` 时一律拒绝（不止 `execve`/`getdents`/`clone` 三个，做成对任何 op 都生效的防御），C 端与 Python 端都要改、行为要一致。结果记入本节下一次更新，或由 cdx 接手核对。
 
 **这一条本身给 FX-4"规格优先"提供了一个具体例证**：这个缺陷之所以潜伏了这么久没被发现，正是因为 `abi.tsv` 里的占位行本身看不出"哪些是真实现、哪些是占位"——`winimp=none` 既可能表示"这个目标真的不需要导入"，也可能表示"没人填"，两种语义共用一个值。分层覆盖或规则化规格（FX-4）如果要求"占位"必须显式区别于"真的是 none"，这类缺陷会在构造期就被查出来，不必等到有真实调用路径才暴露。
+
+门禁来源事故：cc 会话确认其隔离 worktree 后台测试在15:59/16:05覆盖共享 `/tmp/ua_ref.c`/二进制。旧队列 `/tmp/unisacc-flex-final` 的70项记录含 difftest_o 旧版缺陷12错，不能当本轮完整验收；不篡改旧结果。改用本树独占 `/tmp/unisacc-flex-private`（SHA256 3f9a74fcf2118cfcca8cefa51a5ea4e2ac3821d53ef21131b4dd51e7ed3ddd9b），unitlocationcheck 尊重 UA。exec-driver-core 单独排队（此前负载超时53s、单独50.68s），其他113项双槽；两份清单的并集必须恰好等于114项。
+
+队列效率修正：私有参考下 exec-driver-core 单独仍在53s预算处超时。源码检查确认 compilercheck.py 的 core 分支不读取 driver.com，仅 resources 分支使用；compilercheck.sh 现在仅 all/resources 打包 APE，删除 core 的无用准备，保留全部 core 断言及 resources 的包执行测试。
+
+柔性数组收尾证据：新队列 `/tmp/unisacc-flex-isolated` 113/113 全绿，加独立 `/tmp/unisacc-flex-isolated-core2` 的 core=0，程序核对两份请求/结果并集恰好等于 `gate --com` 114 项，无缺无重；私有 UA 哈希始终为 3f9a74fc...。最大单项52.906s，所有调度窗口小于55s。difftest_o396/396、fat133/133、产品C9957/57、chain118/118；E3固定265项用私有token dumper/参考在C表执行器下全部相同。共享污染的旧队列不计入此结论。
+
+产品 `.com` 已重建：1,355,008 B，SHA256 `b3ef68bc2e2e9941309ea394ca7b81138ebebd3cfffe95760ac736b51d61dc53`。独立模型候选 `/tmp/unisacc-flex-candidate/unisacc-next.com`：5,884,843 B，SHA256 `05dce8d8bbd154c46e7b75fe85850910e2c84955ad6e5689a1e3ccfd2025e7e4`。候选真实运行：s61与b_memberptrarray在O0/O1/O2均同host cc；union柔性成员、首个柔性成员、非最后柔性成员均rc1无输出。解析网络4,871状态、535,474 B、1,256,462个观测network=table（含动作与字符串）。本轮增加布局分支与产品基类型元数据，不称代码减少。
+
+模型C99现为53/57、wrong0、refused4、rc1，保留原57基线。余项：自动VLA、结构体复合字面量、数组复合字面量、atexit/div/labs聚合返回初始化。没有切换默认产品路线、发布或推送；cc会话的系统调用扩展与Windows winimp=none修复仍在隔离分支，待本轮提交后另审，不能快进覆盖候选树。

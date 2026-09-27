@@ -71,6 +71,7 @@ int mbwidth[MAXMEMB];   /* the load/store width: 0 means "aggregate" */
 int mbarr[MAXMEMB];     /* an array member, including a one-element struct array */
 int mbelem[MAXMEMB];    /* element size, for [] on an array member */
 int mbptr[MAXMEMB];
+int mbbase[MAXMEMB];    /* final pointee width, separate from array element width */
 int mbstruct[MAXMEMB];
 int mbuns[MAXMEMB];
 int mbbool[MAXMEMB];        /* the member is _Bool */
@@ -1300,13 +1301,17 @@ int postfix(void) {
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
             curuns = mbuns[mi]; curbool = mbbool[mi];
             curflt = mbflt[mi];
-            if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
+            if (mbarr[mi]) {
+                /* T *a[N] decays to T **, without loading its first slot. */
+                lvalue = 0; curptr = 1; curpd = mbptrd[mi] + 1;
+                curelem = mbelem[mi]; curbase = mbbase[mi];
+            } else { if (mbwidth[mi] == 0) { if (mbptr[mi] == 0) {
                 /* an array or a nested struct: the value IS the address */
                 if (mbstruct[mi] < 0 || mbarr[mi]) {
                     lvalue = 0; curptr = 1; curpd = 1;
                     curelem = mbelem[mi]; curbase = curelem;
                 }
-            } }
+            } } }
         } else {
         if (p == P_INDEX) {
             int row; int uu; int ist; int ifl; int ipd; int ibase; int d3;
@@ -3478,6 +3483,7 @@ int stbody(int si) {
                 mboff[nmemb] = mo + mboff[a]; mbbytes[nmemb] = mbbytes[a];
                 mbwidth[nmemb] = mbwidth[a]; mbelem[nmemb] = mbelem[a]; mbarr[nmemb] = mbarr[a];
                 mbptr[nmemb] = mbptr[a]; mbstruct[nmemb] = mbstruct[a];
+                mbbase[nmemb] = mbbase[a];
                 mbuns[nmemb] = mbuns[a];
                 mbskip[nmemb] = mbskip[a];
                 mbpst[nmemb] = mbpst[a];
@@ -3604,6 +3610,7 @@ int stbody(int si) {
             mbname[nmemb * 32 + k] = 0;
             mboff[nmemb] = mo; mbbytes[nmemb] = msz; mbwidth[nmemb] = mw;
             mbelem[nmemb] = mel; mbptr[nmemb] = declptr; mbarr[nmemb] = marr;
+            mbbase[nmemb] = sz; if (mst >= 0) mbbase[nmemb] = stsize[mst];
             mbstruct[nmemb] = 0 - 1;
             if (declptr == 0) { if (isbf == 0) mbstruct[nmemb] = mst; }
             mbpst[nmemb] = 0 - 1;
@@ -3637,6 +3644,7 @@ int stbody(int si) {
         mbwidth[nmemb] = mbwidth[own[j]];
         mbarr[nmemb] = mbarr[own[j]]; mbelem[nmemb] = mbelem[own[j]];
         mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
+        mbbase[nmemb] = mbbase[own[j]];
         mbuns[nmemb] = mbuns[own[j]];
         mbbool[nmemb] = mbbool[own[j]];
         mbskip[nmemb] = mbskip[own[j]];

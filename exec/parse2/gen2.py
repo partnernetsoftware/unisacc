@@ -452,7 +452,7 @@ ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespa
 GIBLOB, GIEND = 5 * POSSPAN, 6 * POSSPAN  # initialiser tape and end token, produced once in source order
 FNSTR = 18 * POSSPAN  # __func__ token byte position -> function-name blob
 SKIPS = 7 * POSSPAN   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
-GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
+GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = array length (0: scalar, -1: flexible)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
@@ -622,7 +622,10 @@ def types():
     p = P("SB.nm")
     p.a(("LDI", "marr", 0), ("COPYW", "mnm_s", "ps"), ("COPYW", "mnm_e", "pe"), ("COPYW", "mtd", "td")).call("NEXT").tok({"[": "SB.arr"}, "SB.nm1")
     p = P("SB.arr")         # NAME [N]: N elements; more dimensions are not covered
-    p.call("NEXT").tok({TK_NUM: "SB.arn"}, bad("struct member array bound"))
+    p.call("NEXT").tok({TK_NUM: "SB.arn", "]": "SB.flex"}, bad("struct member array bound"))
+    P("SB.flex").branch({1: "SB.flexmember"}, bad("flexible array in union"), [("CMPI", "sun", 0)])
+    P("SB.flexmember").branch({2: "SB.flexlast"}, bad("flexible array without prior member"), [("LDX", "t", "sid", SMN), ("CMPI", "t", 0)])
+    P("SB.flexlast").a(("LDI", "marr", -1)).call("NEXT").expect(";").goto("SB.nm1")
     P("SB.arn").a(("COPYW", "marr", "nv")).call("NEXT").expect("]").call("NEXT").tok({";": "SB.nm1", ",": "SB.nm1"}, bad("struct member"))
     p = P("SB.nm1")         # back to the name for the layout (the current token is ';')
     p.a(("COPYW", "ps", "mnm_s"), ("COPYW", "pe", "mnm_e"), ("COPYW", "td", "mtd")).branch({1: "SB.v"}, "SB.p", [("CMPI", "td", 0)])
@@ -637,7 +640,8 @@ def types():
     P("SB.put").a(("COPYW", "mal", "msz")).goto("SB.put2")      # a scalar: aligned to its size
     # SB.put2 with marr > 0: the element's size times marr, the element's alignment (see SB.am)
     p = P("SB.put2")
-    p.branch({1: "SB.put3"}, "SB.am", [("CMPI", "marr", 0)])
+    p.branch({0: "SB.flexsize", 1: "SB.put3"}, "SB.am", [("CMPI", "marr", 0)])
+    P("SB.flexsize").a(("LDI", "msz", 0)).goto("SB.put3")
     P("SB.am").a(("ALU", "mul", "msz", "msz", "marr")).goto("SB.put3")
     p = P("SB.put3")
     p.branch({1: "SB.put0"}, "SB.put4", [("CMPI", "sun", 1)])
@@ -650,7 +654,8 @@ def types():
         ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t"),
         ("ALU", "add", "soff", "soff", "msz"))
     p.call("TYPECOUNT").branch({1:"SB.flat"}, "SB.flatarr", [("CMPI","marr",0)])
-    P("SB.flatarr").a(("ALU","mul","flat","flat","marr")).goto("SB.flat")
+    P("SB.flatarr").branch({0:"SB.flatskip"},"SB.flatmul",[("CMPI","marr",0)])
+    P("SB.flatmul").a(("ALU","mul","flat","flat","marr")).goto("SB.flat")
     P("SB.flat").branch({1:"SB.flatunion"},"SB.flatput",[("CMPI","sun",1)])
     P("SB.flatunion").branch({2:"SB.flatskip"},"SB.flatput",[("LDX","t","sid",SMN),("CMPI","t",1)])
     P("SB.flatskip").a(("LDI","flat",0)).goto("SB.flatput")
@@ -660,7 +665,9 @@ def types():
     p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
     P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
     P("SB.more").call("DSTARS").tok({TK_ID: "SB.nm"}, bad("struct member"))
-    P("SB.nx").tok({";": "SB.semi", ",": "SB.more"}, bad("struct member"))     # (the name's next token was read in SB.nm)
+    P("SB.nx").branch({0:"SB.flexend"},"SB.nextdecl",[("CMPI","marr",0)])
+    P("SB.flexend").expect(";").call("NEXT").expect("}").goto("SB.end")
+    P("SB.nextdecl").tok({";": "SB.semi", ",": "SB.more"}, bad("struct member"))     # (the name's next token was read in SB.nm)
     P("SB.semi").call("NEXT").goto("SB.m")
     p = P("SB.end")
     p.a(("COPYW", "soff", "umax"),                              # a struct's extent is its last member's end
@@ -1631,7 +1638,8 @@ def build(locations=False, warnings=False, errors=False):
     p.a(("ALUI", "sub", "sid", "vb", SBB)).call("NEXT").tok({TK_ID: "MB.nm"}, bad("member access"))
     p = P("MB.nm")
     p.a(("INTERN", "v", "ps", "pe"), ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
-        ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "vt", "k", MPT), ("LDX", "vb", "k", MBS), ("LDX", "marr", "k", MAR)).branch({1: "DEAD.mb"}, "MB.has", [("CMPI", "ms", 0)])
+        ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "vt", "k", MPT), ("LDX", "vb", "k", MBS), ("LDX", "marr", "k", MAR)).branch({1: "MB.zero"}, "MB.has", [("CMPI", "ms", 0)])
+    P("MB.zero").branch({0: "MB.has"}, "DEAD.mb", [("CMPI", "marr", 0)])
     P("MB.has").branch({1: "MB.z"}, "MB.off", [("CMPI", "mo", 0)])
     P("MB.off").o("  imm r2, ").num("mo").o("\n  add64 r0, r0, r2\n").goto("MB.z")
     P("MB.z").call("NEXT").tok({"=": "PX.as", "++": "MB.inc", "--": "MB.dec", "->": "MB.ptr", ".": "MB.dot2"}, "MB.ld")
