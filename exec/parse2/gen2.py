@@ -368,7 +368,14 @@ def printf(warnings=False):
     q = P("PL.e1")
     emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).call("POOL.next").goto("PO.l")
     P("PO.nx").call("POOL.next").goto("PO.l")
-    P("PO.id").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf0"}, "PO.nx", [("CMP", "v", "pfid")])
+    P("PO.id").a(("LDX","ufblob","ps",FNSTR)).branch({1:"PO.idnormal"},"PO.func",[("CMPI","ufblob",0)])
+    P("PO.idnormal").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf0"}, "PO.nx", [("CMP", "v", "pfid")])
+    emit(P("PO.func"),"pool_open").a(("INPUSH","ufblob")).goto("PO.funcbyte")
+    g.on("PO.funcbyte",[256],"PO.funcend",[("INPOP",)])
+    for byte in range(256):
+        spelling=chr(byte) if 32<=byte<127 and byte not in (34,92) else ("\\"+chr(byte) if byte in (34,92) else "\\x%02x"%byte)
+        g.on("PO.funcbyte",[byte],"PO.funcbyte",[("OUT",ord(c)) for c in spelling]+[("ADV",)])
+    P("PO.funcend").o("\\x00").goto("PL.e1")
     P("PO.pf0").a(("LDX", "t", "pfid", E.FND)).branch({1: "PO.nx"}, "PO.pf", [("CMPI", "t", 1)])   # a real printf: its format pools whole
     P("PO.pf").call("POOL.next").tok({"(": "PO.p1"}, "PO.l")
     P("PO.p1").call("POOL.next").tok({E.TK_STR: "PO.s"}, "PO.l")
@@ -443,6 +450,7 @@ PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate c
 GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
 ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
 GIBLOB, GIEND = 5 * POSSPAN, 6 * POSSPAN  # initialiser tape and end token, produced once in source order
+FNSTR = 18 * POSSPAN  # __func__ token byte position -> function-name blob
 SKIPS = 7 * POSSPAN   # SKIPS[the token position of a string literal] = 1: it initialises a char array, not pooled
 GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a struct's members, in order   # MAR[member key] = its array length (0: not an array)   # a struct's alignment (its widest member's)
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
@@ -722,6 +730,7 @@ def build(locations=False, warnings=False, errors=False):
                 p.a(("LDI", "t", i * 256 + l * 16 + r), ("LDI", "u", AX.index(y)), ("STX", "t", RST, "u"))
     p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("LDI", "csp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid"),
         ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"), ("MARK", "x0"), ("LDI", "sk", 0))
+    p.a(("SBCLR",), [("SBOUT", c) for c in b"__func__"], ("SBINTERN", "funcid"))
     # the reference auto-includes a header when one of its functions is called and not defined here
     # (src/front_pp.c autoinc): the old E3's check, reused -- such a unit is not covered
     for k, (nm, _, _) in enumerate(SYSCALLS, 1):
@@ -880,7 +889,7 @@ def build(locations=False, warnings=False, errors=False):
     p.branch({2: "FN.many"}, "FN.def1", [("CMPI", "pk", 6)])
     P("FN.many").a(("LDI", "vfn", 1)).goto("FN.def1")
     p = P("FN.def1")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
+    p.a(("LDI","infunc",1),("ALUI", "add", "lab", "lab", 1), ("COPYW", "rl", "lab"))
     emit(p, "fn_head").a(("ORES", "frm", 7)).o("\n").a(("LDI", "sk2", 0)).label("FN.sp")
     p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).branch({0: "FN.sp0"}, "FN.copies", [("CMP", "sk2", "pk")])
     P("FN.sp0").branch({1: "FN.spv"}, "FN.sp1", [("CMPI", "vfn", 1)])
@@ -910,7 +919,7 @@ def build(locations=False, warnings=False, errors=False):
     p.branch({1: "FN.rv0"}, "FN.nx", [("CMPI", "rd", 0)])
     P("FN.rv0").branch({(1, 2): "FN.rv"}, "FN.nx", [("CMPI", "rb", SBB)])
     P("FN.rv").a(("ALUI", "sub", "t", "rb", SBB), ("LDX", "sz", "t", SSZ)).o(".bss __rv_").a(("SPAN2", "fns", "fne")).o(" ").num("sz").o("\n").goto("FN.nx")
-    P("FN.nx").call("NEXT").goto("UNIT")
+    P("FN.nx").a(("LDI","infunc",0)).call("NEXT").goto("UNIT")
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
     P("DECLN").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).goto("DECL")
@@ -1281,7 +1290,9 @@ def build(locations=False, warnings=False, errors=False):
         P("PX." + nm[2:]).call("STEPTY").goto("POST." + o)
         P("MB." + nm[2:]).branch({1: "PX." + nm[2:]}, bad("increment of array member"), [("CMPI", "marr", 0)])
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
-    p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", END_)).branch({1: "X.enum"}, "X.var1", [("CMPI", "t", 1)])
+    p.a(("INTERN", "v", "ips", "ipe")).branch({1:"X.func"},"X.enumcheck",[("CMP","v","funcid")])
+    P("X.enumcheck").a(("LDX","t","v",END_)).branch({1:"X.enum"},"X.var1",[("CMPI","t",1)])
+    P("X.func").call("UF").call("POSTIX").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     P("X.enum").a(("LDX", "nv", "v", ENV), ("LDI", "nx", 1)).o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("C%d" % LEVELS[0]).call("QTAIL").ret()
     p = P("X.var1")
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "X.fnv"}, "X.v2", [("CMPI", "isfn", 1)])
@@ -1400,7 +1411,9 @@ def build(locations=False, warnings=False, errors=False):
     P("UD.dn").call("DOWN").branch({1: "RET"}, "LOADV", [("CMPI", "vb", FPB)])
     P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call"}, "UD.v")
     P("UD.call").call("U.call").goto("UD.dn")
-    p = P("UD.v")        # *f with f a local function pointer: `load64 r0, [r6-N]` as for a callee (measured, p70)
+    P("UD.v").a(("INTERN","v","ips","ipe")).branch({1:"UD.func"},"UD.namedvalue",[("CMP","v","funcid")])
+    P("UD.func").call("UF").call("POSTIX").goto("UD.dn")
+    p = P("UD.namedvalue")     # *f with f a local function pointer: load the callee value
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "RET"}, "UD.v2", [("CMPI", "isfn", 1)])
     p = P("UD.v2")
     p.call("LOOKUP").branch({1: "UD.f1"}, "UD.gv", [("CMPI", "vb", FPB)])
@@ -1498,7 +1511,13 @@ def build(locations=False, warnings=False, errors=False):
     addr(q)
     q.tok({".": "MEMB"}, "U.vl")
     q = P("U.var0")
-    q.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", END_)).branch({1: "U.enum"}, "U.var0b", [("CMPI", "t", 1)])
+    q.a(("INTERN", "v", "ips", "ipe")).branch({1:"U.func"},"U.enumcheck",[("CMP","v","funcid")])
+    P("U.enumcheck").a(("LDX","t","v",END_)).branch({1:"U.enum"},"U.var0b",[("CMPI","t",1)])
+    P("U.func").call("UF").call("POSTIX").ret()
+    P("UF").branch({1:"UF.name"},bad("__func__ outside a function"),[("CMPI","infunc",1)])
+    P("UF.name").a(("ALUI","add","ufend","fns",120)).branch({2:"UF.pool"},"UF.short",[("CMP","fne","ufend")])
+    P("UF.short").a(("COPYW","ufend","fne")).goto("UF.pool")
+    P("UF.pool").a(("BLOBSAVE","ufblob","fns","ufend"),("STX","ips",FNSTR,"ufblob")).o("  .lea r0, S").num("sk").o("\n").a(("ALUI","add","sk","sk",1),("LDI","vt",1),("LDI","vb",1),("LDI","rkok",0)).ret()
     P("U.enum").a(("LDX", "nv", "v", ENV), ("LDI", "nx", 1)).o("  imm r0, ").call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("POSTIX").ret()
     q = P("U.var0b")
     q.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "U.fnp"}, "U.var", [("CMPI", "isfn", 1)])

@@ -12384,6 +12384,7 @@ int primary(void) {
        with the name of the function being walked. */
     if (t == T_ID) { if (srcis(tpos[tp], tlen[tp], "__func__")) {
         int fl;
+        fl = 0;
         adv();
         if (fntok < 0) { i = addlit("", 0); }
         else {
@@ -12395,6 +12396,7 @@ int primary(void) {
             i = addlit(lbuf, fl + 1);
         }
         es("  @mem.lea r0, S"); en(i); ec(10);
+        setkind(0); cursize = fl + 1; curpd = 1; curbase = 1;
         lvalue = 0; curelem = 1; curptr = 1;
         return postfix();
     } }

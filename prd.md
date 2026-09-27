@@ -1100,6 +1100,33 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 4. 切换是否要求去掉 Python？推荐不要求，只要求生成可复现。
 5. 参考路线至少保留两个版本周期？推荐是。
 
+### 5.7 "C99 子集"措辞核查与两处未记录缺口（2026-09-27，主人提出，我自测确认）
+
+**背景**：README 称 "A C99-subset compiler"。核查了它为什么不叫 "C99-compatible"，兼容度多少、缺什么、缺的东西有没有排进计划。
+
+**已有的两个量化**（现成套件，非新测）：
+- `tests/c99.sh`：按标准自身变更清单写的 57 个探针，实测 **57/57（100%）**。
+- `tests/corpus.sh`（c-testsuite，外部语料 220 个程序）：214 pass、0 wrong、**0 unsupported**、6 knownfail；这 6 个全是 GCC 语句表达式、空结构体、C11 `_Generic` 与一处有意的 64 位整数求值偏离，**不是** C99 本身的缺口。
+
+**"subset" 而不是 "compatible" 的三层原因**：
+1. 构建系统不兼容，不是语言问题：`-c` 不产目标文件，没有链接器、没有 `-l`/`-L`（README 已写明）。
+2. 明确排除了不属于 C99 的东西：C11 `_Generic`、GCC 扩展（语句表达式、空结构体、inline asm，README 已写明）。
+3. 真正的语言/库缺口，下面两条是我实测发现、**目前未见于任何文档**：
+   - **三字符组（trigraphs）未实现**：`??<`/`??>` 之类直接语法错误。
+   - **标准头文件缺 6 个**：C99 要求 24 个标准头，现在有 18 个（`assert ctype errno float inttypes iso646 limits math signal stdarg stdbool stddef stdint stdio stdlib string time wchar`），缺 `complex.h`、`fenv.h`、`locale.h`、`setjmp.h`、`tgmath.h`、`wctype.h`（覆盖 75%）。`complex.h`/`tgmath.h` 严格说是 C99 允许的可选项，但连"不支持"的声明宏 `__STDC_NO_COMPLEX__` 也没定义，所以现在的行为是直接报错，不是标准允许的显式声明。
+
+**`<setjmp.h>` 不算未记录缺口**：D1（本节前文，已有条款）写明是**评估过、主动决定不做**：tape 没有间接跳转，也读不到 arm64 的 LR，需要新的 tape 操作族并在两个后端六个目标上 lower；这是权衡过的架构决定，不在"未来安排"里，是永久性的。
+
+**结论**：`fenv.h`、`locale.h`、`wctype.h`、trigraphs、`__STDC_NO_COMPLEX__` 宏缺失，**目前都没有被记录为已放弃或已排期**，是真正的文档空白，留给 cdx 或未来评估是否要补。
+
+### 5.8 跨目标验证：新增 examples/apps 四个程序（2026-09-27，我本人操作，未派子代理）
+
+procview.c、winlayout.c、memmap.c、exeinfo.c（3359cc5）此前只验证过 osx/arm64（`-run`、`-O2`、host cc 三者一致）。本轮补验，用 `tests/vms.sh up`/`down` 自己开关虚拟机（只关自己开的那些，没碰已经在跑的 default Lima），不经子代理：
+
+- **lnx/x86_64**（Lima）：把 `unisacc.com` 与四个 `.c` 拷进虚拟机，`-run` 跑，四个都与本机 `cc -std=c99` 参考逐字节相同。
+- **win/arm64**（UTM）：同样拷进虚拟机跑；`unisacc.com` 只带一份 x86_64 的 PE 切片，在 Windows arm64 上靠系统自带的模拟层执行，四个都逐字节相同。win/x86_64 因此被间接覆盖（同一份切片，同一条模拟路径）。
+- lnx/arm64、osx/arm64 此前已验证。六个目标里，实际执行覆盖了 lnx/arm64、lnx/x86_64、osx/arm64、win/arm64（间接覆盖 win/x86_64）；osx/x86_64（Rosetta）本轮未测。
+
 ## 6. 实验发现 [E] —— 面向论文
 
 本章随实现推进累积。**只记实测，不记预期**；每条含可复现命令，供论文直接引用。
@@ -4122,3 +4149,12 @@ the reference at 671422 / 720572 B. This is targeted revalidation after harness
 changes, not a claim that one fresh invocation reran the entire new 114-item
 list. Earlier bounded runs plus replacement shards cover the old gate's tests.
 No push, release, default-route switch, or new cross-platform execution claim.
+
+Function-name slice closed locally: __func__ and its direct dereference use the
+same captured function-name pool entry path; the fixed chain is 98/98. Product
+C99 is 57/57 including `main 109 109 102`; the actual model container is 42/57,
+0 wrong, 15 explicit refusals (not a green C99 claim). Product .com SHA-256:
+61d01e7a7017df9d9c31ece1a874a403fe998163c910283a8da342f5226be27e,
+1,350,032 B. The remaining declaration/library gaps and reported function-
+pointer-array defects remain open. Test infrastructure is committed separately
+as 1cad167; no pending unrelated changes are swept into the product slice.
