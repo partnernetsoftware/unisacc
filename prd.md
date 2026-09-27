@@ -5019,3 +5019,7 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 并行收口续行：新6e60e3d1候选固定网络包驱动器三代N1=N2=N3完整Mach-O相同（115746B，cebaed0a260bcffed8f61c6fa2f698ec5fadc87e1e4ba0d27d1c66ae55613f96）；父N3后代probe已实际通过空PATH的O0/O2内存与native对host，缺包rc2，证据/tmp/unisacc-fp-modelboot-928，不扩大为网络/容器重构。聚合va_arg沿既有8B地址槽与ARGCOPY/LOADRAW复用，独立代理keep316及真实NET O0/O2正例通过；原00204继续暴露既有结构体char数组成员字符串初始化错值，明确保留为wrong，下一共享初始化组修复。枚举描述与测试资源/语言拆分在不同私有树并行，不改默认产品。
 
 父合并cafb149/a039e40后双槽复验：exec-driver-resources rc0 37s、exec-driver-language rc0 44s，整体44s、2/2通过；21个真实ASM网络语言probe含scalar_prefix/conditional_deref及6个条件拒绝，原19项保留。vararg_aggregate独立实测已合，但本轮language清单尚未加入它，不冒称覆盖。core仍由独立代理按责任分组解决55s窗口超限；parse2成员字符串初始化与enum描述同时在互不重叠私有树推进，父主树测试期间未编辑。
+
+联合诊断门禁发现旧测试过期：exec-errors仍要求L"ab"两例拒绝，但宽字符串已经迁移，实际rc0。因此保留原两例改为正例全结果对照，并用仍未覆盖的u字符串前缀验证失败定位不会递归重入；不把新支持当失败，也不删除诊断防循环义务。当前六项队列5通过/1失败，修正后须重跑errors与warnings变体。
+
+诊断修正实际闭合：L宽串两例保留为无诊断接受；与旧C tape仅差字符串池末尾额外NUL（非错误状态/定位差异），未以全tape一致作该正例判据，宽串语义由既有真实language probe检验。u前缀仍明确rc1并正确定位，验证拒绝路径不递归。父errors/errors-warn双槽2/2、7秒；原17全结果比较保留。成员字符串初始化2436a5a复用IMEMBER/STRINGINIT.row/INITADDR，Python净0、声明净38，原00204及持久probe实际NET O0/O2全同host；core按modes/contracts/dependencies三职责拆分，原断言不减，下一联合验收保持主树冻结。
