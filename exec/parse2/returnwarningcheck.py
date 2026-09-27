@@ -30,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
            ('nested','int f(int x){if(x){if(x==2)return 1;else return 3;}else return 2;}'),
            ('after-return','int f(void){return 1; ;}'),
            ('block-return','int f(void){{return 1;}}'),
+           ('static-ordinals','int f(void){static int x=3;return x++;} int g(void){static int y=7;return f()+y;}'),
            ('while-one','int f(void){while(1){}}'),('while-zero','int f(void){while(0){}}'),
            ('while-variable','int f(int x){while(x){}}'),
            ('while-return','int f(int x){while(x){return 3;}}'),

@@ -82,7 +82,9 @@ entering the ordinary token reader; parser token-buffer positions still point
 to the prefix. This preserves original-buffer rewinds and bounded views used
 for strings and initialisers. `source_pos` is the current text offset;
 `TOKEN_POS[token_buffer_position]` retains it across subsequent reads. The
-normal tape output has no location prefixes or metadata.
+normal tape output has no location prefixes or metadata. The location reader
+also passes through the ordinary stable-token-ordinal registration, so static
+local storage labels are unchanged by diagnostic mode.
 
 `exec/lex/locationcheck.py` checks the E2/E1 join and malformed frames.
 `exec/parse2/locationcheck.py` checks the E2/E1/E3 join against ordinary tape

@@ -58,6 +58,7 @@ with tempfile.TemporaryDirectory(prefix='parse-locations-') as td:
            ('header','#include "local.h"\nint main(void){return twice(3);}\n'),
            ('strings','int main(void){char a[4]="xy"; char *p="a" "b";return a[1]+p[0];}\n'),
            ('printf','int main(void){printf("%d %s\\n",3,"ok");return 0;}\n')]
+    cases.append(('static-ordinals','int f(void){static int x=3;return x++;} int main(void){static int y=7;return f()+y;}\n'))
     cases += [(p.stem,p.read_text()) for p in [R/'examples/fib.c',R/'tests/c/b_strderef.c']]
     for name,src in cases:
         f=t/'source.c';f.write_text(src)
@@ -81,4 +82,4 @@ with tempfile.TemporaryDirectory(prefix='parse-locations-') as td:
     for i,b in enumerate(bad):
         f=t/'bad';f.write_bytes(b);p=run([t/'run',t/'parse.net',f])
         assert p.returncode==1 and not p.stdout and b'malformed token locations' in p.stderr,(i,p.returncode,p.stderr)
-    print('located parser: 8 tape comparisons, 10 malformed frames rejected')
+    print('located parser:',len(cases),'tape comparisons, 10 malformed frames rejected')

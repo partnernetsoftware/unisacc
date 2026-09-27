@@ -1729,7 +1729,7 @@ def build(locations=False, warnings=False):
     start = "START"
     if locations:
         from tokenlocations import install as location_install
-        start = location_install(E, P)
+        start = location_install(E, P, TIX)
         from diagnostics import install as diagnostic_install
         diagnostic_install(E, P)
     if warnings:

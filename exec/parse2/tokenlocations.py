@@ -10,7 +10,7 @@ INCLUDE_LINES=37<<40
 INCLUDE_NAME=38<<40
 
 
-def install(E,P):
+def install(E,P,ordinal_table=None):
     g=E.g
     bad='DL.bad'
     def word(name,reg,nxt):
@@ -65,7 +65,11 @@ def install(E,P):
     g.els('DL.prefix',bad)
     word('DL.offset','source_pos','DL.offsetbound')
     le(P('DL.offsetbound'),'source_pos','diag_textlen','DL.newline')
-    g.on('DL.newline',[10],'NX',[('ADV',),('STX','tpos',TOKEN_POS,'source_pos')])
+    # Preserve the ordinary reader's stable token ordinals used by static
+    # storage. Located prefixes change byte offsets, not source ordinals.
+    acts=[('ADV',),('STX','tpos',TOKEN_POS,'source_pos')]
+    if ordinal_table is not None: acts.append(('LDX','ixn','tpos',ordinal_table))
+    g.on('DL.newline',[10],'IX.have' if ordinal_table is not None else 'NX',acts)
     g.els('DL.newline',bad)
     g.on(bad,range(257),'DEAD',E.rej('not covered: malformed token locations'))
     return 'DL.magic0'

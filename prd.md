@@ -3611,3 +3611,24 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   unused-variable and format warnings, multi-unit location integration,
   -Werror and CLI selection remain. No full-gate or new native-platform claim.
   Product source and shipped .com unchanged; local work, no push/release.
+
+
+### Located reader repair: static-local token ordinals
+
+- Source inspection found that the located NEXT entry bypassed IX.have,
+  which assigns stable source-token ordinals for static local labels. A new
+  two-function static-local fixture failed before the fix with "identifier
+  is not a local" (rc 1). This was a development location-mode defect, not
+  a shipped product regression.
+- The located reader now preserves IX.have/IX.new after its position prefix;
+  it passes the ordinal table explicitly. The isolated diagnostic-renderer
+  test continuation has no grammar ordinal table and retains its own entry.
+- Nine location-mode tape comparisons and ten malformed-frame checks pass
+  on cc, unisacc and both macOS assembly runtimes. The new static case is
+  also in the return-warning check: 33 cases, 14 with warnings, exact tape
+  and diagnostics on cc. This prevents a green location suite that only
+  exercises automatic/global storage.
+- Current compilercheck.sh passes 27 mode/level comparisons plus its existing
+  CLI/resources/IO/decimal/native and memory-run checks; package 1,250,262 B.
+  No full-gate result, default product switch or publication is claimed.
+  Remaining warning/CLI work and the full reconstruction goal remain active.
