@@ -11,94 +11,42 @@ DATA = 1 << 40  # byte offsets are bounded below 2^31; separate wide region
 def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format="elf"):
     assert arch in elf.MACHINE
     P,g=E.P,E.g
-    P('ELF').branch({1:'ELF.begin'},'DEAD.image',[('CMPI','target_os',{'macho':2,'pe':3,'elf':1}[image_format])])
-    P('ELF.begin').a(('LDI','zero',0),('OCUT','text_blob','zero'),('LDI','dlen',0),('LDI','extra_bss',0),('LDI','nr_relocs',0),('INPUSH','header_data')).goto('ED.first')
-    g.on('ED.first',[45],'ED.empty',[('ADV',)])
-    g.els('ED.first','ED.hi',[])
-    g.on('ED.empty',[256],'ED.end',[])
-    g.els('ED.empty','DEAD.image',[])
-    g.on('ED.hi',[256],'ED.end',[])
-    for c,v in [(c,c-48) for c in range(48,58)]+[(c,c-87) for c in range(97,103)]:
-        g.on('ED.hi',[c],'ED.lo',[('LDI','db',v*16),('ADV',)])
-        g.on('ED.lo',[c],'ED.put',[('ALUI','add','db','db',v),('ADV',)])
-    g.els('ED.hi','DEAD.image',[]);g.els('ED.lo','DEAD.image',[])
-    P('ED.put').a(('STX','dlen',DATA,'db'),('ALUI','add','dlen','dlen',1)).goto('ED.hi')
-    # @data may omit its zero tail. data_len is its logical extent. The Linux route
-    # requires bss=0 (the extra stack field belongs to Windows).
-    P('ED.end').a(('INPOP',),('LDI','extent_max',2147483647),('COPYW','vlen','dlen')).branch({1:'EM.len'},'EM.bss',[('CMPI','has_data_len',1)])
-    P('EM.len').a(('INPUSH','header_data_len')).call('EM.num').branch({0:'DEAD.image'},'EM.length',[('C64','mn','dlen')])
-    P('EM.length').a(('COPYW','vlen','mn')).goto('EM.bss')
-    P('EM.bss').a(('COPYW','memlen','vlen')).branch({1:'EM.extra'},'EM.ready',[('CMPI','has_bss',1)])
-    p=P('EM.extra').a(('INPUSH','header_bss')).call('EM.num')
-    if image_format=='pe':p.a(('COPYW','extra_bss','mn')).goto('EM.ready')
-    else:p.branch({1:'EM.ready'},'DEAD.image',[('CMPI','mn',0)])
-    P('EM.num').a(('LDI','mn',0),('LDI','nd',0)).goto('EM.digit')
-    g.on('EM.digit',range(48,58),'EM.bound',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','mn','mn',10),('A64','add','mn','mn','bt'),('ALUI','add','nd','nd',1),('ADV',)])
-    P('EM.bound').branch({2:'DEAD.image'},'EM.digit',[('C64U','mn','extent_max')])
-    g.on('EM.digit',[256],'EM.end',[]);g.els('EM.digit','DEAD.image',[])
-    P('EM.end').a(('INPOP',)).branch({1:'DEAD.image'},'RET',[('CMPI','nd',0)])
-    P('EM.ready').branch({1:'ER.init'},'MI.args',[('CMPI','has_relocs',1)])
-    P('ER.init').a(('INPUSH','header_relocs')).goto('ER.first')
-    g.on('ER.first',[45],'ER.empty',[('ADV',)])
-    g.els('ER.first','ER.start',[])
-    g.on('ER.empty',[256],'ER.end',[]);g.els('ER.empty','DEAD.image',[])
-    g.els('ER.start','ER.digit',[('LDI','ra',0),('LDI','nd',0)])
-    g.on('ER.digit',range(48,58),'ER.digitbound',[('BYTE','bt'),('ALUI','sub','bt','bt',48),('A64I','mul','ra','ra',10),('A64','add','ra','ra','bt'),('ALUI','add','nd','nd',1),('ADV',)])
-    P('ER.digitbound').branch({2:'DEAD.image'},'ER.digit',[('C64U','ra','extent_max')])
-    g.on('ER.digit',[44,256],'ER.bound',[]);g.els('ER.digit','DEAD.image',[])
-    P('ER.bound').branch({1:'DEAD.image'},'ER.b2',[('CMPI','nd',0)])
-    P('ER.b2').a(('A64I','add','rend','ra',8)).branch({2:'DEAD.image'},'ER.read',[('C64U','rend','vlen')])
-    P('ER.read').branch({2:'ER.extend'},'ER.value',[('C64','rend','dlen')])
-    P('ER.extend').a(('COPYW','dlen','rend')).goto('ER.value')
-    p=P('ER.value');p.a(('LDI','rv',0))
-    if image_format=='pe':
-        from pedelta import RELOCS
-        p.a(('STX','nr_relocs',RELOCS,'ra'),('ALUI','add','nr_relocs','nr_relocs',1))
-    for j in range(8):
-        p.a(('ALUI','add','di','ra',j),('LDX','db','di',DATA),('A64I','shl','db','db',8*j),('A64','or','rv','rv','db'))
-    p.a(('A64','add','rv','rv','data_shift'))
-    for j in range(8):
-        p.a(('ALUI','add','di','ra',j),('A64I','and','db','rv',255),('STX','di',DATA,'db'),('A64I','shr','rv','rv',8))
-    p.goto('ER.sep')
-    g.on('ER.sep',[44],'ER.start',[('ADV',)]);g.on('ER.sep',[256],'ER.end',[])
-    P('ER.end').a(('INPOP',)).goto('MI.args')
-    P('MI.args').branch({1:'ER.trim'},'MI.argc',[('CMPI','memory_mode',0)])
-    for key,value,nxt in [('argc','ml_argc','MI.argv'),('argv','ml_argv','ER.trim')]:
-        P('MI.'+key).branch({1:'MI.'+key+'.read'},'DEAD.image',[('CMPI','has_'+key,1)])
-        P('MI.'+key+'.read').a(('INPUSH','header_'+key)).call('EM.num').a(('A64I','sub','mi_at','mn',256),('A64I','add','mi_end','mi_at',8)).branch({0:'DEAD.image'},'MI.'+key+'.bound',[('C64','mi_at','zero')])
-        P('MI.'+key+'.bound').branch({2:'DEAD.image'},'MI.'+key+'.store',[('C64U','mi_end','vlen')])
-        p=P('MI.'+key+'.store').a(('COPYW','mi_v',value))
-        for j in range(8):p.a(('ALUI','add','di','mi_at',j),('A64I','and','db','mi_v',255),('STX','di',DATA,'db'),('A64I','shr','mi_v','mi_v',8))
-        p.branch({2:'MI.'+key+'.extend'},nxt,[('C64','mi_end','dlen')])
-        P('MI.'+key+'.extend').a(('COPYW','dlen','mi_end')).goto(nxt)
-    P('ER.trim').a(('COPYW','stored','dlen')).label('ET.loop').branch({1:'EH'},'ET.last',[('CMPI','stored',0)])
-    P('ET.last').a(('ALUI','sub','di','stored',1),('LDX','db','di',DATA)).branch({1:'ET.drop'},'EH',[('CMPI','db',0)])
-    P('ET.drop').a(('ALUI','sub','stored','stored',1)).goto('ET.loop')
-    # Entry label is resolved from the same final layout as branch targets.
-    P('EH').a(('LDX','ei','id_entry',LABD),('LDI','entryoff',0)).branch({1:'EH.write'},'EH.entry',[('CMPI','ei',0)])
-    if direct_labels:
-        P('EH.entry').a(('ALUI','sub','entryoff','ei',1)).goto('EH.write')
-    else:
-        P('EH.entry').a(('ALUI','sub','ei','ei',1)).branch({0:'EH.in'},'EH.end',[('CMP','ei','npc')])
-        P('EH.in').a(('LDX','entryoff','ei',OFF)).goto('EH.write')
-        P('EH.end').a(('COPYW','entryoff','endo')).goto('EH.write')
-    P('EH.write').branch({1:'EH.file'},'MI.begin',[('CMPI','memory_mode',0)])
-    P('EH.file').goto({'macho':'MACHO','pe':'PE','elf':'EH.elfwrite'}[image_format])
-    # A native-memory image has no OS file headers or signature. It carries
-    # exact code/data bytes and a declared zero-filled extent; all relocation
-    # and entry arithmetic above is reused, still performed by the model.
-    P('MI.begin').a(('COPYW','mi_textlen','endo'),('A64','add','mi_extent','memlen','extra_bss')).branch({1:'MI.winlen'},'MI.header',[('CMPI','target_os',3)])
+    from pathlib import Path
+    from finite_rules import install as install_rules
     from unisa.image.pe import IMPORTS
-    P('MI.winlen').a(('A64I','add','mi_textlen','ml_iatoff',8*len(IMPORTS))).goto('MI.header')
-    p=P('MI.header').o('UNIMEM1\n')
-    for value in ('mi_textlen','mi_extent','stored','entryoff'):
-        p.a(('COPYW','lb_v',value),('LDI','lb_n',8)).call('EI.bytes')
-    p.a(('INPUSH','text_blob')).goto('MI.copy')
-    g.on('MI.copy',[256],'MI.tail',[('INPOP',)])
-    g.els('MI.copy','MI.copy',[('COPY',),('ADV',)])
-    P('MI.tail').branch({1:'MI.align'},'EI.data',[('CMPI','target_os',3)])
-    P('MI.align').a(('OLEN','mi_pos'),('A64I','sub','mi_pos','mi_pos',40)).branch({0:'MI.pad'},'MI.iat',[('C64','mi_pos','ml_iatoff')])
-    byte(P('MI.pad'),0).goto('MI.align')
+    from pedelta import RELOCS
+    image_bindings = dict(DATA=DATA, LABD=LABD, OFF=OFF, RELOCS=RELOCS,
+                          format_os={'macho':2,'pe':3,'elf':1}[image_format],
+                          writer={'macho':'MACHO','pe':'PE','elf':'EH.elfwrite'}[image_format],
+                          iat_size=8*len(IMPORTS))
+    image_sequences = {'zero_byte': byte(P('byte.binding'),0).acts,
+                       'memory_magic': E.O('UNIMEM1\n'),
+                       'reject': E.rej('not covered: '+{'macho':'Mach-O','pe':'PE','elf':'ELF'}[image_format]+' input or relocation')}
+    labels = (('ELF_b0', 'ELF', 'b'), ('ED_end_b0', 'ED', 'b'),
+              ('EM_len_r0', 'EM', 'r'), ('EM_len_r0_b0', 'EM', 'b'),
+              ('EM_bss_b0', 'EM', 'b'), ('EM_extra_r0', 'EM', 'r'),
+              ('EM_extra_r0_b0', 'EM', 'b'), ('EM_bound_b0', 'EM', 'b'),
+              ('EM_end_b0', 'EM', 'b'), ('EM_ready_b0', 'EM', 'b'),
+              ('ER_digitbound_b0', 'ER', 'b'), ('ER_bound_b0', 'ER', 'b'),
+              ('ER_b2_b0', 'ER', 'b'), ('ER_read_b0', 'ER', 'b'),
+              ('MI_args_b0', 'MI', 'b'), ('MI_argc_b0', 'MI', 'b'),
+              ('MI_argc_read_r0', 'MI', 'r'), ('MI_argc_read_r0_b0', 'MI', 'b'),
+              ('MI_argc_bound_b0', 'MI', 'b'), ('MI_argc_store_b0', 'MI', 'b'),
+              ('MI_argv_b0', 'MI', 'b'), ('MI_argv_read_r0', 'MI', 'r'),
+              ('MI_argv_read_r0_b0', 'MI', 'b'), ('MI_argv_bound_b0', 'MI', 'b'),
+              ('MI_argv_store_b0', 'MI', 'b'), ('ET_loop_b0', 'ET', 'b'),
+              ('ET_last_b0', 'ET', 'b'), ('EH_b0', 'EH', 'b'),
+              ('EH_entry_b0', 'EH', 'b'), ('EH_write_b0', 'EH', 'b'),
+              ('MI_begin_b0', 'MI', 'b'), ('MI_header_r0', 'MI', 'r'),
+              ('MI_header_r0_r0', 'MI', 'r'), ('MI_header_r0_r0_r0', 'MI', 'r'),
+              ('MI_header_r0_r0_r0_r0', 'MI', 'r'), ('MI_tail_b0', 'MI', 'b'),
+              ('MI_align_b0', 'MI', 'b'))
+    omitted = ({'EM_extra_r0_b0'} if image_format=='pe' else set()) | ({'EH_entry_b0'} if direct_labels else set())
+    image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels if key not in omitted})
+    for section in ('input-common', 'input-pe' if image_format=='pe' else 'input-nonpe',
+                    'input-direct' if direct_labels else 'input-indirect'):
+        install_rules(g, Path(__file__).parent, 'elfimage', bindings=image_bindings,
+                      sequences=image_sequences, section=section)
     p=P('MI.iat')
     for i in range(len(IMPORTS)):p.a(('COPYW','lb_v','ml_imp_'+str(i)),('LDI','lb_n',8)).call('EI.bytes')
     p.goto('EI.data')
@@ -116,12 +64,8 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     for flags,offset,va,fs,ms in [(5,0,elf.VADDR,'tend','tend'),(6,'doff','data_va','stored','memlen')]:
         for w,v in [(4,1),(4,flags),(8,offset),(8,va),(8,va),(8,fs),(8,ms),(8,elf.PAGE)]:field(w,v)
     p.a(('INPUSH','text_blob')).goto('EI.copy')
-    g.on('EI.copy',[256],'EI.pad',[('INPOP',)])
-    g.els('EI.copy','EI.copy',[('COPY',),('ADV',)])
-    P('EI.pad').a(('OLEN','pos')).branch({0:'EI.zero'},'EI.data',[('C64','pos','doff')])
-    byte(P('EI.zero'),0).goto('EI.pad')
-    P('EI.data').a(('LDI','di',0)).label('EI.loop').branch({0:'EI.byte'},'RET',[('CMP','di','stored')])
-    P('EI.byte').a(('LDX','db','di',DATA),('OUTW','db'),('ALUI','add','di','di',1)).goto('EI.loop')
-    P('EI.bytes').branch({2:'EI.nextbyte'},'RET',[('CMPI','lb_n',0)])
-    P('EI.nextbyte').a(('OUTW','lb_v'),('A64I','shr','lb_v','lb_v',8),('ALUI','sub','lb_n','lb_n',1)).goto('EI.bytes')
-    g.on('DEAD.image',range(257),'DEAD',E.rej('not covered: '+{'macho':'Mach-O','pe':'PE','elf':'ELF'}[image_format]+' input or relocation'),'r')
+    labels = (('EI_pad_b0', 'EI', 'b'), ('EI_loop_b0', 'EI', 'b'),
+              ('EI_bytes_b0', 'EI', 'b'))
+    image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels})
+    install_rules(g, Path(__file__).parent, 'elfimage', bindings=image_bindings,
+                  sequences=image_sequences, section='output-common')
