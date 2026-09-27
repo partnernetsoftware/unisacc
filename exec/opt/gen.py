@@ -19,8 +19,9 @@ with its neighbour, the action for which is the peep table's (loaded at START).
 This is the optimiser's algorithm compiled into an action table. The complete
 SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv, LOCAL in
 local-{byte,result}.tsv, STFUSE in stfuse-{byte,result}.tsv, and PPASS/BCLS/REAL
-in peep-{byte,result}.tsv. Dynamic peep/opinfo data assembly remains here;
-src/opt.c and unisa/opt.py stay the behaviour reference.
+in peep-{byte,result}.tsv. ANALYZE/SOLVE/SCAN/DEADQ live in analysis-{byte,result}.tsv.
+Dynamic peep/opinfo data assembly remains here; src/opt.c and unisa/opt.py
+stay the behaviour reference.
 
 The opinfo table is read, not copied: its `simple` column is interned into a
 set at START.  Everything else is the byte-level control of the rule.
@@ -83,205 +84,19 @@ def procs():
 
 
 def analysis():
-    """ANALYZE: from x's start -- pass A (lines: kind, read/write masks, block, target token;
-    labels), pass B (targets), then the liveness of r2..r5 (bl_solve by rescanning, as
-    unisa/opt.py _solve).  Leaves nl, nb, ZOK[z], LIVE."""
-    # pass A
-    p = P("ANALYZE")
-    p.a(("LDI", "q_l", 0), ("LDI", "q_b", 0), ("LDI", "q_cut", 1), ("ALUI", "mul", "q_lab", "rnd", 2 * 10 ** 6),
-        ("ALUI", "add", "q_lab", "q_lab", LABB)).goto("A0")
-    g.on("A0", [EOF], "A.end", [])
-    g.els("A0", "A.blk", [("MARK", "q_p"), ("STX", "q_l", LSS, "q_p"), ("LDI", "q_t", 0), ("STX", "q_l", ISLAB, "q_t"),
-                          ("LDI", "q_t", -1), ("STX", "q_l", WIDD, "q_t"), ("STX", "q_l", FRR, "q_t")])
-    # the block: a non-space line starts one, and so does the line after jump/jumpz/ret
-    p = P("A.blk")
-    p.call("A.first").branch({1: "A.new"}, "A.old", [("CMPI", "q_cut", 1)])
-    P("A.new").a(("STX", "q_b", BSS, "q_l"), ("ALUI", "add", "q_b", "q_b", 1), ("LDI", "q_cut", 0)).goto("A.old")
-    P("A.old").a(("ALUI", "sub", "q_t", "q_b", 1), ("STX", "q_l", BLOF, "q_t"),
-                 ("LDI", "q_rm", 0), ("LDI", "q_wm", 0), ("JUMP", "q_p")).branch({1: "A.sp"}, "A.lab", [("CMPI", "q_sp", 1)])
-    # A.first: q_sp := the line starts with a space; a non-space line cuts
-    g.on("A.first", [32], "RET", [("LDI", "q_sp", 1)])
-    g.els("A.first", "RET", [("LDI", "q_sp", 0), ("LDI", "q_cut", 1)])
-    # a line not starting with a space: LABEL; `name:` (len > 1, not starting with '.') registers name
-    P("A.lab").a(("LDI", "q_k", K_LABEL), ("STX", "q_l", KK, "q_k"), ("STX", "q_l", RMM, "q_rm"), ("STX", "q_l", WMM, "q_wm"),
-                 ("LDI", "q_lc", 0), ("LDI", "q_len", 0)).goto("AL.s")
-    g.on("AL.s", [46], "AL.skip", [])          # '.': not a label
-    g.els("AL.s", "AL.l", [])
-    g.on("AL.l", NL, "AL.e", [("MARK", "q_e")])
-    g.els("AL.l", "AL.l", [("BYTE", "q_lc"), ("ALUI", "add", "q_len", "q_len", 1), ("ADV",)])
-    p = P("AL.e")
-    p.branch({1: "AL.e2"}, "A.done", [("CMPI", "q_lc", 58)])
-    p = P("AL.e2")
-    p.branch({2: "AL.reg"}, "A.done", [("CMPI", "q_len", 1)])
-    p = P("AL.reg")
-    p.a(("ALUI", "sub", "q_e", "q_e", 1), ("INTERN", "q_id", "q_p", "q_e"), ("ALU", "add", "q_a", "q_lab", "q_id"),
-        ("LDX", "q_t", "q_a", 0)).branch({1: "AL.set"}, "AL.mk", [("CMPI", "q_t", 0)])
-    P("AL.set").a(("ALUI", "add", "q_t", "q_l", 1), ("STX", "q_a", 0, "q_t")).goto("AL.mk")
-    P("AL.mk").a(("LDI", "q_t", 1), ("STX", "q_l", ISLAB, "q_t"),             # the label's name: [TS, TE)
-                 ("STX", "q_l", TSS, "q_p"), ("STX", "q_l", TEE, "q_e")).goto("A.done")
-    g.on("AL.skip", NL, "A.done", [])
-    g.els("AL.skip", "AL.skip", [("ADV",)])
-    # a space line: the word from p+2
-    g.on("A.sp", [32], "A.sp2", [("ADV",)])
-    g.els("A.sp", "A.oth", [])
-    g.on("A.sp2", NL, "A.oth", [])                         # ` ` alone: no word
-    g.on("A.sp2", [32], "A.w", [("ADV",), ("LDI", "q_s2", 1)])
-    g.els("A.sp2", "A.w", [("ADV",), ("LDI", "q_s2", 0)])  # the second byte, whatever it is (ol_simple wants a space)
-    g.els("A.w", "A.wl", [("MARK", "q_ws"), ("LDI", "q_wn", 0)])
-    g.on("A.wl", [32] + NL, "A.we", [("MARK", "q_we")])
-    g.els("A.wl", "A.wl", [("ADV",), ("ALUI", "add", "q_wn", "q_wn", 1)])
-    # the operands: every rN after a non-letter; the first one (unless a `[` came before it); again
-    p = P("A.we")
-    p.a(("LDI", "q_m", 0), ("LDI", "q_f", -1), ("LDI", "q_first", 1), ("LDI", "q_br", 0), ("LDI", "q_again", 0),
-        ("COPYW", "q_ls", "q_ws")).goto("OP0")
-    g.on("OP0", NL, "A.cls", [("MARK", "q_e")])
-    g.on("OP0", [32], "OP0", [("ADV",), ("MARK", "q_ls")])
-    g.on("OP0", [91], "OP0", [("ADV",), ("LDI", "q_br", 1)])
-    g.on("OP0", [114], "OPR", [("ADV",)])
-    g.on("OP0", LETTER, "OP1", [("ADV",)])
-    g.els("OP0", "OP0", [("ADV",)])
-    g.on("OP1", NL, "A.cls", [("MARK", "q_e")])
-    g.on("OP1", LETTER, "OP1", [("ADV",)])
-    g.els("OP1", "OP0", [])
-    g.on("OPR", DIGIT, "OPD", [("LDI", "q_rn", 0)])
-    g.els("OPR", "OP1", [])
-    g.on("OPD", DIGIT, "OPD", [("BYTE", "q_bt"), ("ALUI", "sub", "q_bt", "q_bt", 48),
-                               ("ALUI", "mul", "q_rn", "q_rn", 10), ("ALU", "add", "q_rn", "q_rn", "q_bt"), ("ADV",)])
-    g.els("OPD", "OPD.r", [])
-    p = P("OPD.r")
-    p.branch({0: "OPD.m"}, "OPD.f", [("CMPI", "q_rn", 16)])
-    P("OPD.m").a(("LDI", "q_t", 1), ("ALU", "shl", "q_t", "q_t", "q_rn"), ("ALU", "or", "q_m", "q_m", "q_t")).goto("OPD.f")
-    p = P("OPD.f")
-    p.branch({1: "OPD.1"}, "OPD.2", [("CMPI", "q_first", 1)])
-    p = P("OPD.1")
-    p.a(("LDI", "q_first", 0)).branch({1: "OP0"}, "OPD.1f", [("CMPI", "q_br", 1)])
-    P("OPD.1f").a(("COPYW", "q_f", "q_rn")).goto("OP0")
-    p = P("OPD.2")
-    p.branch({1: "OPD.ag"}, "OP0", [("CMP", "q_rn", "q_f")])      # q_f = -1 never equals a register
-    P("OPD.ag").a(("LDI", "q_again", 1)).goto("OP0")
-    # A.cls: the kind from the word
-    p = P("A.cls")
-    p.a(("INTERN", "q_id", "q_ws", "q_we"), ("STX", "q_l", WIDD, "q_id"), ("STX", "q_l", FRR, "q_f"),
-        ("STX", "q_l", TSS, "q_ls"), ("STX", "q_l", TEE, "q_e"))
-    for w, k in (("ret", K_RET), ("jump", K_JUMP), ("jumpz", K_JUMPZ), ("call", K_CALL), (".frame", K_FRAME)):
-        hit, nx = "A.c_" + w, "A.cn_" + w
-        p.branch({1: hit}, nx, [("CMP", "q_id", "id_" + w.strip("."))])
-        q = P(hit)
-        q.a(("LDI", "q_k", k))
-        if w in ("jump", "jumpz", "ret"):
-            q.a(("LDI", "q_cut", 1))
-        if w == "jumpz":
-            q.a(("COPYW", "q_rm", "q_m"))
-        if w in ("jump", "jumpz", "call"):
-            q.a(("STX", "q_l", TSS, "q_ls"), ("STX", "q_l", TEE, "q_e"))
-        q.goto("A.store")
-        p = P(nx)
-    # not one of those: simple (opinfo) or other; the word was at most 15 bytes for ol_opi
-    p.branch({2: "A.oth"}, "A.cs0", [("CMPI", "q_wn", WORDMAX)])
-    P("A.cs0").branch({1: "A.cs"}, "A.oth", [("CMPI", "q_s2", 1)])
-    p = P("A.cs")
-    p.a(("LDX", "q_t", "q_id", SIMPLE)).branch({1: "A.simple"}, "A.oth", [("CMPI", "q_t", 1)])
-    p = P("A.simple")
-    p.a(("LDI", "q_k", K_SIMPLE)).branch({1: "A.st"}, "A.sm1", [("CMP", "q_id", "id_store64")])
-    P("A.sm1").branch({1: "A.st"}, "A.sm2", [("CMP", "q_id", "id_st")])
-    P("A.st").a(("LDI", "q_f", -1)).goto("A.sm2")
-    p = P("A.sm2")
-    p.branch({0: "A.nof"}, "A.hasf", [("CMPI", "q_f", 0)])          # f < 0
-    P("A.nof").a(("COPYW", "q_rm", "q_m")).goto("A.store")
-    p = P("A.hasf")
-    p.a(("LDI", "q_t", 1), ("ALU", "shl", "q_wm", "q_t", "q_f"), ("LDI", "q_u", -1), ("ALU", "xor", "q_u", "q_u", "q_wm"),
-        ("ALU", "and", "q_rm", "q_m", "q_u")).branch({1: "A.ag"}, "A.store", [("CMPI", "q_again", 1)])
-    P("A.ag").a(("ALU", "or", "q_rm", "q_rm", "q_wm")).goto("A.store")
-    P("A.oth").a(("LDI", "q_k", K_OTHER), ("LDI", "q_rm", 255), ("LDI", "q_wm", 0)).goto("A.oth2")
-    g.on("A.oth2", NL, "A.store", [])
-    g.els("A.oth2", "A.oth2", [("ADV",)])
-    P("A.store").a(("STX", "q_l", KK, "q_k"), ("STX", "q_l", RMM, "q_rm"), ("STX", "q_l", WMM, "q_wm")).goto("A.done")
-    # A.done: at the line's end (\n or EOF)
-    g.on("A.done", [10], "A0", [("MARK", "q_t"), ("STX", "q_l", LEE, "q_t"), ("ADV",), ("ALUI", "add", "q_l", "q_l", 1)])
-    g.on("A.done", [EOF], "A.end", [("MARK", "q_t"), ("STX", "q_l", LEE, "q_t"), ("ALUI", "add", "q_l", "q_l", 1)])
-    g.els("A.done", "A.done", [("ADV",)])
-    # the LABEL kind for non-space lines is stored at A.done's entry through A.lab -> A.done: store it
-    # pass B: targets
-    p = P("A.end")
-    p.a(("COPYW", "nl", "q_l"), ("COPYW", "nb", "q_b"), ("LDI", "q_l", 0)).label("B.l")
-    p.branch({0: "B.k"}, "SOLVE", [("CMP", "q_l", "nl")])
-    p = P("B.k")
-    p.a(("LDX", "q_k", "q_l", KK), ("LDI", "q_t", -1), ("STX", "q_l", TGG, "q_t"))
-    p.branch({1: "B.t"}, "B.k2", [("CMPI", "q_k", K_JUMP)])
-    P("B.k2").branch({1: "B.t"}, "B.k3", [("CMPI", "q_k", K_JUMPZ)])
-    P("B.k3").branch({1: "B.t"}, "B.n", [("CMPI", "q_k", K_CALL)])
-    p = P("B.t")
-    p.a(("LDX", "q_ts", "q_l", TSS), ("LDX", "q_te", "q_l", TEE), ("INTERN", "q_id", "q_ts", "q_te"),
-        ("ALU", "add", "q_a", "q_lab", "q_id"), ("LDX", "q_t", "q_a", 0)).branch({1: "B.n"}, "B.set", [("CMPI", "q_t", 0)])
-    P("B.set").a(("ALUI", "sub", "q_t", "q_t", 1), ("LDX", "q_t", "q_t", BLOF), ("STX", "q_l", TGG, "q_t")).goto("B.n")
-    P("B.n").a(("ALUI", "add", "q_l", "q_l", 1)).goto("B.l")
-    # SOLVE: z = 2..5; rounds <= 64; blocks from last to first; ZOK[z] := converged
-    p = P("SOLVE")
-    p.a(("COPYW", "z", "zlo")).label("SV.z")
-    p.branch({2: "SV.done"}, "SV.init", [("CMPI", "z", 5)])
-    p = P("SV.init")
-    p.a(("ALUI", "mul", "q_lb", "rnd", 6), ("ALU", "add", "q_lb", "q_lb", "z"),
-        ("ALUI", "mul", "q_lb", "q_lb", 10 ** 6), ("ALUI", "add", "q_lb", "q_lb", LIVEB),
-        ("LDI", "q_ch", 1), ("LDI", "q_rr", 0)).label("SV.r")
-    p.branch({1: "SV.go"}, "SV.fin", [("CMPI", "q_ch", 1)])
-    p = P("SV.go")
-    p.branch({0: "SV.go2"}, "SV.fin", [("CMPI", "q_rr", 64)])
-    p = P("SV.go2")
-    p.a(("LDI", "q_ch", 0), ("ALUI", "add", "q_rr", "q_rr", 1), ("ALUI", "sub", "q_bb", "nb", 1)).label("SV.b")
-    p.branch({0: "SV.r"}, "SV.bb", [("CMPI", "q_bb", 0)])        # q_bb < 0: the round is over
-    p = P("SV.bb")
-    p.a(("ALU", "add", "q_a", "q_lb", "q_bb"), ("LDX", "q_t", "q_a", 0)).branch({1: "SV.scan"}, "SV.nx", [("CMPI", "q_t", 0)])
-    p = P("SV.scan")
-    p.a(("LDX", "q_s", "q_bb", BSS), ("LDX", "q_t", "q_s", KK)).branch({1: "SV.s1"}, "SV.s0", [("CMPI", "q_t", K_LABEL)])
-    P("SV.s1").a(("ALUI", "add", "q_s", "q_s", 1)).goto("SV.s0")
-    p = P("SV.s0")
-    p.a(("COPYW", "sc_l", "q_s"), ("COPYW", "sc_z", "z")).vpush("q_bb", "q_lb").call("SCAN").vpop("q_bb", "q_lb")
-    p.branch({1: "SV.set"}, "SV.nx", [("CMPI", "sc_v", 1)])
-    P("SV.set").a(("ALU", "add", "q_a", "q_lb", "q_bb"), ("LDI", "q_t", 1), ("STX", "q_a", 0, "q_t"), ("LDI", "q_ch", 1)).goto("SV.nx")
-    P("SV.nx").a(("ALUI", "sub", "q_bb", "q_bb", 1)).goto("SV.b")
-    p = P("SV.fin")          # converged iff the last round changed nothing
-    p.a(("LDI", "q_t", 1)).branch({1: "SV.bad"}, "SV.ok", [("CMPI", "q_ch", 1)])
-    P("SV.bad").a(("LDI", "q_t", 0)).goto("SV.ok")
-    P("SV.ok").a(("STX", "z", ZOKB, "q_t"), ("ALUI", "add", "z", "z", 1)).goto("SV.z")
-    P("SV.done").ret()
-    # SCAN(sc_z, sc_l) -> sc_v: from line sc_l, is sc_z read before written (ol_scan)
-    p = P("SCAN")
-    p.a(("ALUI", "mul", "sc_lb", "rnd", 6), ("ALU", "add", "sc_lb", "sc_lb", "sc_z"),
-        ("ALUI", "mul", "sc_lb", "sc_lb", 10 ** 6), ("ALUI", "add", "sc_lb", "sc_lb", LIVEB),
-        ("LDI", "sc_bit", 1), ("ALU", "shl", "sc_bit", "sc_bit", "sc_z")).label("SC.l")
-    p.branch({0: "SC.k"}, "SC.live", [("CMP", "sc_l", "nl")])
-    p = P("SC.k")
-    p.a(("LDX", "sc_k", "sc_l", KK))
-    cases = {K_LABEL: "SC.lab", K_RET: "SC.ret", K_JUMP: "SC.jmp", K_JUMPZ: "SC.jz", K_CALL: "SC.call", K_FRAME: "SC.nx"}
-    p.branch(cases, "SC.gen", [("RLD", "sc_k")])
-    P("SC.lab").a(("LDX", "sc_t", "sc_l", BLOF), ("ALU", "add", "sc_t", "sc_t", "sc_lb"), ("LDX", "sc_v", "sc_t", 0)).ret()
-    p = P("SC.ret")
-    p.branch({(0, 1): "SC.live"}, "SC.dead", [("CMPI", "sc_z", 1)])
-    p = P("SC.jmp")
-    p.a(("LDX", "sc_t", "sc_l", TGG)).branch({0: "SC.live"}, "SC.jt", [("CMPI", "sc_t", 0)])
-    P("SC.jt").a(("ALU", "add", "sc_t", "sc_t", "sc_lb"), ("LDX", "sc_v", "sc_t", 0)).ret()
-    p = P("SC.jz")
-    p.a(("LDX", "sc_t", "sc_l", RMM), ("ALU", "and", "sc_t", "sc_t", "sc_bit")).branch({1: "SC.call"}, "SC.live",
-                                                                                     [("CMPI", "sc_t", 0)])
-    # careful: CMPI t 0 gives 1 when t == 0 (not read); read -> live
-    p = P("SC.call")
-    p.a(("LDX", "sc_t", "sc_l", TGG)).branch({0: "SC.live"}, "SC.ct", [("CMPI", "sc_t", 0)])
-    p = P("SC.ct")
-    p.a(("ALU", "add", "sc_t", "sc_t", "sc_lb"), ("LDX", "sc_t", "sc_t", 0)).branch({1: "SC.live"}, "SC.nx", [("CMPI", "sc_t", 1)])
-    p = P("SC.gen")
-    p.a(("LDX", "sc_t", "sc_l", RMM), ("ALU", "and", "sc_t", "sc_t", "sc_bit")).branch({1: "SC.g2"}, "SC.live", [("CMPI", "sc_t", 0)])
-    p = P("SC.g2")
-    p.a(("LDX", "sc_t", "sc_l", WMM), ("ALU", "and", "sc_t", "sc_t", "sc_bit")).branch({1: "SC.nx"}, "SC.dead", [("CMPI", "sc_t", 0)])
-    P("SC.nx").a(("ALUI", "add", "sc_l", "sc_l", 1)).goto("SC.l")
-    P("SC.live").a(("LDI", "sc_v", 1)).ret()
-    P("SC.dead").a(("LDI", "sc_v", 0)).ret()
-    # DEAD(dz, dfrom) -> dv: ZOK[dz] and SCAN(dz, dfrom) == 0
-    p = P("DEADQ")
-    p.a(("LDI", "dv", 0), ("LDX", "q_t", "dz", ZOKB)).branch({1: "DQ.s"}, "RET", [("CMPI", "q_t", 1)])
-    p = P("DQ.s")
-    p.a(("COPYW", "sc_z", "dz"), ("COPYW", "sc_l", "dfrom")).call("SCAN").branch({1: "DQ.y"}, "RET", [("CMPI", "sc_v", 0)])
-    # CMPI sc_v 0: 1 when sc_v == 0
-    P("DQ.y").a(("LDI", "dv", 1)).ret()
+    # Ordered metadata retains all existing state names; analysis control is in TSV.
+    bindings = {}
+    for line in open(os.path.join(os.path.dirname(__file__), "analysis-names.tsv")):
+        if not line.startswith("#"):
+            name, prefix, kind = line.rstrip("\n").split("\t")
+            bindings[name] = P(prefix).fresh(kind)
+    bindings.update({name: globals()[name] for name in (
+        "SIMPLE", "KK", "RMM", "WMM", "TGG", "BLOF", "TSS", "TEE", "BSS",
+        "LABB", "LIVEB", "LSS", "LEE", "WIDD", "FRR", "ISLAB", "ZOKB", "WORDMAX",
+        "K_SIMPLE", "K_LABEL", "K_RET", "K_JUMP", "K_JUMPZ", "K_CALL", "K_FRAME", "K_OTHER")})
+    bindings["VS"] = E.VS
+    install_rules(g, os.path.dirname(__file__), "analysis", bindings=bindings,
+                  classes={name: [value] for name, value in bindings.items() if name.startswith("K_")})
 
 
 def local():
