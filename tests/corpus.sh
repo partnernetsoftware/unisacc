@@ -9,6 +9,7 @@
 # never fall.
 set -u
 U="python3 -m unisa"
+CORPUS_UA=${CORPUS_UA:-}
 DRIVE=${DRIVE:-built}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$REPO/tests/lib.sh"
@@ -47,23 +48,35 @@ if [ -z "${HOST_TARGET:-}" ]; then
         *) HOST_TARGET=;;
     esac
 fi
-runlim() {
-    "$@" & p=$!
-    ( sleep "$LIMIT"; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 & w=$!
-    wait $p 2>/dev/null; rc=$?
-    kill $w 2>/dev/null
-    return $rc
+case $LIMIT in ''|*[!0-9]*) echo 'invalid LIMIT' >&2; exit 2;; esac
+[ "$LIMIT" -ge 1 ] && [ "$LIMIT" -le 60 ] || exit 2
+runlim() { perl "$REPO/tests/bound.pl" "$LIMIT" "$@"; }
+compile_one() {
+    if [ -n "$CORPUS_UA" ]; then
+        runlim "$CORPUS_UA" -O2 -b "$HOST_TARGET" "$1" -o "$2"
+    else
+        runlim $U compile "$1" -o "$2" --target "$HOST_TARGET" --drive "$DRIVE"
+    fi
 }
+if [ -n "$CORPUS_UA" ]; then
+    [ -n "$HOST_TARGET" ] || { echo 'CORPUS_UA requires a native host target' >&2; exit 2; }
+    echo "corpus driver: $CORPUS_UA"
+else
+    echo "corpus driver: Python --drive $DRIVE"
+fi
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 # SHARD=k/n runs every n-th program starting at the k-th.  The whole corpus
 # is 220 first executions, each a 0.5-0.9 s XProtect scan, and one run may
 # not take more than 60 s (AGENTS.md) -- so it goes in shards: 1/4 .. 4/4.
 FILES=""; i=0
 SHARD=${SHARD:-1/1}; SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
+case $SH_K:$SH_N in *[!0-9:]*|:*|*:) echo 'invalid SHARD' >&2; exit 2;; esac
+[ ${#SH_K} -le 6 ] && [ ${#SH_N} -le 6 ] && [ "$SH_K" -ge 1 ] && [ "$SH_N" -ge "$SH_K" ] || exit 2
 for f in "$SRC"/*.c; do
     [ $((i % SH_N)) -eq $((SH_K - 1)) ] && FILES="$FILES $f"
     i=$((i + 1))
 done
+[ -n "$FILES" ] || { echo "empty corpus shard" >&2; exit 1; }
 : > "$T/passing"
 PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
 . "$REPO/tests/par.sh"
@@ -75,8 +88,9 @@ for f in $FILES; do
     (
     D="$T/$b.d"; mkdir -p "$D"; : > "$D/err"
     if [ -n "$HOST_TARGET" ]; then
-        if $U compile "$f" -o "$D/x" --target "$HOST_TARGET" --drive "$DRIVE" \
-                >/dev/null 2>"$D/err" && [ ! -s "$D/err" ]; then
+        compile_one "$f" "$D/x" >/dev/null 2>"$D/err"; compiled=$?
+        echo "$compiled" > "$D/compile_rc"
+        if [ "$compiled" -eq 0 ] && [ -s "$D/x" ] && [ ! -s "$D/err" ]; then
             chmod +x "$D/x"
             command -v codesign >/dev/null && \
                 codesign -f -s - "$D/x" >/dev/null 2>&1
@@ -99,7 +113,11 @@ for f in $FILES; do
     got=$(cat "$D/got"); code=$(cat "$D/code")
     # 137 is our own watchdog's SIGKILL; any other signal is the program
     # crashing, which is a wrong answer, not a slow one
-    if [ "$code" -eq 137 ] && [ ! -s "$T/err" ]; then
+    compiled=$(cat "$D/compile_rc" 2>/dev/null || echo 0)
+    if [ "$compiled" -gt 1 ] || { [ "$compiled" -eq 0 ] && [ -n "$HOST_TARGET" ] && [ ! -s "$D/x" ]; }; then
+        wrong=$((wrong+1))
+        printf "  TOOLFAIL %s compiler rc=%s or empty output\n" "$b" "$compiled"
+    elif [ "$code" -eq 137 ] || [ "$code" -eq 142 ]; then
         slow=$((slow+1))
         [ "${VERBOSE:-0}" = "1" ] && printf "  SLOW %s  (over %ss in the reference VM)\n" "$b" "$LIMIT"
     elif [ -s "$T/err" ] && isknown "$b"; then
@@ -129,6 +147,7 @@ echo "corpus $total   pass $pass   wrong $wrong   unsupported $unsup   knownfail
 
 rc=0
 [ "$wrong" -eq 0 ] || rc=1
+[ "$total" -gt 0 ] && [ "$slow" -eq 0 ] || rc=1
 [ "$revived" -eq 0 ] || rc=1
 if [ "$SH_N" -eq 1 ]; then
     ratchet "$BASE" "$pass" "$T/passing" || rc=1

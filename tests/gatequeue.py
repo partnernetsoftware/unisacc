@@ -28,7 +28,7 @@ def plan(com):
     return jobs
 
 def fingerprint(jobs):
-    settings = {k:os.environ[k] for k in ('UA','UA_RUN','TOOLS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
+    settings = {k:os.environ[k] for k in ('UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
                 'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT') if k in os.environ}
     h = hashlib.sha256(json.dumps([jobs, settings], sort_keys=True).encode())
     raw = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
