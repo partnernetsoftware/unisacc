@@ -40,6 +40,7 @@ def main():
         if os.environ.get('LOWER_TARGET','').startswith('win/'):
             from unisa.catalog import WINAPI
             fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in WINAPI)
+        fixture += '  .print r0\n  .print r3\n'
         cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
         if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             # Immediate limits, power-of-two multiply, aliasing and liveness.

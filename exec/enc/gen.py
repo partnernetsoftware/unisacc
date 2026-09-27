@@ -57,6 +57,7 @@ KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 
                                          80 * 10 ** 6, 81 * 10 ** 6, 82 * 10 ** 6)    # per instruction
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
 C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD, C_GATE, C_LEA, C_SETMEM, C_ARGSAVE, C_ARGVGET = range(1, 29)
+C_ITOA = 29
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -167,7 +168,7 @@ def relax():
     p.a(("LDI", "q", 0)).label("WR.l")
     p.branch({0: "WR.i"}, "RET", [("CMP", "q", "npc")])
     p = P("WR.i")
-    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c", 4:"WR.addr", 5:"WR.argsave", 6:"WR.argvget", 7:"WR.win"}, "WR.blob", [("RLD", "k")])
+    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c", 4:"WR.addr", 5:"WR.argsave", 6:"WR.argvget", 7:"WR.win", 8:"WR.itoa"}, "WR.blob", [("RLD", "k")])
     p = P("WR.c")           # call rel32: E8, target - (the call's final offset + 5)
     p.call("LADDR").a(("LDX", "o_", "q", OFF), ("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"),
                      ("LDI", "t", 0xE8), ("OUTW", "t"), ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
@@ -203,7 +204,7 @@ def build(image=False):
     classes.update(WIN_IDS)
     from x86win import init as win_init, reset as win_reset, META as WIN_META
     win_init(p)
-    classes.update({"gate": C_GATE, ".lea": C_LEA, "setmem": C_SETMEM, "argsave":C_ARGSAVE, "argvget":C_ARGVGET})
+    classes.update({"itoa":C_ITOA, "gate": C_GATE, ".lea": C_LEA, "setmem": C_SETMEM, "argsave":C_ARGSAVE, "argvget":C_ARGVGET})
     for op, c in X86["alu2"].items():
         classes[op] = C_ALU
     for op in X86["setcc"]:
@@ -295,14 +296,18 @@ def build(image=False):
     g.els("SKIPL", "SKIPL", [("ADV",)])
     g.on("ARG", [32], "ARG", [("ADV",)])
     g.on("ARG", NL, "ARGS.d", [])
-    g.on("ARG", [45] + DIGIT, "AN", [("LDI", "neg", 0), ("LDI", "av", 0)])
-    g.els("ARG", "AR", [("MARK", "ts")])
+    g.on("ARG", [45] + DIGIT, "AN", [("LDI", "neg", 0), ("LDI", "av", 0), ("LDI","akind",1), ("LDI","ndigit",0)])
+    g.els("ARG", "AR", [("MARK", "ts"),("LDI","akind",0)])
     g.on("AN", [45], "AN.d", [("LDI", "neg", 1), ("ADV",)])
     g.els("AN", "AN.d", [])
-    g.on("AN.d", DIGIT, "AN.d", [("BYTE", "bt"), ("ALUI", "sub", "bt", "bt", 48), ("A64I", "mul", "av", "av", 10),
-                                 ("A64", "add", "av", "av", "bt"), ("ADV",)])
+    g.on("AN.d", DIGIT, "AN.guard", [("BYTE", "bt"), ("ALUI", "sub", "bt", "bt", 48), ("A64I", "mul", "av", "av", 10),
+                                 ("A64", "add", "av", "av", "bt"), ("LDI","ndigit",1), ("ADV",)])
+    P("AN.guard").branch({1:"ITO.digit"},"AN.d",[("CMPI","cls",C_ITOA)])
+    P("ITO.digit").a(("LDI","limit",2147483647)).branch({2:"DEAD.itoa"},"AN.d",[("C64U","av","limit")])
     g.els("AN.d", "AN.s", [])
-    p = P("AN.s")
+    P("AN.s").branch({1:"ITO.numend"},"AN.sign",[("CMPI","cls",C_ITOA)])
+    P("ITO.numend").branch({1:"AN.sign"},"DEAD.itoa",[("CMPI","ndigit",1)])
+    p = P("AN.sign")
     p.branch({1: "AN.neg"}, "ARG.put", [("CMPI", "neg", 1)])
     P("AN.neg").a(("LDI", "z0", 0), ("A64", "sub", "av", "z0", "av")).goto("ARG.put")
     g.on("AR", [44, 32] + NL, "AR.e", [("MARK", "te")])
@@ -330,7 +335,7 @@ def build(image=False):
     for k in range(4):
         hit, nx = "AP.%d" % k, "AP.n%d" % k
         p.branch({1: hit}, nx, [("CMPI", "na", k)])
-        P(hit).a(("COPYW", "a%d" % k, "av"), ("ALUI", "add", "na", "na", 1)).goto("ARG.sep")
+        P(hit).a(("COPYW", "a%d" % k, "av"), ("COPYW","ak%d" % k,"akind"), ("ALUI", "add", "na", "na", 1)).goto("ARG.sep")
         p = P(nx)
     p.goto("DEAD.reg")
     g.on("ARG.sep", [32], "ARG.sep", [("ADV",)])
@@ -372,7 +377,7 @@ def build(image=False):
     p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
               C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
               C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
-              C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate", C_LEA:"AD.lea", C_SETMEM:"AD.setmem", C_ARGSAVE:"AD.argsave", C_ARGVGET:"AD.argvget",
+              C_ITOA:"ITO.store", C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate", C_LEA:"AD.lea", C_SETMEM:"AD.setmem", C_ARGSAVE:"AD.argsave", C_ARGVGET:"AD.argvget",
               C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
               **{v: "FP." + k for k, v in FP_IDS.items()}, **{v:"WX.store" for v in WIN_IDS.values()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
@@ -574,6 +579,8 @@ def build(image=False):
         ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
     install_fp(E, byte)
     install_address(E, byte, KND, SZ, OFF, LABD)
+    from x86itoa import install as install_itoa
+    install_itoa(E,KND,SZ)
     from x86win import install as install_win
     install_win(E, byte, KND, SZ)
     relax()

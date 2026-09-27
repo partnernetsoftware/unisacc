@@ -153,7 +153,12 @@ def install(E, arch="x86_64", os_="lnx"):
         if tag=='sys6':
             for r,off,role in [('r6',SYSFP,'fp'),('r7',SYSSP,'sp')]:p.o('setreg '+regmap[r]+', mem ').a(('LDI','offset',off)).call('ADDR').o(' role='+role+'\n')
         p.goto('C.advance')
-    P('DO.print').goto('C.fail')  # fallback integer printer needs itoa encoder.
+    p=P('DO.print');spill(p,'a0',0)
+    p.o('itoa ')
+    for i,off in enumerate((0,24,16)):
+        if i:p.o(', ')
+        p.a(('LDI','offset',off)).call('ADDR')
+    p.o('\n').a(('LDI','syskind',4),('COPYW','sop',ids['write'])).call('SYSCALL').goto('C.advance')
     p=P('SYSCALL')
     for op,f in abi.items():
         if f[0]=='none' and os_!='win':continue
@@ -165,7 +170,7 @@ def install(E, arch="x86_64", os_="lnx"):
         p.a(('SBCLR',),[('SBOUT',c) for c in f[7].encode()],('SBSAVE','retblob'))
         if f[0]!='none':p.o('setreg '+f[9]+', imm '+str(int(f[0],0))+' role=sysno\n')
         if os_=='win':p.o('winsave ').a(('LDI','offset',WIN_SAVE)).call('ADDR').o('\n')
-        for mode in range(4):
+        for mode in range(5):
             p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
             q=P('SC.'+op+'.m'+str(mode))
             if mode==0:
@@ -177,7 +182,8 @@ def install(E, arch="x86_64", os_="lnx"):
                          'atfd_2_zero5':[('imm',-100),('mem',0),('imm',-100),('mem',8),('imm',0)]}[f[10]]
             elif mode==1:sources=[('mem',SYSA+i*8) for i in range(6)]
             elif mode==2:sources=[('imm',1),('mem',0),('mem',8)]
-            else:sources=[('mem',0),('imm',0),('imm',0)]
+            elif mode==3:sources=[('mem',0),('imm',0),('imm',0)]
+            else:sources=[('imm',1),('addr',24),('mem',16)]
             for i,(kind,value) in enumerate(sources):
                 if f[1+i]=='none':
                     if os_=='win':break

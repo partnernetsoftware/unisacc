@@ -3270,3 +3270,33 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   options plus -nostdinc with a user header; built-in stdio rejection checked
   on both. No full gate or Linux/Windows execution claimed for this batch.
   Default product unchanged; no push/release; cc-unisacc remains paused.
+
+### Model printf continuation: .print / itoa through both encoders
+
+- Lowering now handles .print with the reference's scratch spill, itoa, and
+  write ABI sequence. Print-buffer/address and length arguments are resolved
+  by the delta. Both ISA encoders emit the signed decimal count/write loops;
+  x86 RIP operands wait for final relaxation, ARM ADRP uses the final layout.
+  No formatting or encoder primitive was added to the generic executor.
+- Integer conversion selection/control is explicit generated code and emitted
+  machine-code templates, not a newly discovered gold-table fact. This adds
+  source and model bytes; no code-size reduction is claimed.
+- ARM encoding: three OS layouts, page-crossing fixtures and both executors
+  agree with reference bytes. x86: 53 fixtures pass, including a branch before
+  itoa, and rejects for a register address, missing operand, lone minus and a
+  too-wide decimal address. The new x86 address parser bounds each digit before
+  wraparound; existing operand paths retain their previous semantics.
+- Typed lowering suites for all six targets pass, with .print added to their
+  shared fixture; both executors compare the complete typed fields. Fresh
+  compilercheck passes decimal fallback tape equality and actual output for
+  0, 1, -1, 10, INT64_MAX and INT64_MIN. Logs:
+  `/tmp/unisacc-{arm-itoa,x86-itoa-final,print-driver,print-lower-x86,print-lower-arm,print-lower-win}.log`.
+- Rebuilt development container: 3,193,943 B, SHA256
+  `8693dad1ce748ed72346b3f18b81cf3dbd50a4a69a3e89dd57c37cb13ce329b7`.
+  Actual macOS arm64 and Rosetta x86_64 execution at O0/O1/O2, memory and native
+  output, prints `0/1/-1/10/9223372036854775807/-9223372036854775808` correctly.
+  No new Linux/Windows native execution or full-gate result is claimed.
+- Full undeclared printf fallback remains unfinished: pfconv conversion
+  dispatch and argument-string-before-format-fragment pool order still need
+  migration. The old 58/64 CLI result is not relabelled green by this slice.
+  Default product unchanged, no push/release, cc-unisacc stays paused.

@@ -18,6 +18,7 @@ def check(args,native):
                 source+='nop\n'*pad+'.lea x4, start\n.lea x5, end\nend:\n'
                 source+='spinit x7, 4352\nwinsave 256\nwinrest 256, x0\nwinrest 264, x0\n'
                 if target=='win/arm64':source+='winstdh 256\n'
+                source+='itoa 256, 4352, 280\n'
                 tp=parse(source);want,stats=assemble(tp);assert stats['encoded']==stats['insns']
                 f.write_text(source)
                 for cmd in cmds:
@@ -29,7 +30,7 @@ def check(args,native):
                     decoded=(stats['text_va']&~4095)+pages*4096+((w1>>10)&4095)
                     assert decoded==stats['data_va'],(target,pad,decoded,stats['data_va'])
         print('ARM64 address layout: three OS layouts, page crossings, data/code/end names; both executors')
-        bad=['winrest 264, x8','@target bad/arm64\nret','@target lnx/arm64\n@target osx/arm64\nret',
+        bad=['itoa -1, 256, 280','itoa 256, 2147483648, 280','winrest 264, x8','@target bad/arm64\nret','@target lnx/arm64\n@target osx/arm64\nret',
              '@sym a 256\n@sym a 256\nret','@sym a 2147483648\nret','@sym a -1\nret','@sym a \nret',
              '.lea x0, absent','setmem 256, x17','argvget x0, x17, 256','setreg x0, addr 2147483648',
              'label:\n@target lnx/arm64\nret','nop\n@data -\nret','@unknown value\nret']
@@ -38,4 +39,4 @@ def check(args,native):
             for cmd in cmds:
                 r=subprocess.run(cmd+[str(f)],capture_output=True,timeout=60)
                 assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(source,r.returncode,r.stderr)
-        print('ARM64 payload/address: 14 invalid-target/symbol/header/scratch cases reject on both')
+        print('ARM64 payload/address: 16 invalid-target/symbol/header/scratch cases reject on both')

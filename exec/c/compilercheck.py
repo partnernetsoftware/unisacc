@@ -95,12 +95,17 @@ for exe in drivers:
 probe.write_text('int main(void){ printf("hi %d\\n",42); return 0; }\n')
 # The preprocessor must leave an undeclared printf untouched, without autoinc.
 cli(['-nostdinc'],nostd=True)
-# Still unfinished: the parsed .print has no lowering yet. Keep this visible
-# as a limitation, not as successful execution or CLI parity.
 for exe in drivers:
-    r=run([exe,'--models',p/'compiler.pkg','-nostdinc','-run',probe])
-    assert r.returncode==1 and not r.stdout and b'lowering' in r.stderr,r
-print('KNOWN: -nostdinc printf runtime remains unsupported (.print lowering)')
+    assert ok([exe,'--models',p/'compiler.pkg','-nostdinc','-run',probe])==b'hi 42\n'
+# Signed formatting is independently checked at the emitted-code boundary.
+probe.write_text('int main(void){printf("%d/%d/%d/%d/%d/%d\\n",0,1,-1,10,9223372036854775807L,-9223372036854775807L-1);return 0;}\n')
+expected=b'0/1/-1/10/9223372036854775807/-9223372036854775808\n'
+assert ok([ua,'-nostdinc','-run',probe])==expected
+for exe in drivers:
+    assert ok([exe,'--models',p/'compiler.pkg','-nostdinc','-run',probe])==expected
+    flags=['-nostdinc','-b',target,'-S']
+    assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
+print('undeclared printf decimal fallback: tape equality and integer boundary execution pass')
 
 probe.write_text('int main(void) { return VALUE; }\n')
 flags=['-DVALUE=7','-b',target,'-O2']
