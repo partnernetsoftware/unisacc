@@ -64,3 +64,8 @@ The unsplit 25-probe language run reached 52.75 seconds on the combined source.
 The two shards retain exactly the same list and assertions; `language` and `all`
 still execute the full list for callers outside the bounded gate. Both shard
 receipts are required. No test result or construction cache is newly introduced.
+
+The split was executed with one parent queue slot while an independent agent used
+the other CPU slot: shard 1 (13 positives + six rejections) **37.88 s**; shard 2
+(12 positives) **29.25 s**, both rc 0. These are per-job durations, not a claimed
+two-slot wall time. Together they cover the same 25 positives and six rejections.

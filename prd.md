@@ -5051,3 +5051,7 @@ printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开
 当前a1115126候选优化429全部agree；固定包模型驱动N1=N2=N3完整115746B（cebaed0a…13f96），N3空PATH原生/内存O0/O2同host且缺包rc2；Linux两ISA及Rosetta x86各3实际probe通过，Windows验证继续。第二批2738a3f/1737c4a/f3ba57c已合，language25+6主树52.75秒通过，逼近55秒窗口。因此保持language/all聚合接口，门禁把同一25探针清单按固定奇偶位置拆language-1/2，6拒绝只在第一片，各项恰好一次，不增加缓存/框架。父做这个队列拆分；第三轮两个私有域分别MEMB/POSTIX/赋值与局部初始化，第三代理只读列实际剩余控制，防止漏掉import辅助模块。
 
 只读6a208f8来源审计补齐到exec/rules.md固定清单：普通truth/boolean/floatconst以及产品实际装入的诊断、位置、警告、unit framing辅助过程仍有手写固定控制，不能因gen2壳变短漏报。已有动态gold/类型/模板装配不重迁。E5下一独立组为truth+booleans+TO标量转换，E3/E4保持成员与局部初始化域；逐完整过程迁，非导出整图冒充规则源。
+
+固定a1115126候选跨平台smoke已补齐：Linux arm64/x86_64、macOS Rosetta x86_64各hello/fib/convert，模型-run及编译后运行均同host；Windows ARM64客机上x86 APE驱动的-run与分别win/arm64、win/x86_64编译/native六项通过。macOS arm64模型自举及后代probe如前。只称所列smoke，不称客机全套；本次启动的Linux x86/Windows已停，原有default Lima保持运行。实际包账/tmp/unisacc-controls-candidate-928/ledger.json：32个互异N模型5922578B，938stage rows，资源119004B（含7704/7664B两ISA通用核），包6095511B，整个6278823B；驱动/OS/库不能算作几KB核。
+
+语言队列拆片实跑：13正例+6拒绝37.88秒，12正例29.25秒，两片全部rc0；同一25项清单不重不漏。此次父单槽与代理构图单槽并行，不宣称这两个时长为双槽总耗时；各片比原52.75秒有余量。第三批局部声明dea5899和成员/后缀/赋值656ba4b已合，各全图/扰动同及真实NET分别5probe/12运行对host同；标量真假/TO仍独立进行。下一两个互斥完整组为floatconst常量扫描/limb/舍入和diagnostics位置呈现，保留已有共享输入与普通/告警模式接口，不添加语言。
