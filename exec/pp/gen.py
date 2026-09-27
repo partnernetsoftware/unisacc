@@ -31,9 +31,9 @@ text).
 
 Directive vocabulary and decisions come from weights/gold/pp.tsv, including
 its schema. Target predefinitions come from predefines.tsv. No old kernel
-file supplies generation data. Byte classes, include search order and much
-of the control flow below remain handwritten; declaration migration is not
-complete merely because runtime transitions are constructed into networks.
+file supplies generation data. Transition rules live in the adjacent TSVs;
+see rules.md for their inputs and the remaining Python assembly boundary.
+This is source migration, not a claim of complete C99 coverage.
 """
 import json
 import os
@@ -48,7 +48,7 @@ sys.path.insert(0, ROOT)
 from unisa.tsvgold import load_table
 from pathlib import Path
 sys.path.insert(0, os.path.join(ROOT, "exec"))
-from finite_rules import load as load_rules
+from finite_rules import install as install_rules
 
 _name, _fields, _heads, _rows = load_table(os.path.join(ROOT, "weights/gold/pp.tsv"))
 assert _name == "pp" and [n for n, _ in _fields] == ["dir", "defined"]
@@ -105,19 +105,6 @@ AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta w
 AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
 
 
-def install_rules(g, stem, bindings=None, sequences=None, classes=None, section=None):
-    count = 0
-    for suffix, mode in (("byte", "b"), ("result", "r")):
-        for state, row in load_rules(Path(HERE) / (stem + "-" + suffix + ".tsv"),
-                                     sequences or {}, bindings=bindings, classes=classes, section=section).items():
-            count += 1
-            for key, (target, actions) in row.items():
-                g.on(state, [key], target, actions, mode)
-                g.labels.update(a[1] for a in actions if a[0] == "PUSH")
-    if count == 0:
-        raise ValueError(f"{stem}: no rules for section {section}")
-
-
 def build_autoinc(g, locations=False):
     """P2 autoinc, first run only (RUN == 0), between decomment and P3.
     One scan over x: every maximal identifier run followed (spaces, tabs,
@@ -126,7 +113,7 @@ def build_autoinc(g, locations=False):
     autoinc_map() (printf excluded, as hdrneeded does) with status exactly
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
-    install_rules(g, "autoinc", {"AIB": AIB}, classes={"identifier": ID})
+    install_rules(g, HERE, "autoinc", {"AIB": AIB}, classes={"identifier": ID})
     # per header: does some name have status exactly `called`?
     amap = autoinc_map()
     H = list(AUTOINC_ORDER)
@@ -135,7 +122,7 @@ def build_autoinc(g, locations=False):
         nxt_h = "AH%d_0" % (h + 1) if h + 1 < len(H) else "AEM"
         g.els("AH%d_0" % h, "AH%d_n0" % h, [("LDI", "NEED%d" % h, 0)])
         for k, nm in enumerate(names):
-            install_rules(g, "autoinc-name", {"entry": "AH%d_n%d" % (h, k),
+            install_rules(g, HERE, "autoinc-name", {"entry": "AH%d_n%d" % (h, k),
                 "test": "AH%d_r%d" % (h, k), "found": nxt_h,
                 "next": "AH%d_n%d" % (h, k + 1), "need": "NEED%d" % h, "AIB": AIB},
                 {"name": sbconst(nm)})
@@ -143,10 +130,10 @@ def build_autoinc(g, locations=False):
 
     def line(hn):
         return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()] + ([("ALUI","add","AI_LINES","AI_LINES",1)] if locations else [])
-    install_rules(g, "autoinc-emit", {"entry": "AEM", "test": "AEMR",
+    install_rules(g, HERE, "autoinc-emit", {"entry": "AEM", "test": "AEMR",
         "need": "RTP", "next": "AEM%d" % (len(H) - 1)}, {"line": line("stdio.h")})
     for h in range(len(H) - 1, -1, -1):
-        install_rules(g, "autoinc-emit", {"entry": "AEM%d" % h, "test": "AEM%dr" % h,
+        install_rules(g, HERE, "autoinc-emit", {"entry": "AEM%d" % h, "test": "AEM%dr" % h,
             "need": "NEED%d" % h, "next": "AEM%d" % (h - 1) if h else "ACP0"}, {"line": line(H[h])})
 
 
@@ -255,8 +242,8 @@ def build_xe(g):
     layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'F_ACT', 'F_UP', 'FSZ', 'MACB', 'F_TO', 'F_FN', 'F_HASH', 'F_BODY']}
     layout["XOB_PREV"] = XOB - 1
     layout.update(("PREC_" + str(c), p) for c, (_, p, _) in XOPS.items())
-    install_rules(g, "expression", layout)
-    install_rules(g, "reduce", layout)
+    install_rules(g, HERE, "expression", layout)
+    install_rules(g, HERE, "reduce", layout)
 
 
 # ---- # and ## (research/e2-pp-delta.md s12) -------------------------------
@@ -276,12 +263,12 @@ def build_xe(g):
 # Vars: GLUE (1 ordinary paste, 2 comma/variadic special case), PSP (space
 # owed), LASTK (1 identifier/digit, 2 placemarker, 3 hash, 4 comma, 0 other).
 def build_hx(g):
-    install_rules(g, "hash", {name: globals()[name] for name in ['C_EXP', 'C_RAW', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_VAR']})
+    install_rules(g, HERE, "hash", {name: globals()[name] for name in ['C_EXP', 'C_RAW', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_VAR']})
 
 
 
 def build_cli(g, locations=False):
-    install_rules(g, "cli", {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']},
+    install_rules(g, HERE, "cli", {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']},
         {"location_line": [("ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1)] if locations else []})
 
 
@@ -314,16 +301,16 @@ def build(target="lnx/x86_64", locations=False):
     build_cli(g, locations)
 
     # Declared text normalisation; only layout and inter-stage links are bound here.
-    install_rules(g, "text", {"SPLB": SPLB, "after_comments": "AISTART" if AUTOINC else "P3START"})
+    install_rules(g, HERE, "text", {"SPLB": SPLB, "after_comments": "AISTART" if AUTOINC else "P3START"})
 
     # Macro history and definition rules; bindings describe record layout only.
     macro_layout = {'NEWB': NEWB, 'FSZ': FSZ, 'MACB': MACB, 'F_TO': F_TO, 'SEGINF': SEGINF, 'F_FROM': F_FROM, 'F_PREV': F_PREV, 'F_NAME': F_NAME, 'F_BODY': F_BODY, 'F_FN': F_FN, 'F_VAR': F_VAR}
-    install_rules(g, "macro", macro_layout)
+    install_rules(g, HERE, "macro", macro_layout)
 
     if AUTOINC:
         build_autoinc(g, locations)
 
-    install_rules(g, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
+    install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
     for k, nm in enumerate(predef):
         nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
         sub, pu = g.call("MDEF", "P3PDR%d" % k)
@@ -339,16 +326,16 @@ def build(target="lnx/x86_64", locations=False):
             name = st + "_a%d" % fl
             links = {suffix or "entry": name + suffix for suffix in ("", "b", "c", "m", "n")}
             links.update({key: globals()[key] for key in ['TAKEB', 'SEENB', 'F_TO', 'FSZ', 'MACB']})
-            install_rules(g, "directive-action", links, section=w + "/" + PPT[(w, fl)])
+            install_rules(g, HERE, "directive-action", links, section=w + "/" + PPT[(w, fl)])
 
     body_layout = {name: globals()[name] for name in ['F_BODY', 'F_FN', 'F_NP', 'F_P0', 'F_VAR', 'IRLN', 'IRNL', 'MAXP']}
     body_layout["include_body"] = "INC.body" if locations else "INCOK"
-    install_rules(g, "directive-body", body_layout)
+    install_rules(g, HERE, "directive-body", body_layout)
     if locations:
         from locations import IRNAME
-        install_rules(g, "include-location", {"IRNAME": IRNAME})
+        install_rules(g, HERE, "include-location", {"IRNAME": IRNAME})
 
-    install_rules(g, "rescan", {name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP']})
+    install_rules(g, HERE, "rescan", {name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP']})
     if locations:
         from locations import install
         install(g, SPLB, IRLN, IRNL)

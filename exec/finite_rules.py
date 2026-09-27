@@ -1,5 +1,6 @@
 """Expand disjoint finite observation-transition rules; no language-specific decisions."""
 import json
+from pathlib import Path
 
 
 def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None):
@@ -92,3 +93,16 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None, sectio
                 expanded.append(tuple(values))
             row[key] = target, expanded
     return explicit
+
+
+def install(g, root, stem, bindings=None, sequences=None, classes=None, section=None):
+    count = 0
+    for suffix, mode in (("byte", "b"), ("result", "r")):
+        for state, row in load(Path(root) / (stem + "-" + suffix + ".tsv"),
+                                     sequences or {}, bindings=bindings, classes=classes, section=section).items():
+            count += 1
+            for key, (target, actions) in row.items():
+                g.on(state, [key], target, actions, mode)
+                g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+    if count == 0:
+        raise ValueError(f"{stem}: no rules for section {section}")
