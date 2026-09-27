@@ -501,71 +501,9 @@ def types():
         q = P(bindings["next"])
     bindings["current"] = q.cur
     install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"reject": E.rej("not covered: width")}, section="finish")
-    # Both ordinary and function-pointer [] use the same initializer counter.
-    P("FPDECL").call("FPSTART").branch({1: "FPD.infer"}, "FPD.shape", [("CMPI", "fpn", -1)])
-    P("FPD.infer").expect("=").a(("COPYW", "fpback", "tpos"), ("LDI", "dm_per", 1)).vpush("ips", "ipe").call("NEXT").call("INITCOUNT").vpop("ips", "ipe").a(("COPYW", "fpn", "dm_n"), ("JUMP", "fpback")).call("NEXT").goto("FPD.shape")
-    P("FPD.shape").a(("LDI", "drk", 0)).branch({1: "RET"}, "FPD.dim", [("CMPI", "fpn", 0)])
-    P("FPD.dim").a(("STX", "drk", TDIM, "fpn"), ("LDI", "drk", 1)).ret()
-    p = P("FPSTART")
-    p.a(("LDI", "fp_isfunction", 0)).call("NEXT").expect("*").call("NEXT").tok({TK_ID: "FPD.id", ")": "FPD.abstract"}, bad("declarator"))
-    P("FPD.abstract").a(("LDI", "fpn", 0)).branch({1: "FPD.c"}, bad("declarator"), [("CMPI", "sigmode", 1)])
-    p = P("FPD.id")
-    p.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("COPYW", "fppos", "tpos"), ("LDI", "fpn", 0)).call("NEXT").tok({"[": "FPD.a", ")": "FPD.c", "(": "FPD.function"}, bad("declarator"))
-    P("FPD.function").a(("LDI", "fp_isfunction", 1), ("LDI", "td", 1), ("LDI", "tb", FPB)).ret()
-    P("FPD.a").call("NEXT").tok({TK_NUM: "FPD.n", "]": "FPD.open"}, bad("array bound"))
-    P("FPD.open").a(("LDI", "fpn", -1)).call("NEXT").expect(")").goto("FPD.c")
-    P("FPD.n").a(("COPYW", "fpn", "nv")).call("NEXT").expect("]").call("NEXT").expect(")").goto("FPD.c")
-    P("FPD.c").call("NEXT").call("PARAMS").a(("LDI", "td", 1), ("COPYW", "tb", "fpkind")).ret()
-    p = P("PARAMS")       # balanced parameter list, shared with block prototypes
-    p.expect("(").a(("LDI", "dep", 1), ("LDI", "fpkind", FPB)).call("NEXT").label("FPD.l")
-    p.tok({"(": "FPD.o", ")": "FPD.x", "...": "FPD.var", "eof": "DEAD.params"}, "FPD.k")
-    g.on("DEAD.params", range(257), "DEAD", E.rej("not covered: unterminated parameter list"), "r")
-    P("FPD.var").branch({1: "FPD.stacked"}, "FPD.k", [("CMPI", "dep", 1)])
-    P("FPD.stacked").a(("LDI", "fpkind", FPV)).goto("FPD.k")
-    P("FPD.k").call("NEXT").goto("FPD.l")
-    P("FPD.o").a(("ALUI", "add", "dep", "dep", 1)).goto("FPD.k")
-    P("FPD.x").a(("ALUI", "sub", "dep", "dep", 1)).branch({1: "FPD.d"}, "FPD.k", [("CMPI", "dep", 0)])
-    P("FPD.d").call("NEXT").ret()
-    p = P("DIMS")
-    p.a(("LDI", "drk", 0), ("LDI", "prd", 1)).label("DM.l")
-    p.call("NEXT").tok({"]": "DM.open"}, "DM.expr")
-    # T a[] = { e, ... }: the length is the number of elements, counted ahead (then back to ']')
-    P("DM.open").branch({1: "DM.o1"}, bad("array bound"), [("CMPI", "drk", 0)])
-    p = P("DM.o1")
-    p.call("TYPECOUNT").a(("COPYW", "dm_per", "flat"), ("COPYW", "dm_back", "tpos"), ("LDI", "dm_n", 0)).call("NEXT").expect("=").call("NEXT").tok({E.TK_STR: "DM.s"}, "DM.o2")
+    structured_control("dimensions", False)
     strwalk("DM.s", "DM.sb", "DM.se")
-    P("DM.sb").a(("ALUI", "add", "dm_n", "dm_n", 1)).goto("DM.s.w")
-    P("DM.se").a(("ALUI", "add", "dm_n", "dm_n", 1)).goto("DM.cd")         # the terminating 0
-    P("DM.o2").call("INITCOUNT").goto("DM.cd")
-    p = P("INITCOUNT")
-    p.expect("{").a(("LDI", "dm_used", 0), ("LDI", "dm_max", 0), ("LDI", "dm_par", 0), ("LDI", "dm_d", 1), ("LDI", "dm_need", 1)).call("NEXT").label("DM.cl")
-    p.tok({"{": "DM.co", "}": "DM.cc", ",": "DM.cm", "(": "DM.lp", ")": "DM.rp", "[": "DM.des", "eof": "DEAD.dmx"}, "DM.ct")
-    g.on("DEAD.dmx", range(257), "DEAD", E.rej("not covered: array bound"), "r")
-    P("DM.ct").a(("LDI", "dm_add", 1)).call("DM.item").goto("DM.cn")
-    P("DM.co").a(("COPYW", "dm_add", "dm_per")).call("DM.item").a(("ALUI", "add", "dm_d", "dm_d", 1)).goto("DM.cn")
-    P("DM.cc").a(("ALUI", "sub", "dm_d", "dm_d", 1)).branch({1: "DM.counted"}, "DM.cn", [("CMPI", "dm_d", 0)])
-    P("DM.counted").a(("ALU", "add", "dm_n", "dm_max", "dm_per"), ("ALUI", "sub", "dm_n", "dm_n", 1), ("ALU", "div", "dm_n", "dm_n", "dm_per")).ret()
-    P("DM.lp").a(("LDI", "dm_add", 1)).call("DM.item").a(("ALUI", "add", "dm_par", "dm_par", 1)).goto("DM.cn")
-    P("DM.rp").a(("ALUI", "sub", "dm_par", "dm_par", 1)).goto("DM.cn")
-    P("DM.cm").branch({1: "DM.cm0"}, "DM.cn", [("CMPI", "dm_d", 1)])
-    P("DM.cm0").branch({1: "DM.cm1"}, "DM.cn", [("CMPI", "dm_par", 0)])
-    P("DM.cm1").a(("LDI", "dm_need", 1)).goto("DM.cn")
-    P("DM.cn").call("NEXT").goto("DM.cl")
-    P("DM.des").branch({1: "DM.des0"}, "DM.ct", [("CMPI", "dm_d", 1)])
-    P("DM.des0").branch({1: "DM.des1"}, "DM.ct", [("CMPI", "dm_need", 1)])
-    P("DM.des1").call("NEXT").call("CE").expect("]").call("NEXT").expect("=").a(("ALU", "mul", "dm_used", "cv", "dm_per")).goto("DM.cn")
-    P("DM.item").branch({1: "DM.i1"}, "RET", [("CMPI", "dm_d", 1)])
-    P("DM.i1").branch({1: "DM.i2"}, "RET", [("CMPI", "dm_need", 1)])
-    P("DM.i2").a(("ALU", "add", "dm_used", "dm_used", "dm_add"), ("LDI", "dm_need", 0)).branch({2: "DM.imax"}, "RET", [("CMP", "dm_used", "dm_max")])
-    P("DM.imax").a(("COPYW", "dm_max", "dm_used")).ret()
-    p = P("DM.cd")
-    p.a(("JUMP", "dm_back"), ("COPYW", "nv", "dm_n")).call("NEXT").goto("DM.n0")
-    P("DM.n0").a(("STX", "drk", TDIM, "nv"), ("ALUI", "add", "drk", "drk", 1), ("ALU", "mul", "prd", "prd", "nv")).call("NEXT").tok({"[": "DM.l"}, "RET")
-    P("DM.expr").call("CE").expect("]").a(("COPYW", "nv", "cv")).goto("DM.n0")
-    p = P("DIMSAVE")     # TDIM -> DIM[v * 8 + k] for the declared v
-    p.a(("LDI", "k2", 0)).label("DS.l")
-    p.branch({0: "DS.1"}, "RET", [("CMP", "k2", "drk")])
-    P("DS.1").a(("LDX", "dt", "k2", TDIM), ("ALUI", "mul", "u", "v", 8), ("ALU", "add", "u", "u", "k2"), ("STX", "u", DIM, "dt"), ("ALUI", "add", "k2", "k2", 1)).goto("DS.l")
+    structured_control("dimensions-tail", False)
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
     p = P("TSPEC")
     p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "union": "TS.union", "enum": "TS.enum", "type=unsigned": "TS.type=unsigned"}, bad("type"))
@@ -714,7 +652,7 @@ def types():
 def structured_control(section, warnings):
     section += "-warnings" if warnings and section in ("block", "if") else ""
     p = P("control." + section)
-    bindings = dict(VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M,
+    bindings = dict(VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
                     UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
                     statement="STMT.body" if warnings else "STMT")
     for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
@@ -727,8 +665,8 @@ def structured_control(section, warnings):
     for name, method, slots in tape_rows("control-stack.tsv"):
         p.acts = []
         sequences[name] = getattr(p, method)(*slots.split(",")).acts
-    classes = {name: [TK[token] for token in TWORDS] if kind == "typewords" else
-               [TK_ID if value == "identifier" else TK[value]]
+    tokens = dict(TK, identifier=TK_ID, number=TK_NUM, string=E.TK_STR)
+    classes = {name: [TK[token] for token in TWORDS] if kind == "typewords" else [tokens[value]]
                for name, kind, value in tape_rows("control-classes.tsv")}
     install_rules(g, os.path.dirname(__file__), "control", bindings=bindings,
                   sequences=sequences, classes=classes, section=section)
