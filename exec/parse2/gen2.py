@@ -1534,8 +1534,12 @@ def build(locations=False, warnings=False, errors=False):
     q.call("NEXT").tok({TK_ID: "UD.id"}, "UD.gen")
     P("UD.gen").call("UNARY").goto("UD.dn")
     P("UD.dn").call("DOWN").branch({1: "RET"}, "LOADV", [("CMPI", "vb", FPB)])
-    P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call"}, "UD.v")
+    P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call", "++": "UD.inc", "--": "UD.dec"}, "UD.v")
     P("UD.call").call("U.call").goto("UD.dn")
+    for tag, op in (("inc", "+"), ("dec", "-")):
+        q = P("ID." + tag).call("LOOKUP").call("NOARR").call("CSTEP")
+        addr(q).call("POST." + op).ret()
+        P("UD." + tag).call("ID." + tag).goto("UD.dn")
     P("UD.v").a(("INTERN","v","ips","ipe")).branch({1:"UD.func"},"UD.namedvalue",[("CMP","v","funcid")])
     P("UD.func").call("UF").call("POSTIX").goto("UD.dn")
     p = P("UD.namedvalue")     # *f with f a local function pointer: load the callee value
@@ -1656,7 +1660,7 @@ def build(locations=False, warnings=False, errors=False):
     g.on("DEAD.big", range(257), "DEAD", E.rej("not covered: constant beyond int"), "r")
     q = P("U.num1")
     emit(q, "imm").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
-    P("U.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "U.call"}, "U.var0")
+    P("U.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "U.call", "++": "ID.inc", "--": "ID.dec"}, "U.var0")
     P("U.call").call("CALL").a(("LDI", "rkok", 0)).call("POSTIX").ret()
     printf(warnings)
     q = P("U.var")

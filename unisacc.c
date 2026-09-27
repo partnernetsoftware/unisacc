@@ -15868,7 +15868,7 @@ int unit(void) {
                    Do not conflate the two -- `char src[MAXSRC]` getting 8
                    bytes puts the next global straight on top of the source
                    buffer. */
-                if (isarr) { if (gstruct >= 0) en(n * declsz); else en(n * w); }
+                if (isarr) { if (gstruct >= 0 && gpd == 0) en(n * declsz); else en(n * w); }
                 else { if (declptr) en(8); else {
                     if (gstruct >= 0) en(declsz); else en(n * w); } }
                 ec(10);

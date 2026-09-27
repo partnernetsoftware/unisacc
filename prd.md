@@ -4524,3 +4524,12 @@ LV.c先允许标量float/double的单位步长，指针仍由STEPTY决定。浮�
 
 浮点前后缀片验收：CSTEP复用目标分类；FPSTEP共享IEEE 1.0位模式与irsel加减opcode，前缀返回新值，后缀保存原位模式，不做逆运算恢复。s72覆盖float/double、前后缀加减、2^24/2^53加一舍入、数组n++和成员；s72与完整b_float在实际网络编译器O0/O1/O2共六次输出同cc。旧287项先过，新固定E3=289全同，网络chain=142全同。gen2净+9行（+17/-8），无新执行器原语。
 双槽队列`/tmp/unisacc-fpstep-gate`12/12全rc0，窗口50.14/12.87s，最长42.59s；自身3,958,707 B转储一致。plain delta5104状态、1,312,844项、28,403,652 B；实际候选5,953,878 B，SHA256 07ee7ecdeb6d3b08e38dd5905c636388e07a723e887ed5d798b82bb5488c409f。产品源码和出货.com未改；本片仍是定向模型验证，不宣称新的跨平台运行或全产品门禁。浮点综合用例闭合后重新盘点S-17的剩余覆盖、CLI/错误契约、体积与默认切换阻挡，不以固定清单全绿替代重构完成。未推送/发布/切默认。
+
+### 覆盖盘点与真实应用阻挡（进行中）
+5c875eb候选在tests/c、tests/c99、examples及apps、parse2/probes共296份源文件上，以私有参考和双槽12秒子进程界限盘点：273同转储、22未覆盖、1参考拒绝、0 DIFF/工具失败。此清单不同于固定289，不能直接比较分母。结果存/tmp/unisacc-frontier-5c875eb/results.json。两个真实应用exeinfo/wordfreq在带位置的实际网络编译器中均定位到`(unsigned char)*p++`；UD/U标识符路径未接后缀更新。新增共享命名左值更新入口，复用LOOKUP/地址/CSTEP/POST，不另写更新算法。
+
+新产品缺陷实证：struct P{char x;};struct P *v[4];long guard=77，写v[1]=&obj后旧私有参考输出guard地址值而非77、退出1。全局数组.bss分配仅看gstruct而不看gpd，1字节结构体使数组仅4B，指针实际需32B；24字节结构体反而多分配。sizeof已正确，错误在存储分配。修正isarr优先使用元素w（pointer已设8），仅非指针结构体用declsz。不是为字节对齐复制错误；需新的私有参考与完整产品门禁。
+
+本片冻结前实测（尚未提交）：命名后缀更新复用POST后，wordfreq/exeinfo及b_globalstructptr三份转储均同新私有参考；旧289项先通过，清单扩E3=292/chain=145待完整门禁。三份程序在实际模型O0/O1/O2九次输出同cc，Python及重建产品O2的b_globalstructptr输出77 32 24 1。产品.com 1,358,320 B，SHA256 b0db8800a56a7c13c4e952eb02266b7e72d2fe7b3bf14efbd8da4ed11de4c9bb；私有UA=/tmp/unisacc-postoperand-private，SHA256 b20f125ac70101d966d6e5e83fc21e030b0e9d5de9ffbb93bca83b1294958e44。实际模型/tmp/unisacc-postoperand-candidate/unisacc-next.com为5,958,288 B。完整冻结队列使用/tmp/unisacc-postoperand-full，exec-driver-core另独占；所有步骤完成前不提交、不编辑冻结输入，不把局部九次运行称全门禁。
+
+后缀操作数/全局结构体指针数组片冻结验收完成：`/tmp/unisacc-postoperand-full`117项全部执行，其中exec-multi-ua并发53.07s超时（142，保留记录）；`/tmp/unisacc-postoperand-multi`独占48.69s通过；`/tmp/unisacc-postoperand-core`独占50.68s通过。按gate.sh --list --com核对，使用明确记录的独占复跑结果替代超时判定后，并集精确118个不同套件全rc0，最长52.942s；不将原超时改写为pass。C9957/57，difftest_o408，fat137双架构实际运行；自身转储3,958,904 B一致；E3固定292全同、网络chain145全同。模型候选SHA256 5057c049b5303942164c79a8f66b8a9ed55a7e460d29c95a710c4a899ae7ec8e。gen2净+4行，复用既有后缀更新，无新执行器原语；产品只修正全局数组分配条件并重新生成unisacc.c。当前只据本地门禁范围报告，未新跑Linux/Windows VM原生套件。未推送/发布/切默认，剩余模型覆盖与整体切换继续。
