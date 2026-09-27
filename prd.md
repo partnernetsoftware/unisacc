@@ -4957,3 +4957,5 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 父确认测试分片未削弱经典基线：主树新difftest_o四片对当前私有经典UA全部423agree/0wrong/0refuse，双槽5.74秒（/tmp/unisacc-sharded-classic-gate-928）。模型候选的30refuse是实际兼容差距，并非测试分片引入。两者墙钟含不同编译路线及缓存，不作为正式性能比值。
 
 参数/宽串联合收口（66709ab）：声明共享尾复用PARAMS/DIMS/SH.NEW，旧keep316/316；宽串共用SPANSTR/walk/ESC与宽度参数，UTF8严格解码，UCN仍拒绝。父重建E2/E3及located units/parse完整候选/tmp/unisacc-decl-wide-candidate-928，原b_decl2/b_decl3/b_wide/b_strsizeof在O0/O1/O2共12次实际六阶段网络运行与host stdout/stderr/rc全同。不是仅网络前端接Python后端。预处理signed字面量plain/located各28host对照及15明确拒绝父复跑通过，b_ppif仍拒绝0u，unsigned及函数宏下一共享组继续；位域只读核查另列，未复制参考已知复合结果问题。wide_strings持久探针纳入资源门禁。下一小窗口地址/复合字面量及位域先核共享过程设计，不另起解析器；原141文件×3级分片复验保持拒绝为失败。
+
+66709ab完整候选复验：6,100,290 B，sha256 b66aaba72e2c3681faec4d04e3ac8d2e240e56fc1236eaf754122595b615133c。原141输入×O0/O1/O2四片双槽34.01秒完成，405agree/0wrong/18refuse，剩b_compound/b_layout/b_pp2/b_ppif/b_pp3/b_bits六文件；三失败片保持rc1，未称门禁全绿。联合resources（含wide_strings）与chain167/167双槽2/2、38.61秒。证据/tmp/unisacc-decl-wide-diffo-928与/tmp/unisacc-decl-wide-integration-928。3ebf70c随后补E2 uintmax类型栈及混合运算，父plain/located各67host选择与18拒绝通过，仍在函数宏M拒绝；尚未重新打包，不混入上述候选证据。将该独立literalcheck纳入队列，避免仅存临时验证。

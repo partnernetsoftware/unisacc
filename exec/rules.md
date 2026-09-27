@@ -101,3 +101,13 @@ declarators, address/compound-literal forms, wide strings, bit-fields, and
 preprocessor expression/paste forms. The gate remains failing for these gaps.
 Four bounded queue shards replace the monolithic timed-out job; the classic
 reference passes all 423 comparisons under that stronger harness.
+
+The 66709ab candidate adds shared parameter suffixes and narrow/wide string
+walking. Full-network differential acceptance is now 405/423 matching runs,
+zero wrong outputs, and 18 refusals across six original inputs; all four
+shards finish in a 34.01-second two-worker window. The candidate is 6,100,290
+bytes, SHA256 `b66aaba72e2c3681faec4d04e3ac8d2e240e56fc1236eaf754122595b615133c`.
+The remaining refusals are compound/address expressions, bit-fields, and
+preprocessor expression/paste forms. Unicode universal-character escapes
+still refuse. E2 uintmax rules added afterwards are verified independently;
+they are not in this candidate, and function macros in #if remain pending.
