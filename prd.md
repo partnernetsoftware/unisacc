@@ -5045,3 +5045,5 @@ printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开
 上述两项契约复核完成：classic与固定4d288bab模型共4套件单槽5.43秒全过。模型8个边界输入全部实际-run同host（1000 case逐项求和并测default、9000字节printf完整输出、4097字符数组尺寸/全内容checksum/尾NUL），classic原越界输入仍按预期rc1容量诊断拒绝。staticinit两路线各9个rc1拒绝，兼容各自明确文案；没有通过放宽退出码消除失败。6574a08已合1f2b91d并将真实回调数组probe注册language，FN/CALL声明合4e2f39c/456b4e7；第三helper组仍私有验证中。
 
 三私有组统一合入70d3952：CALL/FN/addr-fmtwalk固定Python分别净减64/75/2，声明增加379/314/32，总源码不是下降；回调数组兼容修复另计。父联合language25正例与6拒绝、E3自身源码3990936B table tape同参考，双槽51.50秒通过。共享+六目标分别两槽构建、pack最后执行，新完整候选源70d395240e94630f9ee01e9f8c138fb30f30da04：/tmp/unisacc-controls-candidate-928/unisacc-next.com，6278823B，sha256 a1115126d8281c93a1b38c3c3fc491779994201d14cf60cd2005933faa19ffb0，包6095511B；22 shared/target全域network/table检查通过。新候选原220 corpus四片双槽21.86秒：216pass/0wrong/0unsupported/4原knownfail/0slow，最后00209闭合，基线不减。新候选其余优化/平台/固定点证据仍需自身验证，未将旧包测试冒用；默认产物未替换、未发布。
+
+后续并行分工决定：E3完整一元/cast/标识符表达式控制、E4全局声明/初始化控制、E5宽度/类型及ELSZ控制分属私有域；不新增语言，保持完整图与真实共享依赖。父对固定a1115126候选补优化差分/产品契约及平台验收，源码写入与主树测试不重叠，重型任务全机双槽排队，结果不跨候选转用。
