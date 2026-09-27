@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='unit-locations-') as td:
  assert joined==expected,'located unit bytes differ from independent serializer'
  dest=p/'joined';dest.write_bytes(joined)
  r=run([p/'run',p/'parse.net',dest,files[0]])
- ref=run(['/tmp/ua_ref',*files,'-Wall','-t','osx/arm64','-o','-'])
+ ref=run([os.environ.get('UA','/tmp/ua_ref'),*files,'-Wall','-t','osx/arm64','-o','-'])
  assert r.returncode==ref.returncode==0 and r.stdout==ref.stdout and r.stderr==ref.stderr,(r.stderr,ref.stderr)
  start=12+sum(map(len,maps))
  badmaps=[b'',joined[:7],joined[:11],joined[:8]+u32(0)+joined[12:],joined[:8]+u32(65)+joined[12:],
