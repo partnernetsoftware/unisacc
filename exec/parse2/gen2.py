@@ -534,8 +534,6 @@ def build(locations=False, warnings=False, errors=False):
     p = P("TD.parse")
     p.a(("LDI", "td_dims", 0)).call("NEXT").call("TSPEC").tok({TK_ID: "TD.id", "(": "TD.fp"}, bad("typedef"))
     P("TD.fp").call("FPDECL").branch({1: "TD.fpshape"}, bad("function typedef shape"), [("CMPI", "fp_isfunction", 0)])
-    P("TD.fpshape").branch({1: "TD.fpput"}, bad("function pointer array typedef"), [("CMPI", "fpn", 0)])
-    P("TD.fpput").a(("COPYW", "tdps", "ips"), ("COPYW", "tdpe", "ipe")).goto("TD.bind")
     P("TD.id").a(("COPYW", "tdps", "ps"), ("COPYW", "tdpe", "pe")).call("NEXT").tok({"[": "TD.array"}, "TD.bind")
     shape_control("typedef-shape")
     P("TD.bind").a(("COPYW", "ps", "tdps"), ("COPYW", "pe", "tdpe"), ("INTERN", "v", "ps", "pe")).branch({1: "TD.put"}, "TD.local", [("CMPI", "tagscope", 0)])
@@ -659,7 +657,6 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
     p = P("FN.par")
     p.a(("LDI", "par_abstract", 0)).call("TSPEC").tok({TK_ID: "FN.pid", "[": "PD.abstract", ",": "FN.unnamed", ")": "FN.unnamed", "(": "PD.paren"}, bad("parameter"))   # unnamed: a prototype
-    P("FN.pfp").call("FPDECL").branch({1: "FN.pfpbind"}, "FN.pfparray", [("CMPI", "fpn", 0)])
     P("FN.pfparray").a(("ALUI", "add", "td", "td", 1)).goto("FN.pfpbind")
     P("FN.pfpbind").call("FS.PARAMABI").branch({1: "FN.pfpstacked"}, "FN.pfpdecl", [])
     # The reference lookahead counts a literal ... in a nested parameter too.
@@ -670,7 +667,7 @@ def build(locations=False, warnings=False, errors=False):
     # Array parameters adjust to pointers before their descriptor is bound.
     # Only a single, side-effect-free bound token is covered here; do not
     # silently discard arbitrary VLA expressions as the reference does.
-    P("FN.pid").a(("LDI", "parrank", 0), ("COPYW", "par_s", "ps"), ("COPYW", "par_e", "pe")).call("NEXT").call("FN.type").tok({"[": "FN.array"}, "FN.bind")
+    P("FN.pid").a(("LDI", "parrank", 0), ("COPYW", "par_s", "ps"), ("COPYW", "par_e", "pe")).call("NEXT").call("FN.type").goto("FPA.namedtail")
     shape_control("parameter-type")
     P("FN.array").a(("ALUI", "add", "td", "td", 1)).call("NEXT").goto("FN.aqual")
     P("FN.aqual").tok({"type=static": "FN.aqnext", "]": "FN.aend", TK_NUM: "FN.abound", TK_ID: "FN.abound", "*": "FN.abound"}, bad("array parameter bound"))
