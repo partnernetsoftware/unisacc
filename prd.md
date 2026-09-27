@@ -5075,3 +5075,5 @@ unitlocations 7a9c3bd已合：普通/located与布局扰动全图相同，原实
 固定a1115126候选补单份包实证：原6095511B compiler.pkg在6278823B容器中完整出现且只出现一次，offset183296，包SHA2198fbeb6687df6914e5622044750ccd286828b63dae33bf0bdbfe323120a376；/tmp/unisacc-controls-candidate-928/package-occurrence.json。这是物理包计数，模型32互异及resource另见ledger，不把驱动库算几KB。warning组全图与原139用例已交待审；E3下一完整errors.py映射/恢复/计数/summary控制，保留动态拒绝源扫描与通用input-frame深度跟踪，不把对应语义埋进通用loader。E4协议读取槽2、E5返回表达式槽1，新组先静态。
 
 warning四helper5650179与返回/表达式7436d7b已审合。warning原139例完整NET tape/诊断全同；返回组五模式+动态10图同，6旧probe完整NET O2/native同host。父下一单槽联合验证以70d3952完整源树为基线，当前全部已合规则迁移后五模式完整展开图对照，分五次有界执行；只证明联合转移相等，不假定表/网络序列编号或容器字节不变。新控制剩X.id/更新/普通解引用、START/unit协调及errors/位置协议/units。
+
+E5下一独立完整组为X.id及标识符查找/自增自减/compound更新、TAX/CSTEP/STEPTY/INTONLY/FPSTEP等与之相连控制，保留真实type/tyinfo、形状描述与共享AS/POSTIX/CALL。剩普通U.str/UNARY/deref及START另计；不把三者混成逐case扩功能。父五模式联合检查单槽执行，E4协议槽2；新组先静态，等空槽。
