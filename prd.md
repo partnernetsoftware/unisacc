@@ -5009,3 +5009,5 @@ Windows传输定位进展：父1KB往返相同、6.2MB push12秒超时；gzip压
 Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip977980B，客机解压后的原6,225,287B哈希先核对；原Start-Process返回空ExitCode及cmd引号问题使早两轮失败，改用项目既有Diagnostics.Process/cmd等待法，路径为自建无空格随机前缀，UTM rc0但Error from event明确拒绝。最终win/arm64及win/x86_64各hello/fib/convert六次独立≤55秒全部PASS；每次含APE x86_64运行-run以及模型编译指定目标后客机实际执行，与host结果相同。两槽并发，实际Windows11 ARM64环境，x86程序经仿真，不称x86实机或完整Windows自举。所有候选只读、未改包；父清理诊断临时文件后关闭本轮启动VM，status=stopped。
 
 最终模型自举验收口径补齐：持久modelboot由N1=N2扩为原先约定N1=N2=N3，后代实测使用N3；三代均以同一NET包编译asmcompiler.c，完整文件比较不剥签。只是固定包驱动器自举，不扩大为模型/内核重新构造。新完整候选将用shared/六target/pack分步双槽构造，source identity必须一致。
+
+函数签名cb4569b合入：共享描述池/参数转换/返回形状/结构兼容查询，旧keep316全同、5正例O0/O2共10次host同，4不兼容签名明确拒绝；Python净18、TSV净169、probe38，非总量缩减。function-signatures纳入持久实际资源检查。主树冻结此组构建新候选；下一私有并行按gen2区域严格分工：E3仅QT/S.star/LV，E4仅U.pos/TSPEC/type-follow，共享fixed控制写声明；剩enum扩展及00204聚合ABI不借首停点修复冒称全过。

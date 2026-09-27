@@ -229,7 +229,7 @@ if part in ('all','resources'):
             ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators']]
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
                ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
-                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result']]
+                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures']]
     for source in probes:
         source=source.resolve(); name=source.stem
         host=p/(name+'-cc'); native=p/(name+'-model')
