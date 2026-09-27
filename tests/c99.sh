@@ -24,13 +24,21 @@ isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 for f in "$D"/*.c; do
     b=$(basename "$f" .c)
     # the reference: whatever this machine's cc does with it
-    if ! cc -std=c99 -w -o "$T/ref" "$f" -lm 2>/dev/null; then
+    if ! bound 60 cc -std=c99 -w -o "$T/ref" "$f" -lm 2>/dev/null; then
         printf "  skip %-24s the system cc will not build it\n" "$b"
         continue
     fi
-    want=$("$T/ref" 2>/dev/null); wrc=$?
-    if ! bound 60 "$UA" -run "$f" > "$T/got" 2>"$T/err"; then
-        grc=$?
+    want=$(bound 60 "$T/ref" 2>/dev/null); wrc=$?
+    if [ "$wrc" -ge 128 ]; then
+        printf "  WRONG %-23s host reference exited %s\n" "$b" "$wrc"
+        bad=$((bad+1)); continue
+    fi
+    bound 60 "$UA" -run "$f" > "$T/got" 2>"$T/err"; grc=$?
+    if [ "$grc" -ge 128 ]; then
+        printf "  WRONG %-23s compiler/run exited %s\n" "$b" "$grc"
+        bad=$((bad+1)); continue
+    fi
+    if [ "$grc" -ne 0 ]; then
         # a refusal and a wrong answer are different failures
         if [ -s "$T/err" ]; then
             if isknown "$b"; then
@@ -50,7 +58,7 @@ for f in "$D"/*.c; do
         bad=$((bad+1)); continue
     fi
     got=$(cat "$T/got")
-    if [ "$got" = "$want" ]; then
+    if [ "$got" = "$want" ] && [ "$grc" = "$wrc" ]; then
         if isknown "$b"; then
             revived=$((revived+1))
             printf "  REVIVED %s  now works -- delete its line from c99.knownfail\n" "$b"
@@ -59,7 +67,7 @@ for f in "$D"/*.c; do
     else
         if isknown "$b"; then known=$((known+1))
         else
-            printf "  WRONG %-23s got [%s] cc says [%s]\n" "$b" "$got" "$want"
+            printf "  WRONG %-23s exit %s/%s got [%s] cc says [%s]\n" "$b" "$grc" "$wrc" "$got" "$want"
             bad=$((bad+1))
         fi
     fi

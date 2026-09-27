@@ -3883,3 +3883,31 @@ replace the model route with a C macro expander or count a rejection as parity.
   punctuator/literal paste forms, _Pragma and other declared E2 limitations
   remain; passing these examples does not prove all preprocessing semantics.
   Default product remains the reference; no push/release or switch this batch.
+
+
+### Broader candidate audit after e291398
+
+Actual model container 36d173b7... passes ccparity but is not ready to replace
+all product paths. C99 reports 39/57, 18 refusals: empty variadics, __func__,
+_Pragma, hexadecimal floating literals, bool/_Bool, restrict/inline, VLAs and
+VLA parameters, flexible/static array parameters, compound literals, va_copy,
+math/atexit/div/labs and signal declarations. run.sh passes 11 with one failure:
+b_float stops at mixed float/double arithmetic (double-operand limitation).
+These remain implementation work, not waived baseline entries.
+
+The C99 harness also loses the original status through `if ! command; then
+rc=$?`, and ignores a host/non-host status mismatch on the success branch.
+Fix status capture and bound the host build/run before relying on expanded
+coverage. Verify with a compiler wrapper that returns correct output then
+exits 2; it must fail. No product compiler change is needed for that fix.
+
+
+C99 harness status fix verified: host compilation and execution are now bounded;
+compiler/run status is captured before branching, compared on both paths, and
+signal/timeout-shaped exits fail instead of becoming unsupported cases. A
+scratch wrapper emitted the reference output, suppressed stderr and exited 2:
+the old script falsely passed 57/57 with rc 0, the corrected script reports
+57 wrong and exits 1. Normal reference remains 57/57; the actual model
+container remains 39/57 with the same 18 refusals and rc 1. The baseline was
+not lowered and no known-failure waiver was added. Next: finish the remaining
+preprocessor gaps in that list, then front-end type/declarator/expression gaps.
