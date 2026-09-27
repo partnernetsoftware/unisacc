@@ -177,9 +177,9 @@ def install(E, arch="x86_64", os_="lnx"):
             put('finish', dict(entry=current, next='SC.'+op+'.gate'), {'pending': pending})
             entry, pending = nxt, []
         put('finish', dict(entry=entry, next='C.fail'), {'pending': []})
-        val = lambda v: "'"+v if v=='none' or v[:1].isdigit() else v
+        val = lambda v: "'"+v if v=='none' or v.startswith(tuple("0123456789")) else v
         facts = dict(form=enc[op], gate=f[8], carry='true' if os_=='osx' else 'false',
-                     winapi=WINAPI.get(op) or 'none', op=op, sysno=val(f[0]),
+                     winapi='none' if WINAPI.get(op) is None else WINAPI[op], op=op, sysno=val(f[0]),
                      retconv=val(f[11]), winimp=val(f[12]), ret=f[7])
         labels = {'label'+str(i): P('SC').fresh('r') for i in range(5 if os_=='win' else 4)}
         put('gate-win' if os_=='win' else 'gate',
