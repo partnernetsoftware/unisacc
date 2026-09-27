@@ -4955,3 +4955,5 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 剩余兼容按共享过程并行补齐决定：一组处理b_decl2/b_decl3的参数/声明尾，复用PARAMS/FPDECL/shape；一组处理b_ppif的预处理常量表达式，直接补expression/reduce声明并复用既有宏展开；一组处理b_wide/b_strsizeof的宽字符字符串路径，复用共享字符串walk及初始化。隔离分支、各约8分钟，固定逻辑留TSV、Python仅绑定，不新增解释器/语言原语，不修改测试输入，不把未完成项改成knownpass。两个E3任务按参数区域与字符串区域分工，父审合后组合验证。
 
 父确认测试分片未削弱经典基线：主树新difftest_o四片对当前私有经典UA全部423agree/0wrong/0refuse，双槽5.74秒（/tmp/unisacc-sharded-classic-gate-928）。模型候选的30refuse是实际兼容差距，并非测试分片引入。两者墙钟含不同编译路线及缓存，不作为正式性能比值。
+
+参数/宽串联合收口（66709ab）：声明共享尾复用PARAMS/DIMS/SH.NEW，旧keep316/316；宽串共用SPANSTR/walk/ESC与宽度参数，UTF8严格解码，UCN仍拒绝。父重建E2/E3及located units/parse完整候选/tmp/unisacc-decl-wide-candidate-928，原b_decl2/b_decl3/b_wide/b_strsizeof在O0/O1/O2共12次实际六阶段网络运行与host stdout/stderr/rc全同。不是仅网络前端接Python后端。预处理signed字面量plain/located各28host对照及15明确拒绝父复跑通过，b_ppif仍拒绝0u，unsigned及函数宏下一共享组继续；位域只读核查另列，未复制参考已知复合结果问题。wide_strings持久探针纳入资源门禁。下一小窗口地址/复合字面量及位域先核共享过程设计，不另起解析器；原141文件×3级分片复验保持拒绝为失败。
