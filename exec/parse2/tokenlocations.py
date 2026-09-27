@@ -90,7 +90,7 @@ def install(E,P,ordinal_table=None,token_record=None,ready="START",multi=True):
     # Every parser rewind points to this prefix, not to the token-kind line.
     del g.st['NEXT']
     if token_record: P('NEXT').call('DL.read').call(token_record).ret()
-    P('DL.read' if token_record else 'NEXT').a(('MARK','tpos')).goto('DL.prefix')
+    P('DL.read' if token_record else 'NEXT').a(('MARK','tpos')).call('DL.prefix').goto('IX.have' if ordinal_table is not None else 'NX')
     g.on('DL.prefix',[64],'DL.which' if multi else 'DL.offset',[('ADV',)])
     if multi:
         P('DL.which').branch({1:'DL.offset'},'DL.tokenunit',[('CMPI','diag_multi',0)])
@@ -106,7 +106,7 @@ def install(E,P,ordinal_table=None,token_record=None,ready="START",multi=True):
     # storage. Located prefixes change byte offsets, not source ordinals.
     acts=[('ADV',),('STX','tpos',TOKEN_POS,'source_pos')]
     if ordinal_table is not None: acts.append(('LDX','ixn','tpos',ordinal_table))
-    g.on('DL.newline',[10],'IX.have' if ordinal_table is not None else 'NX',acts)
+    g.on('DL.newline',[10],'RET',acts)
     g.els('DL.newline',bad)
     g.on(bad,range(257),'DEAD',E.rej('not covered: malformed token locations'))
     return 'DL.magic0'

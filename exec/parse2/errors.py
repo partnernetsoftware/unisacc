@@ -20,6 +20,7 @@ def install(E,P,warnings=False):
     # Valid parsing and the branch that classifies each error stay unchanged.
     mapped={}
     for name,(mode,row) in list(g.st.items()):
+        if name == 'DL.bad': continue  # malformed transport cannot locate its own error
         for key,(nxt,seq) in list(row.items()):
             acts=list(g.seqs[seq])
             if acts and acts[-1][0]=='REJECT' and acts[-1][1].startswith('not covered: '):
@@ -54,7 +55,7 @@ def install(E,P,warnings=False):
     # counter below mirrors generic input-frame operations, not parser guesses.
     P('ER.frames').branch({1:'ER.position'},'ER.popframe',[('CMPI','er_depth',0)])
     P('ER.popframe').a(('INPOP',)).goto('ER.frames')
-    P('ER.position').a(('JUMP','er_at')).call('NEXT').a(('LDX','diag_pos','er_at',TOKEN_POS),
+    P('ER.position').a(('JUMP','er_at'),('MARK','tpos')).call('DL.prefix').a(('LDX','diag_pos','er_at',TOKEN_POS),
         ('LDI','diag_warning',0)).call('DIAG.report').a(('ALUI','add','er_count','er_count',1)).branch(
         {(0,1):'ER.decide'},'ER.limitcheck',[('CMPI','er_limit',0)])
     P('ER.limitcheck').branch({0:'ER.decide'},'ER.limitstop',[('CMP','er_count','er_limit')])
