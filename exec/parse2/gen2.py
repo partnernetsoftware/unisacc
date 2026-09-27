@@ -34,6 +34,8 @@ SYSCALLS = [(name, op, 3) for name, op in INTRINSIC.items()] + [(name, op, 6) fo
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
 VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
 UNDO_SIZE = 41
+FPS_FIRST = 128  # disjoint primitive/signature/structure base-code ranges
+FPS_RD, FPS_RB, FPS_VAR, FPS_PARAM, FPS_RSH, FPS_FN, FPS_COUNT, FPS_PSH = (i << 40 for i in range(55, 63))
 # Shared rule/control entry points (reuse before adding a new state cluster):
 # TSPEC/DSTARS: type specifiers and per-declarator pointer shape.
 # FPDECL/PARAMS: function-pointer shape and balanced parameter scanning.
@@ -573,6 +575,8 @@ def build(locations=False, warnings=False, errors=False):
     floatconst_install(E, P)
     E.autoscan()
     types()
+    from functiontypes import install as functiontypes_install
+    functiontypes_install(E, P, dict(FPS_FIRST=FPS_FIRST, SBB=SBB, FPS_RD=FPS_RD, FPS_RB=FPS_RB, FPS_VAR=FPS_VAR, FPS_PARAM=FPS_PARAM, FPS_RSH=FPS_RSH, FPS_FN=FPS_FN, FPS_COUNT=FPS_COUNT, FPS_PSH=FPS_PSH, SHAPE=SHAPE, ARR=E.ARR, DIM=DIM, PDB=PDB, FPB=FPB, FPV=FPV), TYINT)
     from truth import install as truth_install
     truth_install(P, DBL, FLT)
     from booleans import install as bool_install
@@ -671,7 +675,7 @@ def build(locations=False, warnings=False, errors=False):
     p.a(("LDI", "fn_fpwrap", 0)).call("TSPEC").a(("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).tok({TK_ID: "FN.id", ";": "FN.semi", "(": "GV.fp"}, bad("declarator"))
     p = P("GV.fp")
     p.call("FPDECL").a(("COPYW", "fns", "ips"), ("COPYW", "fne", "ipe")).branch({1: "FN.returnfp"}, "GV.fpobject", [("CMPI", "fp_isfunction", 1)])
-    P("FN.returnfp").a(("LDI", "fn_fpwrap", 1), ("LDI", "rd", 1), ("LDI", "rb", FPB)).goto("FN.fn")
+    P("FN.returnfp").a(("LDI", "fn_fpwrap", 1), ("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).goto("FN.fn")
     p = P("GV.fpobject")
     p.a(("LDI", "gsz", 8), ("LDI", "gar", 0)).branch({1: "GV.fp1"}, "GV.fpa", [("CMPI", "fpn", 0)])
     P("GV.fpa").a(("ALUI", "mul", "gsz", "fpn", 8), ("LDI", "gar", 1)).goto("GV.fp1")
@@ -744,21 +748,21 @@ def build(locations=False, warnings=False, errors=False):
     P("ELSZ.u").a(("ALUI", "sub", "es", "tb", UNS)).ret()
     P("ELSZ.8").a(("LDI", "es", 8)).ret()
     p = P("FN.fn")
-    p.branch({1: "FN.fnplain"}, bad("array typedef function result"), [("CMPI", "type_shape", 0)])
+    p.call("FS.DECL").goto("FN.fnplain")
     p = P("FN.fnplain")
     p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0))
     p.goto("FN.params")
     p = P("FN.params")
     p.call("NEXT").a(("LDI", "pk", 0), ("LDI", "vfn", 0))
     p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
-    P("FN.void").a(("LDI", "par_abstract", 0)).call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid", "(": "FN.pfp"}, bad("parameter"))
+    P("FN.void").a(("LDI", "par_abstract", 0)).call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid", "(": "FN.pfp", ",": "FS.voidparam"}, bad("parameter"))
     P("FN.vend").branch({1: "FN.body"}, "FN.unnamed", [("CMPI", "td", 0)])
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
     p = P("FN.par")
     p.a(("LDI", "par_abstract", 0)).call("TSPEC").tok({TK_ID: "FN.pid", "[": "PD.abstract", ",": "FN.unnamed", ")": "FN.unnamed", "(": "PD.paren"}, bad("parameter"))   # unnamed: a prototype
     P("FN.pfp").call("FPDECL").branch({1: "FN.pfpbind"}, "FN.pfparray", [("CMPI", "fpn", 0)])
     P("FN.pfparray").a(("ALUI", "add", "td", "td", 1)).goto("FN.pfpbind")
-    P("FN.pfpbind").branch({1: "FN.pfpstacked"}, "FN.pfpdecl", [("CMPI", "tb", FPV)])
+    P("FN.pfpbind").call("FS.PARAMABI").branch({1: "FN.pfpstacked"}, "FN.pfpdecl", [])
     # The reference lookahead counts a literal ... in a nested parameter too.
     P("FN.pfpstacked").a(("LDI", "vfn", 1)).goto("FN.pfpdecl")
     P("FN.pfpdecl.old").branch({1: "FN.unnamed"}, "FN.pfpdecl1", [("CMPI", "sigmode", 1)])
@@ -781,16 +785,15 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.unnamed").call("SIG.store").goto("FN.pcount")
     P("FN.pcount").a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("SIG.store").branch({0: "SIG.put"}, "RET", [("CMPI", "pk", 8)])
-    P("SIG.put").a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u")).ret()
     p = P("FN.bindslot")
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v")).call("FN.shape")
     p.a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     shape_control("descriptor-storage")
     P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par", "...": "FN.dots"}, bad("parameter"))
     p = P("FN.body")
-    p.call("NEXT").branch({1: "BP.end"}, "FN.body0", [("CMPI", "sigmode", 1)])
+    p.call("FS.COUNT").call("NEXT").branch({1: "BP.end"}, "FN.body0", [("CMPI", "sigmode", 1)])
     P("FN.body0").branch({1: "FN.fpclose"}, "FN.bodykind", [("CMPI", "fn_fpwrap", 1)])
-    P("FN.fpclose").expect(")").call("FPD.c").goto("FN.bodykind")
+    P("FN.fpclose").expect(")").call("NEXT").a(("COPYW", "fs_code", "rb")).call("FS.params.begin").goto("FN.bodykind")
     P("FN.bodykind").tok({"{": "FN.def", ";": "FN.proto", ",": "FN.proto"}, bad("expected {"))
     p = P("FN.proto")     # a prototype: nothing written; its parameters' names are dropped
     # a prototype after the definition (the header defines exit, the unit declares it) keeps it defined
@@ -878,14 +881,14 @@ def build(locations=False, warnings=False, errors=False):
     P("S.dst1").call("ELSZ").a(("COPYW", "dsz", "es")).goto("S.dnx")
     P("S.dnx").call("NEXT").tok({"[": "S.darr", "(": "S.prototype"}, "S.dd")
     # Same parameter parser, no frame or parameter bindings for a prototype.
-    sigsaved = ("sigmode", "fns", "fne", "pk", "vfn", "fn_fpwrap", "td", "tb", "bd")
+    sigsaved = ("sigmode", "fns", "fne", "pk", "vfn", "fn_fpwrap", "td", "tb", "bd", "rd", "rb")
     p = P("S.prototype").vpush(*sigsaved).a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).call("BIND")
     p.a(("LDI", "t", 0), ("STX", "v", LOC, "t"), ("STX", "v", E.VAR, "t"), ("ALUI", "mul", "u", "v", 16))
     for j in range(16): p.a(("STX", "u", PDB+j, "t"))
-    p.a(("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "td"), ("STX", "v", E.FRB, "tb"), ("COPYW", "fns", "ips"), ("COPYW", "fne", "ipe"), ("LDI", "sigmode", 1)).call("FN.params").vpop(*sigsaved).tok({",": "S.dcm"}, "S.dend")
+    p.a(("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "td"), ("STX", "v", E.FRB, "tb"), ("COPYW", "fns", "ips"), ("COPYW", "fne", "ipe"), ("LDI", "sigmode", 1), ("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).call("FS.DECL").call("FN.params").vpop(*sigsaved).tok({",": "S.dcm"}, "S.dend")
     P("BP.end").branch({2: "BP.many"}, "BP.put", [("CMPI", "pk", 6)])
     P("BP.many").a(("LDI", "vfn", 1)).goto("BP.put")
-    P("BP.put").a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).ret()
+    P("BP.named").a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).ret()
     P("S.dd").call("DECLN").call("S.aliassave").tok({"=": "S.din", ",": "S.dcm"}, "S.dend")
     shape_control("local-binding")
     P("S.dend").expect(";").call("NEXT").ret()
@@ -981,7 +984,7 @@ def build(locations=False, warnings=False, errors=False):
     P("CX.c").a(("COPYW", "stl", "sst")).call("NEXT").goto("CX.l")
     P("CX.e").vpop("cv").ret()
     p = P("EXPR")     # st1: this EXPR is a whole expression statement (nested ones are not); cv1: a comma operand
-    p.a(("LDI", "bf_value", 0), ("COPYW", "st1", "stl"), ("LDI", "stl", 0), ("COPYW", "cv1", "cv"), ("LDI", "cv", 0)).tok({TK_ID: "X.id", "(": "LP.scan"}, "EX.l")
+    p.a(("LDI", "fp_abi_wide", 0), ("LDI", "bf_value", 0), ("COPYW", "st1", "stl"), ("LDI", "stl", 0), ("COPYW", "cv1", "cv"), ("LDI", "cv", 0)).tok({TK_ID: "X.id", "(": "LP.scan"}, "EX.l")
     P("EX.l").call("E%d" % LEVELS[0]).call("QTAIL").ret()
     # Parentheses preserve lvalues. Scan syntax before emitting anything;
     # the address walker evaluates the accepted operand exactly once.
@@ -1019,7 +1022,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("QT.merge").a(("LDI", "bf_value", 0))
     emit(p, "label_b").branch({1: "QT.1"}, "DEAD.qt", [("CMP", "vt", "lt")])
     P("QT.1").branch({1: "QT.scalar"}, "QT.same", [("CMPI", "vt", 0)])
-    P("QT.same").branch({1: "RET"}, "DEAD.qt", [("CMP", "vb", "lb")])
+    P("QT.same").a(("COPYW", "fs_l", "vb"), ("COPYW", "fs_r", "lb")).call("FS.TYPEEQ").branch({1: "RET"}, "DEAD.qt", [])
     q = P("QT.scalar")
     for _, code, *_ in TYINT:
         nx = q.fresh("next")
@@ -1070,7 +1073,9 @@ def build(locations=False, warnings=False, errors=False):
         q.branch({(AX.index("f32"), AX.index("f64")): "BC.store" + o}, "BC.target" + o, [("RLD", "bc_axis")])
         P("BC.target" + o).branch({1: "BC.store" + o}, "BC.same" + o, [("CMPI", "vb", BOOL)])
         P("BC.same" + o).branch({1: "BC.base" + o}, "BC.narrow" + o, [("CMP", "vt", "rvt")])
-        P("BC.base" + o).branch({1: "BC.store" + o}, "BC.narrow" + o, [("CMP", "vb", "rvb")])
+        P("BC.base" + o).branch({1: "BC.wide" + o}, "BC.narrow" + o, [("CMP", "vb", "rvb")])
+        install_rules(g, os.path.dirname(__file__), "functiontypes", section="compound",
+                      bindings=dict(wide="BC.wide"+o, test="BC.widetest"+o, narrow="BC.narrow"+o, store="BC.store"+o))
         P("BC.narrow" + o).call("NARROW").goto("BC.store" + o)
         emit(P("BC.store" + o), "pop1").call("BF.WRITE").call("SH.RESULT").ret()
     P("NODBL").branch({1: "NODBL.l"}, "NODBL.r", [("CMPI", "lb", DBL)])      # a double VALUE (not a pointer to one)
@@ -1287,8 +1292,6 @@ def build(locations=False, warnings=False, errors=False):
     p.call("VLOAD").call("POSTIX").goto("UD.dn")
     P("DOWN").call("ISFP").branch({1: "DOWN.fp"}, "DOWN.0", [])
     P("DOWN.fp").ret()
-    P("ISFP").branch({1: "RET"}, "ISFP.var", [("CMPI", "vb", FPB)])
-    P("ISFP.var").a(("CMPI", "vb", FPV)).ret()
     P("DOWN.0").branch({(1, 2): "DOWN.1"}, bad("dereference of a non-pointer"), [("CMPI", "vt", 1)])
     P("DOWN.1").a(("ALUI", "sub", "vt", "vt", 1)).branch({1: "DOWN.2"}, "RET", [("CMPI", "vt", 0)])
     P("DOWN.2").branch({1: "DEAD.void"}, "RET", [("CMPI", "vb", 0)])
@@ -1330,7 +1333,7 @@ def build(locations=False, warnings=False, errors=False):
     P("UC.fp0").branch({1: "UC.fp1"}, "UC.fp8", [("CMPI", "tb", 4)])
     P("UC.fp8").branch({1: "UC.fp1"}, "UC.fpvoid", [("CMPI", "tb", 8)])
     P("UC.fpvoid").branch({1: "UC.fp1"}, bad("function pointer cast result type"), [("CMPI", "tb", 0)])
-    P("UC.fp1").call("NEXT").expect("*").call("NEXT").expect(")").call("FPD.c").goto("UC.type")
+    P("UC.fp1").a(("COPYW", "fp_td", "td"), ("COPYW", "fp_tb", "tb")).call("NEXT").expect("*").call("NEXT").expect(")").call("FPD.c").goto("UC.type")
     P("UC.type").a(("LDI","cp_arr",0),("LDI","cp_n",1)).tok({"[":"CP.array"},"CP.close")
     P("CP.array").a(("LDI","cp_arr",1),("LDI","cp_n",0)).call("NEXT").tok({"]":"CP.boundend"},"CP.bound")
     P("CP.bound").vpush("td","tb").call("CE").vpop("td","tb").a(("COPYW","cp_n","cv")).goto("CP.boundend")
@@ -1379,7 +1382,7 @@ def build(locations=False, warnings=False, errors=False):
     q = P("U.num1")
     emit(q, "imm").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     P("U.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "U.call", "++": "ID.inc", "--": "ID.dec"}, "U.var0")
-    P("U.call").call("CALL").a(("LDI", "bf_value", 0), ("LDI", "rkok", 0)).call("POSTIX").ret()
+    P("U.call").a(("LDI", "rkok", 0)).call("CALL").a(("LDI", "bf_value", 0)).call("POSTIX").ret()
     printf(warnings)
     q = P("U.var")
     q.call("LOOKUP")
@@ -1430,7 +1433,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("POSTIX")
     p.tok({"[": "PX.i", ".": "MEMB", "->": "MEMB", "(": "PX.fc"}, "RET")
     P("PX.fc").call("ISFP").branch({1: "PX.fc1"}, "RET", [])
-    P("PX.fc1").call("FPCALL").a(("LDI", "rkok", 0)).goto("POSTIX")
+    P("PX.fc1").call("FPCALL").goto("POSTIX")
     q = P("PX.i")
     q.branch({(1, 2): "PX.ok"}, bad("subscript of a non-pointer"), [("CMPI", "vt", 1)])
     q = P("PX.ok")
@@ -1496,8 +1499,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("FNVAL")
     p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", LOC)).branch({1: "FNV.f"}, "RET", [("CMPI", "t", 0)])
     P("FNV.f").a(("LDX", "t", "v", E.FND)).branch({1: "FNV.y"}, "RET", [("CMPI", "t", 1)])
-    P("FNV.y").o("  .lea r0, ").a(("SPAN2", "ips", "ipe")).o("\n").a(("LDI", "vt", 1), ("LDI", "vb", FPB), ("LDI", "isfn", 1), ("LDX", "t", "v", E.VAR)).branch({1: "FNV.stacked"}, "RET", [("CMPI", "t", 1)])
-    P("FNV.stacked").a(("LDI", "vb", FPV)).ret()
+    P("FNV.y").o("  .lea r0, ").a(("SPAN2", "ips", "ipe")).o("\n").a(("LDI", "vt", 1), ("LDI", "isfn", 1), ("LDX", "vb", "v", FPS_FN), ("LDX", "t", "v", E.VAR), ("STX", "vb", FPS_VAR, "t")).ret()
     p = P("LOOKUP")     # s := the slot of ips..ipe (0: not a local of this slice)
     if warnings: p.call("WU.use")
     p.a(("LDI", "bf_width", 0), ("INTERN", "v", "ips", "ipe"), ("LDX", "s", "v", LOC), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE), ("LDX", "ar", "v", E.ARR), ("COPYW", "vid", "v")).branch({1: "DEAD.nl"}, "RET", [("CMPI", "s", 0)])
@@ -1517,7 +1519,8 @@ def build(locations=False, warnings=False, errors=False):
     addr(q).o("  load64 r0, [r0+0]\n").goto("FPCALL")
     p = P("FPCALL")      # r0 = the callee; current '(' -- pushed first, then the arguments; callr r5 (measured)
     if warnings: p.a(("LDI","wf_format",0))
-    emit(p, "push").vpush("cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).branch({1: "FC.stacked"}, "FC.args", [("CMPI", "vb", FPV)])
+    p.call("FS.CALLTYPE")
+    emit(p, "push").vpush("call_sig", "cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).branch({1: "FC.stacked"}, "FC.args", [("CMPI", "fp_stacked", 1)])
     P("FC.stacked").a(("LDI", "sys", 101)).goto("FC.args")
     P("FC.args").vpush("sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     for k, nx in ((0, "CL.va1"), (1, "CL.va2"), (2, "CL.b1")):
@@ -1582,18 +1585,18 @@ def build(locations=False, warnings=False, errors=False):
     g.on("DEAD.vc", range(257), "DEAD", E.rej("not covered: call to a variadic function"), "r")
     p = P("CL.ok")
     if warnings: p.a(("LDX","wf_format","tpos",51<<40))
-    p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe"), ("INTERN", "fid", "ips", "ipe")).vpush("cls", "cle", "sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
+    p.a(("COPYW", "cls", "ips"), ("COPYW", "cle", "ipe"), ("INTERN", "fid", "ips", "ipe")).a(("LDI", "call_sig", 0)).vpush("call_sig", "cls", "cle", "sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     P("ARGCOPY").branch({1: "AC.base"}, "RET", [("CMPI", "vt", 0)])
     P("AC.base").branch({(1, 2): "AC.copy"}, "RET", [("CMPI", "vb", SBB)])
     q = P("AC.copy")
     q.a(("ALUI", "sub", "t", "vb", SBB), ("LDX", "sz", "t", SSZ), ("ALU", "add", "cur", "cur", "sz")).call("MAXF")
     q.o("  mov r1, r0\n  imm r0, ").num("cur").o("\n  sub64 r0, r6, r0\n").goto("COPYSTRUCT")
     p = P("CL.arg")
-    p.vpush("na", "fid")
+    p.vpush("na", "fid", "call_sig")
     if warnings: p.a(("COPYW","wf_at","tpos"),("COPYW","wf_index","na")).call("WF.reset").vpush("wf_format","wf_at")
     p.call("EXPR")
     if warnings: p.vpop("wf_format","wf_at")
-    p.vpop("na", "fid")
+    p.vpop("na", "fid", "call_sig")
     if warnings: p.a(("COPYW","wf_index","na")).call("WF.argcheck")
     p.call("ARGCOPY")
     p.goto("CL.convert")
@@ -1617,8 +1620,8 @@ def build(locations=False, warnings=False, errors=False):
     q.o("  load64 r2, [r7+").num("oi").o("]\n  load64 r1, [r7+").num("oj").o("]\n  store64 [r7+").num("oi").o("], r1\n  store64 [r7+").num("oj").o("], r2\n")
     q.a(("ALUI", "add", "vi", "vi", 1), ("ALUI", "sub", "vj", "vj", 1)).goto("CL.vsw")
     q = P("CL.vend")
-    q.vpop("cls", "cle", "sys").a(("ALUI", "mul", "t", "na", 8)).branch({1: "CL.vdirect"}, "CL.vindirect", [("CMPI", "sys", 200)])
-    P("CL.vindirect").o("  load64 r5, [r7+").num("t").o("]\n  callr r5\n  .frame -").a(("ALUI", "add", "t", "na", 1), ("ALUI", "mul", "t", "t", 8)).num("t").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
+    q.vpop("call_sig", "cls", "cle", "sys").a(("ALUI", "mul", "t", "na", 8)).branch({1: "CL.vdirect"}, "CL.vindirect", [("CMPI", "sys", 200)])
+    P("CL.vindirect").o("  load64 r5, [r7+").num("t").o("]\n  callr r5\n  .frame -").a(("ALUI", "add", "t", "na", 1), ("ALUI", "mul", "t", "t", 8)).num("t").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("FS.RESULT").call("NEXT").ret()
     q = P("CL.vdirect")
     q.o("  call ").a(("SPAN2", "cls", "cle")).o("\n  .frame -").num("t").o("\n")
     if warnings: q.a(("LDI", "wi_called", 1))
@@ -1632,9 +1635,9 @@ def build(locations=False, warnings=False, errors=False):
     p.a(("ALUI", "sub", "na", "na", 1), ("COPYW", "ak", "na"))
     emit(p, "pop_arg").goto("CL.pop")
     p = P("CL.emit")
-    p.vpop("cls", "cle", "sys").branch({1: "CL.call"}, "CL.s100", [("CMPI", "sys", 0)])
+    p.vpop("call_sig", "cls", "cle", "sys").branch({1: "CL.call"}, "CL.s100", [("CMPI", "sys", 0)])
     P("CL.s100").branch({1: "CL.callr"}, "CL.sysz", [("CMPI", "sys", 100)])
-    P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
+    P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("FS.RESULT").call("NEXT").ret()
     # a syscall: r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5`
     for k, (_, sc, w) in enumerate(SYSCALLS, 1):
         nx = "CL.w%d" % (k + 1) if k < len(SYSCALLS) else "DEAD"
@@ -1647,7 +1650,7 @@ def build(locations=False, warnings=False, errors=False):
         P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()   # a call's value is an i64 (pf_call)
     p = P("CL.call")
     if warnings: p.a(("LDI", "wi_called", 1))
-    emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
+    emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB), ("LDX", "call_sig", "v", FPS_FN)).call("FS.result.shape").a(("LDI", "fp_abi_wide", 0)).call("NEXT").ret()
     ud_install(E, P)
     start = "START"
     if locations:
