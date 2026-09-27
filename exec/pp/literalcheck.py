@@ -19,12 +19,34 @@ expressions = [
     '0 && 1/0', '1 || 1/0', '(1 ? 7L : 1/0) == 7',
     '(0 ? 1/0 : 017) == 15', '-7 / 2 == -3 && -7 % 2 == -1',
 ]
-# These remain outside this signed-only slice, including dead-arm literals:
+expressions += [
+    '-1 > 0u', '-1 < 0u', '-1 == 18446744073709551615u',
+    '18446744073709551615u / 2 == 9223372036854775807',
+    '18446744073709551615u % 7 == 1', '0xffffffffffffffff == -1',
+    '0xffffffffffffffff > 0', '(0x8000000000000000 >> 63) == 1',
+    '01777777777777777777777 > 0',
+    '01777777777777777777777 == -1', '000000000000000000001u == 1',
+    '1u + 2L == 3', '1Ul + 2lU + 3uLL + 4LLu == 10',
+    '1uL + 2Lu + 3Ull + 4llU == 10',
+    '(~0u >> 63) == 1', '(-1 >> 1u) == -1',
+    '(1 ? -1 : 0u) > 0', '(0 ? 0u : -1) > 0',
+    '(1 ? -1 : 1u/0) > 0', '(0 ? 1u/0 : -1) > 0',
+    '0 && 1u/0', '1 || 1u/0', '(1 || 0u) < 0u',
+    '(-1 < 0u) == 0', '(-1 <= 0u) == 0', '(-1 >= 0u) == 1',
+    '(0u - 1) > 0', '(0u - 1) / -1 == 1', '(0u - 1) % -1 == 0',
+    '(-1 & 1u) == 1', '(-1 ^ 0u) > 0', '(-1 | 0u) > 0',
+    '(-1 * 1u) > 0', '(+1u - 2) > 0', '(-1u) > 0',
+    '(!0u - 2) < 0', '((1u == 1) - 2) < 0',
+    '((1u && 1) - 2) < 0', '((0u || 1) - 2) < 0',
+]
+# These remain outside this slice, including dead-arm literals:
 # poison skips arithmetic faults, never turns unsupported syntax into a value.
-rejected = ['0u', '1UL', '18446744073709551615', '9223372036854775808L',
-            '0xffffffffffffffffLL', '02000000000000000000000', '08', '1lL',
-            '184467440737095516160L', r"'ab'", r"'\x100'", r"'\400'",
-            '0 && 0u', '1/0', '(0 ? 1 : 1/0)']
+rejected = ['18446744073709551615', '9223372036854775808L',
+            '0x10000000000000000', '02000000000000000000000', '08', '1lL',
+            '184467440737095516160L', '18446744073709551616u',
+            '1uu', '1lul', '1UlL', '1LLL', r"'ab'", r"'\x100'", r"'\400'",
+            '0 && 18446744073709551616u', '1/0', '(0 ? 1 : 1u/0)']
+
 with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
     t = pathlib.Path(td)
     call([os.environ.get('CC', 'cc'), '-O2', R/'exec/c/run.c', '-o', t/'run'])
@@ -51,6 +73,6 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
             assert p.returncode != 0, (expr, p.stdout)
         f = R/'tests/c/b_ppif.c'
         p = run([t/'run', t/'pp.net', f, f, R/'include'])
-        assert p.returncode != 0 and b'not covered: #if expression' in p.stderr, p.stderr
+        assert p.returncode != 0 and b'not covered: #if function-like macro name' in p.stderr, p.stderr
         print(mode or 'plain', len(expressions), 'host selections;', len(rejected),
-              'explicit refusals; original b_ppif still refuses uintmax', flush=True)
+              'explicit refusals; original b_ppif still refuses function macro', flush=True)

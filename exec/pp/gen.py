@@ -212,10 +212,12 @@ def sbconst(s):
 # ---- XE: #if expression evaluator (research/e2-pp-delta.md s11.2) ---------
 # shunting-yard over an operator stack (XOB) and value/poison stacks (XVB,
 # XPB) in W; signed intmax literals/ordinary signed-char constants via
-# literal-*.tsv; decimal/hex/octal digit bounds are 19/16/21. Unsigned, wide
-# and multichar constants remain explicit refusals. 64-bit signed via A64/C64.  A division by zero sets the value's
+# literal-*.tsv, with checked uint64 accumulation and XUB type slots. Wide
+# and multichar constants remain explicit refusals. A64/C64 handle both types.
+# A division by zero sets the value's
 # poison bit; && || ?: drop the poison of the operand they do not evaluate.
-XOB, XVB, XPB, XPRB = 64 * 10 ** 6, 65 * 10 ** 6, 66 * 10 ** 6, 67 * 10 ** 6
+# XUB uses a separate sparse region (IRNAME is 1 << 40); all its indexing is A64I.
+XOB, XVB, XPB, XPRB, XUB = 64 * 10 ** 6, 65 * 10 ** 6, 66 * 10 ** 6, 67 * 10 ** 6, 2 << 40
 # code: (spelling, prec, arity)
 XOPS = {}
 for line in (Path(HERE) / "operators.tsv").read_text().splitlines():
@@ -237,7 +239,7 @@ def xe_init():
 
 
 def build_xe(g):
-    layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'F_ACT', 'F_UP', 'FSZ', 'MACB', 'F_TO', 'F_FN', 'F_HASH', 'F_BODY']}
+    layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'XUB', 'F_ACT', 'F_UP', 'FSZ', 'MACB', 'F_TO', 'F_FN', 'F_HASH', 'F_BODY']}
     layout["XOB_PREV"] = XOB - 1
     layout.update(("PREC_" + str(c), p) for c, (_, p, _) in XOPS.items())
     from unisa.front.lex import ESC
