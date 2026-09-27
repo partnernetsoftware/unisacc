@@ -1,5 +1,5 @@
 """The reference's laststmt/return warning, not a new flow analysis.
-Enabled only by the development --warnings mode. Other warning kinds are
+Enabled only by the development --warnings mode. Format and unused-variable warning kinds are
 still pending, so this mode is not exposed as the compiler's -Wall route.
 """
 from tokenlocations import TOKEN_POS

@@ -49,6 +49,7 @@ job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location
 job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering
 job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py  # first warning kind and FP conditions
+job exec-intwarn python3 ./exec/parse2/returnwarningcheck.py --int-conversion
 job exec-e3self ./exec/parse2/selfcheck.sh                       # complete current compiler source -> tape
 job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal bits, table/net and host cc
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)

@@ -6,7 +6,7 @@ templates -- by one generic compiler, instead of being grown state by state.
     python3 exec/parse2/gen2.py --locations OUT.json
     python3 exec/parse2/gen2.py --warnings OUT.json
 
-Optional --warnings currently implements only -Wreturn-type, implies
+Optional --warnings currently implements -Wreturn-type and -Wint-conversion, implies
 --locations, and is not connected to the compiler CLI.
 
 Step 1 covers: int functions and parameters, int locals, expression
@@ -296,7 +296,7 @@ def fmtwalk(pre, on_byte, on_d, on_end):
     return w
 
 
-def printf():
+def printf(warnings=False):
     pf_install(P)
     P("FMT.decode").a(("SBCLR",)).goto("FMT.walk")
     strwalk("FMT.walk","FMT.byte","FMT.end")
@@ -306,7 +306,9 @@ def printf():
     # PF is at '(' with the callee name still in ips..ipe. Defined printf
     # uses the ordinary variadic call path, including nonliteral formats.
     # Only the undefined fallback requires a literal; pfconv selects routines.
-    P("PF").a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.fallback", [("CMPI", "t", 1)])
+    p = P("PF")
+    if warnings: p.a(("LDI", "wi_called", 1))
+    p.a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.fallback", [("CMPI", "t", 1)])
     P("PF.real").call("CALL").ret()
     P("PF.fallback").call("NEXT").tok({E.TK_STR: "PF.s"}, bad("printf format"))
     p = P("PF.s")
@@ -989,7 +991,10 @@ def build(locations=False, warnings=False):
     P("IA.offset").o("\n").branch({1: "RET"}, "IA.add", [("CMPI", "ioff", 0)])
     P("IA.add").o("  imm r2, ").num("ioff").o("\n  add64 r1, r1, r2\n").ret()
     q = P("S.din1")
-    q.vpush("s", "v", "bd", "tb").call("NEXT").call("EXPR").call("ISDV").a(("COPYW", "sdv", "u")).vpop("s", "v", "bd", "tb")
+    q.vpush("s", "v", "bd", "tb").call("NEXT")
+    if warnings: q.a(("LDX", "wi_target", "v", E.PTR)).call("WI.expr")
+    else: q.call("EXPR")
+    q.call("ISDV").a(("COPYW", "sdv", "u")).vpop("s", "v", "bd", "tb")
     q.a(("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("ISDV").branch({1: "S.din2"}, "DEAD.dbl", [("CMP", "u", "sdv")])
     q = P("S.din2")
     q.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n").call("STOREV").tok({",": "S.dcm"}, "S.dend")
@@ -1475,7 +1480,7 @@ def build(locations=False, warnings=False):
     emit(q, "imm").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
     P("U.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "U.call"}, "U.var0")
     P("U.call").call("CALL").a(("LDI", "rkok", 0)).call("POSTIX").ret()
-    printf()
+    printf(warnings)
     q = P("U.var")
     q.call("LOOKUP")
     addr(q)
@@ -1545,11 +1550,20 @@ def build(locations=False, warnings=False):
     P("PX.st").tok({";": "RET"}, "PX.l2")
     P("PX.l2").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
     q = P("PX.as")
-    emit(q, "push").vpush("vt", "vb").call("NEXT").call("EXPR").vpop("lt", "lb").branch({1: "AS.kind"}, "AS.scalar", [("CMPI", "lt", 0)])
+    emit(q, "push").vpush("vt", "vb").call("NEXT")
+    if warnings: q.a(("COPYW", "wi_target", "vt")).call("WI.expr")
+    else: q.call("EXPR")
+    q.vpop("lt", "lb").branch({1: "AS.kind"}, "AS.scalar", [("CMPI", "lt", 0)])
     P("AS.kind").branch({(1, 2): "AS.struct"}, "AS.scalar", [("CMPI", "lb", SBB)])
     q = P("AS.scalar")
     q.a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("SAMEDBL")
-    emit(q, "pop1").call("STOREV").ret()
+    emit(q, "pop1").call("STOREV").call("AS.result").ret()
+    # Reference assignment keeps the RHS facts except a floating target's
+    # explicit setkind. Store width still comes from the target above.
+    P("AS.result").branch({1: "AS.result0"}, "AS.rhs", [("CMPI", "vt", 0)])
+    P("AS.result0").branch({1: "RET"}, "AS.result1", [("CMPI", "vb", DBL)])
+    P("AS.result1").branch({1: "RET"}, "AS.rhs", [("CMPI", "vb", FLT)])
+    P("AS.rhs").a(("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).ret()
     P("AS.struct").branch({1: "AS.same"}, bad("struct assignment"), [("CMPI", "vt", 0)])
     P("AS.same").branch({1: "AS.copy"}, bad("struct assignment"), [("CMP", "vb", "lb")])
     q = P("AS.copy")
@@ -1567,7 +1581,10 @@ def build(locations=False, warnings=False):
     q = P("S.star")
     q.call("NEXT").call("UNARY").call("DOWN").tok({"=": "SS.as"}, "SS.rv")
     q = P("SS.as")
-    emit(q, "push").vpush("vt", "vb").call("NEXT").call("EXPR").vpop("vt", "vb")
+    emit(q, "push").vpush("vt", "vb").call("NEXT")
+    if warnings: q.a(("COPYW", "wi_target", "vt")).call("WI.expr")
+    else: q.call("EXPR")
+    q.vpop("vt", "vb")
     emit(q, "pop1").call("STOREV").expect(";").call("NEXT").ret()
     P("SS.rv").tok({";": "SS.x"}, "SS.rv1")     # `*p;` alone: the address only (measured, p20)
     P("SS.x").call("NEXT").ret()
@@ -1595,7 +1612,9 @@ def build(locations=False, warnings=False):
     p = P("FPCALL")      # r0 = the callee; current '(' -- pushed first, then the arguments; callr r5 (measured)
     emit(p, "push").vpush("cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).vpush("sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     for k, nx in ((0, "CL.va1"), (1, "CL.va2"), (2, "CL.b1")):
-        P("CL.va%d" % k).branch({1: "VA%d" % k}, nx, [("CMP", "v", "va%d" % k)])
+        q = P("CL.va%d" % k)
+        if warnings and k == 0: q.a(("LDI", "wi_called", 1))
+        q.branch({1: "VA%d" % k}, nx, [("CMP", "v", "va%d" % k)])
     # va_start(ap, last): &ap pushed; last evaluated (unused); ap = r6 + 16 + 8 * named parameters; value 0 (measured)
     p = P("VA0")
     p.call("NEXT").tok({TK_ID: "VA0.ap"}, bad("va_start"))
@@ -1679,6 +1698,7 @@ def build(locations=False, warnings=False):
     q.a(("ALUI", "add", "vi", "vi", 1), ("ALUI", "sub", "vj", "vj", 1)).goto("CL.vsw")
     q = P("CL.vend")
     q.vpop("cls", "cle", "sys").a(("ALUI", "mul", "t", "na", 8)).o("  call ").a(("SPAN2", "cls", "cle")).o("\n  .frame -").num("t").o("\n")
+    if warnings: q.a(("LDI", "wi_called", 1))
     q.a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
     p = P("CL.done1")
     p.a(("COPYW", "nar", "na")).branch({2: "DEAD.na"}, "CL.pop", [("CMPI", "na", 6)])
@@ -1703,6 +1723,7 @@ def build(locations=False, warnings=False):
         regs = ", ".join("r%d" % i for i in range(w))
         P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()   # a call's value is an i64 (pf_call)
     p = P("CL.call")
+    if warnings: p.a(("LDI", "wi_called", 1))
     emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
     ud_install(P)
     start = "START"
@@ -1715,6 +1736,8 @@ def build(locations=False, warnings=False):
         assert locations
         from returnwarnings import install as return_warning_install
         return_warning_install(E, P, SBB)
+        from intwarnings import install as int_warning_install
+        int_warning_install(E, P, DBL, FLT, FPB, SBB)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

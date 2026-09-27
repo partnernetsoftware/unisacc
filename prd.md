@@ -3585,3 +3585,29 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   osx/x86_64 (Rosetta), and memory -run. The subprocess harness must launch
   the APE through /bin/sh on macOS; a direct subprocess exec first raised
   ENOEXEC before compilation, then the corrected harness passed.
+
+
+### Integer-to-pointer warning rule — optional E3 diagnostic route
+
+- --warnings adds the reference intptr_check rule for assignments (names,
+  members, indexed/dereferenced lvalues) and local scalar initializers. It
+  preserves the lone numeric-zero exemption and call-result tracking,
+  including the difference between direct and function-pointer calls.
+  It does not extend checks to returns, compound assignments or global/static
+  initializers where the reference does not run intptr_check.
+- A chained assignment exposed an older E3 descriptor difference: stores
+  returned target facts where the reference normally retains RHS facts.
+  AS.result now retains RHS facts except for a floating target's setkind.
+  Store width still uses the target. This is reference compatibility, not a
+  claim that all reference conversion semantics are proved C-correct.
+- 29 cases compare full tape and diagnostic bytes, 16 with actual warnings;
+  the quiet route also matches. Passed on cc, unisacc, macOS arm64 assembly
+  and x86_64 assembly (Rosetta). Includes zero/parenthesized zero/enum/casts,
+  nested assignment, direct/indirect calls, member/index/star stores, header
+  suppression and explicit no-check contexts. Existing 32 return-warning
+  cases also pass (14 warn). Original 244 kept tapes and self-source tape
+  (3,929,446 B) remain byte-identical. No keep-list expansion in this batch.
+- exec-intwarn enters the bounded gate. Full -Wall remains unavailable:
+  unused-variable and format warnings, multi-unit location integration,
+  -Werror and CLI selection remain. No full-gate or new native-platform claim.
+  Product source and shipped .com unchanged; local work, no push/release.

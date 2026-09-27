@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""First actual warning kind on the model path: reference laststmt semantics.
-This is not full -Wall parity. Cases avoid the three unmigrated warning kinds.
+"""Reference return-type or --int-conversion warnings on the model path.
+This is not full -Wall parity. Cases avoid the remaining unmigrated kinds.
 Both tape and complete diagnostic bytes must agree; every child is bounded.
 """
 import os,pathlib,subprocess,sys,tempfile
@@ -50,6 +50,41 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
            ('exit','void __exit(int x){} int f(void){__exit(0);}')]
     (t/'quiet.h').write_text('static int in_header(void){}\n')
     cases.append(('float-truth',(R/'exec/parse2/probes/float_truth.c').read_text()))
+    category='return-type'
+    if '--int-conversion' in sys.argv:
+        category='int-conversion'
+        cases=[
+          ('init-nonzero','int f(void){int *p=7; return p!=0;}'),
+          ('init-zero','int f(void){int *p=0; return p!=0;}'),
+          ('init-zerohex','int f(void){int *p=0x0; return p!=0;}'),
+          ('init-zeroexpr','int f(void){int *p=0+0; return p!=0;}'),
+          ('init-parenzero','int f(void){int *p=(0); return p!=0;}'),
+          ('init-castzero','int f(void){int *p=(int)0; return p!=0;}'),
+          ('init-pointercast','int f(void){int *p=(int *)7; return p!=0;}'),
+          ('init-enum','enum {Z=0}; int f(void){int *p=Z; return p!=0;}'),
+          ('init-macro','#define Z 0\nint f(void){int *p=Z; return p!=0;}'),
+          ('init-address','int f(void){int x=3; int *p=&x; return *p;}'),
+          ('init-string','int f(void){char *p="ab"; return p[0];}'),
+          ('init-call','int g(void){return 7;} int f(void){int *p=g(); return p!=0;}'),
+          ('init-callplus','int g(void){return 7;} int f(void){int *p=g()+1; return p!=0;}'),
+          ('init-fnvalue','int g(void){return 7;} int f(void){int *p=g; return p!=0;}'),
+          ('init-fnptr','int f(int (*g)(void)){int *p=g(); return p!=0;}'),
+          ('init-castcall','int g(void){return 7;} int f(void){int *p=((int (*)(void))g)(); return p!=0;}'),
+          ('init-sizeof','int f(void){int *p=sizeof(int); return p!=0;}'),
+          ('init-nested','int f(int *q){int *p=(q=7); return p==q;}'),
+          ('assign','int f(int *p){p=7; return p!=0;}'),
+          ('assign-zero','int f(int *p){p=0; return p!=0;}'),
+          ('assign-parameter','int f(int *p,int k){p=k; return p!=0;}'),
+          ('assign-nested','int f(int *p,int *q){p=q=7; return p==q;}'),
+          ('assign-call','int g(void){return 7;} int f(int *p){p=g(); return p!=0;}'),
+          ('assign-member','struct S{int *p;}; int f(struct S *s){s->p=7; return s->p!=0;}'),
+          ('assign-index','int f(int **a){a[0]=7; return a[0]!=0;}'),
+          ('assign-star','int f(int **a){*a=7; return *a!=0;}'),
+          ('compound','int f(int *p){p+=7; return p!=0;}'),
+          ('return-notchecked','int *f(void){return 7;}'),
+          ('header-int','#include "quiet.h"\nint f(int *p){p=8; return p!=0;}'),
+        ]
+        (t/'quiet.h').write_text('static int in_header(int *p){p=7;return p!=0;}\n')
     positives=0
     for name,body in cases:
         f=t/'source.c';f.write_text(body if name=='float-truth' else body+'\nint main(void){return 0;}\n')
@@ -66,7 +101,7 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
         assert baseline.returncode==0 and baseline.stdout==ref.stdout and not baseline.stderr,(name,'quiet tape')
         assert got.stdout==ref.stdout,(name,'warning tape')
         assert got.stderr==ref.stderr,(name,ref.stderr,got.stderr)
-        if b'[-Wreturn-type]' in ref.stderr: positives+=1
-        print('return warning',name,'tape and diagnostics match',flush=True)
+        if ('[-W'+category+']').encode() in ref.stderr: positives+=1
+        print(category+' warning',name,'tape and diagnostics match',flush=True)
     assert positives>0
-    print('return warning:',len(cases),'cases;',positives,'with warnings; full -Wall still pending')
+    print(category+' warning:',len(cases),'cases;',positives,'with warnings; full -Wall still pending')

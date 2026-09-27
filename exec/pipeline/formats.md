@@ -93,13 +93,15 @@ warning selection and -Werror handling remain to be connected; these location
 tests alone do not claim warning compatibility.
 
 
-## Diagnostic rendering and return warnings (development)
+## Diagnostic rendering and warning rules (development)
 
-E3 `--warnings` implies `--locations`. It currently implements only the
-reference's `-Wreturn-type` decision, including its last-statement heuristic,
-main/void exemptions and suppression inside included headers. It is not a
-full `-Wall` mode and is not selected by the compiler CLI. Other warning
-kinds, multi-unit integration and `-Werror` remain pending.
+E3 `--warnings` implies `--locations`. It implements the reference's `-Wreturn-type` decision, including its
+last-statement heuristic and main/void exemptions, plus `-Wint-conversion`
+for assignments and local scalar initializers. The latter preserves the
+reference's syntactic lone-zero and call-result exemptions. Included-header
+warnings are suppressed. It is not a
+full `-Wall` mode and is not selected by the compiler CLI. Format/unused-variable warnings, multi-unit integration and `-Werror`
+remain pending.
 
 The model renderer derives file, line and column from retained preprocessing
 records and emits the source line/caret to stderr. `diagnosticcheck.py` compares
@@ -107,3 +109,8 @@ it with the actual reference diagnostic functions, including EOF/clamped
 positions, tabs, splices and header suppression. `returnwarningcheck.py`
 compares both tape and diagnostics and also checks that the quiet route emits
 no warnings. Neither adds a language-specific executor primitive.
+
+`returnwarningcheck.py --int-conversion` exercises the second rule on the
+same harness: it compares complete tape and diagnostic bytes, and checks the
+quiet route separately. This migration preserves the reference behavior;
+these checks do not establish full C conversion-constraint correctness.
