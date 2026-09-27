@@ -4435,3 +4435,13 @@ atexit/div/labs aggregate-return case. Full reconstruction remains open.
 结构体表达式初始化固定清单：旧265项与新增5d/s62（带填充字段、函数返回、声明逗号、3字节结构体、独立副本、调用次数）共267项与私有参考tape一致；新增两项网络链路相同后加入chain，现120项。解析网络4,881状态、536,676 B、1,259,042观测与表相同。实现只将目标地址保留与RHS求值接到已有AS.struct/COPYSTRUCT，不新增动作或复制算法。
 
 结构体表达式初始化收尾：双槽队列 `/tmp/unisacc-structinit-final` chain120/120（12.33s）、自身3,946,271 B tape相等（3.32s）、unitlocations（3.41s），3/3通过，窗口12.37s。真实模型候选 `/tmp/unisacc-structinit-candidate/unisacc-next.com` 5,887,318 B，SHA256 `50399aa6bf889ea83106ba36a400f327a275fd858c78556e3d6750e3595a0910`；5d/s62三个优化级别均同host cc。原C99清单54/57、wrong0、refused3、rc1，未降57基线；剩余自动VLA与两类复合字面量。本片只改模型生成与固定测试集，未改产品源/出货.com，无推送；全重构仍未完成。
+
+### 产品边界越界复核（进行中）
+
+cc报告switch超过256项静默误编译、-Wall的格式解码超过4096字节栈越界。暂停复合字面量扩展，先用私有临时目录复现产品，再为case写入及所有窄字符串decode调用补容量契约；超限明确诊断，不能继续写。同时检查switch嵌套表边界。参考与token dumper仍用私有路径，污染的共享/tmp/ua_ref不参与。
+
+产品边界修复验收：decode 所有窄字符调用显式传入目标sizeof，逐字节写入前检查；switch case表256项与嵌套16层先检查再写。新增parserbounds普通/.com门禁：256/257/1000项switch，4096/4097/9000字节-Wall格式串，4096/4097字节字符串初始化；边界内通过，超限rc1诊断，8项各通过。我的旧产品复现：9000字节-Wall以信号退出；1000case样例出现错误诊断，未重复声称已复现cc的同一错误值。容量未扩大，宽字符串解码及其他报告缺陷未纳入此结论。
+
+本轮冻结树私有UA `/tmp/unisacc-bounds-private` SHA256 e0c574ddb56036d3ffca04cfc364c612ab07610f46a5c4170e514c994e503cc1。完整门禁：双槽 `/tmp/unisacc-bounds-full`115/115，加独占 `/tmp/unisacc-bounds-core`1/1（48.31s）；程序核对请求与结果并集恰好116项、各一次、全rc0，UA哈希未变。每窗口≤55s。产品C9957/57、difftest_o396/396、fat133、chain120；新.com 1,356,272 B，SHA256 38c9ff7782c4607f91ace663fc43693582ca6c104ef7e011c227a1a45cc19c4c。定向首轮com-parserbounds因Python直接exec APE失败，已修为MZ走sh，并在新队列重验；旧失败保留。未发布、未推送。
+
+后续独立审查：cc提供pf_dryrun的-Wall标签编号漂移复现，指出nlab/frameoff/framemax/curcall未回滚。当前仅确认报告，下一片需核实完整状态副作用，不能以只保存四项就宣称无遗漏；重复case诊断、系统调用隔离分支仍未合入。

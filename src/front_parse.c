@@ -255,7 +255,7 @@ long numval(int t);
 int alloc_local(int n);
 int sadd(int t, int kind, int off, int elem);
 int addlit(char *b, int n);
-int decode(int t, char *buf);
+int decode(int t, char *buf, int capacity);
 
 int ec(int c) {
     if (toinit) {
@@ -1534,7 +1534,7 @@ int primary(void) {
     if (t == T_STR) {
         int sl;
         i = nlab; nlab = nlab + 1;
-        sl = decode(adv(), lbuf); i = addlit(lbuf, sl);
+        sl = decode(adv(), lbuf, sizeof(lbuf)); i = addlit(lbuf, sl);
         es("  @mem.lea r0, S"); en(i); ec(10);
         /* a char *: the kind is set whole, so `*"z"` loads its first char --
            a stale curpd/curstruct from before once left it the address */
@@ -1689,7 +1689,7 @@ int emit_pool(void) {
 }
 
 /* decode a C string literal token into buf, return its length */
-int decode(int t, char *buf) {
+int decode(int t, char *buf, int capacity) {
     int k; int n; int c;
     k = 1; n = 0;
     while (k < tlen[t] - 1) {
@@ -1738,6 +1738,7 @@ int decode(int t, char *buf) {
             else if (c == 102) c = 12;
             else if (c == 118) c = 11;
         }
+        if (n >= capacity) { err_tok(t, "decoded string exceeds buffer capacity"); return 0; }
         buf[n] = c; n = n + 1;
         k = k + 1;
     }
@@ -1777,7 +1778,8 @@ int pf_dryrun(int ft) {
     int save; int nsave; int isave; int psave; int pesave;
     if (warnall == 0) return 0;
     save = tp; nsave = nout; isave = nibuf; psave = npool; pesave = poolend;
-    n = decode(ft, fb);
+    n = decode(ft, fb, sizeof(fb));
+    if (panic) return 0;
     tp = ft + 1;
     k = 0;
     while (k < n) {
@@ -1816,7 +1818,7 @@ int do_printf(void) {
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     if (cur() != T_STR) { printf("printf needs a literal format\n"); __exit(1); }
     t = adv();
-    n = decode(t, fbuf);
+    n = decode(t, fbuf, sizeof(fbuf));
     /* Two passes over the format, as the Python walker does: pass 0
        evaluates every argument into a frame slot of its own, pass 1 writes.
        Interleaving was observable -- `printf("a %d\n", f())` wrote `a `
@@ -3841,7 +3843,7 @@ int initcount(void) {
     while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
     j = j + 1;
     if (iswide(j)) return wdecode(j, wcp) + 1;
-    if (kind(j) == T_STR) { return decode(j, buf) + 1; }
+    if (kind(j) == T_STR) { return decode(j, buf, sizeof(buf)) + 1; }
     return initcountat(j);
 }
 
@@ -3953,7 +3955,7 @@ int initstr(int isglobal, int gt, int off, int cap) {
         return 0;
     }
     t = adv();
-    n = decode(t, buf);
+    n = decode(t, buf, sizeof(buf));
     if (cap > 0) {
         initaddr(isglobal, gt, off, 0);
         es("  @mem.zero r1, 0, "); en(cap); ec(10);
@@ -4550,6 +4552,7 @@ int stmt_(void) {
         adv(); need(tidx("(", 1), "(");
         expr(); loadval();
         /* Case constants convert to the promoted controlling type. */
+        if (nsw >= 16) { err_tok(tp, "switch nesting exceeds capacity"); return 0; }
         swsize[nsw] = cursize; swuns[nsw] = curuns;
         if (cursize < 4) { swsize[nsw] = 4; swuns[nsw] = 0; }
         need(tidx(")", 1), ")");
@@ -4594,6 +4597,8 @@ int stmt_(void) {
             if (swuns[nsw - 1]) v = v & 4294967295;
             else v = (int)v;
         } }
+        if (nsw == 0) { err_tok(tp, "case outside switch"); return 0; }
+        if (nswv >= 256) { err_tok(tp, "switch case capacity exceeded"); return 0; }
         lab = newlab();
         swval[nswv] = v; swlab[nswv] = lab; nswv = nswv + 1;
         elab("L", lab); es(":\n");

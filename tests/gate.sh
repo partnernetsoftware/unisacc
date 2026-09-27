@@ -142,6 +142,7 @@ job warn        ./tests/warn.sh
 job diag-units  ./tests/diagunits.sh
 job nativeboot  ./tests/nativeboot.sh
 job staticinit  ./tests/staticinit.sh
+job parserbounds ./tests/parserbounds.sh
 job staticunits ./tests/staticunits.sh
 job cli         ./tests/cli.sh
 job ccparity    ./tests/ccparity.sh
@@ -155,7 +156,7 @@ job docs        ./tests/docs.sh
 job gate-infra python3 ./tests/queuecheck.py
 if [ "$COM" = 1 ]; then
     [ "$LIST" != 0 ] || [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
-    for s in cli ccparity run multi diag diagunits hostile staticinit staticunits; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
+    for s in cli ccparity run multi diag diagunits hostile staticinit staticunits parserbounds; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
     job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
 fi
 [ "$LIST" = 0 ] || exit 0
