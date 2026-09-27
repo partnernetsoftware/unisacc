@@ -4395,3 +4395,21 @@ atexit/div/labs aggregate-return case. Full reconstruction remains open.
 数组形参实现账：旧 E3 259 全保留，另两个 C99 用例 tape 相等；s60 覆盖 int/char/_Bool/double、static 与 const 界，三项经真实网络链路相等后加入固定清单（E3 262、chain 115）。复用参数描述符与 DECL，gen2 净增 10 行，无新执行器原语。候选 `/tmp/unisacc-arrayparam-candidate/unisacc-next.com` 为 5,880,954 B，SHA256 `d20f59d47b3b570b0898ccd39ae846b79985accb6f4fb46bac2ef24ee5c577b6`；三项在 -O0/-O1/-O2 与 host cc 同输出。原 C99 清单实跑 52/57、wrong 0、refused 5、rc 1，未降低 57 的门槛。解析网络 4,850 状态、534,393 B，1,251,044 个观测 network=table。
 
 固定清单队列 `/tmp/unisacc-arrayparam-final` 双槽：chain 115/115（11.83 s）、self 3,942,700 B 相等（3.39 s）、unitlocations（3.43 s），3/3 通过，窗口 11.87 s。实际候选对 `a[n++]` 与 `a[2][3]` 均 rc 1 拒绝；前者在带位置诊断模式报 expected ]，不声称已实现 VLA 界表达式求值。下一项仍为柔性数组成员、自动 VLA、复合字面量及聚合返回局部初始化；本轮不改出货 `.com`。
+
+### 柔性数组成员迁移（进行中）
+
+复用成员布局表，MAR=-1 表示柔性数组、MSZ=0、MFLAT=0，保留元素对齐与类型；成员存在性不能仅看 MSZ。仅接入结构体最后一个、且前有命名成员的柔性数组，沿用数组到指针的访问路径。不新增执行器原语，先验证旧 E3 清单与真实候选运行，再登记覆盖。
+
+柔性数组扩展探针发现参考产品缺陷：`struct P { int count; int *tail[]; }; p->tail[0]=&n` 的成员路径先 load64 再下标，`/tmp/ua_ref` 实跑 rc139。根因是 mbwidth==0 的数组退化错误地限定 mbptr==0，且 mbelem 已变为数组元素宽度8、丢失最终 pointee 宽度。先修产品：独立保存成员基类型宽度，数组成员增加一层指针深度且不提前加载，覆盖固定与柔性指针数组；不复制错误到模型。
+
+产品修复后，固定/柔性指针数组与 s61（char/double/指针/struct 元素）在 host cc 和原生参考 -O0/-O1/-O2 同输出，三项网络链路与修复参考 tape 相同。旧262项在修产品前已通过；现冻结源码，完整 --com 队列验证后才结案。新增三项固定清单：E3 265、chain 118。
+
+### 5.9 附记：getdents/execve 在 Windows 上暴露了一个既有的死数据缺陷（2026-09-27，后台 opus 代理在独立 worktree 里发现，未合并主树）
+
+按 §5.9 的清单，第 1、2 项（`__execve`、`__getdents64`）已经在一个独立 git worktree（`.claude/worktrees/agent-a25e85490a837aeb3`，分支 `worktree-agent-a25e85490a837aeb3`，未合并、未 push、分叉点在 `3359cc5`，**已落后主分支约 40 个提交**，含本节前面的数组形参、柔性数组成员等工作，合并前需要重新对齐）里做出来并验证：Linux/macOS 四个目标 `-run`/`-O0`/`-O2` 均与 host cc 逐字节一致（目录列举内容相同，`execve` 真实执行 `/bin/echo hello` 输出 `hello`）；lnx/x86_64 因为本机 Lima 虚拟机停着没测。
+
+**过程中发现一个真实缺陷，与这次改动本身无关，是既有数据**：`weights/gold/abi.tsv` 里 `clone`/`execve` 的 `win/x86_64`、`win/arm64` 行，`winimp` 字段是字面量 `none`——但 `winimp` 词表本身把字符串 `"none"` 登记为**合法词表项、下标 0**（`#head winimp - none ExitProcess WriteFile ...`），所以 `back_encode.c` 的 `bk_impof` 会正常"查到"它，返回下标 0，代码生成器就会去调 IAT 里下标 0 的导入槎——不对应任何真实 Windows API，运行时行为未定义。这两行数据在这次改动之前是**死数据**：没有任何前端内建能触达 `clone`/`execve`，所以从未被真正编译过。现在 `__execve` 接上前端后，这条路径**变得可达**：`-b win/x86_64` 编译一个用 `__execve` 的程序，编译器返回码 0（接受），没有拒绝，运行时结果未验证（没有 Windows 虚拟机手边）。这正是项目契约最忌讳的一类：**接受了输入却不能正确匹配参考行为，必须拒绝，不能悄悄接受**。`getdents` 的 win 行是这次新加的，抄了 `clone`/`execve` 的既有模式，所以带着同一个问题一起加了进去。
+
+**已安排修复**（同一个后台代理续做，在同一个 worktree 里）：在 lowering 阶段加一道通用检查——`gate` 为 `winapi` 但 `winimp` 恰好是字面量 `"none"` 时一律拒绝（不止 `execve`/`getdents`/`clone` 三个，做成对任何 op 都生效的防御），C 端与 Python 端都要改、行为要一致。结果记入本节下一次更新，或由 cdx 接手核对。
+
+**这一条本身给 FX-4"规格优先"提供了一个具体例证**：这个缺陷之所以潜伏了这么久没被发现，正是因为 `abi.tsv` 里的占位行本身看不出"哪些是真实现、哪些是占位"——`winimp=none` 既可能表示"这个目标真的不需要导入"，也可能表示"没人填"，两种语义共用一个值。分层覆盖或规则化规格（FX-4）如果要求"占位"必须显式区别于"真的是 none"，这类缺陷会在构造期就被查出来，不必等到有真实调用路径才暴露。
