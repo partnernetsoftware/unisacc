@@ -1,9 +1,9 @@
-"""Decimal literal conversion in delta actions, not in the executor.
+"""Decimal and hexadecimal literal conversion in delta actions.
 
 32-bit limbs keep M and powers of ten exact. Normalise their ratio, take
 only the destination's significant bits, and round once (nearest/even),
 including subnormals. The product's 160-limb bound is checked, never wrapped.
-Integer/character/hexadecimal token paths remain in the existing reader.
+Integer and character token paths remain in the existing reader.
 """
 
 
@@ -17,7 +17,12 @@ def install(E, P):
     g.st['SPANNUM.integer'] = g.st.pop('SPANNUM')
     P('SPANNUM').a(('INPUSHX', 'ps')).goto('DF.scan')
     g.on('DF.scan', b'.eE', 'DF.scanned')
-    g.on('DF.scan', b"xX'\n", 'DF.integer')
+    g.on('DF.scan', b'xX', 'HF.scan', [('ADV',)])
+    g.on('DF.scan', b"'\n", 'DF.integer')
+    g.on('HF.scan', b'pP', 'HF.scanned')
+    g.on('HF.scan', [10, 256], 'DF.integer')
+    g.els('HF.scan', 'HF.scan', [('ADV',)])
+    P('HF.scanned').a(('INPOP',)).goto('HF')
     g.on('DF.scan', [256], 'DF.integer')
     g.els('DF.scan', 'DF.scan', [('ADV',)])
     P('DF.scanned').a(('INPOP',)).goto('DF')
@@ -27,11 +32,26 @@ def install(E, P):
     P('NUMF').goto('DF')
     del g.st['NUMFL']
     P('NUMFL').goto('DF')
-    P('DF').a(('JUMP', 'ps'), ('LDI', 'df_n', 1), ('LDI', 'df_z', 0),
+    P('DF').a(('LDI', 'df_hex', 0)).goto('DF.init')
+    P('HF').a(('LDI', 'df_hex', 1)).goto('DF.init')
+    P('DF.init').a(('JUMP', 'ps'), ('LDI', 'df_offset', 0), ('LDI', 'df_n', 1), ('LDI', 'df_z', 0),
               ('STX', 'df_z', A, 'df_z'), ('LDI', 'df_frac', 0),
               ('LDI', 'df_exp', 0), ('LDI', 'df_seen', 0),
               ('LDI', 'df_mbits', 52), ('LDI', 'df_bias', 1023),
-              ('LDI', 'df_emin', -1022)).goto('DF.digits')
+              ('LDI', 'df_emin', -1022)).branch({1: 'HF.prefix'}, 'DF.digits', [('CMPI', 'df_hex', 1)])
+    g.on('HF.prefix', [48], 'HF.x', [('ADV',)])
+    g.els('HF.prefix', bad)
+    g.on('HF.x', b'xX', 'HF.digits', [('ADV',)])
+    g.els('HF.x', bad)
+    for digit, chars in enumerate(['0','1','2','3','4','5','6','7','8','9','aA','bB','cC','dD','eE','fF']):
+        g.on('HF.digits', chars.encode(), 'HF.digit', [('ADV',), ('LDI', 'df_digit', digit)])
+    P('HF.digit').a(('LDI', 'df_mul', 16), ('COPYW', 'df_carry', 'df_digit')).call('DF.mulA').a(
+        ('ALU', 'sub', 'df_exp', 'df_exp', 'df_frac'), ('LDI', 'df_seen', 1)).goto('HF.digits')
+    g.on('HF.digits', [46], 'HF.dot', [('ADV',)])
+    P('HF.dot').branch({1: 'HF.dotok'}, bad, [('CMPI', 'df_frac', 0)])
+    P('HF.dotok').a(('LDI', 'df_frac', 4)).goto('HF.digits')
+    g.on('HF.digits', b'pP', 'DF.exponent', [('ADV',)])
+    g.els('HF.digits', bad)
     for d in range(10):
         g.on('DF.digits', [48+d], 'DF.digit', [('ADV',), ('LDI', 'df_digit', d)])
     P('DF.digit').a(('LDI', 'df_mul', 10), ('COPYW', 'df_carry', 'df_digit')).call('DF.mulA').a(
@@ -97,7 +117,9 @@ def install(E, P):
     # For negative e, M*10^e < 2^(bits(M)+3e). Only discard a value
     # proven below half the smallest subnormal; a long significand can
     # cancel a large negative exponent (e.g. 10^1000 * 10^-1000).
-    P('DF.expbound').branch({0: 'DF.under'}, 'DF.expmax', [('CMPI', 'df_exp', 0)])
+    P('DF.expbound').branch({1: 'HF.setup'}, 'DF.decimalbound', [('CMPI', 'df_hex', 1)])
+    P('HF.setup').a(('COPYW', 'df_offset', 'df_exp'), ('LDI', 'df_exp', 0)).goto('DF.setup')
+    P('DF.decimalbound').branch({0: 'DF.under'}, 'DF.expmax', [('CMPI', 'df_exp', 0)])
     P('DF.under').a(('ALUI', 'mul', 'df_upper', 'df_exp', 3), ('ALU', 'add', 'df_upper', 'df_upper', 'df_bits'),
         ('ALU', 'sub', 'df_floor', 'df_emin', 'df_mbits'), ('ALUI', 'sub', 'df_floor', 'df_floor', 1)).branch(
         {(0, 1): 'DF.zero'}, 'DF.expmax', [('CMP', 'df_upper', 'df_floor')])
@@ -115,7 +137,7 @@ def install(E, P):
         P('DF.sh'+tag).a(('LDI', 'df_mul', 2), ('LDI', 'df_carry', 0)).call('DF.mul'+tag).a(('ALUI', 'sub', 'df_shift', 'df_shift', 1)).goto('DF.shift'+tag)
     P('DF.adjust').call('DF.cmp').branch({1: 'DF.adjust1'}, 'DF.precision', [('CMPI', 'df_cmp', 0)])
     P('DF.adjust1').a(('LDI', 'df_mul', 2), ('LDI', 'df_carry', 0)).call('DF.mulA').a(('ALUI', 'sub', 'df_e', 'df_e', 1)).goto('DF.precision')
-    P('DF.precision').a(('ALUI', 'add', 'df_prec', 'df_mbits', 1), ('ALU', 'sub', 'df_delta', 'df_e', 'df_emin')).branch({0: 'DF.subnormal'}, 'DF.quotient', [('CMPI', 'df_delta', 0)])
+    P('DF.precision').a(('ALU', 'add', 'df_e', 'df_e', 'df_offset'), ('ALUI', 'add', 'df_prec', 'df_mbits', 1), ('ALU', 'sub', 'df_delta', 'df_e', 'df_emin')).branch({0: 'DF.subnormal'}, 'DF.quotient', [('CMPI', 'df_delta', 0)])
     P('DF.subnormal').a(('ALU', 'add', 'df_prec', 'df_prec', 'df_delta')).branch({0: 'DF.zero', 1: 'DF.halfunit'}, 'DF.quotient', [('CMPI', 'df_prec', 0)])
     P('DF.halfunit').call('DF.cmp').branch({1: 'DF.zero'}, 'DF.one', [('CMPI', 'df_cmp', 1)])
     P('DF.one').a(('LDI', 'nv', 1)).ret()

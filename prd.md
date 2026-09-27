@@ -4239,3 +4239,25 @@ Actual rebuilt development container at /tmp/unisacc-qual-candidate:
 C99 44/57, 0 wrong, 13 refusals (previously 42/57); restrict and inline
 are now accepted with correct output. The suite correctly exits 1 against
 the unchanged 57 baseline. No default switch or completeness claim.
+
+Next floating-literal slice: hexadecimal significands reuse the existing
+limb ratio normalizer and nearest-even packer. Parse base-16 digits and a
+mandatory binary p exponent in the delta, then add the binary exponent to
+the normalized ratio exponent; no host floating parser or executor action.
+Check host-cc bit patterns at rounding/subnormal/overflow boundaries, and
+full source through the actual model compiler. _Bool stays open: its width
+and normalization must be represented across declaration/conversion paths.
+
+Hexadecimal floating slice verified: 61 host-cc bit-pattern expectations
+(decimal plus hex), table and threshold-network execution agree; 10 invalid
+forms reject on both. Covers ties-to-even, normal/subnormal boundary, half
+minimum subnormal, maximum finite/overflow, huge signed exponents and a
+1001-digit hexadecimal significand whose exponent cancels its scale.
+Old E3 248 plus C99/07 all equal, old source/network chain 101/101 retained;
+new C99/07 separately equal through the network chain. Keep lists raised
+only afterwards to E3 249 and chain 102. Two-slot gate queue: float bits
+3.14 s, chain 9.86 s, total 9.90 s. No new executor action.
+Rebuilt /tmp/unisacc-hex-candidate/unisacc-next.com SHA-256
+048f9444d5bc86fabc88dd0b8857a6f006f1eea273c957c58f7528a7f7f620bf:
+actual C99 45/57, wrong 0, refused 12, rc 1 against unchanged baseline 57.
+The reference product was not changed; no release/default switch.
