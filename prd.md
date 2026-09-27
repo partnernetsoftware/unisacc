@@ -4889,3 +4889,11 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第九批并行决定：E3剩余TSPEC/指针尺度完整组，共享parse/gen.py的prn/numout/fconv完整数字组，以及lower的prelude/ABI系统调用控制各自隔离迁入既有声明。共享数字变动与E3消费者以同一250daa6基线独立比对，合入后再组合验证；保留tokenizer/自动引头以免任务无界。各8分钟、子步骤≤60秒，不新增框架或重复模型答案。
 
 第九批验收（2273f3e）：共享PRN/PRNW/NUMOUT/FCONV、TSPEC/DSTARS/PWIDTH/SCALE/DSCALE、lower prelude及syscall准备回写已迁声明。Python净减90，TSV增加358，总源净增268。PRN/PRNW审查后共用一节，以宽度/状态绑定两次实例化；数字25消费者全图同。E3新增动态类型词旧新全图同；首轮导入build发现CLI warnings全局依赖，已修并重跑。父双槽9/9全rc0（52.19秒窗口8项，rc75续跑2.25秒完成最后项），含E4自身两级、chain167/167、多单元位置、ARM及三类lower。新候选2273f3e重建与上一批哈希完全相同：5,985,519 B，sha256 19a4558210cfe1a7a1cc24e0aeeaf94e2edb2cf091725512c9eb56b2cda4cc1f；六目标镜像同参考，六程序含b_float/b_fconv×O0/O1/O2共18次实跑同宿主cc。证据/tmp/unisacc-parallel-ninth-candidate/acceptance.json。仍有tokenizer/自动引头、E3表达式与初始化、ABI主体、其余编码/镜像规则和产品兼容缺口，默认产品未切换，完整目标保持。
+
+第十批并行决定：E3完整OPX/CKM/RESD运算尾组，共享tokenizer的固定数字/字符token读取组（动态词典trie保留），lower剩余SYSCALL/SC调用体使用参数化声明迁移。动态type/tyinfo/ABI来源不复制，各取27d704e隔离基线，8分钟/命令60秒；父集中验收。
+
+第十批审查调整：lower全ABI尝试只是将P通用装配换成长绑定字典，Python+25且实质决策仍在，父拒绝合入该包装；保留通用P装配，只把mode/shape参数来源关系迁数据，ABI余控制继续明确未迁。E3完整OPX任务首窗口仅完成CKM/RESD中间态，未合入，继续一个有界窗口完成共享组合模板，避免以局部交付替代整组。
+
+第十批验收（c839770）：完整OPX/CKM/RESD共享参数规则、固定字符/数字token读取、自动引头定义/使用扫描、ABI参数来源关系已合入。Python净减126行，TSV增加470行，源合计净增344。父拒绝ABI机械包装，并删未读取的参数index列，行序唯一决定位置；ABI余控制尚在，不称整组完成。OPX用共享查询/浮点体/指针类别/整数尾，不逐operator复制；五模式全图和动态AX/TYINT/FPU/optext扰动相同，3实际网络探针通过。父双槽6/6全rc0，20.29秒，chain167/167、三lower、多单元位置和警告诊断全绿。本批未重打.com，最新产物仍2273f3e；上一产物补测两个真实编译单元含浮点调用和INT64_MIN，O0/O1/O2三次同cc，证据/tmp/unisacc-parallel-ninth-candidate/multiunit-acceptance.json。
+
+共享token读取审计边界：直接reader把裸0x当整数0是既有行为。父仅编译最小源int main(void){return 0x;}验证：当前私有参考与2273f3e真实候选均rc0，宿主cc rc1，未运行该不合法程序；不是迁移新引入，也不是C99正确性的证据，单列既有诊断缺口（/tmp/unisacc-malformed-token-evidence.json）。
