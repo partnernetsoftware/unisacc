@@ -9,7 +9,7 @@ def ok(cmd, **kw):
 src=pathlib.Path('examples/hello.c').resolve();n=0
 drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
 part=sys.argv[4] if len(sys.argv)>4 else 'all'
-assert part in ('all','core','core-modes','core-contracts','core-dependencies','resources','language'),part
+assert part in ('all','core','core-modes','core-contracts','core-dependencies','resources','language','language-1','language-2'),part
 def assembly_package(directory):
     isolated=p/directory;isolated.mkdir()
     asm=isolated/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
@@ -246,7 +246,7 @@ if part in ('all','resources'):
     assert set(isolated.iterdir())==before, 'memory run created a file'
     print('compiler driver resources: macros, headers, printf and isolated containers pass',flush=True)
 
-if part in ('all','language'):
+if part in ('all','language','language-1','language-2'):
     asmdir,base=assembly_package('language-isolated')
     # Decimal rounding and the entire carried math header must survive the real
     # network route, not just the converter's unit harness. Independent cc runs
@@ -256,6 +256,10 @@ if part in ('all','language'):
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
                ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
                 'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref', 'vararg_aggregate', 'member_string_init']]
+    assert len(probes)==len(set(probes)) and probes, 'empty/duplicate language probes'
+    shard = int(part[-1])-1 if part.startswith('language-') else None
+    if shard is not None: probes=probes[shard::2]
+    assert probes, 'empty language shard'
     for source in probes:
         source=source.resolve(); name=source.stem
         host=p/(name+'-cc'); native=p/(name+'-model')
@@ -265,8 +269,9 @@ if part in ('all','language'):
         ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==expected
     # Invalid pointer/null conditional operands must fail without emitted tape.
     source=pathlib.Path('exec/c/probes/conditional_deref.c').resolve()
-    for macro in ['QT_RUNTIME_ZERO','QT_FLOAT_ZERO','QT_DIFFERENT_POINTER']:
+    negatives = ['QT_RUNTIME_ZERO','QT_FLOAT_ZERO','QT_DIFFERENT_POINTER'] if shard != 1 else []
+    for macro in negatives:
         for level in ['-O0','-O2']:
             r=run([*base,source,'-D'+macro,level,'-b',target,'-S'],cwd=asmdir)
             assert r.returncode==1 and not r.stdout and b'error: not covered: ?: arms of different types' in r.stderr and r.stderr.endswith(b'1 error generated.\n'),(macro,level,r.returncode,r.stdout,r.stderr)
-    print(f'compiler driver language: {len(probes)} host/ASM network memory O0/O2 and native probes; 6 conditional rejects pass',flush=True)
+    print(f'compiler driver {part}: {len(probes)} host/ASM network memory O0/O2 and native probes; {len(negatives)*2} conditional rejects pass',flush=True)

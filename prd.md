@@ -5047,3 +5047,5 @@ printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开
 三私有组统一合入70d3952：CALL/FN/addr-fmtwalk固定Python分别净减64/75/2，声明增加379/314/32，总源码不是下降；回调数组兼容修复另计。父联合language25正例与6拒绝、E3自身源码3990936B table tape同参考，双槽51.50秒通过。共享+六目标分别两槽构建、pack最后执行，新完整候选源70d395240e94630f9ee01e9f8c138fb30f30da04：/tmp/unisacc-controls-candidate-928/unisacc-next.com，6278823B，sha256 a1115126d8281c93a1b38c3c3fc491779994201d14cf60cd2005933faa19ffb0，包6095511B；22 shared/target全域network/table检查通过。新候选原220 corpus四片双槽21.86秒：216pass/0wrong/0unsupported/4原knownfail/0slow，最后00209闭合，基线不减。新候选其余优化/平台/固定点证据仍需自身验证，未将旧包测试冒用；默认产物未替换、未发布。
 
 后续并行分工决定：E3完整一元/cast/标识符表达式控制、E4全局声明/初始化控制、E5宽度/类型及ELSZ控制分属私有域；不新增语言，保持完整图与真实共享依赖。父对固定a1115126候选补优化差分/产品契约及平台验收，源码写入与主树测试不重叠，重型任务全机双槽排队，结果不跨候选转用。
+
+当前a1115126候选优化429全部agree；固定包模型驱动N1=N2=N3完整115746B（cebaed0a…13f96），N3空PATH原生/内存O0/O2同host且缺包rc2；Linux两ISA及Rosetta x86各3实际probe通过，Windows验证继续。第二批2738a3f/1737c4a/f3ba57c已合，language25+6主树52.75秒通过，逼近55秒窗口。因此保持language/all聚合接口，门禁把同一25探针清单按固定奇偶位置拆language-1/2，6拒绝只在第一片，各项恰好一次，不增加缓存/框架。父做这个队列拆分；第三轮两个私有域分别MEMB/POSTIX/赋值与局部初始化，第三代理只读列实际剩余控制，防止漏掉import辅助模块。

@@ -1,10 +1,10 @@
 # Compiler driver gate parts
 
 `compilercheck.sh` / `compilercheck.py` accept `core-modes`, `core-contracts`,
-`core-dependencies`, `resources`, `language`, and the aggregate aliases `core`
-and default `all`. `core` executes its three parts; `all` executes all five.
+`core-dependencies`, `resources`, `language-1`, `language-2`, and the aggregate aliases `language`, `core`
+and default `all`. `core` executes its three parts; `all` executes every assertion.
 The aliases retain the previous assertion set, but are not bounded gate units.
-A complete driver result requires all five gate receipts.
+A complete driver result requires all six gate receipts.
 
 | Gate | Scope |
 |---|---|
@@ -12,7 +12,7 @@ A complete driver result requires all five gate receipts.
 | `exec-driver-core-contracts` | Compatibility flags, stdin, output preservation, source/output IO and undefined-function checks |
 | `exec-driver-core-dependencies` | Dependency resource-read ledger and token dump |
 | `exec-driver-resources` | Macro/include resources, printf fallback, isolated ASM package and APE CLI/memory/native checks |
-| `exec-driver-language` | Original 19 probes plus scalar prefix, conditional dereference, aggregate varargs and member string initialization; ASM network memory O0/O2 and native O2 versus host cc; three conditional rejection macros at O0/O2 |
+| `exec-driver-language-1`, `exec-driver-language-2` | The same 25 positive probes, split by alternating list positions (13/12); ASM network memory O0/O2 and native O2 versus host cc; all six conditional rejection variants in shard 1 only |
 
 The six conditional negative cases require rc 1, empty stdout and the observed
 `error: not covered: ?: arms of different types` diagnostic ending in
@@ -22,10 +22,10 @@ The two isolated ASM consumers use the same setup helper. The language part does
 not construct unused C/reference drivers or an APE. Every part retains the
 existing `elf.sh` -> `models.py` preparation and hash-verified model cache;
 there is no new cache or result reuse. Set `UNISACC_MODEL_CACHE` and `UA` explicitly
-for isolated runs. Use the existing rolling queue with the five actual gate names:
+for isolated runs. Use the existing rolling queue with the six actual gate names:
 
 ```sh
-./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources --suite exec-driver-language
+./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources --suite exec-driver-language-1 --suite exec-driver-language-2
 ```
 
 Each invocation has a maximum 55-second window. Exit 75 means unfinished work:
@@ -59,3 +59,8 @@ direct non-Terminal resource/language attempt and monolithic core timeout are no
 counted as passes. These are local driver checks, not other-platform or complete
 project-suite evidence. The queue command above documents the existing scheduler;
 the measurements used separate bounded `gate.sh --suite` batches.
+
+The unsplit 25-probe language run reached 52.75 seconds on the combined source.
+The two shards retain exactly the same list and assertions; `language` and `all`
+still execute the full list for callers outside the bounded gate. Both shard
+receipts are required. No test result or construction cache is newly introduced.

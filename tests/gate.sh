@@ -123,7 +123,7 @@ fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 for part in modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
 job exec-driver-resources ./exec/c/compilercheck.sh resources
-job exec-driver-language ./exec/c/compilercheck.sh language
+for shard in 1 2; do job exec-driver-language-$shard ./exec/c/compilercheck.sh language-$shard; done
 job exec-warningdriver ./exec/c/warningcheck.sh
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
 job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py
