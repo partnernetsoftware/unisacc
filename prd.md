@@ -3343,3 +3343,28 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   dispatch and argument-string-before-format-fragment pool order still need
   migration. The old 58/64 CLI result is not relabelled green by this slice.
   Default product unchanged, no push/release, cc-unisacc stays paused.
+
+### Model printf fallback: conversion dispatch and nested arguments
+
+- E3 now reads pfconv for d/i/u/x/X/o/p/c/s and emits the reference fallback's
+  explicit tape helpers. Declared printf remains an ordinary function call.
+  This preserves the fallback's zero return and ignored width/precision;
+  it is not a claim of full libc printf semantics (notably fallback %p).
+- Format strings are decoded before scanning, including escaped percent and
+  adjacent literals. Argument literals are pooled before format fragments;
+  nested calls record their actual frame slots instead of assuming contiguous
+  slots. No executor primitive was added. Source grows; no reduction claimed.
+- Final generated E3 preserves the fixed 243 accepting tapes byte for byte.
+  Fresh compilercheck passes: all nine conversion letters, nested calls,
+  literal-pool order, escaped/adjacent formats, exact tape and actual output
+  on cc/unisacc/assembly drivers. Permanent probe:
+  exec/parse2/probes/printf_fallback.c. Logs:
+  /tmp/unisacc-pf-keep-final.log and /tmp/unisacc-pf-driver.log.
+- Fresh development container: 3,211,436 B, SHA256
+  49cfc5183488fe36a95fda2466e4fa50cc3ccdb223fd290eb36564cfa778c4f2.
+  Actual macOS arm64 and Rosetta x86_64, O0/O1/O2, memory and native output:
+  all pass the permanent probe. /tmp/unisacc-pf-native.log.
+- Full candidate CLI suite: 59/64, exit 1. Remaining: warning options,
+  dependency target/header output, undefined-function diagnostic, token dump.
+  /tmp/unisacc-pf-cli.log. No full-gate or Linux/Windows execution claimed.
+  Default product unchanged; no push/release; FX conjectures remain unscheduled.

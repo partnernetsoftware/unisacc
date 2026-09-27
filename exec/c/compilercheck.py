@@ -106,6 +106,17 @@ for exe in drivers:
     flags=['-nostdinc','-b',target,'-S']
     assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
 print('undeclared printf decimal fallback: tape equality and integer boundary execution pass')
+fallback=pathlib.Path('exec/parse2/probes/printf_fallback.c').resolve()
+expected=(b'-1 2 4294967295 1f 1F 37 1f ok ! %\n'
+          b'inner a\nouter 0 b\nescaped z / Q / 7\n')
+assert ok([ua,'-nostdinc','-run',fallback])==expected
+flags=['-nostdinc','-b',target,'-S']
+want=ok([ua,fallback,*flags])
+for exe in drivers:
+    assert ok([exe,'--models',p/'compiler.pkg',fallback,*flags])==want
+    assert ok([exe,'--models',p/'compiler.pkg','-nostdinc','-run',fallback])==expected
+print('printf fallback: nine conversions, nested slots/pools, escapes/adjacent formats pass')
+
 
 probe.write_text('int main(void) { return VALUE; }\n')
 flags=['-DVALUE=7','-b',target,'-O2']
