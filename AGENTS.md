@@ -155,3 +155,32 @@ stages by `exec/pipeline/stages.tsv`; `exec/stamp.sh` rebuilds any generated
 artefact whose inputs changed -- do not trust a cached file in /tmp. A delta
 that ACCEPTS input and differs from the reference is a bug; anything it
 cannot match exactly must be rejected as "not covered".
+
+## Delegating to a stronger subagent: desensitise first
+
+Measured 2026-09-27 (a design question on table flexibility, two opus
+subagents, both delivered): a high-capability subagent can be tripped by
+safety heuristics when the brief is full of platform-specific mechanics.
+What worked was for the parent to survey the repo itself, then hand over a
+**self-contained, abstracted brief**:
+
+- State the problem in its general form ("a table-driven language
+  processor: finite decision tables, a generic executor, byte-exact
+  equivalence to a reference"), not the mechanics of this repo's
+  executable-image, signing, syscall or in-memory-loading work.
+- Give the numbers and the hard constraints (determinism, byte-for-byte
+  equality, exhaustive verification, executor size), so the answers stay
+  usable. Ask for a diagnosis, 5-8 concrete ideas with prior art and a
+  smallest experiment each, and a recommendation of two, plus which
+  attractive ideas conflict with the constraints.
+- The brief goes in a file; the subagent reads only that file, touches no
+  repository files, runs no commands, and writes one report to a named path.
+  One deliverable per agent, 8 minutes, a different lens per agent.
+- Afterwards the parent checks the claims against real data before
+  recording them: here two of the reports' generalisations were narrowed by
+  a quick measurement over `weights/gold/*.tsv` (overlays help `enc`, not
+  `abi`/`combo`).
+- Say plainly which results are designed-only and which were run.
+
+The point is not to hide anything from anyone: the subagent's job is the
+general problem, and the general problem is all it needs.
