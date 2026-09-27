@@ -3412,3 +3412,33 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   and undefined-function diagnostic remain. /tmp/unisacc-deps-cli.log.
 - Default compiler unchanged; no full-gate or Linux/Windows native result
   claimed for this batch. No push/release. Reconstruction remains incomplete.
+
+### Model compiler deferred undefined-function diagnostics
+
+- E3 no longer rejects an ordinary call merely because the definition has not
+  been read yet. Unknown calls initially use the reference's scalar result
+  descriptor. After all input units and helper generation, unresolved.py scans
+  the actual tape twice: collect labels, then check calls in emission order.
+  This includes nested-call ordering and reports each missing name once.
+  Prototypes alone do not satisfy the check. This migrates the reference's
+  behaviour, including its acceptance of an undeclared call defined later;
+  it is not a new C99 conformance claim for implicit declarations.
+- Diagnostics and singular/plural error counts are model-produced bytes on
+  the existing error stream. Empty rejection reasons no longer cause the host
+  to prepend a spurious 'reject:' line. No language-specific runtime primitive
+  or C-side tape scan was added. The byte scans add generated rules/work;
+  no source-size or speed improvement claimed.
+- Fixed 243 accepting tapes remain byte-identical. E3 self-source produces
+  3,929,446 bytes equal to the reference under the 60 s watchdog. Fresh
+  compilercheck passes on cc/unisacc/assembly drivers: unknown names,
+  declaration without definition, duplicate calls, nested calls, later
+  same-unit and later-unit definitions, and fail-before-output protection.
+  Logs: /tmp/unisacc-ud-{keep,self,driver}.log.
+- Rebuilt container: 3,262,731 B, SHA256
+  6f79bf96c2b6e91a4d80c48dbb2897ed0545c69a161f185b83bf4bc507e0863b.
+  macOS arm64 and Rosetta x86_64 execute the later-definition program with
+  expected exit 7 and produce exact nested missing-function diagnostics.
+  /tmp/unisacc-ud-native.log. CLI 63/64, exit 1; -Wall remains unmigrated.
+  /tmp/unisacc-ud-cli.log. No full gate or new Linux/Windows execution claimed.
+- Default product unchanged. Local commit only, no push/release; full
+  reconstruction and the final product switch are still incomplete.

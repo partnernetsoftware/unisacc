@@ -43,6 +43,7 @@ class P(E.P):
 
 E.P = P
 g = E.g
+from unresolved import install as ud_install
 
 # ---- declared data 1: tape templates (measured once from the reference) -------------
 # {name} prints W[name] in decimal; text is copied as is.
@@ -743,7 +744,7 @@ def build():
     P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
     P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", E.FND)).branch({1: "END.ex"}, "END.x2", [("CMPI", "t", 1)])
     P("END.ex").o("  call exit\n").goto("END.x2")     # a unit that defines exit calls it on return from main (measured)
-    P("END.x2").o("  .exit r0\n").call("PF.helpers").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").a(("ACCEPT",)).goto("DEAD")
+    P("END.x2").o("  .exit r0\n").call("PF.helpers").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").call("UD.check").a(("ACCEPT",)).goto("DEAD")
     p = P("INITS")
     p.call("NEXT").label("IN.l")
     p.branch({1: "IN.scan"}, "IN.static", [("LDX", "si_blob", "tpos", SINIT), ("CMPI", "si_blob", 0)])
@@ -1563,7 +1564,7 @@ def build():
     g.on("DEAD.nl", range(257), "DEAD", E.rej("not covered: identifier is not a local"), "r")
     # CALL: at '(' after ips..ipe: arguments pushed left to right, popped into r(n-1)..r0, call
     p = P("CALL")
-    # the callee must be defined above (the reference rejects a call to an undefined function: probe r1)
+    # Ordinary callees are resolved after all function bodies have been read.
     # syscall builtins (the old E3's declared table SYSCALLS), __argc(), __argv(k) -- measured there
     p.a(("INTERN", "v", "ips", "ipe"), ("LDI", "sys", 0), ("LDX", "t", "v", LOC)).branch({1: "CL.va0"}, "CL.fpv", [("CMPI", "t", 0)])
     p = P("CL.fpv")      # the callee's value: a local's `load64 r0, [r6-N]`, a global's .lea + load64 (measured)
@@ -1627,7 +1628,10 @@ def build():
                     source = "d"
                 q.o("  %s r0, r0\n" % fpu[source + "2" + suffix])
             q.ret()
-    P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.def1"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
+    P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.def1"}, "CL.implicit", [("CMPI", "t", 1)])
+    # Match the reference's unknown-call scalar result; final definition
+    # resolution happens after all units, not while reading this call.
+    P("CL.implicit").a(("LDI","t",8),("STX","v",E.FRB,"t")).goto("CL.def1")
     P("CL.def1").a(("LDX", "t", "v", E.VAR)).branch({1: "CL.vok"}, "CL.ok", [("CMPI", "t", 1)])
     P("CL.vok").a(("LDI", "sys", 200)).goto("CL.ok")
     g.on("DEAD.vc", range(257), "DEAD", E.rej("not covered: call to a variadic function"), "r")
@@ -1683,6 +1687,7 @@ def build():
         P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()   # a call's value is an i64 (pf_call)
     p = P("CL.call")
     emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
+    ud_install(P)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

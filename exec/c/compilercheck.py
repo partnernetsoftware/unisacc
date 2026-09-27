@@ -56,6 +56,33 @@ for exe in drivers:
         resource.setrlimit(resource.RLIMIT_FSIZE,(1024,1024));signal.signal(signal.SIGXFSZ,signal.SIG_IGN)
     r=run([*base,src,'-b',target,'-o',p/'limited'],preexec_fn=limit)
     assert r.returncode==1 and b'short output write' in r.stderr,(r.returncode,r.stderr)
+# Undefined function checks must wait for definitions in later input units.
+ud=p/'undefined.c';late=p/'later-definition.c';sentinel=p/'undefined.out'
+for text in [
+        'int main(void){return nosuchfn(3);}',
+        'int missing(int); int main(void){return missing(1);}',
+        'int main(void){first(); second(); first(); return 0;}',
+        'int main(void){return outer(inner());}']:
+    ud.write_text(text)
+    ref=run([ua,ud,'-S','-o','-'])
+    assert ref.returncode==1 and b'undefined function' in ref.stderr
+    for exe in drivers:
+        sentinel.write_bytes(b'keep')
+        r=run([exe,'--models',p/'compiler.pkg',ud,'-b',target,'-S','-o',sentinel])
+        assert r.returncode==1 and not r.stdout and r.stderr==ref.stderr,(text,exe,r.stderr,ref.stderr)
+        assert sentinel.read_bytes()==b'keep'
+for text in ['int later(int); int main(void){return later(7);} int later(int x){return x;}',
+             'int main(void){return later(7);} int later(int x){return x;}']:
+    ud.write_text(text)
+    want=ok([ua,ud,'-S','-o','-'])
+    for exe in drivers:
+        assert ok([exe,'--models',p/'compiler.pkg',ud,'-b',target,'-S'])==want
+ud.write_text('int later(int); int main(void){return later(7);}')
+late.write_text('int later(int x){return x;}')
+want=ok([ua,ud,late,'-S','-o','-'])
+for exe in drivers:
+    assert ok([exe,'--models',p/'compiler.pkg',ud,late,'-b',target,'-S'])==want
+print('undefined functions: exact named errors, prototypes, duplicates and later definitions pass')
 # Dependency files follow successful real resource reads, never a textual
 # search for include directives. The ledger canonicalises repeated paths.
 dep_src=p/'deps.c';dep_head=p/'outer.h';dep_leaf=p/'leaf.h'
