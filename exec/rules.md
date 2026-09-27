@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Source inventory refreshed after `3520fbb` (2026-09-28). This is a remaining-work
+Source inventory refreshed after `2d27cbf` (2026-09-28). This is a remaining-work
 list, not a completion percentage. Historical batch results and artifact hashes
 remain in `prd.md`; they are not repeated here.
 
@@ -56,17 +56,18 @@ helper does not discharge the obligation. This is source review, not new test ev
 
 - In `gen2.py`: startup/unit markers; return handling; CEXPR/lvalue lookahead;
   conditional expressions; update/compound-assignment/type-axis dispatch;
-  identifier lookup and dereference; sizeof. Scalar TO conversions are now declared.
+  identifier lookup and dereference. Return/CEXPR/LP/QTAIL, sizeof and scalar TO
+  conversions are now declared.
 - Member/postfix/assignment/copy and local declaration/initialization controls
   are now declared (`be71979`, `07c42b6`), with complete graph comparisons and
   targeted actual network/native checks. Scalar truth/boolean/TO controls are
   declared in `3520fbb`; Python binding code grew by 22 lines in that group.
-- Ordinary imports still in progress: `floatconst.py`, and tokenizer
-  terminal/default/qualifier policies in `parse/gen.py`.
-- Product diagnostic modes: `tokenlocations.py`, `diagnostics.py`, `errors.py`,
-  `returnwarnings.py`, `intwarnings.py`, `unusedwarnings.py`, `formatwarnings.py`.
-- Product unit framing models: `units.py` and `unitlocations.py`; preserve their
-  existing declared label handling and shared location-reader interface.
+- Ordinary float literals and token-reader terminal/default/qualifier policies
+  are declared. The shared dynamic word trie remains ordinary construction.
+- Product diagnostic modes: `tokenlocations.py` and `errors.py` remain in progress;
+  diagnostics and the four warning helpers are declared.
+- Product unit framing: `units.py` remains; `unitlocations.py` is declared.
+  Preserve existing label handling and the shared location-reader interface.
 
 Already declared: width/types/optail/tytail/ladder, addr/fmtwalk/printf,
 bitfields, callcontrol, conditional proof rules, constexpr, enum/function types,
@@ -132,3 +133,10 @@ into modes, contracts and dependencies; see [c/COMPILERCHECK.md](c/COMPILERCHECK
 Stage construction is independently schedulable before a validated final pack;
 see [c/BUILDING.md](c/BUILDING.md). Parallel jobs use private artifact paths and a
 frozen source tree. Passing a selected batch never implies the entire gate passed.
+
+Joint source check: all five complete expanded E3 modes at `2d27cbf` match
+`70d3952`, including observations, actions, strings and top-level metadata.
+This checks the combined migrations, not only isolated branches; packed bytes
+may still differ due to insertion order. Fixed `a1115126` separately passed all
+15 selected product gate jobs, including 11 real tools. Neither result substitutes
+for rebuilding and checking the final adopted artifact.
