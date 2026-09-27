@@ -4322,11 +4322,13 @@ int local_decl(void) {
                `sizeof`.  The first one in a block saves the stack pointer,
                and the block's end -- or a break/continue out of it -- puts
                it back, or a loop would eat the stack. */
-            int el; int szs;
-            adv(); expr(); loadval(); need(tidx("]", 1), "]");
+            int el; int szs; int vpd; int vbase; int vuns; int vbool; int vfp;
+            vpd = declpd; vbase = declbase; vuns = declunsigned;
+            vbool = declbool; vfp = declfp;
             el = w;
             if (sst >= 0) el = declsz;
             if (declptr) el = 8;
+            adv(); expr(); loadval(); need(tidx("]", 1), "]");
             eimm(2, el); es("  @alu.mul r0, r0, r2\n");
             szs = alloc_local(8);
             es("  @mem.store [r6-"); en(szs); es("], r0\n");
@@ -4338,7 +4340,9 @@ int local_decl(void) {
                "  @alu.and r0, r0, r2\n  @alu.sub r7, r7, r0\n");
             off = alloc_local(8);
             es("  @mem.store [r6-"); en(off); es("], r7\n");
-            declptr = 1; declbytes = 8;
+            declptr = 1; declbytes = 8; declpd = vpd + 1; declbase = vbase;
+            declstruct = sst; declflt = lflt0; declunsigned = vuns;
+            declbool = vbool; declfp = vfp; decldim2 = 0; decldim3 = 0;
             sadd(t, lbind, off, el);
             symvla[nsym - 1] = szs;
             if (eat(tidx(",", 1))) continue;

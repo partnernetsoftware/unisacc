@@ -37,6 +37,8 @@ from unisa.front.parse import INTRINSIC, INTRINSIC6
 SYSCALLS = [(name, op, 3) for name, op in INTRINSIC.items()] + [(name, op, 6) for name, op in INTRINSIC6.items()]
 
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
+VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
+UNDO_SIZE = 16
 DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges two states silently
 
 
@@ -955,7 +957,7 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.copynext").a(("ALUI", "add", "cpi", "cpi", 1)).goto("FN.copyloop")
     p = P("FN.go")
     if warnings: p.a(("LDI", "wr_last", 0), ("COPYW", "wu_fn", "usp"))
-    p.call("NEXT").call("STMTS")
+    p.a(("LDI","vl_depth",0)).call("VL.enter").call("NEXT").call("STMTS").call("VL.leave")
     if warnings: p.a(("COPYW", "wu_lo", "wu_fn")).call("WU.block").call("WR.return")
     p.a(("INTERN", "v", "fns", "fne")).branch({1: "FN.m0"}, "FN.tl", [("CMP", "v", "mnid")])
     P("FN.m0").o("  imm r0, 0\n").goto("FN.tl")      # reaching main's } returns 0 (C99 5.1.2.2.3; product 18c8f22)
@@ -978,7 +980,7 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("LDX", "t", "u", DIM + j), ("STX", "usp", E.UNDO + 5 + j, "t"))
     for j, table in enumerate((END_, ENV), 13):
         p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
-    p.a(("LDI", "t", 0), ("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", 15)).ret()
+    p.a(("LDX","t","v",VLSIZE),("STX","usp",E.UNDO+15,"t"),("LDI","t",0),("STX","v",VLSIZE,"t"),("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", UNDO_SIZE)).ret()
     p = P("DECL")
     p.call("BIND")
     if warnings: p.call("WU.local")
@@ -989,6 +991,8 @@ def build(locations=False, warnings=False, errors=False):
     # the frame is the deepest point reached: a block's slots are reused after it ends (measured, probe p12)
     P("MAXF").branch({2: "MAXF.u"}, "RET", [("CMP", "cur", "max")])
     P("MAXF.u").a(("COPYW", "max", "cur")).ret()
+    from vla import install as vla_install
+    vla_install(E,P,VLSIZE,VLFRAME,VLDEP,END_,bad,UNS)
     # statements
     p = P("STMTS")
     p.tok({"}": "RET"}, "STMTS.one")
@@ -1007,14 +1011,14 @@ def build(locations=False, warnings=False, errors=False):
     p.call("NEXT").tok({TK_ID: "S.gt"}, bad("goto"))
     P("S.gt").o("  jump u_").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").expect(";").call("NEXT").ret()
     p = P("S.blk")
-    p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur")
+    p.vpush("usp", "cur").call("VL.enter").call("NEXT").call("STMTS").call("VL.leave").vpop("sv", "cur")
     if warnings: p.a(("COPYW", "wu_lo", "sv")).call("WU.block")
     p.call("UNWIND").call("NEXT").ret()
     p = P("UNWIND")
     p.label("S.uw")
     p.branch({2: "S.uw1"}, "RET", [("CMP", "usp", "sv")])
     p = P("S.uw1")
-    p.a(("ALUI", "sub", "usp", "usp", 15), ("LDX", "v", "usp", E.UNDO))
+    p.a(("ALUI", "sub", "usp", "usp", UNDO_SIZE), ("LDX", "v", "usp", E.UNDO))
     if warnings: p.call("WU.unbind")
     for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
         p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
@@ -1023,7 +1027,7 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("LDX", "t", "usp", E.UNDO + 5 + j), ("STX", "u", DIM + j, "t"))
     for j, table in enumerate((END_, ENV), 13):
         p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
-    p.goto("S.uw")
+    p.a(("LDX","t","usp",E.UNDO+15),("STX","v",VLSIZE,"t")).goto("S.uw")
 
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
@@ -1092,7 +1096,8 @@ def build(locations=False, warnings=False, errors=False):
     P("S.dkind").call("ISDV").branch({1: "S.din2"}, "DEAD.dbl", [("CMP", "u", "sdv")])
     q = P("S.din2")
     q.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n").call("STOREV").tok({",": "S.dcm"}, "S.dend")
-    P("S.darr").call("DIMS").call("ELSZ").a(("ALU", "mul", "dsz", "prd", "es"), ("COPYW", "dar", "drk")).goto("S.dd")
+    P("S.darr").call("VL.classify").branch({1:"VL.decl"},"S.fixedarray",[("CMPI","vl_dynamic",1)])
+    P("S.fixedarray").call("DIMS").call("ELSZ").a(("ALU", "mul", "dsz", "prd", "es"), ("COPYW", "dar", "drk")).goto("S.dd")
     p = P("S.ret")
     p.call("NEXT").tok({";": "S.rv"}, "S.re")
     P("S.rv").o("  jump R").num("rl").o("\n").call("NEXT").ret()     # return; (measured, old E3)
@@ -1151,7 +1156,7 @@ def build(locations=False, warnings=False, errors=False):
     emit(p, "jump_a")
     # its own a, b, slot across the body; the enclosing break target, case base and default restored after
     p.vpush("a", "b", "sws").vpush("lbrk", "csb", "dfl", "swtype").a(("COPYW", "swtype", "vb"), ("COPYW", "lbrk", "b"), ("COPYW", "csb", "csp"), ("LDI", "dfl", -1))
-    p.call("NEXT").call("STMT").a(("COPYW", "swd", "dfl"), ("COPYW", "swk", "csb")).vpop("lbrk", "csb", "dfl", "swtype").vpop("a", "b", "sws")
+    p.call("VL.breaktarget").call("NEXT").call("STMT").a(("COPYW", "swd", "dfl"), ("COPYW", "swk", "csb")).vpop("lbrk", "csb", "dfl", "swtype").vpop("a", "b", "sws")
     p.a(("COPYW", "swb", "swk"))
     emit(p, "jump_b")
     emit(p, "label_a").label("SW.l")
@@ -1185,11 +1190,11 @@ def build(locations=False, warnings=False, errors=False):
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
     emit(p, "label_a").call("NEXT").expect("(").call("NEXT").vpush("a", "b").call("EXPR").vpop("a", "b").expect(")")
     q = p
-    q.call("FTRUTH").o("  jumpz r0, L").num("b").o("\n").vpush("a", "b", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "a")).call("NEXT").call("STMT").vpop("a", "b", "lbrk", "lcnt")
+    q.call("FTRUTH").o("  jumpz r0, L").num("b").o("\n").vpush("a", "b", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "a")).call("VL.targets").call("NEXT").call("STMT").vpop("a", "b", "lbrk", "lcnt")
     emit(q, "jump_a")
     emit(q, "label_b").ret()
     p = P("S.for")
-    p.vpush("usp", "cur").call("NEXT").expect("(").call("NEXT").tok(
+    p.vpush("usp", "cur").call("VL.enter").call("NEXT").expect("(").call("NEXT").tok(
         {";": "F.i0", **{w: "F.decl" for w in TWORDS}, "struct": "F.decl",
          "union": "F.decl", "enum": "F.decl", TK_ID: "F.id"}, "F.i1")
     P("F.id").call("ISTD").branch({1: "F.decl"}, "F.i1")
@@ -1212,18 +1217,18 @@ def build(locations=False, warnings=False, errors=False):
     P("F.cl").a(("ALUI", "sub", "dep", "dep", 1)).goto("F.nx")
     P("F.nx").call("NEXT").goto("F.skip")
     p = P("F.body")
-    p.vpush("a", "b", "c", "stp", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("NEXT").call("STMT").vpop("a", "b", "c", "stp", "lbrk", "lcnt").a(("COPYW", "aft", "tpos"))
+    p.vpush("a", "b", "c", "stp", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("VL.targets").call("NEXT").call("STMT").vpop("a", "b", "c", "stp", "lbrk", "lcnt").a(("COPYW", "aft", "tpos"))
     emit(p, "label_c").vpush("a", "b", "aft").a(("JUMP", "stp")).call("NEXT").tok({")": "F.s0"}, "F.s1")
     P("F.s1").a(("LDI", "stl", 1)).call("CEXPR").expect(")").goto("F.s0")
     p = P("F.s0")
     p.vpop("a", "b", "aft")
     emit(p, "jump_a")
-    emit(p, "label_b").a(("JUMP", "aft")).call("NEXT").vpop("sv", "cur").call("UNWIND").ret()
+    emit(p, "label_b").call("VL.leave").a(("JUMP", "aft")).call("NEXT").vpop("sv", "cur").call("UNWIND").ret()
     # do body while (cond);  labels a top, b break, c continue (measured)
     p = P("S.do")
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),
         ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab"))
-    emit(p, "label_a").vpush("a", "b", "c", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("NEXT").call("STMT").vpop("a", "b", "c", "lbrk", "lcnt")
+    emit(p, "label_a").vpush("a", "b", "c", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("VL.targets").call("NEXT").call("STMT").vpop("a", "b", "c", "lbrk", "lcnt")
     emit(p, "label_c").expect("while").call("NEXT").expect("(").vpush("a", "b").call("NEXT").call("EXPR").vpop("a", "b").expect(")")
     emit(p.call("FTRUTH"), "jumpz_b")
     emit(p, "jump_a")
@@ -1231,7 +1236,7 @@ def build(locations=False, warnings=False, errors=False):
     for nm, slot in (("S.brk", "lbrk"), ("S.cnt", "lcnt")):
         q = P(nm)        # the innermost loop's label; outside a loop: not covered
         q.branch({1: "DEAD.nl2"}, nm + ".ok", [("CMPI", slot, 0)])
-        P(nm + ".ok").o("  jump L").num(slot).o("\n").call("NEXT").expect(";").call("NEXT").ret()
+        P(nm + ".ok").a(("LDX","vl_to",slot,VLDEP)).call("VL.back").o("  jump L").num(slot).o("\n").call("NEXT").expect(";").call("NEXT").ret()
     g.on("DEAD.nl2", range(257), "DEAD", E.rej("not covered: break/continue outside a loop"), "r")
     # expressions: EXPR = assignment | the ladder
     p = P("CEXPR")    # e , e , ...: the value is the last; a discarded bare identifier gives its address only (measured)
@@ -1455,7 +1460,8 @@ def build(locations=False, warnings=False, errors=False):
     p.tok({"[": "SZ.sk"}, "SZ.subend")
     P("SZ.subend").branch({1: "SZ.pend"}, "SZ.nend", [("CMPI", "szparen", 1)])
     P("SZ.pend").tok({")": "SZ.cl"}, "SZ.expr")
-    P("SZ.nend").call("SZ.calc").goto("SZ.exprout")
+    P("SZ.nend").call("VL.sizecheck").branch({2:"VL.sizeout"},"SZ.nfixed",[("CMPI","vl_bytes",0)])
+    P("SZ.nfixed").call("SZ.calc").goto("SZ.exprout")
     P("SZ.cl").expect(")").goto("SZ.var")
     p = P("SZ.sk")       # skip to the matching ']'
     p.a(("LDI", "dep", 1)).call("NEXT").label("SZ.sl")
@@ -1465,7 +1471,8 @@ def build(locations=False, warnings=False, errors=False):
     P("SZ.sx").a(("ALUI", "sub", "dep", "dep", 1)).branch({1: "SZ.sd"}, "SZ.sn", [("CMPI", "dep", 0)])
     P("SZ.sd").a(("ALUI", "add", "drop", "drop", 1)).call("NEXT").goto("SZ.sub")
     p = P("SZ.var")      # vt vb ar vid from LOOKUP
-    p.call("SZ.calc").goto("SZ.out")
+    p.call("VL.sizecheck").branch({2:"VL.sizeclose"},"SZ.fixedvar",[("CMPI","vl_bytes",0)])
+    P("SZ.fixedvar").call("SZ.calc").goto("SZ.out")
     p = P("SZ.calc")
     p.a(("COPYW", "td", "vt"), ("COPYW", "tb", "vb")).branch({1: "SZ.sc"}, "SZ.ar", [("CMPI", "ar", 0)])
     P("SZ.sc").branch({1: "SZ.sc1"}, "SZ.pd", [("CMPI", "drop", 0)])
@@ -1936,7 +1943,7 @@ def build(locations=False, warnings=False, errors=False):
         from intwarnings import install as int_warning_install
         int_warning_install(E, P, DBL, FLT, FPB, SBB)
         from unusedwarnings import install as unused_warning_install
-        unused_warning_install(E, P, TIX)
+        unused_warning_install(E, P, TIX, UNDO_SIZE)
         from formatwarnings import install as format_warning_install
         format_warning_install(E, P, DBL, FLT, FPB, SBB)
     if errors:

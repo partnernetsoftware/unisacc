@@ -1,5 +1,5 @@
 """Reference block-local unused-variable warnings on generic model actions.
-Binding records follow the existing 15-cell scope undo records. Reads use
+Binding records follow the existing shared-size scope undo records. Reads use
 reference primary()'s token-context rule, not generated tape liveness.
 """
 from tokenlocations import TOKEN_POS
@@ -12,7 +12,7 @@ POSITION=45<<40
 NAME_TOKEN=46<<40
 KIND=47<<40
 
-def install(E,P,TIX):
+def install(E,P,TIX,undo_size):
     # INDEX visits the full token stream before declarations are parsed.
     # Later reads/replays overwrite the same immutable token facts.
     P('WU.token').a(('LDX','wu_ix','tpos',TIX),('ALUI','mul','wu_unitbase','unit_epoch',1<<26),('ALU','add','wu_ix','wu_ix','wu_unitbase'),('STX','wu_ix',KIND,'tk')).tok({E.TK_ID:'WU.idtoken'},'RET')
@@ -28,7 +28,7 @@ def install(E,P,TIX):
     E.g.els('WU.namechar','WU.namedone')
     P('WU.nameadd').branch({0:'WU.namechar'},'WU.namedone',[('CMPI','wu_nc',24)])
     P('WU.namedone').a(('MARK','wu_end'),('SBSPAN','wu_pos','wu_end'),('INPOP',),('SBSAVE','wu_name'),('STX','usp',NAME,'wu_name')).ret()
-    P('WU.local').a(('ALUI','sub','wu_slot','usp',15),('LDI','wu_one',1),('STX','wu_slot',ELIGIBLE,'wu_one')).ret()
+    P('WU.local').a(('ALUI','sub','wu_slot','usp',undo_size),('LDI','wu_one',1),('STX','wu_slot',ELIGIBLE,'wu_one')).ret()
     # UNWIND calls after decrementing usp and loading the bound id in v.
     P('WU.unbind').a(('LDX','wu_prev','usp',PREVIOUS),('STX','v',ACTIVE,'wu_prev')).ret()
     P('WU.use').a(('INTERN','wu_id','ips','ipe'),('LDX','wu_active','wu_id',ACTIVE)).branch(
@@ -53,4 +53,4 @@ def install(E,P,TIX):
         *[('SBOUT',c) for c in b"unused variable '"],('SBBLOB','wu_name'),
         *[('SBOUT',c) for c in b"' [-Wunused-variable]"],('SBSAVE','diag_message'),('LDI','diag_warning',1)).call('DIAG.report').a(
         ('ALU','add','wr_count','wr_count','diag_reported')).goto('WU.next')
-    P('WU.next').a(('ALUI','add','wu_i','wu_i',15)).goto('WU.scan')
+    P('WU.next').a(('ALUI','add','wu_i','wu_i',undo_size)).goto('WU.scan')

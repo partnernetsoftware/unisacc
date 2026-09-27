@@ -4470,3 +4470,12 @@ cc报告switch超过256项静默误编译、-Wall的格式解码超过4096字节
 
 本轮修复实测：tests/c/b_compoundkind.c覆盖指针/指针数组/二级指针、结构体指针、double/float、unsigned char、_Bool、double数组、嵌套结构体；host cc、私有C参考及重建.com的O0/O1/O2、Python前端均输出`3 3 3 7 / 1 1 1 1 1 4`。另九个小探针（含标量赋值/后缀、sizeof、结构体数组）在C参考三档优化与cc退出值一致。Python前端已正确，未改。模型解除此前指针/浮点字面量拒绝，三例转储一致；旧271项先通过后固定E3扩274、网络chain扩127且127/127通过。综合b_compoundkind模型仍在double operand处明确未覆盖，不算全模型通过。
 完整冻结门禁：`/tmp/unisacc-cpkind-full`117项双槽与`/tmp/unisacc-cpkind-core`独占1项48.42s，并集对`gate.sh --list --com`精确118项各一次、全rc0，最大51.302s。两项曾因窗口剩余预算不足延期，后在新窗口通过，不把中止记pass。产品C9957/57，difftest_o399/399，fat134，模型自身转储3,954,383 B一致。私有UA `/tmp/unisacc-cpkind-private` SHA256 a029f11947b802dbb8eebeecbc83e7340f22205e790e39eb7075c01513acc99f；新.com 1,357,120 B，SHA256 c7e8543851c5a7258b7cb8c420c38cc5f817dec053838cdb9cf51841d14baa2f。未推送、未发布、未切默认模型；重构继续，VLA及其余模型边界仍待完成。
+
+### 局部VLA模型接入（进行中）
+复用EXPR计算运行时长度、ELSZ取元素宽度、现有指针访问路径；增加每符号字节数槽与每作用域栈快照，普通出块及break/continue按参考恢复。sizeof名字读取保存的字节数，不重新求值长度。常量/动态边界先按参考isconstdim的token判别（不试解析后回滚）。scope undo记录由15扩16并同步unused warning步长，新增元数据不塞进数组维度。无新执行器原语；多维VLA等参考未支持形态保持明确拒绝。
+
+VLA元素类型审计：double/struct/enum边界转储一致，指针VLA发现参考symptrd漏加数组层，`int *a[n]; ... *a[0]`最终以8字节而非4字节加载int。与本次模型结果不同；修参考而不复制错误。VLA分支需在解析长度表达式前保存声明类型（长度表达式中的cast可能改写decl*），再以元素深度+1注册符号，并恢复基类型等元数据。
+
+本轮进度（尚未提交，完整门禁待续）：实际模型候选`/tmp/unisacc-vla-candidate/unisacc-next.com`运行C99为57/57、wrong0/refused0；19_vla、b_vla、s65三档优化运行输出同cc。旧E3 274项先通过，加入三项VLA和b_vlakind后278项全部转储一致。模型九项队列`/tmp/unisacc-vla-gate`全绿35.08s（在VLA参考类型修复前），不能替代后续产品冻结验收。参考修复后b_vlakind在cc/C三档/Python以及新.com一致；旧330bc34私有参考运行同一回归退出139。产品已重建，完整队列`/tmp/unisacc-vla-full`使用UA=/tmp/unisacc-vlakind-private，首窗口4/117通过、退出75待续；独占exec-driver-core尚未跑。继续原队列，勿编辑输入或重用旧参考门禁结果。
+
+VLA冻结验收完成：`/tmp/unisacc-vla-full`双槽117项与`/tmp/unisacc-vla-core`独占1项（48.93s），并集精确匹配`gate.sh --list --com`的118项，各一次、全部rc0，最长52.944s，无失败或跳过。四个新增VLA用例（19_vla、b_vla、b_vlakind、s65）实际模型编译器的-Wall退出码、转储与诊断全部同私有参考。chain固定131项通过，E3固定278项通过；模型自身转储3,956,608 B相同。产品.com为1,358,048 B、SHA256 a56523e877d215a7d5ccdfe5bc21e6d793c4d0174de1acde3b711aed9c14f564；私有UA SHA256 757002812b7840aee7335296c4cd7a30bcb18247f64d3cbad8a754b3d3296021。实际模型候选5,913,317 B、SHA256 387cb14e83dbb5da62bb650e8bf9d1f11dbf90ea00498256a7377101ee889ee7。C99的57个探针全过不等于完整C99或重构完成；多维VLA、其余模型未覆盖形式仍单列，未切默认路线、未发布或推送。
