@@ -10,23 +10,17 @@ from sha256delta import install as install_sha
 def install(E,byte,arch):
     P,g=E.P,E.g
     install_sha(E)
-    p=P('MACHO')
-    def rnd(dst,src,align):p.a(('A64I','add',dst,src,align-1),('A64I','and',dst,dst,-align))
-    p.a(('A64I','add','mh_end','endo',M.HDRS(arch)))
-    rnd('mh_text','mh_end',M.PAGE)
-    p.a(('COPYW','mh_vm','memlen')).branch({1:'MH.empty'},'MH.layout',[('CMPI','mh_vm',0)])
-    P('MH.empty').a(('LDI','mh_vm',1)).goto('MH.layout')
-    p=P('MH.layout');rnd('mh_vm','mh_vm',M.PAGE);rnd('mh_data','stored',M.PAGE)
-    p.a(('A64','add','mh_link','mh_text','mh_data'),('A64I','add','mh_sigoff','mh_link',M.STRTAB))
-    rnd('mh_sigoff','mh_sigoff',16)
-    p.a(('A64I','add','mh_slots','mh_sigoff',M.PAGE4-1),('A64I','shr','mh_slots','mh_slots',12),
-        ('A64I','mul','mh_siglen','mh_slots',32),('A64I','add','mh_siglen','mh_siglen',20+88+len(M.IDENT)),
-        ('A64','sub','mh_linksz','mh_sigoff','mh_link'),('A64','add','mh_linksz','mh_linksz','mh_siglen'))
-    rnd('mh_linkvm','mh_linksz',M.PAGE)
-    p.a(('A64I','add','mh_datava','mh_text',M.VMADDR),('A64','add','mh_linkva','mh_datava','mh_vm'),
-        ('A64','add','mh_bssva','mh_datava','stored'),('A64','sub','mh_bsslen','memlen','stored'),
-        ('A64I','add','mh_entry','entryoff',M.HDRS(arch)))
-    p.a(('A64','add','mh_filesz','mh_sigoff','mh_siglen'),('LDI','mh_max',4294967295)).branch({2:'DEAD.image'},'MH.header',[('C64U','mh_filesz','mh_max')])
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    mh_bindings = dict(DATA=DATA, HDRS=M.HDRS(arch), VMADDR=M.VMADDR, STRTAB=M.STRTAB,
+                       page_minus_one=M.PAGE-1, page_mask=-M.PAGE,
+                       page4_minus_one=M.PAGE4-1, PAGE4=M.PAGE4,
+                       signature_base=20+88+len(M.IDENT))
+    mh_sequences = {'zero_byte': byte(P('byte.binding'),0).acts}
+    mh_bindings.update({'label'+str(i): P(owner).fresh(kind)
+                        for i, (owner, kind) in enumerate((('MACHO', 'b'), ('MH', 'b')))})
+    install_rules(g, Path(__file__).parent, 'machodelta', bindings=mh_bindings,
+                  sequences=mh_sequences, section='layout')
     p=P('MH.header')
     def field(w,v,big=False):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','mb_v',v),('LDI','mb_n',w)).call('MB.big' if big else 'MB.little')
@@ -58,28 +52,22 @@ def install(E,byte,arch):
     fields([(4,M.LC_DYSYMTAB),(4,80)]+[(4,0)]*18)
     fields([(4,M.LC_CODE_SIGNATURE),(4,16),(4,'mh_sigoff'),(4,'mh_siglen')])
     for _ in range(M.SLACK):byte(p,0)
-    p.a(('OLEN','mh_pos')).branch({1:'MH.text'},'DEAD.image',[('CMPI','mh_pos',M.HDRS(arch))])
-    p=P('MH.text').a(('INPUSH','text_blob')).call('MH.copy').a(('OLEN','mh_pos')).branch({1:'MH.textpad'},'DEAD.image',[('C64','mh_pos','mh_end')])
-    p=P('MH.textpad').a(('COPYW','mh_pad','mh_text')).call('MH.pad').a(('LDI','di',0)).goto('MH.data')
-    P('MH.data').branch({0:'MH.byte'},'MH.afterdata',[('CMP','di','stored')])
-    P('MH.byte').a(('LDX','db','di',DATA),('OUTW','db'),('ALUI','add','di','di',1)).goto('MH.data')
-    p=P('MH.afterdata').a(('COPYW','mh_pad','mh_sigoff')).call('MH.pad')
-    # Snapshot the signed bytes. The signature itself is never hashed.
-    p.a(('LDI','zero',0),('OCUT','mh_blob','zero'),('INPUSH','mh_blob')).call('MH.copy')
+    mh_bindings['state'] = p.cur
+    mh_bindings.update({'label'+str(i): P(owner).fresh(kind)
+                        for i, (owner, kind) in enumerate((('MH', 'b'), ('MH', 'r'), ('MH', 'b'), ('MH', 'r'), ('MH', 'b'), ('MH', 'r'), ('MH', 'r')))})
+    install_rules(g, Path(__file__).parent, 'machodelta', bindings=mh_bindings,
+                  sequences={'pending': p.acts}, section='copy')
+    p = P(mh_bindings['label6'])
     fields([(4,M.CS_MAGIC_EMBEDDED),(4,'mh_siglen'),(4,1),(4,0),(4,20)],True)
     p.a(('A64I','sub','mh_cdlen','mh_siglen',20))
     fields([(4,M.CS_MAGIC_CODEDIRECTORY),(4,'mh_cdlen'),(4,0x20400),(4,M.CS_ADHOC),(4,88+len(M.IDENT)),(4,88),(4,0),(4,'mh_slots'),(4,'mh_sigoff'),(1,32),(1,2),(1,0),(1,12),(4,0),
             (4,0),(4,0),(4,0),(8,0),(8,0),(8,'mh_text'),(8,M.CS_EXECSEG_MAIN_BINARY)],True)
     for b in M.IDENT:byte(p,b)
     p.a(('LDI','mh_page',0)).goto('MH.hash')
-    P('MH.hash').branch({0:'MH.slice'},'RET',[('C64','mh_page','mh_sigoff')])
-    P('MH.slice').a(('A64I','add','mh_pageend','mh_page',M.PAGE4)).branch({2:'MH.last'},'MH.hashpage',[('C64','mh_pageend','mh_sigoff')])
-    P('MH.last').a(('COPYW','mh_pageend','mh_sigoff')).goto('MH.hashpage')
-    P('MH.hashpage').a(('INPUSH','mh_blob'),('BLOBSAVE','sh_blob','mh_page','mh_pageend'),('INPOP',)).call('SHA256').a(('COPYW','mh_page','mh_pageend')).goto('MH.hash')
-    g.on('MH.copy',[256],'RET',[('INPOP',)]);g.els('MH.copy','MH.copy',[('COPY',),('ADV',)])
-    P('MH.pad').a(('OLEN','mh_pos')).branch({0:'MH.zero',1:'RET'},'DEAD.image',[('C64','mh_pos','mh_pad')])
-    byte(P('MH.zero'),0).goto('MH.pad')
-    P('MB.little').branch({2:'MB.lebyte'},'RET',[('CMPI','mb_n',0)])
-    P('MB.lebyte').a(('OUTW','mb_v'),('A64I','shr','mb_v','mb_v',8),('ALUI','sub','mb_n','mb_n',1)).goto('MB.little')
-    P('MB.big').branch({2:'MB.bebyte'},'RET',[('CMPI','mb_n',0)])
-    P('MB.bebyte').a(('ALUI','sub','mb_n','mb_n',1),('ALUI','mul','mb_shift','mb_n',8),('A64','shr','mb_byte','mb_v','mb_shift'),('OUTW','mb_byte')).goto('MB.big')
+    mh_bindings.update({'label'+str(i): P(owner).fresh(kind)
+                        for i, (owner, kind) in enumerate((('MH', 'b'), ('MH', 'b'), ('MH', 'r'), ('MH', 'b')))})
+    install_rules(g, Path(__file__).parent, 'machodelta', bindings=mh_bindings,
+                  sequences=mh_sequences, section='output')
+    for direction, step in (('little', 'MB.lebyte'), ('big', 'MB.bebyte')):
+        install_rules(g, Path(__file__).parent, 'machodelta', section='endian',
+                      bindings={'entry': 'MB.'+direction, 'check': P('MB').fresh('b'), 'step': step})
