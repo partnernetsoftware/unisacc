@@ -28,6 +28,12 @@ for exe in drivers:
     bad=p/'bad.c';bad.write_text('int main( { this is invalid; }')
     out=p/'sentinel';out.write_bytes(b'preserve')
     r=run([*base,bad,'-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'
+    # Source IO errors retain the product contract, also for a later unit.
+    missing=p/'missing-source.c'
+    for inputs in [[missing],[src,missing]]:
+        r=run([*base,*inputs,'-o',out])
+        assert r.returncode==1 and not r.stdout and out.read_bytes()==b'preserve'
+        assert r.stderr==('unisacc: error: cannot open '+str(missing)+'\n').encode(),r.stderr
     for args in [['-nostdinc',src],['-E',src,src],['-o'],['-b'],['-D'],['-U'],['-include']]:
         r=run([*base,*args]);assert r.returncode==1 and not r.stdout
     r=run([*base,src,'-b','unknown/target','-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'

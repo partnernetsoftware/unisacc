@@ -3209,3 +3209,17 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   This remains the default product route. No Linux or Windows execution of
   this batch's final artifacts was performed; cross-output checks do not
   establish that. cc-unisacc remains paused. No push or release.
+
+### Model driver: source IO diagnostics
+
+- Source reads now report `unisacc: error: cannot open PATH`, exit 1, while
+  runtime package/resource failures retain their separate diagnostics. Both
+  the first input and a later translation unit are checked; neither truncates
+  an existing output. No source parsing moved into the driver.
+- Fresh compilercheck passes (host cc, unisacc, ASM driver and network-built
+  driver integration); log `/tmp/unisacc-source-io.log`. Rebuilt development
+  container executed both missing-source cases on macOS arm64 and Rosetta
+  x86_64, with exact stderr/rc and preserved output. Size 3,076,656 B, SHA256
+  `83d5322d30fba24ffd2249e35a7d653f396e1119570e3023d6ad0daea0af9b14`.
+- Targeted verification only; no new full-gate or full-CLI result claimed.
+  Default reference .com unchanged. No push/release; cc-unisacc stays paused.

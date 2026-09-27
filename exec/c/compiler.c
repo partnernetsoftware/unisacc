@@ -27,6 +27,19 @@
 static int clierror(const char *s) {
     fprintf(stderr, "unisacc: model driver: %s\n", s); return 1;
 }
+/* Source IO has the public compiler diagnostic; package/resource IO keeps
+   the runtime diagnostic. No source interpretation happens in this helper. */
+static unsigned char *source_read(const char *path, int *len) {
+    if (!strcmp(path,"-")) return readstream(0,"stdin",len);
+    long fd=io_open(path);
+    if (fd < 0) {
+        fprintf(stderr,"unisacc: error: cannot open %s\n",path);
+        exit(1);
+    }
+    unsigned char *bytes=readstream(fd,path,len);
+    if (io_close(fd)<0) die("close failed");
+    return bytes;
+}
 static long output_open(const char *path) {
 #ifdef __UNISA__
 #ifdef _WIN32
@@ -143,11 +156,11 @@ int main(int argc, char **argv) {
     }
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; int rc=0;
-    if (nsources==1) in.b = !strcmp(src,"-") ? readstream(0,"stdin",&in.n) : readfile(src,&in.n,0);
+    if (nsources==1) in.b = source_read(src,&in.n);
     else {
         char unitroute[96]; snprintf(unitroute,sizeof unitroute,"%s/unit",target);
         for (int j=0;j<nsources;j++) {
-            Buf unit={0}; unit.b=!strcmp(sources[j],"-") ? readstream(0,"stdin",&unit.n) : readfile(sources[j],&unit.n,0);
+            Buf unit={0}; unit.b=source_read(sources[j],&unit.n);
             rc=runroute(unitroute,&unit,sources[j]);
             if (rc) { free(unit.b); break; }
             for (int k=0;k<4;k++) bput(&in,(unit.n>>(8*k))&255,0);
