@@ -5095,3 +5095,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 固定a1115126候选性能/容量实测：同fib源/同osx-arm64/O2/新进程到镜像，5次中位数classic 0.0613s、model 0.6430s（10.48倍），镜像hash相同；含加载不含产物执行。编译unisacc.c默认在11.02s以rc3 timeout（2e8步燃料）拒绝；使用现有自编译测试的UNISA_MAXSTEPS=400000000000后19.37s成功，外45s未触发。这是产品默认燃料与既有selfcheck契约不一致，不能隐藏为bench跳过。修正仅产品驱动默认与已有selfcheck燃料一致，显式环境上限仍生效，独立通用测试runner默认不变；真实后续产物重新验证，性能如实列风险。首轮9s探针外限过窄已失败，不记通过。证据/tmp/unisacc-final-perf-928。
 
 普通unary/deref 289cfe4合b128044，含ID.inc/dec共享模板及staticauto；三处冲突为声明append与SS/FNVAL相邻组，保留两组新实现。父在11a0d56复验五模式全图全部与70d3952基线同（6.41/8.29/8.52/6.84/6.90s），/tmp/unisacc-complete-controls-928；原实际NET 1549292观察全等和五probe O0/O2十运行见代理证据。exec/rules.md同步已声明全组及保留的生成期绑定，不把旧候选当新产物。
+
+最终parser审计11a0d56未发现完整固定过程遗漏；仅strings.py普通escape的保留字符策略/ADV-LDI模板仍明文分支。为避免声明边界含糊，最后小修将此策略及共享escape模板纳入现有strings声明，esc真实映射继续动态绑定；ADR.object单边连接保留为共享过程装配，不另迁。产品燃料7f528cd已验证私有driver默认self 20.57s同前hash、显式预算1拒绝，现合入待新包实测。
