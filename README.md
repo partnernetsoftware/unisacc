@@ -27,7 +27,7 @@ is claimed here.
 | Models and routes | 32 distinct constructed networks, 938 stage-route rows, 21 resources |
 | Network equivalence | All 32 network/table pairs checked across their complete declared observation domains, including actions and strings |
 | Package / container | `compiler.pkg` 6,095,823 bytes; `.com` 6,279,167 bytes; the complete package occurs physically once |
-| Complete candidate gate | **Pending: the current 143-item gate has not finished.** |
+| Complete candidate gate | **Pending: the current 171-item gate has not finished.** |
 | Target and bootstrap evidence | Specified six-target smoke and fixed-package driver N1=N2=N3 completed; see bounded scope below |
 | Default switch / publication | **Pending final acceptance** |
 
