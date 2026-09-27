@@ -18,8 +18,10 @@ model container passes diag 14/14, CLI 64/64 and ccparity 53/53 (plus its
 existing known -c difference). `pp/macrocheck.py` compares 20 macro inputs in
 ordinary and located formats, including the C99 expansion examples. Broader
 source and failure compatibility remains incomplete; these are suite results.
-The following E0 machine and toy are
-retained as their original, separate experiment.
+For current declaration sources and remaining work, see [rules.md](rules.md).
+The sections below retain milestone evidence; statements that packaging was
+unfinished describe those earlier milestones, not the current container above.
+The following E0 machine and toy are retained as their original experiment.
 
 ## E0 toy experiment
 
