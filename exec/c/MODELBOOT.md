@@ -14,8 +14,8 @@ python3 exec/c/modelboot.py probe /tmp/my-modelboot
 Prepare requires an empty private directory, validates embedded P2 framing and N-format
 model bodies, checks required routes/resources, and snapshots source and package hashes.
 Bootstrap compiles `asmcompiler.c` with the model candidate, then compiles the same source
-with N1 using exactly the same package. It compares complete N1/N2 Mach-O bytes, including
-signatures. Probe runs N2 with empty PATH and no external kernel setting, compares O0/O2
+with N1 and N2 using exactly the same package. It compares complete N1/N2/N3 Mach-O bytes, including
+signatures. Probe runs N3 with empty PATH and no external kernel setting, compares O0/O2
 memory/native results to host cc, and checks that a missing explicit package rejects.
 
 The manifest rejects candidate/source/test changes between steps; prepare a new directory

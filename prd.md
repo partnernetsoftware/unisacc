@@ -5007,3 +5007,5 @@ Windows候选smoke首次在guest hash核对处失败，尚未执行模型，不�
 Windows传输定位进展：父1KB往返相同、6.2MB push12秒超时；gzip压至977980B，上传4.2秒，客机cmd.exe启动PowerShell解压后SHA256确为81c04285…，说明可保留原始候选校验而缩短传输。utmctl存在rc0但stderr报Error from event、exec早返回的行为，入口需明确识别并等待唯一结果。改为gzip运输、客机解压先核原hash再运行，cmd.exe启动脚本、非空结果轮询；不是修改模型包或跳过校验。
 
 Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip977980B，客机解压后的原6,225,287B哈希先核对；原Start-Process返回空ExitCode及cmd引号问题使早两轮失败，改用项目既有Diagnostics.Process/cmd等待法，路径为自建无空格随机前缀，UTM rc0但Error from event明确拒绝。最终win/arm64及win/x86_64各hello/fib/convert六次独立≤55秒全部PASS；每次含APE x86_64运行-run以及模型编译指定目标后客机实际执行，与host结果相同。两槽并发，实际Windows11 ARM64环境，x86程序经仿真，不称x86实机或完整Windows自举。所有候选只读、未改包；父清理诊断临时文件后关闭本轮启动VM，status=stopped。
+
+最终模型自举验收口径补齐：持久modelboot由N1=N2扩为原先约定N1=N2=N3，后代实测使用N3；三代均以同一NET包编译asmcompiler.c，完整文件比较不剥签。只是固定包驱动器自举，不扩大为模型/内核重新构造。新完整候选将用shared/六target/pack分步双槽构造，source identity必须一致。

@@ -101,17 +101,19 @@ def main():
     if args.step=='bootstrap':
         call(['sh',candidate,'-O2','-b','osx/arm64',source,'-o',OUT/'N1'])
         # Native child uses fixed networks and the package's assembly kernel.
-        call([OUT/'N1',*base,'-o',OUT/'N2'],clean)
-        first=(OUT/'N1').read_bytes();require(first and first==(OUT/'N2').read_bytes(),'N1 != N2 whole image bytes')
-        result={'bytes':len(first),'sha256':digest(first),'N1_equals_N2':True,'manifest_sha256':digest((OUT/'manifest.json').read_bytes())}
+        for old,new in (('N1','N2'),('N2','N3')):
+            call([OUT/old,*base,'-o',OUT/new],clean)
+        first=(OUT/'N1').read_bytes()
+        require(first and all(first==(OUT/name).read_bytes() for name in ('N2','N3')),'N1/N2/N3 whole image bytes differ')
+        result={'bytes':len(first),'sha256':digest(first),'N1_equals_N2_equals_N3':True,'manifest_sha256':digest((OUT/'manifest.json').read_bytes())}
         (OUT/'bootstrap.json').write_text(json.dumps(result,indent=2)+'\n');print('bootstrap',json.dumps(result));return
     result=json.loads((OUT/'bootstrap.json').read_text())
     require(result['manifest_sha256']==digest((OUT/'manifest.json').read_bytes()),'bootstrap inputs differ')
-    for name in ('N1','N2'):require(digest((OUT/name).read_bytes())==result['sha256'],'driver changed: '+name)
+    for name in ('N1','N2','N3'):require(digest((OUT/name).read_bytes())==result['sha256'],'driver changed: '+name)
     call([os.environ.get('CC','cc'),OUT/'probe.c','-o',OUT/'host'])
     want=call([OUT/'host']).stdout;require(want,'empty host expectation');checks=[]
     for level in (0,2):
-        opts=[OUT/'N2','--models',OUT/'compiler.pkg','-b','osx/arm64','-O'+str(level)]
+        opts=[OUT/'N3','--models',OUT/'compiler.pkg','-b','osx/arm64','-O'+str(level)]
         memory=call([*opts,'-run',OUT/'probe.c'],clean).stdout
         output=OUT/('probe-O'+str(level));call([*opts,OUT/'probe.c','-o',output],clean)
         native=call([output],clean).stdout;require(memory==native==want,'offspring differs from host')
@@ -120,11 +122,11 @@ def main():
     try:missing.stat()
     except FileNotFoundError:pass
     else:raise ValueError('missing-package test path unexpectedly exists')
-    bad=call([OUT/'N2','--models',missing,'-run',OUT/'probe.c'],clean,okay=False)
+    bad=call([OUT/'N3','--models',missing,'-run',OUT/'probe.c'],clean,okay=False)
     require(bad.returncode==2 and not bad.stdout and b'cannot open' in bad.stderr,'missing package did not reject explicitly')
     require(inputs()[2]==manifest and digest((OUT/'compiler.pkg').read_bytes())==manifest['package_sha256'],'inputs changed during probes')
     (OUT/'probe.json').write_text(json.dumps({'checks':checks,'missing_package_rc':bad.returncode},indent=2)+'\n')
-    print('probe: N2 O0/O2 memory/native = host; empty PATH; missing package rc2; fixed-package driver only')
+    print('probe: N3 O0/O2 memory/native = host; empty PATH; missing package rc2; fixed-package driver only')
 
 if __name__=='__main__':
     try:main()
