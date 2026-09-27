@@ -800,8 +800,12 @@ def build(locations=False, warnings=False, errors=False):
     P("TOP.id").call("ISTD").branch({1: "FN"}, bad("top-level construct"))
     # typedef T [*]... NAME;  -- no code
     p = P("TD")
-    p.call("NEXT").call("TSPEC").tok({TK_ID: "TD.id"}, bad("typedef"))
-    P("TD.id").a(("INTERN", "t", "ps", "pe"), ("LDI", "u", 1), ("STX", "t", E.TDN, "u"), ("STX", "t", E.TDB, "tb"), ("STX", "t", E.TDD, "td")).call("NEXT").expect(";").call("NEXT").goto("UNIT")
+    p.call("NEXT").call("TSPEC").tok({TK_ID: "TD.id", "(": "TD.fp"}, bad("typedef"))
+    P("TD.fp").call("FPDECL").branch({1: "TD.fpshape"}, bad("function typedef shape"), [("CMPI", "fp_isfunction", 0)])
+    P("TD.fpshape").branch({1: "TD.fpput"}, bad("function pointer array typedef"), [("CMPI", "fpn", 0)])
+    P("TD.fpput").a(("INTERN", "t", "ips", "ipe")).goto("TD.put")
+    P("TD.id").a(("INTERN", "t", "ps", "pe")).call("NEXT").goto("TD.put")
+    P("TD.put").a(("LDI", "u", 1), ("STX", "t", E.TDN, "u"), ("STX", "t", E.TDB, "tb"), ("STX", "t", E.TDD, "td")).expect(";").call("NEXT").goto("UNIT")
     # a unit without main is an error in the reference (measured, probe r2)
     P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
     P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", E.FND)).branch({1: "END.ex"}, "END.x2", [("CMPI", "t", 1)])
@@ -913,7 +917,9 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
     p = P("FN.par")
     p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.pn", ")": "FN.body", "(": "FN.pfp"}, bad("parameter"))   # unnamed: a prototype
-    P("FN.pfp").call("FPDECL").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
+    P("FN.pfp").call("FPDECL").branch({1: "FN.pfpbind"}, "FN.pfparray", [("CMPI", "fpn", 0)])
+    P("FN.pfparray").a(("ALUI", "add", "td", "td", 1)).goto("FN.pfpbind")
+    P("FN.pfpbind").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
     # Array parameters adjust to pointers before their descriptor is bound.
     # Only a single, side-effect-free bound token is covered here; do not
