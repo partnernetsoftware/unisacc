@@ -19,7 +19,8 @@ with its neighbour, the action for which is the peep table's (loaded at START).
 This is the optimiser's algorithm compiled into an action table. The complete
 SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv, LOCAL in
 local-{byte,result}.tsv, STFUSE in stfuse-{byte,result}.tsv, and PPASS/BCLS/REAL
-in peep-{byte,result}.tsv. ANALYZE/SOLVE/SCAN/DEADQ live in analysis-{byte,result}.tsv.
+in peep-{byte,result}.tsv. ANALYZE/SOLVE/SCAN/DEADQ live in analysis-{byte,result}.tsv;
+tape operand parsers and REREG live in parsers-{byte,result}.tsv.
 Dynamic peep/opinfo data assembly remains here; src/opt.c and unisa/opt.py
 stay the behaviour reference.
 
@@ -48,9 +49,7 @@ LIVEB = 200 * 10 ** 6            # LIVE[(round * 6 + z) * 1e6 + block]
 LSS, LEE, WIDD, FRR, ISLAB = (51 * 10 ** 6, 52 * 10 ** 6, 53 * 10 ** 6, 54 * 10 ** 6, 55 * 10 ** 6)   # per line
 ZOKB = 59 * 10 ** 6              # ZOK[z]
 K_SIMPLE, K_LABEL, K_RET, K_JUMP, K_JUMPZ, K_CALL, K_FRAME, K_OTHER = range(8)
-LETTER = sorted(set(range(97, 123)) | set(range(65, 91)) | {95})     # isal
 DIGIT = list(range(48, 58))
-NL = [10, EOF]
 MAXJ = 16                        # the pop is line i+2+cnt, cnt <= 16: at most line i+18
 WORDMAX = 15                     # ol_opi reads at most 15 bytes of the op word
 
@@ -119,112 +118,13 @@ PA, PB, PR, PY = PFIELDS["a"], PFIELDS["b"], PFIELDS["rel"], PFIELDS["y"]
 PEEPB, ACLSB, BCLSB = 300 * 10 ** 6, 301 * 10 ** 6, 302 * 10 ** 6   # PEEP[(a*|b| + b)*|rel| + rel] = y index + 1
 
 
-def rtok(st, dst, terms, fail):
-    """`r` then digits -> W[dst]; then one of terms {bytes: state} (not consumed), else fail"""
-    g.on(st, [114], st + ".r", [("ADV",)])
-    g.els(st, fail, [])
-    g.on(st + ".r", DIGIT, st + ".d", [("LDI", dst, 0)])
-    g.els(st + ".r", fail, [])
-    g.on(st + ".d", DIGIT, st + ".d", [("BYTE", "q_bt"), ("ALUI", "sub", "q_bt", "q_bt", 48),
-                                       ("ALUI", "mul", dst, dst, 10), ("ALU", "add", dst, dst, "q_bt"), ("ADV",)])
-    for keys, nx in terms:
-        g.on(st + ".d", keys, nx, [])
-    g.els(st + ".d", fail, [])
-
-
-def anyb(st, nx, fail):
-    """one byte that is not the end of the line"""
-    g.on(st, NL, fail, [])
-    g.els(st, nx, [("ADV",)])
-
-
 def parsers():
-    # PSTORE: `  store64 [SLOT], rX` -> st_x (-1), st_ms/st_me
-    g.els("PSTORE", "PS.a", [("LDI", "st_x", -1)])
-    lit("PS.a", "  store64 [", "PS.m", "RET")
-    g.els("PS.m", "PS.s", [("MARK", "st_ms")])
-    g.on("PS.s", [93], "PS.c", [("MARK", "st_me"), ("ADV",)])
-    g.on("PS.s", NL, "RET", [])
-    g.els("PS.s", "PS.s", [("ADV",)])
-    lit("PS.c", ", ", "PS.r", "RET")
-    rtok("PS.r", "q_v", [(NL, "PS.ok")], "RET")
-    P("PS.ok").a(("COPYW", "st_x", "q_v")).ret()
-    # PLOAD: `  load64 rY, [SLOT]` -> ld_y (-1), ld_ms/ld_me
-    g.els("PLOAD", "PL.a", [("LDI", "ld_y", -1)])
-    lit("PL.a", "  load64 ", "PL.r", "RET")
-    rtok("PL.r", "q_v", [([44], "PL.c")], "RET")
-    lit("PL.c", ", [", "PL.m", "RET")
-    g.els("PL.m", "PL.s", [("MARK", "ld_ms"), ("LDI", "q_lc", 0)])
-    g.on("PL.s", NL, "PL.e", [("MARK", "ld_me")])
-    g.els("PL.s", "PL.s", [("BYTE", "q_lc"), ("ADV",)])
-    p = P("PL.e")
-    p.branch({1: "PL.ok"}, "RET", [("CMPI", "q_lc", 93)])
-    P("PL.ok").a(("ALUI", "sub", "ld_me", "ld_me", 1), ("COPYW", "ld_y", "q_v")).ret()
-    # PIMM: `  imm rK, DIGITS` (1..18 digits) -> im_k (-1), im_v (64-bit), im_n0/im_n1
-    g.els("PIMM", "PI.a", [("LDI", "im_k", -1)])
-    lit("PI.a", "  imm ", "PI.r", "RET")
-    rtok("PI.r", "q_v", [([44], "PI.c")], "RET")
-    lit("PI.c", ", ", "PI.n", "RET")
-    g.on("PI.n", DIGIT, "PI.d", [("MARK", "im_n0"), ("LDI", "im_v", 0), ("LDI", "q_nd", 0)])
-    g.els("PI.n", "RET", [])
-    g.on("PI.d", DIGIT, "PI.d", [("BYTE", "q_bt"), ("ALUI", "sub", "q_bt", "q_bt", 48), ("A64I", "mul", "im_v", "im_v", 10),
-                                 ("A64", "add", "im_v", "im_v", "q_bt"), ("ALUI", "add", "q_nd", "q_nd", 1), ("ADV",)])
-    g.on("PI.d", NL, "PI.e", [("MARK", "im_n1")])
-    g.els("PI.d", "RET", [])
-    p = P("PI.e")
-    p.branch({2: "RET"}, "PI.ok", [("CMPI", "q_nd", 18)])
-    P("PI.ok").a(("COPYW", "im_k", "q_v")).ret()
-    # PMOV: `  mov rD,?rS` -> mv_d (-1), mv_s
-    g.els("PMOV", "PM.a", [("LDI", "mv_d", -1)])
-    lit("PM.a", "  mov ", "PM.r", "RET")
-    rtok("PM.r", "q_v", [([44], "PM.c")], "RET")
-    g.els("PM.c", "PM.c1", [("ADV",)])
-    anyb("PM.c1", "PM.s", "RET")
-    rtok("PM.s", "q_w", [(NL, "PM.ok")], "RET")
-    P("PM.ok").a(("COPYW", "mv_d", "q_v"), ("COPYW", "mv_s", "q_w")).ret()
-    # PTHREE: ` ?WORD... rD,?rS,?rT` (after the first space from index 2) -> th_ok, th_d/th_s/th_t
-    g.els("PTHREE", "PT.a", [("LDI", "th_ok", 0)])
-    g.on("PT.a", [32], "PT.b", [("ADV",)])
-    g.els("PT.a", "RET", [])
-    anyb("PT.b", "PT.w", "RET")
-    g.on("PT.w", [32], "PT.r1", [("ADV",)])
-    g.on("PT.w", NL, "RET", [])
-    g.els("PT.w", "PT.w", [("ADV",)])
-    rtok("PT.r1", "th_d", [([44], "PT.c1")], "RET")
-    g.els("PT.c1", "PT.c1b", [("ADV",)])
-    anyb("PT.c1b", "PT.r2", "RET")
-    rtok("PT.r2", "th_s", [([44], "PT.c2")], "RET")
-    g.els("PT.c2", "PT.c2b", [("ADV",)])
-    anyb("PT.c2b", "PT.r3", "RET")
-    rtok("PT.r3", "th_t", [(NL, "PT.ok")], "RET")
-    P("PT.ok").a(("LDI", "th_ok", 1)).ret()
-    # REREG(rr_a -> rr_b, rr_all): the line at the cursor written out with register rr_a as rr_b --
-    # every register token, or only the first one (rr_all 0)
-    g.els("REREG", "RR0", [("LDI", "rr_done", 0), ("LDI", "q_pa", 0)])
-    g.on("RR0", [10], "RET", [])
-    g.on("RR0", [EOF], "RET", [])
-    g.on("RR0", [114], "RR.r", [("MARK", "rr_p")])
-    g.on("RR0", LETTER, "RR0", [("COPY",), ("ADV",), ("LDI", "q_pa", 1)])
-    g.els("RR0", "RR0", [("COPY",), ("ADV",), ("LDI", "q_pa", 0)])
-    p = P("RR.r")       # an `r`: a register token when not after a letter, not at the start, a digit next
-    p.branch({1: "RR.lit"}, "RR.r1", [("CMPI", "q_pa", 1)])
-    P("RR.r1").branch({1: "RR.lit"}, "RR.r2", [("CMPI", "rr_done", 1)])
-    p = P("RR.r2")
-    p.a(("ADV",)).goto("RR.r3")
-    g.on("RR.r3", DIGIT, "RR.d", [("LDI", "q_rn", 0)])
-    g.els("RR.r3", "RR.back", [])
-    P("RR.back").a(("JUMP", "rr_p")).goto("RR.lit")
-    g.els("RR.lit", "RR0", [("COPY",), ("ADV",), ("LDI", "q_pa", 1)])
-    g.on("RR.d", DIGIT, "RR.d", [("BYTE", "q_bt"), ("ALUI", "sub", "q_bt", "q_bt", 48),
-                                 ("ALUI", "mul", "q_rn", "q_rn", 10), ("ALU", "add", "q_rn", "q_rn", "q_bt"), ("ADV",)])
-    g.els("RR.d", "RR.e", [("MARK", "rr_q")])
-    p = P("RR.e")
-    p.branch({1: "RR.sub"}, "RR.keep", [("CMP", "q_rn", "rr_a")])
-    P("RR.sub").o("r").num("rr_b").goto("RR.f")
-    P("RR.keep").a(("SPAN2", "rr_p", "rr_q")).goto("RR.f")
-    p = P("RR.f")
-    p.a(("LDI", "q_pa", 0)).branch({1: "RR0"}, "RR.one", [("CMPI", "rr_all", 1)])
-    P("RR.one").a(("LDI", "rr_done", 1)).goto("RR0")
+    # Preserve branch names and the shared PRN continuation; matching lives in TSV.
+    specs = (("PL_b1", "PL", "b"), ("PI_b2", "PI", "b"),
+             ("RR_b3", "RR", "b"), ("RR_b4", "RR", "b"),
+             ("RR_b5", "RR", "b"), ("RR_r6", "RR", "r"), ("RR_b7", "RR", "b"))
+    bindings = {name: P(prefix).fresh(kind) for name, prefix, kind in specs}
+    install_rules(g, os.path.dirname(__file__), "parsers", bindings=bindings)
 
 
 def stfuse():
