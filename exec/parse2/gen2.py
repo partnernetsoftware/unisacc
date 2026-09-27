@@ -620,7 +620,9 @@ def types():
     p = P("TS.tag")
     p.a(("INTERN", "tg", "ps", "pe")).call("NEXT").tok({"{": "TS.tbody"}, "TS.tref")
     P("TS.tbody").call("SBODY").call("NEXT").goto("TS.sb")
-    p = P("TS.tref")      # a tag without a body: its sid (an incomplete struct gets one, size 0: pointers only)
+    P("TS.tref").tok({";": "TS.forward"}, "TS.lookup")
+    P("TS.forward").a(("LDX", "tagoldscope", "tg", TAGLEVEL)).branch({1: "TS.lookup"}, "TS.new", [("CMP", "tagoldscope", "tagscope")])
+    p = P("TS.lookup")      # a tag reference resolves outward; a tag-only declaration shadows
     p.a(("LDX", "nsid2", "tg", STAG)).branch({1: "TS.new"}, "TS.old", [("CMPI", "nsid2", 0)])
     P("TS.new").call("TAG.alloc").a(("COPYW", "nsid2", "nsid")).call("TAG.bind").a(("STX", "tg", STAG, "nsid")).goto("TS.old")
     P("TS.old").a(("ALUI", "add", "tb", "nsid2", SBB)).goto("TS.b")

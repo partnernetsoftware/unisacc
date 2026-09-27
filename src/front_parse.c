@@ -1123,6 +1123,7 @@ int unary(void) {
                     adv(); sz = sz * cexpr(); need(tidx("]", 1), "]");
                 }
                 need(tidx(")", 1), ")");
+                if (declstruct >= 0 && sz == 0) err_tok(tp, "sizeof incomplete structure");
                 es("  @lit.imm r0, "); en(sz); ec(10);
                 setkind(1); curpd = 0; curbase = 8; curvla = 0; /* size_t: unsigned 64-bit */
                 return 0;
@@ -1139,6 +1140,7 @@ int unary(void) {
         nout = nsave; nibuf = isave;
         if (toinit && curvla) err_tok(tp, "static initializer requires a constant size");
         sz = cursize;
+        if (curstruct >= 0 && curptr == 0 && stsize[curstruct] == 0) err_tok(tp, "sizeof incomplete structure");
         if (curvla) { es("  @mem.load r0, [r6-"); en(curvla); es("]\n"); curvla = 0; }
         else { es("  @lit.imm r0, "); en(sz); ec(10); }
         setkind(1); curpd = 0; curbase = 8; curvla = 0;
@@ -3072,6 +3074,7 @@ long cunary(void) {
         w = declspec(); w = declsz;
         while (eatstar()) w = 8;
         need(tidx(")", 1), ")");
+        if (declstruct >= 0 && w == 0) err_tok(tp, "sizeof incomplete structure");
         return w;
     } } }
     /* a cast inside a constant expression: `(int)7` */
@@ -3254,8 +3257,8 @@ int stparse(int isunion) {
         t = tp;
         si = stfind(t);
         if (si < 0) si = stnew(t, isunion);
-        /* a DEFINITION in a deeper block shadows the outer tag */
-        else { if (kind(tp + 1) == tidx("{", 1)) { if (stdepth[si] < bdepth) si = stnew(t, isunion); } }
+        /* A definition or tag-only declaration binds in this block. */
+        else { if (kind(tp + 1) == tidx("{", 1) || kind(tp + 1) == tidx(";", 1)) { if (stdepth[si] < bdepth) si = stnew(t, isunion); } }
         adv();
     } else si = stnew(0 - 1, isunion);
     if (cur() == tidx("{", 1)) stbody(si);

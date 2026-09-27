@@ -278,6 +278,8 @@ class Scope:
         cur = self.tagstack[-1].get(tag)
         if cur is not None:
             return cur
+        if not defining and self.tag_lookup(tag) is not None:
+            return self.tag_lookup(tag)
         if defining and self.tag_lookup(tag) is not None:
             key = "%s#%d" % (tag, uniq)
         else:

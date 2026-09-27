@@ -283,7 +283,7 @@ class Walker:
         isu = self.at("union")
         self.next()                                   # struct | union
         name = self.next().text if self.at("id") else "anon%d" % self.i
-        tag = self.sc.tag_bind(name, self.at("{"), self.i)
+        tag = self.sc.tag_bind(name, self.at("{") or self.at(";"), self.i)
         if self.at("{"):
             self.next()
             st = self.sc.structs.setdefault(tag, Struct(tag, isu))
@@ -1793,6 +1793,8 @@ class Walker:
                 self.lval = None
                 if b.kind == "arr" and b.n < 0:
                     raise CError("line %d: constant size required" % t.line)
+            if b.kind == "struct" and b.size(self.sc.structs) == 0:
+                raise CError("sizeof incomplete structure")
             return b.size(self.sc.structs)
         raise CError("line %d: constant expected, got %r" % (t.line, t.text))
 
@@ -2265,10 +2267,14 @@ class Walker:
                 base = self.abstract_type()
                 self.expect(")")
                 n = base.size(self.sc.structs)
+                if base.kind == "struct" and n == 0:
+                    raise CError("sizeof incomplete structure")
             else:
                 m = self.mark()
                 t = self.unary()
                 n = (t or I64).size(self.sc.structs)
+                if t is not None and t.kind == "struct" and n == 0:
+                    raise CError("sizeof incomplete structure")
                 end = self.i          # where the operand really ends
                 vla = t is not None and t.kind == "arr" and t.n < 0
                 self.rewind(m)        # drop the code it emitted ...
