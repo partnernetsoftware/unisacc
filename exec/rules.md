@@ -66,3 +66,12 @@ alone was insufficient. The 7fd1514 candidate is 6,017,681 bytes, SHA256
 It does not yet include 080e638 scalar void casts. The 11-project baseline remains
 required; this is not product acceptance. `TOOLS_UA` explicitly selects the binary
 for `tests/tools.sh`; its default still tests the Python compiler.
+
+The follow-up 9157c00 candidate includes scalar void casts: 6,017,901 bytes,
+SHA256 `d8358e4b1b3f87a076715fead6c15b5216a3143fe82544ea6f9f93f630e06ae7`.
+Real tools still report 6/11: regex2 passes parsing but fails downstream encoding.
+Investigation found a lowering ARG/TXT address-region collision on the larger
+input; its repair remains pending. Root strings, fixed-size string rows and void
+casts now run in the existing ASM network driver regression, with host-cc results
+and both in-memory and native execution. Inferred leading dimensions remain a
+separate compatibility gap.
