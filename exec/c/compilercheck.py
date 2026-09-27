@@ -25,6 +25,16 @@ for exe in drivers:
             flags=['-b',target,mode]+([target] if mode=='-b' else [])+['-O'+str(level)]
             got=ok([*base,src,*flags]);want=ok([ua,src,*flags]);assert got==want,(exe,flags)
             n+=1
+    # Build-system options have the reference's no-linker semantics.
+    for compat in [['-lm','-L/nowhere','-xc'],
+                   ['-l','m','-L','/nowhere','-x','c','-g','-std=c99']]:
+        flags=['-b',target,'-S','-O2']
+        want=ok([ua,*compat,src,*flags])
+        assert ok([*base,*compat,src,*flags])==want
+        assert ok([*base,src,*compat,*flags])==want
+    for flag in ['-l','-L','-x']:
+        r=run([*base,src,flag])
+        assert r.returncode==1 and not r.stdout and b'missing compatibility argument' in r.stderr
     # stdin reaches the first network unchanged.
     flags=['-b',target,'-S','-O1']
     assert ok([*base,'-',*flags],input=src.read_bytes())==ok([ua,'-',*flags],input=src.read_bytes())
@@ -38,7 +48,7 @@ for exe in drivers:
         r=run([*base,*inputs,'-o',out])
         assert r.returncode==1 and not r.stdout and out.read_bytes()==b'preserve'
         assert r.stderr==('unisacc: error: cannot open '+str(missing)+'\n').encode(),r.stderr
-    for args in [['-nostdinc',src],['-E',src,src],['-o'],['-b'],['-D'],['-U'],['-include']]:
+    for args in [['-E',src,src],['-o'],['-b'],['-D'],['-U'],['-include']]:
         r=run([*base,*args]);assert r.returncode==1 and not r.stdout
     r=run([*base,src,'-b','unknown/target','-o',out]);assert r.returncode!=0 and out.read_bytes()==b'preserve'
     r=run([*base,src,'-o',p]);assert r.returncode==1 and b'cannot open output' in r.stderr
@@ -52,7 +62,7 @@ sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()))
 import sim
 delta=json.loads((p/'e2.json').read_text());loaded=sim.load(delta)
 probe=p/'cli.c';probe.write_text('#ifdef X\nX\n#else\n17\n#endif\n__UNISA__\n')
-def cli(opts,defs=(),undefs=(),includes=(),incdir=''):
+def cli(opts,defs=(),undefs=(),includes=(),incdir='',nostd=False):
     flags=['-b',target,'-E',*opts]
     want=ok([ua,probe,*flags])
     for exe in drivers:
@@ -61,6 +71,7 @@ def cli(opts,defs=(),undefs=(),includes=(),incdir=''):
     for key,values in [('defines',defs),('undefines',undefs),('includes',includes)]:
         files.cache[('\0cli/'+key).encode()]=b''.join(str(v).encode()+b'\0' for v in values)
     files.cache[b'\0cli/include-dir']=str(incdir).encode()
+    files.cache[b'\0cli/nostdinc']=b'\1' if nostd else b''
     verdict,out,_=sim.run(delta,probe.read_bytes(),str(probe),files,maxsteps=50000000,loaded=loaded)
     assert verdict=='accept' and out==want,(opts,verdict,out,want)
 for opts,ds,us in [(['-DX=3'],['X=3'],[]),(['-D','X'],['X'],[]),
@@ -76,6 +87,21 @@ idir=p/'headers';idir.mkdir();(idir/'stdio.h').write_text('#define PICK 29\n')
 (p/'local.h').write_text('#define LOCAL 31\n');(idir/'local.h').write_text('#define LOCAL 99\n')
 probe.write_text('#include <stdio.h>\n#include "local.h"\nPICK LOCAL\n')
 cli(['-I',idir],incdir=idir);cli(['-I'+str(idir)],incdir=idir)
+cli(['-nostdinc','-I',idir],incdir=idir,nostd=True)
+probe.write_text('#include <stdio.h>\nint main(void){return 0;}\n')
+for exe in drivers:
+    r=run([exe,'--models',p/'compiler.pkg','-nostdinc',probe,'-b',target,'-S'])
+    assert r.returncode!=0 and not r.stdout and b'no such file for #include' in r.stderr,(exe,r.returncode,r.stdout,r.stderr)
+probe.write_text('int main(void){ printf("hi %d\\n",42); return 0; }\n')
+# The preprocessor must leave an undeclared printf untouched, without autoinc.
+cli(['-nostdinc'],nostd=True)
+# Still unfinished: the parsed .print has no lowering yet. Keep this visible
+# as a limitation, not as successful execution or CLI parity.
+for exe in drivers:
+    r=run([exe,'--models',p/'compiler.pkg','-nostdinc','-run',probe])
+    assert r.returncode==1 and not r.stdout and b'lowering' in r.stderr,r
+print('KNOWN: -nostdinc printf runtime remains unsupported (.print lowering)')
+
 probe.write_text('int main(void) { return VALUE; }\n')
 flags=['-DVALUE=7','-b',target,'-O2']
 for exe in drivers:

@@ -3240,3 +3240,33 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   docs: 3 generated tables, stale 0, referee ledger ok. Logs are
   `/tmp/unisacc-version-{check,build,com,docs}.log`. Targeted checks only;
   no new full gate, platform-wide validation, default switch, push or release.
+
+### Model CLI: compatibility arguments and -nostdinc preprocessing
+
+- Driver consumes attached/separate -l/-L/-x arguments, matching the product's
+  no-linker, C-only compatibility behaviour. Missing arguments fail explicitly.
+  -g and -std= are accepted with the same no-debug/no-dialect-switch behaviour;
+  warning options are not silently treated as implemented.
+- -nostdinc is a raw resource. E2, not host C, disables built-in include search
+  and automatic headers while preserving source-relative and explicit -I
+  lookup. CLI resources were expanded by one slot; process/memory/import
+  slots moved together. No executor operation was added.
+- Fresh compilercheck passes the implemented contracts, including Python
+  action-oracle vs network preprocessing. Its printed KNOWN line explicitly
+  records that undeclared printf's runtime fallback remains unfinished.
+  The complete CLI suite remains red: **58 pass / 6 fail**. Remaining: warning
+  flags, -nostdinc printf conversion/lowering, dependency target/header output,
+  undefined-function diagnostic, token dump. Logs:
+  `/tmp/unisacc-nostd-finalcheck.log`, `/tmp/unisacc-compat-final-cli.log`.
+- An attempted fallback expansion was withdrawn after tape comparison exposed
+  literal-pool order (argument strings must precede format fragments). Another
+  concrete blocker is DO.print's explicit rejection in exec/lower/code.py:
+  faithful migration requires the itoa TIns encoder on both ISAs. Scratch
+  all-conversion probe and tapes remain under `/tmp/unisacc-nostd-*`; none of
+  that incorrect parser trial remains in the tree. This is not printf closure.
+- Rebuilt development container: 3,080,406 B, SHA256
+  `714b4b41a45cd10f71b8489f7c761c09eb9b43827f4aeebd8ccbbadbf40a7725`.
+  Both macOS arm64 and Rosetta x86_64 executed attached/separate compatibility
+  options plus -nostdinc with a user header; built-in stdio rejection checked
+  on both. No full gate or Linux/Windows execution claimed for this batch.
+  Default product unchanged; no push/release; cc-unisacc remains paused.

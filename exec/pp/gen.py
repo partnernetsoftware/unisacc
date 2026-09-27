@@ -79,7 +79,8 @@ def build_autoinc(g):
     autoinc_map() (printf excluded, as hdrneeded does) with status exactly
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
-    g.els("AISTART", "AIS1", [("RLD", "RUN")])
+    g.els("AISTART", "AI.nostd", [("RLD", "CLI_NOSTD")])
+    g.r("AI.nostd", {0:("AIS1",[("RLD","RUN")]),1:("P3START",[])})
     g.r("AIS1", {0: ("AS", [("LDI", "RTP", 0)]), (1, 2): ("P3START", [])})
     WSN = [32, 9, 10]
     g.on("AS", ID, "ASI", [("MARK", "AS0"), ("ADV",)])
@@ -597,6 +598,10 @@ def build_cli(g, NC):
     decisions live here: -include source prefixes, MDEF bodies, and -U masks.
     No CLI directive text is inserted for -D/-U, so source positions stay put.
     """
+    g.els("CLI.FLAGS", "CLI.FLAGS.have", sbconst("\0cli/nostdinc")+
+          [("SBFIND","CLI_B"),("BLEN","CLI_NOSTD","CLI_B"),("CMPI","CLI_NOSTD",0)])
+    g.r("CLI.FLAGS.have", {1:("CLI.INC",[("LDI","CLI_NOSTD",0)]),
+                                (0,2):("CLI.INC",[("LDI","CLI_NOSTD",1)])})
     g.els("CLI.INC", "CLI.INC.have", sbconst("\0cli/includes") + [("SBFIND", "CLI_B"), ("RLD", "CLI_B")])
     g.r("CLI.INC.have", {0: ("P0S", []), tuple(range(1,257)): ("CLI.INC.next", [("INPUSH", "CLI_B")])})
     g.on("CLI.INC.next", [EOF], "P0S", [("INPOP",), ("LDI", "CLI_Z", 0), ("XLEN", "CLI_E"),
@@ -655,7 +660,7 @@ def build(target="lnx/x86_64"):
         init += sbconst(w) + [("SBINTERN", nm)]
     init += sbconst("printf") + [("SBINTERN", "ID_PRINTF")]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
-    g.els("START", "CLI.INC", init)
+    g.els("START", "CLI.FLAGS", init)
     build_cli(g, NC)
 
     # ---- P0: shebang, then splice -----------------------------------------
@@ -932,8 +937,10 @@ def build(target="lnx/x86_64"):
     g.els("SRCD", "SRCD", [("ADV",)])
     g.r("INC4", {1: ("CLI.IP", []), (0, 2): ("INCOK", [])})
     g.els("CLI.IP", "CLI.IP.have", sbconst("\0cli/include-dir")+[("SBFIND","CLI_DIR"),("BLEN","CLI_LEN","CLI_DIR"),("CMPI","CLI_LEN",0)])
-    g.r("CLI.IP.have", {1:("INC5",trydisk),(0,2):("CLI.IP.try",[("SBCLR",),("SBBLOB","CLI_DIR"),("SBOUT",47),("SBSPAN","NM","NME"),("SBFIND","HB"),("CMPI","HB",0)])})
-    g.r("CLI.IP.try", {1:("INC5",trydisk),(0,2):("INCOK",[])})
+    g.r("CLI.IP.have", {1:("INC.BUILTIN",[("RLD","CLI_NOSTD")]),(0,2):("CLI.IP.try",[("SBCLR",),("SBBLOB","CLI_DIR"),("SBOUT",47),("SBSPAN","NM","NME"),("SBFIND","HB"),("CMPI","HB",0)])})
+    g.r("CLI.IP.try", {1:("INC.BUILTIN",[("RLD","CLI_NOSTD")]),(0,2):("INCOK",[])})
+    g.r("INC.BUILTIN", {0:("INC5",trydisk),
+                              1:("DEAD",[("REJECT","no such file for #include")])})
     g.r("INC5", {1: ("INC6", sbconst("\0hdr/") + [("SBSPAN", "NM", "NME"), ("SBFIND", "HB"),
                                                   ("CMPI", "HB", 0)]),
                  (0, 2): ("INCOK", [])})

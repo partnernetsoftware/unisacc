@@ -82,7 +82,7 @@ int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
-    Buf defs={0}, undefs={0}, forced={0}, incdir={0};
+    Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
@@ -95,6 +95,7 @@ int main(int argc, char **argv) {
             if (len>=2 && !strcmp(a+len-2,".c")) sources[nsources++]=a;
             else { argstart=i; break; }
         }
+        else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
         else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
         else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
@@ -115,6 +116,15 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-I")) {
             if (++i >= argc) return clierror("missing include path"); INCDIR = argv[i];
         } else if (a[0]=='-' && a[1]=='I' && a[2]) INCDIR = a+2;
+        /* Same build-system compatibility as the reference product: no
+           external linker/search path, and only the C language. These
+           arguments are consumed, not interpreted as input file names. */
+        else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
+            if (!a[2] && ++i >= argc) return clierror("missing compatibility argument");
+        }
+        else if (!strcmp(a,"-g") || !strncmp(a,"-std=",5)) {
+            /* No separate debug information or dialect switch. */
+        }
         else if (!strcmp(a,"-O")) level = 1;
         else if (!strcmp(a,"-O0")) level = 0;
         else if (!strcmp(a,"-O1")) level = 1;
@@ -149,13 +159,14 @@ int main(int argc, char **argv) {
     ARGRESOURCE(1,"\0cli/undefines",undefs);
     ARGRESOURCE(2,"\0cli/includes",forced);
     ARGRESOURCE(3,"\0cli/include-dir",incdir);
-    RI=cli; NRI=4;
+    ARGRESOURCE(4,"\0cli/nostdinc",nostd);
+    RI=cli; NRI=5;
     if (runit) {
-        cli[4].name=(const unsigned char *)"\0process/argc";cli[4].n=13;cli[4].data=process_argc;cli[4].len=8;
-        cli[5].name=(const unsigned char *)"\0process/argv";cli[5].n=13;cli[5].data=process_argv;cli[5].len=8;
-        NRI=6;
+        cli[5].name=(const unsigned char *)"\0process/argc";cli[5].n=13;cli[5].data=process_argc;cli[5].len=8;
+        cli[6].name=(const unsigned char *)"\0process/argv";cli[6].n=13;cli[6].data=process_argv;cli[6].len=8;
+        NRI=7;
 #ifdef _WIN32
-        nimports=process_own_imports(cli+8,248,(long)process_own_imports);NRI=8+nimports;
+        nimports=process_own_imports(cli+9,247,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
     package(pkg ? pkg : argv[0]);
@@ -183,9 +194,9 @@ int main(int argc, char **argv) {
         if (!rc) {
             memory_image(&first,&plan);memory_map(&plan,&mapping);free(first.b);
             resource_u64(memory_text,(long)mapping.base);resource_u64(memory_data,(long)(mapping.base+mapping.dataoff));
-            cli[6].name=(const unsigned char *)"\0memory/text";cli[6].n=12;cli[6].data=memory_text;cli[6].len=8;
-            cli[7].name=(const unsigned char *)"\0memory/data";cli[7].n=12;cli[7].data=memory_data;cli[7].len=8;
-            NRI=8+nimports;rc=runroute(route,&in,src);
+            cli[7].name=(const unsigned char *)"\0memory/text";cli[7].n=12;cli[7].data=memory_text;cli[7].len=8;
+            cli[8].name=(const unsigned char *)"\0memory/data";cli[8].n=12;cli[8].data=memory_data;cli[8].len=8;
+            NRI=9+nimports;rc=runroute(route,&in,src);
         }
     }
     unpackage(); RI=0; NRI=0;
