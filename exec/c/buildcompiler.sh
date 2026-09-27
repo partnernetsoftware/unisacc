@@ -1,44 +1,106 @@
 #!/bin/sh
-# Offline construction of the development compiler container. No deployment or
-# overwrite of the shipped unisacc.com. Each child is bounded independently.
+# Offline construction only; shared/target domains permit external parallel scheduling.
 set -eu
+PYTHONHASHSEED=${PYTHONHASHSEED:-0}; export PYTHONHASHSEED
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
-[ $# = 1 ] || { echo 'usage: buildcompiler.sh OUTPUT_DIR' >&2; exit 2; }
+[ $# -ge 1 ] && [ $# -le 2 ] || { echo 'usage: buildcompiler.sh OUTPUT_DIR [shared|OS/ARCH|pack]' >&2; exit 2; }
+step=${2:-all}
+case $step in all|shared|pack|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
 [ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
-. ./tests/lib.sh; ua_ready
 mkdir -p "$1"; T=$(cd "$1" && pwd)
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
-mkdir -p "$T/shared" "$T/kernels"
-for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
-b python3 exec/lex/gen.py --typed "$T/shared/e1.json"
-b python3 exec/parse2/gen2.py "$T/shared/e3.json"
-b python3 exec/opt/gen.py "$T/shared/e4.json" 2
-b python3 exec/opt/gen.py "$T/shared/o1.json" 1
-for s in e1 e3 e4 o1; do
-    b python3 exec/c/tbl.py "$T/shared/$s.json" "$T/shared/$s.tbl"
-    b python3 exec/c/net.py "$T/shared/$s.tbl" "$T/shared/$s.net"
-done
-set --
-for os in lnx osx win; do
-    case $os in lnx) osflag=; image=elf;; osx) osflag=--osx; image=macho;; win) osflag=--win; image=pe;; esac
-    for arch in arm64 x86_64; do
-        case $arch in arm64) archflag=--arm64; enc=arm.py;; x86_64) archflag=; enc=gen.py;; esac
-        d="$T/$os-$arch"; mkdir -p "$d"
-        b python3 exec/pp/gen.py "$d/e2.json" "$os/$arch"
-        b python3 exec/lower/gen.py "$d/lower.json" --full $osflag $archflag
-        b python3 "exec/enc/$enc" "$d/elf.json" "--$image"
-        for s in e2 lower elf; do
-            b python3 exec/c/tbl.py "$d/$s.json" "$d/$s.tbl"
-            b python3 exec/c/net.py "$d/$s.tbl" "$d/$s.net"
-        done
-        awk -v route="$os/$arch" '!/^#/ && NF {
-            file=$4; if ($1=="e1" || $1=="e3" || $1=="e4") file="../shared/" file;
-            print route "\t" $1 "\t" $2 "\t" $3 "\t" file
-        }' exec/pipeline/image-stages.tsv > "$d/route.tsv"
-        set -- "$@" "$d/route.tsv"
+b() { perl "$R/tests/bound.pl" 50 "$@"; }
+# Reuse the model preparation identity/digest implementation. These are completion
+# records, not a result cache: requested stages always rebuild their own outputs.
+manifest() {
+    b python3 - "$T" "$1" "$2" <<'PYCODE'
+import hashlib,json,os,pathlib,sys
+sys.path.insert(0,'exec/pipeline')
+from models import identity,digest
+root=pathlib.Path(sys.argv[1]);mode,stage=sys.argv[2:]
+key=identity('compiler-container','1','cc')
+settings={k:v for k,v in os.environ.items() if k.startswith(('E1','E2','E3','E4','PYTHONHASHSEED'))}
+assembly={str(p):digest(p) for p in sorted(pathlib.Path('exec/c/asm').glob('*.S'))}
+key=hashlib.sha256((key+json.dumps([settings,assembly],sort_keys=True)).encode()).hexdigest()
+if mode=='identity': print(key);raise SystemExit
+names=([f'shared/{s}.{e}' for s in ('e1','e3','e4','o1') for e in ('json','tbl','net')]
+       + ['kernels/arm64','kernels/x86_64']) if stage=='shared' else (
+       [f'{stage}/{s}.{e}' for s in ('e2','lower','elf') for e in ('json','tbl','net')]+[f'{stage}/route.tsv'])
+record=root/stage/'manifest.json'
+if mode=='write':
+    expected=(root/stage/'input.sha256').read_text().strip()
+    if key!=expected: raise SystemExit('model source changed during '+stage)
+    data={'inputs':key,'outputs':{name:digest(root/name) for name in names}}
+    if any((root/name).stat().st_size==0 for name in names): raise SystemExit('empty stage output')
+    tmp=record.with_suffix('.tmp');tmp.write_text(json.dumps(data,sort_keys=True));tmp.replace(record)
+else:
+    try: data=json.loads(record.read_text())
+    except FileNotFoundError: raise SystemExit('missing completed dependency: '+stage)
+    if data.get('inputs')!=key or set(data.get('outputs',{}))!=set(names):
+        raise SystemExit('stale stage dependency: '+stage)
+    for name,sha in data['outputs'].items():
+        if digest(root/name)!=sha: raise SystemExit('changed stage output: '+name)
+PYCODE
+}
+start() {
+    mkdir -p "$T/$1"
+    rm -f "$T/$1/manifest.json"
+    manifest identity "$1" > "$T/$1/input.sha256"
+}
+shared() {
+    start shared
+    mkdir -p "$T/kernels"
+    for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
+    b python3 exec/lex/gen.py --typed "$T/shared/e1.json"
+    b python3 exec/parse2/gen2.py "$T/shared/e3.json"
+    b python3 exec/opt/gen.py "$T/shared/e4.json" 2
+    b python3 exec/opt/gen.py "$T/shared/o1.json" 1
+    for s in e1 e3 e4 o1; do
+        b python3 exec/c/tbl.py "$T/shared/$s.json" "$T/shared/$s.tbl"
+        b python3 exec/c/net.py "$T/shared/$s.tbl" "$T/shared/$s.net"
     done
-done
-b python3 exec/c/compilerpack.py --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" -o "$T/compiler.pkg" "$@"
-b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" -o "$T/unisacc-next.com"
-chmod +x "$T/unisacc-next.com"
-echo "development assembly/network compiler: $T/unisacc-next.com"
+    manifest write shared
+    echo 'completed compiler shared models and kernels'
+}
+target() {
+    os=${1%/*}; arch=${1#*/}; name=$os-$arch
+    start "$name"; d="$T/$name"
+    case $os in lnx) osflag=; image=elf;; osx) osflag=--osx; image=macho;; win) osflag=--win; image=pe;; esac
+    case $arch in arm64) archflag=--arm64; enc=arm.py;; x86_64) archflag=; enc=gen.py;; esac
+    b python3 exec/pp/gen.py "$d/e2.json" "$os/$arch"
+    b python3 exec/lower/gen.py "$d/lower.json" --full $osflag $archflag
+    b python3 "exec/enc/$enc" "$d/elf.json" "--$image"
+    for s in e2 lower elf; do
+        b python3 exec/c/tbl.py "$d/$s.json" "$d/$s.tbl"
+        b python3 exec/c/net.py "$d/$s.tbl" "$d/$s.net"
+    done
+    awk -v route="$os/$arch" '!/^#/ && NF {
+        file=$4; if ($1=="e1" || $1=="e3" || $1=="e4") file="../shared/" file;
+        print route "\t" $1 "\t" $2 "\t" $3 "\t" file
+    }' exec/pipeline/image-stages.tsv > "$d/route.tsv"
+    manifest write "$name"
+    echo "completed compiler target $os/$arch"
+}
+pack() {
+    manifest check shared
+    set --
+    for os in lnx osx win; do
+        for arch in arm64 x86_64; do
+            manifest check "$os-$arch"
+            set -- "$@" "$T/$os-$arch/route.tsv"
+        done
+    done
+    # Only packaging needs the classic seed; never race its creation in target jobs.
+    . ./tests/lib.sh
+    b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
+    b python3 exec/c/compilerpack.py --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" -o "$T/compiler.pkg" "$@"
+    b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" -o "$T/unisacc-next.com"
+    [ -s "$T/compiler.pkg" ] && [ -s "$T/unisacc-next.com" ]
+    manifest check shared
+    for os in lnx osx win; do for arch in arm64 x86_64; do manifest check "$os-$arch"; done; done
+    chmod +x "$T/unisacc-next.com"
+    echo "development assembly/network compiler: $T/unisacc-next.com"
+}
+case $step in
+    all) shared; for os in lnx osx win; do for arch in arm64 x86_64; do target "$os/$arch"; done; done; pack;;
+    shared) shared;; pack) pack;; *) target "$step";;
+esac
