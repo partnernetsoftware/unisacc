@@ -4533,3 +4533,9 @@ LV.c先允许标量float/double的单位步长，指针仍由STEPTY决定。浮�
 本片冻结前实测（尚未提交）：命名后缀更新复用POST后，wordfreq/exeinfo及b_globalstructptr三份转储均同新私有参考；旧289项先通过，清单扩E3=292/chain=145待完整门禁。三份程序在实际模型O0/O1/O2九次输出同cc，Python及重建产品O2的b_globalstructptr输出77 32 24 1。产品.com 1,358,320 B，SHA256 b0db8800a56a7c13c4e952eb02266b7e72d2fe7b3bf14efbd8da4ed11de4c9bb；私有UA=/tmp/unisacc-postoperand-private，SHA256 b20f125ac70101d966d6e5e83fc21e030b0e9d5de9ffbb93bca83b1294958e44。实际模型/tmp/unisacc-postoperand-candidate/unisacc-next.com为5,958,288 B。完整冻结队列使用/tmp/unisacc-postoperand-full，exec-driver-core另独占；所有步骤完成前不提交、不编辑冻结输入，不把局部九次运行称全门禁。
 
 后缀操作数/全局结构体指针数组片冻结验收完成：`/tmp/unisacc-postoperand-full`117项全部执行，其中exec-multi-ua并发53.07s超时（142，保留记录）；`/tmp/unisacc-postoperand-multi`独占48.69s通过；`/tmp/unisacc-postoperand-core`独占50.68s通过。按gate.sh --list --com核对，使用明确记录的独占复跑结果替代超时判定后，并集精确118个不同套件全rc0，最长52.942s；不将原超时改写为pass。C9957/57，difftest_o408，fat137双架构实际运行；自身转储3,958,904 B一致；E3固定292全同、网络chain145全同。模型候选SHA256 5057c049b5303942164c79a8f66b8a9ed55a7e460d29c95a710c4a899ae7ec8e。gen2净+4行，复用既有后缀更新，无新执行器原语；产品只修正全局数组分配条件并重新生成unisacc.c。当前只据本地门禁范围报告，未新跑Linux/Windows VM原生套件。未推送/发布/切默认，剩余模型覆盖与整体切换继续。
+
+### sizeof成员对象复用（进行中）
+覆盖盘点中b_arr1memb/b_structarrmember停在sizeof成员数组：普通表达式路径已衰减成指针，无法再由vt/vb恢复完整对象宽度。提取MB.INFO共用成员声明元数据读取，sizeof直接沿命名成员链取得MSZ（不执行地址/载入），普通成员访问仍用同一读取入口；未匹配的表达式退回原路径，不把残留marr当通用类型事实。
+
+
+sizeof成员片验收：复用MB.INFO读取成员声明元数据，新增命名成员链的sizeof路径；数组成员保留MSZ对象宽度，后续箭头访问仍按数组衰减处理。未增加执行器原语，gen2净增19行。原292项先通过，新增b_arr1memb、b_structarrmember和s73_sizeof_members后固定295项全部逐字节相同；chain固定148项全部通过。实际模型候选在三个用例、三个优化级别上共9次执行与宿主cc相同。相关12项门禁两槽排队，两个窗口50.67/12.97秒，全通过；源码到ELF43.13秒，E3自身源码3,958,904字节相同。候选5,961,195 B，sha256 f4d1a1639b4ca9d5b1d6ff24bac520463a28abb2c5318162e92cbdb73f73ddb1；仍在隔离目录，不替换出货产物。模型5171状态、1,330,083条目、JSON 28,797,582 B。此片为模型覆盖补齐，不宣称完整C99或S-17完成，产品源码未变，未重复整套产品门禁。
