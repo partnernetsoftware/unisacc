@@ -137,7 +137,7 @@ job exec-armself env TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-
 job exec-macself env TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh # Mach-O source route and native bootstrap
 job exec-macxself env TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh # x86/Rosetta bootstrap
 job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 complete source-to-ELF paths
-job difftest_o  ./tests/difftest_o.sh
+for k in 1 2 3 4; do job difftest_o-$k SHARD=$k/4 ./tests/difftest_o.sh; done
 job warn        ./tests/warn.sh
 job diag-units  ./tests/diagunits.sh
 job nativeboot  ./tests/nativeboot.sh
