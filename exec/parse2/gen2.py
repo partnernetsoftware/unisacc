@@ -691,16 +691,18 @@ def types():
     P("TS.td").a(("LDX", "tb", "t", E.TDB), ("LDX", "td", "t", E.TDD)).call("NEXT").goto("TS.b")
     for w, n in TYPEW.items():   # (unsigned is read by its own states below)
         P("TS." + w).a(("LDI", "tb", n)).call("NEXT").goto("TS.q" if w in ("type=char", "type=short", "type=int") else "TS.b" if w != "type=long" else "TS.ll")
-    P("TS.q").tok({"type=unsigned": "TS.qu"}, "TS.b")       # `char unsigned`: the same type (p47)
+    P("TS.q").tok({"type=unsigned": "TS.qu"}, "TS.intopt")       # `char unsigned`: the same type (p47)
     P("TS.qu").a(("ALUI", "add", "tb", "tb", UNS)).call("NEXT").goto("TS.b")
-    P("TS.ll").tok({"type=long": "TS.ll2"}, "TS.b")    # long long: a long
+    P("TS.ll").tok({"type=long": "TS.ll2"}, "TS.intopt")    # long long: a long
     P("TS.type=unsigned").call("NEXT").tok({"type=char": "TS.u1", "type=short": "TS.u2", "type=long": "TS.u8", "type=int": "TS.u4i"}, "TS.u4")
     P("TS.u4i").call("NEXT").goto("TS.u4")
     P("TS.u4").a(("LDI", "tb", UNS + 4)).goto("TS.b")
     P("TS.u1").a(("LDI", "tb", UNS + 1)).call("NEXT").goto("TS.b")
-    P("TS.u2").a(("LDI", "tb", UNS + 2)).call("NEXT").goto("TS.b")
+    P("TS.u2").a(("LDI", "tb", UNS + 2)).call("NEXT").goto("TS.intopt")
     P("TS.u8").a(("LDI", "tb", UNS + 8)).call("NEXT").goto("TS.ll")
-    P("TS.ll2").call("NEXT").goto("TS.b")
+    P("TS.ll2").call("NEXT").goto("TS.intopt")
+    P("TS.intopt").tok({"type=int": "TS.intend"}, "TS.b")
+    P("TS.intend").call("NEXT").goto("TS.b")
     P("TS.b").a(("COPYW", "bd", "td")).goto("TS.l")
     P("TS.l").tok({"*": "TS.st"}, "RET")
     # after ',' in a declaration: the next declarator's stars on the base depth
