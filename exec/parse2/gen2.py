@@ -651,7 +651,25 @@ def types():
     P("SB.go").a(("STX", "sid", SFLAT, "z0"), ("LDI", "soff", 0), ("LDI", "smal", 1), ("COPYW", "sun", "sun_n"), ("LDI", "umax", 0)).call("NEXT").label("SB.m")
     P("SB.m").tok({"}": "SB.end"}, "SB.mem")
     p = P("SB.mem")
-    p.vpush("sid", "soff", "smal", "sun", "umax").call("TSPEC").vpop("sid", "soff", "smal", "sun", "umax").tok({TK_ID: "SB.nm"}, bad("struct member"))
+    p.vpush("sid", "soff", "smal", "sun", "umax").call("TSPEC").vpop("sid", "soff", "smal", "sun", "umax").tok({TK_ID: "SB.nm", ";": "SB.anon"}, bad("struct member"))
+    # Anonymous aggregate: lift names/layout, preserving initializer slots.
+    P("SB.anon").branch({1: "SB.anonbase"}, bad("anonymous pointer member"), [("CMPI", "td", 0)])
+    P("SB.anonbase").branch({2: "SB.anonlayout"}, bad("anonymous scalar member"), [("CMPI", "tb", SBB)])
+    P("SB.anonlayout").a(("ALUI", "sub", "an_sid", "tb", SBB), ("LDX", "msz", "an_sid", SSZ), ("LDX", "mal", "an_sid", SAL)).branch({1: "DEAD.sm"}, "SB.anonplace", [("CMPI", "msz", 0)])
+    P("SB.anonplace").branch({1: "SB.anonunion"}, "SB.anonstruct", [("CMPI", "sun", 1)])
+    P("SB.anonunion").a(("LDI", "an_base", 0), ("COPYW", "soff", "msz")).goto("SB.anonbegin")
+    P("SB.anonstruct").a(("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "an_base", "t", "m"), ("ALU", "add", "soff", "an_base", "msz")).goto("SB.anonbegin")
+    P("SB.anonbegin").a(("LDI", "an_i", 0), ("LDX", "an_n", "an_sid", SMN), ("LDX", "an_flat", "an_sid", SFLAT), ("LDX", "t", "sid", SFLAT), ("ALU", "add", "t", "t", "an_flat"), ("STX", "sid", SFLAT, "t")).label("SB.anonloop").branch({0: "SB.anoncopy"}, "SB.anonend", [("CMP", "an_i", "an_n")])
+    p = P("SB.anoncopy")
+    p.a(("ALUI", "mul", "u", "an_sid", 64), ("ALU", "add", "u", "u", "an_i"), ("LDX", "an_key", "u", SMEM), ("A64I", "and", "k", "an_key", -MEMBER_STRIDE), ("A64", "add", "k", "k", "sid"), ("LDX", "t", "an_key", MOF), ("ALU", "add", "t", "t", "an_base"), ("STX", "k", MOF, "t"))
+    for table in (MSZ, MPT, MBS, MAR, MFLAT):
+        p.a(("LDX", "t", "an_key", table), ("STX", "k", table, "t"))
+    p.call("SB.memberindex").a(("ALUI", "add", "an_i", "an_i", 1)).goto("SB.anonloop")
+    P("SB.anonend").a(("LDI", "marr", 0)).branch({2: "SB.um"}, "SB.al", [("CMP", "soff", "umax")])
+    # One append operation for named and lifted members. The existing index
+    # representation has 64 entries per structure; reject before aliasing.
+    P("SB.memberindex").a(("LDX", "t", "sid", SMN)).branch({0: "SB.memberput"}, bad("structure member capacity"), [("CMPI", "t", 64)])
+    P("SB.memberput").a(("ALUI", "mul", "u", "sid", 64), ("ALU", "add", "u", "u", "t"), ("STX", "u", SMEM, "k"), ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t")).ret()
     p = P("SB.nm")
     p.a(("LDI", "marr", 0), ("COPYW", "mnm_s", "ps"), ("COPYW", "mnm_e", "pe"), ("COPYW", "mtd", "td")).call("NEXT").tok({"[": "SB.arr"}, "SB.nm1")
     p = P("SB.arr")         # NAME [N]: N elements; more dimensions are not covered
@@ -683,9 +701,7 @@ def types():
     p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
         ("A64I", "mul", "k", "v", MEMBER_STRIDE), ("A64", "add", "k", "k", "sid"),
         ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("STX", "k", MAR, "marr"),
-        ("LDX", "t", "sid", SMN), ("ALUI", "mul", "u", "sid", 64), ("ALU", "add", "u", "u", "t"), ("STX", "u", SMEM, "k"),
-        ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t"),
-        ("ALU", "add", "soff", "soff", "msz"))
+        ("ALU", "add", "soff", "soff", "msz")).call("SB.memberindex")
     p.call("TYPECOUNT").branch({1:"SB.flat"}, "SB.flatarr", [("CMPI","marr",0)])
     P("SB.flatarr").branch({0:"SB.flatskip"},"SB.flatmul",[("CMPI","marr",0)])
     P("SB.flatmul").a(("ALU","mul","flat","flat","marr")).goto("SB.flat")
