@@ -4500,3 +4500,9 @@ VLA冻结验收完成：`/tmp/unisacc-vla-full`双槽117项与`/tmp/unisacc-vla-
 
 返回转换片验收完成：复用ASSIGNCV，删除返回路径的局部float/bool特判，gen2净-5行（+5/-10），无执行器或产品源码改动。s68覆盖int→double、double→float/int/u64/uchar/bool、u64→float/double、float→short。最小double f(){return 3;}旧模型输出0，新模型与cc输出3；两程序三档优化共6次真实模型运行同cc。旧282项先通过，再纳入s68，固定E3=283；网络chain=136/136。
 定向双槽队列`/tmp/unisacc-returncv-gate`12/12全rc0，窗口50.97/12.97s，最长43.423s；自身3,958,707 B转储相同。实际模型C9957/57、wrong0/refused0。plain delta5045状态、1,297,615项、28,151,060 B；候选`/tmp/unisacc-returncv-candidate/unisacc-next.com`5,942,411 B，SHA256 01a562a374cfd8c49cafabe718cc647d39ab7a1920b892d3d7b18e546327164b。出货.com仍为ef17e27的产品构建，本片未重跑118项产品门禁；未发布、推送或切换默认路线，剩余转换与覆盖缺口继续推进。
+
+### 十进制u64字面量边界（进行中）
+复测b_fconv仍拒绝expression；逐句缩小至首行18446744073709551615UL。共享token读取器NUMD只接受19位，U.ulong已有正确的有符号位模式输出。扩至20位前逐位检查UINT64_MAX，不能只放宽长度令累加回绕；复用现有64位比较动作，不增执行器原语。浮点先由floatconst分类，仍走原精确转换。
+
+十进制u64片实测：NUMD每次乘10前用UINT64_MAX与当前digit计算阈值，C64U拒绝溢出，长度放宽至20位；U.ulong原有NUMOUT打印位模式复用。旧283项先过，再固定b_fconv与s69，E3=285全同，网络chain=138全同。此前b_fconv拒绝的首因就是20位字面量；修复后完整转储同参考，两新增程序实际模型O0/O1/O2六次运行输出同cc。共享数值门禁增加6个整数精确位值、3个溢出token拒绝，table/net两路径都检查tk，避免只看回绕后的nv；原61个浮点位值及10个坏浮点输入保持通过。
+双槽定向队列`/tmp/unisacc-u64literal-gate`6/6全rc0，窗口42.90s；source-to-ELF42.78s，自身3,958,707 B一致。plain delta5065状态、1,302,755项、28,248,181 B；候选5,944,748 B，SHA256 cce79501fbb67e55f78760828b5e5b9b62fb4c23ceda51e3df79b90f9715b285。模型共享reader净+4行；产品源码与出货.com未改，不宣称本片重跑完整产品门禁。b_float仍在混合?:类型处未覆盖，下一片审计公共类型及两分支转换；未推送/发布/切默认，整体重构未完成。

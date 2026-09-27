@@ -136,7 +136,7 @@ def tokenizer(qualifiers=("type=const", "type=volatile")):
     g.on("SPANSTR", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_STR)])
     g.on("SPANSTR", [256], "DEAD", rej("not covered: truncated token dump"))
     g.els("SPANSTR", "SPANSTR", [("ADV",)])
-    # decimal: copied as written (<= 19 digits), suffixes u/l dropped (measured);
+    # decimal: copied as written (<= 20 digits, bounded by UINT64_MAX), suffixes u/l dropped (measured);
     # hex/octal: value in W[nv] (64-bit), printed signed decimal (nx = 1)
     SUF = [ord(c) for c in "uUlL"]
     DIGS = range(48, 58)
@@ -181,9 +181,13 @@ def tokenizer(qualifiers=("type=const", "type=volatile")):
     g.els("NUMF", "SKIPO", [("LDI", "tk", TK_BADNUM)])
     g.r("NUMFL", {0: ("FCONV", []), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
     for d in range(10):
-        g.on("NUMD", [48 + d], "NUMD", [("ADV",), ("A64I", "mul", "nv", "nv", 10), ("A64I", "add", "nv", "nv", d)])
-    g.on("NUMD", [10], "NUMLEN", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
-    g.on("NUMD", SUF, "NUMDS", [("MARK", "pe"), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
+        # Check before multiplication; the 20th digit must not wrap W[nv].
+        check, append = "NUMD.check%d" % d, "NUMD.append%d" % d
+        g.on("NUMD", [48 + d], check, [("LDI", "numlimit", (2**64 - 1 - d) // 10), ("C64U", "nv", "numlimit")])
+        g.r(check, {(0, 1): (append, []), 2: ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
+        g.els(append, "NUMD", [("ADV",), ("A64I", "mul", "nv", "nv", 10), ("A64I", "add", "nv", "nv", d)])
+    g.on("NUMD", [10], "NUMLEN", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 21)])
+    g.on("NUMD", SUF, "NUMDS", [("MARK", "pe"), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 21)])
     g.els("NUMD", "SKIPO", [("LDI", "tk", TK_BADNUM)])
     g.r("NUMLEN", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
     g.r("NUMDS", {0: ("NUMS", [("ADV",), ("LDI", "ns", 1)]), (1, 2): ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
