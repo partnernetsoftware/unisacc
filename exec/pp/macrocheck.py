@@ -93,9 +93,10 @@ assert len(cases)==43
 expressions = ['2+3*4==14', '17/5==3 && 17%5==2', '(1<<5)==32 && (32>>3)==4',
  '(6&3)==2 && (4|1)==5 && (7^3)==4', '1<2 && 2<=2 && 3>2 && 3>=3 && 1!=2',
  '!0 && !(!1) && (~0)==-1 && -3+ +4==1', '0 && (1/0)', '1 || (1/0)',
- '(1 ? 7 : 1/0)==7', '(0 ? 1/0 : 9)==9', '(1 ? 0 : 1) ? 0 : 1']
-truth = [True, True, True, True, True, True, False, True, True, True, True]
-cases['integer_reductions'] = ''.join(
+ '(1 ? 7 : 1/0)==7', '(0 ? 1/0 : 9)==9', '(1 ? 0 : 1) ? 0 : 1',
+ 'defined(ONE) && defined TWO && !defined(NOPE)', 'TWO==2 && UNDECLARED==0']
+truth = [True, True, True, True, True, True, False, True, True, True, True, True, True]
+cases['integer_reductions'] = '#define ONE 1\n#define TWO ONE+1\n' + ''.join(
  '#if '+expr+'\nYES'+str(i)+'\n#else\nNO'+str(i)+'\n#endif\n'
  for i,expr in enumerate(expressions))
 integer_want = [('YES' if yes else 'NO')+str(i) for i,yes in enumerate(truth)]

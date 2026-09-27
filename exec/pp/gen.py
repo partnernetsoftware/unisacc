@@ -111,6 +111,7 @@ def install_rules(g, stem, bindings=None, sequences=None, classes=None):
                                      sequences or {}, bindings=bindings, classes=classes).items():
             for key, (target, actions) in row.items():
                 g.on(state, [key], target, actions, mode)
+                g.labels.update(a[1] for a in actions if a[0] == "PUSH")
 
 
 def build_autoinc(g, locations=False):
@@ -248,7 +249,6 @@ for line in (Path(HERE) / "operators.tsv").read_text().splitlines():
     assert spelling and spelling not in {v[0] for v in XOPS.values()}
     XOPS[code] = spelling, precedence, arity
 assert XOPS, "empty expression operator declarations"
-XCODE = {v[0]: k for k, v in XOPS.items()}
 
 
 def xe_init():
@@ -258,143 +258,12 @@ def xe_init():
     return a
 
 
-def xpushop(code):
-    return [("ALUI", "add", "xa", "XOS", XOB), ("LDI", "xc", code), ("STX", "xa", 0, "xc"),
-            ("ALUI", "add", "XOS", "XOS", 1)]
-
-
-XPUSHV = [("ALUI", "add", "xa", "XVS", XVB), ("STX", "xa", 0, "xr"),
-          ("ALUI", "add", "xa", "XVS", XPB), ("STX", "xa", 0, "xrp"), ("ALUI", "add", "XVS", "XVS", 1)]
-XTOP = [("ALUI", "add", "xa", "XOS", XOB - 1), ("LDX", "xt", "xa", 0),
-        ("ALUI", "add", "xa", "xt", XPRB), ("LDX", "xq", "xa", 0)]
-
-
-def xpopv(v, p):
-    return [("ALUI", "sub", "XVS", "XVS", 1), ("ALUI", "add", "xa", "XVS", XVB), ("LDX", v, "xa", 0),
-            ("ALUI", "add", "xa", "XVS", XPB), ("LDX", p, "xa", 0)]
-
-
-def build_xe(g, NC):
-    nc = ("DEAD", NC("#if expression"))
-    g.els("XE", "XO", [("LDI", "XOS", 1), ("LDI", "XVS", 0), ("LDI", "xz", 0), ("LDI", "xdp", 0),
-                       ("ALUI", "add", "xa", "XOS", XOB - 1), ("STX", "xa", 0, "xz")])
-
-    def popwhile(name, p, nxt, acts):
-        g.els(name, name + "c", XTOP + [("CMPI", "xq", p)])
-        sub, pu = g.call("XRED", name)
-        g.r(name + "c", {(1, 2): (sub, pu), 0: (nxt, acts)})
-
-    # end of a macro body pushed on the #if line (s11.2b): pop the frame,
-    # clear the macro's active mark, continue with the enclosing text
-    xpop = [("INPOP",), ("STX", "CUR", F_ACT, "xz"), ("LDX", "CUR", "CUR", F_UP),
-            ("ALUI", "sub", "DEP", "DEP", 1), ("ALUI", "sub", "xdp", "xdp", 1)]
-    for st in ("XO", "XR"):
-        g.on(st, [EOF], st + "EOF", [("CMPI", "xdp", 0)])
-    g.r("XOEOF", {2: ("XO", xpop), (0, 1): nc})
-    g.r("XREOF", {2: ("XR", xpop), (0, 1): ("XEND", [])})
-    # operand expected
-    g.on("XO", WS, "XO", [("ADV",)])
-    g.on("XO", [40], "XO", [("ADV",)] + xpushop(1))
-    for ch, sp in ((33, "u!"), (126, "u~"), (45, "u-"), (43, "u+")):
-        g.on("XO", [ch], "XO", [("ADV",)] + xpushop(XCODE[sp]))
-    g.on("XO", [48], "XN0", [("ADV",), ("LDI", "xr", 0), ("LDI", "xrp", 0)])
-    g.on("XO", DI, "XND", [("LDI", "xr", 0), ("LDI", "xrp", 0), ("LDI", "xnc", 0)])
-    g.on("XO", AL, "XID", [("MARK", "XS")])
-    g.els("XO", *nc)
-    g.on("XN0", [120, 88], "XNH0", [("ADV",), ("LDI", "xnc", 0)])
-    g.on("XN0", ID | {46, 39}, *nc)
-    g.els("XN0", "XR", XPUSHV)
-    for c in DI:
-        g.on("XND", [c], "XND", [("ADV",), ("A64I", "mul", "xr", "xr", 10),
-                                 ("A64I", "add", "xr", "xr", c - 48), ("ALUI", "add", "xnc", "xnc", 1)])
-    g.on("XND", AL | {46, 39}, *nc)
-    g.els("XND", "XNDE", [("CMPI", "xnc", 18)])
-    g.r("XNDE", {(0, 1): ("XR", XPUSHV), 2: nc})
-    hx = {c: c - 48 for c in DI}
-    hx.update({c: c - 87 for c in range(97, 103)})
-    hx.update({c: c - 55 for c in range(65, 71)})
-    for st in ("XNH0", "XNH"):
-        for c, v in hx.items():
-            g.on(st, [c], "XNH", [("ADV",), ("A64I", "shl", "xr", "xr", 4),
-                                  ("A64I", "or", "xr", "xr", v), ("ALUI", "add", "xnc", "xnc", 1)])
-    g.els("XNH0", *nc)
-    g.on("XNH", ID | {46, 39}, *nc)
-    g.els("XNH", "XNHE", [("CMPI", "xnc", 15)])
-    g.r("XNHE", {(0, 1): ("XR", XPUSHV), 2: nc})
-    # identifier: only `defined`
-    g.on("XID", ID, "XID", [("ADV",)])
-    g.els("XID", "XID1", [("MARK", "XE_"), ("INTERN", "t", "XS", "XE_"), ("CMP", "t", "ID_DEFD")])
-    # any other identifier: not a macro -> 0 (as the reference, which
-    # expands first and then reads leftover identifiers as 0); a macro
-    # name is not covered (no expansion on the #if line yet)
-    sub_u, pu_u = g.call("MFIND", "XUM")
-    g.r("XID1", {1: ("XD", [("LDI", "xpar", 0)]),
-                 (0, 2): (sub_u, [("COPYW", "NID", "t"), ("LDI", "SEGQ", -1)] + pu_u)})
-    g.els("XUM", "XUM1", [("CMPI", "M", 0)])
-    # a macro name: an active one (hide set) reads 0 like any leftover
-    # identifier; an inactive object-like one pushes its body (s11.2b);
-    # a function-like one is not covered
-    zero = ("XR", [("LDI", "xr", 0), ("LDI", "xrp", 0)] + XPUSHV)
-    g.r("XUM1", {0: zero,
-                 (1, 2): ("XUM2", ea("me", "M") + [("LDX", "act", "me", F_ACT), ("RLD", "act")])})
-    g.r("XUM2", {1: zero, (0, 2): ("XUM3", [("LDX", "fn", "me", F_FN), ("RLD", "fn")])})
-    g.r("XUM3", {0: ("XUM4", [("LDX", "hh", "me", F_HASH), ("RLD", "hh")]),
-                 (1, 2): ("DEAD", NC("#if function-like macro name"))})
-    g.r("XUM4", {0: ("XO", PUSHM + [("ALUI", "add", "xdp", "xdp", 1)]),
-                 tuple(range(1, 257)): ("DEAD", NC("#if macro with # or ##"))})
-    g.on("XD", WS, "XD", [("ADV",)])
-    g.on("XD", [40], "XDP", [("ADV",), ("LDI", "xpar", 1)])
-    g.on("XD", AL, "XDI", [("MARK", "XS")])
-    g.els("XD", *nc)
-    g.on("XDP", WS, "XDP", [("ADV",)])
-    g.on("XDP", AL, "XDI", [("MARK", "XS")])
-    g.els("XDP", *nc)
-    g.on("XDI", ID, "XDI", [("ADV",)])
-    g.els("XDI", "XDW", [("MARK", "XE_"), ("INTERN", "NID", "XS", "XE_"), ("CMPI", "xpar", 1)])
-    sub, pu = g.call("MFIND", "XDM")
-    g.r("XDW", {1: ("XDC", []), (0, 2): (sub, [("LDI", "SEGQ", -1)] + pu)})
-    g.on("XDC", WS, "XDC", [("ADV",)])
-    g.on("XDC", [41], sub, [("ADV",), ("LDI", "SEGQ", -1)] + pu)
-    g.els("XDC", *nc)
-    g.els("XDM", "XDM1", [("CMPI", "M", 0)])
-    g.r("XDM1", {0: ("XR", [("LDI", "xr", 0), ("LDI", "xrp", 0)] + XPUSHV),
-                 (1, 2): ("XR", [("LDI", "xr", 1), ("LDI", "xrp", 0)] + XPUSHV)})
-    # operator expected
-    g.on("XR", WS, "XR", [("ADV",)])
-    g.on("XR", [10], "XEND", [])
-    single = {42: "*", 47: "/", 37: "%", 43: "+", 45: "-", 94: "^"}
-    for ch, sp in single.items():
-        g.on("XR", [ch], "XB%d" % XCODE[sp], [("ADV",)])
-    for ch, sp, sp2 in ((38, "&", "&&"), (124, "|", "||")):
-        g.on("XR", [ch], "XR%d" % ch, [("ADV",)])
-        g.on("XR%d" % ch, [ch], "XB%d" % XCODE[sp2], [("ADV",)])
-        g.els("XR%d" % ch, "XB%d" % XCODE[sp])
-    for ch, sp in ((60, "<"), (62, ">")):
-        g.on("XR", [ch], "XR%d" % ch, [("ADV",)])
-        g.on("XR%d" % ch, [ch], "XB%d" % XCODE[sp + sp], [("ADV",)])
-        g.on("XR%d" % ch, [61], "XB%d" % XCODE[sp + "="], [("ADV",)])
-        g.els("XR%d" % ch, "XB%d" % XCODE[sp])
-    for ch, sp in ((61, "=="), (33, "!=")):
-        g.on("XR", [ch], "XR%d" % ch, [("ADV",)])
-        g.on("XR%d" % ch, [61], "XB%d" % XCODE[sp], [("ADV",)])
-        g.els("XR%d" % ch, *nc)
-    g.on("XR", [63], "XQ", [("ADV",)])
-    g.on("XR", [58], "XC", [("ADV",)])
-    g.on("XR", [41], "XP", [("ADV",)])
-    g.els("XR", *nc)
-    for c, (sp, p, ar) in XOPS.items():
-        if ar == 2:
-            popwhile("XB%d" % c, p, "XO", xpushop(c))
-    popwhile("XQ", 3, "XO", xpushop(2))
-    popwhile("XC", 2, "XC2", [("CMPI", "xt", 2)])
-    g.r("XC2", {1: ("XO", [("ALUI", "add", "xa", "XOS", XOB - 1), ("LDI", "xc", 3), ("STX", "xa", 0, "xc")]),
-                (0, 2): nc})
-    popwhile("XP", 1, "XP2", [("CMPI", "xt", 1)])
-    g.r("XP2", {1: ("XR", [("ALUI", "sub", "XOS", "XOS", 1)]), (0, 2): nc})
-    popwhile("XEND", 2, "XEND2", [("CMPI", "XOS", 1)])
-    g.r("XEND2", {1: ("RET", xpopv("XV", "XP")), (0, 2): nc})
-
-    install_rules(g, "reduce", {"XOB": XOB, "XVB": XVB, "XPB": XPB})
+def build_xe(g):
+    layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'F_ACT', 'F_UP', 'FSZ', 'MACB', 'F_TO', 'F_FN', 'F_HASH', 'F_BODY']}
+    layout["XOB_PREV"] = XOB - 1
+    layout.update(("PREC_" + str(c), p) for c, (_, p, _) in XOPS.items())
+    install_rules(g, "expression", layout)
+    install_rules(g, "reduce", layout)
 
 
 # ---- # and ## (research/e2-pp-delta.md s12) -------------------------------
@@ -1219,7 +1088,7 @@ def build(target="lnx/x86_64", locations=False):
         install(g, SPLB, IRLN, IRNL)
     else:
         g.els("ACC", "ACC", [("ACCEPT",)])
-    build_xe(g, NC)
+    build_xe(g)
     build_hx(g, NC)
     g.finish()
     return g
