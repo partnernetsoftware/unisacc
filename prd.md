@@ -5079,3 +5079,5 @@ warning四helper5650179与返回/表达式7436d7b已审合。warning原139例完
 E5下一独立完整组为X.id及标识符查找/自增自减/compound更新、TAX/CSTEP/STEPTY/INTONLY/FPSTEP等与之相连控制，保留真实type/tyinfo、形状描述与共享AS/POSTIX/CALL。剩普通U.str/UNARY/deref及START另计；不把三者混成逐case扩功能。父五模式联合检查单槽执行，E4协议槽2；新组先静态，等空槽。
 
 父联合源迁移验证完成：固定完整基线70d3952对当前2d27cbf，plain/locations/warnings/errors/both五个模式6006/6194/6433/6357/6593状态，每个观察后继及展开action/string与顶层metadata全等；逐模式10.15/10.30/10.65/13.08/13.42秒，各步≤55，源码全程冻结。/tmp/unisacc-joint-controls-928/summary.json及逐模式完整比较文件；涵盖目前已合全部局部迁移和共享token策略，仍不声称packed bytes相同。槽1已交errors，槽2协议结束交identifier/update。
+
+位置协议25ec7ad已合：五E3模式/units两配置及8种接口组合、布局/字段顺序扰动全图同；原unitlocationcheck与locationcheck实际NET序列化/map/tape/诊断/坏帧全通过，Python净减44、声明139。E4下一完整units.py分帧/扫描/文件static隔离组；保留已声明unit-labels、位置信封DL/LS、动态词表和唯一tokenizer，声明builtin选择来源，不能将扫描算法搬进新的Python模块。父现有五模式联合验证不包含此后合入，后面统一最终源再验。
