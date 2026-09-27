@@ -10,14 +10,13 @@ weights/built.uns2 byte for byte.
 """
 import os
 
-from .gold import Stage
 
 
 class GoldDataError(ValueError):
     pass
 
 
-def load_stage(path):
+def load_table(path):
     """The stage in `path`, or GoldDataError.  The input contract, shared
     with any other reader (the C constructor to come): the schema's field
     and head names are unique, each field's values and each head's classes
@@ -91,9 +90,15 @@ def load_stage(path):
     if len(rows) != n:          # unique, in-domain keys: equal count = full cover
         bad("%d keys, the fields' product is %d" % (len(rows), n))
 
-    def label(*kv):
-        return rows[tuple(kv)]
-    return Stage(name, fields, heads, label, cfg=None)
+    return name, fields, heads, rows
+
+
+def load_stage(path):
+    # Compatibility adapter for construction callers that use Stage objects.
+    # Reading declaration data alone does not import any gold rules.
+    from .gold import Stage
+    name, fields, heads, rows = load_table(path)
+    return Stage(name, fields, heads, lambda *kv: rows[tuple(kv)], cfg=None)
 
 
 def load_all(d, names):

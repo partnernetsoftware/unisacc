@@ -23,6 +23,9 @@ def identity(target, network, compiler):
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
                 h.update(str(path.relative_to(ROOT)).encode() + b'\0')
                 h.update(bytes.fromhex(digest(path)))
+    path = ROOT / 'iterate/kernel/typekw.tsv'
+    h.update(str(path.relative_to(ROOT)).encode() + b'\0')
+    h.update(bytes.fromhex(digest(path)))
     return h.hexdigest()
 
 def valid(cache, network):

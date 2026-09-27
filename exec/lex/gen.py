@@ -17,15 +17,19 @@ Where the data comes from -- derived, not typed in:
   * dispatch (what a byte starts, given the next one): weights/gold/lex.tsv,
     the shipped lex table itself;
   * token kinds, their names and order, the punctuators for maximal munch,
-    the keywords: unisa.gold.TOKS (== TOKV in kernel/unisa_model.inc, checked);
-  * the words that lex as `type`: unisa.front.lex.TYPEKW (== TYPEV, checked).
+    the keywords: weights/gold/parse.tsv, field tok;
+  * the words that lex as `type`: iterate/kernel/typekw.tsv.
   * the byte -> class split and the attribute look-ahead's white space:
     weights/gold/lexcls.tsv; the GCC words that are skipped with their
     parenthesised argument or dropped, and the string/char prefixes:
     weights/gold/lexword.tsv.  Both are declared data read with the gold-table
-    reader (unisa/tsvgold.py), and _check_decl() asserts they agree with
+    reader (unisa/tsvgold.py); --check-declarations asserts agreement with
     src/front_pp.c charclass()/lex() and src/front_parse.c's OPCH.
-Still transcribed: the number scanning rules (design doc s8).
+Finite scanning/entry/output/framing rules: the TSV files beside this module.
+This generator expands finite rules, links declared actions, builds word and
+punctuator tries, and checks totality. See rules.md for the input contract
+and the remaining construction-side assumptions; no reference files are
+read unless --check-declarations is requested.
 """
 import json
 import os
@@ -36,41 +40,47 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, ROOT)
 
-from unisa.gold import TOKS                      # noqa: E402
-from unisa.front.lex import TYPEKW               # noqa: E402
+from pathlib import Path
 
 EOF = 256
+_G = os.path.join(ROOT, "weights", "gold")
+# The token-ID contract is the declared parse/tok field order.
+_token_rows = [line.split("\t")[2:] for line in
+    (Path(_G) / "parse.tsv").read_text().splitlines()
+    if line.startswith("#field\ttok\t")]
+assert len(_token_rows) == 1 and _token_rows[0], "missing or repeated token schema"
+TOKS = tuple(_token_rows[0])
+assert len(TOKS) == len(set(TOKS)) and all(TOKS), "invalid token schema"
+_kw = [line.split("\t") for line in
+    (Path(ROOT) / "iterate/kernel/typekw.tsv").read_text().splitlines()
+    if line and not line.startswith("#")]
+assert _kw and all(len(row) == 2 and row[0] == "kw" and row[1] for row in _kw)
+TYPEKW = tuple(row[1] for row in _kw)
+assert len(TYPEKW) == len(set(TYPEKW)), "duplicate type keyword"
 
-# ---- cross-check the Python declarations against what the C lexer uses ----
-_inc = open(os.path.join(ROOT, "kernel", "unisa_model.inc"), encoding="latin-1").read()
+# Reference-source checks are a test mode, never a generation dependency.
+CHECK_DECL = "--check-declarations" in sys.argv
+if CHECK_DECL:
+    sys.argv.remove("--check-declarations")
 
-
-def _cvocab(name):
-    m = re.search(r'char \*%s = "((?:[^"\\]|\\.)*)";' % name, _inc)
-    return tuple(m.group(1).split("\\0")[:-1])
-
-
-assert _cvocab("TOKV") == tuple(TOKS), "TOKS != TOKV"
-assert _cvocab("TYPEV") == tuple(TYPEKW), "TYPEKW != TYPEV"
 
 # ---- declared data: weights/gold/lexcls.tsv, weights/gold/lexword.tsv ----------
 # Read with the gold-table reader (same input contract as every stage), then
 # checked against what src/front_pp.c actually does.
-from unisa.tsvgold import load_stage             # noqa: E402
+from unisa.tsvgold import load_table             # noqa: E402
 
 _G = os.path.join(ROOT, "weights", "gold")
-_LC = load_stage(os.path.join(_G, "lexcls.tsv"))
-_LW = load_stage(os.path.join(_G, "lexword.tsv"))
+_, _, _LCheads, _LCrows = load_table(os.path.join(_G, "lexcls.tsv"))
+_, _, _, _LWrows = load_table(os.path.join(_G, "lexword.tsv"))
 _CLS = {}
 WS_SKIP = []                                             # the attribute look-ahead
-for (bv,) in _LC.keys():
+for (bv,), lab in _LCrows.items():
     c = EOF if bv == "eof" else int(bv)
-    lab = _LC.label(bv)
     _CLS[c] = lab["c"]
     if lab["attws"] == "yes":
         WS_SKIP.append(c)
 WS_SKIP = tuple(WS_SKIP)
-_W = [(w, _LW.label(w)) for (w,) in _LW.keys()]
+_W = [(w, lab) for (w,), lab in _LWrows.items()]
 SKIPPAREN = tuple(w for w, l in _W if l["gcc"] == "skipparen")   # word [ws] ( ... )
 DROP = tuple(w for w, l in _W if l["gcc"] == "drop")
 CHARPFX = tuple(w for w, l in _W if l["pfxch"] == "yes")         # before ' : dropped
@@ -83,10 +93,6 @@ def isal(c):
 
 def isdi(c):
     return c != EOF and _CLS[c] == "d"
-
-
-def ishex(c):
-    return isdi(c) or 97 <= c <= 102 or 65 <= c <= 70
 
 
 def charclass(c):                     # the declared split
@@ -103,7 +109,7 @@ def _check_decl():
     # the class names in charclass()'s return order are lex.tsv's `c` field order
     cfield = [ln.rstrip("\n").split("\t")[2:] for ln in
               open(os.path.join(_G, "lex.tsv"), encoding="utf-8") if ln.startswith("#field\tc\t")][0]
-    assert list(_LC.heads[0][1]) == cfield, "lexcls classes != lex.tsv c field"
+    assert list(_LCheads[0][1]) == cfield, "lexcls classes != lex.tsv c field"
     body = re.search(r"int charclass\(int c\) \{(.*?)\n\}", pp, re.S).group(1)
     # isal/isdi: the C ranges
     def ranges(fn):
@@ -153,7 +159,15 @@ def _check_decl():
     one = set(chr(int(v)) for v in re.findall(r"at\(q\) == (\d+)", nxt))
     assert one == set(w for w in STRPFX if len(w) == 1) and "at(q + 1) == 56" in nxt, "STRPFX != adjacent literal"
 
-_check_decl()
+if CHECK_DECL:
+    from unisa.gold import TOKS as reference_tokens
+    from unisa.front.lex import TYPEKW as reference_types
+    assert tuple(reference_tokens) == TOKS and tuple(reference_types) == TYPEKW
+    _inc = (Path(ROOT) / "kernel/unisa_model.inc").read_text(encoding="latin-1")
+    for name, values in (("TOKV", TOKS), ("TYPEV", TYPEKW)):
+        m = re.search(r'char \*%s = "((?:[^"\\]|\\.)*)";' % name, _inc)
+        assert m and tuple(m.group(1).split("\\0")[:-1]) == values, name
+    _check_decl()
 
 
 def load_lex_table():
@@ -218,28 +232,43 @@ def OUT(s):
     return [("OUT", ord(ch)) for ch in s]
 
 
+def declarations(path):
+    rows = [line.split("\t") for line in path.read_text().splitlines()
+            if line and not line.startswith("#")]
+    assert rows and len({row[0] for row in rows}) == len(rows), path
+    return rows
+
+
+OUTPUT = {name: json.loads(actions) for name, actions in declarations(Path(HERE) / "output.tsv")}
+SPELLING = {}
+for token, plain, typed in declarations(Path(HERE) / "spelling.tsv"):
+    assert token in TOKS and plain in ("yes", "no") and typed in ("yes", "no")
+    SPELLING[token] = (plain == "yes", typed == "yes")
+
+
+def output_sequence(sequence, **parameters):
+    result = []
+    for action in OUTPUT[sequence]:
+        values = [parameters[v[1:]] if isinstance(v, str) and v.startswith("$") else v
+                  for v in action]
+        if values[0] == "@bytes":
+            assert len(values) == 2 and isinstance(values[1], str)
+            result.extend(OUT(values[1]))
+        else:
+            result.append(tuple(values))
+    return result
+
+
 def position(reg):
-    """Optional token prefix: @, four little-endian offset bytes, newline."""
-    if not POSITIONS:
-        return []
-    acts = OUT("@")
-    for shift in (0, 8, 16, 24):
-        acts += [("ALUI", "sar", "token_position_byte", reg, shift),
-                 ("OUTW", "token_position_byte")]
-    return acts + OUT("\n")
+    return output_sequence("position", start=reg) if POSITIONS else []
 
 
 def emit_kind(k, span=("S", None)):
-    """The -dump-tokens line of a token of kind k: name, and for id/num/str
-    '=' and the spelling.  kind 1 (`type`) prints no spelling
-    unless --typed."""
     name = TOKS[k]
-    acts = position(span[0]) + OUT(name)
-    if k in (2, 3, 4) or (TYPED and k == 1):
-        acts += OUT("=")
-        acts += [("SPAN2", span[0], span[1])] if span[1] else [("SPAN", span[0])]
-    acts += OUT("\n") + [("INC", "NT")]
-    return acts
+    acts = position(span[0]) + output_sequence("name", name=name)
+    if SPELLING.get(name, (False, False))[int(TYPED)]:
+        acts += output_sequence("span2" if span[1] else "span", start=span[0], end=span[1])
+    return acts + output_sequence("end")
 
 
 KID, KNUM, KSTR = 2, 3, 4
@@ -260,32 +289,13 @@ for cl in CLASSES:
     rowconst[cl] = vals.pop() if len(vals) == 1 else None
 
 
-# ---- handler entries: what each lex action does on its first byte c ---------
-def handler(a, c):
-    """(next, acts) for lex action `a` at byte c, i at c, c not consumed."""
-    if a == "skip":
-        if c == EOF:
-            return "CNT0", ([("MARK", "S")] if POSITIONS else []) + position("S") + OUT("eof\n") + [("INC", "NT")]
-        return "DISPATCH", [A]
-    if a == "nl":
-        return "DISPATCH", [A]
-    if a == "linecmt":
-        return "LC", [A, A]
-    if a == "cmt":
-        return "BC", [A, A]
-    if a == "ident":
-        return idnext("", c)
-    if a == "num":
-        return num_start(c)
-    if a == "str":
-        return "STR", [("MARK", "S"), A]
-    if a == "charlit":
-        return "CH", [("MARK", "S"), A]
-    if a == "op":
-        return op_step("", c, [("MARK", "S")])
-    if a == "bad":
-        return "HALT", [("REJECT", "unexpected character")]
-    raise KeyError(a)
+# ---- declared dispatch actions, linked to generated machine entries -----------
+def handler(action, byte):
+    target, actions = ENTRIES[action][byte]
+    if target in ENTRY_LINKS:
+        target, linked_actions = ENTRY_LINKS[target](byte)
+        return target, actions + linked_actions
+    return target, actions
 
 
 # ---- identifiers: a trie over every word the lexer treats specially --------
@@ -305,211 +315,71 @@ def idstate(w):
 
 def idnext(w, c):
     """ident scan: in node w, the next byte c continues the name."""
-    acts = [("MARK", "S")] if w == "" else []
+    acts = output_sequence("scan.start") if w == "" else []
     nw = w + chr(c)
-    return (idstate(nw) if w != "*" else "ID*"), acts + [A]
-
-
-def id_end(w, c):
-    """the name (trie node w; '*' = none) ended; c is the byte after it"""
-    if w in SKIPPAREN:
-        return "SKW:" + w, [("MARK", "E")]
-    if w in DROP:
-        return "DISPATCH", []
-    if w in CHARPFX and c == 39:
-        return "CH", [("MARK", "S"), A]           # L'x': the prefix is dropped
-    if w in STRPFX and c == 34:
-        return "STR", [A]                          # L"x": the prefix is kept
-    k = KWKIND.get(w, KID)
-    return "DISPATCH", emit_kind(k)
+    return (idstate(nw) if w != "*" else "ID*"), acts + output_sequence("scan.advance")
 
 
 def build_ident():
-    nodes = sorted(PREFIXES) + ["*"]
-    for w in nodes:
+    classes = {"skipparen": set(SKIPPAREN), "drop": set(DROP),
+               "pfxch": set(CHARPFX), "pfxstr": set(STRPFX)}
+    byteclasses = {"identifier": [c for c in ALLB if c != EOF and (isal(c) or isdi(c))],
+                   "space": WS_SKIP}
+    for w in sorted(PREFIXES) + ["*"]:
+        endings = load_byte_rules(Path(HERE) / "ident-end.tsv", {"token": emit_kind(KWKIND.get(w, KID))})
+        applicable = [row for role, row in endings.items() if role == "*" or w in classes[role]]
+        flow = load_byte_rules(Path(HERE) / "ident-flow.tsv",
+            {"bounded": emit_kind(KWKIND.get(w, KID), ("S", "E"))}, classes=byteclasses)
         st = "ID:" + w if w != "*" else "ID*"
-        for c in ALLB:
-            if c != EOF and (isal(c) or isdi(c)):
-                if w == "*":
-                    D.put(st, c, "ID*", [A])
-                else:
-                    D.put(st, c, idstate(w + chr(c)), [A])
-            elif c == 92:                          # a UCN continues the name
-                D.put(st, c, "UCN", [("MARK", "B"), A])
-            else:
-                nx, acts = id_end(w, c)
-                D.put(st, c, nx, acts)
-    # \uXXXX / \UXXXXXXXX; a malformed one ends the name at the backslash,
-    # which then lexes as `other` -> the same reject, at the backslash
-    bad = [("JUMP", "B"), ("REJECT", "unexpected character")]
-    for c in ALLB:
-        if c == 117:
-            D.put("UCN", c, "UCNH4.0", [A])
-        elif c == 85:
-            D.put("UCN", c, "UCNH8.0", [A])
-        else:
-            D.put("UCN", c, "HALT", bad)
-    for n in (4, 8):
-        for k in range(n):
-            st = "UCNH%d.%d" % (n, k)
-            nx = "ID*" if k == n - 1 else "UCNH%d.%d" % (n, k + 1)
-            for c in ALLB:
-                if c != EOF and ishex(c):
-                    D.put(st, c, nx, [A])
-                else:
-                    D.put(st, c, "HALT", bad)
-    # the GCC words: skip white space; `(` starts a balanced skip, anything
-    # else means it was an ordinary identifier after all
-    for w in SKIPPAREN:
-        st = "SKW:" + w
-        for c in ALLB:
-            if c in WS_SKIP:
-                D.put(st, c, st, [A])
-            elif c == 40:
-                D.put(st, c, "ATT", [("PUSH", "P"), A])
-            else:
-                D.put(st, c, "DISPATCH", emit_kind(KWKIND.get(w, KID), ("S", "E")))
-    for c in ALLB:
-        if c == 40:
-            D.put("ATT", c, "ATT", [("PUSH", "P"), A])
-        elif c == 41:
-            D.put("ATT", c, "ATTCHK", [("POP",), A])
-        elif c == EOF:
-            D.put("ATT", c, "ATTDRAIN", [])
-        else:
-            D.put("ATT", c, "ATT", [A])
-    D.state("ATTCHK", "t").update({"BOT": ("DISPATCH", D.seq([])),
-                                   "P": ("ATT", D.seq([]))})
-    D.state("ATTDRAIN", "t").update({"BOT": ("DISPATCH", D.seq([])),
-                                     "P": ("ATTDRAIN", D.seq([("POP",)]))})
+        for c, (target, actions) in flow["continue"].items():
+            if target == "@child":
+                target = idstate(w + chr(c)) if w != "*" else "ID*"
+            elif target == "@end":
+                target, actions = next(row[c] for row in applicable if row[c][0] != "@next")
+                target = target.format(word=w)
+            D.put(st, c, target, actions)
+        if w in SKIPPAREN:
+            st = "SKW:" + w
+            for c, (target, actions) in flow["skip"].items():
+                D.put(st, c, st if target == "@self" else target, actions)
+    for filename, mode, domain in (("ident-byte.tsv", "b", ALLB),
+                                   ("ident-stack.tsv", "t", ("BOT", "P"))):
+        install_rules(filename, mode, domain)
 
 
-# ---- numbers ---------------------------------------------------------------
+# ---- numbers: finite transition rules, not Python scanning branches ------------
+from byterules import load as load_byte_rules
+
+
+def install_rules(filename, mode, domain, sequences=None, classes=None):
+    rows = load_byte_rules(Path(HERE) / filename, sequences or {}, domain, classes)
+    for state, row in rows.items():
+        out = D.state(state, mode)
+        for observation, (target, actions) in row.items():
+            out[observation] = target, D.seq(actions)
+
+
+NUMBER = load_byte_rules(Path(HERE) / "number.tsv", {"number": emit_kind(KNUM)})
+NUMEMIT = emit_kind(KNUM)  # character constants use the same token format
+
+
 def num_start(c):
-    if c == 48:
-        return "NZ", [("MARK", "S"), A]
-    if isdi(c):
-        return "DEC", [("MARK", "S"), A]
-    if c == 46:
-        return "DFRAC", [("MARK", "S"), A]
-    return "HALT", [("REJECT", "unreachable")]
-
-
-NUMEMIT = emit_kind(KNUM)
+    return NUMBER["NSTART"][c]
 
 
 def build_num():
-    def row(st, f):
-        for c in ALLB:
-            nx, acts = f(c)
-            D.put(st, c, nx, acts)
-
-    def dig(c):
-        return c != EOF and isdi(c)
-
-    def hx(c):
-        return c != EOF and ishex(c)
-
-    def dec(c):
-        if dig(c):
-            return "DEC", [A]
-        if c == 46:
-            return "DFRAC", [A]
-        if c in (101, 69):
-            return "DEXP0.i", [("MARK", "E"), A]
-        return "SUFI", []
-    row("DEC", dec)
-    row("NZ", lambda c: ("HEX", [A]) if c in (120, 88) else dec(c))
-
-    def dfrac(c):
-        if dig(c):
-            return "DFRAC", [A]
-        if c in (101, 69):
-            return "DEXP0.f", [("MARK", "E"), A]
-        return "SUFF", []
-    row("DFRAC", dfrac)
-    for fl in ("i", "f"):
-        back = [("JUMP", "E")]
-        suf = "SUFI" if fl == "i" else "SUFF"
-        row("DEXP0." + fl, lambda c, back=back, suf=suf:
-            ("DEXPS." + suf, [A]) if c in (43, 45)
-            else (("EXPD", [A]) if dig(c) else (suf, back)))
-    for suf in ("SUFI", "SUFF"):
-        row("DEXPS." + suf, lambda c, suf=suf:
-            ("EXPD", [A]) if dig(c) else (suf, [("JUMP", "E")]))
-    row("EXPD", lambda c: ("EXPD", [A]) if dig(c) else ("SUFF", []))
-    row("HEX", lambda c: ("HEX", [A]) if hx(c) else
-        (("HFRAC", [("MARK", "E"), A]) if c == 46 else
-         (("HEXP0", [("MARK", "E"), A]) if c in (112, 80) else ("SUFI", []))))
-    row("HFRAC", lambda c: ("HFRAC", [A]) if hx(c) else
-        (("HEXP0", [A]) if c in (112, 80) else ("SUFI", [("JUMP", "E")])))
-    row("HEXP0", lambda c: ("HEXP1", [A]) if c in (43, 45) else
-        (("EXPD", [A]) if dig(c) else ("SUFI", [("JUMP", "E")])))
-    row("HEXP1", lambda c: ("EXPD", [A]) if dig(c) else ("SUFI", [("JUMP", "E")]))
-    row("SUFF", lambda c: ("DISPATCH", [A] + NUMEMIT) if c in (102, 70, 108, 76)
-        else ("DISPATCH", NUMEMIT))
-    row("SUFI", lambda c: ("SUFI", [A]) if c in (117, 85, 108, 76)
-        else ("DISPATCH", NUMEMIT))
+    for state, row in NUMBER.items():
+        if state != "NSTART":  # entry action is inlined by dispatch
+            for byte in ALLB:
+                target, actions = row[byte]
+                D.put(state, byte, target, actions)
 
 
-# ---- strings and character constants --------------------------------------
-STREMIT = [("JUMP", "E")] + emit_kind(KSTR)
-
-
+# ---- literal/comment transitions share the finite rule loader -----------------
 def build_str():
-    for c in ALLB:
-        if c == 92:
-            D.put("STR", c, "STR", [A, A])
-        elif c == 34:
-            D.put("STR", c, "STRWS", [A, ("MARK", "E")])
-        elif c == EOF:          # unterminated: rejected at the literal's start,
-                                # as the reference now does (e1-lexer-delta.md s6)
-            D.put("STR", c, "HALT", [("JUMP", "S"), ("REJECT", "missing terminating '\"' character")])
-        else:
-            D.put("STR", c, "STR", [A])
-        # after the closing quote: white space, an optional prefix, and
-        # another literal continue the same token [W-12]
-        if c in WS_SKIP:
-            D.put("STRWS", c, "STRWS", [A])
-        elif c == 34:
-            D.put("STRWS", c, "STR", [A])
-        elif c in (76, 85):
-            D.put("STRWS", c, "STRP1", [A])
-        elif c == 117:
-            D.put("STRWS", c, "STRPu", [A])
-        else:
-            D.put("STRWS", c, "DISPATCH", STREMIT)
-        D.put("STRP1", c, *(("STR", [A]) if c == 34 else ("DISPATCH", STREMIT)))
-        D.put("STRPu", c, *(("STR", [A]) if c == 34 else
-                            (("STRPu8", [A]) if c == 56 else ("DISPATCH", STREMIT))))
-        D.put("STRPu8", c, *(("STR", [A]) if c == 34 else ("DISPATCH", STREMIT)))
-        # 'x': to the next quote; a backslash takes the byte after it
-        if c == 39:
-            D.put("CH", c, "DISPATCH", [A] + NUMEMIT)
-        elif c == 92:
-            D.put("CH", c, "CH", [A, A])
-        elif c == EOF:
-            D.put("CH", c, "HALT", [("JUMP", "S"), ("REJECT", "missing terminating ' character")])
-        else:
-            D.put("CH", c, "CH", [A])
-
-
-# ---- comments ----------------------------------------------------------------
-def build_cmt():
-    for c in ALLB:
-        D.put("LC", c, *(("DISPATCH", []) if c in (10, EOF) else ("LC", [A])))
-        if c == EOF:
-            D.put("BC", c, "DISPATCH", [])
-            D.put("BCS", c, "DISPATCH", [])
-        elif c == 42:
-            D.put("BC", c, "BCS", [A])
-            D.put("BCS", c, "BCS", [A])
-        elif c == 47:
-            D.put("BC", c, "BC", [A])
-            D.put("BCS", c, "DISPATCH", [A])
-        else:
-            D.put("BC", c, "BC", [A])
-            D.put("BCS", c, "BC", [A])
+    install_rules("literal.tsv", "b", ALLB,
+        {"number": NUMEMIT, "string": [("JUMP", "E")] + emit_kind(KSTR)},
+        {"space": WS_SKIP})
 
 
 # ---- punctuators: maximal munch as a trie with a remembered last accept -----
@@ -536,13 +406,13 @@ def op_step(node, c, pre):
         k, bl = munch(nxt)
         acc = bl == len(nxt)
         last = k
-        return opname(nxt, last), pre + [A] + ([("MARK", "E")] if acc else [])
+        return opname(nxt, last), pre + output_sequence("scan.advance") + (output_sequence("scan.accept") if acc else [])
     if node == "":
-        return "HALT", [("REJECT", "stray char")]
+        return "HALT", output_sequence("punct.reject")
     k, bl = munch(node)
     if bl == len(node):
         return "DISPATCH", emit_kind(k)
-    return "DISPATCH", [("JUMP", "E")] + emit_kind(k)
+    return "DISPATCH", output_sequence("scan.rewind") + emit_kind(k)
 
 
 def build_op():
@@ -553,7 +423,7 @@ def build_op():
             nx, acts = op_step(node, c, [])
             D.put(st, c, nx, acts)
     for c in ALLB:
-        nx, acts = op_step("", c, [("MARK", "S")])
+        nx, acts = op_step("", c, output_sequence("scan.start"))
         D.put("OP:", c, nx, acts)
 
 
@@ -579,24 +449,24 @@ def build_dispatch():
                 if charclass(c) == cl:
                     nx, acts = handler(a, c)
                     D.put("H:" + a, c, nx, acts)
-    # the count line: "%d tokens\n" from W[NT], digits via the stack
-    for c in ALLB:
-        D.put("CNT0", c, "CNT1", [("COPYW", "T", "NT"), ("DIVMOD10", "T")])
-    r = D.state("CNT1", "r")
-    for d in range(10):
-        r[d] = ("CNT1", D.seq([("PUSH", "D%d" % d), ("DIVMOD10", "T")]))
-        r[10 + d] = ("CNTP", D.seq([("PUSH", "D%d" % d)]))
-    t = D.state("CNTP", "t")
-    for d in range(10):
-        t["D%d" % d] = ("CNTP", D.seq([("OUT", 48 + d), ("POP",)]))
-    t["BOT"] = ("HALT", D.seq(OUT(" tokens\n") + [("ACCEPT",)]))
+    for filename, mode, domain in (("count-byte.tsv", "b", ALLB),
+                                   ("count-result.tsv", "r", range(20)),
+                                   ("count-stack.tsv", "t", ["BOT"] + ["D%d" % n for n in range(10)])):
+        install_rules(filename, mode, domain)
 
+
+ENTRIES = load_byte_rules(Path(HERE) / "entry.tsv", {
+    "eof": ([("MARK", "S")] + position("S") if POSITIONS else []) + output_sequence("eof")})
+assert set(ENTRIES) == set(head), "entry actions must cover lex.tsv exactly"
+ENTRY_LINKS = {"@identifier": lambda c: idnext("", c), "@number": num_start,
+               "@punctuator": lambda c: op_step("", c, output_sequence("scan.start"))}
+assert all(not target.startswith("@") or target in ENTRY_LINKS
+           for row in ENTRIES.values() for target, _ in row.values())
 
 build_dispatch()
 build_ident()
 build_num()
 build_str()
-build_cmt()
 build_op()
 START = "DISPATCH"
 if LOCATIONS:

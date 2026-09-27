@@ -16,7 +16,7 @@ export E1REF=$X/ua_ref E1PRE=$X/ua_pre
 ready() {
     fresh $X/ua_ref $B ./tests/build_ref.sh $X/ua_ref.c $X/ua_ref -- $REFSRC &&
     fresh $X/ua_pre $B exec/lex/mkpre.sh $X/ua_ref.c $X/ua_pre -- $X/ua_ref.c exec/lex/mkpre.sh &&
-    fresh $D $B python3 exec/lex/gen.py $D -- exec/lex/*.py $PYSRC
+    fresh $D $B python3 exec/lex/gen.py --check-declarations $D -- exec/lex/*.py exec/lex/*.tsv weights/gold/lex*.tsv weights/gold/parse.tsv iterate/kernel/typekw.tsv kernel/unisa_model.inc src/front_pp.c src/front_parse.c $PYSRC
 }
 case "$1" in
 gen)     ready ;;
