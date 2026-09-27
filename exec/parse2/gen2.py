@@ -426,7 +426,8 @@ TYINFO = {f[0]: (int(f[1]), int(f[2]), int(f[3])) for f in E.gold("tyinfo") if f
 TYINT = [(t, (UNS if TYINFO[t][1] else 0) + TYINFO[t][0], TYINFO[t][0], TYINFO[t][1], TYINFO[t][2])
          for t in ("i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64")]      # (t, vb, size, uns, narrow)
 U32M = (1 << (8 * TYINFO["u32"][0])) - 1          # an unsigned int kept to 32 bits (measured), from tyinfo
-UIM = "  imm r2, %d\n  and64 r0, r0, r2\n" % U32M
+TYPE_TAPE = {name: json.loads(text) for name, text in tape_rows("type-tape.tsv")}
+UIM = TYPE_TAPE["mask"] % U32M
 assert TYINFO["u32"][1] == 1
 # the premises the derivations lean on, pinned: a table that changes shape must fail here, not silently
 assert len(AX) == 16 and AX[-1] == "illegal"
@@ -459,67 +460,47 @@ TYPEW = {"type=_Bool": BOOL, "type=float": FLT, "type=double": DBL, "type": E.SZ
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
 
-def width_dispatch(p, name, tab8, tabn, masks=False):
-    """one procedure per access kind, shared by every construct: the width comes from the
-    value descriptor (vt >= 1 or vb == 8: 8 bytes; else vb), the text from the template"""
-    q = P(name)
-    q.branch({(1, 2): name + ".8"}, name + ".b", [("CMPI", "vt", 1)])
-    P(name + ".b").branch({1: name + ".8"}, name + ".d", [("CMPI", "vb", 8)])
-    P(name + ".d").branch({1: name + ".8"}, name + ".f", [("CMPI", "vb", DBL)])
-    P(name + ".f").branch({1: name + ".f32"}, name + ".n", [("CMPI", "vb", FLT)])
-    P(name + ".f32").o(tabn % TYINFO["f32"][0]).ret()
-    P(name + ".8").o(tab8).ret()
-    P(name + ".n").branch({1: name + ".bool"}, name + ".integer", [("CMPI", "vb", BOOL)])
-    P(name + ".bool").o(tabn % 1 + ("  imm r2, 255\n  and64 r0, r0, r2\n" if masks else "")).ret()
-    q = P(name + ".integer")
-    # the width and the zero-extension mask come from tyinfo (size, uns), row by row
-    for t, vb, size, uns, _ in TYINT:
-        if vb == 8:
-            continue                          # the signed 8-byte row: taken above
-        hit, nx = q.fresh("w"), q.fresh("x")
-        q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
-        if size == 8:
-            P(hit).o(tab8).ret()
-        else:
-            P(hit).o(tabn % size + (masks and uns and "  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << (8 * size)) - 1) or "")).ret()
-        q = P(nx)
-    if name == "LOADV":
-        q.branch({(1, 2): "RET"}, "DEAD.w", [("CMPI", "vb", SBB)])  # aggregate value is its address
-    else:
-        q.goto("DEAD.w")
+def width_dispatch(name, tape, masks=False):
+    bindings = {key: name + suffix for key, suffix in
+                (("entry", ""), ("base", ".b"), ("double", ".d"), ("float", ".f"),
+                 ("f32", ".f32"), ("wide", ".8"), ("number", ".n"), ("bool", ".bool"), ("integer", ".integer"))}
+    bindings.update((key + "_test", P(bindings[key]).fresh("b")) for key in ("entry", "base", "double", "float", "number"))
+    bindings.update(DBL=DBL, FLT=FLT, BOOL=BOOL, SBB=SBB)
+    seq = {"wide": O(TYPE_TAPE[tape + "8"]), "float": O(TYPE_TAPE[tape + "n"] % TYINFO["f32"][0]),
+           "bool": O(TYPE_TAPE[tape + "n"] % 1 + (TYPE_TAPE["mask"] % 255 if masks else ""))}
+    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences=seq, section="prefix")
+    q = P(bindings["integer"])
+    for _, vb, size, uns, _ in (row for row in TYINT if row[1] != 8):
+        bindings.update(current=q.cur, hit=q.fresh("w"), next=q.fresh("x"), test=q.fresh("b"), code=vb)
+        seq["row"] = O(TYPE_TAPE[tape + "8"] if size == 8 else TYPE_TAPE[tape + "n"] % size +
+                       (TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if masks and uns else ""))
+        install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences=seq, section="row")
+        q = P(bindings["next"])
+    bindings["current"] = q.cur
+    if name == "LOADV": bindings["tail_test"] = q.fresh("b")
+    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, section="aggregate" if name == "LOADV" else "reject")
 
 
 def types():
-    width_dispatch(None, "LOADV", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n", masks=True)
-    width_dispatch(None, "LOADRAW", "  load64 r0, [r0+0]\n", "  .ld r0, [r0+0], %d\n")   # va_arg: no mask (measured, p62)
-    P("STOREV").branch({1: "STF"}, "STOREV0", [("CMPI", "vb", FLT)])
-    P("STF").branch({1: "STF1"}, "STOREV0", [("CMPI", "vt", 0)])
-    P("STF1").o("  .st [r1+0], r0, 4\n").ret()
-    width_dispatch(None, "STOREV0", "  store64 [r1+0], r0\n", "  .st [r1+0], r0, %d\n")
-    # NARROW: a value to vb bytes through the stack (a return, a cast); 8 bytes and pointers: nothing
-    q = P("NARROW")
-    q.branch({(1, 2): "RET"}, "NARROW.b", [("CMPI", "vt", 1)])
-    P("NARROW.b").branch({1: "RET"}, "NARROW.u", [("CMPI", "vb", 8)])
-    P("NARROW.u").branch({1: "RET"}, "NARROW.dd", [("CMPI", "vb", UNS + 8)])
-    P("NARROW.dd").branch({1: "RET"}, "NARROW.ui", [("CMPI", "vb", DBL)])
-    P("NARROW.ui").branch({1: "TO.b"}, "NARROW.n", [("CMPI", "vb", BOOL)])
-    P("NARROW.m").o(UIM).ret()
+    width_dispatch("LOADV", "load", masks=True)
+    width_dispatch("LOADRAW", "load")
+    bindings = dict(FLT=FLT, store_test=P("STOREV").fresh("b"), scalar_test=P("STF").fresh("b"))
+    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings,
+                  sequences={"store_float": O(TYPE_TAPE["storen"] % 4)}, section="store")
+    width_dispatch("STOREV0", "store")
+    bindings = {key: P(state).fresh("b") for key, state in
+                (("pointer_test", "NARROW"), ("wide_test", "NARROW.b"), ("unsigned_test", "NARROW.u"),
+                 ("double_test", "NARROW.dd"), ("bool_test", "NARROW.ui"))}
+    bindings.update(UNSIGNED_WIDE=UNS + 8, DBL=DBL, BOOL=BOOL, TDN=E.TDN)
+    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"uim": O(UIM)}, section="narrow")
     q = P("NARROW.n")
-    # tyinfo.narrow picks the rows that narrow; signed: through the stack at their size; unsigned:
-    # masked to their size (measured: a cast and a return of unsigned char/short/int)
-    for t, vb, size, uns, narrow in TYINT:
-        if not narrow:
-            continue
-        hit, nx = q.fresh("w"), q.fresh("x")
-        q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
-        if uns:
-            P(hit).o("  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << (8 * size)) - 1)).ret()
-        else:
-            P(hit).o("  .frame 8\n  .st [r7+0], r0, %d\n  .ld r0, [r7+0], %d\n  .frame -8\n" % (size, size)).ret()
-        q = P(nx)
-    q.goto("DEAD.w")
-    g.on("DEAD.w", range(257), "DEAD", E.rej("not covered: width"), "r")
-    P("ISTD").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN), ("CMPI", "u", 1)).ret()
+    for _, vb, size, uns, _ in (row for row in TYINT if row[4]):
+        bindings.update(current=q.cur, hit=q.fresh("w"), next=q.fresh("x"), test=q.fresh("b"), code=vb)
+        text = TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1) if uns else TYPE_TAPE["narrow"] % (size, size)
+        install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"row": O(text)}, section="row")
+        q = P(bindings["next"])
+    bindings["current"] = q.cur
+    install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences={"reject": E.rej("not covered: width")}, section="finish")
     # Both ordinary and function-pointer [] use the same initializer counter.
     P("FPDECL").call("FPSTART").branch({1: "FPD.infer"}, "FPD.shape", [("CMPI", "fpn", -1)])
     P("FPD.infer").expect("=").a(("COPYW", "fpback", "tpos"), ("LDI", "dm_per", 1)).vpush("ips", "ipe").call("NEXT").call("INITCOUNT").vpop("ips", "ipe").a(("COPYW", "fpn", "dm_n"), ("JUMP", "fpback")).call("NEXT").goto("FPD.shape")
