@@ -929,6 +929,14 @@ int zext(int w) {
     return 0;
 }
 
+int snarrow(int w) {
+    if (w >= 8) return 0;
+    es("  @call.frame 8\n  @mem.st [r7+0], r0, "); en(w);
+    es("\n  @mem.ld r0, [r7+0], "); en(w);
+    es("\n  @call.frame -8\n");
+    return 0;
+}
+
 int estore(int w) {                              /* [r1] = r0 */
     if (w >= BFTAG) {
         /* read, clear the field's bits, or the new ones in, write back;
@@ -1201,9 +1209,7 @@ int unary(void) {
                         if (csz == 2) es("  @lit.imm r2, 65535\n  @alu.and r0, r0, r2\n");
                         if (csz == 4) es("  @lit.imm r2, 4294967295\n  @alu.and r0, r0, r2\n");
                     } else {
-                        es("  @call.frame 8\n  @mem.st [r7+0], r0, "); en(csz);
-                        es("\n  @mem.ld r0, [r7+0], "); en(csz);
-                        es("\n  @call.frame -8\n");
+                        snarrow(csz);
                     }
                 }
             } }
@@ -2893,10 +2899,10 @@ int expr(void) {
     if (lvalue) {
         op = aop();
         if (op >= 0) {
-            int ptrl; int pel; int ak; int aax;
+            int ptrl; int pel; int ak; int aax; int ck2;
             adv();
             ptrl = curptr; pel = curelem;
-            ak = fkind(); aax = tyax(); bl = curbool && curptr == 0;
+            ak = fkind(); aax = tyax(); bl = curbool && curptr == 0; ck2 = aax;
             e = stw();
             lvalue = 0;
             push();                                  /* address */
@@ -2933,13 +2939,19 @@ int expr(void) {
                when the table says so, or `h >>= 1` on a u64 shifted in
                the sign; then the value is x's, masked to x's width */
             if (ptrl == 0) {
-                int ck2; ck2 = tyask(aax, "+", 1, tyax());
+                char cb[8]; int cl;
+                ck2 = tyask(aax, "+", 1, tyax());
                 binuns = tyuns(ck2); binwid = tysize(ck2);
+                cl = tycanon(op, cb);
+                ck2 = tyask(aax, cb, cl, tyax());
             }
             emit_binop(op);                          /* pops old value */
             binuns = 0; binwid = 8;
             if (bl) fconv(0, 9);
-            else { if (ptrl == 0) { if (e < BFTAG) { if (tyuns(aax)) zext(e); } } }
+            else { if (ptrl == 0) { if (e < BFTAG) {
+                if (tyuns(aax)) zext(e);
+                else { if (ck2 != aax) snarrow(e); }
+            } } }
             pop1();                                  /* address */
             estore(e);
             curelem = e;

@@ -4929,3 +4929,7 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 回归持久化决定：把brace_string/string_rows/void_cast三个自校验探针加入既有compilercheck资源模式的真实ASM网络路径，与既有decimal/math同跑hostcc、内存执行O0/O2和原生镜像；不另建框架。C新增b_string_rows含未定首维[][10]，实际候选仍明确拒绝，作为shape组剩余项保留，不把二维定长行修好外推到推断首维。
 
 字符串修复后验收补充：Python参考9157c00补尾逗号及本地数组尾部zero（+6/-1）；新回归查出解释器鲜内存掩盖过该零填充差距，原生结果作判据。经典unisacc.com已重建1,366,672 B，sha256 6561d036cf4f2566b8a1e179bd23b6b3563ddf60a29ffb5b6d182632d5b152a8；--com全部13项双槽7.73秒全绿（不是整个默认gate），/tmp/unisacc-strings-com-gate-928。新版网络候选6,017,901 B、sha256 d8358e4b1b3f87a076715fead6c15b5216a3143fe82544ea6f9f93f630e06ae7，/tmp/unisacc-void-candidate-928含void；真实tools仍6/11，regex2已过解析但ARM拒绝，子代理定位lower ARG/TXT百万间距碰撞，正在修，不称regex2全链通过。父18次实际产物编译运行比较：classic9/9，模型root/void6/6，含未定首维的b_string_rows3次明确拒绝，/tmp/unisacc-string-accept-928/results.json。持久化资源回归已实跑通过：五probe含新root/定长rows/void经ASM网络内存O0/O2与native同hostcc；默认Python tools11/11。双槽2/2、38.06秒，/tmp/unisacc-string-resource-gate-928。shape和lower碰撞两隔离任务继续，不改产品默认到模型。
+
+复合赋值参考缺陷实证及修正决定：char x=127; int y=(x+=1)在当前经典.com打印-128 128，hostcc为-128 -128，均rc0（/tmp/unisacc-compound-ref-928）。目标存储正确但表达式结果未按目标类型转换。模型共享OPX修复不可为错误参考删除目标窄化；父在C/Python参考复用现有窄化路径修正不同整数类型回写，保持同类型已有结果不重复转换。C抽共用signed窄化辅助替代cast内联，非扩第二套类型阶梯。
+
+复合赋值参考修复实测：目标是否需额外signed窄化由实际运算RST与目标比较，CKT只选操作数转换（避免int<<unsignedlong的冗余窄化）。tests/c/b_compound_result.c覆盖char/short/int(long RHS)的存储值与表达式值，hostcc、C O0/O1/O2和Python原生输出全同，/tmp/unisacc-compound-ref-928/result.json。只读独立审查未发现新增错误；另证经典C位域compound仍返回截断前值（5位signed/unsigned加1：host -16 -16 0 0，旧C -16 16 0 32），本片未修，不把普通标量证明扩大到位域。

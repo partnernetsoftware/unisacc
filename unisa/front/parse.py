@@ -1946,6 +1946,8 @@ class Walker:
                     self.convto(I32, aty)
                 elif aty.kind in NARROW_UNS:
                     self.em.zext(NARROW_UNS[aty.kind])
+                elif is_narrow(aty.kind) and self.sc.combine(aty, op, rt) != aty.kind and not self.isflt(rt):
+                    self.em.truncate(self.wid(aty))
                 if bits is not None:
                     self.em.bits_set(bits[0], bits[1], bits[2], self.wid(aty))
                     return aty
