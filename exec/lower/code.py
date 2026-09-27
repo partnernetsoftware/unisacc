@@ -126,40 +126,65 @@ def install(E, arch="x86_64", os_="lnx"):
                    Path(__file__).with_name('code-abi-sources.tsv').read_text().splitlines()
                    if line and not line.startswith('#')]
     source_values = {'SYSA'+str(i): SYSA+8*i for i in range(6)}
-    p=P('SYSCALL')
-    for op,f in abi.items():
-        if f[0]=='none' and os_!='win':continue
-        p.branch({1:'SC.'+op},'SC.next.'+op,[('CMP','sop','sysid_'+op)]);p=P('SC.next.'+op)
-    p.goto('C.fail')
-    for op,f in abi.items():
-        if f[0]=='none' and os_!='win':continue
-        p=P('SC.'+op)
-        p.a(('SBCLR',),[('SBOUT',c) for c in f[7].encode()],('SBSAVE','retblob'))
-        if f[0]!='none':p.o('setreg '+f[9]+', imm '+str(int(f[0],0))+' role=sysno\n')
-        if os_=='win':p.o('winsave ').a(('LDI','offset',WIN_SAVE)).call('ADDR').o('\n')
+    # Materialize current ABI rows; templates own dispatch, calls and field order.
+    from finite_rules import load as load_rules
+    root = Path(__file__).parent
+    def actions(section, sequences):
+        return load_rules(root/'code-syscall-actions.tsv', sequences,
+                          section=section)['actions'][0][1]
+    def put(section, bindings, sequences=None):
+        install_rules(g, root, 'code-syscall', bindings=bindings,
+                      sequences=sequences or {}, section=section)
+    selected = [(op,f) for op,f in abi.items() if f[0]!='none' or os_=='win']
+    entry = 'SYSCALL'
+    for op,f in selected:
+        nxt = 'SC.next.'+op
+        put('dispatch', dict(entry=entry, branch=P(entry).fresh('b'),
+                            match='SC.'+op, next=nxt, sysid='sysid_'+op))
+        entry = nxt
+    put('finish', dict(entry=entry, next='C.fail'), {'pending': []})
+    for op,f in selected:
+        entry = 'SC.'+op
+        sysno = actions('sysno', {'reg': E.O(f[9]), 'value': E.O(str(int(f[0],0)))}) if f[0]!='none' else []
+        pending = actions('head', {'retchars': [('SBOUT',c) for c in f[7].encode()], 'sysno': sysno})
+        if os_=='win':
+            resume = P(entry).fresh('r')
+            put('winhead', dict(entry=entry, resume=resume, WIN_SAVE=WIN_SAVE), {'pending': pending})
+            entry, pending = resume, E.O('\n')
         for mode in range(5):
-            p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
-            q=P('SC.'+op+'.m'+str(mode))
+            match, nxt = 'SC.'+op+'.m'+str(mode), 'SC.'+op+'.n'+str(mode)
+            put('mode', dict(entry=entry, branch=P(entry).fresh('b'), match=match,
+                             next=nxt, mode=mode), {'pending': pending})
             sources = [(kind, source_values[value] if value in source_values else int(value))
                        for m, shape, kind, value in source_rows
                        if int(m)==mode and shape in ('*', f[10])]
             if not sources:
                 raise ValueError('new Linux '+arch+' argument shape requires migration: '+f[10])
+            current, pending = match, []
             for i,(kind,value) in enumerate(sources):
                 if f[1+i]=='none':
-                    if os_=='win':break
+                    if os_=='win': break
                     raise ValueError('unsupported stack syscall argument')
-                q.o('setreg '+f[1+i]+', '+kind+' ')
-                if kind=='imm':q.o(str(value))
-                else:q.a(('LDI','offset',value)).call('ADDR')
-                q.o(' role=arg'+str(i)+'\n')
-            q.goto('SC.'+op+'.gate');p=P('SC.'+op+'.n'+str(mode))
-        p.goto('C.fail')
-        def val(v):return "'"+v if v=='none' or v.startswith(('0','1','2','3','4','5','6','7','8','9')) else v
-        p=P('SC.'+op+'.gate').o('gate form='+enc[op]+' gate='+f[8]+' carry='+('true' if os_=='osx' else 'false')+' winapi='+('none' if WINAPI.get(op) is None else WINAPI[op])+' catop='+op+' sysno='+val(f[0])+' retconv='+val(f[11])+' winimp='+val(f[12])+' ret='+f[7])
-        for name,off in [('hstd',WIN_HSTD),('written',WIN_WRITTEN),('scr0',0),('scr1',8)]:p.o(' '+name+'=').a(('LDI','offset',off)).call('ADDR')
-        p.o('\n')
-        if os_=='win':p.o('winrest ').a(('LDI','offset',WIN_SAVE)).call('ADDR').o(', '+f[7]+'\n')
-        p.ret()
+                facts = {'reg': E.O(f[1+i]), 'kind': E.O(kind),
+                         'value': E.O(str(value)), 'index': E.O(str(i))}
+                if kind=='imm':
+                    pending += actions('immediate', facts)
+                else:
+                    resume = P(current).fresh('r')
+                    put('arg', dict(entry=current, resume=resume, value=value),
+                        dict(facts, pending=pending))
+                    current, pending = resume, actions('argtail', facts)
+            put('finish', dict(entry=current, next='SC.'+op+'.gate'), {'pending': pending})
+            entry, pending = nxt, []
+        put('finish', dict(entry=entry, next='C.fail'), {'pending': []})
+        val = lambda v: "'"+v if v=='none' or v[:1].isdigit() else v
+        facts = dict(form=enc[op], gate=f[8], carry='true' if os_=='osx' else 'false',
+                     winapi=WINAPI.get(op) or 'none', op=op, sysno=val(f[0]),
+                     retconv=val(f[11]), winimp=val(f[12]), ret=f[7])
+        labels = {'label'+str(i): P('SC').fresh('r') for i in range(5 if os_=='win' else 4)}
+        put('gate-win' if os_=='win' else 'gate',
+            dict(labels, entry='SC.'+op+'.gate', WIN_HSTD=WIN_HSTD,
+                 WIN_WRITTEN=WIN_WRITTEN, WIN_SAVE=WIN_SAVE, zero=0, eight=8),
+            {name: E.O(value) for name,value in facts.items()})
     P('C.done').a(('INPOP',),('ACCEPT',)).goto('DEAD')
     g.on('C.fail',range(257),'DEAD',E.rej('not covered: '+os_+'/'+arch+' lowering'),'r')
