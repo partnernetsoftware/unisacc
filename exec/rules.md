@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current checkpoint: 3860676, after the width/peephole/ARM-FP batch. This is a source
+Current checkpoint: 84cfcc8, after structured control, analysis and sparse layout. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -13,9 +13,9 @@ remain shared inputs, not copied answers.
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
-| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` grammar/control, types and initialization; helper modules for scopes, literals, diagnostics, warnings, units and locations |
-| E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`; gold opinfo/peep | Analysis/liveness, tape parsing, outer optimization loop and dynamic data assembly in `opt/gen.py` |
-| E5 lowering | Existing gold/catalog facts | `lower/code.py`, `data.py`, `armfuse.py` |
+| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` grammar/control, types and initialization; helper modules for scopes, literals, diagnostics, warnings, units and locations |
+| E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`; gold opinfo/peep | Outer optimization loop and dynamic data assembly in `opt/gen.py` |
+| E5 lowering | `lower/data-*` sparse layout; existing gold/catalog facts | `lower/code.py`, `armfuse.py`; target/escape/layout bindings in `data.py` |
 | E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`; catalog opcode facts | x86 encoding and setup, ARM input/layout/Windows setup, shared formatting helpers |
 | E6 images | Existing target layout facts | ELF, Mach-O, PE, memory layout and signature construction in `enc/` |
 
