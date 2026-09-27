@@ -120,13 +120,13 @@ def build_autoinc(g, locations=False):
     for h, hn in enumerate(H):
         names = [n for n in amap[hn] if n != "printf"]
         nxt_h = "AH%d_0" % (h + 1) if h + 1 < len(H) else "AEM"
-        g.els("AH%d_0" % h, "AH%d_n0" % h, [("LDI", "NEED%d" % h, 0)])
+        install_rules(g, HERE, "assembly", {"entry": "AH%d_0" % h, "first": "AH%d_n0" % h,
+            "last": "AH%d_n%d" % (h, len(names)), "next": nxt_h, "need": "NEED%d" % h}, section="header")
         for k, nm in enumerate(names):
             install_rules(g, HERE, "autoinc-name", {"entry": "AH%d_n%d" % (h, k),
                 "test": "AH%d_r%d" % (h, k), "found": nxt_h,
                 "next": "AH%d_n%d" % (h, k + 1), "need": "NEED%d" % h, "AIB": AIB},
                 {"name": sbconst(nm)})
-        g.els("AH%d_n%d" % (h, len(names)), nxt_h)
 
     def line(hn):
         return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()] + ([("ALUI","add","AI_LINES","AI_LINES",1)] if locations else [])
@@ -190,10 +190,6 @@ class G:
     def r(self, name, cases):          # a state that reads r
         for keys, (nxt, acts) in cases.items():
             self.on(name, keys if isinstance(keys, tuple) else (keys,), nxt, acts, "r")
-
-    def call(self, sub, ret):
-        self.labels.add(ret)
-        return sub, [("PUSH", ret)]
 
     def finish(self):
         self.st["RET"] = ["t", {g: (g, self.seq([("POP",)])) for g in sorted(self.labels)}]
@@ -313,9 +309,8 @@ def build(target="lnx/x86_64", locations=False):
     install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
     for k, nm in enumerate(predef):
         nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
-        sub, pu = g.call("MDEF", "P3PDR%d" % k)
-        g.els("P3PD%d" % k, sub, sbconst(nm) + [("SBINTERN", "NID")] + pu)
-        g.els("P3PDR%d" % k, nxt, sbconst("1") + [("SBSAVE", "t"), ("STX", "EA", F_BODY, "t")])
+        install_rules(g, HERE, "assembly", {"entry": "P3PD%d" % k, "resume": "P3PDR%d" % k,
+            "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(nm)}, section="predefine")
 
     cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")])}
     cases.update((k + 1, ("D_" + w, [])) for k, w in enumerate(DIRV))
@@ -340,7 +335,7 @@ def build(target="lnx/x86_64", locations=False):
         from locations import install
         install(g, SPLB, IRLN, IRNL)
     else:
-        g.els("ACC", "ACC", [("ACCEPT",)])
+        install_rules(g, HERE, "assembly", section="accept")
     build_xe(g)
     build_hx(g)
     g.finish()
