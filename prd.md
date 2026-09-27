@@ -5027,3 +5027,5 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 收口清单维护决定：exec/rules.md仍把4d351c5当当前状态并保留多批历史候选，容易误导剩余范围。父把它收敛为当前规则来源/真实候选证据/仍需完成的清单，历史数据以本prd保留；不改变S-17完成标准、不把当前通过数当全C99证明。
 
 父联合核心分片实测：当前成员初始化合入树上core-modes与core-contracts双槽各47秒、整体47秒全通过；前者含网络构建驱动器与27模式/优化级对照，后者保留compat/stdin/IO/未定义函数检查。language新增vararg/member两个持久probe，严格拒绝要求rc1与诊断，不将信号或超时算合法拒绝；三core+resources+language清单与旧all保持覆盖关系。
+
+父后续联合分片实测：core-dependencies 26秒、language 46秒双槽2/2通过；language已含23正例（新增聚合va_arg与成员字符串）及6严格拒绝。独立产品接入审计发现发布入口仍造classic、测试包与最终保存包未统一hash；完成前仍不切默认。先补现有gatequeue对显式外部候选/可执行文件的内容指纹，防同路径覆写复用旧结果，不新建调度框架；seed与被测产品须分开，TOOLS_UA/CORPUS_UA不能由UA默认为已选择。
