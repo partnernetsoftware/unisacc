@@ -156,12 +156,14 @@ def build(image=False):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
     for w, nm in [("mem", "tagmem"), ("addr", "tagaddr"), ("lnx/x86_64", "target1"), ("osx/x86_64", "target2"), ("win/x86_64", "target3")] + [("@"+k, "h_"+k) for k in ("target","data","sym","src_os","data_len","bss","relocs","argc","argv")]:
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + nm))
-    p.a(("LDI", "target_os", 1), ("LDI", "has_relocs", 0))
+    initialization = {'catalog': p.acts}
+    p = P('START.binding')
     p.a(("SBCLR",), [("SBOUT", ch) for ch in b"_start"], ("SBINTERN", "id_entry"))
     for w in ("jump", "jumpz", "call"):
         p.a(("SBCLR",), [("SBOUT", ch) for ch in w.encode()], ("SBINTERN", "id_" + w))
-    p.a(("LDI", "npc", 0), ("LDI", "lnum", 0)).goto("LINE")
+    initialization['labels'] = p.acts
     from finite_rules import install as install_rules
+    install_rules(g, HERE, 'x86-shell', section='start', sequences=initialization)
     from functools import partial
     line_rules = partial(install_rules, g, HERE, 'x86-line')
     line_bindings = {name: globals()[name] for name in
@@ -201,15 +203,23 @@ def build(image=False):
     line_rules(section='key-end', bindings={'entry': entry})
     line_bindings.update({name: P(owner).fresh(kind) for part, name, owner, kind in line_names if part == 'meta-tail'})
     line_rules(section='meta-tail', bindings=line_bindings, sequences=line_sequences)
-    # ARGS.d: at the end of the line: the class decides
-    p = P("ARGS.d")
-    p.branch({C_MOV + 1 - 1: "E.mov", C_IMM: "E.imm", C_ALU: "E.alu", C_MUL: "E.mul", C_LD8: "E.ld8", C_ST8: "E.st8",
-              C_LD: "E.ld", C_ST: "E.st", C_SET: "E.set", C_RET: "E.ret", C_SHF: "E.shf", C_CALLR: "E.callr",
-              C_PUSH: "E.push", C_POP: "E.pop", C_NOP: "E.nop", C_FRAME: "E.frame", C_ZERO: "E.zero",
-              C_ITOA:"ITO.store", C_SETREG: "E.setreg", C_SPINIT: "E.spinit", C_GATE: "E.gate", C_LEA:"AD.lea", C_SETMEM:"AD.setmem", C_ARGSAVE:"AD.argsave", C_ARGVGET:"AD.argvget",
-              C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
-              **{v: "FP." + k for k, v in FP_IDS.items()}, **{v:"WX.store" for v in WIN_IDS.values()}}, "DEAD.op", [("RLD", "cls")])
-    g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
+    dispatch = {globals()[name]: entry for name, entry in
+                (line.rstrip('\n').split('\t') for line in open(os.path.join(HERE, 'x86-shell-dispatch.tsv')) if not line.startswith('#'))}
+    dispatch.update({v: 'FP.'+k for k, v in FP_IDS.items()})
+    dispatch.update({v: 'WX.store' for v in WIN_IDS.values()})
+    dispatch_test = P('ARGS.d').fresh('b')
+    install_rules(g, HERE, 'x86-shell', section='dispatch', bindings={'test': dispatch_test},
+                  sequences={'reject': E.rej('not covered: an op outside the first encoder slice')})
+    from finite_rules import load as load_rules
+    from pathlib import Path
+    routes = [('route', (key,), {'entry': entry}) for key, entry in dispatch.items()]
+    routes.append(('unknown', set(range(257)) - dispatch.keys(), {}))
+    for section, domain, values in routes:
+        rows = load_rules(Path(HERE)/'x86-shell-result.tsv', {}, domain=domain, section=section,
+                          bindings={'test': dispatch_test, **values})
+        for state, row in rows.items():
+            for observation, (target, actions) in row.items():
+                g.on(state, [observation], target, actions, 'r')
     emit_rules('pre')
     emit_rules('division')
     emit_rules('post')
