@@ -51,14 +51,30 @@ jobs,results=data['jobs'],data['results']
 if not jobs or set(jobs)!=set(results) or any(r['rc'] for r in results.values()):
     raise SystemExit('release: incomplete/failed queue evidence')
 # Counts and named omissions occur in gate logs; zero counts are not omissions.
-skip=re.compile(r'\bSKIP(?:PED)?\b(?![ \t]+0+\b)|'
-                r'(?<!no target )\bskipped[ \t]*(?:\(|:|$)|'
-                r'^[ \t]*skip[ \t]+(?![ \t]*0+\b)|'
-                r'\b(?:skip|skipped)[ \t]+[1-9][0-9]*\b',re.M)
+zero_skip=re.compile(r'\b(?:skip|skipped)[ \t]+0+\b|\bno target skipped\b',re.I)
+skip=re.compile(r'\bskip(?:ped)?\b',re.I)
+# These exact notices describe Windows execution outside this LOCAL gate.
+# Each notice is allowed only once, only in its owning suite; retain all other
+# text for omission checks and report the outstanding obligations explicitly.
+windows_run='  skip windows (-run needs the UTM machine started)'
+windows_boot='  skip Windows self-build (not run; independent proofs: --windows win/arm64 and --windows win/x86_64)'
+outside={'run':windows_run, 'com-run':windows_run, 'nativeboot':windows_boot}
+unverified=[]
 for name in jobs:
-    log=(p/(name+'.log')).read_text(errors='replace')
-    if not log.strip() or skip.search(log):
+    try:log=(p/(name+'.log')).read_text(errors='replace')
+    except FileNotFoundError:raise SystemExit('release: missing evidence log: '+name)
+    lines=log.splitlines()
+    notice=outside.get(name)
+    if notice in lines:
+        if lines.count(notice)!=1:
+            raise SystemExit('release: repeated omission notice: '+name)
+        lines.remove(notice)
+        unverified.append((name,notice.strip()))
+    evidence='\n'.join(lines)
+    if not evidence.strip() or skip.search(zero_skip.sub('',evidence)):
         raise SystemExit('release: empty or skipped evidence: '+name)
+for name,notice in unverified:
+    print('UNVERIFIED Windows obligation outside LOCAL gate:',name+':',notice)
 source=pathlib.Path(source)
 def sha(path):
     with path.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
