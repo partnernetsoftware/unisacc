@@ -19,7 +19,7 @@ if mode=='pending' and not (p/'continued').exists():
 if mode=='failed':sys.exit(7)
 jobs={} if mode=='empty' else {'com-probe':['true']}
 (p/'results.json').write_text(json.dumps({'jobs':jobs,'results':{n:{'rc':0} for n in jobs}}))
-(p/'com-probe.log').write_text('SKIPPED 1: target' if mode=='skip' else 'probe passed; skip 0; (no target skipped)')
+(p/'com-probe.log').write_text(os.environ.get('PROBE_LOG','SKIPPED 1: target' if mode=='skip' else 'probe passed; skip 0; (no target skipped)'))
 ''')
     base=dict(os.environ,MODEL_COM=str(candidate),UA=str(reference),TERM_SH='0')
     base.pop('RELEASE_BOUND',None);base.pop('SUITES',None)
@@ -32,6 +32,10 @@ jobs={} if mode=='empty' else {'com-probe':['true']}
     check('missing',2,MODEL_COM=str(p/'absent'))
     check('disabled',2,SUITES='0')
     check('failed',7);check('skip',1);check('empty',1)
+    for i,log in enumerate(('SKIPPED 0', 'skip 0', '  skip 0', '  skip  0', '(skipped 0)', 'no target skipped', '(no target skipped)')):
+        check('zero'+str(i),0,PROBE_LOG=log)
+    for i,log in enumerate(('SKIPPED 2: target', 'skip 3', '(skipped 1)', '  skip windows (not running)', 'fat skipped (macOS only)', 'ARM64 native: SKIPPED', 'clone failed -- skipped')):
+        check('positive'+str(i),1,PROBE_LOG=log)
     check('pending',75);x=check('pending',0)
     assert 'LOCAL gate passed' in x.stdout and 'release NOT ready' in x.stdout
     assert (p/'out-pending/unisacc.com').read_bytes()==candidate.read_bytes()

@@ -46,7 +46,11 @@ p=pathlib.Path(state); data=json.loads((p/'results.json').read_text())
 jobs,results=data['jobs'],data['results']
 if not jobs or set(jobs)!=set(results) or any(r['rc'] for r in results.values()):
     raise SystemExit('release: incomplete/failed queue evidence')
-skip=re.compile(r'\bSKIP(?:PED)?\b|\bskipped\s*(?:\(|$)|^\s*skip\s|\bskip\s+[1-9][0-9]*',re.M)
+# Counts and named omissions occur in gate logs; zero counts are not omissions.
+skip=re.compile(r'\bSKIP(?:PED)?\b(?![ \t]+0+\b)|'
+                r'(?<!no target )\bskipped[ \t]*(?:\(|:|$)|'
+                r'^[ \t]*skip[ \t]+(?![ \t]*0+\b)|'
+                r'\b(?:skip|skipped)[ \t]+[1-9][0-9]*\b',re.M)
 for name in jobs:
     log=(p/(name+'.log')).read_text(errors='replace')
     if not log.strip() or skip.search(log):
