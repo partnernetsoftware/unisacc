@@ -67,7 +67,57 @@ as migrated template algorithms. See [enc/CONTROL_AUDIT.md](enc/CONTROL_AUDIT.md
 The final parser helper inventory is checked separately before the candidate
 is frozen; a shorter gen2.py alone is not completion evidence.
 
-## Current evidence and remaining work
+## Final candidate snapshot (acceptance pending)
+
+The candidate built from source `85eaeb9` has SHA-256
+`9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.
+It contains a 6,095,823-byte package (SHA-256
+`a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`)
+inside a 6,279,167-byte `.com` container. The complete package occurs
+physically once. Its 32 distinct constructed networks, 938 stage-route rows
+and 21 resources have an artifact-specific inventory; all 32 network/table
+pairs passed full declared observation-domain checks, including actions and
+strings. Those checks prove table equivalence, not complete C99 semantics.
+
+The fixed-package model driver reached N1=N2=N3 as identical complete
+115,746-byte Mach-O files (SHA-256
+`6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03`).
+The N3 successor passed empty-PATH O0/O2 memory and native probes against the
+host; missing-package execution returns 2. The network package and APE
+container were held fixed, so this does not establish their self-construction.
+
+The specified six-target smoke passed: local macOS arm64 and Rosetta x86-64
+container hello; Linux arm64/x86-64 and Windows arm64/x86-64 hello/fib/convert
+through model-run and compiled/native execution against host output. Linux
+x86-64 used Lima/QEMU; Windows used an ARM64 UTM guest and OS emulation of the
+x86-64 container driver. This is bounded smoke, not complete platform-suite
+acceptance or evidence from six physical machines.
+
+### Measured compile-time cost
+
+On macOS arm64, five fresh APE-process samples per compiler/input measured
+`-O2 -b osx/arm64` through completed image write, excluding execution of that
+image. The classic and model output SHA-256 matched for each input:
+
+| Input | Classic median | Model median | Model/classic |
+|---|---:|---:|---:|
+| `examples/fib.c` | 0.06078575 s | 0.62056504 s | 10.209× |
+| `unisacc.c` | 0.77623196 s | 19.42672129 s | 25.027× |
+
+The timings include startup and model/package loading. They measure compiler
+latency, not produced-program runtime. Raw samples, input hashes and compiler
+hashes are in the local `/tmp/unisacc-final-perf-plan-928/summary.json`;
+the final ledger still needs a durable reference. This cost remains to be
+optimized while preserving byte-identical outputs.
+
+The **complete current 143-item gate remains pending**. Old queue passes and
+timeout attempts are historical records, not inherited results. `make com` and
+the shipped `unisacc.com` still take the classic path. Complete the immutable
+candidate's gate, retain failures/refusals/skips and artifact hashes, and
+reconcile the final result ledger before changing the default or publishing.
+Specified smoke and fixed-package bootstrap do not substitute for that gate.
+
+## Earlier candidate evidence
 
 The immutable candidate from `70d3952` is 6,278,823 bytes, SHA256
 `a1115126d8281c93a1b38c3c3fc491779994201d14cf60cd2005933faa19ffb0`.
@@ -105,19 +155,10 @@ Windows ARM64 guest smoke evidence. Linux x86 uses QEMU; Windows x86 binaries us
 ARM64 emulation. These are bounded smoke tests, not full six-platform acceptance,
 and they do not validate the newer candidate.
 
-Remaining closure obligations:
-
-1. Confirm the final parser/helper source inventory, retaining shared type/gold
-   facts and explicit initialization/template bindings. Rebuild the full model
-   container from these final sources; old candidate evidence is not transferred
-   to a different artifact hash.
-2. Preserve the restored fixed corpus baseline while validating the remaining
-   changes. Do not copy known classic-reference defects to achieve byte equality.
-3. Run bounded joint CLI/diagnostic/optimization/platform and performance checks
-   on the same immutable full model container. Update the size ledger for that
-   artifact, separating weights, kernels, drivers, libraries and templates.
-4. Switch default product construction and documentation only after that evidence
-   passes. `make com` and shipped `unisacc.com` still use the classic route.
+Historical closure plan for those earlier candidates: parser/helper inventory,
+full rebuild, corpus ratchet, bounded product and platform checks, and a physical
+size ledger. The final `9a0ae470` candidate's current status is recorded above;
+earlier artifact results do not transfer to it.
 
 Resource and language checks now run in separate queue jobs. Core checks are split
 into modes, contracts and dependencies; see [c/COMPILERCHECK.md](c/COMPILERCHECK.md).

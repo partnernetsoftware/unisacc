@@ -10,6 +10,63 @@ rewrites ...) is answered by a small integer neural network whose weights are
 **constructed** from the decision table and **verified by enumeration** over
 the table's whole domain, not trained.
 
+## Final model candidate (acceptance pending)
+
+The model route builds a separate `unisacc.com` candidate from declarative
+rules, dynamic facts and shared templates. Offline Python constructs and
+checks its 32 integer networks; the packaged compiler runs without Python.
+The classic C and Python implementations remain references and explicit
+fallbacks. A model refusal does not silently retry through the classic path.
+`make com` and the currently shipped `unisacc.com` still use the classic route;
+`make model-com` builds the separate candidate. No default switch or release
+is claimed here.
+
+| Candidate snapshot | Evidence / status |
+|---|---|
+| Source / artifact | `85eaeb9` / `9a0ae470` (short IDs; full artifact hash below) |
+| Models and routes | 32 distinct constructed networks, 938 stage-route rows, 21 resources |
+| Network equivalence | All 32 network/table pairs checked across their complete declared observation domains, including actions and strings |
+| Package / container | `compiler.pkg` 6,095,823 bytes; `.com` 6,279,167 bytes; the complete package occurs physically once |
+| Complete candidate gate | **Pending: the current 143-item gate has not finished.** |
+| Target and bootstrap evidence | Specified six-target smoke and fixed-package driver N1=N2=N3 completed; see bounded scope below |
+| Default switch / publication | **Pending final acceptance** |
+
+Candidate SHA-256: `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.
+Package SHA-256: `a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`.
+
+With the fixed package, model-driven N1=N2=N3 are identical complete
+115,746-byte Mach-O drivers (SHA-256
+`6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03`).
+The N3 successor passed empty-PATH O0/O2 memory and native probes; a missing
+package returns 2. This is driver self-hosting with a fixed network package,
+not reconstruction of the networks, package or APE container.
+
+The specified smoke covers local macOS arm64 and Rosetta x86-64 container
+hello, plus hello/fib/convert on Linux arm64, Linux x86-64, Windows arm64 and
+Windows x86-64 through model-run and compiled/native execution. Linux x86-64
+uses QEMU; Windows uses an ARM64 UTM guest, with its x86-64 container driver
+under OS emulation. These checks are not complete platform suites or six
+physical machines. See [the scoped evidence](exec/rules.md).
+
+Five fresh APE processes per compiler and input, on macOS arm64 with
+`-O2 -b osx/arm64`, measured time through complete image write, excluding
+execution of that image:
+
+| Source | Classic median | Model median | Model / classic |
+|---|---:|---:|---:|
+| `examples/fib.c` | 0.06078575 s | 0.62056504 s | 10.209× |
+| `unisacc.c` | 0.77623196 s | 19.42672129 s | 25.027× |
+
+Each classic/model image pair had the same SHA-256. The timing includes startup
+and model/package loading; it is compilation latency, not the produced program's
+runtime. The raw samples, inputs and compiler hashes are in the local
+`/tmp/unisacc-final-perf-plan-928/summary.json`; the final ledger still needs
+a durable reference. This performance cost remains to be optimized.
+
+Finite-domain checks establish network/table equality, not complete C99
+semantics. Candidate-specific native and differential tests remain separate
+acceptance evidence.
+
 Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) -- the product, the
 development tools, the static inputs and the reference judges.
 
