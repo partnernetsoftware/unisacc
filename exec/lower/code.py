@@ -115,6 +115,11 @@ def install(E, arch="x86_64", os_="lnx"):
     prep_bindings.update({'SYSA'+str(i): SYSA+8*i for i in range(6)})
     install_rules(g, Path(__file__).parent, 'code-sysprep', bindings=prep_bindings,
                   sequences=prep_sequences, section='prepare')
+    # Finite source layouts are declarations; ABI register facts stay in current rows.
+    source_rows = [line.split('\t') for line in
+                   Path(__file__).with_name('code-abi-sources.tsv').read_text().splitlines()
+                   if line and not line.startswith('#')]
+    source_values = {'SYSA'+str(i): SYSA+8*i for i in range(6)}
     p=P('SYSCALL')
     for op,f in abi.items():
         if f[0]=='none' and os_!='win':continue
@@ -129,17 +134,11 @@ def install(E, arch="x86_64", os_="lnx"):
         for mode in range(5):
             p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
             q=P('SC.'+op+'.m'+str(mode))
-            if mode==0:
-                if f[10] not in ('plain','atfd_1','atfd_1_zero','atfd_2_zero5'):
-                    raise ValueError('new Linux '+arch+' argument shape requires migration: '+f[10])
-                sources={'plain':[('mem',0),('mem',8),('mem',16)],
-                         'atfd_1':[('imm',-100),('mem',0),('mem',8),('mem',16)],
-                         'atfd_1_zero':[('imm',-100),('mem',0),('imm',0)],
-                         'atfd_2_zero5':[('imm',-100),('mem',0),('imm',-100),('mem',8),('imm',0)]}[f[10]]
-            elif mode==1:sources=[('mem',SYSA+i*8) for i in range(6)]
-            elif mode==2:sources=[('imm',1),('mem',0),('mem',8)]
-            elif mode==3:sources=[('mem',0),('imm',0),('imm',0)]
-            else:sources=[('imm',1),('addr',24),('mem',16)]
+            sources = [(kind, source_values[value] if value in source_values else int(value))
+                       for m, shape, _, kind, value in source_rows
+                       if int(m)==mode and shape in ('*', f[10])]
+            if not sources:
+                raise ValueError('new Linux '+arch+' argument shape requires migration: '+f[10])
             for i,(kind,value) in enumerate(sources):
                 if f[1+i]=='none':
                     if os_=='win':break
