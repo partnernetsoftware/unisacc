@@ -228,13 +228,14 @@ if part in ('all','resources'):
     probes=[pathlib.Path('exec/parse2/probes/'+name+'.c') for name in
             ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings']]
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
-               ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals']]
+               ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
+                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result']]
     for source in probes:
         source=source.resolve(); name=source.stem
         host=p/(name+'-cc'); native=p/(name+'-model')
-        ok(['cc','-w',source,'-lm','-o',host]); assert ok([host])==b''
+        ok(['cc','-w',source,'-lm','-o',host]); expected=ok([host])
         for level in ['-O0','-O2']:
-            assert ok([*base,'-run',source,level],cwd=asmdir)==b''
+            assert ok([*base,'-run',source,level],cwd=asmdir)==expected
         ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==b''
     print('decimal/math/string/void/compound probes: host cc and ASM network driver, memory/native pass')
     # Public-shaped commands operate with only the container and source in cwd.

@@ -23,9 +23,8 @@ unterminated _Pragma calls; more than MAXP parameters; general punctuator/litera
 #if lines reuse P4 macro expansion before typed constant evaluation.
 autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
 its trigger names read from include/*.h (E2_AUTOINC=0 builds without it).
-Pragma macro stacks accept literal identifier names; _Pragma remains separate.
-(rejected as not covered when live and spelled exactly; the reference's
-prefix match `push_macroX` is not reproduced), the
+Pragma macro stacks accept literal identifier names; escaped names are rejected.
+The reference's prefix match `push_macroX` is not reproduced. Also not modelled:
 file:line:col rendering of diagnostics (the reject kind is compared, not the
 text).
 

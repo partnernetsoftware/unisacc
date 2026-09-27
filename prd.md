@@ -4981,3 +4981,5 @@ corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28�
 函数标签命名空间修复决定：C/Python/E3统一使用u_<实际函数符号>.<源标签>，点分隔不可出现在C标识符中，函数符号保留多单元static后缀，源标签不经过全局static重命名。只改共享label/goto输出，不放宽后端重复定义检查；原corpus00215及独立双函数同名标签验证，再做原回归。父负责C/Python及持久探针，E3在位域交付后同步模板。
 
 2286757标签修复验收：C/Python使用函数作用域前缀，原00215与新b_labelscope在host/私有C O0/O1/O2/Python行为一致，多单元static同名函数内同名标签亦通过。143差分源×3=429agree/0wrong/0refuse，自举本机通过，双槽5/5 17.68秒。经典.com重建1,368,528 B，sha256 3e2ac266b02a62a7b38620655871ed031eed8f450ec41d878bf0eb8867deac75；13项产物门禁全绿12.26秒，Windows自举仍未测，未发布/推送。模型E3模板须下一组同步，当前候选不借用经典证据。E4/x86联合实际门禁2/2 37.58秒；lower5485a95六目标扰动全图同和三目标NET通过，Python+6/TSV+15；x86剩余壳658054b正常/扰动四图同，Python+10/TSV+37，不声称总源码缩减。
+
+位域27def9e与pragma50fb1e9联合验收决定：将4持久位域probe纳入实际ASM/network资源门禁，按host stdout及rc核对（兼容原空输出probe），pragma plain/located检查列独立队列项。重包候选包含六目标E2/lower/image、E3及位置信息模型，E4本轮声明变更也重建；仅未变E1/内核按源哈希复用。函数标签/实参转换由E3下一私有组处理，不覆盖掉本轮未修状态。
