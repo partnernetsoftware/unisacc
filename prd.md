@@ -5071,3 +5071,5 @@ sizeof组0999ad5已交待父队列冻结结束后合；全图10组同、6旧prob
 unitlocations 7a9c3bd已合：普通/located与布局扰动全图相同，原实际NET序列化/UTF8/诊断及17坏帧检查通过。下一E4完整tokenlocations DL读取组，保留MAP_FIELDS顺序与调用者ready/ordinal/token_record/multi接口。父独立处理parse/gen.py tokenizer的终端/qualifier/default策略声明化，prefix trie仍由动态WORDS/TK/qualifiers装配；仅此文件域，不动其他代理模块，先对tokenizer完整有限观察表比对，不运行重型构图抢槽。
 
 父tokenizer策略已迁token-policy.tsv与token-prefixes.tsv，WORDS/TK/qualifiers仍动态构造前缀trie。原普通完整240状态/61680观察、新增词表和qualifier及token编号扰动250状态/64250观察，旧新每个后继/展开动作完全相同，两次各约0.10秒；/tmp/unisacc-token-policy-928。只验共享reader有限图，未外推完整编译；Python加入通用规则绑定而非新词法分支，末尾/qualifier/word/span策略由声明提供。
+
+固定a1115126候选补单份包实证：原6095511B compiler.pkg在6278823B容器中完整出现且只出现一次，offset183296，包SHA2198fbeb6687df6914e5622044750ccd286828b63dae33bf0bdbfe323120a376；/tmp/unisacc-controls-candidate-928/package-occurrence.json。这是物理包计数，模型32互异及resource另见ledger，不把驱动库算几KB。warning组全图与原139用例已交待审；E3下一完整errors.py映射/恢复/计数/summary控制，保留动态拒绝源扫描与通用input-frame深度跟踪，不把对应语义埋进通用loader。E4协议读取槽2、E5返回表达式槽1，新组先静态。
