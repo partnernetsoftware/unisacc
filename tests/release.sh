@@ -31,7 +31,8 @@ printf 'local candidate: %s sha256 %s\n' "$MODEL_COM" "$before"
 # Invoke through tests/term.sh externally if desired; env arguments preserve
 # MODEL_COM explicitly across Terminal's whitelist. Never call ua_ready here.
 rc=0
-exclusive=(--exclusive-suite exec-warningdriver)
+exclusive=()
+for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindx86); fi
 python3 "$R/tests/gatequeue.py" --com --jobs 2 --window 50 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?

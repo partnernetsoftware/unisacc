@@ -124,7 +124,8 @@ job exec-embedded python3 ./exec/c/embeddedcheck.py
 for part in modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
 job exec-driver-resources ./exec/c/compilercheck.sh resources
 for shard in 1 2; do job exec-driver-language-$shard ./exec/c/compilercheck.sh language-$shard; done
-job exec-warningdriver ./exec/c/warningcheck.sh
+for driver in cc asm; do job exec-warningdriver-$driver ./exec/c/warningcheck.sh "$driver"; done
+for flag in Wall Wextra Werror; do job exec-warningdriver-ua-$flag ./exec/c/warningcheck.sh ua "$flag"; done
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
 job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py
 for kind in cc ua asm; do job exec-multi-$kind env DRIVER_KIND=$kind ./exec/c/multicheck.sh; done
