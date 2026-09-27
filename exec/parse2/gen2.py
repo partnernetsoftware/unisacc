@@ -435,13 +435,27 @@ def structured_control(section, warnings, extra=None, sequence_bindings=None):
     for name, method, slots in tape_rows("control-stack.tsv"):
         p.acts = []
         sequences[name] = getattr(p, method)(*slots.split(",")).acts
-    tokens = dict(TK, identifier=TK_ID, number=TK_NUM, string=E.TK_STR)
+    tokens = dict(TK, identifier=TK_ID, number=TK_NUM, string=E.TK_STR, floating=E.TK_FNUM)
     sequences.update(sequence_bindings or {})
     classes = {name: [AX.index("f32"), AX.index("f64")] if kind == "float_axes" else
                [TK[token] for token in TWORDS] if kind == "typewords" else [tokens[value]]
                for name, kind, value in tape_rows("control-classes.tsv")}
     install_rules(g, os.path.dirname(__file__), "control", bindings=bindings,
                   sequences=sequences, classes=classes, section=section)
+
+
+def ordinary_control(section, warnings, extra=None):
+    bindings=dict(DBL=DBL, FLT=FLT, GMARK=E.GMARK, bottom="C%d" % LEVELS[0])
+    bindings.update(extra or {})
+    p=P("ordinary.bindings."+section+bindings.get("word_state", ""))
+    for part, mode, owner, kind, key in tape_rows("ordinary-fresh.tsv"):
+        if part == section and mode in ("common", "warnings" if warnings else "plain"):
+            p.cur=owner;bindings[key]=p.fresh(kind)
+    sequences={name:O(json.loads(value)) for name,value in tape_rows("ordinary-text.tsv")}
+    for part, mode, rules in tape_rows("ordinary-sections.tsv"):
+        if part == section and mode in ("common", "warnings" if warnings else "plain"):
+            structured_control(rules, False, bindings, sequences)
+    return bindings
 
 
 def function_control(section, warnings):
@@ -586,7 +600,7 @@ def build(locations=False, warnings=False, errors=False):
     from initializers import install as init_install
     init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS, dict(BFW=BFW, BFO=BFO, BFS=BFS, SHAPE=SHAPE, SHAPE_IDS=SHAPE_IDS))
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
-    g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
+    structured_control("ordinary-staticauto", False)
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     structured_control("startup-guard", False, dict(POSSPAN=POSSPAN))
     p = P("START.ok")
@@ -771,13 +785,7 @@ def build(locations=False, warnings=False, errors=False):
     update_control("variable1",dict(address_end=addr(P(b["f81"])).cur))
     ladder("E", "UNARY")
     ladder("C", None)
-    P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("COPYW", "vb", "sw"), ("LDI", "rkok", 0)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "POSTIX")
-    g.on("DEAD.adj", range(257), "DEAD", E.rej("not covered: adjacent string literals"), "r")
-    q = P("U.cpl")       # ~x: imm r1, -1; xor64 (measured); the operand's type is kept
-    q.call("NEXT").call("UNARY").call("BF.RVALUE").call("NODBL0").o("  imm r1, -1\n  xor64 r0, r0, r1\n").branch({1: "NARU"}, "RET", [("CMPI", "vb", UNS + 4)])
-    P("NODBL0").branch({1: "NODBL0.1"}, "NODBL0.p", [("CMPI", "vb", DBL)])
-    P("NODBL0.1").branch({1: "DEAD.dbl"}, "NODBL0.p", [("CMPI", "vt", 0)])
-    P("NODBL0.p").branch({1: "RET"}, "DEAD.pa", [("CMPI", "vt", 0)])
+    ordinary_control('string', warnings)
     # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
     # or a variable with subscripts (each drops one dimension); anything else is not covered
     structured_control("sizeof0", False)
@@ -787,42 +795,21 @@ def build(locations=False, warnings=False, errors=False):
     structured_control("sizeof2", False)
     strwalk("SZ.lwalk", "SZ.lbyte", "SZ.lend")
     structured_control("sizeof3", False)
-    P("U.fnum").o("  imm r0, ").a(("LDI", "nx", 1)).call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", DBL)).branch({1: "U.f32"}, "U.fnext", [("CMPI", "df_mbits", 23)])
-    P("U.f32").a(("LDI", "vb", FLT)).goto("U.fnext")
-    P("U.fnext").call("NEXT").ret()
-    p = P("UNARY").a(("LDI", "bf_value", 0))
-    p.tok({"sizeof": "U.szof", E.TK_FNUM: "U.fnum", E.TK_STR: "U.str", "~": "U.cpl", "-": "U.neg", "+": "U.pos", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec", "&": "U.amp", "*": "U.deref"}, bad("expression"))
+    ordinary_control('dispatch', warnings)
     structured_control("address", False)
     addr(P("ADR.object")).goto("ADR.object.next")
-    q = P("U.deref")     # * operand: its value is the address; one level down, then a load at the new width
-    q.call("NEXT").tok({TK_ID: "UD.id"}, "UD.gen")
-    P("UD.gen").call("UNARY").goto("UD.dn")
+    ordinary_control('deref', warnings)
     shape_control("dereference")
-    P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call", "++": "UD.inc", "--": "UD.dec"}, "UD.v")
-    P("UD.call").call("U.call").goto("UD.dn")
+    ordinary_control('id', warnings)
     for tag, op in (("inc", "+"), ("dec", "-")):
-        q = P("ID." + tag).call("LOOKUP").call("NOARR").call("CSTEP")
-        addr(q).call("POST." + op).ret()
-        P("UD." + tag).call("ID." + tag).goto("UD.dn")
-    P("UD.v").a(("INTERN","v","ips","ipe")).branch({1:"UD.func"},"UD.namedvalue",[("CMP","v","funcid")])
-    P("UD.func").call("UF").call("POSTIX").goto("UD.dn")
-    p = P("UD.namedvalue")     # *f with f a local function pointer: load the callee value
-    p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "RET"}, "UD.v2", [("CMPI", "isfn", 1)])
-    p = P("UD.v2")
-    p.call("LOOKUP").call("ISFP").branch({1: "UD.f1"}, "UD.gv", [])
-    P("UD.f1").branch({1: "UD.gv"}, "UD.fs", [("CMPI", "s", E.GMARK)])
-    P("UD.fs").branch({0: "UD.gv"}, "UD.f2", [("CMPI", "s", 0)])
-    P("UD.f2").branch({1: "UD.gv"}, "UD.f3", [("CMPI", "ar", 1)])
-    P("UD.f3").o("  load64 r0, [r6-").num("s").o("]\n").ret()
+        update=dict(word_state=tag, update_entry="ID."+tag, update_deref="UD."+tag, update_post="POST."+op)
+        bound=ordinary_control("update-address", warnings, update)
+        q=addr(P(bound["ordinary_update_address3"]))
+        ordinary_control("update-result", warnings, dict(update, resume=q.cur))
+    ordinary_control('value', warnings)
     p = P("UD.gv")
     addr(p)
-    p.call("VLOAD").call("POSTIX").goto("UD.dn")
-    P("DOWN").call("ISFP").branch({1: "DOWN.fp"}, "DOWN.0", [])
-    P("DOWN.fp").ret()
-    P("DOWN.0").branch({(1, 2): "DOWN.1"}, bad("dereference of a non-pointer"), [("CMPI", "vt", 1)])
-    P("DOWN.1").a(("ALUI", "sub", "vt", "vt", 1)).branch({1: "DOWN.2"}, "RET", [("CMPI", "vt", 0)])
-    P("DOWN.2").branch({1: "DEAD.void"}, "RET", [("CMPI", "vb", 0)])
-    g.on("DEAD.void", range(257), "DEAD", E.rej("not covered: dereference of void"), "r")
+    ordinary_control('down', warnings, dict(resume=p.cur))
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
     for name,op,postfix,prefixname,prefixfix,integer,floating in tape_rows("update-modes.tsv"):
@@ -838,26 +825,14 @@ def build(locations=False, warnings=False, errors=False):
                   dict(DBL=DBL, FLT=FLT, BOOL=BOOL, UNS1=UNS+1, UNS3=UNS+3, UNS4=UNS+4, UNS8=UNS+8,
                        U32M=U32M, ENV=ENV, END_=END_, FNSTR=FNSTR, TIX=TIX, MAXTOK=unit_span), TWORDS)
     shape_control("value-load")
-    P("VL.a").a(("LDI", "rkok", 1), ("COPYW", "rk", "ar")).ret()
-    P("NOARR").branch({0: "RET"}, "DEAD.arr", [("CMPI", "ar", 1)])
-    g.on("DEAD.arr", range(257), "DEAD", E.rej("not covered: assignment to an array"), "r")
+    ordinary_control('array', warnings)
     from membercontrol import install as member_control
     member_control(E, P, warnings, TEMPL,
                    dict(SBB=SBB, MEMBER_STRIDE=MEMBER_STRIDE, MOF=MOF, MSZ=MSZ, MPT=MPT, MBS=MBS,
                         MAR=MAR, BFW=BFW, BFO=BFO, BFS=BFS, SHAPE_IDS=SHAPE_IDS, SHAPE=SHAPE,
                         ARR=E.ARR, SSZ=SSZ, DBL=DBL, FLT=FLT, BOOL=BOOL), shape_control)
     # statement `*E = e` / `*E ...;`: E's value is the address
-    q = P("S.star")
-    q.call("NEXT").call("UNARY").call("DOWN").call("BF.OBJECT").goto("SS.dispatch")
-    q = P("SS.as")
-    emit(q, "push").vpush("vt", "vb").call("NEXT")
-    if warnings: q.a(("COPYW", "wi_target", "vt")).call("WI.expr")
-    else: q.call("EXPR")
-    q.a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).vpop("vt", "vb").call("BOOLTARGET")
-    emit(q, "pop1").call("STOREV").expect(";").call("NEXT").ret()
-    P("SS.rv").tok({";": "SS.x"}, "SS.rv1")     # `*p;` alone: the address only (measured, p20)
-    P("SS.x").call("NEXT").ret()
-    P("SS.rv1").call("LOADV").call("C%d" % LEVELS[0]).expect(";").call("NEXT").ret()
+    ordinary_control('star', warnings)
     update_control("fnvalue")
     lookup_entry=update_control("lookup-warn")["f112"] if warnings else "LOOKUP"
     update_control("lookup-body",dict(lookup_entry=lookup_entry))
