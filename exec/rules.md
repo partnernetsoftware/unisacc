@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: 9a38e3b, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
+Current source checkpoint: 4df5e53, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -13,10 +13,10 @@ remain shared inputs, not copied answers.
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
-| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
+| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`, `shape-*`, `conversion-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
 | E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `armfuse-*`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`; ARM destination-shape selection and dynamic bindings; target/escape/layout bindings in `data.py` |
-| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM core/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
+| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `armbase-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM operand-input contracts/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
 | E6 images | `enc/elfimage-byte/result.tsv` shared image control and `enc/pedelta-byte/result.tsv` PE control, `enc/machodelta-*` Mach-O layout/signature-page control, `enc/sha256-*` shared digest control; existing target layout facts | Format header/section/CD fields and import/string enumeration, child installation and dynamic layout/hash-constant bindings in `enc/` |
 
 `finite_rules.py` expands declared observations, bindings and action sequences;
@@ -93,3 +93,11 @@ Shared fixed-array shape declarations and operand namespace fixes are included.
 The shape change adds 36 Python lines and 277 TSV lines; it closes real input
 gaps and is not code reduction. Array-typedef extra suffixes, T**, T* members,
 and T* function returns still reject; no wider compatibility is implied.
+
+Expanded differential acceptance keeps all 141 existing input files and all
+three optimization levels. The same candidate has 393 matching runs and 30
+explicit refusals (10 files); no accepted run differs. Refusals cover parameter
+declarators, address/compound-literal forms, wide strings, bit-fields, and
+preprocessor expression/paste forms. The gate remains failing for these gaps.
+Four bounded queue shards replace the monolithic timed-out job; the classic
+reference passes all 423 comparisons under that stronger harness.

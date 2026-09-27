@@ -4953,3 +4953,5 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 转换/ARM基础控制收尾（4df5e53）：ASSIGNCV/NARU迁共享声明，已有TO/NARROW未重复；Python+4、声明+27。ARM mov/mul/ALU/ret/nop/callr/compare/MOVIMM迁声明，RRR及MOVK共用模板，Python−10、声明+21；两组合计Python−6，声明+48，总源+42。原图和动态依赖扰动相等；父主树实际资源、ARM、chain双槽3/3、38.65秒，/tmp/unisacc-conversion-armbase-gate-928。候选仍9a38e3b，未把未重打包版本误称新产物。
 
 剩余兼容按共享过程并行补齐决定：一组处理b_decl2/b_decl3的参数/声明尾，复用PARAMS/FPDECL/shape；一组处理b_ppif的预处理常量表达式，直接补expression/reduce声明并复用既有宏展开；一组处理b_wide/b_strsizeof的宽字符字符串路径，复用共享字符串walk及初始化。隔离分支、各约8分钟，固定逻辑留TSV、Python仅绑定，不新增解释器/语言原语，不修改测试输入，不把未完成项改成knownpass。两个E3任务按参数区域与字符串区域分工，父审合后组合验证。
+
+父确认测试分片未削弱经典基线：主树新difftest_o四片对当前私有经典UA全部423agree/0wrong/0refuse，双槽5.74秒（/tmp/unisacc-sharded-classic-gate-928）。模型候选的30refuse是实际兼容差距，并非测试分片引入。两者墙钟含不同编译路线及缓存，不作为正式性能比值。
