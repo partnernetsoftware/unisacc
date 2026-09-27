@@ -3937,3 +3937,34 @@ variadics probe is now supported. Logs: /tmp/unisacc-comma-{check,arm,x86,
 build,c99,ccparity}.log. Every run bounded at 60 s. This is targeted validation,
 not a release gate or default-product switch. _Pragma and the other 16 refusals
 remain work; no baseline reduction, push or release.
+
+
+### E2 _Pragma operator migration
+
+The reference consumes a balanced _Pragma call without honouring its contents
+or expanding its arguments. Implement that scan with ordinary delta actions,
+including quoted parentheses, replacement-frame boundaries and source newline
+accounting. Bare names remain text. Compare exact reference output separately
+from host pragma semantics: this is not an implementation of pack or diagnostic
+pragmas. Unterminated calls remain an explicit prototype limitation.
+
+_Pragma slice verified: 43 macro probes in both output formats (86 full
+outputs), plus two malformed-call refusals per format. Host C and both macOS
+assembly runtimes agree with the simulator and reference; constructed network
+= table enumeration also passes. Twenty-four probe token sequences additionally
+match host cc; nineteen use explicit reference-contract token expectations
+(comma extension and ignored pragma behaviour). A self-referential _Pragma
+name exposed lost suppression after frame lookahead; the name's active/paint
+state is now captured before popping, and the formerly looping case is fixed
+on the permanent list. No new executor action. gen.py: 1,322 -> 1,376 lines.
+
+Existing location checks pass (9 reference envelopes, 5 simulator cases),
+fixed chain 96/96 with no rejects/not-covered/bad/lost. Actual model container:
+5,796,265 B, package 5,612,953 B, SHA-256
+8c341754b0354e6f07a02b1055d995d3421c72d9fb2f936dfe8eb57e4cca9ac9.
+ccparity remains 53 ok / 0 wrong / 1 known. C99 now 41/57, 0 wrong, 16 refused;
+the suite still correctly exits 1. The reference's ignored _Pragma is covered;
+pack semantics are not newly implemented or claimed. Logs are
+/tmp/unisacc-pragma-{check,arm,x86,location,chain,build,c99,ccparity}.log.
+All runs bounded at 60 s. No default-product switch, push or release. Next are
+__func__ and the remaining type/declarator/expression/library compatibility gaps.

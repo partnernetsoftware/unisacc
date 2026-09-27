@@ -65,7 +65,31 @@ cases.update({
 # reference contract with an independent token expectation instead.
 reference_tokens={'comma_explicit': ['f','(','1',')','f','(','1',')']}
 cases['comma_explicit']='#define P(x,...) f(x, ##__VA_ARGS__)\nP(1,) P(1, )\n'
-assert len(cases)==25
+pragma_cases={
+ 'pragma_hidden_call': ('#define _Pragma _Pragma\n#define F(x) x\nF(_Pragma)("x") z\n', ['z']),
+ 'pragma_hidden_arg': ('#define _Pragma _Pragma\n#define F(x) x\nF(_Pragma("x")) z\n', ['z']),
+ 'pragma_defined_arg': ('#define _Pragma 4\n#define F(x) x\nF(_Pragma) z\n', ['4','z']),
+ 'pragma_root': ('a _Pragma("pack(1)") b\n', ['a','b']),
+ 'pragma_bare': ('_Pragma\n', ['_Pragma']),
+ 'pragma_lines': ('_Pragma\n("x")\nb\n', ['b']),
+ 'pragma_object': ('#define P _Pragma("x")\na P b\n', ['a','b']),
+ 'pragma_stringize': ('#define P(x) _Pragma(#x)\na P(pack(1)) b\n', ['a','b']),
+ 'pragma_nameframe': ('#define P _Pragma\na P("x") b\n', ['a','b']),
+ 'pragma_callframe': ('#define P _Pragma(\na P "x") b\n', ['a','b']),
+ 'pragma_argument': ('#define F(x) x\na F(_Pragma("x")) b\n', ['a','b']),
+ 'pragma_nocall': ('#define P _Pragma\nP + 1\n', ['_Pragma','+','1']),
+ 'pragma_end': ('#define P _Pragma\nP\n', ['_Pragma']),
+ 'pragma_framelines': ('#define P _Pragma\nP\n("x") z\n', ['z']),
+ # Reference ignores balanced contents, even forms outside C99's operand grammar.
+ 'pragma_balanced': ('_Pragma((a),"x)",\'q\')z\n', ['z']),
+ 'pragma_unexpanded': ('#define F(x) x\n_Pragma(F(a,b))z\n', ['z']),
+ 'pragma_defined': ('#define _Pragma 4\n_Pragma\n', ['4']),
+ 'pragma_definedframe': ('#define _Pragma 4\n#define P _Pragma\nP\n', ['4']),
+}
+for name,(source,want) in pragma_cases.items():
+ cases[name]=source;reference_tokens[name]=want
+assert len(cases)==43
+
 with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
  t=pathlib.Path(td)
  call(['sh','-c','R=$1; . "$R/tests/lib.sh"; ua_ready','macrocheck',R])
@@ -90,5 +114,12 @@ with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
    assert (text_of(got) if located else got)==want,(name,q,got,want)
    verdict,value,_=sim.run(d,f.read_bytes(),str(f),sim.Files(),maxsteps=2000000,loaded=loaded)
    assert verdict=='accept' and value==got,(name,q,verdict,value)
-  print(q,len(cases),'full outputs; 24 host-token cases, 1 explicit reference contract; simulator/network agree',flush=True)
- print('macro checks: 50 full results, both preprocessing formats')
+  for name,source in {'pragma_unclosed':'_Pragma("x"\n',
+                      'pragma_badliteral':'_Pragma("x\n'}.items():
+   f=t/(name+'.c');f.write_text(source)
+   result=run([t/'run',t/(q+'.net'),f,f,R/'include'])
+   assert result.returncode!=0 and b'not covered: unterminated _Pragma' in result.stderr,(name,q,result)
+   verdict,value,_=sim.run(d,f.read_bytes(),str(f),sim.Files(),maxsteps=2000000,loaded=loaded)
+   assert verdict!='accept' and 'unterminated _Pragma' in str(value),(name,q,verdict,value)
+  print(q,len(cases),'full outputs; 24 host-token cases, 19 explicit reference contracts; 2 named refusals; simulator/network agree',flush=True)
+ print('macro checks: 86 full results and 4 refusals, both preprocessing formats')

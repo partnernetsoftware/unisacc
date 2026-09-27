@@ -15,9 +15,10 @@ each pass reading x and writing o, SWAP between passes:
   P4 token rescan          object/function macros, argument pre-expansion,
                            zero/variadic arguments, # and covered ## forms;
                            replacement frames can continue into their parent
+                           balanced _Pragma calls are ignored as in the reference
 
 NOT covered (the delta rejects with a `not covered: ...` code, never guesses):
-_Pragma; more than MAXP parameters; general punctuator/literal ## operands
+unterminated _Pragma calls; more than MAXP parameters; general punctuator/literal ## operands
 (the identifier/digit and object-like `# ## #` forms are covered);
 # / ## bodies on an #if line.
 autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
@@ -1041,7 +1042,7 @@ def build(target="lnx/x86_64", locations=False):
             g.els("UCN%d_%d" % (n, k), "ERIDX", [("JUMP", "U")])
     g.els("ERIDX", "ERPR", idend)
     sub, pu = g.call("MFIND", "ERM")
-    g.r("ERPR", {1: ("DEAD", NC("_Pragma")),
+    g.r("ERPR", {1: ("PR.root", [("LDI","NLC",0)]),
                  (0, 2): (sub, [("COPYW", "SEGQ", "ESEG")] + pu)})
     g.els("ERM", "ERM2", [("CMPI", "M", 0)])
     g.r("ERM2", {0: ("ERL", [("SPANT", "IS")]),
@@ -1050,6 +1051,10 @@ def build(target="lnx/x86_64", locations=False):
     start = [("OUT", 32), ("LDI", "DEP", 0), ("LDI", "SEP", 0), ("LDI", "CUR", 0),
              ("LDI", "BDEP", -1), ("LDI", "PRE", 0), ("LDI", "EDEP", 0),
              ("LDI", "SEPB", 32), ("LDI", "SEPB0", 32)]
+    g.on("PR.root", WS, "PR.root", [("ADV",)])
+    g.on("PR.root", [10], "PR.root", [("ADV",),("ALUI","add","NLC","NLC",1)])
+    g.on("PR.root", [40], "PR.scan", [("ADV",)] + start + [("OLEN","O0"),("LDI","PRDEP",0)])
+    g.els("PR.root", sub, [("JUMP","IE"),("COPYW","SEGQ","ESEG")] + pu)
     g.r("ERM3", {2: ("ERFN", []), 1: ("ERFC", [("LDI", "NLC", 0)]),
                  0: ("ERH", [("LDI", "NLC", 0), ("LDI", "FNE", 0)] + start
                      + [("OLEN", "O0"), ("LDX", "hh", "me", F_HASH), ("RLD", "hh")])})
@@ -1218,10 +1223,10 @@ def build(target="lnx/x86_64", locations=False):
     g.on("EBID", ID, "EBID", [("ADV",)])
     g.on("EBID", [92], "DEAD", NC("UCN in a body"))
     sub2, pu2 = g.call("MFIND", "EBM")
-    g.els("EBID", "EBPN", [("MARK", "BIE"), ("RLD", "PNT")])
+    g.els("EBID", "EBPR", [("MARK", "BIE"),("INTERN","NID","BIS","BIE"),("CMP","NID","ID_PRAGMAOP")])
     g.r("EBPN", {1: ("EBNX", [("RLD", "PS")]),
-                 (0, 2): ("EBPR", [("INTERN", "NID", "BIS", "BIE"), ("CMP", "NID", "ID_PRAGMAOP")])})
-    g.r("EBPR", {1: ("DEAD", NC("_Pragma")), (0, 2): ("EBPB", [("CMP", "CUR", "FNE")])})
+                 (0, 2): ("EBPB", [("CMP","CUR","FNE")])})
+    g.r("EBPR", {1: ("PR.before", [("LDI","PRCALL",1),("LDI","PRROOT",0),("COPYW","PRHIDE","PNT"),("BLOBSAVE","NMB","BIS","BIE"),("COPYW","PKW","SEPB0")]), (0, 2): ("EBPN", [("RLD", "PNT")])})
     # directly in a function-like body: a parameter name pushes its argument
     # (the argument frame is the entry ARGE, so the hide-set rule is unchanged)
     g.r("EBPB", {1: ("EBPL", [("LDI", "PK", 0), ("LDX", "FNP", "FNE", F_NP), ("CMP", "PK", "FNP")]),
@@ -1243,7 +1248,7 @@ def build(target="lnx/x86_64", locations=False):
     # a function-like name: a call when `(` follows, looking past the ends of
     # body frames (popping them) and, at the outermost, into the pass input;
     # never past an argument's barrier (s13)
-    g.r("EBM4", {1: ("EBF", [("BLOBSAVE", "NMB", "BIS", "BIE"), ("COPYW", "PKW", "SEPB0")]),
+    g.r("EBM4", {1: ("EBF", [("LDI","PRCALL",0),("BLOBSAVE", "NMB", "BIS", "BIE"), ("COPYW", "PKW", "SEPB0")]),
                  2: ("DEAD", NC("function-like macro name in a body")),
                  0: ("EBH", [("LDX", "hh", "me", F_HASH), ("RLD", "hh")])})
     emit = [("INPUSH", "NMB"), ("LDI", "z0", 0), ("XLEN", "ze"), ("SPAN2", "z0", "ze"), ("INPOP",)]
@@ -1256,17 +1261,66 @@ def build(target="lnx/x86_64", locations=False):
     g.els("EBCR", "EB")
     g.on("EBF", [32, 9, 10], "EBF", [("ADV",), ("LDI", "PKW", 32)])
     g.on("EBF", [2], "EBF", [("ADV",)])
-    g.on("EBF", [40], subf, [("ADV",)] + cfpre + puf)
+    g.on("EBF", [40], "PR.open", [("RLD","PRCALL")])
     g.on("EBF", [EOF], "EBFE", [("CMP", "DEP", "BDEP")])
     fk = [("COPYW", "SEPB", "PKW")]
-    g.els("EBF", ename("F", "EB", fk), [("RLD", "PS")])
-    g.r("EBFE", {1: (ename("F", "EB", fk), [("RLD", "PS")]), (0, 2): ("EBFP", popb)})
-    g.r("EBFP", {1: ("EBFX", [("MARK", "PX"), ("COPYW", "NLC0", "NLC")]), (0, 2): ("EBF", [])})
+    g.els("EBF", "PR.nobody", [("RLD","PRCALL")])
+    g.r("PR.nobody",{0:(ename("F", "EB", fk),[("RLD","PS")]),1:("PR.lookup",[])})
+    g.r("EBFE", {1: ("PR.nobody", [("RLD", "PRCALL")]), (0, 2): ("EBFP", popb)})
+    g.r("EBFP", {1: ("EBFX", [("MARK", "PX"), ("COPYW", "NLC0", "NLC"), ("LDI","PRROOT",1)]), (0, 2): ("EBF", [])})
     g.on("EBFX", [32, 9], "EBFX", [("ADV",)])
     g.on("EBFX", [10], "EBFX", [("ADV",), ("ALUI", "add", "NLC", "NLC", 1)])
-    g.on("EBFX", [40], subf, [("ADV",)] + cfpre + puf)
-    g.els("EBFX", ename("X", "EBX2", [("OLEN", "t"), ("CMP", "t", "O0")]),
-          [("JUMP", "PX"), ("COPYW", "NLC", "NLC0"), ("RLD", "PS")])
+    g.on("EBFX", [40], "PR.open", [("RLD","PRCALL")])
+    g.els("EBFX", "PR.noroot", [("JUMP","PX"),("COPYW","NLC","NLC0"),("RLD","PRCALL")])
+    g.r("PR.noroot",{0:(ename("X", "EBX2", [("OLEN", "t"), ("CMP", "t", "O0")]),[("RLD","PS")]),
+                        1:("PR.lookup",[])})
+    prs,prpush=g.call("MFIND","PR.found")
+    # Record suppression while the name's owning replacement is still active;
+    # lookahead may pop that frame before discovering there is no call.
+    prefind,prepush=g.call("MFIND","PR.preFound")
+    g.els("PR.before",prefind,prepush)
+    g.els("PR.preFound","PR.preHave",[("CMPI","M",0)])
+    g.r("PR.preHave",{0:("EBF",[]),(1,2):("PR.preAct",ea("prme","M"))})
+    g.els("PR.preAct","EBF",[("LDX","pra","prme",F_ACT),("ALU","or","PRHIDE","PRHIDE","pra")])
+    g.els("PR.lookup","PR.hidden",[("RLD","PRHIDE")])
+    g.r("PR.hidden",{1:("PR.name",[("LDI","PNT",1)]),0:(prs,prpush)})
+    g.els("PR.found","PR.have",[("CMPI","M",0)])
+    g.r("PR.have",{0:("PR.name",[("RLD","PRROOT")]),
+                     (1,2):("PR.active",ea("me","M")+[("LDX","act","me",F_ACT),("RLD","act")])})
+    g.r("PR.active",{1:("PR.name",[("LDI","PNT",1),("RLD","PRROOT")]),
+                       0:("PR.kind",[("LDX","fn","me",F_FN),("RLD","fn")])})
+    g.r("PR.kind",{0:("EBH",[("LDX","hh","me",F_HASH),("RLD","hh")]),
+                     (1,2):("PR.name",[("RLD","PRROOT")])})
+    g.els("PR.name","PR.sep",[("RLD","PS")])
+    g.r("PR.sep",{1:("PR.paint",[("OUTW","SEPB"),("ALU","and","t","PNT","PRE"),("RLD","t")]),
+                      (0,2):("PR.paint",[("LDI","SEP",1),("ALU","and","t","PNT","PRE"),("RLD","t")])})
+    g.r("PR.paint",{1:("PR.emit",[("OUT",1)]),(0,2):("PR.emit",[])})
+    g.els("PR.emit","PR.resume",emit+[("RLD","PRROOT")])
+    g.r("PR.resume",{0:("EB",fk),1:("EBX2",[("OLEN","t"),("CMP","t","O0")])})
+    g.r("PR.open", {0:(subf,[("ADV",)] + cfpre + puf),
+                       1:("PR.scan",[("ADV",),("LDI","PRDEP",0)])})
+    # No macro expansion inside the ignored call. A replacement can end in
+    # the middle of the call, but an argument's frame is a hard boundary.
+    g.on("PR.scan",[40],"PR.scan",[("ADV",),("ALUI","add","PRDEP","PRDEP",1)])
+    g.on("PR.scan",[41],"PR.close",[("ADV",),("CMPI","PRDEP",0)])
+    g.r("PR.close",{1:("PR.done",[("CMP","DEP","EDEP")]),
+                       (0,2):("PR.scan",[("ALUI","sub","PRDEP","PRDEP",1)])})
+    g.r("PR.done",{1:("EBX2",[("OLEN","t"),("CMP","t","O0")]),(0,2):("EB",[])})
+    g.on("PR.scan",[10],"PR.nl",[("ADV",),("ALU","add","t","DEP","PRE"),("CMPI","t",0)])
+    g.r("PR.nl",{1:("PR.scan",[("ALUI","add","NLC","NLC",1)]),(0,2):("PR.scan",[])})
+    g.on("PR.scan",[EOF],"PR.frame",[("CMP","DEP","BDEP")])
+    g.r("PR.frame",{1:("DEAD",NC("unterminated _Pragma call")),(0,2):("PR.base",[("CMPI","DEP",0)])})
+    g.r("PR.base",{1:("DEAD",NC("unterminated _Pragma call")),(0,2):("PR.scan",popb)})
+    for q in (34,39):
+        state="PR.quote"+str(q)
+        g.on("PR.scan",[q],state,[("ADV",)])
+        g.on(state,[92],state+"E",[("ADV",)])
+        g.on(state,[q],"PR.scan",[("ADV",)])
+        g.on(state,[EOF,10],"DEAD",NC("unterminated _Pragma literal"))
+        g.els(state,state,[("ADV",)])
+        g.on(state+"E",[EOF],"DEAD",NC("unterminated _Pragma literal"))
+        g.els(state+"E",state,[("ADV",)])
+    g.els("PR.scan","PR.scan",[("ADV",)])
     subx, pux = g.call("HX", "EBHR")
     g.r("EBH", {0: ("EB", PUSHM), 1: (subx, pux), tuple(range(2, 257)): ("DEAD", NC("hash flag"))})
     g.els("EBHR", "EB", PUSHMB)
