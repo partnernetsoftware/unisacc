@@ -523,101 +523,7 @@ def types():
     P("TS.new").call("TAG.alloc").a(("COPYW", "nsid2", "nsid")).call("TAG.bind").a(("STX", "tg", STAG, "nsid")).goto("TS.old")
     P("TS.old").a(("ALUI", "add", "tb", "nsid2", SBB)).goto("TS.b")
     P("TS.sb").a(("ALUI", "add", "tb", "nsid", SBB)).goto("TS.b")
-    P("TAG.alloc").a(("ALUI", "add", "sidserial", "sidserial", 1), ("COPYW", "nsid", "sidserial"), ("COPYW", "t", "nsid")).branch({0: "RET"}, bad("structure id capacity"), [("CMPI", "nsid", STRUCT_MAX + 1)])
-    P("TAG.enter").vpush("tagusp", "tagscope").a(("ALUI", "add", "tagserial", "tagserial", 1), ("COPYW", "tagscope", "tagserial")).ret()
-    P("TAG.bind").branch({1: "RET"}, "TAG.save", [("CMPI", "tagscope", 0)])
-    P("TAG.save").a(("LDX", "tagold", "tg", STAG), ("LDX", "tagoldscope", "tg", TAGLEVEL),
-        ("STX", "tagusp", TAGUNDO, "tg"), ("STX", "tagusp", TAGUNDO+1, "tagold"), ("STX", "tagusp", TAGUNDO+2, "tagoldscope"),
-        ("LDX", "tagoldenum", "tg", ETAG), ("STX", "tagusp", TAGUNDO+3, "tagoldenum"),
-        ("ALUI", "add", "tagusp", "tagusp", 4), ("STX", "tg", TAGLEVEL, "tagscope")).ret()
-    P("TAG.leave").vpop("tagmark", "tagscope").goto("TAG.unwind")
-    P("TAG.unwind").branch({2: "TAG.restore"}, "RET", [("CMP", "tagusp", "tagmark")])
-    P("TAG.restore").a(("ALUI", "sub", "tagusp", "tagusp", 4), ("LDX", "tagname", "tagusp", TAGUNDO),
-        ("LDX", "tagold", "tagusp", TAGUNDO+1), ("LDX", "tagoldscope", "tagusp", TAGUNDO+2),
-        ("LDX", "tagoldenum", "tagusp", TAGUNDO+3), ("STX", "tagname", ETAG, "tagoldenum"),
-        ("STX", "tagname", STAG, "tagold"), ("STX", "tagname", TAGLEVEL, "tagoldscope")).goto("TAG.unwind")
-    # SBODY at '{': members `T [*]... name;` -- each aligned to its own size, the total to the largest (measured)
-    p = P("SBODY")
-    p.vpush("td", "tb").a(("LDX", "t", "tg", STAG), ("LDX", "tagoldscope", "tg", TAGLEVEL)).branch({1: "SB.samescope"}, "SB.nw", [("CMP", "tagoldscope", "tagscope")])
-    P("SB.samescope").branch({1: "SB.nw"}, "SB.re", [("CMPI", "t", 0)])
-    P("SB.nw").call("TAG.alloc").goto("SB.re")
-    p = P("SB.re")      # (a tag seen before without a body is completed in place)
-    p.a(("COPYW", "sid", "t"), ("COPYW", "nsid", "t")).branch({1: "SB.go"}, "SB.tg", [("CMPI", "tg", 0)])
-    P("SB.tg").call("TAG.bind").a(("STX", "tg", STAG, "sid")).goto("SB.go")
-    P("SB.go").a(("STX", "sid", SFLAT, "z0"), ("LDI", "soff", 0), ("LDI", "smal", 1), ("COPYW", "sun", "sun_n"), ("LDI", "umax", 0)).call("NEXT").label("SB.m")
-    P("SB.m").tok({"}": "SB.end"}, "SB.mem")
-    p = P("SB.mem")
-    p.vpush("sid", "soff", "smal", "sun", "umax").call("TSPEC").vpop("sid", "soff", "smal", "sun", "umax").tok({TK_ID: "SB.nm", ";": "SB.anon"}, bad("struct member"))
-    # Anonymous aggregate: lift names/layout, preserving initializer slots.
-    P("SB.anon").branch({1: "SB.anonbase"}, bad("anonymous pointer member"), [("CMPI", "td", 0)])
-    P("SB.anonbase").branch({2: "SB.anonlayout"}, bad("anonymous scalar member"), [("CMPI", "tb", SBB)])
-    P("SB.anonlayout").a(("ALUI", "sub", "an_sid", "tb", SBB), ("LDX", "msz", "an_sid", SSZ), ("LDX", "mal", "an_sid", SAL)).branch({1: "DEAD.sm"}, "SB.anonplace", [("CMPI", "msz", 0)])
-    P("SB.anonplace").branch({1: "SB.anonunion"}, "SB.anonstruct", [("CMPI", "sun", 1)])
-    P("SB.anonunion").a(("LDI", "an_base", 0), ("COPYW", "soff", "msz")).goto("SB.anonbegin")
-    P("SB.anonstruct").a(("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "an_base", "t", "m"), ("ALU", "add", "soff", "an_base", "msz")).goto("SB.anonbegin")
-    P("SB.anonbegin").a(("LDI", "an_i", 0), ("LDX", "an_n", "an_sid", SMN), ("LDX", "an_flat", "an_sid", SFLAT), ("LDX", "t", "sid", SFLAT), ("ALU", "add", "t", "t", "an_flat"), ("STX", "sid", SFLAT, "t")).label("SB.anonloop").branch({0: "SB.anoncopy"}, "SB.anonend", [("CMP", "an_i", "an_n")])
-    p = P("SB.anoncopy")
-    p.a(("ALUI", "mul", "u", "an_sid", 64), ("ALU", "add", "u", "u", "an_i"), ("LDX", "an_key", "u", SMEM), ("A64I", "and", "k", "an_key", -MEMBER_STRIDE), ("A64", "add", "k", "k", "sid"), ("LDX", "t", "an_key", MOF), ("ALU", "add", "t", "t", "an_base"), ("STX", "k", MOF, "t"))
-    for table in (MSZ, MPT, MBS, MAR, MFLAT):
-        p.a(("LDX", "t", "an_key", table), ("STX", "k", table, "t"))
-    p.call("SB.memberindex").a(("ALUI", "add", "an_i", "an_i", 1)).goto("SB.anonloop")
-    P("SB.anonend").a(("LDI", "marr", 0)).branch({2: "SB.um"}, "SB.al", [("CMP", "soff", "umax")])
-    # One append operation for named and lifted members. The existing index
-    # representation has 64 entries per structure; reject before aliasing.
-    P("SB.memberindex").a(("LDX", "t", "sid", SMN)).branch({0: "SB.memberput"}, bad("structure member capacity"), [("CMPI", "t", 64)])
-    P("SB.memberput").a(("ALUI", "mul", "u", "sid", 64), ("ALU", "add", "u", "u", "t"), ("STX", "u", SMEM, "k"), ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t")).ret()
-    p = P("SB.nm")
-    p.a(("LDI", "marr", 0), ("COPYW", "mnm_s", "ps"), ("COPYW", "mnm_e", "pe"), ("COPYW", "mtd", "td")).call("NEXT").tok({"[": "SB.arr"}, "SB.nm1")
-    p = P("SB.arr")         # NAME [N]: N elements; more dimensions are not covered
-    p.call("NEXT").tok({TK_NUM: "SB.arn", "]": "SB.flex"}, bad("struct member array bound"))
-    P("SB.flex").branch({1: "SB.flexmember"}, bad("flexible array in union"), [("CMPI", "sun", 0)])
-    P("SB.flexmember").branch({2: "SB.flexlast"}, bad("flexible array without prior member"), [("LDX", "t", "sid", SMN), ("CMPI", "t", 0)])
-    P("SB.flexlast").a(("LDI", "marr", -1)).call("NEXT").expect(";").goto("SB.nm1")
-    P("SB.arn").a(("COPYW", "marr", "nv")).call("NEXT").expect("]").call("NEXT").tok({";": "SB.nm1", ",": "SB.nm1"}, bad("struct member"))
-    p = P("SB.nm1")         # back to the name for the layout (the current token is ';')
-    p.a(("COPYW", "ps", "mnm_s"), ("COPYW", "pe", "mnm_e"), ("COPYW", "td", "mtd")).branch({1: "SB.v"}, "SB.p", [("CMPI", "td", 0)])
-    P("SB.p").a(("LDI", "msz", 8)).goto("SB.put")
-    P("SB.v").branch({(1, 2): "SB.st"}, "SB.v1", [("CMPI", "tb", SBB)])
-    # a member of struct type: its size SSZ, aligned to its own alignment SAL (its widest member)
-    p = P("SB.st")
-    p.a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "msz", "t", SSZ), ("LDX", "mal", "t", SAL)).branch({1: "DEAD.sm"}, "SB.put2", [("CMPI", "msz", 0)])
-    P("SB.v1").branch({1: "DEAD.void"}, "SB.v2", [("CMPI", "tb", 0)])
-    P("SB.v2").call("ELSZ").a(("COPYW", "msz", "es")).goto("SB.put")
-    g.on("DEAD.sm", range(257), "DEAD", E.rej("not covered: a struct member of struct type"), "r")
-    P("SB.put").a(("COPYW", "mal", "msz")).goto("SB.put2")      # a scalar: aligned to its size
-    # SB.put2 with marr > 0: the element's size times marr, the element's alignment (see SB.am)
-    p = P("SB.put2")
-    p.branch({0: "SB.flexsize", 1: "SB.put3"}, "SB.am", [("CMPI", "marr", 0)])
-    P("SB.flexsize").a(("LDI", "msz", 0)).goto("SB.put3")
-    P("SB.am").a(("ALU", "mul", "msz", "msz", "marr")).goto("SB.put3")
-    p = P("SB.put3")
-    p.branch({1: "SB.put0"}, "SB.put4", [("CMPI", "sun", 1)])
-    P("SB.put0").a(("LDI", "soff", 0)).goto("SB.put4")         # a union member: at 0
-    p = P("SB.put4")
-    p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
-        ("A64I", "mul", "k", "v", MEMBER_STRIDE), ("A64", "add", "k", "k", "sid"),
-        ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("STX", "k", MAR, "marr"),
-        ("ALU", "add", "soff", "soff", "msz")).call("SB.memberindex")
-    p.call("TYPECOUNT").branch({1:"SB.flat"}, "SB.flatarr", [("CMPI","marr",0)])
-    P("SB.flatarr").branch({0:"SB.flatskip"},"SB.flatmul",[("CMPI","marr",0)])
-    P("SB.flatmul").a(("ALU","mul","flat","flat","marr")).goto("SB.flat")
-    P("SB.flat").branch({1:"SB.flatunion"},"SB.flatput",[("CMPI","sun",1)])
-    P("SB.flatunion").branch({2:"SB.flatskip"},"SB.flatput",[("LDX","t","sid",SMN),("CMPI","t",1)])
-    P("SB.flatskip").a(("LDI","flat",0)).goto("SB.flatput")
-    P("SB.flatput").a(("STX","k",MFLAT,"flat"),("LDX","t","sid",SFLAT),("ALU","add","t","t","flat"),("STX","sid",SFLAT,"t")).branch({2: "SB.um"}, "SB.al", [("CMP", "soff", "umax")])
-    P("SB.um").a(("COPYW", "umax", "soff")).goto("SB.al")      # the extent so far (a union's size)
-    p = P("SB.al")
-    p.branch({2: "SB.mx"}, "SB.nx", [("CMP", "mal", "smal")])
-    P("SB.mx").a(("COPYW", "smal", "mal")).goto("SB.nx")
-    P("SB.more").call("DSTARS").tok({TK_ID: "SB.nm"}, bad("struct member"))
-    P("SB.nx").branch({0:"SB.flexend"},"SB.nextdecl",[("CMPI","marr",0)])
-    P("SB.flexend").expect(";").call("NEXT").expect("}").goto("SB.end")
-    P("SB.nextdecl").tok({";": "SB.semi", ",": "SB.more"}, bad("struct member"))     # (the name's next token was read in SB.nm)
-    P("SB.semi").call("NEXT").goto("SB.m")
-    p = P("SB.end")
-    p.a(("COPYW", "soff", "umax"),                              # a struct's extent is its last member's end
-        ("ALU", "add", "t", "soff", "smal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "smal"), ("ALU", "and", "t", "t", "m"),
-        ("STX", "sid", SSZ, "t"), ("STX", "sid", SAL, "smal"), ("COPYW", "nsid", "sid")).vpop("td", "tb").ret()
+    structured_control("structure", False)
     P("TS.id").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN)).branch({1: "TS.td"}, bad("type"), [("CMPI", "u", 1)])
     P("TS.td").a(("LDX", "tb", "t", E.TDB), ("LDX", "td", "t", E.TDD)).call("NEXT").goto("TS.b")
     for w, n in TYPEW.items():   # (unsigned is read by its own states below)
@@ -655,6 +561,11 @@ def structured_control(section, warnings):
     bindings = dict(VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
                     UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
                     statement="STMT.body" if warnings else "STMT")
+    bindings.update((name, globals()[name]) for name in
+                    ("STAG", "TAGLEVEL", "TAGUNDO", "ETAG", "SBB", "SSZ", "SAL", "SMN", "SMEM", "SFLAT",
+                     "MOF", "MSZ", "MPT", "MBS", "MAR", "MFLAT", "MEMBER_STRIDE"))
+    bindings.update(STRUCT_LIMIT=STRUCT_MAX + 1, MEMBER_MASK=-MEMBER_STRIDE,
+                    TAGUNDO1=TAGUNDO + 1, TAGUNDO2=TAGUNDO + 2, TAGUNDO3=TAGUNDO + 3)
     for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
         if part == section:
             p.cur = prefix
