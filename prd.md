@@ -3911,3 +3911,29 @@ the old script falsely passed 57/57 with rc 0, the corrected script reports
 container remains 39/57 with the same 18 refusals and rc 1. The baseline was
 not lowered and no known-failure waiver was added. Next: finish the remaining
 preprocessor gaps in that list, then front-end type/declarator/expression gaps.
+
+
+### Next E2 compatibility slice
+
+Migrate the reference's comma-before-final-variadic-argument rule into the
+existing macro rewrite delta. Empty raw arguments remove the comma; nonempty
+arguments retain it without token pasting. This is GNU-compatible reference
+behaviour, not a claim about mandatory C99 semantics. No executor action or
+product-source change. Pin both empty and nonempty cases before proceeding
+to the remaining _Pragma and front-end gaps.
+
+Comma/variadic slice verified: 25 probes in both ordinary and located formats
+(50 full outputs), on host C and both macOS assembly executors. All match the
+reference and Python simulator; 24 cases additionally match host preprocessing
+tokens. Explicitly empty final arguments have a separate hand token expectation
+because host compilers may retain their comma. Network/table enumeration passes.
+No executor primitive added; gen.py grows 1,307 -> 1,322 lines.
+
+Actual development candidate is 5,770,202 B, SHA-256
+985d90cc87bc837305bc99059d5a5ce0c01b0d89f7a78b6254cce286f650d038;
+package 5,586,890 B. C99 is 40/57, 0 wrong, 17 refused (suite correctly exits
+1); ccparity remains 53 ok, 0 wrong, 1 existing known difference. The empty
+variadics probe is now supported. Logs: /tmp/unisacc-comma-{check,arm,x86,
+build,c99,ccparity}.log. Every run bounded at 60 s. This is targeted validation,
+not a release gate or default-product switch. _Pragma and the other 16 refusals
+remain work; no baseline reduction, push or release.

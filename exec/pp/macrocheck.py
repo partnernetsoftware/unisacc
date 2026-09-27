@@ -54,7 +54,18 @@ cases={'zero': '#define F() 7\nF F() F( )\n',
 examples=re.findall(r'ecase "(-E C99 6\.10\.3\.5 ex[347])" \'(.*?)\'',(R/'tests/ccparity.sh').read_text(),re.S)
 assert [n.rsplit(' ',1)[-1] for n,_ in examples]==['ex3','ex4','ex7']
 cases.update((n.rsplit(' ',1)[-1],s+'\n') for n,s in examples)
-assert len(cases)==20
+cases.update({
+ 'comma_empty': '#define P(x,...) f(x, ##__VA_ARGS__)\nP(1) P(1,2) P(1,2,3)\n',
+ 'comma_nested': '#define P(x,...) f(x, ##__VA_ARGS__)\n#define V(...) P(__VA_ARGS__)\nV(1) V(1,2,3)\n',
+ 'comma_raw': '#define E\n#define V(...) a, ##__VA_ARGS__\nV(E)\n',
+ 'comma_space': '#define P(x,...) f(x , ## __VA_ARGS__)\nP(1) P(1, 2)\n',
+})
+# The reference also elides an explicitly supplied empty final argument;
+# host compilers may distinguish it from an omitted argument. Pin this
+# reference contract with an independent token expectation instead.
+reference_tokens={'comma_explicit': ['f','(','1',')','f','(','1',')']}
+cases['comma_explicit']='#define P(x,...) f(x, ##__VA_ARGS__)\nP(1,) P(1, )\n'
+assert len(cases)==25
 with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
  t=pathlib.Path(td)
  call(['sh','-c','R=$1; . "$R/tests/lib.sh"; ua_ready','macrocheck',R])
@@ -69,11 +80,15 @@ with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
   d=json.loads((t/(q+'.json')).read_text());loaded=sim.load(d)
   for name,source in cases.items():
    f=t/(name+'.c');f.write_text(source)
-   want=call([ref,'-E',f]);host=call(['cc','-E','-P',f])
-   assert tokens(want)==tokens(host),(name,'reference/host tokens',want,host)
+   want=call([ref,'-E',f])
+   if name in reference_tokens:
+    assert tokens(want)==reference_tokens[name],(name,'reference contract',want)
+   else:
+    host=call(['cc','-E','-P',f])
+    assert tokens(want)==tokens(host),(name,'reference/host tokens',want,host)
    got=call([t/'run',t/(q+'.net'),f,f,R/'include'])
    assert (text_of(got) if located else got)==want,(name,q,got,want)
    verdict,value,_=sim.run(d,f.read_bytes(),str(f),sim.Files(),maxsteps=2000000,loaded=loaded)
    assert verdict=='accept' and value==got,(name,q,verdict,value)
-  print(q,len(cases),'full outputs; host tokens, Python simulator, constructed network agree',flush=True)
- print('macro checks: 40 full results, both preprocessing formats')
+  print(q,len(cases),'full outputs; 24 host-token cases, 1 explicit reference contract; simulator/network agree',flush=True)
+ print('macro checks: 50 full results, both preprocessing formats')

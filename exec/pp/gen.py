@@ -458,8 +458,8 @@ def build_xe(g, NC):
 # Covered paste operands: identifier/digit boundaries, empty arguments and
 # object-like # ## #. General punctuator/literal pastes remain not covered
 # (the reference re-tokenises concatenated spellings).
-# Vars: GLUE (a `##` is pending), PSP (a space is owed), LASTK (the last
-# operand's final byte: 1 identifier/digit, 2 placemarker, 3 hash, 0 other).
+# Vars: GLUE (1 ordinary paste, 2 comma/variadic special case), PSP (space
+# owed), LASTK (1 identifier/digit, 2 placemarker, 3 hash, 4 comma, 0 other).
 def build_hx(g, NC):
     OTH = set(range(256)) - ID - WS - {10, 34, 39, 35}
     # define-time scan
@@ -485,11 +485,13 @@ def build_hx(g, NC):
         g.r("HPG" + c, {1: ("HPG1" + c, []), 0: ("HPS" + c, [("RLD", "PSP")])})
         g.on("HPG1" + c, ID, "HCP" + c, [("LDI", "GLUE", 0), ("LDI", "PSP", 0)])
         g.els("HPG1" + c, "DEAD", NC("## operand"))
+        g.r("HPG" + c, {2: ("DEAD", NC("comma paste requires final variadic parameter"))})
         g.r("HPS" + c, {(1, 3): ("HCP" + c, [("SBOUT", 32), ("LDI", "PSP", 0)]),
                         2: ("HCP" + c, [("SBOUT", 2), ("LDI", "PSP", 0)]), 0: ("HCP" + c, [])})
         # copy: an identifier/digit byte, a literal, or one other byte
         g.on("HCP" + c, ID, back, one + [("LDI", "LASTK", 1)])
-        g.on("HCP" + c, OTH, back, one + [("LDI", "LASTK", 0)])
+        g.on("HCP" + c, [44], back, [("SBSAVE", "HCOMMA")] + one + [("LDI", "LASTK", 4)])
+        g.on("HCP" + c, OTH - {44}, back, one + [("LDI", "LASTK", 0)])
         g.on("HCP" + c, [35], back, one + [("LDI", "LASTK", 3)])
         for q in (34, 39):
             L = "HL%d%s" % (q, c)
@@ -528,13 +530,25 @@ def build_hx(g, NC):
     getarg = [("ALU", "add", "hpa", "CR", "hk"), ("LDX", "hab", "hpa", C_RAW)]
     # not a parameter: the spelling (an identifier is a valid paste operand)
     plook("I", ("HAP", getarg + [("RLD", "GLUE")]), ("HNP", [("RLD", "GLUE")]))
-    g.r("HNP", {1: ("HW", [("LDI", "GLUE", 0), ("LDI", "PSP", 0), ("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)]),
+    g.r("HNP", {2: ("DEAD", NC("comma paste requires final variadic parameter")), 1: ("HW", [("LDI", "GLUE", 0), ("LDI", "PSP", 0), ("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)]),
                 0: ("HNP2", [("RLD", "PSP")])})
     g.r("HNP2", {(1, 3): ("HW", [("SBOUT", 32), ("LDI", "PSP", 0), ("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)]),
                  2: ("HW", [("SBOUT", 2), ("LDI", "PSP", 0), ("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)]),
                  0: ("HW", [("SBSPAN", "hs", "he"), ("LDI", "LASTK", 1)])})
     # a parameter: its argument, padded unless pasted
     g.r("HAP", {1: ("HA0", [("LDI","HRAW",1),("INPUSH", "hab")]), 0: ("HAQ", [("MARK", "hq")])})
+    # GNU comma elision is special only for the final variadic parameter.
+    # Save the builder before each comma; an empty raw argument restores it.
+    g.r("HAP", {2: ("HV", [("LDX","hv","me",F_VAR),("RLD","hv")])})
+    g.r("HV", {1: ("HVK", [("ALUI","sub","hv","hnp",1),("CMP","hk","hv")])})
+    g.r("HV", {0: ("DEAD", NC("comma paste requires variadic macro"))})
+    g.r("HVK", {1: ("HVE", [("INPUSH","hab"),("MARK","hvstart")]),
+                  (0,2): ("DEAD", NC("comma paste requires final variadic parameter"))})
+    g.on("HVE", WS | {10,2}, "HVE", [("ADV",)])
+    g.on("HVE", [EOF], "HW", [("INPOP",),("SBCLR",),("SBBLOB","HCOMMA"),
+                               ("LDI","GLUE",0),("LDI","PSP",2),("LDI","LASTK",2)])
+    g.els("HVE", "HA0", [("JUMP","hvstart"),("LDI","GLUE",0),("LDI","PSP",0),("LDI","HRAW",1)])
+
     # not pasted on the left: pasted on the right (`p ##`) takes it raw, else expanded
     raw = ("HA0", [("LDI","HRAW",2),("JUMP", "hq"), ("ALUI", "or", "PSP", "PSP", 2), ("LDI", "LASTK", 2), ("INPUSH", "hab")])
     expd = ("HA0", [("LDI","HRAW",0),("JUMP", "hq"), ("LDX", "hab", "hpa", C_EXP), ("ALUI", "or", "PSP", "PSP", 2),
@@ -566,7 +580,8 @@ def build_hx(g, NC):
     g.els("HA1", "HPGA", [("RLD", "GLUE")])
     # `#`: `##` or stringize
     g.on("HH", [35], "HPP", [("ADV",), ("RLD", "LASTK")])
-    g.r("HPP", {(1, 2, 3): ("HW", [("LDI", "GLUE", 1), ("LDI", "PSP", 0)]),
+    g.r("HPP", {4: ("HW", [("LDI", "GLUE", 2), ("LDI", "PSP", 0)]),
+                (1, 2, 3): ("HW", [("LDI", "GLUE", 1), ("LDI", "PSP", 0)]),
                 0: ("DEAD", NC("## operand"))})
     g.els("HH", "HH1", [("RLD", "hfn")])
     g.r("HH1", {1: ("HH2", [("RLD", "GLUE")]), 0: ("HOBJGLUE", [("RLD","GLUE")]),
