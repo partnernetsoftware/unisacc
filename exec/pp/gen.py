@@ -238,12 +238,16 @@ def sbconst(s):
 # poison bit; && || ?: drop the poison of the operand they do not evaluate.
 XOB, XVB, XPB, XPRB = 64 * 10 ** 6, 65 * 10 ** 6, 66 * 10 ** 6, 67 * 10 ** 6
 # code: (spelling, prec, arity)
-XOPS = {1: ("(", 0, 0), 2: ("?", 1, 0), 3: ("tern", 2, 3),
-        4: ("||", 3, 2), 5: ("&&", 4, 2), 6: ("|", 5, 2), 7: ("^", 6, 2), 8: ("&", 7, 2),
-        9: ("==", 8, 2), 10: ("!=", 8, 2), 11: ("<", 9, 2), 12: ("<=", 9, 2), 13: (">", 9, 2),
-        14: (">=", 9, 2), 15: ("<<", 10, 2), 16: (">>", 10, 2), 17: ("+", 11, 2), 18: ("-", 11, 2),
-        19: ("*", 12, 2), 20: ("/", 12, 2), 21: ("%", 12, 2),
-        22: ("u!", 13, 1), 23: ("u~", 13, 1), 24: ("u-", 13, 1), 25: ("u+", 13, 1)}
+XOPS = {}
+for line in (Path(HERE) / "operators.tsv").read_text().splitlines():
+    if not line or line.startswith("#"):
+        continue
+    code, spelling, precedence, arity = line.split("\t")
+    code, precedence, arity = int(code), int(precedence), int(arity)
+    assert code not in XOPS and 0 < code < 257 and precedence >= 0 and arity in (0, 1, 2, 3)
+    assert spelling and spelling not in {v[0] for v in XOPS.values()}
+    XOPS[code] = spelling, precedence, arity
+assert XOPS, "empty expression operator declarations"
 XCODE = {v[0]: k for k, v in XOPS.items()}
 
 
@@ -390,51 +394,7 @@ def build_xe(g, NC):
     popwhile("XEND", 2, "XEND2", [("CMPI", "XOS", 1)])
     g.r("XEND2", {1: ("RET", xpopv("XV", "XP")), (0, 2): nc})
 
-    # XRED: pop one operator and apply it
-    g.els("XRED", "XRD", [("ALUI", "sub", "XOS", "XOS", 1), ("ALUI", "add", "xa", "XOS", XOB),
-                          ("LDX", "xc", "xa", 0), ("RLD", "xc")])
-    cases = {}
-    or_p = [("ALU", "or", "xrp", "xap", "xbp")]
-    ab = xpopv("xb", "xbp") + xpopv("xa_", "xap")
-    arith = {"*": "mul", "+": "add", "-": "sub", "&": "and", "|": "or", "^": "xor",
-             "<<": "shl", ">>": "sar"}
-    for c, (sp, p, ar) in XOPS.items():
-        if sp in arith:
-            cases[c] = ("RET", ab + [("A64", arith[sp], "xr", "xa_", "xb")] + or_p + XPUSHV)
-        elif sp in ("/", "%"):
-            cases[c] = ("XDV", ab + or_p + [("A64", "sdiv" if sp == "/" else "srem", "xr", "xa_", "xb")])
-        elif sp in ("==", "!=", "<", "<=", ">", ">="):
-            cases[c] = ("XCMP%d" % c, ab + or_p + [("C64", "xa_", "xb")])
-            tv = {"==": (0, 1, 0), "!=": (1, 0, 1), "<": (1, 0, 0), "<=": (1, 1, 0),
-                  ">": (0, 0, 1), ">=": (0, 1, 1)}[sp]
-            g.r("XCMP%d" % c, {k: ("RET", [("LDI", "xr", tv[k])] + XPUSHV) for k in (0, 1, 2)})
-        elif sp in ("&&", "||"):
-            cases[c] = ("XL%d" % c, ab + [("C64", "xa_", "xz")])
-            short = 0 if sp == "&&" else 1
-            dec = (1,) if sp == "&&" else (0, 2)      # the left operand decides
-            rest = tuple(k for k in (0, 1, 2) if k not in dec)
-            g.r("XL%d" % c, {dec: ("RET", [("LDI", "xr", short), ("COPYW", "xrp", "xap")] + XPUSHV),
-                             rest: ("XLB", or_p + [("C64", "xb", "xz")])})
-        elif sp == "tern":
-            cases[c] = ("XT", xpopv("xb", "xbp") + xpopv("xa_", "xap") + xpopv("xk", "xkp") +
-                        [("C64", "xk", "xz")])
-        elif sp == "u!":
-            cases[c] = ("XLB", xpopv("xb", "xrp") + [("C64", "xb", "xz")])
-        elif sp == "u~":
-            cases[c] = ("RET", xpopv("xb", "xrp") + [("A64", "not", "xr", "xb", "xz")] + XPUSHV)
-        elif sp == "u-":
-            cases[c] = ("RET", xpopv("xb", "xrp") + [("A64", "sub", "xr", "xz", "xb")] + XPUSHV)
-        elif sp == "u+":
-            cases[c] = ("RET", xpopv("xr", "xrp") + XPUSHV)
-    g.r("XRD", cases)
-    g.r("XDV", {0: ("RET", XPUSHV), 1: ("RET", [("LDI", "xrp", 1)] + XPUSHV)})
-    # XLB: xr := (compared value != 0); `!` then inverts
-    g.r("XLB", {1: ("XLBX", [("LDI", "xr", 0), ("RLD", "xc")]),
-                (0, 2): ("XLBX", [("LDI", "xr", 1), ("RLD", "xc")])})
-    g.r("XLBX", {XCODE["u!"]: ("RET", [("LDI", "xt", 1), ("ALU", "sub", "xr", "xt", "xr")] + XPUSHV),
-                 (XCODE["&&"], XCODE["||"]): ("RET", XPUSHV)})
-    g.r("XT", {1: ("RET", [("COPYW", "xr", "xb"), ("ALU", "or", "xrp", "xkp", "xbp")] + XPUSHV),
-               (0, 2): ("RET", [("COPYW", "xr", "xa_"), ("ALU", "or", "xrp", "xkp", "xap")] + XPUSHV)})
+    install_rules(g, "reduce", {"XOB": XOB, "XVB": XVB, "XPB": XPB})
 
 
 # ---- # and ## (research/e2-pp-delta.md s12) -------------------------------

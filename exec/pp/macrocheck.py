@@ -89,6 +89,16 @@ pragma_cases={
 for name,(source,want) in pragma_cases.items():
  cases[name]=source;reference_tokens[name]=want
 assert len(cases)==43
+# Independent expected truth values, exercising every integer reduction family.
+expressions = ['2+3*4==14', '17/5==3 && 17%5==2', '(1<<5)==32 && (32>>3)==4',
+ '(6&3)==2 && (4|1)==5 && (7^3)==4', '1<2 && 2<=2 && 3>2 && 3>=3 && 1!=2',
+ '!0 && !(!1) && (~0)==-1 && -3+ +4==1', '0 && (1/0)', '1 || (1/0)',
+ '(1 ? 7 : 1/0)==7', '(0 ? 1/0 : 9)==9', '(1 ? 0 : 1) ? 0 : 1']
+truth = [True, True, True, True, True, True, False, True, True, True, True]
+cases['integer_reductions'] = ''.join(
+ '#if '+expr+'\nYES'+str(i)+'\n#else\nNO'+str(i)+'\n#endif\n'
+ for i,expr in enumerate(expressions))
+integer_want = [('YES' if yes else 'NO')+str(i) for i,yes in enumerate(truth)]
 
 with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
  t=pathlib.Path(td)
@@ -105,6 +115,7 @@ with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
   for name,source in cases.items():
    f=t/(name+'.c');f.write_text(source)
    want=call([ref,'-E',f])
+   if name=='integer_reductions': assert tokens(want)==integer_want,(name,want)
    if name in reference_tokens:
     assert tokens(want)==reference_tokens[name],(name,'reference contract',want)
    else:
@@ -121,5 +132,5 @@ with tempfile.TemporaryDirectory(prefix='pp-macros-') as td:
    assert result.returncode!=0 and b'not covered: unterminated _Pragma' in result.stderr,(name,q,result)
    verdict,value,_=sim.run(d,f.read_bytes(),str(f),sim.Files(),maxsteps=2000000,loaded=loaded)
    assert verdict!='accept' and 'unterminated _Pragma' in str(value),(name,q,verdict,value)
-  print(q,len(cases),'full outputs; 24 host-token cases, 19 explicit reference contracts; 2 named refusals; simulator/network agree',flush=True)
- print('macro checks: 86 full results and 4 refusals, both preprocessing formats')
+  print(q,len(cases),'full outputs;',len(cases)-len(reference_tokens),'host-token cases;',len(reference_tokens),'explicit reference contracts; 2 named refusals; simulator/network agree',flush=True)
+ print('macro checks:',2*len(cases),'full results and 4 refusals, both preprocessing formats')
