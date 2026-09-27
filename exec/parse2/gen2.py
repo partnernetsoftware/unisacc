@@ -147,22 +147,30 @@ def optail(o):
     per operator, shared by both ladders -- double, pointer scaling, unsigned, int forms"""
     bn = "OPX." + o
     q = P(bn)
-    q.call("NOFLT")
-    q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("ISDV").a(("COPYW", "ldv", "u"),
-        ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("ISDV").a(("ALU", "or", "t", "u", "ldv"))
-    q.branch({1: bn + ".f"}, bn + ".nf", [("CMPI", "t", 1)])
-    f = P(bn + ".f")
+    # The existing type axis identifies floating VALUES, not pointers to them.
+    q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("TAX").a(("COPYW", "axl", "ax"),
+        ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("TAX")
+    floats = (AX.index("f32"), AX.index("f64"))
+    q.branch({floats: bn + ".f"}, bn + ".lf", [("RLD", "ax")])
+    P(bn + ".lf").branch({floats: bn + ".f"}, bn + ".nf", [("RLD", "axl")])
+    oi = [x for lv in LEVELS for x in OPS[lv] if x not in SHORT].index(o)
+    f = P(bn + ".f").a(("ALUI", "mul", "t", "axl", 16), ("ALU", "add", "t", "t", "ax"),
+        ("LDX", "ck", "t", CKT), ("ALUI", "add", "t", "t", oi * 256), ("LDX", "rs", "t", RST))
+    f.branch({1: "DEAD.dbl"}, bn + ".fc", [("CMPI", "rs", AX.index("illegal"))])
     if o in FOPS:
-        # right in r0: cvtid if an integer; push; the left from [r7+8] (cvtid if an integer); mov r1, r0; the right back; .frame -16
-        f.branch({1: bn + ".f1"}, bn + ".fc", [("CMPI", "u", 1)])
-        P(bn + ".fc").o("  cvtid r0, r0\n").goto(bn + ".f1")
-        f = P(bn + ".f1")
-        emit(f, "push").o("  load64 r0, [r7+8]\n").branch({1: bn + ".f2"}, bn + ".fl", [("CMPI", "ldv", 1)])
-        P(bn + ".fl").o("  cvtid r0, r0\n").goto(bn + ".f2")
-        cmpf = o in ("<", ">", "<=", ">=", "==", "!=")
-        P(bn + ".f2").o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n  %s\n" % FOPS[o]).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmpf else DBL)).ret()
+        P(bn + ".fc").branch({1: bn + ".d"}, bn + ".s", [("CMPI", "ck", AX.index("f64"))])
+        for suffix, base in (("d", DBL), ("s", FLT)):
+            f = P(bn + "." + suffix).call("TO." + suffix)
+            emit(f, "push").o("  load64 r0, [r7+8]\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("TO." + suffix)
+            f.o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n")
+            name = FOPS[o]
+            opcode = FPU[suffix + name]
+            reverse = opcode.endswith("_rev")
+            f.o("  %s r0, %s\n" % (opcode.removesuffix("_rev"), "r0, r1" if reverse else "r1, r0"))
+            if o == "!=": f.o("  imm r1, 1\n  xor64 r0, r0, r1\n")
+            f.a(("LDI", "vt", 0), ("LDI", "vb", 4 if o in ("<", ">", "<=", ">=", "==", "!=") else base)).ret()
     else:
-        f.goto("DEAD.dbl")
+        P(bn + ".fc").goto("DEAD.dbl")
     q = P(bn + ".nf")
     if o in ("+", "-"):
         q.branch({1: bn + ".i"}, bn + ".pr", [("CMPI", "vt", 0)])
@@ -464,11 +472,9 @@ GSZ, SMN, SMEM = 39 * 10 ** 6, 40 * 10 ** 6, 41 * 10 ** 6   # a global's size; a
 ENV, END_ = 35 * 10 ** 6, 36 * 10 ** 6   # an enum constant's value; END_[v] = 1 when v names one
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
-FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
-        "<": "flt64 r0, r1, r0", ">": "flt64 r0, r0, r1", "<=": "fle64 r0, r1, r0", ">=": "fle64 r0, r0, r1",
-        "==": "feq64 r0, r1, r0",
-        "!=": "feq64 r0, r1, r0\n  imm r1, 1\n  xor64 r0, r0, r1"}   # != is inverted equality, including unordered (NaN) inputs
-FLT = E.FLT   # f32 descriptor; loads/stores and sqrt builtins are covered, binary float arithmetic remains guarded
+FOPS = {"+":"add", "-":"sub", "*":"mul", "/":"div", "<":"lt", ">":"gt", "<=":"le", ">=":"ge", "==":"eq", "!=":"eq"}
+FPU = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
+FLT = E.FLT   # f32 value descriptor; pointer depth keeps pointee types distinct
 BOOL = 66  # distinct value kind; arithmetic maps to tyinfo u8
 assert BOOL not in (DBL, FLT, FPB) and BOOL < SBB
 TYPEW = {"type=_Bool": BOOL, "type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
@@ -1358,10 +1364,6 @@ def build(locations=False, warnings=False, errors=False):
     P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
     g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
     # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
-    P("NOFLT").branch({1: "NOFLT.1"}, "NOFLT.2", [("CMPI", "vb", FLT)])
-    P("NOFLT.1").branch({1: "DEAD.dbl"}, "NOFLT.2", [("CMPI", "vt", 0)])
-    P("NOFLT.2").branch({1: "NOFLT.3"}, "RET", [("CMPI", "lb", FLT)])
-    P("NOFLT.3").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "lt", 0)])
     P("TAX").branch({(1, 2): "TAX.p"}, "TAX.0", [("CMPI", "vt", 1)])
     P("TAX.p").a(("LDI", "ax", AX.index("ptr"))).ret()
     q = P("TAX.0")
