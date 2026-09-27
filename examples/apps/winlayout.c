@@ -133,8 +133,11 @@ int main(int argc, char **argv)
          * letting the realistic-looking sample pass as live data. */
         fprintf(stderr, "winlayout: no input given -- showing a built-in "
                         "SAMPLE, not real data. Try:\n"
-                        "  wmctrl -lG | awk '{print $3,$4,$5,$6,$7}' | "
-                        "unisacc -run winlayout.c -\n");
+                        "  macOS: cc -o /tmp/wingeom tools/wingeom.c "
+                        "-framework CoreGraphics && /tmp/wingeom | "
+                        "unisacc -run winlayout.c -\n"
+                        "  X11:   wmctrl -lG | awk '{print $3,$4,$5,$6,$7}' "
+                        "| unisacc -run winlayout.c -\n");
         for (i = 0; sample[i]; i++) {
             strcpy(buf, sample[i]);
             add_line(buf);

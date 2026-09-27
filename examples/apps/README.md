@@ -13,8 +13,8 @@ suites' inputs.
 | `bf.c` | a Brainfuck interpreter: `switch`, a bracket jump table, `unsigned char` wraparound |
 | `dijkstra.c` | a binary-heap priority queue, an adjacency list in arrays, recursive path printing |
 | `procview.c` | a process-tree analyser: on Linux, with no argument, real data straight from `/proc/N/status` for every `N` (no subprocess -- this compiler's syscall catalog has no directory listing or `fork`/`exec`, so it scans instead of reading the directory); elsewhere, or off `ps -axo pid=,ppid=,rss=,comm=`. Parent lookup, subtree sums by walking ancestors with a depth cap (so parent cycles cannot loop), `qsort` on index arrays with three comparators, orphan / self-parent / cycle detection |
-| `winlayout.c` | window-stack analysis: exact visible area per window by coordinate compression and a topmost-owner grid, off-screen clipping, overlap pairs, the largest empty rectangle, a text minimap |
-| `memmap.c` | address-space analysis of a Linux `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit |
+| `winlayout.c` | window-stack analysis: exact visible area per window by coordinate compression and a topmost-owner grid, off-screen clipping, overlap pairs, the largest empty rectangle, a text minimap. No automatic real data: window-server access (X11/Wayland/Win32/CoreGraphics) needs bindings this compiler doesn't have; `tools/wingeom.c` is a small **system-cc** helper (macOS, CoreGraphics) that supplies real geometry over a pipe -- proof that real data plus this analysis works end to end, and the reference `winlayout.c` itself should eventually match if unisacc gains that access |
+| `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Real input via an explicit file/pipe is fully checked against host `cc`; it does **not** auto-read its own `/proc/self/maps` on Linux -- that is real data, but it is a property of the specific binary asking (a `cc` build and a `unisacc` build of the same source have different segments -- verified in a VM), so it needs a different test instrument (structural self-checks, not a `cc` byte-diff) that does not exist yet; see prd.md §5.9 |
 | `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; with no argument it builds one sample of each format in memory |
 
 Each program runs with no input and has deterministic output. The four system
@@ -23,16 +23,30 @@ machine:
 
 ```
 ps -axo pid=,ppid=,rss=,comm= | unisacc -run examples/apps/procview.c -
-cat /proc/self/maps           | unisacc -run examples/apps/memmap.c -
+cat /proc/PID/maps            | unisacc -run examples/apps/memmap.c -
 unisacc -run examples/apps/winlayout.c layout.txt     # "screen W H", then "X Y W H title", bottom to top
 unisacc -run examples/apps/exeinfo.c unisacc.com /bin/ls
+
+# real window geometry on macOS, no argument-writing by hand:
+cc -o /tmp/wingeom examples/apps/tools/wingeom.c -framework CoreGraphics
+/tmp/wingeom | unisacc -run examples/apps/winlayout.c -
 ```
+
+Running any of these four with **no** input at all prints a plain warning
+to stderr and falls back to a built-in sample -- the samples use realistic
+names (`Safari`, `libc.so.6`, `Slack`) on purpose, as a stress case for the
+program's own logic, so they are never silently mistaken for live data.
+`exeinfo.c` is the one exception: dissecting formats is its whole point, so
+its sample output is always prefixed `== sample: ...`.
 
 `procview.c` was also run on a live 685-process table (piped `ps`, on macOS)
 and, after adding the `/proc` scan, on a live 171-process Linux VM with no
-argument at all (0.21 s wall, real kernel data, no `ps`); `exeinfo.c` was run
-on the compiler's own output (`unisacc.com`, and a Mach-O it had just
-written). Host `cc` and `unisacc.com -run` gave identical output each time.
+argument at all (0.21 s wall, real kernel data, no `ps`); `winlayout.c` was
+run on `tools/wingeom.c`'s real, live on-screen window geometry (a Terminal
+window's own tabs, stacked); `exeinfo.c` was run on the compiler's own
+output (`unisacc.com`, and a Mach-O it had just written). Host `cc` and
+`unisacc.com -run` gave identical output each time -- except `wingeom.c`
+itself, which links CoreGraphics and is never compiled by `unisacc`.
 The output was
 checked byte for byte against the host `cc` build, using
 `unisacc.com -run FILE` and `unisacc.com -O2 FILE -o OUT`:
