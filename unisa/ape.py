@@ -106,6 +106,10 @@ def build(compile_target, out, payload=b""):
     # pass 1: plausible numbers, padded to a fixed length
     guess = [(name, 1 << 30, len(imgs[t]), "0" * 16) for (name, t) in SLICES]
     want = len(_script(guess, bool(payload))) + PAD
+    # The DOS magic occupies two bytes before _stub. Keep the PE signature
+    # aligned even when the embedded-container environment line changes the
+    # shell's length; Windows rejected the resulting offset 781 in that case.
+    want += -(2 + len(_stub(b"")) + want) % 8
     head = compile_target("win/x86_64",
                           stub=_stub(_pad(_script(guess, bool(payload)), want)))
     base = (len(head) + 15) // 16 * 16
@@ -118,6 +122,8 @@ def build(compile_target, out, payload=b""):
     stub = _stub(_pad(_script(table, bool(payload)), want))
     head2 = compile_target("win/x86_64", stub=stub)
     assert len(head2) == len(head), (len(head2), len(head))
+    peoff = struct.unpack_from("<I", head2, 0x3C)[0]
+    assert peoff % 8 == 0 and head2[peoff:peoff+4] == b"PE\0\0"
     blob = bytearray(head2.ljust(base, b"\x00"))
     for (_, t) in SLICES:
         img = imgs[t]

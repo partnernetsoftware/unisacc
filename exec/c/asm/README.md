@@ -312,3 +312,37 @@ blob itself remains a fixed, explicitly supplied artifact; the rebuilt driver
 does not assemble it. Both native macOS arm64 and Rosetta x86-64 pass. Windows
 and Linux execution of this binding, embedding it in the single package, and
 the final default product switch remain pending. These are not platform claims.
+# Carried kernel and compiler container
+
+`../buildcompiler.sh OUTPUT_DIR` constructs `unisacc-next.com` in that directory,
+without replacing the shipped product. It carries all six compiler routes,
+deduplicated networks, the headers and exactly one kernel blob per ISA. The
+runtime uses `\0kernel/arm64` or `\0kernel/x86_64` from its package before the
+standalone `UNISA_KERNEL` path. Borrowed package bytes are copied to the executable
+mapping before package cleanup; the package remains the owner of those bytes.
+`../asmcompiler.c` is the explicit assembly-bound driver entry. Offline model
+construction, assembly and APE packaging still use seed tools; running this
+container does not invoke them.
+
+`../containercheck.sh` checks the directory/spans for unique model storage and
+two exact kernel resources, removes the loose inputs, then tests all six output
+targets and actual arm64/x86-64 host execution. `bindingcheck.sh` now also checks
+N1=N2=N3 with the kernel carried in the model package and no UNISA_KERNEL.
+These are development artifacts, not a default-product switch or a claim of
+complete source-language/CLI parity.
+
+ARM bridge tag bit 1 identifies Windows' separate tape stack; bit 0 selects
+transition rather than execution. On POSIX, the kernel hardware stack moves
+below live tape frames. On Windows, hardware SP stays on the OS stack, and
+callbacks use the original x7 data stack. **x28 is reserved throughout the ARM
+kernel for this callback stack (zero in shared-stack mode)**; helpers must not
+use it for local values. This is needed because a WinAPI call can grow the real
+stack, whereas a POSIX syscall does not. Windows testing caught the initial
+shared-stack assumption and then a conflicting sequence counter in w28; the
+counter now lives in the run frame. x18 remains the Windows platform register.
+
+Opt-in actual Linux checks: `../containerlinux.sh BUILD_DIR` uses an already
+running Lima VM (`LIMA_VM`, default `default`); it requires the source tree
+readable there and never counts a missing VM as a pass. Windows uses the
+existing `winmemoryrun.py`, with `MEMORY_EMBEDDED=1` for a native slice plus
+package footer or the full .com, so no loose package/core is supplied.

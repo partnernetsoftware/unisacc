@@ -19,7 +19,9 @@
 .endm
 .globl CSYM(core_run)
 CSYM(core_run):
-    stp x29,x30,[sp,#-416]!
+    /* x28 is reserved by the product bridge for its separate tape stack.
+       Keep the sequence length in this frame across action/service calls. */
+    stp x29,x30,[sp,#-432]!
     mov x29,sp
     stp x19,x20,[sp,#16]
     stp x21,x22,[sp,#32]
@@ -131,10 +133,12 @@ Lrkey:
     ldr x26,[x20,#CM_QA]
     add x26,x26,x8,lsl #3
     ldr x8,[x20,#CM_QLEN]
-    ldr w28,[x8,x25,lsl #2]
+    ldr w8,[x8,x25,lsl #2]
+    str w8,[sp,#416]
     mov w27,#0
 Lractions:
-    cmp w27,w28
+    ldr w8,[sp,#416]
+    cmp w27,w8
     b.ge Lrloop
     mov x0,x19
     mov x1,x26
@@ -246,7 +250,7 @@ Lrreturn:
     ldp x23,x24,[sp,#48]
     ldp x21,x22,[sp,#32]
     ldp x19,x20,[sp,#16]
-    ldp x29,x30,[sp],#416
+    ldp x29,x30,[sp],#432
     ret
 Lroom:
 #ifdef __APPLE__

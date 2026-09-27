@@ -1,5 +1,7 @@
-/* unisacc tape ABI <-> internal AAPCS kernel. The hardware stack must move
-   below the live x7 tape stack before any conventional function is called. */
+/* unisacc tape ABI <-> internal AAPCS kernel. POSIX shares the process stack
+   with x7, so move below its live tape frames. Windows has a separate x7 data
+   stack: keep the real hardware stack for AAPCS and WinAPI calls. Tag bit 1
+   declares this separation, bit 0 selects transition rather than run. */
 #ifdef __APPLE__
 #define CSYM1(x) _##x
 #define CSYM(x) CSYM1(x)
@@ -11,18 +13,25 @@
 .globl CSYM(kernel_entry)
 CSYM(kernel_entry):
     mov x9,sp
+    ldr x11,[x0]
+    tbnz x11,#1,Lseparate
     and x10,x7,#-16
     mov sp,x10
+Lseparate:
     sub sp,sp,#48
     stp x9,x7,[sp]
     stp x6,x30,[sp,#16]
     stp x29,x28,[sp,#32]
+    mov x28,xzr
+    tbz x11,#1,Largs
+    mov x28,x7
+Largs:
     mov x10,x0
     ldr x11,[x10]
     ldp x0,x1,[x10,#8]
     ldp x2,x3,[x10,#24]
     ldp x4,x5,[x10,#40]
-    cbnz x11,Ltransition
+    tbnz x11,#0,Ltransition
     bl CSYM(core_run)
     b Lentrydone
 Ltransition:
@@ -59,7 +68,12 @@ Lservice:
     adrp x16,CSYM(kernel_service)@PAGE
     ldr x16,[x16,CSYM(kernel_service)@PAGEOFF]
     adr x17,Lreturned
+    cbnz x28,Ltapecallback
     sub x7,sp,#8
+    b Lcallback
+Ltapecallback:
+    sub x7,x28,#8
+Lcallback:
     str x17,[x7]
     br x16
 Lreturned:

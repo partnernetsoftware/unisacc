@@ -2,7 +2,7 @@
 """Bounded host execution of an APE with one generic network package.
 No compiler semantics in the fixture; packaging uses Python, execution does not.
 """
-import os, pathlib, subprocess, sys, tempfile
+import os, pathlib, struct, subprocess, sys, tempfile
 from net import convert
 from tbl import CODE
 from pack import build
@@ -23,6 +23,8 @@ with tempfile.TemporaryDirectory(prefix='embedded models ') as td:
         image=d/f'model {ch}.com'
         call([sys.executable,'-m','unisa','ape',ROOT/'exec/c/run.c','--via',os.environ.get('UA','/tmp/ua_ref'),'-O2','--payload',pkg,'-o',image],cwd=ROOT)
         body=image.read_bytes()
+        peoff=struct.unpack_from('<I',body,0x3C)[0]
+        assert peoff%8==0 and body[peoff:peoff+4]==b'PE\0\0'
         assert body[-16:-8]==b'UNIPKG1\n'
         assert int.from_bytes(body[-8:],'little')==len(payload)
         assert body[-16-len(payload):-16]==payload and body.count(payload)==1

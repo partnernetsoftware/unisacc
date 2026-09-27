@@ -9,6 +9,8 @@ case $ARCH in arm64|x86_64) ;; *) exit 2;; esac
 T=$(mktemp -d);trap 'rm -rf "$T"' EXIT
 b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
 b python3 exec/c/asm/blob.py "$ARCH" "$T/kernel.blob"
+mkdir "$T/kernels"
+for ISA in arm64 x86_64; do b python3 exec/c/asm/blob.py "$ISA" "$T/kernels/$ISA"; done
 export CORE_ASM_ARCH=$ARCH UNISA_KERNEL="$T/kernel.blob"
 export EXEC_CC="$R/exec/c/asm/blobcc.sh" TARGET="osx/$ARCH"
 b python3 exec/c/netcheck.py
@@ -16,11 +18,14 @@ b ./exec/pipeline/elf.sh "$T" examples/hello.c examples/fib.c tests/c/b_strderef
 b python3 exec/opt/gen.py "$T/o1.json" 1
 b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
-b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
+b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include --kernels "$T/kernels" -o "$T/compiler.pkg" "$T/route.tsv"
 b "$EXEC_CC" -O2 exec/c/compiler.c -o "$T/compiler"
 b python3 - "$T" "$TARGET" "$UA" <<'PY'
 import os,pathlib,subprocess,sys
 p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ua=sys.argv[3]
+# Compiler invocations must use the carried kernel, not the standalone test's
+# environment path. Standalone negative probes below supply explicit envs.
+os.environ.pop('UNISA_KERNEL',None)
 def run(args,**kw):return subprocess.run(list(map(str,args)),capture_output=True,timeout=60,**kw)
 def ok(args,**kw):
  r=run(args,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
@@ -53,7 +58,7 @@ for old,new in ((n1,n2),(n2,n3)):
  assert image==n1.read_bytes(), 'assembly-bound driver self-rebuild differs'
  new.write_bytes(image);new.chmod(0o755)
 assert ok([n3,'--models',p/'compiler.pkg','-run','examples/hello.c'])==b'hello from C99\n'
-print('product-ABI assembly driver: N1=N2=N3, rebuilt through networks, same explicit assembly blob')
+print('product-ABI assembly driver: N1=N2=N3, rebuilt through networks, kernel carried in package')
 # The runtime requires the explicit binding; it cannot silently run core.c.
 badenv=dict(os.environ);badenv.pop('UNISA_KERNEL',None)
 r=run([p/'run',p/'e1.net',p/'hello.e2'],env=badenv)

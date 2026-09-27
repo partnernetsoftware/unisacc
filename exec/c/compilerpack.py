@@ -4,11 +4,24 @@ Only construction: the runtime reads the resulting package without Python.
 """
 import argparse
 from pathlib import Path
-import tempfile
+import tempfile,struct
 import subprocess,sys
 from pack import build
 
-def compiler_package(manifests, o1, includes):
+def compiler_package(manifests, o1, includes, kernels=None):
+    mounts=[('006864722f',includes)]
+    if kernels is not None:
+        kernels=Path(kernels)
+        if not kernels.is_dir() or {p.name for p in kernels.iterdir()}!={'arm64','x86_64'}:
+            raise ValueError('kernel directory must contain arm64 and x86_64 only')
+        for isa,arch in enumerate(('arm64','x86_64'),1):
+            raw=(kernels/arch).read_bytes()
+            if len(raw)<40 or raw[:8]!=b'UNIKERN1': raise ValueError('invalid kernel header')
+            kind,entry,slot,length=struct.unpack_from('<4Q',raw,8)
+            if (kind!=isa or length!=len(raw)-40 or entry>=length or slot+8>length
+                    or slot%8 or any(raw[40+slot:48+slot])):
+                raise ValueError('invalid kernel ISA or extent')
+        mounts.append(('006b65726e656c2f',kernels))
     specs=[]
     for text in Path(__file__).with_name('compiler-routes.tsv').read_text().splitlines():
         if text and not text.startswith('#'): specs.append(text.split('\t'))
@@ -49,16 +62,17 @@ def compiler_package(manifests, o1, includes):
                     if cols[0]==target+'/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
-        return build([manifest],[('006864722f',includes)])
+        return build([manifest],mounts)
 
 if __name__=='__main__':
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument('-o',required=True,type=Path)
     ap.add_argument('--o1',required=True,type=Path)
     ap.add_argument('--include',required=True,type=Path)
+    ap.add_argument('--kernels',type=Path,help='explicit directory containing both ISA kernel blobs')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')

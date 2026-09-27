@@ -73,6 +73,7 @@ if [ "$(uname -s)" = Darwin ]; then
     job exec-asmx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asmcheck.sh
     job exec-bindarm env CORE_ASM_ARCH=arm64 ./exec/c/asm/bindingcheck.sh
     job exec-bindx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asm/bindingcheck.sh
+    job exec-container ./exec/c/containercheck.sh
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh

@@ -14,7 +14,11 @@ def tool(*args,data=None):
 def push(path,data):
  tool('file','push',vm,path,data=data);assert tool('file','pull',vm,path)==data,path
 (p/'native-memory-prefix.txt').write_text(prefix)
-push(prefix+'.exe',driver.read_bytes());push(prefix+'.pkg',(p/'compiler.pkg').read_bytes())
+embedded=os.environ.get('MEMORY_EMBEDDED','0')=='1'
+image=driver.read_bytes()
+if embedded: assert image[-16:-8]==b'UNIPKG1\n', 'embedded test requires a package footer'
+push(prefix+'.exe',image)
+if not embedded: push(prefix+'.pkg',(p/'compiler.pkg').read_bytes())
 cases=[('hello',pathlib.Path('examples/hello.c').read_bytes(),'',0,b'hello from C99\r\n'),
        ('pointer',pathlib.Path('tests/c/b_funcptr.c').read_bytes(),'',0,None),
        ('args',b'#include <stdio.h>\nint main(int n,char **v){printf("%d %s\\n",n,v[1]);return 7;}\n',' -- sample',7,b'2 sample\r\n')]
@@ -39,7 +43,8 @@ for name,source,args,code,want in cases:
  if name!='missing':push(path,source)
  for level in ([2] if group=='io' else [1] if name=='args' else [0,2]):
   stem=prefix+'-'+name+str(level);log=stem+'.out';err=stem+'.err';rc=stem+'.rc';script=stem+'.ps1'
-  command=f'{prefix}.exe --models {prefix}.pkg -O{level} -run {path}{args}'
+  package='' if embedded else f' --models {prefix}.pkg'
+  command=f'{prefix}.exe{package} -O{level} -run {path}{args}'
   ps=f"$p = New-Object System.Diagnostics.Process; $p.StartInfo.FileName = 'cmd.exe'; $p.StartInfo.Arguments = '/c {command} >{log} 2>{err}'; $p.StartInfo.UseShellExecute = $false; $p.Start() | Out-Null; if (-not $p.WaitForExit(15000)) {{ & taskkill.exe /PID $p.Id /T /F | Out-Null; 'TIMEOUT' | Set-Content '{rc}' }} else {{ $p.ExitCode | Set-Content '{rc}' }}"
   push(script,ps.encode());tool('exec',vm,'--cmd','cmd.exe','--','/c','powershell.exe -NoProfile -ExecutionPolicy Bypass -File '+script)
   deadline=time.monotonic()+20;gotrc='';last_error=None
@@ -55,5 +60,5 @@ for name,source,args,code,want in cases:
   assert gotrc==str(code) and out.replace(b'\r\n',b'\n')==want.replace(b'\r\n',b'\n') and err_ok,(target,name,level,gotrc,out,stderr)
   receipts.append(f'{target} {name} O{level}: output and exit {code} passed')
   print(receipts[-1],flush=True)
-print('driver sha256',hashlib.sha256(driver.read_bytes()).hexdigest(),flush=True)
+print('driver sha256',hashlib.sha256(image).hexdigest(),'embedded' if embedded else 'external model package',flush=True)
 (p/('native-memory-'+group+'-result.txt')).write_text('\n'.join(receipts)+'\n')

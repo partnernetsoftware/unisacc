@@ -3064,3 +3064,50 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - Binding suites are required macOS gate entries. Linux/Windows binding,
   single-package integration and default switching remain unfinished. Product
   source/.com unchanged, cc-unisacc paused, local commits only; no push/release.
+
+### Assembly core carried with the compiler models
+
+- Frozen 8c3ab88 full `JOBS=2 tests/gate.sh --com`: **84/84**, all exit 0,
+  467 s aggregate; each suite bounded at 60 s. Evidence:
+  `/tmp/unisacc-binding-full-gate.log`. This covers that commit, not later edits.
+- New development `exec/c/buildcompiler.sh OUTPUT_DIR` builds one container
+  using `asmcompiler.c`, six model routes, headers and both fixed ISA core
+  resources. Kernel lookup uses the package first; an external path is retained
+  only for standalone tests. No C core fallback. No product/CLI source parsing
+  was moved into the assembly bridge.
+- Local targeted checks: carried ARM binding N1=N2=N3; isolated container with
+  loose model/kernel files removed, all six hello images equal the reference,
+  native/memory execution on macOS arm64 and Rosetta x86-64. Package has 23
+  unique models, two cores and one container payload. Logs:
+  `/tmp/unisacc-carried-bindarm.log`, `/tmp/unisacc-carried-container.log`.
+- Actual Windows ARM execution caught the bridge's POSIX shared-stack assumption.
+  Windows now keeps AAPCS/WinAPI on the hardware stack and tape callbacks on x7;
+  x28 carries that callback stack and is reserved (the run loop's sequence count
+  moved into its frame). The first fix's register conflict failed macOS and was
+  corrected before acceptance. Full ARM helper/action/lifecycle checks and
+  carried binding N1=N2=N3 pass again. ARM blob now 7,704 B, x86 remains 7,664 B.
+- Windows then rejected the embedded .com before entry: PE offset 781 was
+  unaligned. APE construction now aligns the PE signature at an 8-byte boundary
+  (784 here), guarded in the constructor and embedded/container checks. The
+  actual full container subsequently passed five x86-64-emulated Windows runs
+  (hello/pointer at O0/O2 and argv at O1, including exit 7). ARM native passed
+  those five with a carried-core package, then file/malloc/missing-input runs
+  with one native image carrying its own package. This VM was stopped afterward.
+  Logs `/tmp/unisacc-carried-winarm3.log`, `-wincom2.log`, `-winarmio.log`.
+- Actual Lima Linux arm64: four programs at O0/O1/O2 in memory and as native
+  images, six-target cross-output comparison, driver N1=N2=N3; no external
+  kernel. `containerlinux.sh BUILD_DIR` preserves the opt-in reproduction.
+  Linux driver bare-image SHA-256:
+  `0eba58a2e360df6bd10a328351cd2e80910a0a931e41f4eda5f65c79abb155d0`.
+- Development container: **3,064,442 B**, SHA-256
+  `e31284381653f87e208ec963fc4459e1a3fd2724d08746e9b3fee2da370315d8`.
+  Package 2,892,922 B = 2,749,364 B network/action/string models + 103,636 B
+  carried headers + 15,368 B two kernel blobs + 24,554 B directory/framing.
+  Other executable/launcher/compressed-slice bytes 171,504; footer 16 B. These
+  are different byte categories, not an assertion that the whole compiler is
+  a few KB. Final isolated macOS checks pass in `-container-final.log`.
+- Still a development route: default switch, complete CLI/source parity,
+  final same-input speed comparison and remaining platform scope are not
+  complete. No Linux x86-64 or Windows x86-64 hardware claim from this batch.
+  The reference .com will be rebuilt for the APE fix without changing its
+  handwritten compiler path. No push/release; cc-unisacc remains paused.

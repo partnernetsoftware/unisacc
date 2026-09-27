@@ -28,9 +28,22 @@ static int kernel_field(unsigned char *p) {
     return n;
 }
 static void kernel_load(void) {
-    const char *path=getenv("UNISA_KERNEL");
-    if (!path || !*path) die("assembly kernel not specified");
-    int n; unsigned char *bytes=readfile(path,&n,0);
+    /* A packaged compiler needs neither an external kernel nor an environment
+       setting. The explicit path remains for standalone kernel tests. */
+#ifdef __aarch64__
+    const char *key="\0kernel/arm64";
+    int keyn=13;
+#else
+    const char *key="\0kernel/x86_64";
+    int keyn=14;
+#endif
+    int n; unsigned char *bytes=0;
+    int owner=core_host_fetch((const unsigned char *)key,keyn,&bytes,&n);
+    if (!owner) {
+        const char *path=getenv("UNISA_KERNEL");
+        if (!path || !*path) die("assembly kernel not specified");
+        bytes=readfile(path,&n,0);owner=2;
+    }
     if (n<40 || memcmp(bytes,"UNIKERN1",8)) die("bad kernel header");
     int isa=kernel_field(bytes+8),entry=kernel_field(bytes+16);
     int slot=kernel_field(bytes+24),length=kernel_field(bytes+32);
@@ -51,7 +64,7 @@ static void kernel_load(void) {
 #endif
 #endif
     if ((long)code<0 || !code || ((long)code&4095)) die("cannot map kernel memory");
-    memcpy(code,bytes+40,length); free(bytes);
+    memcpy(code,bytes+40,length); if (owner==2) free(bytes);
     *(long *)(code+slot)=(long)kernel_service;
 #ifdef _WIN32
     if (__mprotect((long)code,mapped,0x20)) die("cannot protect kernel memory");
@@ -62,6 +75,10 @@ static void kernel_load(void) {
 }
 static long kernel_call(long *args) {
     if (!kernel_code) kernel_load();
+#if defined(_WIN32) && defined(__aarch64__)
+    /* The Windows tape stack is separate from the real WinAPI stack. */
+    args[0]=args[0]+2;
+#endif
     long (*entry)(long *)=(long (*)(long *))(kernel_code+kernel_entry);
     return entry(args);
 }
