@@ -3111,3 +3111,24 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   complete. No Linux x86-64 or Windows x86-64 hardware claim from this batch.
   The reference .com will be rebuilt for the APE fix without changing its
   handwritten compiler path. No push/release; cc-unisacc remains paused.
+
+- Acceptance at **95d4f17**: full `JOBS=2 tests/gate.sh --com` **85/85**,
+  exit 0, 465 s aggregate; all suites individually <=60 s. New container suite
+  18 s, ARM/x86 binding suites 15/18 s. Log `/tmp/unisacc-carried-full-gate.log`.
+  Final aligned container also passed the Linux reproduction, with the same
+  e3128438... hash as the actual Windows container; log `-linux-aligned.log`.
+  Rebuilt reference product remains 1,349,776 B, SHA-256
+  `ee67c33f323ddb4bafa4d1bc1925fe7a04aa009c906ecb86e78610b0fe5fa055`.
+  Follow-up builder chmod and documentation updates do not change image bytes;
+  their targeted check is recorded separately. No default-route switch.
+
+- Post-gate targeted follow-up: builder now marks its container executable;
+  `containercheck.sh` asserts that and passes (`/tmp/unisacc-carried-executable.log`);
+  docs check passes. `tests/cli.sh`'s six legacy 120 s child limits were reduced
+  to 60 s. Reference CLI remains **64/64**. Running the same suite directly on
+  the assembly/model container gives **53 pass / 11 fail**, not product parity:
+  math-header forward call, ignored build flags, -l/-L/-x, -nostdinc's two cases,
+  dependency target/header output, undefined-function wording, --version,
+  -dump-tokens, missing-file wording. Logs `/tmp/unisacc-carried-cli-{reference,next}.log`.
+  This is the concrete next acceptance list; the 85-suite green result does
+  not mean this new container passed the old product's complete CLI suite.

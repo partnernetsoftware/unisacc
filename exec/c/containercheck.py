@@ -8,7 +8,9 @@ def run(args,**kw):
     return subprocess.run(list(map(str,args)),capture_output=True,timeout=60,**kw)
 def ok(args,**kw):
     r=run(args,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
-raw=(p/'build/unisacc-next.com').read_bytes();payload=(p/'build/compiler.pkg').read_bytes()
+artifact=p/'build/unisacc-next.com'
+assert artifact.stat().st_mode & 0o111, 'compiler artifact is not executable'
+raw=artifact.read_bytes();payload=(p/'build/compiler.pkg').read_bytes()
 peoff=struct.unpack_from('<I',raw,0x3C)[0]
 assert peoff%8==0 and raw[peoff:peoff+4]==b'PE\0\0'
 assert raw[-16:-8]==b'UNIPKG1\n' and int.from_bytes(raw[-8:],'little')==len(payload)

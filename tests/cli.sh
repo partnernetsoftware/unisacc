@@ -89,7 +89,7 @@ say "-E preprocesses" "expanded" "$got"
 
 # the flags a Makefile passes that mean nothing here must not be refused:
 # there is one dialect, one optimisation level, no separate debug info
-say "-Wall -O2 -g -std" "ok" "$( (cd "$T" && bound 120 \
+say "-Wall -O2 -g -std" "ok" "$( (cd "$T" && bound 60 \
     "$UA_RUN" -Wall -O2 -g -std=c99 -run def.c 2>&1) | sed 's/^off$/ok/')"
 
 # -S is the name for "write the tape", the assembly-level IR, and -c is
@@ -120,20 +120,20 @@ say "-include"      "on 9" "$(run -DFEATURE -include pre.h def.c)"
 say "-lm -L -x c accepted" "off" "$(run -lm -L/nowhere -x c def.c)"
 say "stdin as input" "from stdin" \
     "$( (cd "$T" && printf '#include <stdio.h>\nint main(void){puts("from stdin");return 0;}\n' \
-        | bound 120 "$UA_RUN" -run - 2>&1) )"
+        | bound 60 "$UA_RUN" -run - 2>&1) )"
 say "-o - is stdout" "_start:" \
-    "$( (cd "$T" && bound 120 "$UA_RUN" def.c -S -o - 2>&1) | head -1)"
-got=$( (cd "$T" && bound 120 "$UA_RUN" -nostdinc lib.c -S 2>&1) | head -1)
+    "$( (cd "$T" && bound 60 "$UA_RUN" def.c -S -o - 2>&1) | head -1)"
+got=$( (cd "$T" && bound 60 "$UA_RUN" -nostdinc lib.c -S 2>&1) | head -1)
 case "$got" in *"no such file for #include"*) got="refused, as cc does";; esac
 say "-nostdinc refuses <stdio.h>" "refused, as cc does" "$got"
 # -nostdinc and printf with no declaration: the only path left to the
 # compile-time lowering (do_printf, W-9) since printf became a real call
 printf 'int main(void){ int n; n = 42; printf("hi %%d %%s%%c\\n", n, "ok", 33); return 0; }\n' > "$T/nsi.c"
-say "-nostdinc printf lowered" "hi 42 ok!" "$( (cd "$T" && bound 120 "$UA_RUN" -nostdinc -run nsi.c 2>&1) )"
+say "-nostdinc printf lowered" "hi 42 ok!" "$( (cd "$T" && bound 60 "$UA_RUN" -nostdinc -run nsi.c 2>&1) )"
 
 # -MD writes what make wants: `target: input headers`, only files that were
 # really opened (the built-in header copies are not files) [S-15 C2]
-(cd "$T" && bound 120 "$UA_RUN" -MD inc.c -S -I inc -o inc.tape >/dev/null 2>&1)
+(cd "$T" && bound 60 "$UA_RUN" -MD inc.c -S -I inc -o inc.tape >/dev/null 2>&1)
 say "-MD names the target" "inc.tape:" "$(head -1 "$T/inc.d" 2>/dev/null | tr -d ' \\')"
 say "-MD lists the header" "greet.h" "$(grep -o 'greet.h' "$T/inc.d" 2>/dev/null | head -1)"
 

@@ -6,8 +6,10 @@ copies, resource caching, decimal field rendering and control/input stacks**
 by hand for AArch64 and x86-64 System V. Both ISAs also implement all 56 action
 handlers and their dispatch in assembly.
 The transition loop, initialization and cleanup are also assembly on both ISAs.
-Allocation remains libc. The shipped product and default runtime still select
-C; product ABI/platform binding and default switching remain unfinished.
+Allocation remains libc. The default standalone run.c retains the C oracle;
+asmcompiler.c uses the product-ABI bridge and a carried assembly core. The
+shipped product still uses its reference compiler route; default switching
+remains unfinished. Current package/platform evidence is summarized below.
 
 Both transition routines evaluate the threshold network directly: initialize the two
 signed 64-bit outputs, visit every threshold, activate `key >= threshold`,
@@ -21,9 +23,11 @@ a changed ABI fails compilation. The transition assembly has no imported functio
 the non-returning core_host_panic hook for an invalid operation. Buffer append
 uses realloc and the same panic hook; it preserves all callee-saved registers.
 The transition uses caller-saved x0–x17; all routines leave x18 untouched. x86-64 preserves
-rbx/r12–r15 on every return. Windows object/calling-convention bindings are
-explicitly not implemented. Mach-O native arm64 and Rosetta x86-64 were run;
-the ELF assembler spelling is present but has not yet been run on Linux.
+rbx/r12–r15 on every return. The host-object tests use Mach-O native arm64 and
+Rosetta x86-64; ELF assembler spelling is present but untested. The separately
+extracted raw blobs use the product bridge, not Windows COFF linkage. That
+route has run on macOS (both ISAs), Linux arm64, and Windows ARM64 native plus
+x86-64 emulation. Windows hardware x86-64 and Linux x86-64 are not claimed here.
 
 `cc.sh` builds an explicit development runtime: it omits core.c entirely
 and links all assembly symbols. It is a build adapter, not a
@@ -95,7 +99,7 @@ linear probing wraps. Absent keys read zero, including before allocation.
 Writing zero still creates an occupied entry. Growth happens before insertion
 when (n+1)*2 exceeds capacity, even for an overwrite; the first capacity is
 65536 and later capacities double. All occupied entries are reinserted before
-the old arrays are freed. Cleanup/reset remains in core_run, in C.
+the old arrays are freed. Cleanup/reset belongs to core_run.
 
 Both versions reject doubling whose eight-byte array would overflow the
 64-bit storage extent. This is an explicit representation guard, not a new
@@ -146,7 +150,7 @@ core_run reserves ID zero for a missing resource before looking anything up.
 CoreResources caches byte keys by length and content, including absent results.
 On a miss it calls the host once: borrowed bytes are copied, malloc-owned bytes
 are copied and freed exactly once, and absence is cached as zero. Empty but
-present bytes get a nonzero blob ID. Cleanup/reset remains in C.
+present bytes get a nonzero blob ID. Cleanup/reset belongs to core_run.
 
 bytescheck.c uses the real C functions under alternate names and a moving
 allocator: 300 blocks, 256 binary resource keys, reverse cached lookups,
@@ -160,7 +164,7 @@ Both actual ISA runs pass the full network checks and six-image route.
 member_index_address.c independently expects exit 25: E3 must load a pointer
 member before evaluating its subscript under address-of. Native C network
 self-reconstruction and C ASan/UBSan network checks also pass. These are
-migration checks, not a claim of smaller code or a completed assembly kernel.
+migration checks, not a claim of smaller total code.
 
 ## Signed decimal and reserved fields
 
@@ -177,7 +181,7 @@ formatcheck.c compares the actual C and assembly routines against snprintf
 for 10,013 values and 250,325 fields; untouched bytes and attributes are checked.
 Ten C/ASM bad-offset/width runs check failure before writes, including INT64_MAX.
 Both real ISA jobs retain all network and six-image checks. C ASan/UBSan and
-network-built C self-reconstruction also pass. The outer loop and cleanup remain C.
+network-built C self-reconstruction also pass. The retained C core is the oracle.
 
 ## Control stack and input-frame stack
 
@@ -188,7 +192,7 @@ and end positions; pushing copies all four fields. The push source is external
 to the backing array, because realloc may move that array. Frame pop preserves
 the bottom record and is a no-op for zero or one record. Both capacity doublings
 are checked before signed int overflow. Allocator failure is fatal; cleanup
-of backing storage still belongs to the C run lifecycle.
+of backing storage belongs to the selected run lifecycle.
 
 stackcheck.c compares the real C helpers and assembly using an always-moving
 allocator: 20,000 symbols and frames, all retained fields, full reverse pops,
@@ -208,8 +212,9 @@ contract is unchanged. Decoded action numbers are asserted against core.h.
 
 On both ISAs cc.sh selects core_action and every primitive in assembly. A compile
 error prevents selecting this action engine while silently keeping C primitive
-implementations. The only remaining C work is the transition/step-limit loop,
-initial ownership setup and final ownership transfer/free. The unselected C action engine remains the test oracle, with the same state API.
+implementations. The transition/step-limit loop, initial ownership setup and
+final ownership transfer/free are also assembly, as described below. The
+unselected C action engine remains the test oracle, with the same state API.
 
 actioncheck.c runs the actual retained C action body and each ISA assembly on
 independent states, checking all registers, byte/attribute buffers, frames,
@@ -253,15 +258,13 @@ primitive/action/lifecycle checks, six image comparisons, five native runs and
 the generated C runtime comparison. Native C network self-reconstruction and
 C ASan/UBSan pass; leak sanitizer is unavailable on this macOS installation.
 
-Uncompressed object __text: lifecycle 916 B arm64 / 1,160 B x86-64; complete
-assembly kernel 5,976 / 6,195 B. Current cc -Os C-only baseline is 6,436 / 7,146 B.
+Uncompressed object __text after reserving x28 for the product bridge:
+lifecycle 924 B arm64 / 1,160 B x86-64; complete assembly kernel 5,984 / 6,195 B.
+The cc -Os C-only baseline is 6,436 / 7,146 B.
 These sums exclude diagnostic strings, shared arity data, loader/IO, host
 callbacks, libc, heap and model bytes. They are not complete executable sizes.
-Only macOS arm64 and Rosetta x86-64 were run. System V/Mach-O test bindings do
-not establish Windows bindings or compatibility with the product's internal
-calling convention. The default .com is unchanged; assembly self-rebuilding
-and the final product switch remain unfinished. These are targeted checks,
-not a new full-gate result.
+Those object-level tests ran on macOS arm64 and Rosetta x86-64. Product-ABI,
+carried-library and other OS execution are separate checks described below.
 
 ## Compiler-driver integration
 
@@ -274,8 +277,8 @@ memory runs. An isolated directory contains only the assembly-backed driver,
 its package and source, and compiles/executes hello both as a file and via -run.
 The memory suite passes 36 native runs per ISA plus argv/environment/O1/status
 checks on macOS arm64 and Rosetta x86-64. These counts include all three drivers.
-The existing C-only embedded .com check remains separate. The assembly driver
-is host-linked, not yet linked with the product's carried library/internal ABI.
+This suite's driver-asm is host-linked; the carried-library/product-ABI checks
+below exercise a separate build without a C-core fallback.
 
 ## Product-internal calling convention bridge
 
@@ -286,9 +289,9 @@ make a six-register indirect call). The two entry operations are core_run and
 core_transition. The latter is also used by the full-domain verifier. Both
 return a machine word so rejection-string pointers retain all bits.
 
-On ARM the bridge moves hardware SP below the live x7 tape stack and saves
-x6, x7 and the original SP. A service callback places a tape return slot below
-the current hardware frame. On x86 it translates the record into System V
+On POSIX ARM the bridge moves hardware SP below the live x7 tape stack and
+saves x6, x7 and the original SP. Windows instead keeps its separate stacks
+(details below). On x86 it translates the record into System V
 registers, aligns rsp, and saves the product's r9 frame pointer. Callback thunks
 save System V nonvolatile GPRs across product code. Nine services are allocation,
 free, byte copy/compare/fill/length and the two host callbacks; none is a compiler
@@ -299,20 +302,21 @@ requires no unresolved import or runtime rebasing/binding, and extracts __TEXT
 through its last section. The service slot is bound before the mapping becomes
 RX. binding.c validates the ISA and byte extents, maps/copies/protects the code
 and retains this immutable mapping until process exit. Current blobs are
-7,664 B per ISA including the 40-byte envelope, Mach-O seed header, padding,
+7,704 B arm64 / 7,664 B x86-64 including the 40-byte envelope, Mach-O seed header, padding,
 strings/constants, complete execution core and bridge. The Mach-O header is
 inert bytes inside the blob, not a request to load it as an OS executable.
 
-UNISA_CORE_BLOB selects this development binding; UNISA_KERNEL is currently
-an explicit external file. There is no core.c fallback. Bindingcheck requires
+UNISA_CORE_BLOB selects this binding, with carried resources preferred and
+UNISA_KERNEL retained for standalone tests. There is no core.c fallback. Bindingcheck requires
 fresh networks, four complete image comparisons, nine CLI modes, nine real
 memory runs, two multi-unit runs, missing/corrupt blob rejection and N1=N2=N3
 for the assembly-bound compiler driver rebuilt through networks. The assembly
-blob itself remains a fixed, explicitly supplied artifact; the rebuilt driver
-does not assemble it. Both native macOS arm64 and Rosetta x86-64 pass. Windows
-and Linux execution of this binding, embedding it in the single package, and
-the final default product switch remain pending. These are not platform claims.
-# Carried kernel and compiler container
+blob itself remains a fixed package resource; the rebuilt driver does not
+assemble it. Native macOS arm64 and Rosetta x86-64 binding checks pass, as does
+the Linux arm64 carried driver self-rebuild. The final default product switch
+remains pending.
+
+## Carried kernel and compiler container
 
 `../buildcompiler.sh OUTPUT_DIR` constructs `unisacc-next.com` in that directory,
 without replacing the shipped product. It carries all six compiler routes,

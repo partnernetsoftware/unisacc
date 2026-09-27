@@ -40,4 +40,5 @@ for os in lnx osx win; do
 done
 b python3 exec/c/compilerpack.py --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" -o "$T/compiler.pkg" "$@"
 b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" -o "$T/unisacc-next.com"
+chmod +x "$T/unisacc-next.com"
 echo "development assembly/network compiler: $T/unisacc-next.com"

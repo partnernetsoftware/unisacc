@@ -2,8 +2,13 @@
 
 The current source-to-image route is `pipeline/elf.sh`, using `c/run.c` and
 six constructed threshold networks. `c/run.c --chain` also connects explicit
-models in one process (see below). This remains a development route; the
-shipped compiler has not adopted it. The following E0 machine and toy are
+models in one process (see below). `c/buildcompiler.sh OUTPUT_DIR` now builds
+`unisacc-next.com`: a development compiler with all six target routes, shared
+networks and two carried assembly cores. It runs without loose model/core files
+or Python; offline construction still uses the seed tools. See
+[the assembly binding and tests](c/asm/README.md#carried-kernel-and-compiler-container).
+The shipped compiler has not adopted this route: CLI/source/error parity is
+still incomplete. The following E0 machine and toy are
 retained as their original, separate experiment.
 
 ## E0 toy experiment
