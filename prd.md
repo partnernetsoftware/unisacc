@@ -4921,3 +4921,7 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOOLS_UA可执行路径以实测模型/产品；报告实际driver，编译与运行各自bound60并比较退出码。避免UA被静默忽略后把Python绿误报产品绿；沿原11条固定清单，不增测试框架。
 
 字符初始化修复并行收敛：C根数组修复d92477f、模型根数组796d87e及二维行768809c已合入。模型二维行复用STRINGINIT/INITADDR，Python零新增；实际ARCFOUR通过。C二维行待独立审查提出的整行范围检查补齐后合入，不以已有正例代替边界检查。下一并行只针对真实tools拒绝：void转换实现、二维参数/成员/typedef共用维度通路只读定位。tools入口两路实跑：默认Python11/11；旧模型候选0/11（6错误5拒绝），如实保留。TOOLS_UA已加入队列输入指纹，切换被测编译器不能复用原队列结果。
+
+第十四批合并验收（4501650）：VLA、unresolved/printf回退、x86共享过程和松弛三组Python净减101，TSV新增386，总净增285；动态依赖保留，完整图扰动与实际网络/编码由各隔离组实测。父双槽4/4，24.46秒，/tmp/unisacc-parallel-fourteenth-gate。
+
+实际工具兼容修复（080e638）：C根数组/二维行及边界检查、模型根数组/二维行、void转换已合入。void控制4条声明，复用已求值UNARY，无新Python语言分支；原regex2子代理实际net→后端native533字节同cc，regex1继续停在[][4]，不修改真实源。7fd1514候选6,017,681 B，sha256 13b2b3221ed3b5f046761518ec2a00af2a35e75c758a2a1fb16f29ee983abb7d，/tmp/unisacc-string-candidate-928，构造脚本分shared/routes/pack各55秒上限；实际TOOLS_UA候选11项目6通过0错误5拒绝，baseline11仍失败。经典C私有参考同套7通过2错误2拒绝（des/regex1错误，blowfish/tiny-aes拒绝），默认Python11/11；因此三条路线不能混记，shape修复必须依hostcc及Python正确参考核对。父080e638合并后队列6/6、18.28秒：chain实际net167/167，C99 57/57，CLI64、run12、parserbounds8、formatonce5，/tmp/unisacc-string-fix-gate-928。该队列使用新私有C参考；7fd1514候选尚不含void修复。

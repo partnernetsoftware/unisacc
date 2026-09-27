@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: 5a7a5d3, after constant expressions, block statics, Mach-O and SHA control rules. This is a source
+Current source checkpoint: 080e638, including VLA, unresolved-call, printf fallback, shared x86 control and string/void compatibility fixes. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -13,10 +13,10 @@ remain shared inputs, not copied answers.
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
-| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `type-entry/default/follow`, `operator-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
+| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
 | E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `armfuse-*`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`; ARM destination-shape selection and dynamic bindings; target/escape/layout bindings in `data.py` |
-| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`; catalog opcode facts | x86 encoding and setup; ARM core/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
+| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM core/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
 | E6 images | `enc/elfimage-byte/result.tsv` shared image control and `enc/pedelta-byte/result.tsv` PE control, `enc/machodelta-*` Mach-O layout/signature-page control, `enc/sha256-*` shared digest control; existing target layout facts | Format header/section/CD fields and import/string enumeration, child installation and dynamic layout/hash-constant bindings in `enc/` |
 
 `finite_rules.py` expands declared observations, bindings and action sequences;
@@ -57,3 +57,12 @@ at O0/O1/O2 ran identically to host cc on macOS arm64. These are bounded
 checks, not full product acceptance or cross-platform native verification.
 Exact run records are in `prd.md`. Historical prototype results must not
 substitute for the remaining completion obligations.
+
+Actual packaged real-tools check at 7fd1514: 6/11 pass, 0 wrong, 5 refused.
+The prior d5dcda4 artifact had 6 wrong and 5 refused. Braced character-string
+initialization was also wrong in the classic C reference; matching that reference
+alone was insufficient. The 7fd1514 candidate is 6,017,681 bytes, SHA256
+`13b2b3221ed3b5f046761518ec2a00af2a35e75c758a2a1fb16f29ee983abb7d`.
+It does not yet include 080e638 scalar void casts. The 11-project baseline remains
+required; this is not product acceptance. `TOOLS_UA` explicitly selects the binary
+for `tests/tools.sh`; its default still tests the Python compiler.
