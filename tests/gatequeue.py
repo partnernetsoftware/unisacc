@@ -6,7 +6,7 @@ again. No test result is cached across an input change. Model preparation may
 be shared separately. Each window is <=55 s, leaving cleanup inside the 60 s
 outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
-import argparse, fcntl, hashlib, json, os, pathlib, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, pathlib, shutil, stat, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -28,12 +28,38 @@ def plan(com):
     return jobs
 
 def execution_settings():
-    return {k:os.environ[k] for k in ('UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
+    return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
                 'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT') if k in os.environ}
+
+def executable_inputs(settings):
+    # These selectors are one quoted executable argument, never shell commands.
+    # MODEL_COM is a file path; the other selectors also permit a PATH command.
+    # Empty UA-family selectors retain their existing fallback semantics.
+    inputs = {}
+    for key in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA'):
+        if key not in settings or (not settings[key] and key != 'MODEL_COM'): continue
+        value = settings[key]
+        try:
+            if not value: raise ValueError('empty candidate path')
+            name = value if key == 'MODEL_COM' or '/' in value else shutil.which(value)
+            if name is None: raise ValueError('executable name not found in PATH')
+            path = pathlib.Path(name).resolve(strict=True)
+            if not stat.S_ISREG(path.stat().st_mode) or not os.access(path, os.X_OK):
+                raise ValueError('expected an executable regular file')
+            with path.open('rb') as f:
+                mode = os.fstat(f.fileno()).st_mode
+                if not stat.S_ISREG(mode) or not os.access(path, os.X_OK):
+                    raise ValueError('expected an executable regular file')
+                h = hashlib.sha256()
+                for chunk in iter(lambda: f.read(1024*1024), b''): h.update(chunk)
+            inputs[key] = {'path':str(path), 'mode':mode, 'sha256':h.hexdigest()}
+        except (OSError, ValueError) as error:
+            raise SystemExit(f'queue {key}: {error}; use one executable path or wrapper, not a shell command')
+    return inputs
 
 def fingerprint(jobs):
     settings = execution_settings()
-    h = hashlib.sha256(json.dumps([jobs, settings], sort_keys=True).encode())
+    h = hashlib.sha256(json.dumps([jobs, settings, executable_inputs(settings)], sort_keys=True).encode())
     raw = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
                                   '--', 'src', 'exec', 'tests', 'include', 'kernel', 'weights', 'unisa', 'examples',
                                   'unisacc.c', 'README.md', 'ARCHITECTURE.md', 'AGENTS.md',
