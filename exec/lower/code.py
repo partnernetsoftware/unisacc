@@ -31,38 +31,17 @@ def install(E, arch="x86_64", os_="lnx"):
         if w in enc:
             p.a(('SBCLR',),[('SBOUT',c) for c in (' form='+enc[w]).encode()],('SBSAVE','blob'),('STX',d,FORM,'blob'))
     p.goto('C.line')
-    g.on('C.line',[32,9,10],'C.line',[('ADV',)])
-    g.on('C.line',[256],'C.parsed',[])
-    g.els('C.line','C.word',[('MARK','ts'),('LDI','last',0)])
-    g.on('C.word',[32,9,10,256],'C.we',[('MARK','te')])
-    g.els('C.word','C.word',[('BYTE','last'),('ADV',)])
-    P('C.we').call('TOKEN').a(('STX','nc',OP,'tok'),('LDI','na',0)).branch({1:'C.label'},'C.op',[('CMPI','last',58)])
-    P('C.label').a(('LDI','t',1),('STX','nc',KIND,'t')).branch({1:'C.entlabel'},'C.next',[('CMP','tok',ids['_start:'])])
-    P('C.entlabel').a(('LDI','pending',1)).goto('C.next')
-    P('C.op').a(('LDI','t',2),('STX','nc',KIND,'t')).branch({1:'C.first'},'C.ent',[('CMPI','firstop',-1)])
-    P('C.first').a(('COPYW','firstop','nc')).goto('C.ent')
-    P('C.ent').branch({1:'C.setentry'},'C.args',[('CMPI','pending',1)])
-    P('C.setentry').a(('COPYW','entry','nc'),('LDI','pending',0)).goto('C.args')
-    g.on('C.args',[32,9,44,91,93,43],'C.args',[('ADV',)])
-    g.on('C.args',[10,256],'C.next',[])
-    g.on('C.args',[45],'C.arg',[('MARK','ts'),('ADV',)])
-    g.els('C.args','C.arg',[('MARK','ts')])
-    g.on('C.arg',[32,9,44,91,93,43,45,10,256],'C.ae',[('MARK','te')])
-    g.els('C.arg','C.arg',[('ADV',)])
-    P('C.ae').call('TOKEN').a(('ALUI','mul','ai','nc',8),('ALU','add','ai','ai','na'),('STX','ai',ARG,'tok'),('ALUI','add','na','na',1)).branch({2:'C.fail'},'C.args',[('CMPI','na',7)])
-    P('C.next').a(('STX','nc',AC,'na'),('ALUI','add','nc','nc',1)).goto('C.line')
-    P('TOKEN').a(('INTERN','tok','ts','te'),('BLOBSAVE','blob','ts','te'),('STX','tok',TXT,'blob')).ret()
-    P('C.parsed').branch({1:'C.default'},'C.output',[('CMPI','entry',-1)])
-    P('C.default').a(('COPYW','entry','firstop')).goto('C.output')
-    P('C.output').a(('LDI','ci',0)).goto('C.loop')
-    P('C.loop').branch({0:'C.load'},'C.done',[('CMP','ci','nc')])
-    P('C.load').a(('LDX','op','ci',OP),('LDX','kind','ci',KIND),('LDX','na','ci',AC),('ALUI','mul','ai','ci',8)).goto('C.load.more')
-    p=P('C.load.more')
-    # Separate state after the load so arguments are stable across printing calls.
-    for i in range(7):p.a(('ALUI','add','aj','ai',i),('LDX','a'+str(i),'aj',ARG))
-    p.branch({1:'C.labprint'},'C.enter',[('CMPI','kind',1)])
-    P('C.labprint').a(('COPYW','tok','op')).call('PRINT').o('\n').goto('C.advance')
-    P('C.enter').branch({1:'C.setup'},'C.dispatch',[('CMP','ci','entry')])
+    # Complete token/buffer traversal group; setup and dynamic dispatch follow below.
+    from finite_rules import install as install_rules
+    scan_labels = (('C', 'r'), ('C', 'b'), ('C', 'b'), ('C', 'b'),
+                   ('C', 'b'), ('C', 'r'), ('C', 'b'), ('C', 'b'),
+                   ('C', 'b'), ('C', 'b'), ('C', 'r'), ('C', 'b'))
+    scan_bindings = {'label'+str(i): P(owner).fresh(kind)
+                     for i, (owner, kind) in enumerate(scan_labels)}
+    scan_bindings.update(OP=OP, KIND=KIND, AC=AC, ARG=ARG, TXT=TXT,
+                         start_id=ids['_start:'])
+    install_rules(g, Path(__file__).parent, 'code-scan', bindings=scan_bindings,
+                  sequences={'newline': E.O('\n')})
     p=P('C.setup')
     if os_=='win':
         p.o('winstdh ').a(('LDI','offset',WIN_HSTD)).call('ADDR').o('\n')
