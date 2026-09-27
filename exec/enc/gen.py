@@ -70,128 +70,36 @@ def byte(p, v):
 
 
 def procs():
-    # REX(w, rr, bb) with x = 0: 0x40 | w<<3 | (rr>>3)<<2 | (bb>>3)
-    p = P("REX")
-    p.a(("ALUI", "shl", "rx_t", "rx_w", 3), ("ALUI", "or", "rx_t", "rx_t", 0x40),
-        ("ALUI", "sar", "rx_u", "rx_r", 3), ("ALUI", "shl", "rx_u", "rx_u", 2), ("ALU", "or", "rx_t", "rx_t", "rx_u"),
-        ("ALUI", "sar", "rx_u", "rx_b", 3), ("ALU", "or", "rx_t", "rx_t", "rx_u"), ("OUTW", "rx_t")).ret()
-    # MODRM(mod, reg, rm)
-    p = P("MODRM")
-    p.a(("ALUI", "shl", "rx_t", "mr_m", 6), ("ALUI", "and", "rx_u", "mr_r", 7), ("ALUI", "shl", "rx_u", "rx_u", 3),
-        ("ALU", "or", "rx_t", "rx_t", "rx_u"), ("ALUI", "and", "rx_u", "mr_b", 7), ("ALU", "or", "rx_t", "rx_t", "rx_u"),
-        ("OUTW", "rx_t")).ret()
-    # ALU(opc: al_o, dst: al_d, src: al_s): rex(1, s>>3, 0, d>>3) opc modrm(3, s, d)
-    p = P("ALU")
-    p.a(("LDI", "rx_w", 1), ("COPYW", "rx_r", "al_s"), ("COPYW", "rx_b", "al_d")).call("REX").a(("OUTW", "al_o"),
-        ("LDI", "mr_m", 3), ("COPYW", "mr_r", "al_s"), ("COPYW", "mr_b", "al_d")).call("MODRM").ret()
-    # LEBYTES(lb_v, lb_n): lb_n little-endian bytes of the 64-bit value
-    p = P("LEBYTES")
-    p.label("LB.l")
-    p.branch({2: "LB.o"}, "RET", [("CMPI", "lb_n", 0)])
-    P("LB.o").a(("OUTW", "lb_v"), ("A64I", "shr", "lb_v", "lb_v", 8), ("ALUI", "sub", "lb_n", "lb_n", 1)).goto("LB.l")
-    # MEM(opcode bytes already chosen by the caller in me_o1/me_o2 (me_two), reg me_r, base me_b, disp me_d, w me_w;
-    # me_66: a 0x66 prefix first)
-    p = P("MEM")
-    p.branch({1: "ME.66"}, "ME.rex", [("CMPI", "me_66", 1)])
-    byte(P("ME.66"), 0x66).goto("ME.rex")
-    p = P("ME.rex")
-    p.a(("COPYW", "rx_w", "me_w"), ("COPYW", "rx_r", "me_r"), ("COPYW", "rx_b", "me_b")).call("REX")
-    p.a(("OUTW", "me_o1")).branch({1: "ME.o2"}, "ME.fm", [("CMPI", "me_two", 1)])
-    P("ME.o2").a(("OUTW", "me_o2")).goto("ME.fm")
-    p = P("ME.fm")          # the form: disp 0 (base not rbp/r13), 8-bit, 32-bit
-    p.a(("ALUI", "and", "me_b7", "me_b", 7), ("LDI", "me_z", 0)).branch({1: "ME.z0"}, "ME.nz", [("C64", "me_d", "me_z")])
-    P("ME.z0").branch({1: "ME.nz"}, "ME.m0", [("CMPI", "me_b7", 5)])
-    p = P("ME.m0")
-    p.a(("LDI", "mr_m", 0)).call("ME.mrsib").ret()
-    p = P("ME.nz")
-    p.a(("LDI", "me_z", -128)).branch({0: "ME.m2"}, "ME.nz2", [("C64", "me_d", "me_z")])
-    p = P("ME.nz2")
-    p.a(("LDI", "me_z", 127)).branch({2: "ME.m2"}, "ME.m1", [("C64", "me_d", "me_z")])
-    p = P("ME.m1")
-    p.a(("LDI", "mr_m", 1)).call("ME.mrsib").a(("OUTW", "me_d")).ret()
-    p = P("ME.m2")
-    p.a(("LDI", "mr_m", 2)).call("ME.mrsib").a(("COPYW", "lb_v", "me_d"), ("LDI", "lb_n", 4)).call("LEBYTES").ret()
-    p = P("ME.mrsib")       # modrm(mod, r, b), then the SIB 0x24 when b&7 == 4
-    p.a(("COPYW", "mr_r", "me_r"), ("COPYW", "mr_b", "me_b")).call("MODRM").branch({1: "ME.sib"}, "RET", [("CMPI", "me_b7", 4)])
-    byte(P("ME.sib"), 0x24).ret()
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    labels = (('ALU', 'r'), ('ALU', 'r'), ('LB', 'b'), ('MEM', 'b'),
+              ('ME', 'r'), ('ME', 'b'), ('ME', 'b'), ('ME', 'b'),
+              ('ME', 'r'), ('ME', 'b'), ('ME', 'b'), ('ME', 'r'),
+              ('ME', 'r'), ('ME', 'r'), ('ME', 'r'), ('ME', 'b'))
+    bindings = {'label'+str(i): P(owner).fresh(kind)
+                for i, (owner, kind) in enumerate(labels)}
+    sequences = {'byte'+str(v): byte(P('byte.binding'),v).acts for v in (0x66,0x24)}
+    install_rules(g, Path(__file__).parent, 'x86-procs', bindings=bindings,
+                  sequences=sequences, section='procs')
 
 
 def relax():
-    """RELAX: the rounds of unisa/assemble.py; WRITE: every instruction in its final form"""
-    p = P("RELAX")
-    p.a(("LDI", "rround", 0)).label("RX.r")
-    p.a(("ALUI", "add", "rround", "rround", 1), ("LDI", "q", 0), ("LDI", "off", 0)).label("RX.o")      # offsets
-    p.branch({0: "RX.o1"}, "RX.f", [("CMP", "q", "npc")])
-    P("RX.o1").a(("STX", "q", OFF, "off"), ("LDX", "t", "q", SZ), ("ALU", "add", "off", "off", "t"),
-                 ("ALUI", "add", "q", "q", 1)).goto("RX.o")
-    p = P("RX.f")           # every long branch whose short form would reach
-    p.a(("COPYW", "endo", "off"), ("LDI", "q", 0), ("LDI", "nfit", 0)).label("RX.fl")
-    p.branch({0: "RX.f1"}, "RX.m", [("CMP", "q", "npc")])
-    p = P("RX.f1")
-    p.a(("LDX", "k", "q", KND)).branch({1: "RX.nx"}, "RX.addr", [("CMPI", "k", 0)])
-    P("RX.addr").branch({(1,2):"RX.nx"}, "RX.f15", [("CMPI","k",4)])
-    P("RX.f15").branch({1: "RX.nx"}, "RX.f2", [("CMPI", "k", 3)])          # a call never shortens
-    p = P("RX.f2")
-    p.a(("LDX", "t", "q", SHT)).branch({1: "RX.f3"}, "RX.nx", [("CMPI", "t", 0)])
-    p = P("RX.f3")
-    p.a(("LDI", "ns", 2)).branch({1: "RX.f4"}, "RX.f35", [("CMPI", "k", 1)])
-    P("RX.f35").a(("LDI", "ns", 5)).goto("RX.f4")
-    p = P("RX.f4")
-    p.call("LADDR").a(("LDX", "t", "q", OFF), ("ALU", "add", "t", "t", "ns"), ("ALU", "sub", "d", "la", "t"))
-    p.branch({0: "RX.nx"}, "RX.f5", [("CMPI", "d", -128)])
-    p = P("RX.f5")
-    p.branch({2: "RX.nx"}, "RX.fit", [("CMPI", "d", 127)])
-    P("RX.fit").a(("STX", "q", FIT, "rround"), ("ALUI", "add", "nfit", "nfit", 1)).goto("RX.nx")
-    P("RX.nx").a(("ALUI", "add", "q", "q", 1)).goto("RX.fl")
-    p = P("RX.m")           # none fit: done; else all of this round's fits become short
-    p.branch({1: "RET"}, "RX.m0", [("CMPI", "nfit", 0)])
-    p = P("RX.m0")
-    p.a(("LDI", "q", 0)).label("RX.ml")
-    p.branch({0: "RX.m1"}, "RX.r", [("CMP", "q", "npc")])
-    p = P("RX.m1")
-    p.a(("LDX", "t", "q", FIT)).branch({1: "RX.m2"}, "RX.m3", [("CMP", "t", "rround")])
-    p = P("RX.m2")
-    p.a(("LDI", "t", 1), ("STX", "q", SHT, "t"), ("LDX", "k", "q", KND), ("LDI", "t", 2)).branch({1: "RX.m2s"}, "RX.m2z", [("CMPI", "k", 1)])
-    P("RX.m2z").a(("LDI", "t", 5)).goto("RX.m2s")
-    P("RX.m2s").a(("STX", "q", SZ, "t")).goto("RX.m3")
-    P("RX.m3").a(("ALUI", "add", "q", "q", 1)).goto("RX.ml")
-    # LADDR(q) -> la: the offset of branch q's target label (the end past the last instruction)
-    p = P("LADDR")
-    p.a(("LDX", "t", "q", TGT), ("LDX", "t", "t", LABD)).branch({1: "DEAD.undef"}, "LA.1", [("CMPI", "t", 0)])
-    g.on("DEAD.undef", range(257), "DEAD", E.rej("not covered: a branch to an undefined label"), "r")
-    p = P("LA.1")
-    p.a(("ALUI", "sub", "t", "t", 1)).branch({0: "LA.in"}, "LA.end", [("CMP", "t", "npc")])
-    P("LA.in").a(("LDX", "la", "t", OFF)).ret()
-    P("LA.end").a(("COPYW", "la", "endo")).ret()
-    # WRITE
-    p = P("WRITE")
-    p.a(("LDI", "q", 0)).label("WR.l")
-    p.branch({0: "WR.i"}, "RET", [("CMP", "q", "npc")])
-    p = P("WR.i")
-    p.a(("LDX", "k", "q", KND)).branch({0: "WR.blob", 1: "WR.j", 2: "WR.z", 3: "WR.c", 4:"WR.addr", 5:"WR.argsave", 6:"WR.argvget", 7:"WR.win", 8:"WR.itoa"}, "WR.blob", [("RLD", "k")])
-    p = P("WR.c")           # call rel32: E8, target - (the call's final offset + 5)
-    p.call("LADDR").a(("LDX", "o_", "q", OFF), ("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"),
-                     ("LDI", "t", 0xE8), ("OUTW", "t"), ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
-    p = P("WR.blob")
-    p.a(("LDX", "t", "q", BLB), ("INPUSH", "t")).goto("WR.cp")
-    g.on("WR.cp", [EOF], "WR.cpd", [("INPOP",)])
-    g.els("WR.cp", "WR.cp", [("COPY",), ("ADV",)])
-    P("WR.cpd").goto("WR.nx")
-    p = P("WR.j")           # jmp: short EB rel8 / long E9 rel32, from the instruction's end
-    p.call("LADDR").a(("LDX", "o_", "q", OFF), ("LDX", "t", "q", SHT)).branch({1: "WR.js"}, "WR.jl", [("CMPI", "t", 1)])
-    P("WR.js").a(("ALUI", "add", "o_", "o_", 2), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0xEB), ("OUTW", "t"), ("OUTW", "d")).goto("WR.nx")
-    p = P("WR.jl")
-    p.a(("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0xE9), ("OUTW", "t"),
-        ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
-    p = P("WR.z")           # test r, r (rex(1, r>>3, 0, r>>3) 85 modrm(3, r, r)); jz rel8 74 / rel32 0F 84
-    p.a(("LDX", "zr", "q", BRG), ("LDI", "rx_w", 1), ("COPYW", "rx_r", "zr"), ("COPYW", "rx_b", "zr")).call("REX")
-    p.a(("LDI", "t", 0x85), ("OUTW", "t"), ("LDI", "mr_m", 3), ("COPYW", "mr_r", "zr"), ("COPYW", "mr_b", "zr")).call("MODRM")
-    p.call("LADDR").a(("LDX", "o_", "q", OFF), ("LDX", "t", "q", SHT)).branch({1: "WR.zs"}, "WR.zl", [("CMPI", "t", 1)])
-    P("WR.zs").a(("ALUI", "add", "o_", "o_", 5), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0x74), ("OUTW", "t"), ("OUTW", "d")).goto("WR.nx")
-    p = P("WR.zl")
-    p.a(("ALUI", "add", "o_", "o_", 9), ("ALU", "sub", "d", "la", "o_"), ("LDI", "t", 0x0F), ("OUTW", "t"), ("LDI", "t", 0x84), ("OUTW", "t"),
-        ("COPYW", "lb_v", "d"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("WR.nx")
-    P("WR.nx").a(("ALUI", "add", "q", "q", 1)).goto("WR.l")
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    labels = (('RX', 'b'), ('RX', 'b'), ('RX', 'b'), ('RX', 'b'),
+              ('RX', 'b'), ('RX', 'b'), ('RX', 'b'), ('RX', 'r'),
+              ('RX', 'b'), ('RX', 'b'), ('RX', 'b'), ('RX', 'b'),
+              ('RX', 'b'), ('RX', 'b'), ('LADDR', 'b'), ('LA', 'b'),
+              ('WR', 'b'), ('WR', 'b'), ('WR', 'r'), ('WR', 'r'),
+              ('WR', 'r'), ('WR', 'b'), ('WR', 'r'), ('WR', 'r'),
+              ('WR', 'r'), ('WR', 'r'), ('WR', 'b'), ('WR', 'r'))
+    bindings = {'label'+str(i): P(owner).fresh(kind)
+                for i, (owner, kind) in enumerate(labels)}
+    bindings.update({name: globals()[name] for name in
+                     ('OFF', 'LABD', 'KND', 'BLB', 'SZ', 'TGT', 'BRG', 'SHT', 'FIT')})
+    sequences = {'undefined': E.rej('not covered: a branch to an undefined label')}
+    install_rules(g, Path(__file__).parent, 'x86-procs', bindings=bindings,
+                  sequences=sequences, section='relax')
 
 
 def build(image=False):
