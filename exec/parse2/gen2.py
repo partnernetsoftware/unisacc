@@ -993,9 +993,6 @@ def build(locations=False, warnings=False, errors=False):
     P("LP.after").call("NEXT").tok({o: "LP.parse" for o in lops}, "LP.fallback")
     P("LP.fallback").a(("JUMP", "lp_start")).call("NEXT").goto("EX.l")
     P("LP.parse").a(("JUMP", "lp_start")).call("NEXT").call("LP.addr").tok(lops, bad("parenthesized lvalue"))
-    P("LP.addr").tok({"(": "LP.par", "*": "LP.star", TK_ID: "PRE.addr"}, bad("parenthesized lvalue"))
-    P("LP.par").call("NEXT").call("LP.addr").expect(")").call("NEXT").ret()
-    P("LP.star").call("NEXT").call("UNARY").call("DOWN").ret()
     for name, op in (("inc", "+"), ("dec", "-")):
         P("LP."+name).call("CSTEP").call("POST."+op).call("C%d" % LEVELS[0]).call("QTAIL").ret()
     # c ? a : b -- labels as if/else (measured): jumpz L a; a; jump L b; L a: b; L b:
@@ -1257,20 +1254,8 @@ def build(locations=False, warnings=False, errors=False):
     P("U.fnext").call("NEXT").ret()
     p = P("UNARY")
     p.tok({"sizeof": "U.szof", E.TK_FNUM: "U.fnum", E.TK_STR: "U.str", "~": "U.cpl", "-": "U.neg", "+": "U.pos", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec", "&": "U.amp", "*": "U.deref"}, bad("expression"))
-    P("U.amp").call("NEXT").tok({TK_ID: "U.amp1"}, bad("address of"))
-    q = P("U.amp1")
-    q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("LDI", "isfn", 0)).call("FNVAL").branch({1:"U.amfn"}, "U.amobj", [("CMPI", "isfn", 1)])
-    P("U.amfn").call("NEXT").ret()
-    P("U.amobj").call("LOOKUP").call("NEXT").tok({"[": "U.ams", ".": "U.amm", "->": "U.amptr"}, "U.amv")
-    q = P("U.amptr")
-    addr(q).call("LOADV").goto("U.amm0")
-    q = P("U.amm")
-    addr(q).goto("U.amm0")
-    P("U.amm0").a(("LDI", "amp", 1)).call("MEMB").a(("LDI", "amp", 0)).ret()
-    q = P("U.amv")
-    addr(q).a(("ALUI", "add", "vt", "vt", 1)).ret()
-    q = P("U.ams")       # &a[i]...: the element's address, no load (measured, p53)
-    addr(q).call("VLOAD").a(("LDI", "amp", 1)).call("POSTIX").a(("LDI", "amp", 0)).ret()
+    structured_control("address", False)
+    addr(P("ADR.object")).goto("ADR.object.next")
     q = P("U.deref")     # * operand: its value is the address; one level down, then a load at the new width
     q.call("NEXT").tok({TK_ID: "UD.id"}, "UD.gen")
     P("UD.gen").call("UNARY").goto("UD.dn")
@@ -1304,16 +1289,6 @@ def build(locations=False, warnings=False, errors=False):
     g.on("DEAD.void", range(257), "DEAD", E.rej("not covered: dereference of void"), "r")
     # Prefix updates share the existing member/subscript address walk. The
     # address is evaluated once; its value kind then selects step/load/store.
-    P("PRE.addr").tok({TK_ID: "PRE.id"}, bad("prefix increment operand"))
-    q = P("PRE.id")
-    q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NEXT")
-    addr(q).tok({".": "PRE.member", "->": "PRE.ptr", "[": "PRE.index"}, "PRE.bare")
-    P("PRE.bare").call("NOARR").ret()
-    P("PRE.ptr").call("LOADV").goto("PRE.member")
-    P("PRE.member").vpush("amp").a(("LDI", "amp", 1)).call("MEMB").goto("PRE.done")
-    P("PRE.index").call("VLOAD").vpush("amp").a(("LDI", "amp", 1)).call("POSTIX").goto("PRE.done")
-    P("PRE.done").branch({1: "PRE.value"}, bad("prefix increment operand"), [("CMPI", "amp", 0)])
-    P("PRE.value").vpop("amp").call("DOWN").ret()
     for nm, fix in (("U.pinc", "pre_inc"), ("U.pdec", "pre_dec")):
         q = P(nm)           # addr; push; load; +-step; pop; store
         q.call("NEXT").call("PRE.addr").call("CSTEP")
@@ -1450,10 +1425,10 @@ def build(locations=False, warnings=False, errors=False):
     # &s.ptr[i] needs the pointer value before taking the final element address.
     P("MB.ld1").tok({"[": "MB.value"}, "MB.addrtest")
     P("MB.addrtest").branch({1: "MB.address"}, "MB.value", [("CMPI", "amp", 1)])
-    P("MB.address").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0)).ret()
+    P("MB.address").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0), ("LDI", "adr_kind", 1)).ret()
     P("MB.value").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
     P("MB.arr").a(("ALUI", "add", "vt", "vt", 1), ("COPYW", "vid", "member_vid"), ("LDX", "rk", "vid", E.ARR), ("LDI", "rkok", 1)).branch({1: "MB.arrayaddr"}, "POSTIX", [("CMPI", "amp", 1)])   # s.arr: the address, decayed
-    P("MB.arrayaddr").tok({"[": "POSTIX"}, bad("address of array member"))
+    P("MB.arrayaddr").tok({"[": "POSTIX"}, "ADR.arrayterminal")
     p = P("POSTIX")
     p.tok({"[": "PX.i", ".": "MEMB", "->": "MEMB", "(": "PX.fc"}, "RET")
     P("PX.fc").call("ISFP").branch({1: "PX.fc1"}, "RET", [])
@@ -1475,7 +1450,7 @@ def build(locations=False, warnings=False, errors=False):
     emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("DOWN").call("NEXT").tok({"=": "PX.as", "++": "PX.inc", "--": "PX.dec", **{o+"=": "LV.c"+o for o in E.CASOPS}, ".": "MEMB"}, "PX.ld")   # a[i].m: the element's address, then the member
     # a statement that is only `p[i];` computes the address and stops (measured, probe p39)
     P("PX.ld").branch({1: "PX.am"}, "PX.ld1", [("CMPI", "amp", 1)])
-    P("PX.am").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0)).ret()
+    P("PX.am").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0), ("LDI", "adr_kind", 1)).ret()
     P("PX.ld1").branch({1: "PX.st"}, "PX.l2", [("CMPI", "st1", 1)])
     P("PX.st").tok({";": "RET"}, "PX.l2")
     P("PX.l2").call("LOADV").a(("LDI", "rkok", 0)).goto("POSTIX")
