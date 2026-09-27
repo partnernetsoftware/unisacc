@@ -1768,29 +1768,23 @@ int pf_check(int c, int lng, int at) {
     return 0;
 }
 
-/* The arguments walked once for their TYPES and the emitter rewound, the
-   way expr() rewinds a false start: the real walk -- do_printf's or the
-   ordinary call's, when the format needs the runtime printf -- follows
-   as if nothing happened.  An error found here parks the cursor like any
-   other and is not walked into twice. */
-int pf_dryrun(int ft) {
-    char fb[4096]; int n; int k; int c; int lng; int at;
-    int save; int nsave; int isave; int psave; int pesave;
+/* Read only the format. The argument has already been parsed once by the
+   real call path; warning checks must not allocate labels, locals or types. */
+int pf_argcheck(int ft, int which, int at) {
+    char fb[4096]; int n; int k; int c; int lng; int arg;
     if (warnall == 0) return 0;
-    save = tp; nsave = nout; isave = nibuf; psave = npool; pesave = poolend;
     n = decode(ft, fb, sizeof(fb));
-    if (panic) return 0;
-    tp = ft + 1;
-    k = 0;
+    if (panic || which == 0) return 0;
+    k = 0; arg = 0;
     while (k < n) {
         c = fb[k] & 255;
         if (c != 37) { k = k + 1; continue; }
         k = k + 1;
         while (k < n) { c = fb[k] & 255; if (c == 45 || c == 43 || c == 32 || c == 35 || c == 48) { k = k + 1; continue; } break; }
-        if (k < n) { if (fb[k] == 42) { k = k + 1; if (eat(tidx(",", 1))) { expr(); loadval(); } } }
+        if (k < n) { if (fb[k] == 42) { k = k + 1; arg = arg + 1; if (arg == which) return 0; } }
         while (k < n) { if (isdi(fb[k] & 255) == 0) break; k = k + 1; }
         if (k < n) { if (fb[k] == 46) { k = k + 1;
-            if (k < n) { if (fb[k] == 42) { k = k + 1; if (eat(tidx(",", 1))) { expr(); loadval(); } } }
+            if (k < n) { if (fb[k] == 42) { k = k + 1; arg = arg + 1; if (arg == which) return 0; } }
             while (k < n) { if (isdi(fb[k] & 255) == 0) break; k = k + 1; } } }
         lng = 0;
         while (k < n) {
@@ -1802,18 +1796,15 @@ int pf_dryrun(int ft) {
         if (k >= n) break;
         c = fb[k] & 255; k = k + 1;
         if (c == 37) continue;
-        if (eat(tidx(",", 1)) == 0) break;          /* too few arguments: not this check's */
-        at = tp; curcall = 0; expr(); loadval();
-        pf_check(c, lng, at);
-        if (panic) break;
+        arg = arg + 1;
+        if (arg == which) return pf_check(c, lng, at);
     }
-    if (panic == 0) { tp = save; nout = nsave; nibuf = isave; npool = psave; poolend = pesave; }
     return 0;
 }
 
 int do_printf(void) {
     int lng;
-    int t; int k; int n; int c; int m; int id; int pass; int j; int slot[32];
+    int t; int k; int n; int c; int m; int id; int pass; int j; int at; int slot[32];
     char fbuf[4096];
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     if (cur() != T_STR) { printf("printf needs a literal format\n"); __exit(1); }
@@ -1863,7 +1854,10 @@ int do_printf(void) {
             if (c == 37) { lbuf[m] = 37; m = m + 1; k = k + 1; }
             else if (pass == 0) {
                 need(vfind(TOKV, NTOKV, ",", 1), ",");
+                at = tp;
+                if (warnall) curcall = 0;
                 expr(); loadval();
+                if (warnall) pf_check(c, lng, at);
                 if (j >= 32) { printf("printf: more than 32 arguments\n"); __exit(1); }
                 slot[j] = alloc_local(8);
                 es("  @mem.store [r6-"); en(slot[j]); es("], r0\n");
@@ -2033,7 +2027,8 @@ int callres(int si) {
 }
 
 int pf_call(int t) {
-    int n; int k; int psi;
+    int n; int k; int psi; int fmt; int at;
+    fmt = 0 - 1;
     /* a call's value is an i64 on the type axis until return types are
        tracked; the fields describe the RESULT, not whatever came before */
     cursize = 8; curuns = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
@@ -2046,7 +2041,10 @@ int pf_call(int t) {
             useit = 1;   /* printf is an ordinary call whenever <stdio.h>'s is there */
         } }
         if (ps >= 0) { if (symvar[ps]) { if (kind(tp + 1) != T_STR) useit = 1; } }
-        if (kind(tp + 1) == T_STR) pf_dryrun(tp + 1);
+        if (warnall && kind(tp + 1) == T_STR) {
+            fmt = tp + 1; pf_argcheck(fmt, 0, fmt);
+            if (panic) return 0;
+        }
         if (useit == 0) return do_printf();
         /* else: an ordinary variadic call on <stdio.h>'s printf */
     }
@@ -2162,7 +2160,10 @@ int pf_call(int t) {
     if (psi >= 0) symused[psi] = 1;
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (cur() == T_EOF) break;
+        at = tp;
+        if (fmt >= 0 && n > 0) curcall = 0;
         expr(); loadval();
+        if (fmt >= 0 && n > 0) pf_argcheck(fmt, n, at);
         if (curstruct >= 0) { if (curptr == 0) { if (curelem == 0) stemp(curstruct); } }
         argconv(psi, n);
         push(); n = n + 1;

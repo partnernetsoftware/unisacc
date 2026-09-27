@@ -1,54 +1,59 @@
-"""Reference printf format preflight and pf_check in model actions.
-Arguments are parsed for their types; emitted tape and literal-pool cursor
-are rewound before the real call. Diagnostics and reference label allocation
-are retained. This is the existing warning policy, not full format checking.
+"""Format checks consume the real argument type; no speculative parsing.
+The format scanner preserves the existing warning policy, not full printf
+validation. Conversion identity comes from bytes, never from emitted tape.
 """
 from tokenlocations import TOKEN_POS
 from unusedwarnings import NAME_TOKEN
 
 def install(E,P,DBL,FLT,FPB,SBB):
     g=E.g
-    saved=('wf_start','wf_mark','wf_pool','wf_blob','wf_offset','wf_long','wf_char','wf_at',
-           'ips','ipe','v','sys','pfblob')
-    # Unit isolation can rename the carried static printf. The public source
-    # spelling, not its internal symbol suffix, selects the reference check.
-    P('WF.entry').a(('LDX','wf_nametok','ips',NAME_TOKEN),('LDX','wf_namepos','wf_nametok',TOKEN_POS),('INPUSH','diag_source'),('JUMP','wf_namepos')).goto('WF.name0')
+    saved=('wf_start','ips','ipe','v','sys','pfblob')
+    # Prepare only a format blob, keyed by the call's token position. No
+    # expression is speculatively parsed and no semantic state is rewound.
+    P('WF.entry').a(('LDI','wf_zero',0),('STX','tpos',51<<40,'wf_zero'),('LDX','wf_nametok','ips',NAME_TOKEN),('LDX','wf_namepos','wf_nametok',TOKEN_POS),('INPUSH','diag_source'),('JUMP','wf_namepos')).goto('WF.name0')
     for i,c in enumerate(b'printf'):
         g.on('WF.name'+str(i),[c],'WF.name'+str(i+1),[('ADV',)])
         g.els('WF.name'+str(i),'WF.notname')
     g.on('WF.name6',list(b'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789'),'WF.notname',[])
     g.els('WF.name6','WF.begin',[('INPOP',)])
     P('WF.notname').a(('INPOP',)).ret()
-    P('WF.begin').vpush(*saved).a(('COPYW','wf_start','tpos'),('OLEN','wf_mark'),('COPYW','wf_pool','sk')).call('NEXT').tok({E.TK_STR:'WF.literal'},'WF.finish')
-    P('WF.literal').call('FMT.decode').a(('COPYW','wf_blob','pfblob')).call('NEXT').a(('INPUSH','wf_blob')).goto('WF.scan')
+    P('WF.begin').vpush(*saved).a(('COPYW','wf_start','tpos')).call('NEXT').tok({E.TK_STR:'WF.literal'},'WF.finish')
+    P('WF.literal').call('FMT.decode').a(('STX','wf_start',51<<40,'pfblob')).goto('WF.finish')
+    P('WF.finish').a(('JUMP','wf_start')).call('NEXT').vpop(*saved).ret()
+
+    # The real argument was already parsed. wf_index is one-based (the
+    # ordinary call's argument zero is the format itself).
+    P('WF.reset').branch({1:'RET'},'WF.resetindex',[('CMPI','wf_format',0)])
+    P('WF.resetindex').branch({1:'RET'},'WF.resetcall',[('CMPI','wf_index',0)])
+    P('WF.resetcall').a(('LDI','wi_called',0)).ret()
+    P('WF.argcheck').branch({1:'RET'},'WF.index',[('CMPI','wf_format',0)])
+    P('WF.index').branch({1:'RET'},'WF.scanbegin',[('CMPI','wf_index',0)])
+    P('WF.scanbegin').a(('LDI','wf_count',0),('INPUSH','wf_format')).goto('WF.scan')
     g.on('WF.scan',[37],'WF.flags',[('ADV',)])
-    g.on('WF.scan',[256],'WF.endfmt',[('INPOP',)])
+    g.on('WF.scan',[256],'WF.stop',[])
     g.els('WF.scan','WF.scan',[('ADV',)])
     g.on('WF.flags',list(b'-+ #0'),'WF.flags',[('ADV',)])
     g.els('WF.flags','WF.width')
-    g.on('WF.width',[42],'WF.widtharg',[('ADV',),('MARK','wf_offset'),('INPOP',)])
+    g.on('WF.width',[42],'WF.widtharg',[('ADV',),('ALUI','add','wf_count','wf_count',1)])
     g.els('WF.width','WF.digits')
-    P('WF.widtharg').call('WF.star').a(('INPUSH','wf_blob'),('JUMP','wf_offset')).goto('WF.digits')
+    P('WF.widtharg').branch({1:'WF.stop'},'WF.digits',[('CMP','wf_count','wf_index')])
     g.on('WF.digits',range(48,58),'WF.digits',[('ADV',)])
     g.on('WF.digits',[46],'WF.precision',[('ADV',)])
     g.els('WF.digits','WF.length0')
-    g.on('WF.precision',[42],'WF.precarg',[('ADV',),('MARK','wf_offset'),('INPOP',)])
+    g.on('WF.precision',[42],'WF.precarg',[('ADV',),('ALUI','add','wf_count','wf_count',1)])
     g.els('WF.precision','WF.precdigits')
-    P('WF.precarg').call('WF.star').a(('INPUSH','wf_blob'),('JUMP','wf_offset')).goto('WF.precdigits')
+    P('WF.precarg').branch({1:'WF.stop'},'WF.precdigits',[('CMP','wf_count','wf_index')])
     g.on('WF.precdigits',range(48,58),'WF.precdigits',[('ADV',)])
     g.els('WF.precdigits','WF.length0')
     P('WF.length0').a(('LDI','wf_long',0)).goto('WF.length')
     g.on('WF.length',list(b'hLzjt'),'WF.length',[('ADV',)])
     g.on('WF.length',[108],'WF.length',[('LDI','wf_long',1),('ADV',)])
     g.on('WF.length',[37],'WF.scan',[('ADV',)])
-    g.on('WF.length',[256],'WF.endfmt',[('INPOP',)])
-    g.els('WF.length','WF.conversion',[('BYTE','wf_char'),('ADV',),('MARK','wf_offset'),('INPOP',)])
-    P('WF.star').tok({',':'WF.stararg'},'RET')
-    P('WF.stararg').call('NEXT').call('EXPR').ret()
-    P('WF.conversion').tok({',':'WF.arg'},'WF.finish')
-    P('WF.arg').call('NEXT').a(('COPYW','wf_at','tpos'),('LDI','wi_called',0)).call('EXPR').call('WF.check').a(('INPUSH','wf_blob'),('JUMP','wf_offset')).goto('WF.scan')
-    P('WF.endfmt').goto('WF.finish')
-    P('WF.finish').a(('OCUT','wf_discard','wf_mark'),('COPYW','sk','wf_pool'),('JUMP','wf_start')).call('NEXT').vpop(*saved).ret()
+    g.on('WF.length',[256],'WF.stop',[])
+    g.els('WF.length','WF.conversion',[('BYTE','wf_char'),('ADV',),('ALUI','add','wf_count','wf_count',1)])
+    P('WF.conversion').branch({1:'WF.matched'},'WF.scan',[('CMP','wf_count','wf_index')])
+    P('WF.stop').a(('INPOP',)).ret()
+    P('WF.matched').a(('INPOP',)).vpush('td','tb').call('WF.check').vpop('td','tb').ret()
 
     P('WF.check').branch({1:'RET'},'WF.classify',[('CMPI','wi_called',1)])
     P('WF.classify').a(('LDI','wf_ptr',0),('LDI','wf_fn',0),('LDI','wf_float',0)).branch({1:'WF.base'},'WF.pointer',[('CMPI','vt',0)])

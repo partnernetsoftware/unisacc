@@ -156,6 +156,9 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
           ('call-exempt','int g(void){return 1;}int f(void){printf("%s",g());return 0;}'),
           ('nested','int f(void){printf("%d",printf("%ld",1));return 0;}'),
           ('conditional','int f(int k){printf("%ld",k?1:2);return 0;}'),
+          ('conditional-marker','int f(int k){printf("%d",k>1?k*2:k+1);printf("marker");return 0;}'),
+          ('nested-format-order','int f(void){printf("%ld %d",1,printf("%ld",2));return 0;}'),
+          ('struct-temp','struct S{int x;};struct S g(void){struct S s={3};return s;}int use(struct S s){return s.x;}int f(void){printf("%d",use(g()));return 0;}'),
           ('fnvalue','int g(void){return 1;}int f(void){printf("%s %d",g,g);return 0;}'),
           ('fnptr','int f(int (*p)(void)){printf("%d",p);return 0;}'),
           ('struct','struct S{int x;};int f(void){struct S s;s.x=1;printf("%d",s);return 0;}'),
@@ -199,6 +202,7 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
         quiet=run([t/'ref',f,'-S','-o','-']);assert quiet.returncode==0,(name,quiet.stderr)
         assert baseline.returncode==0 and baseline.stdout==quiet.stdout and not baseline.stderr,(name,'quiet tape')
         assert got.stdout==ref.stdout,(name,'warning tape')
+        assert ref.stdout==quiet.stdout,(name,'-Wall changed tape')
         assert got.stderr==ref.stderr,(name,ref.stderr,got.stderr)
         if ('[-W'+category+']').encode() in ref.stderr: positives+=1
         print(category+' warning',name,'tape and diagnostics match',flush=True)

@@ -4445,3 +4445,13 @@ cc报告switch超过256项静默误编译、-Wall的格式解码超过4096字节
 本轮冻结树私有UA `/tmp/unisacc-bounds-private` SHA256 e0c574ddb56036d3ffca04cfc364c612ab07610f46a5c4170e514c994e503cc1。完整门禁：双槽 `/tmp/unisacc-bounds-full`115/115，加独占 `/tmp/unisacc-bounds-core`1/1（48.31s）；程序核对请求与结果并集恰好116项、各一次、全rc0，UA哈希未变。每窗口≤55s。产品C9957/57、difftest_o396/396、fat133、chain120；新.com 1,356,272 B，SHA256 38c9ff7782c4607f91ace663fc43693582ca6c104ef7e011c227a1a45cc19c4c。定向首轮com-parserbounds因Python直接exec APE失败，已修为MZ走sh，并在新队列重验；旧失败保留。未发布、未推送。
 
 后续独立审查：cc提供pf_dryrun的-Wall标签编号漂移复现，指出nlab/frameoff/framemax/curcall未回滚。当前仅确认报告，下一片需核实完整状态副作用，不能以只保存四项就宣称无遗漏；重复case诊断、系统调用隔离分支仍未合入。
+
+### 格式警告单次解析（进行中）
+
+审查pf_dryrun：表达式试走可修改标签、帧、类型/符号注册等状态，补四项回滚不足以覆盖。改为实际参数解析后读取格式中的对应转换并检查已有类型，不再为警告调用expr；普通printf与未声明fallback两条路径均接入。模型警告路径同步删除试走，保留既有诊断分类。用-Wall前后tape一致、嵌套调用/临时对象/匿名类型及warning对照验证，独立记录诊断顺序变化。
+
+格式警告收尾：C删除pf_dryrun，pf_argcheck仅解码/扫描格式，实际参数expr后检查已有类型；fallback也在真实解析处检查。模型WF.entry只准备格式，WF.argcheck读取已有vt/vb，无EXPR试走、OCUT或池游标回滚；通用执行器未改。原警告分类保留，嵌套警告按真实解析顺序输出，不再重复试走。代码量不是减少：front_parse +23/-22；formatwarnings +29/-24，gen2 +17/-3。
+
+新增formatonce（普通与.com）：标签分支、结构体临时量、复合字面量+匿名struct、嵌套printf、sizeof内enum，五类×O0/O1/O2，-Wall前后tape完全相同，实际输出同host cc。旧f004934私有参考运行该测试以1失败（labels/O0/-Wall changed tape），证明回归能抓住旧缺陷。最初argc用例因参考-run与原生argc不同而失败，已改volatile输入，不把它算产品缺陷。模型格式用例36→39，全部tape与完整诊断一致；所有警告检查额外要求quiet与-Wall tape相同。
+
+冻结完整门禁：`/tmp/unisacc-format-full`117项双槽，加`/tmp/unisacc-format-core`独占1项47.87s，核对并集恰好118项各一次、全rc0。各窗口≤55s，最大单项51.15s。C9957/57、difftest_o396/396、fat133、chain120；私有UA SHA256 313bfba3b8f099ebc7765a67a9aa389153473cf38af857ecd39ae9702922e8b9。新.com 1,356,064 B，SHA256 fe72c95fa7392f69ff4dc9479f77960b8dd9ecb46292e3a6a4b99005abfee380。无推送/发布/默认模型切换。模型C99剩余VLA与复合字面量仍未闭合；继续迁移，不以本次警告修复作为重构完成。
