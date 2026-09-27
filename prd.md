@@ -4941,3 +4941,9 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 联合shape候选实测（9a38e3b）：17组180条固定shape控制迁TSV，共用DIM/PX/SH.WIDTH/SH.RESULT，compound结果保持同一形状；gen2净增36、TSV净增277、probe34，总增347，属于真实能力补齐而非代码缩减。父新候选6,019,097 B，sha256 d07fed1dd459731bd6b7a5a00e24aefa1f455de44b6890d639a3c1cc891199f0，/tmp/unisacc-shape-candidate-928；E3及六lower重建，其余模型源同7fd1514（git diff核对无变化），package5,835,785 B。实际TOOLS_UA原11项目全11通过、0wrong/unsupported/skip，首次闭合这批真实工具完整网络链路。并行resources包括新增array_shapes与compound两probe，经ASM网络内存O0/O2及native同host；队列2/3用41.11秒，rc75同队列续跑chain167/167用18.43秒，最终3/3（/tmp/unisacc-shape-acceptance-gate-928）。联合E3旧keep316/316实际net同修正参考，0diff/refuse/toolfail；两既有E2拒绝b_pp3/b_ppif用参考预处理供E1，明确不算E2覆盖。证据/tmp/unisacc-shape-keep-928。数组typedef附加suffix、T**、T*成员、T*函数返回、rank9仍拒绝；完整产品验收/默认切换未完成。
 
 自举测试收尾（3203b8b）：本地N1=N2=N3及cross5/5主树复跑通过；正确字节但rc7、rc0空输出、无host均被故障控制拒绝。Windows改显式单目标入口，host55秒进程组/guest30秒编译及kill/exec和poll共享35秒，未启动VM，不声称远端验证。
+
+实际模型候选扩验：C99 57/57、CLI64、run12通过；difftest_o整体在并行队列53秒触限rc142，未算通过。原脚本未支持分片、只在末尾汇总；按用户队列效率要求，下一小任务复用SHARD契约分四片，固定清单统一选择并保证各项恰好覆盖，保持三个优化级与cc比较；编译/执行逐步有界，先检查编译退出码，不增加超时。模型源冻结，本步只改测试调度。
+
+真实tools11闭合后下一并行收口：保持候选与兼容清单，E3标量转换完整共享过程组、ARM基础编码/MOVIMM完整控制组分别迁既有声明；动态type/tyinfo/FPU/ENCSPEC/word序列保持真实来源与单份共享，删除替代Python分支，不扩语法与框架。各小任务8分钟，原图逐状态/后继/动作相等及实际网络验收；测试分片任务独占tests文件，父不在运行门禁期间改树。
+
+联合候选六目标补验：9a38e3b网络包对hello在lnx/osx/win×arm64/x86_64生成的六份镜像，均与修正私有C参考逐字节相同，/tmp/unisacc-shape-candidate-928/six-target-acceptance.json。该项为交叉生成，不能代替六平台原生执行。
