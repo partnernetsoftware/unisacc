@@ -287,47 +287,10 @@ def build_hx(g):
 
 
 
-def build_cli(g, NC, locations=False):
-    """Raw NUL-separated CLI values from named byte resources. All language
-    decisions live here: -include source prefixes, MDEF bodies, and -U masks.
-    No CLI directive text is inserted for -D/-U, so source positions stay put.
-    """
-    g.els("CLI.FLAGS", "CLI.FLAGS.have", sbconst("\0cli/nostdinc")+
-          [("SBFIND","CLI_B"),("BLEN","CLI_NOSTD","CLI_B"),("CMPI","CLI_NOSTD",0)])
-    g.r("CLI.FLAGS.have", {1:("CLI.INC",[("LDI","CLI_NOSTD",0)]),
-                                (0,2):("CLI.INC",[("LDI","CLI_NOSTD",1)])})
-    g.els("CLI.INC", "CLI.INC.have", sbconst("\0cli/includes") + [("SBFIND", "CLI_B"), ("RLD", "CLI_B")])
-    g.r("CLI.INC.have", {0: ("P0S", []), tuple(range(1,257)): ("CLI.INC.next", [("INPUSH", "CLI_B")])})
-    g.on("CLI.INC.next", [EOF], "P0S", [("INPOP",), ("LDI", "CLI_Z", 0), ("XLEN", "CLI_E"),
-                                         ("SPAN2", "CLI_Z", "CLI_E"), ("SWAP",)])
-    g.els("CLI.INC.next", "CLI.INC.path", [("OUT", c) for c in b'#include "'])
-    g.on("CLI.INC.path", [0], "CLI.INC.next", [("ADV",), ("OUT", 34), ("OUT", 10)] + ([("ALUI","add","CLI_PRELINES","CLI_PRELINES",1)] if locations else []))
-    g.on("CLI.INC.path", [EOF], "DEAD", NC("unterminated CLI include"))
-    g.els("CLI.INC.path", "CLI.INC.path", [("COPY",), ("ADV",)])
+def build_cli(g, locations=False):
+    install_rules(g, "cli", {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']},
+        {"location_line": [("ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1)] if locations else []})
 
-    for what,key,done in [('D','defines','P3PD0'),('U','undefines','P3L0')]:
-        q='CLI.'+what
-        g.els(q, q+'.have', sbconst('\0cli/'+key)+[("SBFIND","CLI_B"),("RLD","CLI_B")])
-        g.r(q+'.have', {0:(done,[]),tuple(range(1,257)):(q+'.next',[("INPUSH","CLI_B")])})
-        g.on(q+'.next',[EOF],done,[("INPOP",)])
-        g.on(q+'.next',AL,q+'.name',[("MARK","CLI_S"),("ADV",)])
-        g.els(q+'.next','DEAD',NC('invalid CLI macro name'))
-        g.on(q+'.name',ID,q+'.name',[("ADV",)])
-        g.els(q+'.name',q+'.end',[("MARK","CLI_E"),("INTERN","NID","CLI_S","CLI_E")])
-        if what=='D':
-            sub,pu=g.call('MDEF',q+'.store')
-            g.on(q+'.end',[0],sub,sbconst('1')+[("SBSAVE","CLI_BODY")]+pu)
-            g.on(q+'.end',[61],q+'.body',[("ADV",),("MARK","CLI_S")])
-            g.els(q+'.end','DEAD',NC('invalid CLI macro name'))
-            g.on(q+'.body',[0],sub,[("MARK","CLI_E"),("BLOBSAVE","CLI_BODY","CLI_S","CLI_E")]+pu)
-            g.on(q+'.body',[EOF],'DEAD',NC('unterminated CLI macro body'))
-            g.els(q+'.body',q+'.body',[("ADV",)])
-            g.els(q+'.store',q+'.next',[("STX","EA",F_BODY,"CLI_BODY"),("ADV",)])
-        else:
-            g.on(q+'.end',[0],q+'.found',[("ALUI","add","a","NID",NEWB),("LDX","t","a",0),
-                                          ("ALUI","sub","M","t",1),("CMPI","M",0)])
-            g.els(q+'.end','DEAD',NC('invalid CLI undefine'))
-            g.r(q+'.found',{0:(q+'.next',[("ADV",)]),(1,2):(q+'.next',ea('EA','M')+[("LDI","t",0),("STX","EA",F_TO,"t"),("ADV",)])})
 
 
 def build(target="lnx/x86_64", locations=False):
@@ -356,7 +319,7 @@ def build(target="lnx/x86_64", locations=False):
     init += sbconst("__VA_ARGS__") + [("SBINTERN", "ID_VA")]
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
     g.els("START", "CLI.FLAGS", init)
-    build_cli(g, NC, locations)
+    build_cli(g, locations)
 
     # Declared text normalisation; only layout and inter-stage links are bound here.
     install_rules(g, "text", {"SPLB": SPLB, "after_comments": "AISTART" if AUTOINC else "P3START"})
