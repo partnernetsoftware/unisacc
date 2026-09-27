@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: c839770, after parameterized operator, token reader, automatic-header and ABI-source rules. This is a source
+Current source checkpoint: ac11995, after shared precedence, ARM fusion and image-control rules. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -13,11 +13,11 @@ remain shared inputs, not copied answers.
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
-| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `type-entry/default/follow`, `operator-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, literals, diagnostics, warnings, units and locations |
+| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `type-entry/default/follow`, `operator-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, literals, diagnostics, warnings, units and locations |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
-| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`, `armfuse.py`; target/escape/layout bindings in `data.py` |
+| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `armfuse-*`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`; ARM destination-shape selection and dynamic bindings; target/escape/layout bindings in `data.py` |
 | E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`; catalog opcode facts | x86 encoding and setup; ARM core/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
-| E6 images | Existing target layout facts | ELF, Mach-O, PE, memory layout and signature construction in `enc/` |
+| E6 images | `enc/elfimage-byte/result.tsv` shared input, relocation, trim and output control; existing target layout facts | Format-specific Mach-O/PE/signature construction; ELF field and import enumeration, child installation and dynamic bindings in `enc/` |
 
 `finite_rules.py` expands declared observations, bindings and action sequences;
 it must not acquire compiler-specific predicates. The retired grammar in

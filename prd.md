@@ -4897,3 +4897,7 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第十批验收（c839770）：完整OPX/CKM/RESD共享参数规则、固定字符/数字token读取、自动引头定义/使用扫描、ABI参数来源关系已合入。Python净减126行，TSV增加470行，源合计净增344。父拒绝ABI机械包装，并删未读取的参数index列，行序唯一决定位置；ABI余控制尚在，不称整组完成。OPX用共享查询/浮点体/指针类别/整数尾，不逐operator复制；五模式全图和动态AX/TYINT/FPU/optext扰动相同，3实际网络探针通过。父双槽6/6全rc0，20.29秒，chain167/167、三lower、多单元位置和警告诊断全绿。本批未重打.com，最新产物仍2273f3e；上一产物补测两个真实编译单元含浮点调用和INT64_MIN，O0/O1/O2三次同cc，证据/tmp/unisacc-parallel-ninth-candidate/multiunit-acceptance.json。
 
 共享token读取审计边界：直接reader把裸0x当整数0是既有行为。父仅编译最小源int main(void){return 0x;}验证：当前私有参考与2273f3e真实候选均rc0，宿主cc rc1，未运行该不合法程序；不是迁移新引入，也不是C99正确性的证据，单列既有诊断缺口（/tmp/unisacc-malformed-token-evidence.json）。
+
+第十一批并行决定：E3完整ladder优先级/短路组，lower armfuse完整融合组，elfimage共享输入/重定位/写出控制完整组迁现有声明。动态prec/opinfo/SHAPE/布局/byte等绑定原来源；E/C或双架构必须共享参数化规则，不逐实例复制。隔离基线f253fd0，每窗约8分钟、子步骤60秒；父审查实际逻辑替换，拒绝机械包装膨胀，集中验证。
+
+第十一批验收（ac11995）：三小代理隔离并行完成ladder、ARM融合、共享镜像控制。Python分别净减10/30/56，共96行；TSV新增70/214/191，共475行，源合计净增379，不能称整体瘦身。E/C优先级共享24参数规则；ARM按动态SHAPE共用匹配模板；镜像六wrapper共用187规则。各路完整图和动作核对相同，优先级/token/SHAPE扰动保持新旧一致。父冻结后双槽队列10/10全部rc0，33.55秒：chain实际网络167/167、ARM lower、双ELF、双Mach-O含本机执行、双PE、sparse、warnings。队列证据/tmp/unisacc-parallel-eleventh-gate。保留ABI/SYS主体、ARM目标形状选择、ELF字段/import枚举及格式子安装，不称全部迁完；本批未重打.com，实际候选仍2273f3e。
