@@ -16,19 +16,28 @@ def install(E, fail, code_size='endo'):
     u64(E,'ML.argv',b'\0process/argv','ml_argv','ml_hasargv',fail)
     u64(E,'ML.text',b'\0memory/text','ml_text','ml_hast',fail)
     u64(E,'ML.data',b'\0memory/data','ml_data','ml_hasd',fail)
-    P('LAYOUT').call('LAY.default').call('ML.mode').branch({1:'ML.file'},'ML.bind',[('CMPI','memory_mode',0)])
-    P('ML.file').a(('ALU','or','ml_args','has_argc','has_argv')).branch({1:'RET'},fail,[('CMPI','ml_args',0)])
-    P('ML.bind').goto('ML.bases')
-    P('ML.bases').call('ML.argv').branch({1:fail},'ML.addresses',[('CMPI','ml_hasargv',0)])
-    P('ML.addresses').call('ML.text').call('ML.data').branch({1:'ML.no_text'},'ML.have_text',[('CMPI','ml_hast',0)])
-    P('ML.no_text').branch({1:'ML.imports'},fail,[('CMPI','ml_hasd',0)])
-    P('ML.have_text').branch({1:fail},'ML.apply',[('CMPI','ml_hasd',0)])
-    P('ML.apply').a(('COPYW','text_va','ml_text'),('COPYW','data_va','ml_data'),('A64I','sub','data_shift','data_va',DATA_BASE)).goto('ML.imports')
-    P('ML.imports').branch({1:'ML.windows'},'RET',[('CMPI','target_os',3)])
-    p=P('ML.windows').a(('A64I','add','ml_iatoff',code_size,7),('A64I','and','ml_iatoff','ml_iatoff',-8),('A64','add','imp_base','text_va','ml_iatoff'))
+    from finite_rules import install as install_rules, load as load_rules
+    root = Path(__file__).parent
+    bindings = dict(fail=fail, DATA_BASE=DATA_BASE, code_size=code_size)
+    for line in (root/'memorylayout-names.tsv').read_text().splitlines():
+        if line and not line.startswith('#'):
+            name, owner, kind = line.split('\t')
+            bindings[name] = P(owner).fresh(kind)
+    install_rules(E.g, root, 'memorylayout', bindings=bindings, section='base')
+    pending = load_rules(root/'memorylayout-result.tsv', {}, bindings=bindings,
+                         section='prefix')['actions'][0][1]
+    current = 'ML.windows'
     for i,name in enumerate(IMPORTS):
         label='ML.import.'+str(i); value='ml_imp_'+str(i)
         u64(E,label,b'\0process/import/'+DLL.lower()+b'/'+name.encode(),value,'ml_found',fail)
-        p.call(label).branch({1:fail},label+'.present',[('CMPI','ml_found',0)])
-        p=P(label+'.present').branch({1:fail},label+'.nonzero',[('C64',value,'zero')]);p=P(label+'.nonzero')
-    p.ret()
+        resume = P(current).fresh('r')
+        found = P(resume).fresh('b')
+        nonzero = P(label+'.present').fresh('b')
+        install_rules(E.g, root, 'memorylayout', section='import',
+                      bindings=dict(bindings, entry=current, read=label, value=value,
+                                    resume=resume, found=found, nonzero=nonzero,
+                                    present=label+'.present', next=label+'.nonzero'),
+                      sequences={'pending': pending})
+        current, pending = label+'.nonzero', []
+    install_rules(E.g, root, 'memorylayout', section='finish',
+                  bindings={'entry': current}, sequences={'pending': pending})
