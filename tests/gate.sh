@@ -160,9 +160,21 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 job gate-infra python3 ./tests/queuecheck.py
 if [ "$COM" = 1 ]; then
-    [ "$LIST" != 0 ] || [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
-    for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
-    job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
+    PRODUCT=${MODEL_COM-$R/unisacc.com}
+    case "$PRODUCT" in /*) ;; *) PRODUCT="$R/$PRODUCT";; esac
+    if [ "$LIST" = 0 ]; then
+        [ -f "$PRODUCT" ] && [ -x "$PRODUCT" ] || { echo "gate: --com needs an executable MODEL_COM file: $PRODUCT" >&2; exit 1; }
+        product_hash() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$PRODUCT"; }
+        PRODUCT_SHA=$(product_hash) || exit 1
+        printf 'gate product: %s sha256 %s\n' "$PRODUCT" "$PRODUCT_SHA"
+    fi
+    for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
+    job com-closure UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/closure.sh examples/*.c
+    job com-tools UA="$PRODUCT" UA_RUN="$PRODUCT" TOOLS_UA="$PRODUCT" ./tests/tools.sh
+    for shard in 1 2 3 4; do
+        job com-corpus-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" CORPUS_UA="$PRODUCT" SHARD=$shard/4 FETCH=0 ./tests/corpus.sh
+        job com-difftest_o-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest_o.sh
+    done
 fi
 [ "$LIST" = 0 ] || exit 0
 [ "$n" -gt 0 ] || { echo "gate: no suites executed" >&2; exit 2; }
@@ -170,6 +182,10 @@ wait
 count=$(ls "$O" | wc -l | tr -d ' ')
 [ "$count" -eq "$n" ] || { echo "gate: missing results ($count of $n)" >&2; exit 1; }
 cat "$O"/*
+if [ "$COM" = 1 ]; then
+    PRODUCT_AFTER=$(product_hash) || exit 1
+    [ "$PRODUCT_AFTER" = "$PRODUCT_SHA" ] || { echo 'gate: product changed during acceptance' >&2; exit 1; }
+fi
 bad=$(cat "$O"/* | grep -vc ' rc=0 ')
 echo "gate  suites $(ls "$O" | wc -l | tr -d ' ')   failed $bad   $(( $(date +%s)-T0 ))s wall"
 [ "$bad" -eq 0 ]
