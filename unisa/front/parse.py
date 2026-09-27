@@ -775,8 +775,9 @@ class Walker:
         string literal, *optionally enclosed in braces*.  Read as an ordinary
         brace group instead, `char s[] = {"abc"}` is an array of ONE, and the
         program silently compares a truncated string."""
+        end = 3 if self.peek(2).kind == "," else 2
         if not (self.at("{") and self.peek(1).kind == "str"
-                and self.peek(2).kind == "}" and elem is not None):
+                and self.peek(end).kind == "}" and elem is not None):
             return None
         t = self.peek(1)
         if _wide(t):
@@ -853,6 +854,7 @@ class Walker:
         if ty.kind == "arr" and self._braced_str(ty.to) is not None:
             self.next()                           # `{`  [C99 6.7.8p14]
             self.const_init(sym, ty, at)
+            self.eat(",")
             self.expect("}")
             return
         t = self.peek()
@@ -1343,12 +1345,15 @@ class Walker:
         if ty.kind == "arr" and self._braced_str(ty.to) is not None:
             self.next()                           # `{`  [C99 6.7.8p14]
             self.local_init(ty, off)
+            self.eat(",")
             self.expect("}")
             return
         t = self.peek()
         if t.kind == "str" and not _wide(t) and self._is_charr(ty):
             self.next()
             raw = (t.val.encode("latin-1") + b"\x00")[:ty.size(self.sc.structs)]
+            self.em.emit(self.em.recipe("mem", "zero"), FP, -off,
+                         ty.size(self.sc.structs))
             for i, b in enumerate(raw):
                 self.em.imm(ACC, b)
                 self.em.store(FP, -off + i, ACC, 1)
