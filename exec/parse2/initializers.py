@@ -14,10 +14,11 @@ from pathlib import Path
 from finite_rules import install as install_rules
 
 
-def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS):
+def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS, bitfields):
     bindings = dict(SBB=SBB, LOC=LOC, SSZ=SSZ, SMN=SMN, SMEM=SMEM, MOF=MOF, MPT=MPT, MBS=MBS,
                     MAR=MAR, SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE,
                     SKIPS=SKIPS, UCHAR=E.UNS + 1)
+    bindings.update(bitfields, MSZ=MSZ)
     bindings.update(PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM1=DIM + 1, DIM2=DIM + 2)
     root = Path(__file__).parent
     def rows(name):
