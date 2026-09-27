@@ -40,7 +40,7 @@ help:
 
 # The reference build every suite uses.  -O2: it is run thousands of times.
 ref:
-	@./tests/build_ref.sh
+	@./tests/build_ref.sh "$(UA).c" "$(UA)"
 
 # What to run before saying "it works" -- the checks that are fast enough
 # that there is no excuse not to.
@@ -87,7 +87,7 @@ com:
 
 classic-com: ref
 	@mkdir -p out
-	@python3 -m unisa ape unisacc.c --via $(UA) -O $(OPT) -o out/unisacc-classic.com
+	@python3 -m unisa ape unisacc.c --via "$(UA)" -O $(OPT) -o out/unisacc-classic.com
 	@chmod +x out/unisacc-classic.com
 	@ls -l out/unisacc-classic.com | awk '{printf "  out/unisacc-classic.com  %s B\n", $$5}'
 
