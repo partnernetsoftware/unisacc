@@ -5087,3 +5087,5 @@ E5下一独立完整组为X.id及标识符查找/自增自减/compound更新、T
 并行收口续行：identifier/update 19edc71、errors e43c525、units e1d712a 已交付待父集成。E3下一完整普通U.str/UNARY/deref/S.star/NOARR控制组，明确不碰已由E5交付的U.pinc/U.pdec与START；E4/E5分别只读审计lower/opt及enc/ARM的实际剩余手写规则与既有声明绑定，若无缺口即交清单，不扩语言/框架。父完成startup真实NET检查后批合集成；重型验证两槽，独立私有树静态工作并行。
 
 startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/CKT/SYSCALLS/HEADER/autonames/TYROW联合扰动与迁前图一致且异于基线。真实六阶段NET O2→osx/arm64运行hello/funcname/s77_fpvar三例stdout/rc同host；首跑host因hello无stdio声明失败，裁判显式预包含stdio后重跑通过，s9自定义va_list不作host对照，改用已有s77_fpvar。证据/tmp/unisacc-startup-control-928；gen2 Python净减3行，声明增加另计，不称总码量减少。
+
+四组已合7ebfe09/114444d/b8edf74/ff5e0b5。父联合验证ff5e0b5的plain/errors/both/locations/warnings完整展开图均与70d3952全等，各6.45/8.26/8.50/6.59/6.75秒，分两次≤55秒；证据/tmp/unisacc-joint-finalcontrols-928。这包含errors/update与startup组合，units另有普通/located全图及NET证据，不把五模式检查误称全部包已重建。E3普通解引用组私有并行；E4 lower/opt只读审计未发现新增完整待迁控制，但保留ABI/目标模板选择、事实物化、格式绑定，不宣称Python纯通用loader；报告/tmp/unisacc-lower-opt-source-audit-928.md。默认产品未切换、无推送。
