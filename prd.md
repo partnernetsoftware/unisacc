@@ -3127,8 +3127,31 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   docs check passes. `tests/cli.sh`'s six legacy 120 s child limits were reduced
   to 60 s. Reference CLI remains **64/64**. Running the same suite directly on
   the assembly/model container gives **53 pass / 11 fail**, not product parity:
-  math-header forward call, ignored build flags, -l/-L/-x, -nostdinc's two cases,
+  math-header coverage, ignored build flags, -l/-L/-x, -nostdinc's two cases,
   dependency target/header output, undefined-function wording, --version,
   -dump-tokens, missing-file wording. Logs `/tmp/unisacc-carried-cli-{reference,next}.log`.
   This is the concrete next acceptance list; the 85-suite green result does
   not mean this new container passed the old product's complete CLI suite.
+
+
+### Model CLI follow-up: sqrt builtins (local acceptance)
+
+- The carried math-header rejection was not evidence of a forward-declaration
+  defect: E3 lacked `__builtin_sqrt` and `__builtin_sqrtf`. Their parser-delta
+  paths now select the product's signed/unsigned/double/float conversions and
+  square-root operation. FPU spellings are read from irsel; f32 access width
+  comes from tyinfo. No executor operation or host source parser was added.
+- Before extending keep-e3, all old **240/240** accepting C-executor tapes were
+  byte-identical to the stamped reference. The new `builtin_sqrt.c` also agrees
+  on the Python and C executors; keep is now 241. It covers nested builtins,
+  float loads, signed integers, u64, and both result precisions. Host cc and the
+  rebuilt assembly/model container at O0/O1/O2, in-memory and native execution,
+  all return the independently expected 3 on macOS arm64.
+- Logs: `/tmp/unisacc-sqrt-keep.log`, `/tmp/unisacc-sqrt-cli.log`; scratch
+  reproduction scripts `/tmp/unisacc-sqrt-{keep,run}.py`. The candidate is
+  `/tmp/unisacc-sqrt-candidate/unisacc-next.com`, not the shipped product.
+- CLI remains **53/64**: full math.h now reaches `isnan`'s double `!=`, which
+  E3 still refuses. This batch is a local capability repair, not closure of
+  the complete header test. Other ten CLI failures are unchanged. No full
+  gate or cross-platform rerun is claimed for this batch. cc-unisacc remains
+  paused; no push or release.

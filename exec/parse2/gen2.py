@@ -408,7 +408,7 @@ PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double param
 FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
         "<": "flt64 r0, r1, r0", ">": "flt64 r0, r0, r1", "<=": "fle64 r0, r1, r0", ">=": "fle64 r0, r0, r1",
         "==": "feq64 r0, r1, r0"}   # measured (the reversed forms for > >=); != not measured: not covered   # double: stored, passed, returned and va_arg'd as a plain 64-bit move (measured, old E3 p63)
-FLT = E.FLT   # float: only `*p = (float) d` (cvtds, .st 4 -- measured by the old E3); any other float value is not covered
+FLT = E.FLT   # f32 descriptor; loads/stores and sqrt builtins are covered, binary float arithmetic remains guarded
 TYPEW = {"type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
@@ -419,7 +419,9 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
     q = P(name)
     q.branch({(1, 2): name + ".8"}, name + ".b", [("CMPI", "vt", 1)])
     P(name + ".b").branch({1: name + ".8"}, name + ".d", [("CMPI", "vb", 8)])
-    P(name + ".d").branch({1: name + ".8"}, name + ".n", [("CMPI", "vb", DBL)])
+    P(name + ".d").branch({1: name + ".8"}, name + ".f", [("CMPI", "vb", DBL)])
+    P(name + ".f").branch({1: name + ".f32"}, name + ".n", [("CMPI", "vb", FLT)])
+    P(name + ".f32").o(tabn % TYINFO["f32"][0]).ret()
     P(name + ".8").o(tab8).ret()
     q = P(name + ".n")
     # the width and the zero-extension mask come from tyinfo (size, uns), row by row
@@ -680,6 +682,8 @@ def build():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sy%d" % k))
     for k, nm in enumerate(("va_start", "va_arg", "va_end")):
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "va%d" % k))
+    for k, nm in enumerate(("__builtin_sqrt", "__builtin_sqrtf")):
+        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sqrt%d" % k))
     p.a(("SBCLR",), [("SBOUT", c) for c in b"__argc"], ("SBINTERN", "acid"), ("SBCLR",), [("SBOUT", c) for c in b"__argv"], ("SBINTERN", "avid"))
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
@@ -1570,8 +1574,24 @@ def build():
         P("CL.s%d" % k).a(("LDI", "sys", k)).goto("CL.ok")
     P("CL.b%d" % (len(SYSCALLS) + 1)).branch({1: "CL.ac"}, "CL.av0", [("CMP", "v", "acid")])
     P("CL.ac").call("NEXT").expect(")").o("  .argc r0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
-    P("CL.av0").branch({1: "CL.av"}, "CL.def", [("CMP", "v", "avid")])
+    P("CL.av0").branch({1: "CL.av"}, "CL.sqrt0", [("CMP", "v", "avid")])
     P("CL.av").call("NEXT").call("EXPR").expect(")").o("  .argv r0, r0\n").a(("LDI", "vt", 1), ("LDI", "vb", 1)).call("NEXT").ret()
+    # Hardware sqrt builtins, as in product fkind/fconv. Conversion selection
+    # belongs to the parser delta; opcode spellings come from irsel.
+    fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
+    for k, (base, suffix) in enumerate(((DBL, "d"), (FLT, "s"))):
+        tag = "SQ%d" % k
+        P("CL.sqrt%d" % k).branch({1: tag}, "CL.sqrt1" if k == 0 else "CL.def", [("CMP", "v", "sqrt%d" % k)])
+        P(tag).call("NEXT").call("EXPR").expect(")").branch({1: tag + ".base"}, tag + ".u", [("CMPI", "vt", 0)])
+        P(tag + ".base").branch({1: tag + ".d"}, tag + ".float", [("CMPI", "vb", DBL)])
+        P(tag + ".float").branch({1: tag + ".s"}, tag + ".int", [("CMPI", "vb", FLT)])
+        P(tag + ".int").branch({1: tag + ".u"}, tag + ".i", [("CMPI", "vb", UNS + 8)])
+        for source in ("d", "s", "i", "u"):
+            q = P(tag + "." + source)
+            if source != suffix:
+                q.o("  %s r0, r0\n" % fpu[source + "2" + suffix])
+            q.goto(tag + ".emit")
+        P(tag + ".emit").o("  %s r0, r0\n" % fpu[suffix + "sqrt"]).a(("LDI", "vt", 0), ("LDI", "vb", base)).call("NEXT").ret()
     P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.def1"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
     P("CL.def1").a(("LDX", "t", "v", E.VAR)).branch({1: "CL.vok"}, "CL.ok", [("CMPI", "t", 1)])
     P("CL.vok").a(("LDI", "sys", 200)).goto("CL.ok")
