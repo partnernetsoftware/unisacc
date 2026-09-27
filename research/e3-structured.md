@@ -1,7 +1,14 @@
 # E3, structured: grammar table + attribute tables + templates + a generic driver
 
-Status: design (2026-09-26). The current E3 (`exec/parse/gen.py`) stays as the
-verified reference delta; this is its replacement plan.
+Status: unfulfilled design, audited 2026-09-27. `exec/parse2/gen2.py`
+is now the active generator, but still contains handwritten state/action
+rules. The separate grammar/template inputs below were proposed, not
+implemented. Runtime constructed-model execution is a separate achievement.
+
+The LL(1), additive-size and one-production-plus-template statements below
+are design hypotheses, not established properties of C or this generator.
+Typedef disambiguation, scope and type constraints require explicit attribute
+and storage rules. Do not cite this document as implementation evidence.
 
 ## Why
 

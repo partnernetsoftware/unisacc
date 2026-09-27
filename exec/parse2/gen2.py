@@ -1,24 +1,18 @@
-"""E3, structured (research/e3-structured.md): the delta is GENERATED from
-declared data -- a grammar, attribute tables (the gold stages), and tape
-templates -- by one generic compiler, instead of being grown state by state.
+"""E3 delta generator: shared expression/type helpers and handwritten
+state/action rules, with selected attributes read from the gold tables.
+
+The declarative grammar compiler described in research/e3-structured.md is
+an unfulfilled design, not the implementation of this file. Runtime model
+construction does not by itself remove the handwritten compilation rules.
 
     python3 exec/parse2/gen2.py OUT.json
     python3 exec/parse2/gen2.py --locations OUT.json
     python3 exec/parse2/gen2.py --warnings OUT.json
     python3 exec/parse2/gen2.py --errors OUT.json
 
-Optional --warnings implements return-type, int-conversion, unused-variable
-and format warnings and implies --locations. The development compiler CLI
-selects it for single- and multi-unit -Wall/-Wextra/-Werror.
---errors adds located language errors and top-level recovery; it is selected
-for ordinary compilation as well. Unmapped prototype limits stay explicit.
-
-Step 1 covers: int functions and parameters, int locals, expression
-statements, assignment, calls, unary - !, the binary operators of every
-precedence level in weights/gold/prec.tsv except && ||, if/else, while,
-return.  Anything else is rejected as not covered.  The frame size is
-backpatched (ORES/OFILL), as the reference itself does: its `.frame` field is
-always 7 characters wide.
+Warnings imply locations. Errors add located diagnostics and recovery.
+Unsupported forms are rejected explicitly. Coverage is recorded in the
+fixed probe lists and prd.md, not inferred from the presence of a rule.
 """
 import json
 import os
@@ -38,7 +32,16 @@ SYSCALLS = [(name, op, 3) for name, op in INTRINSIC.items()] + [(name, op, 6) fo
 
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
 VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
-UNDO_SIZE = 19
+UNDO_SIZE = 39
+# Shared rule/control entry points (reuse before adding a new state cluster):
+# TSPEC/DSTARS: type specifiers and per-declarator pointer shape.
+# FPDECL/PARAMS: function-pointer shape and balanced parameter scanning.
+# FN.params: parameter declarations; definitions and block signatures share it.
+# DIMS/DIMSAVE: dimensions and their object metadata; ELSZ: element size.
+# DECLN/DECL, BIND/UNWIND: local allocation and scoped name restoration.
+# ASSIGNCV, CKM/RESD: conversions and table-derived arithmetic type decisions.
+# INITLIST/STRINGINIT: aggregate and string initialisation.
+# These are existing helpers, not a claim that grammar duplication is gone.
 DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges two states silently
 
 
@@ -552,7 +555,8 @@ def types():
     P("FPD.shape").a(("LDI", "drk", 0)).branch({1: "RET"}, "FPD.dim", [("CMPI", "fpn", 0)])
     P("FPD.dim").a(("STX", "drk", TDIM, "fpn"), ("LDI", "drk", 1)).ret()
     p = P("FPSTART")
-    p.a(("LDI", "fp_isfunction", 0)).call("NEXT").expect("*").call("NEXT").tok({TK_ID: "FPD.id"}, bad("declarator"))
+    p.a(("LDI", "fp_isfunction", 0)).call("NEXT").expect("*").call("NEXT").tok({TK_ID: "FPD.id", ")": "FPD.abstract"}, bad("declarator"))
+    P("FPD.abstract").a(("LDI", "fpn", 0)).branch({1: "FPD.c"}, bad("declarator"), [("CMPI", "sigmode", 1)])
     p = P("FPD.id")
     p.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe"), ("COPYW", "fppos", "tpos"), ("LDI", "fpn", 0)).call("NEXT").tok({"[": "FPD.a", ")": "FPD.c", "(": "FPD.function"}, bad("declarator"))
     P("FPD.function").a(("LDI", "fp_isfunction", 1), ("LDI", "td", 1), ("LDI", "tb", FPB)).ret()
@@ -951,19 +955,22 @@ def build(locations=False, warnings=False, errors=False):
     P("ELSZ.8").a(("LDI", "es", 8)).ret()
     p = P("FN.fn")
     p.a(("INTERN", "v", "fns", "fne"), ("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "rd"), ("STX", "v", E.FRB, "rb"), ("LDI", "cur", 0), ("LDI", "max", 0), ("LDI", "usp", 0))
+    p.goto("FN.params")
+    p = P("FN.params")
     p.call("NEXT").a(("LDI", "pk", 0), ("LDI", "vfn", 0))
     p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
     P("FN.void").call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid", "(": "FN.pfp"}, bad("parameter"))
-    P("FN.vend").branch({1: "FN.body"}, bad("parameter"), [("CMPI", "td", 0)])
+    P("FN.vend").branch({1: "FN.body"}, "FN.unnamed", [("CMPI", "td", 0)])
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
     p = P("FN.par")
-    p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.pn", ")": "FN.body", "(": "FN.pfp"}, bad("parameter"))   # unnamed: a prototype
+    p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.unnamed", ")": "FN.unnamed", "(": "FN.pfp"}, bad("parameter"))   # unnamed: a prototype
     P("FN.pfp").call("FPDECL").branch({1: "FN.pfpbind"}, "FN.pfparray", [("CMPI", "fpn", 0)])
     P("FN.pfparray").a(("ALUI", "add", "td", "td", 1)).goto("FN.pfpbind")
     P("FN.pfpbind").branch({1: "FN.pfpstacked"}, "FN.pfpdecl", [("CMPI", "tb", FPV)])
     # The reference lookahead counts a literal ... in a nested parameter too.
     P("FN.pfpstacked").a(("LDI", "vfn", 1)).goto("FN.pfpdecl")
-    P("FN.pfpdecl").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
+    P("FN.pfpdecl").branch({1: "FN.unnamed"}, "FN.pfpdecl1", [("CMPI", "sigmode", 1)])
+    P("FN.pfpdecl1").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
     # Array parameters adjust to pointers before their descriptor is bound.
     # Only a single, side-effect-free bound token is covered here; do not
@@ -976,12 +983,18 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.aend").call("NEXT").tok({",": "FN.bind", ")": "FN.bind"}, bad("array parameter suffix"))
     p = P("FN.bind")
     p.a(("COPYW", "ps", "par_s"), ("COPYW", "pe", "par_e"))
-    p.a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u"))   # depth * 4096 + base: a double* is not a double
+    p.call("SIG.store").branch({1: "FN.pcount"}, "FN.bindslot", [("CMPI", "sigmode", 1)])
+    P("FN.unnamed").call("SIG.store").goto("FN.pcount")
+    P("FN.pcount").a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
+    P("SIG.store").branch({0: "SIG.put"}, "RET", [("CMPI", "pk", 8)])
+    P("SIG.put").a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u")).ret()
+    p = P("FN.bindslot")
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"))
     p.a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par", "...": "FN.dots"}, bad("parameter"))
     p = P("FN.body")
-    p.call("NEXT").branch({1: "FN.fpclose"}, "FN.bodykind", [("CMPI", "fn_fpwrap", 1)])
+    p.call("NEXT").branch({1: "BP.end"}, "FN.body0", [("CMPI", "sigmode", 1)])
+    P("FN.body0").branch({1: "FN.fpclose"}, "FN.bodykind", [("CMPI", "fn_fpwrap", 1)])
     P("FN.fpclose").expect(")").call("FPD.c").goto("FN.bodykind")
     P("FN.bodykind").tok({"{": "FN.def", ";": "FN.proto"}, bad("expected {"))
     p = P("FN.proto")     # a prototype: nothing written; its parameters' names are dropped
@@ -1040,6 +1053,10 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
     for j, table in enumerate((E.TDN, E.TDB, E.TDD), 16):
         p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO+j, "t"))
+    for j, table in enumerate((E.FND, E.FRD, E.FRB, E.VAR), 19):
+        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO+j, "t"))
+    p.a(("ALUI", "mul", "u", "v", 16))
+    for j in range(16): p.a(("LDX", "t", "u", PDB+j), ("STX", "usp", E.UNDO+23+j, "t"))
     p.a(("LDI", "t", 0), ("STX", "v", E.TDN, "t"))
     p.a(("LDX","t","v",VLSIZE),("STX","usp",E.UNDO+15,"t"),("LDI","t",0),("STX","v",VLSIZE,"t"),("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", UNDO_SIZE)).ret()
     p = P("DECL")
@@ -1090,6 +1107,10 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
     for j, table in enumerate((E.TDN, E.TDB, E.TDD), 16):
         p.a(("LDX", "t", "usp", E.UNDO+j), ("STX", "v", table, "t"))
+    for j, table in enumerate((E.FND, E.FRD, E.FRB, E.VAR), 19):
+        p.a(("LDX", "t", "usp", E.UNDO+j), ("STX", "v", table, "t"))
+    p.a(("ALUI", "mul", "u", "v", 16))
+    for j in range(16): p.a(("LDX", "t", "usp", E.UNDO+23+j), ("STX", "u", PDB+j, "t"))
     p.a(("LDX","t","usp",E.UNDO+15),("STX","v",VLSIZE,"t")).goto("S.uw")
 
     P("S.empty").call("NEXT").ret()
@@ -1103,7 +1124,15 @@ def build(locations=False, warnings=False, errors=False):
     P("S.dst").branch({(1, 2): "S.dst1"}, "S.dnx", [("CMPI", "tb", SBB)])
     P("S.dst1").call("ELSZ").a(("COPYW", "dsz", "es")).goto("S.dnx")
     P("S.dnx").call("NEXT").tok({"[": "S.darr", "(": "S.prototype"}, "S.dd")
-    P("S.prototype").call("PARAMS").tok({",": "S.dcm"}, "S.dend")
+    # Same parameter parser, no frame or parameter bindings for a prototype.
+    sigsaved = ("sigmode", "fns", "fne", "pk", "vfn", "fn_fpwrap", "td", "tb", "bd")
+    p = P("S.prototype").vpush(*sigsaved).a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).call("BIND")
+    p.a(("LDI", "t", 0), ("STX", "v", LOC, "t"), ("STX", "v", E.VAR, "t"), ("ALUI", "mul", "u", "v", 16))
+    for j in range(16): p.a(("STX", "u", PDB+j, "t"))
+    p.a(("LDI", "t", 1), ("STX", "v", E.FND, "t"), ("STX", "v", E.FRD, "td"), ("STX", "v", E.FRB, "tb"), ("COPYW", "fns", "ips"), ("COPYW", "fne", "ipe"), ("LDI", "sigmode", 1)).call("FN.params").vpop(*sigsaved).tok({",": "S.dcm"}, "S.dend")
+    P("BP.end").branch({2: "BP.many"}, "BP.put", [("CMPI", "pk", 6)])
+    P("BP.many").a(("LDI", "vfn", 1)).goto("BP.put")
+    P("BP.put").a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).ret()
     P("S.dd").call("DECLN").tok({"=": "S.din", ",": "S.dcm"}, "S.dend")
     P("S.dend").expect(";").call("NEXT").ret()
     P("S.dcm").call("DSTARS").tok({TK_ID: "S.did0"}, bad("declarator"))

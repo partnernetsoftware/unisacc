@@ -1018,9 +1018,7 @@ class Walker:
             raise CError("line %d: only constant global initialisers (%s)"
                          % (self.peek().line, e))
 
-    def function(self, ret, name, body=None, sym=None):
-        sym = sym or name          # differs only for a file-scope `static`
-        self.want("top", self.peek(), "fn_name")      # lparen -> fn_name
+    def parameters(self):
         self.expect("(")
         params, vararg = [], False
         if not self.at(")"):
@@ -1043,6 +1041,12 @@ class Walker:
                 if not self.eat(","):
                     break
         self.expect(")")
+        return params, vararg
+
+    def function(self, ret, name, body=None, sym=None):
+        sym = sym or name          # differs only for a file-scope `static`
+        self.want("top", self.peek(), "fn_name")      # lparen -> fn_name
+        params, vararg = self.parameters()
         if body is not None:
             self.i = body                    # back to where the body starts
         self.sc.declare(name, Type("fn", ret=ret, n=1 if vararg else 0,
@@ -1251,8 +1255,9 @@ class Walker:
             if self.at("("):
                 # a prototype inside a block: `int f1(char *);` declares f1,
                 # it does not define a variable
-                self.skip_parens()
-                self.sc.declare(name, Type("fn", ret=ty), "fn", sym=name)
+                params, vararg = self.parameters()
+                self.sc.declare(name, Type("fn", ret=ty, n=1 if vararg else 0,
+                                           params=[p[0] for p in params]), "fn", sym=name)
                 if not self.eat(","):
                     break
                 continue

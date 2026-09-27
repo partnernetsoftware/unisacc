@@ -1993,6 +1993,28 @@ ACAS Xu 那条线已经走完一整个循环：Julian et al.（DASC'16）用 45 
 
 **前置条件与归属**：不阻塞 S-17 与当前正在做的门禁验收；不影响已经验证过的 L0（execve、getdents64，隔离分支）。留给 cdx 判断何时排期。
 
+
+
+### 5.10 只读巡查发现：bit-field 存储单元宽度错误（2026-09-27，cc-unisacc 用 examples/apps/colorpack.c 实测发现，未修复）
+
+**背景**：主人要求在 cdx 没有漂移的巡查间隙，充实测试套件与 examples/、用 unisacc.com 实测找问题。新增 `examples/apps/colorpack.c`（bit-field 打包像素格式：RGB565/555、RGBA4444），只经具名字段读写，不做内存重解释，规避了 C99 6.7.2.1p10 允许的"位分配顺序因实现而异"这条合法差异。
+
+**发现**：所有字段值在 `-run` 与 `-O2`、host cc 与 unisacc.com 之间逐一比对**完全一致**（说明 bit-field 的读写语义是对的）；但 `sizeof` 不一致。最小复现（`/tmp/bfsize.c`）：
+
+```c
+struct a { unsigned short r:5, g:6, b:5; };   /* cc: 2   unisacc: 4 */
+struct b { unsigned char x:3, y:3; };          /* cc: 1   unisacc: 2 */
+struct c { unsigned r:5, g:6, b:5; };          /* cc: 4   unisacc: 4，一致 */
+```
+
+**规律**：只要 bit-field 声明的基础类型比 `int` 窄（`unsigned short`、`unsigned char`），unisacc 分配的存储单元就比正确值大一档（2→4、1→2，正好是"下一个整数尺寸"），像是取存储单元宽度时跳到了下一级，而不是停在声明的基础类型宽度上；基础类型本来就是 `int`/`unsigned` 宽度时（4 字节）不受影响。
+
+**已核实的旁证**：审查 `src/front_parse.c` 里 `own[256]`（结构体成员计数上限）已有边界检查（`3512` 行），不是本次巡查要修的对象；`decode()` 的两个 4096 缓冲区调用点（`3854`、`3951` 行）已经在 f004934 里统一走显式容量检查，不再是 B2 那类风险。这次的 bit-field 问题是**新发现，与 f004934/12be67c 那批修复无关**。
+
+**影响面**：任何用窄类型声明 bit-field 的结构体，`sizeof`、数组步长、结构体内后续成员的偏移都会算错，是真实的正确性缺陷，不是实现定义范围内的合理差异。
+
+**留给 cdx**：本条只记录、不修复，不动 src/。建议定位到 bit-field 存储单元宽度选择的那段代码（结构体成员布局，`stbody`/`bitpos`/`bw` 附近，`src/front_parse.c` 3467 行前后），核对是否是"取下一个尺寸类"而不是"取声明类型自身尺寸"的选择逻辑写错了下标。
+
 ## 7. 附录
 
 ### 7.1 构建顺序
@@ -4659,3 +4681,87 @@ b_typedef需要块内类型别名、内嵌枚举定义和块退出恢复。把�
 
 块内原型迁移验收（不含浮点签名缺陷）：PARAMS由函数指针声明与块内原型共用，普通声明遇到参数列表不分配槽，逗号继续原声明路径；EOF明确拒绝，实际候选未闭合括号rc1报unterminated parameter list。gen2净增3行，无新执行器原语。原310项先通过，加入b_init5与s80_block_proto后固定312项全相同，chain165项全相同；两文件×3优化级别共6次实际构造模型运行与cc一致。仅执行受影响7项门禁，两槽单窗口45.84秒全通过，源码到ELF43.52秒。
 模型5278状态、1,357,608条目、JSON29,428,415 B；候选5,980,518 B，sha256 eed6c1f793d347ab401cdd02e1c50621da2152ec6685eea6fe05c1971b4d2306。模型候选在s80x浮点原型反例上也输出0.5，与参考共同偏离cc的3.5；明确登记为未修复，不计入通过证据，下一项同步修复。默认产品源码与.com未变；本提交只完成参考已有块内声明行为的迁移，不称完整原型语义完成。
+
+
+### 块内原型签名修复（进行中）
+修复真实浮点调用错误：C抽出函数定义已有的单参数声明解析，由块内原型共用，只登记函数返回与参数转换信息、不创建参数局部槽或输出指令；Python同样抽取现有参数列表解析。块内逗号声明继续时恢复外层声明描述符。随后模型同步使用签名，重建产品与完整冻结门禁，不以参考旧错误作为答案。
+
+
+### S-17 设计校正（2026-09-27，用户指出模型设计漂移）
+停止以新增equal用例数驱动语法补丁。核对当前源码：gen2.py的开头把目标写成已实现事实；research/e3-structured.md规划的独立grammar.txt/templates.tsv并未成为实际输入。现有路径包含可复用的构造器、运行时模型，以及部分真实表来源，但大量编译规则仍由生成器中的命名状态与动作手写，不能称声明式文法迁移已完成。
+当前未提交的块内原型签名修复保留并收尾，不继续扩语法。已实测修复浮点反例与私有参考tape相同，原312项固定集全同；这不等于完整产品验收。之后按声明器、类型转换、绑定/作用域、控制流四个共用机制核对规则来源和组合边界，优先合并重复规则，不能只把分支搬进另一个文件或自创DSL便称模型化完成。运行时模型替代与规则来源简化分别验收，旧参考作为回退，不能偷偷承担模型未覆盖输入而宣称完成。
+有限语法规则不等于有限程序集合；C的typedef消歧、类型与作用域需要显式属性/存储规则。撤回无条件LL(1)与“新构造只需一条产生式加模板”的承诺，规模和收益以实现测量为准。该校正服务既定S-17，不新增FX研究工程。
+
+
+纠偏咨询回报与核对：cc-unisacc只读审阅指出，type/tyinfo已有共用来源，应保留；主要重复在C/Python/显式状态机的识别与控制流程。不能把这两张表的共用外推为所有语义已统一，初始化、布局与调用约定仍有手写规则。核对其候选后，DIMS/DIMSAVE和ELSZ事实上已被多处共用，DECLN只是DECL的名字适配入口，不能为了凑重构数量再抽一层。gen2头部已列出现有共用入口，防止继续绕过它们。当前FN.params/parameter_decl/parameters签名修复正是已确定的重复消除；先收尾它，不新增grammar.txt/DSL项目。咨询的“一次审计结束”只作为这次整理的边界，绝不代替S-17默认模型产物的最终验收。
+
+
+### 用户重申的权威链路与 E1 实查（2026-09-27）
+目标是 *.tsv规则 → 构造模型权重 → 字节流经阶段模型推导 → 字节流，覆盖C99兼容编译全链路。仅运行时使用模型不等于规则来源已完成迁移；不再把新增手写状态当作该目标的直接完成证据。
+
+E1实际链路：exec/lex/gen.py → JSON → exec/c/tbl.py → exec/c/net.py → e1.net；exec/c/buildcompiler.sh将其装入六目标共享包，阶段接口为pp.text→tokens.typed。exec/lex/net.py是旧UNS2实验（推理后回填DENSE），不是当前候选构建入口，不能混作当前运行时证据。
+
+| E1规则 | 当前权威输入 | 当前缺口 |
+|---|---|---|
+| 字符分派 | weights/gold/lex.tsv | handler把动作类别解释为具体状态/动作，仍手写 |
+| 字节分类、空白、特殊词前缀 | lexcls.tsv、lexword.tsv | 部分字符串前缀转移仍直接编码 |
+| token种类/词表顺序 | unisa.gold.TOKS、front.lex.TYPEKW | 不是独立TSV输入；还读取旧kernel词表校验 |
+| 数字扫描 | build_num/num_start | 转移条件、回退位置和后缀规则均在Python |
+| 字符串、字符与注释 | build_str/build_cmt | 转移、EOF和发射动作均在Python |
+| 标点最长匹配、关键字识别 | 词表加trie构造 | trie可作为通用构造算法保留；词法专属动作须显式声明 |
+| 阶段发射、计数与终止 | emit_kind/build_dispatch | typed/位置选项与输出格式仍在生成器 |
+
+纠偏实现边界：先让完整E1的有限转移/动作、词表与输出格式成为可独立读取的数据，再复用已有权重构造与执行机制。不能只导出一次JSON/改名TSV而继续把gen.py当权威；验收须生成过程不调用原词法规则生成器、不读旧kernel，并删除被替代的手写规则。全域转移/动作对比使用冻结旧生成结果作为迁移裁判，字节流测试另验组合；不得把E1完成外推为E2—E6完成。这是当前整阶段边界核对，不是新增文法框架或继续解析补丁。
+
+
+E1纠偏实施首步：exec/lex/number.tsv以44条互斥字节范围/默认转移声明完整数字扫描（十/十六进制、小数、指数回退、后缀、入口）。删除gen.py对应条件分支，净-47行；通用byterules.py只展开有限字节集合、检查冲突/全定义并链接动作序列，没有数字语义。动作使用既有执行器原语，number发射序列仍由旧输出格式代码供给，明确未完成整阶段数据化。冻结旧typed生成结果与新结果按状态名和动作内容比较85,123个观测，全部相同；序号不作为语义判据。本步尚未运行端到端候选，不复用此前产品门禁为证据。
+
+
+E1字符串/注释规则迁移：literal.tsv 29条规则，涵盖字符串拼接/前缀、字符常量、行/块注释及EOF行为；空白集合引用lexcls.tsv，不复制分类答案。与number.tsv共用57行有限规则读取器，gen.py累计+23/-120（净-97）；计入读取器后的Python净减少40行，规则数据74行含两个表头。完整typed E1的85,123个生成域观测转移与动作逐项不变。exec/c/netcheck.py读取新.tbl，实际C推理对86,625个编码域观测/336状态全同，动作/字符串一致，返回0；此编码域含转换后统一结果域，不能与生成域观测数混称。尚有分派、词表、token输出、标识符专属流程未数据化，未切换默认产品、未宣称完整E1或重构完成。
+
+
+E1词表输入校正：TOKS改读weights/gold/parse.tsv的tok字段（恰好一行、非空唯一），TYPEKW改读iterate/kernel/typekw.tsv（kw行、非空唯一）。默认生成不再读取kernel/unisa_model.inc或src前端文本；--check-declarations显式开启旧词表/源码兼容裁判，并接入原lex/run.sh，缓存补入全部新TSV及裁判输入。带裁判typed生成已通过，85,123个转移/动作与原token顺序全部相同。注意unisa.tsvgold仍通过gold.Stage导入Python模块，尚不能宣称独立于gold.py；仅已移除对Python词表值和旧kernel内容的生成依赖。未修改旧生成物权威或宣称全E1完成。
+
+
+E1 token输出声明：output.tsv列位置前缀、名字、SPAN/SPAN2及结束动作，spelling.tsv列普通/typed模式是否附原文。emit_kind不再硬编码token编号集合或字节格式，只实例化动作参数；通用@bytes展开静态字符串。四模式两槽比对：plain/typed/positions各85,123、locations100,920个转移及完整动作全部一致，含位置寄存器与字符串输出；每个生成子进程10秒限时，总运行约1秒。该步骤并未迁移CNT计数/EOF输出和标识符控制流程，也未证明完整E1独立输入闭合。
+
+
+E1标识符固定流程：Unicode转义4/8位消费、非法回退以及属性括号跳过/栈清空，迁入ident-byte.tsv与ident-stack.tsv；同一有限规则读取器支持字节范围和命名栈符号，生成器删除对应条件链与专用循环。完整typed E1的85,123个转移/动作全同。trie构造和词表分派仍在生成器，不能称标识符规则已全部迁完。
+
+
+E1计数/终止迁移：CNT0字节状态、CNT1余数状态和CNTP栈状态均由count-*.tsv声明，包括计数字符输出及ACCEPT；通用install_rules同时装载byte/result/stack域，复用于字面量和标识符固定流程。生成器删除计数算法专属转移循环。完整typed E1的85,123个转移和动作逐项同旧结果；词法分派/trie专属处理仍待完成，不宣称全部E1来源已闭合。
+
+
+E1分派动作迁移：entry.tsv声明lex.tsv全部动作类别的入口、字节例外和动作序列，EOF发射在output.tsv中；构造器校验动作集合精确相等，动态trie/数字入口通过显式链接注册。handler不再有词法类别if链，仅查声明并连接机器。四模式全域转移/完整动作同迁移前（85,123×3及100,920），两槽约0.9秒。identifier/punctuator链接内部仍有专属控制，须继续逐项落实而非用链接隐藏剩余规则。
+
+
+E1 trie边界迁移：ident-flow.tsv声明继续字节类/UCN/结束及特殊词后空白/括号处理；ident-end.tsv按显式优先顺序链接lexword词类到结束动作，保留@next继续匹配，普通token为末项。标点最长匹配的scan.start/advance/accept/rewind及拒绝动作移入output.tsv。构造代码保留词表trie查找、最长接受前缀和声明链接，不再内嵌对应字节行为。四模式全域转移/动作全部与迁移前一致（85,123×3+100,920）。尚须解除gold.Stage间接模块依赖、核对locations附加流程及隔离生成，不能提前称全部E1独立来源完成。
+
+
+E1独立输入验证：unisa.tsvgold拆出不导入gold的load_table，既有load_stage作为惰性Stage适配器保留；没有复制第二份TSV解析器。适配器18阶段8,484键schema/corpus与gold全同。隔离临时根只复制E1构造源码/locations、通用TSV读取器、E1规则TSV和parse/lex/lexcls/lexword/typekw声明，没有gold.py、kernel或参考编译器；从临时cwd生成plain/typed/positions/locations，四模式全部转移/动作与冻结旧结果一致（两槽约0.8秒）。此证据只证明输入独立，locations.py仍含封装协议控制，尚未称所有规则均为TSV。
+
+
+E1位置封装迁移：location-byte/result.tsv声明magic、长度解码、边界、记录循环、输出封装与切换输入，locations.py由协议实现缩为14行装载适配。有限规则读取器仅增加观测键左移代入，参数限定0..63，不解释协议语义。四模式生成域转移/动作全同；位置模式实际C网络与表核对104,045观测、403状态，actions/strings一致，netcheck返回0。该数字是编码域，生成域仍100,920。当前未提交改动中，gen.py净-133、locations.py净-54、tsvgold.py净+5、新通用读取器76行，合计Python净-106行（run.sh不变行数）；新增规则数据315行含表头。尚需集成字节流检查、规则完整性和缓存输入核对，不以表相同替代最终默认产物验收。
+
+E1定向字节流集成：双槽队列/tmp/unisacc-e1-rules-gate 2/2返回0，窗口3.32秒；exec-lexpos的9项参考/Python位置用例通过，exec-lexloc的6个拼接输入通过、11个畸形封装拒绝。使用私有UA，不碰/tmp/ua_ref；该结果仅覆盖两项定向门禁。
+
+
+E1收尾依赖修正：共享models.identity补入iterate/kernel/typekw.tsv；旧pipeline/run.py生成依赖纳入本阶段TSV及四张gold声明；gatequeue冻结指纹补入typekw.tsv，lex/run.sh此前已纳入全部E1 TSV。临时假根分别修改typekw与entry规则，cache identity均变化，无共享输入修改。exec/lex/rules.md列完整输入、有限规则格式、trie/ABI构造边界和验证范围；不是宣称任意词法协议无需适配代码。
+
+E1收尾定向队列/tmp/unisacc-e1-rules-chain两项全rc0，双槽42.25秒：实际网络chain固定165项全部相同，0拒绝/未覆盖/丢项（17.55秒）；exec-srcelf通过（42.21秒）。加此前词法位置与封装两项、全域转换/推理及隔离生成，形成E1声明迁移证据。产品签名修复仍未完成完整冻结门禁，默认产物切换与E2—E6规则来源统一仍未完成。
+
+原型签名收尾：tests/c/b_blockproto覆盖double/float/_Bool参数、逗号原型与块作用域恢复。实际产品.com与实际模型候选各-O0/-O1/-O2均同宿主cc（8.0 2.2 1），Python同；原312固定项先通过，随后将此回归与s80x纳入E3/chain。当前.com为1,361,760 B，尚待本树全门禁，不作发布结论。
+
+
+### 声明迁移后的冻结验收进度（2026-09-27）
+当前HEAD为42a3c56（E1声明规则迁移），原型签名修复仍未提交，源码在门禁期间冻结。主队列/tmp/unisacc-protosig-full以双槽和55秒窗口完成38/119项；exec-driver-core另留独占运行，完整清单共120项，尚未全绿。主队列原始36通过、2失败不改写：exec-multi-ua并发53.05秒超时，独占复跑50.76秒通过；exec-container在net写文件时报ENOSPC，清理本轮旧候选目录的可重建中间物（保留各.com）后独占32.52秒通过。复跑分别存于同名前缀retry-multi/retry-container目录；合计38个不同套件已有通过证据，仍待82项。后续续跑原主队列，不重做已通过项；接近上限的重项独占，不能把负载超时或磁盘失败涂成原轮通过。
+本轮产品unisacc.com：1,361,760 B，sha256 a61a882d506cb621c8c101370e78c6f3e0110bcff544e51b007a65b58ddc02ed，来自当前未提交签名修复；不是发布或默认模型切换。实际模型候选/tmp/unisacc-protosig-candidate/unisacc-next.com的sha256为11329391d00a2949d837f5ba008edaa1321f0b14b8574fda5f859dc641089c8c，建于E1声明迁移之前，不能称为最新规则源码重建产物。
+E2后续输入审计：exec/pp/gen.py仍从kernel/unisa_model.inc提取DIRV，预定义宏按目标的分支、P0拼接和P1去注释规则仍由Python手写。这是待迁移来源，不以E1完成替代；下一阶段应复用有限规则读取与构造机制，消除旧kernel生成依赖和被替代的专属分支，不另起语法框架。
+
+
+冻结验收发现测试夹具遗漏：gate-infra的cache identity假根未提供新增的iterate/kernel/typekw.tsv，导致FileNotFoundError。修复限于tests/queuecheck.py：补显式声明并验证改变它会使identity变化，不改变模型生成、缓存算法或编译器。旧队列已完成46/119项，含该失败；因检查源码改变，新冻结队列重新登记，旧记录保留为此前树证据，不冒称新树全通过。
+
+
+原型签名验收收尾：43bc914补齐cache测试夹具后，/tmp/unisacc-protosig-full2跑完116个套件，原始112通过、fat超时及三个ENOSPC失败保留。磁盘清理只删除本轮旧候选中间物和未占用的旧生成缓存，保留候选.com与日志；disk-retry2的container/tableself/native-stages分别34.36/15.38/19.71秒通过；fat2独占37.30秒通过。预留core2独占52.61秒通过；heavy2的multi-ua/memory-ua/memx86-ua独占50.41/41.87/47.24秒通过。
+原始full2与disk-retry2最终未返回整体绿色：协作者在运行期间新增并提交21aa027（examples/apps/colorpack.c及其README），广域指纹因而拒绝整轮结论。没有重写这些退出状态。独立输入审计以43bc914的apps README内容并排除新增colorpack，重算得到完全相同的原指纹3a6c0afaf0eb7feea0f05771f74b014725c29209b750186ca435d3df8d2743bc；证明其余全部冻结文件（含编译器、生成器、测试及.com）未变。所有120个套件命令逐项与当前--plan --com相同，新增colorpack不在固定列表或examples/*.c输入中，apps README也不是构建/运行输入。最终以实际单项rc0并集核对120/120、无遗漏；这是附非输入变更审计的分批验收，不宣称原队列单次rc0。完整对账保存在/tmp/unisacc-protosig-final-evidence.json，原记录目录保留。
+本次只闭合已开始的块内原型签名修复与E1迁移回归；默认产品仍非完整模型路线，未发布，E2—E6声明来源迁移与最终默认产物验收继续。

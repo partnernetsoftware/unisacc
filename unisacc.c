@@ -15113,8 +15113,63 @@ int valuekind(int width, int ptr, int uns, int flt, int bl) {
 int dkind(int flt) {
     return valuekind(declsz, declptr, declunsigned, flt, declbool);
 }
+/* Parse one parameter without binding a slot or emitting any instruction.
+   Definitions and block prototypes use the same declarator rules. */
+int paramtok; int paramnamed; int paramstruct; int paramflt;
+int parameter_decl(void) {
+    int pw;
+    paramtok = 0 - 1;
+    pw = declspec();
+    paramstruct = declstruct; paramflt = declflt;
+    declptr = declspecptr; declpd = declspecpd; declfp = declspecfp;
+    while (eatstar()) declptr = 1;
+    paramnamed = 0;
+    if (cur() == tidx("(", 1)) {
+        if (kind(tp + 1) == tidx("*", 1)) {
+            paramtok = fpdecl(); declptr = 1; pw = 8;
+            if (paramtok >= 0) paramnamed = 1;
+            if (fpdim > 0) declfp = 0;       /* an array of them decays */
+        } else {
+            /* `int f1(int (), int)`: a function type, adjusted to a
+               pointer to it (C99 6.7.5.3p8) */
+            skipparen(); declptr = 1; pw = 8;
+        }
+    }
+    if (cur() == T_ID) { paramtok = adv(); paramnamed = 1; }
+    /* `int a[n]`, `int a[static 5]`: an array parameter IS a pointer
+       (C99 6.7.5.3p7), whatever the brackets say */
+    while (cur() == tidx("[", 1)) {
+        while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
+        adv(); declptr = 1;
+    }
+    return pw;
+}
+
+/* Keep the return declaration in the symbol before parsing parameters.
+   The caller restores its declaration base before a comma continuation. */
+int block_prototype(int t, int w) {
+    int si; int np; int var; int pw;
+    declbytes = declptr ? 8 : declsz;
+    si = sadd(t, 2, 0, w);
+    need(tidx("(", 1), "(");
+    np = 0; var = 0;
+    if (isname(tp, "void", 4) && kind(tp + 1) == tidx(")", 1)) adv();
+    while (cur() != tidx(")", 1) && cur() != T_EOF) {
+        if (eat(tidx("...", 3))) { var = 1; break; }
+        pw = parameter_decl();
+        if (np < 8) sympk[si * 8 + np] = dkind(paramflt);
+        np = np + 1;
+        if (eat(tidx(",", 1)) == 0) break;
+    }
+    need(tidx(")", 1), ")");
+    symnpk[si] = np;
+    symvar[si] = var || np > 6;
+    return 0;
+}
+
 int local_decl(void) {
     int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool;
+    int psave[9];
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
@@ -15146,15 +15201,27 @@ int local_decl(void) {
             if (fpadim > 0) { decldim2 = fpadim; declptr = 1; }
         } else t = adv(); }
         else t = adv();
-        /* `int f(char *);` in a block: a prototype, not an object.  Calls
-           resolve by name, so there is nothing to allocate. */
+        /* A block prototype declares a callable signature, not an object. */
         if (cur() == tidx("(", 1)) {
-            int depth; depth = 0;
-            while (cur() != T_EOF) {
-                if (cur() == tidx("(", 1)) depth = depth + 1;
-                if (cur() == tidx(")", 1)) { depth = depth - 1; if (depth == 0) { adv(); break; } }
-                adv();
-            }
+            psave[0] = declspecptr;
+            psave[1] = declspecpd;
+            psave[2] = declspecfp;
+            psave[3] = declspecfpst;
+            psave[4] = declbase;
+            psave[5] = declsz;
+            psave[6] = declunsigned;
+            psave[7] = declenum;
+            psave[8] = declvoid;
+            block_prototype(t, w);
+            declspecptr = psave[0];
+            declspecpd = psave[1];
+            declspecfp = psave[2];
+            declspecfpst = psave[3];
+            declbase = psave[4];
+            declsz = psave[5];
+            declunsigned = psave[6];
+            declenum = psave[7];
+            declvoid = psave[8];
             if (eat(tidx(",", 1))) continue;
             need(tidx(";", 1), ";");
             return 0;
@@ -15644,29 +15711,9 @@ int function(int t, int w) {
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (cur() == T_EOF) break;
         if (eat(tidx("...", 3))) break;
-        pw = declspec();
-        pst = declstruct; pfl = declflt;
-        declptr = declspecptr; declpd = declspecpd; declfp = declspecfp;
-        while (eatstar()) declptr = 1;
-        havename = 0;
-        if (cur() == tidx("(", 1)) {
-            if (kind(tp + 1) == tidx("*", 1)) {
-                pt = fpdecl(); declptr = 1; pw = 8;
-                if (pt >= 0) havename = 1;
-                if (fpdim > 0) declfp = 0;       /* an array of them decays */
-            } else {
-                /* `int f1(int (), int)`: a function type, adjusted to a
-                   pointer to it (C99 6.7.5.3p8) */
-                skipparen(); declptr = 1; pw = 8;
-            }
-        }
-        if (cur() == T_ID) { pt = adv(); havename = 1; }
-        /* `int a[n]`, `int a[static 5]`: an array parameter IS a pointer
-           (C99 6.7.5.3p7), whatever the brackets say */
-        while (cur() == tidx("[", 1)) {
-            while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
-            adv(); declptr = 1;
-        }
+        pw = parameter_decl();
+        pst = paramstruct; pfl = paramflt;
+        pt = paramtok; havename = paramnamed;
         if (havename) {
             if (scopebind("param", 5, pt) != 1) scopefail("a parameter", pt);
             off = alloc_local(8);
@@ -15695,11 +15742,7 @@ int function(int t, int w) {
         }
         /* the parameter's kind, for callers to convert to */
         if (fsym >= 0) { if (np < 8) {
-            int pk; pk = 0;
-            if (declptr) pk = 1;
-            else { if (pfl) pk = pfl; else { if (declunsigned) { if (declsz == 8) pk = 1; } } }
-            if (declbool && declptr == 0) pk = 9;
-            sympk[fsym * 8 + np] = pk;
+            sympk[fsym * 8 + np] = dkind(pfl);
         } }
         np = np + 1;
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
