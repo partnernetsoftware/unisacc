@@ -17,8 +17,9 @@ the liveness of r2..r5 and with it the carry through r3..r5 and ol_local; then
 up to four peep rounds: liveness of r0..r5, stfuse, and each line's relation
 with its neighbour, the action for which is the peep table's (loaded at START).
 This is the optimiser's algorithm compiled into an action table. The complete
-SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv; the remaining
-rules are maintained here. src/opt.c and unisa/opt.py stay the behaviour reference.
+SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv and LOCAL in
+local-{byte,result}.tsv. Other rules remain here; src/opt.c and unisa/opt.py
+stay the behaviour reference.
 
 The opinfo table is read, not copied: its `simple` column is interned into a
 set at START.  Everything else is the byte-level control of the rule.
@@ -283,70 +284,13 @@ def analysis():
 
 
 def local():
-    """LOCAL (ol_local): at line li (position ls) `imm r2, N / sub64 rD, r6, r2 / .ld rD, [rD+0], W`
-    (or load64) with r2 dead after it -> `.ld rD, [r6-N], W`; lok := 1 and the output written"""
-    p = P("LOCAL")
-    p.a(("LDI", "lok", 0), ("ALUI", "add", "q_t", "li", 2)).branch({0: "LC.a"}, "RET", [("CMP", "q_t", "nl")])
-    g.els("LC.a", "LC.a0", [])
-    lit("LC.a0", "  imm r2, ", "LC.n", "RET")
-    g.on("LC.n", DIGIT, "LC.nd", [("MARK", "q_n0")])
-    g.els("LC.n", "RET", [])
-    g.on("LC.nd", DIGIT, "LC.nd", [("ADV",)])
-    g.on("LC.nd", [10], "LC.b", [("MARK", "q_n1"), ("ADV",)])
-    g.els("LC.nd", "RET", [])
-    lit("LC.b", "  sub64 r", "LC.d", "RET")
-    g.on("LC.d", [48, 49, 51, 52, 53], "LC.q", [("BYTE", "q_d"), ("ADV",)])
-    g.els("LC.d", "RET", [])
-    # `, r6, r2`: the C checks only ',' . 'r' '6' . . 'r' '2' (dots: any byte), then the line ends
-    pat = [44, None, 114, 54, None, None, 114, 50, 10]
-    for k, c in enumerate(pat):
-        cur = "LC.q" if k == 0 else "LC.q%d" % k
-        nx = "LC.c" if k == len(pat) - 1 else "LC.q%d" % (k + 1)
-        if c is None:
-            g.on(cur, [10, EOF], "RET", [])
-            g.els(cur, nx, [("ADV",)])
-        else:
-            g.on(cur, [c], nx, [("ADV",)])
-            g.els(cur, "RET", [])
-    g.els("LC.c", "LC.c0", [("MARK", "q_c0")])
-    lit("LC.c0", "  .ld r", "LC.cd1", "LC.c2")
-    g.els("LC.cd1", "LC.cd1b", [("BYTE", "q_t")])
-    p = P("LC.cd1b")
-    p.branch({1: "LC.ld1"}, "LC.c2", [("CMP", "q_t", "q_d")])
-    g.els("LC.ld1", "LC.r", [("ADV",), ("LDI", "q_ld", 1)])
-    P("LC.c2").a(("JUMP", "q_c0")).goto("LC.c3")
-    lit("LC.c3", "  load64 r", "LC.cd2", "RET")
-    g.els("LC.cd2", "LC.cd2b", [("BYTE", "q_t")])
-    p = P("LC.cd2b")
-    p.branch({1: "LC.ld2"}, "RET", [("CMP", "q_t", "q_d")])
-    g.els("LC.ld2", "LC.r", [("ADV",), ("LDI", "q_ld", 2)])
-    # `, [rD+0]`: ',' . '[' 'r' D '+' '0' ']'
-    g.on("LC.r", [44], "LC.r1", [("ADV",)])
-    g.els("LC.r", "RET", [])
-    g.on("LC.r1", [10, EOF], "RET", [])
-    g.els("LC.r1", "LC.r2", [("ADV",)])
-    lit("LC.r2", "[r", "LC.r3", "RET")
-    g.els("LC.r3", "LC.r3b", [("BYTE", "q_t")])
-    p = P("LC.r3b")
-    p.branch({1: "LC.r4"}, "RET", [("CMP", "q_t", "q_d")])
-    g.els("LC.r4", "LC.r5", [("ADV",)])
-    lit("LC.r5", "+0]", "LC.tail", "RET")
-    p = P("LC.tail")
-    p.branch({1: "LC.t1"}, "LC.t2", [("CMPI", "q_ld", 1)])
-    g.on("LC.t2", NL, "LC.dead", [("MARK", "q_after")])      # load64: the line ends here
-    g.els("LC.t2", "RET", [])
-    g.on("LC.t1", [44], "LC.t1r", [("MARK", "q_r0")])        # .ld: `, W` follows
-    g.els("LC.t1", "RET", [])
-    g.on("LC.t1r", NL, "LC.dead", [("MARK", "q_r1"), ("MARK", "q_after")])
-    g.els("LC.t1r", "LC.t1r", [("ADV",)])
-    p = P("LC.dead")
-    p.a(("LDI", "dz", 2), ("ALUI", "add", "dfrom", "li", 3)).call("DEADQ").branch({1: "LC.emit"}, "RET", [("CMPI", "dv", 1)])
-    p = P("LC.emit")
-    p.a(("LDI", "lok", 1)).branch({1: "LC.e1"}, "LC.e2", [("CMPI", "q_ld", 1)])
-    P("LC.e1").o("  .ld r").a(("OUTW", "q_d")).o(", [r6-").a(("SPAN2", "q_n0", "q_n1")).o("]").a(("SPAN2", "q_r0", "q_r1")).o("\n").goto("LC.fin")
-    P("LC.e2").o("  load64 r").a(("OUTW", "q_d")).o(", [r6-").a(("SPAN2", "q_n0", "q_n1")).o("]\n").goto("LC.fin")
-    g.on("LC.fin", [10], "RET", [("ADV",)])     # past line i+2's newline
-    g.els("LC.fin", "RET", [])
+    # Allocate the original branch/call names; all LOCAL control is declared in TSV.
+    bindings = {name: P(state).fresh(kind) for name, state, kind in (
+        ("bounds", "LOCAL", "b"), ("load32_dest", "LC", "b"),
+        ("load64_dest", "LC", "b"), ("base_register", "LC", "b"),
+        ("load_tail", "LC", "b"), ("dead_return", "LC", "r"),
+        ("dead_result", "LC", "b"), ("load_emit", "LC", "b"))}
+    install_rules(g, os.path.dirname(__file__), "local", bindings=bindings)
 
 
 # ---- -O2's second half: the peep table's rounds (unisa/opt.py _Peep, src/opt.c peep_round) ----
