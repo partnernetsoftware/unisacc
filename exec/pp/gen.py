@@ -23,7 +23,7 @@ unterminated _Pragma calls; more than MAXP parameters; general punctuator/litera
 #if lines reuse P4 macro expansion before typed constant evaluation.
 autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
 its trigger names read from include/*.h (E2_AUTOINC=0 builds without it).
-Also not modelled: #pragma push_macro/pop_macro
+Pragma macro stacks accept literal identifier names; _Pragma remains separate.
 (rejected as not covered when live and spelled exactly; the reference's
 prefix match `push_macroX` is not reproduced), the
 file:line:col rendering of diagnostics (the reject kind is compared, not the
@@ -311,6 +311,8 @@ def build(target="lnx/x86_64", locations=False):
     # Macro history and definition rules; bindings describe record layout only.
     macro_layout = {'NEWB': NEWB, 'FSZ': FSZ, 'MACB': MACB, 'F_TO': F_TO, 'SEGINF': SEGINF, 'F_FROM': F_FROM, 'F_PREV': F_PREV, 'F_NAME': F_NAME, 'F_BODY': F_BODY, 'F_FN': F_FN, 'F_VAR': F_VAR}
     install_rules(g, HERE, "macro", macro_layout)
+    install_rules(g, HERE, "pragma", dict(macro_layout, F_NP=F_NP,
+                  PMHEAD=1 << 44, PMSTACK=2 << 44))
 
     if AUTOINC:
         build_autoinc(g, locations)
