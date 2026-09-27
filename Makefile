@@ -12,7 +12,8 @@
 #
 #   make            the fast checks, about a minute
 #   make test       every suite (~10 min)
-#   make com        unisacc.com, all six targets, built here
+#   make com        classic unisacc.com (default unchanged)
+#   make model-com  one explicit bounded model construction step
 #   make release    the pre-release gate
 #   make linux      the whole suite inside the Linux VM
 #   make bench      compile speed
@@ -24,13 +25,16 @@ UA     ?= /tmp/ua_ref
 JOBS   ?= 4
 # The shipped compiler is built at -O2 [H1]; OPT=0 gives the walker's code.
 OPT    ?= 2
+# Explicit model build stages never overwrite the default shipped artifact.
+MODEL_DIR  ?=
+MODEL_STEP ?=
 
 .PHONY: help quick test com release linux bench acc weights clean ref \
-        c99 closure corpus
+        c99 closure corpus classic-com model-com
 
 help:
 	@sed -n '13,19p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
-	@echo "targets: $$(grep -E '^[a-z][a-z0-9]*:' $(MAKEFILE_LIST) | cut -d: -f1 | sort -u | tr '\n' ' ')"
+	@echo "targets: $$(grep -E '^[a-z][a-z0-9-]*:' $(MAKEFILE_LIST) | cut -d: -f1 | sort -u | tr '\n' ' ')"
 
 .DEFAULT_GOAL := quick
 
@@ -72,10 +76,19 @@ weights:
 # One file, every target, built in ONE environment -- that is the whole
 # point of a compiler that writes all six itself.  CI tests; it does not
 # build.
-com: ref
+com: classic-com
+
+classic-com: ref
 	@python3 -m unisa ape unisacc.c --via $(UA) -O $(OPT) -o unisacc.com
 	@chmod +x unisacc.com
 	@ls -l unisacc.com | awk '{printf "  unisacc.com  %s B\n", $$5}'
+
+# One explicit stage per invocation; completion/input checks belong to the
+# existing builder. Run pack separately, after shared and all six targets.
+model-com:
+	@test -n "$(MODEL_DIR)" || { echo 'model-com: set MODEL_DIR to a private output directory' >&2; exit 2; }
+	@case "$(MODEL_STEP)" in shared|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64|pack) ;; *) echo 'model-com: set MODEL_STEP=shared|OS/ARCH|pack (see exec/c/BUILDING.md)' >&2; exit 2;; esac
+	@UA="$(UA)" perl tests/bound.pl 55 ./exec/c/buildcompiler.sh "$(MODEL_DIR)" "$(MODEL_STEP)"
 
 release: ref
 	@./tests/release.sh --com
