@@ -1030,14 +1030,20 @@ def build(locations=False, warnings=False, errors=False):
     p = P("X.as")
     p.call("LOOKUP").call("NOARR")
     addr(p).goto("PX.as")       # names and computed lvalues share assignment
-    # One assignment conversion: target vt/vb, source rvt/rvb, value in r0.
-    P("ASSIGNCV").branch({1: "ACV.scalar"}, "ACV.u", [("CMPI", "vt", 0)])
-    P("ACV.scalar").branch({1: "BOOLCV"}, "ACV.double", [("CMPI", "vb", BOOL)])
-    P("ACV.double").branch({1: "ACV.d"}, "ACV.float", [("CMPI", "vb", DBL)])
-    P("ACV.float").branch({1: "ACV.s"}, "ACV.int", [("CMPI", "vb", FLT)])
-    P("ACV.int").branch({1: "ACV.u"}, "ACV.i", [("CMPI", "vb", UNS + 8)])
+    # Target dispatch is declared once; four conversion calls share the saved descriptor.
+    bindings = dict(BOOL=BOOL, DBL=DBL, FLT=FLT, UNSIGNED_WIDE=UNS + 8)
+    bindings.update((key, P(owner).fresh("b")) for key, owner in
+                    (("entry_test", "ASSIGNCV"), ("bool_test", "ACV.scalar"),
+                     ("double_test", "ACV.double"), ("float_test", "ACV.float"), ("unsigned_test", "ACV.int")))
+    install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="assign")
     for suffix in ("d", "s", "i", "u"):
-        P("ACV." + suffix).vpush("vt", "vb").a(("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).call("TO." + suffix).vpop("vt", "vb").ret()
+        q = P("ACV." + suffix)
+        bindings.update(entry=q.cur, convert="TO." + suffix, resume=q.fresh("r"))
+        save = q.vpush("vt", "vb").acts
+        q.acts = []
+        restore = q.vpop("vt", "vb").acts
+        install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings,
+                      sequences={"save": save, "restore": restore}, section="convert")
     shape_control("update-entry")
     P("CSTEP.scalar").branch({(DBL, FLT): "CSTEP.fp"}, "STEPTY", [("RLD", "vb")])
     P("CSTEP.fp").a(("LDI", "stp", 1)).ret()
@@ -1080,18 +1086,16 @@ def build(locations=False, warnings=False, errors=False):
         q = P(nx)
     q.branch({(1, 2): "TAX.s"}, "DEAD.w", [("CMPI", "vb", SBB)])
     P("TAX.s").a(("LDI", "ax", AX.index("struct"))).ret()
-    P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
-    P("NARU.1").branch({1: "TO.b"}, "NARU.integer", [("CMPI", "vb", BOOL)])
-    q = P("NARU.integer")          # the unsigned narrow rows of tyinfo: masked back to their size
-    for t, vb, sz, un, nr in TYINT:
-        if not (un and sz < 8):
-            continue
-        hit, nx = q.fresh("h"), q.fresh("n")
-        q.branch({1: hit}, nx, [("CMPI", "vb", vb)])
-        P(hit).o("  imm r2, %d\n  and64 r0, r0, r2\n" % ((1 << (8 * sz)) - 1)).ret()
-        q = P(nx)
-    q.ret()
-    P("NARU.b").ret()
+    bindings = dict(BOOL=BOOL, entry_test=P("NARU").fresh("b"), bool_test=P("NARU.1").fresh("b"))
+    install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned")
+    q = P("NARU.integer")
+    for _, code, size, uns, _ in (row for row in TYINT if row[3] and row[2] < 8):
+        bindings.update(current=q.cur, hit=q.fresh("h"), next=q.fresh("n"), test=q.fresh("b"), code=code)
+        install_rules(g, os.path.dirname(__file__), "width", bindings=bindings,
+                      sequences={"row": O(TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1))}, section="row")
+        q = P(bindings["next"])
+    bindings["current"] = q.cur
+    install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned-end")
     P("STEPTY").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
     P("STY.s").branch({1: "RET"}, "STY.s0", [("CMPI", "vb", BOOL)])
     P("STY.s0").branch({1: "DEAD.nint"}, "STY.s1", [("CMPI", "vb", 0)])
