@@ -1306,33 +1306,24 @@ def build(locations=False, warnings=False, errors=False):
     P("ACV.int").branch({1: "ACV.u"}, "ACV.i", [("CMPI", "vb", UNS + 8)])
     for suffix in ("d", "s", "i", "u"):
         P("ACV." + suffix).vpush("vt", "vb").a(("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).call("TO." + suffix).vpop("vt", "vb").ret()
+    P("CSTEP").branch({1: "CSTEP.scalar"}, "STEPTY", [("CMPI", "vt", 0)])
+    P("CSTEP.scalar").branch({(DBL, FLT): "CSTEP.fp"}, "STEPTY", [("RLD", "vb")])
+    P("CSTEP.fp").a(("LDI", "stp", 1)).ret()
     for o in E.CASOPS:
         q = P("X.c" + o)    # addr; push; load; push; rhs (a pointer's scaled); pop; op; pop; store
         q.call("LOOKUP").call("NOARR")
         addr(q).goto("LV.c" + o)
-        q = P("LV.c" + o).call("STEPTY")
+        q = P("LV.c" + o).call("CSTEP")
         if o not in ("+", "-"):
             q.branch({1: (nx2 := "X.c%s.i" % o)}, "DEAD.nint", [("CMPI", "vt", 0)])
             q = P(nx2)
         emit(q, "push").call("LOADV")
         emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb", "stp")
-        q.branch({1: "BC.target" + o}, "BC.ordinary" + o, [("CMPI", "vt", 0)])
-        P("BC.target" + o).branch({1: "BC.source" + o}, "BC.ordinary" + o, [("CMPI", "vb", BOOL)])
-        P("BC.source" + o).branch({1: "BC.kind" + o}, "BC.ordinary" + o, [("CMPI", "rvt", 0)])
-        P("BC.kind" + o).branch({1: "BC.float" + o}, "BC.single" + o, [("CMPI", "rvb", DBL)])
-        P("BC.single" + o).branch({1: "BC.float" + o}, "BC.ordinary" + o, [("CMPI", "rvb", FLT)])
-        bf = P("BC.float" + o)
-        if o in ("+", "-", "*", "/"):
-            bf.branch({1: "BC.d" + o}, "BC.s" + o, [("CMPI", "rvb", DBL)])
-            for suffix, width, cvop in (("d",64,"cvtid"),("s",32,"cvtis")):
-                bf = P("BC." + suffix + o)
-                emit(bf,"push").o("  load64 r0, [r7+8]\n  %s r0, r0\n" % cvop)
-                bf.o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n")
-                bf.o("  f%s%d r0, r1, r0\n" % ({"+":"add","-":"sub","*":"mul","/":"div"}[o],width))
-                bf.a(("LDI","vb",DBL if width == 64 else FLT)).call("TO.b").a(("LDI","vb",BOOL))
-                emit(bf,"pop1").call("STOREV").ret()
-        else:
-            bf.goto("DEAD.dbl")
+        q.call("TAX").branch({(AX.index("f32"), AX.index("f64")): "BC.float" + o}, "BC.rtype" + o, [("RLD", "ax")])
+        P("BC.rtype" + o).vpush("vt", "vb").a(("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).call("TAX").vpop("vt", "vb").branch({(AX.index("f32"), AX.index("f64")): "BC.float" + o}, "BC.ordinary" + o, [("RLD", "ax")])
+        bf = P("BC.float" + o).vpush("vt", "vb").a(("COPYW", "lt", "vt"), ("COPYW", "lb", "vb"), ("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).call("OPX." + o)
+        bf.a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).vpop("vt", "vb").call("ASSIGNCV")
+        emit(bf, "pop1").call("STOREV").ret()
         P("BC.ordinary" + o).vpush("vt","vb").a(("COPYW","vt","rvt"),("COPYW","vb","rvb")).call("NODBL0").vpop("vt","vb").goto("BC.integer" + o)
         q = P("BC.integer" + o)
         q.branch({1: "X.c%s.m" % o}, "X.c%s.s" % o, [("CMPI", "stp", 1)])
@@ -1694,7 +1685,7 @@ def build(locations=False, warnings=False, errors=False):
     P("MB.zero").branch({0: "MB.has"}, "DEAD.mb", [("CMPI", "marr", 0)])
     P("MB.has").branch({1: "MB.z"}, "MB.off", [("CMPI", "mo", 0)])
     P("MB.off").o("  imm r2, ").num("mo").o("\n  add64 r0, r0, r2\n").goto("MB.z")
-    P("MB.z").call("NEXT").tok({"=": "PX.as", "++": "MB.inc", "--": "MB.dec", "->": "MB.ptr", ".": "MB.dot2"}, "MB.ld")
+    P("MB.z").call("NEXT").tok({"=": "PX.as", "++": "MB.inc", "--": "MB.dec", **{o+"=": "LV.c"+o for o in E.CASOPS}, "->": "MB.ptr", ".": "MB.dot2"}, "MB.ld")
     P("MB.dot2").goto("MEMB")          # s.inner.m: the inner struct's address, then its member
     P("MB.ptr").call("LOADV").goto("MEMB")
     P("MB.ld").branch({1: "MB.ld1"}, "MB.arr", [("CMPI", "marr", 0)])
@@ -1727,7 +1718,7 @@ def build(locations=False, warnings=False, errors=False):
     emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("ALUI", "sub", "rk", "rk", 1), ("LDI", "rkok", 1)).call("NEXT").goto("POSTIX")
     q = P("PX.one")
     emit(q, "push").vpush("vt", "vb", "st1", "amp").a(("LDI", "amp", 0)).call("NEXT").call("EXPR").expect("]").vpop("lt", "lb", "st1", "amp").call("SCALE")
-    emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("DOWN").call("NEXT").tok({"=": "PX.as", "++": "PX.inc", "--": "PX.dec", ".": "MEMB"}, "PX.ld")   # a[i].m: the element's address, then the member
+    emit(q, "pop1").o("  add64 r0, r1, r0\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("DOWN").call("NEXT").tok({"=": "PX.as", "++": "PX.inc", "--": "PX.dec", **{o+"=": "LV.c"+o for o in E.CASOPS}, ".": "MEMB"}, "PX.ld")   # a[i].m: the element's address, then the member
     # a statement that is only `p[i];` computes the address and stops (measured, probe p39)
     P("PX.ld").branch({1: "PX.am"}, "PX.ld1", [("CMPI", "amp", 1)])
     P("PX.am").a(("ALUI", "add", "vt", "vt", 1), ("LDI", "amp", 0)).ret()
