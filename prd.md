@@ -5105,3 +5105,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 同一9a0ae470候选全139项本机滚动门禁已启动：/tmp/unisacc-final-gate-928；首窗口39.44秒，tools11/11与bigclosure6目标同均rc0，2/139，pending75正确保留，尚未称全套通过。显式MODEL_COM、UA=/tmp/unisacc-final-build-928/seed，默认产物未替换；后续只改prd证据不更改冻结构建输入。
 
 最终候选冻结队列续行：47/139已执行，44项rc0；exec-bindx86、exec-container、exec-warningdriver在双槽48秒任务预算下rc142，失败原日志保留，不当通过。独立同候选exec-bindx86单槽53秒预算实测38.04秒通过（/tmp/unisacc-final-retry-bindx86-928）。下一步重套件独占、短套件双槽；同源同候选队列重试前将原失败结果与日志归档为attempts，再实际重跑，不伪造通过。containercheck发现仍重建另一包，独立修为显式MODEL_COM直接验证候选；主树尚未合入，不将草案检查计入冻结队列。
+
+容器门禁独占53.06秒仍超时，未得到运行检查结果。合入e74c677最小修复：显式MODEL_COM时不另造包，直接验证候选内P2目录/唯一网络/双核及六目标输出、本机双ISA内存与native运行；无候选保留原开发构建路径。测试源码变化，新建最终队列，旧45项通过和各超时留存，不移植为新队列通过。产品与候选9a0ae470未改。
