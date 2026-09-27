@@ -1555,7 +1555,8 @@ def build(locations=False, warnings=False, errors=False):
     addr(q)
     emit(q, "push").o("  load64 r0, [r0+0]\n")
     emit(q, "push").o("  imm r2, 8\n  add64 r0, r0, r2\n  load64 r1, [r7+8]\n  store64 [r1+0], r0\n  load64 r1, [r7+0]\n  .frame -8\n  .frame -8\n  mov r0, r1\n")
-    q.call("NEXT").expect(",").call("NEXT").call("TSPEC").expect(")").a(("COPYW", "vt", "td"), ("COPYW", "vb", "tb")).call("LOADRAW").call("NEXT").ret()
+    q.call("NEXT").expect(",").call("NEXT").call("TSPEC").expect(")").a(("COPYW", "vt", "td"), ("COPYW", "vb", "tb")).call("VA1.VALUE").call("NEXT").ret()
+    install_rules(g, os.path.dirname(__file__), "varargs", bindings=dict(SBB=SBB, SSZ=SSZ), section="aggregate")
     # va_end(ap): ap evaluated; value 0
     p = P("VA2")
     p.call("NEXT").call("EXPR").expect(")").o("  imm r0, 0\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
