@@ -240,130 +240,19 @@ def fmtwalk(pre, on_byte, on_d, on_end):
 
 
 def printf(warnings=False):
+    from printfcontrol import install as printf_control
     pf_install(E, P)
-    P("FMT.decode").a(("SBCLR",)).goto("FMT.walk")
+    printf_control(E, P, "part0", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
     strwalk("FMT.walk","FMT.byte","FMT.end")
-    P("FMT.byte").a(("RLD","bv")).goto("FMT.append")
-    for b in range(256):g.on("FMT.append",[b],"FMT.walk.w",[("SBOUT",b)],"r")
-    P("FMT.end").a(("SBSAVE","pfblob")).ret()
-    # PF is at '(' with the callee name still in ips..ipe. Defined printf
-    # uses the ordinary variadic call path, including nonliteral formats.
-    # Only the undefined fallback requires a literal; pfconv selects routines.
-    p = P("PF")
-    if warnings: p.a(("LDI", "wi_called", 1))
-    p.a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.fallback", [("CMPI", "t", 1)])
-    P("PF.real").call("CALL").ret()
-    p = P("PF.fallback")
-    p.call("NEXT").tok({E.TK_STR: "PF.s"}, bad("printf format"))
-    p = P("PF.s")
-    p.call("FMT.decode").vpush("pfblob").a(("ALUI","add","pfcalls","pfcalls",1),("COPYW","pfcid","pfcalls"),("LDI","pfan",0))
-    if warnings: p.a(("COPYW","wf_format","pfblob"))
-    p.call("NEXT").label("PF.args")
-    p.tok({",": "PF.arg", ")": "PF.go"}, bad("argument list"))
-    P("PF.arg").branch({0:"PF.argument"},bad("printf argument count"),[("CMPI","pfan",32)])
-    q = P("PF.argument")
-    q.vpush("pfcid","pfan").call("NEXT")
-    if warnings: q.a(("COPYW","wf_at","tpos"),("LDI","wi_called",0)).vpush("wf_format","wf_at")
-    q.call("EXPR")
-    if warnings: q.vpop("wf_format","wf_at")
-    q.vpop("pfcid","pfan")
-    if warnings: q.a(("ALUI","add","wf_index","pfan",1)).call("WF.argcheck")
-    q.a(("ALUI", "add", "cur", "cur", 8)).call("MAXF")
-    emit(q, "pf_spill").a(("ALUI","mul","pfkey","pfcid",32),("ALU","add","pfkey","pfkey","pfan"),("STX","pfkey",32<<40,"cur"),("ALUI","add","pfan","pfan",1)).goto("PF.args")
-    q = P("PF.go")
-    q.vpop("pfblob").a(("LDI","pfx",0),("LDI", "cnt", 0), ("INPUSH", "pfblob")).goto("PF.w")
+    printf_control(E, P, "part1", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
     fmtwalk("PF", "PF.b", "PF.d", "PF.end")
-    P("PF.b").a(("ALUI", "add", "cnt", "cnt", 1)).goto("PF.w")
-    P("PF.d").branch({0:"PF.convertarg"},bad("printf argument count"),[("CMP","pfx","pfan")])
-    q = P("PF.convertarg")
-    q.call("PF.flush").a(("ALUI","mul","pfkey","pfcid",32),("ALU","add","pfkey","pfkey","pfx"),("LDX","as","pfkey",32<<40))
-    q.o("  load64 r0, [r6-").num("as").o("]\n").call("PF.convert").a(("ALUI","add","pfx","pfx",1)).goto("PF.w")
-    P("PF.end").branch({1:"PF.finish"},bad("printf argument count"),[("CMP","pfx","pfan")])
-    q = P("PF.finish")
-    q.call("PF.flush")
-    emit(q, "pf_value").call("NEXT").ret()
-    q = P("PF.flush")
-    q.branch({1: "RET"}, "PF.fw", [("CMPI", "cnt", 0)])
-    q = P("PF.fw")
-    emit(q, "pf_write").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).ret()
-    # POOL: after the footer, the formats again from the top, in the same order: each
-    # non-empty literal run is `.str Sk "..."` -- printable bytes as they are, others \xHH, then \x00
-    p = P("POOL")
-    p.call("POOL.next").label("PO.l")
-    p.tok({"eof": "RET", TK_ID: "PO.id", E.TK_STR: "PO.lit"}, "PO.nx")
-    P("PO.lit").a(("LDX", "t", "tpos", SKIPS)).branch({1: "PO.nx"}, "PO.lit1", [("CMPI", "t", 1)])
-    P("PO.lit1").a(("LDI", "cnt", 0)).goto("PL")
+    printf_control(E, P, "part2", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
     strwalk("PL", "PL.cp", "PL.end")
     from strings import rules as string_rules
     string_rules(E, P, "wide_hooks")
-    q = P("PL.b")
-    q.branch({1: "PL.open"}, "PL.byte", [("CMPI", "cnt", 0)])
-    q = P("PL.open")
-    emit(q, "pool_open").goto("PL.byte")
-    P("PL.byte").a(("ALUI", "add", "cnt", "cnt", 1), ("RLD", "bv")).goto("PL.out")
-    for c in range(256):
-        if c in (34, 92):
-            g.on("PL.out", [c], "PL.resume", [("OUT", 92), ("OUT", c)], "r")
-        elif 32 <= c < 127:
-            g.on("PL.out", [c], "PL.resume", [("OUT", c)], "r")
-        else:
-            g.on("PL.out", [c], "PL.resume", [("OUT", 92), ("OUT", ord("x")), ("OUT", ord(HEX[c >> 4])), ("OUT", ord(HEX[c & 15]))], "r")
-    q = P("PL.end")     # an empty literal still has its \x00
-    q.branch({1: "PL.e0"}, "PL.e1", [("CMPI", "cnt", 0)])
-    q = P("PL.e0")
-    emit(q, "pool_open").goto("PL.e1")
-    P("PL.e1").goto("PL.zero")
-    q = P("PL.close")
-    emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).call("POOL.next").goto("PO.l")
-    P("PO.nx").call("POOL.next").goto("PO.l")
-    P("PO.id").a(("LDX","ufblob","ps",FNSTR)).branch({1:"PO.idnormal"},"PO.func",[("CMPI","ufblob",0)])
-    P("PO.idnormal").a(("INTERN", "v", "ps", "pe")).branch({1: "PO.pf0"}, "PO.nx", [("CMP", "v", "pfid")])
-    emit(P("PO.func"),"pool_open").a(("INPUSH","ufblob")).goto("PO.funcbyte")
-    g.on("PO.funcbyte",[256],"PO.funcend",[("INPOP",)])
-    for byte in range(256):
-        spelling=chr(byte) if 32<=byte<127 and byte not in (34,92) else ("\\"+chr(byte) if byte in (34,92) else "\\x%02x"%byte)
-        g.on("PO.funcbyte",[byte],"PO.funcbyte",[("OUT",ord(c)) for c in spelling]+[("ADV",)])
-    P("PO.funcend").o("\\x00").a(("LDI","dw",1)).goto("PL.e1")
-    P("PO.pf0").a(("LDX", "t", "pfid", E.FND)).branch({1: "PO.nx"}, "PO.pf", [("CMPI", "t", 1)])   # a real printf: its format pools whole
-    P("PO.pf").call("POOL.next").tok({"(": "PO.p1"}, "PO.l")
-    P("PO.p1").call("POOL.next").tok({E.TK_STR: "PO.s"}, "PO.l")
-    # Evaluate/pool argument literals before the format fragments, including
-    # nested fallback calls. Reader frames keep the original token positions.
-    P("PO.s").call("FMT.decode").vpush("pfblob").call("POOL.next").a(("COPYW","pas","tpos"),("LDI","pdep",0)).goto("PO.seek")
-    P("PO.seek").tok({"(":"PO.deeper",")":"PO.shallower","eof":"DEAD.pfpool"},"PO.seeknext")
-    P("PO.deeper").a(("ALUI","add","pdep","pdep",1)).goto("PO.seeknext")
-    P("PO.shallower").branch({1:"PO.arguments"},"PO.less",[("CMPI","pdep",0)])
-    P("PO.less").a(("ALUI","sub","pdep","pdep",1)).goto("PO.seeknext")
-    P("PO.seeknext").call("POOL.next").goto("PO.seek")
-    P("PO.arguments").a(("INPUSHXE","pas","tpos")).call("POOL").a(("INPOP",)).vpop("pfblob").a(("LDI","cnt",0),("INPUSH","pfblob")).goto("PO.w")
-    g.on("DEAD.pfpool",range(257),"DEAD",E.rej("not covered: unterminated printf pool"),"r")
+    printf_control(E, P, "part3", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
     fmtwalk("PO", "PO.b", "PO.d", "PO.end")
-    q = P("PO.b")
-    q.branch({1: "PO.open"}, "PO.byte", [("CMPI", "cnt", 0)])
-    q = P("PO.open")
-    emit(q, "pool_open").goto("PO.byte")
-    q = P("PO.byte")
-    q.a(("ALUI", "add", "cnt", "cnt", 1), ("RLD", "bv")).goto("PO.out")
-    for c in range(256):
-        if c in (34, 92):     # measured (probe p12): \" and \\
-            g.on("PO.out", [c], "PO.w", [("OUT", 92), ("OUT", c)], "r")
-        elif 32 <= c < 127:
-            g.on("PO.out", [c], "PO.w", [("OUT", c)], "r")
-        else:
-            g.on("PO.out", [c], "PO.w", [("OUT", 92), ("OUT", ord("x")), ("OUT", ord(HEX[c >> 4])), ("OUT", ord(HEX[c & 15]))], "r")
-    q = P("PO.d")
-    q.call("PO.close").goto("PO.w")
-    q = P("PO.end")
-    q.call("PO.close").call("POOL.next").goto("PO.l")
-    q = P("PO.close")
-    q.branch({1: "RET"}, "PO.cw", [("CMPI", "cnt", 0)])
-    q = P("PO.cw")
-    emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).ret()
-
-    g.on("POOL.next",[256],"RET",[("LDI","tk",TK["eof"])])
-    g.els("POOL.next","POOL.next.real",[])
-    P("POOL.next.real").call("NEXT").ret()
-
+    printf_control(E, P, "part4", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
 
 UNS = E.UNS   # unsigned char/short/int/long: UNS + size
 SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
