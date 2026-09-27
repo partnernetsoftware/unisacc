@@ -5063,3 +5063,5 @@ printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开
 诊断呈现完整组c7ed7a2已合：五模式/导入布局扰动全图一致，11场景×error/warning两模式实际NET与instrumented C renderer完整stdout/stderr/数量22/22同；Python净减38，声明95行。E3下一独立交付为四个warning helper（return/int/unused/format）的完整固定控制，复用同一finite_rules入口与诊断调用接口；不改消息语义、抑制规则或产品支持域。E4 floatconst和E5 sizeof仍各占一个重型槽，新warning组先静态修改后排队验证。
 
 unit位置协议收口按完整过程分工：E4先迁unitlocations.py完整LS适配器，保留tokenlocations.install以及units.py的唯一扫描器和既有标签规则；随后迁完整DL协议读取组和units隔离组，不混改三个语义层。当前E3 warning、E5 sizeof私有验证，父主树产品队列窗口之间只记本决策；不修改队列指纹输入，私有修改继续并行。
+
+sizeof组0999ad5已交待父队列冻结结束后合；全图10组同、6旧probe真实NET O2原生同host，Python净减77/声明增307。E5下一独立整组为return语句及CEXPR/EXPR/LP/QTAIL条件表达式完整控制，保留ASSIGNCV/FS/CKT等已有类型事实和QN空指针证明、共享LP.addr，不迁X.id/更新操作相邻组。先静态工作，等待全机两槽空位，不拆成逐例新增规则。
