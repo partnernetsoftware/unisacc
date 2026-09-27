@@ -3960,7 +3960,7 @@ int wdecode(int t, int *cp) {
     return n;
 }
 
-int initstr(int isglobal, int gt, int off, int cap) {
+int initstr(int isglobal, int gt, int off, int cap, int delta) {
     int t; int n; int k;
     char buf[4096];
     if (iswide(tp)) {
@@ -3968,14 +3968,14 @@ int initstr(int isglobal, int gt, int off, int cap) {
         t = adv();
         n = wdecode(t, wcp);
         if (cap > 0) {
-            initaddr(isglobal, gt, off, 0);
+            initaddr(isglobal, gt, off, delta);
             es("  @mem.zero r1, 0, "); en(cap * 4); ec(10);
         }
         k = 0;
         while (k < n) {
             if (k >= cap) break;
             es("  @lit.imm r0, "); en(wcp[k]); ec(10);
-            initaddr(isglobal, gt, off, k * 4);
+            initaddr(isglobal, gt, off, delta + k * 4);
             estore(4);
             k = k + 1;
         }
@@ -3984,7 +3984,7 @@ int initstr(int isglobal, int gt, int off, int cap) {
     t = adv();
     n = decode(t, buf, sizeof(buf));
     if (cap > 0) {
-        initaddr(isglobal, gt, off, 0);
+        initaddr(isglobal, gt, off, delta);
         es("  @mem.zero r1, 0, "); en(cap); ec(10);
     }
     k = 0;
@@ -3996,7 +3996,7 @@ int initstr(int isglobal, int gt, int off, int cap) {
         c = 0;
         if (k < n) c = buf[k] & 255;
         es("  @lit.imm r0, "); en(c); ec(10);
-        initaddr(isglobal, gt, off, k);
+        initaddr(isglobal, gt, off, delta + k);
         estore(1);
         k = k + 1;
     }
@@ -4072,7 +4072,7 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     initisarr = 0; initrows = 0; initrows3 = 0;
     if (isarr && w == 1 && sst < 0 && rows == 0 && bracedstr(tp)) {
         adv();
-        initstr(isglobal, gt, off, nbytes);
+        initstr(isglobal, gt, off, nbytes, 0);
         eat(tidx(",", 1));
         need(tidx("}", 1), "}");
         return 0;
@@ -4099,6 +4099,19 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     }
     i = 0; depth = 0;
     while (1) {
+        /* A string fills one whole row of a two-dimensional character array. */
+        if (depth == 1 && isarr && w == 1 && sst < 0 && rows > 0 && rows3 == 0) {
+            int braced; int text;
+            braced = bracedstr(tp);
+            text = cur() == T_STR && iswide(tp) == 0;
+            if (braced || text) {
+                if (braced) adv();
+                initstr(isglobal, gt, off, rows, i);
+                if (braced) { eat(tidx(",", 1)); need(tidx("}", 1), "}"); }
+                i = i + rows;
+                continue;
+            }
+        }
         if (cur() == tidx("{", 1)) {
             adv(); depth = depth + 1;
             if (depth >= 32) { printf("initialiser nested too deeply\n"); __exit(1); }
@@ -4396,7 +4409,7 @@ int local_decl(void) {
                 if (cur() == tidx("{", 1)) {
                     if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
                     initaggr(3, slabel, 0, isarr ? ew : w, sst, nb);
-                } else { if (cur() == T_STR) { if (isarr) { initstr(3, slabel, 0, n); }
+                } else { if (cur() == T_STR) { if (isarr) { initstr(3, slabel, 0, n, 0); }
                     else { expr(); loadval(); es("  @mem.lea r1, ls"); en(slabel); ec(10); estore(8); } }
                 else { int sptr; sptr = declptr;   /* before the RHS */
                     expr(); loadval(); fconv(fkind(), lk2);
@@ -4517,7 +4530,7 @@ int local_decl(void) {
                 initaggr(0, 0, off, w, sst, n * w);
             }
             else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
-                initstr(0, 0, off, n);
+                initstr(0, 0, off, n, 0);
             } else { expr(); loadval();
                 eframe(1, 2, off);
                 estore(8); } }
@@ -5064,7 +5077,7 @@ int unit(void) {
                     while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
                 }
                 else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
-                    initstr(1, t, 0, n);
+                    initstr(1, t, 0, n, 0);
                 } else { expr(); loadval();
                     es("  @mem.lea r1, g_"); etok(t); ec(10); estore(8); } }
                 else { expr(); loadval();
