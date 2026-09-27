@@ -9,14 +9,14 @@ def ok(cmd, **kw):
 src=pathlib.Path('examples/hello.c').resolve();n=0
 drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
 part=sys.argv[4] if len(sys.argv)>4 else 'all'
-assert part in ('all','core','resources','language'),part
+assert part in ('all','core','core-modes','core-contracts','core-dependencies','resources','language'),part
 def assembly_package(directory):
     isolated=p/directory;isolated.mkdir()
     asm=isolated/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
     (isolated/'models.pkg').write_bytes((p/'compiler.pkg').read_bytes())
     (isolated/'hello.c').write_bytes(src.read_bytes())
     return isolated,[asm,'--models','models.pkg']
-if part in ('all','core'):
+if part in ('all','core','core-modes'):
     # The migrated pipeline builds the driver itself, not just its input programs.
     netdriver=p/'driver-net'
     netdriver.write_bytes(ok([p/'run','--bundle',p/'models.pkg',target,'exec/c/compiler.c']))
@@ -34,6 +34,10 @@ if part in ('all','core'):
                 flags=['-b',target,mode]+([target] if mode=='-b' else [])+['-O'+str(level)]
                 got=ok([*base,src,*flags]);want=ok([ua,src,*flags]);assert got==want,(exe,flags)
                 n+=1
+    print(f'compiler driver core-modes: network-built driver and {n} mode/level matches pass',flush=True)
+if part in ('all','core','core-contracts'):
+    for exe in drivers:
+        base=[exe,'--models',p/'compiler.pkg']
         # Build-system options have the reference's no-linker semantics.
         for compat in [['-lm','-L/nowhere','-xc'],
                        ['-l','m','-L','/nowhere','-x','c','-g','-std=c99']]:
@@ -92,6 +96,8 @@ if part in ('all','core'):
     for exe in drivers:
         assert ok([exe,'--models',p/'compiler.pkg',ud,late,'-b',target,'-S'])==want
     print('undefined functions: exact named errors, prototypes, duplicates and later definitions pass')
+    print('compiler driver core-contracts: compatibility, stdin, IO and undefined-function contracts pass',flush=True)
+if part in ('all','core','core-dependencies'):
     # Dependency files follow successful real resource reads, never a textual
     # search for include directives. The ledger canonicalises repeated paths.
     dep_src=p/'deps.c';dep_head=p/'outer.h';dep_leaf=p/'leaf.h'
@@ -143,7 +149,7 @@ if part in ('all','core'):
             got=ok([exe,'--models',p/'compiler.pkg','-dump-tokens',tok])
             assert got==want,(text,exe,got,want)
     print('token dump: plain lexer network, macros/literals/predefines match reference')
-    print(f'compiler driver core: {n} mode/level matches and failure/dependency contracts',flush=True)
+    print('compiler driver core-dependencies: dependency ledger and token dump contracts pass',flush=True)
 if part in ('all','resources'):
     # Raw CLI resources are interpreted by E2, in both the Python action oracle
     # and the actual threshold-network runtime. No C-side macro parser is used.
@@ -249,7 +255,7 @@ if part in ('all','language'):
             ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators', 'scalar_prefix']]
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
                ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
-                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref']]
+                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref', 'vararg_aggregate']]
     for source in probes:
         source=source.resolve(); name=source.stem
         host=p/(name+'-cc'); native=p/(name+'-model')
@@ -262,5 +268,5 @@ if part in ('all','language'):
     for macro in ['QT_RUNTIME_ZERO','QT_FLOAT_ZERO','QT_DIFFERENT_POINTER']:
         for level in ['-O0','-O2']:
             r=run([*base,source,'-D'+macro,level,'-b',target,'-S'],cwd=asmdir)
-            assert r.returncode!=0 and not r.stdout,(macro,level,r.returncode,r.stdout,r.stderr)
+            assert r.returncode==1 and not r.stdout and b'error: not covered: ?: arms of different types' in r.stderr and r.stderr.endswith(b'1 error generated.\n'),(macro,level,r.returncode,r.stdout,r.stderr)
     print(f'compiler driver language: {len(probes)} host/ASM network memory O0/O2 and native probes; 6 conditional rejects pass',flush=True)

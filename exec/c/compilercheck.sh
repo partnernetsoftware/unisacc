@@ -14,7 +14,7 @@ b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
 b "$T/run" --check-net "$T/o1.tbl" "$T/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
-case ${1:-all} in all|core|resources)
+case ${1:-all} in all|core|core-modes|core-contracts|core-dependencies|resources)
 b cc -O2 -Wall -Wextra exec/c/compiler.c -o "$T/driver-cc"
 b "$UA" -O2 exec/c/compiler.c -o "$T/driver-ua"
 ;; esac

@@ -121,7 +121,7 @@ if [ "$(uname -s)" = Darwin ]; then
     job exec-container ./exec/c/containercheck.sh
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
-job exec-driver-core ./exec/c/compilercheck.sh core
+for part in modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
 job exec-driver-resources ./exec/c/compilercheck.sh resources
 job exec-driver-language ./exec/c/compilercheck.sh language
 job exec-warningdriver ./exec/c/warningcheck.sh
