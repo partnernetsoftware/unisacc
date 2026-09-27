@@ -517,15 +517,9 @@ def build(locations=False, warnings=False, errors=False):
     E.WORDS.append("type=_Bool"); E.TK["type=_Bool"] = max(E.TK.values()) + 1
     E.tokenizer(("type=const", "type=volatile", "type=restrict", "type=inline"))
     del g.st["NX"][1][64]
-    g.on("NX", [64], "MU0", [("ADV",)])
-    for i, c in enumerate(b"unit"):
-        g.on("MU"+str(i), [c], "MU"+str(i+1), [("ADV",)])
-        g.els("MU"+str(i), "DEAD", E.rej("not covered: unit marker"))
-    g.on("MU4", [48], "MUend", [("ADV",), ("LDI", "unit_epoch", 0), ("LDI", "ixcount", 0)])
-    g.on("MU4", [43], "MUend", [("ADV",), ("ALUI", "add", "unit_epoch", "unit_epoch", 1), ("LDI", "ixcount", 0)])
-    g.els("MU4", "DEAD", E.rej("not covered: unit marker"))
-    g.on("MUend", [10], "NEXT", [("ADV",)])
-    g.els("MUend", "DEAD", E.rej("not covered: unit marker"))
+    for state,row in load_rules(Path(__file__).with_name("startup-entry.tsv"), {}, domain=[64]).items():
+        for key,(target,actions) in row.items(): g.on(state,[key],target,actions)
+    structured_control("startup-marker", False)
     from strings import token_span
     token_span(E, P)
     from strings import initializer as string_initializer
@@ -551,7 +545,7 @@ def build(locations=False, warnings=False, errors=False):
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
     g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
-    P("START").branch({0: "START.ok"}, bad("token input exceeds position domain"), [("XLEN", "toklen"), ("CMPI", "toklen", POSSPAN)])
+    structured_control("startup-guard", False, dict(POSSPAN=POSSPAN))
     p = P("START.ok")
     tops = [o for lv in LEVELS for o in OPS[lv] if o not in SHORT]
     for l in range(16):
@@ -561,21 +555,24 @@ def build(locations=False, warnings=False, errors=False):
             for i, o in enumerate(tops):
                 y = TYROW.get((AX[l], TYOP.get(o, o), AX[r]), "illegal")
                 p.a(("LDI", "t", i * 256 + l * 16 + r), ("LDI", "u", AX.index(y)), ("STX", "t", RST, "u"))
-    p.a(("LDI", "lab", 0), ("LDI", "vsp", 0), ("LDI", "csp", 0), ("SBCLR",), [("SBOUT", c) for c in b"main"], ("SBINTERN", "mnid"),
-        ("SBCLR",), [("SBOUT", c) for c in b"printf"], ("SBINTERN", "pfid"), ("SBCLR",), [("SBOUT", c) for c in b"exit"], ("SBINTERN", "exid"), ("MARK", "x0"), ("LDI", "sk", 0))
-    p.a(("SBCLR",), [("SBOUT", c) for c in b"__func__"], ("SBINTERN", "funcid"))
-    # the reference auto-includes a header when one of its functions is called and not defined here
-    # (src/front_pp.c autoinc): the old E3's check, reused -- such a unit is not covered
-    for k, (nm, _, _) in enumerate(SYSCALLS, 1):
-        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sy%d" % k))
-    for k, nm in enumerate(("va_start", "va_arg", "va_end")):
-        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "va%d" % k))
-    for k, nm in enumerate(("__builtin_sqrt", "__builtin_sqrtf")):
-        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "sqrt%d" % k))
-    p.a(("SBCLR",), [("SBOUT", c) for c in b"__argc"], ("SBINTERN", "acid"), ("SBCLR",), [("SBOUT", c) for c in b"__argv"], ("SBINTERN", "avid"))
+    def init_actions(section, values=None, sequences=None):
+        return load_rules(Path(__file__).with_name("startup-actions.tsv"), sequences or {},
+                          domain=[0], bindings=values or {}, section=section)["actions"][0][1]
+    def intern_name(register, name):
+        p.a(*init_actions("intern", dict(register=register), dict(name=[("SBOUT",c) for c in name.encode()])))
+    def fixed_names(group):
+        for part,register,name in tape_rows("startup-names.tsv"):
+            if part == group: intern_name(register,name)
+    p.a(*init_actions("registers"))
+    fixed_names("head")
+    p.a(*init_actions("position"))
+    fixed_names("function")
+    for k, (nm, _, _) in enumerate(SYSCALLS, 1): intern_name("sy%d" % k,nm)
+    fixed_names("builtins")
     for nm in E.autonames():
-        p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
-    p.call("AUTO").a(("JUMP", "x0")).call("INDEX").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
+        intern_name("t",nm)
+        p.a(*init_actions("auto",dict(AUT=E.AUT)))
+    structured_control("startup-run", False, sequence_bindings=dict(startup_data=p.acts, startup_header=O(E.HEADER)))
     global_control("global0", warnings)
     from enumtypes import install as enum_install
     enum_install(E, P, dict(ENUM_FIRST=ENUM_FIRST, ENUM_LIMIT=FPS_FIRST, ENUM_STATE=ENUM_STATE, TAG_EPOCH=TAG_EPOCH,

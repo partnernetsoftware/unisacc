@@ -5083,3 +5083,7 @@ E5下一独立完整组为X.id及标识符查找/自增自减/compound更新、T
 位置协议25ec7ad已合：五E3模式/units两配置及8种接口组合、布局/字段顺序扰动全图同；原unitlocationcheck与locationcheck实际NET序列化/map/tape/诊断/坏帧全通过，Python净减44、声明139。E4下一完整units.py分帧/扫描/文件static隔离组；保留已声明unit-labels、位置信封DL/LS、动态词表和唯一tokenizer，声明builtin选择来源，不能将扫描算法搬进新的Python模块。父现有五模式联合验证不包含此后合入，后面统一最终源再验。
 
 父本轮独立迁gen2启动/unit-marker控制：固定marker识别、输入域守卫、寄存器/名字初始化与AUTO/INDEX/NEXT调用顺序入声明；TYROW/AX/OPS及SYSCALLS/autonames/HEADER保持实际动态来源。用既有structured_control/load_rules装配，不引入运行原语；与E5的X.id更新区域互不交叉，私有代理不读父工作改动。完成后等槽做完整图及现有多文件/函数名字探针，不能只验语法。
+
+并行收口续行：identifier/update 19edc71、errors e43c525、units e1d712a 已交付待父集成。E3下一完整普通U.str/UNARY/deref/S.star/NOARR控制组，明确不碰已由E5交付的U.pinc/U.pdec与START；E4/E5分别只读审计lower/opt及enc/ARM的实际剩余手写规则与既有声明绑定，若无缺口即交清单，不扩语言/框架。父完成startup真实NET检查后批合集成；重型验证两槽，独立私有树静态工作并行。
+
+startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/CKT/SYSCALLS/HEADER/autonames/TYROW联合扰动与迁前图一致且异于基线。真实六阶段NET O2→osx/arm64运行hello/funcname/s77_fpvar三例stdout/rc同host；首跑host因hello无stdio声明失败，裁判显式预包含stdio后重跑通过，s9自定义va_list不作host对照，改用已有s77_fpvar。证据/tmp/unisacc-startup-control-928；gen2 Python净减3行，声明增加另计，不称总码量减少。
