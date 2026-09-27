@@ -236,7 +236,7 @@ if part in ('all','resources'):
         ok(['cc','-w',source,'-lm','-o',host]); expected=ok([host])
         for level in ['-O0','-O2']:
             assert ok([*base,'-run',source,level],cwd=asmdir)==expected
-        ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==b''
+        ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==expected
     print('decimal/math/string/void/compound probes: host cc and ASM network driver, memory/native pass')
     # Public-shaped commands operate with only the container and source in cwd.
     isolated=p/'isolated';isolated.mkdir()
