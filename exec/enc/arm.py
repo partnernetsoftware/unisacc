@@ -134,6 +134,11 @@ def build(image=False):
         p.goto('EMIT.%d'%cls)
     from finite_rules import install as install_rules
     sequences = {'word': word(P('word.binding')).acts}
+    install_rules(g, Path(__file__).parent, 'armbase', sequences=sequences, section='move')
+    for cls, base in ((3, ('ALUI', 'or', 'w', 'w', 0x9B007C00)),
+                      (7, ('ALU', 'or', 'w', 'w', 'base'))):
+        install_rules(g, Path(__file__).parent, 'armbase', section='rrr',
+                      bindings={'entry': 'EMIT.%d' % cls}, sequences={**sequences, 'base': [base]})
     bindings = {name: P(owner).fresh(kind) for name, owner, kind in
                 (('label0', 'EMIT.6', 'b'), ('label1', 'CALLR.sp', 'b'), ('label2', 'EMIT.2', 'r'))}
     install_rules(g, Path(__file__).parent, 'armbase', bindings=bindings,
