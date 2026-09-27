@@ -117,93 +117,56 @@ def bad(k):
 
 
 def optail(o):
-    """OPX.<o>: the left operand pushed (descriptor lt/lb), the right in r0 (vt/vb): one copy
-    per operator, shared by both ladders -- double, pointer scaling, unsigned, int forms"""
     bn = "OPX." + o
-    q = P(bn)
-    # The existing type axis identifies floating VALUES, not pointers to them.
-    q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("TAX").a(("COPYW", "axl", "ax"),
-        ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("TAX")
-    floats = (AX.index("f32"), AX.index("f64"))
-    q.branch({floats: bn + ".f"}, bn + ".lf", [("RLD", "ax")])
-    P(bn + ".lf").branch({floats: bn + ".f"}, bn + ".nf", [("RLD", "axl")])
-    oi = [x for lv in LEVELS for x in OPS[lv] if x not in SHORT].index(o)
-    f = P(bn + ".f").a(("ALUI", "mul", "t", "axl", 16), ("ALU", "add", "t", "t", "ax"),
-        ("LDX", "ck", "t", CKT), ("ALUI", "add", "t", "t", oi * 256), ("LDX", "rs", "t", RST))
-    f.branch({1: "DEAD.dbl"}, bn + ".fc", [("CMPI", "rs", AX.index("illegal"))])
+    modes = {name: (pointer, int(compare), int(invert)) for name, pointer, compare, invert in tape_rows("operator-modes.tsv")}
+    pointer, compare, invert = modes.get(o, modes["*"])
+    bindings = {name: bn + (suffix if suffix != "-" else "") for name, suffix in tape_rows("operator-states.tsv")}
+    bindings.update(CKT=CKT, RST=RST, operator_offset=[x for lv in LEVELS for x in OPS[lv] if x not in SHORT].index(o) * 256,
+                    axis_illegal=AX.index("illegal"), axis_f64=AX.index("f64"),
+                    integer_entry=bn + (".n" if pointer in ("add", "sub") else ".r"),
+                    pointer_compare_target=bn + ".r" if compare else "DEAD.pa")
+    sequences = {name: row[0][1] for name, row in load_rules(Path(__file__).with_name("operator-actions.tsv"), {},
+                 domain=[0], bindings=bindings, section="operator").items()}
+    sequences.update(operator_signed=O(E.optext(o)), operator_unsigned=O(E.optext(o, True)))
+    def install(section, suffix=""):
+        structured_control("operator-" + section, False, dict(bindings, word_state=bn + "." + section + suffix), sequences)
+    install("prefix")
     if o in FOPS:
-        P(bn + ".fc").branch({1: bn + ".d"}, bn + ".s", [("CMPI", "ck", AX.index("f64"))])
+        install("float-select")
         for suffix, base in (("d", DBL), ("s", FLT)):
-            f = P(bn + "." + suffix).call("TO." + suffix)
-            emit(f, "push").o("  load64 r0, [r7+8]\n").a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("TO." + suffix)
-            f.o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n")
-            name = FOPS[o]
-            opcode = FPU[suffix + name]
-            reverse = opcode.endswith("_rev")
-            f.o("  %s r0, %s\n" % (opcode.removesuffix("_rev"), "r0, r1" if reverse else "r1, r0"))
-            if o == "!=": f.o("  imm r1, 1\n  xor64 r0, r0, r1\n")
-            f.a(("LDI", "vt", 0), ("LDI", "vb", 4 if o in ("<", ">", "<=", ">=", "==", "!=") else base)).ret()
+            opcode = FPU[suffix + FOPS[o]]
+            sequences.update(float_opcode=O(TYPE_TAPE["float_operator"] % (opcode.removesuffix("_rev"),
+                             "r0, r1" if opcode.endswith("_rev") else "r1, r0")),
+                             float_invert=O(TYPE_TAPE["float_invert"]) if invert else [])
+            bindings.update(float_entry=bn + "." + suffix, float_convert="TO." + suffix, float_result=4 if compare else base)
+            install("float-body", suffix)
     else:
-        P(bn + ".fc").goto("DEAD.dbl")
-    q = P(bn + ".nf")
-    if o in ("+", "-"):
-        q.branch({1: bn + ".i"}, bn + ".pr", [("CMPI", "vt", 0)])
-        r = P(bn + ".pr")
-        if o == "+":     # n + p: the pushed n scaled in place by p's element size (measured)
-            r.branch({1: bn + ".np"}, bad("pointer + pointer"), [("CMPI", "lt", 0)])
-            r = P(bn + ".np")
-            r.a(("COPYW", "lt", "vt"), ("COPYW", "lb", "vb"))
-            emit(r, "push").o("  load64 r0, [r7+8]\n").call("SCALE").o("  store64 [r7+8], r0\n  load64 r0, [r7+0]\n  .frame -8\n")
-            emit(r, "pop1").o(E.optext(o)).ret()
-        else:            # p - q: the byte difference divided by the element size; a long (measured)
-            r.branch({(1, 2): bn + ".pd"}, bad("integer - pointer"), [("CMPI", "lt", 1)])
-            r = P(bn + ".pd")
-            emit(r, "pop1").o(E.optext(o)).call("DSCALE").a(("LDI", "vt", 0), ("LDI", "vb", 8)).ret()
-        q = P(bn + ".i")
-        q.branch({1: bn + ".n"}, bn + ".p", [("CMPI", "lt", 0)])
-        r = P(bn + ".p")
-        r.call("SCALE")
-        emit(r, "pop1").o(E.optext(o)).a(("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).ret()
-        q = P(bn + ".n")
-    else:
-        q.branch({1: bn + ".r"}, bn + ".pc", [("ALU", "or", "t", "vt", "lt"), ("CMPI", "t", 0)])
-        P(bn + ".pc").goto(bn + ".r" if o in ("<", ">", "<=", ">=", "==", "!=") else "DEAD.pa")
-        q = P(bn + ".r")
-    emit(q, "pop1")
-    tops = [x for lv in LEVELS for x in OPS[lv] if x not in SHORT]
-    oi = tops.index(o)
-    q.a(("COPYW", "svt", "vt"), ("COPYW", "svb", "vb"), ("COPYW", "vt", "lt"), ("COPYW", "vb", "lb")).call("TAX").a(("COPYW", "axl", "ax"),
-        ("COPYW", "vt", "svt"), ("COPYW", "vb", "svb")).call("TAX")
-    q.a(("ALUI", "mul", "t", "axl", 16), ("ALU", "add", "t", "t", "ax"), ("LDX", "ck", "t", CKT), ("ALUI", "add", "t", "t", oi * 256), ("LDX", "rs", "t", RST))
-    # CKM (shared): ck unsigned below 8 bytes masks both; the spelling by ck's signedness; RESD (shared): res
-    q.call("CKM").branch({1: bn + ".us"}, bn + ".ss", [("CMPI", "cku", 1)])
-    P(bn + ".us").o(E.optext(o, True)).goto("RESD")
-    P(bn + ".ss").o(E.optext(o)).goto("RESD")
+        install("float-reject")
+    install("pointer-" + pointer)
+    install("integer")
 
 
 def tytail():
-    """the operator-independent halves of the integer tail, once for every operator"""
-    q = P("CKM")
-    q.a(("LDI", "cku", 0))
-    for w, m in [(sz, (1 << (8 * sz)) - 1) for t, vb, sz, un, nr in TYINT if un and sz < 8]:
-        q.branch({1: "CKM.m%d" % w}, (nx := "CKM.k%d" % w), [("CMPI", "ck", AX.index("u%d" % (8 * w)))])
-        P("CKM.m%d" % w).o("  imm r2, %d\n  and64 r0, r0, r2\n  and64 r1, r1, r2\n" % m).a(("LDI", "cku", 1)).ret()
-        q = P(nx)
-    q.branch({1: "CKM.u"}, "RET", [("CMPI", "ck", AX.index("u64"))])
-    P("CKM.u").a(("LDI", "cku", 1)).ret()
-    q = P("RESD")        # res: an unsigned result below 8 bytes is masked (zext); the descriptor is res's
-    q.a(("LDI", "vt", 0))
-    # the rows are tried in tyinfo's order (i8 first), so the table's row order changes the
-    # step count of every generated compile -- a reorder is not a regression (ade4848: +0.4%)
-    for name, code, m in [(t, vb, (1 << (8 * sz)) - 1 if un and sz < 8 else None) for t, vb, sz, un, nr in TYINT]:
-        hit, nx = "RESD." + name, "RESD.n" + name
-        q.branch({1: hit}, nx, [("CMPI", "rs", AX.index(name))])
-        h = P(hit)
-        if m:
-            h.o("  imm r2, %d\n  and64 r0, r0, r2\n" % m)
-        h.a(("LDI", "vb", code)).ret()
-        q = P(nx)
-    q.goto("DEAD.ty")
+    initials = {name: row[0][1] for name, row in load_rules(Path(__file__).with_name("operator-actions.tsv"),
+                {}, domain=[0], section="initial").items()}
+    current, initial = "CKM", initials["ckm"]
+    for width, mask in [(sz, (1 << (8 * sz)) - 1) for _, _, sz, un, _ in TYINT if un and sz < 8]:
+        hit, nxt = "CKM.m%d" % width, "CKM.k%d" % width
+        structured_control("ckm-row", False, dict(word_state=current, tail_current=current,
+            tail_test=P(current).fresh("b"), tail_hit=hit, tail_next=nxt, tail_axis=AX.index("u%d" % (8 * width))),
+            dict(tail_initial=initial, tail_mask=O(TYPE_TAPE["mask_pair"] % mask)))
+        current, initial = nxt, []
+    structured_control("ckm-final", False, dict(tail_current=current, tail_test=P(current).fresh("b"),
+        tail_axis=AX.index("u64")), dict(tail_initial=initial))
+    current, initial = "RESD", initials["resd"]
+    for name, code, size, unsigned, _ in TYINT:
+        hit, nxt = "RESD." + name, "RESD.n" + name
+        mask = O(TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1)) if unsigned and size < 8 else []
+        structured_control("resd-row", False, dict(word_state=current, tail_current=current,
+            tail_test=P(current).fresh("b"), tail_hit=hit, tail_next=nxt, tail_axis=AX.index(name), tail_code=code),
+            dict(tail_initial=initial, tail_mask=mask))
+        current, initial = nxt, []
+    structured_control("resd-final", False, dict(tail_current=current), dict(tail_initial=initial))
 
 
 def strwalk(pre, body, done):
@@ -527,7 +490,7 @@ def types():
     structured_control("type-tail", False)
 
 
-def structured_control(section, warnings, extra=None):
+def structured_control(section, warnings, extra=None, sequence_bindings=None):
     section += "-warnings" if warnings and section in ("block", "if") else ""
     p = P("control." + section + (extra or {}).get("word_state", ""))
     bindings = dict(VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
@@ -551,7 +514,9 @@ def structured_control(section, warnings, extra=None):
         p.acts = []
         sequences[name] = getattr(p, method)(*slots.split(",")).acts
     tokens = dict(TK, identifier=TK_ID, number=TK_NUM, string=E.TK_STR)
-    classes = {name: [TK[token] for token in TWORDS] if kind == "typewords" else [tokens[value]]
+    sequences.update(sequence_bindings or {})
+    classes = {name: [AX.index("f32"), AX.index("f64")] if kind == "float_axes" else
+               [TK[token] for token in TWORDS] if kind == "typewords" else [tokens[value]]
                for name, kind, value in tape_rows("control-classes.tsv")}
     install_rules(g, os.path.dirname(__file__), "control", bindings=bindings,
                   sequences=sequences, classes=classes, section=section)
