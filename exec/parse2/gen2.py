@@ -1262,7 +1262,7 @@ def build(locations=False, warnings=False, errors=False):
     P("LP.par").call("NEXT").call("LP.addr").expect(")").call("NEXT").ret()
     P("LP.star").call("NEXT").call("UNARY").call("DOWN").ret()
     for name, op in (("inc", "+"), ("dec", "-")):
-        P("LP."+name).call("STEPTY").call("POST."+op).call("C%d" % LEVELS[0]).call("QTAIL").ret()
+        P("LP."+name).call("CSTEP").call("POST."+op).call("C%d" % LEVELS[0]).call("QTAIL").ret()
     # c ? a : b -- labels as if/else (measured): jumpz L a; a; jump L b; L a: b; L b:
     P("QTAIL").tok({"?": "QT"}, "RET")
     p = P("QT")
@@ -1384,15 +1384,22 @@ def build(locations=False, warnings=False, errors=False):
     g.on("DEAD.nint", range(257), "DEAD", E.rej("not covered: pointer or non-int in op= ++ --"), "r")
     P("INTONLY").branch({1: "IO.b"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vt", 0)])
     P("IO.b").branch({1: "RET"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vb", 4)])
+    for op, name in (("+", "add"), ("-", "sub")):
+        P("FPSTEP." + op).branch({1: "FPSTEP.d" + op}, "FPSTEP.s" + op, [("CMPI", "vb", DBL)])
+        for suffix, bits in (("d", 4607182418800017408), ("s", 1065353216)):
+            P("FPSTEP." + suffix + op).o("  imm r1, %d\n  %s r0, r0, r1\n" % (bits, FPU[suffix + name])).ret()
     for nm, o, fix in (("X.inc", "+", "post_inc"), ("X.dec", "-", "post_dec")):
         q = P(nm)           # addr; push; load; push; 1; pop; op; pop; store; undo to the old value
-        q.call("LOOKUP").call("NOARR").call("STEPTY")
+        q.call("LOOKUP").call("NOARR").call("CSTEP")
         addr(q)
         q.call("POST." + o).call("C%d" % LEVELS[0]).call("QTAIL").ret()
         # A computed member/element address uses the same update as a name.
         q = P("POST." + o)
         q.branch({1: "POST.booltest" + o}, "POST.normal" + o, [("CMPI", "vt", 0)])
-        P("POST.booltest" + o).branch({1: "POST.bool" + o}, "POST.normal" + o, [("CMPI", "vb", BOOL)])
+        P("POST.booltest" + o).branch({BOOL: "POST.bool" + o, (DBL, FLT): "POST.float" + o}, "POST.normal" + o, [("RLD", "vb")])
+        qf = P("POST.float" + o)
+        emit(qf, "push").call("LOADRAW")
+        emit(qf, "push").call("FPSTEP." + o).o("  load64 r1, [r7+8]\n").call("STOREV").o("  load64 r0, [r7+0]\n  .frame -16\n").call("NEXT").ret()
         qb = P("POST.bool" + o)
         emit(qb, "push").call("LOADRAW")
         emit(qb, "push").o("  imm r1, 1\n  %s r0, r0, r1\n" % ("add64" if o == "+" else "sub64")).call("TO.b").o("  load64 r1, [r7+8]\n").call("STOREV").o("  load64 r0, [r7+0]\n  .frame -16\n").call("NEXT").ret()
@@ -1403,7 +1410,7 @@ def build(locations=False, warnings=False, errors=False):
         emit(q, "pop1").o(E.optext(o))
         emit(q, "pop1").call("STOREV")
         emit(q, fix).call("NEXT").ret()
-        P("PX." + nm[2:]).call("STEPTY").goto("POST." + o)
+        P("PX." + nm[2:]).call("CSTEP").goto("POST." + o)
         P("MB." + nm[2:]).branch({1: "PX." + nm[2:]}, bad("increment of array member"), [("CMPI", "marr", 0)])
     p = P("X.var")      # an identifier operand, then the rest of the ladder with it as the left operand
     p.a(("INTERN", "v", "ips", "ipe")).branch({1:"X.func"},"X.enumcheck",[("CMP","v","funcid")])
@@ -1562,10 +1569,12 @@ def build(locations=False, warnings=False, errors=False):
     P("PRE.value").vpop("amp").call("DOWN").ret()
     for nm, fix in (("U.pinc", "pre_inc"), ("U.pdec", "pre_dec")):
         q = P(nm)           # addr; push; load; +-step; pop; store
-        q.call("NEXT").call("PRE.addr").call("STEPTY")
-        emit(q, "push").call("LOADV")
-        emit(q, fix).call("NARU")
-        emit(q, "pop1").call("STOREV").ret()
+        q.call("NEXT").call("PRE.addr").call("CSTEP")
+        emit(q, "push").call("LOADV").branch({1: nm + ".scalar"}, nm + ".integer", [("CMPI", "vt", 0)])
+        P(nm + ".scalar").branch({(DBL, FLT): nm + ".float"}, nm + ".integer", [("RLD", "vb")])
+        P(nm + ".float").call("FPSTEP." + ("+" if nm == "U.pinc" else "-")).goto(nm + ".store")
+        emit(P(nm + ".integer"), fix).call("NARU").goto(nm + ".store")
+        emit(P(nm + ".store"), "pop1").call("STOREV").ret()
     P("U.pos").call("NEXT").call("UNARY").call("NODBL0").ret()     # +x: no code (the old E3, p7)
     q = P("U.neg")
     q.call("NEXT").call("UNARY").branch({1: "U.negscalar"}, "U.negint", [("CMPI", "vt", 0)])
