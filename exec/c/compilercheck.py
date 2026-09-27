@@ -16,6 +16,10 @@ netdriver.chmod(0o755)
 assert ok([netdriver,'--models',p/'compiler.pkg',src,'-b',target,'-O2'])==ok([ua,src,'-b',target,'-O2'])
 for exe in drivers:
     base=[exe,'--models',p/'compiler.pkg']
+    # Version queries need no input or package, including outside the repo.
+    for flag in ['--version','-version']:
+        r=run([exe,flag],cwd=p)
+        assert r.returncode==0 and not r.stderr and r.stdout==ok([ua,flag]),r
     for level in range(3):
         for mode in ['-E','-S','-b']:
             flags=['-b',target,mode]+([target] if mode=='-b' else [])+['-O'+str(level)]

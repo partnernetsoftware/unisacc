@@ -1,6 +1,7 @@
 /* Product-driver migration: IO and route selection only. All source handling
    is performed by the package's networks. Unsupported CLI remains an explicit
    error until migrated; no call to a reference compiler. Not the default yet. */
+#include "../../src/version.h"
 #define UNISA_RUNTIME_LIBRARY
 #include "run.c"
 #undef UNISA_RUNTIME_LIBRARY
@@ -84,7 +85,10 @@ int main(int argc, char **argv) {
     Buf defs={0}, undefs={0}, forced={0}, incdir={0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a,"-run")) runit = 1;
+        if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
+            printf("unisacc %s\n",UNISACC_VERSION); return 0;
+        }
+        else if (!strcmp(a,"-run")) runit = 1;
         else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
         else if (runit && src && a[0]!='-') {
             size_t len=strlen(a);

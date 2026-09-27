@@ -3223,3 +3223,20 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   `83d5322d30fba24ffd2249e35a7d653f396e1119570e3023d6ad0daea0af9b14`.
 - Targeted verification only; no new full-gate or full-CLI result claimed.
   Default reference .com unchanged. No push/release; cc-unisacc stays paused.
+
+### Model driver: shared version query
+
+- `src/version.h` is the single product version declaration. build_ref embeds
+  it into the standalone unisacc.c; the model driver includes it directly.
+  ua_ready hashes it too, so a version-only edit cannot reuse a stale reference.
+- `--version` and `-version` return before package/source loading. Fresh
+  compilercheck passes, checking cc/unisacc/ASM builds from outside the repo
+  without a package. Rebuilt container also executes both queries on macOS
+  arm64 and Rosetta x86_64: exact `unisacc 0.0.7`, exit 0, no stderr.
+- Development container: 3,076,896 B, SHA256
+  `e9214bae33045acb0c5dbc6438de4f7b3383885f3af9aca1184428b65b592f03`.
+  Reference .com rebuilt and unchanged byte-for-byte (SHA256
+  `3f914d98624f82122d5841611bcd4de384746761b7db837a725f0c829a14cd07`).
+  docs: 3 generated tables, stale 0, referee ledger ok. Logs are
+  `/tmp/unisacc-version-{check,build,com,docs}.log`. Targeted checks only;
+  no new full gate, platform-wide validation, default switch, push or release.

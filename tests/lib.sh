@@ -33,7 +33,7 @@ ua_ready() {
     # the caller chose is used as given.
     local want
     if [ "$UA" = /tmp/ua_ref ]; then
-        want=$(cat "$_LIB_R"/kernel/*.inc "$_LIB_R"/kernel/*.c "$_LIB_R"/src/*.c \
+        want=$(cat "$_LIB_R"/kernel/*.inc "$_LIB_R"/kernel/*.c "$_LIB_R"/src/*.c "$_LIB_R"/src/version.h \
                "$_LIB_R"/tests/refshim.h "$_LIB_R"/tests/reffoot.h | cksum)
         [ -x "$UA" ] && [ "$(cat "$UA.stamp" 2>/dev/null)" = "$want" ] && return 0
     else

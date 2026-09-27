@@ -86,6 +86,7 @@
 | [`src/front_parse.c`](src/front_parse.c) | 解析与 tape 生成（walker）：类型、符号、表达式、调用、语句、初始化 |
 | [`src/opt.c`](src/opt.c) | tape 优化器：H1 栈顶缓存、块级活跃性、`peep` 表 |
 | [`src/main.c`](src/main.c) | 命令行 |
+| [`src/version.h`](src/version.h) | 参考与模型驱动器共用的产品版本声明 |
 | [`src/back_lower.c`](src/back_lower.c) | 后端前半：解析 tape、向网络问 facts、lowering |
 | [`src/back_encode.c`](src/back_encode.c) | arm64 与 x86-64 编码器、汇编器 |
 | [`src/back_image.c`](src/back_image.c) | ELF/Mach-O/PE 写出、SHA-256 签名、Windows 导入、`-run` |
@@ -95,7 +96,7 @@
 
 [`iterate/`](iterate/) 是**开发工具**，不属于产品：`iterate/construct/` 用 C 从 `weights/gold/*.tsv` 构造权重（18 个阶段的 UNS2 整包与 `built.uns2` 逐字节相同），`iterate/kernel/` 用 C 从声明数据生成 `kernel/unisa_model.inc` 的大部分内容。它们由 unisacc 编译、单独运行，不进编译器的使用流程，也不是自举的前提；产品的 `kernel/` 仍由种子生成。这条迁移路线（prd 的 J10）已暂停，工具保留。
 
-`src/` 的七个文件没有头文件，也不互相 `#include`：`tests/build_ref.sh` 按上表顺序把它们拼进 `unisacc.c`，顺序即依赖。
+`src/` 的七个 C 文件不互相 `#include`：`tests/build_ref.sh` 先嵌入 `src/version.h` 的版本声明，再按依赖顺序拼入生成内核与七个 C 文件，得到独立的 `unisacc.c`。模型驱动器直接包含同一版本头文件。
 
 这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。`unisacc.com` 的打包（`python3 -m unisa ape`）是打包路径上唯一用到 Python 的步骤（完整发布门禁仍调用 Python 裁判），其中各目标的镜像都由 unisacc 编译。
 

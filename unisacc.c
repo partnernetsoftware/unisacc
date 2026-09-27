@@ -1,3 +1,6 @@
+/* Shared product version for the reference and model drivers.
+   build_ref.sh embeds this declaration in the standalone unisacc.c. */
+#define UNISACC_VERSION "0.0.7"
 /* GENERATED -- do not edit.  `python3 -m unisa emit-kernel` writes this
  * file; tests/kernel.sh fails when it differs from a fresh run.
  * The model: every stage's constructed weights, their dimensions, and the
@@ -11438,8 +11441,6 @@ long numval(int t) {
     return v;
 }
 
-/* One string, in one place: a release is identifiable from the binary. */
-#define UNISACC_VERSION "0.0.7"
 /* Are two NUL-terminated strings the same? */
 int strpre(char *a, char *p) {          /* a starts with p */
     int k;
