@@ -1059,6 +1059,7 @@ class Walker:
         self.sc.push()
         self.off, self.maxoff = 0, 0
         self.fn_ret = ret
+        self.fn_label = sym
         self.fn_nfixed = len(params) + (1 if ret.kind == "struct" else 0)
         self.fn_vararg = vararg
         self.ret_label = self.em.new_label("ret_" + sym + "_")
@@ -1161,7 +1162,7 @@ class Walker:
         if self.at("id") and self.peek(1).kind == ":":           # a label
             name = self.next().text
             self.next()
-            self.em.label("u_" + name)
+            self.em.label("u_" + self.fn_label + "." + name)
             return self.labelled()
         p = self.ask("stmt")                                     # [W-3]
         if p == "block":
@@ -1207,7 +1208,7 @@ class Walker:
             self.em.jump(self.ret_label)
         elif p == "goto":
             self.next()
-            self.em.jump("u_" + self.expect("id").text)
+            self.em.jump("u_" + self.fn_label + "." + self.expect("id").text)
             self.expect(";")
         elif p == "break":
             self.next()

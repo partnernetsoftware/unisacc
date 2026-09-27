@@ -4977,3 +4977,5 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 实际外部corpus候选4d351c5：220原输入四片双槽35.96秒，201通过/1错值/14拒绝/4原knownfail/0超时；四片rc1，原216基线不降低。00175浮点实参到char/int形参输出0而应99，优先E3共用参数转换；00215 ARM指令拒绝分给enc独立定位，其余拒绝按共用语法分组。证据/tmp/unisacc-model-corpus-928，CORPUS_UA显式为网络候选，不能用Python默认结果覆盖。E4 START/peep分派e5b54b1全图及动态扰动同、实际net fib O1/O2同，Python+9/TSV+9；lower、parse2、enc三域继续私有并行。
 
 corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28秒全绿；私有经典C产物214通过/2wrong（00038 sizeof不带括号、00204结构参数/返回）+4knownfail、14.73秒，不能将Python216外推产品。实际模型201/1wrong/14拒绝如前。加强后空输入与“写出貌似正确产物再exit2”均被拒绝，/tmp/unisacc-corpus-fault-*。00215已由enc代理全链定位为E3/参考均输出重复函数内u_label，合法不同函数同名标签被混到全局；ARM拒绝正确，禁止放宽后端，后续前端统一函数域命名。x868156a9a删division/DONE固定Python净44，TSV增54，全图/动态扰动与实际原fixture均同，未称总源码减少。
+
+函数标签命名空间修复决定：C/Python/E3统一使用u_<实际函数符号>.<源标签>，点分隔不可出现在C标识符中，函数符号保留多单元static后缀，源标签不经过全局static重命名。只改共享label/goto输出，不放宽后端重复定义检查；原corpus00215及独立双函数同名标签验证，再做原回归。父负责C/Python及持久探针，E3在位域交付后同步模板。

@@ -582,6 +582,14 @@ int etok(int i) {
     return 0;
 }
 
+/* C labels have function scope, independent of the ordinary identifier namespace. */
+int userlabel(int t) {
+    int k;
+    es("u_"); etok(fntok); ec(46);
+    k = 0; while (k < tlen[t]) { ec(src[tpos[t] + k] & 255); k = k + 1; }
+    return 0;
+}
+
 int newlab(void) { nlab = nlab + 1; return nlab; }
 int elab(char *p, int n) { es(p); en(n); return 0; }
 
@@ -4601,7 +4609,7 @@ int stmt_(void) {
         if (kind(tp + 1) == tidx(":", 1)) {
             int lt;
             lt = adv(); adv();
-            es("u_"); etok(lt); es(":\n");
+            userlabel(lt); es(":\n");
             if (cur() != tidx("}", 1)) stmt();
             return 0;
         }
@@ -4788,7 +4796,7 @@ int stmt_(void) {
     if (p == P_GOTO) {
         int gt;
         adv(); gt = adv();
-        es("  @ctrl.jump u_"); etok(gt); ec(10);
+        es("  @ctrl.jump "); userlabel(gt); ec(10);
         need(tidx(";", 1), ";");
         return 0;
     }
