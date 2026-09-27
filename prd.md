@@ -3553,3 +3553,35 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   rendering and warning rules, plus multi-unit location framing and CLI
   -Wall/-Wextra/-Werror integration. Last measured CLI remains 63/64.
   Local commit only; no push/release. Full reconstruction remains active.
+
+
+### Diagnostic renderer and first warning rule — development route
+
+- Optional E3 --warnings (implies --locations) implements reference
+  -Wreturn-type decisions and summary, plus source/caret rendering and header
+  warning suppression. Compiler CLI still does not select it: full -Wall,
+  other warning kinds, multi-unit integration and -Werror remain unfinished.
+- Renderer: 11 cases x 2 modes compare with actual reference diagnostic
+  functions. Return warnings: 32 cases, 14 with warnings, compare tape and
+  stderr; quiet mode also matches tape with empty stderr. Both checks passed
+  with cc, unisacc and macOS arm64/x86_64 assembly runtimes (Rosetta for x86).
+- These tests exposed an existing E3 floating-condition gap: it omitted
+  reference ftruthy conversion. Model FTRUTH/FNOT now cover if/loops/ternary,
+  logical operands and unary !, preserving negative-zero and NaN behavior.
+  Product/reference code was already correct. float_truth.c runs successfully
+  with host cc and the reference; quiet/warning model tapes match reference.
+- Before adding float_truth.c, all old 243 kept tapes passed unchanged.
+  The new probe is separately verified and raises keep-e3 to 244. Self-source
+  tape remains byte-identical (3,929,446 B). compilercheck.sh passed all
+  27 mode/level matches and its existing CLI/resource/IO/decimal checks.
+- exec-diag and exec-returnwarn join the bounded gate. No whole-gate result,
+  Linux/Windows native claim, default .com switch or release in this batch.
+  Default E3 model changes for the floating-condition fix; no serialized-model
+  identity claim. Runtime remains generic model actions.
+
+- Rebuilt development container (not shipped default): 3,265,064 B,
+  SHA-256 b8c29bed5211b39071ee4fc58ae0de255efed0c1199cc2cc7594a225c1a12f63.
+  Its float_truth probe compiled and ran with exit 0 as native osx/arm64,
+  osx/x86_64 (Rosetta), and memory -run. The subprocess harness must launch
+  the APE through /bin/sh on macOS; a direct subprocess exec first raised
+  ENOEXEC before compilation, then the corrected harness passed.

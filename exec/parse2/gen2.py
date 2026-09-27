@@ -3,6 +3,11 @@ declared data -- a grammar, attribute tables (the gold stages), and tape
 templates -- by one generic compiler, instead of being grown state by state.
 
     python3 exec/parse2/gen2.py OUT.json
+    python3 exec/parse2/gen2.py --locations OUT.json
+    python3 exec/parse2/gen2.py --warnings OUT.json
+
+Optional --warnings currently implements only -Wreturn-type, implies
+--locations, and is not connected to the compiler CLI.
 
 Step 1 covers: int functions and parameters, int locals, expression
 statements, assignment, calls, unary - !, the binary operators of every
@@ -234,15 +239,15 @@ def ladder(prefix, bottom):
         for o in OPS[lv]:
             q = P("%s.%s" % (nm, o))
             if o == "&&":
-                q.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "e", "lab"))
+                q.call("FTRUTH").a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "e", "lab"))
                 emit(q, "and_skip").vpush("e").call("NEXT").call(nxt).vpop("e")
-                emit(q, "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
+                emit(q.call("FTRUTH"), "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
                 emit(q, "label_e").goto(nm + ".l")
                 continue
             if o == "||":
-                q.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "od", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "on", "lab"))
+                q.call("FTRUTH").a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "od", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "on", "lab"))
                 emit(q, "or_skip").vpush("od").call("NEXT").call(nxt).vpop("od")
-                emit(q, "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
+                emit(q.call("FTRUTH"), "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
                 emit(q, "label_d").goto(nm + ".l")
                 continue
             # left in r0: push; the right operand at the next level; then the operator's shared tail (OPX)
@@ -662,7 +667,7 @@ def types():
         P(name + ".emit").o("  imm r2, ").num("scl").o("\n  " + op + " r0, r0, r2\n").ret()
 
 
-def build(locations=False):
+def build(locations=False, warnings=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
@@ -687,6 +692,8 @@ def build(locations=False):
     floatconst_install(E, P)
     E.autoscan()
     types()
+    from truth import install as truth_install
+    truth_install(P, DBL, FLT)
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
     from statics import install as static_install
@@ -744,7 +751,9 @@ def build(locations=False):
     P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
     P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", E.FND)).branch({1: "END.ex"}, "END.x2", [("CMPI", "t", 1)])
     P("END.ex").o("  call exit\n").goto("END.x2")     # a unit that defines exit calls it on return from main (measured)
-    P("END.x2").o("  .exit r0\n").call("PF.helpers").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").call("UD.check").a(("ACCEPT",)).goto("DEAD")
+    p = P("END.x2").o("  .exit r0\n").call("PF.helpers").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").call("UD.check")
+    if warnings: p.call("WR.summary")
+    p.a(("ACCEPT",)).goto("DEAD")
     p = P("INITS")
     p.call("NEXT").label("IN.l")
     p.branch({1: "IN.scan"}, "IN.static", [("LDX", "si_blob", "tpos", SINIT), ("CMPI", "si_blob", 0)])
@@ -883,7 +892,10 @@ def build(locations=False):
     q.a(("STX", "cpv", LOC, "cur")).goto("FN.copynext")
     P("FN.copynext").a(("ALUI", "add", "cpi", "cpi", 1)).goto("FN.copyloop")
     p = P("FN.go")
-    p.call("NEXT").call("STMTS").a(("INTERN", "v", "fns", "fne")).branch({1: "FN.m0"}, "FN.tl", [("CMP", "v", "mnid")])
+    if warnings: p.a(("LDI", "wr_last", 0))
+    p.call("NEXT").call("STMTS")
+    if warnings: p.call("WR.return")
+    p.a(("INTERN", "v", "fns", "fne")).branch({1: "FN.m0"}, "FN.tl", [("CMP", "v", "mnid")])
     P("FN.m0").o("  imm r0, 0\n").goto("FN.tl")      # reaching main's } returns 0 (C99 5.1.2.2.3; product 18c8f22)
     p = P("FN.tl")
     emit(p, "fn_tail").a(("ALUI", "add", "t", "max", 7), ("ALUI", "and", "t", "t", -8), ("OFILL", "frm", "t", 7), ("LDI", "sv", 0)).call("UNWIND")
@@ -916,7 +928,7 @@ def build(locations=False):
     p = P("STMTS")
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
-    p = P("STMT")
+    p = P("STMT.body" if warnings else "STMT")
     p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl", "enum": "S.decl",
            "type=static": "SC.start", "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
     P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
@@ -1013,13 +1025,18 @@ def build(locations=False):
     P("S.expr").a(("LDI", "stl", 1)).call("CEXPR").expect(";").call("NEXT").ret()
     p = P("S.if")
     p.call("NEXT").expect("(").call("NEXT").call("EXPR").expect(")").a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"))
-    emit(p, "jumpz").vpush("a").call("NEXT").call("STMT").vpop("a").tok({"else": "S.else"}, "S.noelse")
+    emit(p.call("FTRUTH"), "jumpz").vpush("a").call("NEXT").call("STMT").vpop("a").tok({"else": "S.else"}, "S.noelse")
     q = P("S.noelse")
+    if warnings: q.a(("LDI", "wr_last", 0))
     emit(q, "label_a").ret()
     q = P("S.else")
     q.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
     emit(q, "jump_b")
-    emit(q, "label_a").vpush("b").call("NEXT").call("STMT").vpop("b")
+    emit(q, "label_a").vpush("b")
+    if warnings: q.vpush("wr_last")
+    q.call("NEXT").call("STMT")
+    if warnings: q.vpop("wr_then").a(("ALU", "and", "wr_last", "wr_last", "wr_then"))
+    q.vpop("b")
     emit(q, "label_b").ret()
     # switch (e) body: e kept in a new 8-byte slot (not reused after); `jump La`; the body, whose
     # case/default labels are numbered as met; then `jump Lb`, La: one compare per case in order
@@ -1066,7 +1083,7 @@ def build(locations=False):
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
     emit(p, "label_a").call("NEXT").expect("(").call("NEXT").vpush("a", "b").call("EXPR").vpop("a", "b").expect(")")
     q = p
-    q.o("  jumpz r0, L").num("b").o("\n").vpush("a", "b", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "a")).call("NEXT").call("STMT").vpop("a", "b", "lbrk", "lcnt")
+    q.call("FTRUTH").o("  jumpz r0, L").num("b").o("\n").vpush("a", "b", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "a")).call("NEXT").call("STMT").vpop("a", "b", "lbrk", "lcnt")
     emit(q, "jump_a")
     emit(q, "label_b").ret()
     p = P("S.for")
@@ -1083,7 +1100,7 @@ def build(locations=False):
     emit(p, "label_a").vpush("a", "b", "c").tok({";": "F.c0"}, "F.c1")
     q = P("F.c1")
     q.call("CEXPR").expect(";").vpop("a", "b", "c")
-    emit(q, "jumpz_b").goto("F.c2")
+    emit(q.call("FTRUTH"), "jumpz_b").goto("F.c2")
     P("F.c0").vpop("a", "b", "c").goto("F.c2")
     p = P("F.c2")
     p.call("NEXT").a(("COPYW", "stp", "tpos"), ("LDI", "dep", 0)).label("F.skip")
@@ -1106,7 +1123,7 @@ def build(locations=False):
         ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab"))
     emit(p, "label_a").vpush("a", "b", "c", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("NEXT").call("STMT").vpop("a", "b", "c", "lbrk", "lcnt")
     emit(p, "label_c").expect("while").call("NEXT").expect("(").vpush("a", "b").call("NEXT").call("EXPR").vpop("a", "b").expect(")")
-    emit(p, "jumpz_b")
+    emit(p.call("FTRUTH"), "jumpz_b")
     emit(p, "jump_a")
     emit(p, "label_b").call("NEXT").expect(";").call("NEXT").ret()
     for nm, slot in (("S.brk", "lbrk"), ("S.cnt", "lcnt")):
@@ -1127,7 +1144,7 @@ def build(locations=False):
     P("QTAIL").tok({"?": "QT"}, "RET")
     p = P("QT")
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
-    emit(p, "jumpz").vpush("a", "b").call("NEXT").call("EXPR").vpop("a", "b").expect(":").vpush("vt", "vb")
+    emit(p.call("FTRUTH"), "jumpz").vpush("a", "b").call("NEXT").call("EXPR").vpop("a", "b").expect(":").vpush("vt", "vb")
     emit(p, "jump_b")
     emit(p, "label_a").vpush("b").call("NEXT").call("E%d" % LEVELS[0]).call("QTAIL").vpop("b").vpop("lt", "lb")
     emit(p, "label_b").branch({1: "QT.1"}, "DEAD.qt", [("CMP", "vt", "lt")])
@@ -1411,7 +1428,7 @@ def build(locations=False):
     P("U.ng4").a(("LDI", "vb", 4)).ret()
     q = P("U.not")
     q.call("NEXT").call("UNARY")
-    emit(q, "not").a(("LDI", "vt", 0), ("LDI", "vb", 4)).ret()
+    q.call("FNOT").ret()
     P("U.par").call("NEXT").tok({**{w: "U.cast" for w in TWORDS}, TK_ID: "U.pq", "struct": "U.cast", "union": "U.cast"}, "U.pe")
     P("U.pq").call("ISTD").branch({1: "U.cast"}, "U.pe")
     P("U.pe").call("CEXPR").expect(")").call("NEXT").a(("LDI", "rkok", 0)).call("POSTIX").ret()
@@ -1692,16 +1709,25 @@ def build(locations=False):
     if locations:
         from tokenlocations import install as location_install
         start = location_install(E, P)
+        from diagnostics import install as diagnostic_install
+        diagnostic_install(E, P)
+    if warnings:
+        assert locations
+        from returnwarnings import install as return_warning_install
+        return_warning_install(E, P, SBB)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
 
 
 if __name__ == "__main__":
-    locations = "--locations" in sys.argv
-    if locations:
+    warnings = "--warnings" in sys.argv
+    if warnings:
+        sys.argv.remove("--warnings")
+    locations = "--locations" in sys.argv or warnings
+    if "--locations" in sys.argv:
         sys.argv.remove("--locations")
-    d = build(locations=locations)
+    d = build(locations=locations, warnings=warnings)
     twice = sorted(k for k, n in DEFS.items() if n > 1)
     assert not twice, "defined twice: %r" % twice
     s = json.dumps(d, separators=(",", ":"))

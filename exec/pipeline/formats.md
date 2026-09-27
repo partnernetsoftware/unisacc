@@ -89,5 +89,21 @@ normal tape output has no location prefixes or metadata.
 output and reads every saved map field back through a test-only model
 continuation. Neither test inserts a language-specific executor primitive.
 The compiler CLI does not select these modes yet. Multi-unit location framing,
-position-to-file/line rendering, warning decisions and -Werror handling remain
-to be connected; these tests do not claim warning compatibility.
+warning selection and -Werror handling remain to be connected; these location
+tests alone do not claim warning compatibility.
+
+
+## Diagnostic rendering and return warnings (development)
+
+E3 `--warnings` implies `--locations`. It currently implements only the
+reference's `-Wreturn-type` decision, including its last-statement heuristic,
+main/void exemptions and suppression inside included headers. It is not a
+full `-Wall` mode and is not selected by the compiler CLI. Other warning
+kinds, multi-unit integration and `-Werror` remain pending.
+
+The model renderer derives file, line and column from retained preprocessing
+records and emits the source line/caret to stderr. `diagnosticcheck.py` compares
+it with the actual reference diagnostic functions, including EOF/clamped
+positions, tabs, splices and header suppression. `returnwarningcheck.py`
+compares both tape and diagnostics and also checks that the quiet route emits
+no warnings. Neither adds a language-specific executor primitive.
