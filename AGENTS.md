@@ -1,186 +1,97 @@
-# Working rules for this repo
+# 本仓库的工作规则
 
-For where each file belongs (seed / core tables and weights / self-iterating
-C / generated), see [ARCHITECTURE.md](ARCHITECTURE.md).
+各文件归属（种子 / 核心表与权重 / 自迭代 C / 生成物）见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-## Testing: local machines, not GitHub Actions
+## 输出与调度
 
-**Do not push in order to test.** The repository is public now, so the hosted
-runners are free and `.github/workflows/ci.yml` fires on push again — but CI
-is a *safety net*, not the test loop. Get the local suites green first and let
-CI be the second opinion on a machine nobody has been editing.
+**输出只有两种结构**：
+1. 决策型：一段能通过 `node --check` 的 JS（闭包或对象字面量均可），例如
+   `const 决策 = { 结论: '…', 依据: ['…'], 产物: ['path:line'], 待定: null };`
+2. 工具调用：需要时带精简的中文注释（每个非空行以 `//` 开头）。
 
-The reason the rule exists: while the repository was private, a push-triggered
-matrix of one Linux and two macOS jobs — the macOS ones billing at ten times
-the Linux rate — exhausted the organisation's Actions budget in a single
-session of pushing after every increment. Batch the work; push once.
+**默认自己处理简单任务。** 只在下面两种情况才起 `deep-debug` 子代理（高成本，如 opus-5-5）：
+- 定位跨文件或隐蔽的 bug，且已经自己试过 2 次没成；
+- 需要设计级决策（架构、技术选型）。
 
-All three platforms are here:
+其余情况用 `code-review` 子代理（如 sonnet-5），或者直接自己完成。**不要为了“保险”升级模型。**
 
-| platform | how | covers |
+子代理的通用约束：每个子代理一个交付物，最长约 10 分钟（研究类 8 分钟），并行时各取不同视角；结论要标明“只是设计”还是“实际跑过”。
+
+**把问题交给强模型前先脱敏**（2026-09-27 实测有效，两个 opus 都交了活）：强模型遇到满篇平台细节的简报，容易被安全检查误触发。做法：
+- 父会话先自己调研，再写一份**自包含、抽象化**的简报，放在文件里；子代理只读这一个文件，不碰仓库、不跑命令，只把一份报告写到指定路径；
+- 用一般形式陈述问题（例如“表驱动的语言处理器：有限决策表、通用执行器、与参考实现逐字节一致”），不写本仓库可执行文件写出、签名、系统调用、内存内加载的具体机制；
+- 给出数字和硬约束（确定性、逐字节相等、穷举验证、执行器大小），回答才可用；要求给出诊断、5–8 个带先例和最小实验的思路、推荐两个、以及哪些诱人的想法与约束冲突；
+- 事后用真实数据核对再记录：这次两份报告的泛化，被对 `weights/gold/*.tsv` 的一次粗测收窄了（覆盖层对 `enc` 有用，对 `abi`、`combo` 没用）。
+
+这不是对谁隐瞒：子代理要解决的是一般性问题，一般性问题就是它需要的全部。
+
+## 协作
+
+- 新知识和决定先写进 `prd.md`，再做别的；`prd.md` 是主上下文文件。
+- 提交一律带路径：`git commit -m … -- 路径`。别人已暂存的文件不能被顺带提交。
+- 改代码用精确匹配加断言的 Python 替换，不用 `sed`；`os.path.exists` 会把 ENOTDIR/EACCES 当成“不存在”，要用 `stat` 并只捕获 `FileNotFoundError`。
+
+## 测试：本机，不用 GitHub Actions
+
+**不要为了测试而 push。** 仓库已公开，托管的 runner 免费，`.github/workflows/ci.yml` 会在 push 时触发，但 CI 只是**安全网**，不是测试循环：先把本机测试跑绿，再让 CI 在一台没人动过的机器上当第二意见。
+
+规则的来由：仓库还是私有时，push 触发的一个 Linux 加两个 macOS 任务的矩阵（macOS 计费是 Linux 的 10 倍）在一次“每个增量都 push”的会话里耗光了组织的 Actions 预算。所以攒着做，一次 push。
+
+三个平台都在本机：
+
+| 平台 | 方法 | 覆盖 |
 |---|---|---|
-| macOS arm64 + x86_64 | `./tests/all.sh`, `./tests/fat.sh` (Rosetta) | osx/arm64, osx/x86_64 |
-| Linux | `./tests/linux.sh` — the whole suite inside a local Lima VM. `LIMA_VM=minicon-lnx-x86_64` is x86_64 on this arm64 host, so it is **emulated**: linux.sh notices the architecture mismatch and multiplies the watchdogs by ten, because seven suites once "failed" by timing out while working. It has no repo mount, so the tree is piped in; `gcc` was installed there on 2026-09-23 | lnx/arm64, lnx/x86_64 |
-| Windows 11 | `./tests/crossnative.sh` — the local UTM machine, driven by `utmctl` | win/arm64, win/x86_64 |
+| macOS arm64 与 x86_64 | `./tests/all.sh`、`./tests/fat.sh`（Rosetta） | osx/arm64、osx/x86_64 |
+| Linux | `./tests/linux.sh`：整套测试跑在本机 Lima 虚拟机里。`LIMA_VM=minicon-lnx-x86_64` 在 arm64 宿主上是**模拟**的，脚本发现架构不一致会把看门狗放大 10 倍（曾有七个套件因超时被误判失败）。虚拟机不挂载仓库，树是用管道送进去的 | lnx/arm64、lnx/x86_64 |
+| Windows 11 | `./tests/crossnative.sh`：本机 UTM 虚拟机，用 `utmctl` 驱动 | win/arm64、win/x86_64 |
 
-`tests/crossnative.sh` skips a target whose VM is not up, so start the UTM
-machine before relying on the Windows result — and **stop it afterwards**, it
-is expensive on CPU. `tests/vms.sh up` / `down` does both (down stops only
-what up started); `make release` calls them itself.
+- `crossnative.sh` 在虚拟机没开时**跳过**该目标：先开机再看 Windows 结果，用完要**关机**（很耗 CPU）。`tests/vms.sh up` / `down` 两件事都做（down 只关 up 开的）；`make release` 自己会调用。
+- 跳过不等于通过：`crossnative.sh` 会点名跳过了什么，`STRICT=1` 让跳过变成失败。每个套件在“什么都没检查”时也失败（`closure.sh` 没有探针时曾打印 `identical 0 differ 0` 然后退出 0）。
+- **macOS 绿不等于绿**：`difftest` 对拍的是系统编译器，glibc 与 BSD libc 对“C 只说未指定”的行为不一致，这是一类真实的失败，`tests/linux.sh` 专门抓它。
+- **为什么 Linux 走 Lima 不走 UTM**（2026-09-21 实测，不必再争）：UTM 里有 `minicon-lnx-arm-64` 和 `minicon-lnx-x86-64`，但都没装 QEMU 客户机代理，`utmctl exec`、`file`、`ip-address` 全部失败；它们的网络是共享模式、没有端口转发、MAC 进不了宿主的 ARP 表，也没有 SSH 路径。Windows 虚拟机有代理，所以 UTM 只驱动 Windows。将来 Linux 机器装了代理，就把 `tests/linux.sh` 和 `crossnative.sh` 的 Linux 目标一起改用 `utmctl`，去掉 Lima。
 
-**Why Linux goes through Lima and not UTM** (measured, 2026-09-21, so nobody
-has to re-litigate it): UTM does have `minicon-lnx-arm-64` and
-`minicon-lnx-x86-64`, but neither has the QEMU guest agent installed, so
-`utmctl exec`, `utmctl file` and `utmctl ip-address` all fail on them with
-*"QEMU 客户机代理没有运行或未安装在客户机上"*. Their network is Shared with
-no port forwards and their MAC never reaches the host ARP table, so there is
-no SSH route either. The Windows VM **does** have the agent, which is why
-UTM drives Windows. If the agent gets installed in the Linux machines, move
-both `tests/linux.sh` and `crossnative.sh`'s Linux targets over to `utmctl`
-and drop the Lima dependency.
+## 长命令
 
-The Lima VM mounts the repo **read-only**, so `tests/linux.sh` copies the tree
-into the guest (minus `.git` and `corpus/`, with `corpus/` symlinked back —
-the suites only read it) before running.
+**每次运行上限 60 秒**（主人 2026-09-25 定）。所有看门狗最多 60 秒；需要更久的套件要拆分或收窄。
 
-A skipped target is not a passing target: `crossnative.sh` names what it
-skipped and `STRICT=1` makes a skip a failure. Every suite also fails when
-it checked *nothing* — `closure.sh` with no probes used to print
-`identical 0 differ 0` and exit 0.
+可能超过一分钟的命令放后台（`run_in_background`），或者带明确的超时。曾有一个前台套件把会话堵了两个小时。
 
-Green on macOS is not green. `difftest` compares against the *system*
-compiler, and glibc and BSD libc disagree about things C only calls
-"unspecified" — that is a real class of failure, and `tests/linux.sh` is what
-catches it.
+## 跑套件
 
-## Long commands
+- **`all.sh` 跑完才打印。** 每个套件写各自的文件，最后才汇总；日志是 0 字节说明在跑，不是卡住。需要看进度就单独跑 `./tests/closure.sh …` 这类套件，它们边跑边打印。
+- **套件运行时不要改树。** 一次与 `lower.py` 的修改重叠的运行报了 59 处不一致（镜像根本没写出来），整轮作废。改完、重建，再开跑。
+- **每个内层步骤都要有自己的看门狗**，不只是外层命令。一次没有逐个编译超时的消融运行，因为一个死循环的编译挂了 20 分钟。macOS 没有 `timeout`：用 `perl -e 'alarm N; exec @ARGV' …`。
+- **`alarm` 只约束它 exec 的那个进程**，不约束它启动的东西。既编译又运行的测试有两样要限时，第二样更危险：`cc -o p f.c && ./p` 里的 `./p` 没人管。一个不终止的生成程序，在启动它的脚本早已结束之后，还以 99.8% CPU 空转了将近一小时，发热还被怪到套件头上。机器发烫时**先找失控进程**：`ps -eo pid,pcpu,command | awk '$2 > 20'`。
+- **`pkill -f` 在这个 shell 的 locale 下会失败**（“illegal byte sequence”），按 PID 杀：`ps -eo pid,command | grep …`。
+- unisacc 自编译每个目标约 0.25 秒，所以套件跑几分钟，是在等 Python，或者 macOS 对新二进制的首次启动扫描：先测再怪编译器。
+- **发热来自 XProtect，不是编译器**（2026-09-25 实测）：每个新写出的二进制**第一次** exec 要 0.5–0.9 秒（`XprotectService` 以约 35% CPU 扫描），同一个文件第二次只要 0.02 秒，而 unisacc 编译一个探针只要 0.01 秒。十三个套件对每个探针都是“写出、签名、执行”一个新二进制，整轮就是几千次扫描。`unisacc -run` 在内存里映射代码，从不被扫描。豁免（隐私与安全性 > 开发者工具）跟随**责任应用**，而长期存活的 tmux 服务器下的 shell 不属于任何人：`tests/term.sh CMD` 把 CMD 放进 Terminal.app 里跑，扫描就跳过了（每个新二进制 0.3–0.9 秒降到 0.00 秒）。环境变量用固定白名单，传参写成 `term.sh env JOBS=2 …`。
 
-**Ceiling: 60 s per run** (owner's rule, 2026-09-25). Every watchdog is at
-most 60 s; a suite that needs longer gets split or narrowed.
+## 门禁
 
-Anything that might run for more than a minute goes in the background
-(`run_in_background`) or carries an explicit bounded timeout. A foreground
-suite once blocked the session for two hours.
+`./tests/gate.sh [--com]` 并排跑所有发布套件（同时 4 个，各自限 60 秒），在 Terminal.app 里运行，每个套件一行，总共约一分钟；`--com` 再加上通过出货的 `unisacc.com` 跑的面向用户的套件。用它，不用 `all.sh`。
 
-## Running the suites
+## 构建与发布
 
-Things that cost time here before they were written down:
+**CI 只测试，不构建。** 每个出货产物都在本机**同一个环境**里交叉编译（一个能自己写出六个目标的编译器，意义就在这里），再经 GitHub release（进行中是草稿）中转。GitHub Actions 只是干净机器上的第二意见，绝不是产出二进制的地方。本机跨机器测试走 UTM 虚拟机（`tests/crossnative.sh`，以及仓库之外的 `utm-court` 辅助脚本）和 Lima Linux 虚拟机。
 
-- **`all.sh` prints nothing until it finishes.** Each suite writes to its own
-  file and the summary comes at the end, so a log of zero bytes means
-  *running*, not stuck. Individual suites (`./tests/closure.sh …`) print as
-  they go — run those when progress needs to be visible.
-- **Do not edit the tree while a suite runs.** A run that overlapped edits to
-  `lower.py` reported 59 mismatches from images that were never written, and
-  the whole run had to be thrown away. Finish the edit, rebuild, then start.
-- **Every inner step gets its own watchdog**, not just the outer command. An
-  ablation run with no per-compile timeout hung for twenty minutes on one
-  looping compile. macOS has no `timeout`: use
-  `perl -e 'alarm N; exec @ARGV' …`.
-- **`alarm` binds only the process it execs**, not anything that process
-  starts. A test that BUILDS a program and then runs it has two things to
-  bound, and the second is the dangerous one: `cc -o p f.c && ./p` leaves
-  `./p` unbounded. A generated program that never terminated once span at
-  99.8% CPU for the better part of an hour after the harness that started
-  it was gone, and the heat was blamed on the suites. When the machine is
-  hot, look for a runaway FIRST:
-  `ps -eo pid,pcpu,command | awk '$2 > 20'`.
-- **`pkill -f` fails under this shell's locale** ("illegal byte sequence").
-  Kill by PID (`ps -eo pid,command | grep …`).
-- unisacc compiling itself takes ~0.25 s per target, so a suite that takes
-  minutes is waiting on Python or on macOS's first-launch scan of new
-  binaries -- profile before blaming the compiler.
-- **The heat is XProtect, not the compiler** (measured 2026-09-25). Every
-  freshly written binary's FIRST exec costs 0.5-0.9 s while
-  `XprotectService` scans it at ~35% CPU; the second exec of the same file
-  is 0.02 s, and unisacc compiling a probe is 0.01 s. Thirteen suites
-  write-sign-exec a new binary per probe (closure, native, corpus, tools,
-  fat, ...), so a full run is thousands of scans. `unisacc -run` maps the
-  code in memory and is never scanned. The exemption (Privacy & Security >
-  Developer Tools) follows the RESPONSIBLE app, and a shell under a
-  long-lived tmux server is nobody's: `tests/term.sh CMD` runs CMD inside
-  Terminal.app so the scan is skipped (0.3-0.9 s -> 0.00 s per new binary).
+## 生成物：kernel/
 
-## The gate
+`kernel/` 里的一切都由 `python3 -m unisa emit-kernel` 写出，**不要手改**。每个文件开头列出输入及其 sha256 前缀，每个数据块标明来源：
 
-`./tests/gate.sh [--com]` runs every release suite side by side (4 at a
-time, each bounded at 60 s) inside Terminal.app, one line per suite, about
-a minute in all; `--com` adds the user-facing suites run through the
-shipped `unisacc.com`. Use it instead of `all.sh`.
-
-## Building and releasing
-
-**CI tests; it does not build.** Every shipped artifact is cross-compiled in
-ONE environment locally -- that is the whole point of a compiler that writes
-all six targets itself -- and then moved through a GitHub release (a draft
-while it is in flight) as the transfer mechanism. GitHub Actions is only ever
-a second opinion on a clean machine, never the thing that produces the
-binary. Local cross-machine testing goes through the UTM machines
-(`tests/crossnative.sh`, and the `utm-court` helper that lives outside this
-repo) and the Lima Linux VM.
-
-## Generated files: kernel/
-
-Everything in `kernel/` is written by `python3 -m unisa emit-kernel`; never
-edit it by hand. Each file opens with its inputs and their sha256 prefixes,
-and each data block names its source:
-
-| file | contents | source |
+| 文件 | 内容 | 来源 |
 |---|---|---|
-| `unisa_model.inc` | weights blob, stage dimensions, vocabularies, per-stage field/head names, encoder opcode tables | `weights/built.json` (constructed from `unisa/gold.py` by `unisa build-weights`), `unisa/gold.py`, `unisa/catalog.py` (`ENCSPEC`), `unisa/front/lex.py` |
-| `unisa_headers.inc` | the C library carried inside the binary | `include/*.h`, verbatim |
-| `unisa_cases.inc` | every key of every stage with its gold class, for the self test | `unisa/gold.py` |
-| `unisa_core.c`, `unisa_self.c` | the integer inference kernel | `KERNEL_BODY` in `unisa/ckernel.py` |
-| `weights/gold/*.tsv` | every stage's truth table as data, one line per key (written by `unisa gold-export`, which `build-weights` runs) | `unisa/gold.py` |
+| `unisa_model.inc` | 权重块、阶段维度、词表、各阶段字段与头的名字、编码器操作码表 | `weights/built.json`（由 `unisa build-weights` 从 `unisa/gold.py` 构造）、`unisa/gold.py`、`unisa/catalog.py`（`ENCSPEC`）、`unisa/front/lex.py` |
+| `unisa_headers.inc` | 编译器内嵌的 C 库 | `include/*.h`，原样 |
+| `unisa_cases.inc` | 每个阶段每个 key 及其 gold 类别，供自测用 | `unisa/gold.py` |
+| `unisa_core.c`、`unisa_self.c` | 整数推理内核 | `unisa/ckernel.py` 里的 `KERNEL_BODY` |
+| `weights/gold/*.tsv` | 各阶段的真值表，一行一个 key（由 `unisa gold-export` 写出，`build-weights` 会跑它） | `unisa/gold.py` |
 
-They are committed on purpose: `unisacc.c` is these files and `src/`
-concatenated, so the compiler builds -- and rebuilds itself -- with no
-Python and no file reads. `tests/kernel.sh` regenerates them and fails
-when the committed copies differ.
+它们**有意提交进仓库**：`unisacc.c` 就是这些文件加 `src/` 拼起来的，所以编译器不需要 Python、不需要读文件，就能构建并重新构建自己。`tests/kernel.sh` 会重新生成，与已提交的副本不同就失败。
 
-## The route
+## 路线
 
-Construction, not training. The shipped weights are derived from the gold
-tables (`unisa build-weights`, exact by construction, verified by enumeration);
-`unisa train` is a control arm and is not on the shipping path. Every
-`--drive` default is `built`. Do not run training without being asked — it is
-minutes of full-core work and it has overheated this machine before.
+是**构造**，不是训练。出货的权重由 gold 表派生（`unisa build-weights`，构造上精确，经穷举验证）；`unisa train` 只是对照组，不在出货路径上；所有 `--drive` 默认值都是 `built`。**没被要求就不要跑训练**：它是几分钟的满核计算，这台机器曾因此过热。
 
-## Model migration: exec/
+## 模型迁移：exec/
 
-`exec/` is the S-17 migration (prd.md): each compiler stage as a finite
-delta run by a generic executor, compared byte for byte with the current
-compiler (the behavioural reference). `exec/pipeline/run.py FILE` chains the
-stages by `exec/pipeline/stages.tsv`; `exec/stamp.sh` rebuilds any generated
-artefact whose inputs changed -- do not trust a cached file in /tmp. A delta
-that ACCEPTS input and differs from the reference is a bug; anything it
-cannot match exactly must be rejected as "not covered".
-
-## Delegating to a stronger subagent: desensitise first
-
-Measured 2026-09-27 (a design question on table flexibility, two opus
-subagents, both delivered): a high-capability subagent can be tripped by
-safety heuristics when the brief is full of platform-specific mechanics.
-What worked was for the parent to survey the repo itself, then hand over a
-**self-contained, abstracted brief**:
-
-- State the problem in its general form ("a table-driven language
-  processor: finite decision tables, a generic executor, byte-exact
-  equivalence to a reference"), not the mechanics of this repo's
-  executable-image, signing, syscall or in-memory-loading work.
-- Give the numbers and the hard constraints (determinism, byte-for-byte
-  equality, exhaustive verification, executor size), so the answers stay
-  usable. Ask for a diagnosis, 5-8 concrete ideas with prior art and a
-  smallest experiment each, and a recommendation of two, plus which
-  attractive ideas conflict with the constraints.
-- The brief goes in a file; the subagent reads only that file, touches no
-  repository files, runs no commands, and writes one report to a named path.
-  One deliverable per agent, 8 minutes, a different lens per agent.
-- Afterwards the parent checks the claims against real data before
-  recording them: here two of the reports' generalisations were narrowed by
-  a quick measurement over `weights/gold/*.tsv` (overlays help `enc`, not
-  `abi`/`combo`).
-- Say plainly which results are designed-only and which were run.
-
-The point is not to hide anything from anyone: the subagent's job is the
-general problem, and the general problem is all it needs.
+`exec/` 是 S-17 迁移（见 prd.md）：每个编译阶段做成一个有限 δ，由通用执行器运行，与现有编译器（行为参考）逐字节对拍。`exec/pipeline/run.py FILE` 按 `exec/pipeline/stages.tsv` 把各阶段串起来；`exec/stamp.sh` 重建输入变过的生成物，**不要信 /tmp 里缓存的文件**。δ **接受**了输入却与参考不同，就是 bug；不能精确匹配的，必须拒绝并报“未覆盖”。
