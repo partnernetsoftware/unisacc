@@ -11,6 +11,12 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None):
         fields = line.split("\t")
         if len(fields) != 4:
             raise ValueError(f"{path}:{lineno}: expected four columns")
+        for index in (0, 2):
+            value = fields[index]
+            if value.startswith("$"):
+                if bindings is None or type(bindings.get(value[1:])) is not str:
+                    raise ValueError(f"{path}:{lineno}: missing state binding {value}")
+                fields[index] = bindings[value[1:]]
         state, keys, target, encoded = fields
         if not state or not target:
             raise ValueError(f"{path}:{lineno}: empty state or target")

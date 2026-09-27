@@ -105,6 +105,14 @@ AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta w
 AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
 
 
+def install_rules(g, stem, bindings=None, sequences=None, classes=None):
+    for suffix, mode in (("byte", "b"), ("result", "r")):
+        for state, row in load_rules(Path(HERE) / (stem + "-" + suffix + ".tsv"),
+                                     sequences or {}, bindings=bindings, classes=classes).items():
+            for key, (target, actions) in row.items():
+                g.on(state, [key], target, actions, mode)
+
+
 def build_autoinc(g, locations=False):
     """P2 autoinc, first run only (RUN == 0), between decomment and P3.
     One scan over x: every maximal identifier run followed (spaces, tabs,
@@ -113,10 +121,7 @@ def build_autoinc(g, locations=False):
     autoinc_map() (printf excluded, as hdrneeded does) with status exactly
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
-    for filename, mode in (("autoinc-byte.tsv", "b"), ("autoinc-result.tsv", "r")):
-        for state, row in load_rules(Path(HERE) / filename, {}, classes={"identifier": ID}, bindings={"AIB": AIB}).items():
-            for key, (target, actions) in row.items():
-                g.on(state, [key], target, actions, mode)
+    install_rules(g, "autoinc", {"AIB": AIB}, classes={"identifier": ID})
     # per header: does some name have status exactly `called`?
     amap = autoinc_map()
     H = list(AUTOINC_ORDER)
@@ -125,22 +130,19 @@ def build_autoinc(g, locations=False):
         nxt_h = "AH%d_0" % (h + 1) if h + 1 < len(H) else "AEM"
         g.els("AH%d_0" % h, "AH%d_n0" % h, [("LDI", "NEED%d" % h, 0)])
         for k, nm in enumerate(names):
-            g.els("AH%d_n%d" % (h, k), "AH%d_r%d" % (h, k),
-                  sbconst(nm) + [("SBINTERN", "at"), ("ALUI", "add", "aa", "at", AIB),
-                                 ("LDX", "av", "aa", 0), ("CMPI", "av", 1)])
-            g.r("AH%d_r%d" % (h, k), {1: (nxt_h, [("LDI", "NEED%d" % h, 1)]),
-                                      (0, 2): ("AH%d_n%d" % (h, k + 1), [])})
+            install_rules(g, "autoinc-name", {"entry": "AH%d_n%d" % (h, k),
+                "test": "AH%d_r%d" % (h, k), "found": nxt_h,
+                "next": "AH%d_n%d" % (h, k + 1), "need": "NEED%d" % h, "AIB": AIB},
+                {"name": sbconst(nm)})
         g.els("AH%d_n%d" % (h, len(names)), nxt_h)
 
     def line(hn):
         return [("OUT", c) for c in ("#include <%s>\n" % hn).encode()] + ([("ALUI","add","AI_LINES","AI_LINES",1)] if locations else [])
-    g.els("AEM", "AEMR", [("RLD", "RTP")])
-    first = "AEM%d" % (len(H) - 1)
-    g.r("AEMR", {1: (first, line("stdio.h")), (0, 2): (first, [])})
+    install_rules(g, "autoinc-emit", {"entry": "AEM", "test": "AEMR",
+        "need": "RTP", "next": "AEM%d" % (len(H) - 1)}, {"line": line("stdio.h")})
     for h in range(len(H) - 1, -1, -1):
-        g.els("AEM%d" % h, "AEM%dr" % h, [("RLD", "NEED%d" % h)])
-        nx = "AEM%d" % (h - 1) if h else "ACP0"
-        g.r("AEM%dr" % h, {1: (nx, line(H[h])), (0, 2): (nx, [])})
+        install_rules(g, "autoinc-emit", {"entry": "AEM%d" % h, "test": "AEM%dr" % h,
+            "need": "NEED%d" % h, "next": "AEM%d" % (h - 1) if h else "ACP0"}, {"line": line(H[h])})
 
 
 
@@ -691,18 +693,11 @@ def build(target="lnx/x86_64", locations=False):
     build_cli(g, NC, locations)
 
     # Declared text normalisation; only layout and inter-stage links are bound here.
-    links = {"@after_comments": "AISTART" if AUTOINC else "P3START"}
-    for filename, mode in (("text-byte.tsv", "b"), ("text-result.tsv", "r")):
-        for state, row in load_rules(Path(HERE) / filename, {}, bindings={"SPLB": SPLB}).items():
-            for key, (target, actions) in row.items():
-                g.on(state, [key], links.get(target, target), actions, mode)
+    install_rules(g, "text", {"SPLB": SPLB, "after_comments": "AISTART" if AUTOINC else "P3START"})
 
     # Macro history and definition rules; bindings describe record layout only.
     macro_layout = {'NEWB': NEWB, 'FSZ': FSZ, 'MACB': MACB, 'F_TO': F_TO, 'SEGINF': SEGINF, 'F_FROM': F_FROM, 'F_PREV': F_PREV, 'F_NAME': F_NAME, 'F_BODY': F_BODY, 'F_FN': F_FN, 'F_VAR': F_VAR}
-    for filename, mode in (("macro-byte.tsv", "b"), ("macro-result.tsv", "r")):
-        for state, row in load_rules(Path(HERE) / filename, {}, bindings=macro_layout).items():
-            for key, (target, actions) in row.items():
-                g.on(state, [key], target, actions, mode)
+    install_rules(g, "macro", macro_layout)
 
     if AUTOINC:
         build_autoinc(g, locations)
