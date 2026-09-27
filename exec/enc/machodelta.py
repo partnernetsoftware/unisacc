@@ -11,7 +11,7 @@ def install(E,byte,arch):
     P,g=E.P,E.g
     install_sha(E)
     from pathlib import Path
-    from finite_rules import install as install_rules
+    from finite_rules import install as install_rules, load as load_rules
     mh_bindings = dict(DATA=DATA, HDRS=M.HDRS(arch), VMADDR=M.VMADDR, STRTAB=M.STRTAB,
                        page_minus_one=M.PAGE-1, page_mask=-M.PAGE,
                        page4_minus_one=M.PAGE4-1, PAGE4=M.PAGE4,
@@ -59,11 +59,13 @@ def install(E,byte,arch):
                   sequences={'pending': p.acts}, section='copy')
     p = P(mh_bindings['label6'])
     fields([(4,M.CS_MAGIC_EMBEDDED),(4,'mh_siglen'),(4,1),(4,0),(4,20)],True)
-    p.a(('A64I','sub','mh_cdlen','mh_siglen',20))
+    p.a(load_rules(Path(__file__).with_name('machodelta-result.tsv'), {},
+                   section='signature-length')['actions'][0][1])
     fields([(4,M.CS_MAGIC_CODEDIRECTORY),(4,'mh_cdlen'),(4,0x20400),(4,M.CS_ADHOC),(4,88+len(M.IDENT)),(4,88),(4,0),(4,'mh_slots'),(4,'mh_sigoff'),(1,32),(1,2),(1,0),(1,12),(4,0),
             (4,0),(4,0),(4,0),(8,0),(8,0),(8,'mh_text'),(8,M.CS_EXECSEG_MAIN_BINARY)],True)
     for b in M.IDENT:byte(p,b)
-    p.a(('LDI','mh_page',0)).goto('MH.hash')
+    install_rules(g, Path(__file__).parent, 'machodelta', section='signature-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
     mh_bindings.update({'label'+str(i): P(owner).fresh(kind)
                         for i, (owner, kind) in enumerate((('MH', 'b'), ('MH', 'b'), ('MH', 'r'), ('MH', 'b')))})
     install_rules(g, Path(__file__).parent, 'machodelta', bindings=mh_bindings,

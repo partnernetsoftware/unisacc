@@ -12,7 +12,7 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     assert arch in elf.MACHINE
     P,g=E.P,E.g
     from pathlib import Path
-    from finite_rules import install as install_rules
+    from finite_rules import install as install_rules, load as load_rules
     from unisa.image.pe import IMPORTS
     from pedelta import RELOCS
     image_bindings = dict(DATA=DATA, LABD=LABD, OFF=OFF, RELOCS=RELOCS,
@@ -49,21 +49,25 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
                       sequences=image_sequences, section=section)
     p=P('MI.iat')
     for i in range(len(IMPORTS)):p.a(('COPYW','lb_v','ml_imp_'+str(i)),('LDI','lb_n',8)).call('EI.bytes')
-    p.goto('EI.data')
+    install_rules(g, Path(__file__).parent, 'elfimage', section='iat-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
     if image_format=='pe':
         from pedelta import install as install_pe
         install_pe(E,byte,arch)
     if image_format=='macho':
         from machodelta import install as install_macho
         install_macho(E,byte,arch)
-    p=P('EH.elfwrite');p.a(('A64','add','entryva','text_va','entryoff'),('A64I','add','tend','endo',elf.HDRS(arch)),('A64I','sub','doff','data_va',elf.VADDR))
+    header = load_rules(Path(__file__).with_name('elfimage-result.tsv'), {},
+                        bindings={'HDRS': elf.HDRS(arch), 'VADDR': elf.VADDR}, section='header-init')
+    p=P('EH.elfwrite').a(header['actions'][0][1])
     for b in b'\x7fELF'+bytes([2,1,1,0])+bytes(8):byte(p,b)
     def field(width,v):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('EI.bytes')
     for w,v in [(2,2),(2,elf.MACHINE[arch]),(4,1),(8,'entryva'),(8,elf.EHDR),(8,0),(4,0),(2,elf.EHDR),(2,elf.PHDR),(2,elf.NPH),(2,0),(2,0),(2,0)]:field(w,v)
     for flags,offset,va,fs,ms in [(5,0,elf.VADDR,'tend','tend'),(6,'doff','data_va','stored','memlen')]:
         for w,v in [(4,1),(4,flags),(8,offset),(8,va),(8,va),(8,fs),(8,ms),(8,elf.PAGE)]:field(w,v)
-    p.a(('INPUSH','text_blob')).goto('EI.copy')
+    install_rules(g, Path(__file__).parent, 'elfimage', section='header-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
     labels = (('EI_pad_b0', 'EI', 'b'), ('EI_loop_b0', 'EI', 'b'),
               ('EI_bytes_b0', 'EI', 'b'))
     image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels})
