@@ -5017,3 +5017,5 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 旧固定81c04285候选补平台实测：Linux x86_64 QEMU客机hello/fib/convert，模型-run和客机编译/执行均同host（16.87/10.00/10.19秒），未放大watchdog；仅本轮启动实例已关，default保持原Running。Rosetta osx/x86_64同三probe通过，arch强制Darwinx86_64，trace与候选offset138928解压切片/缓存driver逐字节一致、Mach-O CPU=x86_64，非arm交叉编译冒充x86执行。日志/tmp/unisacc-e5-linuxx86-928和/tmp/unisacc-e5-rosetta-928；这些旧候选平台smoke不外推新6e60e3d1，也不是完整六平台套件/自举。
 
 并行收口续行：新6e60e3d1候选固定网络包驱动器三代N1=N2=N3完整Mach-O相同（115746B，cebaed0a260bcffed8f61c6fa2f698ec5fadc87e1e4ba0d27d1c66ae55613f96）；父N3后代probe已实际通过空PATH的O0/O2内存与native对host，缺包rc2，证据/tmp/unisacc-fp-modelboot-928，不扩大为网络/容器重构。聚合va_arg沿既有8B地址槽与ARGCOPY/LOADRAW复用，独立代理keep316及真实NET O0/O2正例通过；原00204继续暴露既有结构体char数组成员字符串初始化错值，明确保留为wrong，下一共享初始化组修复。枚举描述与测试资源/语言拆分在不同私有树并行，不改默认产品。
+
+父合并cafb149/a039e40后双槽复验：exec-driver-resources rc0 37s、exec-driver-language rc0 44s，整体44s、2/2通过；21个真实ASM网络语言probe含scalar_prefix/conditional_deref及6个条件拒绝，原19项保留。vararg_aggregate独立实测已合，但本轮language清单尚未加入它，不冒称覆盖。core仍由独立代理按责任分组解决55s窗口超限；parse2成员字符串初始化与enum描述同时在互不重叠私有树推进，父主树测试期间未编辑。
