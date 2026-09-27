@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: 961c50c, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
+Current source checkpoint: 9a38e3b, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -84,3 +84,12 @@ conversion paths (961c50c), removing 13 Python lines. The old 316-probe set has
 corrected C reference. Persistent integer and pointer probes also compare host
 cc with the actual ASM network driver at O0/O2 and native O2. Fixed-array shape
 work is still isolated; it has not yet closed the real-tools baseline.
+
+The 9a38e3b candidate closes the original 11-project tools baseline through
+the complete network compiler: 11 pass, zero wrong/refused/skipped. It is
+6,019,097 bytes, SHA256
+`d07fed1dd459731bd6b7a5a00e24aefa1f455de44b6890d639a3c1cc891199f0`.
+Shared fixed-array shape declarations and operand namespace fixes are included.
+The shape change adds 36 Python lines and 277 TSV lines; it closes real input
+gaps and is not code reduction. Array-typedef extra suffixes, T**, T* members,
+and T* function returns still reject; no wider compatibility is implied.

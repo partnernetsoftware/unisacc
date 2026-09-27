@@ -4937,3 +4937,7 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 测试基础设施收口决定：核查nativeboot.sh仍有alarm300、未检查rc的进程替换cmp和Windows最长450秒轮询。隔离小任务将本地自举/跨写编译改成逐步≤60秒、先检查退出码再比较；Windows保持独立可验证入口，不将跳过算通过，不开新VM框架。主树仍在完成shape/compound/lower真实兼容组，不开启其它迁移功能。
 
 复合赋值与lower合并验收（961c50c）：lower ARG/TXT百万间距改为独立2^40区域，相关索引A64；完整regex2网络链已由隔离任务实跑同hostcc，父三lower门禁3/3、6.59秒。compound共享OPX及ASSIGNCV替代旧整数阶梯，gen2净减13行；旧keep316项309不变、7必要窄化与修正参考全同，实际网络整数/指针/浮点三组同cc。父合并后双槽chain167/167与compiler资源2/2、37.27秒（/tmp/unisacc-compound-network-gate-928）。经典.com按e8d0041重建1,367,408 B，sha256 79b42f2fa1adf6fde62c179778e9e8e919c82eb97c4f1effdc1abfcbfa8d5f7d；13个--com项加difftest_o及nativeboot共15/15、14.55秒。上述不是新网络候选的tools11全绿：该候选仍待shape合并重建实测。
+
+联合shape候选实测（9a38e3b）：17组180条固定shape控制迁TSV，共用DIM/PX/SH.WIDTH/SH.RESULT，compound结果保持同一形状；gen2净增36、TSV净增277、probe34，总增347，属于真实能力补齐而非代码缩减。父新候选6,019,097 B，sha256 d07fed1dd459731bd6b7a5a00e24aefa1f455de44b6890d639a3c1cc891199f0，/tmp/unisacc-shape-candidate-928；E3及六lower重建，其余模型源同7fd1514（git diff核对无变化），package5,835,785 B。实际TOOLS_UA原11项目全11通过、0wrong/unsupported/skip，首次闭合这批真实工具完整网络链路。并行resources包括新增array_shapes与compound两probe，经ASM网络内存O0/O2及native同host；队列2/3用41.11秒，rc75同队列续跑chain167/167用18.43秒，最终3/3（/tmp/unisacc-shape-acceptance-gate-928）。联合E3旧keep316/316实际net同修正参考，0diff/refuse/toolfail；两既有E2拒绝b_pp3/b_ppif用参考预处理供E1，明确不算E2覆盖。证据/tmp/unisacc-shape-keep-928。数组typedef附加suffix、T**、T*成员、T*函数返回、rank9仍拒绝；完整产品验收/默认切换未完成。
+
+自举测试收尾（3203b8b）：本地N1=N2=N3及cross5/5主树复跑通过；正确字节但rc7、rc0空输出、无host均被故障控制拒绝。Windows改显式单目标入口，host55秒进程组/guest30秒编译及kill/exec和poll共享35秒，未启动VM，不声称远端验证。
