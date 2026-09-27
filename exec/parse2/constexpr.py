@@ -6,44 +6,48 @@ conversions. Division by zero is refused even in an unselected arm; sizeof
 and casts remain unsupported. These are coverage limits, not C language rules.
 """
 
+import csv
+from pathlib import Path
+from finite_rules import install as install_rules, load as load_rules
+
+
 def install(E, P, levels, ops, enum_values, enum_defined):
-    g = E.g
-    arithmetic = {'+':'add', '-':'sub', '*':'mul', '/':'sdiv', '%':'srem',
-                  '<<':'shl', '>>':'sar', '&':'and', '|':'or', '^':'xor'}
-    comparisons = {'==':(1,), '!=':(0,2), '<':(0,), '>':(2,), '<=':(0,1), '>=':(1,2)}
-    P('CE').call('CE'+str(levels[0])).tok({'?':'CE.cond'}, 'RET')
-    P('CE.cond').vpush('cv').call('NEXT').call('CE').vpop('ce_test').vpush('ce_test','cv').expect(':').call('NEXT').call('CE').vpop('ce_test','ce_yes').branch({1:'RET'}, 'CE.yes', [('LDI','ce_zero',0),('C64','ce_test','ce_zero')])
-    P('CE.yes').a(('COPYW','cv','ce_yes')).ret()
+    root = Path(__file__).parent
+    def rows(name):
+        with (root / ("constexpr-" + name + ".tsv")).open() as source:
+            return list(csv.reader(source, delimiter="\t"))[1:]
+    sequences = {name: E.rej(message) for name, message in rows("reject")}
+    p = P("constexpr.bindings")
+    for name, method, slots in rows("stack"):
+        p.acts = []
+        sequences[name] = getattr(p, method)(*slots.split(",")).acts
+    tokens = dict(E.TK, identifier=E.TK_ID, number=E.TK_NUM)
+    classes = {name: [tokens[token]] for name, token in rows("tokens")}
+    fresh = rows("fresh")
+    def emit(section, bindings):
+        for part, prefix, kind, key in fresh:
+            if part == section:
+                p.cur = bindings.get(prefix, prefix)
+                bindings[key] = p.fresh(kind)
+        install_rules(E.g, root, "constexpr", bindings=bindings, sequences=sequences, classes=classes, section=section)
+    emit("entry", dict(first="CE" + str(levels[0])))
+    operators = {op: fields for op, *fields in rows("operators")}
     for i, level in enumerate(levels):
-        name='CE'+str(level); sub='CE'+str(levels[i+1]) if i+1<len(levels) else 'CE.atom'
-        P(name).call(sub).label(name+'.loop').tok({o:name+'.'+o for o in ops[level]}, 'RET')
+        name = "CE" + str(level)
+        bindings = dict(owner=name, name=name, loop=name + ".loop",
+                        sub="CE" + str(levels[i + 1]) if i + 1 < len(levels) else "CE.atom")
+        emit("level", bindings)
+        targets = {E.TK[op]: name + "." + op for op in ops[level]}
+        for key, target in targets.items(): E.g.on(bindings["dispatch"], [key], target, [], "r")
+        for state, row in load_rules(root / "constexpr-default.tsv", {},
+                domain=set(range(257)) - targets.keys(), bindings=bindings).items():
+            for key, (target, actions) in row.items(): E.g.on(state, [key], target, actions, "r")
         for op in ops[level]:
-            p=P(name+'.'+op).vpush('cv').call('NEXT').call(sub).vpop('ce_left')
-            if op in arithmetic:
-                p.a(('A64',arithmetic[op],'cv','ce_left','cv'))
-                if op in ('/','%'):
-                    p.branch({0:name+'.loop'}, ('rej','not covered: zero divisor in constant expression'))
-                else:
-                    p.goto(name+'.loop')
-            elif op in comparisons:
-                p.branch({comparisons[op]:name+'.'+op+'.true'}, name+'.'+op+'.false',[('C64','ce_left','cv')])
-                P(name+'.'+op+'.true').a(('LDI','cv',1)).goto(name+'.loop')
-                P(name+'.'+op+'.false').a(('LDI','cv',0)).goto(name+'.loop')
-            else:
-                assert op in ('&&','||')
-                hit=name+'.'+op+'.hit';rhs=name+'.'+op+'.rhs';no=name+'.'+op+'.no'
-                p.branch({1:rhs if op=='||' else no}, hit if op=='||' else rhs,[('LDI','ce_zero',0),('C64','ce_left','ce_zero')])
-                P(rhs).branch({1:no},hit,[('LDI','ce_zero',0),('C64','cv','ce_zero')])
-                P(hit).a(('LDI','cv',1)).goto(name+'.loop')
-                P(no).a(('LDI','cv',0)).goto(name+'.loop')
-    P('CE.atom').tok({E.TK_NUM:'CE.num',E.TK_ID:'CE.id','(':'CE.par','+':'CE.plus','-':'CE.minus','~':'CE.inv','!':'CE.not'},('rej','not covered: constant expression'))
-    P('CE.num').a(('COPYW','cv','nv')).call('NEXT').ret()
-    P('CE.id').a(('INTERN','ce_id','ps','pe'),('LDX','ce_ok','ce_id',enum_defined)).branch({1:'CE.enum'},('rej','not covered: nonconstant bound'),[('CMPI','ce_ok',1)])
-    P('CE.enum').a(('LDX','cv','ce_id',enum_values)).call('NEXT').ret()
-    P('CE.par').call('NEXT').call('CE').expect(')').call('NEXT').ret()
-    P('CE.plus').call('NEXT').call('CE.atom').ret()
-    P('CE.minus').call('NEXT').call('CE.atom').a(('LDI','ce_zero',0),('A64','sub','cv','ce_zero','cv')).ret()
-    P('CE.inv').call('NEXT').call('CE.atom').a(('A64I','xor','cv','cv',-1)).ret()
-    P('CE.not').call('NEXT').call('CE.atom').branch({1:'CE.one'},'CE.zero',[('LDI','ce_zero',0),('C64','cv','ce_zero')])
-    P('CE.one').a(('LDI','cv',1)).ret()
-    P('CE.zero').a(('LDI','cv',0)).ret()
+            category, action, comparison, zero, nonzero = operators[op]
+            operator = targets[E.TK[op]]
+            bindings.update(operator=operator, action=action, zero=operator + "." + zero, nonzero=operator + "." + nonzero)
+            bindings.update((suffix, operator + "." + suffix) for suffix in ("true", "false", "rhs", "hit", "no"))
+            classes["comparison"] = list(map(int, comparison.split(","))) if comparison != "-" else []
+            emit("prefix", bindings)
+            emit(category, bindings)
+    emit("atom", dict(enum_values=enum_values, enum_defined=enum_defined))
