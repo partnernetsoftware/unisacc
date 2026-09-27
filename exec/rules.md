@@ -105,17 +105,16 @@ image. The classic and model output SHA-256 matched for each input:
 | `unisacc.c` | 0.77623196 s | 19.42672129 s | 25.027× |
 
 The timings include startup and model/package loading. They measure compiler
-latency, not produced-program runtime. Raw samples, input hashes and compiler
-hashes are in the local `/tmp/unisacc-final-perf-plan-928/summary.json`;
-the final ledger still needs a durable reference. This cost remains to be
+latency, not produced-program runtime. Samples, input hashes, compiler hashes and the final acceptance ledger are
+preserved in [`research/s17-final-evidence.json`](../research/s17-final-evidence.json). This cost remains to be
 optimized while preserving byte-identical outputs.
 
-The immutable candidate passed its V4 171-item gate. Old queue passes and
-timeout attempts are historical records, not inherited results. Local
-`make com` now builds the model route, and its `unisacc.com` is byte-identical
-to that candidate; published v0.0.7 remains classic. The changed final tree
-still requires its own complete gate and release audit before publication.
-Specified smoke and fixed-package bootstrap do not substitute for that gate.
+Frozen code tree `1ccb16e` passed its complete V5 171-item gate and local
+release audit (rc=0). Old queue passes were not inherited. The initial
+48-second bindx86 timeout is retained; its same-input exclusive retry passed
+in 37.98 seconds. Local `make com` builds the identical model candidate.
+Published v0.0.7 remains classic; no new release is claimed. Windows
+self-build remains unverified; specified guest smoke is separate evidence.
 
 ## Earlier candidate evidence
 

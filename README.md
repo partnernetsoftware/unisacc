@@ -10,7 +10,7 @@ rewrites ...) is answered by a small integer neural network whose weights are
 **constructed** from the decision table and **verified by enumeration** over
 the table's whole domain, not trained.
 
-## Local model default (final acceptance pending)
+## Local model default (local acceptance complete)
 
 The model route builds a separate `unisacc.com` candidate from declarative
 rules, dynamic facts and shared templates. Offline Python constructs and
@@ -28,9 +28,9 @@ remains classic; no new release is claimed here.
 | Models and routes | 32 distinct constructed networks, 938 stage-route rows, 21 resources |
 | Network equivalence | All 32 network/table pairs checked across their complete declared observation domains, including actions and strings |
 | Package / container | `compiler.pkg` 6,095,823 bytes; `.com` 6,279,167 bytes; the complete package occurs physically once |
-| Complete candidate gate | Candidate-specific V4 171/171 passed; the changed final tree still needs its own gate and release audit. |
+| Complete candidate gate | Frozen code tree `1ccb16e`: V5 171/171 passed; local release audit returned 0. |
 | Target and bootstrap evidence | Specified six-target smoke and fixed-package driver N1=N2=N3 completed; see bounded scope below |
-| Default switch / publication | Local `make com` switched; publication pending final acceptance. |
+| Default switch / publication | Local `make com` switched and verified; no new release published. |
 
 Candidate SHA-256: `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.
 Package SHA-256: `a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`.
@@ -60,9 +60,8 @@ execution of that image:
 
 Each classic/model image pair had the same SHA-256. The timing includes startup
 and model/package loading; it is compilation latency, not the produced program's
-runtime. The raw samples, inputs and compiler hashes are in the local
-`/tmp/unisacc-final-perf-plan-928/summary.json`; the final ledger still needs
-a durable reference. This performance cost remains to be optimized.
+runtime. The samples, inputs, compiler hashes and final acceptance ledger are preserved
+in [S-17 final evidence](research/s17-final-evidence.json). This performance cost remains to be optimized.
 
 Finite-domain checks establish network/table equality, not complete C99
 semantics. Candidate-specific native and differential tests remain separate
@@ -124,8 +123,8 @@ build a replacement or assert cross-platform release readiness. CI only re-runs 
 
 > **Shell = inferencer + executor + model data.**
 
-The walker, symbol table, relocation arithmetic and image writers are ordinary
-code. Every table-shaped decision is a network, one kernel for all of them
+In the classic seed/reference, the walker, symbol table, relocation arithmetic
+and image writers are ordinary code. Its fact stages below use networks, with one kernel for all of them
 (`embed -> gemv -> ReLU -> gemv -> argmax`, integers only):
 
 <!-- stages:begin -->

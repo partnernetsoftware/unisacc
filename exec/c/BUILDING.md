@@ -1,12 +1,16 @@
 # Model container construction
 
-`make com` still aliases `make classic-com`: both build the classic seed/fallback
-`unisacc.com`. They do not select the model compiler. No release default changes.
+`make com` builds the model compiler in at most two parallel build slots,
+with a 55-second process-tree bound inside the 60-second make bound. Shared
+and six target stages finish before packaging; only a successful build
+atomically replaces root `unisacc.com`. Set `MODEL_DIR` for a private build
+directory and `UA` for a private classic seed. `make classic-com` is the
+explicit fallback, writing `out/unisacc-classic.com`. Published v0.0.7 is unchanged.
 
 `make model-com` performs **one explicit step**, bounded at 55 seconds including
 its child processes. Set both `MODEL_DIR` and `MODEL_STEP`; missing or unknown
 steps (including `all`) fail. The model output is `MODEL_DIR/unisacc-next.com`,
-never the repository `unisacc.com`. There is no implicit full-build invocation.
+never the repository `unisacc.com`. The explicit-step entry remains available alongside the full `make com` build.
 
 Run these commands separately, in this order (each is a resumable scheduling
 unit; a failed unit must be rerun successfully before pack):
@@ -77,14 +81,15 @@ A target does not require shared to have finished. Pack requires all seven compl
 stages; do not overlap pack with any writer, or run two writers for the same stage.
 
 Every child runs through the existing process-group watchdog with a 50-second limit.
-Use an outer 55-second bound per explicit step when scheduling. The legacy all entry
-is for existing callers; it does not turn six sequential steps into one cheap step.
+Use an outer 55-second bound per explicit step when scheduling. The all entry
+uses two disjoint build slots and packages last; its complete process tree is
+bounded at 55 seconds. A timeout is a failure, not a completed build.
 Requested stages always rebuild. Completion records reuse the existing model input
 identity and artifact digest functions; pack rejects missing, altered or stale outputs.
 A failed stage removes its completion record before writing and cannot count as ready.
 If sources change between stages, rebuild affected stages in a fresh output directory;
 the conservative identity may require rebuilding all seven. There is no new scheduler,
-model interpreter, result cache, default-product change, or runtime Python dependency.
+model interpreter, result cache, or runtime Python dependency.
 
 Pack also retains every referenced table/network pair in `model-audit/`, including
 its temporary diagnostic, token and unit models. `models.json` identifies each
