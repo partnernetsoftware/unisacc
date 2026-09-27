@@ -102,6 +102,25 @@ def relax():
                   sequences=sequences, section='relax')
 
 
+def emit_rules(phase):
+    from finite_rules import install as install_rules
+    sequences = {name: [tuple(a) for a in json.loads(actions)] for name, actions in
+                 (line.rstrip('\n').split('\t') for line in open(os.path.join(HERE, 'x86-emit-sequences.tsv')) if not line.startswith('#'))}
+    sequences.update({'byte'+line.strip(): byte(P('byte.binding'), int(line)).acts for line in
+                      open(os.path.join(HERE, 'x86-emit-bytes.tsv')) if not line.startswith('#')})
+    sequences.update({name: E.rej(reason) for name, reason in
+                      (line.rstrip('\n').split('\t') for line in open(os.path.join(HERE, 'x86-emit-reject.tsv')) if not line.startswith('#'))})
+    for line in open(os.path.join(HERE, 'x86-emit-instances.tsv')):
+        if line.startswith('#'): continue
+        selected, section, values, names, prepare = line.rstrip('\n').split('\t')
+        if selected != phase: continue
+        bindings = {name: globals()[name] for name in ('AOPC', 'ACC', 'SHX', 'BLB', 'SZ', 'KND', 'SCR', 'SCR2', 'SPREG')}
+        bindings.update(json.loads(values))
+        bindings.update({name: P(owner).fresh(kind) for name, owner, kind in json.loads(names)})
+        install_rules(g, HERE, 'x86-emit', section=section, bindings=bindings,
+                      sequences={**sequences, 'prepare': sequences[prepare]})
+
+
 def build(image=False):
     E.prn()
     procs()
@@ -189,45 +208,7 @@ def build(image=False):
               C_DIV: "E.div", C_MOD: "E.mod", C_UDIV: "E.udiv", C_UMOD: "E.umod",
               **{v: "FP." + k for k, v in FP_IDS.items()}, **{v:"WX.store" for v in WIN_IDS.values()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
-    P("EG.choose").branch({1:"WX.store"},"EG.emit",[("CMPI","gwin",1)])
-    P("E.gate").branch({1: "EG.choose"}, "DEAD.meta", [("CMPI", "na", 0)])
-    p = byte(byte(P("EG.emit"), 0x0f), 0x05)
-    p.branch({1: "EG.carry"}, "NEXTL", [("CMPI", "gcarry", 1)])
-    p = P("EG.carry")
-    for b in (0x73, 3, 0x48, 0xf7, 0xd8): byte(p, b)
-    p.goto("NEXTL")
-    # mov d, s
-    p = P("E.mov")
-    p.a(("LDI", "al_o", 0x89), ("COPYW", "al_d", "a0"), ("COPYW", "al_s", "a1")).call("ALU").goto("NEXTL")
-    # imm d, v: `mov r32, imm32` when v >> 32 == 0 (0x41 first for r8..r15), else movabs
-    p = P("E.imm")
-    p.a(("A64I", "shr", "t", "a1", 32), ("LDI", "z0", 0)).branch({1: "EI.s"}, "EI.l", [("C64", "t", "z0")])
-    p = P("EI.s")
-    p.branch({(1, 2): "EI.s41"}, "EI.s2", [("CMPI", "a0", 8)])
-    byte(P("EI.s41"), 0x41).goto("EI.s2")
-    p = P("EI.s2")
-    p.a(("ALUI", "and", "t", "a0", 7), ("ALUI", "add", "t", "t", 0xB8), ("OUTW", "t"), ("COPYW", "lb_v", "a1"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("NEXTL")
-    p = P("EI.l")
-    p.a(("LDI", "rx_w", 1), ("LDI", "rx_r", 0), ("COPYW", "rx_b", "a0")).call("REX")
-    p.a(("ALUI", "and", "t", "a0", 7), ("ALUI", "add", "t", "t", 0xB8), ("OUTW", "t"), ("COPYW", "lb_v", "a1"), ("LDI", "lb_n", 8)).call("LEBYTES").goto("NEXTL")
-    # alu2 / mul64 d, s1, s2 (_alias: d == s1 -> op d, s2; s2 == d -> mov r11, s2 first, op on r11)
-    for nm, mul in (("E.alu", False), ("E.mul", True)):
-        p = P(nm)
-        p.a(("COPYW", "src2", "a2")).branch({1: nm + ".op"}, nm + ".a2", [("CMP", "a0", "a1")])
-        p = P(nm + ".a2")
-        p.branch({1: nm + ".sc"}, nm + ".mv", [("CMP", "a2", "a0")])
-        p = P(nm + ".sc")
-        p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", SCR), ("COPYW", "al_s", "a2")).call("ALU").a(("LDI", "src2", SCR)).goto(nm + ".mv")
-        p = P(nm + ".mv")
-        p.a(("LDI", "al_o", 0x89), ("COPYW", "al_d", "a0"), ("COPYW", "al_s", "a1")).call("ALU").goto(nm + ".op")
-        p = P(nm + ".op")
-        if not mul:
-            p.a(("LDX", "al_o", "opid", AOPC), ("COPYW", "al_d", "a0"), ("COPYW", "al_s", "src2")).call("ALU").goto("NEXTL")
-        else:       # rex(1, d>>3, 0, s2>>3) 0F AF modrm(3, d, s2)
-            p.a(("LDI", "rx_w", 1), ("COPYW", "rx_r", "a0"), ("COPYW", "rx_b", "src2")).call("REX")
-            byte(p, 0x0F)
-            byte(p, 0xAF)
-            p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "a0"), ("COPYW", "mr_b", "src2")).call("MODRM").goto("NEXTL")
+    emit_rules('pre')
     # Integer division/remainder: hand sequence from emit_x86, with the existing
     # ALU/MEM encoders reused. Save rax/rdx in the tape stack (not push/pop).
     # Operand domain is the non-stack tape registers; r11 is reserved scratch.
@@ -276,115 +257,7 @@ def build(image=False):
     dadj(p, 0)
     dmov(p, "a0", SCR)
     p.goto("NEXTL")
-    # memory: load64 r, base, disp / store64 base, disp, r / .ld r, base, disp, w / .st base, disp, r, w
-    def mem(p, o1, o2=None, w=1, p66=0):
-        p.a(("LDI", "me_o1", o1), ("LDI", "me_two", 1 if o2 is not None else 0), ("LDI", "me_o2", o2 or 0),
-            ("LDI", "me_w", w), ("LDI", "me_66", p66)).call("MEM").goto("NEXTL")
-    p = P("E.ld8")
-    p.a(("COPYW", "me_r", "a0"), ("COPYW", "me_b", "a1"), ("COPYW", "me_d", "a2"))
-    mem(p, 0x8B)
-    p = P("E.st8")
-    p.a(("COPYW", "me_r", "a2"), ("COPYW", "me_b", "a0"), ("COPYW", "me_d", "a1"))
-    mem(p, 0x89)
-    p = P("E.ld")
-    p.a(("COPYW", "me_r", "a0"), ("COPYW", "me_b", "a1"), ("COPYW", "me_d", "a2"))
-    p.branch({1: "EL.1", 2: "EL.2", 4: "EL.4", 8: "EL.8"}, "DEAD.op", [("RLD", "a3")])
-    mem(P("EL.8"), 0x8B)
-    mem(P("EL.4"), 0x63)                   # movsxd
-    mem(P("EL.1"), 0x0F, 0xBE)
-    mem(P("EL.2"), 0x0F, 0xBF)
-    p = P("E.st")
-    p.a(("COPYW", "me_r", "a2"), ("COPYW", "me_b", "a0"), ("COPYW", "me_d", "a1"))
-    p.branch({1: "ES.1", 2: "ES.2", 4: "ES.4", 8: "ES.8"}, "DEAD.op", [("RLD", "a3")])
-    mem(P("ES.8"), 0x89)
-    mem(P("ES.4"), 0x89, w=0)
-    mem(P("ES.2"), 0x89, w=0, p66=1)
-    mem(P("ES.1"), 0x88, w=0)
-    # setcc d, ra, rb: cmp ra, rb / setcc r11b (41 0F cc modrm(3,0,r11)) / movzx d, r11b
-    p = P("E.set")
-    p.a(("LDI", "al_o", 0x39), ("COPYW", "al_d", "a1"), ("COPYW", "al_s", "a2")).call("ALU")
-    byte(p, 0x41)
-    byte(p, 0x0F)
-    p.a(("LDX", "t", "opid", ACC), ("OUTW", "t"), ("LDI", "mr_m", 3), ("LDI", "mr_r", 0), ("LDI", "mr_b", SCR)).call("MODRM")
-    p.a(("LDI", "rx_w", 1), ("COPYW", "rx_r", "a0"), ("LDI", "rx_b", 8)).call("REX")   # rex(1, d>>3, 0, 1): b bit set (REX sees rx_b >> 3)
-    byte(p, 0x0F)
-    byte(p, 0xB6)
-    p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "a0"), ("LDI", "mr_b", SCR)).call("MODRM").goto("NEXTL")
-    byte(P("E.ret"), 0xC3).goto("NEXTL")
-    # push/pop r: 50+r / 58+r, a REX.B (0x41) first for r8..r15 (emit_x86 push/pop)
-    for nm, base in (("E.push", 0x50), ("E.pop", 0x58)):
-        p = P(nm)
-        p.branch({(1, 2): nm + ".x"}, nm + ".o", [("CMPI", "a0", 8)])
-        byte(P(nm + ".x"), 0x41).goto(nm + ".o")
-        P(nm + ".o").a(("ALUI", "and", "t", "a0", 7), ("ALUI", "add", "t", "t", base), ("OUTW", "t")).goto("NEXTL")
-    byte(P("E.nop"), 0x90).goto("NEXTL")
-    # .frame n: on the tape SP's register, sub (/5) for n >= 0, add (/0) for n < 0, by |n|:
-    # 83 /r ib when |n| <= 127, else 81 /r id (emit_x86 alu_imm) -- hand rules, stated
-    p = P("E.frame")
-    p.a(("LDI", "z0", 0), ("LDI", "fx", 5), ("COPYW", "fn", "a0")).branch({0: "EF.neg"}, "EF.r", [("C64", "a0", "z0")])
-    P("EF.neg").a(("LDI", "fx", 0), ("A64", "sub", "fn", "z0", "a0")).goto("EF.r")
-    p = P("EF.r")
-    p.a(("LDI", "rx_w", 1), ("LDI", "rx_r", 0), ("LDI", "rx_b", SPREG)).call("REX")
-    p.a(("LDI", "z0", 127)).branch({2: "EF.l"}, "EF.s", [("C64", "fn", "z0")])
-    p = P("EF.s")
-    byte(p, 0x83)
-    p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "fx"), ("LDI", "mr_b", SPREG)).call("MODRM").a(("OUTW", "fn")).goto("NEXTL")
-    p = P("EF.l")
-    byte(p, 0x81)
-    p.a(("LDI", "mr_m", 3), ("COPYW", "mr_r", "fx"), ("LDI", "mr_b", SPREG)).call("MODRM").a(("COPYW", "lb_v", "fn"), ("LDI", "lb_n", 4)).call("LEBYTES").goto("NEXTL")
-    # .zero base, disp, n: xor r11, r11 once, then the widest store (8, 4, 2, 1) that fits the rest,
-    # at disp + k, until n bytes are zero (emit_x86) -- the split is a hand rule; r11 may not be the base
-    p = P("E.zero")
-    p.branch({1: "DEAD.zb"}, "EZ.x", [("CMPI", "a0", SCR)])
-    g.on("DEAD.zb", range(257), "DEAD", E.rej("not covered: .zero with the scratch r11 as its base"), "r")
-    p = P("EZ.x")
-    for c in (0x4D, 0x31, 0xDB):
-        byte(p, c)
-    p.a(("LDI", "zk", 0)).label("EZ.l")
-    p.branch({0: "EZ.w"}, "NEXTL", [("C64", "zk", "a2")])
-    p = P("EZ.w")
-    p.a(("LDI", "zw", 8)).label("EZ.fit")
-    p.a(("A64", "add", "t", "zk", "zw")).branch({2: "EZ.half"}, "EZ.st", [("C64", "t", "a2")])
-    P("EZ.half").a(("ALUI", "sar", "zw", "zw", 1)).goto("EZ.fit")
-    p = P("EZ.st")
-    p.a(("LDI", "me_r", SCR), ("COPYW", "me_b", "a0"), ("A64", "add", "me_d", "a1", "zk"), ("LDI", "me_two", 0), ("LDI", "me_o2", 0))
-    p.branch({8: "EZ.8", 4: "EZ.4", 2: "EZ.2", 1: "EZ.1"}, "DEAD.op", [("RLD", "zw")])
-    for w, o1, ww, p66 in ((8, 0x89, 1, 0), (4, 0x89, 0, 0), (2, 0x89, 0, 1), (1, 0x88, 0, 0)):
-        P("EZ.%d" % w).a(("LDI", "me_o1", o1), ("LDI", "me_w", ww), ("LDI", "me_66", p66)).call("MEM").a(("A64", "add", "zk", "zk", "zw")).goto("EZ.l")
-    # setreg rX, imm V -> the imm path; setreg rX, reg rY -> the mov path (emit_x86: mov_ri / mov_rr);
-    # mem/addr is deferred until layout; imm/reg reuse existing encoders
-    p = P("E.setreg")
-    p.branch({1: "E.imm"}, "ESR.r", [("CMP", "stag", "id_tagimm")])
-    P("ESR.r").branch({1: "E.mov"}, "ESR.mem", [("CMP", "stag", "id_tagreg")])
-    P("ESR.mem").branch({1:"AD.mem"}, "ESR.addr", [("CMP","stag","id_tagmem")])
-    P("ESR.addr").branch({1:"AD.addr"}, "DEAD.op", [("CMP","stag","id_tagaddr")])
-    # spinit rN (lowering's spinit(rN, None), the None normalised away): mov rN, rsp
-    p = P("E.spinit")
-    p.branch({1: "ESI.m"}, "DEAD.op", [("CMPI", "na", 1)])
-    P("ESI.m").a(("LDI", "a1", SPREG)).goto("E.mov")
-    # callr r: FF /2 modrm(3, 2, r), a REX.B (0x41, no W) first for r8..r15
-    p = P("E.callr")
-    p.branch({(1, 2): "ECR.x"}, "ECR.o", [("CMPI", "a0", 8)])
-    byte(P("ECR.x"), 0x41).goto("ECR.o")
-    p = P("ECR.o")
-    byte(p, 0xFF)
-    p.a(("LDI", "mr_m", 3), ("LDI", "mr_r", 2), ("COPYW", "mr_b", "a0")).call("MODRM").goto("NEXTL")
-    # shl64/shr64/lshr64 d, s, c (emit_x86, [I-14]): mov r11, s; mov rbx, c; push rcx; mov rcx, rbx;
-    # rex.WB D3 /ext r11; pop rcx; mov d, r11 -- the count must be in cl, and rcx is a tape register (r4).
-    # r11 and rbx are no tape register (catalog.REGMAP), so no tape operand can alias them.
-    p = P("E.shf")
-    p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", SCR), ("COPYW", "al_s", "a1")).call("ALU")
-    p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", SCR2), ("COPYW", "al_s", "a2")).call("ALU")
-    byte(p, 0x51)                                                     # push rcx
-    p.a(("LDI", "al_o", 0x89), ("LDI", "al_d", 1), ("LDI", "al_s", SCR2)).call("ALU")
-    byte(p, 0x49)                                                     # rex(1, 0, 0, 1)
-    byte(p, 0xD3)
-    p.a(("LDI", "mr_m", 3), ("LDX", "mr_r", "opid", SHX), ("LDI", "mr_b", SCR)).call("MODRM")
-    byte(p, 0x59)                                                     # pop rcx
-    p.a(("LDI", "al_o", 0x89), ("COPYW", "al_d", "a0"), ("LDI", "al_s", SCR)).call("ALU").goto("NEXTL")
-    p = P("NEXTL")          # a non-branch: its bytes become a blob, its size known
-    p.a(("OCUT", "blob", "omark"), ("STX", "npc", BLB, "blob"), ("BLEN", "t", "blob"), ("STX", "npc", SZ, "t"),
-        ("LDI", "t", 0), ("STX", "npc", KND, "t"), ("ALUI", "add", "npc", "npc", 1)).goto("SKIPL")
+    emit_rules('post')
     install_fp(E, byte)
     install_address(E, byte, KND, SZ, OFF, LABD)
     from x86itoa import install as install_itoa
