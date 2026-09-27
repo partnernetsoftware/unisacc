@@ -5103,3 +5103,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 冻结源85eaeb9完整新模型候选已建：/tmp/unisacc-final-build-928/candidate/unisacc-next.com，6279167B，sha256 9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46；包6095823B/a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8，物理整包仅1份(offset183328)。shared与六目标两槽批次7.98/4.13/5.14/4.86s，pack25.20s全rc0。审计保留32个互异网络及32表配对，逐一SHA核对与--check-net全域通过，配对网络集合恰等包内32模型（938stage rows/21资源，网络5922890B）；不是只验原22项。证据source.json/coverage.json/pairs-{0,1}.json。
 
 同一9a0ae470候选全139项本机滚动门禁已启动：/tmp/unisacc-final-gate-928；首窗口39.44秒，tools11/11与bigclosure6目标同均rc0，2/139，pending75正确保留，尚未称全套通过。显式MODEL_COM、UA=/tmp/unisacc-final-build-928/seed，默认产物未替换；后续只改prd证据不更改冻结构建输入。
+
+最终候选冻结队列续行：47/139已执行，44项rc0；exec-bindx86、exec-container、exec-warningdriver在双槽48秒任务预算下rc142，失败原日志保留，不当通过。独立同候选exec-bindx86单槽53秒预算实测38.04秒通过（/tmp/unisacc-final-retry-bindx86-928）。下一步重套件独占、短套件双槽；同源同候选队列重试前将原失败结果与日志归档为attempts，再实际重跑，不伪造通过。containercheck发现仍重建另一包，独立修为显式MODEL_COM直接验证候选；主树尚未合入，不将草案检查计入冻结队列。
