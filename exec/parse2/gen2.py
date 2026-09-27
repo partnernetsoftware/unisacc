@@ -175,45 +175,35 @@ def strwalk(pre, body, done):
 
 
 def ladder(prefix, bottom):
-    """E<lv>: operand, then (op E<lv+1>)* for the ops of level lv.
-    prefix "E": from scratch (bottom = UNARY); prefix "C": the left operand is
-    already in r0 (bottom = nothing) -- the same table, generated twice."""
+    """Instantiate the shared precedence ladder from current operator facts."""
+    modes = dict(tape_rows("ladder-modes.tsv"))
     for i, lv in enumerate(LEVELS):
-        nm, up = "%s%d" % (prefix, lv), ("%s%d" % (prefix, LEVELS[i + 1]) if i + 1 < len(LEVELS) else bottom)
-        p = P(nm)
-        if up:
-            p.call(up)
-        p.label(nm + ".l")
-        cases = {o: "%s.%s" % (nm, o) for o in OPS[lv]}
-        p.tok(cases, "RET")
-        nxt = "E%d" % LEVELS[i + 1] if i + 1 < len(LEVELS) else "UNARY"
+        nm = "%s%d" % (prefix, lv)
+        up = "%s%d" % (prefix, LEVELS[i + 1]) if i + 1 < len(LEVELS) else bottom
+        bindings = dict(ladder_owner=nm, ladder_loop=nm + ".l", ladder_up=up,
+                        ladder_next="E%d" % LEVELS[i + 1] if i + 1 < len(LEVELS) else "UNARY")
+        structured_control("ladder-up" if up else "ladder-empty", False, dict(bindings, word_state=nm))
+        dispatch = P(nm).fresh("b")
+        bindings["ladder_dispatch"] = dispatch
+        structured_control("ladder-read", False, dict(bindings, word_state=nm))
+        targets = {TK[o]: nm + "." + o for o in OPS[lv]}
+        for key, target in targets.items():
+            g.on(dispatch, [key], target, [], "r")
+        for state, row in load_rules(Path(__file__).with_name("ladder-default.tsv"), {},
+                domain=set(range(257)) - targets.keys(), bindings=bindings).items():
+            for key, (target, actions) in row.items(): g.on(state, [key], target, actions, "r")
         for o in OPS[lv]:
-            q = P("%s.%s" % (nm, o))
-            if o == "&&":
-                q.call("FTRUTH").a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "e", "lab"))
-                emit(q, "and_skip").vpush("e").call("NEXT").call(nxt).vpop("e")
-                emit(q.call("FTRUTH"), "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
-                emit(q, "label_e").goto(nm + ".l")
-                continue
-            if o == "||":
-                q.call("FTRUTH").a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "od", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "on", "lab"))
-                emit(q, "or_skip").vpush("od").call("NEXT").call(nxt).vpop("od")
-                emit(q.call("FTRUTH"), "bool").a(("LDI", "vt", 0), ("LDI", "vb", 4))
-                emit(q, "label_d").goto(nm + ".l")
-                continue
-            # left in r0: push; the right operand at the next level; then the operator's shared tail (OPX)
-            emit(q, "push").vpush("vt", "vb").call("NEXT").call(nxt).vpop("lt", "lb").call("OPX." + o).goto(nm + ".l")
+            structured_control("ladder-" + modes.get(o, modes["*"]), False,
+                               dict(bindings, ladder_operator=targets[TK[o]], ladder_tail="OPX." + o, word_state=targets[TK[o]]))
     if prefix == "E":
         for lv in LEVELS:
             for o in OPS[lv]:
                 if o not in SHORT:
                     optail(o)
         tytail()
-    g.on("DEAD.short", range(257), "DEAD", E.rej("not covered: && ||"), "r")
-    g.on("DEAD.pa", range(257), "DEAD", E.rej("not covered: pointer arithmetic"), "r")
-    if prefix == "E":
-        g.on("DEAD.ty", range(257), "DEAD", E.rej("not covered: operand types (the type table's result)"), "r")
-    g.on("DEAD.ui", range(257), "DEAD", E.rej("not covered: unsigned int with this operand"), "r")
+    for owner, state, message in tape_rows("ladder-reject.tsv"):
+        if owner in ("all", prefix):
+            g.on(state, range(257), "DEAD", E.rej(message), "r")
 
 
 from printfallback import KINDS as PFKINDS, install as pf_install
@@ -505,7 +495,7 @@ def structured_control(section, warnings, extra=None, sequence_bindings=None):
     bindings.update(extra or {})
     for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
         if part == section:
-            p.cur = prefix
+            p.cur = bindings.get(prefix, prefix)
             bindings[key] = p.fresh(kind)
     sequences = {name: O(re.split(r"(\{[^}]*\})", TEMPL[template])[int(fragment)])
                  for name, template, fragment in tape_rows("control-text.tsv")}
