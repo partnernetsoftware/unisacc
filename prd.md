@@ -4873,3 +4873,5 @@ E4 tape匹配组完成后，在同一隔离槽继续最后build外层及lit/regn
 E4外层控制已交付并审核，下一空闲槽转ARM arminput完整输入/元数据组；固定扫描规则迁声明，target/schema常量绑定，禁止新增解析框架。
 
 E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入rounds声明，Python净减106行，声明+352；gen.py现204行。固定扫描、局部改写、活跃性分析、peephole、匹配与轮次控制已由声明提供；仍保留LEVEL选择、opinfo/peep数据初始化/索引分派、常量/fresh绑定与通用装配，不称Python构造工具完全消失。独立双槽exec-e4/exec-e4self 2/2全rc0，35.09秒：139文件两级278同，编译器自身两级2同（12.85秒），无拒绝/错误。本证据固定E4源码，不代替后续其他阶段组合验收。
+
+第六批集成与产物实测：E3 switch/case/default及入口标签/goto、lower code扫描、ARM输入metadata三组与E4外层已合入0ae4ad2，四组Python净减227行；声明另增786行（不称总源变小）。父组合六项双槽25.66秒全rc0，含chain167/167、三类lowering、ARM和警告诊断；E4专门含自身的2项证据见前条。统一真实模型候选/tmp/unisacc-parallel-sixth-candidate/unisacc-next.com为5,985,531 B，sha256 9b5b710bd97cc590371a9fc73de159ee8aa6f0fcfffa34f297ae0d3a54e1bbc7；构建55秒外限内rc0，模型包5,802,219 B。候选六目标hello镜像与私有参考逐字节一致；hello/fib/b_strderef/b_switch3四程序×O0/O1/O2共12次macOS arm64运行与宿主cc输出、诊断、退出码一致（cc显式补stdio.h）。默认产品未切换；这些是限定产物验证，不是完整C99、六平台原生或整个重构完成。
