@@ -8,89 +8,53 @@ s=importlib.util.spec_from_file_location('unit_grammar',pathlib.Path(__file__).p
 E=importlib.util.module_from_spec(s);s.loader.exec_module(E)
 P=E.P;g=E.g;TK_ID=E.TK_ID
 STATIC=1<<40
-BAD=('rej','not covered: multi-unit static declarator')
+
+from finite_rules import install as install_rules, load as load_rules
+
+
+def rows(name):
+    return [line.split("\t") for line in pathlib.Path(__file__).with_name("units-"+name+".tsv").read_text().splitlines()[1:]]
+
 
 def build(locations=False):
-    # This pass copies physical tokens, including qualifiers. The parser's
-    # reader skips qualifiers, but doing that here merges two framing spans.
-    for name in ('type=const','type=volatile','type=restrict','type=inline','type=_Bool'):
+    # Physical qualifiers are transport tokens here, not parser-skipped spans.
+    qualifiers=[row[0] for row in rows("qualifiers")]
+    for name in qualifiers:
         E.WORDS.append(name);E.TK[name]=max(E.TK.values())+1
     E.tokenizer();E.prn();E.fconv()
-    for name in ('type=const','type=volatile','type=restrict','type=inline','type=_Bool'):
-        g.st['NX'+name][1][10]=('RET',g.seq([('ADV',),('LDI','tk',E.TK[name])]))
+    for name in qualifiers:
+        for state,row in load_rules(pathlib.Path(__file__).with_name("units-byte.tsv"),{},domain=[10],
+                bindings=dict(qualifier_state="NX"+name,qualifier_token=E.TK[name]),section="qualifier").items():
+            for key,(target,acts) in row.items():g.st[state][1][key]=(target,g.seq(acts))
     from strings import token_span
     token_span(E,P)
-    P('START').a(('LDI','unit',0),('LDI','zero',0)).goto('FRAME')
-    g.on('FRAME',[256],'FINAL',[])
-    g.on('FRAME',range(256),'L0',[('LDI','len',0)])
+    selection=rows("builtin")
+    builtin=[E.TK[word] for word in E.WORDS if any(word.startswith(prefix) and word!=exclude for prefix,exclude in selection)]
+    tokens=dict(E.TK,identifier=TK_ID)
+    classes={name:[tokens[token]] for name,token in rows("tokens")};classes["builtin"]=builtin
+    sequences={name:E.O(json.loads(value)) for name,value in rows("text")}
+    sequences.update((name,E.rej(message)) for name,message in rows("reject"))
+    def rules(section,extra=None,extra_classes=None):
+        bindings=dict(STATIC=STATIC,**(extra or {}))
+        for part,prefix,kind,key in rows("fresh"):
+            if part==section:bindings[key]=P(prefix+".units_"+key).fresh(kind)
+        install_rules(g,pathlib.Path(__file__).parent,"units",section=section,bindings=bindings,
+                      classes=dict(classes,**(extra_classes or {})),sequences=sequences)
+    rules("main0")
     for i in range(4):
-        g.on('L'+str(i),range(256),'L'+str(i)+'b',[('BYTE','ch'),('ADV',),('A64I','shl','ch','ch',8*i),('A64','or','len','len','ch')])
-        g.on('L'+str(i),[256],'DEAD',E.rej('not covered: truncated unit frame'))
-        P('L'+str(i)+'b').goto('L'+str(i+1) if i<3 else 'EXTENT')
-    P('EXTENT').branch({(1,2):'DEAD.frame'},'COUNT.ok',[('CMPI','unit',64)])
-    P('COUNT.ok').branch({1:'DEAD.frame'},'EXTENT2',[('CMPI','len',0)])
-    P('EXTENT2').a(('MARK','begin'),('XLEN','total'),('A64','add','end','begin','len')).branch({2:'DEAD.frame'},'SCAN',[('C64','end','total')])
-    P('SCAN').a(('INPUSHXE','begin','end'),('LDI','dep',0)).call('NEXT').goto('SCAN.loop')
-    P('SCAN.loop').tok({'eof':'SCAN.end','{':'SCAN.open','}':'SCAN.close','type=static':'SCAN.static'},'SCAN.next')
-    P('SCAN.open').a(('ALUI','add','dep','dep',1)).goto('SCAN.next')
-    P('SCAN.close').a(('ALUI','sub','dep','dep',1)).branch({0:'DEAD.frame'},'SCAN.next',[('CMPI','dep',0)])
-    P('SCAN.next').call('NEXT').goto('SCAN.loop')
-    P('SCAN.static').branch({1:'SD.type'},'SCAN.next',[('CMPI','dep',0)])
-    # A declaration specifier followed by pointer stars and an identifier.
-    # Tagged types, typedef names and parenthesised pointer declarators are
-    # accepted; inline aggregate specifiers remain a named refusal.
-    P('SD.type').a(('LDI','nest',0)).call('NEXT').tok({'struct':'SD.tag','union':'SD.tag','enum':'SD.tag',TK_ID:'SD.typedef'},'SD.builtin')
-    builtin={w:'SD.more' for w in E.WORDS if w.startswith('type=') and w!='type=static'}
-    P('SD.builtin').tok(builtin,BAD)
-    P('SD.more').call('NEXT').tok(builtin|{'*':'SD.star','(':'SD.nested',TK_ID:'SD.name'},BAD)
-    P('SD.tag').call('NEXT').tok({TK_ID:'SD.typedef'},BAD)
-    P('SD.typedef').call('NEXT').goto('SD.decl')
-    P('SD.decl').tok({'*':'SD.star','(':'SD.nested',TK_ID:'SD.name'},BAD)
-    P('SD.nested').a(('ALUI','add','nest','nest',1)).call('NEXT').goto('SD.decl')
-    P('SD.star').call('NEXT').goto('SD.decl')
-    P('SD.name').a(('INTERN','id','ps','pe'),('ALUI','add','u','unit',1),('STX','id',STATIC,'u')).call('NEXT').a(('COPYW','par','nest'),('LDI','br',0),('LDI','curly',0),('LDI','init',0)).goto('SD.tail')
-    P('SD.tail').tok({'(':'SD.po',')':'SD.pc','[':'SD.bo',']':'SD.bc','{':'SD.co','}':'SD.cc','=':'SD.eq',',':'SD.comma',';':'SD.semi','eof':'DEAD.frame'},'SD.next')
-    for token,slot,op in [('po','par','add'),('pc','par','sub'),('bo','br','add'),('bc','br','sub'),('cc','curly','sub')]:
-        p=P('SD.'+token).a(('ALUI',op,slot,slot,1))
-        if op=='sub':p.branch({0:'DEAD.frame'},'SD.'+token+'ok',[('CMPI',slot,0)]);p=P('SD.'+token+'ok')
-        p.goto('SD.next')
-    P('SD.eq').a(('LDI','init',1)).goto('SD.next')
-    P('SD.co').branch({1:'SD.body'},'SD.initbrace',[('CMPI','init',0)])
-    P('SD.body').a(('LDI','dep',1)).goto('SCAN.next')
-    P('SD.initbrace').a(('ALUI','add','curly','curly',1)).goto('SD.next')
-    for name,dest in [('comma','SD.nextdecl'),('semi','SCAN.next')]:
-        P('SD.'+name).a(('ALU','or','u','par','br'),('ALU','or','u','u','curly')).branch({1:dest},'SD.next',[('CMPI','u',0)])
-    P('SD.nextdecl').a(('LDI','nest',0)).call('NEXT').goto('SD.decl')
-    P('SD.next').call('NEXT').goto('SD.tail')
-    # The eof token must be the last token in its bounded view.
-    P('SCAN.end').goto('TRAIL')
-    g.on('TRAIL',range(48,58),'TRAILdigits',[('ADV',)])
-    g.on('TRAIL',[256],'COPY.start',[])
-    g.els('TRAIL','DEAD.frame')
-    g.on('TRAILdigits',range(48,58),'TRAILdigits',[('ADV',)])
-    g.on('TRAILdigits',[32],'TRAIL0',[('ADV',)])
-    g.els('TRAILdigits','DEAD.frame')
-    for i,c in enumerate(b'tokens\n'):
-        g.on('TRAIL'+str(i),[c],'TRAIL'+str(i+1),[('ADV',)])
-        g.els('TRAIL'+str(i),'DEAD.frame')
-    g.on('TRAIL7',[256],'COPY.start',[])
-    g.els('TRAIL7','DEAD.frame')
-    P('COPY.start').a(('LDI','copy_prev',0),('LDI','copy_cond',0)).branch({1:'COPY.first'},'COPY.later',[('CMPI','unit',0)])
-    P('COPY.first').o('@unit0\n').goto('COPY.tokens')
-    P('COPY.later').o('@unit+\n').goto('COPY.tokens')
-    P('COPY.tokens').a(('JUMP','begin'),('MARK','copy_begin')).call('NEXT').goto('COPY.loop')
-    P('COPY.loop').tok({'eof':'COPY.end',TK_ID:'COPY.id','?':'COPY.question',':':'COPY.colon'},'COPY.raw')
-    P('COPY.id').a(('INTERN','id','ps','pe'),('LDX','seen','id',STATIC),('ALUI','add','u','unit',1)).branch({1:'COPY.private'},'COPY.raw',[('CMP','seen','u')])
-    P('COPY.private').branch({1:'COPY.raw'},'COPY.labelcheck',[('CMPI','unit',0)])
-    P('COPY.rename').a(('SPAN2','copy_begin','tpos')).o('id=').a(('SPAN2','ps','pe')).o('__u').num('unit').o('\n').goto('COPY.next')
-    P('COPY.raw').a(('MARK','at'),('SPAN2','copy_begin','at')).goto('COPY.next')
-    P('COPY.next').a(('COPYW','copy_prev','tk'),('MARK','copy_begin')).call('NEXT').goto('COPY.loop')
-    from finite_rules import install as install_rules
+        rules("length",dict(length_byte="L"+str(i),length_step="L"+str(i)+"b",length_next="L"+str(i+1) if i<3 else "EXTENT",length_shift=8*i))
+    rules("main2")
+    for part,token,slot in rows("counters"):
+        rules(part,dict(counter_entry="SD."+token,counter_ok="SD."+token+"ok",counter_slot=slot))
+    rules("main5")
+    for entry,nxt in rows("separators"):
+        rules("separator",dict(separator_entry=entry,separator_next=nxt))
+    rules("main7")
+    for i,byte in enumerate(json.loads(rows("trailer")[0][0])):
+        rules("trailer",dict(trailer_state="TRAIL"+str(i),trailer_next="TRAIL"+str(i+1)),dict(trailer_byte=[byte]))
+    rules("main9")
     install_rules(g, pathlib.Path(__file__).parent, 'unit-labels', bindings=dict(ID=TK_ID, GOTO=E.TK['goto'], COLON=E.TK[':']), section='main')
-    P('COPY.end').a(('INPOP',),('JUMP','end'),('ALUI','add','unit','unit',1)).goto('FRAME')
-    P('FINAL').branch({1:'DEAD.frame'},'DONE',[('CMPI','unit',0)])
-    P('DONE').o('eof\n').a(('ACCEPT',)).goto('DEAD')
-    g.on('DEAD.frame',range(257),'DEAD',E.rej('not covered: malformed unit frame'),'r')
+    rules("main12")
     if locations:
         from unitlocations import install
         install(E,P)
