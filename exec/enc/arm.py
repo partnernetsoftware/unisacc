@@ -1,8 +1,8 @@
 """ARM64 straight-line encoder delta, executed by the existing generic runtime.
 
-ENCSPEC supplies ALU and inverted condition values. Instruction bit layouts,
-MOVZ/MOVK selection and operand contracts below are hand-written rules compiled
-into transitions, not new runtime primitives or constructed neural networks.
+ENCSPEC supplies ALU and inverted condition values. armbase-*.tsv declares
+basic instruction packing and MOVZ/MOVK selection; operand contracts below
+compile into transitions using the existing runtime.
 Input is the TIns line syntax with section-local labels and declared metadata.
 Two passes resolve branches after all lengths are measured.
 """
@@ -132,34 +132,19 @@ def build(image=False):
                 P(bound).a(('LDI','limit',9223372036854775807)).branch({2:'FAIL'},checked,[('C64U','a%d'%i,'limit')])
                 p=P(checked)
         p.goto('EMIT.%d'%cls)
-    word(P('EMIT.1').a(('ALUI','shl','w','a1',16),('ALUI','or','w','w',0xAA0003E0),('ALU','or','w','w','a0'))).goto('LINE')
-    for cls,base in ((3,0x9B007C00),(7,None)):
-        p=P('EMIT.%d'%cls).a(('ALUI','shl','w','a2',16),('ALUI','shl','t','a1',5),('ALU','or','w','w','t'),('ALU','or','w','w','a0'))
-        p.a(('ALU','or','w','w','base') if base is None else ('ALUI','or','w','w',base))
-        word(p).goto('LINE')
-    # Tape ABI returns through x17 saved on x7, rather than host LR.
-    p=P('EMIT.4')
-    for base in (0xF94000F1, 0x910020E7, 0xD65F0220):
-        word(p.a(('LDI','w',base)))
-    p.goto('LINE')
-    for cls,base in ((5,0xD503201F),):
-        word(P('EMIT.%d'%cls).a(('LDI','w',base))).goto('LINE')
-    P('EMIT.6').branch({1:'FAIL'},'CALLR.sp',[('CMPI','a0',17)])
-    P('CALLR.sp').branch({1:'FAIL'},'CALLR.emit',[('CMPI','a0',7)])
-    p=P('CALLR.emit')
-    for base in (0x10000091, 0xD10020E7, 0xF90000F1):
-        word(p.a(('LDI','w',base)))
-    word(p.a(('ALUI','shl','w','a0',5),('ALUI','or','w','w',0xD63F0000))).goto('LINE')
-    p=P('EMIT.8').a(('ALUI','shl','w','a2',16),('ALUI','shl','t','a1',5),('ALU','or','w','w','t'),('ALUI','or','w','w',0xEB00001F))
-    word(p).a(('ALUI','shl','w','base',12),('ALUI','or','w','w',0x9A9F07E0),('ALU','or','w','w','a0'))
-    word(p).goto('LINE')
-    P('EMIT.2').a(('COPYW','md','a0'),('COPYW','mv','a1')).call('MOVIMM').goto('LINE')
-    p=P('MOVIMM').a(('A64I','and','w','mv',65535),('ALUI','shl','w','w',5),('ALUI','or','w','w',0xD2800000),('ALU','or','w','w','md'))
-    word(p).goto('IMM.1')
-    for sh in (1,2,3):
-        nxt='IMM.%d'%(sh+1) if sh<3 else 'RET'
-        P('IMM.%d'%sh).a(('A64I','shr','w','mv',16*sh),('ALUI','and','w','w',65535)).branch({1:nxt},'IMM.put%d'%sh,[('CMPI','w',0)])
-        word(P('IMM.put%d'%sh).a(('ALUI','shl','w','w',5),('ALUI','or','w','w',0xF2800000|(sh<<21)),('ALU','or','w','w','md'))).goto(nxt)
+    from finite_rules import install as install_rules
+    sequences = {'word': word(P('word.binding')).acts}
+    bindings = {name: P(owner).fresh(kind) for name, owner, kind in
+                (('label0', 'EMIT.6', 'b'), ('label1', 'CALLR.sp', 'b'), ('label2', 'EMIT.2', 'r'))}
+    install_rules(g, Path(__file__).parent, 'armbase', bindings=bindings,
+                  sequences=sequences, section='base')
+    for halfword in (1, 2, 3):
+        state = 'IMM.%d' % halfword
+        install_rules(g, Path(__file__).parent, 'armbase', section='movk', sequences=sequences,
+                      bindings=dict(state=state, put='IMM.put%d' % halfword,
+                                    branch=P(state).fresh('b'),
+                                    next='IMM.%d' % (halfword + 1) if halfword < 3 else 'RET',
+                                    shift=16 * halfword, movk=0xF2800000 | (halfword << 21)))
     from armmem import install
     install(E,word)
     from armbranch import install as install_branch
