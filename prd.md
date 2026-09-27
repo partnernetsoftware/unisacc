@@ -4391,3 +4391,7 @@ atexit/div/labs aggregate-return case. Full reconstruction remains open.
 ### 模型数组形参接入（进行中）
 
 在布尔切片后的模型 C99 50/57 基线上，下一步接入一维数组形参的指针调整。先支持空界、单个整数或标识符界及 static/const/restrict/volatile 修饰；不跳过任意表达式，带副作用的界与多维形参仍明确拒绝，避免复制参考前端忽略界求值的行为。复用现有 DECL、PDB 与指针寻址，不新增执行器动作；固定旧覆盖后再增加用例。
+
+数组形参实现账：旧 E3 259 全保留，另两个 C99 用例 tape 相等；s60 覆盖 int/char/_Bool/double、static 与 const 界，三项经真实网络链路相等后加入固定清单（E3 262、chain 115）。复用参数描述符与 DECL，gen2 净增 10 行，无新执行器原语。候选 `/tmp/unisacc-arrayparam-candidate/unisacc-next.com` 为 5,880,954 B，SHA256 `d20f59d47b3b570b0898ccd39ae846b79985accb6f4fb46bac2ef24ee5c577b6`；三项在 -O0/-O1/-O2 与 host cc 同输出。原 C99 清单实跑 52/57、wrong 0、refused 5、rc 1，未降低 57 的门槛。解析网络 4,850 状态、534,393 B，1,251,044 个观测 network=table。
+
+固定清单队列 `/tmp/unisacc-arrayparam-final` 双槽：chain 115/115（11.83 s）、self 3,942,700 B 相等（3.39 s）、unitlocations（3.43 s），3/3 通过，窗口 11.87 s。实际候选对 `a[n++]` 与 `a[2][3]` 均 rc 1 拒绝；前者在带位置诊断模式报 expected ]，不声称已实现 VLA 界表达式求值。下一项仍为柔性数组成员、自动 VLA、复合字面量及聚合返回局部初始化；本轮不改出货 `.com`。

@@ -892,10 +892,20 @@ def build(locations=False, warnings=False, errors=False):
     p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.pn", ")": "FN.body", "(": "FN.pfp"}, bad("parameter"))   # unnamed: a prototype
     P("FN.pfp").call("FPDECL").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
-    p = P("FN.pid")
+    # Array parameters adjust to pointers before their descriptor is bound.
+    # Only a single, side-effect-free bound token is covered here; do not
+    # silently discard arbitrary VLA expressions as the reference does.
+    P("FN.pid").a(("COPYW", "par_s", "ps"), ("COPYW", "par_e", "pe")).call("NEXT").tok({"[": "FN.array"}, "FN.bind")
+    P("FN.array").a(("ALUI", "add", "td", "td", 1)).call("NEXT").goto("FN.aqual")
+    P("FN.aqual").tok({"type=static": "FN.aqnext", "]": "FN.aend", TK_NUM: "FN.abound", TK_ID: "FN.abound"}, bad("array parameter bound"))
+    P("FN.aqnext").call("NEXT").goto("FN.aqual")
+    P("FN.abound").call("NEXT").expect("]").goto("FN.aend")
+    P("FN.aend").call("NEXT").tok({",": "FN.bind", ")": "FN.bind"}, bad("array parameter suffix"))
+    p = P("FN.bind")
+    p.a(("COPYW", "ps", "par_s"), ("COPYW", "pe", "par_e"))
     p.a(("INTERN", "t", "fns", "fne"), ("ALUI", "mul", "t", "t", 16), ("ALU", "add", "t", "t", "pk"), ("ALUI", "mul", "u", "td", 4096), ("ALU", "add", "u", "u", "tb"), ("STX", "t", PDB, "u"))   # depth * 4096 + base: a double* is not a double
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"))
-    p.a(("ALUI", "add", "pk", "pk", 1)).call("NEXT").tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
+    p.a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par", "...": "FN.dots"}, bad("parameter"))
     p = P("FN.body")
     p.call("NEXT").branch({1: "FN.fpclose"}, "FN.bodykind", [("CMPI", "fn_fpwrap", 1)])
