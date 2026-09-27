@@ -711,6 +711,27 @@ def types():
         P(name + ".emit").o("  imm r2, ").num("scl").o("\n  " + op + " r0, r0, r2\n").ret()
 
 
+def structured_control(section, warnings):
+    section += "-warnings" if warnings and section != "loops" else ""
+    p = P("control." + section)
+    bindings = {"VLDEP": VLDEP}
+    for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
+        if part == section:
+            p.cur = prefix
+            bindings[key] = p.fresh(kind)
+    sequences = {name: O(re.split(r"(\{[^}]*\})", TEMPL[template])[int(fragment)])
+                 for name, template, fragment in tape_rows("control-text.tsv")}
+    sequences.update((name, E.rej(message)) for name, message in tape_rows("control-reject.tsv"))
+    for name, method, slots in tape_rows("control-stack.tsv"):
+        p.acts = []
+        sequences[name] = getattr(p, method)(*slots.split(",")).acts
+    classes = {name: [TK[token] for token in TWORDS] if kind == "typewords" else
+               [TK_ID if value == "identifier" else TK[value]]
+               for name, kind, value in tape_rows("control-classes.tsv")}
+    install_rules(g, os.path.dirname(__file__), "control", bindings=bindings,
+                  sequences=sequences, classes=classes, section=section)
+
+
 def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
@@ -1031,10 +1052,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("S.goto")
     p.call("NEXT").tok({TK_ID: "S.gt"}, bad("goto"))
     P("S.gt").o("  jump u_").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").expect(";").call("NEXT").ret()
-    p = P("S.blk")
-    p.vpush("usp", "cur").call("VL.enter").call("TAG.enter").call("NEXT").call("STMTS").call("TAG.leave").call("VL.leave").vpop("sv", "cur")
-    if warnings: p.a(("COPYW", "wu_lo", "sv")).call("WU.block")
-    p.call("UNWIND").call("NEXT").ret()
+    structured_control("block", warnings)
     scope_bindings["scope_compare"] = P("S.uw").fresh("b")
     if warnings: scope_bindings["unbind_return"] = P("S.uw1").fresh("r")
     install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
@@ -1142,21 +1160,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("S.rj")
     p.o("  jump R").num("rl").o("\n").call("NEXT").ret()
     P("S.expr").a(("LDI", "stl", 1)).call("CEXPR").expect(";").call("NEXT").ret()
-    p = P("S.if")
-    p.call("NEXT").expect("(").call("NEXT").call("EXPR").expect(")").a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"))
-    emit(p.call("FTRUTH"), "jumpz").vpush("a").call("NEXT").call("STMT").vpop("a").tok({"else": "S.else"}, "S.noelse")
-    q = P("S.noelse")
-    if warnings: q.a(("LDI", "wr_last", 0))
-    emit(q, "label_a").ret()
-    q = P("S.else")
-    q.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
-    emit(q, "jump_b")
-    emit(q, "label_a").vpush("b")
-    if warnings: q.vpush("wr_last")
-    q.call("NEXT").call("STMT")
-    if warnings: q.vpop("wr_then").a(("ALU", "and", "wr_last", "wr_last", "wr_then"))
-    q.vpop("b")
-    emit(q, "label_b").ret()
+    structured_control("if", warnings)
     # switch (e) body: e kept in a new 8-byte slot (not reused after); `jump La`; the body, whose
     # case/default labels are numbered as met; then `jump Lb`, La: one compare per case in order
     # (the slot reloaded 64-bit, `ne`, `jumpz Lcase`), `jump Ldefault` or `jump Lb`; Lb: (measured)
@@ -1198,58 +1202,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("S.dflt")
     p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "dfl", "lab")).o("L").num("lab").o(":\n")
     p.call("NEXT").expect(":").call("NEXT").call("STMT").ret()
-    p = P("S.while")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
-    emit(p, "label_a").call("NEXT").expect("(").call("NEXT").vpush("a", "b").call("EXPR").vpop("a", "b").expect(")")
-    q = p
-    q.call("FTRUTH").o("  jumpz r0, L").num("b").o("\n").vpush("a", "b", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "a")).call("VL.targets").call("NEXT").call("STMT").vpop("a", "b", "lbrk", "lcnt")
-    emit(q, "jump_a")
-    emit(q, "label_b").ret()
-    p = P("S.for")
-    p.vpush("usp", "cur").call("VL.enter").call("NEXT").expect("(").call("NEXT").tok(
-        {";": "F.i0", **{w: "F.decl" for w in TWORDS}, "struct": "F.decl",
-         "union": "F.decl", "enum": "F.decl", TK_ID: "F.id"}, "F.i1")
-    P("F.id").call("ISTD").branch({1: "F.decl"}, "F.i1")
-    P("F.decl").call("S.decl").goto("F.ready")
-    P("F.i1").a(("LDI", "stl", 1)).call("CEXPR").expect(";").goto("F.i0")
-    P("F.i0").call("NEXT").goto("F.ready")
-    p = P("F.ready")     # labels follow initializer labels; declaration consumed its semicolon
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),
-        ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab"))
-    emit(p, "label_a").vpush("a", "b", "c").tok({";": "F.c0"}, "F.c1")
-    q = P("F.c1")
-    q.call("CEXPR").expect(";").vpop("a", "b", "c")
-    emit(q.call("FTRUTH"), "jumpz_b").goto("F.c2")
-    P("F.c0").vpop("a", "b", "c").goto("F.c2")
-    p = P("F.c2")
-    p.call("NEXT").a(("COPYW", "stp", "tpos"), ("LDI", "dep", 0)).label("F.skip")
-    p.tok({"(": "F.open", ")": "F.close"}, "F.nx")
-    P("F.open").a(("ALUI", "add", "dep", "dep", 1)).goto("F.nx")
-    P("F.close").branch({1: "F.body"}, "F.cl", [("CMPI", "dep", 0)])
-    P("F.cl").a(("ALUI", "sub", "dep", "dep", 1)).goto("F.nx")
-    P("F.nx").call("NEXT").goto("F.skip")
-    p = P("F.body")
-    p.vpush("a", "b", "c", "stp", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("VL.targets").call("NEXT").call("STMT").vpop("a", "b", "c", "stp", "lbrk", "lcnt").a(("COPYW", "aft", "tpos"))
-    emit(p, "label_c").vpush("a", "b", "aft").a(("JUMP", "stp")).call("NEXT").tok({")": "F.s0"}, "F.s1")
-    P("F.s1").a(("LDI", "stl", 1)).call("CEXPR").expect(")").goto("F.s0")
-    p = P("F.s0")
-    p.vpop("a", "b", "aft")
-    emit(p, "jump_a")
-    emit(p, "label_b").call("VL.leave").a(("JUMP", "aft")).call("NEXT").vpop("sv", "cur").call("UNWIND").ret()
-    # do body while (cond);  labels a top, b break, c continue (measured)
-    p = P("S.do")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"),
-        ("ALUI", "add", "lab", "lab", 1), ("COPYW", "c", "lab"))
-    emit(p, "label_a").vpush("a", "b", "c", "lbrk", "lcnt").a(("COPYW", "lbrk", "b"), ("COPYW", "lcnt", "c")).call("VL.targets").call("NEXT").call("STMT").vpop("a", "b", "c", "lbrk", "lcnt")
-    emit(p, "label_c").expect("while").call("NEXT").expect("(").vpush("a", "b").call("NEXT").call("EXPR").vpop("a", "b").expect(")")
-    emit(p.call("FTRUTH"), "jumpz_b")
-    emit(p, "jump_a")
-    emit(p, "label_b").call("NEXT").expect(";").call("NEXT").ret()
-    for nm, slot in (("S.brk", "lbrk"), ("S.cnt", "lcnt")):
-        q = P(nm)        # the innermost loop's label; outside a loop: not covered
-        q.branch({1: "DEAD.nl2"}, nm + ".ok", [("CMPI", slot, 0)])
-        P(nm + ".ok").a(("LDX","vl_to",slot,VLDEP)).call("VL.back").o("  jump L").num(slot).o("\n").call("NEXT").expect(";").call("NEXT").ret()
-    g.on("DEAD.nl2", range(257), "DEAD", E.rej("not covered: break/continue outside a loop"), "r")
+    structured_control("loops", warnings)
     # expressions: EXPR = assignment | the ladder
     p = P("CEXPR")    # e , e , ...: the value is the last; a discarded bare identifier gives its address only (measured)
     p.vpush("cv").a(("LDI", "cv", 1)).label("CX.l")
