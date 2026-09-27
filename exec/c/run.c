@@ -332,6 +332,20 @@ static int checknet(const char *table, const char *net) {
 /* Exact resource lookup and filesystem naming belong to the host adapter. */
 void core_host_panic(const char *reason) { die(reason); }
 static const char *INCDIR=0;
+/* Optional host IO ledger. It records successful disk reads, not include
+   syntax or carried/process resources. Cached requests need only one make
+   prerequisite; no language decision is made here. */
+static int FILE_READ_RECORD=0, FILE_READ_COUNT=0;
+static char **FILE_READ_PATHS=0;
+static void record_file_read(const char *path) {
+    if (!FILE_READ_RECORD) return;
+    for (int i=0;i<FILE_READ_COUNT;i++) if (!strcmp(FILE_READ_PATHS[i],path)) return;
+    FILE_READ_PATHS=xrealloc(FILE_READ_PATHS,(FILE_READ_COUNT+1)*sizeof(char *));
+    int n=strlen(path)+1;
+    FILE_READ_PATHS[FILE_READ_COUNT]=xrealloc(0,n);
+    memcpy(FILE_READ_PATHS[FILE_READ_COUNT++],path,n);
+}
+
 int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len) {
     for (int j=0;j<NRI;j++) if (RI[j].n==n && !memcmp(RI[j].name,p,n)) {
         *bytes=(unsigned char *)RI[j].data; *len=RI[j].len; return 1;
@@ -345,7 +359,9 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
     if (header) snprintf(path,sizeof path,"%s/%.*s",INCDIR,n-5,p+5);
     else snprintf(path,sizeof path,"%.*s",n,p);
     if ((int)strlen(path)!=(header ? (int)strlen(INCDIR)+1+n-5 : n)) return 0;
-    *bytes=readfile(path,len,1); return *bytes ? 2 : 0;
+    *bytes=readfile(path,len,1);
+    if (*bytes) record_file_read(path);
+    return *bytes ? 2 : 0;
 }
 #ifdef UNISA_RUNTIME_LIBRARY
 /* CLI byte framing is host IO, not a machine action. */

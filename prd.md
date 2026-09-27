@@ -3386,3 +3386,29 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - Candidate CLI: 60/64, exit 1. Remaining: warning options, dependency target
   and header output, undefined-function diagnostic. /tmp/unisacc-token-cli.log.
   No full gate claimed. Default product unchanged; local commit, no push.
+
+### Model compiler dependency-file output
+
+- -MD/-MMD/-MF now write make-style input/header prerequisites after successful
+  compilation. The generic host adapter optionally records successful disk
+  resource reads; the model still decides which include is active and which
+  path to request. Carried/process resources and failed reads are excluded.
+  No new executor action or C-side include parser was introduced.
+- Duplicate paths are canonicalised (including reads shared across units),
+  unlike the reference's repeated include entries; the prerequisite set is
+  preserved. Formatting/default names follow the reference. Like the existing
+  product, no additional make escaping for whitespace in filenames is claimed.
+- Fresh compilercheck passes on cc/unisacc/assembly drivers: nested headers,
+  inactive missing header, repeated include, multiple inputs, carried stdio,
+  explicit/default dependency paths, missing -MF argument and dependency IO
+  failure preserving the existing compiled output. All prior driver checks
+  pass as well. /tmp/unisacc-deps-driver-final.log. The first trial used a
+  Linux-default -S route absent from the single-host test package; the test
+  now explicitly selects its packaged target before -S.
+- Rebuilt development container: 3,260,145 B, SHA256
+  5752a0e8f840175db0219647efa0eb13d2546a87a39c036861154d27d02baaba.
+  Actual macOS arm64 and Rosetta x86_64 dependency output matches reference;
+  /tmp/unisacc-deps-native.log. Candidate CLI is 62/64, exit 1: warning options
+  and undefined-function diagnostic remain. /tmp/unisacc-deps-cli.log.
+- Default compiler unchanged; no full-gate or Linux/Windows native result
+  claimed for this batch. No push/release. Reconstruction remains incomplete.

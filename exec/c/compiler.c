@@ -63,6 +63,18 @@ static long output_write(long fd, const void *p, long n) {
     return write((int)fd, p, (size_t)n);
 #endif
 }
+/* Dependency formatting is a driver/file contract. The read ledger comes
+   from the same host adapter used by C and ASM network execution. */
+static int deps_write(const char *path,const char *target,const char **sources,int count) {
+    FILE *f=fopen(path,"wb");
+    if (!f) return clierror("cannot open dependency output");
+    int bad=fprintf(f,"%s:",target)<0;
+    for (int i=0;i<count;i++) if (fprintf(f," \\\n  %s",sources[i])<0) bad=1;
+    for (int i=0;i<FILE_READ_COUNT;i++) if (fprintf(f," \\\n  %s",FILE_READ_PATHS[i])<0) bad=1;
+    if (fwrite("\n",1,1,f)!=1) bad=1;
+    if (fclose(f)!=0) bad=1;
+    return bad ? clierror("cannot write dependency output") : 0;
+}
 static void argbytes(Buf *b, const char *s) {
     while (*s) { bput(b,(unsigned char)*s,0); s++; }
     bput(b,0,0);
@@ -79,7 +91,7 @@ static char *process_environment(int argc,char **argv,int i) {
 #define ARGRESOURCE(i,k,v) cli[i].name=(const unsigned char *)k; cli[i].n=sizeof(k)-1; cli[i].data=v.b; cli[i].len=v.n
 
 int main(int argc, char **argv) {
-    const char *src = 0, *out = 0, *target = 0, *pkg = 0;
+    const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0};
@@ -94,6 +106,10 @@ int main(int argc, char **argv) {
             size_t len=strlen(a);
             if (len>=2 && !strcmp(a+len-2,".c")) sources[nsources++]=a;
             else { argstart=i; break; }
+        }
+        else if (!strcmp(a,"-MD") || !strcmp(a,"-MMD")) { if (!deps) deps=""; }
+        else if (!strcmp(a,"-MF")) {
+            if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
         }
         else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
         else if (!strcmp(a,"-dump-tokens")) mode = 4;
@@ -171,6 +187,7 @@ int main(int argc, char **argv) {
         nimports=process_own_imports(cli+9,247,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
+    FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; int rc=0;
     if (nsources==1) in.b = source_read(src,&in.n);
@@ -185,7 +202,6 @@ int main(int argc, char **argv) {
             free(unit.b);
         }
     }
-    free(sources);
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
     if (!rc) rc = runroute(route,&in,src);
     MemoryImage plan; MemoryMap mapping;
@@ -205,6 +221,17 @@ int main(int argc, char **argv) {
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
     if (rc) return rc;
+    if (deps && mode!=1 && mode!=4 && !runit) {
+        char *name=0;
+        if (!deps[0]) {
+            const char *base=out ? out : src; int len=strlen(base),dot=len;
+            for (int k=0;k<len;k++) { if (base[k]=='/') dot=len; else if (base[k]=='.') dot=k; }
+            name=xrealloc(0,dot+3);memcpy(name,base,dot);name[dot]='.';name[dot+1]='d';name[dot+2]=0;deps=name;
+        }
+        int drc=deps_write(deps,out ? out : "a.out",sources,nsources);
+        free(name);if (drc) return drc;
+    }
+    free(sources);
     if (runit) return memory_enter(&mapping,&plan,&in);
     if (!out && !mode && !explicit_image) {
 #ifdef _WIN32
