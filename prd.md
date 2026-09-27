@@ -5033,3 +5033,7 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 实际产品门禁接入决定：保留组件门禁UA为私有参考seed，gate --com允许显式MODEL_COM且默认仍根unisacc.com；com任务同时设置UA/UA_RUN，tools/corpus用独立选择变量，增加原有C99/工具11/外部corpus四片/优化差分四片的com命名入口。执行前后核同一候选哈希，不在验收末尾重建替换；不切默认、不发布。队列外部内容指纹由独立代理同步补齐。
 
 枚举完整描述48d10d3合入：身份/完成/作用域、尺寸/读写/位域/调用共享查询，314固定NET tape全同，00170与跨unit同名tag实际native同host，14类型负例及59/60容量边界实测。父收紧host拒绝检查为rc1（不收信号/超时），合法enum_forward注册language；00209仍函数指针数组typedef拒绝，由独立组继续。MODEL_COM显式门禁已实跑新6e60e3d1旧候选cli64/run12双槽11秒，报告候选hash；这不把刚合enum算入旧包。现冻结主树构建包含全部已合兼容修复的新候选。
+
+新完整候选e4d1a8f已分阶段双槽构建：/tmp/unisacc-enum-candidate-928/unisacc-next.com，6,275,043B，sha256 4d288bab4610416e4d0e942589cf6df3211ae59ea47adf6d696a59ad172fc29b，package6,091,731B；22个shared/target网络全域--check-net通过。显式MODEL_COM门禁实际corpus220原清单23.21秒：215pass/0wrong/1unsupported（00209）/4原knownfail/0slow，失败仍rc1；143源×三个优化级429全部agree，双槽两个窗口37.06+31.85秒，0wrong/refuse。queue内容指纹父infra实跑通过，记录/tmp/unisacc-enum-corpus-928与/tmp/unisacc-enum-diffo-928。后续printf控制迁移尚不计入此候选，默认仍未切换。
+
+printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开动作及字符串全同，动态布局/HEX/模板扰动全同，旧keep316/316与4probe O0/O2实际native同host；Python净减63、声明增232，总源仍增169。父审后合入，保留声明绑定/共享字符串walk/模板，不把格式控制重写进执行器。
