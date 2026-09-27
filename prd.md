@@ -4973,3 +4973,5 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 完整候选4d351c5联合收口：/tmp/unisacc-closure-candidate-928/unisacc-next.com，6,150,292 B，sha256 95900b79bad936f874edd6368066be352f2974b86d3e10757bd68a846e6722d2；六目标E2/lower/image及E3与located/units重新构造，E1/E4/O1/通用核源差为空才复用。142原始输入×三个优化级426对，420agree/0wrong/6refuse，仅b_bits与新增b_bitfield_result各三级拒绝；四片双槽36.99秒，失败仍记rc1。原141输入中已420/423，剩位域一文件，不能称全C99。真实TOOLS_UA原11工具再次11/11，资源含address_lvalue/compound_literals完整ASM网络均通过，双槽2/2、42.20秒。原b_decl2/b_decl3/b_compound/b_pp2/b_layout/b_ppif/b_pp3/b_strsizeof/b_wide全链已过。lower syscall67a57b0/1fa97b0及x86 operand主树四门禁4/4、18.72秒；lower Python净增25/声明27如实记录，不称压缩。全平台原生与默认切换仍未完成。
 
 外部corpus验收入口校正决定：tests/corpus.sh当前固定Python，因此不可据其216基线宣称模型通过。增显式CORPUS_UA路径，保留默认Python与原220输入/216通过基线；编译/执行分别bound≤30、记录编译rc、非空产物，信号/超时不伪作knownfail；沿SHARD四片和双槽队列，不改样例、不降低基线。队列指纹纳入driver参数，实际候选与Python证据分开。
+
+实际外部corpus候选4d351c5：220原输入四片双槽35.96秒，201通过/1错值/14拒绝/4原knownfail/0超时；四片rc1，原216基线不降低。00175浮点实参到char/int形参输出0而应99，优先E3共用参数转换；00215 ARM指令拒绝分给enc独立定位，其余拒绝按共用语法分组。证据/tmp/unisacc-model-corpus-928，CORPUS_UA显式为网络候选，不能用Python默认结果覆盖。E4 START/peep分派e5b54b1全图及动态扰动同、实际net fib O1/O2同，Python+9/TSV+9；lower、parse2、enc三域继续私有并行。

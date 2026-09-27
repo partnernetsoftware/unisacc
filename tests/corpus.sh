@@ -19,10 +19,10 @@ BASE=$REPO/tests/corpus.baseline
 KNOWN=$REPO/tests/corpus.knownfail
 
 if [ ! -d "$SRC" ]; then
-    [ "${FETCH:-1}" = "1" ] || { echo "corpus absent (FETCH=0)"; exit 0; }
+    [ "${FETCH:-1}" = "1" ] || { echo "corpus absent (FETCH=0)"; exit 1; }
     echo "fetching c-testsuite into $DIR ..."
-    git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$DIR" \
-        || { echo "clone failed -- corpus skipped"; exit 0; }
+    perl "$REPO/tests/bound.pl" 30 git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$DIR" \
+        || { echo "clone failed -- corpus not tested"; exit 1; }
 fi
 
 pass=0; wrong=0; unsup=0; known=0; revived=0; slow=0
@@ -73,6 +73,7 @@ SHARD=${SHARD:-1/1}; SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
 case $SH_K:$SH_N in *[!0-9:]*|:*|*:) echo 'invalid SHARD' >&2; exit 2;; esac
 [ ${#SH_K} -le 6 ] && [ ${#SH_N} -le 6 ] && [ "$SH_K" -ge 1 ] && [ "$SH_N" -ge "$SH_K" ] || exit 2
 for f in "$SRC"/*.c; do
+    [ -f "$f" ] || continue
     [ $((i % SH_N)) -eq $((SH_K - 1)) ] && FILES="$FILES $f"
     i=$((i + 1))
 done
