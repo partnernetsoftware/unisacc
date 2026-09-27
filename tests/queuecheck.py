@@ -14,8 +14,8 @@ with tempfile.TemporaryDirectory() as td:
     jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in [('fast','0.1'),('slow','0.8'),('refill','0.1')]}
     q.plan=lambda com:jobs
     q.fingerprint=lambda plan:stamp[0]
-    def run(state,window=55):
-        sys.argv=['gatequeue.py','--state',str(t/state),'--window',str(window)]
+    def run(state,window=55,extra=()):
+        sys.argv=['gatequeue.py','--state',str(t/state),'--window',str(window),*extra]
         with contextlib.redirect_stdout(io.StringIO()): return q.main()
     assert run('rolling')==0
     assert float((t/'refill').read_text()) < float((t/'slow.end').read_text()), 'empty slot waited for slow job'
@@ -32,6 +32,31 @@ with tempfile.TemporaryDirectory() as td:
     assert run('timeout',5)==1
     assert json.loads((t/'timeout/results.json').read_text())['results']['timeout']['rc']==142
     print('queue: rolling refill, resume, changed inputs, nonzero exit and timeout controls pass')
+    # Exclusive jobs must precede and never overlap ordinary two-slot work.
+    jobs={n:[sys.executable,'-c',code,str(t/n),delay] for n,delay in
+          [('normal-a','0.4'),('normal-b','0.4'),('exclusive-a','0.2'),('exclusive-b','0.2')]}
+    exclusive_args=['--exclusive-suite','exclusive-a','--exclusive-suite','exclusive-b']
+    jobs['bad-exclusive']=[sys.executable,'-c','print("PASS"); raise SystemExit(3)']
+    exclusive_args+=['--exclusive-suite','bad-exclusive']
+    assert run('exclusive',extra=exclusive_args)==1
+    result=json.loads((t/'exclusive/results.json').read_text())
+    assert len(result['results'])==5 and result['results']['bad-exclusive']['rc']==3
+    intervals={n:(float((t/n).read_text()),float((t/n).with_suffix('.end').read_text()))
+               for n in jobs if n!='bad-exclusive'}
+    for name in ('exclusive-a','exclusive-b'):
+        lo,hi=intervals[name]
+        for other,(start,end) in intervals.items():
+            if other!=name:assert hi<=start or end<=lo,'exclusive overlap'
+        assert hi<=intervals['normal-a'][0] and hi<=intervals['normal-b'][0], 'exclusive not prioritized'
+    assert max(intervals[n][0] for n in ('normal-a','normal-b')) < min(intervals[n][1] for n in ('normal-a','normal-b')), 'ordinary jobs did not overlap'
+    for extra in (['--exclusive-suite','unknown'],['--suite','normal-a','--exclusive-suite','exclusive-a']):
+        try:run('invalid-exclusive',extra=extra)
+        except SystemExit as e:assert e.code==2
+        else:raise AssertionError('unselected exclusive accepted')
+    try:run('exclusive')
+    except SystemExit as e:assert 'input changed' in str(e)
+    else:raise AssertionError('changed exclusivity reused results')
+    print('queue: exclusive priority/no overlap, ordinary concurrency, nonzero exclusive and selected-name validation pass')
     # Exercise real queue identity and resume, not a mocked candidate stamp.
     q.fingerprint=real_fingerprint
     selectors=('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA')

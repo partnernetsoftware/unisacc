@@ -9,6 +9,8 @@ with tempfile.TemporaryDirectory(prefix='release-contract-') as td:
     reference=p/'reference';shutil.copy2(candidate,reference)
     (t/'gatequeue.py').write_text('''import json,os,pathlib,sys
 assert sys.argv[1:6]==['--com','--jobs','2','--window','50']
+assert sys.argv[6:8]==['--exclusive-suite','exec-warningdriver']
+if os.uname().sysname=='Darwin':assert sys.argv[8:10]==['--exclusive-suite','exec-bindx86']
 assert os.environ['STRICT']=='1'
 p=pathlib.Path(sys.argv[-1]);p.mkdir(parents=True,exist_ok=True)
 mode=os.environ['PROBE_MODE']

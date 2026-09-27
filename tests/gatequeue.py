@@ -80,21 +80,26 @@ def main():
     ap.add_argument('--jobs', type=int, default=2)
     ap.add_argument('--window', type=int, default=55)
     ap.add_argument('--suite', action='append', default=[])
+    ap.add_argument('--exclusive-suite', action='append', default=[],
+                    help='selected suite that must run alone (repeatable; prioritized)')
     args = ap.parse_args()
     if not 1 <= args.jobs <= 4 or not 5 <= args.window <= 55: ap.error('jobs 1..4; window 5..55')
     os.chdir(ROOT); jobs = plan(args.com)
     if args.suite:
         if len(set(args.suite)) != len(args.suite) or set(args.suite) - jobs.keys(): ap.error('duplicate/unknown suite')
         jobs = {n: jobs[n] for n in args.suite}
+    exclusive = set(args.exclusive_suite)
+    if len(exclusive) != len(args.exclusive_suite) or exclusive - jobs.keys():
+        ap.error('duplicate/unknown exclusive suite (must belong to selected jobs)')
     state = args.state.resolve(); state.mkdir(parents=True, exist_ok=True)
     lock = (state/'lock').open('a'); fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stamp = fingerprint(jobs); path = state/'results.json'
-    data = json.loads(path.read_text()) if path.is_file() else {'stamp':stamp, 'jobs':jobs, 'results':{}}
-    if data['stamp'] != stamp or data['jobs'] != jobs:
+    data = json.loads(path.read_text()) if path.is_file() else {'stamp':stamp, 'jobs':jobs, 'exclusive':sorted(exclusive), 'results':{}}
+    if data['stamp'] != stamp or data['jobs'] != jobs or data.get('exclusive', []) != sorted(exclusive):
         raise SystemExit('queue input changed: use a new state directory; old results are not reused')
     atomic(path, data)
     # Classic and network drivers, and different concurrency, have different costs.
-    profile = json.dumps([str(ROOT), execution_settings()], sort_keys=True).encode()
+    profile = json.dumps([str(ROOT), execution_settings(), sorted(exclusive)], sort_keys=True).encode()
     histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(profile).hexdigest()[:16]+'.json')
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]
@@ -104,9 +109,12 @@ def main():
         while pending or active:
             left = deadline-time.monotonic()
             while pending and len(active) < args.jobs and left > 2:
+                if exclusive.intersection(active): break
                 fits = [n for n in pending if estimate(n) <= left-1]
                 if not fits: break
-                n = max(fits, key=estimate); pending.remove(n)
+                alone = [n for n in fits if n in exclusive]
+                if alone and active: break  # drain ordinary work before the priority job
+                n = max(alone or fits, key=estimate); pending.remove(n)
                 limit = max(1, int(left)-1)
                 log = (state/(n+'.log')).open('wb')
                 p = subprocess.Popen(['perl','tests/bound.pl',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT)
