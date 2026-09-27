@@ -14,8 +14,10 @@ models for one or several source files. `c/warningcheck.sh` and
 source locations. `parse2/errors.py` generates mapped syntax diagnostics and
 top-level recovery; unmapped prototype limitations remain explicit rejections.
 `parse2/errorcheck.py` checks complete results and error limits. The current
-model container passes diag 14/14 and CLI 64/64; three complex C99 macro
-examples in ccparity still fail, so source compatibility is not complete.
+model container passes diag 14/14, CLI 64/64 and ccparity 53/53 (plus its
+existing known -c difference). `pp/macrocheck.py` compares 20 macro inputs in
+ordinary and located formats, including the C99 expansion examples. Broader
+source and failure compatibility remains incomplete; these are suite results.
 The following E0 machine and toy are
 retained as their original, separate experiment.
 

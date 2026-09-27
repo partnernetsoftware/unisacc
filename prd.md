@@ -3837,3 +3837,49 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - Product sources/default .com are unchanged. No default model-route switch,
   push or release; offline construction still uses Python. FX-1..FX-4 remain
   unscheduled conjectures, not prerequisites for this work.
+
+
+### Active compatibility work: macro invocation and replacement lists
+
+The remaining ccparity macro failures reach explicit E2 limitations: zero-argument
+and variadic calls, replacement-list boundary crossing, and hash/paste handling.
+Continue the existing model path by reproducing the three examples, then add
+only the missing preprocessing semantics with focused reference comparisons.
+Runtime decisions must remain generic actions in constructed models. Preserve
+existing byte output, hide-set behaviour and located preprocessing; do not
+replace the model route with a C macro expander or count a rejection as parity.
+
+
+### Macro invocation/rescan compatibility accepted (development route)
+
+- E2 now parses zero-parameter and final variadic parameters, preserves the
+  remaining commas as variadic argument text, and collects a macro call across
+  replacement-frame boundaries without crossing argument-expansion barriers.
+  It handles object-like # and the standard # ## # form, strips internal
+  separators from operands, and removes a hide mark only on a pasted boundary
+  token. Other tokens in the same argument retain their hide marks. This last
+  distinction caught and fixed a repeated expansion in a multi-token operand.
+- macrocheck.py covers 20 inputs: the three C99 examples from ccparity plus
+  focused zero/variadic/cross-frame/stringize/paste/hide cases. Both ordinary
+  and located preprocessing produce exact reference bytes (40 comparisons);
+  system cc independently agrees on preprocessing tokens. Python simulation
+  and actual constructed-network execution agree. All pass with host C,
+  unisacc C and both macOS assembly cores; network=table enumeration is run
+  for both formats. The suite is in gate as exec-macros.
+- Fixed chain list: 96/96 equal, 0 rejected/not-covered/bad/lost. Existing
+  location suite: 9 reference envelopes and 5 Python oracle cases pass.
+  Full current-source osx/arm64 route: separate stages and shared package
+  give the same 743,202 B image as the reference; native N1=N2=N3.
+- Actual development container: 5,761,242 B, SHA-256
+  36d173b7f138b430eaaf1b574cad8e602cb473291404172e5e176435f2a83826.
+  ccparity is now 53 ok, 0 wrong, 1 existing known (-c is not an object file);
+  diag remains 14/14 and CLI 64/64. These runs use the container itself.
+- Size account: gen.py 1,254 -> 1,307 lines; ordinary E2 642 -> 671 states,
+  164,787 -> 172,240 entries. Its Linux/x86-64 network is 64,375 B; the complete
+  package is 5,577,930 B. No new executor action; no source-size reduction
+  claim. The container grew 25,942 B over the diagnostic slice.
+- Every invoked suite/build was bounded at 60 s. This is targeted validation,
+  not a new complete release gate or Linux/Windows native run. General
+  punctuator/literal paste forms, _Pragma and other declared E2 limitations
+  remain; passing these examples does not prove all preprocessing semantics.
+  Default product remains the reference; no push/release or switch this batch.
