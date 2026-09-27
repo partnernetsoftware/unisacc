@@ -1594,16 +1594,10 @@ def build(locations=False, warnings=False, errors=False):
     p.vpop("na", "fid")
     if warnings: p.a(("COPYW","wf_index","na")).call("WF.argcheck")
     p.call("ARGCOPY")
-    p.a(("ALUI", "mul", "t", "fid", 16), ("ALU", "add", "t", "t", "na"), ("LDX", "t", "t", PDB)).branch({1: "CL.ad"}, "CL.af", [("CMPI", "t", DBL)])
-    P("CL.ad").call("TO.d").goto("CL.a2")
-    P("CL.af").branch({1: "CL.af1"}, "CL.ordinary", [("CMPI", "t", FLT)])
-    # No declared parameter kind: the default promotion of scalar float.
-    P("CL.ordinary").branch({1: "CL.ab"}, "CL.ordinary0", [("CMPI", "t", BOOL)])
-    P("CL.ab").call("TO.b").goto("CL.a2")
-    P("CL.ordinary0").branch({1: "CL.default"}, "CL.a2", [("CMPI", "t", 0)])
-    P("CL.default").branch({1: "CL.defaultbase"}, "CL.a2", [("CMPI", "vt", 0)])
-    P("CL.defaultbase").branch({1: "CL.ad"}, "CL.a2", [("CMPI", "vb", FLT)])
-    P("CL.af1").call("TO.s").goto("CL.a2")
+    p.goto("CL.convert")
+    install_rules(g, os.path.dirname(__file__), "call-conversion",
+                  bindings=dict(PDB=PDB, DBL=DBL, FLT=FLT, BOOL=BOOL),
+                  classes=dict(DBL=[DBL], FLT=[FLT], BOOL=[BOOL]), section="main")
     p = P("CL.a2")
     emit(p, "push").a(("ALUI", "add", "na", "na", 1)).tok({",": "CL.more", ")": "CL.done"}, bad("argument list"))
     P("CL.more").call("NEXT").goto("CL.arg")
