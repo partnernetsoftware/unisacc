@@ -14,7 +14,7 @@ remain shared inputs, not copied answers.
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
 | E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` grammar/control, types and initialization; helper modules for scopes, literals, diagnostics, warnings, units and locations |
-| E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`; gold opinfo/peep | Outer optimization loop and dynamic data assembly in `opt/gen.py` |
+| E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
 | E5 lowering | `lower/data-*` sparse layout; existing gold/catalog facts | `lower/code.py`, `armfuse.py`; target/escape/layout bindings in `data.py` |
 | E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`; catalog opcode facts | x86 encoding and setup, ARM input/layout/Windows setup, shared formatting helpers |
 | E6 images | Existing target layout facts | ELF, Mach-O, PE, memory layout and signature construction in `enc/` |
