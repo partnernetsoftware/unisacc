@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Source inventory refreshed after `2d27cbf` (2026-09-28). This is a remaining-work
+Source inventory refreshed after `11a0d56` (2026-09-28). This is a remaining-work
 list, not a completion percentage. Historical batch results and artifact hashes
 remain in `prd.md`; they are not repeated here.
 
@@ -14,9 +14,9 @@ remain shared inputs, not copied answers.
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
-| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`, `shape-*`, `conversion-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/initialization control and dynamic type bindings (CALL, FN and shared address/format control now declared); helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
+| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`, `shape-*`, `conversion-*`; gold type/tyinfo/prec and other existing facts | Dynamic type/gold/template bindings and initialization; fixed expression, declaration, literal, diagnostic, warning, unit and location controls now have declarations |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
-| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `code-syscall-*`, `armfuse-*`; existing gold/catalog facts | Dynamic ABI fact selection and template bindings in `lower/code.py` (fixed syscall/termination control now uses `code-syscall-*` and `code-shell-*`); ARM destination-shape policy; target/escape/layout bindings in `data.py`; shared optional u64 reader in `modelinput.py` |
+| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `code-syscall-*`, `armfuse-*`; existing gold/catalog facts | Dynamic ABI fact selection and template bindings in `lower/code.py` (fixed syscall/termination control now uses `code-syscall-*` and `code-shell-*`); target/escape/layout bindings in `data.py`; ARM destination-shape policy and shared optional u64 reader are declared |
 | E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `armbase-*`, `armcontract-*`, `x86-operand-*`, `x86-line-*`, `x86-procs-*` (including relaxation); catalog opcode facts | Dynamic instruction/shape and format-field bindings; machine-code templates including Windows command-line setup remain shared sources; see [enc/CONTROL_AUDIT.md](enc/CONTROL_AUDIT.md) |
 | E6 images | `enc/elfimage-byte/result.tsv` shared image control and `enc/pedelta-byte/result.tsv` PE control, `enc/machodelta-*` Mach-O layout/signature-page control, `enc/sha256-*` shared digest control; existing target layout facts | Format header/section/CD fields and import/string enumeration, child installation and dynamic layout/hash-constant bindings in `enc/` |
 
@@ -48,31 +48,24 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 - Only then adopt the model path as the default product and update its docs.
   The current shipped `unisacc.com` has not switched.
 
-## Fixed-control inventory (source review at 6a208f8)
+## Fixed-control inventory
 
-Declarations and dynamic gold/catalog/template bindings are separate concerns.
-The following fixed controls still need declaration sources; merely importing a
-helper does not discharge the obligation. This is source review, not new test evidence.
+The final ordinary unary/dereference group is declared in `b128044`, including
+shared ID.inc/dec and the static-auto rejection. Startup/unit markers,
+identifier/update, error recovery, token positions and unit framing are now
+also declared. Their combined five expanded E3 graphs at `11a0d56` match the
+complete `70d3952` baseline; unit framing has separate ordinary/located graph
+and actual-network checks. This is transition equality, not byte-identical
+packaging or a new product acceptance result.
 
-- In `gen2.py`: startup/unit markers; update/compound-assignment/type-axis
-  dispatch; identifier lookup and ordinary unary/string/dereference shells.
-  Return/CEXPR/LP/QTAIL, sizeof and scalar TO conversions are now declared.
-- Member/postfix/assignment/copy and local declaration/initialization controls
-  are now declared (`be71979`, `07c42b6`), with complete graph comparisons and
-  targeted actual network/native checks. Scalar truth/boolean/TO controls are
-  declared in `3520fbb`; Python binding code grew by 22 lines in that group.
-- Ordinary float literals and token-reader terminal/default/qualifier policies
-  are declared. The shared dynamic word trie remains ordinary construction.
-- Product diagnostic modes: `tokenlocations.py` and `errors.py` remain in progress;
-  diagnostics and the four warning helpers are declared.
-- Product unit framing: `units.py` remains; `unitlocations.py` is declared.
-  Preserve existing label handling and the shared location-reader interface.
-
-Already declared: width/types/optail/tytail/ladder, addr/fmtwalk/printf,
-bitfields, callcontrol, conditional proof rules, constexpr, enum/function types,
-aggregate initialization, statics, unresolved names, VLA and the migrated unary
-subgroup. Their remaining dynamic installations are not another runtime parser.
-The ordinary conditional and unary shells listed above remain distinct work.
+Source review of lower/opt and enc found no further complete input-dependent
+fixed-control group to migrate. Python still binds dynamic ABI/target facts,
+initializes data and connects parameterized templates. Encoder field schemas,
+shared byte writers and target-program itoa/WINARGS machine-code templates
+remain explicit sources. They must not be described as zero Python logic or
+as migrated template algorithms. See [enc/CONTROL_AUDIT.md](enc/CONTROL_AUDIT.md).
+The final parser helper inventory is checked separately before the candidate
+is frozen; a shorter gen2.py alone is not completion evidence.
 
 ## Current evidence and remaining work
 
@@ -114,11 +107,10 @@ and they do not validate the newer candidate.
 
 Remaining closure obligations:
 
-1. Finish E3's remaining hand-written control groups (notably expressions,
-   and initialization glue), while retaining shared
-   type/gold facts and deleting replaced Python control. E4's runtime algorithm
-   and encoder runtime branches already use declarations; initialization and
-   machine-code/format templates remain separately disclosed inputs.
+1. Confirm the final parser/helper source inventory, retaining shared type/gold
+   facts and explicit initialization/template bindings. Rebuild the full model
+   container from these final sources; old candidate evidence is not transferred
+   to a different artifact hash.
 2. Preserve the restored fixed corpus baseline while validating the remaining
    changes. Do not copy known classic-reference defects to achieve byte equality.
 3. Run bounded joint CLI/diagnostic/optimization/platform and performance checks
