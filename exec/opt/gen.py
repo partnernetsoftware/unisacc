@@ -20,7 +20,8 @@ This is the optimiser's algorithm compiled into an action table. The complete
 SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv, LOCAL in
 local-{byte,result}.tsv, STFUSE in stfuse-{byte,result}.tsv, and PPASS/BCLS/REAL
 in peep-{byte,result}.tsv. ANALYZE/SOLVE/SCAN/DEADQ live in analysis-{byte,result}.tsv;
-tape operand parsers and REREG live in parsers-{byte,result}.tsv.
+tape operand parsers and REREG live in parsers-{byte,result}.tsv; outer pass
+control and stack matching live in rounds-{byte,result}.tsv.
 Dynamic peep/opinfo data assembly remains here; src/opt.c and unisa/opt.py
 stay the behaviour reference.
 
@@ -36,7 +37,7 @@ _spec = importlib.util.spec_from_file_location(
     "e3gen", os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "parse", "gen.py"))
 E = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(E)
-g, P, EOF = E.g, E.P, 256
+g, P = E.g, E.P
 from finite_rules import install as install_rules
 
 SIMPLE = 32 * 10 ** 6            # SIMPLE[intern id of an op word] = 1 when opinfo says simple
@@ -49,28 +50,8 @@ LIVEB = 200 * 10 ** 6            # LIVE[(round * 6 + z) * 1e6 + block]
 LSS, LEE, WIDD, FRR, ISLAB = (51 * 10 ** 6, 52 * 10 ** 6, 53 * 10 ** 6, 54 * 10 ** 6, 55 * 10 ** 6)   # per line
 ZOKB = 59 * 10 ** 6              # ZOK[z]
 K_SIMPLE, K_LABEL, K_RET, K_JUMP, K_JUMPZ, K_CALL, K_FRAME, K_OTHER = range(8)
-DIGIT = list(range(48, 58))
 MAXJ = 16                        # the pop is line i+2+cnt, cnt <= 16: at most line i+18
 WORDMAX = 15                     # ol_opi reads at most 15 bytes of the op word
-
-
-def lit(st, text, ok, fail):
-    """match text byte by byte from state st: ok after the whole, fail at the first mismatch"""
-    b = text.encode()
-    for k, c in enumerate(b):
-        cur = st if k == 0 else "%s.%d" % (st, k)
-        nx = ok if k == len(b) - 1 else "%s.%d" % (st, k + 1)
-        g.on(cur, [c], nx, [("ADV",)])
-        g.els(cur, fail, [])
-
-
-def regnum(st, dst, ok, fail):
-    """one or more digits -> W[dst]; state ok at the first byte after them"""
-    g.on(st, DIGIT, st + ".a", [("LDI", dst, 0)])
-    g.els(st, fail, [])
-    g.on(st + ".a", DIGIT, st + ".a", [("BYTE", "bt"), ("ALUI", "sub", "bt", "bt", 48),
-                                       ("ALUI", "mul", dst, dst, 10), ("ALU", "add", dst, dst, "bt"), ("ADV",)])
-    g.els(st + ".a", ok, [])
 
 
 def procs():
@@ -201,102 +182,15 @@ def build():
         if len(f) >= 2 and f[1] == "1":
             p.a(("SBCLR",), [("SBOUT", c) for c in f[0].encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", SIMPLE, "u"))
     p.a(("LDI", "rnd", 0), ("LDI", "hits", 0)).goto("RSTART")
-    # RSTART: a round begins; at -O2 the liveness of the whole tape first
-    p = P("RSTART")
-    if LEVEL >= 2:
-        p.a(("LDI", "zlo", 2)).call("ANALYZE").a(("LDI", "q_zero", 0), ("JUMP", "q_zero"))
-    p.a(("LDI", "li", 0)).goto("L0")
-
-    # L0: the start of a line
-    g.on("L0", [EOF], "ROUND", [])
-    g.els("L0", "L0.m", [("MARK", "ls")])
-    lit("L0.m", "  .frame 8\n", "ST", "COPY1")
-    lit("ST", "  store64 [r7+0], r", "ST.x", "COPY1")
-    regnum("ST.x", "X", "ST.nl", "COPY1")
-    g.on("ST.nl", [10], "MID", [("ADV",), ("MARK", "mid"), ("LDI", "cnt", 0)])
-    g.els("ST.nl", "COPY1", [])
-    # MID: line i+2+cnt.  The pop (and `.frame -8` after it) ends M; any other line must be
-    # simple and must not name r7
-    p = P("MID")
-    p.branch({2: "COPY1"}, "MID.t", [("CMPI", "cnt", MAXJ)])
-    g.els("MID.t", "MID.p", [("MARK", "lp")])
-    lit("MID.p", "  load64 r", "MID.y", "MID.np")
-    regnum("MID.y", "Y", "MID.yc", "MID.np")
-    lit("MID.yc", ", [r7+0]\n", "MID.f", "MID.np")
-    lit("MID.f", "  .frame -8\n", "OK1", "COPY1")
-    p = P("MID.np")
-    p.a(("JUMP", "lp")).call("SIMPLE").branch({1: "MID.s"}, "COPY1", [("CMPI", "ok", 1)])
-    p = P("MID.s")
-    p.a(("JUMP", "lp"), ("LDI", "nr", 7)).call("NAMES").branch({1: "COPY1"}, "MID.n", [("CMPI", "found", 1)])
-    p = P("MID.n")
-    p.a(("JUMP", "lp")).call("SKIPL").a(("ALUI", "add", "cnt", "cnt", 1)).goto("MID")
-    # OK1: past `.frame -8\n`.  M = [mid, lp): no line of it names rY; empty when X == Y
-    p = P("OK1")
-    p.a(("MARK", "after"), ("JUMP", "mid"), ("COPYW", "nr", "Y")).label("OK.l")
-    p.a(("MARK", "cur")).branch({1: "OK.d"}, "OK.n", [("CMP", "cur", "lp")])
-    p = P("OK.n")
-    p.call("NAMES").branch({1: "ZTRY"}, "OK.s", [("CMPI", "found", 1)])
-    p = P("OK.s")
-    p.a(("JUMP", "cur")).call("SKIPL").goto("OK.l")
-    p = P("OK.d")
-    p.branch({1: "OK.xy"}, "OK.emit", [("CMP", "X", "Y")])
-    P("OK.xy").branch({1: "OK.emit"}, "ZTRY", [("CMP", "mid", "lp")])       # X == Y: only with M empty
-    p = P("OK.emit")
-    p.branch({1: "OK.m"}, "OK.mv", [("CMP", "X", "Y")])
-    p = P("OK.mv")
-    p.o("  mov r").num("Y").o(", r").num("X").o("\n").goto("OK.m")
-    p = P("OK.m")
-    p.a(("SPAN2", "mid", "lp"), ("JUMP", "after"), ("ALUI", "add", "hits", "hits", 1),
-        ("ALU", "add", "li", "li", "cnt"), ("ALUI", "add", "li", "li", 4)).goto("L0")
-    # ZTRY (-O2): carry X in r3..r5 -- one not X or Y, not named in M, dead at line j+2 (the pop + 2)
-    p = P("ZTRY")
-    if LEVEL < 2:
-        p.goto("COPY1")
-    else:
-        p.a(("LDI", "zz", 3)).label("ZT.l")
-        p.branch({2: "COPY1"}, "ZT.a", [("CMPI", "zz", 5)])
-        P("ZT.a").branch({1: "ZT.nx"}, "ZT.b", [("CMP", "zz", "X")])
-        P("ZT.b").branch({1: "ZT.nx"}, "ZT.c", [("CMP", "zz", "Y")])
-        p = P("ZT.c")          # does M name zz
-        p.a(("JUMP", "mid"), ("COPYW", "nr", "zz")).label("ZT.m")
-        p.a(("MARK", "cur")).branch({1: "ZT.d"}, "ZT.mn", [("CMP", "cur", "lp")])
-        p = P("ZT.mn")
-        p.call("NAMES").branch({1: "ZT.nx"}, "ZT.ms", [("CMPI", "found", 1)])
-        p = P("ZT.ms")
-        p.a(("JUMP", "cur")).call("SKIPL").goto("ZT.m")
-        p = P("ZT.d")
-        p.a(("COPYW", "dz", "zz"), ("ALU", "add", "dfrom", "li", "cnt"), ("ALUI", "add", "dfrom", "dfrom", 4)).call("DEADQ")
-        p.branch({1: "ZT.emit"}, "ZT.nx", [("CMPI", "dv", 1)])
-        P("ZT.nx").a(("ALUI", "add", "zz", "zz", 1)).goto("ZT.l")
-        p = P("ZT.emit")
-        p.o("  mov r").num("zz").o(", r").num("X").o("\n").a(("SPAN2", "mid", "lp"))
-        p.o("  mov r").num("Y").o(", r").num("zz").o("\n")
-        p.a(("JUMP", "after"), ("ALUI", "add", "hits", "hits", 1), ("ALU", "add", "li", "li", "cnt"), ("ALUI", "add", "li", "li", 4)).goto("L0")
-    # COPY1: not a rewrite -- the line at ls as it stands
-    p = P("COPY1")
-    if LEVEL >= 2:
-        p.a(("JUMP", "ls")).call("LOCAL").branch({1: "C1.loc"}, "C1.cp", [("CMPI", "lok", 1)])
-        P("C1.loc").a(("ALUI", "add", "li", "li", 3), ("ALUI", "add", "hits", "hits", 1)).goto("L0")
-        p = P("C1.cp")
-    p.a(("JUMP", "ls")).call("COPYL").a(("ALUI", "add", "li", "li", 1)).goto("L0")
-    # ROUND: at most four rounds; a round with no rewrite ends the pass
-    p = P("ROUND")
-    p.branch({1: "DONE"}, "RND.n", [("CMPI", "hits", 0)])
-    p = P("RND.n")
-    p.a(("ALUI", "add", "rnd", "rnd", 1)).branch({1: "DONE"}, "RND.s", [("CMPI", "rnd", 4)])
-    P("RND.s").a(("SWAP",), ("LDI", "hits", 0)).goto("RSTART")
-    if LEVEL < 2:
-        P("DONE").a(("ACCEPT",)).goto("DEAD")
-    else:
-        # the peep table's rounds: at most four, a round with no rewrite ends them
-        P("DONE").a(("SWAP",), ("LDI", "prnd", 0)).goto("PR.go")
-        p = P("PR.go")
-        p.a(("ALUI", "add", "rnd", "prnd", 4), ("LDI", "zlo", 0), ("LDI", "hits", 0)).call("ANALYZE").call("PPASS")
-        p.branch({1: "PR.end"}, "PR.n", [("CMPI", "hits", 0)])
-        p = P("PR.n")
-        p.a(("ALUI", "add", "prnd", "prnd", 1)).branch({1: "PR.end"}, "PR.s", [("CMPI", "prnd", 4)])
-        P("PR.s").a(("SWAP",)).goto("PR.go")
-        P("PR.end").a(("ACCEPT",)).goto("DEAD")
+    level = "2" if LEVEL >= 2 else "1"
+    bindings = {"MAXJ": MAXJ}
+    for line in open(os.path.join(os.path.dirname(__file__), "rounds-names.tsv")):
+        if not line.startswith("#"):
+            selected, name, prefix, kind = line.rstrip("\n").split("\t")
+            if selected == level:
+                bindings[name] = P(prefix).fresh(kind)
+    for section in ("common", level):
+        install_rules(g, os.path.dirname(__file__), "rounds", bindings=bindings, section=section)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
