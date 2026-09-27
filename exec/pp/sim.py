@@ -176,7 +176,7 @@ def load(delta):
     return names, ix, rows
 
 
-def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
+def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None, diagnostics=None):
     names, ix, rows = loaded or load(delta)
     files = files or Files()
     q = ix[delta["start"]]
@@ -199,6 +199,7 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
     while True:
         steps += 1
         if maxsteps and steps > maxsteps:
+            if diagnostics is not None: diagnostics.extend(e)
             return ("timeout", None, steps)
         mode, row = rows[q]
         if mode == "b":
@@ -402,8 +403,10 @@ def run(delta, x, srcpath, files=None, cov=None, maxsteps=None, loaded=None):
                 frames = [[x, xattr, 0, len(x)]]
                 fr = frames[-1]
             elif op == "ACCEPT":
+                if diagnostics is not None: diagnostics.extend(e)
                 return ("accept", bytes(o), steps)
             elif op == "REJECT":
+                if diagnostics is not None: diagnostics.extend(e)
                 return ("reject", (a[1], bytes(e)), steps)
             else:
                 raise ValueError(op)
@@ -413,19 +416,22 @@ def main():
     delta = json.load(open(sys.argv[1]))
     path = sys.argv[2]
     x = open(path, "rb").read()
+    diagnostics = bytearray()
     try:
-        res, val, steps = run(delta, x, path, Files(sys.argv[3]) if len(sys.argv) > 3 else None)
+        res, val, steps = run(delta, x, path, Files(sys.argv[3]) if len(sys.argv) > 3 else None, diagnostics=diagnostics)
     except (RuntimeError, OSError) as ex:      # a bad table or an unreadable file: 2, as run.c
         sys.stderr.write("run: %s\n" % ex)
         return 2
     if res == "accept":
         sys.stdout.buffer.write(val)
+        sys.stderr.buffer.write(diagnostics)
         return 0
     if res == "reject":
-        sys.stderr.write("reject: %s\n" % (val[0],))                 # the same form as run.c
+        if val[0]: sys.stderr.write("reject: %s\n" % (val[0],))                 # the same form as run.c
         sys.stderr.buffer.write(val[1])
         return 1
     sys.stderr.write("timeout\n")
+    sys.stderr.buffer.write(diagnostics)
     return 3
 
 

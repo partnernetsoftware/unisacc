@@ -3442,3 +3442,35 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   /tmp/unisacc-ud-cli.log. No full gate or new Linux/Windows execution claimed.
 - Default product unchanged. Local commit only, no push/release; full
   reconstruction and the final product switch are still incomplete.
+
+### Warning migration prerequisite: successful diagnostic streams
+
+- Audited -Wall: the reference implements unused-variable, return-type,
+  printf-format and integer-to-pointer diagnostics; -Wextra shares the switch,
+  while -Werror prevents output/run when warnings exist. These cannot be
+  replaced by silently accepting a flag. Model CLI still rejects them.
+- Fixed a generic host-adapter defect: execute() discarded the model error
+  byte stream on successful acceptance. It now forwards a nonempty diagnostic
+  stream independently of acceptance. Python's action oracle also preserves
+  successful diagnostics via an optional collector (existing return shape
+  retained) and its CLI; empty rejection reasons do not prepend a fake line.
+  No executor action or compiler-specific primitive added.
+- netcheck adds exact status/stdout/stderr evidence for successful diagnostics,
+  two-stage order, and a rejecting later stage (no partial stdout or later
+  model execution). Same actions pass in the Python oracle. The fixture
+  serializer now uses the production '-' spelling for an empty string.
+- Passed netcheck with host cc, unisacc, arm64 assembly and Rosetta x86_64
+  assembly runtimes. Fresh compilercheck remains green. Logs:
+  /tmp/unisacc-warning-channel{,-ua,-arm,-x86}.log and
+  /tmp/unisacc-warning-driver.log.
+- Rebuilt development container: 3,262,731 B, SHA256
+  1effcec46db3a186a378e569e32a1aa6f4fe10149fb68b681b5c162d9b27e7c3.
+  Exact missing-function diagnostics and later-definition execution pass on
+  both macOS ISAs (/tmp/unisacc-warning-native.log). This is a transport fix,
+  not completion of warning analysis; previous CLI 63/64 is not raised.
+- Remaining warning work includes original-file positions, header suppression,
+  continuation/include adjustments and the four analysis rules. E2 currently
+  retains splice/include line records internally but does not export them to
+  E1/E3; token streams do not yet carry source positions. Do not infer source
+  locations by searching token text. Default product unchanged; no push,
+  release, full-gate claim or new Linux/Windows run in this batch.

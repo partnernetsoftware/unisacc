@@ -3,7 +3,7 @@
 Optional .tbl arguments are exhaustively checked too; no generated model cache.
 Each compiler/executor invocation has its own 60-second bound.
 """
-import os, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, subprocess, sys, tempfile
 from net import convert
 from tbl import CODE
 from pack import build as package_build
@@ -61,10 +61,31 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
     # stage name is built into it. Compare same-process and fresh-process runs.
     def model(name, acts, rows='R 0 0 0 0', strings=()):
         tokens=' '.join(' '.join(map(str,(CODE[a[0]],*a[1:]))) for a in acts)
-        body=f'T 1 1 8 {len(strings)} 0\n'+''.join('S '+v.hex()+'\n' for v in strings)
+        body=f'T 1 1 8 {len(strings)} 0\n'+''.join('S '+(v.hex() or '-')+'\n' for v in strings)
         path=d/(name+'.net')
         path.write_text(convert(body+f'Q {len(acts)} '+tokens+'\n'+rows+'\n')[0])
         return path
+    # Diagnostics are an independent byte stream even when the transducer
+    # accepts. They survive chains in stage order and never become stdout.
+    warnacts=[('OSEL',1),('OUT',87),('OUT',10),('OSEL',0),('OUT',65),('ACCEPT',)]
+    warning=model('warning',warnacts)
+    inp=d/'diagnostic-input';inp.write_bytes(b'')
+    r=run([exe,warning,inp]);assert (r.returncode,r.stdout,r.stderr)==(0,b'A',b'W\n'),r
+    r=run([exe,'--chain',inp,inp,d,warning,warning])
+    assert (r.returncode,r.stdout,r.stderr)==(0,b'A',b'W\nW\n'),r
+    silent_reason=model('diagnostic-reject',warnacts[:-2]+[('REJECT',0)],strings=(b'',))
+    r=run([exe,'--chain',inp,inp,d,warning,silent_reason,d/'never.net'])
+    assert (r.returncode,r.stdout,r.stderr)==(1,b'',b'W\nW\n'),r
+    # Same generic actions on the Python oracle: no change to run's existing
+    # three-value API; its CLI now also retains successful diagnostics.
+    for end,want in [(('ACCEPT',),(0,b'A',b'W\n')),
+                     (('REJECT',''),(1,b'',b'W\n'))]:
+        acts=[list(a) for a in warnacts[:-1]]+[list(end)]
+        delta={'start':'s','states':{'s':['b',{str(k):['s',0] for k in range(257)}]},'seqs':[acts]}
+        fixture=d/'diagnostic.json';fixture.write_text(json.dumps(delta))
+        r=run([sys.executable,ROOT/'exec/pp/sim.py',fixture,inp])
+        assert (r.returncode,r.stdout,r.stderr)==want,r
+    print('diagnostic stream: acceptance, chained order, named-byte rejection, Python oracle pass')
     # Leave nonzero registers, indexed memory, a stack entry, an intern and
     # a blob behind. Every subsequent invocation must begin with fresh state.
     reset=model('reset', [('ORES',2,1),('OFILL',2,3,1),('LDX',1,0,100),

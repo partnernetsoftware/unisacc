@@ -378,7 +378,7 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
     if (status==1 && r.reason_n) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
     if (status==2) fprintf(stderr,"run: %s\n",r.reason);
     if (status==3) fprintf(stderr,"timeout\n");
-    if (status==1) fwrite(r.err.b,1,r.err.n,stderr);
+    if (r.err.n) fwrite(r.err.b,1,r.err.n,stderr);
     free(r.err.b); result->b=r.out.b; result->n=r.out.n;
     return status;
 }
