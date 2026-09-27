@@ -228,7 +228,7 @@ if part in ('all','resources'):
     probes=[pathlib.Path('exec/parse2/probes/'+name+'.c') for name in
             ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings']]
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
-               ['compound_integer', 'compound_pointer']]
+               ['compound_integer', 'compound_pointer', 'address_lvalue']]
     for source in probes:
         source=source.resolve(); name=source.stem
         host=p/(name+'-cc'); native=p/(name+'-model')

@@ -4961,3 +4961,5 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 66709ab完整候选复验：6,100,290 B，sha256 b66aaba72e2c3681faec4d04e3ac8d2e240e56fc1236eaf754122595b615133c。原141输入×O0/O1/O2四片双槽34.01秒完成，405agree/0wrong/18refuse，剩b_compound/b_layout/b_pp2/b_ppif/b_pp3/b_bits六文件；三失败片保持rc1，未称门禁全绿。联合resources（含wide_strings）与chain167/167双槽2/2、38.61秒。证据/tmp/unisacc-decl-wide-diffo-928与/tmp/unisacc-decl-wide-integration-928。3ebf70c随后补E2 uintmax类型栈及混合运算，父plain/located各67host选择与18拒绝通过，仍在函数宏M拒绝；尚未重新打包，不混入上述候选证据。将该独立literalcheck纳入队列，避免仅存临时验证。
 
 按主人并发提醒继续按阶段域调度：parse2共享取址保持一人；预处理函数宏/placemarker当前小组交付后，原两代理分别转lower/code.py剩余ABI/SYSCALL整组与enc/arm.py剩余输入契约/数值格式化。动态gold/catalog依赖保持绑定，固定控制迁已有TSV并删除Python同义逻辑，不扩新框架；每组原图全域比较与实际网络门禁，私有树/UA隔离，父合并共同验收。
+
+共享取址c9b75ab及placemarker6962325已合：ADR显式区分值/对象左值/函数/数组，替代U.amp及LP/PRE重复包装，Python净减25、声明增88；代理实际b_layout及副作用正例O0/O2四次同host，六非法取址/修改拒绝，keep316全同。父将副作用正例持久纳入资源门禁。##空参数先决定placemarker后查非空边界，Python0、声明净11；原b_pp3 E2net与私有参考完整相同、host token同，原88+4回归；非空通用标点paste仍拒绝。完整新候选待三阶段合并重验，不借用旧候选405结果。
