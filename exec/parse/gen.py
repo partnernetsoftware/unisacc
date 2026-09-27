@@ -285,89 +285,33 @@ class P:
         return self.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", slot, "lab"))
 
 
+def numeric_rules(section, bindings=None, owner=None):
+    # Unique metadata instances also satisfy gen2's duplicate-definition guard.
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    bindings = dict(bindings or {}, DIG=DIG, TK_FNUM=TK_FNUM)
+    for line in Path(HERE, "numeric-names.tsv").read_text().splitlines():
+        if not line.startswith("#"):
+            selected, name, prefix, kind = line.split("\t")
+            if selected == section:
+                bindings[name] = P((owner or prefix) + ".numeric_" + name).fresh(kind)
+    install_rules(g, HERE, "numeric", bindings=bindings, section=section)
+
+
 def prn():
-    # PRN: W[n] >= 0 in decimal.  PRNW: the same, right-aligned in 6 columns
-    for nm, width in (("PRN", 0), ("PRNW", 6)):
-        p = P(nm)
-        p.a(("LDI", "k", 0))
-        p.label(nm + ".loop")
-        cases = {}
-        for r in range(20):
-            lab = nm + ".d%d" % r
-            cases[r] = lab
-            g.on(lab, range(257), nm + (".out0" if r >= 10 else ".loop"),
-                 [("LDI", "t", r % 10), ("STX", "k", DIG, "t"), ("ALUI", "add", "k", "k", 1)], "r")
-        p.branch(cases, ("rej", "unreachable"), [("DIVMOD10", "n")])
-        p.cur = nm + ".out0"
-        p.a(("COPYW", "j", "k"))
-        p.label(nm + ".pad")
-        p.branch({0: nm + ".sp"}, nm + ".out", [("CMPI", "j", width)])
-        p.cur = nm + ".sp"
-        p.o(" ").a(("ALUI", "add", "j", "j", 1)).goto(nm + ".pad")
-        p.cur = nm + ".out"
-        p.a(("ALUI", "sub", "k", "k", 1), ("LDX", "t", "k", DIG), ("ALUI", "add", "t", "t", 48), ("OUTW", "t"))
-        p.branch({1: nm + ".done"}, nm + ".out", [("CMPI", "k", 0)])
-        p.cur = nm + ".done"
-        p.ret()
+    # One declared decimal algorithm, instantiated at widths zero and six.
+    suffixes = ("", ".loop", ".out0", ".pad", ".sp", ".out", ".done") + tuple(".d%d" % i for i in range(20))
+    for name, width in (("PRN", 0), ("PRNW", 6)):
+        bindings = {"PRN" + suffix.replace(".", "_"): name + suffix for suffix in suffixes}
+        numeric_rules("prn", dict(bindings, width=width), owner=name)
 
 
 def numout():
-    # NUMOUT: the current literal as the reference prints it -- decimal: its
-    # digits as written; hex/octal (nx = 1): W[nv] as signed 64-bit decimal
-    p = P("NUMOUT")
-    p.branch({1: "NO.v"}, "NO.s", [("CMPI", "nx", 1)])
-    p.cur = "NO.s"
-    p.a(("SPAN2", "ps", "pe")).ret()
-    p.cur = "NO.v"
-    p.a(("LDI", "z0", 0), ("LDI", "k", 0)).branch({0: "NO.neg"}, "NO.loop", [("C64", "nv", "z0")])
-    p.cur = "NO.neg"
-    p.o("-").a(("A64", "sub", "nv", "z0", "nv")).goto("NO.loop")
-    p.cur = "NO.loop"
-    p.a(("A64I", "urem", "t", "nv", 10), ("STX", "k", DIG, "t"), ("ALUI", "add", "k", "k", 1), ("A64I", "udiv", "nv", "nv", 10))
-    p.branch({1: "NO.out"}, "NO.loop", [("LDI", "z0", 0), ("C64", "nv", "z0")])
-    p.cur = "NO.out"
-    p.a(("ALUI", "sub", "k", "k", 1), ("LDX", "t", "k", DIG), ("ALUI", "add", "t", "t", 48), ("OUTW", "t"))
-    p.branch({1: "NO.done"}, "NO.out", [("CMPI", "k", 0)])
-    p.cur = "NO.done"
-    p.ret()
+    numeric_rules("numout")
 
 
 def fconv():
-    """FCONV: the decimal floating constant M / 10^k (W[nv] = M < 10^18, W[fk] = k) as the IEEE-754
-    double the reference prints (measured: `imm r0, <the 64 bits as signed decimal>`, 0.1 ->
-    4591870180066957722).  Exact: M and D = 10^k are normalised to D <= M < 2D (value = M/D * 2^e),
-    53 quotient bits by long division, then round-to-nearest-even on the remainder.  Result in W[nv]
-    with nx = 1 (NUMOUT prints it signed); token TK_FNUM."""
-    p = P("FCONV")
-    p.a(("LDI", "tk", TK_FNUM), ("LDI", "nx", 1), ("LDI", "z0", 0)).branch({1: "RET"}, "FC.d", [("C64", "nv", "z0")])
-    p = P("FC.d")
-    p.a(("LDI", "fd", 1), ("LDI", "fe", 0)).label("FC.p")
-    p.branch({1: "FC.n1"}, "FC.p1", [("CMPI", "fk", 0)])
-    P("FC.p1").a(("A64I", "mul", "fd", "fd", 10), ("ALUI", "sub", "fk", "fk", 1)).goto("FC.p")
-    p = P("FC.n1")       # M < D: M *= 2, e -= 1
-    p.branch({0: "FC.n1a"}, "FC.n2", [("C64U", "nv", "fd")])
-    P("FC.n1a").a(("A64I", "shl", "nv", "nv", 1), ("ALUI", "sub", "fe", "fe", 1)).goto("FC.n1")
-    p = P("FC.n2")       # M >= 2D: D *= 2, e += 1
-    p.a(("A64I", "shl", "t", "fd", 1)).branch({(1, 2): "FC.n2a"}, "FC.q", [("C64U", "nv", "t")])
-    P("FC.n2a").a(("COPYW", "fd", "t"), ("ALUI", "add", "fe", "fe", 1)).goto("FC.n2")
-    p = P("FC.q")
-    p.a(("LDI", "fm", 0), ("LDI", "fc", 53)).label("FC.ql")
-    p.a(("A64I", "shl", "fm", "fm", 1)).branch({(1, 2): "FC.q1"}, "FC.q2", [("C64U", "nv", "fd")])
-    P("FC.q1").a(("A64I", "add", "fm", "fm", 1), ("A64", "sub", "nv", "nv", "fd")).goto("FC.q2")
-    p = P("FC.q2")
-    p.a(("A64I", "shl", "nv", "nv", 1), ("ALUI", "sub", "fc", "fc", 1)).branch({1: "FC.r"}, "FC.ql", [("CMPI", "fc", 0)])
-    p = P("FC.r")        # round bit, sticky, even
-    p.branch({(1, 2): "FC.r1"}, "FC.out", [("C64U", "nv", "fd")])
-    p = P("FC.r1")
-    p.a(("A64", "sub", "nv", "nv", "fd"), ("LDI", "z0", 0)).branch({1: "FC.r2"}, "FC.up", [("C64", "nv", "z0")])
-    p = P("FC.r2")
-    p.a(("A64I", "and", "t", "fm", 1)).branch({1: "FC.out"}, "FC.up", [("CMPI", "t", 0)])
-    p = P("FC.up")
-    p.a(("A64I", "add", "fm", "fm", 1), ("LDI", "t", 1 << 53)).branch({1: "FC.up1"}, "FC.out", [("C64", "fm", "t")])
-    P("FC.up1").a(("A64I", "shr", "fm", "fm", 1), ("ALUI", "add", "fe", "fe", 1)).goto("FC.out")
-    p = P("FC.out")
-    p.a(("ALUI", "add", "t", "fe", 1023), ("A64I", "shl", "nv", "t", 52), ("A64I", "sub", "fm", "fm", 1 << 52),
-        ("A64", "add", "nv", "nv", "fm")).ret()
+    numeric_rules("fconv")
 
 
 def tyinfo():                 # stage tyinfo (weights/gold/tyinfo.tsv): type key -> (size, unsigned)
