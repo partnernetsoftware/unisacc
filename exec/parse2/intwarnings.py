@@ -11,10 +11,11 @@ def install(E,P,DBL,FLT,FPB,SBB):
     P('WI.call').branch({1:'RET'},'WI.ptr',[('CMPI','wi_called',1)])
     P('WI.ptr').branch({1:'WI.kind'},'RET',[('CMPI','vt',0)])
     p=P('WI.kind')
-    for i,base in enumerate((DBL,FLT,FPB)):
+    for i,base in enumerate((DBL,FLT)):
         nxt='WI.kind'+str(i)
         p.branch({1:'RET'},nxt,[('CMPI','vb',base)]);p=P(nxt)
-    p.branch({(1,2):'RET'},'WI.zero',[('CMPI','vb',SBB)])
+    p.call('ISFP').branch({1:'RET'},'WI.struct',[])
+    P('WI.struct').branch({(1,2):'RET'},'WI.zero',[('CMPI','vb',SBB)])
     # Re-read only the first token, preserving parser cursor/descriptors. The
     # byte offset after one NEXT must be the current token's start, so `(0)`
     # or `0+0` is not mistaken for the reference's lone numeric zero.

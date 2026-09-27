@@ -438,7 +438,8 @@ SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables 
 STAG, SSZ = E.STAG, E.SSZ
 STRUCT_MAX, MEMBER_STRIDE = 128, 256
 MOF, MSZ, MPT, MBS, MAR, MFLAT = (i << 40 for i in range(1, 7))
-FPB = E.FPB   # function pointer; indirect calls return the reference's full machine word
+FPB = E.FPB   # register-call function pointer
+FPV = 68      # stacked variadic function pointer; carried by the ordinary base descriptor
 DBL = E.DBL
 # ---- declared data: the product's type tables (weights/gold/type.tsv, tyinfo.tsv) -------------
 # binary() asks two rows: ck = type(t1 "+" t2), the common type the operands are converted to
@@ -479,7 +480,7 @@ FOPS = {"+":"add", "-":"sub", "*":"mul", "/":"div", "<":"lt", ">":"gt", "<=":"le
 FPU = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
 FLT = E.FLT   # f32 value descriptor; pointer depth keeps pointee types distinct
 BOOL = 66  # distinct value kind; arithmetic maps to tyinfo u8
-assert BOOL not in (DBL, FLT, FPB) and BOOL < SBB
+assert len({BOOL, DBL, FLT, FPB, FPV}) == 5 and FPV < SBB
 TYPEW = {"type=_Bool": BOOL, "type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
@@ -559,13 +560,14 @@ def types():
     P("FPD.open").a(("LDI", "fpn", -1)).call("NEXT").expect(")").goto("FPD.c")
     P("FPD.n").a(("COPYW", "fpn", "nv")).call("NEXT").expect("]").call("NEXT").expect(")").goto("FPD.c")
     p = P("FPD.c")       # skip the parameter list
-    p.call("NEXT").expect("(").a(("LDI", "dep", 1)).call("NEXT").label("FPD.l")
-    p.tok({"(": "FPD.o", ")": "FPD.x", "...": "DEAD.fpv"}, "FPD.k")
-    g.on("DEAD.fpv", range(257), "DEAD", E.rej("not covered: a pointer to a variadic function"), "r")
+    p.call("NEXT").expect("(").a(("LDI", "dep", 1), ("LDI", "fpkind", FPB)).call("NEXT").label("FPD.l")
+    p.tok({"(": "FPD.o", ")": "FPD.x", "...": "FPD.var"}, "FPD.k")
+    P("FPD.var").branch({1: "FPD.stacked"}, "FPD.k", [("CMPI", "dep", 1)])
+    P("FPD.stacked").a(("LDI", "fpkind", FPV)).goto("FPD.k")
     P("FPD.k").call("NEXT").goto("FPD.l")
     P("FPD.o").a(("ALUI", "add", "dep", "dep", 1)).goto("FPD.k")
     P("FPD.x").a(("ALUI", "sub", "dep", "dep", 1)).branch({1: "FPD.d"}, "FPD.k", [("CMPI", "dep", 0)])
-    P("FPD.d").a(("LDI", "td", 1), ("LDI", "tb", FPB)).call("NEXT").ret()
+    P("FPD.d").a(("LDI", "td", 1), ("COPYW", "tb", "fpkind")).call("NEXT").ret()
     p = P("DIMS")
     p.a(("LDI", "drk", 0), ("LDI", "prd", 1)).label("DM.l")
     p.call("NEXT").tok({"]": "DM.open"}, "DM.expr")
@@ -938,7 +940,10 @@ def build(locations=False, warnings=False, errors=False):
     p.call("TSPEC").tok({TK_ID: "FN.pid", ",": "FN.pn", ")": "FN.body", "(": "FN.pfp"}, bad("parameter"))   # unnamed: a prototype
     P("FN.pfp").call("FPDECL").branch({1: "FN.pfpbind"}, "FN.pfparray", [("CMPI", "fpn", 0)])
     P("FN.pfparray").a(("ALUI", "add", "td", "td", 1)).goto("FN.pfpbind")
-    P("FN.pfpbind").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
+    P("FN.pfpbind").branch({1: "FN.pfpstacked"}, "FN.pfpdecl", [("CMPI", "tb", FPV)])
+    # The reference lookahead counts a literal ... in a nested parameter too.
+    P("FN.pfpstacked").a(("LDI", "vfn", 1)).goto("FN.pfpdecl")
+    P("FN.pfpdecl").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe"), ("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v"), ("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     P("FN.dots").a(("LDI", "vfn", 1)).call("NEXT").tok({")": "FN.body"}, bad("parameter after ..."))
     # Array parameters adjust to pointers before their descriptor is bound.
     # Only a single, side-effect-free bound token is covered here; do not
@@ -1381,7 +1386,7 @@ def build(locations=False, warnings=False, errors=False):
     P("TAX.p").a(("LDI", "ax", AX.index("ptr"))).ret()
     q = P("TAX.0")
     for code, name in ((1, "i8"), (2, "i16"), (4, "i32"), (8, "i64"), (UNS + 1, "u8"), (UNS + 2, "u16"), (UNS + 4, "u32"), (UNS + 8, "u64"),
-                       (BOOL, "u8"), (0, "void"), (DBL, "f64"), (FLT, "f32"), (FPB, "ptr")):
+                       (BOOL, "u8"), (0, "void"), (DBL, "f64"), (FLT, "f32"), (FPB, "ptr"), (FPV, "ptr")):
         hit, nx = q.fresh("h"), q.fresh("n")
         q.branch({1: hit}, nx, [("CMPI", "vb", code)])
         P(hit).a(("LDI", "ax", AX.index(name))).ret()
@@ -1406,7 +1411,7 @@ def build(locations=False, warnings=False, errors=False):
     P("STY.s1").branch({(0, 1): "RET"}, "STY.s2", [("CMPI", "vb", 8)])
     P("STY.s2").branch({(0, 1): "STY.s3"}, "DEAD.nint", [("CMPI", "vb", UNS + 8)])
     P("STY.s3").branch({2: "RET"}, "DEAD.nint", [("CMPI", "vb", UNS)])
-    P("STY.p").branch({1: "DEAD.nint"}, "STY.p1", [("CMPI", "vb", FPB)])
+    P("STY.p").call("ISFP").branch({1: "DEAD.nint"}, "STY.p1", [])
     P("STY.p1").a(("COPYW", "td", "vt"), ("ALUI", "sub", "td", "td", 1), ("COPYW", "tb", "vb")).call("ELSZ").a(("COPYW", "stp", "es")).ret()
     g.on("DEAD.nint", range(257), "DEAD", E.rej("not covered: pointer or non-int in op= ++ --"), "r")
     P("INTONLY").branch({1: "IO.b"}, bad("pointer or non-int in op= ++ --"), [("CMPI", "vt", 0)])
@@ -1574,7 +1579,7 @@ def build(locations=False, warnings=False, errors=False):
     q = P("U.deref")     # * operand: its value is the address; one level down, then a load at the new width
     q.call("NEXT").tok({TK_ID: "UD.id"}, "UD.gen")
     P("UD.gen").call("UNARY").goto("UD.dn")
-    P("UD.dn").call("DOWN").branch({1: "RET"}, "LOADV", [("CMPI", "vb", FPB)])
+    P("UD.dn").call("DOWN").call("ISFP").branch({1: "RET"}, "LOADV", [])
     P("UD.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({"(": "UD.call", "++": "UD.inc", "--": "UD.dec"}, "UD.v")
     P("UD.call").call("U.call").goto("UD.dn")
     for tag, op in (("inc", "+"), ("dec", "-")):
@@ -1586,7 +1591,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("UD.namedvalue")     # *f with f a local function pointer: load the callee value
     p.a(("LDI", "isfn", 0)).call("FNVAL").branch({1: "RET"}, "UD.v2", [("CMPI", "isfn", 1)])
     p = P("UD.v2")
-    p.call("LOOKUP").branch({1: "UD.f1"}, "UD.gv", [("CMPI", "vb", FPB)])
+    p.call("LOOKUP").call("ISFP").branch({1: "UD.f1"}, "UD.gv", [])
     P("UD.f1").branch({1: "UD.gv"}, "UD.fs", [("CMPI", "s", E.GMARK)])
     P("UD.fs").branch({0: "UD.gv"}, "UD.f2", [("CMPI", "s", 0)])
     P("UD.f2").branch({1: "UD.gv"}, "UD.f3", [("CMPI", "ar", 1)])
@@ -1594,8 +1599,10 @@ def build(locations=False, warnings=False, errors=False):
     p = P("UD.gv")
     addr(p)
     p.call("VLOAD").call("POSTIX").goto("UD.dn")
-    P("DOWN").branch({1: "DOWN.fp"}, "DOWN.0", [("CMPI", "vb", FPB)])
+    P("DOWN").call("ISFP").branch({1: "DOWN.fp"}, "DOWN.0", [])
     P("DOWN.fp").ret()
+    P("ISFP").branch({1: "RET"}, "ISFP.var", [("CMPI", "vb", FPB)])
+    P("ISFP.var").a(("CMPI", "vb", FPV)).ret()
     P("DOWN.0").branch({(1, 2): "DOWN.1"}, bad("dereference of a non-pointer"), [("CMPI", "vt", 1)])
     P("DOWN.1").a(("ALUI", "sub", "vt", "vt", 1)).branch({1: "DOWN.2"}, "RET", [("CMPI", "vt", 0)])
     P("DOWN.2").branch({1: "DEAD.void"}, "RET", [("CMPI", "vb", 0)])
@@ -1753,7 +1760,7 @@ def build(locations=False, warnings=False, errors=False):
     P("MB.arrayaddr").tok({"[": "POSTIX"}, bad("address of array member"))
     p = P("POSTIX")
     p.tok({"[": "PX.i", ".": "MEMB", "->": "MEMB", "(": "PX.fc"}, "RET")
-    P("PX.fc").branch({1: "PX.fc1"}, "RET", [("CMPI", "vb", FPB)])
+    P("PX.fc").call("ISFP").branch({1: "PX.fc1"}, "RET", [])
     P("PX.fc1").call("FPCALL").a(("LDI", "rkok", 0)).goto("POSTIX")
     q = P("PX.i")
     q.branch({(1, 2): "PX.ok"}, bad("subscript of a non-pointer"), [("CMPI", "vt", 1)])
@@ -1824,7 +1831,8 @@ def build(locations=False, warnings=False, errors=False):
     p = P("FNVAL")
     p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "t", "v", LOC)).branch({1: "FNV.f"}, "RET", [("CMPI", "t", 0)])
     P("FNV.f").a(("LDX", "t", "v", E.FND)).branch({1: "FNV.y"}, "RET", [("CMPI", "t", 1)])
-    P("FNV.y").o("  .lea r0, ").a(("SPAN2", "ips", "ipe")).o("\n").a(("LDI", "vt", 1), ("LDI", "vb", FPB), ("LDI", "isfn", 1)).ret()
+    P("FNV.y").o("  .lea r0, ").a(("SPAN2", "ips", "ipe")).o("\n").a(("LDI", "vt", 1), ("LDI", "vb", FPB), ("LDI", "isfn", 1), ("LDX", "t", "v", E.VAR)).branch({1: "FNV.stacked"}, "RET", [("CMPI", "t", 1)])
+    P("FNV.stacked").a(("LDI", "vb", FPV)).ret()
     p = P("LOOKUP")     # s := the slot of ips..ipe (0: not a local of this slice)
     if warnings: p.call("WU.use")
     p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "s", "v", LOC), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE), ("LDX", "ar", "v", E.ARR), ("COPYW", "vid", "v")).branch({1: "DEAD.nl"}, "RET", [("CMPI", "s", 0)])
@@ -1835,7 +1843,7 @@ def build(locations=False, warnings=False, errors=False):
     # syscall builtins (the old E3's declared table SYSCALLS), __argc(), __argv(k) -- measured there
     p.a(("INTERN", "v", "ips", "ipe"), ("LDI", "sys", 0), ("LDX", "t", "v", LOC)).branch({1: "CL.va0"}, "CL.fpv", [("CMPI", "t", 0)])
     p = P("CL.fpv")      # the callee's value: a local's `load64 r0, [r6-N]`, a global's .lea + load64 (measured)
-    p.call("LOOKUP").branch({1: "CL.fpv1"}, bad("call through a non-function"), [("CMPI", "vb", FPB)])
+    p.call("LOOKUP").call("ISFP").branch({1: "CL.fpv1"}, bad("call through a non-function"), [])
     q = P("CL.fpv1")
     q.branch({1: "CL.fpg"}, "CL.fps", [("CMPI", "s", E.GMARK)])
     P("CL.fps").branch({0: "CL.fpg"}, "CL.fpl", [("CMPI", "s", 0)])
@@ -1844,7 +1852,9 @@ def build(locations=False, warnings=False, errors=False):
     addr(q).o("  load64 r0, [r0+0]\n").goto("FPCALL")
     p = P("FPCALL")      # r0 = the callee; current '(' -- pushed first, then the arguments; callr r5 (measured)
     if warnings: p.a(("LDI","wf_format",0))
-    emit(p, "push").vpush("cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).vpush("sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
+    emit(p, "push").vpush("cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).branch({1: "FC.stacked"}, "FC.args", [("CMPI", "vb", FPV)])
+    P("FC.stacked").a(("LDI", "sys", 101)).goto("FC.args")
+    P("FC.args").vpush("sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     for k, nx in ((0, "CL.va1"), (1, "CL.va2"), (2, "CL.b1")):
         q = P("CL.va%d" % k)
         if warnings and k == 0: q.a(("LDI", "wi_called", 1)).call("WF.entry")
@@ -1935,7 +1945,11 @@ def build(locations=False, warnings=False, errors=False):
     emit(p, "push").a(("ALUI", "add", "na", "na", 1)).tok({",": "CL.more", ")": "CL.done"}, bad("argument list"))
     P("CL.more").call("NEXT").goto("CL.arg")
     p = P("CL.done")
-    p.a(("LDX", "t", "vsp", E.VS - 1)).branch({1: "CL.vdone"}, "CL.done1", [("CMPI", "t", 200)])
+    p.a(("LDX", "t", "vsp", E.VS - 1)).branch({1: "CL.vdone"}, "CL.indirect", [("CMPI", "t", 200)])
+    P("CL.indirect").branch({1: "CL.vdone"}, "CL.indirect0", [("CMPI", "t", 101)])
+    P("CL.indirect0").branch({1: "CL.indirectn"}, "CL.done1", [("CMPI", "t", 100)])
+    P("CL.indirectn").branch({2: "CL.vdone", 1: "DEAD.indirect6"}, "CL.done1", [("CMPI", "na", 6)])
+    g.on("DEAD.indirect6", range(257), "DEAD", E.rej("not covered: six indirect register arguments leave no callee register"), "r")
     p = P("CL.vdone")    # the pushed block reversed in place: swap [r7+8i] and [r7+8j]
     p.a(("LDI", "vi", 0), ("ALUI", "sub", "vj", "na", 1)).label("CL.vsw")
     p.branch({0: "CL.vs1"}, "CL.vend", [("CMP", "vi", "vj")])
@@ -1944,7 +1958,10 @@ def build(locations=False, warnings=False, errors=False):
     q.o("  load64 r2, [r7+").num("oi").o("]\n  load64 r1, [r7+").num("oj").o("]\n  store64 [r7+").num("oi").o("], r1\n  store64 [r7+").num("oj").o("], r2\n")
     q.a(("ALUI", "add", "vi", "vi", 1), ("ALUI", "sub", "vj", "vj", 1)).goto("CL.vsw")
     q = P("CL.vend")
-    q.vpop("cls", "cle", "sys").a(("ALUI", "mul", "t", "na", 8)).o("  call ").a(("SPAN2", "cls", "cle")).o("\n  .frame -").num("t").o("\n")
+    q.vpop("cls", "cle", "sys").a(("ALUI", "mul", "t", "na", 8)).branch({1: "CL.vdirect"}, "CL.vindirect", [("CMPI", "sys", 200)])
+    P("CL.vindirect").o("  load64 r5, [r7+").num("t").o("]\n  callr r5\n  .frame -").a(("ALUI", "add", "t", "na", 1), ("ALUI", "mul", "t", "t", 8)).num("t").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
+    q = P("CL.vdirect")
+    q.o("  call ").a(("SPAN2", "cls", "cle")).o("\n  .frame -").num("t").o("\n")
     if warnings: q.a(("LDI", "wi_called", 1))
     q.a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
     p = P("CL.done1")

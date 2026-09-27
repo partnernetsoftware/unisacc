@@ -57,7 +57,7 @@ def install(E,P,DBL,FLT,FPB,SBB):
 
     P('WF.check').branch({1:'RET'},'WF.classify',[('CMPI','wi_called',1)])
     P('WF.classify').a(('LDI','wf_ptr',0),('LDI','wf_fn',0),('LDI','wf_float',0)).branch({1:'WF.base'},'WF.pointer',[('CMPI','vt',0)])
-    P('WF.pointer').a(('LDI','wf_ptr',1)).branch({1:'WF.fp'},'WF.base',[('CMPI','vb',FPB)])
+    P('WF.pointer').a(('LDI','wf_ptr',1)).call('ISFP').branch({1:'WF.fp'},'WF.base',[])
     P('WF.fp').branch({1:'WF.function'},'WF.base',[('CMPI','isfn',1)])
     P('WF.function').a(('LDI','wf_ptr',0),('LDI','wf_fn',1)).goto('WF.base')
     P('WF.base').branch({1:'WF.floating'},'WF.single',[('CMPI','vb',DBL)])
