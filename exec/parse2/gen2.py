@@ -867,7 +867,7 @@ def build(locations=False, warnings=False, errors=False):
 
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
-    p.call("TSPEC").tok({TK_ID: "S.did0", "(": "S.dfp", ";": "S.empty"}, bad("declaration"))
+    p.call("TSPEC").a(("COPYW", "local_base", "tb")).tok({TK_ID: "S.did0", "(": "S.dfp", ";": "S.empty"}, bad("declaration"))
     p = P("S.dfp")
     p.call("FPDECL").a(("LDI", "dsz", 8), ("LDI", "dar", 0)).branch({1: "S.dd"}, "S.dfa", [("CMPI", "fpn", 0)])
     P("S.dfa").a(("ALUI", "mul", "dsz", "fpn", 8), ("LDI", "dar", 1)).goto("S.dd")
@@ -889,7 +889,9 @@ def build(locations=False, warnings=False, errors=False):
     P("S.dd").call("DECLN").call("S.aliassave").tok({"=": "S.din", ",": "S.dcm"}, "S.dend")
     shape_control("local-binding")
     P("S.dend").expect(";").call("NEXT").ret()
-    P("S.dcm").call("DSTARS").tok({TK_ID: "S.did0"}, bad("declarator"))
+    install_rules(g, os.path.dirname(__file__), "local-declarators",
+                  classes=dict(identifier=[TK_ID], paren=[TK["("]]),
+                  sequences=dict(reject=E.rej("not covered: declarator")), section="main")
     p = P("S.din")
     p.a(("COPYW", "lpp", "tpos")).call("NEXT").tok({"{": "S.lbr", E.TK_STR: "S.ls"}, "S.din0")
     p = P("S.ls")           # (measured, s34) imm r2, S; sub64 r1, r6, r2; .zero; each byte then the 0 at S - k
