@@ -10,59 +10,90 @@
 # reaches a fixed point through the Python back end; this proves the IMAGE
 # does through unisacc's own.  Images are compared unsigned: codesign
 # rewrites the file it signs, so it only ever touches a copy that is run.
+# Default: local proof only. Run the independent guest proofs explicitly:
+#   tests/nativeboot.sh --windows win/arm64
+#   tests/nativeboot.sh --windows win/x86_64
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-. "$R/tests/lib.sh"; ua_ready
-T=$(scratch)
-case "$(uname -s)/$(uname -m)" in
-    Darwin/arm64)  H=osx/arm64;;
-    Darwin/x86_64) H=osx/x86_64;;
-    Linux/x86_64)  H=lnx/x86_64;;
-    Linux/aarch64) H=lnx/arm64;;
-    *) echo "nativeboot: no host target"; exit 0;;
+case "${1:-}" in
+    "") mode=local;;
+    --windows)
+        case "${2:-}" in win/arm64|win/x86_64) ;; *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;; esac
+        # One independently scheduled VM proof, including transfer/poll overhead.
+        exec perl -e 'alarm 55; exec @ARGV' bash "$0" --windows-step "$2";;
+    --windows-step) mode=windows;;
+    *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;;
 esac
-runnable() { cp "$1" "$2"; chmod +x "$2"
-    command -v codesign >/dev/null && codesign -f -s - "$2" >/dev/null 2>&1; true; }
-ok=1
-"$UA" unisacc.c -b "$H" > "$T/N1"
-runnable "$T/N1" "$T/r1"
-perl -e 'alarm 300; exec @ARGV' "$T/r1" unisacc.c -b "$H" > "$T/N2" || { echo "  FAIL N1 did not run"; ok=0; }
-runnable "$T/N2" "$T/r2"
-perl -e 'alarm 300; exec @ARGV' "$T/r2" unisacc.c -b "$H" > "$T/N3" || { echo "  FAIL N2 did not run"; ok=0; }
-cmp -s "$T/N1" "$T/N2" || { echo "  FAIL N1 != N2"; ok=0; }
-cmp -s "$T/N2" "$T/N3" || { echo "  FAIL N2 != N3"; ok=0; }
-for t in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
-    [ "$t" = "$H" ] && continue
-    cmp -s <("$UA" unisacc.c -b "$t") <("$T/r2" unisacc.c -b "$t") \
-        || { echo "  FAIL cross $t"; ok=0; }
-done
-# Windows, when the UTM machine is up (see tests/crossnative.sh): unisacc's
-# own PE, both ISAs, rebuilds itself ON Windows to the same bytes.
-UTM=/Applications/UTM.app/Contents/MacOS/utmctl; VM=${WINVM:-minicon-win-arm-64}
-if [ -x "$UTM" ] && "$UTM" status "$VM" 2>/dev/null | grep -q started; then
-    n=$(date +%s)$RANDOM
-    for t in win/arm64 win/x86_64; do
-        tt=$(echo "$t" | tr / _)
-        "$UA" unisacc.c -b "$t" > "$T/W.$tt"
-        "$UTM" file push "$VM" 'C:\u\nb'"$n$tt"'.exe' < "$T/W.$tt" 2>/dev/null
+. "$R/tests/lib.sh"
+T=$(scratch)
+fail() { echo "  FAIL $*"; return 1; }
+compile() { # output, compiler, target: a failed/empty compile is never comparable.
+    local output=$1 compiler=$2 target=$3 rc
+    bound 55 "$compiler" unisacc.c -b "$target" > "$output" 2> "$output.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then cat "$output.err" >&2; fail "compile $target exited $rc"; return 1; fi
+    [ -s "$output" ] || { fail "compile $target produced an empty image"; return 1; }
+}
+runnable() {
+    cp "$1" "$2" && chmod +x "$2" || return 1
+    if command -v codesign >/dev/null; then
+        bound 10 codesign -f -s - "$2" >/dev/null 2>&1 || return 1
+    fi
+}
+windows() {
+    local target=$1 UTM=/Applications/UTM.app/Contents/MacOS/utmctl VM=${WINVM:-minicon-win-arm-64}
+    if [ ! -x "$UTM" ] || ! bound 5 "$UTM" status "$VM" 2>/dev/null | grep -q started; then
+        echo "  skip Windows $target ($VM not started or UTM unavailable)"
+        return 77   # explicitly requested proof did not run; never a passing exit
+    fi
+    local n; n="$(date +%s)$RANDOM"
+    local stem="C:\u\nb$n"
+    compile "$T/W" "$UA" "$target" || return 1
+    bound 5 "$UTM" file push "$VM" "$stem.exe" < "$T/W" || return 1
+    bound 5 "$UTM" file push "$VM" "$stem.c" < unisacc.c || return 1
+    # Bound the guest process itself: a host-side alarm alone cannot stop it.
+    cat > "$T/run.ps1" <<EOF
+\$ErrorActionPreference = 'Stop'
+\$rc = 1
+try {
+  \$p = Start-Process -FilePath '$stem.exe' -ArgumentList '$stem.c','-b','$target' -RedirectStandardOutput '$stem.out' -RedirectStandardError '$stem.err' -PassThru
+  if (-not \$p.WaitForExit(30000)) { \$p.Kill(); [void]\$p.WaitForExit(2000); \$rc = 124 }
+  else { \$p.WaitForExit(); \$rc = \$p.ExitCode }
+} catch { \$rc = 1 }
+[IO.File]::WriteAllText('$stem.rc', [string]\$rc)
+EOF
+    bound 5 "$UTM" file push "$VM" "$stem.ps1" < "$T/run.ps1" || return 1
+    bound 5 "$UTM" exec "$VM" --hide --cmd powershell.exe -- -NoProfile -ExecutionPolicy Bypass -File "$stem.ps1" >/dev/null || return 1
+    local deadline=$((SECONDS+35)) rc=''
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if bound 3 "$UTM" file pull "$VM" "$stem.rc" > "$T/rc" 2>/dev/null; then
+            rc=$(tr -d '\r\n' < "$T/rc"); break
+        fi
+        sleep 1
     done
-    "$UTM" file push "$VM" 'C:\u\nb'"$n"'.c' < unisacc.c 2>/dev/null
-    printf '@echo off\r\ncd /d C:\\u\r\nnb%swin_arm64.exe nb%s.c -b win/arm64 > nb%sa.out\r\nnb%swin_x86_64.exe nb%s.c -b win/x86_64 > nb%sx.out\r\necho done > nb%s.txt\r\n' \
-        "$n" "$n" "$n" "$n" "$n" "$n" "$n" | "$UTM" file push "$VM" 'C:\u\nb'"$n"'.bat' 2>/dev/null
-    "$UTM" exec "$VM" --hide --cmd cmd.exe -- /c 'C:\u\nb'"$n"'.bat' >/dev/null 2>&1
-    i=0; while [ $i -lt 150 ]; do
-        case "$("$UTM" file pull "$VM" 'C:\u\nb'"$n"'.txt' 2>&1)" in *done*) break;; esac
-        i=$((i+1)); sleep 3; done
-    "$UTM" file pull "$VM" 'C:\u\nb'"$n"'a.out' > "$T/Wa" 2>/dev/null
-    "$UTM" file pull "$VM" 'C:\u\nb'"$n"'x.out' > "$T/Wx" 2>/dev/null
-    cmp -s "$T/W.win_arm64" "$T/Wa" || { echo "  FAIL win/arm64 self-build differs"; ok=0; }
-    cmp -s "$T/W.win_x86_64" "$T/Wx" || { echo "  FAIL win/x86_64 self-build differs"; ok=0; }
-    [ $ok = 1 ] && echo "  ok  on Windows: win/arm64 and win/x86_64 rebuild themselves"
-else
-    echo "  skip Windows ($VM not started)"
-fi
-printf "  %s  N1=N2=N3 on %s, cross 5/5  %s\n" "$([ $ok = 1 ] && echo ok || echo FAIL)" \
-    "$H" "$(shasum < "$T/N1" | cut -c1-16)"
-echo
-[ $ok = 1 ] && echo "native bootstrap reached" || echo "native bootstrap NOT reached"
-[ $ok = 1 ]
+    [ "$rc" = 0 ] || { fail "$target guest compiler rc=${rc:-timeout}"; return 1; }
+    bound 5 "$UTM" file pull "$VM" "$stem.out" > "$T/got" || return 1
+    [ -s "$T/got" ] && cmp -s "$T/W" "$T/got" || { fail "$target guest self-build empty or different"; return 1; }
+    echo "  ok on Windows: $target rebuilt itself byte for byte"
+}
+# Reference construction is also bounded, including the caller-selected UA.
+bound 55 env UA="$UA" bash -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' _ "$R" || exit 1
+if [ "$mode" = windows ]; then windows "$2"; exit $?; fi
+H=$(host_target)
+[ -n "$H" ] || { echo "nativeboot: skip (no host target)"; exit 0; }
+compile "$T/N1" "$UA" "$H" || exit 1
+runnable "$T/N1" "$T/r1" || { fail "prepare N1"; exit 1; }
+compile "$T/N2" "$T/r1" "$H" || exit 1
+runnable "$T/N2" "$T/r2" || { fail "prepare N2"; exit 1; }
+compile "$T/N3" "$T/r2" "$H" || exit 1
+cmp -s "$T/N1" "$T/N2" && cmp -s "$T/N2" "$T/N3" || { fail "N1=N2=N3"; exit 1; }
+cross=0
+for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
+    [ "$target" = "$H" ] && continue
+    compile "$T/reference" "$UA" "$target" && compile "$T/native" "$T/r2" "$target" || exit 1
+    cmp -s "$T/reference" "$T/native" || { fail "cross $target"; exit 1; }
+    cross=$((cross+1))
+done
+printf '  ok N1=N2=N3 on %s, cross %s/5  %s\n' "$H" "$cross" "$(shasum < "$T/N1" | cut -c1-16)"
+echo '  skip Windows self-build (not run; independent proofs: --windows win/arm64 and --windows win/x86_64)'
+echo 'native bootstrap reached locally; Windows self-build unverified'
