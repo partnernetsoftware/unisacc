@@ -12,7 +12,7 @@
 #
 #   make            the fast checks, about a minute
 #   make test       every suite (~10 min)
-#   make com        classic unisacc.com (default unchanged)
+#   make com        model unisacc.com, bounded two-slot build
 #   make model-com  one explicit bounded model construction step
 #   make release    the pre-release gate
 #   make linux      the whole suite inside the Linux VM
@@ -76,12 +76,20 @@ weights:
 # One file, every target, built in ONE environment -- that is the whole
 # point of a compiler that writes all six itself.  CI tests; it does not
 # build.
-com: classic-com
+com:
+	@UA="$(UA)" perl tests/bound.pl 60 sh -ec '\
+	    out="$(if $(MODEL_DIR),$(MODEL_DIR),out/model-com)"; \
+	    ./exec/c/buildcompiler.sh "$$out"; \
+	    tmp=$$(mktemp ./unisacc.com.XXXXXX); \
+	    trap "rm -f \"$$tmp\"" EXIT HUP INT TERM; \
+	    cp "$$out/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
+	    mv -f "$$tmp" unisacc.com'
 
 classic-com: ref
-	@python3 -m unisa ape unisacc.c --via $(UA) -O $(OPT) -o unisacc.com
-	@chmod +x unisacc.com
-	@ls -l unisacc.com | awk '{printf "  unisacc.com  %s B\n", $$5}'
+	@mkdir -p out
+	@python3 -m unisa ape unisacc.c --via $(UA) -O $(OPT) -o out/unisacc-classic.com
+	@chmod +x out/unisacc-classic.com
+	@ls -l out/unisacc-classic.com | awk '{printf "  out/unisacc-classic.com  %s B\n", $$5}'
 
 # One explicit stage per invocation; completion/input checks belong to the
 # existing builder. Run pack separately, after shared and all six targets.

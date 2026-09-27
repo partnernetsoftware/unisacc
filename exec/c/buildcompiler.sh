@@ -101,6 +101,24 @@ pack() {
     echo "development assembly/network compiler: $T/unisacc-next.com"
 }
 case $step in
-    all) shared; for os in lnx osx win; do for arch in arm64 x86_64; do target "$os/$arch"; done; done; pack;;
+    all)
+        # One process-tree budget for the entire build, including all children.
+        perl "$R/tests/bound.pl" 55 sh -c '
+            set -eu
+            script=$1; out=$2
+            pair() {
+                sh "$script" "$out" "$1" & a=$!
+                sh "$script" "$out" "$2" & b=$!
+                ra=0; wait "$a" || ra=$?
+                rb=0; wait "$b" || rb=$?
+                [ "$ra" -eq 0 ] || return "$ra"
+                [ "$rb" -eq 0 ] || return "$rb"
+            }
+            pair shared lnx/arm64
+            pair lnx/x86_64 osx/arm64
+            pair osx/x86_64 win/arm64
+            sh "$script" "$out" win/x86_64
+            sh "$script" "$out" pack
+        ' model-build "$R/exec/c/buildcompiler.sh" "$T";;
     shared) shared;; pack) pack;; *) target "$step";;
 esac
