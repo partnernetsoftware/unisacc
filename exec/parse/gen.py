@@ -279,32 +279,18 @@ def autonames():
 
 
 def autoscan():
-    """Two scans of x before the first pass: definitions `NAME ( ... ) {`
-    (AUD), then any `NAME (` of a header function not defined here is
-    rejected -- the reference compiles the header too."""
-    p = P("AUTO")
-    p.a(("JUMP", "x0")).call("NEXT").label("AU.loop")
-    p.tok({"eof": "AU.two", TK_ID: "AU.id"}, "AU.nx")
-    P("AU.nx").call("NEXT").goto("AU.loop")
-    p = P("AU.id")
-    p.a(("INTERN", "av", "ps", "pe"), ("LDX", "t", "av", AUT)).branch({1: "AU.c"}, "AU.nx", [("CMPI", "t", 1)])
-    P("AU.c").call("NEXT").tok({"(": "AU.p"}, "AU.loop")
-    P("AU.p").a(("LDI", "ad", 1)).call("NEXT").label("AU.pl")
-    P("AU.pl").tok({"(": "AU.po", ")": "AU.pc", "eof": "AU.two"}, "AU.pn")
-    P("AU.pn").call("NEXT").goto("AU.pl")
-    P("AU.po").a(("ALUI", "add", "ad", "ad", 1)).goto("AU.pn")
-    P("AU.pc").a(("ALUI", "sub", "ad", "ad", 1)).branch({1: "AU.cl"}, "AU.pn", [("CMPI", "ad", 0)])
-    P("AU.cl").call("NEXT").tok({"{": "AU.def"}, "AU.loop")
-    P("AU.def").a(("LDI", "t", 2), ("STX", "av", AUD, "t")).goto("AU.nx")
-    p = P("AU.two")
-    p.a(("JUMP", "x0")).call("NEXT").label("AV.loop")
-    p.tok({"eof": "RET", TK_ID: "AV.id"}, "AV.nx")
-    P("AV.nx").call("NEXT").goto("AV.loop")
-    p = P("AV.id")
-    p.a(("INTERN", "av", "ps", "pe"), ("LDX", "t", "av", AUT)).branch({1: "AV.c"}, "AV.nx", [("CMPI", "t", 1)])
-    P("AV.c").a(("LDX", "t", "av", AUD)).branch({1: "AV.nx"}, "AV.c2", [("CMPI", "t", 2)])
-    P("AV.c2").call("NEXT").tok({"(": "AV.rej"}, "AV.loop")
-    g.on("AV.rej", range(257), "DEAD", rej("not covered: the reference auto-includes a header"), "r")
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    bindings = {"AUT": AUT, "AUD": AUD}
+    for line in Path(HERE, "autoscan-names.tsv").read_text().splitlines():
+        if not line.startswith("#"):
+            name, prefix, kind = line.split("\t")
+            bindings[name] = P(prefix + ".autoscan_" + name).fresh(kind)
+    classes = {name: [TK[token]] for name, token in (
+        ("eof", "eof"), ("lparen", "("), ("rparen", ")"), ("lbrace", "{"))}
+    classes["id"] = [TK_ID]
+    install_rules(g, HERE, "autoscan", bindings=bindings, classes=classes, section="auto",
+                  sequences={"reject_header": rej("not covered: the reference auto-includes a header")})
 
 
 def sizes(d):
