@@ -4947,3 +4947,9 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 真实tools11闭合后下一并行收口：保持候选与兼容清单，E3标量转换完整共享过程组、ARM基础编码/MOVIMM完整控制组分别迁既有声明；动态type/tyinfo/FPU/ENCSPEC/word序列保持真实来源与单份共享，删除替代Python分支，不扩语法与框架。各小任务8分钟，原图逐状态/后继/动作相等及实际网络验收；测试分片任务独占tests文件，父不在运行门禁期间改树。
 
 联合候选六目标补验：9a38e3b网络包对hello在lnx/osx/win×arm64/x86_64生成的六份镜像，均与修正私有C参考逐字节相同，/tmp/unisacc-shape-candidate-928/six-target-acceptance.json。该项为交叉生成，不能代替六平台原生执行。
+
+优化差分分片实际结果（ca2b2d0）：141原输入按36/35/35/35覆盖各一次，O0/O1/O2共423对；实际网络候选393agree、0wrong、30refuse（10源×3级）。拒绝清单b_decl2/b_decl3参数声明、b_pp2文件域复合字面量、b_compound/b_layout地址取值、b_ppif常量预处理、b_pp3粘贴、b_strsizeof/b_wide宽字符串、b_bits位域。四片19.03/17.15/37.34/39.78秒，双槽队列，不再整批超时；有拒绝的三片rc1保留，未减清单。参考run取raw wait区分正常exit142与信号；cc失败/信号/超时不缓存，bound.pl清理睡眠子孙经实测。父后续以该明确差距补模型声明，不把tools11或C99精选57外推为完整兼容。
+
+转换/ARM基础控制收尾（4df5e53）：ASSIGNCV/NARU迁共享声明，已有TO/NARROW未重复；Python+4、声明+27。ARM mov/mul/ALU/ret/nop/callr/compare/MOVIMM迁声明，RRR及MOVK共用模板，Python−10、声明+21；两组合计Python−6，声明+48，总源+42。原图和动态依赖扰动相等；父主树实际资源、ARM、chain双槽3/3、38.65秒，/tmp/unisacc-conversion-armbase-gate-928。候选仍9a38e3b，未把未重打包版本误称新产物。
+
+剩余兼容按共享过程并行补齐决定：一组处理b_decl2/b_decl3的参数/声明尾，复用PARAMS/FPDECL/shape；一组处理b_ppif的预处理常量表达式，直接补expression/reduce声明并复用既有宏展开；一组处理b_wide/b_strsizeof的宽字符字符串路径，复用共享字符串walk及初始化。隔离分支、各约8分钟，固定逻辑留TSV、Python仅绑定，不新增解释器/语言原语，不修改测试输入，不把未完成项改成knownpass。两个E3任务按参数区域与字符串区域分工，父审合后组合验证。
