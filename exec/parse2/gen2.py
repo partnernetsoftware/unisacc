@@ -464,6 +464,7 @@ SFLAT, MFLAT = 16 * POSSPAN, 17 * POSSPAN  # scalar slots in a struct/member
 GUNIT = 15 * POSSPAN  # global symbol -> last declaration unit epoch
 PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
 GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
+TAGLEVEL, TAGUNDO = 19 * POSSPAN, 20 * POSSPAN
 ETAG = 11 * POSSPAN   # named enum tags, separate from typedef and value namespaces
 GIBLOB, GIEND = 5 * POSSPAN, 6 * POSSPAN  # initialiser tape and end token, produced once in source order
 FNSTR = 18 * POSSPAN  # __func__ token byte position -> function-name blob
@@ -619,16 +620,28 @@ def types():
     P("TS.tbody").call("SBODY").call("NEXT").goto("TS.sb")
     p = P("TS.tref")      # a tag without a body: its sid (an incomplete struct gets one, size 0: pointers only)
     p.a(("LDX", "nsid2", "tg", STAG)).branch({1: "TS.new"}, "TS.old", [("CMPI", "nsid2", 0)])
-    P("TS.new").a(("ALUI", "add", "nsid", "nsid", 1), ("STX", "tg", STAG, "nsid"), ("COPYW", "nsid2", "nsid")).goto("TS.old")
+    P("TS.new").call("TAG.alloc").a(("COPYW", "nsid2", "nsid")).call("TAG.bind").a(("STX", "tg", STAG, "nsid")).goto("TS.old")
     P("TS.old").a(("ALUI", "add", "tb", "nsid2", SBB)).goto("TS.b")
     P("TS.sb").a(("ALUI", "add", "tb", "nsid", SBB)).goto("TS.b")
+    P("TAG.alloc").a(("ALUI", "add", "sidserial", "sidserial", 1), ("COPYW", "nsid", "sidserial"), ("COPYW", "t", "nsid")).branch({0: "RET"}, bad("structure id capacity"), [("CMPI", "nsid", 64)])
+    P("TAG.enter").vpush("tagusp", "tagscope").a(("ALUI", "add", "tagserial", "tagserial", 1), ("COPYW", "tagscope", "tagserial")).ret()
+    P("TAG.bind").branch({1: "RET"}, "TAG.save", [("CMPI", "tagscope", 0)])
+    P("TAG.save").a(("LDX", "tagold", "tg", STAG), ("LDX", "tagoldscope", "tg", TAGLEVEL),
+        ("STX", "tagusp", TAGUNDO, "tg"), ("STX", "tagusp", TAGUNDO+1, "tagold"), ("STX", "tagusp", TAGUNDO+2, "tagoldscope"),
+        ("ALUI", "add", "tagusp", "tagusp", 3), ("STX", "tg", TAGLEVEL, "tagscope")).ret()
+    P("TAG.leave").vpop("tagmark", "tagscope").goto("TAG.unwind")
+    P("TAG.unwind").branch({2: "TAG.restore"}, "RET", [("CMP", "tagusp", "tagmark")])
+    P("TAG.restore").a(("ALUI", "sub", "tagusp", "tagusp", 3), ("LDX", "tagname", "tagusp", TAGUNDO),
+        ("LDX", "tagold", "tagusp", TAGUNDO+1), ("LDX", "tagoldscope", "tagusp", TAGUNDO+2),
+        ("STX", "tagname", STAG, "tagold"), ("STX", "tagname", TAGLEVEL, "tagoldscope")).goto("TAG.unwind")
     # SBODY at '{': members `T [*]... name;` -- each aligned to its own size, the total to the largest (measured)
     p = P("SBODY")
-    p.vpush("td", "tb").a(("LDX", "t", "tg", STAG)).branch({1: "SB.nw"}, "SB.re", [("CMPI", "t", 0)])
-    P("SB.nw").a(("ALUI", "add", "nsid", "nsid", 1), ("COPYW", "t", "nsid")).goto("SB.re")
+    p.vpush("td", "tb").a(("LDX", "t", "tg", STAG), ("LDX", "tagoldscope", "tg", TAGLEVEL)).branch({1: "SB.samescope"}, "SB.nw", [("CMP", "tagoldscope", "tagscope")])
+    P("SB.samescope").branch({1: "SB.nw"}, "SB.re", [("CMPI", "t", 0)])
+    P("SB.nw").call("TAG.alloc").goto("SB.re")
     p = P("SB.re")      # (a tag seen before without a body is completed in place)
     p.a(("COPYW", "sid", "t"), ("COPYW", "nsid", "t")).branch({1: "SB.go"}, "SB.tg", [("CMPI", "tg", 0)])
-    P("SB.tg").a(("STX", "tg", STAG, "sid")).goto("SB.go")
+    P("SB.tg").call("TAG.bind").a(("STX", "tg", STAG, "sid")).goto("SB.go")
     P("SB.go").a(("STX", "sid", SFLAT, "z0"), ("LDI", "soff", 0), ("LDI", "smal", 1), ("COPYW", "sun", "sun_n"), ("LDI", "umax", 0)).call("NEXT").label("SB.m")
     P("SB.m").tok({"}": "SB.end"}, "SB.mem")
     p = P("SB.mem")
@@ -973,7 +986,7 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.copynext").a(("ALUI", "add", "cpi", "cpi", 1)).goto("FN.copyloop")
     p = P("FN.go")
     if warnings: p.a(("LDI", "wr_last", 0), ("COPYW", "wu_fn", "usp"))
-    p.a(("LDI","vl_depth",0)).call("VL.enter").call("NEXT").call("STMTS").call("VL.leave")
+    p.a(("LDI","vl_depth",0)).call("VL.enter").call("TAG.enter").call("NEXT").call("STMTS").call("TAG.leave").call("VL.leave")
     if warnings: p.a(("COPYW", "wu_lo", "wu_fn")).call("WU.block").call("WR.return")
     p.a(("INTERN", "v", "fns", "fne")).branch({1: "FN.m0"}, "FN.tl", [("CMP", "v", "mnid")])
     P("FN.m0").o("  imm r0, 0\n").goto("FN.tl")      # reaching main's } returns 0 (C99 5.1.2.2.3; product 18c8f22)
@@ -1027,7 +1040,7 @@ def build(locations=False, warnings=False, errors=False):
     p.call("NEXT").tok({TK_ID: "S.gt"}, bad("goto"))
     P("S.gt").o("  jump u_").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").expect(";").call("NEXT").ret()
     p = P("S.blk")
-    p.vpush("usp", "cur").call("VL.enter").call("NEXT").call("STMTS").call("VL.leave").vpop("sv", "cur")
+    p.vpush("usp", "cur").call("VL.enter").call("TAG.enter").call("NEXT").call("STMTS").call("TAG.leave").call("VL.leave").vpop("sv", "cur")
     if warnings: p.a(("COPYW", "wu_lo", "sv")).call("WU.block")
     p.call("UNWIND").call("NEXT").ret()
     p = P("UNWIND")
@@ -1047,7 +1060,7 @@ def build(locations=False, warnings=False, errors=False):
 
     P("S.empty").call("NEXT").ret()
     p = P("S.decl")
-    p.call("TSPEC").tok({TK_ID: "S.did0", "(": "S.dfp"}, bad("declaration"))
+    p.call("TSPEC").tok({TK_ID: "S.did0", "(": "S.dfp", ";": "S.empty"}, bad("declaration"))
     p = P("S.dfp")
     p.call("FPDECL").a(("LDI", "dsz", 8), ("LDI", "dar", 0)).branch({1: "S.dd"}, "S.dfa", [("CMPI", "fpn", 0)])
     P("S.dfa").a(("ALUI", "mul", "dsz", "fpn", 8), ("LDI", "dar", 1)).goto("S.dd")
