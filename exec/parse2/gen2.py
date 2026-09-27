@@ -238,7 +238,7 @@ def fmtwalk(pre, on_byte, on_d, on_end):
 
 
 def printf(warnings=False):
-    pf_install(P)
+    pf_install(E, P)
     P("FMT.decode").a(("SBCLR",)).goto("FMT.walk")
     strwalk("FMT.walk","FMT.byte","FMT.end")
     P("FMT.byte").a(("RLD","bv")).goto("FMT.append")
@@ -1649,7 +1649,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("CL.call")
     if warnings: p.a(("LDI", "wi_called", 1))
     emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
-    ud_install(P)
+    ud_install(E, P)
     start = "START"
     if locations:
         from tokenlocations import install as location_install

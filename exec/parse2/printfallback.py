@@ -55,20 +55,30 @@ itoab_done:
   mov r1, r4
   ret
 '''
-def install(P):
-    P('PF.convert').branch({i:'PF.convert.'+k for i,k in enumerate(KINDS)},'DEAD', [('RLD','pfkind')])
-    for k in KINDS:
-        p=P('PF.convert.'+k)
-        if k=='int':p.o('  .print r0\n')
-        elif k=='u32':p.o('  imm r2, 4294967295\n  and64 r0, r0, r2\n  .print r0\n')
-        elif k in ('hex','HEX','oct'):
-            p.a(('LDI','pf_xb',1)).o('  imm r1, '+str(8 if k=='oct' else 16)+'\n  imm r2, '+str(65 if k=='HEX' else 97)+'\n  call __itoab\n  .write r0, r1\n')
-        elif k=='chr':p.a(('LDI','pf_ch',1)).o('  mov r2, r0\n  .lea r0, __chb\n  .st [r0+0], r2, 1\n  imm r1, 1\n  .write r0, r1\n')
-        elif k=='str':p.a(('LDI','pf_sl',1)).o('  .frame 8\n  store64 [r7+0], r0\n  call __slen\n  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -8\n  .write r0, r1\n')
-        p.ret()
-    P('PF.helpers').branch({1:'PF.helpers.s'},'PF.helpers.c0',[('CMPI','pf_sl',1)])
-    P('PF.helpers.s').o(SLEN).goto('PF.helpers.c0')
-    P('PF.helpers.c0').branch({1:'PF.helpers.c'},'PF.helpers.x0',[('CMPI','pf_ch',1)])
-    P('PF.helpers.c').o('.bss __chb 8\n').goto('PF.helpers.x0')
-    P('PF.helpers.x0').branch({1:'PF.helpers.x'},'RET',[('CMPI','pf_xb',1)])
-    P('PF.helpers.x').o(ITOAB).ret()
+def install(E, P):
+    import json
+    from pathlib import Path
+    from finite_rules import install as install_rules
+    root = Path(__file__).parent
+    def rows(suffix):
+        return (line.split('\t') for line in (root/('printfallback-'+suffix+'.tsv')).read_text().splitlines()
+                if not line.startswith('#'))
+    texts = {'SLEN':SLEN, 'ITOAB':ITOAB}
+    sequences = {name:E.O(texts[value] if kind=='binding' else json.loads(value))
+                 for name,kind,value in rows('text')}
+    templates = {kind:json.loads(value) for kind,value in rows('kinds')}
+    bindings = {}
+    def rules(section):
+        for selected,name,prefix,kind in rows('names'):
+            if selected == section:
+                bindings[name] = P(prefix+'.pf_'+name).fresh(kind)
+        install_rules(E.g, root, 'printfallback', bindings=bindings,
+                      sequences=sequences, section=section)
+    rules('head')
+    for index,kind in enumerate(KINDS):
+        bindings['convert'] = 'PF.convert.'+kind
+        E.g.on(bindings['PF_b1'], [index], bindings['convert'], [], 'r')
+        sequences['body'] = [op for action in templates.get(kind, [])
+                             for op in (E.O(action[1]) if action[0]=='text' else [tuple(action)])]
+        rules('body')
+    rules('tail')
