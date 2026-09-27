@@ -111,88 +111,12 @@ def tokenizer(qualifiers=("type=const", "type=volatile")):
             g.on(st, [10], "RET", [("ADV",), ("LDI", "tk", TK[p])])
         g.on(st, [256], "DEAD", rej("not covered: truncated token dump"))
         g.els(st, "SKIPO", [("LDI", "tk", TK_OTHER)])
-    g.on("SKIPO", [10], "RET", [("ADV",)])
-    g.on("SKIPO", [256], "DEAD", rej("not covered: truncated token dump"))
-    g.els("SKIPO", "SKIPO", [("ADV",)])
-    g.on("SPANID", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_ID)])
-    g.on("SPANID", [256], "DEAD", rej("not covered: truncated token dump"))
-    g.els("SPANID", "SPANID", [("ADV",)])
-    g.on("SPANSTR", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_STR)])
-    g.on("SPANSTR", [256], "DEAD", rej("not covered: truncated token dump"))
-    g.els("SPANSTR", "SPANSTR", [("ADV",)])
-    # decimal: copied as written (<= 20 digits, bounded by UINT64_MAX), suffixes u/l dropped (measured);
-    # hex/octal: value in W[nv] (64-bit), printed signed decimal (nx = 1)
-    SUF = [ord(c) for c in "uUlL"]
-    DIGS = range(48, 58)
-    g.on("SPANNUM", [48], "NUM0", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", 0), ("LDI", "nd", 0)])
-    for d in range(1, 10):   # the decimal value too (W[nv]): an array bound
-        g.on("SPANNUM", [48 + d], "NUMD", [("ADV",), ("LDI", "nx", 0), ("LDI", "nv", d)])
-    # a character constant: its value, printed as a decimal (measured: '0' 48, '\\n' 10, '\\xff' 255, '\\101' 65)
-    g.on("SPANNUM", [39], "CQ0", [("ADV",), ("LDI", "nx", 1), ("LDI", "nv", 0), ("LDI", "nd", 0)])
-    for c in range(256):
-        if c not in (10, 39, 92):
-            g.on("CQ0", [c], "CQC", [("ADV",), ("LDI", "nv", c)])
-    g.on("CQ0", [92], "CQE", [("ADV",)])
-    g.els("CQ0", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    for ch, v in (("n", 10), ("t", 9), ("r", 13), ("a", 7), ("b", 8), ("f", 12), ("v", 11), ("\\", 92), ("'", 39), ('"', 34), ("?", 63)):
-        g.on("CQE", [ord(ch)], "CQC", [("ADV",), ("LDI", "nv", v)])
-    for d in range(8):
-        g.on("CQE", [48 + d], "CQO", [("ADV",), ("LDI", "nv", d), ("LDI", "nd", 1)])
-        g.on("CQO", [48 + d], "CQO", [("ADV",), ("ALUI", "shl", "nv", "nv", 3), ("ALUI", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
-    g.on("CQE", [ord("x")], "CQX", [("ADV",), ("LDI", "nd", 0)])
-    for d, c in enumerate("0123456789abcdef"):
-        for ch in {c, c.upper()}:
-            g.on("CQX", [ord(ch)], "CQX", [("ADV",), ("ALUI", "shl", "nv", "nv", 4), ("ALUI", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
-    g.els("CQE", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    for st in ("CQC", "CQO", "CQX"):
-        g.on(st, [39], "CQN", [("ADV",)])
-        g.els(st, "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.on("CQN", [10], "CQV", [("MARK", "pe"), ("ADV",), ("CMPI", "nv", 256)])
-    g.els("CQN", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.r("CQV", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
-    g.els("SPANNUM", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.on("NUM0", [10], "RET", [("MARK", "pe"), ("ADV",), ("LDI", "tk", TK_NUM)])
-    g.on("NUM0", SUF, "NUMS", [("MARK", "pe"), ("ADV",), ("LDI", "ns", 1)])
-    g.on("NUM0", [ord("x"), ord("X")], "NUMX", [("ADV",), ("LDI", "nx", 1)])
-    for d in range(8):
-        g.on("NUM0", [48 + d], "NUMO", [("ADV",), ("LDI", "nx", 1), ("LDI", "nv", d), ("LDI", "nd", 1)])
-    g.on("NUM0", [46], "NUMF", [("ADV",), ("LDI", "fk", 0)])
-    g.els("NUM0", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.on("NUMD", [46], "NUMF", [("ADV",), ("LDI", "fk", 0)])
-    for d in range(10):
-        g.on("NUMF", [48 + d], "NUMF", [("ADV",), ("A64I", "mul", "nv", "nv", 10), ("A64I", "add", "nv", "nv", d), ("ALUI", "add", "fk", "fk", 1)])
-    g.on("NUMF", [10], "NUMFL", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 20)])
-    g.els("NUMF", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.r("NUMFL", {0: ("FCONV", []), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
-    for d in range(10):
-        # Check before multiplication; the 20th digit must not wrap W[nv].
-        check, append = "NUMD.check%d" % d, "NUMD.append%d" % d
-        g.on("NUMD", [48 + d], check, [("LDI", "numlimit", (2**64 - 1 - d) // 10), ("C64U", "nv", "numlimit")])
-        g.r(check, {(0, 1): (append, []), 2: ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
-        g.els(append, "NUMD", [("ADV",), ("A64I", "mul", "nv", "nv", 10), ("A64I", "add", "nv", "nv", d)])
-    g.on("NUMD", [10], "NUMLEN", [("MARK", "pe"), ("ADV",), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 21)])
-    g.on("NUMD", SUF, "NUMDS", [("MARK", "pe"), ("ALU", "sub", "t", "pe", "ps"), ("CMPI", "t", 21)])
-    g.els("NUMD", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.r("NUMLEN", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
-    g.r("NUMDS", {0: ("NUMS", [("ADV",), ("LDI", "ns", 1)]), (1, 2): ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
-    # suffix: at most 3 of u U l L (the reference drops them)
-    g.on("NUMS", SUF, "NUMS", [("ADV",), ("ALUI", "add", "ns", "ns", 1)])
-    g.on("NUMS", [10], "NUMSN", [("ADV",), ("CMPI", "ns", 4)])
-    g.els("NUMS", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.r("NUMSN", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
-    for d in range(8):   # octal: <= 21 digits (< 2**63)
-        g.on("NUMO", [48 + d], "NUMO", [("ADV",), ("A64I", "shl", "nv", "nv", 3), ("A64I", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
-    g.on("NUMO", [10], "NUMOK", [("MARK", "pe"), ("ADV",), ("CMPI", "nd", 22)])
-    g.on("NUMO", SUF, "NUMOS", [("MARK", "pe"), ("CMPI", "nd", 22)])
-    g.els("NUMO", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    hx = [(c, c - 48) for c in DIGS] + [(c, c - 87) for c in range(97, 103)] + [(c, c - 55) for c in range(65, 71)]
-    for c, d in hx:      # hex: 1..16 digits
-        g.on("NUMX", [c], "NUMX", [("ADV",), ("A64I", "shl", "nv", "nv", 4), ("A64I", "add", "nv", "nv", d), ("ALUI", "add", "nd", "nd", 1)])
-    g.on("NUMX", [10], "NUMOK", [("MARK", "pe"), ("ADV",), ("ALUI", "sub", "t", "nd", 1), ("CMPI", "t", 16)])
-    g.on("NUMX", SUF, "NUMOS", [("MARK", "pe"), ("ALUI", "sub", "t", "nd", 1), ("CMPI", "t", 16)])
-    g.els("NUMX", "SKIPO", [("LDI", "tk", TK_BADNUM)])
-    g.r("NUMOK", {0: ("RET", [("LDI", "tk", TK_NUM)]), (1, 2): ("RET", [("LDI", "tk", TK_BADNUM)])})
-    g.r("NUMOS", {0: ("NUMS", [("ADV",), ("LDI", "ns", 1)]), (1, 2): ("SKIPO", [("LDI", "tk", TK_BADNUM)])})
+    from finite_rules import install as install_rules
+    bindings = {name: globals()[name] for name in ("TK_ID", "TK_STR", "TK_NUM", "TK_BADNUM")}
+    # Derive each pre-multiply bound from the integer domain, never frozen answers.
+    bindings.update(("limit" + str(d), (2**64 - 1 - d) // 10) for d in range(10))
+    install_rules(g, HERE, "tokenread", bindings=bindings,
+                  sequences={"truncated": rej("not covered: truncated token dump")})
 
 
 # ---- a small structured assembler onto (state, r) rows ---------------------
