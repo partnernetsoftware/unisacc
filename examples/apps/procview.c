@@ -231,9 +231,17 @@ int main(int argc, char **argv)
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
 #ifdef __linux__
-        if (!scan_proc())
+        if (!scan_proc()) {
+#else
+        {
 #endif
+            fprintf(stderr, "procview: no live process source on this target "
+                             "(no /proc, and no `ps` piped in) -- showing a "
+                             "built-in SAMPLE, not real data. Try:\n"
+                             "  ps -axo pid=,ppid=,rss=,comm= | unisacc -run "
+                             "procview.c -\n");
             for (i = 0; sample[i]; i++) add_line(sample[i]);
+        }
     }
     if (NP == 0) { fprintf(stderr, "procview: no processes\n"); return 1; }
 
