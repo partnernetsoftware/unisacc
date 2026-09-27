@@ -4987,3 +4987,5 @@ corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28�
 位域/pragma实际整包验收（候选5b018d9）：/tmp/unisacc-bitfield-candidate-928/unisacc-next.com，6,224,902 B，sha256 4b91962b837210ecffd98fa88fdbb3d13703ecba8169fb86504142bba82290eb。E3/E4/O1及六目标E2/lower/image重构，未变E1/汇编核差为空才复用；9原程序/持久probe×O0/O2实际完整网络编译并native运行18/18同host，含b_bits/b_bitfield_result、00128/00218/00206。首次host因旧b_bits未写stdio声明失败，测试环境补-include stdio.h后全重跑；源码未改。资源+pragma主树双槽2/2 48.12秒。位域保留byte-rounded目标布局，不宣称系统ABI；候选函数标签/实参转换仍待E3下一组，未称429/外部216全绿。后续memorylayout0f16928及address已合，全图动态源扰动同、实际NET平台布局边界通过；Python分别+9/-52，TSV+52/+128，总源码仍增，不冒称整体缩减。
 
 前端实参/标签aef24b5合入：复用ASSIGNCV处理声明参数浮点与整数转换，函数标签统一函数域前缀，多单元prepass不再重命名原标签。旧316全过；00175/00215/持久probe实际NET O0/O2同host，多单元整tape同2286757参考。下一冻结候选必须同时重E3、units/located（包构造会重建），再跑原143×3及220corpus；拒绝仍失败。两个独立单文件probe进入资源清单，不将多单元证据冒称已有门禁覆盖。
+
+队列耗时隔离决定：实际模型429差分全部通过（四片108/108/108/105，/tmp/unisacc-call-label-diffo2-928）；PAR1首次两片53秒超时如实失败，PAR2两轮完成。历史耗时目前仅按仓库路径，使classic约5秒污染model约30秒预测，窗口末尾两片错误启动后defer浪费时间。改为按执行配置（UA/TOOLS_UA/CORPUS_UA/PAR等）分离历史，不改55秒窗口/结果判据/原清单；实际候选固定路径不覆写。

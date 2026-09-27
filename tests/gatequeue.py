@@ -27,9 +27,12 @@ def plan(com):
     assert jobs, 'empty gate plan'
     return jobs
 
-def fingerprint(jobs):
-    settings = {k:os.environ[k] for k in ('UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
+def execution_settings():
+    return {k:os.environ[k] for k in ('UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
                 'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT') if k in os.environ}
+
+def fingerprint(jobs):
+    settings = execution_settings()
     h = hashlib.sha256(json.dumps([jobs, settings], sort_keys=True).encode())
     raw = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
                                   '--', 'src', 'exec', 'tests', 'include', 'kernel', 'weights', 'unisa', 'examples',
@@ -64,7 +67,9 @@ def main():
     if data['stamp'] != stamp or data['jobs'] != jobs:
         raise SystemExit('queue input changed: use a new state directory; old results are not reused')
     atomic(path, data)
-    histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(str(ROOT).encode()).hexdigest()[:16]+'.json')
+    # Classic and network drivers, and different concurrency, have different costs.
+    profile = json.dumps([str(ROOT), execution_settings()], sort_keys=True).encode()
+    histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(profile).hexdigest()[:16]+'.json')
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]
     active = {}; start = time.monotonic(); deadline = start + args.window
