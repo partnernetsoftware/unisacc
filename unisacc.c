@@ -14739,12 +14739,26 @@ int initaddr(int isglobal, int gt, int off, int delta) {
 
 /* How many elements the initialiser supplies, for an unsized `[]`.  The
    cursor is on the `]`. */
-int initcount(void) {
+/* A single ordinary string may have one brace pair and a trailing comma. */
+int bracedstr(int j) {
+    int end;
+    if (kind(j) != tidx("{", 1)) return 0;
+    if (kind(j + 1) != T_STR || iswide(j + 1)) return 0;
+    end = j + 2;
+    if (kind(end) == tidx(",", 1)) end = end + 1;
+    if (kind(end) != tidx("}", 1)) return 0;
+    return j + 1;
+}
+int initcount(int chars) {
     int j; int depth; int n; int k; int c; int pos;
     char buf[4096];
     j = tp;
     while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
     j = j + 1;
+    if (chars && kind(tp + 1) == tidx("=", 1)) {
+        k = bracedstr(j);
+        if (k) return decode(k, buf, sizeof(buf)) + 1;
+    }
     if (iswide(j)) return wdecode(j, wcp) + 1;
     if (kind(j) == T_STR) { return decode(j, buf, sizeof(buf)) + 1; }
     return initcountat(j);
@@ -14946,6 +14960,13 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
     isarr = initisarr; rows = initrows; rows3 = initrows3;
     myflt = initflt;          /* nested literals set it for themselves */
     initisarr = 0; initrows = 0; initrows3 = 0;
+    if (isarr && w == 1 && sst < 0 && rows == 0 && bracedstr(tp)) {
+        adv();
+        initstr(isglobal, gt, off, nbytes);
+        eat(tidx(",", 1));
+        need(tidx("}", 1), "}");
+        return 0;
+    }
     /* C99 6.7.8p21: what the initialiser does not mention is ZERO.  Clearing
        the object first is the whole of that rule, and the tape has an op for
        it -- element-wise stores would also have to know which elements were
@@ -15239,7 +15260,7 @@ int local_decl(void) {
             if (cur() == tidx("[", 1)) {
                 adv(); isarr = 1;
                 if (cur() == tidx("]", 1)) {
-                    n = initcount();
+                    n = initcount(w == 1 && declpd == 0 && sst < 0);
                     if (sst >= 0) { int per; per = structslots(sst); n = (n + per - 1) / per; }
                 } else n = cexpr();
                 need(tidx("]", 1), "]");
@@ -15315,7 +15336,7 @@ int local_decl(void) {
             /* `int a[] = {1,2,3}` -- the initialiser says how long it is,
                and for an array of structs it says how many SCALARS */
             if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
-                n = initcount();
+                n = initcount(w == 1 && declpd == 0 && sst < 0);
                 if (sst >= 0) {
                     int per; per = structslots(sst);
                     n = (n + per - 1) / per;
@@ -15867,7 +15888,7 @@ int unit(void) {
             if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                 adv();
                 if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
-                    n = initcount();
+                    n = initcount(w == 1 && declpd == 0 && gstruct < 0);
                     if (gstruct >= 0) {
                         int per; per = structslots(gstruct);
                         n = (n + per - 1) / per;
