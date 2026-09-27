@@ -4494,3 +4494,9 @@ VLA冻结验收完成：`/tmp/unisacc-vla-full`双槽117项与`/tmp/unisacc-vla-
 初始化/赋值片完成验收：ASSIGNCV供局部标量、聚合槽、静态标量、全局值与普通赋值共用TO转换；删除ISDV及静态f32拒绝等重复分支，模型相关源码净-18行。产品valuekind供dkind和数组/成员/复合字面量槽共用，修复unsigned long大浮点初始化；新增b_aggrunsigned的9个宽无符号比较全为1，控制输出3 4 5 1，cc/C三档/Python/新.com一致。s67另覆盖f32/f64/int/u64/bool的声明、普通赋值、聚合与静态初始化；三个新增用例在实际模型三档优化9次输出同cc。旧279项先过，再纳入三项固定E3=282，网络chain=135全过。
 冻结门禁：`/tmp/unisacc-assigncv-full`117项双槽+`/tmp/unisacc-assigncv-core`独占1项49.95s，精确并集118项各一次、全rc0，最大52.62s。difftest-2因窗口余6s延期，完整预算15.87s通过，延期不记pass。产品与实际模型的C9957/57，wrong0/refused0；difftest_o405，fat136；自身转储3,958,707 B一致。产品.com 1,358,336 B，SHA256 38f13433a6ab2bd3f3ebb2915bb527e657d34f1cc4fee66f05d2ae976e1a1e3d；私有UA SHA256 1fc4fdc26a4c881b44b38cb5e028983e33c9d86c25104c1b292d201fef4ff4b1。模型候选5,942,919 B，SHA256 552604d99d6baf6a3017a5aa6bc57732f6d812facbdeff2847ae6870460994e0；plain delta5054状态、28,200,821 B。未推送/发布/切默认。
 后续返回转换缺口已实测：`double f(void){return 3;}`再打印(int)f()，私有产品输出3、当前模型候选输出0。S.re1只改目标描述并NARROW，没有转换返回表达式；这是既有模型缺陷，不是已修复的初始化问题。下一片让返回复用同一转换入口并保存回归，不能以本轮固定清单全绿声称全域正确。系统调用/procview隔离分支继续未合并。
+
+### 返回值转换复用（进行中）
+返回标量先保存表达式来源类型，再以声明返回类型调用ASSIGNCV；只有整数窄化继续NARROW，float/double/bool和指针不重复窄化。沿用结构体返回拷贝。不改产品源码，先验证既有282项，再以真实网络运行检查混合返回类型。按主人要求后续不再向cc-unisacc发协作消息，自主推进。
+
+返回转换片验收完成：复用ASSIGNCV，删除返回路径的局部float/bool特判，gen2净-5行（+5/-10），无执行器或产品源码改动。s68覆盖int→double、double→float/int/u64/uchar/bool、u64→float/double、float→short。最小double f(){return 3;}旧模型输出0，新模型与cc输出3；两程序三档优化共6次真实模型运行同cc。旧282项先通过，再纳入s68，固定E3=283；网络chain=136/136。
+定向双槽队列`/tmp/unisacc-returncv-gate`12/12全rc0，窗口50.97/12.97s，最长43.423s；自身3,958,707 B转储相同。实际模型C9957/57、wrong0/refused0。plain delta5045状态、1,297,615项、28,151,060 B；候选`/tmp/unisacc-returncv-candidate/unisacc-next.com`5,942,411 B，SHA256 01a562a374cfd8c49cafabe718cc647d39ab7a1920b892d3d7b18e546327164b。出货.com仍为ef17e27的产品构建，本片未重跑118项产品门禁；未发布、推送或切换默认路线，剩余转换与覆盖缺口继续推进。
