@@ -113,34 +113,10 @@ def build_autoinc(g, locations=False):
     autoinc_map() (printf excluded, as hdrneeded does) with status exactly
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
-    g.els("AISTART", "AI.nostd", [("RLD", "CLI_NOSTD")])
-    g.r("AI.nostd", {0:("AIS1",[("RLD","RUN")]),1:("P3START",[])})
-    g.r("AIS1", {0: ("AS", [("LDI", "RTP", 0)]), (1, 2): ("P3START", [])})
-    WSN = [32, 9, 10]
-    g.on("AS", ID, "ASI", [("MARK", "AS0"), ("ADV",)])
-    g.on("AS", [EOF], "AH0_0", [])
-    g.els("AS", "AS", [("ADV",)])
-    g.on("ASI", ID, "ASI", [("ADV",)])
-    g.els("ASI", "ASW", [("MARK", "AE"), ("INTERN", "aid", "AS0", "AE")])
-    g.on("ASW", WSN, "ASW", [("ADV",)])
-    g.on("ASW", [40], "ASC", [("MARK", "AP"), ("ALUI", "add", "aa", "aid", AIB), ("LDX", "av", "aa", 0),
-                              ("ALUI", "or", "av", "av", 1), ("STX", "aa", 0, "av"),
-                              ("CMP", "aid", "ID_PRINTF")])
-    g.els("ASW", "AS", [])
-    pm = ("APM", [("JUMP", "AP"), ("LDI", "ad", 0)])
-    # rtprintf (product 991d337): any `printf (` pulls stdio.h in -- no format test any more
-    g.r("ASC", {1: ("APM", [("LDI", "RTP", 1)] + pm[1]), (0, 2): pm})
-    # paren match from the `(`
-    back = ("AS", [("JUMP", "AE")])
-    g.on("APM", [40], "APM", [("ALUI", "add", "ad", "ad", 1), ("ADV",)])
-    g.on("APM", [41], "APC", [("ALUI", "sub", "ad", "ad", 1), ("CMPI", "ad", 0), ("ADV",)])
-    g.on("APM", [EOF], *back)
-    g.els("APM", "APM", [("ADV",)])
-    g.r("APC", {1: ("APW", []), (0, 2): ("APM", [])})
-    g.on("APW", WSN, "APW", [("ADV",)])
-    g.on("APW", [123], "AS", [("ALUI", "add", "aa", "aid", AIB), ("LDX", "av", "aa", 0),
-                              ("ALUI", "or", "av", "av", 2), ("STX", "aa", 0, "av"), ("JUMP", "AE")])
-    g.els("APW", *back)
+    for filename, mode in (("autoinc-byte.tsv", "b"), ("autoinc-result.tsv", "r")):
+        for state, row in load_rules(Path(HERE) / filename, {}, classes={"identifier": ID}, bindings={"AIB": AIB}).items():
+            for key, (target, actions) in row.items():
+                g.on(state, [key], target, actions, mode)
     # per header: does some name have status exactly `called`?
     amap = autoinc_map()
     H = list(AUTOINC_ORDER)
@@ -165,9 +141,7 @@ def build_autoinc(g, locations=False):
         g.els("AEM%d" % h, "AEM%dr" % h, [("RLD", "NEED%d" % h)])
         nx = "AEM%d" % (h - 1) if h else "ACP0"
         g.r("AEM%dr" % h, {1: (nx, line(H[h])), (0, 2): (nx, [])})
-    g.els("ACP0", "ACP", [("LDI", "az", 0), ("JUMP", "az")])
-    g.on("ACP", [EOF], "P3START", [("SWAP",)])
-    g.els("ACP", "ACP", [("COPY",), ("ADV",)])
+
 
 
 AL = set(range(97, 123)) | set(range(65, 91)) | {95}
