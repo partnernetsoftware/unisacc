@@ -47,7 +47,7 @@ expected to move to them.
 |---|---|
 | Pass sequencing (P0 splice, P1 decomment, P2 autoinc, P3 directives, P4 rounds, DIAG) | The pass input `x` and output `o`; one attribute word per byte (the segment) |
 | Byte classes: letter, digit, blank, quote, `#`, `/`, `*`, `\`, newline, EOF (δ sees the raw byte, as in E1) | |
-| Directive recognition: the directive word is interned and looked up in a dictionary that init fills from **DIRV**. What each (directive, defined) pair does comes from **weights/gold/pp.tsv**; both are derived by gen.py | The interned strings (hash-consing: bytes → id) |
+| Directive recognition: the directive word is interned and looked up in a dictionary that init fills from the **dir field schema in weights/gold/pp.tsv**. What each (directive, defined) pair does comes from the same TSV; neither requires the old kernel. Target macro names are declared in **exec/pp/predefines.tsv** | The interned strings (hash-consing: bytes → id) |
 | Conditional-stack *transitions* (take / skip / pop, from pp.tsv) | The conditional stack itself: `TAKE[k]`, `SEEN[k]`, `NDEPTH` in W |
 | `#define` parameter-list grammar; body scan (`#`, `##`, literals, identifiers) | The macro table: entries (name id, body blob id, fn, var, np, params, from, to, prev) in W; `NEWEST[id]` |
 | `#if` precedence levels as return points in Γ (recursive descent, like the E0 toy) | The `#if` value stack in W; 32-bit values |

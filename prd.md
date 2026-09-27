@@ -4765,3 +4765,10 @@ E2后续输入审计：exec/pp/gen.py仍从kernel/unisa_model.inc提取DIRV，�
 原型签名验收收尾：43bc914补齐cache测试夹具后，/tmp/unisacc-protosig-full2跑完116个套件，原始112通过、fat超时及三个ENOSPC失败保留。磁盘清理只删除本轮旧候选中间物和未占用的旧生成缓存，保留候选.com与日志；disk-retry2的container/tableself/native-stages分别34.36/15.38/19.71秒通过；fat2独占37.30秒通过。预留core2独占52.61秒通过；heavy2的multi-ua/memory-ua/memx86-ua独占50.41/41.87/47.24秒通过。
 原始full2与disk-retry2最终未返回整体绿色：协作者在运行期间新增并提交21aa027（examples/apps/colorpack.c及其README），广域指纹因而拒绝整轮结论。没有重写这些退出状态。独立输入审计以43bc914的apps README内容并排除新增colorpack，重算得到完全相同的原指纹3a6c0afaf0eb7feea0f05771f74b014725c29209b750186ca435d3df8d2743bc；证明其余全部冻结文件（含编译器、生成器、测试及.com）未变。所有120个套件命令逐项与当前--plan --com相同，新增colorpack不在固定列表或examples/*.c输入中，apps README也不是构建/运行输入。最终以实际单项rc0并集核对120/120、无遗漏；这是附非输入变更审计的分批验收，不宣称原队列单次rc0。完整对账保存在/tmp/unisacc-protosig-final-evidence.json，原记录目录保留。
 本次只闭合已开始的块内原型签名修复与E1迁移回归；默认产品仍非完整模型路线，未发布，E2—E6声明来源迁移与最终默认产物验收继续。
+
+
+### E2声明输入迁移（进行中）
+先冻结六目标、普通/位置两种模式的全部状态转移与动作，作为旧实现裁判；实现去掉kernel/unisa_model.inc的DIRV提取，改用pp.tsv自身schema与已验证的通用读取器。目标预定义宏改成OS/架构/公共项声明，保留当前顺序与当前兼容行为（Windows上的__LP64__仍是现有子集契约，不外推系统ABI）。同步真实构建缓存依赖；之后迁移P0/P1等有限控制规则，不能把本步仅移除输入依赖称为完整E2声明化。
+
+E2首步实测：六目标×普通/位置模式12份JSON的完整状态、转移与动作均与迁移前一致；Linux/macOS普通180,466、位置183,036观测，Windows普通179,951、位置182,521。隔离临时根只放pp构造源码、通用TSV读取器、pp.tsv、predefines.tsv和include头声明，无kernel、gold.py、src；从/tmp生成12份均相同。临时声明把__linux__改为__linux_variant__，只有一个初始化动作序列变化，状态映射不变，证明宏名称确实由声明控制。当前改变的是输入来源，P0/P1和宏控制规则仍手写；Python行数未减少，不称完整E2声明迁移。
+E2输入迁移集成：/tmp/unisacc-e2-declarations-gate双槽2/2通过，总2.74秒；宏展开86个完整结果与4个明确拒绝，位置封装9个参考用例与5个Python裁判用例通过。缓存来源同步到pp/run.sh与旧pipeline/run.py，共享models.py原已包含exec TSV和weights。未改产品源码，不把此定向结果写为新一轮全产品门禁。

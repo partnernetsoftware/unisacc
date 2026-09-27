@@ -29,11 +29,11 @@ prefix match `push_macroX` is not reproduced), the
 file:line:col rendering of diagnostics (the reject kind is compared, not the
 text).
 
-Derived, not typed in: the directive vocabulary from DIRV
-(kernel/unisa_model.inc), and what each (directive, defined) pair does from
-weights/gold/pp.tsv (the shipped pp table).  Transcribed from
-src/front_pp.c: byte classes, the predefined macros of predef() for the
-selected target (default Linux x86_64), the include search order.
+Directive vocabulary and decisions come from weights/gold/pp.tsv, including
+its schema. Target predefinitions come from predefines.tsv. No old kernel
+file supplies generation data. Byte classes, include search order and much
+of the control flow below remain handwritten; declaration migration is not
+complete merely because runtime transitions are constructed into networks.
 """
 import json
 import os
@@ -44,8 +44,38 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 EOF = 256
 
-_inc = open(os.path.join(ROOT, "kernel", "unisa_model.inc"), encoding="latin-1").read()
-DIRV = tuple(re.search(r'char \*DIRV = "((?:[^"\\]|\\.)*)";', _inc).group(1).split("\\0")[:-1])
+sys.path.insert(0, ROOT)
+from unisa.tsvgold import load_table
+
+_name, _fields, _heads, _rows = load_table(os.path.join(ROOT, "weights/gold/pp.tsv"))
+assert _name == "pp" and [n for n, _ in _fields] == ["dir", "defined"]
+assert _fields[1][1] == ("0", "1") and [n for n, _, _ in _heads] == ["y"]
+DIRV = _fields[0][1]
+PPHEAD = list(_heads[0][1])
+PPT = {(d, int(b)): labels["y"] for (d, b), labels in _rows.items()}
+assert PPHEAD == ["take", "skip", "pop", "macro"], PPHEAD
+
+
+def load_predefines():
+    path = os.path.join(HERE, "predefines.tsv")
+    rows = {}
+    for line, text in enumerate(open(path, encoding="utf-8"), 1):
+        if text.startswith("#") or not text.strip():
+            continue
+        fields = text.rstrip("\n").split("\t")
+        key, names = tuple(fields[:2]), fields[2:]
+        if (len(fields) < 3 or key in rows or len(set(names)) != len(names) or
+                any(not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", name) for name in names)):
+            raise ValueError(f"{path}:{line}: invalid or duplicate predefinition row")
+        rows[key] = names
+    expected = {("os", x) for x in ("lnx", "osx", "win")} | {
+        ("arch", x) for x in ("x86_64", "arm64")} | {("common", "*")}
+    if set(rows) != expected:
+        raise ValueError(f"{path}: expected OS, architecture and common declarations")
+    return rows
+
+
+PREDEF = load_predefines()
 
 
 # autoinc (src/front_pp.c autoinc/hdrneeded): the trigger data build_autoinc
@@ -137,27 +167,10 @@ def build_autoinc(g, locations=False):
     g.els("ACP", "ACP", [("COPY",), ("ADV",)])
 
 
-def load_pp_table():
-    head, T = None, {}
-    for ln in open(os.path.join(ROOT, "weights", "gold", "pp.tsv"), encoding="utf-8"):
-        f = ln.rstrip("\n").split("\t")
-        if f[0] == "#head":
-            head = f[3:]
-            continue
-        if ln.startswith("#") or len(f) < 3 or f[0] == "dir":
-            continue
-        T[(f[0], int(f[1]))] = f[2]
-    return head, T
-
-
-PPHEAD, PPT = load_pp_table()          # head: take skip pop macro -> a = 0..3
-assert PPHEAD == ["take", "skip", "pop", "macro"], PPHEAD
-
 AL = set(range(97, 123)) | set(range(65, 91)) | {95}
 DI = set(range(48, 58))
 ID = AL | DI
 WS = {32, 9}
-PREDEF = ["__linux__", "__unix__", "__ELF__", "__x86_64__", "__LP64__", "__UNISA__"]
 SEGINF = 1000000000
 # W regions (addresses; plain named slots are strings)
 DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
@@ -675,10 +688,10 @@ def build_cli(g, NC, locations=False):
 def build(target="lnx/x86_64", locations=False):
     if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"):
         raise ValueError("unsupported preprocessor target: "+target)
-    predef=list(PREDEF)
-    if target.startswith("osx/"):predef[:3]=["__APPLE__","__MACH__","__unix__"]
-    if target.endswith("/arm64"):predef[3]="__aarch64__"
-    if target.startswith("win/"):predef[:3]=["_WIN32","_WIN64"]
+    target_os, target_arch = target.split("/")
+    predef = PREDEF["os", target_os] + PREDEF["arch", target_arch] + PREDEF["common", "*"]
+    if len(set(predef)) != len(predef):
+        raise ValueError("overlapping target predefinitions: " + target)
     g = G()
     NC = lambda what: [("REJECT", "not covered: " + what)]   # noqa: E731
 
