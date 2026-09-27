@@ -42,8 +42,14 @@ with tempfile.TemporaryDirectory() as td:
     seed=t/'source';seed.mkdir()
     for d in ('exec','unisa','src','kernel','include','weights'): (seed/d).mkdir()
     header=seed/'include/test.h';header.write_text('one')
+    keywords=seed/'iterate/kernel/typekw.tsv'
+    keywords.parent.mkdir(parents=True)
+    keywords.write_text('kw\tint\n')
     c.ROOT=seed
     first=c.identity('osx/arm64','1','cc')
     header.write_text('two')
     assert first!=c.identity('osx/arm64','1','cc')
-    print('cache: artifact corruption, incomplete manifest and changed header controls pass')
+    second=c.identity('osx/arm64','1','cc')
+    keywords.write_text('kw\tlong\n')
+    assert second!=c.identity('osx/arm64','1','cc')
+    print('cache: artifact corruption, incomplete manifest, changed header and keyword controls pass')
