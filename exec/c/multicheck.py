@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Multi-unit tape, native behaviour, preprocessing isolation and framing."""
-import json,pathlib,struct,subprocess,sys
+import json,os,pathlib,struct,subprocess,sys
 p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ua=sys.argv[3]
 def run(cmd,**kw):return subprocess.run(list(map(str,cmd)),capture_output=True,timeout=60,**kw)
 def ok(cmd,**kw):
     r=run(cmd,**kw);assert r.returncode==0,(r.args,r.returncode,r.stderr);return r.stdout
-drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm'];count=0
+kind=os.environ.get('DRIVER_KIND','all'); assert kind in ('all','cc','ua','asm')
+drivers=[p/('driver-'+k) for k in ('cc','ua','asm') if kind in ('all',k)];count=0
 pairs=[['tests/multi/m1.c','tests/multi/m2.c'],['tests/multi/n1.c','tests/multi/n2.c']]
 for pair in pairs:
     for files in (pair,pair[::-1]):
@@ -44,15 +45,17 @@ for files in (['tests/multi/static1.c','tests/multi/static2.c'],['tests/multi/st
         r=run([*base,'-run',*files]);assert (r.returncode,r.stdout,r.stderr)==(19,b'',b''),r
 print('block-static unit namespaces: both orders, reference tapes and exit 19',flush=True)
 
-sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()));import sim
-d=json.loads((p/'units.json').read_text());loaded=sim.load(d)
-tokens=b'type=int\nid=main\n(\n)\n{\nreturn\nnum=0\n;\n}\neof\n10 tokens\n'
-framed=struct.pack('<I',len(tokens))+tokens
-path=p/'framed';path.write_bytes(framed)
-expected=b'@unit0\n'+tokens.split(b'eof\n')[0]+b'eof\n'
-assert ok([p/'run',p/'units.net',path])==expected
-r,out,_=sim.run(d,framed,'frame',loaded=loaded);assert r=='accept' and out==expected
-for bad in [b'',b'\1',b'\0'*4,framed[:-1],framed+b'\1',struct.pack('<I',len(tokens)+1)+tokens,framed[:-10]+b'x'*10]:
-    path.write_bytes(bad);r=run([p/'run',p/'units.net',path]);assert r.returncode!=0 and not r.stdout
-    verdict,_,_=sim.run(d,bad,'bad-frame',loaded=loaded);assert verdict!='accept'
-print('multi-unit:',count,'tape comparisons; bounded framing accepts/rejects on both executors')
+if kind in ('all','cc'):
+    sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()));import sim
+    d=json.loads((p/'units.json').read_text());loaded=sim.load(d)
+    tokens=b'type=int\nid=main\n(\n)\n{\nreturn\nnum=0\n;\n}\neof\n10 tokens\n'
+    framed=struct.pack('<I',len(tokens))+tokens
+    path=p/'framed';path.write_bytes(framed)
+    expected=b'@unit0\n'+tokens.split(b'eof\n')[0]+b'eof\n'
+    assert ok([p/'run',p/'units.net',path])==expected
+    r,out,_=sim.run(d,framed,'frame',loaded=loaded);assert r=='accept' and out==expected
+    for bad in [b'',b'\1',b'\0'*4,framed[:-1],framed+b'\1',struct.pack('<I',len(tokens)+1)+tokens,framed[:-10]+b'x'*10]:
+        path.write_bytes(bad);r=run([p/'run',p/'units.net',path]);assert r.returncode!=0 and not r.stdout
+        verdict,_,_=sim.run(d,bad,'bad-frame',loaded=loaded);assert verdict!='accept'
+    print('multi-unit:',count,'tape comparisons; bounded framing accepts/rejects on both executors')
+print('multi-unit backend:',kind,count,'tape comparisons')

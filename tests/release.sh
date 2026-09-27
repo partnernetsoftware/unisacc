@@ -67,9 +67,12 @@ for k in 1 2 3 4 5 6 7 8; do
 done
 say "ablate (8 shards)" "$([ ${arc:-0} -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.a8")"
 # 3a. the gate: ccparity and malloc are in no other suite list [S-16 T1]
-./tests/gate.sh --com > "$LOG.g" 2>&1
+# One bounded queue window; pending work is NOT a release pass. Preserve the
+# state path and finish further windows separately before release acceptance.
+GATE_STATE=${GATE_STATE:-$(mktemp -d)}
+./tests/term.sh python3 ./tests/gatequeue.py --com --state "$GATE_STATE" > "$LOG.g" 2>&1
 rc=$?
-say "gate (--com)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.g")"
+say "gate queue (--com)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.g")"
 [ $rc -eq 0 ] || grep -v 'rc=0' "$LOG.g" | head -10
 
 # 3b. ...and a suite that SKIPPED is not a suite that passed.  fat is macOS

@@ -1072,6 +1072,34 @@ tape → lower → TargetProgram → 镜像 + 目标机解释执行
 
 **远期设想（主人，2026-09-26，明确“完全不应该急”）**：推理替代程序与函数会带来少量性能损耗；将来可对性能极敏感的少数环节，用 FFI 一类的外部调用做针对性封装。理论上的位置：被外部调用的原生代码就是 delta 草稿 §3 选项 B 的“可信组件”，必须逐个列出、计入产物账，并说明它替代了哪一段 δ 以及两者的等价证据；不能悄悄进入执行器。在功能完成、速度统一优化之前不做。
 
+### 5.6 路线建议与完成度评估（2026-09-27，研究员估计，非规范）
+
+来源：两位独立研究员（opus 出路线，sonnet 出评估）读了脱敏简报后各写一份报告；简报里的数字取自 cdx 的日志，我没有独立复核，研究员也没有读仓库。这里只记要点，不构成验收，也不改变 S-17 的里程碑定义。
+
+**完成度**（下限、中心值、上限）：
+
+| 口径 | 完成度 |
+|---|---|
+| a 六个目标功能跑通 | 55%、**68%**、78% |
+| b 可以把默认路线切到模型路线（E7 前提满足） | 28%、**38%**、55% |
+| c 原始目标全部达成（几 KB 执行器、表只存一份、编译动作全由表完成） | 32%、**45%**、60% |
+
+九个维度（权重：完成度）：阶段覆盖 15%：85%；目标覆盖 15%：75%；未覆盖构造 20%：70%；命令行与错误信息对等 8%：65%；体积 8%：20%；速度 7%：10%；离线生成不依赖 Python 7%：10%；验证深度 8%：45%；E7 切换 12%：3%。最可能高估的是“未覆盖”和阶段覆盖，因为 130 个输入与 101 个套件都是自选样本；最能改变估计的新证据是拿一批没参与开发的外部真实 C 程序跑一次覆盖统计。按现在的节奏，各涨 10 个百分点：a 约 3–7 天，b 约 2–4 周，c 约 3–6 周；外部程序的未覆盖比例若远高于 25%，时间翻倍。
+
+**路线建议**（4–6 周，三个阶段）：
+- **阶段 A（第 1–2 周，收口）**：清零已知的“不同”（无符号按位取反的截断，按值传结构体的局部副本；该数字来自 0d3358b 之后的一次探索，是否已修复未核实）；补完 Windows x86_64 并原生三轮自举；WINARGS 要么迁移，要么写进规格登记为执行器外壳；为 32 个未覆盖输入和约 42 类构造建覆盖账本；冻结门禁数字。
+- **阶段 B（第 3–4 周，验证与前置条件）**：随机生成程序对拍（目标 10 万个，“接受且不同”为 0）；每张表做拒绝完备性检查；拿系统编译器当第二真值，交叉对拍参考本身；离线生成可复现；体积和速度只定底线，不做全面优化。
+- **阶段 C（第 5–6 周，E7）**：六目标合成单文件、表只存一份；先跑后台对拍的影子期再切默认；留回退开关；三个平台原生跑完整门禁。
+- 最该停：以提交次数衡量进度，改为每天固定一次门禁加探索快照，看不同数、未覆盖数、目标数。可推迟：全面速度优化、去 Python 化、FX-1 到 FX-4（FX-4 在阶段 B 只做设计文档，FX-3 的 wasm 目标先排除，避免稀释收尾）。
+- 最大的被低估风险：对拍的标准答案就是手写参考本身，参考里的错会被表原样复制，门禁永远是绿的。对策是系统编译器做第二真值加随机程序，并把参考路线冻结为只修 bug。
+
+**待主人决定**（研究员的推荐）：
+1. 未覆盖时切换后自动回落到参考路线？推荐是。冲突：这会把手写编译器留在产品里，与“编译动作全由表完成、只存一份”的原始目标矛盾，是方向问题。
+2. 切换底线：体积不超过手写路线 3 倍、自编译不超过 5 倍？推荐是。现状：模型路线开发容器约 5.29 MB，手写路线约 1.35 MB，约 3.9 倍，按这个底线现在过不了。
+3. WINARGS 是否可登记为执行器外壳常量？推荐可以。
+4. 切换是否要求去掉 Python？推荐不要求，只要求生成可复现。
+5. 参考路线至少保留两个版本周期？推荐是。
+
 ## 6. 实验发现 [E] —— 面向论文
 
 本章随实现推进累积。**只记实测，不记预期**；每条含可复现命令，供论文直接引用。
@@ -3968,3 +3996,129 @@ pack semantics are not newly implemented or claimed. Logs are
 /tmp/unisacc-pragma-{check,arm,x86,location,chain,build,c99,ccparity}.log.
 All runs bounded at 60 s. No default-product switch, push or release. Next are
 __func__ and the remaining type/declarator/expression/library compatibility gaps.
+
+
+### E3 predefined function name
+
+Implement __func__ inside function bodies as a pooled name, preserving the
+reference's source-order literal numbering and its 120-byte name bound. The
+reference currently writes an explicit NUL in this pool entry and the usual
+pool terminator, so byte comparison must retain both. Use normal delta string
+operations, no executor intrinsic. Outside-function use stays explicitly
+unsupported; it is not a C99 use of the predefined identifier.
+
+A required __func__ subscript probe exposed a reference defect: its primary
+expression only sets curptr/curelem, retaining curpd and other kind state, so
+__func__[0] emits no character load. Model tape has the load and therefore
+differs. Fix the product descriptor through setkind before accepting parity;
+retain a character-access regression in the existing C99 feature probe. The
+Python front end has no __func__ implementation to update. Rebuild the product
+.com and run its bounded gate after this product-source change.
+
+The committed-reference binary was rebuilt privately for a before/after test.
+With first() returning __func__[0], it printed an address-valued integer
+(648511783 in that run) instead of 102. Fixed reference, rebuilt product .com
+and host cc print `main 109 109 102`. The first model candidate still rejected
+*__func__ through its specialised dereference-name path; wire that path to the
+same pooled-name value before reporting model acceptance. The earlier direct
+printf argument happened to work and is not the defect's regression proof.
+The existing C99 probe now includes this independent function. Old fixed chain
+96 passed before adding the two new function-name files (98/98 total).
+
+The first frozen gate was cancelled (rc 137), not counted as validation, after
+the model dereference gap became known. Re-run the complete bounded gate after
+the fix. An earlier scratch command incorrectly sent Python stdin through
+term.sh and timed out; the subsequent test uses a real script file.
+
+
+### Owner correction: aggregate timeout must remain bounded
+
+The second function-name gate was incorrectly launched with TERM_SH_ALARM=0.
+Per-suite alarms did not bound the overall background run. At the owner's
+correction the gate and its 10 descendants were killed; no gate success is
+claimed. Set terminal/gate defaults to 60 seconds and reject zero or values
+over 60. Remaining full validation must be split into bounded batches. The
+function-name/product changes remain uncommitted pending that validation.
+
+Timeout correction follow-up: merely setting alarm(60) on the wrapper still
+leaves descendants alive. Add a small process-group watchdog that preserves
+exit status and kills the whole owned group on timeout/interruption. Gate runs
+will require explicit suite selection; --list enumerates the same authoritative
+job declarations without executing them. Validate selection before running.
+No unbounded aggregate gate will be relaunched.
+
+The new timeout probe passed: an outer 1-second watchdog terminated a nested
+30-second watchdog and its sleeping child, returned 142 in 1.29 seconds;
+normal exit 2 remained 2. Gate rejects absent/unknown selections before builds.
+Next enforce the same outer limit for direct TERM_SH=0 gate calls, and bound
+the Terminal handoff wait as well as the command. Full gate is now a sequence
+of explicit selected batches; an interrupted batch supplies no passing receipt.
+
+### Test efficiency: rolling queue and shared preparation
+
+Owner explicitly requests parallel queue scheduling and measured efficiency.
+Current frozen checks: 102/105 pass; exec-native, exec-multi and exec-memx86
+hit the 60-second limit (not passes). All other queued checks finished.
+Inspection found elf.sh reconstructs the same six models in every private
+suite directory. Separate immutable, content-checked preparation from source
+execution; key it by generator/table/header/runtime inputs, target, network
+mode and compiler identity, serialize identical builds, and publish atomically.
+Cache hits still verify artifact hashes; cold preparation retains full-domain
+network checks. This changes preparation reuse, not suite assertions.
+Make rolling scheduling reusable with a bounded scheduling window and retained
+per-suite results, so work continues without hand-written batch barriers.
+The three timeouts must be rerun after the preparation improvement; no waiver.
+
+The first rolling-window rerun retained partial logs: native reaches the stream
+chain but not resource-packaged self checks; multi reaches only the first pair.
+Both still exceed 53 s under two-way load, so caching alone is insufficient.
+Split native by stages / chain / resources; split multi and POSIX memory checks
+by compiler backend (cc / ua / asm), retaining the union of assertions. Build
+only the backend used in a shard. The queue keeps late-window timeouts pending
+for an early full-window attempt; a full-window timeout remains a failure.
+
+Rolling queue validation: 12/12 replacement shards pass; the longest is
+46.34 s (Rosetta/UA memory). Native stages/chain/resources took
+20.86/30.32/17.36 s. Cold model preparation was 4.36 s, warm verified reuse
+0.08 s. A simultaneous same-key cold request built once (4.20 s); the second
+waited and reused it (4.09 s), all 21 artifacts identical. Queue/cache controls
+pass for rolling refill, resume, changed-input refusal, nonzero exit despite
+PASS text, timeout, artifact corruption, missing manifest entry and header
+invalidation. Terminal output is now streamed (measured 2.05 s between lines
+emitted two seconds apart), not buffered until completion.
+The backend split initially repeated backend-independent framing/loader
+checks in every shard. Keep those in the cc shard only (and all mode), retaining
+their original two-executor / two-build checks, and skip their extra preparation
+in ua/asm shards. Every selected backend still runs its entire behavior matrix.
+
+After corruption, a cold rebuild restored all executable tables, networks and
+packages byte-for-byte. Two JSON files differed only in dictionary key order
+(parsed objects equal). Pin PYTHONHASHSEED=0 in cold preparation so cached
+intermediate JSON is also reproducible; this is not a model-behavior change.
+The post-deduplication queue passed 10/10, with windows 51.41/48.16/30.70 s.
+
+The final current-key corruption experiment rebuilt the private cache and
+restored all 21 artifacts byte-for-byte, now including JSON (4.17/4.25 s cold).
+Two concurrent same-key callers build only once; a subsequent warm check was
+0.08 s. These are preparation timings, not a claimed whole-suite speedup.
+Queue windows retain all completed results, validate the frozen input snapshot,
+and use exit 75 for pending work; no pending task is reported green. The legacy
+release caller now invokes one bounded queue window and treats pending as not
+ready. Its older all.sh release orchestration is not run or certified here.
+
+cc-unisacc supplied two new reported product defects (not yet independently
+executed in this session): unsized static-local and file-scope function-pointer
+arrays. Source reading finds fpdecl defaults [] to one slot and the local
+function-pointer-array path precedes the static-storage branch. Reproduce with
+host cc and bounded runs, then fix the declaration/storage rules, not a special
+case for 3 or 8 elements. They remain open; test-green is not a C99 proof.
+The requested section 5.6 roadmap is retained as explicitly unverified advice,
+not a replacement for S-17 acceptance criteria or a completion percentage claim.
+
+Final targeted queue on the finished infrastructure: 6/6 pass in one 35.39 s
+window (docs, kernel, C99 57/57, complete self-source through Linux x86_64 and
+arm64 network routes, queue/cache controls). The two full-source images equal
+the reference at 671422 / 720572 B. This is targeted revalidation after harness
+changes, not a claim that one fresh invocation reran the entire new 114-item
+list. Earlier bounded runs plus replacement shards cover the old gate's tests.
+No push, release, default-route switch, or new cross-platform execution claim.

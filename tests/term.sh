@@ -12,16 +12,29 @@
 #
 # Off macOS, or with TERM_SH=0, the command just runs here.
 set -u
-if [ "$(uname -s)" != Darwin ] || [ "${TERM_SH:-1}" = 0 ] || [ -n "${TERM_SH_INSIDE:-}" ]; then
-    exec "$@"
+TERM_SH_ALARM=${TERM_SH_ALARM:-60}
+case $TERM_SH_ALARM in
+    ''|*[!0-9]*) echo 'term.sh: timeout must be an integer from 1 to 60 seconds' >&2; exit 2;;
+esac
+if [ "$TERM_SH_ALARM" -lt 1 ] || [ "$TERM_SH_ALARM" -gt 60 ]; then
+    echo 'term.sh: timeout must be from 1 to 60 seconds' >&2; exit 2
 fi
+if [ "$(uname -s)" != Darwin ] || [ "${TERM_SH:-1}" = 0 ] || [ -n "${TERM_SH_INSIDE:-}" ]; then
+    exec perl "$(dirname "$0")/bound.pl" "$TERM_SH_ALARM" "$@"
+fi
+BOUND=$(cd "$(dirname "$0")" && pwd)/bound.pl
 d=$(mktemp -d); q=""
+started=$(date +%s)
+deadline=$((started + TERM_SH_ALARM))
 for a in "$@"; do q="$q '$(printf '%s' "$a" | sed "s/'/'\\\\''/g")'"; done
 cat > "$d/run.sh" <<EOS
 #!/bin/sh
 cd '$(pwd)'
 TERM_SH_INSIDE=1; export TERM_SH_INSIDE
-perl -e 'alarm shift; exec @ARGV' ${TERM_SH_ALARM:-600} $q > '$d/out' 2>&1
+if [ \$(date +%s) -ge $deadline ]; then echo 142 > '$d/rc'; exit 142; fi
+perl '$BOUND' $TERM_SH_ALARM $q > '$d/out' 2>&1 &
+echo \$! > '$d/pid'
+wait \$!
 echo \$? > '$d/rc.tmp' && mv '$d/rc.tmp' '$d/rc'
 EOS
 chmod +x "$d/run.sh"
@@ -42,8 +55,50 @@ done
 sed -i '' "2i\\
 . '$d/env'
 " "$d/run.sh"
-osascript -e "tell application \"Terminal\" to do script \"'$d/run.sh'; exit\"" >/dev/null 2>&1 || {
-    rm -rf "$d"; exec "$@"; }
-# the window runs on its own; the caller's alarm bounds this wait
-while [ ! -f "$d/rc" ]; do sleep 0.2; done
-cat "$d/out"; rc=$(cat "$d/rc"); rm -rf "$d"; exit "$rc"
+perl "$BOUND" 5 osascript -e "tell application \"Terminal\" to do script \"'$d/run.sh'; exit\"" >/dev/null 2>&1 || {
+    rm -rf "$d"; exec perl "$BOUND" "$TERM_SH_ALARM" "$@"; }
+# One polling process streams output; no per-poll date/wc/tail subprocesses.
+perl - "$d" "$deadline" <<'PERL'
+use strict;
+use warnings;
+use Time::HiRes qw(time sleep);
+my ($dir, $deadline) = @ARGV;
+$| = 1;
+my $position = 0;
+sub drain {
+    if (open(my $out, '<', "$dir/out")) {
+        binmode $out; seek($out, $position, 0);
+        my $bytes;
+        while (read($out, $bytes, 65536)) {
+            print $bytes; $position += length($bytes);
+            last if time >= $deadline;
+        }
+        close $out;
+    }
+}
+sub stop {
+    my ($rc) = @_;
+    if (open(my $pidfile, '<', "$dir/pid")) {
+        my $pid = <$pidfile>; close $pidfile;
+        if (defined($pid) && $pid =~ /^([0-9]+)\s*$/) { kill 'TERM', $1; }
+    }
+    drain();
+    print STDERR "term.sh: stopped (rc $rc; log: $dir/out)\n";
+    exit $rc;
+}
+$SIG{INT} = sub { stop(130) };
+$SIG{TERM} = sub { stop(143) };
+while (1) {
+    drain();
+    if (open(my $result, '<', "$dir/rc")) {
+        my $rc = <$result>; close $result;
+        drain(); exit int($rc);
+    }
+    stop(142) if time >= $deadline;
+    sleep .1;
+}
+PERL
+rc=$?
+# Preserve failed logs for diagnosis; successful handoffs need no temporary tree.
+[ "$rc" != 0 ] || rm -rf "$d"
+exit "$rc"

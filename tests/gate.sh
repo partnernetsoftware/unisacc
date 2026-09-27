@@ -1,5 +1,5 @@
 #!/bin/sh
-# gate.sh [--com] -- every suite a release needs, side by side, each bounded
+# gate.sh [--com] --suite NAME [--suite NAME...] -- explicit bounded batches
 # at 60 s (AGENTS.md), one line per suite with its time.  [S-16 T1]
 #
 #   JOBS=N   suites at once (default 4); each suite also runs PAR jobs inside
@@ -10,21 +10,50 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 if [ "$(uname -s)" = Darwin ] && [ -z "${TERM_SH_INSIDE:-}" ] && [ "${TERM_SH:-1}" != 0 ]; then
-    TERM_SH_ALARM=${TERM_SH_ALARM:-900} exec ./tests/term.sh ./tests/gate.sh "$@"
+    TERM_SH_ALARM=${TERM_SH_ALARM:-60} exec ./tests/term.sh ./tests/gate.sh "$@"
 fi
-COM=0; [ "${1:-}" = --com ] && COM=1
+# Also bound direct/non-macOS calls, including queueing and final collection.
+if [ "${GATE_BOUND:-0}" != 1 ]; then
+    exec perl "$R/tests/bound.pl" 60 env GATE_BOUND=1 "$0" "$@"
+fi
+COM=0; LIST=0; SELECT=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        --com) COM=1; shift;;
+        --list) LIST=1; shift;;
+        --plan) LIST=2; shift;;
+        --suite) [ $# -ge 2 ] || { echo 'missing suite name' >&2; exit 2; }
+            SELECT="$SELECT $2"; shift 2;;
+        *) echo "unknown gate option: $1" >&2; exit 2;;
+    esac
+done
+if [ "$LIST" = 0 ] && [ -z "$SELECT" ]; then
+    echo 'gate: select a bounded batch with --suite NAME; use --list [--com] for names' >&2; exit 2
+fi
+if [ "$LIST" = 0 ]; then
+    names=$(TERM_SH_INSIDE=1 "$0" --list $([ "$COM" = 1 ] && echo --com)) || exit 2
+    seen=" "
+    for selected in $SELECT; do
+        case "$seen" in *" $selected "*) echo "duplicate suite: $selected" >&2; exit 2;; esac
+        printf '%s\n' "$names" | grep -Fxq -- "$selected" || { echo "unknown suite: $selected" >&2; exit 2; }
+        seen="$seen$selected "
+    done
+fi
 JOBS=${JOBS:-4}
 UA=${UA:-/tmp/ua_ref}; export UA
-. "$R/tests/lib.sh"; ua_ready
+. "$R/tests/lib.sh"; [ "$LIST" != 0 ] || ua_ready
 O=$(mktemp -d); trap 'rm -rf "$O"' EXIT
 TC=$(ls tests/c/*.c)
 n=0
 job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     name=$1; shift
+    if [ "$LIST" = 1 ]; then echo "$name"; return; fi
+    if [ "$LIST" = 2 ]; then printf '%s\0' "$name" "$#" "$@"; return; fi
+    case " $SELECT " in *" $name "*) ;; *) return;; esac
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.1; done
     n=$((n+1)); f="$O/$(printf %03d $n).$name"
     ( t0=$(date +%s)
-      out=$(perl -e 'alarm 60; exec @ARGV' env "$@" 2>&1); rc=$?
+      out=$(perl "$R/tests/bound.pl" 60 env "$@" 2>&1); rc=$?
       printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(( $(date +%s)-t0 ))" \
           "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f" ) &
 }
@@ -79,7 +108,7 @@ job exec-pex86 env PE_ARCH=x86_64 ./exec/enc/pecheck.sh           # Shared PE wr
 job exec-winx86self env TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, relocations, real ARM images
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
-job exec-native ./exec/c/nativecheck.sh
+for part in stages chain resources; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
 job exec-net python3 ./exec/c/netcheck.py
 job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
 job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel
@@ -95,10 +124,10 @@ job exec-driver-resources ./exec/c/compilercheck.sh resources
 job exec-warningdriver ./exec/c/warningcheck.sh
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
 job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py
-job exec-multi ./exec/c/multicheck.sh
-job exec-memory ./exec/c/memorycheck.sh
+for kind in cc ua asm; do job exec-multi-$kind env DRIVER_KIND=$kind ./exec/c/multicheck.sh; done
+for kind in cc ua asm; do job exec-memory-$kind env DRIVER_KIND=$kind ./exec/c/memorycheck.sh; done
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
-    job exec-memx86 env MEMORY_ARCH=x86_64 ./exec/c/memorycheck.sh
+    for kind in cc ua asm; do job exec-memx86-$kind env MEMORY_ARCH=x86_64 DRIVER_KIND=$kind ./exec/c/memorycheck.sh; done
 fi
 job exec-memwinarm ./exec/c/winmemorycheck.sh arm64
 job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64
@@ -123,12 +152,17 @@ job hostile     ./tests/hostile.sh
 job kernel      ./tests/kernel.sh
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
+job gate-infra python3 ./tests/queuecheck.py
 if [ "$COM" = 1 ]; then
-    [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
+    [ "$LIST" != 0 ] || [ -x unisacc.com ] || { echo "gate: --com needs ./unisacc.com (make com)"; exit 1; }
     for s in cli ccparity run multi diag diagunits hostile staticinit staticunits; do job com-$s UA="$R/unisacc.com" ./tests/$s.sh; done
     job com-closure UA="$R/unisacc.com" ./tests/closure.sh examples/*.c
 fi
+[ "$LIST" = 0 ] || exit 0
+[ "$n" -gt 0 ] || { echo "gate: no suites executed" >&2; exit 2; }
 wait
+count=$(ls "$O" | wc -l | tr -d ' ')
+[ "$count" -eq "$n" ] || { echo "gate: missing results ($count of $n)" >&2; exit 1; }
 cat "$O"/*
 bad=$(cat "$O"/* | grep -vc ' rc=0 ')
 echo "gate  suites $(ls "$O" | wc -l | tr -d ' ')   failed $bad   $(( $(date +%s)-T0 ))s wall"
