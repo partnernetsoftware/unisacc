@@ -25,4 +25,12 @@ if bound 10 env UA="$T/empty" bash tests/nativeboot.sh > "$T/log" 2>&1; then
     echo 'FAIL nativeboot accepted an empty successful compile'; exit 1
 fi
 grep -F 'produced an empty image' "$T/log" >/dev/null || { cat "$T/log"; exit 1; }
-echo 'nativeboot fault controls: valid bytes + exit 7 rejected; empty + exit 0 rejected'
+# Unsupported hosts cannot report an empty passing proof.
+mkdir "$T/bin"
+printf '#!/bin/sh\necho Unsupported\n' > "$T/bin/uname"
+chmod +x "$T/bin/uname"
+rc=0
+bound 10 env PATH="$T/bin:$PATH" UA="$UA" bash tests/nativeboot.sh > "$T/log" 2>&1 || rc=$?
+[ "$rc" -eq 77 ] || { cat "$T/log"; echo "FAIL unsupported host returned $rc"; exit 1; }
+grep -F 'skip (no host target)' "$T/log" >/dev/null || { cat "$T/log"; exit 1; }
+echo 'nativeboot fault controls: valid bytes + exit 7 rejected; empty + exit 0 rejected; unsupported host exits 77'

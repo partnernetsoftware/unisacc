@@ -20,7 +20,7 @@ case "${1:-}" in
     --windows)
         case "${2:-}" in win/arm64|win/x86_64) ;; *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;; esac
         # One independently scheduled VM proof, including transfer/poll overhead.
-        exec perl -e 'alarm 55; exec @ARGV' bash "$0" --windows-step "$2";;
+        exec perl "$R/tests/bound.pl" 55 bash "$0" --windows-step "$2";;
     --windows-step) mode=windows;;
     *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;;
 esac
@@ -63,8 +63,11 @@ try {
 [IO.File]::WriteAllText('$stem.rc', [string]\$rc)
 EOF
     bound 5 "$UTM" file push "$VM" "$stem.ps1" < "$T/run.ps1" || return 1
-    bound 5 "$UTM" exec "$VM" --hide --cmd powershell.exe -- -NoProfile -ExecutionPolicy Bypass -File "$stem.ps1" >/dev/null || return 1
+    # exec may wait for PowerShell. Cover its 30s compile + 2s kill budget;
+    # an asynchronous return polls only the remainder of the SAME 35s window.
+    # The outer process-group watchdog caps transfer + execution at 55s.
     local deadline=$((SECONDS+35)) rc=''
+    bound 35 "$UTM" exec "$VM" --hide --cmd powershell.exe -- -NoProfile -ExecutionPolicy Bypass -File "$stem.ps1" >/dev/null || return 1
     while [ "$SECONDS" -lt "$deadline" ]; do
         if bound 3 "$UTM" file pull "$VM" "$stem.rc" > "$T/rc" 2>/dev/null; then
             rc=$(tr -d '\r\n' < "$T/rc"); break
@@ -80,7 +83,7 @@ EOF
 bound 55 env UA="$UA" bash -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' _ "$R" || exit 1
 if [ "$mode" = windows ]; then windows "$2"; exit $?; fi
 H=$(host_target)
-[ -n "$H" ] || { echo "nativeboot: skip (no host target)"; exit 0; }
+[ -n "$H" ] || { echo "nativeboot: skip (no host target)"; exit 77; }
 compile "$T/N1" "$UA" "$H" || exit 1
 runnable "$T/N1" "$T/r1" || { fail "prepare N1"; exit 1; }
 compile "$T/N2" "$T/r1" "$H" || exit 1
