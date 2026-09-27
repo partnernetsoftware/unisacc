@@ -712,9 +712,11 @@ def types():
 
 
 def structured_control(section, warnings):
-    section += "-warnings" if warnings and section != "loops" else ""
+    section += "-warnings" if warnings and section in ("block", "if") else ""
     p = P("control." + section)
-    bindings = {"VLDEP": VLDEP}
+    bindings = dict(VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M,
+                    UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
+                    statement="STMT.body" if warnings else "STMT")
     for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
         if part == section:
             p.cur = prefix
@@ -1036,22 +1038,7 @@ def build(locations=False, warnings=False, errors=False):
     from vla import install as vla_install
     vla_install(E,P,VLSIZE,VLFRAME,VLDEP,END_,bad,UNS)
     # statements
-    p = P("STMTS")
-    p.tok({"}": "RET"}, "STMTS.one")
-    P("STMTS.one").call("STMT").goto("STMTS")
-    p = P("STMT.body" if warnings else "STMT")
-    p.tok({"{": "S.blk", "typedef": "TD.parse", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl", "enum": "S.decl",
-           "type=static": "SC.start", "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
-    P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
-    # NAME: stmt -- the label u_NAME (measured, b_goto); otherwise back to the name, an expression
-    p = P("S.idl")
-    p.a(("COPYW", "lpp", "tpos"), ("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok({":": "S.lab"}, "S.idb")
-    P("S.idb").a(("JUMP", "lpp")).call("NEXT").goto("S.expr")
-    P("S.lab").o("u_").a(("SPAN2", "ips", "ipe")).o(":\n").call("NEXT").call("STMT").ret()
-    # goto NAME;
-    p = P("S.goto")
-    p.call("NEXT").tok({TK_ID: "S.gt"}, bad("goto"))
-    P("S.gt").o("  jump u_").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").expect(";").call("NEXT").ret()
+    structured_control("dispatch", warnings)
     structured_control("block", warnings)
     scope_bindings["scope_compare"] = P("S.uw").fresh("b")
     if warnings: scope_bindings["unbind_return"] = P("S.uw1").fresh("r")
@@ -1161,47 +1148,7 @@ def build(locations=False, warnings=False, errors=False):
     p.o("  jump R").num("rl").o("\n").call("NEXT").ret()
     P("S.expr").a(("LDI", "stl", 1)).call("CEXPR").expect(";").call("NEXT").ret()
     structured_control("if", warnings)
-    # switch (e) body: e kept in a new 8-byte slot (not reused after); `jump La`; the body, whose
-    # case/default labels are numbered as met; then `jump Lb`, La: one compare per case in order
-    # (the slot reloaded 64-bit, `ne`, `jumpz Lcase`), `jump Ldefault` or `jump Lb`; Lb: (measured)
-    p = P("S.sw")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
-    p.call("NEXT").expect("(").call("NEXT").vpush("a", "b").call("EXPR").vpop("a", "b").expect(")")
-    p.a(("ALUI", "add", "cur", "cur", 8), ("COPYW", "sws", "cur")).call("MAXF")
-    p.o("  imm r2, ").num("sws").o("\n  sub64 r1, r6, r2\n  store64 [r1+0], r0\n")
-    emit(p, "jump_a")
-    # its own a, b, slot across the body; the enclosing break target, case base and default restored after
-    p.vpush("a", "b", "sws").vpush("lbrk", "csb", "dfl", "swtype").a(("COPYW", "swtype", "vb"), ("COPYW", "lbrk", "b"), ("COPYW", "csb", "csp"), ("LDI", "dfl", -1))
-    p.call("VL.breaktarget").call("NEXT").call("STMT").a(("COPYW", "swd", "dfl"), ("COPYW", "swk", "csb")).vpop("lbrk", "csb", "dfl", "swtype").vpop("a", "b", "sws")
-    p.a(("COPYW", "swb", "swk"))
-    emit(p, "jump_b")
-    emit(p, "label_a").label("SW.l")
-    p.branch({0: "SW.c"}, "SW.d", [("CMP", "swk", "csp")])
-    q = P("SW.c")
-    q.a(("LDX", "swv", "swk", CSV), ("LDX", "swl", "swk", CSL))
-    q.o("  imm r2, ").num("sws").o("\n  sub64 r1, r6, r2\n  load64 r0, [r1+0]\n  imm r1, ").a(("COPYW", "nv", "swv"), ("LDI", "nx", 1)).call("NUMOUT")
-    q.o("\n  ne r0, r0, r1\n  jumpz r0, L").num("swl").o("\n").a(("ALUI", "add", "swk", "swk", 1)).goto("SW.l")
-    p = P("SW.d")
-    p.a(("COPYW", "csp", "swb")).branch({0: "SW.nd"}, "SW.df", [("CMPI", "swd", 0)])
-    P("SW.df").o("  jump L").num("swd").o("\n").goto("SW.e")
-    P("SW.nd").goto("SW.jb")
-    p = P("SW.jb")
-    emit(p, "jump_b").goto("SW.e")
-    p = P("SW.e")
-    emit(p, "label_b").ret()
-    # Case values use the existing constant-expression evaluator, as bounds and enums do.
-    p = P("S.case")
-    p.call("NEXT").call("CE").expect(":").branch({1: "CASE.u32"}, "CASE.width", [("CMPI", "swtype", UNS + 4)])
-    P("CASE.u32").a(("A64I", "and", "cv", "cv", U32M)).goto("CASE.emit")
-    P("CASE.width").branch({1: "CASE.emit"}, "CASE.width2", [("CMPI", "swtype", 8)])
-    P("CASE.width2").branch({1: "CASE.emit"}, "CASE.i32", [("CMPI", "swtype", UNS + 8)])
-    P("CASE.i32").a(("A64I", "shl", "cv", "cv", 32), ("A64I", "sar", "cv", "cv", 32)).goto("CASE.emit")
-    p = P("CASE.emit")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("STX", "csp", CSV, "cv"), ("STX", "csp", CSL, "lab"), ("ALUI", "add", "csp", "csp", 1))
-    p.o("L").num("lab").o(":\n").call("NEXT").call("STMT").ret()
-    p = P("S.dflt")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "dfl", "lab")).o("L").num("lab").o(":\n")
-    p.call("NEXT").expect(":").call("NEXT").call("STMT").ret()
+    structured_control("switch", warnings)
     structured_control("loops", warnings)
     # expressions: EXPR = assignment | the ladder
     p = P("CEXPR")    # e , e , ...: the value is the last; a discarded bare identifier gives its address only (measured)
