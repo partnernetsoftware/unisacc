@@ -115,10 +115,12 @@ def emit_rules(phase):
         selected, section, values, names, prepare = line.rstrip('\n').split('\t')
         if selected != phase: continue
         bindings = {name: globals()[name] for name in ('AOPC', 'ACC', 'SHX', 'BLB', 'SZ', 'KND', 'SCR', 'SCR2', 'SPREG')}
+        bindings.update(RAX=NUM['rax'], RDX=NUM['rdx'])
         bindings.update(json.loads(values))
         bindings.update({name: P(owner).fresh(kind) for name, owner, kind in json.loads(names)})
         install_rules(g, HERE, 'x86-emit', section=section, bindings=bindings,
-                      sequences={**sequences, 'prepare': sequences[prepare]})
+                      sequences={**sequences, 'prepare': sequences[prepare]},
+                      classes={'division_registers': tuple(NUM[r] for r in REGMAP['x86_64'][:7])})
 
 
 def build(image=False):
@@ -209,54 +211,7 @@ def build(image=False):
               **{v: "FP." + k for k, v in FP_IDS.items()}, **{v:"WX.store" for v in WIN_IDS.values()}}, "DEAD.op", [("RLD", "cls")])
     g.on("DEAD.op", range(257), "DEAD", E.rej("not covered: an op outside the first encoder slice"), "r")
     emit_rules('pre')
-    # Integer division/remainder: hand sequence from emit_x86, with the existing
-    # ALU/MEM encoders reused. Save rax/rdx in the tape stack (not push/pop).
-    # Operand domain is the non-stack tape registers; r11 is reserved scratch.
-    for nm, unsigned, remainder in (("div", 0, 0), ("mod", 0, 1), ("udiv", 1, 0), ("umod", 1, 1)):
-        P("E." + nm).a(("LDI", "dv_unsigned", unsigned), ("LDI", "dv_rem", remainder)).goto("DV.check")
-    p = P("DV.check")
-    p.branch({3: "DV.reg0"}, "DEAD.op", [("RLD", "na")])
-    allowed = tuple(NUM[r] for r in REGMAP["x86_64"][:7])
-    for i in range(3):
-        P("DV.reg%d" % i).branch({allowed: "DV.reg%d" % (i + 1) if i < 2 else "DV.save"}, "DEAD.op", [("RLD", "a%d" % i)])
-
-    def dmov(p, dst, src):
-        p.a(("LDI", "al_o", 0x89), ("LDI" if isinstance(dst, int) else "COPYW", "al_d", dst),
-            ("LDI" if isinstance(src, int) else "COPYW", "al_s", src)).call("ALU")
-
-    def dmem(p, opcode, reg, disp):
-        p.a(("LDI", "me_o1", opcode), ("LDI", "me_two", 0), ("LDI", "me_o2", 0),
-            ("LDI", "me_w", 1), ("LDI", "me_66", 0), ("LDI", "me_r", reg),
-            ("LDI", "me_b", SPREG), ("LDI", "me_d", disp)).call("MEM")
-
-    def dadj(p, ext):
-        p.a(("LDI", "rx_w", 1), ("LDI", "rx_r", 0), ("LDI", "rx_b", SPREG)).call("REX")
-        byte(p, 0x83)
-        p.a(("LDI", "mr_m", 3), ("LDI", "mr_r", ext), ("LDI", "mr_b", SPREG)).call("MODRM")
-        byte(p, 16)
-
-    p = P("DV.save")
-    dadj(p, 5)
-    dmem(p, 0x89, NUM["rax"], 0)
-    dmem(p, 0x89, NUM["rdx"], 8)
-    dmov(p, SCR, "a2")
-    dmov(p, NUM["rax"], "a1")
-    p.branch({1: "DV.u"}, "DV.s", [("RLD", "dv_unsigned")])
-    p = P("DV.u")
-    for b in (0x48, 0x31, 0xD2, 0x49, 0xF7, 0xF3): byte(p, b)
-    p.goto("DV.result")
-    p = P("DV.s")
-    for b in (0x48, 0x99, 0x49, 0xF7, 0xFB): byte(p, b)
-    p.goto("DV.result")
-    P("DV.result").branch({1: "DV.rem"}, "DV.quot", [("RLD", "dv_rem")])
-    p = P("DV.rem"); dmov(p, SCR, NUM["rdx"]); p.goto("DV.restore")
-    p = P("DV.quot"); dmov(p, SCR, NUM["rax"]); p.goto("DV.restore")
-    p = P("DV.restore")
-    dmem(p, 0x8B, NUM["rax"], 0)
-    dmem(p, 0x8B, NUM["rdx"], 8)
-    dadj(p, 0)
-    dmov(p, "a0", SCR)
-    p.goto("NEXTL")
+    emit_rules('division')
     emit_rules('post')
     install_fp(E, byte)
     install_address(E, byte, KND, SZ, OFF, LABD)
@@ -265,12 +220,13 @@ def build(image=False):
     from x86win import install as install_win
     install_win(E, byte, KND, SZ)
     relax()
-    p = P("DONE").call("RELAX").call("LAYOUT").call("WRITE")
+    completion = {'done'+str(i): P('DONE').fresh('r') for i in range(3)}
+    install_rules(g, HERE, 'x86-emit', section='done-write', bindings=completion)
     if image:
         from elfimage import install as install_elf
         install_elf(E, byte, OFF, LABD,image_format=image if isinstance(image,str) else "elf")
-        p.call("ELF")
-    p.a(("ACCEPT",)).goto("DEAD")
+        completion['done3'] = P('DONE').fresh('r')
+    install_rules(g, HERE, 'x86-emit', section='done-image' if image else 'done-raw', bindings=completion)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
