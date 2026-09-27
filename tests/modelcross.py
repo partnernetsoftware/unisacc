@@ -8,7 +8,7 @@ Windows APE runs its x86_64 PE driver; -run uses that default target. The separa
 compile/native-execution probe uses the requested Windows target. This is model
 product smoke coverage, not bootstrap or a six-platform completeness claim.
 """
-import argparse, hashlib, io, json, os, pathlib, shlex, shutil, subprocess, sys, tarfile, tempfile, time, uuid
+import argparse, gzip, hashlib, io, json, os, pathlib, shlex, shutil, subprocess, sys, tarfile, tempfile, time, uuid
 R = pathlib.Path(__file__).resolve().parents[1]
 SOURCES = {
     'hello': '#include <stdio.h>\nint main(void){printf("hello from C99\\n");return 0;}\n',
@@ -19,7 +19,7 @@ SOURCES = {
 def run(args, seconds=15, data=None, okay=True):
     p = subprocess.run(['perl', str(R/'tests/bound.pl'), str(seconds), *map(str,args)],
                        input=data, capture_output=True, timeout=seconds+3)
-    if okay and p.returncode:
+    if okay and (p.returncode or b'Error from event:' in p.stderr):
         raise RuntimeError(f'{args}: rc={p.returncode} {p.stderr.decode(errors="replace")[-2000:]}')
     return p
 
@@ -97,18 +97,18 @@ def main():
             def push(name,data):run([utm,'file','push',vm,stem+name],8,data)
             def pull(name):return run([utm,'file','pull',vm,stem+name],8).stdout
             try:
-                push('.exe',blob)
-                received=pull('.exe');actual=hashlib.sha256(received).hexdigest()
-                if actual!=digest:
-                    raise RuntimeError(f'guest candidate hash differs: expected {len(blob)} bytes {digest}; received {len(received)} bytes {actual}')
+                # Transport compression only: guest verifies the original candidate
+                # hash before executing it. Avoid a multi-megabyte UTM round trip.
+                push('.gz',gzip.compress(blob,mtime=0))
                 for name,source in sources.items():
                     push('-'+name+'.c',source.encode())
                     # Synchronous exec gets enough budget; each guest child owns a shorter timeout.
                     script=r"""$ErrorActionPreference='Stop'
 function Step($exe,$argv,$out,$seconds) {
- $opts=@{FilePath=$exe;RedirectStandardOutput=$out;RedirectStandardError=($out+'.err');PassThru=$true}
- if($argv.Count){$opts.ArgumentList=$argv}
- $p=Start-Process @opts
+ $p=New-Object System.Diagnostics.Process
+ $p.StartInfo.FileName='cmd.exe';$p.StartInfo.UseShellExecute=$false
+ $p.StartInfo.Arguments='/c '+$exe+' '+($argv -join ' ')+' >'+$out+' 2>'+ $out+'.err'
+ $p.Start() | Out-Null
  if(-not $p.WaitForExit($seconds*1000)){
   $k=Start-Process taskkill -ArgumentList @('/PID',$p.Id,'/T','/F') -PassThru -WindowStyle Hidden
   if(-not $k.WaitForExit(2000)){$k.Kill()};throw 'timeout'
@@ -116,30 +116,43 @@ function Step($exe,$argv,$out,$seconds) {
  $p.WaitForExit();if($p.ExitCode -ne 0){throw ('rc='+$p.ExitCode)}
 }
 try {
+ $inputFile=[IO.File]::OpenRead('CAND.gz')
+ $zip=New-Object IO.Compression.GzipStream($inputFile,[IO.Compression.CompressionMode]::Decompress)
+ $outputFile=[IO.File]::Create('CAND.exe');$zip.CopyTo($outputFile)
+ $outputFile.Dispose();$zip.Dispose();$inputFile.Dispose()
+ $hash=(Get-FileHash -Algorithm SHA256 'CAND.exe').Hash.ToLower()
+ [IO.File]::WriteAllText('STEM.hash',$hash)
+ if($hash -ne 'EXPECTED_HASH'){throw 'candidate hash differs'}
  Step 'CAND.exe' @('-run','STEM.c') 'STEM.mem' 12
  Step 'CAND.exe' @('-b','TARGET','STEM.c','-o','STEM.bin.exe') 'STEM.compile' 12
  if((Get-Item 'STEM.bin.exe').Length -eq 0){throw 'empty image'}
  Step 'STEM.bin.exe' @() 'STEM.native' 8
  [IO.File]::WriteAllText('STEM.rc','0')
 } catch { [IO.File]::WriteAllText('STEM.rc',$_);exit 1 }
-""".replace('STEM',stem+'-'+name).replace('CAND',stem).replace('TARGET',args.target)
+""".replace('STEM',stem+'-'+name).replace('CAND',stem).replace('TARGET',args.target).replace('EXPECTED_HASH',digest)
                     push('.ps1',script.encode())
                     deadline=time.monotonic()+40
-                    run([utm,'exec',vm,'--hide','--cmd','powershell.exe','--','-NoProfile','-ExecutionPolicy','Bypass','-File',stem+'.ps1'],37)
+                    run([utm,'exec',vm,'--cmd','cmd.exe','--','/c','powershell.exe -NoProfile -ExecutionPolicy Bypass -File '+stem+'.ps1'],37)
                     # UTM may return before the guest completes: poll a unique per-probe result.
                     status=None
                     while time.monotonic()<deadline:
                         result=run([utm,'file','pull',vm,stem+'-'+name+'.rc'],2,okay=False)
-                        if result.returncode==0:
+                        if result.returncode==0 and result.stdout.strip():
                             status=result.stdout.strip();break
                         time.sleep(0.2)
-                    if status!=b'0':raise RuntimeError('guest probe failed or timed out: '+repr(status))
+                    if status!=b'0':
+                        details=[]
+                        for suffix in ('.mem','.mem.err','.compile','.compile.err','.native','.native.err'):
+                            result=run([utm,'file','pull',vm,stem+'-'+name+suffix],2,okay=False)
+                            if result.stdout:details.append((suffix,result.stdout[-1500:]))
+                        raise RuntimeError('guest probe failed or timed out: '+repr((status,details)))
+                    if pull('-'+name+'.hash').decode().strip()!=digest:raise RuntimeError('guest candidate hash differs')
                     mem,native=pull('-'+name+'.mem'),pull('-'+name+'.native')
                     # CRT text mode may turn stdout LF into CRLF on Windows.
                     if mem.replace(b'\r\n',b'\n')!=expected[name] or native.replace(b'\r\n',b'\n')!=expected[name]:raise RuntimeError(name+': output mismatch')
                     print(args.target,name,'APE x86_64 -run + requested-target guest compile/native = host',flush=True)
             finally:
-                run([utm,'exec',vm,'--hide','--cmd','powershell.exe','--','-NoProfile','-Command',"Remove-Item -Force '"+stem+"*'"],8,okay=False)
+                run([utm,'exec',vm,'--cmd','cmd.exe','--','/c','del /q '+stem+'*'],8,okay=False)
     if hashlib.sha256(candidate.read_bytes()).hexdigest()!=digest:raise RuntimeError('candidate changed during validation')
     print('PASS',args.target,len(sources),'fixed programs, explicit candidate; no bootstrap claim',flush=True)
 

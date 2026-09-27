@@ -5003,3 +5003,7 @@ corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28�
 本轮并行收口决定：enc最终来源审计已落exec/enc/CONTROL_AUDIT.md，承认字段模板调用边/初始化动作仍属Python装配，未称Python零控制。持久x86win门禁加入net构造、全域check-net与原全套夹具，父主树3a17d96复跑6.15秒全过。modelboot入口已合，父用固定81c04285候选独立prepare/bootstrap/probe均通过，N1=N2完整字节cebaed0a…13f96，后代空PATH的O0/O2内存/native同host且缺包拒绝；/tmp/unisacc-parent-modelboot-928。接下来构建脚本按shared/六独立target/pack提供分步入口以便双槽并发，不改默认产品、不另造调度框架；E3完整函数指针组继续，Windows真实候选验收独立执行，客机hash不符先停并诊断而非跳过核对。
 
 Windows候选smoke首次在guest hash核对处失败，尚未执行模型，不归因编译器；独立6MB传输15秒超时。保留真实失败及日志，停止/关闭本次启动VM。父补入口清理范围：push与hash也必须在finally内，hash错误显示实际/期望字节及摘要，便于区分传输不完整；不放宽校验，不重算期望，不把未测计pass。
+
+Windows传输定位进展：父1KB往返相同、6.2MB push12秒超时；gzip压至977980B，上传4.2秒，客机cmd.exe启动PowerShell解压后SHA256确为81c04285…，说明可保留原始候选校验而缩短传输。utmctl存在rc0但stderr报Error from event、exec早返回的行为，入口需明确识别并等待唯一结果。改为gzip运输、客机解压先核原hash再运行，cmd.exe启动脚本、非空结果轮询；不是修改模型包或跳过校验。
+
+Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip977980B，客机解压后的原6,225,287B哈希先核对；原Start-Process返回空ExitCode及cmd引号问题使早两轮失败，改用项目既有Diagnostics.Process/cmd等待法，路径为自建无空格随机前缀，UTM rc0但Error from event明确拒绝。最终win/arm64及win/x86_64各hello/fib/convert六次独立≤55秒全部PASS；每次含APE x86_64运行-run以及模型编译指定目标后客机实际执行，与host结果相同。两槽并发，实际Windows11 ARM64环境，x86程序经仿真，不称x86实机或完整Windows自举。所有候选只读、未改包；父清理诊断临时文件后关闭本轮启动VM，status=stopped。
