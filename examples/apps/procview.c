@@ -1,8 +1,17 @@
 /* procview: process-tree analysis.
  *
- * Input is `ps -axo pid=,ppid=,rss=,comm=` (RSS in KiB): from a file, from
- * stdin with "-", or -- with no argument -- a built-in snapshot, so the
- * default output is deterministic.
+ * On Linux, with no argument, it reads real kernel data straight out of
+ * /proc/N/status for every N -- no subprocess, no `ps`: this compiler's
+ * syscall catalog has `open`/`read`/`close` but no directory listing
+ * (`getdents`) and no `fork`/`exec`/`popen`, so it cannot list /proc itself
+ * or run `ps`; it tries every N up to PROCMAX instead. That is a real
+ * limitation, not a style choice -- a system with a live pid above PROCMAX
+ * is invisible to it, and this only works where /proc exists.
+ *
+ * On any other target (or if that scan finds nothing), input is
+ * `ps -axo pid=,ppid=,rss=,comm=` (RSS in KiB): from a file, from stdin
+ * with "-", or -- with no argument and no /proc -- a built-in snapshot,
+ * so the default output is still deterministic there.
  *
  *   ps -axo pid=,ppid=,rss=,comm= | unisacc -run procview.c -
  *
@@ -16,6 +25,7 @@
 
 #define MAXP 4096
 #define MAXD 256
+#define PROCMAX 20000
 
 struct proc {
     long pid, ppid, rss, sub;
@@ -104,6 +114,45 @@ static void add_line(const char *s)
     p->name[k] = 0;
 }
 
+#ifdef __linux__
+/* Real data, no subprocess: /proc/N/status for every N up to PROCMAX (see
+ * the file comment for why it is a scan and not a directory listing). Each
+ * status file gives Name, PPid and VmRSS directly, so the result is fed
+ * through add_line() in the same "pid ppid rss name" shape ps would have
+ * given it -- one parser either way. */
+static int scan_proc(void)
+{
+    char path[32], line[256], out[320];
+    long pid, ppid, rss;
+    char name[64];
+    FILE *f;
+    for (pid = 1; pid <= PROCMAX; pid++) {
+        sprintf(path, "/proc/%ld/status", pid);
+        f = fopen(path, "r");
+        if (f == 0) continue;
+        ppid = 0; rss = 0; name[0] = 0;
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "Name:", 5) == 0) {
+                char *s = line + 5, *e;
+                while (*s == ' ' || *s == '\t') s++;
+                for (e = s; *e && *e != '\n'; e++) ;
+                *e = 0;
+                strncpy(name, s, 63); name[63] = 0;
+            } else if (strncmp(line, "PPid:", 5) == 0) {
+                ppid = strtol(line + 5, 0, 10);
+            } else if (strncmp(line, "VmRSS:", 6) == 0) {
+                rss = strtol(line + 6, 0, 10);
+            }
+        }
+        fclose(f);
+        if (name[0] == 0) continue;             /* status was unreadable */
+        sprintf(out, "%ld %ld %ld %s", pid, ppid, rss, name);
+        add_line(out);
+    }
+    return NP > 0;
+}
+#endif
+
 static const char *mb(long kb)
 {
     static char buf[4][24];
@@ -181,7 +230,10 @@ int main(int argc, char **argv)
         if (f == 0) { fprintf(stderr, "procview: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
-        for (i = 0; sample[i]; i++) add_line(sample[i]);
+#ifdef __linux__
+        if (!scan_proc())
+#endif
+            for (i = 0; sample[i]; i++) add_line(sample[i]);
     }
     if (NP == 0) { fprintf(stderr, "procview: no processes\n"); return 1; }
 
