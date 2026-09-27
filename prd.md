@@ -4158,3 +4158,66 @@ C99 is 57/57 including `main 109 109 102`; the actual model container is 42/57,
 1,350,032 B. The remaining declaration/library gaps and reported function-
 pointer-array defects remain open. Test infrastructure is committed separately
 as 1cad167; no pending unrelated changes are swept into the product slice.
+
+
+Function-pointer-array correction in progress (2026-09-27): independently
+reproduced both reported probes on the current product .com. Host cc exits 0
+(argc 1); product local probe prints 652742492, global eight-pointer probe
+terminates with SIGSEGV. fpdecl treats an unsized [] as one pointer, and the
+local array branch bypasses static storage. Fix the inferred extent and route
+static arrays through the existing static-storage initializer. Check explicit
+and inferred extents, automatic/global/static storage, and persistence across
+calls. Python's declarator/local_decl already represents an unsized array and
+infers its initializer count; verify before deciding it needs a change.
+
+Function-pointer-array fix, targeted evidence: product -O0/-O1/-O2 in both
+-run and native forms, plus unchanged Python front end, equal host cc on
+b_staticfnptr_local (1 71 61 30 20 24 24) and b_fnptr_table8 (56 1 64 72).
+These cover inferred/explicit extents, automatic/global/static storage,
+zero-filled trailing slots, frame preservation and static persistence.
+E3 uses the shared initializer counter and static storage walker; global
+function-pointer initializers now enter the existing initializer path.
+Old fixed E3 245 + new 2 equal using the C table executor; both new cases
+also equal on the Python simulator. Source -> E2/E1/E3 threshold networks:
+old 98 + new 2 = 100 equal, 0 lost/bad/refused. Only after those runs were
+keep-e3/keep-chain raised to 247/100. E3 = 4492 states, 8777 hidden units,
+506991 B network, exhaustive network/table check on 1158680 observations.
+Full fresh gate --com queue follows on this tree; targeted success does not
+replace it. No release or default-route switch.
+
+Gate observation: closure-c2 found a probe-environment mismatch, not an image
+or array-value mismatch. Its `$UA source -run` invocation passes the trailing
+-run as a program argument (argc=2), while the tape VM sees argc=1. New local
+probe now captures argc at main entry and checks it remains unchanged after
+array initialization, rather than requiring a fixed argument count. All six
+images already matched; the static-array values were identical. Continue the
+frozen run, then recheck the corrected probe through both executors/closure;
+do not erase the original failed receipt or call it a passing run.
+
+Function-pointer-array slice verified (frozen candidate based on 31e033d plus
+this patch): `/tmp/unisacc-fp-frozen-gate` completed all 114 gate --com items,
+112 pass and two original failures (closure-c2, difftest_o), both solely the
+new probe's argc=1 assumption. Preserve that failed run. After changing ONLY
+the probe to compare argc with its entry value, `/tmp/unisacc-fp-finalcheck`
+passed closure-c2 (186 identical images; 31 host runs), difftest_o (390 agree,
+0 wrong) and the 100-file network chain. No product/model source hash changed
+between these runs. This is full-list evidence plus focused correction, not
+one pristine 114/114 run. Longest suite 49.861 s; rolling queue uses two slots,
+all windows bounded below 60 s, no timeout failures. Earlier root-tree window
+was invalidated on a concurrent example edit; its receipts were not reused.
+
+Both final probes also match host cc with product and actual model container
+at -O0/-O1/-O2, in -run and native compiled execution. Unchanged Python front
+end agrees. Product .com: 1350992 B, SHA-256
+bbb4bd59b4b0e9b5c2f92b5fbd28571ad3408be39b3e08a4e7d4c64edd9424ca.
+Development container `/tmp/unisacc-fp-modelcandidate/unisacc-next.com`:
+5819785 B, SHA-256
+fae217ff8fefbe923912535e17cc639dba3197ac9413ec7960e81d7d3e704bdd.
+Fresh model C99: 42/57, 0 wrong, 15 refusals, exit 1; remaining compatibility
+work is not waived. Product C99 57/57 is not proof of language completeness.
+No default-path switch, push, release, or new VM execution claim.
+
+External example updates 76bf9a0/31e033d/2287f58 are cc-unisacc's independent
+work. Optional user-facing process/directory/syscall bindings are reported
+as absent, not scheduled in this repair. Their new VM claims were not rerun
+by cdx; no such claim is inferred from the image-comparison gates above.

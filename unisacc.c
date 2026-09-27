@@ -15018,7 +15018,7 @@ int skipparen(void) {                 /* over a balanced (...) at the cursor */
     return var;
 }
 int fpdecl(void) {
-    int t; int var;
+    int t; int var; int unsized;
     adv();
     while (eatstar()) { }
     /* the name may be absent: `int (*[4])(int)` as a parameter type */
@@ -15033,13 +15033,14 @@ int fpdecl(void) {
         return t;
     } }
     if (cur() == T_ID) t = adv();
-    fpdim = 0; fpadim = 0; fpfn = 0 - 1; fpretfp = 0;
+    fpdim = 0; fpadim = 0; fpfn = 0 - 1; fpretfp = 0; unsized = 0;
     /* `(*pick(int which))(int, int)`: pick takes (int which) and RETURNS
        the pointer -- the declarator nests, and the inner list is pick's */
     if (cur() == tidx("(", 1)) { fpfn = tp; skipparen(); }
     while (cur() == tidx("[", 1)) {             /* an array of pointers */
         adv(); fpdim = 1;
         if (cur() != tidx("]", 1)) fpdim = cexpr();
+        else unsized = 1;
         need(tidx("]", 1), "]");
     }
     need(tidx(")", 1), ")");
@@ -15052,6 +15053,9 @@ int fpdecl(void) {
         /* `(*p)[4]`: a pointer to arrays of 4 -- p[1] strides a whole row */
         adv(); fpadim = cexpr(); need(tidx("]", 1), "]");
     } }
+    /* The initializer follows the whole declarator, not the inner [].
+       Do not scan into the next declaration when no initializer is present. */
+    if (unsized) { if (cur() == tidx("=", 1)) fpdim = initcountat(tp + 1); }
     /* `(*const x)` is just a parenthesised pointer: declfp stays 0 */
     return t;
 }
@@ -15066,7 +15070,7 @@ int dkind(int flt) {
     return 0;
 }
 int local_decl(void) {
-    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat;
+    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
@@ -15077,17 +15081,20 @@ int local_decl(void) {
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
         declptr = declspecptr; declpd = declspecpd;
-        declflt = lflt0;
+        declflt = lflt0; fpn = 0;
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; lfpret = fpretfp; sst = 0 - 1; declstruct = 0 - 1;
             if (fpdim > 0) {
-                /* `int (*fs[2])(int, int)`: an array of pointers */
+                fpn = fpdim; declpd = 1; declfp = 0;
+            }
+            if (fpn > 0 && lstat == 0) {
+                /* `int (*fs[2])(int, int)`: an automatic array of pointers */
                 lbind = scopebind("local", 5, t);
                 off = alloc_local(fpdim * 8);
                 declbytes = fpdim * 8; declfp = 0;
                 sadd(t, lbind, off, 8);
-                symkind[nsym - 1] = 3;
+                symkind[nsym - 1] = 3; symptrd[nsym - 1] = 2;
                 if (eat(tidx("=", 1))) { initisarr = 1; initaggr(0, 0, off, 8, 0 - 1, fpdim * 8); }
                 if (eat(tidx(",", 1))) continue;
                 break;
@@ -15110,6 +15117,7 @@ int local_decl(void) {
         }
         lbind = scopebind("local", 5, t);
         n = 1; isarr = 0;
+        if (fpn > 0) { n = fpn; isarr = 1; }
         lfp = declfp;
         if (lstat) {
             int ew; long nb; int lk2; int slabel;

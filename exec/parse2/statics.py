@@ -20,7 +20,12 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS):
     P('IX.new').a(('ALUI','add','ixcount','ixcount',1),('STX','tpos',TIX,'ixcount')).goto('NX')
     P('INDEX').call('NEXT').tok({'eof':'RET'},'INDEX')
     P('SC.start').call('NEXT').call('TSPEC').goto('SC.name')
-    P('SC.name').tok({E.TK_ID:'SC.id'}, ('rej','not covered: static declarator'))
+    P('SC.name').tok({E.TK_ID:'SC.id','(':'SC.fp'}, ('rej','not covered: static declarator'))
+    P('SC.fp').call('FPDECL').a(('COPYW','si_pos','fppos'),
+        ('LDX','si_lab','fppos',TIX),('ALUI','sub','si_lab','si_lab',1),
+        ('ALUI','mul','si_unit','unit_epoch',unit_span),('ALU','add','si_lab','si_lab','si_unit'),
+        ('COPYW','prd','fpn')).branch({1:'SC.fpscalar'},'SC.size',[('CMPI','fpn',0)])
+    P('SC.fpscalar').a(('LDI','prd',1)).goto('SC.size')
     P('SC.id').a(('COPYW','ips','ps'),('COPYW','ipe','pe'),('COPYW','si_pos','tpos'),
         ('LDX','si_lab','tpos',TIX),('ALUI','sub','si_lab','si_lab',1),
         ('ALUI','mul','si_unit','unit_epoch',unit_span),('ALU','add','si_lab','si_lab','si_unit'),
