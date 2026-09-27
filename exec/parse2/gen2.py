@@ -1011,7 +1011,7 @@ def build(locations=False, warnings=False, errors=False):
     P("FN.nx").a(("LDI","infunc",0)).call("NEXT").goto("UNIT")
     # DECL: the identifier ps..pe becomes the next 8-byte slot (measured: params and int locals)
     # DECLN: the name was saved in ips..ipe (the current token is after it)
-    P("DECLN").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).goto("DECL")
+    install_rules(g, os.path.dirname(__file__), "declaration", section="name")
     # Scope record fields are declared once; bind/unwind share their layout bindings.
     scope_bindings = {name: getattr(E, name) for name in
                       ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
@@ -1023,16 +1023,14 @@ def build(locations=False, warnings=False, errors=False):
     if warnings: scope_bindings["bind_return"] = P("BIND").fresh("r")
     install_rules(g, os.path.dirname(__file__), "scope", bindings=scope_bindings,
                   sequences=scope_sequences, section="bind-warnings" if warnings else "bind")
+    # Preserve fresh continuation identities; declaration semantics live in TSV.
     p = P("DECL")
-    p.call("BIND")
-    if warnings: p.call("WU.local")
-    p.a(("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("STX", "v", E.BASE, "tb"),
-        ("STX", "v", E.ARR, "dar"), ("COPYW", "s", "cur")).call("MAXF").a(("COPYW", "t", "td")).branch({1: "DC.p"}, "DC.a", [("CMPI", "dar", 0)])
-    P("DC.a").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("DC.p")
-    P("DC.p").a(("STX", "v", E.PTR, "t")).ret()
-    # the frame is the deepest point reached: a block's slots are reused after it ends (measured, probe p12)
-    P("MAXF").branch({2: "MAXF.u"}, "RET", [("CMP", "cur", "max")])
-    P("MAXF.u").a(("COPYW", "max", "cur")).ret()
+    decl_bindings = dict(scope_bindings, after_bind=p.fresh("r"))
+    decl_bindings["after_local"] = p.fresh("r") if warnings else decl_bindings["after_bind"]
+    decl_bindings.update(after_frame=p.fresh("r"), array_test=p.fresh("b"),
+                         after_dims=P("DC.a").fresh("r"), frame_test=P("MAXF").fresh("b"))
+    for section in ("entry-warnings" if warnings else "entry", "body"):
+        install_rules(g, os.path.dirname(__file__), "declaration", bindings=decl_bindings, section=section)
     from vla import install as vla_install
     vla_install(E,P,VLSIZE,VLFRAME,VLDEP,END_,bad,UNS)
     # statements
