@@ -123,6 +123,7 @@ fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver-core ./exec/c/compilercheck.sh core
 job exec-driver-resources ./exec/c/compilercheck.sh resources
+job exec-driver-language ./exec/c/compilercheck.sh language
 job exec-warningdriver ./exec/c/warningcheck.sh
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
 job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py

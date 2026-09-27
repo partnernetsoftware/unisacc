@@ -9,7 +9,13 @@ def ok(cmd, **kw):
 src=pathlib.Path('examples/hello.c').resolve();n=0
 drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
 part=sys.argv[4] if len(sys.argv)>4 else 'all'
-assert part in ('all','core','resources'),part
+assert part in ('all','core','resources','language'),part
+def assembly_package(directory):
+    isolated=p/directory;isolated.mkdir()
+    asm=isolated/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
+    (isolated/'models.pkg').write_bytes((p/'compiler.pkg').read_bytes())
+    (isolated/'hello.c').write_bytes(src.read_bytes())
+    return isolated,[asm,'--models','models.pkg']
 if part in ('all','core'):
     # The migrated pipeline builds the driver itself, not just its input programs.
     netdriver=p/'driver-net'
@@ -207,11 +213,7 @@ if part in ('all','resources'):
         assert ok([exe,'--models',p/'compiler.pkg',probe,*flags])==ok([ua,probe,*flags])
     # Assembly driver consumes the same explicit package from an isolated cwd;
     # this is the real compiler CLI, not a standalone core_run harness.
-    asmdir=p/'asm-isolated';asmdir.mkdir()
-    asm=asmdir/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
-    (asmdir/'models.pkg').write_bytes((p/'compiler.pkg').read_bytes())
-    (asmdir/'hello.c').write_bytes(src.read_bytes())
-    base=[asm,'--models','models.pkg']
+    asmdir,base=assembly_package('asm-isolated')
     for mode in ['-E','-S']:
         flags=['-b',target,mode,'-O2']
         assert ok([*base,'hello.c',*flags],cwd=asmdir)==ok([ua,src,*flags])
@@ -222,22 +224,6 @@ if part in ('all','resources'):
     assert ok([*base,'-run','hello.c'],cwd=asmdir)==b'hello from C99\n'
     assert set(asmdir.iterdir())==before
     print('assembly compiler driver: isolated package, native output and memory run pass')
-    # Decimal rounding and the entire carried math header must survive the real
-    # network route, not just the converter's unit harness. Independent cc runs
-    # check the probes' zero-exit expectations as well as reference tape spelling.
-    probes=[pathlib.Path('exec/parse2/probes/'+name+'.c') for name in
-            ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators']]
-    probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
-               ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
-                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures']]
-    for source in probes:
-        source=source.resolve(); name=source.stem
-        host=p/(name+'-cc'); native=p/(name+'-model')
-        ok(['cc','-w',source,'-lm','-o',host]); expected=ok([host])
-        for level in ['-O0','-O2']:
-            assert ok([*base,'-run',source,level],cwd=asmdir)==expected
-        ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==expected
-    print('decimal/math/string/void/compound probes: host cc and ASM network driver, memory/native pass')
     # Public-shaped commands operate with only the container and source in cwd.
     isolated=p/'isolated';isolated.mkdir()
     com=isolated/'compiler.com';com.write_bytes((p/'driver.com').read_bytes())
@@ -252,4 +238,29 @@ if part in ('all','resources'):
     before=set(isolated.iterdir())
     assert ok([*base,'-run','hello.c'],cwd=isolated)==b'hello from C99\n'
     assert set(isolated.iterdir())==before, 'memory run created a file'
-    print('compiler driver resources: macros, headers, printf, math and isolated container pass',flush=True)
+    print('compiler driver resources: macros, headers, printf and isolated containers pass',flush=True)
+
+if part in ('all','language'):
+    asmdir,base=assembly_package('language-isolated')
+    # Decimal rounding and the entire carried math header must survive the real
+    # network route, not just the converter's unit harness. Independent cc runs
+    # check the probes' zero-exit expectations as well as reference tape spelling.
+    probes=[pathlib.Path('exec/parse2/probes/'+name+'.c') for name in
+            ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators', 'scalar_prefix']]
+    probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
+               ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
+                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref']]
+    for source in probes:
+        source=source.resolve(); name=source.stem
+        host=p/(name+'-cc'); native=p/(name+'-model')
+        ok(['cc','-w',source,'-lm','-o',host]); expected=ok([host])
+        for level in ['-O0','-O2']:
+            assert ok([*base,'-run',source,level],cwd=asmdir)==expected
+        ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==expected
+    # Invalid pointer/null conditional operands must fail without emitted tape.
+    source=pathlib.Path('exec/c/probes/conditional_deref.c').resolve()
+    for macro in ['QT_RUNTIME_ZERO','QT_FLOAT_ZERO','QT_DIFFERENT_POINTER']:
+        for level in ['-O0','-O2']:
+            r=run([*base,source,'-D'+macro,level,'-b',target,'-S'],cwd=asmdir)
+            assert r.returncode!=0 and not r.stdout,(macro,level,r.returncode,r.stdout,r.stderr)
+    print(f'compiler driver language: {len(probes)} host/ASM network memory O0/O2 and native probes; 6 conditional rejects pass',flush=True)

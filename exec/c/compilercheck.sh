@@ -14,8 +14,10 @@ b python3 exec/c/tbl.py "$T/o1.json" "$T/o1.tbl"
 b python3 exec/c/net.py "$T/o1.tbl" "$T/o1.net"
 b "$T/run" --check-net "$T/o1.tbl" "$T/o1.net"
 b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compiler.pkg" "$T/route.tsv"
+case ${1:-all} in all|core|resources)
 b cc -O2 -Wall -Wextra exec/c/compiler.c -o "$T/driver-cc"
 b "$UA" -O2 exec/c/compiler.c -o "$T/driver-ua"
+;; esac
 b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.sh -O2 exec/c/compiler.c -o "$T/driver-asm"
 # Only the resources contract executes the packaged container. Core checks
 # use the three raw drivers; rebuilding an unused APE costs their time budget.

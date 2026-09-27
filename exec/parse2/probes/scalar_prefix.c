@@ -16,7 +16,12 @@ int main(void) {
     h.value = identity(ld);
     int once = +(n += 1);
     printf("%f %f %d %d %d %d %d %d %d\n", +f, +d, +c, +u, +s, +us, +b, once, n);
-    printf("%d %d %d %d %d %d %d\n", (int)sizeof(+c), (int)sizeof(+u), (int)sizeof(+s), (int)sizeof(+us), (int)sizeof(+b), (int)sizeof(long double), (int)sizeof(h));
+    printf("%d %d %d %d %d\n", (int)sizeof(+c), (int)sizeof(+u), (int)sizeof(+s), (int)sizeof(+us), (int)sizeof(+b));
+#ifdef __UNISA__
+    if (sizeof(long double) != sizeof(double) || sizeof(h) != sizeof(double)) return 1;
+#else
+    if (sizeof(h) != sizeof(long double)) return 1;
+#endif
     printf("%f %f\n", (double)h.value, (double)(long double)4.5);
     return 0;
 }
