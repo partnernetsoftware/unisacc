@@ -135,7 +135,7 @@ def install(E, arch="x86_64", os_="lnx"):
             p.branch({1:'SC.'+op+'.m'+str(mode)},'SC.'+op+'.n'+str(mode),[('CMPI','syskind',mode)])
             q=P('SC.'+op+'.m'+str(mode))
             sources = [(kind, source_values[value] if value in source_values else int(value))
-                       for m, shape, _, kind, value in source_rows
+                       for m, shape, kind, value in source_rows
                        if int(m)==mode and shape in ('*', f[10])]
             if not sources:
                 raise ValueError('new Linux '+arch+' argument shape requires migration: '+f[10])
