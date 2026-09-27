@@ -5031,3 +5031,5 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 父后续联合分片实测：core-dependencies 26秒、language 46秒双槽2/2通过；language已含23正例（新增聚合va_arg与成员字符串）及6严格拒绝。独立产品接入审计发现发布入口仍造classic、测试包与最终保存包未统一hash；完成前仍不切默认。先补现有gatequeue对显式外部候选/可执行文件的内容指纹，防同路径覆写复用旧结果，不新建调度框架；seed与被测产品须分开，TOOLS_UA/CORPUS_UA不能由UA默认为已选择。
 
 实际产品门禁接入决定：保留组件门禁UA为私有参考seed，gate --com允许显式MODEL_COM且默认仍根unisacc.com；com任务同时设置UA/UA_RUN，tools/corpus用独立选择变量，增加原有C99/工具11/外部corpus四片/优化差分四片的com命名入口。执行前后核同一候选哈希，不在验收末尾重建替换；不切默认、不发布。队列外部内容指纹由独立代理同步补齐。
+
+枚举完整描述48d10d3合入：身份/完成/作用域、尺寸/读写/位域/调用共享查询，314固定NET tape全同，00170与跨unit同名tag实际native同host，14类型负例及59/60容量边界实测。父收紧host拒绝检查为rc1（不收信号/超时），合法enum_forward注册language；00209仍函数指针数组typedef拒绝，由独立组继续。MODEL_COM显式门禁已实跑新6e60e3d1旧候选cli64/run12双槽11秒，报告候选hash；这不把刚合enum算入旧包。现冻结主树构建包含全部已合兼容修复的新候选。

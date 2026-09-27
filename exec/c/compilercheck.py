@@ -252,7 +252,7 @@ if part in ('all','language'):
     # network route, not just the converter's unit harness. Independent cc runs
     # check the probes' zero-exit expectations as well as reference tape spelling.
     probes=[pathlib.Path('exec/parse2/probes/'+name+'.c') for name in
-            ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators', 'scalar_prefix']]
+            ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators', 'scalar_prefix', 'enum_forward']]
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
                ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
                 'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref', 'vararg_aggregate', 'member_string_init']]

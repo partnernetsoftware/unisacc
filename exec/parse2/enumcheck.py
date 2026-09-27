@@ -47,7 +47,7 @@ for name, text in rejects.items():
     source, p = parse(name, text + "int main(void){return 0;}\n")
     assert p.returncode == 1, (name, p.stderr)
     host = run(["cc", "-std=c11", "-fsyntax-only", source])
-    assert host.returncode != 0, (name, "host accepted rejection probe")
+    assert host.returncode == 1, (name, "host must diagnose, not crash or time out", host.returncode, host.stderr)
 for count in (59, 60):
     text = "".join("enum E%d;\n" % i for i in range(count)) + "int main(void){return 0;}"
     _, p = parse("capacity%d" % count, text)
