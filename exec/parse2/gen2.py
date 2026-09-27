@@ -455,6 +455,18 @@ def function_control(section, warnings):
             structured_control(rules, False, bindings)
 
 
+def global_control(section, warnings):
+    bindings = {name: globals()[name] for name in
+                ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
+    bindings.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
+    for part, mode, prefix, kind, key in tape_rows("global-fresh.tsv"):
+        if part == section and mode in ("common", "warnings" if warnings else "plain"):
+            bindings[key] = P(prefix + ".global_" + key).fresh(kind)
+    for owner, mode, rules in tape_rows("global-sections.tsv"):
+        if owner == section and mode in ("common", "warnings" if warnings else "plain"):
+            structured_control(rules, False, bindings)
+
+
 def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
@@ -521,123 +533,18 @@ def build(locations=False, warnings=False, errors=False):
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).call("INDEX").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
-    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", "type=extern": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "FN"}, bad("top-level construct"))
+    global_control("global0", warnings)
     from enumtypes import install as enum_install
     enum_install(E, P, dict(ENUM_FIRST=ENUM_FIRST, ENUM_LIMIT=FPS_FIRST, ENUM_STATE=ENUM_STATE, TAG_EPOCH=TAG_EPOCH,
                            ETAG=ETAG, TAGLEVEL=TAGLEVEL, STAG=STAG, INT=TYINFO["i32"][0],
                            FPS_FN=FPS_FN, FPS_PARAM=FPS_PARAM),
                  [TK[w] for w in TWORDS if w != "type=void"])
     # enum is a type specifier in both declarations and typedefs.
-    p = P("EN.b")
-    p.a(("LDI", "env", 0), ("LDI", "type_enum", 1)).call("NEXT").label("EN.l")
-    p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
-    P("EN.id").a(("COPYW", "enps", "ps"), ("COPYW", "enpe", "pe")).call("NEXT").tok({"=": "EN.eq"}, "EN.bind")
-    P("EN.eq").call("NEXT").call("CE").a(("COPYW", "env", "cv")).goto("EN.bind")
-    P("EN.bind").a(("COPYW", "ps", "enps"), ("COPYW", "pe", "enpe"), ("INTERN", "v", "ps", "pe")).branch({1: "EN.put"}, "EN.local", [("CMPI", "tagscope", 0)])
-    P("EN.local").call("BIND").goto("EN.put")
-    P("EN.c").call("NEXT").goto("EN.l")
-    P("TOP.st").call("NEXT").goto("UNIT")        # static: the same code (measured)
-    P("TOP.id").call("ISTD").branch({1: "FN"}, bad("top-level construct"))
-    # typedef T [*]... NAME;  -- no code
-    P("TD").call("TD.parse").goto("UNIT")
-    p = P("TD.parse")
-    p.a(("LDI", "td_dims", 0)).call("NEXT").call("TSPEC").tok({TK_ID: "TD.id", "(": "TD.fp"}, bad("typedef"))
-    P("TD.fp").call("FPDECL").branch({1: "TD.fpshape"}, bad("function typedef shape"), [("CMPI", "fp_isfunction", 0)])
-    P("TD.id").a(("COPYW", "tdps", "ps"), ("COPYW", "tdpe", "pe")).call("NEXT").tok({"[": "TD.array"}, "TD.bind")
+    global_control("global1", warnings)
     shape_control("typedef-shape")
-    P("TD.bind").a(("COPYW", "ps", "tdps"), ("COPYW", "pe", "tdpe"), ("INTERN", "v", "ps", "pe")).branch({1: "TD.put"}, "TD.local", [("CMPI", "tagscope", 0)])
-    P("TD.local").call("BIND").goto("TD.put")
-    P("TD.put").a(("LDI", "u", 1), ("STX", "v", E.TDN, "u"), ("STX", "v", E.TDB, "tb"), ("STX", "v", E.TDD, "td"), ("STX", "v", TDE, "type_enum")).call("TD.shape").expect(";").call("NEXT").ret()
-    # a unit without main is an error in the reference (measured, probe r2)
-    P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
-    P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", E.FND)).branch({1: "END.ex"}, "END.x2", [("CMPI", "t", 1)])
-    P("END.ex").o("  call exit\n").goto("END.x2")     # a unit that defines exit calls it on return from main (measured)
-    p = P("END.x2").o("  .exit r0\n").call("PF.helpers").a(("LDI", "sk", 0), ("JUMP", "x0")).call("POOL").call("UD.check")
-    if warnings: p.call("WR.summary").call("WR.error")
-    p.a(("ACCEPT",)).goto("DEAD")
-    p = P("INITS")
-    p.call("NEXT").label("IN.l")
-    p.branch({1: "IN.scan"}, "IN.static", [("LDX", "si_blob", "tpos", SINIT), ("CMPI", "si_blob", 0)])
-    p = P("IN.scan")
-    p.tok({"eof": "RET", "{": "IN.o", "}": "IN.c", TK_ID: "IN.id", "=": "IN.eqd"}, "IN.nx")
-    P("IN.eqd").branch({1: "IN.eq"}, "IN.nx", [("CMPI", "dep", 0)])
-    P("IN.o").a(("ALUI", "add", "dep", "dep", 1)).goto("IN.nx")
-    P("IN.c").a(("ALUI", "sub", "dep", "dep", 1)).goto("IN.nx")
-    P("IN.nx").call("NEXT").goto("IN.l")
-    P("IN.id").branch({1: "IN.id0"}, "IN.nx", [("CMPI", "dep", 0)])
-    P("IN.id0").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).goto("IN.nx")
-    P("IN.eq").a(("LDX", "ips", "tpos", GINPS), ("LDX", "ipe", "tpos", GINPE)).branch({2: "IN.eq0"}, "DEAD.ginit", [("CMP", "ipe", "ips")])
-    P("IN.eq0").call("NEXT").tok({E.TK_STR: "IN.s0"}, "IN.v")
-    P("IN.s0").a(("LDX", "t", "tpos", SKIPS)).branch({1: "IN.s1"}, "IN.v", [("CMPI", "t", 1)])
-    P("IN.s1").a(("INTERN", "iv", "ips", "ipe"), ("LDX", "ibytes", "iv", GSZ),
-        ("LDI", "imode", 1), ("COPYW", "inps", "ips"), ("COPYW", "inpe", "ipe")).call("STRINGINIT").goto("IN.l")
-    # Every non-string-array initializer was emitted once at its declaration.
-    P("IN.v").a(("LDX", "gi_blob", "tpos", GIBLOB), ("LDX", "gi_end", "tpos", GIEND), ("INPUSH", "gi_blob")).goto("IN.vcopy")
-    g.on("IN.vcopy", [256], "IN.vdone", [("INPOP",), ("JUMP", "gi_end")])
-    g.els("IN.vcopy", "IN.vcopy", [("COPY",), ("ADV",)])
-    P("IN.vdone").call("NEXT").goto("IN.l")
-    # function: int NAME ( params ) { body }
-    p = P("FN")
-    p.a(("LDI", "fn_fpwrap", 0)).call("TSPEC").a(("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).tok({TK_ID: "FN.id", ";": "FN.semi", "(": "GV.fp"}, bad("declarator"))
-    p = P("GV.fp")
-    p.call("FPDECL").a(("COPYW", "fns", "ips"), ("COPYW", "fne", "ipe")).branch({1: "FN.returnfp"}, "GV.fpobject", [("CMPI", "fp_isfunction", 1)])
-    P("FN.returnfp").a(("LDI", "fn_fpwrap", 1), ("COPYW", "rd", "td"), ("COPYW", "rb", "tb")).goto("FN.fn")
-    p = P("GV.fpobject")
-    p.a(("LDI", "gsz", 8), ("LDI", "gar", 0)).branch({1: "GV.fp1"}, "GV.fpa", [("CMPI", "fpn", 0)])
-    P("GV.fpa").a(("ALUI", "mul", "gsz", "fpn", 8), ("LDI", "gar", 1)).goto("GV.fp1")
-    P("GV.fp1").call("GV.emit").tok({"=": "GV.init"}, "GV.end")
-    p = P("FN.id")
-    p.a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe")).call("NEXT").tok({"(": "FN.fn", ";": "GV.sc", "=": "GV.sc", ",": "GV.sc", "[": "GV.ar"}, bad("declarator"))
-    P("FN.semi").call("NEXT").goto("UNIT")      # `struct T { ... };` -- a definition only, no code
-    # a global: `.bss g_NAME SIZE` where it is declared; its initialiser goes to __init (measured)
-    p = P("GV.sc")
-    p.branch({1: "GV.plaintype"}, "GV.aliastype", [("CMPI", "type_shape", 0)])
+    global_control("global3", warnings)
     shape_control("global-type")
-    P("GV.sc0").branch({1: "DEAD.void"}, "GV.scb", [("CMPI", "tb", 0)])
-    P("GV.scb").call("ELSZ").a(("COPYW", "gsz", "es")).goto("GV.reg")
-    P("GV.p8").a(("LDI", "gsz", 8)).goto("GV.reg")
-    p = P("GV.reg")
-    p.a(("LDI", "gar", 0)).call("GV.emit").tok({"=": "GV.init"}, "GV.end")
-    P("GV.init").a(("STX", "tpos", GINPS, "fns"), ("STX", "tpos", GINPE, "fne")).call("NEXT").tok({"{": "GV.bi", E.TK_STR: "GV.gs"}, "GV.iv")
-    P("GV.gs").call("CHARR").branch({1: "GV.gs1"}, "GV.iv", [("CMPI", "u", 1)])
-    P("GV.gs1").a(("LDI", "t", 1), ("STX", "tpos", SKIPS, "t")).call("NEXT").goto("GV.end")
-    # CHARR: u := 1 when the declaration being read (gar/dar, td, tb) is an array of char
-    p = P("CHARR")
-    p.a(("LDI", "u", 0), ("ALU", "or", "t", "gar", "dar")).branch({1: "RET"}, "CH.1", [("CMPI", "t", 0)])
-    P("CH.1").branch({1: "CH.2"}, "RET", [("CMPI", "td", 0)])
-    P("CH.2").branch({1: "CH.narrow"}, "CH.3", [("CMPI", "tb", 1)])
-    P("CH.3").branch({1: "CH.narrow"}, "CH.wide", [("CMPI", "tb", UNS + 1)])
-    P("CH.y").a(("LDI", "u", 1)).ret()
-    p = P("GV.bi")
-    p.a(("OLEN", "gi_out"), ("COPYW", "gi_pos", "tpos"), ("INTERN", "ivv", "fns", "fne"), ("LDI", "imode", 1),
-        ("COPYW", "inps", "fns"), ("COPYW", "inpe", "fne"), ("COPYW", "ibytes", "gsz"))
-    p.vpush("gi_out", "gi_pos", "fns", "fne", "td", "tb", "bd", "gar", "gsz").call("INITLIST").vpop("gi_out", "gi_pos", "fns", "fne", "td", "tb", "bd", "gar", "gsz")
-    p.goto("GV.cache")
-    p = P("GV.iv").a(("OLEN", "gi_out"), ("COPYW", "gi_pos", "tpos"))
-    p.vpush("gi_out", "gi_pos", "fns", "fne", "td", "tb", "bd", "gar", "gsz").call("EXPR").a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).vpop("gi_out", "gi_pos", "fns", "fne", "td", "tb", "bd", "gar", "gsz")
-    p.goto("CP.global.store")
-    P("CP.global.scalar").a(("COPYW", "vt", "td"), ("COPYW", "vb", "tb")).call("ASSIGNCV").o("  .lea r1, g_").a(("SPAN2", "fns", "fne")).o("\n").call("STOREV").goto("GV.cache")
-    P("GV.cache").a(("OCUT", "gi_blob", "gi_out"), ("STX", "gi_pos", GIBLOB, "gi_blob"), ("STX", "gi_pos", GIEND, "tpos")).goto("GV.end")
-    P("GV.end").tok({",": "GV.cm", "=": "GV.init"}, "GV.e0")
-    g.on("DEAD.ginit", range(257), "DEAD", E.rej("not covered: global initialiser"), "r")
-    P("GV.e0").expect(";").call("NEXT").goto("UNIT")
-    P("GV.cm").call("DSTARS").tok({TK_ID: "GV.cid"}, bad("declarator"))
-    P("GV.cid").a(("COPYW", "fns", "ps"), ("COPYW", "fne", "pe")).call("NEXT").tok({";": "GV.sc", "=": "GV.sc", ",": "GV.sc", "[": "GV.ar", "(": "FN.fn"}, bad("declarator"))
-    p = P("GV.ar")       # T NAME[N][M]...: the product * element size (a pointer element: 8)
-    p.call("SH.suffix").call("DIMS").goto("GV.an")
-    p = P("GV.an")
-    p.call("ELSZ").a(("ALU", "mul", "gsz", "prd", "es"), ("COPYW", "gar", "drk")).call("GV.emit").goto("GV.end")
-    p = P("GV.emit")
-    p.a(("INTERN", "v", "fns", "fne"), ("LDX", "u", "v", LOC)).branch({1: "GV.epoch"}, "GV.storage", [("CMPI", "u", E.GMARK)])
-    P("GV.epoch").branch({1: "GV.record"}, "GV.storage", [("LDX", "u", "v", GUNIT), ("CMP", "u", "unit_epoch")])
-    p = P("GV.storage")
-    p.a(("STX", "v", GUNIT, "unit_epoch")).o(".bss g_").a(("SPAN2", "fns", "fne")).o(" ").num("gsz").o("\n")
-    p.goto("GV.record")
-    p = P("GV.record")
-    p.a(("INTERN", "v", "fns", "fne"), ("STX", "v", GSZ, "gsz"), ("LDI", "t", E.GMARK), ("STX", "v", LOC, "t"), ("STX", "v", E.BASE, "tb"), ("STX", "v", E.ARR, "gar"),
-        ("COPYW", "t", "td")).branch({1: "GV.e1"}, "GV.e2", [("CMPI", "gar", 0)])
-    P("GV.e2").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("GV.e1")
-    P("GV.e1").a(("STX", "v", E.PTR, "t")).call("GV.aliassave").ret()
+    global_control("global5", warnings)
     shape_control("global-binding")
     P("ELSZ.enumraw").branch({1: "ELSZ.b0"}, "ELSZ.8", [("CMPI", "td", 0)])
     P("ELSZ.b0").branch({(1, 2): "ELSZ.st"}, "ELSZ.b", [("CMPI", "tb", SBB)])
