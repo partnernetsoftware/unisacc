@@ -13,4 +13,4 @@ def install(E,word):
     bindings = {'label'+str(i): E.P(owner).fresh(kind)
                 for i, (owner, kind) in enumerate(labels)}
     install_rules(E.g, Path(__file__).parent, 'armint',
-                  bindings=bindings, section='integer')
+                  bindings=bindings, sequences={'word': word(E.P('word.binding')).acts}, section='integer')
