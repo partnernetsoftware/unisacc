@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Source inventory refreshed after `70d3952` (2026-09-28). This is a remaining-work
+Source inventory refreshed after `3520fbb` (2026-09-28). This is a remaining-work
 list, not a completion percentage. Historical batch results and artifact hashes
 remain in `prd.md`; they are not repeated here.
 
@@ -56,10 +56,12 @@ helper does not discharge the obligation. This is source review, not new test ev
 
 - In `gen2.py`: startup/unit markers; return handling; CEXPR/lvalue lookahead;
   conditional expressions; update/compound-assignment/type-axis dispatch;
-  identifier lookup and dereference; sizeof; scalar TO conversions.
-- Member/postfix/assignment/copy and local declaration/initialization are assigned
-  to two independent workers; completion requires their delivered evidence.
-- Ordinary imports: `truth.py`, `booleans.py`, `floatconst.py`, and tokenizer
+  identifier lookup and dereference; sizeof. Scalar TO conversions are now declared.
+- Member/postfix/assignment/copy and local declaration/initialization controls
+  are now declared (`be71979`, `07c42b6`), with complete graph comparisons and
+  targeted actual network/native checks. Scalar truth/boolean/TO controls are
+  declared in `3520fbb`; Python binding code grew by 22 lines in that group.
+- Ordinary imports still in progress: `floatconst.py`, and tokenizer
   terminal/default/qualifier policies in `parse/gen.py`.
 - Product diagnostic modes: `tokenlocations.py`, `diagnostics.py`, `errors.py`,
   `returnwarnings.py`, `intwarnings.py`, `unusedwarnings.py`, `formatwarnings.py`.
@@ -89,6 +91,14 @@ It runs actual constructed networks, not the Python table simulator:
   parallel. Each complete expanded graph matches before/after in five modes,
   including dynamic source perturbations. Function-pointer array support fixes
   the last original corpus refusal, 00209.
+
+The same `a1115126` candidate also passed 429 optimization comparisons and
+fixed-package driver N1=N2=N3 (115,746-byte Mach-O), with empty-PATH successor
+execution. Linux arm64/x86_64 and Rosetta x86_64 each passed hello/fib/convert
+model-run and compiled execution; Windows ARM64 guest passed those three on both
+target ISAs. Linux x86 uses QEMU and Windows x86 uses emulation. These are smoke
+checks, not full guest suites or model/container regeneration. Later rule-source
+migrations are not silently credited to this older package.
 
 Earlier immutable candidates retain separate evidence: `4d288bab` passed all
 429 differential comparisons and the product CLI/diagnostic/tools/closure groups;
