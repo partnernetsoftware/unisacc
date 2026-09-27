@@ -18,20 +18,21 @@ SUFFIX=bytes.fromhex('4e8d2c33')+DIGITS+bytes([0x75,(-len(DIGITS)-2)&255])+bytes
 SIZE=21+len(PREFIX)+len(SUFFIX)
 
 def install(E,KND,SZ):
-    P,g=E.P,E.g
-    p=P('ITO.store').branch({1:'ITO.args'},'DEAD.itoa',[('CMPI','na',3)])
-    p=P('ITO.args')
+    from pathlib import Path
+    from functools import partial
+    from finite_rules import install as install_rules
+    rules = partial(install_rules, E.g, Path(__file__).parent, 'x86itoa')
+    rules(section='arity', bindings={'test': E.P('ITO').fresh('b')})
     for i in range(3):
-        p.branch({1:'ITO.kind'+str(i)},'DEAD.itoa',[('CMPI','ak'+str(i),1)])
-        p=P('ITO.kind'+str(i)).a(('LDI','limit',2147483647))
-        p.branch({2:'DEAD.itoa'},'ITO.bound'+str(i),[('C64U','a'+str(i),'limit')]);p=P('ITO.bound'+str(i))
-    p.a(('STX','npc',VALUE,'a0'),('STX','npc',VALUE2,'a1'),('STX','npc',DEST,'a2'),('LDI','t',8),('STX','npc',KND,'t'),('LDI','t',SIZE),('STX','npc',SZ,'t'),('ALUI','add','npc','npc',1)).goto('SKIPL')
-    p=P('WR.itoa')
-    def rip(reg,op,table):
-        p.a(('LDI','ad_r',reg),('LDI','ad_o',op),('LDX','ad_v','q',table),('A64','add','ad_v','ad_v','data_shift')).call('RIP')
-    rip(0,0x8b,VALUE)
-    p.a([('OUT',b) for b in PREFIX])
-    rip(14,0x89,DEST)
-    rip(3,0x8d,VALUE2)
-    p.a([('OUT',b) for b in SUFFIX]).goto('WR.nx')
-    g.on('DEAD.itoa',range(257),'DEAD',E.rej('not covered: itoa address/operands'),'r')
+        rules(section='argument', bindings=dict(entry='ITO.args' if i == 0 else 'ITO.bound'+str(i-1),
+            kindtest=E.P('ITO').fresh('b'), kindentry='ITO.kind'+str(i), kind='ak'+str(i),
+            boundtest=E.P('ITO').fresh('b'), value='a'+str(i), next='ITO.bound'+str(i)))
+    rules(section='store', bindings=dict(VALUE=VALUE, VALUE2=VALUE2, DEST=DEST, KND=KND, SZ=SZ, SIZE=SIZE))
+    entry = 'WR.itoa'
+    for reg, opcode, table, prefix in ((0,0x8b,VALUE,b''),(14,0x89,DEST,PREFIX),(3,0x8d,VALUE2,b'')):
+        nxt = E.P('WR').fresh('r')
+        rules(section='rip', bindings=dict(entry=entry, next=nxt, reg=reg, opcode=opcode, table=table),
+              sequences={'prefix': [('OUT', b) for b in prefix]})
+        entry = nxt
+    rules(section='finish', bindings={'entry': entry}, sequences={
+        'suffix': [('OUT', b) for b in SUFFIX], 'reject': E.rej('not covered: itoa address/operands')})
