@@ -1,6 +1,5 @@
 """The reference's laststmt/return warning, not a new flow analysis.
-Enabled only by the development --warnings mode. Format and unused-variable warning kinds are
-still pending, so this mode is not exposed as the compiler's -Wall route.
+Enabled only by the development --warnings mode. Format warnings are still pending, so this mode is not exposed as the compiler's -Wall route.
 """
 from tokenlocations import TOKEN_POS
 MESSAGE=b'non-void function does not return a value in all control paths [-Wreturn-type]'

@@ -102,8 +102,7 @@ last-statement heuristic and main/void exemptions, plus `-Wint-conversion`
 for assignments and local scalar initializers. The latter preserves the
 reference's syntactic lone-zero and call-result exemptions. Included-header
 warnings are suppressed. It is not a
-full `-Wall` mode and is not selected by the compiler CLI. Format/unused-variable warnings, multi-unit integration and `-Werror`
-remain pending.
+full `-Wall` mode and is not selected by the compiler CLI. Format warnings, multi-unit integration and `-Werror` remain pending.
 
 The model renderer derives file, line and column from retained preprocessing
 records and emits the source line/caret to stderr. `diagnosticcheck.py` compares
@@ -116,3 +115,11 @@ no warnings. Neither adds a language-specific executor primitive.
 same harness: it compares complete tape and diagnostic bytes, and checks the
 quiet route separately. This migration preserves the reference behavior;
 these checks do not establish full C conversion-constraint correctness.
+
+The optional mode also implements block-local `-Wunused-variable`. Binding
+and use records follow the existing scope undo stack, preserve shadowed
+bindings, and report in declaration order when a block closes. Function
+parameters and static/global objects are not warned about by this reference
+rule. Identifier use follows the reference token-context test (a standalone
+simple write is not a read), rather than tape liveness. `--unused` on the
+warning check exercises the rule and its interaction with the other warnings.

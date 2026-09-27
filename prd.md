@@ -3632,3 +3632,29 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   CLI/resources/IO/decimal/native and memory-run checks; package 1,250,262 B.
   No full-gate result, default product switch or publication is claimed.
   Remaining warning/CLI work and the full reconstruction goal remain active.
+
+
+### Unused-variable warnings — optional E3 mode
+
+- The model now tracks binding/use records alongside the existing scope undo
+  stack. It restores shadowed bindings, reports in source declaration order,
+  excludes parameters and static/global storage as the reference does, and
+  uses primary()'s token-context rule for reads versus standalone writes.
+  Token facts come from the existing whole-token INDEX walk; declaration
+  locations feed the shared diagnostic renderer. No executor primitive added.
+- 38 cases (21 warning-producing) match complete reference tape and stderr
+  on cc, unisacc, macOS arm64 assembly and x86_64 assembly via Rosetta.
+  Cases include shadow/restore (automatic, static and enum), arrays, members,
+  indirect calls, sizeof, nested blocks, for scopes, initializer reads,
+  multiple functions, name truncation, macros, splices and header suppression.
+  An initial splice fixture contained literal backslash-n instead of a
+  physical continued line; corrected before the successful runs.
+- Existing 33 return-warning and 29 integer-conversion cases also pass on cc.
+  Default (non-warning) E3 serialization is unchanged from ec628eb with fixed
+  PYTHONHASHSEED=0: 24,570,115 B, directly compared. Thus no default product
+  rebuild or new default-route regression claim in this optional-only batch.
+- New rule module: 52 source lines plus parser hooks and tests; this migrates
+  the rule into model actions, not a code-size reduction. exec-unusedwarn is
+  added to the bounded gate. No full-gate/platform/release claim. Format
+  warnings, multi-unit warning framing, -Werror and CLI integration remain;
+  reconstruction is still active and the shipped .com is unchanged.

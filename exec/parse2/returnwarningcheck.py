@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reference return-type or --int-conversion warnings on the model path.
+"""Reference return-type, --int-conversion or --unused model warnings.
 This is not full -Wall parity. Cases avoid the remaining unmigrated kinds.
 Both tape and complete diagnostic bytes must agree; every child is bounded.
 """
@@ -86,6 +86,49 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
           ('header-int','#include "quiet.h"\nint f(int *p){p=8; return p!=0;}'),
         ]
         (t/'quiet.h').write_text('static int in_header(int *p){p=7;return p!=0;}\n')
+    if '--unused' in sys.argv:
+        category='unused-variable'
+        cases=[
+          ('unused','int f(void){int x;return 0;}'),
+          ('initialized','int f(void){int x=3;return 0;}'),
+          ('written','int f(void){int x;x=3;return 0;}'),
+          ('read','int f(void){int x=3;return x;}'),
+          ('discarded','int f(void){int x=3;x;return 0;}'),
+          ('increment','int f(void){int x=3;x++;return 0;}'),
+          ('preincrement','int f(void){int x=3;++x;return 0;}'),
+          ('compound','int f(void){int x=3;x+=2;return 0;}'),
+          ('address','int f(void){int x=3;int *p=&x;return *p;}'),
+          ('parameter','int f(int x){return 0;}'),
+          ('static','int f(void){static int x;return 0;}'),
+          ('global','int x;int f(void){return 0;}'),
+          ('array','int f(void){int x[3];return 0;}'),
+          ('arraywrite','int f(void){int x[3];x[0]=3;return 0;}'),
+          ('sizeof','int f(void){int x=3;return sizeof x;}'),
+          ('sizeof-paren','int f(void){int x=3;return sizeof(x);}'),
+          ('multiple','int f(void){int a,b=3,c;return b;}'),
+          ('shadow','int f(void){int x=3;{int x=2;return x;}return 0;}'),
+          ('restore','int f(void){int x=3;{int x=2;}return x;}'),
+          ('nested-order','int f(void){int x=3;{int a,b;}{int c;}return 0;}'),
+          ('static-shadow','int f(void){int x=3;{static int x=2;x++;}return 0;}'),
+          ('static-restore','int f(void){int x=3;{static int x=2;x++;}return x;}'),
+          ('member-name','struct S{int x;};int f(void){int x;struct S s;s.x=3;return s.x;}'),
+          ('initializer-use','int f(void){int x=3;int y=x;return 0;}'),
+          ('enum-shadow','enum {X=7};int f(void){int X=3;{int X=2;}return X;}'),
+          ('two-functions','int f(void){int x;return 0;}int g(void){int y;return 0;}'),
+          ('for-decl','int f(void){for(int x=0;0;){}return 0;}'),
+          ('for-body','int f(void){for(int x=0;x<1;x++){int y;}return 0;}'),
+          ('assigned-in-argument','int g(int n){return n;}int f(void){int x;return g(x=3);}'),
+          ('nested-assignment','int f(void){int x,y;x=y=3;return 0;}'),
+          ('if-write','int f(int k){int x;if(k)x=3;return 0;}'),
+          ('member','struct S{int a;};int f(void){struct S s;s.a=3;return 0;}'),
+          ('pointercall','int g(void){return 1;}int f(void){int (*p)(void)=g;return p();}'),
+          ('unused-fp','int f(void){int (*p)(void);return 0;}'),
+          ('long-name','int f(void){int abcdefghijklmnopqrstuvwxyz;return 0;}'),
+          ('macro','#define DECL int x\nint f(void){DECL;return 0;}'),
+          ('header-unused','#include "quiet.h"\nint f(void){int x;return 0;}'),
+          ('splice-unused','int f(void){int '+chr(92)+'\n x;return 0;}'),
+        ]
+        (t/'quiet.h').write_text('static int in_header(void){int hidden;return 0;}\n')
     positives=0
     for name,body in cases:
         f=t/'source.c';f.write_text(body if name=='float-truth' else body+'\nint main(void){return 0;}\n')

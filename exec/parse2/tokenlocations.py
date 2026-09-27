@@ -10,7 +10,7 @@ INCLUDE_LINES=37<<40
 INCLUDE_NAME=38<<40
 
 
-def install(E,P,ordinal_table=None):
+def install(E,P,ordinal_table=None,token_record=None):
     g=E.g
     bad='DL.bad'
     def word(name,reg,nxt):
@@ -60,7 +60,8 @@ def install(E,P,ordinal_table=None):
         ('INPOP',),('JUMP','diag_pp_end')).goto('START')
     # Every parser rewind points to this prefix, not to the token-kind line.
     del g.st['NEXT']
-    P('NEXT').a(('MARK','tpos')).goto('DL.prefix')
+    if token_record: P('NEXT').call('DL.read').call(token_record).ret()
+    P('DL.read' if token_record else 'NEXT').a(('MARK','tpos')).goto('DL.prefix')
     g.on('DL.prefix',[64],'DL.offset',[('ADV',)])
     g.els('DL.prefix',bad)
     word('DL.offset','source_pos','DL.offsetbound')

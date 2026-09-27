@@ -6,8 +6,8 @@ templates -- by one generic compiler, instead of being grown state by state.
     python3 exec/parse2/gen2.py --locations OUT.json
     python3 exec/parse2/gen2.py --warnings OUT.json
 
-Optional --warnings currently implements -Wreturn-type and -Wint-conversion, implies
---locations, and is not connected to the compiler CLI.
+Optional --warnings implements return-type, int-conversion and unused-variable
+warnings, implies --locations, and is not connected to the compiler CLI.
 
 Step 1 covers: int functions and parameters, int locals, expression
 statements, assignment, calls, unary - !, the binary operators of every
@@ -894,9 +894,9 @@ def build(locations=False, warnings=False):
     q.a(("STX", "cpv", LOC, "cur")).goto("FN.copynext")
     P("FN.copynext").a(("ALUI", "add", "cpi", "cpi", 1)).goto("FN.copyloop")
     p = P("FN.go")
-    if warnings: p.a(("LDI", "wr_last", 0))
+    if warnings: p.a(("LDI", "wr_last", 0), ("COPYW", "wu_fn", "usp"))
     p.call("NEXT").call("STMTS")
-    if warnings: p.call("WR.return")
+    if warnings: p.a(("COPYW", "wu_lo", "wu_fn")).call("WU.block").call("WR.return")
     p.a(("INTERN", "v", "fns", "fne")).branch({1: "FN.m0"}, "FN.tl", [("CMP", "v", "mnid")])
     P("FN.m0").o("  imm r0, 0\n").goto("FN.tl")      # reaching main's } returns 0 (C99 5.1.2.2.3; product 18c8f22)
     p = P("FN.tl")
@@ -910,6 +910,7 @@ def build(locations=False, warnings=False):
     P("DECLN").a(("COPYW", "ps", "ips"), ("COPYW", "pe", "ipe")).goto("DECL")
     p = P("BIND")       # one scope record, shared by automatic and static objects
     p.a(("INTERN", "v", "ps", "pe"), ("STX", "usp", E.UNDO, "v"))
+    if warnings: p.call("WU.bind")
     for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
         p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
     p.a(("ALUI", "mul", "u", "v", 8))
@@ -919,7 +920,9 @@ def build(locations=False, warnings=False):
         p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
     p.a(("LDI", "t", 0), ("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", 15)).ret()
     p = P("DECL")
-    p.call("BIND").a(("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("STX", "v", E.BASE, "tb"),
+    p.call("BIND")
+    if warnings: p.call("WU.local")
+    p.a(("ALU", "add", "cur", "cur", "dsz"), ("STX", "v", LOC, "cur"), ("STX", "v", E.BASE, "tb"),
         ("STX", "v", E.ARR, "dar"), ("COPYW", "s", "cur")).call("MAXF").a(("COPYW", "t", "td")).branch({1: "DC.p"}, "DC.a", [("CMPI", "dar", 0)])
     P("DC.a").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("DC.p")
     P("DC.p").a(("STX", "v", E.PTR, "t")).ret()
@@ -944,12 +947,15 @@ def build(locations=False, warnings=False):
     p.call("NEXT").tok({TK_ID: "S.gt"}, bad("goto"))
     P("S.gt").o("  jump u_").a(("SPAN2", "ps", "pe")).o("\n").call("NEXT").expect(";").call("NEXT").ret()
     p = P("S.blk")
-    p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur").call("UNWIND").call("NEXT").ret()
+    p.vpush("usp", "cur").call("NEXT").call("STMTS").vpop("sv", "cur")
+    if warnings: p.a(("COPYW", "wu_lo", "sv")).call("WU.block")
+    p.call("UNWIND").call("NEXT").ret()
     p = P("UNWIND")
     p.label("S.uw")
     p.branch({2: "S.uw1"}, "RET", [("CMP", "usp", "sv")])
     p = P("S.uw1")
     p.a(("ALUI", "sub", "usp", "usp", 15), ("LDX", "v", "usp", E.UNDO))
+    if warnings: p.call("WU.unbind")
     for j, table in enumerate((LOC, E.PTR, E.BASE, E.ARR), 1):
         p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
     p.a(("ALUI", "mul", "u", "v", 8))
@@ -1594,6 +1600,7 @@ def build(locations=False, warnings=False):
     P("FNV.f").a(("LDX", "t", "v", E.FND)).branch({1: "FNV.y"}, "RET", [("CMPI", "t", 1)])
     P("FNV.y").o("  .lea r0, ").a(("SPAN2", "ips", "ipe")).o("\n").a(("LDI", "vt", 1), ("LDI", "vb", FPB), ("LDI", "isfn", 1)).ret()
     p = P("LOOKUP")     # s := the slot of ips..ipe (0: not a local of this slice)
+    if warnings: p.call("WU.use")
     p.a(("INTERN", "v", "ips", "ipe"), ("LDX", "s", "v", LOC), ("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE), ("LDX", "ar", "v", E.ARR), ("COPYW", "vid", "v")).branch({1: "DEAD.nl"}, "RET", [("CMPI", "s", 0)])
     g.on("DEAD.nl", range(257), "DEAD", E.rej("not covered: identifier is not a local"), "r")
     # CALL: at '(' after ips..ipe: arguments pushed left to right, popped into r(n-1)..r0, call
@@ -1729,7 +1736,7 @@ def build(locations=False, warnings=False):
     start = "START"
     if locations:
         from tokenlocations import install as location_install
-        start = location_install(E, P, TIX)
+        start = location_install(E, P, TIX, "WU.token" if warnings else None)
         from diagnostics import install as diagnostic_install
         diagnostic_install(E, P)
     if warnings:
@@ -1738,6 +1745,8 @@ def build(locations=False, warnings=False):
         return_warning_install(E, P, SBB)
         from intwarnings import install as int_warning_install
         int_warning_install(E, P, DBL, FLT, FPB, SBB)
+        from unusedwarnings import install as unused_warning_install
+        unused_warning_install(E, P, TIX)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
