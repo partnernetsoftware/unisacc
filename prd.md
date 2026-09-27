@@ -5107,3 +5107,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 最终候选冻结队列续行：47/139已执行，44项rc0；exec-bindx86、exec-container、exec-warningdriver在双槽48秒任务预算下rc142，失败原日志保留，不当通过。独立同候选exec-bindx86单槽53秒预算实测38.04秒通过（/tmp/unisacc-final-retry-bindx86-928）。下一步重套件独占、短套件双槽；同源同候选队列重试前将原失败结果与日志归档为attempts，再实际重跑，不伪造通过。containercheck发现仍重建另一包，独立修为显式MODEL_COM直接验证候选；主树尚未合入，不将草案检查计入冻结队列。
 
 容器门禁独占53.06秒仍超时，未得到运行检查结果。合入e74c677最小修复：显式MODEL_COM时不另造包，直接验证候选内P2目录/唯一网络/双核及六目标输出、本机双ISA内存与native运行；无候选保留原开发构建路径。测试源码变化，新建最终队列，旧45项通过和各超时留存，不移植为新队列通过。产品与候选9a0ae470未改。
+
+最终9a0ae470容器直验（22ce210）实跑通过：六目标完整镜像同参考，arm64/x86_64实际-run及native输出同host，32互异网络/两核/单包，无外部模型核。固定最终包模型驱动器N1=N2=N3完整Mach-O 115746B，sha256 6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03；N3空PATH、O0/O2内存/native同host、缺包rc2，证据/tmp/unisacc-final-modelboot-928。不是整个网络包或APE自构造。Linux arm64在既有default Lima实跑hello/fib/convert：候选哈希先核对，-run及指定目标编译后native全同host；仅三程序smoke，不称整平台套件全绿。
