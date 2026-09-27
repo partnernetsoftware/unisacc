@@ -5025,3 +5025,5 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 诊断修正实际闭合：L宽串两例保留为无诊断接受；与旧C tape仅差字符串池末尾额外NUL（非错误状态/定位差异），未以全tape一致作该正例判据，宽串语义由既有真实language probe检验。u前缀仍明确rc1并正确定位，验证拒绝路径不递归。父errors/errors-warn双槽2/2、7秒；原17全结果比较保留。成员字符串初始化2436a5a复用IMEMBER/STRINGINIT.row/INITADDR，Python净0、声明净38，原00204及持久probe实际NET O0/O2全同host；core按modes/contracts/dependencies三职责拆分，原断言不减，下一联合验收保持主树冻结。
 
 收口清单维护决定：exec/rules.md仍把4d351c5当当前状态并保留多批历史候选，容易误导剩余范围。父把它收敛为当前规则来源/真实候选证据/仍需完成的清单，历史数据以本prd保留；不改变S-17完成标准、不把当前通过数当全C99证明。
+
+父联合核心分片实测：当前成员初始化合入树上core-modes与core-contracts双槽各47秒、整体47秒全通过；前者含网络构建驱动器与27模式/优化级对照，后者保留compat/stdin/IO/未定义函数检查。language新增vararg/member两个持久probe，严格拒绝要求rc1与诊断，不将信号或超时算合法拒绝；三core+resources+language清单与旧all保持覆盖关系。
