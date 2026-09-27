@@ -4905,3 +4905,5 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第十二批并行决定：以d5dcda4为隔离基线，三个小代理分别迁完整聚合初始化、普通字符串解码/初始化、PE镜像控制；各自仅改所属模块及TSV。共享walk/存储/字段写出保持参数化，动态ESC/类型布局/导入字段保留真实来源；不扩loader、不复制参考算法到新Python。每窗8分钟、每子步骤60秒，完整图动作核对加既有真实网络或镜像检查，父冻结后集中验收。
 
 第十一批实际产物补验：d5dcda4在私有UA下重建/tmp/unisacc-parallel-eleventh-candidate/unisacc-next.com，6,005,111 B，sha256 3ffcb9bdada262e13bc9a9e8ac3c638059e8eab465690e90ffe7c44f3565cf64。六目标hello镜像同参考、六程序O0/O1/O2共18本机运行同cc；两编译单元含浮点调用/INT64_MIN的三优化级也同cc。相对2273f3e包增19,592 B，不称压缩；父独立全图核对E3每观测/后继/动作相同、9806隐藏单元不变，但state/sequence排序不同，E3.net增9761 B。证据同目录acceptance.json、multiunit-acceptance.json、migration-size.json。
+
+第十二批验收（0a9377a）：聚合初始化163规则、普通字符串共享walk及初始化、PE固定控制82规则已合入；Python净减42/25/27共94行，TSV新增253/103/86共442行，总净增348。动态类型布局/ESC/import及布局常量扰动下旧新完整图相同；聚合5网络探针、字符串三存储类/转义探针和双PE字节边界检查通过。父双槽6/6全rc0，20.34秒，含chain实际网络167/167、双PE、多单元位置、警告诊断、sparse。父合并后完整E3图5300states每观测/后继/动作0差异；序列化字节不相同，固定PYTHONHASHSEED=0仍不同，确认为state/seq顺序差异，未把它写成字节不变。证据/tmp/unisacc-parallel-twelfth-gate/combined-graph.json。保留类型ctx共享装配、ESC保留字符筛选、PE字段/import装配；没有新loader原语；本批不重复打包，最近实际候选仍d5dcda4。
