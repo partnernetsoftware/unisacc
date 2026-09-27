@@ -4965,3 +4965,7 @@ tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOO
 共享取址c9b75ab及placemarker6962325已合：ADR显式区分值/对象左值/函数/数组，替代U.amp及LP/PRE重复包装，Python净减25、声明增88；代理实际b_layout及副作用正例O0/O2四次同host，六非法取址/修改拒绝，keep316全同。父将副作用正例持久纳入资源门禁。##空参数先决定placemarker后查非空边界，Python0、声明净11；原b_pp3 E2net与私有参考完整相同、host token同，原88+4回归；非空通用标点paste仍拒绝。完整新候选待三阶段合并重验，不借用旧候选405结果。
 
 位域实施契约决定：模型保持现有unisacc目标布局（字段间字节补齐），明确不把系统cc不同packing本身当语言错误，也不承诺系统C ABI互操作。算术/赋值表达式值按存入位宽转换必须正确，父实跑现.com得到16/-16、32/0、34/2，host为-16/-16、0/0、2/2，是真实参考缺陷；父修classic estore返回截断值并检查64位mask，E3并行复用共享位域描述/GET/PUT及OPX/ASSIGNCV，不复制旧错。普通成员不改变；位域取址/sizeof拒绝。原b_bits与持久表达式探针作为验收，不缩减剩余清单。
+
+阶段域并行本轮：ARM输入契约408ac48 Python净减38/声明增86，x86操作数a438713 Python净减34/声明增90；标准及动态扰动四封装全图等价，真实net边界fixture通过。父ARM+chain双槽2/2、19.33秒；取址/宏/整数资源双槽3/3、38.66秒。静态compound7f6c7a8共享INITVALUE/AS.struct，Python净减7/声明净77；原b_pp2/b_compound与身份副作用probe O0/O2六次同host，keep316不变，新结构初始化不称tape字节同classic。E2函数宏2607607删旧专用XUM并复用EB/CF/HX，父联合hash复跑原b_ppif两格式完整tokens同host、67字面量/14宏选择/18拒绝及原macro88+4均通过。全部仍待新完整候选联合重包，不能沿用66709ab产物数字。
+
+经典参考dd37da1位域结果修复：estore返回位宽转换值，63/64位mask使用无符号移位避免溢出。新tests/c/b_bitfield_result.c的assignment/compound/pre/post、signed/unsigned64与63，私有C及实际.com O0/O1/O2均同host。产品.com已重建1,367,696 B，sha256 a97674d56881c1ac1f9f66fd540bb9d4d1cc9e66d6b031f12e8596ec6a7b26a4；13个--com项+四difftest_o分片+nativeboot共18/18、双槽15.57秒，/tmp/unisacc-bitfield-product-gate-928；当前142源426对全同。Windows自举未测，无发布/推送；模型位域仍并行实施，未称默认已切换。

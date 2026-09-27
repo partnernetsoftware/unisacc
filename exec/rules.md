@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: 4df5e53, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
+Current source checkpoint: a438713, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -16,7 +16,7 @@ remain shared inputs, not copied answers.
 | E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`, `shape-*`, `conversion-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
 | E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `armfuse-*`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`; ARM destination-shape selection and dynamic bindings; target/escape/layout bindings in `data.py` |
-| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `armbase-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM operand-input contracts/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
+| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `armbase-*`, `armcontract-*`, `x86-operand-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM dynamic instruction/shape bindings and image-layout bindings; the Windows command-line template remains a shared source |
 | E6 images | `enc/elfimage-byte/result.tsv` shared image control and `enc/pedelta-byte/result.tsv` PE control, `enc/machodelta-*` Mach-O layout/signature-page control, `enc/sha256-*` shared digest control; existing target layout facts | Format header/section/CD fields and import/string enumeration, child installation and dynamic layout/hash-constant bindings in `enc/` |
 
 `finite_rules.py` expands declared observations, bindings and action sequences;
@@ -111,3 +111,11 @@ The remaining refusals are compound/address expressions, bit-fields, and
 preprocessor expression/paste forms. Unicode universal-character escapes
 still refuse. E2 uintmax rules added afterwards are verified independently;
 they are not in this candidate, and function macros in #if remain pending.
+
+The following source-only migrations retain complete transition graphs under
+ordinary and perturbed dynamic inputs: ARM input contracts remove 38 Python
+lines (86 declaration lines added), x86 operand scanning removes 34 Python
+lines (90 declaration lines added). Shared address control removes 25 Python
+lines; anonymous compound storage removes seven while reusing INITVALUE and
+AS.struct. Their full packaged acceptance is pending; classic bit-field
+assignment results were corrected independently before the model migration.
