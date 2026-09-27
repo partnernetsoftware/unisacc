@@ -8,7 +8,7 @@ not a new executor primitive or a claim of complete C initializer semantics.
 """
 
 
-def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT):
+def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE):
     ctx = ('ic_base', 'ic_slots', 'ic_st', 'ic_el', 'ic_elst', 'ic_row', 'ic_sub')
     root = ('ivt', 'ivb', 'iar', 'ivv', 'isl', 'ix', 'imode', 'inps', 'inpe', 'inlabel', 'ibytes')
     # Count scalar slots in a type. SBODY caches this for each member/aggregate.
@@ -52,7 +52,7 @@ def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT,
     P('IL.index1').call('NEXT').call('CE').expect(']').call('NEXT').expect('=').a(('ALU','mul','ix','cv','ic_el'),('ALU','add','ix','ix','ic_base')).call('NEXT').goto('IL.loop')
     P('IL.member').branch({2:'IL.member1'},'DEAD.linit',[('CMPI','ic_st',0)])
     P('IL.member1').call('NEXT').tok({E.TK_ID:'IL.membername'},'DEAD.linit')
-    P('IL.membername').a(('INTERN','t','ps','pe'),('ALUI','mul','im_want','t',64),('ALU','add','im_want','im_want','ic_st'),('COPYW','im_sid','ic_st'),('LDI','im_named',1)).call('IMEMBER').a(('ALU','add','ix','ic_base','im_first')).call('NEXT').expect('=').call('NEXT').goto('IL.loop')
+    P('IL.membername').a(('INTERN','t','ps','pe'),('A64I','mul','im_want','t',MEMBER_STRIDE),('A64','add','im_want','im_want','ic_st'),('COPYW','im_sid','ic_st'),('LDI','im_named',1)).call('IMEMBER').a(('ALU','add','ix','ic_base','im_first')).call('NEXT').expect('=').call('NEXT').goto('IL.loop')
     # A brace takes the current immediate subaggregate, even after flat scalars.
     p=P('IL.child').a(*[('COPYW','ip_'+v[3:],v) for v in ctx],*[('LDI',v,0) for v in ctx],('COPYW','ic_base','ix'),('LDI','ic_slots',1))
     p.branch({2:'IL.childst'},'IL.childarr',[('CMPI','ip_st',0)])

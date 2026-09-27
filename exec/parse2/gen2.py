@@ -435,7 +435,9 @@ def printf(warnings=False):
 
 UNS = E.UNS   # unsigned char/short/int/long: UNS + size
 SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
-STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
+STAG, SSZ = E.STAG, E.SSZ
+STRUCT_MAX, MEMBER_STRIDE = 128, 256
+MOF, MSZ, MPT, MBS, MAR, MFLAT = (i << 40 for i in range(1, 7))
 FPB = E.FPB   # function pointer; indirect calls return the reference's full machine word
 DBL = E.DBL
 # ---- declared data: the product's type tables (weights/gold/type.tsv, tyinfo.tsv) -------------
@@ -457,10 +459,10 @@ assert len(TYINT) == 8 and all(TYINFO[t][0] in (1, 2, 4, 8) for t, *_ in TYINT)
 TYOP = {"&": "|", "<": "<", ">": "<", "<=": "<", ">=": "<", "==": "==", "!=": "=="}   # tycanon: the row an operator asks
 CKT, RST = 30 * 10 ** 6, 31 * 10 ** 6   # CKT[l * 16 + r] = ck; RST[opi * 256 + l * 16 + r] = res (AX indices)
 CSV, CSL = 33 * 10 ** 6, 34 * 10 ** 6   # a switch's cases: value and label, a stack (csp)
-SAL, MAR = 37 * 10 ** 6, 38 * 10 ** 6
+SAL = 37 * 10 ** 6
 POSSPAN = 1 << 26   # disjoint byte-position-keyed regions; checked at START
 TIX, SINIT, SIEND = 8 * POSSPAN, 9 * POSSPAN, 10 * POSSPAN
-SFLAT, MFLAT = 16 * POSSPAN, 17 * POSSPAN  # scalar slots in a struct/member
+SFLAT = 16 * POSSPAN  # scalar slots in a struct/member
 GUNIT = 15 * POSSPAN  # global symbol -> last declaration unit epoch
 PIDS = 14 * POSSPAN  # parameter index -> bound object, for deferred aggregate copies
 GINPS, GINPE = 12 * POSSPAN, 13 * POSSPAN  # declaration name at its initializer = token
@@ -623,7 +625,7 @@ def types():
     P("TS.new").call("TAG.alloc").a(("COPYW", "nsid2", "nsid")).call("TAG.bind").a(("STX", "tg", STAG, "nsid")).goto("TS.old")
     P("TS.old").a(("ALUI", "add", "tb", "nsid2", SBB)).goto("TS.b")
     P("TS.sb").a(("ALUI", "add", "tb", "nsid", SBB)).goto("TS.b")
-    P("TAG.alloc").a(("ALUI", "add", "sidserial", "sidserial", 1), ("COPYW", "nsid", "sidserial"), ("COPYW", "t", "nsid")).branch({0: "RET"}, bad("structure id capacity"), [("CMPI", "nsid", 64)])
+    P("TAG.alloc").a(("ALUI", "add", "sidserial", "sidserial", 1), ("COPYW", "nsid", "sidserial"), ("COPYW", "t", "nsid")).branch({0: "RET"}, bad("structure id capacity"), [("CMPI", "nsid", STRUCT_MAX + 1)])
     P("TAG.enter").vpush("tagusp", "tagscope").a(("ALUI", "add", "tagserial", "tagserial", 1), ("COPYW", "tagscope", "tagserial")).ret()
     P("TAG.bind").branch({1: "RET"}, "TAG.save", [("CMPI", "tagscope", 0)])
     P("TAG.save").a(("LDX", "tagold", "tg", STAG), ("LDX", "tagoldscope", "tg", TAGLEVEL),
@@ -675,7 +677,7 @@ def types():
     P("SB.put0").a(("LDI", "soff", 0)).goto("SB.put4")         # a union member: at 0
     p = P("SB.put4")
     p.a(("INTERN", "v", "ps", "pe"), ("ALU", "add", "t", "soff", "mal"), ("ALUI", "sub", "t", "t", 1), ("ALU", "sub", "m", "z0", "mal"), ("ALU", "and", "soff", "t", "m"),
-        ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
+        ("A64I", "mul", "k", "v", MEMBER_STRIDE), ("A64", "add", "k", "k", "sid"),
         ("STX", "k", MOF, "soff"), ("STX", "k", MSZ, "msz"), ("STX", "k", MPT, "td"), ("STX", "k", MBS, "tb"), ("STX", "k", MAR, "marr"),
         ("LDX", "t", "sid", SMN), ("ALUI", "mul", "u", "sid", 64), ("ALU", "add", "u", "u", "t"), ("STX", "u", SMEM, "k"),
         ("ALUI", "add", "t", "t", 1), ("STX", "sid", SMN, "t"),
@@ -766,7 +768,7 @@ def build(locations=False, warnings=False, errors=False):
     from statics import install as static_install
     static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL)
     from initializers import install as init_install
-    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT)
+    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE)
     g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------
     P("START").branch({0: "START.ok"}, bad("token input exceeds position domain"), [("XLEN", "toklen"), ("CMPI", "toklen", POSSPAN)])
@@ -1731,7 +1733,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("MB.ok")
     p.a(("ALUI", "sub", "sid", "vb", SBB)).call("NEXT").tok({TK_ID: "MB.nm"}, bad("member access"))
     P("MB.nm").call("MB.INFO").branch({1: "MB.zero"}, "MB.has", [("CMPI", "ms", 0)])
-    P("MB.INFO").a(("INTERN", "v", "ps", "pe"), ("ALUI", "mul", "k", "v", 64), ("ALU", "add", "k", "k", "sid"),
+    P("MB.INFO").a(("INTERN", "v", "ps", "pe"), ("A64I", "mul", "k", "v", MEMBER_STRIDE), ("A64", "add", "k", "k", "sid"),
         ("LDX", "mo", "k", MOF), ("LDX", "ms", "k", MSZ), ("LDX", "vt", "k", MPT), ("LDX", "vb", "k", MBS), ("LDX", "marr", "k", MAR)).ret()
     P("MB.zero").branch({0: "MB.has"}, "DEAD.mb", [("CMPI", "marr", 0)])
     P("MB.has").branch({1: "MB.z"}, "MB.off", [("CMPI", "mo", 0)])

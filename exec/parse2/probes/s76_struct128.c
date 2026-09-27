@@ -1,4 +1,4 @@
-/* Capacity probe: accepted by host cc and the product, currently not covered by the model. */
+/* Capacity probe: accepted by host cc and the product, model member-key capacity regression. */
 struct S0 {int m0;};
 struct S1 {int m1;};
 struct S2 {int m2;};
@@ -127,4 +127,5 @@ struct S124 {int m124;};
 struct S125 {int m125;};
 struct S126 {int m126;};
 struct S127 {int m127;};
-int main(void){struct S127 x; x.m127=7; return x.m127!=7;}
+struct S127 last = {.m127=11};
+int main(void){struct S63 a={.m63=3}; struct S64 b={.m64=5}; struct S127 x={.m127=7}; return a.m63!=3 || b.m64!=5 || x.m127!=7 || last.m127!=11;}
