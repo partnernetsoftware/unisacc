@@ -5099,3 +5099,7 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 最终parser审计11a0d56未发现完整固定过程遗漏；仅strings.py普通escape的保留字符策略/ADV-LDI模板仍明文分支。为避免声明边界含糊，最后小修将此策略及共享escape模板纳入现有strings声明，esc真实映射继续动态绑定；ADR.object单边连接保留为共享过程装配，不另迁。产品燃料7f528cd已验证私有driver默认self 20.57s同前hash、显式预算1拒绝，现合入待新包实测。
 
 最终源冻结准备：escape小策略88e4b46、显式构建9e33bdb与不可变候选验收fbf00d0/72e421e已合。make release去除ref副作用；每次队列55秒、双槽，pending75可续，同hash通过才复制，零skip不误拒，不称本机gate等于跨平台发布。默认com仍classic，冻结新包后以实际artifact完成全部门禁/平台/性能，再决定切换。
+
+冻结源85eaeb9完整新模型候选已建：/tmp/unisacc-final-build-928/candidate/unisacc-next.com，6279167B，sha256 9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46；包6095823B/a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8，物理整包仅1份(offset183328)。shared与六目标两槽批次7.98/4.13/5.14/4.86s，pack25.20s全rc0。审计保留32个互异网络及32表配对，逐一SHA核对与--check-net全域通过，配对网络集合恰等包内32模型（938stage rows/21资源，网络5922890B）；不是只验原22项。证据source.json/coverage.json/pairs-{0,1}.json。
+
+同一9a0ae470候选全139项本机滚动门禁已启动：/tmp/unisacc-final-gate-928；首窗口39.44秒，tools11/11与bigclosure6目标同均rc0，2/139，pending75正确保留，尚未称全套通过。显式MODEL_COM、UA=/tmp/unisacc-final-build-928/seed，默认产物未替换；后续只改prd证据不更改冻结构建输入。
