@@ -18,6 +18,9 @@
 #include <stdint.h>
 #include <errno.h>
 
+#ifdef UNISA_CORE_BLOB
+#define UNISA_CORE_EXTERNAL
+#endif
 #include "core.h"
 #ifndef UNISA_CORE_EXTERNAL
 #include "core.c"
@@ -378,6 +381,10 @@ static int runroute(const char *route, Buf *in, const char *src) {
     if (!count) die("unknown package route");
     return 0;
 }
+
+#ifdef UNISA_CORE_BLOB
+#include "asm/binding.c"
+#endif
 
 #ifndef UNISA_RUNTIME_LIBRARY
 int main(int argc, char **argv) {

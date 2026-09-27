@@ -370,7 +370,7 @@ def printf():
 UNS = E.UNS   # unsigned char/short/int/long: UNS + size
 SBB = E.SBB   # a struct's base code: SBB + sid; layouts in the old E3's tables (measured rules)
 STAG, SSZ, MOF, MSZ, MPT, MBS = E.STAG, E.SSZ, E.MOF, E.MSZ, E.MPT, E.MBS
-FPB = E.FPB   # a function pointer: depth 1, base FPB (its call result is taken as int)
+FPB = E.FPB   # function pointer; indirect calls return the reference's full machine word
 DBL = E.DBL
 # ---- declared data: the product's type tables (weights/gold/type.tsv, tyinfo.tsv) -------------
 # binary() asks two rows: ck = type(t1 "+" t2), the common type the operands are converted to
@@ -1381,7 +1381,8 @@ def build():
     q = P("U.cast")      # (T) e: narrowed through the stack to T; long and pointers: no code (measured)
     q.call("TSPEC").tok({"(": "UC.fp"}, "UC.type")
     P("UC.fp").branch({1: "UC.fp0"}, bad("function pointer cast result type"), [("CMPI", "td", 0)])
-    P("UC.fp0").branch({1: "UC.fp1"}, bad("function pointer cast result type"), [("CMPI", "tb", 4)])
+    P("UC.fp0").branch({1: "UC.fp1"}, "UC.fp8", [("CMPI", "tb", 4)])
+    P("UC.fp8").branch({1: "UC.fp1"}, bad("function pointer cast result type"), [("CMPI", "tb", 8)])
     P("UC.fp1").call("NEXT").expect("*").call("NEXT").expect(")").call("FPD.c").goto("UC.type")
     q = P("UC.type")
     q.expect(")").vpush("td", "tb").call("NEXT").call("UNARY").call("ISDV").a(("COPYW", "sdv", "u")).vpop("vt", "vb").call("ISDV")
@@ -1614,7 +1615,7 @@ def build():
     p = P("CL.emit")
     p.vpop("cls", "cle", "sys").branch({1: "CL.call"}, "CL.s100", [("CMPI", "sys", 0)])
     P("CL.s100").branch({1: "CL.callr"}, "CL.sysz", [("CMPI", "sys", 100)])
-    P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 4)).call("NEXT").ret()
+    P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()
     # a syscall: r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5`
     for k, (_, sc, w) in enumerate(SYSCALLS, 1):
         nx = "CL.w%d" % (k + 1) if k < len(SYSCALLS) else "DEAD"

@@ -3036,3 +3036,31 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   ABI/carried-library binding remains necessary; x7 is the ARM tape stack and
   the first x86 tape argument is rax rather than System V rdi. Product sources
   and .com unchanged. Local commit only, cc-unisacc paused, no push/release.
+
+
+### Product-ABI assembly binding and network driver self-rebuild
+
+- Added a small tape-ABI/assembly bridge on both ISAs and nine generic carried-
+  library/host services. ARM separates hardware stack use from the live x7
+  tape stack; x86 aligns rsp and preserves the tape r9 frame. The entry takes
+  a tagged argument record, avoiding the reference's six-register indirect-
+  call limit. No language-specific action was added, no C core fallback.
+- Offline macOS assembly/static link yields a self-contained, position-
+  independent blob with no unresolved imports or rebasing/binding. One service
+  pointer is filled before RX protection. Complete blob: **7,664 B each ISA**,
+  including envelope, header/padding, strings/constants, core and bridge.
+  UNISA_KERNEL is still an explicit development input, not embedded yet.
+- Fresh native arm64/Rosetta x86 binding checks both pass: network/domain/
+  resource/error tests; four complete images; nine CLI modes; nine memory runs;
+  two multi-unit runs; missing/corrupt blob rejection; **N1=N2=N3** for the
+  assembly-bound compiler driver, rebuilt through its networks using the same
+  explicit fixed assembly blob. Logs /tmp/unisacc-binding-self-{arm2,x862}.log.
+- Self-rebuild exposed E3's int-only function-pointer cast guard. Added signed
+  long casts and made indirect results the reference's full machine word.
+  New long_fptr probe equals the reference tape and executes with exit 0 under
+  host cc and product. Old fixed 239 all pass in eight bounded Python-oracle
+  shards before adding the probe (keep now 240). Generator +1 net line; this
+  matches the measured word-result convention, not complete function types.
+- Binding suites are required macOS gate entries. Linux/Windows binding,
+  single-package integration and default switching remain unfinished. Product
+  source/.com unchanged, cc-unisacc paused, local commits only; no push/release.

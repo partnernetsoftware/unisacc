@@ -9,6 +9,10 @@ ARCH=${CORE_ASM_ARCH:-$(uname -m)}
 case $ARCH in aarch64) ARCH=arm64;; arm64|x86_64) ;; *) exit 2;; esac
 case $(uname -s) in Darwin) OS=osx; ARCHFLAG="-arch $ARCH";; Linux) OS=lnx; ARCHFLAG=;; *) exit 2;; esac
 export CORE_ASM_ARCH=$ARCH
+KERNEL_ASM=""
+for unit in transition arith buffer memory intern bytes format stack action run; do
+    KERNEL_ASM="$KERNEL_ASM exec/c/asm/${unit}_${ARCH}.S"
+done
 b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_TRANSITION_NAME=core_transition_c \
     exec/c/core.c "exec/c/asm/transition_$ARCH.S" exec/c/asm/layoutcheck.c \
     exec/c/asm/transitioncheck.c -o "$T/check"
@@ -119,7 +123,7 @@ for case in range(1,8):
 print('stack failure paths: C/ASM both reject, 14 simulated checks')
 PYSTACK
 b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_RUN_NAME=core_run_c -DCORE_ACTION_LINKAGE= -Daction_run=action_run_c -DCORE_TRANSITION_NAME=core_transition_c \
-    exec/c/core.c exec/c/asm/*_"$ARCH".S exec/c/asm/layoutcheck.c exec/c/asm/actioncheck.c -o "$T/action"
+    exec/c/core.c $KERNEL_ASM exec/c/asm/layoutcheck.c exec/c/asm/actioncheck.c -o "$T/action"
 b "$T/action"
 b python3 - "$T/action" <<'PYACTION'
 import subprocess,sys
@@ -129,7 +133,7 @@ for version in ['c','a']:
 print('bad action: C/ASM both reject')
 PYACTION
 b cc $ARCHFLAG -Os -Wall -Wextra -DCORE_RUN_NAME=core_run_c -DCORE_TRANSITION_NAME=core_transition_c -Dcalloc=run_calloc -Drealloc=run_realloc -Dfree=run_free \
-    exec/c/core.c exec/c/asm/*_"$ARCH".S exec/c/asm/layoutcheck.c exec/c/asm/runcheck.c -o "$T/lifecycle"
+    exec/c/core.c $KERNEL_ASM exec/c/asm/layoutcheck.c exec/c/asm/runcheck.c -o "$T/lifecycle"
 b "$T/lifecycle"
 b python3 - "$T/lifecycle" <<'PYRUN'
 import subprocess,sys

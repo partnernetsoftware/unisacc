@@ -69,7 +69,11 @@ job exec-native ./exec/c/nativecheck.sh
 job exec-net python3 ./exec/c/netcheck.py
 job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
 job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel
-if [ "$(uname -s)" = Darwin ]; then job exec-asmx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asmcheck.sh; fi
+if [ "$(uname -s)" = Darwin ]; then
+    job exec-asmx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asmcheck.sh
+    job exec-bindarm env CORE_ASM_ARCH=arm64 ./exec/c/asm/bindingcheck.sh
+    job exec-bindx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asm/bindingcheck.sh
+fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
 job exec-driver ./exec/c/compilercheck.sh
 job exec-multi ./exec/c/multicheck.sh

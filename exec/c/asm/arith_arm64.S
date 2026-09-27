@@ -6,7 +6,8 @@
 #error Windows_ARM64_object_binding_not_implemented
 #endif
 #ifdef __APPLE__
-#define CNAME(x) _##x
+#define CNAME1(x) _##x
+#define CNAME(x) CNAME1(x)
 #else
 #define CNAME(x) x
 #endif

@@ -276,3 +276,39 @@ The memory suite passes 36 native runs per ISA plus argv/environment/O1/status
 checks on macOS arm64 and Rosetta x86-64. These counts include all three drivers.
 The existing C-only embedded .com check remains separate. The assembly driver
 is host-linked, not yet linked with the product's carried library/internal ABI.
+
+## Product-internal calling convention bridge
+
+bridge_arm64.S and bridge_x86_64.S connect the assembly kernel to a driver
+compiled by unisacc, using its carried library rather than host libc. A single
+argument points to an operation tag and six argument words (the product cannot
+make a six-register indirect call). The two entry operations are core_run and
+core_transition. The latter is also used by the full-domain verifier. Both
+return a machine word so rejection-string pointers retain all bits.
+
+On ARM the bridge moves hardware SP below the live x7 tape stack and saves
+x6, x7 and the original SP. A service callback places a tape return slot below
+the current hardware frame. On x86 it translates the record into System V
+registers, aligns rsp, and saves the product's r9 frame pointer. Callback thunks
+save System V nonvolatile GPRs across product code. Nine services are allocation,
+free, byte copy/compare/fill/length and the two host callbacks; none is a compiler
+decision. The kernel's mutable execution state remains in its existing frames.
+
+blob.py uses the macOS assembler/static linker as an offline seed tool. It
+requires no unresolved import or runtime rebasing/binding, and extracts __TEXT
+through its last section. The service slot is bound before the mapping becomes
+RX. binding.c validates the ISA and byte extents, maps/copies/protects the code
+and retains this immutable mapping until process exit. Current blobs are
+7,664 B per ISA including the 40-byte envelope, Mach-O seed header, padding,
+strings/constants, complete execution core and bridge. The Mach-O header is
+inert bytes inside the blob, not a request to load it as an OS executable.
+
+UNISA_CORE_BLOB selects this development binding; UNISA_KERNEL is currently
+an explicit external file. There is no core.c fallback. Bindingcheck requires
+fresh networks, four complete image comparisons, nine CLI modes, nine real
+memory runs, two multi-unit runs, missing/corrupt blob rejection and N1=N2=N3
+for the assembly-bound compiler driver rebuilt through networks. The assembly
+blob itself remains a fixed, explicitly supplied artifact; the rebuilt driver
+does not assemble it. Both native macOS arm64 and Rosetta x86-64 pass. Windows
+and Linux execution of this binding, embedding it in the single package, and
+the final default product switch remain pending. These are not platform claims.
