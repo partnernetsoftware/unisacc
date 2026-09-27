@@ -21,7 +21,8 @@ install(E,code_start="C.prelude" if full else "H.code",target=target)
 if full:
     from code import install as install_code
     install_code(E,arch=target.split("/")[1],os_=target.split("/")[0])
-E.P('ACCEPTDATA').a(('ACCEPT',)).goto('DEAD')
+from finite_rules import install as install_rules
+install_rules(E.g, pathlib.Path(__file__).parent, 'code-shell', section='data-end')
 E.g.finish()
 d={'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in E.g.st.items()},'seqs':[list(map(list,s)) for s in E.g.seqs]}
 pathlib.Path(sys.argv[1]).write_text(json.dumps(d,separators=(',',':')))
