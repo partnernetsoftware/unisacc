@@ -72,7 +72,17 @@ def build(image=False):
             hit='PUT.%d' % i, next='PUT.next%d' % i, index=i,
             value='a%d' % i, kind='k%d' % i, negative='neg%d' % i))
     contract(section='after')
-    P('ENC').branch({i:'CHECK.'+op for i,op in enumerate(specs,1)},'FAIL',[('RLD','cls')])
+    from finite_rules import load as load_rules
+    dispatch_test = P('ENC').fresh('b')
+    contract(section='dispatch', bindings={'test': dispatch_test})
+    routes = [('dispatch-route', (i,), {'entry': 'CHECK.'+op}) for i, op in enumerate(specs,1)]
+    routes.append(('dispatch-unknown', set(range(257))-set(range(1,len(specs)+1)), {}))
+    for section, domain, values in routes:
+        rows = load_rules(Path(__file__).with_name('armcontract-result.tsv'), {}, domain=domain, section=section,
+                          bindings={'test': dispatch_test, **values})
+        for state, row in rows.items():
+            for observation, (target, actions) in row.items():
+                g.on(state, [observation], target, actions, 'r')
     for op, (shape, cls) in specs.items():
         entry = 'CHECK.' + op
         if op == 'spinit':
