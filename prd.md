@@ -5065,3 +5065,5 @@ printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开
 unit位置协议收口按完整过程分工：E4先迁unitlocations.py完整LS适配器，保留tokenlocations.install以及units.py的唯一扫描器和既有标签规则；随后迁完整DL协议读取组和units隔离组，不混改三个语义层。当前E3 warning、E5 sizeof私有验证，父主树产品队列窗口之间只记本决策；不修改队列指纹输入，私有修改继续并行。
 
 sizeof组0999ad5已交待父队列冻结结束后合；全图10组同、6旧probe真实NET O2原生同host，Python净减77/声明增307。E5下一独立整组为return语句及CEXPR/EXPR/LP/QTAIL条件表达式完整控制，保留ASSIGNCV/FS/CKT等已有类型事实和QN空指针证明、共享LP.addr，不迁X.id/更新操作相邻组。先静态工作，等待全机两槽空位，不拆成逐例新增规则。
+
+父固定a1115126候选15项产品队列全部rc0（/tmp/unisacc-controls-product-928），包括C99 57/57、CLI64、ccparity53+known1、closure48镜像同/8运行、diag14、diagunits18、formatonce5、hostile21、multi、parserbounds8、run12、staticinit9拒绝、staticunits、tagforward15拒绝、tools11。单槽与代理重型验证并行，6窗口32.84/18.15/16.94/15.54/14.83/48.29秒；无超时/失败，最后rc0。此证据仅该固定候选；队列结束后才批合d96bf3a浮点常量与0999ad5 sizeof，未称新源已重建为同一包。E4 unitlocations接槽1，E3 warnings槽2，E5 return/表达式静态处理中。
