@@ -4545,3 +4545,9 @@ sizeof成员片验收：复用MB.INFO读取成员声明元数据，新增命名�
 b_short仍停在sizeof(long int)：TSPEC已有long/long long和unsigned short的描述符，但未消费可选int。把这几条尾部接入共用的可选int消费状态；保持类型宽度来源与描述符不变。新增声明、参数、转换和sizeof探针，先检查参考字节与真实执行，再扩大固定清单。
 
 整数类型拼写验收：共用TS.intopt/TS.intend消费short/long/long long尾部可选int，unsigned short/long沿同一路径；类型描述符不变，未增加执行器原语，gen2净增2行。原295项先通过，加入b_short与s74_int_spellings后297项全部参考tape相同，chain150项全部通过。两例在实际模型候选-O0/-O1/-O2共6次执行与宿主cc相同。12项相关门禁两槽队列50.37/13.11秒，全通过，源码到ELF42.40秒。模型5175状态、1,331,112条目、JSON28,822,967 B；候选5,961,557 B，sha256 4353fd82c49d224b70dce8da0460efc07833b81eefc6ca334d81370b038dadc9。产品源码与默认.com未变，未宣称任意声明拼写或完整C99已覆盖。
+
+
+### unsigned一元负号覆盖（进行中）
+剩余b_uzext停在unsigned int一元负号。参考在减法后把u32零扩展，模型此前直接拒绝；复用tyinfo派生的NARU掩码，不复制第二套宽度常量。先核对该文件与固定清单，再由实际模型候选执行。
+
+unsigned负号验收：gen2净增1行，以已有NARU生成u32减法后的零扩展，无新执行器原语。b_uzext全文件与参考tape相同，原297项先通过，加入后298项全通过；chain151项全通过。实际模型候选-O0/-O1/-O2均与宿主cc相同。12项相关门禁两槽队列50.73/12.97秒，全通过，源码到ELF42.65秒。模型5177状态、1,331,627条目、JSON28,832,947 B；候选5,962,191 B，sha256 adc7e716a34776e4ab031726ff8fe9b929d3e3bf8c688e59c1b5d24cb9878d0d。产品源码未变，默认.com未切换。

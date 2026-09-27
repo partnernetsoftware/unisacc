@@ -1602,7 +1602,8 @@ def build(locations=False, warnings=False, errors=False):
     P("U.negsingle").branch({1: "U.negfloat"}, "U.negint", [("CMPI", "vb", FLT)])
     P("U.negdouble").o("  imm r1, -9223372036854775808\n  xor64 r0, r0, r1\n").ret()
     P("U.negfloat").o("  imm r1, 2147483648\n  xor64 r0, r0, r1\n").ret()
-    P("U.negint").branch({1: "DEAD.ui"}, "U.ng1", [("CMPI", "vb", UNS + 4)])
+    P("U.negint").branch({1: "U.ngu32"}, "U.ng1", [("CMPI", "vb", UNS + 4)])
+    emit(P("U.ngu32"), "neg").call("NARU").ret()
     q = P("U.ng1")       # -x on any integer but unsigned int: imm r1, 0; sub64 (measured); a narrow operand gives an int
     emit(q, "neg").branch({1: "U.ng4"}, "U.ngwidth", [("CMPI", "vb", BOOL)])
     P("U.ngwidth").branch({(0, 1): "U.ng4"}, "U.ng2", [("CMPI", "vb", 2)])
