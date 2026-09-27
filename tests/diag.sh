@@ -32,7 +32,7 @@ check() {   # check <name> <want line:col> <want text in message>
     # to report the line of its spliced buffer -- `line 553` for line 4 of
     # a six-line file -- so the two front ends disagreed about where an
     # error was even when they agreed that there was one.
-    got=$(perl -e 'alarm 120; exec @ARGV' python3 -m unisa tape "$T/$name.c" 2>&1 \
+    got=$(perl -e 'alarm 60; exec @ARGV' python3 -m unisa tape "$T/$name.c" 2>&1 \
           | grep -m1 "error:")
     case "$got" in
         *"$name.c:$want: error:"*"$msg"*) ok=$((ok+1));;
@@ -126,7 +126,7 @@ lines=$(perl -e 'alarm 60; exec @ARGV' "$UA" -run "$T/multi.c" 2>&1 | grep "erro
 if [ "$lines" = "3 7 10 " ]; then ok=$((ok+1)); else
     bad=$((bad+1)); printf "  FAIL %-14s want lines 3 7 10, got %s\n" multi-lines "$lines"; fi
 # ...and the Python front end reports the same three [S-10 #4]
-got=$(perl -e 'alarm 120; exec @ARGV' python3 -m unisa tape "$T/multi.c" 2>&1 | grep -c "error:")
+got=$(perl -e 'alarm 60; exec @ARGV' python3 -m unisa tape "$T/multi.c" 2>&1 | grep -c "error:")
 if [ "$got" -eq 3 ]; then ok=$((ok+1)); else
     bad=$((bad+1)); printf "  FAIL %-14s (python) want 3 errors, got %s\n" multi "$got"; fi
 # -ferror-limit=1 stops after the first, as clang's does

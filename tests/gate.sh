@@ -48,6 +48,8 @@ job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets 
 job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location envelope
 job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering
+job exec-errors python3 ./exec/parse2/errorcheck.py
+job exec-errors-warn python3 ./exec/parse2/errorcheck.py --warnings
 job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py  # first warning kind and FP conditions
 job exec-intwarn python3 ./exec/parse2/returnwarningcheck.py --int-conversion
 job exec-unusedwarn python3 ./exec/parse2/returnwarningcheck.py --unused
@@ -87,7 +89,8 @@ if [ "$(uname -s)" = Darwin ]; then
     job exec-container ./exec/c/containercheck.sh
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
-job exec-driver ./exec/c/compilercheck.sh
+job exec-driver-core ./exec/c/compilercheck.sh core
+job exec-driver-resources ./exec/c/compilercheck.sh resources
 job exec-warningdriver ./exec/c/warningcheck.sh
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
 job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py

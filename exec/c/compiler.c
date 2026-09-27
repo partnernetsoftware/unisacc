@@ -93,7 +93,7 @@ static char *process_environment(int argc,char **argv,int i) {
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
-    int warnings=0; Buf werror={0};
+    int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0};
     for (int i = 1; i < argc; i++) {
@@ -103,6 +103,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a,"-Wall") || !strcmp(a,"-Wextra")) warnings=1;
         else if (!strcmp(a,"-Werror")) { warnings=1; if (!werror.n) bput(&werror,1,0); }
+        else if (!strncmp(a,"-ferror-limit=",14)) { errorlimit.n=0; argbytes(&errorlimit,a+14); }
         else if (!strcmp(a,"-run")) runit = 1;
         else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
         else if (runit && src && a[0]!='-') {
@@ -191,10 +192,11 @@ int main(int argc, char **argv) {
         cli[6].name=(const unsigned char *)"\0process/argv";cli[6].n=13;cli[6].data=process_argv;cli[6].len=8;
         NRI=7;
 #ifdef _WIN32
-        nimports=process_own_imports(cli+9,246,(long)process_own_imports);NRI=9+nimports;
+        nimports=process_own_imports(cli+9,245,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
+    ARGRESOURCE(NRI,"\0cli/error-limit",errorlimit); NRI++;
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; int rc=0;
@@ -205,11 +207,11 @@ int main(int argc, char **argv) {
             Buf unit={0}; unit.b=source_read(sources[j],&unit.n);
             rc=runroute(unitroute,&unit,sources[j]);
             if (rc) { free(unit.b); break; }
-            int namelen=warnings ? strlen(sources[j]) : 0;
-            long framed=(long)unit.n+(warnings ? 4+(long)namelen : 0);
+            int namelen=strlen(sources[j]);
+            long framed=(long)unit.n+4+(long)namelen;
             if (framed>0x7fffffff) return clierror("unit frame too large");
             for (int k=0;k<4;k++) bput(&in,(framed>>(8*k))&255,0);
-            if (warnings) {
+            {
                 for (int k=0;k<4;k++) bput(&in,(namelen>>(8*k))&255,0);
                 for (int k=0;k<namelen;k++) bput(&in,(unsigned char)sources[j][k],0);
             }

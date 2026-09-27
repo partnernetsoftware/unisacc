@@ -90,9 +90,9 @@ local storage labels are unchanged by diagnostic mode.
 `exec/parse2/locationcheck.py` checks the E2/E1/E3 join against ordinary tape
 output and reads every saved map field back through a test-only model
 continuation. Neither test inserts a language-specific executor primitive.
-The compiler CLI does not select these modes yet. Multi-unit location framing,
-warning selection and -Werror handling remain to be connected; these location
-tests alone do not claim warning compatibility.
+The development compiler now selects these location modes for normal and
+warning compilation, including multiple units. The location tests alone do
+not claim complete diagnostic compatibility.
 
 
 ## Diagnostic rendering and warning rules (development)
@@ -188,3 +188,21 @@ than the static-isolation suffix. Counts/extents/unit indices/source offsets
 are checked before access. `unitlocationcheck.py` independently serializes a
 valid two-unit case, checks UTF-8 filenames and reference diagnostics, and
 rejects ten bad map containers and seven bad input frames.
+
+
+## Parser errors and error-limit resource
+
+`--errors` implies locations and can accompany `--warnings`. The driver
+passes `-ferror-limit=` unchanged as NUL-terminated bytes under the opaque
+`\0cli/error-limit` resource. An absent/empty resource means the default 20;
+a supplied empty argument has a NUL byte and parses as zero (unlimited).
+The model reads the leading decimal value, counts errors across units and
+implements the stopping message. C does not parse diagnostic text.
+
+Mapped grammar errors render reference diagnostics, discard the failed
+continuation/scope, and rescan to the next balanced top-level boundary.
+Nonzero error count prevents output publication. Unmapped prototype
+limitations acquire a location but keep their not-covered reason and stop.
+`parse2/errorcheck.py` compares 17 complete results and checks one such
+limitation separately. `c/multiwarningcheck.sh` additionally compares 18
+cross-unit error results, covering order, recovery and limits.

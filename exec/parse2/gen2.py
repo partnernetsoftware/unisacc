@@ -5,10 +5,13 @@ templates -- by one generic compiler, instead of being grown state by state.
     python3 exec/parse2/gen2.py OUT.json
     python3 exec/parse2/gen2.py --locations OUT.json
     python3 exec/parse2/gen2.py --warnings OUT.json
+    python3 exec/parse2/gen2.py --errors OUT.json
 
 Optional --warnings implements return-type, int-conversion, unused-variable
 and format warnings and implies --locations. The development compiler CLI
 selects it for single- and multi-unit -Wall/-Wextra/-Werror.
+--errors adds located language errors and top-level recovery; it is selected
+for ordinary compilation as well. Unmapped prototype limits stay explicit.
 
 Step 1 covers: int functions and parameters, int locals, expression
 statements, assignment, calls, unary - !, the binary operators of every
@@ -672,7 +675,7 @@ def types():
         P(name + ".emit").o("  imm r2, ").num("scl").o("\n  " + op + " r0, r0, r2\n").ret()
 
 
-def build(locations=False, warnings=False):
+def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
@@ -1743,7 +1746,7 @@ def build(locations=False, warnings=False):
     start = "START"
     if locations:
         from tokenlocations import install as location_install
-        start = location_install(E, P, TIX, "WU.token" if warnings else None)
+        start = location_install(E, P, TIX, "ER.token" if errors else "WU.token" if warnings else None)
         from diagnostics import install as diagnostic_install
         diagnostic_install(E, P)
     if warnings:
@@ -1756,6 +1759,9 @@ def build(locations=False, warnings=False):
         unused_warning_install(E, P, TIX)
         from formatwarnings import install as format_warning_install
         format_warning_install(E, P, DBL, FLT, FPB, SBB)
+    if errors:
+        from errors import install as error_install
+        error_install(E, P, warnings)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
@@ -1765,10 +1771,12 @@ if __name__ == "__main__":
     warnings = "--warnings" in sys.argv
     if warnings:
         sys.argv.remove("--warnings")
-    locations = "--locations" in sys.argv or warnings
+    errors = "--errors" in sys.argv
+    if errors: sys.argv.remove("--errors")
+    locations = "--locations" in sys.argv or warnings or errors
     if "--locations" in sys.argv:
         sys.argv.remove("--locations")
-    d = build(locations=locations, warnings=warnings)
+    d = build(locations=locations, warnings=warnings, errors=errors)
     twice = sorted(k for k, n in DEFS.items() if n > 1)
     assert not twice, "defined twice: %r" % twice
     s = json.dumps(d, separators=(",", ":"))

@@ -40,3 +40,16 @@ for name in ['cc','ua','asm']:
  assert out.read_bytes()==b'keep' and dep.read_bytes()==b'dep'
 assert count==120,count
 print('multi warnings:',count,'complete result comparisons')
+# Recovery and the error limit span unit boundaries, including -Wall output
+# before an error. Compare all bytes and exit status, not only the count.
+a.write_text('int f(void){int *p=3;return missing;}\n')
+b.write_text('int main(void){int n=3\nreturn n;}\n')
+errors=0
+for files in ([a,b],[b,a]):
+ for limit in ('0','1','2'):
+  args=[*files,'-Wall','-ferror-limit='+limit,'-t',target,'-o','-']
+  want=run([ref,*args]);assert want.returncode==1 and not want.stdout
+  for name in ['cc','ua','asm']:
+   equal(run([p/('driver-'+name),'--models',p/'compiler.pkg',*args]),want);errors+=1
+assert errors==18,errors
+print('multi errors:',errors,'complete results; recovery, both orders, cross-unit limit')

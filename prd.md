@@ -3806,3 +3806,34 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
 - These are macOS arm64/Rosetta results and cross-generation checks; no Linux
   or Windows VM was run for this batch. No default model-route switch, push
   or release. The overall reconstruction goal remains active.
+
+
+### Located parser errors and bounded recovery (development route)
+
+- Normal and warning compilation routes now retain per-unit source maps.
+  E3 --errors maps unknown identifiers, expression starts and expected
+  punctuation to reference diagnostics, unwinds scopes and input views, and
+  resumes at a balanced top-level boundary. Any error prevents tape publication.
+  Other prototype limitations retain their explicit not-covered reason, gain
+  a location, and stop; this is not reference-error equivalence.
+- The driver carries -ferror-limit= as an opaque resource; the model reads it
+  (default 20, zero unlimited). No diagnostic classification or recovery was
+  added to the C executor. Existing warning rules remain model actions.
+- errorcheck: 17 complete rc/stdout/stderr comparisons plus one located
+  prototype limitation on host C, unisacc C and both macOS assembly cores.
+  Every loaded network is enumerated against its table. Multi-unit checks:
+  120 warning comparisons plus 18 error/recovery/limit comparisons, both
+  file orders, across three drivers. Ordinary multi-unit checks also pass:
+  36 tape comparisons, native runs, scope isolation and failure preservation.
+- The combined driver suite exceeded its outer 60 s budget (rc 142); it is
+  split into core/resources with the same assertions. Both bounded parts
+  pass. diag.sh's two legacy 120 s child alarms are now 60 s. These targeted
+  results do not claim a new complete gate or new-platform validation.
+- Actual development unisacc-next.com: 5,735,300 B, SHA-256
+  417a110d6593a5cbb1091fd472858a195c51af744a30e4c66728964807756bb1.
+  diag 14/14 (including 40 damaged inputs), CLI 64/64. ccparity at this slice
+  is 50 ok, 3 wrong, 1 known: C99 macro examples ex3/ex4/ex7 still fail;
+  the known -c object-file incompatibility remains. Macro parity is next.
+- Product sources/default .com are unchanged. No default model-route switch,
+  push or release; offline construction still uses Python. FX-1..FX-4 remain
+  unscheduled conjectures, not prerequisites for this work.

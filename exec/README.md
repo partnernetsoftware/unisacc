@@ -10,7 +10,12 @@ or Python; offline construction still uses the seed tools. See
 The shipped compiler has not adopted this route: CLI/source/error parity is
 still incomplete. `-Wall`, `-Wextra` and `-Werror` use the located warning
 models for one or several source files. `c/warningcheck.sh` and
-`c/multiwarningcheck.sh` check this contract.
+`c/multiwarningcheck.sh` check this contract. Ordinary compilation also retains
+source locations. `parse2/errors.py` generates mapped syntax diagnostics and
+top-level recovery; unmapped prototype limitations remain explicit rejections.
+`parse2/errorcheck.py` checks complete results and error limits. The current
+model container passes diag 14/14 and CLI 64/64; three complex C99 macro
+examples in ccparity still fail, so source compatibility is not complete.
 The following E0 machine and toy are
 retained as their original, separate experiment.
 

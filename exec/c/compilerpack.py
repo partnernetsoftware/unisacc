@@ -48,9 +48,6 @@ def compiler_package(manifests, o1, includes, kernels=None):
         # Offline construction of the shared unit-framing network. Runtime
         # does not invoke these Python tools or parse declarations in C.
         here=Path(__file__).resolve().parent
-        uj=Path(td)/'units.json';ut=Path(td)/'units.tbl';un=Path(td)/'units.net'
-        for script,args in [(here.parent/'parse2/units.py',[uj]),(here/'tbl.py',[uj,ut]),(here/'net.py',[ut,un])]:
-            subprocess.run([sys.executable,str(script),*map(str,args)],check=True,timeout=60)
         # Public token dump uses the reference's fixed Linux/x86 predefines
         # and the plain E1 output, independently of image-target selection.
         for name,script,args,inp,out in [
@@ -71,11 +68,22 @@ def compiler_package(manifests, o1, includes, kernels=None):
                 subprocess.run([sys.executable,str(tool),*map(str,argv)],check=True,timeout=60)
             return n
         warning_models['e1']=warning_model('warnlex',here.parent/'lex/gen.py',['--locations'])
-        warning_models['e3']=warning_model('warnparse',here.parent/'parse2/gen2.py',['--warnings'])
+        warning_models['e3']=warning_model('warnparse',here.parent/'parse2/gen2.py',['--warnings','--errors'])
         located_units=warning_model('warnunits',here.parent/'parse2/units.py',['--locations'])
+        quiet_parse=warning_model('errorparse',here.parent/'parse2/gen2.py',['--errors'])
         ordinary=list(rows)
         for target in sorted(targets):
             warning_models['e2']=warning_model('warnpp-'+target.replace('/','-'),here.parent/'pp/gen.py',[target,'--locations'])
+            # Normal compilation also carries locations, without enabling
+            # warnings. The same units model preserves file boundaries.
+            quiet_routes={target+'/unit'}|{target+'/'+s for s,_,_ in specs if s!='pp'}
+            for i,row in enumerate(rows):
+                cols=row.split('\t')
+                if cols[0] not in quiet_routes: continue
+                if cols[1]=='e2': cols[3:5]=['pp.locations',str(warning_models['e2'])]
+                elif cols[1]=='e1': cols[2:5]=['pp.locations','tokens.locations',str(warning_models['e1'])]
+                elif cols[1]=='e3': cols[2]='tokens.locations';cols[4]=str(quiet_parse)
+                rows[i]='\t'.join(cols)
             rows.append('\t'.join([target+'/warn/unit','e2','src.c','pp.locations',str(warning_models['e2'])]))
             rows.append('\t'.join([target+'/warn/unit','e1','pp.locations','tokens.locations',str(warning_models['e1'])]))
             for suffix,last,opt in specs:
@@ -94,7 +102,7 @@ def compiler_package(manifests, o1, includes, kernels=None):
             for suffix,last,opt in specs:
                 if suffix=='pp': continue
                 route=target+'/multi/'+suffix
-                rows.append('\t'.join([route,'units','units.typed','tokens.typed',str(un)]))
+                rows.append('\t'.join([route,'units','units.locations','tokens.locations',str(located_units)]))
                 for row in base:
                     cols=row.split('\t')
                     if cols[0]==target+'/'+suffix and cols[1] not in ('e2','e1'):
