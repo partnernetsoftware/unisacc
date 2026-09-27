@@ -2,6 +2,10 @@
    is performed by the package's networks. Unsupported CLI remains an explicit
    error until migrated; no call to a reference compiler. Not the default yet. */
 #include "../../src/version.h"
+/* Match the existing selfcheck fuel budget; explicit environment wins. */
+#ifndef UNISA_DEFAULT_MAXSTEPS
+#define UNISA_DEFAULT_MAXSTEPS 400000000000LL
+#endif
 #define UNISA_RUNTIME_LIBRARY
 #include "run.c"
 #undef UNISA_RUNTIME_LIBRARY

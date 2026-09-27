@@ -18,6 +18,11 @@
 #include <stdint.h>
 #include <errno.h>
 
+/* Standalone runner default; product drivers may override at compile time. */
+#ifndef UNISA_DEFAULT_MAXSTEPS
+#define UNISA_DEFAULT_MAXSTEPS 200000000LL
+#endif
+
 #ifdef UNISA_CORE_BLOB
 #define UNISA_CORE_EXTERNAL
 #endif
@@ -373,7 +378,7 @@ static void bput(Buf *o,int c,I at) {
 #endif
 static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
     CoreModel m; core_model(&m);
-    I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : 200000000LL;
+    I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : UNISA_DEFAULT_MAXSTEPS;
     CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
     if (status==1 && r.reason_n) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
     if (status==2) fprintf(stderr,"run: %s\n",r.reason);
