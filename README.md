@@ -10,16 +10,17 @@ rewrites ...) is answered by a small integer neural network whose weights are
 **constructed** from the decision table and **verified by enumeration** over
 the table's whole domain, not trained.
 
-## Final model candidate (acceptance pending)
+## Local model default (final acceptance pending)
 
 The model route builds a separate `unisacc.com` candidate from declarative
 rules, dynamic facts and shared templates. Offline Python constructs and
 checks its 32 integer networks; the packaged compiler runs without Python.
 The classic C and Python implementations remain references and explicit
 fallbacks. A model refusal does not silently retry through the classic path.
-`make com` and the currently shipped `unisacc.com` still use the classic route;
-`make model-com` builds the separate candidate. No default switch or release
-is claimed here.
+`make com` now builds the model compiler; `make classic-com` preserves the
+classic fallback as `out/unisacc-classic.com`. The local `unisacc.com` was
+rebuilt byte for byte from the tested candidate. The published v0.0.7 artifact
+remains classic; no new release is claimed here.
 
 | Candidate snapshot | Evidence / status |
 |---|---|
@@ -27,9 +28,9 @@ is claimed here.
 | Models and routes | 32 distinct constructed networks, 938 stage-route rows, 21 resources |
 | Network equivalence | All 32 network/table pairs checked across their complete declared observation domains, including actions and strings |
 | Package / container | `compiler.pkg` 6,095,823 bytes; `.com` 6,279,167 bytes; the complete package occurs physically once |
-| Complete candidate gate | **Pending: the current 171-item gate has not finished.** |
+| Complete candidate gate | Candidate-specific V4 171/171 passed; the changed final tree still needs its own gate and release audit. |
 | Target and bootstrap evidence | Specified six-target smoke and fixed-package driver N1=N2=N3 completed; see bounded scope below |
-| Default switch / publication | **Pending final acceptance** |
+| Default switch / publication | Local `make com` switched; publication pending final acceptance. |
 
 Candidate SHA-256: `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.
 Package SHA-256: `a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`.
@@ -106,15 +107,16 @@ machine). The C headers it needs travel inside it.
 ```bash
 ./tests/build_ref.sh            # cc builds unisacc from unisacc.c  (-> /tmp/ua_ref)
 /tmp/ua_ref -O2 unisacc.c -b osx/arm64 -o ua1   # unisacc builds itself
-make com                        # unisacc.com for all six targets (-O2)
+make com                        # construct the model compiler in two build slots
+make classic-com                # explicit classic fallback in out/
 ```
 
-`unisacc.c` is one C file (`kernel/` + `src/` concatenated) that `cc` or
-`unisacc` compiles directly. **Self-hosting needs no Python:** the built
-compiler rebuilds itself to the same bytes (`N1 = N2 = N3`,
-`tests/nativeboot.sh`). The one step that does use Python is *packaging* the
-six slices into `unisacc.com` (`python3 -m unisa ape`); the slices themselves
-are compiled by `unisacc`. `tests/release.sh` performs bounded local acceptance of an explicit, already-built
+`unisacc.c` is the classic single-file C seed (`kernel/` + `src/`). Its C
+self-hosting check needs no Python. The model route uses Python offline to
+bind declarations, construct and verify networks, package them, and assemble
+the APE container; the packaged compiler needs no Python to compile programs.
+Its fixed-package driver bootstrap (`N1 = N2 = N3`) has a narrower scope than
+reconstructing the package. `tests/release.sh` performs bounded local acceptance of an explicit, already-built
 model candidate (see [model build instructions](exec/c/BUILDING.md)); it does not
 build a replacement or assert cross-platform release readiness. CI only re-runs tests.
 

@@ -110,11 +110,11 @@ hashes are in the local `/tmp/unisacc-final-perf-plan-928/summary.json`;
 the final ledger still needs a durable reference. This cost remains to be
 optimized while preserving byte-identical outputs.
 
-The **complete current 171-item gate remains pending**. Old queue passes and
-timeout attempts are historical records, not inherited results. `make com` and
-the shipped `unisacc.com` still take the classic path. Complete the immutable
-candidate's gate, retain failures/refusals/skips and artifact hashes, and
-reconcile the final result ledger before changing the default or publishing.
+The immutable candidate passed its V4 171-item gate. Old queue passes and
+timeout attempts are historical records, not inherited results. Local
+`make com` now builds the model route, and its `unisacc.com` is byte-identical
+to that candidate; published v0.0.7 remains classic. The changed final tree
+still requires its own complete gate and release audit before publication.
 Specified smoke and fixed-package bootstrap do not substitute for that gate.
 
 ## Earlier candidate evidence
