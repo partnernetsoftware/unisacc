@@ -13293,7 +13293,11 @@ unsigned long fdec2bin(int p, int n, int f32) {
     if (f32) { prec = 24; emin = 0 - 126; bias = 127; mbits = 23; }
     if (fb_bits(fbA, fbAn) == 0) return 0;
     if (e10 > 400) e10 = 400;             /* past any double: overflows below */
-    if (e10 < 0 - 800) return 0;           /* below any subnormal */
+    /* For negative e, M*10^e < 2^(bits(M)+3e). The exponent alone
+       cannot prove underflow: a long significand may cancel it. */
+    if (e10 < 0) {
+        if (fb_bits(fbA, fbAn) + 3 * e10 <= emin - mbits - 1) return 0;
+    }
     s = 0;
     if (e10 >= 0) {
         j = 0; while (j < e10) { fbAn = fb_mul(fbA, fbAn, 10); j = j + 1; }
@@ -16137,7 +16141,6 @@ int undef_calls(void) {
     }
     return bad;
 }
-
 /* ---- -O1: the stack top in a register [H1] -------------------------------
    The walker evaluates `a op b` by pushing a, computing b, popping a:
 

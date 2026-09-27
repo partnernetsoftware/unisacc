@@ -3155,3 +3155,57 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   the complete header test. Other ten CLI failures are unchanged. No full
   gate or cross-platform rerun is claimed for this batch. cc-unisacc remains
   paused; no push or release.
+
+
+### Model math-header closure and exact decimal constants (local batch)
+
+- E3 now handles double `!=` as inverted floating equality, including NaN.
+  Decimal constants use a delta implementation of exact multiword arithmetic,
+  normalisation and nearest/even rounding, for binary32/64, exponents and
+  subnormals. No float-parser executor primitive or host-source parsing was
+  added. The old small-decimal FCONV generator is no longer called by E3.
+  Hexadecimal floating constants remain outside this slice. A 160-limb bound
+  is checked before appending; oversized significands reject rather than wrap.
+- Casts, sqrt builtins and typed floating arguments share conversion procedures;
+  instruction spellings come from irsel. Scalar struct/union member size now
+  uses ELSZ rather than treating encoded float types as byte sizes. These two
+  latent errors were exposed by whole-tape comparison, after the simple CLI
+  example already ran correctly.
+- New `floatconstcheck.sh` compares 34 host-cc bit expectations with both table
+  and network execution, including half-way cases, f32 double-rounding-sensitive
+  values, overflow, subnormals and a long significand cancelling its exponent.
+  Five invalid/capacity inputs reject on both routes. It is in the gate.
+  Decimal/NaN and full math-header probes are also exercised by the real ASM
+  network driver suite, against independently executed host-cc programs.
+- Old keep-e3 241/241 stayed byte-identical before adding the two new probes
+  (243 now). Both new inputs match the stamped reference on Python and C action
+  executors. Actual carried-container runs at O0/O1/O2, memory and native, return
+  the expected zero on both; `/tmp/unisacc-float-{keep2,oracles,run}.log`.
+  CLI improved to **54/64**, including the complete carried-header case;
+  `/tmp/unisacc-float-cli.log`. The other ten failures remain open.
+- The long-decimal oracle found a product bug too: `10^1000 * 10^-1000` was
+  discarded solely because its decimal exponent was below -800. Host cc exits
+  0, the pre-fix reference 1. Product and delta now prove underflow from both
+  significand bit length and exponent. `tests/c/b_longdecimal.c` covers double
+  and float; generated unisacc.c and the reference .com were rebuilt.
+- This batch adds a conversion algorithm to generated model logic; it is not
+  a claim of fewer source lines or complete C99 floating support. No default
+  route switch, push or release. Full frozen-tree acceptance follows below.
+- Frozen-tree local gate: 86 suites, 85 passed and exec-driver failed; the
+  failure was the new test's relative models.pkg lookup from the wrong cwd,
+  not a semantic mismatch. After the run finished, the harness was corrected
+  to run those calls in its isolated package directory. The independently
+  rerun exec-driver passed. This records the original red run, not an invented
+  86/86 rerun (`/tmp/unisacc-float-full-gate.log`,
+  `/tmp/unisacc-float-driver-fixed.log`).
+- Final development container: 3,076,544 B, SHA256
+  `22c0e8bbca6d9ed3bb2e6d4e06597c3509c2169614a2b023819589ce4d69c377`.
+  Both macOS arm64 and Rosetta x86_64 actually executed the decimal, math-header
+  and long-decimal probes at O0/O1/O2, in memory and as native images, all as
+  expected (`/tmp/unisacc-float-finalrun.log`). Its final CLI result is 54 pass,
+  10 fail (`/tmp/unisacc-float-cli-final.log`); no CLI parity is claimed.
+- Rebuilt reference product .com: 1,349,952 B, SHA256
+  `3f914d98624f82122d5841611bcd4de384746761b7db837a725f0c829a14cd07`.
+  This remains the default product route. No Linux or Windows execution of
+  this batch's final artifacts was performed; cross-output checks do not
+  establish that. cc-unisacc remains paused. No push or release.

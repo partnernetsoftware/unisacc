@@ -87,6 +87,17 @@ before=set(asmdir.iterdir())
 assert ok([*base,'-run','hello.c'],cwd=asmdir)==b'hello from C99\n'
 assert set(asmdir.iterdir())==before
 print('assembly compiler driver: isolated package, native output and memory run pass')
+# Decimal rounding and the entire carried math header must survive the real
+# network route, not just the converter's unit harness. Independent cc runs
+# check the probes' zero-exit expectations as well as reference tape spelling.
+for name in ['decimal_literals', 'math_header']:
+    source=pathlib.Path('exec/parse2/probes/'+name+'.c').resolve()
+    host=p/(name+'-cc'); native=p/(name+'-model')
+    ok(['cc','-w',source,'-lm','-o',host]); assert ok([host])==b''
+    for level in ['-O0','-O2']:
+        assert ok([*base,'-run',source,level],cwd=asmdir)==b''
+    ok([*base,source,'-O2','-o',native],cwd=asmdir); assert ok([native])==b''
+print('decimal/math probes: host cc and ASM network driver, memory/native pass')
 # Public-shaped commands operate with only the container and source in cwd.
 isolated=p/'isolated';isolated.mkdir()
 com=isolated/'compiler.com';com.write_bytes((p/'driver.com').read_bytes())

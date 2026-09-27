@@ -147,7 +147,7 @@ def optail(o):
         f = P(bn + ".f1")
         emit(f, "push").o("  load64 r0, [r7+8]\n").branch({1: bn + ".f2"}, bn + ".fl", [("CMPI", "ldv", 1)])
         P(bn + ".fl").o("  cvtid r0, r0\n").goto(bn + ".f2")
-        cmpf = o in ("<", ">", "<=", ">=", "==")
+        cmpf = o in ("<", ">", "<=", ">=", "==", "!=")
         P(bn + ".f2").o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n  %s\n" % FOPS[o]).a(("LDI", "vt", 0), ("LDI", "vb", 4 if cmpf else DBL)).ret()
     else:
         f.goto("DEAD.dbl")
@@ -407,7 +407,8 @@ DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimen
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
 FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1, r0", "/": "fdiv64 r0, r1, r0",
         "<": "flt64 r0, r1, r0", ">": "flt64 r0, r0, r1", "<=": "fle64 r0, r1, r0", ">=": "fle64 r0, r0, r1",
-        "==": "feq64 r0, r1, r0"}   # measured (the reversed forms for > >=); != not measured: not covered   # double: stored, passed, returned and va_arg'd as a plain 64-bit move (measured, old E3 p63)
+        "==": "feq64 r0, r1, r0",
+        "!=": "feq64 r0, r1, r0\n  imm r1, 1\n  xor64 r0, r0, r1"}   # != is inverted equality, including unordered (NaN) inputs
 FLT = E.FLT   # f32 descriptor; loads/stores and sqrt builtins are covered, binary float arithmetic remains guarded
 TYPEW = {"type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
@@ -568,8 +569,7 @@ def types():
     p = P("SB.st")
     p.a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "msz", "t", SSZ), ("LDX", "mal", "t", SAL)).branch({1: "DEAD.sm"}, "SB.put2", [("CMPI", "msz", 0)])
     P("SB.v1").branch({1: "DEAD.void"}, "SB.v2", [("CMPI", "tb", 0)])
-    P("SB.v2").a(("COPYW", "msz", "tb")).branch({2: "SB.vu"}, "SB.put", [("CMPI", "tb", UNS)])
-    P("SB.vu").a(("ALUI", "sub", "msz", "tb", UNS)).goto("SB.put")
+    P("SB.v2").call("ELSZ").a(("COPYW", "msz", "es")).goto("SB.put")
     g.on("DEAD.sm", range(257), "DEAD", E.rej("not covered: a struct member of struct type"), "r")
     P("SB.put").a(("COPYW", "mal", "msz")).goto("SB.put2")      # a scalar: aligned to its size
     # SB.put2 with marr > 0: the element's size times marr, the element's alignment (see SB.am)
@@ -653,7 +653,8 @@ def build():
     string_initializer(E, P, ESC)
     E.prn()
     E.numout()
-    E.fconv()
+    from floatconst import install as floatconst_install
+    floatconst_install(E, P)
     E.autoscan()
     types()
     from constexpr import install as const_install
@@ -1310,7 +1311,9 @@ def build():
     P("SZ.exprout").o("  imm r0, ").num("sz").o("\n").a(("LDI","vt",0),("LDI","vb",UNS + 8)).ret()
     g.on("DEAD.szx", range(257), "DEAD", E.rej("not covered: sizeof operand"), "r")
     P("SZ.out").o("  imm r0, ").num("sz").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", UNS + 8)).call("NEXT").ret()
-    P("U.fnum").o("  imm r0, ").a(("LDI", "nx", 1)).call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", DBL)).call("NEXT").ret()
+    P("U.fnum").o("  imm r0, ").a(("LDI", "nx", 1)).call("NUMOUT").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", DBL)).branch({1: "U.f32"}, "U.fnext", [("CMPI", "df_mbits", 23)])
+    P("U.f32").a(("LDI", "vb", FLT)).goto("U.fnext")
+    P("U.fnext").call("NEXT").ret()
     p = P("UNARY")
     p.tok({"sizeof": "U.szof", E.TK_FNUM: "U.fnum", E.TK_STR: "U.str", "~": "U.cpl", "-": "U.neg", "+": "U.pos", "!": "U.not", "(": "U.par", TK_NUM: "U.num", TK_ID: "U.id", "++": "U.pinc", "--": "U.pdec", "&": "U.amp", "*": "U.deref"}, bad("expression"))
     P("U.amp").call("NEXT").tok({TK_ID: "U.amp1"}, bad("address of"))
@@ -1389,18 +1392,16 @@ def build():
     P("UC.fp8").branch({1: "UC.fp1"}, bad("function pointer cast result type"), [("CMPI", "tb", 8)])
     P("UC.fp1").call("NEXT").expect("*").call("NEXT").expect(")").call("FPD.c").goto("UC.type")
     q = P("UC.type")
-    q.expect(")").vpush("td", "tb").call("NEXT").call("UNARY").call("ISDV").a(("COPYW", "sdv", "u")).vpop("vt", "vb").call("ISDV")
-    q.a(("COPYW", "tdv", "u")).branch({1: "UC.flt"}, "UC.nf", [("CMPI", "vb", FLT)])
-    P("UC.flt").branch({1: "UC.flt1"}, "DEAD.dbl", [("CMPI", "sdv", 1)])
-    P("UC.flt1").branch({1: "UC.flt2"}, "DEAD.dbl", [("CMPI", "vt", 0)])
-    P("UC.flt2").o("  cvtds r0, r0\n").ret()
-    P("UC.nf").branch({1: "UC.same"}, "UC.cv", [("CMP", "sdv", "tdv")])
-    P("UC.same").call("NARROW").ret()
-    P("UC.cv").branch({1: "UC.id"}, "UC.di", [("CMPI", "tdv", 1)])
-    P("UC.id").branch({1: "UC.id1"}, "DEAD.dbl", [("CMPI", "vt", 0)])
-    P("UC.id1").o("  cvtid r0, r0\n").ret()
-    P("UC.di").branch({1: "UC.di1"}, "DEAD.dbl", [("CMPI", "vt", 0)])
-    P("UC.di1").o("  cvtdi r0, r0\n").call("NARROW").ret()
+    q.expect(")").vpush("td", "tb").call("NEXT").call("UNARY").vpop("cast_td", "cast_tb")
+    q.branch({1: "UC.scalar"}, "UC.to_u", [("CMPI", "cast_td", 0)])
+    P("UC.scalar").branch({1: "UC.to_d"}, "UC.float", [("CMPI", "cast_tb", DBL)])
+    P("UC.float").branch({1: "UC.to_s"}, "UC.integer", [("CMPI", "cast_tb", FLT)])
+    P("UC.integer").branch({1: "UC.to_u"}, "UC.to_i", [("CMPI", "cast_tb", UNS + 8)])
+    for kind in ("d", "s", "i", "u"):
+        q = P("UC.to_" + kind).call("TO." + kind).a(("COPYW", "vt", "cast_td"), ("COPYW", "vb", "cast_tb"))
+        if kind in ("i", "u"):
+            q.call("NARROW")
+        q.ret()
     # the suffix (the dump's text from pe to the line end): u -> unsigned, l/ll -> long (measured)
     q = P("U.num")
     q.a(("LDI", "nu", 0), ("LDI", "nl", 0), ("INPUSHX", "pe")).goto("SFX.w")
@@ -1582,16 +1583,21 @@ def build():
     for k, (base, suffix) in enumerate(((DBL, "d"), (FLT, "s"))):
         tag = "SQ%d" % k
         P("CL.sqrt%d" % k).branch({1: tag}, "CL.sqrt1" if k == 0 else "CL.def", [("CMP", "v", "sqrt%d" % k)])
-        P(tag).call("NEXT").call("EXPR").expect(")").branch({1: tag + ".base"}, tag + ".u", [("CMPI", "vt", 0)])
-        P(tag + ".base").branch({1: tag + ".d"}, tag + ".float", [("CMPI", "vb", DBL)])
-        P(tag + ".float").branch({1: tag + ".s"}, tag + ".int", [("CMPI", "vb", FLT)])
-        P(tag + ".int").branch({1: tag + ".u"}, tag + ".i", [("CMPI", "vb", UNS + 8)])
+        P(tag).call("NEXT").call("EXPR").expect(")").call("TO." + suffix).o("  %s r0, r0\n" % fpu[suffix + "sqrt"]).a(("LDI", "vt", 0), ("LDI", "vb", base)).call("NEXT").ret()
+    for suffix in ("d", "s", "i", "u"):
+        cv = "TO." + suffix  # shared fkind/fconv for casts, sqrt and typed arguments
+        P(cv).branch({1: cv + ".base"}, cv + ".u", [("CMPI", "vt", 0)])
+        P(cv + ".base").branch({1: cv + ".d"}, cv + ".float", [("CMPI", "vb", DBL)])
+        P(cv + ".float").branch({1: cv + ".s"}, cv + ".int", [("CMPI", "vb", FLT)])
+        P(cv + ".int").branch({1: cv + ".u"}, cv + ".i", [("CMPI", "vb", UNS + 8)])
         for source in ("d", "s", "i", "u"):
-            q = P(tag + "." + source)
-            if source != suffix:
+            q = P(cv + "." + source)
+            if source != suffix and not (source in ("i", "u") and suffix in ("i", "u")):
+                if source == "s" and suffix in ("i", "u"):
+                    q.o("  %s r0, r0\n" % fpu["s2d"])
+                    source = "d"
                 q.o("  %s r0, r0\n" % fpu[source + "2" + suffix])
-            q.goto(tag + ".emit")
-        P(tag + ".emit").o("  %s r0, r0\n" % fpu[suffix + "sqrt"]).a(("LDI", "vt", 0), ("LDI", "vb", base)).call("NEXT").ret()
+            q.ret()
     P("CL.def").a(("LDX", "t", "v", E.FND)).branch({1: "CL.def1"}, bad("call to a function not defined before"), [("CMPI", "t", 1)])
     P("CL.def1").a(("LDX", "t", "v", E.VAR)).branch({1: "CL.vok"}, "CL.ok", [("CMPI", "t", 1)])
     P("CL.vok").a(("LDI", "sys", 200)).goto("CL.ok")
@@ -1605,10 +1611,10 @@ def build():
     q.o("  mov r1, r0\n  imm r0, ").num("cur").o("\n  sub64 r0, r6, r0\n").goto("COPYSTRUCT")
     p = P("CL.arg")
     p.vpush("na", "fid").call("EXPR").vpop("na", "fid").call("ARGCOPY")
-    p.a(("ALUI", "mul", "t", "fid", 16), ("ALU", "add", "t", "t", "na"), ("LDX", "t", "t", PDB)).branch({1: "CL.ad"}, "CL.a2", [("CMPI", "t", DBL)])
-    P("CL.ad").call("ISDV").branch({1: "CL.a2"}, "CL.ad1", [("CMPI", "u", 1)])
-    P("CL.ad1").branch({1: "CL.ad2"}, "DEAD.dbl", [("CMPI", "vt", 0)])
-    P("CL.ad2").o("  cvtid r0, r0\n").goto("CL.a2")
+    p.a(("ALUI", "mul", "t", "fid", 16), ("ALU", "add", "t", "t", "na"), ("LDX", "t", "t", PDB)).branch({1: "CL.ad"}, "CL.af", [("CMPI", "t", DBL)])
+    P("CL.ad").call("TO.d").goto("CL.a2")
+    P("CL.af").branch({1: "CL.af1"}, "CL.a2", [("CMPI", "t", FLT)])
+    P("CL.af1").call("TO.s").goto("CL.a2")
     p = P("CL.a2")
     emit(p, "push").a(("ALUI", "add", "na", "na", 1)).tok({",": "CL.more", ")": "CL.done"}, bad("argument list"))
     P("CL.more").call("NEXT").goto("CL.arg")
