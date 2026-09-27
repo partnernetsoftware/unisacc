@@ -139,12 +139,21 @@ def peepround():
         bindings.update((prefix + "_" + name, index) for index, name in enumerate(values))
     bindings.update(PB_size=len(PB), PR_size=len(PR))
     install_rules(g, os.path.dirname(__file__), "peep", bindings=bindings)
-    # Pure schema assembly: the answer indices follow the current peep head order.
-    dispatch = bindings['PP_b85']
+    # Materialize the current head order; target policy and fallback are declarations.
+    from finite_rules import load as load_rules
+    from pathlib import Path
+    root = Path(__file__).parent
+    targets = dict(line.split('\t') for line in
+                   (root/'answer-targets.tsv').read_text().splitlines()
+                   if line and not line.startswith('#'))
     for index, name in enumerate(PY):
-        if name not in ("-", "keep"):
-            g.on(dispatch, [index], "PX." + name, [], "r")
-    g.els(dispatch, "PP.copy", [], "r")
+        target = targets.get(name, targets['*']).format(name=name)
+        rows = load_rules(root/'setup-result.tsv', {}, domain=[index],
+                          bindings=dict(dispatch=bindings['PP_b85'], target=target), section='answer')
+        for state, row in rows.items():
+            for key, (next_state, acts) in row.items():
+                g.on(state, [key], next_state, acts, 'r')
+    install_rules(g, root, 'setup', bindings={'dispatch': bindings['PP_b85']}, section='fallback')
 
 
 def peep_start(p):
@@ -173,7 +182,6 @@ def build():
         stfuse()
         peepround()
     p = P("START")
-    p.a(("LDI", "vsp", 0))
     for w in ("ret", "jump", "jumpz", "call", ".frame", "store64", ".st", "mov"):
         p.a(("SBCLR",), [("SBOUT", c) for c in w.encode()], ("SBINTERN", "id_" + w.strip(".")))
     if LEVEL >= 2:
@@ -181,7 +189,8 @@ def build():
     for f in E.gold("opinfo"):
         if len(f) >= 2 and f[1] == "1":
             p.a(("SBCLR",), [("SBOUT", c) for c in f[0].encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", SIMPLE, "u"))
-    p.a(("LDI", "rnd", 0), ("LDI", "hits", 0)).goto("RSTART")
+    install_rules(g, os.path.dirname(__file__), "setup",
+                  sequences={"data": p.acts}, section="start")
     level = "2" if LEVEL >= 2 else "1"
     bindings = {"MAXJ": MAXJ}
     for line in open(os.path.join(os.path.dirname(__file__), "rounds-names.tsv")):
