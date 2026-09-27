@@ -154,7 +154,6 @@ def build_autoinc(g, locations=False):
 AL = set(range(97, 123)) | set(range(65, 91)) | {95}
 DI = set(range(48, 58))
 ID = AL | DI
-WS = {32, 9}
 SEGINF = 1000000000
 # W regions (addresses; plain named slots are strings)
 DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
@@ -295,7 +294,6 @@ def build(target="lnx/x86_64", locations=False):
     if len(set(predef)) != len(predef):
         raise ValueError("overlapping target predefinitions: " + target)
     g = G()
-    NC = lambda what: [("REJECT", "not covered: " + what)]   # noqa: E731
 
     # ---- init: constant ids (built byte by byte, then interned) ---------
     init = []
@@ -325,100 +323,18 @@ def build(target="lnx/x86_64", locations=False):
     if AUTOINC:
         build_autoinc(g, locations)
 
-    # ---- P3: directives -------------------------------------------------------
-    g.els("P3START", "P3S2", [("RLD", "RUN")])
-    # predef(): object-like macros with body "1" for the selected target
-    chain = "P3PD0"
-    g.r("P3S2", {0: ("CLI.D", [("LDI", "RUN", 1), ("LDI", "CURSEG", 0), ("SETOT", "CURSEG")]),
-                 1: ("P3L0", [("LDI", "Z", 0), ("SPAN2", "Z", "RESUME"), ("JUMP", "RESUME")])})
+    install_rules(g, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
     for k, nm in enumerate(predef):
         nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
         sub, pu = g.call("MDEF", "P3PDR%d" % k)
         g.els("P3PD%d" % k, sub, sbconst(nm) + [("SBINTERN", "NID")] + pu)
         g.els("P3PDR%d" % k, nxt, sbconst("1") + [("SBSAVE", "t"), ("STX", "EA", F_BODY, "t")])
 
-    # line start: live := every open level taking
-    g.els("P3L0", "LIVEL", [("MARK", "LS"), ("LDI", "LIVE", 1), ("LDI", "K", 0),
-                            ("CMP", "K", "NDEPTH")])
-    g.r("LIVEL", {0: ("LIVE2", [("ALUI", "add", "a", "K", TAKEB), ("LDX", "t", "a", 0), ("RLD", "t")]),
-                  (1, 2): ("P3WS", [])})
-    g.r("LIVE2", {0: ("P3WS", [("LDI", "LIVE", 0)]),
-                  tuple(range(1, 257)): ("LIVEL", [("ALUI", "add", "K", "K", 1), ("CMP", "K", "NDEPTH")])})
-    g.on("P3WS", WS, "P3WS", [("ADV",)])
-    g.on("P3WS", [35], "DIR", [("ADV",)])
-    g.els("P3WS", "P3LINE", [("JUMP", "LS"), ("RLD", "LIVE")])
-    g.r("P3LINE", {1: ("P3COPY", []), 0: ("P3BLANK", [])})
-    g.on("P3COPY", [10], "P3L0", [("COPYT",), ("ADV",), ("ALUI", "add", "LINES", "LINES", 1)])
-    g.on("P3COPY", [EOF], "P4", [("SWAP",), ("LDI", "ESEG", 0), ("SETOT", "ESEG")])
-    g.els("P3COPY", "P3COPY", [("COPYT",), ("ADV",)])
-    g.on("P3BLANK", [10], "P3L0", [("COPYT",), ("ADV",), ("ALUI", "add", "LINES", "LINES", 1)])
-    g.on("P3BLANK", [EOF], "P4", [("SWAP",), ("LDI", "ESEG", 0), ("SETOT", "ESEG")])
-    g.els("P3BLANK", "P3BLANK", [("OUT", 32), ("ADV",)])
-    blank = ("P3BLANK", [("JUMP", "LS")])
-
-    g.on("DIR", WS, "DIR", [("ADV",)])
-    g.els("DIR", "DW", [("MARK", "WS")])
-    g.on("DW", AL, "DW", [("ADV",)])
-    g.els("DW", "DWS", [("MARK", "WE"), ("INTERN", "DID", "WS", "WE")])
-    g.on("DWS", WS, "DWS", [("ADV",)])
-    g.els("DWS", "DN", [("MARK", "NS")])
-    g.on("DN", ID, "DN", [("ADV",)])
-    g.els("DN", "DEOL", [("MARK", "NE"), ("INTERN", "NID", "NS", "NE")])
-    g.on("DEOL", [10, EOF], "DSW", [("MARK", "LE"), ("ALUI", "add", "a", "DID", DIRB),
-                                    ("LDX", "DC", "a", 0), ("RLD", "DC")])
-    g.els("DEOL", "DEOL", [("ADV",)])
-    # DC: 0 unknown, k+1 = DIRV[k], 100 = pragma (push/pop_macro not covered: blanked)
-    cases = {0: blank, 100: ("PRAG", [("RLD", "LIVE")])}
-    # #pragma push_macro / pop_macro (live) are outside the slice: reject, do
-    # not guess; any other #pragma is blanked, as pushpop() leaves it
-    g.r("PRAG", {0: blank, 1: ("PRAG1", [("JUMP", "WE")])})
-    g.on("PRAG1", WS, "PRAG1", [("ADV",)])
-    g.els("PRAG1", "PRAG2", [("MARK", "PA")])
-    g.on("PRAG2", AL, "PRAG2", [("ADV",)])
-    g.els("PRAG2", "PRAG3", [("MARK", "PB"), ("INTERN", "t", "PA", "PB"), ("CMP", "t", "ID_PUSHM")])
-    g.r("PRAG3", {1: ("DEAD", NC("#pragma push_macro")),
-                  (0, 2): ("PRAG4", [("CMP", "t", "ID_POPM")])})
-    g.r("PRAG4", {1: ("DEAD", NC("#pragma pop_macro")), (0, 2): blank})
-    for k, w in enumerate(DIRV):
-        cases[k + 1] = ("D_%s" % w, [])
+    cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")])}
+    cases.update((k + 1, ("D_" + w, [])) for k, w in enumerate(DIRV))
     g.r("DSW", cases)
-
-    # the table decides: a = PP[(directive, flag)]
-    for d, w in enumerate(DIRV):
-        st = "D_%s" % w
-        if w in ("if", "elif"):
-            # #if/#elif: integer constants, defined, the C operators;
-            # evaluated by XE (64-bit); a dead #if is not evaluated (as the
-            # reference); any macro name: not covered
-            sub, pu = g.call("XE", st + "_x")
-            if w == "if":
-                g.els(st, st + "_l", [("RLD", "LIVE")])
-                g.r(st + "_l", {0: (st + "_a0", [("RLD", "LIVE")]),
-                                tuple(range(1, 257)): (sub, [("JUMP", "NS")] + pu)})
-            else:
-                g.els(st, sub, [("JUMP", "NS")] + pu)
-            g.els(st + "_x", st + "_xp", [("CMPI", "XP", 0), ])
-            g.r(st + "_xp", {1: (st + "_xv", [("C64", "XV", "xz")]),
-                             (0, 2): ("DEAD", NC("#if division by zero"))})
-            # (the reference reports it on stderr and still writes the text,
-            # -E exit 0; one channel here, so: not covered)
-            g.r(st + "_xv", {1: (st + "_a0", [("RLD", "LIVE")]), (0, 2): (st + "_a1", [("RLD", "LIVE")])})
-        elif w in ("ifdef", "ifndef"):
-            sub, pu = g.call("MFIND", st + "_m")
-            g.els(st, sub, [("LDI", "SEGQ", -1)] + pu)
-            g.els(st + "_m", st + "_f", [("CMPI", "M", 0)])
-            flag = {0: 0, 1: 1, 2: 1}
-            g.r(st + "_f", {k: (st + "_a%d" % flag[k], [("RLD", "LIVE")]) for k in (0, 1, 2)})
-        elif w == "else":
-            g.els(st, st + "_n", [("CMPI", "NDEPTH", 0)])
-            g.r(st + "_n", {2: (st + "_s", [("ALUI", "sub", "k", "NDEPTH", 1),
-                                            ("ALUI", "add", "sa", "k", SEENB), ("LDX", "s", "sa", 0),
-                                            ("RLD", "s")]),
-                            (0, 1): (st + "_a0", [("RLD", "LIVE")])})
-            g.r(st + "_s", {0: (st + "_a1", [("RLD", "LIVE")]),
-                            tuple(range(1, 257)): (st + "_a0", [("RLD", "LIVE")])})
-        else:
-            g.els(st, st + "_a1", [("RLD", "LIVE")])
+    for w in DIRV:
+        st = "D_" + w
         for fl in (0, 1):
             name = st + "_a%d" % fl
             links = {suffix or "entry": name + suffix for suffix in ("", "b", "c", "m", "n")}
