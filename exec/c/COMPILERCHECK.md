@@ -3,8 +3,8 @@
 `compilercheck.sh` / `compilercheck.py` accept `core-modes`, `core-contracts`,
 `core-dependencies`, `resources`, `language`, and the aggregate aliases `core`
 and default `all`. `core` executes its three parts; `all` executes all five.
-The aliases retain the entire previous assertion set, but are not bounded gate
-units. A complete driver result requires all five gate receipts.
+The aliases retain the previous assertion set, but are not bounded gate units.
+A complete driver result requires all five gate receipts.
 
 | Gate | Scope |
 |---|---|
@@ -12,7 +12,7 @@ units. A complete driver result requires all five gate receipts.
 | `exec-driver-core-contracts` | Compatibility flags, stdin, output preservation, source/output IO and undefined-function checks |
 | `exec-driver-core-dependencies` | Dependency resource-read ledger and token dump |
 | `exec-driver-resources` | Macro/include resources, printf fallback, isolated ASM package and APE CLI/memory/native checks |
-| `exec-driver-language` | Previous 19 language probes plus scalar prefix, conditional dereference and aggregate varargs; ASM network memory O0/O2 and native O2 versus host cc; three conditional rejection macros at O0/O2 |
+| `exec-driver-language` | Original 19 probes plus scalar prefix, conditional dereference, aggregate varargs and member string initialization; ASM network memory O0/O2 and native O2 versus host cc; three conditional rejection macros at O0/O2 |
 
 The six conditional negative cases require rc 1, empty stdout and the observed
 `error: not covered: ?: arms of different types` diagnostic ending in
@@ -22,33 +22,22 @@ The two isolated ASM consumers use the same setup helper. The language part does
 not construct unused C/reference drivers or an APE. Every part retains the
 existing `elf.sh` -> `models.py` preparation and hash-verified model cache;
 there is no new cache or result reuse. Set `UNISACC_MODEL_CACHE` and `UA` explicitly
-for isolated runs. Run separate two-slot batches (never all five in one window):
+for isolated runs. Use the existing rolling queue with the five actual gate names:
 
 ```sh
-./tests/term.sh env JOBS=2 UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache ./tests/gate.sh --suite exec-driver-core-modes --suite exec-driver-core-contracts
-./tests/term.sh env JOBS=2 UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache ./tests/gate.sh --suite exec-driver-core-dependencies --suite exec-driver-language
-./tests/term.sh env JOBS=2 UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache ./tests/gate.sh --suite exec-driver-resources
+./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources --suite exec-driver-language
 ```
 
-`scalar_prefix` and `conditional_deref`; ASM network memory O0/O2 and native O2 versus host cc; all three conditional rejection macros at O0/O2 |
-
-The two isolated ASM consumers use the same setup helper. The language part does
-not construct unused C/reference drivers or an APE. Every part retains the
-existing `elf.sh` -> `models.py` preparation and hash-verified model cache;
-there is no new cache or result reuse. Set `UNISACC_MODEL_CACHE` and `UA` explicitly
-for isolated runs. Run a two-slot batch, then the remaining core part:
-
-```sh
-./tests/term.sh env JOBS=2 UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache ./tests/gate.sh --suite exec-driver-resources --suite exec-driver-language
-./tests/term.sh env JOBS=2 UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache ./tests/gate.sh --suite exec-driver-core
-```
+Each invocation has a maximum 55-second window. Exit 75 means unfinished work:
+repeat the same command and state path. Exit 0 means every selected suite passed;
+exit 1 means failure. Do not substitute `exec-driver-core`, which is no longer a
+gate entry, or put the `core`/`all` aggregate CLI into one bounded gate window.
 
 `scalar_prefix` keeps the five unary-promotion `sizeof` outputs in the host
-comparison. Its long-double/member widths are now ABI assertions: `__UNISA__`
+comparison. Its long-double/member widths are ABI assertions: `__UNISA__`
 requires both widths to equal `sizeof(double)` (the product F64 alias); host cc
-requires the holder to match its own `long double`. This avoids comparing
-unrelated host/product long-double ABIs while retaining the width checks and
-exact 3.25/4.5 value comparison.
+requires the holder to match its own `long double`. This retains the width checks
+and exact 3.25/4.5 value comparison without equating different host/product ABIs.
 
 ## Measured scheduling
 
@@ -56,13 +45,17 @@ exact 3.25/4.5 value comparison.
 profiling the former monolithic core reached its outer 55 s limit. Before that
 limit, the first 13 reference-compiled C-driver calls alone took 20.5 s; the
 system-cc driver completed 31 calls in 3.0 s. This is a partial runtime profile,
-not a complete timing attribution. It motivated splitting repeated mode checks
-from CLI/error contracts and dependency/token checks, without weakening them.
+not a complete timing attribution. The split preserves all core assertions.
 
-Terminal two-slot receipts after the split: core-modes **39 s**, core-contracts
-**40 s**; next batch core-dependencies **17 s**, language **36 s**; resources
-**26 s** in its own batch. All five parts returned rc 0.
-Language ran 22 positive probes and six strict rejection variants. Every measured
-batch was wrapped in a 55 s process-tree watchdog. The earlier direct non-Terminal
-resource/language attempt and monolithic core timeout are not counted as passes.
-These are local driver checks, not other-platform or complete-project-suite evidence.
+Terminal two-slot receipts for the split: core-modes **39 s**, core-contracts
+**40 s**; next batch core-dependencies **17 s**, language **36 s** (22 positives);
+resources **26 s** in its own batch. All five parts returned rc 0. After merging
+the member-string implementation and registering its probe, language alone was
+rerun: **38 s**, rc 0, **23 positives and six strict rejection variants**. The
+other four parts were not rerun against that subsequent implementation change.
+
+Every measured batch was wrapped in a 55 s process-tree watchdog. The earlier
+direct non-Terminal resource/language attempt and monolithic core timeout are not
+counted as passes. These are local driver checks, not other-platform or complete
+project-suite evidence. The queue command above documents the existing scheduler;
+the measurements used separate bounded `gate.sh --suite` batches.

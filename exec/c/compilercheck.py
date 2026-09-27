@@ -255,7 +255,7 @@ if part in ('all','language'):
             ['decimal_literals', 'math_header', 'brace_string', 'string_rows', 'void_cast', 'array_shapes', 'wide_strings', 'call_conversion', 'label_scope', 'local_parenthesized_declarators', 'scalar_prefix']]
     probes += [pathlib.Path('exec/c/probes/'+name+'.c') for name in
                ['compound_integer', 'compound_pointer', 'address_lvalue', 'compound_literals',
-                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref', 'vararg_aggregate']]
+                'bitfield_edges', 'bitfield_enum_scope', 'bitfield_nested', 'bitfield_result', 'function-signatures', 'conditional_deref', 'vararg_aggregate', 'member_string_init']]
     for source in probes:
         source=source.resolve(); name=source.stem
         host=p/(name+'-cc'); native=p/(name+'-model')
