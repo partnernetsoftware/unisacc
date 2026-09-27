@@ -4875,3 +4875,9 @@ E4外层控制已交付并审核，下一空闲槽转ARM arminput完整输入/�
 E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入rounds声明，Python净减106行，声明+352；gen.py现204行。固定扫描、局部改写、活跃性分析、peephole、匹配与轮次控制已由声明提供；仍保留LEVEL选择、opinfo/peep数据初始化/索引分派、常量/fresh绑定与通用装配，不称Python构造工具完全消失。独立双槽exec-e4/exec-e4self 2/2全rc0，35.09秒：139文件两级278同，编译器自身两级2同（12.85秒），无拒绝/错误。本证据固定E4源码，不代替后续其他阶段组合验收。
 
 第六批集成与产物实测：E3 switch/case/default及入口标签/goto、lower code扫描、ARM输入metadata三组与E4外层已合入0ae4ad2，四组Python净减227行；声明另增786行（不称总源变小）。父组合六项双槽25.66秒全rc0，含chain167/167、三类lowering、ARM和警告诊断；E4专门含自身的2项证据见前条。统一真实模型候选/tmp/unisacc-parallel-sixth-candidate/unisacc-next.com为5,985,531 B，sha256 9b5b710bd97cc590371a9fc73de159ee8aa6f0fcfffa34f297ae0d3a54e1bbc7；构建55秒外限内rc0，模型包5,802,219 B。候选六目标hello镜像与私有参考逐字节一致；hello/fib/b_strderef/b_switch3四程序×O0/O1/O2共12次macOS arm64运行与宿主cc输出、诊断、退出码一致（cc显式补stdio.h）。默认产品未切换；这些是限定产物验证，不是完整C99、六平台原生或整个重构完成。
+
+第七批并行决定：E3类型声明/维度辅助完整组，ARM armlayout地址解析/布局组，以及lower code固定输出/融合组继续迁入既有声明；动态ABI/catalog/tyinfo事实保持原输入，按完整组验证。各隔离8分钟、子步骤≤60秒，父单写主树并集中验收。
+
+父复核剩余源发现清单遗漏：parse/gen.py删除的是退休语法副本，仍有现用tokenizer/prn/numout/fconv规则；units.py实际调用fconv。不能把“共享构造支持”误写成全通用代码。已更正exec/rules.md，后续须完整迁移这些共享规则，不复制进各消费者；本批不碰该共享文件，避免与并行生成对照交叉。
+
+第七批验收（975ee7c）：函数指针/参数平衡/维度/初始化计数/维度保存，lower固定输出/融合/参数输出，ARM地址布局三整组已合入。Python净减151行；声明增加664行，总源净增513。共享strwalk/值栈/模板、动态regmap/reloc/image事实均未复制。父组合双槽6/6全rc0，26.18秒：chain167/167、ARM（三OS地址字节解码含在内）、三类lowering及警告诊断。子代理还做五模式E3、六目标lowering、四封装ARM完整转移动作对比与对应实际探针。父要求把八个mov文本重新变回range枚举，改后六图逐字节等于已测图，避免数据装配源码反向膨胀。最新产物仍为0ae4ad2候选，本批未重打.com；实际剩余共享parse规则已补入清单，完整重构未结案。
