@@ -546,20 +546,13 @@ def build(locations=False, warnings=False, errors=False):
     shape_control("global-type")
     global_control("global5", warnings)
     shape_control("global-binding")
-    P("ELSZ.enumraw").branch({1: "ELSZ.b0"}, "ELSZ.8", [("CMPI", "td", 0)])
-    P("ELSZ.b0").branch({(1, 2): "ELSZ.st"}, "ELSZ.b", [("CMPI", "tb", SBB)])
-    P("ELSZ.st").a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "es", "t", SSZ)).branch({1: "DEAD.inc"}, "RET", [("CMPI", "es", 0)])
-    g.on("DEAD.inc", range(257), "DEAD", E.rej("not covered: incomplete struct"), "r")
-    P("ELSZ.b").branch({1: "DEAD.void"}, "ELSZ.s", [("CMPI", "tb", 0)])
-    P("ELSZ.s").a(("COPYW", "es", "tb")).branch({1: "ELSZ.d"}, "ELSZ.sf", [("CMPI", "tb", DBL)])
-    P("ELSZ.sf").branch({1: "ELSZ.f"}, "ELSZ.bool", [("CMPI", "tb", FLT)])
-    P("ELSZ.bool").branch({1: "ELSZ.one"}, "ELSZ.s2", [("CMPI", "tb", BOOL)])
-    P("ELSZ.one").a(("LDI", "es", 1)).ret()
-    P("ELSZ.f").a(("LDI", "es", 4)).ret()
-    P("ELSZ.d").a(("LDI", "es", 8)).ret()
-    P("ELSZ.s2").branch({2: "ELSZ.u"}, "RET", [("CMPI", "tb", UNS)])
-    P("ELSZ.u").a(("ALUI", "sub", "es", "tb", UNS)).ret()
-    P("ELSZ.8").a(("LDI", "es", 8)).ret()
+    size_bindings = {key:P(state).fresh('b') for key,state in
+                     [('enum_test','ELSZ.enumraw'),('base_test','ELSZ.b0'),('struct_test','ELSZ.st'),
+                      ('void_test','ELSZ.b'),('double_test','ELSZ.s'),('float_test','ELSZ.sf'),
+                      ('bool_test','ELSZ.bool'),('unsigned_test','ELSZ.s2')]}
+    install_rules(g, os.path.dirname(__file__), 'width', section='element-size',
+                  bindings=dict(size_bindings, SBB=SBB, SSZ=SSZ, DBL=DBL, FLT=FLT, BOOL=BOOL, UNS=UNS),
+                  sequences=dict(incomplete=E.rej('not covered: incomplete struct')))
     function_control("function0", warnings)
     shape_control("parameter-type")
     function_control("function2", warnings)
