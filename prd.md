@@ -5011,3 +5011,7 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 最终模型自举验收口径补齐：持久modelboot由N1=N2扩为原先约定N1=N2=N3，后代实测使用N3；三代均以同一NET包编译asmcompiler.c，完整文件比较不剥签。只是固定包驱动器自举，不扩大为模型/内核重新构造。新完整候选将用shared/六target/pack分步双槽构造，source identity必须一致。
 
 函数签名cb4569b合入：共享描述池/参数转换/返回形状/结构兼容查询，旧keep316全同、5正例O0/O2共10次host同，4不兼容签名明确拒绝；Python净18、TSV净169、probe38，非总量缩减。function-signatures纳入持久实际资源检查。主树冻结此组构建新候选；下一私有并行按gen2区域严格分工：E3仅QT/S.star/LV，E4仅U.pos/TSPEC/type-follow，共享fixed控制写声明；剩enum扩展及00204聚合ABI不借首停点修复冒称全过。
+
+父分阶段双槽完整构造候选a001adb（/tmp/unisacc-fp-candidate-928）：6,248,074B，sha256 6e60e3d1fa40880ce22ebb7c09a8b9c9ae605236f7b911c8ffa1d070e04abf1b，六目标与shared/pack全部rc0，每步≤55s；shared四模型及六target各三模型22项--check-net全域映射与actions/strings全同。实际候选143源×O0/O1/O2=429agree/0wrong/0refuse，双槽两窗口36.53+33.55秒，/tmp/unisacc-fp-diffo-928。corpus220原清单20.06秒：210pass/0wrong/6unsupported/4原knownfail/0slow，比旧候选增87/89/124/130四项；00144/170/174/204/209/217仍拒，门禁三片rc1保留，/tmp/unisacc-fp-corpus-928。后续U.pos/longdouble与QT/S.star私有改动未计入该成绩。
+
+旧固定81c04285候选补平台实测：Linux x86_64 QEMU客机hello/fib/convert，模型-run和客机编译/执行均同host（16.87/10.00/10.19秒），未放大watchdog；仅本轮启动实例已关，default保持原Running。Rosetta osx/x86_64同三probe通过，arch强制Darwinx86_64，trace与候选offset138928解压切片/缓存driver逐字节一致、Mach-O CPU=x86_64，非arm交叉编译冒充x86执行。日志/tmp/unisacc-e5-linuxx86-928和/tmp/unisacc-e5-rosetta-928；这些旧候选平台smoke不外推新6e60e3d1，也不是完整六平台套件/自举。
