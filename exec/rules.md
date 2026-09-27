@@ -76,7 +76,7 @@ and they do not validate the newer candidate.
 Remaining closure obligations:
 
 1. Finish E3's remaining hand-written control groups (notably expressions,
-   calls, literal pooling and initialization glue), while retaining shared
+   calls and initialization glue), while retaining shared
    type/gold facts and deleting replaced Python control. E4's runtime algorithm
    and encoder runtime branches already use declarations; initialization and
    machine-code/format templates remain separately disclosed inputs.

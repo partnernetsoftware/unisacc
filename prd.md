@@ -5037,3 +5037,5 @@ Windows父实际验收闭合（候选81c04285…固定不变）：传输用gzip9
 新完整候选e4d1a8f已分阶段双槽构建：/tmp/unisacc-enum-candidate-928/unisacc-next.com，6,275,043B，sha256 4d288bab4610416e4d0e942589cf6df3211ae59ea47adf6d696a59ad172fc29b，package6,091,731B；22个shared/target网络全域--check-net通过。显式MODEL_COM门禁实际corpus220原清单23.21秒：215pass/0wrong/1unsupported（00209）/4原knownfail/0slow，失败仍rc1；143源×三个优化级429全部agree，双槽两个窗口37.06+31.85秒，0wrong/refuse。queue内容指纹父infra实跑通过，记录/tmp/unisacc-enum-corpus-928与/tmp/unisacc-enum-diffo-928。后续printf控制迁移尚不计入此候选，默认仍未切换。
 
 printf/POOL完整规则迁移a20bfdc：五模式完整state/观察/后继/展开动作及字符串全同，动态布局/HEX/模板扰动全同，旧keep316/316与4probe O0/O2实际native同host；Python净减63、声明增232，总源仍增169。父审后合入，保留声明绑定/共享字符串walk/模板，不把格式控制重写进执行器。
+
+父合并7d4bb90后printf警告联合门禁双槽2/2、15秒：原39例完整tape/诊断对照保持。CALL整组固定控制迁声明与00209共享声明形状继续分别在隔离树推进；前者保留EN.VALUE、ARGCOPY、addr和动态SYSCALLS，后者保留FS签名，不重复解析器。
