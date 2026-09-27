@@ -5115,3 +5115,7 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 最终9a0ae470跨目标smoke补齐：lnx/x86_64经Lima/QEMU仿真、win/arm64与win/x86_64经Windows11 ARM64 UTM，各hello/fib/convert全rc0；每次先核候选完整hash，APE-run与指定目标编译后native输出均同host。Windows容器运行x86_64驱动（OS仿真），不称x86实机。9单probe日志与guest-results.json在/tmp/unisacc-final-platform-928，另Linux arm64三probe已录。两台本轮新启VM已关闭，既有default Lima保持；容器本机双ISA运行和固定NET包三代自举另录。新完整门禁状态目录/tmp/unisacc-final-gate-v2-928，重套件独占、其余双槽；只继承调度耗时估计，不继承通过结果。
 
 V2冷缓存bindx86在48秒仍超时，归档后同源55秒窗口独占实跑38.52秒通过，窗口填充后6项全绿。warningdriver独占53.09秒仍超时，只完成cc分支；判定套件本身过长，按原cc/ua/asm三个驱动划分门禁，各保留完整比较项，仅构建选中驱动，不增加超时上限。修复完成前暂停全队列，不继续用超时堆积结果；最终产物和平台证据不变。
+
+警告驱动分片16bb21d已合d624763：cc20、asm20、ua Wall5/Wextra5/Werror10，合计原60个完整rc/stdout/stderr比较及输出屏障全部保留；仅构建选定驱动，ua三片独占。代理私有冷cache最慢ua-Werror实跑46.79s全10项通过，首次未拆ua55s超时保留。完整门禁现143项，重开最终冻结V3队列；对耗时明确区分冷构造与运行，先用现有models.py内容哈希缓存有界准备重套件模型，不缓存测试结果。
+
+最终9a0ae470同口径性能完成：同源、O2、osx/arm64、新/bin/sh APE进程到完整镜像（含watchdog/加载、不运行镜像），无其他重测试、各5次、默认UNISA_MAXSTEPS。fib经典0.06078575s/模型0.62056504s中位，10.209倍；unisacc.c经典0.77623196s/模型19.42672129s，25.027倍。每源全部十个完整镜像hash相同，fib5bda314a…70ec6/self474cdb14…a52146。证据/tmp/unisacc-final-perf-plan-928/summary.json和20单样本；这是当前成本，不是优化收益，按原决定功能验收先行，速度另行优化。
