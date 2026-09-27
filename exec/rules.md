@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: a438713, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
+Current source checkpoint: 4d351c5, including shared compound assignment conversion and sparse lowering operand namespaces, plus the earlier string/void fixes. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -15,8 +15,8 @@ remain shared inputs, not copied answers.
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
 | E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`, `shape-*`, `conversion-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, other literals, diagnostics, warnings, units and locations; string ESC data and shared initialization bindings |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
-| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `armfuse-*`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`; ARM destination-shape selection and dynamic bindings; target/escape/layout bindings in `data.py` |
-| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `armbase-*`, `armcontract-*`, `x86-operand-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM dynamic instruction/shape bindings and image-layout bindings; the Windows command-line template remains a shared source |
+| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`, `code-abi-sources.tsv`, `code-syscall-*`, `armfuse-*`; existing gold/catalog facts | ABI fact selection, initialization/termination shells and template bindings in `lower/code.py`; ARM destination-shape policy; target/escape/layout bindings in `data.py`; shared optional u64 reader in `modelinput.py` |
+| E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`, `armbase-*`, `armcontract-*`, `x86-operand-*`, `x86-line-*`, `x86-procs-*` (including relaxation); catalog opcode facts | x86 concrete instruction encoding and setup; ARM dynamic instruction/shape bindings and image-layout bindings; the Windows command-line template remains a shared source |
 | E6 images | `enc/elfimage-byte/result.tsv` shared image control and `enc/pedelta-byte/result.tsv` PE control, `enc/machodelta-*` Mach-O layout/signature-page control, `enc/sha256-*` shared digest control; existing target layout facts | Format header/section/CD fields and import/string enumeration, child installation and dynamic layout/hash-constant bindings in `enc/` |
 
 `finite_rules.py` expands declared observations, bindings and action sequences;
@@ -37,8 +37,8 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 - Finish the rule-source inventory above: remove the replaced control code,
   preserve actual dynamic dependencies, and enumerate old/new local transitions.
 - Close source and failure compatibility gaps in the chosen product contract.
-  The checkpoint candidate still rejects bit-fields, several declarator/compound
-  literal forms, and wide strings. A correct rejection is not support.
+  The current differential candidate rejects bit-fields. Other unsupported
+  forms remain outside that finite test set; a correct rejection is not support.
 - Validate the actual packaged network compiler, not just the table simulator:
   CLI, diagnostics, source-to-image, optimization, six targets and native execution
   on the available platforms, with input and artifact provenance.
@@ -119,3 +119,12 @@ lines (90 declaration lines added). Shared address control removes 25 Python
 lines; anonymous compound storage removes seven while reusing INITVALUE and
 AS.struct. Their full packaged acceptance is pending; classic bit-field
 assignment results were corrected independently before the model migration.
+
+At 4d351c5, the complete six-target package runs the original 11 tools (11/11)
+and 420 of 426 optimization differential cases with zero wrong outputs. Only
+the original bit-field test and the added bit-field assignment-result test
+refuse, at all three levels. The four-shard queue takes 36.99 seconds; refusals
+still fail it. Package: 6,150,292 bytes, SHA256
+`95900b79bad936f874edd6368066be352f2974b86d3e10757bd68a846e6722d2`.
+These results do not cover arbitrary C99 inputs or complete native platform
+acceptance, and the default shipped compiler remains the classic route.
