@@ -38,7 +38,7 @@ SYSCALLS = [(name, op, 3) for name, op in INTRINSIC.items()] + [(name, op, 6) fo
 
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
 VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
-UNDO_SIZE = 16
+UNDO_SIZE = 19
 DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges two states silently
 
 
@@ -611,9 +611,7 @@ def types():
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
     p = P("TSPEC")
     p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "union": "TS.union", "enum": "TS.enum", "type=unsigned": "TS.type=unsigned"}, bad("type"))
-    P("TS.enum").call("NEXT").tok({TK_ID: "TS.etag"}, bad("enum type"))
-    P("TS.etag").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", ETAG)).branch({1: "TS.eint"}, bad("unknown enum tag"), [("CMPI", "u", 1)])
-    P("TS.eint").a(("LDI", "tb", 4)).call("NEXT").goto("TS.b")
+    P("TS.enum").call("ENUM").a(("LDI", "td", 0), ("LDI", "tb", 4)).goto("TS.b")
     # union: a struct whose members all sit at offset 0, its size the largest member's (measured)
     P("TS.struct").a(("LDI", "sun_n", 0)).goto("TS.su")
     P("TS.union").a(("LDI", "sun_n", 1)).goto("TS.su")
@@ -634,11 +632,13 @@ def types():
     P("TAG.bind").branch({1: "RET"}, "TAG.save", [("CMPI", "tagscope", 0)])
     P("TAG.save").a(("LDX", "tagold", "tg", STAG), ("LDX", "tagoldscope", "tg", TAGLEVEL),
         ("STX", "tagusp", TAGUNDO, "tg"), ("STX", "tagusp", TAGUNDO+1, "tagold"), ("STX", "tagusp", TAGUNDO+2, "tagoldscope"),
-        ("ALUI", "add", "tagusp", "tagusp", 3), ("STX", "tg", TAGLEVEL, "tagscope")).ret()
+        ("LDX", "tagoldenum", "tg", ETAG), ("STX", "tagusp", TAGUNDO+3, "tagoldenum"),
+        ("ALUI", "add", "tagusp", "tagusp", 4), ("STX", "tg", TAGLEVEL, "tagscope")).ret()
     P("TAG.leave").vpop("tagmark", "tagscope").goto("TAG.unwind")
     P("TAG.unwind").branch({2: "TAG.restore"}, "RET", [("CMP", "tagusp", "tagmark")])
-    P("TAG.restore").a(("ALUI", "sub", "tagusp", "tagusp", 3), ("LDX", "tagname", "tagusp", TAGUNDO),
+    P("TAG.restore").a(("ALUI", "sub", "tagusp", "tagusp", 4), ("LDX", "tagname", "tagusp", TAGUNDO),
         ("LDX", "tagold", "tagusp", TAGUNDO+1), ("LDX", "tagoldscope", "tagusp", TAGUNDO+2),
+        ("LDX", "tagoldenum", "tagusp", TAGUNDO+3), ("STX", "tagname", ETAG, "tagoldenum"),
         ("STX", "tagname", STAG, "tagold"), ("STX", "tagname", TAGLEVEL, "tagoldscope")).goto("TAG.unwind")
     # SBODY at '{': members `T [*]... name;` -- each aligned to its own size, the total to the largest (measured)
     p = P("SBODY")
@@ -800,33 +800,35 @@ def build(locations=False, warnings=False, errors=False):
     for nm in E.autonames():
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).call("INDEX").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
-    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", "type=extern": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "EN"}, bad("top-level construct"))
-    # enum [TAG] { NAME [= N], ... } ; -- the names are int constants (0, 1, ... or the given N and on); no code
-    p = P("EN")
-    p.a(("COPYW", "enstart", "tpos")).call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
-    P("EN.tag").a(("INTERN", "entag", "ps", "pe")).call("NEXT").tok({"{": "EN.register"}, "EN.object")
-    P("EN.register").a(("LDI", "u", 1), ("STX", "entag", ETAG, "u")).goto("EN.b")
-    P("EN.object").a(("JUMP", "enstart")).call("NEXT").goto("FN")
+    p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", "type=extern": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "FN"}, bad("top-level construct"))
+    # enum is a type specifier in both declarations and typedefs.
+    P("ENUM").call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
+    P("EN.tag").a(("INTERN", "entag", "ps", "pe")).call("NEXT").tok({"{": "EN.register"}, "EN.reference")
+    P("EN.register").a(("COPYW", "tg", "entag")).call("TAG.bind").a(("LDI", "u", 1), ("STX", "entag", ETAG, "u")).goto("EN.b")
+    P("EN.reference").branch({1: "RET"}, bad("unknown enum tag"), [("LDX", "u", "entag", ETAG), ("CMPI", "u", 1)])
     p = P("EN.b")
     p.a(("LDI", "env", 0)).call("NEXT").label("EN.l")
     p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
-    p = P("EN.id")
-    p.a(("INTERN", "v", "ps", "pe")).call("NEXT").tok({"=": "EN.eq"}, "EN.put")
-    P("EN.eq").call("NEXT").call("CE").a(("COPYW", "env", "cv")).goto("EN.put")
-    p = P("EN.put")
-    p.a(("STX", "v", ENV, "env"), ("LDI", "t", 1), ("STX", "v", END_, "t"), ("ALUI", "add", "env", "env", 1)).tok({",": "EN.c", "}": "EN.e"}, bad("enum"))
+    P("EN.id").a(("COPYW", "enps", "ps"), ("COPYW", "enpe", "pe")).call("NEXT").tok({"=": "EN.eq"}, "EN.bind")
+    P("EN.eq").call("NEXT").call("CE").a(("COPYW", "env", "cv")).goto("EN.bind")
+    P("EN.bind").a(("COPYW", "ps", "enps"), ("COPYW", "pe", "enpe"), ("INTERN", "v", "ps", "pe")).branch({1: "EN.put"}, "EN.local", [("CMPI", "tagscope", 0)])
+    P("EN.local").call("BIND").goto("EN.put")
+    P("EN.put").a(("STX", "v", ENV, "env"), ("LDI", "t", 1), ("STX", "v", END_, "t"), ("ALUI", "add", "env", "env", 1)).tok({",": "EN.c", "}": "EN.e"}, bad("enum"))
     P("EN.c").call("NEXT").goto("EN.l")
-    P("EN.e").call("NEXT").expect(";").call("NEXT").goto("UNIT")
+    P("EN.e").call("NEXT").ret()
     P("TOP.st").call("NEXT").goto("UNIT")        # static: the same code (measured)
     P("TOP.id").call("ISTD").branch({1: "FN"}, bad("top-level construct"))
     # typedef T [*]... NAME;  -- no code
-    p = P("TD")
+    P("TD").call("TD.parse").goto("UNIT")
+    p = P("TD.parse")
     p.call("NEXT").call("TSPEC").tok({TK_ID: "TD.id", "(": "TD.fp"}, bad("typedef"))
     P("TD.fp").call("FPDECL").branch({1: "TD.fpshape"}, bad("function typedef shape"), [("CMPI", "fp_isfunction", 0)])
     P("TD.fpshape").branch({1: "TD.fpput"}, bad("function pointer array typedef"), [("CMPI", "fpn", 0)])
-    P("TD.fpput").a(("INTERN", "t", "ips", "ipe")).goto("TD.put")
-    P("TD.id").a(("INTERN", "t", "ps", "pe")).call("NEXT").goto("TD.put")
-    P("TD.put").a(("LDI", "u", 1), ("STX", "t", E.TDN, "u"), ("STX", "t", E.TDB, "tb"), ("STX", "t", E.TDD, "td")).expect(";").call("NEXT").goto("UNIT")
+    P("TD.fpput").a(("COPYW", "tdps", "ips"), ("COPYW", "tdpe", "ipe")).goto("TD.bind")
+    P("TD.id").a(("COPYW", "tdps", "ps"), ("COPYW", "tdpe", "pe")).call("NEXT").goto("TD.bind")
+    P("TD.bind").a(("COPYW", "ps", "tdps"), ("COPYW", "pe", "tdpe"), ("INTERN", "v", "ps", "pe")).branch({1: "TD.put"}, "TD.local", [("CMPI", "tagscope", 0)])
+    P("TD.local").call("BIND").goto("TD.put")
+    P("TD.put").a(("LDI", "u", 1), ("STX", "v", E.TDN, "u"), ("STX", "v", E.TDB, "tb"), ("STX", "v", E.TDD, "td")).expect(";").call("NEXT").ret()
     # a unit without main is an error in the reference (measured, probe r2)
     P("END").a(("LDX", "t", "mnid", E.FND)).branch({1: "END.ok"}, bad("no main"), [("CMPI", "t", 1)])
     P("END.ok").o("__init:\n").a(("JUMP", "x0"), ("LDI", "dep", 0)).call("INITS").o("  ret\n__main_ret:\n").a(("LDX", "t", "exid", E.FND)).branch({1: "END.ex"}, "END.x2", [("CMPI", "t", 1)])
@@ -1018,6 +1020,9 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("LDX", "t", "u", DIM + j), ("STX", "usp", E.UNDO + 5 + j, "t"))
     for j, table in enumerate((END_, ENV), 13):
         p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO + j, "t"))
+    for j, table in enumerate((E.TDN, E.TDB, E.TDD), 16):
+        p.a(("LDX", "t", "v", table), ("STX", "usp", E.UNDO+j, "t"))
+    p.a(("LDI", "t", 0), ("STX", "v", E.TDN, "t"))
     p.a(("LDX","t","v",VLSIZE),("STX","usp",E.UNDO+15,"t"),("LDI","t",0),("STX","v",VLSIZE,"t"),("STX", "v", END_, "t"), ("ALUI", "add", "usp", "usp", UNDO_SIZE)).ret()
     p = P("DECL")
     p.call("BIND")
@@ -1036,7 +1041,7 @@ def build(locations=False, warnings=False, errors=False):
     p.tok({"}": "RET"}, "STMTS.one")
     P("STMTS.one").call("STMT").goto("STMTS")
     p = P("STMT.body" if warnings else "STMT")
-    p.tok({"{": "S.blk", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl", "enum": "S.decl",
+    p.tok({"{": "S.blk", "typedef": "TD.parse", "*": "S.star", **{w: "S.decl" for w in TWORDS}, "return": "S.ret", "if": "S.if", "while": "S.while", "for": "S.for", "do": "S.do", "break": "S.brk", "continue": "S.cnt", ";": "S.empty", TK_ID: "S.idq", "struct": "S.decl", "union": "S.decl", "enum": "S.decl",
            "type=static": "SC.start", "switch": "S.sw", "case": "S.case", "default": "S.dflt", "goto": "S.goto"}, "S.expr")
     P("S.idq").call("ISTD").branch({1: "S.decl"}, "S.idl")
     # NAME: stmt -- the label u_NAME (measured, b_goto); otherwise back to the name, an expression
@@ -1065,6 +1070,8 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("LDX", "t", "usp", E.UNDO + 5 + j), ("STX", "u", DIM + j, "t"))
     for j, table in enumerate((END_, ENV), 13):
         p.a(("LDX", "t", "usp", E.UNDO + j), ("STX", "v", table, "t"))
+    for j, table in enumerate((E.TDN, E.TDB, E.TDD), 16):
+        p.a(("LDX", "t", "usp", E.UNDO+j), ("STX", "v", table, "t"))
     p.a(("LDX","t","usp",E.UNDO+15),("STX","v",VLSIZE,"t")).goto("S.uw")
 
     P("S.empty").call("NEXT").ret()
