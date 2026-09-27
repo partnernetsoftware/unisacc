@@ -1,6 +1,6 @@
 """Load the declared pp.locations -> tokens.locations transition rules."""
 from pathlib import Path
-from byterules import load
+from finite_rules import load
 
 
 def install(d):

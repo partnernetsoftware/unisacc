@@ -75,6 +75,7 @@ def gen_inputs(cmd):
         for dp, _, names in os.walk(os.path.join(ROOT, top)):
             fs.update(os.path.relpath(os.path.join(dp, n), ROOT) for n in names
                       if n.endswith((".py", ".tsv")))
+    fs.add("exec/finite_rules.py")
     fs.add("weights/gold/pp.tsv")  # shared E2 builder reads the directive schema
     if d.endswith("lex"):
         fs.update("weights/gold/" + name + ".tsv" for name in ("lex", "lexcls", "lexword", "parse"))

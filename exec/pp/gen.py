@@ -46,6 +46,9 @@ EOF = 256
 
 sys.path.insert(0, ROOT)
 from unisa.tsvgold import load_table
+from pathlib import Path
+sys.path.insert(0, os.path.join(ROOT, "exec"))
+from finite_rules import load as load_rules
 
 _name, _fields, _heads, _rows = load_table(os.path.join(ROOT, "weights/gold/pp.tsv"))
 assert _name == "pp" and [n for n, _ in _fields] == ["dir", "defined"]
@@ -713,52 +716,12 @@ def build(target="lnx/x86_64", locations=False):
     g.els("START", "CLI.FLAGS", init)
     build_cli(g, NC, locations)
 
-    # ---- P0: shebang, then splice -----------------------------------------
-    g.on("P0S", [35], "P0S1", [("MARK", "A"), ("ADV",)])
-    g.els("P0S", "P0")
-    g.on("P0S1", [33], "P0SB", [("JUMP", "A")])
-    g.els("P0S1", "P0", [("JUMP", "A")])
-    g.on("P0SB", [10, EOF], "P0")
-    g.els("P0SB", "P0SB", [("OUT", 32), ("ADV",)])
-    rec = [("OLEN", "t"), ("ALUI", "add", "a", "NSPL", SPLB), ("STX", "a", 0, "t"),
-           ("ALUI", "add", "NSPL", "NSPL", 1)]
-    g.on("P0", [92], "P0B", [("MARK", "A"), ("ADV",)])
-    g.on("P0", [EOF], "P1", [("SWAP",)])
-    g.els("P0", "P0", [("COPY",), ("ADV",)])
-    g.on("P0B", [10], "P0", [("ADV",)] + rec)
-    g.on("P0B", [13], "P0BR", [("ADV",)])
-    g.els("P0B", "P0", [("JUMP", "A"), ("COPY",), ("ADV",)])
-    g.on("P0BR", [10], "P0", [("ADV",)] + rec)
-    g.els("P0BR", "P0", [("JUMP", "A"), ("COPY",), ("ADV",)])
-
-    # ---- P1: decomment ------------------------------------------------------
-    g.on("P1", [34], "P1Q34", [("COPY",), ("ADV",)])
-    g.on("P1", [39], "P1Q39", [("COPY",), ("ADV",)])
-    g.on("P1", [47], "P1SL", [("MARK", "A"), ("ADV",)])
-    g.on("P1", [EOF], "AISTART" if AUTOINC else "P3START", [("SWAP",)])
-    g.els("P1", "P1", [("COPY",), ("ADV",)])
-    for q in (34, 39):
-        g.on("P1Q%d" % q, [92], "P1Q%dE" % q, [("COPY",), ("ADV",)])
-        g.on("P1Q%d" % q, [q], "P1", [("COPY",), ("ADV",)])
-        g.on("P1Q%d" % q, [EOF], "P1")
-        g.els("P1Q%d" % q, "P1Q%d" % q, [("COPY",), ("ADV",)])
-        g.on("P1Q%dE" % q, [EOF], "P1")
-        g.els("P1Q%dE" % q, "P1Q%d" % q, [("COPY",), ("ADV",)])
-    g.on("P1SL", [47], "P1LC")
-    g.on("P1SL", [42], "P1BC", [("ADV",), ("LDI", "NL", 0)])
-    g.els("P1SL", "P1", [("JUMP", "A"), ("COPY",), ("ADV",)])
-    g.on("P1LC", [10, EOF], "P1", [("OUT", 32)])
-    g.els("P1LC", "P1LC", [("ADV",)])
-    unterminated = [("REJECT", "unterminated comment")]
-    g.on("P1BC", [10], "P1BC", [("ALUI", "add", "NL", "NL", 1), ("ADV",)])
-    g.on("P1BC", [42], "P1BS", [("ADV",)])
-    g.on("P1BC", [EOF], "DEAD", unterminated)
-    g.els("P1BC", "P1BC", [("ADV",)])
-    g.on("P1BS", [47], "P1NL", [("ADV",), ("OUT", 32), ("CMPI", "NL", 0)])
-    g.on("P1BS", [EOF], "DEAD", unterminated)
-    g.els("P1BS", "P1BC")
-    g.r("P1NL", {2: ("P1NL", [("OUT", 10), ("ALUI", "sub", "NL", "NL", 1), ("CMPI", "NL", 0)]),
-                 1: ("P1", [])})
+    # Declared text normalisation; only layout and inter-stage links are bound here.
+    links = {"@after_comments": "AISTART" if AUTOINC else "P3START"}
+    for filename, mode in (("text-byte.tsv", "b"), ("text-result.tsv", "r")):
+        for state, row in load_rules(Path(HERE) / filename, {}, bindings={"SPLB": SPLB}).items():
+            for key, (target, actions) in row.items():
+                g.on(state, [key], links.get(target, target), actions, mode)
 
     # ---- MFIND: M := entry for id NID live in segment SEGQ (-1: now) -------
     g.els("MFIND", "MF1", [("ALUI", "add", "mfa", "NID", NEWB), ("LDX", "mft", "mfa", 0),

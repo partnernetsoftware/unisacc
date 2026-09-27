@@ -21,6 +21,7 @@ weights. The production candidate evaluates those weights at runtime.
 | `count-*.tsv` | counter rendering and halt |
 | `location-*.tsv` | positioned-input envelope validation and emission |
 
+The shared reader is `exec/finite_rules.py`, also used by the preprocessor.
 Transition columns are state, observation set, next state, action tuples.
 Ranges are inclusive; `*` means the remaining domain, not priority over
 explicit rows. Overlapping explicit rules and incomplete states fail.

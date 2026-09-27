@@ -348,7 +348,8 @@ def build_ident():
 
 
 # ---- numbers: finite transition rules, not Python scanning branches ------------
-from byterules import load as load_byte_rules
+sys.path.insert(0, os.path.join(ROOT, "exec"))
+from finite_rules import load as load_byte_rules
 
 
 def install_rules(filename, mode, domain, sequences=None, classes=None):

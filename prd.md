@@ -4772,3 +4772,9 @@ E2后续输入审计：exec/pp/gen.py仍从kernel/unisa_model.inc提取DIRV，�
 
 E2首步实测：六目标×普通/位置模式12份JSON的完整状态、转移与动作均与迁移前一致；Linux/macOS普通180,466、位置183,036观测，Windows普通179,951、位置182,521。隔离临时根只放pp构造源码、通用TSV读取器、pp.tsv、predefines.tsv和include头声明，无kernel、gold.py、src；从/tmp生成12份均相同。临时声明把__linux__改为__linux_variant__，只有一个初始化动作序列变化，状态映射不变，证明宏名称确实由声明控制。当前改变的是输入来源，P0/P1和宏控制规则仍手写；Python行数未减少，不称完整E2声明迁移。
 E2输入迁移集成：/tmp/unisacc-e2-declarations-gate双槽2/2通过，总2.74秒；宏展开86个完整结果与4个明确拒绝，位置封装9个参考用例与5个Python裁判用例通过。缓存来源同步到pp/run.sh与旧pipeline/run.py，共享models.py原已包含exec TSV和weights。未改产品源码，不把此定向结果写为新一轮全产品门禁。
+
+E2下一步：P0（shebang/续行）和P1（注释/字面量保留）转移与动作迁入有限规则TSV，删除原Python分支。复用E1读取器并移为exec/finite_rules.py公共模块，仅增加显式常量绑定替换；SPLB是执行器存储布局常量，出口是阶段链接，不由回调藏词法决策。普通、位置、自动头开启/关闭均核对完整转移和动作；顺序号可能改变，比较动作内容而非序号。
+
+E2 P0/P1实现：text-byte.tsv与text-result.tsv共46条规则声明shebang清空、续行拼接、字符串/字符保护、行/块注释、换行保留与未终止拒绝。删除gen.py对应分支；E1有限读取器移到exec/finite_rules.py供两阶段共用，增加显式constant绑定替换，不调用语言相关Python回调。六目标×两模式的完整观测/动作同旧结果；关闭自动头的两模式120,842/123,412观测亦同。共享模块迁移后E1四模式85,123×3及100,920观测同旧结果。隔离根无kernel/gold.py/src的12模式生成通过，宏改名输入依赖检查仍通过。
+cc-unisacc的死函数清理建议已收到但未实施；其“经典walker不得模型化”的措辞适用于旧产品T-1边界，不代替用户重申的S-17全阶段模型推理目标。本轮不增加产品修改范围。
+E2 P0/P1定向集成收尾：/tmp/unisacc-e2-text-gate双槽4/4返回0，总6.05秒；exec-macros、exec-pploc、exec-lexpos、exec-lexloc分别2.84/2.44/3.52/2.72秒，实际网络路径覆盖宏展开与位置封装。计入共享读取器移动及新增常量绑定，本片Python净减少29行，46条规则成为显式输入；没有复制旧读取器。未改产品源码、未重跑全产品门禁；E2剩余宏/指令控制仍待迁移，不称完整重构完成。

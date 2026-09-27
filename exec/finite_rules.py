@@ -2,7 +2,7 @@
 import json
 
 
-def load(path, sequences, domain=range(257), classes=None):
+def load(path, sequences, domain=range(257), classes=None, bindings=None):
     domain = set(domain)
     explicit, defaults = {}, {}
     for lineno, line in enumerate(path.read_text().splitlines(), 1):
@@ -64,7 +64,13 @@ def load(path, sequences, domain=range(257), classes=None):
             for action in actions:
                 values = []
                 for value in action:
-                    if isinstance(value, list):
+                    if isinstance(value, list) and len(value) == 2 and value[0] == "constant":
+                        if bindings is None or value[1] not in bindings:
+                            raise ValueError(f"{path}: unknown constant binding {value[1]}")
+                        value = bindings[value[1]]
+                        if type(value) not in (int, str):
+                            raise ValueError(f"{path}: constant binding must be an integer or symbol")
+                    elif isinstance(value, list):
                         if (len(value) != 2 or value[0] != "observation" or
                             type(key) is not int or type(value[1]) is not int or
                             not 0 <= value[1] <= 63):
