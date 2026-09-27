@@ -588,7 +588,7 @@ def build(locations=False, warnings=False, errors=False):
     from statics import install as static_install
     static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL)
     from initializers import install as init_install
-    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS, dict(BFW=BFW, BFO=BFO, BFS=BFS))
+    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS, dict(BFW=BFW, BFO=BFO, BFS=BFS, SHAPE=SHAPE, SHAPE_IDS=SHAPE_IDS))
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
     g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------

@@ -19,7 +19,7 @@ def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT,
                     MAR=MAR, SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE,
                     SKIPS=SKIPS, UCHAR=E.UNS + 1)
     bindings.update(bitfields, MSZ=MSZ)
-    bindings.update(PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM1=DIM + 1, DIM2=DIM + 2)
+    bindings.update(PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM=DIM, DIM1=DIM + 1, DIM2=DIM + 2)
     root = Path(__file__).parent
     def rows(name):
         return [line.split("\t") for line in (root / ("initializers-" + name + ".tsv")).read_text().splitlines()[1:]]
