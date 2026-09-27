@@ -17,9 +17,9 @@ the liveness of r2..r5 and with it the carry through r3..r5 and ol_local; then
 up to four peep rounds: liveness of r0..r5, stfuse, and each line's relation
 with its neighbour, the action for which is the peep table's (loaded at START).
 This is the optimiser's algorithm compiled into an action table. The complete
-SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv and LOCAL in
-local-{byte,result}.tsv. Other rules remain here; src/opt.c and unisa/opt.py
-stay the behaviour reference.
+SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv, LOCAL in
+local-{byte,result}.tsv, and STFUSE in stfuse-{byte,result}.tsv. Other rules
+remain here; src/opt.c and unisa/opt.py stay the behaviour reference.
 
 The opinfo table is read, not copied: its `simple` column is interned into a
 set at START.  Everything else is the byte-level control of the rule.
@@ -412,81 +412,20 @@ def parsers():
 
 
 def stfuse():
-    """STFUSE(pi): imm r2, N / sub64 rA, r6, r2 / M / .st|store64 [rA+0], rV -> M, one frame-relative
-    store (pk_stfuse).  sk := the next line or 0; the output is written on success"""
-    p = P("STFUSE")
-    p.a(("LDI", "sk", 0), ("ALUI", "add", "q_t", "pi", 3)).branch({0: "SF.a"}, "RET", [("CMP", "q_t", "nl")])
-    p = P("SF.a")
-    p.a(("LDX", "q_t", "pi", LSS), ("JUMP", "q_t")).goto("SF.a0")
-    lit("SF.a0", "  imm r2, ", "SF.n", "RET")
-    g.on("SF.n", DIGIT, "SF.nd", [("MARK", "sf_n0")])
-    g.els("SF.n", "RET", [])
-    g.on("SF.nd", DIGIT, "SF.nd", [("ADV",)])
-    g.on("SF.nd", [10], "SF.b", [("MARK", "sf_n1"), ("ADV",)])
-    g.els("SF.nd", "RET", [])
-    lit("SF.b", "  sub64 r", "SF.d", "RET")
-    g.on("SF.d", [48, 49, 51, 52, 53], "SF.q", [("BYTE", "sf_a"), ("ADV",)])
-    g.els("SF.d", "RET", [])
-    pat = [44, None, 114, 54, None, None, 114, 50, 10]
-    for k, c in enumerate(pat):
-        cur = "SF.q" if k == 0 else "SF.q%d" % k
-        nx = "SF.j" if k == len(pat) - 1 else "SF.q%d" % (k + 1)
-        if c is None:
-            g.on(cur, NL, "RET", [])
-            g.els(cur, nx, [("ADV",)])
-        else:
-            g.on(cur, [c], nx, [("ADV",)])
-            g.els(cur, "RET", [])
-    p = P("SF.j")
-    p.a(("ALUI", "sub", "sf_ad", "sf_a", 48), ("ALUI", "add", "sf_j", "pi", 2)).label("SF.l")
-    p.a(("ALUI", "add", "q_t", "pi", 11)).branch({0: "SF.l2"}, "RET", [("CMP", "sf_j", "q_t")])
-    P("SF.l2").branch({0: "SF.line"}, "RET", [("CMP", "sf_j", "nl")])
-    p = P("SF.line")
-    p.a(("LDX", "q_t", "sf_j", LSS), ("JUMP", "q_t"), ("MARK", "sf_l0")).goto("SF.p1")
-    lit("SF.p1", "  .st [r", "SF.st1", "SF.p2x")
-    P("SF.p2x").a(("JUMP", "sf_l0")).goto("SF.p2")
-    lit("SF.p2", "  store64 [r", "SF.st2", "SF.other")
-    P("SF.st1").a(("LDI", "sf_st", 1)).goto("SF.sa")
-    P("SF.st2").a(("LDI", "sf_st", 2)).goto("SF.sa")
-    g.els("SF.sa", "SF.sa2", [("BYTE", "q_t")])
-    p = P("SF.sa2")
-    p.branch({1: "SF.sb"}, "RET", [("CMP", "q_t", "sf_a")])
-    g.els("SF.sb", "SF.sc", [("ADV",)])
-    lit("SF.sc", "+0], r", "SF.sv", "RET")
-    g.on("SF.sv", DIGIT, "SF.svd", [("LDI", "sf_v", 0)])
-    g.els("SF.sv", "RET", [])
-    g.on("SF.svd", DIGIT, "SF.svd", [("BYTE", "q_bt"), ("ALUI", "sub", "q_bt", "q_bt", 48),
-                                     ("ALUI", "mul", "sf_v", "sf_v", 10), ("ALU", "add", "sf_v", "sf_v", "q_bt"), ("ADV",)])
-    g.els("SF.svd", "SF.sve", [("MARK", "sf_q")])
-    p = P("SF.sve")
-    p.branch({1: "RET"}, "SF.v2", [("CMP", "sf_v", "sf_ad")])
-    P("SF.v2").branch({1: "RET"}, "SF.v3", [("CMPI", "sf_v", 2)])
-    p = P("SF.v3")
-    p.branch({1: "SF.t1"}, "SF.t2", [("CMPI", "sf_st", 1)])
-    g.on("SF.t2", NL, "SF.dead", [])
-    g.els("SF.t2", "RET", [])
-    g.on("SF.t1", [44], "SF.t1r", [])
-    g.els("SF.t1", "RET", [])
-    g.on("SF.t1r", NL, "SF.dead", [("MARK", "sf_q1")])
-    g.els("SF.t1r", "SF.t1r", [("ADV",)])
-    p = P("SF.dead")
-    p.a(("COPYW", "dz", "sf_ad"), ("ALUI", "add", "dfrom", "sf_j", 1)).call("DEADQ").branch({1: "SF.dead2"}, "RET", [("CMPI", "dv", 1)])
-    p = P("SF.dead2")
-    p.a(("LDI", "dz", 2), ("ALUI", "add", "dfrom", "sf_j", 1)).call("DEADQ").branch({1: "SF.emit"}, "RET", [("CMPI", "dv", 1)])
-    p = P("SF.emit")
-    p.a(("ALUI", "add", "q_t", "pi", 2), ("LDX", "q_t", "q_t", LSS), ("SPAN2", "q_t", "sf_l0"))
-    p.branch({1: "SF.e1"}, "SF.e2", [("CMPI", "sf_st", 1)])
-    P("SF.e1").o("  .st [r6-").a(("SPAN2", "sf_n0", "sf_n1")).o("], r").num("sf_v").a(("SPAN2", "sf_q", "sf_q1")).o("\n").goto("SF.ok")
-    P("SF.e2").o("  store64 [r6-").a(("SPAN2", "sf_n0", "sf_n1")).o("], r").num("sf_v").o("\n").goto("SF.ok")
-    P("SF.ok").a(("ALUI", "add", "sk", "sf_j", 1)).ret()
-    # not a store: M's line must be simple and name neither rA nor r2
-    p = P("SF.other")
-    p.a(("LDX", "q_t", "sf_j", KK)).branch({1: "SF.o2"}, "RET", [("CMPI", "q_t", K_SIMPLE)])
-    p = P("SF.o2")
-    p.a(("JUMP", "sf_l0"), ("COPYW", "nr", "sf_ad")).call("NAMES").branch({1: "RET"}, "SF.o3", [("CMPI", "found", 1)])
-    p = P("SF.o3")
-    p.a(("JUMP", "sf_l0"), ("LDI", "nr", 2)).call("NAMES").branch({1: "RET"}, "SF.o4", [("CMPI", "found", 1)])
-    P("SF.o4").a(("ALUI", "add", "sf_j", "sf_j", 1)).goto("SF.l")
+    # Keep the original fresh names and shared DEADQ/NAMES/PRN continuations.
+    specs = (("bounds", "STFUSE", "b"), ("window", "SF", "b"),
+             ("end", "SF", "b"), ("base", "SF", "b"),
+             ("value_alias", "SF", "b"), ("value_r2", "SF", "b"),
+             ("store_tail", "SF", "b"), ("dead_a_return", "SF", "r"),
+             ("dead_a", "SF", "b"), ("dead_r2_return", "SF", "r"),
+             ("dead_r2", "SF", "b"), ("store_emit", "SF", "b"),
+             ("print_st_return", "SF", "r"), ("print_store_return", "SF", "r"),
+             ("simple", "SF", "b"), ("names_a_return", "SF", "r"),
+             ("names_a", "SF", "b"), ("names_r2_return", "SF", "r"),
+             ("names_r2", "SF", "b"))
+    bindings = {name: P(state).fresh(kind) for name, state, kind in specs}
+    install_rules(g, os.path.dirname(__file__), "stfuse",
+                  bindings=dict(bindings, LSS=LSS, KK=KK, K_SIMPLE=K_SIMPLE))
 
 
 def peepround():
