@@ -468,99 +468,12 @@ def build(target="lnx/x86_64", locations=False):
             a = PPHEAD.index(PPT[(w, fl)])
             act(d, a, st + "_a%d" % fl)
 
-    # #define: name at NS..NE (NID); function-like only when `(` touches it
-    g.on("DEF0", [40], "DEFFN", [])
-    g.els("DEF0", "DB_WS", [])
-    # Record parameter names and a final variadic slot. Unsupported/malformed
-    # declarations remain visible to #ifdef but reject when invoked.
-    g.els("DEFFN", "MDEF", [("PUSH", "DEFFNR")])
-    g.labels.add("DEFFNR")
-    fn2 = ("P3BLANK", [("LDI", "t", 2), ("STX", "EA", F_FN, "t"), ("JUMP", "LS")])
-    g.els("DEFFNR", "DP0", [("ADV",), ("LDI", "NP", 0)])
-    g.on("DP0", WS, "DP0", [("ADV",)])
-    g.on("DP0", AL, "DPID", [("MARK", "PS_")])
-    g.on("DP0", [41], "DPZERO", [("CMPI", "NP", 0)])
-    g.r("DPZERO", {1:("DBF",[("ADV",),("STX","EA",F_NP,"NP")]),(0,2):fn2})
-    g.on("DP0", [46], "DPDOT1", [("ADV",)])
-    g.on("DPDOT1", [46], "DPDOT2", [("ADV",)])
-    g.on("DPDOT2", [46], "DPVAR", [("ADV",),("CMPI","NP",MAXP)])
-    g.els("DPDOT1", *fn2);g.els("DPDOT2", *fn2)
-    g.r("DPVAR", {0:("DPVEND",[("ALUI","add","pa","EA",F_P0),("ALU","add","pa","pa","NP"),
-        ("STX","pa",0,"ID_VA"),("ALUI","add","NP","NP",1),("LDI","t",1),("STX","EA",F_VAR,"t")]),(1,2):fn2})
-    g.on("DPVEND", WS, "DPVEND", [("ADV",)])
-    g.on("DPVEND", [41], "DBF", [("ADV",),("STX","EA",F_NP,"NP")])
-    g.els("DPVEND", *fn2)
-    g.els("DP0", *fn2)
-    g.on("DPID", ID, "DPID", [("ADV",)])
-    g.els("DPID", "DPIDS", [("MARK", "PE_"), ("INTERN", "pid", "PS_", "PE_"), ("CMPI", "NP", MAXP)])
-    g.r("DPIDS", {0: ("DP1", [("ALUI", "add", "pa", "EA", F_P0), ("ALU", "add", "pa", "pa", "NP"),
-                              ("STX", "pa", 0, "pid"), ("ALUI", "add", "NP", "NP", 1)]),
-                  (1, 2): fn2})
-    g.on("DP1", WS, "DP1", [("ADV",)])
-    g.on("DP1", [44], "DP0", [("ADV",)])
-    g.on("DP1", [41], "DBF", [("ADV",), ("STX", "EA", F_NP, "NP")])
-    g.els("DP1", *fn2)
-    g.on("DBF", WS, "DBF", [("ADV",)])
-    subh, puh = g.call("HSCAN", "DBFR")
-    g.els("DBF", subh, [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE"),
-                        ("STX", "EA", F_BODY, "BODY"), ("LDI", "one", 1),
-                        ("STX", "EA", F_FN, "one"), ("JUMP", "LS")] + puh)
-    g.els("DBFR", "P3BLANK")
-    g.on("DB_WS", WS, "DB_WS", [("ADV",)])
-    sub, pu = g.call("MDEF", "DB_R")
-    g.els("DB_WS", sub, [("MARK", "VS"), ("BLOBSAVE", "BODY", "VS", "LE")] + pu)
-    subh, puh = g.call("HSCAN", "DB_RR")
-    g.els("DB_R", subh, [("STX", "EA", F_BODY, "BODY"), ("JUMP", "LS")] + puh)
-    g.els("DB_RR", "P3BLANK")
-
-    # #include: incdo()
-    g.on("INC0", WS, "INC0", [("ADV",)])
-    g.on("INC0", [34], "IN34", [("ADV",), ("MARK", "NM"), ("LDI", "IQ", 34)])
-    g.on("INC0", [60], "IN62", [("ADV",), ("MARK", "NM"), ("LDI", "IQ", 60)])
-    g.els("INC0", *blank)
-    for q in (34, 62):
-        g.on("IN%d" % q, [q, 10, EOF], "INC1", [("MARK", "NME"), ("CMPI", "NINCL", 200)])
-        g.els("IN%d" % q, "IN%d" % q, [("ADV",)])
-    g.r("INC1", {2: blank, (0, 1): ("INC2", [("JUMP", "NM")])})
-    trydisk = sbconst("include/") + [("SBSPAN", "NM", "NME"), ("SBFIND", "HB"), ("CMPI", "HB", 0)]
-    g.on("INC2", [47], "INC4", [("SBCLR",), ("SBSPAN", "NM", "NME"), ("SBFIND", "HB"), ("CMPI", "HB", 0)])
-    g.els("INC2", "INC2Q", [("RLD", "IQ")])
-    # "x.h": the source file's directory first (dir = srcpath up to its last '/')
-    g.r("INC2Q", {34: ("SRCD", [("LDI", "DL", 0), ("LDI", "SRCB", 1), ("INPUSH", "SRCB")]),
-                  60: ("CLI.IP", [])})
-    g.on("SRCD", [47], "SRCD", [("ADV",), ("MARK", "DL")])
-    g.on("SRCD", [EOF], "INC4", [("LDI", "Z", 0), ("SBCLR",), ("SBSPAN", "Z", "DL"), ("INPOP",),
-                                 ("SBSPAN", "NM", "NME"), ("SBFIND", "HB"), ("CMPI", "HB", 0)])
-    g.els("SRCD", "SRCD", [("ADV",)])
-    g.r("INC4", {1: ("CLI.IP", []), (0, 2): ("INCOK", [])})
-    g.els("CLI.IP", "CLI.IP.have", sbconst("\0cli/include-dir")+[("SBFIND","CLI_DIR"),("BLEN","CLI_LEN","CLI_DIR"),("CMPI","CLI_LEN",0)])
-    g.r("CLI.IP.have", {1:("INC.BUILTIN",[("RLD","CLI_NOSTD")]),(0,2):("CLI.IP.try",[("SBCLR",),("SBBLOB","CLI_DIR"),("SBOUT",47),("SBSPAN","NM","NME"),("SBFIND","HB"),("CMPI","HB",0)])})
-    g.r("CLI.IP.try", {1:("INC.BUILTIN",[("RLD","CLI_NOSTD")]),(0,2):("INCOK",[])})
-    g.r("INC.BUILTIN", {0:("INC5",trydisk),
-                              1:("DEAD",[("REJECT","no such file for #include")])})
-    g.r("INC5", {1: ("INC6", sbconst("\0hdr/") + [("SBSPAN", "NM", "NME"), ("SBFIND", "HB"),
-                                                  ("CMPI", "HB", 0)]),
-                 (0, 2): ("INCOK", [])})
-    g.r("INC6", {1: ("DEAD", [("REJECT", "no such file for #include")]), (0, 2): ("INCOK", [])})
-    # found: o holds the buffer up to LS; write the file, a newline, the rest
-    # of x from LE, and run P0, P1 and P3 again (P3 resumes at LS)
-    inc_entry="INCOK"
+    body_layout = {name: globals()[name] for name in ['F_BODY', 'F_FN', 'F_NP', 'F_P0', 'F_VAR', 'IRLN', 'IRNL', 'MAXP']}
+    body_layout["include_body"] = "INC.body" if locations else "INCOK"
+    install_rules(g, "directive-body", body_layout)
     if locations:
         from locations import IRNAME
-        # incname in the reference diagnostic map retains at most 62 bytes.
-        g.els("INCOK","INC.location",[("ALUI","add","loc_end","NM",62),("CMP","NME","loc_end")])
-        g.r("INC.location",{(0,1):("INC.record",[("COPYW","loc_end","NME")]),2:("INC.record",[])})
-        g.els("INC.record","INC.body",[("BLOBSAVE","loc_name","NM","loc_end"),("STX","NIREG",IRNAME,"loc_name")])
-        inc_entry="INC.body"
-    g.els(inc_entry, "INCH", [("OLEN", "RESUME"), ("ALUI", "add", "a", "NIREG", IRLN),
-                            ("ALUI", "add", "t", "LINES", 1), ("STX", "a", 0, "t"),
-                            ("LDI", "HNL", 1), ("INPUSH", "HB")])
-    g.on("INCH", [10], "INCH", [("COPYT",), ("ADV",), ("ALUI", "add", "HNL", "HNL", 1)])
-    g.on("INCH", [EOF], "P0", [("INPOP",), ("OUT", 10), ("XLEN", "XE"), ("SPAN2", "LE", "XE"),
-                               ("ALUI", "add", "a", "NIREG", IRNL), ("STX", "a", 0, "HNL"),
-                               ("ALUI", "add", "NIREG", "NIREG", 1),
-                               ("ALUI", "add", "NINCL", "NINCL", 1), ("SWAP",)])
-    g.els("INCH", "INCH", [("COPYT",), ("ADV",)])
+        install_rules(g, "include-location", {"IRNAME": IRNAME})
 
     install_rules(g, "rescan", {name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP']})
     if locations:
