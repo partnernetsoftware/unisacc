@@ -8,7 +8,7 @@ from ..gold import TOKS
 from ..ir import (Emitter, ACC, LHS, TMP, FP, SP, ARGREGS, CALLEE, WCHAR,
                   wide_bytes)
 from .sema import (Scope, Type, VOID, I8, I16, I32, I64,
-                   U8, U16, U32, U64, is_unsigned, is_narrow,
+                   U8, U16, U32, U64, BOOL, is_unsigned, is_narrow,
                    F32, F64, FLOATS, ptr, Struct)
 from .lex import FNum
 # r0..r5 carry a syscall's arguments (r6 is the frame pointer, r7 the stack)
@@ -46,6 +46,8 @@ VARIADIC_LIBC = ("printf", "fprintf", "sprintf", "snprintf")
 
 def _basety(words):
     """Resolve a declaration-specifier word list to a base type."""
+    if "_Bool" in words:
+        return BOOL
     if "void" in words:
         return VOID
     if "double" in words:
@@ -914,6 +916,10 @@ class Walker:
             self.eat(",")
             self.expect("}")
             return
+        if ty.boolean and t.kind == "str":
+            self.next()
+            self.em.t.data[base + at:base + at + 1] = b"\x01"
+            return
         if t.kind == "str":                       # char *p = "..."
             self.next()
             self.em.init_ptrs.append(
@@ -927,12 +933,17 @@ class Walker:
             return
         lab = self._addr_of()
         if lab is not None:                       # int *p = &g;  char *q = arr;
-            self.em.init_ptrs.append((sym, lab, at))
+            if ty.boolean:
+                self.em.t.data[base + at:base + at + 1] = b"\x01"
+            else:
+                self.em.init_ptrs.append((sym, lab, at))
             return
         if self.isflt(ty) or self._fconst_ahead():
             v = self.fconst_value(ty)
         else:
             v = self.const_expr()
+        if ty.boolean:
+            v = int(v != 0)
         w = min(8, max(1, ty.size(self.sc.structs)))
         self.em.t.data[base + at:base + at + w] = \
             (v & ((1 << (w * 8)) - 1)).to_bytes(w, "little")
@@ -1670,6 +1681,8 @@ class Walker:
         """the stored bits of a constant initialiser of type ty"""
         from ..fp import bd, bs
         k, v = self.fconst(0)
+        if ty.boolean:
+            return int(v != 0)
         if ty.kind == "f64":
             return bd(float(v))
         if ty.kind == "f32":
@@ -1799,7 +1812,13 @@ class Walker:
         Integer-to-integer is left to the store's width, as it always was."""
         if frm is None or to is None:
             return
-        if self.isflt(frm) or self.isflt(to):
+        if to.boolean:
+            if self.isflt(frm):
+                self.em.ftruth(frm.kind)
+            else:
+                self.em.imm(TMP, 0)
+                self.em.emit(self.em.recipe("alu", "ne"), ACC, ACC, TMP)
+        elif self.isflt(frm) or self.isflt(to):
             self.em.conv(frm.kind, to.kind)
 
     def truthy(self, ty):
@@ -1911,7 +1930,9 @@ class Walker:
                     self.em.divmod_(op, uns, wid)
                 else:
                     self.em.binop(op, uns, wid)
-                if aty.kind in NARROW_UNS:
+                if aty.boolean:
+                    self.convto(I32, aty)
+                elif aty.kind in NARROW_UNS:
                     self.em.zext(NARROW_UNS[aty.kind])
                 if bits is not None:
                     self.em.bits_set(bits[0], bits[1], bits[2], self.wid(aty))
@@ -2140,7 +2161,9 @@ class Walker:
                 self.em.emit(self.em.recipe("alu",
                                             "add" if op == "++" else "sub"),
                              ACC, ACC, LHS)
-                if ty.kind in NARROW_UNS:
+                if ty.boolean:
+                    self.convto(I32, ty)
+                elif ty.kind in NARROW_UNS:
                     self.em.zext(NARROW_UNS[ty.kind])
             if bits is not None:
                 self.em.bits_set(bits[0], bits[1], bits[2], self.wid(ty))
@@ -2396,6 +2419,17 @@ class Walker:
                     self.em.bits_get(bits[0], bits[1], bits[2], self.wid(aty))
                 else:
                     self.em.load(ACC, ACC, 0, self.wid(aty))
+                if aty.boolean:
+                    self.em.push()       # old value, above saved address
+                    self.em.imm(TMP, 1)
+                    self.em.emit(self.em.recipe("alu", "add" if op == "++" else "sub"), ACC, ACC, TMP)
+                    self.convto(I32, aty)
+                    self.em.load(LHS, SP, 8)
+                    self.em.store(LHS, 0, ACC, self.wid(aty))
+                    self.em.pop(ACC)
+                    self.em.frame(-8)
+                    ty = aty
+                    continue
                 if self.isflt(aty):
                     # (x + 1) - 1 is not x in floating point: keep the old
                     # value itself.  Stack: address, old value.

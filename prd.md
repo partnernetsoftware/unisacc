@@ -4310,3 +4310,27 @@ void callback return/cast and an ordinary function after the wrapped one.
 Fresh model C99 47/57, 0 wrong, 10 refusals, rc 1 against baseline 57.
 This does not extend the bundled signal implementation to external OS
 signal delivery. Product sources and the default product remain unchanged.
+
+_Bool audit before model migration found reference-product defects. A valid
+probe prints `1 1 1 1 1 1 0 1 1 0` with host cc but product prints
+`1 0 0 0 2 2 0 2 2 0`: floating assignment, cast, function return/parameter,
+aggregate initializer and increment fail to normalize. Fix the existing
+conversion-kind 9 propagation at these boundaries first; preserve boolean
+type metadata through typedefs and declaration lists, and preserve postfix
+old values explicitly. Do not reproduce these errors in the delta.
+
+Bool validation: native -O0/-O1/-O2 match cc on b_boolconv. The bounded gate stopped after 27/114 (one failure): fat exposed that Python resolves _Bool as int. Repair the same scalar conversion contract there, keeping its arithmetic axis u8; do not waive the probe.
+
+Python bool repair keeps a boolean flag on the existing u8 type axis; conversions, constant aggregate initialization and old-value postfix semantics now agree with host cc. b_boolconv covers typedefs, float/int/pointer truth, argument/return, arrays/members and updates. Native O0/O1/O2 and Python fat arm64/x86_64 pass. Full gate restarts on the changed tree; earlier 27 results are not reused.
+
+Bool fix acceptance: final unchanged-tree rolling queue /tmp/unisacc-bool-final,
+114/114 passed, zero failed/pending, jobs=2, every scheduling window <=55 s
+and each child bounded <=60 s. Longest suite exec-multi-ua: 49.655 s.
+Product C99 57/57; difftest_o 393/393; fat 132/132 (arm64 and Rosetta
+x86_64 executed); fixed model chain 107/107. New b_boolconv agrees with host
+cc in native and rebuilt .com at O0/O1/O2; Python fat probe also agrees.
+.com 1,354,144 B, SHA256
+53556829bb402fe5ab7e2abbb4ee0a9103af71c538d5d67800b7b22ba6467bd4.
+No push/release/default-route switch. Model _Bool migration remains pending;
+model C99 remains 47/57, not the product's 57/57. This closes the measured
+reference conversion defects, not all C99 conformance obligations.

@@ -43,13 +43,14 @@ TOP_CANON = {"<": "<", ">": "<", "<=": "<", ">=": "<",
 
 
 class Type:
-    __slots__ = ("kind", "to", "n", "tag", "ret", "params")
+    __slots__ = ("kind", "to", "n", "tag", "ret", "params", "boolean")
 
-    def __init__(self, kind, to=None, n=0, tag=None, ret=None, params=None):
+    def __init__(self, kind, to=None, n=0, tag=None, ret=None, params=None, boolean=False):
         self.kind, self.to, self.n, self.tag, self.ret = kind, to, n, tag, ret
         # a function's parameter types when a prototype gave them, else None:
         # an argument is converted to its parameter's type (C99 6.5.2.2p7)
         self.params = params
+        self.boolean = boolean
 
     def size(self, structs=None):
         if self.kind == "arr":
@@ -77,6 +78,7 @@ I16 = Type("i16")
 I32 = Type("i32")
 I64 = Type("i64")
 U8 = Type("u8")
+BOOL = Type("u8", boolean=True)
 U16 = Type("u16")
 U32 = Type("u32")
 U64 = Type("u64")

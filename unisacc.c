@@ -10985,6 +10985,7 @@ int declspecptr;        /* the specifier itself was a pointer typedef */
 char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
+int tdbool[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
 int tdfpst[MAXTD];        /* ...and the struct its call returns a pointer to */
 int tdflt[MAXTD]; int tdpd[MAXTD];
@@ -11979,7 +11980,8 @@ int unary(void) {
         ec(10);
         if (op == tidx("++", 2)) es("  @alu.add r0, r0, r1\n");
         else es("  @alu.sub r0, r0, r1\n");
-        if (curptr == 0) { if (e < BFTAG) { if (curuns) zext(e); } }
+        if (curptr == 0) { if (curbool) fconv(0, 9);
+            else { if (e < BFTAG) { if (curuns) zext(e); } } }
         pop1();
         estore(e);
         return 0;
@@ -12032,9 +12034,9 @@ int unary(void) {
        all it can see -- whether a type name follows is the walker's job. */
     if (cur() == tidx("(", 1)) {
         if (is_typeat(tp + 1)) {
-            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd;
+            int cw; int csz; int cuns; int cst; int carr; int cn; int cflt; int ok; int cpd; int cb; int cptr;
             adv();
-            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt;
+            cw = declspec(); csz = declsz; cuns = declunsigned; cst = declstruct; cflt = declflt; cb = declbool;
             declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) { declptr = 1; csz = 8; }
             cpd = declpd;
@@ -12052,18 +12054,21 @@ int unary(void) {
             }
             need(tidx(")", 1), ")");
             if (cur() == tidx("{", 1)) return cplitexpr(cw, cst, carr, cn);
+            cptr = declptr;
             unary(); loadval();
+            declptr = cptr;
             /* C99 6.3.1.4-5 at a cast: to or from a floating type */
             ok = fkind();
             if (declptr == 0) {
-                if (cflt) fconv(ok, cflt);
-                else { if (ok >= 4) fconv(ok, (cuns && csz == 8) ? 1 : 0); }
+                if (cb) fconv(ok, 9);
+                else { if (cflt) fconv(ok, cflt);
+                else { if (ok >= 4) fconv(ok, (cuns && csz == 8) ? 1 : 0); } }
             }
             /* narrowing is observable: `(char)300` is 44.  The tape has
                sized load/store, so a round trip through a stack slot is the
                whole of it -- and it sign-extends on the way back. */
             if (declptr == 0) { if (cflt == 0) {
-                if (csz < 8) {
+                if (csz < 8 && cb == 0) {
                     if (cuns) {
                         /* unsigned: keep the low bits, zero the rest --
                            `(unsigned char)255 >> 4` is 15, not -1 */
@@ -12077,7 +12082,7 @@ int unary(void) {
                     }
                 }
             } }
-            lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns; curflt = cflt;
+            lvalue = 0; curptr = declptr; cursize = csz; curuns = cuns; curflt = cflt; curbool = cb;
             curelem = cw;
             curpd = 0; curbase = cw;
             if (declptr) { curpd = cpd > 0 ? cpd : 1; if (curpd >= 2) curelem = 8; }
@@ -12114,6 +12119,17 @@ int postfix(void) {
             lvalue = 0;
             push();                                  /* address */
             eload(e2);
+            if (curbool && curptr == 0) {
+                /* Normalization loses the arithmetic inverse: save old x. */
+                push();
+                es("  @lit.imm r1, 1\n");
+                if (op == tidx("++", 2)) es("  @alu.add r0, r0, r1\n");
+                else es("  @alu.sub r0, r0, r1\n");
+                fconv(0, 9);
+                es("  @mem.load r1, [r7+8]\n"); estore(e2);
+                es("  @mem.load r0, [r7+0]\n  @call.frame -16\n");
+                continue;
+            }
             if (curflt) { if (curptr == 0) {
                 /* (x + 1) - 1 is not x in floating point: keep the old value
                    itself.  Stack: address, old value. */
@@ -13460,7 +13476,8 @@ int fconv(int from, int to) {
 }
 /* ...and the value's description follows it */
 int setkind(int k) {
-    lvalue = 0; curptr = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
+    lvalue = 0; curptr = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0; curbool = 0;
+    if (k == 9) { curbool = 1; curflt = 0; cursize = 1; curelem = 1; curuns = 1; return 0; }
     if (k >= 4) { curflt = k; cursize = k; curelem = k; curuns = 0; return 0; }
     curflt = 0;
     if (k == 1) { curuns = 1; cursize = 8; curelem = 8; }
@@ -13747,7 +13764,7 @@ int expr(void) {
             int ptrl; int pel; int ak; int aax;
             adv();
             ptrl = curptr; pel = curelem;
-            ak = fkind(); aax = tyax();
+            ak = fkind(); aax = tyax(); bl = curbool && curptr == 0;
             e = stw();
             lvalue = 0;
             push();                                  /* address */
@@ -13768,10 +13785,10 @@ int expr(void) {
                 if (op == tidx("-", 1)) es(cf == 8 ? "  @fpu.dsub r0, r1, r0\n" : "  @fpu.ssub r0, r1, r0\n");
                 if (op == tidx("*", 1)) es(cf == 8 ? "  @fpu.dmul r0, r1, r0\n" : "  @fpu.smul r0, r1, r0\n");
                 if (op == tidx("/", 1)) es(cf == 8 ? "  @fpu.ddiv r0, r1, r0\n" : "  @fpu.sdiv r0, r1, r0\n");
-                fconv(cf, ak);
+                fconv(cf, bl ? 9 : ak);
                 pop1();                              /* address */
                 estore(e);
-                setkind(ak);
+                setkind(bl ? 9 : ak);
                 return 0;
             }
             /* `p += n` moves n ELEMENTS, as `p = p + n` does */
@@ -13789,7 +13806,8 @@ int expr(void) {
             }
             emit_binop(op);                          /* pops old value */
             binuns = 0; binwid = 8;
-            if (ptrl == 0) { if (e < BFTAG) { if (tyuns(aax)) zext(e); } }
+            if (bl) fconv(0, 9);
+            else { if (ptrl == 0) { if (e < BFTAG) { if (tyuns(aax)) zext(e); } } }
             pop1();                                  /* address */
             estore(e);
             curelem = e;
@@ -13803,7 +13821,8 @@ int expr(void) {
             ak = fkind();
             if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
-            bl = curbool;               /* the TARGET's type, before the RHS */
+            bl = curbool && curptr == 0; /* the TARGET's type, before the RHS */
+            if (bl) ak = 9;
             lvalue = 0;
             if (e == 0) { if (curstruct >= 0) {
                 int ast; ast = curstruct;
@@ -13818,10 +13837,6 @@ int expr(void) {
             expr(); loadval();
             intptr_check(tptr, rt);
             fconv(fkind(), ak);                      /* C99 6.5.16.1p2 */
-            /* C99 6.3.1.2: converting to _Bool gives 0 if the value
-               compares equal to 0, and 1 otherwise -- it is not a
-               truncation, which is what storing one byte would be. */
-            if (bl) es("  @lit.imm r2, 0\n  @alu.ne r0, r0, r2\n");
             pop1();
             estore(e);
             if (ak >= 4) setkind(ak);
@@ -14061,7 +14076,7 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     if (k > 31) k = 31;
     tdname[ntd * 32 + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
-    tduns[ntd] = declunsigned;
+    tduns[ntd] = declunsigned; tdbool[ntd] = declbool;
     tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1; tdflt[ntd] = declflt;
     ntd = ntd + 1;
     return ntd - 1;
@@ -14258,7 +14273,7 @@ int declspec(void) {                       /* -> element width */
     if (td >= 0) {
         adv();
         declsz = tdsz[td]; declstruct = tdstruct[td]; declspecptr = tdptr[td];
-        declunsigned = tduns[td];
+        declunsigned = tduns[td]; declbool = tdbool[td];
         declspecfp = tdfp[td];
         declspecfpst = tdfpst[td];
         declflt = tdflt[td];
@@ -14662,6 +14677,7 @@ int slotat(int i, int w, int sst) {
             if (k < cnt + sub) {
                 slotoff = el * stsize[sst] + mboff[mi] + (k - cnt) * mbelem[mi];
                 slotflt = mbflt[mi];
+                if (mbbool[mi] && mbptr[mi] == 0) slotflt = 9;
                 slotw = mbelem[mi];
                 if (slotw == 0) slotw = 8;
                 return 0;
@@ -14672,6 +14688,7 @@ int slotat(int i, int w, int sst) {
                 slotoff = el * stsize[sst] + mboff[mi];
                 slotflt = mbflt[mi];
                 if (mbptr[mi]) slotflt = 0;
+                else { if (mbbool[mi]) slotflt = 9; }
                 slotw = mbwidth[mi];
                 return 0;
             }
@@ -15070,18 +15087,18 @@ int dkind(int flt) {
     return 0;
 }
 int local_decl(void) {
-    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn;
+    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool;
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
     sst = declstruct;
-    lflt0 = declflt;          /* an initialiser's casts would overwrite it */
+    lflt0 = declflt; lbool = declbool; /* initializers may contain type names */
     lstat = declstatic;
     if (cur() == tidx(";", 1)) { adv(); return 0; }  /* `struct X { ... };` */
     while (1) {
         declstruct = sst;
         decldim2 = 0; decldim3 = 0; declfp = declspecfp;
         declptr = declspecptr; declpd = declspecpd;
-        declflt = lflt0; fpn = 0;
+        declflt = lflt0; declbool = lbool; fpn = 0;
         while (eatstar()) { declptr = 1; }
         if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; lfpret = fpretfp; sst = 0 - 1; declstruct = 0 - 1;
@@ -15149,7 +15166,7 @@ int local_decl(void) {
             if (eat(tidx("=", 1))) {
                 /* once, at program start: into __init, like a global's */
                 lk2 = dkind(lflt0);
-                initflt = lflt0;
+                initflt = (declbool && declpd == 0) ? 9 : lflt0;
                 toinit = 1; hasinit = 1;
                 if (cur() == tidx("{", 1)) {
                     if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
@@ -15265,7 +15282,7 @@ int local_decl(void) {
                stack held.  It passed here by luck and printed garbage on
                a GitHub runner. */
             lptr = declptr;
-            initflt = lflt0;
+            initflt = (declbool && declpd == 0) ? 9 : lflt0;
             if (cur() == tidx("{", 1)) {
                 if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
                 initaggr(0, 0, off, w, sst, n * w);
@@ -15647,6 +15664,7 @@ int function(int t, int w) {
             int pk; pk = 0;
             if (declptr) pk = 1;
             else { if (pfl) pk = pfl; else { if (declunsigned) { if (declsz == 8) pk = 1; } } }
+            if (declbool && declptr == 0) pk = 9;
             sympk[fsym * 8 + np] = pk;
         } }
         np = np + 1;
@@ -15686,6 +15704,7 @@ int function(int t, int w) {
         else { if (symflt[fsym]) retkind = symflt[fsym];
                else { if (retuns) { if (w == 8) retkind = 1; } } }
     }
+    if (fsym >= 0) { if (symbool[fsym] && symptr[fsym] == 0) retkind = 9; }
     rett = t;
     retlab = newlab();
     infunc = 1;
@@ -15708,7 +15727,7 @@ int function(int t, int w) {
 }
 
 int unit(void) {
-    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd; int gfpd;
+    int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd; int gfpd; int gbool;
     while (1) {
         if (panic) {
             /* the walker unwound to EOF after an error: drop the broken
@@ -15727,13 +15746,13 @@ int unit(void) {
            This branch used to insist on a body, so a USE was refused. */
         w = declspec();
         gstruct = declstruct;
-        gflt0 = declflt;
+        gflt0 = declflt; gbool = declbool;
         if (cur() == tidx(";", 1)) { adv(); continue; }  /* `struct X {...};` */
         while (1) {
             declstruct = gstruct;
             decldim2 = 0; decldim3 = 0; declfp = declspecfp;
             declptr = declspecptr; declpd = declspecpd;
-            declflt = gflt0;
+            declflt = gflt0; declbool = gbool;
             while (eatstar()) declptr = 1;
             gfpfn = 0; gfpd = 0;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
@@ -15827,7 +15846,7 @@ int unit(void) {
                 adv();
                 toinit = 1; hasinit = 1;
                 gk = dkind(gflt0);
-                initflt = gflt0;
+                initflt = (declbool && declptr == 0) ? 9 : gflt0;
                 cpn = 0 - 1;
                 if (cur() == tidx("(", 1)) cpn = cplit();
                 if (cur() == tidx("{", 1)) {
