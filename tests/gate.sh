@@ -135,9 +135,9 @@ for kind in cc ua asm; do
     for part in isolation static; do job exec-multi-$kind-$part env DRIVER_KIND=$kind MULTI_PART=$part ./exec/c/multicheck.sh; done
 done
 job exec-multi-cc-frame env DRIVER_KIND=cc MULTI_PART=frame ./exec/c/multicheck.sh
-for kind in cc ua asm; do job exec-memory-$kind env DRIVER_KIND=$kind ./exec/c/memorycheck.sh; done
+for kind in cc ua asm; do for shard in 1 2 3; do job exec-memory-$kind-$shard env DRIVER_KIND=$kind MEMORY_SHARD=$shard/3 ./exec/c/memorycheck.sh; done; done
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
-    for kind in cc ua asm; do job exec-memx86-$kind env MEMORY_ARCH=x86_64 DRIVER_KIND=$kind ./exec/c/memorycheck.sh; done
+    for kind in cc ua asm; do for shard in 1 2 3; do job exec-memx86-$kind-$shard env MEMORY_ARCH=x86_64 DRIVER_KIND=$kind MEMORY_SHARD=$shard/3 ./exec/c/memorycheck.sh; done; done
 fi
 job exec-memwinarm ./exec/c/winmemorycheck.sh arm64
 job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64

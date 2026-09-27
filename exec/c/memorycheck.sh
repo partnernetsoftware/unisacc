@@ -7,6 +7,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 KIND=${DRIVER_KIND:-all}
 case $KIND in all|cc|ua|asm) ;; *) echo 'unknown DRIVER_KIND' >&2; exit 2;; esac
 export DRIVER_KIND
+case ${MEMORY_SHARD:-all} in all|1/3|2/3|3/3) ;; *) echo 'unknown MEMORY_SHARD' >&2; exit 2;; esac
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) echo 'unsupported memory-check host' >&2; exit 1;; esac
