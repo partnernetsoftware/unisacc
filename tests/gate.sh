@@ -128,7 +128,13 @@ for driver in cc asm; do job exec-warningdriver-$driver ./exec/c/warningcheck.sh
 for flag in Wall Wextra Werror; do job exec-warningdriver-ua-$flag ./exec/c/warningcheck.sh ua "$flag"; done
 job exec-multiwarn ./exec/c/multiwarningcheck.sh
 job exec-unitlocations python3 ./exec/parse2/unitlocationcheck.py
-for kind in cc ua asm; do job exec-multi-$kind env DRIVER_KIND=$kind ./exec/c/multicheck.sh; done
+for kind in cc ua asm; do
+    for pair in m n; do
+        for order in forward reverse; do job exec-multi-$kind-$pair-$order env DRIVER_KIND=$kind MULTI_PART=tapes-$pair-$order ./exec/c/multicheck.sh; done
+    done
+    for part in isolation static; do job exec-multi-$kind-$part env DRIVER_KIND=$kind MULTI_PART=$part ./exec/c/multicheck.sh; done
+done
+job exec-multi-cc-frame env DRIVER_KIND=cc MULTI_PART=frame ./exec/c/multicheck.sh
 for kind in cc ua asm; do job exec-memory-$kind env DRIVER_KIND=$kind ./exec/c/memorycheck.sh; done
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     for kind in cc ua asm; do job exec-memx86-$kind env MEMORY_ARCH=x86_64 DRIVER_KIND=$kind ./exec/c/memorycheck.sh; done
