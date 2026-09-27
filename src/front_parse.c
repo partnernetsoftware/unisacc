@@ -939,19 +939,23 @@ int snarrow(int w) {
 
 int estore(int w) {                              /* [r1] = r0 */
     if (w >= BFTAG) {
-        /* read, clear the field's bits, or the new ones in, write back;
-           r0 -- the assigned value -- survives */
+        /* Store the field and return its converted value, including for
+           assignment and prefix/compound expressions. */
         long mask;
-        mask = 1;
-        mask = (mask << bfwidth(w)) - 1;
+        mask = -1;
+        if (bfwidth(w) < 64) mask = (unsigned long)mask >> (64 - bfwidth(w));
         eimm(2, mask); es("  @alu.and r3, r0, r2\n");
         eimm(2, bfofs(w)); es("  @alu.shl r3, r3, r2\n");
         if (bfunit(w) == 8) es("  @mem.load r4, [r1+0]\n");
         else { es("  @mem.ld r4, [r1+0], "); en(bfunit(w)); ec(10); }
-        eimm(2, 0 - (mask << bfofs(w)) - 1);
+        eimm(2, ~((unsigned long)mask << bfofs(w)));
         es("  @alu.and r4, r4, r2\n  @alu.or r4, r4, r3\n");
         if (bfunit(w) == 8) es("  @mem.store [r1+0], r4\n");
         else { es("  @mem.st [r1+0], r4, "); en(bfunit(w)); ec(10); }
+        eimm(2, 64 - bfwidth(w));
+        es("  @alu.shl r0, r0, r2\n");
+        if (bfsig(w)) es("  @alu.shr r0, r0, r2\n");
+        else es("  @alu.lshr r0, r0, r2\n");
         return 0;
     }
     if (w == 0) return 0;
