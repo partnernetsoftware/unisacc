@@ -1,128 +1,69 @@
 #!/bin/bash
-# What has to be true before a release. [S-14]
-#
-# Releasing was a sequence someone remembered: run the suites, notice that
-# crossnative had quietly skipped a target, build the .com, check it runs,
-# push, tag.  The parts that are checkable are checked here instead, and
-# the strictness that a release wants -- a SKIPPED target is a failure --
-# is the difference between this and `all.sh`.
-#
-#   ./tests/release.sh            everything, and say whether it is ready
-#   ./tests/release.sh --com      also build unisacc.com and exercise it
-#
-#   SUITES=0   skip step 3's single `all.sh` run (about nine minutes, one
-#              unbounded aggregate).  Run the suites instead as the bounded
-#              steps listed in AGENTS.md / tests/snap.sh, each <= 60 s, and
-#              record them; this script then checks the tree, the version
-#              string and the artifact only.
-#   RELEASE_OUT=dir   where the built unisacc.com is KEPT (default: dist/).
-#              The scratch copy is deleted when the script exits.
-#
-# It does not push, tag, or upload: those are the parts a person decides.
-set -u
+# Bounded LOCAL acceptance of an already-built immutable model candidate.
+# MODEL_COM=/absolute/candidate GATE_STATE=/private/queue UA=/private/reference \
+#   ./tests/release.sh [--com]
+# Repeat the identical command after rc=75 (pending). Each invocation <=55s;
+# queue work gets 50s, leaving time for input checks and final copy verification.
+# Optional RELEASE_OUT receives this exact candidate only after local completion.
+# rc=0 means local gate complete, NOT release ready: six-platform model/native/
+# bootstrap evidence is external and is neither inferred nor marked passed here.
+# No VM startup, building, tagging, uploading, or default product replacement.
+set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
-. "$R/tests/lib.sh"
-com=0; [ "${1:-}" = "--com" ] && com=1
-bad=0
-say() {   # say <what> <ok|FAIL> <detail>
-    printf "  %-4s %-26s %s\n" "$2" "$1" "$3"
-    [ "$2" = "ok" ] || bad=$((bad+1))
-}
-
-# 1. the tree is committed: a release built from a dirty tree cannot be
-#    rebuilt from the tag it claims to be
-# Only what the artifact is BUILT from: this tree is shared with another
-# workstream, whose uncommitted files say nothing about whether this release
-# can be rebuilt from its tag.  (The first version looked at everything but
-# ujs/ and failed on eighteen of that workstream's files elsewhere.)
-INPUTS="src unisa kernel include unisacc.c weights"
-dirty=$(git status --porcelain -- $INPUTS 2>/dev/null | wc -l | tr -d ' ')
-say "tree committed" "$([ "$dirty" = 0 ] && echo ok || echo FAIL)" \
-    "$([ "$dirty" = 0 ] && echo "clean" || echo "$dirty file(s) uncommitted")"
-
-# 2. the binary says which build it is
-ua_ready
-v=$("$UA" --version 2>&1)
-case "$v" in "unisacc "[0-9]*) say "version string" ok "$v";;
-             *) say "version string" FAIL "$v";; esac
-
-# 3. every suite, with a skipped target counted as a failure
-# the machines crossnative needs: started here if they are not running, and
-# stopped on the way out -- failure included -- if this started them [S-15 F1]
-if [ "${SUITES:-1}" = 1 ] && [ "${VMS:-1}" = 1 ]; then
-    ./tests/vms.sh up
-    trap './tests/vms.sh down' EXIT
+case "${1:-}" in
+    --help) head -11 "$0"; exit 0;;
+    ''|--com) [ "$#" -le 1 ] || exit 2;;
+    *) echo 'usage: MODEL_COM=file GATE_STATE=dir UA=reference tests/release.sh [--com]' >&2; exit 2;;
+esac
+[ "${SUITES:-1}" = 1 ] || { echo 'release: SUITES=0 cannot establish acceptance' >&2; exit 2; }
+: "${MODEL_COM:?explicit already-built candidate required}"
+: "${GATE_STATE:?explicit persistent private queue directory required}"
+: "${UA:?explicit existing private reference required}"
+[ -f "$MODEL_COM" ] && [ -x "$MODEL_COM" ] && [ -s "$MODEL_COM" ] || { echo 'release: missing/empty/non-executable MODEL_COM' >&2; exit 2; }
+[ "$UA" != /tmp/ua_ref ] && [ -f "$UA" ] && [ -x "$UA" ] || { echo 'release: UA must be an existing private reference' >&2; exit 2; }
+if [ "${RELEASE_BOUND:-0}" != 1 ]; then
+    exec perl "$R/tests/bound.pl" 55 env RELEASE_BOUND=1 "$0" "$@"
 fi
-LOG=$(mktemp)                        # not in the tree: nobody commits it
-if [ "${SUITES:-1}" = 1 ]; then
-STRICT=1 ./tests/all.sh > "$LOG" 2>&1
-rc=$?
-say "all suites (STRICT=1)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" \
-    "$(tail -3 "$LOG" | head -1)"
-[ $rc -eq 0 ] || sed -n '/=== summary/,$p' "$LOG" | grep FAIL | head -10
-# 3a'. ablate: every listed stage's answer must change an image; eight shards,
-# each under the 60 s ceiling
-for k in 1 2 3 4 5 6 7 8; do
-    SHARD=$k/8 perl -e 'alarm 60; exec @ARGV' ./tests/ablate.sh > "$LOG.a$k" 2>&1 || { arc=1; tail -3 "$LOG.a$k"; }
-done
-say "ablate (8 shards)" "$([ ${arc:-0} -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.a8")"
-# 3a. the gate: ccparity and malloc are in no other suite list [S-16 T1]
-# One bounded queue window; pending work is NOT a release pass. Preserve the
-# state path and finish further windows separately before release acceptance.
-GATE_STATE=${GATE_STATE:-$(mktemp -d)}
-./tests/term.sh python3 ./tests/gatequeue.py --com --state "$GATE_STATE" > "$LOG.g" 2>&1
-rc=$?
-say "gate queue (--com)" "$([ $rc -eq 0 ] && echo ok || echo FAIL)" "$(tail -1 "$LOG.g")"
-[ $rc -eq 0 ] || grep -v 'rc=0' "$LOG.g" | head -10
-
-# 3b. ...and a suite that SKIPPED is not a suite that passed.  fat is macOS
-#     only, corpus and tools need their corpora present, crossnative needs
-#     the VMs: each is legitimate on some machine and none of them is
-#     legitimate on the machine a release is cut from.
-# The suites' own words for a skip: "SKIPPED n: target" (crossnative) and
-# "skipped (reason)" (fat, corpus, selfgap).  A bare "skipped" also matched
-# crossnative's "(no target skipped)" -- the gate failed on the sentence
-# saying nothing was skipped.
-SKIPRE='SKIPPED [0-9]|skipped \('
-skipped=$(sed -n '/=== summary/,$p' "$LOG" | grep -cE "$SKIPRE" || true)
-say "nothing skipped" "$([ "$skipped" = 0 ] && echo ok || echo FAIL)" \
-    "$(sed -n '/=== summary/,$p' "$LOG" | grep -E "$SKIPRE" | \
-       sed 's/^  ok *//' | tr '\n' ';' | cut -c1-70)"
-else
-    echo "  --   all suites               not run here (SUITES=0): run them as bounded steps and record them"
-fi
-
-# 4. the artifact, if asked: built here for all six targets, then run
-if [ "$com" = 1 ]; then
-    T=$(scratch)
-    # built as `make com` builds it: -O2 [H1]
-    if bound 60 python3 -m unisa ape unisacc.c --via "$UA" -O 2 -o "$T/unisacc.com" \
-           > "$T/ape.log" 2>&1; then
-        chmod +x "$T/unisacc.com"
-        sz=$(wc -c < "$T/unisacc.com" | tr -d ' ')
-        say ".com built" ok "$sz B"
-        # from a directory with nothing else in it, the way someone who
-        # downloaded it has
-        mkdir -p "$T/fresh"; cp "$T/unisacc.com" "$T/fresh/"
-        printf '#include <stdio.h>\nint h(void);\nint main(void){printf("%%d\\n",h());return 0;}\n' > "$T/fresh/a.c"
-        printf 'static int n = 7;\nint h(void){return n;}\n' > "$T/fresh/b.c"
-        # the command's own status counts as well as its output: a run that
-        # printed 7 and then crashed, or was killed by the watchdog, fails
-        got=$( (cd "$T/fresh" && bound 60 ./unisacc.com -run a.c b.c 2>&1) ); grc=$?
-        say ".com compiles two files" "$([ "$grc" = 0 ] && [ "$got" = 7 ] && echo ok || echo FAIL)" "rc $grc, output '$got'"
-        OUT=${RELEASE_OUT:-$R/dist}
-        mkdir -p "$OUT" && cp "$T/unisacc.com" "$OUT/unisacc.com" && chmod +x "$OUT/unisacc.com"
-        say ".com kept" "$([ -x "$OUT/unisacc.com" ] && echo ok || echo FAIL)" \
-            "$OUT/unisacc.com  sha256 $(shasum -a 256 "$OUT/unisacc.com" | cut -c1-16)  from $(git rev-parse --short HEAD)"
-    else
-        say ".com built" FAIL "$(tail -1 "$T/ape.log")"
-    fi
-fi
-
-echo
-if [ "$bad" -eq 0 ]; then
-    echo "release  ready -- $v"
-else
-    echo "release  NOT ready: $bad check(s) failed"
-fi
-[ "$bad" -eq 0 ]
+MODEL_COM=$(cd "$(dirname "$MODEL_COM")" && printf '%s/%s' "$PWD" "$(basename "$MODEL_COM")")
+export MODEL_COM UA STRICT=1
+before=$(shasum -a 256 "$MODEL_COM"); before=${before%% *}
+printf 'local candidate: %s sha256 %s\n' "$MODEL_COM" "$before"
+# Invoke through tests/term.sh externally if desired; env arguments preserve
+# MODEL_COM explicitly across Terminal's whitelist. Never call ua_ready here.
+rc=0
+python3 "$R/tests/gatequeue.py" --com --jobs 2 --window 50 --state "$GATE_STATE" || rc=$?
+after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
+[ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
+case "$rc" in
+    75) echo "local acceptance PENDING: repeat with GATE_STATE=$GATE_STATE; release NOT ready"; exit 75;;
+    0) ;;
+    *) echo "local acceptance FAILED (rc=$rc); release NOT ready" >&2; exit "$rc";;
+esac
+python3 - "$GATE_STATE" "$MODEL_COM" "$before" "${RELEASE_OUT:-}" <<'CHECK'
+import hashlib,json,pathlib,re,shutil,sys,tempfile
+state,source,digest,out=sys.argv[1:]
+p=pathlib.Path(state); data=json.loads((p/'results.json').read_text())
+jobs,results=data['jobs'],data['results']
+if not jobs or set(jobs)!=set(results) or any(r['rc'] for r in results.values()):
+    raise SystemExit('release: incomplete/failed queue evidence')
+skip=re.compile(r'\bSKIP(?:PED)?\b|\bskipped\s*(?:\(|$)|^\s*skip\s|\bskip\s+[1-9][0-9]*',re.M)
+for name in jobs:
+    log=(p/(name+'.log')).read_text(errors='replace')
+    if not log.strip() or skip.search(log):
+        raise SystemExit('release: empty or skipped evidence: '+name)
+source=pathlib.Path(source)
+def sha(path):
+    with path.open('rb') as f:return hashlib.file_digest(f,'sha256').hexdigest()
+if sha(source)!=digest:raise SystemExit('release: candidate changed before copy')
+if out:
+    dest=pathlib.Path(out);dest.mkdir(parents=True,exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=dest,prefix='.candidate-',delete=False) as f:tmp=pathlib.Path(f.name)
+    try:
+        shutil.copyfile(source,tmp);tmp.chmod(source.stat().st_mode & 0o777)
+        if sha(tmp)!=digest or sha(source)!=digest:raise SystemExit('release: copy hash mismatch')
+        tmp.replace(dest/'unisacc.com')
+    finally:tmp.unlink(missing_ok=True)
+    print('local-tested candidate copied:',dest/'unisacc.com','sha256',digest)
+print('LOCAL gate passed for candidate sha256',digest)
+print('release NOT ready: external six-platform model execution/bootstrap evidence remains unverified here')
+CHECK
