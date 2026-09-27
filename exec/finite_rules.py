@@ -2,13 +2,19 @@
 import json
 
 
-def load(path, sequences, domain=range(257), classes=None, bindings=None):
+def load(path, sequences, domain=range(257), classes=None, bindings=None, section=None):
     domain = set(domain)
     explicit, defaults = {}, {}
     for lineno, line in enumerate(path.read_text().splitlines(), 1):
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
+        if section is not None:
+            if len(fields) != 5:
+                raise ValueError(f"{path}:{lineno}: expected section plus four columns")
+            if fields[0] != section:
+                continue
+            fields = fields[1:]
         if len(fields) != 4:
             raise ValueError(f"{path}:{lineno}: expected four columns")
         for index in (0, 2):
@@ -58,7 +64,7 @@ def load(path, sequences, domain=range(257), classes=None, bindings=None):
                 if key in row:
                     raise ValueError(f"{path}:{lineno}: overlapping byte rules")
                 row[key] = answer
-    if not explicit:
+    if not explicit and section is None:
         raise ValueError(f"{path}: empty rules")
     for state, row in explicit.items():
         for key in sorted(domain - row.keys()):

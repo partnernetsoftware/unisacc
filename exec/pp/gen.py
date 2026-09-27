@@ -105,13 +105,17 @@ AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta w
 AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
 
 
-def install_rules(g, stem, bindings=None, sequences=None, classes=None):
+def install_rules(g, stem, bindings=None, sequences=None, classes=None, section=None):
+    count = 0
     for suffix, mode in (("byte", "b"), ("result", "r")):
         for state, row in load_rules(Path(HERE) / (stem + "-" + suffix + ".tsv"),
-                                     sequences or {}, bindings=bindings, classes=classes).items():
+                                     sequences or {}, bindings=bindings, classes=classes, section=section).items():
+            count += 1
             for key, (target, actions) in row.items():
                 g.on(state, [key], target, actions, mode)
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
+    if count == 0:
+        raise ValueError(f"{stem}: no rules for section {section}")
 
 
 def build_autoinc(g, locations=False):
@@ -217,10 +221,6 @@ class G:
         self.els("DEAD", "DEAD", [("REJECT", "unreachable")])
 
 
-
-
-def ea(dst, e):              # W[dst] := address of macro entry W[e]
-    return [("ALUI", "mul", dst, e, FSZ), ("ALUI", "add", dst, dst, MACB)]
 
 
 def sbconst(s):
@@ -382,51 +382,6 @@ def build(target="lnx/x86_64", locations=False):
     for k, w in enumerate(DIRV):
         cases[k + 1] = ("D_%s" % w, [])
     g.r("DSW", cases)
-    newseg = [("ALUI", "add", "CURSEG", "CURSEG", 1), ("SETOT", "CURSEG")]
-
-    def act(d, a, name):
-        """the code after `a = inf(S_PP, key)` in preprocess(), for (d, a)."""
-        w = DIRV[d]
-        if w == "if":
-            d = 0                                   # a pushed level, as #ifdef
-        if d == 7 and a == 3:                       # include (when live)
-            g.r(name, {1: ("INC0", [("JUMP", "WE")]), 0: blank})
-            return
-        if d < 3:                                   # push a level
-            t = [("COPYW", "t", "LIVE")] if a == 0 else [("LDI", "t", 0)]
-            g.els(name, blank[0], t + [("ALUI", "add", "a", "NDEPTH", TAKEB), ("STX", "a", 0, "t"),
-                                        ("ALUI", "add", "a", "NDEPTH", SEENB), ("STX", "a", 0, "t"),
-                                        ("ALUI", "add", "NDEPTH", "NDEPTH", 1), ("JUMP", "LS")])
-            return
-        if d in (3, 4):                             # elif / else
-            n2 = name + "b"
-            g.els(name, n2, [("CMPI", "NDEPTH", 0)])
-            base = [("ALUI", "sub", "k", "NDEPTH", 1), ("ALUI", "add", "ta", "k", TAKEB),
-                    ("ALUI", "add", "sa", "k", SEENB), ("LDI", "z", 0), ("STX", "ta", 0, "z")]
-            if a == 0:
-                g.r(n2, {2: (name + "c", base + [("LDX", "s", "sa", 0), ("RLD", "s")]), (0, 1): blank})
-                g.r(name + "c", {0: ("P3BLANK", [("LDI", "one", 1), ("STX", "ta", 0, "one"),
-                                                 ("STX", "sa", 0, "one"), ("JUMP", "LS")]),
-                                 tuple(range(1, 257)): blank})
-            else:
-                g.r(n2, {2: ("P3BLANK", base + [("JUMP", "LS")]), (0, 1): blank})
-            return
-        if a == 2:
-            g.els(name, name + "b", [("CMPI", "NDEPTH", 0)])
-            g.r(name + "b", {2: ("P3BLANK", [("ALUI", "sub", "NDEPTH", "NDEPTH", 1), ("JUMP", "LS")]),
-                             (0, 1): blank})
-            return
-        if a == 3 and w == "undef":
-            sub, pu = g.call("MFIND", name + "m")
-            g.r(name, {1: (sub, [("LDI", "SEGQ", -1)] + pu), 0: blank})
-            g.els(name + "m", name + "n", [("CMPI", "M", 0)])
-            g.r(name + "n", {0: blank, (1, 2): ("P3BLANK", newseg + ea("t2", "M") +
-                                                [("STX", "t2", F_TO, "CURSEG"), ("JUMP", "LS")])})
-            return
-        if a == 3 and w == "define":
-            g.r(name, {1: ("DEF0", newseg + [("JUMP", "NE")]), 0: blank})
-            return
-        g.els(name, blank[0], blank[1])             # nothing else happens
 
     # the table decides: a = PP[(directive, flag)]
     for d, w in enumerate(DIRV):
@@ -465,8 +420,10 @@ def build(target="lnx/x86_64", locations=False):
         else:
             g.els(st, st + "_a1", [("RLD", "LIVE")])
         for fl in (0, 1):
-            a = PPHEAD.index(PPT[(w, fl)])
-            act(d, a, st + "_a%d" % fl)
+            name = st + "_a%d" % fl
+            links = {suffix or "entry": name + suffix for suffix in ("", "b", "c", "m", "n")}
+            links.update({key: globals()[key] for key in ['TAKEB', 'SEENB', 'F_TO', 'FSZ', 'MACB']})
+            install_rules(g, "directive-action", links, section=w + "/" + PPT[(w, fl)])
 
     body_layout = {name: globals()[name] for name in ['F_BODY', 'F_FN', 'F_NP', 'F_P0', 'F_VAR', 'IRLN', 'IRNL', 'MAXP']}
     body_layout["include_body"] = "INC.body" if locations else "INCOK"
