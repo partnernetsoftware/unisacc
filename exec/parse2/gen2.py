@@ -505,59 +505,31 @@ def types():
     strwalk("DM.s", "DM.sb", "DM.se")
     structured_control("dimensions-tail", False)
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
-    p = P("TSPEC")
-    p.a(("LDI", "td", 0)).tok({**{w: "TS." + w for w in TWORDS}, TK_ID: "TS.id", "struct": "TS.struct", "union": "TS.union", "enum": "TS.enum", "type=unsigned": "TS.type=unsigned"}, bad("type"))
-    P("TS.enum").call("ENUM").a(("LDI", "td", 0), ("LDI", "tb", 4)).goto("TS.b")
-    # union: a struct whose members all sit at offset 0, its size the largest member's (measured)
-    P("TS.struct").a(("LDI", "sun_n", 0)).goto("TS.su")
-    P("TS.union").a(("LDI", "sun_n", 1)).goto("TS.su")
-    P("TS.su").call("NEXT").tok({TK_ID: "TS.tag", "{": "TS.anon"}, bad("type"))
-    P("TS.anon").a(("LDI", "tg", 0)).call("SBODY").call("NEXT").goto("TS.sb")
-    p = P("TS.tag")
-    p.a(("INTERN", "tg", "ps", "pe")).call("NEXT").tok({"{": "TS.tbody"}, "TS.tref")
-    P("TS.tbody").call("SBODY").call("NEXT").goto("TS.sb")
-    P("TS.tref").tok({";": "TS.forward"}, "TS.lookup")
-    P("TS.forward").a(("LDX", "tagoldscope", "tg", TAGLEVEL)).branch({1: "TS.lookup"}, "TS.new", [("CMP", "tagoldscope", "tagscope")])
-    p = P("TS.lookup")      # a tag reference resolves outward; a tag-only declaration shadows
-    p.a(("LDX", "nsid2", "tg", STAG)).branch({1: "TS.new"}, "TS.old", [("CMPI", "nsid2", 0)])
-    P("TS.new").call("TAG.alloc").a(("COPYW", "nsid2", "nsid")).call("TAG.bind").a(("STX", "tg", STAG, "nsid")).goto("TS.old")
-    P("TS.old").a(("ALUI", "add", "tb", "nsid2", SBB)).goto("TS.b")
-    P("TS.sb").a(("ALUI", "add", "tb", "nsid", SBB)).goto("TS.b")
+    dispatch = P("TSPEC").fresh("b")
+    structured_control("type-entry", False, dict(type_dispatch=dispatch))
+    targets = {TK[word]: "TS." + word for word in TWORDS}
+    targets.update((TK_ID if word == "identifier" else TK[word], target)
+                   for word, target in tape_rows("type-entry.tsv"))
+    for key, target in targets.items():
+        g.on(dispatch, [key], target, [], "r")
+    for state, row in load_rules(Path(__file__).with_name("type-default.tsv"),
+            {"reject": E.rej("not covered: type")}, domain=set(range(257)) - targets.keys(),
+            bindings=dict(type_dispatch=dispatch)).items():
+        for key, (target, actions) in row.items(): g.on(state, [key], target, actions, "r")
+    structured_control("type-prefix", False)
     structured_control("structure", False)
-    P("TS.id").a(("INTERN", "t", "ps", "pe"), ("LDX", "u", "t", E.TDN)).branch({1: "TS.td"}, bad("type"), [("CMPI", "u", 1)])
-    P("TS.td").a(("LDX", "tb", "t", E.TDB), ("LDX", "td", "t", E.TDD)).call("NEXT").goto("TS.b")
-    for w, n in TYPEW.items():   # (unsigned is read by its own states below)
-        P("TS." + w).a(("LDI", "tb", n)).call("NEXT").goto("TS.q" if w in ("type=char", "type=short", "type=int") else "TS.b" if w != "type=long" else "TS.ll")
-    P("TS.q").tok({"type=unsigned": "TS.qu"}, "TS.intopt")       # `char unsigned`: the same type (p47)
-    P("TS.qu").a(("ALUI", "add", "tb", "tb", UNS)).call("NEXT").goto("TS.b")
-    P("TS.ll").tok({"type=long": "TS.ll2"}, "TS.intopt")    # long long: a long
-    P("TS.type=unsigned").call("NEXT").tok({"type=char": "TS.u1", "type=short": "TS.u2", "type=long": "TS.u8", "type=int": "TS.u4i"}, "TS.u4")
-    P("TS.u4i").call("NEXT").goto("TS.u4")
-    P("TS.u4").a(("LDI", "tb", UNS + 4)).goto("TS.b")
-    P("TS.u1").a(("LDI", "tb", UNS + 1)).call("NEXT").goto("TS.b")
-    P("TS.u2").a(("LDI", "tb", UNS + 2)).call("NEXT").goto("TS.intopt")
-    P("TS.u8").a(("LDI", "tb", UNS + 8)).call("NEXT").goto("TS.ll")
-    P("TS.ll2").call("NEXT").goto("TS.intopt")
-    P("TS.intopt").tok({"type=int": "TS.intend"}, "TS.b")
-    P("TS.intend").call("NEXT").goto("TS.b")
-    P("TS.b").a(("COPYW", "bd", "td")).goto("TS.l")
-    P("TS.l").tok({"*": "TS.st"}, "RET")
-    # after ',' in a declaration: the next declarator's stars on the base depth
-    p = P("DSTARS")
-    p.a(("COPYW", "td", "bd")).call("NEXT").label("DS2.l")
-    p.tok({"*": "DS2.s"}, "RET")
-    P("DS2.s").a(("ALUI", "add", "td", "td", 1)).call("NEXT").goto("DS2.l")
-    P("TS.st").a(("ALUI", "add", "td", "td", 1)).call("NEXT").goto("TS.l")
-    # Every pointer operation asks the same pointee-size calculation.
-    P("PWIDTH").vpush("td", "tb").a(("ALUI", "sub", "td", "lt", 1), ("COPYW", "tb", "lb")).call("ELSZ").a(("COPYW", "scl", "es")).vpop("td", "tb").ret()
-    for name, op in (("SCALE", "mul64"), ("DSCALE", ".div")):
-        P(name).call("PWIDTH").branch({1: "RET"}, name + ".emit", [("CMPI", "scl", 1)])
-        P(name + ".emit").o("  imm r2, ").num("scl").o("\n  " + op + " r0, r0, r2\n").ret()
+    structured_control("type-typedef", False)
+    follows = dict(tape_rows("type-follow.tsv"))
+    for word, value in TYPEW.items():
+        p = P("TS." + word)
+        structured_control("type-word", False, dict(word_state=p.cur, word_return=p.fresh("r"),
+                           type_value=value, word_follow=follows.get(word, follows["*"])))
+    structured_control("type-tail", False)
 
 
-def structured_control(section, warnings):
+def structured_control(section, warnings, extra=None):
     section += "-warnings" if warnings and section in ("block", "if") else ""
-    p = P("control." + section)
+    p = P("control." + section + (extra or {}).get("word_state", ""))
     bindings = dict(VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
                     UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
                     statement="STMT.body" if warnings else "STMT")
@@ -566,6 +538,8 @@ def structured_control(section, warnings):
                      "MOF", "MSZ", "MPT", "MBS", "MAR", "MFLAT", "MEMBER_STRIDE"))
     bindings.update(STRUCT_LIMIT=STRUCT_MAX + 1, MEMBER_MASK=-MEMBER_STRIDE,
                     TAGUNDO1=TAGUNDO + 1, TAGUNDO2=TAGUNDO + 2, TAGUNDO3=TAGUNDO + 3)
+    bindings.update(TDN=E.TDN, TDB=E.TDB, TDD=E.TDD, UNS=UNS, UNSIGNED_CHAR=UNS + 1, UNSIGNED_SHORT=UNS + 2)
+    bindings.update(extra or {})
     for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
         if part == section:
             p.cur = prefix
