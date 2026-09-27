@@ -1127,6 +1127,24 @@ procview.c、winlayout.c、memmap.c、exeinfo.c（3359cc5）此前只验证过 o
 - **win/arm64**（UTM）：同样拷进虚拟机跑；`unisacc.com` 只带一份 x86_64 的 PE 切片，在 Windows arm64 上靠系统自带的模拟层执行，四个都逐字节相同。这证明该 x86_64 切片在 Windows ARM64 的模拟环境运行；不证明 win/arm64 原生产物或 Windows x86_64 实机通过。
 - 本条新增证据仅为 Linux x86_64 与 Windows ARM64 主机上的 x86_64 模拟执行。其他目标沿用各自有来源的历史记录，不并入本轮通过数。回报未给被测 `.com` 的完整哈希，因此不将它作为当前冻结候选的发布门禁。
 
+
+### 5.9 真实语法调用缺口与测试方法论纠正（2026-09-27，主人纠正 cc-unisacc 的两处判断）
+
+**纠正一（方法论）**：不同编译器产出的二进制本来就不会完全一样，这正是测试套件重要的原因——TDD 把"效果"（可观测行为）限定为一致，不要求内部实现或内存布局一致。cc-unisacc 之前以"两个编译器产出的自身 /proc/self/maps 逐字节对不上"为理由，判定 memmap.c 不该自动读自身内存映射，这个判断用错了标尺：**逐字节对拍 cc 只是本项目众多验证手段之一**，不是唯一合法手段。对于"自身内存映射"这类天然依赖具体二进制布局（动态链接与否、缓存路径等）的输出，正确做法是换一种测试仪器（结构自检、与独立真实来源交叉核对），而不是因为"cc 比不了"就放弃这个功能。**结论未改**（这次仍未启用 memmap.c 的自动 `/proc/self/maps`——原因是还没设计出替代的验证仪器，不是因为它不可行），但理由记录纠正为：缺一种新测试仪器，不是缺一个可行的功能。
+
+**纠正二（功能缺口应记录并排期，不是绕开）**：procview.c、winlayout.c 在其他平台拿不到"自动真实数据"，根因是 unisacc 自己从零写的 C 库没有实现这些系统调用/绑定：
+- **目录列举（`getdents`）**：完全没有，procview 在 Linux 上只能靠对 pid 逐个探测（已实现，见 76bf9a0），不能真正列目录。
+- **`fork`/`exec`/`popen`**：完全没有暴露给用户代码；但 S-17 迁移原型的 ABI 目录（`weights/gold/abi.tsv`）**已经配好 `clone`/`execve` 的系统调用号**，只是没有接到现有前端的内建名字识别（`src/front_parse.c` 里 `__open`/`__read` 那一类）或头文件封装上——这是可以做的工作，不是架构墙。
+- **`sysctl`**（macOS 拿进程列表要用）：完全没有配号，是真正的新工作。
+- **窗口系统访问**（X11/Wayland socket、Win32 API、CoreGraphics）：完全没有绑定，比系统调用封装更难（涉及协议或框架链接）。
+
+**已证明的目标（主人建议：先用系统 cc 证明可行，再定目标）**：`examples/apps/tools/wingeom.c` 用系统 `cc` 链接 CoreGraphics（`CGWindowListCopyWindowInfo`），在 macOS 上拿到真实的、当前屏幕上所有窗口的坐标、大小与标题，通过管道喂给 `winlayout.c`（用 `unisacc.com -run` 跑），整条链路真实数据端到端验证过。**它不是、也不会是 unisacc 自己编译的产物**——链接框架超出这个编译器的能力边界——它的作用是**给"unisacc 未来若要做窗口感知"提供一个已知正确的参考实现**，其余平台（X11、Win32）同理可以先用系统工具/系统 cc 做出参考，再谈要不要把对应系统调用接进 unisacc。
+
+**下一步（记录，未排期）**：
+1. 给 `fork`/`exec` 接上前端内建名字（`abi.tsv` 已有 ABI 映射，工作量小于 `sysctl`/`getdents`）。
+2. 设计"结构自检"类测试仪器（不依赖与 cc 逐字节对拍），用于验证自身内存映射一类天然依赖具体二进制的输出，作为 memmap.c 自动读取 `/proc/self/maps` 的前置条件。
+3. `getdents`、`sysctl`、窗口系统绑定按需再评估，不在当前优先级。
+
 ## 6. 实验发现 [E] —— 面向论文
 
 本章随实现推进累积。**只记实测，不记预期**；每条含可复现命令，供论文直接引用。
@@ -4334,3 +4352,36 @@ cc in native and rebuilt .com at O0/O1/O2; Python fat probe also agrees.
 No push/release/default-route switch. Model _Bool migration remains pending;
 model C99 remains 47/57, not the product's 57/57. This closes the measured
 reference conversion defects, not all C99 conformance obligations.
+
+Model bool slice: reserve descriptor 66 between f32 and function-pointer;
+map its arithmetic axis to existing u8, its size to one byte. A shared
+source-kind-aware TO.b comparison handles integer/pointer and f32/f64;
+route declaration, aggregate, assignment, cast, return and parameter
+conversion through it. Prefix/postfix updates normalize and preserve the
+old postfix value. No executor primitive; validate fixed keeps before
+adding bool probes, then actual network compiler against host cc.
+
+Model bool checks: old E3 254 plus C99/13, C99/14 and b_boolconv all equal;
+old network chain 107/107 remains green, three additions independently pass
+network inference. Keeps raised only afterwards to 257/110. No executor
+primitive. Float unary negation now flips the sign bit (needed for -0.0);
+boolean floating compound updates use the existing arithmetic tape ops and
+normalize their result. Self-source tape 3942700 B identical. Two-slot queue
+chain/self/location all pass, 11.03 s wall. Descriptor size and arithmetic
+reuse tyinfo u8; boolean conversion remains an explicit semantic rule.
+
+Bool candidate /tmp/unisacc-bool-candidate/unisacc-next.com:
+SHA256 6e535da2ca834f1dc7a826d7a5d538787d7ec133e571031e9f793e33c2dfd706,
+5,877,754 B. Actual compiler C99 50/57, wrong 0, refused 7, rc 1 against
+unchanged baseline 57. Unary floating negation also enables 54_math_c99.
+Five probes (13,14,b_boolconv,54,s59) at O0/O1/O2 equal host cc in actual
+network-compiler execution. s59 adds f32 conversion/compound update,
+negative zero, minimum f32 subnormal, pointer stride and sizeof bool/array.
+Math and s59 also independently pass the network source chain; fixed sets
+become E3 259, chain 112. Current delta: 4,835 states, 533,503 B network,
+1,247,174 finite observations match table including action/string identity.
+This is added behavior, not code reduction (gen2 +73/-19, plus shared bool
+procedures and static/unit hooks). No executor action, product switch,
+release or push. Remaining C99 refusals: VLA, VLA parameter, flexible
+array member, static array parameter, scalar/array compound literal,
+atexit/div/labs aggregate-return case. Full reconstruction remains open.

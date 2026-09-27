@@ -3,7 +3,7 @@ LOC encodes a static object's label as -(token ordinal + 1); positive slots
 still mean frame offsets or GMARK. No language primitive is added to run.c.
 """
 
-def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS):
+def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL):
     import pathlib,re
     # Same bounded ordinal namespace as the product; single-unit labels stay
     # unchanged. This is a declaration constant, not emitted reference code.
@@ -53,8 +53,11 @@ def install(E, P, TIX, SINIT, SIEND, LOC, SKIPS):
     P('SC.strinit').a(('LDI','t',1),('STX','tpos',SKIPS,'t'),('LDI','imode',2),
         ('COPYW','inlabel','si_lab'),('COPYW','ibytes','dsz')).call('STRINGINIT').vpop(*saved).goto('SC.cache')
     P('SC.scalar').branch({1:'SC.expr'},('rej','not covered: static array initializer'),[('CMPI','dar',0)])
-    P('SC.expr').call('EXPR').call('SC.nof32').call('ISDV').a(('COPYW','sdv','u')).vpop(*saved).a(
-        ('LDX','vt','v',E.PTR),('LDX','vb','v',E.BASE)).call('SC.nof32').call('ISDV').branch({1:'SC.store'},'DEAD.dbl',[('CMP','u','sdv')])
+    P('SC.expr').call('EXPR').a(('COPYW','rvt','vt'),('COPYW','rvb','vb')).call('ISDV').a(('COPYW','sdv','u')).vpop(*saved).a(
+        ('LDX','vt','v',E.PTR),('LDX','vb','v',E.BASE)).branch({1:'SC.booltest'},'SC.kind',[('CMPI','vt',0)])
+    P('SC.booltest').branch({1:'SC.bool'},'SC.kind',[('CMPI','vb',BOOL)])
+    P('SC.bool').call('BOOLCV').goto('SC.store')
+    P('SC.kind').vpush('vt','vb').a(('COPYW','vt','rvt'),('COPYW','vb','rvb')).call('SC.nof32').vpop('vt','vb').call('SC.nof32').call('ISDV').branch({1:'SC.store'},'DEAD.dbl',[('CMP','u','sdv')])
     P('SC.store').o('  .lea r1, ls').num('si_lab').o('\n').call('STOREV').goto('SC.cache')
     P('SC.cache').a(('LDI','si_active',0),('OCUT','si_blob','si_out'),('STX','si_pos',SINIT,'si_blob'),('STX','si_pos',SIEND,'tpos')).goto('SC.after')
     P('IN.static').a(('LDX','si_end','tpos',SIEND),('INPUSH','si_blob')).goto('IN.scopy')

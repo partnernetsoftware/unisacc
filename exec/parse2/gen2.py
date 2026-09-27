@@ -461,7 +461,9 @@ FOPS = {"+": "fadd64 r0, r1, r0", "-": "fsub64 r0, r1, r0", "*": "fmul64 r0, r1,
         "==": "feq64 r0, r1, r0",
         "!=": "feq64 r0, r1, r0\n  imm r1, 1\n  xor64 r0, r0, r1"}   # != is inverted equality, including unordered (NaN) inputs
 FLT = E.FLT   # f32 descriptor; loads/stores and sqrt builtins are covered, binary float arithmetic remains guarded
-TYPEW = {"type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
+BOOL = 66  # distinct value kind; arithmetic maps to tyinfo u8
+assert BOOL not in (DBL, FLT, FPB) and BOOL < SBB
+TYPEW = {"type=_Bool": BOOL, "type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned",)
 
 
@@ -475,7 +477,9 @@ def width_dispatch(p, name, tab8, tabn, masks=False):
     P(name + ".f").branch({1: name + ".f32"}, name + ".n", [("CMPI", "vb", FLT)])
     P(name + ".f32").o(tabn % TYINFO["f32"][0]).ret()
     P(name + ".8").o(tab8).ret()
-    q = P(name + ".n")
+    P(name + ".n").branch({1: name + ".bool"}, name + ".integer", [("CMPI", "vb", BOOL)])
+    P(name + ".bool").o(tabn % 1 + ("  imm r2, 255\n  and64 r0, r0, r2\n" if masks else "")).ret()
+    q = P(name + ".integer")
     # the width and the zero-extension mask come from tyinfo (size, uns), row by row
     for t, vb, size, uns, _ in TYINT:
         if vb == 8:
@@ -506,7 +510,7 @@ def types():
     P("NARROW.b").branch({1: "RET"}, "NARROW.u", [("CMPI", "vb", 8)])
     P("NARROW.u").branch({1: "RET"}, "NARROW.dd", [("CMPI", "vb", UNS + 8)])
     P("NARROW.dd").branch({1: "RET"}, "NARROW.ui", [("CMPI", "vb", DBL)])
-    P("NARROW.ui").goto("NARROW.n")
+    P("NARROW.ui").branch({1: "TO.b"}, "NARROW.n", [("CMPI", "vb", BOOL)])
     P("NARROW.m").o(UIM).ret()
     q = P("NARROW.n")
     # tyinfo.narrow picks the rows that narrow; signed: through the stack at their size; unsigned:
@@ -695,6 +699,7 @@ def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
+    E.WORDS.append("type=_Bool"); E.TK["type=_Bool"] = max(E.TK.values()) + 1
     E.tokenizer(("type=const", "type=volatile", "type=restrict", "type=inline"))
     del g.st["NX"][1][64]
     g.on("NX", [64], "MU0", [("ADV",)])
@@ -718,10 +723,12 @@ def build(locations=False, warnings=False, errors=False):
     types()
     from truth import install as truth_install
     truth_install(P, DBL, FLT)
+    from booleans import install as bool_install
+    bool_install(P, BOOL, DBL, FLT)
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
     from statics import install as static_install
-    static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS)
+    static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL)
     from initializers import install as init_install
     init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT)
     g.on("DEAD.staticauto", range(257), "DEAD", E.rej("not covered: static initializer uses automatic storage"), "r")
@@ -866,7 +873,9 @@ def build(locations=False, warnings=False, errors=False):
     g.on("DEAD.inc", range(257), "DEAD", E.rej("not covered: incomplete struct"), "r")
     P("ELSZ.b").branch({1: "DEAD.void"}, "ELSZ.s", [("CMPI", "tb", 0)])
     P("ELSZ.s").a(("COPYW", "es", "tb")).branch({1: "ELSZ.d"}, "ELSZ.sf", [("CMPI", "tb", DBL)])
-    P("ELSZ.sf").branch({1: "ELSZ.f"}, "ELSZ.s2", [("CMPI", "tb", FLT)])
+    P("ELSZ.sf").branch({1: "ELSZ.f"}, "ELSZ.bool", [("CMPI", "tb", FLT)])
+    P("ELSZ.bool").branch({1: "ELSZ.one"}, "ELSZ.s2", [("CMPI", "tb", BOOL)])
+    P("ELSZ.one").a(("LDI", "es", 1)).ret()
     P("ELSZ.f").a(("LDI", "es", 4)).ret()
     P("ELSZ.d").a(("LDI", "es", 8)).ret()
     P("ELSZ.s2").branch({2: "ELSZ.u"}, "RET", [("CMPI", "tb", UNS)])
@@ -1028,8 +1037,11 @@ def build(locations=False, warnings=False, errors=False):
     q.vpush("s", "v", "bd", "tb").call("NEXT")
     if warnings: q.a(("LDX", "wi_target", "v", E.PTR)).call("WI.expr")
     else: q.call("EXPR")
-    q.call("ISDV").a(("COPYW", "sdv", "u")).vpop("s", "v", "bd", "tb")
-    q.a(("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).call("ISDV").branch({1: "S.din2"}, "DEAD.dbl", [("CMP", "u", "sdv")])
+    q.a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).call("ISDV").a(("COPYW", "sdv", "u")).vpop("s", "v", "bd", "tb")
+    q.a(("LDX", "vt", "v", E.PTR), ("LDX", "vb", "v", E.BASE)).branch({1: "S.dbool0"}, "S.dkind", [("CMPI", "vt", 0)])
+    P("S.dbool0").branch({1: "S.dbool1"}, "S.dkind", [("CMPI", "vb", BOOL)])
+    P("S.dbool1").call("BOOLCV").goto("S.din2")
+    P("S.dkind").call("ISDV").branch({1: "S.din2"}, "DEAD.dbl", [("CMP", "u", "sdv")])
     q = P("S.din2")
     q.o("  imm r2, ").num("s").o("\n  sub64 r1, r6, r2\n").call("STOREV").tok({",": "S.dcm"}, "S.dend")
     P("S.darr").call("DIMS").call("ELSZ").a(("ALU", "mul", "dsz", "prd", "es"), ("COPYW", "dar", "drk")).goto("S.dd")
@@ -1052,7 +1064,10 @@ def build(locations=False, warnings=False, errors=False):
     # Returns, arguments and assignment all use the same aggregate copy.
     P("WCOPY").a(("ALUI", "sub", "t", "rb", SBB), ("LDX", "sz", "t", SSZ)).goto("COPYSTRUCT")
     p = P("S.re1")
-    p.call("EXPR").expect(";").branch({1: "S.rf0"}, "S.rn", [("CMPI", "rb", FLT)])
+    p.call("EXPR").expect(";").branch({1: "S.rb0"}, "S.rfcheck", [("CMPI", "rb", BOOL)])
+    P("S.rb0").branch({1: "S.rb1"}, "S.rfcheck", [("CMPI", "rd", 0)])
+    P("S.rb1").call("TO.b").goto("S.rj")
+    P("S.rfcheck").branch({1: "S.rf0"}, "S.rn", [("CMPI", "rb", FLT)])
     # a float function returns a float value as it is (measured, p76: return (float) g(a) -- cvtds, no narrowing)
     P("S.rf0").branch({1: "S.rf1"}, "S.rn", [("CMPI", "rd", 0)])
     P("S.rf1").branch({1: "S.rf2"}, "DEAD.dbl", [("CMPI", "vb", FLT)])
@@ -1221,7 +1236,9 @@ def build(locations=False, warnings=False, errors=False):
     p.call("LOOKUP").call("NOARR")
     addr(p).goto("PX.as")       # names and computed lvalues share assignment
     # = between a double and an integer needs a conversion (cvtid/cvtdi): not covered yet
-    P("SAMEDBL").a(("LDI", "u", 0)).branch({1: "SD.l"}, "SD.r", [("CMPI", "vb", DBL)])
+    P("SAMEDBL").branch({1: "SD.booltest"}, "SD.start", [("CMPI", "vt", 0)])
+    P("SD.booltest").branch({1: "BOOLCV"}, "SD.start", [("CMPI", "vb", BOOL)])
+    P("SD.start").a(("LDI", "u", 0)).branch({1: "SD.l"}, "SD.r", [("CMPI", "vb", DBL)])
     P("SD.l").branch({1: "SD.l2"}, "SD.r", [("CMPI", "vt", 0)])
     P("SD.l2").a(("LDI", "u", 1)).goto("SD.r")
     P("SD.r").a(("LDI", "w", 0)).branch({1: "SD.r1"}, "SD.c", [("CMPI", "rvb", DBL)])
@@ -1240,7 +1257,26 @@ def build(locations=False, warnings=False, errors=False):
             q.branch({1: (nx2 := "X.c%s.i" % o)}, "DEAD.nint", [("CMPI", "vt", 0)])
             q = P(nx2)
         emit(q, "push").call("LOADV")
-        emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").call("NODBL0").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb", "stp")
+        emit(q, "push").vpush("vt", "vb", "stp").call("NEXT").call("EXPR").a(("COPYW", "rvb", "vb"), ("COPYW", "rvt", "vt")).vpop("vt", "vb", "stp")
+        q.branch({1: "BC.target" + o}, "BC.ordinary" + o, [("CMPI", "vt", 0)])
+        P("BC.target" + o).branch({1: "BC.source" + o}, "BC.ordinary" + o, [("CMPI", "vb", BOOL)])
+        P("BC.source" + o).branch({1: "BC.kind" + o}, "BC.ordinary" + o, [("CMPI", "rvt", 0)])
+        P("BC.kind" + o).branch({1: "BC.float" + o}, "BC.single" + o, [("CMPI", "rvb", DBL)])
+        P("BC.single" + o).branch({1: "BC.float" + o}, "BC.ordinary" + o, [("CMPI", "rvb", FLT)])
+        bf = P("BC.float" + o)
+        if o in ("+", "-", "*", "/"):
+            bf.branch({1: "BC.d" + o}, "BC.s" + o, [("CMPI", "rvb", DBL)])
+            for suffix, width, cvop in (("d",64,"cvtid"),("s",32,"cvtis")):
+                bf = P("BC." + suffix + o)
+                emit(bf,"push").o("  load64 r0, [r7+8]\n  %s r0, r0\n" % cvop)
+                bf.o("  mov r1, r0\n  load64 r0, [r7+0]\n  .frame -16\n")
+                bf.o("  f%s%d r0, r1, r0\n" % ({"+":"add","-":"sub","*":"mul","/":"div"}[o],width))
+                bf.a(("LDI","vb",DBL if width == 64 else FLT)).call("TO.b").a(("LDI","vb",BOOL))
+                emit(bf,"pop1").call("STOREV").ret()
+        else:
+            bf.goto("DEAD.dbl")
+        P("BC.ordinary" + o).vpush("vt","vb").a(("COPYW","vt","rvt"),("COPYW","vb","rvb")).call("NODBL0").vpop("vt","vb").goto("BC.integer" + o)
+        q = P("BC.integer" + o)
         q.branch({1: "X.c%s.m" % o}, "X.c%s.s" % o, [("CMPI", "stp", 1)])
         P("X.c%s.s" % o).o("  imm r2, ").num("stp").o("\n  mul64 r0, r0, r2\n").goto("X.c%s.m" % o)
         q = P("X.c%s.m" % o)
@@ -1277,7 +1313,7 @@ def build(locations=False, warnings=False, errors=False):
     P("TAX.p").a(("LDI", "ax", AX.index("ptr"))).ret()
     q = P("TAX.0")
     for code, name in ((1, "i8"), (2, "i16"), (4, "i32"), (8, "i64"), (UNS + 1, "u8"), (UNS + 2, "u16"), (UNS + 4, "u32"), (UNS + 8, "u64"),
-                       (0, "void"), (DBL, "f64"), (FLT, "f32"), (FPB, "ptr")):
+                       (BOOL, "u8"), (0, "void"), (DBL, "f64"), (FLT, "f32"), (FPB, "ptr")):
         hit, nx = q.fresh("h"), q.fresh("n")
         q.branch({1: hit}, nx, [("CMPI", "vb", code)])
         P(hit).a(("LDI", "ax", AX.index(name))).ret()
@@ -1285,7 +1321,8 @@ def build(locations=False, warnings=False, errors=False):
     q.branch({(1, 2): "TAX.s"}, "DEAD.w", [("CMPI", "vb", SBB)])
     P("TAX.s").a(("LDI", "ax", AX.index("struct"))).ret()
     P("NARU").branch({1: "NARU.1"}, "NARU.b", [("CMPI", "vt", 0)])
-    q = P("NARU.1")          # the unsigned narrow rows of tyinfo: masked back to their size
+    P("NARU.1").branch({1: "TO.b"}, "NARU.integer", [("CMPI", "vb", BOOL)])
+    q = P("NARU.integer")          # the unsigned narrow rows of tyinfo: masked back to their size
     for t, vb, sz, un, nr in TYINT:
         if not (un and sz < 8):
             continue
@@ -1296,7 +1333,7 @@ def build(locations=False, warnings=False, errors=False):
     q.ret()
     P("NARU.b").ret()
     P("STEPTY").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
-    P("STY.s").goto("STY.s0")
+    P("STY.s").branch({1: "RET"}, "STY.s0", [("CMPI", "vb", BOOL)])
     P("STY.s0").branch({1: "DEAD.nint"}, "STY.s1", [("CMPI", "vb", 0)])
     P("STY.s1").branch({(0, 1): "RET"}, "STY.s2", [("CMPI", "vb", 8)])
     P("STY.s2").branch({(0, 1): "STY.s3"}, "DEAD.nint", [("CMPI", "vb", UNS + 8)])
@@ -1313,6 +1350,12 @@ def build(locations=False, warnings=False, errors=False):
         q.call("POST." + o).call("C%d" % LEVELS[0]).call("QTAIL").ret()
         # A computed member/element address uses the same update as a name.
         q = P("POST." + o)
+        q.branch({1: "POST.booltest" + o}, "POST.normal" + o, [("CMPI", "vt", 0)])
+        P("POST.booltest" + o).branch({1: "POST.bool" + o}, "POST.normal" + o, [("CMPI", "vb", BOOL)])
+        qb = P("POST.bool" + o)
+        emit(qb, "push").call("LOADRAW")
+        emit(qb, "push").o("  imm r1, 1\n  %s r0, r0, r1\n" % ("add64" if o == "+" else "sub64")).call("TO.b").o("  load64 r1, [r7+8]\n").call("STOREV").o("  load64 r0, [r7+0]\n  .frame -16\n").call("NEXT").ret()
+        q = P("POST.normal" + o)
         emit(q, "push").call("LOADRAW")
         emit(q, "push")
         emit(q, "one")
@@ -1482,9 +1525,15 @@ def build(locations=False, warnings=False, errors=False):
         emit(q, "pop1").call("STOREV").ret()
     P("U.pos").call("NEXT").call("UNARY").call("NODBL0").ret()     # +x: no code (the old E3, p7)
     q = P("U.neg")
-    q.call("NEXT").call("UNARY").call("NODBL0").branch({1: "DEAD.ui"}, "U.ng1", [("CMPI", "vb", UNS + 4)])
+    q.call("NEXT").call("UNARY").branch({1: "U.negscalar"}, "U.negint", [("CMPI", "vt", 0)])
+    P("U.negscalar").branch({1: "U.negdouble"}, "U.negsingle", [("CMPI", "vb", DBL)])
+    P("U.negsingle").branch({1: "U.negfloat"}, "U.negint", [("CMPI", "vb", FLT)])
+    P("U.negdouble").o("  imm r1, -9223372036854775808\n  xor64 r0, r0, r1\n").ret()
+    P("U.negfloat").o("  imm r1, 2147483648\n  xor64 r0, r0, r1\n").ret()
+    P("U.negint").branch({1: "DEAD.ui"}, "U.ng1", [("CMPI", "vb", UNS + 4)])
     q = P("U.ng1")       # -x on any integer but unsigned int: imm r1, 0; sub64 (measured); a narrow operand gives an int
-    emit(q, "neg").branch({(0, 1): "U.ng4"}, "U.ng2", [("CMPI", "vb", 2)])
+    emit(q, "neg").branch({1: "U.ng4"}, "U.ngwidth", [("CMPI", "vb", BOOL)])
+    P("U.ngwidth").branch({(0, 1): "U.ng4"}, "U.ng2", [("CMPI", "vb", 2)])
     P("U.ng2").branch({(1, 2): "U.ng3"}, "RET", [("CMPI", "vb", UNS + 1)])
     P("U.ng3").branch({0: "U.ng4"}, "RET", [("CMPI", "vb", UNS + 3)])
     P("U.ng4").a(("LDI", "vb", 4)).ret()
@@ -1506,7 +1555,9 @@ def build(locations=False, warnings=False, errors=False):
     q.branch({1: "UC.scalar"}, "UC.to_u", [("CMPI", "cast_td", 0)])
     P("UC.scalar").branch({1: "UC.to_d"}, "UC.float", [("CMPI", "cast_tb", DBL)])
     P("UC.float").branch({1: "UC.to_s"}, "UC.integer", [("CMPI", "cast_tb", FLT)])
-    P("UC.integer").branch({1: "UC.to_u"}, "UC.to_i", [("CMPI", "cast_tb", UNS + 8)])
+    P("UC.integer").branch({1: "UC.bool"}, "UC.integer0", [("CMPI", "cast_tb", BOOL)])
+    P("UC.bool").call("TO.b").a(("LDI", "vt", 0), ("LDI", "vb", BOOL)).ret()
+    P("UC.integer0").branch({1: "UC.to_u"}, "UC.to_i", [("CMPI", "cast_tb", UNS + 8)])
     for kind in ("d", "s", "i", "u"):
         q = P("UC.to_" + kind).call("TO." + kind).a(("COPYW", "vt", "cast_td"), ("COPYW", "vb", "cast_tb"))
         if kind in ("i", "u"):
@@ -1626,7 +1677,8 @@ def build(locations=False, warnings=False, errors=False):
     # explicit setkind. Store width still comes from the target above.
     P("AS.result").branch({1: "AS.result0"}, "AS.rhs", [("CMPI", "vt", 0)])
     P("AS.result0").branch({1: "RET"}, "AS.result1", [("CMPI", "vb", DBL)])
-    P("AS.result1").branch({1: "RET"}, "AS.rhs", [("CMPI", "vb", FLT)])
+    P("AS.result1").branch({1: "RET"}, "AS.resultbool", [("CMPI", "vb", FLT)])
+    P("AS.resultbool").branch({1: "RET"}, "AS.rhs", [("CMPI", "vb", BOOL)])
     P("AS.rhs").a(("COPYW", "vt", "rvt"), ("COPYW", "vb", "rvb")).ret()
     P("AS.struct").branch({1: "AS.same"}, bad("struct assignment"), [("CMPI", "vt", 0)])
     P("AS.same").branch({1: "AS.copy"}, bad("struct assignment"), [("CMP", "vb", "lb")])
@@ -1648,7 +1700,7 @@ def build(locations=False, warnings=False, errors=False):
     emit(q, "push").vpush("vt", "vb").call("NEXT")
     if warnings: q.a(("COPYW", "wi_target", "vt")).call("WI.expr")
     else: q.call("EXPR")
-    q.vpop("vt", "vb")
+    q.a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb")).vpop("vt", "vb").call("BOOLTARGET")
     emit(q, "pop1").call("STOREV").expect(";").call("NEXT").ret()
     P("SS.rv").tok({";": "SS.x"}, "SS.rv1")     # `*p;` alone: the address only (measured, p20)
     P("SS.x").call("NEXT").ret()
@@ -1749,7 +1801,9 @@ def build(locations=False, warnings=False, errors=False):
     P("CL.ad").call("TO.d").goto("CL.a2")
     P("CL.af").branch({1: "CL.af1"}, "CL.ordinary", [("CMPI", "t", FLT)])
     # No declared parameter kind: the default promotion of scalar float.
-    P("CL.ordinary").branch({1: "CL.default"}, "CL.a2", [("CMPI", "t", 0)])
+    P("CL.ordinary").branch({1: "CL.ab"}, "CL.ordinary0", [("CMPI", "t", BOOL)])
+    P("CL.ab").call("TO.b").goto("CL.a2")
+    P("CL.ordinary0").branch({1: "CL.default"}, "CL.a2", [("CMPI", "t", 0)])
     P("CL.default").branch({1: "CL.defaultbase"}, "CL.a2", [("CMPI", "vt", 0)])
     P("CL.defaultbase").branch({1: "CL.ad"}, "CL.a2", [("CMPI", "vb", FLT)])
     P("CL.af1").call("TO.s").goto("CL.a2")
