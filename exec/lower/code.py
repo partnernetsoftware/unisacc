@@ -42,29 +42,32 @@ def install(E, arch="x86_64", os_="lnx"):
                          start_id=ids['_start:'])
     install_rules(g, Path(__file__).parent, 'code-scan', bindings=scan_bindings,
                   sequences={'newline': E.O('\n')})
-    p=P('C.setup')
-    if os_=='win':
-        p.o('winstdh ').a(('LDI','offset',WIN_HSTD)).call('ADDR').o('\n')
-        p.branch({1:'C.winargs'},'C.spinit',[('CMPI','run_mode',0)])
-        p=P('C.winargs').o('winargs ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', ').a(('LDI','offset',WIN_ARGVA)).call('ADDR').o('\n').goto('C.spinit')
-        p=P('C.spinit')
-    p.o('spinit '+regmap['r7'])
-    if os_=='win' and arch=='arm64':p.o(', ').a(('LDI','offset',WIN_EXTRA+WIN_STACK)).call('ADDR')
-    p.o('\n')
-    p.branch({1:'C.processargs'},'C.dispatch',[('CMPI','run_mode',0)])
-    p=P('C.processargs')
-    if os_!='win':p.o('argsave ').a(('LDI','offset',48)).call('ADDR').o(', ').a(('LDI','offset',56)).call('ADDR').o(', '+('true' if os_=='lnx' else 'false')+'\n')
-    p.goto('C.dispatch')
-    special={'.arg':'arg','.argc':'argc','.argv':'argv','.exit':'exit','.write':'write','.sys':'sys','.sys6':'sys6','.print':'print','.frame':'frame','load64':'load'}
+    # Target setup is a fixed declaration; layout and register facts remain bindings.
+    setup_section = 'win-'+arch if os_=='win' else 'posix'
+    setup_labels = {
+        'posix': (('C', 'b'), ('C', 'r'), ('C', 'r')),
+        'win-x86_64': (('C', 'r'), ('C', 'b'), ('C', 'r'), ('C', 'r'), ('C', 'r'), ('C', 'b')),
+        'win-arm64': (('C', 'r'), ('C', 'b'), ('C', 'r'), ('C', 'r'), ('C', 'r'), ('C', 'r'), ('C', 'b')),
+    }[setup_section]
+    entry_bindings = {'label'+str(i): P(owner).fresh(kind)
+                      for i, (owner, kind) in enumerate(setup_labels)}
+    entry_bindings.update(WIN_HSTD=WIN_HSTD, WIN_ARGVA=WIN_ARGVA,
+                          stack_end=WIN_EXTRA+WIN_STACK)
+    entry_sequences = {name: E.O(text) for name, text in (
+        ('winstdh', 'winstdh '), ('winargs', 'winargs '), ('argsave', 'argsave '),
+        ('newline', '\n'), ('comma', ', '), ('spinit', 'spinit '+regmap['r7']),
+        ('process_flags', ', '+('true' if os_=='lnx' else 'false')+'\n'))}
+    install_rules(g, Path(__file__).parent, 'code-entry', bindings=entry_bindings,
+                  sequences=entry_sequences, section=setup_section)
     if arch=='arm64':
-        special['imm']='armimm'; special['.frame']='armframe'; special.pop('load64')
         from armfuse import install as install_armfuse, immediate
         install_armfuse(E,ids,OP,KIND,ARG)
         immediate(E,ids,OP,KIND,ARG,TXT)
-    p=P('C.dispatch')
-    for op,tag in special.items():
-        p.branch({1:'DO.'+tag},'CD.'+tag,[('CMP','op',ids[op])]);p=P('CD.'+tag)
-    p.goto('GENERIC')
+    dispatch_bindings = {'label'+str(i): P('C' if i==0 else 'CD').fresh('b')
+                         for i in range(10)}
+    dispatch_bindings.update({'id:'+name: value for name, value in ids.items()})
+    install_rules(g, Path(__file__).parent, 'code-entry', bindings=dispatch_bindings,
+                  section='dispatch-'+arch)
     # Generic output and fixed fusion/argument control; facts stay in their original maps.
     print_labels = (('PRINT', 'b'), ('ADDR', 'r'), ('GENERIC', 'r'), ('G', 'b'),
                     ('G', 'b'), ('G', 'r'), ('G', 'b'), ('G', 'r'),
