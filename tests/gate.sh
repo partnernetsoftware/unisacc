@@ -51,6 +51,8 @@ job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual refere
 job exec-returnwarn python3 ./exec/parse2/returnwarningcheck.py  # first warning kind and FP conditions
 job exec-intwarn python3 ./exec/parse2/returnwarningcheck.py --int-conversion
 job exec-unusedwarn python3 ./exec/parse2/returnwarningcheck.py --unused
+job exec-formatwarn0 python3 ./exec/parse2/returnwarningcheck.py --format --shard 0/2
+job exec-formatwarn1 python3 ./exec/parse2/returnwarningcheck.py --format --shard 1/2
 job exec-e3self ./exec/parse2/selfcheck.sh                       # complete current compiler source -> tape
 job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal bits, table/net and host cc
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)

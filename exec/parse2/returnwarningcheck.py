@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Reference return-type, --int-conversion or --unused model warnings.
-This is not full -Wall parity. Cases avoid the remaining unmigrated kinds.
+"""Reference return-type, --int-conversion, --unused or --format model warnings.
+This checks single-unit model rules, not compiler CLI -Wall parity.
 Both tape and complete diagnostic bytes must agree; every child is bounded.
 """
 import os,pathlib,subprocess,sys,tempfile
@@ -129,23 +129,78 @@ with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
           ('splice-unused','int f(void){int '+chr(92)+'\n x;return 0;}'),
         ]
         (t/'quiet.h').write_text('static int in_header(void){int hidden;return 0;}\n')
+    if '--format' in sys.argv:
+        category='format'
+        cases=[
+          ('string-int','int f(void){printf("%s",7);return 0;}'),
+          ('address-int','int f(void){printf("%p",7);return 0;}'),
+          ('integer-pointer','int f(void){printf("%d","x");return 0;}'),
+          ('integer-float','int f(void){printf("%d",1.0);return 0;}'),
+          ('integer-long','int f(void){printf("%d",1L);return 0;}'),
+          ('long-int','int f(void){printf("%ld",1);return 0;}'),
+          ('real-int','int f(void){printf("%f",1);return 0;}'),
+          ('okay','int f(void){printf("%s %p %d %ld %f","x","x",1,1L,1.0);return 0;}'),
+          ('int-float-cast','int f(void){printf("%d",(float)1);return 0;}'),
+          ('real-float-pointer','int f(void){printf("%f",(double*)0);return 0;}'),
+          ('small-width','int f(void){char c=3;printf("%ld",c);return 0;}'),
+          ('unsigned','int f(void){printf("%u %lu",1UL,1U);return 0;}'),
+          ('lengths','int f(void){printf("%hd %lld %zd",1L,1,1L);return 0;}'),
+          ('flags','int f(void){printf("%+-#08.4ld",1);return 0;}'),
+          ('stars','int f(void){printf("%*.*ld",3,2,1);return 0;}'),
+          ('percent','int f(void){printf("%% %ld",1);return 0;}'),
+          ('few','int f(void){printf("%ld %s",1);return 0;}'),
+          ('extra','int f(void){printf("plain",1);return 0;}'),
+          ('trailing','int f(void){printf("%000.",1);return 0;}'),
+          ('unknown','int f(void){printf("%q %ld",1,1);return 0;}'),
+          ('nonliteral','int f(char *s){printf(s,1);return 0;}'),
+          ('call-exempt','int g(void){return 1;}int f(void){printf("%s",g());return 0;}'),
+          ('nested','int f(void){printf("%d",printf("%ld",1));return 0;}'),
+          ('conditional','int f(int k){printf("%ld",k?1:2);return 0;}'),
+          ('fnvalue','int g(void){return 1;}int f(void){printf("%s %d",g,g);return 0;}'),
+          ('fnptr','int f(int (*p)(void)){printf("%d",p);return 0;}'),
+          ('struct','struct S{int x;};int f(void){struct S s;s.x=1;printf("%d",s);return 0;}'),
+          ('adjacent','int f(void){printf("%" "ld",1);return 0;}'),
+          ('escaped','int f(void){printf("\\x25ld",1);return 0;}'),
+          ('two-calls','int f(void){printf("%ld",1);printf("%s",3);return 0;}'),
+          ('all-four','int f(void){int unused;int *p=7;printf("%ld",1);}'),
+          ('star-assignment','int f(int *p){printf("%*ld",p=7,1);return p!=0;}'),
+          ('many-conversions','int f(void){printf("%i %x %X %o %c",1L,1L,1L,1L,1L);return 0;}'),
+          ('real-conversions','int f(void){printf("%e %g %E %G %F",1,1,1,1,1);return 0;}'),
+          ('header-format','#include "quiet.h"\nint f(void){printf("%ld",1);return 0;}'),
+
+        ]
+    if category=='format': (t/'quiet.h').write_text('static int header_format(void){printf("%ld",1);return 0;}\n')
+    if category=='format': cases.append(('vararg-float',(R/'exec/parse2/probes/vararg_float.c').read_text()))
+    total=len(cases)
+    shard='all'
+    if '--shard' in sys.argv:
+        try:
+            shard=sys.argv[sys.argv.index('--shard')+1]
+            part,parts=map(int,shard.split('/'))
+            assert 0<=part<parts<=total
+        except (ValueError,IndexError,AssertionError):
+            raise SystemExit('bad --shard: use index/count, zero based')
+        cases=cases[part::parts]
+    assert cases
     positives=0
     for name,body in cases:
-        f=t/'source.c';f.write_text(body if name=='float-truth' else body+'\nint main(void){return 0;}\n')
-        if name=='float-truth':
+        f=t/'source.c';f.write_text(body if name in ('float-truth','vararg-float') else body+'\nint main(void){return 0;}\n')
+        if name in ('float-truth','vararg-float'):
+            expected=b'' if name=='float-truth' else b'1.5 2.5\n'
             call(['cc','-O0',f,'-o',t/'truth'])
-            assert call([t/'truth'])==b''
-            assert call([t/'ref',f,'-run'])==b''
+            assert call([t/'truth'])==expected
+            assert call([t/'ref',f,'-run'])==expected
         ref=run([t/'ref',f,'-Wall','-S','-o','-']);assert ref.returncode==0,(name,ref.stderr)
         pp=call([t/'run',t/'pp.net',f,f,R/'include']);(t/'pp').write_bytes(pp)
         tok=call([t/'run',t/'lex.net',t/'pp']);(t/'tokens').write_bytes(tok)
         got=run([t/'run',t/'parse.net',t/'tokens',f])
         assert got.returncode==0,(name,got.stderr)
         baseline=run([t/'run',t/'plain.net',t/'tokens',f])
-        assert baseline.returncode==0 and baseline.stdout==ref.stdout and not baseline.stderr,(name,'quiet tape')
+        quiet=run([t/'ref',f,'-S','-o','-']);assert quiet.returncode==0,(name,quiet.stderr)
+        assert baseline.returncode==0 and baseline.stdout==quiet.stdout and not baseline.stderr,(name,'quiet tape')
         assert got.stdout==ref.stdout,(name,'warning tape')
         assert got.stderr==ref.stderr,(name,ref.stderr,got.stderr)
         if ('[-W'+category+']').encode() in ref.stderr: positives+=1
         print(category+' warning',name,'tape and diagnostics match',flush=True)
     assert positives>0
-    print(category+' warning:',len(cases),'cases;',positives,'with warnings; full -Wall still pending')
+    print(category+' warning:',len(cases),'cases;',positives,'with warnings; shard',shard,'of',total,'cases; CLI integration pending')

@@ -6,8 +6,8 @@ templates -- by one generic compiler, instead of being grown state by state.
     python3 exec/parse2/gen2.py --locations OUT.json
     python3 exec/parse2/gen2.py --warnings OUT.json
 
-Optional --warnings implements return-type, int-conversion and unused-variable
-warnings, implies --locations, and is not connected to the compiler CLI.
+Optional --warnings implements return-type, int-conversion, unused-variable
+and format warnings, implies --locations, and is not connected to the compiler CLI.
 
 Step 1 covers: int functions and parameters, int locals, expression
 statements, assignment, calls, unary - !, the binary operators of every
@@ -310,7 +310,9 @@ def printf(warnings=False):
     if warnings: p.a(("LDI", "wi_called", 1))
     p.a(("LDX", "t", "pfid", E.FND)).branch({1: "PF.real"}, "PF.fallback", [("CMPI", "t", 1)])
     P("PF.real").call("CALL").ret()
-    P("PF.fallback").call("NEXT").tok({E.TK_STR: "PF.s"}, bad("printf format"))
+    p = P("PF.fallback")
+    if warnings: p.call("WF.entry")
+    p.call("NEXT").tok({E.TK_STR: "PF.s"}, bad("printf format"))
     p = P("PF.s")
     p.call("FMT.decode").vpush("pfblob").a(("ALUI","add","pfcalls","pfcalls",1),("COPYW","pfcid","pfcalls"),("LDI","pfan",0))
     p.call("NEXT").label("PF.args")
@@ -1620,7 +1622,7 @@ def build(locations=False, warnings=False):
     emit(p, "push").vpush("cls", "cle").a(("LDI", "sys", 100), ("LDI", "fid", 0)).vpush("sys").a(("LDI", "na", 0)).call("NEXT").tok({")": "CL.done"}, "CL.arg")
     for k, nx in ((0, "CL.va1"), (1, "CL.va2"), (2, "CL.b1")):
         q = P("CL.va%d" % k)
-        if warnings and k == 0: q.a(("LDI", "wi_called", 1))
+        if warnings and k == 0: q.a(("LDI", "wi_called", 1)).call("WF.entry")
         q.branch({1: "VA%d" % k}, nx, [("CMP", "v", "va%d" % k)])
     # va_start(ap, last): &ap pushed; last evaluated (unused); ap = r6 + 16 + 8 * named parameters; value 0 (measured)
     p = P("VA0")
@@ -1689,7 +1691,11 @@ def build(locations=False, warnings=False):
     p.vpush("na", "fid").call("EXPR").vpop("na", "fid").call("ARGCOPY")
     p.a(("ALUI", "mul", "t", "fid", 16), ("ALU", "add", "t", "t", "na"), ("LDX", "t", "t", PDB)).branch({1: "CL.ad"}, "CL.af", [("CMPI", "t", DBL)])
     P("CL.ad").call("TO.d").goto("CL.a2")
-    P("CL.af").branch({1: "CL.af1"}, "CL.a2", [("CMPI", "t", FLT)])
+    P("CL.af").branch({1: "CL.af1"}, "CL.ordinary", [("CMPI", "t", FLT)])
+    # No declared parameter kind: the default promotion of scalar float.
+    P("CL.ordinary").branch({1: "CL.default"}, "CL.a2", [("CMPI", "t", 0)])
+    P("CL.default").branch({1: "CL.defaultbase"}, "CL.a2", [("CMPI", "vt", 0)])
+    P("CL.defaultbase").branch({1: "CL.ad"}, "CL.a2", [("CMPI", "vb", FLT)])
     P("CL.af1").call("TO.s").goto("CL.a2")
     p = P("CL.a2")
     emit(p, "push").a(("ALUI", "add", "na", "na", 1)).tok({",": "CL.more", ")": "CL.done"}, bad("argument list"))
@@ -1747,6 +1753,8 @@ def build(locations=False, warnings=False):
         int_warning_install(E, P, DBL, FLT, FPB, SBB)
         from unusedwarnings import install as unused_warning_install
         unused_warning_install(E, P, TIX)
+        from formatwarnings import install as format_warning_install
+        format_warning_install(E, P, DBL, FLT, FPB, SBB)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

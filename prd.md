@@ -3658,3 +3658,33 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   added to the bounded gate. No full-gate/platform/release claim. Format
   warnings, multi-unit warning framing, -Werror and CLI integration remain;
   reconstruction is still active and the shipped .com is unchanged.
+
+
+### Format warnings and scalar-float default argument promotion
+
+- Optional E3 --warnings now includes the reference printf preflight and
+  format checks, using generic model actions and the shared source/caret
+  renderer. It preserves literal decoding, star arguments, call exemptions,
+  nested diagnostics and the reference label-allocation side effects. Quiet
+  and warning tapes are each compared against the matching reference mode.
+  No language-specific executor primitive was added.
+- 36 cases, 28 with format warnings, pass with complete tape/stderr comparison
+  on cc, unisacc, macOS arm64 assembly and x86_64 assembly/Rosetta. The initial
+  unsplit unisacc check hit the 60 s alarm (rc 142), not a pass; two disjoint
+  18-case shards pass with 15 and 13 warning cases. The bounded gate gains
+  these two shards. Existing return/int-conversion/unused checks pass on cc
+  (33/29/38 cases). No full-gate result is claimed.
+- A quiet-route difference exposed missing default scalar-float promotion
+  when no formal kind is recorded. The parser now uses the existing TO.d
+  conversion there. Original 244 kept tapes passed before list expansion;
+  the new vararg_float probe brings the keep list to 245. Self-source tape
+  is still 3,929,446 B and byte-identical; compilercheck passes 27 mode/level
+  comparisons and its existing CLI/IO/native/memory checks.
+- Fresh development container: 3,265,512 B, SHA-256
+  97e8a6a33dc5e9898d1e6489b6dfb05769e30ef25217e2d3a335ab2322ef79fb.
+  The new probe prints exactly `1.5 2.5` (rc 0) in memory and as native
+  osx/arm64 and osx/x86_64 programs. Shipped unisacc.com is unchanged.
+- Four warning rules are implemented in optional single-unit mode; -Wall
+  CLI selection, multi-unit locations and -Werror remain. No default product
+  switch, new Linux/Windows execution claim, push or release. Reconstruction
+  remains active; FX conjectures do not add implementation scope.

@@ -102,7 +102,7 @@ last-statement heuristic and main/void exemptions, plus `-Wint-conversion`
 for assignments and local scalar initializers. The latter preserves the
 reference's syntactic lone-zero and call-result exemptions. Included-header
 warnings are suppressed. It is not a
-full `-Wall` mode and is not selected by the compiler CLI. Format warnings, multi-unit integration and `-Werror` remain pending.
+full `-Wall` mode and is not selected by the compiler CLI. Multi-unit integration and `-Werror` remain pending.
 
 The model renderer derives file, line and column from retained preprocessing
 records and emits the source line/caret to stderr. `diagnosticcheck.py` compares
@@ -123,3 +123,19 @@ parameters and static/global objects are not warned about by this reference
 rule. Identifier use follows the reference token-context test (a standalone
 simple write is not a read), rather than tape liveness. `--unused` on the
 warning check exercises the rule and its interaction with the other warnings.
+
+
+The optional mode also implements the reference `printf` format preflight and
+`-Wformat` checks. It parses arguments for their types, retains diagnostics,
+then rewinds emitted tape and the literal-pool cursor before the real call.
+Reference label allocation is retained; therefore warning-mode tape need not
+equal quiet-mode tape. Each mode is compared with its matching reference.
+`--format` checks 36 cases, including nested calls and all four warning kinds
+together; `--shard 0/2` and `--shard 1/2` split this bounded check. This retains
+the existing reference policy, not a claim of complete format validation.
+
+The checks also exposed a missing scalar-float default argument promotion in
+the ordinary parser route. An argument with no recorded formal kind now goes
+through the existing float-to-double conversion. `probes/vararg_float.c`
+checks both a float variable and a cast; this does not assert completeness of
+all parameter conversions.
