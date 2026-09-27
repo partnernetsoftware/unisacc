@@ -16,9 +16,9 @@ ends the pass.
 the liveness of r2..r5 and with it the carry through r3..r5 and ol_local; then
 up to four peep rounds: liveness of r0..r5, stfuse, and each line's relation
 with its neighbour, the action for which is the peep table's (loaded at START).
-This is the optimiser's algorithm compiled into an action table: the rules are
-maintained here, in the generator, not removed; the old src/opt.c and
-unisa/opt.py stay the behaviour reference.
+This is the optimiser's algorithm compiled into an action table. The complete
+SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv; the remaining
+rules are maintained here. src/opt.c and unisa/opt.py stay the behaviour reference.
 
 The opinfo table is read, not copied: its `simple` column is interned into a
 set at START.  Everything else is the byte-level control of the rule.
@@ -33,6 +33,7 @@ _spec = importlib.util.spec_from_file_location(
 E = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(E)
 g, P, EOF = E.g, E.P, 256
+from finite_rules import install as install_rules
 
 SIMPLE = 32 * 10 ** 6            # SIMPLE[intern id of an op word] = 1 when opinfo says simple
 LEVEL = int(sys.argv[2]) if len(sys.argv) > 2 else 1
@@ -71,45 +72,12 @@ def regnum(st, dst, ok, fail):
 
 
 def procs():
-    # SKIPL / COPYL: past the end of the line (its \n included)
-    g.on("SKIPL", [10], "RET", [("ADV",)])
-    g.on("SKIPL", [EOF], "RET", [])
-    g.els("SKIPL", "SKIPL", [("ADV",)])
-    g.on("COPYL", [10], "RET", [("COPY",), ("ADV",)])
-    g.on("COPYL", [EOF], "RET", [])
-    g.els("COPYL", "COPYL", [("COPY",), ("ADV",)])
-    # SIMPLE: ok := the line (from its start) is `  WORD...` with WORD simple in opinfo (ol_simple)
-    g.els("SIMPLE", "SIM.a", [("LDI", "ok", 0)])
-    lit("SIM.a", "  ", "SIM.w", "RET")
-    g.els("SIM.w", "SIM.l", [("MARK", "ws"), ("LDI", "wk", 0)])
-    g.on("SIM.l", [32] + NL, "SIM.e", [])
-    g.els("SIM.l", "SIM.k", [])
-    p = P("SIM.k")
-    p.branch({1: "SIM.e"}, "SIM.adv", [("CMPI", "wk", WORDMAX)])
-    g.els("SIM.adv", "SIM.l", [("ADV",), ("ALUI", "add", "wk", "wk", 1)])
-    g.els("SIM.e", "SIM.e2", [("MARK", "we")])
-    p = P("SIM.e2")
-    p.branch({1: "RET"}, "SIM.f", [("CMPI", "wk", 0)])
-    p = P("SIM.f")
-    p.a(("INTERN", "wid", "ws", "we"), ("LDX", "s", "wid", SIMPLE)).branch({1: "SIM.y"}, "RET", [("CMPI", "s", 1)])
-    P("SIM.y").a(("LDI", "ok", 1)).ret()
-    # NAMES: found := the line names register W[nr] (`r` after a non-letter, then digits) -- ol_names
-    g.els("NAMES", "NM0", [("LDI", "found", 0)])
-    g.on("NM0", NL, "RET", [])
-    g.on("NM0", [114], "NMR", [("ADV",)])
-    g.on("NM0", LETTER, "NM1", [("ADV",)])
-    g.els("NM0", "NM0", [("ADV",)])
-    g.on("NM1", NL, "RET", [])
-    g.on("NM1", LETTER, "NM1", [("ADV",)])
-    g.els("NM1", "NM0", [])                   # the byte after a letter, looked at with a non-letter before it
-    g.on("NMR", DIGIT, "NMD", [("LDI", "rn", 0)])
-    g.els("NMR", "NM1", [])                   # `r` was a letter: the next byte follows a letter
-    g.on("NMD", DIGIT, "NMD", [("BYTE", "bt"), ("ALUI", "sub", "bt", "bt", 48),
-                               ("ALUI", "mul", "rn", "rn", 10), ("ALU", "add", "rn", "rn", "bt"), ("ADV",)])
-    g.els("NMD", "NMD.c", [])
-    p = P("NMD.c")
-    p.branch({1: "NMD.y"}, "NM0", [("CMP", "rn", "nr")])     # after digits: a non-letter before the next byte
-    P("NMD.y").a(("LDI", "found", 1)).goto("NM0")
+    # Preserve downstream fresh names while the complete scan rules live in TSV.
+    bindings = {name: P(state).fresh("b") for name, state in (
+        ("word_limit", "SIM.k"), ("word_empty", "SIM.e2"),
+        ("word_simple", "SIM.f"), ("register_equal", "NMD.c"))}
+    install_rules(g, os.path.dirname(__file__), "scans",
+                  bindings=dict(bindings, WORDMAX=WORDMAX, SIMPLE=SIMPLE))
 
 
 def analysis():
