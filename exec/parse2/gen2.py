@@ -477,6 +477,39 @@ def local_control(section, warnings):
             structured_control(rules, False, bindings)
 
 
+def return_control(section, extra=None):
+    b = dict(SBB=SBB, SSZ=SSZ, CKT=CKT, expr_entry="E%d" % LEVELS[0], tail_entry="C%d" % LEVELS[0])
+    b.update(extra or {})
+    p = P("return.bindings." + section + "." + str(P.n))
+    for part, owner, kind, key in tape_rows("return-fresh.tsv"):
+        if part == section:
+            p.cur = owner
+            b[key] = p.fresh(kind)
+    sequences = {name: O(json.loads(value)) for name,value in tape_rows("return-text.tsv")}
+    sequences.update((name, O(re.split(r"(\{[^}]*\})", TEMPL[template])[int(index)]))
+                     for name,template,index in tape_rows("return-template.tsv"))
+    sequences.update((name, E.rej(message)) for name,message in tape_rows("return-reject.tsv"))
+    for name,method,slots in tape_rows("return-stack.tsv"):
+        p.acts = []
+        sequences[name] = getattr(p, method)(*slots.split(",")).acts
+    tokens = dict(TK, identifier=TK_ID)
+    classes = {name:[tokens[token]] for name,token in tape_rows("return-tokens.tsv")}
+    classes.update(typewords=[TK[w] for w in TWORDS], scalar_types=[BOOL,DBL,FLT], float_types=[DBL,FLT],
+                   axis_f64=[AX.index("f64")], axis_f32=[AX.index("f32")],
+                   operators=[TK[o] for o in ("=","++","--")] + [TK[o+"="] for o in E.CASOPS])
+    install_rules(g, os.path.dirname(__file__), "return", bindings=b, sequences=sequences, classes=classes, section=section)
+    if section == "expr0":
+        compound = {TK[o+"="]:"LV.c"+o for o in E.CASOPS}
+        dispatch = b["f48"]
+        for domain, selected, additions in [(set(range(257))-compound.keys(), "expr0", {})] + [
+                ([key], "compound", dict(lp_dispatch=dispatch,operation=target)) for key,target in compound.items()]:
+            for state,row in load_rules(Path(__file__).with_name("return-dispatch.tsv"), sequences,
+                    domain=domain, bindings=dict(b,**additions), classes=classes, section=selected).items():
+                for key, (target, actions) in row.items():
+                    g.on(state, [key], target, actions, "r")
+    return b
+
+
 def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
@@ -616,96 +649,26 @@ def build(locations=False, warnings=False, errors=False):
                   classes=dict(identifier=[TK_ID], paren=[TK["("]]),
                   sequences=dict(reject=E.rej("not covered: declarator")), section="main")
     local_control("local8", warnings)
-    p = P("S.ret")
-    p.call("NEXT").tok({";": "S.rv"}, "S.re")
-    P("S.rv").o("  jump R").num("rl").o("\n").call("NEXT").ret()     # return; (measured, old E3)
-    p = P("S.re")
-    p.branch({1: "S.rs0"}, "S.re1", [("CMPI", "rd", 0)])
-    P("S.rs0").branch({(1, 2): "S.rs"}, "S.re1", [("CMPI", "rb", SBB)])
-    p = P("S.rs")
-    p.tok({TK_ID: "S.rs1"}, bad("struct return"))
-    q = P("S.rs1")
-    q.a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("LOOKUP").call("NOARR").branch({1: "S.rs2"}, bad("struct return"), [("CMP", "vb", "rb")])
-    q = P("S.rs2")
-    q.branch({1: "S.rs3"}, bad("struct return"), [("CMPI", "vt", 0)])
-    q = P("S.rs3")
-    addr(q)
-    q.o("  mov r1, r0\n  .lea r0, __rv_").a(("SPAN2", "fns", "fne")).o("\n").call("NEXT").expect(";").call("WCOPY")
-    q.o("  jump R").num("rl").o("\n").call("NEXT").ret()
-    # Returns, arguments and assignment all use the same aggregate copy.
-    P("WCOPY").a(("ALUI", "sub", "t", "rb", SBB), ("LDX", "sz", "t", SSZ)).goto("COPYSTRUCT")
-    p = P("S.re1")
-    p.call("EXPR").expect(";").a(("COPYW", "rvt", "vt"), ("COPYW", "rvb", "vb"),
-        ("COPYW", "vt", "rd"), ("COPYW", "vb", "rb")).call("ASSIGNCV")
-    p.branch({1: "S.rscalar"}, "S.rj", [("CMPI", "vt", 0)])
-    P("S.rscalar").branch({(BOOL, DBL, FLT): "S.rj"}, "S.rn", [("RLD", "vb")])
-    P("S.rn").call("NARROW").goto("S.rj")
-    p = P("S.rj")
-    p.o("  jump R").num("rl").o("\n").call("NEXT").ret()
-    P("S.expr").a(("LDI", "stl", 1)).call("CEXPR").expect(";").call("NEXT").ret()
+    return_control("ret0")
+    return_control("ret1", dict(addr_end=addr(P("S.rs3")).cur))
     structured_control("if", warnings)
     structured_control("switch", warnings)
     structured_control("loops", warnings)
-    # expressions: EXPR = assignment | the ladder
-    p = P("CEXPR")    # e , e , ...: the value is the last; a discarded bare identifier gives its address only (measured)
-    p.vpush("cv").a(("LDI", "cv", 1)).label("CX.l")
-    p.a(("COPYW", "sst", "stl")).call("EXPR").tok({",": "CX.c"}, "CX.e")
-    P("CX.c").a(("COPYW", "stl", "sst")).call("NEXT").goto("CX.l")
-    P("CX.e").vpop("cv").ret()
-    p = P("EXPR")     # st1: this EXPR is a whole expression statement (nested ones are not); cv1: a comma operand
-    p.a(("LDI", "fp_abi_wide", 0), ("LDI", "bf_value", 0), ("COPYW", "st1", "stl"), ("LDI", "stl", 0), ("COPYW", "cv1", "cv"), ("LDI", "cv", 0)).tok({TK_ID: "X.id", "(": "LP.scan"}, "EX.l")
-    P("EX.l").call("E%d" % LEVELS[0]).call("QTAIL").ret()
-    # Parentheses preserve lvalues. Scan syntax before emitting anything;
-    # the address walker evaluates the accepted operand exactly once.
-    P("LP.scan").a(("COPYW", "lp_start", "tpos"), ("LDI", "lp_depth", 1)).call("NEXT").tok(
-        {**{w: "LP.fallback" for w in TWORDS}, "struct": "LP.fallback", "union": "LP.fallback", "enum": "LP.fallback", TK_ID: "LP.typedef"}, "LP.scan0")
-    P("LP.typedef").call("ISTD").branch({1: "LP.fallback"}, "LP.scan0")
-    P("LP.scan0").tok({"(": "LP.open", ")": "LP.close", "eof": "LP.fallback"}, "LP.next")
-    P("LP.open").a(("ALUI", "add", "lp_depth", "lp_depth", 1)).goto("LP.next")
-    P("LP.close").a(("ALUI", "sub", "lp_depth", "lp_depth", 1)).branch({1: "LP.after"}, "LP.next", [("CMPI", "lp_depth", 0)])
-    P("LP.next").call("NEXT").goto("LP.scan0")
-    lops = {"=": "PX.as", "++": "LP.inc", "--": "LP.dec", **{o+"=": "LV.c"+o for o in E.CASOPS}}
-    P("LP.after").call("NEXT").tok({o: "LP.parse" for o in lops}, "LP.fallback")
-    P("LP.fallback").a(("JUMP", "lp_start")).call("NEXT").goto("EX.l")
-    P("LP.parse").a(("JUMP", "lp_start")).call("NEXT").call("LP.addr").tok(lops, bad("parenthesized lvalue"))
-    for name, op in (("inc", "+"), ("dec", "-")):
-        P("LP."+name).call("CSTEP").call("POST."+op).call("C%d" % LEVELS[0]).call("QTAIL").ret()
-    # c ? a : b -- labels as if/else (measured): jumpz L a; a; jump L b; L a: b; L b:
-    P("QTAIL").tok({"?": "QT"}, "RET")
-    p = P("QT")
-    p.a(("ALUI", "add", "lab", "lab", 1), ("COPYW", "a", "lab"), ("ALUI", "add", "lab", "lab", 1), ("COPYW", "b", "lab"))
-    emit(p.call("FTRUTH"), "jumpz").call("NEXT").a(("COPYW", "qtpos", "tpos"), ("OLEN", "qtout")).vpush("a", "b", "qtpos", "qtout").call("EXPR").vpop("a", "b", "qtpos", "qtout").expect(":")
-    p.a(("COPYW", "np_start", "qtpos"), ("COPYW", "np_end", "tpos")).call("QN.PROOF")
-    emit(p, "jump_b")
-    emit(p, "label_a").vpush("a", "b", "qtpos", "qtout", "vt", "vb", "np_zero", "rkok", "vid", "rk").call("NEXT").a(("COPYW", "qt_rhs", "tpos")).vpush("qt_rhs").call("E%d" % LEVELS[0]).call("QTAIL").vpop("qt_rhs")
-    p.a(("COPYW", "np_start", "qt_rhs"), ("COPYW", "np_end", "tpos")).call("QN.PROOF").vpop("a", "b", "qtpos", "qtout", "lt", "lb", "qt_lzero", "qt_lshape", "qt_lvid", "qt_lrank")
-    p.goto("QN.TYPE")
+    return_control("expr0")
+    for name,op in (("inc","+"),("dec","-")):
+        return_control("update", dict(update_entry="LP."+name,update_target="POST."+op))
+    return_control("qt0")
     from conditional import install as conditional_install
     conditional_install(E, P, ENV, END_)
-    P("QT.original").branch({1: "QT.merge"}, "QT.floatcheck", [("CMP", "vb", "lb")])
-    P("QT.floatcheck").branch({(DBL, FLT): "QT.common"}, "QT.floatleft", [("RLD", "vb")])
-    P("QT.floatleft").branch({(DBL, FLT): "QT.common"}, "QT.merge", [("RLD", "lb")])
-    P("QT.common").branch({1: "QT.common0"}, "DEAD.qt", [("CMPI", "vt", 0)])
-    P("QT.common0").branch({1: "QT.common1"}, "DEAD.qt", [("CMPI", "lt", 0)])
-    P("QT.common1").call("TAX").a(("COPYW", "axr", "ax"), ("COPYW", "vb", "lb")).call("TAX").a(("ALUI", "mul", "t", "ax", 16), ("ALU", "add", "t", "t", "axr"), ("LDX", "qtc", "t", CKT)).branch({AX.index("f64"): "QT.double", AX.index("f32"): "QT.single"}, "DEAD.qt", [("RLD", "qtc")])
-    for label, cv in (("double", "d"), ("single", "s")):
-        q = P("QT." + label).a(("OCUT", "qtdiscard", "qtout"), ("JUMP", "qtpos")).call("NEXT").vpush("a", "b").call("EXPR").call("TO." + cv).vpop("a", "b").expect(":")
-        emit(q, "jump_b")
-        emit(q, "label_a").vpush("b").call("NEXT").call("E%d" % LEVELS[0]).call("QTAIL").call("TO." + cv).vpop("b")
-        emit(q, "label_b").a(("LDI", "vt", 0), ("LDI", "vb", DBL if cv == "d" else FLT)).ret()
-    p = P("QT.merge").a(("LDI", "bf_value", 0))
-    emit(p, "label_b").branch({1: "QT.1"}, "DEAD.qt", [("CMP", "vt", "lt")])
-    P("QT.1").branch({1: "QT.scalar"}, "QT.same", [("CMPI", "vt", 0)])
-    P("QT.same").a(("COPYW", "fs_l", "vb"), ("COPYW", "fs_r", "lb")).call("FS.TYPEEQ").branch({1: "RET"}, "DEAD.qt", [])
-    q = P("QT.scalar")
-    for _, code, *_ in TYINT:
-        nx = q.fresh("next")
-        q.branch({1: "QT.int"}, nx, [("CMPI", "vb", code)])
-        q = P(nx)
-    q.goto("QT.same")
-    # Common integer type is the existing type(t1 + t2) row, not a new ladder.
-    P("QT.int").call("TAX").a(("COPYW", "axr", "ax"), ("COPYW", "vb", "lb")).call("TAX").a(("ALUI", "mul", "t", "ax", 16), ("ALU", "add", "t", "t", "axr"), ("LDX", "rs", "t", CKT)).goto("RESD")
-    g.on("DEAD.qt", range(257), "DEAD", E.rej("not covered: ?: arms of different types"), "r")
+    return_control("qt1")
+    for label,cv,base in (("double","d",DBL),("single","s",FLT)):
+        return_control("floating", dict(float_entry="QT."+label,float_convert="TO."+cv,result_base=base))
+    return_control("qt2")
+    current="QT.scalar"
+    for _,code,*_ in TYINT:
+        b=return_control("integer", dict(integer_current=current,integer_code=code))
+        current=b["f92"]
+    return_control("qt3", dict(integer_end=current))
     P("X.id").a(("COPYW", "ips", "ps"), ("COPYW", "ipe", "pe")).call("NEXT").tok(dict({"=": "X.as", "(": "X.cpf", "++": "X.inc", "--": "X.dec"}, **{o + "=": "X.c" + o for o in E.CASOPS}), "X.var")
     p = P("X.as")
     p.call("LOOKUP").call("NOARR")
