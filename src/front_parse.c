@@ -977,21 +977,27 @@ int primary(void);
 int ncl;
 int cplitexpr(int w, int sst, int isarr, int n) {
     int size; int off; int id; int save; int el;
+    int pd; int base; int uns; int flt; int bl; int slotst;
+    pd = declpd; if (declptr && pd == 0) pd = 1;
+    base = w; uns = declunsigned; flt = declflt; bl = declbool;
+    slotst = sst;
     el = declsz;
     if (sst >= 0) el = stsize[sst];
-    if (declptr) el = 8;
+    if (pd) { el = 8; slotst = 0 - 1; }
     if (isarr) {
         if (n == 0) {
             n = initcountat(tp);
-            if (sst >= 0) n = (n + structslots(sst) - 1) / structslots(sst);
+            if (slotst >= 0) n = (n + structslots(slotst) - 1) / structslots(slotst);
         }
         size = n * el;
     } else size = el;
-    if (sst >= 0) w = el;
+    w = el;
+    initflt = 0;
+    if (pd == 0) { initflt = flt; if (bl) initflt = 9; }
     if (infunc) {
         off = alloc_local(size);
         initisarr = isarr;
-        initaggr(0, 0, off, w, sst, size);
+        initaggr(0, 0, off, w, slotst, size);
         eframe(0, 0, off);
     } else {
         /* named after the `{` token, not a counter: expr() parses
@@ -1002,13 +1008,19 @@ int cplitexpr(int w, int sst, int isarr, int n) {
         es(".bss __cl"); en(id); ec(32); en(size); ec(10);
         toinit = save;
         initisarr = isarr;
-        initaggr(2, id, 0, w, sst, size);
+        initaggr(2, id, 0, w, slotst, size);
         es("  @mem.lea r0, __cl"); en(id); ec(10);
     }
-    if (isarr) { lvalue = 0; curptr = 1; curelem = w; if (sst >= 0) curelem = el; }
-    else { if (sst >= 0) { lvalue = 1; curptr = 0; curelem = 0; }
-           else { lvalue = 1; curptr = declptr; curelem = w; if (declptr) curelem = 8; } }
-    curstruct = sst; cursize = size; curdim2 = 0; curdim3 = 0;
+    /* Initializer expressions may change every current/declaration kind.
+       Reconstruct this object's descriptor from its saved declared type. */
+    setkind(0); curpd = pd; curbase = base; curuns = uns; curflt = flt; curbool = bl;
+    curstruct = sst; cursize = size; curdim2 = 0; curdim3 = 0; curvla = 0;
+    curptr = pd > 0; curelem = base;
+    if (pd >= 2) curelem = 8;
+    if (pd == 1 && sst >= 0) curelem = stsize[sst];
+    lvalue = 1;
+    if (isarr) { lvalue = 0; curptr = 1; curpd = pd + 1; curelem = el; }
+    else { if (pd == 0 && sst >= 0) curelem = 0; }
     return postfix();
 }
 

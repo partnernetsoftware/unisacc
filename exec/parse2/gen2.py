@@ -1609,11 +1609,7 @@ def build(locations=False, warnings=False, errors=False):
     q.branch({1: "UC.scalar"}, "UC.to_u", [("CMPI", "cast_td", 0)])
     # Anonymous local objects use the same aggregate walker as declarations.
     P("CP.literal").branch({1:"CP.local"},bad("file-scope compound literal"),[("CMPI","infunc",1)])
-    P("CP.local").branch({1:"CP.base"},bad("pointer compound literal: reference defect"),[("CMPI","td",0)])
-    P("CP.base").branch({1:"CP.floatreject"},"CP.base2",[("CMPI","tb",DBL)])
-    P("CP.base2").branch({1:"CP.floatreject"},"CP.extent",[("CMPI","tb",FLT)])
-    P("CP.floatreject").branch({},bad("floating compound literal: reference defect"))
-    P("CP.extent").branch({1:"CP.infer"},"CP.size",[("CMPI","cp_n",0)])
+    P("CP.local").branch({1:"CP.infer"},"CP.size",[("CMPI","cp_n",0)])
     P("CP.infer").call("TYPECOUNT").a(("COPYW","dm_per","flat"),("COPYW","cp_back","tpos")).vpush("td","tb","cp_arr","cp_back").call("INITCOUNT").vpop("td","tb","cp_arr","cp_back").a(("COPYW","cp_n","dm_n"),("JUMP","cp_back")).call("NEXT").goto("CP.size")
     P("CP.size").branch({2:"CP.alloc"},bad("compound literal extent"),[("CMPI","cp_n",0)])
     P("CP.alloc").call("ELSZ").a(("ALU","mul","ibytes","es","cp_n"),("ALU","add","cur","cur","ibytes")).call("MAXF").a(

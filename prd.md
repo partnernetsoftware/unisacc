@@ -4464,3 +4464,9 @@ cc报告switch超过256项静默误编译、-Wall的格式解码超过4096字节
 
 本片实测：旧E3固定267项先通过，再加入C99的23/24与s63/s64，固定清单271；chain由120增124，124/124网络推理转储相同。匿名对象复用INITVALUE（INITLIST仅负责从符号取元数据）；声明中的结构体复合字面量用只读token识别进入同一遍历，不试解析表达式。s63/s64覆盖显式/推断长度、零补齐、设计符、嵌套标量与结构体、结构体数组、不同对象、递增只求值一次。原有地址获取、标量字面量赋值/后缀修改、文件作用域、多维匿名类型仍未宣称覆盖。
 实际模型候选`/tmp/unisacc-compound-candidate/unisacc-next.com`：5,902,565 B，SHA256 441226e99997d39ba5ed3d23d976a62bc28abf1f5757434d9e63c07c2e31bac7；四个新增程序在O0/O1/O2的运行输出与host cc相同。C99为56/57、wrong0、refused1（19_vla），套件按原57基线仍退出1，未降低门槛。双槽队列`/tmp/unisacc-compound-gate`四项全绿，窗口14.31s：chain12.95s、自身3,950,564 B转储3.38s、parseloc7.22s、unitlocations3.49s。plain delta4964状态、1,276,743项；gen2 +46/-4，初始化模块+2/-1，规则增加而非代码减少，无新执行器原语。产品源码与出货.com未改，未推送、未切默认路线。下一项修复指针/浮点复合字面量参考语义，再推进剩余VLA与未覆盖形式；重构目标保持未完成。
+
+### 复合字面量类型修复（进行中）
+根因核对：cplitexpr把指针基类型的cw作为存储宽度，未设置initflt，且初始化表达式会覆盖declptr等全局类型状态；返回值又未完整建立curpd/curbase/curuns/curflt。修复按声明类型保存元数据，区分对象存储宽度与指针指向类型；初始化前明确给出转换类型，结束后重建结果描述，不按最后一个初始化表达式猜类型。保留聚合遍历与后缀逻辑。
+
+本轮修复实测：tests/c/b_compoundkind.c覆盖指针/指针数组/二级指针、结构体指针、double/float、unsigned char、_Bool、double数组、嵌套结构体；host cc、私有C参考及重建.com的O0/O1/O2、Python前端均输出`3 3 3 7 / 1 1 1 1 1 4`。另九个小探针（含标量赋值/后缀、sizeof、结构体数组）在C参考三档优化与cc退出值一致。Python前端已正确，未改。模型解除此前指针/浮点字面量拒绝，三例转储一致；旧271项先通过后固定E3扩274、网络chain扩127且127/127通过。综合b_compoundkind模型仍在double operand处明确未覆盖，不算全模型通过。
+完整冻结门禁：`/tmp/unisacc-cpkind-full`117项双槽与`/tmp/unisacc-cpkind-core`独占1项48.42s，并集对`gate.sh --list --com`精确118项各一次、全rc0，最大51.302s。两项曾因窗口剩余预算不足延期，后在新窗口通过，不把中止记pass。产品C9957/57，difftest_o399/399，fat134，模型自身转储3,954,383 B一致。私有UA `/tmp/unisacc-cpkind-private` SHA256 a029f11947b802dbb8eebeecbc83e7340f22205e790e39eb7075c01513acc99f；新.com 1,357,120 B，SHA256 c7e8543851c5a7258b7cb8c420c38cc5f817dec053838cdb9cf51841d14baa2f。未推送、未发布、未切默认模型；重构继续，VLA及其余模型边界仍待完成。

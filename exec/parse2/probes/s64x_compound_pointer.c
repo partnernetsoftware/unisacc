@@ -1,2 +1,2 @@
-/* Reference defect at 12be67c; model must reject, not copy the defect. */
+/* Regression: 12be67c reference returned the wrong result or crashed. */
 int main(void){int x=3; return *(int *){&x};}
