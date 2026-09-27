@@ -98,31 +98,23 @@ def install(E, arch="x86_64", os_="lnx"):
     from modelinput import u64
     u64(E,'C.runargc',b'\0process/argc','run_argc','run_mode','C.fail')
     u64(E,'C.runargv',b'\0process/argv','run_argv','run_hasargv','C.fail')
-    p.call('C.runargc').branch({1:'C.init'},'C.argv',[('CMPI','run_mode',0)])
-    P('C.argv').call('C.runargv').branch({1:'C.fail'},'C.runheaders',[('CMPI','run_hasargv',0)])
-    # Data cells are initialised by the image model, just as bk_run does;
-    # there are no extra instructions in the compiled entry sequence.
-    P('C.runheaders').o('@argc ').a(('LDI','offset',48)).call('ADDR').o('\n@argv ').a(('LDI','offset',56)).call('ADDR').o('\n').goto('C.init')
-    # Syscall source preparation: spill before overwriting ABI registers.
-    def spill(p,token,offset):
-        p.o('setmem ').a(('LDI','offset',offset)).call('ADDR').o(', ').a(('COPYW','tok',token)).call('PRINT').o('\n')
-    for tag,n,shift in [('sys',3,1),('sys6',6,1),('write',2,0),('exit',1,0)]:
-        p=P('DO.'+tag)
-        for i in range(n):spill(p,'a'+str(i+shift),SYSA+8*i if tag=='sys6' else 8*i)
-        if tag=='sys6':
-            p.o('setmem ').a(('LDI','offset',SYSFP)).call('ADDR').o(', '+regmap['r6']+'\nsetmem ').a(('LDI','offset',SYSSP)).call('ADDR').o(', '+regmap['r7']+'\n')
-        p.a(('LDI','syskind',{'sys':0,'sys6':1,'write':2,'exit':3}[tag]),('COPYW','sop','a0' if tag in ('sys','sys6') else ids['write' if tag=='write' else 'exit'])).call('SYSCALL')
-        if tag in ('sys','sys6'):
-            p.o('mov '+regmap['r0']+', ').a(('INPUSH','retblob')).call('PCOPY').o('\n')
-        if tag=='sys6':
-            for r,off,role in [('r6',SYSFP,'fp'),('r7',SYSSP,'sp')]:p.o('setreg '+regmap[r]+', mem ').a(('LDI','offset',off)).call('ADDR').o(' role='+role+'\n')
-        p.goto('C.advance')
-    p=P('DO.print');spill(p,'a0',0)
-    p.o('itoa ')
-    for i,off in enumerate((0,24,16)):
-        if i:p.o(', ')
-        p.a(('LDI','offset',off)).call('ADDR')
-    p.o('\n').a(('LDI','syskind',4),('COPYW','sop',ids['write'])).call('SYSCALL').goto('C.advance')
+    # Prelude controls consume the existing dynamic ABI-id init sequence.
+    prelude_bindings = {'label'+str(i): P('C').fresh(kind)
+                        for i, kind in enumerate('rbrbrr')}
+    prep_sequences = {'text'+str(i): E.O(text) for i, text in enumerate((
+        '@argc ', '\n@argv ', '\n', 'setmem ', ', ', 'mov '+regmap['r0']+', ',
+        ', '+regmap['r6']+'\nsetmem ', ', '+regmap['r7']+'\n', 'setreg '+regmap['r6']+', mem ',
+        ' role=fp\n', 'setreg '+regmap['r7']+', mem ', ' role=sp\n', 'itoa ',
+    ))}
+    install_rules(g, Path(__file__).parent, 'code-sysprep', bindings=prelude_bindings,
+                  sequences={**prep_sequences, 'init': p.acts}, section='prelude')
+    # Source spills, return copying, and print preparation precede dynamic ABI rules.
+    prep_bindings = {'label'+str(i): P('DO').fresh('r') for i in range(40)}
+    prep_bindings.update({'id:'+name: value for name, value in ids.items()})
+    prep_bindings.update(SYSFP=SYSFP, SYSSP=SYSSP)
+    prep_bindings.update({'SYSA'+str(i): SYSA+8*i for i in range(6)})
+    install_rules(g, Path(__file__).parent, 'code-sysprep', bindings=prep_bindings,
+                  sequences=prep_sequences, section='prepare')
     p=P('SYSCALL')
     for op,f in abi.items():
         if f[0]=='none' and os_!='win':continue
