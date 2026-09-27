@@ -4885,3 +4885,7 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第八批并行决定：E3 types中TSPEC/结构布局完整控制组、ARM Windows setup完整组、lower剩余setup/dispatch固定控制各在隔离worktree迁声明，保留动态数据计算及共享输出序列。父只审计共享parse规则的消费者与迁移边界，本轮不修改共享模块。每路约8分钟，子步骤≤60秒，集中双槽验收；不扩语法与框架。
 
 第八批验收（29e2f57）：TAG作用域/SBODY结构布局、ARM Windows元数据/API准备/返回转换、lower setup/dispatch完整组合入。Python净减128行（89+42−3），TSV增加568行，源合计净增440；lower绑定净增3行不称缩减。动态布局/IMPORTS/WINARGS_BODY/regmap依赖扰动及全图比对通过，模板保持原来源。父双槽6/6全rc0，25.94秒，chain167/167及ARM/三lower/警告诊断全通过。候选重新构建于55秒外限内，5,985,519 B，sha256 19a4558210cfe1a7a1cc24e0aeeaf94e2edb2cf091725512c9eb56b2cda4cc1f，模型包5,802,207 B；六目标hello镜像同私有参考，四程序×三优化级共12次macOS arm64实跑同cc，记录/tmp/unisacc-parallel-eighth-candidate/acceptance.json。最新候选未替换默认产品；TSPEC、共享tokenizer/数值/自动引头规则、ABI/syscall及其他剩余模块与兼容差距继续列在exec/rules.md，未称全重构完成。
+
+第九批并行决定：E3剩余TSPEC/指针尺度完整组，共享parse/gen.py的prn/numout/fconv完整数字组，以及lower的prelude/ABI系统调用控制各自隔离迁入既有声明。共享数字变动与E3消费者以同一250daa6基线独立比对，合入后再组合验证；保留tokenizer/自动引头以免任务无界。各8分钟、子步骤≤60秒，不新增框架或重复模型答案。
+
+第九批验收（2273f3e）：共享PRN/PRNW/NUMOUT/FCONV、TSPEC/DSTARS/PWIDTH/SCALE/DSCALE、lower prelude及syscall准备回写已迁声明。Python净减90，TSV增加358，总源净增268。PRN/PRNW审查后共用一节，以宽度/状态绑定两次实例化；数字25消费者全图同。E3新增动态类型词旧新全图同；首轮导入build发现CLI warnings全局依赖，已修并重跑。父双槽9/9全rc0（52.19秒窗口8项，rc75续跑2.25秒完成最后项），含E4自身两级、chain167/167、多单元位置、ARM及三类lower。新候选2273f3e重建与上一批哈希完全相同：5,985,519 B，sha256 19a4558210cfe1a7a1cc24e0aeeaf94e2edb2cf091725512c9eb56b2cda4cc1f；六目标镜像同参考，六程序含b_float/b_fconv×O0/O1/O2共18次实跑同宿主cc。证据/tmp/unisacc-parallel-ninth-candidate/acceptance.json。仍有tokenizer/自动引头、E3表达式与初始化、ABI主体、其余编码/镜像规则和产品兼容缺口，默认产品未切换，完整目标保持。

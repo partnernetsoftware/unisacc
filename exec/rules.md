@@ -1,6 +1,6 @@
 # Rule-source migration and completion boundary
 
-Current source checkpoint: 29e2f57, after structure layout, Windows setup and lowering entry rules. This is a source
+Current source checkpoint: 2273f3e, after shared numeric, type specification and syscall preparation rules. This is a source
 inventory, not a new specification language or a completion percentage.
 
 The route is **declarations → finite transitions/actions → constructed threshold
@@ -13,17 +13,18 @@ remain shared inputs, not copied answers.
 |---|---|---|
 | E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
-| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` grammar/control, TSPEC types and initialization; helper modules for scopes, literals, diagnostics, warnings, units and locations |
+| E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `type-entry/default/follow`; gold type/tyinfo/prec and other existing facts | `parse2/gen2.py` expression/call/initialization control and dynamic type bindings; helper modules for scopes, literals, diagnostics, warnings, units and locations |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
-| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`; existing gold/catalog facts | `lower/code.py`, `armfuse.py`; target/escape/layout bindings in `data.py` |
+| E5 lowering | `lower/data-*` sparse layout, `lower/code-scan-*`, `lower/code-print-*`, `lower/code-entry-*`, `lower/code-sysprep-*`; existing gold/catalog facts | ABI/SYSCALL body in `lower/code.py`, `armfuse.py`; target/escape/layout bindings in `data.py` |
 | E5 encoding | `enc/armint-*`, `armmem-*`, `armbranch-*`, `armfp-*`, `arminput-*`, `armlayout-*`, `armwin-*`; catalog opcode facts | x86 encoding and setup; ARM core/formatting and dynamic image-layout bindings; the Windows command-line template remains a shared source |
 | E6 images | Existing target layout facts | ELF, Mach-O, PE, memory layout and signature construction in `enc/` |
 
 `finite_rules.py` expands declared observations, bindings and action sequences;
 it must not acquire compiler-specific predicates. The retired grammar in
 `parse/gen.py` was deleted, but that module still contains shared token reading,
-numeric output and decimal-float conversion rules as well as the generic
-assembler. `autoscan()` is also live: it recognizes definitions and header
+token-number decoding rules as well as the generic assembler. Shared
+`prn/numout/fconv` now use `parse/numeric-*` declarations; PRN and PRNW instantiate
+one rule with different widths. `autoscan()` is also live: it recognizes definitions and header
 auto-inclusion conflicts; `autonames()` extracts the corresponding header
 resources. `optext()` binds binsel/irsel results to shared tape templates.
 Those live rules also remain to be declared; calling the file “shared support”
@@ -46,9 +47,9 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 - Only then adopt the model path as the default product and update its docs.
   The current shipped `unisacc.com` has not switched.
 
-The latest rebuilt candidate, from checkpoint 29e2f57, is 5,985,519 bytes, SHA256
+The latest rebuilt candidate, from checkpoint 2273f3e, is 5,985,519 bytes, SHA256
 `19a4558210cfe1a7a1cc24e0aeeaf94e2edb2cf091725512c9eb56b2cda4cc1f`.
-It produced reference-identical hello images for six targets; four programs
+It produced reference-identical hello images for six targets; six programs, including floating arithmetic and conversions,
 at O0/O1/O2 ran identically to host cc on macOS arm64. These are bounded
 checks, not full product acceptance or cross-platform native verification.
 Exact run records are in `prd.md`. Historical prototype results must not
