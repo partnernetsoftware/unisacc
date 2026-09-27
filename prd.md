@@ -4995,3 +4995,5 @@ corpus三路线口径补全：默认Python四片216通过+4原knownfail、24.28�
 新增实际MODEL_COM客机入口tests/modelcross.py：显式hash验证、无ua_ready/classic回退、按目标独立运行、不可用rc77不算pass。代理实跑候选81c04285…在已开的Lima Linux arm64，hello/fib/整数printf三程序的模型-run及客机编译后执行全部同hostcc，guest核对hash；不称自举/全部平台。Windows已查停机，接口尚未客机验，父强制Windows --probe单例以免三例串行越过60秒预算。Linux x86停机未测，最终候选需再次选择正确hash后验。
 
 并行收口738a5ed：x86win完整固定控制迁24共享声明段，Python净减34、TSV增269；代理八种正常/动态扰动图全等，实际NET/SIM setup359B与11API 132指令2381B同参考，约束负例通过，未启动Windows。主树已合，最终整包仍待重验。另一独立线对固定81c04285候选实际编译asmcompiler.c得到N1，N1使用同候选抽出的compiler.pkg再次编译得到N2；完整Mach-O N1=N2，115746B，sha256 cebaed0a260bcffed8f61c6fa2f698ec5fadc87e1e4ba0d27d1c66ae55613f96。包6041975B，sha256 c7de2c66b3b933763601d53632a7c02f0d7b72eeb51edb5295baad4c875a61d4。N2空PATH、UNISA_KERNEL unset、显式同包，fib/printf转换O0/O2运行与native同host；缺包rc2。代理实际证据/tmp/unisacc-modelbootstrap-928；仅本机模型驱动器固定点与固定网络/内核包，不称六平台或APE容器自重建。parse2函数指针描述组仍在独立树修复，未合未完成路径。
+
+下一独立验收决定：将已合192ca2a的local_parenthesized_declarators持久探针纳入真实ASM/network资源清单，与host输出对照；主树资源与x86win验收双槽并发，原清单不减。模型驱动器自举实验证据转为显式候选输入的可重复入口，仍由独立代理负责，不改变默认产品。
