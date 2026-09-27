@@ -47,3 +47,20 @@ for token text. Source path is the route's existing source-name input.
 and compares all records and text byte for byte, including nested/repeated
 includes, forced/automatic includes, LF/CRLF continuations and macros. Its
 Python decoder is a test oracle, not part of the product route.
+
+## Token offsets (development)
+
+`exec/lex/gen.py --positions` consumes ordinary **pp.text** and emits
+**tokens.positions**: before each typed token line, including `eof`, it writes
+`@`, four little-endian offset bytes, then LF. The final `N tokens` line has
+no prefix. Offsets index the preprocessed byte buffer; EOF is its length.
+The four bytes are binary, so a consumer must not split the entire stream on
+newlines. Token spelling follows the existing tokens.typed contract.
+
+This mode implies `--typed`; ordinary/default generation is unchanged.
+Offsets are emitted by model actions from the lexer's saved start cursor,
+not reconstructed by searching for spelling. `positioncheck.py` compares
+against the reference lexer's actual `tpos` array in a scratch build, plus
+ordinary typed output after removing the fixed-size prefixes. The optional
+pp.locations envelope is still separate: connecting its text and mapping to
+this stream and E3 is remaining work, and `-Wall` is still unavailable.

@@ -201,9 +201,13 @@ A = ("ADV",)
 
 # --typed: write tokens.typed (exec/pipeline/formats.md) -- a `type` token also
 # carries its spelling, the same generic SPAN copy as id/num/str.  Default
-# output (tokens.plain) is unchanged.
-TYPED = "--typed" in sys.argv
-if TYPED:
+# output (tokens.plain) is unchanged. --positions implies typed and adds
+# fixed-size byte-offset prefixes; see tokens.positions in formats.md.
+POSITIONS = "--positions" in sys.argv
+if POSITIONS:
+    sys.argv.remove("--positions")
+TYPED = "--typed" in sys.argv or POSITIONS
+if "--typed" in sys.argv:
     sys.argv.remove("--typed")
 
 
@@ -211,12 +215,23 @@ def OUT(s):
     return [("OUT", ord(ch)) for ch in s]
 
 
+def position(reg):
+    """Optional token prefix: @, four little-endian offset bytes, newline."""
+    if not POSITIONS:
+        return []
+    acts = OUT("@")
+    for shift in (0, 8, 16, 24):
+        acts += [("ALUI", "sar", "token_position_byte", reg, shift),
+                 ("OUTW", "token_position_byte")]
+    return acts + OUT("\n")
+
+
 def emit_kind(k, span=("S", None)):
     """The -dump-tokens line of a token of kind k: name, and for id/num/str
     '=' and the spelling.  kind 1 (`type`) prints no spelling
     unless --typed."""
     name = TOKS[k]
-    acts = OUT(name)
+    acts = position(span[0]) + OUT(name)
     if k in (2, 3, 4) or (TYPED and k == 1):
         acts += OUT("=")
         acts += [("SPAN2", span[0], span[1])] if span[1] else [("SPAN", span[0])]
@@ -247,7 +262,7 @@ def handler(a, c):
     """(next, acts) for lex action `a` at byte c, i at c, c not consumed."""
     if a == "skip":
         if c == EOF:
-            return "CNT0", OUT("eof\n") + [("INC", "NT")]
+            return "CNT0", ([("MARK", "S")] if POSITIONS else []) + position("S") + OUT("eof\n") + [("INC", "NT")]
         return "DISPATCH", [A]
     if a == "nl":
         return "DISPATCH", [A]

@@ -3503,3 +3503,24 @@ Log /tmp/unisacc-sizeof-gate.log. No push/release.
   Next is model consumption/token positions and warning analysis, retaining
   header suppression and the reference's macro-expanded-column convention.
   Local commit only; no push/release. Reconstruction remains active.
+
+### E1 token positions — optional, not yet a warning route
+
+- `exec/lex/gen.py --positions` emits typed tokens with fixed-size binary
+  prefixes holding the saved token-start offset in the preprocessed buffer;
+  EOF carries the buffer length. Generic model actions perform the output;
+  no token/position logic was added to the C or assembly executor.
+- `exec/lex/positioncheck.py` builds an instrumented reference in scratch,
+  captures the actual lexer input and tpos values, and compares nine cases:
+  empty, ordinary, macro, splice, multiline comment, string/char prefixes,
+  numeric/operator lookahead, skipped attributes, and offsets above 255.
+  All pass on cc and unisacc C builds and both macOS assembly runtimes
+  (x86_64 through Rosetta), plus the Python action oracle. Logs:
+  `/tmp/unisacc-lex-position{,-ua,-arm,-x86}.log`.
+- Removing the six-byte prefix before each token yields exactly ordinary
+  typed output. Default and --typed states/action sequences are unchanged
+  from 84b18d5. exec-lexpos joins the bounded gate; no full-gate or other
+  platform claim in this batch. No product/container rebuild or switch.
+- Remaining: connect pp.locations and token offsets to E3, then implement
+  warning decisions and rendering. This does not make -Wall available;
+  CLI remains last measured 63/64. FX-3 remains an unscheduled conjecture.

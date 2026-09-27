@@ -44,6 +44,7 @@ job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
 job stages      ./tests/stages.sh examples/*.c tests/c/*.c
 job exec-chain  env CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt)   # S-17: network inference, E2/E1/E3
 job exec-pploc python3 ./exec/pp/locationcheck.py              # source-position metadata from actual preprocessing
+job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets against reference tpos
 job exec-e3self ./exec/parse2/selfcheck.sh                       # complete current compiler source -> tape
 job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal bits, table/net and host cc
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
