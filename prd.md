@@ -4913,3 +4913,11 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 第十三批父任务补充：同步迁sha256delta固定压缩/填充控制，保留src/back_image.c常量真实抽取，以共用初始化序列绑定进声明。Mach-O代理不改该文件；父最后联合验证完整封装图及FIPS/边界摘要。
 
 第十三批验收（5a7a5d3）：三代理完成constexpr76规则、statics完整块静态组、Mach-O43规则；父完成SHA固定控制33规则。Python分别+4/-30/-12/-42，共净减80；声明158/128/47/43，共新增376，总净增296。constexpr装配增加4行，明确不是代码缩减；没有另写运算控制体。五模式、levels/ops/token/enum、MAXTOK/布局及Mach-O参数扰动核对通过，实际常量/块静态/多单元网络与双架构原生镜像通过。父SHA原图及常量/W/K/fresh扰动一致；FIPS3向量与14边界输入重复摘要，查表+模拟和另一次实际net+模拟均正确（30banks/16hidden，7484观测network=table）。父合并后Mach-O两架构1819/1687状态全部观测/后继/动作同旧图。双槽6/6全rc0，29.02秒，日志/tmp/unisacc-parallel-thirteenth-gate，SHA与组合图证据/tmp/unisacc-sha-rules-928。仍保留格式字段枚举、实际常量读取、动态绑定与其他未迁控制；本批未重打包，候选仍d5dcda4。
+
+第十四批并行决定：以0a774b3隔离，VLA完整分配/作用域恢复；未解析调用扫描及未声明printf回退完整组；x86共享REX/MODRM/ALU/字节/MEM过程和分支松弛完整组。只声明替代控制，动态表/模板保留源，过程共用不按调用复制。第二路独占gen2的必要installer接口行，其他路不得改gen2；x86不改共享parse/loader。每窗8分钟、子步60秒，完整图与真实网络/编码检查后父集中验证。
+
+产品候选独立检查阻挡（d5dcda4，sha3ffcb9bd）：C99 57/57、CLI64/64、run12/12通过。父误把tools/difftest的UA参数当作切换入口；读脚本确认两者硬编码Python，队列这5项绿不算模型证据。随后对tools原11项目直接用模型候选-O2写原生镜像同cc比较，6接受却FAILED、5明确拒绝（二维数组参数/成员/typedef、void cast）。最小rot13来源已定位：合法char a[]={"abc"};经典私有UA和模型均sizeof a=1、a[0]为字符串地址低字节；cc正确sizeof4、97/98/99/0。未归罪声明迁移，参考实现本身也错，先修此真实产品差距，不扩大新迁移组。实际结果/tmp/unisacc-candidate-contract-928/tools-results.json。
+
+tools门禁入口修正决定：保留默认Python裁判路径，新增显式TOOLS_UA可执行路径以实测模型/产品；报告实际driver，编译与运行各自bound60并比较退出码。避免UA被静默忽略后把Python绿误报产品绿；沿原11条固定清单，不增测试框架。
+
+字符初始化修复并行收敛：C根数组修复d92477f、模型根数组796d87e及二维行768809c已合入。模型二维行复用STRINGINIT/INITADDR，Python零新增；实际ARCFOUR通过。C二维行待独立审查提出的整行范围检查补齐后合入，不以已有正例代替边界检查。下一并行只针对真实tools拒绝：void转换实现、二维参数/成员/typedef共用维度通路只读定位。tools入口两路实跑：默认Python11/11；旧模型候选0/11（6错误5拒绝），如实保留。TOOLS_UA已加入队列输入指纹，切换被测编译器不能复用原队列结果。

@@ -64,6 +64,15 @@ command -v cc >/dev/null || { echo "tools: no system compiler -- skipped"; exit 
 
 # The reference VM is a Python loop and these run 100,000 rounds, so a real
 # image is the only way to run them -- which is also the stronger check.
+# Explicit compiler selection: UA alone does not select this historically Python suite.
+compile_tool() {
+    if [ -n "${TOOLS_UA:-}" ]; then
+        bound 60 "$TOOLS_UA" "$@" -b "$HOST"
+    else
+        bound 60 python3 -m unisa compile "$@" --target "$HOST"
+    fi
+}
+echo "tools driver: ${TOOLS_UA:-python3 -m unisa compile}"
 pass=0; wrong=0; unsup=0; skip=0
 : > "$T/passing"
 # a redirect, not a pipe: the loop must run in THIS shell or the
@@ -77,22 +86,25 @@ while IFS= read -r e; do
     dir=$CACHE/$repo
     src=""
     for f in $rel; do src="$src $dir/$f"; done
-    if ! cc -std=c99 -w -I"$dir" -o "$T/ref" $src 2>/dev/null; then
+    if ! bound 60 cc -std=c99 -w -I"$dir" -o "$T/ref" $src 2>/dev/null; then
         skip=$((skip+1))
         printf "  skip %-9s the system compiler will not build it either\n" "$name"
         continue
     fi
-    want=$("$T/ref" 2>&1)
-    if ! python3 -m unisa compile $src -I "$dir" -o "$T/got" \
-            --target "$HOST" >/dev/null 2>"$T/err"; then
+    want=$(bound 60 "$T/ref" 2>&1); wrc=$?
+    if [ "$wrc" -ge 128 ]; then
+        wrong=$((wrong+1)); printf "  WRONG %-9s reference exited %s\n" "$name" "$wrc"
+        continue
+    fi
+    if ! compile_tool $src -I "$dir" -o "$T/got" >/dev/null 2>"$T/err"; then
         unsup=$((unsup+1))
         printf "  UNS  %-9s %s\n" "$name" "$(head -1 "$T/err" | cut -c1-58)"
         continue
     fi
     chmod +x "$T/got"
-    command -v codesign >/dev/null && codesign -f -s - "$T/got" >/dev/null 2>&1
-    got=$("$T/got" 2>&1)
-    if [ "$got" = "$want" ]; then
+    command -v codesign >/dev/null && bound 60 codesign -f -s - "$T/got" >/dev/null 2>&1
+    got=$(bound 60 "$T/got" 2>&1); grc=$?
+    if [ "$grc" -lt 128 ] && [ "$grc" -eq "$wrc" ] && [ "$got" = "$want" ]; then
         pass=$((pass+1)); echo "$name" >> "$T/passing"
         printf "  ok   %-9s %s\n" "$name" "$(printf '%s' "$got" | tail -1 | cut -c1-48)"
     else
