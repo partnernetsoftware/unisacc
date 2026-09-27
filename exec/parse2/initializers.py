@@ -24,7 +24,8 @@ def install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT,
     P('IM.next').a(('ALU','add','im_first','im_first','im_count'),('ALUI','add','im_n','im_n',1)).goto('IM.loop')
     # Root context: dimensions describe arrays; a struct describes its members.
     p=P('INITLIST').a(('LDX','ivt','ivv',E.PTR),('LDX','ivb','ivv',E.BASE),('LDX','iar','ivv',E.ARR),
-        ('LDX','isl','ivv',LOC),('LDI','ix',0),('LDI','ioff',0),('COPYW','td','ivt'),('COPYW','tb','ivb'))
+        ('LDX','isl','ivv',LOC)).goto('INITVALUE')
+    p=P('INITVALUE').a(('LDI','ix',0),('LDI','ioff',0),('COPYW','td','ivt'),('COPYW','tb','ivb'))
     p.branch({1:'IL.root'},'IL.arraytype',[('CMPI','iar',0)])
     P('IL.arraytype').a(('ALUI','sub','td','td',1)).goto('IL.root')
     p=P('IL.root').call('TYPECOUNT').a(('COPYW','ip_per','flat')).call('ELSZ').a(
