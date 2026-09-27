@@ -1,4 +1,4 @@
-"""Shared string-span, initializer and parameterized byte-walk rules in TSV."""
+"""Shared narrow/wide string spans, initialization and code-point walks in TSV."""
 from pathlib import Path
 from finite_rules import install as install_rules
 
@@ -28,7 +28,7 @@ def initializer(E, P, esc):
 
 def walk(E, P, esc, pre, body, done):
     bindings = {'walk'+suffix.replace('.', '_'): pre+suffix for suffix in
-                ('', '.w', '.es', '.gap', '.hex', '.hexend', '.oct', '.octstep')}
+                ('', '.w', '.es', '.gap', '.hex', '.hexend', '.oct', '.octstep', '.start', '.quote', '.setup', '.setup_test', '.wide', '.char', '.char_test', '.rawbyte', '.utf', '.cont', '.contstep', '.contstep_test', '.min', '.min_test', '.max', '.max_test', '.surrogate', '.surrogate_test', '.surrogateend', '.surrogateend_test', '.bad')}
     bindings.update(body=body, done=done)
     # Keep adjacent-prefix rejection before escape rejection for error-message numbering.
     rules(E, P, 'walk_head', bindings)

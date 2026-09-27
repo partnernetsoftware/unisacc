@@ -291,7 +291,9 @@ def printf(warnings=False):
     p.tok({"eof": "RET", TK_ID: "PO.id", E.TK_STR: "PO.lit"}, "PO.nx")
     P("PO.lit").a(("LDX", "t", "tpos", SKIPS)).branch({1: "PO.nx"}, "PO.lit1", [("CMPI", "t", 1)])
     P("PO.lit1").a(("LDI", "cnt", 0)).goto("PL")
-    strwalk("PL", "PL.b", "PL.end")
+    strwalk("PL", "PL.cp", "PL.end")
+    from strings import rules as string_rules
+    string_rules(E, P, "wide_hooks")
     q = P("PL.b")
     q.branch({1: "PL.open"}, "PL.byte", [("CMPI", "cnt", 0)])
     q = P("PL.open")
@@ -299,16 +301,17 @@ def printf(warnings=False):
     P("PL.byte").a(("ALUI", "add", "cnt", "cnt", 1), ("RLD", "bv")).goto("PL.out")
     for c in range(256):
         if c in (34, 92):
-            g.on("PL.out", [c], "PL.w", [("OUT", 92), ("OUT", c)], "r")
+            g.on("PL.out", [c], "PL.resume", [("OUT", 92), ("OUT", c)], "r")
         elif 32 <= c < 127:
-            g.on("PL.out", [c], "PL.w", [("OUT", c)], "r")
+            g.on("PL.out", [c], "PL.resume", [("OUT", c)], "r")
         else:
-            g.on("PL.out", [c], "PL.w", [("OUT", 92), ("OUT", ord("x")), ("OUT", ord(HEX[c >> 4])), ("OUT", ord(HEX[c & 15]))], "r")
+            g.on("PL.out", [c], "PL.resume", [("OUT", 92), ("OUT", ord("x")), ("OUT", ord(HEX[c >> 4])), ("OUT", ord(HEX[c & 15]))], "r")
     q = P("PL.end")     # an empty literal still has its \x00
     q.branch({1: "PL.e0"}, "PL.e1", [("CMPI", "cnt", 0)])
     q = P("PL.e0")
     emit(q, "pool_open").goto("PL.e1")
-    q = P("PL.e1")
+    P("PL.e1").goto("PL.zero")
+    q = P("PL.close")
     emit(q, "pool_close").a(("ALUI", "add", "sk", "sk", 1), ("LDI", "cnt", 0)).call("POOL.next").goto("PO.l")
     P("PO.nx").call("POOL.next").goto("PO.l")
     P("PO.id").a(("LDX","ufblob","ps",FNSTR)).branch({1:"PO.idnormal"},"PO.func",[("CMPI","ufblob",0)])
@@ -318,7 +321,7 @@ def printf(warnings=False):
     for byte in range(256):
         spelling=chr(byte) if 32<=byte<127 and byte not in (34,92) else ("\\"+chr(byte) if byte in (34,92) else "\\x%02x"%byte)
         g.on("PO.funcbyte",[byte],"PO.funcbyte",[("OUT",ord(c)) for c in spelling]+[("ADV",)])
-    P("PO.funcend").o("\\x00").goto("PL.e1")
+    P("PO.funcend").o("\\x00").a(("LDI","dw",1)).goto("PL.e1")
     P("PO.pf0").a(("LDX", "t", "pfid", E.FND)).branch({1: "PO.nx"}, "PO.pf", [("CMPI", "t", 1)])   # a real printf: its format pools whole
     P("PO.pf").call("POOL.next").tok({"(": "PO.p1"}, "PO.l")
     P("PO.p1").call("POOL.next").tok({E.TK_STR: "PO.s"}, "PO.l")
@@ -692,8 +695,8 @@ def build(locations=False, warnings=False, errors=False):
     p = P("CHARR")
     p.a(("LDI", "u", 0), ("ALU", "or", "t", "gar", "dar")).branch({1: "RET"}, "CH.1", [("CMPI", "t", 0)])
     P("CH.1").branch({1: "CH.2"}, "RET", [("CMPI", "td", 0)])
-    P("CH.2").branch({1: "CH.y"}, "CH.3", [("CMPI", "tb", 1)])
-    P("CH.3").branch({1: "CH.y"}, "RET", [("CMPI", "tb", UNS + 1)])
+    P("CH.2").branch({1: "CH.narrow"}, "CH.3", [("CMPI", "tb", 1)])
+    P("CH.3").branch({1: "CH.narrow"}, "CH.wide", [("CMPI", "tb", UNS + 1)])
     P("CH.y").a(("LDI", "u", 1)).ret()
     p = P("GV.bi")
     p.a(("OLEN", "gi_out"), ("COPYW", "gi_pos", "tpos"), ("INTERN", "ivv", "fns", "fne"), ("LDI", "imode", 1),
@@ -1156,7 +1159,7 @@ def build(locations=False, warnings=False, errors=False):
     P("X.call").call("U.call").call("C%d" % LEVELS[0]).call("QTAIL").ret()
     ladder("E", "UNARY")
     ladder("C", None)
-    P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("LDI", "vb", 1), ("LDI", "rkok", 0)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "POSTIX")
+    P("U.str").o("  .lea r0, S").num("sk").o("\n").a(("ALUI", "add", "sk", "sk", 1), ("ALUI", "add", "lab", "lab", 1), ("LDI", "vt", 1), ("COPYW", "vb", "sw"), ("LDI", "rkok", 0)).call("NEXT").tok({E.TK_STR: "DEAD.adj"}, "POSTIX")
     g.on("DEAD.adj", range(257), "DEAD", E.rej("not covered: adjacent string literals"), "r")
     q = P("U.cpl")       # ~x: imm r1, -1; xor64 (measured); the operand's type is kept
     q.call("NEXT").call("UNARY").call("NODBL0").o("  imm r1, -1\n  xor64 r0, r0, r1\n").branch({1: "NARU"}, "RET", [("CMPI", "vb", UNS + 4)])
@@ -1238,13 +1241,13 @@ def build(locations=False, warnings=False, errors=False):
     P("SZ.literal").a(("LDI","szlit",1)).goto("SZ.lwalk")
     strwalk("SZ.lwalk","SZ.lbyte","SZ.lend")
     P("SZ.lbyte").a(("ALUI","add","szlit","szlit",1)).goto("SZ.lwalk.w")
-    P("SZ.lend").call("NEXT").goto("SZ.lclose")
+    P("SZ.lend").a(("ALU","mul","szlit","szlit","dw")).call("NEXT").goto("SZ.lclose")
     P("SZ.lclose").branch({1:"SZ.ltail"},"SZ.lparen",[("CMPI","szlp",0)])
     P("SZ.lparen").tok({")":"SZ.lpop"},"SZ.general")
     P("SZ.lpop").a(("ALUI","sub","szlp","szlp",1)).call("NEXT").goto("SZ.lclose")
     P("SZ.ltail").tok({k:"SZ.general" for k in ("[","(",".","->","++","--")},"SZ.lvalue")
     P("SZ.lvalue").a(("COPYW","sz","szlit"),("ALUI","add","sk","sk",1),("ALUI","add","lab","lab",1)).goto("SZ.exprout")
-    P("SZ.general").a(("JUMP","szpos"),("OLEN","szmark")).vpush("szmark","si_active").a(("LDI","si_active",0)).call("NEXT").call("UNARY").vpop("szmark","si_active").a(("OCUT","szdiscard","szmark")).branch({1:"SZ.exprsize"},bad("sizeof non-scalar expression"),[("CMPI","vt",0)])
+    P("SZ.general").a(("JUMP","szpos"),("OLEN","szmark")).vpush("szmark","si_active").a(("LDI","si_active",0)).call("NEXT").call("UNARY").vpop("szmark","si_active").a(("OCUT","szdiscard","szmark")).branch({(1,2):"SZ.exprsize"},bad("sizeof non-scalar expression"),[("CMPI","vt",0)])
     P("SZ.exprsize").a(("COPYW","td","vt"),("COPYW","tb","vb")).call("ELSZ").a(("COPYW","sz","es")).goto("SZ.exprout")
     P("SZ.exprout").o("  imm r0, ").num("sz").o("\n").a(("LDI","vt",0),("LDI","vb",UNS + 8)).ret()
     g.on("DEAD.szx", range(257), "DEAD", E.rej("not covered: sizeof operand"), "r")
