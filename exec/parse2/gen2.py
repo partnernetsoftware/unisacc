@@ -424,6 +424,12 @@ BOOL = 66  # distinct value kind; arithmetic maps to tyinfo u8
 assert len({BOOL, DBL, FLT, FPB, FPV}) == 5 and FPV < SBB
 TYPEW = {"type=_Bool": BOOL, "type=float": FLT, "type=double": DBL, "type": E.SZ["int"], "type=char": E.SZ["char"], "type=short": E.SZ["short"], "type=long": E.SZ["long"], "type=void": 0}
 TWORDS = tuple(TYPEW) + ("type=unsigned", "type=signed")
+ENUM_FIRST = 69
+ENUM_CAPACITY = FPS_FIRST - ENUM_FIRST
+ENUM_STATE, TAG_EPOCH = 63 << 40, 64 << 40
+assert FPS_PSH + SBB * 16 < ENUM_STATE < TAG_EPOCH
+assert ENUM_CAPACITY > 0 and max([BOOL, DBL, FLT, FPB, FPV] + [code for _, code, *_ in TYINT]) < ENUM_FIRST
+assert FPS_FIRST < SBB and SBB + STRUCT_MAX < 4096
 
 
 def width_dispatch(name, tape, masks=False):
@@ -431,7 +437,7 @@ def width_dispatch(name, tape, masks=False):
                 (("entry", ""), ("base", ".b"), ("double", ".d"), ("float", ".f"),
                  ("f32", ".f32"), ("wide", ".8"), ("number", ".n"), ("bool", ".bool"), ("integer", ".integer"))}
     bindings.update((key + "_test", P(bindings[key]).fresh("b")) for key in ("entry", "base", "double", "float", "number"))
-    bindings.update(DBL=DBL, FLT=FLT, BOOL=BOOL, SBB=SBB)
+    bindings.update(DBL=DBL, FLT=FLT, BOOL=BOOL, SBB=SBB, entry=name + ".enumraw")
     seq = {"wide": O(TYPE_TAPE[tape + "8"]), "float": O(TYPE_TAPE[tape + "n"] % TYINFO["f32"][0]),
            "bool": O(TYPE_TAPE[tape + "n"] % 1 + (TYPE_TAPE["mask"] % 255 if masks else ""))}
     install_rules(g, os.path.dirname(__file__), "width", bindings=bindings, sequences=seq, section="prefix")
@@ -618,10 +624,12 @@ def build(locations=False, warnings=False, errors=False):
         p.a(("SBCLR",), [("SBOUT", c) for c in nm.encode()], ("SBINTERN", "t"), ("LDI", "u", 1), ("STX", "t", E.AUT, "u"))
     p.call("AUTO").a(("JUMP", "x0")).call("INDEX").a(("JUMP", "x0")).o(E.HEADER).call("NEXT").label("UNIT")
     p.tok({**{w: "FN" for w in TWORDS}, "eof": "END", "typedef": "TD", "type=static": "TOP.st", "type=extern": "TOP.st", TK_ID: "TOP.id", "struct": "FN", "union": "FN", "enum": "FN"}, bad("top-level construct"))
+    from enumtypes import install as enum_install
+    enum_install(E, P, dict(ENUM_FIRST=ENUM_FIRST, ENUM_LIMIT=FPS_FIRST, ENUM_STATE=ENUM_STATE, TAG_EPOCH=TAG_EPOCH,
+                           ETAG=ETAG, TAGLEVEL=TAGLEVEL, STAG=STAG, INT=TYINFO["i32"][0],
+                           FPS_FN=FPS_FN, FPS_PARAM=FPS_PARAM),
+                 [TK[w] for w in TWORDS if w != "type=void"])
     # enum is a type specifier in both declarations and typedefs.
-    P("ENUM").a(("LDI", "entag", 0)).call("NEXT").tok({TK_ID: "EN.tag", "{": "EN.b"}, bad("enum"))
-    P("EN.tag").a(("INTERN", "entag", "ps", "pe")).call("NEXT").tok({"{": "EN.register"}, "EN.reference")
-    P("EN.register").a(("COPYW", "tg", "entag")).call("TAG.bind").a(("LDI", "u", 1), ("STX", "entag", ETAG, "u")).goto("EN.b")
     p = P("EN.b")
     p.a(("LDI", "env", 0), ("LDI", "type_enum", 1)).call("NEXT").label("EN.l")
     p.tok({TK_ID: "EN.id", "}": "EN.e"}, bad("enum"))
@@ -735,7 +743,7 @@ def build(locations=False, warnings=False, errors=False):
     P("GV.e2").a(("ALUI", "add", "t", "t", 1)).call("DIMSAVE").goto("GV.e1")
     P("GV.e1").a(("STX", "v", E.PTR, "t")).call("GV.aliassave").ret()
     shape_control("global-binding")
-    P("ELSZ").branch({1: "ELSZ.b0"}, "ELSZ.8", [("CMPI", "td", 0)])
+    P("ELSZ.enumraw").branch({1: "ELSZ.b0"}, "ELSZ.8", [("CMPI", "td", 0)])
     P("ELSZ.b0").branch({(1, 2): "ELSZ.st"}, "ELSZ.b", [("CMPI", "tb", SBB)])
     P("ELSZ.st").a(("ALUI", "sub", "t", "tb", SBB), ("LDX", "es", "t", SSZ)).branch({1: "DEAD.inc"}, "RET", [("CMPI", "es", 0)])
     g.on("DEAD.inc", range(257), "DEAD", E.rej("not covered: incomplete struct"), "r")
@@ -756,7 +764,7 @@ def build(locations=False, warnings=False, errors=False):
     p.goto("FN.params")
     p = P("FN.params")
     p.call("NEXT").a(("LDI", "pk", 0), ("LDI", "vfn", 0))
-    p.tok(dict({")": "FN.body", "type=void": "FN.void", TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par"}, **{w: "FN.par" for w in TWORDS if w != "type=void"}), bad("parameter"))
+    p.goto("EN.firstparam")
     P("FN.void").a(("LDI", "par_abstract", 0)).call("TSPEC").tok({")": "FN.vend", TK_ID: "FN.pid", "(": "FN.pfp", ",": "FS.voidparam"}, bad("parameter"))
     P("FN.vend").branch({1: "FN.body"}, "FN.unnamed", [("CMPI", "td", 0)])
     P("FN.ptk").call("ISTD").branch({1: "FN.par"}, bad("parameter"))
@@ -791,7 +799,7 @@ def build(locations=False, warnings=False, errors=False):
     p.a(("LDI", "dsz", 8), ("LDI", "dar", 0)).call("DECL").a(("STX", "pk", PIDS, "v")).call("FN.shape")
     p.a(("ALUI", "add", "pk", "pk", 1)).tok({",": "FN.pn", ")": "FN.body"}, bad("parameter"))
     shape_control("descriptor-storage")
-    P("FN.pn").call("NEXT").tok({**{w: "FN.par" for w in TWORDS}, TK_ID: "FN.ptk", "struct": "FN.par", "union": "FN.par", "...": "FN.dots"}, bad("parameter"))
+    P("FN.pn").call("NEXT").goto("EN.nextparam")
     p = P("FN.body")
     p.call("FS.COUNT").call("NEXT").branch({1: "BP.end"}, "FN.body0", [("CMPI", "sigmode", 1)])
     P("FN.body0").branch({1: "FN.fpclose"}, "FN.bodykind", [("CMPI", "fn_fpwrap", 1)])
@@ -802,7 +810,7 @@ def build(locations=False, warnings=False, errors=False):
     p.a(("LDI", "sv", 0)).call("UNWIND").a(("INTERN", "v", "fns", "fne"), ("LDX", "t", "v", E.FND)).branch({1: "FN.pr1"}, "FN.pr0", [("CMPI", "t", 1)])
     P("FN.pr0").a(("LDI", "t", 0), ("STX", "v", E.FND, "t")).goto("FN.pr1")
     structured_control("parameter-declarators", False)
-    p = P("FN.def")      # the return label is taken here: a prototype takes none (measured)
+    p = P("FN.def.enumraw")      # the return label is taken here: a prototype takes none (measured)
     # more than six parameters: all of them come on the tape stack, as for a variadic function (measured, b_args8)
     p.branch({2: "FN.many"}, "FN.def1", [("CMPI", "pk", 6)])
     P("FN.many").a(("LDI", "vfn", 1)).goto("FN.def1")
@@ -891,7 +899,7 @@ def build(locations=False, warnings=False, errors=False):
     P("BP.end").branch({2: "BP.many"}, "BP.put", [("CMPI", "pk", 6)])
     P("BP.many").a(("LDI", "vfn", 1)).goto("BP.put")
     P("BP.named").a(("INTERN", "v", "fns", "fne"), ("STX", "v", E.VAR, "vfn")).ret()
-    P("S.dd").call("DECLN").call("S.aliassave").tok({"=": "S.din", ",": "S.dcm"}, "S.dend")
+    P("S.dd.enumraw").call("DECLN").call("S.aliassave").tok({"=": "S.din", ",": "S.dcm"}, "S.dend")
     shape_control("local-binding")
     P("S.dend").expect(";").call("NEXT").ret()
     install_rules(g, os.path.dirname(__file__), "local-declarators",
@@ -1091,7 +1099,7 @@ def build(locations=False, warnings=False, errors=False):
     P("NODBL.r2").branch({1: "DEAD.dbl"}, "RET", [("CMPI", "vt", 0)])
     g.on("DEAD.dbl", range(257), "DEAD", E.rej("not covered: double operand"), "r")
     # NARU: an unsigned char/short result masked back before its store (measured, p46); others as they are
-    P("TAX").branch({(1, 2): "TAX.p"}, "TAX.0", [("CMPI", "vt", 1)])
+    P("TAX.enumraw").branch({(1, 2): "TAX.p"}, "TAX.0", [("CMPI", "vt", 1)])
     P("TAX.p").a(("LDI", "ax", AX.index("ptr"))).ret()
     q = P("TAX.0")
     for code, name in ((1, "i8"), (2, "i16"), (4, "i32"), (8, "i64"), (UNS + 1, "u8"), (UNS + 2, "u16"), (UNS + 4, "u32"), (UNS + 8, "u64"),
@@ -1112,7 +1120,7 @@ def build(locations=False, warnings=False, errors=False):
         q = P(bindings["next"])
     bindings["current"] = q.cur
     install_rules(g, os.path.dirname(__file__), "conversion", bindings=bindings, section="unsigned-end")
-    P("STEPTY").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
+    P("STEPTY.enumraw").a(("LDI", "stp", 1)).branch({1: "STY.s"}, "STY.p", [("CMPI", "vt", 0)])
     P("STY.s").branch({1: "RET"}, "STY.s0", [("CMPI", "vb", BOOL)])
     P("STY.s0").branch({1: "DEAD.nint"}, "STY.s1", [("CMPI", "vb", 0)])
     P("STY.s1").branch({(0, 1): "RET"}, "STY.s2", [("CMPI", "vb", 8)])
@@ -1633,11 +1641,11 @@ def build(locations=False, warnings=False, errors=False):
     q.a(("ALUI", "add", "vi", "vi", 1), ("ALUI", "sub", "vj", "vj", 1)).goto("CL.vsw")
     q = P("CL.vend")
     q.vpop("call_sig", "cls", "cle", "sys").a(("ALUI", "mul", "t", "na", 8)).branch({1: "CL.vdirect"}, "CL.vindirect", [("CMPI", "sys", 200)])
-    P("CL.vindirect").o("  load64 r5, [r7+").num("t").o("]\n  callr r5\n  .frame -").a(("ALUI", "add", "t", "na", 1), ("ALUI", "mul", "t", "t", 8)).num("t").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("FS.RESULT").call("NEXT").ret()
+    P("CL.vindirect").o("  load64 r5, [r7+").num("t").o("]\n  callr r5\n  .frame -").a(("ALUI", "add", "t", "na", 1), ("ALUI", "mul", "t", "t", 8)).num("t").o("\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("FS.RESULT").call("EN.VALUE").call("NEXT").ret()
     q = P("CL.vdirect")
     q.o("  call ").a(("SPAN2", "cls", "cle")).o("\n  .frame -").num("t").o("\n")
     if warnings: q.a(("LDI", "wi_called", 1))
-    q.a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("NEXT").ret()
+    q.a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB)).call("EN.VALUE").call("NEXT").ret()
     p = P("CL.done1")
     p.a(("COPYW", "nar", "na")).branch({2: "DEAD.na"}, "CL.pop", [("CMPI", "na", 6)])
     g.on("DEAD.na", range(257), "DEAD", E.rej("not covered: more than 6 arguments"), "r")
@@ -1649,7 +1657,7 @@ def build(locations=False, warnings=False, errors=False):
     p = P("CL.emit")
     p.vpop("call_sig", "cls", "cle", "sys").branch({1: "CL.call"}, "CL.s100", [("CMPI", "sys", 0)])
     P("CL.s100").branch({1: "CL.callr"}, "CL.sysz", [("CMPI", "sys", 100)])
-    P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("FS.RESULT").call("NEXT").ret()
+    P("CL.callr").o("  load64 r5, [r7+0]\n  .frame -8\n  callr r5\n").a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("FS.RESULT").call("EN.VALUE").call("NEXT").ret()
     # a syscall: r(n)..r(w-1) zeroed, then `.sys NAME, r0, r1, r2` (w 3) or `.sys6 NAME, r0..r5`
     for k, (_, sc, w) in enumerate(SYSCALLS, 1):
         nx = "CL.w%d" % (k + 1) if k < len(SYSCALLS) else "DEAD"
@@ -1662,7 +1670,7 @@ def build(locations=False, warnings=False, errors=False):
         P("CL.x%d" % k).o("  .sys%s %s, %s\n" % ("6" if w == 6 else "", sc, regs)).a(("LDI", "vt", 0), ("LDI", "vb", 8)).call("NEXT").ret()   # a call's value is an i64 (pf_call)
     p = P("CL.call")
     if warnings: p.a(("LDI", "wi_called", 1))
-    emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB), ("LDX", "call_sig", "v", FPS_FN)).call("FS.result.shape").a(("LDI", "fp_abi_wide", 0)).call("NEXT").ret()
+    emit(p, "call").a(("INTERN", "v", "cls", "cle"), ("LDX", "vt", "v", E.FRD), ("LDX", "vb", "v", E.FRB), ("LDX", "call_sig", "v", FPS_FN)).call("FS.result.shape").a(("LDI", "fp_abi_wide", 0)).call("EN.VALUE").call("NEXT").ret()
     ud_install(E, P)
     start = "START"
     if locations:
