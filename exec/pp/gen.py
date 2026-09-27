@@ -19,8 +19,8 @@ each pass reading x and writing o, SWAP between passes:
 
 NOT covered (the delta rejects with a `not covered: ...` code, never guesses):
 unterminated _Pragma calls; more than MAXP parameters; general punctuator/literal ## operands
-(the identifier/digit and object-like `# ## #` forms are covered);
-# / ## bodies on an #if line.
+(the identifier/digit and object-like `# ## #` forms are covered).
+#if lines reuse P4 macro expansion before typed constant evaluation.
 autoinc() (P2, the on-demand header prepend) is modelled: build_autoinc,
 its trigger names read from include/*.h (E2_AUTOINC=0 builds without it).
 Also not modelled: #pragma push_macro/pop_macro
@@ -239,7 +239,7 @@ def xe_init():
 
 
 def build_xe(g):
-    layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'XUB', 'F_ACT', 'F_UP', 'FSZ', 'MACB', 'F_TO', 'F_FN', 'F_HASH', 'F_BODY']}
+    layout = {name: globals()[name] for name in ['XOB', 'XVB', 'XPB', 'XPRB', 'XUB']}
     layout["XOB_PREV"] = XOB - 1
     layout.update(("PREC_" + str(c), p) for c, (_, p, _) in XOPS.items())
     from unisa.front.lex import ESC
