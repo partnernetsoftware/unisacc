@@ -3,7 +3,13 @@ ARM shares setup and syscalls, with its own transition peepholes.
 regmap/enc/abi/reloc are read from TSV; no reference lower() is run by generator.
 """
 from pathlib import Path
-OP, KIND, AC, ARG, TXT, REG, FORM = (i*10**6 for i in range(105,112))
+# Operand rows use eight slots each; large tapes must not overlap token text.
+# Match the sparse 64-bit namespaces already used by the data-layout tables.
+# Each [i<<40, (i+1)<<40) region has 2^40 slots. The executor has int-sized
+# input: buffered rows fit 2^30 slots; their eight-wide ARG offsets fit 2^33.
+# Interned tokens (TXT/REG/FORM) fit 2^31 slots; low PRN scratch and data.py
+# regions 1..8 are disjoint. ARG index arithmetic uses A64/A64I in every reader.
+OP, KIND, AC, ARG, TXT, REG, FORM = (i << 40 for i in range(105,112))
 
 
 def rows(name):

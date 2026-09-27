@@ -28,7 +28,7 @@ def immediate(E, ids, OP, KIND, ARG, TXT):
     # instantiate one shared reader from the current SHAPE order and fields.
     shapes = {('r','r','r'), ('r','r'), ('r','i'), ('r','s'), ('r','r','i'), ('r','r','i','i')}
     current = 'AI.shape'
-    initial = [('LDX','so','si',OP), ('ALUI','mul','sj','si',8)]
+    initial = [('LDX','so','si',OP), ('A64I','mul','sj','si',8)]
     for i, (op, shape) in enumerate((o,s) for o,s in SHAPE.items() if s in shapes and o != '.write'):
         read, nxt = 'AI.read'+str(i), 'AI.next'+str(i)
         test = E.P(current).fresh('b')

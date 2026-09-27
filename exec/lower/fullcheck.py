@@ -70,4 +70,7 @@ def main():
                     sexts=[tuple(i.args) for i in parse_tins(r.stdout.decode()).code if i.op=='sext']
                     assert sexts==[('x1','x2',1),('x1','x2',2),('x1','x2',4)],sexts
             print('lower full',name,n,'instructions equal; executors',len(commands),flush=True)
+        if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
+            subprocess.run([sys.executable, 'exec/lower/largecodecheck.py', sys.argv[1], sys.argv[2]],
+                           check=True, timeout=45)
 if __name__=='__main__':main()
