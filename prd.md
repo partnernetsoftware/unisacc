@@ -5069,3 +5069,5 @@ sizeof组0999ad5已交待父队列冻结结束后合；全图10组同、6旧prob
 父固定a1115126候选15项产品队列全部rc0（/tmp/unisacc-controls-product-928），包括C99 57/57、CLI64、ccparity53+known1、closure48镜像同/8运行、diag14、diagunits18、formatonce5、hostile21、multi、parserbounds8、run12、staticinit9拒绝、staticunits、tagforward15拒绝、tools11。单槽与代理重型验证并行，6窗口32.84/18.15/16.94/15.54/14.83/48.29秒；无超时/失败，最后rc0。此证据仅该固定候选；队列结束后才批合d96bf3a浮点常量与0999ad5 sizeof，未称新源已重建为同一包。E4 unitlocations接槽1，E3 warnings槽2，E5 return/表达式静态处理中。
 
 unitlocations 7a9c3bd已合：普通/located与布局扰动全图相同，原实际NET序列化/UTF8/诊断及17坏帧检查通过。下一E4完整tokenlocations DL读取组，保留MAP_FIELDS顺序与调用者ready/ordinal/token_record/multi接口。父独立处理parse/gen.py tokenizer的终端/qualifier/default策略声明化，prefix trie仍由动态WORDS/TK/qualifiers装配；仅此文件域，不动其他代理模块，先对tokenizer完整有限观察表比对，不运行重型构图抢槽。
+
+父tokenizer策略已迁token-policy.tsv与token-prefixes.tsv，WORDS/TK/qualifiers仍动态构造前缀trie。原普通完整240状态/61680观察、新增词表和qualifier及token编号扰动250状态/64250观察，旧新每个后继/展开动作完全相同，两次各约0.10秒；/tmp/unisacc-token-policy-928。只验共享reader有限图，未外推完整编译；Python加入通用规则绑定而非新词法分支，末尾/qualifier/word/span策略由声明提供。

@@ -91,26 +91,33 @@ def rej(k):
 
 # ---- the token reader: a byte trie over the dump's lines -------------------
 def tokenizer(qualifiers=("type=const", "type=volatile")):
+    from pathlib import Path
+    from finite_rules import load as load_rules
+    spans = dict(line.split("\t") for line in Path(HERE, "token-prefixes.tsv").read_text().splitlines() if line and not line.startswith("#"))
+    def policy(section, state="NEXT", target="NX", token=TK_OTHER, domain=range(257), mode="b"):
+        rules = load_rules(Path(HERE, "token-policy.tsv"), {}, domain=domain,
+                           bindings=dict(state=state, target=target, token=token), section=section)
+        for name, row in rules.items():
+            for key, (nxt, acts) in row.items(): g.on(name, [key], nxt, acts, mode)
     pre = {""}
-    for w in WORDS + ["id=", "num=", "str="] + list(qualifiers):
+    for w in WORDS + list(spans) + list(qualifiers):
         for i in range(1, len(w) + 1):
             pre.add(w[:i])
-    g.on("NEXT", range(257), "NX", [("MARK", "tpos")], "r")
+    policy("entry", mode="r")
     for p in sorted(pre):
         st = "NX" + p
-        if p in ("id=", "num=", "str="):
-            g.on(st, range(257), {"id=": "SPANID", "num=": "SPANNUM", "str=": "SPANSTR"}[p], [("MARK", "ps")], "r")
+        if p in spans:
+            policy("span", st, spans[p], mode="r")
             continue
         for b in range(256):
             c = chr(b)
             if p + c in pre:
                 g.on(st, [b], "NX" + p + c, [("ADV",)])
         if p in qualifiers:   # declaration-only token, skipped by this reader
-            g.on(st, [10], "NEXT", [("ADV",)])
+            policy("qualifier", st, domain=[10])
         elif p in TK:
-            g.on(st, [10], "RET", [("ADV",), ("LDI", "tk", TK[p])])
-        g.on(st, [256], "DEAD", rej("not covered: truncated token dump"))
-        g.els(st, "SKIPO", [("LDI", "tk", TK_OTHER)])
+            policy("word", st, token=TK[p], domain=[10])
+        policy("tail", st)
     from finite_rules import install as install_rules
     bindings = {name: globals()[name] for name in ("TK_ID", "TK_STR", "TK_NUM", "TK_BADNUM")}
     # Derive each pre-multiply bound from the integer domain, never frozen answers.
