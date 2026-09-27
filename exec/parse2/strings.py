@@ -1,6 +1,6 @@
 """Shared narrow/wide string spans, initialization and code-point walks in TSV."""
 from pathlib import Path
-from finite_rules import install as install_rules
+from finite_rules import install as install_rules, load as load_rules
 
 
 def rules(E, P, section, bindings=None, owner=None):
@@ -33,7 +33,11 @@ def walk(E, P, esc, pre, body, done):
     # Keep adjacent-prefix rejection before escape rejection for error-message numbering.
     rules(E, P, 'walk_head', bindings)
     # Only escape-map data is materialized here; digits/x retain their reserved forms.
+    reserved = {int(byte) for line in Path(__file__).with_name('strings-escape-policy.tsv').read_text().splitlines()[1:]
+                for byte in line.split('\t')[1].split(',')}
     for ch, value in esc.items():
-        if ch not in '01234567x':
-            E.g.on(pre+'.es', [ord(ch)], body, [('ADV',), ('LDI','bv',value)])
+        if ord(ch) not in reserved:
+            for state, row in load_rules(Path(__file__).with_name('strings-byte.tsv'), {}, domain=[ord(ch)],
+                    bindings=dict(bindings, escape_value=value), section='walk_escape').items():
+                for byte, (target, actions) in row.items(): E.g.on(state, [byte], target, actions)
     rules(E, P, 'walk_tail', bindings, owner=pre.split('.')[0])
