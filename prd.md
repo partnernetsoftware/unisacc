@@ -4881,3 +4881,7 @@ E4固定控制来源收尾实测（e7e15cf）：build外层及lit/regnum迁入ro
 父复核剩余源发现清单遗漏：parse/gen.py删除的是退休语法副本，仍有现用tokenizer/prn/numout/fconv规则；units.py实际调用fconv。不能把“共享构造支持”误写成全通用代码。已更正exec/rules.md，后续须完整迁移这些共享规则，不复制进各消费者；本批不碰该共享文件，避免与并行生成对照交叉。
 
 第七批验收（975ee7c）：函数指针/参数平衡/维度/初始化计数/维度保存，lower固定输出/融合/参数输出，ARM地址布局三整组已合入。Python净减151行；声明增加664行，总源净增513。共享strwalk/值栈/模板、动态regmap/reloc/image事实均未复制。父组合双槽6/6全rc0，26.18秒：chain167/167、ARM（三OS地址字节解码含在内）、三类lowering及警告诊断。子代理还做五模式E3、六目标lowering、四封装ARM完整转移动作对比与对应实际探针。父要求把八个mov文本重新变回range枚举，改后六图逐字节等于已测图，避免数据装配源码反向膨胀。最新产物仍为0ae4ad2候选，本批未重打.com；实际剩余共享parse规则已补入清单，完整重构未结案。
+
+第八批并行决定：E3 types中TSPEC/结构布局完整控制组、ARM Windows setup完整组、lower剩余setup/dispatch固定控制各在隔离worktree迁声明，保留动态数据计算及共享输出序列。父只审计共享parse规则的消费者与迁移边界，本轮不修改共享模块。每路约8分钟，子步骤≤60秒，集中双槽验收；不扩语法与框架。
+
+第八批验收（29e2f57）：TAG作用域/SBODY结构布局、ARM Windows元数据/API准备/返回转换、lower setup/dispatch完整组合入。Python净减128行（89+42−3），TSV增加568行，源合计净增440；lower绑定净增3行不称缩减。动态布局/IMPORTS/WINARGS_BODY/regmap依赖扰动及全图比对通过，模板保持原来源。父双槽6/6全rc0，25.94秒，chain167/167及ARM/三lower/警告诊断全通过。候选重新构建于55秒外限内，5,985,519 B，sha256 19a4558210cfe1a7a1cc24e0aeeaf94e2edb2cf091725512c9eb56b2cda4cc1f，模型包5,802,207 B；六目标hello镜像同私有参考，四程序×三优化级共12次macOS arm64实跑同cc，记录/tmp/unisacc-parallel-eighth-candidate/acceptance.json。最新候选未替换默认产品；TSPEC、共享tokenizer/数值/自动引头规则、ABI/syscall及其他剩余模块与兼容差距继续列在exec/rules.md，未称全重构完成。
