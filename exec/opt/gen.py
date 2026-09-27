@@ -18,8 +18,9 @@ up to four peep rounds: liveness of r0..r5, stfuse, and each line's relation
 with its neighbour, the action for which is the peep table's (loaded at START).
 This is the optimiser's algorithm compiled into an action table. The complete
 SKIPL/COPYL/SIMPLE/NAMES scans live in scans-{byte,result}.tsv, LOCAL in
-local-{byte,result}.tsv, and STFUSE in stfuse-{byte,result}.tsv. Other rules
-remain here; src/opt.c and unisa/opt.py stay the behaviour reference.
+local-{byte,result}.tsv, STFUSE in stfuse-{byte,result}.tsv, and PPASS/BCLS/REAL
+in peep-{byte,result}.tsv. Dynamic peep/opinfo data assembly remains here;
+src/opt.c and unisa/opt.py stay the behaviour reference.
 
 The opinfo table is read, not copied: its `simple` column is interned into a
 set at START.  Everything else is the byte-level control of the rule.
@@ -429,213 +430,25 @@ def stfuse():
 
 
 def peepround():
-    """PPASS: one peep round over x (after ANALYZE with z 0..5): per line, the relation of it
-    and its neighbour, the peep table's action for (acls, bcls, rel), and the rewrite"""
-    p = P("PPASS")
-    p.a(("LDI", "pi", 0)).goto("PP0")
-    p = P("PP0")
-    p.branch({0: "PP.line"}, "RET", [("CMP", "pi", "nl")])
-    p = P("PP.line")
-    p.a(("LDX", "q_t", "pi", LSS), ("JUMP", "q_t"), ("LDX", "q_k", "pi", KK)).branch({1: "PP.copy"}, "PP.sf", [("CMPI", "q_k", K_LABEL)])
-    p = P("PP.copy")          # the line as it stands
-    p.a(("LDX", "q_t", "pi", LSS), ("JUMP", "q_t")).call("COPYL").a(("ALUI", "add", "pi", "pi", 1)).goto("PP0")
-    p = P("PP.sf")
-    p.call("STFUSE").branch({1: "PP.a"}, "PP.sfok", [("CMPI", "sk", 0)])
-    P("PP.sfok").a(("COPYW", "pi", "sk"), ("ALUI", "add", "hits", "hits", 1)).goto("PP0")
-    # a = acls(A); b = bcls(i+1); rel = none
-    p = P("PP.a")
-    p.a(("LDX", "q_w", "pi", WIDD), ("LDI", "pa_", PA.index("other")), ("LDI", "rel", PR.index("none")),
-        ("LDI", "pt", -1), ("LDI", "px", -1), ("LDI", "py", -1)).branch({0: "PP.b"}, "PP.a1", [("CMPI", "q_w", 0)])
-    p = P("PP.a1")
-    p.a(("LDX", "q_t", "q_w", ACLSB)).branch({1: "PP.b"}, "PP.a2", [("CMPI", "q_t", 0)])
-    P("PP.a2").a(("ALUI", "sub", "pa_", "q_t", 1)).goto("PP.b")
-    p = P("PP.b")
-    p.a(("ALUI", "add", "bl_", "pi", 1)).call("BCLS").a(("COPYW", "pb_", "bc"))
-    p.a(("LDX", "q_w", "pi", WIDD)).branch({1: "PP.jmp"}, "PP.j2", [("CMP", "q_w", "id_jump")])
-    P("PP.j2").branch({1: "PP.jmp"}, "PP.st", [("CMP", "q_w", "id_jumpz")])
-    # jump/jumpz: to the very next label (to_next) or to a line that is itself a jump (to_jump)
-    p = P("PP.jmp")
-    p.a(("LDX", "q_ts", "pi", TSS), ("LDX", "q_te", "pi", TEE), ("INTERN", "pname", "q_ts", "q_te"),
-        ("LDI", "q_u", 0), ("ALUI", "add", "q_kk", "pi", 1)).label("PP.jl")
-    p.branch({0: "PP.jl2"}, "PP.jd", [("CMP", "q_kk", "nl")])
-    p = P("PP.jl2")
-    p.a(("LDX", "q_t", "q_kk", ISLAB)).branch({1: "PP.jl3"}, "PP.jd", [("CMPI", "q_t", 1)])
-    p = P("PP.jl3")
-    p.a(("LDX", "q_ts", "q_kk", TSS), ("LDX", "q_te", "q_kk", TEE), ("INTERN", "q_id", "q_ts", "q_te"))
-    p.branch({1: "PP.jl4"}, "PP.jl5", [("CMP", "q_id", "pname")])
-    P("PP.jl4").a(("LDI", "q_u", 1)).goto("PP.jl5")
-    P("PP.jl5").a(("ALUI", "add", "q_kk", "q_kk", 1)).goto("PP.jl")
-    p = P("PP.jd")
-    p.branch({1: "PP.tn"}, "PP.tj", [("CMPI", "q_u", 1)])
-    p = P("PP.tn")
-    p.a(("ALUI", "add", "rl_", "pi", 1)).call("REAL").a(("COPYW", "bl_", "rl_")).call("BCLS")
-    p.a(("COPYW", "pb_", "bc"), ("LDI", "rel", PR.index("to_next"))).goto("PP.act")
-    p = P("PP.tj")
-    p.a(("ALU", "add", "q_a", "q_lab", "pname"), ("LDX", "q_t", "q_a", 0)).branch({1: "PP.act"}, "PP.tj1", [("CMPI", "q_t", 0)])
-    p = P("PP.tj1")
-    p.a(("COPYW", "rl_", "q_t")).call("REAL").a(("COPYW", "pt", "rl_")).branch({0: "PP.tj2"}, "PP.act", [("CMP", "pt", "nl")])
-    p = P("PP.tj2")
-    p.a(("LDX", "q_t", "pt", WIDD)).branch({1: "PP.tj3"}, "PP.act", [("CMP", "q_t", "id_jump")])
-    p = P("PP.tj3")
-    p.a(("LDX", "q_ts", "pt", TSS), ("LDX", "q_te", "pt", TEE), ("INTERN", "q_id", "q_ts", "q_te"))
-    p.branch({1: "PP.act"}, "PP.tj4", [("CMP", "q_id", "pname")])
-    p = P("PP.tj4")
-    p.a(("COPYW", "bl_", "pt")).call("BCLS").a(("COPYW", "pb_", "bc"), ("LDI", "rel", PR.index("to_jump"))).goto("PP.act")
-    # a store and the next line: the same slot
-    p = P("PP.st")
-    p.a(("ALUI", "add", "q_t", "pi", 1)).branch({0: "PP.st1"}, "PP.h4", [("CMP", "q_t", "nl")])
-    p = P("PP.st1")
-    p.a(("LDX", "q_t", "pi", LSS), ("JUMP", "q_t")).call("PSTORE").branch({0: "PP.im"}, "PP.st2", [("CMPI", "st_x", 0)])
-    p = P("PP.st2")
-    p.a(("COPYW", "px", "st_x"), ("INTERN", "q_m", "st_ms", "st_me"), ("COPYW", "q_ms", "st_ms"), ("COPYW", "q_me", "st_me"),
-        ("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_t", "q_t", LSS), ("JUMP", "q_t"), ("MARK", "q_b0")).call("PLOAD")
-    p.branch({0: "PP.st3"}, "PP.st4", [("CMPI", "ld_y", 0)])
-    p = P("PP.st3")
-    p.a(("JUMP", "q_b0")).call("PSTORE").a(("COPYW", "ld_y", "st_x"), ("COPYW", "ld_ms", "st_ms"), ("COPYW", "ld_me", "st_me")).goto("PP.st4")
-    p = P("PP.st4")
-    p.branch({0: "PP.h4"}, "PP.st5", [("CMPI", "ld_y", 0)])
-    p = P("PP.st5")
-    p.a(("INTERN", "q_m2", "ld_ms", "ld_me")).branch({1: "PP.st6"}, "PP.h4", [("CMP", "q_m", "q_m2")])
-    p = P("PP.st6")          # a slot starting `r7` is not a slot
-    p.a(("JUMP", "q_ms")).goto("PP.r7")
-    lit("PP.r7", "r7", "PP.h4", "PP.st7")
-    p = P("PP.st7")
-    p.a(("COPYW", "py", "ld_y")).branch({1: "PP.ssr"}, "PP.ss", [("CMP", "px", "ld_y")])
-    P("PP.ssr").a(("LDI", "rel", PR.index("same_slot_same_reg"))).goto("PP.h4")
-    P("PP.ss").a(("LDI", "rel", PR.index("same_slot"))).goto("PP.h4")
-    # an imm and the next line (only when the line was not a store)
-    p = P("PP.im")
-    p.a(("LDX", "q_t", "pi", LSS), ("JUMP", "q_t")).call("PIMM").branch({0: "PP.h4"}, "PP.im1", [("CMPI", "im_k", 0)])
-    p = P("PP.im1")
-    p.a(("COPYW", "px", "im_k"), ("LDI", "th_ok", 0)).branch({2: "PP.imv"}, "PP.im2", [("CMPI", "px", 5)])
-    p = P("PP.im2")
-    p.a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_t", "q_t", WIDD)).branch({1: "PP.imv"}, "PP.im3", [("CMP", "q_t", "id_mov")])
-    p = P("PP.im3")
-    p.a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_t", "q_t", LSS), ("JUMP", "q_t")).call("PTHREE").goto("PP.imv")
-    p = P("PP.imv")
-    p.branch({1: "PP.i3"}, "PP.imm", [("CMPI", "th_ok", 1)])
-    p = P("PP.i3")
-    p.branch({1: "PP.i3b"}, "PP.h4", [("CMP", "th_t", "px")])
-    P("PP.i3b").branch({1: "PP.h4"}, "PP.i3c", [("CMP", "th_s", "px")])
-    p = P("PP.i3c")
-    p.a(("COPYW", "dz", "px"), ("ALUI", "add", "dfrom", "pi", 2)).call("DEADQ").branch({1: "PP.i3d"}, "PP.h4", [("CMPI", "dv", 1)])
-    p = P("PP.i3d")
-    p.a(("LDI", "q_z", 0)).branch({1: "PP.c0"}, "PP.i3e", [("C64", "im_v", "q_z")])
-    P("PP.c0").a(("LDI", "rel", PR.index("const0"))).goto("PP.h4")
-    p = P("PP.i3e")
-    p.a(("LDI", "q_z", 1)).branch({1: "PP.c1"}, "PP.i3f", [("C64", "im_v", "q_z")])
-    P("PP.c1").a(("LDI", "rel", PR.index("const1"))).goto("PP.h4")
-    p = P("PP.i3f")          # v & (v - 1) == 0
-    p.a(("A64I", "sub", "q_z", "im_v", 1), ("A64", "and", "q_z", "q_z", "im_v"), ("LDI", "q_zz", 0))
-    p.branch({1: "PP.p2"}, "PP.h4", [("C64", "q_z", "q_zz")])
-    P("PP.p2").a(("LDI", "rel", PR.index("pow2"))).goto("PP.h4")
-    p = P("PP.imm")          # not three registers: `mov rD, rX` with X dead after it
-    p.branch({2: "PP.h4"}, "PP.imm1", [("CMPI", "px", 5)])
-    p = P("PP.imm1")
-    p.a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_t", "q_t", LSS), ("JUMP", "q_t")).call("PMOV")
-    p.branch({0: "PP.h4"}, "PP.imm2", [("CMPI", "mv_d", 0)])
-    P("PP.imm2").branch({1: "PP.imm3"}, "PP.h4", [("CMP", "mv_s", "px")])
-    P("PP.imm3").branch({1: "PP.h4"}, "PP.imm4", [("CMP", "mv_d", "px")])
-    p = P("PP.imm4")
-    p.a(("COPYW", "dz", "px"), ("ALUI", "add", "dfrom", "pi", 2)).call("DEADQ").branch({1: "PP.cd"}, "PP.h4", [("CMPI", "dv", 1)])
-    P("PP.cd").a(("LDI", "rel", PR.index("copy_dead"))).goto("PP.h4")
-    # [H4]: copy_into, dest_to_mov -- when rel is still none and there is a next line
-    p = P("PP.h4")
-    p.branch({1: "PP.h4a"}, "PP.act", [("CMPI", "rel", PR.index("none"))])
-    p = P("PP.h4a")
-    p.a(("ALUI", "add", "q_t", "pi", 1)).branch({0: "PP.h4b"}, "PP.ad", [("CMP", "q_t", "nl")])
-    p = P("PP.h4b")
-    p.a(("LDX", "q_t", "pi", LSS), ("JUMP", "q_t")).call("PMOV").branch({0: "PP.dm"}, "PP.ci", [("CMPI", "mv_d", 0)])
-    p = P("PP.ci")          # mov rY, rX; the next line simple, reads rY, does not write it; rY dead after
-    p.branch({2: "PP.dm"}, "PP.ci1", [("CMPI", "mv_d", 5)])
-    P("PP.ci1").branch({1: "PP.dm"}, "PP.ci2", [("CMP", "mv_d", "mv_s")])
-    p = P("PP.ci2")
-    p.a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_k", "q_t", KK)).branch({1: "PP.ci3"}, "PP.dm", [("CMPI", "q_k", K_SIMPLE)])
-    p = P("PP.ci3")
-    p.a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_r", "q_t", RMM), ("LDX", "q_w", "q_t", WMM), ("LDI", "q_b", 1),
-        ("ALU", "shl", "q_b", "q_b", "mv_d"), ("ALU", "and", "q_r", "q_r", "q_b"), ("ALU", "and", "q_w", "q_w", "q_b"))
-    p.branch({1: "PP.dm"}, "PP.ci4", [("CMPI", "q_r", 0)])
-    P("PP.ci4").branch({1: "PP.ci5"}, "PP.dm", [("CMPI", "q_w", 0)])
-    p = P("PP.ci5")
-    p.a(("COPYW", "dz", "mv_d"), ("ALUI", "add", "dfrom", "pi", 2)).call("DEADQ").branch({1: "PP.ci6"}, "PP.dm", [("CMPI", "dv", 1)])
-    P("PP.ci6").a(("LDI", "rel", PR.index("copy_into")), ("COPYW", "py", "mv_d"), ("COPYW", "px", "mv_s")).goto("PP.act")
-    p = P("PP.dm")          # a simple non-store line writing rD, then `mov rE, rD` with D dead after
-    p.a(("LDX", "q_k", "pi", KK)).branch({1: "PP.dm1"}, "PP.ad", [("CMPI", "q_k", K_SIMPLE)])
-    p = P("PP.dm1")
-    p.a(("LDX", "q_w", "pi", WIDD)).branch({1: "PP.ad"}, "PP.dm2", [("CMP", "q_w", "id_store64")])
-    P("PP.dm2").branch({1: "PP.ad"}, "PP.dm3", [("CMP", "q_w", "id_st")])
-    p = P("PP.dm3")
-    p.a(("LDX", "q_db", "pi", FRR)).branch({0: "PP.ad"}, "PP.dm4", [("CMPI", "q_db", 0)])
-    P("PP.dm4").branch({2: "PP.ad"}, "PP.dm5", [("CMPI", "q_db", 5)])
-    p = P("PP.dm5")
-    p.a(("LDX", "q_w", "pi", WMM), ("LDI", "q_b", 1), ("ALU", "shl", "q_b", "q_b", "q_db"), ("ALU", "and", "q_w", "q_w", "q_b"))
-    p.branch({1: "PP.ad"}, "PP.dm6", [("CMPI", "q_w", 0)])
-    p = P("PP.dm6")
-    p.a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_t", "q_t", LSS), ("JUMP", "q_t")).call("PMOV")
-    p.branch({0: "PP.ad"}, "PP.dm7", [("CMPI", "mv_d", 0)])
-    P("PP.dm7").branch({1: "PP.dm8"}, "PP.ad", [("CMP", "mv_s", "q_db")])
-    P("PP.dm8").branch({1: "PP.ad"}, "PP.dm9", [("CMP", "mv_d", "q_db")])
-    p = P("PP.dm9")
-    p.a(("COPYW", "dz", "q_db"), ("ALUI", "add", "dfrom", "pi", 2)).call("DEADQ").branch({1: "PP.dm10"}, "PP.ad", [("CMPI", "dv", 1)])
-    P("PP.dm10").a(("LDI", "rel", PR.index("dest_to_mov")), ("COPYW", "px", "q_db"), ("COPYW", "py", "mv_d")).goto("PP.act")
-    # a_dead: a simple non-store line whose destination rD is dead right after it
-    p = P("PP.ad")
-    p.branch({1: "PP.ad0"}, "PP.act", [("CMPI", "rel", PR.index("none"))])
-    p = P("PP.ad0")
-    p.a(("LDX", "q_k", "pi", KK)).branch({1: "PP.ad1"}, "PP.act", [("CMPI", "q_k", K_SIMPLE)])
-    p = P("PP.ad1")
-    p.a(("LDX", "q_w", "pi", WIDD)).branch({1: "PP.act"}, "PP.ad2", [("CMP", "q_w", "id_store64")])
-    P("PP.ad2").branch({1: "PP.act"}, "PP.ad3", [("CMP", "q_w", "id_st")])
-    p = P("PP.ad3")
-    p.a(("LDX", "q_db", "pi", FRR)).branch({0: "PP.act"}, "PP.ad4", [("CMPI", "q_db", 0)])
-    P("PP.ad4").branch({2: "PP.act"}, "PP.ad5", [("CMPI", "q_db", 5)])
-    p = P("PP.ad5")
-    p.a(("LDX", "q_w", "pi", WMM), ("LDI", "q_b", 1), ("ALU", "shl", "q_b", "q_b", "q_db"), ("ALU", "and", "q_w", "q_w", "q_b"))
-    p.branch({1: "PP.act"}, "PP.ad6", [("CMPI", "q_w", 0)])
-    p = P("PP.ad6")
-    p.a(("COPYW", "dz", "q_db"), ("ALUI", "add", "dfrom", "pi", 1)).call("DEADQ").branch({1: "PP.ad7"}, "PP.act", [("CMPI", "dv", 1)])
-    P("PP.ad7").a(("LDI", "rel", PR.index("a_dead"))).goto("PP.act")
-    # the table's answer and the rewrite
-    p = P("PP.act")
-    p.branch({1: "PP.copy"}, "PP.ask", [("CMPI", "rel", PR.index("none"))])
-    p = P("PP.ask")
-    p.a(("ALUI", "mul", "q_t", "pa_", len(PB)), ("ALU", "add", "q_t", "q_t", "pb_"), ("ALUI", "mul", "q_t", "q_t", len(PR)),
-        ("ALU", "add", "q_t", "q_t", "rel"), ("LDX", "act", "q_t", PEEPB), ("ALUI", "sub", "act", "act", 1))
-    acts = {PY.index(y): "PX." + y for y in PY if y not in ("-", "keep")}
-    p.branch(acts, "PP.copy", [("RLD", "act")])
-    A = ("LDX", "q_t", "pi", LSS)
-    P("PX.load_to_mov").a(A, ("JUMP", "q_t")).call("COPYL").o("  mov r").num("py").o(", r").num("px").o("\n").goto("PX.i2")
-    P("PX.drop_b").a(A, ("JUMP", "q_t")).call("COPYL").goto("PX.i2")
-    P("PX.drop_a").goto("PX.i1")
-    P("PX.retarget").a(("LDX", "q_ts", "pi", LSS), ("LDX", "q_te", "pi", TSS), ("SPAN2", "q_ts", "q_te"),
-                       ("LDX", "q_ts", "pt", TSS), ("LDX", "q_te", "pt", TEE), ("SPAN2", "q_ts", "q_te")).o("\n").goto("PX.i1")
-    P("PX.to_mov").o("  mov r").num("th_d").o(", r").num("th_s").o("\n").goto("PX.i2")
-    p = P("PX.to_shl")      # imm rX, log2(v) / shl64 rD, rS, rX
-    p.a(("COPYW", "q_z", "im_v"), ("LDI", "q_lg", -1), ("LDI", "q_zz", 0)).label("PX.lg")
-    p.branch({1: "PX.lgd"}, "PX.lg1", [("C64", "q_z", "q_zz")])
-    P("PX.lg1").a(("A64I", "shr", "q_z", "q_z", 1), ("ALUI", "add", "q_lg", "q_lg", 1)).goto("PX.lg")
-    P("PX.lgd").o("  imm r").num("px").o(", ").num("q_lg").o("\n  shl64 r").num("th_d").o(", r").num("th_s").o(", r").num("px").o("\n").goto("PX.i2")
-    P("PX.retarget_dest").a(A, ("JUMP", "q_t"), ("COPYW", "rr_a", "px"), ("COPYW", "rr_b", "py"), ("LDI", "rr_all", 0)).call("REREG").o("\n").goto("PX.i2")
-    P("PX.fold_copy").a(("ALUI", "add", "q_t", "pi", 1), ("LDX", "q_t", "q_t", LSS), ("JUMP", "q_t"),
-                        ("COPYW", "rr_a", "py"), ("COPYW", "rr_b", "px"), ("LDI", "rr_all", 1)).call("REREG").o("\n").goto("PX.i2")
-    P("PX.fold_imm").o("  imm r").num("mv_d").o(", ").a(("LDI", "nx", 1), ("COPYW", "nv", "im_v")).call("NUMOUT").o("\n").goto("PX.i2")
-    P("PX.i1").a(("ALUI", "add", "pi", "pi", 1), ("ALUI", "add", "hits", "hits", 1)).goto("PP0")
-    P("PX.i2").a(("ALUI", "add", "pi", "pi", 2), ("ALUI", "add", "hits", "hits", 1)).goto("PP0")
-    # BCLS(bl_) -> bc: `none` past the end; `other` for a label line or an unknown word
-    p = P("BCLS")
-    p.a(("LDI", "bc", PB.index("none"))).branch({0: "BC.1"}, "RET", [("CMP", "bl_", "nl")])
-    p = P("BC.1")
-    p.a(("LDI", "bc", PB.index("other")), ("LDX", "q_w", "bl_", WIDD)).branch({0: "RET"}, "BC.2", [("CMPI", "q_w", 0)])
-    p = P("BC.2")
-    p.a(("LDX", "q_t", "q_w", BCLSB)).branch({1: "RET"}, "BC.3", [("CMPI", "q_t", 0)])
-    P("BC.3").a(("ALUI", "sub", "bc", "q_t", 1)).ret()
-    # REAL(rl_): past label lines
-    p = P("REAL")
-    p.label("RL.l")
-    p.branch({0: "RL.1"}, "RET", [("CMP", "rl_", "nl")])
-    p = P("RL.1")
-    p.a(("LDX", "q_t", "rl_", ISLAB)).branch({1: "RL.2"}, "RET", [("CMPI", "q_t", 1)])
-    P("RL.2").a(("ALUI", "add", "rl_", "rl_", 1)).goto("RL.l")
+    # Fresh names are assembler metadata; all fixed PPASS/BCLS/REAL rules are in TSV.
+    bindings = {}
+    for line in open(os.path.join(os.path.dirname(__file__), "peep-names.tsv")):
+        if not line.startswith("#"):
+            name, prefix, kind = line.rstrip("\n").split("\t")
+            bindings[name] = P(prefix).fresh(kind)
+    bindings.update({name: globals()[name] for name in (
+        "LSS", "WIDD", "TSS", "TEE", "ISLAB", "KK", "RMM", "WMM", "FRR",
+        "ACLSB", "BCLSB", "PEEPB", "K_LABEL", "K_SIMPLE")})
+    for prefix, values in (("PA", PA), ("PB", PB), ("PR", PR)):
+        bindings.update((prefix + "_" + name, index) for index, name in enumerate(values))
+    bindings.update(PB_size=len(PB), PR_size=len(PR))
+    install_rules(g, os.path.dirname(__file__), "peep", bindings=bindings)
+    # Pure schema assembly: the answer indices follow the current peep head order.
+    dispatch = bindings['PP_b85']
+    for index, name in enumerate(PY):
+        if name not in ("-", "keep"):
+            g.on(dispatch, [index], "PX." + name, [], "r")
+    g.els(dispatch, "PP.copy", [], "r")
 
 
 def peep_start(p):
