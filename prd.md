@@ -5111,3 +5111,5 @@ startup组验收：五模式全展开图与70d3952基线一致；动态POSSPAN/C
 最终9a0ae470容器直验（22ce210）实跑通过：六目标完整镜像同参考，arm64/x86_64实际-run及native输出同host，32互异网络/两核/单包，无外部模型核。固定最终包模型驱动器N1=N2=N3完整Mach-O 115746B，sha256 6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03；N3空PATH、O0/O2内存/native同host、缺包rc2，证据/tmp/unisacc-final-modelboot-928。不是整个网络包或APE自构造。Linux arm64在既有default Lima实跑hello/fib/convert：候选哈希先核对，-run及指定目标编译后native全同host；仅三程序smoke，不称整平台套件全绿。
 
 基于实测超时修正现有队列调度：7d9f2fb增加显式exclusive-suite，bindx86与warningdriver独占，普通套件仍双槽；独占清单纳入state，变更拒绝复用，窗口仍50/55秒。queuecheck/releasecheck替身已验证互斥、普通重叠和失败传播；合入后重启新冻结队列，不重建未改变的9a0ae470候选。
+
+最终9a0ae470跨目标smoke补齐：lnx/x86_64经Lima/QEMU仿真、win/arm64与win/x86_64经Windows11 ARM64 UTM，各hello/fib/convert全rc0；每次先核候选完整hash，APE-run与指定目标编译后native输出均同host。Windows容器运行x86_64驱动（OS仿真），不称x86实机。9单probe日志与guest-results.json在/tmp/unisacc-final-platform-928，另Linux arm64三probe已录。两台本轮新启VM已关闭，既有default Lima保持；容器本机双ISA运行和固定NET包三代自举另录。新完整门禁状态目录/tmp/unisacc-final-gate-v2-928，重套件独占、其余双槽；只继承调度耗时估计，不继承通过结果。
