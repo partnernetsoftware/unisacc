@@ -1,0 +1,324 @@
+name: Windows signing qualification
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Qualification is local-format-only and uses no signing quota
+        type: choice
+        options: [qualification, company]
+        default: qualification
+        required: true
+      source_sha:
+        description: Exact current main SHA of the owner-built bytes
+        type: string
+        required: true
+      seal_tag:
+        description: Existing draft Release containing owner-uploaded unsigned assets
+        type: string
+        required: true
+      receipt_sha256:
+        description: Owner-reviewed SHA256 of unsigned-receipt.json
+        type: string
+        required: true
+      upstream_run_id:
+        description: Successful ci.yml run for source SHA (source test only)
+        type: string
+        required: true
+      upstream_attempt:
+        description: Exact completed CI run attempt
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: unisacc-windows-signing-${{ inputs.source_sha }}
+  cancel-in-progress: false
+jobs:
+  qualify:
+    runs-on: windows-2025
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+        timeout-minutes: 1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Bind source, CI attempt and existing owner seal
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SEAL_TAG: ${{ inputs.seal_tag }}
+          RECEIPT_SHA256: ${{ inputs.receipt_sha256 }}
+          UPSTREAM_RUN_ID: ${{ inputs.upstream_run_id }}
+          UPSTREAM_ATTEMPT: ${{ inputs.upstream_attempt }}
+        run: |
+          @'
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+          def call(*args):
+              return subprocess.run(args, check=True, capture_output=True, text=True, timeout=45).stdout
+          def api(path): return json.loads(call('gh','api',path))
+          env=os.environ; repo=env['GITHUB_REPOSITORY']; sha=env['SOURCE_SHA']
+          assert re.fullmatch('[0-9a-f]{40}',sha), 'invalid source SHA'
+          assert re.fullmatch('[0-9a-f]{64}',env['RECEIPT_SHA256']), 'invalid receipt SHA'
+          assert re.fullmatch('[1-9][0-9]*',env['UPSTREAM_RUN_ID']), 'invalid run id'
+          assert re.fullmatch('[1-9][0-9]*',env['UPSTREAM_ATTEMPT']), 'invalid attempt'
+          assert re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,99}',env['SEAL_TAG']), 'invalid seal tag'
+          assert env['GITHUB_REF']=='refs/heads/main' and env['GITHUB_SHA']==sha, 'dispatch must use exact main'
+          assert call('git','rev-parse','HEAD').strip()==sha, 'checkout mismatch'
+          assert api(f'repos/{repo}/commits/main')['sha']==sha, 'main moved; reseal/review'
+          run=api(f"repos/{repo}/actions/runs/{env['UPSTREAM_RUN_ID']}/attempts/{env['UPSTREAM_ATTEMPT']}")
+          assert run['head_sha']==sha and run['path']=='.github/workflows/ci.yml', 'wrong upstream source/workflow'
+          assert run['id']==int(env['UPSTREAM_RUN_ID']) and run['run_attempt']==int(env['UPSTREAM_ATTEMPT']), 'wrong upstream run/attempt response'
+          assert run['status']=='completed' and run['conclusion']=='success', 'upstream failed/incomplete'
+          assert run['head_branch']=='main' and run['event'] in ('push','workflow_dispatch'), 'upstream is not main CI'
+          release=api(f"repos/{repo}/releases/tags/{env['SEAL_TAG']}")
+          assert release['draft'] is True, 'seal must be an existing owner draft'
+          wanted={'unisacc-unsigned.zip','unsigned-receipt.json'}
+          assets={a['name']:a for a in release['assets']}
+          assert wanted<=assets.keys(), 'missing owner seal assets'
+          assert sum(a['name'] in wanted for a in release['assets'])==2, 'duplicate seal assets'
+          assert 0<assets['unsigned-receipt.json']['size']<=65536, 'receipt size budget'
+          assert 0<assets['unisacc-unsigned.zip']['size']<=16842752, 'archive size budget'
+          Path('upstream').mkdir()
+          call('gh','release','download',env['SEAL_TAG'],'--repo',repo,'--pattern','unisacc-unsigned.zip','--pattern','unsigned-receipt.json','--dir','upstream')
+          again=api(f"repos/{repo}/releases/tags/{env['SEAL_TAG']}")
+          current={a['name']:a for a in again['assets']}
+          assert again['id']==release['id'] and again['draft'] is True, 'seal release changed during download'
+          assert sum(a['name'] in wanted for a in again['assets'])==2, 'seal asset set changed'
+          for name in wanted:
+              assert current[name]['id']==assets[name]['id'] and current[name]['size']==assets[name]['size'], 'seal asset identity changed'
+              assert Path('upstream',name).stat().st_size==assets[name]['size'], 'downloaded asset size mismatch'
+          receipt=Path('upstream/unsigned-receipt.json').read_bytes()
+          assert hashlib.sha256(receipt).hexdigest()==env['RECEIPT_SHA256'], 'receipt seal mismatch'
+          Path('upstream/upstream-identity.json').write_text(json.dumps(dict(source_sha=sha,
+              upstream_run_id=int(env['UPSTREAM_RUN_ID']),upstream_attempt=int(env['UPSTREAM_ATTEMPT']),
+              seal_release_id=release['id'],seal_tag=env['SEAL_TAG'],
+              seal_asset_ids={n:assets[n]['id'] for n in sorted(wanted)},receipt_sha256=env['RECEIPT_SHA256']),indent=2))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'source/seal qualification failed' }
+      - name: Validate exact local-build manifest and bounded APE package
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          @'
+          import hashlib, importlib.util, json, os, re, shutil, zipfile
+          from pathlib import Path
+          spec=importlib.util.spec_from_file_location('ape','release/apeinspect.py')
+          ape=importlib.util.module_from_spec(spec); spec.loader.exec_module(ape)
+          assert os.environ['MODE'] in ('qualification','company'), 'unknown signing mode'
+          policy=json.loads(Path('release/signing-policy.json').read_text())
+          receipt=json.loads(Path('upstream/unsigned-receipt.json').read_text())
+          identity=json.loads(Path('upstream/upstream-identity.json').read_text())
+          assert policy['schema']==1 and policy['windows']['provider']=='azure-artifact-signing'
+          assert type(receipt['schema']) is int and receipt['schema']==1 and receipt['kind']=='unisacc-owner-local-build'
+          assert receipt['source_sha']==identity['source_sha'] and receipt['source_dirty'] is False
+          assert receipt['built_by']=='owner-local' and receipt['local_gate_complete'] is True
+          assert set(receipt['upstream'])=={'run_id','run_attempt'}
+          assert all(type(receipt['upstream'][key]) is int and receipt['upstream'][key]>0 for key in ('run_id','run_attempt'))
+          assert receipt['upstream']==dict(run_id=identity['upstream_run_id'],run_attempt=identity['upstream_attempt'])
+          assert re.fullmatch('[0-9]+(?:[.][0-9]+){2,3}',receipt['product_version'])
+          versions=re.findall(r'^\s*#\s*define\s+UNISACC_VERSION\s+"([^"]+)"\s*$',Path('src/version.h').read_text(),re.M)
+          assert versions==[receipt['product_version']], 'unknown or source-mismatched product version'
+          local=receipt['local_build']; assert local['host'] and local['created_at']
+          assert re.fullmatch('[0-9a-f]{64}',local['toolchain_sha256'])
+          declared={a['path']:a for a in policy['windows']['assets']}
+          assert declared and len(declared)==len(policy['windows']['assets'])
+          assert set(receipt['assets'])==set(declared), 'receipt asset allowlist differs'
+          archive=Path('upstream/unisacc-unsigned.zip')
+          assert archive.stat().st_size<=sum(a['max_unsigned_bytes'] for a in declared.values())+65536
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==receipt['archive_sha256']
+          assert re.fullmatch('[0-9a-f]{64}',receipt['archive_sha256'])
+          before={}; Path('staged').mkdir()
+          with zipfile.ZipFile(archive) as z:
+              entries=z.infolist()
+              assert len(entries)==len(declared) and {e.filename for e in entries}==set(declared), 'archive allowlist differs'
+              for e in entries:
+                  rule=declared[e.filename]; expected=receipt['assets'][e.filename]
+                  assert e.orig_filename==e.filename and '\x00' not in e.orig_filename, 'noncanonical ZIP filename'
+                  assert not e.is_dir() and not e.flag_bits & 1
+                  assert ((e.external_attr>>16)&0o170000) in (0,0o100000), 'nonregular ZIP asset'
+                  assert e.compress_type in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED), 'unsupported ZIP compression'
+                  assert 0<e.file_size<=rule['max_unsigned_bytes']
+                  data=z.read(e); digest=hashlib.sha256(data).hexdigest()
+                  assert digest==expected['sha256'] and len(data)==expected['bytes'], 'local asset seal mismatch'
+                  info=ape.inspect(data)
+                  assert info['certificate_offset']==0 and info['certificate_length']==0, 'input is already signed'
+                  path=Path('staged')/e.filename
+                  assert path.parent==Path('staged'), 'this catalog supports root assets only'
+                  path.write_bytes(data)
+                  before[e.filename]=dict(sha256=digest,bytes=len(data),package_sha256=info['package_sha256'])
+          context=dict(schema=1,kind='unisacc-windows-qualification',release_eligible=False,
+                       **identity,product_version=receipt['product_version'],before=before,
+                       local_build=local,provider_called=False)
+          Path('staged/qualification-receipt.json').write_text(json.dumps(context,indent=2))
+          shutil.copyfile('upstream/unsigned-receipt.json','staged/unsigned-receipt.json')
+          shutil.copyfile('release/signing-policy.json','staged/signing-policy.json')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'local sealed-input validation failed' }
+          $policy = Get-Content release/signing-policy.json -Raw | ConvertFrom-Json
+          $receipt = Get-Content staged/qualification-receipt.json -Raw | ConvertFrom-Json
+          $ready = $true
+          foreach ($asset in $policy.windows.assets) {
+            $v = (Get-Item -LiteralPath (Join-Path staged $asset.path)).VersionInfo
+            if ($v.ProductName -ne 'Unisacc' -or $v.ProductVersion -ne $receipt.product_version) { $ready = $false }
+          }
+          $receipt | Add-Member -NotePropertyName versioninfo_ready -NotePropertyValue $ready
+          $receipt | ConvertTo-Json -Depth 10 | Set-Content staged/qualification-receipt.json -Encoding utf8NoBOM
+          if ($env:MODE -eq 'company' -and (-not $ready -or $policy.windows.mode -ne 'required')) {
+            throw 'company signing requires policy.required and exact VERSIONINFO'
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        timeout-minutes: 1
+        with:
+          name: unisacc-sealed-signing-input-${{ github.run_attempt }}
+          path: staged/
+          if-no-files-found: error
+          retention-days: 14
+  company:
+    if: inputs.mode == 'company'
+    needs: qualify
+    runs-on: windows-2025
+    timeout-minutes: 8
+    environment: release-signing
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
+        timeout-minutes: 1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        timeout-minutes: 1
+        with:
+          name: unisacc-sealed-signing-input-${{ github.run_attempt }}
+          path: signed/
+      - name: Fail closed on repository identity and provider configuration
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          REPO_IDENTITY_VERIFIED: ${{ vars.UNISACC_REPO_IDENTITY_VERIFIED }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('AZURE_CLIENT_ID','AZURE_TENANT_ID','AZURE_SUBSCRIPTION_ID',
+              'ARTIFACT_SIGNING_ENDPOINT','ARTIFACT_SIGNING_ACCOUNT','ARTIFACT_SIGNING_PROFILE')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "missing protected setting: $name" }
+          }
+          if ($env:REPO_IDENTITY_VERIFIED -ne 'true') { throw 'unisacc-specific OIDC subject/profile RBAC not approved' }
+          $policy = Get-Content signed/signing-policy.json -Raw | ConvertFrom-Json
+          $q = Get-Content signed/qualification-receipt.json -Raw | ConvertFrom-Json
+          if ($policy.windows.mode -ne 'required' -or -not $q.versioninfo_ready) { throw 'sealed qualification is not signable' }
+          $catalog = @()
+          foreach ($asset in $policy.windows.assets) {
+            $path = (Resolve-Path (Join-Path signed $asset.path)).Path
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $q.before.($asset.path).sha256) { throw 'transferred input changed' }
+            $catalog += $path
+          }
+          $catalog | Set-Content signing-catalog.txt -Encoding ascii
+      - uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.2
+        timeout-minutes: 1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign only the declared owner-built bytes
+        uses: Azure/artifact-signing-action@208f8af4bf26cf2af8597424e3cb5582801523ba # v2.0.0
+        timeout-minutes: 1
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files-catalog: signing-catalog.txt
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          timeout: 55
+          cache-dependencies: false
+          trace: false
+          description: Unisacc
+          description-url: https://github.com/partnernetsoftware/unisacc
+          exclude-workload-identity-credential: true
+          exclude-environment-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          correlation-id: unisacc-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Windows authoritative trust and public before-after receipt
+        timeout-minutes: 1
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = Get-Content signed/signing-policy.json -Raw | ConvertFrom-Json
+          $q = Get-Content signed/qualification-receipt.json -Raw | ConvertFrom-Json
+          if ($q.source_sha -ne $env:SOURCE_SHA) { throw 'receipt source mismatch' }
+          $expectedPaths = @($policy.windows.assets | ForEach-Object { $_.path }) + @('qualification-receipt.json','unsigned-receipt.json','signing-policy.json')
+          $actualPaths = @(Get-ChildItem -LiteralPath signed -File -Recurse | ForEach-Object {
+            [IO.Path]::GetRelativePath((Resolve-Path signed).Path, $_.FullName).Replace('\','/')
+          })
+          if (($actualPaths | Sort-Object) -join "`n" -cne (($expectedPaths | Sort-Object) -join "`n")) { throw 'signed output path allowlist mismatch' }
+          if ((Get-FileHash signed/unsigned-receipt.json -Algorithm SHA256).Hash.ToLowerInvariant() -ne $q.receipt_sha256) { throw 'sealed upstream receipt changed' }
+          $assets = [ordered]@{}
+          foreach ($asset in $policy.windows.assets) {
+            $path = Join-Path signed $asset.path
+            $sig = Get-AuthenticodeSignature -LiteralPath $path
+            if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate -or -not $sig.TimeStamperCertificate) { throw 'Windows trust/timestamp rejected' }
+            $org = [regex]::Escape($policy.windows.publisher_organization)
+            if ($sig.SignerCertificate.Subject -notmatch "(?:^|,\s*)O=$org(?:,|$)") { throw 'unexpected publisher organization' }
+            $v = (Get-Item -LiteralPath $path).VersionInfo
+            if ($v.ProductName -ne 'Unisacc' -or $v.ProductVersion -ne $q.product_version) { throw 'VERSIONINFO changed' }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $before = $q.before.($asset.path)
+            $bytes = (Get-Item -LiteralPath $path).Length
+            if ($hash -eq $before.sha256 -or $bytes -gt $asset.max_signed_bytes) { throw 'signature mutation/size invalid' }
+            $info = python release/apeinspect.py $path | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $info[0].package_sha256 -ne $before.package_sha256 -or $info[0].certificate_length -le 0) { throw 'APE package changed or certificate extent invalid' }
+            $c = $sig.SignerCertificate; $t = $sig.TimeStamperCertificate
+            $assets[$asset.path] = [ordered]@{
+              before_sha256=$before.sha256; before_bytes=$before.bytes; after_sha256=$hash; after_bytes=$bytes
+              package_sha256=$before.package_sha256; authenticode_status="$($sig.Status)"
+              signer_subject=$c.Subject; signer_issuer=$c.Issuer; signer_thumbprint=$c.Thumbprint
+              signer_not_before=$c.NotBefore.ToUniversalTime().ToString('o'); signer_not_after=$c.NotAfter.ToUniversalTime().ToString('o')
+              timestamp_subject=$t.Subject; timestamp_issuer=$t.Issuer; timestamp_thumbprint=$t.Thumbprint
+              timestamp_not_before=$t.NotBefore.ToUniversalTime().ToString('o'); timestamp_not_after=$t.NotAfter.ToUniversalTime().ToString('o')
+              timestamp_rfc3161=$policy.windows.timestamp_rfc3161; timestamp_digest='SHA256'
+              file_product_name=$v.ProductName; file_product_version=$v.ProductVersion
+            }
+          }
+          $receipt = [ordered]@{
+            schema=1; kind='unisacc-windows-company-signing'; signing_provider='azure-artifact-signing'
+            source_sha=$q.source_sha; product_version=$q.product_version; local_build=$q.local_build
+            upstream=[ordered]@{run_id=$q.upstream_run_id;run_attempt=$q.upstream_attempt}
+            seal=[ordered]@{release_id=$q.seal_release_id;asset_ids=$q.seal_asset_ids;receipt_sha256=$q.receipt_sha256}
+            signing_run=[ordered]@{id=$env:GITHUB_RUN_ID;attempt=$env:GITHUB_RUN_ATTEMPT}
+            windows_trust_court='Get-AuthenticodeSignature'; release_eligible=$false
+            pending_release_courts=$policy.windows.pending_release_courts; assets=$assets
+          }
+          $receipt | ConvertTo-Json -Depth 12 | Set-Content signed/signing-receipt.json -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        timeout-minutes: 1
+        with:
+          name: unisacc-company-signed-${{ github.run_attempt }}
+          path: signed/
+          if-no-files-found: error
+          retention-days: 14

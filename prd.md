@@ -74,7 +74,7 @@
 
 **签名接入下一片决定**：新增独立unisacc的Windows资格/company工作流与显式签名政策，默认off且缺配置/VERSIONINFO在额度调用前失败；真正落地由主代理检查并配置repo专属OIDC及profile窄权限，不把配置工作甩给用户。签名前PE版本资源必须在构造APE的PE head时追加，不对已打包容器插字节；纯打包IO，原text/data/reloc字节与RVA不动，拒绝已有resource/证书/overlay、header不足及超宽字段，产品名Unisacc与冻结版本精确对应。Linux演示的目录枚举作为R9-5最小切片，只增加getdents64事实与有界目录适配、不加入execve/fork；不支持OS明确拒绝，E3复用INTRINSIC，通用核不加语言原语，生成表/权重由主代理统一重建。
 
-**微软身份实际接入**：已创建 unisacc 专属 Entra app/SP（无密码），绑定 GitHub 实际返回的 immutable repo/environment subject；只授 profile 级 Artifact Signing Certificate Profile Signer，读取核验恰一项。GitHub release-signing 已配置主人审核与 main-only，OIDC三标识存 Environment secrets，provider 坐标存变量；值不写源码/回执。尚未调用企业签名服务，政策仍 off，身份验证标志待完整读回后设置。
+**微软身份实际接入**：已创建 unisacc 专属 Entra app/SP（无密码），绑定 GitHub 实际返回的 immutable repo/environment subject；只授 profile 级 Artifact Signing Certificate Profile Signer，读取核验恰一项。GitHub release-signing 已配置主人审核与 main-only，OIDC三标识存 Environment secrets，provider 坐标存变量；值不写源码/回执。已读回核验联邦配置、profile角色、审核/分支保护及变量配置，并设置身份验证标志。尚未调用企业签名服务，政策仍 off，真实企业签名/额度路径待资格和最终候选验证。
 
 **候选版本校准**：源码版本改为0.0.9供本轮签名资格与真实产物验证，不表示发布完成。新增libneed资源后Windows进口上限由245改244，预留固定9槽与3个尾部CLI资源，保持ResourceInput[256]边界；默认不开libneed。首次整体重构建触及55秒外层预算，按已有shared/六目标/pack入口分批，超时不计通过、不放大预算。
 
