@@ -16,6 +16,9 @@ def closure(h):
     templates, gold tables, carried headers and the inference verifier."""
     for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights'):
         for path in sorted((ROOT / directory).rglob('*')):
+            # Declared generated seed/cache output, never a construction input.
+            if path.relative_to(ROOT).parts[:2] == ('exec', 'build'):
+                continue
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
                 h.update(str(path.relative_to(ROOT)).encode() + b'\0')
                 h.update(bytes.fromhex(digest(path)))

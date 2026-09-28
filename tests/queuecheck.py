@@ -332,6 +332,11 @@ def compilercheck_closure_controls(queue, source_root, declaration_path=None):
                 edit('README-real-reviewed-snapshot',fixture/'README.md',{'docs','unknown'})
                 records.append({'control':'real-main-inventory-qualified','pass':True,
                     'reviewed_trees':declaration['families']['compilercheck']['reviewed_trees']})
+                ignored=fixture/'exec/build/cache.c';ignored.parent.mkdir(exist_ok=True)
+                compare('ignored-build-output-new',lambda:ignored.write_text('generated v1\n'),set(),lambda:ignored.unlink())
+                ignored.write_text('generated v1\n')
+                edit('ignored-build-output-change',ignored,set())
+                ignored.unlink()
                 edit('checker',fixture/'exec/c/compilercheck.py',all_family|unknown)
                 edit('actual-generator',fixture/'exec/pp/gen.py',all_family|unknown)
                 edit('same-path-UA',ua,all_family|unknown)

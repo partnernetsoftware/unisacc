@@ -17,13 +17,22 @@ with tempfile.TemporaryDirectory() as td:
         (t/d).mkdir(parents=True, exist_ok=True)
     header=t/'include/test.h'; header.write_text('header v1')
     asm=t/'exec/c/asm/test.S'; asm.write_text('assembly v1')
+    source=t/'src/test.c'; source.write_text('source v1')
+    generator=t/'exec/generator.py'; generator.write_text('generator v1')
+    output=t/'exec/build/ua_ref.c'; output.parent.mkdir(); output.write_text('generated v1')
     (t/'iterate/kernel/typekw.tsv').write_text('int\n')
     binary=t/'candidate'; binary.write_bytes(b'candidate v1'); binary.chmod(0o755)
     with patch.object(p, 'ROOT', t), patch.object(sys.modules['models'], 'ROOT', t), \
          patch.object(p.subprocess, 'check_output', return_value=b'fixture-commit\n'):
         refused(binary)  # absence is not auto-attested
         start=p.source_digest(); p.write(binary, start); p.verify(binary)
-        for source in (header, asm):
+        output.write_text('generated v2')
+        assert p.source_digest()==start, 'generated build output invalidated source identity'
+        p.verify(binary)
+        output.unlink(); assert p.source_digest()==start
+        new_output=output.parent/'nested/model.json'; new_output.parent.mkdir(); new_output.write_text('{}')
+        assert p.source_digest()==start, 'new generated output invalidated source identity'
+        for source in (header, asm, source, generator):
             old=source.read_bytes(); source.write_bytes(old+b'changed'); refused(binary)
             source.write_bytes(old); p.verify(binary)
         binary.write_bytes(b'candidate v2'); refused(binary)
