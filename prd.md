@@ -5303,3 +5303,10 @@ v0.0.8 发布阻挡（2026-09-28）：版本更新提交a43844d，随后冻结b9
 
 
 v0.0.8发布条件校正：cc-unisacc转达主人决定签名条件撤回；历代v0.0.1–v0.0.7本为未签名单文件。v0.0.8按惯例未签名发布，说明明确未签名；签名后续另行接入，不阻挡本次。已向cc-minicon讨教：当前APE具空Security Directory但缺VERSIONINFO、没有ZIP，后续签名验证须按实际自定义包定位设计。其余最终冻结树本地全队列、平台60秒分批、关机、草稿确认条件保持。继续验收，不把旧11项移植新树。
+
+
+v0.0.8 Linux arm64 发布定位（2026-09-28）：冻结07ccaf8本地177/177通过，但客机com-difftest_o第一片出现3个wrong，均为b_compound_result在-O0/-O1/-O2的同一差异。同客机实测：gcc默认plain char为unsigned，输出128/128；gcc -fsigned-char、同源经典与模型均输出-128/-128，其余字段一致。决定将有符号窄化回归明确写为signed char，不改编译器也不忽略差异；新增独立plain-char探针保留平台差异证据（不放入要求跨编译器相等的tests/c清单）。发布说明明确lnx/arm64 plain char符号性与该平台gcc不同，属于实现定义差异，不宣称平台ABI完全一致。按目标跟随符号性留待v0.0.9评估；新测试树需重新冻结验收，不移植旧177项结果。Windows客机RPC失效与Linux x86模拟整套超时分别记为未验，不作通过；本轮启动的两个客机均已关，原本运行的Lima default保留。
+
+Linux差分第二片定位：b_boolconv的`static B literal="x"`被客机gcc拒绝（initializer element is not computable at load time）；加显式`(B)`后同一地址到_Bool转换可编译，实际输出不变。决定此跨编译器回归使用显式转换，不称隐式静态字符串初始化已获gcc对照；原拒绝诊断与四种表达式实验日志保留。其余第三/四片分别108/105项全相同，产品不改。
+
+修正后实测：Linux arm64模型difftest_o四片共429个比较，wrong0/refuse0；macOS第二片经典与模型各108个比较均相同。独立tests/plainchar.c在macOS三路均为plain=-1，在Linux arm64 gcc为plain=255、经典/模型为plain=-1；signed=-1/unsigned=255均一致，模型与经典各-O0/-O1/-O2通过。候选948232f…产品输入未改变，不重建相同产物；本次提交冻结后重跑本地177项。平台未验项将在草稿中逐项注明，最终证据放发布附件，不为更新计数反复改变冻结树。

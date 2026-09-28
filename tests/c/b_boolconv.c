@@ -2,7 +2,8 @@
 typedef _Bool B;
 struct Bits { B a; B b[2]; B *p; };
 static B globals[3] = {0, 256, 0.5};
-static B address=&globals, literal="x";
+/* Explicit cast also works with the Linux GCC reference's static initializer. */
+static B address=&globals, literal=(B)"x";
 static B result(double x) { return x; }
 static int param(B x) { return x; }
 int main(void) {
