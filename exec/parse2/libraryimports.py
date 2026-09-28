@@ -70,7 +70,13 @@ def install(E,P,b,start,integers):
     # A parsed typed native prototype is a real callable declaration. Do not
     # mark missing prototypes callable, or source definitions as host wrappers.
     g.st['LI.original.prototype']=g.st.pop('FN.pr1');g.labels.add('LI.original.prototype')
-    P('FN.pr1').a(('INTERN','li_protoid','fns','fne'),('LDX','li_protoindex','li_protoid',BYNAME)).branch({1:'LI.original.prototype'},'LI.prototypebinding',[('CMPI','li_protoindex',0)])
+    # A forward prototype needs the same stacked calling mode as its later
+    # definition; this is not specific to an injected native binding.
+    from libraryexports import VARIADIC as PROTOTYPEVAR
+    P('FN.pr1').a(('INTERN','li_protoid','fns','fne'),('LDX','li_modesig','li_protoid',b['FPS_FN']),('LDX','li_modecount','li_modesig',b['FPS_COUNT']),('LDX','li_modevar','li_modesig',PROTOTYPEVAR),('LDI','li_modestack',0)).branch({2:'LI.forwardstack'},'LI.forwardvar',[('CMPI','li_modecount',6)])
+    P('LI.forwardvar').branch({1:'LI.forwardstack'},'LI.forwardput',[('CMPI','li_modevar',1)])
+    P('LI.forwardstack').a(('LDI','li_modestack',1)).goto('LI.forwardput')
+    P('LI.forwardput').a(('STX','li_protoid',E.VAR,'li_modestack'),('LDX','li_protoindex','li_protoid',BYNAME)).branch({1:'LI.original.prototype'},'LI.prototypebinding',[('CMPI','li_protoindex',0)])
     P('LI.prototypebinding').a(('ALUI','sub','li_protoindex','li_protoindex',1),('LDX','li_protoformat','li_protoindex',FORMAT)).branch({1:'LI.prototypesignature'},'LI.original.prototype',[('CMPI','li_protoformat',1)])
     P('LI.prototypesignature').a(('LDX','li_protosig','li_protoid',b['FPS_FN']),('LDI','li_protoone',1),('STX','li_protoid',E.FND,'li_protoone'),('LDX','li_protoret','li_protosig',b['FPS_RD']),('STX','li_protoid',E.FRD,'li_protoret'),('LDX','li_protoret','li_protosig',b['FPS_RB']),('STX','li_protoid',E.FRB,'li_protoret'),('LDX','li_protocount','li_protosig',b['FPS_COUNT']),('LDI','li_protomode',0)).branch({2:'LI.prototypestack'},'LI.prototypeput',[('CMPI','li_protocount',6)])
     P('LI.prototypestack').a(('LDI','li_protomode',1)).goto('LI.prototypeput')

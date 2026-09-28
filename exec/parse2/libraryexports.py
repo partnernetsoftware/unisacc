@@ -22,10 +22,11 @@ def install(E,P,b,start,integers):
     P('LX.storage').branch({1:'LX.internal'},'LX.external',[('CMPI','tk',E.TK['type=static'])])
     P('LX.internal').a(('LDI','lx_storage',1)).ret()
     P('LX.external').a(('LDI','lx_storage',0)).ret()
-    def hook(state,procedure):
+    def hook(state,procedure,always=False):
         orig='LX.original.'+state;g.st[orig]=g.st.pop(state)
         g.labels.add(orig)
-        P(state).branch({1:orig},'LX.hook.'+state,[('CMPI','lx_present',0)])
+        if always:P(state).goto('LX.hook.'+state)
+        else:P(state).branch({1:orig},'LX.hook.'+state,[('CMPI','lx_present',0)])
         P('LX.hook.'+state).a(('PUSH',orig)).goto(procedure)
     hook('TOP.st','LX.storage')
     append('FN',[('COPYW','lx_linkage','lx_storage'),('LDI','lx_storage',0)])
@@ -35,8 +36,8 @@ def install(E,P,b,start,integers):
     # Capture all parameters before the legacy SIG.store eight-slot limit.
     # Per-definition epoch marks avoid clearing 1024 slots on each declaration.
     append('FN.fnplain',[('ALUI','add','lx_captureepoch','lx_captureepoch',1)])
-    hook('SIG.store','LX.capture')
-    hook('FN.pfpdecl1','LX.capture')
+    hook('SIG.store','LX.capture',always=True)
+    hook('FN.pfpdecl1','LX.capture',always=True)
     P('LX.capture').branch({0:'LX.captureok'},'LX.fail',[('CMPI','pk',1024)])
     P('LX.captureok').a(('INTERN','lx_id','fns','fne'),('LDX','lx_sig','lx_id',b['FPS_FN']),
         ('ALUI','mul','lx_index','lx_sig',1024),('ALU','add','lx_index','lx_index','pk'),
@@ -113,6 +114,16 @@ def install(E,P,b,start,integers):
     from librarymodule import install as module_install
     from libraryimports import install as imports_install
     imports_start=imports_install(E,P,b,start,integers)
+    # Complete parameter capture is also needed by ordinary source calls.
+    # The legacy first-eight cache default-promoted a ninth fixed float.
+    # Reuse the same pool and conversion machine for every named prototype;
+    # genuinely variadic tail and absent declarations retain the old path.
+    g.st['LX.original.argumentquery']=g.st.pop('CL.namedquery');g.labels.add('LX.original.argumentquery')
+    P('LX.argumentquery').a(('LDX','lx_callsig','fid',b['FPS_FN'])).branch({1:'LX.original.argumentquery'},'LX.callcount',[('CMPI','lx_callsig',0)])
+    g.st['CL.namedquery']=g.st['LX.argumentquery']
+    P('LX.callcount').a(('LDX','lx_callcount','lx_callsig',b['FPS_COUNT'])).branch({0:'LX.callindex'},'LX.original.argumentquery',[('CMP','na','lx_callcount')])
+    P('LX.callindex').a(('ALUI','mul','lx_callindex','lx_callsig',1024),('ALU','add','lx_callindex','lx_callindex','na'),('LDX','lx_callmark','lx_callindex',PARAMMARK),('LDX','lx_callepoch','lx_callsig',SIGEPOCH)).branch({1:'LX.calltype'},'LX.original.argumentquery',[('CMP','lx_callmark','lx_callepoch')])
+    P('LX.calltype').a(('LDX','t','lx_callindex',PARAMDEPTH),('ALUI','mul','t','t',4096),('LDX','lx_callbase','lx_callindex',PARAMBASE),('ALU','add','t','t','lx_callbase'),('CMPI','t',0)).goto('CL.signature')
     module_start=module_install(E,P,imports_start)
     mode,row=g.st['LX.startok']
     for k,(n,q) in list(row.items()):

@@ -39,7 +39,9 @@ int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
    8 (double); like the unsigned bit it describes the object a pointer points
    to, so `*p` of a `double *` is a double. */
 int symflt[MAXSYM];
-int sympk[MAXSYM * 8];         /* a function's parameter kinds (fkind), first 8 */
+int sympk[MAXSYM * 8];         /* append-only pool of complete parameter kinds */
+int nsympk;
+int sympkfirst[MAXSYM];        /* this declaration's first kind in the pool */
 int symnpk[MAXSYM];            /* how many; -1: no prototype seen */
 int symretw[MAXSYM];        /* a function's int return width: 1 2 4, or 0 for 8/other */
 int symfpret[MAXSYM];        /* calling it yields a function pointer */
@@ -734,6 +736,7 @@ int sadd(int t, int kind, int off, int elem) {
     symretw[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
     symflt[nsym] = declflt; symnpk[nsym] = 0 - 1;
+    sympkfirst[nsym] = nsympk;
     symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
     if (declptr) symptrd[nsym] = declpd > 0 ? declpd : 1;
     symbase[nsym] = declbase;
@@ -2024,10 +2027,10 @@ int fmtneedsrt(int ft) {
    type when a prototype gave one, else the default argument promotions --
    float becomes double (C99 6.5.2.2p6-7), which is what `...` receives. */
 int argconv(int si, int k) {
-    if (si >= 0) { if (symkind[si] == 2) { if (symnpk[si] > k) { if (k < 8) {
-        fconv(fkind(), sympk[si * 8 + k]);
+    if (si >= 0) { if (symkind[si] == 2) { if (symnpk[si] > k) {
+        fconv(fkind(), sympk[sympkfirst[si] + k]);
         return 0;
-    } } } }
+    } } }
     if (curflt == 4) { if (curptr == 0) fconv(4, 8); }
     return 0;
 }
@@ -4338,19 +4341,27 @@ int parameter_decl(void) {
     return pw;
 }
 
+/* Pool entries outlive local symbol slots, which block exit can reuse. */
+int paramkind_add(int pk) {
+    if (nsympk >= MAXSYM * 8) { __write(2, "parameter kind pool full\n", 25); __exit(1); }
+    sympk[nsympk] = pk; nsympk = nsympk + 1;
+    return 0;
+}
+
 /* Keep the return declaration in the symbol before parsing parameters.
    The caller restores its declaration base before a comma continuation. */
 int block_prototype(int t, int w) {
     int si; int np; int var; int pw;
     declbytes = declptr ? 8 : declsz;
     si = sadd(t, 2, 0, w);
+    sympkfirst[si] = nsympk;
     need(tidx("(", 1), "(");
     np = 0; var = 0;
     if (isname(tp, "void", 4) && kind(tp + 1) == tidx(")", 1)) adv();
     while (cur() != tidx(")", 1) && cur() != T_EOF) {
         if (eat(tidx("...", 3))) { var = 1; break; }
         pw = parameter_decl();
-        if (np < 8) sympk[si * 8 + np] = dkind(paramflt);
+        paramkind_add(dkind(paramflt));
         np = np + 1;
         if (eat(tidx(",", 1)) == 0) break;
     }
@@ -4871,6 +4882,7 @@ int function(int t, int w) {
     fntok = t;
     start = nout; nsp = 0; pst = 0 - 1;
     fsym = nsym - 1;
+    if (fsym >= 0) sympkfirst[fsym] = nsympk;
     scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
     need(vfind(TOKV, NTOKV, "(", 1), "(");
     /* Look ahead at the whole parameter list before emitting a byte of it:
@@ -4934,9 +4946,7 @@ int function(int t, int w) {
             }
         }
         /* the parameter's kind, for callers to convert to */
-        if (fsym >= 0) { if (np < 8) {
-            sympk[fsym * 8 + np] = dkind(pfl);
-        } }
+        if (fsym >= 0) paramkind_add(dkind(pfl));
         np = np + 1;
         if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
     }
@@ -5317,7 +5327,7 @@ int fe_units(char **paths, int npath, char *t) {
        wrong tape, quietly. */
     model_dims();
     setup();
-    nout = 0; nsym = 0; nlab = 0; npool = 0;
+    nout = 0; nsym = 0; nsympk = 0; nlab = 0; npool = 0;
     poolend = 0; nloop = 0;
     /* `__init` ACCUMULATES: every unit's global initialisers run there, so
        this is reset once for the program, not once per file.  Resetting it

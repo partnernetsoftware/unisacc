@@ -2834,3 +2834,9 @@ R10 typed 私有替换包验收：ARM64/Rosetta 的 O0/O1/O2 均通过 Pair9、d
 R10 variadic宿主首片实测：新lib-variadic-host/rosetta与原lib-typed-host/native/rosetta共5门禁全部rc0，4秒。ARM64原生和Rosetta x86_64均以真实va_arg函数各100次验证固定double前缀、20参数跨寄存器/栈混合、零尾参数、Pair按值与返回；普通/ASan/UBSan均通过。未提升float/窄整数、固定前缀0/超总数明确拒绝。公开API与模型变参调用点尚未接入，完整范围保留。宿主头变化触发构建闭包，根产物必须实际重构，不能重写旧sidecar声称新鲜。
 
 R10 variadic宿主首片正式验收：f241dc2私有冻结源构造全部阶段；整批55秒rc142不算通过，独立pack复核全部阶段manifest并rc0。根.com与原始来源侧车同步真实重构产物，仍1,080,781B/2fe21bc3…（库适配器改动不影响CLI字节）；来源check通过。最终9项受影响门禁rc0，17秒，含两ISA新变参宿主/旧双向typed、kernel59 stale0、docs、run12/12、c9957/57。回执research/r10-ffi-variadic-host-evidence.json。首片仅内部机械调用计划，模型与公开变参调用仍未完成；没有VM/push/release，完整0.0.10仍继续。
+
+
+### R10 fixed参数完整性红基线（2026-09-29）
+为变参调用点核查固定/尾参数分界时，真实产品暴露另一同源问题：普通源码定义的9个float固定参数加权函数应返回285，宿主cc退出0，当前根.com在O0/O1/O2均退出1。原固定typed import专用池修复没有覆盖普通源码函数，不能称全量固定参数已正确。先加回归并修：模型默认路径也捕获完整参数池，查询命名固定参数时复用此池与既有转换机，真正ellipsis尾参数仍默认提升；经典C行为参考改用有界连续参数池+每symbol起点，不按每个symbol预分配1024、容量不足明确拒绝。Python种子实际结果另测，不凭源码猜错。模型变参设计只读并行，经典文件与模型文件不交叠；父会话持有PRD/模型hook/共享生成物与产品重构。
+
+R10 fixed参数修复局部证据：经典新参考与系统cc同输出，原参考三个优化级均错误；真实524288槽容量可编，513×1024参数原型明确拒绝。模型通用完整参数捕获还暴露前向>6参数原型的stack模式未设置，已与定义采用同规则。新增完整回归经私有新E3REF/E3DUMP与模型逐字节equal；早先compare误只传UA导致读取默认参考，不作为新参考证据且未写共享路径。正式产品重构与受影响门禁随后执行。变参调用点一遍E3/事务准备方案见research/r10-ffi-variadic-callsite-design.md，仍是设计未实现。
