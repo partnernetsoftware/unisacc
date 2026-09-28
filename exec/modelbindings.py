@@ -1,4 +1,4 @@
-"""Finite USBIND1 resource wire decoder, reusable by stage builders.
+"""Finite USBIND1/2/3 resource wire decoder, reusable by stage builders.
 No source parsing or host-side ABI selection. Structural validation precedes decoding; named data facts are checked on use.
 Function typing is proved by E3; raw .librarycall is an explicitly trusted tape capability.
 """
@@ -6,6 +6,7 @@ from pathlib import Path
 NAMES, IDS, ADDRESS, ARGC, DESC, SEEN = (i << 40 for i in range(190,196))
 KIND, EXTENT, WRITABLE = (i << 40 for i in range(196,199))
 VARIADIC, SUPPORTED = (i << 40 for i in range(313,315))
+FORMAT, TYPED, CANON, CANONLEN, DISPATCH, PLAN, RESULT_KIND, RESULT_WIDTH = (i << 40 for i in range(320,328))
 STRIDE=6150
 
 def install(E):
@@ -17,8 +18,12 @@ def install(E):
     from modelcandidates import install as install_candidates
     install_candidates(E)
     P('LBI.present').a(('COPYW','mc_blob','lbi_blob'),('COPYW','mc_len','lbi_len')).call('MC.normalize').a(('COPYW','lbi_blob','mc_blob'),('COPYW','lbi_len','mc_len'),('INPUSH','lbi_blob'),('COPYW','lbi_limit','lbi_len')).goto('LBI.magic0')
-    for i,c in enumerate(b'USBIND1\n'):
-        P('LBI.magic'+str(i)).call('LBI.byte').branch({c:'LBI.magic'+str(i+1) if i<7 else 'LBI.count'},'LBI.fail',[('RLD','lbi_byte')])
+    for i,c in enumerate(b'USBIND'):
+        P('LBI.magic'+str(i)).call('LBI.byte').branch({c:'LBI.magic'+str(i+1)},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.magic6').call('LBI.byte').branch({49:'LBI.version1',51:'LBI.version3'},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.version1').a(('LDI','lbi_version',1)).goto('LBI.magic7')
+    P('LBI.version3').a(('LDI','lbi_version',3)).goto('LBI.magic7')
+    P('LBI.magic7').call('LBI.byte').branch({10:'LBI.count'},'LBI.fail',[('RLD','lbi_byte')])
     P('LBI.count').call('LBI.u64').a(('COPYW','lbi_count','lbi_value'),('LDI','lbi_i',0)).branch({2:'LBI.fail'},'LBI.nonempty',[('LDI','lbi_max',1024),('C64U','lbi_count','lbi_max')])
     P('LBI.nonempty').branch({1:'LBI.fail'},'LBI.record',[('CMPI','lbi_count',0)])
     P('LBI.record').branch({1:'LBI.inputend'},'LBI.recordlength',[('CMP','lbi_i','lbi_count')])
@@ -37,12 +42,18 @@ def install(E):
     P('LBI.kind').call('LBI.byte').branch({0:'LBI.kind0',1:'LBI.kind1'},'LBI.fail',[('RLD','lbi_byte')])
     for kind in (0,1):
         P('LBI.kind'+str(kind)).a(('LDI','lbi_kind',kind),('STX','lbi_i',KIND,'lbi_kind')).goto('LBI.origin')
-    for state,nx in [('origin','abi'),('abi','variadic')]:
-        P('LBI.'+state).call('LBI.byte').branch({0:'LBI.'+nx},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.origin').call('LBI.byte').branch({0:'LBI.originversion'},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.originversion').branch({1:'LBI.ordinal'},'LBI.abi',[('CMPI','lbi_version',3)])
+    P('LBI.ordinal').call('LBI.u64').branch({1:'LBI.abi'},'LBI.fail',[('CMPI','lbi_value',0)])
+    P('LBI.abi').call('LBI.byte').branch({0:'LBI.variadic'},'LBI.fail',[('RLD','lbi_byte')])
     P('LBI.variadic').call('LBI.byte').a(('STX','lbi_i',VARIADIC,'lbi_byte')).goto('LBI.address')
     P('LBI.address').call('LBI.u64').branch({2:'LBI.addressmax'},'LBI.fail',[('LDI','lbi_zero',0),('C64U','lbi_value','lbi_zero')])
     P('LBI.addressmax').branch({2:'LBI.fail'},'LBI.addrok',[('LDI','lbi_max',9223372036854775807),('C64U','lbi_value','lbi_max')])
-    P('LBI.addrok').a(('STX','lbi_i',ADDRESS,'lbi_value')).call('LBI.u64').a(('COPYW','lbi_argc','lbi_value'),('STX','lbi_i',ARGC,'lbi_value')).branch({2:'LBI.fail'},'LBI.argkind',[('LDI','lbi_max',1024),('C64U','lbi_argc','lbi_max')])
+    P('LBI.addrok').a(('STX','lbi_i',ADDRESS,'lbi_value')).call('LBI.u64').a(('COPYW','lbi_argc','lbi_value'),('STX','lbi_i',ARGC,'lbi_value')).branch({2:'LBI.fail'},'LBI.formatversion',[('LDI','lbi_max',1024),('C64U','lbi_argc','lbi_max')])
+    P('LBI.formatversion').branch({1:'LBI.format'},'LBI.legacyformat',[('CMPI','lbi_version',3)])
+    P('LBI.legacyformat').a(('LDI','lbi_format',0),('STX','lbi_i',FORMAT,'lbi_format')).goto('LBI.argkind')
+    P('LBI.format').call('LBI.byte').a(('STX','lbi_i',FORMAT,'lbi_byte')).branch({0:'LBI.argkind',1:'LBI.typeddispatcher'},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.typeddispatcher').call('LBI.u64').a(('STX','lbi_i',DISPATCH,'lbi_value')).call('LBI.u64').a(('STX','lbi_i',PLAN,'lbi_value')).call('LBI.u64').a(('COPYW','ms_len','lbi_value'),('MARK','lbi_sigstart'),('A64','add','lbi_sigend','lbi_sigstart','ms_len'),('OLEN','lbi_sigcut'),('SPAN2','lbi_sigstart','lbi_sigend'),('OCUT','ms_blob','lbi_sigcut'),('STX','lbi_i',TYPED,'ms_blob'),('JUMP','lbi_sigend')).call('MS.canonical').a(('STX','lbi_i',CANON,'ms_canon'),('STX','lbi_i',CANONLEN,'ms_canonlen'),('STX','lbi_i',RESULT_KIND,'ms_resultkind'),('STX','lbi_i',RESULT_WIDTH,'ms_resultwidth')).goto('LBI.supported')
     P('LBI.argkind').branch({1:'LBI.dataargc'},'LBI.descbegin',[('CMPI','lbi_kind',1)])
     P('LBI.dataargc').branch({1:'LBI.descbegin'},'LBI.fail',[('CMPI','lbi_argc',0)])
     P('LBI.descbegin').a(('LDI','lbi_d',0),('LDI','lbi_field',0)).goto('LBI.desc')

@@ -55,6 +55,14 @@ US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const
    Success invalidates code/exports; failure preserves the prior generation.
    Handles remain owned until us_free, after compiled code is destroyed. */
 US_API int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
+/* New typed fixed native declarations use the exact model USLSIG2 single-record
+   protocol. The record name must equal name; bytes are deep-owned on success.
+   Old us_signature/API layout is unchanged. Mutation follows the same generation
+   invalidation rule. Full variadic/callback/union ABI support remains separate. */
+US_API int us_add_symbol_typed(us_context *ctx, const char *name, void *address,
+                              const void *signature, size_t length);
+US_API int us_declare_import_typed(us_context *ctx, const char *name,
+                                  const void *signature, size_t length);
 US_API int us_load_library(us_context *ctx, const char *path);
 US_API int us_compile(us_context *ctx, const char *target, int optimisation);
 US_API int us_relocate(us_context *ctx);

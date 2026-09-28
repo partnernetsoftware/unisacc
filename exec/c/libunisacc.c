@@ -14,6 +14,7 @@
 #include <errno.h>
 #include "libraryexports.h"
 #include "librarycall.h"
+#include "librarynative.h"
 #include "librarybindings.h"
 #include "libraryresolver.h"
 
@@ -33,6 +34,7 @@ struct us_context {
     us_exports exports;
     us_bindings bindings;
     us_resolver resolver;
+    us_native_plans native_plans;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -192,6 +194,7 @@ API us_context *us_new(const char *path) {
 API void us_free(us_context *c) {
     if (!c) return;
     discard_image(c);
+    us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);free(c->binding_blob);
     free(c->package); free(c->definitions); free(c->target);
@@ -244,8 +247,9 @@ API const void *us_tape(const us_context *c,size_t *length) {
 }
 static uint64_t library_u64(const Buf *b,size_t *at);
 static const char *library_native_target(void);
+static uint64_t library_native_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static void invalidate_bindings(us_context *c) {
-    discard_image(c);free(c->tape);c->tape=0;c->tape_length=0;
+    discard_image(c);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
     free(c->target);c->target=0;c->error[0]=0;
@@ -282,6 +286,17 @@ API int us_declare_import(us_context *c,const char *name,const us_signature *sig
           sig->count,sig->variadic,sig->extent,sig->writable,c->error,sizeof c->error);
     free(args);if(rc)return rc;invalidate_bindings(c);return 0;
 }
+API int us_add_symbol_typed(us_context *c,const char *name,void *address,const void *signature,size_t length) {
+    if(!c || active || c->input_is_tape || !address)return error(c,"invalid typed symbol registration");
+    if(us_resolver_accept_injection_typed(&c->resolver,name,signature,length,c->error,sizeof c->error))return 1;
+    if(us_bindings_add_function_typed(&c->bindings,name,(uintptr_t)address,signature,length,c->error,sizeof c->error))return 1;
+    c->resolver.generation++;invalidate_bindings(c);return 0;
+}
+API int us_declare_import_typed(us_context *c,const char *name,const void *signature,size_t length) {
+    if(!c || active || c->input_is_tape)return error(c,"invalid typed import declaration");
+    if(us_resolver_declare_typed(&c->resolver,&c->bindings,name,signature,length,c->error,sizeof c->error))return 1;
+    invalidate_bindings(c);return 0;
+}
 API int us_load_library(us_context *c,const char *path) {
     if(!c || active || c->input_is_tape)return error(c,"invalid library load");
     int rc=us_resolver_load(&c->resolver,path,c->error,sizeof c->error);
@@ -292,14 +307,14 @@ API int us_compile(us_context *c,const char *target,int level) {
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
     if (active) return error(c,"recursive compilation not yet supported");
     c->error[0]=0;
-    unsigned char *frozen=0;size_t frozen_length=0;
+    unsigned char *frozen=0;size_t frozen_length=0;us_native_plans plans={0};
     if(c->bindings.count || c->resolver.declarations.count || c->resolver.handle_count){
         if(strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
-        if(us_resolver_freeze(&c->resolver,&c->bindings,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
+        if(us_resolver_freeze_with_plans(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,&plans,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
     }
-    if(frozen_length>=INT_MAX){free(frozen);return error(c,"bindings too large");}
-    char *chosen=copy_string(target); if (!chosen){free(frozen);return error(c,"out of memory");}
-    discard_image(c);
+    if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);return error(c,"bindings too large");}
+    char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);return error(c,"out of memory");}
+    discard_image(c);us_native_plans_clear(&c->native_plans);c->native_plans=plans;
     free(c->binding_blob);c->binding_blob=frozen;c->binding_length=frozen_length;
     free(c->target); c->target=chosen; c->optimisation=level;
     if (c->input_is_tape) return 0;
@@ -424,12 +439,60 @@ static void library_image(us_context *c,Buf *bytes,MemoryImage *m,MemoryMap *map
     for (size_t i=1;i<c->symbol_count;i++)
         if (!strcmp(c->symbols[i-1].name,c->symbols[i].name)) __us_panic("duplicate library symbol");
 }
+typedef struct NativeCleanup { us_native_arena *arena; struct NativeCleanup *next; } NativeCleanup;
 typedef struct ScriptFrame {
     jmp_buf returned;
-    volatile int status;
+    volatile int status,exited,failed;
+    NativeCleanup *volatile native_arenas;
+    unsigned char *stack_base;size_t stack_size;
     struct ScriptFrame *previous;
 } ScriptFrame;
 static _Thread_local ScriptFrame *script_frames;
+static void script_frame_cleanup(ScriptFrame *frame) {
+    while(frame->native_arenas){NativeCleanup *node=frame->native_arenas;frame->native_arenas=node->next;
+        us_native_arena_free(node->arena);free(node);}
+}
+static int library_region(uintptr_t base,size_t extent,uintptr_t at,size_t bytes) {
+    return at>=base && at-base<=extent && bytes<=extent-(at-base);
+}
+static int library_frame_region(us_context *c,ScriptFrame *f,uint64_t address,size_t bytes) {
+    if(!bytes)return 1;
+    size_t page=library_page_size();
+    if(page && f->stack_size>=2*page && library_region((uintptr_t)f->stack_base+page,
+              f->stack_size-2*page,(uintptr_t)address,bytes))return 1;
+    return c->image_dataoff>=0 && c->image_data_size>=0 &&
+        library_region((uintptr_t)c->image+(uintptr_t)c->image_dataoff,
+                       (size_t)c->image_data_size,(uintptr_t)address,bytes);
+}
+static uint64_t library_dispatch_error(us_context *c,const char *message) {
+    if(c && message)error(c,message);
+    if(script_frames){script_frames->failed=1;longjmp(script_frames->returned,1);}
+    return 1;
+}
+/* A declared ABI mechanism: model selected this exact plan; no host name winner
+   or source type classification. Native code and borrowed objects obey C's
+   lifetime contract; this bridge is not an untrusted-code sandbox. */
+static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
+                                       uint64_t count,uint64_t reserved0,uint64_t reserved1) {
+    us_context *c=active;ScriptFrame *frame=script_frames;
+    if(!c || !frame)return 1;
+    us_native_plan *plan=us_native_plan_find(&c->native_plans,handle);
+    if(!plan || count>1024 || reserved0 || reserved1 ||
+       !library_frame_region(c,frame,slots,(size_t)count*8))
+        return library_dispatch_error(c,"invalid declared native call plan or slots");
+    us_export *x=plan->graph.items;size_t bytes=x->result.kind==5 ? (size_t)x->result.width : x->result.kind ? 8:0;
+    if(!library_frame_region(c,frame,result,bytes))
+        return library_dispatch_error(c,"native result is outside owned script frame");
+    us_native_arena *arena=NULL;
+    if(us_native_prepare(plan,(const uint64_t *)(uintptr_t)slots,count,(void *)(uintptr_t)result,
+                         &arena,c->error,sizeof c->error))return library_dispatch_error(c,NULL);
+    NativeCleanup *node=malloc(sizeof *node);
+    if(!node){us_native_arena_free(arena);return library_dispatch_error(c,"native cleanup allocation failed");}
+    node->arena=arena;node->next=frame->native_arenas;frame->native_arenas=node;
+    int rc=us_native_invoke(arena);
+    frame->native_arenas=node->next;us_native_arena_free(arena);free(node);
+    if(rc)return library_dispatch_error(c,"declared native call failed");return 0;
+}
 /* Host memory lifetime adaptation. The model decides which operation and
    argument sequence to issue; these callbacks never inspect source or tape. */
 static int64_t library_mmap(int64_t addr,int64_t length,int64_t prot,int64_t flags,int64_t fd,int64_t offset) {
@@ -517,7 +580,7 @@ static int64_t library_munmap(int64_t addr,int64_t length) {
 }
 static int64_t library_exit(int64_t status) {
     if(!script_frames)return -EINVAL;
-    script_frames->status=(int)status;longjmp(script_frames->returned,1);
+    script_frames->status=(int)status;script_frames->exited=1;longjmp(script_frames->returned,1);
 }
 static const char *library_native_target(void) {
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -646,7 +709,8 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
     }
     c->error[0]=0;if(values->result_kind)memset(values->result,0,values->result_bytes);
     us_context *previous_active=active;
-    ScriptFrame frame;frame.previous=script_frames;frame.status=0;
+    ScriptFrame frame;frame.previous=script_frames;frame.status=0;frame.exited=0;frame.failed=0;
+    frame.native_arenas=NULL;frame.stack_base=stack;frame.stack_size=stack_size;
     active=c;script_frames=&frame;
     int exited=setjmp(frame.returned);
     if(!exited) {
@@ -655,7 +719,7 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
         if(values->mode==1) {
             if(!us_library_call_stack(raw,values->slots,top,stack_size-2*page,
                                       (size_t)values->count,&value)) {
-                script_frames=frame.previous;active=previous_active;
+                script_frame_cleanup(&frame);script_frames=frame.previous;active=previous_active;
                 if(nested)library_release_map(stack,stack_size);
                 return error(c,"declared library call exceeds private stack");
             }
@@ -671,19 +735,19 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
             uintptr_t start=(uintptr_t)c->image+(uintptr_t)c->image_dataoff,at=(uintptr_t)value;
             if(c->image_data_size<0 || at<start || at-start>(uint64_t)c->image_data_size ||
                values->result_bytes>(uint64_t)c->image_data_size-(at-start)) {
-                script_frames=frame.previous;active=previous_active;
+                script_frame_cleanup(&frame);script_frames=frame.previous;active=previous_active;
                 if(nested)library_release_map(stack,stack_size);
                 return error(c,"aggregate return is outside owned script image");
             }
             memcpy(values->result,(const void *)at,values->result_bytes);
         } else if(values->result_kind)memcpy(values->result,&value,8);
     }
-    script_frames=frame.previous;active=previous_active;
+    script_frame_cleanup(&frame);script_frames=frame.previous;active=previous_active;
     if(nested)library_release_map(stack,stack_size);
-    c->call_exited=exited ? 1 : 0;c->call_exit_status=exited ? frame.status : 0;
-    c->call_failed=c->call_exited;
-    if(exited)snprintf(c->error,sizeof c->error,"script exited with status %d",frame.status);
-    else c->error[0]=0;
+    c->call_exited=frame.exited ? 1 : 0;c->call_exit_status=frame.exited ? frame.status : 0;
+    c->call_failed=frame.failed || frame.exited;
+    if(frame.exited)snprintf(c->error,sizeof c->error,"script exited with status %d",frame.status);
+    else if(!frame.failed)c->error[0]=0;
     return c->call_failed;
 }
 static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {

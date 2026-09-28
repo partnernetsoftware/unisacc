@@ -2810,3 +2810,9 @@ R10 ALL_STACK正式候选封存：d4eac6d冻结源实际shared+六目标均完�
 **R10 USLSIG2公开API闭环（2b80b50）**：共享/六目标/pack在私有冻结源分步有界实际重建，候选`d7d985bdf02f546178674b7ea12e9e2bbae2cd8953f7c0528b02411d107aa758`/1058524B。macOS ARM原生与Rosetta x86经真实公开us_compile→us_relocate→us_sym，在O0/O1/O2各100轮调用完整9参混合FP/GP/指针/Pair，返回17.00/40；负值6.00/-21、caller对象与返回副本隔离、float9/double9/加权integer17通过。host native+ASan/UBSan包含1024参数真实ffi_call与原子截断拒绝。最终E3全域check-net为1,821,224观察/7060态（先前1,815,923是表项数，已更正），prune127,970观察/497态；默认完整4,480,071B自源tape与参考相同。20受影响门禁实际rc0；首次7项整批55秒超时不算pass，拆4+1+2后七项全部通过。根.com及原始sidecar同步实际候选、不restamp；见research/r10-ffi-sig2-final-candidate.json。完整双向FFI/typed变参与callback/union及bitfield/宽long double/六目标完整ABI/最终CI和签名发布仍待，不据此宣布R10完成。
 
 下一片只读设计已保存research/r10-ffi-native-import-design.md：USBIND2已有origin+ordinal用途，递归typed binding需新USBIND3。复用同一TypeGraph、由δ比较原型与选择计划；六GP桥只调用通用ffi_call dispatcher，不直接假称能调用混合原生ABI。首验必须是native→script_exchange9→真实injected host_exchange9→Pair返回17.00/40。该报告只是设计，尚未实现；完整剩余范围保持。
+
+
+### R10 typed native双向FFI实施决定（2026-09-29）
+固定协议见exec/c/librarybinding-v3.md：USBIND1/2保持，USBIND3容纳共享USLSIG2递归声明及candidate-owned native plan；原公开struct不变，新增typed API。模型比较完整源原型与显式声明、选择候选和REGISTER/ALL_STACK包装；既有六GP桥只调用通用ffi_call dispatcher，宿主不选择符号赢家或解析C。候选层、E3全量原型/包装、宿主深拷贝/ffi计划三个不相交文件域并发；父会话持有libunisacc公开API、ScriptFrame arena清理、门禁/生成物/根com与提交。首闭环必须native→script9→真实injected native9→Pair17.00/40，并保留FP9/17参、错误图与优先级控制，不能以纯ffi smoke充数。变参/typed callback/union-bitfield NativePlan/宽long double/六目标及签名发布仍完整保留。
+
+R10 本轮源实现：USBIND3 完整递归签名经共享 δ 规范化，宿主逐候选创建自有 libffi plan；模型生成参数槽与六字段控制帧，通用原生桥只调用声明 dispatcher。真实双向固定 ABI 的整包验证仍待执行；不据宿主单测宣布整体 FFI 完成。候选、规范化、lower 三模型合计 689,124 观察网络等于表；原生旧包 Pair9/FP9/整数17 三优化级每组100次保持通过。

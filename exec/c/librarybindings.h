@@ -9,11 +9,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
 typedef struct us_binding_type {uint64_t depth,base,shape,kind,width,uns;} us_binding_type;
-typedef struct us_binding {char *name;uintptr_t address;unsigned kind,variadic,supported,writable;size_t count;us_binding_type result,*args;uint64_t extent;} us_binding;
+typedef struct us_binding {char *name;uintptr_t address;unsigned kind,variadic,supported,writable;size_t count;us_binding_type result,*args;uint64_t extent;unsigned char *signature;size_t signature_length;struct us_exports *typed;void (*typed_clear)(struct us_exports*);} us_binding;
 typedef struct us_bindings {us_binding *items;size_t count;} us_bindings;
 static int us_binding_error(char *error,size_t capacity,const char *message){if(error&&capacity)snprintf(error,capacity,"%s",message);return 1;}
-static void us_bindings_clear(us_bindings *b){if(!b)return;for(size_t i=0;i<b->count;i++){free(b->items[i].name);free(b->items[i].args);}free(b->items);memset(b,0,sizeof *b);}
+static void us_bindings_clear(us_bindings *b){if(!b)return;for(size_t i=0;i<b->count;i++){free(b->items[i].name);free(b->items[i].args);free(b->items[i].signature);if(b->items[i].typed){b->items[i].typed_clear(b->items[i].typed);free(b->items[i].typed);}}free(b->items);memset(b,0,sizeof *b);}
 static int us_binding_type_valid(const us_binding_type *t,int result){
  if(!t||t->kind>6||t->uns>1)return 0;
  if(t->kind==0)return result&&!t->depth&&!t->width&&!t->uns;
@@ -47,13 +48,32 @@ static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t addres
  us_binding x={0};size_t n=strlen(name)+1;x.name=malloc(n);if(!x.name)return us_binding_error(error,cap,"binding allocation failed");memcpy(x.name,name,n);x.kind=1;x.address=address;x.result=*type;x.extent=extent;x.writable=writable;x.supported=us_binding_type_supported(type,0);
  if(us_binding_append(b,&x,error,cap)){free(x.name);return 1;}return 0;
 }
+#ifdef UNISACC_LIBRARYNATIVE_H
+static void us_binding_owned_clear(us_binding *x){if(!x)return;free(x->name);free(x->args);free(x->signature);if(x->typed){us_exports_clear(x->typed);free(x->typed);}memset(x,0,sizeof *x);}
+static int us_bindings_add_function_typed(us_bindings *b,const char *name,uintptr_t address,const void *signature,size_t length,char *error,size_t cap){
+ if(!b||!us_binding_name(name)||!address||!signature||length<16||memcmp(signature,"USLSIG2\n",8)||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
+ us_binding x={0};x.typed_clear=us_exports_clear;x.typed=calloc(1,sizeof *x.typed);if(!x.typed)return us_binding_error(error,cap,"typed declaration allocation failed");
+ if(us_exports_load(x.typed,signature,length,error,cap)||x.typed->count!=1)goto bad;
+ us_export *f=x.typed->items;if(strcmp(name,f->name)||f->linkage||f->defined!=1)goto bad;
+ x.name=malloc(strlen(name)+1);x.signature=malloc(length);if(!x.name||!x.signature)goto bad;
+ strcpy(x.name,name);memcpy(x.signature,signature,length);x.signature_length=length;x.address=address;x.count=(size_t)f->count;x.variadic=f->variadic;x.supported=us_export_supported(f);
+ if(us_binding_append(b,&x,error,cap))goto bad;return 0;
+ bad:us_binding_owned_clear(&x);return us_binding_error(error,cap,"invalid typed function declaration");
+}
+static int us_binding_graph_equal(const us_export_type *a,const us_export_type *b){
+ if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)return 0;
+ for(size_t i=0;i<(size_t)a->nmembers;i++){const us_export_member *x=a->members+i,*y=b->members+i;
+ if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||!us_binding_graph_equal(x->type,y->type))return 0;}
+ return !a->element ? !b->element : b->element&&us_binding_graph_equal(a->element,b->element);
+}
+#endif
 static void us_binding_put64(unsigned char *p,uint64_t value){for(unsigned i=0;i<8;i++)p[i]=(unsigned char)(value>>(8*i));}
 static void us_binding_puttype(unsigned char *p,const us_binding_type *t){us_binding_put64(p,t->depth);us_binding_put64(p+8,t->base);us_binding_put64(p+16,t->shape);us_binding_put64(p+24,t->kind);us_binding_put64(p+32,t->width);us_binding_put64(p+40,t->uns);}
 /* Allocates one caller-owned byte blob. Full unsupported descriptors are kept.
    origin=0 injected, abi=0 native-system. No pointer ownership is transferred. */
 static int us_bindings_serialize(const us_bindings *b,unsigned char **out,size_t *length,char *error,size_t cap){
  if(!b||!out||!length||b->count>4096||(b->count&&!b->items))return us_binding_error(error,cap,"invalid binding output");*out=NULL;*length=0;size_t total=16;
- for(size_t i=0;i<b->count;i++){const us_binding *x=b->items+i;size_t record=strlen(x->name)+(x->kind?86:77)+48*x->count;if(record>SIZE_MAX-total-8)return us_binding_error(error,cap,"binding wire length overflow");total+=8+record;}
+ for(size_t i=0;i<b->count;i++){const us_binding *x=b->items+i;if(x->typed)return us_binding_error(error,cap,"typed bindings require V3 freeze");size_t record=strlen(x->name)+(x->kind?86:77)+48*x->count;if(record>SIZE_MAX-total-8)return us_binding_error(error,cap,"binding wire length overflow");total+=8+record;}
  unsigned char *p=malloc(total);if(!p)return us_binding_error(error,cap,"binding wire allocation failed");memcpy(p,"USBIND1\n",8);us_binding_put64(p+8,b->count);size_t at=16;
  for(size_t i=0;i<b->count;i++){
   const us_binding *x=b->items+i;size_t n=strlen(x->name),record=n+(x->kind?86:77)+48*x->count;us_binding_put64(p+at,record);at+=8;us_binding_put64(p+at,n);at+=8;memcpy(p+at,x->name,n);at+=n;

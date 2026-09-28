@@ -4,6 +4,7 @@ length-framed outer envelope; prune/lower see only its separated tape payload.
 """
 from pathlib import Path
 RECORDS, SEEN, VARIADIC, PARAMMARK, PARAMDEPTH, PARAMBASE, PARAMSHAPE, UNION = (i << 40 for i in range(72,80))
+SIGEPOCH = 81 << 40
 
 def install(E,P,b,start,integers):
     from modelinput import u64
@@ -33,13 +34,13 @@ def install(E,P,b,start,integers):
                       ('STX','lx_sig',VARIADIC,'vfn')])
     # Capture all parameters before the legacy SIG.store eight-slot limit.
     # Per-definition epoch marks avoid clearing 1024 slots on each declaration.
-    append('FN.fnplain',[('ALUI','add','lx_epoch','lx_epoch',1)])
+    append('FN.fnplain',[('ALUI','add','lx_captureepoch','lx_captureepoch',1)])
     hook('SIG.store','LX.capture')
     hook('FN.pfpdecl1','LX.capture')
     P('LX.capture').branch({0:'LX.captureok'},'LX.fail',[('CMPI','pk',1024)])
     P('LX.captureok').a(('INTERN','lx_id','fns','fne'),('LDX','lx_sig','lx_id',b['FPS_FN']),
         ('ALUI','mul','lx_index','lx_sig',1024),('ALU','add','lx_index','lx_index','pk'),
-        ('STX','lx_index',PARAMMARK,'lx_epoch'),('STX','lx_index',PARAMDEPTH,'td'),
+        ('STX','lx_sig',SIGEPOCH,'lx_captureepoch'),('STX','lx_index',PARAMMARK,'lx_captureepoch'),('STX','lx_index',PARAMDEPTH,'td'),
         ('STX','lx_index',PARAMBASE,'tb'),('STX','lx_index',PARAMSHAPE,'type_shape')).ret()
     # Union identity must survive SB.end's restoration of the enclosing parser.
     hook('SB.go','LX.union')
@@ -50,7 +51,7 @@ def install(E,P,b,start,integers):
         {1:'LX.record'},'LX.fail',[('CMPI','lx_seen',0)])
     p=P('LX.record').a(('LDI','lx_one',1),('STX','lx_id',SEEN,'lx_one'),('LDI','lx_zero',0),
        ('OCUT','lx_tape','lx_zero'),('LDX','lx_sig','lx_id',b['FPS_FN']),
-       ('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
+       ('LDX','lx_epoch','lx_sig',SIGEPOCH),('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
        ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0))
     p.branch({1:'LX.externalrecord'},'LX.unsupportedlink',[('CMPI','lx_linkage',0)])
     P('LX.unsupportedlink').a(('LDI','lx_supported',0)).goto('LX.externalrecord')
@@ -77,6 +78,22 @@ def install(E,P,b,start,integers):
         ('INPUSH','lx_tape'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',)).ret()
     from librarytypes import install as type_install
     type_install(E,P,b,integers,UNION)
+    # Import prototypes serialize through the same descriptor path. Names are
+    # already-owned blobs; parser source offsets no longer need remain active.
+    p=P('LX.signature').a(('OCUT','lx_sigold','lx_zero'),('LDX','lx_epoch','lx_sig',SIGEPOCH),
+        ('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
+        ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).o('USLSIG2\n').a(('LDI','lx_v',1)).call('LX.u64').goto('LX.signaturemode')
+    P('LX.signaturemode').branch({2:'LX.signaturestack'},'LX.signaturevar',[('CMPI','lx_nparams',6)])
+    # The preceding procedure builder continuation must explicitly reach mode.
+    P('LX.signaturevar').branch({1:'LX.signaturestack'},'LX.signaturefields',[('CMPI','lx_var',1)])
+    P('LX.signaturestack').a(('LDI','lx_mode',1)).goto('LX.signaturefields')
+    p=P('LX.signaturefields').a(('BLEN','lx_v','lx_nameblob')).call('LX.u64').a(('INPUSH','lx_nameblob'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',),('LDI','lx_one',1),('OUTW','lx_zero'),('OUTW','lx_one'),('OUTW','lx_var'),('OUTW','lx_mode'),('COPYW','lx_v','lx_nparams')).call('LX.u64')
+    p.a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',1)).call('LX.descriptor')
+    p.a(('COPYW','lx_v','lx_nparams')).call('LX.u64').a(('LDI','lx_proto_i',0)).goto('LX.prototypeparams')
+    P('LX.prototypeparams').branch({0:'LX.prototypeparam'},'LX.signatureend',[('CMP','lx_proto_i','lx_nparams')])
+    p=P('LX.prototypeparam').a(('ALUI','mul','lx_index','lx_sig',1024),('ALU','add','lx_index','lx_index','lx_proto_i'),('LDX','lx_mark','lx_index',PARAMMARK)).branch({1:'LX.prototypeparamout'},'LX.fail',[('CMP','lx_mark','lx_epoch')])
+    P('LX.prototypeparamout').a(('LDX','lx_depth','lx_index',PARAMDEPTH),('LDX','lx_base','lx_index',PARAMBASE),('LDX','lx_shape','lx_index',PARAMSHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',0)).call('LX.descriptor').a(('ALUI','add','lx_proto_i','lx_proto_i',1)).goto('LX.prototypeparams')
+    P('LX.signatureend').a(('OUTW','lx_supported'),('OCUT','lx_sigblob','lx_zero'),('INPUSH','lx_sigold'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',)).ret()
     # Intercept successful acceptance only, preserving its prior output actions.
     for state,(mode,row) in list(g.st.items()):
         for k,(n,q) in list(row.items()):

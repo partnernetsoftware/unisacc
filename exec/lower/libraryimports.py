@@ -1,5 +1,6 @@
-"""Declared USBIND1 capability gates dedicated library calls in lowering.
-The byte decoder is mechanically shared in shape with E3's reader, not a C parser.
+"""Declared USBIND1/2/3 capability gates dedicated library calls in lowering.
+The shared decoder validates format1 TypeGraphs/dispatcher handles as capabilities;
+E3 chooses and types wrappers. Lower never classifies a source type or picks an import.
 Ordinary .hostcall handling is untouched; only the dedicated token uses this route.
 """
 from pathlib import Path
