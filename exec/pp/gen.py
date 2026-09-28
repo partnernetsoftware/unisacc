@@ -102,6 +102,41 @@ def autoinc_map():
 
 AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta without it
 AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
+# -libneed (src/front_pp.c libneed_scan/libneed_define): W[LNSB + id] = 1 when
+# the identifier occurs anywhere in the unit (srcfind), kept apart from AIB so
+# the autoinc status compare is untouched; W[NEEDB + b] = 1 marks carried body b.
+LNSB, NEEDB = 71 * 10 ** 6, 70 * 10 ** 6
+
+
+def build_libneed(g):
+    """-libneed after the autoinc scan: with \\0cli/libneed and no quoted
+    #include (the LQ* prescan, quotedinc's line rule), mark the roots'
+    closure, then every body reached by a seen key, then define __UN_<body>
+    for each marked body and __UNISA_LIBNEED.  Closures are the build-time
+    table of unisa/libneed.py; nothing is solved at run time."""
+    sys.path.insert(0, ROOT)
+    from unisa.libneed import table, roots, PREFIX
+    inc = os.path.join(ROOT, "include")
+    keys, closure, bodies = table(inc)
+    index = {b: i for i, b in enumerate(bodies)}
+    def marks(names):
+        out = []
+        for b in names:
+            out += [("LDI", "t", NEEDB + index[b]), ("LDI", "v", 1), ("STX", "t", 0, "v")]
+        return out
+    install_rules(g, HERE, "libneed", {"LNSB": LNSB}, {"roots": marks(roots(inc))})
+    for i, k in enumerate(keys):
+        install_rules(g, HERE, "libneed-key", {"entry": "LNK%d" % i, "test": "LNK%dr" % i,
+            "next": "LNK%d" % (i + 1) if i + 1 < len(keys) else "LNB0", "LNSB": LNSB},
+            {"name": sbconst(k), "mark": marks(closure[k])})
+    for j, b in enumerate(bodies):
+        nxt = "LNB%d" % (j + 1) if j + 1 < len(bodies) else "LNDEF"
+        install_rules(g, HERE, "libneed-body", {"entry": "LNB%d" % j, "test": "LNB%dr" % j,
+            "next": nxt, "define": "LNB%dd" % j, "slot": NEEDB + j})
+        install_rules(g, HERE, "assembly", {"entry": "LNB%dd" % j, "resume": "LNB%ddr" % j,
+            "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(PREFIX + b)}, section="predefine")
+    install_rules(g, HERE, "assembly", {"entry": "LNDEF", "resume": "LNDEFR",
+        "next": "AH0_0", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_LIBNEED")}, section="predefine")
 
 
 def build_autoinc(g, locations=False):
@@ -112,7 +147,8 @@ def build_autoinc(g, locations=False):
     autoinc_map() (printf excluded, as hdrneeded does) with status exactly
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
-    install_rules(g, HERE, "autoinc", {"AIB": AIB}, classes={"identifier": ID})
+    install_rules(g, HERE, "autoinc", {"AIB": AIB, "LNSB": LNSB}, classes={"identifier": ID})
+    build_libneed(g)
     # per header: does some name have status exactly `called`?
     amap = autoinc_map()
     H = list(AUTOINC_ORDER)
