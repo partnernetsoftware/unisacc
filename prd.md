@@ -2661,3 +2661,10 @@ R10 注入真实闭环首差：私有包路由旧目录已修并核对compact_q�
 R10 注入首片实际闭环已通过：osx/arm64四上下文并发、O0/O1/O2、signed char/unsigned short/int/指针/void参数及返回、宿主→us_sym→脚本嵌套调用、嵌套exit37后恢复均实跑。E3包装地址改64位十进制；lower退出声明补retblob，旧模型被新checker拒绝，四POSIX目标完整有限观察一致。当前验证包是明确替换E3/lower的私有ARM限定包，非最新完整六目标出货物；Windows、FP/聚合/变参/data注入及完整1000循环仍待完成。增加lib-bindings门禁消费MODEL_COM，待完整候选重建后验，不把旧根.com算绿。
 
 本片封存：注入lower有限观察与边界见[lower回执](research/r10-libraryimports-lower.json)，实际四上下文互调见[原生回执](research/r10-libraryimports-native.json)，退出空源旧模型控制及四POSIX修复见[退出回执](research/r10-libraryexit-return.json)。E3高地址回归通过，net=table完整1,665,908观察，6458状态。
+
+
+### R10 宿主注入完整候选与长测状态（2026-09-29）
+
+4bcc672冻结快照的共享模型及六目标lower/镜像全部构造、manifest复核和P3/APE打包成功；来源侧车check通过。候选1,028,528 B，SHA256 `2515bb32bd76779c7ee2e67ecea02e4a8037700d2916f71e5c88681c98daa8fc`。该包实际通过四上下文注入与双向回调、含main/无main原生导出、严格lib-context；产品com-run 12/12、com-c99 57/57。根开发产物更新到同一候选，当前版本资源仍为0.0.9，非0.0.10发布物。
+
+1000次同进程compile/run专项本次受55秒看门狗终止（rc142，无最终输出），不推测已完成次数、不算通过、不提高上限。下一步须在相同上下文保持的条件下实现有界分批或减少实际准备开销，并加内存增长测量；不能用多个新进程的100次冒充1000次同进程。完整候选及限定验收见[构建回执](research/r10-hostimports-candidate.json)。
