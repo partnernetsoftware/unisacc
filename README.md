@@ -22,11 +22,11 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| Current local candidate | Synchronized reference/network prune; sidecar base `cfdceb5` and exact source-content hash; v0.0.9 `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
+| v0.0.9 artifact | Synchronized reference/network prune; the build sidecar records the actual source-content closure separately from its build-time base HEAD; `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
 | Model organization | 33 shared constructed networks, 1,082 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
-| Local verification | Current candidate: CLI 64, run 12, C99 57, nativeboot/kernel and all 33 deployed network/table checks passed; full queue and platform acceptance pending. Previous candidates retain separate historical receipts. |
-| Remaining release work | Local v0.0.9 candidate is **not published**. Historical `7608a31b` pre-sign smoke covered six targets × hello/fib/convert (18 cells); this is not final-platform evidence for the current candidate, but macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are not full native platform suites |
+| Local verification | CLI 64, run 12, C99 57, nativeboot/kernel and all 33 deployed network/table checks passed. Complete acceptance is recorded separately in the [release receipt](research/r9-release-acceptance.json); an unfinished queue is not a pass. Previous candidates retain separate historical receipts. |
+| Platform and release scope | The exact `d4f7d302` bytes passed six targets × hello/fib/convert (18 cells). macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are smoke checks, not full native platform suites or Windows compiler bootstrap. Publication status is shown on the [GitHub releases page](https://github.com/partnernetsoftware/unisacc/releases). |
 
 The authoritative [pipeline design](prd.md#pipeline-design) describes each
 stage's inputs, outputs, control structure, rule sources and limits. The
@@ -45,8 +45,9 @@ gates, platform smoke and older performance measurements remain in the
 [original final evidence](research/s17-final-evidence.json); they do not transfer
 to the current candidate.
 
-Unreachable-function pruning (tape-level, beyond `-libneed`) is planned and
-not yet a stage in the current production route. Company signing remains release work: macOS app/DMG qualification has passed
+Unreachable-function pruning is a separate constructed-network stage before
+lowering on image/run routes; ambiguous or unsupported tapes are retained whole.
+Public `-S`/`-c` tape output remains unchanged. macOS app/DMG qualification has passed
 actual Developer ID signing, notarization, stapling and Gatekeeper, with the
 sealed `.com` running inside. Windows Authenticode signing is **deferred to
 v0.0.10** (owner decision, 2026-09-28): v0.0.9 Windows assets ship unsigned, so
