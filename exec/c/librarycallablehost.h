@@ -46,6 +46,8 @@ static uint64_t library_callable_make_dispatch(uint64_t origin,uint64_t key,uint
     }else if(origin==US_CALLABLE_NATIVE){
         int declared=0;for(us_native_plan *p=c->native_plans.head;p;p=p->next){
             us_export_signature view;if(p->target==raw&&!us_callable_export_signature(p->graph.items,&view)&&us_callable_signature_equal(&view,s)){declared=1;break;}}
+        if(!declared)for(us_native_template *p=c->native_templates.head;p;p=p->next){
+            us_export_signature view;if(p->target==raw&&!us_callable_export_signature(p->graph.items,&view)&&us_callable_signature_equal(&view,s)){declared=1;break;}}
         if(!declared)return library_dispatch_error(c,"native callable lacks frozen candidate declaration");
     }else return library_dispatch_error(c,"invalid callable origin");
     uint64_t h=0;int rc=us_callable_make(&c->callables,(unsigned)origin,s,(uintptr_t)raw,&h,c->error,sizeof c->error);
@@ -56,8 +58,12 @@ static uint64_t library_callable_call_dispatch(uint64_t handle,uint64_t key,uint
     us_context *c=active;ScriptFrame *f=script_frames;
     if(!c||!f||f->owner!=c)return 1;
     const us_export_signature *s=library_callable_signature(c,key);
-    if(!s||site||library_callable_slots(c,f,s,slots,count,result))return library_dispatch_error(c,"invalid declared callable call frame");
-    int rc=us_callable_call(&c->callables,handle,s,(const uint64_t*)(uintptr_t)slots,(void*)(uintptr_t)result,count,c->error,sizeof c->error);
+    const LibraryCallableSite *concrete=site ? library_callable_site(c,key,site):NULL;
+    if(!s||(site ? !concrete:s->variadic)||
+       library_callable_slots(c,f,concrete?&concrete->signature:s,slots,count,result))return library_dispatch_error(c,"invalid declared callable call frame");
+    int rc=concrete ?
+        us_callable_call_concrete(&c->callables,handle,s,&concrete->signature,(const uint64_t*)(uintptr_t)slots,(void*)(uintptr_t)result,count,c->error,sizeof c->error):
+        us_callable_call(&c->callables,handle,s,(const uint64_t*)(uintptr_t)slots,(void*)(uintptr_t)result,count,c->error,sizeof c->error);
     return library_callable_propagate(c,rc);
 }
 static uint64_t library_callable_plan_invoke(us_context *c,ScriptFrame *f,us_native_plan *plan,uint64_t slots,uint64_t result,uint64_t count){

@@ -4,12 +4,18 @@ SCRIPT/NATIVE origin is selected after final source definitions are known.
 """
 SIGKEY,SIGLIST,FNSEEN,FNNAME,FNSIG,FNID=(i<<40 for i in range(440,446))
 assert not set(range(440,446)) & (set(range(72,83))|set(range(300,358))|set(range(400,438)))
+SITE_SIG,SITE_KEY,SITE_FIXED,SITE_COUNT,SITE_DEPTH,SITE_BASE,SITE_SHAPE=(i<<40 for i in range(460,467))
 def install(E,P,b,start):
  from modelinput import u64
  from libraryimports import BYNAME,ADDRESS
  from libraryvariadic import REQUESTS
  from unresolved import DEFINED
  from libraryexports import VARIADIC
+ import sys
+ owned={SITE_SIG,SITE_KEY,SITE_FIXED,SITE_COUNT,SITE_DEPTH,SITE_BASE,SITE_SHAPE}
+ for module in tuple(sys.modules.values()):
+  if module is not None and module.__name__!=__name__:
+   assert not owned.intersection(v for v in vars(module).values() if type(v) is int and v>=1<<40),module.__name__
  g=E.g
  def hook(name,enabled):
   old='LC.original.'+name;g.st[old]=g.st.pop(name);g.labels.add(old)
@@ -36,14 +42,35 @@ def install(E,P,b,start):
  name=continuations.pop();old='LC.original.fpclassified';g.st[old]=g.st.pop(name);g.labels.add(old)
  P(name).branch({1:'LC.fpclassified'},old,[('CMPI','lc_enabled',1)])
  P('LC.fpclassified').branch({1:'LX.fail'},'LC.fpkey',[('CMPI','call_sig',0)])
- P('LC.fpkey').a(('COPYW','lc_sig','call_sig')).call('LC.key').a(('LDI','fp_stacked',1)).goto(old)
+ P('LC.fpkey').a(('COPYW','lc_sig','call_sig')).call('LC.key').a(('LDI','fp_stacked',1),('LDI','lc_site',0),('LDX','lc_var','call_sig',VARIADIC)).branch({1:'LC.siteallocate'},old,[('CMPI','lc_var',1)])
+ P('LC.siteallocate').branch({2:'LX.fail'},'LC.siteput',[('CMPI','lc_sites',8191)])
+ P('LC.siteput').a(('ALUI','add','lc_sites','lc_sites',1),('COPYW','lc_site','lc_sites'),('STX','lc_site',SITE_SIG,'call_sig'),('STX','lc_site',SITE_KEY,'lc_key'),('LDX','lc_fixed','call_sig',b['FPS_COUNT']),('STX','lc_site',SITE_FIXED,'lc_fixed')).branch({1:'LX.fail'},old,[('CMPI','lc_fixed',0)])
+ hook('CL.ok','LC.named')
+ P('LC.named').a(('LDI','lc_site',0)).goto('LC.original.CL.ok')
+ # The old CL.a2 hook already captures named variadics. Capture our separate
+ # indirect site after the existing conversions and before incrementing na.
+ hook('CL.a2','LC.argument')
+ P('LC.argument').branch({1:'LC.original.CL.a2'},'LC.arglimit',[('CMPI','lc_site',0)])
+ P('LC.arglimit').branch({2:'LX.fail'},'LC.argprefix',[('CMPI','na',1023)])
+ P('LC.argprefix').a(('LDX','lc_fixed','lc_site',SITE_FIXED)).branch({0:'LC.argstore'},'LC.tail',[('CMP','na','lc_fixed')])
+ P('LC.tail').branch({1:'LC.tailscalar'},'LC.argstore',[('CMPI','vt',0)])
+ narrow={code:'LC.promoteint' for code in (1,2,E.UNS+1,E.UNS+2,b['BOOL'])};narrow[b['FLT']]='LC.promotefloat'
+ P('LC.tailscalar').branch(narrow,'LC.argstore',[('RLD','vb')])
+ # CL.default already emitted TO.d; only the saved descriptor needs promotion.
+ P('LC.promotefloat').a(('LDI','vb',E.DBL),('LDI','type_shape',0)).goto('LC.argstore')
+ P('LC.promoteint').a(('LDI','vb',E.SZ['int']),('LDI','type_shape',0)).goto('LC.argstore')
+ P('LC.argstore').a(('ALUI','mul','lc_index','lc_site',1024),('ALU','add','lc_index','lc_index','na'),('STX','lc_index',SITE_DEPTH,'vt'),('STX','lc_index',SITE_BASE,'vb'),('STX','lc_index',SITE_SHAPE,'type_shape')).goto('LC.original.CL.a2')
+ hook('CL.done','LC.complete')
+ P('LC.complete').branch({1:'LC.original.CL.done'},'LC.completecount',[('CMPI','lc_site',0)])
+ P('LC.completecount').a(('LDX','lc_fixed','lc_site',SITE_FIXED)).branch({0:'LX.fail'},'LC.completeput',[('CMP','na','lc_fixed')])
+ P('LC.completeput').a(('STX','lc_site',SITE_COUNT,'na')).goto('LC.original.CL.done')
  hook('CL.vindirect','LC.indirect')
- P('LC.indirect').a(('COPYW','lc_sig','call_sig'),('LDX','lc_var','call_sig',VARIADIC)).branch({1:'LX.fail'},'LC.indirectkey',[('CMPI','lc_var',1)])
+ P('LC.indirect').a(('COPYW','lc_sig','call_sig')).goto('LC.indirectkey')
  P('LC.indirectkey').call('LC.key').a(('LDX','lc_rd','call_sig',b['FPS_RD']),('LDX','lc_rb','call_sig',b['FPS_RB']),('LDI','lc_resultbytes',8)).branch({1:'LC.resultscalar'},'LC.allocate',[('CMPI','lc_rd',0)])
  P('LC.resultscalar').branch({0:'LC.allocate'},'LC.resultaggregate',[('CMPI','lc_rb',b['SBB'])])
  P('LC.resultaggregate').a(('ALUI','sub','lc_sid','lc_rb',b['SBB']),('LDX','lc_resultbytes','lc_sid',b['SSZ'])).goto('LC.allocate')
  P('LC.allocate').a(('ALU','add','cur','cur','lc_resultbytes'),('COPYW','lc_resultoffset','cur')).call('MAXF').goto('LC.emitcall')
- p=P('LC.emitcall').o('  .frame 48\n  load64 r1, [r7+').a(('ALUI','mul','lc_n','na',8),('ALUI','add','lc_n','lc_n',48));number(p,'lc_n').o(']\n  store64 [r7+0], r1\n  imm r1, ');number(p,'lc_key').o('\n  store64 [r7+8], r1\n  imm r1, 48\n  add64 r1, r7, r1\n  store64 [r7+16], r1\n  imm r1, ');number(p,'lc_resultoffset').o('\n  sub64 r1, r6, r1\n  store64 [r7+24], r1\n  imm r1, ');number(p,'na').o('\n  store64 [r7+32], r1\n  imm r1, 0\n  store64 [r7+40], r1\n  imm r1, ');number(p,'lc_call').o('\n  mov r0, r7\n  .librarycall r1, r0\n  .frame -').a(('ALUI','add','lc_n','na',1),('ALUI','mul','lc_n','lc_n',8),('ALUI','add','lc_n','lc_n',48));number(p,'lc_n').o('\n  imm r0, ');number(p,'lc_resultoffset').o('\n  sub64 r0, r6, r0\n').branch({1:'LC.loadscalar'},'LC.scalarword',[('CMPI','lc_rd',0)])
+ p=P('LC.emitcall').o('  .frame 48\n  load64 r1, [r7+').a(('ALUI','mul','lc_n','na',8),('ALUI','add','lc_n','lc_n',48));number(p,'lc_n').o(']\n  store64 [r7+0], r1\n  imm r1, ');number(p,'lc_key').o('\n  store64 [r7+8], r1\n  imm r1, 48\n  add64 r1, r7, r1\n  store64 [r7+16], r1\n  imm r1, ');number(p,'lc_resultoffset').o('\n  sub64 r1, r6, r1\n  store64 [r7+24], r1\n  imm r1, ');number(p,'na').o('\n  store64 [r7+32], r1\n  imm r1, ');number(p,'lc_site').o('\n  store64 [r7+40], r1\n  imm r1, ');number(p,'lc_call').o('\n  mov r0, r7\n  .librarycall r1, r0\n  .frame -').a(('ALUI','add','lc_n','na',1),('ALUI','mul','lc_n','lc_n',8),('ALUI','add','lc_n','lc_n',48));number(p,'lc_n').o('\n  imm r0, ');number(p,'lc_resultoffset').o('\n  sub64 r0, r6, r0\n').branch({1:'LC.loadscalar'},'LC.scalarword',[('CMPI','lc_rd',0)])
  P('LC.loadscalar').branch({0:'LC.scalarword'},'LC.resulttype',[('CMPI','lc_rb',b['SBB'])])
  P('LC.scalarword').o('  load64 r0, [r0+0]\n').goto('LC.resulttype')
  P('LC.resulttype').a(('LDI','vt',0),('LDI','vb',8)).call('FS.RESULT').call('EN.VALUE').call('NEXT').ret()
@@ -72,9 +99,23 @@ def install(E,P,b,start):
  P('LC.outer').a(('OCUT','lx_metadata','lx_zero')).o('USCPLAN1').a(('COPYW','lx_v','lv_requests')).call('LX.u64').a(('LDI','lc_i',0)).goto('LC.requests')
  P('LC.requests').branch({1:'LC.catalogstart'},'LC.requestcopy',[('CMP','lc_i','lv_requests')])
  p=P('LC.requestcopy').a(('LDX','lc_blob','lc_i',REQUESTS));blob(p,'lc_blob').a(('ALUI','add','lc_i','lc_i',1)).goto('LC.requests')
- P('LC.catalogstart').a(('OCUT','lc_calls','lx_zero')).o('USLCALL1\n').a(('COPYW','lx_v','lc_keys')).call('LX.u64').a(('LDI','lc_catalogi',1)).goto('LC.catalogloop')
- P('LC.catalogloop').branch({2:'LC.envelope'},'LC.catalogsignature',[('CMP','lc_catalogi','lc_keys')])
+ P('LC.catalogstart').a(('OCUT','lc_calls','lx_zero')).branch({1:'LC.catalogfixed'},'LC.catalogvar',[('CMPI','lc_sites',0)])
+ P('LC.catalogfixed').o('USLCALL1\n').goto('LC.catalogcount')
+ P('LC.catalogvar').o('USLCALL2\n').goto('LC.catalogcount')
+ P('LC.catalogcount').a(('COPYW','lx_v','lc_keys')).call('LX.u64').a(('LDI','lc_catalogi',1)).goto('LC.catalogloop')
+ P('LC.catalogloop').branch({2:'LC.sitesstart'},'LC.catalogsignature',[('CMP','lc_catalogi','lc_keys')])
  p=P('LC.catalogsignature').a(('LDX','lx_sig','lc_catalogi',SIGLIST),('OLEN','lc_cut')).o('callable').a(('OCUT','lx_nameblob','lc_cut')).call('LX.signature');u(p,'lc_catalogi').a(('BLEN','lc_siglen','lx_sigblob'));u(p,'lc_siglen');blob(p,'lx_sigblob').a(('ALUI','add','lc_catalogi','lc_catalogi',1)).goto('LC.catalogloop')
+ P('LC.sitesstart').branch({1:'LC.envelope'},'LC.sitescount',[('CMPI','lc_sites',0)])
+ P('LC.sitescount').a(('COPYW','lx_v','lc_sites')).call('LX.u64').a(('LDI','lc_iter',1)).goto('LC.siteloop')
+ P('LC.siteloop').branch({2:'LC.envelope'},'LC.sitesignature',[('CMP','lc_iter','lc_sites')])
+ p=P('LC.sitesignature').a(('LDX','lx_sig','lc_iter',SITE_SIG),('LDX','lc_total','lc_iter',SITE_COUNT),('LDX','lc_fixed','lc_iter',SITE_FIXED),('LDI','lx_supported',1),('LDI','lx_recursion',0),('LDI','lx_nodes',0),('OCUT','lc_old','lx_zero')).call('LCG.begin').o('USLSIG2\n').a(('LDI','lx_v',1)).call('LX.u64').a(('LDI','lx_v',8)).call('LX.u64').o('callable').a(('OUTW','lx_zero'),('LDI','lc_one',1),('OUTW','lc_one'),('OUTW','lx_zero'),('OUTW','lc_one'))
+ u(p,'lc_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',1)).call('LX.descriptor')
+ u(p,'lc_total').a(('LDI','lc_arg',0),('LDI','lx_return',0)).goto('LC.sitearg')
+ P('LC.sitearg').branch({1:'LC.siteend'},'LC.siteargout',[('CMP','lc_arg','lc_total')])
+ P('LC.siteargout').a(('ALUI','mul','lc_index','lc_iter',1024),('ALU','add','lc_index','lc_index','lc_arg'),('LDX','lx_depth','lc_index',SITE_DEPTH),('LDX','lx_base','lc_index',SITE_BASE),('LDX','lx_shape','lc_index',SITE_SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0)).call('LX.descriptor').a(('ALUI','add','lc_arg','lc_arg',1)).goto('LC.sitearg')
+ P('LC.siteend').a(('OUTW','lx_supported'),('OCUT','lc_signature','lx_zero'),('BLEN','lc_siglen','lc_signature')).goto('LC.siterestore')
+ blob(P('LC.siterestore'),'lc_old').a(('ALUI','add','lx_v','lc_siglen',32)).call('LX.u64').goto('LC.siterecord')
+ p=P('LC.siterecord');u(p,'lc_iter').a(('LDX','lc_key','lc_iter',SITE_KEY));u(p,'lc_key');u(p,'lc_fixed');u(p,'lc_siglen');blob(p,'lc_signature').a(('ALUI','add','lc_iter','lc_iter',1)).goto('LC.siteloop')
  p=P('LC.envelope').a(('OCUT','lc_catalog','lx_zero')).o('USLTAPE3\n')
  for r in ('lx_tape','lx_metadata','lc_calls','lc_catalog'):p.a(('BLEN','lx_v',r)).call('LX.u64')
  for r in ('lx_tape','lx_metadata','lc_calls','lc_catalog'):blob(p,r)

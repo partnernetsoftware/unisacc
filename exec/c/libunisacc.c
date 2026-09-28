@@ -25,6 +25,7 @@ typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } Gu
 typedef struct Symbol { char *name; uintptr_t address; int kind; } Symbol;
 typedef struct Source { char *name, *bytes; struct Source *next; } Source;
 typedef struct LibraryCallableDeclaration {uint64_t key;us_exports graph;us_export_signature signature;} LibraryCallableDeclaration;
+typedef struct LibraryCallableSite {uint64_t site,key,fixed;us_exports graph;us_export_signature signature;} LibraryCallableSite;
 struct us_context {
     char *package, *definitions, *include_path, *target;
     Source *sources;
@@ -42,6 +43,7 @@ struct us_context {
     us_native_callsites native_callsites;
     us_callables callables;uint64_t image_generation;
     LibraryCallableDeclaration *callable_declarations;size_t callable_count;
+    LibraryCallableSite *callable_sites;size_t callable_site_count;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -175,6 +177,8 @@ static void library_release_map(void *p,size_t extent) {
 static void library_callable_catalog_clear(us_context *c){
     for(size_t i=0;i<c->callable_count;i++)us_exports_clear(&c->callable_declarations[i].graph);
     free(c->callable_declarations);c->callable_declarations=NULL;c->callable_count=0;
+    for(size_t i=0;i<c->callable_site_count;i++)us_exports_clear(&c->callable_sites[i].graph);
+    free(c->callable_sites);c->callable_sites=NULL;c->callable_site_count=0;
 }
 static void discard_image(us_context *c) {
     us_callables_clear(&c->callables);if(c->image_generation!=UINT64_MAX)c->image_generation++;
@@ -270,25 +274,53 @@ static int library_callable_native_hook(void *,ffi_cif *,uintptr_t,void *,void *
 static int library_callable_script_hook(void *,const void *,const us_export_signature *,const us_export_frame *);
 static void library_callable_failure_hook(void *,const char *);
 static int library_callable_catalog_load(us_context *c,const unsigned char *b,size_t n){
-    if(n<17||memcmp(b,"USLCALL1\n",9))return error(c,"invalid callable catalogue");
-    Buf input={0};if(n>INT_MAX)return error(c,"callable catalogue too large");input.b=(unsigned char*)b;input.n=(int)n;
-    size_t at=9;uint64_t count=library_u64(&input,&at);
-    if(count>8192)return error(c,"callable catalogue count capacity exceeded");
-    LibraryCallableDeclaration *items=calloc(count?count:1,sizeof *items);if(!items)return error(c,"callable catalogue allocation failed");
-    size_t built=0;int rc=1;
+    size_t at=9,built=0,sites_built=0;uint64_t count=0,site_count=0;
+    LibraryCallableDeclaration *items=NULL;LibraryCallableSite *sites=NULL;
+    if(!c||!b||n<17||n>INT_MAX)return error(c,"invalid callable catalogue");
+    int version2=!memcmp(b,"USLCALL2\n",9);
+    if(!version2&&memcmp(b,"USLCALL1\n",9))return error(c,"invalid callable catalogue");
+    if(us_export_u64(b,n,&at,&count)||count>8192)goto bad;
+    items=calloc(count?count:1,sizeof *items);if(!items)goto bad;
     for(size_t i=0;i<count;i++){
-        if(n-at<16)goto done;uint64_t key=library_u64(&input,&at),len=library_u64(&input,&at);
-        if(!key||len>n-at||len>16777216)goto done;
-        for(size_t j=0;j<i;j++)if(items[j].key==key)goto done;
+        uint64_t key,len;
+        if(us_export_u64(b,n,&at,&key)||us_export_u64(b,n,&at,&len)||!key||len>n-at||len>16777216)goto bad;
+        for(size_t j=0;j<i;j++)if(items[j].key==key)goto bad;
         items[i].key=key;built=i+1;
         if(us_exports_load_bridge(&items[i].graph,b+at,(size_t)len,c->error,sizeof c->error)||items[i].graph.count!=1||
-           us_callable_export_signature(items[i].graph.items,&items[i].signature))goto done;
+           us_callable_export_signature(items[i].graph.items,&items[i].signature))goto bad;
         at+=(size_t)len;
     }
-    if(at!=n)goto done;
-    library_callable_catalog_clear(c);c->callable_declarations=items;c->callable_count=(size_t)count;return 0;
-done:for(size_t i=0;i<built;i++)us_exports_clear(&items[i].graph);free(items);
-    return rc?error(c,"invalid callable catalogue record"):0;
+    if(version2){
+        if(us_export_u64(b,n,&at,&site_count)||site_count>8192)goto bad;
+        sites=calloc(site_count?site_count:1,sizeof *sites);if(!sites)goto bad;
+        for(size_t i=0;i<site_count;i++){
+            uint64_t payload,len;size_t end;const us_export_signature *proto=NULL;
+            if(us_export_u64(b,n,&at,&payload)||payload<32||payload>n-at)goto bad;
+            end=at+(size_t)payload;
+            LibraryCallableSite *site=sites+i;sites_built=i+1;
+            if(us_export_u64(b,end,&at,&site->site)||us_export_u64(b,end,&at,&site->key)||
+               us_export_u64(b,end,&at,&site->fixed)||us_export_u64(b,end,&at,&len)||
+               !site->site||!site->key||len>16777216||len!=end-at)goto bad;
+            for(size_t j=0;j<i;j++)if(sites[j].site==site->site)goto bad;
+            for(size_t j=0;j<count;j++)if(items[j].key==site->key){proto=&items[j].signature;break;}
+            if(!proto||proto->variadic!=1||site->fixed!=proto->count||
+               us_exports_load_bridge(&site->graph,b+at,(size_t)len,c->error,sizeof c->error)||site->graph.count!=1||
+               us_callable_export_signature(site->graph.items,&site->signature)||
+               !us_callable_concrete_valid(proto,&site->signature))goto bad;
+            at=end;
+        }
+    }
+    if(at!=n)goto bad;
+    library_callable_catalog_clear(c);c->callable_declarations=items;c->callable_count=(size_t)count;
+    c->callable_sites=sites;c->callable_site_count=(size_t)site_count;return 0;
+bad:
+    for(size_t i=0;i<built;i++)us_exports_clear(&items[i].graph);free(items);
+    for(size_t i=0;i<sites_built;i++)us_exports_clear(&sites[i].graph);free(sites);
+    return error(c,"invalid callable catalogue record");
+}
+static const LibraryCallableSite *library_callable_site(us_context *c,uint64_t key,uint64_t site){
+    for(size_t i=0;i<c->callable_site_count;i++)if(c->callable_sites[i].key==key&&c->callable_sites[i].site==site)return c->callable_sites+i;
+    return NULL;
 }
 static const us_export_signature *library_callable_signature(us_context *c,uint64_t key){
     for(size_t i=0;i<c->callable_count;i++)if(c->callable_declarations[i].key==key)return &c->callable_declarations[i].signature;
