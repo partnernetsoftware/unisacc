@@ -2849,3 +2849,5 @@ R10 fixed参数修复正式收尾（e22d236源）：私有shared/六目标/pack�
 沿research/r10-ffi-variadic-callsite-design.md执行一次E3：USBIND3 format2携带variadic模板，模型负责原型相等、固定转换/尾提升、选定候选与逐调用点具体USLSIG2；USCPLAN1请求由宿主在E3之后事务建立ffi_prep_cif_var，不重跑解析器。模板与具体调用计划分别拥有，未知/重复站点、固定前缀不符与截断失败不能部分发布。并发域：宿主模板/调用请求decoder与其测试；共享模型wire decoder/候选format2验证；主代理E3调用捕获/公开库集成/PRD/门禁/根产物。仍保持旧fixed格式与普通CLI；第一批先验证协议与宿主真实va_arg，随后接完整模型路线，未接通前不冒称公开variadic可用。无共享UA、无根com后台重建、无push或VM。
 
 R10 typedvariadic协议/宿主半部已实测：USBIND3 format2区分原型support0与外层模板可用位；固定格式0/1保留，USCPLAN1逐调用点完整图的事务发布/失败保留旧计划已实现。ARM/Rosetta普通+ASan/UBSan每轮300次真实va_arg（混合20、零尾、Pair）通过；模型655态/168734观察全域相等，4有效/10畸形/536截断在sim/C网络一致。父会话resolver冻结模板/缺dispatcher回滚/旧固定freeze对照通过，8项门禁双槽4秒全rc0。接下来仍需E3捕获与提升、USLTAPE2、公开上下文生命周期和完整调用闭环；不能把这些host/protocol单测称为公开变参已可用。
+
+R10 variadic协议批次正式产品核验：dec4223私有冻结源shared/六目标/pack每步≤55s重构；根.com与真实原始sidecar同步**1,081,898 B / SHA256 bd41d0d3a54cd1a999ac586f6a998a36f8efb2e3990d5c1b8153aa7fb561d872**（比上批+766B）。候选9项产品/公开fixed库门禁rc0（17s）、435次产品差分wrong0/refuse0（15s）、23对实际保留网络全域check-net一致；协议/宿主8项门禁另已rc0。普通公开接口仍fixed-only准备；这些不是完整公开variadic闭环、最终全套或六平台验收。回执research/r10-variadic-protocol-host-evidence.json，完整R10继续。
