@@ -2805,3 +2805,8 @@ R10 ALL_STACK正式候选封存：d4eac6d冻结源实际shared+六目标均完�
 
 ### R10 USLSIG2类型与全量参数实施决定（2026-09-29）
 协议固定见exec/c/librarysignature-v2.md：V1兼容，V2携带完整<=1024参数、显式REGISTER/ALL_STACK、带长度的递归类型布局、size/alignment与ordered成员，来自E3真实类型池而不是宿主解析C。E3独立参数捕获池不再sig*16/min8；宿主递归owned ffi_type树及完整arg数组只执行声明ABI，libffi无法表达的union/bitfield不伪装bytearray；prune δ认识新framing，仍按模型保留全部public定义。父会话集成ValueFrame到生命周期/私有软栈，聚合返回在释放帧前复制，旧入口保留。分域并行：E3输出、host decoder、prune协议；父会话只动libunisacc.c与专项公开API测试、门禁/生成物/根产物。第一完整闭环必须仍是9混合参数+Pair返回17.00/40，不以类型格式或libffi smoke代替公开API执行。完整R10/变参/callback与其他ABI后续范围不变。
+
+
+**R10 USLSIG2公开API闭环（2b80b50）**：共享/六目标/pack在私有冻结源分步有界实际重建，候选`d7d985bdf02f546178674b7ea12e9e2bbae2cd8953f7c0528b02411d107aa758`/1058524B。macOS ARM原生与Rosetta x86经真实公开us_compile→us_relocate→us_sym，在O0/O1/O2各100轮调用完整9参混合FP/GP/指针/Pair，返回17.00/40；负值6.00/-21、caller对象与返回副本隔离、float9/double9/加权integer17通过。host native+ASan/UBSan包含1024参数真实ffi_call与原子截断拒绝。最终E3全域check-net为1,821,224观察/7060态（先前1,815,923是表项数，已更正），prune127,970观察/497态；默认完整4,480,071B自源tape与参考相同。20受影响门禁实际rc0；首次7项整批55秒超时不算pass，拆4+1+2后七项全部通过。根.com及原始sidecar同步实际候选、不restamp；见research/r10-ffi-sig2-final-candidate.json。完整双向FFI/typed变参与callback/union及bitfield/宽long double/六目标完整ABI/最终CI和签名发布仍待，不据此宣布R10完成。
+
+下一片只读设计已保存research/r10-ffi-native-import-design.md：USBIND2已有origin+ordinal用途，递归typed binding需新USBIND3。复用同一TypeGraph、由δ比较原型与选择计划；六GP桥只调用通用ffi_call dispatcher，不直接假称能调用混合原生ABI。首验必须是native→script_exchange9→真实injected host_exchange9→Pair返回17.00/40。该报告只是设计，尚未实现；完整剩余范围保持。
