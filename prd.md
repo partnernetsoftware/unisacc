@@ -15,7 +15,7 @@
 
 **已发布基线**：v0.0.8 / `10672e3`，未签名 `.com` 5,388,402 B；发布证据与限制封存，不回写。
 **旧集成基线**：早期1.08MB/1.11MB候选及限定门禁已移入[集成历史](archive/r9-integration-history-20260928.md)，不作当前身份。
-**最新集成候选**：同步启用参考与网络prune的工作树闭包构建（sidecar base `88db316`），`.com` **1,233,236 B**，SHA256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`，比v0.0.8小约77.1%。root载荷/侧车freshness通过；全部33个部署网络与对应表全域相等；CLI64、run12、C9957、nativeboot/kernel通过。新增prune有117次三执行器对拍及40项C参考边界/重复调用检查；新身份完整队列与平台证据仍待，不移植旧候选全绿。微软签名仅延至0.0.10；这份载荷的Apple资产正在独立签名、公证。逐阶段静态结构见[当前审计](research/r9-pipeline-structure-prune.json)，旧calc动态计数不外推。来源闭包SHA `289548f97133ab431fafb6229b62ed083e1a320f98e9a3818a8410a857298b5f`；生成副本排除仅限声明的exec/build，真实源码变化仍失效。
+**最新集成候选**：同步启用参考与网络prune的工作树闭包构建（sidecar base `cfdceb5`），`.com` **1,233,236 B**，SHA256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`，比v0.0.8小约77.1%。root载荷/侧车freshness通过；全部33个部署网络与对应表全域相等；CLI64、run12、C9957、nativeboot/kernel通过。新增prune有117次三执行器对拍及40项C参考边界/重复调用检查；新身份完整队列与平台证据仍待，不移植旧候选全绿。微软签名仅延至0.0.10；这份载荷的Apple资产正在独立签名、公证。逐阶段静态结构见[当前审计](research/r9-pipeline-structure-prune.json)，旧calc动态计数不外推。来源闭包SHA `1a6c74388d6fff4bdbd67db76c0ff96ac4499adfce038dca2694d243ac0bab6d`；生成副本排除仅限声明的exec/build，真实源码变化仍失效。
 
 | 编号 | 有限交付 | 状态 / 完成判据 |
 |---|---|---|
@@ -2451,3 +2451,5 @@ R9-4/R9-7待修实证：models.closure把忽略的exec/build/ua_ref.c（1,130,27
 ### R9 冻结门禁入口修正
 
 首轮d4f7队列44项完成，其中四个prune分片因macOS TMPDIR默认为/private/var而触发检查器只允许/tmp的断言，比较尚未执行；记录为失败，不移植为通过。检查器默认显式创建/tmp下唯一私有目录，保留显式路径校验与私人UA。仅测试脚本改变，产品内容仍须通过真实有界重构建确认；旧队列保留，新冻结重新跑，不手工填回执。
+
+临时目录修正后真实七分片+pack重构建完成，1,233,236B/SHA d4f7d302逐字节不变；来源侧车更新为cfdceb5的真实输入闭包。prune默认目录10项×3执行器实际通过。新冻结重新排193项，重项独占，其余四槽并发；不转移旧失败队列通过项。六目标18格实际同一d4f7载荷通过，Windows Defender同一SHA scan exit0，未发现威胁。本轮Lima x86与UTM Windows已关闭并读回，预存default ARM VM保留。

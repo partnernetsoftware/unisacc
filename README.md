@@ -22,7 +22,7 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| Current local candidate | Synchronized reference/network prune; sidecar base `88db316` and exact source-content hash; v0.0.9 `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
+| Current local candidate | Synchronized reference/network prune; sidecar base `cfdceb5` and exact source-content hash; v0.0.9 `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
 | Model organization | 33 shared constructed networks, 1,082 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
 | Local verification | Current candidate: CLI 64, run 12, C99 57, nativeboot/kernel and all 33 deployed network/table checks passed; full queue and platform acceptance pending. Previous candidates retain separate historical receipts. |
