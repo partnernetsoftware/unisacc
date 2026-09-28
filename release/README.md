@@ -1,16 +1,23 @@
 # 发布签名接入与剩余验收
 
-当前本地版本为0.0.9候选，封存载荷 `unisacc.com` 为1,221,182 B，SHA256
+历史0.0.9候选的封存载荷 `unisacc.com` 为1,221,182 B，SHA256
 `7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846`，
-构建来源为 `10994c2`。这是当前待验收载荷身份，尚无其企业签名，不是已发布版本；
-后续产物改变须重新封存、签名并验证，不继承旧资产的回执。
+构建来源为 `10994c2`。保留此历史身份与证据，尚无其Windows企业签名；
+当前修复候选须重新冻结源码和载荷身份，不继承旧资产的验收或签名回执。
 
-## Windows：身份与格式已接入，服务签名待验
+主人已明确将**仅微软企业签名延期到0.0.10**：0.0.9的Windows载荷按
+unsigned方案验收，0.0.10再进行企业Authenticode签名。Apple公司签名与公证
+仍在0.0.9范围；此前资格资产和最终发行资产分别记账。延期不表示已完成发布，
+`release_eligible=false`，最终字节运行、Windows Defender与主人Promotion仍须验收。
+
+## Windows：身份与格式已接入，企业签名延期到0.0.10
 
 [windows-signing.yml](../.github/workflows/windows-signing.yml) 只消费主人在本机
 构建、测试并封存的资产。Actions 不构建产物，也不发布 Release。
-[signing-policy.json](signing-policy.json) 当前为 `required`，签名清单只有
-`unisacc.com`。任何额外 PE/DLL 必须先明确加入清单、预算与原生运行法院。
+[signing-policy.json](signing-policy.json) 当前为 `deferred`，记录0.0.9 unsigned
+与0.0.10企业签名计划；签名清单仍只有 `unisacc.com`，身份、Environment和
+workflow接入保留。当前不调用企业签名服务。任何额外 PE/DLL 必须先明确加入
+清单、预算与原生运行法院。
 
 两种 dispatch mode：
 
@@ -20,13 +27,18 @@
   `versioninfo_ready=false` 时仍未满足公司签名前提；当前候选已实现
   Unisacc/0.0.9的PE VERSIONINFO，资格检查必须从确切资产重新读取。
   此模式不产生新签名；身份配置的读回核验与正式OIDC登录/服务签名分别记账。
-- `company`：要求策略改为 `required`、PE 中 ProductName 为 `Unisacc` 且
+- `company`：仅在0.0.10签名计划正式启用、策略改为 `required` 后使用；
+  当前 `deferred` 会硬失败。要求PE 中 ProductName 为 `Unisacc` 且
   ProductVersion 精确匹配封存回执，再进入保护 Environment。缺任何配置、
-  OIDC 登录失败、签名失败、Windows 信任或时间戳失败均停止，不退回未签名出货。
+  OIDC 登录失败、签名失败、Windows 信任或时间戳失败均停止；启用 `required`
+  后的企业签名发布不退回未签名出货。0.0.9 unsigned来自明确延期决定。
   即使签名成功，回执仍为 `release_eligible=false`；当前流程还没有六平台最终
   字节运行、Defender 与主人 Promotion，不能称完整发布验收。
 
 ### 本地封存输入契约
+
+以下保留qualification与未来company签名的输入契约；示例0.0.9可做资格检查，
+不调用企业服务。0.0.10正式签名须使用当时冻结版本及源码，不能继承0.0.9回执。
 
 先完成本机本轮全部门禁、六平台运行与独立构建证据。不要为了测试 push。
 源码和工作树必须干净；签名调度只能使用当前 `main`，调度 workflow 的
@@ -84,7 +96,8 @@ issuer 为 `https://token.actions.githubusercontent.com`，audience 为
 
 已读回核验profile级Signer授权、联邦配置、主人审核与main-only分支约束，
 并设置身份验证标志；依据为 [PRD微软身份接入记录](../prd.md)。
-正式OIDC登录、企业服务签名与Windows信任尚未验证，policy已设required，实际服务调用仍等待最终封存。
+正式OIDC登录、企业服务签名与Windows信任尚未验证。此前policy设为required
+是历史接入状态；按主人延期决定现为deferred，服务调用留待0.0.10正式启用。
 以下配置名称保留供资格核对；检查时只列名称，不输出值：
 
 | 类型 | 名称 |
@@ -117,11 +130,12 @@ SHA256 不变。格式检查不是认证判定，Windows 是权威信任法院�
 provider/OIDC coordinates 不进入回执；公司诊断材料另存受限位置。
 
 身份/Environment配置已读回，产品VERSIONINFO已实现；这些不等于服务签名成功。
-待办：最终封存输入的资格检查；政策按发布决定启用后的正式OIDC登录、实际公司
-服务签名与Windows信任回执；签后同一SHA的全部六平台运行、Windows Defender、
-当前attempt的完整汇总，以及主人审核后的封存字节Promotion。
-当前policy已设required，未调用Windows企业签名服务。每个workflow step最多一分钟，
-服务签名timeout为55秒；超时即失败。
+0.0.9待办：最终unsigned封存字节的全部六平台运行、Windows Defender、当前
+attempt完整汇总与主人Promotion；Apple最终资产的签名、公证和签后法院单独验收。
+0.0.10待办：最终封存输入资格检查，政策正式启用required后的OIDC登录、公司
+服务签名与Windows信任回执，再验签后同一SHA的全部六平台、Defender和Promotion。
+当前policy为deferred，未调用Windows企业签名服务；company workflow保留
+required硬条件。每个workflow step最多一分钟，服务签名timeout为55秒；超时即失败。
 
 依据（2026-09-28 核对）：
 [官方 Artifact Signing action](https://github.com/Azure/artifact-signing-action)、
@@ -148,6 +162,9 @@ trust bundle fetch helper独立生成私有bundle，shell inspector不自动调�
 三个副本已提交进仓库；最终冻结仍需保留字节一致性及实际验签回执。
 
 ## macOS 公司签名与公证资格（已通过，非发布）
+
+Apple公司签名与公证仍属于0.0.9交付；Windows延期不改变此范围。以下旧资产
+资格证据保留，当前最终资产须按其实际源码、载荷与封装身份重新签名、公证和验收。
 
 [macosbundle.py](macosbundle.py) 与 [macos-launcher.c](macos-launcher.c)
 分片构建原生入口、app与DMG；入口/app签名，内层 `.com` 的封存哈希独立验证。
