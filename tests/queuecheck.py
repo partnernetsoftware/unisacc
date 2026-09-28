@@ -169,6 +169,7 @@ with tempfile.TemporaryDirectory() as td:
     (private/'tests/bound.py').write_bytes((ROOT/'tests/bound.py').read_bytes())
     for n in ('docs', 'bound'):
         (private/('tests/'+n+'check.py')).write_text('pass\n')
+    (private/'release').mkdir(); (private/'release/apeinspect.py').write_text('pass\n')
     for n in ('prd.md','README.md','src/product.c'):(private/n).write_text('v1\n')
     probe={n:[sys.executable,'-c','pass',n] for n in ('docs','bound','product-com')}
     declarations={'version':1,'suites':{n:{'command':probe[n],
@@ -195,6 +196,19 @@ with tempfile.TemporaryDirectory() as td:
         changed(private/'tests/boundcheck.py', ['bound','product-com'])
         changed(private/'tests/gatedeps.json', list(probe))
         changed(private/'src/product.c', ['product-com'])
+        changed(private/'release/apeinspect.py', ['product-com'])
+        footer_plan={'package-footer':['python3','./tests/packagefootercheck.py']}
+        footer_before=q.fingerprint(footer_plan)
+        footer=private/'release/apeinspect.py';footer_original=footer.read_bytes()
+        footer.write_bytes(footer_original+b'# changed imported locator\n')
+        footer_after=q.fingerprint(footer_plan)
+        footer_saved={'stamp':footer_before,'jobs':footer_plan,'exclusive':[],
+                      'results':{'package-footer':{'rc':0}}}
+        q.resume(footer_saved,footer_after,footer_plan,set())
+        assert not footer_saved['results'], 'package-footer reused a changed imported locator'
+        footer.write_bytes(footer_original)
+        print('queue: package-footer loses its completed result when release/apeinspect.py changes')
+
         base=q.fingerprint(probe)
         with patch.dict(os.environ,{'UNISA_MAXSTEPS':'123'}):
             assert all(q.fingerprint(probe)[n]!=base[n] for n in probe), 'environment reused'

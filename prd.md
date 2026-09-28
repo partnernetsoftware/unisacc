@@ -14,18 +14,17 @@
 **目标**：收敛成更小、可验证、演示真实、可企业签名的模型编译器。保持“声明表 → 构造确定性网络 → 通用执行器完成编译”的产品路线。离线构造/打包允许 Python；不做训练、不继续扩大迁移框架。以下旧规格、旧候选和实验流水均按其日期解释，不覆盖本清单。
 
 **已发布基线**：v0.0.8 / `10672e3`，未签名 `.com` 5,388,402 B；发布证据与限制封存，不回写。
-**当前本地基线**：`44fc348` 构建、`75e54ef` 收尾，`.com` 1,083,311 B，SHA256 `01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`。P3压缩与单次memory已实现，本地179/179通过；Linux arm64三程序另有实际烟测，Windows/Linux x86_64本轮未验。它仍是本地候选，不能写成0.0.9已发布。
-**本轮收片候选**：`5eb87bc`，根 `.com` 已重建为1,109,471 B，SHA256 `8bd775ec0a1fd7d3787526f24d34e589ebadb93cc5b764629209869b907de1c6`。相关11项双槽队列21.4秒、11/11通过，包含三条路线的371例转换与真实系统演示；不是最终全套或平台通过。[收片回执](research/r9-scoped-acceptance-20260928.json)。签后APE实际-run通过仅证明私有格式，企业信任/公证仍未达。
+**旧集成基线**：早期1.08MB/1.11MB候选及限定门禁已移入[集成历史](archive/r9-integration-history-20260928.md)，不作当前身份。
 **最新集成候选**：49a6e00源码闭包重建，0.0.9候选 `.com` 1,221,185 B，SHA256 `c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`，比0.0.8小约77.3%。E2 156文件×开/关312/312逐字节同新经典参考；4项相关门禁全绿；Linux arm64实际模型编出的procview列140进程且报告结构通过。此为有限验收，完整队列/Windows企业签名尚待，不算发布。静态逐阶段结构见[新审计](research/r9-pipeline-structure-20260928.json)，旧calc动态计数不外推。
 
 | 编号 | 有限交付 | 状态 / 完成判据 |
 |---|---|---|
-| R9-1 | 权重/模型压缩 | **实现已达，发布复验待做**：保留P3二进制+逐网络DEFLATE/CRC、共享模型索引与P1/P2兼容；不再重复开发压缩。最终网络/表全域相等、坏包拒绝、功能字节账与同身份计时齐全。当前无签名主产物约1.08MB作为基线；签名新增字节单列，不把证书算成权重。 |
+| R9-1 | 权重/模型压缩 | **实现已达，发布复验待做**：保留P3二进制+逐网络DEFLATE/CRC、共享模型索引与P1/P2兼容；不再重复开发压缩。最终网络/表全域相等、坏包拒绝、功能字节账与同身份计时齐全。当前无签名主产物1,221,185 B作为基线；签名新增字节单列，不把证书算成权重。 |
 | R9-2 | 代码和文档收敛 | 更新README/ARCHITECTURE/exec入口、prd导读与Paper A；归档无规范ID的旧发布/实验流水，主文只留现状、限制、证据链接。列每个归档项原路径、去向与引用；保留稳定ID、A/B/C论文、经典参考与原始失败证据。代码仅移除证明无引用的死项或合并确实重复的机制，不以行数下降代替正确性。 |
 | R9-3 | 正确性与TDD | 小批修复已确认的strtol/strtoul边界及Python #if静默吞内部异常。测试先覆盖范围边界、endptr、前缀/无数字、ERANGE，以及畸形表达式/未消费token/内部异常；三条编译路线与独立host参考核对。atol仅检查有定义的输入，不把它的溢出行为当作标准保证。 |
 | R9-4 | 高效测试队列 | 保留滚动双槽和≤60秒步骤，重项可独占。准备产物继续内容缓存；通过结果改按**显式、保守的套件输入闭包**复用，含脚本/实际生成器和静态资源、编译器SHA、选项/环境/平台身份。未证明闭包的套件沿用全局失效，漏项不能复用。证明：仅改prd叙述不重跑产品；改README等受docs检查的输入只失效docs；改检查器失效对应族；改候选SHA失效相关--com套件。输入/配置变化、超时和缺项控制必须抓到。 |
 | R9-5 | 真实演示与覆盖 | 让`unisacc.com -run examples/apps/*.c`成为直接演示入口；无cc采集器、无假实时数据。固定计算/解析样例用独立预期与cc行为对照；进程/窗口/自映射用结构检查及程序自取的快照，不要求变化中的实时输出逐字节相同。丰富文件/I/O、解析、内存/边界与真实系统数据检查；Linux procview的目录枚举作为一个有界切片，先确认getdents/opendir当前实现与授权，再实现，不能偷偷只修改演示文字。权限拒绝、消失进程、空输入和不支持平台明确报告。 |
-| R9-6 | 微软与苹果企业签名 | **设计待实现，发布门槛**：从minicon直接学习并适配；先格式rehearsal，再配置资格检查和真实签名。Windows以企业Authenticode验证`.com`及显式发布的PE资产；macOS优先验证签名`.app`入口携带并运行封存`.com`的公证/staple `.dmg`方案；外层、内层运行与信任分别验。签前/签后完整SHA、来源、签名者、时间戳、公证与信任判据都有回执。未通过不能称企业双签或无声改为未签名发布。 |
+| R9-6 | 微软与苹果企业签名 | **接入与苹果资格已达，微软实签待做；发布门槛**：从minicon直接学习并适配；格式rehearsal、仓库身份与苹果实际公证已有证据，微软服务及最终签后验收仍待。Windows以企业Authenticode验证`.com`及显式发布的PE资产；macOS优先验证签名`.app`入口携带并运行封存`.com`的公证/staple `.dmg`方案；外层、内层运行与信任分别验。签前/签后完整SHA、来源、签名者、时间戳、公证与信任判据都有回执。未通过不能称企业双签或无声改为未签名发布。 |
 | R9-7 | 最终冻结与发布 | 版本更新为0.0.9、冻结本地构建身份；最终输入上全套本地门禁和按单套件平台验证，签后实际资产再验编译/-run/包读取及签名。平台未验显式列出，VM用后清理。先草稿审查，再提升同一封存字节并打tag；不为测试push、不在发布时重新构建或重签。 |
 
 ### R9 速度补充：不可达函数消除（cc-unisacc 负责，待实现）
@@ -46,56 +45,26 @@
 
 **分工**：cc-unisacc 写参考剪枝、prune 构造/声明、路由接入和对应测试；cdx 避开其 src/main、共享拼接入口、exec/c driver 与种子接入点。prd 结构由 cdx 整理，后续记录归本节。库按需注入与零解析装载仅是后续建议，不因本片自动排期；自环答案物化方案本轮不实施。
 
-**macOS封装细化**：后台封装代理仅新增原生launcher/build/check文件；启动器通过系统CommonCrypto校验封存载荷SHA和manifest，属于发布完整性/IO适配，不新增编译规则；公司Developer ID只用于私有格式资格，公证上传未执行。签名先入口后bundle，记录两ISA及Gatekeeper未公证状态；不通过时不禁用Gatekeeper或去掉quarantine凑成功。
+### R9 当前集成与签名状态
 
-**签名首片实施（main，主代理）**：先在私有目录复制当前 SHA `01e5c1d9…` 的未签名产物，不改根 `.com`，用一次性不受信证书做 Authenticode 格式演练；验证证书目录、签名前后模型包完全相同、篡改拒绝与实际宿主执行。已确认本机有公司 Developer ID Application 身份；macOS先构建最小原生启动器携带封存 `.com`，本地签入口/app并检查运行，尚无公证成功证据。不读取/输出私钥，不复制 minicon 的产品级 OIDC 身份；证书/包尾兼容改动若触及 cc 的 driver 文件，先给出独立定位器与测试，等文件锁释放再接入。演示主代理先加强应用自采快照的结构验证与异常输入，Linux目录枚举涉及新intrinsic时单列依赖，不越域改核心。
+- **正确性**：stdlib转换371例覆盖base2–36、endptr/ERANGE/前缀与有定义atol；Python #if拒绝畸形及未消费token、内部异常传播。共享头已重建，独立host/UBSan、种子、经典和模型限定回归通过；全套以最终队列为准。
+- **库按需**：E2与经典读取同一LIBNEED闭包；CLI资源已接入，默认关闭。新参考下156文件×开/关312项全部逐字节同。Windows资源容量上限244，固定9槽与3个尾部CLI资源不超过256。
+- **真实演示**：winlist/窗口/进程/映射由unisacc编译程序自身取数，无cc采集器。Linux增加getdents64与有界dirent适配；模型编出的procview已在Linux arm64真实枚举140进程，结构检查通过。权限、消失对象与不支持平台仍显式区分。
+- **包与PE**：封存c499候选含Unisacc/0.0.9 VERSIONINFO；生产包定位器正确越过Authenticode证书尾，内存/FILE路径有界，坏证书与包偏移拒绝。一次性不受信证书格式演练及实际-run通过，不代替微软企业信任。
+- **微软**：仓库专属无密码Entra app/SP、immutable OIDC联邦、profile级唯一Signer角色、main-only审核Environment已读回核验；canonical验签工具已接入。policy已设required，尚未调用公司签名服务。最终封存与上游CI身份一致后才启动公司资格/签名；真实服务及签后六平台/Defender门槛未完成。
+- **苹果**：原生双ISA入口封存c499载荷，企业Developer ID时间戳/Hardened Runtime签名已成功，app与DMG都获Accepted并staple，Gatekeeper均为Notarized Developer ID；内层-run与载荷哈希通过。见[资格回执](research/r9-apple-signing-qualification-20260928.json)。这是资格资产，最终源码/载荷/签后门禁尚需封存，不冒充已发布。
+- **私有签名操作**：既有公司P12仅导入一次性专用钥匙串；临时前置user searchlist，finally恢复并读回，结束删除专用链。不改login ACL，不记录密码/Key ID/私钥。Microsoft与Apple信任分别验证，CRC32不提供企业信任。
+- **并发与冻结**：所有写者在main按不交叠文件域分工；主代理独占PRD、索引、共享生成物与根com。写入全部停止后才跑两槽滚动队列，窗口≤55秒、步骤≤60秒，未知套件仍保守全局失效。最终189项及平台证据未完成，不把旧179项移植为通过。
 
-**首轮正确性收片**：strtol/strtoul使用两个32位非负long累积，范围钳位/ERANGE、无数字endptr与不完整0x前缀已修；371个base2–36边界加atol有定义/null-end控制通过独立host/UBSan与私有根com+冻结include。Python #if明确拒绝畸形/尾token并传播内部异常，9合法/19畸形/2内部异常/2除零控制通过。后续共享生成头已重建，三条路线转换回归均已通过；最终完整门禁和平台仍待统一冻结，见收片回执。
+**已归档**：早期本地候选、签名阻挡/资格分工及临时诊断记录由本节移入[原样历史](archive/r9-integration-history-20260928.md)。旧SHA/速度/门禁只适用于其原身份；稳定规范与失败证据保留。README/ARCHITECTURE/exec入口、Paper A及当前生成字节账为R9-2交付，经典参考和被导入的旧组装器不删除。
 
-**执行编排（2026-09-28，用户授权 main 并发）**：所有写者直接在 main，不创建分支/worktree。后台文件域：①正确性子代理仅 include/stdlib.h、unisa/front/pp.py 及专属新回归；②队列子代理仅 tests/gatequeue.py、tests/queuecheck.py 及专属依赖声明；③文档子代理仅 README/ARCHITECTURE/exec入口文档。主代理独占 prd、演示、release签名适配、索引/提交与共享生成物。cc-unisacc 独占 prune、src/main、exec/c driver 与种子接入点。子代理不 add/commit、不改共享UA/根产物、不运行全套；只做有界私有/合成验证。代码变更统一停止后，主代理按片提交、重建、冻结并跑并发队列；源码编辑与候选门禁不交叠。签名与演示涉及新的核心入口时先解除文件锁，不越域抢写。
-
-**三批顺序与并行边界**：
-
-1. **整理/资格批**：文档归档审计（README/ARCHITECTURE/research/prd）、正确性回归（include与前端）、签名格式/流程（release/签名适配）可以分文件并行；共享生成物统一由主代理重建，prd与索引单写者。先记录精确交付和文件域，禁止多个写者改同一生成器。签名兼容原型只用私有候选，不改根产物。
-2. **实现/验证批**：落小范围正确性修复、队列闭包、真实演示与签名接入；每片先相关测试，合批后重建一次。源码编辑与门禁运行不重叠。队列改动须有故障控制，不能用缓存隐藏失败。压缩与单次memory的已验内容保持不扩张。
-3. **发布批**：统一冻结、完整队列、六目标指定平台证据、真实签名/公证和签后验收、草稿/发布。网络服务以提交/有界轮询分步推进，不放宽60秒上限。外部证书/账号权限与客机可用性单列阻挡，不承诺未核实的完成日期。
-
-**签名的已核实风险与路线**：
-
-- 实际读取minicon的`company-signing.yml`、`macos-signing.yml`、`release-policy.json`、`self-sign-rehearsal.sh`与签名回执/验签工具。复用公司发布身份及方法；unisacc的repo级Environment、Entra app/OIDC与profile级角色授权独立核对，不能借用minicon的客户端身份冒充已配置。本计划不创建第二个公司身份，不记录私钥/凭据。
-- 当前`.com`已有空PE Security Directory，但缺VERSIONINFO；`exec/c/run.c`从EOF-16读UNIPKG footer。Authenticode附加证书会移动EOF，必须先定义有界的证书/包定位并验证签名前后**模型包内容不变**、截断/错误偏移拒绝及所有宿主启动路径。不靠搜索任意magic定位可信包，不直接照搬minicon的ZIP检查。
-- 按用户校准，macOS优先试签名原生入口的`Unisacc.app`携带封存`.com`，再公证并staple app/dmg；实际编译由`.com`执行。APE不是原生Mach-O，不称其已获得Developer ID签名。必须验证内层执行/缓存与完整bundle公证；失败再评估同源原生内层。minicon签的是内层Mach-O及app，不是只给任意载荷套壳。
-- 苹果Hardened Runtime可能限制当前匿名内存转RX与FFI。用实际签名封装候选验证内层启动、编译、-run、系统API调用和最小必要运行配置，不能因为minicon无需entitlement便假定unisacc也不需要。公证Accepted、codesign strict、staple及适用于最终分发形态的Gatekeeper判据分别记录；裸CLI的判据不能套成app判据。
-- 本机负责构建，签名工作流只消费哈希冻结的本地产物，不搬入CI编译。资格演练明确非正式发布；正式签名后重新记录产物SHA与来源侧车/签名回执，发布只提升这些字节。签名服务、凭据资格及真实信任结果尚未核实，不把仓库模板当作签名已经成功。
-- 官方依据：[Microsoft Artifact Signing角色](https://learn.microsoft.com/en-us/azure/artifact-signing/concept-resources-roles)、[GitHub OIDC接入](https://github.com/Azure/artifact-signing-action/blob/main/docs/OIDC.md)、[PE Certificate Table](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)、[Apple分发签名](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac)、[Apple公证](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。实现时对照当前官方文档，不照抄归档计划的过期状态。
-
-**整理的首批明确清单**：README/ARCHITECTURE仍以旧9a0ae470或1dbac50候选和“未发布”作现状；exec/README与rules仍含“产品尚未采用”。这些更新为v0.0.8发布+当前P3/单次memory候选。prd早期训练交付定义、prd.map的14阶段/7,052 B、旧E3研究记录标历史；手写键数与生成表核对，不批量改生成块。`exec/parse/gen.py`仍是被导入的共享组装器，parse/probes仍在keep清单，经典src/unisa/kernel与E0论文复现实验必须保留。归档只迁过期现状/叙事并同步引用，不进行大目录搬迁或凭年龄删除代码。
-
-**本版不捆绑**：库AOT、跨阶段二进制流、重复网络结构合并、系统libc全面转发、新语言/目标、mmap内存重构、全域T2/T3证明。AOT如做只独立测量，不阻挡这份清单；不能同步改参考实现只为凑字节相同。各项完成并验证后即停止扩范围、进入发布。
-
-**签名接入下一片决定**：新增独立unisacc的Windows资格/company工作流与显式签名政策，默认off且缺配置/VERSIONINFO在额度调用前失败；真正落地由主代理检查并配置repo专属OIDC及profile窄权限，不把配置工作甩给用户。签名前PE版本资源必须在构造APE的PE head时追加，不对已打包容器插字节；纯打包IO，原text/data/reloc字节与RVA不动，拒绝已有resource/证书/overlay、header不足及超宽字段，产品名Unisacc与冻结版本精确对应。Linux演示的目录枚举作为R9-5最小切片，只增加getdents64事实与有界目录适配、不加入execve/fork；不支持OS明确拒绝，E3复用INTRINSIC，通用核不加语言原语，生成表/权重由主代理统一重建。
-
-**微软身份实际接入**：已创建 unisacc 专属 Entra app/SP（无密码），绑定 GitHub 实际返回的 immutable repo/environment subject；只授 profile 级 Artifact Signing Certificate Profile Signer，读取核验恰一项。GitHub release-signing 已配置主人审核与 main-only，OIDC三标识存 Environment secrets，provider 坐标存变量；值不写源码/回执。已读回核验联邦配置、profile角色、审核/分支保护及变量配置，并设置身份验证标志。尚未调用企业签名服务，政策仍 off，真实企业签名/额度路径待资格和最终候选验证。
-
-**候选版本校准**：源码版本改为0.0.9供本轮签名资格与真实产物验证，不表示发布完成。新增libneed资源后Windows进口上限由245改244，预留固定9槽与3个尾部CLI资源，保持ResourceInput[256]边界；默认不开libneed。首次整体重构建触及55秒外层预算，按已有shared/六目标/pack入口分批，超时不计通过、不放大预算。
-
-**本轮接入决定**：E2 `-libneed` 增加 CLI 资源传递，默认关闭；闭包与函数体集合来自同一声明表，seen 银行独立于自动头 called/defined。参考缺少新 dirent.h 的2项差异保持待复验，不计通过。APE仅在发布编译器构建时显式增加 Unisacc/当前源码版本的 PE VERSIONINFO，两遍头布局均先增加资源再计算 Unix 偏移；普通用户程序不自动冒用产品名。Linux目录枚举、版本资源及其限定回归收片后统一重建，再冻结正式产物。
-
-**苹果诊断实测**：显式--keychain仍20秒超时；随后仅临时将专用链前置user searchlist并保留原项，同一identity的私有无时间戳签名0.06秒rc0，finally恢复并读回原搜索列表一致。本机已存minicon-notary profile通过真实认证。尚待最终载荷timestamp签名与公证，不把该诊断算最终信任。
-
-**苹果阻挡的最小处理**：minicon已验证配方注明公司P12/密码在本机私有vault，且minicon-notary已存为钥匙串profile。核验文件类型与0600权限后只导入一次性专用钥匙串，设置该新钥匙串的codesign分区权限；不导出现有私钥、不改login钥匙串ACL、不把密码/Key ID写日志。签名工具增加显式--keychain，仅作用调用者选定的私有链，用后删除；先私有诊断，再用最终冻结载荷签名/公证。
-
-**苹果签名阻挡定位**：额外私有入口以`--timestamp=none`诊断45秒仍超时，已清理所属进程组；实时sample显示停在`SecKeyCreateSignature → SecurityServer::generateSignature → mach_msg`，因此阻挡在系统签名/私钥服务等待，不能归因为时间戳HTTP。是否有钥匙串授权提示已向用户核实；未导出私钥、修改ACL或假称签名成功。微软产品级签名workflow/policy正在独立准备，尚未配置仓库Entra/OIDC资格，不复用minicon身份。
-
-**并发收片实测（2026-09-28）**：队列仅docs/bound两个审计闭包实现选择性失效，未知族仍全局失效；合成3项复用约0.025秒，输入/候选/环境/缺项与未审代码变化控制通过，不能称179项均已选择性复用。真实演示新增winlist与进程/映射/窗口结构校验；合成控制通过，最终产品实跑待统一冻结。Windows签后footer定位器在冻结产品和host ASan/UBSan各160例通过，接入将复用已读内存而非二次打开文件，格式校验不代替签名信任。macOS原生双架构入口/app/DMG私有ad-hoc格式、参数/退出/运行/FFI/篡改验证通过；Developer ID带时间戳两次20秒超时，Gatekeeper拒绝、公证/staple未做，企业签名未完成。所有格式演练均不改变根产物。
-
-**收片补充验证**：新driver已实际读取私有签前/签后同包，hello流水线输出1075字节完全一致（SHA `09e8e1fe6a814600c33170f9fc3e880cc959249f1e7b6b25c2568ca76cd10b81`）。当前头文件生成物已统一重建；转换371例在Python种子及私有经典C参考实跑通过，host UBSan和#if回归通过；最终模型产物验证仍待重建。libneed默认关闭的参考切片来自57db2eb，修正其测试不使用Perl、两边编译必须成功且超时不可计一致；私有经典参考14例行为一致且均减少标签，模型δ尚未接入，不称产品速度收益。
+**本版不捆绑**：库AOT、跨阶段二进制流、重复网络结构合并、系统libc全面转发、新语言/目标、mmap内存重构、全域T2/T3证明。各项完成并验证后停止扩范围、进入发布；不通过签名或平台法院不静默降级。
 
 ### v0.0.10 计划（草案，2026-09-28 用户提出，暂不实施）
 
 **单目标原生产物作为副产品。** 沿用统一 `.com` 的同一构造器、δ、网络和执行机制，仅选择一个 OS/ISA 的路由与资源，产出原生单格式可执行文件；保留所需共享 E1/E3/E4、该目标 E2/lower/镜像/memory 和对应 ISA 核，不再附其他目标驱动或 APE 外壳。不另写编译器、不改编译规则。它是构造产物可按服务范围裁剪的工程实例，可为本机 C99 子集脚本/DSL 宿主作演示；不是新增的 T2/T3 或完整 C99 正确性证明。
 
-**起点统计（当前本地候选，主代理重新读包）**：包共 853,279 B，32网络压缩体 671,895 B；以下仅统计目标前缀路由引用的网络并集。约349–358KB是保留模型体，约原模型体的52–53%，不是最终单目标可执行文件大小。公开 `tokens` 等非目标前缀路线需要另算，不能把它们漏掉后声称 CLI 功能完全相同；库/资源、目录和签名也另计。
+**起点统计（历史01e5c1d9候选，主代理当时重新读包）**：包共 853,279 B，32网络压缩体 671,895 B；以下仅统计目标前缀路由引用的网络并集。约349–358KB是保留模型体，约原模型体的52–53%，不是最终单目标可执行文件大小。公开 `tokens` 等非目标前缀路线需要另算，不能把它们漏掉后声称 CLI 功能完全相同；库/资源、目录和签名也另计。
 
 | 目标 | 引用网络数 | 保留压缩网络体 B |
 |---|---:|---:|
@@ -265,7 +234,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 共享索引让同一模型内容只保存一份；Q/C 动作、H 参数和 S 字节声明分别计账，解压后逻辑量不与压缩体相加。头文件库源码是另计资源，当前没有全库 AOT 或全系统 libc 转发；macOS FFI 是有边界的宿主能力，不把它说成六平台都可任意调用系统库。执行器、驱动/OS 适配、模板、库和网络均是产品组成，不能只报纯推理核几 KB。
 
-**macOS 发布方案（按用户校准，待格式验证）**：优先试 `unisacc.dmg → Unisacc.app → 签名的原生入口 → 同包封存 unisacc.com`，实际编译仍由 `.com` 完成，参数/退出状态应原样传递。先验证 quarantine/Gatekeeper、内层 APE 运行与解包缓存、`-run`/FFI，以及公证扫描能否接受整个 bundle。minicon 实际是先签内层 Mach-O，再签 app、公证并 staple app/dmg；不是给任意载荷加壳便完成信任。本方案若未过，不宣称 `.com` 已获得 Apple 签名，回报具体阻挡并评估同源原生内层，不静默更换编译路线。微软 Authenticode 与 Apple 分发链分别验，参见 R9-6。
+**macOS 发布方案（资格已通过，最终分发验收待做）**：采用 `unisacc.dmg → Unisacc.app → 签名的原生入口 → 同包封存 unisacc.com`，实际编译仍由 `.com` 完成，参数/退出状态应原样传递。先验证 quarantine/Gatekeeper、内层 APE 运行与解包缓存、`-run`/FFI，以及公证扫描能否接受整个 bundle。minicon 实际是先签内层 Mach-O，再签 app、公证并 staple app/dmg；不是给任意载荷加壳便完成信任。本方案若未过，不宣称 `.com` 已获得 Apple 签名，回报具体阻挡并评估同源原生内层，不静默更换编译路线。微软 Authenticode 与 Apple 分发链分别验，参见 R9-6。
 
 #### 0.4.13 验证分层与当前证据
 
@@ -277,7 +246,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 | 包/宿主是否可靠 | codec、损坏包、资源、内存范围、API 失败 | CRC 已提供企业签名信任 |
 | 发布物是否可分发 | 精确 SHA、来源、签后运行、平台和信任回执 | 旧候选门禁适用于新源码/重签字节 |
 
-当前源码候选 `44fc348` 的产物 SHA/尺寸见下一节；179/179 本地门禁收据在集成证据中，包含 macOS arm64 与 Rosetta 的相应覆盖，另有 Linux arm64 本轮小程序实跑。本轮 Windows 单次绑定仅 mock、Linux x86 未运行；v0.0.8 的 Linux arm64 三代自举是另一冻结身份。完整 610MB 数组 C 源码在新旧路线均超 10s，是未解决规模限制。T1 是有限转移/网络等价；全程 T2 和 C 语义 T3 仍是独立证明义务。
+当前集成候选 c4993fd0 的完整 SHA/尺寸见R9与下一节；新身份完整189项队列尚未完成，旧44fc348的179/179仅是历史证据。当前另有Linux arm64真实procview实跑。本轮 Windows 单次绑定仅 mock、Linux x86 未运行；v0.0.8 的 Linux arm64 三代自举是另一冻结身份。完整 610MB 数组 C 源码在新旧路线均超 10s，是未解决规模限制。T1 是有限转移/网络等价；全程 T2 和 C 语义 T3 仍是独立证明义务。
 
 <a id="model-function-bytes"></a>
 #### 0.4.14 当前模型功能与物理字节账
@@ -319,11 +288,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 | `C`：动作序列共享前缀声明 | 578,479 | 47.37% |
 <!-- model-bytes:end -->
 
-两个 e3 分别是错误与错误+告警变体；十二个 e2 是六目标的普通/位置变体。32 个共享物理模型被 938 条阶段行引用，引用次数不是物理份数。压缩前 Q/C 是动作与共享声明，H 是阈值/选择参数；三个数字不与压缩模型体相加。20 份头/库源码与两 ISA 核资源另计；混合平台驱动缺独立 link-map，不虚构其 libc/启动/OS 子项比例。当前包 1,083,311 B 相对已发布 v0.0.8 的 5,388,402 B 小约 79.90%，签名后字节变化另记。
+两个 e3 分别是错误与错误+告警变体；十二个 e2 是六目标的普通/位置变体。32 个共享物理模型被 938 条阶段行引用，引用次数不是物理份数。压缩前 Q/C 是动作与共享声明，H 是阈值/选择参数；三个数字不与压缩模型体相加。21 份头/库源码与两 ISA 核资源另计；混合平台驱动缺独立 link-map，不虚构其 libc/启动/OS 子项比例。当前产物1,221,185 B（包973,121 B）相对已发布v0.0.8的5,388,402 B小约77.34%，签名后字节变化另记。
 
 ---
 
-**逐阶段结构计数口径**：论文 §1.3 的结构快照见 [pipeline-structure-20260928.json](research/pipeline-structure-20260928.json)，绑定当前候选完整 SHA。静态动作数按每个序列展开 Q/C 前缀后的动作次数求和；另记包中实际保存的后缀动作数。它们不等于一次程序运行的动态动作数，也不是动作操作码种类数。声明返回按银行数与键成员数另记；O1/O2 不能共用一组结构数字。结构审计另附 calc 动态计数：cc-unisacc 提供插桩/原始输出，cdx 用同一二进制独立复跑，五阶段计数一致；输入、模型与运行时 SHA、O0/run 与 memory 路由及日志归档到 research/pipeline-counts-20260928/。它不是出货汇编内核的性能测量，结构表中的 O2 网络未参与该次 O0 运行。
+**逐阶段结构计数口径**：论文 §1.3 的结构快照见 [pipeline-structure-20260928.json](research/pipeline-structure-20260928.json)，绑定旧01e5c1d9测量基线；当前c499静态结构见[r9-pipeline-structure-20260928.json](research/r9-pipeline-structure-20260928.json)，旧calc动态计数不得外推。静态动作数按每个序列展开 Q/C 前缀后的动作次数求和；另记包中实际保存的后缀动作数。它们不等于一次程序运行的动态动作数，也不是动作操作码种类数。声明返回按银行数与键成员数另记；O1/O2 不能共用一组结构数字。结构审计另附 calc 动态计数：cc-unisacc 提供插桩/原始输出，cdx 用同一二进制独立复跑，五阶段计数一致；输入、模型与运行时 SHA、O0/run 与 memory 路由及日志归档到 research/pipeline-counts-20260928/。它不是出货汇编内核的性能测量，结构表中的 O2 网络未参与该次 O0 运行。
 
 ---
 
@@ -2351,3 +2320,13 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 实际两个 Terminal 窗口只差 TERM_SESSION_ID，整环境指纹却令189项全部失效并重复执行已通过工具与自举套件。决定：仅剔除这个窗口传输标识，同时从套件实际执行环境剔除它；其余环境完整保留并参与指纹，不凭猜测缩小输入。增加跨窗口复用及真实配置改变失效的回归，旧队列身份因修复重新建立一次。
 
 实际验证：queuecheck全部控制通过；两个真实Terminal窗口对同一bound套件，首轮3.26秒、第二轮0.10秒直接复用，无INVALIDATE/START。TERM_SESSION_ID在子进程确实不存在；改变UNISA_MAXSTEPS仍使结果失效并重跑。未把此前旧身份的189项结果冒充新身份通过。
+
+### R9 队列外部目录输入闭包补齐（2026-09-28）
+
+发现package-footer测试实际import release/apeinspect.py，但未知套件全局清单遗漏release。决定补入release/scripts/iterate及构建入口，新增私有树变更控制；它们的内容改变须使未审计套件失效，不能靠缓存掩盖。该修复统一收片后重新冻结完整队列，已有旧身份结果不移植。
+
+闭包补齐实际控制：私有树使用package-footer的真实命令形状，修改release/apeinspect.py后已通过结果被resume删除；其余环境/候选/缺项/超时与跨窗口回归通过。R9早期集成/签名临时状态已原样归档，四个代码入口与Paper A的静态/历史边界对齐c499；docs三张生成表、referee与物理字节账检查通过。
+
+### R9 企业签名正式门槛启用（最终冻结前）
+
+用户已要求0.0.9企业签名；仓库身份/版本资源及资格配方实际核验后，将windows.mode置required，禁止未签名回退。此开关不调用服务；服务仍必须消费本地最终全绿封存的同一主线SHA/CI attempt与草稿资产。当前本地验收未完、微软服务未签、release_eligible仍false。

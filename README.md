@@ -22,15 +22,15 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| Current local candidate | Built from `44fc348`, finalized at `75e54ef`; `.com` 1,083,311 B; SHA-256 `01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631` |
+| Current local candidate | Source closure built at `49a6e00`; v0.0.9 `.com` 1,221,185 B; SHA-256 `c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8` |
 | Model organization | 32 shared constructed networks, 938 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
-| Local verification | Current candidate passed 179/179 local gate items; Linux arm64 hello/fib/convert also ran through model `-run` and compiled/native execution |
+| Local verification | Final 189-item queue pending; E2 off/on 312/312 byte-equal to fresh classic reference; model-built procview actually enumerated Linux arm64 processes |
 | Remaining release work | Local v0.0.9 candidate is **not published**; this round has no Windows execution or Linux x86-64 execution evidence |
 
 The authoritative [pipeline design](prd.md#pipeline-design) describes each
 stage's inputs, outputs, control structure, rule sources and limits. The
-[current integrated evidence](research/memory-once-integrated-bench-20260928.json)
+[historical one-pass measurements](research/memory-once-integrated-bench-20260928.json)
 records candidate identity, gate receipts and timing. On the same macOS arm64
 driver and calc input, five warm samples gave medians of 205.382 ms
 (P2/two-pass), 207.770 ms (P3/two-pass) and 172.749 ms (P3/one-pass).
@@ -46,10 +46,10 @@ gates, platform smoke and older performance measurements remain in the
 to the current candidate.
 
 Unreachable-function pruning is assigned to cc-unisacc and remains planned;
-it is not a stage in the current production route. Enterprise signing is also
-pending: the macOS signed app/dmg wrapper proposal still requires format,
-inner `.com` execution and trust validation, separately from Windows
-Authenticode. See the [R9 release checklist](prd.md).
+it is not a stage in the current production route. Company signing remains release work: macOS app/DMG qualification has passed
+actual Developer ID signing, notarization, stapling and Gatekeeper, with the
+sealed `.com` running inside. Windows Authenticode service signing and final
+signed-asset/platform acceptance remain pending. See the [R9 release checklist](prd.md).
 
 Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) — product, offline seed,
 static inputs, development tools and reference judges. The [research index](research/README.md)

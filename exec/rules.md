@@ -74,17 +74,20 @@ is frozen; a shorter gen2.py alone is not completion evidence.
 
 Published v0.0.8 / `10672e3` is unsigned, 5,388,402 B, SHA-256
 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
-Current local `44fc348` build / `75e54ef` completion is 1,083,311 B, SHA-256
-`01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`.
-It implements P3 binary/DEFLATE networks and one-pass memory binding, and
-passed 179/179 local gate items. Linux arm64 hello/fib/convert ran separately;
-Windows one-pass checks were mocks and Linux x86-64 was not run this round.
-Local v0.0.9 is not published. See [integrated evidence](../research/memory-once-integrated-bench-20260928.json)
+Current v0.0.9 source closure built at `49a6e00` is 1,221,185 B, SHA-256
+`c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`.
+It implements P3 binary/DEFLATE networks and one-pass memory binding.
+Final 189-item local acceptance is pending; old 179-item results do not
+transfer. E2 off/on 312/312 match the fresh classic reference; current
+model-built procview ran on Linux arm64. Windows one-pass checks remain mocks
+and Linux x86-64 has not run this round. v0.0.9 is not published.
+See [current structure audit](../research/r9-pipeline-structure-20260928.json)
 and [physical byte accounting](../prd.md#model-function-bytes).
 
 Prune is assigned to cc-unisacc and awaits implementation; the current route
-has no prune stage. The macOS signed app/dmg proposal and Windows enterprise
-signing remain validation/release work, not completed product capabilities.
+has no prune stage. macOS company signing/notarization/staple/Gatekeeper has
+passed qualification; Windows service signing and final sealed-asset release
+acceptance remain pending.
 
 The former `85eaeb9` / `9a0ae470` candidate, its 6,279,167-byte container,
 171-item gate, fixed-package driver bootstrap and older timing samples are

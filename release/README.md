@@ -1,10 +1,15 @@
-# 发布签名准备
+# 发布签名接入与剩余验收
 
-## Windows：先资格检查，再公司签名
+当前本地版本为0.0.9候选，封存载荷 `unisacc.com` 为1,221,185 B，SHA256
+`c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`，
+构建来源为 `49a6e00`。这是当前签名资格证据的身份，不是已发布版本；
+后续产物改变须重新封存、签名并验证，不继承旧资产的回执。
+
+## Windows：身份与格式已接入，服务签名待验
 
 [windows-signing.yml](../.github/workflows/windows-signing.yml) 只消费主人在本机
 构建、测试并封存的资产。Actions 不构建产物，也不发布 Release。
-[signing-policy.json](signing-policy.json) 当前为 `off`，签名清单只有
+[signing-policy.json](signing-policy.json) 当前为 `required`，签名清单只有
 `unisacc.com`。任何额外 PE/DLL 必须先明确加入清单、预算与原生运行法院。
 
 两种 dispatch mode：
@@ -12,8 +17,9 @@
 - `qualification`：验证确切主线源码、成功 CI run/attempt、本机回执、ZIP
   清单、SHA256、字节数与有界 APE 包位置。不会进入 `release-signing`
   Environment，不请求 Azure OIDC、不调用公司签名服务，签名额度消耗为零。
-  回执中的 `versioninfo_ready=false` 是尚未满足公司签名前提；此模式没有产生
-  新签名，也没有证明 Azure 身份已部署。
+  `versioninfo_ready=false` 时仍未满足公司签名前提；当前候选已实现
+  Unisacc/0.0.9的PE VERSIONINFO，资格检查必须从确切资产重新读取。
+  此模式不产生新签名；身份配置的读回核验与正式OIDC登录/服务签名分别记账。
 - `company`：要求策略改为 `required`、PE 中 ProductName 为 `Unisacc` 且
   ProductVersion 精确匹配封存回执，再进入保护 Environment。缺任何配置、
   OIDC 登录失败、签名失败、Windows 信任或时间戳失败均停止，不退回未签名出货。
@@ -41,7 +47,7 @@
   "source_dirty": false,
   "built_by": "owner-local",
   "local_gate_complete": true,
-  "product_version": "0.0.8",
+  "product_version": "0.0.9",
   "local_build": {
     "host": "<local build host label>",
     "created_at": "<UTC ISO8601>",
@@ -69,14 +75,17 @@ CI 是源码的第二意见，不是这些本机构建字节的生产者，也�
 ### 配置：一个仓库一个 Entra 身份
 
 复用公司的 Artifact Signing account/Public Trust profile；**不能复制 minicon
-的 Entra application/service principal 或 AZURE_CLIENT_ID**。为 unisacc 独立配置
-Entra 身份，精确绑定本仓库 `release-signing` Environment 的 OIDC `sub`，
+的 Entra application/service principal 或 AZURE_CLIENT_ID**。unisacc专属无密码
+Entra app/SP及本仓库 `release-signing` Environment 已配置并读回核验，
+绑定GitHub实际返回的immutable repo/environment OIDC `sub`，
 issuer 为 `https://token.actions.githubusercontent.com`，audience 为
 `api://AzureADTokenExchange`，只授予 profile 范围的
 `Artifact Signing Certificate Profile Signer`。
 
-`release-signing` Environment 应要求主人审核并限制 `main`。配置以下名称；
-检查配置时只列名称，不输出值：
+已读回核验profile级Signer授权、联邦配置、主人审核与main-only分支约束，
+并设置身份验证标志；依据为 [PRD微软身份接入记录](../prd.md)。
+正式OIDC登录、企业服务签名与Windows信任尚未验证，policy仍为off。
+以下配置名称保留供资格核对；检查时只列名称，不输出值：
 
 | 类型 | 名称 |
 | --- | --- |
@@ -107,17 +116,19 @@ SHA256 不变。格式检查不是认证判定，Windows 是权威信任法院�
 时间戳证书有效期不是实际 RFC3161 genTime；当前回执不声称已提取 genTime。
 provider/OIDC coordinates 不进入回执；公司诊断材料另存受限位置。
 
-待办：真实仓库身份与 Environment 部署；VERSIONINFO 资源；实际服务签名与信任
-回执；签后同一 SHA 的全部六平台运行、Windows Defender、当前 attempt 的完整
-汇总，以及主人审核后的封存字节 Promotion。此片没有创建外部资源、push 或实际
-云签名。每个 workflow step 最多一分钟，服务签名 timeout 为 55 秒；超时即失败。
+身份/Environment配置已读回，产品VERSIONINFO已实现；这些不等于服务签名成功。
+待办：最终封存输入的资格检查；政策按发布决定启用后的正式OIDC登录、实际公司
+服务签名与Windows信任回执；签后同一SHA的全部六平台运行、Windows Defender、
+当前attempt的完整汇总，以及主人审核后的封存字节Promotion。
+当前policy已设required，未调用Windows企业签名服务。每个workflow step最多一分钟，
+服务签名timeout为55秒；超时即失败。
 
 依据（2026-09-28 核对）：
 [官方 Artifact Signing action](https://github.com/Azure/artifact-signing-action)、
 [微软集成说明](https://learn.microsoft.com/en-us/azure/artifact-signing/how-to-signing-integrations)、
 [GitHub OIDC reference](https://docs.github.com/en/actions/reference/security/oidc)。
 
-### Canonical inspection scripts（父代理接入）
+### Canonical inspection scripts（已接入）
 
 参考源位于本机技能目录：
 
@@ -125,19 +136,37 @@ provider/OIDC coordinates 不进入回执；公司诊断材料另存受限位置
 - `~/.claude/skills/sign-windows-artifacts/scripts/inspect-authenticode.sh`
 - `~/.claude/skills/sign-windows-artifacts/scripts/fetch-microsoft-trust-bundle.sh`
 
-产品副本应分别放到 `scripts/` 同名文件，保持
-`pns-authenticode-inspector/v3` 字节一致。Windows调用为：
+产品副本已接入 `scripts/` 同名文件，保持
+`pns-authenticode-inspector/v3` 字节一致；实际验签仍须在最终资产上执行。
+Windows调用为：
 `pwsh scripts/inspect-authenticode.ps1 -Path FILE -ExpectedProductName Unisacc
 -ExpectedProductVersion VERSION`（同一命令行）。Portable诊断调用为：
 `bash scripts/inspect-authenticode.sh --ca-file PRIVATE_BUNDLE -- FILE`。
 trust bundle fetch helper独立生成私有bundle，shell inspector不自动调用它；
 不要把bundle内容或公司配置写进公开回执。技能中的
 `scripts/check-product-inspectors.sh REPO_ROOT` 检查这三个副本的完整字节一致性。
-此片只列引用路径，没有复制或修改这些脚本。
+三个副本已提交进仓库；最终冻结仍需保留字节一致性及实际验签回执。
 
-## macOS 私有演练
+## macOS 公司签名与公证资格（已通过，非发布）
 
 [macosbundle.py](macosbundle.py) 与 [macos-launcher.c](macos-launcher.c)
-用于本机分片构建/签名/DMG/评估：签原生入口和 app，内层 `.com` 的封存哈希独立
-验证。具体参数见工具 `--help`。本机签名不是公证成功；尚需 quarantine/Gatekeeper、
-notarization/staple 与六平台最终字节证据，不能称 Apple 已签内层 `.com`。
+分片构建原生入口、app与DMG；入口/app签名，内层 `.com` 的封存哈希独立验证。
+具体参数见工具 `--help`。当前c499载荷的公司Developer ID时间戳与Hardened Runtime
+签名已成功，签后app实际 `--version`/`-run hello` 通过。Apple对app ZIP及DMG均返回
+Accepted；app/DMG均已staple并验证，Gatekeeper均为Notarized Developer ID。
+完整载荷、launcher及DMG SHA和资格边界见
+[公开资格回执](../research/r9-apple-signing-qualification-20260928.json)。
+
+资格回执仍为 `release_eligible=false`：尚需最终冻结门禁、签后确切分发资产的
+编译/`-run`/包读取与系统API检查、quarantine和各平台运行证据及主人Promotion。
+不能称Apple已签内层APE `.com`，也不能把Apple资格通过称为Windows/Apple双签发布。
+若载荷或发布封装改变，必须重新签名、公证、staple并核对最终字节身份。
+
+### 私有keychain操作边界
+
+仅使用调用者明确选定的私有专用keychain；本机实测仅传 `--keychain` 不足以避免
+系统密钥服务等待，需临时将该链前置user searchlist，同时保留原有全部项目。
+操作前保存搜索表，任何成功、失败或超时路径均在finally恢复，并读回核对原表一致；
+限时命令清理所属进程。不得导出既有私钥、修改login钥匙串ACL或输出密码、API key、
+Key ID及公证提交标识；这些只在私有环境处理。一次诊断成功不替代最终载荷的签名
+与信任回执，也不以关闭Gatekeeper或去掉quarantine作为通过条件。

@@ -18,18 +18,22 @@ not just the six-stage development route shown later in this file. See
 
 Published v0.0.8 is `10672e3`, unsigned 5,388,402 B, SHA-256
 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
-The current local candidate was built from `44fc348` and finalized at `75e54ef`:
-1,083,311 B, SHA-256
-`01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`.
-P3 compression and one-pass memory binding are implemented; its local gate
-passed 179/179. Linux arm64 hello/fib/convert ran separately; this round has
-no Windows or Linux x86-64 execution evidence. Local v0.0.9 is not published.
-See [integrated receipts](../research/memory-once-integrated-bench-20260928.json)
-and [the current physical byte ledger](../prd.md#model-function-bytes).
+The current v0.0.9 source closure was built at `49a6e00`: 1,221,185 B,
+SHA-256 `c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`.
+P3 compression and one-pass memory binding are implemented. The final
+189-item queue is pending; old 179-item receipts do not transfer. E2 off/on
+312/312 outputs match a fresh classic reference; current model-built procview
+ran with real Linux arm64 directory enumeration. Windows and Linux x86-64
+execution remain pending. v0.0.9 is not published.
+See [current pipeline audit](../research/r9-pipeline-structure-20260928.json)
+and [the physical byte ledger](../prd.md#model-function-bytes); the prior
+[one-pass measurements](../research/memory-once-integrated-bench-20260928.json)
+remain historical evidence for their recorded identity.
 
 Pruning remains cc-unisacc's planned work, not a current production stage.
-The enterprise signing plan, including a macOS signed app/dmg carrying the
-sealed `.com`, still needs format, execution and trust validation.
+macOS company-signed app/DMG qualification has passed notarization, stapling,
+Gatekeeper and sealed-payload execution. Windows service signing and final
+signed-asset/platform release acceptance remain pending.
 
 ## Historical development milestones
 

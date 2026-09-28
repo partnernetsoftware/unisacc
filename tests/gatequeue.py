@@ -98,7 +98,7 @@ def fingerprint(jobs):
     raw = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
                                   '--', 'src', 'exec', 'tests', 'include', 'kernel', 'weights', 'unisa', 'examples',
                                   'unisacc.c', 'README.md', 'ARCHITECTURE.md', 'AGENTS.md',
-                                  'prd.tree.md', 'prd.map.md', 'research/referee.tsv', 'iterate/kernel/typekw.tsv'])
+                                  'prd.tree.md', 'prd.map.md', 'research/referee.tsv', 'iterate', 'release', 'scripts', 'Makefile'])
     names = sorted(set(raw.decode().split('\0')) - {''})
     if digest('unisacc.com') != ['missing']: names.append('unisacc.com')
     tools = {}
