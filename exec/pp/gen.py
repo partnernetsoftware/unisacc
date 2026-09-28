@@ -308,7 +308,10 @@ def build_hx(g):
 
 
 def build_cli(g, locations=False):
-    install_rules(g, HERE, "cli", {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']},
+    layout = {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']}
+    # Without autoinc the libneed scan is absent; continue with forced includes.
+    layout['after_flags'] = "CLI.LN" if AUTOINC else "CLI.INC"
+    install_rules(g, HERE, "cli", layout,
         {"location_line": [("ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1)] if locations else []})
 
 

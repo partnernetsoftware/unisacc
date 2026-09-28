@@ -2360,3 +2360,11 @@ CI负控制的另一个陈旧期望已实跑定位：win_argregs只令win/x86_64
 旧all.sh仍以900秒/六槽调度，且直接build_ref不写来源stamp；selfhost/bootstrap又绕过调用者UA重写共享/tmp。收紧为每套件1–60秒、默认双槽、超时清理所属进程树，acceptance按现有PART入口拆15单节（保持全部节），准备复用lib.ua_ready，生成代际产物使用私有scratch并保留原比对。此次不把189模型门禁替代旧经典覆盖，不增加框架；单项超过上限仍是失败，需要按实际日志处理。修改前当前0c65队列18/189零失败，窗口正常结束后再编辑；这些部分结果不冒称全绿。
 
 有界入口实测：私有UA下bootstrap B=C=U完整tape一致（rc0），selfhost两文件×两代lexer各2一致/0差异（rc0）；未重写默认/tmp/ua_ref。SUITE_LIMIT=61启动即rc2，bash语法检查通过。此为入口及固定点验证，不称完整旧all通过；平台不适用的acceptance 10/11明确SKIP，不计通过。当前产品来源核验仍通过且c499字节不变。
+
+### R9 token-dump 无自动头路由断链
+
+94a8daf冻结队列74/189时，exec-driver-core-dependencies实际失败（rc2 no transition），依赖关系子检查已通过。保留私有包/三驱动复现，首输入int x=1即失败；拆阶段确认tokenpp失败、空输入tokenlex本身能运行。源审计确认E2_AUTOINC=0不安装build_libneed，但cli-result仍无条件跳CLI.LN，形成未定义续点。修正仅在构造接线中把after_flags声明绑定为：自动头开启走CLI.LN，关闭走既有CLI.INC；不在运行时加C逻辑，不放宽no-transition拒绝，保留原四类token dump与三驱动对照。
+
+断链修正实测：原根c499的-dump-tokens首例也rc2；修正后私有新包的四类输入（普通、宏、字符串/十六进制、预定义）×cc/UA/ASM三驱动均与经典token输出逐字节相同，dependencies整个专项rc0。正常AUTOINC=1接线未变；无需启用自动头来绕过问题。随后重建新产品并更新物理账，旧c499签名资格不能作为新载荷的回执。
+
+CI外部准备与命令限时同步：三套真实库按tools.sh现有精确commit有界fetch准备，FETCH=0验收，不把网络失败算跳过；权重/acc、ELF编译/执行/解释器、可选mac诊断分别有界，corpus保持四片，all沿用双槽/逐套件60秒。私有配置actionlint已通过，不能冒称远端CI成功；这批不调用签名服务。

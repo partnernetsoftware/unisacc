@@ -43,32 +43,50 @@ jobs:
             test "$(git -C corpus/c-testsuite rev-parse HEAD)" = 5c7275656d751de0e68b2d340a95b5681858ed07
           '
 
+      - name: prepare pinned external library fixtures
+        run: |
+          # Each library fetch is independently bounded; tests do not fetch.
+          for spec in 'crypto-algorithms|https://github.com/B-Con/crypto-algorithms.git|cfbde48414baacf51fc7c74f275190881f037d32' 'tiny-AES-c|https://github.com/kokke/tiny-AES-c.git|23856752fbd139da0b8ca6e471a13d5bcc99a08d' 'tiny-regex-c|https://github.com/kokke/tiny-regex-c.git|f2632c6d9ed25272987471cdb8b70395c2460bdb'; do
+            # shellcheck disable=SC2016
+            python3 tests/bound.py 45 sh -eu -c '
+              name=${1%%|*}; rest=${1#*|}; url=${rest%%|*}; commit=${rest##*|}
+              git init -q "corpus/$name"
+              git -C "corpus/$name" remote add origin "$url"
+              python3 tests/bound.py 30 git -C "corpus/$name" fetch -q --depth 1 origin "$commit"
+              git -C "corpus/$name" checkout -q --detach FETCH_HEAD
+              test "$(git -C "corpus/$name" rev-parse HEAD)" = "$commit"
+            ' _ "$spec"
+          done
+
       - name: construct weights and check every stage
         run: |
-          python3 -m unisa build-weights
-          python3 -m unisa acc
+          python3 tests/bound.py 55 python3 -m unisa build-weights
+          python3 tests/bound.py 55 python3 -m unisa acc
 
       - name: the emitted ELF actually runs
         run: |
           set -e
           for e in hello fact fib ptr struct 'do' switch; do
-            python3 -m unisa compile examples/$e.c -o /tmp/$e \
+            python3 tests/bound.py 30 python3 -m unisa compile examples/$e.c -o /tmp/$e \
               --target lnx/x86_64 --drive built
             chmod +x /tmp/$e
-            got=$(/tmp/$e); code=$?
-            want=$(python3 -m unisa run examples/$e.c --target lnx/x86_64 --drive built)
+            got=$(python3 tests/bound.py 8 /tmp/$e); code=$?
+            want=$(python3 tests/bound.py 15 python3 -m unisa run examples/$e.c --target lnx/x86_64 --drive built)
             echo "  $e -> '$got' (exit $code)"
             [ "$got" = "$want" ] || { echo "MISMATCH: want '$want'"; exit 1; }
           done
 
       - name: suites
-        run: ./tests/all.sh
+        run: env JOBS=2 FETCH=0 ./tests/all.sh
 
       - name: an external corpus we did not write
-        run: ./tests/corpus.sh
+        run: |
+          for shard in 1 2 3 4; do
+            python3 tests/bound.py 60 env FETCH=0 SHARD="$shard/4" ./tests/corpus.sh
+          done
 
       - name: real library code by other people
-        run: ./tests/tools.sh
+        run: python3 tests/bound.py 60 env FETCH=0 ./tests/tools.sh
 
   macos:
     # macos-14/15 are Darwin 23/24 against the dev machine's Darwin 25, which
@@ -98,22 +116,37 @@ jobs:
             git -C corpus/c-testsuite checkout -q --detach FETCH_HEAD
             test "$(git -C corpus/c-testsuite rev-parse HEAD)" = 5c7275656d751de0e68b2d340a95b5681858ed07
           '
-      - run: python3 -m unisa build-weights
+      - name: prepare pinned external library fixtures
+        run: |
+          # Each library fetch is independently bounded; tests do not fetch.
+          for spec in 'crypto-algorithms|https://github.com/B-Con/crypto-algorithms.git|cfbde48414baacf51fc7c74f275190881f037d32' 'tiny-AES-c|https://github.com/kokke/tiny-AES-c.git|23856752fbd139da0b8ca6e471a13d5bcc99a08d' 'tiny-regex-c|https://github.com/kokke/tiny-regex-c.git|f2632c6d9ed25272987471cdb8b70395c2460bdb'; do
+            # shellcheck disable=SC2016
+            python3 tests/bound.py 45 sh -eu -c '
+              name=${1%%|*}; rest=${1#*|}; url=${rest%%|*}; commit=${rest##*|}
+              git init -q "corpus/$name"
+              git -C "corpus/$name" remote add origin "$url"
+              python3 tests/bound.py 30 git -C "corpus/$name" fetch -q --depth 1 origin "$commit"
+              git -C "corpus/$name" checkout -q --detach FETCH_HEAD
+              test "$(git -C "corpus/$name" rev-parse HEAD)" = "$commit"
+            ' _ "$spec"
+          done
+
+      - run: python3 tests/bound.py 55 python3 -m unisa build-weights
 
       - name: what this host thinks of our Mach-O
         continue-on-error: true
         run: |
           sw_vers; uname -m
-          python3 -m unisa compile examples/hello.c -o /tmp/hello \
+          python3 tests/bound.py 30 python3 -m unisa compile examples/hello.c -o /tmp/hello \
             --target osx/arm64 --drive built
           chmod +x /tmp/hello
-          codesign -f -s - /tmp/hello
+          python3 tests/bound.py 8 codesign -f -s - /tmp/hello
           set +e
-          /tmp/hello; echo "plain exit=$?"
+          python3 tests/bound.py 8 /tmp/hello; echo "plain exit=$?"
           echo "--- dyld ---"
-          DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_LIBRARIES=1 /tmp/hello 2>&1 | head -40
+          DYLD_PRINT_SEGMENTS=1 DYLD_PRINT_LIBRARIES=1 python3 tests/bound.py 8 /tmp/hello 2>&1 | head -40
           echo "--- lldb ---"
-          lldb --batch -o 'run' -o 'bt all' -o 'register read pc sp x0' \
+          python3 tests/bound.py 15 lldb --batch -o 'run' -o 'bt all' -o 'register read pc sp x0' \
                -o 'disassemble --pc --count 8' -o 'quit' /tmp/hello 2>&1 | head -60
 
-      - run: ./tests/all.sh
+      - run: env JOBS=2 FETCH=0 ./tests/all.sh
