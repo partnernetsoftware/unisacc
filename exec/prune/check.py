@@ -15,7 +15,7 @@ def main():
  ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--output',type=Path);ap.add_argument('--probes',type=Path);ap.add_argument('--calc',type=Path);ap.add_argument('--ua',type=Path,default=os.environ.get('PRUNE_UA'));ap.add_argument('--start',type=int,default=0);ap.add_argument('--count',type=int,default=10);ap.add_argument('--build',action='store_true');ns=ap.parse_args()
  if ns.output is None:
   import tempfile
-  ns.output=Path(tempfile.mkdtemp(prefix='unisacc-prune-check-'))
+  ns.output=Path(tempfile.mkdtemp(prefix='unisacc-prune-check-',dir='/tmp'))
  assert ns.ua is not None, '--ua or PRUNE_UA required; no default UA'
  part=os.environ.get('PRUNE_PART')
  if part is not None:

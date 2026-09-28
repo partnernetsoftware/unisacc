@@ -2447,3 +2447,7 @@ R9-4/R9-7待修实证：models.closure把忽略的exec/build/ua_ref.c（1,130,27
 ### R9 同步prune候选：实际冻结前验收
 
 根载荷d4f7d302/1,233,236B已构建，33部署网络全域check-net通过；CLI64/run12/C9957、nativeboot/kernel实际通过。固定清单193项，含四个有界prune分片。40项C参考在ASan+UBSan及unisacc构建下重复调用一致。五次交替热新进程中位：calc新177.01ms/旧d61为176.22ms，空程序新29.23/旧27.68ms；输出/退出相同，未观察到该输入的提速，不以参考原型收益替代。见research/r9-prune-product-bench.json。新身份全队列、平台与Apple最终资产继续验收。
+
+### R9 冻结门禁入口修正
+
+首轮d4f7队列44项完成，其中四个prune分片因macOS TMPDIR默认为/private/var而触发检查器只允许/tmp的断言，比较尚未执行；记录为失败，不移植为通过。检查器默认显式创建/tmp下唯一私有目录，保留显式路径校验与私人UA。仅测试脚本改变，产品内容仍须通过真实有界重构建确认；旧队列保留，新冻结重新跑，不手工填回执。
