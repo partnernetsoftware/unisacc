@@ -75,7 +75,10 @@ def main():
    c=L.us_new(str(pkg).encode());assert c
    try:
     data=source.startswith(b'extern');ok(L.us_declare_import(c,b'absent_object' if data else b'absent_function',ctypes.byref(data_sig if data else fn_sig)),c)
-    ok(L.us_add_source(c,b'missing.c',source),c);assert L.us_compile(c,target.encode(),0)!=0;assert L.us_error(c)
+    ok(L.us_add_source(c,b'missing.c',source),c)
+    rc=L.us_compile(c,target.encode(),0)
+    if rc==0:rc=L.us_relocate(c) # lower resolves data during mapping, not tape generation
+    assert rc!=0;assert L.us_error(c);assert not L.us_sym(c,b'check')
    finally:L.us_free(c)
   # Registration succeeds only when the two trusted declarations agree.
   c=L.us_new(str(pkg).encode());assert c

@@ -2740,3 +2740,5 @@ R10 resolver公开API已接入：声明与加载成功统一失效已编译代�
 R10 resolver TDD门禁新增lib-resolver（完整模型候选真实公开API）与lib-resolver-host（独立普通/ASan typed候选IO）。host上限对齐65536后重验rc0，准确源hash与命令封存research/r10-resolver-host-evidence.json；Windows只读交叉编译审计永久封存research/r10-windows-library-port-audit.txt。此时根.com仍旧26def90/0dad候选，resolver5e0058b六目标私有构造已全部rc0、打包在跑，未称最新root或native通过。
 
 R10 resolver全候选wire复核收紧三处data结构：var必须0、result不可void、extent必须>0；即使是合法winner旁的低优先级也不可藏畸形记录。MC规范器189态48506观察与17负例/404截断首验通过。5e0058b包已完成且来源验证，但不含这三处，仅作先验原生集成；正式root必须基于修复后源实际重构，禁止把旧包侧车换身份。
+
+R10真实resolver首验15个O0/O1/O2优先级/data正例已实际通过，随后missing data测试误把compile=tape生成等同lower映射、断言rc1；保留research/r10-resolver-first-native.json。改为完整compile→relocate必须拒绝且无export，与API阶段一致，不删除缺失数据控制；仍需复跑证明实际lower拒绝。
