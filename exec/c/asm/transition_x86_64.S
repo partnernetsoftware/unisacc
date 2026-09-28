@@ -1,5 +1,7 @@
-/* Handwritten x86-64 System V core_transition. Signed 64-bit accumulation;
-   each threshold activates its two weights independently of table answers.
+/* Handwritten x86-64 System V core_transition. Signed 64-bit accumulation.
+   Thresholds ascend (the loader rejects any other bank), so the active units
+   are a prefix: a branchless binary search finds its length, then exactly
+   those weights are added. No table answers are consulted.
    Windows x64 has a different calling convention and is not selected here. */
 #include "layout.h"
 #ifdef _WIN32
@@ -49,18 +51,27 @@ CNAME(core_transition):
     testl %r15d,%r15d
     je Lxbounds
     xorl %ebx,%ebx
+Lxsearch:
+    cmpl %r15d,%ebx
+    jae Lxsum
+    leal (%rbx,%r15),%eax
+    shrl $1,%eax
+    leal 1(%rax),%r11d
+    cmpl (%r12,%rax,4),%edx
+    cmovgel %r11d,%ebx
+    cmovll %eax,%r15d
+    jmp Lxsearch
+Lxsum:
+    testl %ebx,%ebx
+    je Lxbounds
 Lxunit:
-    cmpl (%r12),%edx
     movslq (%r13),%rax
     movslq (%r14),%r11
-    cmovlq %rbx,%rax
-    cmovlq %rbx,%r11
     addq %rax,%r9
     addq %r11,%r10
-    addq $4,%r12
     addq $4,%r13
     addq $4,%r14
-    decl %r15d
+    decl %ebx
     jne Lxunit
 Lxbounds:
     cmpq $-1,%r9

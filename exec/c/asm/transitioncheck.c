@@ -10,10 +10,24 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **b,int *len) {
 }
 void core_host_panic(const char *s) { fprintf(stderr,"panic %s\n",s); exit(2); }
 static long checks;
+/* Independent oracle: the defining net.py sum over every unit, no early exit. */
+static int full_eval(const CoreModel *m,int q,int key,int *n,int *s) {
+    if (key < m->lo[q] || key > m->hi[q]) return 0;
+    long long nn=m->base_next[q], ss=m->base_seq[q];
+    for (int j=0;j<m->count[q];j++) if (key>=m->keys[q][j]) { nn+=m->next[q][j]; ss+=m->seq[q][j]; }
+    if (nn<-1 || nn>=m->ns || ss<0 || ss>=m->nq) return 0;
+    *n=(int)nn; *s=(int)ss; return 1;
+}
 static void check(CoreModel *m,int q,int key,int expect,int n,int s) {
     int cn=99,cs=99,an=99,as=99;
     const char *c=core_transition_c(m,q,key,&cn,&cs);
     const char *a=core_transition(m,q,key,&an,&as);
+    if (m->isnet) {
+        int fn=99,fs=99,ok=full_eval(m,q,key,&fn,&fs);
+        if (ok!=!a || (ok && (an!=fn || as!=fs))) {
+            fprintf(stderr,"FULL q=%d key=%d full=(%d,%d,%d) ASM=(%s,%d,%d)\n",q,key,ok,fn,fs,a?a:"ok",an,as);exit(1);
+        }
+    }
     if ((!!c)!=(!!a) || (c && strcmp(c,a)) || cn!=an || cs!=as ||
         (expect>=0 && ((!!a)!=expect || (!a && (an!=n || as!=s))))) {
         fprintf(stderr,"DIFF q=%d key=%d C=(%s,%d,%d) ASM=(%s,%d,%d)\n",

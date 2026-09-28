@@ -5188,3 +5188,13 @@ parse2 FOPS 表格化（本session直改主树，非cdx，2026-09-28）：`exec/
 parse2 function/global/local_control 去重（本session直改主树，TDD验证，2026-09-28）：三个函数原来各自内嵌一段完全同构的"读*-fresh.tsv绑定fresh continuation、再读*-sections.tsv调structured_control"循环，只是tsv前缀和绑定内容不同。抽成共享`_namespace_control(namespace, section, warnings, bindings)`，三处改为薄封装。验证：改动前后`python3 exec/parse2/gen2.py OUT.json`产出sha256一致(5baca634...)；`./tests/gate.sh --suite exec-e3self`及`--suite exec-driver-language-1 --suite exec-driver-language-2`（25个host/ASM网络O0/O2及native探针，含条件拒绝用例）均rc=0，无回归。这是真的、经门禁验证的去重，不是本session前一次仅靠json哈希核对的极小改动。ordinary_control因为多带sequences/word_state前缀与返回值，结构不完全同构，本次未合并，留给理解更深或cdx确认后再做。
 
 本轮验证：docs 生成表与字节账核对通过；修改模型归属字节的副本与错误产物均被拒绝。`modelbenchcheck` 的正常、非零（先输出正确镜像再 exit2）、缺失/空/不同镜像、候选/参考超时、参考非零、显式超严性能阈值及输入输出别名故障全部按预期判定。实际 9a0ae470 候选 fib 五次全新进程编译完整镜像均同参考，中位约0.655秒；自身源码一次约18.967秒，完整镜像同参考。此为探针验证，不以单次 self 或本轮环境与旧中位数差额宣称优化收益。功能、性能工具与文档域修改，未改产品源码/模型，未重跑或冒称新172项全套通过；新增 `modelbenchcheck` 已入队列，后续候选按新清单执行。
+
+
+### 初心与论文对齐审阅（2026-09-28，进行中）
+
+只读运行边界审计未发现执行核隐藏 C 语法、类型、ABI 或编码选择谓词：网络输出下一状态与动作序列，通用核执行算术/存储/字节操作，驱动保留 CLI、文件/资源路径、OS 加载与运行。初心在运行路径上成立，但动作模板仍是程序规则信息，声明化不使信息或总字节自动减少；离线 Python 仍有动态绑定。T1 与有限行为测试不能推出 T2/T3。下一优化先验有序阈值早停（cc-unisacc 已授权占 core/asm 文件域），再按实测考虑解码模型复用或批量 span，暂不并行改三种运行机制。
+
+审阅发现具体 TDD 缺口：运行受 UNISA_MAXSTEPS、UNISA_CONTAINER、UNISA_KERNEL 影响，但滚动队列原身份没有这些值/外部文件字节，性能探针也没有记录外部包/内核身份。本轮补身份和失效控制，避免同一 .com 哈希测到另一份包或改预算后复用旧成功结果。旧经典 bench.sh 仍忽略被测命令 rc，且不验证完整镜像，本轮不把它当当前模型性能证据；实际模型用新有界探针。论文中“E1 尚在实验”“E3 查表原型”“当前产品结构工作留经典代码”等已滞后，下一修改保留历史18表/发布版测量，另列32网络本地候选和实测边界。
+
+模型路线提速一（本session，主人"每次都卡一下"反馈，2026-09-28）：实测 `unisacc.com -run examples/apps/calc.c` 模型路线约0.55秒、经典路线约0.035秒，输出相同；主因是 `#include <stdio.h>`（单独0.41秒）。分段计时：e2 0.023秒、e1约0.002秒、**e3约0.27秒**、lower+elf约0.13秒。插桩（stdio.h单独程序）：e3 3.29M步共扫描602M个阈值单元（平均183/步，71%激活），lower 2.44M步扫描61M单元（仅9%激活）——`core_transition`每步线性扫完一个状态的全部H单元，是运行时间的主体。
+决定：net.py按升序发阈值、run.c装载时已强制严格升序（`bad network unit`），故激活单元必为前缀。C核心与两份asm内核改为"二分查找前缀长度（asm用csel/cmov无分支）+只累加这些权重"：同一网络同一求和、不物化任何答案表或前缀和，结果逐位相同。验证：transitioncheck新增独立全和oracle（按net.py定义逐单元求和，不早停），arm64/x86_64各537,620项通过；把比较改成gt的变异体在两架构均被抓住（rc=1）；exec-core/exec-asm/exec-asmx86/exec-net全绿（六个完整镜像同参考、五个native同）。宿主cc链接asm内核实测：stdio.h单独0.302→0.170秒，calc.c 0.407→0.236秒，exeinfo.c 0.672→0.393秒（约-42%），输出逐字节相同。附带发现：线性早停版在cc -O2下反而更慢（破坏自动向量化），二分+定长求和两种编译方式都更快，故C核心也用二分。剩余：e3平均激活单元仍约130/步，进一步需减少单元数（例如构造期调整token/寄存器键的编码顺序）——属于模型构造改动，另议。

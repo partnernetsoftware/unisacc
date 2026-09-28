@@ -1,6 +1,8 @@
 /* Handwritten AArch64 implementation of core_transition. No calls, stack,
-   model-specific constants or precomputed answer rows. Network mode evaluates
-   every H(key-threshold) and accumulates signed weights in 64 bits.
+   model-specific constants or precomputed answer rows. Thresholds ascend (the
+   loader rejects any other bank), so the active units H(key-threshold)=1 are a
+   prefix: a branchless binary search finds its length, then exactly those
+   signed weights accumulate in 64 bits.
    x0=model, w1=state, w2=key, x3=&next, x4=&sequence; x0=error or NULL.
    Only caller-saved x0-x17 are touched; x18 is never used. */
 #include "layout.h"
@@ -46,17 +48,26 @@ CNAME(core_transition):
     ldr x12,[x5,x1,lsl #3]
     ldr x5,[x0,#CM_SEQ]
     ldr x13,[x5,x1,lsl #3]
-    cbz w8,Lbounds
-Lunit:
-    ldr w14,[x11],#4
+    mov w6,#0
+Lsearch:
+    cmp w6,w8
+    b.hs Lsum
+    add w7,w6,w8
+    lsr w7,w7,#1
+    ldr w14,[x11,w7,uxtw #2]
+    add w15,w7,#1
     cmp w2,w14
+    csel w6,w15,w6,ge
+    csel w8,w8,w7,ge
+    b Lsearch
+Lsum:
+    cbz w6,Lbounds
+Lunit:
     ldrsw x15,[x12],#4
     ldrsw x16,[x13],#4
-    csel x15,x15,xzr,ge
-    csel x16,x16,xzr,ge
     add x9,x9,x15
     add x10,x10,x16
-    subs w8,w8,#1
+    subs w6,w6,#1
     b.ne Lunit
 Lbounds:
     cmn x9,#1

@@ -48,10 +48,11 @@ const char *CORE_TRANSITION_NAME(const CoreModel *m, int q, int key, int *nx, in
     if (m->isnet) {
         if (key < m->lo[q] || key > m->hi[q]) return "observation outside network domain";
         I n = m->base_next[q], s = m->base_seq[q];
-        for (int j = 0; j < m->count[q]; j++) {
-            int h = key >= m->keys[q][j];
-            n += (I)m->next[q][j] * h; s += (I)m->seq[q][j] * h;
-        }
+        /* Thresholds ascend (the loader rejects any other bank): the active
+           units are a prefix. Find its length, then add exactly those weights. */
+        const int *k = m->keys[q]; int cut = 0, end = m->count[q];
+        while (cut < end) { int mid = (cut + end) >> 1; if (key >= k[mid]) cut = mid + 1; else end = mid; }
+        for (int j = 0; j < cut; j++) { n += (I)m->next[q][j]; s += (I)m->seq[q][j]; }
         if (n < -1 || n >= m->ns || s < 0 || s >= m->nq) return "invalid network output";
         *nx = (int)n; *sq = (int)s;
     } else if (m->mode[q] == 1) {
