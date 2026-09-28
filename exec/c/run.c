@@ -33,6 +33,7 @@
 
 static void die(const char *m) { fprintf(stderr, "run: %s\n", m); exit(2); }
 #include "codec.h"
+#include "packagefooter.h"
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
 
 /* File operations are OS adaptation, not compiler actions. The native
@@ -268,14 +269,12 @@ static char *pword(void) {
 static void package(const char *path) {
     PFILE = readfile(path, &PN, 0); PB = PFILE;
     if (PN < 2 || PB[0] != 'P' || PB[1] != ' ') {
-        if (PN < 16 || memcmp(PB+PN-16, "UNIPKG1\n", 8)) die("missing package footer");
-        I len = 0;
-        for (int i = 7; i >= 0; i--) {
-            len = len*256 + PB[PN-8+i];
-            if (len > PN-16) die("bad package footer extent");
-        }
-        if (!len) die("empty embedded package");
-        PB += PN-16-(int)len; PN = (int)len;
+        PackageFooter footer;
+        /* Signature records follow the package footer in Authenticode APEs.
+           Locate only within the validated file/certificate extents. This is
+           format handling, not a signature trust decision. */
+        if (!packagefooter_locate_bytes(PFILE, PN, &footer)) die("bad or missing package footer");
+        PB += (int)footer.package_offset; PN = (int)footer.package_length;
     }
     LBIN = 0; LB = PB; LN = PN; LP = 0;
     ltag('P'); int version = lint();
