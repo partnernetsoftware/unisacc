@@ -59,9 +59,23 @@ def check(paths):
   assert b'load64 r2, [r6+80]' in tape and b'store64 [r7+112], r2' in tape
   assert b'.bss __rv_host_exchange9 16\n' in tape and b'.lea r1, __rv_host_exchange9' in tape
   assert b'  imm r1, 320255973501902\n' in tape # dispatcher, not raw target
+  floatbody=tape.split(b'float9:\n',1)[1].split(b'integers17:\n',1)[0]
+  assert b'ftod' not in floatbody, 'fixed ninth float was default-promoted to double'
   assert execute(combined(binding('host_exchange9',PAIR,[I,D,F,PTR,PAIR,I,D,I,L])))[0]=='reject'
   assert execute(combined(binding('host_exchange9',I,[I,D,F,PTR,PAIR,I,D,I,I])))[0]=='reject'
   assert execute(None)[0]=='reject'
+  # Fixed typed calls cannot omit or invent stack slots. These controls compile
+  # only, so a missing slot never reaches a native target.
+  for call in ('host_float9(a,b,c,d,e,f,g,h)', 'host_float9(a,b,c,d,e,f,g,h,i,i)'):
+   src.write_text(SOURCE.replace('host_float9(a,b,c,d,e,f,g,h,i)',call))
+   p=run([dump,'-dump-tokens',src]);assert p.returncode==0,p.stderr
+   assert execute(raw,p.stdout)[0]=='reject',('wrong fixed typed argc accepted',call)
+  # Source definitions win typed registry candidates, including true varargs.
+  src.write_text('long host_integers17(long a,...){return a;} long caller(void){return host_integers17(42,1,2);}')
+  p=run([dump,'-dump-tokens',src]);assert p.returncode==0,p.stderr
+  vv,oo=execute(binding('host_integers17',L,[L]*17),p.stdout)
+  assert vv=='accept', 'typed candidate overrode source-defined variadic signature'
+  tt=struct.unpack_from('<Q',oo,9)[0];assert b'.librarycall' not in oo[25:25+tt]
   # A later prototype/definition must not replace another signature's epoch.
   src.write_text(SOURCE+'long unrelated(long q){return q;}\n')
   p=run([dump,'-dump-tokens',src]);assert p.returncode==0

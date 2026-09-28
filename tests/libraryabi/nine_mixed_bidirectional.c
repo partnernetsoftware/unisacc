@@ -14,7 +14,8 @@ static Exchange callback9;
 static struct Pair host_exchange9(int a,double b,float c,int *p,struct Pair s,int e,double f,int g,int h){if(callback9)return callback9(a,b,c,p,s,e,f,g,h);struct Pair r={b+c+s.d+f,a+*p+s.n+e+g+h};s.d=999;s.n=999;return r;}
 static double host_double9(double a,double b,double c,double d,double e,double f,double g,double h,double i){return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9;}
 static float host_float9(float a,float b,float c,float d,float e,float f,float g,float h,float i){return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9;}
-static long long host_integers17(long long a,long long b,long long c,long long d,long long e,long long f,long long g,long long h,long long i,long long j,long long k,long long l,long long m,long long n,long long o,long long p,long long q){return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9+j*10+k*11+l*12+m*13+n*14+o*15+p*16+q*17;}
+static int native_integer_calls;
+static long long host_integers17(long long a,long long b,long long c,long long d,long long e,long long f,long long g,long long h,long long i,long long j,long long k,long long l,long long m,long long n,long long o,long long p,long long q){native_integer_calls++;return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9+j*10+k*11+l*12+m*13+n*14+o*15+p*16+q*17;}
 static int bind(us_context *c,const char *dir,const char *name,void *fn){char path[2048];unsigned char bytes[8192];snprintf(path,sizeof path,"%s/%s.sig",dir,name);FILE *f=fopen(path,"rb");if(!f)return 1;size_t n=fread(bytes,1,sizeof bytes,f);int bad=ferror(f)||!feof(f);fclose(f);return bad||us_add_symbol_typed(c,name,fn,bytes,n);}
 static const char source[]=
 "struct Pair { double d; int n; };"
@@ -28,6 +29,23 @@ static const char source[]=
 "float float9(float a,float b,float c,float d,float e,float f,float g,float h,float i){return host_float9(a,b,c,d,e,f,g,h,i);}"
 "long integers17(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long n,long o,long p,long q){return host_integers17(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q);}";
 static int fail(us_context *c,const char *step){fprintf(stderr,"%s: %s\n",step,us_error(c));us_free(c);return 1;}
+static int bad_count(const char *package,const char *target,const char *dir,int opt,int extra){
+ const char *needle="return host_float9(a,b,c,d,e,f,g,h,i);",*at=strstr(source,needle);
+ const char *replace=extra?"return host_float9(a,b,c,d,e,f,g,h,i,i);":"return host_float9(a,b,c,d,e,f,g,h);";
+ if(!at)return 1;char wrong[sizeof source+16];size_t prefix=(size_t)(at-source);
+ memcpy(wrong,source,prefix);strcpy(wrong+prefix,replace);strcat(wrong,at+strlen(needle));
+ us_context *c=us_new(package);if(!c)return 1;
+ if(bind(c,dir,"host_exchange9",(void*)host_exchange9)||bind(c,dir,"host_double9",(void*)host_double9)||bind(c,dir,"host_float9",(void*)host_float9)||bind(c,dir,"host_integers17",(void*)host_integers17)||us_add_source(c,"bad-count.c",wrong))return fail(c,"bad count setup");
+ int rc=us_compile(c,target,opt);if(rc!=1||!strstr(us_error(c),"library import binding or signature")){fprintf(stderr,"fixed typed %s argument call incorrectly handled rc=%d: %s\n",extra?"extra":"missing",rc,us_error(c));us_free(c);return 1;}
+ us_free(c);return 0; /* Invalid source is never executed. */
+}
+static int source_shadow(const char *package,const char *target,const char *dir,int opt){
+ us_context *c=us_new(package);if(!c)return 1;
+ const char *text="long host_integers17(long a,...){return a;} long caller(void){return host_integers17(42,1,2);}";
+ if(bind(c,dir,"host_integers17",(void*)host_integers17)||us_add_source(c,"source-shadow.c",text)||us_compile(c,target,opt)||us_relocate(c))return fail(c,"typed source shadow compile");
+ long long (*caller)(void)=(long long(*)(void))us_sym(c,"caller");if(!caller)return fail(c,"typed source shadow export");
+ int before=native_integer_calls;if(caller()!=42||native_integer_calls!=before)return fail(c,"typed source did not win");us_free(c);return 0;
+}
 int main(int argc,char **argv){
  if(argc!=4)return 2;
  for(int opt=0;opt<3;opt++){
@@ -51,11 +69,14 @@ int main(int argc,char **argv){
      guarded.before!=UINT64_C(0x0123456789abcdef)||guarded.after!=UINT64_C(0xfedcba9876543210))return fail(c,"nine mixed/by-value/canary");
    struct Pair next=exchange(-2,-0.5,-1.25f,&n,input,-7,2.25,-8,-14);
    if(next.d!=6.0||next.n!=-21||guarded.value.d!=17.0||guarded.value.n!=40)return fail(c,"independent return copies");
-   if(d9(1,2,3,4,5,6,7,8,9)!=285.0||f9(1,2,3,4,5,6,7,8,9)!=285.0f||
-      i17(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17)!=1785)return fail(c,"complete scalar argument list");
+   double dr=d9(1,2,3,4,5,6,7,8,9);float fr=f9(1,2,3,4,5,6,7,8,9);
+   long long ir=i17(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17);
+   if(dr!=285.0||fr!=285.0f||ir!=1785){fprintf(stderr,"actual scalar results: double %.17g, float %.9g, int17 %lld\n",dr,(double)fr,ir);return fail(c,"complete scalar argument list");}
    int status=-1;if(us_call_status(c,&status))return fail(c,"call status");
   }
   callback9=NULL;
+  if(source_shadow(argv[1],argv[2],argv[3],opt))return fail(c,"typed source shadow");
+  if(bad_count(argv[1],argv[2],argv[3],opt,0)||bad_count(argv[1],argv[2],argv[3],opt,1))return fail(c,"fixed argument count reject");
   if(!us_add_symbol_typed(c,"bad",(void*)host_exchange9,"bad",3))return fail(c,"malformed registration accepted");
   int again=4;struct Pair in={5.5,6},out=exchange(1,2.5,3.25f,&again,in,7,5.75,8,14);
   if(out.d!=17.0||out.n!=40)return fail(c,"failed registration invalidated export");

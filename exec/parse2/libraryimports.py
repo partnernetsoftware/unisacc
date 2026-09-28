@@ -75,6 +75,27 @@ def install(E,P,b,start,integers):
     P('LI.prototypesignature').a(('LDX','li_protosig','li_protoid',b['FPS_FN']),('LDI','li_protoone',1),('STX','li_protoid',E.FND,'li_protoone'),('LDX','li_protoret','li_protosig',b['FPS_RD']),('STX','li_protoid',E.FRD,'li_protoret'),('LDX','li_protoret','li_protosig',b['FPS_RB']),('STX','li_protoid',E.FRB,'li_protoret'),('LDX','li_protocount','li_protosig',b['FPS_COUNT']),('LDI','li_protomode',0)).branch({2:'LI.prototypestack'},'LI.prototypeput',[('CMPI','li_protocount',6)])
     P('LI.prototypestack').a(('LDI','li_protomode',1)).goto('LI.prototypeput')
     P('LI.prototypeput').a(('STX','li_protoid',E.VAR,'li_protomode')).goto('LI.original.prototype')
+    # Fixed typed imports query the complete prototype pool for conversion.
+    # The legacy PDB first-eight query default-promotes an absent ninth float
+    # to double, changing its raw slot. Reuse the existing conversion machine
+    # with the real declaration instead of creating a second classifier.
+    from libraryexports import PARAMMARK, PARAMDEPTH, PARAMBASE, SIGEPOCH, SEEN as SOURCEDEFS
+    g.st['LI.original.argumentquery']=g.st.pop('CL.namedquery');g.labels.add('LI.original.argumentquery')
+    P('CL.namedquery').a(('LDX','li_argsource','fid',SOURCEDEFS)).branch({1:'LI.original.argumentquery'},'LI.argumentbinding',[('CMPI','li_argsource',1)])
+    P('LI.argumentbinding').a(('LDX','li_argbinding','fid',BYNAME)).branch({1:'LI.original.argumentquery'},'LI.argumentformat',[('CMPI','li_argbinding',0)])
+    P('LI.argumentformat').a(('ALUI','sub','li_argbinding','li_argbinding',1),('LDX','li_argformat','li_argbinding',FORMAT)).branch({1:'LI.argumenttyped'},'LI.original.argumentquery',[('CMPI','li_argformat',1)])
+    P('LI.argumenttyped').a(('LDX','li_argsig','fid',b['FPS_FN']),('LDX','li_argcount','li_argsig',b['FPS_COUNT'])).branch({0:'LI.argumentpool'},'LI.fail',[('CMP','na','li_argcount')])
+    P('LI.argumentpool').a(('ALUI','mul','li_argindex','li_argsig',1024),('ALU','add','li_argindex','li_argindex','na'),('LDX','li_argmark','li_argindex',PARAMMARK),('LDX','li_argepoch','li_argsig',SIGEPOCH)).branch({1:'LI.argumenttype'},'LI.fail',[('CMP','li_argmark','li_argepoch')])
+    P('LI.argumenttype').a(('LDX','t','li_argindex',PARAMDEPTH),('ALUI','mul','t','t',4096),('LDX','li_argbase','li_argindex',PARAMBASE),('ALU','add','t','t','li_argbase'),('CMPI','t',0)).goto('CL.signature')
+    # Every fixed typed native call supplies exactly the declared slots. A
+    # deficit cannot be repaired by a wrapper reading past the caller's frame.
+    from libraryexports import SEEN as SOURCEDEFS, VARIADIC as SOURCEVAR
+    g.st['LI.original.callcomplete']=g.st.pop('CL.done');g.labels.add('LI.original.callcomplete')
+    P('CL.done').a(('LDX','li_completebinding','fid',BYNAME)).branch({1:'LI.original.callcomplete'},'LI.completeformat',[('CMPI','li_completebinding',0)])
+    P('LI.completeformat').a(('ALUI','sub','li_completebinding','li_completebinding',1),('LDX','li_completeformat','li_completebinding',FORMAT)).branch({1:'LI.completefixed'},'LI.original.callcomplete',[('CMPI','li_completeformat',1)])
+    P('LI.completefixed').a(('LDX','li_completesource','fid',SOURCEDEFS)).branch({1:'LI.original.callcomplete'},'LI.completesignature',[('CMPI','li_completesource',1)])
+    P('LI.completesignature').a(('LDX','li_completesig','fid',b['FPS_FN']),('LDX','li_completevar','li_completesig',SOURCEVAR)).branch({1:'LI.original.callcomplete'},'LI.completecount',[('CMPI','li_completevar',1)])
+    P('LI.completecount').a(('LDX','li_completecount','li_completesig',b['FPS_COUNT'])).branch({1:'LI.original.callcomplete'},'LI.fail',[('CMP','na','li_completecount')])
     # Aggregate native call expressions return their stable result-buffer address.
     # The old aggregate return branch accepts only a local lvalue; preserve it
     # for every other input and use normal EXPR/COPYSTRUCT for this declared call.

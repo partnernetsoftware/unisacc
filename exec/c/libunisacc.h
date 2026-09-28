@@ -17,9 +17,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* R10 development API: model compilation, host-native relocation and callable
-   fixed integer/pointer/void exports. Symbol injection, wider ABIs and full
-   platform qualification remain under development. One caller per context;
+/* R10 development API: model compilation, host-native relocation, declared
+   native bindings and fixed scalar/plain-aggregate exports/imports. Typed
+   variadic and special layouts plus full platform qualification remain under
+   development. One caller per context;
    different contexts may execute concurrently. */
 typedef struct us_context us_context;
 /* ABI facts, not parser-local IDs. kind: 0 void, 1 integer, 2 data pointer,
