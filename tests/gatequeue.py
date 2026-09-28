@@ -2,11 +2,12 @@
 """Rolling parallel gate, bounded windows, durable exact per-suite results.
 
 Run through tests/term.sh. Exit 75 means pending work: invoke the SAME command
-again. No test result is cached across an input change. Model preparation may
+again. Audited input closures permit per-suite reuse; unknown suites retain global
+input invalidation. Model preparation may
 be shared separately. Each window is <=55 s, leaving cleanup inside the 60 s
 outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 """
-import argparse, fcntl, hashlib, json, os, pathlib, shutil, stat, subprocess, sys, time
+import argparse, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
@@ -64,20 +65,84 @@ def executable_inputs(settings):
     return inputs
 
 def fingerprint(jobs):
+    """One tree inventory and one hash per file, shared by all suite stamps.
+
+    Declarations are audited code snapshots, not automatic dependency discovery.
+    Changed code or an unrecognised command loses selective reuse. Missing
+    declared files are identities too: a prior success never covers absence.
+    """
     settings = execution_settings()
-    h = hashlib.sha256(json.dumps([jobs, settings, executable_inputs(settings)], sort_keys=True).encode())
+    executables = executable_inputs(settings)
+    files = {}
+    def digest(name):
+        if name not in files:
+            p = pathlib.Path(name)
+            try:
+                mode = p.stat().st_mode
+                if not stat.S_ISREG(mode): raise SystemExit('queue nonregular input: '+name)
+                h = hashlib.sha256()
+                with p.open('rb') as f:
+                    for block in iter(lambda:f.read(1024*1024), b''): h.update(block)
+                files[name] = [mode, h.hexdigest()]
+            except FileNotFoundError:
+                files[name] = ['missing']
+        return files[name]
+    declaration = 'tests/gatedeps.json'
+    manifest = json.loads(pathlib.Path(declaration).read_text()) if digest(declaration) != ['missing'] else {}
+    assert not manifest or manifest['version'] == 1, 'unsupported gate dependency declaration'
     raw = subprocess.check_output(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard',
                                   '--', 'src', 'exec', 'tests', 'include', 'kernel', 'weights', 'unisa', 'examples',
                                   'unisacc.c', 'README.md', 'ARCHITECTURE.md', 'AGENTS.md',
                                   'prd.tree.md', 'prd.map.md', 'research/referee.tsv', 'iterate/kernel/typekw.tsv'])
     names = sorted(set(raw.decode().split('\0')) - {''})
-    if pathlib.Path('unisacc.com').is_file(): names.append('unisacc.com')
-    for name in names:
-        p = pathlib.Path(name)
-        h.update(name.encode() + b'\0' + str(p.stat().st_mode).encode())
-        with p.open('rb') as f:
-            for b in iter(lambda: f.read(1024*1024), b''): h.update(b)
-    return h.hexdigest()
+    if digest('unisacc.com') != ['missing']: names.append('unisacc.com')
+    tools = {}
+    for name in ('python3', 'sh', 'bash', 'cc', 'openssl', 'grep', 'wc', 'tr', 'uname', 'id', 'env', '/bin/ps', '/usr/bin/openssl'):
+        path = shutil.which(name)
+        tools[name] = [path, digest(path)] if path else ['missing']
+    for key in ('CC', 'EXEC_CC'):
+        if settings.get(key):
+            path = shutil.which(settings[key])
+            tools[key] = [path, digest(path)] if path else ['missing', settings[key]]
+    common = [str(ROOT), dict(os.environ), platform.platform(), platform.machine(), sys.version,
+              str(pathlib.Path(sys.executable).resolve()), tools,
+              {n:digest(n) for n in ('tests/gatequeue.py', 'tests/gate.sh', 'tests/bound.py', declaration)}]
+    def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    global_inputs = None
+    result = {}
+    for name, command in jobs.items():
+        entry = manifest.get('suites', {}).get(name)
+        audited = entry is not None and command == entry['command']
+        if audited:
+            guards = entry['guards']
+            audited = bool(guards) and all(digest(n)[-1] == sha for n,sha in guards.items())
+            # Added Python modules must also lose the reviewed import closure.
+            guarded = set(guards)
+            audited = audited and all(n in guarded for n in names
+                if n.endswith('.py') and any(n.startswith(prefix+'/') for prefix in entry.get('code_trees', [])))
+        inputs = []
+        if entry:
+            inputs = sorted(set(entry['files']) | {n for n in names
+                if any(n.startswith(prefix+'/') for prefix in entry.get('trees', []))})
+        if audited:
+            result[name] = stamp([common, command, {n:digest(n) for n in inputs}])
+        else:
+            if global_inputs is None: global_inputs = {n:digest(n) for n in names}
+            result[name] = stamp([common, jobs, settings, executables, global_inputs,
+                                  {n:digest(n) for n in inputs}])
+    return result
+
+def resume(data, stamps, jobs, exclusive):
+    if data['jobs'] != jobs or data.get('exclusive', []) != sorted(exclusive):
+        raise SystemExit('queue input changed: selected jobs/options require a new state directory')
+    old = data['stamp']
+    if not isinstance(stamps, dict) or not isinstance(old, dict):
+        if old != stamps: raise SystemExit('queue input changed: use a new state directory')
+        return
+    invalid = [n for n in jobs if old.get(n) != stamps[n]]
+    for n in invalid: data['results'].pop(n, None)
+    if invalid: print('INVALIDATE', ','.join(invalid), flush=True)
+    data['stamp'] = stamps
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -105,8 +170,7 @@ def main():
     lock = (state/'lock').open('a'); fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     stamp = fingerprint(jobs); path = state/'results.json'
     data = json.loads(path.read_text()) if path.is_file() else {'stamp':stamp, 'jobs':jobs, 'exclusive':sorted(exclusive), 'results':{}}
-    if data['stamp'] != stamp or data['jobs'] != jobs or data.get('exclusive', []) != sorted(exclusive):
-        raise SystemExit('queue input changed: use a new state directory; old results are not reused')
+    resume(data, stamp, jobs, exclusive)
     atomic(path, data)
     # Classic and network drivers, and different concurrency, have different costs.
     profile = json.dumps([str(ROOT), execution_settings(), sorted(exclusive)], sort_keys=True).encode()
@@ -161,7 +225,14 @@ def main():
     if args.com:
         subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
                         os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
-    if fingerprint(jobs) != stamp: raise SystemExit('inputs changed during queue: results invalid')
+    after = fingerprint(jobs)
+    if after != stamp:
+        if isinstance(after, dict):
+            for n in jobs:
+                if after[n] != stamp[n]: data['results'].pop(n, None)
+        else: data['results'].clear()
+        atomic(path, data)
+        raise SystemExit('inputs changed during queue: results invalid')
     bad = [n for n,r in data['results'].items() if r['rc'] != 0]
     missing = set(jobs)-data['results'].keys()
     print('queue: %d/%d completed, %d failed, %d pending, window %.2fs; logs %s' %

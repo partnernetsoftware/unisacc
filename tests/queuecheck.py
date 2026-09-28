@@ -86,10 +86,7 @@ with tempfile.TemporaryDirectory() as td:
             before=marker.stat().st_mtime_ns
             assert run('fuel')==0 and marker.stat().st_mtime_ns==before
         with patch.dict(os.environ,{'UNISA_MAXSTEPS':'3'}):
-            try: run('fuel')
-            except SystemExit as e: assert 'input changed' in str(e)
-            else: raise AssertionError('changed fuel reused completed result')
-            assert marker.stat().st_mtime_ns==before
+            assert run('fuel')==0 and marker.stat().st_mtime_ns!=before, 'changed fuel reused completed result'
         for key in runtime_selectors[1:]:
             data=t/(key+' data');data.write_bytes(b'model input');data.chmod(0o600)
             alternate=t/(key+' alternate');alternate.write_bytes(data.read_bytes());alternate.chmod(0o600)
@@ -101,15 +98,11 @@ with tempfile.TemporaryDirectory() as td:
                 for change in ('content','mode'):
                     if change=='content': data.write_bytes(b'changed input')
                     else: data.chmod(0o640)
-                    try: run(key)
-                    except SystemExit as e: assert 'input changed' in str(e)
-                    else: raise AssertionError('changed '+key+' '+change+' reused completed result')
-                    assert marker.stat().st_mtime_ns==before
+                    assert run(key)==0 and marker.stat().st_mtime_ns!=before, 'changed '+key+' '+change+' reused completed result'
+                    before=marker.stat().st_mtime_ns
                     data.write_bytes(b'model input');data.chmod(0o600)
             with patch.dict(os.environ,{key:str(alternate)}):
-                try: run(key)
-                except SystemExit as e: assert 'input changed' in str(e)
-                else: raise AssertionError('changed '+key+' path reused completed result')
+                assert run(key)==0 and marker.stat().st_mtime_ns!=before, 'changed '+key+' path reused completed result'
             invalid_fifo=t/(key+' fifo');os.mkfifo(invalid_fifo)
             for invalid in (t,t/'absent-model',invalid_fifo):
                 with patch.dict(os.environ,{key:str(invalid)}):
@@ -124,9 +117,7 @@ with tempfile.TemporaryDirectory() as td:
                 original=candidate.read_bytes();candidate.write_bytes(original)
                 assert run(key)==0 and marker.stat().st_mtime_ns==before, 'same bytes did not resume'
                 candidate.write_bytes(original+b'# changed\n')
-                try: run(key)
-                except SystemExit as e: assert 'input changed' in str(e)
-                else: raise AssertionError('changed '+key+' reused completed result')
+                assert run(key)==0 and marker.stat().st_mtime_ns!=before, 'changed '+key+' reused completed result'
                 candidate.write_bytes(original)
             with patch.dict(os.environ,{key:str(t/'missing')}):
                 try: run('missing-'+key)
@@ -153,6 +144,79 @@ with tempfile.TemporaryDirectory() as td:
             else: raise AssertionError('invalid candidate accepted')
     os.chdir(previous_cwd)
     print('queue: five explicit executable hashes, same-byte resume, changed/missing rejection, spaces/PATH/symlink and command-string controls pass')
+    # Small audited closures, with unknown suites retaining the global fallback.
+    # This private tree is independent of concurrent product source edits.
+    import hashlib, time
+    private=t/'closures';(private/'tests').mkdir(parents=True);(private/'src').mkdir()
+    subprocess.run(['git','init','-q',str(private)],check=True,timeout=5)
+    (private/'tests/bound.py').write_bytes((ROOT/'tests/bound.py').read_bytes())
+    for n in ('docs', 'bound'):
+        (private/('tests/'+n+'check.py')).write_text('pass\n')
+    for n in ('prd.md','README.md','src/product.c'):(private/n).write_text('v1\n')
+    probe={n:[sys.executable,'-c','pass',n] for n in ('docs','bound','product-com')}
+    declarations={'version':1,'suites':{n:{'command':probe[n],
+        'files':['tests/'+n+'check.py']+(['prd.md','README.md'] if n=='docs' else []),
+        'guards':{'tests/'+n+'check.py':hashlib.sha256((private/('tests/'+n+'check.py')).read_bytes()).hexdigest()}}
+        for n in ('docs','bound')}}
+    dep=private/'tests/gatedeps.json';dep.write_text(json.dumps(declarations))
+    with patch.object(q,'ROOT',private), patch.dict(os.environ,environment,clear=True):
+        os.chdir(private)
+        def changed(path, expected):
+            before=q.fingerprint(probe);original=path.read_bytes()
+            path.write_bytes(original+(b' ' if path.suffix=='.json' else b'# edit\n'))
+            after=q.fingerprint(probe)
+            assert {n for n in probe if before[n]!=after[n]}==set(expected), (path, expected)
+            saved={'stamp':before,'jobs':probe,'exclusive':[],'results':{n:{'rc':0} for n in probe}}
+            q.resume(saved,after,probe,set())
+            assert set(saved['results'])==set(probe)-set(expected)
+            path.write_bytes(original)
+        changed(private/'prd.md', ['docs'])
+        # Unknown product's global closure intentionally includes README.
+        changed(private/'README.md', ['docs','product-com'])
+        changed(private/'tests/bound.py', list(probe)) # shared watchdog
+        changed(private/'tests/docscheck.py', ['docs','product-com'])
+        changed(private/'tests/boundcheck.py', ['bound','product-com'])
+        changed(private/'tests/gatedeps.json', list(probe))
+        changed(private/'src/product.c', ['product-com'])
+        base=q.fingerprint(probe)
+        with patch.dict(os.environ,{'UNISA_MAXSTEPS':'123'}):
+            assert all(q.fingerprint(probe)[n]!=base[n] for n in probe), 'environment reused'
+        with patch.object(q.platform,'platform',return_value='different platform'):
+            assert all(q.fingerprint(probe)[n]!=base[n] for n in probe), 'platform reused'
+        removed=private/'README.md';original=removed.read_bytes();removed.unlink()
+        missing=q.fingerprint(probe)
+        assert missing['docs']!=base['docs'], 'missing declared file reused'
+        removed.write_bytes(original)
+        with patch.dict(os.environ,{'MODEL_COM':str(candidate)}):
+            base=q.fingerprint(probe);original=candidate.read_bytes();candidate.write_bytes(original+b'# candidate edit\n')
+            after=q.fingerprint(probe)
+            assert {n for n in probe if base[n]!=after[n]}=={'product-com'}
+            candidate.write_bytes(original)
+        # A checker with a new undeclared input cannot keep its audited closure.
+        check=private/'tests/docscheck.py';original=check.read_bytes();check.write_bytes(original+b'# new dependency\n')
+        changed(private/'src/product.c', ['docs','product-com'])
+        check.write_bytes(original)
+        # An unrecognised invocation likewise falls back, even under a known name.
+        probe['docs']+=["new-option"]
+        changed(private/'src/product.c', ['docs','product-com'])
+        probe['docs'].pop()
+        # Successful runs made while a script changed must not survive the
+        # final identity check (nor reappear after restoring that script).
+        supplied=iter(['before','after'])
+        q.plan=lambda com:{'racing':[sys.executable,'-c','pass']}
+        q.fingerprint=lambda jobs:next(supplied)
+        try: run('racing')
+        except SystemExit as error: assert 'inputs changed during queue' in str(error)
+        else: raise AssertionError('mid-run input change accepted')
+        assert not json.loads((t/'racing/results.json').read_text())['results']
+        q.fingerprint=real_fingerprint
+        started=time.monotonic();snap=q.fingerprint(probe)
+        saved={'stamp':snap,'jobs':probe,'exclusive':[],'results':{n:{'rc':0} for n in probe}}
+        q.resume(saved,q.fingerprint(probe),probe,set())
+        assert len(saved['results'])==3
+        elapsed=time.monotonic()-started
+        print('queue: 3/3 synthetic results reused in %.3fs; docs/checker/candidate/environment/platform/missing/declaration and unreviewed-code/command fallback controls pass'%elapsed)
+    os.chdir(previous_cwd)
     cache=t/'cache';cache.mkdir()
     names={'run','models.pkg','route.tsv'} | {s+'.'+e for s in ('e2','e1','e3','e4','lower','elf') for e in ('json','tbl','net')}
     for n in names: (cache/n).write_bytes(b'fixture')
