@@ -2345,3 +2345,9 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 ### R9 苹果签名资格实际闭环（候选c4993fd0，未发布）
 
 专用临时钥匙串前置搜索表并finally恢复后，Developer ID时间戳及Hardened Runtime签名成功；真实签名app的--version/-run通过，内层c4993fd0封存未变。Apple对app ZIP与DMG均返回Accepted；app及DMG已staple，Gatekeeper对app实际返回Notarized Developer ID。最终DMG评估与签后资产完整平台门禁另记；Windows公司Authenticode尚未运行，不称双签。公证ID/凭据保留私有，公开回执仅来源/完整资产SHA/企业身份/时间戳/信任结果，非发布许可。
+
+### R9 滚动队列跨窗口身份修复（2026-09-28）
+
+实际两个 Terminal 窗口只差 TERM_SESSION_ID，整环境指纹却令189项全部失效并重复执行已通过工具与自举套件。决定：仅剔除这个窗口传输标识，同时从套件实际执行环境剔除它；其余环境完整保留并参与指纹，不凭猜测缩小输入。增加跨窗口复用及真实配置改变失效的回归，旧队列身份因修复重新建立一次。
+
+实际验证：queuecheck全部控制通过；两个真实Terminal窗口对同一bound套件，首轮3.26秒、第二轮0.10秒直接复用，无INVALIDATE/START。TERM_SESSION_ID在子进程确实不存在；改变UNISA_MAXSTEPS仍使结果失效并重跑。未把此前旧身份的189项结果冒充新身份通过。

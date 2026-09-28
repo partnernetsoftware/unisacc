@@ -74,6 +74,23 @@ with tempfile.TemporaryDirectory() as td:
     with patch.object(q,'ROOT',fixture), patch.dict(os.environ,environment,clear=True):
         os.chdir(fixture)
         assert not q.executable_inputs(q.execution_settings()), 'implicit compiler file guessed'
+        # Session transport changes preserve results; jobs see no session ID.
+        session_marker=t/'session-env'
+        jobs={'session':[sys.executable,'-c',
+              'import os,pathlib,sys; assert "TERM_SESSION_ID" not in os.environ; pathlib.Path(sys.argv[1]).write_text("ran")',str(session_marker)]}
+        with patch.dict(os.environ,{'TERM_SESSION_ID':'window-a'}):
+            assert run('session')==0
+            before=session_marker.stat().st_mtime_ns
+            session_stamp=q.fingerprint(jobs)
+        with patch.dict(os.environ,{'TERM_SESSION_ID':'window-b'}):
+            assert q.fingerprint(jobs)==session_stamp
+            assert run('session')==0 and session_marker.stat().st_mtime_ns==before
+        with patch.dict(os.environ,{'TERM_SESSION_ID':'window-b','UNISA_MAXSTEPS':'17'}):
+            assert q.fingerprint(jobs)!=session_stamp
+            assert run('session')==0 and session_marker.stat().st_mtime_ns!=before
+        jobs={'candidate':[sys.executable,'-c','import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("ran")',str(marker)]}
+        print('queue: Terminal session changes reuse results, suites receive no transport ID, real fuel change reruns')
+
         # Fuel and model inputs affect execution even when the compiler is unchanged.
         for key in runtime_selectors:
             assert key not in q.execution_settings()

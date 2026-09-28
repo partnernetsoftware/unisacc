@@ -18,7 +18,7 @@ def atomic(path, obj):
 
 def plan(com):
     out = subprocess.check_output(['sh', 'tests/gate.sh', '--plan'] + (['--com'] if com else []),
-                                  env=dict(os.environ, TERM_SH='0'), timeout=10)
+                                  env=dict(execution_environment(), TERM_SH='0'), timeout=10)
     words = out.decode().split('\0'); assert words.pop() == ''
     jobs = {}; i = 0
     while i < len(words):
@@ -27,6 +27,11 @@ def plan(com):
         jobs[name] = words[i:i+n]; i += n
     assert jobs, 'empty gate plan'
     return jobs
+
+def execution_environment():
+    # Terminal.app supplies a fresh transport identifier for each window.
+    # Suites do not receive it either: reuse hashes the actual execution env.
+    return {k:v for k,v in os.environ.items() if k != 'TERM_SESSION_ID'}
 
 def execution_settings():
     return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
@@ -104,7 +109,7 @@ def fingerprint(jobs):
         if settings.get(key):
             path = shutil.which(settings[key])
             tools[key] = [path, digest(path)] if path else ['missing', settings[key]]
-    common = [str(ROOT), dict(os.environ), platform.platform(), platform.machine(), sys.version,
+    common = [str(ROOT), execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
               {n:digest(n) for n in ('tests/gatequeue.py', 'tests/gate.sh', 'tests/bound.py', declaration)}]
     def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -191,7 +196,7 @@ def main():
                 n = max(alone or fits, key=estimate); pending.remove(n)
                 limit = max(1, int(left)-1)
                 log = (state/(n+'.log')).open('wb')
-                p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT)
+                p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT, env=execution_environment())
                 active[n] = (p, log, time.monotonic(), limit)
                 print('START',n,'limit='+str(limit),flush=True)
                 left = deadline-time.monotonic()
