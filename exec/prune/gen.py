@@ -272,6 +272,8 @@ state('ISSTR').a(('LDI','datakind',2)).goto('DATANAME')
 p=state('NORMALOP');cp(p,'id','savedid');get(p,'op','OP','id');test(p,'op',0,'LABEL','OPCLASS',True)
 
 def construct():
+ from libraryroots import install
+ install(E,P,B,NAMEMAX)
  g.finish()
  return {'start':'START','states':{n:[mode,{str(k):v for k,v in row.items()}] for n,(mode,row) in g.st.items()},'seqs':g.seqs}
 

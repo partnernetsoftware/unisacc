@@ -115,13 +115,14 @@ def install(E, arch="x86_64", os_="lnx"):
     # Wrapper around init, for the eight numeric spellings and syscall ids.
     p=P('C.prelude')
     for i in range(8):p.a(('SBCLR',),('SBOUT',48+i),('SBINTERN','inum'+str(i)))
-    for op in abi:p.a(('SBCLR',),[('SBOUT',c) for c in op.encode()],('SBINTERN','sysid_'+op))
+    for op in dict.fromkeys([*abi, 'exit_group']):p.a(('SBCLR',),[('SBOUT',c) for c in op.encode()],('SBINTERN','sysid_'+op))
     from modelinput import u64
     u64(E,'C.runargc',b'\0process/argc','run_argc','run_mode','C.fail')
     u64(E,'C.runargv',b'\0process/argv','run_argv','run_hasargv','C.fail')
     # Prelude controls consume the existing dynamic ABI-id init sequence.
     prelude_bindings = {'label'+str(i): P('C').fresh(kind)
                         for i, kind in enumerate('rbrbrr')}
+    prelude_bindings['entry'] = 'C.prelude.base'
     prep_sequences = {'text'+str(i): E.O(text) for i, text in enumerate((
         '@argc ', '\n@argv ', '\n', 'setmem ', ', ', 'mov '+regmap['r0']+', ',
         ', '+regmap['r6']+'\nsetmem ', ', '+regmap['r7']+'\n', 'setreg '+regmap['r6']+', mem ',
@@ -152,7 +153,7 @@ def install(E, arch="x86_64", os_="lnx"):
                       sequences=sequences or {}, section=section)
     selected = [(op,f) for op,f in abi.items()
                 if f[0]!='none' or (os_=='win' and WINAPI.get(op) is not None and f[12]!='none')]
-    entry = 'SYSCALL'
+    entry = 'SYSCALL.base'
     for op,f in selected:
         nxt = 'SC.next.'+op
         put('dispatch', dict(entry=entry, branch=P(entry).fresh('b'),
@@ -202,5 +203,7 @@ def install(E, arch="x86_64", os_="lnx"):
             dict(labels, entry='SC.'+op+'.gate', WIN_HSTD=WIN_HSTD,
                  WIN_WRITTEN=WIN_WRITTEN, WIN_SAVE=WIN_SAVE, zero=0, eight=8),
             {name: E.O(value) for name,value in facts.items()})
+    from libraryexit import install as install_libraryexit
+    install_libraryexit(E, os_, regmap, SYSA)
     install_rules(g, Path(__file__).parent, 'code-shell',
                   sequences={'reject': E.rej('not covered: '+os_+'/'+arch+' lowering')}, section='exit')

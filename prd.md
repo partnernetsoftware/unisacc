@@ -2613,3 +2613,18 @@ E3库请求输出USLTAPE1外层（tape_len/meta_len LE64、原tape、USLSIG1元�
 
 ### R10 脚本映射资源schema确认（2026-09-28）
 `library/mmap`、`library/munmap`各为独立LE64地址资源；缺失/零保留原syscall，坏长度拒绝，Windows非零拒绝。模型mmap仅接已有六参数SYSA形态，不伪造普通三参数.sys的未定义机器寄存器；munmap使用原mode0/1已有两参数来源。hostcall返回r0回原结果路径。Linux桥门控允许三种库callback资源任一合法非零，仍不开放普通C hostcall；编码器适配与lower一起验收。
+
+### R10 映射回调联动首差（2026-09-29）
+真实malloc/free运行发现lower独立对拍漏过一个协议错误：munmap后四参数清零被输出为setmem ADDRESS, 0，但编码器只接受源寄存器，故完整路径拒绝（未误编译）。修复由δ先setreg ISA scratch(x16/r11), imm0，再setmem各槽该scratch；不改执行核、不破坏tape寄存器。门禁补lower→encoder联动，不能只凭lower表/网络输出一致宣布宿主执行已绿。宿主符号格式截断/重复/越界与guest映射分裂/释放在普通host及ASan+UBSan下已通过。
+
+### R10 企业签名就绪审计（2026-09-29）
+只读外部回读已证：unisacc专属SP、唯一profile级Signer授权、准确immutable OIDC联邦credential；Azure profile Active；GitHub release-signing secret/variable名称齐全、verified=true、1 reviewer/main-only。当前Environment允许自审核及admin bypass，记录现状不擅改。actionlint及三份canonical inspector通过；当前根产物仍为0.0.9 VERSIONINFO且未签名。签名政策仍deferred、最新main CI未绿；最终0.0.10候选同SHA CI成功和资格封存之前不dispatch付费签名。此前“未外部读回”限制已被本轮只读实证替代，不等于企业签名已完成。签后Windows信任/Defender/六目标及绑定签后载荷的Apple封装仍需验收。
+
+### R10 回调联动第二项门禁缺口（2026-09-29）
+ARM已拒绝setmem literal0；x86当前表/网络却把字面0当reg index0(rax)，而参考TIns协议拒绝。这是既有类型门禁缺口，不代表literal0合法。补x86 address setmem寄存器类型guard，并保留非法字面反例，两阶段联动必须验证实际类型，不只整数解析值。
+
+### R10 库导出根保留（2026-09-29）
+宿主仅挂完整USLSIG1元数据为`library/signatures`资源；prune δ解析其长度/枚举/descriptor/重复名，再将external且defined的实际函数label加入根集合。即使当前FFI签名unsupported也保留公有函数，不能因main未调用就删除库导出。内部死函数仍按原闭包去除。资源缺失维持旧输出，畸形及公有name无真实label明确拒绝，不进入普通FALLBACK透传。决策仍在模型，不让C按linkage筛名字或跳过prune。
+
+### R10 库签名、导出根与映射联动收片（2026-09-29）
+E3可选签名封装已验：默认固定314项全部equal，9类descriptor/坏资源/network-table全域通过。prune追加库公有根已验：24原始源码配置、5手写fixture及366坏metadata；宿主挂完整metadata，不筛公有名字。映射回调修复后，真实macOS arm64 main(argc=2)=39，malloc/free同context20轮仅一个池，next compile清空、context free后系统mach_vm_region确认地址不再映射。宿主解析/生命周期专项普通及ASan+UBSan通过。原先mincore错误地用rc判地址是否仍存在，已换为实际region边界查询，不能把该测试误判记作库泄漏。签名、函数调用ABI桥和公有根是可复用机制，但us_sym/host注入/完整签名、1000次及六平台库尚未全部闭合。

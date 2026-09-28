@@ -1,0 +1,60 @@
+"""Library public roots from complete USLSIG1 metadata, interpreted in delta."""
+SEEN, ROOT = (i<<40 for i in (80,81))
+def install(E,P,B,limit):
+    from pathlib import Path
+    schema=dict(line.split("\t") for line in (Path(__file__).with_name("libraryroots-schema.tsv")).read_text().splitlines() if line and not line.startswith("#"))
+    magic=bytes.fromhex(schema["magic"]);widths=tuple(map(int,schema["widths"].split(",")))
+    assert magic==b"USLSIG1\n" and set(schema)=={"magic","class-max","widths","flag-max","stored-max"}
+    assert widths==(0,1,2,4,8) and int(schema["class-max"])==6 and int(schema["flag-max"])==1 and int(schema["stored-max"])==8
+    g=E.g
+    def test(p,x,y,yes,no):p.branch({1:yes},no,[("CMPI",x,y)])
+    def hook(name,proc):
+        old="LR.original."+name;g.st[old]=g.st.pop(name);g.labels.add(old)
+        P(name).a(("PUSH",old)).goto(proc)
+    hook("START","LR.resource")
+    P("LR.resource").a(("LDI","lr_zero",0),("LDI","lr_count",0),("SBCLR",),
+        [("SBOUT",c) for c in b"\0library/signatures"],("SBFIND","lr_blob")).branch({1:"LR.return"},"LR.open",[("CMPI","lr_blob",0)])
+    P("LR.return").ret()
+    P("LR.bad").a(E.rej("not covered: malformed library signatures or missing public label")).goto("DEAD")
+    P("LR.open").a(("INPUSH","lr_blob"),("XLEN","lr_len")).goto("LR.magic0")
+    for i,c in enumerate(magic):
+        P("LR.magic"+str(i)).branch({c:"LR.magicadv"+str(i)},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
+        P("LR.magicadv"+str(i)).a(("ADV",)).goto("LR.magic"+str(i+1) if i<7 else "LR.count")
+    P("LR.count").call("LR.u64").a(("COPYW","lr_records","lr_value"),("LDI","lr_limit",limit)).branch({2:"LR.bad"},"LR.begin",[("C64U","lr_records","lr_limit")])
+    P("LR.begin").a(("LDI","lr_rec",0)).goto("LR.loop")
+    P("LR.loop").branch({1:"LR.end"},"LR.name",[("CMP","lr_rec","lr_records")])
+    P("LR.name").call("LR.u64").a(("COPYW","lr_n","lr_value"),("MARK","lr_s"),("A64","sub","lr_left","lr_len","lr_s")).branch({2:"LR.bad"},"LR.nonempty",[("C64U","lr_n","lr_left")])
+    test(P("LR.nonempty"),"lr_n",0,"LR.bad","LR.namebegin")
+    P("LR.namebegin").a(("A64","add","lr_e","lr_s","lr_n")).goto("LR.first")
+    letters=tuple(range(65,91))+tuple(range(97,123))+(95,)
+    def byte(name,good,yes,no):
+        g.on(name,good,yes,[],"b");g.on(name,[x for x in range(257) if x not in good],no,[],"b")
+    byte("LR.first",letters,"LR.nameadv","LR.bad")
+    P("LR.nameadv").a(("ADV",),("MARK","lr_pos")).branch({1:"LR.nameend"},"LR.tail",[("CMP","lr_pos","lr_e")])
+    byte("LR.tail",letters+tuple(range(48,58))+(46,36),"LR.nameadv","LR.bad")
+    P("LR.nameend").a(("INTERN","lr_id","lr_s","lr_e"),("JUMP","lr_e"),("LDX","lr_seen","lr_id",SEEN)).branch({1:"LR.link"},"LR.bad",[("CMPI","lr_seen",0)])
+    P("LR.link").a(("LDI","lr_one",1),("STX","lr_id",SEEN,"lr_one")).call("LR.bit").a(("COPYW","lr_link","lr_value")).call("LR.bit").branch({1:"LR.var"},"LR.bad",[("CMPI","lr_value",1)])
+    P("LR.var").call("LR.bit").call("LR.u64").a(("COPYW","lr_params","lr_value"),("LDI","lr_di",0)).call("LR.desc").call("LR.u64").a(("COPYW","lr_stored","lr_value"),("LDI","lr_limit",8)).branch({2:"LR.eight"},"LR.same",[("C64U","lr_params","lr_limit")])
+    P("LR.eight").a(("LDI","lr_expected",8)).goto("LR.stored")
+    P("LR.same").a(("COPYW","lr_expected","lr_params")).goto("LR.stored")
+    P("LR.stored").branch({1:"LR.paramstart"},"LR.bad",[("CMP","lr_stored","lr_expected")])
+    P("LR.paramstart").a(("LDI","lr_pi",0)).goto("LR.paramloop")
+    P("LR.paramloop").branch({1:"LR.supported"},"LR.param",[("CMP","lr_pi","lr_stored")])
+    P("LR.param").call("LR.desc").a(("ALUI","add","lr_pi","lr_pi",1)).goto("LR.paramloop")
+    P("LR.supported").call("LR.bit").branch({1:"LR.save"},"LR.next",[("CMPI","lr_link",0)])
+    P("LR.save").a(("STX","lr_count",ROOT,"lr_id"),("ALUI","add","lr_count","lr_count",1)).goto("LR.next")
+    P("LR.next").a(("ALUI","add","lr_rec","lr_rec",1)).goto("LR.loop")
+    P("LR.end").a(("MARK","lr_pos")).branch({1:"LR.done"},"LR.bad",[("CMP","lr_pos","lr_len")])
+    P("LR.done").a(("INPOP",)).ret()
+    # Complete six-field descriptors; opaque depth/base/shape preserved, not guessed.
+    P("LR.desc").call("LR.u64").call("LR.u64").call("LR.u64").call("LR.u64").a(("LDI","lr_limit",int(schema["class-max"]))).branch({2:"LR.bad"},"LR.width",[("C64U","lr_value","lr_limit")])
+    P("LR.width").call("LR.u64").branch({widths:"LR.unsigned"},"LR.bad",[("RLD","lr_value")])
+    P("LR.unsigned").call("LR.u64").a(("LDI","lr_limit",1)).branch({2:"LR.bad"},"LR.return",[("C64U","lr_value","lr_limit")])
+    P("LR.bit").a(("BYTE","lr_value"),("ADV",)).branch({(0,1):"LR.return"},"LR.bad",[("RLD","lr_value")])
+    P("LR.u64").a(("MARK","lr_pos"),("A64","sub","lr_left","lr_len","lr_pos"),("LDI","lr_limit",8)).branch({0:"LR.bad"},"LR.u64read",[("C64U","lr_left","lr_limit")])
+    P("LR.u64read").a(("LDI","lr_value",0),*[a for i in range(8) for a in [("BYTE","lr_byte"),("A64I","shl","lr_byte","lr_byte",i*8),("A64","or","lr_value","lr_value","lr_byte"),("ADV",)]]).ret()
+    hook("QUEUEST","LR.roots")
+    P("LR.roots").a(("LDI","lr_i",0)).goto("LR.rootloop")
+    P("LR.rootloop").branch({1:"LR.return"},"LR.root",[("CMP","lr_i","lr_count")])
+    P("LR.root").a(("LDX","lr_id","lr_i",ROOT),("LDX","lr_label","lr_id",B['LAB'])).branch({1:"LR.bad"},"LR.rootmark",[("CMPI","lr_label",0)])
+    P("LR.rootmark").a(("ALUI","sub","lr_label","lr_label",1),("LDX","lr_unit","lr_label",B['OWNER']),("LDI","lr_one",1),("STX","lr_unit",B['ROOTS'],"lr_one"),("ALUI","add","lr_i","lr_i",1)).goto("LR.rootloop")

@@ -458,10 +458,14 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
 }
 
 /* Route dispatch owns only byte-stream lifetimes, never compiler semantics. */
-static int runroute(const char *route, Buf *in, const char *src) {
-    int count = 0;
+static int runroute_from(const char *route, const char *first_stage, Buf *in, const char *src) {
+    int count = 0, ready = first_stage == 0;
     for (int i = 0; i < PS; i++) {
         if (strcmp(STAGES[i].route, route)) continue;
+        if (!ready) {
+            if (strcmp(STAGES[i].name,first_stage)) continue;
+            ready=1;
+        }
         int m = STAGES[i].model;
         unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
         if (PVER == 3) {
@@ -477,8 +481,11 @@ static int runroute(const char *route, Buf *in, const char *src) {
         if (rc) return rc;
         count++;
     }
-    if (!count) die("unknown package route");
+    if (!count) die("unknown package route or stage boundary");
     return 0;
+}
+static int runroute(const char *route, Buf *in, const char *src) {
+    return runroute_from(route,0,in,src);
 }
 
 #ifdef UNISA_CORE_BLOB

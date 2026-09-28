@@ -26,13 +26,22 @@ def install(E, arch, word=None):
     regkind,intkind=(1,2) if arch=='arm64' else (0,1)
     allowed=tuple(range(8)) if arch=='arm64' else tuple(NUM[r] for r in REGMAP['x86_64'])
     for op,start in [('call',entry),('addr','EMIT.61' if arch=='arm64' else 'HB.addr')]:
-        guard(E,start,[('CMPI','target_os',2)],'HB.'+op+'.arity')
+        # Ordinary foreign calls remain macOS-only. Linux gets this identical
+        # integer ABI bridge only with an explicit nonzero library callback.
+        guard(E,start,[('CMPI','target_os',2)],'HB.'+op+'.arity',
+              no='HB.call.librarytarget' if op=='call' else 'HB.fail')
         guard(E,'HB.'+op+'.arity',[('CMPI',count,2)],'HB.'+op+'.kind0')
         guard(E,'HB.'+op+'.kind0',[('CMPI',kind+'0',regkind)],'HB.'+op+'.kind1')
         guard(E,'HB.'+op+'.kind1',[('CMPI',kind+'1',regkind if op=='call' else intkind)],'HB.'+op+'.reg0')
         guard(E,'HB.'+op+'.reg0',[('RLD','a0')],'HB.'+op+'.value1',allowed)
         if op=='call':guard(E,'HB.call.value1',[('RLD','a1')],'HB.call.emit',allowed)
         else:guard(E,'HB.addr.value1',[('RLD','a1')],'HB.addr.emit',(0,1,2,3))
+    from modelinput import u64
+    u64(E,'HB.libraryread',b'\0library/exit','hb_libraryexit','hb_hasexit','HB.fail')
+    u64(E,'HB.librarymmap',b'\0library/mmap','hb_librarymmap','hb_hasmmap','HB.fail')
+    u64(E,'HB.librarymunmap',b'\0library/munmap','hb_librarymunmap','hb_hasmunmap','HB.fail')
+    guard(E,'HB.call.librarytarget',[('CMPI','target_os',1)],'HB.call.libraryread')
+    install_rules(E.g,Path(__file__).parent,'hostbridge',section='library')
     P('HB.fail').a(E.rej('not covered: foreign host ABI target or operands')).goto('DEAD')
     p=P('HB.call.emit')
     if arch=='arm64':
