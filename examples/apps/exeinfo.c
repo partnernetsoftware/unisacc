@@ -3,11 +3,8 @@
  *
  *   unisacc -run exeinfo.c FILE...
  *
- * With no argument it builds one small sample of each format in memory and
- * dissects those, so the default output is deterministic and does not depend
- * on any file.  Point it at the compiler's own output to see what it wrote:
- * it reads unisacc.com (a DOS/PE header that is also a shell script, followed
- * by gzip-compressed slices) as readily as a plain ELF.
+ * Requires real file paths; run.sh defaults to the actual compiler container.
+ * Reads that polyglot container as readily as a plain ELF or Mach-O file.
  *
  * Every field is read through U()/UB(), which are bounds-checked: a field
  * that lies beyond the bytes examined reads as 0 and sets a flag that is
@@ -245,105 +242,14 @@ static void analyze(void)
     if (oob) printf("note     some fields lie beyond the %ld bytes examined and read as 0\n", LEN);
 }
 
-/* ---- samples: built in memory, dissected by the code above ---------- */
-
-static void put(long off, unsigned long v, int n)
-{
-    int i;
-    for (i = 0; i < n; i++) B[off + i] = (unsigned char)(v >> (8 * i));
-}
-
-static void putbe(long off, unsigned long v, int n)
-{
-    int i;
-    for (i = 0; i < n; i++) B[off + i] = (unsigned char)(v >> (8 * (n - 1 - i)));
-}
-
-static void puts_at(long off, const char *s)
-{
-    while (*s) B[off++] = (unsigned char)*s++;
-}
-
-static void begin(long len)
-{
-    memset(B, 0, (size_t)len);
-    LEN = len; FILESZ = len;
-}
-
-static void sample_elf(void)
-{
-    begin(64 + 3 * 56);
-    puts_at(0, "\177ELF");
-    B[4] = 2; B[5] = 1; B[6] = 1;
-    put(16, 2, 2); put(18, 0xb7, 2); put(20, 1, 4); put(24, 0x400078, 8);
-    put(32, 64, 8); put(52, 64, 2); put(54, 56, 2); put(56, 3, 2);
-    put(64, 1, 4); put(68, 5, 4); put(72, 0, 8); put(80, 0x400000, 8); put(96, 0x178, 8); put(104, 0x178, 8);
-    put(120, 1, 4); put(124, 7, 4); put(128, 0x1000, 8); put(136, 0x401000, 8); put(152, 0x20, 8); put(160, 0x2000, 8);
-    put(176, 0x6474e551UL, 4); put(180, 6, 4);
-}
-
-static void sample_macho(void)
-{
-    begin(32 + 72 + 24 + 56);
-    put(0, 0xfeedfacfUL, 4); put(4, 0x0100000cUL, 4); put(12, 2, 4); put(16, 3, 4); put(20, 152, 4); put(24, 0x200085, 4);
-    put(32, 0x19, 4); put(36, 72, 4); puts_at(40, "__TEXT");
-    put(56, 0x100000000UL, 8); put(64, 0x4000, 8); put(80, 0x4000, 8); put(92, 5, 4);
-    put(104, 0x80000028UL, 4); put(108, 24, 4); put(112, 0x3f80, 8);
-    put(128, 0xc, 4); put(132, 56, 4); put(136, 24, 4); puts_at(152, "/usr/lib/libSystem.B.dylib");
-}
-
-static void sample_fat(void)
-{
-    begin(8 + 40);
-    putbe(0, 0xcafebabeUL, 4); putbe(4, 2, 4);
-    putbe(8, 0x0100000cUL, 4); putbe(16, 0x4000, 4); putbe(20, 0x10000, 4);
-    putbe(28, 0x01000007UL, 4); putbe(36, 0x14000, 4); putbe(40, 0x11000, 4);
-}
-
-static void sample_pe(void)
-{
-    begin(0x188 + 80);
-    puts_at(0, "MZ"); put(0x3c, 0x80, 4);
-    puts_at(0x80, "PE"); put(0x84, 0x8664, 2); put(0x86, 2, 2); put(0x94, 240, 2); put(0x96, 0x22, 2);
-    put(0x98, 0x20b, 2); put(0xa8, 0x1000, 4); put(0xb0, 0x140000000UL, 8); put(0xd0, 0x4000, 4);
-    put(0xdc, 3, 2); put(0xde, 0x8160, 2);
-    puts_at(0x188, ".text"); put(0x188 + 8, 0x1200, 4); put(0x188 + 12, 0x1000, 4); put(0x188 + 16, 0x1200, 4);
-    put(0x188 + 20, 0x400, 4); put(0x188 + 36, 0x60000020UL, 4);
-    puts_at(0x188 + 40, ".data"); put(0x188 + 48, 0x800, 4); put(0x188 + 52, 0x3000, 4); put(0x188 + 56, 0x200, 4);
-    put(0x188 + 60, 0x1600, 4); put(0x188 + 76, 0xC0000040UL, 4);
-}
-
-static void sample_script(void)
-{
-    const char *s = "#!/bin/sh\necho hello\n";
-    begin((long)strlen(s));
-    puts_at(0, s);
-}
-
-static void make(int s)
-{
-    switch (s) {
-    case 0: sample_elf(); break;
-    case 1: sample_macho(); break;
-    case 2: sample_fat(); break;
-    case 3: sample_pe(); break;
-    default: sample_script();
-    }
-}
-
 int main(int argc, char **argv)
 {
-    static const char *title[] = { "ELF64 aarch64 (with a writable+executable segment)", "Mach-O arm64",
-                                   "Mach-O universal", "PE32+ x86_64", "shell script" };
-    int a, s;
+    int a;
+    /* In -run mode argv[0] names the source, so require an explicit file.
+     * run.sh supplies the actual compiler container when no file is given. */
     if (argc <= 1) {
-        for (s = 0; s < 5; s++) {
-            printf("== sample: %s\n", title[s]);
-            make(s);
-            analyze();
-            printf("\n");
-        }
-        return 0;
+        fprintf(stderr, "exeinfo: supply a real executable; use examples/apps/run.sh exeinfo\n");
+        return 1;
     }
     for (a = 1; a < argc; a++) {
         FILE *f = fopen(argv[a], "rb");

@@ -2,8 +2,8 @@
  *
  *   cat /proc/self/maps | unisacc -run memmap.c -
  *
- * With no argument it reads a built-in listing, so the default output is
- * deterministic.  It classifies every region, sums them by kind, groups the
+ * With no argument on Linux it reads its own /proc/self/maps.
+ * Elsewhere supply a captured map or use run.sh memmap.  It classifies every region, sums them by kind, groups the
  * file mappings into images, and audits the layout: regions that are both
  * writable and executable, overlaps, and the biggest holes between regions.
  * Addresses are parsed as unsigned 64-bit, so kernel-half lines such as
@@ -42,34 +42,7 @@ static struct image I[MAXI];
 static int ord[MAXR];
 static int NR, NI;
 
-static const char *sample[] = {
-    "55d0a1a00000-55d0a1a02000 r--p 00000000 08:01 1310725                    /usr/bin/demo",
-    "55d0a1a02000-55d0a1a08000 r-xp 00002000 08:01 1310725                    /usr/bin/demo",
-    "55d0a1a08000-55d0a1a0b000 r--p 00008000 08:01 1310725                    /usr/bin/demo",
-    "55d0a1a0b000-55d0a1a0d000 r--p 0000a000 08:01 1310725                    /usr/bin/demo",
-    "55d0a1a0d000-55d0a1a0e000 rw-p 0000c000 08:01 1310725                    /usr/bin/demo",
-    "55d0a2c7d000-55d0a2c9e000 rw-p 00000000 00:00 0                          [heap]",
-    "7f3a4c000000-7f3a4c021000 rw-p 00000000 00:00 0",
-    "7f3a4c021000-7f3a50000000 ---p 00000000 00:00 0",
-    "7f3a54800000-7f3a54828000 r--p 00000000 08:01 917505                     /usr/lib/x86_64-linux-gnu/libc.so.6",
-    "7f3a54828000-7f3a549bd000 r-xp 00028000 08:01 917505                     /usr/lib/x86_64-linux-gnu/libc.so.6",
-    "7f3a549bd000-7f3a54a15000 r--p 001bd000 08:01 917505                     /usr/lib/x86_64-linux-gnu/libc.so.6",
-    "7f3a54a15000-7f3a54a16000 ---p 00215000 08:01 917505                     /usr/lib/x86_64-linux-gnu/libc.so.6",
-    "7f3a54a16000-7f3a54a1a000 r--p 00215000 08:01 917505                     /usr/lib/x86_64-linux-gnu/libc.so.6",
-    "7f3a54a1a000-7f3a54a1c000 rw-p 00219000 08:01 917505                     /usr/lib/x86_64-linux-gnu/libc.so.6",
-    "7f3a54a1c000-7f3a54a29000 rw-p 00000000 00:00 0",
-    "7f3a54b10000-7f3a54b12000 rwxp 00000000 00:00 0",
-    "7f3a54b30000-7f3a54b31000 r--p 00000000 08:01 917990                     /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "7f3a54b31000-7f3a54b58000 r-xp 00001000 08:01 917990                     /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "7f3a54b58000-7f3a54b62000 r--p 00028000 08:01 917990                     /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "7f3a54b62000-7f3a54b64000 r--p 00031000 08:01 917990                     /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "7f3a54b64000-7f3a54b66000 rw-p 00033000 08:01 917990                     /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
-    "7ffc8a2d5000-7ffc8a2f6000 rw-p 00000000 00:00 0                          [stack]",
-    "7ffc8a3e3000-7ffc8a3e7000 r--p 00000000 00:00 0                          [vvar]",
-    "7ffc8a3e7000-7ffc8a3e9000 r-xp 00000000 00:00 0                          [vdso]",
-    "ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsyscall]",
-    0
-};
+
 
 static unsigned long hex(const char **pp)
 {
@@ -166,21 +139,17 @@ int main(int argc, char **argv)
 
     if (argc > 1) {
         f = strcmp(argv[1], "-") == 0 ? stdin : fopen(argv[1], "r");
-        if (f == 0) { fprintf(stderr, "memmap: cannot open %s\n", argv[1]); return 1; }
-        while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
-        /* Deliberately NOT reading this process's own /proc/self/maps here:
-         * it is real data, but the map is a property of the SPECIFIC
-         * binary asking (a cc build and a unisacc build of the same
-         * source have different segments), so it would break the
-         * cc-vs-unisacc byte-for-byte check every other example in this
-         * directory relies on, and ASLR makes it change between runs of
-         * the same binary too. That is a real reason, not a shortcut. */
-        fprintf(stderr, "memmap: no input given -- showing a built-in "
-                        "SAMPLE, not real data. Try:\n"
-                        "  cat /proc/PID/maps | unisacc -run memmap.c -\n");
-        for (i = 0; sample[i]; i++) add_line(sample[i]);
+#ifdef __linux__
+        f = fopen("/proc/self/maps", "r");
+#else
+        fprintf(stderr, "memmap: supply real maps; use examples/apps/run.sh memmap\n");
+        return 1;
+#endif
     }
+    if (f == 0) { fprintf(stderr, "memmap: cannot open maps input\n"); return 1; }
+    while (fgets(buf, sizeof buf, f)) add_line(buf);
+    if (f != stdin) fclose(f);
     if (NR == 0) { fprintf(stderr, "memmap: no regions\n"); return 1; }
 
     for (i = 0; i < NKIND; i++) { kcount[i] = 0; ksum[i] = 0; }

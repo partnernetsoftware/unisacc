@@ -7,8 +7,8 @@
  *     X Y W H title...             (X and Y may be negative)
  *     # comment
  *
- * From a file, from stdin with "-", or -- with no argument -- a built-in
- * desktop, so the default output is deterministic.  On X11, wmctrl -lG gives
+ * From a file, from stdin with "-", or from a real window collector via run.sh winlayout.
+ * Missing input is an error; no desktop is fabricated.  On X11, wmctrl -lG gives
  * the geometry; put it in stacking order and reshape it with awk.
  *
  * The visible area of every window is exact.  All rectangle edges are
@@ -40,20 +40,7 @@ static long xs[MAXE], ys[MAXE];
 static int nx, ny;
 static int owner[MAXE][MAXE];      /* owner[row][col]: topmost window or -1 */
 
-static const char *sample[] = {
-    "screen 1440 900",
-    "# bottom",
-    "120 90 900 620 Notes",
-    "60 40 1200 800 Browser",
-    "-100 640 300 320 Music",
-    "20 560 700 320 Terminal",
-    "700 60 340 220 Calculator",
-    "1100 300 420 500 Slack",
-    "1180 20 240 90 Clock",
-    "1600 200 300 200 Parked",
-    "# top",
-    0
-};
+
 
 static long lmin(long a, long b) { return a < b ? a : b; }
 static long lmax(long a, long b) { return a > b ? a : b; }
@@ -126,22 +113,8 @@ int main(int argc, char **argv)
         if (f == 0) { fprintf(stderr, "winlayout: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
-        /* No window-server access is possible from this compiler's own C
-         * library: reading real geometry needs X11/Wayland sockets, the
-         * Win32 API or CoreGraphics, none of which this front end binds.
-         * That is a real gap, not a shortcut -- say so plainly instead of
-         * letting the realistic-looking sample pass as live data. */
-        fprintf(stderr, "winlayout: no input given -- showing a built-in "
-                        "SAMPLE, not real data. Try:\n"
-                        "  macOS: cc -o /tmp/wingeom tools/wingeom.c "
-                        "-framework CoreGraphics && /tmp/wingeom | "
-                        "unisacc -run winlayout.c -\n"
-                        "  X11:   wmctrl -lG | awk '{print $3,$4,$5,$6,$7}' "
-                        "| unisacc -run winlayout.c -\n");
-        for (i = 0; sample[i]; i++) {
-            strcpy(buf, sample[i]);
-            add_line(buf);
-        }
+        fprintf(stderr, "winlayout: supply real window geometry; use examples/apps/run.sh winlayout\n");
+        return 1;
     }
     if (NW == 0) { fprintf(stderr, "winlayout: no windows\n"); return 1; }
 

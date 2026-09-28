@@ -33,6 +33,7 @@ int main(void)
     CFArrayRef wins = CGWindowListCopyWindowInfo(
         kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
         kCGNullWindowID);
+    if (!wins) { fprintf(stderr, "wingeom: window query failed\n"); return 1; }
     CFIndex n = CFArrayGetCount(wins), i;
     CGRect screen = CGDisplayBounds(CGMainDisplayID());
 

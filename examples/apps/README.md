@@ -12,50 +12,63 @@ suites' inputs.
 | `queens.c` | backtracking with unsigned bit masks (`x & -x`, shifts), recursion |
 | `bf.c` | a Brainfuck interpreter: `switch`, a bracket jump table, `unsigned char` wraparound |
 | `dijkstra.c` | a binary-heap priority queue, an adjacency list in arrays, recursive path printing |
-| `procview.c` | a process-tree analyser: on Linux, with no argument, real data straight from `/proc/N/status` for every `N` (no subprocess -- this compiler's syscall catalog has no directory listing or `fork`/`exec`, so it scans instead of reading the directory); elsewhere, or off `ps -axo pid=,ppid=,rss=,comm=`. Parent lookup, subtree sums by walking ancestors with a depth cap (so parent cycles cannot loop), `qsort` on index arrays with three comparators, orphan / self-parent / cycle detection |
+| `procview.c` | a process-tree analyser: real process snapshots via the launcher's `ps`, or a bounded `/proc/N/status` scan in direct Linux use. Parent lookup, subtree sums by walking ancestors with a depth cap (so parent cycles cannot loop), `qsort` on index arrays with three comparators, orphan / self-parent / cycle detection |
 | `winlayout.c` | window-stack analysis: exact visible area per window by coordinate compression and a topmost-owner grid, off-screen clipping, overlap pairs, the largest empty rectangle, a text minimap. No automatic real data: window-server access (X11/Wayland/Win32/CoreGraphics) needs bindings this compiler doesn't have; `tools/wingeom.c` is a small **system-cc** helper (macOS, CoreGraphics) that supplies real geometry over a pipe -- proof that real data plus this analysis works end to end, and the reference `winlayout.c` itself should eventually match if unisacc gains that access |
-| `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Real input via an explicit file/pipe is fully checked against host `cc`; it does **not** auto-read its own `/proc/self/maps` on Linux -- that is real data, but it is a property of the specific binary asking (a `cc` build and a `unisacc` build of the same source have different segments -- verified in a VM), so it needs a different test instrument (structural self-checks, not a `cc` byte-diff) that does not exist yet; see prd.md §5.9 |
-| `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; with no argument it builds one sample of each format in memory |
+| `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Linux defaults to its own `/proc/self/maps`; macOS launcher collects real Mach regions. Identical snapshots are compared against cc; live self maps are checked structurally |
+| `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; reads explicit real files; launcher defaults to the actual compiler container |
 | `colorpack.c` | bit-field packed pixel formats (RGB565/555, RGBA4444): quantisation, round-trip error, per-channel histograms. Every field value matches host `cc`; `sizeof` currently does not (a filed, unfixed defect -- see the file comment) |
 
-Each program runs with no input and has deterministic output. The four system
-tools also take real input, and their default output does not depend on the
-machine:
+The four system tools consume **real input**, never a fabricated fallback.
+Use the bounded launcher (55 seconds including compilation and collectors):
 
-```
-ps -axo pid=,ppid=,rss=,comm= | unisacc -run examples/apps/procview.c -
-cat /proc/PID/maps            | unisacc -run examples/apps/memmap.c -
-unisacc -run examples/apps/winlayout.c layout.txt     # "screen W H", then "X Y W H title", bottom to top
-unisacc -run examples/apps/exeinfo.c unisacc.com /bin/ls
-
-# real window geometry on macOS, no argument-writing by hand:
-cc -o /tmp/wingeom examples/apps/tools/wingeom.c -framework CoreGraphics
-/tmp/wingeom | unisacc -run examples/apps/winlayout.c -
+```sh
+./examples/apps/run.sh procview     # actual ps snapshot on this host
+./examples/apps/run.sh memmap       # Linux: analyser's own maps; macOS: live collector's maps
+./examples/apps/run.sh winlayout    # macOS: actual CoreGraphics window geometry
+./examples/apps/run.sh exeinfo      # actual unisacc.com bytes
 ```
 
-Running any of these four with **no** input at all prints a plain warning
-to stderr and falls back to a built-in sample -- the samples use realistic
-names (`Safari`, `libc.so.6`, `Slack`) on purpose, as a stress case for the
-program's own logic, so they are never silently mistaken for live data.
-`exeinfo.c` is the one exception: dissecting formats is its whole point, so
-its sample output is always prefixed `== sample: ...`.
+`APP_COM=/absolute/path/to/compiler` selects another compiler. Explicit files
+or `-` are passed through unchanged. Direct C use also accepts captured input:
 
-`procview.c` was also run on a live 685-process table (piped `ps`, on macOS)
-and, after adding the `/proc` scan, on a live 171-process Linux VM with no
-argument at all (0.21 s wall, real kernel data, no `ps`); `winlayout.c` was
-run on `tools/wingeom.c`'s real, live on-screen window geometry (a Terminal
-window's own tabs, stacked); `exeinfo.c` was run on the compiler's own
-output (`unisacc.com`, and a Mach-O it had just written). Host `cc` and
-`unisacc.com -run` gave identical output each time -- except `wingeom.c`
-itself, which links CoreGraphics and is never compiled by `unisacc`.
-The output was
-checked byte for byte against the host `cc` build, using
-`unisacc.com -run FILE` and `unisacc.com -O2 FILE -o OUT`:
+```sh
+ps -axo pid=,ppid=,rss=,comm= | ./unisacc.com -run examples/apps/procview.c -
+./unisacc.com -run examples/apps/memmap.c /proc/PID/maps
+./unisacc.com -run examples/apps/winlayout.c real-layout.txt
+./unisacc.com -run examples/apps/exeinfo.c unisacc.com /bin/ls
+```
 
-```
-cc -std=c99 -o /tmp/x examples/apps/calc.c && /tmp/x > want
-./unisacc.com -run examples/apps/calc.c > got && cmp want got
-```
+On Linux, direct `memmap.c` with no argument reads `/proc/self/maps`.
+Direct `procview.c` still has the bounded Linux PID scan; the launcher uses
+`ps` instead, avoiding its PID-range limit. On other hosts these analysers
+require input. `winlayout.c` and `exeinfo.c` require input on all targets.
+Missing or empty input fails rather than inventing a desktop or process list.
+
+The bundled libc implements its own functions; it does **not** default to
+forwarding system libc. The launcher explicitly uses system `ps` and, on
+macOS, builds two small **system-cc-only** collectors: `tools/selfmaps.c`
+uses Mach to enumerate its own actual mappings, and `tools/wingeom.c`
+uses CoreGraphics to collect real bottom-to-top windows. Neither collector
+is compiled by unisacc. The memory snapshot belongs to the collector, not
+the analyser; regions are real but file names are not recovered by this helper.
+Window access may be restricted by OS permissions; unavailable data is an
+error. Other hosts can provide an explicit geometry file; no window bindings
+are implied.
+
+`python3 tests/appsrealcheck.py` captures live processes and mappings once,
+then compares each analyser's host-cc, model `-run`, and O2-native output on
+identical input. Its window geometry is an analytic **test fixture**, kept out
+of application defaults. `--live-windows` additionally uses the real macOS
+collector. Missing/empty inputs and unsupported defaults must fail. A Linux
+analyser's own live mappings get structural checks: different binaries and
+ASLR need not produce identical address spaces.
+
+2026-09-28 local macOS arm64 verification: all four analysers matched host cc
+through model `-run` and O2 native execution on one real process/maps/window
+snapshot and the actual container; missing and empty input checks passed.
+This does not claim Linux/Windows testing of the changed defaults.
+
+The older six application checks below are historical evidence:
 
 Independent takeover check (2026-09-26): all six compile warning-free under
 host `cc -std=c99 -Wall -Wextra`. The Linux x86-64 compiler image produced by

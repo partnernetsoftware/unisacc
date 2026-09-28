@@ -10,8 +10,7 @@
  *
  * On any other target (or if that scan finds nothing), input is
  * `ps -axo pid=,ppid=,rss=,comm=` (RSS in KiB): from a file, from stdin
- * with "-", or -- with no argument and no /proc -- a built-in snapshot,
- * so the default output is still deterministic there.
+ * with "-". Without /proc, missing input is an error; no snapshot is fabricated.
  *
  *   ps -axo pid=,ppid=,rss=,comm= | unisacc -run procview.c -
  *
@@ -45,44 +44,7 @@ static int NP;
 static long total;
 static long minkb;
 
-static const char *sample[] = {
-    "    1     0  11208 /sbin/launchd",
-    "  101     1   9016 /usr/sbin/syslogd",
-    "  102     1  14520 /usr/libexec/logd",
-    "  118     1  62344 /usr/libexec/UserEventAgent",
-    "  201     1 188420 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer",
-    "  244     1  41872 /usr/sbin/coreaudiod",
-    "  310     1  71408 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
-    "  322   310 148900 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder",
-    "  330   310  93216 /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock",
-    "  341   310  58120 /System/Library/CoreServices/SystemUIServer.app/Contents/MacOS/SystemUIServer",
-    "  402   310 176640 /Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
-    "  410   402   5120 /usr/bin/login",
-    "  411   410   6784 -zsh",
-    "  437   411  98432 tmux",
-    "  438   437   6912 -zsh",
-    "  441   438 312560 node",
-    "  447   441  47120 node",
-    "  452   441  46880 node",
-    "  455   438  22016 cc",
-    "  456   455  18432 cc1",
-    "  460   437   6640 -zsh",
-    "  466   460 421376 python3",
-    "  520   310 612288 /Applications/Safari.app/Contents/MacOS/Safari",
-    "  531   520 233120 Safari Web Content",
-    "  532   520 187264 Safari Web Content",
-    "  533   520 141056 Safari Web Content",
-    "  534   520  38224 com.apple.WebKit.Networking",
-    "  601   310 274816 /Applications/Slack.app/Contents/MacOS/Slack",
-    "  612   601 143360 Slack Helper (Renderer)",
-    "  613   601  60288 Slack Helper (GPU)",
-    "  620   601  31744 Slack Helper",
-    "  812   899   7424 /usr/local/bin/orphaned-worker",
-    "  700   701   1024 cyc-a",
-    "  701   700   1024 cyc-b",
-    "  777   777   2048 self-parent",
-    0
-};
+
 
 static void add_line(const char *s)
 {
@@ -231,17 +193,11 @@ int main(int argc, char **argv)
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
 #ifdef __linux__
-        if (!scan_proc()) {
+        if (!scan_proc()) { fprintf(stderr, "procview: cannot read live /proc data\n"); return 1; }
 #else
-        {
+        fprintf(stderr, "procview: supply a real ps snapshot; use examples/apps/run.sh procview\n");
+        return 1;
 #endif
-            fprintf(stderr, "procview: no live process source on this target "
-                             "(no /proc, and no `ps` piped in) -- showing a "
-                             "built-in SAMPLE, not real data. Try:\n"
-                             "  ps -axo pid=,ppid=,rss=,comm= | unisacc -run "
-                             "procview.c -\n");
-            for (i = 0; sample[i]; i++) add_line(sample[i]);
-        }
     }
     if (NP == 0) { fprintf(stderr, "procview: no processes\n"); return 1; }
 
