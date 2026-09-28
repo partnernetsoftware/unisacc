@@ -15,7 +15,7 @@
 
 **已发布基线**：v0.0.8 / `10672e3`，未签名 `.com` 5,388,402 B；发布证据与限制封存，不回写。
 **旧集成基线**：早期1.08MB/1.11MB候选及限定门禁已移入[集成历史](archive/r9-integration-history-20260928.md)，不作当前身份。
-**最新集成候选**：同步启用参考与网络prune的工作树闭包构建（sidecar base `cfdceb5`），`.com` **1,233,236 B**，SHA256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`，比v0.0.8小约77.1%。root载荷/侧车freshness通过；全部33个部署网络与对应表全域相等；CLI64、run12、C9957、nativeboot/kernel通过。新增prune有117次三执行器对拍及40项C参考边界/重复调用检查；新身份完整队列与平台证据仍待，不移植旧候选全绿。微软签名仅延至0.0.10；这份载荷的Apple资产正在独立签名、公证。逐阶段静态结构见[当前审计](research/r9-pipeline-structure-prune.json)，旧calc动态计数不外推。来源闭包SHA `1a6c74388d6fff4bdbd67db76c0ff96ac4499adfce038dca2694d243ac0bab6d`；生成副本排除仅限声明的exec/build，真实源码变化仍失效。
+**0.0.9 发布验收完成**：`.com` **1,233,236 B**，SHA256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`，比v0.0.8小约77.1%。最终冻结源 `155bc9d`，构建来源闭包 `36066e0e495c4ffff3c029e2dc417931cf9946136481becd23f0e06434aefb07`；193/193本地门禁实际通过，全部33部署网络与对应表全域相等。相同载荷六目标18格烟测通过（含明确的模拟范围，不称全平台完整套件或Windows自举）；Windows Defender scan exit0。Apple app/DMG企业签名、公证、装订及正常下载确认后执行已闭合，DMG 1,340,209 B；Windows签名延至0.0.10。发布状态与完整范围见[最终回执](research/r9-release-acceptance.json)，逐阶段结构见[当前审计](research/r9-pipeline-structure-prune.json)。
 
 | 编号 | 有限交付 | 状态 / 完成判据 |
 |---|---|---|
@@ -2461,3 +2461,6 @@ R9-4/R9-7待修实证：models.closure把忽略的exec/build/ua_ref.c（1,130,27
 
 ### R9 内存专项验收补齐剪枝阶段
 134/193 时两个内存专项报错，产品包路线已经含 prune；漏接的是 memorycheck.py 的独立 Python 模拟比较链（raw tape→lower→memory），而 C bk_run 参考已先 prune。独立模拟先执行现有 prune δ 再 lower，保留同基址的长度、完整文本/数据与两种绑定的严格比较。失败回执留存，不以行为相同替代字节比较。
+
+### R9 最终资格回执
+冻结源155bc9d的193/193本地队列 rc0。沿用release.sh原有完成/日志遗漏/候选复制校验，未修改断言；本地Windows未跑义务显式保留，独立同载荷18格平台烟测另列。完整来源、各套件输入指纹与日志SHA、签封资产及平台模拟限制统一存入research/r9-release-acceptance.json。发布只上传同一d4f7载荷及同一a203公证DMG，不为测试push。
