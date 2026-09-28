@@ -2736,3 +2736,5 @@ macOS正式1000循环生命周期以暖后全zone live bytes和blocks零增长�
 分域：候选host helper代理仅新exec/c/libraryresolver.h及独立C格式/生命周期checker；模型代理负责新exec/modelcandidates.py与E3/lower入口和专属模型checker；主代理负责libunisacc.h/c集成、真实dlopen测试、共享生成物/根产物重建、PRD/索引。句柄与typed声明归context；compile冻结同一blob至relocate，API成功变更失效image/closures，失败不毁旧generation。Windows暂返回未实现loader能力，不能把POSIX动态库证明外推；正式平台适配仍完整待做。
 
 R10 resolver公开API已接入：声明与加载成功统一失效已编译代际；失败不改旧code/exports。compile在native target机械freeze USBIND2，relocate复用同一blob不重新lookup。65536原始candidate硬上限与δ一致。独立host普通及ASan/UBSan实跑通过；模型规范器46958观察、lower集成469820观察与V2截断/高64控制首验通过。新真实API checker覆盖owned ordinal/process/injected/source定义四级、O0/O1/O2、动态数据读写、失败保存与成功失效，必须完整新包实际通过后才称闭环。Windows审计实际两ISA long32/pointer64、core COFF成功，但CRC/资源地址与process_slots截断、Windows映射/ffi构件未闭合，仍待完成，报告不外推原生通过。
+
+R10 resolver TDD门禁新增lib-resolver（完整模型候选真实公开API）与lib-resolver-host（独立普通/ASan typed候选IO）。host上限对齐65536后重验rc0，准确源hash与命令封存research/r10-resolver-host-evidence.json；Windows只读交叉编译审计永久封存research/r10-windows-library-port-audit.txt。此时根.com仍旧26def90/0dad候选，resolver5e0058b六目标私有构造已全部rc0、打包在跑，未称最新root或native通过。
