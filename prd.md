@@ -2799,3 +2799,5 @@ Windows guest mmap契约经现有stdlib实读校准：Windows _UNISA_MAP传Virtu
 四份ASM分为x86与ARM两个不相交并发域；父会话负责接口、实际编译器生成的多参数/FP用例、门禁和提交。旧六GP测试保持。新桥只有实际脚本ABI搬运专项通过后才称可用，不据此称完整FFI/us_sym九混合聚合probe通过；后续仍需全量USLSIG2参数/TypeGraph/ScriptPlan、libffi对象树与typed变参调用点，完整R10范围不变。
 
 R10 ALL_STACK首片实测：macOS ARM原生与Rosetta x86的实际模型生成机器码，9参混合FP/GP/指针、9参struct按值复制（caller对象不变）、9个float、17加权整数、嵌套调用各100轮通过，SP与低栈canary及拒绝控制通过。两个新增实际模型门禁和Win64宿主ABI适配门禁已加入gate。首轮旧Windows源解释器错误消费新增第二procedure导致1失败，已按精确seh_proc锚点分开；复跑7项全部rc0，双槽5秒，首失败保留在research/r10-ffi-stack-bridge-evidence.json。Windows/Linux只cross-assemble，不冒称客机执行；USLSIG1/us_sym仍缺完整类型图，原九混合聚合返回红基线尚未闭合。本片不改模型决策、未接宿主API新桥，根产物需按实际源码重构后验来源，不原地换侧车。
+
+R10 ALL_STACK正式候选封存：d4eac6d冻结源实际shared+六目标均完成，all在pack55秒超时，随后独立pack复核输入manifest并rc0（不放宽）；实际新产物仍55e3425b/1,056,235B，源码闭包身份更新自真实构建。第一次9项非Terminal整批被Python50秒wrapper中止，未算pass且owned进程已无。相同候选经Terminal分7+2两个bounded批次全部rc0（3秒与13秒）；com-run12/12、com-c9957/57。根产物及原始sidecar已替换、来源核对通过。回执research/r10-ffi-stack-final-candidate.json。本片仅增加声明脚本帧搬运，USLSIG2/完整us_sym九混合聚合返回及剩余R10仍未完成。
