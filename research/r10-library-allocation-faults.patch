@@ -1,0 +1,33 @@
+--- exec/c/libunisacc.c
++++ exec/c/libunisacc-fault.c
+@@ -1,3 +1,4 @@
++#include <assert.h>
+ /* Host adaptation for the same product network routes. No parser or
+    compilation rule lives here. One context may be used by one thread at a
+    time; different contexts execute concurrently, without a global lock. */
+@@ -74,15 +75,23 @@
+     while (*at && (*at)->p!=p) at=&(*at)->hash_next;
+     return at;
+ }
++static int review_fail_realloc, review_move_realloc, review_same_realloc, review_fail_node;
++static void *review_realloc(void *p,size_t n) {
++ if(review_fail_realloc){review_fail_realloc=0;return 0;}
++ if(review_same_realloc){review_same_realloc=0;return p;}
++ if(review_move_realloc){review_move_realloc=0;void *q=malloc(n);assert(q);memcpy(q,p,8);free(p);return q;}
++ return realloc(p,n);
++}
++static void *review_node_malloc(size_t n){if(review_fail_node){review_fail_node=0;return 0;}return malloc(n);}
+ static void *tracked_realloc(void *p,size_t n) {
+     Allocation **at=p ? allocation_slot(p) : 0;
+     Allocation *a=at ? *at : 0;
+     if (p && !a) __us_panic("unowned runtime allocation");
+-    void *q=realloc(p,n ? n : 1);
++    void *q=review_realloc(p,n ? n : 1);
+     if (!q) __us_panic("out of memory");
+     if (a) *at=a->hash_next;
+     else {
+-        a=malloc(sizeof *a);
++        a=review_node_malloc(sizeof *a);
+         if (!a) { free(q); __us_panic("out of memory"); }
+         a->prev=0; a->next=allocations;
+         if (allocations) allocations->prev=a;

@@ -2676,3 +2676,11 @@ R10默认完整包复核后docs门禁实际rc1：新增.librarycall进入SHAPE/o
 93cd892同步权重后的完整候选已重构并实际验证：1,028,542 B、SHA256 `acbc2cbbe9e7df2900e553770bc3e4b3a36fab2d1c001b0518617a7cafe53489`；native bindings/no-main exports/lib-context及com-run12/12、com-c9957/57全部通过。根开发产物已替换，freshness check通过。回执见[同步候选](research/r10-synchronised-candidate.json)，不能据此称全部R10/六平台库/企业签名完成。
 
 R10长测性能定位（只读代理私有插桩实测，未改主树）：20轮compile→relocate→run共4,567.75ms，unload占4,384.10ms（约96%），原因是tracked_free在TLS单链逐指针线性查找，模型正常unload释放顺序引发累计O(n²)。下一片只优化分配登记/释放索引，不缓存编译答案，仍执行每次真实compile与运行；需验所有权、错误清理、并发上下文及1000循环的边界与内存增长。
+
+R10释放修复决定：保留事务分配链以支持失败时整体清理，增加线程私有指针哈希索引和链的prev链接。tracked_realloc/free仍验证所有权，删除节点不再线性扫描整个分配集合；不缓存模型或编译结果，不改变每轮阶段执行。固定4096桶仅索引内部宿主分配；错误路径、realloc移址、乱序释放和cleanup索引清空由普通及ASan/UBSan测试验证。随后同包20轮与1000轮实测，不把理论复杂度改善当完成证据。
+
+R10分配索引实测首验：普通与ASan/UBSan的20,000分配/realloc/乱序释放、foreign pointer拒绝和cleanup索引清空通过。相同acbc2c包、实际宿主CC构建新运行时，1000次同上下文源码compile→映射→run成功，总专项10.2144秒（含四线程/exit和20轮malloc池检查）；每次事务登记归零。每100轮resident采样71,680,000/71,680,000后为71,696,384，300–1000稳定，未称前期页增长为零或形式证明无泄漏。加入lib-lifecycle门禁1000轮；根.com仍为93cd892旧来源，本轮库源码变更后需重新构建来源身份，不能原地伪造sidecar。
+
+第二次1000专项的严格resident全采样范围断言实际失败：63,815,680→65,404,928→65,421,312 B，随后300–1000不变；事务分配仍每轮零。保留该失败，不能声称所有样本零增长。测试明确使用同上下文先300轮暖机、再完整1000轮测量，暖机resident另报且不降低512KiB测量范围阈值；实际总调用1300，逐次真实编译/运行及所有权计数覆盖全部1300。此项证明有限重复执行中的稳态，没有宣称形式化无泄漏。
+
+分配索引同身份20轮私有插桩复测：wall 4,567.75→216.41ms，model unload 4,384.10→17.19ms；同acbc2c包、同源程序、相同宿主CC标志，只改分配登记，无准备或编译结果缓存。首profiling命令因辅助匹配断言误计diagnostic声明/定义失败，修为仅在声明前插入后实跑成功，不是产品失败。稳态长测实跑：同上下文300暖机+完整1000真实编译运行，专项12.98秒；10次测量全部resident67,010,560B，每轮事务分配零，错误exit及guest池释放保持通过。证据[1000循环](research/r10-library-lifecycle-1000.json)、[同身份剖析](research/r10-library-allocation-index-profile.json)、[插桩补丁](research/r10-library-allocation-index-profile.patch)。独立只读复核的same/move/realloc-fail/node-malloc-fail/overflow ASan控制通过，不把哈希平均性能说成最坏O(1)。

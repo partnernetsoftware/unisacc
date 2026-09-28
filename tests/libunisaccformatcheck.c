@@ -9,7 +9,33 @@ static int check_library_decode(unsigned char *b,int n) {
     if (!setjmp(failure)) {library_image(c,&bytes,&m,&mapping);ok=1;}
     active=0;us_free(c);return ok;
 }
+static void check_allocator(void) {
+    us_context *c=us_new("unused"); assert(c); active=c;
+    void **p=calloc(20000,sizeof *p); assert(p);
+    for (int i=0;i<20000;i++) {
+        p[i]=tracked_calloc(1,8); assert(*(unsigned char *)p[i]==0);
+        *(unsigned char *)p[i]=(unsigned char)i;
+    }
+    for (int i=0;i<20000;i+=3) {
+        p[i]=tracked_realloc(p[i],64);
+        assert(*(unsigned char *)p[i]==(unsigned char)i);
+    }
+    for (int i=0;i<20000;i+=2) tracked_free(p[i]);
+    for (int i=19999;i>=0;i-=2) tracked_free(p[i]);
+    assert(!allocations);
+    for (int i=0;i<ALLOCATION_BUCKETS;i++) assert(!allocation_buckets[i]);
+    int foreign=0;
+    if (!setjmp(failure)) {tracked_free(&foreign);assert(0);}
+    assert(strstr(c->error,"unowned runtime free"));
+    if (!setjmp(failure)) {tracked_realloc(&foreign,8);assert(0);}
+    assert(strstr(c->error,"unowned runtime allocation"));
+    (void)tracked_realloc(0,0); (void)tracked_realloc(0,16); cleanup();
+    assert(!allocations);
+    for (int i=0;i<ALLOCATION_BUCKETS;i++) assert(!allocation_buckets[i]);
+    free(p); active=0; us_free(c);
+}
 int main(void) {
+    check_allocator();
     unsigned char b[128]={0};memcpy(b,"UNILIB1\n",8);
     resource_u64(b+8,1);resource_u64(b+16,8);resource_u64(b+24,1);
     memcpy(b+42,"SYMS1\n",6);resource_u64(b+48,1);

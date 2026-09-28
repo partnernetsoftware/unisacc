@@ -15,7 +15,7 @@
 #include "librarycall.h"
 #include "librarybindings.h"
 
-typedef struct Allocation { void *p; struct Allocation *next; } Allocation;
+typedef struct Allocation { void *p; struct Allocation *next, *prev, *hash_next; } Allocation;
 typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } GuestMap;
 typedef struct Symbol { char *name; uintptr_t address; int kind; } Symbol;
 typedef struct Source { char *name, *bytes; struct Source *next; } Source;
@@ -41,6 +41,8 @@ struct us_context {
 };
 static _Thread_local us_context *active;
 static _Thread_local Allocation *allocations;
+#define ALLOCATION_BUCKETS 4096
+static _Thread_local Allocation *allocation_buckets[ALLOCATION_BUCKETS];
 typedef struct OpenFile { int fd; struct OpenFile *next; } OpenFile;
 static _Thread_local OpenFile *open_files;
 static _Thread_local jmp_buf failure;
@@ -62,14 +64,34 @@ static int tracked_close(int fd) {
 }
 /* Track all runtime allocations, including partial model loads on errors.
    The host context itself is outside this per-compilation cleanup domain. */
+static size_t allocation_bucket(void *p) {
+    uintptr_t x=(uintptr_t)p >> 4;
+    x^=x>>17; x^=x>>9;
+    return (size_t)x & (ALLOCATION_BUCKETS-1);
+}
+static Allocation **allocation_slot(void *p) {
+    Allocation **at=&allocation_buckets[allocation_bucket(p)];
+    while (*at && (*at)->p!=p) at=&(*at)->hash_next;
+    return at;
+}
 static void *tracked_realloc(void *p,size_t n) {
-    Allocation *a=p ? allocations : 0;
-    if (p) { while (a && a->p!=p) a=a->next; if (!a) __us_panic("unowned runtime allocation"); }
+    Allocation **at=p ? allocation_slot(p) : 0;
+    Allocation *a=at ? *at : 0;
+    if (p && !a) __us_panic("unowned runtime allocation");
     void *q=realloc(p,n ? n : 1);
     if (!q) __us_panic("out of memory");
-    if (!a) { a=malloc(sizeof *a); if (!a) { free(q); __us_panic("out of memory"); }
-        a->next=allocations; allocations=a; }
-    a->p=q; return q;
+    if (a) *at=a->hash_next;
+    else {
+        a=malloc(sizeof *a);
+        if (!a) { free(q); __us_panic("out of memory"); }
+        a->prev=0; a->next=allocations;
+        if (allocations) allocations->prev=a;
+        allocations=a;
+    }
+    a->p=q;
+    size_t bucket=allocation_bucket(q);
+    a->hash_next=allocation_buckets[bucket]; allocation_buckets[bucket]=a;
+    return q;
 }
 static void *tracked_calloc(size_t count,size_t size) {
     if (size && count>SIZE_MAX/size) __us_panic("allocation overflow");
@@ -77,14 +99,17 @@ static void *tracked_calloc(size_t count,size_t size) {
 }
 static void tracked_free(void *p) {
     if (!p) return;
-    Allocation **a=&allocations;
-    while (*a && (*a)->p!=p) a=&(*a)->next;
-    if (!*a) __us_panic("unowned runtime free");
-    Allocation *node=*a; *a=node->next; free(p); free(node);
+    Allocation **at=allocation_slot(p);
+    if (!*at) __us_panic("unowned runtime free");
+    Allocation *node=*at; *at=node->hash_next;
+    if (node->prev) node->prev->next=node->next; else allocations=node->next;
+    if (node->next) node->next->prev=node->prev;
+    free(p); free(node);
 }
 static void cleanup(void) {
     while (open_files) {OpenFile *node=open_files;open_files=node->next;close(node->fd);free(node);}
     while (allocations) { Allocation *a=allocations; allocations=a->next; free(a->p); free(a); }
+    memset(allocation_buckets,0,sizeof allocation_buckets);
 }
 static void diagnostic(int status,const char *reason,int n,const void *errors);
 #define UNISA_RUNTIME_LIBRARY
