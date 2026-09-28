@@ -42,7 +42,7 @@ def main():
     blob=candidate.read_bytes();digest=hashlib.sha256(blob).hexdigest()
     if blob[-16:-8]!=b'UNIPKG1\n': raise RuntimeError('candidate lacks embedded model package footer')
     size=int.from_bytes(blob[-8:],'little')
-    if not 0<size<len(blob)-16 or not blob[-16-size:-16].startswith((b'P 1 ',b'P 2 ')):
+    if not 0<size<len(blob)-16 or not blob[-16-size:-16].startswith((b'P 1 ',b'P 2 ',b'P 3 ')):
         raise RuntimeError('invalid model package extent/header')
     print(json.dumps({'candidate':str(candidate),'sha256':digest,'bytes':len(blob),'target':args.target}),flush=True)
     linux=args.target.startswith('lnx/')

@@ -2,7 +2,7 @@
 
 This is a construction/development artifact for the generic runtime, also
 used by the shipped model compiler. P1/P2 remain readable. P3 is an explicit
-size-candidate option until its product gates complete.
+new compiler-package default; its release candidate still needs product gates.
 
 ## Construction
 
@@ -280,9 +280,10 @@ build includes the C core; this is not yet the assembly or product switch.
 
 ## P3: binary networks with raw DEFLATE
 
-`pack.py --compressed` and `compilerpack.py --compressed` select P3.
+`pack.py --compressed` selects P3; `compilerpack.py` uses P3 by default.
 `PACK_COMPRESSED=1 buildcompiler.sh OUT pack` selects it for an APE candidate;
-the default is still P1/P2. Directory and uncompressed resources are unchanged.
+`PACK_COMPRESSED=0` or `compilerpack.py --legacy-package` selects P1/P2.
+Directory and uncompressed resources are unchanged.
 
 ```
 P 3 MODEL_COUNT STAGE_COUNT RESOURCE_COUNT\n

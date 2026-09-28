@@ -101,7 +101,7 @@ def retain_models(directory, rows):
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
 
-def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=False):
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -215,7 +215,8 @@ if __name__=='__main__':
     ap.add_argument('--include',required=True,type=Path)
     ap.add_argument('--kernels',type=Path,help='explicit directory containing both ISA kernel blobs')
     ap.add_argument('--audit-dir',type=Path,help='retain exact table/network pairs for offline --check-net')
-    ap.add_argument('--compressed',action='store_true',help='P3 binary+DEFLATE models')
+    ap.add_argument('--compressed',dest='compressed',action='store_true',default=True,help='P3 binary+DEFLATE models (default)')
+    ap.add_argument('--legacy-package',dest='compressed',action='store_false',help='legacy uncompressed P1/P2')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
