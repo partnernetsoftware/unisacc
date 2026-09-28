@@ -10,7 +10,8 @@ typedef struct Pair (*Exchange)(int,double,float,int*,struct Pair,int,double,int
 typedef double (*Double9)(double,double,double,double,double,double,double,double,double);
 typedef float (*Float9)(float,float,float,float,float,float,float,float,float);
 typedef long long (*Int17)(long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long,long long);
-static struct Pair host_exchange9(int a,double b,float c,int *p,struct Pair s,int e,double f,int g,int h){struct Pair r={b+c+s.d+f,a+*p+s.n+e+g+h};s.d=999;s.n=999;return r;}
+static Exchange callback9;
+static struct Pair host_exchange9(int a,double b,float c,int *p,struct Pair s,int e,double f,int g,int h){if(callback9)return callback9(a,b,c,p,s,e,f,g,h);struct Pair r={b+c+s.d+f,a+*p+s.n+e+g+h};s.d=999;s.n=999;return r;}
 static double host_double9(double a,double b,double c,double d,double e,double f,double g,double h,double i){return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9;}
 static float host_float9(float a,float b,float c,float d,float e,float f,float g,float h,float i){return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9;}
 static long long host_integers17(long long a,long long b,long long c,long long d,long long e,long long f,long long g,long long h,long long i,long long j,long long k,long long l,long long m,long long n,long long o,long long p,long long q){return a+b*2+c*3+d*4+e*5+f*6+g*7+h*8+i*9+j*10+k*11+l*12+m*13+n*14+o*15+p*16+q*17;}
@@ -22,6 +23,7 @@ static const char source[]=
 "float host_float9(float,float,float,float,float,float,float,float,float);"
 "long host_integers17(long,long,long,long,long,long,long,long,long,long,long,long,long,long,long,long,long);"
 "struct Pair exchange(int a,double b,float c,int *p,struct Pair s,int e,double f,int g,int h){return host_exchange9(a,b,c,p,s,e,f,g,h);}"
+"struct Pair callback9(int a,double b,float c,int *p,struct Pair s,int e,double f,int g,int h){struct Pair r;r.d=b+c+s.d+f;r.n=a+*p+s.n+e+g+h;return r;}"
 "double double9(double a,double b,double c,double d,double e,double f,double g,double h,double i){return host_double9(a,b,c,d,e,f,g,h,i);}"
 "float float9(float a,float b,float c,float d,float e,float f,float g,float h,float i){return host_float9(a,b,c,d,e,f,g,h,i);}"
 "long integers17(long a,long b,long c,long d,long e,long f,long g,long h,long i,long j,long k,long l,long m,long n,long o,long p,long q){return host_integers17(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q);}";
@@ -39,7 +41,9 @@ int main(int argc,char **argv){
   Float9 f9=(Float9)us_sym(c,"float9");if(!f9)return fail(c,"float9");
   Int17 i17=(Int17)us_sym(c,"integers17");if(!i17)return fail(c,"integers17");
   if((void*)exchange!=us_sym(c,"exchange"))return fail(c,"stable address");
+  Exchange bounce=(Exchange)us_sym(c,"callback9");if(!bounce)return fail(c,"callback closure");
   for(int repeat=0;repeat<100;repeat++){
+   callback9=(repeat>=50)?bounce:NULL;
    int n=4;struct Pair input={5.5,6};
    struct {uint64_t before;struct Pair value;uint64_t after;} guarded={UINT64_C(0x0123456789abcdef),{0,0},UINT64_C(0xfedcba9876543210)};
    guarded.value=exchange(1,2.5,3.25f,&n,input,7,5.75,8,14);
@@ -51,7 +55,11 @@ int main(int argc,char **argv){
       i17(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17)!=1785)return fail(c,"complete scalar argument list");
    int status=-1;if(us_call_status(c,&status))return fail(c,"call status");
   }
-  printf("O%d: bidirectional nine mixed -> 17.00 40; by-value/copy/canary, FP9, integer17, 100 repeats: ok\n",opt);us_free(c);
+  callback9=NULL;
+  if(!us_add_symbol_typed(c,"bad",(void*)host_exchange9,"bad",3))return fail(c,"malformed registration accepted");
+  int again=4;struct Pair in={5.5,6},out=exchange(1,2.5,3.25f,&again,in,7,5.75,8,14);
+  if(out.d!=17.0||out.n!=40)return fail(c,"failed registration invalidated export");
+  printf("O%d: bidirectional nine mixed -> 17.00 40; by-value/copy/canary, FP9, integer17, 100 repeats including50 typed nested callbacks; failed mutation preserves export: ok\n",opt);us_free(c);
  }
  return 0;
 }
