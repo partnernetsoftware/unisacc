@@ -45,6 +45,10 @@ CORE_FORMAT_LINKAGE int field_fill(Buf *o,I at,I width,I value) {
 #ifndef UNISA_CORE_ASM_TRANSITION
 const char *CORE_TRANSITION_NAME(const CoreModel *m, int q, int key, int *nx, int *sq) {
     *nx = -1; *sq = 0;
+    /* A declared return: the stack top names the continuation state itself. */
+    if (m->ret_ok && m->ret_ok[q] && key >= 0 && key < m->ns && m->ret_ok[q][key]) {
+        *nx = key; *sq = m->ret_seq[q]; return 0;
+    }
     if (m->isnet) {
         if (key < m->lo[q] || key > m->hi[q]) return "observation outside network domain";
         I n = m->base_next[q], s = m->base_seq[q];

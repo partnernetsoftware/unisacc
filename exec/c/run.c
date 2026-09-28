@@ -111,7 +111,7 @@ static int NS, NQ, NRG, NSTR, START;
 static char **STR; static int *STRL;
 static int *QOFF, *QLEN; static I *QA; static int NQA;          /* actions, flattened */
 static int ISNET, TOPMAX;
-static int *NLO, *NHI, *BN, *BQ;
+static int *NLO, *NHI, *BN, *BQ, *RETS; static unsigned char **RETOK;
 static int *SMODE; static int **ROWK, **ROWN, **ROWQ; static int *ROWC;
 
 static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
@@ -149,9 +149,21 @@ static void loadbytes(unsigned char *data, int len) {
     ROWK = xrealloc(0, sizeof(int *) * NS); ROWN = xrealloc(0, sizeof(int *) * NS); ROWQ = xrealloc(0, sizeof(int *) * NS);
     NLO = xrealloc(0, sizeof(int) * NS); NHI = xrealloc(0, sizeof(int) * NS);
     BN = xrealloc(0, sizeof(int) * NS); BQ = xrealloc(0, sizeof(int) * NS);
+    RETS = xrealloc(0, sizeof(int) * NS); RETOK = xrealloc(0, sizeof(unsigned char *) * NS);
+    for (int s = 0; s < NS; s++) { RETS[s] = -1; RETOK[s] = 0; }
     for (int s = 0; s < NS; s++) {
         if (ISNET) {
             ltag('H'); int m=lint(), lo=lint(), hi=lint(), n=lint(), bn=lint(), bq=lint();
+            if (m == 3) {   /* a stack bank with a declared return set */
+                int rs = lint(), rn = lint(), prev = -1;
+                if (rs < 0 || rs >= NQ || rn < 1 || rn > NS) die("bad return declaration");
+                RETS[s] = rs; RETOK[s] = xrealloc(0, NS); memset(RETOK[s], 0, NS);
+                for (int j = 0; j < rn; j++) {
+                    int k = lint(); if (k <= prev || k >= NS) die("bad return declaration");
+                    RETOK[s][k] = 1; prev = k;
+                }
+                m = 1;
+            }
             if (m < 0 || m > 2 ||
                 lo != (m == 1 ? -1 : 0) || hi != (m == 1 ? TOPMAX : 256) || n < 0 || (I)n > (I)hi - lo) die("bad network bank");
             SMODE[s] = m; NLO[s] = lo; NHI[s] = hi; ROWC[s] = n; BN[s] = bn; BQ[s] = bq;
@@ -276,6 +288,8 @@ static void unload(void) {
     free(STR); free(STRL); free(QOFF); free(QLEN); free(QA);
     free(SMODE); free(ROWC); free(ROWK); free(ROWN); free(ROWQ);
     free(NLO); free(NHI); free(BN); free(BQ);
+    for (int i = 0; i < NS; i++) free(RETOK[i]);
+    free(RETS); free(RETOK);
 }
 
 static void core_model(CoreModel *m) {
@@ -298,6 +312,8 @@ static void core_model(CoreModel *m) {
     m->hi=NHI;
     m->base_next=BN;
     m->base_seq=BQ;
+    m->ret_seq=RETS;
+    m->ret_ok=RETOK;
 }
 #ifndef UNISA_RUNTIME_LIBRARY
 static void transition(int q,int key,int *nx,int *sq) {

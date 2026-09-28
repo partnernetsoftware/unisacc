@@ -19,7 +19,21 @@ state-conditioned network, not a single dense matrix: with state one-hot
 `s_q` and a sufficiently large `M`, each active bank's hidden unit is
 `H(x-t+M*(s_q-1))`. Inactive banks contribute zero; the baselines are selected
 by `s_q`. Runtime evaluates hidden thresholds and signed output sums directly;
-it never expands the network into an answer table. Output codes are integers,
+it never expands the network into an answer table. A bank's thresholds strictly
+ascend (the loader rejects anything else), so the units active for an
+observation form a prefix: the kernel binary-searches its length and adds
+exactly those weights. That is the same sum; no answer rows or prefix sums are
+stored.
+
+A stack bank's rows that send a continuation state `k` back to `k` with one
+shared action sequence are a return: pop, then continue at the state the stack
+names. That is control over an unbounded structure (the continuation stack),
+not a finite decision, so the constructor records it as a declared return set,
+`H 3 lo hi n base_next base_seq ret_seq m k1..km units...`, and builds units only
+for the bank's other rows (for example the empty-stack row). The kernel answers
+`(k, ret_seq)` for a declared `k` before evaluating units. In e3 this removes
+the 2,461-unit return bank that dominated every procedure return; `--check-net`
+still compares every observation, returns included, against the table. Output codes are integers,
 not class logits or argmax. Observation modes and action programs remain
 explicit declarations. The generator still contains hand-written compiler
 rules, and network construction does not eliminate those rules.

@@ -12,7 +12,9 @@
 #define CM_HI 112
 #define CM_BASE_NEXT 120
 #define CM_BASE_SEQ 128
-#define CM_SIZE 136
+#define CM_RET_SEQ 136
+#define CM_RET_OK 144
+#define CM_SIZE 152
 
 #define BUF_BYTES 0
 #define BUF_ATTR 8

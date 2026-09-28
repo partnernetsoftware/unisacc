@@ -1,7 +1,9 @@
 /* Handwritten x86-64 System V core_transition. Signed 64-bit accumulation.
    Thresholds ascend (the loader rejects any other bank), so the active units
    are a prefix: a branchless binary search finds its length, then exactly
-   those weights are added. No table answers are consulted.
+   those weights are added. No table answers are consulted. A declared return
+   (ret_ok[q][key]) answers (key, ret_seq[q]) first: control flow, not a
+   network decision.
    Windows x64 has a different calling convention and is not selected here. */
 #include "layout.h"
 #ifdef _WIN32
@@ -28,6 +30,23 @@ CNAME(core_transition):
     movslq %edx,%rdx
     movl $-1,(%rcx)
     movl $0,(%r8)
+    movq CM_RET_OK(%rdi),%rax
+    testq %rax,%rax
+    je Lxnoret
+    movq (%rax,%rsi,8),%rax
+    testq %rax,%rax
+    je Lxnoret
+    testl %edx,%edx
+    js Lxnoret
+    cmpl CM_NS(%rdi),%edx
+    jge Lxnoret
+    cmpb $0,(%rax,%rdx)
+    je Lxnoret
+    movq CM_RET_SEQ(%rdi),%rax
+    movl (%rax,%rsi,4),%r10d
+    movl %edx,%r9d
+    jmp Lxstore
+Lxnoret:
     cmpl $0,CM_ISNET(%rdi)
     je Lxtable
     movq CM_LO(%rdi),%rax

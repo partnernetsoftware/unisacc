@@ -12,6 +12,7 @@ void core_host_panic(const char *s) { fprintf(stderr,"panic %s\n",s); exit(2); }
 static long checks;
 /* Independent oracle: the defining net.py sum over every unit, no early exit. */
 static int full_eval(const CoreModel *m,int q,int key,int *n,int *s) {
+    if (m->ret_ok && m->ret_ok[q] && key>=0 && key<m->ns && m->ret_ok[q][key]) { *n=key; *s=m->ret_seq[q]; return 1; }
     if (key < m->lo[q] || key > m->hi[q]) return 0;
     long long nn=m->base_next[q], ss=m->base_seq[q];
     for (int j=0;j<m->count[q];j++) if (key>=m->keys[q][j]) { nn+=m->next[q][j]; ss+=m->seq[q][j]; }
@@ -37,6 +38,8 @@ static void check(CoreModel *m,int q,int key,int expect,int n,int s) {
 }
 static unsigned rng=37;
 static int random_n(int n) { rng=rng*1664525u+1013904223u; return (int)(rng%(unsigned)n); }
+/* High bits: an LCG's low bits cycle with a short period. */
+static int random_hi(int n) { rng=rng*1664525u+1013904223u; return (int)((rng>>16)%(unsigned)n); }
 int main(void) {
     CoreModel m={0};int mode[4],count[4],lo[4],hi[4],bn[4],bq[4];
     int keys[4][257],next[4][257],seq[4][257];
@@ -78,6 +81,41 @@ int main(void) {
     count[1]=1;lo[1]=-1;hi[1]=INT32_MAX;bn[1]=-1;bq[1]=0;
     keys[1][0]=INT32_MAX;next[1][0]=4;seq[1][0]=6;
     check(&m,1,INT32_MAX-1,0,-1,0);check(&m,1,INT32_MAX,0,3,6);
+    /* Declared returns against the original stack row function f, compiled
+       the way net.py does: continuations -> return set, units for the rest. */
+    {
+        static unsigned char okbits[4][260]; unsigned char *okp[4]; int rsq[4];
+        int saved_ns=m.ns; m.ns=200; m.ret_ok=okp; m.ret_seq=rsq;
+        for(int round=0;round<256;round++) for(int i=0;i<4;i++) {
+            int fn[258],fs[258];
+            mode[i]=1;lo[i]=-1;hi[i]=256;rsq[i]=random_hi(7);okp[i]=okbits[i];memset(okbits[i],0,sizeof okbits[i]);
+            for(int key=-1;key<=256;key++) {
+                int r=random_hi(8);
+                if(key>=0 && key<m.ns && r<3){okbits[i][key]=1;fn[key+1]=key;fs[key+1]=rsq[i];}
+                else if(r<5){fn[key+1]=-1;fs[key+1]=0;}
+                else {fn[key+1]=random_hi(m.ns+1)-1;fs[key+1]=random_hi(7);}
+            }
+            bn[i]=fn[0];bq[i]=fs[0];count[i]=0;
+            for(int key=0,ln=fn[0],ls=fs[0];key<=256;key++) {
+                if(okbits[i][key]) continue;
+                if(fn[key+1]!=ln || fs[key+1]!=ls) {
+                    int j=count[i]++;keys[i][j]=key;next[i][j]=fn[key+1]-ln;seq[i][j]=fs[key+1]-ls;ln=fn[key+1];ls=fs[key+1];
+                }
+            }
+            for(int key=-1;key<=256;key++) {
+                int an=99,as=99;const char *a=core_transition(&m,i,key,&an,&as);
+                if(a || an!=fn[key+1] || as!=fs[key+1]) {
+                    fprintf(stderr,"RET q=%d key=%d f=(%d,%d) ASM=(%s,%d,%d)\n",i,key,fn[key+1],fs[key+1],a?a:"ok",an,as);exit(1);
+                }
+                check(&m,i,key,-1,0,0);
+            }
+            check(&m,i,257,1,0,0);check(&m,i,-2,1,0,0);
+        }
+        /* A null per-state entry means no returns; an undeclared continuation is
+           answered by the units only. */
+        okp[0]=0;count[0]=0;bn[0]=-1;bq[0]=0;check(&m,0,5,0,-1,0);
+        m.ret_ok=0;m.ret_seq=0;m.ns=saved_ns;
+    }
     m.isnet=0;
     for(int i=0;i<4;i++) {
         mode[i]=i%3;count[i]=3;

@@ -31,6 +31,7 @@ typedef struct {
     int *qoff, *qlen; I *qa;
     int *mode, *count, **keys, **next, **seq;
     int *lo, *hi, *base_next, *base_seq;
+    int *ret_seq; unsigned char **ret_ok;   /* declared returns; ret_ok[q] may be NULL */
 } CoreModel;
 /* Host linkage: absent=0, borrowed=1, malloc-owned=2. No key syntax
    is interpreted by the core; even NUL bytes are ordinary key bytes. */
