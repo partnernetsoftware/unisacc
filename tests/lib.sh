@@ -39,7 +39,7 @@ ua_ready() {
     else
         [ -x "$UA" ] && return 0
     fi
-    "$_LIB_R/tests/build_ref.sh" "$UA.c" "$UA" >/dev/null || {
+    bound 30 "$_LIB_R/tests/build_ref.sh" "$UA.c" "$UA" >/dev/null || {
         echo "  FAIL could not build the reference compiler ($UA)"; exit 1; }
     [ -n "${want:-}" ] && printf '%s\n' "$want" > "$UA.stamp"
     return 0

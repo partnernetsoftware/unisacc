@@ -23,68 +23,67 @@ case "$(uname -s)/$(uname -m)" in
     *)             HOST="";;
 esac
 
-# The reference is the system compiler doing what it has always done: two
-# translation units and a linker.
-if ! cc -std=c99 -w -o "$T/ref" "$D/m1.c" "$D/m2.c" 2>"$T/cc.err"; then
-    echo "  skip (no system compiler)"; exit 0
-fi
-want=$("$T/ref")
-printf "  reference (cc m1.c m2.c)   %s\n" "$want"
-
-check() {   # check <banner> <got>
-    if [ "$2" = "$want" ]; then printf "  ok   %-24s %s\n" "$1" "$2"
-    else printf "  FAIL %-24s got '%s' want '%s'\n" "$1" "$2" "$want"; rc=1; fi
+# Compare output only after the actual bounded command has exited successfully.
+checked() { # banner, expected, all|last, command...
+    local banner=$1 expected=$2 mode=$3 status got
+    shift 3
+    bound 20 "$@" >"$T/got" 2>"$T/err"
+    status=$?
+    if [ "$mode" = last ]; then got=$(cat "$T/got" "$T/err" | tail -1)
+    else got=$(cat "$T/got"); fi
+    if [ "$status" -ne 0 ]; then
+        printf '  FAIL %-24s exit %s: %s\n' "$banner" "$status" "$(tail -1 "$T/err")"
+        rc=1
+    elif [ "$got" = "$expected" ]; then
+        printf '  ok   %-24s %s\n' "$banner" "$got"
+    else
+        printf "  FAIL %-24s got '%s' want '%s'\n" "$banner" "$got" "$expected"
+        rc=1
+    fi
 }
 
-check "unisa run m1 m2"  "$($U run "$D/m1.c" "$D/m2.c" 2>"$T/e1" || cat "$T/e1")"
-# Order must not matter: `main` is in m1, and the entry sequence is emitted
-# after every unit has been walked.
-check "unisa run m2 m1"  "$($U run "$D/m2.c" "$D/m1.c" 2>"$T/e2" || cat "$T/e2")"
+# Host reference: two translation units and a linker, with separate bounds.
+if ! bound 20 cc -std=c99 -w -o "$T/ref" "$D/m1.c" "$D/m2.c" 2>"$T/cc.err"; then
+    echo "  FAIL system reference build"; cat "$T/cc.err"; exit 1
+fi
+want=$(bound 20 "$T/ref")
+status=$?
+if [ "$status" -ne 0 ] || [ -z "$want" ]; then
+    echo "  FAIL system reference execution ($status)"; exit 1
+fi
+printf "  reference (cc m1.c m2.c)   %s\n" "$want"
+checked "unisa run m1 m2" "$want" all $U run "$D/m1.c" "$D/m2.c"
+checked "unisa run m2 m1" "$want" all $U run "$D/m2.c" "$D/m1.c"
+# Implicit strlen must resolve in the second unit; clang has no such reference.
+checked "libc on demand" 5 last $U run "$D/n1.c" "$D/n2.c"
+checked "--fold" '6/6 match' last $U run "$D/m1.c" "$D/m2.c" --fold
 
-# libc on demand has to reach EVERY unit: `strlen` is used in n2.c with no
-# <string.h>, and our headers define their functions `static`.  There is no cc
-# reference for this one -- clang rejects the implicit declaration outright,
-# which is the very situation the driver's retry exists to paper over.
-got=$($U run "$D/n1.c" "$D/n2.c" 2>&1 | tail -1)
-if [ "$got" = "5" ]; then printf "  ok   %-24s %s\n" "libc on demand" "$got"
-else printf "  FAIL %-24s got '%s' want '5'\n" "libc on demand" "$got"; rc=1; fi
-
-# Six lowerings of the same tape, in the target interpreter.
-fold=$($U run "$D/m1.c" "$D/m2.c" --fold 2>&1 | tail -1)
-if [ "$fold" = "6/6 match" ]; then printf "  ok   %-24s %s\n" "--fold" "$fold"
-else printf "  FAIL %-24s %s\n" "--fold" "$fold"; rc=1; fi
-
-# And a real image on this host, because the interpreter is the forgiving one.
 if [ -n "$HOST" ]; then
-    if $U compile "$D/m1.c" "$D/m2.c" -o "$T/m" --target "$HOST" >/dev/null; then
+    if bound 20 $U compile "$D/m1.c" "$D/m2.c" -o "$T/m" --target "$HOST" >/dev/null; then
         chmod +x "$T/m"
-        command -v codesign >/dev/null && codesign -f -s - "$T/m" >/dev/null 2>&1
-        check "native $HOST" "$("$T/m")"
+        if command -v codesign >/dev/null; then
+            bound 10 codesign -f -s - "$T/m" >/dev/null 2>&1 || exit 1
+        fi
+        checked "native $HOST" "$want" all "$T/m"
     else
         echo "  FAIL native $HOST: compile failed"; rc=1
     fi
 fi
 
-# The SHIPPED compiler, not only the Python driver: `unisacc a.c b.c` is
-# what someone with one binary and two files actually types.
+# Same input through the native/reference or shipped compiler selected by UA.
 ua_ready
-if [ -x "$UA" ]; then
-    check "unisacc -run m1 m2" \
-        "$(bound 120 "$UA" -run "$D/m1.c" "$D/m2.c" 2>&1 | tail -1)"
-    check "unisacc m2 m1 -run" \
-        "$(bound 120 "$UA" -run "$D/m2.c" "$D/m1.c" 2>&1 | tail -1)"
-    got=$(bound 120 "$UA" -run "$D/n1.c" "$D/n2.c" 2>&1 | tail -1)
-    if [ "$got" = "5" ]; then printf "  ok   %-24s %s\n" "unisacc libc on demand" "$got"
-    else printf "  FAIL %-24s got '%s' want '5'\n" "unisacc libc on demand" "$got"; rc=1; fi
-    if [ -n "$HOST" ]; then
-        if bound 200 "$UA" "$D/m1.c" "$D/m2.c" \
-               -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
-            chmod +x "$T/um"
-            command -v codesign >/dev/null && codesign -f -s - "$T/um" >/dev/null 2>&1
-            check "unisacc -b $HOST" "$("$T/um")"
-        else
-            echo "  FAIL unisacc -b $HOST: compile failed"; rc=1
+checked "unisacc -run m1 m2" "$want" all "$UA" -run "$D/m1.c" "$D/m2.c"
+checked "unisacc m2 m1 -run" "$want" all "$UA" -run "$D/m2.c" "$D/m1.c"
+checked "unisacc libc on demand" 5 last "$UA" -run "$D/n1.c" "$D/n2.c"
+if [ -n "$HOST" ]; then
+    if bound 20 "$UA" "$D/m1.c" "$D/m2.c" -b "$HOST" -o "$T/um" >/dev/null 2>&1; then
+        chmod +x "$T/um"
+        if command -v codesign >/dev/null; then
+            bound 10 codesign -f -s - "$T/um" >/dev/null 2>&1 || exit 1
         fi
+        checked "unisacc -b $HOST" "$want" all "$T/um"
+    else
+        echo "  FAIL unisacc -b $HOST: compile failed"; rc=1
     fi
 fi
 
