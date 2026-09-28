@@ -2693,3 +2693,11 @@ c8201d4冻结源的shared、六目标和私有种子重新构造均rc0，P3/APE�
 后续并发决定：分开推进（1）私有插桩定位RSS与宿主分配器/真实保留映射；（2）正式POSIX库构建及消费入口，新增buildlibrary.py/libraryartifactcheck.py，不重写编译逻辑、不改执行核；（3）数据符号与resolver先做模型边界设计，函数选择与来源优先级仍由δ作答。Windows桥/OS适配、CLI复用库仍列为独立剩余，不把临时测试dylib冒充已交付库。所有共享源写者遵守文件域，候选专项仍使用冻结私有快照。
 
 本批产品com-run12/12与com-c9957/57实际rc0，根开发.com与实际c8201d4重建产物及侧车一同替换后freshness check通过；字节仍acbc2c/1,028,542 B。限定通过与生命周期rc1均封存[候选回执](research/r10-lifecycle-candidate.json)，未隐藏失败，未发布0.0.10。
+
+R10远端状态只读核对：最近CI run36434683590仍是旧42815c4三宿主失败；b_malloc/closure/tools看门狗失败已对应主树分片与共享准备修复，selfhost日志无完整诊断，不能仅归为超时或称已远端恢复。尚未有新版干净远端全绿；不为试错触发push。见[远端状态](research/r10-ci-remote-status.json)。
+
+R10生命周期测量方法决定：独立私有实验原生C进程在同300暖机+1000实际调用、原512KiB范围判据下，单跑与并发ASan格式控制均通过，live/reserved保持稳定；两轮Python诊断也未复现阶跃，不能声称已证旧失败唯一根因。正式长期RSS专项移到无Python/ctypes/线程池参与测量的原生C进程，固定数组保留13次采样，macOS另记malloc live/reserved；原Python四线程、exit、guest映射与释放专项保持。持续真实编译，不缓存答案、不释放分配器保留页来造绿；原失败回执保留。
+
+正式POSIX库首片实跑：同acbc2c模型包、当前运行时生成macOS ARM静态97,352 B与动态108,032 B，两种公开C API消费者均通过解析失败后define恢复、O0/O1/O2编译映射、main17与sum42及main后再调用；ZERO_AR_DATE=1后重复构建字节一致。明确依赖宿主C11构建工具及libffi/system libc，运行消费不需要编译器；其他平台未验。新增lib-artifacts门禁在私有目录构建后实际消费，原artifactcheck仍支持验已构建发布目录，不把测试临时dylib算发布资产。
+
+正式native生命周期实现实跑rc0：总专项13.96秒（保留Python四上下文/exit/guest释放）；原生同上下文300暖机+1000次真实compile/run，10次测量RSS范围16KiB，live blocks/bytes及reserved恒定，每次事务分配零。人为每100轮真实保留1MiB的负控制完整执行后rc9、RSS范围11,272,192 B，证明原512KiB检查仍能抓真实保留增长。此前Python进程阶跃失败不撤销，也未证明唯一原因；[正例](research/r10-library-native-lifecycle.json)、[真实增长控制](research/r10-library-native-growth-control.json)与补丁保留。正式static/dynamic构建消费集成也rc0，见[库产物](research/r10-library-artifacts-native.json)。

@@ -50,6 +50,23 @@ __attribute__((visibility("default"))) int test_mapped(long p){unsigned char v;r
   L.test_runtime_count.restype=ctypes.c_long
   L.test_resident_bytes.restype=ctypes.c_ulonglong
   resident_samples=[];warmup_resident_samples=[]
+  started=time.monotonic()
+  native_lifecycle=None
+  if a.iterations==1000:
+   native=td/'native-lifecycle'
+   source=ROOT/'tests/libunisacclifecycle.c'
+   bridge=runtime/('librarycall_'+('arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64')+'.S')
+   subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-I',str(td),str(source),str(bridge),'-lffi','-o',str(native)],check=True,timeout=30)
+   result=subprocess.run([str(native),pkg.decode()],capture_output=True,text=True,timeout=40)
+   assert result.returncode==0,(result.returncode,result.stdout,result.stderr)
+   native_lifecycle=json.loads(result.stdout)
+   assert native_lifecycle['actual_iterations']==1000 and native_lifecycle['warmup_iterations']==300
+   assert native_lifecycle['runtime_allocations_after_each_call']==0
+   assert native_lifecycle['resident_range_bytes']<=512*1024
+   assert len(native_lifecycle['samples'])==13
+   warmup_resident_samples=[x[1] for x in native_lifecycle['samples'][:3]]
+   resident_samples=[x[1] for x in native_lifecycle['samples'][3:]]
+   native_lifecycle['binary_sha256']=hashlib.sha256(native.read_bytes()).hexdigest()
   def run(source,expected,iterations):
    c=L.us_new(pkg);assert c
    try:
@@ -71,11 +88,10 @@ __attribute__((visibility("default"))) int test_mapped(long p){unsigned char v;r
   L.test_guest_count.argtypes=[ctypes.c_void_p];L.test_guest_count.restype=ctypes.c_long
   L.test_guest_base.argtypes=[ctypes.c_void_p];L.test_guest_base.restype=ctypes.c_long
   L.test_mapped.argtypes=[ctypes.c_long]
-  started=time.monotonic()
   with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
    list(ex.map(lambda n:run(('int main(int argc,char **argv){return argc+'+str(n)+';}').encode(),n+2,3),range(4)))
   run(b'#include <stdlib.h>\nint main(void){exit(51);return 9;}',51,1)
-  run(b'int main(int argc,char **argv){return argc+37;}',39,a.iterations)
+  run(b'int main(int argc,char **argv){return argc+37;}',39,1 if native_lifecycle else a.iterations)
   run(b'int main(int argc,char **argv){return argc==2 && argv[2]==0 && argv[1][0]==97 ? 61 : 3;}',61,1)
   run(b'#include <stdlib.h>\nint main(void){exit(0);return 9;}',0,1)
   c=L.us_new(pkg)
@@ -90,5 +106,5 @@ __attribute__((visibility("default"))) int test_mapped(long p){unsigned char v;r
    base=L.test_guest_base(c);assert base and L.test_mapped(base)==1
   finally:L.us_free(c)
   assert L.test_mapped(base)==0,'guest mapping survives context free'
-  print(json.dumps({'scope':target+' actual host execution','concurrent_contexts':4,'explicit_exit_host_survived':True,'guest_pool_released':True,'same_context_compile_relocate_run_iterations':a.iterations,'seconds':time.monotonic()-started,'runtime_allocations_after_each_call':0,'resident_bytes_every_100_cycles':resident_samples,'resident_warm_plateau_tolerance_bytes':512*1024,'same_context_warmup_iterations':300 if a.iterations>=1000 else 0,'warmup_resident_bytes_every_100_cycles':warmup_resident_samples,'package_sha256':hashlib.sha256(pathlib.Path(a.package).read_bytes()).hexdigest(),'native_library_sha256':hashlib.sha256(out.read_bytes()).hexdigest()}))
+  print(json.dumps({'scope':target+' actual host execution','concurrent_contexts':4,'explicit_exit_host_survived':True,'guest_pool_released':True,'same_context_compile_relocate_run_iterations':a.iterations,'seconds':time.monotonic()-started,'native_lifecycle':native_lifecycle,'runtime_allocations_after_each_call':0,'resident_bytes_every_100_cycles':resident_samples,'resident_warm_plateau_tolerance_bytes':512*1024,'same_context_warmup_iterations':300 if a.iterations>=1000 else 0,'warmup_resident_bytes_every_100_cycles':warmup_resident_samples,'package_sha256':hashlib.sha256(pathlib.Path(a.package).read_bytes()).hexdigest(),'native_library_sha256':hashlib.sha256(out.read_bytes()).hexdigest()}))
 if __name__=='__main__':main()
