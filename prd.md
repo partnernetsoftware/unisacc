@@ -2857,3 +2857,5 @@ R10 variadic完整调用闭环本批实施：E3同时处理USBIND3 format2原型
 本批公开variadic真实回归红基线：tests/libraryabi/variadic_bidirectional.c经真实公开API与当前bd41d0d3模型包运行，编译明确拒绝library import binding or signature、rc1；不算完成。新回归含同原型混合/零尾两种调用图、signed char/unsigned short/_Bool/float默认提升、嵌套float函数实参、六个额外FP尾参数跨寄存器、指针/Pair按值与返回、100次/优化级、失败注册保留旧导出、后置源码定义优先与缺前缀拒绝。宿主适配已实跑原固定typed普通及ASan/UBSan回归，变参新模型仍待交付。
 
 本批私有quiet E3候选公开调用已实测：ARM普通/ASan+UBSan、Rosetta普通各O0/O1/O2×100次全部通过，真实va_arg图/提升/Pair/零尾/后置源码优先与缺前缀、前缀不符拒绝通过。独立图字段检查抓到首版350–357与modelsignature银行重叠，改400–407并断言隔离；第一版仅接受判定不足、不作为通过证据。新模型进入正式构造与受影响门禁之前，根产品仍保持旧bd41d0d3。callback图后续设计见research/r10-callback-graph-next-design.md（仅设计，不把现host全局us_sym回跳等同于callback形参跨界）。
+
+本批FP栈探针口径更正：首轮fixed double1+提升float1+额外double6合计8，恰好仍在ARM/x86的8个FP寄存器内，不能证明跨栈；已将额外double增为7、总FP9，并在正式候选两ISA普通/ASan验收中重跑。不删除首轮结果，但撤回其中FP跨栈表述。

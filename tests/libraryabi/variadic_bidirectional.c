@@ -12,7 +12,7 @@ static struct Pair host_exchange(double seed,int mode,...){
  if(mode==7){int c=va_arg(ap,int),u=va_arg(ap,int),b=va_arg(ap,int);double f=va_arg(ap,double);int *p=va_arg(ap,int*);struct Pair q=va_arg(ap,struct Pair);
   if(c!=-3||u!=24||b!=1||f!=2.5||!p||*p!=9||q.d!=4.0||q.n!=11)native_bad++;
   r.d+=f+*p+q.d;r.n+=c+u+b+q.n;
-  for(int i=0;i<6;i++)if(va_arg(ap,double)!=0.0)native_bad++;
+  for(int i=0;i<7;i++)if(va_arg(ap,double)!=0.0)native_bad++;
   mixed_calls++;
  }else if(mode==0)empty_calls++;else native_bad++;
  va_end(ap);return r;
@@ -24,7 +24,7 @@ static const char source[]=
 "struct Pair host_exchange(double,int,...);"
 "float tailvalue(void){return 2.5f;}"
 "struct Pair run_case(void){signed char c=-3;unsigned short u=24;_Bool b=1;int n=9;struct Pair p={4.0,11};"
-"struct Pair r=host_exchange(1.5,7,c,u,b,tailvalue(),&n,p,0.0,0.0,0.0,0.0,0.0,0.0);"
+"struct Pair r=host_exchange(1.5,7,c,u,b,tailvalue(),&n,p,0.0,0.0,0.0,0.0,0.0,0.0,0.0);"
 "struct Pair z=host_exchange(3.25,0);r.d+=z.d;r.n+=z.n;return r;}";
 static int source_shadow(const char *package,const char *target,const char *dir,int opt){
  const char *s="struct Pair {double d;int n;};struct Pair host_exchange(double,int,...);struct Pair shadow(void){return host_exchange(8.0,4,1);}struct Pair host_exchange(double a,int b,...){struct Pair p={a+1.0,b+2};return p;}";
