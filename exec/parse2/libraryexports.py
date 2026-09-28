@@ -116,10 +116,14 @@ def install(E,P,b,start,integers):
     imports_start=imports_install(E,P,b,start,integers)
     # Complete parameter capture is also needed by ordinary source calls.
     # The legacy first-eight cache default-promoted a ninth fixed float.
-    # Reuse the same pool and conversion machine for every named prototype;
-    # genuinely variadic tail and absent declarations retain the old path.
+    # Extend only the missing ninth-and-later slots. First-eight source slots
+    # retain PDB, whose declarator path includes array/function decay; the
+    # export descriptor captured before FN.pfpdecl1 is not that conversion.
+    # Typed imports keep their separate complete-signature query below.
+    # Genuinely variadic tail and absent declarations retain the old path.
     g.st['LX.original.argumentquery']=g.st.pop('CL.namedquery');g.labels.add('LX.original.argumentquery')
-    P('LX.argumentquery').a(('LDX','lx_callsig','fid',b['FPS_FN'])).branch({1:'LX.original.argumentquery'},'LX.callcount',[('CMPI','lx_callsig',0)])
+    P('LX.argumentquery').branch({0:'LX.original.argumentquery'},'LX.argumentlong',[('CMPI','na',8)])
+    P('LX.argumentlong').a(('LDX','lx_callsig','fid',b['FPS_FN'])).branch({1:'LX.original.argumentquery'},'LX.callcount',[('CMPI','lx_callsig',0)])
     g.st['CL.namedquery']=g.st['LX.argumentquery']
     P('LX.callcount').a(('LDX','lx_callcount','lx_callsig',b['FPS_COUNT'])).branch({0:'LX.callindex'},'LX.original.argumentquery',[('CMP','na','lx_callcount')])
     P('LX.callindex').a(('ALUI','mul','lx_callindex','lx_callsig',1024),('ALU','add','lx_callindex','lx_callindex','na'),('LDX','lx_callmark','lx_callindex',PARAMMARK),('LDX','lx_callepoch','lx_callsig',SIGEPOCH)).branch({1:'LX.calltype'},'LX.original.argumentquery',[('CMP','lx_callmark','lx_callepoch')])
