@@ -2729,4 +2729,4 @@ macOS正式1000循环生命周期以暖后全zone live bytes和blocks零增长�
 
 正式修正首验13.46秒：1000真实compile/run全zone live bytes/blocks范围均0、owned image/stack恒定，RSS范围3,063,808 B仍明确标为超原阈值。新的不触页真实保留控制live+9,437,184 B/blocks+9且rc9，RSS仅32KiB原判据会漏检：说明live裁判同时避免释放页false positive与未触页malloc false negative，并非放宽相同性质阈值。见research/r10-native-lifecycle-live.json，Linux仍旧判据；实际完整受影响门禁待冻结复验。
 
-9332cb8冻结测试树、真实26def90/0dadf387产物的12项受影响门禁全部rc0（双槽19秒），根.com真实bytes1,039,038、freshness核源通过。所有原RSS失败仍保留，当前成功只按已声明macOS全zone live+owned/mapping判据；真实未触页malloc控制无编译、用1000检测循环抓live+9MiB，而正例执行300暖机+1000完整compile/map/run。最终回执research/r10-data-live-final-gates.json。全R10/最终全套/其他平台/企业签名/发布未闭合，resolver方案已定但尚未实现。
+9332cb8冻结测试树、真实26def90/0dadf387产物的12项受影响门禁全部rc0（双槽20秒），根.com真实bytes1,039,038、freshness核源通过。所有原RSS失败仍保留，当前成功只按已声明macOS全zone live+owned/mapping判据；真实未触页malloc控制无编译、用1000检测循环抓live+9MiB，而正例执行300暖机+1000完整compile/map/run。最终回执research/r10-data-live-final-gates.json。全R10/最终全套/其他平台/企业签名/发布未闭合，resolver方案已定但尚未实现。
