@@ -2949,3 +2949,9 @@ R10聚合/回调SCRIPT尾参公开实际验收：Pair与Leaf尾的native固定�
 R10 Linux ARM实际公开ABI验收：Lima default已运行（本次未启动/关闭任何VM），补libffi-dev3.5.2-4后，在客机私有tmp、同根P3 SHA51d0d1dd…实际跑公开concrete变参/typed specialization、固定五段callback、Pair转发/retained Relay以及owner outcome。前三项均ASan+UBSan/O0/O1/O2×100，outcome普通+ASan/UBSan各三优化级，全rc0；尾参Pair/Leaf、来源转换、exit23正常回返/canary/隔离/恢复均通过。四项guest日志及包/runtime身份见research/r10-callback-linux-arm-evidence.json。第一次固定native runner误传其不支持的--evidence参数rc2，不列通过；修正独立调用后rc0。所有host外层55s、guest50s、内步20s，未改源码或共用UA；Linuxx86/Windows/layout/full release仍待。
 
 R10 NativePlan下一片设计选择：完整USLSIG2已有tag2 union/bitfield布局，而ffi支持门正确拒绝；下一步采用独立target ABI模型生成显式BANK搬运计划，通用native gateway只加载/捕获bank与有界copy，不在C分类union，不把union伪装ffi bytearray。先建立真实U{double,u64} public round(U)->host_flip(U)红基线，必须同时覆盖export与import路径，再确定有版本plan framing及resolver freeze接点；设计尚未实现，不以八字节union代替完整目标。并行代理只持新union探针域，父持协议/PRD/后端接线。USLSIG2协议文档已同步当前callback/typed-var实际能力，撤下“尚未接线”的过时表述。
+
+
+### R10 union实际红基线与NativePlan后端修订（2026-09-29）
+当前P3 SHA51d0d1dd…，ARM/Rosetta各实际跑bidirectional与export-only：四次runner均rc1，不列通过。引用host_flip的路径registration/unused-binding compile成功，实际源在模型compile拒绝“library import binding or signature”；export-only compile/relocate成功，us_sym拒绝“missing or unsupported function export”。证据research/r10-union-public-red.json与tests/libraryabi/union_native.c；测试保留O0/O1/O2×100真实调用的完成条件，当前在O0首拒绝结束，未加入假绿门禁。
+
+后端决定修订：NativePlan分FFI_CARRIER与BANK。模型按完整原图与target profile选择ABI等价carrier，并声明有界COPY_BYTES；宿主只据声明构建CIF及拷贝，原图继续用于source/binding匹配、aggregate slot语义、owned范围与callback identity，不把union类型替换为scalar。首片mixed union{double,u64}8采用模型认证u64 carrier；double-only union与寄存器耗尽是强制反例控制，不接受“size8就用整数”的规则。计划必须绑定target与原/载体完整签名，resolver freeze前的plan准备、E3能力检查、us_sym和callable转换均须真实接线后才能称完成。不能可靠表达的SSEUP/HVA/unaligned MEMORY等继续BANK，long double源折叠F64需另外修源表示；此决定不缩union/bitfield/wide-FP六平台完整目标。下一步并行推进模型认证及通用机械适配，私有实验不冒充出货能力。
