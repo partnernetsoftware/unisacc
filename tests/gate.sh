@@ -199,6 +199,7 @@ job lib-data python3 ./tests/libunisaccdatacheck.py --package "${MODEL_COM:-./un
 job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-resolver-host python3 ./tests/libraryresolverhostcheck.py
 job lib-word64 python3 ./tests/librarywordcheck.py --native-only
+job exec-binaryio python3 ./tests/runtimeiocheck.py
 job exec-crcllp64 python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
 job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000

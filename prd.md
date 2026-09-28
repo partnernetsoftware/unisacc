@@ -2762,3 +2762,11 @@ Windows新SDK快照两ISA正式DLL已真实C/桥compile与link成功，无隔离
 8ef6fe6完整冻结源的shared、六目标、pack实际rc0；候选1,055,907 B，SHA256 `071cf2dbda46b8fa641fdb02d1a577702f4d8c2f34a14f8b851be07535fd79e6`，来源侧车check通过。双槽16项受影响门禁全部rc0（24秒），另C/ARM/x86执行核3项全部rc0（27秒）。真实新版resolver涵盖不支持float/aggregate/variadic/>6参数候选的source定义与unused优先、实际external拒绝；readonly data同域检查。生命周期1000实际循环按macOS all-zone live+owned判据通过，RSS仍是诊断而非零增长证明。根开发产物更新到该真实候选，版本仍0.0.9 development，不能冒称0.0.10发布物。
 
 Windows两ISA正式DLL用真实SDK和官方libffi3.5.2完成交叉编译链接，17个API导出，编译日志零告警；未完成Windows原生运行、ARM SEH、resolver、guest mmap与完整ABI，不算六平台库交付。永久交叉构建回执见research/r10-windows-dll-evidence.json。默认模型的种子/最终产物命名拆分仍为咨询建议，尚未实施。完整R10、最终全套、远端CI、企业签名发布仍待完成。
+
+### R10 Windows真实依赖运行验收决定（2026-09-29）
+
+下一片先在本地Windows ARM客机执行已固定官方libffi3.5.2的ARM原生与x86仿真call/closure探针，随后通过LoadLibrary/GetProcAddress消费实际DLL的公开API。每次RPC与客机执行各自有界，不启动Linux客机；仅关闭本轮启动的Windows客机。这一步不把探针成功外推为完整编译模型或SEH安全，现有Windows library lower拒绝仍须后续迁移。DLL/public API运行若失败保留首差，不把cross-link当pass。
+
+R10 Windows首个真实DLL失败已定位：native CRT的open(O_RDONLY)默认text mode，压缩包内CRLF/0x1a会变换或提前EOF，随后footer缺失。ARM/x86官方libffi call+closure实际rc0，仅依赖通过；真实DLL API首次compile rc6，保留首差。修复仅native Windows文件IO加O_BINARY，不改模型或编译决策，再用相同包复验实际DLL。UTM exec参数分隔符不会代为吞掉，RPC早返回且OSStatus错误可仍rc0；新runner据guest rc文件与stderr判断，guest程序10秒、RPC15秒、整体55秒。
+
+R10 Windows真实运行结果：官方libffi ARM原生、x86_64在ARM上的仿真两probe call42/closure43均rc0。二进制IO独立65539字节向量（全byte值、跨65536扩容）两目标实际rc0，native与ASan/UBSan宿主rc0；恢复旧text mode的ARM变异体只读26字节并rc3，证明裁判确实抓到0x1a截断。真实DLL加binary IO后两目标都完成O0源码compile（334B tape），但relocate明确rc8/not covered Windows lowering，不能算库通过。完整公开API探针会继续要求实际原生导出check(5)=12及O0/O1/O2，不以compile通过降低验收。回执research/r10-windows-native-first-evidence.json，Windows客机已stop并status=stopped。新增exec-binaryio本地native/ASan门禁；WindowsVM专项单独运行，不让无VMskip算pass。

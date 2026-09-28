@@ -60,7 +60,14 @@ static long io_close(long fd) { return __close(fd); }
 #else
 #include <unistd.h>
 #include <fcntl.h>
-static long io_open(const char *path) { int fd = open(path, O_RDONLY); return fd < 0 ? -errno : fd; }
+static long io_open(const char *path) {
+    int flags = O_RDONLY;
+#ifdef _WIN32
+    /* CRT text mode rewrites CRLF and stops on 0x1a in model packages. */
+    flags |= O_BINARY;
+#endif
+    int fd = open(path, flags); return fd < 0 ? -errno : fd;
+}
 static long io_read(long fd, void *p, long n) { long r = read((int)fd, p, (size_t)n); return r < 0 ? -errno : r; }
 static long io_close(long fd) { return close((int)fd); }
 #endif
