@@ -2820,3 +2820,9 @@ R10 本轮源实现：USBIND3 完整递归签名经共享 δ 规范化，宿主�
 R10 首轮 typed 整包失败保留：4774981 候选 1,080,232 B/SHA256 7a9135d37118d81436306eab71f03fddb504d7e26d3b28b6f4f98394dc411553，ARM64 与 Rosetta 均因真实 Pair 声明的 storage_bytes 与模型不一致被拒绝。模型此前普通成员误写0，合成探针也误写0；改为普通成员 MSZ、位域 BFS，并让探针采用真实8/4布局和无名形参。新 E3 全域 1,912,647 观察通过；原生组合候选尚待重构，不以这次局部通过代替验收。
 
 R10 typed 私有替换包验收：ARM64/Rosetta 的 O0/O1/O2 均通过 Pair9、double9、float9、整数17 的各100次真实双向调用，其中每级50次为 native→script→native→script 聚合回调；失败注册保留旧导出、固定9调用8/10拒绝、源码变参函数优先且原生函数调用计数不变。候选选择仍在模型，不在宿主；完整参数转换复用既有转换机。此为单阶段替换的私有P2试验（e8bc6e…），不冒称正式出货；正式P3重构和受影响门禁随后执行。所有首轮失败与修复原因见 research/r10-ffi-typed-first-candidate.json。
+
+### R10 typed 正式候选验收（2026-09-29）
+
+0773e18 冻结源重新构造 shared/六目标/P3/APE，每步≤55s、私有UA，无共享构建路径污染。根开发 `.com` 与真实来源侧车一同更新：**1,080,781 B，SHA256 `2fe21bc359b0ce09d280aeeeaf2eea8b1e9737d0bdd1b5583fe65ed4d6b5de8b`**。正式候选30项受影响门禁全rc0；实际保留的23对table/network全部全域一致。新双向fixed ABI在ARM64/Rosetta的O0/O1/O2各100次，包括50次typed聚合嵌套回调；缺/多参数、失败注册与源码变参优先控制通过。产品run12/12、c9957/57，kernel59项无stale；完整自源tape4,480,071 B与参考相同，该selfchecker自身为table路径，不能冒称整容器网络自重打包。
+
+回执：[真实本批候选](research/r10-ffi-typed-final-candidate.json)；首轮失败保留另册。版本仍0.0.9开发候选，**不称整个0.0.10已完成或发布**。完整typedvariadic/函数指针callback签名/union-bitfield及宽longdouble NativePlan、六平台原生/WindowsSEH、最终全套、文档论文最终同步、企业签名发布仍保持原范围。没有开VM、push或release。
