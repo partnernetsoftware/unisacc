@@ -2701,3 +2701,5 @@ R10生命周期测量方法决定：独立私有实验原生C进程在同300暖�
 正式POSIX库首片实跑：同acbc2c模型包、当前运行时生成macOS ARM静态97,352 B与动态108,032 B，两种公开C API消费者均通过解析失败后define恢复、O0/O1/O2编译映射、main17与sum42及main后再调用；ZERO_AR_DATE=1后重复构建字节一致。明确依赖宿主C11构建工具及libffi/system libc，运行消费不需要编译器；其他平台未验。新增lib-artifacts门禁在私有目录构建后实际消费，原artifactcheck仍支持验已构建发布目录，不把测试临时dylib算发布资产。
 
 正式native生命周期实现实跑rc0：总专项13.96秒（保留Python四上下文/exit/guest释放）；原生同上下文300暖机+1000次真实compile/run，10次测量RSS范围16KiB，live blocks/bytes及reserved恒定，每次事务分配零。人为每100轮真实保留1MiB的负控制完整执行后rc9、RSS范围11,272,192 B，证明原512KiB检查仍能抓真实保留增长。此前Python进程阶跃失败不撤销，也未证明唯一原因；[正例](research/r10-library-native-lifecycle.json)、[真实增长控制](research/r10-library-native-growth-control.json)与补丁保留。正式static/dynamic构建消费集成也rc0，见[库产物](research/r10-library-artifacts-native.json)。
+
+fa9b452源（正式库builder+原生生命周期checker）重新构造shared/六目标/私有种子与P3/APE均rc0，根实际产物与真实侧车一同替换后freshness通过，仍acbc2c/1,028,542 B。冻结快照双槽五门禁lib-format/lib-artifacts/lib-lifecycle/com-run/com-c99全rc0，17秒；1000测量RSS范围196,608 B、live/reserved恒定，明确原512KiB阈值非零增长形式证明。回执[最终本批候选](research/r10-library-artifact-candidate.json)。旧Python进程RSS失败仍保留；本批不代表整个R10或六平台/签名发布完成。
