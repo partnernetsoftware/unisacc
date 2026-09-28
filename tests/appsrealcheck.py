@@ -3,7 +3,9 @@
 Live self maps require structural checks, not equality between different binaries.
 All commands and descendants are bounded; there is no synthetic demo fallback.
 """
-import argparse, os, pathlib, platform, subprocess, tempfile, time
+import argparse, os, pathlib, platform, re, subprocess, tempfile, time
+from appsstructurecheck import processes as check_processes, maps as check_maps
+from appsstructurecheck import windows as check_windows, process_report, window_list, check_controls
 
 ROOT = pathlib.Path(os.environ.get('APP_ROOT', pathlib.Path(__file__).resolve().parents[1])).resolve()
 p = argparse.ArgumentParser()
@@ -19,26 +21,35 @@ def run(args, expected=0):
     if remaining < 1: raise RuntimeError('whole check deadline exceeded')
     r = subprocess.run(['python3', str(ROOT/'tests/bound.py'), str(remaining), *map(str, args)],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if r.returncode != expected:
+    allowed = expected if isinstance(expected, tuple) else (expected,)
+    if r.returncode not in allowed:
         raise RuntimeError(f'{args}: exit {r.returncode}, expected {expected}: {r.stderr.decode(errors="replace")}')
     return r
 
 try:
+    check_controls()
     prefix = ['/bin/sh', a.compiler] if a.compiler.read_bytes()[:2] == b'MZ' else [a.compiler]
     with tempfile.TemporaryDirectory(prefix='unisacc-apps-test-') as td:
         d = pathlib.Path(td)
         # Actual unisacc programs collect their own live inputs. No cc collector.
-        processes = run([*prefix, '-run', a.apps/'procview.c', '--', '--capture']).stdout
-        maps = run([*prefix, '-run', a.apps/'memmap.c', '--', '--capture']).stdout
-        if not processes.strip() or not maps.strip(): raise RuntimeError('empty application-captured live data')
+        process_capture = run([*prefix, '-run', a.apps/'procview.c', '--', '--capture'])
+        map_capture = run([*prefix, '-run', a.apps/'memmap.c', '--', '--capture'])
+        processes, maps = process_capture.stdout, map_capture.stdout
+        process_count, map_count = check_processes(processes), check_maps(maps)
+        # Capture RSS=0 does not distinguish unreadable RSS from genuine zero.
+        # The live default report separately checks its '?' privilege notice.
+        if platform.system() == 'Darwin':
+            if not re.search(rb'querying this process, pid [1-9][0-9]*', map_capture.stderr):
+                raise RuntimeError('captured self maps did not name their own PID')
+        print(f'captured structure: {process_count} unique processes, {map_count} ordered non-overlapping regions', flush=True)
         (d/'processes').write_bytes(processes)
         (d/'maps').write_bytes(maps)
         if platform.system() == 'Darwin':
             windows = run([*prefix, '-run', a.apps/'winlayout.c', '--', '--capture']).stdout
-            if not windows.startswith(b'screen '): raise RuntimeError('live window snapshot missing screen')
         else:
             # Analytic fixture only; live windows are unavailable on this platform.
             windows = b'screen 100 100\n0 0 100 100 bottom\n0 0 50 100 top\n'
+        check_windows(windows)
         (d/'windows').write_bytes(windows)
         inputs = {'procview':d/'processes', 'memmap':d/'maps', 'winlayout':d/'windows', 'exeinfo':a.compiler}
         for app, source_input in inputs.items():
@@ -74,8 +85,8 @@ try:
                     print('winlayout: live API unavailable on this platform; not counted as live pass',flush=True)
                     continue
                 text = own.stdout
-                if app == 'procview' and b'== process tree (' not in text:
-                    raise RuntimeError('live process collection missing structure')
+                if app == 'procview':
+                    process_report(text)
                 if app == 'memmap':
                     if b'== regions (' not in text or b'lowest start' not in text:
                         raise RuntimeError('live self maps missing structure')
@@ -89,7 +100,26 @@ try:
                 (d/'empty').write_bytes(b'')
                 run([*prefix, '-run', source, d/'empty'], expected=1)
             print(f'PASS {app}: cc / model -run / native, missing input, default and empty checks', flush=True)
-        print('real apps: 4 checked; process/maps snapshots live; windows '+('application-captured live' if platform.system()=='Darwin' else 'analytic fixture only'))
+        # winlist has no captured-input analyzer: each model invocation queries
+        # its own window server. Compare structure, never live output with cc.
+        live_lists = 0
+        for args, all_windows in (([], False), (['--all'], True)):
+            result = run([*prefix, '-run', a.apps/'winlist.c', '--', *args], expected=(0, 1))
+            if result.returncode == 0:
+                if platform.system() != 'Darwin':
+                    raise RuntimeError('winlist unexpectedly claims a live non-macOS binding')
+                window_list(result.stdout, all_windows)
+                live_lists += 1
+            else:
+                unavailable = re.search(rb'winlist: (framework load failed|missing |FFI call |no GUI window-server session|the window server is only reachable)', result.stderr)
+                if result.stdout.strip() or not unavailable:
+                    raise RuntimeError('winlist exit 1 is not an explicit unavailable-query diagnostic')
+                if a.live_windows:
+                    raise RuntimeError('required live winlist query unavailable: '+result.stderr.decode(errors='replace'))
+                print('winlist: query unavailable; not counted as live pass: '+result.stderr.decode(errors='replace').strip(), flush=True)
+        run([*prefix, '-run', a.apps/'winlist.c', '--', '--invalid'], expected=2)
+        print(f'winlist: {live_lists}/2 live modes checked; invalid argument rejected', flush=True)
+        print('real apps: 4 captured-input analyzers checked; process/maps snapshots live; windows '+('application-captured live' if platform.system()=='Darwin' else 'analytic fixture only'))
 except (OSError, RuntimeError) as error:
     print('real apps: FAIL:', error, flush=True)
     raise SystemExit(1)
