@@ -10,65 +10,50 @@ rewrites ...) is answered by a small integer neural network whose weights are
 **constructed** from the decision table and **verified by enumeration** over
 the table's whole domain, not trained.
 
-## Local model default (local acceptance complete)
+## Model product: published baseline and local candidate
 
-The model route builds a separate `unisacc.com` candidate from declarative
-rules, dynamic facts and shared templates. Offline Python constructs and
-checks its 32 integer networks; the packaged compiler runs without Python.
-The classic C and Python implementations remain references and explicit
-fallbacks. A model refusal does not silently retry through the classic path.
-`make com` now builds the model compiler; `make classic-com` preserves the
-classic fallback as `out/unisacc-classic.com`. The local `unisacc.com` was
-rebuilt byte for byte from the tested candidate. The published v0.0.7 artifact
-remains classic; no new release is claimed here.
+`make com` builds the model compiler from declarations, dynamic facts and
+shared templates. Offline Python constructs and checks integer networks;
+the packaged compiler runs without Python. The classic C and Python
+implementations remain behavior references. `make classic-com` builds an
+explicit fallback at `out/unisacc-classic.com`; a model refusal never silently
+retries through it.
 
-| Candidate snapshot | Evidence / status |
+| Snapshot | Evidence / status |
 |---|---|
-| Source / artifact | `85eaeb9` / `9a0ae470` (short IDs; full artifact hash below) |
-| Models and routes | 32 distinct constructed networks, 938 stage-route rows, 21 resources |
-| Network equivalence | All 32 network/table pairs checked across their complete declared observation domains, including actions and strings |
-| Package / container | `compiler.pkg` 6,095,823 bytes; `.com` 6,279,167 bytes; the complete package occurs physically once |
-| Complete candidate gate | Frozen code tree `1ccb16e`: V5 171/171 passed; local release audit returned 0. |
-| Target and bootstrap evidence | Specified six-target smoke and fixed-package driver N1=N2=N3 completed; see bounded scope below |
-| Default switch / publication | Local `make com` switched and verified; no new release published. |
+| Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
+| Current local candidate | Built from `44fc348`, finalized at `75e54ef`; `.com` 1,083,311 B; SHA-256 `01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631` |
+| Model organization | 32 shared constructed networks, 938 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
+| Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
+| Local verification | Current candidate passed 179/179 local gate items; Linux arm64 hello/fib/convert also ran through model `-run` and compiled/native execution |
+| Remaining release work | Local v0.0.9 candidate is **not published**; this round has no Windows execution or Linux x86-64 execution evidence |
 
-Candidate SHA-256: `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.
-Package SHA-256: `a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`.
+The authoritative [pipeline design](prd.md#pipeline-design) describes each
+stage's inputs, outputs, control structure, rule sources and limits. The
+[current integrated evidence](research/memory-once-integrated-bench-20260928.json)
+records candidate identity, gate receipts and timing. On the same macOS arm64
+driver and calc input, five warm samples gave medians of 205.382 ms
+(P2/two-pass), 207.770 ms (P3/two-pass) and 172.749 ms (P3/one-pass).
+These are input-specific compilation/run-entry measurements, not produced
+program runtime or a claim about every program.
 
-With the fixed package, model-driven N1=N2=N3 are identical complete
-115,746-byte Mach-O drivers (SHA-256
-`6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03`).
-The N3 successor passed empty-PATH O0/O2 memory and native probes; a missing
-package returns 2. This is driver self-hosting with a fixed network package,
-not reconstruction of the networks, package or APE container.
+Finite-domain checks prove network/table equality, not complete C99 semantics.
+Fixed-package driver N1=N2=N3 checks do not prove reconstruction of networks,
+the package or the APE container. Historical candidate hashes, 171/177-item
+gates, platform smoke and older performance measurements remain in the
+[S-17 migration archive](archive/s17-migration-log-20260928.md) and
+[original final evidence](research/s17-final-evidence.json); they do not transfer
+to the current candidate.
 
-The specified smoke covers local macOS arm64 and Rosetta x86-64 container
-hello, plus hello/fib/convert on Linux arm64, Linux x86-64, Windows arm64 and
-Windows x86-64 through model-run and compiled/native execution. Linux x86-64
-uses QEMU; Windows uses an ARM64 UTM guest, with its x86-64 container driver
-under OS emulation. These checks are not complete platform suites or six
-physical machines. See [the scoped evidence](exec/rules.md).
+Unreachable-function pruning is assigned to cc-unisacc and remains planned;
+it is not a stage in the current production route. Enterprise signing is also
+pending: the macOS signed app/dmg wrapper proposal still requires format,
+inner `.com` execution and trust validation, separately from Windows
+Authenticode. See the [R9 release checklist](prd.md).
 
-Five fresh APE processes per compiler and input, on macOS arm64 with
-`-O2 -b osx/arm64`, measured time through complete image write, excluding
-execution of that image:
-
-| Source | Classic median | Model median | Model / classic |
-|---|---:|---:|---:|
-| `examples/fib.c` | 0.06078575 s | 0.62056504 s | 10.209× |
-| `unisacc.c` | 0.77623196 s | 19.42672129 s | 25.027× |
-
-Each classic/model image pair had the same SHA-256. The timing includes startup
-and model/package loading; it is compilation latency, not the produced program's
-runtime. The samples, inputs, compiler hashes and final acceptance ledger are preserved
-in [S-17 final evidence](research/s17-final-evidence.json). This performance cost remains to be optimized.
-
-Finite-domain checks establish network/table equality, not complete C99
-semantics. Candidate-specific native and differential tests remain separate
-acceptance evidence.
-
-Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) -- the product, the
-development tools, the static inputs and the reference judges.
+Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) — product, offline seed,
+static inputs, development tools and reference judges. The [research index](research/README.md)
+keeps Papers A, B and C and their evidence separate from the product specification.
 
 ## Use it
 
@@ -233,10 +218,11 @@ in a twentieth of a second, and the SGD control arm lives in
 ## Layout
 
 ```
-src/*.c           the compiler, written in the C subset it compiles
-kernel/           generated from the seed: the model data + the integer inference kernel, as C
+exec/             production model declarations, offline constructors, driver and generic execution cores
+src/*.c           classic reference compiler, written in the C subset it compiles
+kernel/           generated classic fact data + integer inference kernel, as C
 include/          the bundled C99 headers
-unisacc.c         kernel/ + src/ concatenated: the one file cc or unisacc compiles
+unisacc.c         kernel/ + src/ concatenated: classic reference and self-hosting seed
 unisa/            the Python seed: gold tables, weight construction, reference front/back end, packaging
 weights/          the constructed weights (built.uns2) and the tables as data (gold/*.tsv)
 iterate/          development tools in C (weight constructor, kernel-data generator); not the product
@@ -244,10 +230,15 @@ tests/            the suites (differential vs cc, native runs, self-hosting, clo
 prd.md            the specification and the measured log
 ```
 
-`prd.md` §6 is a running log of measured findings — including the ones that
-refuted our own predictions.
+Current design and status are in [prd §0.4](prd.md#pipeline-design); older
+measured findings and failed predictions remain in [the archive](archive/s17-migration-log-20260928.md).
 
-## Where it stands on someone else's code
+## Historical corpus and library observations
+
+The results below describe earlier classic/reference measurements, retained
+for the defects they exposed. They are not the current candidate's acceptance
+snapshot; `tests/corpus.baseline` now requires 216 passes. Current candidate
+receipts are linked above.
 
 `tests/corpus.sh` runs c-testsuite, 220 single-file C programs this project had
 no hand in writing:
@@ -261,7 +252,7 @@ interpreted: the reference VM is a Python loop, and an eight-queens search a
 real CPU finishes instantly takes a quarter of an hour there. `wrong` is the
 only failure — a program that compiled and then disagreed.
 `unsupported` is the honest coverage gap — the front end refuses the
-program — and it is now **zero**, so the next one to appear is a real alarm
+program — and was **zero** in this snapshot, so the next one to appear was an alarm
 rather than another entry in an old backlog. `knownfail` is the list we are
 deliberately not chasing: floating point, GCC extensions, `_Generic`, and one
 place where this subset evaluates `int` arithmetic at 64 bits on purpose.
@@ -293,7 +284,7 @@ targets because the interpreter does not model addressing modes:
 - and a struct passed by value was copied through the registers the *later*
   arguments were still sitting in.
 
-`prd.md` §6 E-45 and E-46 have the full list. The lesson is not that real code
+`prd.md` §6 E-45 and E-46 retain the full list. The lesson is not that real code
 is harder — it is that real code leans on the type system, the ABI, the
 encoder and the library *at the same time*, and a probe we write ourselves
 leans on one of them at a time.
@@ -309,7 +300,7 @@ Boniol et al. 2026 then compressed the same tables *exactly* with BDDs). Not
 new here: the existence theorem, integer/power-of-two weights, exhaustive
 verification, or size. What we have not found a precedent for is the
 combination — every table-shaped decision point of a real self-hosting C99
-compiler behind one kernel, with **no fallback path anywhere**, verified by
+compiler behind one kernel, with **no implicit fallback on model rejection**, verified by
 enumeration over the whole domain.
 
 ## UJS（平行 JS 产品）
@@ -336,18 +327,13 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 
 ## Status
 
-A research compiler converging on a stable `unisacc.com`. Four layers, because the hard part and the big part are not the same part.
+The published model baseline is v0.0.8; the smaller P3/one-pass-memory
+candidate is local and has not been released. Candidate-specific verification,
+platform gaps and signing work are recorded above and in [prd](prd.md).
 
-| | done when | today |
-|---|---|---|
-| **the claim** | every table-shaped decision is a net, `acc = 1.000` by enumeration | **there** — the stages and keys in the generated table above, no fallback path |
-| **the targets** | six images, real machines, identical behaviour | **reached earlier on all six** (Linux via a local VM, Windows via a local VM); each release records which targets were run for that candidate — a target that was not run is not claimed |
-| **the language** | someone else's C compiles, or is refused for a written reason | **for these corpora** — c-testsuite 214 of 220 pass, 0 wrong, the other six tracked as known failures (`tests/corpus.knownfail`: GCC extensions, C11); `tools` 11/11 real libraries. Larger real projects are not yet measured |
-| **the product** | compiles ordinary C99 tools; `unisacc` builds its own executable | **reached for the self-hosting part** — `unisacc -b` writes the image itself, byte-identical to the driver's, and rebuilds itself with no Python; `unisacc -run` compiles and runs in memory, from any directory |
-
-Nothing here is blocked on a question we cannot answer: `[P-8]` proves the
-weights exist for any finite table, `[F-5]` says accuracy below 1.000 is a
-key-encoding bug, and `[D-7]` says a net/gold disagreement is a defect rather
-than variance. There is no randomness at inference, so **no shortfall anywhere
-in this project has a statistical excuse**. What is left is work, and each
-piece of it lands as a ratchet that may only go up.
+The generated table above describes classic finite fact decisions; current
+whole-stage networks and their limits are documented in
+[the pipeline design](prd.md#pipeline-design). Exhaustive network/table equality
+is distinct from C semantics, stage compatibility, platform execution and
+package/container self-construction. Classical no-Python self-hosting and
+fixed-package model-driver self-hosting retain their separate evidence scopes.

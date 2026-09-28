@@ -11,57 +11,36 @@
 
 规格在 [`prd.md`](prd.md)，工作规则在 [`AGENTS.md`](AGENTS.md)，论文在 [`research/`](research/)。
 
-## 模型路线：历史验收与当前候选
+## 模型路线：发布基线与当前本地候选
 
-本地 `make com` 已改为模型构建；冻结 `1ccb16e` 时根目录与该已验候选逐字节相同。后续候选单列，不能继承历史全绿结论。
-`make classic-com` 把经典回退构建到 `out/unisacc-classic.com`。已发布的 v0.0.7
-产物仍是经典路线。模型由声明规则、动态事实和共享模板离线构造，打包后运行不需要 Python。
-经典 `src/` 与 `unisa/` 仍为参考和显式回退；模型拒绝输入不会隐式改走经典路线。
-冻结代码树 `1ccb16e` 已完成最终本地验收；未发布新版本。
+`make com` 构建模型产品；`make classic-com` 把经典显式回退写到
+`out/unisacc-classic.com`。模型拒绝不隐式改走经典路线。规范入口是
+[prd §0.4 当前流水线](prd.md#pipeline-design)，当前字节账见
+[模型功能与物理字节账](prd.md#model-function-bytes)。
 
-| 项目 | 历史冻结快照 / 边界 |
+| 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
-| 源码 / 候选短标识 | `85eaeb9` / `9a0ae470` |
-| 模型与路由 | 32 个互异构造网络、938 条 stage 路由、21 个资源 |
-| 有限图检查 | 32 组实际 network/table 的完整观察域、后继、动作及字符串均已核对 |
-| 包 / 容器 | 包 6,095,823 B；`.com` 6,279,167 B；完整包物理出现一份 |
-| 完整门禁 | 冻结代码树 V5 171/171 通过，最终本地汇总 rc=0 |
-| 指定 smoke / 模型自举 | 六目标指定 smoke 和固定包驱动 N1=N2=N3 已实测，不称整平台通过 |
-| 默认切换 / 发布 | 本地 `make com` 已切换并验证；未发布新版本 |
+| 已发布 v0.0.8 / `10672e3` | 未签名 5,388,402 B；`948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`；发布收据与限制封存 |
+| 当前本地 `44fc348` 构建、`75e54ef` 收尾 | 1,083,311 B；`01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`；P3 压缩、单次 memory，179/179 本地通过；v0.0.9 尚未发布 |
 
-容器 SHA-256：`9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`。
-包 SHA-256：`a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`。
-有限图相等只证明网络实现其声明表，不证明完整 C99 语义。
+本轮另有 Linux arm64 hello/fib/convert 实跑；Windows 单次绑定只有 mock，
+Linux x86_64 未运行。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
+计时与逐项收据见 [单次 memory 集成证据](research/memory-once-integrated-bench-20260928.json)。
+32 个共享网络被 938 条阶段行引用；模板、库源码、核与平台驱动另计，
+不能把引用数当网络物理份数，也不能把 CRC 当发行签名。
 
-**2026-09-28 当前候选（冻结 `1dbac50` 本地完整门禁已通过）：** `unisacc.com` 5,388,386 B，
-SHA-256 `a4de871ad6a251cbf7cee313e430f23bb08c618500a5285d36e224a4e74e0ece`。
-实际包账见 [model-bytes.json](research/model-bytes.json)，性能与平台烟测见
-[candidate-bench-20260928.json](research/candidate-bench-20260928.json) 和
-[candidate-platform-20260928.json](research/candidate-platform-20260928.json)。
-Q 前缀编码只减存储、不减展开后运行内存。macOS 的显式 dl/libffi 桥使应用自行
-读取进程、内存映射与窗口数据，未把全部内置 libc 默认转发。
-修复后的冻结 `1dbac50` 完整门禁 177/177；逐项账见
-[candidate-gate-20260928.json](research/candidate-gate-20260928.json)。旧冻结的两条
-multi 红灯保留。随后示例改动单列 apps-real/docs 复验，不移植全套结果。
-根产物带构建来源侧车，门禁启动前与结束后验证输入/二进制身份。未发布新版本。
+旧候选 6MB/171 项、Q 编码/177 项与各平台自举、失败及性能记录均保留在
+[S-17 迁移档案](archive/s17-migration-log-20260928.md) 和
+[原始最终证据](research/s17-final-evidence.json)，不作为当前候选验收。
+固定包驱动自举不包含模型、整包或 APE 容器自构造。
 
+prune 由 cc-unisacc 负责、待实现，不在当前生产路由中。企业签名待验证：
+macOS app/dmg 携带封存 `.com` 的方案须分别验证外层签名、公证与内层运行/信任；
+Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要求。
 
-固定包模型驱动 N1=N2=N3 是完整 115,746 B Mach-O（SHA-256
-`6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03`）。
-N3 空 PATH、O0/O2 内存/native 探针与 host 相同，缺包返回 2。这不包括网络、
-整包或 APE 容器的自构造。
+### 经典参考的种子与自举关系
 
-指定六目标 smoke 已完成：本机 macOS arm64 与 Rosetta x86_64 的容器 hello，
-Linux arm64/x86_64 与 Windows arm64/x86_64 的 hello/fib/convert 均经模型
-`-run` 和编译后原生执行，与 host 输出一致。Linux x86 使用 QEMU；Windows
-使用 ARM64 UTM 客机，x86_64 驱动经 OS 模拟。这不是完整客机套件或六台实机。
-
-macOS arm64 上同源、`-O2 -b osx/arm64`、各五次全新 APE 进程至镜像写出的
-中位数：`examples/fib.c` 经典 0.06078575 秒、模型 0.62056504 秒（10.209 倍）；
-`unisacc.c` 经典 0.77623196 秒、模型 19.42672129 秒（25.027 倍）。每对镜像
-SHA 相同，计时含启动及模型/包加载，不含产物运行；性能成本仍待优化。原始样本
-和输入哈希及最终验收账本已保存在 [`research/s17-final-evidence.json`](research/s17-final-evidence.json)。
-详见 [`exec/rules.md`](exec/rules.md)；历史候选结果见 [`prd.md`](prd.md)。
+以下图与第 1–3 节描述经典参考链，不是当前模型产品的运行流水线：
 
 ```
   ┌──────────────── 种子（第 0 代）：unisa/，全是 Python ─────────────────┐
@@ -73,7 +52,7 @@ SHA 相同，计时含启动及模型/包加载，不含产物运行；性能成
   ┌──── 可复用（跨实现的决策数据）────┐                │
   │ weights/built.json  built.uns2    │                │
   │ weights/gold/*.tsv  真值表        │                ▼
-  │ kernel/*.inc        C 形态        │ ─inf()─▶ ┌──── 产品编译器：C ────┐
+  │ kernel/*.inc        C 形态        │ ─inf()─▶ ┌──── 经典参考：C ──────┐
   └───────────────────────────────────┘          │ src/*.c include/ → unisacc.c │
                                                  │ 编译自己：N1 = N2 = N3        │
                                                  └──────────────────────────────┘
@@ -82,14 +61,14 @@ SHA 相同，计时含启动及模型/包加载，不含产物运行；性能成
 
 判别规则：**要运行才能得到结果的是程序（种子或迭代），拿来读的是数据（可复用）**。种子里造权重的脚本属于种子，它们造出来的东西才是可复用的。
 
-## 1　可复用：数据，与语言无关
+## 1　经典参考的可复用决策数据
 
 | 位置 | 内容 | 由谁写出 |
 |---|---|---|
 | `weights/gold/<阶段>.tsv` | **真值表本身**，一行一个键：先是键的各字段值，然后是每个输出头的类。18 个阶段共 8,486 行 | `python3 -m unisa gold-export`（`build-weights` 会顺带执行） |
 | `weights/built.json` | 构造出的权重，JSON，便于阅读和调试 | `python3 -m unisa build-weights`（约 20 s） |
-| `weights/built.uns2` | 同一份权重的紧凑二进制，发行时用 | 同上 |
-| `kernel/unisa_model.inc` | 权重、各阶段维度、词表、编码器操作码表的 C 形态，产品编译器读的就是它 | `python3 -m unisa emit-kernel` |
+| `weights/built.uns2` | 同一份经典参考权重的紧凑二进制 | 同上 |
+| `kernel/unisa_model.inc` | 权重、各阶段维度、词表、编码器操作码表的 C 形态，经典参考读取它 | `python3 -m unisa emit-kernel` |
 | `kernel/unisa_headers.inc` | 随身携带的 C 库（`include/*.h` 原文） | 同上 |
 | `kernel/unisa_cases.inc` | 每个阶段每个键的正确答案，供 C 端自测 | 同上 |
 
@@ -130,7 +109,7 @@ SHA 相同，计时含启动及模型/包加载，不含产物运行；性能成
 | 入口 | [`__main__.py`](unisa/__main__.py) 命令行 · [`driver.py`](unisa/driver.py) 源码到 tape · [`docgen.py`](unisa/docgen.py) 生成文档里的阶段表 |
 | 对照臂 | [`control/`](unisa/control/)：SGD 训练与它的网络、权重格式，保留作负结果的证据，只有 `python3 -m unisa train` 用它 |
 
-## 3　产品：编译器（C），由 unisacc 编译自己
+## 3　经典 C 参考与自举
 
 | 文件 | 作用 |
 |---|---|
@@ -144,13 +123,13 @@ SHA 相同，计时含启动及模型/包加载，不含产物运行；性能成
 | [`src/back_image.c`](src/back_image.c) | ELF/Mach-O/PE 写出、SHA-256 签名、Windows 导入、`-run` |
 | [`include/*.h`](include/) | 随身携带的 C 库，以 `static` 定义，按需补头 |
 | [`unisacc.c`](unisacc.c) | `kernel/` 与 `src/` 的拼接：单个 C 文件，cc 或 unisacc 都能直接编译，不需要 Python，也不读外部文件 |
-| `unisacc.com` | `make com` 用 `-O2` 构建的六目标单文件发行版 |
+| `out/unisacc-classic.com` | `make classic-com` 构建的经典六目标显式回退；根 `unisacc.com` 由模型路线构建 |
 
-[`iterate/`](iterate/) 是**开发工具**，不属于产品：`iterate/construct/` 用 C 从 `weights/gold/*.tsv` 构造权重（18 个阶段的 UNS2 整包与 `built.uns2` 逐字节相同），`iterate/kernel/` 用 C 从声明数据生成 `kernel/unisa_model.inc` 的大部分内容。它们由 unisacc 编译、单独运行，不进编译器的使用流程，也不是自举的前提；产品的 `kernel/` 仍由种子生成。这条迁移路线（prd 的 J10）已暂停，工具保留。
+[`iterate/`](iterate/) 是**开发工具**，不属于产品：`iterate/construct/` 用 C 从 `weights/gold/*.tsv` 构造权重（18 个阶段的 UNS2 整包与 `built.uns2` 逐字节相同），`iterate/kernel/` 用 C 从声明数据生成 `kernel/unisa_model.inc` 的大部分内容。它们由 unisacc 编译、单独运行，不进编译器的使用流程，也不是自举的前提；经典参考的 `kernel/` 仍由种子生成。这条迁移路线（prd 的 J10）已暂停，工具保留。
 
 `src/` 的七个 C 文件不互相 `#include`：`tests/build_ref.sh` 先嵌入 `src/version.h` 的版本声明，再按依赖顺序拼入生成内核与七个 C 文件，得到独立的 `unisacc.c`。模型驱动器直接包含同一版本头文件。
 
-这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。`unisacc.com` 的打包（`python3 -m unisa ape`）是打包路径上唯一用到 Python 的步骤（完整发布门禁仍调用 Python 裁判），其中各目标的镜像都由 unisacc 编译。
+这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。经典容器打包使用 `python3 -m unisa ape`，各目标镜像由 unisacc 编译；当前模型路线另由 `exec/` 离线构造、验证和打包，用户编译路径不运行 Python。
 
 ## 4　验证与工具
 

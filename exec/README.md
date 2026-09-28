@@ -1,27 +1,44 @@
 # exec/ — model-driven compiler development route
 
-The current source-to-image route is `pipeline/elf.sh`, using `c/run.c` and
-six constructed threshold networks. `c/run.c --chain` also connects explicit
-models in one process (see below). `c/buildcompiler.sh OUTPUT_DIR` now builds
-`unisacc-next.com`: a development compiler with all six target routes, shared
-networks and two carried assembly cores. It runs without loose model/core files
-or Python; offline construction still uses the seed tools. See
-[the assembly binding and tests](c/asm/README.md#carried-kernel-and-compiler-container).
-The shipped compiler has not adopted this route: CLI/source/error parity is
-still incomplete. `-Wall`, `-Wextra` and `-Werror` use the located warning
-models for one or several source files. `c/warningcheck.sh` and
-`c/multiwarningcheck.sh` check this contract. Ordinary compilation also retains
-source locations. `parse2/errors.py` generates mapped syntax diagnostics and
-top-level recovery; unmapped prototype limitations remain explicit rejections.
-`parse2/errorcheck.py` checks complete results and error limits. The current
-model container passes diag 14/14, CLI 64/64 and ccparity 53/53 (plus its
-existing known -c difference). `pp/macrocheck.py` compares 20 macro inputs in
-ordinary and located formats, including the C99 expansion examples. Broader
-source and failure compatibility remains incomplete; these are suite results.
-For current declaration sources and remaining work, see [rules.md](rules.md).
-The sections below retain milestone evidence; statements that packaging was
-unfinished describe those earlier milestones, not the current container above.
-The following E0 machine and toy are retained as their original experiment.
+The production model compiler is built by `make com`, with the driver and
+generic execution/inference cores in `c/`, stage declarations and offline
+constructors in this tree, and bundled C headers as resources. `src/`,
+`kernel/`, `unisacc.c` and the Python seed remain behavior references;
+`make classic-com` builds an explicit classic fallback. Model refusals never
+silently use that fallback. Construction and packaging use offline Python;
+compiling and running with the packaged product do not.
+
+Read the authoritative [current pipeline design](../prd.md#pipeline-design)
+for the E2 → E1 → optional units → E3 → optional E4 → lower → image/memory
+route, its rule sources and limits. The current product has 32 shared networks,
+not just the six-stage development route shown later in this file. See
+[rules.md](rules.md) for the rule-source inventory,
+[c/BUILDING.md](c/BUILDING.md) for building and
+[c/PACKAGE.md](c/PACKAGE.md) for the package contract.
+
+Published v0.0.8 is `10672e3`, unsigned 5,388,402 B, SHA-256
+`948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
+The current local candidate was built from `44fc348` and finalized at `75e54ef`:
+1,083,311 B, SHA-256
+`01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`.
+P3 compression and one-pass memory binding are implemented; its local gate
+passed 179/179. Linux arm64 hello/fib/convert ran separately; this round has
+no Windows or Linux x86-64 execution evidence. Local v0.0.9 is not published.
+See [integrated receipts](../research/memory-once-integrated-bench-20260928.json)
+and [the current physical byte ledger](../prd.md#model-function-bytes).
+
+Pruning remains cc-unisacc's planned work, not a current production stage.
+The enterprise signing plan, including a macOS signed app/dmg carrying the
+sealed `.com`, still needs format, execution and trust validation.
+
+## Historical development milestones
+
+The sections below preserve E0 and later development interfaces and measured
+milestones. Their old adoption and packaging limitations describe those
+snapshots, not the current production container. Complete migration history,
+including original failures and immutable candidate identities, is retained
+in [the S-17 archive](../archive/s17-migration-log-20260928.md).
+The [research index](../research/README.md) retains Papers A, B and C.
 
 ## E0 toy experiment
 
@@ -114,7 +131,8 @@ The same entry supports Windows x86_64 and the four POSIX targets (`.elf` / `.ma
 still used to generate transition tables, not to process source between these
 six stages. The default constructs and exhaustively checks integer threshold
 networks, then evaluates them at runtime; `NETWORK=0` selects lookup tables (see [c/NETWORK.md](c/NETWORK.md)). The generated
-compiler is the existing C compiler; this is not E7 adoption in the product.
+compiler in this milestone was the existing classic C compiler; this route
+alone was not E7 product adoption.
 
 `TARGET=win/arm64 ./exec/pipeline/selfcheck.sh` checks all five Windows target
 macros against the native front end, optimized tape and whole PE bytes against
@@ -144,10 +162,10 @@ via x86_64 emulation, not on x86_64 hardware: N1=N2=N3, 694,272 B, SHA256
 `19bfcf3d809ac42e6120a4cbc033b9002de3d556c1634c6f59ad23647b312fc8`.
 Source: f360ba0's unisacc.c, SHA256
 `11ef59801d8c18f637e67b2a5b0e988ad31baec1859fabdd06dc879935574307`.
-This closes the measured self-source route for six targets. Frontend coverage
-is still partial. The current default evaluates constructed threshold networks;
-Python still generates the models, and the shipped .com has not switched to
-this executor.
+This closed the measured self-source development route for six targets at
+that snapshot. Frontend coverage was partial; the development default evaluated
+constructed threshold networks and Python generated the models. The shipped
+container had not switched then; current adoption is recorded above.
 
 E3 sizeof scalar expressions now reuse expression parsing and discard emitted
 instructions, including nested sizeof and unevaluated static-initializer
@@ -187,8 +205,8 @@ This does not change the existing single-model or `--check-net` interfaces.
 `c/netcheck.py` checks repeated-stage reset, empty streams and failure
 propagation. `c/nativecheck.sh` compares the chain against the six-process
 route using cc-, unisacc- and network-built runtimes, including runtime
-self-reconstruction. This is preparation for product integration, not a new
-`.com` CLI, a single embedded model package, or completion of E7.
+self-reconstruction. At this milestone it was preparation for product
+integration, not a new `.com` CLI, embedded package or completion of E7.
 
 
 ## A shared model package
@@ -204,9 +222,9 @@ tests/bound 60 env UNISA_MAXSTEPS=400000000000 \
 Choose the route that was constructed; the runtime does not infer a target
 from the host. `python3 exec/c/pack.py -o all.pkg OUT1/route.tsv OUT2/route.tsv`
 combines explicit routes and stores equal network bodies once. See
-[c/PACKAGE.md](c/PACKAGE.md) for the directory and execution contract. The
-package is an external development input; embedding it in `.com`, preserving
-the product CLI and isolating the small execution core remain unfinished.
+[c/PACKAGE.md](c/PACKAGE.md) for the directory and execution contract. At this milestone, the
+package was an external development input; embedding it in `.com`, preserving
+the product CLI and isolating the small execution core were unfinished.
 
 
 The constructed package now also carries `include/` as named byte resources.

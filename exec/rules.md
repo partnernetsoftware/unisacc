@@ -1,8 +1,10 @@
 # Rule-source migration and completion boundary
 
 Source inventory refreshed after `11a0d56` (2026-09-28). This is a remaining-work
-list, not a completion percentage. Historical batch results and artifact hashes
-remain in `prd.md`; they are not repeated here.
+list, not a completion percentage. The inventory describes offline construction sources; it does not declare
+product adoption incomplete. The authoritative [pipeline design](../prd.md#pipeline-design)
+and [S-17 migration archive](../archive/s17-migration-log-20260928.md) separate
+current behavior from historical acceptance evidence.
 
 The route is **declarations → finite transitions/actions → constructed threshold
 networks → generic execution over stage byte streams**. Moving a rule to TSV
@@ -12,7 +14,7 @@ remain shared inputs, not copied answers.
 
 | Stage | Declaration sources already used | Remaining handwritten construction |
 |---|---|---|
-| E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the old product lexer |
+| E1 | `lex/` declarations | Data assembly and bindings; runtime model is separate from the classic reference lexer |
 | E2 | [pp/rules.md](pp/rules.md) | Header-name extraction, resource ordering, initialization and assembly bindings |
 | E3 | `parse2/tape-*`, `scope-*`, `declaration-*`, `width-*`, `type-tape.tsv`, `control-*`, `ladder-*`, `initializers-*`, `strings-*`, `constexpr-*`, `statics-*`, `vla-*`, `unresolved-*`, `printfallback-*`, `type-entry/default/follow`, `operator-*`, `shape-*`, `conversion-*`; gold type/tyinfo/prec and other existing facts | Dynamic type/gold/template bindings and initialization; fixed expression, declaration, literal, diagnostic, warning, unit and location controls now have declarations |
 | E4 | `opt/scans-*`, `local-*`, `stfuse-*`, `peep-*`, `analysis-*`, `parsers-*`, `rounds-*`; gold opinfo/peep | LEVEL selection, dynamic data initialization/dispatch and generic assembly in `opt/gen.py` |
@@ -31,9 +33,10 @@ resources. `optext()` binds binsel/irsel results to shared tape templates.
 Any remaining compiler-specific control must stay visible in this inventory;
 calling the file “shared support” does not remove that obligation. Keep a single implementation of each shared
 routine when migrating it; E3, the unit reader, E4 and lowering use this module.
-`src/` and `unisa/` remain the behavior reference until the specified switch.
+`src/` and `unisa/` remain behavior references after the default switch;
+the explicit classic fallback is not an automatic retry for model refusals.
 
-## Completed local acceptance obligations
+## Acceptance contract
 
 - Finish the rule-source inventory above: remove the replaced control code,
   preserve actual dynamic dependencies, and enumerate old/new local transitions.
@@ -45,8 +48,8 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
   on the available platforms, with input and artifact provenance.
 - Reconcile the carried kernels, resource/template bytes and the one-copy model
   package with the S-17 size ledger; compare performance on the same inputs.
-- Only then adopt the model path as the default product and update its docs.
-  Local `unisacc.com` has switched; published v0.0.7 remains classic.
+- The model path is the default product and v0.0.8 is published. Each new
+  candidate still needs its own frozen artifact and release evidence.
 
 ## Fixed-control inventory
 
@@ -67,54 +70,29 @@ as migrated template algorithms. See [enc/CONTROL_AUDIT.md](enc/CONTROL_AUDIT.md
 The final parser helper inventory is checked separately before the candidate
 is frozen; a shorter gen2.py alone is not completion evidence.
 
-## Final candidate snapshot (local acceptance complete)
+## Current published and local identities
 
-The candidate built from source `85eaeb9` has SHA-256
-`9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.
-It contains a 6,095,823-byte package (SHA-256
-`a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`)
-inside a 6,279,167-byte `.com` container. The complete package occurs
-physically once. Its 32 distinct constructed networks, 938 stage-route rows
-and 21 resources have an artifact-specific inventory; all 32 network/table
-pairs passed full declared observation-domain checks, including actions and
-strings. Those checks prove table equivalence, not complete C99 semantics.
+Published v0.0.8 / `10672e3` is unsigned, 5,388,402 B, SHA-256
+`948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
+Current local `44fc348` build / `75e54ef` completion is 1,083,311 B, SHA-256
+`01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`.
+It implements P3 binary/DEFLATE networks and one-pass memory binding, and
+passed 179/179 local gate items. Linux arm64 hello/fib/convert ran separately;
+Windows one-pass checks were mocks and Linux x86-64 was not run this round.
+Local v0.0.9 is not published. See [integrated evidence](../research/memory-once-integrated-bench-20260928.json)
+and [physical byte accounting](../prd.md#model-function-bytes).
 
-The fixed-package model driver reached N1=N2=N3 as identical complete
-115,746-byte Mach-O files (SHA-256
-`6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03`).
-The N3 successor passed empty-PATH O0/O2 memory and native probes against the
-host; missing-package execution returns 2. The network package and APE
-container were held fixed, so this does not establish their self-construction.
+Prune is assigned to cc-unisacc and awaits implementation; the current route
+has no prune stage. The macOS signed app/dmg proposal and Windows enterprise
+signing remain validation/release work, not completed product capabilities.
 
-The specified six-target smoke passed: local macOS arm64 and Rosetta x86-64
-container hello; Linux arm64/x86-64 and Windows arm64/x86-64 hello/fib/convert
-through model-run and compiled/native execution against host output. Linux
-x86-64 used Lima/QEMU; Windows used an ARM64 UTM guest and OS emulation of the
-x86-64 container driver. This is bounded smoke, not complete platform-suite
-acceptance or evidence from six physical machines.
-
-### Measured compile-time cost
-
-On macOS arm64, five fresh APE-process samples per compiler/input measured
-`-O2 -b osx/arm64` through completed image write, excluding execution of that
-image. The classic and model output SHA-256 matched for each input:
-
-| Input | Classic median | Model median | Model/classic |
-|---|---:|---:|---:|
-| `examples/fib.c` | 0.06078575 s | 0.62056504 s | 10.209× |
-| `unisacc.c` | 0.77623196 s | 19.42672129 s | 25.027× |
-
-The timings include startup and model/package loading. They measure compiler
-latency, not produced-program runtime. Samples, input hashes, compiler hashes and the final acceptance ledger are
-preserved in [`research/s17-final-evidence.json`](../research/s17-final-evidence.json). This cost remains to be
-optimized while preserving byte-identical outputs.
-
-Frozen code tree `1ccb16e` passed its complete V5 171-item gate and local
-release audit (rc=0). Old queue passes were not inherited. The initial
-48-second bindx86 timeout is retained; its same-input exclusive retry passed
-in 37.98 seconds. Local `make com` builds the identical model candidate.
-Published v0.0.7 remains classic; no new release is claimed. Windows
-self-build remains unverified; specified guest smoke is separate evidence.
+The former `85eaeb9` / `9a0ae470` candidate, its 6,279,167-byte container,
+171-item gate, fixed-package driver bootstrap and older timing samples are
+historical snapshots. Their full records remain in the
+[S-17 archive](../archive/s17-migration-log-20260928.md) and
+[original final evidence](../research/s17-final-evidence.json). Their results do
+not validate the current artifact; fixed-package driver self-hosting does not
+prove reconstruction of networks, the package or APE container.
 
 ## Earlier candidate evidence
 
@@ -156,8 +134,8 @@ and they do not validate the newer candidate.
 
 Historical closure plan for those earlier candidates: parser/helper inventory,
 full rebuild, corpus ratchet, bounded product and platform checks, and a physical
-size ledger. The final `9a0ae470` candidate's current status is recorded above;
-earlier artifact results do not transfer to it.
+size ledger. The later `9a0ae470` snapshot is preserved in the archive;
+no earlier artifact result transfers to the current candidate.
 
 Resource and language checks now run in separate queue jobs. Core checks are split
 into modes, contracts and dependencies; see [c/COMPILERCHECK.md](c/COMPILERCHECK.md).
