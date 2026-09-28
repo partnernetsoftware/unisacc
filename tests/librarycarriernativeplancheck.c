@@ -41,10 +41,10 @@ int main(int argc,char **argv){
  assert(!us_native_plan_add(&plans,(uintptr_t)round_native,b[3],n[3],&h,error,sizeof error)&&!h&&provider.calls==1); /* plain support0 attempt */
  assert(!us_native_plan_add(&plans,(uintptr_t)round_native,b[4],n[4],&h,error,sizeof error)&&!h&&provider.calls==1); /* variadic prototype */
  assert(!us_native_plan_add_variadic(&plans,(uintptr_t)round_native,b[1],n[1],1,&h,error,sizeof error)&&!h&&provider.calls==1); /* no widening */
- assert(!us_native_plan_add(&plans,(uintptr_t)round_native,b[5],n[5],&h,error,sizeof error)&&!h&&provider.calls==1); /* callback legacy */
- assert(!us_native_plan_add_bridge(&plans,(uintptr_t)round_native,b[5],n[5],&h,error,sizeof error)&&h&&us_native_plan_find(&plans,h)->bridge_required&&provider.calls==1);
- assert(us_native_plan_add(&plans,(uintptr_t)round_native,b[6],n[6],&h,error,sizeof error)&&!h&&provider.calls==1); /* strict wire fails before provider */
- assert(!us_native_plan_add(&plans,(uintptr_t)round_native,b[1],n[1],&h,error,sizeof error)&&h&&provider.calls==2);exercise(us_native_plan_find(&plans,h));
+ assert(!us_native_plan_add(&plans,(uintptr_t)round_native,b[5],n[5],&h,error,sizeof error)&&!h&&provider.calls==2); /* unsupported callback requires a model certificate */
+ assert(!us_native_plan_add_bridge(&plans,(uintptr_t)round_native,b[5],n[5],&h,error,sizeof error)&&h&&us_native_plan_find(&plans,h)->bridge_required&&provider.calls==2);
+ assert(us_native_plan_add(&plans,(uintptr_t)round_native,b[6],n[6],&h,error,sizeof error)&&!h&&provider.calls==2); /* strict wire fails before provider */
+ assert(!us_native_plan_add(&plans,(uintptr_t)round_native,b[1],n[1],&h,error,sizeof error)&&h&&provider.calls==3);exercise(us_native_plan_find(&plans,h));
  us_native_plans_clear(&plans);assert(!plans.head&&!plans.carrier_provider&&!plans.carrier_owner);for(int i=0;i<7;i++)free(b[i]);
  puts("carrier native plans: true Mixed call/commit, canaries, original arena, sticky discard, transactional consume and provider gates passed");return 0;
 }

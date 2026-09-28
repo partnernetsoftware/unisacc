@@ -268,6 +268,7 @@ API const void *us_tape(const us_context *c,size_t *length) {
     if (length) *length=c ? c->tape_length : 0; return c ? c->tape : 0;
 }
 static uint64_t library_u64(const Buf *b,size_t *at);
+static int library_lookup(void *owner,const char *name,const void **raw,int *kind);
 static const char *library_native_target(void);
 static uint64_t library_native_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static uint64_t library_variadic_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);

@@ -12,6 +12,10 @@ static us_context *callback_context;static Round callback_entry;static int callb
 static const uint64_t script_mask=UINT64_C(0x0102030405060708);
 static const uint64_t native_mask=UINT64_C(0x8877665544332211);
 static union U host_flip(union U x){native_calls++;if(callback_context&&(Round)us_sym(callback_context,"round")!=callback_entry)callback_lookup_failed=1;x.bits^=native_mask;return x;}
+static Round host_pick(void){return host_flip;}
+static Round host_echo(Round f){native_calls++;union U x={.bits=51};union U y=f(x);if(y.bits!=(x.bits^script_mask))callback_lookup_failed=1;return f;}
+static const char relay_source[]="union U {double d;unsigned long long bits;};typedef union U (*Fn)(union U);Fn host_echo(Fn);union U leaf(union U x){x.bits^=0x0102030405060708ULL;return x;}union U round(union U x){Fn f=host_echo(leaf);return f(x);}";
+static const char factory_source[]="union U {double d;unsigned long long bits;};typedef union U (*Fn)(union U);Fn host_pick(void);union U round(union U x){Fn f=host_pick();x.bits^=0x0102030405060708ULL;return f(x);}";
 static const char export_source[]=
 "union U {double d;unsigned long long bits;};"
 "union U round(union U x){x.bits^=0x0102030405060708ULL;return x;}";
@@ -23,24 +27,26 @@ static void quoted(const char *s){putchar('"');for(;*s;s++){unsigned char c=(uns
 static int event(us_context *c,const char *stage,int opt,int rc){
  printf("{\"stage\":");quoted(stage);printf(",\"opt\":%d,\"rc\":%d,\"native_calls\":%u,\"error\":",opt,rc,native_calls);quoted(c?us_error(c):"context allocation failed");puts("}");fflush(stdout);return rc;
 }
-static int bind(us_context *c,const char *path,int opt){
+static int bind(us_context *c,const char *path,int opt,int factory,int relay){
  unsigned char sig[8192];FILE *f=fopen(path,"rb");if(!f){event(c,"signature_read",opt,1);return 1;}
  size_t n=fread(sig,1,sizeof sig,f);int bad=ferror(f)||!feof(f);fclose(f);
  if(bad)return event(c,"signature_read",opt,1);
- return event(c,"registration",opt,us_add_symbol_typed(c,"host_flip",(void*)host_flip,sig,n));
+ return event(c,"registration",opt,us_add_symbol_typed(c,relay?"host_echo":factory?"host_pick":"host_flip",relay?(void*)host_echo:factory?(void*)host_pick:(void*)host_flip,sig,n));
 }
 int main(int argc,char **argv){
  if(argc!=4&&argc!=5)return 2;
  int export_only=argc==5&&!strcmp(argv[4],"export-only");
- if(argc==5&&!export_only)return 2;
+ int factory=argc==5&&!strcmp(argv[4],"factory");
+ int relay=argc==5&&!strcmp(argv[4],"relay");
+ if(argc==5&&!export_only&&!factory&&!relay)return 2;
  /* An unused declaration still goes through the real resolver freeze. Its
     successful compile separates freeze/registration from referenced E3 refusal. */
  us_context *pre=us_new(argv[1]);if(!pre){event(NULL,"context",0,1);return 1;}
- if(bind(pre,argv[3],0)||event(pre,"preflight_add",0,us_add_source(pre,"unused-union.c","int control(void){return 7;}"))||
+ if(bind(pre,argv[3],0,factory,relay)||event(pre,"preflight_add",0,us_add_source(pre,"unused-union.c","int control(void){return 7;}"))||
     event(pre,"unused_binding_compile",0,us_compile(pre,argv[2],0))){us_free(pre);return 1;}us_free(pre);
  for(int opt=0;opt<3;opt++){
   us_context *c=us_new(argv[1]);if(!c){event(NULL,"context",opt,1);return 1;}
-  if(bind(c,argv[3],opt)||event(c,"source_add",opt,us_add_source(c,"union-chain.c",export_only?export_source:source))||
+  if(bind(c,argv[3],opt,factory,relay)||event(c,"source_add",opt,us_add_source(c,"union-chain.c",relay?relay_source:export_only?export_source:factory?factory_source:source))||
      event(c,"compile",opt,us_compile(c,argv[2],opt))||event(c,"relocate",opt,us_relocate(c))){us_free(c);return 1;}
   Round round=(Round)us_sym(c,"round");if(event(c,"us_sym",opt,round?0:1)){us_free(c);return 1;}
   if((void*)round!=us_sym(c,"round")){event(c,"stable_export",opt,1);us_free(c);return 1;}
@@ -49,7 +55,7 @@ int main(int argc,char **argv){
    struct {uint64_t before;union U value;uint64_t after;} input={UINT64_C(0x123456789abcdef0),{.bits=UINT64_C(0x7ff8000000000001)+i},UINT64_C(0xfedcba9876543210)};
    struct {uint64_t before;union U value;uint64_t after;} output={UINT64_C(0xabcdef0123456789),{.bits=0},UINT64_C(0x9876543210fedcba)};
    uint64_t original=input.value.bits;unsigned before=native_calls;output.value=round(input.value);int status=-1;
-   if(output.value.bits!=(original^script_mask^(export_only?0:native_mask))||input.value.bits!=original||native_calls!=before+(export_only?0:1)||
+   if(output.value.bits!=(original^script_mask^((export_only||relay)?0:native_mask))||input.value.bits!=original||native_calls!=before+(export_only?0:1)||
       input.before!=UINT64_C(0x123456789abcdef0)||input.after!=UINT64_C(0xfedcba9876543210)||
       output.before!=UINT64_C(0xabcdef0123456789)||output.after!=UINT64_C(0x9876543210fedcba)||callback_lookup_failed||us_call_status(c,&status)){
     event(c,"call_value_copy_canary_status",opt,1);us_free(c);return 1;

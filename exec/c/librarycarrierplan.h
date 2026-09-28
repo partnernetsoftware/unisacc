@@ -65,13 +65,15 @@ static int us_carrier_certificate_native_add(us_native_plans *plans,uintptr_t ra
        us_callable_export_signature(certificate->carrier.items,&carrier)||
        !us_callable_carrier_valid(&original,&carrier)||
        strcmp(certificate->original.items->name,certificate->carrier.items->name)||
-       !us_export_supported(certificate->carrier.items)||us_export_has_callbacks(certificate->original.items))
+       !(us_export_supported(certificate->carrier.items)||us_export_bridge_supported(certificate->carrier.items)))
         return us_export_error(error,cap,"invalid carrier native plan certificate");
     us_native_plan *plan=calloc(1,sizeof *plan);if(!plan)return us_export_error(error,cap,"carrier native plan allocation failed");
+    if(us_export_has_callbacks(certificate->original.items)){plan->bridge_required=1;goto publish;}
     plan->args=calloc(carrier.count?(size_t)carrier.count:1,sizeof *plan->args);if(!plan->args)goto bad;
     for(size_t i=0;i<carrier.count;i++)if(!(plan->args[i]=us_export_ffitype(carrier.argtypes+i,0)))goto bad;
     ffi_type *result=us_export_ffitype(&carrier.result,1);if(!result||
        ffi_prep_cif(&plan->cif,FFI_DEFAULT_ABI,(unsigned)carrier.count,result,plan->args)!=FFI_OK)goto bad;
+publish:
     plan->graph=certificate->original;plan->carrier=certificate->carrier;plan->signature=original;plan->target=raw;
     memset(certificate,0,sizeof *certificate);
     plan->next=plans->head;plans->head=plan;*handle=(uintptr_t)plan;return 0;

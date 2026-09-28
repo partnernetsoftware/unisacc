@@ -209,8 +209,11 @@ job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py
+job lib-carrier-callback python3 ./tests/librarycarriercallbackcheck.py
 job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
 job lib-union-native python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
+job lib-carrier-factory python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
+job lib-carrier-relay python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
 job lib-callable-variadic-mechanism python3 ./tests/librarycallablevarcheck.py
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
@@ -238,6 +241,9 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-carrier-mechanism-rosetta python3 ./tests/librarycarriercheck.py --arch x86_64
     job lib-carrier-native-plan-rosetta python3 ./tests/librarycarriernativeplancheck.py --arch x86_64
     job lib-union-native-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
+    job lib-carrier-callback-rosetta python3 ./tests/librarycarriercallbackcheck.py --arch x86_64
+    job lib-carrier-factory-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --factory
+    job lib-carrier-relay-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --relay
     job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi

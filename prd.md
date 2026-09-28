@@ -387,13 +387,13 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 下面从 `research/model-bytes.json` 生成，按实际封存 `.com` 计。只对阶段/模式作可证的功能归属，不把跨阶段动作任意分摊成“指针占多少字节”。
 
 <!-- model-bytes:begin -->
-快照 SHA-256：`6252cf4bb721b0ff529bf39af21c05e5cf4ce6bddbb3ed0900b83d3adfc80662`；总计 **1,110,640 B**。
+快照 SHA-256：`f083f670bd1e42f51c433f10e1458026c69db9e32c62160093f2afb75cc9d213`；总计 **1,111,324 B**。
 
 | 物理内容 | 字节 | 占整个 .com |
 |---|---:|---:|
-| 24 个共享网络体 | 657,657 | 59.21% |
-| 平台驱动、APE 启动/加载与对齐（混合账） | 250,736 | 22.58% |
-| 21 份 C 头文件/库实现源码 | 123,856 | 11.15% |
+| 24 个共享网络体 | 658,341 | 59.24% |
+| 平台驱动、APE 启动/加载与对齐（混合账） | 250,736 | 22.56% |
+| 21 份 C 头文件/库实现源码 | 123,856 | 11.14% |
 | 两 ISA 通用推理执行核资源 | 15,520 | 1.40% |
 | 目标预定义宏声明资源 | 321 | 0.03% |
 | 目录、记录头与资源键 | 62,534 | 5.63% |
@@ -401,14 +401,14 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 | 模型阶段 / 具体功能 | 物理模型数 | 模型体 B | 占 .com | 阶段行引用数 |
 |---|---:|---:|---:|---:|
-| `e2`：预处理、目标预定义宏与位置模式 | 2 | 48,605 | 4.38% | 126 |
+| `e2`：预处理、目标预定义宏与位置模式 | 2 | 48,605 | 4.37% | 126 |
 | `e1`：词法与 token/位置输出 | 1 | 23,064 | 2.08% | 120 |
-| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 266,030 | 23.95% | 216 |
+| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 266,030 | 23.94% | 216 |
 | `e4`：O1/O2 优化 | 2 | 14,404 | 1.30% | 144 |
-| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 6,018 | 0.54% | 6 |
+| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 6,702 | 0.60% | 6 |
 | `prune`：函数可达闭包与保守原文剪枝（数据/地址根保留） | 1 | 7,911 | 0.71% | 144 |
-| `lower`：ABI、调用、目标指令 lowering 与数据布局 | 6 | 125,930 | 11.34% | 144 |
-| `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 6 | 118,347 | 10.66% | 78 |
+| `lower`：ABI、调用、目标指令 lowering 与数据布局 | 6 | 125,930 | 11.33% | 144 |
+| `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 6 | 118,347 | 10.65% | 78 |
 | `tokenpp`：公开 token 路线的预处理 | 1 | 11,131 | 1.00% | 1 |
 | `tokenlex`：公开 token 路线的词法输出 | 1 | 4,477 | 0.40% | 1 |
 | `units`：多文件分帧与文件级 static 隔离 | 1 | 31,740 | 2.86% | 108 |
@@ -417,11 +417,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 | 网络记录 / 含义 | 字节 | 占整个 .com |
 |---|---:|---:|
-| `H`：阈值/选择网络参数记录 | 919,974 | 82.83% |
-| `Q`：动作序列声明（包含编译模板动作） | 904,125 | 81.41% |
+| `H`：阈值/选择网络参数记录 | 920,578 | 82.84% |
+| `Q`：动作序列声明（包含编译模板动作） | 904,820 | 81.42% |
 | `S`：字节字符串声明 | 18,108 | 1.63% |
 | `N`：网络头记录 | 479 | 0.04% |
-| `C`：动作序列共享前缀声明 | 430,031 | 38.72% |
+| `C`：动作序列共享前缀声明 | 430,715 | 38.76% |
 <!-- model-bytes:end -->
 
 两个 e3 分别是错误与错误+告警变体；十二个 e2 是六目标的普通/位置变体。33 个共享物理模型被 1,082 条阶段行引用，引用次数不是物理份数。压缩前 Q/C 是动作与共享声明，H 是阈值/选择参数；三个数字不与压缩模型体相加。21 份头/库源码与两 ISA 核资源另计；混合平台驱动缺独立 link-map，不虚构其 libc/启动/OS 子项比例。当前产物1,233,236 B（包985,172 B）相对已发布v0.0.8的5,388,402 B小约77.11%，签名后字节变化另记。
@@ -2973,3 +2973,9 @@ R10 carrier公开首片实际转绿：宿主libunisacc运行target/nativeabi产�
 R10 carrier重入接线决定：relocate完成后、任何SCRIPT执行前，对fixed unsupported source export运行nativeabi，成功证书按image lifetime缓存，拒绝不阻止其他函数执行。us_sym只查缓存，不在active回调中启动模型运行域；compile/free/discard先清证书再清exports。公开union探针中的native函数将重入us_sym，必须得到同一closure，且不改变外层call outcome。完成后冻结完整源构建新候选与来源，在候选上验证，不把旧根.com算新功能证据。
 
 R10 carrier重入已实测闭合首片：relocate完成后认证/拥有fixed unsupported export证书，us_sym只读缓存，compile/free/discard按image lifetime清理。native host_flip在active SCRIPT中重入us_sym取得同一closure，ARM/Rosetta ASan/UBSan各O0/O1/O2×100通过；不再把idle模型运行域塞入活动回调。新根.com1110640B、SHA6252cf4bb721b0ff529bf39af21c05e5cf4ce6bddbb3ed0900b83d3adfc80662，来源closure见sidecar；构建包含工作树cache修订，不是仅39f99d5已提交内容。与上一根包相比1082条旧stage记录/全部旧资源逐字节相同，只新增六route共用一网，物理网络23→24。全部24部署net与保留table全域相等、部署解码内容与保留网一致；候选正式union两ISA+com-run/c99/docs5/5 rc0（16s），c99 57/57、run12/0。all构建在pack阶段触55s rc142，不列通过；六target/shared已完成，分开pack rc0完成，不提高超时。字节账已同步。证据research/r10-carrier-reentrant-candidate-evidence.json。下一项继续无frozen plan返回native pointer、general union/bitfield/wide-FP与六平台，不称0.0.10完成或全套发布绿。
+
+R10 nested carrier调用图决定：nativeabi递归认证callback signature的fixed图，保持原始wire与循环/共享引用；carrier仅替换已认证union的ABI载体，其callback指针仍同一pointer存储。宿主registry按两图转换callback槽与handle，不把callback当opaque复制；native返回的未frozen目标由已认证callback边引入，不运行地址分类或新模型查询。NativePlan有callback时走registry bridge，用original signature/frame+carrier CIF，旧ordinary arena保持原路径。公开验收新增host factory返回未注册union Fn、source间接调用该Fn，O0/O1/O2×100且ASan两ISA，先保留真实红记录再接模型/机械层。
+
+R10 递归 carrier 公开验收：nativeabi 模型保留原始 USLSIG2，并递归生成固定回调载体图（755态、194,534观察、34,167 B网络）；C 按已认证图配对与转换，不分类 ABI。私有包 fef8d381… 的原生工厂返回未注册函数指针、SCRIPT closure 经原生实际调用再返回两条路径，在 macOS ARM 与 Rosetta 各以 ASan/UBSan 跑 O0/O1/O2×100 均 rc0；旧模型 factory 明确拒绝的 red 回执一并保留。已加入 factory/relay 与机械图回调门禁；证据 research/r10-recursive-carrier-public-evidence.json。当前根 .com 尚待本批重建；不外推 general union/bitfield/wide-FP 或六平台完成。
+
+R10 递归 carrier 候选已更新根产物：unisacc.com 1,111,324 B / SHA256 f083f670bd1e42f51c433f10e1458026c69db9e32c62160093f2afb75cc9d213；六目标阶段各有界独立构造，pack rc0，来源侧车校验通过。全部24部署网络与留存表全域相等且包中内容相同；公开 factory/relay 四项门禁4/4，旧 concrete变参回调与导出4/4，com-run 12/0、com-c99 57/57、docs均通过（各批≤60s）。完整回执 research/r10-recursive-carrier-candidate-evidence.json。本批不是0.0.10完整发布：general union/bitfield/wide-FP、全部六平台实际FFI、SEH/生命周期及企业分发验收仍需继续。

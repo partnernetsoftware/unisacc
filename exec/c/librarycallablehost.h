@@ -44,6 +44,14 @@ static uint64_t library_callable_make_dispatch(uint64_t origin,uint64_t key,uint
     const us_export_signature *carrier=NULL;us_export_signature carrier_view;
     if(origin==US_CALLABLE_SCRIPT){
         if(!library_region((uintptr_t)c->image,(size_t)c->image_text_size,(uintptr_t)raw,1))return library_dispatch_error(c,"script callable outside owner code");
+        for(LibraryCarrierExport *entry=c->carrier_exports;entry;entry=entry->next){
+            us_export_signature original;const void *address=NULL;int kind=-1;
+            if(!library_lookup(c,entry->source->name,&address,&kind)&&!kind&&(uintptr_t)address==raw&&
+               !us_callable_export_signature(entry->source,&original)&&us_callable_signature_equal(&original,s)){
+                if(us_callable_export_signature(entry->certificate.carrier.items,&carrier_view))return library_dispatch_error(c,"invalid cached script carrier graph");
+                carrier=&carrier_view;break;
+            }
+        }
     }else if(origin==US_CALLABLE_NATIVE){
         int declared=0;for(us_native_plan *p=c->native_plans.head;p;p=p->next){
             us_export_signature view;if(p->target==raw&&!us_callable_export_signature(p->graph.items,&view)&&us_callable_signature_equal(&view,s)){declared=1;if(p->carrier.count){if(us_callable_export_signature(p->carrier.items,&carrier_view))return library_dispatch_error(c,"invalid frozen carrier graph");carrier=&carrier_view;}break;}}
@@ -70,7 +78,9 @@ static uint64_t library_callable_call_dispatch(uint64_t handle,uint64_t key,uint
 static uint64_t library_callable_plan_invoke(us_context *c,ScriptFrame *f,us_native_plan *plan,uint64_t slots,uint64_t result,uint64_t count){
     const us_export_signature *s=&plan->signature;
     if(library_callable_slots(c,f,s,slots,count,result))return library_dispatch_error(c,"invalid callback native plan frame");
-    uint64_t handle=0;int rc=us_callable_make(&c->callables,US_CALLABLE_NATIVE,s,plan->target,&handle,c->error,sizeof c->error);
+    us_export_signature carrier;int has_carrier=plan->carrier.count!=0;
+    if(has_carrier&&us_callable_export_signature(plan->carrier.items,&carrier))return library_dispatch_error(c,"invalid callback carrier plan");
+    uint64_t handle=0;int rc=has_carrier?us_callable_make_carrier(&c->callables,US_CALLABLE_NATIVE,s,&carrier,plan->target,&handle,c->error,sizeof c->error):us_callable_make(&c->callables,US_CALLABLE_NATIVE,s,plan->target,&handle,c->error,sizeof c->error);
     if(!rc)rc=us_callable_call(&c->callables,handle,s,(const uint64_t*)(uintptr_t)slots,(void*)(uintptr_t)result,count,c->error,sizeof c->error);
     return library_callable_propagate(c,rc);
 }

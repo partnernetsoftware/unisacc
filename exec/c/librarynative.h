@@ -44,14 +44,14 @@ static int us_native_plan_add_call_capability(us_native_plans *plans,uintptr_t t
         }
     }
     if(bridge && !variadic && us_export_has_callbacks(x)){
-        if(!us_export_bridge_supported(x)){us_native_plan_free(p);return 0;}
+        if(!us_export_bridge_supported(x)){int eligible=!x->variadic;us_native_plan_free(p);return eligible&&plans->carrier_provider?plans->carrier_provider(plans->carrier_owner,plans,target,sig,length,handle,error,cap):0;}
         p->bridge_required=1;p->signature.count=x->count;p->signature.stored=x->stored;
         p->signature.mode=x->mode;p->signature.supported=x->supported;
         p->signature.result=x->result;p->signature.argtypes=x->argtypes;
         p->target=target;p->next=plans->head;plans->head=p;*handle=(uintptr_t)p;return 0;
     }
     if(!us_export_supported(x)){
-        int eligible=!variadic&&!x->variadic&&!us_export_has_callbacks(x);
+        int eligible=!variadic&&!x->variadic;
         us_native_plan_free(p);
         return eligible&&plans->carrier_provider ? plans->carrier_provider(plans->carrier_owner,plans,target,sig,length,handle,error,cap):0;
     }
