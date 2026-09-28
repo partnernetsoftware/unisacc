@@ -4,6 +4,8 @@
 #ifndef _UNISA_STDLIB_H
 #define _UNISA_STDLIB_H
 #include <stddef.h>
+#include <errno.h>
+#include <limits.h>
 #define NULL 0
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -148,33 +150,73 @@ static int atoi(const char *__u_s) {
 /* strtol/strtoul/strtod: the conversions C89 and C99 put here.  `end` is
  * written when it is not null, which is how callers tell "no digits" from
  * "the value happened to be zero". */
-static long strtol(const char *__u_s, char **__u_end, int __u_base) {
-    long __u_v; int __u_sign; long __u_i; int __u_d;
-    __u_v = 0; __u_sign = 1; __u_i = 0;
+/* Accumulate two 32-bit limbs in nonnegative longs.  Their products by
+ * base (<=36) fit signed long, including at ULONG_MAX; no signed wrap or
+ * unsigned division is needed.  Overflow still consumes every valid digit. */
+static int _unisa_strdigit(int __u_c) {
+    if (__u_c >= 48 && __u_c <= 57) return __u_c - 48;
+    if (__u_c >= 97 && __u_c <= 122) return __u_c - 97 + 10;
+    if (__u_c >= 65 && __u_c <= 90) return __u_c - 65 + 10;
+    return 0 - 1;
+}
+static int _unisa_strmag(const char *__u_s, char **__u_end, int __u_base,
+                       long *__u_hi, long *__u_lo, int *__u_neg) {
+    long __u_i; long __u_start; long __u_l; long __u_h; int __u_d; int __u_over; int __u_auto;
+    __u_auto = __u_base == 0; __u_i = 0; *__u_hi = 0; *__u_lo = 0; *__u_neg = 0; __u_over = 0;
+    if (__u_end) *__u_end = (char *)__u_s;
+    if (__u_base != 0 && (__u_base < 2 || __u_base > 36)) return 0;
     while (__u_s[__u_i] == 32 || (__u_s[__u_i] >= 9 && __u_s[__u_i] <= 13)) __u_i = __u_i + 1;
-    if (__u_s[__u_i] == 45) { __u_sign = 0 - 1; __u_i = __u_i + 1; }
+    if (__u_s[__u_i] == 45) { *__u_neg = 1; __u_i = __u_i + 1; }
     else { if (__u_s[__u_i] == 43) __u_i = __u_i + 1; }
     if (__u_base == 0) {
         __u_base = 10;
-        if (__u_s[__u_i] == 48) {
-            if (__u_s[__u_i+1] == 120 || __u_s[__u_i+1] == 88) { __u_base = 16; __u_i = __u_i + 2; }
-            else __u_base = 8;
-        }
-    } else { if (__u_base == 16) { if (__u_s[__u_i] == 48) {
-        if (__u_s[__u_i+1] == 120 || __u_s[__u_i+1] == 88) __u_i = __u_i + 2; } } }
-    while (__u_s[__u_i]) {
-        __u_d = 0 - 1;
-        if (__u_s[__u_i] >= 48 && __u_s[__u_i] <= 57) __u_d = __u_s[__u_i] - 48;
-        else { if (__u_s[__u_i] >= 97 && __u_s[__u_i] <= 122) __u_d = __u_s[__u_i] - 97 + 10;
-        else { if (__u_s[__u_i] >= 65 && __u_s[__u_i] <= 90) __u_d = __u_s[__u_i] - 65 + 10; } }
-        if (__u_d < 0 || __u_d >= __u_base) break;
-        __u_v = __u_v * __u_base + __u_d; __u_i = __u_i + 1;
+        if (__u_s[__u_i] == 48) __u_base = 8;
     }
-    if (__u_end) *__u_end = (char *)(__u_s + __u_i);
-    return __u_v * __u_sign;
+    if (__u_base == 8 || __u_base == 16) {
+        if (__u_s[__u_i] == 48 && (__u_s[__u_i+1] == 120 || __u_s[__u_i+1] == 88)) {
+            __u_d = _unisa_strdigit(__u_s[__u_i+2]);
+            if (__u_d >= 0 && __u_d < 16) {
+                /* Only base 0 or 16 may accept a hex prefix. */
+                if (__u_base == 16 || __u_auto) { __u_base = 16; __u_i = __u_i + 2; }
+            }
+        }
+    }
+    __u_start = __u_i;
+    while (__u_s[__u_i]) {
+        __u_d = _unisa_strdigit(__u_s[__u_i]);
+        if (__u_d < 0 || __u_d >= __u_base) break;
+        if (!__u_over) {
+            __u_l = *__u_lo * __u_base + __u_d;
+            __u_h = *__u_hi * __u_base + __u_l / 4294967296;
+            if (__u_h > 4294967295) __u_over = 1;
+            else { *__u_hi = __u_h; *__u_lo = __u_l % 4294967296; }
+        }
+        __u_i = __u_i + 1;
+    }
+    if (__u_end && __u_i != __u_start) *__u_end = (char *)(__u_s + __u_i);
+    return __u_over;
+}
+static long strtol(const char *__u_s, char **__u_end, int __u_base) {
+    long __u_hi; long __u_lo; long __u_v; int __u_neg; int __u_over;
+    __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+    if (__u_over || __u_hi > 2147483648 ||
+        (__u_hi == 2147483648 && (__u_lo != 0 || !__u_neg))) {
+        errno = ERANGE;
+        if (__u_neg) return LONG_MIN;
+        return LONG_MAX;
+    }
+    if (__u_hi == 2147483648) return LONG_MIN;
+    __u_v = __u_hi * 4294967296 + __u_lo;
+    if (__u_neg) return 0 - __u_v;
+    return __u_v;
 }
 static unsigned long strtoul(const char *__u_s, char **__u_end, int __u_base) {
-    return (unsigned long)strtol(__u_s, __u_end, __u_base);
+    long __u_hi; long __u_lo; unsigned long __u_v; int __u_neg; int __u_over;
+    __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
+    if (__u_over) { errno = ERANGE; return (unsigned long)0 - 1; }
+    __u_v = ((unsigned long)__u_hi << 32) | (unsigned long)__u_lo;
+    if (__u_neg) return (unsigned long)0 - __u_v;
+    return __u_v;
 }
 static long atol(const char *__u_s) { return strtol(__u_s, 0, 10); }
 

@@ -35,6 +35,8 @@ _M64 = (1 << 64) - 1
 def _pp_char(e, i):
     """e[i] is the opening quote of a character constant -> (value, end)."""
     j, v = i + 1, 0
+    if j >= len(e) or e[j] == "'":
+        raise ValueError("empty or unterminated character constant in #if")
     while j < len(e) and e[j] != "'":
         c = e[j]
         j += 1
@@ -47,7 +49,9 @@ def _pp_char(e, i):
                 k = j
                 while j < len(e) and e[j] in "0123456789abcdefABCDEF":
                     j += 1
-                c = int(e[k:j] or "0", 16)
+                if k == j:
+                    raise ValueError("missing hex escape digits in #if")
+                c = int(e[k:j], 16)
             elif c in "01234567":
                 k = j - 1
                 while j < len(e) and j - k < 3 and e[j] in "01234567":
@@ -58,6 +62,8 @@ def _pp_char(e, i):
         else:
             c = ord(c)
         v = ((v << 8) | (c & 255)) & _M64
+    if j >= len(e):
+        raise ValueError("unterminated character constant in #if")
     return v, j + 1
 
 
@@ -80,11 +86,17 @@ def _pp_tokens(e):
             t = m.group(0)
             i = m.end()
             uns = False
+            suffix_start = i
             while i < len(e) and e[i] in "uUlL":
                 uns = uns or e[i] in "uU"
                 i += 1
+            suffix = e[suffix_start:i]
+            if suffix.lower() not in ("", "u", "l", "ul", "lu", "ll", "ull", "llu") or ("lL" in suffix or "Ll" in suffix):
+                raise ValueError("invalid integer suffix in #if")
             if len(t) > 1 and t[0] == "0" and t[1] not in "xX":
-                v = int(re.match(r"[0-7]*", t).group(0) or "0", 8)
+                if any(c not in "01234567" for c in t):
+                    raise ValueError("invalid octal integer in #if")
+                v = int(t, 8)
             else:
                 v = int(t, 0)
             v &= _M64
@@ -169,8 +181,9 @@ class _PPExpr:
             self.skip += v[0] == 0
             a = self.cond()
             self.skip -= v[0] == 0
-            if self.peek() == ("op", ":"):
-                self.take()
+            if self.peek() != ("op", ":"):
+                raise ValueError("expected : in #if")
+            self.take()
             self.skip += v[0] != 0
             b = self.cond()
             self.skip -= v[0] != 0
@@ -230,8 +243,9 @@ class _PPExpr:
         if k == "op" and v == "(":
             self.take()
             x = self.cond()
-            if self.peek() == ("op", ")"):
-                self.take()
+            if self.peek() != ("op", ")"):
+                raise ValueError("expected ) in #if")
+            self.take()
             return x
         if k == "num":
             self.take()
@@ -242,28 +256,30 @@ class _PPExpr:
                 p = self.peek() == ("op", "(")
                 if p:
                     self.take()
+                if self.peek()[0] != "id":
+                    raise ValueError("expected identifier after defined in #if")
                 n = self.take()
-                if p and self.peek() == ("op", ")"):
+                if p:
+                    if self.peek() != ("op", ")"):
+                        raise ValueError("expected ) after defined in #if")
                     self.take()
-                return (1 if n[0] == "id" and n[1] in self.macros else 0, False)
+                return (1 if n[1] in self.macros else 0, False)
             return (0, False)        # C99 6.10.1: an unknown name is 0
-        self.take()
-        return (0, False)
+        raise ValueError("expected operand in #if")
 
 
 def _truth(expr, macros, live=True):
     """#if / #elif over a real integer constant expression: `defined(X)`
     first, then macro expansion, then any name left standing is 0. [W-1]"""
-    e = re.sub(r"\bdefined\s*\(\s*(\w+)\s*\)",
+    e = re.sub(r"\bdefined\s*\(\s*([A-Za-z_]\w*)\s*\)",
                lambda m: "1" if m.group(1) in macros else "0", expr)
-    e = re.sub(r"\bdefined\s+(\w+)",
+    e = re.sub(r"\bdefined\s+([A-Za-z_]\w*)",
                lambda m: "1" if m.group(1) in macros else "0", e)
     e = expand(e, macros)
-    try:
-        x = _PPExpr(_pp_tokens(e), macros)
-        r = x.cond()[0] != 0
-    except Exception:
-        return False
+    x = _PPExpr(_pp_tokens(e), macros)
+    r = x.cond()[0] != 0
+    if x.peek()[0] != "end":
+        raise ValueError("unconsumed token in #if: " + str(x.peek()[1]))
     if x.div0 and live:
         raise ValueError("division by zero in #if")
     return r
