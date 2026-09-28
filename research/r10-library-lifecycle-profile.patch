@@ -1,0 +1,106 @@
+--- current/exec/c/libunisacc.c
++++ private-profile/exec/c/libunisacc.c
+@@ -2,6 +2,9 @@
+    compilation rule lives here. One context may be used by one thread at a
+    time; different contexts execute concurrently, without a global lock. */
+ #include "libunisacc.h"
++#include <time.h>
++static _Thread_local unsigned long long profile_ns[5];
++static unsigned long long profile_clock(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (unsigned long long)t.tv_sec*1000000000+t.tv_nsec;}
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -82,10 +85,11 @@
+     if (!*a) __us_panic("unowned runtime free");
+     Allocation *node=*a; *a=node->next; free(p); free(node);
+ }
+-static void cleanup(void) {
++static void cleanup_impl(void) {
+     while (open_files) {OpenFile *node=open_files;open_files=node->next;close(node->fd);free(node);}
+     while (allocations) { Allocation *a=allocations; allocations=a->next; free(a->p); free(a); }
+ }
++static void cleanup(void){unsigned long long n=profile_clock();cleanup_impl();profile_ns[4]+=profile_clock()-n;}
+ static void diagnostic(int status,const char *reason,int n,const void *errors);
+ #define UNISA_RUNTIME_LIBRARY
+ #define UNISA_RUNTIME_STATE static _Thread_local
+@@ -553,3 +557,6 @@
+     *status=c->call_exited ? c->call_exit_status : (int)result;
+     c->error[0]=0;return 0;
+ }
++
++API void profile_reset(void){memset(profile_ns,0,sizeof profile_ns);}
++API unsigned long long profile_get(int i){return i>=0&&i<5?profile_ns[i]:0;}
+--- current/exec/c/run.c
++++ private-profile/exec/c/run.c
+@@ -134,7 +134,7 @@
+ 
+ static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
+ 
+-static void loadbytes(unsigned char *data, int len) {
++static void loadbytes_impl(unsigned char *data, int len) {
+     LB = data; LN = len; LBIN=len>=8 && !memcmp(data,"UNINETB1",8); LP=LBIN?8:0;
+     int kind = lchar(); NS=lint(); NQ=lint(); NRG=lint(); NSTR=lint(); START=lint();
+     if ((kind != 'T' && kind != 'N') || NS <= 0 || NQ <= 0 || NRG < 0 || NSTR < 0 || START < 0 || START >= NS) die("bad header");
+@@ -243,6 +243,8 @@
+     }
+ }
+ 
++static void loadbytes(unsigned char *data, int len) {unsigned long long n=profile_clock();loadbytes_impl(data,len);profile_ns[1]+=profile_clock()-n;}
++
+ #ifndef UNISA_RUNTIME_LIBRARY
+ static void load(const char *path) {
+     int n = 0; unsigned char *data = readfile(path, &n, 0);
+@@ -272,7 +274,7 @@
+     int n = LP-first; if (!n) die("missing package name");
+     char *v = xrealloc(0, n+1); memcpy(v, LB+first, n); v[n] = 0; return v;
+ }
+-static void package(const char *path) {
++static void package_impl(const char *path) {
+     PFILE = readfile(path, &PN, 0); PB = PFILE;
+     if (PN < 2 || PB[0] != 'P' || PB[1] != ' ') {
+         PackageFooter footer;
+@@ -324,6 +326,8 @@
+     }
+     if (LP != LN) die("trailing package data");
+ }
++static void package(const char *path) {unsigned long long n=profile_clock();package_impl(path);profile_ns[0]+=profile_clock()-n;}
++
+ static void unpackage(void) {
+     for (int i = 0; i < PS; i++) {
+         free(STAGES[i].route); free(STAGES[i].name); free(STAGES[i].in); free(STAGES[i].out);
+@@ -332,7 +336,7 @@
+ }
+ 
+ /* Model lifetime is one stage. No model-specific state survives unload. */
+-static void unload(void) {
++static void unload_impl(void) {
+     for (int i = 0; i < NSTR; i++) free(STR[i]);
+     for (int i = 0; i < NS; i++) { free(ROWK[i]); free(ROWN[i]); free(ROWQ[i]); }
+     free(STR); free(STRL); free(QOFF); free(QLEN); free(QA);
+@@ -341,6 +345,8 @@
+     for (int i = 0; i < NS; i++) free(RETOK[i]);
+     free(RETS); free(RETOK);
+ }
++
++static void unload(void) {unsigned long long n=profile_clock();unload_impl();profile_ns[3]+=profile_clock()-n;}
+ 
+ static void core_model(CoreModel *m) {
+     m->ns=NS;
+@@ -442,7 +448,7 @@
+     o->b[o->n]=(unsigned char)c; o->at[o->n]=at; o->n++;
+ }
+ #endif
+-static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {
++static int execute_impl(unsigned char *input,int inputn,const char *src,Buf *result) {
+     CoreModel m; core_model(&m);
+     I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : UNISA_DEFAULT_MAXSTEPS;
+     CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
+@@ -456,6 +462,8 @@
+     free(r.err.b); result->b=r.out.b; result->n=r.out.n;
+     return status;
+ }
++
++static int execute(unsigned char *input,int inputn,const char *src,Buf *result) {unsigned long long n=profile_clock();int rc=execute_impl(input,inputn,src,result);profile_ns[2]+=profile_clock()-n;return rc;}
+ 
+ /* Route dispatch owns only byte-stream lifetimes, never compiler semantics. */
+ static int runroute_range(const char *route, const char *first_stage, const char *last_stage, Buf *in, const char *src) {
