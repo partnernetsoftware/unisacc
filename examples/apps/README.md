@@ -15,7 +15,7 @@ suites' inputs.
 | `procview.c` | a process-tree analyser: macOS libproc queried by the application itself, or a bounded `/proc/N/status` scan on Linux. Parent lookup, subtree sums by walking ancestors with a depth cap (so parent cycles cannot loop), `qsort` on index arrays with three comparators, orphan / self-parent / cycle detection |
 | `winlayout.c` | queries live CoreGraphics/CF windows on macOS through explicit FFI, then computes visibility, overlaps, largest empty rectangle and minimap; also accepts captured geometry |
 | `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Linux defaults to its own `/proc/self/maps`; macOS queries this application's own regions through libproc. Identical snapshots are compared against cc; live self maps are checked structurally |
-| `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; reads explicit real files supplied on the command line |
+| `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; reads the files named on the command line; with none, dissects this host's own system executables (`/bin/ls` and `/usr/lib/dyld` on macOS, the running image `/proc/self/exe` and `/bin/ls` on Linux, `cmd.exe`/`kernel32.dll` on Windows) |
 | `colorpack.c` | bit-field packed pixel formats (RGB565/555, RGBA4444): quantisation, round-trip error, per-channel histograms. Every field value matches host `cc`; `sizeof` currently does not (a filed, unfixed defect -- see the file comment) |
 
 The four system tools consume real input. On macOS, procview, memmap and
@@ -26,6 +26,7 @@ collector participates in these commands.
 ./unisacc.com -run examples/apps/procview.c
 ./unisacc.com -run examples/apps/memmap.c
 ./unisacc.com -run examples/apps/winlayout.c
+./unisacc.com -run examples/apps/exeinfo.c
 ./unisacc.com -run examples/apps/exeinfo.c unisacc.com /bin/ls
 ./unisacc.com -run examples/apps/memmap.c -- --capture > maps.txt
 ```
@@ -33,7 +34,10 @@ collector participates in these commands.
 The former collector launcher has been removed. Explicit files or `-` remain available
 for reproducible analysis tests. Linux procview and memmap retain their
 `/proc` paths; live window collection currently requires macOS. Permission
-restrictions, vanished processes and collection limits are reported.
+restrictions, vanished processes and collection limits are reported: on macOS
+procview lists every process (other users' via the unprivileged short BSD
+record) and shows their resident size as `?`, because only the setuid-root
+`ps` may read other users' task information.
 There is no synthetic fallback.
 
 The macOS bridge resolves system symbols using dlopen/dlsym and calls them

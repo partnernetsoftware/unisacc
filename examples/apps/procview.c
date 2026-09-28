@@ -29,7 +29,7 @@
 
 struct proc {
     long pid, ppid, rss, sub;
-    int parent, depth, kids, first, next;
+    int parent, depth, kids, first, next, norss;
     char name[48];
 };
 
@@ -43,6 +43,7 @@ static struct grp G[MAXP];
 static int ord[MAXP];
 static int NP;
 static long total;
+static int NORSS;
 static long minkb;
 
 
@@ -123,9 +124,9 @@ static int scan_proc(void)
 static int scan_mac_proc(void)
 {
     static int pids[MAXP];
-    long bsd[17], task[12], result, zero = 0;
+    long bsd[17], shortbsd[8], task[12], result, zero = 0;
     unsigned int type = 1, typeinfo = 0;
-    int capacity = sizeof pids, i, count, omitted = 0, flavor, size, pid;
+    int capacity = sizeof pids, i, count, vanished = 0, norss = 0, flavor, size, pid;
     int lk[4] = { UFFI_UINT, UFFI_UINT, UFFI_POINTER, UFFI_INT };
     int pk[5] = { UFFI_INT, UFFI_INT, UFFI_ULONG, UFFI_POINTER, UFFI_INT };
     void *buffer = pids, *values[5], *lib, *list, *info;
@@ -147,17 +148,31 @@ static int scan_mac_proc(void)
         values[0] = &pid; values[1] = &flavor; values[2] = &zero;
         values[3] = &buffer; values[4] = &size;
         if (uffi_call(info, UFFI_INT, pk, values, 5, -1, &result)) return 0;
-        if (result != sizeof bsd) { omitted++; continue; }
+        if (NP >= MAXP) { fprintf(stderr, "procview: process capacity reached\n"); break; }
+        p = &P[NP];
+        if (result == sizeof bsd) {
+            p->pid = *(unsigned int *)((char *)bsd + 12);
+            p->ppid = *(unsigned int *)((char *)bsd + 16);
+            memcpy(p->name, (char *)bsd + 64, 32); p->name[32] = 0;
+            if (!p->name[0]) { memcpy(p->name, (char *)bsd + 48, 16); p->name[16] = 0; }
+        } else {
+            /* Other users' full BSD info is denied; the short record
+               (proc_bsdshortinfo, 64 bytes: pid, ppid, comm at 16) is not. */
+            flavor = 13; size = sizeof shortbsd; buffer = shortbsd;
+            if (uffi_call(info, UFFI_INT, pk, values, 5, -1, &result)) return 0;
+            if (result != sizeof shortbsd) { vanished++; continue; }
+            p->pid = *(unsigned int *)((char *)shortbsd + 0);
+            p->ppid = *(unsigned int *)((char *)shortbsd + 4);
+            memcpy(p->name, (char *)shortbsd + 16, 16); p->name[16] = 0;
+        }
         flavor = 4; size = sizeof task; buffer = task;
         if (uffi_call(info, UFFI_INT, pk, values, 5, -1, &result)) return 0;
-        if (result != sizeof task) { omitted++; continue; }
-        p = &P[NP++]; p->pid = *(unsigned int *)((char *)bsd + 12);
-        p->ppid = *(unsigned int *)((char *)bsd + 16);
-        p->rss = (unsigned long)task[1] / 1024;
-        memcpy(p->name, (char *)bsd + 64, 32); p->name[32] = 0;
-        if (!p->name[0]) { memcpy(p->name, (char *)bsd + 48, 16); p->name[16] = 0; }
+        if (result == sizeof task) p->rss = (unsigned long)task[1] / 1024;
+        else { p->rss = 0; p->norss = 1; norss++; }
+        NP++;
     }
-    if (omitted) fprintf(stderr, "procview: %d processes vanished or were inaccessible\n", omitted);
+    NORSS = norss;
+    if (vanished) fprintf(stderr, "procview: %d processes exited during the scan\n", vanished);
     uffi_dlclose(lib);
     return NP > 0;
 }
@@ -205,7 +220,7 @@ static int by_sum(const void *a, const void *b)
 
 static void line(int i, const char *pre, const char *branch)
 {
-    printf("%s%s%s (%ld)  %s", pre, branch, P[i].name, P[i].pid, mb(P[i].rss));
+    printf("%s%s%s (%ld)  %s", pre, branch, P[i].name, P[i].pid, P[i].norss ? "    ?" : mb(P[i].rss));
     if (P[i].first >= 0) printf("  sum %s", mb(P[i].sub));
     printf("\n");
 }
@@ -287,7 +302,10 @@ int main(int argc, char **argv)
     }
     minkb = NP > 40 ? total / 100 : 0;
 
-    printf("== process tree (%d processes, %s resident)\n", NP, mb(total));
+    if (NORSS)
+        printf("== process tree (%d processes, %s resident; RSS of %d other users' processes needs privileges, shown as ?)\n", NP, mb(total), NORSS);
+    else
+        printf("== process tree (%d processes, %s resident)\n", NP, mb(total));
     for (i = rootfirst; i >= 0; i = P[i].next)
         if (P[i].ppid != P[i].pid) show(i, "", "", 0);
 

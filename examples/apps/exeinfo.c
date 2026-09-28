@@ -3,7 +3,8 @@
  *
  *   unisacc -run exeinfo.c FILE...
  *
- * Requires real file paths; run.sh defaults to the actual compiler container.
+ * With no argument it dissects this host's own system executables (the
+ * running process's image on Linux, a system binary on macOS/Windows).
  * Reads that polyglot container as readily as a plain ELF or Mach-O file.
  *
  * Every field is read through U()/UB(), which are bounds-checked: a field
@@ -242,27 +243,43 @@ static void analyze(void)
     if (oob) printf("note     some fields lie beyond the %ld bytes examined and read as 0\n", LEN);
 }
 
+static int dissect(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char tmp[4096];
+    long n;
+    if (f == 0) return 0;
+    LEN = (long)fread(B, 1, BUFSZ, f);
+    FILESZ = LEN;
+    while ((n = (long)fread(tmp, 1, sizeof tmp, f)) > 0) FILESZ += n;
+    fclose(f);
+    printf("== %s\n", path);
+    analyze();
+    printf("\n");
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
-    int a;
-    /* In -run mode argv[0] names the source, so require an explicit file.
-     * run.sh supplies the actual compiler container when no file is given. */
+    /* In -run mode argv[0] names the source, not an image, so the no-argument
+     * default reads real executables that exist on every host of its kind. */
+    static const char *host[] = {
+#if defined(_WIN32)
+        "C:\\Windows\\System32\\cmd.exe", "C:\\Windows\\System32\\kernel32.dll",
+#elif defined(__APPLE__)
+        "/bin/ls", "/usr/lib/dyld",
+#else
+        "/proc/self/exe", "/bin/ls",
+#endif
+        0 };
+    int a, found = 0;
     if (argc <= 1) {
-        fprintf(stderr, "exeinfo: supply a real executable; use examples/apps/run.sh exeinfo\n");
-        return 1;
+        for (a = 0; host[a]; a++) found += dissect(host[a]);
+        if (!found) { fprintf(stderr, "exeinfo: no system executable readable; pass a path\n"); return 1; }
+        return 0;
     }
     for (a = 1; a < argc; a++) {
-        FILE *f = fopen(argv[a], "rb");
-        char tmp[4096];
-        long n;
-        if (f == 0) { fprintf(stderr, "exeinfo: cannot open %s\n", argv[a]); return 1; }
-        LEN = (long)fread(B, 1, BUFSZ, f);
-        FILESZ = LEN;
-        while ((n = (long)fread(tmp, 1, sizeof tmp, f)) > 0) FILESZ += n;
-        fclose(f);
-        printf("== %s\n", argv[a]);
-        analyze();
-        printf("\n");
+        if (!dissect(argv[a])) { fprintf(stderr, "exeinfo: cannot open %s\n", argv[a]); return 1; }
     }
     return 0;
 }

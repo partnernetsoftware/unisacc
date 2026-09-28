@@ -54,8 +54,11 @@ try:
             if native != want: raise RuntimeError(f'{app}: native differs from cc')
             run([*prefix, '-run', source, d/'missing'], expected=1)
             if app == 'exeinfo':
-                run([d/app], expected=1)
-                run([*prefix, '-run', source], expected=1)
+                for own in (run([d/app]), run([*prefix, '-run', source])):
+                    if own.stdout.count(b'\n== ') + own.stdout.startswith(b'== ') < 1 or b'format   ' not in own.stdout:
+                        raise RuntimeError('exeinfo default did not dissect a host executable')
+                    if b'== sample:' in own.stdout or b'SAMPLE' in own.stdout:
+                        raise RuntimeError('synthetic default')
             else:
                 own = run([*prefix, '-run', source], expected=1 if app=='winlayout' and platform.system()!='Darwin' else 0)
                 if app=='winlayout' and platform.system()!='Darwin':
