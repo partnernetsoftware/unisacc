@@ -2861,3 +2861,19 @@ R10 variadic完整调用闭环本批实施：E3同时处理USBIND3 format2原型
 本批FP栈探针口径更正：首轮fixed double1+提升float1+额外double6合计8，恰好仍在ARM/x86的8个FP寄存器内，不能证明跨栈；已将额外double增为7、总FP9，并在正式候选两ISA普通/ASan验收中重跑。不删除首轮结果，但撤回其中FP跨栈表述。
 
 R10 public typedvariadic正式候选收尾：ed43891源私有冻结树完整shared/六目标/P3/APE每步≤55s真实构造，a225e17只修回归的FP9边界。根.com与原始sidecar同步**1,084,569 B / SHA256 89667911e1ab3af2b26f3961106f804e445ae9544e8ca8e275a1a91502a103f9**。两ISA公开变参ASan+UBSan与旧fixed ABI/模板事务8项rc0（6s），435次产品三优化级差分wrong0/refuse0（15s），language-1的13探针/6拒绝rc0（47s），库兼容/产品入口/kernel/docs8项rc0（17s）；实际23对网络全域一致。新模型独立签名逐字段检查与sim/C-network一致。总21项受影响门禁，不是最终全套；没有VM/push/签名/release。回执research/r10-variadic-public-evidence.json；完整R10继续，下一域recursive callback签名图，四个平台原生与其他布局/WindowsSEH/企业签名发布保持原范围。
+
+### R10 recursive callback图首批实施决定（2026-09-29）
+沿research/r10-callback-graph-next-design.md推进完整图，不采用只能表示内联树的替代目标。USLSIG2 tag4非空payload固定为schema1/form0定义或form1引用/LE64 record-local signature_id；定义后接variadic、script_mode、LE64 count、result descriptor、LE64 stored=count、完整params、supported字节。ID为1..1024、定义按首次遍历分配连续ID；只引用此前登记（含正在定义）的ID，允许callback指针闭环，拒绝重复/悬空/前向引用；描述符直接callable限定kind4/depth1/width8/align8，额外指针层按opaque data pointer处理。保持空tag4旧记录可读但unsupported；旧V1及tag0–3字节兼容。宿主图arena独立拥有signature节点，引用边不递归释放；canonical重编号ID、删除parser-local base/shape，保留布局/图拓扑与声明调用模式。限节点16384/嵌套32/单signature参数1024/图signature1024/单记录16MiB。
+并发首批域：宿主graph decoder/有界结构图相等及host图测试；共享model canonicalizer/prune reader及wire图测试；parse2匿名/嵌套signature完整facts池与参数query/equality及模型回归。父会话协议/PRD/后续callable机制/真正公开回归/共享产物。首批只建立完整图声明与事实，不让现有ffi_call直接接收script函数地址：callback型顶层签名在callable方向转换接通前仍须unsupported，不能以ffi_type_pointer冒充ABI适配成功。后续闭环必须实际native→script→native→script Relay→native Leaf9、正常回返后的sticky错误传播、保留callback直到generation结束、嵌套aggregate字段/返回与variadic indirect calls；六平台/WindowsSEH/签名发布不缩范围。
+
+Callback图ABI相等口径补正：图ID与共享方式都是表示选择，同一Leaf定义一次+引用与重复两份等价Leaf定义应兼容，不能把图同构当类型相等。宿主防御比较采用有界已访问(signatureA,signatureB)对的结构双模拟，不强制一对一ID映射；共享model首片canonical用于有界/无损图规范化，未完成语义重复合并或图对比较前，不拿canonical字节相等宣称全部callback ABI兼容。callback执行仍unsupported，后续实际桥接前必须补模型语义图相等，防止表示差异误拒绝合法原型。
+
+Callback真实红基线已建立：五段native→script→native→script Relay→native Leaf9探针tests/libraryabi/callback_graph_bidirectional.c当前在typed graph注册明确拒绝，rc1，不冒称可调用；它不使用宿主全局us_sym地址代替callback形参，另检查两真实native函数地址、保留callback、Pair/canary。普通源码完整signature探针callback_full_signature.c系统cc退出0，而根89667911模型产品退出1且无诊断（应285+153=438），构成实际产品误编译红基线，首批facts修复必须实机执行candidate验证，不能只检查生成字典。回执research/r10-callback-public-red.json。
+
+Callback图首片父会话独立验证：宿主ARM64及Rosetta x86_64各普通/ASan+UBSan通过；模型282态/72500观察与prune727态/187310观察全域相等，10图规范化/15畸形/273截断/4保留根通过。实际8052态--errors私有E3候选仍在完整signature程序退出1；拆分后direct9/direct17退出0，而ptr9/ptr17/pick9/returned9退出1，故完整facts测试不能替代实际间接调用。继续修复调用固定转换；不提升根.com、不称callback可用。新增三个图声明门禁，不将仍红的公开callback执行探针登记为绿门禁。
+
+Callback模型图语义相等下一片决定：保持MS.canonical作为声明验证/无损规范化，新增独立MG.equal，将两份已校验图索引为有序类型节点与signature引用，再以非双射已访问节点对比较。忽略parser/wire ID、definition/reference编码与共享拓扑、supported证明位；比较kind/depth/width/unsigned/align、真variadic、nested脚本mode、参数顺序、数组维度/stride与成员布局。节点<=16384、signature<=1024沿现wire；pair队列/已访问预算65536，超预算明确未覆盖，不返回相等。430–437高位银行与现72–82/300–357/400–413隔离；顶层调用mode保留既有忽略契约，nested保留。先独立model回归共享/重复、self/双节点cycle、第9参/返回/mode/offset变异，再连接实际LI/LV原型比较；未连接不称产品已有完整callbackABI匹配。
+
+完整signature实际误编译已局部修复并独立复验：明确移除旧展开FS.query状态后，以完整sig*1024 facts查询固定实参；九/十七参数直接/间接、pick返回及连调/full共7程序，在真实ASM网络driver的O0/O1/O2共21次全部退出0。之前只测facts/equality未覆盖实际callquery是门禁缺口，专项补sim/C-network查询与实际driver接受。六项旧宿主ABI/计划门禁rc0（3s）。回执research/r10-callback-foundation-evidence.json；私有候选成功不是根产品已更新，后续正式构造/产品受影响门禁仍待做。
+
+宿主graph相等补回归：同一plain Leaf的supported0/1是能力声明而非ABI类型差异，新等价fixture先实际失败，再移除该证明位的结构比较；数据解码仍按supported约束拒绝冒充可执行callback。两ISA图门禁需在补丁后重跑，先前3门禁不代替新fixture验收。

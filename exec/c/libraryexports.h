@@ -15,11 +15,20 @@
 #include <string.h>
 #include <stdio.h>
 typedef struct us_export_type us_export_type;
+typedef struct us_export_signature us_export_signature;
+typedef struct us_export_graph {
+    us_export_signature **signatures; size_t count;
+} us_export_graph;
 typedef struct us_export_member { uint64_t offset,bit_offset,bit_width,storage; us_export_type *type; } us_export_member;
 struct us_export_type {
     uint64_t depth,base,shape,kind,width,uns,alignment,tag,nmembers,count,stride;
     us_export_member *members; us_export_type *element;
+    us_export_signature *signature; /* borrowed edge; graph owns each node once */
     ffi_type native; ffi_type **elements; ffi_type *ffi;
+};
+struct us_export_signature {
+    uint64_t id,count,stored; unsigned variadic,mode,supported;
+    us_export_type result,*argtypes;
 };
 typedef struct us_export_frame {
     const uint64_t *slots; uint64_t count; unsigned mode,result_kind;
@@ -34,7 +43,7 @@ typedef struct us_export {
     us_export_type *argtypes; ffi_type **dynamic_ffiargs; us_export_invoke_frame invoke_frame;
     ffi_cif cif; ffi_type *ffiargs[6]; ffi_closure *closure; void *code;
     const void *raw; void *owner; us_export_invoke invoke;
-    int last_status;
+    int last_status; us_export_graph graph;
 } us_export;
 typedef struct us_exports { us_export *items; size_t count; } us_exports;
 static int us_export_error(char *error,size_t cap,const char *text) {
@@ -46,6 +55,16 @@ static void us_export_type_clear(us_export_type *t) {
     free(t->members);if(t->element){us_export_type_clear(t->element);free(t->element);}
     free(t->elements);memset(t,0,sizeof *t);
 }
+static void us_export_graph_clear(us_export_graph *g) {
+    if(!g)return;
+    for(size_t i=0;i<g->count;i++){
+        us_export_signature *s=g->signatures[i];
+        us_export_type_clear(&s->result);
+        for(size_t j=0;s->argtypes && j<(size_t)s->stored;j++)us_export_type_clear(&s->argtypes[j]);
+        free(s->argtypes);free(s);
+    }
+    free(g->signatures);memset(g,0,sizeof *g);
+}
 static const us_export_type *us_export_arg(const us_export *x,size_t i) { return x->version==2 ? &x->argtypes[i] : &x->args[i]; }
 static void us_exports_clear(us_exports *set) {
     if (!set) return;
@@ -55,6 +74,7 @@ static void us_exports_clear(us_exports *set) {
         us_export_type_clear(&set->items[i].result);
         if(set->items[i].argtypes){for(size_t j=0;j<(size_t)set->items[i].stored;j++)us_export_type_clear(&set->items[i].argtypes[j]);}
         free(set->items[i].argtypes);free(set->items[i].dynamic_ffiargs);
+        us_export_graph_clear(&set->items[i].graph);
     }
     free(set->items);memset(set,0,sizeof *set);
 }
@@ -94,7 +114,7 @@ static int us_export_supported(const us_export *x) {
 }
 /* Recursive payloads are bounded independently; no child can consume a sibling. */
 static int us_export_descriptor2(const unsigned char *b,size_t len,size_t *at,
-        us_export_type *t,unsigned depth,size_t *nodes) {
+        us_export_type *t,unsigned depth,size_t *nodes,us_export_graph *graph) {
     uint64_t payload; size_t end;
     if(depth>32 || ++*nodes>16384 || us_export_u64(b,len,at,&t->depth) ||
        us_export_u64(b,len,at,&t->base)||us_export_u64(b,len,at,&t->shape)||
@@ -117,7 +137,7 @@ static int us_export_descriptor2(const unsigned char *b,size_t len,size_t *at,
             us_export_member *m=&t->members[i];m->type=calloc(1,sizeof *m->type);if(!m->type)return 1;
             if(us_export_u64(b,end,at,&m->offset)||us_export_u64(b,end,at,&m->bit_offset)||
                us_export_u64(b,end,at,&m->bit_width)||us_export_u64(b,end,at,&m->storage)||
-               us_export_descriptor2(b,end,at,m->type,depth+1,nodes)||m->offset>t->width ||
+               us_export_descriptor2(b,end,at,m->type,depth+1,nodes,graph)||m->offset>t->width ||
                m->type->width>t->width-m->offset || m->storage>t->width-m->offset ||
                m->bit_width>m->storage*8 || m->bit_offset>m->storage*8-m->bit_width)return 1;
         }
@@ -125,9 +145,52 @@ static int us_export_descriptor2(const unsigned char *b,size_t len,size_t *at,
         if(t->kind!=5 || t->depth || us_export_u64(b,end,at,&t->count)||us_export_u64(b,end,at,&t->stride)||
            !t->count || t->count>16384 || !t->stride || t->stride>16777216 || t->count>16777216/t->stride ||
            t->width!=t->count*t->stride)return 1;
-        t->element=calloc(1,sizeof *t->element);if(!t->element || us_export_descriptor2(b,end,at,t->element,depth+1,nodes)||t->element->width!=t->stride)return 1;
-    }else if(payload || t->kind!=4 || t->width!=8 || !t->depth)return 1; /* nested signature is not introduced yet */
+        t->element=calloc(1,sizeof *t->element);if(!t->element || us_export_descriptor2(b,end,at,t->element,depth+1,nodes,graph)||t->element->width!=t->stride)return 1;
+    }else{
+        if(t->kind!=4 || t->width!=8 || !t->depth)return 1;
+        if(payload){
+            uint64_t id;unsigned form;
+            if(t->depth!=1 || t->alignment!=8 || end-*at<2 || b[(*at)++]!=1)return 1;
+            form=b[(*at)++];
+            if(form>1 || us_export_u64(b,end,at,&id)||!id||id>1024)return 1;
+            if(form==1){
+                if(id>graph->count)return 1;
+                t->signature=graph->signatures[id-1];
+            }else{
+                if(id!=graph->count+1 || end-*at<2)return 1;
+                if(!graph->signatures){graph->signatures=calloc(1024,sizeof *graph->signatures);if(!graph->signatures)return 1;}
+                us_export_signature *sig=calloc(1,sizeof *sig);if(!sig)return 1;
+                sig->id=id;graph->signatures[graph->count++]=sig;t->signature=sig;
+                /* Register before children: only already introduced/self edges are legal. */
+                sig->variadic=b[(*at)++];sig->mode=b[(*at)++];
+                if(sig->variadic>1 || sig->mode>1 || us_export_u64(b,end,at,&sig->count)||sig->count>1024 ||
+                   (!sig->mode && (sig->count>6 || sig->variadic)) ||
+                   us_export_descriptor2(b,end,at,&sig->result,depth+1,nodes,graph) ||
+                   us_export_u64(b,end,at,&sig->stored)||sig->stored!=sig->count)return 1;
+                sig->argtypes=calloc(sig->stored ? (size_t)sig->stored:1,sizeof *sig->argtypes);if(!sig->argtypes)return 1;
+                for(size_t i=0;i<(size_t)sig->stored;i++)
+                    if(us_export_descriptor2(b,end,at,&sig->argtypes[i],depth+1,nodes,graph))return 1;
+                if(*at>=end || (sig->supported=b[(*at)++])>1)return 1;
+            }
+        }
+    }
     return *at!=end;
+}
+/* Signature edges are not followed: a callable slot itself requires conversion.
+   By-value child ownership is a depth-bounded tree, even in cyclic signatures. */
+static int us_export_type_has_callback(const us_export_type *t) {
+    if(t->kind==4)return 1;
+    if(t->element && us_export_type_has_callback(t->element))return 1;
+    for(size_t i=0;i<(size_t)t->nmembers;i++)if(us_export_type_has_callback(t->members[i].type))return 1;
+    return 0;
+}
+static int us_export_graph_support_valid(const us_export_graph *g) {
+    for(size_t i=0;i<g->count;i++){
+        const us_export_signature *s=g->signatures[i];if(!s->supported)continue;
+        if(us_export_type_has_callback(&s->result))return 0;
+        for(size_t j=0;j<(size_t)s->count;j++)if(us_export_type_has_callback(&s->argtypes[j]))return 0;
+    }
+    return 1;
 }
 /* Build only representable libffi layouts. Unsupported declarations stay visible. */
 static ffi_type *us_export_native(us_export_type *t,int result) {
@@ -172,9 +235,10 @@ static int us_exports_load(us_exports *set,const void *data,size_t length,char *
         if(x->linkage>1||x->defined!=1||x->variadic>1||x->mode>1||us_export_u64(bytes,length,&at,&x->count))goto bad;
         if(version==2){
             if(x->count>1024 || (!x->mode && (x->count>6||x->variadic)) ||
-               us_export_descriptor2(bytes,length,&at,&x->result,1,&nodes)||us_export_u64(bytes,length,&at,&x->stored)||x->stored!=x->count)goto bad;
+               us_export_descriptor2(bytes,length,&at,&x->result,1,&nodes,&x->graph)||us_export_u64(bytes,length,&at,&x->stored)||x->stored!=x->count)goto bad;
             x->argtypes=calloc(x->stored ? (size_t)x->stored:1,sizeof *x->argtypes);if(!x->argtypes)goto bad;
-            for(size_t j=0;j<(size_t)x->stored;j++)if(us_export_descriptor2(bytes,length,&at,&x->argtypes[j],1,&nodes))goto bad;
+            for(size_t j=0;j<(size_t)x->stored;j++)if(us_export_descriptor2(bytes,length,&at,&x->argtypes[j],1,&nodes,&x->graph))goto bad;
+            if(!us_export_graph_support_valid(&x->graph))goto bad;
             x->result.ffi=us_export_native(&x->result,1);
             for(size_t j=0;j<(size_t)x->stored;j++)x->argtypes[j].ffi=us_export_native(&x->argtypes[j],0);
         }else{

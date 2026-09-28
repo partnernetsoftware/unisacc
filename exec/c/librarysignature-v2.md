@@ -29,10 +29,31 @@ These layout facts come from SSZ/SAL/SMEM/MOF/MPT/MBS/MAR/BFW/BFO/BFS.
 Tag3 array payload: element_count, stride_bytes, child_descriptor; width=count*stride.
 Bitfields, unions, flexible arrays and unresolved types stay represented but unsupported
 until a model NativePlan/typed callback path is implemented, never faked as byte arrays.
-Tag4 reserved for nested function signature; version2 readers reject a nonempty tag4
-until its schema is introduced together with the typed callback implementation.
+Tag4 payload0 is an old unresolved callback and remains unsupported. A nonempty
+payload is `schema:u8=1, form:u8, signature_id:LE64`. form1 is a reference with
+no additional bytes. form0 defines a signature, followed by
+`variadic:u8, script_mode:u8, parameter_count:LE64, result_descriptor,
+stored_count:LE64 (=parameter_count), parameter_descriptors[], supported:u8`.
+IDs are record-local, 1..1024, allocated contiguously in first-definition traversal.
+Register a definition before its children: backward references and self references
+are legal, but forward, dangling and duplicate IDs are rejected. Definitions have
+independent counts/modes; each uses the same REGISTER/ALL_STACK rules as a record.
+A nonempty tag4 must be kind4/depth1/width8/alignment8. Additional indirection is
+an opaque data pointer (kind2/tag0), never automatically dereferenced.
+A signature containing a direct or nested callback remains supported0 until the
+callable bridge is implemented; a leaf signature without callbacks may support1.
+The enclosing public record must support0 whenever any kind4 appears. This graph
+protocol establishes declaration facts and does not claim callback execution.
+Canonicalisation zeroes parser base/shape and emits deterministic definition IDs,
+preserving graph topology, layout and nested modes. Top-level mode remains separate
+metadata under the existing canonical comparison contract. Canonical graph bytes
+preserve sharing topology: one shared leaf and two identical leaf definitions can
+have different bytes despite ABI equivalence. Complete callback ABI compatibility
+therefore still requires a bounded structural signature-pair comparison; canonical
+byte equality alone is not claimed to establish all equivalent callback graphs.
 Each descriptor payload is bounded by its declared length and must be consumed exactly.
-Limits: descriptor recursion32, nodes16384 per record, byte extent<=16MiB.
+Limits: descriptor recursion32, nodes16384 and signature definitions1024 per record,
+parameter count1024 per signature, byte extent<=16MiB.
 
 Host call frame contract (mechanical):
 `us_export_frame {slots,count,mode,result_kind,result_bytes,result}`.
@@ -45,8 +66,8 @@ Original us_exports_symbol/invoke and V1 unit tests remain supported. New public
 integration calls us_exports_symbol_frame and chooses explicit REGISTER/ALL_STACK mode.
 
 Prune consumes V1 and V2 framing, retaining public definitions regardless support flag.
-It validates all scalar framing/bounds before skipping a payload; the host typed decoder
-validates the complete recursive layout before any execution. No public roots are picked in C.
+It validates complete V2 descriptor and callback graphs through the shared model
+validator; the host typed decoder also validates the graph before any execution. No public roots are picked in C.
 
 This protocol alone is not complete R10 FFI. Typed variadic import callsites, union/bitfield
 NativePlan, function-pointer ownership, wider long double and all target native tests remain.

@@ -28,14 +28,41 @@ static int us_native_template_add(us_native_templates *s,uintptr_t target,const 
 unsupported:us_exports_clear(&p->graph);free(p);return 0;
 bad:us_exports_clear(&p->graph);free(p);return us_export_error(error,cap,"invalid variadic template graph");
 }
+/* Iterative comparison is bounded by the wire type/signature limits. Signature
+   pairs are visited coinductively; sharing and parser IDs are not ABI identity. */
+typedef struct us_native_type_pair { const us_export_type *a,*b; } us_native_type_pair;
+typedef struct us_native_signature_pair { const us_export_signature *a,*b; } us_native_signature_pair;
 static int us_native_type_equal(const us_export_type *a,const us_export_type *b){
-    if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)return 0;
-    if((a->element==NULL)!=(b->element==NULL))return 0;
-    if(a->element&&!us_native_type_equal(a->element,b->element))return 0;
-    for(size_t i=0;i<(size_t)a->nmembers;i++){
-        const us_export_member *x=a->members+i,*y=b->members+i;
-        if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||!us_native_type_equal(x->type,y->type))return 0;
-    }return 1;
+    us_native_type_pair *work=calloc(16384,sizeof *work);
+    us_native_signature_pair *seen=calloc(16384,sizeof *seen);
+    size_t pending=0,visited=0,steps=0;int equal=0;
+    if(!work||!seen)goto done;
+    work[pending++]=(us_native_type_pair){a,b};
+    while(pending){
+        us_native_type_pair pair=work[--pending];a=pair.a;b=pair.b;
+        if(!a||!b||++steps>16384)goto done;
+        if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)goto done;
+        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL))goto done;
+        if(a->nmembers>64 || (a->nmembers && (!a->members||!b->members)))goto done;
+        if(a->element){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
+        for(size_t i=0;i<(size_t)a->nmembers;i++){
+            const us_export_member *x=a->members+i,*y=b->members+i;
+            if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||pending>=16384)goto done;
+            work[pending++]=(us_native_type_pair){x->type,y->type};
+        }
+        if(a->signature){
+            const us_export_signature *x=a->signature,*y=b->signature;size_t i;
+            for(i=0;i<visited;i++)if(seen[i].a==x && seen[i].b==y)break;
+            if(i<visited)continue;
+            if(visited>=16384||x->variadic!=y->variadic||x->mode!=y->mode||x->count!=y->count||x->stored!=y->stored||x->stored!=x->count||x->count>1024||
+               (x->count && (!x->argtypes||!y->argtypes))||pending+1+x->count>16384)goto done;
+            seen[visited++]=(us_native_signature_pair){x,y};
+            work[pending++]=(us_native_type_pair){&x->result,&y->result};
+            for(i=0;i<(size_t)x->count;i++)work[pending++]=(us_native_type_pair){&x->argtypes[i],&y->argtypes[i]};
+        }
+    }
+    equal=1;
+done:free(work);free(seen);return equal;
 }
 static void us_native_callsites_clear(us_native_callsites *s){
     if(!s)return;while(s->head){us_native_callsite *n=s->head->next;free(s->head);s->head=n;}us_native_plans_clear(&s->plans);

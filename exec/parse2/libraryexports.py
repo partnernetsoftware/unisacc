@@ -30,19 +30,30 @@ def install(E,P,b,start,integers):
         P('LX.hook.'+state).a(('PUSH',orig)).goto(procedure)
     hook('TOP.st','LX.storage')
     append('FN',[('COPYW','lx_linkage','lx_storage'),('LDI','lx_storage',0)])
-    # Store true syntactic ellipsis before FN.many selects stacked ABI for >6.
-    append('FN.body',[('INTERN','lx_id','fns','fne'),('LDX','lx_sig','lx_id',b['FPS_FN']),
-                      ('STX','lx_sig',VARIADIC,'vfn')])
-    # Capture all parameters before the legacy SIG.store eight-slot limit.
-    # Per-definition epoch marks avoid clearing 1024 slots on each declaration.
-    append('FN.fnplain',[('ALUI','add','lx_captureepoch','lx_captureepoch',1)])
+    # Each parameter list owns its epoch, including nested anonymous lists.
+    P('LX.owner').branch({1:'LX.ownernamed'},'LX.ownertyped',[('CMPI','sig_fp',0)])
+    P('LX.ownernamed').a(('INTERN','lx_id','fns','fne'),('LDX','lx_sig','lx_id',b['FPS_FN'])).ret()
+    P('LX.ownertyped').a(('COPYW','lx_sig','sig_fp')).ret()
+    hook('FN.params','LX.begin',always=True)
+    P('LX.begin').call('LX.owner').a(('ALUI','add','lx_captureepoch','lx_captureepoch',1),
+        ('STX','lx_sig',SIGEPOCH,'lx_captureepoch'),('LDI','lx_ellipsis',0),
+        ('STX','lx_sig',VARIADIC,'lx_ellipsis')).ret()
+    # A callback parameter's own mode does not change the enclosing ABI.
+    mode,row=g.st['FN.pfpstacked']
+    for key,(target,seq) in list(row.items()):
+        assert list(g.seqs[seq])==[('LDI','vfn',1)]
+        row[key]=(target,g.seq([]))
+    hook('FN.dots','LX.ellipsis',always=True)
+    P('LX.ellipsis').call('LX.owner').a(('LDI','lx_ellipsis',1),('STX','lx_sig',VARIADIC,'lx_ellipsis')).ret()
+    # SIG.store is reached after scalar/array/function parameter adjustment.
     hook('SIG.store','LX.capture',always=True)
     hook('FN.pfpdecl1','LX.capture',always=True)
     P('LX.capture').branch({0:'LX.captureok'},'LX.fail',[('CMPI','pk',1024)])
-    P('LX.captureok').a(('INTERN','lx_id','fns','fne'),('LDX','lx_sig','lx_id',b['FPS_FN']),
+    P('LX.captureok').call('LX.owner').a(
         ('ALUI','mul','lx_index','lx_sig',1024),('ALU','add','lx_index','lx_index','pk'),
-        ('STX','lx_sig',SIGEPOCH,'lx_captureepoch'),('STX','lx_index',PARAMMARK,'lx_captureepoch'),('STX','lx_index',PARAMDEPTH,'td'),
-        ('STX','lx_index',PARAMBASE,'tb'),('STX','lx_index',PARAMSHAPE,'type_shape')).ret()
+        ('LDX','lx_ownerepoch','lx_sig',SIGEPOCH),('STX','lx_index',PARAMMARK,'lx_ownerepoch'),
+        ('STX','lx_index',PARAMDEPTH,'td'),('STX','lx_index',PARAMBASE,'tb'),
+        ('STX','lx_index',PARAMSHAPE,'type_shape')).ret()
     # Union identity must survive SB.end's restoration of the enclosing parser.
     hook('SB.go','LX.union')
     P('LX.union').a(('STX','sid',UNION,'sun_n')).ret()

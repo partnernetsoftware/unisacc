@@ -200,6 +200,8 @@ job lib-variadic-host python3 ./tests/librarynativevariadiccheck.py
 job lib-callplans-host python3 ./tests/librarycallplanscheck.py
 job lib-variadic-resolver-host python3 ./tests/libraryvariadicresolvercheck.py
 job lib-variadic-protocol ./tests/modelvariadicprotocolcheck.sh
+job lib-callback-graph-host python3 ./tests/librarycallbackgraphcheck.py
+job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
 job lib-typed-native python3 ./tests/librarytypednativecheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-variadic-native python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-sig2-native python3 ./tests/librarysig2nativecheck.py --package "${MODEL_COM:-./unisacc.com}"
@@ -208,6 +210,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-typed-rosetta python3 ./tests/librarytypednativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-variadic-rosetta python3 ./tests/librarynativevariadiccheck.py --arch x86_64
     job lib-callplans-rosetta python3 ./tests/librarycallplanscheck.py --arch x86_64
+    job lib-callback-graph-rosetta python3 ./tests/librarycallbackgraphcheck.py --arch x86_64
     job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
