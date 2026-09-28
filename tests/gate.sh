@@ -95,6 +95,10 @@ job exec-decimal ./exec/parse2/floatconstcheck.sh                # exact literal
 job exec-neg    ./exec/c/neg.sh   # the executors' error paths agree (bad table 2, reject 1)
 job exec-e4     env E4STRICT=1 ./exec/opt/check.sh examples/*.c tests/c/*.c   # S-17 E4: -O1 and -O2 as deltas
 job exec-e4self env E4STRICT=1 ./exec/opt/check.sh unisacc.c                    # the compiler's own 3.9 MB tape
+job exec-prune-0 env PRUNE_PART=0 PRUNE_UA="$UA" python3 ./exec/prune/check.py
+job exec-prune-1 env PRUNE_PART=1 PRUNE_UA="$UA" python3 ./exec/prune/check.py
+job exec-prune-2 env PRUNE_PART=2 PRUNE_UA="$UA" python3 ./exec/prune/check.py
+job exec-prune-3 env PRUNE_PART=3 PRUNE_UA="$UA" python3 ./exec/prune/check.py
 job exec-e5     ./exec/enc/check.sh                               # S-17 E5, first slice: x86 encoder on a fixture
 job exec-arm    ./exec/enc/armcheck.sh                            # ARM64 integer encoder on both runtimes
 job exec-elf    ./exec/enc/imagecheck.sh                          # S-17: complete Linux x86 ELF from lowering payload

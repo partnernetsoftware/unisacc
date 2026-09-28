@@ -32,10 +32,12 @@ int tp_edge_to[tp_EDGEMAX],tp_edge_next[tp_EDGEMAX],tp_ne;
 int tp_bad,tp_nrows,tp_npc;
 int tp_tstart[16],tp_tlen[16],tp_nt;
 int tp_space(int c){return c==32||c==9||c==10||c==13||c==11||c==12;}
-int tp_same(int at,int n,char *s){return (int)strlen(s)==n && memcmp(tp_input+at,s,n)==0;}
+int tp_length(char *s){int n=0;while(s[n])n++;return n;}
+int tp_equal(char *a,char *b,int n){int i;for(i=0;i<n;i++)if(a[i]!=b[i])return 0;return 1;}
+int tp_same(int at,int n,char *s){return tp_length(s)==n && tp_equal(tp_input+at,s,n);}
 int tp_namechar(int c,int first){return (c>=65&&c<=90)||(c>=97&&c<=122)||c==95||(!first&&((c>=48&&c<=57)||c==46||c==36));}
 int tp_validname(int at,int n){int i;if(n<1)return 0;for(i=0;i<n;i++)if(!tp_namechar(tp_input[at+i]&255,i==0))return 0;return 1;}
-int tp_intern(int at,int n){int i;for(i=0;i<tp_nn;i++)if(tp_nl[i]==n&&memcmp(tp_input+tp_ns[i],tp_input+at,n)==0)return i;
+int tp_intern(int at,int n){int i;for(i=0;i<tp_nn;i++)if(tp_nl[i]==n&&tp_equal(tp_input+tp_ns[i],tp_input+at,n))return i;
  if(tp_nn>=tp_NAMEMAX){tp_bad=1;return 0;}i=tp_nn++;tp_ns[i]=at;tp_nl[i]=n;tp_lab[i]=-1;return i;}
 int tp_lookup(char *s){int i;for(i=0;i<tp_nn;i++)if(tp_same(tp_ns[i],tp_nl[i],s))return i;return -1;}
 int tp_number(int at,int n,long *out){int i=0,base=10,d,c,neg=0;unsigned long value=0;unsigned long limit=9223372036854775807UL;
@@ -74,7 +76,7 @@ int tp_parse(void){int p=0,end,textend,start,q,quoted,esc,i,op,shape,idx,id;long
     if(q!=textend-1){tp_bad=1;return 0;}}
    tp_datum[id]=1;tp_rk[idx]=3;tp_rn[idx]=id;continue;}
   op=tp_getop(start,q-start);if(op<0){tp_bad=1;return 0;}tp_ro[idx]=op;
-  if(!tp_tokenize(q,textend))return 0;shape=strlen(tp_opshapes[op]);if(tp_nt!=shape||tp_nt>8){tp_bad=1;return 0;}
+  if(!tp_tokenize(q,textend))return 0;shape=tp_length(tp_opshapes[op]);if(tp_nt!=shape||tp_nt>8){tp_bad=1;return 0;}
   for(i=0;i<tp_nt;i++){char kind=tp_opshapes[op][i];int at=idx*8+i;tp_numeric[at]=0;tp_an[at]=-1;
    if(kind=='r'){id=tp_getreg(tp_tstart[i],tp_tlen[i]);if(id<0){tp_bad=1;return 0;}tp_av[at]=id;}
    else if(kind=='i'){if(!tp_number(tp_tstart[i],tp_tlen[i],&value)){tp_bad=1;return 0;}tp_av[at]=value;tp_numeric[at]=1;}
@@ -103,7 +105,7 @@ int tp_analyze(void){int i,j,k,id,op,u,last,target,tail=0,pos=0,entry;
  entry=tp_addroot("_start");if(entry<0||tp_lab[entry]<0)for(i=0;i<tp_nrows;i++)if(tp_rk[i]==1){tp_roots[tp_owner[i]]=1;break;}
  tp_addroot("main");tp_addroot("__init");tp_addroot("__main_ret");
  for(i=0;i<tp_nrows;i++)if(tp_rk[i]==1){op=tp_ro[i];u=tp_owner[i];
-  if(op==tp_OP_CALL||op==tp_OP_JUMP||op==tp_OP_JUMPZ){k=strlen(tp_opshapes[op])-1;id=tp_an[i*8+k];if(id<0||tp_lab[id]<0){tp_bad=1;return 0;}
+  if(op==tp_OP_CALL||op==tp_OP_JUMP||op==tp_OP_JUMPZ){k=tp_length(tp_opshapes[op])-1;id=tp_an[i*8+k];if(id<0||tp_lab[id]<0){tp_bad=1;return 0;}
    if(!tp_edge(u,tp_owner[tp_lab[id]]))return 0;}
   else if(op==tp_OP_LEA){id=tp_an[i*8+1];if(id>=0&&tp_lab[id]>=0)tp_roots[tp_owner[tp_lab[id]]]=1;else if(id>=0&&!tp_datum[id]){tp_bad=1;return 0;}}
   if(op==tp_OP_CALLR)tp_hascallr[u]=1;
@@ -124,10 +126,8 @@ char *tp_prune(char *text, int length) {
  if(length<0||length>tp_SRCMAX)return text;
  for(i=0;i<length;i++)if(text[i]==13||text[i]==11||text[i]==12)return text;
  tp_nn=0;tp_un=0;tp_ne=0;tp_bad=0;tp_nrows=0;tp_npc=0;tp_nt=0;
- memset(tp_datum,0,sizeof(tp_datum));memset(tp_pro,0,sizeof(tp_pro));
- memset(tp_anchor,0,sizeof(tp_anchor));memset(tp_startmark,0,sizeof(tp_startmark));
- memset(tp_alive,0,sizeof(tp_alive));memset(tp_roots,0,sizeof(tp_roots));
- memset(tp_hascallr,0,sizeof(tp_hascallr));
+ for(i=0;i<tp_NAMEMAX;i++){tp_datum[i]=0;tp_pro[i]=0;tp_anchor[i]=0;}
+ for(i=0;i<tp_ROWMAX;i++){tp_startmark[i]=0;tp_alive[i]=0;tp_roots[i]=0;tp_hascallr[i]=0;}
  tp_input=text;tp_inputn=length;
  if(!tp_parse()||!tp_analyze()||tp_bad)return text;
  size=0;

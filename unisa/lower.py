@@ -178,7 +178,6 @@ def zero_last(data, syms, base):
 
 
 def lower(tape, target, oracle, fault=None, drive="spec"):
-    import os
     from .prune import prune
     tape = prune(tape)
     from .tape import DATA_BASE
