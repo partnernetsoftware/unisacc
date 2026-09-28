@@ -29,7 +29,7 @@ sys.path.insert(0, R)
 NAME = {
     "lnx": {"open": ["SYS_open", "SYS_openat"], "unlink": ["SYS_unlink", "SYS_unlinkat"],
             "rename": ["SYS_rename", "SYS_renameat2"]},
-    "osx": {"clock_gettime": None, "nanosleep": None,
+    "osx": {"clock_gettime": None, "nanosleep": None, "getdents64": None,
             "futex": ["SYS_ulock_wait"], "clone": ["SYS_bsdthread_create"]},
 }
 

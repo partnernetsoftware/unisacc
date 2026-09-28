@@ -2464,3 +2464,9 @@ R9-4/R9-7待修实证：models.closure把忽略的exec/build/ua_ref.c（1,130,27
 
 ### R9 最终资格回执
 冻结源155bc9d的193/193本地队列 rc0。沿用release.sh原有完成/日志遗漏/候选复制校验，未修改断言；本地Windows未跑义务显式保留，独立同载荷18格平台烟测另列。完整来源、各套件输入指纹与日志SHA、签封资产及平台模拟限制统一存入research/r9-release-acceptance.json。发布只上传同一d4f7载荷及同一a203公证DMG，不为测试push。
+
+### 发布后 CI 检查（2026-09-28，a606ff4）
+
+GitHub Actions 36426134774 的 Linux 与两项 macOS 作业失败：旧 `tests/all.sh` 的多项整套运行超过 60 秒；APE 检查在 55 秒报构建失败，但重定向丢弃了具体原因，尚不能确认是超时。macOS `abi_audit.py` 还把 Linux 专用 `getdents64` 当作 Darwin 必须存在的系统调用；catalog 与 ABI 表实际声明 Darwin 为 `none`，本机已复现该裁判错误。先显式检查 Darwin 无该调用且 catalog 为 `none`，不改产品；其余超时需拆分旧 CI 入口，APE 需保留构建诊断后定位，不放宽 60 秒，不为测试推送。已完成的 C99、fuzz、优化差分、布局、内核及网络全域检查通过，超时部分仍未通过。
+
+本机修正后复跑：`python3 tests/bound.py 20 python3 tests/abi_audit.py`，退出 0，osx/arm64 23 项一致、0 错；只证明此项裁判修正，全 CI 尚未重新通过。
