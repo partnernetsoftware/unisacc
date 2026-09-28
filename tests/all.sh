@@ -79,6 +79,24 @@
 #   corpus      c-testsuite -- 220 programs we did not write [A-25];
 #               skipped unless corpus/ is already present
 set -u
+# Explicit jobs keep CI and local dispatch on the same coverage plan.
+LIST=0; SELECT=()
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --list) LIST=1; shift;;
+        --suite) [ "$#" -ge 2 ] || exit 2; SELECT+=("$2"); shift 2;;
+        *) echo "usage: all.sh [--list] [--suite NAME ...]" >&2; exit 2;;
+    esac
+done
+# Validate all requested names before reference preparation or any dispatch.
+if [ "$LIST" -eq 0 ] && [ "${#SELECT[@]}" -gt 0 ]; then
+    AVAILABLE=$(bash "$0" --list) || exit 2
+    for wanted in "${SELECT[@]}"; do
+        found=0
+        for n in $AVAILABLE; do [ "$wanted" = "$n" ] && found=1; done
+        [ "$found" -eq 1 ] || { echo "unknown/unavailable suite: $wanted" >&2; exit 2; }
+    done
+fi
 PROBES="examples/*.c tests/c/*.c"
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching
 # its last line -- a summary line that happens to end differently is not a
@@ -95,9 +113,16 @@ JOBS=${JOBS:-2}
 case "$JOBS" in *[!0-9]*|"") echo "JOBS must be positive" >&2; exit 2;; esac
 [ "$JOBS" -ge 1 ] || { echo "JOBS must be positive" >&2; exit 2; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-ORDER=()
+ORDER=(); PLAN=()
 run() {
     local n="$1"; shift
+    PLAN+=("$n")
+    if [ "$LIST" -eq 1 ]; then printf '%s\n' "$n"; return; fi
+    if [ "${#SELECT[@]}" -gt 0 ]; then
+        local found=0 wanted
+        for wanted in "${SELECT[@]}"; do [ "$wanted" = "$n" ] && found=1; done
+        [ "$found" -eq 1 ] || return
+    fi
     ORDER+=("$n")
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.5; done
     (
@@ -123,7 +148,7 @@ prepare_reference() {
         ua_ready
     ' _ "$PWD" >/dev/null || { echo "build_ref failed"; exit 1; }
 }
-prepare_reference
+[ "$LIST" -eq 1 ] || prepare_reference
 
 # acceptance rewrites weights/, which every other suite reads: it goes alone.
 for part in $(seq 1 15); do
@@ -131,22 +156,30 @@ for part in $(seq 1 15); do
     # Name that platform exclusion instead of treating an empty shard as pass.
     if { [ "$part" -eq 10 ] || [ "$part" -eq 11 ]; } &&
        [ "$(uname -s)/$(uname -m)" != Darwin/arm64 ]; then
-        echo "SKIP acceptance$part: requires Darwin/arm64 (not a pass)"
+        echo "SKIP acceptance$part: requires Darwin/arm64 (not a pass)" >&2
         continue
     fi
     serial "acceptance$part" env PART="$part/15" ./tests/acceptance.sh
 done
-# Re-check the reference identity after the generated-input checks.
-prepare_reference
+# The full run rechecks after acceptance. A selected job did not rerun
+# acceptance and needs only its initial readiness check.
+if [ "$LIST" -eq 0 ] && [ "${#SELECT[@]}" -eq 0 ]; then prepare_reference; fi
 run vm         ./tests/vm.sh
-run difftest   ./tests/difftest.sh
-run native     bash -c "./tests/native.sh $PROBES"
+for shard in 1 2 3 4; do
+    run "difftest$shard" env SHARD="$shard/4" ./tests/difftest.sh
+done
+# File shards are a disjoint partition of the original wildcard inputs.
+FILES=(examples/*.c tests/c/*.c)
+for shard in 0 1 2 3; do
+    CHUNK=()
+    for ((i=shard; i<${#FILES[@]}; i+=4)); do CHUNK+=("${FILES[$i]}"); done
+    [ "${#CHUNK[@]}" -gt 0 ] || { echo "empty probe shard" >&2; exit 2; }
+    for suite in native fat ccrun selfhost closure stages; do
+        run "$suite$((shard+1))" "./tests/$suite.sh" "${CHUNK[@]}"
+    done
+done
 run crossnative bash -c "./tests/crossnative.sh $PROBES"
-run fat        bash -c "./tests/fat.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
-run ccrun      bash -c "./tests/ccrun.sh $PROBES"
-run selfhost   bash -c "./tests/selfhost.sh $PROBES"
-run closure    bash -c "./tests/closure.sh $PROBES"
 run run        ./tests/run.sh
 run c99        ./tests/c99.sh
 run fuzz       ./tests/fuzz.sh
@@ -169,7 +202,9 @@ run diag       ./tests/diag.sh
 run warn       ./tests/warn.sh
 run opt        ./tests/opt.sh
 run optpy      ./tests/optpy.sh
-run difftest_o ./tests/difftest_o.sh
+for shard in 1 2 3 4; do
+    run "difftest_o$shard" env SHARD="$shard/4" ./tests/difftest_o.sh
+done
 run scale      ./tests/scale.sh
 run ape        ./tests/ape.sh
 run multi      ./tests/multi.sh
@@ -177,7 +212,6 @@ if [ -d corpus/crypto-algorithms ]; then
     run tools  env FETCH=0 ./tests/tools.sh
 fi
 run selfgap    ./tests/selfgap.sh
-run stages     bash -c "./tests/stages.sh $PROBES"
 # bootstrap needs the host toolchain to turn a tape back into a binary
 if [ "$(uname -s)" = "Darwin" ]; then
     run bootstrap ./tests/bootstrap.sh
@@ -191,6 +225,14 @@ if [ -d corpus/c-testsuite ]; then
     run corpus4 env FETCH=0 SHARD=4/4 ./tests/corpus.sh
 fi
 run acc        bash -c "python3 -m unisa acc"   # the SHIPPED weights
+[ "$LIST" -eq 0 ] || exit 0
+if [ "${#SELECT[@]}" -gt 0 ]; then
+    for wanted in "${SELECT[@]}"; do
+        found=0
+        for n in "${PLAN[@]}"; do [ "$wanted" = "$n" ] && found=1; done
+        [ "$found" -eq 1 ] || { echo "unknown/unavailable suite: $wanted" >&2; wait; exit 2; }
+    done
+fi
 wait
 
 bad=0

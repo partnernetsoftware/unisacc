@@ -77,7 +77,36 @@ jobs:
           done
 
       - name: suites
-        run: env JOBS=2 FETCH=0 ./tests/all.sh
+        run: |
+          set -e
+          python3 tests/bound.py 10 python3 tests/ciplancheck.py
+          # Acceptance entries remain first and serial: they write weights.
+          # Every later entry has the same bounded, explicit input shard.
+          python3 tests/bound.py 10 ./tests/all.sh --list > /tmp/unisacc-ci-plan
+          logs=$(mktemp -d); pids=(); batch=(); bad=0
+          drain() {
+            for pid in "${pids[@]}"; do wait "$pid" || true; done
+            for name in "${batch[@]}"; do
+              cat "$logs/$name.log"
+              [ "$(cat "$logs/$name.rc")" = 0 ] || bad=1
+            done
+            pids=(); batch=()
+          }
+          while IFS= read -r suite; do
+            # Acceptance modifies generated inputs and must stay serial.
+            case "$suite" in acceptance*) drain;; esac
+            (
+              # 55s suite ceiling leaves 5s for readiness and reporting.
+              set +e
+              python3 tests/bound.py 60 env SUITE_LIMIT=55 JOBS=1 FETCH=0 ./tests/all.sh --suite "$suite" >"$logs/$suite.log" 2>&1
+              echo "$?" >"$logs/$suite.rc"
+            ) &
+            pids+=("$!"); batch+=("$suite")
+            case "$suite" in acceptance*) drain;;
+              *) [ "${#pids[@]}" -lt 2 ] || drain;; esac
+          done < /tmp/unisacc-ci-plan
+          drain
+          [ "$bad" -eq 0 ]
 
       - name: an external corpus we did not write
         run: |
@@ -149,4 +178,33 @@ jobs:
           python3 tests/bound.py 15 lldb --batch -o 'run' -o 'bt all' -o 'register read pc sp x0' \
                -o 'disassemble --pc --count 8' -o 'quit' /tmp/hello 2>&1 | head -60
 
-      - run: env JOBS=2 FETCH=0 ./tests/all.sh
+      - run: |
+          set -e
+          python3 tests/bound.py 10 python3 tests/ciplancheck.py
+          # Acceptance entries remain first and serial: they write weights.
+          # Every later entry has the same bounded, explicit input shard.
+          python3 tests/bound.py 10 ./tests/all.sh --list > /tmp/unisacc-ci-plan
+          logs=$(mktemp -d); pids=(); batch=(); bad=0
+          drain() {
+            for pid in "${pids[@]}"; do wait "$pid" || true; done
+            for name in "${batch[@]}"; do
+              cat "$logs/$name.log"
+              [ "$(cat "$logs/$name.rc")" = 0 ] || bad=1
+            done
+            pids=(); batch=()
+          }
+          while IFS= read -r suite; do
+            # Acceptance modifies generated inputs and must stay serial.
+            case "$suite" in acceptance*) drain;; esac
+            (
+              # 55s suite ceiling leaves 5s for readiness and reporting.
+              set +e
+              python3 tests/bound.py 60 env SUITE_LIMIT=55 JOBS=1 FETCH=0 ./tests/all.sh --suite "$suite" >"$logs/$suite.log" 2>&1
+              echo "$?" >"$logs/$suite.rc"
+            ) &
+            pids+=("$!"); batch+=("$suite")
+            case "$suite" in acceptance*) drain;;
+              *) [ "${#pids[@]}" -lt 2 ] || drain;; esac
+          done < /tmp/unisacc-ci-plan
+          drain
+          [ "$bad" -eq 0 ]

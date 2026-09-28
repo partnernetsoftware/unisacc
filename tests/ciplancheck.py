@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Check legacy CI coverage and dispatch without building/running a compiler."""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+BASE = {'acceptance', 'vm', 'difftest', 'native', 'crossnative', 'fat',
+        'artifacts', 'ccrun', 'selfhost', 'closure', 'run', 'c99', 'fuzz',
+        'hostile', 'bench', 'consts', 'oracle', 'docs', 'kernel', 'tsvbuild',
+        'gold_audit', 'prec_audit', 'tyinfo_audit', 'abi_audit', 'layout',
+        'datashape', 'bigclosure', 'cli', 'diag', 'warn', 'opt', 'optpy',
+        'difftest_o', 'scale', 'ape', 'multi', 'selfgap', 'stages',
+        'nativeboot', 'acc'}
+SHARDED = {'difftest', 'native', 'fat', 'ccrun', 'selfhost', 'closure',
+           'stages', 'difftest_o'}
+
+
+def check():
+    # Fake only the dispatch runner. No test command or reference build runs.
+    # The real all.sh supplies every argv; check its file partition directly.
+    with tempfile.TemporaryDirectory(prefix='unisacc-ci-plan-') as name:
+        tmp = Path(name)
+        (tmp / 'bin').mkdir()
+        runner = tmp / 'bin/python3'
+        runner.write_text('#!' + sys.executable + '\n'
+                          'import json,os,sys\n'
+                          'with open(os.environ["CI_RECORD"],"a") as f:\n'
+                          ' f.write(json.dumps(sys.argv[1:])+"\\n")\n')
+        runner.chmod(0o755)
+        record = tmp / 'calls.jsonl'
+        env = dict(os.environ, PATH=str(tmp / 'bin') + ':' + os.environ['PATH'],
+                   CI_RECORD=str(record), JOBS='128')
+        proc = subprocess.run(['bash', 'tests/all.sh'], cwd=ROOT, env=env,
+                              capture_output=True, text=True, timeout=15)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        import json
+        calls = [json.loads(line) for line in record.read_text().splitlines()]
+        jobs = [args[2:] for args in calls if args[:1] == ['tests/bound.py']
+                and len(args) > 2 and args[2] != 'bash']
+        files = sorted(str(p.relative_to(ROOT)) for pat in ('examples/*.c', 'tests/c/*.c')
+                       for p in ROOT.glob(pat))
+        for suite in SHARDED - {'difftest', 'difftest_o'}:
+            chunks = [args[1:] for args in jobs if args[0] == './tests/' + suite + '.sh']
+            assert len(chunks) == 4 and all(chunks), (suite, chunks)
+            actual = [f for chunk in chunks for f in chunk]
+            assert sorted(actual) == files and len(set(actual)) == len(files), suite
+        for suite in ('difftest', 'difftest_o'):
+            actual = [args[1] for args in jobs if args[-1] == './tests/' + suite + '.sh']
+            assert actual == ['SHARD=%d/4' % i for i in range(1, 5)], (suite, actual)
+        plan = subprocess.run(['bash', 'tests/all.sh', '--list'], cwd=ROOT,
+                              capture_output=True, text=True, timeout=5)
+        assert plan.returncode == 0, plan.stderr
+        names = plan.stdout.splitlines()
+        assert names and len(names) == len(set(names)), names
+        import re
+        bases = {n if n in BASE else re.sub(r'\d+$', '', n) for n in names}
+        assert BASE <= bases, BASE - bases
+        if (ROOT / 'corpus/c-testsuite').is_dir():
+            assert {'corpus1', 'corpus2', 'corpus3', 'corpus4'} <= set(names)
+        if (ROOT / 'corpus/crypto-algorithms').is_dir():
+            assert 'tools' in names
+        # A selected job must not accidentally dispatch the whole plan.
+        record.write_text('')
+        proc = subprocess.run(['bash', 'tests/all.sh', '--suite', 'native1'],
+                              cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
+        assert proc.returncode == 0, proc.stderr
+        selected = [json.loads(line) for line in record.read_text().splitlines()]
+        assert sum('./tests/native.sh' in args for args in selected) == 1
+        assert len(selected) == 2, selected  # one readiness check + one job
+        record.write_text('')
+        proc = subprocess.run(['bash', 'tests/all.sh', '--suite', 'native1',
+                               '--suite', 'missing-suite'],
+                              cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
+        assert proc.returncode == 2, proc.returncode
+        assert not record.read_text(), 'unknown selection dispatched/prepared a job'
+    print('ci plan: legacy coverage kept; 6 file partitions, 2 SHARD families; selection controls ok')
+
+
+if __name__ == '__main__':
+    try:
+        check()
+    except (AssertionError, OSError, subprocess.TimeoutExpired) as exc:
+        print('ci plan: FAIL ' + str(exc), file=sys.stderr)
+        sys.exit(1)

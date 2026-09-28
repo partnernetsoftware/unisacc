@@ -18,17 +18,25 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 T=$(scratch)
 COM=$T/unisacc.com
 "$_BOUND" 55 python3 -m unisa ape unisacc.c --via "$UA" -O 2 \
-    -o "$COM" >/dev/null 2>&1 || { echo "  FAIL could not build the .com"; exit 1; }
+    -o "$COM" >"$T/build.log" 2>&1
+build_rc=$?
+if [ "$build_rc" -ne 0 ]; then
+    echo "  FAIL could not build the .com (rc=$build_rc)"
+    cat "$T/build.log"
+    exit 1
+fi
 chmod +x "$COM"
 [ "$(head -c 2 "$COM")" = "MZ" ] || { echo "  FAIL not an MZ file"; exit 1; }
 ok=0; bad=0
 for f in examples/hello.c examples/fib.c tests/c/b_float.c; do
     b=$(basename "$f" .c)
     { echo '#include <stdio.h>'; cat "$f"; } > "$T/ref.c"
-    cc -w -o "$T/ref" "$T/ref.c" -lm 2>/dev/null || { continue; }
-    "$T/ref" > "$T/want" 2>/dev/null
-    "$_BOUND" 30 "$COM" -run "$f" > "$T/got" 2>/dev/null
-    if cmp -s "$T/want" "$T/got"; then ok=$((ok+1))
+    "$_BOUND" 20 cc -w -o "$T/ref" "$T/ref.c" -lm >"$T/ref-build.log" 2>&1 || {
+        bad=$((bad+1)); echo "  FAIL reference build $b"; cat "$T/ref-build.log"; continue;
+    }
+    "$_BOUND" 8 "$T/ref" > "$T/want" 2>"$T/ref-run.log"; ref_rc=$?
+    "$_BOUND" 30 "$COM" -run "$f" > "$T/got" 2>"$T/com-run.log"; com_rc=$?
+    if [ "$ref_rc" -eq 0 ] && [ "$com_rc" -eq 0 ] && cmp -s "$T/want" "$T/got"; then ok=$((ok+1))
     else bad=$((bad+1)); printf "  FAIL %s\n" "$b"; diff "$T/want" "$T/got" | head -3; fi
 done
 # a watchdog that kills the .com must kill the compiler it unpacked, too:
