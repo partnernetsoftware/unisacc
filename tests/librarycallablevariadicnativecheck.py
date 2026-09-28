@@ -33,8 +33,11 @@ def main():
   (t/'host_exchange.sig').write_bytes(signature)
   def concrete(name,args,result=pair,variadic=0):
    n=name.encode();return b'USLSIG2\n'+u(1)+u(len(n))+n+bytes([0,1,variadic,1])+u(len(args))+result+u(len(args))+b''.join(args)+bytes([0])
+  leaf_payload=bytes([1,0])+u(1)+bytes([0,0])+u(3)+pair+u(3)+D+I+pair+bytes([1])
+  leaf=desc(4,8,8,depth=1,tag=4,payload=leaf_payload)
   good=concrete('scriptvar',[D,I,D,I])
   shapes={'script-full.sig':good,'script-zero.sig':concrete('scriptvar',[D,I]),
+          'script-aggregate.sig':concrete('scriptvar',[D,I,pair,leaf]),
           'script-wrongname.sig':concrete('other',[D,I,D,I]),
           'script-result.sig':concrete('scriptvar',[D,I,D,I],D),
           'script-prefix.sig':concrete('scriptvar',[I,I,D,I]),
@@ -50,7 +53,7 @@ def main():
   run(os.environ.get('CC','cc'),*flags,*san,'-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',rt/'libunisacc.c',rt/('librarycall_'+arch+'.S'),'-lffi','-o',lib)
   run(os.environ.get('CC','cc'),*flags,*san,'-std=c11','-O2','-Wall','-Wextra','-I',rt,ROOT/'tests/libraryabi/callable_variadic.c',lib,'-o',probe)
   output=run(*(['arch','-x86_64'] if host=='arm64' and arch=='x86_64' else []),probe,package,target,t);print(output,end='')
-  evidence={'target':target,'sanitize':a.sanitize,'package_sha256':hashlib.sha256(package.read_bytes()).hexdigest(),'runtime_sha256':hashlib.sha256(lib.read_bytes()).hexdigest(),'optimisation_levels':[0,1,2],'repeats_per_level':100,'callback_exit_status':23,'explicit_export_specializations':['promoted double/int tail','zero-tail'],'invalid_specialization_declarations':8,'failure_checks':'native normal return, outer ABI zero/canary, independent next-call recovery','host_fixture_sha256':hashlib.sha256((ROOT/'tests/libraryabi/callable_variadic.c').read_bytes()).hexdigest(),'scope':'actual public native->script entry(Var) -> concrete indirect native varargs -> fixed script Leaf; frozen native template introduction; concrete script va_arg reads promoted double/int tails, zero-tail and nested site restoration; unknown-tail script closures not supported'}
+  evidence={'target':target,'sanitize':a.sanitize,'package_sha256':hashlib.sha256(package.read_bytes()).hexdigest(),'runtime_sha256':hashlib.sha256(lib.read_bytes()).hexdigest(),'optimisation_levels':[0,1,2],'repeats_per_level':100,'callback_exit_status':23,'explicit_export_specializations':['promoted double/int tail','zero-tail','Pair and fixed callable tail'],'invalid_specialization_declarations':8,'failure_checks':'native normal return, outer ABI zero/canary, specialized SCRIPT closure tail exit23, independent next-call recovery','host_fixture_sha256':hashlib.sha256((ROOT/'tests/libraryabi/callable_variadic.c').read_bytes()).hexdigest(),'scope':'actual public native->script entry(Var) -> concrete indirect native varargs -> fixed script Leaf; frozen native template introduction; concrete script va_arg reads promoted double/int, Pair and fixed callback tails; native Leaf and SCRIPT closure conversion, zero-tail and nested site restoration; unknown-tail script closures not supported'}
   print(json.dumps(evidence,ensure_ascii=False))
   if a.evidence:Path(a.evidence).write_text(json.dumps(evidence,ensure_ascii=False,indent=2)+'\n')
 if __name__=='__main__':main()

@@ -29,5 +29,8 @@ failure return. It does not perform a nonlocal jump across a native caller.
 
 Current native evidence: macOS ARM64 and Rosetta x86_64, ASan/UBSan,
 O0/O1/O2 with 100 calls each, promoted double/int tail reads, zero-tail,
-eight invalid declarations and preservation of old entries. Other native
+eight invalid declarations and preservation of old entries. Pair and fixed
+callback tails are read by va_arg and invoked in both concrete SCRIPT sites
+and specialized native entries; a SCRIPT closure passed as a tail preserves
+its origin, including exit23/ABI-zero failure and subsequent recovery. Other native
 platforms and union/bitfield/wide-FP layouts still require qualification.
