@@ -301,7 +301,7 @@ CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
     case RLD: { I v = R[a[1]]; s->r = v >= 0 && v <= 256 ? v : 256; } break;
     case LDX: R[a[1]] = core_mget(&s->memory,R[a[2]] + a[3]); break;
     case STX: core_mset(&s->memory,R[a[1]] + a[2], R[a[3]]); break;
-    case OUT: if (s->osel == 0) core_put(&s->out, (int)a[1], s->ot); else core_put(&s->err, (int)a[1], 0); break;
+    case CORE_OUT: if (s->osel == 0) core_put(&s->out, (int)a[1], s->ot); else core_put(&s->err, (int)a[1], 0); break;
     case OUTW: if (s->osel == 0) core_put(&s->out, (int)(R[a[1]] & 255), s->ot); else core_put(&s->err, (int)(R[a[1]] & 255), 0); break;
     case COPYT: if (F->i < F->end) { if (s->osel == 0) core_put(&s->out, F->b[F->i], s->ot); else core_put(&s->err, F->b[F->i], 0); } break;
     case COPY: if (F->i < F->end) { if (s->osel == 0) core_put(&s->out, F->b[F->i], F->at ? F->at[F->i] : s->ot); else core_put(&s->err, F->b[F->i], 0); } break;
@@ -348,7 +348,7 @@ CORE_ACTION_LINKAGE int action_run(CoreMachine *s,const I *a) {
     case SBSPAN: { I s0 = R[a[1]] < 0 ? 0 : R[a[1]], s1 = R[a[2]]; if (s1 > F->end) s1 = F->end; for (I j = s0; j < s1; j++) core_put(&s->scratch, F->b[j], 0); } break;
     case SBBLOB: { CoreBlob *B = &s->blobs.entries[R[a[1]]]; for (int j = 0; j < B->n; j++) core_put(&s->scratch, B->b[j], 0); } break;
     case SBFIND: R[a[1]] = core_rfind(&s->resources,&s->blobs,s->scratch.b ? s->scratch.b : (unsigned char *)"", s->scratch.n); break;
-    case BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
+    case CORE_BYTE: R[a[1]] = F->i < F->end ? F->b[F->i] : 0; break;
     case XLEN: R[a[1]] = F->end; break;
     case BLEN: R[a[1]] = s->blobs.entries[R[a[2]]].n; break;
     case DIVMOD10: { uint64_t v = (uint32_t)(uint64_t)R[a[1]]; R[a[1]] = (I)(v / 10); s->r = (I)(v % 10) + (v / 10 == 0 ? 10 : 0); } break;

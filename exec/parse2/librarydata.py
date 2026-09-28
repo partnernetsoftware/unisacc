@@ -6,11 +6,11 @@ def global_address(E,P,entry,classic,done):
     E.g.labels.add(entry+'.emit')
     P(entry).branch({1:classic},entry+'.library',[('CMPI','li_len',0)])
     P(entry+'.library').a(('INTERN','ld_v','ips','ipe'),('LDX','ld_ext','ld_v',EXTERN)).branch({1:entry+'.import'},classic,[('CMPI','ld_ext',1)])
-    P(entry+'.import').a(('LDX','ld_depth','ld_v',DEPTH),('LDX','ld_base','ld_v',BASE),('LDI','ld_class',0),('PUSH',entry+'.emit')).goto('LD.classify')
+    P(entry+'.import').a(('LDI','ld_one',1),('STX','ld_v',197 << 40,'ld_one'),('LDX','ld_depth','ld_v',DEPTH),('LDX','ld_base','ld_v',BASE),('LDI','ld_class',0),('PUSH',entry+'.emit')).goto('LD.classify')
     p=P(entry+'.emit').o('  .libraryaddr r0, g_').a(('SPAN2','ips','ipe')).o(', ').a(('COPYW','n','ld_depth')).call('PRN').o(', ').a(('COPYW','n','ld_class')).call('PRN').o(', ').a(('COPYW','n','ld_width')).call('PRN').o(', ').a(('COPYW','n','ld_uns')).call('PRN').o('\n').goto(done)
 
 def install(E,P,b,integers):
-    from libraryimports import KIND, EXTENT, WRITABLE, IDS, DESC
+    from libraryimports import KIND, EXTENT, WRITABLE, IDS, DESC, SUPPORTED, VARIADIC, STRIDE
     g=E.g
     g.labels.add('LD.match')
     def prefix(state,acts):
@@ -37,10 +37,10 @@ def install(E,P,b,integers):
     P('LD.save').a(('STX','ld_v',EXTERN,'ld_ext'),('STX','ld_v',DEPTH,'td'),('STX','ld_v',BASE,'tb'),('STX','ld_v',SHAPE,'gar')).ret()
     # The complete registry decoder checks a data record's fixed structure.
     P('LD.tail').branch({1:'LD.extent'},'LI.fail',[('CMPI','li_argc',0)])
-    P('LD.extent').call('LI.u64').branch({2:'LD.extentok'},'LI.fail',[('CMPI','li_value',0)])
+    P('LD.extent').call('LI.u64').goto('LD.extentok')
     P('LD.extentok').a(('STX','li_i',EXTENT,'li_value'),('LDX','ld_address','li_i',__import__('libraryimports').ADDRESS),('A64','add','ld_end','ld_address','li_value')).branch({0:'LI.fail',1:'LI.fail'},'LD.extentnowrap',[('C64U','ld_end','ld_address')])
-    P('LD.extentnowrap').call('LI.byte').branch({1:'LD.writable'},'LI.fail',[('RLD','li_byte')])
-    P('LD.writable').a(('STX','li_i',WRITABLE,'li_byte'),('ALUI','mul','ld_index','li_i',42),('LDX','ld_depth','ld_index',DESC),('ALUI','add','ld_t','ld_index',3),('LDX','ld_class','ld_t',DESC),('ALUI','add','ld_t','ld_index',4),('LDX','ld_width','ld_t',DESC),('ALUI','add','ld_t','ld_index',5),('LDX','ld_uns','ld_t',DESC)).goto('LD.wirebound0')
+    P('LD.extentnowrap').call('LI.byte').a(('STX','li_i',WRITABLE,'li_byte')).goto('LI.supported')
+    P('LD.writable').a(('STX','li_i',WRITABLE,'li_byte'),('ALUI','mul','ld_index','li_i',STRIDE),('LDX','ld_depth','ld_index',DESC),('ALUI','add','ld_t','ld_index',3),('LDX','ld_class','ld_t',DESC),('ALUI','add','ld_t','ld_index',4),('LDX','ld_width','ld_t',DESC),('ALUI','add','ld_t','ld_index',5),('LDX','ld_uns','ld_t',DESC)).goto('LD.wirebound0')
     P('LD.wireinteger').branch({1:'LD.wirewidth'},'LI.fail',[('CMPI','ld_depth',0)])
     P('LD.wirewidth').branch({w:'LD.wireunsigned' for w in (1,2,4,8)},'LI.fail',[('RLD','ld_width')])
     P('LD.wireunsigned').branch({0:'LD.wireextent',1:'LD.wireextent'},'LI.fail',[('RLD','ld_uns')])
@@ -49,7 +49,10 @@ def install(E,P,b,integers):
     P('LD.wirepointeruns').branch({1:'LD.wireextent'},'LI.fail',[('CMPI','ld_uns',0)])
     P('LD.wireextent').a(('LDX','ld_extent','li_i',EXTENT)).branch({0:'LI.fail'},'LI.supported',[('C64U','ld_extent','ld_width')])
     P('LD.validate').a(('LDX','ld_v','li_i',IDS),('LDX','ld_ext','ld_v',EXTERN)).branch({1:'LD.validateextern'},'LI.wrapnext',[('CMPI','ld_ext',1)])
-    P('LD.validateextern').a(('LDX','ld_shape','ld_v',SHAPE)).branch({1:'LD.types'},'LI.fail',[('CMPI','ld_shape',0)])
+    P('LD.validateextern').a(('LDX','ld_used','ld_v',197 << 40)).branch({1:'LD.importsupport'},'LI.wrapnext',[('CMPI','ld_used',1)])
+    P('LD.importsupport').a(('LDX','ld_supported','li_i',SUPPORTED),('LDX','ld_writable','li_i',WRITABLE)).branch({1:'LD.importwrite'},'LI.fail',[('CMPI','ld_supported',1)])
+    P('LD.importwrite').branch({1:'LD.importshape'},'LI.fail',[('CMPI','ld_writable',1)])
+    P('LD.importshape').a(('LDX','ld_shape','ld_v',SHAPE)).branch({1:'LD.types'},'LI.fail',[('CMPI','ld_shape',0)])
     P('LD.types').a(('LDX','ld_depth','ld_v',DEPTH),('LDX','ld_base','ld_v',BASE),('PUSH','LD.match')).goto('LD.classify')
     P('LD.classify').a(('LDI','ld_uns',0),('LDI','ld_width',8)).branch({1:'LD.scalar'},'LD.pointer',[('CMPI','ld_depth',0)])
     P('LD.pointer').branch({b['FPB']:'LI.fail',b['FPV']:'LI.fail'},'LD.pointerrange',[('RLD','ld_base')])
@@ -60,7 +63,7 @@ def install(E,P,b,integers):
     for _,code,width,uns,_ in integers:P('LD.int.'+str(code)).a(('LDI','ld_class',1),('LDI','ld_width',width),('LDI','ld_uns',uns)).ret()
     P('LD.bool').branch({b['BOOL']:'LD.boolok'},'LI.fail',[('RLD','ld_base')])
     P('LD.boolok').a(('LDI','ld_class',1),('LDI','ld_width',1),('LDI','ld_uns',1)).ret()
-    P('LD.match').a(('ALUI','mul','ld_index','li_i',42)).goto('LD.match0')
+    P('LD.match').a(('ALUI','mul','ld_index','li_i',STRIDE)).goto('LD.match0')
     for f,r,nx in [(0,'ld_depth','LD.match3'),(3,'ld_class','LD.match4'),(4,'ld_width','LD.match5'),(5,'ld_uns','LD.extentmatch')]:
         P('LD.match'+str(f)).a(('ALUI','add','ld_t','ld_index',f),('LDX','ld_value','ld_t',DESC)).branch({1:nx},'LI.fail',[('C64U','ld_value',r)])
     P('LD.extentmatch').a(('LDX','ld_extent','li_i',EXTENT)).branch({0:'LI.fail'},'LI.wrapnext',[('C64U','ld_extent','ld_width')])

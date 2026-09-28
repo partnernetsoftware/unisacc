@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Dedicated lowering capability proof; actual native ABI execution is separate."""
+"""Dedicated lowering capability proof; actual native ABI execution is separate.
+Raw .librarycall is trusted E3 output: E3 proves its named signature, while lower
+checks wire structure and module capability, not arbitrary register-address ABI."""
 import hashlib,json,pathlib,struct,subprocess,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT),str(ROOT/'exec/c')]
@@ -43,8 +45,11 @@ def main():
   status,out=check(raw,values)
   assert status==('reject' if target.startswith('win/') else 'accept'),(target,status,out)
   if status=='accept':assert out.count(b'hostcall ')==2
+  if not target.startswith('win/'):
+   for unrelated in (binding(supported=0),binding(D(0,0,0,3,8,0))):
+    assert check(raw,{**base,b'\0library/bindings':unrelated})[0]=='accept'
   controls=0
-  for bad in [None,b'',b'USBIND1\n'+U(0),valid[:-1],valid+b'X',binding(supported=0),binding(D(0,0,0,1,3,0)),binding(D(0,0,0,0,0,0)),binding(name=b'3bad'),valid[:8]+U(1<<63)+valid[16:],valid[:16]+U(1<<63)+valid[24:],valid[:8]+U(2)+valid[16:]+valid[16:],binding(D(0,0,0,1,1<<32|1,0)),binding(D(0,0,0,3,8,0)),binding(D(1,0,0,2,8,1))]:
+  for bad in [None,b'',b'USBIND1\n'+U(0),valid[:-1],valid+b'X',binding(D(0,0,0,1,3,0)),binding(D(0,0,0,0,0,0)),binding(name=b'3bad'),valid[:8]+U(1<<63)+valid[16:],valid[:16]+U(1<<63)+valid[24:],valid[:8]+U(2)+valid[16:]+valid[16:],binding(D(0,0,0,1,1<<32|1,0)),binding(D(1,0,0,2,8,1))]:
    vals=dict(base)
    if bad is not None:vals[b'\0library/bindings']=bad
    assert check(raw,vals)[0]=='reject';controls+=1

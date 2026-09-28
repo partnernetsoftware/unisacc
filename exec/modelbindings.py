@@ -1,9 +1,12 @@
 """Finite USBIND1 resource wire decoder, reusable by stage builders.
-No source parsing or host-side ABI selection. Caller validates descriptors.
+No source parsing or host-side ABI selection. Structural validation precedes decoding; named data facts are checked on use.
+Function typing is proved by E3; raw .librarycall is an explicitly trusted tape capability.
 """
 from pathlib import Path
 NAMES, IDS, ADDRESS, ARGC, DESC, SEEN = (i << 40 for i in range(190,196))
 KIND, EXTENT, WRITABLE = (i << 40 for i in range(196,199))
+VARIADIC, SUPPORTED = (i << 40 for i in range(313,315))
+STRIDE=6150
 
 def install(E):
     from finite_rules import install as rules
@@ -34,21 +37,22 @@ def install(E):
     P('LBI.kind').call('LBI.byte').branch({0:'LBI.kind0',1:'LBI.kind1'},'LBI.fail',[('RLD','lbi_byte')])
     for kind in (0,1):
         P('LBI.kind'+str(kind)).a(('LDI','lbi_kind',kind),('STX','lbi_i',KIND,'lbi_kind')).goto('LBI.origin')
-    for state,nx in [('origin','abi'),('abi','variadic'),('variadic','address')]:
+    for state,nx in [('origin','abi'),('abi','variadic')]:
         P('LBI.'+state).call('LBI.byte').branch({0:'LBI.'+nx},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.variadic').call('LBI.byte').a(('STX','lbi_i',VARIADIC,'lbi_byte')).goto('LBI.address')
     P('LBI.address').call('LBI.u64').branch({2:'LBI.addressmax'},'LBI.fail',[('LDI','lbi_zero',0),('C64U','lbi_value','lbi_zero')])
     P('LBI.addressmax').branch({2:'LBI.fail'},'LBI.addrok',[('LDI','lbi_max',9223372036854775807),('C64U','lbi_value','lbi_max')])
-    P('LBI.addrok').a(('STX','lbi_i',ADDRESS,'lbi_value')).call('LBI.u64').a(('COPYW','lbi_argc','lbi_value'),('STX','lbi_i',ARGC,'lbi_value')).branch({2:'LBI.fail'},'LBI.argkind',[('LDI','lbi_max',6),('C64U','lbi_argc','lbi_max')])
+    P('LBI.addrok').a(('STX','lbi_i',ADDRESS,'lbi_value')).call('LBI.u64').a(('COPYW','lbi_argc','lbi_value'),('STX','lbi_i',ARGC,'lbi_value')).branch({2:'LBI.fail'},'LBI.argkind',[('LDI','lbi_max',1024),('C64U','lbi_argc','lbi_max')])
     P('LBI.argkind').branch({1:'LBI.dataargc'},'LBI.descbegin',[('CMPI','lbi_kind',1)])
     P('LBI.dataargc').branch({1:'LBI.descbegin'},'LBI.fail',[('CMPI','lbi_argc',0)])
     P('LBI.descbegin').a(('LDI','lbi_d',0),('LDI','lbi_field',0)).goto('LBI.desc')
-    P('LBI.desc').call('LBI.u64').a(('ALUI','mul','lbi_index','lbi_i',42),('ALUI','mul','lbi_t','lbi_d',6),('ALU','add','lbi_index','lbi_index','lbi_t'),('ALU','add','lbi_index','lbi_index','lbi_field'),('STX','lbi_index',DESC,'lbi_value'),('ALUI','add','lbi_field','lbi_field',1)).branch({1:'LBI.checkdesc'},'LBI.desc',[('CMPI','lbi_field',6)])
+    P('LBI.desc').call('LBI.u64').a(('ALUI','mul','lbi_index','lbi_i',STRIDE),('ALUI','mul','lbi_t','lbi_d',6),('ALU','add','lbi_index','lbi_index','lbi_t'),('ALU','add','lbi_index','lbi_index','lbi_field'),('STX','lbi_index',DESC,'lbi_value'),('ALUI','add','lbi_field','lbi_field',1)).branch({1:'LBI.descnext'},'LBI.desc',[('CMPI','lbi_field',6)])
     P('LBI.descnext').a(('LDI','lbi_field',0),('ALUI','add','lbi_d','lbi_d',1),('CMP','lbi_d','lbi_argc')).branch({2:'LBI.tailkind'},'LBI.desc',[('CMP','lbi_d','lbi_argc')])
     P('LBI.tailkind').branch({1:'LBI.extent'},'LBI.supported',[('CMPI','lbi_kind',1)])
-    P('LBI.extent').call('LBI.u64').a(('STX','lbi_i',EXTENT,'lbi_value')).branch({0:'LBI.fail'},'LBI.extentadd',[('C64U','lbi_value','lbi_width')])
+    P('LBI.extent').call('LBI.u64').a(('STX','lbi_i',EXTENT,'lbi_value')).goto('LBI.extentadd')
     P('LBI.extentadd').a(('LDX','lbi_address','lbi_i',ADDRESS),('A64','add','lbi_extentend','lbi_address','lbi_value')).branch({0:'LBI.fail',1:'LBI.fail'},'LBI.writable',[('C64U','lbi_extentend','lbi_address')])
-    P('LBI.writable').call('LBI.byte').a(('STX','lbi_i',WRITABLE,'lbi_byte')).branch({1:'LBI.supported'},'LBI.fail',[('RLD','lbi_byte')])
-    P('LBI.supported').call('LBI.byte').branch({1:'LBI.bound'},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.writable').call('LBI.byte').a(('STX','lbi_i',WRITABLE,'lbi_byte')).goto('LBI.supported')
+    P('LBI.supported').call('LBI.byte').a(('STX','lbi_i',SUPPORTED,'lbi_byte')).goto('LBI.bound')
     P('LBI.bound').a(('MARK','lbi_pos')).branch({1:'LBI.nextrecord'},'LBI.fail',[('CMP','lbi_pos','lbi_end')])
     P('LBI.nextrecord').a(('ALUI','add','lbi_i','lbi_i',1)).goto('LBI.record')
     P('LBI.inputend').a(('MARK','lbi_pos')).branch({1:'LBI.ready'},'LBI.fail',[('CMP','lbi_pos','lbi_len')])

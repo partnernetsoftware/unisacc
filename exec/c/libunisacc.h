@@ -2,6 +2,18 @@
 #define LIBUNISACC_H
 #include <stddef.h>
 #include <stdint.h>
+/* Define LIBUNISACC_STATIC when consuming a Windows static archive. */
+#if defined(_WIN32) && !defined(LIBUNISACC_STATIC)
+#ifdef LIBUNISACC_BUILD
+#define US_API __declspec(dllexport)
+#else
+#define US_API __declspec(dllimport)
+#endif
+#elif defined(__GNUC__)
+#define US_API __attribute__((visibility("default")))
+#else
+#define US_API
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -24,33 +36,33 @@ typedef struct us_signature {
     uint64_t extent; /* data object bytes, not pointee bytes */
     unsigned writable;
 } us_signature;
-us_context *us_new(const char *package_path);
-void us_free(us_context *ctx);
-int us_add_source(us_context *ctx, const char *name, const char *source);
-int us_add_file(us_context *ctx, const char *path);
-int us_add_tape(us_context *ctx, const void *bytes, size_t length);
-int us_define(us_context *ctx, const char *definition);
-int us_include_path(us_context *ctx, const char *path);
+US_API us_context *us_new(const char *package_path);
+US_API void us_free(us_context *ctx);
+US_API int us_add_source(us_context *ctx, const char *name, const char *source);
+US_API int us_add_file(us_context *ctx, const char *path);
+US_API int us_add_tape(us_context *ctx, const void *bytes, size_t length);
+US_API int us_define(us_context *ctx, const char *definition);
+US_API int us_include_path(us_context *ctx, const char *path);
 /* Borrow address; caller owns its lifetime. Successful registration invalidates
    compiled code and previously returned exports; recompile before use. */
-int us_add_symbol(us_context *ctx, const char *name, void *address, const us_signature *signature);
+US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const us_signature *signature);
 /* Trusted ABI/object declarations; dlsym does not discover or validate types.
    Native POSIX lookup freezes all candidates at compile: injection, process,
    then owned libraries in load order. The model selects and checks the winner.
    Success invalidates code/exports; failure preserves the prior generation.
    Handles remain owned until us_free, after compiled code is destroyed. */
-int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
-int us_load_library(us_context *ctx, const char *path);
-int us_compile(us_context *ctx, const char *target, int optimisation);
-int us_relocate(us_context *ctx);
-int us_run_main(us_context *ctx, int argc, const char *const *argv, int *status);
+US_API int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
+US_API int us_load_library(us_context *ctx, const char *path);
+US_API int us_compile(us_context *ctx, const char *target, int optimisation);
+US_API int us_relocate(us_context *ctx);
+US_API int us_run_main(us_context *ctx, int argc, const char *const *argv, int *status);
 /* Pointers survive calls, but not recompile, relocate or free. */
-void *us_sym(us_context *ctx, const char *name);
+US_API void *us_sym(us_context *ctx, const char *name);
 /* Most recent native export invocation: 0 success, 1 error/explicit exit.
    Native pointer calls return a zero/NULL/void sentinel on failure. */
-int us_call_status(const us_context *ctx, int *exit_status);
-const char *us_error(const us_context *ctx);
-const void *us_tape(const us_context *ctx, size_t *length);
+US_API int us_call_status(const us_context *ctx, int *exit_status);
+US_API const char *us_error(const us_context *ctx);
+US_API const void *us_tape(const us_context *ctx, size_t *length);
 #ifdef __cplusplus
 }
 #endif

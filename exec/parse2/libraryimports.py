@@ -1,11 +1,14 @@
 """USBIND1 injected function declarations resolved by E3 delta.
 Pure resource decoding, ABI matching and wrapper emission use existing actions.
 No host source parser. Parent installs this after libraryexports, before finish.
-Writable scalar data is handled by librarydata; loaded/dynamic origins and unsupported signatures reject.
+Candidate origins are selected by modelcandidates. Structural wire checks run
+before source parsing; support and ABI checks apply only to referenced externals.
 """
 from pathlib import Path
 NAMES, IDS, ADDRESS, ARGC, DESC, SEEN = (i << 40 for i in range(180,186))
 KIND, EXTENT, WRITABLE = (i << 40 for i in range(190,193))
+VARIADIC, SUPPORTED, USED = (i << 40 for i in range(310,313))
+STRIDE = 6150
 
 def install(E,P,b,start,integers):
     from finite_rules import install as rules
@@ -35,15 +38,16 @@ def install(E,P,b,start,integers):
     P('LI.newname').a(('LDI','li_one',1),('STX','li_id',SEEN,'li_one'),('STX','li_i',NAMES,'li_name'),('STX','li_i',IDS,'li_id')).goto('LI.kind')
     P('LI.kind').call('LI.byte').branch({0:'LI.kindput',1:'LI.kindput'},'LI.fail',[('RLD','li_byte')])
     P('LI.kindput').a(('STX','li_i',KIND,'li_byte')).goto('LI.origin')
-    for state,nx in [('origin','abi'),('abi','variadic'),('variadic','address')]:
+    for state,nx in [('origin','abi'),('abi','variadic')]:
         P('LI.'+state).call('LI.byte').branch({0:'LI.'+nx},'LI.fail',[('RLD','li_byte')])
+    P('LI.variadic').call('LI.byte').a(('STX','li_i',VARIADIC,'li_byte')).goto('LI.address')
     P('LI.address').call('LI.u64').branch({2:'LI.addrok'},'LI.fail',[('LDI','li_cmpmax',0),('C64U','li_value','li_cmpmax')])
-    P('LI.addrok').a(('STX','li_i',ADDRESS,'li_value')).call('LI.u64').a(('COPYW','li_argc','li_value'),('STX','li_i',ARGC,'li_value')).branch({2:'LI.fail'},'LI.descbegin',[('LDI','li_cmpmax',6),('C64U','li_argc','li_cmpmax')])
+    P('LI.addrok').a(('STX','li_i',ADDRESS,'li_value')).call('LI.u64').a(('COPYW','li_argc','li_value'),('STX','li_i',ARGC,'li_value')).branch({2:'LI.fail'},'LI.descbegin',[('LDI','li_cmpmax',1024),('C64U','li_argc','li_cmpmax')])
     P('LI.descbegin').a(('LDI','li_d',0),('LDI','li_field',0)).goto('LI.desc')
-    P('LI.desc').call('LI.u64').a(('ALUI','mul','li_index','li_i',42),('ALUI','mul','li_t','li_d',6),('ALU','add','li_index','li_index','li_t'),('ALU','add','li_index','li_index','li_field'),('STX','li_index',DESC,'li_value'),('ALUI','add','li_field','li_field',1)).branch({1:'LI.descnext'},'LI.desc',[('CMPI','li_field',6)])
+    P('LI.desc').call('LI.u64').a(('ALUI','mul','li_index','li_i',STRIDE),('ALUI','mul','li_t','li_d',6),('ALU','add','li_index','li_index','li_t'),('ALU','add','li_index','li_index','li_field'),('STX','li_index',DESC,'li_value'),('ALUI','add','li_field','li_field',1)).branch({1:'LI.descnext'},'LI.desc',[('CMPI','li_field',6)])
     P('LI.descnext').a(('LDI','li_field',0),('ALUI','add','li_d','li_d',1),('CMP','li_d','li_argc')).branch({2:'LI.kindtail'},'LI.desc',[('CMP','li_d','li_argc')])
     P('LI.kindtail').a(('LDX','li_kind','li_i',KIND)).branch({1:'LD.tail'},'LI.supported',[('CMPI','li_kind',1)])
-    P('LI.supported').call('LI.byte').branch({1:'LI.bound'},'LI.fail',[('RLD','li_byte')])
+    P('LI.supported').call('LI.byte').a(('STX','li_i',SUPPORTED,'li_byte')).goto('LI.bound')
     P('LI.bound').a(('MARK','li_pos')).branch({1:'LI.nextrecord'},'LI.fail',[('C64U','li_pos','li_end')])
     P('LI.nextrecord').a(('ALUI','add','li_i','li_i',1)).goto('LI.record')
     P('LI.inputend').a(('MARK','li_pos')).branch({1:'LI.ready'},'LI.fail',[('C64U','li_pos','li_len')])
@@ -53,10 +57,14 @@ def install(E,P,b,start,integers):
     original=g.st.pop('UD.calls0');g.st['LI.original.calls0']=original;g.labels.add('LI.original.calls0')
     P('UD.calls0').branch({1:'LI.original.calls0'},'LI.firstwrap',[('CMPI','li_len',0)])
     P('LI.firstwrap').branch({1:'LI.original.calls0'},'LI.wrapstart',[('CMPI','li_emitted',1)])
-    P('LI.wrapstart').a(('INPOP',),('INPUSH','ud_tape'),('SPAN2','ud_zero','ud_len'),('INPOP',),('LDI','li_i',0)).goto('LI.wrap')
+    P('LI.wrapstart').a(('INPOP',),('INPUSH','ud_tape'),('SPAN2','ud_zero','ud_len'),('INPOP',),('LDI','li_i',0)).call('LI.usedscan').goto('LI.wrap')
     P('LI.wrap').branch({1:'LI.wrapend'},'LI.lookup',[('CMP','li_i','li_count')])
     P('LI.lookup').a(('LDX','li_kind','li_i',KIND)).branch({1:'LD.validate'},'LI.functionlookup',[('CMPI','li_kind',1)])
-    P('LI.functionlookup').a(('LDX','li_id','li_i',IDS),('LDX','li_def','li_id',DEFINED)).branch({1:'LI.wrapnext'},'LI.prototype',[('CMPI','li_def',1)])
+    P('LI.functionlookup').a(('LDX','li_id','li_i',IDS),('LDX','li_def','li_id',DEFINED)).branch({1:'LI.wrapnext'},'LI.usedcheck',[('CMPI','li_def',1)])
+    P('LI.usedcheck').a(('LDX','li_used','li_id',USED)).branch({1:'LI.importsupport'},'LI.wrapnext',[('CMPI','li_used',1)])
+    P('LI.importsupport').a(('LDX','li_supported','li_i',SUPPORTED)).branch({1:'LI.importvar'},'LI.fail',[('CMPI','li_supported',1)])
+    P('LI.importvar').a(('LDX','li_var','li_i',VARIADIC)).branch({1:'LI.importargc'},'LI.fail',[('CMPI','li_var',0)])
+    P('LI.importargc').a(('LDX','li_argc','li_i',ARGC)).branch({2:'LI.fail'},'LI.prototype',[('LDI','li_cmpmax',6),('C64U','li_argc','li_cmpmax')])
     P('LI.prototype').a(('LDX','li_sig','li_id',b['FPS_FN']),('LDX','li_argc','li_i',ARGC)).branch({1:'LI.fail'},'LI.variadiccheck',[('CMPI','li_sig',0)])
     P('LI.variadiccheck').a(('LDX','li_var','li_id',E.VAR)).branch({1:'LI.countmatch'},'LI.fail',[('CMPI','li_var',0)])
     P('LI.countmatch').a(('LDX','li_n','li_sig',b['FPS_COUNT'])).branch({1:'LI.return'},'LI.fail',[('CMP','li_n','li_argc')])
@@ -72,7 +80,7 @@ def install(E,P,b,start,integers):
     P('LI.other').branch({0:'LI.void',b['BOOL']:'LI.bool'},'LI.fail',[('RLD','li_base')])
     P('LI.void').branch({1:'LI.match'},'LI.fail',[('CMPI','li_d',0)])
     P('LI.bool').a(('LDI','li_class',1),('LDI','li_width',1),('LDI','li_uns',1)).goto('LI.match')
-    P('LI.match').a(('ALUI','mul','li_index','li_i',42),('ALUI','mul','li_t','li_d',6),('ALU','add','li_index','li_index','li_t')).goto('LI.match0')
+    P('LI.match').a(('ALUI','mul','li_index','li_i',STRIDE),('ALUI','mul','li_t','li_d',6),('ALU','add','li_index','li_index','li_t')).goto('LI.match0')
     for field,register,nx in [(0,'li_depth','LI.match3'),(3,'li_class','LI.match4'),(4,'li_width','LI.match5'),(5,'li_uns','LI.matched')]:
         P('LI.match'+str(field)).a(('ALUI','add','li_t','li_index',field),('LDX','li_value','li_t',DESC)).branch({1:nx},'LI.fail',[('C64U','li_value',register)])
     P('LI.matched').branch({1:'LI.save_return'},'LI.paramnext',[('CMPI','li_d',0)])
@@ -96,6 +104,28 @@ def install(E,P,b,start,integers):
     P('LI.tail').o('  .frame -48\n  ret\n').goto('LI.wrapnext')
     P('LI.wrapnext').a(('ALUI','add','li_i','li_i',1)).goto('LI.wrap')
     P('LI.wrapend').a(('OCUT','ud_tape','ud_zero'),('BLEN','ud_len','ud_tape'),('INPUSH','ud_tape'),('LDI','li_emitted',1)).goto('UD.labels')
+    P('LI.scanstart').a(('INPUSH','ud_tape'),('LDI','lis_flag',0),('LDI','lis_last',0),('LDI','lis_first',0)).goto('LI.scanbyte')
+    letters=b'_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    def bb(state,cases,other):
+        for key,nx in cases.items():g.on(state,[key],nx,[],'b')
+        g.on(state,[x for x in range(257) if x not in cases],other,[],'b')
+    bb('LI.scanbyte',{256:'LI.scanend',10:'LI.scanline',**{c:'LI.scanword' for c in letters}},'LI.scanadv')
+    P('LI.scanadv').a(('ADV',)).goto('LI.scanbyte')
+    P('LI.scanword').a(('MARK','lis_start')).goto('LI.scanwordbyte')
+    bb('LI.scanwordbyte',{c:'LI.scanwordadv' for c in letters+b'0123456789'},'LI.scanwordend')
+    P('LI.scanwordadv').a(('ADV',)).goto('LI.scanwordbyte')
+    P('LI.scanwordend').a(('MARK','lis_end'),('INTERN','lis_last','lis_start','lis_end')).branch({1:'LI.scanopcode'},'LI.scanbyte',[('CMPI','lis_first',0)])
+    P('LI.scanopcode').a(('LDI','lis_first',1)).branch({1:'LI.scancall'},'LI.scanlea',[('CMP','lis_last','lis_call')])
+    P('LI.scanlea').branch({1:'LI.scancall'},'LI.scanbyte',[('CMP','lis_last','lis_lea')])
+    P('LI.scancall').a(('LDI','lis_flag',1)).goto('LI.scanbyte')
+    P('LI.scanline').branch({1:'LI.scanmark'},'LI.scanreset',[('CMPI','lis_flag',1)])
+    P('LI.scanmark').a(('STX','lis_last',USED,'lis_flag')).goto('LI.scanreset')
+    P('LI.scanreset').a(('LDI','lis_flag',0),('LDI','lis_last',0),('LDI','lis_first',0),('ADV',)).goto('LI.scanbyte')
+    P('LI.scanend').a(('INPOP',)).ret()
+    # Intern the two opcode words once before the scan; caller has no live SB.
+    pp=P('LI.usedscan')
+    for text,reg in [('call','lis_call'),('lea','lis_lea')]:pp.a(('SBCLR',),*[('SBOUT',c) for c in text.encode()],('SBINTERN',reg))
+    pp.goto('LI.scanstart')
     from librarydata import install as data_install
     data_install(E,P,b,integers)
     return 'LI.start'

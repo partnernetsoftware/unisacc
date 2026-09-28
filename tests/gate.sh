@@ -198,6 +198,8 @@ job lib-bindings python3 ./tests/libunisaccbindingscheck.py --package "${MODEL_C
 job lib-data python3 ./tests/libunisaccdatacheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-resolver python3 ./tests/libunisaccresolvercheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-resolver-host python3 ./tests/libraryresolverhostcheck.py
+job lib-word64 python3 ./tests/librarywordcheck.py --native-only
+job exec-crcllp64 python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
 job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
 job shared-e2-plain ./tests/sharede2.sh plain

@@ -18,7 +18,9 @@ def install(E, os_, ids):
     P('LBI.arity').branch({1:'LBI.reg0'},'LBI.fail',[('CMPI','na',2)])
     for i,nx in [(0,'LBI.reg1'),(1,'LBI.cached')]:
         P('LBI.reg'+str(i)).branch({1:'LBI.fail'},nx,[('LDX','lbi_reg','a'+str(i),REG),('CMPI','lbi_reg',0)])
-    # Validate every declared descriptor even if no source prototype remains here.
+    # Legacy descriptor-validation states are retained as constructor helpers;
+    # the structural decoder no longer invokes them globally. E3 proves named
+    # function ABI matches; raw .librarycall is trusted typed tape capability.
     p=P('LBI.checkdesc')
     for field,reg in [(0,'depth'),(3,'class'),(4,'width'),(5,'uns')]:
         p.a(('ALUI','add','lbi_t','lbi_index',field-5),('LDX','lbi_'+reg,'lbi_t',DESC))

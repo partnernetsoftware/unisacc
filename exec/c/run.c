@@ -255,7 +255,7 @@ static void load(const char *path) {
    are checked before a route is executed. Model bodies use the same loader. */
 typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
 UNISA_RUNTIME_STATE unsigned char *PFILE, *PB; UNISA_RUNTIME_STATE int PN, PM, PS;
-UNISA_RUNTIME_STATE int *POFF, *PLEN, *PRAW; UNISA_RUNTIME_STATE long *PCRC; UNISA_RUNTIME_STATE int PVER; UNISA_RUNTIME_STATE Stage *STAGES;
+UNISA_RUNTIME_STATE int *POFF, *PLEN, *PRAW; UNISA_RUNTIME_STATE uint32_t *PCRC; UNISA_RUNTIME_STATE int PVER; UNISA_RUNTIME_STATE Stage *STAGES;
 typedef struct { int name, n, data, len; } Resource;
 UNISA_RUNTIME_STATE Resource *RES; UNISA_RUNTIME_STATE int NR;
 /* Borrowed process inputs override carried resources by exact byte key.
@@ -291,7 +291,7 @@ static void package(const char *path) {
     RES = xrealloc(0, sizeof(Resource)*NR);
     if (PM <= 0 || PS <= 0 || PM > PN/8 || PS > PN/10) die("bad package count");
     POFF = xrealloc(0, sizeof(int)*PM); PLEN = xrealloc(0, sizeof(int)*PM);
-    PRAW = xrealloc(0, sizeof(int)*PM); PCRC = xrealloc(0, sizeof(long)*PM);
+    PRAW = xrealloc(0, sizeof(int)*PM); PCRC = xrealloc(0, sizeof(uint32_t)*PM);
     STAGES = xrealloc(0, sizeof(Stage)*PS);
     for (int i = 0; i < PS; i++) {
         ltag('D'); Stage *s = &STAGES[i];
@@ -307,8 +307,9 @@ static void package(const char *path) {
     for (int i = 0; i < PM; i++) {
         ltag('M'); int n = lint(); PRAW[i]=n; PCRC[i]=0;
         if (version == 3) {
-            PRAW[i]=lint(); int codec=lint(); PCRC[i]=lnum();
-            if (PRAW[i]<=0 || codec!=1 || PCRC[i]<0 || PCRC[i]>4294967295) die("bad compressed model header");
+            PRAW[i]=lint(); int codec=lint(); I checksum=lnum();
+            if (PRAW[i]<=0 || codec!=1 || checksum<0 || checksum>(I)UINT32_MAX) die("bad compressed model header");
+            PCRC[i]=(uint32_t)checksum;
         }
         if (LP >= LN || LB[LP++] != 10 || n <= 0 || n > LN-LP) die("bad package model extent");
         if (version < 3 && LB[LP] != 'N') die("package requires networks");

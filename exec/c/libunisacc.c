@@ -1,6 +1,7 @@
 /* Host adaptation for the same product network routes. No parser or
    compilation rule lives here. One context may be used by one thread at a
    time; different contexts execute concurrently, without a global lock. */
+#define LIBUNISACC_BUILD
 #include "libunisacc.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +29,7 @@ struct us_context {
     size_t tape_length, definitions_length;
     unsigned char *signatures; size_t signatures_length;
     int input_is_tape;
-    unsigned char *image; long image_size, image_dataoff, image_text_size; int image_entry;
+    unsigned char *image; int64_t image_size, image_dataoff, image_text_size; int image_entry;
     us_exports exports;
     us_bindings bindings;
     us_resolver resolver;
@@ -38,15 +39,16 @@ struct us_context {
     Symbol *symbols; size_t symbol_count;
     GuestMap *guest_maps;
     int argc; char **argv;
-    long process_slots[2];
+    uint64_t process_slots[2];
     char error[1024];
 };
+_Static_assert(sizeof(((us_context *)0)->process_slots)==16,"process protocol requires two 64-bit slots");
 static _Thread_local us_context *active;
 static _Thread_local Allocation *allocations;
 #define ALLOCATION_BUCKETS 4096
 static _Thread_local Allocation *allocation_buckets[ALLOCATION_BUCKETS];
-typedef struct OpenFile { int fd; struct OpenFile *next; } OpenFile;
-static _Thread_local OpenFile *open_files;
+typedef struct UsOpenFile { int fd; struct UsOpenFile *next; } UsOpenFile;
+static _Thread_local UsOpenFile *open_files;
 static _Thread_local jmp_buf failure;
 static void __us_panic(const char *message) {
     snprintf(active->error,sizeof active->error,"%s",message);
@@ -54,14 +56,14 @@ static void __us_panic(const char *message) {
 }
 static int tracked_open(const char *path,int flags) {
     int fd=open(path,flags);if (fd<0) return fd;
-    OpenFile *node=malloc(sizeof *node);
+    UsOpenFile *node=malloc(sizeof *node);
     if (!node) {close(fd);__us_panic("out of memory");}
     node->fd=fd;node->next=open_files;open_files=node;return fd;
 }
 static int tracked_close(int fd) {
-    OpenFile **at=&open_files;
+    UsOpenFile **at=&open_files;
     while (*at && (*at)->fd!=fd) at=&(*at)->next;
-    if (*at) {OpenFile *node=*at;*at=node->next;free(node);}
+    if (*at) {UsOpenFile *node=*at;*at=node->next;free(node);}
     return close(fd);
 }
 /* Track all runtime allocations, including partial model loads on errors.
@@ -109,7 +111,7 @@ static void tracked_free(void *p) {
     free(p); free(node);
 }
 static void cleanup(void) {
-    while (open_files) {OpenFile *node=open_files;open_files=node->next;close(node->fd);free(node);}
+    while (open_files) {UsOpenFile *node=open_files;open_files=node->next;close(node->fd);free(node);}
     while (allocations) { Allocation *a=allocations; allocations=a->next; free(a->p); free(a); }
     memset(allocation_buckets,0,sizeof allocation_buckets);
 }
@@ -143,22 +145,27 @@ static void diagnostic(int status,const char *reason,int n,const void *errors) {
     else snprintf(active->error,sizeof active->error,"compiler status %d",status);
 }
 
-#if defined(__GNUC__)
-#define API __attribute__((visibility("default")))
+#define API US_API
+static size_t library_page_size(void) {
+#ifdef _WIN32
+    SYSTEM_INFO info;GetSystemInfo(&info);return info.dwPageSize;
 #else
-#define API
+    long n=sysconf(_SC_PAGESIZE);return n>0?(size_t)n:0;
 #endif
+}
+static void library_release_map(void *p,size_t extent) {
+#ifdef _WIN32
+    (void)extent;VirtualFree(p,0,MEM_RELEASE);
+#else
+    munmap(p,extent);
+#endif
+}
 static void discard_image(us_context *c) {
     us_exports_clear(&c->exports);c->initialised=0;
-    if(c->call_stack){munmap(c->call_stack,c->call_stack_size);c->call_stack=0;c->call_stack_size=0;}
-    while (c->guest_maps) {GuestMap *m=c->guest_maps;c->guest_maps=m->next;munmap(m->base,m->length);free(m);}
+    if(c->call_stack){library_release_map(c->call_stack,c->call_stack_size);c->call_stack=0;c->call_stack_size=0;}
+    while (c->guest_maps) {GuestMap *m=c->guest_maps;c->guest_maps=m->next;library_release_map(m->base,m->length);free(m);}
     if (c->image) {
-#ifdef _WIN32
-        /* Windows context library adaptation is a later platform slice. */
-        __us_panic("Windows library unload not implemented");
-#else
-        munmap(c->image,(size_t)c->image_size);
-#endif
+        library_release_map(c->image,(size_t)c->image_size);
         c->image=0;
     }
     for (size_t i=0;i<c->symbol_count;i++) free(c->symbols[i].name);
@@ -394,7 +401,7 @@ static void library_image(us_context *c,Buf *bytes,MemoryImage *m,MemoryMap *map
     c->symbols=calloc(count ? (size_t)count : 1,sizeof(Symbol));
     if (!c->symbols) __us_panic("out of memory");
     c->symbol_count=(size_t)count;
-    long dataoff=((long)m->text+16383)&-16384;
+    int64_t dataoff=((int64_t)m->text+16383)&-16384;
     for (size_t i=0;i<c->symbol_count;i++) {
         if (at>=(size_t)bytes->n) __us_panic("truncated library symbol");
         int kind=bytes->b[at++];uint64_t n=library_u64(bytes,&at),addr=library_u64(bytes,&at);
@@ -420,7 +427,12 @@ typedef struct ScriptFrame {
 static _Thread_local ScriptFrame *script_frames;
 /* Host memory lifetime adaptation. The model decides which operation and
    argument sequence to issue; these callbacks never inspect source or tape. */
-static long library_mmap(long addr,long length,long prot,long flags,long fd,long offset) {
+static int64_t library_mmap(int64_t addr,int64_t length,int64_t prot,int64_t flags,int64_t fd,int64_t offset) {
+#ifdef _WIN32
+    /* The guest mmap callback contract remains POSIX. Windows allocation and
+       partial-unmap semantics require a separate declared adapter. */
+    (void)addr;(void)length;(void)prot;(void)flags;(void)fd;(void)offset;return -ENOSYS;
+#else
     if (!active || length<=0 || (flags&MAP_FIXED)) return -EINVAL;
     GuestMap *node=malloc(sizeof *node);if (!node) return -ENOMEM;
     void *p=mmap((void *)addr,(size_t)length,(int)prot,(int)flags,(int)fd,(off_t)offset);
@@ -429,9 +441,13 @@ static long library_mmap(long addr,long length,long prot,long flags,long fd,long
     if (page<=0 || (size_t)length>SIZE_MAX-(size_t)page+1) {munmap(p,(size_t)length);free(node);return -EINVAL;}
     node->base=p;node->length=((size_t)length+(size_t)page-1)/(size_t)page*(size_t)page;
     node->next=active->guest_maps;active->guest_maps=node;
-    return (long)p;
+    return (int64_t)(uintptr_t)p;
+#endif
 }
-static long library_munmap(long addr,long length) {
+static int64_t library_munmap(int64_t addr,int64_t length) {
+#ifdef _WIN32
+    (void)addr;(void)length;return -ENOSYS;
+#else
     if (!active || length<=0 || (uintptr_t)addr>UINTPTR_MAX-(size_t)length) return -EINVAL;
     long page=sysconf(_SC_PAGESIZE);
     if (page<=0 || (size_t)length>SIZE_MAX-(size_t)page+1) return -EINVAL;
@@ -453,20 +469,25 @@ static long library_munmap(long addr,long length) {
     else if (begin==lo) {node->base=(void *)end;node->length=hi-end;}
     else {node->length=begin-lo;if (tail) {tail->base=(void *)end;tail->length=hi-end;tail->next=node->next;node->next=tail;}}
     return 0;
+#endif
 }
-static long library_exit(long status) {
+static int64_t library_exit(int64_t status) {
     if(!script_frames)return -EINVAL;
     script_frames->status=(int)status;longjmp(script_frames->returned,1);
 }
 static const char *library_native_target(void) {
-#ifdef __aarch64__
-#ifdef __APPLE__
+#if defined(__aarch64__) || defined(_M_ARM64)
+#ifdef _WIN32
+    return "win/arm64";
+#elif defined(__APPLE__)
     return "osx/arm64";
 #else
     return "lnx/arm64";
 #endif
 #else
-#ifdef __APPLE__
+#ifdef _WIN32
+    return "win/x86_64";
+#elif defined(__APPLE__)
     return "osx/x86_64";
 #else
     return "lnx/x86_64";
@@ -488,8 +509,8 @@ API int us_relocate(us_context *c) {
         ResourceInput actual[16];unsigned char scalar[14][8];memset(actual,0,sizeof actual);
         const char *names[]={"\0process/argc","\0process/argv","\0memory/text","\0memory/reserve",
             "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process"};
-        long vals[]={c->argc,(long)c->argv,(long)mapping.base,mapping.reserved,1,(long)library_exit,(long)library_mmap,(long)library_munmap,
-            host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3),1,(long)c->process_slots};
+        uint64_t vals[]={c->argc,(uintptr_t)c->argv,(uintptr_t)mapping.base,mapping.reserved,1,(uintptr_t)library_exit,(uintptr_t)library_mmap,(uintptr_t)library_munmap,
+            host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3),1,(uintptr_t)c->process_slots};
         int lengths[]={13,13,12,15,16,13,13,15,13,13,13,13,15,16};
         for (int i=0;i<14;i++) {resource_u64(scalar[i],vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=8;}
         RI=actual;NRI=14;
@@ -510,8 +531,7 @@ API int us_relocate(us_context *c) {
             MemoryImage m;library_image(c,&input,&m,&mapping);memory_commit(&m,&mapping);
             c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;c->image_text_size=m.text;
             memcpy(mapping.base,input.b+40,m.text);memcpy(mapping.base+mapping.dataoff,input.b+40+m.text,m.stored);
-            __builtin___clear_cache((char *)mapping.base,(char *)mapping.base+m.text);
-            if (mprotect(mapping.base,(size_t)mapping.dataoff,PROT_READ|PROT_EXEC)) __us_panic("cannot protect library code");
+            if (memory_protect_code(&mapping,m.text)) __us_panic("cannot protect library code");
             if(c->signatures && us_exports_load(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
         }
     } else rc=1;
@@ -529,12 +549,18 @@ static int library_lookup(void *owner,const char *name,const void **raw,int *kin
     return 1;
 }
 static int library_stack_alloc(us_context *c,unsigned char **base,size_t *size) {
-    long page=sysconf(_SC_PAGESIZE);size_t usable=16U*1024U*1024U;
-    if(page<=0 || (size_t)page>SIZE_MAX/2)return error(c,"invalid host page size");
-    size_t total=usable+2*(size_t)page;
+    size_t page=library_page_size(),usable=16U*1024U*1024U;
+    if(!page || page>(SIZE_MAX-usable)/2)return error(c,"invalid host page size");
+    size_t total=usable+2*page;
+#ifdef _WIN32
+    unsigned char *p=VirtualAlloc(0,total,MEM_RESERVE,PAGE_NOACCESS);
+    if(!p)return error(c,"cannot reserve library call stack");
+    if(VirtualAlloc(p+page,usable,MEM_COMMIT,PAGE_READWRITE)!=p+page){library_release_map(p,total);return error(c,"cannot commit library call stack");}
+#else
     unsigned char *p=mmap(0,total,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
     if(p==MAP_FAILED)return error(c,"cannot reserve library call stack");
-    if(mprotect(p+page,usable,PROT_READ|PROT_WRITE)){munmap(p,total);return error(c,"cannot commit library call stack");}
+    if(mprotect(p+page,usable,PROT_READ|PROT_WRITE)){library_release_map(p,total);return error(c,"cannot commit library call stack");}
+#endif
     *base=p;*size=total;return 0;
 }
 static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {
@@ -556,11 +582,11 @@ static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],ui
     active=c;script_frames=&frame;
     int exited=setjmp(frame.returned);
     if(!exited) {
-        size_t page=(size_t)sysconf(_SC_PAGESIZE);
+        size_t page=library_page_size();
         *result=us_library_bridge_raw(raw,slots,stack+stack_size-page);
     }
     script_frames=frame.previous;active=previous_active;
-    if(nested)munmap(stack,stack_size);
+    if(nested)library_release_map(stack,stack_size);
     c->call_exited=exited ? 1 : 0;c->call_exit_status=exited ? frame.status : 0;
     c->call_failed=c->call_exited;
     if(exited)snprintf(c->error,sizeof c->error,"script exited with status %d",frame.status);
@@ -597,7 +623,7 @@ API int us_run_main(us_context *c,int argc,const char *const *argv,int *status) 
         }
     }
     for (int i=0;i<c->argc;i++) free(c->argv[i]);free(c->argv);c->argv=args;c->argc=argc;
-    c->process_slots[0]=argc;c->process_slots[1]=(long)args;
+    c->process_slots[0]=argc;c->process_slots[1]=(uintptr_t)args;
     int rc=c->image ? 0 : us_relocate(c);if(rc)return rc;
     if(library_initialise(c))return 1;
     const void *raw=0;int kind=-1;

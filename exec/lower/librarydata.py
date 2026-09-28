@@ -5,7 +5,7 @@ match a writable USBIND1 data record and all four canonical ABI facts.
 def install(E,os_,ids):
  from code import REG,TXT
  from data import DEFINED
- from modelbindings import IDS,ADDRESS,DESC,KIND
+ from modelbindings import IDS,ADDRESS,DESC,KIND,SUPPORTED,WRITABLE,EXTENT,STRIDE
  P,g=E.P,E.g
  def bytebranch(name,cases,other):
   for c,nx in cases.items():g.on(name,[c],nx,[],'b')
@@ -28,9 +28,12 @@ def install(E,os_,ids):
  P('LBD.find').branch({1:'LBI.fail'},'LBD.compare',[('CMP','ld_i','lbi_count')])
  P('LBD.compare').a(('LDX','ld_recordid','ld_i',IDS)).branch({1:'LBD.kind'},'LBD.next',[('CMP','ld_recordid','ld_id')])
  P('LBD.next').a(('ALUI','add','ld_i','ld_i',1)).goto('LBD.find')
- P('LBD.kind').a(('LDX','ld_kind','ld_i',KIND)).branch({1:'LBD.fact0'},'LBI.fail',[('CMPI','ld_kind',1)])
- for arg,field,nx in [(2,0,'LBD.fact3'),(3,3,'LBD.fact4'),(4,4,'LBD.fact5'),(5,5,'LBD.emit')]:
-  P('LBD.fact'+str(field)).a(('LDX','ld_blob','a'+str(arg),TXT),('INPUSH','ld_blob')).call('LBD.number').a(('INPOP',),('ALUI','mul','ld_index','ld_i',42),('ALUI','add','ld_index','ld_index',field),('LDX','ld_value','ld_index',DESC)).branch({1:nx},'LBI.fail',[('C64U','ld_value','ld_number')])
+ P('LBD.kind').a(('LDX','ld_kind','ld_i',KIND)).branch({1:'LBD.supported'},'LBI.fail',[('CMPI','ld_kind',1)])
+ P('LBD.supported').a(('LDX','ld_support','ld_i',SUPPORTED)).branch({1:'LBD.writable'},'LBI.fail',[('CMPI','ld_support',1)])
+ P('LBD.writable').a(('LDX','ld_write','ld_i',WRITABLE)).branch({1:'LBD.fact0'},'LBI.fail',[('CMPI','ld_write',1)])
+ for arg,field,nx in [(2,0,'LBD.fact3'),(3,3,'LBD.fact4'),(4,4,'LBD.fact5'),(5,5,'LBD.extent')]:
+  P('LBD.fact'+str(field)).a(('LDX','ld_blob','a'+str(arg),TXT),('INPUSH','ld_blob')).call('LBD.number').a(('INPOP',),('ALUI','mul','ld_index','ld_i',STRIDE),('ALUI','add','ld_index','ld_index',field),('LDX','ld_value','ld_index',DESC)).branch({1:nx},'LBI.fail',[('C64U','ld_value','ld_number')])
+ P('LBD.extent').a(('LDX','ld_extent','ld_i',EXTENT),('ALUI','mul','ld_index','ld_i',STRIDE),('ALUI','add','ld_index','ld_index',4),('LDX','ld_width','ld_index',DESC)).branch({0:'LBI.fail'},'LBD.emit',[('C64U','ld_extent','ld_width')])
  P('LBD.number').a(('LDI','ld_number',0),('LDI','ld_digits',0)).goto('LBD.digit')
  bytebranch('LBD.digit',{c:'LBD.digit.'+str(c) for c in range(48,58)},'LBD.numberend')
  for c in range(48,58):

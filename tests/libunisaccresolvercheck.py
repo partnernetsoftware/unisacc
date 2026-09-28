@@ -70,6 +70,44 @@ def main():
     ctypes.c_int.in_dll(probe,'owned_value').value=101
     checks.append([level,'owned-data',104])
    finally:L.us_free(c)
+  # Source definitions and unused imports precede legal unsupported host ABIs.
+  seven=(Type*7)(*[integer() for _ in range(7)])
+  variants=[('float',Signature(0,Type(0,0,0,3,8,0),params,1,0,0,0)),
+            ('aggregate',Signature(0,Type(0,0,0,5,16,0),params,1,0,0,0)),
+            ('variadic',Signature(0,integer(),params,1,1,0,0)),
+            ('seven-args',Signature(0,integer(),seven,7,0,0,0))]
+  priority_cases=[]
+  for label,sig in variants:
+   for mode in ('own','unused','external'):
+    c=L.us_new(str(pkg).encode());assert c
+    try:
+     ok(L.us_add_symbol(c,b'own',ctypes.cast(callback,P),ctypes.byref(sig)),c)
+     source=(b'long own(long n){return n+7;}long check(long n){return own(n);}' if mode=='own' else
+             b'long check(long n){return n+7;}' if mode=='unused' else
+             b'long own(long n);long check(long n){return own(n);}')
+     if mode=='external':
+      ok(L.us_add_source(c,b'unsupported.c',source),c)
+      rc=L.us_compile(c,target.encode(),0)
+      if not rc:rc=L.us_relocate(c)
+      assert rc and L.us_error(c)
+     else:assert compile_(c,source,0)(5)==12
+     priority_cases.append([label,mode])
+    finally:L.us_free(c)
+  for mode in ('own','unused','external'):
+   c=L.us_new(str(pkg).encode());assert c;obj=ctypes.c_int(99)
+   try:
+    readonly=Signature(1,integer(4),None,0,0,4,0)
+    ok(L.us_add_symbol(c,b'own_value',ctypes.cast(ctypes.pointer(obj),P),ctypes.byref(readonly)),c)
+    source=(b'extern int own_value;int own_value=7;long check(long n){return own_value+n;}' if mode=='own' else
+            b'long check(long n){return n+7;}' if mode=='unused' else
+            b'extern int own_value;long check(long n){return own_value+n;}')
+    if mode=='external':
+     ok(L.us_add_source(c,b'readonly.c',source),c);rc=L.us_compile(c,target.encode(),0)
+     if not rc:rc=L.us_relocate(c)
+     assert rc and L.us_error(c)
+    else:assert compile_(c,source,0)(5)==12 and obj.value==99
+    priority_cases.append(['readonly-data',mode])
+   finally:L.us_free(c)
   # Missing declared data must not silently receive fabricated .bss storage.
   for source in (b'extern int absent_object;long check(long n){return absent_object+n;}',b'long absent_function(long n);long check(long n){return absent_function(n);}'):
    c=L.us_new(str(pkg).encode());assert c
@@ -93,5 +131,5 @@ def main():
    ok(L.us_compile(c,target.encode(),0),c);ok(L.us_relocate(c),c)
    address=L.us_sym(c,b'check');assert address;assert ctypes.CFUNCTYPE(ctypes.c_long,ctypes.c_long)(address)(5)==45
   finally:L.us_free(c)
-  print(json.dumps({'target':target,'checks':checks,'missing_rejected':2,'failed_mutation_preserves_exports':True,'successful_mutation_invalidates_exports':True,'trusted_abi_conflict_rejected':True,'package_sha256':hashlib.sha256(pkg.read_bytes()).hexdigest(),'process_library':str(process),'scope':'native POSIX fixed integer function and writable scalar data; not Windows/FP/aggregate/variadic'}))
+  print(json.dumps({'target':target,'checks':checks,'source_unsupported_priority':priority_cases,'missing_rejected':2,'failed_mutation_preserves_exports':True,'successful_mutation_invalidates_exports':True,'trusted_abi_conflict_rejected':True,'package_sha256':hashlib.sha256(pkg.read_bytes()).hexdigest(),'process_library':str(process),'scope':'native POSIX fixed integer function and writable scalar data; not Windows/FP/aggregate/variadic'}))
 if __name__=='__main__':main()

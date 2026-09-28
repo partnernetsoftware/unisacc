@@ -37,7 +37,7 @@ static int mode[]={0,1,2,0},count[]={0,1,0,0};
 static int sparse[]={77};static int *keys[]={NULL,sparse,NULL,NULL};
 static int nx[4][257],seq[4][257];static int *next[]={nx[0],nx[1],nx[2],nx[3]},*seqs[]={seq[0],seq[1],seq[2],seq[3]};
 static int qoff[]={0,4,12,15},qlen[]={2,4,2,1};
-static I qa[64]={OUT,65,PUSH,77, POP,OUT,66,LDI,0,2,RLD,0, OUT,67,ADV, ACCEPT};
+static I qa[64]={CORE_OUT,65,PUSH,77, POP,CORE_OUT,66,LDI,0,2,RLD,0, CORE_OUT,67,ADV, ACCEPT};
 static char *str[]={"denied"};static int strl[]={6};
 static int lo[]={97,77,2,256},hi[]={97,77,2,256},base_next[]={1,2,3,3},base_seq[]={0,1,2,3},zero[4];
 static CoreModel m;
@@ -84,9 +84,9 @@ int main(int argc,char **argv) {
         check("b",10,2,"","",net?"observation outside network domain":"no transition");
         check("",10,2,"","",net?"observation outside network domain":"no transition");
         /* Stopping actions must prevent later actions in their sequence. */
-        qlen[3]=2;qa[16]=OUT;qa[17]=90;check("a",4,0,"ABC","",NULL);
-        qa[15]=REJECT;qa[16]=0;qa[17]=OUT;qa[18]=90;check("a",4,1,"","","denied");
-        qa[15]=OFILL;qa[16]=0;qa[17]=0;qa[18]=0;qa[19]=OUT;qa[20]=90;check("a",4,1,"","","field overflow");
+        qlen[3]=2;qa[16]=CORE_OUT;qa[17]=90;check("a",4,0,"ABC","",NULL);
+        qa[15]=REJECT;qa[16]=0;qa[17]=CORE_OUT;qa[18]=90;check("a",4,1,"","","denied");
+        qa[15]=OFILL;qa[16]=0;qa[17]=0;qa[18]=0;qa[19]=CORE_OUT;qa[20]=90;check("a",4,1,"","","field overflow");
         qlen[3]=0;check("a",7,3,"","","timeout");
     }
     setup(1);base_next[0]=4;check("a",5,2,"","","invalid network output");
@@ -96,7 +96,7 @@ int main(int argc,char **argv) {
     for(int i=0;i<257;i++) { owner_next[i]=0;owner_seq[i]=0; }
     int *on[]={owner_next},*os[]={owner_seq};int off[]={0},len[]={20};
     I owned[]={LDI,0,9,STX,0,100,0,SBOUT,120,SBFIND,0,SBFIND,0,SBINTERN,0,SBSAVE,0,INPUSH,0,INPOP,
-        OSEL,1,OUT,69,OSEL,0,OUT,88,SWAP,OUT,89,SWAP,OUT,90,ACCEPT};
+        OSEL,1,CORE_OUT,69,OSEL,0,CORE_OUT,88,SWAP,CORE_OUT,89,SWAP,CORE_OUT,90,ACCEPT};
     m.ns=1;m.nq=1;m.mode=owner_mode;m.next=on;m.seq=os;m.qoff=off;m.qlen=len;m.qa=owned;
     /* Count decoded actions independently from the expected output. */
     int words=sizeof owned/sizeof *owned,nact=0;for(int p=0;p<words;p+=1+ARITY[owned[p]])nact++;len[0]=nact;

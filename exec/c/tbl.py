@@ -46,7 +46,10 @@ def crosscheck():
     definitions = re.findall(r"^#define CORE_ACTION_ARITIES ([0-9,]+)$", c, re.M)
     assert len(definitions) == 1, "missing or duplicate action arity definition"
     ar = [int(x) for x in definitions[0].split(",")]
-    assert names[-1] == "NOP_" and names[:-1] == [n for n, _ in OPS], "core.h enum differs from OPS"
+    # C names avoid Windows SDK BYTE/OUT identifiers; wire action names and
+    # ordinal values stay fixed. Only these two explicit aliases are accepted.
+    c_names = {"BYTE": "CORE_BYTE", "OUT": "CORE_OUT"}
+    assert names[-1] == "NOP_" and names[:-1] == [c_names.get(n,n) for n, _ in OPS], "core.h enum differs from OPS"
     assert ar == [len(k) for _, k in OPS], "core.h ARITY differs from OPS"
 
 

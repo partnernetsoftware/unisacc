@@ -2744,3 +2744,15 @@ R10 resolver全候选wire复核收紧三处data结构：var必须0、result不�
 R10真实resolver首验15个O0/O1/O2优先级/data正例已实际通过，随后missing data测试误把compile=tape生成等同lower映射、断言rc1；保留research/r10-resolver-first-native.json。改为完整compile→relocate必须拒绝且无export，与API阶段一致，不删除缺失数据控制；仍需复跑证明实际lower拒绝。
 
 76a690c正式resolver完整候选已实际shared/六目标/pack构造与来源校验；根.com及真实侧车更新为d375af584419e207f16987efed96728cea9dd288ee214c78fb61b40e5442413f，1,053,132 B，版本仍0.0.9开发候选。冻结双槽14项门禁全部rc0、21秒：新增lib-resolver/lib-resolver-host加原data/bindings/context/exports/artifacts/lifecycle/Windows桥/com-run12/12/com-c9957/57/docs/kernel。USBIND2规范器48506观察全部network=table、17坏wire和404截断通过；native O0/O1/O2十五组四级priority/data/失败保留/成功失效/缺失符号完整链通过。完整回执research/r10-resolver-final-candidate.json，API边界exec/c/libraryresolver.md。不能称全部R10/六平台库/最终签名发布通过。另只读复核source真实定义与unsupported候选组合，此项尚无TDD覆盖。
+
+### R10 源定义优先修复与Windows宿主并发（2026-09-29）
+真实d375候选发现source优先合同缺口：GP host候选被source定义正确覆盖，但float/aggregate unsupported候选在LI.startup先拒绝。14绿不覆盖该组合，保留失败，不能改为“源必须兼容host声明”。修复必须将完整结构验证与实际调用支持分开：startup记录结构合法候选；使用点先源定义胜出，只有外部winner参与ABI/支持校验。var、argc>6、数据readonly/aggregate等一起处理，不只给float特判；E3与lower共享一致合同，仍畸形任意候选拒绝、真正外部不支持winner拒绝。
+并发分域：模型代理仅E3 libraryimports/librarydata与lower modelbindings/librarydata/libraryexit及必要typed ABI辅助；CRC代理仅codec.h/run.c的CRC存储解析与专属测试；主代理负责memory.c/libunisacc协议64位字段与正式候选/TDD/生成物/PRD；另代理私有探索并交叉构建官方Windows libffi依赖，不动主树或安装全局工具。Windows宿主OS映射与六目标原生资格仍待，不能把COFF构造当实机完成。所有步骤≤55s、独立日志、直接main源域，禁止共享UA。
+
+R10宿主64位/OS机械适配决定：memory map extent与资源序列化使用显式int64_t/uint64_t/uintptr_t，context process两个槽每个8B，不再用宿主long装地址。native _WIN32使用SDK VirtualAlloc/VirtualProtect/FlushInstructionCache/VirtualFree；__UNISA__产物保留既有intrinsic OS转发，不能把宿主C编译与自举子集ABI混为一体。代码保护/释放封装仅OS机制，不读tape/source/选择ABI；库软栈用本机pagesize+guard/reserve/commit。guest mmap Windows语义另按明确contract实现，不将POSIX partial unmap冒充VirtualFree。lower .librarycall系E3已typed证明的固定GP声明动作，本片不扩大tape协议，低层不虚构按名验证（指令只携带寄存器）；raw未可信tape的完整ABI检验仍不宣称。
+
+Windows实际SDK编译暴露宿主名字冲突BYTE（SDK类型）、OUT（SDK注解宏）、OpenFile（SDK函数）。最小修正将本机opcode C枚举名字改CORE_BYTE/CORE_OUT（数值/网络动作文本不变，layout checker同步），宿主内部登记名UsOpenFile；不靠伪造SDK头或隐藏错误构建。仅属于通用执行机制C命名隔离。
+
+Windows新SDK快照两ISA正式DLL已真实C/桥compile与link成功，无隔离hack、各导出17 API；尚无Windows运行。统一公开头属性：DLL构建LIBUNISACC_BUILD导出，消费者默认导入，static消费者LIBUNISACC_STATIC绕开dll属性；GCC POSIX仍默认visibility公开。先消除重复属性警告，不能把编译链接rc0当调用/SEH/FFI运行已通过。
+
+本片实证：CRC36记录（宿主CC、root候选编译、ASan/UBSan实际执行、高CRC与超范围包头、两Windows COFF）全部通过；固定64bit resource七向量及native reserve/commit/protect/release通过、两SDK COFF通过。新host/runtime消费旧d375模型的resolver原正例仍通过（未验证新priority模型），故下一完整候选须重新构造。Windows官方libffi v3.5.2固定源及两静态库/PE探针已交叉链接，不是Windows运行；ARM需显式FlushInstructionCache adapter且GNU汇编缺SEH unwind，保留为正式交付阻挡。完整scope/hashes封存research/r10-crc-llp64-evidence.json、r10-memory-word64-evidence.json、r10-windows-libffi-evidence.json。源码优先模型E3 7010态1808324观察、lower1838态473948观察均全域net=table首验，原生新版组合TDD待完整包。

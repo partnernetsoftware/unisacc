@@ -192,7 +192,7 @@ int main(int argc, char **argv) {
         for (int j=argstart;j<argc;j++) runargs[j-argstart+1]=argv[j];
         runargs[count]=0;
         for (int j=0;j<=envn;j++) runargs[count+1+j]=process_environment(argc,argv,j);
-        resource_u64(process_argc,count); resource_u64(process_argv,(long)runargs);
+        resource_u64(process_argc,count); resource_u64(process_argv,(uintptr_t)runargs);
     }
     ARGRESOURCE(0,"\0cli/defines",defs);
     ARGRESOURCE(1,"\0cli/undefines",undefs);
@@ -257,7 +257,7 @@ int main(int argc, char **argv) {
         if (!twopass || strcmp(twopass,"1")) {
             unsigned char memory_capacity[8];
             memory_reserve(&mapping);
-            resource_u64(memory_text,(long)mapping.base);
+            resource_u64(memory_text,(uintptr_t)mapping.base);
             resource_u64(memory_capacity,mapping.reserved);
             cli[7].name=(const unsigned char *)"\0memory/text";cli[7].n=12;cli[7].data=memory_text;cli[7].len=8;
             cli[8].name=(const unsigned char *)"\0memory/reserve";cli[8].n=15;cli[8].data=memory_capacity;cli[8].len=8;
@@ -268,7 +268,7 @@ int main(int argc, char **argv) {
         rc=runroute(route,&first,src);
         if (!rc) {
             memory_image(&first,&plan);memory_map(&plan,&mapping);free(first.b);
-            resource_u64(memory_text,(long)mapping.base);resource_u64(memory_data,(long)(mapping.base+mapping.dataoff)
+            resource_u64(memory_text,(uintptr_t)mapping.base);resource_u64(memory_data,(uintptr_t)(mapping.base+mapping.dataoff)
 #ifdef __APPLE__
                 +32
 #endif
