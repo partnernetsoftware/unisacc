@@ -2633,3 +2633,14 @@ ARM已拒绝setmem literal0；x86当前表/网络却把字面0当reg index0(rax)
 
 ### R10 库签名、导出根与映射联动收片（2026-09-29）
 E3可选签名封装已验：默认固定314项全部equal，9类descriptor/坏资源/network-table全域通过。prune追加库公有根已验：24原始源码配置、5手写fixture及366坏metadata；宿主挂完整metadata，不筛公有名字。映射回调修复后，真实macOS arm64 main(argc=2)=39，malloc/free同context20轮仅一个池，next compile清空、context free后系统mach_vm_region确认地址不再映射。宿主解析/生命周期专项普通及ASan+UBSan通过。原先mincore错误地用rc判地址是否仍存在，已换为实际region边界查询，不能把该测试误判记作库泄漏。签名、函数调用ABI桥和公有根是可复用机制，但us_sym/host注入/完整签名、1000次及六平台库尚未全部闭合。
+
+
+### R10 无main模块与真实原生导出调用（2026-09-29）
+
+E3/lower新增声明的library/module资源：无main输入按模块编译，不生成进程启动；固定__init由宿主经脚本ABI每映射执行一次。us_sym以模型提供的USLSIG1签名构造真正系统ABI可调用指针，首片固定六个以内整数/数据指针参数与整数/指针/void返回；FP、聚合、变参等保留描述并明确拒绝。返回与栈适配是声明ABI机制，函数选择、导出根与地址仍由模型给出。
+
+实际证据：macOS ARM四上下文的无main模块、初始化一次、状态保持、各宽参数、void/指针、exit37宿主存活及后续调用恢复通过；普通及ASan/UBSan格式边界测试通过。含main模块还实测同一映射更新argc/argv、保存的导出指针继续有效；lower通过library/process稳定两槽地址读取当次参数，不固化重定位时的值。Mac ARM/Rosetta及Linux ARM的限定原生typed导出测试另存精确快照身份，Linux x86仅跨汇编、Windows桥尚未实现。
+
+本批默认E3固定清单与warnings/errors模式补验进行中；根.com仍为上一构建身份，需要新冻结重建，不把这些专项标成最新根产物全绿。符号注入与脚本调用宿主、双向回调、扩展ABI、1000次无增长、六目标库与最终签名发布均未闭合。本轮并发：默认模型回归、原生ABI与typed注入声明存储、E3注入符号解析δ三个不相交域；宿主仅存借用地址和显式类型描述，解析决策继续在δ，禁止宿主解析C或假装未定义函数已定义。
+
+本批证据封存：[模块构造](research/r10-librarymodule-construct.json)、[动态参数六目标构造](research/r10-libraryprocess-construct.json)、[当前宿主实际调用](research/r10-librarymodule-native.json)。门禁新增lib-format/lib-native-exports/lib-module-exports，分别检查格式与生命周期、含main导出保持、无main模块；最终候选仍须实际执行这些项。

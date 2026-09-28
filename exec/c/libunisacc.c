@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include "libraryexports.h"
+#include "librarycall.h"
 
 typedef struct Allocation { void *p; struct Allocation *next; } Allocation;
 typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } GuestMap;
@@ -24,10 +26,14 @@ struct us_context {
     size_t tape_length, definitions_length;
     unsigned char *signatures; size_t signatures_length;
     int input_is_tape;
-    unsigned char *image; long image_size, image_dataoff; int image_entry;
+    unsigned char *image; long image_size, image_dataoff, image_text_size; int image_entry;
+    us_exports exports;
+    unsigned char *call_stack; size_t call_stack_size;
+    int initialised, call_exited, call_exit_status, call_failed;
     Symbol *symbols; size_t symbol_count;
     GuestMap *guest_maps;
     int argc; char **argv;
+    long process_slots[2];
     char error[1024];
 };
 static _Thread_local us_context *active;
@@ -113,6 +119,8 @@ static void diagnostic(int status,const char *reason,int n,const void *errors) {
 #define API
 #endif
 static void discard_image(us_context *c) {
+    us_exports_clear(&c->exports);c->initialised=0;
+    if(c->call_stack){munmap(c->call_stack,c->call_stack_size);c->call_stack=0;c->call_stack_size=0;}
     while (c->guest_maps) {GuestMap *m=c->guest_maps;c->guest_maps=m->next;munmap(m->base,m->length);free(m);}
     if (c->image) {
 #ifdef _WIN32
@@ -208,7 +216,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
         package(c->package);
-        ResourceInput resources[4]; memset(resources,0,sizeof resources);
+        ResourceInput resources[5]; memset(resources,0,sizeof resources);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
         RI=resources; NRI=0;
         resources[NRI].name=(const unsigned char *)"\0cli/target"; resources[NRI].n=11;
@@ -224,6 +232,8 @@ API int us_compile(us_context *c,const char *target,int level) {
             resources[NRI].len=(int)strlen(c->include_path); NRI++;
         }
         resources[NRI].name=(const unsigned char *)"\0library/symbols";resources[NRI].n=16;
+        resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
+        resources[NRI].name=(const unsigned char *)"\0library/module";resources[NRI].n=15;
         resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
         Buf input={0};
         char route[128];
@@ -383,14 +393,14 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        ResourceInput actual[13];unsigned char scalar[12][8];memset(actual,0,sizeof actual);
+        ResourceInput actual[15];unsigned char scalar[14][8];memset(actual,0,sizeof actual);
         const char *names[]={"\0process/argc","\0process/argv","\0memory/text","\0memory/reserve",
-            "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3"};
+            "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process"};
         long vals[]={c->argc,(long)c->argv,(long)mapping.base,mapping.reserved,1,(long)library_exit,(long)library_mmap,(long)library_munmap,
-            host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3)};
-        int lengths[]={13,13,12,15,16,13,13,15,13,13,13,13};
-        for (int i=0;i<12;i++) {resource_u64(scalar[i],vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=8;}
-        RI=actual;NRI=12;
+            host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3),1,(long)c->process_slots};
+        int lengths[]={13,13,12,15,16,13,13,15,13,13,13,13,15,16};
+        for (int i=0;i<14;i++) {resource_u64(scalar[i],vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=8;}
+        RI=actual;NRI=14;
         if (c->signatures) {
             actual[NRI].name=(const unsigned char *)"\0library/signatures";actual[NRI].n=19;
             actual[NRI].data=c->signatures;actual[NRI].len=(int)c->signatures_length;NRI++;
@@ -402,13 +412,72 @@ API int us_relocate(us_context *c) {
         if (!rc) {snprintf(route,sizeof route,"%s/memory",c->target);rc=runroute(route,&input,"library.tape");}
         if (!rc) {
             MemoryImage m;library_image(c,&input,&m,&mapping);memory_commit(&m,&mapping);
-            c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;
+            c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;c->image_text_size=m.text;
             memcpy(mapping.base,input.b+40,m.text);memcpy(mapping.base+mapping.dataoff,input.b+40+m.text,m.stored);
             __builtin___clear_cache((char *)mapping.base,(char *)mapping.base+m.text);
             if (mprotect(mapping.base,(size_t)mapping.dataoff,PROT_READ|PROT_EXEC)) __us_panic("cannot protect library code");
+            if(c->signatures && us_exports_load(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
         }
     } else rc=1;
     cleanup();active=0;RI=0;NRI=0;if (rc) discard_image(c);return rc;
+}
+/* Addresses are model-declared symbols; native callability comes only from
+   the soft-stack adapter and an independently validated ABI declaration. */
+static int library_lookup(void *owner,const char *name,const void **raw,int *kind) {
+    us_context *c=owner;
+    for(size_t i=0;i<c->symbol_count;i++) if(!strcmp(c->symbols[i].name,name)) {
+        Symbol *s=&c->symbols[i];
+        if(!s->kind && (s->address<(uintptr_t)c->image || s->address>=(uintptr_t)c->image+(uintptr_t)c->image_text_size)) return 1;
+        *raw=(const void *)s->address;*kind=s->kind;return 0;
+    }
+    return 1;
+}
+static int library_stack(us_context *c) {
+    if(c->call_stack)return 0;
+    long page=sysconf(_SC_PAGESIZE);size_t usable=16U*1024U*1024U;
+    if(page<=0 || (size_t)page>SIZE_MAX/2)return error(c,"invalid host page size");
+    size_t total=usable+2*(size_t)page;
+    unsigned char *p=mmap(0,total,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+    if(p==MAP_FAILED)return error(c,"cannot reserve library call stack");
+    if(mprotect(p+page,usable,PROT_READ|PROT_WRITE)){munmap(p,total);return error(c,"cannot commit library call stack");}
+    c->call_stack=p;c->call_stack_size=total;return 0;
+}
+static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {
+    us_context *c=owner;
+    if(c){c->call_failed=1;c->call_exited=0;c->call_exit_status=0;}
+    if(!c || !c->image || !raw || !slots || !result)return error(c,"invalid library call");
+    if(active)return error(c,"recursive script execution not yet supported");
+    if(library_stack(c))return 1;
+    c->error[0]=0;c->call_exited=0;c->call_exit_status=0;*result=0;
+    active=c;script_status=0;
+    if(!setjmp(script_return)) {
+        size_t page=(size_t)sysconf(_SC_PAGESIZE);
+        *result=us_library_bridge_raw(raw,slots,c->call_stack+c->call_stack_size-page);
+    } else {
+        c->call_exited=1;c->call_exit_status=script_status;
+        snprintf(c->error,sizeof c->error,"script exited with status %d",script_status);
+    }
+    active=0;c->call_failed=c->call_exited ? 1 : 0;return c->call_failed;
+}
+static int library_initialise(us_context *c) {
+    if(c->initialised==1)return 0;
+    if(c->initialised)return error(c,"library initialisation failed or reentered");
+    const void *raw=0;int kind=-1;uint64_t args[6]={0},ignored=0;
+    if(library_lookup(c,"__init",&raw,&kind) || kind)return error(c,"missing model library initialisation entry");
+    c->initialised=2;
+    if(library_invoke(c,raw,args,&ignored)){c->initialised=-1;return 1;}
+    c->initialised=1;return 0;
+}
+API void *us_sym(us_context *c,const char *name) {
+    if(!c || !name || !c->image){error(c,"library is not relocated");return 0;}
+    if(library_initialise(c))return 0;
+    c->error[0]=0;
+    return us_exports_symbol(&c->exports,name,c,library_lookup,library_invoke,c->error,sizeof c->error);
+}
+API int us_call_status(const us_context *c,int *exit_status) {
+    if(!c)return 1;
+    if(exit_status)*exit_status=c->call_exit_status;
+    return c->call_failed;
 }
 API int us_run_main(us_context *c,int argc,const char *const *argv,int *status) {
     if (!c || !status || argc<0 || (argc && !argv)) return error(c,"invalid main arguments");
@@ -420,11 +489,14 @@ API int us_run_main(us_context *c,int argc,const char *const *argv,int *status) 
         }
     }
     for (int i=0;i<c->argc;i++) free(c->argv[i]);free(c->argv);c->argv=args;c->argc=argc;
-    int rc=us_relocate(c);if (rc) return rc;
-    active=c;script_status=0;
-    if (!setjmp(script_return)) {
-        int (*entry)(long,long)=(int (*)(long,long))(c->image+c->image_entry);
-        script_status=entry(0,0);
-    }
-    *status=script_status;active=0;return 0;
+    c->process_slots[0]=argc;c->process_slots[1]=(long)args;
+    int rc=c->image ? 0 : us_relocate(c);if(rc)return rc;
+    if(library_initialise(c))return 1;
+    const void *raw=0;int kind=-1;
+    if(library_lookup(c,"main",&raw,&kind) || kind)return error(c,"no main function in library");
+    uint64_t slots[6]={(uint64_t)argc,(uintptr_t)c->argv,0,0,0,0},result=0;
+    rc=library_invoke(c,raw,slots,&result);
+    if(rc && !c->call_exited)return rc;
+    *status=c->call_exited ? c->call_exit_status : (int)result;
+    c->error[0]=0;return 0;
 }

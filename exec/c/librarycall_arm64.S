@@ -1,9 +1,20 @@
-/* macOS AArch64 host ABI -> script x0..x5 / x7 software-stack ABI.
+/* macOS/Linux AAPCS64 host ABI -> script x0..x5 / x7 software-stack ABI.
    Hardware SP remains a platform stack, always 16-aligned. */
+#if defined(_WIN32)
+#error "librarycall bridge does not implement the Windows host ABI"
+#endif
+#if defined(__APPLE__)
+#define BRIDGE_SYMBOL _us_library_bridge_raw
+#else
+#define BRIDGE_SYMBOL us_library_bridge_raw
+#endif
 .text
 .p2align 2
-.globl _us_library_bridge_raw
-_us_library_bridge_raw:
+.globl BRIDGE_SYMBOL
+#if !defined(__APPLE__)
+.type BRIDGE_SYMBOL, %function
+#endif
+BRIDGE_SYMBOL:
     sub sp, sp, #160
     stp x19, x20, [sp, #0]
     stp x21, x22, [sp, #16]
@@ -38,3 +49,8 @@ Llibrary_return:
     ldp x29, x30, [sp, #80]
     add sp, sp, #160
     ret
+
+#if !defined(__APPLE__)
+.size BRIDGE_SYMBOL, .-BRIDGE_SYMBOL
+.section .note.GNU-stack,"",%progbits
+#endif

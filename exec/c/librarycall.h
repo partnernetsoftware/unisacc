@@ -17,7 +17,7 @@ uint64_t us_library_bridge_raw(const void *entry,const uint64_t args[6],void *so
 static inline int us_library_signature_supported(const us_library_signature *s) {
     unsigned i;
     if (!s || s->variadic || s->argument_count>6 ||
-        (s->result_kind!=US_LIBRARY_INTEGER && s->result_kind!=US_LIBRARY_POINTER)) return 0;
+        (s->result_kind!=0 && s->result_kind!=US_LIBRARY_INTEGER && s->result_kind!=US_LIBRARY_POINTER)) return 0;
     for (i=0;i<s->argument_count;i++)
         if (s->argument_kind[i]!=US_LIBRARY_INTEGER && s->argument_kind[i]!=US_LIBRARY_POINTER) return 0;
     return 1;

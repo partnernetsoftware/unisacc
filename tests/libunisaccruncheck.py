@@ -9,7 +9,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='unisacc-library-run-') as name:
   td=pathlib.Path(name);runtime=td/'exec/c';runtime.mkdir(parents=True);(td/'src').mkdir()
   for f in (ROOT/'exec/c').iterdir():
-   if f.is_file() and f.suffix in ('.h','.c'):shutil.copy2(f,runtime/f.name)
+   if f.is_file() and f.suffix in ('.h','.c','.S'):shutil.copy2(f,runtime/f.name)
   shutil.copy2(ROOT/'src/host_dl.h',td/'src/host_dl.h')
   out=td/'library.dylib'
   wrapper=td/'test-library.c'
@@ -29,7 +29,7 @@ __attribute__((visibility("default"))) int test_mapped(long p){
 __attribute__((visibility("default"))) int test_mapped(long p){unsigned char v;return !mincore((void*)p,(size_t)sysconf(_SC_PAGESIZE),&v);}
 #endif
 ''')
-  subprocess.run(['cc','-std=c11','-O2','-fvisibility=hidden','-shared','-fPIC',str(wrapper),'-o',str(out)],check=True,timeout=30)
+  subprocess.run(['cc','-std=c11','-O2','-fvisibility=hidden','-shared','-fPIC',str(wrapper),str(runtime/('librarycall_'+('arm64' if __import__('platform').machine() in ('arm64','aarch64') else 'x86_64')+'.S')),'-lffi','-o',str(out)],check=True,timeout=30)
   L=ctypes.CDLL(str(out));L.us_new.argtypes=[ctypes.c_char_p];L.us_new.restype=ctypes.c_void_p
   for n,args in [('us_add_source',[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_char_p]),('us_compile',[ctypes.c_void_p,ctypes.c_char_p,ctypes.c_int]),('us_run_main',[ctypes.c_void_p,ctypes.c_int,ctypes.POINTER(ctypes.c_char_p),ctypes.POINTER(ctypes.c_int)])]:getattr(L,n).argtypes=args
   L.us_error.argtypes=[ctypes.c_void_p];L.us_error.restype=ctypes.c_char_p;L.us_free.argtypes=[ctypes.c_void_p]

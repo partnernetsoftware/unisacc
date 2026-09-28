@@ -205,5 +205,7 @@ def install(E, arch="x86_64", os_="lnx"):
             {name: E.O(value) for name,value in facts.items()})
     from libraryexit import install as install_libraryexit
     install_libraryexit(E, os_, regmap, SYSA)
+    from librarymodule import install as install_librarymodule
+    install_librarymodule(E, regmap)
     install_rules(g, Path(__file__).parent, 'code-shell',
                   sequences={'reject': E.rej('not covered: '+os_+'/'+arch+' lowering')}, section='exit')

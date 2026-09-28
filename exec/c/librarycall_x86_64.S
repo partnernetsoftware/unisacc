@@ -1,9 +1,20 @@
-/* macOS SysV host ABI -> script rax,rdi,rsi,rdx,rcx,r8 / rsp ABI.
+/* macOS/Linux SysV host ABI -> script rax,rdi,rsi,rdx,rcx,r8 / rsp ABI.
    The host SP is saved in a stack sentinel, not a register the script may use. */
+#if defined(_WIN32)
+#error "librarycall bridge does not implement the Windows host ABI"
+#endif
+#if defined(__APPLE__)
+#define BRIDGE_SYMBOL _us_library_bridge_raw
+#else
+#define BRIDGE_SYMBOL us_library_bridge_raw
+#endif
 .text
 .p2align 4
-.globl _us_library_bridge_raw
-_us_library_bridge_raw:
+.globl BRIDGE_SYMBOL
+#if !defined(__APPLE__)
+.type BRIDGE_SYMBOL, @function
+#endif
+BRIDGE_SYMBOL:
     pushq %rbp
     pushq %rbx
     pushq %r12
@@ -31,3 +42,8 @@ _us_library_bridge_raw:
     popq %rbx
     popq %rbp
     retq
+
+#if !defined(__APPLE__)
+.size BRIDGE_SYMBOL, .-BRIDGE_SYMBOL
+.section .note.GNU-stack,"",@progbits
+#endif

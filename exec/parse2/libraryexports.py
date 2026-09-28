@@ -119,4 +119,10 @@ def install(E,P,b,start,integers):
     for blob in ('lx_tape','lx_metadata'):p.a(('INPUSH',blob),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',))
     p.goto('LX.accept')
     rules(g,Path(__file__).parent,'libraryexports',section='write')
+    from librarymodule import install as module_install
+    module_start=module_install(E,P,start)
+    mode,row=g.st['LX.startok']
+    for k,(n,q) in list(row.items()):
+        assert n==start
+        row[k]=(module_start,q)
     return 'LX.start'
