@@ -2719,3 +2719,6 @@ fa9b452源（正式库builder+原生生命周期checker）重新构造shared/六
 数据native首验rc139已定位：E3 tape正确，但lower LBD.emit调用旧PRN的32位十进制运算，真实0x105e46de8借用地址被写成98856424，原生load崩溃。原lower正例仅2147487744没有覆盖跨2^32地址。修复为该地址路径独立64位无符号十进制规则（A64I udiv/urem，C64U判零），增加2^32+4096、真实高地址及INT64_MAX等精确立即数预期；不改旧布局打印的语义。失败四门禁日志保留，根产物不更新直到真实读写通过。
 
 数据注入完整候选26def90来源核验通过。12受影响门禁19秒：lib-data/functions/context/exports/static+dynamic/Windows桥/kernel/docs及com-run12/12、com-c9957/57全部rc0；lib-lifecycle实际rc1，native300暖机+1000轮RSS范围2,244,608 B（阈值524,288），live/reserved稳定。正例和失败一起封存research/r10-data-native-candidate.json，不挑重跑至绿、不放宽门禁；根仅同步未发布开发候选，后续需定位驻留增长。lower新增跨2^32/INT64_MAX打印精确预期通过，见research/r10-data-lower-print64-evidence.json。
+
+### R10 resolver下一片决定（设计，未实现）
+采用冻结全候选USBIND2方案：us_declare_import显式可信函数/数据ABI，us_load_library持有RTLD_NOW|RTLD_LOCAL句柄；C在compile开始按已声明名字机械枚举注入/RTLD_DEFAULT/所有owned handle地址，全部候选作为同一不可变resource留到relocate，C不挑胜者、不解析C。USBIND2在origin后加LE64 ordinal，E3/lower共用有限规则按origin/ordinal择一，之后核源码类型；源定义仍优先，低优先级unsupported候选不否定合法winner、坏最高候选不fallback。旧USBIND1/USLTAPE1不变，无需动态fetchhook/三段封装。dlsym不能证明ABI/对象extent/writable，声明是信任输入；未声明的外部名明确拒绝，不宣称自动类型发现。实现与native优先级/错误恢复/所有权TDD仍待；报告research/r10-resolver-design.md只属设计。
