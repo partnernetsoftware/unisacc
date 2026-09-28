@@ -66,7 +66,10 @@ def install(E, fail='DEAD'):
     P('MC.typedsupported').call('MC.byte').branch({0:'MC.bound',1:'MC.typedhasplan'},'MC.fail',[('RLD','mc_byte')])
     P('MC.typedhasplan').branch({1:'MC.fail'},'MC.typedissupported',[('C64U','mc_plan','mc_zero')])
     P('MC.typedissupported').branch({2:'MC.bound'},'MC.typedfixedsupported',[('RLD','mc_format')])
-    P('MC.typedfixedsupported').branch({1:'MC.bound'},'MC.fail',[('CMPI','ms_support',1)])
+    from modelinput import u64
+    u64(E,'MC.callablecap',b'\0library/callables','mc_callablecap','mc_callablepresent','MC.fail')
+    P('MC.typedfixedsupported').branch({1:'MC.bound'},'MC.typedcallablecap',[('CMPI','ms_support',1)])
+    P('MC.typedcallablecap').call('MC.callablecap').branch({1:'MC.bound'},'MC.fail',[('CMPI','mc_callablecap',1)])
     P('MC.argkind').branch({1:'MC.dataargc'},'MC.descinit',[('CMPI','mc_kind',1)])
     eq('MC.dataargc','mc_argc','mc_zero','MC.datavar','MC.fail')
     eq('MC.datavar','mc_variadic','mc_zero','MC.descinit','MC.fail')

@@ -51,16 +51,18 @@ static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t addres
 #ifdef UNISACC_LIBRARYNATIVE_H
 #include "librarycallplans.h"
 static void us_binding_owned_clear(us_binding *x){if(!x)return;free(x->name);free(x->args);free(x->signature);if(x->typed){us_exports_clear(x->typed);free(x->typed);}memset(x,0,sizeof *x);}
-static int us_bindings_add_function_typed(us_bindings *b,const char *name,uintptr_t address,const void *signature,size_t length,char *error,size_t cap){
+static int us_bindings_add_function_typed_capability(us_bindings *b,const char *name,uintptr_t address,const void *signature,size_t length,int bridge,char *error,size_t cap){
  if(!b||!us_binding_name(name)||!address||!signature||length<16||memcmp(signature,"USLSIG2\n",8)||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
  us_binding x={0};x.typed_clear=us_exports_clear;x.typed=calloc(1,sizeof *x.typed);if(!x.typed)return us_binding_error(error,cap,"typed declaration allocation failed");
- if(us_exports_load(x.typed,signature,length,error,cap)||x.typed->count!=1)goto bad;
+ if(us_exports_load_capability(x.typed,signature,length,bridge,error,cap)||x.typed->count!=1)goto bad;
  us_export *f=x.typed->items;if(strcmp(name,f->name)||f->linkage||f->defined!=1)goto bad;
  x.name=malloc(strlen(name)+1);x.signature=malloc(length);if(!x.name||!x.signature)goto bad;
- strcpy(x.name,name);memcpy(x.signature,signature,length);x.signature_length=length;x.address=address;x.count=(size_t)f->count;x.variadic=f->variadic;x.supported=us_export_supported(f);
+ strcpy(x.name,name);memcpy(x.signature,signature,length);x.signature_length=length;x.address=address;x.count=(size_t)f->count;x.variadic=f->variadic;x.supported=bridge && us_export_has_callbacks(f) ? us_export_bridge_supported(f):us_export_supported(f);
  if(us_binding_append(b,&x,error,cap))goto bad;return 0;
  bad:us_binding_owned_clear(&x);return us_binding_error(error,cap,"invalid typed function declaration");
 }
+static int us_bindings_add_function_typed(us_bindings *b,const char *name,uintptr_t addr,const void *sig,size_t n,char *e,size_t cap){return us_bindings_add_function_typed_capability(b,name,addr,sig,n,0,e,cap);}
+static int us_bindings_add_function_typed_bridge(us_bindings *b,const char *name,uintptr_t addr,const void *sig,size_t n,char *e,size_t cap){return us_bindings_add_function_typed_capability(b,name,addr,sig,n,1,e,cap);}
 /* Binding declarations obey the same recursive callback ABI equality as plans.
    IDs/sharing/support are not ABI; nested arguments/results/mode are. */
 static int us_binding_graph_equal(const us_export_type *a,const us_export_type *b){

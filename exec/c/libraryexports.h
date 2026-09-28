@@ -217,8 +217,49 @@ static ffi_type *us_export_native(us_export_type *t,int result) {
     if(bad || t->native.size!=t->width || t->native.alignment!=t->alignment)return NULL;
     return &t->native;
 }
+/* Capability-only structural check. The registry builds and verifies its own
+   ffi layouts; no callback ffi pointer is installed in these borrowed graphs. */
+typedef struct us_export_bridge_check {const us_export_signature *seen[1024];size_t signatures,nodes;} us_export_bridge_check;
+static int us_export_bridge_type(const us_export_type *,int,unsigned,us_export_bridge_check *);
+static int us_export_bridge_signature(const us_export_signature *s,us_export_bridge_check *c){
+    if(!s||s->variadic||s->mode>1||s->count>1024||s->stored!=s->count||(!s->mode&&s->count>6)||(s->count&&!s->argtypes))return 0;
+    for(size_t i=0;i<c->signatures;i++)if(c->seen[i]==s)return 1;
+    if(c->signatures>=1024)return 0;c->seen[c->signatures++]=s;
+    if(!us_export_bridge_type(&s->result,1,1,c))return 0;
+    for(size_t i=0;i<(size_t)s->count;i++)if(!us_export_bridge_type(&s->argtypes[i],0,1,c))return 0;
+    return 1;
+}
+static int us_export_bridge_type(const us_export_type *t,int result,unsigned depth,us_export_bridge_check *c){
+    if(!t||depth>32||++c->nodes>16384)return 0;
+    if(t->kind==4)return t->depth==1&&t->width==8&&t->alignment==8&&!t->uns&&t->tag==4&&t->signature&&us_export_bridge_signature(t->signature,c);
+    if(t->tag==0){ffi_type *f=us_export_ffitype(t,result);return f && (t->kind==0 || (f->size==t->width&&f->alignment==t->alignment));}
+    if(t->kind!=5||t->depth||(t->tag!=1&&t->tag!=3))return 0;
+    if(t->tag==3)return t->count&&t->count<=16384&&t->element&&t->stride==t->element->width&&t->width==t->count*t->stride&&t->alignment==t->element->alignment&&us_export_bridge_type(t->element,0,depth+1,c);
+    if(!t->nmembers||t->nmembers>64||!t->members)return 0;
+    uint64_t offset=0,alignment=1;
+    for(size_t i=0;i<(size_t)t->nmembers;i++){
+        const us_export_member *m=t->members+i;const us_export_type *v=m->type;
+        if(m->bit_width||m->bit_offset||!us_export_bridge_type(v,0,depth+1,c)||!v->alignment)return 0;
+        offset=(offset+v->alignment-1)&~(v->alignment-1);
+        if(m->offset!=offset||offset>t->width||v->width>t->width-offset)return 0;
+        offset+=v->width;if(v->alignment>alignment)alignment=v->alignment;
+    }
+    return t->alignment==alignment&&t->width==((offset+alignment-1)&~(alignment-1));
+}
+static int us_export_bridge_supported(const us_export *x){
+    if(!x||x->version!=2||x->linkage||x->defined!=1||x->variadic||x->count>1024||x->stored!=x->count)return 0;
+    us_export_bridge_check c={0};
+    if(!us_export_bridge_type(&x->result,1,1,&c))return 0;
+    for(size_t i=0;i<(size_t)x->count;i++)if(!us_export_bridge_type(us_export_arg(x,i),0,1,&c))return 0;
+    return 1;
+}
+static int us_export_has_callbacks(const us_export *x){
+    if(us_export_type_has_callback(&x->result))return 1;
+    for(size_t i=0;i<(size_t)x->count;i++)if(us_export_type_has_callback(us_export_arg(x,i)))return 1;
+    return 0;
+}
 /* Decode atomically: the old set is unchanged on every failure. */
-static int us_exports_load(us_exports *set,const void *data,size_t length,char *error,size_t cap) {
+static int us_exports_load_capability(us_exports *set,const void *data,size_t length,int bridge,char *error,size_t cap) {
     const unsigned char *bytes=data;size_t at=8;uint64_t count;us_exports tmp={0};unsigned version;
     if(!set || !bytes || length<16)goto bad;
     version=!memcmp(bytes,"USLSIG2\n",8) ? 2 : !memcmp(bytes,"USLSIG1\n",8) ? 1 : 0;
@@ -238,7 +279,10 @@ static int us_exports_load(us_exports *set,const void *data,size_t length,char *
                us_export_descriptor2(bytes,length,&at,&x->result,1,&nodes,&x->graph)||us_export_u64(bytes,length,&at,&x->stored)||x->stored!=x->count)goto bad;
             x->argtypes=calloc(x->stored ? (size_t)x->stored:1,sizeof *x->argtypes);if(!x->argtypes)goto bad;
             for(size_t j=0;j<(size_t)x->stored;j++)if(us_export_descriptor2(bytes,length,&at,&x->argtypes[j],1,&nodes,&x->graph))goto bad;
-            if(!us_export_graph_support_valid(&x->graph))goto bad;
+            if(!bridge && !us_export_graph_support_valid(&x->graph))goto bad;
+            if(bridge)for(size_t j=0;j<x->graph.count;j++)if(x->graph.signatures[j]->supported){
+                us_export_bridge_check check={0};if(!us_export_bridge_signature(x->graph.signatures[j],&check))goto bad;
+            }
             x->result.ffi=us_export_native(&x->result,1);
             for(size_t j=0;j<(size_t)x->stored;j++)x->argtypes[j].ffi=us_export_native(&x->argtypes[j],0);
         }else{
@@ -246,11 +290,13 @@ static int us_exports_load(us_exports *set,const void *data,size_t length,char *
             for(size_t j=0;j<(size_t)x->stored;j++)if(us_export_descriptor(bytes,length,&at,&x->args[j]))goto bad;
         }
         if(at>=length || (x->supported=bytes[at++])>1)goto bad;
-        if((version==2 && at-record_start>16777216) || (x->supported && !us_export_supported(x)))goto bad;
+        if((version==2 && at-record_start>16777216) || (x->supported && !(bridge && version==2 ? us_export_bridge_supported(x):us_export_supported(x))))goto bad;
     }
     if(at!=length)goto bad;us_exports_clear(set);*set=tmp;return 0;
 bad:us_exports_clear(&tmp);return us_export_error(error,cap,"malformed library signature declaration");
 }
+static int us_exports_load(us_exports *s,const void *b,size_t n,char *e,size_t cap){return us_exports_load_capability(s,b,n,0,e,cap);}
+static int us_exports_load_bridge(us_exports *s,const void *b,size_t n,char *e,size_t cap){return us_exports_load_capability(s,b,n,1,e,cap);}
 static uint64_t us_export_slot(const us_export_type *t,const void *p) {
     if(t->kind==3){uint64_t v=0;memcpy(&v,p,(size_t)t->width);return v;}
     if(t->kind==2){void *v;memcpy(&v,p,sizeof v);return (uintptr_t)v;}

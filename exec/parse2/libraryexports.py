@@ -141,7 +141,9 @@ def install(E,P,b,start,integers):
     P('LX.calltype').a(('LDX','t','lx_callindex',PARAMDEPTH),('ALUI','mul','t','t',4096),('LDX','lx_callbase','lx_callindex',PARAMBASE),('ALU','add','t','t','lx_callbase'),('CMPI','t',0)).goto('CL.signature')
     from libraryvariadic import install as variadic_install
     variadic_install(E,P,b,integers)
-    module_start=module_install(E,P,imports_start)
+    from librarycallables import install as callable_install
+    callable_start=callable_install(E,P,b,imports_start)
+    module_start=module_install(E,P,callable_start)
     mode,row=g.st['LX.startok']
     for k,(n,q) in list(row.items()):
         assert n==start

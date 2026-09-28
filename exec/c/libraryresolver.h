@@ -56,19 +56,23 @@ static int us_resolver_accept_injection(const us_resolver*r,const char*name,unsi
  return equal?0:us_binding_error(error,cap,"injected and import declarations disagree");
 }
 #ifdef UNISACC_LIBRARYNATIVE_H
-static int us_resolver_declare_typed(us_resolver*r,const us_bindings*injected,const char*name,const void*sig,size_t length,char*error,size_t cap){
+static int us_resolver_declare_typed_capability(us_resolver*r,const us_bindings*injected,const char*name,const void*sig,size_t length,int bridge,char*error,size_t cap){
  if(!r||!us_binding_name(name)||r->generation==UINT64_MAX||us_resolver_find(&r->declarations,name)||r->declarations.count>=US_RESOLVER_NAMES)return us_binding_error(error,cap,"invalid or duplicate typed import");
- us_bindings temp={0};if(us_bindings_add_function_typed(&temp,name,1,sig,length,error,cap))return 1;temp.items[0].address=0;
+ us_bindings temp={0};if(us_bindings_add_function_typed_capability(&temp,name,1,sig,length,bridge,error,cap))return 1;temp.items[0].address=0;
  const us_binding *x=us_resolver_find(injected,name);
  if(x&&!us_resolver_declaration_equal(x,temp.items)){us_bindings_clear(&temp);return us_binding_error(error,cap,"injected and import declarations disagree");}
  if(us_binding_append(&r->declarations,temp.items,error,cap)){us_bindings_clear(&temp);return 1;}free(temp.items);r->generation++;return 0;
 }
-static int us_resolver_accept_injection_typed(const us_resolver*r,const char*name,const void*sig,size_t length,char*error,size_t cap){
+static int us_resolver_declare_typed(us_resolver*r,const us_bindings*injected,const char*name,const void*sig,size_t length,char*error,size_t cap){return us_resolver_declare_typed_capability(r,injected,name,sig,length,0,error,cap);}
+static int us_resolver_declare_typed_bridge(us_resolver*r,const us_bindings*injected,const char*name,const void*sig,size_t length,char*error,size_t cap){return us_resolver_declare_typed_capability(r,injected,name,sig,length,1,error,cap);}
+static int us_resolver_accept_injection_typed_capability(const us_resolver*r,const char*name,const void*sig,size_t length,int bridge,char*error,size_t cap){
  if(!r||!name||r->generation==UINT64_MAX)return us_binding_error(error,cap,"invalid typed injection");
- us_bindings temp={0};if(us_bindings_add_function_typed(&temp,name,1,sig,length,error,cap))return 1;
+ us_bindings temp={0};if(us_bindings_add_function_typed_capability(&temp,name,1,sig,length,bridge,error,cap))return 1;
  const us_binding*x=us_resolver_find(&r->declarations,name);int equal=!x||us_resolver_declaration_equal(x,temp.items);us_bindings_clear(&temp);
  return equal?0:us_binding_error(error,cap,"injected and import declarations disagree");
 }
+static int us_resolver_accept_injection_typed(const us_resolver*r,const char*name,const void*sig,size_t length,char*error,size_t cap){return us_resolver_accept_injection_typed_capability(r,name,sig,length,0,error,cap);}
+static int us_resolver_accept_injection_typed_bridge(const us_resolver*r,const char*name,const void*sig,size_t length,char*error,size_t cap){return us_resolver_accept_injection_typed_capability(r,name,sig,length,1,error,cap);}
 #endif
 static int us_resolver_load(us_resolver*r,const char*path,char*error,size_t cap){
  if(!r||!path||!*path||r->generation==UINT64_MAX)return us_binding_error(error,cap,"invalid library path");
@@ -119,14 +123,17 @@ static int us_resolver_process(const us_resolver*r,HANDLE snapshot,const char*na
 }
 #endif
 #ifdef UNISACC_LIBRARYNATIVE_H
-static int us_resolver_candidate3_extended(us_resolver_bytes*b,const us_binding*decl,uintptr_t address,unsigned origin,uint64_t ordinal,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,char*error,size_t cap){
+static int us_resolver_candidate3_extended_capability(us_resolver_bytes*b,const us_binding*decl,uintptr_t address,unsigned origin,uint64_t ordinal,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,int bridge,char*error,size_t cap){
  unsigned char *v=NULL;size_t payload;uint64_t handle=0;unsigned format=1;
  if(decl->typed){
   if(decl->variadic && templates){
    format=2;dispatcher=variadic_dispatcher;
    if(!dispatcher)return us_binding_error(error,cap,"missing variadic dispatcher");
-   if(us_native_template_add(templates,address,decl->signature,decl->signature_length,&handle,error,cap))return 1;
-  }else if(us_native_plan_add(plans,address,decl->signature,decl->signature_length,&handle,error,cap))return 1;
+   /* Keep unsupported variadic callback candidates visible for model source
+      priority; fixed callable capability does not activate variadic templates. */
+   if(!(bridge && us_export_has_callbacks(decl->typed->items)) &&
+      us_native_template_add(templates,address,decl->signature,decl->signature_length,&handle,error,cap))return 1;
+  }else if(us_native_plan_add_call_capability(plans,address,decl->signature,decl->signature_length,0,0,bridge,&handle,error,cap))return 1;
   if(!dispatcher)return us_binding_error(error,cap,"missing typed dispatcher");
   payload=62+strlen(decl->name)+decl->signature_length;
   v=malloc(payload);if(!v)return us_binding_error(error,cap,"resolver wire allocation failed");size_t at=0,n=strlen(decl->name);
@@ -148,6 +155,8 @@ static int us_resolver_candidate3_extended(us_resolver_bytes*b,const us_binding*
  unsigned char *p=realloc(b->p,b->n+8+payload);if(!p){free(v);return us_binding_error(error,cap,"resolver wire allocation failed");}
  b->p=p;us_binding_put64(p+b->n,payload);memcpy(p+b->n+8,v,payload);b->n+=8+payload;b->count++;free(v);return 0;
 }
+static int us_resolver_candidate3_extended(us_resolver_bytes*b,const us_binding*decl,uintptr_t address,unsigned origin,uint64_t ordinal,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,char*error,size_t cap){return us_resolver_candidate3_extended_capability(b,decl,address,origin,ordinal,dispatcher,variadic_dispatcher,plans,templates,0,error,cap);}
+static int us_resolver_candidate3_bridge(us_resolver_bytes*b,const us_binding*decl,uintptr_t address,unsigned origin,uint64_t ordinal,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,char*error,size_t cap){return us_resolver_candidate3_extended_capability(b,decl,address,origin,ordinal,dispatcher,variadic_dispatcher,plans,templates,1,error,cap);}
 #endif
 static int us_resolver_freeze(const us_resolver*r,const us_bindings*injected,unsigned char**out,size_t*length,char*error,size_t cap){
  if(!out||!length)return us_binding_error(error,cap,"invalid resolver output");*out=NULL;*length=0;
@@ -182,7 +191,7 @@ static int us_resolver_freeze(const us_resolver*r,const us_bindings*injected,uns
  if(rc){free(b.p);return rc;}us_binding_put64(b.p+8,b.count);*out=b.p;*length=b.n;return 0;
 }
 #ifdef UNISACC_LIBRARYNATIVE_H
-static int us_resolver_freeze_with_templates(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,unsigned char**out,size_t*length,char*error,size_t cap){
+static int us_resolver_freeze_with_templates_capability(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,unsigned char**out,size_t*length,int bridge,char*error,size_t cap){
  us_native_plans tmpplans={0};us_native_templates tmptemplates={0};
  if(!plans || plans->head || (templates&&templates->head))return us_binding_error(error,cap,"invalid native plan or template output");
  if(!out||!length)return us_binding_error(error,cap,"invalid resolver output");*out=NULL;*length=0;
@@ -199,15 +208,15 @@ static int us_resolver_freeze_with_templates(const us_resolver*r,const us_bindin
    const us_binding*decl=list->items+i;const us_binding*x=us_resolver_find(injected,decl->name);
    if(group&&x){if(!us_resolver_declaration_equal(x,decl)){rc=us_binding_error(error,cap,"injected and import declarations disagree");break;}continue;}
    if(++names>US_RESOLVER_NAMES){rc=us_binding_error(error,cap,"resolver name capacity exceeded");break;}
-   if(x)rc=us_resolver_candidate3_extended(&b,x,x->address,0,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);
+   if(x)rc=us_resolver_candidate3_extended_capability(&b,x,x->address,0,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,bridge,error,cap);
    if(rc)break;
 #ifdef _WIN32
    uintptr_t address=0;rc=us_resolver_process(r,snapshot,decl->name,&address,error,cap);
-   if(!rc&&address)rc=us_resolver_candidate3_extended(&b,decl,address,1,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);
-   for(size_t j=0;j<r->handle_count&&!rc;j++){FARPROC a=GetProcAddress((HMODULE)r->handles[j].handle,decl->name);if(a)rc=us_resolver_candidate3_extended(&b,decl,(uintptr_t)a,2,j+1,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);}
+   if(!rc&&address)rc=us_resolver_candidate3_extended_capability(&b,decl,address,1,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,bridge,error,cap);
+   for(size_t j=0;j<r->handle_count&&!rc;j++){FARPROC a=GetProcAddress((HMODULE)r->handles[j].handle,decl->name);if(a)rc=us_resolver_candidate3_extended_capability(&b,decl,(uintptr_t)a,2,j+1,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,bridge,error,cap);}
 #else
-   dlerror();void*a=dlsym(RTLD_DEFAULT,decl->name);const char*failure=dlerror();if(!failure)rc=us_resolver_candidate3_extended(&b,decl,(uintptr_t)a,1,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);
-   for(size_t j=0;j<r->handle_count&&!rc;j++){dlerror();a=dlsym(r->handles[j].handle,decl->name);failure=dlerror();if(!failure)rc=us_resolver_candidate3_extended(&b,decl,(uintptr_t)a,2,j+1,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);}
+   dlerror();void*a=dlsym(RTLD_DEFAULT,decl->name);const char*failure=dlerror();if(!failure)rc=us_resolver_candidate3_extended_capability(&b,decl,(uintptr_t)a,1,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,bridge,error,cap);
+   for(size_t j=0;j<r->handle_count&&!rc;j++){dlerror();a=dlsym(r->handles[j].handle,decl->name);failure=dlerror();if(!failure)rc=us_resolver_candidate3_extended_capability(&b,decl,(uintptr_t)a,2,j+1,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,bridge,error,cap);}
 #endif
   }
  }
@@ -217,6 +226,8 @@ static int us_resolver_freeze_with_templates(const us_resolver*r,const us_bindin
  if(rc){free(b.p);us_native_plans_clear(&tmpplans);us_native_templates_clear(&tmptemplates);return rc;}
  us_binding_put64(b.p+8,b.count);*plans=tmpplans;if(templates)*templates=tmptemplates;*out=b.p;*length=b.n;return 0;
 }
+static int us_resolver_freeze_with_templates(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,unsigned char**out,size_t*length,char*error,size_t cap){return us_resolver_freeze_with_templates_capability(r,injected,dispatcher,variadic_dispatcher,plans,templates,out,length,0,error,cap);}
+static int us_resolver_freeze_with_templates_bridge(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,unsigned char**out,size_t*length,char*error,size_t cap){return us_resolver_freeze_with_templates_capability(r,injected,dispatcher,variadic_dispatcher,plans,templates,out,length,1,error,cap);}
 /* Existing callers stay fixed-only until the model callsite stream is installed. */
 static int us_resolver_freeze_with_plans(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,us_native_plans*plans,unsigned char**out,size_t*length,char*error,size_t cap){
  return us_resolver_freeze_with_templates(r,injected,dispatcher,0,plans,NULL,out,length,error,cap);

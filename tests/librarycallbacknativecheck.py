@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Actual recursive callback values through the public model compiler.
-This probe remains red until callable graph conversion is integrated.
+Requires callable-capable E3 and lower networks in the supplied package.
 """
 import argparse,pathlib,platform,shutil,subprocess,tempfile,json,hashlib,os,struct
 ROOT=pathlib.Path(__file__).resolve().parents[1]

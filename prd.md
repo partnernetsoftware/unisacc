@@ -2894,3 +2894,16 @@ Callback source/outcome父会话独立复验：modelcallbacksourcecheck.sh rc0�
 R10 resolver声明一致性补防线决定：librarybindings现有递归布局比较未读取callback.signature，会把nested参数或返回不同的声明当成一致。改为复用librarycallplans的有界coinductive ABI比较，保持旧unsupported执行边界；host graph门禁同时检查resolver/binding比较，先验证不同nested result真实失败再修复。
 
 Resolver callback子签名缺口已先红后绿：同布局不同nested result旧bindings比较误判相等，host graph回归退出1；复用us_native_type_equal后ARM/Rosetta普通+ASan/UBSan全rc0，两ISA旧variadic resolver冻结/回滚/固定兼容回归全rc0。不扩大callback可执行支持。
+
+### R10 callback模型/宿主接线协议决定（2026-09-29）
+能力资源\0library/callables显式开启时，E3新增USLTAPE3包络（u64 tape_len、exports_len、callsites_len、callable_catalog_len后四段）；旧资源关闭仍旧包络。catalog为USLCALL1\n + u64 count，逐项u64 key/u64 signature_length/完整单记录USLSIG2；key是模型本次编译显式分配的声明键，不是嵌套wire ID，host在image generation内验证并映射。模型typed indirect与函数值引入全部走现有.librarycall机制，不增加执行器语义原语。make控制六槽为origin/key/raw/output_handle_pointer/0/0；call控制六槽为handle/key/slots/result/count/site（首片fixed site0，变参具体site后续）。SCRIPT/NATIVE选择与源优先在模型final definition/candidate阶段完成，不在宿主猜地址；所有参数/result/control来自caller私有frame，失败清理后才传播。函数值裸名和取址统一FNV.y；typed indirect统一stack carrier并复用当前参数转换/聚合复制，不重新实现表达式语义。catalog完成字段由模型签名池生成，宿主仅解码声明与执行ABI适配；未声明签名、null调用、跨generation/context、unsupported实际布局均明确拒绝。
+
+公开五段链首轮私有候选真实拒绝在typed library signature（不是通过）：宿主bridge登记已过，但MS canonical仍强制任何callback支持位为0。修正决定：MS入口读取明确callables能力资源；开启时保留完整声明的支持位，关闭仍旧严格判据；能力位不代替实际host bridge plan SUPPORTED/布局验证，empty/unknown不能获执行计划。增加真实host_drive完整注入图模型回归后重建私有E3，继续公开链验证。
+
+声明入站聚合范围补接决定：registry把native按值聚合复制到自身heap，脚本若原样转发，该复制物不属于script stack/image，现slots防线会误拒绝。增加签名感知script-call hook（旧invoke-frame接口保留），调用期把完整声明及slots登记到ScriptFrame；只允许该调用明确聚合复制物的范围，不放开任意heap指针。NATIVE introduction宿主验证的是冻结candidate target+ABI，真正winner仍由模型BYNAME/ADDRESS选择，不冒称宿主二次选择。
+
+为保留声明入站聚合范围，version2且普通supported或显式callback bridge支持的us_sym导出统一走声明registry；version1继续旧adapter，普通supported0仍拒绝。signature-aware hook只在当前同步调用内登记root按值聚合复制物范围，不遍历opaque pointee，不扩展到任意heap。
+
+R10 callable lower无绑定回归修复决定：公开outcome测试第二context只含source函数，没有USBIND资源；新增source callable helper仍产生专用.librarycall，lower旧LBI.read因缺绑定拒绝。仅在.librarycall、library_module=1、显式callables=1且make/call两u64地址均非零时，允许缺失绑定的generic callable dispatch；已有绑定仍完整解码，.libraryaddr不得走此旁路。该能力来自host显式资源，不推导地址origin、不绕过callable registry声明检查。先保留真实outcome红回执，再验证旧资源关闭/缺地址/畸形绑定仍拒绝。
+
+R10 callable实际首片验收（私有候选，尚非根产品）：嵌套签名首拒绝实际在旧lower而非新E3；同步重构lower后，ARM O0/O1/O2公开native→script→native→script Relay→native Leaf9每级100轮通过，普通+ASan/UBSan通过；Rosetta x86_64 ASan/UBSan同三优化级通过。独立入站Pair转发/retained Relay嵌套重入在ARM普通+ASan及Rosetta ASan通过，逐级Leaf200/host_take400/drive100计数与caller copy/canary正确。旧fixed/variadic ABI回归仍通过。随后outcome无绑定context红回归定位到lower缺USBIND能力，已修；ARM普通+ASan首次exit23、正常native返回、隔离/恢复均通过。lower网络=表659708观测；无能力/缺地址/畸形含显式空绑定/数据操作14负例仍拒绝，普通路径不变。证据research/r10-callable-bridge-first-evidence.json。新真实callback/forward四门禁已登记；根.com仍旧，必须正式六目标重构与受影响门禁后提升。此片不宣称callback变参、union/bitfield/wide FP、Linux/Windows或完整0.0.10完成。

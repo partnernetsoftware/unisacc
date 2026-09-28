@@ -42,4 +42,15 @@ def install(E, os_, ids):
     P('LBI.pointerwidth').branch({1:'LBI.unszero'},'LBI.fail',[('CMPI','lbi_width',8)])
     P('LBI.unszero').branch({1:'LBI.descnext'},'LBI.fail',[('CMPI','lbi_uns',0)])
     P('LBI.emit').o('hostcall ').a(('COPYW','tok','a0')).call('PRINT').o(', ').a(('COPYW','tok','a1')).call('PRINT').goto('C.nl')
-    P('LBI.cached').branch({1:'LBI.emit'},'LBI.read',[('CMPI','lbi_validated',1)])
+    # Callable-only modules have no import binding table. Their explicit host
+    # resources authorise the generic dispatcher, never named data resolution.
+    from modelinput import u64
+    u64(E,'LBI.callableflag',b'\0library/callables','lbi_callableflag','lbi_callablepresent','LBI.fail')
+    u64(E,'LBI.callablemake',b'\0library/callablemake','lbi_callablemake','lbi_makepresent','LBI.fail')
+    u64(E,'LBI.callablecall',b'\0library/callablecall','lbi_callablecall','lbi_callpresent','LBI.fail')
+    P('LBI.cached').branch({1:'LBI.emit'},'LBI.bindingpresence',[('CMPI','lbi_validated',1)])
+    P('LBI.bindingpresence').a(('SBCLR',),*[('SBOUT',x) for x in b'\0library/bindings'],('SBFIND','lbi_probe')).branch({1:'LBI.callableonly'},'LBI.read',[('CMPI','lbi_probe',0)])
+    P('LBI.callableonly').branch({1:'LBI.callablecap'},'LBI.fail',[('CMP','op',ids['.librarycall'])])
+    P('LBI.callablecap').call('LBI.callableflag').branch({1:'LBI.callableaddresses'},'LBI.fail',[('CMPI','lbi_callableflag',1)])
+    P('LBI.callableaddresses').call('LBI.callablemake').call('LBI.callablecall').branch({1:'LBI.fail'},'LBI.callablecallcheck',[('CMPI','lbi_callablemake',0)])
+    P('LBI.callablecallcheck').branch({1:'LBI.fail'},'LBI.emit',[('CMPI','lbi_callablecall',0)])

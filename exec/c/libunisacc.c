@@ -17,11 +17,14 @@
 #include "librarynative.h"
 #include "librarybindings.h"
 #include "libraryresolver.h"
+#define US_CALLABLES_IMPLEMENTATION
+#include "librarycallables.h"
 
 typedef struct Allocation { void *p; struct Allocation *next, *prev, *hash_next; } Allocation;
 typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } GuestMap;
 typedef struct Symbol { char *name; uintptr_t address; int kind; } Symbol;
 typedef struct Source { char *name, *bytes; struct Source *next; } Source;
+typedef struct LibraryCallableDeclaration {uint64_t key;us_exports graph;us_export_signature signature;} LibraryCallableDeclaration;
 struct us_context {
     char *package, *definitions, *include_path, *target;
     Source *sources;
@@ -37,6 +40,8 @@ struct us_context {
     us_native_plans native_plans;
     us_native_templates native_templates;
     us_native_callsites native_callsites;
+    us_callables callables;uint64_t image_generation;
+    LibraryCallableDeclaration *callable_declarations;size_t callable_count;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -167,7 +172,12 @@ static void library_release_map(void *p,size_t extent) {
     munmap(p,extent);
 #endif
 }
+static void library_callable_catalog_clear(us_context *c){
+    for(size_t i=0;i<c->callable_count;i++)us_exports_clear(&c->callable_declarations[i].graph);
+    free(c->callable_declarations);c->callable_declarations=NULL;c->callable_count=0;
+}
 static void discard_image(us_context *c) {
+    us_callables_clear(&c->callables);if(c->image_generation!=UINT64_MAX)c->image_generation++;
     us_exports_clear(&c->exports);c->initialised=0;
     if(c->call_stack){library_release_map(c->call_stack,c->call_stack_size);c->call_stack=0;c->call_stack_size=0;}
     while (c->guest_maps) {GuestMap *m=c->guest_maps;c->guest_maps=m->next;library_release_map(m->base,m->length);free(m);}
@@ -204,7 +214,7 @@ API void us_free(us_context *c) {
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
     for (int i=0;i<c->argc;i++) free(c->argv[i]); free(c->argv);
-    free(c->include_path); free(c->tape); free(c->signatures); free(c);
+    library_callable_catalog_clear(c);free(c->include_path); free(c->tape); free(c->signatures); free(c);
 }
 API int us_add_source(us_context *c,const char *name,const char *source) {
     if (!c || !name || !source) return error(c,"missing source");
@@ -253,8 +263,39 @@ static uint64_t library_u64(const Buf *b,size_t *at);
 static const char *library_native_target(void);
 static uint64_t library_native_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static uint64_t library_variadic_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static uint64_t library_callable_make_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static uint64_t library_callable_call_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static int library_invoke_frame(void *,const void *,const us_export_frame *);
+static int library_callable_native_hook(void *,ffi_cif *,uintptr_t,void *,void **);
+static int library_callable_script_hook(void *,const void *,const us_export_signature *,const us_export_frame *);
+static void library_callable_failure_hook(void *,const char *);
+static int library_callable_catalog_load(us_context *c,const unsigned char *b,size_t n){
+    if(n<17||memcmp(b,"USLCALL1\n",9))return error(c,"invalid callable catalogue");
+    Buf input={0};if(n>INT_MAX)return error(c,"callable catalogue too large");input.b=(unsigned char*)b;input.n=(int)n;
+    size_t at=9;uint64_t count=library_u64(&input,&at);
+    if(count>8192)return error(c,"callable catalogue count capacity exceeded");
+    LibraryCallableDeclaration *items=calloc(count?count:1,sizeof *items);if(!items)return error(c,"callable catalogue allocation failed");
+    size_t built=0;int rc=1;
+    for(size_t i=0;i<count;i++){
+        if(n-at<16)goto done;uint64_t key=library_u64(&input,&at),len=library_u64(&input,&at);
+        if(!key||len>n-at||len>16777216)goto done;
+        for(size_t j=0;j<i;j++)if(items[j].key==key)goto done;
+        items[i].key=key;built=i+1;
+        if(us_exports_load_bridge(&items[i].graph,b+at,(size_t)len,c->error,sizeof c->error)||items[i].graph.count!=1||
+           us_callable_export_signature(items[i].graph.items,&items[i].signature))goto done;
+        at+=(size_t)len;
+    }
+    if(at!=n)goto done;
+    library_callable_catalog_clear(c);c->callable_declarations=items;c->callable_count=(size_t)count;return 0;
+done:for(size_t i=0;i<built;i++)us_exports_clear(&items[i].graph);free(items);
+    return rc?error(c,"invalid callable catalogue record"):0;
+}
+static const us_export_signature *library_callable_signature(us_context *c,uint64_t key){
+    for(size_t i=0;i<c->callable_count;i++)if(c->callable_declarations[i].key==key)return &c->callable_declarations[i].signature;
+    return NULL;
+}
 static void invalidate_bindings(us_context *c) {
-    discard_image(c);us_native_callsites_clear(&c->native_callsites);
+    discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
@@ -294,13 +335,13 @@ API int us_declare_import(us_context *c,const char *name,const us_signature *sig
 }
 API int us_add_symbol_typed(us_context *c,const char *name,void *address,const void *signature,size_t length) {
     if(!c || active || c->input_is_tape || !address)return error(c,"invalid typed symbol registration");
-    if(us_resolver_accept_injection_typed(&c->resolver,name,signature,length,c->error,sizeof c->error))return 1;
-    if(us_bindings_add_function_typed(&c->bindings,name,(uintptr_t)address,signature,length,c->error,sizeof c->error))return 1;
+    if(us_resolver_accept_injection_typed_bridge(&c->resolver,name,signature,length,c->error,sizeof c->error))return 1;
+    if(us_bindings_add_function_typed_bridge(&c->bindings,name,(uintptr_t)address,signature,length,c->error,sizeof c->error))return 1;
     c->resolver.generation++;invalidate_bindings(c);return 0;
 }
 API int us_declare_import_typed(us_context *c,const char *name,const void *signature,size_t length) {
     if(!c || active || c->input_is_tape)return error(c,"invalid typed import declaration");
-    if(us_resolver_declare_typed(&c->resolver,&c->bindings,name,signature,length,c->error,sizeof c->error))return 1;
+    if(us_resolver_declare_typed_bridge(&c->resolver,&c->bindings,name,signature,length,c->error,sizeof c->error))return 1;
     invalidate_bindings(c);return 0;
 }
 API int us_load_library(us_context *c,const char *path) {
@@ -316,11 +357,11 @@ API int us_compile(us_context *c,const char *target,int level) {
     unsigned char *frozen=0;size_t frozen_length=0;us_native_plans plans={0};us_native_templates templates={0};
     if(c->bindings.count || c->resolver.declarations.count || c->resolver.handle_count){
         if(strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
-        if(us_resolver_freeze_with_templates(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,(uintptr_t)library_variadic_dispatch,&plans,&templates,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
+        if(us_resolver_freeze_with_templates_bridge(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,(uintptr_t)library_variadic_dispatch,&plans,&templates,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
     }
     if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"bindings too large");}
     char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"out of memory");}
-    discard_image(c);us_native_callsites_clear(&c->native_callsites);
+    discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);
     c->native_plans=plans;c->native_templates=templates;
     free(c->binding_blob);c->binding_blob=frozen;c->binding_length=frozen_length;
@@ -333,7 +374,8 @@ API int us_compile(us_context *c,const char *target,int level) {
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
         package(c->package);
-        ResourceInput resources[6]; memset(resources,0,sizeof resources);
+        ResourceInput resources[9]; memset(resources,0,sizeof resources);
+        unsigned char callable_values[2][8];resource_u64(callable_values[0],(uintptr_t)library_callable_make_dispatch);resource_u64(callable_values[1],(uintptr_t)library_callable_call_dispatch);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
         RI=resources; NRI=0;
         resources[NRI].name=(const unsigned char *)"\0cli/target"; resources[NRI].n=11;
@@ -356,6 +398,9 @@ API int us_compile(us_context *c,const char *target,int level) {
             resources[NRI].name=(const unsigned char *)"\0library/bindings";resources[NRI].n=17;
             resources[NRI].data=c->binding_blob;resources[NRI].len=(int)c->binding_length;NRI++;
         }
+        resources[NRI].name=(const unsigned char *)"\0library/callables";resources[NRI].n=18;resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
+        resources[NRI].name=(const unsigned char *)"\0library/callablemake";resources[NRI].n=21;resources[NRI].data=callable_values[0];resources[NRI].len=8;NRI++;
+        resources[NRI].name=(const unsigned char *)"\0library/callablecall";resources[NRI].n=21;resources[NRI].data=callable_values[1];resources[NRI].len=8;NRI++;
         Buf input={0};
         char route[128];
         int z=snprintf(route,sizeof route,"%s/%stape/O%d",target,c->source_count>1 ? "multi/" : "",level);
@@ -381,18 +426,21 @@ API int us_compile(us_context *c,const char *target,int level) {
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
             size_t begin=0,length=(size_t)input.n;
-            if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9))) {
-                int version2=!memcmp(input.b,"USLTAPE2\n",9);
+            if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9) || !memcmp(input.b,"USLTAPE3\n",9))) {
+                int version3=!memcmp(input.b,"USLTAPE3\n",9);
+                int version2=version3 || !memcmp(input.b,"USLTAPE2\n",9);
                 size_t at=9;uint64_t tape=library_u64(&input,&at),meta=library_u64(&input,&at);
                 uint64_t calls=version2 ? library_u64(&input,&at) : 0;
+                uint64_t catalogue=version3 ? library_u64(&input,&at) : 0;
                 if (tape>(size_t)input.n-at || meta>(size_t)input.n-at-tape ||
-                    calls!=(size_t)input.n-at-tape-meta || meta<16 ||
+                    calls>(size_t)input.n-at-tape-meta || catalogue!=(size_t)input.n-at-tape-meta-calls || meta<16 ||
                     (memcmp(input.b+at+(size_t)tape,"USLSIG1\n",8) &&
                      memcmp(input.b+at+(size_t)tape,"USLSIG2\n",8))) __us_panic("bad library tape envelope");
                 c->signatures=malloc((size_t)meta);if (!c->signatures) __us_panic("out of memory");
                 memcpy(c->signatures,input.b+at+(size_t)tape,(size_t)meta);c->signatures_length=(size_t)meta;
                 if(version2 && us_native_callsites_load(&c->native_callsites,&c->native_templates,
                     input.b+at+(size_t)tape+(size_t)meta,(size_t)calls,c->error,sizeof c->error)) __us_panic(c->error);
+                if(version3 && library_callable_catalog_load(c,input.b+at+(size_t)tape+(size_t)meta+(size_t)calls,(size_t)catalogue))__us_panic(c->error);
                 begin=at;length=(size_t)tape;
             }
             if (level) {
@@ -410,7 +458,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         }
     } else rc=1;
     cleanup(); active=0; RI=0; NRI=0;
-    if(rc){us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+    if(rc){library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;}
     return rc;
 }
@@ -456,12 +504,15 @@ static void library_image(us_context *c,Buf *bytes,MemoryImage *m,MemoryMap *map
         if (!strcmp(c->symbols[i-1].name,c->symbols[i].name)) __us_panic("duplicate library symbol");
 }
 typedef struct NativeCleanup { us_native_arena *arena; struct NativeCleanup *next; } NativeCleanup;
+typedef struct LibraryCallableScope {us_context *owner;const us_export_signature *signature;const us_export_frame *values;struct LibraryCallableScope *previous;} LibraryCallableScope;
+static _Thread_local LibraryCallableScope *library_callable_scopes;
 typedef struct ScriptFrame {
     jmp_buf returned;
     volatile int status,exited,failed;
     NativeCleanup *volatile native_arenas;
     unsigned char *stack_base;size_t stack_size;
     struct ScriptFrame *previous;us_context *owner;us_call_outcome *outcome;
+    const us_export_signature *argument_signature;const uint64_t *argument_slots;
 } ScriptFrame;
 static _Thread_local ScriptFrame *script_frames;
 static _Thread_local us_native_boundary *native_boundaries;
@@ -490,6 +541,10 @@ static int library_frame_region(us_context *c,ScriptFrame *f,uint64_t address,si
     size_t page=library_page_size();
     if(page && f->stack_size>=2*page && library_region((uintptr_t)f->stack_base+page,
               f->stack_size-2*page,(uintptr_t)address,bytes))return 1;
+    if(f->argument_signature&&f->argument_slots)for(size_t i=0;i<f->argument_signature->count;i++){
+        const us_export_type *t=f->argument_signature->argtypes+i;
+        if(t->kind==5&&library_region((uintptr_t)f->argument_slots[i],(size_t)t->width,(uintptr_t)address,bytes))return 1;
+    }
     return c->image_dataoff>=0 && c->image_data_size>=0 &&
         library_region((uintptr_t)c->image+(uintptr_t)c->image_dataoff,
                        (size_t)c->image_data_size,(uintptr_t)address,bytes);
@@ -499,6 +554,7 @@ static uint64_t library_dispatch_error(us_context *c,const char *message) {
     if(script_frames){script_frames->failed=1;longjmp(script_frames->returned,1);}
     return 1;
 }
+#include "librarycallablehost.h"
 /* A declared ABI mechanism: model selected this exact plan; no host name winner
    or source type classification. Native code and borrowed objects obey C's
    lifetime contract; this bridge is not an untrusted-code sandbox. */
@@ -510,6 +566,7 @@ static uint64_t library_native_invoke(us_context *c,ScriptFrame *frame,us_native
     us_export *x=plan->graph.items;size_t bytes=x->result.kind==5 ? (size_t)x->result.width : x->result.kind ? 8:0;
     if(!library_frame_region(c,frame,result,bytes))
         return library_dispatch_error(c,"native result is outside owned script frame");
+    if(plan->bridge_required)return library_callable_plan_invoke(c,frame,plan,slots,result,count);
     us_native_arena *arena=NULL;
     if(us_native_prepare(plan,(const uint64_t *)(uintptr_t)slots,count,(void *)(uintptr_t)result,
                          &arena,c->error,sizeof c->error))return library_dispatch_error(c,NULL);
@@ -672,18 +729,18 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        size_t capacity=16;
+        size_t capacity=19;
 #if defined(_WIN32) && !defined(__UNISA__)
         capacity+=(size_t)winimports.count;
 #endif
-        ResourceInput *actual=tracked_calloc(capacity,sizeof *actual);unsigned char scalar[14][8];
+        ResourceInput *actual=tracked_calloc(capacity,sizeof *actual);unsigned char scalar[17][8];
         const char *names[]={"\0process/argc","\0process/argv","\0memory/text","\0memory/reserve",
-            "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process"};
+            "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process","\0library/callables","\0library/callablemake","\0library/callablecall"};
         uint64_t vals[]={c->argc,(uintptr_t)c->argv,(uintptr_t)mapping.base,mapping.reserved,1,(uintptr_t)library_exit,(uintptr_t)library_mmap,(uintptr_t)library_munmap,
-            host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3),1,(uintptr_t)c->process_slots};
-        int lengths[]={13,13,12,15,16,13,13,15,13,13,13,13,15,16};
-        for (int i=0;i<14;i++) {resource_u64(scalar[i],vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=8;}
-        RI=actual;NRI=14;
+            host_dl_slot(0),host_dl_slot(1),host_dl_slot(2),host_dl_slot(3),1,(uintptr_t)c->process_slots,1,(uintptr_t)library_callable_make_dispatch,(uintptr_t)library_callable_call_dispatch};
+        int lengths[]={13,13,12,15,16,13,13,15,13,13,13,13,15,16,18,21,21};
+        for (int i=0;i<17;i++) {resource_u64(scalar[i],vals[i]);actual[i].name=(const unsigned char *)names[i];actual[i].n=lengths[i];actual[i].data=scalar[i];actual[i].len=8;}
+        RI=actual;NRI=17;
         if (c->signatures) {
             actual[NRI].name=(const unsigned char *)"\0library/signatures";actual[NRI].n=19;
             actual[NRI].data=c->signatures;actual[NRI].len=(int)c->signatures_length;NRI++;
@@ -705,14 +762,17 @@ API int us_relocate(us_context *c) {
             c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;c->image_text_size=m.text;c->image_data_size=m.extent;
             memcpy(mapping.base,input.b+40,m.text);memcpy(mapping.base+mapping.dataoff,input.b+40+m.text,m.stored);
             if (memory_protect_code(&mapping,m.text)) __us_panic("cannot protect library code");
-            if(c->signatures && us_exports_load(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
+            if(c->signatures && us_exports_load_bridge(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
         }
     } else rc=1;
     cleanup();active=0;RI=0;NRI=0;
 #if defined(_WIN32) && !defined(__UNISA__)
     library_winimports_free(&winimports);
 #endif
-    if (rc) discard_image(c);return rc;
+    if (rc) discard_image(c);
+    else if(c->image_generation==UINT64_MAX){discard_image(c);return error(c,"image generation capacity exceeded");}
+    else {us_callables_init(&c->callables,c,c->image_generation,library_invoke_frame,library_callable_native_hook,library_callable_failure_hook);c->callables.script_call=library_callable_script_hook;}
+    return rc;
 }
 /* Addresses are model-declared symbols; native callability comes only from
    the soft-stack adapter and an independently validated ABI declaration. */
@@ -767,6 +827,10 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
     us_context *previous_active=active;
     ScriptFrame frame;frame.previous=script_frames;frame.status=0;frame.exited=0;frame.failed=0;
     frame.native_arenas=NULL;frame.stack_base=stack;frame.stack_size=stack_size;frame.owner=c;frame.outcome=outcome;
+    frame.argument_signature=NULL;frame.argument_slots=NULL;
+    if(library_callable_scopes&&library_callable_scopes->owner==c&&library_callable_scopes->values==values){
+        frame.argument_signature=library_callable_scopes->signature;frame.argument_slots=values->slots;
+    }
     active=c;script_frames=&frame;
     int exited=setjmp(frame.returned);
     if(!exited) {
@@ -787,8 +851,8 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
            return buffer address; no host ABI classification happens here. */
         if(values->result_kind==5) {
             uintptr_t start=(uintptr_t)c->image+(uintptr_t)c->image_dataoff,at=(uintptr_t)value;
-            if(c->image_data_size<0 || at<start || at-start>(uint64_t)c->image_data_size ||
-               values->result_bytes>(uint64_t)c->image_data_size-(at-start)) {
+            (void)start;
+            if(!library_frame_region(c,&frame,(uint64_t)at,values->result_bytes)) {
                 frame.failed=1;error(c,"aggregate return is outside owned script image");goto finished;
             }
             memcpy(values->result,(const void *)at,values->result_bytes);
@@ -831,6 +895,17 @@ API void *us_sym(us_context *c,const char *name) {
     if(!c || !name || !c->image){error(c,"library is not relocated");return 0;}
     if(library_initialise(c))return 0;
     c->error[0]=0;
+    for(size_t i=0;i<c->exports.count;i++)if(!strcmp(c->exports.items[i].name,name)){
+        us_export *x=c->exports.items+i;
+        if(x->version==2&&(us_export_supported(x)||(us_export_has_callbacks(x)&&us_export_bridge_supported(x)))&&!x->linkage&&x->defined==1){
+            const void *raw=NULL;int kind=-1;us_export_signature view;uint64_t h=0;void *code=NULL;
+            if(library_lookup(c,name,&raw,&kind)||kind||us_callable_export_signature(x,&view)||
+               us_callable_make(&c->callables,US_CALLABLE_SCRIPT,&view,(uintptr_t)raw,&h,c->error,sizeof c->error)||
+               us_callable_pointer(&c->callables,h,&view,&code,c->error,sizeof c->error))return NULL;
+            return code;
+        }
+        break;
+    }
     return us_exports_symbol_frame(&c->exports,name,c,library_lookup,library_invoke_frame,c->error,sizeof c->error);
 }
 API int us_call_status(const us_context *c,int *exit_status) {
