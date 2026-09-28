@@ -33,7 +33,7 @@ calling the file “shared support” does not remove that obligation. Keep a si
 routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 `src/` and `unisa/` remain the behavior reference until the specified switch.
 
-## Work required before calling the refactor complete
+## Completed local acceptance obligations
 
 - Finish the rule-source inventory above: remove the replaced control code,
   preserve actual dynamic dependencies, and enumerate old/new local transitions.
@@ -46,7 +46,7 @@ routine when migrating it; E3, the unit reader, E4 and lowering use this module.
 - Reconcile the carried kernels, resource/template bytes and the one-copy model
   package with the S-17 size ledger; compare performance on the same inputs.
 - Only then adopt the model path as the default product and update its docs.
-  The current shipped `unisacc.com` has not switched.
+  Local `unisacc.com` has switched; published v0.0.7 remains classic.
 
 ## Fixed-control inventory
 
@@ -67,7 +67,7 @@ as migrated template algorithms. See [enc/CONTROL_AUDIT.md](enc/CONTROL_AUDIT.md
 The final parser helper inventory is checked separately before the candidate
 is frozen; a shorter gen2.py alone is not completion evidence.
 
-## Final candidate snapshot (acceptance pending)
+## Final candidate snapshot (local acceptance complete)
 
 The candidate built from source `85eaeb9` has SHA-256
 `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`.

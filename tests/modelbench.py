@@ -103,16 +103,21 @@ def main(argv=None):
         ap.error('max-seconds must be finite and positive')
     # Reject output/input aliasing before any missing-input failure can write JSON.
     output = args.output.resolve()
-    if output in {getattr(args, name).resolve() for name in ('source', 'compiler', 'reference')}:
+    protected = {getattr(args, name).resolve() for name in ('source', 'compiler', 'reference')}
+    protected.update(Path(os.environ[k]).resolve() for k in ('UNISA_CONTAINER', 'UNISA_KERNEL') if os.environ.get(k))
+    if output in protected:
         ap.error('JSON output must not overwrite an input')
     report = {'ok': False, 'target': args.target, 'optimization': '-O2',
               'samples_requested': args.samples, 'samples': [],
               'timeout_seconds': args.timeout, 'max_seconds': args.max_seconds,
               'host': platform.platform(),
-              'environment': {'UNISA_MAXSTEPS': os.environ.get('UNISA_MAXSTEPS')}}
+              'environment': {k: os.environ.get(k) for k in ('UNISA_MAXSTEPS', 'UNISA_CONTAINER', 'UNISA_KERNEL')}}
     try:
         paths = {name: getattr(args, name).resolve(strict=True)
                  for name in ('source', 'compiler', 'reference')}
+        for key in ('UNISA_CONTAINER', 'UNISA_KERNEL'):
+            if os.environ.get(key):
+                paths[key] = Path(os.environ[key]).resolve(strict=True)
         output = args.output.resolve()
         if output in paths.values():
             ap.error('JSON output must not overwrite an input')

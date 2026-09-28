@@ -60,12 +60,63 @@ with tempfile.TemporaryDirectory() as td:
     # Exercise real queue identity and resume, not a mocked candidate stamp.
     q.fingerprint=real_fingerprint
     selectors=('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA')
-    environment={k:v for k,v in os.environ.items() if k not in selectors}
+    runtime_selectors=('UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL')
+    environment={k:v for k,v in os.environ.items() if k not in (*selectors,*runtime_selectors)}
     candidate=t/'compiler with spaces';candidate.write_bytes(b'#!/bin/sh\nexit 0\n');candidate.chmod(0o755)
     marker=t/'candidate-ran'
     jobs={'candidate':[sys.executable,'-c','import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("ran")',str(marker)]}
-    with patch.dict(os.environ,environment,clear=True):
+    # Keep real content hashing independent of concurrent repository edits.
+    fixture=t/'queue-source';(fixture/'tests').mkdir(parents=True)
+    (fixture/'tests/bound.pl').write_bytes((ROOT/'tests/bound.pl').read_bytes())
+    subprocess.run(['git','init','-q',str(fixture)],check=True,timeout=5)
+    subprocess.run(['git','-C',str(fixture),'add','tests/bound.pl'],check=True,timeout=5)
+    previous_cwd=pathlib.Path.cwd()
+    with patch.object(q,'ROOT',fixture), patch.dict(os.environ,environment,clear=True):
+        os.chdir(fixture)
         assert not q.executable_inputs(q.execution_settings()), 'implicit compiler file guessed'
+        # Fuel and model inputs affect execution even when the compiler is unchanged.
+        for key in runtime_selectors:
+            assert key not in q.execution_settings()
+            with patch.dict(os.environ,{key:''}):
+                assert q.execution_settings().get(key)=='' , 'empty '+key+' was normalised away'
+                empty=q.fingerprint(jobs)
+            assert empty!=q.fingerprint(jobs), 'unset/empty '+key+' shared an identity'
+        with patch.dict(os.environ,{'UNISA_MAXSTEPS':'2'}):
+            assert run('fuel')==0
+            before=marker.stat().st_mtime_ns
+            assert run('fuel')==0 and marker.stat().st_mtime_ns==before
+        with patch.dict(os.environ,{'UNISA_MAXSTEPS':'3'}):
+            try: run('fuel')
+            except SystemExit as e: assert 'input changed' in str(e)
+            else: raise AssertionError('changed fuel reused completed result')
+            assert marker.stat().st_mtime_ns==before
+        for key in runtime_selectors[1:]:
+            data=t/(key+' data');data.write_bytes(b'model input');data.chmod(0o600)
+            alternate=t/(key+' alternate');alternate.write_bytes(data.read_bytes());alternate.chmod(0o600)
+            with patch.dict(os.environ,{key:str(data)}):
+                assert run(key)==0
+                before=marker.stat().st_mtime_ns
+                data.write_bytes(b'model input')
+                assert run(key)==0 and marker.stat().st_mtime_ns==before, 'same model bytes did not resume'
+                for change in ('content','mode'):
+                    if change=='content': data.write_bytes(b'changed input')
+                    else: data.chmod(0o640)
+                    try: run(key)
+                    except SystemExit as e: assert 'input changed' in str(e)
+                    else: raise AssertionError('changed '+key+' '+change+' reused completed result')
+                    assert marker.stat().st_mtime_ns==before
+                    data.write_bytes(b'model input');data.chmod(0o600)
+            with patch.dict(os.environ,{key:str(alternate)}):
+                try: run(key)
+                except SystemExit as e: assert 'input changed' in str(e)
+                else: raise AssertionError('changed '+key+' path reused completed result')
+            invalid_fifo=t/(key+' fifo');os.mkfifo(invalid_fifo)
+            for invalid in (t,t/'absent-model',invalid_fifo):
+                with patch.dict(os.environ,{key:str(invalid)}):
+                    try: run('invalid-'+key)
+                    except SystemExit as e: assert 'queue '+key+':' in str(e)
+                    else: raise AssertionError('invalid '+key+' accepted')
+        print('queue: fuel and external model identity, nonexecutables, resume, changed path/content/mode and invalid files pass')
         for key in selectors:
             with patch.dict(os.environ,{key:str(candidate)}):
                 assert run(key)==0
@@ -100,6 +151,7 @@ with tempfile.TemporaryDirectory() as td:
             try: q.executable_inputs({'MODEL_COM':str(invalid)})
             except SystemExit: pass
             else: raise AssertionError('invalid candidate accepted')
+    os.chdir(previous_cwd)
     print('queue: five explicit executable hashes, same-byte resume, changed/missing rejection, spaces/PATH/symlink and command-string controls pass')
     cache=t/'cache';cache.mkdir()
     names={'run','models.pkg','route.tsv'} | {s+'.'+e for s in ('e2','e1','e3','e4','lower','elf') for e in ('json','tbl','net')}

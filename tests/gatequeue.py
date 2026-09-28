@@ -29,32 +29,38 @@ def plan(com):
 
 def execution_settings():
     return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
-                'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT') if k in os.environ}
+                'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT',
+                'UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL') if k in os.environ}
 
 def executable_inputs(settings):
     # These selectors are one quoted executable argument, never shell commands.
     # MODEL_COM is a file path; the other selectors also permit a PATH command.
     # Empty UA-family selectors retain their existing fallback semantics.
+    # External package/kernel selectors are file paths and need no execute bit.
+    # Empty values stay in execution_settings, without inventing a file input.
     inputs = {}
-    for key in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA'):
+    for key in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','UNISA_CONTAINER','UNISA_KERNEL'):
+        executable = key not in ('UNISA_CONTAINER','UNISA_KERNEL')
         if key not in settings or (not settings[key] and key != 'MODEL_COM'): continue
         value = settings[key]
         try:
             if not value: raise ValueError('empty candidate path')
-            name = value if key == 'MODEL_COM' or '/' in value else shutil.which(value)
+            name = value if not executable or key == 'MODEL_COM' or '/' in value else shutil.which(value)
             if name is None: raise ValueError('executable name not found in PATH')
             path = pathlib.Path(name).resolve(strict=True)
-            if not stat.S_ISREG(path.stat().st_mode) or not os.access(path, os.X_OK):
-                raise ValueError('expected an executable regular file')
+            expected = 'expected an executable regular file' if executable else 'expected a regular file'
+            if not stat.S_ISREG(path.stat().st_mode) or (executable and not os.access(path, os.X_OK)):
+                raise ValueError(expected)
             with path.open('rb') as f:
                 mode = os.fstat(f.fileno()).st_mode
-                if not stat.S_ISREG(mode) or not os.access(path, os.X_OK):
-                    raise ValueError('expected an executable regular file')
+                if not stat.S_ISREG(mode) or (executable and not os.access(path, os.X_OK)):
+                    raise ValueError(expected)
                 h = hashlib.sha256()
                 for chunk in iter(lambda: f.read(1024*1024), b''): h.update(chunk)
             inputs[key] = {'path':str(path), 'mode':mode, 'sha256':h.hexdigest()}
         except (OSError, ValueError) as error:
-            raise SystemExit(f'queue {key}: {error}; use one executable path or wrapper, not a shell command')
+            hint = 'use one executable path or wrapper, not a shell command' if executable else 'use one regular-file path'
+            raise SystemExit(f'queue {key}: {error}; {hint}')
     return inputs
 
 def fingerprint(jobs):
