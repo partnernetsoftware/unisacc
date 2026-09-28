@@ -458,8 +458,8 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
 }
 
 /* Route dispatch owns only byte-stream lifetimes, never compiler semantics. */
-static int runroute_from(const char *route, const char *first_stage, Buf *in, const char *src) {
-    int count = 0, ready = first_stage == 0;
+static int runroute_range(const char *route, const char *first_stage, const char *last_stage, Buf *in, const char *src) {
+    int count = 0, ready = first_stage == 0, ended = last_stage == 0;
     for (int i = 0; i < PS; i++) {
         if (strcmp(STAGES[i].route, route)) continue;
         if (!ready) {
@@ -480,12 +480,16 @@ static int runroute_from(const char *route, const char *first_stage, Buf *in, co
         unload(); free(in->b); in->b = out.b; in->n = out.n;
         if (rc) return rc;
         count++;
+        if (last_stage && !strcmp(STAGES[i].name,last_stage)) { ended=1; break; }
     }
-    if (!count) die("unknown package route or stage boundary");
+    if (!count || !ended) die("unknown package route or stage boundary");
     return 0;
 }
+static int runroute_from(const char *route, const char *first_stage, Buf *in, const char *src) {
+    return runroute_range(route,first_stage,0,in,src);
+}
 static int runroute(const char *route, Buf *in, const char *src) {
-    return runroute_from(route,0,in,src);
+    return runroute_range(route,0,0,in,src);
 }
 
 #ifdef UNISA_CORE_BLOB

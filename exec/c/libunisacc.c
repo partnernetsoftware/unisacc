@@ -247,7 +247,7 @@ API int us_compile(us_context *c,const char *target,int level) {
             for (int j=0;j<unit.n;j++) bput(&input,unit.b[j],0);
             tracked_free(unit.b);
         }
-        if (!rc) rc=runroute(route,&input,c->sources->name);
+        if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
             size_t begin=0,length=(size_t)input.n;
             if (input.n>=9 && !memcmp(input.b,"USLTAPE1\n",9)) {
@@ -258,9 +258,18 @@ API int us_compile(us_context *c,const char *target,int level) {
                 memcpy(c->signatures,input.b+at+(size_t)tape,(size_t)meta);c->signatures_length=(size_t)meta;
                 begin=at;length=(size_t)tape;
             }
-            unsigned char *out=malloc(length ? length : 1);
-            if (!out) __us_panic("out of memory");
-            memcpy(out,input.b+begin,length);c->tape=out;c->tape_length=length;
+            if (level) {
+                /* E4 consumes tape bytes, never the opaque signature envelope. */
+                Buf optimised={0};optimised.b=tracked_realloc(0,length ? length : 1);
+                memcpy(optimised.b,input.b+begin,length);optimised.n=(int)length;
+                rc=runroute_from(route,"e4",&optimised,c->sources->name);
+                if (!rc) { input=optimised;begin=0;length=(size_t)input.n; }
+            }
+            if (!rc) {
+                unsigned char *out=malloc(length ? length : 1);
+                if (!out) __us_panic("out of memory");
+                memcpy(out,input.b+begin,length);c->tape=out;c->tape_length=length;
+            }
         }
     } else rc=1;
     cleanup(); active=0; RI=0; NRI=0; return rc;
