@@ -2842,3 +2842,5 @@ R10 variadic宿主首片正式验收：f241dc2私有冻结源构造全部阶段�
 R10 fixed参数修复局部证据：经典新参考与系统cc同输出，原参考三个优化级均错误；真实524288槽容量可编，513×1024参数原型明确拒绝。模型通用完整参数捕获还暴露前向>6参数原型的stack模式未设置，已与定义采用同规则。新增完整回归经私有新E3REF/E3DUMP与模型逐字节equal；早先compare误只传UA导致读取默认参考，不作为新参考证据且未写共享路径。正式产品重构与受影响门禁随后执行。变参调用点一遍E3/事务准备方案见research/r10-ffi-variadic-callsite-design.md，仍是设计未实现。
 
 R10 fixed参数集成门禁纠正：1f146ec候选87a9082e…的语言一片发现function_pointer_arrays在O0崩溃，未提升根产物。通用参数查询过早替换首八槽的PDB声明转换，FN.pfpdecl1之前捕获的描述还不是数组/函数退化后的调用类型。修正只扩充缺失的第九及以后槽，首八保留原PDB路径；typed import完整签名路径不变。私有匹配--errors变体的ASM网络driver上，函数指针数组与b_fixedfp_many在O0/O1/O2六次运行均退出0；接着重跑正式language-1。不把scratch错误输入格式的unit-marker拒绝计为产品缺陷；失败候选与实际修复证据分别保留。
+
+R10 fixed参数修复正式收尾（e22d236源）：私有shared/六目标/pack逐步≤55s真实重构，根.com与原始sidecar同步为**1,081,132 B / SHA256 53abdd383b6817fa1c4a768b43934d5f6904db3120ca6b4bfbb39442e44cd154**。旧失败候选87a9082e未提升且保留；language-1的13探针/6拒绝控制rc0（47s）。新产品435次O0/O1/O2差分wrong0/refuse0；9项库ABI/变参宿主/产品run/C99/kernel/docs门禁rc0（16s），23对实际网络全域check-net一致，两个核心回归在三优化级与宿主cc六次实际输出一致。仅本机ARM与Rosetta范围，不冒称最终全部门禁、Windows/Linux库或完整变参模型调用已完。回执research/r10-fixed-parameters-evidence.json；完整0.0.10继续。
