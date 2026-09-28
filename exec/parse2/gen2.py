@@ -304,7 +304,7 @@ SHAPE_IDS = 1 << 32  # fresh descriptor pool and member-link namespace; never in
 # SHAPE links use v, or SHAPE_IDS + v*MEMBER_STRIDE + sid, in disjoint ranges.
 DIM, TDIM = 28 * 10 ** 6, 29 * 10 ** 6   # DIM[v * 8 + k]: an array's k-th dimension; TDIM[k]: while declaring
 PDB = 27 * 10 ** 6   # PDB[f * 16 + k] = base of f's parameter k (a double parameter converts an int argument)
-FOPS = {"+":"add", "-":"sub", "*":"mul", "/":"div", "<":"lt", ">":"gt", "<=":"le", ">=":"ge", "==":"eq", "!=":"eq"}
+FOPS = dict(tape_rows("operator-float.tsv"))   # arithmetic operator -> float mnemonic (declared, not a second hand list)
 FPU = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
 FLT = E.FLT   # f32 value descriptor; pointer depth keeps pointee types distinct
 BOOL = 66  # distinct value kind; arithmetic maps to tyinfo u8
