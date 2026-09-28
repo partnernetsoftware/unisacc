@@ -72,6 +72,8 @@
 
 **本版不捆绑**：库AOT、跨阶段二进制流、重复网络结构合并、系统libc全面转发、新语言/目标、mmap内存重构、全域T2/T3证明。AOT如做只独立测量，不阻挡这份清单；不能同步改参考实现只为凑字节相同。各项完成并验证后即停止扩范围、进入发布。
 
+**签名接入下一片决定**：新增独立unisacc的Windows资格/company工作流与显式签名政策，默认off且缺配置/VERSIONINFO在额度调用前失败；真正落地由主代理检查并配置repo专属OIDC及profile窄权限，不把配置工作甩给用户。签名前PE版本资源必须在构造APE的PE head时追加，不对已打包容器插字节；纯打包IO，原text/data/reloc字节与RVA不动，拒绝已有resource/证书/overlay、header不足及超宽字段，产品名Unisacc与冻结版本精确对应。Linux演示的目录枚举作为R9-5最小切片，只增加getdents64事实与有界目录适配、不加入execve/fork；不支持OS明确拒绝，E3复用INTRINSIC，通用核不加语言原语，生成表/权重由主代理统一重建。
+
 **苹果签名阻挡定位**：额外私有入口以`--timestamp=none`诊断45秒仍超时，已清理所属进程组；实时sample显示停在`SecKeyCreateSignature → SecurityServer::generateSignature → mach_msg`，因此阻挡在系统签名/私钥服务等待，不能归因为时间戳HTTP。是否有钥匙串授权提示已向用户核实；未导出私钥、修改ACL或假称签名成功。微软产品级签名workflow/policy正在独立准备，尚未配置仓库Entra/OIDC资格，不复用minicon身份。
 
 **并发收片实测（2026-09-28）**：队列仅docs/bound两个审计闭包实现选择性失效，未知族仍全局失效；合成3项复用约0.025秒，输入/候选/环境/缺项与未审代码变化控制通过，不能称179项均已选择性复用。真实演示新增winlist与进程/映射/窗口结构校验；合成控制通过，最终产品实跑待统一冻结。Windows签后footer定位器在冻结产品和host ASan/UBSan各160例通过，接入将复用已读内存而非二次打开文件，格式校验不代替签名信任。macOS原生双架构入口/app/DMG私有ad-hoc格式、参数/退出/运行/FFI/篡改验证通过；Developer ID带时间戳两次20秒超时，Gatekeeper拒绝、公证/staple未做，企业签名未完成。所有格式演练均不改变根产物。
