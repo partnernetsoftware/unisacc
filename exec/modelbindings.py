@@ -11,7 +11,9 @@ def install(E):
     rules(g,Path(__file__).parent,'modelbindings',section='read')
     P('LBI.fail').a(E.rej('not covered: library import binding or signature')).goto('DEAD')
     P('LBI.read').a(('SBCLR',),*[('SBOUT',x) for x in b'\0library/bindings'],('SBFIND','lbi_blob'),('BLEN','lbi_len','lbi_blob')).branch({1:'LBI.fail'},'LBI.present',[('CMPI','lbi_len',0)])
-    P('LBI.present').a(('INPUSH','lbi_blob'),('COPYW','lbi_limit','lbi_len')) .goto('LBI.magic0')
+    from modelcandidates import install as install_candidates
+    install_candidates(E)
+    P('LBI.present').a(('COPYW','mc_blob','lbi_blob'),('COPYW','mc_len','lbi_len')).call('MC.normalize').a(('COPYW','lbi_blob','mc_blob'),('COPYW','lbi_len','mc_len'),('INPUSH','lbi_blob'),('COPYW','lbi_limit','lbi_len')).goto('LBI.magic0')
     for i,c in enumerate(b'USBIND1\n'):
         P('LBI.magic'+str(i)).call('LBI.byte').branch({c:'LBI.magic'+str(i+1) if i<7 else 'LBI.count'},'LBI.fail',[('RLD','lbi_byte')])
     P('LBI.count').call('LBI.u64').a(('COPYW','lbi_count','lbi_value'),('LDI','lbi_i',0)).branch({2:'LBI.fail'},'LBI.nonempty',[('LDI','lbi_max',1024),('C64U','lbi_count','lbi_max')])

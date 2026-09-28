@@ -2730,3 +2730,9 @@ macOS正式1000循环生命周期以暖后全zone live bytes和blocks零增长�
 正式修正首验13.46秒：1000真实compile/run全zone live bytes/blocks范围均0、owned image/stack恒定，RSS范围3,063,808 B仍明确标为超原阈值。新的不触页真实保留控制live+9,437,184 B/blocks+9且rc9，RSS仅32KiB原判据会漏检：说明live裁判同时避免释放页false positive与未触页malloc false negative，并非放宽相同性质阈值。见research/r10-native-lifecycle-live.json，Linux仍旧判据；实际完整受影响门禁待冻结复验。
 
 9332cb8冻结测试树、真实26def90/0dadf387产物的12项受影响门禁全部rc0（双槽20秒），根.com真实bytes1,039,038、freshness核源通过。所有原RSS失败仍保留，当前成功只按已声明macOS全zone live+owned/mapping判据；真实未触页malloc控制无编译、用1000检测循环抓live+9MiB，而正例执行300暖机+1000完整compile/map/run。最终回执research/r10-data-live-final-gates.json。全R10/最终全套/其他平台/企业签名/发布未闭合，resolver方案已定但尚未实现。
+
+### R10 resolver实施分域（2026-09-29）
+共同USBIND2协议固定：magic8/count64；record_len64+name_len64/name/kind8/origin8/ordinal64/abi8/variadic8/address64/argc64/result6u64/args6u64/data extent64+writable8/supported8。origin0/1 ordinal0，origin2 ordinal1..64，原USBIND1不变。C仅枚举/序列化所有候选，不择优。优先级与名字分组由共享δ规则完成，可在E3/lower各自先规范为选定USBIND1再调用既有typed decoder；这是同一模型选择而非宿主答案表。完整wire结构先核所有candidate，supported/source ABI仅核winner，禁止不兼容winner自动回退。
+分域：候选host helper代理仅新exec/c/libraryresolver.h及独立C格式/生命周期checker；模型代理负责新exec/modelcandidates.py与E3/lower入口和专属模型checker；主代理负责libunisacc.h/c集成、真实dlopen测试、共享生成物/根产物重建、PRD/索引。句柄与typed声明归context；compile冻结同一blob至relocate，API成功变更失效image/closures，失败不毁旧generation。Windows暂返回未实现loader能力，不能把POSIX动态库证明外推；正式平台适配仍完整待做。
+
+R10 resolver公开API已接入：声明与加载成功统一失效已编译代际；失败不改旧code/exports。compile在native target机械freeze USBIND2，relocate复用同一blob不重新lookup。65536原始candidate硬上限与δ一致。独立host普通及ASan/UBSan实跑通过；模型规范器46958观察、lower集成469820观察与V2截断/高64控制首验通过。新真实API checker覆盖owned ordinal/process/injected/source定义四级、O0/O1/O2、动态数据读写、失败保存与成功失效，必须完整新包实际通过后才称闭环。Windows审计实际两ISA long32/pointer64、core COFF成功，但CRC/资源地址与process_slots截断、Windows映射/ffi构件未闭合，仍待完成，报告不外推原生通过。

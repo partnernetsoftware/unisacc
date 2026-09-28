@@ -14,7 +14,9 @@ def install(E,P,b,start,integers):
     rules(g,Path(__file__).parent,'libraryimports',section='read')
     P('LI.fail').a(E.rej('not covered: library import binding or signature')).goto('DEAD')
     P('LI.start').a(('SBCLR',),*[('SBOUT',x) for x in b'\0library/bindings'],('SBFIND','li_blob'),('BLEN','li_len','li_blob')).branch({1:start},'LI.present',[('CMPI','li_len',0)])
-    P('LI.present').a(('INPUSH','li_blob'),('COPYW','li_limit','li_len')) .goto('LI.magic0')
+    from modelcandidates import install as install_candidates
+    install_candidates(E)
+    P('LI.present').a(('COPYW','mc_blob','li_blob'),('COPYW','mc_len','li_len')).call('MC.normalize').a(('COPYW','li_blob','mc_blob'),('COPYW','li_len','mc_len'),('INPUSH','li_blob'),('COPYW','li_limit','li_len')).goto('LI.magic0')
     for i,c in enumerate(b'USBIND1\n'):
         P('LI.magic'+str(i)).call('LI.byte').branch({c:'LI.magic'+str(i+1) if i<7 else 'LI.count'},'LI.fail',[('RLD','li_byte')])
     P('LI.count').call('LI.u64').a(('COPYW','li_count','li_value'),('LDI','li_i',0)).branch({2:'LI.fail'},'LI.record',[('LDI','li_cmpmax',1024),('C64U','li_count','li_cmpmax')])

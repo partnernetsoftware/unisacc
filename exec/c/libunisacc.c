@@ -14,6 +14,7 @@
 #include "libraryexports.h"
 #include "librarycall.h"
 #include "librarybindings.h"
+#include "libraryresolver.h"
 
 typedef struct Allocation { void *p; struct Allocation *next, *prev, *hash_next; } Allocation;
 typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } GuestMap;
@@ -30,6 +31,7 @@ struct us_context {
     unsigned char *image; long image_size, image_dataoff, image_text_size; int image_entry;
     us_exports exports;
     us_bindings bindings;
+    us_resolver resolver;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -179,6 +181,7 @@ API us_context *us_new(const char *path) {
 API void us_free(us_context *c) {
     if (!c) return;
     discard_image(c);
+    us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);free(c->binding_blob);
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
@@ -229,6 +232,13 @@ API const void *us_tape(const us_context *c,size_t *length) {
     if (length) *length=c ? c->tape_length : 0; return c ? c->tape : 0;
 }
 static uint64_t library_u64(const Buf *b,size_t *at);
+static const char *library_native_target(void);
+static void invalidate_bindings(us_context *c) {
+    discard_image(c);free(c->tape);c->tape=0;c->tape_length=0;
+    free(c->signatures);c->signatures=0;c->signatures_length=0;
+    free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
+    free(c->target);c->target=0;c->error[0]=0;
+}
 static us_binding_type binding_type(us_type_descriptor t) {
     us_binding_type r={t.depth,t.base,t.shape,t.kind,t.width,t.uns};return r;
 }
@@ -240,26 +250,46 @@ API int us_add_symbol(us_context *c,const char *name,void *address,const us_sign
     if(sig->kind && (sig->count || sig->variadic))return error(c,"invalid data symbol declaration");
     if(sig->count){args=malloc(sig->count*sizeof *args);if(!args)return error(c,"out of memory");
         for(size_t i=0;i<sig->count;i++)args[i]=binding_type(sig->args[i]);}
-    int rc=sig->kind ? us_bindings_add_data(&c->bindings,name,(uintptr_t)address,&result,
+    int rc=us_resolver_accept_injection(&c->resolver,name,sig->kind,&result,args,sig->count,
+                 sig->variadic,sig->extent,sig->writable,c->error,sizeof c->error);
+    if(rc){free(args);return rc;}
+    rc=sig->kind ? us_bindings_add_data(&c->bindings,name,(uintptr_t)address,&result,
                       sig->extent,sig->writable,c->error,sizeof c->error) :
         us_bindings_add_function(&c->bindings,name,(uintptr_t)address,&result,args,sig->count,
                                 sig->variadic,c->error,sizeof c->error);
     free(args);if(rc)return rc;
-    discard_image(c);free(c->tape);c->tape=0;c->tape_length=0;
-    free(c->signatures);c->signatures=0;c->signatures_length=0;
-    free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
-    free(c->target);c->target=0;c->error[0]=0;return 0;
+    c->resolver.generation++;invalidate_bindings(c);return 0;
+}
+API int us_declare_import(us_context *c,const char *name,const us_signature *sig) {
+    if(!c || !sig || sig->kind>1 || active || c->input_is_tape)
+        return error(c,"invalid import declaration");
+    if(sig->count>1024 || (sig->count&&!sig->args))return error(c,"invalid import parameters");
+    us_binding_type result=binding_type(sig->result),*args=0;
+    if(sig->count){args=malloc(sig->count*sizeof *args);if(!args)return error(c,"out of memory");
+        for(size_t i=0;i<sig->count;i++)args[i]=binding_type(sig->args[i]);}
+    int rc=us_resolver_declare(&c->resolver,&c->bindings,name,sig->kind,&result,args,
+          sig->count,sig->variadic,sig->extent,sig->writable,c->error,sizeof c->error);
+    free(args);if(rc)return rc;invalidate_bindings(c);return 0;
+}
+API int us_load_library(us_context *c,const char *path) {
+    if(!c || active || c->input_is_tape)return error(c,"invalid library load");
+    int rc=us_resolver_load(&c->resolver,path,c->error,sizeof c->error);
+    if(rc)return rc;invalidate_bindings(c);return 0;
 }
 API int us_compile(us_context *c,const char *target,int level) {
     if (!c || !target || level<0 || level>2) return error(c,"invalid compilation options");
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
     if (active) return error(c,"recursive compilation not yet supported");
     c->error[0]=0;
-    free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
-    if(c->bindings.count && us_bindings_serialize(&c->bindings,&c->binding_blob,&c->binding_length,c->error,sizeof c->error))return 1;
-    if(c->binding_length>=INT_MAX)return error(c,"bindings too large");
+    unsigned char *frozen=0;size_t frozen_length=0;
+    if(c->bindings.count || c->resolver.declarations.count || c->resolver.handle_count){
+        if(strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
+        if(us_resolver_freeze(&c->resolver,&c->bindings,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
+    }
+    if(frozen_length>=INT_MAX){free(frozen);return error(c,"bindings too large");}
+    char *chosen=copy_string(target); if (!chosen){free(frozen);return error(c,"out of memory");}
     discard_image(c);
-    char *chosen=copy_string(target); if (!chosen) return error(c,"out of memory");
+    free(c->binding_blob);c->binding_blob=frozen;c->binding_length=frozen_length;
     free(c->target); c->target=chosen; c->optimisation=level;
     if (c->input_is_tape) return 0;
     free(c->tape);c->tape=0;c->tape_length=0;free(c->signatures);c->signatures=0;c->signatures_length=0;

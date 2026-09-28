@@ -34,6 +34,13 @@ int us_include_path(us_context *ctx, const char *path);
 /* Borrow address; caller owns its lifetime. Successful registration invalidates
    compiled code and previously returned exports; recompile before use. */
 int us_add_symbol(us_context *ctx, const char *name, void *address, const us_signature *signature);
+/* Trusted ABI/object declarations; dlsym does not discover or validate types.
+   Native POSIX lookup freezes all candidates at compile: injection, process,
+   then owned libraries in load order. The model selects and checks the winner.
+   Success invalidates code/exports; failure preserves the prior generation.
+   Handles remain owned until us_free, after compiled code is destroyed. */
+int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
+int us_load_library(us_context *ctx, const char *path);
 int us_compile(us_context *ctx, const char *target, int optimisation);
 int us_relocate(us_context *ctx);
 int us_run_main(us_context *ctx, int argc, const char *const *argv, int *status);
