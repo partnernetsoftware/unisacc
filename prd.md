@@ -2458,3 +2458,6 @@ R9-4/R9-7待修实证：models.closure把忽略的exec/build/ua_ref.c（1,130,27
 完整队列抓到 exec-lower、exec-armlower、exec-winlower 三项布局差异：Python lower 在单阶段入口提前执行 prune，而模型流水线把 prune 作为独立阶段。恢复 lower 的单阶段默认语义，完整镜像调用显式请求剪枝；不修改严格比较器。修复后先复跑三项与完整镜像路径，再重建和续验，失败回执保留。
 
 修正后的三项 lowering 专项与完整 source-to-ELF 严格比较均实际通过。七个构建分域和 pack 已重新执行，候选与已签封载荷逐字节相同（d4f7d302，1,233,236 B）；新的真实构建来源闭包为 812a916ade2d0d39cf7aaf5360f4298058426cbf7549d0deb43b04157c27139f。继续对修正后的冻结输入跑完整193项，前一轮三项失败不继承为通过。
+
+### R9 内存专项验收补齐剪枝阶段
+134/193 时两个内存专项报错，产品包路线已经含 prune；漏接的是 memorycheck.py 的独立 Python 模拟比较链（raw tape→lower→memory），而 C bk_run 参考已先 prune。独立模拟先执行现有 prune δ 再 lower，保留同基址的长度、完整文本/数据与两种绑定的严格比较。失败回执留存，不以行为相同替代字节比较。

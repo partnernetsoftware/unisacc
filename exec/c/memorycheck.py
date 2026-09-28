@@ -21,7 +21,8 @@ if kind in ('all','cc') and shard in ('all','1/3'):
     sys.path.insert(0,str(pathlib.Path('exec/pp').resolve()));import sim
     sys.path.insert(0,str(pathlib.Path('exec/c').resolve()));from pack import build
     low=json.loads((p/'lower.json').read_text());enc=json.loads((p/'elf.json').read_text())
-    ll=sim.load(low);el=sim.load(enc)
+    prune=json.loads((p/'prune.json').read_text())
+    ll=sim.load(low);el=sim.load(enc);pl=sim.load(prune)
     resources=p/'resources';(resources/'process').mkdir(parents=True);(resources/'memory').mkdir()
     manifest=p/'memory.tsv';manifest.write_text('memory\tencode\ttarget.text\tmemory-v1\telf.net\n')
     prefix=32 if target.startswith('osx/') else 0
@@ -38,7 +39,8 @@ if kind in ('all','cc') and shard in ('all','1/3'):
             (resources/'process/dl').mkdir(exist_ok=True)
         for key,v in vals.items():
             raw=struct.pack('<Q',v);files.cache[b'\0'+key.encode()]=raw;(resources/key).write_bytes(raw)
-        r,lowered,_=sim.run(low,tape,f,files,maxsteps=50000000,loaded=ll);assert r=='accept',(f,r,lowered)
+        r,pruned,_=sim.run(prune,tape,f,files,maxsteps=50000000,loaded=pl);assert r=='accept',(f,'prune',r,pruned)
+        r,lowered,_=sim.run(low,pruned,f,files,maxsteps=50000000,loaded=ll);assert r=='accept',(f,r,lowered)
         r,image,_=sim.run(enc,lowered,f,files,maxsteps=50000000,loaded=el);assert r=='accept',(f,r,image)
         assert image[:8]==b'UNIMEM1\n';text,extent,stored,off=struct.unpack('<4Q',image[8:40])
         expected_stored=prefix+len(body[nt+prefix:].rstrip(b'\0'))
