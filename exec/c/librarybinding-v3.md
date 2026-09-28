@@ -35,18 +35,18 @@ Host agent: librarybindings.h/libraryresolver.h and NEW librarynative.h + host u
 Candidate agent: modelcandidates.py/modelbindings.py, NEW shared typed signature canonicalizer, lower/libraryimports.py + own tests. Expose reusable delta canonicalization helper to E3, communicate its exact registers/entry.
 E3 agent: parse2/libraryimports.py and necessary capture/serializer hooks in libraryexports/librarytypes/gen2; import existing/new shared canonicalizer; own probes. No edits to candidate/lower/host files.
 
-## Variadic call-plan foundation (not yet a USBIND3 public feature)
+## Variadic call-plan foundation (internal mechanical interface)
 `us_native_plan_add_variadic` accepts an explicit fixed-count plus a concrete
 USLSIG2 invocation graph (variadic=0, count=total, all promoted tail descriptors).
 It uses ffi_prep_cif_var even when total==fixed, and deep-owns all graph objects.
 Tail float32 and integer widths below four bytes are rejected; the model must
 perform default argument promotions before emitting this declaration. This
-internal helper does not enable variadic bindings in existing public APIs.
-The model still needs to validate the prototype prefix and emit per-call plans;
+internal helper alone does not enable a public source call. E3 validates the
+prototype prefix and emits per-call plans through the integration below;
 USLSIG2 export closure support for genuinely variadic functions remains pending.
 Reference: https://github.com/libffi/libffi/blob/master/doc/libffi.texi .
 
-## Variadic templates and concrete call requests (R10, partial integration)
+## Variadic templates and concrete call requests (R10 source integration)
 
 USBIND3 format2 uses format1 framing, but the handle owns a variadic prototype
 template rather than a prepared call cif. The prototype USLSIG2 has variadic1,
@@ -65,7 +65,19 @@ integers and float32 are rejected because promotion belongs in E3.
 
 The host transaction owns every graph/cif and publishes all sites only after
 complete validation. An invalid request preserves the previous site set.
-This protocol and the real host va_arg path are tested; E3 callsite capture,
-USLTAPE2 emission, public-context dispatcher/lifecycle and full source-to-native
-variadic calls are still pending. Existing public APIs continue fixed-only
-preparation; adding these helpers does not claim public variadic support.
+E3 format2 calls use ALL_STACK wrappers with a unique callsite label. Each
+site captures converted fixed parameters and promoted tails; nested argument
+expressions preserve their outer site. After all source definitions are known,
+a source winner redirects to that function without requesting a native plan.
+Selected native sites emit the six control words template_handle, slots,
+result, total_count, site_id, reserved0 and a concrete USCPLAN1 graph.
+
+USLTAPE2\n contains three little-endian u64 lengths followed by tape, USLSIG2
+exports and USCPLAN1 requests. The public context prepares all sites after E3;
+E4 sees only tape. Images are destroyed before sites/templates on invalidation.
+Source-to-native variadic Pair calls, two call graphs, zero tail, narrow/Bool/
+float promotions and source priority are tested on private macOS ARM64 and
+Rosetta candidates. Legacy variadic us_signature, variadic script export
+closures, recursive callback signatures and other four native platforms remain
+separate uncompleted requirements. The first deployed-model red baseline is
+recorded in research/r10-variadic-public-red.json.

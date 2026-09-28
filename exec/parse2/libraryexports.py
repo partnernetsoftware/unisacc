@@ -128,6 +128,8 @@ def install(E,P,b,start,integers):
     P('LX.callcount').a(('LDX','lx_callcount','lx_callsig',b['FPS_COUNT'])).branch({0:'LX.callindex'},'LX.original.argumentquery',[('CMP','na','lx_callcount')])
     P('LX.callindex').a(('ALUI','mul','lx_callindex','lx_callsig',1024),('ALU','add','lx_callindex','lx_callindex','na'),('LDX','lx_callmark','lx_callindex',PARAMMARK),('LDX','lx_callepoch','lx_callsig',SIGEPOCH)).branch({1:'LX.calltype'},'LX.original.argumentquery',[('CMP','lx_callmark','lx_callepoch')])
     P('LX.calltype').a(('LDX','t','lx_callindex',PARAMDEPTH),('ALUI','mul','t','t',4096),('LDX','lx_callbase','lx_callindex',PARAMBASE),('ALU','add','t','t','lx_callbase'),('CMPI','t',0)).goto('CL.signature')
+    from libraryvariadic import install as variadic_install
+    variadic_install(E,P,b,integers)
     module_start=module_install(E,P,imports_start)
     mode,row=g.st['LX.startok']
     for k,(n,q) in list(row.items()):

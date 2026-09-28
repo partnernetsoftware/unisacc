@@ -18,9 +18,10 @@
 extern "C" {
 #endif
 /* R10 development API: model compilation, host-native relocation, declared
-   native bindings and fixed scalar/plain-aggregate exports/imports. Typed
-   variadic and special layouts plus full platform qualification remain under
-   development. One caller per context;
+   native bindings and scalar/plain-aggregate exports/imports, including typed
+   variadic native imports with model-declared concrete callsites. Recursive
+   callback signatures, unions/bitfields/wide floating layouts and full platform
+   qualification remain under development. One caller per context;
    different contexts may execute concurrently. */
 typedef struct us_context us_context;
 /* ABI facts, not parser-local IDs. kind: 0 void, 1 integer, 2 data pointer,
@@ -56,10 +57,14 @@ US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const
    Success invalidates code/exports; failure preserves the prior generation.
    Handles remain owned until us_free, after compiled code is destroyed. */
 US_API int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
-/* New typed fixed native declarations use the exact model USLSIG2 single-record
+/* Typed fixed or variadic native declarations use the exact model USLSIG2 single-record
    protocol. The record name must equal name; bytes are deep-owned on success.
    Old us_signature/API layout is unchanged. Mutation follows the same generation
-   invalidation rule. Full variadic/callback/union ABI support remains separate. */
+   invalidation rule. A variadic prototype describes its fixed prefix; the model records and promotes
+   each concrete tail before the host builds its call plan (at least one fixed
+   parameter, at most 1024 total parameters). This does not enable legacy
+   us_signature variadics or native pointers to variadic script exports. Callback/union and
+   wide floating layouts remain separate. */
 US_API int us_add_symbol_typed(us_context *ctx, const char *name, void *address,
                               const void *signature, size_t length);
 US_API int us_declare_import_typed(us_context *ctx, const char *name,

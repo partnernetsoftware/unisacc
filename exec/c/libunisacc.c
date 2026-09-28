@@ -35,6 +35,8 @@ struct us_context {
     us_bindings bindings;
     us_resolver resolver;
     us_native_plans native_plans;
+    us_native_templates native_templates;
+    us_native_callsites native_callsites;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -53,7 +55,7 @@ typedef struct UsOpenFile { int fd; struct UsOpenFile *next; } UsOpenFile;
 static _Thread_local UsOpenFile *open_files;
 static _Thread_local jmp_buf failure;
 static void __us_panic(const char *message) {
-    snprintf(active->error,sizeof active->error,"%s",message);
+    if(message!=active->error)snprintf(active->error,sizeof active->error,"%s",message);
     longjmp(failure,1);
 }
 static int tracked_open(const char *path,int flags) {
@@ -194,6 +196,8 @@ API us_context *us_new(const char *path) {
 API void us_free(us_context *c) {
     if (!c) return;
     discard_image(c);
+    us_native_callsites_clear(&c->native_callsites);
+    us_native_templates_clear(&c->native_templates);
     us_native_plans_clear(&c->native_plans);
     us_resolver_clear(&c->resolver);
     us_bindings_clear(&c->bindings);free(c->binding_blob);
@@ -248,8 +252,10 @@ API const void *us_tape(const us_context *c,size_t *length) {
 static uint64_t library_u64(const Buf *b,size_t *at);
 static const char *library_native_target(void);
 static uint64_t library_native_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
+static uint64_t library_variadic_dispatch(uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t);
 static void invalidate_bindings(us_context *c) {
-    discard_image(c);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
+    discard_image(c);us_native_callsites_clear(&c->native_callsites);
+    us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);free(c->tape);c->tape=0;c->tape_length=0;
     free(c->signatures);c->signatures=0;c->signatures_length=0;
     free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
     free(c->target);c->target=0;c->error[0]=0;
@@ -307,14 +313,16 @@ API int us_compile(us_context *c,const char *target,int level) {
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
     if (active) return error(c,"recursive compilation not yet supported");
     c->error[0]=0;
-    unsigned char *frozen=0;size_t frozen_length=0;us_native_plans plans={0};
+    unsigned char *frozen=0;size_t frozen_length=0;us_native_plans plans={0};us_native_templates templates={0};
     if(c->bindings.count || c->resolver.declarations.count || c->resolver.handle_count){
         if(strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
-        if(us_resolver_freeze_with_plans(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,&plans,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
+        if(us_resolver_freeze_with_templates(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,(uintptr_t)library_variadic_dispatch,&plans,&templates,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
     }
-    if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);return error(c,"bindings too large");}
-    char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);return error(c,"out of memory");}
-    discard_image(c);us_native_plans_clear(&c->native_plans);c->native_plans=plans;
+    if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"bindings too large");}
+    char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"out of memory");}
+    discard_image(c);us_native_callsites_clear(&c->native_callsites);
+    us_native_templates_clear(&c->native_templates);us_native_plans_clear(&c->native_plans);
+    c->native_plans=plans;c->native_templates=templates;
     free(c->binding_blob);c->binding_blob=frozen;c->binding_length=frozen_length;
     free(c->target); c->target=chosen; c->optimisation=level;
     if (c->input_is_tape) return 0;
@@ -373,13 +381,18 @@ API int us_compile(us_context *c,const char *target,int level) {
         if (!rc) rc=runroute_range(route,0,"e3",&input,c->sources->name);
         if (!rc) {
             size_t begin=0,length=(size_t)input.n;
-            if (input.n>=9 && !memcmp(input.b,"USLTAPE1\n",9)) {
+            if (input.n>=9 && (!memcmp(input.b,"USLTAPE1\n",9) || !memcmp(input.b,"USLTAPE2\n",9))) {
+                int version2=!memcmp(input.b,"USLTAPE2\n",9);
                 size_t at=9;uint64_t tape=library_u64(&input,&at),meta=library_u64(&input,&at);
-                if (tape>(size_t)input.n-at || meta!=(size_t)input.n-at-tape || meta<16 ||
+                uint64_t calls=version2 ? library_u64(&input,&at) : 0;
+                if (tape>(size_t)input.n-at || meta>(size_t)input.n-at-tape ||
+                    calls!=(size_t)input.n-at-tape-meta || meta<16 ||
                     (memcmp(input.b+at+(size_t)tape,"USLSIG1\n",8) &&
                      memcmp(input.b+at+(size_t)tape,"USLSIG2\n",8))) __us_panic("bad library tape envelope");
                 c->signatures=malloc((size_t)meta);if (!c->signatures) __us_panic("out of memory");
                 memcpy(c->signatures,input.b+at+(size_t)tape,(size_t)meta);c->signatures_length=(size_t)meta;
+                if(version2 && us_native_callsites_load(&c->native_callsites,&c->native_templates,
+                    input.b+at+(size_t)tape+(size_t)meta,(size_t)calls,c->error,sizeof c->error)) __us_panic(c->error);
                 begin=at;length=(size_t)tape;
             }
             if (level) {
@@ -396,7 +409,10 @@ API int us_compile(us_context *c,const char *target,int level) {
             }
         }
     } else rc=1;
-    cleanup(); active=0; RI=0; NRI=0; return rc;
+    cleanup(); active=0; RI=0; NRI=0;
+    if(rc){us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
+        us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;}
+    return rc;
 }
 
 /* The decoder handles a bounded byte format only; all symbol selection and
@@ -472,12 +488,9 @@ static uint64_t library_dispatch_error(us_context *c,const char *message) {
 /* A declared ABI mechanism: model selected this exact plan; no host name winner
    or source type classification. Native code and borrowed objects obey C's
    lifetime contract; this bridge is not an untrusted-code sandbox. */
-static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
-                                       uint64_t count,uint64_t reserved0,uint64_t reserved1) {
-    us_context *c=active;ScriptFrame *frame=script_frames;
-    if(!c || !frame)return 1;
-    us_native_plan *plan=us_native_plan_find(&c->native_plans,handle);
-    if(!plan || count>1024 || reserved0 || reserved1 ||
+static uint64_t library_native_invoke(us_context *c,ScriptFrame *frame,us_native_plan *plan,
+                                      uint64_t slots,uint64_t result,uint64_t count) {
+    if(!plan || count>1024 || count!=plan->graph.items[0].count ||
        !library_frame_region(c,frame,slots,(size_t)count*8))
         return library_dispatch_error(c,"invalid declared native call plan or slots");
     us_export *x=plan->graph.items;size_t bytes=x->result.kind==5 ? (size_t)x->result.width : x->result.kind ? 8:0;
@@ -492,6 +505,20 @@ static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t 
     int rc=us_native_invoke(arena);
     frame->native_arenas=node->next;us_native_arena_free(arena);free(node);
     if(rc)return library_dispatch_error(c,"declared native call failed");return 0;
+}
+static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
+                                       uint64_t count,uint64_t reserved0,uint64_t reserved1) {
+    us_context *c=active;ScriptFrame *frame=script_frames;
+    if(!c || !frame)return 1;
+    if(reserved0 || reserved1)return library_dispatch_error(c,"invalid native call reserved fields");
+    return library_native_invoke(c,frame,us_native_plan_find(&c->native_plans,handle),slots,result,count);
+}
+static uint64_t library_variadic_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
+                                         uint64_t count,uint64_t site,uint64_t reserved0) {
+    us_context *c=active;ScriptFrame *frame=script_frames;
+    if(!c || !frame)return 1;
+    if(reserved0 || !site)return library_dispatch_error(c,"invalid variadic call site or reserved field");
+    return library_native_invoke(c,frame,us_native_callsite_find(&c->native_callsites,handle,site),slots,result,count);
 }
 /* Host memory lifetime adaptation. The model decides which operation and
    argument sequence to issue; these callbacks never inspect source or tape. */

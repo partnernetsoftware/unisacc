@@ -2851,3 +2851,9 @@ R10 fixed参数修复正式收尾（e22d236源）：私有shared/六目标/pack�
 R10 typedvariadic协议/宿主半部已实测：USBIND3 format2区分原型support0与外层模板可用位；固定格式0/1保留，USCPLAN1逐调用点完整图的事务发布/失败保留旧计划已实现。ARM/Rosetta普通+ASan/UBSan每轮300次真实va_arg（混合20、零尾、Pair）通过；模型655态/168734观察全域相等，4有效/10畸形/536截断在sim/C网络一致。父会话resolver冻结模板/缺dispatcher回滚/旧固定freeze对照通过，8项门禁双槽4秒全rc0。接下来仍需E3捕获与提升、USLTAPE2、公开上下文生命周期和完整调用闭环；不能把这些host/protocol单测称为公开变参已可用。
 
 R10 variadic协议批次正式产品核验：dec4223私有冻结源shared/六目标/pack每步≤55s重构；根.com与真实原始sidecar同步**1,081,898 B / SHA256 bd41d0d3a54cd1a999ac586f6a998a36f8efb2e3990d5c1b8153aa7fb561d872**（比上批+766B）。候选9项产品/公开fixed库门禁rc0（17s）、435次产品差分wrong0/refuse0（15s）、23对实际保留网络全域check-net一致；协议/宿主8项门禁另已rc0。普通公开接口仍fixed-only准备；这些不是完整公开variadic闭环、最终全套或六平台验收。回执research/r10-variadic-protocol-host-evidence.json，完整R10继续。
+
+R10 variadic完整调用闭环本批实施：E3同时处理USBIND3 format2原型、逐调用点postconversion描述、嵌套保存、源码后置定义优先、ALL_STACK专用包装与USCPLAN1/USLTAPE2。宿主公开ctx拥有templates/callsites，E3后事务准备且E4只见tape；专用dispatcher沿既有arena先登记再ffi_call，所有失效/失败/free先销毁image再清callsite/templates。并发域：parse2模型与专用modelcheck；libunisacc.c/.h公开宿主；父会话真实API回归/PRD/门禁/正式重构。默认CLI无变参资源仍保持现状；模型尾提升由tyinfo/type与原有转换机支持，不由宿主猜类型。公开验收至少两种调用点图、嵌套实参、Pair返回与O0/O1/O2，ARM/Rosetta；后置源码定义不产生native计划。失败证据保留，未闭环不记为完成。
+
+本批公开variadic真实回归红基线：tests/libraryabi/variadic_bidirectional.c经真实公开API与当前bd41d0d3模型包运行，编译明确拒绝library import binding or signature、rc1；不算完成。新回归含同原型混合/零尾两种调用图、signed char/unsigned short/_Bool/float默认提升、嵌套float函数实参、六个额外FP尾参数跨寄存器、指针/Pair按值与返回、100次/优化级、失败注册保留旧导出、后置源码定义优先与缺前缀拒绝。宿主适配已实跑原固定typed普通及ASan/UBSan回归，变参新模型仍待交付。
+
+本批私有quiet E3候选公开调用已实测：ARM普通/ASan+UBSan、Rosetta普通各O0/O1/O2×100次全部通过，真实va_arg图/提升/Pair/零尾/后置源码优先与缺前缀、前缀不符拒绝通过。独立图字段检查抓到首版350–357与modelsignature银行重叠，改400–407并断言隔离；第一版仅接受判定不足、不作为通过证据。新模型进入正式构造与受影响门禁之前，根产品仍保持旧bd41d0d3。callback图后续设计见research/r10-callback-graph-next-design.md（仅设计，不把现host全局us_sym回跳等同于callback形参跨界）。
