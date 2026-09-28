@@ -55,7 +55,13 @@ def main():
   pointerloser=rec(2,2,8192,supported=0,desc=((1<<32)+1,0,0,2,8,0))
   check(wire(pointerloser,winner),expected)
   datawinner=rec(kind=1);check(wire(rec(1,0,8192,kind=1),datawinner),b'USBIND1\n'+U(1)+v1(datawinner))
+  # Invalid data candidate structure must fail even below a valid function.
+  malformed_data=[]
+  r=bytearray(rec(2,1,8192,name=b'host',kind=1,supported=0));n=struct.unpack('<Q',r[8:16])[0];r[16+n+11]=1;malformed_data.append(bytes(r)) # variadic
+  malformed_data.append(rec(2,1,8192,kind=1,supported=0,desc=(0,0,0,0,0,0)))
+  r=bytearray(rec(2,1,8192,kind=1,supported=0,desc=(0,0,0,5,0,0)));r[-10:-2]=U(0);malformed_data.append(bytes(r))
+  for r in malformed_data:assert check(wire(winner,r))[0]=='reject'
   valid=wire(*candidates)
   for n in range(len(valid)):assert run(d,b'','fixture',files=Files(valid[:n]),loaded=loaded,maxsteps=2000000)[0]=='reject'
-  print(json.dumps({'states':len(d['states']),'full_domain':full,'priority_orders':3,'controls':len(bad),'truncations':len(valid),'V1_passthrough':True,'unsupported_loser_kept_valid':True,'unsupported_winner_retained_for_typed_reject':True}))
+  print(json.dumps({'states':len(d['states']),'full_domain':full,'priority_orders':3,'controls':len(bad)+len(malformed_data),'truncations':len(valid),'V1_passthrough':True,'unsupported_loser_kept_valid':True,'unsupported_winner_retained_for_typed_reject':True}))
 if __name__=='__main__':main()

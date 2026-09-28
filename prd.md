@@ -2738,3 +2738,5 @@ macOS正式1000循环生命周期以暖后全zone live bytes和blocks零增长�
 R10 resolver公开API已接入：声明与加载成功统一失效已编译代际；失败不改旧code/exports。compile在native target机械freeze USBIND2，relocate复用同一blob不重新lookup。65536原始candidate硬上限与δ一致。独立host普通及ASan/UBSan实跑通过；模型规范器46958观察、lower集成469820观察与V2截断/高64控制首验通过。新真实API checker覆盖owned ordinal/process/injected/source定义四级、O0/O1/O2、动态数据读写、失败保存与成功失效，必须完整新包实际通过后才称闭环。Windows审计实际两ISA long32/pointer64、core COFF成功，但CRC/资源地址与process_slots截断、Windows映射/ffi构件未闭合，仍待完成，报告不外推原生通过。
 
 R10 resolver TDD门禁新增lib-resolver（完整模型候选真实公开API）与lib-resolver-host（独立普通/ASan typed候选IO）。host上限对齐65536后重验rc0，准确源hash与命令封存research/r10-resolver-host-evidence.json；Windows只读交叉编译审计永久封存research/r10-windows-library-port-audit.txt。此时根.com仍旧26def90/0dad候选，resolver5e0058b六目标私有构造已全部rc0、打包在跑，未称最新root或native通过。
+
+R10 resolver全候选wire复核收紧三处data结构：var必须0、result不可void、extent必须>0；即使是合法winner旁的低优先级也不可藏畸形记录。MC规范器189态48506观察与17负例/404截断首验通过。5e0058b包已完成且来源验证，但不含这三处，仅作先验原生集成；正式root必须基于修复后源实际重构，禁止把旧包侧车换身份。
