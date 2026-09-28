@@ -21044,6 +21044,9 @@ long bk_run(char *t, int n, long argc, long argv) {
        table, so it uses this process's own [S-9] */
     bk_win_imports((long)bk_win_imports);
 #endif
+#ifdef UNISA_EXPERIMENTAL_TAPEPRUNE
+    t = tp_prune(t, n); n = tp_prune_length;
+#endif
     bk_parse(t, n);
     bk_repack();
     bk_lower();
@@ -21082,6 +21085,9 @@ int bk_build(char *t, int n, char *target) {
     if (target[0] == 111) bkos = 1;                  /* osx */
     if (target[0] == 119) bkos = 2;                  /* win */
     bkarch = 0; if (target[4] == 97) bkarch = 1;     /* .../arm64 */
+#ifdef UNISA_EXPERIMENTAL_TAPEPRUNE
+    t = tp_prune(t, n); n = tp_prune_length;
+#endif
     bk_parse(t, n);
     bk_repack();
     bk_lower();

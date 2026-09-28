@@ -249,7 +249,7 @@ with tempfile.TemporaryDirectory() as td:
         print('queue: 3/3 synthetic results reused in %.3fs; docs/checker/candidate/environment/platform/missing/declaration and unreviewed-code/command fallback controls pass'%elapsed)
     os.chdir(previous_cwd)
     cache=t/'cache';cache.mkdir()
-    names={'run','models.pkg','route.tsv'} | {s+'.'+e for s in ('e2','e1','e3','e4','lower','elf') for e in ('json','tbl','net')}
+    names={'run','models.pkg','route.tsv'} | {s+'.'+e for s in ('e2','e1','e3','e4','prune','lower','elf') for e in ('json','tbl','net')}
     for n in names: (cache/n).write_bytes(b'fixture')
     manifest={n:c.digest(cache/n) for n in names}
     (cache/'manifest.json').write_text(json.dumps(manifest))

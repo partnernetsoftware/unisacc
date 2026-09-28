@@ -126,7 +126,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         if target in targets or any(s[0]!=target for s in stages): raise ValueError('duplicate/mixed target')
         targets.add(target)
         names=[s[1] for s in stages]
-        if names!=['e2','e1','e3','e4','lower','elf']: raise ValueError('unexpected image stages')
+        if names!=['e2','e1','e3','e4','prune','lower','elf']: raise ValueError('unexpected image stages')
         for _,name,inp,out,model in stages[:2]:
             rows.append('\t'.join([target+'/unit',name,inp,out,str((path.parent/model).resolve())]))
         _,name,inp,out,model=stages[-1]

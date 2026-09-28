@@ -163,7 +163,7 @@ fi
 job exec-memwinarm ./exec/c/winmemorycheck.sh arm64
 job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64
 job exec-tableself env NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
-job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through six deltas
+job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through seven deltas
 job exec-armself env TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines
 job exec-macself env TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh # Mach-O source route and native bootstrap
 job exec-macxself env TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh # x86/Rosetta bootstrap

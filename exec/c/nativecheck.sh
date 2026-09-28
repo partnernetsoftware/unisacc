@@ -33,30 +33,30 @@ def run(cmd, cwd=None):
 part=sys.argv[3]; netrun=p/'run.macho'
 assert netrun.read_bytes()==ua.read_bytes(), 'network runtime != compiler-built runtime'
 if part in ('all', 'stages'):
-    for stage in ['e2','e1','e3','e4','lower','elf']:
+    for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         run([ua,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     for src in ['examples/hello.c','examples/fib.c','tests/c/b_toknames.c']:
         name=pathlib.Path(src).stem;inp=pathlib.Path(src)
-        for stage in ['e2','e1','e3','e4','lower','elf']:
+        for stage in ['e2','e1','e3','e4','prune','lower','elf']:
             got=run([ua,p/(stage+'.net'),inp,src,root/'include'])
             want=p/(name+'.'+('macho' if stage=='elf' else stage))
             if got!=want.read_bytes():raise SystemExit(f'{name} {stage}: executor output differs')
             inp=p/(name+'.ua.'+stage);inp.write_bytes(got)
-        print('native executor:',src,'six stages equal')
-    # The six network stages now compile their own C runtime.  The resulting
+        print('native executor:',src,'seven stages equal')
+    # The seven network stages now compile their own C runtime.  The resulting
     # runtime repeats those stages on its own source, without Python processing it.
-    for stage in ['e2','e1','e3','e4','lower','elf']:
+    for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         run([netrun,'--check-net',p/(stage+'.tbl'),p/(stage+'.net')])
     src='exec/c/run.c';inp=pathlib.Path(src)
-    for stage in ['e2','e1','e3','e4','lower','elf']:
+    for stage in ['e2','e1','e3','e4','prune','lower','elf']:
         got=run([netrun,p/(stage+'.net'),inp,src,root/'include'])
         want=p/('run.'+('macho' if stage=='elf' else stage))
         if got!=want.read_bytes():raise SystemExit(f'network-built runtime self stage {stage}: differs')
         inp=p/('run.self.'+stage);inp.write_bytes(got)
-    print('network-built runtime: six self stages and image equal; six domain checks passed')
+    print('network-built runtime: seven self stages and image equal; seven domain checks passed')
 if part in ('all', 'chain'):
     # The same stages also run within a single process, passing only bytes.
-    models=[p/(stage+'.net') for stage in ['e2','e1','e3','e4','lower','elf']]
+    models=[p/(stage+'.net') for stage in ['e2','e1','e3','e4','prune','lower','elf']]
     for exe in [p/'run',ua,netrun]:
         for src in ['examples/hello.c','tests/c/b_toknames.c','exec/c/run.c']:
             got=run([exe,'--chain',src,src,root/'include',*models])

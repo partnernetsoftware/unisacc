@@ -1,7 +1,7 @@
 #!/bin/sh
 _BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
-# Development route: C source -> ELF, Mach-O or PE, six deltas on one generic C executor.
+# Development route: C source -> ELF, Mach-O or PE, seven deltas on one generic C executor.
 # Python constructs models only; after that no Python stage processes a source.
 # NETWORK=0 selects the reference lookup-table execution; default is inference.
 # Linux/macOS x86_64 or arm64, Windows x86_64 or arm64; frontend coverage limits apply.

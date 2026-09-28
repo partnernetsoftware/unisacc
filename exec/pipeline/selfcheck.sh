@@ -1,7 +1,7 @@
 #!/bin/sh
 _BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
-# Current compiler source through six deltas to the selected target image.
+# Current compiler source through seven deltas to the selected target image.
 # The output compiles the existing C compiler; it is not E7 product adoption.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"

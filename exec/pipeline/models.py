@@ -37,7 +37,7 @@ def identity(target, network, compiler):
 def valid(cache, network):
     try:
         manifest = json.loads((cache / 'manifest.json').read_text())
-        required = {'run'} | {s+'.'+ext for s in ('e2','e1','e3','e4','lower','elf')
+        required = {'run'} | {s+'.'+ext for s in ('e2','e1','e3','e4','prune','lower','elf')
                              for ext in (('json','tbl','net') if network == '1' else ('json','tbl'))}
         if network == '1': required |= {'models.pkg', 'route.tsv'}
         if not isinstance(manifest, dict) or set(manifest) != required:
