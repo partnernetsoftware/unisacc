@@ -1,6 +1,7 @@
 """Optional native-memory binding, expressed as ordinary model actions.
-The first pass without mapped bases supplies a size plan; the second pass
-encodes at the actual bases. Neither pass asks a reference compiler.
+A reserved text base lets the model derive the aligned data base and encode
+once. The retained explicit text/data interface also supports the old two-pass
+driver. Neither path asks a reference compiler.
 """
 import sys
 from pathlib import Path
