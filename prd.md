@@ -2644,3 +2644,7 @@ E3/lower新增声明的library/module资源：无main输入按模块编译，不
 本批默认E3固定清单与warnings/errors模式补验进行中；根.com仍为上一构建身份，需要新冻结重建，不把这些专项标成最新根产物全绿。符号注入与脚本调用宿主、双向回调、扩展ABI、1000次无增长、六目标库与最终签名发布均未闭合。本轮并发：默认模型回归、原生ABI与typed注入声明存储、E3注入符号解析δ三个不相交域；宿主仅存借用地址和显式类型描述，解析决策继续在δ，禁止宿主解析C或假装未定义函数已定义。
 
 本批证据封存：[模块构造](research/r10-librarymodule-construct.json)、[动态参数六目标构造](research/r10-libraryprocess-construct.json)、[当前宿主实际调用](research/r10-librarymodule-native.json)。门禁新增lib-format/lib-native-exports/lib-module-exports，分别检查格式与生命周期、含main导出保持、无main模块；最终候选仍须实际执行这些项。
+
+新私有六目标候选已实际完成构造与打包：1,013,267 B、SHA256 a97f8357de1f9ff2fd2417703714068ec69300b2213b9142cf83b4650d5b810f；冻结快照无.git令最后provenance写入报错，包/容器构建已成功，随后仅用主仓只读GIT_DIR补入e160857身份并校验快照来源哈希，不重建或改字节。该候选含main真实typed导出四上下文测试rc0。旧lib-context对普通CLI -S的整tape断言rc1：模块有意移除进程启动且__init仅初始化后返回，不能继承普通程序tape全等合同；保留失败，补严格独立模块参考后再验，不用单纯删除断言凑绿。默认E3固定314/314及plain/warnings/errors全域和located模块有限对拍已由私有快照实测，回执收片中。根.com尚未替换。
+
+模块参考修正已实跑rc0：并发上下文、multi-unit O0/O1/O2、include目录与连续IO失败fd恢复均通过；转换只删除独立写明的316B启动及23B进程退出包装，其他字节完整比较，O1/O2从转换后的O0经过既有Python参考优化，禁止盲删已优化tape。增加启动/退出包装篡改拒绝控制。默认314源及三个网络的完整有限观察结果见[默认与变体回执](research/r10-librarymodule-default.json)；plain 1,604,504、warnings 1,714,670、errors 1,701,636观察全相等。native ABI及USBIND1独立声明存储见[原生回执](research/r10-libraryexports-native.json)，注册表尚未接入context，不能称符号互调已完成。

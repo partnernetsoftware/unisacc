@@ -1,5 +1,24 @@
 import ctypes, concurrent.futures, subprocess, tempfile, pathlib, argparse, shutil, sys
 ROOT=pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0,str(ROOT))
+from unisa.opt import optimise
+
+def module_reference(ordinary):
+    """O0 declared process wrapper removal; preserve every other byte."""
+    header = b'_start:\n  call __init\n  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n  jump __argv_top\n__argv_done:\n  call main\n  jump __main_ret\n.bss __argvv 32768\n'
+    assert ordinary.startswith(header) and ordinary.count(header) == 1, 'unexpected startup wrapper'
+    body = ordinary[len(header):]
+    marker = b'__main_ret:\n'
+    assert body.count(marker) == 1, 'ambiguous generated return label'
+    assert body.count(b'__init:\n') == 1, 'ambiguous generated init label'
+    at = body.index(marker)
+    assert body[:at].endswith(b'__init:\n  ret\n') or (b'__init:\n' in body[:at] and body[:at].endswith(b'  ret\n')), 'unexpected init return'
+    tails = (b'__main_ret:\n  .exit r0\n', b'__main_ret:\n  call exit\n  .exit r0\n')
+    matched = [tail for tail in tails if body[at:].startswith(tail)]
+    assert len(matched) == 1, 'unexpected process exit wrapper'
+    tail = matched[0]
+    return body[:at] + body[at + len(tail):]
+
 def main():
  global L,pkg
  ap=argparse.ArgumentParser();ap.add_argument('--package',required=True);a=ap.parse_args()
@@ -34,7 +53,12 @@ def check(candidate,td):
  for k,out in enumerate(outs):
   src=td/('reference'+str(k)+'.c');src.write_text('int main(void){return K;}')
   r=subprocess.run(['sh',str(candidate),'-b','osx/arm64','-D','K='+str(k),'-S',str(src),'-o','-'],capture_output=True,timeout=10)
-  assert r.returncode==0 and r.stdout==out,('reference',k,r.returncode,r.stderr)
+  assert r.returncode==0 and module_reference(r.stdout)==out,('reference',k,r.returncode,r.stderr)
+  if k==0:
+   for changed in (b'X'+r.stdout, r.stdout+b'__main_ret:\n  .exit r0\n',r.stdout.replace(b'__main_ret:\n  .exit r0\n',b'__main_ret:\n  ret\n')):
+    try:module_reference(changed)
+    except AssertionError:pass
+    else:raise AssertionError('module reference accepted changed process wrapper')
  c=L.us_new(pkg);assert not L.us_add_source(c,b'bad.c',b'int main( {')
  assert L.us_compile(c,b'osx/arm64',0)!=0 and L.us_error(c)
  L.us_free(c)
@@ -66,8 +90,10 @@ def check(candidate,td):
    for path,text in zip(srcs,texts):assert not L.us_add_source(c,str(path).encode(),text)
    assert not L.us_compile(c,b'osx/arm64',level),L.us_error(c)
    n=ctypes.c_size_t();p=L.us_tape(c,ctypes.byref(n));out=ctypes.string_at(p,n.value)
-   r=subprocess.run(['sh',str(candidate),'-b','osx/arm64','-O'+str(level),'-S',*[str(p) for p in srcs],'-o','-'],capture_output=True,timeout=10)
-   assert r.returncode==0 and out==r.stdout,('multi',level,r.returncode,r.stderr)
+   r=subprocess.run(['sh',str(candidate),'-b','osx/arm64','-O0','-S',*[str(p) for p in srcs],'-o','-'],capture_output=True,timeout=10)
+   assert r.returncode==0,('multi reference failed',level,r.returncode,r.stderr)
+   expected=optimise(module_reference(r.stdout).decode(),level).encode()
+   assert out==expected,('multi',level)
   finally:L.us_free(c)
  inc=td/'headers';inc.mkdir();(inc/'answer.h').write_text('#define ANSWER 23\n')
  src=td/'include.c';src.write_text('#include <answer.h>\nint main(void){return ANSWER;}')
@@ -78,7 +104,7 @@ def check(candidate,td):
   assert not L.us_compile(c,b'osx/arm64',0),L.us_error(c)
   n=ctypes.c_size_t();p=L.us_tape(c,ctypes.byref(n));out=ctypes.string_at(p,n.value)
   r=subprocess.run(['sh',str(candidate),'-b','osx/arm64','-I',str(inc),'-S',str(src),'-o','-'],capture_output=True,timeout=10)
-  assert r.returncode==0 and r.stdout==out,('include',r.returncode,r.stderr)
+  assert r.returncode==0 and module_reference(r.stdout)==out,('include',r.returncode,r.stderr)
  finally:L.us_free(c)
  print('lib prototype: concurrent contexts, multi-unit O0/O1/O2, include directory and error recovery: ok')
 
