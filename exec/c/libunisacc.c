@@ -461,9 +461,23 @@ typedef struct ScriptFrame {
     volatile int status,exited,failed;
     NativeCleanup *volatile native_arenas;
     unsigned char *stack_base;size_t stack_size;
-    struct ScriptFrame *previous;
+    struct ScriptFrame *previous;us_context *owner;us_call_outcome *outcome;
 } ScriptFrame;
 static _Thread_local ScriptFrame *script_frames;
+static _Thread_local us_native_boundary *native_boundaries;
+static void library_boundary_note(us_context *c,const us_call_outcome *outcome){
+    for(us_native_boundary *b=native_boundaries;b;b=b->previous)
+        if(b->owner==c){us_call_outcome_merge(&b->outcome,outcome);break;}
+}
+static int library_invocation_error(us_context *c,const char *message){
+    if(message)error(c,message);
+    us_call_outcome outcome={0};outcome.failed=1;
+    if(c)snprintf(outcome.message,sizeof outcome.message,"%s",c->error);
+    library_boundary_note(c,&outcome);
+    int same_owner=0;for(ScriptFrame *f=script_frames;f;f=f->previous)if(f->owner==c){same_owner=1;break;}
+    if(c && !same_owner){c->call_failed=1;c->call_exited=0;c->call_exit_status=0;}
+    return 1;
+}
 static void script_frame_cleanup(ScriptFrame *frame) {
     while(frame->native_arenas){NativeCleanup *node=frame->native_arenas;frame->native_arenas=node->next;
         us_native_arena_free(node->arena);free(node);}
@@ -502,21 +516,32 @@ static uint64_t library_native_invoke(us_context *c,ScriptFrame *frame,us_native
     NativeCleanup *node=malloc(sizeof *node);
     if(!node){us_native_arena_free(arena);return library_dispatch_error(c,"native cleanup allocation failed");}
     node->arena=arena;node->next=frame->native_arenas;frame->native_arenas=node;
-    int rc=us_native_invoke(arena);
+    arena->boundary.owner=c;arena->boundary.previous=native_boundaries;
+    native_boundaries=&arena->boundary;
+    int rc=us_native_call(arena);
+    native_boundaries=arena->boundary.previous;
+    us_call_outcome outcome=arena->boundary.outcome;
+    if(!rc && !outcome.failed && !outcome.exited)rc=us_native_commit(arena);
     frame->native_arenas=node->next;us_native_arena_free(arena);free(node);
+    if(outcome.failed || outcome.exited){
+        us_call_outcome_merge(frame->outcome,&outcome);
+        frame->failed=outcome.failed;frame->exited=outcome.exited;frame->status=outcome.exit_status;
+        if(outcome.message[0])snprintf(c->error,sizeof c->error,"%s",outcome.message);
+        longjmp(frame->returned,1); /* ffi_call/native target has returned normally. */
+    }
     if(rc)return library_dispatch_error(c,"declared native call failed");return 0;
 }
 static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
                                        uint64_t count,uint64_t reserved0,uint64_t reserved1) {
     us_context *c=active;ScriptFrame *frame=script_frames;
-    if(!c || !frame)return 1;
+    if(!c || !frame || frame->owner!=c)return 1;
     if(reserved0 || reserved1)return library_dispatch_error(c,"invalid native call reserved fields");
     return library_native_invoke(c,frame,us_native_plan_find(&c->native_plans,handle),slots,result,count);
 }
 static uint64_t library_variadic_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
                                          uint64_t count,uint64_t site,uint64_t reserved0) {
     us_context *c=active;ScriptFrame *frame=script_frames;
-    if(!c || !frame)return 1;
+    if(!c || !frame || frame->owner!=c)return 1;
     if(reserved0 || !site)return library_dispatch_error(c,"invalid variadic call site or reserved field");
     return library_native_invoke(c,frame,us_native_callsite_find(&c->native_callsites,handle,site),slots,result,count);
 }
@@ -717,27 +742,31 @@ static int library_stack_alloc(us_context *c,unsigned char **base,size_t *size) 
 }
 static int library_invoke_frame(void *owner,const void *raw,const us_export_frame *values) {
     us_context *c=owner;
-    if(c){c->call_failed=1;c->call_exited=0;c->call_exit_status=0;}
     if(!c || !c->image || !raw || !values || (!values->slots && values->count) ||
        values->count>US_LIBRARY_STACK_ARGUMENT_LIMIT || values->mode>1 ||
        (values->mode==0 && values->count>6) || values->result_kind>6 ||
        (values->result_kind && !values->result) ||
        (values->result_kind==5 && (!values->result_bytes || values->result_bytes>16U*1024U*1024U)) ||
        (values->result_kind && values->result_kind!=5 && values->result_bytes!=8))
-        return error(c,"invalid declared library call frame");
+        return library_invocation_error(c,"invalid declared library call frame");
     /* Reentry is permitted only inside a declared native call's script frame,
        never while a compiler/loader owns thread-local runtime state. */
-    if(active && !script_frames)return error(c,"execution during compilation is not supported");
+    if(active && !script_frames)return library_invocation_error(c,"execution during compilation is not supported");
     unsigned char *stack=0;size_t stack_size=0;int nested=script_frames!=0;
-    if(nested){if(library_stack_alloc(c,&stack,&stack_size))return 1;}
+    if(nested){if(library_stack_alloc(c,&stack,&stack_size))return library_invocation_error(c,NULL);}
     else {
-        if(!c->call_stack && library_stack_alloc(c,&c->call_stack,&c->call_stack_size))return 1;
+        if(!c->call_stack && library_stack_alloc(c,&c->call_stack,&c->call_stack_size))return library_invocation_error(c,NULL);
         stack=c->call_stack;stack_size=c->call_stack_size;
     }
-    c->error[0]=0;if(values->result_kind)memset(values->result,0,values->result_bytes);
+    us_call_outcome *outcome=calloc(1,sizeof *outcome);
+    if(!outcome){if(nested)library_release_map(stack,stack_size);return library_invocation_error(c,"call outcome allocation failed");}
+    int same_owner_parent=0;
+    for(ScriptFrame *p=script_frames;p;p=p->previous)if(p->owner==c){same_owner_parent=1;break;}
+    if(!same_owner_parent){c->error[0]=0;c->call_failed=0;c->call_exited=0;c->call_exit_status=0;}
+    if(values->result_kind)memset(values->result,0,values->result_bytes);
     us_context *previous_active=active;
     ScriptFrame frame;frame.previous=script_frames;frame.status=0;frame.exited=0;frame.failed=0;
-    frame.native_arenas=NULL;frame.stack_base=stack;frame.stack_size=stack_size;
+    frame.native_arenas=NULL;frame.stack_base=stack;frame.stack_size=stack_size;frame.owner=c;frame.outcome=outcome;
     active=c;script_frames=&frame;
     int exited=setjmp(frame.returned);
     if(!exited) {
@@ -746,9 +775,7 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
         if(values->mode==1) {
             if(!us_library_call_stack(raw,values->slots,top,stack_size-2*page,
                                       (size_t)values->count,&value)) {
-                script_frame_cleanup(&frame);script_frames=frame.previous;active=previous_active;
-                if(nested)library_release_map(stack,stack_size);
-                return error(c,"declared library call exceeds private stack");
+                frame.failed=1;error(c,"declared library call exceeds private stack");goto finished;
             }
         } else {
             uint64_t slots[6]={0};
@@ -762,20 +789,30 @@ static int library_invoke_frame(void *owner,const void *raw,const us_export_fram
             uintptr_t start=(uintptr_t)c->image+(uintptr_t)c->image_dataoff,at=(uintptr_t)value;
             if(c->image_data_size<0 || at<start || at-start>(uint64_t)c->image_data_size ||
                values->result_bytes>(uint64_t)c->image_data_size-(at-start)) {
-                script_frame_cleanup(&frame);script_frames=frame.previous;active=previous_active;
-                if(nested)library_release_map(stack,stack_size);
-                return error(c,"aggregate return is outside owned script image");
+                frame.failed=1;error(c,"aggregate return is outside owned script image");goto finished;
             }
             memcpy(values->result,(const void *)at,values->result_bytes);
         } else if(values->result_kind)memcpy(values->result,&value,8);
     }
+finished:
+    if(frame.failed || frame.exited){
+        us_call_outcome current={0};current.failed=frame.failed;current.exited=frame.exited;current.exit_status=frame.status;
+        if(frame.exited)snprintf(current.message,sizeof current.message,"script exited with status %d",frame.status);
+        else snprintf(current.message,sizeof current.message,"%s",c->error);
+        us_call_outcome_merge(outcome,&current);
+    }
     script_frame_cleanup(&frame);script_frames=frame.previous;active=previous_active;
     if(nested)library_release_map(stack,stack_size);
-    c->call_exited=frame.exited ? 1 : 0;c->call_exit_status=frame.exited ? frame.status : 0;
-    c->call_failed=frame.failed || frame.exited;
-    if(frame.exited)snprintf(c->error,sizeof c->error,"script exited with status %d",frame.status);
-    else if(!frame.failed)c->error[0]=0;
-    return c->call_failed;
+    int failed=outcome->failed || outcome->exited;
+    if(failed){
+        if(values->result_kind)memset(values->result,0,values->result_bytes);
+        library_boundary_note(c,outcome);
+    }
+    if(!same_owner_parent){
+        c->call_exited=outcome->exited;c->call_exit_status=outcome->exited ? outcome->exit_status:0;c->call_failed=failed;
+        snprintf(c->error,sizeof c->error,"%s",failed ? outcome->message:"");
+    }
+    free(outcome);return failed;
 }
 static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {
     us_export_frame frame={slots,6,0,1,8,result};

@@ -64,7 +64,7 @@ def install(E,P,b,start,integers):
     p=P('LX.record').a(('LDI','lx_one',1),('STX','lx_id',SEEN,'lx_one'),('LDI','lx_zero',0),
        ('OCUT','lx_tape','lx_zero'),('LDX','lx_sig','lx_id',b['FPS_FN']),
        ('LDX','lx_epoch','lx_sig',SIGEPOCH),('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
-       ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0))
+       ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).call('LCG.begin')
     p.branch({1:'LX.externalrecord'},'LX.unsupportedlink',[('CMPI','lx_linkage',0)])
     P('LX.unsupportedlink').a(('LDI','lx_supported',0)).goto('LX.externalrecord')
     P('LX.externalrecord').branch({1:'LX.paramlimit'},'LX.unsupportedvar',[('CMPI','lx_var',0)])
@@ -74,7 +74,7 @@ def install(E,P,b,start,integers):
     P('LX.varmode').branch({1:'LX.stackmode'},'LX.recordfields',[('CMPI','lx_var',1)])
     P('LX.stackmode').a(('LDI','lx_mode',1)).goto('LX.recordfields')
     # Supported status is appended after every descriptor has been classified.
-    p=P('LX.recordfields').a(('ALU','sub','lx_v','fne','fns')).call('LX.u64').a(('SPAN2','fns','fne'),
+    p=P('LX.recordfields').a(('STX','lx_sig',b['FPS_VAR'],'lx_mode'),('ALU','sub','lx_v','fne','fns')).call('LX.u64').a(('SPAN2','fns','fne'),
        ('OUTW','lx_linkage'),('LDI','lx_one',1),('OUTW','lx_one'),('OUTW','lx_var'),('OUTW','lx_mode'))
     p.a(('COPYW','lx_v','lx_nparams')).call('LX.u64')
     p.a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),
@@ -94,12 +94,12 @@ def install(E,P,b,start,integers):
     # already-owned blobs; parser source offsets no longer need remain active.
     p=P('LX.signature').a(('OCUT','lx_sigold','lx_zero'),('LDX','lx_epoch','lx_sig',SIGEPOCH),
         ('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
-        ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).o('USLSIG2\n').a(('LDI','lx_v',1)).call('LX.u64').goto('LX.signaturemode')
+        ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).call('LCG.begin').o('USLSIG2\n').a(('LDI','lx_v',1)).call('LX.u64').goto('LX.signaturemode')
     P('LX.signaturemode').branch({2:'LX.signaturestack'},'LX.signaturevar',[('CMPI','lx_nparams',6)])
     # The preceding procedure builder continuation must explicitly reach mode.
     P('LX.signaturevar').branch({1:'LX.signaturestack'},'LX.signaturefields',[('CMPI','lx_var',1)])
     P('LX.signaturestack').a(('LDI','lx_mode',1)).goto('LX.signaturefields')
-    p=P('LX.signaturefields').a(('BLEN','lx_v','lx_nameblob')).call('LX.u64').a(('INPUSH','lx_nameblob'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',),('LDI','lx_one',1),('OUTW','lx_zero'),('OUTW','lx_one'),('OUTW','lx_var'),('OUTW','lx_mode'),('COPYW','lx_v','lx_nparams')).call('LX.u64')
+    p=P('LX.signaturefields').a(('STX','lx_sig',b['FPS_VAR'],'lx_mode'),('BLEN','lx_v','lx_nameblob')).call('LX.u64').a(('INPUSH','lx_nameblob'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',),('LDI','lx_one',1),('OUTW','lx_zero'),('OUTW','lx_one'),('OUTW','lx_var'),('OUTW','lx_mode'),('COPYW','lx_v','lx_nparams')).call('LX.u64')
     p.a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',1)).call('LX.descriptor')
     p.a(('COPYW','lx_v','lx_nparams')).call('LX.u64').a(('LDI','lx_proto_i',0)).goto('LX.prototypeparams')
     P('LX.prototypeparams').branch({0:'LX.prototypeparam'},'LX.signatureend',[('CMP','lx_proto_i','lx_nparams')])

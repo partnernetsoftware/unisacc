@@ -32,7 +32,11 @@ def install(E,P,b,integers,union_bank):
     P('LTY.pointertyped').branch({0:'LTY.ptr'},'LTY.pointertypedupper',[('CMPI','d_base',b['FPS_FIRST'])])
     P('LTY.pointertypedupper').branch({0:'LTY.fp'},'LTY.ptr',[('CMPI','d_base',b['SBB'])])
     P('LTY.ptr').a(('LDI','d_class',2),('LDI','d_width',8),('LDI','d_align',8)).goto('LTY.arraycheck')
-    P('LTY.fp').a(('LDI','d_class',4),('LDI','d_width',8),('LDI','d_align',8),('LDI','lx_supported',0)).goto('LTY.arraycheck')
+    P('LTY.fp').branch({2:'LTY.ptr'},'LTY.fpclass',[('CMPI','d_depth',1)])
+    P('LTY.fpclass').a(('LDI','d_class',4),('LDI','d_width',8),('LDI','d_align',8),('LDI','lx_supported',0)).branch({1:'LTY.fptyped'},'LTY.arraycheck',[('CMPI','d_depth',1)])
+    P('LTY.fptyped').branch({0:'LTY.arraycheck'},'LTY.fptypedupper',[('CMPI','d_base',b['FPS_FIRST'])])
+    P('LTY.fptypedupper').branch({0:'LTY.fpgraph'},'LTY.arraycheck',[('CMPI','d_base',b['SBB'])])
+    P('LTY.fpgraph').a(('LDI','d_tag',4)).goto('LTY.arraycheck')
     P('LTY.scalar').branch({code:'LTY.int.'+str(code) for _,code,_,_,_ in integers},'LTY.other',[('RLD','d_base')])
     for _,code,size,uns,_ in integers:
         P('LTY.int.'+str(code)).a(('LDI','d_class',1),('LDI','d_width',size),('LDI','d_align',size),('LDI','d_unsigned',uns)).goto('LTY.arraycheck')
@@ -59,7 +63,7 @@ def install(E,P,b,integers,union_bank):
     P('LTY.flex').a(('LDI','d_class',6),('LDI','d_width',0),('LDI','d_align',0),('LDI','d_tag',0),('LDI','lx_supported',0)).goto('LTY.payload')
     P('LTY.array').a(('COPYW','d_stride','d_width'),('COPYW','d_width','d_arraybytes'),
         ('LDI','d_class',5),('LDI','d_tag',3)).goto('LTY.payload')
-    P('LTY.payload').branch({1:'LTY.struct',2:'LTY.struct',3:'LTY.arraypayload'},'LTY.out',[('RLD','d_tag')])
+    P('LTY.payload').branch({1:'LTY.struct',2:'LTY.struct',3:'LTY.arraypayload',4:'LCG.payload'},'LTY.out',[('RLD','d_tag')])
     P('LTY.struct').a(('COPYW','lx_v','d_members')).call('LX.u64').a(('LDI','d_i',0)).goto('LTY.members')
     P('LTY.members').branch({0:'LTY.member'},'LTY.out',[('CMP','d_i','d_members')])
     p=P('LTY.member').a(('ALUI','mul','d_key','d_sid',64),('ALU','add','d_key','d_key','d_i'),
@@ -79,6 +83,8 @@ def install(E,P,b,integers,union_bank):
     p.a(('COPYW','lx_depth','d_depth'),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),
         ('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',0)).call('LX.descriptor')
     frame(p,'LDX').goto('LTY.out')
+    from librarycallbackgraph import install as graph_install
+    graph_install(E,P,b,frame)
     p=P('LTY.out').a(('OCUT','d_payload','lx_zero'))
     for r in ('d_depth','d_base','d_shape','d_class','d_width','d_unsigned','d_align'):
         p.a(('COPYW','lx_v',r)).call('LX.u64')

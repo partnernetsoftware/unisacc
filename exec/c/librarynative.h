@@ -7,9 +7,18 @@ typedef struct us_native_plan {
     uintptr_t target;
 } us_native_plan;
 typedef struct us_native_plans { us_native_plan *head; } us_native_plans;
+typedef struct us_call_outcome {
+    int failed,exited,exit_status;char message[1024];
+} us_call_outcome;
+static void us_call_outcome_merge(us_call_outcome *to,const us_call_outcome *from){
+    if(to && from && !to->failed && !to->exited && (from->failed || from->exited))*to=*from;
+}
+typedef struct us_native_boundary {
+    void *owner;us_call_outcome outcome;struct us_native_boundary *previous;
+} us_native_boundary;
 typedef struct us_native_arena {
     us_native_plan *plan; void **values; void **owned; void *native_result;
-    void *result_target; size_t count;
+    void *result_target; size_t count;us_native_boundary boundary;
 } us_native_arena;
 static void us_native_plan_free(us_native_plan *p){if(!p)return;free(p->args);us_exports_clear(&p->graph);free(p);}
 static void us_native_plans_clear(us_native_plans *p){if(!p)return;while(p->head){us_native_plan *n=p->head->next;us_native_plan_free(p->head);p->head=n;}}
@@ -73,11 +82,18 @@ static int us_native_prepare(us_native_plan *p,const uint64_t *slots,uint64_t co
 bad:us_native_arena_free(a);return us_export_error(error,cap,"native arena allocation or argument failed");
 }
 /* Register arena with ScriptFrame BEFORE calling: explicit script exit can unwind. */
-static int us_native_invoke(us_native_arena *a){
-    if(!a||!a->plan)return 1;us_export *x=a->plan->graph.items;
+static int us_native_call(us_native_arena *a){
+    if(!a||!a->plan)return 1;
     ffi_call(&a->plan->cif,FFI_FN((void*)a->plan->target),a->native_result,a->values);
+    return 0;
+}
+/* Commit only after the owner checked the callback boundary outcome. */
+static int us_native_commit(us_native_arena *a){
+    if(!a||!a->plan||a->boundary.outcome.failed||a->boundary.outcome.exited)return 1;
+    us_export *x=a->plan->graph.items;
     if(x->result.kind==5)memcpy(a->result_target,a->native_result,(size_t)x->result.width);
     else if(x->result.kind){uint64_t v=us_export_slot(&x->result,a->native_result);memcpy(a->result_target,&v,8);}
     return 0;
 }
+static int us_native_invoke(us_native_arena *a){return us_native_call(a)||us_native_commit(a);}
 #endif
