@@ -39,6 +39,9 @@ if [ "$LIST" = 0 ]; then
         seen="$seen$selected "
     done
 fi
+if [ "$COM" = 1 ] && [ "$LIST" = 0 ]; then
+    python3 "$R/exec/c/provenance.py" check "${MODEL_COM-$R/unisacc.com}" || exit 1
+fi
 JOBS=${JOBS:-4}
 UA=${UA:-/tmp/ua_ref}; export UA
 . "$R/tests/lib.sh"; [ "$LIST" != 0 ] || ua_ready

@@ -90,7 +90,11 @@ def main():
                     help='selected suite that must run alone (repeatable; prioritized)')
     args = ap.parse_args()
     if not 1 <= args.jobs <= 4 or not 5 <= args.window <= 55: ap.error('jobs 1..4; window 5..55')
-    os.chdir(ROOT); jobs = plan(args.com)
+    os.chdir(ROOT)
+    if args.com:
+        subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
+                        os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
+    jobs = plan(args.com)
     if args.suite:
         if len(set(args.suite)) != len(args.suite) or set(args.suite) - jobs.keys(): ap.error('duplicate/unknown suite')
         jobs = {n: jobs[n] for n in args.suite}
@@ -154,6 +158,9 @@ def main():
             p.wait(timeout=2); log.close()
             data['results'][n] = {'rc':142,'seconds':round(time.monotonic()-t,3),'limit':limit}
         atomic(path,data)
+    if args.com:
+        subprocess.run([sys.executable, str(ROOT/"exec/c/provenance.py"), "check",
+                        os.environ.get("MODEL_COM", str(ROOT/"unisacc.com"))], check=True, timeout=10)
     if fingerprint(jobs) != stamp: raise SystemExit('inputs changed during queue: results invalid')
     bad = [n for n,r in data['results'].items() if r['rc'] != 0]
     missing = set(jobs)-data['results'].keys()

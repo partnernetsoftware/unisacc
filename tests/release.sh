@@ -86,6 +86,7 @@ if out:
         shutil.copyfile(source,tmp);tmp.chmod(source.stat().st_mode & 0o777)
         if sha(tmp)!=digest or sha(source)!=digest:raise SystemExit('release: copy hash mismatch')
         tmp.replace(dest/'unisacc.com')
+        shutil.copyfile(pathlib.Path(str(source)+'.build.json'), dest/'unisacc.com.build.json')
     finally:tmp.unlink(missing_ok=True)
     print('local-tested candidate copied:',dest/'unisacc.com','sha256',digest)
 print('LOCAL gate passed for candidate sha256',digest)

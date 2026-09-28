@@ -176,3 +176,5 @@ with tempfile.TemporaryDirectory() as td:
     keywords.write_text('kw\tlong\n')
     assert second!=c.identity('osx/arm64','1','cc')
     print('cache: artifact corruption, incomplete manifest, changed header and keyword controls pass')
+
+subprocess.run([sys.executable, str(ROOT/"tests/provenancecheck.py")], cwd=ROOT, check=True, timeout=10)

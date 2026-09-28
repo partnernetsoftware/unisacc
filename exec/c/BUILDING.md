@@ -114,3 +114,16 @@ at most two test jobs. Exit 0 means the local gate completed for that exact hash
 It does not establish six-platform release readiness. Optional `RELEASE_OUT`
 copies only the same checked artifact. `SUITES=0` is rejected. No VM is started,
 and no tag, upload or default-product replacement is performed.
+
+Product freshness: pack writes `unisacc-next.com.build.json` only after its seven
+source/output manifests pass and packaging finishes with unchanged inputs.
+`make com` installs the binary and its record; `--com` gates reject a missing
+record, changed product sources or a mismatching binary before starting suites.
+A different HEAD containing only tests/documentation does not make product bytes
+stale. Source identity covers the conservative product closure plus assembly;
+timestamps and version banners are not used as freshness evidence. Keep the
+sidecar with a private candidate. Existing binaries are not automatically attested.
+
+The record's `commit` is the base revision at build time; the content hash is
+authoritative when building a working tree with uncommitted product changes.
+Committing those same bytes does not change the input identity.

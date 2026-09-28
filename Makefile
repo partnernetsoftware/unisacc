@@ -83,7 +83,9 @@ com:
 	    tmp=$$(mktemp ./unisacc.com.XXXXXX); \
 	    trap "rm -f \"$$tmp\"" EXIT HUP INT TERM; \
 	    cp "$$out/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
-	    mv -f "$$tmp" unisacc.com'
+	    mv -f "$$tmp" unisacc.com; \
+	    cp "$$out/unisacc-next.com.build.json" unisacc.com.build.json; \
+	    python3 exec/c/provenance.py check unisacc.com'
 
 classic-com: ref
 	@mkdir -p out
@@ -107,6 +109,6 @@ linux:
 	@./tests/linux.sh
 
 clean:
-	@rm -f unisacc.com .release.log
+	@rm -f unisacc.com unisacc.com.build.json .release.log
 	@rm -rf /tmp/ua_ref /tmp/ua_ref.c
 	@echo "  removed the built artifacts (unisacc.c is generated and tracked)"

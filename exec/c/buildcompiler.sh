@@ -81,6 +81,7 @@ target() {
     echo "completed compiler target $os/$arch"
 }
 pack() {
+    source_start=$(b python3 exec/c/provenance.py identity)
     manifest check shared
     set --
     for os in lnx osx win; do
@@ -97,6 +98,7 @@ pack() {
     [ -s "$T/compiler.pkg" ] && [ -s "$T/unisacc-next.com" ]
     manifest check shared
     for os in lnx osx win; do for arch in arm64 x86_64; do manifest check "$os-$arch"; done; done
+    b python3 exec/c/provenance.py write "$T/unisacc-next.com" "$source_start"
     chmod +x "$T/unisacc-next.com"
     echo "development assembly/network compiler: $T/unisacc-next.com"
 }
