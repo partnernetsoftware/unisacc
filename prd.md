@@ -2742,3 +2742,5 @@ R10 resolver TDD门禁新增lib-resolver（完整模型候选真实公开API）�
 R10 resolver全候选wire复核收紧三处data结构：var必须0、result不可void、extent必须>0；即使是合法winner旁的低优先级也不可藏畸形记录。MC规范器189态48506观察与17负例/404截断首验通过。5e0058b包已完成且来源验证，但不含这三处，仅作先验原生集成；正式root必须基于修复后源实际重构，禁止把旧包侧车换身份。
 
 R10真实resolver首验15个O0/O1/O2优先级/data正例已实际通过，随后missing data测试误把compile=tape生成等同lower映射、断言rc1；保留research/r10-resolver-first-native.json。改为完整compile→relocate必须拒绝且无export，与API阶段一致，不删除缺失数据控制；仍需复跑证明实际lower拒绝。
+
+76a690c正式resolver完整候选已实际shared/六目标/pack构造与来源校验；根.com及真实侧车更新为d375af584419e207f16987efed96728cea9dd288ee214c78fb61b40e5442413f，1,053,132 B，版本仍0.0.9开发候选。冻结双槽14项门禁全部rc0、21秒：新增lib-resolver/lib-resolver-host加原data/bindings/context/exports/artifacts/lifecycle/Windows桥/com-run12/12/com-c9957/57/docs/kernel。USBIND2规范器48506观察全部network=table、17坏wire和404截断通过；native O0/O1/O2十五组四级priority/data/失败保留/成功失效/缺失符号完整链通过。完整回执research/r10-resolver-final-candidate.json，API边界exec/c/libraryresolver.md。不能称全部R10/六平台库/最终签名发布通过。另只读复核source真实定义与unsupported候选组合，此项尚无TDD覆盖。
