@@ -10,7 +10,7 @@
  *   unisa/catalog.py             a2a290ba91cf
  *   unisa/front/lex.py           67f2248c3a8a
  *   weights/built.json           1e7609d2b806
- *   unisa/ckernel.py             0a6caab12790 */
+ *   unisa/ckernel.py             736dce0ce3ee */
 
 /* S_<stage>: the stage order of gold.ALL */
 #define S_PP 0

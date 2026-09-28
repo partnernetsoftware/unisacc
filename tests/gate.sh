@@ -124,6 +124,12 @@ if [ "$(uname -s)" = Darwin ]; then
     job ffi-bridge python3 ./exec/ffi/bridgecheck.py
     job ffi-product python3 ./exec/ffi/productcheck.py
 fi
+job apps-structure python3 ./tests/appsstructurecheck.py
+job strconvert-host python3 ./tests/strconvertcheck.py
+job pptruth python3 ./tests/pptruthcheck.py
+for route in seed classic model; do job strconvert-$route python3 ./tests/strconvertroute.py "$route"; done
+job package-footer python3 ./tests/packagefootercheck.py
+job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
 job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
 job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel
