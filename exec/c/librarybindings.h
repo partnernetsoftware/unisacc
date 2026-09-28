@@ -49,6 +49,7 @@ static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t addres
  if(us_binding_append(b,&x,error,cap)){free(x.name);return 1;}return 0;
 }
 #ifdef UNISACC_LIBRARYNATIVE_H
+#include "librarycallplans.h"
 static void us_binding_owned_clear(us_binding *x){if(!x)return;free(x->name);free(x->args);free(x->signature);if(x->typed){us_exports_clear(x->typed);free(x->typed);}memset(x,0,sizeof *x);}
 static int us_bindings_add_function_typed(us_bindings *b,const char *name,uintptr_t address,const void *signature,size_t length,char *error,size_t cap){
  if(!b||!us_binding_name(name)||!address||!signature||length<16||memcmp(signature,"USLSIG2\n",8)||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
@@ -60,11 +61,10 @@ static int us_bindings_add_function_typed(us_bindings *b,const char *name,uintpt
  if(us_binding_append(b,&x,error,cap))goto bad;return 0;
  bad:us_binding_owned_clear(&x);return us_binding_error(error,cap,"invalid typed function declaration");
 }
+/* Binding declarations obey the same recursive callback ABI equality as plans.
+   IDs/sharing/support are not ABI; nested arguments/results/mode are. */
 static int us_binding_graph_equal(const us_export_type *a,const us_export_type *b){
- if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)return 0;
- for(size_t i=0;i<(size_t)a->nmembers;i++){const us_export_member *x=a->members+i,*y=b->members+i;
- if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||!us_binding_graph_equal(x->type,y->type))return 0;}
- return !a->element ? !b->element : b->element&&us_binding_graph_equal(a->element,b->element);
+ return us_native_type_equal(a,b);
 }
 #endif
 static void us_binding_put64(unsigned char *p,uint64_t value){for(unsigned i=0;i<8;i++)p[i]=(unsigned char)(value>>(8*i));}

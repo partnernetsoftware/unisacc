@@ -1,5 +1,6 @@
 /* Graph decoder ownership/equality only: deliberately no executable callback ABI. */
 #include "exec/c/librarycallplans.h"
+#include "exec/c/librarybindings.h"
 static unsigned char *readfile(const char *path,size_t *length){
     FILE *f=fopen(path,"rb");if(!f)return NULL;
     if(fseek(f,0,SEEK_END)){fclose(f);return NULL;}long n=ftell(f);rewind(f);
@@ -29,6 +30,7 @@ int main(int argc,char **argv){
     if(us_native_plan_add(&plans,1,b,n,&handle,error,sizeof error)||handle||plans.head)goto done;
     us_native_plans_clear(&plans);
     if(us_native_type_equal(&x->argtypes[0],&other.items[0].argtypes[0])==!strcmp(argv[1],"unequal"))goto done;
+    if(us_binding_graph_equal(&x->argtypes[0],&other.items[0].argtypes[0])==!strcmp(argv[1],"unequal"))goto done;
     us_export *old=a.items;
     for(size_t i=0;i<n;i+=(n<4096 ? 1:n/64))if(!us_exports_load(&a,b,i,error,sizeof error)||a.items!=old)goto done;
     for(int i=4;i<argc;i++){

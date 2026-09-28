@@ -2890,3 +2890,7 @@ R10 callback图基础与完整间接固定参数正式候选验收：a572ab0私�
 建立context-owned callable registry：SCRIPT/NATIVE origin、完整签名、image generation均由声明提供，handle非裸地址且跨context不互认。通用宿主桥按有限类型描述符复制参数/结果并递归转换按值callback字段；不沿signature图递归搬运对象。SCRIPT closure将native callback参数转为NATIVE handle，脚本typed indirect通过同一dispatcher调用；反向将SCRIPT handle转closure。native调用必须经过现有TLS boundary，失败在native正常返回并清理后传播。ffi layout由桥独立持有，不改借用声明图。先交付registry机械层及混合九参/聚合/canary/生命周期测试，再接模型FNV.y/CL.vindirect/CL.callr及公开五段探针；机械层测试不等于真实模型链已完成。变参具体callsite、union/bitfield/wide FP、六平台native仍属0.0.10完整目标，不以固定plain-struct首片替代。
 
 Callback source/outcome父会话独立复验：modelcallbacksourcecheck.sh rc0，7838态/2021948观察网络=表，source sim/C-network bytes相同，host decoder57参数逐字段通过，shared/ref/返回/cycle/depth2/truevar-vs-mode/legacyfixed bytes通过。librarycallbackoutcomecheck.py ARM normal+ASan/UBSan O0/O1/O2 rc0，真实ffi arena失败结果不提交、Pair canary、owner隔离与恢复通过。新增三个永久门禁（source graph、outcome ARM/Rosetta）；两片不激活callback support，不称公开双向链可用。当前根产品仍是3df82d5之前候选，新source闭包重构/实际产品验收待下一构建窗口。
+
+R10 resolver声明一致性补防线决定：librarybindings现有递归布局比较未读取callback.signature，会把nested参数或返回不同的声明当成一致。改为复用librarycallplans的有界coinductive ABI比较，保持旧unsupported执行边界；host graph门禁同时检查resolver/binding比较，先验证不同nested result真实失败再修复。
+
+Resolver callback子签名缺口已先红后绿：同布局不同nested result旧bindings比较误判相等，host graph回归退出1；复用us_native_type_equal后ARM/Rosetta普通+ASan/UBSan全rc0，两ISA旧variadic resolver冻结/回滚/固定兼容回归全rc0。不扩大callback可执行支持。
