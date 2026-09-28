@@ -170,7 +170,7 @@ chk "two constructions" "same" "$r"
 }
 
 # PART=k/n runs every n-th section starting at the k-th, so that each run
-# stays under the 60 s ceiling (AGENTS.md); all.sh runs 1/4 .. 4/4.  With
+# stays under the 60 s ceiling (AGENTS.md); all.sh runs individual applicable sections as k/15.  With
 # no PART, every section runs, in order.
 PART=${PART:-1/1}; PK=${PART%/*}; PN=${PART#*/}
 i=1

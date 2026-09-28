@@ -84,12 +84,16 @@ PROBES="examples/*.c tests/c/*.c"
 # its last line -- a summary line that happens to end differently is not a
 # failure, and a suite that dies silently must not read as green.
 # No suite may hang the run.  macOS has no `timeout`, so each one gets a
-# watchdog; 137 is the kill and reads as a failure with a clear line.
-LIMIT=${SUITE_LIMIT:-900}
+# watchdog; 142 is the timeout and reads as a failure with a clear line.
+LIMIT=${SUITE_LIMIT:-60}
+case "$LIMIT" in *[!0-9]*|"") echo "SUITE_LIMIT must be 1..60" >&2; exit 2;; esac
+[ "$LIMIT" -ge 1 ] && [ "$LIMIT" -le 60 ] || { echo "SUITE_LIMIT must be 1..60" >&2; exit 2; }
 # Suites run CONCURRENTLY, JOBS at a time.  Each one writes its output to a
 # file of its own; the summary is printed afterwards in the fixed order below.
 # The default leaves cores free: this machine has overheated under full load.
-JOBS=${JOBS:-6}
+JOBS=${JOBS:-2}
+case "$JOBS" in *[!0-9]*|"") echo "JOBS must be positive" >&2; exit 2;; esac
+[ "$JOBS" -ge 1 ] || { echo "JOBS must be positive" >&2; exit 2; }
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 ORDER=()
 run() {
@@ -98,10 +102,9 @@ run() {
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.5; done
     (
         t0=$(date +%s)
-        "$@" > "$W/$n.out" 2>&1 & p=$!
-        ( sleep "$LIMIT"; kill -9 $p 2>/dev/null ) >/dev/null 2>&1 &
-        w=$!; wait $p 2>/dev/null; rc=$?; kill $w 2>/dev/null
-        [ "$rc" -eq 137 ] && echo "TIMED OUT after ${LIMIT}s" >> "$W/$n.out"
+        python3 tests/bound.py "$LIMIT" "$@" > "$W/$n.out" 2>&1
+        rc=$?
+        [ "$rc" -eq 142 ] && echo "TIMED OUT after ${LIMIT}s" >> "$W/$n.out"
         echo "$rc" > "$W/$n.rc"; echo $(( $(date +%s) - t0 )) > "$W/$n.sec"
     ) &
 }
@@ -111,13 +114,30 @@ T0=$(date +%s)
 
 # One build of the self-hosted compiler for every suite that uses it.  ccrun
 # never built it and ran BEFORE selfhost, so it could test a stale binary.
-./tests/build_ref.sh >/dev/null || { echo "build_ref failed"; exit 1; }
+UA=${UA:-/tmp/ua_ref}; export UA
+UA_RUN=${UA_RUN:-$UA}; export UA_RUN
+prepare_reference() {
+    python3 tests/bound.py 45 bash -c '
+        R=$1
+        . "$R/tests/lib.sh"
+        ua_ready
+    ' _ "$PWD" >/dev/null || { echo "build_ref failed"; exit 1; }
+}
+prepare_reference
 
 # acceptance rewrites weights/, which every other suite reads: it goes alone.
-serial acceptance1 env PART=1/4 ./tests/acceptance.sh
-serial acceptance2 env PART=2/4 ./tests/acceptance.sh
-serial acceptance3 env PART=3/4 ./tests/acceptance.sh
-serial acceptance4 env PART=4/4 ./tests/acceptance.sh
+for part in $(seq 1 15); do
+    # These two original sections contain no checks outside Darwin/arm64.
+    # Name that platform exclusion instead of treating an empty shard as pass.
+    if { [ "$part" -eq 10 ] || [ "$part" -eq 11 ]; } &&
+       [ "$(uname -s)/$(uname -m)" != Darwin/arm64 ]; then
+        echo "SKIP acceptance$part: requires Darwin/arm64 (not a pass)"
+        continue
+    fi
+    serial "acceptance$part" env PART="$part/15" ./tests/acceptance.sh
+done
+# Re-check the reference identity after the generated-input checks.
+prepare_reference
 run vm         ./tests/vm.sh
 run difftest   ./tests/difftest.sh
 run native     bash -c "./tests/native.sh $PROBES"

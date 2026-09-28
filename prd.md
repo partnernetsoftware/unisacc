@@ -2354,3 +2354,9 @@ CI负控制的另一个陈旧期望已实跑定位：win_argregs只令win/x86_64
 本轮exec-native-stages实际rc1保留日志；进一步定位到netcheck:167的b'MZ-container-prefix'假PE（裸P2已成功），不是包解码缺陷。新定位器先验证MZ/PE边界，拒绝这张假PE正确。保留普通legacy容器前缀作为原footer正例，并把旧假PE显式列为负例；真实PE/签名尾正例仍由package-footer门禁覆盖，不放松定位器。顺带检查隔离自编译资源快照，补入run.c现在明确包含的packagefooter.h（之前只复制core/codec）。只修测试输入，不改网络/答案/加载器。
 
 实际复验：netcheck用私有unisacc种子构建执行核后rc0；nativecheck NATIVE_PART=stages与resources各独立55秒外层、双槽并行，均rc0。三个runtime构建六阶段输出/全域网络检查及runtime自身重编一致，隔离资源自编译一致，缺资源/三种写失败控制拒绝。旧失败仍保留；未把20/189旧身份结果搬进新冻结。
+
+### R9 旧CI套件的有界准备修正
+
+旧all.sh仍以900秒/六槽调度，且直接build_ref不写来源stamp；selfhost/bootstrap又绕过调用者UA重写共享/tmp。收紧为每套件1–60秒、默认双槽、超时清理所属进程树，acceptance按现有PART入口拆15单节（保持全部节），准备复用lib.ua_ready，生成代际产物使用私有scratch并保留原比对。此次不把189模型门禁替代旧经典覆盖，不增加框架；单项超过上限仍是失败，需要按实际日志处理。修改前当前0c65队列18/189零失败，窗口正常结束后再编辑；这些部分结果不冒称全绿。
+
+有界入口实测：私有UA下bootstrap B=C=U完整tape一致（rc0），selfhost两文件×两代lexer各2一致/0差异（rc0）；未重写默认/tmp/ua_ref。SUITE_LIMIT=61启动即rc2，bash语法检查通过。此为入口及固定点验证，不称完整旧all通过；平台不适用的acceptance 10/11明确SKIP，不计通过。当前产品来源核验仍通过且c499字节不变。

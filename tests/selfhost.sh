@@ -7,22 +7,24 @@
 # `selfhost lexer agree 0 differ 44   ok`.
 set -u
 rc=0
-./tests/build_ref.sh >/dev/null
+R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
 
 run() {   # run() <banner> <env-assignment...>
     local banner=$1; shift
     echo "== $banner =="
-    local out; out=$(env "$@" ./tests/lexdiff.sh "${ARGS[@]}"); local r=$?
+    local out; out=$(bound 55 env "$@" ./tests/lexdiff.sh "${ARGS[@]}"); local r=$?
     printf '%s\n' "$out" | tail -1
     [ "$r" -eq 0 ] || rc=1
 }
 
 ARGS=("$@")
-run "unisacc built by cc" UA=/tmp/ua_ref
+run "unisacc built by cc" UA="$UA"
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
-    python3 -m unisa compile unisacc.c -o /tmp/ua_self --target osx/arm64 \
-        --drive built >/dev/null
-    chmod +x /tmp/ua_self; codesign -f -s - /tmp/ua_self >/dev/null 2>&1
-    run "unisacc built by unisa itself" UA=/tmp/ua_self
+    bound 45 python3 -m unisa compile unisacc.c -o "$T/ua_self" --target osx/arm64 \
+        --drive built >/dev/null || exit 1
+    chmod +x "$T/ua_self"; bound 10 codesign -f -s - "$T/ua_self" >/dev/null 2>&1 || exit 1
+    run "unisacc built by unisa itself" UA="$T/ua_self"
 fi
 exit $rc
