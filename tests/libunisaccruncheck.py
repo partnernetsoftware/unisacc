@@ -62,7 +62,17 @@ __attribute__((visibility("default"))) int test_mapped(long p){unsigned char v;r
    native_lifecycle=json.loads(result.stdout)
    assert native_lifecycle['actual_iterations']==1000 and native_lifecycle['warmup_iterations']==300
    assert native_lifecycle['runtime_allocations_after_each_call']==0
-   assert native_lifecycle['resident_range_bytes']<=512*1024
+   if platform.system()=='Darwin':
+    assert native_lifecycle['qualification']=='all-zone-live-and-owned-mappings'
+    assert native_lifecycle['live_range_bytes']==native_lifecycle['live_range_blocks']==0
+    assert native_lifecycle['stable_owned_mapping_extents']
+    control=subprocess.run([str(native),pkg.decode(),'--retain-control'],capture_output=True,text=True,timeout=10)
+    assert control.returncode==9,(control.returncode,control.stdout,control.stderr)
+    retention=json.loads(control.stdout)
+    assert retention['retention_control'] and retention['live_range_bytes']>=9*1048576
+    native_lifecycle['retention_control_result']=retention
+   else:
+    assert native_lifecycle['resident_range_bytes']<=512*1024
    assert len(native_lifecycle['samples'])==13
    warmup_resident_samples=[x[1] for x in native_lifecycle['samples'][:3]]
    resident_samples=[x[1] for x in native_lifecycle['samples'][3:]]

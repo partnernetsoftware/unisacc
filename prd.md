@@ -2722,3 +2722,9 @@ fa9b452源（正式库builder+原生生命周期checker）重新构造shared/六
 
 ### R10 resolver下一片决定（设计，未实现）
 采用冻结全候选USBIND2方案：us_declare_import显式可信函数/数据ABI，us_load_library持有RTLD_NOW|RTLD_LOCAL句柄；C在compile开始按已声明名字机械枚举注入/RTLD_DEFAULT/所有owned handle地址，全部候选作为同一不可变resource留到relocate，C不挑胜者、不解析C。USBIND2在origin后加LE64 ordinal，E3/lower共用有限规则按origin/ordinal择一，之后核源码类型；源定义仍优先，低优先级unsupported候选不否定合法winner、坏最高候选不fallback。旧USBIND1/USLTAPE1不变，无需动态fetchhook/三段封装。dlsym不能证明ABI/对象extent/writable，声明是信任输入；未声明的外部名明确拒绝，不宣称自动类型发现。实现与native优先级/错误恢复/所有权TDD仍待；报告research/r10-resolver-design.md只属设计。
+
+### R10 生命周期裁判修正（实证后决定，2026-09-29）
+同候选同原生插桩二进制两轮RSS范围0/1,703,936 B，全部malloc zones live bytes/blocks均零增长；VM分域将阶跃100%归为系统malloc匿名dirty保留页，context image/stack/guest/事务所有权恒定，非代码/file-backed。真实每100轮保留1MiB控制live+9,437,184 B/blocks+9、rc11，证明live轴独立抓真实泄漏。证据research/r10-native-rss-diagnosis.json；pressure_relief仅诊断且返回0，不进正式实现，不为造绿trim。
+macOS正式1000循环生命周期以暖后全zone live bytes和blocks零增长、image/stack范围恒定、guest0及每事务owned0为判据，比512KiB live容忍更严格；保留原RSS范围/512KiB比较为明确diagnostic，过去rc1/rc9不改为原判据通过。增加不触碰payload页的真实malloc保留负控制，要求即使RSS变化小也由live维度拒绝。该变更是泄漏裁判修正，不宣称physical RSS零增长。Linux暂保留原RSS阈值，all-arena live测量/原生验收另补，不外推macOS。原生OS可保留已释放allocator页，这不等于库仍持有对象；按不可解释RSS阶跃开发新allocator不是本需求。
+
+正式修正首验13.46秒：1000真实compile/run全zone live bytes/blocks范围均0、owned image/stack恒定，RSS范围3,063,808 B仍明确标为超原阈值。新的不触页真实保留控制live+9,437,184 B/blocks+9且rc9，RSS仅32KiB原判据会漏检：说明live裁判同时避免释放页false positive与未触页malloc false negative，并非放宽相同性质阈值。见research/r10-native-lifecycle-live.json，Linux仍旧判据；实际完整受影响门禁待冻结复验。
