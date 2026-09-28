@@ -273,3 +273,100 @@ with tempfile.TemporaryDirectory() as td:
     print('cache: artifact corruption, incomplete manifest, changed header and keyword controls pass')
 
 subprocess.run([sys.executable, str(ROOT/"tests/provenancecheck.py")], cwd=ROOT, check=True, timeout=10)
+
+
+def compilercheck_closure_controls(queue, source_root, declaration_path=None):
+    """Real fingerprints on a private source fixture; no compiler execution."""
+    import copy, hashlib, shutil
+    source_root=pathlib.Path(source_root)
+    declaration=json.loads(pathlib.Path(declaration_path or source_root/'tests/gatedeps.json').read_text())
+    family={n:dict(declaration['families'][e['family']],command=e['command'],family=e['family']) for n,e in declaration['suites'].items() if n.startswith('exec-driver-') and e['command'][0]=='./exec/c/compilercheck.sh'}
+    assert len(family)==6, 'compilercheck audited declarations missing'
+    records=[]
+    with tempfile.TemporaryDirectory(prefix='compilercheck-closure-controls-') as td:
+        temp=pathlib.Path(td); fixture=temp/'source';fixture.mkdir()
+        required={'tests/gatequeue.py','tests/gate.sh','tests/bound.py','README.md'}
+        for entry in family.values():
+            required.update(entry['files']);required.update(entry['guards'])
+            for tree in entry['reviewed_trees']:
+                required.update(str(p.relative_to(source_root)) for p in (source_root/tree).rglob('*')
+                    if p.is_file() and (tree in entry['all_files_trees'] or p.suffix in entry['inventory_suffixes']))
+        for name in sorted(required-{''}):
+            source=source_root/name
+            try: source.stat()
+            except FileNotFoundError: continue
+            if source.is_file():
+                target=fixture/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
+        (fixture/'tests/docs-fixture.py').write_text('pass\n')
+        (fixture/'tests/bound-fixture.py').write_text('pass\n')
+        probe={n:e['command'] for n,e in family.items()}
+        probe.update(docs=['python3','tests/docs-fixture.py'],bound=['python3','tests/bound-fixture.py'],unknown=['python3','unknown.py'])
+        declared={'version':1,'families':copy.deepcopy(declaration['families']),
+            'suites':{n:copy.deepcopy(declaration['suites'][n]) for n in family}}
+        for n in ('docs','bound'):
+            file='tests/'+n+'-fixture.py'
+            declared['suites'][n]={'command':probe[n],'files':[file]+(['README.md'] if n=='docs' else []),
+                'guards':{file:hashlib.sha256((fixture/file).read_bytes()).hexdigest()}}
+        (fixture/'tests/gatedeps.json').write_text(json.dumps(declared))
+        subprocess.run(['git','init','-q',str(fixture)],check=True,timeout=5)
+        ua=temp/'ua';model=temp/'model';ua.write_text('#!/bin/sh\nexit 0\n');model.write_bytes(ua.read_bytes());ua.chmod(0o755);model.chmod(0o755)
+        tool=temp/'tools';tool.mkdir();awk=tool/'awk';awk.write_text('#!/bin/sh\nexit 0\n');awk.chmod(0o755)
+        environment={k:v for k,v in os.environ.items() if k not in ('UA','UA_RUN','MODEL_COM','TOOLS_UA','CORPUS_UA','UNISA_CONTAINER','UNISA_KERNEL','TERM_SESSION_ID')}
+        environment.update(UA=str(ua),MODEL_COM=str(model),PATH=str(tool)+os.pathsep+environment.get('PATH',''))
+        oldcwd=pathlib.Path.cwd()
+        try:
+            with patch.object(queue,'ROOT',fixture),patch.dict(os.environ,environment,clear=True):
+                os.chdir(fixture)
+                def compare(label, mutation, expected, restore):
+                    before=queue.fingerprint(probe);mutation();after=queue.fingerprint(probe)
+                    changed={n for n in probe if before[n]!=after[n]}
+                    assert changed==set(expected),(label,changed,set(expected))
+                    saved={'stamp':before,'jobs':probe,'exclusive':[],'results':{n:{'rc':0} for n in probe}}
+                    queue.resume(saved,after,probe,set())
+                    assert set(saved['results'])==set(probe)-set(expected)
+                    restore();records.append({'control':label,'invalidated':sorted(changed),'pass':True})
+                def edit(label,path,expected):
+                    raw=path.read_bytes();compare(label,lambda:path.write_bytes(raw+b'\n# fixture edit\n'),expected,lambda:path.write_bytes(raw))
+                all_family=set(family); unknown={'unknown'}
+                # A real reviewed snapshot must qualify; README stability proves the branch.
+                edit('README-real-reviewed-snapshot',fixture/'README.md',{'docs','unknown'})
+                records.append({'control':'real-main-inventory-qualified','pass':True,
+                    'reviewed_trees':declaration['families']['compilercheck']['reviewed_trees']})
+                edit('checker',fixture/'exec/c/compilercheck.py',all_family|unknown)
+                edit('actual-generator',fixture/'exec/pp/gen.py',all_family|unknown)
+                edit('same-path-UA',ua,all_family|unknown)
+                edit('same-path-MODEL_COM',model,all_family|unknown)
+                edit('actual-awk-tool',awk,all_family)
+                added=fixture/'exec/c/new-unreviewed.py'
+                compare('new-code',lambda:added.write_text('pass\n'),all_family|unknown,lambda:added.unlink())
+                removed_file=fixture/'exec/c/compilercheck.py';original_bytes=removed_file.read_bytes();mode=removed_file.stat().st_mode
+                compare('missing-code',lambda:removed_file.unlink(),all_family|unknown,lambda:(removed_file.write_bytes(original_bytes),removed_file.chmod(mode)))
+                # Once a code guard changes, README must trigger conservative fallback.
+                checker=fixture/'exec/c/compilercheck.py';raw=checker.read_bytes();checker.write_bytes(raw+b'\n# unreviewed\n')
+                edit('guard-change-falls-back',fixture/'README.md',all_family|{'docs','unknown'});checker.write_bytes(raw)
+                removed=os.environ.pop('UA')
+                edit('missing-UA-falls-back',fixture/'README.md',all_family|{'docs','unknown'})
+                edit('fallback-keeps-actual-tools',awk,all_family)
+                os.environ['UA']=removed
+                original=probe['exec-driver-core-modes'];probe['exec-driver-core-modes']=original+['unknown-argument']
+                edit('unknown-command-falls-back',fixture/'README.md',{'exec-driver-core-modes','docs','unknown'});probe['exec-driver-core-modes']=original
+                before=queue.fingerprint(probe)
+                with patch.dict(os.environ,{'UNISA_MAXSTEPS':'123'}):
+                    assert all(queue.fingerprint(probe)[n]!=before[n] for n in probe)
+                records.append({'control':'environment','pass':True})
+                with patch.dict(os.environ,{'TERM_SESSION_ID':'transport-only'}):assert queue.fingerprint(probe)==before
+                records.append({'control':'transport-excluded','pass':True})
+                with patch.object(queue.platform,'platform',return_value='different-platform'):
+                    assert all(queue.fingerprint(probe)[n]!=before[n] for n in probe)
+                records.append({'control':'platform','pass':True})
+                real_which=queue.shutil.which
+                with patch.object(queue.shutil,'which',side_effect=lambda name:None if name=='awk' else real_which(name)):
+                    edit('missing-actual-tool-falls-back',fixture/'README.md',all_family|{'docs','unknown'})
+                bound_before=queue.fingerprint(probe);ua_raw=ua.read_bytes();ua.write_bytes(ua_raw+b'# changed\n');bound_after=queue.fingerprint(probe);ua.write_bytes(ua_raw)
+                assert bound_before['bound']==bound_after['bound'] and bound_before['docs']==bound_after['docs']
+                records.append({'control':'docs-bound-external-byte-semantics-preserved','pass':True})
+        finally:os.chdir(oldcwd)
+    print('compilercheck closures: %d private real-fingerprint controls passed; unknown remains global'%len(records))
+    return records
+
+compilercheck_closure_controls(q, ROOT)

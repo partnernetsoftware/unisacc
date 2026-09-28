@@ -114,10 +114,42 @@ def fingerprint(jobs):
               {n:digest(n) for n in ('tests/gatequeue.py', 'tests/gate.sh', 'tests/bound.py', declaration)}]
     def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
     global_inputs = None
+    inventories, family_tools = {}, {}
     result = {}
     for name, command in jobs.items():
         entry = manifest.get('suites', {}).get(name)
+        if entry and 'family' in entry:
+            entry = dict(manifest['families'][entry['family']], command=entry['command'], family=entry['family'])
         audited = entry is not None and command == entry['command']
+        inventory, extra = {}, None
+        if entry and entry.get('reviewed_trees'):
+            for tree, reviewed in entry['reviewed_trees'].items():
+                if tree not in inventories:
+                    paths = sorted(p for p in pathlib.Path(tree).rglob('*') if p.is_file() and
+                        (tree in entry['all_files_trees'] or p.suffix in entry['inventory_suffixes']))
+                    if any(not stat.S_ISREG(p.lstat().st_mode) for p in paths): raise SystemExit('nonregular reviewed input')
+                    inventories[tree] = stamp({str(p):digest(str(p)) for p in paths})
+                inventory[tree] = inventories[tree]
+            audited = audited and inventory == entry['reviewed_trees'] and all(settings.get(k) for k in entry['required_settings'])
+            family = entry['family']
+            if family not in family_tools:
+                selected = {t:shutil.which(t) for t in entry['tools']}
+                selected['actual-python'] = str(pathlib.Path(sys.executable).resolve())
+                metadata = {}
+                if sys.platform == 'darwin':
+                    selected['xcrun'] = shutil.which('xcrun')
+                    for flag in ('--show-sdk-path','--show-sdk-version','--show-sdk-build-version'):
+                        metadata[flag] = subprocess.check_output(['xcrun',flag],timeout=5).decode().strip()
+                    selected['sdk-settings'] = metadata['--show-sdk-path']+'/SDKSettings.json'
+                    selected['sdk-clang'] = subprocess.check_output(['xcrun','--find','clang'],timeout=5).decode().strip()
+                else:
+                    for flag in ('-print-prog-name=ld','-print-prog-name=as','-print-file-name=libgcc.a'):
+                        value = subprocess.check_output([tools['cc'][0],flag],timeout=5).decode().strip()
+                        selected[flag] = value if '/' in value else shutil.which(value)
+                    metadata['cc-version'] = subprocess.check_output([tools['cc'][0],'--version'],timeout=5).decode()
+                family_tools[family] = [metadata,{t:[p,digest(p)] if p else ['missing'] for t,p in selected.items()}]
+            extra = family_tools[family]
+            audited = audited and all(extra[1][t][0] != 'missing' for t in entry['tools'])
         if audited:
             guards = entry['guards']
             audited = bool(guards) and all(digest(n)[-1] == sha for n,sha in guards.items())
@@ -130,11 +162,14 @@ def fingerprint(jobs):
             inputs = sorted(set(entry['files']) | {n for n in names
                 if any(n.startswith(prefix+'/') for prefix in entry.get('trees', []))})
         if audited:
-            result[name] = stamp([common, command, {n:digest(n) for n in inputs}])
+            identity = [common, command, {n:digest(n) for n in inputs}]
+            if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]
+            result[name] = stamp(identity)
         else:
             if global_inputs is None: global_inputs = {n:digest(n) for n in names}
-            result[name] = stamp([common, jobs, settings, executables, global_inputs,
-                                  {n:digest(n) for n in inputs}])
+            identity = [common, jobs, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
+            if inventory: identity += [inventory, extra]
+            result[name] = stamp(identity)
     return result
 
 def resume(data, stamps, jobs, exclusive):
