@@ -9,7 +9,7 @@
  *   unisa/gold.py                25721a152d0d
  *   unisa/catalog.py             07ff7baa3166
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           8b10e43e2b3d
+ *   weights/built.json           a23482901be9
  *   unisa/ckernel.py             d54d70c049f3 */
 
 #ifndef UNISA_MODEL_INC
@@ -92,7 +92,7 @@ char *DENSE =
 #include "dense.abi.inc"
 #include "dense.combo.inc"
 ;
-#define DENSE_LEN 20368
+#define DENSE_LEN 20371
 int STAGE_DOFF[18]; int STAGE_NH[18];
 
 int model_dims(void) {
@@ -109,11 +109,11 @@ int model_dims(void) {
   STAGE_DOFF[10] = 5741; STAGE_NH[10] = 1;
   STAGE_DOFF[11] = 5750; STAGE_NH[11] = 1;
   STAGE_DOFF[12] = 7382; STAGE_NH[12] = 3;
-  STAGE_DOFF[13] = 7589; STAGE_NH[13] = 1;
-  STAGE_DOFF[14] = 7608; STAGE_NH[14] = 1;
-  STAGE_DOFF[15] = 7640; STAGE_NH[15] = 2;
-  STAGE_DOFF[16] = 7936; STAGE_NH[16] = 13;
-  STAGE_DOFF[17] = 13708; STAGE_NH[17] = 15;
+  STAGE_DOFF[13] = 7592; STAGE_NH[13] = 1;
+  STAGE_DOFF[14] = 7611; STAGE_NH[14] = 1;
+  STAGE_DOFF[15] = 7643; STAGE_NH[15] = 2;
+  STAGE_DOFF[16] = 7939; STAGE_NH[16] = 13;
+  STAGE_DOFF[17] = 13711; STAGE_NH[17] = 15;
   STAGE_M[0] = 2; STAGE_H[0] = 6; STAGE_OFF[0] = 0;  STAGE_MW[0] = 1;
   STAGE_NCLS[0] = 4;
   STAGE_VN[0] = 9;
@@ -169,7 +169,7 @@ int model_dims(void) {
   STAGE_NCLS[192] = 2;
   STAGE_NCLS[193] = 8;
   STAGE_NCLS[194] = 16;
-  STAGE_VN[48] = 69;
+  STAGE_VN[48] = 70;
   STAGE_M[13] = 1; STAGE_H[13] = 11; STAGE_OFF[13] = 9778;  STAGE_MW[13] = 1;
   STAGE_NCLS[208] = 11;
   STAGE_VN[52] = 19;
@@ -374,8 +374,8 @@ char *BH_PEEP_Y = "keep\000load_to_mov\000drop_b\000drop_a\000retarget\000to_mov
 #define HD_PEEP_Y 0
 
 /* BF_OPINFO_0: unisa/gold.py STAGES["opinfo"].fields[0] (op) */
-char *BF_OPINFO_0 = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000.div\000.mod\000.udiv\000.umod\000slt64\000sle64\000ult64\000ule64\000eq\000ne\000load64\000store64\000.ld\000.st\000.lea\000.zero\000jump\000jumpz\000call\000callr\000.hostcall\000.hostaddr\000ret\000.frame\000.arg\000.print\000.write\000.exit\000.sys\000.sys6\000.argc\000.argv\000nop\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000other\000";
-#define NBF_OPINFO_0 69
+char *BF_OPINFO_0 = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000.div\000.mod\000.udiv\000.umod\000slt64\000sle64\000ult64\000ule64\000eq\000ne\000load64\000store64\000.ld\000.st\000.lea\000.zero\000jump\000jumpz\000call\000callr\000.hostcall\000.librarycall\000.hostaddr\000ret\000.frame\000.arg\000.print\000.write\000.exit\000.sys\000.sys6\000.argc\000.argv\000nop\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000other\000";
+#define NBF_OPINFO_0 70
 
 /* BH_OPINFO_SIMPLE: the classes of head "simple" of stage "opinfo", in the constructed net's order (weights/built.json) */
 char *BH_OPINFO_SIMPLE = "0\0001\000";
