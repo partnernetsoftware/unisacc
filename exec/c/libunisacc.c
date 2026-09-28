@@ -29,7 +29,7 @@ struct us_context {
     size_t tape_length, definitions_length;
     unsigned char *signatures; size_t signatures_length;
     int input_is_tape;
-    unsigned char *image; int64_t image_size, image_dataoff, image_text_size; int image_entry;
+    unsigned char *image; int64_t image_size, image_dataoff, image_text_size, image_data_size; int image_entry;
     us_exports exports;
     us_bindings bindings;
     us_resolver resolver;
@@ -170,6 +170,7 @@ static void discard_image(us_context *c) {
     if (c->image) {
         library_release_map(c->image,(size_t)c->image_size);
         c->image=0;
+        c->image_data_size=0;
     }
     for (size_t i=0;i<c->symbol_count;i++) free(c->symbols[i].name);
     free(c->symbols); c->symbols=0; c->symbol_count=0;
@@ -360,7 +361,8 @@ API int us_compile(us_context *c,const char *target,int level) {
             if (input.n>=9 && !memcmp(input.b,"USLTAPE1\n",9)) {
                 size_t at=9;uint64_t tape=library_u64(&input,&at),meta=library_u64(&input,&at);
                 if (tape>(size_t)input.n-at || meta!=(size_t)input.n-at-tape || meta<16 ||
-                    memcmp(input.b+at+(size_t)tape,"USLSIG1\n",8)) __us_panic("bad library tape envelope");
+                    (memcmp(input.b+at+(size_t)tape,"USLSIG1\n",8) &&
+                     memcmp(input.b+at+(size_t)tape,"USLSIG2\n",8))) __us_panic("bad library tape envelope");
                 c->signatures=malloc((size_t)meta);if (!c->signatures) __us_panic("out of memory");
                 memcpy(c->signatures,input.b+at+(size_t)tape,(size_t)meta);c->signatures_length=(size_t)meta;
                 begin=at;length=(size_t)tape;
@@ -585,7 +587,7 @@ API int us_relocate(us_context *c) {
         if (!rc) {snprintf(route,sizeof route,"%s/memory",c->target);rc=runroute(route,&input,"library.tape");}
         if (!rc) {
             MemoryImage m;library_image(c,&input,&m,&mapping);memory_commit(&m,&mapping);
-            c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;c->image_text_size=m.text;
+            c->image_dataoff=mapping.dataoff;c->image_entry=m.entry;c->image_text_size=m.text;c->image_data_size=m.extent;
             memcpy(mapping.base,input.b+40,m.text);memcpy(mapping.base+mapping.dataoff,input.b+40+m.text,m.stored);
             if (memory_protect_code(&mapping,m.text)) __us_panic("cannot protect library code");
             if(c->signatures && us_exports_load(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
@@ -623,10 +625,16 @@ static int library_stack_alloc(us_context *c,unsigned char **base,size_t *size) 
 #endif
     *base=p;*size=total;return 0;
 }
-static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {
+static int library_invoke_frame(void *owner,const void *raw,const us_export_frame *values) {
     us_context *c=owner;
     if(c){c->call_failed=1;c->call_exited=0;c->call_exit_status=0;}
-    if(!c || !c->image || !raw || !slots || !result)return error(c,"invalid library call");
+    if(!c || !c->image || !raw || !values || (!values->slots && values->count) ||
+       values->count>US_LIBRARY_STACK_ARGUMENT_LIMIT || values->mode>1 ||
+       (values->mode==0 && values->count>6) || values->result_kind>6 ||
+       (values->result_kind && !values->result) ||
+       (values->result_kind==5 && (!values->result_bytes || values->result_bytes>16U*1024U*1024U)) ||
+       (values->result_kind && values->result_kind!=5 && values->result_bytes!=8))
+        return error(c,"invalid declared library call frame");
     /* Reentry is permitted only inside a declared native call's script frame,
        never while a compiler/loader owns thread-local runtime state. */
     if(active && !script_frames)return error(c,"execution during compilation is not supported");
@@ -636,14 +644,39 @@ static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],ui
         if(!c->call_stack && library_stack_alloc(c,&c->call_stack,&c->call_stack_size))return 1;
         stack=c->call_stack;stack_size=c->call_stack_size;
     }
-    c->error[0]=0;*result=0;
+    c->error[0]=0;if(values->result_kind)memset(values->result,0,values->result_bytes);
     us_context *previous_active=active;
     ScriptFrame frame;frame.previous=script_frames;frame.status=0;
     active=c;script_frames=&frame;
     int exited=setjmp(frame.returned);
     if(!exited) {
         size_t page=library_page_size();
-        *result=us_library_bridge_raw(raw,slots,stack+stack_size-page);
+        void *top=stack+stack_size-page;uint64_t value=0;
+        if(values->mode==1) {
+            if(!us_library_call_stack(raw,values->slots,top,stack_size-2*page,
+                                      (size_t)values->count,&value)) {
+                script_frames=frame.previous;active=previous_active;
+                if(nested)library_release_map(stack,stack_size);
+                return error(c,"declared library call exceeds private stack");
+            }
+        } else {
+            uint64_t slots[6]={0};
+            for(size_t i=0;i<(size_t)values->count;i++)slots[i]=values->slots[i];
+            value=us_library_bridge_raw(raw,slots,top);
+        }
+        /* Move the declared result while this call frame is still alive.
+           For current script aggregates the model returns its image-owned
+           return buffer address; no host ABI classification happens here. */
+        if(values->result_kind==5) {
+            uintptr_t start=(uintptr_t)c->image+(uintptr_t)c->image_dataoff,at=(uintptr_t)value;
+            if(c->image_data_size<0 || at<start || at-start>(uint64_t)c->image_data_size ||
+               values->result_bytes>(uint64_t)c->image_data_size-(at-start)) {
+                script_frames=frame.previous;active=previous_active;
+                if(nested)library_release_map(stack,stack_size);
+                return error(c,"aggregate return is outside owned script image");
+            }
+            memcpy(values->result,(const void *)at,values->result_bytes);
+        } else if(values->result_kind)memcpy(values->result,&value,8);
     }
     script_frames=frame.previous;active=previous_active;
     if(nested)library_release_map(stack,stack_size);
@@ -652,6 +685,10 @@ static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],ui
     if(exited)snprintf(c->error,sizeof c->error,"script exited with status %d",frame.status);
     else c->error[0]=0;
     return c->call_failed;
+}
+static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {
+    us_export_frame frame={slots,6,0,1,8,result};
+    return library_invoke_frame(owner,raw,&frame);
 }
 static int library_initialise(us_context *c) {
     if(c->initialised==1)return 0;
@@ -666,7 +703,7 @@ API void *us_sym(us_context *c,const char *name) {
     if(!c || !name || !c->image){error(c,"library is not relocated");return 0;}
     if(library_initialise(c))return 0;
     c->error[0]=0;
-    return us_exports_symbol(&c->exports,name,c,library_lookup,library_invoke,c->error,sizeof c->error);
+    return us_exports_symbol_frame(&c->exports,name,c,library_lookup,library_invoke_frame,c->error,sizeof c->error);
 }
 API int us_call_status(const us_context *c,int *exit_status) {
     if(!c)return 1;

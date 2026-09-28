@@ -1,56 +1,49 @@
 # Optional E3 library signature envelope
 
-Resource key `\0library/symbols` accepts only LE64 value 1. Absent, E3 emits its
-ordinary tape exactly. Present, it emits a binary envelope rather than adding
-new tape directives. A host separates byte ranges before prune/lower; it does
-not parse C or infer signatures.
+Resource `\0library/symbols` accepts only LE64 value 1. When absent the model
+emits ordinary tape byte-for-byte. Present it emits `USLTAPE1` carrying the tape
+and model-generated `USLSIG2` declarations. Exact wire specification is
+[`../c/librarysignature-v2.md`](../c/librarysignature-v2.md). No host C parser or
+signature guessing is involved. The host validates recursive framing/layout;
+prune uses the declaration to retain public definitions independent of support.
 
-Envelope: `USLTAPE1\n` (9 bytes), tape length LE64, metadata length LE64,
-exact tape bytes, exact metadata bytes. No suffix is permitted.
-Metadata: `USLSIG1\n` (8 bytes), definition-record count LE64. Each record:
+## Full parameter and layout facts
 
-1. Name length LE64, name bytes (no NUL).
-2. Linkage u8 (0 external, 1 internal), defined u8 (always 1 in this version),
-   syntactic variadic u8.
-3. Declared parameter count LE64.
-4. Return descriptor: six LE64 fields described below.
-5. Stored parameter count LE64, then one descriptor per stored parameter.
-6. Supported u8, placed at the end after every descriptor is classified.
+`SIG.store` is intercepted **before** its legacy eight-descriptor check. The
+metadata pool uses `signature*1024+parameter` and a per-definition epoch mark;
+no 1024-slot reset is emitted. Named function-pointer parameters have their
+own `FN.pfpdecl1` capture because legacy parser allocation skips SIG.store.
+The model rejects any capture beyond 1024 or any uncaptured declared parameter.
+True ellipsis is saved before the legacy >6 stacked convention is selected.
+V2 records REGISTER vs ALL_STACK explicitly, then all declared descriptors.
 
-Descriptor: pointer depth, raw E3 base code, raw shape ID, type class,
-width in bytes, unsigned flag. Classes: void=0, integer=1, ordinary data
-pointer=2, floating=3, function pointer=4, aggregate=5, unknown=6.
-Raw composite identifiers are E3-local descriptors, not public layout or nested
-signature specifications. Width=0 marks absent/unsupported concrete width.
+Primitive widths/signedness come from tyinfo. Struct/union sizes and alignment
+come from SSZ/SAL; SMEM uses `sid*64+i` ordered member keys. Member offset,
+pointer depth/base, array count and bitfield facts come from MOF/MPT/MBS/MAR
+and BFO/BFW/BFS; `SB.go` captures union identity before enclosing state restores.
+Recursive layout serialization uses a private frame bank, 32-level depth bound
+and 16384 nodes per record. Arrays carry count, stride and recursive element
+layout. Payload lengths are produced from actual model output blobs.
 
-Source facts are E3's existing FPS_FN/RD/RB/RSH/COUNT/PARAM/PSH tables. Named
-function-pointer parameters bypass SIG.store in the legacy allocation path; a
-metadata-only hook records their already parsed td/tb/type_shape at
-FN.pfpdecl1, without changing parser type facts. Primitive
-integer widths and signedness use tyinfo. The syntactic variadic flag is saved
-at FN.body before FN.many also selects the stacked ABI for more than six
-arguments. TOP.st preserves the actual static/extern token; linkage is not
-inferred from mangled names. Records snapshot definitions before parsing the
-body; prototypes do not invent definitions. Duplicate definition names reject.
+Fixed GP, data-pointer, FP and known plain struct/array descriptors may be
+supported. Union, bitfield, flexible/unresolved members and function pointers
+remain represented but unsupported. True variadic exports remain unsupported
+pending a typed invocation interface. Static linkage records remain nonpublic.
+The existing parser collapses source long double to its double descriptor;
+**this format does not establish native wider-long-double support**. That
+source type distinction must be added before the native ABI can claim it.
 
-The supported first slice is external defined functions with at most six fixed
-integer parameters of any existing width, or ordinary data pointers, and an
-integer/data-pointer/void result. Function-pointer, floating and aggregate value
-ABIs and variadic calls are unsupported, explicitly marked. Internal functions
-are recorded but not public exports. The existing E3 signature table stores
-only the first eight parameter descriptors; stored count is min(total,8), and
-more than six parameters is unsupported. This is not a claim that missing
-parameter types or composite layouts have been reconstructed.
+## Actual checks
 
-Library mode still requires main because the existing E3 entry-generation
-contract does. A no-main module, public ABI wrappers and host symbol lookup are
-separate integration work. The host must decode bounds, uniqueness and enum
-fields and refuse unsupported signatures. A raw code address remains unusable
-as a native function pointer until the declared ABI bridge/wrapper is applied.
-
-`libraryexportscheck.py` independently asserts nine signature shapes with the
-C network executor and Python simulator, rejects malformed resources, duplicate
-definitions and damaged framing, and compares only ordinary tape/payload with
-the classic reference. Metadata is never claimed correct merely because tape
-matches. `--keep N/M` partitions the unchanged fixed keep-e3 list to check
-resource-absent default outputs against a private classic reference.
+`libraryexportscheck.py` runs C network and simulator, performs all-observation
+`--check-net`, and independently decodes V2. Its 13 definitions include the
+nine-mixed GP/FP/pointer/Pair function, Pair return size16/align8 and ordered
+members, recursive Box/short[3], unsupported union, named function-pointer,
+true varargs, seven parameters and seventeen parameters. It asserts full
+counts, mode, widths, offsets, alignment, layouts and support flags.
+Malformed resources, duplicate definitions and damaged framing are rejected.
+Ordinary tape and framed tape payload are each checked against a private
+classic reference. `--keep N/M` partitions existing keep-e3 inputs to check
+resource-absent outputs independently; a passed fixture is not the whole list.
+Native us_sym closures, actual foreign ABI execution and remaining R10 ABI
+shapes need their separate integration evidence.

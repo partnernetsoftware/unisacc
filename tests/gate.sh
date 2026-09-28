@@ -194,6 +194,11 @@ job lib-format python3 ./tests/libunisaccformatcheck.py
 job lib-stack-arm python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" arm64
 job lib-stack-x86 python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" x86_64
 job lib-stack-x86-hostabi python3 ./tests/r10stackx86check.py
+job lib-sig2-host python3 ./tests/librarysig2hostcheck.py
+job lib-sig2-native python3 ./tests/librarysig2nativecheck.py --package "${MODEL_COM:-./unisacc.com}"
+if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
+    job lib-sig2-rosetta python3 ./tests/librarysig2nativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
+fi
 job lib-artifacts python3 ./tests/libraryartifactcheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-native-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-module-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}" --no-main

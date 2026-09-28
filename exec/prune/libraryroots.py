@@ -1,11 +1,14 @@
-"""Library public roots from complete USLSIG1 metadata, interpreted in delta."""
+"""Library public roots from complete USLSIG1/2 framing, interpreted in delta."""
 SEEN, ROOT = (i<<40 for i in (80,81))
 def install(E,P,B,limit):
     from pathlib import Path
     schema=dict(line.split("\t") for line in (Path(__file__).with_name("libraryroots-schema.tsv")).read_text().splitlines() if line and not line.startswith("#"))
     magic=bytes.fromhex(schema["magic"]);widths=tuple(map(int,schema["widths"].split(",")))
-    assert magic==b"USLSIG1\n" and set(schema)=={"magic","class-max","widths","flag-max","stored-max"}
+    assert magic==b"USLSIG1\n" and bytes.fromhex(schema["magic-v2"])==b"USLSIG2\n"
+    assert set(schema)=={"magic","magic-v2","class-max","widths","flag-max","stored-max","parameter-max-v2","extent-max-v2","alignment-max-v2"}
     assert widths==(0,1,2,4,8) and int(schema["class-max"])==6 and int(schema["flag-max"])==1 and int(schema["stored-max"])==8
+    params_max=int(schema["parameter-max-v2"]);extent_max=int(schema["extent-max-v2"]);alignment_max=int(schema["alignment-max-v2"])
+    assert (params_max,extent_max,alignment_max)==(1024,16777216,65536)
     g=E.g
     def test(p,x,y,yes,no):p.branch({1:yes},no,[("CMPI",x,y)])
     def hook(name,proc):
@@ -17,9 +20,14 @@ def install(E,P,B,limit):
     P("LR.return").ret()
     P("LR.bad").a(E.rej("not covered: malformed library signatures or missing public label")).goto("DEAD")
     P("LR.open").a(("INPUSH","lr_blob"),("XLEN","lr_len")).goto("LR.magic0")
-    for i,c in enumerate(magic):
+    for i,c in enumerate(magic[:6]):
         P("LR.magic"+str(i)).branch({c:"LR.magicadv"+str(i)},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
-        P("LR.magicadv"+str(i)).a(("ADV",)).goto("LR.magic"+str(i+1) if i<7 else "LR.count")
+        P("LR.magicadv"+str(i)).a(("ADV",)).goto("LR.magic"+str(i+1))
+    P("LR.magic6").branch({49:"LR.version1",50:"LR.version2"},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
+    P("LR.version1").a(("LDI","lr_version",1),("ADV",)).goto("LR.magic7")
+    P("LR.version2").a(("LDI","lr_version",2),("ADV",),("LDI","lr_limit",extent_max)).branch({2:"LR.bad"},"LR.magic7",[("C64U","lr_len","lr_limit")])
+    P("LR.magic7").branch({10:"LR.magicadv7"},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
+    P("LR.magicadv7").a(("ADV",)).goto("LR.count")
     P("LR.count").call("LR.u64").a(("COPYW","lr_records","lr_value"),("LDI","lr_limit",limit)).branch({2:"LR.bad"},"LR.begin",[("C64U","lr_records","lr_limit")])
     P("LR.begin").a(("LDI","lr_rec",0)).goto("LR.loop")
     P("LR.loop").branch({1:"LR.end"},"LR.name",[("CMP","lr_rec","lr_records")])
@@ -34,7 +42,15 @@ def install(E,P,B,limit):
     byte("LR.tail",letters+tuple(range(48,58))+(46,36),"LR.nameadv","LR.bad")
     P("LR.nameend").a(("INTERN","lr_id","lr_s","lr_e"),("JUMP","lr_e"),("LDX","lr_seen","lr_id",SEEN)).branch({1:"LR.link"},"LR.bad",[("CMPI","lr_seen",0)])
     P("LR.link").a(("LDI","lr_one",1),("STX","lr_id",SEEN,"lr_one")).call("LR.bit").a(("COPYW","lr_link","lr_value")).call("LR.bit").branch({1:"LR.var"},"LR.bad",[("CMPI","lr_value",1)])
-    P("LR.var").call("LR.bit").call("LR.u64").a(("COPYW","lr_params","lr_value"),("LDI","lr_di",0)).call("LR.desc").call("LR.u64").a(("COPYW","lr_stored","lr_value"),("LDI","lr_limit",8)).branch({2:"LR.eight"},"LR.same",[("C64U","lr_params","lr_limit")])
+    P("LR.var").call("LR.bit").a(("COPYW","lr_variadic","lr_value")).branch({1:"LR.v1params"},"LR.mode",[("CMPI","lr_version",1)])
+    P("LR.v1params").call("LR.u64").a(("COPYW","lr_params","lr_value")).goto("LR.result")
+    P("LR.mode").call("LR.bit").a(("COPYW","lr_mode","lr_value")).call("LR.u64").a(("COPYW","lr_params","lr_value"),("LDI","lr_limit",params_max)).branch({2:"LR.bad"},"LR.modevar",[("C64U","lr_params","lr_limit")])
+    P("LR.modevar").branch({1:"LR.stackmode"},"LR.modecount",[("CMPI","lr_variadic",1)])
+    P("LR.modecount").a(("LDI","lr_limit",6)).branch({2:"LR.stackmode"},"LR.registermode",[("C64U","lr_params","lr_limit")])
+    test(P("LR.stackmode"),"lr_mode",1,"LR.result","LR.bad")
+    test(P("LR.registermode"),"lr_mode",0,"LR.result","LR.bad")
+    P("LR.result").call("LR.desc").call("LR.u64").a(("COPYW","lr_stored","lr_value")).branch({1:"LR.v1stored"},"LR.same",[("CMPI","lr_version",1)])
+    P("LR.v1stored").a(("LDI","lr_limit",8)).branch({2:"LR.eight"},"LR.same",[("C64U","lr_params","lr_limit")])
     P("LR.eight").a(("LDI","lr_expected",8)).goto("LR.stored")
     P("LR.same").a(("COPYW","lr_expected","lr_params")).goto("LR.stored")
     P("LR.stored").branch({1:"LR.paramstart"},"LR.bad",[("CMP","lr_stored","lr_expected")])
@@ -47,9 +63,36 @@ def install(E,P,B,limit):
     P("LR.end").a(("MARK","lr_pos")).branch({1:"LR.done"},"LR.bad",[("CMP","lr_pos","lr_len")])
     P("LR.done").a(("INPOP",)).ret()
     # Complete six-field descriptors; opaque depth/base/shape preserved, not guessed.
-    P("LR.desc").call("LR.u64").call("LR.u64").call("LR.u64").call("LR.u64").a(("LDI","lr_limit",int(schema["class-max"]))).branch({2:"LR.bad"},"LR.width",[("C64U","lr_value","lr_limit")])
+    P("LR.desc").branch({1:"LR.desc1"},"LR.desc2",[("CMPI","lr_version",1)])
+    P("LR.desc1").call("LR.u64").call("LR.u64").call("LR.u64").call("LR.u64").a(("LDI","lr_limit",int(schema["class-max"]))).branch({2:"LR.bad"},"LR.width",[("C64U","lr_value","lr_limit")])
     P("LR.width").call("LR.u64").branch({widths:"LR.unsigned"},"LR.bad",[("RLD","lr_value")])
     P("LR.unsigned").call("LR.u64").a(("LDI","lr_limit",1)).branch({2:"LR.bad"},"LR.return",[("C64U","lr_value","lr_limit")])
+    # V2 checks the outer descriptor framing. Recursive member semantics belong
+    # to the typed host decoder; prune never guesses an ABI or selects roots there.
+    P("LR.desc2").call("LR.u64").call("LR.u64").call("LR.u64").call("LR.u64").a(("COPYW","lr_kind","lr_value"),("LDI","lr_limit",6)).branch({2:"LR.bad"},"LR.width2",[("C64U","lr_kind","lr_limit")])
+    P("LR.width2").call("LR.u64").a(("COPYW","lr_width","lr_value")).branch({(0,6):"LR.widthzero",1:"LR.widthint",(2,4):"LR.widthptr",3:"LR.widthfp",5:"LR.widthaggregate"},"LR.bad",[("RLD","lr_kind")])
+    test(P("LR.widthzero"),"lr_width",0,"LR.unsigned2","LR.bad")
+    P("LR.widthint").branch({(1,2,4,8):"LR.unsigned2"},"LR.bad",[("RLD","lr_width")])
+    test(P("LR.widthptr"),"lr_width",8,"LR.unsigned2","LR.bad")
+    P("LR.widthfp").branch({(4,8):"LR.unsigned2"},"LR.bad",[("RLD","lr_width")])
+    test(P("LR.widthaggregate"),"lr_width",0,"LR.bad","LR.widthbound")
+    P("LR.widthbound").a(("LDI","lr_limit",extent_max)).branch({2:"LR.bad"},"LR.unsigned2",[("C64U","lr_width","lr_limit")])
+    P("LR.unsigned2").call("LR.u64").a(("LDI","lr_limit",1)).branch({2:"LR.bad"},"LR.align2",[("C64U","lr_value","lr_limit")])
+    P("LR.align2").call("LR.u64").a(("COPYW","lr_align","lr_value")).branch({(0,6):"LR.alignzero"},"LR.alignnonzero",[("RLD","lr_kind")])
+    test(P("LR.alignzero"),"lr_align",0,"LR.tag2","LR.bad")
+    test(P("LR.alignnonzero"),"lr_align",0,"LR.bad","LR.alignbound")
+    P("LR.alignbound").a(("LDI","lr_limit",alignment_max)).branch({2:"LR.bad"},"LR.alignpower",[("C64U","lr_align","lr_limit")])
+    P("LR.alignpower").a(("A64I","sub","lr_am1","lr_align",1),("A64","and","lr_abits","lr_align","lr_am1")).branch({1:"LR.tag2"},"LR.bad",[("CMPI","lr_abits",0)])
+    P("LR.tag2").a(("BYTE","lr_tag"),("ADV",)).branch({(0,1,2,3,4):"LR.payload2"},"LR.bad",[("RLD","lr_tag")])
+    P("LR.payload2").call("LR.u64").a(("COPYW","lr_payload","lr_value"),("MARK","lr_pos"),("A64","sub","lr_left","lr_len","lr_pos")).branch({2:"LR.bad"},"LR.payloadbound",[("C64U","lr_payload","lr_left")])
+    P("LR.payloadbound").a(("LDI","lr_limit",extent_max)).branch({2:"LR.bad"},"LR.layoutkind",[("C64U","lr_payload","lr_limit")])
+    P("LR.layoutkind").branch({5:"LR.layoutaggregate",4:"LR.layoutfn"},"LR.layoutprimitive",[("RLD","lr_kind")])
+    P("LR.layoutaggregate").branch({(1,2,3):"LR.payloadnonempty"},"LR.bad",[("RLD","lr_tag")])
+    P("LR.payloadnonempty").a(("LDI","lr_limit",8)).branch({0:"LR.bad"},"LR.payloadskip",[("C64U","lr_payload","lr_limit")])
+    P("LR.layoutfn").branch({(0,4):"LR.payloadempty"},"LR.bad",[("RLD","lr_tag")])
+    test(P("LR.layoutprimitive"),"lr_tag",0,"LR.payloadempty","LR.bad")
+    test(P("LR.payloadempty"),"lr_payload",0,"LR.return","LR.bad")
+    P("LR.payloadskip").a(("A64","add","lr_e_payload","lr_pos","lr_payload"),("JUMP","lr_e_payload")).ret()
     P("LR.bit").a(("BYTE","lr_value"),("ADV",)).branch({(0,1):"LR.return"},"LR.bad",[("RLD","lr_value")])
     P("LR.u64").a(("MARK","lr_pos"),("A64","sub","lr_left","lr_len","lr_pos"),("LDI","lr_limit",8)).branch({0:"LR.bad"},"LR.u64read",[("C64U","lr_left","lr_limit")])
     P("LR.u64read").a(("LDI","lr_value",0),*[a for i in range(8) for a in [("BYTE","lr_byte"),("A64I","shl","lr_byte","lr_byte",i*8),("A64","or","lr_value","lr_value","lr_byte"),("ADV",)]]).ret()

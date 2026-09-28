@@ -2801,3 +2801,7 @@ Windows guest mmap契约经现有stdlib实读校准：Windows _UNISA_MAP传Virtu
 R10 ALL_STACK首片实测：macOS ARM原生与Rosetta x86的实际模型生成机器码，9参混合FP/GP/指针、9参struct按值复制（caller对象不变）、9个float、17加权整数、嵌套调用各100轮通过，SP与低栈canary及拒绝控制通过。两个新增实际模型门禁和Win64宿主ABI适配门禁已加入gate。首轮旧Windows源解释器错误消费新增第二procedure导致1失败，已按精确seh_proc锚点分开；复跑7项全部rc0，双槽5秒，首失败保留在research/r10-ffi-stack-bridge-evidence.json。Windows/Linux只cross-assemble，不冒称客机执行；USLSIG1/us_sym仍缺完整类型图，原九混合聚合返回红基线尚未闭合。本片不改模型决策、未接宿主API新桥，根产物需按实际源码重构后验来源，不原地换侧车。
 
 R10 ALL_STACK正式候选封存：d4eac6d冻结源实际shared+六目标均完成，all在pack55秒超时，随后独立pack复核输入manifest并rc0（不放宽）；实际新产物仍55e3425b/1,056,235B，源码闭包身份更新自真实构建。第一次9项非Terminal整批被Python50秒wrapper中止，未算pass且owned进程已无。相同候选经Terminal分7+2两个bounded批次全部rc0（3秒与13秒）；com-run12/12、com-c9957/57。根产物及原始sidecar已替换、来源核对通过。回执research/r10-ffi-stack-final-candidate.json。本片仅增加声明脚本帧搬运，USLSIG2/完整us_sym九混合聚合返回及剩余R10仍未完成。
+
+
+### R10 USLSIG2类型与全量参数实施决定（2026-09-29）
+协议固定见exec/c/librarysignature-v2.md：V1兼容，V2携带完整<=1024参数、显式REGISTER/ALL_STACK、带长度的递归类型布局、size/alignment与ordered成员，来自E3真实类型池而不是宿主解析C。E3独立参数捕获池不再sig*16/min8；宿主递归owned ffi_type树及完整arg数组只执行声明ABI，libffi无法表达的union/bitfield不伪装bytearray；prune δ认识新framing，仍按模型保留全部public定义。父会话集成ValueFrame到生命周期/私有软栈，聚合返回在释放帧前复制，旧入口保留。分域并行：E3输出、host decoder、prune协议；父会话只动libunisacc.c与专项公开API测试、门禁/生成物/根产物。第一完整闭环必须仍是9混合参数+Pair返回17.00/40，不以类型格式或libffi smoke代替公开API执行。完整R10/变参/callback与其他ABI后续范围不变。
