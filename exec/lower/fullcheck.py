@@ -37,9 +37,15 @@ def main():
             for width in (1,2,4,8):
                 for barrier in ('','blocked'+str(width)+':\n'):
                     fixture += f'  .frame 8\n  .st [r7+0], r2, {width}\n{barrier}  .ld r1, [r7+0], {width}\n  .frame -8\n'
-        if os.environ.get('LOWER_TARGET','').startswith('win/'):
-            from unisa.catalog import WINAPI
-            fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in WINAPI)
+        target=os.environ.get('LOWER_TARGET','lnx/x86_64')
+        unavailable=[]
+        if target.startswith('win/'):
+            from unisa.catalog import WINAPI, winimp
+            arch=target.split('/')[1]
+            supported=[op for op in WINAPI if WINAPI[op] is not None and winimp(op,'win',arch)!='none']
+            unavailable=[op for op in WINAPI if op not in supported]
+            assert supported and unavailable, 'Windows import fixture classes must be nonempty'
+            fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in supported)
         fixture += '  .print r0\n  .print r3\n'
         cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
         if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
@@ -70,6 +76,20 @@ def main():
                     sexts=[tuple(i.args) for i in parse_tins(r.stdout.decode()).code if i.op=='sext']
                     assert sexts==[('x1','x2',1),('x1','x2',2),('x1','x2',4)],sexts
             print('lower full',name,n,'instructions equal; executors',len(commands),flush=True)
+        # Planned API names with no declared import are refusals, not positives.
+        # Keep every such entry checked; neither a crash nor an acceptance passes.
+        for op in unavailable:
+            raw='_start:\n  .sys '+op+', r0, r1, r2\n  ret\n'
+            try: lower(parse(raw),target,oracle,drive='built')
+            except ValueError as error:
+                assert str(error)==op+': no Windows import for this op', (op,str(error))
+            else: raise AssertionError('reference accepted missing Windows import: '+op)
+            p.write_text(raw)
+            for cmd in ([sys.argv[1],sys.argv[2],str(p)],
+                        [sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)]):
+                r=subprocess.run(cmd,capture_output=True,timeout=60)
+                assert r.returncode==1 and not r.stdout and r.stderr.startswith(b'reject: not covered:'), (op,r.returncode,r.stdout,r.stderr)
+            print('lower unavailable',target,op,'reference + both executors rejected',flush=True)
         if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             subprocess.run([sys.executable, 'exec/lower/largecodecheck.py', sys.argv[1], sys.argv[2]],
                            check=True, timeout=45)
