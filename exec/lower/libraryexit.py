@@ -14,6 +14,7 @@ def install(E, os_, regmap, sysa):
           bindings=dict(supported='LM.prelude' if os_ in ('osx','lnx') else 'C.fail', SYSA=sysa, DIG=112 << 40),
           sequences=dict(fn=E.O('setreg '+regmap['r1']+', imm '),
                          argv=E.O('setreg '+regmap['r0']+', addr '),
-                         call=E.O('hostcall '+regmap['r1']+', '+regmap['r0']+'\n')))
+                         call=E.O('hostcall '+regmap['r1']+', '+regmap['r0']+'\n'),
+                         retname=[('SBOUT',b) for b in regmap['r0'].encode()]))
     from librarymemory import install as memory
     memory(E, os_, regmap, sysa)

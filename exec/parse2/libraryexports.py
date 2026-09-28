@@ -120,7 +120,9 @@ def install(E,P,b,start,integers):
     p.goto('LX.accept')
     rules(g,Path(__file__).parent,'libraryexports',section='write')
     from librarymodule import install as module_install
-    module_start=module_install(E,P,start)
+    from libraryimports import install as imports_install
+    imports_start=imports_install(E,P,b,start,integers)
+    module_start=module_install(E,P,imports_start)
     mode,row=g.st['LX.startok']
     for k,(n,q) in list(row.items()):
         assert n==start

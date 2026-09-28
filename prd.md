@@ -66,7 +66,7 @@
 
 **目标与基线**：以已发布 v0.0.9 / `a606ff4` 为基线，保持统一 `.com` 为主产品，优先补齐干净机器 CI 与 Windows 企业签名，再推进网络复用、单目标副产品及进程内库。沿用“表 → 构造确定性网络 → 通用执行器”的路线；不新增训练或另写一套编译逻辑。0.0.9 的193项本地通过不代表其 GitHub CI 通过。
 
-**当前进度**：七项交付仍未全部闭合。CI分片/共享准备和源码权重布局已落地并本地验证，远端CI成功仍待证；六单目标已私有交叉构建，最终平台验收未完成。共享E2已进入正式构建；db822a0冻结源的六目标模型及P3候选重建成功，候选1,008,827 B，SHA256 `72bff5ea4b8ce580fc30e371aca8f8df5d05959e3e6acdd9830d872ab82ffe80`，包759,627 B，来源闭包校验通过。候选hello/fib/calc的-run输出、诊断与退出码等于同源经典参考。库已实际完成macOS ARM映射运行、四线程四上下文、同上下文100次编译运行及20次malloc/free池回收；显式exit不结束宿主，格式普通与ASan/UBSan检查通过。us_sym原生可调用指针、us_add_symbol/回调、无main模块、1000次及六平台库仍未闭合。微软企业签名、最终全门禁与发布未完成；不得沿用0.0.9全门禁宣称0.0.10通过。
+**当前进度**：七项交付仍未全部闭合。CI分片/共享准备和源码权重布局已落地并本地验证，远端CI成功仍待证；六单目标已私有交叉构建，最终平台验收未完成。共享E2已进入正式构建；db822a0冻结源的六目标模型及P3候选重建成功，候选1,008,827 B，SHA256 `72bff5ea4b8ce580fc30e371aca8f8df5d05959e3e6acdd9830d872ab82ffe80`，包759,627 B，来源闭包校验通过。候选hello/fib/calc的-run输出、诊断与退出码等于同源经典参考。库已实际完成macOS ARM映射运行、四线程四上下文、同上下文100次编译运行及20次malloc/free池回收；显式exit不结束宿主，格式普通与ASan/UBSan检查通过。无main模块与us_sym整数/指针/void原生导出已实际通过；us_add_symbol首片在私有ARM包完成脚本调用宿主及同步嵌套回调/exit恢复。扩展ABI、1000次及六平台库仍未闭合，根.com尚未纳入本轮改动。微软企业签名、最终全门禁与发布未完成；不得沿用0.0.9全门禁宣称0.0.10通过。
 
 **R10 库格式边界修复（2026-09-29）**：新候选的lib-context在多单元O1检查明确失败：E3输出的USLTAPE1封装被E4当普通tape优化，tape缩短20字节而封装长度未更新。单单元O0、实际100次运行、CLI/C99检查仍通过；这些不能覆盖O1/O2库路径。修复决定：通用路由增加显式结束阶段边界，库先运行到E3、按有界格式拆出签名与tape，再仅把tape送进现有E4网络；C不做优化或编译决策，普通CLI路由不变。修复后lib-context多单元O0/O1/O2对拍、四线程、include目录与错误恢复实际通过；最新C适配器尚需重新装配根候选并跑完整门禁，原72bff5ea候选不能代表该修复后的驱动身份。
 
@@ -2648,3 +2648,16 @@ E3/lower新增声明的library/module资源：无main输入按模块编译，不
 新私有六目标候选已实际完成构造与打包：1,013,267 B、SHA256 a97f8357de1f9ff2fd2417703714068ec69300b2213b9142cf83b4650d5b810f；冻结快照无.git令最后provenance写入报错，包/容器构建已成功，随后仅用主仓只读GIT_DIR补入e160857身份并校验快照来源哈希，不重建或改字节。该候选含main真实typed导出四上下文测试rc0。旧lib-context对普通CLI -S的整tape断言rc1：模块有意移除进程启动且__init仅初始化后返回，不能继承普通程序tape全等合同；保留失败，补严格独立模块参考后再验，不用单纯删除断言凑绿。默认E3固定314/314及plain/warnings/errors全域和located模块有限对拍已由私有快照实测，回执收片中。根.com尚未替换。
 
 模块参考修正已实跑rc0：并发上下文、multi-unit O0/O1/O2、include目录与连续IO失败fd恢复均通过；转换只删除独立写明的316B启动及23B进程退出包装，其他字节完整比较，O1/O2从转换后的O0经过既有Python参考优化，禁止盲删已优化tape。增加启动/退出包装篡改拒绝控制。默认314源及三个网络的完整有限观察结果见[默认与变体回执](research/r10-librarymodule-default.json)；plain 1,604,504、warnings 1,714,670、errors 1,701,636观察全相等。native ABI及USBIND1独立声明存储见[原生回执](research/r10-libraryexports-native.json)，注册表尚未接入context，不能称符号互调已完成。
+
+### R10 注入符号接入决定（2026-09-29）
+
+公开us_add_symbol(ctx,name,addr,sig)接收宿主显式完整ABI描述并存借用地址；USBIND1资源有版本、record长度、名字、来源、ABI、类型与支持标志，宿主不解析C、不挑未定义名字。E3 δ核对实际源码原型再生成真实脚本ABI到宿主ABI包装；lower δ仅在library/module和bindings声明下将专用.librarycall降为现有通用ABI桥。普通Linux .hostcall继续拒绝，Windows本片明确未支持。注入改动使旧映射/导出失效，重新编译后生效；拥有地址的宿主保证其生命周期。完整descriptor中的base/shape本地编号不参与跨模块ABI相等，depth/class/width/unsigned参与。首片function fixed<=6整数/普通数据指针/void返回；data/FP/聚合/变参声明可存但未实现调用必须明确拒绝。目标为实际宿主函数在脚本内被调用，不以包装tape或存表成功替代闭环。
+
+回调宿主边界决定：已导出的native指针允许在注入的宿主函数内部回调脚本。同线程嵌套调用使用独立guarded软栈与逐帧exit跳转，恢复前一active上下文；不能复用外层软栈顶部或单例jmp_buf。每上下文仍要求单调用线程；同线程回调是同步栈嵌套。对脚本自动取址为系统函数指针及任意FP/聚合/变参ABI的扩展尚待后续，此次实际回调证据限定宿主持有us_sym产生的native桥指针。
+
+
+R10 注入真实闭环首差：私有包路由旧目录已修并核对compact_q后的模型哈希。当前源码编译通过，但ARM encoder拒绝：捕获lower流含退出hostcall后的`mov x0, `，LE.call漏声明返回寄存器；注入包装地址又经过32位PRN而截断。分别在lower返回声明和E3的64位无符号十进制输出修复，补高地址及完整mov控制，实际回调通过前不称闭环完成。
+
+R10 注入首片实际闭环已通过：osx/arm64四上下文并发、O0/O1/O2、signed char/unsigned short/int/指针/void参数及返回、宿主→us_sym→脚本嵌套调用、嵌套exit37后恢复均实跑。E3包装地址改64位十进制；lower退出声明补retblob，旧模型被新checker拒绝，四POSIX目标完整有限观察一致。当前验证包是明确替换E3/lower的私有ARM限定包，非最新完整六目标出货物；Windows、FP/聚合/变参/data注入及完整1000循环仍待完成。增加lib-bindings门禁消费MODEL_COM，待完整候选重建后验，不把旧根.com算绿。
+
+本片封存：注入lower有限观察与边界见[lower回执](research/r10-libraryimports-lower.json)，实际四上下文互调见[原生回执](research/r10-libraryimports-native.json)，退出空源旧模型控制及四POSIX修复见[退出回执](research/r10-libraryexit-return.json)。E3高地址回归通过，net=table完整1,665,908观察，6458状态。

@@ -50,6 +50,12 @@ def main():
                     else:
                         assert b'320255973501901' in out and b'hostcall ' in out,'callback address/bridge missing'
                         assert b'gate ' not in out,'library exit still emits process gate'
+                        resultreg=b'x0' if target.endswith('/arm64') else b'rax'
+                        complete=b'hostcall '+(b'x1' if target.endswith('/arm64') else b'rdi')+b', '+resultreg+b'\n'
+                        if op.startswith('.sys'):
+                            complete+=b'mov '+resultreg+b', '+resultreg+b'\n'
+                        assert complete in out,('library exit return register absent/incomplete',out)
+                        assert all(not line.endswith(b', ') for line in out.splitlines()),'empty operand in library exit output'
                     if value is None and 'exit_group' not in op:
                         assert command([runtime,str(tbl),str(source)])==out,'C table differs'
                 else: assert result.returncode==1,(status,result.stderr)

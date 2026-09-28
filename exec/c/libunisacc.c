@@ -13,6 +13,7 @@
 #include <errno.h>
 #include "libraryexports.h"
 #include "librarycall.h"
+#include "librarybindings.h"
 
 typedef struct Allocation { void *p; struct Allocation *next; } Allocation;
 typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } GuestMap;
@@ -28,6 +29,8 @@ struct us_context {
     int input_is_tape;
     unsigned char *image; long image_size, image_dataoff, image_text_size; int image_entry;
     us_exports exports;
+    us_bindings bindings;
+    unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
     Symbol *symbols; size_t symbol_count;
@@ -151,6 +154,7 @@ API us_context *us_new(const char *path) {
 API void us_free(us_context *c) {
     if (!c) return;
     discard_image(c);
+    us_bindings_clear(&c->bindings);free(c->binding_blob);
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
     for (int i=0;i<c->argc;i++) free(c->argv[i]); free(c->argv);
@@ -200,11 +204,35 @@ API const void *us_tape(const us_context *c,size_t *length) {
     if (length) *length=c ? c->tape_length : 0; return c ? c->tape : 0;
 }
 static uint64_t library_u64(const Buf *b,size_t *at);
+static us_binding_type binding_type(us_type_descriptor t) {
+    us_binding_type r={t.depth,t.base,t.shape,t.kind,t.width,t.uns};return r;
+}
+API int us_add_symbol(us_context *c,const char *name,void *address,const us_signature *sig) {
+    if(!c || !sig || sig->kind>1 || active)return error(c,"invalid symbol registration");
+    if(c->input_is_tape)return error(c,"symbol injection requires C declarations");
+    us_binding_type result=binding_type(sig->result),*args=0;
+    if(sig->count>1024 || (sig->count&&!sig->args))return error(c,"invalid symbol parameters");
+    if(sig->kind && (sig->count || sig->variadic))return error(c,"invalid data symbol declaration");
+    if(sig->count){args=malloc(sig->count*sizeof *args);if(!args)return error(c,"out of memory");
+        for(size_t i=0;i<sig->count;i++)args[i]=binding_type(sig->args[i]);}
+    int rc=sig->kind ? us_bindings_add_data(&c->bindings,name,(uintptr_t)address,&result,
+                      sig->extent,sig->writable,c->error,sizeof c->error) :
+        us_bindings_add_function(&c->bindings,name,(uintptr_t)address,&result,args,sig->count,
+                                sig->variadic,c->error,sizeof c->error);
+    free(args);if(rc)return rc;
+    discard_image(c);free(c->tape);c->tape=0;c->tape_length=0;
+    free(c->signatures);c->signatures=0;c->signatures_length=0;
+    free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
+    free(c->target);c->target=0;c->error[0]=0;return 0;
+}
 API int us_compile(us_context *c,const char *target,int level) {
     if (!c || !target || level<0 || level>2) return error(c,"invalid compilation options");
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
     if (active) return error(c,"recursive compilation not yet supported");
     c->error[0]=0;
+    free(c->binding_blob);c->binding_blob=0;c->binding_length=0;
+    if(c->bindings.count && us_bindings_serialize(&c->bindings,&c->binding_blob,&c->binding_length,c->error,sizeof c->error))return 1;
+    if(c->binding_length>=INT_MAX)return error(c,"bindings too large");
     discard_image(c);
     char *chosen=copy_string(target); if (!chosen) return error(c,"out of memory");
     free(c->target); c->target=chosen; c->optimisation=level;
@@ -216,7 +244,7 @@ API int us_compile(us_context *c,const char *target,int level) {
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
         package(c->package);
-        ResourceInput resources[5]; memset(resources,0,sizeof resources);
+        ResourceInput resources[6]; memset(resources,0,sizeof resources);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
         RI=resources; NRI=0;
         resources[NRI].name=(const unsigned char *)"\0cli/target"; resources[NRI].n=11;
@@ -235,6 +263,10 @@ API int us_compile(us_context *c,const char *target,int level) {
         resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
         resources[NRI].name=(const unsigned char *)"\0library/module";resources[NRI].n=15;
         resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
+        if(c->binding_blob){
+            resources[NRI].name=(const unsigned char *)"\0library/bindings";resources[NRI].n=17;
+            resources[NRI].data=c->binding_blob;resources[NRI].len=(int)c->binding_length;NRI++;
+        }
         Buf input={0};
         char route[128];
         int z=snprintf(route,sizeof route,"%s/%stape/O%d",target,c->source_count>1 ? "multi/" : "",level);
@@ -325,8 +357,12 @@ static void library_image(us_context *c,Buf *bytes,MemoryImage *m,MemoryMap *map
     for (size_t i=1;i<c->symbol_count;i++)
         if (!strcmp(c->symbols[i-1].name,c->symbols[i].name)) __us_panic("duplicate library symbol");
 }
-static _Thread_local jmp_buf script_return;
-static _Thread_local int script_status;
+typedef struct ScriptFrame {
+    jmp_buf returned;
+    volatile int status;
+    struct ScriptFrame *previous;
+} ScriptFrame;
+static _Thread_local ScriptFrame *script_frames;
 /* Host memory lifetime adaptation. The model decides which operation and
    argument sequence to issue; these callbacks never inspect source or tape. */
 static long library_mmap(long addr,long length,long prot,long flags,long fd,long offset) {
@@ -364,7 +400,8 @@ static long library_munmap(long addr,long length) {
     return 0;
 }
 static long library_exit(long status) {
-    script_status=(int)status;longjmp(script_return,1);
+    if(!script_frames)return -EINVAL;
+    script_frames->status=(int)status;longjmp(script_frames->returned,1);
 }
 static const char *library_native_target(void) {
 #ifdef __aarch64__
@@ -393,7 +430,7 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        ResourceInput actual[15];unsigned char scalar[14][8];memset(actual,0,sizeof actual);
+        ResourceInput actual[16];unsigned char scalar[14][8];memset(actual,0,sizeof actual);
         const char *names[]={"\0process/argc","\0process/argv","\0memory/text","\0memory/reserve",
             "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process"};
         long vals[]={c->argc,(long)c->argv,(long)mapping.base,mapping.reserved,1,(long)library_exit,(long)library_mmap,(long)library_munmap,
@@ -404,6 +441,10 @@ API int us_relocate(us_context *c) {
         if (c->signatures) {
             actual[NRI].name=(const unsigned char *)"\0library/signatures";actual[NRI].n=19;
             actual[NRI].data=c->signatures;actual[NRI].len=(int)c->signatures_length;NRI++;
+        }
+        if(c->binding_blob){
+            actual[NRI].name=(const unsigned char *)"\0library/bindings";actual[NRI].n=17;
+            actual[NRI].data=c->binding_blob;actual[NRI].len=(int)c->binding_length;NRI++;
         }
         Buf input={0};input.n=(int)c->tape_length;input.b=tracked_realloc(0,c->tape_length);memcpy(input.b,c->tape,c->tape_length);
         char route[128];int z=snprintf(route,sizeof route,"%s/run/O%d",c->target,c->optimisation);
@@ -432,32 +473,44 @@ static int library_lookup(void *owner,const char *name,const void **raw,int *kin
     }
     return 1;
 }
-static int library_stack(us_context *c) {
-    if(c->call_stack)return 0;
+static int library_stack_alloc(us_context *c,unsigned char **base,size_t *size) {
     long page=sysconf(_SC_PAGESIZE);size_t usable=16U*1024U*1024U;
     if(page<=0 || (size_t)page>SIZE_MAX/2)return error(c,"invalid host page size");
     size_t total=usable+2*(size_t)page;
     unsigned char *p=mmap(0,total,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
     if(p==MAP_FAILED)return error(c,"cannot reserve library call stack");
     if(mprotect(p+page,usable,PROT_READ|PROT_WRITE)){munmap(p,total);return error(c,"cannot commit library call stack");}
-    c->call_stack=p;c->call_stack_size=total;return 0;
+    *base=p;*size=total;return 0;
 }
 static int library_invoke(void *owner,const void *raw,const uint64_t slots[6],uint64_t *result) {
     us_context *c=owner;
     if(c){c->call_failed=1;c->call_exited=0;c->call_exit_status=0;}
     if(!c || !c->image || !raw || !slots || !result)return error(c,"invalid library call");
-    if(active)return error(c,"recursive script execution not yet supported");
-    if(library_stack(c))return 1;
-    c->error[0]=0;c->call_exited=0;c->call_exit_status=0;*result=0;
-    active=c;script_status=0;
-    if(!setjmp(script_return)) {
-        size_t page=(size_t)sysconf(_SC_PAGESIZE);
-        *result=us_library_bridge_raw(raw,slots,c->call_stack+c->call_stack_size-page);
-    } else {
-        c->call_exited=1;c->call_exit_status=script_status;
-        snprintf(c->error,sizeof c->error,"script exited with status %d",script_status);
+    /* Reentry is permitted only inside a declared native call's script frame,
+       never while a compiler/loader owns thread-local runtime state. */
+    if(active && !script_frames)return error(c,"execution during compilation is not supported");
+    unsigned char *stack=0;size_t stack_size=0;int nested=script_frames!=0;
+    if(nested){if(library_stack_alloc(c,&stack,&stack_size))return 1;}
+    else {
+        if(!c->call_stack && library_stack_alloc(c,&c->call_stack,&c->call_stack_size))return 1;
+        stack=c->call_stack;stack_size=c->call_stack_size;
     }
-    active=0;c->call_failed=c->call_exited ? 1 : 0;return c->call_failed;
+    c->error[0]=0;*result=0;
+    us_context *previous_active=active;
+    ScriptFrame frame;frame.previous=script_frames;frame.status=0;
+    active=c;script_frames=&frame;
+    int exited=setjmp(frame.returned);
+    if(!exited) {
+        size_t page=(size_t)sysconf(_SC_PAGESIZE);
+        *result=us_library_bridge_raw(raw,slots,stack+stack_size-page);
+    }
+    script_frames=frame.previous;active=previous_active;
+    if(nested)munmap(stack,stack_size);
+    c->call_exited=exited ? 1 : 0;c->call_exit_status=exited ? frame.status : 0;
+    c->call_failed=c->call_exited;
+    if(exited)snprintf(c->error,sizeof c->error,"script exited with status %d",frame.status);
+    else c->error[0]=0;
+    return c->call_failed;
 }
 static int library_initialise(us_context *c) {
     if(c->initialised==1)return 0;

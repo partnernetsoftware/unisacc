@@ -193,6 +193,7 @@ job lib-context python3 ./tests/libunisacccheck.py --package "${MODEL_COM:-./uni
 job lib-format python3 ./tests/libunisaccformatcheck.py
 job lib-native-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-module-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}" --no-main
+job lib-bindings python3 ./tests/libunisaccbindingscheck.py --package "${MODEL_COM:-./unisacc.com}"
 job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located
 job shared-e2-tokens ./tests/sharede2.sh tokens
