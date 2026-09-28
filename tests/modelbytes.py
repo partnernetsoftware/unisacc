@@ -24,6 +24,7 @@ FUNCTIONS = {
     "e1": "词法与 token/位置输出",
     "e3": "解析、类型/作用域、tape、错误与警告",
     "e4": "O1/O2 优化",
+    "nativeabi": "宿主ABI carrier认证（原始类型图→目标载体证书）",
     "prune": "函数可达闭包与保守原文剪枝（数据/地址根保留）",
     "lower": "ABI、调用、目标指令 lowering 与数据布局",
     "elf": "目标指令编码及 ELF/Mach-O/PE 镜像写出",

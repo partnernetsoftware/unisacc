@@ -27,6 +27,7 @@ typedef struct Symbol { char *name; uintptr_t address; int kind; } Symbol;
 typedef struct Source { char *name, *bytes; struct Source *next; } Source;
 typedef struct LibraryCallableDeclaration {uint64_t key;us_exports graph;us_export_signature signature;} LibraryCallableDeclaration;
 typedef struct LibraryCallableSite {uint64_t site,key,fixed;us_exports graph;us_export_signature signature;} LibraryCallableSite;
+typedef struct LibraryCarrierExport {us_export *source;us_carrier_certificate certificate;struct LibraryCarrierExport *next;} LibraryCarrierExport;
 struct us_context {
     char *package, *definitions, *include_path, *target;
     Source *sources;
@@ -37,6 +38,7 @@ struct us_context {
     int input_is_tape;
     unsigned char *image; int64_t image_size, image_dataoff, image_text_size, image_data_size; int image_entry;
     us_exports exports;
+    LibraryCarrierExport *carrier_exports;
     us_bindings bindings;
     us_resolver resolver;
     us_native_plans native_plans;
@@ -183,6 +185,7 @@ static void library_callable_catalog_clear(us_context *c){
 }
 static void discard_image(us_context *c) {
     us_callables_clear(&c->callables);if(c->image_generation!=UINT64_MAX)c->image_generation++;
+    while(c->carrier_exports){LibraryCarrierExport *p=c->carrier_exports;c->carrier_exports=p->next;us_carrier_certificate_clear(&p->certificate);free(p);}
     us_exports_clear(&c->exports);c->initialised=0;
     if(c->call_stack){library_release_map(c->call_stack,c->call_stack_size);c->call_stack=0;c->call_stack_size=0;}
     while (c->guest_maps) {GuestMap *m=c->guest_maps;c->guest_maps=m->next;library_release_map(m->base,m->length);free(m);}
@@ -405,6 +408,19 @@ static int library_carrier_model(us_context *c,const char *target,const void *wi
     cleanup();active=NULL;RI=NULL;NRI=0;NR=0;
     if(rc==2)c->error[0]=0;
     return (int)rc;
+}
+static int library_carrier_exports_prepare(us_context *c){
+    for(size_t i=0;i<c->exports.count;i++){
+        us_export *x=c->exports.items+i;
+        if(x->version!=2||x->linkage||x->defined!=1||x->variadic||us_export_supported(x)||
+           (us_export_has_callbacks(x)&&us_export_bridge_supported(x)))continue;
+        LibraryCarrierExport *entry=calloc(1,sizeof *entry);
+        if(!entry)return error(c,"carrier export allocation failed");
+        int rc=library_carrier_model(c,c->target,x->wire,x->wire_length,&entry->certificate);
+        if(rc){us_carrier_certificate_clear(&entry->certificate);free(entry);if(rc==1)return 1;continue;}
+        entry->source=x;entry->next=c->carrier_exports;c->carrier_exports=entry;
+    }
+    return 0;
 }
 static int library_carrier_provider(void *owner,us_native_plans *plans,uintptr_t raw,const void *wire,size_t length,uint64_t *handle,char *message,size_t cap){
     LibraryCarrierOwner *request=owner;us_carrier_certificate cert={0};
@@ -836,6 +852,7 @@ API int us_relocate(us_context *c) {
 #if defined(_WIN32) && !defined(__UNISA__)
     library_winimports_free(&winimports);
 #endif
+    if(!rc)rc=library_carrier_exports_prepare(c);
     if (rc) discard_image(c);
     else if(c->image_generation==UINT64_MAX){discard_image(c);return error(c,"image generation capacity exceeded");}
     else {us_callables_init(&c->callables,c,c->image_generation,library_invoke_frame,library_callable_native_hook,library_callable_failure_hook);c->callables.script_call=library_callable_script_hook;}
@@ -978,14 +995,15 @@ API void *us_sym(us_context *c,const char *name) {
             return code;
         }
         if(x->version==2&&!x->linkage&&x->defined==1&&!x->variadic){
-            us_carrier_certificate cert={0};int rc=library_carrier_model(c,c->target,x->wire,x->wire_length,&cert);
-            if(rc==1)return NULL;
-            if(!rc){
+            LibraryCarrierExport *entry=c->carrier_exports;
+            while(entry&&entry->source!=x)entry=entry->next;
+            if(entry){
+                int rc;
                 const void *raw=NULL;int kind=-1;us_export_signature view;uint64_t h=0;void *code=NULL;
                 rc=library_lookup(c,name,&raw,&kind)||kind||us_callable_export_signature(x,&view)||
-                   us_carrier_certificate_make(&cert,&c->callables,US_CALLABLE_SCRIPT,&view,(uintptr_t)raw,&h,c->error,sizeof c->error)||
+                   us_carrier_certificate_make(&entry->certificate,&c->callables,US_CALLABLE_SCRIPT,&view,(uintptr_t)raw,&h,c->error,sizeof c->error)||
                    us_callable_pointer(&c->callables,h,&view,&code,c->error,sizeof c->error);
-                us_carrier_certificate_clear(&cert);return rc?NULL:code;
+                return rc?NULL:code;
             }
         }
         break;

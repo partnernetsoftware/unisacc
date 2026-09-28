@@ -8,9 +8,10 @@ union U {double d;unsigned long long bits;};
 _Static_assert(sizeof(union U)==8 && _Alignof(union U)==8,"fixture requires declared union8 ABI");
 typedef union U (*Round)(union U);
 static unsigned native_calls;
+static us_context *callback_context;static Round callback_entry;static int callback_lookup_failed;
 static const uint64_t script_mask=UINT64_C(0x0102030405060708);
 static const uint64_t native_mask=UINT64_C(0x8877665544332211);
-static union U host_flip(union U x){native_calls++;x.bits^=native_mask;return x;}
+static union U host_flip(union U x){native_calls++;if(callback_context&&(Round)us_sym(callback_context,"round")!=callback_entry)callback_lookup_failed=1;x.bits^=native_mask;return x;}
 static const char export_source[]=
 "union U {double d;unsigned long long bits;};"
 "union U round(union U x){x.bits^=0x0102030405060708ULL;return x;}";
@@ -43,17 +44,18 @@ int main(int argc,char **argv){
      event(c,"compile",opt,us_compile(c,argv[2],opt))||event(c,"relocate",opt,us_relocate(c))){us_free(c);return 1;}
   Round round=(Round)us_sym(c,"round");if(event(c,"us_sym",opt,round?0:1)){us_free(c);return 1;}
   if((void*)round!=us_sym(c,"round")){event(c,"stable_export",opt,1);us_free(c);return 1;}
+  callback_context=c;callback_entry=round;callback_lookup_failed=0;
   for(unsigned i=0;i<100;i++){
    struct {uint64_t before;union U value;uint64_t after;} input={UINT64_C(0x123456789abcdef0),{.bits=UINT64_C(0x7ff8000000000001)+i},UINT64_C(0xfedcba9876543210)};
    struct {uint64_t before;union U value;uint64_t after;} output={UINT64_C(0xabcdef0123456789),{.bits=0},UINT64_C(0x9876543210fedcba)};
    uint64_t original=input.value.bits;unsigned before=native_calls;output.value=round(input.value);int status=-1;
    if(output.value.bits!=(original^script_mask^(export_only?0:native_mask))||input.value.bits!=original||native_calls!=before+(export_only?0:1)||
       input.before!=UINT64_C(0x123456789abcdef0)||input.after!=UINT64_C(0xfedcba9876543210)||
-      output.before!=UINT64_C(0xabcdef0123456789)||output.after!=UINT64_C(0x9876543210fedcba)||us_call_status(c,&status)){
+      output.before!=UINT64_C(0xabcdef0123456789)||output.after!=UINT64_C(0x9876543210fedcba)||callback_lookup_failed||us_call_status(c,&status)){
     event(c,"call_value_copy_canary_status",opt,1);us_free(c);return 1;
    }
   }
-  event(c,"calls_100",opt,0);us_free(c);
+  event(c,"calls_100",opt,0);callback_context=NULL;callback_entry=NULL;us_free(c);
  }
  return 0;
 }
