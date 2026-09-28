@@ -2979,3 +2979,11 @@ R10 nested carrier调用图决定：nativeabi递归认证callback signature的fi
 R10 递归 carrier 公开验收：nativeabi 模型保留原始 USLSIG2，并递归生成固定回调载体图（755态、194,534观察、34,167 B网络）；C 按已认证图配对与转换，不分类 ABI。私有包 fef8d381… 的原生工厂返回未注册函数指针、SCRIPT closure 经原生实际调用再返回两条路径，在 macOS ARM 与 Rosetta 各以 ASan/UBSan 跑 O0/O1/O2×100 均 rc0；旧模型 factory 明确拒绝的 red 回执一并保留。已加入 factory/relay 与机械图回调门禁；证据 research/r10-recursive-carrier-public-evidence.json。当前根 .com 尚待本批重建；不外推 general union/bitfield/wide-FP 或六平台完成。
 
 R10 递归 carrier 候选已更新根产物：unisacc.com 1,111,324 B / SHA256 f083f670bd1e42f51c433f10e1458026c69db9e32c62160093f2afb75cc9d213；六目标阶段各有界独立构造，pack rc0，来源侧车校验通过。全部24部署网络与留存表全域相等且包中内容相同；公开 factory/relay 四项门禁4/4，旧 concrete变参回调与导出4/4，com-run 12/0、com-c99 57/57、docs均通过（各批≤60s）。完整回执 research/r10-recursive-carrier-candidate-evidence.json。本批不是0.0.10完整发布：general union/bitfield/wide-FP、全部六平台实际FFI、SEH/生命周期及企业分发验收仍需继续。
+
+### R10 natural scalar union 与平台并行推进决定（2026-09-29）
+下一域把 nativeabi 的固定 mixed8 两成员规则推广为显式有限的自然对齐标量 union 类别（integer-only 小宽度、FP-only、mixed8，成员数与顺序不决定 ABI）；六 profile 必须按真实 ABI 判断，不能按大小误判。模型独占分类/载体选择，宿主只验证并执行已声明载体图；不可标量承载的类保留拒绝直至对应 carrier/BANK 完成，不冒称 general union。并行对 569a242 冻结快照作 Linux ARM factory/relay 实际测试，模型编辑期间不运行共享构建。更广 union、bitfield、wide-FP 与六平台目标不缩减。
+
+R10 位域 source fact TDD 决定：BF.metadata 中 BFS=bf_signed、MSZ=bf_unit；librarytypes.py 却以 BFS 输出 storage_bytes。先用 unsigned/signed int:3 和 long:33 实际源导出保留 red，再仅将 serializer storage 读取切到 MSZ；签名 support仍0，不借 wire修复冒称位域可调用。
+
+R10 位域 storage source fact 已先红后绿：旧冻结 E3 8049态在 unsigned int:3 输出 storage0（应4），真实源码测试退出1；单处 BFS→MSZ 修复后，unsigned/signed int:3 与 unsigned/signed long:33 的入参与返回共8描述全部正确（storage4/8，signedness未变），sim与C网络输出逐字节同，2,076,386观察全域net=table；support仍0。新增 lib-bitfield-source 门禁及 research/r10-bitfield-source-storage-evidence.json。根产品本批尚待模型源全部冻结后重构，不称已带修复。
+R10 Linux ARM 公开递归载体验证：569a242完整私有快照与P3包6307b751…在既有Lima ARM guest实际执行factory/relay、普通+ASan/UBSan四项，O0/O1/O2各100均rc0（1200 outer调用）；GCC15.2/libffi3.5.2/glibc2.43，来源/命令见 research/r10-recursive-carrier-linux-arm-evidence.json；无VM启停，未扩称压力/多参数/其他平台。缺失源事实及USLSIG3建议归入 research/r10-nativeabi-sourcefacts-plan.md，只是设计，wide-FP等仍需实现。

@@ -71,7 +71,7 @@ def install(E,P,b,integers,union_bank):
     for pool in ('MOF','BFO','BFW'):
         p.a(('LDX','lx_v','d_key',b[pool])).call('LX.u64')
     p.a(('LDX','d_bit','d_key',b['BFW'])).branch({2:'LTY.bitfield'},'LTY.ordinarymember',[('CMPI','d_bit',0)])
-    P('LTY.bitfield').a(('LDI','lx_supported',0),('LDX','lx_v','d_key',b['BFS'])).call('LX.u64').goto('LTY.membertype')
+    P('LTY.bitfield').a(('LDI','lx_supported',0),('LDX','lx_v','d_key',b['MSZ'])).call('LX.u64').goto('LTY.membertype')
     P('LTY.ordinarymember').a(('LDX','lx_v','d_key',b['MSZ'])).call('LX.u64').goto('LTY.membertype')
     p=P('LTY.membertype')
     frame(p,'STX')
