@@ -3,10 +3,13 @@
 /* Explicit declared native ABI only. Root owns frame cleanup registration. */
 #include "libraryexports.h"
 typedef struct us_native_plan {
-    struct us_native_plan *next; us_exports graph; ffi_cif cif; ffi_type **args;
+    struct us_native_plan *next; us_exports graph,carrier; ffi_cif cif; ffi_type **args;
     uintptr_t target;unsigned bridge_required;us_export_signature signature;
 } us_native_plan;
-typedef struct us_native_plans { us_native_plan *head; } us_native_plans;
+typedef struct us_native_plans us_native_plans;
+/* Internal provider classifies model declarations; users cannot supply carriers. */
+typedef int (*us_native_carrier_provider)(void *,us_native_plans *,uintptr_t,const void *,size_t,uint64_t *,char *,size_t);
+struct us_native_plans { us_native_plan *head;us_native_carrier_provider carrier_provider;void *carrier_owner; };
 typedef struct us_call_outcome {
     int failed,exited,exit_status;char message[1024];
 } us_call_outcome;
@@ -20,8 +23,8 @@ typedef struct us_native_arena {
     us_native_plan *plan; void **values; void **owned; void *native_result;
     void *result_target; size_t count;us_native_boundary boundary;
 } us_native_arena;
-static void us_native_plan_free(us_native_plan *p){if(!p)return;free(p->args);us_exports_clear(&p->graph);free(p);}
-static void us_native_plans_clear(us_native_plans *p){if(!p)return;while(p->head){us_native_plan *n=p->head->next;us_native_plan_free(p->head);p->head=n;}}
+static void us_native_plan_free(us_native_plan *p){if(!p)return;free(p->args);us_exports_clear(&p->graph);us_exports_clear(&p->carrier);free(p);}
+static void us_native_plans_clear(us_native_plans *p){if(!p)return;while(p->head){us_native_plan *n=p->head->next;us_native_plan_free(p->head);p->head=n;}p->carrier_provider=NULL;p->carrier_owner=NULL;}
 static us_native_plan *us_native_plan_find(const us_native_plans *p,uint64_t handle){
     if(p)for(us_native_plan *n=p->head;n;n=n->next)if((uint64_t)(uintptr_t)n==handle)return n;return NULL;
 }
@@ -47,7 +50,11 @@ static int us_native_plan_add_call_capability(us_native_plans *plans,uintptr_t t
         p->signature.result=x->result;p->signature.argtypes=x->argtypes;
         p->target=target;p->next=plans->head;plans->head=p;*handle=(uintptr_t)p;return 0;
     }
-    if(!us_export_supported(x)){us_native_plan_free(p);return 0;}
+    if(!us_export_supported(x)){
+        int eligible=!variadic&&!x->variadic&&!us_export_has_callbacks(x);
+        us_native_plan_free(p);
+        return eligible&&plans->carrier_provider ? plans->carrier_provider(plans->carrier_owner,plans,target,sig,length,handle,error,cap):0;
+    }
     p->args=calloc(x->count ? (size_t)x->count:1,sizeof *p->args);if(!p->args){us_native_plan_free(p);return us_export_error(error,cap,"native plan allocation failed");}
     for(size_t i=0;i<(size_t)x->count;i++)p->args[i]=us_export_ffitype(us_export_arg(x,i),0);
     ffi_status status=variadic ?

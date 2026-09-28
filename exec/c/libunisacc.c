@@ -19,6 +19,7 @@
 #include "libraryresolver.h"
 #define US_CALLABLES_IMPLEMENTATION
 #include "librarycallables.h"
+#include "librarycarrierplan.h"
 
 typedef struct Allocation { void *p; struct Allocation *next, *prev, *hash_next; } Allocation;
 typedef struct GuestMap { void *base; size_t length; struct GuestMap *next; } GuestMap;
@@ -381,16 +382,50 @@ API int us_load_library(us_context *c,const char *path) {
     int rc=us_resolver_load(&c->resolver,path,c->error,sizeof c->error);
     if(rc)return rc;invalidate_bindings(c);return 0;
 }
+/* A separate runtime allocation domain, used only while no script is active.
+   The network, not this adapter, selects or rejects the ABI carrier. */
+typedef struct LibraryCarrierOwner {us_context *context;const char *target;} LibraryCarrierOwner;
+static int library_carrier_model(us_context *c,const char *target,const void *wire,size_t length,us_carrier_certificate *cert){
+    if(!c||!target||!wire||length>INT_MAX||active)return error(c,"carrier model requires an idle context");
+    active=c;volatile int rc=1;
+    if(!setjmp(failure)){
+        RI=0;NRI=0;NR=0;FILE_READ_RECORD=0;FILE_READ_COUNT=0;FILE_READ_PATHS=0;
+        package(c->package);
+        char route[64];snprintf(route,sizeof route,"%s/nativeabi",target);
+        int present=0;for(int i=0;i<PS;i++)if(!strcmp(STAGES[i].route,route))present=1;
+        if(!present)rc=2;
+        else{
+            ResourceInput resource={0};resource.name=(const unsigned char*)"\0cli/target";resource.n=11;
+            resource.data=(const unsigned char*)target;resource.len=(int)strlen(target);RI=&resource;NRI=1;
+            Buf input={0};input.b=tracked_realloc(NULL,length);input.n=(int)length;memcpy(input.b,wire,length);
+            int rejected=runroute(route,&input,"native ABI declaration");
+            rc=rejected?2:us_carrier_certificate_load(cert,target,input.b,(size_t)input.n,c->error,sizeof c->error);
+        }
+    }
+    cleanup();active=NULL;RI=NULL;NRI=0;NR=0;
+    if(rc==2)c->error[0]=0;
+    return (int)rc;
+}
+static int library_carrier_provider(void *owner,us_native_plans *plans,uintptr_t raw,const void *wire,size_t length,uint64_t *handle,char *message,size_t cap){
+    LibraryCarrierOwner *request=owner;us_carrier_certificate cert={0};
+    int rc=library_carrier_model(request->context,request->target,wire,length,&cert);
+    if(rc==2){*handle=0;return 0;}
+    if(!rc)rc=us_carrier_certificate_native_add(plans,raw,&cert,handle,message,cap);
+    else us_export_error(message,cap,request->context->error);
+    us_carrier_certificate_clear(&cert);return rc;
+}
 API int us_compile(us_context *c,const char *target,int level) {
     if (!c || !target || level<0 || level>2) return error(c,"invalid compilation options");
     if (!c->sources && !c->input_is_tape) return error(c,"no input");
     if (active) return error(c,"recursive compilation not yet supported");
     c->error[0]=0;
     unsigned char *frozen=0;size_t frozen_length=0;us_native_plans plans={0};us_native_templates templates={0};
+    LibraryCarrierOwner carrier_owner={c,target};plans.carrier_provider=library_carrier_provider;plans.carrier_owner=&carrier_owner;
     if(c->bindings.count || c->resolver.declarations.count || c->resolver.handle_count){
         if(strcmp(target,library_native_target()))return error(c,"native resolver target differs from host");
         if(us_resolver_freeze_with_templates_bridge(&c->resolver,&c->bindings,(uintptr_t)library_native_dispatch,(uintptr_t)library_variadic_dispatch,&plans,&templates,&frozen,&frozen_length,c->error,sizeof c->error))return 1;
     }
+    plans.carrier_provider=NULL;plans.carrier_owner=NULL;
     if(frozen_length>=INT_MAX){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"bindings too large");}
     char *chosen=copy_string(target); if (!chosen){free(frozen);us_native_plans_clear(&plans);us_native_templates_clear(&templates);return error(c,"out of memory");}
     discard_image(c);library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);
@@ -941,6 +976,17 @@ API void *us_sym(us_context *c,const char *name) {
                us_callable_make(&c->callables,US_CALLABLE_SCRIPT,&view,(uintptr_t)raw,&h,c->error,sizeof c->error)||
                us_callable_pointer(&c->callables,h,&view,&code,c->error,sizeof c->error))return NULL;
             return code;
+        }
+        if(x->version==2&&!x->linkage&&x->defined==1&&!x->variadic){
+            us_carrier_certificate cert={0};int rc=library_carrier_model(c,c->target,x->wire,x->wire_length,&cert);
+            if(rc==1)return NULL;
+            if(!rc){
+                const void *raw=NULL;int kind=-1;us_export_signature view;uint64_t h=0;void *code=NULL;
+                rc=library_lookup(c,name,&raw,&kind)||kind||us_callable_export_signature(x,&view)||
+                   us_carrier_certificate_make(&cert,&c->callables,US_CALLABLE_SCRIPT,&view,(uintptr_t)raw,&h,c->error,sizeof c->error)||
+                   us_callable_pointer(&c->callables,h,&view,&code,c->error,sizeof c->error);
+                us_carrier_certificate_clear(&cert);return rc?NULL:code;
+            }
         }
         break;
     }

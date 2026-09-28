@@ -41,16 +41,17 @@ static uint64_t library_callable_make_dispatch(uint64_t origin,uint64_t key,uint
     if(!c||!f||f->owner!=c)return 1;
     const us_export_signature *s=library_callable_signature(c,key);
     if(!s||r0||r1||!library_frame_region(c,f,output,8))return library_dispatch_error(c,"invalid callable introduction frame");
+    const us_export_signature *carrier=NULL;us_export_signature carrier_view;
     if(origin==US_CALLABLE_SCRIPT){
         if(!library_region((uintptr_t)c->image,(size_t)c->image_text_size,(uintptr_t)raw,1))return library_dispatch_error(c,"script callable outside owner code");
     }else if(origin==US_CALLABLE_NATIVE){
         int declared=0;for(us_native_plan *p=c->native_plans.head;p;p=p->next){
-            us_export_signature view;if(p->target==raw&&!us_callable_export_signature(p->graph.items,&view)&&us_callable_signature_equal(&view,s)){declared=1;break;}}
+            us_export_signature view;if(p->target==raw&&!us_callable_export_signature(p->graph.items,&view)&&us_callable_signature_equal(&view,s)){declared=1;if(p->carrier.count){if(us_callable_export_signature(p->carrier.items,&carrier_view))return library_dispatch_error(c,"invalid frozen carrier graph");carrier=&carrier_view;}break;}}
         if(!declared)for(us_native_template *p=c->native_templates.head;p;p=p->next){
             us_export_signature view;if(p->target==raw&&!us_callable_export_signature(p->graph.items,&view)&&us_callable_signature_equal(&view,s)){declared=1;break;}}
         if(!declared)return library_dispatch_error(c,"native callable lacks frozen candidate declaration");
     }else return library_dispatch_error(c,"invalid callable origin");
-    uint64_t h=0;int rc=us_callable_make(&c->callables,(unsigned)origin,s,(uintptr_t)raw,&h,c->error,sizeof c->error);
+    uint64_t h=0;int rc=carrier ? us_callable_make_carrier(&c->callables,(unsigned)origin,s,carrier,(uintptr_t)raw,&h,c->error,sizeof c->error) : us_callable_make(&c->callables,(unsigned)origin,s,(uintptr_t)raw,&h,c->error,sizeof c->error);
     if(!rc)memcpy((void*)(uintptr_t)output,&h,8);
     return library_callable_propagate(c,rc);
 }

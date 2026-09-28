@@ -4,7 +4,7 @@ import argparse, hashlib, json, pathlib, platform, shutil, struct, subprocess, t
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
- ap=argparse.ArgumentParser();ap.add_argument('--package',default=str(ROOT/'unisacc.com'));ap.add_argument('--arch',choices=['arm64','x86_64']);ap.add_argument('--evidence',type=pathlib.Path);ap.add_argument('--export-only',action='store_true');a=ap.parse_args()
+ ap=argparse.ArgumentParser();ap.add_argument('--package',default=str(ROOT/'unisacc.com'));ap.add_argument('--arch',choices=['arm64','x86_64']);ap.add_argument('--evidence',type=pathlib.Path);ap.add_argument('--export-only',action='store_true');ap.add_argument('--sanitize',action='store_true');a=ap.parse_args()
  host='arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64';arch=a.arch or host
  if arch!=host and platform.system()!='Darwin':raise RuntimeError('cross-native execution requires platform runner')
  package=pathlib.Path(a.package).resolve();target=('osx/' if platform.system()=='Darwin' else 'lnx/')+arch
@@ -17,13 +17,14 @@ def main():
   shutil.copy2(ROOT/'tests/libraryabi/union_native.c',td/'probe.c');inputs['tests/libraryabi/union_native.c']=sha(td/'probe.c')
   frozen=td/'models.pkg';shutil.copy2(package,frozen);assert sha(frozen)==record['package_sha256'],'package changed while snapshotting'
   record['runtime_inputs']=inputs;flags=['-arch',arch] if platform.system()=='Darwin' else []
+  sanitizers=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if a.sanitize else [];record['sanitize']=a.sanitize
   def run(stage,args):
    cmd=[str(ROOT/'tests/bound'),'20',*map(str,args)];p=subprocess.run(cmd,capture_output=True,timeout=25)
    item={'stage':stage,'command':cmd,'rc':p.returncode,'stdout':p.stdout.decode(errors='replace'),'stderr':p.stderr.decode(errors='replace')};record['commands'].append(item);return item
   try:
-   lib=td/'library.dylib';item=run('runtime_build',['cc',*flags,'-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',runtime/'libunisacc.c',runtime/('librarycall_'+arch+'.S'),'-lffi','-o',lib])
+   lib=td/'library.dylib';item=run('runtime_build',['cc',*flags,*sanitizers,'-std=c11','-O2','-shared','-fPIC','-fvisibility=hidden',runtime/'libunisacc.c',runtime/('librarycall_'+arch+'.S'),'-lffi','-o',lib])
    if item['rc']:return finish(record,a.evidence,item['rc'])
-   record['runtime_sha256']=sha(lib);exe=td/'probe';item=run('probe_build',['cc',*flags,'-std=c11','-O2','-Wall','-Wextra','-I',runtime,td/'probe.c',lib,'-o',exe])
+   record['runtime_sha256']=sha(lib);exe=td/'probe';item=run('probe_build',['cc',*flags,*sanitizers,'-std=c11','-O2','-Wall','-Wextra','-I',runtime,td/'probe.c',lib,'-o',exe])
    if item['rc']:return finish(record,a.evidence,item['rc'])
    u=lambda n:struct.pack('<Q',n)
    def desc(kind,width,align,uns=0,tag=0,payload=b''):

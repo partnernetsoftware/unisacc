@@ -194,6 +194,7 @@ static int us_resolver_freeze(const us_resolver*r,const us_bindings*injected,uns
 static int us_resolver_freeze_with_templates_capability(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,unsigned char**out,size_t*length,int bridge,char*error,size_t cap){
  us_native_plans tmpplans={0};us_native_templates tmptemplates={0};
  if(!plans || plans->head || (templates&&templates->head))return us_binding_error(error,cap,"invalid native plan or template output");
+ tmpplans.carrier_provider=plans->carrier_provider;tmpplans.carrier_owner=plans->carrier_owner;
  if(!out||!length)return us_binding_error(error,cap,"invalid resolver output");*out=NULL;*length=0;
  if(!r||r->handle_count>US_RESOLVER_HANDLES||r->declarations.count>US_RESOLVER_NAMES||(injected&&injected->count>US_RESOLVER_NAMES))return us_binding_error(error,cap,"invalid resolver registry");
  us_resolver_bytes b={malloc(16),16,0};if(!b.p)return us_binding_error(error,cap,"resolver wire allocation failed");memcpy(b.p,"USBIND3\n",8);

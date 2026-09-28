@@ -26,8 +26,8 @@ def _keybase():
         sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'pipeline'))
         from models import closure, ROOT
         names=set()
-        sources=[p for d in ('exec/pp','exec/lex','exec/parse','exec/parse2','unisa') for p in (ROOT/d).rglob('*.py')]
-        sources+=[ROOT/'exec/finite_rules.py',ROOT/'exec/c/tbl.py',ROOT/'exec/c/net.py']
+        sources=[p for d in ('exec/pp','exec/lex','exec/parse','exec/parse2','exec/nativeabi','unisa') for p in (ROOT/d).rglob('*.py')]
+        sources+=[ROOT/'exec/finite_rules.py',ROOT/'exec/modelsignature.py',ROOT/'exec/modelgraphequality.py',ROOT/'exec/c/tbl.py',ROOT/'exec/c/net.py']
         for p in sorted(sources):
             for line in p.read_text(errors='replace').splitlines():
                 if 'environ' in line or 'getenv' in line:
@@ -101,7 +101,7 @@ def retain_models(directory, rows):
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
 
-def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None):
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -219,6 +219,10 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                     cols=row.split('\t')
                     if cols[0]==target+'/warn/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
+        nativeabi=Path(shared_nativeabi).resolve() if shared_nativeabi is not None else built_model(
+            td,'nativeabi',here.parent/'nativeabi/gen.py',[])
+        for target in sorted(targets):
+            rows.append('\t'.join([target+'/nativeabi','nativeabi','USLSIG2','USLNCAR1',str(nativeabi)]))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
         payload=build([manifest],mounts,compressed=compressed,cache=MODEL_CACHE)
         if audit_dir is not None: retain_models(audit_dir, rows)
@@ -232,6 +236,7 @@ if __name__=='__main__':
     ap.add_argument('--kernels',type=Path,help='explicit directory containing both ISA kernel blobs')
     ap.add_argument('--audit-dir',type=Path,help='retain exact table/network pairs for offline --check-net')
     ap.add_argument('--shared-e2',type=Path,help='fresh shared plain E2 network from --shared-predefines')
+    ap.add_argument('--shared-nativeabi',type=Path,help='fresh shared model-certified ABI carrier network')
     ap.add_argument('--compressed',dest='compressed',action='store_true',default=True,help='P3 binary+DEFLATE models (default)')
     ap.add_argument('--legacy-package',dest='compressed',action='store_false',help='legacy uncompressed P1/P2')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
@@ -239,6 +244,6 @@ if __name__=='__main__':
     a=ap.parse_args()
     MODEL_CACHE=not a.no_model_cache
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2,a.shared_nativeabi);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')

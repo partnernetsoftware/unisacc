@@ -63,6 +63,17 @@ int main(int argc,char **argv){
                original.result.kind!=5||original.result.tag!=2||
                carrier.result.kind!=1||carrier.result.uns!=1||
                original.count!=1||carrier.count!=1)return 1;
+            /* Owned single-record wires must round-trip without ABI rewriting. */
+            us_exports replay={0};
+            us_export *x=plan.original.items;
+            if(!x->wire||us_exports_load_bridge(&replay,x->wire,x->wire_length,error,sizeof error))return 1;
+            us_export_signature replay_view;
+            if(replay.count!=1||strcmp(replay.items[0].name,x->name)||
+               us_callable_export_signature(replay.items,&replay_view)||
+               !us_callable_signature_equal(&original,&replay_view)||
+               replay.items[0].wire_length!=x->wire_length||
+               memcmp(replay.items[0].wire,x->wire,x->wire_length))return 1;
+            us_exports_clear(&replay);
             if(exercise(&plan))return 1;
             good++;
         }

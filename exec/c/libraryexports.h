@@ -44,6 +44,7 @@ typedef struct us_export {
     ffi_cif cif; ffi_type *ffiargs[6]; ffi_closure *closure; void *code;
     const void *raw; void *owner; us_export_invoke invoke;
     int last_status; us_export_graph graph;
+    unsigned char *wire; size_t wire_length; /* owned single-record declaration */
 } us_export;
 typedef struct us_exports { us_export *items; size_t count; } us_exports;
 static int us_export_error(char *error,size_t cap,const char *text) {
@@ -71,6 +72,7 @@ static void us_exports_clear(us_exports *set) {
     for(size_t i=0;i<set->count;i++) {
         if(set->items[i].closure) ffi_closure_free(set->items[i].closure);
         free(set->items[i].name);
+        free(set->items[i].wire);
         us_export_type_clear(&set->items[i].result);
         if(set->items[i].argtypes){for(size_t j=0;j<(size_t)set->items[i].stored;j++)us_export_type_clear(&set->items[i].argtypes[j]);}
         free(set->items[i].argtypes);free(set->items[i].dynamic_ffiargs);
@@ -291,6 +293,13 @@ static int us_exports_load_capability(us_exports *set,const void *data,size_t le
         }
         if(at>=length || (x->supported=bytes[at++])>1)goto bad;
         if((version==2 && at-record_start>16777216) || (x->supported && !(bridge && version==2 ? us_export_bridge_supported(x):us_export_supported(x))))goto bad;
+        /* Preserve the exact encoded graph rather than reconstructing ABI rules. */
+        size_t record_length=at-record_start;
+        if(record_length>SIZE_MAX-16)goto bad;
+        x->wire_length=16+record_length;x->wire=malloc(x->wire_length);
+        if(!x->wire)goto bad;
+        memcpy(x->wire,bytes,8);memset(x->wire+8,0,8);x->wire[8]=1;
+        memcpy(x->wire+16,bytes+record_start,record_length);
     }
     if(at!=length)goto bad;us_exports_clear(set);*set=tmp;return 0;
 bad:us_exports_clear(&tmp);return us_export_error(error,cap,"malformed library signature declaration");

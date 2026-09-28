@@ -22,7 +22,7 @@ settings={k:v for k,v in os.environ.items() if k.startswith(('E1','E2','E3','E4'
 assembly={str(p):digest(p) for p in sorted(pathlib.Path('exec/c/asm').glob('*.S'))}
 key=hashlib.sha256((key+json.dumps([settings,assembly],sort_keys=True)).encode()).hexdigest()
 if mode=='identity': print(key);raise SystemExit
-names=([f'shared/{s}.{e}' for s in ('e2','e1','e3','e4','o1','prune') for e in ('json','tbl','net')]
+names=([f'shared/{s}.{e}' for s in ('e2','e1','e3','e4','o1','prune','nativeabi') for e in ('json','tbl','net')]
        + ['kernels/arm64','kernels/x86_64']) if stage=='shared' else (
        [f'{stage}/{s}.{e}' for s in ('lower','elf') for e in ('json','tbl','net')]+[f'{stage}/route.tsv'])
 record=root/stage/'manifest.json'
@@ -56,7 +56,8 @@ shared() {
     b python3 exec/opt/gen.py "$T/shared/e4.json" 2
     b python3 exec/opt/gen.py "$T/shared/o1.json" 1
     b python3 exec/prune/gen.py "$T/shared/prune.json"
-    for s in e2 e1 e3 e4 o1 prune; do
+    b python3 exec/nativeabi/gen.py "$T/shared/nativeabi.json"
+    for s in e2 e1 e3 e4 o1 prune nativeabi; do
         b python3 exec/c/tbl.py "$T/shared/$s.json" "$T/shared/$s.tbl"
         b python3 exec/c/net.py "$T/shared/$s.tbl" "$T/shared/$s.net"
     done
@@ -96,7 +97,7 @@ pack() {
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
     codec_flag=
     case ${PACK_COMPRESSED:-1} in 0) codec_flag=--legacy-package;; 1) codec_flag=--compressed;; *) echo "PACK_COMPRESSED must be 0 or 1" >&2; exit 2;; esac
-    b python3 exec/c/compilerpack.py $codec_flag --no-model-cache --shared-e2 "$T/shared/e2.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    b python3 exec/c/compilerpack.py $codec_flag --no-model-cache --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
     product_version=$(python3 -c 'import re; from pathlib import Path; m=re.findall(r"#define UNISACC_VERSION \"([0-9.]+)\"",Path("src/version.h").read_text()); assert len(m)==1; print(m[0])')
     b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" --product-name Unisacc --product-version "$product_version" -o "$T/unisacc-next.com"
     [ -s "$T/compiler.pkg" ] && [ -s "$T/unisacc-next.com" ]
