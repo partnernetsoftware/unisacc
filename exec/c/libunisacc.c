@@ -946,6 +946,29 @@ API void *us_sym(us_context *c,const char *name) {
     }
     return us_exports_symbol_frame(&c->exports,name,c,library_lookup,library_invoke_frame,c->error,sizeof c->error);
 }
+/* A caller-supplied complete ABI is a fixed entry specialization, not a
+   universal variadic closure. The model export supplies the real prototype. */
+API void *us_sym_typed(us_context *c,const char *name,const void *signature,size_t length) {
+    if(!c||!name||!c->image){error(c,"library is not relocated");return NULL;}
+    c->error[0]=0;us_exports declared={0};void *code=NULL;
+    if(us_exports_load_bridge(&declared,signature,length,c->error,sizeof c->error))return NULL;
+    if(declared.count!=1||declared.items[0].version!=2||strcmp(declared.items[0].name,name)){
+        error(c,"invalid concrete export declaration");goto done;
+    }
+    us_export *source=NULL;
+    for(size_t i=0;i<c->exports.count;i++)if(!strcmp(c->exports.items[i].name,name)){source=c->exports.items+i;break;}
+    us_export_signature proto,concrete;
+    if(!source||source->linkage||source->defined!=1||us_callable_export_signature(source,&proto)||
+       us_callable_export_signature(declared.items,&concrete)||!us_callable_concrete_valid(&proto,&concrete)){
+        error(c,"incompatible concrete variadic export signature");goto done;
+    }
+    if(library_initialise(c))goto done;
+    const void *raw=NULL;int kind=-1;uint64_t handle=0;
+    if(library_lookup(c,name,&raw,&kind)||kind||
+       us_callable_make(&c->callables,US_CALLABLE_SCRIPT,&concrete,(uintptr_t)raw,&handle,c->error,sizeof c->error)||
+       us_callable_pointer(&c->callables,handle,&concrete,&code,c->error,sizeof c->error))code=NULL;
+ done:us_exports_clear(&declared);return code;
+}
 API int us_call_status(const us_context *c,int *exit_status) {
     if(!c)return 1;
     if(exit_status)*exit_status=c->call_exit_status;

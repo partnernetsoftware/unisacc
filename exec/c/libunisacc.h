@@ -75,6 +75,14 @@ US_API int us_relocate(us_context *ctx);
 US_API int us_run_main(us_context *ctx, int argc, const char *const *argv, int *status);
 /* Pointers survive calls, but not recompile, relocate or free. */
 US_API void *us_sym(us_context *ctx, const char *name);
+/* Explicit specialization of a variadic script export. signature is one complete
+   USLSIG2 record with this name, variadic=0, mode=ALL_STACK and the promoted
+   actual argument list (including the declared fixed prefix). Returned code
+   has the FIXED native ABI of that complete list: do not cast it to a general
+   variadic function pointer. Owned until recompile/relocate/free, like us_sym.
+   Invalid declarations return NULL and preserve previous specializations. */
+US_API void *us_sym_typed(us_context *ctx, const char *name,
+                         const void *signature, size_t length);
 /* Most recent native export invocation: 0 success, 1 error/explicit exit.
    Native pointer calls return a zero/NULL/void sentinel on failure. */
 US_API int us_call_status(const us_context *ctx, int *exit_status);

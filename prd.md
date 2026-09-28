@@ -2934,3 +2934,8 @@ R10 USLCALL2正式产品验收：7b0977b源shared/六目标分批重构、独立
 R10 SCRIPT concrete尾参执行门禁补强决定：现公开scriptvar只读固定前缀不足以证明实际tail frame。使用现有stdarg内置和模型VA路径，在间接调用的脚本变参体读取promoted double/int，保留zero-tail与嵌套site恢复、真实native混合尾/错误传播；不修改ABI或执行器，不以mock替代实际模型编译。
 
 R10 SCRIPT concrete尾参实际验收：新增真实scriptvar体va_arg double/int，float与signed char在调用方默认提升；script_case预期Pair(6.75,12)、嵌套tailvalue零尾与outer site恢复预期Pair(6,12)。根P3 SHA51d0d1dd…上ARM/Rosetta各ASan+UBSan、O0/O1/O2×100全通过，双槽2/2 rc0/5s；原native混合13参/fixed Leaf/exit23/canary/下一独立调用恢复不回退。该项补实了上一记录未验证的脚本tail读取，仅测试改变，无产品源或模型改变，无需假重建；aggregate/callback脚本va_arg与未知尾SCRIPT closure尚不以此声称完成。
+
+### R10 显式变参脚本导出特化实施决定
+按r10-ffi-complete-design §4补us_sym_typed(ctx,name,singleUSLSIG2,length)：只接受已有public/defined V2真实variadic导出及固定concrete mode1完整签名，名称/result/fixed prefix/promotion域复用us_callable_concrete_valid验证。返回的是完整actual参数列表的固定原生ABI函数指针，不是未知尾参variadic入口；通过registry克隆concrete并使用现有SCRIPT closure/frame/错误生命周期，不增加模型之外源码解释或ABI分类器。多shape拥有独立closure，同shape复用；畸形/不符返回NULL而不失效旧入口，recompile/relocate/free沿现generation失效。真实API探针读double/int尾、zero-tail、返回Pair，六平台仍逐平台验，不从macOS外推。
+
+R10 us_sym_typed首轮真实验收：宿主声明完整fixed actual ABI，模型导出提供variadic prototype；两ISA ASan+UBSan/O0/O1/O2×100实际SCRIPT va_arg double/int及zero-tail全部通过。相同shape入口稳定，不同shape独立；八项name/result/prefix/float32/narrow/short/varroot/truncation拒绝后原入口继续正常。旧native mixed13/fixedcallback/sticky exit23/recovery均保留，双槽2/2 rc0/5s。API契约见exec/c/librarycallable-specialization.md；普通us_sym仍拒绝未知尾，特化不冒称任意variadic pointer。此时使用既有根P3+当前host runtime，源闭包刷新与正式旧API回归待后续构建窗口。

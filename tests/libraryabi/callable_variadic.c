@@ -43,6 +43,11 @@ static int bind(us_context *c,const char *dir){
  FILE *f=fopen(path,"rb");if(!f)return 1;size_t n=fread(bytes,1,sizeof bytes,f);int bad=ferror(f)||!feof(f);fclose(f);
  return bad||us_add_symbol_typed(c,"host_exchange",(void*)host_exchange,bytes,n);
 }
+static void *specialise(us_context *c,const char *dir,const char *file){
+ char path[2048];unsigned char bytes[16384];snprintf(path,sizeof path,"%s/%s",dir,file);
+ FILE *f=fopen(path,"rb");if(!f)return NULL;size_t n=fread(bytes,1,sizeof bytes,f);int bad=ferror(f)||!feof(f);fclose(f);
+ return bad?NULL:us_sym_typed(c,"scriptvar",bytes,n);
+}
 static int fail(us_context *c,const char *step){fprintf(stderr,"%s: %s\n",step,us_error(c));us_free(c);return 1;}
 int main(int argc,char **argv){
  if(argc!=4)return 2;
@@ -55,12 +60,20 @@ int main(int argc,char **argv){
   struct Pair (*nested)(void)=(struct Pair(*)(void))us_sym(c,"nested_script_case");
   struct Pair (*failure_case)(Var)=(struct Pair(*)(Var))us_sym(c,"fail_case");
   if(!entry||!native_case||!script_case||!nested||!failure_case)return fail(c,"callable var symbols");
+  if(us_sym(c,"scriptvar"))return fail(c,"generic variadic export unexpectedly callable");
+  struct Pair (*special)(double,int,double,int)=(struct Pair(*)(double,int,double,int))specialise(c,argv[3],"script-full.sig");
+  struct Pair (*zero)(double,int)=(struct Pair(*)(double,int))specialise(c,argv[3],"script-zero.sig");
+  if(!special||!zero||(void*)special== (void*)zero||specialise(c,argv[3],"script-full.sig")!=(void*)special)return fail(c,"explicit shape ownership/reuse");
+  const char *badshapes[]={"script-wrongname.sig","script-result.sig","script-prefix.sig","script-float.sig","script-narrow.sig","script-short.sig","script-variable.sig","script-truncated.sig"};
+  for(size_t j=0;j<sizeof badshapes/sizeof badshapes[0];j++)if(specialise(c,argv[3],badshapes[j])||!*us_error(c))return fail(c,"bad concrete export signature accepted");
   int m=mixed,e=empty,r=normal_returns;
   for(int i=0;i<100;i++){
    struct {uint64_t a;struct Pair p;uint64_t z;} g={123,{0,0},456};
    g.p=entry((i&1)?other_exchange:host_exchange);
    if(g.p.d!=36+(i&1)||g.p.n!=12+10*(i&1)||g.a!=123||g.z!=456)return fail(c,"incoming var pointer/promoted tail/Pair/fixed script callback");
    g.p=native_case();if(g.p.d!=36||g.p.n!=12)return fail(c,"frozen native template callable introduction");
+   g.p=special(4.25,3,1.5,7);if(g.p.d!=6.75||g.p.n!=12)return fail(c,"explicit native fixed entry reads script vararg tails");
+   g.p=zero(2.5,0);if(g.p.d!=3.5||g.p.n!=2)return fail(c,"zero-tail fixed entry/preservation after rejected shapes");
    g.p=script_case();if(g.p.d!=6.75||g.p.n!=12)return fail(c,"concrete script var handle");
    g.p=nested();if(g.p.d!=6.0||g.p.n!=12)return fail(c,"nested concrete script sites");
    int status=-1;if(us_call_status(c,&status)||status||*us_error(c))return fail(c,"callable var status");
