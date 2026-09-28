@@ -13,7 +13,7 @@ for f in sys.argv[3:]:
  name=pathlib.Path(f).stem
  r=subprocess.run([sys.argv[1],'-O2','-S',f,'-o','-'],capture_output=True,timeout=60)
  if r.returncode or r.stdout!=(p/(name+'.e4')).read_bytes():raise RuntimeError(f+' reference failed or tape differs')
- tp=lower(parse(r.stdout.decode()),'lnx/x86_64',oracle,drive='built');code,st=assemble(tp)
+ tp=lower(parse(r.stdout.decode()),'lnx/x86_64',oracle,drive='built',prune_input=True);code,st=assemble(tp)
  if st['encoded']!=st['insns']:raise RuntimeError('reference has unencoded instructions')
  want=image.build(tp,code,image.relocate(tp,tp.data,st['data_va']-DATA_BASE),st['entry'])
  if want!=(p/(name+'.elf')).read_bytes():raise RuntimeError(f+' image differs')

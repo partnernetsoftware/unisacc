@@ -36,7 +36,7 @@ def main(argv):
         for t in targets:
             n += 1
             try:
-                tp = lower(tparse(text), t, o, drive="built")
+                tp = lower(tparse(text), t, o, drive="built", prune_input=True)
                 code, st = assemble(tp)
                 data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
                 want = image.build(tp, code, data, st["entry"])

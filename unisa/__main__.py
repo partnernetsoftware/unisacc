@@ -309,7 +309,7 @@ def _fold(t, o, a):
     ref_out, ref_code, _ = vm_run(t)
     rows, ok = [], 0
     for tgt in C.TARGETS:
-        tp = lower(t, tgt, o, fault=a.fault, drive=a.drive)
+        tp = lower(t, tgt, o, fault=a.fault, drive=a.drive, prune_input=True)
         out, code, steps, trap = execute(tp)
         good = trap is None and (out, code) == (ref_out, ref_code)
         ok += good
@@ -350,7 +350,7 @@ def cmd_compile(a):
     except Exception as e:
         print(str(e) if type(e).__name__ == "CDiag" else "%s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 1
-    tp = lower(t, a.target, o, drive=a.drive)
+    tp = lower(t, a.target, o, drive=a.drive, prune_input=True)
     text, st = assemble(tp)
     from .tape import DATA_BASE
     data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
@@ -379,7 +379,7 @@ def cmd_fat(a):
         except Exception as e:
             print(str(e) if type(e).__name__ == "CDiag" else "%s: %s" % (type(e).__name__, e), file=sys.stderr)
             return 1
-        tp = lower(t, tgt, o, drive=a.drive)
+        tp = lower(t, tgt, o, drive=a.drive, prune_input=True)
         text, st = assemble(tp)
         data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
         img = image.build(tp, text, data, st["entry"])
@@ -431,7 +431,7 @@ def cmd_ape(a):
             t.src_os = target.split("/")[0]
         else:
             t = compile_file(a.file, o, target)
-        tp = lower(t, target, o, drive=a.drive)
+        tp = lower(t, target, o, drive=a.drive, prune_input=True)
         text, st = assemble(tp)
         data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
         img = image.build(tp, text, data, st["entry"], stub=stub)
@@ -620,7 +620,7 @@ def cmd_ship(a):
     imgs = {}
     for tgt in C.TARGETS:
         t = compile_file(a.example, o, tgt)
-        tp = lower(t, tgt, o, drive="built")
+        tp = lower(t, tgt, o, drive="built", prune_input=True)
         text, st = assemble(tp)
         data = image.relocate(tp, tp.data, st["data_va"] - DATA_BASE)
         imgs[tgt.replace("/", "-")] = image.build(tp, text, data, st["entry"])
