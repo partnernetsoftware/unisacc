@@ -23,8 +23,8 @@ typedef struct us_callables {
 } us_callables;
 struct us_callable {
     us_callable *next,*global_next;us_callables *registry;uint64_t token,generation;
-    unsigned origin;uintptr_t target;us_export_graph graph;ffi_cif cif;ffi_type **args;
-    ffi_closure *closure;void *code;
+    unsigned origin;uintptr_t target;us_export_graph graph,carrier_graph;ffi_cif cif;ffi_type **args;
+    ffi_closure *closure;void *code;unsigned char opaque_result,*opaque_args;
 };
 #ifdef US_CALLABLES_IMPLEMENTATION
 us_callable *us_callable_global_closures;
@@ -43,7 +43,7 @@ static void us_callables_init(us_callables *r,void *owner,uint64_t generation,
 }
 static void us_callable_free(us_callable *p){
     if(!p)return;if(p->closure)ffi_closure_free(p->closure);
-    free(p->args);us_export_graph_clear(&p->graph);free(p);
+    free(p->opaque_args);free(p->args);us_export_graph_clear(&p->graph);us_export_graph_clear(&p->carrier_graph);free(p);
 }
 static void us_callables_clear(us_callables *r){
     if(!r)return;us_callable_lock();us_callable **q=&us_callable_global_closures;
@@ -147,6 +147,43 @@ static int us_callable_convert(us_callables *r,const us_export_type *t,void *des
         else return us_callable_error(error,cap,"unsupported callable aggregate");
     }return 0;
 }
+/* Carrier certificates are supplied by the model. This layer checks storage,
+   owns both graphs, and never chooses an ABI class from union members. */
+static int us_callable_opaque_safe(const us_export_type *t,unsigned depth,size_t *nodes){
+    if(!t||depth>32||++*nodes>16384||t->kind==4||t->nmembers>64||t->width>16777216)return 0;
+    if(t->nmembers&&!t->members)return 0;
+    for(size_t i=0;i<t->nmembers;i++){
+        const us_export_member *m=t->members+i;
+        if(!m->type||m->offset>t->width||m->type->width>t->width-m->offset||!us_callable_opaque_safe(m->type,depth+1,nodes))return 0;
+    }
+    return !t->element||us_callable_opaque_safe(t->element,depth+1,nodes);
+}
+static int us_callable_carrier_type_valid(const us_export_type *original,const us_export_type *carrier){
+    if(original->width!=carrier->width||original->alignment!=carrier->alignment||original->width>16777216)return 0;
+    if(us_native_type_equal(original,carrier))return 1;
+    size_t nodes=0;
+    return original->kind==5&&!original->depth&&original->width&&original->alignment&&
+        !(original->alignment&(original->alignment-1))&&
+        us_callable_opaque_safe(original,0,&nodes)&&us_callable_opaque_safe(carrier,0,&nodes);
+}
+static int us_callable_carrier_valid(const us_export_signature *original,const us_export_signature *carrier){
+    if(!original||!carrier||original->variadic||carrier->variadic||original->mode>1||original->mode!=carrier->mode||
+       original->count>1024||(!original->mode&&original->count>6)||original->count!=carrier->count||original->stored!=original->count||carrier->stored!=carrier->count||
+       (original->count&&(!original->argtypes||!carrier->argtypes))||us_callable_budget(original)||us_callable_budget(carrier)||
+       !us_callable_carrier_type_valid(&original->result,&carrier->result))return 0;
+    for(size_t i=0;i<original->count;i++)if(!us_callable_carrier_type_valid(original->argtypes+i,carrier->argtypes+i))return 0;
+    return 1;
+}
+/* Frozen copy flags are computed once at introduction, never by ABI
+   classification or graph comparison in the native/closure conversion path. */
+static int us_callable_value_convert(us_callable *p,const us_export_type *t,int opaque,
+                                    void *dest,const void *source,int to_native,char *error,size_t cap){
+    if(opaque){
+        if(!dest||!source||t->width>16777216)return us_callable_error(error,cap,"invalid opaque carrier copy");
+        memcpy(dest,source,(size_t)t->width);return 0;
+    }
+    return us_callable_convert(p->registry,t,dest,source,to_native,0,error,cap);
+}
 static void us_callable_callback(ffi_cif *cif,void *result,void **args,void *data){
     us_callable *p=data;us_callables *r=p->registry;const us_export_signature *s=p->graph.signatures[0];
     uint64_t *slots=NULL;void **owned=NULL;void *converted=NULL;char error[256]="callable callback failed";int rc=1,reported=0;
@@ -158,7 +195,7 @@ static void us_callable_callback(ffi_cif *cif,void *result,void **args,void *dat
     converted=calloc(scriptbytes?scriptbytes:1,1);if(!slots||!owned||!converted)goto done;
     for(size_t i=0;i<s->count;i++){
         const us_export_type *t=s->argtypes+i;size_t n=t->kind==5?(size_t)t->width:8;
-        owned[i]=calloc(n,1);if(!owned[i]||us_callable_convert(r,t,owned[i],args[i],0,0,error,sizeof error))goto done;
+        owned[i]=calloc(n,1);if(!owned[i]||us_callable_value_convert(p,t,p->opaque_args?p->opaque_args[i]:0,owned[i],args[i],0,error,sizeof error))goto done;
         slots[i]=t->kind==5?(uintptr_t)owned[i]:us_export_slot(t,owned[i]);
         if(t->kind==4)memcpy(slots+i,owned[i],8);
     }
@@ -166,21 +203,28 @@ static void us_callable_callback(ffi_cif *cif,void *result,void **args,void *dat
     int status=r->script_call?r->script_call(r->owner,(const void*)p->target,s,&frame):r->invoke_frame(r->owner,(const void*)p->target,&frame);
     if(status){reported=1;goto done;}
     if(rn){void *out=calloc(rn,1);if(!out)goto done;
-        rc=us_callable_convert(r,&s->result,out,converted,1,0,error,sizeof error);
+        rc=us_callable_value_convert(p,&s->result,p->opaque_result,out,converted,1,error,sizeof error);
         if(!rc)memcpy(result,out,rn);free(out);
     }else rc=0;
 done:
     if(rc&&!reported&&r->failure)r->failure(r->owner,error);
     if(owned)for(size_t i=0;i<s->count;i++)free(owned[i]);free(owned);free(slots);free(converted);(void)cif;
 }
-static int us_callable_make(us_callables *r,unsigned origin,const us_export_signature *s,uintptr_t raw,uint64_t *handle,char *error,size_t cap){
+static int us_callable_make_impl(us_callables *r,unsigned origin,const us_export_signature *s,const us_export_signature *carrier,uintptr_t raw,uint64_t *handle,char *error,size_t cap){
     if(!r||!handle||!r->owner||!r->generation||!s||(origin!=US_CALLABLE_SCRIPT&&origin!=US_CALLABLE_NATIVE))return us_callable_error(error,cap,"invalid declared callable introduction");
-    *handle=0;if(!raw)return 0;
+    *handle=0;if(carrier&&!us_callable_carrier_valid(s,carrier))return us_callable_error(error,cap,"invalid callable carrier certificate");if(!raw)return 0;
     if((origin==US_CALLABLE_SCRIPT&&!r->script_call&&!r->invoke_frame)||(origin==US_CALLABLE_NATIVE&&!r->native_call))return us_callable_error(error,cap,"missing declared callable owner hook");
-    for(us_callable *p=r->head;p;p=p->next)if(p->generation==r->generation&&p->origin==origin&&p->target==raw&&us_callable_signature_equal(p->graph.signatures[0],s)){*handle=p->token;return 0;}
+    for(us_callable *p=r->head;p;p=p->next)if(p->generation==r->generation&&p->origin==origin&&p->target==raw&&us_callable_signature_equal(p->graph.signatures[0],s)&&
+       ((!carrier&&!p->carrier_graph.count)||(carrier&&p->carrier_graph.count&&us_callable_signature_equal(p->carrier_graph.signatures[0],carrier)))){*handle=p->token;return 0;}
     us_callable *p=calloc(1,sizeof *p);if(!p)return us_callable_error(error,cap,"callable allocation failed");
     p->registry=r;p->origin=origin;p->generation=r->generation;p->target=raw;
-    if(us_callable_clone_graph(&p->graph,s))goto bad;us_export_signature *x=p->graph.signatures[0];
+    if(us_callable_clone_graph(&p->graph,s)||(carrier&&us_callable_clone_graph(&p->carrier_graph,carrier)))goto bad;
+    us_export_signature *x=carrier?p->carrier_graph.signatures[0]:p->graph.signatures[0];
+    if(carrier){const us_export_signature *original=p->graph.signatures[0];
+        p->opaque_args=calloc(x->count?(size_t)x->count:1,1);if(!p->opaque_args)goto bad;
+        p->opaque_result=!us_native_type_equal(&original->result,&x->result);
+        for(size_t i=0;i<x->count;i++)p->opaque_args[i]=!us_native_type_equal(original->argtypes+i,x->argtypes+i);
+    }
     p->args=calloc(x->count?(size_t)x->count:1,sizeof *p->args);if(!p->args)goto bad;
     ffi_type *ret=us_callable_layout(&x->result,1,0);if(!ret)goto bad;
     for(size_t i=0;i<x->count;i++)if(!(p->args[i]=us_callable_layout(x->argtypes+i,0,0)))goto bad;
@@ -189,6 +233,15 @@ static int us_callable_make(us_callables *r,unsigned origin,const us_export_sign
     do {if(!token||token==UINT64_MAX)goto bad;}while(!atomic_compare_exchange_weak_explicit(&us_callable_global_token,&token,token+1,memory_order_relaxed,memory_order_relaxed));
     p->token=token;p->next=r->head;r->head=p;*handle=token;return 0;
 bad:us_callable_free(p);return us_callable_error(error,cap,"unsupported or invalid callable signature");
+}
+/* Legacy callers never opt into carrier layout. */
+static int us_callable_make(us_callables *r,unsigned origin,const us_export_signature *s,uintptr_t raw,uint64_t *h,char *e,size_t n){
+    return us_callable_make_impl(r,origin,s,NULL,raw,h,e,n);
+}
+static int us_callable_make_carrier(us_callables *r,unsigned origin,const us_export_signature *original,const us_export_signature *carrier,
+                                    uintptr_t raw,uint64_t *h,char *e,size_t n){
+    if(!carrier)return us_callable_error(e,n,"missing callable carrier certificate");
+    return us_callable_make_impl(r,origin,original,carrier,raw,h,e,n);
 }
 static int us_callable_pointer(us_callables *r,uint64_t h,const us_export_signature *s,void **out,char *error,size_t cap){
     if(!out||!s)return 1;*out=NULL;if(!h)return 0;us_callable *p=us_callable_find(r,h);
@@ -218,10 +271,10 @@ static int us_callable_invoke(us_callables *r,us_callable *p,
         if(!r->native_call)goto done;owned=calloc(count?(size_t)count:1,sizeof *owned);values=calloc(count?(size_t)count:1,sizeof *values);if(!owned||!values)goto done;
         for(size_t i=0;i<count;i++){const us_export_type *t=s->argtypes+i;size_t n=t->kind==5?(size_t)t->width:8;owned[i]=calloc(n,1);values[i]=owned[i];
             const void *from=t->kind==5?(const void*)(uintptr_t)slots[i]:slots+i;
-            if(!owned[i]||!from||us_callable_convert(r,t,owned[i],from,1,0,error,cap))goto done;}
+            if(!owned[i]||!from||us_callable_value_convert(p,t,p->opaque_args?p->opaque_args[i]:0,owned[i],from,1,error,cap))goto done;}
         if(r->native_call(r->owner,&p->cif,p->target,temp,values))goto done;
         void *script=calloc(rn?rn:1,1);if(!script)goto done;
-        rc=rn?us_callable_convert(r,&s->result,script,temp,0,0,error,cap):0;
+        rc=rn?us_callable_value_convert(p,&s->result,p->opaque_result,script,temp,0,error,cap):0;
         if(!rc&&rn)us_callable_commit_slot(&s->result,result,script);free(script);goto done;
     }
     if(!rc&&rn)us_callable_commit_slot(&s->result,result,temp);

@@ -205,6 +205,9 @@ job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
 job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
 job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
 job lib-callable-mechanism python3 ./tests/librarycallablescheck.py
+job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
+job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
+job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-callable-variadic-mechanism python3 ./tests/librarycallablevarcheck.py
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
@@ -229,6 +232,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-outcome-rosetta python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
+    job lib-carrier-mechanism-rosetta python3 ./tests/librarycarriercheck.py --arch x86_64
     job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
