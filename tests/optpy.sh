@@ -10,7 +10,12 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
-exec "$_BOUND" 55 python3 - "$UA" "$_BOUND" <<'PY'
+T=$(scratch)
+SELF="$T/unisacc.flat.c"
+if [ "${OPTPY_PART:-all}" != probes ]; then
+    bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
+fi
+exec "$_BOUND" 55 python3 - "$UA" "$_BOUND" "$SELF" <<'PY'
 import subprocess, sys, glob, os
 sys.path.insert(0, '.')
 from unisa.opt import optimise
@@ -23,7 +28,7 @@ if not re.fullmatch(r'[1-9][0-9]{0,5}/[1-9][0-9]{0,5}', shard): raise SystemExit
 k, n = map(int, shard.split('/'))
 if k > n: raise SystemExit('invalid SHARD')
 probes = sorted(glob.glob('examples/*.c') + glob.glob('tests/c/*.c'))
-files = (probes[k-1::n] if part != 'self' else []) + (['unisacc.c'] if part != 'probes' else [])
+files = (probes[k-1::n] if part != 'self' else []) + ([sys.argv[3]] if part != 'probes' else [])
 if not files: raise SystemExit('empty optpy partition')
 def tape(args):
     p = subprocess.run([sys.argv[2], '15', ua] + args,

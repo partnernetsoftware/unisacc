@@ -1,20 +1,13 @@
 #!/bin/sh
 # Build unisacc.c with the system compiler, for differential checking.
 set -e
-# Every step writes a private file and renames it into place: suites run
-# concurrently and several of them rebuild, so nobody may ever see half a
-# file -- the same source gives the same bytes, so the last rename wins
-# harmlessly.
-# unisacc.c is ONE file -- no include path to depend on -- so the model goes
-# in where unisa_core.c's `#include` names it
-{ cat src/version.h kernel/unisa_model.inc kernel/unisa_headers.inc
-  grep -v '^#include "unisa_' kernel/unisa_core.c
-  cat src/front_pp.c src/front_parse.c src/opt.c src/main.c src/back_lower.c src/host_dl.h
-  grep -v '^#include "host_dl.h"' src/back_encode.c
-  cat src/tapeprune.c src/back_image.c; } > unisacc.c.$$
-mv -f unisacc.c.$$ unisacc.c
-cat tests/refshim.h unisacc.c tests/reffoot.h > "${1:-/tmp/ua_ref.c}.$$"
-mv -f "${1:-/tmp/ua_ref.c}.$$" "${1:-/tmp/ua_ref.c}"
+R=$(cd "$(dirname "$0")/.." && pwd)
+source=${1:-/tmp/ua_ref.c}
+flat="$source.flat.$$"
+trap 'rm -f "$flat" "$source.$$"' EXIT HUP INT TERM
+"$R/tests/export_ref.sh" "$flat"
+cat "$R/tests/refshim.h" "$flat" "$R/tests/reffoot.h" > "$source.$$"
+mv -f "$source.$$" "$source"
 # -O2, and it is not a detail: the reference binary is what every suite
 # runs, thousands of times.  Unoptimised it compiles unisacc.c in 3.86s,
 # at -O2 in 0.46s, and the whole suite is dominated by it.  The output is

@@ -9,7 +9,9 @@ TARGET=${TARGET:-lnx/x86_64}; export TARGET
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
-b ./exec/pipeline/elf.sh "$T" unisacc.c > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
+b python3 tests/sourceflat.py "$T/unisacc.c"
+SELF="$T/unisacc.c"
+b ./exec/pipeline/elf.sh "$T" "$SELF" > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 # All target predefines have value 1; other platform/architecture names
 # must be absent. Exercise the generated E2 and the product -E independently.
 case $TARGET in */arm64) arch=__aarch64__; other=__x86_64__;; *) arch=__x86_64__; other=__aarch64__;; esac
@@ -30,20 +32,20 @@ b "$UA" -b "$TARGET" -E "$T/macros.c" > "$T/macros.ref"
 for file in "$T/macros.delta" "$T/macros.ref"; do
     [ "$(tr -d '[:space:]' < "$file")" = "$expected" ] || { echo 'target predefines differ' >&2; exit 1; }
 done
-b "$UA" -O2 -b "$TARGET" -S unisacc.c -o "$T/ref.tape"
+b "$UA" -O2 -b "$TARGET" -S "$SELF" -o "$T/ref.tape"
 [ -s "$T/unisacc.e4" ] && cmp "$T/ref.tape" "$T/unisacc.e4"
-b "$UA" -O2 -b "$TARGET" unisacc.c -o "$T/ref.elf"
+b "$UA" -O2 -b "$TARGET" "$SELF" -o "$T/ref.elf"
 [ -s "$T/unisacc.$IMAGE" ] && cmp "$T/ref.elf" "$T/unisacc.$IMAGE"
 if [ "$MODEL" = net ]; then
-    b env UNISA_MAXSTEPS=400000000000 "$T/run" --bundle "$T/models.pkg" "$TARGET" unisacc.c unisacc.c "$R/include" > "$T/pack.image"
+    b env UNISA_MAXSTEPS=400000000000 "$T/run" --bundle "$T/models.pkg" "$TARGET" "$SELF" "$SELF" "$R/include" > "$T/pack.image"
     cmp "$T/pack.image" "$T/unisacc.$IMAGE"
     echo "package self-source $TARGET: same image as separate stages"
 fi
 # Execute the resulting compiler only on a host that can run this image.
 case "$(uname -s)/$(uname -m):$TARGET" in
     Darwin/arm64:osx/*|Darwin/x86_64:osx/x86_64)
-        b "$T/unisacc.$IMAGE" -O2 -b "$TARGET" unisacc.c -o "$T/n2"
-        b "$T/n2" -O2 -b "$TARGET" unisacc.c -o "$T/n3"
+        b "$T/unisacc.$IMAGE" -O2 -b "$TARGET" "$SELF" -o "$T/n2"
+        b "$T/n2" -O2 -b "$TARGET" "$SELF" -o "$T/n3"
         cmp "$T/unisacc.$IMAGE" "$T/n2" && cmp "$T/n2" "$T/n3"
         echo "$MODEL bootstrap $TARGET: N1=N2=N3" ;;
     *) echo "$MODEL bootstrap $TARGET: not executed on this host" ;;

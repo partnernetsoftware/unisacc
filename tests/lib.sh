@@ -34,7 +34,8 @@ ua_ready() {
     local want
     if [ "$UA" = /tmp/ua_ref ]; then
         want=$(cat "$_LIB_R"/kernel/*.inc "$_LIB_R"/kernel/*.c "$_LIB_R"/src/*.c "$_LIB_R"/src/*.h \
-               "$_LIB_R"/tests/refshim.h "$_LIB_R"/tests/reffoot.h | cksum)
+               "$_LIB_R"/unisacc.c "$_LIB_R"/tests/export_ref.sh \
+               "$_LIB_R"/tests/build_ref.sh "$_LIB_R"/tests/refshim.h "$_LIB_R"/tests/reffoot.h | cksum)
         [ -x "$UA" ] && [ "$(cat "$UA.stamp" 2>/dev/null)" = "$want" ] && return 0
     else
         [ -x "$UA" ] && return 0

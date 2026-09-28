@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # No stage decided in code.  [A-33]
 #
 # The claim is that every table-shaped decision is made by a net.  The Python
@@ -12,9 +12,16 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 UA=${UA:-/tmp/ua_ref}
-[ -x "$UA" ] || "$R/tests/build_ref.sh" >/dev/null || exit 1
 cd "$R"
-python3 - "$UA" "$@" <<'PY'
+. "$R/tests/lib.sh"; ua_ready
+T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
+ARGS=()
+for f in "$@"; do
+    case "$f" in unisacc.c|"$R/unisacc.c") ARGS+=("$SELF");; *) ARGS+=("$f");; esac
+done
+python3 - "$UA" "${ARGS[@]}" <<'PY'
 import subprocess, sys
 sys.path.insert(0, ".")
 from unisa.__main__ import _built
@@ -62,5 +69,5 @@ for f in files:
         ok += 1
 print()
 print("stages agree %d   missing %d   known %d   (refused %d)" % (ok, bad, nk, skip))
-sys.exit(1 if bad else 0)
+sys.exit(1 if bad or not ok else 0)
 PY

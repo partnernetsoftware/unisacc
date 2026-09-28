@@ -1,6 +1,6 @@
 # 仓库地图
 
-**产品**是 C99 子集编译器 `unisacc.com`（六目标单文件）及随带的 `include/`。当前模型路线的驱动、通用执行器与推理核在 `exec/c/`，各阶段声明与构造器在 `exec/` 对应目录；`unisacc.c`（= `kernel/` + `src/`）是经典参考与显式回退。编译与运行不需要 Python，离线构造和容器打包仍用 Python。下面区分产品、参考、数据与开发工具：
+**产品**是 C99 子集编译器 `unisacc.com`（六目标单文件）及随带的 `include/`。当前模型路线的驱动、通用执行器与推理核在 `exec/c/`，各阶段声明与构造器在 `exec/` 对应目录；`unisacc.c`（引用 `kernel/` + `src/` 的经典入口）是经典参考与显式回退。编译与运行不需要 Python，离线构造和容器打包仍用 Python。下面区分产品、参考、数据与开发工具：
 
 | 类别 | 位置 | 说明 |
 |---|---|---|
@@ -79,7 +79,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 - **`.tsv`**：普通的制表符分隔文本，任何语言都能读。
 - **`.uns2`**：本项目**自定义**的格式，不属于任何现成系统。名字取自 "UNISA net, version 2"，文件以 4 个字节 `UNS2` 开头。构造出的网络很稀疏：第一层只是每个单元对每个字段的一张位掩码，第二层是少量小整数，按稠密矩阵存储会大半是零，所以另定格式。完整布局写在 [`unisa/uns2.py`](unisa/uns2.py) 开头的注释里。全部权重合计约 9 KB。
 - **`.unisa`**（`weights/*.f32.unisa`、`*.i8.unisa`）：同样是自定义格式（UNS1，稠密张量），属于 SGD 对照臂的旧权重，不在发布路径上。
-- **`.inc`**：C 源码片段，经拼接进入 `unisacc.c`。每个文件开头列出它的输入文件和 sha256。
+- **`.inc`**：生成的 C 数据片段，由经典入口引用；`kernel/weight.<stage>.inc` 与 `dense.<stage>.inc` 分别保存构造权重与参考答案。每个文件开头列出它的输入文件和 sha256。
 
 ## 2　种子（第 0 代）：`unisa/`，全部是 Python
 
@@ -122,12 +122,12 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | [`src/back_encode.c`](src/back_encode.c) | arm64 与 x86-64 编码器、汇编器 |
 | [`src/back_image.c`](src/back_image.c) | ELF/Mach-O/PE 写出、SHA-256 签名、Windows 导入、`-run` |
 | [`include/*.h`](include/) | 随身携带的 C 库，以 `static` 定义，按需补头 |
-| [`unisacc.c`](unisacc.c) | `kernel/` 与 `src/` 的拼接：单个 C 文件，cc 或 unisacc 都能直接编译，不需要 Python，也不读外部文件 |
+| [`unisacc.c`](unisacc.c) | 经典参考的有序 include 入口，不含权重字节；cc 或 unisacc 读取仓库依赖直接编译。独立传送/自举使用 `tests/export_ref.sh` 导出的完整源码，无 Python |
 | `out/unisacc-classic.com` | `make classic-com` 构建的经典六目标显式回退；根 `unisacc.com` 由模型路线构建 |
 
 [`iterate/`](iterate/) 是**开发工具**，不属于产品：`iterate/construct/` 用 C 从 `weights/gold/*.tsv` 构造权重（18 个阶段的 UNS2 整包与 `built.uns2` 逐字节相同），`iterate/kernel/` 用 C 从声明数据生成 `kernel/unisa_model.inc` 的大部分内容。它们由 unisacc 编译、单独运行，不进编译器的使用流程，也不是自举的前提；经典参考的 `kernel/` 仍由种子生成。这条迁移路线（prd 的 J10）已暂停，工具保留。
 
-`src/` 的七个 C 文件不互相 `#include`：`tests/build_ref.sh` 先嵌入 `src/version.h` 的版本声明，再按依赖顺序拼入生成内核与七个 C 文件，得到独立的 `unisacc.c`。模型驱动器直接包含同一版本头文件。
+`unisacc.c` 是经典源码唯一的有序装配入口，引用 `src/version.h`、生成数据及各 C 模块。`tests/export_ref.sh` 递归展开为私有独立源码；`tests/build_ref.sh` 加宿主适配后编译该导出，不改写根入口。自举和规模门禁始终使用完整导出，不以入口行数代替编译器规模。产品33部署网络仍属于P3包，经典18张表的片段不是产品包的另一份权重。
 
 这一层只读第 1 节的数据，不依赖任何 `.py`。判据：`tests/nativeboot.sh`（N1 = N2 = N3，全程无 Python）、`tests/bigclosure.sh`（编译器自身在六个目标上与种子后端逐字节相同）。经典容器打包使用 `python3 -m unisa ape`，各目标镜像由 unisacc 编译；当前模型路线另由 `exec/` 离线构造、验证和打包，用户编译路径不运行 Python。
 

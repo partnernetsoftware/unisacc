@@ -16,6 +16,8 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 OPT_PART=${OPT_PART:-all}; SHARD=${SHARD:-1/1}
 case "$OPT_PART" in all|run|closure|self) ;; *) echo 'invalid OPT_PART' >&2; exit 2;; esac
 [[ "$SHARD" =~ ^[1-9][0-9]{0,5}/[1-9][0-9]{0,5}$ ]] || exit 2
@@ -69,14 +71,14 @@ fi
 
 host=$(host_target)
 if { [ "$OPT_PART" = all ] || [ "$OPT_PART" = self ]; } && [ -n "$host" ]; then
-    bound 15 "$UA" unisacc.c -b "$host" -o "$T/ref" || exit 1
-    bound 15 "$UA" -O2 unisacc.c -b "$host" -o "$T/o2" || exit 1
+    bound 15 "$UA" "$SELF" -b "$host" -o "$T/ref" || exit 1
+    bound 15 "$UA" -O2 "$SELF" -b "$host" -o "$T/o2" || exit 1
     [ -s "$T/ref" ] && [ -s "$T/o2" ] || exit 1
     cp "$T/o2" "$T/o2x"; chmod +x "$T/o2x"
     if command -v codesign >/dev/null; then bound 8 codesign -f -s - "$T/o2x" >/dev/null 2>&1 || exit 1; fi
-    bound 15 "$T/o2x" unisacc.c -b "$host" -o "$T/o2ref" || exit 1
+    bound 15 "$T/o2x" "$SELF" -b "$host" -o "$T/o2ref" || exit 1
     if cmp -s "$T/o2ref" "$T/ref"; then ok=$((ok+1)); else fail "the -O2 compiler writes a different compiler"; fi
-    bound 15 "$T/o2x" -O2 unisacc.c -b "$host" -o "$T/o2o2" || exit 1
+    bound 15 "$T/o2x" -O2 "$SELF" -b "$host" -o "$T/o2o2" || exit 1
     if cmp -s "$T/o2o2" "$T/o2"; then ok=$((ok+1)); else fail "-O2 is not a fixed point"; fi
     printf "  compiler image  -O0 %s B   -O2 %s B\n" "$(wc -c < "$T/ref" | tr -d ' ')" "$(wc -c < "$T/o2" | tr -d ' ')"
 fi

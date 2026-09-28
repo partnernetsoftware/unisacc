@@ -96,7 +96,7 @@ def _cases(nets):
 
 def _cstr(b, name):
     esc = "".join("\\x%02x" % x for x in b)
-    ch = [esc[i:i + 80] for i in range(0, len(esc), 80)]
+    ch = [esc[i:i + 80] for i in range(0, len(esc), 80)] or [""]
     return ["char *%s =" % name] + ['  "%s"' % c for c in ch[:-1]] + \
         ['  "%s";' % ch[-1]]
 
@@ -123,8 +123,10 @@ def _provenance(what, paths):
          ' * ' + what, ' * Inputs (sha256, first 12 hex digits):']
     for p in paths:
         f = _os.path.join(root, p)
-        h = hashlib.sha256(open(f, "rb").read()).hexdigest()[:12] \
-            if _os.path.exists(f) else "(absent)"
+        try:
+            h = hashlib.sha256(open(f, "rb").read()).hexdigest()[:12]
+        except FileNotFoundError:
+            h = "(absent)"
         L.append(' *   %-28s %s' % (p, h))
     L[-1] += ' */'
     return L
@@ -206,6 +208,7 @@ def emit_core(nets, path):
                     "the vocabularies are the\n * tuples named at each "
                     "string.  The kernel that reads this is unisa_core.c.",
                     _MODEL_SRC) + ['',
+          '#ifndef UNISA_MODEL_INC', '#define UNISA_MODEL_INC', '',
           '/* S_<stage>: the stage order of gold.ALL */']
     for i, (st, m, H, nh, off, ncls, vlen, mw) in enumerate(meta):
         L.append('#define S_%s %d' % (st.upper(), i))
@@ -213,7 +216,22 @@ def emit_core(nets, path):
     L += ["/* MODEL: every stage's units, packed: per stage [nfields][field "
           "masks][nw2][(unit, class, w2)...]", " * -- the constructed weights "
           "of weights/built.json, in gold.ALL order */"]
-    L += _cstr(blob, "MODEL")
+    # Keep one contiguous ABI string, but give each stage its own source
+    # fragment. Adjacent C literals preserve every byte and STAGE_OFF.
+    L += ['char *MODEL =']
+    for i, row in enumerate(meta):
+        st, off = row[0], row[4]
+        end = meta[i + 1][4] if i + 1 < len(meta) else len(blob)
+        filename = "weight.%s.inc" % st
+        part = _provenance("Constructed weight literal for stage " + st,
+                           _MODEL_SRC)
+        literals = _cstr(blob[off:end], "unused")[1:]
+        literals[-1] = literals[-1][:-1]  # semicolon belongs to aggregate
+        part += literals
+        open(_os.path.join(_os.path.dirname(path), filename), "w").write(
+            "\n".join(part) + "\n")
+        L.append('#include "%s"' % filename)
+    L += [';']
     L += ['', '#define NSTAGE %d' % len(meta),
           '']
     L += ['int STAGE_M[%d];' % len(meta), 'int STAGE_H[%d];' % len(meta),
@@ -244,7 +262,19 @@ def emit_core(nets, path):
     L += ["/* DENSE: each stage's answers for every key, head-minor, as the "
           "constructed net\n * computes them (intnet.predict over the full "
           "domain) -- the net compiled to a\n * table [J1] */"]
-    L += _cstr(bytes(dense), "DENSE")
+    L += ['char *DENSE =']
+    for i, st in enumerate(ALL):
+        end = doff[i + 1] if i + 1 < len(doff) else len(dense)
+        filename = "dense.%s.inc" % st
+        part = _provenance("Network-evaluated dense literal for stage " + st,
+                           _MODEL_SRC)
+        literals = _cstr(bytes(dense[doff[i]:end]), "unused")[1:]
+        literals[-1] = literals[-1][:-1]
+        part += literals
+        open(_os.path.join(_os.path.dirname(path), filename), "w").write(
+            "\n".join(part) + "\n")
+        L.append('#include "%s"' % filename)
+    L += [';']
     L += ['#define DENSE_LEN %d' % len(dense),
           'int STAGE_DOFF[%d]; int STAGE_NH[%d];' % (len(meta), len(meta)), '']
     L += ['int model_dims(void) {']
@@ -322,6 +352,7 @@ def emit_core(nets, path):
             for i, v in enumerate(tab.values()):
                 L.append('  if (i == %d) return %d;' % (i, v))
             L += ['  return 0 - 1;', '}', '']
+    L += ['#endif /* UNISA_MODEL_INC */']
     open(model_path, "w").write("\n".join(L) + "\n")
     K = _provenance("The decision layer as C: the integer kernel [K-5], "
                     "from KERNEL_BODY in\n * unisa/ckernel.py.  The model it "

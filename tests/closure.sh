@@ -26,16 +26,17 @@ for f in "$@"; do
     throttle
     (
     D="$T/$b.d"; mkdir -p "$D"
-    "$UA" "$f" -c > "$D/tape" 2>/dev/null || { echo refused > "$D/verdict"; exit 0; }
+    "$_BOUND" 20 "$UA" "$f" -c > "$D/tape" 2>"$D/errors"; rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -s "$D/tape" ]; then echo "DIFF tool $f initial compiler rc=$rc" >"$D/verdict"; cat "$D/errors"; exit 1; fi
     : > "$D/verdict"
     for t in $TARGETS; do
         tt=$(echo "$t" | tr / _)
         # a tape is compiled FOR an OS (<stdio.h> reads __linux__, _WIN32),
         # so each target's image is checked against that target's tape
-        "$UA" "$f" -t "$t" > "$D/tape.$tt" 2>/dev/null
-        python3 -m unisa compile "$D/tape.$tt" --from-tape -o "$D/py.$tt" \
-            --target "$t" --drive built >/dev/null 2>&1
-        "$UA" "$f" -b "$t" > "$D/ua.$tt" 2>/dev/null
+        if ! "$_BOUND" 20 "$UA" "$f" -t "$t" > "$D/tape.$tt" 2>>"$D/errors" || [ ! -s "$D/tape.$tt" ]; then echo "DIFF tool $t tape" >>"$D/verdict"; continue; fi
+        if ! "$_BOUND" 25 python3 -m unisa compile "$D/tape.$tt" --from-tape -o "$D/py.$tt" \
+            --target "$t" --drive built >>"$D/errors" 2>&1 || [ ! -s "$D/py.$tt" ]; then echo "DIFF tool $t reference" >>"$D/verdict"; continue; fi
+        if ! "$_BOUND" 20 "$UA" "$f" -b "$t" > "$D/ua.$tt" 2>>"$D/errors" || [ ! -s "$D/ua.$tt" ]; then echo "DIFF tool $t candidate" >>"$D/verdict"; continue; fi
         if cmp -s "$D/py.$tt" "$D/ua.$tt"; then echo "same $t" >> "$D/verdict"
         else echo "DIFF $t $(cmp "$D/py.$tt" "$D/ua.$tt" 2>&1 | head -1)" >> "$D/verdict"; fi
     done
@@ -45,9 +46,10 @@ for f in "$@"; do
         # 0.5-0.9 s XProtect scan, and the on-disk image is executed by
         # native.sh -- the same bytes, as the cmp above just proved.
         case "$f" in /*) src="$f";; *) src="$R/$f";; esac   # datashape passes absolute paths
-        (cd "$D" && "$_BOUND" 30 "$UA" "$src" -run > "$D/run.out" 2>/dev/null)
-        python3 -m unisa vm --os "${HOSTT%/*}" "$D/tape.$tt" > "$D/vm.out" 2>/dev/null
-        cmp -s "$D/run.out" "$D/vm.out" && echo "ran" >> "$D/verdict" || echo "RANWRONG" >> "$D/verdict"
+        (cd "$D" && "$_BOUND" --status "$D/run.status" 30 "$UA" "$src" -run > "$D/run.out" 2>>"$D/errors"); rrc=$?
+        "$_BOUND" --status "$D/vm.status" 45 python3 -m unisa vm --os "${HOSTT%/*}" "$D/tape.$tt" > "$D/vm.out" 2>>"$D/errors"; vrc=$?
+        rs=$(cat "$D/run.status" 2>/dev/null); vs=$(cat "$D/vm.status" 2>/dev/null)
+        if [ -n "$rs" ] && [ -n "$vs" ] && [ $((rs & 127)) -eq 0 ] && [ $((vs & 127)) -eq 0 ] && [ "$rrc" -eq "$vrc" ] && cmp -s "$D/run.out" "$D/vm.out"; then echo ran >>"$D/verdict"; else echo RANWRONG >>"$D/verdict"; fi
     fi
     ) &
 done
@@ -56,6 +58,7 @@ same=0; diff=0; refused=0; ran=0; ranwrong=0
 for f in "$@"; do
     b=$(basename "$f" .c)
     v="$T/$b.d/verdict"
+    [ -s "$v" ] || { echo "  $b: missing verdict"; diff=$((diff+1)); continue; }
     if grep -q refused "$v"; then refused=$((refused+1)); continue; fi
     s=$(grep -c "^same" "$v"); d=$(grep -c "^DIFF" "$v")
     same=$((same+s)); diff=$((diff+d))

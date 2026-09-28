@@ -31,7 +31,13 @@
 #include "core.c"
 #endif
 
-static void die(const char *m) { fprintf(stderr, "run: %s\n", m); exit(2); }
+#ifndef UNISA_RUNTIME_STATE
+#define UNISA_RUNTIME_STATE static
+#endif
+#ifndef UNISA_RUNTIME_PANIC
+#define UNISA_RUNTIME_PANIC(m) do { fprintf(stderr,"run: %s\n",m); exit(2); } while (0)
+#endif
+static void die(const char *m) { UNISA_RUNTIME_PANIC(m); }
 #include "codec.h"
 #include "packagefooter.h"
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
@@ -63,7 +69,7 @@ static unsigned char *readstream(long fd, const char *path, int *len) {
     for (;;) {
         if (n == cap) { if (cap > INT32_MAX/2) die("file too large"); cap *= 2; b = xrealloc(b, cap); }
         long r = io_read(fd, b+n, cap-n);
-        if (r < 0) { fprintf(stderr, "run: cannot read %s\n", path); exit(2); }
+        if (r < 0) { fprintf(stderr, "run: cannot read %s\n", path); die("cannot read input"); }
         if (!r) break;
         if (r > cap-n) die("invalid read length");
         n += (int)r;
@@ -78,7 +84,7 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
 #else
         if (optional && fd == -ENOENT) return 0;
 #endif
-        fprintf(stderr, "run: cannot open %s\n", path); exit(2);
+        fprintf(stderr, "run: cannot open %s\n", path); die("cannot open input");
     }
     unsigned char *b = readstream(fd,path,len);
     if (io_close(fd) < 0) die("close failed");
@@ -87,7 +93,7 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
 
 /* Decimal model reader: no scanf dependency, and 64-bit arguments are
    checked before multiply/add (including the INT64_MIN magnitude). */
-static unsigned char *LB; static int LP, LN, LBIN;
+UNISA_RUNTIME_STATE unsigned char *LB; UNISA_RUNTIME_STATE int LP, LN, LBIN;
 static void lskip(void) { if(!LBIN)while (LP < LN && LB[LP] <= 32) LP++; }
 static int lchar(void) {
     if(LBIN){if(LP==LN)die("truncated binary model tag");return LB[LP++];}
@@ -119,12 +125,12 @@ static I lnum(void) {
 static int lint(void) { I n = lnum(); if (n < INT32_MIN || n > INT32_MAX) die("model index overflow"); return (int)n; }
 
 /* ---- the table ---- */
-static int NS, NQ, NRG, NSTR, START;
-static char **STR; static int *STRL;
-static int *QOFF, *QLEN; static I *QA; static int NQA;          /* actions, flattened */
-static int ISNET, TOPMAX;
-static int *NLO, *NHI, *BN, *BQ, *RETS; static unsigned char **RETOK;
-static int *SMODE; static int **ROWK, **ROWN, **ROWQ; static int *ROWC;
+UNISA_RUNTIME_STATE int NS, NQ, NRG, NSTR, START;
+UNISA_RUNTIME_STATE char **STR; UNISA_RUNTIME_STATE int *STRL;
+UNISA_RUNTIME_STATE int *QOFF, *QLEN; UNISA_RUNTIME_STATE I *QA; UNISA_RUNTIME_STATE int NQA;          /* actions, flattened */
+UNISA_RUNTIME_STATE int ISNET, TOPMAX;
+UNISA_RUNTIME_STATE int *NLO, *NHI, *BN, *BQ, *RETS; UNISA_RUNTIME_STATE unsigned char **RETOK;
+UNISA_RUNTIME_STATE int *SMODE; UNISA_RUNTIME_STATE int **ROWK, **ROWN, **ROWQ; UNISA_RUNTIME_STATE int *ROWC;
 
 static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
 
@@ -248,14 +254,14 @@ static void load(const char *path) {
    Shared model spans are kept once. All directory bounds and format edges
    are checked before a route is executed. Model bodies use the same loader. */
 typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
-static unsigned char *PFILE, *PB; static int PN, PM, PS;
-static int *POFF, *PLEN, *PRAW; static long *PCRC; static int PVER; static Stage *STAGES;
+UNISA_RUNTIME_STATE unsigned char *PFILE, *PB; UNISA_RUNTIME_STATE int PN, PM, PS;
+UNISA_RUNTIME_STATE int *POFF, *PLEN, *PRAW; UNISA_RUNTIME_STATE long *PCRC; UNISA_RUNTIME_STATE int PVER; UNISA_RUNTIME_STATE Stage *STAGES;
 typedef struct { int name, n, data, len; } Resource;
-static Resource *RES; static int NR;
+UNISA_RUNTIME_STATE Resource *RES; UNISA_RUNTIME_STATE int NR;
 /* Borrowed process inputs override carried resources by exact byte key.
    The caller keeps these immutable spans alive for the whole route. */
 typedef struct { const unsigned char *name; int n; const unsigned char *data; int len; } ResourceInput;
-static ResourceInput *RI; static int NRI;
+UNISA_RUNTIME_STATE ResourceInput *RI; UNISA_RUNTIME_STATE int NRI;
 static char *pword(void) {
     lskip(); int first = LP;
     while (LP < LN && LB[LP] > 32) {
@@ -396,12 +402,12 @@ static int checknet(const char *table, const char *net) {
 
 /* Exact resource lookup and filesystem naming belong to the host adapter. */
 void core_host_panic(const char *reason) { die(reason); }
-static const char *INCDIR=0;
+UNISA_RUNTIME_STATE const char *INCDIR=0;
 /* Optional host IO ledger. It records successful disk reads, not include
    syntax or carried/process resources. Cached requests need only one make
    prerequisite; no language decision is made here. */
-static int FILE_READ_RECORD=0, FILE_READ_COUNT=0;
-static char **FILE_READ_PATHS=0;
+UNISA_RUNTIME_STATE int FILE_READ_RECORD=0, FILE_READ_COUNT=0;
+UNISA_RUNTIME_STATE char **FILE_READ_PATHS=0;
 static void record_file_read(const char *path) {
     if (!FILE_READ_RECORD) return;
     for (int i=0;i<FILE_READ_COUNT;i++) if (!strcmp(FILE_READ_PATHS[i],path)) return;
@@ -440,6 +446,9 @@ static int execute(unsigned char *input,int inputn,const char *src,Buf *result) 
     CoreModel m; core_model(&m);
     I maxsteps=getenv("UNISA_MAXSTEPS") ? strtol(getenv("UNISA_MAXSTEPS"),0,10) : UNISA_DEFAULT_MAXSTEPS;
     CoreResult r; int status=core_run(&m,input,inputn,src,maxsteps,&r);
+#ifdef UNISA_RUNTIME_DIAGNOSTIC
+    UNISA_RUNTIME_DIAGNOSTIC(status,r.reason,r.reason_n,&r.err);
+#endif
     if (status==1 && r.reason_n) fprintf(stderr,"reject: %.*s\n",r.reason_n,r.reason);
     if (status==2) fprintf(stderr,"run: %s\n",r.reason);
     if (status==3) fprintf(stderr,"timeout\n");

@@ -17,7 +17,9 @@ for L in 1 2; do
     b 60 python3 exec/c/tbl.py "$T/e4_$L.json" "$T/e4_$L.tbl" || { echo "e4: tbl -O$L failed"; exit 1; }
 done
 eq=0; bad=0; skip=0
+b 10 python3 tests/sourceflat.py "$T/unisacc-flat.c" || exit 1
 for f in "$@"; do
+    case "$f" in unisacc.c|"$R/unisacc.c") f="$T/unisacc-flat.c";; esac
     b 30 "$UA" "$f" -S -o - > "$T/o0" 2>/dev/null; r0=$?
     for L in 1 2; do
         b 30 "$UA" -O$L "$f" -S -o - > "$T/oL" 2>/dev/null; rl=$?

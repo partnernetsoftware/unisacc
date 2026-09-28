@@ -112,3 +112,9 @@ clean:
 	@rm -f unisacc.com unisacc.com.build.json .release.log
 	@rm -rf /tmp/ua_ref /tmp/ua_ref.c
 	@echo "  removed the built artifacts (unisacc.c is generated and tracked)"
+
+# Independent export for VM transfer and single-file self-hosting.
+.PHONY: export-ref
+export-ref:
+	@mkdir -p out
+	@./tests/export_ref.sh out/unisacc-flat.c

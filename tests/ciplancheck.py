@@ -46,8 +46,8 @@ def check():
             if suite == 'ccrun':
                 chunks = [args[3:] for args in jobs if args[:3] == ['env', 'CCRUN_SHARD=1', './tests/ccrun.sh']]
             else:
-                chunks = [args[1:] for args in jobs if args[0] == './tests/' + suite + '.sh']
-            assert len(chunks) == 8 and all(chunks), (suite, chunks)
+                chunks = [args[1:] for args in jobs if args[0] == './tests/' + suite + '.sh' and not args[1].startswith('--prepare-')]
+            assert len(chunks) == (17 if suite == 'closure' else 9 if suite == 'ccrun' else 8) and all(chunks), (suite, chunks)
             actual = [f for chunk in chunks for f in chunk]
             assert sorted(actual) == files and len(set(actual)) == len(files), suite
         for suite in ('difftest', 'difftest_o'):
@@ -60,7 +60,7 @@ def check():
         assert names and len(names) == len(set(names)), names
         import re
         def family(name):
-            for prefix in ('opt-', 'optpy-', 'ape-', 'acceptance'):
+            for prefix in ('opt-', 'optpy-', 'ape-', 'acceptance', 'selfhost-', 'ccrun-', 'closure-'):
                 if name.startswith(prefix):
                     return prefix.rstrip('-')
             return name if name in BASE else re.sub(r'\d+$', '', name)
@@ -69,7 +69,7 @@ def check():
         if (ROOT / 'corpus/c-testsuite').is_dir():
             assert {'corpus1', 'corpus2', 'corpus3', 'corpus4'} <= set(names)
         if (ROOT / 'corpus/crypto-algorithms').is_dir():
-            assert {'tools1', 'tools2', 'tools3', 'tools4'} <= set(names)
+            assert {'tools%d' % k for k in range(1,12)} <= set(names)
         # A selected job must not accidentally dispatch the whole plan.
         record.write_text('')
         proc = subprocess.run(['bash', 'tests/all.sh', '--suite', 'native1'],

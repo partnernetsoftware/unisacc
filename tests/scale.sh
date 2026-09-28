@@ -14,14 +14,16 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 ok=0; bad=0
 cap() { grep -h "^#define $1 " src/*.c | awk '{print $3}'; }
 half() {   # half <what> <used> <limit>
     if [ "$2" -le $(( $3 / 2 )) ]; then ok=$((ok+1)); printf "  ok   %-26s %9s of %9s\n" "$1" "$2" "$3"
     else bad=$((bad+1)); printf "  FAIL %-26s %9s of %9s -- over half: raise the limit\n" "$1" "$2" "$3"; fi
 }
-half "source (MAXSRC)" "$(wc -c < unisacc.c | tr -d ' ')" "$(cap MAXSRC)"
-tape=$("$_BOUND" 30 "$UA" unisacc.c -t osx/arm64 2>/dev/null)
+half "source (MAXSRC)" "$(wc -c < "$SELF" | tr -d ' ')" "$(cap MAXSRC)"
+tape=$("$_BOUND" 30 "$UA" "$SELF" -t osx/arm64 2>/dev/null)
 half "tape text (MAXOUT)" "$(printf '%s' "$tape" | wc -c | tr -d ' ')" "$(cap MAXOUT)"
 half "tape lines (OPT_MAXL)" "$(printf '%s\n' "$tape" | wc -l | tr -d ' ')" "$(cap OPT_MAXL)"
 half "tape instructions (BK_MAXI)" "$(printf '%s\n' "$tape" | grep -c '^  ')" "$(cap BK_MAXI)"

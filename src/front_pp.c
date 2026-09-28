@@ -752,6 +752,8 @@ int prelines;               /* lines -include put before the user's own */
 long ireg_ln[MAXIREG];    /* the line the header's text starts on */
 long ireg_nl[MAXIREG];    /* how many lines it is */
 int ireg_nm[MAXIREG];     /* its name, as an offset into `fnpool` */
+int ireg_path[MAXIREG];   /* actual disk path, separate from display name */
+char incpaths[65536]; int nincpaths; int incdisk;
 int nireg;
 #define MAXSPL 4096
 long spl_at[MAXSPL]; int nspl;   /* joined continuation lines */
@@ -761,7 +763,7 @@ int nautoinc;                     /* `#include` lines WE put at the top */
 char *srcpath;                    /* the file being compiled, for `"x.h"` */
 char optincdir[512]; int optincdl; /* -I, normalised with a trailing slash */
 
-#define MAXINC 131072
+#define MAXINC MAXSRC    /* included source has the same limit as source */
 char incbuf[MAXINC];
 char incpath[512];
 int nincl;
@@ -810,7 +812,9 @@ int inctry(char *dir, int dl, int nm, int nl) {
     if (fd < 0) return 0 - 1;
     n = __read(fd, incbuf, MAXINC);
     __close(fd);
+    if (n >= MAXINC) { err_at(nm, "included source too large"); __exit(1); }
     if (n < 0) return 0 - 1;
+    incdisk = 1;
     if (wantdeps) {                    /* a file that was really read */
         k = 0;
         while (incpath[k] && ndeppool < 65534) { deppool[ndeppool] = incpath[k]; ndeppool = ndeppool + 1; k = k + 1; }
@@ -847,6 +851,7 @@ int writedeps(char *target, char **inputs, int ninput) {
 /* Replace src[ls..le) with the included text.  Returns 1 if it did. */
 int incdo(int ls, int le, int from) {
     int j; int q; int nm; int nl; int n; int k; int dl; int grow; char *a;
+    if (nireg == 0) nincpaths = 0;
     j = from;
     while (j < le) { if (wsat(j) == 0) break; j = j + 1; }
     q = src[j] & 255;
@@ -864,20 +869,33 @@ int incdo(int ls, int le, int from) {
         while (q2 < nl && q2 < 62) { incname[q2] = src[nm + q2]; q2 = q2 + 1; }
         incname[q2] = 0;
     }
-    n = 0 - 1;
+    n = 0 - 1; incdisk = 0;
     /* an absolute path names its file outright: it was being joined to
        the source's directory, so `#include "/abs/x.h"` silently opened
        nothing and the program compiled without it */
     if (src[nm] == 47) n = inctry("", 0, nm, nl);
     else if (q == 34) {
+        /* Resolve a quoted include beside its actual including file.
+           Undo prior splices as diagnostics do; angle includes retain
+           the existing -I/include/embedded search order below. */
+        long line; long pos; int ri; int inside;
+        line = 1; pos = 0;
+        while (pos < ls) { if (src[pos] == 10) line = line + 1; pos = pos + 1; }
+        inside = 0 - 1; ri = nireg - 1;
+        while (ri >= 0) {
+            if (line > ireg_ln[ri] + ireg_nl[ri]) line = line - ireg_nl[ri];
+            else { if (line >= ireg_ln[ri]) { inside = ri; break; } }
+            ri = ri - 1;
+        }
         a = srcpath;
+        if (inside >= 0) { if (ireg_path[inside] >= 0) a = incpaths + ireg_path[inside]; }
         dl = 0; k = 0;
         while (a[k]) { if (a[k] == 47) dl = k + 1; k = k + 1; }
         n = inctry(a, dl, nm, nl);
     }
     if (n < 0) { if (optincdl) n = inctry(optincdir, optincdl, nm, nl); }
     if (n < 0) n = inctry("include/", 8, nm, nl);
-    if (n < 0) n = hdr_read(nm, nl);     /* the copy we carry [S-11] */
+    if (n < 0) { incdisk = 0; n = hdr_read(nm, nl); } /* embedded [S-11] */
     if (n < 0) {
         /* C99 6.10.2p4: a header that cannot be found is a constraint
            violation.  This returned 0 and the line simply vanished -- the
@@ -911,6 +929,16 @@ int incdo(int ls, int le, int from) {
         ireg_ln[nireg] = ln;
         ireg_nl[nireg] = 1; c2 = 0;
         while (c2 < n) { if (incbuf[c2] == 10) ireg_nl[nireg] = ireg_nl[nireg] + 1; c2 = c2 + 1; }
+        ireg_path[nireg] = 0 - 1;
+        if (incdisk) {
+            q = 0; while (incpath[q]) q = q + 1;
+            if (nincpaths + q + 1 > 65536) {
+                err_at(ls, "include path capacity exceeded"); __exit(1);
+            }
+            ireg_path[nireg] = nincpaths; q = 0;
+            while (incpath[q]) { incpaths[nincpaths] = incpath[q]; nincpaths = nincpaths + 1; q = q + 1; }
+            incpaths[nincpaths] = 0; nincpaths = nincpaths + 1;
+        }
         ireg_nm[nireg] = nfnpool;
         q = 0;
         while (incname[q] && nfnpool < 8000) { fnpool[nfnpool] = incname[q]; nfnpool = nfnpool + 1; q = q + 1; }

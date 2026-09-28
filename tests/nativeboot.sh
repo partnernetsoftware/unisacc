@@ -26,10 +26,12 @@ case "${1:-}" in
 esac
 . "$R/tests/lib.sh"
 T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 fail() { echo "  FAIL $*"; return 1; }
 compile() { # output, compiler, target: a failed/empty compile is never comparable.
     local output=$1 compiler=$2 target=$3 rc
-    bound 55 "$compiler" unisacc.c -b "$target" > "$output" 2> "$output.err"
+    bound 55 "$compiler" "$SELF" -b "$target" > "$output" 2> "$output.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then cat "$output.err" >&2; fail "compile $target exited $rc"; return 1; fi
     [ -s "$output" ] || { fail "compile $target produced an empty image"; return 1; }
@@ -50,7 +52,7 @@ windows() {
     local stem="C:\u\nb$n"
     compile "$T/W" "$UA" "$target" || return 1
     bound 5 "$UTM" file push "$VM" "$stem.exe" < "$T/W" || return 1
-    bound 5 "$UTM" file push "$VM" "$stem.c" < unisacc.c || return 1
+    bound 5 "$UTM" file push "$VM" "$stem.c" < "$SELF" || return 1
     # Bound the guest process itself: a host-side alarm alone cannot stop it.
     cat > "$T/run.ps1" <<EOF
 \$ErrorActionPreference = 'Stop'

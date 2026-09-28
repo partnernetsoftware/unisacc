@@ -40,7 +40,7 @@ def read_package(data):
             text=decode(raw)
         else:raw=wire;text=wire
         if not text.startswith(b'N ') or not text.endswith(b'\n'):raise ValueError('network required')
-        models.append(text);wires.append({'stored':wire,'raw':raw})
+        models.append(text);wires.append({'stored':wire,'raw':raw,'record':row})
     resources={}
     for _ in range(nr):
         row=line()

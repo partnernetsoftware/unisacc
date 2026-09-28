@@ -17,6 +17,8 @@ PROBES=${*:-examples/hello.c examples/fib.c examples/fact.c examples/switch.c
             tests/c/b_float.c tests/c/b_argv.c tests/c/b_mmap.c
             tests/c/b_printf.c tests/c/b_static.c}
 T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 ok=0; bad=0; skip=0
 for f in $PROBES; do
     b=$(basename "$f" .c)
@@ -66,7 +68,7 @@ if [ -x "$UTM" ] && "$UTM" status "$VM" 2>/dev/null | grep -q started \
     n=$(date +%s)$RANDOM
     for t in win/arm64 win/x86_64; do
         tt=$(echo "$t" | tr / _)
-        "$UA_RUN" unisacc.c -b "$t" > "$T/uw.$tt" 2>/dev/null
+        "$UA_RUN" "$SELF" -b "$t" > "$T/uw.$tt" 2>/dev/null
         "$UTM" file push "$VM" 'C:\u\r'"$n$tt"'.exe' < "$T/uw.$tt" 2>/dev/null
     done
     { echo '#include <stdio.h>'; cat examples/fib.c; } > "$T/wf.c"

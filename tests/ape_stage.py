@@ -11,12 +11,13 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'exec/pipeline'))
 from models import closure, digest
+from sourceflat import export_source,verify_source,identity as source_identity
 
 TARGETS = ('lnx/x86_64', 'lnx/arm64', 'osx/x86_64', 'osx/arm64', 'win/x86_64')
 
 
 def identity(ua):
-    h = closure(hashlib.sha256())
+    h = closure(hashlib.sha256()); h.update(bytes.fromhex(source_identity()))
     for path in (ROOT / 'unisacc.c', Path(ua), Path(__file__)):
         h.update(bytes.fromhex(digest(path)))
     return h.hexdigest()
@@ -35,7 +36,9 @@ def prepare(state, target, ua):
     from unisa.assemble import assemble
     from unisa import image
     source = identity(ua)
-    result = subprocess.run([ua, '-O2', str(ROOT / 'unisacc.c'), '-t', target],
+    dest = directory(state,target); dest.mkdir(parents=True,exist_ok=True)
+    flat=export_source(dest/'unisacc.flat.c')
+    result = subprocess.run([ua, '-O2', str(flat), '-t', target],
                             capture_output=True, timeout=25, check=True)
     if not result.stdout:
         raise ValueError('empty compiler tape')

@@ -187,6 +187,9 @@ job run         ./tests/run.sh
 job multi       ./tests/multi.sh
 job diag        ./tests/diag.sh
 job hostile     ./tests/hostile.sh
+job source-layout ./tests/source_layout.sh
+job target-package python3 ./tests/targetpackagecheck.py "${MODEL_COM:-./unisacc.com}"
+job lib-context python3 ./tests/libunisacccheck.py --package "${MODEL_COM:-./unisacc.com}"
 job kernel      ./tests/kernel.sh
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh

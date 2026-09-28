@@ -36,8 +36,10 @@ def main():
             command = [sys.executable, '-m', 'unisa', 'run', source, '--drive', 'built']
         elif args.route == 'classic':
             compiler_source = tmp/'reference.c'
-            compiler_source.write_bytes(b''.join((ROOT/name).read_bytes() for name in
-                ['tests/refshim.h', 'unisacc.c', 'tests/reffoot.h']))
+            from sourceflat import export_source
+            flat=export_source(tmp/'unisacc-flat.c')
+            compiler_source.write_bytes((ROOT/'tests/refshim.h').read_bytes()+flat.read_bytes()+
+                                        (ROOT/'tests/reffoot.h').read_bytes())
             run([os.environ.get('CC', 'cc'), '-std=c99', '-w', '-O2',
                  compiler_source, '-o', tmp/'classic'])
             command = [tmp/'classic', '-run', source]

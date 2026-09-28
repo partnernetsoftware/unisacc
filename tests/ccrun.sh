@@ -15,15 +15,19 @@ isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
     rm -f "$T/ref.status"
-    want=$("$_BOUND" --status "$T/ref.status" 25 python3 -m unisa run "$f" --drive built 2>"$T/ref.err"); wrc=$?
-    ws=$(cat "$T/ref.status" 2>/dev/null)
-    if [ -z "$ws" ] || [ $((ws & 127)) -ne 0 ]; then fail=$((fail+1)); echo "  FAIL $b reference timeout/signal $wrc"; continue; fi
+    # Independent VM routes overlap; the full allocator churn stays intact.
+    ("$_BOUND" --status "$T/ref.status" 45 python3 -m unisa run "$f" --drive built >"$T/ref.out" 2>"$T/ref.err"; echo $? >"$T/ref.rc") & refpid=$!
     if ! "$_BOUND" 25 "$UA" "$f" -c > "$T/$b.tape" 2>"$T/$b.err" || [ ! -s "$T/$b.tape" ]; then
+        wait "$refpid"
         uns=$((uns+1))
         printf "  UNS  %-12s %s\n" "$b" "$(head -1 "$T/$b.err"|cut -c1-48)"; continue
     fi
     rm -f "$T/vm.status"
-    got=$("$_BOUND" --status "$T/vm.status" 25 python3 -m unisa vm "$T/$b.tape" 2>"$T/vm.err"); grc=$?
+    got=$("$_BOUND" --status "$T/vm.status" 45 python3 -m unisa vm "$T/$b.tape" 2>"$T/vm.err"); grc=$?
+    wait "$refpid"
+    want=$(cat "$T/ref.out"); wrc=$(cat "$T/ref.rc")
+    ws=$(cat "$T/ref.status" 2>/dev/null)
+    if [ -z "$ws" ] || [ $((ws & 127)) -ne 0 ]; then fail=$((fail+1)); echo "  FAIL $b reference timeout/signal $wrc"; cat "$T/ref.err"; continue; fi
     gs=$(cat "$T/vm.status" 2>/dev/null)
     if [ -z "$gs" ] || [ $((gs & 127)) -ne 0 ]; then fail=$((fail+1)); echo "  FAIL $b VM timeout/signal $grc"; continue; fi
     if [ "$got" = "$want" ] && [ "$wrc" -eq "$grc" ]; then

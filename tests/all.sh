@@ -121,6 +121,7 @@ cleanup() {
 trap cleanup EXIT
 APE_STATE=${APE_STATE:-$W/ape}; export APE_STATE
 ACCEPT_STATE=${ACCEPT_STATE:-$W/accept}; export ACCEPT_STATE
+SELFHOST_STATE=${SELFHOST_STATE:-$W/selfhost}; export SELFHOST_STATE
 ORDER=(); PLAN=()
 run() {
     local n="$1"; shift
@@ -193,19 +194,34 @@ for shard in 1 2 3 4; do
     run "difftest$shard" env SHARD="$shard/4" ./tests/difftest.sh
 done
 # File shards are a disjoint partition of the original wildcard inputs.
+if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
+    serial selfhost-prepare-tape ./tests/selfhost.sh --prepare-tape
+    serial selfhost-prepare-image ./tests/selfhost.sh --prepare-image
+fi
 FILES=(examples/*.c tests/c/*.c)
 for shard in 0 1 2 3 4 5 6 7; do
     CHUNK=()
     for ((i=shard; i<${#FILES[@]}; i+=8)); do CHUNK+=("${FILES[$i]}"); done
     [ "${#CHUNK[@]}" -gt 0 ] || { echo "empty probe shard" >&2; exit 2; }
-    for suite in native fat ccrun selfhost closure stages; do
+    for suite in native fat ccrun selfhost stages; do
         if [ "$suite" = ccrun ]; then
-            run "$suite$((shard+1))" env CCRUN_SHARD=1 "./tests/$suite.sh" "${CHUNK[@]}"
+            CCRUN_CHUNK=()
+            for f in "${CHUNK[@]}"; do [ "$f" = tests/c/b_malloc.c ] || CCRUN_CHUNK+=("$f"); done
+            run "$suite$((shard+1))" env CCRUN_SHARD=1 "./tests/$suite.sh" "${CCRUN_CHUNK[@]}"
         else
             run "$suite$((shard+1))" "./tests/$suite.sh" "${CHUNK[@]}"
         fi
     done
 done
+run ccrun-malloc env CCRUN_SHARD=1 ./tests/ccrun.sh tests/c/b_malloc.c
+for shard in $(seq 0 15); do
+    CHUNK=()
+    for ((i=shard; i<${#FILES[@]}; i+=16)); do
+        [ "${FILES[$i]}" = tests/c/b_malloc.c ] || CHUNK+=("${FILES[$i]}")
+    done
+    run "closure$((shard+1))" ./tests/closure.sh "${CHUNK[@]}"
+done
+run closure-malloc ./tests/closure.sh tests/c/b_malloc.c
 run crossnative bash -c "./tests/crossnative.sh $PROBES"
 run artifacts  ./tests/artifacts.sh
 run run        ./tests/run.sh
@@ -253,7 +269,7 @@ done
 serial ape ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
-    for k in 1 2 3 4; do run "tools$k" env FETCH=0 SHARD="$k/4" ./tests/tools.sh; done
+    for k in $(seq 1 11); do run "tools$k" env FETCH=0 SHARD="$k/11" ./tests/tools.sh; done
 fi
 run selfgap    ./tests/selfgap.sh
 # bootstrap needs the host toolchain to turn a tape back into a binary

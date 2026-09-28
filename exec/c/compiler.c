@@ -161,8 +161,15 @@ int main(int argc, char **argv) {
     }
     if (!src) return clierror("expected a C source file");
     if (nsources>1 && (mode==1 || mode==4)) return clierror("multiple preprocessing outputs not migrated");
+#ifdef UNISA_SINGLE_TARGET
+    if (target && strcmp(target,UNISA_SINGLE_TARGET))
+        return clierror("target is outside this single-target compiler");
+    target = UNISA_SINGLE_TARGET;
+    if (runit) mode=3;
+#else
     if (!target) target = mode ? "lnx/x86_64" : NATIVE_OS "/" NATIVE_ARCH;
     if (runit) { target=NATIVE_OS "/" NATIVE_ARCH; mode=3; }
+#endif
     char route[96];
     int n = mode == 4 ? snprintf(route,sizeof route,"tokens") :
         mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :

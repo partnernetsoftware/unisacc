@@ -433,7 +433,10 @@ static int puff(unsigned char *dest,
     return err;
 }
 
-static long ctab[4][256];
+#ifndef UNISA_RUNTIME_STATE
+#define UNISA_RUNTIME_STATE static
+#endif
+UNISA_RUNTIME_STATE long ctab[4][256];
 static int crc_init(void){int i;int j;long c;for(i=0;i<256;i++){c=i;for(j=0;j<8;j++){if(c&1)c=(c>>1)^3988292384;else c=c>>1;}ctab[0][i]=c;}for(i=0;i<256;i++){c=ctab[0][i];for(j=1;j<4;j++){c=(c>>8)^ctab[0][c&255];ctab[j][i]=c;}}return 0;}
 static long crc(char *p,int n){long c;long x;int i;c=4294967295;i=0;
  while(i+4<=n){x=c^((long)(p[i]&255)|((long)(p[i+1]&255)<<8)|((long)(p[i+2]&255)<<16)|((long)(p[i+3]&255)<<24));c=ctab[3][x&255]^ctab[2][(x>>8)&255]^ctab[1][(x>>16)&255]^ctab[0][(x>>24)&255];i+=4;}

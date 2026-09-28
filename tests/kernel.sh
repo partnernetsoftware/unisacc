@@ -19,6 +19,16 @@ for f in "$T"/*; do
     if cmp -s "$f" "kernel/$b"; then ok=$((ok+1))
     else bad=$((bad+1)); echo "  STALE kernel/$b -- run: python3 -m unisa emit-kernel"; fi
 done
+# Compare the whole generated inventory too: stale stage fragments must not
+# survive a stage removal, and an empty generation must never pass.
+for f in kernel/weight.*.inc kernel/dense.*.inc; do
+    [ -f "$f" ] || continue
+    b=$(basename "$f")
+    if [ ! -f "$T/$b" ]; then
+        bad=$((bad+1)); echo "  ORPHAN kernel/$b"
+    fi
+done
+[ "$ok" -gt 0 ] || { echo "  FAIL empty kernel inventory"; exit 1; }
 # ...and the truth tables as data (weights/gold/*.tsv), from the same gold
 bound 55 python3 -m unisa gold-export --out "$T/gold" >/dev/null 2>&1 || {
     echo "  FAIL gold-export did not run"; exit 1; }

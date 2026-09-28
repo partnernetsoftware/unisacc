@@ -16,12 +16,14 @@ case "$#" in
     *) echo 'usage: bigclosure.sh [--target OS/ARCH | --list-targets]' >&2; exit 2;;
 esac
 . "$R/tests/lib.sh"; ua_ready
-T=$(scratch); HOSTT=$(host_target)
+T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1; HOSTT=$(host_target)
 same=0; diff=0; host_selected=0
 for t in $TARGETS; do
     [ "$t" = "$HOSTT" ] && host_selected=1
     tt=$(echo "$t" | tr / _)
-    if ! bound 30 "$UA" unisacc.c -t "$t" > "$T/tape.$tt" 2>"$T/tape.$tt.err"; then
+    if ! bound 30 "$UA" "$SELF" -t "$t" > "$T/tape.$tt" 2>"$T/tape.$tt.err"; then
         echo "  FAIL $t: front end failed"; cat "$T/tape.$tt.err"; diff=$((diff+1)); continue
     fi
     if [ ! -s "$T/tape.$tt" ]; then
@@ -31,7 +33,7 @@ for t in $TARGETS; do
          -o "$T/py.$tt" --target "$t" --drive built >"$T/py.$tt.log" 2>&1; then
         echo "  FAIL $t: Python image build failed"; cat "$T/py.$tt.log"; diff=$((diff+1)); continue
     fi
-    if ! bound 30 "$UA" unisacc.c -b "$t" > "$T/ua.$tt" 2>"$T/ua.$tt.err"; then
+    if ! bound 30 "$UA" "$SELF" -b "$t" > "$T/ua.$tt" 2>"$T/ua.$tt.err"; then
         echo "  FAIL $t: C image build failed"; cat "$T/ua.$tt.err"; diff=$((diff+1)); continue
     fi
     if [ ! -s "$T/py.$tt" ] || [ ! -s "$T/ua.$tt" ]; then

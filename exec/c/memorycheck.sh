@@ -12,6 +12,8 @@ export DRIVER_KIND
 case ${MEMORY_SHARD:-all} in all|1/3|2/3|3/3) ;; *) echo 'unknown MEMORY_SHARD' >&2; exit 2;; esac
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 b() { "$_BOUND" 60 "$@"; }
+b python3 tests/sourceflat.py "$T/unisacc-flat.c"
+SELF="$T/unisacc-flat.c"
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) echo 'unsupported memory-check host' >&2; exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 HOST_ARCH=$ARCH
@@ -31,7 +33,7 @@ if [ "$KIND" = all ] || [ "$KIND" = cc ]; then hostcc -O2 exec/c/compiler.c -o "
 if [ "$KIND" = all ] || [ "$KIND" = ua ]; then b "$UA" -b "$TARGET" -O2 exec/c/compiler.c -o "$T/driver-ua"; fi
 if [ "$KIND" = all ] || [ "$KIND" = asm ]; then b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.sh -O2 exec/c/compiler.c -o "$T/driver-asm"; fi
 if [ "$KIND" = all ] || [ "$KIND" = cc ]; then
-cat tests/refshim.h unisacc.c exec/c/memory-ref.c > "$T/ref.c"
+cat tests/refshim.h "$SELF" exec/c/memory-ref.c > "$T/ref.c"
 hostcc -w -O1 "$T/ref.c" -o "$T/ref-memory"
 fi
 b python3 exec/c/memorycheck.py "$T" "$TARGET" "$UA"

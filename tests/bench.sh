@@ -26,6 +26,8 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
+SELF="$T/unisacc.flat.c"
+bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 TOL=${TOLERANCE:-30}          # percent slower than baseline that still passes
 # One machine's numbers are not another's.  Keyed by `uname -m` alone,
 # GitHub's arm64 macOS runners -- six times slower than the laptop that
@@ -52,8 +54,8 @@ ms() {   # ms <cmd...> -- best of three, in milliseconds
     echo "$best"
 }
 
-self=$(ms "$T/opt" unisacc.c -b osx/arm64 -o "$T/a.bin")
-[ -f "$T/a.bin" ] || self=$(ms "$T/opt" unisacc.c -b lnx/x86_64 -o "$T/a.bin")
+self=$(ms "$T/opt" "$SELF" -b osx/arm64 -o "$T/a.bin")
+[ -f "$T/a.bin" ] || self=$(ms "$T/opt" "$SELF" -b lnx/x86_64 -o "$T/a.bin")
 probe=$(ms "$T/opt" examples/fib.c -b lnx/x86_64 -o "$T/b.bin")
 
 # the shipped binary: built by unisacc itself, no optimiser anywhere
@@ -61,17 +63,17 @@ host=$(host_target)
 ratio=0
 if [ -n "$host" ]; then
     # built as make com builds it: -O2 [H1]
-    if bound 60 "$T/opt" -O2 unisacc.c -b "$host" -o "$T/self.bin" 2>/dev/null; then
+    if bound 60 "$T/opt" -O2 "$SELF" -b "$host" -o "$T/self.bin" 2>/dev/null; then
         chmod +x "$T/self.bin"
         command -v codesign >/dev/null && codesign -f -s - "$T/self.bin" >/dev/null 2>&1
-        shipped=$(ms "$T/self.bin" unisacc.c -b "$host" -o "$T/c.bin")
+        shipped=$(ms "$T/self.bin" "$SELF" -b "$host" -o "$T/c.bin")
         [ "$self" -gt 0 ] && ratio=$((shipped * 10 / self))
         printf "  %-26s %6d ms  (cc -O2 built: %d ms -> %d.%dx)\n" \
             "shipped binary on itself" "$shipped" "$self" \
             $((ratio / 10)) $((ratio % 10))
     fi
 fi
-printf "  %-26s %6d ms\n" "self-compile (707 KB)" "$self"
+printf "  %-26s %6d ms\n" "full-source self-compile" "$self"
 printf "  %-26s %6d ms\n" "one small probe" "$probe"
 
 # A compile that took no time did not happen.  The first version of this
