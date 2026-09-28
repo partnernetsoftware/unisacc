@@ -209,6 +209,8 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
 
     def syscall_seq(op, arg_srcs):
         f = facts(oracle, op, os_, arch, drive)
+        if win and (C.WINAPI.get(op) is None or f["winimp"] == "none"):
+            raise ValueError("%s: no Windows import for this op" % op)
         args = (f["arg0"], f["arg1"], f["arg2"],
                 f["arg3"], f["arg4"], f["arg5"])
         if fault == "win_argregs" and os_ == "win":

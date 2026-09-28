@@ -14,6 +14,7 @@ SYSCALLS = {
     "write":         (1, 64, 4, "WriteFile"),
     "open":          (2, 56, 5, "CreateFileW"),       # lnx arm = openat
     "close":         (3, 57, 6, "CloseHandle"),
+    "getdents64":    (217, 61, None, None),  # Linux-only directory records
     "mmap":          (9, 222, 197, "VirtualAlloc"),
     "munmap":        (11, 215, 73, "VirtualFree"),
     "mprotect":      (10, 226, 74, "VirtualProtect"),

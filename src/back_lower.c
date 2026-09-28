@@ -575,7 +575,8 @@ int tk_setreg(int dst, int kind, long v) { return tk(TO_SETREG, dst, v, 0, kind)
    lower.py refuses.  (Jumps and calls ask bk_facts too and have no number
    by nature; only the syscall sequences come here.) */
 int bk_needno(void) {
-    if (bkf_hasno == 0 && bkos != 2) {
+    if ((bkf_hasno == 0 && bkos != 2) ||
+        (bkos == 2 && bkf_winimp == 0)) { /* catalog WINIMPS[0] is none */
         __write(2, "back end: no system call for this op on this OS\n", 49);
         __exit(1);
     }

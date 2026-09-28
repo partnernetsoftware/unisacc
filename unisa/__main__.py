@@ -440,7 +440,8 @@ def cmd_ape(a):
 
     from pathlib import Path
     payload = Path(a.payload).read_bytes() if a.payload else b""
-    blob = ape_build(one, a.out, payload=payload)
+    blob = ape_build(one, a.out, payload=payload,
+                     product_name=a.product_name, product_version=a.product_version)
     print("%s  %d B  (%s, and a shell script for the rest)"
           % (a.out, len(blob), blob[:2].decode()))
     return 0
@@ -729,6 +730,8 @@ def main(argv=None):
                      help="optimisation level passed to --via (the tape is "
                           "optimised by the C front end) [H1]")
     apx.add_argument("--payload", help="development model package carried once in the container")
+    apx.add_argument("--product-name", help="explicit PE product metadata for release packaging")
+    apx.add_argument("--product-version", help="PE product version; requires --product-name")
     apx.set_defaults(fn=cmd_ape)
 
     vm = sub.add_parser("vm")

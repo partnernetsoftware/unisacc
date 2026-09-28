@@ -91,13 +91,21 @@ def _stub(script):
     return b"qFpD='\n" + filler + b"....'\n" + script
 
 
-def build(compile_target, out, payload=b""):
+def build(compile_target, out, payload=b"", product_name=None, product_version=None):
     """`compile_target(target, stub=b"")` -> the image for that target.
 
     Two passes: the first learns how long everything is with a placeholder
     script, the second writes the real offsets.  The script's length cannot
     change between them, which is what the fixed-width fields are for.
     """
+    if (product_name is None) != (product_version is None):
+        raise ValueError("product name and version must be specified together")
+    def pe_head(stub):
+        head = compile_target("win/x86_64", stub=stub)
+        if product_name is not None:
+            from .peversion import add_version_info
+            head = add_version_info(head, product_name, product_version)
+        return head
     # The appended Unix slices are gzipped -- the script pipes them through
     # `gzip -dc`.  mtime=0 so the bytes are a function of the input alone;
     # the project depends on byte-identical rebuilds.  The win/x86_64 image
@@ -110,8 +118,7 @@ def build(compile_target, out, payload=b""):
     # aligned even when the embedded-container environment line changes the
     # shell's length; Windows rejected the resulting offset 781 in that case.
     want += -(2 + len(_stub(b"")) + want) % 8
-    head = compile_target("win/x86_64",
-                          stub=_stub(_pad(_script(guess, bool(payload)), want)))
+    head = pe_head(_stub(_pad(_script(guess, bool(payload)), want)))
     base = (len(head) + 15) // 16 * 16
     off = base
     table = []
@@ -120,7 +127,7 @@ def build(compile_target, out, payload=b""):
                       hashlib.sha256(imgs[t]).hexdigest()[:16]))
         off += (len(imgs[t]) + 15) // 16 * 16
     stub = _stub(_pad(_script(table, bool(payload)), want))
-    head2 = compile_target("win/x86_64", stub=stub)
+    head2 = pe_head(stub)
     assert len(head2) == len(head), (len(head2), len(head))
     peoff = struct.unpack_from("<I", head2, 0x3C)[0]
     assert peoff % 8 == 0 and head2[peoff:peoff+4] == b"PE\0\0"

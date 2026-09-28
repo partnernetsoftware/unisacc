@@ -27,7 +27,7 @@ ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
 # to the tape's `.sys` gate, so the target facts (sysno, arg registers, gate)
 # still come from the abi/enc tables -- nothing here is hardcoded per target.
 INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
-             "__close": "close", "__exit": "exit",
+             "__close": "close", "__exit": "exit", "__getdents64": "getdents64",
              "__mprotect": "mprotect", "__munmap": "munmap",
              "__lseek": "lseek", "__unlink": "unlink", "__rename": "rename"}
 # six arguments, so the six-register gate: a compiler that runs what it

@@ -74,6 +74,12 @@
 
 **签名接入下一片决定**：新增独立unisacc的Windows资格/company工作流与显式签名政策，默认off且缺配置/VERSIONINFO在额度调用前失败；真正落地由主代理检查并配置repo专属OIDC及profile窄权限，不把配置工作甩给用户。签名前PE版本资源必须在构造APE的PE head时追加，不对已打包容器插字节；纯打包IO，原text/data/reloc字节与RVA不动，拒绝已有resource/证书/overlay、header不足及超宽字段，产品名Unisacc与冻结版本精确对应。Linux演示的目录枚举作为R9-5最小切片，只增加getdents64事实与有界目录适配、不加入execve/fork；不支持OS明确拒绝，E3复用INTRINSIC，通用核不加语言原语，生成表/权重由主代理统一重建。
 
+**微软身份实际接入**：已创建 unisacc 专属 Entra app/SP（无密码），绑定 GitHub 实际返回的 immutable repo/environment subject；只授 profile 级 Artifact Signing Certificate Profile Signer，读取核验恰一项。GitHub release-signing 已配置主人审核与 main-only，OIDC三标识存 Environment secrets，provider 坐标存变量；值不写源码/回执。尚未调用企业签名服务，政策仍 off，身份验证标志待完整读回后设置。
+
+**候选版本校准**：源码版本改为0.0.9供本轮签名资格与真实产物验证，不表示发布完成。新增libneed资源后Windows进口上限由245改244，预留固定9槽与3个尾部CLI资源，保持ResourceInput[256]边界；默认不开libneed。首次整体重构建触及55秒外层预算，按已有shared/六目标/pack入口分批，超时不计通过、不放大预算。
+
+**本轮接入决定**：E2 `-libneed` 增加 CLI 资源传递，默认关闭；闭包与函数体集合来自同一声明表，seen 银行独立于自动头 called/defined。参考缺少新 dirent.h 的2项差异保持待复验，不计通过。APE仅在发布编译器构建时显式增加 Unisacc/当前源码版本的 PE VERSIONINFO，两遍头布局均先增加资源再计算 Unix 偏移；普通用户程序不自动冒用产品名。Linux目录枚举、版本资源及其限定回归收片后统一重建，再冻结正式产物。
+
 **苹果签名阻挡定位**：额外私有入口以`--timestamp=none`诊断45秒仍超时，已清理所属进程组；实时sample显示停在`SecKeyCreateSignature → SecurityServer::generateSignature → mach_msg`，因此阻挡在系统签名/私钥服务等待，不能归因为时间戳HTTP。是否有钥匙串授权提示已向用户核实；未导出私钥、修改ACL或假称签名成功。微软产品级签名workflow/policy正在独立准备，尚未配置仓库Entra/OIDC资格，不复用minicon身份。
 
 **并发收片实测（2026-09-28）**：队列仅docs/bound两个审计闭包实现选择性失效，未知族仍全局失效；合成3项复用约0.025秒，输入/候选/环境/缺项与未审代码变化控制通过，不能称179项均已选择性复用。真实演示新增winlist与进程/映射/窗口结构校验；合成控制通过，最终产品实跑待统一冻结。Windows签后footer定位器在冻结产品和host ASan/UBSan各160例通过，接入将复用已读内存而非二次打开文件，格式校验不代替签名信任。macOS原生双架构入口/app/DMG私有ad-hoc格式、参数/退出/运行/FFI/篡改验证通过；Developer ID带时间戳两次20秒超时，Gatekeeper拒绝、公证/staple未做，企业签名未完成。所有格式演练均不改变根产物。

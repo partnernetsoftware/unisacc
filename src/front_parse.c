@@ -2129,7 +2129,7 @@ int pf_call(int t) {
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
-    if (isname(t, "__open", 6) || isname(t, "__read", 6) ||
+    if (isname(t, "__getdents64", 12) || isname(t, "__open", 6) || isname(t, "__read", 6) ||
         isname(t, "__write", 7) || isname(t, "__close", 7) ||
         isname(t, "__mprotect", 10) || isname(t, "__munmap", 8) ||
         isname(t, "__exit", 6) || isname(t, "__lseek", 7) ||
@@ -2144,7 +2144,8 @@ int pf_call(int t) {
         need(tidx(")", 1), ")");
         sysargs(n);
         es("  .sys ");
-        if (isname(t, "__open", 6)) es("open");
+        if (isname(t, "__getdents64", 12)) es("getdents64");
+        else { if (isname(t, "__open", 6)) es("open");
         else { if (isname(t, "__read", 6)) es("read");
         else { if (isname(t, "__write", 7)) es("write");
         else { if (isname(t, "__close", 7)) es("close");
@@ -2153,7 +2154,7 @@ int pf_call(int t) {
         else { if (isname(t, "__lseek", 7)) es("lseek");
         else { if (isname(t, "__unlink", 8)) es("unlink");
         else { if (isname(t, "__rename", 8)) es("rename");
-        else es("exit"); } } } } } } } }
+        else es("exit"); } } } } } } } } }
         es(", r0, r1, r2\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();

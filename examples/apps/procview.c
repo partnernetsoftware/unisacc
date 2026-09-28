@@ -1,12 +1,8 @@
 /* procview: process-tree analysis.
  *
- * On Linux, with no argument, it reads real kernel data straight out of
- * /proc/N/status for every N -- no subprocess, no `ps`: this compiler's
- * syscall catalog has `open`/`read`/`close` but no directory listing
- * (`getdents`) and no `fork`/`exec`/`popen`, so it cannot list /proc itself
- * or run `ps`; it tries every N up to PROCMAX instead. That is a real
- * limitation, not a style choice -- a system with a live pid above PROCMAX
- * is invisible to it, and this only works where /proc exists.
+ * On Linux it enumerates real /proc numeric directories using getdents64,
+ * then reads their status; no subprocess and no fixed PID scan ceiling.
+ * Missing/inaccessible status files and capacity limits are reported.
  *
  * On macOS it calls real libproc through libffi for the process list and
  * PID/parent/RSS/name information. Inaccessible or disappearing processes
@@ -25,7 +21,12 @@
 
 #define MAXP 4096
 #define MAXD 256
-#define PROCMAX 20000
+#ifdef __linux__
+#include <dirent.h>
+#ifndef PROCVIEW_PROC_ROOT
+#define PROCVIEW_PROC_ROOT "/proc"
+#endif
+#endif
 
 struct proc {
     long pid, ppid, rss, sub;
@@ -79,21 +80,27 @@ static void add_line(const char *s)
 }
 
 #ifdef __linux__
-/* Real data, no subprocess: /proc/N/status for every N up to PROCMAX (see
- * the file comment for why it is a scan and not a directory listing). Each
- * status file gives Name, PPid and VmRSS directly, so the result is fed
- * through add_line() in the same "pid ppid rss name" shape ps would have
- * given it -- one parser either way. */
+/* Enumerate directory entries, then independently read each current status. */
 static int scan_proc(void)
 {
-    char path[32], line[256], out[320];
+    char path[1024], line[256], out[320];
+    DIR *dir; struct dirent *entry; char *end; int skipped = 0, limited = 0;
     long pid, ppid, rss;
     char name[64];
     FILE *f;
-    for (pid = 1; pid <= PROCMAX; pid++) {
-        sprintf(path, "/proc/%ld/status", pid);
+    dir = opendir(PROCVIEW_PROC_ROOT);
+    if (!dir) { fprintf(stderr, "procview: cannot enumerate proc directory (errno %d)\n", errno); return 0; }
+    while ((entry = readdir(dir)) != 0) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
+        pid = strtol(entry->d_name, &end, 10);
+        if (*end || pid <= 0 || pid > 2147483647L) continue;
+        if (NP >= MAXP) { limited = 1; break; }
+        if (strlen(PROCVIEW_PROC_ROOT) + strlen(entry->d_name) + 9 >= sizeof path) {
+            fprintf(stderr, "procview: proc path exceeds capacity\n"); closedir(dir); return 0;
+        }
+        sprintf(path, "%s/%s/status", PROCVIEW_PROC_ROOT, entry->d_name);
         f = fopen(path, "r");
-        if (f == 0) continue;
+        if (f == 0) { skipped++; continue; }
         ppid = 0; rss = 0; name[0] = 0;
         while (fgets(line, sizeof line, f)) {
             if (strncmp(line, "Name:", 5) == 0) {
@@ -109,10 +116,14 @@ static int scan_proc(void)
             }
         }
         fclose(f);
-        if (name[0] == 0) continue;             /* status was unreadable */
+        if (name[0] == 0) { skipped++; continue; }
         sprintf(out, "%ld %ld %ld %s", pid, ppid, rss, name);
         add_line(out);
     }
+    if (!limited && errno) { fprintf(stderr, "procview: directory read failed (errno %d)\n", errno); closedir(dir); return 0; }
+    if (closedir(dir)) { fprintf(stderr, "procview: directory close failed\n"); return 0; }
+    if (skipped) fprintf(stderr, "procview: %d status files inaccessible or disappeared\n", skipped);
+    if (limited) fprintf(stderr, "procview: process capacity reached\n");
     return NP > 0;
 }
 #endif

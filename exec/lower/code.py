@@ -150,7 +150,8 @@ def install(E, arch="x86_64", os_="lnx"):
     def put(section, bindings, sequences=None):
         install_rules(g, root, 'code-syscall', bindings=bindings,
                       sequences=sequences or {}, section=section)
-    selected = [(op,f) for op,f in abi.items() if f[0]!='none' or os_=='win']
+    selected = [(op,f) for op,f in abi.items()
+                if f[0]!='none' or (os_=='win' and WINAPI.get(op) is not None and f[12]!='none')]
     entry = 'SYSCALL'
     for op,f in selected:
         nxt = 'SC.next.'+op
