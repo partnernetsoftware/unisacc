@@ -164,13 +164,15 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
         pack.write_bytes(bad);r=run([exe,'--bundle',pack,'resource',inp])
         assert r.returncode==2 and not r.stdout,(r.returncode,r.stderr)
     # A container footer locates the same package without copying model bodies.
-    container = b'MZ-container-prefix' + data + b'UNIPKG1\n' + len(data).to_bytes(8,'little')
+    container = b'legacy-container-prefix' + data + b'UNIPKG1\n' + len(data).to_bytes(8,'little')
     pack.write_bytes(container)
     r=require(run([exe,'--bundle',pack,'resource',inp]));assert r.stdout==b'22\0\x80\n30'
     env=dict(os.environ,UNISA_CONTAINER=str(pack))
     r=subprocess.run([str(exe),'--embedded','resource',str(inp)],capture_output=True,timeout=60,env=env)
     require(r);assert r.stdout==b'22\0\x80\n30'
-    for bad in [container[:-1],container[:-16]+b'BADMAGIC'+container[-8:],
+    # MZ claims a PE header; arbitrary prefix text must not bypass PE validation.
+    for bad in [b'MZ-container-prefix'+data+container[-16:],
+                container[:-1],container[:-16]+b'BADMAGIC'+container[-8:],
                 container[:-8]+bytes(8),container[:-8]+bytes([255])*8]:
         pack.write_bytes(bad);r=run([exe,'--bundle',pack,'resource',inp])
         assert r.returncode==2 and not r.stdout,(r.returncode,r.stderr)

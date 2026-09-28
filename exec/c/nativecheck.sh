@@ -66,7 +66,7 @@ if part in ('all', 'chain'):
 if part in ('all', 'resources'):
     isolated=p/'isolated';isolated.mkdir()
     shutil.copyfile(root/'exec/c/run.c',isolated/'runtime.c')
-    for name in ['core.c','core.h','codec.h']: shutil.copyfile(root/'exec/c'/name,isolated/name)
+    for name in ['core.c','core.h','codec.h','packagefooter.h']: shutil.copyfile(root/'exec/c'/name,isolated/name)
     shutil.copyfile(p/'models.pkg',isolated/'models.pkg')
     for exe in [p/'run',ua,netrun]:
         got=run([exe,'--bundle','models.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated)

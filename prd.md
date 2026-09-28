@@ -2348,3 +2348,9 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 CI负控制的另一个陈旧期望已实跑定位：win_argregs只令win/x86_64失败，win/arm64使用独立ABI路径，因此是5/6而非旧4/6；其余两个故障仍4/6。不把故障当通过，只更新受扰目标范围的期望。gold审计同时保存实际probe退出码与完整1400项分母，避免编译器工具错误或输出不全被当语义回答。
 
 四项最小修复实测：本机Clang与Linux ARM客机GCC的gold审计各1400项，1399一致/1已声明偏差/0差异；acceptance PART=1/4现6通过0失败；Clang warning四探针及完整corpus零误报；ci.yml/windows-signing.yml的actionlint通过。未触发CI或签名服务，不把语法检查算远端成功。重套件分片的CI衔接仍需闭合，完整本地队列随后续跑。
+
+### R9 netcheck旧伪MZ夹具与资源快照收口
+
+本轮exec-native-stages实际rc1保留日志；进一步定位到netcheck:167的b'MZ-container-prefix'假PE（裸P2已成功），不是包解码缺陷。新定位器先验证MZ/PE边界，拒绝这张假PE正确。保留普通legacy容器前缀作为原footer正例，并把旧假PE显式列为负例；真实PE/签名尾正例仍由package-footer门禁覆盖，不放松定位器。顺带检查隔离自编译资源快照，补入run.c现在明确包含的packagefooter.h（之前只复制core/codec）。只修测试输入，不改网络/答案/加载器。
+
+实际复验：netcheck用私有unisacc种子构建执行核后rc0；nativecheck NATIVE_PART=stages与resources各独立55秒外层、双槽并行，均rc0。三个runtime构建六阶段输出/全域网络检查及runtime自身重编一致，隔离资源自编译一致，缺资源/三种写失败控制拒绝。旧失败仍保留；未把20/189旧身份结果搬进新冻结。
