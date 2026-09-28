@@ -34,6 +34,7 @@ def main():
     ap.add_argument('--payload', type=Path)
     ap.add_argument('--sha256')
     ap.add_argument('--identity')
+    ap.add_argument('--keychain', help='explicit private signing keychain; never changes login ACL')
     ns = ap.parse_args(); work = ns.work.resolve(); app = work/'Unisacc.app'
     entry = app/'Contents/MacOS/unisacc'; resource = app/'Contents/Resources/unisacc.com'
     recpath = work/'qualification.json'
@@ -49,10 +50,13 @@ def main():
         (app/'Contents/MacOS').mkdir(parents=True); resource.parent.mkdir()
         shutil.copyfile(payload, resource); resource.chmod(0o755)
         (resource.parent/'payload.sha256').write_text(ns.sha256+'\n')
+        versions = re.findall(r'#define UNISACC_VERSION "([0-9.]+)"', (ROOT/'src/version.h').read_text())
+        if len(versions) != 1: raise RuntimeError('source version is ambiguous')
+        version = versions[0]
         plist = {'CFBundleName':'Unisacc','CFBundleDisplayName':'Unisacc',
                  'CFBundleIdentifier':'com.partnernetsoftware.unisacc',
                  'CFBundleExecutable':'unisacc','CFBundlePackageType':'APPL',
-                 'CFBundleShortVersionString':'0.0.0','CFBundleVersion':'0',
+                 'CFBundleShortVersionString':version,'CFBundleVersion':version,
                  'LSMinimumSystemVersion':'11.0',
                  'LSApplicationCategoryType':'public.app-category.developer-tools'}
         (app/'Contents/Info.plist').write_bytes(plistlib.dumps(plist))
@@ -66,6 +70,7 @@ def main():
              'source_sha':run(['git','-C',ROOT,'rev-parse','HEAD'])['stdout'].strip(),
              'payload_source':str(payload),'payload_sha256':ns.sha256,
              'launcher_before_sha256':sha(entry),'launcher_source_sha256':sha(ROOT/'release/macos-launcher.c'),
+             'builder_source_sha256':sha(ROOT/'release/macosbundle.py'),
              'build':steps,'notarization':'pending: no submission','staple':'pending',
              'inner_ape_apple_signature':False,'scope':'CLI bundle adapter; private qualification only'}
     else:
@@ -75,7 +80,7 @@ def main():
         if ns.phase == 'sign':
             steps=[]
             for target in [entry, app]:
-                steps.append(run(['/usr/bin/codesign','--force','--options','runtime','--timestamp','--sign',ns.identity,target]))
+                steps.append(run(['/usr/bin/codesign','--force','--options','runtime','--timestamp','--sign',ns.identity]+(['--keychain',ns.keychain] if ns.keychain else [])+[target]))
                 steps.append(run(['/usr/bin/codesign','--verify','--strict','--verbose=2',target]))
             rec['identity']=ns.identity; rec['sign']=steps
             rec['launcher_after_sha256']=sha(entry)
@@ -93,7 +98,7 @@ def main():
             dmgroot.mkdir(); shutil.copytree(app,dmgroot/'Unisacc.app')
             rec['dmg_signature_kind']='ad-hoc rehearsal' if ns.identity=='-' else 'Developer ID requested'
             rec['dmg']=[run(['/usr/bin/hdiutil','create','-volname','Unisacc','-srcfolder',dmgroot,'-ov','-format','UDZO',dmg]),
-                        run(['/usr/bin/codesign','--force','--timestamp','--sign',ns.identity,dmg]),
+                        run(['/usr/bin/codesign','--force','--timestamp','--sign',ns.identity]+(['--keychain',ns.keychain] if ns.keychain else [])+[dmg]),
                         run(['/usr/bin/codesign','--verify','--strict','--verbose=2',dmg]),
                         run(['/usr/bin/hdiutil','verify',dmg])]
             rec['dmg_sha256']=sha(dmg)
@@ -112,7 +117,9 @@ def main():
             rec['gatekeeper_app']=run(['/usr/sbin/spctl','-a','-t','exec','-vv',app],okay=False)
             dmg=work/'unisacc-private-macos-universal.dmg'
             rec['gatekeeper_dmg']=run(['/usr/sbin/spctl','-a','-t','open','--context','context:primary-signature','-vv',dmg],okay=False)
-            rec['trust']='pending: notarization and stapling not performed; spctl result is only recorded'
+            rec['gatekeeper_accepted'] = all(rec[k]['returncode']==0 for k in ['gatekeeper_app','gatekeeper_dmg'])
+            rec['trust'] = ('Gatekeeper app/DMG accepted; notarization/staple require separate receipts'
+                            if rec['gatekeeper_accepted'] else 'Gatekeeper rejection recorded')
     if sha(resource)!=rec['payload_sha256']: raise RuntimeError('signing changed the inner APE')
     recpath.write_text(json.dumps(rec,ensure_ascii=False,indent=2)+'\n')
     print(json.dumps({'phase':ns.phase,'receipt':str(recpath),'payload_sha256':rec['payload_sha256'],
