@@ -84,7 +84,7 @@ issuer 为 `https://token.actions.githubusercontent.com`，audience 为
 
 已读回核验profile级Signer授权、联邦配置、主人审核与main-only分支约束，
 并设置身份验证标志；依据为 [PRD微软身份接入记录](../prd.md)。
-正式OIDC登录、企业服务签名与Windows信任尚未验证，policy仍为off。
+正式OIDC登录、企业服务签名与Windows信任尚未验证，policy已设required，实际服务调用仍等待最终封存。
 以下配置名称保留供资格核对；检查时只列名称，不输出值：
 
 | 类型 | 名称 |
