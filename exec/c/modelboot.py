@@ -25,32 +25,11 @@ def call(args, env=None, okay=True):
     return p
 
 def package_check(data):
-    # Check existing P2 framing and that every model is N, not table bytecode.
-    at=0
-    def line():
-        nonlocal at
-        end=data.index(b'\n',at);fields=data[at:end].split();at=end+1;return fields
-    def take(n):
-        nonlocal at
-        require(n>=0 and at+n<=len(data),'package extent');value=data[at:at+n];at+=n;return value
-    head=line();require(len(head)==5 and head[:2]==[b'P',b'2'],'expected resource-bearing P2 package')
-    nm,ns,nr=map(int,head[2:]);require(nm>0 and ns>0 and nr>0,'empty package')
-    routes={};seen=set()
-    for _ in range(ns):
-        row=line();require(len(row)==6 and row[0]==b'D','bad stage directory')
-        route,stage,inp,out,index=row[1:];require(0<=int(index)<nm,'model index')
-        require((route,stage) not in seen,'duplicate stage');seen.add((route,stage))
-        if route in routes:require(routes[route]==inp,'format edge mismatch')
-        routes[route]=out
-    for _ in range(nm):
-        row=line();require(len(row)==2 and row[0]==b'M','missing network body')
-        model=take(int(row[1]));require(model.startswith(b'N ') and model.endswith(b'\n'),'non-network body')
-    resources={}
-    for _ in range(nr):
-        row=line();require(len(row)==3 and row[0]==b'F','missing resource')
-        key=take(int(row[1]));value=take(int(row[2]));require(key and key not in resources,'duplicate/empty resource')
-        resources[key]=value
-    require(at==len(data),'trailing package data')
+    from packageformat import read_package
+    parsed=read_package(data)
+    nm,ns,nr=len(parsed['models']),len(parsed['rows']),len(parsed['resources'])
+    require(nm>0 and ns>0 and nr>0,'empty package')
+    routes={row[1] for row in parsed['rows']};resources=parsed['resources']
     for suffix in ['image/O0','image/O2','run/O0','run/O2','memory']:
         require(('osx/arm64/'+suffix).encode() in routes,'missing bootstrap/probe route')
     kernel=resources.get(b'\0kernel/arm64',b'')

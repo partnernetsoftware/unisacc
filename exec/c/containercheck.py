@@ -23,29 +23,13 @@ assert raw[-16:-8]==b'UNIPKG1\n' and int.from_bytes(raw[-8:],'little')==len(payl
 assert raw[-16-len(payload):-16]==payload and raw.count(payload)==1
 # Decode the package directory and raw spans, proving that neither models nor
 # per-ISA cores were accidentally repeated while constructing six routes.
-pos=0
-def line():
-    global pos
-    end=payload.index(b'\n',pos);v=payload[pos:end].split();pos=end+1;return v
-head=line();assert head[:2]==[b'P',b'2'];nm,ns,nr=map(int,head[2:])
+from packageformat import read_package
+parsed=read_package(payload)
+head=parsed['version'];directory=parsed['rows'];models=parsed['models'];resources=parsed['resources']
+nm,ns,nr=len(models),len(directory),len(resources)
 assert nm>0 and ns>0 and nr>=2
-routes=set();directory=[]
-for _ in range(ns):
-    row=line();assert len(row)==6 and row[0]==b'D'
-    assert 0<=int(row[5])<nm
-    routes.add(row[1]);directory.append(row)
-models=[]
-for _ in range(nm):
-    tag,n=line();n=int(n);assert tag==b'M' and n>0 and pos+n<=len(payload)
-    models.append(payload[pos:pos+n]);pos+=n
-assert len(set(models))==len(models)
-resources={}
-for _ in range(nr):
-    tag,n,length=line();n=int(n);length=int(length);assert tag==b'F'
-    assert n>0 and length>=0 and pos+n+length<=len(payload)
-    key=payload[pos:pos+n];assert key not in resources
-    resources[key]=payload[pos+n:pos+n+length];pos+=n+length
-assert pos==len(payload)
+routes={row[1] for row in directory}
+assert len(set(models))==nm
 assert {int(row[5]) for row in directory}==set(range(nm)), 'unreferenced model'
 for isa,arch in enumerate(('arm64','x86_64'),1):
     core=resources[b'\0kernel/'+arch.encode()]

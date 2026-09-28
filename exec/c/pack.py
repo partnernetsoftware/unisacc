@@ -6,6 +6,8 @@ Model paths are relative to their manifest. Equal network bytes are stored once.
 import argparse
 import pathlib
 import re
+import zlib, hashlib, os, tempfile, fcntl
+from networkformat import encode as binary_encode, decode as binary_decode, inflate
 from tbl import OPS
 
 NAME = re.compile(r'[A-Za-z0-9_./-]+\Z')
@@ -93,7 +95,39 @@ def compact_q(data):
     return b''.join(lines[:start] + wires + lines[start+nq:])
 
 
-def build(manifests, mounts=()):
+def compressed_model(text, cache=True):
+    raw = binary_encode(text)
+    if [line.split() for line in binary_decode(raw).splitlines()] != [line.split() for line in text.splitlines()]:
+        raise ValueError('binary network round trip differs')
+    checksum = zlib.crc32(raw)
+    def construct():
+        c = zlib.compressobj(9, zlib.DEFLATED, -15)
+        return c.compress(raw) + c.flush()
+    if not cache:
+        return construct(), len(raw), checksum
+    key = hashlib.sha256(b'P3/raw-deflate9/UNINETB1/' + zlib.ZLIB_RUNTIME_VERSION.encode() + raw).hexdigest()
+    base = pathlib.Path(os.environ.get('UNISACC_MODEL_CACHE', tempfile.gettempdir()+'/unisacc-model-cache'))
+    base.mkdir(parents=True, exist_ok=True)
+    target = base/('codec-'+key)
+    with (base/('codec-'+key+'.lock')).open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            blob = target.read_bytes()
+            if inflate(blob,len(raw),checksum) != raw:
+                raise ValueError('cached content differs')
+        except (FileNotFoundError,ValueError,zlib.error):
+            blob = construct()
+            fd, name = tempfile.mkstemp(prefix='codec-', dir=base)
+            try:
+                with os.fdopen(fd,'wb') as f: f.write(blob)
+                os.replace(name,target)
+            finally:
+                try: pathlib.Path(name).unlink()
+                except FileNotFoundError: pass
+    return blob, len(raw), checksum
+
+
+def build(manifests, mounts=(), compressed=False, cache=True):
     stages, models, index, seen, last = [], [], {}, set(), {}
     for manifest in map(pathlib.Path, manifests):
         for line, text in enumerate(manifest.read_text().splitlines(), 1):
@@ -132,11 +166,17 @@ def build(manifests, mounts=()):
             if key in resources and resources[key] != data:
                 raise ValueError(f'conflicting resource {key!r}')
             resources[key] = data
-    head = (f'P 2 {len(models)} {len(stages)} {len(resources)}\n' if resources
-            else f'P 1 {len(models)} {len(stages)}\n')
+    head = (f'P 3 {len(models)} {len(stages)} {len(resources)}\n' if compressed else
+            (f'P 2 {len(models)} {len(stages)} {len(resources)}\n' if resources
+             else f'P 1 {len(models)} {len(stages)}\n'))
     head += ''.join('D ' + ' '.join(map(str, row)) + '\n' for row in stages)
     models = [compact_q(model) for model in models]
-    result = head.encode('ascii') + b''.join(f'M {len(b)}\n'.encode() + b for b in models)
+    if compressed:
+        bodies = [compressed_model(b, cache) for b in models]
+        wire = b''.join(f'M {len(b)} {n} 1 {crc}\n'.encode() + b for b,n,crc in bodies)
+    else:
+        wire = b''.join(f'M {len(b)}\n'.encode() + b for b in models)
+    result = head.encode('ascii') + wire
     result += b''.join(f'F {len(k)} {len(v)}\n'.encode() + k + v for k, v in resources.items())
     if len(result) >= 2**31:
         raise ValueError('package exceeds runtime byte extent')
@@ -147,10 +187,12 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('-o', '--output', required=True, type=pathlib.Path)
     ap.add_argument('--mount', nargs=2, action='append', default=[], metavar=('PREFIX_HEX', 'DIRECTORY'))
+    ap.add_argument('--compressed', action='store_true', help='P3 binary networks with raw DEFLATE/CRC')
+    ap.add_argument('--no-codec-cache', action='store_true')
     ap.add_argument('manifests', nargs='+', type=pathlib.Path)
     args = ap.parse_args()
     try:
-        data = build(args.manifests, args.mount)
+        data = build(args.manifests, args.mount, args.compressed, not args.no_codec_cache)
         args.output.write_bytes(data)
     except (OSError, ValueError) as exc:
         ap.exit(1, f'pack: {exc}\n')

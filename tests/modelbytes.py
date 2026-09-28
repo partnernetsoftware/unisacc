@@ -11,6 +11,10 @@ import gzip
 import re
 import struct
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"exec/c"))
+from packageformat import read_package
+from networkformat import encode
 
 ROOT = Path(__file__).resolve().parents[1]
 BEGIN = "<!-- model-bytes:begin -->"
@@ -41,7 +45,8 @@ def capture(path, source):
         nonlocal pos
         assert 0<=n<=len(pkg)-pos
         b=pkg[pos:pos+n];pos+=n;return b
-    h=line();fields=h.split();assert fields[:2]==[b'P',b'2'] and len(fields)==5
+    h=line();fields=h.split();assert fields[:2] in ([b'P',b'2'],[b'P',b'3']) and len(fields)==5
+    version=int(fields[1]);decoded=read_package(pkg)
     nm,nd,nr=map(int,fields[2:]);assert min(nm,nd,nr)>0
     parts={'package header':len(h),'directory':0,'model bodies':0,'model record headers':0,
            'resource record headers':0,'resource keys':0,'C header bodies':0,'kernel bodies':0}
@@ -52,13 +57,15 @@ def capture(path, source):
         refs[i]+=1;kinds[i].add(f[2].decode());routes.add(f[1].decode())
     models=[]; tags=collections.Counter()
     for i in range(nm):
-        b=line();parts['model record headers']+=len(b);f=b.split();assert len(f)==2 and f[0]==b'M'
+        b=line();parts['model record headers']+=len(b);f=b.split();assert len(f)==(5 if version==3 else 2) and f[0]==b'M'
         data=body(int(f[1]));parts['model bodies']+=len(data)
-        assert data.endswith(b'\n')
-        for record in data.splitlines(keepends=True):
-            tag=record[:1].decode();assert tag in ('N','S','Q','C','H');tags[tag]+=len(record)
+        text=decoded['models'][i];rawmodel=decoded['wires'][i]['raw']
+        for record in text.splitlines(keepends=True):
+            tag=record[:1].decode();assert tag in ('N','S','Q','C','H')
+            tags[tag]+=len(encode(record))-8 if version==3 else len(record)
+        if version==3:tags['N']+=8
         models.append({'index':i,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),
-                       'refs':refs[i],'stages':sorted(kinds[i])})
+                       'refs':refs[i],'stages':sorted(kinds[i]),'raw_bytes':len(rawmodel)})
     resources=[]
     for _ in range(nr):
         b=line();parts['resource record headers']+=len(b);f=b.split();assert len(f)==3 and f[0]==b'F'
@@ -90,7 +97,8 @@ def capture(path, source):
        'package_offset':off,'package_bytes':size,'footer_bytes':16,'package_parts':parts,
        'models':models,'unique_models':nm,'stage_rows':nd,'repeated_references':nd-nm,
        'logical_model_bytes':sum(m['bytes']*m['refs'] for m in models),'resources':resources,'resource_count':nr,
-       'network_record_bytes':dict(tags),'routes':sorted(routes),'unix_slices':slices,
+       'network_record_bytes':dict(tags),'network_record_encoding':'binary before compression' if version==3 else 'text',
+       'uncompressed_model_bytes':sum(len(m['raw']) for m in decoded['wires']),'routes':sorted(routes),'unix_slices':slices,
        'pe':{'bytes':pebytes,'sections':secs,'signature_offset':peoff,
              'header_bytes':struct.unpack_from('<I',raw,peoff+24+60)[0]},
        'alignment_bytes':off-pebytes-sum(q['bytes'] for q in slices)}
@@ -104,7 +112,7 @@ def render(evidence):
     assert sum(parts.values()) == a["package_bytes"]
     assert a["package_offset"] + a["package_bytes"] + a["footer_bytes"] == total
     assert sum(m["bytes"] for m in a["models"]) == parts["model bodies"]
-    assert sum(a["network_record_bytes"].values()) == parts["model bodies"]
+    assert sum(a["network_record_bytes"].values()) == a.get("uncompressed_model_bytes",parts["model bodies"])
     assert len(a["models"]) == a["unique_models"]
     assert len({m["sha256"] for m in a["models"]}) == len(a["models"])
     assert sum(m["refs"] for m in a["models"]) == a["stage_rows"]
@@ -131,7 +139,7 @@ def render(evidence):
     for stage, meaning in FUNCTIONS.items():
         n, size, refs = grouped[stage]
         lines.append(f"| `{stage}`：{meaning} | {n} | {size:,} | {size / total * 100:.2f}% | {refs} |")
-    lines += ["", "下表是网络体的内部拆分，与上表重叠，不能再相加：", "",
+    lines += ["", ("下表是二进制网络的压缩前拆分；与物理压缩体不可相加，百分比为相对整包大小而非物理占比：" if a.get("network_record_encoding")=="binary before compression" else "下表是网络体的内部拆分，与上表重叠，不能再相加："), "",
               "| 网络记录 / 含义 | 字节 | 占整个 .com |", "|---|---:|---:|"]
     meanings = {"H": "阈值/选择网络参数记录", "Q": "动作序列声明（包含编译模板动作）",
                 "S": "字节字符串声明", "N": "网络头记录", "C": "动作序列共享前缀声明"}

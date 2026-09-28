@@ -14,15 +14,8 @@ def require(argv):
     return p.stdout
 
 def models(package):
-    lines = package.split(b'\n', 1); h = lines[0].split(); pos = len(lines[0])+1
-    assert h[:2] in ([b'P', b'1'], [b'P', b'2'])
-    nm, nd = map(int, h[2:4])
-    for _ in range(nd): pos = package.index(b'\n',pos)+1
-    for _ in range(nm):
-        e = package.index(b'\n',pos); mh = package[pos:e].split()
-        assert mh[0] == b'M'; n = int(mh[1]); pos = e+1
-        b = package[pos:pos+n]; assert len(b) == n; pos += n
-        yield b
+    from packageformat import read_package
+    yield from read_package(package)["models"]
 
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--package', type=pathlib.Path)

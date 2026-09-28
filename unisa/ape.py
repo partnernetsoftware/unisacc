@@ -130,7 +130,7 @@ def build(compile_target, out, payload=b""):
         blob += img
         blob += b"\x00" * ((-len(img)) % 16)
     if payload:
-        if not payload.startswith((b"P 1 ", b"P 2 ")):
+        if not payload.startswith((b"P 1 ", b"P 2 ", b"P 3 ")):
             raise ValueError("embedded payload must be a model package")
         blob += payload
         blob += b"UNIPKG1\n" + struct.pack("<Q", len(payload))

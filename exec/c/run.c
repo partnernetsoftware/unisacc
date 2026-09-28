@@ -32,6 +32,7 @@
 #endif
 
 static void die(const char *m) { fprintf(stderr, "run: %s\n", m); exit(2); }
+#include "codec.h"
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
 
 /* File operations are OS adaptation, not compiler actions. The native
@@ -85,14 +86,24 @@ static unsigned char *readfile(const char *path, int *len, int optional) {
 
 /* Decimal model reader: no scanf dependency, and 64-bit arguments are
    checked before multiply/add (including the INT64_MIN magnitude). */
-static unsigned char *LB; static int LP, LN;
-static void lskip(void) { while (LP < LN && LB[LP] <= 32) LP++; }
+static unsigned char *LB; static int LP, LN, LBIN;
+static void lskip(void) { if(!LBIN)while (LP < LN && LB[LP] <= 32) LP++; }
 static int lchar(void) {
+    if(LBIN){if(LP==LN)die("truncated binary model tag");return LB[LP++];}
     lskip(); if (LP == LN) die("truncated model");
     int c = LB[LP++]; if (LP < LN && LB[LP] > 32) die("bad model tag"); return c;
 }
 static void ltag(int c) { if (lchar() != c) die("bad model tag"); }
 static I lnum(void) {
+    if(LBIN){uint64_t v=0;int shift=0;
+        for(int k=0;k<10;k++){
+            if(LP==LN)die("truncated binary model number");int c=LB[LP++];
+            if(k==9 && c>1)die("binary model number overflow");
+            v|=(uint64_t)(c&127)<<shift;
+            if(c<128){if(k && !c)die("noncanonical binary model number");return (I)((v>>1)^(0-(v&1)));}
+            shift+=7;
+        }die("long binary model number");
+    }
     lskip(); int neg = 0, count = 0;
     if (LP < LN && LB[LP] == '-') { neg = 1; LP++; }
     uint64_t v = 0, lim = neg ? 9223372036854775808ull : 9223372036854775807ull;
@@ -117,14 +128,21 @@ static int *SMODE; static int **ROWK, **ROWN, **ROWQ; static int *ROWC;
 static int hexv(int c) { if (c >= '0' && c <= '9') return c-'0'; if (c >= 'a' && c <= 'f') return c-'a'+10; die("bad hex string"); return 0; }
 
 static void loadbytes(unsigned char *data, int len) {
-    LB = data; LN = len; LP = 0;
+    LB = data; LN = len; LBIN=len>=8 && !memcmp(data,"UNINETB1",8); LP=LBIN?8:0;
     int kind = lchar(); NS=lint(); NQ=lint(); NRG=lint(); NSTR=lint(); START=lint();
     if ((kind != 'T' && kind != 'N') || NS <= 0 || NQ <= 0 || NRG < 0 || NSTR < 0 || START < 0 || START >= NS) die("bad header");
+    if (NS > len || NQ > len || NSTR > len || NSTR == INT32_MAX) die("bad model count extent");
     ISNET = kind == 'N'; TOPMAX = NS - 1;
     if (ISNET) { TOPMAX=lint(); if (TOPMAX < NS-1 || TOPMAX == INT32_MAX) die("bad network domain"); }
     STR = xrealloc(0, sizeof *STR * (NSTR + 1)); STRL = xrealloc(0, sizeof *STRL * (NSTR + 1));
     for (int k = 0; k < NSTR; k++) {
-        ltag('S'); lskip(); int begin = LP;
+        ltag('S');
+        if (LBIN) {
+            int n = lint(); if (n < 0 || n > LN-LP || n == INT32_MAX) die("bad binary model string");
+            STR[k]=xrealloc(0,n+1); STRL[k]=n; memcpy(STR[k],LB+LP,n);
+            STR[k][n]=0; LP+=n; continue;
+        }
+        lskip(); int begin = LP;
         while (LP < LN && LB[LP] > 32) LP++;
         int size = LP-begin; unsigned char *buf = LB+begin;
         int n = size == 1 && buf[0] == '-' ? 0 : size/2;
@@ -230,7 +248,7 @@ static void load(const char *path) {
    are checked before a route is executed. Model bodies use the same loader. */
 typedef struct { char *route; char *name; char *in; char *out; int model; } Stage;
 static unsigned char *PFILE, *PB; static int PN, PM, PS;
-static int *POFF, *PLEN; static Stage *STAGES;
+static int *POFF, *PLEN, *PRAW; static long *PCRC; static int PVER; static Stage *STAGES;
 typedef struct { int name, n, data, len; } Resource;
 static Resource *RES; static int NR;
 /* Borrowed process inputs override carried resources by exact byte key.
@@ -259,14 +277,16 @@ static void package(const char *path) {
         if (!len) die("empty embedded package");
         PB += PN-16-(int)len; PN = (int)len;
     }
-    LB = PB; LN = PN; LP = 0;
+    LBIN = 0; LB = PB; LN = PN; LP = 0;
     ltag('P'); int version = lint();
-    if (version != 1 && version != 2) die("unknown package version");
-    PM = lint(); PS = lint(); NR = version == 2 ? lint() : 0;
+    if (version != 1 && version != 2 && version != 3) die("unknown package version");
+    PVER = version; if (version == 3) crc_init();
+    PM = lint(); PS = lint(); NR = version >= 2 ? lint() : 0;
     if (NR < 0 || NR > PN/5) die("bad resource count");
     RES = xrealloc(0, sizeof(Resource)*NR);
     if (PM <= 0 || PS <= 0 || PM > PN/8 || PS > PN/10) die("bad package count");
     POFF = xrealloc(0, sizeof(int)*PM); PLEN = xrealloc(0, sizeof(int)*PM);
+    PRAW = xrealloc(0, sizeof(int)*PM); PCRC = xrealloc(0, sizeof(long)*PM);
     STAGES = xrealloc(0, sizeof(Stage)*PS);
     for (int i = 0; i < PS; i++) {
         ltag('D'); Stage *s = &STAGES[i];
@@ -280,9 +300,13 @@ static void package(const char *path) {
         if (previous >= 0 && strcmp(STAGES[previous].out, s->in)) die("package format mismatch");
     }
     for (int i = 0; i < PM; i++) {
-        ltag('M'); int n = lint();
+        ltag('M'); int n = lint(); PRAW[i]=n; PCRC[i]=0;
+        if (version == 3) {
+            PRAW[i]=lint(); int codec=lint(); PCRC[i]=lnum();
+            if (PRAW[i]<=0 || codec!=1 || PCRC[i]<0 || PCRC[i]>4294967295) die("bad compressed model header");
+        }
         if (LP >= LN || LB[LP++] != 10 || n <= 0 || n > LN-LP) die("bad package model extent");
-        if (LB[LP] != 'N') die("package requires networks");
+        if (version < 3 && LB[LP] != 'N') die("package requires networks");
         POFF[i] = LP; PLEN[i] = n; LP += n;
     }
     for (int i = 0; i < NR; i++) {
@@ -299,7 +323,7 @@ static void unpackage(void) {
     for (int i = 0; i < PS; i++) {
         free(STAGES[i].route); free(STAGES[i].name); free(STAGES[i].in); free(STAGES[i].out);
     }
-    free(STAGES); free(POFF); free(PLEN); free(RES); RES = 0; NR = 0; free(PFILE);
+    free(STAGES); free(POFF); free(PLEN); free(PRAW); free(PCRC); free(RES); RES = 0; NR = 0; free(PFILE);
 }
 
 /* Model lifetime is one stage. No model-specific state survives unload. */
@@ -430,7 +454,16 @@ static int runroute(const char *route, Buf *in, const char *src) {
     int count = 0;
     for (int i = 0; i < PS; i++) {
         if (strcmp(STAGES[i].route, route)) continue;
-        int m = STAGES[i].model; loadbytes(PB+POFF[m], PLEN[m]);
+        int m = STAGES[i].model;
+        unsigned char *bytes = PB+POFF[m], *owned = 0; int len = PLEN[m];
+        if (PVER == 3) {
+            owned = xrealloc(0, PRAW[m]);
+            if (unisa_inflate(owned, PRAW[m], bytes, len)) die("invalid compressed model");
+            if (crc((char *)owned, PRAW[m]) != PCRC[m]) die("compressed model CRC");
+            if (PRAW[m] < 9 || memcmp(owned,"UNINETB1N",9)) die("package requires binary networks");
+            bytes = owned; len = PRAW[m];
+        }
+        loadbytes(bytes, len); free(owned); LB = 0;
         Buf out = {0}; int rc = execute(in->b, in->n, src, &out);
         unload(); free(in->b); in->b = out.b; in->n = out.n;
         if (rc) return rc;

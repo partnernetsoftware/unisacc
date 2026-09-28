@@ -1,8 +1,8 @@
-# Model package v1 / resource extension v2
+# Model packages P1 / P2 / compressed P3
 
 This is a construction/development artifact for the generic runtime, also
-used by the embedded development container below. It has not replaced the
-shipped compiler CLI.
+used by the shipped model compiler. P1/P2 remain readable. P3 is an explicit
+size-candidate option until its product gates complete.
 
 ## Construction
 
@@ -277,3 +277,44 @@ linkable from the package/route loader. [CORE.md](CORE.md) records its exact
 boundary, ownership, two ISA object sizes and external dependencies. Package
 bytes, network/action formats and route behavior are unchanged. The default
 build includes the C core; this is not yet the assembly or product switch.
+
+## P3: binary networks with raw DEFLATE
+
+`pack.py --compressed` and `compilerpack.py --compressed` select P3.
+`PACK_COMPRESSED=1 buildcompiler.sh OUT pack` selects it for an APE candidate;
+the default is still P1/P2. Directory and uncompressed resources are unchanged.
+
+```
+P 3 MODEL_COUNT STAGE_COUNT RESOURCE_COUNT\n
+D ...\n
+M STORED_LENGTH RAW_LENGTH 1 CRC32\n
+<raw-DEFLATE bytes>
+F ...\n
+```
+
+Codec 1 is raw DEFLATE. RAW_LENGTH and CRC32 describe the binary bytes before
+compression. Every stage inflates only its selected network, checks exact input
+and output extents and CRC, loads its arrays, then frees the temporary buffer.
+Unknown versions/codecs reject. CRC detects damage; it is not authentication.
+Resources are not compressed or newly authenticated by this format.
+
+Binary model magic is `UNINETB1`. N/S/Q/C/H tags and record order retain the
+network schema. Integers use signed 64-bit zigzag then canonical unsigned
+LEB128 (at most 10 bytes); strings use an integer byte length and literal bytes.
+Record counts determine boundaries; there are no whitespace delimiters or
+terminal newline. Q-prefix sharing and declared return sets are unchanged.
+The offline audit reader reconstructs canonical text; insignificant trailing
+spaces in hand-written text are not preserved. Actual 32 release networks
+round-trip to their original text exactly. This is storage encoding, not a new
+inference or compiler decision mechanism.
+
+`exec-codec` checks the byte codec in batches; `exec-package` checks P1/P2/P3
+execution, corruption rejection and poisoned compression-cache recovery.
+`PACKAGE_SANITIZE=1` adds the host sanitizer. Repeated packing uses the existing
+cache root with content-keyed, locked, atomically replaced compressed bodies;
+cache hits are decoded and compared against the intended binary bytes.
+`compilerpack --no-model-cache` also bypasses this compression cache.
+
+The decoder is an explicitly altered Mark Adler puff 2.3 with its zlib license
+retained in `codec.h`, plus the measured prefix lookup and slice-by-4 CRC. It
+returns bounded errors and contains no language or stage-specific predicates.

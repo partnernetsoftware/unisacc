@@ -101,7 +101,7 @@ def retain_models(directory, rows):
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
 
-def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None):
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=False):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -204,7 +204,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None):
                     if cols[0]==target+'/warn/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
-        payload=build([manifest],mounts)
+        payload=build([manifest],mounts,compressed=compressed,cache=MODEL_CACHE)
         if audit_dir is not None: retain_models(audit_dir, rows)
         return payload
 
@@ -215,11 +215,12 @@ if __name__=='__main__':
     ap.add_argument('--include',required=True,type=Path)
     ap.add_argument('--kernels',type=Path,help='explicit directory containing both ISA kernel blobs')
     ap.add_argument('--audit-dir',type=Path,help='retain exact table/network pairs for offline --check-net')
+    ap.add_argument('--compressed',action='store_true',help='P3 binary+DEFLATE models')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
     MODEL_CACHE=not a.no_model_cache
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')
