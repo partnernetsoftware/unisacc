@@ -5265,3 +5265,5 @@ FFI与实采父验收：narfix候选5,388,386 B；17/17系统ABI探针在模型-
 冻结 759240b 门禁实际177项完成、175通过、2失败：multi/com-multi 残留 bound120/200，被新native看门狗拒绝，产品调用未发生。只在该轮终止后修测试入口：所有编译/执行20秒上限，输出比较同时要求被测命令rc0，不能让管道tail隐藏失败；ua_ready的冷参考构建也限30秒。旧红灯记录保留，不改写为绿。文档同步当前8486键、20190键—头判定，明确历史8484/20184身份。
 
 multi入口修复验收：multi、com-multi、docs 三项双槽4秒全rc0；私有替身按输入打印正确8 309 11或5，再exit2，套件仍exit1，三条-run都报告exit2，编译亦失败，不误判绿。候选.com仍a4de871a…/5388386 B。完整冻结759240b的175绿+2红不回写；新测试树需新冻结队列验收。Windows/Linux self日志明确当前仅镜像相同、宿主未运行bootstrap，下一轮平台烟测单列。
+
+候选平台烟测（a4de871a… 同一.com）：已运行Lima default Linux/aarch64看门狗两实现（退出0/2/142、信号、脱离子进程清理）通过；fib模型-run同客机cc（显式-include stdio.h）；模型编出的经典unisacc.c参考N1=N2=N3，SHA e831354f…，不称完整打包.com自重打包。Windows11 arm64 UTM：经ZIP传输后核完整SHA，候选-run、生成arm64原生和x86_64仿真fib均55、rc0；只属于烟测，非Windows全套。VM由本次启动且已停止，原本运行的Lima不动。Linux x86_64/Windows x86_64实机未跑。证据research/candidate-platform-20260928.json。
