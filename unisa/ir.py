@@ -91,7 +91,7 @@ class Emitter:
 
     def new_label(self, p="L"):
         self._n += 1
-        return "%s%d" % (p, self._n)
+        return "__unisacc_%s%d" % (p, self._n)
 
     def label(self, name):
         self.t.label(name)

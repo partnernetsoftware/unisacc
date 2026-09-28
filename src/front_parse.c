@@ -2815,10 +2815,10 @@ int land(void) {
     while (cur() == vfind(TOKV, NTOKV, "&&", 2)) {
         loadval(); ftruthy(); adv();
         end = newlab();
-        elab("  @ctrl.jumpz r0, L", end); ec(10);
+        elab("  @ctrl.jumpz r0, __unisacc_L", end); ec(10);
         binary(0); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
-        elab("L", end); es(":\n");
+        elab("__unisacc_L", end); es(":\n");
         setkind(0); cursize = 4; curelem = 4; curptr = 0;   /* an int (6.5.13p3) */
     }
     return 0;
@@ -2830,13 +2830,13 @@ int lor(void) {
     while (cur() == vfind(TOKV, NTOKV, "||", 2)) {
         loadval(); ftruthy(); adv();
         end = newlab(); rhs = newlab();
-        elab("  @ctrl.jumpz r0, L", rhs); ec(10);
+        elab("  @ctrl.jumpz r0, __unisacc_L", rhs); ec(10);
         es("  @lit.imm r0, 1\n");
-        elab("  @ctrl.jump L", end); ec(10);
-        elab("L", rhs); es(":\n");
+        elab("  @ctrl.jump __unisacc_L", end); ec(10);
+        elab("__unisacc_L", rhs); es(":\n");
         land(); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
-        elab("L", end); es(":\n");
+        elab("__unisacc_L", end); es(":\n");
         setkind(0); cursize = 4; curelem = 4; curptr = 0;   /* an int (6.5.14p3) */
     }
     return 0;
@@ -2850,12 +2850,12 @@ int cond(void) {
     if (cur() != tidx("?", 1)) return 0;
     loadval(); ftruthy(); adv();
     els = newlab(); end = newlab();
-    elab("  @ctrl.jumpz r0, L", els); ec(10);
+    elab("  @ctrl.jumpz r0, __unisacc_L", els); ec(10);
     {   int save; int nsave; int k1; int k2; int a1; int cf;
         save = tp; nsave = nout;
         expr(); loadval(); k1 = fkind(); a1 = tyax(); p1 = curptr; e1 = curelem;
-        elab("  @ctrl.jump L", end); ec(10);
-        elab("L", els); es(":\n");
+        elab("  @ctrl.jump __unisacc_L", end); ec(10);
+        elab("__unisacc_L", els); es(":\n");
         need(tidx(":", 1), ":");
         cond(); loadval(); k2 = fkind();
         ci = 0 - 1;
@@ -2869,14 +2869,14 @@ int cond(void) {
             cf = tyis(tyask(a1, "+", 1, tyax()), "f64", 3) ? 8 : 4;
             tp = save; nout = nsave;
             expr(); loadval(); fconv(fkind(), cf);
-            elab("  @ctrl.jump L", end); ec(10);
-            elab("L", els); es(":\n");
+            elab("  @ctrl.jump __unisacc_L", end); ec(10);
+            elab("__unisacc_L", els); es(":\n");
             need(tidx(":", 1), ":");
             cond(); loadval(); fconv(fkind(), cf);
             setkind(cf);
         }
     }
-    elab("L", end); es(":\n");
+    elab("__unisacc_L", end); es(":\n");
     if (ci >= 0) {
         /* Both integer arms meet in the type table's arithmetic row.
            Convert the selected value once, after the branch merge. */
@@ -4643,32 +4643,32 @@ int stmt_(void) {
         adv(); need(vfind(TOKV, NTOKV, "(", 1), "(");
         expr(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         a = newlab();
-        elab("  @ctrl.jumpz r0, L", a); ec(10);
+        elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
         stmt();
         c = laststmt;                            /* the then-branch's answer */
         if (cur() == vfind(TOKV, NTOKV, "else", 4)) {
             b = newlab();
-            elab("  @ctrl.jump L", b); ec(10);
-            elab("L", a); es(":\n");
+            elab("  @ctrl.jump __unisacc_L", b); ec(10);
+            elab("__unisacc_L", a); es(":\n");
             adv(); stmt();
-            elab("L", b); es(":\n");
+            elab("__unisacc_L", b); es(":\n");
             laststmt = c && laststmt;
-        } else { elab("L", a); es(":\n"); laststmt = 0; }
+        } else { elab("__unisacc_L", a); es(":\n"); laststmt = 0; }
         return 0;
     }
     if (p == P_WHILE) {
         adv();
         top = newlab(); a = newlab();
-        elab("L", top); es(":\n");
+        elab("__unisacc_L", top); es(":\n");
         need(vfind(TOKV, NTOKV, "(", 1), "(");
         expr(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
-        elab("  @ctrl.jumpz r0, L", a); ec(10);
+        elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
         brkstack[nloop] = a; cntstack[nloop] = top;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
-        elab("  @ctrl.jump L", top); ec(10);
-        elab("L", a); es(":\n");
+        elab("  @ctrl.jump __unisacc_L", top); ec(10);
+        elab("__unisacc_L", a); es(":\n");
         return 0;
     }
     if (p == P_FOR) {
@@ -4682,10 +4682,10 @@ int stmt_(void) {
             else { exprc(); need(tidx(";", 1), ";"); }
         }
         top = newlab(); a = newlab(); c = newlab();
-        elab("L", top); es(":\n");
+        elab("__unisacc_L", top); es(":\n");
         if (cur() != tidx(";", 1)) {
             expr(); loadval(); ftruthy();
-            elab("  @ctrl.jumpz r0, L", a); ec(10);
+            elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
         }
         need(tidx(";", 1), ";");
         stept = tp;
@@ -4703,12 +4703,12 @@ int stmt_(void) {
         stmt();
         nloop = nloop - 1;
         aftert = tp;
-        elab("L", c); es(":\n");
+        elab("__unisacc_L", c); es(":\n");
         /* not after an error: the cursor is parked at EOF and stays there */
         if (panic == 0) { if (stept != bodyt - 1) { tp = stept; exprc(); } }
         tp = aftert;
-        elab("  @ctrl.jump L", top); ec(10);
-        elab("L", a); es(":\n");
+        elab("  @ctrl.jump __unisacc_L", top); ec(10);
+        elab("__unisacc_L", a); es(":\n");
         if (vlaslot[bdepth]) {
             es("  @mem.load r7, [r6-"); en(vlaslot[bdepth]); es("]\n");
             vlaslot[bdepth] = 0;
@@ -4731,7 +4731,7 @@ int stmt_(void) {
         eframe(1, 2, slot);
         es("  @mem.store [r1+0], r0\n");
         disp = newlab(); end = newlab();
-        elab("  @ctrl.jump L", disp); ec(10);
+        elab("  @ctrl.jump __unisacc_L", disp); ec(10);
         cbase = nswv; mysw = nsw;
         swdef[mysw] = 0 - 1; swslot[mysw] = slot;
         nsw = nsw + 1;
@@ -4744,21 +4744,21 @@ int stmt_(void) {
         stmt();
         nloop = nloop - 1;
         nsw = nsw - 1;
-        elab("  @ctrl.jump L", end); ec(10);
-        elab("L", disp); es(":\n");
+        elab("  @ctrl.jump __unisacc_L", end); ec(10);
+        elab("__unisacc_L", disp); es(":\n");
         k = cbase;
         while (k < nswv) {
             eframe(1, 2, slot);
             es("  @mem.load r0, [r1+0]\n");
             es("  @lit.imm r1, "); en(swval[k]); ec(10);
             es("  @alu.ne r0, r0, r1\n");
-            elab("  @ctrl.jumpz r0, L", swlab[k]); ec(10);
+            elab("  @ctrl.jumpz r0, __unisacc_L", swlab[k]); ec(10);
             k = k + 1;
         }
         nswv = cbase;
-        if (swdef[mysw] >= 0) { elab("  @ctrl.jump L", swdef[mysw]); ec(10); }
-        else { elab("  @ctrl.jump L", end); ec(10); }
-        elab("L", end); es(":\n");
+        if (swdef[mysw] >= 0) { elab("  @ctrl.jump __unisacc_L", swdef[mysw]); ec(10); }
+        else { elab("  @ctrl.jump __unisacc_L", end); ec(10); }
+        elab("__unisacc_L", end); es(":\n");
         return 0;
     }
     if (p == P_CASE) {
@@ -4772,7 +4772,7 @@ int stmt_(void) {
         if (nswv >= 256) { err_tok(tp, "switch case capacity exceeded"); return 0; }
         lab = newlab();
         swval[nswv] = v; swlab[nswv] = lab; nswv = nswv + 1;
-        elab("L", lab); es(":\n");
+        elab("__unisacc_L", lab); es(":\n");
         /* C99 6.8.1: a label prefixes a STATEMENT -- but `case 1: }` is
            common enough in the wild to tolerate. */
         if (cur() != tidx("}", 1)) stmt();
@@ -4783,7 +4783,7 @@ int stmt_(void) {
         adv(); need(tidx(":", 1), ":");
         lab = newlab();
         swdef[nsw - 1] = lab;
-        elab("L", lab); es(":\n");
+        elab("__unisacc_L", lab); es(":\n");
         if (cur() != tidx("}", 1)) stmt();
         return 0;
     }
@@ -4812,7 +4812,7 @@ int stmt_(void) {
             scopy(stsize[retst]);
         }
         need(vfind(TOKV, NTOKV, ";", 1), ";");
-        elab("  @ctrl.jump R", retlab); ec(10);
+        elab("  @ctrl.jump __unisacc_R", retlab); ec(10);
         return 0;
     }
     if (p == P_GOTO) {
@@ -4825,32 +4825,32 @@ int stmt_(void) {
     if (p == P_BREAK) {
         adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
         vlaback(brkdep[nloop - 1]);
-        elab("  @ctrl.jump L", brkstack[nloop - 1]); ec(10);
+        elab("  @ctrl.jump __unisacc_L", brkstack[nloop - 1]); ec(10);
         return 0;
     }
     if (p == P_CONTINUE) {
         adv(); need(vfind(TOKV, NTOKV, ";", 1), ";");
         vlaback(cntdep[nloop - 1]);
-        elab("  @ctrl.jump L", cntstack[nloop - 1]); ec(10);
+        elab("  @ctrl.jump __unisacc_L", cntstack[nloop - 1]); ec(10);
         return 0;
     }
     if (p == P_DO) {
         adv();
         top = newlab(); a = newlab(); c = newlab();
-        elab("L", top); es(":\n");
+        elab("__unisacc_L", top); es(":\n");
         brkstack[nloop] = a; cntstack[nloop] = c;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
         stmt();
         nloop = nloop - 1;
-        elab("L", c); es(":\n");
+        elab("__unisacc_L", c); es(":\n");
         need(tidx("while", 5), "while");
         need(tidx("(", 1), "(");
         expr(); loadval(); ftruthy();
         need(tidx(")", 1), ")");
         need(tidx(";", 1), ";");
-        elab("  @ctrl.jumpz r0, L", a); ec(10);
-        elab("  @ctrl.jump L", top); ec(10);
-        elab("L", a); es(":\n");
+        elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
+        elab("  @ctrl.jump __unisacc_L", top); ec(10);
+        elab("__unisacc_L", a); es(":\n");
         return 0;
     }
     if (eat(vfind(TOKV, NTOKV, ";", 1))) return 0;
@@ -4988,7 +4988,7 @@ int function(int t, int w) {
             warn_at(tpos[tp - 1], "non-void function does not return a value in all control paths [-Wreturn-type]");
     } } } } }
     if (isname(t, "main", 4)) es("  @lit.imm r0, 0\n");   /* reaching main's } returns 0 (C99 5.1.2.2.3) */
-    elab("R", retlab); es(":\n");
+    elab("__unisacc_R", retlab); es(":\n");
     es("  mov r7, r6\n  @mem.load r6, [r7+0]\n  @call.frame -8\n  @ctrl.ret\n");
     patchnum(fpatch, 6, (framemax + 7) / 8 * 8);
     if (retst >= 0) { es(".bss __rv_"); etok(t); ec(32); en(stsize[retst]); ec(10); }
