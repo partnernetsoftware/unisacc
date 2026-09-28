@@ -2703,3 +2703,15 @@ R10生命周期测量方法决定：独立私有实验原生C进程在同300暖�
 正式native生命周期实现实跑rc0：总专项13.96秒（保留Python四上下文/exit/guest释放）；原生同上下文300暖机+1000次真实compile/run，10次测量RSS范围16KiB，live blocks/bytes及reserved恒定，每次事务分配零。人为每100轮真实保留1MiB的负控制完整执行后rc9、RSS范围11,272,192 B，证明原512KiB检查仍能抓真实保留增长。此前Python进程阶跃失败不撤销，也未证明唯一原因；[正例](research/r10-library-native-lifecycle.json)、[真实增长控制](research/r10-library-native-growth-control.json)与补丁保留。正式static/dynamic构建消费集成也rc0，见[库产物](research/r10-library-artifacts-native.json)。
 
 fa9b452源（正式库builder+原生生命周期checker）重新构造shared/六目标/私有种子与P3/APE均rc0，根实际产物与真实侧车一同替换后freshness通过，仍acbc2c/1,028,542 B。冻结快照双槽五门禁lib-format/lib-artifacts/lib-lifecycle/com-run/com-c99全rc0，17秒；1000测量RSS范围196,608 B、live/reserved恒定，明确原512KiB阈值非零增长形式证明。回执[最终本批候选](research/r10-library-artifact-candidate.json)。旧Python进程RSS失败仍保留；本批不代表整个R10或六平台/签名发布完成。
+
+### R10 数据注入与Windows桥并发决定（2026-09-29）
+
+继续完整R10，下一片补显式借用数据对象。E3保留extern身份和真实类型；未定义的extern不生成虚假BSS；统一地址 helper对这类引用发`.libraryaddr r0, g_NAME, depth,kind,width,uns`，不在宿主解析C或绑定源名字。lower δ优先实际本单元g_NAME定义，否则从USBIND1的kind1找借用地址并核对depth/kind/width/uns、extent和writable再发64位立即地址。最初覆盖整数与普通指针可写对象，数组/聚合/只读及loaded/dynamic数据仍待；此切片不作为完整data/API结案。函数绑定与普通CLI行为保持。USBIND1不改版本；原kind1的extent/writable字段按既有格式解码，decoder可读函数/数据混合记录。
+
+文件域：前端代理仅exec/parse2（extern/global注册、统一addr、libraryimports及其TSV）；lower代理仅exec/modelbindings.py/对应TSV及exec/lower（新地址处理/源码优先）；另一代理只新增Windows两ISA调用桥和专属交叉ABI检查，不接入未实现的Windows宿主库。主代理持有libunisacc API/运行时、通用SHAPE/classic生成物与真实native数据探针。新指令仍是δ生成和解释；通用执行核不添加变量/类型语义。双方先报告接口冲突再改，不扩大文法覆盖。Windows桥以官方ABI为依据，交叉object及有限ABI模拟不称原生Windows库通过；后续LLP64运行时与OS映射另补。
+
+数据ABI审查发现通用CMP/CMPI执行32位I比较，不能直接核对USBIND的64位descriptor/extent；E3与lower分别改为C64U完整字段比较和域限界，增加2^32+预期depth/width/class/unsigned与地址+extent wrap控制。合法旧函数/数据不改，未使用资源的默认路径不变。原生API checker也加入指针深度2^32+1拒绝，不能只用低32位同值宣称类型一致。
+
+数据构造收片：E3私有网络全域1,750,790观察，lower四POSIX各全域相等并通过混合function/data、源定义优先、64位地址及所有截断/高32字段/溢出控制。Windows数据明确拒绝。新增lib-data实际借用变量读写门禁，必须完整候选native O0/O1/O2通过再称闭环。Windows桥新增lib-windows-bridge门禁，依赖开发机clang与llvm-readobj，只验证COFF/展开元数据及独立寄存器恢复，不计原生Windows库通过。经典SHAPE新增.libraryaddr需要按构造路线同步opinfo权重与生成物，不接受旧轴裁判通过。
+
+数据E3固定314保持集在补齐examples的私有快照上由C真实网络对拍实际参考全部equal（8.93秒）；先前Python单批超时无效结果不计通过。Windows桥256模拟项、5恢复破坏控制及两COFF展开元数据通过，仍未原生调用；证据分别见research/r10-data-e3-evidence.json与research/r10-windows-bridge-evidence.json。

@@ -28,7 +28,7 @@ def install(E, arch="x86_64", os_="lnx"):
     reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
     p=P('C.init')
-    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','3','4','8','-8','_start:','write','exit','.hostcall','.hostaddr','.librarycall']))
+    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','3','4','8','-8','_start:','write','exit','.hostcall','.hostaddr','.librarycall','.libraryaddr']))
     ids={w:'idc'+str(i) for i,w in enumerate(words)}
     for w,d in ids.items():
         p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN',d),('SBSAVE','blob'),('STX',d,TXT,'blob'))
@@ -209,5 +209,7 @@ def install(E, arch="x86_64", os_="lnx"):
     install_librarymodule(E, regmap)
     from libraryimports import install as install_libraryimports
     install_libraryimports(E, os_, ids)
+    from librarydata import install as install_librarydata
+    install_librarydata(E, os_, ids)
     install_rules(g, Path(__file__).parent, 'code-shell',
                   sequences={'reject': E.rej('not covered: '+os_+'/'+arch+' lowering')}, section='exit')

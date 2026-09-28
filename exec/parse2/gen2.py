@@ -86,7 +86,10 @@ def addr(p):
     bindings = dict(zip(('global','local','done','static','frame','auto'),
                         (p.fresh(k) for k in ('ga','la','ad','sa','fa','auto'))))
     bindings.update(entry=p.cur, entry_test=p.fresh('b'), GMARK=E.GMARK)
-    global_out = emit(P(bindings['global']), 'gaddr')
+    global_classic = bindings['global'] + '.classic'
+    from librarydata import global_address
+    global_address(E,P,bindings['global'],global_classic,bindings['done'])
+    global_out = emit(P(global_classic), 'gaddr')
     bindings['local_test'] = P(bindings['local']).fresh('b')
     bindings['static_return'] = P(bindings['static']).fresh('r')
     bindings['frame_test'] = P(bindings['frame']).fresh('b')
@@ -866,7 +869,7 @@ def build(locations=False, warnings=False, errors=False):
     from libraryexports import install as libraryexports_install
     start = libraryexports_install(E, P, {name: globals()[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH',
-         'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST')}, start, TYINT)
+         'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT')}, start, TYINT)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
