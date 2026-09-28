@@ -73,8 +73,18 @@ def main():
     src = os.path.join(tmp, "audit.c")
     # pass 1: which lines are errors
     open(src, "w").write(source(set()))
-    p = subprocess.run(["cc", "-std=c11", "-w", "-ferror-limit=0",
-                        "-fsyntax-only", src], capture_output=True, text=True)
+    macros = subprocess.run(["cc", "-dM", "-E", "-"], input="",
+                            capture_output=True, text=True, timeout=15)
+    if macros.returncode != 0:
+        raise RuntimeError("cannot identify the system compiler: " + macros.stderr)
+    if "#define __clang__ " in macros.stdout:
+        errors = "-ferror-limit=0"
+    elif "#define __GNUC__ " in macros.stdout:
+        errors = "-fmax-errors=0"
+    else:
+        raise RuntimeError("unreviewed system compiler diagnostic format")
+    p = subprocess.run(["cc", "-std=c11", "-w", errors,
+                        "-fsyntax-only", src], capture_output=True, text=True, timeout=30)
     illegal = set()
     for m in re.finditer(r"audit\.c:(\d+):\d+: error", p.stderr):
         illegal.add(int(m.group(1)) - first_line)
@@ -82,13 +92,17 @@ def main():
     open(src, "w").write(source(illegal))
     exe = os.path.join(tmp, "audit")
     p = subprocess.run(["cc", "-std=c11", "-w", "-o", exe, src],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, timeout=30)
     if p.returncode != 0:
         print("  FAIL the audit program itself did not build:")
         print(p.stderr[:600])
         return 1
-    got = [int(x) for x in subprocess.run([exe], capture_output=True,
-                                          text=True).stdout.split()]
+    result = subprocess.run([exe], capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise RuntimeError("audit probe exited " + str(result.returncode))
+    got = [int(x) for x in result.stdout.split()]
+    if len(got) != len(cases):
+        raise RuntimeError("audit probe returned an incomplete type list")
 
     known = {}
     kf = os.path.join(R, "tests", "gold.knownfail")

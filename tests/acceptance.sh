@@ -3,6 +3,7 @@
 set -u
 U="python3 -m unisa"
 pass=0; fail=0
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 chk() { # chk <name> <expected> <actual>
     if [ "$2" = "$3" ]; then
         pass=$((pass+1)); printf "  ok   %-42s %s\n" "$1" "$3"
@@ -48,8 +49,10 @@ done
 
 sec5() {
 echo "== [A-8] negative control: the fold must be breakable =="
-for f in osx_class_bit win_argregs arm_gate; do
-    chk "fault $f" "4/6 match" "$($U run examples/hello.c --fold --fault $f | tail -1)"
+# win_argregs perturbs the x86 WinAPI argument path; ARM now reads its own ABI.
+for pair in osx_class_bit:4 win_argregs:5 arm_gate:4; do
+    f=${pair%:*}; matches=${pair#*:}
+    chk "fault $f" "$matches/6 match" "$($U run examples/hello.c --fold --fault $f | tail -1)"
 done
 }
 
@@ -129,22 +132,21 @@ fi
 
 sec12() {
 echo "== [A-9] image magics =="
-mkdir -p /tmp/uimg
 for t in lnx:7f454c46 osx:cffaedfe win:4d5a0000; do
     os=${t%%:*}; want=${t#*:}
     for arch in x86_64 arm64; do
-        $U compile examples/hello.c -o /tmp/uimg/h.$os.$arch --target $os/$arch >/dev/null
+        $U compile examples/hello.c -o "$T"/h.$os.$arch --target $os/$arch >/dev/null
         chk "$os/$arch magic" "$want" \
-            "$(od -An -tx1 -N4 /tmp/uimg/h.$os.$arch | tr -d ' \n')"
+            "$(od -An -tx1 -N4 "$T"/h.$os.$arch | tr -d ' \n')"
     done
 done
 }
 
 sec13() {
 echo "== [A-10] compiling twice gives identical bytes =="
-$U compile examples/hello.c -o /tmp/uimg/r1 --target lnx/x86_64 >/dev/null
-$U compile examples/hello.c -o /tmp/uimg/r2 --target lnx/x86_64 >/dev/null
-if cmp -s /tmp/uimg/r1 /tmp/uimg/r2; then r=same; else r=differs; fi
+$U compile examples/hello.c -o "$T"/r1 --target lnx/x86_64 >/dev/null
+$U compile examples/hello.c -o "$T"/r2 --target lnx/x86_64 >/dev/null
+if cmp -s "$T"/r1 "$T"/r2; then r=same; else r=differs; fi
 chk "two compiles" "same" "$r"
 }
 

@@ -17,6 +17,10 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
+# These four diagnostic tags are a Clang reference contract, not a GCC one.
+WARN_CC=${WARN_CC:-clang}
+ref_version=$("$_BOUND" 10 "$WARN_CC" --version) || { echo "warning referee unavailable: $WARN_CC"; exit 1; }
+case "$ref_version" in *clang*) ;; *) echo "warning referee must be Clang: $WARN_CC"; exit 1;; esac
 T=$(scratch)
 kinds() {   # kinds <file> -- "line kind" per diagnostic of the four kinds, sorted
     sed -E -n 's/^[^:]*:([0-9]+):[0-9]+: (warning|error): .*\[-W([a-z-]+)\].*$/\1 \3/p' "$1" \
@@ -26,7 +30,7 @@ kinds() {   # kinds <file> -- "line kind" per diagnostic of the four kinds, sort
 ok=0; bad=0
 for f in tests/warn/*.c; do
     b=$(basename "$f" .c)
-    cc -std=c99 -Wall -fsyntax-only "$f" > "$T/cc.out" 2>&1
+    "$_BOUND" 15 "$WARN_CC" -std=c99 -Wall -fsyntax-only "$f" > "$T/cc.out" 2>&1
     "$_BOUND" 60 "$UA" -Wall "$f" -c -o "$T/x.tape" > "$T/ua.out" 2>&1
     kinds "$T/cc.out" > "$T/cc.k"; kinds "$T/ua.out" > "$T/ua.k"
     if [ ! -s "$T/cc.k" ]; then echo "  FAIL $b: cc -Wall gives none of the four kinds here"; bad=$((bad+1)); continue; fi
@@ -37,7 +41,7 @@ done
 fp=0; n=0
 for f in corpus/c-testsuite/tests/single-exec/*.c; do
     b=$(basename "$f" .c); n=$((n+1))
-    cc -std=c99 -Wall -fsyntax-only "$f" > "$T/cc.out" 2>&1
+    "$_BOUND" 15 "$WARN_CC" -std=c99 -Wall -fsyntax-only "$f" > "$T/cc.out" 2>&1
     "$_BOUND" 60 "$UA" -Wall "$f" -c -o "$T/x.tape" > "$T/ua.out" 2>&1
     kinds "$T/cc.out" > "$T/cc.k"; kinds "$T/ua.out" > "$T/ua.k"
     extra=$(comm -13 "$T/cc.k" "$T/ua.k")
@@ -48,7 +52,7 @@ done
 # nothing on BSD and reported a clean corpus)
 ccany=0
 for f in corpus/c-testsuite/tests/single-exec/*.c; do
-    cc -std=c99 -Wall -fsyntax-only "$f" 2>&1 | kinds /dev/stdin | grep -q . && ccany=$((ccany+1))
+    "$_BOUND" 15 "$WARN_CC" -std=c99 -Wall -fsyntax-only "$f" 2>&1 | kinds /dev/stdin | grep -q . && ccany=$((ccany+1))
 done
 [ "$ccany" -gt 0 ] || { echo "  FAIL the warning parser read nothing from cc over the corpus"; bad=$((bad+1)); }
 echo
