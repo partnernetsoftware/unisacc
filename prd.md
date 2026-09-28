@@ -387,25 +387,25 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 下面从 `research/model-bytes.json` 生成，按实际封存 `.com` 计。只对阶段/模式作可证的功能归属，不把跨阶段动作任意分摊成“指针占多少字节”。
 
 <!-- model-bytes:begin -->
-快照 SHA-256：`f083f670bd1e42f51c433f10e1458026c69db9e32c62160093f2afb75cc9d213`；总计 **1,111,324 B**。
+快照 SHA-256：`bf8a17a1f6cd6591c851e5d718da52d66eb5cc98ce5c912223933809511bf27b`；总计 **1,111,563 B**。
 
 | 物理内容 | 字节 | 占整个 .com |
 |---|---:|---:|
-| 24 个共享网络体 | 658,341 | 59.24% |
+| 24 个共享网络体 | 658,581 | 59.25% |
 | 平台驱动、APE 启动/加载与对齐（混合账） | 250,736 | 22.56% |
 | 21 份 C 头文件/库实现源码 | 123,856 | 11.14% |
 | 两 ISA 通用推理执行核资源 | 15,520 | 1.40% |
 | 目标预定义宏声明资源 | 321 | 0.03% |
-| 目录、记录头与资源键 | 62,534 | 5.63% |
+| 目录、记录头与资源键 | 62,533 | 5.63% |
 | 尾部 | 16 | 0.00% |
 
 | 模型阶段 / 具体功能 | 物理模型数 | 模型体 B | 占 .com | 阶段行引用数 |
 |---|---:|---:|---:|---:|
 | `e2`：预处理、目标预定义宏与位置模式 | 2 | 48,605 | 4.37% | 126 |
-| `e1`：词法与 token/位置输出 | 1 | 23,064 | 2.08% | 120 |
-| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 266,030 | 23.94% | 216 |
+| `e1`：词法与 token/位置输出 | 1 | 23,064 | 2.07% | 120 |
+| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 266,030 | 23.93% | 216 |
 | `e4`：O1/O2 优化 | 2 | 14,404 | 1.30% | 144 |
-| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 6,702 | 0.60% | 6 |
+| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 6,942 | 0.62% | 6 |
 | `prune`：函数可达闭包与保守原文剪枝（数据/地址根保留） | 1 | 7,911 | 0.71% | 144 |
 | `lower`：ABI、调用、目标指令 lowering 与数据布局 | 6 | 125,930 | 11.33% | 144 |
 | `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 6 | 118,347 | 10.65% | 78 |
@@ -417,11 +417,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 | 网络记录 / 含义 | 字节 | 占整个 .com |
 |---|---:|---:|
-| `H`：阈值/选择网络参数记录 | 920,578 | 82.84% |
-| `Q`：动作序列声明（包含编译模板动作） | 904,820 | 81.42% |
+| `H`：阈值/选择网络参数记录 | 920,818 | 82.84% |
+| `Q`：动作序列声明（包含编译模板动作） | 904,976 | 81.41% |
 | `S`：字节字符串声明 | 18,108 | 1.63% |
 | `N`：网络头记录 | 479 | 0.04% |
-| `C`：动作序列共享前缀声明 | 430,715 | 38.76% |
+| `C`：动作序列共享前缀声明 | 430,692 | 38.75% |
 <!-- model-bytes:end -->
 
 两个 e3 分别是错误与错误+告警变体；十二个 e2 是六目标的普通/位置变体。33 个共享物理模型被 1,082 条阶段行引用，引用次数不是物理份数。压缩前 Q/C 是动作与共享声明，H 是阈值/选择参数；三个数字不与压缩模型体相加。21 份头/库源码与两 ISA 核资源另计；混合平台驱动缺独立 link-map，不虚构其 libc/启动/OS 子项比例。当前产物1,233,236 B（包985,172 B）相对已发布v0.0.8的5,388,402 B小约77.11%，签名后字节变化另记。
@@ -2987,3 +2987,6 @@ R10 位域 source fact TDD 决定：BF.metadata 中 BFS=bf_signed、MSZ=bf_unit�
 
 R10 位域 storage source fact 已先红后绿：旧冻结 E3 8049态在 unsigned int:3 输出 storage0（应4），真实源码测试退出1；单处 BFS→MSZ 修复后，unsigned/signed int:3 与 unsigned/signed long:33 的入参与返回共8描述全部正确（storage4/8，signedness未变），sim与C网络输出逐字节同，2,076,386观察全域net=table；support仍0。新增 lib-bitfield-source 门禁及 research/r10-bitfield-source-storage-evidence.json。根产品本批尚待模型源全部冻结后重构，不称已带修复。
 R10 Linux ARM 公开递归载体验证：569a242完整私有快照与P3包6307b751…在既有Lima ARM guest实际执行factory/relay、普通+ASan/UBSan四项，O0/O1/O2各100均rc0（1200 outer调用）；GCC15.2/libffi3.5.2/glibc2.43，来源/命令见 research/r10-recursive-carrier-linux-arm-evidence.json；无VM启停，未扩称压力/多参数/其他平台。缺失源事实及USLSIG3建议归入 research/r10-nativeabi-sourcefacts-plan.md，只是设计，wide-FP等仍需实现。
+
+R10 natural scalar union 首片实际接入：六profile数据行声明最小整数宽度与homogeneousFP载体类；模型773态/199,178观察全域net=table，117独立sim/C wire oracle相等，保持递归图与旧mixed8字节。新增integer8、FP-only4/8、mixed8多成员/重排；Win64 FP-only按整数carrier，其他profile按FP。ARM窄整数与异格式FP-only仍拒绝，struct/array/16B/BANK/bitfield/wide-FP仍未闭合。实际原生矩阵45 normal+6 float4 sanitizer=51variants/15,300calls证据 research/r10-natural-union-public-evidence.json；正式P3候选六个matrix门禁覆盖默认36variants全部ASan/UBSan，另Rosetta窄整数9variants亦ASan；每variant O0/O1/O2×100。注册压力GP9/FP9与紧邻union字节canary均通过，不把六profile字节oracle称六平台native通过。
+R10 root候选同步：1,111,563 B，SHA256bf8a17a1f6cd6591c851e5d718da52d66eb5cc98ce5c912223933809511bf27b（比569a242产物+239B）；包含本批位域storage修复，来源侧车通过，全部24部署network/table与retained全域一致，旧阶段rows/resources不变。新matrix、窄整数、旧factory/relay/concrete变参与com-c9957/57、com-run12/0、docs分批13/13 rc0。完整构造/模型/公开证据分别 research/r10-natural-union-{candidate,model,public}-evidence.json。不是完整0.0.10发布，广义ABI、六平台完整native、企业分发等继续推进。

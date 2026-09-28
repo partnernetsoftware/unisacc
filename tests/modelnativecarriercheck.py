@@ -12,6 +12,9 @@ D=desc(3);UI=desc(unsigned=1);I=desc();F=desc(3,4,4);P=desc(2,depth=1);VOID=desc
 def union(children=(D,UI),layout=(0,0,0,8),**kw):
  return desc(5,tag=2,payload=U(len(children))+b''.join(b''.join(map(U,layout))+x for x in children),**kw)
 MIX=union()
+def natural(children,width):
+ return desc(5,width,width,tag=2,payload=U(len(children))+b''.join(bytes(24)+U(struct.unpack_from('<Q',x,32)[0])+x for x in children))
+
 def signature(params=(MIX,),result=MIX,support=0,var=0,mode=None,name=b'entry'):
  return b'USLSIG2\n'+U(1)+U(len(name))+name+bytes([0,1,var,int(var or len(params)>6) if mode is None else mode])+U(len(params))+result+U(len(params))+b''.join(params)+bytes([support])
 CUI=desc(unsigned=1,base=0,shape=0)
@@ -54,6 +57,29 @@ def main():
   for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
    for params,result in [((MIX,),MIX),((union((UI,D)),),union((UI,D))),((I,D,F,P,MIX),I),((I,)*8+(MIX,),MIX),((),VOID)]:
     original=signature(params,result);check(original,target,plan(target,original,carrier(params,result)));successes+=1
+  # Profile oracle is independent of rules.tsv and the model classifier.
+  natural_cases=0;arm_narrow_rejections=0
+  for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
+   for width in (1,2,4,8):
+    children=(desc(1,width,width),desc(1,width,width,unsigned=1),desc(1,1,1))
+    value=natural(children,width);original=signature((value,),value)
+    if target.endswith(b'/arm64') and width<8:check(original,target);arm_narrow_rejections+=1
+    else:
+     converted=desc(1,width,width,unsigned=1,base=0,shape=0)
+     check(original,target,plan(target,original,signature((converted,),converted,support=1)));natural_cases+=1
+   for width in (4,8):
+    children=(desc(3,width,width),)*7;value=natural(children,width);original=signature((value,),value)
+    converted=desc(1 if target==b'win/x86_64' else 3,width,width,unsigned=int(target==b'win/x86_64'),base=0,shape=0)
+    check(original,target,plan(target,original,signature((converted,),converted,support=1)));natural_cases+=1
+   for children in ((I,D,UI,F),(F,UI,D,I),(D,)*9+(I,)*8,(F,UI,desc(1,2,2))):
+    value=natural(children,8);original=signature((value,),value)
+    check(original,target,plan(target,original,signature((CUI,),CUI,support=1)));natural_cases+=1
+   # Profile-specific FP carrier nested inside a shared cyclic callback graph.
+   value=natural((F,F,F),4)
+   mapped=desc(1 if target==b'win/x86_64' else 3,4,4,unsigned=int(target==b'win/x86_64'),base=0,shape=0)
+   original=signature((callback_ref(1),),callback_def(1,(value,callback_ref(1)),value))
+   converted=signature((callback_ref(1,True),),callback_def(1,(mapped,callback_ref(1,True)),mapped,support=1,canon=True),support=1)
+   check(original,target,plan(target,original,converted));natural_cases+=1
   # Independent explicit graph wire oracle: shared references, back edges,
   # mutual recursion, factory return and a nested mode1 nine-argument signature.
   cI=identity(I)
@@ -79,7 +105,7 @@ def main():
   hostrun=t/'graphcheck';cmd('cc','-O0','-I',ROOT,host,'-lffi','-o',hostrun)
   for _,converted in fixtures:wire=t/'certified-graph';wire.write_bytes(converted);cmd(hostrun,wire)
   # Equal object extent alone is insufficient, and all layout facts matter.
-  rejects=[signature(result=union((D,D))),signature(result=union((D,))),signature(result=union((I,UI))),
+  rejects=[signature(result=natural((D,F),8)),signature(result=natural((desc(3,unsigned=1),),8)),signature(result=natural((desc(1,4,4),),8)),
    signature(result=union(unsigned=1)),signature(result=union(width=16)),signature(result=union(alignment=4)),signature(result=union(depth=1)),
    signature(result=union(layout=(1,0,0,8))),signature(result=union(layout=(0,1,0,8))),
    signature(result=union(layout=(0,0,1,8))),signature(result=union(layout=(0,0,0,4))),
@@ -90,9 +116,9 @@ def main():
    signature(result=desc(4,depth=1,tag=4)),signature(result=desc(3,8,4)),signature(result=desc(0,0,0,unsigned=1)),signature(params=(VOID,),result=I),
    signature(mode=1),signature()+b'x']
   rejects.extend([
-   signature((MIX,),callback_def(1,(MIX,),callback_def(2,(union((D,D)),),MIX))),
+   signature((MIX,),callback_def(1,(MIX,),callback_def(2,(natural((D,F),8),),MIX))),
    signature((MIX,),callback_def(1,(callback_ref(2),),MIX)),
-   signature((callback_def(1,(union((D,D)),),MIX),),MIX),
+   signature((callback_def(1,(natural((D,F),8),),MIX),),MIX),
    signature((callback_def(1,(MIX,),union(layout=(0,0,1,8))),),MIX),
    signature((callback_def(1,(MIX,),MIX,var=1),),MIX),
    signature((callback_ref(1),),MIX),
@@ -109,5 +135,5 @@ def main():
   for length in (0,7,16,len(original)//2,len(original)-1):check(original[:length])
   for original,_ in fixtures:
    for length in (len(original)//2,len(original)-1):check(original[:length])
-  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'double_only_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
+  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
 if __name__=='__main__':main()

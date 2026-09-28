@@ -21,8 +21,9 @@ def install(E):
  rows=list(csv.DictReader((pathlib.Path(__file__).parent/'rules.tsv').open(),delimiter='\t'))
  profiles={r['profile'] for r in rows}
  assert profiles=={f'{os}/{arch}' for os in ('osx','lnx','win') for arch in ('arm64','x86_64')} and len(rows)==6
- rule={k:int(v) for k,v in rows[0].items() if k not in ('profile','rule')}
- assert all(r['rule']=='mixed_union8_u64_v1' and {k:int(v) for k,v in r.items() if k not in ('profile','rule')}==rule for r in rows)
+ policy={r['profile']:(int(r['integer_min_width']),int(r['homogeneous_fp_carrier_kind'])) for r in rows}
+ assert all(r['rule']=='natural_scalar_union_v2' and int(r['mixed_width'])==8 for r in rows)
+ assert all(lo in (1,8) and fp in (1,3) for lo,fp in policy.values())
  def word(p,r):return p.a(('COPYW','ms_value',r)).call('MS.write64')
  def constword(p,v):return word(p.a(('LDI','nc_v',v)),'nc_v')
  def blob(p,r,n):return p.a(('INPUSH',r),('SPAN2','nc_zero',n),('INPOP',))
@@ -39,7 +40,7 @@ def install(E):
  names={p:'NC.profile'+('' if not p else '.'+p.hex()) for p in prefixes}
  for prefix in sorted(prefixes):
   if prefix.decode() in profiles:
-   P(names[prefix]).a(('MARK','nc_pos')).branch({1:'NC.profileok'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
+   P(names[prefix]).a(('LDI','nc_intminimum',policy[prefix.decode()][0]),('LDI','nc_fpcarrier',policy[prefix.decode()][1]),('MARK','nc_pos')).branch({1:'NC.profileok'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
   else:
    choices={p[len(prefix)]:names[p] for p in prefixes if len(p)==len(prefix)+1 and p.startswith(prefix)}
    P(names[prefix]).a(('MARK','nc_pos')).branch({0:names[prefix]+'.read'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
@@ -77,24 +78,48 @@ def install(E):
  # Union objects can occur in any fixed signature node. Their overlapping
  # members are checked exactly and never traversed as callback object values.
  P('NC.union').branch({1:'NC.uniondepth'},'NC.unsupported',[('CMPI','nc_support',0)])
- sequence=[(0,'depth'),(3,'kind'),(5,'unsigned'),(7,'tag'),(4,'width'),(6,'alignment'),(8,'members')]
- for j,(index,key) in enumerate(sequence):check('NC.union'+key,index,rule[key],'NC.union'+sequence[j+1][1] if j+1<len(sequence) else 'NC.unionmembersstart')
- P('NC.unionmembersstart').a(('LDI','nc_member',0),('LDI','nc_floatseen',0),('LDI','nc_intseen',0)).goto('NC.memberlayout')
+ sequence=[(0,0,'depth'),(3,5,'kind'),(5,0,'unsigned'),(7,2,'tag')]
+ for j,(index,value,key) in enumerate(sequence):check('NC.union'+key,index,value,'NC.union'+sequence[j+1][2] if j+1<len(sequence) else 'NC.unionwidth')
+ P('NC.unionwidth').branch({(1,2,4,8):'NC.unionalign'},'NC.unsupported',[('RLD','nc_width')])
+ P('NC.unionalign').branch({1:'NC.unionmembers'},'NC.unsupported',[('C64U','nc_width','nc_alignment')])
+ field(P('NC.unionmembers'),8,'nc_members').branch({1:'NC.unsupported'},'NC.unionmembersbound',[('CMPI','nc_members',0)])
+ P('NC.unionmembersbound').branch({2:'NC.unsupported'},'NC.unionmembersstart',[('CMPI','nc_members',1024)])
+ P('NC.unionmembersstart').a(('LDI','nc_member',0),('LDI','nc_floatseen',0),('LDI','nc_intseen',0),('LDI','nc_maxwidth',0),('LDI','nc_fpwidth',0),('LDI','nc_fpmixed',0)).goto('NC.memberlayout')
  P('NC.memberlayout').a(('LDI','nc_attr',0)).goto('NC.memberattr')
- layouts=[rule[x] for x in ('offset','bit_offset','bit_width','storage_width')]
- P('NC.memberattr').a(('ALUI','mul','nc_key','nc_node',1025),('ALU','add','nc_key','nc_key','nc_member'),('ALUI','mul','nc_key','nc_key',4),('ALU','add','nc_key','nc_key','nc_attr'),('LDX','nc_v','nc_key',LAYOUT)).branch({0:'NC.attr0',1:'NC.attr1',2:'NC.attr2',3:'NC.attr3'},'NC.unsupported',[('RLD','nc_attr')])
- for i,v in enumerate(layouts):P('NC.attr'+str(i)).branch({1:'NC.attrnext'},'NC.unsupported',[('LDI','nc_expect',v),('C64U','nc_v','nc_expect')])
+ P('NC.memberattr').a(('ALUI','mul','nc_key','nc_node',1025),('ALU','add','nc_key','nc_key','nc_member'),('ALUI','mul','nc_key','nc_key',4),('ALU','add','nc_key','nc_key','nc_attr'),('LDX','nc_v','nc_key',LAYOUT)).branch({3:'NC.memberstorage'},'NC.memberzero',[('RLD','nc_attr')])
+ P('NC.memberzero').branch({1:'NC.attrnext'},'NC.unsupported',[('CMPI','nc_v',0)])
+ P('NC.memberstorage').a(('COPYW','nc_storage','nc_v')).goto('NC.attrnext')
  P('NC.attrnext').a(('ALUI','add','nc_attr','nc_attr',1)).branch({1:'NC.memberchild'},'NC.memberattr',[('CMPI','nc_attr',4)])
  P('NC.memberchild').a(('ALUI','mul','nc_key','nc_node',1025),('ALU','add','nc_key','nc_key','nc_member'),('LDX','nc_child','nc_key',EDGES)).goto('NC.memberdepth')
- check('NC.memberdepth',0,0,'NC.membertag',node='nc_child');check('NC.membertag',7,0,'NC.memberkind',node='nc_child')
- P('NC.memberkind').a(('ALUI','mul','nc_key','nc_child',16),('ALUI','add','nc_key','nc_key',3),('LDX','nc_v','nc_key',FIELDS)).branch({rule['float_kind']:'NC.memberfloatwidth',rule['integer_kind']:'NC.memberintwidth'},'NC.unsupported',[('RLD','nc_v')])
- for flavor,prefix,seen in [('float','memberfloat','nc_floatseen'),('integer','memberint','nc_intseen')]:
-  for j,(index,key) in enumerate(((4,'width'),(5,'unsigned'),(6,'alignment'))):check('NC.'+prefix+key,index,rule[flavor+'_'+key],'NC.'+prefix+('unsigned' if j==0 else 'alignment' if j==1 else 'seen'),node='nc_child')
-  P('NC.'+prefix+'seen').a(('ALUI','add',seen,seen,1)).goto('NC.membernext')
- P('NC.membernext').a(('ALUI','add','nc_member','nc_member',1)).branch({1:'NC.unioncomplete'},'NC.memberlayout',[('CMPI','nc_member',2)])
- P('NC.unioncomplete').branch({1:'NC.unioninteger'},'NC.unsupported',[('CMPI','nc_floatseen',1)])
- P('NC.unioninteger').branch({1:'NC.mapped'},'NC.unsupported',[('CMPI','nc_intseen',1)])
- P('NC.mapped').a(('LDI','nc_depth',0),('LDI','nc_kind',rule['carrier_kind']),('LDI','nc_width',rule['carrier_width']),('LDI','nc_unsigned',rule['carrier_unsigned']),('LDI','nc_alignment',rule['carrier_alignment'])).goto('NC.emit')
+ check('NC.memberdepth',0,0,'NC.membertag',node='nc_child');check('NC.membertag',7,0,'NC.memberfields',node='nc_child')
+ p=P('NC.memberfields')
+ for index,out in ((3,'nc_mkind'),(4,'nc_mwidth'),(5,'nc_munsigned'),(6,'nc_malign')):field(p,index,out,node='nc_child')
+ p.branch({1:'NC.memberinteger',3:'NC.memberfloating'},'NC.unsupported',[('RLD','nc_mkind')])
+ P('NC.memberinteger').branch({(1,2,4,8):'NC.memberintegerseen'},'NC.unsupported',[('RLD','nc_mwidth')])
+ P('NC.memberintegerseen').a(('ALUI','add','nc_intseen','nc_intseen',1)).goto('NC.membernatural')
+ P('NC.memberfloating').branch({(4,8):'NC.memberfloatunsigned'},'NC.unsupported',[('RLD','nc_mwidth')])
+ P('NC.memberfloatunsigned').branch({1:'NC.memberfpwidth'},'NC.unsupported',[('CMPI','nc_munsigned',0)])
+ P('NC.memberfpwidth').branch({1:'NC.memberfpset'},'NC.memberfpcompare',[('CMPI','nc_fpwidth',0)])
+ P('NC.memberfpset').a(('COPYW','nc_fpwidth','nc_mwidth')).goto('NC.memberfloatseen')
+ P('NC.memberfpcompare').branch({1:'NC.memberfloatseen'},'NC.memberfpmixed',[('C64U','nc_fpwidth','nc_mwidth')])
+ P('NC.memberfpmixed').a(('LDI','nc_fpmixed',1)).goto('NC.memberfloatseen')
+ P('NC.memberfloatseen').a(('ALUI','add','nc_floatseen','nc_floatseen',1)).goto('NC.membernatural')
+ P('NC.membernatural').branch({1:'NC.memberextent'},'NC.unsupported',[('C64U','nc_mwidth','nc_malign')])
+ P('NC.memberextent').branch({1:'NC.memberrootextent'},'NC.unsupported',[('C64U','nc_mwidth','nc_storage')])
+ P('NC.memberrootextent').branch({2:'NC.unsupported'},'NC.membermaximum',[('C64U','nc_mwidth','nc_width')])
+ P('NC.membermaximum').branch({2:'NC.membersetmax'},'NC.membernext',[('C64U','nc_mwidth','nc_maxwidth')])
+ P('NC.membersetmax').a(('COPYW','nc_maxwidth','nc_mwidth')).goto('NC.membernext')
+ P('NC.membernext').a(('ALUI','add','nc_member','nc_member',1)).branch({1:'NC.unioncomplete'},'NC.memberlayout',[('C64U','nc_member','nc_members')])
+ P('NC.unioncomplete').branch({1:'NC.unionflavor'},'NC.unsupported',[('C64U','nc_maxwidth','nc_width')])
+ P('NC.unionflavor').branch({1:'NC.unionintegeronly'},'NC.unionhasfloat',[('CMPI','nc_floatseen',0)])
+ P('NC.unionintegeronly').branch({0:'NC.unsupported'},'NC.mapinteger',[('C64U','nc_width','nc_intminimum')])
+ P('NC.unionhasfloat').branch({1:'NC.unionhomogeneous'},'NC.unionmixed',[('CMPI','nc_intseen',0)])
+ P('NC.unionhomogeneous').branch({1:'NC.mapfloating'},'NC.unsupported',[('CMPI','nc_fpmixed',0)])
+ P('NC.unionmixed').branch({1:'NC.mapinteger'},'NC.unsupported',[('CMPI','nc_width',8)])
+ P('NC.mapfloating').a(('COPYW','nc_kind','nc_fpcarrier')).branch({1:'NC.mapinteger'},'NC.mapfloatfinish',[('CMPI','nc_kind',1)])
+ P('NC.mapfloatfinish').a(('LDI','nc_unsigned',0)).goto('NC.mapped')
+ P('NC.mapinteger').a(('LDI','nc_kind',1),('LDI','nc_unsigned',1)).goto('NC.mapped')
+ P('NC.mapped').a(('LDI','nc_depth',0)).goto('NC.emit')
  callbackchecks=[(0,1,'depth'),(4,8,'width'),(5,0,'unsigned'),(6,8,'alignment'),(7,4,'tag'),(10,1,'edgecount')]
  P('NC.callback').goto('NC.callbackdepth')
  for j,(index,value,name) in enumerate(callbackchecks):check('NC.callback'+name,index,value,'NC.callback'+callbackchecks[j+1][2] if j+1<len(callbackchecks) else 'NC.cbemit')

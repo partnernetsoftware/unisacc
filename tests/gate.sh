@@ -215,6 +215,9 @@ job lib-carrier-import-model python3 ./tests/modelnativecarrierimportcheck.py
 job lib-union-native python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-carrier-factory python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --factory
 job lib-carrier-relay python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize --relay
+job lib-union-scalar-1 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8,float4 --sanitize
+job lib-union-scalar-2 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8,mixed2 --sanitize
+job lib-union-scalar-3 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3,mixed-reordered --sanitize
 job lib-callable-variadic-mechanism python3 ./tests/librarycallablevarcheck.py
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
@@ -245,6 +248,10 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-carrier-callback-rosetta python3 ./tests/librarycarriercallbackcheck.py --arch x86_64
     job lib-carrier-factory-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --factory
     job lib-carrier-relay-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize --relay
+    job lib-union-scalar-1-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int8,float4 --sanitize
+    job lib-union-scalar-2-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases double8,mixed2 --sanitize
+    job lib-union-scalar-3-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed3,mixed-reordered --sanitize
+    job lib-union-scalar-narrow-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int1,int2,int4 --sanitize
     job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi
