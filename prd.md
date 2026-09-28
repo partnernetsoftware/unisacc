@@ -2756,3 +2756,9 @@ Windows实际SDK编译暴露宿主名字冲突BYTE（SDK类型）、OUT（SDK注
 Windows新SDK快照两ISA正式DLL已真实C/桥compile与link成功，无隔离hack、各导出17 API；尚无Windows运行。统一公开头属性：DLL构建LIBUNISACC_BUILD导出，消费者默认导入，static消费者LIBUNISACC_STATIC绕开dll属性；GCC POSIX仍默认visibility公开。先消除重复属性警告，不能把编译链接rc0当调用/SEH/FFI运行已通过。
 
 本片实证：CRC36记录（宿主CC、root候选编译、ASan/UBSan实际执行、高CRC与超范围包头、两Windows COFF）全部通过；固定64bit resource七向量及native reserve/commit/protect/release通过、两SDK COFF通过。新host/runtime消费旧d375模型的resolver原正例仍通过（未验证新priority模型），故下一完整候选须重新构造。Windows官方libffi v3.5.2固定源及两静态库/PE探针已交叉链接，不是Windows运行；ARM需显式FlushInstructionCache adapter且GNU汇编缺SEH unwind，保留为正式交付阻挡。完整scope/hashes封存research/r10-crc-llp64-evidence.json、r10-memory-word64-evidence.json、r10-windows-libffi-evidence.json。源码优先模型E3 7010态1808324观察、lower1838态473948观察均全域net=table首验，原生新版组合TDD待完整包。
+
+### R10 source优先与LLP64正式候选验收（2026-09-29）
+
+8ef6fe6完整冻结源的shared、六目标、pack实际rc0；候选1,055,907 B，SHA256 `071cf2dbda46b8fa641fdb02d1a577702f4d8c2f34a14f8b851be07535fd79e6`，来源侧车check通过。双槽16项受影响门禁全部rc0（24秒），另C/ARM/x86执行核3项全部rc0（27秒）。真实新版resolver涵盖不支持float/aggregate/variadic/>6参数候选的source定义与unused优先、实际external拒绝；readonly data同域检查。生命周期1000实际循环按macOS all-zone live+owned判据通过，RSS仍是诊断而非零增长证明。根开发产物更新到该真实候选，版本仍0.0.9 development，不能冒称0.0.10发布物。
+
+Windows两ISA正式DLL用真实SDK和官方libffi3.5.2完成交叉编译链接，17个API导出，编译日志零告警；未完成Windows原生运行、ARM SEH、resolver、guest mmap与完整ABI，不算六平台库交付。永久交叉构建回执见research/r10-windows-dll-evidence.json。默认模型的种子/最终产物命名拆分仍为咨询建议，尚未实施。完整R10、最终全套、远端CI、企业签名发布仍待完成。
