@@ -87,10 +87,13 @@ machine). The C headers it needs travel inside it.
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
   `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
-- **Headers:** nineteen C99 headers are bundled (`assert ctype errno float
-  inttypes iso646 limits math memory signal stdarg stdbool stddef stdint stdio
-  stdlib string time wchar`); their functions are compiled from source on
-  demand. The system libc is not used.
+- **Headers:** nineteen standard/compatibility headers are bundled (`assert
+  ctype errno float inttypes iso646 limits math memory signal stdarg stdbool
+  stddef stdint stdio stdlib string time wchar`), plus `unisacc_ffi.h`. Ordinary
+  library calls use the bundled C implementations, compiled on demand. On
+  macOS, the explicit dl/libffi bridge can call system APIs; it is not automatic
+  forwarding of all libc calls. System FILE/va_list and allocator families must
+  not be mixed with the bundled implementations.
 - **Several files, one program:** `unisacc a.c b.c ...` compiles all the units
   of a program in one invocation. Each unit is preprocessed on its own, and a
   later unit's file-scope `static` names are renamed, so two units may each

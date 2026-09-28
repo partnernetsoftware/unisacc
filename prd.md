@@ -5267,3 +5267,5 @@ FFI与实采父验收：narfix候选5,388,386 B；17/17系统ABI探针在模型-
 multi入口修复验收：multi、com-multi、docs 三项双槽4秒全rc0；私有替身按输入打印正确8 309 11或5，再exit2，套件仍exit1，三条-run都报告exit2，编译亦失败，不误判绿。候选.com仍a4de871a…/5388386 B。完整冻结759240b的175绿+2红不回写；新测试树需新冻结队列验收。Windows/Linux self日志明确当前仅镜像相同、宿主未运行bootstrap，下一轮平台烟测单列。
 
 候选平台烟测（a4de871a… 同一.com）：已运行Lima default Linux/aarch64看门狗两实现（退出0/2/142、信号、脱离子进程清理）通过；fib模型-run同客机cc（显式-include stdio.h）；模型编出的经典unisacc.c参考N1=N2=N3，SHA e831354f…，不称完整打包.com自重打包。Windows11 arm64 UTM：经ZIP传输后核完整SHA，候选-run、生成arm64原生和x86_64仿真fib均55、rc0；只属于烟测，非Windows全套。VM由本次启动且已停止，原本运行的Lima不动。Linux x86_64/Windows x86_64实机未跑。证据research/candidate-platform-20260928.json。
+
+文档收口核对：README仍写“system libc is not used”，与新增显式FFI/系统API桥冲突；架构首页仍把模型产品.com的源码等同经典unisacc.c、把9a0历史尺寸列为当前快照。修为模型驱动/执行器与经典参考的准确分工，并单列a4de候选状态；历史171门禁不移植新候选，不宣称全部libc默认转发。

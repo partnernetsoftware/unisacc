@@ -1,25 +1,25 @@
 # 仓库地图
 
-**产品**是一个 C99 子集编译器：`unisacc.com`（六目标单文件）及其源码 `unisacc.c`（= `kernel/` + `src/`）与随带的 `include/`。它能编译自己（自举不需要 Python），也能编译运行其他 C99 程序。仓库里的其余东西都服务于它，分四类：
+**产品**是 C99 子集编译器 `unisacc.com`（六目标单文件）及随带的 `include/`。当前模型路线的驱动、通用执行器与推理核在 `exec/c/`，各阶段声明与构造器在 `exec/` 对应目录；`unisacc.c`（= `kernel/` + `src/`）是经典参考与显式回退。编译与运行不需要 Python，离线构造和容器打包仍用 Python。下面区分产品、参考、数据与开发工具：
 
 | 类别 | 位置 | 说明 |
 |---|---|---|
-| 产品 | `src/`、`include/`、`kernel/`（生成物，提交在库）、`unisacc.c`、`unisacc.com` | 用户实际使用的编译器 |
-| 种子与参考实现 | `unisa/`（Python） | 真值表、权重构造、生成 `kernel/`、独立的第二套前后端（供逐字节对照）、`unisacc.com` 的 APE 打包 |
+| 模型产品 | `exec/c/`、各阶段声明/构造器、`include/`、`unisacc.com` | 构造网络、通用运行核与用户使用的编译器 |
+| 种子与参考实现 | `unisa/`、`src/`、`kernel/`、`unisacc.c` | Python 种子、经典 C 参考/回退、生成静态事实与容器打包；与模型路线对照 |
 | 静态输入与数据 | `weights/`（`built.uns2`、`gold/*.tsv`）、`include/*.h` | 构造与生成的输入；真值表的数据形态 |
 | 开发工具与参考裁判 | `iterate/`（C 写的权重构造器与 kernel 数据生成器，**不属于产品**）、`tests/`、各 `*_check.py` | 验证与复现，不进用户流程 |
 
 规格在 [`prd.md`](prd.md)，工作规则在 [`AGENTS.md`](AGENTS.md)，论文在 [`research/`](research/)。
 
-## 本地模型默认：本地验收完成
+## 模型路线：历史验收与当前候选
 
-本地 `make com` 已改为模型构建，根目录 `unisacc.com` 与已验候选逐字节相同；
+本地 `make com` 已改为模型构建；冻结 `1ccb16e` 时根目录与该已验候选逐字节相同。后续候选单列，不能继承历史全绿结论。
 `make classic-com` 把经典回退构建到 `out/unisacc-classic.com`。已发布的 v0.0.7
 产物仍是经典路线。模型由声明规则、动态事实和共享模板离线构造，打包后运行不需要 Python。
 经典 `src/` 与 `unisa/` 仍为参考和显式回退；模型拒绝输入不会隐式改走经典路线。
 冻结代码树 `1ccb16e` 已完成最终本地验收；未发布新版本。
 
-| 项目 | 当前快照 / 边界 |
+| 项目 | 历史冻结快照 / 边界 |
 |---|---|
 | 源码 / 候选短标识 | `85eaeb9` / `9a0ae470` |
 | 模型与路由 | 32 个互异构造网络、938 条 stage 路由、21 个资源 |
@@ -32,6 +32,17 @@
 容器 SHA-256：`9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`。
 包 SHA-256：`a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`。
 有限图相等只证明网络实现其声明表，不证明完整 C99 语义。
+
+**2026-09-28 当前候选（尚待修复后的完整门禁）：** `unisacc.com` 5,388,386 B，
+SHA-256 `a4de871ad6a251cbf7cee313e430f23bb08c618500a5285d36e224a4e74e0ece`。
+实际包账见 [model-bytes.json](research/model-bytes.json)，性能与平台烟测见
+[candidate-bench-20260928.json](research/candidate-bench-20260928.json) 和
+[candidate-platform-20260928.json](research/candidate-platform-20260928.json)。
+Q 前缀编码只减存储、不减展开后运行内存。macOS 的显式 dl/libffi 桥使应用自行
+读取进程、内存映射与窗口数据，未把全部内置 libc 默认转发。
+177 项冻结运行有两条 multi 测试入口失败；修复后两条路线及 docs 已复验，
+不把它们回写成原冻结队列全绿。未发布新版本。
+
 
 固定包模型驱动 N1=N2=N3 是完整 115,746 B Mach-O（SHA-256
 `6e31c9664f4274f9bac02f46c9b773db7b5e53e0200725985c6b3b4b866dde03`）。
