@@ -2,7 +2,8 @@
    model-specific constants or precomputed answer rows. Thresholds ascend (the
    loader rejects any other bank), so the active units H(key-threshold)=1 are a
    prefix: a branchless binary search finds its length, then exactly those
-   signed weights accumulate in 64 bits.
+   signed weights accumulate in 64 bits. A declared return (ret_ok[q][key])
+   answers (key, ret_seq[q]) first: control flow, not a network decision.
    x0=model, w1=state, w2=key, x3=&next, x4=&sequence; x0=error or NULL.
    Only caller-saved x0-x17 are touched; x18 is never used. */
 #include "layout.h"
@@ -26,6 +27,21 @@ CNAME(core_transition):
     mov w5,#-1
     str w5,[x3]
     str wzr,[x4]
+    ldr x5,[x0,#CM_RET_OK]
+    cbz x5,Lnoret
+    ldr x5,[x5,x1,lsl #3]
+    cbz x5,Lnoret
+    tbnz w2,#31,Lnoret
+    ldr w6,[x0,#CM_NS]
+    cmp w2,w6
+    b.ge Lnoret
+    ldrb w6,[x5,x2]
+    cbz w6,Lnoret
+    ldr x5,[x0,#CM_RET_SEQ]
+    ldr w10,[x5,x1,lsl #2]
+    mov w9,w2
+    b Lstore
+Lnoret:
     ldr w5,[x0,#CM_ISNET]
     cbz w5,Ltable
     ldr x5,[x0,#CM_LO]

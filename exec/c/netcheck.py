@@ -46,6 +46,23 @@ with tempfile.TemporaryDirectory(prefix='unisacc-net-') as td:
         words=lines[index].split();words[5]=str(int(words[5])+1);lines[index]=' '.join(words)
         bad=d/'bad.net';bad.write_text('\n'.join(lines)+'\n')
         assert run([exe,'--check-net',table,bad]).returncode != 0,'mutated weight passed'
+    # A stack bank whose continuation rows return k -> k with one shared
+    # sequence compiles to a declared return set (H 3); other rows keep units.
+    ret_src=('T 6 3 1 0 0\n'+f'Q 1 {CODE["ACCEPT"]}\n'*3+'R 0 0 -1 0\n'*5+
+             'R 1 5 -1 0 -1 0 2 1 1 1 2 2 1 3 3 1 4 0 2\n')
+    rt=d/'ret.tbl';rt.write_text(ret_src);out,_,_=convert(ret_src)
+    hline=next(s for s in out.splitlines() if s.startswith('H 3 '))
+    assert hline.split()[7:12]==['1','3','1','2','3'],hline
+    rn=d/'ret.net';rn.write_text(out);require(run([exe,'--check-net',rt,rn]))
+    def tampered(words):
+        return out.replace(hline,' '.join(words))
+    w=hline.split()
+    for bad_words,why in [(w[:7]+['2']+w[8:],'return sequence'),
+                          (w[:8]+['2','1','2']+w[12:],'dropped continuation'),
+                          (w[:8]+['4','1','2','3','4']+w[12:],'non-continuation added'),
+                          (w[:8]+['3','1','2','9']+w[12:],'key outside states')]:
+        rn.write_text(tampered(bad_words))
+        assert run([exe,'--check-net',rt,rn]).returncode != 0,'tampered return passed: '+why
     # Exact signed 64-bit decoding, observable through the production OFILL.
     acts=[('LDI',0,-9223372036854775808),('ORES',1,20),('OFILL',1,0,20),('OUT',10),
           ('LDI',0,9223372036854775807),('ORES',1,20),('OFILL',1,0,20),('OUT',10),('ACCEPT',)]
