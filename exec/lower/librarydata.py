@@ -37,4 +37,8 @@ def install(E,os_,ids):
   P('LBD.digit.'+str(c)).a(('ALUI','mul','ld_number','ld_number',10),('ALUI','add','ld_number','ld_number',c-48),('ALUI','add','ld_digits','ld_digits',1),('ADV',)).branch({2:'LBI.fail'},'LBD.digit',[('CMPI','ld_number',1024)])
  bytebranch('LBD.numberend',{256:'LBD.numbervalid'},'LBI.fail')
  P('LBD.numbervalid').branch({1:'LBI.fail'},'RET',[('CMPI','ld_digits',0)])
- P('LBD.emit').o('imm ').a(('COPYW','tok','a0')).call('PRINT').o(', ').a(('LDX','n','ld_i',ADDRESS)).call('PRN').goto('C.nl')
+ P('LBD.emit').o('imm ').a(('COPYW','tok','a0')).call('PRINT').o(', ').a(('LDX','ld_print','ld_i',ADDRESS)).call('LBD.print64').goto('C.nl')
+ # Borrowed host addresses are 64-bit; the legacy PRN intentionally uses ALU32.
+ P('LBD.print64').a(('LDI','ld_pk',0),('LDI','ld_zero',0)).goto('LBD.printdigit')
+ P('LBD.printdigit').a(('A64I','urem','ld_pd','ld_print',10),('A64I','udiv','ld_print','ld_print',10),('STX','ld_pk',199 << 40,'ld_pd'),('ALUI','add','ld_pk','ld_pk',1)).branch({1:'LBD.printout'},'LBD.printdigit',[('C64U','ld_print','ld_zero')])
+ P('LBD.printout').a(('ALUI','sub','ld_pk','ld_pk',1),('LDX','ld_pd','ld_pk',199 << 40),('ALUI','add','ld_pd','ld_pd',48),('OUTW','ld_pd')).branch({1:'RET'},'LBD.printout',[('CMPI','ld_pk',0)])

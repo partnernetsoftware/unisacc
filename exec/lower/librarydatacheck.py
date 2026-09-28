@@ -45,8 +45,8 @@ def main():
   bad=[binding(data(desc=D((1<<32)|1,0,0,2,8,0))),binding(data(address=(1<<63)|4096)),binding(data(extent=7)),binding(data(extent=(1<<64)-1)),binding(data(desc=D(0,0,0,(1<<32)|1,8,0))),binding(data(desc=D(0,0,0,1,8,(1<<32)|1))),binding(data(writable=0)),binding(data(supported=0)),binding(data(desc=D(0,0,0,1,3,0))),binding(data(desc=D(0,0,0,0,0,0))),binding(data(address=0)),valid[:-1],valid+b'X',valid[:8]+U(1<<63)+valid[16:],binding(data(),data())]
   for wire in bad:assert check(tape,wire)[0]=='reject'
   if posix:
-   huge=2147487744
-   status,out=check(tape,binding(data(address=huge)));assert status=='accept' and ('imm '+register.decode()+', '+str(huge)+'\n').encode() in out
+   for huge in (2147487744,(1<<32)+4096,0x105e46de8,10*(1<<32),(1<<63)-1):
+    status,out=check(tape,binding(data(address=huge)));assert status=='accept' and ('imm '+register.decode()+', '+str(huge)+'\n').encode() in out
   for raw in [tape.replace(b'0, 1, 8, 0',b'0, 1, 4, 0'),tape.replace(b'g_counter',b'g_absent'),tape.replace(b'g_counter',b'counter'),tape.replace(b'0, 1, 8, 0',b'0, 1, 8, 1'),tape.replace(b'0, 1, 8, 0',b'0, 1, 999999999999999999999, 0')]:assert check(raw)[0]=='reject'
   assert check(tape,module=False)[0]=='reject'
   for n in range(1,len(valid)):

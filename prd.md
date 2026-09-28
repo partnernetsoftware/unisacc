@@ -2715,3 +2715,5 @@ fa9b452源（正式库builder+原生生命周期checker）重新构造shared/六
 数据构造收片：E3私有网络全域1,750,790观察，lower四POSIX各全域相等并通过混合function/data、源定义优先、64位地址及所有截断/高32字段/溢出控制。Windows数据明确拒绝。新增lib-data实际借用变量读写门禁，必须完整候选native O0/O1/O2通过再称闭环。Windows桥新增lib-windows-bridge门禁，依赖开发机clang与llvm-readobj，只验证COFF/展开元数据及独立寄存器恢复，不计原生Windows库通过。经典SHAPE新增.libraryaddr需要按构造路线同步opinfo权重与生成物，不接受旧轴裁判通过。
 
 数据E3固定314保持集在补齐examples的私有快照上由C真实网络对拍实际参考全部equal（8.93秒）；先前Python单批超时无效结果不计通过。Windows桥256模拟项、5恢复破坏控制及两COFF展开元数据通过，仍未原生调用；证据分别见research/r10-data-e3-evidence.json与research/r10-windows-bridge-evidence.json。
+
+数据native首验rc139已定位：E3 tape正确，但lower LBD.emit调用旧PRN的32位十进制运算，真实0x105e46de8借用地址被写成98856424，原生load崩溃。原lower正例仅2147487744没有覆盖跨2^32地址。修复为该地址路径独立64位无符号十进制规则（A64I udiv/urem，C64U判零），增加2^32+4096、真实高地址及INT64_MAX等精确立即数预期；不改旧布局打印的语义。失败四门禁日志保留，根产物不更新直到真实读写通过。
