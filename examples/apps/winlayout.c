@@ -194,13 +194,14 @@ static int topmost(long px, long py)
 int main(int argc, char **argv)
 {
     char buf[512];
+    int capture = argc == 2 && strcmp(argv[1], "--capture") == 0;
     FILE *f;
     int i, j, c, r, pairs = 0, pi = -1, pj = -1;
     long covered = 0, pbest = 0;
     long fx = 0, fy = 0, fw = 0, fh = 0, farea = 0;
     static char rowok[MAXE];
 
-    if (argc > 1) {
+    if (argc > 1 && !capture) {
         f = strcmp(argv[1], "-") == 0 ? stdin : fopen(argv[1], "r");
         if (f == 0) { fprintf(stderr, "winlayout: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
@@ -212,6 +213,12 @@ int main(int argc, char **argv)
 #endif
     }
     if (NW == 0) { fprintf(stderr, "winlayout: no windows\n"); return 1; }
+
+    if (capture) {
+        printf("screen %ld %ld\n", SW, SH);
+        for (i = 0; i < NW; i++) printf("%ld %ld %ld %ld %s\n", W[i].x, W[i].y, W[i].w, W[i].h, W[i].title);
+        return 0;
+    }
 
     nx = edge(xs, 0, 0); nx = edge(xs, nx, SW);
     ny = edge(ys, 0, 0); ny = edge(ys, ny, SH);

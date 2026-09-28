@@ -27,6 +27,7 @@ collector participates in these commands.
 ./unisacc.com -run examples/apps/memmap.c
 ./unisacc.com -run examples/apps/winlayout.c
 ./unisacc.com -run examples/apps/exeinfo.c unisacc.com /bin/ls
+./unisacc.com -run examples/apps/memmap.c -- --capture > maps.txt
 ```
 
 The former collector launcher has been removed. Explicit files or `-` remain available
@@ -38,8 +39,9 @@ There is no synthetic fallback.
 The macOS bridge resolves system symbols using dlopen/dlsym and calls them
 through libffi with explicit native types. This adds real foreign calls;
 it does not mean all bundled libc functions have been replaced. Bundled
-FILE and va_list objects never cross into system libc. `tools/` collectors
-are historical test references, not part of the application commands or live defaults.
+FILE and va_list objects never cross into system libc. The former system-cc
+collectors have been removed. `--capture` exports the live raw snapshot
+from each application for reproducible analysis tests.
 
 `tests/appsrealcheck.py` uses cc only as a test reference. Captured inputs
 are compared byte for byte; live defaults are checked structurally because

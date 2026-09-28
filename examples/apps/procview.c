@@ -230,12 +230,13 @@ static void show(int i, const char *pre, const char *branch, int level)
 int main(int argc, char **argv)
 {
     char buf[512];
+    int capture = argc == 2 && strcmp(argv[1], "--capture") == 0;
     FILE *f;
     int i, j, k, ng, roots = 0, orphans = 0, selfp = 0, cyc = 0;
     int fan = -1, top;
     int rootfirst = -1;
 
-    if (argc > 1) {
+    if (argc > 1 && !capture) {
         f = strcmp(argv[1], "-") == 0 ? stdin : fopen(argv[1], "r");
         if (f == 0) { fprintf(stderr, "procview: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
@@ -251,6 +252,11 @@ int main(int argc, char **argv)
 #endif
     }
     if (NP == 0) { fprintf(stderr, "procview: no processes\n"); return 1; }
+
+    if (capture) {
+        for (i = 0; i < NP; i++) printf("%ld %ld %ld %s\n", P[i].pid, P[i].ppid, P[i].rss, P[i].name);
+        return 0;
+    }
 
     for (i = 0; i < NP; i++) {
         P[i].parent = -1; P[i].first = -1; P[i].next = -1;

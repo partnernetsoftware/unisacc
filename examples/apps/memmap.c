@@ -186,12 +186,13 @@ static int by_span(const void *a, const void *b)
 int main(int argc, char **argv)
 {
     char buf[512];
+    int capture = argc == 2 && strcmp(argv[1], "--capture") == 0;
     FILE *f = 0;
     int i, k, ngap = 0, nover = 0, nwx = 0;
     unsigned long kcount[NKIND], ksum[NKIND];
     struct { unsigned long size, lo, hi; } gap[3];
 
-    if (argc > 1) {
+    if (argc > 1 && !capture) {
         f = strcmp(argv[1], "-") == 0 ? stdin : fopen(argv[1], "r");
     } else {
 #ifdef __linux__
@@ -204,12 +205,17 @@ int main(int argc, char **argv)
 #endif
 #endif
     }
-    if (argc > 1 && f == 0) { fprintf(stderr, "memmap: cannot open maps input\n"); return 1; }
+    if (argc > 1 && !capture && f == 0) { fprintf(stderr, "memmap: cannot open maps input\n"); return 1; }
     if (f) {
         while (fgets(buf, sizeof buf, f)) add_line(buf);
         if (f != stdin) fclose(f);
     }
     if (NR == 0) { fprintf(stderr, "memmap: no regions\n"); return 1; }
+
+    if (capture) {
+        for (i = 0; i < NR; i++) printf("%lx-%lx %s %lx 00:00 %lu %s\n", R[i].lo, R[i].hi, R[i].perm, R[i].off, R[i].ino, R[i].path);
+        return 0;
+    }
 
     for (i = 0; i < NKIND; i++) { kcount[i] = 0; ksum[i] = 0; }
     for (i = 0; i < NR; i++) {
