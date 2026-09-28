@@ -8,6 +8,43 @@
 
 当前本地模型产物的功能/权重字节账与测试优先级见 [模型功能与物理字节账](#model-function-bytes)。
 
+
+### v0.0.9 交付计划（当前唯一发布清单，2026-09-28）
+
+**目标**：收敛成更小、可验证、演示真实、可企业签名的模型编译器。保持“声明表 → 构造确定性网络 → 通用执行器完成编译”的产品路线。离线构造/打包允许 Python；不做训练、不继续扩大迁移框架。以下旧规格、旧候选和实验流水均按其日期解释，不覆盖本清单。
+
+**已发布基线**：v0.0.8 / `10672e3`，未签名 `.com` 5,388,402 B；发布证据与限制封存，不回写。
+**当前本地基线**：`44fc348` 构建、`75e54ef` 收尾，`.com` 1,083,311 B，SHA256 `01e5c1d9d4528a2402d212883da0df64f63d60b8f17b5e6461d18e41ed053631`。P3压缩与单次memory已实现，本地179/179通过；Linux arm64三程序另有实际烟测，Windows/Linux x86_64本轮未验。它仍是本地候选，不能写成0.0.9已发布。
+
+| 编号 | 有限交付 | 状态 / 完成判据 |
+|---|---|---|
+| R9-1 | 权重/模型压缩 | **实现已达，发布复验待做**：保留P3二进制+逐网络DEFLATE/CRC、共享模型索引与P1/P2兼容；不再重复开发压缩。最终网络/表全域相等、坏包拒绝、功能字节账与同身份计时齐全。当前无签名主产物约1.08MB作为基线；签名新增字节单列，不把证书算成权重。 |
+| R9-2 | 代码和文档收敛 | 更新README/ARCHITECTURE/exec入口、prd导读与Paper A；归档无规范ID的旧发布/实验流水，主文只留现状、限制、证据链接。列每个归档项原路径、去向与引用；保留稳定ID、A/B/C论文、经典参考与原始失败证据。代码仅移除证明无引用的死项或合并确实重复的机制，不以行数下降代替正确性。 |
+| R9-3 | 正确性与TDD | 小批修复已确认的strtol/strtoul边界及Python #if静默吞内部异常。测试先覆盖范围边界、endptr、前缀/无数字、ERANGE，以及畸形表达式/未消费token/内部异常；三条编译路线与独立host参考核对。atol仅检查有定义的输入，不把它的溢出行为当作标准保证。 |
+| R9-4 | 高效测试队列 | 保留滚动双槽和≤60秒步骤，重项可独占。准备产物继续内容缓存；通过结果改按**显式、保守的套件输入闭包**复用，含脚本/实际生成器和静态资源、编译器SHA、选项/环境/平台身份。未证明闭包的套件沿用全局失效，漏项不能复用。证明：仅改prd叙述不重跑产品；改README等受docs检查的输入只失效docs；改检查器失效对应族；改候选SHA失效相关--com套件。输入/配置变化、超时和缺项控制必须抓到。 |
+| R9-5 | 真实演示与覆盖 | 让`unisacc.com -run examples/apps/*.c`成为直接演示入口；无cc采集器、无假实时数据。固定计算/解析样例用独立预期与cc行为对照；进程/窗口/自映射用结构检查及程序自取的快照，不要求变化中的实时输出逐字节相同。丰富文件/I/O、解析、内存/边界与真实系统数据检查；Linux procview的目录枚举作为一个有界切片，先确认getdents/opendir当前实现与授权，再实现，不能偷偷只修改演示文字。权限拒绝、消失进程、空输入和不支持平台明确报告。 |
+| R9-6 | 微软与苹果企业签名 | **设计待实现，发布门槛**：从minicon直接学习并适配；先格式rehearsal，再配置资格检查和真实签名。Windows以企业Authenticode验证`.com`及显式发布的PE资产；macOS以同源原生Mach-O的Developer ID+公证资产验证。签前/签后完整SHA、来源、签名者、时间戳、公证与信任判据都有回执。未通过不能称企业双签或无声改为未签名发布。 |
+| R9-7 | 最终冻结与发布 | 版本更新为0.0.9、冻结本地构建身份；最终输入上全套本地门禁和按单套件平台验证，签后实际资产再验编译/-run/包读取及签名。平台未验显式列出，VM用后清理。先草稿审查，再提升同一封存字节并打tag；不为测试push、不在发布时重新构建或重签。 |
+
+**三批顺序与并行边界**：
+
+1. **整理/资格批**：文档归档审计（README/ARCHITECTURE/research/prd）、正确性回归（include与前端）、签名格式/流程（release/签名适配）可以分文件并行；共享生成物统一由主代理重建，prd与索引单写者。先记录精确交付和文件域，禁止多个写者改同一生成器。签名兼容原型只用私有候选，不改根产物。
+2. **实现/验证批**：落小范围正确性修复、队列闭包、真实演示与签名接入；每片先相关测试，合批后重建一次。源码编辑与门禁运行不重叠。队列改动须有故障控制，不能用缓存隐藏失败。压缩与单次memory的已验内容保持不扩张。
+3. **发布批**：统一冻结、完整队列、六目标指定平台证据、真实签名/公证和签后验收、草稿/发布。网络服务以提交/有界轮询分步推进，不放宽60秒上限。外部证书/账号权限与客机可用性单列阻挡，不承诺未核实的完成日期。
+
+**签名的已核实风险与路线**：
+
+- 实际读取minicon的`company-signing.yml`、`macos-signing.yml`、`release-policy.json`、`self-sign-rehearsal.sh`与签名回执/验签工具。复用公司发布身份及方法；unisacc的repo级Environment、Entra app/OIDC与profile级角色授权独立核对，不能借用minicon的客户端身份冒充已配置。本计划不创建第二个公司身份，不记录私钥/凭据。
+- 当前`.com`已有空PE Security Directory，但缺VERSIONINFO；`exec/c/run.c`从EOF-16读UNIPKG footer。Authenticode附加证书会移动EOF，必须先定义有界的证书/包定位并验证签名前后**模型包内容不变**、截断/错误偏移拒绝及所有宿主启动路径。不靠搜索任意magic定位可信包，不直接照搬minicon的ZIP检查。
+- APE `.com`不是原生Mach-O，不能把Windows签名说成苹果Developer ID签名。默认规划保留单文件`.com`主资产，并提供同源双架构原生macOS签名/公证分发物（可staple的app/dmg）；不在未证格式兼容前许诺一个`.com`同时承载两套平台企业签名。原生资产是否universal或两份独立切片以包定位rehearsal结果确定，不能lipo后丢模型包。
+- 苹果Hardened Runtime可能限制当前匿名内存转RX与FFI。用实际签名原生候选验证编译、-run、系统API调用和最小必要运行配置，不能因为minicon无需entitlement便假定unisacc也不需要。公证Accepted、codesign strict、staple及适用于最终分发形态的Gatekeeper判据分别记录；裸CLI的判据不能套成app判据。
+- 本机负责构建，签名工作流只消费哈希冻结的本地产物，不搬入CI编译。资格演练明确非正式发布；正式签名后重新记录产物SHA与来源侧车/签名回执，发布只提升这些字节。签名服务、凭据资格及真实信任结果尚未核实，不把仓库模板当作签名已经成功。
+- 官方依据：[Microsoft Artifact Signing角色](https://learn.microsoft.com/en-us/azure/artifact-signing/concept-resources-roles)、[GitHub OIDC接入](https://github.com/Azure/artifact-signing-action/blob/main/docs/OIDC.md)、[PE Certificate Table](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)、[Apple分发签名](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac)、[Apple公证](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)。实现时对照当前官方文档，不照抄归档计划的过期状态。
+
+**整理的首批明确清单**：README/ARCHITECTURE仍以旧9a0ae470或1dbac50候选和“未发布”作现状；exec/README与rules仍含“产品尚未采用”。这些更新为v0.0.8发布+当前P3/单次memory候选。prd早期训练交付定义、prd.map的14阶段/7,052 B、旧E3研究记录标历史；手写键数与生成表核对，不批量改生成块。`exec/parse/gen.py`仍是被导入的共享组装器，parse/probes仍在keep清单，经典src/unisa/kernel与E0论文复现实验必须保留。归档只迁过期现状/叙事并同步引用，不进行大目录搬迁或凭年龄删除代码。
+
+**本版不捆绑**：库AOT、跨阶段二进制流、重复网络结构合并、系统libc全面转发、新语言/目标、mmap内存重构、全域T2/T3证明。AOT如做只独立测量，不阻挡这份清单；不能同步改参考实现只为凑字节相同。各项完成并验证后即停止扩范围、进入发布。
+
 ### 0.1 条款编号
 
 每条规范性条款带稳定 ID，供实现、形式化证明、验收脚本三方引用。**ID 一旦分配不再改动**，废弃条款保留编号并标记。
