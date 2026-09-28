@@ -2859,3 +2859,5 @@ R10 variadic完整调用闭环本批实施：E3同时处理USBIND3 format2原型
 本批私有quiet E3候选公开调用已实测：ARM普通/ASan+UBSan、Rosetta普通各O0/O1/O2×100次全部通过，真实va_arg图/提升/Pair/零尾/后置源码优先与缺前缀、前缀不符拒绝通过。独立图字段检查抓到首版350–357与modelsignature银行重叠，改400–407并断言隔离；第一版仅接受判定不足、不作为通过证据。新模型进入正式构造与受影响门禁之前，根产品仍保持旧bd41d0d3。callback图后续设计见research/r10-callback-graph-next-design.md（仅设计，不把现host全局us_sym回跳等同于callback形参跨界）。
 
 本批FP栈探针口径更正：首轮fixed double1+提升float1+额外double6合计8，恰好仍在ARM/x86的8个FP寄存器内，不能证明跨栈；已将额外double增为7、总FP9，并在正式候选两ISA普通/ASan验收中重跑。不删除首轮结果，但撤回其中FP跨栈表述。
+
+R10 public typedvariadic正式候选收尾：ed43891源私有冻结树完整shared/六目标/P3/APE每步≤55s真实构造，a225e17只修回归的FP9边界。根.com与原始sidecar同步**1,084,569 B / SHA256 89667911e1ab3af2b26f3961106f804e445ae9544e8ca8e275a1a91502a103f9**。两ISA公开变参ASan+UBSan与旧fixed ABI/模板事务8项rc0（6s），435次产品三优化级差分wrong0/refuse0（15s），language-1的13探针/6拒绝rc0（47s），库兼容/产品入口/kernel/docs8项rc0（17s）；实际23对网络全域一致。新模型独立签名逐字段检查与sim/C-network一致。总21项受影响门禁，不是最终全套；没有VM/push/签名/release。回执research/r10-variadic-public-evidence.json；完整R10继续，下一域recursive callback签名图，四个平台原生与其他布局/WindowsSEH/企业签名发布保持原范围。
