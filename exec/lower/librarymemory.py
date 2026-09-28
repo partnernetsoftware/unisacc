@@ -10,7 +10,7 @@ def install(E, os_, regmap, sysa):
     scratch='x'+str(IP0) if regmap['r0'].startswith('x') else SCR
     assert scratch not in regmap.values(), 'library zero scratch aliases tape register'
     rules(E.g,Path(__file__).parent,'librarymemory',section='route',
-          bindings=dict(supported='C.prelude.base' if os_ in ('osx','lnx') else 'C.fail', SYSA=sysa),
+          bindings=dict(supported='C.prelude.base' if os_ in ('osx','lnx','win') else 'C.fail', SYSA=sysa),
           sequences=dict(fn=E.O('setreg '+regmap['r1']+', imm '),
                          argv=E.O('setreg '+regmap['r0']+', addr '), zero=E.O(', '+scratch+'\n'), zeroinit=E.O('setreg '+scratch+', imm 0\n'),
                          store=E.O('setmem '), call=E.O('hostcall '+regmap['r1']+', '+regmap['r0']+'\n'),

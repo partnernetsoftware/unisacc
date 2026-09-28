@@ -3,7 +3,7 @@ No host compiler/encoder is called by this model generator.
 """
 from pathlib import Path
 from finite_rules import install as install_rules, load as load_rules
-from unisa.hostabi import ARM_FN, ARM_ARGV, ARM_BODY, X86_BODY
+from unisa.hostabi import ARM_FN, ARM_ARGV, ARM_BODY, X86_BODY, WIN_X86_BODY
 from unisa.catalog import REGMAP
 from unisa.emit_x86 import NUM
 
@@ -40,10 +40,13 @@ def install(E, arch, word=None):
     u64(E,'HB.libraryread',b'\0library/exit','hb_libraryexit','hb_hasexit','HB.fail')
     u64(E,'HB.librarymmap',b'\0library/mmap','hb_librarymmap','hb_hasmmap','HB.fail')
     u64(E,'HB.librarymunmap',b'\0library/munmap','hb_librarymunmap','hb_hasmunmap','HB.fail')
-    guard(E,'HB.call.librarytarget',[('CMPI','target_os',1)],'HB.call.libraryread')
+    guard(E,'HB.call.librarytarget',[('RLD','target_os')],'HB.call.libraryread',(1,3))
     install_rules(E.g,Path(__file__).parent,'hostbridge',section='library')
     P('HB.fail').a(E.rej('not covered: foreign host ABI target or operands')).goto('DEAD')
     p=P('HB.call.emit')
+    if arch=='x86_64':
+        p.branch({1:'HB.call.emitwin'},'HB.call.emitposix',[('CMPI','target_os',3)])
+        p=P('HB.call.emitposix')
     if arch=='arm64':
         for base,arg in [(ARM_FN,'a0'),(ARM_ARGV,'a1')]:
             p.a(('ALUI','shl','w',arg,16),('ALUI','or','w','w',base));word(p)
@@ -61,5 +64,13 @@ def install(E, arch, word=None):
                 ('ALUI','and','t',arg,7),('ALUI','shl','t','t',3),
                 ('ALUI','or','t','t',0xC0|(dest&7)),('OUTW','t'))
         p.a([('OUT',b) for b in X86_BODY]).goto('NEXTL')
+        win=P('HB.call.emitwin')
+        # Operand prefix has no OS-specific rule; emit the identical moves.
+        for dest,arg in [(11,'a0'),(0,'a1')]:
+            win.a(('ALUI','sar','t',arg,3),('ALUI','shl','t','t',2),
+                ('ALUI','or','t','t',0x48|(dest>>3)),('OUTW','t'),('OUT',0x89),
+                ('ALUI','and','t',arg,7),('ALUI','shl','t','t',3),
+                ('ALUI','or','t','t',0xC0|(dest&7)),('OUTW','t'))
+        win.a([('OUT',b) for b in WIN_X86_BODY]).goto('NEXTL')
         P('HB.addr.emit').a(('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),
             ('A64I','add','ad_v','ad_v',224),('LDI','ad_o',0x8B),('LDI','anamed',0)).goto('AD.store')

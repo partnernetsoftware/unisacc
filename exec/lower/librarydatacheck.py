@@ -36,7 +36,7 @@ def main():
    if status=='accept':assert p.stdout==out
    else:assert p.returncode==1
    return status,out
-  status,out=check(tape);posix=target.startswith(('lnx/','osx/'));assert status==('accept' if posix else 'reject')
+  status,out=check(tape);posix=target.startswith(('lnx/','osx/','win/'));assert status==('accept' if posix else 'reject')
   if posix:
    register=b'x0' if target.endswith('/arm64') else b'rax';assert b'imm '+register+b', 4096\n' in out
    mixed=tape.replace(b'ret\n',b'.librarycall r1, r0\nret\n');assert check(mixed)[1].count(b'hostcall ')==1

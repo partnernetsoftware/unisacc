@@ -41,7 +41,7 @@ def main():
                 package.write_bytes(build([manifest],[] if value is None else [('006c6962726172792f',resource)]))
                 result=subprocess.run([runtime,'--bundle',str(package),'test',str(source)],capture_output=True,timeout=55)
                 assert (result.returncode==0)==(status=='accept'),(op,value,status,result.returncode,result.stderr)
-                if value not in (None, bytes(8)) and (len(value)!=8 or target.split('/')[0] not in ('osx','lnx')):
+                if value not in (None, bytes(8)) and (len(value)!=8 or target.split('/')[0] not in ('osx','lnx','win')):
                     assert status=='reject' and result.returncode==1,'invalid/unsupported callback must reject'
                 if status=='accept':
                     assert result.stdout==out,(op,value,'table/network difference')

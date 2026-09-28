@@ -136,6 +136,9 @@ static void diagnostic(int status,const char *reason,int n,const void *errors);
 #undef free
 #include "memory.c"
 #include "../../src/host_dl.h"
+#if defined(_WIN32) && !defined(__UNISA__)
+#include "librarywinimports.h"
+#endif
 
 static void diagnostic(int status,const char *reason,int n,const void *errors) {
     if (!status) return;
@@ -429,9 +432,40 @@ static _Thread_local ScriptFrame *script_frames;
    argument sequence to issue; these callbacks never inspect source or tape. */
 static int64_t library_mmap(int64_t addr,int64_t length,int64_t prot,int64_t flags,int64_t fd,int64_t offset) {
 #ifdef _WIN32
-    /* The guest mmap callback contract remains POSIX. Windows allocation and
-       partial-unmap semantics require a separate declared adapter. */
-    (void)addr;(void)length;(void)prot;(void)flags;(void)fd;(void)offset;return -ENOSYS;
+    /* Windows gates use VirtualAlloc(addr,size,type,protect), not POSIX mmap.
+       Commit-only is restricted to an owned reservation; no foreign memory. */
+    if(!active || length<=0 || addr<0 || fd || offset ||
+       (uint64_t)length>SIZE_MAX || (uintptr_t)addr>UINTPTR_MAX-(size_t)length ||
+       (uint64_t)prot>UINT32_MAX || (prot & ~(MEM_RESERVE|MEM_COMMIT|MEM_TOP_DOWN)) ||
+       !(prot & (MEM_RESERVE|MEM_COMMIT)) || (uint64_t)flags>UINT32_MAX) {
+        SetLastError(ERROR_INVALID_PARAMETER);return 0;
+    }
+    size_t page=library_page_size();
+    if(!page || (size_t)length>SIZE_MAX-page+1){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+    size_t extent=((size_t)length+page-1)/page*page;
+    GuestMap *existing=0;
+    if(!(prot & MEM_RESERVE)) {
+        uintptr_t begin=(uintptr_t)addr/page*page;
+        size_t leading=(uintptr_t)addr-begin;
+        if((size_t)length>SIZE_MAX-leading-page+1){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+        extent=((size_t)length+leading+page-1)/page*page;
+        for(GuestMap *n=active->guest_maps;n;n=n->next)
+            if(begin>=(uintptr_t)n->base && begin-(uintptr_t)n->base<=n->length &&
+               extent<=n->length-(begin-(uintptr_t)n->base)){existing=n;break;}
+        if(!existing){SetLastError(ERROR_INVALID_PARAMETER);return 0;}
+    }
+    GuestMap *node=existing ? 0 : malloc(sizeof *node);
+    if(!existing && !node){SetLastError(ERROR_NOT_ENOUGH_MEMORY);return 0;}
+    void *p=VirtualAlloc((void *)(uintptr_t)addr,(SIZE_T)length,(DWORD)prot,(DWORD)flags);
+    if(!p){free(node);return 0;}
+    if(!existing){
+        MEMORY_BASIC_INFORMATION info;
+        if(!VirtualQuery(p,&info,sizeof info) || info.AllocationBase!=p){
+            VirtualFree(p,0,MEM_RELEASE);free(node);SetLastError(ERROR_INVALID_ADDRESS);return 0;
+        }
+        node->base=p;node->length=info.RegionSize;node->next=active->guest_maps;active->guest_maps=node;
+    }
+    return (int64_t)(uintptr_t)p;
 #else
     if (!active || length<=0 || (flags&MAP_FIXED)) return -EINVAL;
     GuestMap *node=malloc(sizeof *node);if (!node) return -ENOMEM;
@@ -446,7 +480,15 @@ static int64_t library_mmap(int64_t addr,int64_t length,int64_t prot,int64_t fla
 }
 static int64_t library_munmap(int64_t addr,int64_t length) {
 #ifdef _WIN32
-    (void)addr;(void)length;return -ENOSYS;
+    /* Match the Windows gate: release an entire owned allocation by base.
+       Its size argument is not a POSIX partial-unmap request. */
+    if(!active || addr<=0 || length<0){SetLastError(ERROR_INVALID_PARAMETER);return -1;}
+    GuestMap **at=&active->guest_maps;
+    while(*at && (uintptr_t)(*at)->base!=(uintptr_t)addr)at=&(*at)->next;
+    if(!*at){SetLastError(ERROR_INVALID_ADDRESS);return -1;}
+    GuestMap *node=*at;
+    if(!VirtualFree(node->base,0,MEM_RELEASE))return -1;
+    *at=node->next;free(node);return 0;
 #else
     if (!active || length<=0 || (uintptr_t)addr>UINTPTR_MAX-(size_t)length) return -EINVAL;
     long page=sysconf(_SC_PAGESIZE);
@@ -498,6 +540,13 @@ API int us_relocate(us_context *c) {
     if (!c || !c->target || !c->tape || !c->tape_length) return error(c,"no compiled tape");
     if (strcmp(c->target,library_native_target())) return error(c,"library execution target differs from host");
     if (active) return error(c,"recursive compilation not yet supported");
+#if defined(_WIN32) && !defined(__UNISA__)
+    LibraryWinImports winimports={0};
+    /* Construct ownership before setjmp: the object survives model longjmp. */
+    if(library_winimports_init(&winimports) || winimports.count>INT_MAX-16){
+        library_winimports_free(&winimports);return error(c,"cannot enumerate Windows OS exports");
+    }
+#endif
     discard_image(c);c->error[0]=0;active=c;volatile int rc=1;
     /* Mapping identity must survive longjmp on a malformed model output. */
     if (!setjmp(failure)) {
@@ -506,7 +555,11 @@ API int us_relocate(us_context *c) {
         MemoryMap mapping={0};memory_reserve(&mapping);
         c->image=mapping.base;c->image_size=mapping.reserved;
         /* Four loader slots and eight scalar resources. */
-        ResourceInput actual[16];unsigned char scalar[14][8];memset(actual,0,sizeof actual);
+        size_t capacity=16;
+#if defined(_WIN32) && !defined(__UNISA__)
+        capacity+=(size_t)winimports.count;
+#endif
+        ResourceInput *actual=tracked_calloc(capacity,sizeof *actual);unsigned char scalar[14][8];
         const char *names[]={"\0process/argc","\0process/argv","\0memory/text","\0memory/reserve",
             "\0library/symbols","\0library/exit","\0library/mmap","\0library/munmap","\0process/dl/0","\0process/dl/1","\0process/dl/2","\0process/dl/3","\0library/module","\0library/process"};
         uint64_t vals[]={c->argc,(uintptr_t)c->argv,(uintptr_t)mapping.base,mapping.reserved,1,(uintptr_t)library_exit,(uintptr_t)library_mmap,(uintptr_t)library_munmap,
@@ -522,6 +575,9 @@ API int us_relocate(us_context *c) {
             actual[NRI].name=(const unsigned char *)"\0library/bindings";actual[NRI].n=17;
             actual[NRI].data=c->binding_blob;actual[NRI].len=(int)c->binding_length;NRI++;
         }
+#if defined(_WIN32) && !defined(__UNISA__)
+        memcpy(actual+NRI,winimports.rows,(size_t)winimports.count*sizeof *actual);NRI+=winimports.count;
+#endif
         Buf input={0};input.n=(int)c->tape_length;input.b=tracked_realloc(0,c->tape_length);memcpy(input.b,c->tape,c->tape_length);
         char route[128];int z=snprintf(route,sizeof route,"%s/run/O%d",c->target,c->optimisation);
         if (z<0 || z>=(int)sizeof route) __us_panic("target too long");
@@ -535,7 +591,11 @@ API int us_relocate(us_context *c) {
             if(c->signatures && us_exports_load(&c->exports,c->signatures,c->signatures_length,c->error,sizeof c->error)) rc=1;
         }
     } else rc=1;
-    cleanup();active=0;RI=0;NRI=0;if (rc) discard_image(c);return rc;
+    cleanup();active=0;RI=0;NRI=0;
+#if defined(_WIN32) && !defined(__UNISA__)
+    library_winimports_free(&winimports);
+#endif
+    if (rc) discard_image(c);return rc;
 }
 /* Addresses are model-declared symbols; native callability comes only from
    the soft-stack adapter and an independently validated ABI declaration. */

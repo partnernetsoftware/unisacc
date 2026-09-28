@@ -2772,3 +2772,11 @@ R10 Windows首个真实DLL失败已定位：native CRT的open(O_RDONLY)默认tex
 R10 Windows真实运行结果：官方libffi ARM原生、x86_64在ARM上的仿真两probe call42/closure43均rc0。二进制IO独立65539字节向量（全byte值、跨65536扩容）两目标实际rc0，native与ASan/UBSan宿主rc0；恢复旧text mode的ARM变异体只读26字节并rc3，证明裁判确实抓到0x1a截断。真实DLL加binary IO后两目标都完成O0源码compile（334B tape），但relocate明确rc8/not covered Windows lowering，不能算库通过。完整公开API探针会继续要求实际原生导出check(5)=12及O0/O1/O2，不以compile通过降低验收。回执research/r10-windows-native-first-evidence.json，Windows客机已stop并status=stopped。新增exec-binaryio本地native/ASan门禁；WindowsVM专项单独运行，不让无VMskip算pass。
 
 R10 binary IO修复后完整candidate实际构造：all外层55秒rc142（已完成shared/六目标，pack中止），单独pack复核所有manifest后rc0，不放宽上限。a2bae38新候选真实字节仍`071cf2dbda46b8fa641fdb02d1a577702f4d8c2f34a14f8b851be07535fd79e6`/1,055,907 B（__UNISA__产品IO路径不使用CRT，故不变），来源侧车来自本次实际构建，根产物已复制并check。10受影响门禁全部rc0、17秒，包括新exec-binaryio、resolver/context/artifacts、com-run12/12、com-c9957/57、kernel/docs/word64/core。回执research/r10-windows-io-final-candidate.json；Windows库lowering/完整ABI/六平台与最终签名发布仍待，不外推全部R10绿。
+
+### R10 Windows library模型与OS资源并发迁移决定（2026-09-29）
+
+首次真实DLL已将包IO问题修复，继续闭合relocate拒绝。分域：（1）模型GP桥：lower callback/import/data能力与encoder固定Windows ABI声明，普通源hostcall保持拒绝，hostaddr仍Mac-only；Windows x64明确32B shadow、16对齐、6GP中后2在栈，保留tape活寄存器；ARM x18不碰。（2）机械OS导出资源：从已加载kernel32可信PE导出目录枚举全部命名导出，GetProcAddress处理forwarders，提供精确64位process/import资源，不在C硬编码编译器import list；模型仍选需要的名。（3）root集成到native library context与guest mmap/cleanup。只保证正常调用/显式退出恢复，不能从GNU ARM libffi正常返回证明SEH安全。先私有候选与实际Windows公开API O0/O1/O2，自然错误必须保留，不跳过relocate放低验收；每步55秒、两个文件域并行，root统一生成物/根产物/提交。
+
+Windows guest mmap契约经现有stdlib实读校准：Windows _UNISA_MAP传VirtualAlloc(addr,size,type=0x3000,protect=4,0,0)，不是POSIX prot/flags；callback转发native reserve/commit且记录所有权，失败返回NULL（0）；__munmap按现有gate全base VirtualFree(MEM_RELEASE)且成功0/失败-1，不承诺POSIX局部unmap。commit-only只允许已拥有reservation内，foreign映射不能被脚本commit/release；cleanup对owned allocation完整release。类型/保护由OS验证，模型决定调用与参数，host仅OS和生命周期机制。
+
+**R10 Windows 库桥与 OS 资源专项实测**：两目标 lower 的表/网络全域核对分别覆盖360,686、469,820观察；x64 六GP桥125B经独立COFF汇编与Rosetta执行64组高位参数/寄存器恢复探针，缺rcx恢复变异体被拒。Windows ARM原生与x86仿真分别枚举kernel32的1,691/1,698个导出，地址全部等于GetProcAddress；owned reserve/commit/release控制两目标实机通过。新增日常门禁lib-windows-imports与lib-windows-gp。证据见research/r10-windows-library-model-adapters.json；这些专项不代替完整DLL compile/relocate/us_sym，也不证明ARM SEH或Windows动态库解析器完成。

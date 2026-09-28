@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Library-only Linux integer ABI bridge; table and network resource controls.
+"""Library-only Linux/Windows integer ABI bridge; table and network resource controls.
 This checks encoded bytes, not real host callback execution.
 Usage: libraryexitcheck.py RUN JSON ARCH
 """
@@ -38,12 +38,15 @@ def main():
                     (resource/'exit').write_bytes(value or bytes(8))
                     pkg.write_bytes(build([manifest],[] if value is None else [('006c6962726172792f',resource)]))
                     got=subprocess.run([runtime,'--bundle',str(pkg),'test',str(source)],capture_output=True,timeout=55)
-                    accept=os_=='osx' or (os_=='lnx' and op=='hostcall' and value is not None and len(value)==8 and int.from_bytes(value,'little')!=0)
+                    accept=os_=='osx' or (os_ in ('lnx','win') and op=='hostcall' and value is not None and len(value)==8 and int.from_bytes(value,'little')!=0)
                     assert (status=='accept')==accept,(os_,op,value,status)
                     assert got.returncode==(0 if accept else 1),(os_,op,value,got.returncode,got.stderr)
                     if accept:
                         assert got.stdout==out,'table/network bytes differ'
-                        if op=='hostcall':
+                        if op=='hostcall' and os_=='win' and arch=='x86_64':
+                            from unisa.hostabi import WIN_X86_BODY
+                            assert out.endswith(WIN_X86_BODY), 'Win64 ABI declaration missing'
+                        if op=='hostcall' and (os_!='win' or arch=='arm64'):
                             if equalbytes is None:equalbytes=out
                             assert out==equalbytes,'Linux/macOS integer ABI bridge differs'
                         if value is None:assert command([runtime,str(tbl),str(source)])==out,'C table differs'
@@ -60,6 +63,6 @@ def main():
                 assert (status=='accept')==accept and got.returncode==(0 if accept else 1),(callback,value,status,got.returncode)
                 if accept:assert out==got.stdout==equalbytes,'mapping bridge bytes differ'
                 n+=1
-        print('librarybridge:',arch,n,'resource verdicts; Linux/macOS bridge bytes equal; check-net full domain')
+        print('librarybridge:',arch,n,'resource verdicts; Windows library-only ABI route, Linux/macOS bridge equal; check-net full domain')
 
 if __name__=='__main__':main()

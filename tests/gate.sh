@@ -202,6 +202,8 @@ job lib-word64 python3 ./tests/librarywordcheck.py --native-only
 job exec-binaryio python3 ./tests/runtimeiocheck.py
 job exec-crcllp64 python3 ./tests/crcllp64check.py --ua "${MODEL_COM:-./unisacc.com}" --native-only
 job lib-windows-bridge python3 ./tests/windowslibrarybridgecheck.py
+job lib-windows-imports python3 ./tests/librarywinimportscheck.py
+job lib-windows-gp python3 ./exec/enc/windowshostbridgecheck.py
 job lib-lifecycle python3 ./tests/libunisaccruncheck.py --package "${MODEL_COM:-./unisacc.com}" --iterations 1000
 job shared-e2-plain ./tests/sharede2.sh plain
 job shared-e2-located ./tests/sharede2.sh located

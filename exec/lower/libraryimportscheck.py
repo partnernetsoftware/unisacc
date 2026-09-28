@@ -43,9 +43,9 @@ def main():
    return status,out
   values=dict(base);values[b'\0library/bindings']=valid
   status,out=check(raw,values)
-  assert status==('reject' if target.startswith('win/') else 'accept'),(target,status,out)
+  assert status=='accept',(target,status,out)
   if status=='accept':assert out.count(b'hostcall ')==2
-  if not target.startswith('win/'):
+  if status=='accept':
    for unrelated in (binding(supported=0),binding(D(0,0,0,3,8,0))):
     assert check(raw,{**base,b'\0library/bindings':unrelated})[0]=='accept'
   controls=0

@@ -14,7 +14,7 @@ def install(E, os_, ids):
     install_decoder(E)
     g.st['LBI.original.dispatch']=g.st.pop('C.dispatch');g.labels.add('LBI.original.dispatch')
     P('C.dispatch').branch({1:'LBI.capability'},'LBI.original.dispatch',[('CMP','op',ids['.librarycall'])])
-    P('LBI.capability').branch({1:'LBI.arity' if os_ in ('osx','lnx') else 'LBI.fail'},'LBI.fail',[('CMPI','library_module',1)])
+    P('LBI.capability').branch({1:'LBI.arity' if os_ in ('osx','lnx','win') else 'LBI.fail'},'LBI.fail',[('CMPI','library_module',1)])
     P('LBI.arity').branch({1:'LBI.reg0'},'LBI.fail',[('CMPI','na',2)])
     for i,nx in [(0,'LBI.reg1'),(1,'LBI.cached')]:
         P('LBI.reg'+str(i)).branch({1:'LBI.fail'},nx,[('LDX','lbi_reg','a'+str(i),REG),('CMPI','lbi_reg',0)])

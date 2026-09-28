@@ -36,7 +36,7 @@ def main():
     status,out,_=simulate(d,raw,'input',files=Resources(op,value),maxsteps=1000000)
     (resource/op).write_bytes(value or bytes(8));pkg.write_bytes(build([manifest],[] if value is None else [('006c6962726172792f',resource)]))
     got=subprocess.run([runtime,'--bundle',str(pkg),'test',str(source)],capture_output=True,timeout=55)
-    supported=target.split('/')[0] in ('osx','lnx')
+    supported=target.split('/')[0] in ('osx','lnx','win')
     valid=value in (None,bytes(8)) or (len(value)==8 and supported and (op=='munmap' or mode==1))
     assert (status=='accept')==valid,(target,op,mode,value,status)
     assert got.returncode==(0 if valid else 1),(target,op,mode,value,got.returncode,got.stderr)
@@ -63,7 +63,7 @@ def main():
   status,out,_=simulate(d,raw,'input',files=Resources('',values),maxsteps=1000000)
   pkg.write_bytes(build([manifest],[('006c6962726172792f',resource)]))
   got=subprocess.run([runtime,'--bundle',str(pkg),'test',str(source)],capture_output=True,timeout=55)
-  if target.split('/')[0] in ('osx','lnx'):
+  if target.split('/')[0] in ('osx','lnx','win'):
    assert status=='accept' and got.returncode==0 and got.stdout==out,'combined callback routes differ'
    assert out.count(b'hostcall ')==3 and b'gate ' not in out,'combined callback route lost'
    for value in values.values():assert str(int.from_bytes(value,'little')).encode() in out,'callback address lost'

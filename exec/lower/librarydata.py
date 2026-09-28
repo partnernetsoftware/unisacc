@@ -12,7 +12,7 @@ def install(E,os_,ids):
   g.on(name,[c for c in range(257) if c not in cases],other,[],'b')
  g.st['LBD.original.dispatch']=g.st.pop('C.dispatch');g.labels.add('LBD.original.dispatch')
  P('C.dispatch').branch({1:'LBD.capability'},'LBD.original.dispatch',[('CMP','op',ids['.libraryaddr'])])
- P('LBD.capability').branch({1:'LBD.arity' if os_ in ('osx','lnx') else 'LBI.fail'},'LBI.fail',[('CMPI','library_module',1)])
+ P('LBD.capability').branch({1:'LBD.arity' if os_ in ('osx','lnx','win') else 'LBI.fail'},'LBI.fail',[('CMPI','library_module',1)])
  P('LBD.arity').branch({1:'LBD.reg'},'LBI.fail',[('CMPI','na',6)])
  P('LBD.reg').a(('LDX','ld_reg','a0',REG)).branch({1:'LBI.fail'},'LBD.local',[('CMPI','ld_reg',0)])
  P('LBD.local').a(('LDX','ld_def','a1',DEFINED)).branch({1:'LBD.owned'},'LBD.cached',[('CMPI','ld_def',1)])
