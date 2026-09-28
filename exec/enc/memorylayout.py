@@ -16,9 +16,11 @@ def install(E, fail, code_size='endo'):
     u64(E,'ML.argv',b'\0process/argv','ml_argv','ml_hasargv',fail)
     u64(E,'ML.text',b'\0memory/text','ml_text','ml_hast',fail)
     u64(E,'ML.data',b'\0memory/data','ml_data','ml_hasd',fail)
+    u64(E,'ML.reserve',b'\0memory/reserve','ml_capacity','ml_hasreserve',fail)
     from finite_rules import install as install_rules, load as load_rules
     root = Path(__file__).parent
-    bindings = dict(fail=fail, DATA_BASE=DATA_BASE, code_size=code_size)
+    bindings = dict(fail=fail, DATA_BASE=DATA_BASE, code_size=code_size,
+                    reserve_choice="ML.reserve-choice", iat_size=8*len(IMPORTS))
     for line in (root/'memorylayout-names.tsv').read_text().splitlines():
         if line and not line.startswith('#'):
             name, owner, kind = line.split('\t')

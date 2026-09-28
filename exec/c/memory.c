@@ -5,7 +5,7 @@
 #endif
 
 typedef struct { int text, extent, stored, entry; } MemoryImage;
-typedef struct { unsigned char *base; long size, dataoff; } MemoryMap;
+typedef struct { unsigned char *base; long size, dataoff, reserved; } MemoryMap;
 
 static int memory_field(const unsigned char *p) {
     long n=0;
@@ -40,6 +40,39 @@ static void memory_map(MemoryImage *m, MemoryMap *x) {
 #endif
 #endif
     if ((long)x->base<0 || !x->base) die("cannot map native memory");
+}
+/* The OS selects the actual base; the model binds its image once. */
+static void memory_reserve(MemoryMap *x) {
+    x->reserved=2147467264; x->size=x->reserved; x->dataoff=0;
+#ifdef _WIN32
+    x->base=(unsigned char *)__mmap(0,x->reserved,0x2000,1,0,0);
+#else
+#ifdef __UNISA__
+#ifdef __linux__
+    x->base=(unsigned char *)__mmap(0,x->reserved,0,0x22,-1,0);
+#else
+    x->base=(unsigned char *)__mmap(0,x->reserved,0,0x1002,-1,0);
+#endif
+#else
+    x->base=mmap(0,(size_t)x->reserved,PROT_NONE,MAP_PRIVATE|MAP_ANON,-1,0);
+#endif
+#endif
+    if ((long)x->base<0 || !x->base) die("cannot reserve native memory");
+}
+static void memory_commit(MemoryImage *m,MemoryMap *x) {
+    x->dataoff=((long)m->text+16383)&-16384;
+    x->size=x->dataoff+(((long)m->extent+16383)&-16384);
+    if (x->size>x->reserved) die("native image exceeds reserved memory");
+#ifdef _WIN32
+    unsigned char *p=(unsigned char *)__mmap((long)x->base,x->size,0x1000,4,0,0);
+    if (p!=x->base) die("cannot commit reserved native memory");
+#else
+#ifdef __UNISA__
+    if (__mprotect((long)x->base,x->size,3)) die("cannot commit reserved native memory");
+#else
+    if (mprotect(x->base,(size_t)x->size,PROT_READ|PROT_WRITE)) die("cannot commit reserved native memory");
+#endif
+#endif
 }
 static int memory_enter(MemoryMap *x,MemoryImage *plan,Buf *bytes) {
     MemoryImage m; memory_image(bytes,&m);

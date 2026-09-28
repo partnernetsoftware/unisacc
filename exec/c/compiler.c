@@ -238,6 +238,17 @@ int main(int argc, char **argv) {
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
         snprintf(route,sizeof route,"%s/memory",target);
+        const char *twopass=getenv("UNISA_MEMORY_TWOPASS");
+        if (!twopass || strcmp(twopass,"1")) {
+            unsigned char memory_capacity[8];
+            memory_reserve(&mapping);
+            resource_u64(memory_text,(long)mapping.base);
+            resource_u64(memory_capacity,mapping.reserved);
+            cli[7].name=(const unsigned char *)"\0memory/text";cli[7].n=12;cli[7].data=memory_text;cli[7].len=8;
+            cli[8].name=(const unsigned char *)"\0memory/reserve";cli[8].n=15;cli[8].data=memory_capacity;cli[8].len=8;
+            rc=runroute(route,&in,src);
+            if (!rc) { memory_image(&in,&plan);memory_commit(&plan,&mapping); }
+        } else {
         Buf first={0};first.n=in.n;first.b=xrealloc(0,in.n);memcpy(first.b,in.b,in.n);
         rc=runroute(route,&first,src);
         if (!rc) {
@@ -250,6 +261,7 @@ int main(int argc, char **argv) {
             cli[7].name=(const unsigned char *)"\0memory/text";cli[7].n=12;cli[7].data=memory_text;cli[7].len=8;
             cli[8].name=(const unsigned char *)"\0memory/data";cli[8].n=12;cli[8].data=memory_data;cli[8].len=8;
             rc=runroute(route,&in,src);
+        }
         }
     }
     unpackage(); RI=0; NRI=0;

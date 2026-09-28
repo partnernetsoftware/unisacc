@@ -319,3 +319,23 @@ cache hits are decoded and compared against the intended binary bytes.
 The decoder is an explicitly altered Mark Adler puff 2.3 with its zlib license
 retained in `codec.h`, plus the measured prefix lookup and slice-by-4 CRC. It
 returns bounded errors and contains no language or stage-specific predicates.
+
+
+## Single-pass native memory binding
+
+For `-run`, the host reserves a no-access virtual interval at an OS-selected
+address. It supplies `memory/text` and `memory/reserve` as little-endian u64
+resources. The memory network computes the text/import extent, aligns the
+data start to 16 KiB, and emits the final relocated UNIMEM image once.
+The host validates its extents, commits only the needed pages and sets code
+permissions. No fixed-address mapping or host-side instruction/layout decision
+is introduced. Reserve/commit failure and a mismatched Windows commit address
+are errors. Reservation is at most 2 GiB minus 16 KiB, within the existing
+relative-address range; it is virtual space, not eagerly allocated RAM.
+
+The old `memory/text` + `memory/data` interface remains supported. Supplying
+`memory/reserve` together with `memory/data`, without `memory/text`, or with
+an invalid capacity rejects. `UNISA_MEMORY_TWOPASS=1` selects the old two-pass
+driver only for diagnosis and same-driver comparisons; other values do not.
+File output routes do not reserve memory. The mapping lasts until process exit.
+Windows API-contract mocks are not Windows execution evidence.

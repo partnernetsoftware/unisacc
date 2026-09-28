@@ -48,7 +48,22 @@ if kind in ('all','cc') and shard in ('all','1/3'):
         assert image[40+text:]+bytes(extent-stored)==body[nt:],f+' data'
         (p/'lowered').write_bytes(lowered);(p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
         assert ok([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])==image
-        print('bound native bytes:',f,'reference = action oracle = network')
+        # Same actual base, one-pass data placement must match the retained
+        # explicit text/data binding byte for byte, not merely run hello.
+        reserve=2147467264
+        (resources/'memory/data').unlink()
+        (resources/'memory/reserve').write_bytes(struct.pack('<Q',reserve))
+        one=sim.Files()
+        for key,v in vals.items():
+            if key!='memory/data': one.cache[b'\0'+key.encode()]=struct.pack('<Q',v)
+        one.cache[b'\0memory/reserve']=struct.pack('<Q',reserve)
+        verdict,once,_=sim.run(enc,lowered,f,one,maxsteps=50000000,loaded=el)
+        assert verdict=='accept' and once==image,(f,'one-pass binding differs')
+        (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
+        assert ok([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])==image
+        (resources/'memory/reserve').unlink()
+        (resources/'memory/data').write_bytes(struct.pack('<Q',db))
+        print('bound native bytes:',f,'reference = explicit binding = reserved binding = network')
     # Binding context is atomic: a half-specified base or absent process context
     # must not turn run headers into an ordinary executable image.
     missing_context=[('memory/text',),('memory/data',),('process/argc','process/argv')]
@@ -64,7 +79,28 @@ if kind in ('all','cc') and shard in ('all','1/3'):
         rejected=run([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])
         assert rejected.returncode!=0 and not rejected.stdout,(missing,rejected.returncode)
         for key in missing: (resources/key).write_bytes(struct.pack('<Q',vals[key]))
-    print('memory context: missing bases/process context and',4 if prefix else 0,'loader slots rejected by both executors')
+    # The final valid program supplies all required process/Darwin resources.
+    # A malformed reserve binding must reject before producing any bytes.
+    for capacity,drop,mixed in [(2147467264,True,False),(2147467264,False,True),
+                                 (0,False,False),(-1,False,False),(1<<31,False,False)]:
+        bad=sim.Files()
+        for key,v in vals.items():
+            if key=='memory/data' and not mixed: continue
+            if key=='memory/text' and drop: continue
+            bad.cache[b'\0'+key.encode()]=struct.pack('<Q',v)
+        bad.cache[b'\0memory/reserve']=struct.pack('<Q',capacity & ((1<<64)-1))
+        verdict,_,_=sim.run(enc,lowered,'bad-reserve',bad,maxsteps=50000000,loaded=el)
+        assert verdict!='accept',(capacity,drop,mixed)
+        if not mixed: (resources/'memory/data').unlink()
+        if drop: (resources/'memory/text').unlink()
+        (resources/'memory/reserve').write_bytes(bad.cache[b'\0memory/reserve'])
+        (p/'bound.pkg').write_bytes(build([manifest],[('00',resources)]))
+        rejected=run([p/'run','--bundle',p/'bound.pkg','memory',p/'lowered'])
+        assert rejected.returncode!=0 and not rejected.stdout,(capacity,drop,mixed,rejected.returncode)
+        (resources/'memory/reserve').unlink()
+        for key in ('memory/text','memory/data'):
+            (resources/key).write_bytes(struct.pack('<Q',vals[key]))
+    print('memory context: missing bases/process/loader slots and five malformed reserve bindings rejected by both executors')
 # Behaviour includes real stdio, arguments, pointers, static storage, all levels.
 probes=['examples/hello.c','examples/fib.c','examples/struct.c','tests/c/b_argv.c','tests/c/b_printf.c','tests/c/b_static.c']
 if shard != 'all': probes=probes[int(shard[0])-1::3]
@@ -97,3 +133,26 @@ if kind in ('all','cc') and shard in ('all','1/3'):
             (p/'invalid.mem').write_bytes(bad);r=run([p/name,p/'invalid.mem'])
             assert r.returncode==2 and b'memory image' in r.stderr,(name,r.returncode,r.stderr)
     print('memory loader: both builds accept valid bytes and reject entry/length/extent violations')
+    # Compile the production loader with a Windows API-contract double.
+    # This checks reserve/commit arguments and failures, not a Windows guest.
+    mock=p/'reserve.c';mock.write_text((root/'exec/c/memory-contract.c').read_text())
+    ok(['cc','-O2','-I'+str(root/'exec/c'),mock,'-o',p/'reserve'])
+    assert ok([p/'reserve','0'])==b'reserve and exact-address commit\n'
+    for mode,message in [(1,b'cannot reserve'),(2,b'cannot commit'),
+                          (3,b'cannot commit'),(4,b'exceeds reserved')]:
+        rejected=run([p/'reserve',str(mode)])
+        assert rejected.returncode==2 and message in rejected.stderr and not rejected.stdout,(mode,rejected)
+    print('memory allocation: Windows contract success and four failures; mock only')
+    # Large virtual extent, only two actual pages touched; not a huge C source.
+    lazy=p/'lazy.c'
+    lazy.write_text('#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n'
+                    'typedef struct { unsigned char *b; int n; } Buf;\n'
+                    'static void die(const char *s){fprintf(stderr,"%s\\n",s);exit(2); }\n'
+                    '#include "memory.c"\n'
+                    'int main(void){MemoryMap x;MemoryImage m={1,610000000,0,0};'
+                    'memory_reserve(&x);memory_commit(&m,&x);unsigned char *p=x.base+x.dataoff;'
+                    'if(p[0] || p[609999999])return 8;p[609999999]=7;'
+                    'printf("%d %d\\n",p[0],p[609999999]);munmap(x.base,x.reserved);return 0;}\n')
+    ok(['cc','-O2','-I'+str(root/'exec/c'),lazy,'-o',p/'lazy'])
+    assert ok([p/'lazy'])==b'0 7\n'
+    print('memory extent: 610MB virtual range, zero initial pages and final page write pass; host loader only')
