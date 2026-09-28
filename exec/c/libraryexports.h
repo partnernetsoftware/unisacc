@@ -222,7 +222,7 @@ static ffi_type *us_export_native(us_export_type *t,int result) {
 typedef struct us_export_bridge_check {const us_export_signature *seen[1024];size_t signatures,nodes;} us_export_bridge_check;
 static int us_export_bridge_type(const us_export_type *,int,unsigned,us_export_bridge_check *);
 static int us_export_bridge_signature(const us_export_signature *s,us_export_bridge_check *c){
-    if(!s||s->variadic||s->mode>1||s->count>1024||s->stored!=s->count||(!s->mode&&s->count>6)||(s->count&&!s->argtypes))return 0;
+    if(!s||s->variadic>1||s->mode>1||s->count>1024||s->stored!=s->count||(!s->mode&&(s->count>6||s->variadic))||(s->variadic&&!s->count)||(s->count&&!s->argtypes))return 0;
     for(size_t i=0;i<c->signatures;i++)if(c->seen[i]==s)return 1;
     if(c->signatures>=1024)return 0;c->seen[c->signatures++]=s;
     if(!us_export_bridge_type(&s->result,1,1,c))return 0;

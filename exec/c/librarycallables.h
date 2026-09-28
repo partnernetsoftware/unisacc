@@ -90,8 +90,8 @@ static int us_callable_clone_graph(us_export_graph *g,const us_export_signature 
     us_callable_clone c={0};c.graph=g;g->signatures=calloc(1024,sizeof *g->signatures);if(!g->signatures||!us_callable_clone_signature(&c,root))return 1;
     for(size_t i=0;i<g->count;i++){
         const us_export_signature *s=c.source[i];us_export_signature *d=g->signatures[i];
-        if(s->variadic||s->mode>1||s->count>1024||s->stored!=s->count||(s->count&&!s->argtypes))return 1;
-        d->id=i+1;d->count=d->stored=s->count;d->mode=s->mode;d->supported=s->supported;
+        if(s->variadic>1||s->mode>1||s->count>1024||s->stored!=s->count||(s->count&&!s->argtypes)||(s->variadic&&(s->mode!=1||!s->count)))return 1;
+        d->id=i+1;d->count=d->stored=s->count;d->variadic=s->variadic;d->mode=s->mode;d->supported=s->supported;
         if(us_callable_clone_type(&c,&d->result,&s->result,0))return 1;
         d->argtypes=calloc(s->count?(size_t)s->count:1,sizeof *d->argtypes);if(!d->argtypes)return 1;
         for(size_t j=0;j<s->count;j++)if(us_callable_clone_type(&c,d->argtypes+j,s->argtypes+j,0))return 1;
@@ -184,7 +184,7 @@ static int us_callable_make(us_callables *r,unsigned origin,const us_export_sign
     p->args=calloc(x->count?(size_t)x->count:1,sizeof *p->args);if(!p->args)goto bad;
     ffi_type *ret=us_callable_layout(&x->result,1,0);if(!ret)goto bad;
     for(size_t i=0;i<x->count;i++)if(!(p->args[i]=us_callable_layout(x->argtypes+i,0,0)))goto bad;
-    if(ffi_prep_cif(&p->cif,FFI_DEFAULT_ABI,(unsigned)x->count,ret,p->args)!=FFI_OK)goto bad;
+    if(!x->variadic&&ffi_prep_cif(&p->cif,FFI_DEFAULT_ABI,(unsigned)x->count,ret,p->args)!=FFI_OK)goto bad;
     uint64_t token=atomic_load_explicit(&us_callable_global_token,memory_order_relaxed);
     do {if(!token||token==UINT64_MAX)goto bad;}while(!atomic_compare_exchange_weak_explicit(&us_callable_global_token,&token,token+1,memory_order_relaxed,memory_order_relaxed));
     p->token=token;p->next=r->head;r->head=p;*handle=token;return 0;
@@ -194,6 +194,7 @@ static int us_callable_pointer(us_callables *r,uint64_t h,const us_export_signat
     if(!out||!s)return 1;*out=NULL;if(!h)return 0;us_callable *p=us_callable_find(r,h);
     if(!p||!us_callable_signature_equal(p->graph.signatures[0],s))return us_callable_error(error,cap,"stale foreign or incompatible callable handle");
     if(p->origin==US_CALLABLE_NATIVE){*out=(void*)p->target;return 0;}
+    if(p->graph.signatures[0]->variadic)return us_callable_error(error,cap,"variadic script closure requires concrete specialization");
     if(!p->closure){p->closure=ffi_closure_alloc(sizeof *p->closure,&p->code);
         if(!p->closure||ffi_prep_closure_loc(p->closure,&p->cif,us_callable_callback,p,p->code)!=FFI_OK){if(p->closure)ffi_closure_free(p->closure);p->closure=NULL;p->code=NULL;return 1;}
         us_callable_lock();p->global_next=us_callable_global_closures;us_callable_global_closures=p;us_callable_unlock();}
@@ -206,9 +207,8 @@ static int us_callable_from_native(us_callables *r,const us_export_signature *s,
         if(!bad)*out=p->token;us_callable_unlock();return bad?us_callable_error(error,cap,"foreign or incompatible closure"):0;
     }us_callable_unlock();return us_callable_make(r,US_CALLABLE_NATIVE,s,(uintptr_t)raw,out,error,cap);
 }
-static int us_callable_call(us_callables *r,uint64_t handle,const us_export_signature *expected,
+static int us_callable_invoke(us_callables *r,us_callable *p,
                             const uint64_t *slots,void *result,uint64_t count,char *error,size_t cap){
-    us_callable *p=us_callable_find(r,handle);if(!p||!expected||!us_callable_signature_equal(p->graph.signatures[0],expected))return us_callable_error(error,cap,"stale foreign or incompatible callable call");
     const us_export_signature *s=p->graph.signatures[0];size_t rn=s->result.kind?(size_t)s->result.width:0;
     if(count!=s->count||(count&&!slots)||(rn&&!result)||us_callable_budget(s))return us_callable_error(error,cap,"invalid callable frame");
     void *temp=calloc(rn>sizeof(ffi_arg)?rn:sizeof(ffi_arg),1);void **owned=NULL,**values=NULL;int rc=1;
@@ -227,5 +227,42 @@ static int us_callable_call(us_callables *r,uint64_t handle,const us_export_sign
     if(!rc&&rn)us_callable_commit_slot(&s->result,result,temp);
 done:if(owned)for(size_t i=0;i<count;i++)free(owned[i]);free(owned);free(values);free(temp);
     if(rc&&error&&cap&&!error[0])us_callable_error(error,cap,"declared callable invocation failed");return rc;
+}
+/* A prototype declares only the fixed prefix. A concrete signature declares
+   the promoted tail and is never used as a closure's universal signature. */
+static int us_callable_concrete_valid(const us_export_signature *proto,const us_export_signature *concrete){
+    if(!proto||!concrete||proto->variadic!=1||proto->mode!=1||!proto->count||proto->count>1024||proto->stored!=proto->count||!proto->argtypes||
+       concrete->variadic||concrete->mode!=1||concrete->count<proto->count||concrete->count>1024||concrete->stored!=concrete->count||!concrete->argtypes)return 0;
+    if(!us_native_type_equal(&proto->result,&concrete->result))return 0;
+    for(size_t i=0;i<proto->count;i++)if(!us_native_type_equal(proto->argtypes+i,concrete->argtypes+i))return 0;
+    for(size_t i=proto->count;i<concrete->count;i++){
+        const us_export_type *t=concrete->argtypes+i;
+        if((t->kind==3&&t->width==4)||(t->kind==1&&t->width<4))return 0;
+    }return 1;
+}
+static int us_callable_call(us_callables *r,uint64_t handle,const us_export_signature *expected,
+                            const uint64_t *slots,void *result,uint64_t count,char *error,size_t cap){
+    us_callable *p=us_callable_find(r,handle);
+    if(!p||!expected||!us_callable_signature_equal(p->graph.signatures[0],expected))return us_callable_error(error,cap,"stale foreign or incompatible callable call");
+    if(p->graph.signatures[0]->variadic)return us_callable_error(error,cap,"variadic callable requires concrete signature");
+    return us_callable_invoke(r,p,slots,result,count,error,cap);
+}
+static int us_callable_call_concrete(us_callables *r,uint64_t handle,const us_export_signature *expected_proto,
+        const us_export_signature *concrete,const uint64_t *slots,void *result,uint64_t count,char *error,size_t cap){
+    us_callable *source=us_callable_find(r,handle);
+    if(!source||!expected_proto||!us_callable_signature_equal(source->graph.signatures[0],expected_proto))
+        return us_callable_error(error,cap,"stale foreign or incompatible variadic callable");
+    const us_export_signature *proto=source->graph.signatures[0];
+    if(!us_callable_concrete_valid(proto,concrete)||count!=concrete->count)
+        return us_callable_error(error,cap,"invalid concrete variadic callable signature");
+    us_callable *p=calloc(1,sizeof *p);if(!p)return us_callable_error(error,cap,"callable allocation failed");
+    p->registry=r;p->origin=source->origin;p->generation=r->generation;p->target=source->target;int rc=1;
+    if(us_callable_clone_graph(&p->graph,concrete))goto done;
+    us_export_signature *s=p->graph.signatures[0];p->args=calloc((size_t)s->count,sizeof *p->args);if(!p->args)goto done;
+    ffi_type *ret=us_callable_layout(&s->result,1,0);if(!ret)goto done;
+    for(size_t i=0;i<s->count;i++)if(!(p->args[i]=us_callable_layout(s->argtypes+i,0,0)))goto done;
+    if(p->origin==US_CALLABLE_NATIVE&&ffi_prep_cif_var(&p->cif,FFI_DEFAULT_ABI,(unsigned)proto->count,(unsigned)s->count,ret,p->args)!=FFI_OK)goto done;
+    rc=us_callable_invoke(r,p,slots,result,count,error,cap);
+done:us_callable_free(p);if(rc&&error&&cap&&!error[0])us_callable_error(error,cap,"concrete variadic invocation failed");return rc;
 }
 #endif

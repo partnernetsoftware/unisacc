@@ -205,6 +205,7 @@ job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
 job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
 job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
 job lib-callable-mechanism python3 ./tests/librarycallablescheck.py
+job lib-callable-variadic-mechanism python3 ./tests/librarycallablevarcheck.py
 job lib-callback-plan python3 ./tests/librarycallbackplancheck.py
 job lib-callable-model ./tests/modelcallablewirecheck.sh
 job lib-callback-native python3 ./tests/librarycallbacknativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize

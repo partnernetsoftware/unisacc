@@ -99,7 +99,11 @@ int main(void){
  o.fail=o.sticky=0;assert(!us_callable_call(&o.registry,host,&drivesig,ds,&p,2,error,sizeof error)&&p.d==17);
  us_export_signature bad=leafsig;us_export_type ba[9];memcpy(ba,leafargs,sizeof ba);bad.argtypes=ba;ba[8]=D;
  assert(us_callable_pointer(&o.registry,script,&bad,&raw,error,sizeof error));
- bad=leafsig;bad.variadic=1;assert(us_callable_make(&o.registry,US_CALLABLE_NATIVE,&bad,(uintptr_t)native_leaf,&round,error,sizeof error));
+ bad=leafsig;bad.variadic=1;
+ assert(!us_callable_make(&o.registry,US_CALLABLE_NATIVE,&bad,(uintptr_t)native_leaf,&round,error,sizeof error));
+ assert(us_callable_call(&o.registry,round,&bad,NULL,&p,9,error,sizeof error));
+ assert(!us_callable_make(&o.registry,US_CALLABLE_SCRIPT,&bad,(uintptr_t)&scriptleaf,&round,error,sizeof error));
+ assert(us_callable_pointer(&o.registry,round,&bad,&raw,error,sizeof error));
  bad=leafsig;bad.mode=0;assert(us_callable_pointer(&o.registry,script,&bad,&raw,error,sizeof error));
  /* Layout disagreement and missing native boundary hooks explicitly refuse. */
  bad=leafsig;us_export_type wrong=PAIR;us_export_member wm[2];memcpy(wm,pm,sizeof wm);wm[1].offset=4;wrong.members=wm;bad.result=wrong;
