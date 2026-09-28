@@ -871,6 +871,12 @@ finished:
     if(failed){
         if(values->result_kind)memset(values->result,0,values->result_bytes);
         library_boundary_note(c,outcome);
+        /* Legacy fixed-GP hostcalls do not create a typed ffi boundary. Keep
+           their nested script failure in the nearest owner invocation too;
+           native code returns normally before its caller observes failure. */
+        for(ScriptFrame *p=frame.previous;p;p=p->previous)if(p->owner==c){
+            us_call_outcome_merge(p->outcome,outcome);break;
+        }
     }
     if(!same_owner_parent){
         c->call_exited=outcome->exited;c->call_exit_status=outcome->exited ? outcome->exit_status:0;c->call_failed=failed;
