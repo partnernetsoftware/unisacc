@@ -14,10 +14,8 @@
 # first time it ran -- see prd.md E-45 for what that bought.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
-. "$R/tests/lib.sh"
 CACHE=${TOOLS:-$R/corpus}
 BASE=$R/tests/tools.baseline
-T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 
 # name|url|commit
 REPOS="crypto-algorithms|https://github.com/B-Con/crypto-algorithms.git|cfbde48414baacf51fc7c74f275190881f037d32
@@ -43,14 +41,29 @@ tiny-aes|tiny-AES-c|aes.c test.c
 regex1|tiny-regex-c|re.c tests/test1.c
 regex2|tiny-regex-c|re.c tests/test2.c"
 
+# Deterministic, disjoint entry shards. --list has no fixture/build side effects.
+[ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = --list ]; } || { echo 'usage: tools.sh [--list]' >&2; exit 2; }
+SHARD=${SHARD:-1/1}; SH_K=${SHARD%/*}; SH_N=${SHARD#*/}
+case "$SHARD" in */*) ;; *) echo 'SHARD needs k/n' >&2; exit 2;; esac
+case $SH_K:$SH_N in *[!0-9:]*|:*|*:) echo 'invalid SHARD' >&2; exit 2;; esac
+[ "$SH_K" -ge 1 ] && [ "$SH_K" -le "$SH_N" ] && [ "$SH_N" -le 11 ] || { echo 'SHARD must be k/n with 1<=k<=n<=11' >&2; exit 2; }
+SELECTED=$(printf '%s\n' "$ENTRIES" | awk -F'|' -v k="$SH_K" -v n="$SH_N" '((NR-1)%n)+1==k')
+[ -n "$SELECTED" ] || { echo 'empty tools shard' >&2; exit 2; }
+if [ "$#" -eq 1 ]; then printf '%s\n' "$SELECTED" | cut -d'|' -f1; exit 0; fi
+. "$R/tests/lib.sh"
+T=$(scratch)
+printf '%s\n' "$SELECTED" | cut -d'|' -f1 | sort > "$T/selected"
+# Project the original per-name ratchet onto this shard; never lower its count.
+[ -s "$BASE.list" ] || { echo 'tools baseline list missing/empty' >&2; exit 1; }
+comm -12 "$BASE.list" "$T/selected" > "$T/required"
 for r in $REPOS; do
     name=$(echo "$r" | cut -d'|' -f1)
     url=$(echo "$r" | cut -d'|' -f2)
     commit=$(echo "$r" | cut -d'|' -f3)
     [ -d "$CACHE/$name" ] && continue
-    [ "${FETCH:-1}" = "1" ] || { echo "tools corpus absent (FETCH=0)"; exit 0; }
-    git clone -q "$url" "$CACHE/$name" || { echo "clone failed -- skipped"; exit 0; }
-    (cd "$CACHE/$name" && git checkout -q "$commit") || true
+    [ "${FETCH:-1}" = "1" ] || { echo "tools corpus absent (FETCH=0)"; exit 1; }
+    bound 30 git clone -q "$url" "$CACHE/$name" || { echo "clone failed"; exit 1; }
+    (cd "$CACHE/$name" && bound 15 git checkout -q "$commit") || exit 1
 done
 
 case "$(uname -s)/$(uname -m)" in
@@ -58,9 +71,9 @@ case "$(uname -s)/$(uname -m)" in
     Darwin/x86_64) HOST=osx/x86_64;;
     Linux/x86_64)  HOST=lnx/x86_64;;
     Linux/aarch64) HOST=lnx/arm64;;
-    *) echo "tools: no native target for this host -- skipped"; exit 0;;
+    *) echo "tools: no native target for this host"; exit 1;;
 esac
-command -v cc >/dev/null || { echo "tools: no system compiler -- skipped"; exit 0; }
+command -v cc >/dev/null || { echo "tools: no system compiler"; exit 1; }
 
 # The reference VM is a Python loop and these run 100,000 rounds, so a real
 # image is the only way to run them -- which is also the stronger check.
@@ -77,7 +90,7 @@ pass=0; wrong=0; unsup=0; skip=0
 : > "$T/passing"
 # a redirect, not a pipe: the loop must run in THIS shell or the
 # counters it keeps are lost with the subshell
-printf '%s\n' "$ENTRIES" > "$T/entries"
+printf '%s\n' "$SELECTED" > "$T/entries"
 while IFS= read -r e; do
     [ -n "$e" ] || continue
     name=$(echo "$e" | cut -d'|' -f1)
@@ -92,7 +105,7 @@ while IFS= read -r e; do
         continue
     fi
     want=$(bound 60 "$T/ref" 2>&1); wrc=$?
-    if [ "$wrc" -ge 128 ]; then
+    if [ "$wrc" -ne 0 ]; then
         wrong=$((wrong+1)); printf "  WRONG %-9s reference exited %s\n" "$name" "$wrc"
         continue
     fi
@@ -102,9 +115,11 @@ while IFS= read -r e; do
         continue
     fi
     chmod +x "$T/got"
-    command -v codesign >/dev/null && bound 60 codesign -f -s - "$T/got" >/dev/null 2>&1
+    if command -v codesign >/dev/null && ! bound 10 codesign -f -s - "$T/got" >/dev/null 2>&1; then
+        wrong=$((wrong+1)); echo "  WRONG $name signing failed"; continue
+    fi
     got=$(bound 60 "$T/got" 2>&1); grc=$?
-    if [ "$grc" -lt 128 ] && [ "$grc" -eq "$wrc" ] && [ "$got" = "$want" ]; then
+    if [ "$grc" -eq 0 ] && [ "$got" = "$want" ]; then
         pass=$((pass+1)); echo "$name" >> "$T/passing"
         printf "  ok   %-9s %s\n" "$name" "$(printf '%s' "$got" | tail -1 | cut -c1-48)"
     else
@@ -116,9 +131,14 @@ while IFS= read -r e; do
 done < "$T/entries"
 
 echo
-echo "tools $((pass+wrong+unsup+skip))   pass $pass   wrong $wrong   unsupported $unsup   skip $skip"
+echo "tools SHARD=$SHARD $((pass+wrong+unsup+skip))   pass $pass   wrong $wrong   unsupported $unsup   skip $skip"
 
 rc=0
 [ "$wrong" -eq 0 ] || rc=1
-ratchet "$BASE" "$pass" "$T/passing" || rc=1
+sort "$T/passing" > "$T/passing.sorted"
+comm -23 "$T/required" "$T/passing.sorted" > "$T/lost"
+if [ -s "$T/lost" ]; then echo '  REGRESSION missing baseline names:'; cat "$T/lost"; rc=1; fi
+[ "$pass" -gt 0 ] || rc=1
+# Whole-suite invocation retains the original ratchet update facility.
+if [ "$SH_N" -eq 1 ]; then ratchet "$BASE" "$pass" "$T/passing" || rc=1; fi
 exit $rc

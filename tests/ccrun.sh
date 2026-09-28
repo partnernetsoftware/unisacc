@@ -4,6 +4,7 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 . "$R/tests/lib.sh"
+_BOUND=$("$R/tests/bound" --helper) || exit 2
 UA=${UA:-/tmp/ua_ref}
 BASE=$R/tests/ccrun.baseline
 KNOWN=$R/tests/ccrun.knownwrong
@@ -13,13 +14,19 @@ pass=0; fail=0; uns=0; known=0; revived=0
 isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
-    want=$(python3 -m unisa run "$f" --drive built 2>/dev/null)
-    if ! $UA "$f" -c > /tmp/cc_$b.tape 2>/tmp/cc_$b.err; then
+    rm -f "$T/ref.status"
+    want=$("$_BOUND" --status "$T/ref.status" 25 python3 -m unisa run "$f" --drive built 2>"$T/ref.err"); wrc=$?
+    ws=$(cat "$T/ref.status" 2>/dev/null)
+    if [ -z "$ws" ] || [ $((ws & 127)) -ne 0 ]; then fail=$((fail+1)); echo "  FAIL $b reference timeout/signal $wrc"; continue; fi
+    if ! "$_BOUND" 25 "$UA" "$f" -c > "$T/$b.tape" 2>"$T/$b.err" || [ ! -s "$T/$b.tape" ]; then
         uns=$((uns+1))
-        printf "  UNS  %-12s %s\n" "$b" "$(head -1 /tmp/cc_$b.err|cut -c1-48)"; continue
+        printf "  UNS  %-12s %s\n" "$b" "$(head -1 "$T/$b.err"|cut -c1-48)"; continue
     fi
-    got=$(python3 -m unisa vm /tmp/cc_$b.tape 2>/dev/null)
-    if [ "$got" = "$want" ]; then
+    rm -f "$T/vm.status"
+    got=$("$_BOUND" --status "$T/vm.status" 25 python3 -m unisa vm "$T/$b.tape" 2>"$T/vm.err"); grc=$?
+    gs=$(cat "$T/vm.status" 2>/dev/null)
+    if [ -z "$gs" ] || [ $((gs & 127)) -ne 0 ]; then fail=$((fail+1)); echo "  FAIL $b VM timeout/signal $grc"; continue; fi
+    if [ "$got" = "$want" ] && [ "$wrc" -eq "$grc" ]; then
         if isknown "$b"; then
             revived=$((revived+1))
             printf "  REVIVED %s  now agrees -- drop it from ccrun.knownwrong\n" "$b"
@@ -47,5 +54,15 @@ rc=0
 if [ "${NOBASE:-0}" = "1" ]; then
     exit $rc
 fi
-ratchet "$BASE" "$pass" "$T/passing" || rc=1
+if [ "${CCRUN_SHARD:-0}" = 1 ]; then
+    [ -s "$BASE.list" ] || { echo 'ccrun baseline list missing'; exit 1; }
+    for f in "$@"; do basename "$f" .c; done | sort > "$T/selected"
+    comm -12 "$BASE.list" "$T/selected" > "$T/required"
+    sort "$T/passing" > "$T/passed"
+    comm -23 "$T/required" "$T/passed" > "$T/lost"
+    if [ -s "$T/lost" ]; then echo 'REGRESSION: missing required names in this shard'; cat "$T/lost"; rc=1; fi
+    [ "$pass" -gt 0 ] || rc=1
+else
+    ratchet "$BASE" "$pass" "$T/passing" || rc=1
+fi
 exit $rc

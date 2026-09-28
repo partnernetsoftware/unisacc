@@ -43,25 +43,33 @@ def check():
         files = sorted(str(p.relative_to(ROOT)) for pat in ('examples/*.c', 'tests/c/*.c')
                        for p in ROOT.glob(pat))
         for suite in SHARDED - {'difftest', 'difftest_o'}:
-            chunks = [args[1:] for args in jobs if args[0] == './tests/' + suite + '.sh']
-            assert len(chunks) == 4 and all(chunks), (suite, chunks)
+            if suite == 'ccrun':
+                chunks = [args[3:] for args in jobs if args[:3] == ['env', 'CCRUN_SHARD=1', './tests/ccrun.sh']]
+            else:
+                chunks = [args[1:] for args in jobs if args[0] == './tests/' + suite + '.sh']
+            assert len(chunks) == 8 and all(chunks), (suite, chunks)
             actual = [f for chunk in chunks for f in chunk]
             assert sorted(actual) == files and len(set(actual)) == len(files), suite
         for suite in ('difftest', 'difftest_o'):
             actual = [args[1] for args in jobs if args[-1] == './tests/' + suite + '.sh']
-            assert actual == ['SHARD=%d/4' % i for i in range(1, 5)], (suite, actual)
+            assert sorted(actual) == ['SHARD=%d/4' % i for i in range(1, 5)], (suite, actual)
         plan = subprocess.run(['bash', 'tests/all.sh', '--list'], cwd=ROOT,
                               capture_output=True, text=True, timeout=5)
         assert plan.returncode == 0, plan.stderr
         names = plan.stdout.splitlines()
         assert names and len(names) == len(set(names)), names
         import re
-        bases = {n if n in BASE else re.sub(r'\d+$', '', n) for n in names}
+        def family(name):
+            for prefix in ('opt-', 'optpy-', 'ape-', 'acceptance'):
+                if name.startswith(prefix):
+                    return prefix.rstrip('-')
+            return name if name in BASE else re.sub(r'\d+$', '', name)
+        bases = {family(n) for n in names}
         assert BASE <= bases, BASE - bases
         if (ROOT / 'corpus/c-testsuite').is_dir():
             assert {'corpus1', 'corpus2', 'corpus3', 'corpus4'} <= set(names)
         if (ROOT / 'corpus/crypto-algorithms').is_dir():
-            assert 'tools' in names
+            assert {'tools1', 'tools2', 'tools3', 'tools4'} <= set(names)
         # A selected job must not accidentally dispatch the whole plan.
         record.write_text('')
         proc = subprocess.run(['bash', 'tests/all.sh', '--suite', 'native1'],
@@ -76,6 +84,28 @@ def check():
                               cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
         assert proc.returncode == 2, proc.returncode
         assert not record.read_text(), 'unknown selection dispatched/prepared a job'
+        # The aggregate must wait even for the slowest preparation job.
+        runner.write_text('#!' + sys.executable + '\n' +
+            'import os,sys,time,pathlib\n' +
+            'a=sys.argv[1:]; root=pathlib.Path(os.environ["CI_BARRIER"])\n' +
+            'if "--prepare" in a:\n' +
+            ' target=a[a.index("--prepare")+1]\n' +
+            ' time.sleep(.3 if target=="win/x86_64" else .01)\n' +
+            ' (root/target.replace("/","_")).write_text("ready")\n' +
+            'elif "./tests/ape.sh" in a:\n' +
+            ' assert len(list(root.iterdir()))==5, "aggregate started before preparation"\n')
+        barrier = tmp / 'barrier'; barrier.mkdir()
+        env['CI_BARRIER'] = str(barrier)
+        args = ['bash', 'tests/all.sh']
+        for name in ['ape-prepare%d' % i for i in range(1, 6)] + ['ape']:
+            args += ['--suite', name]
+        proc = subprocess.run(args, cwd=ROOT, env=env,
+                              capture_output=True, text=True, timeout=5)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+    expected = ['SHARD=%d/4' % i for i in range(1, 5)]
+    assert sorted(expected[::-1]) == expected
+    assert sorted(expected[:-1]) != expected
+    assert sorted(expected[:-1] + [expected[0]]) != expected
     print('ci plan: legacy coverage kept; 6 file partitions, 2 SHARD families; selection controls ok')
 
 

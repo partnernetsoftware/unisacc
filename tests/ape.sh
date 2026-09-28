@@ -17,8 +17,17 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
 COM=$T/unisacc.com
-"$_BOUND" 55 python3 -m unisa ape unisacc.c --via "$UA" -O 2 \
-    -o "$COM" >"$T/build.log" 2>&1
+if [ "${1:-}" = --prepare ]; then
+    [ "$#" -eq 2 ] && [ -n "${APE_STATE:-}" ] || { echo 'ape --prepare TARGET needs APE_STATE' >&2; exit 2; }
+    exec "$_BOUND" 52 python3 tests/ape_stage.py prepare "$APE_STATE" "$2" "$UA"
+fi
+[ "$#" -eq 0 ] || { echo 'unknown ape option' >&2; exit 2; }
+if [ -n "${APE_STATE:-}" ]; then
+    "$_BOUND" 25 python3 tests/ape_stage.py pack "$APE_STATE" "$COM" "$UA" >"$T/build.log" 2>&1
+else
+    "$_BOUND" 55 python3 -m unisa ape unisacc.c --via "$UA" -O 2 \
+        -o "$COM" >"$T/build.log" 2>&1
+fi
 build_rc=$?
 if [ "$build_rc" -ne 0 ]; then
     echo "  FAIL could not build the .com (rc=$build_rc)"

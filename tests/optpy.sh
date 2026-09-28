@@ -10,17 +10,32 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
-exec "$_BOUND" 55 python3 - "$UA" <<'PY'
-import subprocess, sys, glob
+exec "$_BOUND" 55 python3 - "$UA" "$_BOUND" <<'PY'
+import subprocess, sys, glob, os
 sys.path.insert(0, '.')
 from unisa.opt import optimise
 ua = sys.argv[1]
-files = sorted(glob.glob('examples/*.c') + glob.glob('tests/c/*.c')) + ['unisacc.c']
+part = os.environ.get('OPTPY_PART', 'all')
+if part not in ('all', 'probes', 'self'): raise SystemExit('invalid OPTPY_PART')
+shard = os.environ.get('SHARD', '1/1')
+import re
+if not re.fullmatch(r'[1-9][0-9]{0,5}/[1-9][0-9]{0,5}', shard): raise SystemExit('invalid SHARD')
+k, n = map(int, shard.split('/'))
+if k > n: raise SystemExit('invalid SHARD')
+probes = sorted(glob.glob('examples/*.c') + glob.glob('tests/c/*.c'))
+files = (probes[k-1::n] if part != 'self' else []) + (['unisacc.c'] if part != 'probes' else [])
+if not files: raise SystemExit('empty optpy partition')
+def tape(args):
+    p = subprocess.run([sys.argv[2], '15', ua] + args,
+                       capture_output=True, timeout=17)
+    if p.returncode != 0 or not p.stdout:
+        raise RuntimeError('tape failed/empty: %r rc=%d %s' % (args, p.returncode, p.stderr.decode('latin-1')))
+    return p.stdout.decode('latin-1')
 same = diff = 0
 for f in files:
-    base = subprocess.run([ua, f, '-t', 'osx/arm64'], capture_output=True).stdout.decode('latin-1')
+    base = tape([f, '-t', 'osx/arm64'])
     for lvl in (1, 2):
-        want = subprocess.run([ua, '-O%d' % lvl, f, '-t', 'osx/arm64'], capture_output=True).stdout.decode('latin-1')
+        want = tape(['-O%d' % lvl, f, '-t', 'osx/arm64'])
         if optimise(base, lvl) == want:
             same += 1
         else:

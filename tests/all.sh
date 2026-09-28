@@ -112,7 +112,15 @@ case "$LIMIT" in *[!0-9]*|"") echo "SUITE_LIMIT must be 1..60" >&2; exit 2;; esa
 JOBS=${JOBS:-2}
 case "$JOBS" in *[!0-9]*|"") echo "JOBS must be positive" >&2; exit 2;; esac
 [ "$JOBS" -ge 1 ] || { echo "JOBS must be positive" >&2; exit 2; }
-W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+W=$(mktemp -d)
+cleanup() {
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then rm -rf "$W";
+    else echo "all.sh: preserved logs $W (rc=$rc)" >&2; fi
+}
+trap cleanup EXIT
+APE_STATE=${APE_STATE:-$W/ape}; export APE_STATE
+ACCEPT_STATE=${ACCEPT_STATE:-$W/accept}; export ACCEPT_STATE
 ORDER=(); PLAN=()
 run() {
     local n="$1"; shift
@@ -131,10 +139,11 @@ run() {
         rc=$?
         [ "$rc" -eq 142 ] && echo "TIMED OUT after ${LIMIT}s" >> "$W/$n.out"
         echo "$rc" > "$W/$n.rc"; echo $(( $(date +%s) - t0 )) > "$W/$n.sec"
+        printf "finished %s rc=%s elapsed=%ss\n" "$n" "$rc" "$(cat "$W/$n.sec")"
     ) &
 }
 # Serial, and before anything else: a failing one says why in a known place.
-serial() { run "$@"; wait; }
+serial() { wait; run "$@"; wait; }
 T0=$(date +%s)
 
 # One build of the self-hosted compiler for every suite that uses it.  ccrun
@@ -159,7 +168,22 @@ for part in $(seq 1 15); do
         echo "SKIP acceptance$part: requires Darwin/arm64 (not a pass)" >&2
         continue
     fi
-    serial "acceptance$part" env PART="$part/15" ./tests/acceptance.sh
+    case "$part" in
+        6)
+            serial acceptance6-build env ACCEPT_CASE=6-build ./tests/acceptance.sh
+            for k in 1 2 3 4; do
+                serial "acceptance6-fold$k" env ACCEPT_CASE=6-fold SHARD="$k/4" ./tests/acceptance.sh
+            done
+            serial acceptance6-fault env ACCEPT_CASE=6-fault ./tests/acceptance.sh
+            serial acceptance6-image env ACCEPT_CASE=6-image ./tests/acceptance.sh
+            ;;
+        10)
+            for step in Btape Bimage Ctape Uimage compare; do
+                serial "acceptance10-$step" env ACCEPT_CASE="10-$step" ./tests/acceptance.sh
+            done
+            ;;
+        *) serial "acceptance$part" env PART="$part/15" ./tests/acceptance.sh;;
+    esac
 done
 # The full run rechecks after acceptance. A selected job did not rerun
 # acceptance and needs only its initial readiness check.
@@ -170,12 +194,16 @@ for shard in 1 2 3 4; do
 done
 # File shards are a disjoint partition of the original wildcard inputs.
 FILES=(examples/*.c tests/c/*.c)
-for shard in 0 1 2 3; do
+for shard in 0 1 2 3 4 5 6 7; do
     CHUNK=()
-    for ((i=shard; i<${#FILES[@]}; i+=4)); do CHUNK+=("${FILES[$i]}"); done
+    for ((i=shard; i<${#FILES[@]}; i+=8)); do CHUNK+=("${FILES[$i]}"); done
     [ "${#CHUNK[@]}" -gt 0 ] || { echo "empty probe shard" >&2; exit 2; }
     for suite in native fat ccrun selfhost closure stages; do
-        run "$suite$((shard+1))" "./tests/$suite.sh" "${CHUNK[@]}"
+        if [ "$suite" = ccrun ]; then
+            run "$suite$((shard+1))" env CCRUN_SHARD=1 "./tests/$suite.sh" "${CHUNK[@]}"
+        else
+            run "$suite$((shard+1))" "./tests/$suite.sh" "${CHUNK[@]}"
+        fi
     done
 done
 run crossnative bash -c "./tests/crossnative.sh $PROBES"
@@ -196,20 +224,36 @@ run tyinfo_audit bash -c 'python3 tests/tyinfo_audit.py'
 run abi_audit  bash -c 'python3 tests/abi_audit.py'
 run layout     ./tests/layout.sh
 run datashape  ./tests/datashape.sh
-run bigclosure ./tests/bigclosure.sh
+k=0
+for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
+    k=$((k+1)); run "bigclosure$k" ./tests/bigclosure.sh --target "$target"
+done
 run cli        ./tests/cli.sh
 run diag       ./tests/diag.sh
 run warn       ./tests/warn.sh
-run opt        ./tests/opt.sh
-run optpy      ./tests/optpy.sh
+for k in 1 2 3 4 5 6 7 8; do
+    run "opt-run$k" env OPT_PART=run SHARD="$k/8" ./tests/opt.sh
+done
+for k in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    run "opt-closure$k" env OPT_PART=closure SHARD="$k/16" ./tests/opt.sh
+done
+run opt-self env OPT_PART=self ./tests/opt.sh
+for k in 1 2 3 4; do
+    run "optpy-probes$k" env OPTPY_PART=probes SHARD="$k/4" ./tests/optpy.sh
+done
+run optpy-self env OPTPY_PART=self ./tests/optpy.sh
 for shard in 1 2 3 4; do
     run "difftest_o$shard" env SHARD="$shard/4" ./tests/difftest_o.sh
 done
 run scale      ./tests/scale.sh
-run ape        ./tests/ape.sh
+k=0
+for target in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64; do
+    k=$((k+1)); run "ape-prepare$k" ./tests/ape.sh --prepare "$target"
+done
+serial ape ./tests/ape.sh
 run multi      ./tests/multi.sh
 if [ -d corpus/crypto-algorithms ]; then
-    run tools  env FETCH=0 ./tests/tools.sh
+    for k in 1 2 3 4; do run "tools$k" env FETCH=0 SHARD="$k/4" ./tests/tools.sh; done
 fi
 run selfgap    ./tests/selfgap.sh
 # bootstrap needs the host toolchain to turn a tape back into a binary

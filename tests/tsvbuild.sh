@@ -15,7 +15,9 @@ printf '%s\n' "$c" | sed 's/^/  /'
 if [ $crc -ne 0 ] || ! printf '%s\n' "$c" | grep -q 'contract  cases 6  wrong 0'; then
     echo "tsvbuild  FAIL: input contract check (rc $crc)"; exit 1
 fi
-out=$(bound 58 python3 -m unisa build-weights --from-tsv --check 2>&1); rc=$?
+# Fresh independent stages run in two bounded slots; serializers compare the
+# whole UNS2 and JSON after all 18 exhaustive verifications finish.
+out=$(bound 58 python3 tests/tsvbuild_check.py 2>&1); rc=$?
 printf '%s\n' "$out" | sed 's/^/  /'
 if [ $rc -eq 0 ] && printf '%s\n' "$out" | grep -q "uns2 .* IDENTICAL" && printf '%s\n' "$out" | grep -q "json .* IDENTICAL"; then
     echo "tsvbuild  weights from tsv identical to shipped"
