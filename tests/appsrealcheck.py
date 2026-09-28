@@ -17,7 +17,7 @@ deadline = time.monotonic() + 50
 def run(args, expected=0):
     remaining = min(20, int(deadline - time.monotonic()))
     if remaining < 1: raise RuntimeError('whole check deadline exceeded')
-    r = subprocess.run(['perl', str(ROOT/'tests/bound.pl'), str(remaining), *map(str, args)],
+    r = subprocess.run(['python3', str(ROOT/'tests/bound.py'), str(remaining), *map(str, args)],
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if r.returncode != expected:
         raise RuntimeError(f'{args}: exit {r.returncode}, expected {expected}: {r.stderr.decode(errors="replace")}')
@@ -49,7 +49,8 @@ try:
         inputs = {'procview':d/'processes', 'memmap':d/'maps', 'winlayout':d/'windows', 'exeinfo':a.compiler}
         for app, source_input in inputs.items():
             source = a.apps/(app+'.c')
-            run(['cc', '-std=c99', '-Wall', '-Wextra', source, '-o', d/app])
+            ffi_flags = ['-DUFFI_HOST_SHIM', '-include', ROOT/'exec/ffi/hostshim.h', '-lffi'] if platform.system() == 'Darwin' else []
+            run(['cc', '-std=c99', '-Wall', '-Wextra', source, *ffi_flags, '-o', d/app])
             want = run([d/app, source_input]).stdout
             if not want.strip() or b'== sample:' in want: raise RuntimeError(f'{app}: empty/synthetic output')
             got = run([*prefix, '-run', source, source_input]).stdout
@@ -58,12 +59,23 @@ try:
             native = run([d/(app+'-native'), source_input]).stdout
             if native != want: raise RuntimeError(f'{app}: native differs from cc')
             run([*prefix, '-run', source, d/'missing'], expected=1)
-            if app != 'memmap' or platform.system() != 'Linux':
+            if app == 'exeinfo':
                 run([d/app], expected=1)
                 run([*prefix, '-run', source], expected=1)
             else:
-                own = run([*prefix, '-run', source]).stdout
-                if b'== regions' not in own or b'lowest start' not in own: raise RuntimeError('live self maps missing structure')
+                own = run([*prefix, '-run', source])
+                text = own.stdout
+                if app == 'procview' and b'== process tree (' not in text:
+                    raise RuntimeError('live process collection missing structure')
+                if app == 'memmap':
+                    if b'== regions (' not in text or b'lowest start' not in text:
+                        raise RuntimeError('live self maps missing structure')
+                    if platform.system() == 'Darwin' and b'querying this process, pid ' not in own.stderr:
+                        raise RuntimeError('live self maps did not name its own pid')
+                if app == 'winlayout' and b'== screen ' not in text:
+                    raise RuntimeError('live window collection missing structure')
+                if b'== sample:' in text or b'SAMPLE' in text:
+                    raise RuntimeError('synthetic default')
             if app != 'exeinfo':
                 (d/'empty').write_bytes(b'')
                 run([*prefix, '-run', source, d/'empty'], expected=1)

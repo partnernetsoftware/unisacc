@@ -10,6 +10,7 @@
 #include "run.c"
 #undef UNISA_RUNTIME_LIBRARY
 #include "memory.c"
+#include "../../src/host_dl.h"
 #ifdef _WIN32
 #include "winprocess.c"
 #endif
@@ -173,7 +174,7 @@ int main(int argc, char **argv) {
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
     if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
     ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
-    unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8];
+    unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8],process_dl[4][8];
     char **runargs=0;
     if (runit) {
         int count=1+argc-argstart;
@@ -194,7 +195,16 @@ int main(int argc, char **argv) {
     if (runit) {
         cli[5].name=(const unsigned char *)"\0process/argc";cli[5].n=13;cli[5].data=process_argc;cli[5].len=8;
         cli[6].name=(const unsigned char *)"\0process/argv";cli[6].n=13;cli[6].data=process_argv;cli[6].len=8;
-        NRI=7;
+        NRI=9;
+#ifdef __APPLE__
+        static const char *dlkeys[4] = {"\0process/dl/0", "\0process/dl/1", "\0process/dl/2", "\0process/dl/3"};
+        for (int j=0;j<4;j++) {
+            resource_u64(process_dl[j],host_dl_slot(j));
+            cli[NRI].name=(const unsigned char *)dlkeys[j]; cli[NRI].n=13;
+            cli[NRI].data=process_dl[j]; cli[NRI].len=8; NRI++;
+        }
+        nimports=4;
+#endif
 #ifdef _WIN32
         nimports=process_own_imports(cli+9,245,(long)process_own_imports);NRI=9+nimports;
 #endif
@@ -232,10 +242,14 @@ int main(int argc, char **argv) {
         rc=runroute(route,&first,src);
         if (!rc) {
             memory_image(&first,&plan);memory_map(&plan,&mapping);free(first.b);
-            resource_u64(memory_text,(long)mapping.base);resource_u64(memory_data,(long)(mapping.base+mapping.dataoff));
+            resource_u64(memory_text,(long)mapping.base);resource_u64(memory_data,(long)(mapping.base+mapping.dataoff)
+#ifdef __APPLE__
+                +32
+#endif
+            );
             cli[7].name=(const unsigned char *)"\0memory/text";cli[7].n=12;cli[7].data=memory_text;cli[7].len=8;
             cli[8].name=(const unsigned char *)"\0memory/data";cli[8].n=12;cli[8].data=memory_data;cli[8].len=8;
-            NRI=9+nimports;rc=runroute(route,&in,src);
+            rc=runroute(route,&in,src);
         }
     }
     unpackage(); RI=0; NRI=0;

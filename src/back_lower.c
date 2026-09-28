@@ -252,10 +252,10 @@ int bkni;
 int bkentry;                        /* the _start label's pc */
 
 /* the tape's op names, in one packed list; an op is its index here */
-char *BKOPS = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000.div\000.mod\000.udiv\000.umod\000slt64\000sle64\000ult64\000ule64\000eq\000ne\000load64\000store64\000.ld\000.st\000.lea\000.zero\000jump\000jumpz\000call\000callr\000ret\000.frame\000.arg\000.print\000.write\000.exit\000.sys\000.sys6\000.argc\000.argv\000nop\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
-#define BKNOPS 66              /* BKOPS entries: `.sys6` made it 66 */
+char *BKOPS = "imm\000mov\000add64\000sub64\000mul64\000xor64\000and64\000or64\000shl64\000shr64\000lshr64\000.div\000.mod\000.udiv\000.umod\000slt64\000sle64\000ult64\000ule64\000eq\000ne\000load64\000store64\000.ld\000.st\000.lea\000.zero\000jump\000jumpz\000call\000callr\000ret\000.frame\000.arg\000.print\000.write\000.exit\000.sys\000.sys6\000.argc\000.argv\000nop\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000.hostcall\000.hostaddr\000";
+#define BKNOPS 68              /* Includes .hostcall and .hostaddr. */
 /* operand shapes, one char per operand: r i L s */
-char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rri\000rir\000rrii\000riri\000rs\000rii\000L\000rL\000L\000r\000\000i\000ir\000r\000rr\000r\000srrr\000srrrrrr\000r\000rr\000\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000";
+char *BKSHAPE = "ri\000rr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rri\000rir\000rrii\000riri\000rs\000rii\000L\000rL\000L\000r\000\000i\000ir\000r\000rr\000r\000srrr\000srrrrrr\000r\000rr\000\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rrr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000rr\000ri\000";
 
 /* the i-th entry of a packed list: its start */
 /* A catalog is a run of NUL-separated names.  Walking it from the front on
@@ -540,6 +540,8 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
 #define TO_SUBI 114
 #define TO_LSLI 115
 #define TO_SEXT 116
+#define TO_HOSTCALL 117
+#define TO_HOSTADDR 118
 /* setreg's source kinds */
 #define SK_IMM 1
 #define SK_REG 2
@@ -637,7 +639,7 @@ int bk_dead_after(int j, int r) {
     while (j < bkni && n < 32) {
         if (bklab_first[j] >= 0) return 0;
         sh = bk_nth(BKSHAPE, bkop[j]);
-        if (bk_is(bkop[j], ".write") || bk_destfirst(sh) == 0) return 0;
+        if (bk_is(bkop[j], ".write") || bk_is(bkop[j], ".hostcall") || bk_destfirst(sh) == 0) return 0;
         k = 0; first = 1;
         while (sh[k]) {
             if (sh[k] == 114) {
@@ -753,6 +755,14 @@ int bk_lower(void) {
                 tk(TO_ARGSAVE, bk_argc, bk_argv, bkos == 0, 0);
         }
         op = bkop[pc];
+        if (bk_is(op, ".hostcall") || bk_is(op, ".hostaddr")) {
+            if (bkos != 1) { __write(2, "foreign host ABI is only supported on osx\n", 42); __exit(1); }
+            if (bk_is(op, ".hostaddr")) {
+                if (bkav[pc*8+1] < 0 || bkav[pc*8+1] >= 4) { __write(2, "hostaddr index must be 0..3\n", 28); __exit(1); }
+                tk(TO_HOSTADDR, bk_rmap[bkav[pc*8]], bkav[pc*8+1], 0, 0);
+            } else tk(TO_HOSTCALL, bk_rmap[bkav[pc*8]], bk_rmap[bkav[pc*8+1]], 0, 0);
+            pc = pc + 1; continue;
+        }
         if (bk_is(op, ".write")) {
             tk(TO_SETMEM, bk_scr0, bk_rmap[bkav[pc * 8]], 0, 0);
             tk(TO_SETMEM, bk_scr1, bk_rmap[bkav[pc * 8 + 1]], 0, 0);

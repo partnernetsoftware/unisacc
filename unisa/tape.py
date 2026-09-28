@@ -52,6 +52,8 @@ SHAPE = {
     "jumpz":   ("r", "L"),
     "call":    ("L",),
     "callr":   ("r",),
+    ".hostcall": ("r", "r"), # native fixed-six integer/pointer ABI bridge
+    ".hostaddr": ("r", "i"), # one of four dynamic-loader bootstrap slots
     "ret":     (),
     ".frame":  ("i",),
     ".arg":    ("i", "r"),

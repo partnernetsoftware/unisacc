@@ -7,8 +7,8 @@
  *     X Y W H title...             (X and Y may be negative)
  *     # comment
  *
- * From a file, from stdin with "-", or from a real window collector via run.sh winlayout.
- * Missing input is an error; no desktop is fabricated.  On X11, wmctrl -lG gives
+ * On macOS, no arguments queries CoreGraphics/CoreFoundation via libffi.
+ * A file or stdin with "-" selects explicit geometry. On X11, wmctrl -lG gives
  * the geometry; put it in stacking order and reshape it with awk.
  *
  * The visible area of every window is exact.  All rectangle edges are
@@ -20,6 +20,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <unisacc_ffi.h>
+#endif
 
 #define MAXW 64
 #define MAXE (2 * MAXW + 2)
@@ -80,6 +83,95 @@ static void add_line(char *s)
     if (k == 0) { strcpy(w->title, "(untitled)"); } else w->title[k] = 0;
 }
 
+
+#ifdef __APPLE__
+/* CoreGraphics/CoreFoundation values remain opaque host objects. */
+static void *cgfn[8];
+static int cgcall(int fn, int ret, int *kinds, void **values, int n, void *out)
+{
+    int rc = uffi_call(cgfn[fn], ret, kinds, values, n, -1, out);
+    if (rc) fprintf(stderr, "winlayout: FFI call %d failed (%d)\n", fn, rc);
+    return rc == 0;
+}
+static int scan_mac_windows(void)
+{
+    void *cg, *cf, *wins, *window, *bounds, *name, *keybounds, *keyowner;
+    void *values[4], *buffer, *typeargs[1], *elements[5];
+    struct { unsigned long size; unsigned short alignment, type; void **elements; } recttype;
+    double rect[4], screen[4];
+    unsigned int options = 17, relative = 0, display, encoding = 0x08000100;
+    long result, count, index, limit;
+    int pp[2] = { UFFI_POINTER, UFFI_POINTER };
+    int uu[2] = { UFFI_UINT, UFFI_UINT };
+    int pl[2] = { UFFI_POINTER, UFFI_LONG };
+    int stringk[4] = { UFFI_POINTER, UFFI_POINTER, UFFI_LONG, UFFI_UINT };
+    int onep[1] = { UFFI_POINTER };
+    long bufsize = 40;
+    const char *names[8] = { "CGWindowListCopyWindowInfo", "CFArrayGetCount",
+        "CFArrayGetValueAtIndex", "CFDictionaryGetValue", "CGRectMakeWithDictionaryRepresentation",
+        "CFStringGetCString", "CFRelease", "CGMainDisplayID" };
+    void *screenfn;
+    int i;
+    struct win *w;
+    cg = uffi_dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", 2);
+    cf = uffi_dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", 2);
+    if (!cg || !cf) { fprintf(stderr, "winlayout: framework load failed\n"); return 0; }
+    for (i = 0; i < 8; i++) {
+        cgfn[i] = uffi_dlsym(i == 0 || i == 4 || i == 7 ? cg : cf, names[i]);
+        if (!cgfn[i]) { fprintf(stderr, "winlayout: missing %s\n", names[i]); return 0; }
+    }
+    keybounds = uffi_dlsym(cg, "kCGWindowBounds"); keyowner = uffi_dlsym(cg, "kCGWindowOwnerName");
+    screenfn = uffi_dlsym(cg, "CGDisplayBounds");
+    if (!keybounds || !keyowner || !screenfn) return 0;
+    keybounds = *(void **)keybounds; keyowner = *(void **)keyowner;
+    if (!cgcall(7, UFFI_UINT, 0, 0, 0, &result)) return 0;
+    display = result;
+    /* CGRect is four doubles (two nested two-double structs in the SDK).
+       libffi classifies this layout for each target ABI, including HFA return. */
+    for (i = 0; i < 4; i++) elements[i] = uffi_type(UFFI_DOUBLE);
+    elements[4] = 0; recttype.size = 0; recttype.alignment = 0;
+    recttype.type = 13; recttype.elements = elements;
+    typeargs[0] = uffi_type(UFFI_UINT); values[0] = &display;
+    if (uffi_call_types(screenfn, &recttype, typeargs, values, 1, -1, screen)) return 0;
+    if (screen[2] <= 0 || screen[3] <= 0 || screen[2] > 16384 || screen[3] > 16384) return 0;
+    SW = screen[2]; SH = screen[3];
+    values[0] = &options; values[1] = &relative;
+    if (!cgcall(0, UFFI_POINTER, uu, values, 2, &wins) || !wins) {
+        fprintf(stderr, "winlayout: no GUI window-server session\n"); return 0;
+    }
+    values[0] = &wins;
+    if (!cgcall(1, UFFI_LONG, onep, values, 1, &count) || count < 0) return 0;
+    limit = count > MAXW ? MAXW : count;
+    if (count > MAXW) fprintf(stderr, "winlayout: analysing the frontmost %d of %ld windows\n", MAXW, count);
+    /* Native array is front-to-back; the analyser stores bottom-to-top. */
+    for (index = limit - 1; index >= 0; index--) {
+        values[0] = &wins; values[1] = &index;
+        if (!cgcall(2, UFFI_POINTER, pl, values, 2, &window)) return 0;
+        values[0] = &window; values[1] = &keybounds;
+        if (!cgcall(3, UFFI_POINTER, pp, values, 2, &bounds)) return 0;
+        values[1] = &keyowner;
+        if (!cgcall(3, UFFI_POINTER, pp, values, 2, &name)) return 0;
+        if (!bounds || !name) continue;
+        buffer = rect; values[0] = &bounds; values[1] = &buffer;
+        if (!cgcall(4, UFFI_UINT8, pp, values, 2, &result)) return 0;
+        if (!result || rect[2] <= 0 || rect[3] <= 0) continue;
+        w = &W[NW]; buffer = w->title;
+        values[0] = &name; values[1] = &buffer; values[2] = &bufsize; values[3] = &encoding;
+        if (!cgcall(5, UFFI_UINT8, stringk, values, 4, &result)) return 0;
+        if (!result) strcpy(w->title, "(owner name unavailable)");
+        w->title[39] = 0;
+        /* Geometry is in main-display points, not Retina physical pixels. */
+        w->x = rect[0] - screen[0]; w->y = rect[1] - screen[1];
+        w->w = rect[2]; w->h = rect[3];
+        if (w->w > 0 && w->h > 0) NW++;
+    }
+    values[0] = &wins;
+    if (!cgcall(6, UFFI_VOID, onep, values, 1, 0)) return 0;
+    uffi_dlclose(cf); uffi_dlclose(cg);
+    return 1;
+}
+#endif
+
 static int edge(long *v, int n, long e)
 {
     int i, j;
@@ -113,8 +205,11 @@ int main(int argc, char **argv)
         if (f == 0) { fprintf(stderr, "winlayout: cannot open %s\n", argv[1]); return 1; }
         while (fgets(buf, sizeof buf, f)) add_line(buf);
     } else {
-        fprintf(stderr, "winlayout: supply real window geometry; use examples/apps/run.sh winlayout\n");
-        return 1;
+#ifdef __APPLE__
+        if (!scan_mac_windows()) { fprintf(stderr, "winlayout: live window query failed\n"); return 1; }
+#else
+        fprintf(stderr, "winlayout: provide real window geometry on this platform\n"); return 1;
+#endif
     }
     if (NW == 0) { fprintf(stderr, "winlayout: no windows\n"); return 1; }
 

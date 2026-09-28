@@ -24,7 +24,7 @@ def install(E, byte, KND, SZ, OFF, LABD):
                  OPCODE=OPCODE, VALUE2=VALUE2, KND=KND, SZ=SZ, OFF=OFF, LABD=LABD, DATA_BASE=DATA_BASE)
     idata = 40+16*(len(pe.IMPORTS)+1)+sum((len(n.encode())+4)&-2 for n in pe.IMPORTS)+len(pe.DLL)+1
     idata = ((idata+7)&-8)+pe.LOADCFG
-    layouts = {tag: dict(text=base+m.HDRS('x86_64'), round=m.HDRS('x86_64')+m.PAGE-1, mask=-m.PAGE, base=base)
+    layouts = {tag: dict(text=base+m.HDRS('x86_64'), round=m.HDRS('x86_64')+m.PAGE-1, mask=-m.PAGE, base=base+(macho.DLPREFIX if tag=="osx" else 0))
                for tag, m, base in [('lnx',elf,elf.VADDR), ('osx',macho,macho.VMADDR)]}
     layouts['win'] = dict(text=pe.IMAGEBASE+pe.TEXT_RVA, round=pe.SECT_ALIGN-1, mask=-pe.SECT_ALIGN,
         imports=pe.IMAGEBASE+pe.TEXT_RVA+40+8*(len(pe.IMPORTS)+1),

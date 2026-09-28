@@ -2094,6 +2094,27 @@ int pf_call(int t) {
         lvalue = 0; curelem = 1; curptr = 1;
         return postfix();
     }
+    if (isname(t, "__hostcall", 10)) {
+        need(tidx("(", 1), "("); n = 0;
+        while (cur() != tidx(")", 1)) {
+            if (cur() == T_EOF) break;
+            expr(); loadval(); push(); n = n + 1;
+            if (n > 2) { err_tok(tp, "hostcall requires two arguments"); return 0; }
+            if (eat(tidx(",", 1)) == 0) break;
+        }
+        need(tidx(")", 1), ")");
+        if (n != 2) { err_tok(tp, "hostcall requires two arguments"); return 0; }
+        sysargs(n); es("  .hostcall r0, r1\n");
+        setkind(0); cursize = 8; curelem = 8; lvalue = 0;
+        return postfix();
+    }
+    if (isname(t, "__hostaddr0", 11) || isname(t, "__hostaddr1", 11) ||
+        isname(t, "__hostaddr2", 11) || isname(t, "__hostaddr3", 11)) {
+        need(tidx("(", 1), "("); need(tidx(")", 1), ")");
+        es("  .hostaddr r0, "); en(src[tpos[t] + 10] - 48); es("\n");
+        setkind(0); cursize = 8; curelem = 8; lvalue = 0;
+        return postfix();
+    }
     if (isname(t, "__mmap", 6)) {        /* six arguments: the .sys6 gate */
         need(tidx("(", 1), "(");
         n = 0;

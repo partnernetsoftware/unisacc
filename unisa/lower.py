@@ -30,7 +30,7 @@ def _dead_after(code, targets, j, r):
             return False
         ins = code[j]
         sh = TAPE_SHAPE[ins.op]
-        if ins.op == ".write" or sh not in _DEST_FIRST:
+        if ins.op in (".write", ".hostcall") or sh not in _DEST_FIRST:
             return False
         regs = [x for x, k in zip(ins.args, sh) if k == "r"]
         if r in regs[1:]:
@@ -291,7 +291,13 @@ def lower(tape, target, oracle, fault=None, drive="spec"):
                 tp.emit("argsave", ARGC, ARGV, os_ == "lnx")
         o, a = ins.op, ins.args
 
-        if o == ".write":
+        if o in (".hostcall", ".hostaddr"):
+            if os_ != "osx":
+                raise ValueError("foreign host ABI is only supported on osx")
+            if o == ".hostaddr" and not 0 <= a[1] < 4:
+                raise ValueError("hostaddr index must be 0..3")
+            tp.emit(o[1:], *[R(x) for x in a])
+        elif o == ".write":
             tp.emit("setmem", SCR0, R(a[0]))
             tp.emit("setmem", SCR1, R(a[1]))
             syscall_seq("write", [("imm", 1), ("mem", SCR0), ("mem", SCR1)])

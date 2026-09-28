@@ -10,8 +10,10 @@ int main(int argc,char **argv) {
     if (fread(t,1,n,f)!=n || fclose(f)) return 2;
     t[n]=0; model_dims(); setup();
     bk_run(t,(int)n,3,0x123456780);
-    printf("%ld %ld %ld %ld %ld\n",bk_runtext,bk_rundata,bktlen,bkdlen,bk_entry);
+    long prefix = bkos == 1 ? 32 : 0;
+    /* Report the logical user-data base, serialize the physical dl slots too. */
+    printf("%ld %ld %ld %ld %ld\n",bk_runtext,bk_rundata,bktlen,bkdlen+prefix,bk_entry);
     if (fwrite((void *)bk_runtext,1,bktlen,stdout)!=bktlen ||
-        fwrite((void *)bk_rundata,1,bkdlen,stdout)!=bkdlen) return 2;
+        fwrite((void *)(bk_rundata-prefix),1,bkdlen+prefix,stdout)!=bkdlen+prefix) return 2;
     return fclose(stdout) ? 2 : 0;
 }

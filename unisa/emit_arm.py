@@ -126,6 +126,14 @@ def _disp(bytes_, bits):
 def encode(ins, off, labels, arch="arm64", syms=None, shift=0,
            text_va=0, imps=None, short=False):
     o, a = ins.op, ins.args
+    if o == "hostcall":
+        from .hostabi import ARM_FN, ARM_ARGV, ARM_BODY
+        return w(ARM_FN | (N(a[0]) << 16)) + w(ARM_ARGV | (N(a[1]) << 16)) + b"".join(w(v) for v in ARM_BODY)
+    if o == "hostaddr":
+        if not 0 <= a[1] < 4:
+            raise ValueError("hostaddr index must be 0..3")
+        slot = 256 + shift - 32 + 8*a[1]
+        return adrp_add(N(a[0]), text_va+off, slot) + _ldr(N(a[0]), N(a[0]))
     if o == "mov":                                  # orr Xd, xzr, Xm
         return w(0xAA0003E0 | (N(a[1]) << 16) | N(a[0]))
     if o == "imm":

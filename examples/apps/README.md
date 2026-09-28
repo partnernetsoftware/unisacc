@@ -12,61 +12,39 @@ suites' inputs.
 | `queens.c` | backtracking with unsigned bit masks (`x & -x`, shifts), recursion |
 | `bf.c` | a Brainfuck interpreter: `switch`, a bracket jump table, `unsigned char` wraparound |
 | `dijkstra.c` | a binary-heap priority queue, an adjacency list in arrays, recursive path printing |
-| `procview.c` | a process-tree analyser: real process snapshots via the launcher's `ps`, or a bounded `/proc/N/status` scan in direct Linux use. Parent lookup, subtree sums by walking ancestors with a depth cap (so parent cycles cannot loop), `qsort` on index arrays with three comparators, orphan / self-parent / cycle detection |
-| `winlayout.c` | window-stack analysis: exact visible area per window by coordinate compression and a topmost-owner grid, off-screen clipping, overlap pairs, the largest empty rectangle, a text minimap. No automatic real data: window-server access (X11/Wayland/Win32/CoreGraphics) needs bindings this compiler doesn't have; `tools/wingeom.c` is a small **system-cc** helper (macOS, CoreGraphics) that supplies real geometry over a pipe -- proof that real data plus this analysis works end to end, and the reference `winlayout.c` itself should eventually match if unisacc gains that access |
-| `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Linux defaults to its own `/proc/self/maps`; macOS launcher collects real Mach regions. Identical snapshots are compared against cc; live self maps are checked structurally |
-| `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; reads explicit real files; launcher defaults to the actual compiler container |
+| `procview.c` | a process-tree analyser: macOS libproc queried by the application itself, or a bounded `/proc/N/status` scan on Linux. Parent lookup, subtree sums by walking ancestors with a depth cap (so parent cycles cannot loop), `qsort` on index arrays with three comparators, orphan / self-parent / cycle detection |
+| `winlayout.c` | queries live CoreGraphics/CF windows on macOS through explicit FFI, then computes visibility, overlaps, largest empty rectangle and minimap; also accepts captured geometry |
+| `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Linux defaults to its own `/proc/self/maps`; macOS queries this application's own regions through libproc. Identical snapshots are compared against cc; live self maps are checked structurally |
+| `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; reads explicit real files supplied on the command line |
 | `colorpack.c` | bit-field packed pixel formats (RGB565/555, RGBA4444): quantisation, round-trip error, per-channel histograms. Every field value matches host `cc`; `sizeof` currently does not (a filed, unfixed defect -- see the file comment) |
 
-The four system tools consume **real input**, never a fabricated fallback.
-Use the bounded launcher (55 seconds including compilation and collectors):
+The four system tools consume real input. On macOS, procview, memmap and
+winlayout query system APIs themselves through `unisacc_ffi.h`. No system-cc
+collector participates in these commands.
 
 ```sh
-./examples/apps/run.sh procview     # actual ps snapshot on this host
-./examples/apps/run.sh memmap       # Linux: analyser's own maps; macOS: live collector's maps
-./examples/apps/run.sh winlayout    # macOS: actual CoreGraphics window geometry
-./examples/apps/run.sh exeinfo      # actual unisacc.com bytes
-```
-
-`APP_COM=/absolute/path/to/compiler` selects another compiler. Explicit files
-or `-` are passed through unchanged. Direct C use also accepts captured input:
-
-```sh
-ps -axo pid=,ppid=,rss=,comm= | ./unisacc.com -run examples/apps/procview.c -
-./unisacc.com -run examples/apps/memmap.c /proc/PID/maps
-./unisacc.com -run examples/apps/winlayout.c real-layout.txt
+./unisacc.com -run examples/apps/procview.c
+./unisacc.com -run examples/apps/memmap.c
+./unisacc.com -run examples/apps/winlayout.c
 ./unisacc.com -run examples/apps/exeinfo.c unisacc.com /bin/ls
 ```
 
-On Linux, direct `memmap.c` with no argument reads `/proc/self/maps`.
-Direct `procview.c` still has the bounded Linux PID scan; the launcher uses
-`ps` instead, avoiding its PID-range limit. On other hosts these analysers
-require input. `winlayout.c` and `exeinfo.c` require input on all targets.
-Missing or empty input fails rather than inventing a desktop or process list.
+The former collector launcher has been removed. Explicit files or `-` remain available
+for reproducible analysis tests. Linux procview and memmap retain their
+`/proc` paths; live window collection currently requires macOS. Permission
+restrictions, vanished processes and collection limits are reported.
+There is no synthetic fallback.
 
-The bundled libc implements its own functions; it does **not** default to
-forwarding system libc. The launcher explicitly uses system `ps` and, on
-macOS, builds two small **system-cc-only** collectors: `tools/selfmaps.c`
-uses Mach to enumerate its own actual mappings, and `tools/wingeom.c`
-uses CoreGraphics to collect real bottom-to-top windows. Neither collector
-is compiled by unisacc. The memory snapshot belongs to the collector, not
-the analyser; regions are real but file names are not recovered by this helper.
-Window access may be restricted by OS permissions; unavailable data is an
-error. Other hosts can provide an explicit geometry file; no window bindings
-are implied.
+The macOS bridge resolves system symbols using dlopen/dlsym and calls them
+through libffi with explicit native types. This adds real foreign calls;
+it does not mean all bundled libc functions have been replaced. Bundled
+FILE and va_list objects never cross into system libc. `tools/` collectors
+are historical test references, not part of the application commands or live defaults.
 
-`python3 tests/appsrealcheck.py` captures live processes and mappings once,
-then compares each analyser's host-cc, model `-run`, and O2-native output on
-identical input. Its window geometry is an analytic **test fixture**, kept out
-of application defaults. `--live-windows` additionally uses the real macOS
-collector. Missing/empty inputs and unsupported defaults must fail. A Linux
-analyser's own live mappings get structural checks: different binaries and
-ASLR need not produce identical address spaces.
+`tests/appsrealcheck.py` uses cc only as a test reference. Captured inputs
+are compared byte for byte; live defaults are checked structurally because
+processes, windows and each executable's own maps vary between runs.
 
-2026-09-28 local macOS arm64 verification: all four analysers matched host cc
-through model `-run` and O2 native execution on one real process/maps/window
-snapshot and the actual container; missing and empty input checks passed.
-This does not claim Linux/Windows testing of the changed defaults.
 
 The older six application checks below are historical evidence:
 

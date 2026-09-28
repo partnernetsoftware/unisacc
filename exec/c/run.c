@@ -136,11 +136,32 @@ static void loadbytes(unsigned char *data, int len) {
     QOFF = xrealloc(0, sizeof(int) * NQ); QLEN = xrealloc(0, sizeof(int) * NQ);
     int cap = 1 << 16; QA = xrealloc(0, sizeof(I) * cap); NQA = 0;
     for (int k = 0; k < NQ; k++) {
-        ltag('Q'); int n = lint(); if (n < 0) die("bad sequence");
-        QOFF[k] = NQA; QLEN[k] = n;
+        int tag = lchar(), prefix = 0, copied = 0, from = 0, n;
+        if (tag == 'C') {
+            int ref = lint(); prefix = lint(); n = lint();
+            if (ref < 0 || ref >= k || prefix <= 0 || prefix > QLEN[ref] ||
+                n < 0 || n > INT32_MAX-prefix) die("bad sequence prefix");
+            from = QOFF[ref]; int end = from;
+            for (int a = 0; a < prefix; a++) end += 1 + ARITY[QA[end]];
+            copied = end-from;
+        } else {
+            if (tag != 'Q') die("bad sequence tag");
+            n = lint(); if (n < 0) die("bad sequence");
+        }
+        QOFF[k] = NQA; QLEN[k] = prefix+n;
+        if (NQA > INT32_MAX-copied) die("sequence extent overflow");
+        while (NQA+copied > cap) {
+            if (cap > INT32_MAX/2) die("sequence capacity exceeded");
+            cap *= 2; QA = xrealloc(QA, sizeof(I) * cap);
+        }
+        for (int i = 0; i < copied; i++) QA[NQA++] = QA[from+i];
         for (int a = 0; a < n; a++) {
             int op = lint(); if (op < 0 || op >= NOP_) die("bad opcode");
-            if (NQA + 6 > cap) { cap *= 2; QA = xrealloc(QA, sizeof(I) * cap); }
+            if (NQA > INT32_MAX-6) die("sequence extent overflow");
+            if (NQA+6 > cap) {
+                if (cap > INT32_MAX/2) die("sequence capacity exceeded");
+                cap *= 2; QA = xrealloc(QA, sizeof(I) * cap);
+            }
             QA[NQA++] = op;
             for (int j = 0; j < ARITY[op]; j++) QA[NQA++] = lnum();
         }

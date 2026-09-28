@@ -5248,3 +5248,5 @@ parse2 function/global/local_control 去重（本session直改主树，TDD验证
 看门狗性能纠偏（2026-09-28）：逐探针 Python 包装增加解释器启动成本，difftest_o 的双层 Python 尤其重复。保持不使用 Perl，热路径改为一次构建的原生 POSIX 看门狗；每个冻结套件起点解析 helper 一次，后续直接调用。Python 仅用于外层队列和冷构建限时。保留原始 wait status，不能混淆正常 exit(142) 与超时。前后同分片实测后再确认收益；macOS 已重新父化的完全脱离子进程仍有追踪限制，Linux subreaper 尚待实跑。
 
 原生看门狗验收：本机 macOS arm64，同参考二进制、SHARD=1/16、PAR=2、预热参考缓存，difftest_o 交替3轮均27 agree/0 wrong/0 refuse。bd8622e双Python热路径中位数1.4577秒，直接native中位数0.8309秒（-43.0%）；100次true的3轮中位数native0.5095秒、Python3.6688秒。此为分片/启动成本，不外推全门禁。父独立boundcheck验证两种工具正常退出0/2/142、信号和nested setsid超时清理；native额外核对原始waitstatus。67个原生入口shell语法通过，staticinit9项、exec/c/neg5项通过。全部时间约束不超过60秒。
+
+本轮候选收口（2026-09-28）：FFI桥父独立验证两ISA各96编码、8负例、真实网络原生ABI调用、dyld dlopen/dlsym/strlen及经典内存执行通过；不称Python VM支持hostcall。Q动作序列前缀只改变序列化，32旧产物模型展开QLEN/QA一致，节省829791字节，ASan+UBSan、8畸形拒绝通过；运行时内存不减。候选重建后仍须真实示例、完整有界门禁、同口径速度与功能字节账；当前根.com还不含这些在飞改动，不宣布交付。

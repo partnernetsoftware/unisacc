@@ -3,7 +3,8 @@
  *   cat /proc/self/maps | unisacc -run memmap.c -
  *
  * With no argument on Linux it reads its own /proc/self/maps.
- * Elsewhere supply a captured map or use run.sh memmap.  It classifies every region, sums them by kind, groups the
+ * On macOS it queries this process through libproc and libffi.
+ * Other platforms accept an explicit captured map. It sums regions by kind and groups the
  * file mappings into images, and audits the layout: regions that are both
  * writable and executable, overlaps, and the biggest holes between regions.
  * Addresses are parsed as unsigned 64-bit, so kernel-half lines such as
@@ -12,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <unisacc_ffi.h>
+#endif
 
 #define MAXR 2048
 #define MAXI 128
@@ -103,6 +107,56 @@ static void add_line(const char *s)
     NR++;
 }
 
+
+#ifdef __APPLE__
+static int scan_mac_maps(void)
+{
+    long raw[12], result, ownpid;
+    unsigned long address = 0, end;
+    int pid, flavor = 7, size = sizeof raw, *host_errno;
+    char filename[1024];
+    int pk[5] = { UFFI_INT, UFFI_INT, UFFI_ULONG, UFFI_POINTER, UFFI_INT };
+    int fk[4] = { UFFI_INT, UFFI_ULONG, UFFI_POINTER, UFFI_UINT };
+    void *lib, *info, *getpidfn, *errorfn, *namefn, *buffer, *values[5];
+    struct reg *r;
+    unsigned int namesize;
+    lib = uffi_dlopen("/usr/lib/libSystem.B.dylib", 2);
+    if (!lib || !(info = uffi_dlsym(lib, "proc_pidinfo")) ||
+        !(getpidfn = uffi_dlsym(lib, "getpid")) || !(errorfn = uffi_dlsym(lib, "__error")) ||
+        !(namefn = uffi_dlsym(lib, "proc_regionfilename"))) {
+        fprintf(stderr, "memmap: cannot resolve libproc APIs\n"); return 0;
+    }
+    if (uffi_call(getpidfn, UFFI_INT, 0, 0, 0, -1, &ownpid) ||
+        uffi_call(errorfn, UFFI_POINTER, 0, 0, 0, -1, &host_errno)) return 0;
+    pid = ownpid;
+    fprintf(stderr, "memmap: querying this process, pid %d\n", pid);
+    for (;;) {
+        buffer = raw; values[0] = &pid; values[1] = &flavor; values[2] = &address;
+        values[3] = &buffer; values[4] = &size; *host_errno = 0;
+        /* SDK proc_regioninfo: protection@0, offset@16, address@80, size@88; 96 bytes. */
+        if (uffi_call(info, UFFI_INT, pk, values, 5, -1, &result)) return 0;
+        if (!result && *host_errno == 22 && NR > 0) break; /* no next region */
+        if (result != sizeof raw) {
+            fprintf(stderr, "memmap: region query failed (bytes %ld, errno %d)\n", result, *host_errno); return 0;
+        }
+        end = (unsigned long)raw[10] + (unsigned long)raw[11];
+        if (!raw[11] || (unsigned long)raw[10] < address || end <= (unsigned long)raw[10]) return 0;
+        if (NR >= MAXR) { fprintf(stderr, "memmap: region capacity reached\n"); return 0; }
+        r = &R[NR]; r->lo = raw[10]; r->hi = end; r->off = raw[2];
+        r->perm[0] = raw[0] & 1 ? 'r' : '-'; r->perm[1] = raw[0] & 2 ? 'w' : '-';
+        r->perm[2] = raw[0] & 4 ? 'x' : '-';
+        r->perm[3] = *(unsigned int *)((char *)raw + 12) & 2 ? 's' : 'p'; r->perm[4] = 0;
+        filename[0] = 0; buffer = filename; namesize = sizeof filename;
+        values[0] = &pid; values[1] = &r->lo; values[2] = &buffer; values[3] = &namesize;
+        if (uffi_call(namefn, UFFI_INT, fk, values, 4, -1, &result)) return 0;
+        if (result <= 0) filename[0] = 0;
+        filename[1023] = 0; strncpy(r->path, filename, 95);
+        r->path[95] = 0; r->kind = classify(r); NR++; address = end;
+    }
+    uffi_dlclose(lib); return NR > 0;
+}
+#endif
+
 static const char *sz(unsigned long b)
 {
     static char buf[4][24];
@@ -132,7 +186,7 @@ static int by_span(const void *a, const void *b)
 int main(int argc, char **argv)
 {
     char buf[512];
-    FILE *f;
+    FILE *f = 0;
     int i, k, ngap = 0, nover = 0, nwx = 0;
     unsigned long kcount[NKIND], ksum[NKIND];
     struct { unsigned long size, lo, hi; } gap[3];
@@ -143,13 +197,18 @@ int main(int argc, char **argv)
 #ifdef __linux__
         f = fopen("/proc/self/maps", "r");
 #else
-        fprintf(stderr, "memmap: supply real maps; use examples/apps/run.sh memmap\n");
-        return 1;
+#ifdef __APPLE__
+        if (!scan_mac_maps()) { fprintf(stderr, "memmap: live mapping query failed\n"); return 1; }
+#else
+        fprintf(stderr, "memmap: provide real maps on this platform\n"); return 1;
+#endif
 #endif
     }
-    if (f == 0) { fprintf(stderr, "memmap: cannot open maps input\n"); return 1; }
-    while (fgets(buf, sizeof buf, f)) add_line(buf);
-    if (f != stdin) fclose(f);
+    if (argc > 1 && f == 0) { fprintf(stderr, "memmap: cannot open maps input\n"); return 1; }
+    if (f) {
+        while (fgets(buf, sizeof buf, f)) add_line(buf);
+        if (f != stdin) fclose(f);
+    }
     if (NR == 0) { fprintf(stderr, "memmap: no regions\n"); return 1; }
 
     for (i = 0; i < NKIND; i++) { kcount[i] = 0; ksum[i] = 0; }

@@ -122,7 +122,7 @@ the current reference. It does not claim native execution on a macOS host.
 Windows `__LP64__` matches this compiler's current predefined macros and
 64-bit `long`; it does not describe the Windows system's LLP64 C ABI.
 For an already-running Windows ARM64 UTM VM, the separate opt-in command is
-`perl -e 'alarm 60; exec @ARGV' python3 exec/pipeline/winbootstrap.py OUTPUT_DIR unisacc.c`.
+`tests/bound 60 python3 exec/pipeline/winbootstrap.py OUTPUT_DIR unisacc.c`.
 It copies and verifies inputs, compiles N2 and N3 in the guest, checks explicit
 per-run exit receipts and byte equality. Guest timeout cleanup uses taskkill
 on the process tree; VM lifecycle remains the caller's responsibility.
@@ -165,7 +165,7 @@ After `pipeline/elf.sh` constructs and checks a target's six models, its
 runtime can run them in one process without intermediate files:
 
 ```sh
-perl -e 'alarm 60; exec @ARGV' env UNISA_MAXSTEPS=400000000000 \
+tests/bound 60 env UNISA_MAXSTEPS=400000000000 \
   OUT/run --chain examples/hello.c examples/hello.c "$PWD/include" \
   OUT/e2.net OUT/e1.net OUT/e3.net OUT/e4.net OUT/lower.net OUT/elf.net > hello.image
 ```
@@ -197,7 +197,7 @@ Network construction now also writes `OUT/models.pkg`, using the ordered
 format declarations in `pipeline/image-stages.tsv`. Run it without Python:
 
 ```sh
-perl -e 'alarm 60; exec @ARGV' env UNISA_MAXSTEPS=400000000000 \
+tests/bound 60 env UNISA_MAXSTEPS=400000000000 \
   OUT/run --bundle OUT/models.pkg osx/arm64 examples/hello.c examples/hello.c "$PWD/include" > hello.image
 ```
 

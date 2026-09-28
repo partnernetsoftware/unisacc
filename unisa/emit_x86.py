@@ -468,6 +468,13 @@ def encode(ins, off, labels, arch="x86_64", syms=None, shift=0,
     """-> bytes, or None when the op has no encoding here.  `short`: the
     assembler has found this branch's target within a signed byte."""
     o, a = ins.op, ins.args
+    if o == "hostcall":
+        from .hostabi import X86_BODY
+        return mov_rr("r11", a[0]) + mov_rr("rax", a[1]) + X86_BODY
+    if o == "hostaddr":
+        if not 0 <= a[1] < 4:
+            raise ValueError("hostaddr index must be 0..3")
+        return rip(0x8B, a[0], text_va+off+7, 256+shift-32+8*a[1])
     if o == "mov":
         return mov_rr(a[0], a[1])
     if o == "imm":

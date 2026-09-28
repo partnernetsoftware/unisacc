@@ -25,7 +25,7 @@ def install(E,word):
     for name, image, base in (("lnx", elf, elf.VADDR), ("osx", macho, macho.VMADDR)):
         h, pg = image.HDRS("arm64"), image.PAGE
         bindings.update({name+"_text": base+h, name+"_align_add": h+pg-1,
-                         name+"_mask": -pg, name+"_base": base})
+                         name+"_mask": -pg, name+"_base": base+(macho.DLPREFIX if name=="osx" else 0)})
     idata = 40+16*(len(pe.IMPORTS)+1)+sum((len(n.encode())+4)&-2 for n in pe.IMPORTS)+len(pe.DLL)+1
     idata = ((idata+7)&-8)+pe.LOADCFG
     pg, base = pe.SECT_ALIGN, pe.IMAGEBASE+pe.TEXT_RVA

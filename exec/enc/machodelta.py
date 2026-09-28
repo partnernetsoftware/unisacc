@@ -15,7 +15,7 @@ def install(E,byte,arch):
     mh_bindings = dict(DATA=DATA, HDRS=M.HDRS(arch), VMADDR=M.VMADDR, STRTAB=M.STRTAB,
                        page_minus_one=M.PAGE-1, page_mask=-M.PAGE,
                        page4_minus_one=M.PAGE4-1, PAGE4=M.PAGE4,
-                       signature_base=20+88+len(M.IDENT))
+                       signature_base=20+88+len(M.IDENT), DLPREFIX=M.DLPREFIX, DLBINDLEN=len(M.DLBIND))
     mh_sequences = {'zero_byte': byte(P('byte.binding'),0).acts}
     mh_bindings.update({'label'+str(i): P(owner).fresh(kind)
                         for i, (owner, kind) in enumerate((('MACHO', 'b'), ('MH', 'b')))})
@@ -38,7 +38,7 @@ def install(E,byte,arch):
     seg(b'__TEXT',M.VMADDR,'mh_text',0,'mh_text',5,1)
     sect(b'__text',b'__TEXT',M.VMADDR+M.HDRS(arch),'endo',M.HDRS(arch),0x80000400)
     seg(b'__DATA','mh_datava','mh_vm','mh_text','mh_data',3,2)
-    sect(b'__data',b'__DATA','mh_datava','stored','mh_text',0)
+    sect(b'__data',b'__DATA','mh_datava','mh_stored','mh_text',0)
     sect(b'__bss',b'__DATA','mh_bssva','mh_bsslen',0,1)
     seg(b'__LINKEDIT','mh_linkva','mh_linkvm','mh_link','mh_linksz',1,0)
     fields([(4,M.LC_LOAD_DYLINKER),(4,32),(4,12)])
@@ -47,7 +47,7 @@ def install(E,byte,arch):
     fields([(4,M.LC_LOAD_DYLIB),(4,24+len(lib)),(4,24),(4,0),(4,0x10000),(4,0x10000)])
     for b in lib:byte(p,b)
     fields([(4,M.LC_MAIN),(4,24),(8,'mh_entry'),(8,0),(4,M.LC_BUILD_VERSION),(4,24),(4,1),(4,13<<16),(4,13<<16),(4,0)])
-    fields([(4,M.LC_DYLD_INFO_ONLY),(4,48)]+[(4,0)]*10)
+    fields([(4,M.LC_DYLD_INFO_ONLY),(4,48),(4,0),(4,0),(4,'mh_bindoff'),(4,len(M.DLBIND))]+[(4,0)]*6)
     fields([(4,M.LC_SYMTAB),(4,24),(4,'mh_link'),(4,0),(4,'mh_link'),(4,M.STRTAB)])
     fields([(4,M.LC_DYSYMTAB),(4,80)]+[(4,0)]*18)
     fields([(4,M.LC_CODE_SIGNATURE),(4,16),(4,'mh_sigoff'),(4,'mh_siglen')])
@@ -57,6 +57,12 @@ def install(E,byte,arch):
                         for i, (owner, kind) in enumerate((('MH', 'b'), ('MH', 'r'), ('MH', 'b'), ('MH', 'r'), ('MH', 'b'), ('MH', 'r'), ('MH', 'r')))})
     install_rules(g, Path(__file__).parent, 'machodelta', bindings=mh_bindings,
                   sequences={'pending': p.acts}, section='copy')
+    p=P('MH.dataprefix')
+    for _ in range(M.DLPREFIX):byte(p,0)
+    p.goto('MH.data')
+    p=P('MH.binddata')
+    for value in M.DLBIND:byte(p,value)
+    p.a(('COPYW','mh_pad','mh_sigoff')).call('MH.pad',ret=mh_bindings['label5'])
     p = P(mh_bindings['label6'])
     fields([(4,M.CS_MAGIC_EMBEDDED),(4,'mh_siglen'),(4,1),(4,0),(4,20)],True)
     p.a(load_rules(Path(__file__).with_name('machodelta-result.tsv'), {},

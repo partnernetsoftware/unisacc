@@ -1,4 +1,7 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
+b() { "$_BOUND" "$@"; }
 # Build /tmp/ua_pre: the reference (/tmp/ua_ref.c from tests/build_ref.sh)
 # with two harness hooks on the -dump-tokens path, right where lex() is
 # called.  Nothing in src/ changes; the patch is applied to the generated
@@ -11,6 +14,14 @@
 #                   path (timing: wall(N) - wall(1) is N-1 lex() calls)
 set -e
 IN=${1:?usage: mkpre.sh REF.c OUT (exec/lex/run.sh passes its stamped paths)}; OUT=${2:?}
-perl -0pe 's/(    expandsrc\(\);\n)(    if \(lex\(\) < 0\) return 1;\n    i = 0;\n    while \(i < ntok\))/$1    { char *e_; e_ = getenv("UA_LEXIN"); if (e_) { int f_; f_ = open(e_, O_WRONLY|O_CREAT|O_TRUNC, 0644); write(f_, src, nsrc); close(f_); return 0; }\n      e_ = getenv("UA_LEXREP"); if (e_) { int n_; n_ = atoi(e_); while (n_-- > 1) lex(); }\n      e_ = getenv("UA_LEXREJ"); if (e_) { char *m_; m_ = getenv("UA_LEXMSG"); err_at(atol(e_), m_ ? m_ : "unexpected character"); return 1; } }\n$2/' "$IN" > "$OUT.c"
+b 60 python3 - "$IN" "$OUT.c" <<'PY'
+from pathlib import Path
+import sys
+source = Path(sys.argv[1]).read_bytes()
+before = b'    expandsrc();\n    if (lex() < 0) return 1;\n    i = 0;\n    while (i < ntok)'
+after = b'    expandsrc();\n    { char *e_; e_ = getenv("UA_LEXIN"); if (e_) { int f_; f_ = open(e_, O_WRONLY|O_CREAT|O_TRUNC, 0644); write(f_, src, nsrc); close(f_); return 0; }\n      e_ = getenv("UA_LEXREP"); if (e_) { int n_; n_ = atoi(e_); while (n_-- > 1) lex(); }\n      e_ = getenv("UA_LEXREJ"); if (e_) { char *m_; m_ = getenv("UA_LEXMSG"); err_at(atol(e_), m_ ? m_ : "unexpected character"); return 1; } }\n    if (lex() < 0) return 1;\n    i = 0;\n    while (i < ntok)'
+if source.count(before) != 1: raise SystemExit('expected exactly one patch anchor')
+Path(sys.argv[2]).write_bytes(source.replace(before, after, 1))
+PY
 grep -q UA_LEXIN "$OUT.c"
-cc -w -std=c99 ${CFLAGS:--O2} -o "$OUT" "$OUT.c"
+b 60 cc -w -std=c99 ${CFLAGS:--O2} -o "$OUT" "$OUT.c"

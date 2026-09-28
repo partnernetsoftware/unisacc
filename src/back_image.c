@@ -190,14 +190,26 @@ int bk_sect(char *sect, char *seg, long addr, long size, long off, long flags) {
     w32(off); w32(2); w32(0); w32(0); w32(flags); w32(0); w32(0); w32(0);
     return 0;
 }
+/* The same eager libSystem binding declaration as image/macho.py. */
+int bk_dlbind(void) {
+    int i; int j; char *name;
+    i = 0;
+    while (i < 4) {
+        name = i == 0 ? "dlopen" : (i == 1 ? "dlsym" : (i == 2 ? "dlclose" : "dlerror"));
+        wb(0x11); wb(0x51); wb(0x72); wb(8 * i); wb(0x40); wb(95);
+        j = 0; while (name[j]) { wb(name[j]); j = j + 1; }
+        wb(0); wb(0x90); i = i + 1;
+    }
+    wb(0); return 0;
+}
 int bk_macho(void) {
     long hdrs; long textsz; long datasz; long datavm; long link; long v; long L;
     long sigoff; long siglen; long linksz; long slots; long cdlen; int i;
     hdrs = bk_macho_hdrs();
     L = bk_nzlen();
     textsz = bk_round(hdrs + bktlen, 16384);
-    datavm = bk_round(bkdlen > 1 ? bkdlen : 1, 16384);   /* mapped */
-    datasz = bk_round(L, 16384);                         /* stored */
+    datavm = bk_round(bkdlen + 32, 16384);   /* mapped */
+    datasz = bk_round(L + 32, 16384);                         /* stored */
     link = textsz + datasz;
     v = 4294967296;
     w32(0xFEEDFACF); w32(bkarch ? 0x0100000C : 0x01000007); w32(bkarch ? 0 : 3);
@@ -206,10 +218,10 @@ int bk_macho(void) {
     bk_seg("__TEXT", v, textsz, 0, textsz, 5, 5, 1);
     bk_sect("__text", "__TEXT", v + hdrs, bktlen, hdrs, 0x80000400);
     bk_seg("__DATA", v + textsz, datavm, textsz, datasz, 3, 3, 2);
-    bk_sect("__data", "__DATA", v + textsz, L, textsz, 0);
-    bk_sect("__bss", "__DATA", v + textsz + L, bkdlen - L, 0, 1);      /* S_ZEROFILL */
+    bk_sect("__data", "__DATA", v + textsz, L + 32, textsz, 0);
+    bk_sect("__bss", "__DATA", v + textsz + 32 + L, bkdlen - L, 0, 1);      /* S_ZEROFILL */
     /* __LINKEDIT holds the string table, then the ad-hoc signature */
-    sigoff = (link + 8 + 15) / 16 * 16;
+    sigoff = (link + 8 + 58 + 15) / 16 * 16;
     slots = (sigoff + 4095) / 4096;
     cdlen = 88 + 6;                                  /* fixed part + "unisa\0" */
     siglen = 12 + 8 + cdlen + 32 * slots;
@@ -219,14 +231,14 @@ int bk_macho(void) {
     w32(0xC); w32(56); w32(24); w32(0); w32(0x10000); w32(0x10000); wname("/usr/lib/libSystem.B.dylib", 32);
     w32(0x80000028); w32(24); w64(hdrs + bk_entry); w64(0);
     w32(0x32); w32(24); w32(1); w32(13 << 16); w32(13 << 16); w32(0);
-    w32(0x80000022); w32(48); wz(40);
+    w32(0x80000022); w32(48); wz(8); w32(link + 8); w32(58); wz(24);
     w32(2); w32(24); w32(link); w32(0); w32(link); w32(8);
     w32(0xB); w32(80); wz(72);
     w32(0x1D); w32(16); w32(sigoff); w32(siglen);    /* LC_CODE_SIGNATURE */
     wz(156);
     wtext(); wz(textsz - hdrs - bktlen);
-    wdata(L); wz(link - textsz - L);
-    wz(8);
+    wz(32); wdata(L); wz(link - textsz - 32 - L);
+    wz(8); bk_dlbind();
     wz(sigoff - bkwtot);
     /* the hashes cover everything written so far -- this header included */
     bk_sign_end();

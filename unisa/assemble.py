@@ -47,6 +47,8 @@ def assemble(tp):
             short.add(pc)
             sizes[pc] = n
     text_va, data_va = image.layout(tp.os, tp.arch, end)
+    if tp.os == "osx":
+        data_va += image.macho.DLPREFIX
     imps = image.imports(tp.os, tp.arch, end)
     # interpreter addresses are DATA_BASE-relative; shift them onto the image
     shift = data_va - DATA_BASE

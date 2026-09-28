@@ -2598,6 +2598,16 @@ class Walker:
             self.em.emit(self.em.recipe("fpu", "dsqrt" if fty is F64
                                         else "ssqrt"), ACC, ACC)
             return self.postfix_chain(fty)
+        if name == "__hostcall":
+            self.rvalue(); self.em.push(); self.expect(",")
+            self.rvalue(); self.em.push(); self.expect(")")
+            self.em.pop("r1"); self.em.pop("r0")
+            self.em.emit(".hostcall", "r0", "r1")
+            return I64
+        if name in ("__hostaddr0", "__hostaddr1", "__hostaddr2", "__hostaddr3"):
+            self.expect(")")
+            self.em.emit(".hostaddr", "r0", int(name[-1]))
+            return I64
         if name in INTRINSIC:
             return self.intrinsic(INTRINSIC[name])
         if name in INTRINSIC6:

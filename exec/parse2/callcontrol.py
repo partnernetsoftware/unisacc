@@ -59,7 +59,15 @@ def install(E, P, warnings, templates, addr, facts, syscalls, fpu, phase, bindin
         section('part17')
         for k,(_,opcode,width) in enumerate(syscalls,1):
             registers=', '.join('r%d'%i for i in range(width))
-            sequences['text35']=E.O(formats['syscall']%('6' if width==6 else '',opcode,registers))
-            section('sysemit',sys_entry='CL.sysz' if k==1 else 'CL.w%d'%k,sys_hit='CL.y%d'%k,sys_test='CL.z%d'%k,sys_zero='CL.zz%d'%k,sys_emit='CL.x%d'%k,sys_next='CL.w%d'%(k+1) if k<len(syscalls) else 'DEAD',sys_width=width,sys_index=k)
+            if opcode == 'hostcall':
+                text = '  .hostcall r0, r1\n'
+            elif opcode.startswith('hostaddr'):
+                text = '  .hostaddr r0, %s\n' % opcode[-1]
+            else:
+                text = formats['syscall']%('6' if width==6 else '',opcode,registers)
+            sequences['text35']=E.O(text)
+            section('sysemit',sys_entry='CL.sysz' if k==1 else 'CL.w%d'%k,sys_hit='CL.y%d'%k,sys_arity='CL.ar%d'%k if opcode.startswith('host') else 'CL.y%d'%k,host_arity_test='CL.art%d'%k,sys_test='CL.z%d'%k,sys_zero='CL.zz%d'%k,sys_emit='CL.x%d'%k,sys_next='CL.w%d'%(k+1) if k<len(syscalls) else 'DEAD',sys_width=width,sys_index=k)
+            if opcode.startswith('host'):
+                section('hostarity')
         section('part19')
     return b

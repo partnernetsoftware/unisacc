@@ -26,6 +26,20 @@ def install(E, fail, code_size='endo'):
     install_rules(E.g, root, 'memorylayout', bindings=bindings, section='base')
     pending = load_rules(root/'memorylayout-result.tsv', {}, bindings=bindings,
                          section='prefix')['actions'][0][1]
+    current = 'ML.darwin'
+    for i in range(4):
+        label='ML.dl.'+str(i); value='ml_dl_'+str(i)
+        u64(E,label,b'\0process/dl/'+str(i).encode(),value,'ml_found',fail)
+        resume=P(current).fresh('r'); found=P(resume).fresh('b')
+        nonzero=P(label+'.present').fresh('b')
+        install_rules(E.g, root, 'memorylayout', section='import',
+                      bindings=dict(bindings, entry=current, read=label, value=value,
+                                    resume=resume, found=found, nonzero=nonzero,
+                                    present=label+'.present', next=label+'.nonzero'),
+                      sequences={'pending': []})
+        current=label+'.nonzero'
+    install_rules(E.g, root, 'memorylayout', section='finish',
+                  bindings={'entry': current}, sequences={'pending': []})
     current = 'ML.windows'
     for i,name in enumerate(IMPORTS):
         label='ML.import.'+str(i); value='ml_imp_'+str(i)

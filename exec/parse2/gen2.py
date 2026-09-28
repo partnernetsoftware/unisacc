@@ -29,7 +29,10 @@ _spec.loader.exec_module(E)
 # Intrinsic names come from the product declaration, not a second hand list.
 sys.path.insert(0, E.ROOT)
 from unisa.front.parse import INTRINSIC, INTRINSIC6
-SYSCALLS = [(name, op, 3) for name, op in INTRINSIC.items()] + [(name, op, 6) for name, op in INTRINSIC6.items()]
+SYSCALLS = ([(name, op, 3) for name, op in INTRINSIC.items()]
+            + [(name, op, 6) for name, op in INTRINSIC6.items()]
+            + [("__hostcall", "hostcall", 2)]
+            + [("__hostaddr%d" % i, "hostaddr%d" % i, 0) for i in range(4)])
 
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
 VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40

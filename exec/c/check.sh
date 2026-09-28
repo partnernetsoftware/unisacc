@@ -25,7 +25,7 @@ E3V=1 b 60 python3 exec/parse/compare.py "$D" "$@" > "$T/py" 2>&1; prc=$?
 # compare.py exits 1 on a DIFF or a tool failure: either is a failure here
 [ $prc -eq 0 ] || { echo "exec/c: compare.py exited $prc"; tail -3 "$T/py"; exit 1; }
 same=0; diff=0
-t0=$(perl -MTime::HiRes=time -e 'print time')
+t0=$(b 10 python3 -c 'import time; print(time.time())')
 for f in "$@"; do
     UA_TYPESPELL=1 b 10 /tmp/ua_tdump -dump-tokens "$f" > "$T/x" 2>/dev/null; drc=$?
     [ $drc -eq 0 ] || { echo "exec/c: token dump of $f exited $drc"; exit 1; }
@@ -43,6 +43,6 @@ for f in "$@"; do
     esac
     if [ $ok = 1 ]; then same=$((same+1)); else diff=$((diff+1)); echo "  DIFFER $f  c rc=$rc  py=$v  $(head -1 "$T/e")"; fi
 done
-t1=$(perl -MTime::HiRes=time -e 'print time')
-echo "exec/c  files $#   same verdict $same   differ $diff   loop $(perl -e "printf '%.2f', $t1 - $t0") s (dump, reference and cmp included)"
+t1=$(b 10 python3 -c 'import time; print(time.time())')
+echo "exec/c  files $#   same verdict $same   differ $diff   loop $(b 10 python3 -c 'import sys; print("%.2f" % (float(sys.argv[1]) - float(sys.argv[2])))' "$t1" "$t0") s (dump, reference and cmp included)"
 [ $diff -eq 0 ] && [ $same -gt 0 ]

@@ -8,11 +8,9 @@
  * limitation, not a style choice -- a system with a live pid above PROCMAX
  * is invisible to it, and this only works where /proc exists.
  *
- * On any other target (or if that scan finds nothing), input is
- * `ps -axo pid=,ppid=,rss=,comm=` (RSS in KiB): from a file, from stdin
- * with "-". Without /proc, missing input is an error; no snapshot is fabricated.
- *
- *   ps -axo pid=,ppid=,rss=,comm= | unisacc -run procview.c -
+ * On macOS it calls real libproc through libffi for the process list and
+ * PID/parent/RSS/name information. Inaccessible or disappearing processes
+ * are counted explicitly. A file or "-" accepts a real ps-format snapshot.
  *
  * It prints the tree with subtree sums, the heaviest processes, a per-command
  * roll-up, and the ways a snapshot can be odd: orphans (parent not listed),
@@ -21,6 +19,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __APPLE__
+#include <unisacc_ffi.h>
+#endif
 
 #define MAXP 4096
 #define MAXD 256
@@ -115,6 +116,53 @@ static int scan_proc(void)
 }
 #endif
 
+
+#ifdef __APPLE__
+/* SDK sys/proc_info.h: proc_bsdinfo=136, proc_taskinfo=96 bytes.
+ * Kernel output buffers are native layout, never the bundled libc's structs. */
+static int scan_mac_proc(void)
+{
+    static int pids[MAXP];
+    long bsd[17], task[12], result, zero = 0;
+    unsigned int type = 1, typeinfo = 0;
+    int capacity = sizeof pids, i, count, omitted = 0, flavor, size, pid;
+    int lk[4] = { UFFI_UINT, UFFI_UINT, UFFI_POINTER, UFFI_INT };
+    int pk[5] = { UFFI_INT, UFFI_INT, UFFI_ULONG, UFFI_POINTER, UFFI_INT };
+    void *buffer = pids, *values[5], *lib, *list, *info;
+    struct proc *p;
+    lib = uffi_dlopen("/usr/lib/libSystem.B.dylib", 2);
+    if (!lib || !(list = uffi_dlsym(lib, "proc_listpids")) ||
+        !(info = uffi_dlsym(lib, "proc_pidinfo"))) {
+        fprintf(stderr, "procview: cannot resolve libproc APIs\n"); return 0;
+    }
+    values[0] = &type; values[1] = &typeinfo; values[2] = &buffer; values[3] = &capacity;
+    if (uffi_call(list, UFFI_INT, lk, values, 4, -1, &result) || result <= 0 || result % 4) {
+        fprintf(stderr, "procview: proc_listpids failed\n"); return 0;
+    }
+    if (result >= sizeof pids) { fprintf(stderr, "procview: PID capacity reached\n"); return 0; }
+    count = result / 4;
+    for (i = 0; i < count; i++) {
+        pid = pids[i]; if (pid <= 0) continue;
+        flavor = 3; size = sizeof bsd; buffer = bsd;
+        values[0] = &pid; values[1] = &flavor; values[2] = &zero;
+        values[3] = &buffer; values[4] = &size;
+        if (uffi_call(info, UFFI_INT, pk, values, 5, -1, &result)) return 0;
+        if (result != sizeof bsd) { omitted++; continue; }
+        flavor = 4; size = sizeof task; buffer = task;
+        if (uffi_call(info, UFFI_INT, pk, values, 5, -1, &result)) return 0;
+        if (result != sizeof task) { omitted++; continue; }
+        p = &P[NP++]; p->pid = *(unsigned int *)((char *)bsd + 12);
+        p->ppid = *(unsigned int *)((char *)bsd + 16);
+        p->rss = (unsigned long)task[1] / 1024;
+        memcpy(p->name, (char *)bsd + 64, 32); p->name[32] = 0;
+        if (!p->name[0]) { memcpy(p->name, (char *)bsd + 48, 16); p->name[16] = 0; }
+    }
+    if (omitted) fprintf(stderr, "procview: %d processes vanished or were inaccessible\n", omitted);
+    uffi_dlclose(lib);
+    return NP > 0;
+}
+#endif
+
 static const char *mb(long kb)
 {
     static char buf[4][24];
@@ -195,8 +243,11 @@ int main(int argc, char **argv)
 #ifdef __linux__
         if (!scan_proc()) { fprintf(stderr, "procview: cannot read live /proc data\n"); return 1; }
 #else
-        fprintf(stderr, "procview: supply a real ps snapshot; use examples/apps/run.sh procview\n");
-        return 1;
+#ifdef __APPLE__
+        if (!scan_mac_proc()) { fprintf(stderr, "procview: live process query failed\n"); return 1; }
+#else
+        fprintf(stderr, "procview: provide a real process snapshot on this platform\n"); return 1;
+#endif
 #endif
     }
     if (NP == 0) { fprintf(stderr, "procview: no processes\n"); return 1; }
@@ -240,7 +291,7 @@ int main(int argc, char **argv)
     top = NP < 5 ? NP : 5;
     for (k = 0; k < top; k++)
         printf("%2d. %-28s pid %-5ld %9s  %2ld%%\n", k + 1, P[ord[k]].name, P[ord[k]].pid,
-               mb(P[ord[k]].rss), P[ord[k]].rss * 100 / total);
+               mb(P[ord[k]].rss), total ? P[ord[k]].rss * 100 / total : 0);
 
     printf("\n== by command\n");
     for (i = 0; i < NP; i++) ord[i] = i;

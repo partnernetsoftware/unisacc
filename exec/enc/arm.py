@@ -28,6 +28,7 @@ def word(p):
 def build(image=False):
     specs = {'mov': ('rr', 1), 'imm': ('ri', 2), 'mul64': ('rrr', 3),
              'ret': ('', 4), 'nop': ('', 5), 'callr': ('r', 6),
+             'hostcall': ('rr',60), 'hostaddr': ('ri',61),
              'load64': ('rri',9), 'store64': ('rir',10),
              '.ld': ('rrii',11), '.st': ('riri',12),
              'jump': ('l',13), 'jumpz': ('rl',14), 'call': ('l',15),
@@ -133,6 +134,8 @@ def build(image=False):
     from armitoa import install as install_itoa
     install_itoa(E,word)
     install_win(E,word)
+    from hostbridge import install as install_hostbridge
+    install_hostbridge(E,'arm64',word)
     if image:
         from elfimage import install as install_elf
         from armbranch import LABELS

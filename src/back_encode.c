@@ -1,3 +1,4 @@
+#include "host_dl.h"
 /* ---- encoding, shared ------------------------------------------------- */
 char *bkout;                        /* where the current instruction's bytes go */
 int bkol;                           /* how many so far */
@@ -36,6 +37,12 @@ long bk_leaaddr(int i) {
     }
     return tka[i * 4 + 1] + bk_shift;
 }
+
+/* Fixed host ABI bridge: mirrored from exec/enc/hostbridge.tsv. */
+unsigned long BK_HOST_ARM[] = {0x910003e9,0xd101c0ea,0x927ced4a,0x9100015f,0xf90003e1,0xf90007e2,0xf9000be3,0xf9000fe4,0xf90013e5,0xf90017e6,0xf9001be7,0xf9001fe9,0xf90023fe,0xf9400220,0xf9400621,0xf9400a22,0xf9400e23,0xf9401224,0xf9401625,0xd63f0200,0xf94003e1,0xf94007e2,0xf9400be3,0xf9400fe4,0xf94013e5,0xf94017e6,0xf9401be7,0xf9401fe9,0xf94023fe,0x9100013f};
+char *BK_HOST_X86 = "\123\110\211\303\110\211\340\110\203\354\140\110\203\344\360\110\211\074\044\110\211\164\044\010\110\211\124\044\020\114\211\104\044\030\114\211\124\044\040\114\211\114\044\050\110\211\104\044\070\110\213\073\110\213\163\010\110\213\123\020\110\213\113\030\114\213\103\040\114\213\113\050\061\300\101\377\323\110\213\074\044\110\213\164\044\010\110\213\124\044\020\114\213\104\044\030\114\213\124\044\040\114\213\114\044\050\110\213\144\044\070\133";
+#define BK_HOST_ARM_N 30
+#define BK_HOST_X86_N 112
 
 /* ---- arm64: emit_arm.py, line for line ---------------------------------- */
 #define A_IP0 16
@@ -277,6 +284,14 @@ int bk_arm(int i, long off) {
     int op; long *a; char *o; long pc; long v; int k; int d; int n;
     op = tkop[i]; a = tka + i * 4;
     pc = bk_textva + off;
+    if (op == TO_HOSTCALL) {
+        ow(0xAA0003F0 | (a[0] << 16)); ow(0xAA0003F1 | (a[1] << 16));
+        k = 0; while (k < BK_HOST_ARM_N) { ow(BK_HOST_ARM[k]); k = k+1; } return 1;
+    }
+    if (op == TO_HOSTADDR) {
+        a_adrp_add(a[0], pc, BK_DATA_BASE+bk_shift-32+8*a[1]);
+        ow(0xF9400000 | (a[0]<<5) | a[0]); return 1;
+    }
     if (op == TO_SETREG) {
         if (a[3] == SK_IMM) { a_movimm(a[0], a[1], 0); return 1; }
         if (a[3] == SK_REG) { ow(0xAA0003E0 | (a[1] << 16) | a[0]); return 1; }
@@ -806,6 +821,13 @@ int bk_x86(int i, long off) {
     int op; long *a; char *o; long pc; int s2; int k;
     op = tkop[i]; a = tka + i * 4;
     pc = bk_textva + off;
+    if (op == TO_HOSTCALL) {
+        x_movrr(X_R11, a[0]); x_movrr(X_RAX, a[1]);
+        k = 0; while (k < BK_HOST_X86_N) { ob(BK_HOST_X86[k]); k = k+1; } return 1;
+    }
+    if (op == TO_HOSTADDR) {
+        x_rip(0x8B, a[0], pc+7, BK_DATA_BASE+bk_shift-32+8*a[1]); return 1;
+    }
     if (op == TO_SETREG) {
         if (a[3] == SK_IMM) { x_movri(a[0], a[1]); return 1; }
         if (a[3] == SK_REG) { x_movrr(a[0], a[1]); return 1; }
@@ -1066,7 +1088,7 @@ int bk_assemble(void) {
         /* room for the import slots at the end of the text: they must be
            within reach of a rip-relative call, and read-only suits them */
         bk_runtsz = bk_round((bktlen > 1 ? bktlen : 1) + 128, 16384);
-        bk_rundsz = bk_round(bkdlen + 65536, 16384);
+        bk_rundsz = bk_round(bkdlen + 65536 + (bkos == 1 ? 32 : 0), 16384);
 #ifdef _WIN32
         /* ONE region, PAGE_EXECUTE_READWRITE: the gate calls its imports
            rip-relative, and two separate allocations can land more than
@@ -1092,12 +1114,22 @@ int bk_assemble(void) {
             bk_runtext == 0 || bk_rundata == 0) {
             __write(2, "run: cannot map memory\n", 23); __exit(1);
         }
+        if (bkos == 1) {
+            int q; int b; long v; char *slots;
+            slots = (char *)bk_rundata; q = 0;
+            while (q < 4) {
+                v = host_dl_slot(q); b = 0;
+                while (b < 8) { slots[8*q+b] = (v >> (8*b)) & 255; b = b+1; }
+                q = q+1;
+            }
+            bk_rundata = bk_rundata+32;
+        }
         bk_textva = bk_runtext;
         bk_datava = bk_rundata;
     } else { if (bkos == 1) {
         long h; h = bk_macho_hdrs();
         bk_textva = 4294967296 + h;
-        bk_datava = 4294967296 + bk_round(h + bktlen, 16384);
+        bk_datava = 4294967296 + bk_round(h + bktlen, 16384) + 32;
     } else { if (bkos == 0) {
         bk_textva = 4194304 + 176;
         bk_datava = 4194304 + bk_round(176 + bktlen, 4096);

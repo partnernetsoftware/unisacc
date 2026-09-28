@@ -28,7 +28,7 @@ def install(E, arch="x86_64", os_="lnx"):
     reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
     p=P('C.init')
-    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','4','8','-8','_start:','write','exit']))
+    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','3','4','8','-8','_start:','write','exit','.hostcall','.hostaddr']))
     ids={w:'idc'+str(i) for i,w in enumerate(words)}
     for w,d in ids.items():
         p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN',d),('SBSAVE','blob'),('STX',d,TXT,'blob'))
@@ -75,6 +75,20 @@ def install(E, arch="x86_64", os_="lnx"):
     dispatch_bindings.update({'id:'+name: value for name, value in ids.items()})
     install_rules(g, Path(__file__).parent, 'code-entry', bindings=dispatch_bindings,
                   section='dispatch-'+arch)
+    hostbindings={'id:'+name:value for name,value in ids.items()}
+    hostbindings.update(test0=P('CH').fresh('b'),test1=P('CH').fresh('b'),
+                        call='CH.call' if os_=='osx' else 'C.fail',
+                        addr='CH.addr' if os_=='osx' else 'C.fail')
+    install_rules(g,Path(__file__).parent,'code-host',section='entry',bindings=hostbindings)
+    if os_=='osx':
+        hostbindings.update(test2=P('CH').fresh('b'),test3=P('CH').fresh('b'))
+        hostbindings.update({'ret'+str(i):P('CH').fresh('r') for i in range(4)})
+        install_rules(g,Path(__file__).parent,'code-host',section='supported',bindings=hostbindings,
+                      sequences=dict(calltext=E.O('hostcall '),addrtext=E.O('hostaddr '),comma=E.O(', ')))
+        for i in range(4):
+            install_rules(g,Path(__file__).parent,'code-host',section='bound',bindings=dict(
+                entry='CH.addr.'+str(i),test=P('CH').fresh('b'),value=ids[str(i)],
+                next='CH.addr.'+str(i+1) if i<3 else 'C.fail'))
     # Generic output and fixed fusion/argument control; facts stay in their original maps.
     print_labels = (('PRINT', 'b'), ('ADDR', 'r'), ('GENERIC', 'r'), ('G', 'b'),
                     ('G', 'b'), ('G', 'r'), ('G', 'b'), ('G', 'r'),

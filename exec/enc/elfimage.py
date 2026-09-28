@@ -51,6 +51,9 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     for i in range(len(IMPORTS)):p.a(('COPYW','lb_v','ml_imp_'+str(i)),('LDI','lb_n',8)).call('EI.bytes')
     install_rules(g, Path(__file__).parent, 'elfimage', section='iat-end',
                   bindings={'state': p.cur}, sequences={'pending': p.acts})
+    p=P('MI.dlslots')
+    for i in range(4):p.a(('COPYW','lb_v','ml_dl_'+str(i)),('LDI','lb_n',8)).call('EI.bytes')
+    p.goto('EI.data')
     if image_format=='pe':
         from pedelta import install as install_pe
         install_pe(E,byte,arch)

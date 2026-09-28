@@ -114,6 +114,11 @@ for part in stages chain resources; do job exec-native-$part env NATIVE_PART=$pa
 job exec-net python3 ./exec/c/netcheck.py
 job modelbenchcheck python3 ./tests/modelbenchcheck.py       # performance evidence fails on functional errors
 job bound python3 ./tests/boundcheck.py
+job qprefix python3 ./exec/c/qprefixcheck.py --artifact "${MODEL_COM:-./unisacc.com}"
+if [ "$(uname -s)" = Darwin ]; then
+    job ffi-bridge python3 ./exec/ffi/bridgecheck.py
+    job ffi-product python3 ./exec/ffi/productcheck.py
+fi
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
 job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
 job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel

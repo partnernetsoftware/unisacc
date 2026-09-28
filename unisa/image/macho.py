@@ -19,6 +19,12 @@ LC_SYMTAB, LC_DYSYMTAB, LC_DYLD_INFO_ONLY = 0x2, 0xB, 0x80000022
 STRTAB = 8            # a string table is never empty: it starts with NULs
 DYLD = b"/usr/lib/dyld"
 LIBSYS = b"/usr/lib/libSystem.B.dylib"
+DLIMPORTS = ("dlopen", "dlsym", "dlclose", "dlerror")
+DLPREFIX = 8 * len(DLIMPORTS)
+# Eager pointer binds: dylib ordinal 1, pointer type, __DATA segment 2.
+DLBIND = b"".join(bytes((0x11, 0x51, 0x72, 8*i, 0x40)) +
+                  b"_" + name.encode() + b"\0\x90"
+                  for i, name in enumerate(DLIMPORTS)) + b"\0"
 SEG, SECT = 72, 80
 # Apple Silicon does not support static executables at all: every arm64 macOS
 # binary must be brought up by dyld.  So the image carries LC_LOAD_DYLINKER +
@@ -141,8 +147,8 @@ def write(arch, text, data, entry, full=None):
     cpu, sub = CPU[arch]
     hdrs = HDRS(arch)
     textsz = _round(hdrs + len(text))
-    datavm = _round(max(1, full))           # mapped
-    datasz = _round(len(data))              # stored; __bss zero-fills the rest
+    datavm = _round(full + DLPREFIX)           # mapped
+    datasz = _round(len(data) + DLPREFIX)              # stored; __bss zero-fills the rest
     link = textsz + datasz
     m = bytearray()
     m += struct.pack("<IiiIIIII", 0xFEEDFACF, cpu, sub, 2, NCMDS,
@@ -154,11 +160,12 @@ def write(arch, text, data, entry, full=None):
     m += _sect(b"__text", b"__TEXT", VMADDR + hdrs, len(text), hdrs,
                0x80000400)
     m += _seg(b"__DATA", VMADDR + textsz, datavm, textsz, datasz, 3, 3, 2)
-    m += _sect(b"__data", b"__DATA", VMADDR + textsz, len(data), textsz, 0)
-    m += _sect(b"__bss", b"__DATA", VMADDR + textsz + len(data),
+    m += _sect(b"__data", b"__DATA", VMADDR + textsz, len(data) + DLPREFIX, textsz, 0)
+    m += _sect(b"__bss", b"__DATA", VMADDR + textsz + DLPREFIX + len(data),
                full - len(data), 0, 1)                   # S_ZEROFILL
     # __LINKEDIT holds the string table and then the signature
-    sigoff = (link + STRTAB + 15) // 16 * 16
+    bindoff = link + STRTAB
+    sigoff = (bindoff + len(DLBIND) + 15) // 16 * 16
     siglen = _sig_len(sigoff)
     linksz = sigoff - link + siglen
     m += _seg(b"__LINKEDIT", VMADDR + textsz + datavm, _round(linksz), link,
@@ -168,8 +175,9 @@ def write(arch, text, data, entry, full=None):
     m += struct.pack("<IIQQ", LC_MAIN, 24, hdrs + entry, 0)
     m += struct.pack("<IIIIII", LC_BUILD_VERSION, 24, 1, 13 << 16,
                      13 << 16, 0)
-    # empty, but present -- see the note on NCMDS  [I-15]
-    m += struct.pack("<II" + "I" * 10, LC_DYLD_INFO_ONLY, 48, *([0] * 10))
+    # Rebase/export are empty; eager binds populate the four bootstrap slots.
+    m += struct.pack("<II" + "I" * 10, LC_DYLD_INFO_ONLY, 48,
+                     0, 0, bindoff, len(DLBIND), 0, 0, 0, 0, 0, 0)
     m += struct.pack("<IIIIII", LC_SYMTAB, 24, link, 0, link, STRTAB)
     m += struct.pack("<II" + "I" * 18, LC_DYSYMTAB, 80, *([0] * 18))
     m += struct.pack("<IIII", LC_CODE_SIGNATURE, 16, sigoff, siglen)
@@ -178,9 +186,11 @@ def write(arch, text, data, entry, full=None):
     out = bytearray(m)
     out += text
     out += b"\x00" * (textsz - len(out))
+    out += bytes(DLPREFIX)
     out += data
     out += b"\x00" * (link - len(out))
     out += b"\x00" * STRTAB                 # the string table itself
+    out += DLBIND
     out += b"\x00" * (sigoff - len(out))
     # the hashes cover everything written so far, this image's own header
     # included -- which is why the signature is last and its own bytes are not

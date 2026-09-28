@@ -58,6 +58,7 @@ KND, BLB, SZ, TGT, BRG, SHT, OFF, FIT = (75 * 10 ** 6, 76 * 10 ** 6, 77 * 10 ** 
 AOPC, ACC = 72 * 10 ** 6, 73 * 10 ** 6       # the alu2 opcode / setcc byte of an op id
 C_MOV, C_IMM, C_ALU, C_MUL, C_LD8, C_ST8, C_LD, C_ST, C_SET, C_RET, C_SHF, C_CALLR, C_PUSH, C_POP, C_NOP, C_FRAME, C_ZERO, C_SETREG, C_SPINIT, C_DIV, C_MOD, C_UDIV, C_UMOD, C_GATE, C_LEA, C_SETMEM, C_ARGSAVE, C_ARGVGET = range(1, 29)
 C_ITOA = 29
+C_HOSTCALL, C_HOSTADDR = 60, 61
 from unisa.catalog import REGMAP     # noqa: E402  (generation time only)
 SPREG = NUM[REGMAP["x86_64"][7]]     # the tape SP's machine register (rsp), read, not written here
 SHX = 83 * 10 ** 6                           # the /digit of D3 for a shift op id (ENCSPEC shiftext)
@@ -129,6 +130,7 @@ def build(image=False):
     p = P("START")
     classes = {".div": C_DIV, ".mod": C_MOD, ".udiv": C_UDIV, ".umod": C_UMOD, "setreg": C_SETREG, "spinit": C_SPINIT, ".zero": C_ZERO, "push": C_PUSH, "pop": C_POP, "nop": C_NOP, ".frame": C_FRAME, "callr": C_CALLR, "mov": C_MOV, "imm": C_IMM, "mul64": C_MUL, "load64": C_LD8, "store64": C_ST8, ".ld": C_LD, ".st": C_ST, "ret": C_RET}
     classes.update(FP_IDS)
+    classes.update(hostcall=C_HOSTCALL,hostaddr=C_HOSTADDR)
     from x86win import IDS as WIN_IDS
     classes.update(WIN_IDS)
     from x86win import init as win_init, reset as win_reset, META as WIN_META
@@ -206,6 +208,7 @@ def build(image=False):
     dispatch = {globals()[name]: entry for name, entry in
                 (line.rstrip('\n').split('\t') for line in open(os.path.join(HERE, 'x86-shell-dispatch.tsv')) if not line.startswith('#'))}
     dispatch.update({v: 'FP.'+k for k, v in FP_IDS.items()})
+    dispatch.update({C_HOSTCALL:'HB.call',C_HOSTADDR:'HB.addr'})
     dispatch.update({v: 'WX.store' for v in WIN_IDS.values()})
     dispatch_test = P('ARGS.d').fresh('b')
     install_rules(g, HERE, 'x86-shell', section='dispatch', bindings={'test': dispatch_test},
@@ -225,6 +228,8 @@ def build(image=False):
     emit_rules('post')
     install_fp(E, byte)
     install_address(E, byte, KND, SZ, OFF, LABD)
+    from hostbridge import install as install_hostbridge
+    install_hostbridge(E,'x86_64')
     from x86itoa import install as install_itoa
     install_itoa(E,KND,SZ)
     from x86win import install as install_win
