@@ -16,6 +16,8 @@ def install(E,P,b,start,integers):
     from finite_rules import install as rules
     from unresolved import DEFINED
     g=E.g
+    from modelgraphequality import install as install_graph_equality
+    install_graph_equality(E)
     rules(g,Path(__file__).parent,'libraryimports',section='read')
     P('LI.fail').a(E.rej('not covered: library import binding or signature')).goto('DEAD')
     P('LI.start').a(('SBCLR',),*[('SBOUT',x) for x in b'\0library/bindings'],('SBFIND','li_blob'),('BLEN','li_len','li_blob')).branch({1:start},'LI.present',[('CMPI','li_len',0)])
@@ -132,10 +134,7 @@ def install(E,P,b,start,integers):
     P('LI.importargc').a(('LDX','li_argc','li_i',ARGC),('LDX','li_format','li_i',FORMAT)).branch({1:'LI.typedprototype'},'LI.legacyargc',[('CMPI','li_format',1)])
     P('LI.legacyargc').branch({2:'LI.fail'},'LI.prototype',[('LDI','li_cmpmax',6),('C64U','li_argc','li_cmpmax')])
     P('LI.typedprototype').a(('LDX','lx_sig','li_id',b['FPS_FN']),('LDX','lx_nameblob','li_i',NAMES)).branch({1:'LI.fail'},'LI.typedsource',[('CMPI','lx_sig',0)])
-    P('LI.typedsource').call('LX.signature').a(('COPYW','ms_blob','lx_sigblob'),('BLEN','ms_len','lx_sigblob')).call('MS.canonical').a(('COPYW','li_sourcemode','ms_mode'),('LDX','li_nativecanon','li_i',CANON),('BLEN','li_nativelen','li_nativecanon'),('COPYW','li_sourcecanon','ms_canon'),('COPYW','li_sourcelen','ms_canonlen'),('LDI','li_compareat',0)).branch({1:'LI.typedcompare'},'LI.fail',[('CMP','li_nativelen','li_sourcelen')])
-    P('LI.typedcompare').branch({0:'LI.typedcomparebyte'},'LI.typedemit',[('CMP','li_compareat','li_sourcelen')])
-    P('LI.typedcomparebyte').a(('INPUSH','li_sourcecanon'),('JUMP','li_compareat'),('BYTE','li_sourcebyte'),('INPOP',),('INPUSH','li_nativecanon'),('JUMP','li_compareat'),('BYTE','li_nativebyte'),('INPOP',)).branch({1:'LI.typedcompared'},'LI.fail',[('CMP','li_sourcebyte','li_nativebyte')])
-    P('LI.typedcompared').a(('ALUI','add','li_compareat','li_compareat',1)).goto('LI.typedcompare')
+    P('LI.typedsource').call('LX.signature').a(('COPYW','ms_blob','lx_sigblob'),('BLEN','ms_len','lx_sigblob')).call('MS.canonical').a(('COPYW','li_sourcemode','ms_mode'),('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.equal').branch({1:'LI.typedemit'},'LI.fail',[('CMPI','mg_equal',1)])
     P('LI.prototype').a(('LDX','li_sig','li_id',b['FPS_FN']),('LDX','li_argc','li_i',ARGC)).branch({1:'LI.fail'},'LI.variadiccheck',[('CMPI','li_sig',0)])
     P('LI.variadiccheck').a(('LDX','li_var','li_id',E.VAR)).branch({1:'LI.countmatch'},'LI.fail',[('CMPI','li_var',0)])
     P('LI.countmatch').a(('LDX','li_n','li_sig',b['FPS_COUNT'])).branch({1:'LI.return'},'LI.fail',[('CMP','li_n','li_argc')])

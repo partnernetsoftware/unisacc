@@ -2877,3 +2877,5 @@ Callback模型图语义相等下一片决定：保持MS.canonical作为声明验
 完整signature实际误编译已局部修复并独立复验：明确移除旧展开FS.query状态后，以完整sig*1024 facts查询固定实参；九/十七参数直接/间接、pick返回及连调/full共7程序，在真实ASM网络driver的O0/O1/O2共21次全部退出0。之前只测facts/equality未覆盖实际callquery是门禁缺口，专项补sim/C-network查询与实际driver接受。六项旧宿主ABI/计划门禁rc0（3s）。回执research/r10-callback-foundation-evidence.json；私有候选成功不是根产品已更新，后续正式构造/产品受影响门禁仍待做。
 
 宿主graph相等补回归：同一plain Leaf的supported0/1是能力声明而非ABI类型差异，新等价fixture先实际失败，再移除该证明位的结构比较；数据解码仍按supported约束拒绝冒充可执行callback。两ISA图门禁需在补丁后重跑，先前3门禁不代替新fixture验收。
+
+MG.equal独立模型已完成并连接LI固定/LV变参两处原型比较，移除各自bytecompare循环，共用图比较；来源脚本mode在MS scratch覆盖前保存。独立agent报告396态/101912观察、30双向独立oracle/sim/C-network与6畸形/65536预算控制通过，父会话随后复验。callback源图serializer与可调用转换仍未接入，不能以比较器到位称公开callback已绿。新增com-full-signature永久产品回归，旧根实际ptr9 O0退出1，正式重构候选必须21次全通过。

@@ -202,6 +202,7 @@ job lib-variadic-resolver-host python3 ./tests/libraryvariadicresolvercheck.py
 job lib-variadic-protocol ./tests/modelvariadicprotocolcheck.sh
 job lib-callback-graph-host python3 ./tests/librarycallbackgraphcheck.py
 job lib-callback-graph-protocol ./tests/modelcallbackgraphcheck.sh
+job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
 job lib-typed-native python3 ./tests/librarytypednativecheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-variadic-native python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --sanitize
 job lib-sig2-native python3 ./tests/librarysig2nativecheck.py --package "${MODEL_COM:-./unisacc.com}"
@@ -245,6 +246,7 @@ if [ "$COM" = 1 ]; then
         printf 'gate product: %s sha256 %s\n' "$PRODUCT" "$PRODUCT_SHA"
     fi
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
+    job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
     job com-closure UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/closure.sh examples/*.c
     job com-tools UA="$PRODUCT" UA_RUN="$PRODUCT" TOOLS_UA="$PRODUCT" ./tests/tools.sh
     for shard in 1 2 3 4; do
