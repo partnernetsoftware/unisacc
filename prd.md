@@ -5384,3 +5384,5 @@ P3集成本地结果：P1/P2/P3在生产run.c中由cc sanitizer和unisacc构建�
 五次交替中位数：同驱动P2/plain calc185.285ms，P3候选186.757ms（+1.472ms），发布物188.922ms；实际最小程序装载启动26.156/27.735ms（+1.578ms），发布物26.044ms。六目标hello -O2镜像与经典完全一致，这是生成证据、不是六平台执行。lnx/arm64既有Lima default实际执行codec的1,655向量通过（未改变其原运行状态）。Windows start在10秒超时后发现客机starting，普通stop未生效，--kill已确认stopped；Windows两目标执行仍未验。P3字节账检查压缩物理字节与压缩前记录账分别求和，避免把2.3MB原文误当1.08MB包内占比。
 
 P3相关队列父验：固定私有MODEL_COM与私有UA，exec-net/exec-codec/exec-package/qprefix/docs五项均rc0，双槽3秒墙钟；qprefix使用真实P3候选32网络，动作前缀展开一致。独立sanitizer包检查与完整32模型全域审计另已通过。默认构建与根产物暂保持P2，待正式compilerpack从当前输入构造P3并冻结完整产品门禁后再切；这不是外部阻挡，剩余任务是默认切换前的整机门禁和未验平台证据。
+
+正式compilerpack --compressed入口已用六目标既有manifest及当前追加模型生成器构造包，与上述候选包逐字节一致；重新从3487653的当前输入交叉构建APE，产物仍2f128769…/1,078,516 B，构建开始/结束闭包身份一致并生成私有来源侧车。下一步冻结该私有候选完整--com队列；每个滚动窗口≤55秒、双槽、结果逐套件记录，不修改根发布物或测试树。Windows启动缺口不作门禁降级或通过。
