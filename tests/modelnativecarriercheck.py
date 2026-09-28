@@ -12,6 +12,11 @@ D=desc(3);UI=desc(unsigned=1);I=desc();F=desc(3,4,4);P=desc(2,depth=1);VOID=desc
 def union(children=(D,UI),layout=(0,0,0,8),**kw):
  return desc(5,tag=2,payload=U(len(children))+b''.join(b''.join(map(U,layout))+x for x in children),**kw)
 MIX=union()
+def structure(children,offsets,width,alignment):
+ return desc(5,width,alignment,tag=1,payload=U(len(children))+b''.join(U(off)+bytes(16)+U(struct.unpack_from('<Q',x,32)[0])+x for x,off in zip(children,offsets)))
+def array(child,count,stride,width,alignment):
+ return desc(5,width,alignment,tag=3,payload=U(count)+U(stride)+child)
+
 def natural(children,width):
  return desc(5,width,width,tag=2,payload=U(len(children))+b''.join(bytes(24)+U(struct.unpack_from('<Q',x,32)[0])+x for x in children))
 
@@ -100,6 +105,20 @@ def main():
   fixtures.append((signature((wide,),MIX),signature((cwide,),CUI,support=1)))
   for target in (f'{osname}/{arch}'.encode() for osname in ('osx','lnx','win') for arch in ('arm64','x86_64')):
    for original,converted in fixtures:check(original,target,plan(target,original,converted));successes+=1
+  aggregate_cases=0
+  for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
+   fp=natural((F,F),4);cfp=desc(1 if target==b'win/x86_64' else 3,4,4,unsigned=int(target==b'win/x86_64'),base=0,shape=0)
+   afp=array(fp,3,4,12,4);cafp=identity(array(cfp,3,4,12,4))
+   au=array(MIX,2,8,16,8);cau=identity(array(CUI,2,8,16,8))
+   su=structure((desc(1,1,1),MIX,afp),(0,8,16),32,8)
+   csu=identity(structure((identity(desc(1,1,1)),CUI,cafp),(0,8,16),32,8))
+   # Self-cycle definition traversed through a struct; later references retain ID1.
+   cb=callback_def(1,(callback_ref(1),su),au)
+   ccb=callback_def(1,(callback_ref(1,True),csu),cau,support=1,canon=True)
+   outer=structure((cb,au),(0,8),24,8);couter=identity(structure((ccb,cau),(0,8),24,8))
+   for originalvalue,convertedvalue in ((afp,cafp),(au,cau),(su,csu),(outer,couter)):
+    original=signature((originalvalue,),I);converted=signature((convertedvalue,),identity(I),support=1)
+    check(original,target,plan(target,original,converted));aggregate_cases+=1
   # Decode each certified callback graph through the existing bridge parser.
   host=t/'graphcheck.c';host.write_text('#include "exec/c/libraryexports.h"\nint main(int argc,char **argv){FILE *f=fopen(argv[1],"rb");fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);unsigned char *b=malloc(n);fread(b,1,n,f);fclose(f);us_exports x={0};char e[200]={0};int rc=us_exports_load_bridge(&x,b,n,e,sizeof e);if(rc)fprintf(stderr,"%s\\n",e);us_exports_clear(&x);free(b);return rc;}\n')
   hostrun=t/'graphcheck';cmd('cc','-O0','-I',ROOT,host,'-lffi','-o',hostrun)
@@ -111,8 +130,8 @@ def main():
    signature(result=union(layout=(0,0,1,8))),signature(result=union(layout=(0,0,0,4))),
    signature(result=union((desc(3,4,4),UI))),signature(result=union((D,desc(unsigned=1,depth=1)))),
    signature(result=union((D,desc(unsigned=1,tag=3,payload=U(1)+U(8)+UI)))),
-   signature(result=desc(5,tag=1,payload=U(1)+bytes(24)+U(8)+MIX)),
-   signature(result=desc(5,tag=3,payload=U(1)+U(8)+MIX)),signature(support=1),signature(var=1),
+   signature(result=desc(5,tag=1,payload=U(1)+U(1)+bytes(16)+U(8)+MIX)),
+   signature(result=desc(5,tag=3,payload=U(2)+U(8)+MIX)),signature(support=1),signature(var=1),
    signature(result=desc(4,depth=1,tag=4)),signature(result=desc(3,8,4)),signature(result=desc(0,0,0,unsigned=1)),signature(params=(VOID,),result=I),
    signature(mode=1),signature()+b'x']
   rejects.extend([
@@ -123,9 +142,22 @@ def main():
    signature((callback_def(1,(MIX,),MIX,var=1),),MIX),
    signature((callback_ref(1),),MIX),
    signature((callback_def(1,(MIX,),MIX),callback_def(1,(MIX,),MIX)),MIX),
-   signature((callback_def(1,(desc(5,tag=1,payload=U(1)+bytes(24)+U(8)+MIX),),MIX),),MIX),
-   signature((callback_def(1,(desc(5,tag=3,payload=U(1)+U(8)+MIX),),MIX),),MIX),
+   signature((callback_def(1,(desc(5,tag=1,payload=U(1)+U(1)+bytes(16)+U(8)+MIX),),MIX),),MIX),
+   signature((callback_def(1,(desc(5,tag=3,payload=U(2)+U(8)+MIX),),MIX),),MIX),
    signature((desc(4,depth=2,tag=4,payload=leaf[65:]),),MIX)])
+  rejects.extend([
+   signature(result=structure((I,I),(0,4),16,8)),
+   signature(result=structure((I,),(0,),16,8)),
+   signature(result=structure((I,),(0,),8,4)),
+   signature(result=structure((I,),(0,),8,16)),
+   signature(result=array(I,2,4,8,8)),
+   signature(result=array(I,0,8,8,8)),
+   signature(result=array(I,2,8,16,4)),
+   signature(result=array(natural((D,F),8),2,8,16,8)),
+   signature(result=structure((natural((desc(1,4,4),),4),),(0,),4,4)),
+   signature(result=structure((VOID,),(0,),8,8)),
+   signature(result=desc(5,tag=1,payload=U(1)+U(0)+U(0)+U(1)+U(8)+I)),
+   signature(result=desc(5,tag=1,payload=U(1)+U(0)+U(1)+U(0)+U(8)+I))])
   for original in rejects:check(original)
   for target in (None,b'',b'osx/arm',b'osx/arm64\0',b'osx/arm64x',b'win/riscv64',b'OSX/arm64'):check(signature(),target)
   original=signature()
@@ -135,5 +167,5 @@ def main():
   for length in (0,7,16,len(original)//2,len(original)-1):check(original[:length])
   for original,_ in fixtures:
    for length in (len(original)//2,len(original)-1):check(original[:length])
-  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
+  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases+aggregate_cases,'aggregate_cases':aggregate_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
 if __name__=='__main__':main()

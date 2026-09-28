@@ -218,6 +218,12 @@ job lib-carrier-relay python3 ./tests/libraryunionnativecheck.py --package "${MO
 job lib-union-scalar-1 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases int8,float4 --sanitize
 job lib-union-scalar-2 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases double8,mixed2 --sanitize
 job lib-union-scalar-3 python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed3,mixed-reordered --sanitize
+job lib-union-composite-direct-1 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize
+job lib-union-composite-direct-2 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize
+job lib-union-composite-direct-3 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize
+job lib-union-composite-callback-1 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases mixed16,fp16 --sanitize --callback
+job lib-union-composite-callback-2 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array2,array4 --sanitize --callback
+job lib-union-composite-callback-3 python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --cases array5 --sanitize --callback
 job lib-callable-variadic-mechanism python3 ./tests/librarycallablevarcheck.py
 job lib-callable-catalog python3 ./tests/librarycallablecatalogcheck.py
 job lib-callable-variadic-model ./tests/modelcallablevarwirecheck.sh
@@ -252,6 +258,12 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-union-scalar-2-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases double8,mixed2 --sanitize
     job lib-union-scalar-3-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed3,mixed-reordered --sanitize
     job lib-union-scalar-narrow-rosetta python3 ./tests/libraryunionscalarcheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases int1,int2,int4 --sanitize
+    job lib-union-composite-direct-1-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed16,fp16 --sanitize
+    job lib-union-composite-direct-2-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array2,array4 --sanitize
+    job lib-union-composite-direct-3-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array5 --sanitize
+    job lib-union-composite-callback-1-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases mixed16,fp16 --sanitize --callback
+    job lib-union-composite-callback-2-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array2,array4 --sanitize --callback
+    job lib-union-composite-callback-3-rosetta python3 ./tests/libraryunioncompositecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --cases array5 --sanitize --callback
     job lib-variadic-resolver-rosetta python3 ./tests/libraryvariadicresolvercheck.py --arch x86_64
     job lib-variadic-native-rosetta python3 ./tests/libraryvariadicnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
 fi

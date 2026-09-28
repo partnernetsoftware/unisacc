@@ -65,4 +65,29 @@ Fixed callback graphs retain kind4/tag4 pointer descriptors and schema1 identiti
 Definition IDs are registered before children, so shared and cyclic signatures
 remain shared/cyclic. Every completely certified fixed node carries proof1;
 original graph bytes/proof bits remain untouched. New local banks480–482 own
-signature IDs, epoch marks and 16-register frames; recursion is bounded at64.
+signature IDs, epoch marks and 32-slot frames; recursion is bounded at64.
+
+## Natural recursive aggregates
+
+Ordinary struct(tag1) and array(tag3) descriptors retain exact size/alignment,
+member offset/bitfield/storage words, count and stride. Struct offsets must equal
+sequential natural align-up placement; aggregate alignment is the maximum member
+alignment and its extent is the rounded final member end. Arrays require stride
+equal to element extent, extent equal to count*stride, and element alignment.
+Counts1..1024, alignment1/2/4/8 and extent<=1MiB bound this slice; void children,
+nonzero bitfields, packed/extra-padding/over-aligned layouts and unsupported
+children reject. Existing bank482 uses 32-slot frames for recursive emission.
+
+The local replacement argument is limited to these natural layouts. On SysV
+x64 each certified union preserves its eightbyte INTEGER/SSE class and byte
+extent; enclosing natural structs/arrays therefore merge the same classes,
+while larger aggregates remain MEMORY. On ARM, homogeneous same-format FP unions
+contribute one uniquely addressable FP element both before and after mapping;
+arrays/structs preserve HFA multiplicity. Integer/mixed unions remain non-HFA
+with unchanged extent/alignment. Narrow integer ARM unions remain rejected.
+On Windows x64 small aggregates use extent-based integer passing and larger
+aggregates remain indirect; original and carrier extents are identical.
+Fixed callback descriptors remain pointer-sized and their signature graphs are
+certified recursively. These arguments do not cover arbitrary packed layouts,
+bitfields, vector types, variadics or the pending general16-byte union recipe.
+They are model-domain proofs, not all-platform native qualification.
