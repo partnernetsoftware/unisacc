@@ -64,10 +64,11 @@ def install(E,P,b,integers,union_bank):
     P('LTY.members').branch({0:'LTY.member'},'LTY.out',[('CMP','d_i','d_members')])
     p=P('LTY.member').a(('ALUI','mul','d_key','d_sid',64),('ALU','add','d_key','d_key','d_i'),
         ('LDX','d_key','d_key',b['SMEM']))
-    for pool in ('MOF','BFO','BFW','BFS'):
+    for pool in ('MOF','BFO','BFW'):
         p.a(('LDX','lx_v','d_key',b[pool])).call('LX.u64')
-    p.a(('LDX','d_bit','d_key',b['BFW'])).branch({2:'LTY.bitfield'},'LTY.membertype',[('CMPI','d_bit',0)])
-    P('LTY.bitfield').a(('LDI','lx_supported',0)).goto('LTY.membertype')
+    p.a(('LDX','d_bit','d_key',b['BFW'])).branch({2:'LTY.bitfield'},'LTY.ordinarymember',[('CMPI','d_bit',0)])
+    P('LTY.bitfield').a(('LDI','lx_supported',0),('LDX','lx_v','d_key',b['BFS'])).call('LX.u64').goto('LTY.membertype')
+    P('LTY.ordinarymember').a(('LDX','lx_v','d_key',b['MSZ'])).call('LX.u64').goto('LTY.membertype')
     p=P('LTY.membertype')
     frame(p,'STX')
     p.a(('LDX','lx_depth','d_key',b['MPT']),('LDX','lx_base','d_key',b['MBS']),

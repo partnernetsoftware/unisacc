@@ -2816,3 +2816,5 @@ R10 ALL_STACK正式候选封存：d4eac6d冻结源实际shared+六目标均完�
 固定协议见exec/c/librarybinding-v3.md：USBIND1/2保持，USBIND3容纳共享USLSIG2递归声明及candidate-owned native plan；原公开struct不变，新增typed API。模型比较完整源原型与显式声明、选择候选和REGISTER/ALL_STACK包装；既有六GP桥只调用通用ffi_call dispatcher，宿主不选择符号赢家或解析C。候选层、E3全量原型/包装、宿主深拷贝/ffi计划三个不相交文件域并发；父会话持有libunisacc公开API、ScriptFrame arena清理、门禁/生成物/根com与提交。首闭环必须native→script9→真实injected native9→Pair17.00/40，并保留FP9/17参、错误图与优先级控制，不能以纯ffi smoke充数。变参/typed callback/union-bitfield NativePlan/宽long double/六目标及签名发布仍完整保留。
 
 R10 本轮源实现：USBIND3 完整递归签名经共享 δ 规范化，宿主逐候选创建自有 libffi plan；模型生成参数槽与六字段控制帧，通用原生桥只调用声明 dispatcher。真实双向固定 ABI 的整包验证仍待执行；不据宿主单测宣布整体 FFI 完成。候选、规范化、lower 三模型合计 689,124 观察网络等于表；原生旧包 Pair9/FP9/整数17 三优化级每组100次保持通过。
+
+R10 首轮 typed 整包失败保留：4774981 候选 1,080,232 B/SHA256 7a9135d37118d81436306eab71f03fddb504d7e26d3b28b6f4f98394dc411553，ARM64 与 Rosetta 均因真实 Pair 声明的 storage_bytes 与模型不一致被拒绝。模型此前普通成员误写0，合成探针也误写0；改为普通成员 MSZ、位域 BFS，并让探针采用真实8/4布局和无名形参。新 E3 全域 1,912,647 观察通过；原生组合候选尚待重构，不以这次局部通过代替验收。
