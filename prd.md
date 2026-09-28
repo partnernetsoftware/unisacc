@@ -66,7 +66,7 @@
 
 **目标与基线**：以已发布 v0.0.9 / `a606ff4` 为基线，保持统一 `.com` 为主产品，优先补齐干净机器 CI 与 Windows 企业签名，再推进网络复用、单目标副产品及进程内库。沿用“表 → 构造确定性网络 → 通用执行器”的路线；不新增训练或另写一套编译逻辑。0.0.9 的193项本地通过不代表其 GitHub CI 通过。
 
-**当前进度（2026-09-29，26def90）**：七项交付未全部闭合。CI分片/共享准备、源码权重布局、共享E2已落地；远端CI与最终全门禁待证。六单目标曾私有交叉构建，最终平台验收未完成，单目标驱动尚未改为libunisacc+main。macOS ARM正式静态/动态库消费、上下文隔离、无main模块、GP原生导出、宿主函数注入/同步嵌套回调/exit恢复已实跑；本批整数/普通指针可写数据注入O0/O1/O2四上下文实际读写通过。候选完整重构并核源为0dadf387/1,039,038 B；12个受影响门禁11通过，1000循环RSS范围约2.24MB超过原512KiB阈值，虽然malloc live/reserved恒定仍保留失败并定位，不称生命周期验收完成。Windows两ISA桥只有交叉与模拟证据；resolver链、扩展ABI、六平台库、库+main单目标CLI、最终平台/CI/企业签名与发布仍待。根开发产物同步该真实候选，版本资源仍0.0.9，不是0.0.10发布物。
+**当前进度（2026-09-29，26def90）**：七项交付未全部闭合。CI分片/共享准备、源码权重布局、共享E2已落地；远端CI与最终全门禁待证。六单目标曾私有交叉构建，最终平台验收未完成，单目标驱动尚未改为libunisacc+main。macOS ARM正式静态/动态库消费、上下文隔离、无main模块、GP原生导出、宿主函数注入/同步嵌套回调/exit恢复已实跑；本批整数/普通指针可写数据注入O0/O1/O2四上下文实际读写通过。候选完整重构并核源为0dadf387/1,039,038 B；首验12门禁11通过、1000循环原RSS判据失败已保留。分域实证后改为macOS全zone live/owned映射裁判（不称RSS零增长）；9332cb8冻结测试树的12项受影响门禁全部通过，Linux旧RSS判据与各平台库验收仍待。Windows两ISA桥只有交叉与模拟证据；resolver链、扩展ABI、六平台库、库+main单目标CLI、最终平台/CI/企业签名与发布仍待。根开发产物同步该真实候选，版本资源仍0.0.9，不是0.0.10发布物。
 
 **R10 库格式边界修复（2026-09-29）**：新候选的lib-context在多单元O1检查明确失败：E3输出的USLTAPE1封装被E4当普通tape优化，tape缩短20字节而封装长度未更新。单单元O0、实际100次运行、CLI/C99检查仍通过；这些不能覆盖O1/O2库路径。修复决定：通用路由增加显式结束阶段边界，库先运行到E3、按有界格式拆出签名与tape，再仅把tape送进现有E4网络；C不做优化或编译决策，普通CLI路由不变。修复后lib-context多单元O0/O1/O2对拍、四线程、include目录与错误恢复实际通过；最新C适配器尚需重新装配根候选并跑完整门禁，原72bff5ea候选不能代表该修复后的驱动身份。
 
@@ -2728,3 +2728,5 @@ fa9b452源（正式库builder+原生生命周期checker）重新构造shared/六
 macOS正式1000循环生命周期以暖后全zone live bytes和blocks零增长、image/stack范围恒定、guest0及每事务owned0为判据，比512KiB live容忍更严格；保留原RSS范围/512KiB比较为明确diagnostic，过去rc1/rc9不改为原判据通过。增加不触碰payload页的真实malloc保留负控制，要求即使RSS变化小也由live维度拒绝。该变更是泄漏裁判修正，不宣称physical RSS零增长。Linux暂保留原RSS阈值，all-arena live测量/原生验收另补，不外推macOS。原生OS可保留已释放allocator页，这不等于库仍持有对象；按不可解释RSS阶跃开发新allocator不是本需求。
 
 正式修正首验13.46秒：1000真实compile/run全zone live bytes/blocks范围均0、owned image/stack恒定，RSS范围3,063,808 B仍明确标为超原阈值。新的不触页真实保留控制live+9,437,184 B/blocks+9且rc9，RSS仅32KiB原判据会漏检：说明live裁判同时避免释放页false positive与未触页malloc false negative，并非放宽相同性质阈值。见research/r10-native-lifecycle-live.json，Linux仍旧判据；实际完整受影响门禁待冻结复验。
+
+9332cb8冻结测试树、真实26def90/0dadf387产物的12项受影响门禁全部rc0（双槽19秒），根.com真实bytes1,039,038、freshness核源通过。所有原RSS失败仍保留，当前成功只按已声明macOS全zone live+owned/mapping判据；真实未触页malloc控制无编译、用1000检测循环抓live+9MiB，而正例执行300暖机+1000完整compile/map/run。最终回执research/r10-data-live-final-gates.json。全R10/最终全套/其他平台/企业签名/发布未闭合，resolver方案已定但尚未实现。
