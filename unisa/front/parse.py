@@ -1783,9 +1783,13 @@ class Walker:
             return ~self.const_atom()
         if t.kind == "(":
             if self.istype(self.peek()):          # a cast in a constant
-                self.abstract_type()              # expression: the value is
-                self.expect(")")                  # unchanged, we fold in i64
-                return self.const_atom()
+                cast = self.abstract_type()
+                self.expect(")")
+                if cast.boolean and self.peek().kind == "str":
+                    self.next()                  # a string address is non-null
+                    return 1
+                value = self.const_atom()
+                return int(value != 0) if cast.boolean else value
             v = self.const_expr()
             self.expect(")")
             return v

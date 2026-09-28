@@ -5310,3 +5310,9 @@ v0.0.8 Linux arm64 发布定位（2026-09-28）：冻结07ccaf8本地177/177通�
 Linux差分第二片定位：b_boolconv的`static B literal="x"`被客机gcc拒绝（initializer element is not computable at load time）；加显式`(B)`后同一地址到_Bool转换可编译，实际输出不变。决定此跨编译器回归使用显式转换，不称隐式静态字符串初始化已获gcc对照；原拒绝诊断与四种表达式实验日志保留。其余第三/四片分别108/105项全相同，产品不改。
 
 修正后实测：Linux arm64模型difftest_o四片共429个比较，wrong0/refuse0；macOS第二片经典与模型各108个比较均相同。独立tests/plainchar.c在macOS三路均为plain=-1，在Linux arm64 gcc为plain=255、经典/模型为plain=-1；signed=-1/unsigned=255均一致，模型与经典各-O0/-O1/-O2通过。候选948232f…产品输入未改变，不重建相同产物；本次提交冻结后重跑本地177项。平台未验项将在草稿中逐项注明，最终证据放发布附件，不为更新计数反复改变冻结树。
+
+冻结0f51890新队列发现真实种子缺口：fat拒绝b_boolconv中的`(B)"x"`，而经典C前端与模型接受且结果相同；不是超时。种子const_atom原本解析cast后丢弃类型，随后不认识字符串。决定只修_Bool cast的常量折叠：字符串地址转换为1，整数操作数按非零转换；不把任意地址伪装成整数。b_boolconv继续作回归。bigclosure另有48秒并发超时（完成五目标），保留该失败记录，下一冻结重项独占执行。Linux arm64本次候选编出原生经典N1，再N1编N2、N2编N3，三份SHA f2aded98119b88245bfd2041f0f6d799715c6704a5be76cf5bf5b926b23479a1，版本0.0.8；只称编译器自举，不称模型包自重打包。
+
+发布队列调度修正：bigclosure与fat在release.sh中声明为独占重套件，其内部仍有探针并行；普通独立套件继续双槽并行。不增加超时，不改变比较或通过判据，只避免两个重套件相互争抢CPU。
+
+_Bool种子修复父验：同一个b_boolconv实际运行arm64与Rosetta x86_64两片，fat 1/mismatch0；重建模型.com与原候选逐字节相同，仍5388402 B/SHA948232f…，来源侧车按新的完整输入闭包生成。产品逻辑未变；种子修复与调度变更纳入新的最终冻结。
