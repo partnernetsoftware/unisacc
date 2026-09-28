@@ -1,6 +1,6 @@
 /* Shared product version for the reference and model drivers.
    build_ref.sh embeds this declaration in the standalone unisacc.c. */
-#define UNISACC_VERSION "0.0.7"
+#define UNISACC_VERSION "0.0.8"
 /* GENERATED -- do not edit.  `python3 -m unisa emit-kernel` writes this
  * file; tests/kernel.sh fails when it differs from a fresh run.
  * The model: every stage's constructed weights, their dimensions, and the
