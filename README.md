@@ -22,11 +22,11 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| Current local candidate | Source closure built at `d78da1a`; v0.0.9 `.com` 1,221,288 B; SHA-256 `d61d01531f845903ca8f57e271cd2fa5ee9a930359eb256f4e3778a1594b4459` |
+| Current local candidate | Product changes committed as `d78da1a`; rebuilt from the corrected content closure (sidecar base `6f85c40`); v0.0.9 `.com` 1,221,288 B; SHA-256 `d61d01531f845903ca8f57e271cd2fa5ee9a930359eb256f4e3778a1594b4459` |
 | Model organization | 32 shared constructed networks, 938 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
 | Local verification | Previous candidate `7608a31b` passed the full 189-item local queue with 0 failures; `d61d0153` has passed the affected `.com` gates, nativeboot/kernel and all 32 network/table equality checks, and its full-queue rerun is pending; E2 off/on 312/312 byte-equal to fresh classic reference; model-built procview actually enumerated Linux arm64 processes |
-| Remaining release work | Local v0.0.9 candidate is **not published**. Pre-sign smoke covers six targets × hello/fib/convert (18 cells), but macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are not full native platform suites |
+| Remaining release work | Local v0.0.9 candidate is **not published**. Historical `7608a31b` pre-sign smoke covered six targets × hello/fib/convert (18 cells); this is not final-platform evidence for the current candidate, but macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are not full native platform suites |
 
 The authoritative [pipeline design](prd.md#pipeline-design) describes each
 stage's inputs, outputs, control structure, rule sources and limits. The
@@ -77,7 +77,7 @@ machine). The C headers it needs travel inside it.
   ctype dirent errno float inttypes iso646 limits math memory signal stdarg stdbool
   stddef stdint stdio stdlib string time wchar`), plus `unisacc_ffi.h`. Ordinary
   library calls use the bundled C implementations, compiled on demand;
-  `-libneed` (off by default) keeps only the library bodies the program reaches. On
+  `-libneed` (off by default) conservatively selects library bodies using identifier and dependency closures. On
   macOS, the explicit dl/libffi bridge can call system APIs; it is not automatic
   forwarding of all libc calls. System FILE/va_list and allocator families must
   not be mixed with the bundled implementations.
