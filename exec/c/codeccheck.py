@@ -18,6 +18,7 @@ def vectors():
         except zlib.error:
             valid, raw = False, b''
         cases.append((blob, size, zlib.crc32(raw) if valid else None))
+        return valid
     for size in (0, 1, 2, 7, 8, 9, 55, 56, 63, 64, 65, 511, 512, 513, 4095, 4096, 4097, 32768, 65535, 65536):
         raw = (b'abcdef012345' * (size//12+1))[:size]
         for level, strategy in ((0,0), (9,0), (9,zlib.Z_FIXED)):
@@ -34,9 +35,16 @@ def vectors():
                 pos = rng.randrange(len(blob)); changed[pos] ^= 1 << rng.randrange(8)
                 add(bytes(changed), size)
     # Reserved block, oversubscribed code-length tree, distance before output.
-    add(b'\x07', 0)
-    add(bytes.fromhex('05009204'), 0)
-    add(bytes.fromhex('030200'), 3)
+    assert not add(b'\x07', 0)
+    # Four one-bit symbols oversubscribe the dynamic code-length tree.
+    over = 5 + sum(1 << k for k in (17,20,23,26))
+    assert not add(over.to_bytes(4, 'little'), 0)
+    assert not add(bytes.fromhex('030200'), 3)
+    c = zlib.compressobj(9, zlib.DEFLATED, -15)
+    raw = b'first block' * 100 + b'second block' * 300
+    blob = c.compress(raw[:1100]) + c.flush(zlib.Z_SYNC_FLUSH)
+    blob += c.compress(raw[1100:]) + c.flush()
+    assert add(blob, len(raw))
     for _ in range(1000):
         add(rng.randbytes(rng.randrange(1,80)), rng.randrange(0,300))
     return cases
