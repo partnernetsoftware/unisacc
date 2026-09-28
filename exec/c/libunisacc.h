@@ -47,8 +47,11 @@ US_API int us_include_path(us_context *ctx, const char *path);
    compiled code and previously returned exports; recompile before use. */
 US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const us_signature *signature);
 /* Trusted ABI/object declarations; dlsym does not discover or validate types.
-   Native POSIX lookup freezes all candidates at compile: injection, process,
-   then owned libraries in load order. The model selects and checks the winner.
+   Native lookup freezes candidates at compile: injection, process, then owned
+   libraries in load order. The model selects and checks the winner. POSIX uses
+   dlsym(RTLD_DEFAULT); Windows uses the first export in Toolhelp module order,
+   excluding this context's owned modules. Process addresses are borrowed: the
+   caller must keep their modules loaded while compiled exports remain live.
    Success invalidates code/exports; failure preserves the prior generation.
    Handles remain owned until us_free, after compiled code is destroyed. */
 US_API int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
