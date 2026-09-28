@@ -16,17 +16,37 @@ static void us_native_plans_clear(us_native_plans *p){if(!p)return;while(p->head
 static us_native_plan *us_native_plan_find(const us_native_plans *p,uint64_t handle){
     if(p)for(us_native_plan *n=p->head;n;n=n->next)if((uint64_t)(uintptr_t)n==handle)return n;return NULL;
 }
-static int us_native_plan_add(us_native_plans *plans,uintptr_t target,const void *sig,size_t length,uint64_t *handle,char *error,size_t cap){
+static int us_native_plan_add_call(us_native_plans *plans,uintptr_t target,const void *sig,size_t length,int variadic,uint64_t fixed_count,uint64_t *handle,char *error,size_t cap){
     if(!plans||!handle||!target||!sig)return us_export_error(error,cap,"invalid native plan output or target");
     *handle=0;us_native_plan *p=calloc(1,sizeof *p);if(!p)return us_export_error(error,cap,"native plan allocation failed");
     if(us_exports_load(&p->graph,sig,length,error,cap)||p->graph.count!=1){us_native_plan_free(p);return us_export_error(error,cap,"invalid typed native graph");}
     us_export *x=p->graph.items;
     if(x->version!=2||x->linkage||x->defined!=1){us_native_plan_free(p);return us_export_error(error,cap,"invalid typed native graph");}
+    if(variadic && (!fixed_count || fixed_count>x->count || x->variadic)){
+        us_native_plan_free(p);return us_export_error(error,cap,"invalid variadic fixed prefix");
+    }
+    if(variadic)for(size_t i=(size_t)fixed_count;i<(size_t)x->count;i++){
+        const us_export_type *t=us_export_arg(x,i);
+        if((t->kind==3 && t->width==4) || (t->kind==1 && t->width<4)){
+            us_native_plan_free(p);return us_export_error(error,cap,"variadic tail requires promoted types");
+        }
+    }
     if(!us_export_supported(x)){us_native_plan_free(p);return 0;}
     p->args=calloc(x->count ? (size_t)x->count:1,sizeof *p->args);if(!p->args){us_native_plan_free(p);return us_export_error(error,cap,"native plan allocation failed");}
     for(size_t i=0;i<(size_t)x->count;i++)p->args[i]=us_export_ffitype(us_export_arg(x,i),0);
-    if(ffi_prep_cif(&p->cif,FFI_DEFAULT_ABI,(unsigned)x->count,us_export_ffitype(&x->result,1),p->args)!=FFI_OK){us_native_plan_free(p);return us_export_error(error,cap,"native ffi signature rejected");}
+    ffi_status status=variadic ?
+        ffi_prep_cif_var(&p->cif,FFI_DEFAULT_ABI,(unsigned)fixed_count,(unsigned)x->count,us_export_ffitype(&x->result,1),p->args) :
+        ffi_prep_cif(&p->cif,FFI_DEFAULT_ABI,(unsigned)x->count,us_export_ffitype(&x->result,1),p->args);
+    if(status!=FFI_OK){us_native_plan_free(p);return us_export_error(error,cap,"native ffi signature rejected");}
     p->target=target;p->next=plans->head;plans->head=p;*handle=(uintptr_t)p;return 0;
+}
+/* Concrete call declaration: total arguments, after model-owned promotions.
+   The function prototype is validated separately by the model, not inferred here. */
+static int us_native_plan_add_variadic(us_native_plans *plans,uintptr_t target,const void *sig,size_t length,uint64_t fixed_count,uint64_t *handle,char *error,size_t cap){
+    return us_native_plan_add_call(plans,target,sig,length,1,fixed_count,handle,error,cap);
+}
+static int us_native_plan_add(us_native_plans *plans,uintptr_t target,const void *sig,size_t length,uint64_t *handle,char *error,size_t cap){
+    return us_native_plan_add_call(plans,target,sig,length,0,0,handle,error,cap);
 }
 static void us_native_arena_free(us_native_arena *a){if(!a)return;if(a->owned)for(size_t i=0;i<a->count;i++)free(a->owned[i]);free(a->owned);free(a->values);free(a->native_result);free(a);}
 static int us_native_prepare(us_native_plan *p,const uint64_t *slots,uint64_t count,void *result_target,us_native_arena **out,char *error,size_t cap){

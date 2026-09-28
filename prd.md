@@ -2826,3 +2826,9 @@ R10 typed 私有替换包验收：ARM64/Rosetta 的 O0/O1/O2 均通过 Pair9、d
 0773e18 冻结源重新构造 shared/六目标/P3/APE，每步≤55s、私有UA，无共享构建路径污染。根开发 `.com` 与真实来源侧车一同更新：**1,080,781 B，SHA256 `2fe21bc359b0ce09d280aeeeaf2eea8b1e9737d0bdd1b5583fe65ed4d6b5de8b`**。正式候选30项受影响门禁全rc0；实际保留的23对table/network全部全域一致。新双向fixed ABI在ARM64/Rosetta的O0/O1/O2各100次，包括50次typed聚合嵌套回调；缺/多参数、失败注册与源码变参优先控制通过。产品run12/12、c9957/57，kernel59项无stale；完整自源tape4,480,071 B与参考相同，该selfchecker自身为table路径，不能冒称整容器网络自重打包。
 
 回执：[真实本批候选](research/r10-ffi-typed-final-candidate.json)；首轮失败保留另册。版本仍0.0.9开发候选，**不称整个0.0.10已完成或发布**。完整typedvariadic/函数指针callback签名/union-bitfield及宽longdouble NativePlan、六平台原生/WindowsSEH、最终全套、文档论文最终同步、企业签名发布仍保持原范围。没有开VM、push或release。
+
+
+### R10 typed variadic调用计划（2026-09-29，实施决定）
+变参函数原型只声明固定前缀，不能决定每次调用的尾参数ABI。沿用USLSIG2完整TypeGraph作为单个具体调用的声明（count包含尾参数、variadic=0），另显式携带fixed_count；原函数variadic声明与调用声明是不同对象，后续由δ验证固定前缀一致并执行C默认实参提升。宿主仅按声明调用ffi_prep_cif_var，不猜类型、不扫描格式串、不在C里做提升。首片新增内部owned native plan入口，要求1<=fixed_count<=total<=1024，尾部float32和窄于int的整数明确拒绝；该入口不修改现有固定typed API/USBIND3语义。以真实va_arg函数、固定FP参数、零尾参数、跨寄存器/栈的混合尾参数、拒绝与所有权清理验证，普通和ASan/UBSan两种构建。首片只闭合宿主机械ABI计划，不称模型变参或公开API完成；模型callsite声明/typed callback/其他布局/六平台及签名发布范围保留。依据libffi官方文档的ffi_prep_cif_var固定/总参数与类型寿命约束。
+
+R10 variadic宿主首片实测：新lib-variadic-host/rosetta与原lib-typed-host/native/rosetta共5门禁全部rc0，4秒。ARM64原生和Rosetta x86_64均以真实va_arg函数各100次验证固定double前缀、20参数跨寄存器/栈混合、零尾参数、Pair按值与返回；普通/ASan/UBSan均通过。未提升float/窄整数、固定前缀0/超总数明确拒绝。公开API与模型变参调用点尚未接入，完整范围保留。宿主头变化触发构建闭包，根产物必须实际重构，不能重写旧sidecar声称新鲜。

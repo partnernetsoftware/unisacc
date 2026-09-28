@@ -34,3 +34,14 @@ Host us_sym(script_exchange9) -> model-compiled script -> injected real host_exc
 Host agent: librarybindings.h/libraryresolver.h and NEW librarynative.h + host unit tests. Root owns libunisacc.h/.c integration and ScriptFrame cleanup/public API, PRD/gate/candidate.
 Candidate agent: modelcandidates.py/modelbindings.py, NEW shared typed signature canonicalizer, lower/libraryimports.py + own tests. Expose reusable delta canonicalization helper to E3, communicate its exact registers/entry.
 E3 agent: parse2/libraryimports.py and necessary capture/serializer hooks in libraryexports/librarytypes/gen2; import existing/new shared canonicalizer; own probes. No edits to candidate/lower/host files.
+
+## Variadic call-plan foundation (not yet a USBIND3 public feature)
+`us_native_plan_add_variadic` accepts an explicit fixed-count plus a concrete
+USLSIG2 invocation graph (variadic=0, count=total, all promoted tail descriptors).
+It uses ffi_prep_cif_var even when total==fixed, and deep-owns all graph objects.
+Tail float32 and integer widths below four bytes are rejected; the model must
+perform default argument promotions before emitting this declaration. This
+internal helper does not enable variadic bindings in existing public APIs.
+The model still needs to validate the prototype prefix and emit per-call plans;
+USLSIG2 export closure support for genuinely variadic functions remains pending.
+Reference: https://github.com/libffi/libffi/blob/master/doc/libffi.texi .
