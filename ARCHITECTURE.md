@@ -33,15 +33,17 @@
 包 SHA-256：`a1f364e119ea1be07cd3c8fa2ee9b9fe7c06be89e05ddbe362e6fa52c53332a8`。
 有限图相等只证明网络实现其声明表，不证明完整 C99 语义。
 
-**2026-09-28 当前候选（尚待修复后的完整门禁）：** `unisacc.com` 5,388,386 B，
+**2026-09-28 当前候选（冻结 `1dbac50` 本地完整门禁已通过）：** `unisacc.com` 5,388,386 B，
 SHA-256 `a4de871ad6a251cbf7cee313e430f23bb08c618500a5285d36e224a4e74e0ece`。
 实际包账见 [model-bytes.json](research/model-bytes.json)，性能与平台烟测见
 [candidate-bench-20260928.json](research/candidate-bench-20260928.json) 和
 [candidate-platform-20260928.json](research/candidate-platform-20260928.json)。
 Q 前缀编码只减存储、不减展开后运行内存。macOS 的显式 dl/libffi 桥使应用自行
 读取进程、内存映射与窗口数据，未把全部内置 libc 默认转发。
-177 项冻结运行有两条 multi 测试入口失败；修复后两条路线及 docs 已复验，
-不把它们回写成原冻结队列全绿。未发布新版本。
+修复后的冻结 `1dbac50` 完整门禁 177/177；逐项账见
+[candidate-gate-20260928.json](research/candidate-gate-20260928.json)。旧冻结的两条
+multi 红灯保留。随后示例改动单列 apps-real/docs 复验，不移植全套结果。
+根产物带构建来源侧车，门禁启动前与结束后验证输入/二进制身份。未发布新版本。
 
 
 固定包模型驱动 N1=N2=N3 是完整 115,746 B Mach-O（SHA-256

@@ -54,11 +54,20 @@ try:
             if native != want: raise RuntimeError(f'{app}: native differs from cc')
             run([*prefix, '-run', source, d/'missing'], expected=1)
             if app == 'exeinfo':
-                for own in (run([d/app]), run([*prefix, '-run', source])):
-                    if own.stdout.count(b'\n== ') + own.stdout.startswith(b'== ') < 1 or b'format   ' not in own.stdout:
+                # Each application itself reads real executables. The cc process
+                # is a reference, never a collector for the model application.
+                defaults = [run([d/app]).stdout,
+                            run([*prefix, '-run', source]).stdout,
+                            run([d/(app+'-native')]).stdout]
+                for text in defaults:
+                    if not text.startswith(b'== ') or b'format   ' not in text:
                         raise RuntimeError('exeinfo default did not dissect a host executable')
-                    if b'== sample:' in own.stdout or b'SAMPLE' in own.stdout:
+                    if b'== sample:' in text or b'SAMPLE' in text:
                         raise RuntimeError('synthetic default')
+                # Linux reads /proc/self/exe: different binaries are legitimate.
+                # macOS/Windows defaults name the same existing system files.
+                if platform.system() != 'Linux' and not defaults[0] == defaults[1] == defaults[2]:
+                    raise RuntimeError('exeinfo same system-file defaults differ')
             else:
                 own = run([*prefix, '-run', source], expected=1 if app=='winlayout' and platform.system()!='Darwin' else 0)
                 if app=='winlayout' and platform.system()!='Darwin':

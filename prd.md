@@ -5277,3 +5277,10 @@ multi入口修复验收：multi、com-multi、docs 三项双槽4秒全rc0；私�
 53e6686新鲜度门禁父复验：根.com作为MODEL_COM，私有UA，双槽窗口15.57秒；gate-infra、com-run、ffi-product、apps-real、docs共5/5全绿。com-run实际12运行、wrong0；FFI17/17原生和-run；4个真实示例由应用自身采集。开跑与结束均核sources_sha256和完整artifact_sha256。非177项完整门禁，旧108项不跨测试树移植。
 
 examples/apps 默认行为修正（主人要求本session直接修，2026-09-28）：`./unisacc.com -run examples/apps/exeinfo.c` 无参数时报错退出；改为无参数时由 unisacc 编译的程序自己解剖本机系统可执行文件（macOS `/bin/ls`、`/usr/lib/dyld`；Linux `/proc/self/exe`、`/bin/ls`；Windows `cmd.exe`、`kernel32.dll`），均为真实文件，不造样本。procview 在 macOS 经 FFI 取进程时，对其他用户进程的 PROC_PIDTBSDINFO 被拒，原实现直接丢弃（实测 1,458 中丢 568）；改为回退到无特权可读的 PROC_PIDT_SHORTBSDINFO（flavor 13，64B：pid@0、ppid@4、comm@16）补齐 pid/ppid/名字，任务信息（RSS）被拒的进程保留并显示为 `?`、表头注明原因（只有 setuid-root 的 `/bin/ps` 能读他人 RSS，这是 OS 特权边界，不是编译器限制），只有扫描期间退出的进程才跳过。实测：进程树 1,477 项（ps 约 1,483），569 个他人进程 RSS 标 `?`。tests/appsrealcheck.py 的 exeinfo 期望由"无参数失败"改为"无参数成功且解剖出真实格式、不得含样本"。验证：apps-real 门禁 rc0（cc / 模型 -run / 原生三路、缺失输入、默认、空输入），exeinfo 无参数输出与经典路线逐字节相同。
+
+冻结1dbac50完整门禁177/177全rc0，根.com哈希a4de871a…始终一致。其结束后，外部会话更新procview.c（受限进程BSD短信息与未知RSS标识）和exeinfo.c（无参数读取真实系统镜像）；未覆盖/提交这两份外部改动。追加apps-real+com-ccparity+docs中apps-real红灯：旧测试要求exeinfo无参rc1，新真实默认行为rc0。修正测试契约为默认真实分析的正例（macOS与cc独立读相同系统文件，-run/native均比较），Linux自镜像只结构核对；缺路径仍要求rc1。新检查单列，不改写完整冻结账。
+
+外部示例改动随后提交d46f4f9（仅两应用与appsrealcheck）；完整冻结队列的末次记录10:51:32，两应用写入10:52:34/10:53:04，故该177项结论仍只归属于先前冻结，不移植当前示例。追加当前apps-real+docs为2/2绿。父继续加强exeinfo默认检查：cc、模型-run和模型原生三条路径各自打开系统镜像，macOS/Windows同文件必须逐字节相同；Linux自镜像只结构核对。无需因纯示例变化重建不变的产品，但这几项新验收单列。
+
+本轮收口账：冻结1dbac50完整177项各一次全rc0，源码树在该轮结束时通过原始指纹校验；活跃窗口合计482.34秒，含窗口间核对的经过时间643.84秒，首三窗双槽后四槽，指定重项独占，三条窗口尾部延期均后来真实通过。外部示例后续由apps-real+docs单列复验（强化默认真实分析的cc/-run/native三路线），其余产品源码和共享测试输入未变；不改写冻结结果或把追加检查称177项重跑。证据research/candidate-gate-20260928.json，含逐项日志SHA/摘要与构建来源；根.com仍5388386 B/a4de871a…。已完成尺寸/性能/真实示例/新鲜度门禁这一批，未发布。
+后续提速意见登记为未实施：按套件声明输入闭包复用通过结果（先证明闭包，不猜动态依赖）；memory布局单次化、二进制阶段流、库AOT、跨模型记录共享等都需独立同身份测量。当前不把它们包装成已落地收益，也不为记录这些意见再改产品或重开全套。
