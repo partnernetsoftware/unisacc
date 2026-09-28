@@ -163,6 +163,26 @@ def emit_headers(incdir, path):
     for i in range(len(names)):
         L.append('  if (i == %d) return HDR_%d;' % (i, i))
     L += ['  return 0;', '}', '']
+    # -libneed: each carried name's closure of guarded bodies (unisa/libneed.py)
+    from unisa.libneed import table
+    keys, closure, bodies = table(incdir)
+    index = {b: i for i, b in enumerate(bodies)}
+    offs, deps = [0], []
+    for k in keys:
+        deps += [index[b] for b in closure[k]]
+        offs.append(len(deps))
+    L += ['/* LIBKEY k reaches carried bodies LIBKEY_DEP[LIBKEY_OFF[k]..LIBKEY_OFF[k+1]) */',
+          'char *LIBKEY_NAMES = "%s";' % "".join(k + "\\000" for k in keys),
+          '#define NLIBKEY %d' % len(keys),
+          'long LIBKEY_OFF[%d] = {%s};' % (len(offs), ", ".join(map(str, offs))),
+          'long LIBKEY_DEP[%d] = {%s};' % (max(1, len(deps)), ", ".join(map(str, deps or [0]))),
+          'char *LIBBODY_NAMES = "%s";' % "".join(b + "\\000" for b in bodies),
+          '#define NLIBBODY %d' % len(bodies)]
+    from unisa.libneed import roots
+    rdep = [index[b] for b in roots(incdir)]
+    L += ['/* bodies the compiler itself reaches (libneed.ROOTS), needed whenever pruning is on */',
+          'long LIBROOT_DEP[%d] = {%s};' % (max(1, len(rdep)), ", ".join(map(str, rdep or [0]))),
+          '#define NLIBROOT %d' % len(rdep), '']
     open(path, "w").write("\n".join(L) + "\n")
     return len(names), total
 

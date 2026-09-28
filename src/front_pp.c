@@ -726,6 +726,14 @@ char *optinc; int noptd; char *optd[16];
 int noptu; char *optu[16];
 int nopti; char *opti[8];
 int nostdinc;
+/* -libneed: library bodies on demand, the reference for the E2 model.  The
+   carried headers guard each static body with
+   `#if !__UNISA_LIBNEED || __UN_<name>`; a unit whose names are all
+   visible here (no quoted #include) gets __UNISA_LIBNEED and one
+   __UN_<name> per body its names reach
+   (LIBKEY_* in unisa_headers.inc, derived from the headers themselves). */
+int libneed; int libneed_act; char libneed_mark[1024];
+int libneed_scan(void); int libneed_define(void);
 /* -MD / -MF FILE [S-15 C2]: every file the preprocessor OPENED, in order,
    for a `target: deps` line make can read.  The built-in header copies are
    not files and are not listed -- cc lists its system headers because they
@@ -1104,6 +1112,7 @@ int predef(void) {
     if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
     mdef1("__LP64__");
     mdef1("__UNISA__");
+    libneed_define();
     /* -U NAME: applied after every predefinition, so it can remove one */
     i = 0;
     while (i < noptu) {
@@ -1572,6 +1581,64 @@ int hdrneeded(int n) {
     }
     return 0;
 }
+/* a `#include` whose target is not <...>: a header this scan cannot see */
+int quotedinc(void) {
+    int i; int j;
+    i = 0;
+    while (i < nsrc) {
+        j = i;
+        while (j < nsrc) { if (src[j] != 32) { if (src[j] != 9) break; } j = j + 1; }
+        if (j < nsrc) { if (src[j] == 35) {
+            j = j + 1;
+            while (j < nsrc) { if (src[j] != 32) { if (src[j] != 9) break; } j = j + 1; }
+            if (j + 7 <= nsrc) { if (src[j] == 105) { if (src[j + 1] == 110) { if (src[j + 2] == 99) {
+              if (src[j + 3] == 108) { if (src[j + 4] == 117) { if (src[j + 5] == 100) { if (src[j + 6] == 101) {
+                j = j + 7;
+                while (j < nsrc) { if (src[j] != 32) { if (src[j] != 9) break; } j = j + 1; }
+                if (j < nsrc) { if (src[j] != 60) return 1; }
+            } } } } } } } }
+        } }
+        while (i < nsrc) { if (src[i] == 10) break; i = i + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+int libneed_scan(void) {
+    int k; int p; int n; int b; int e;
+    k = 0; while (k < NLIBBODY) { libneed_mark[k] = 0; k = k + 1; }
+    libneed_act = 0;
+    if (libneed == 0) return 0;
+    if (nostdinc) return 0;
+    if (quotedinc()) return 0;
+    libneed_act = 1;
+    k = 0; while (k < NLIBROOT) { libneed_mark[LIBROOT_DEP[k]] = 1; k = k + 1; }
+    k = 0; p = 0;
+    while (k < NLIBKEY) {
+        n = 0; while (LIBKEY_NAMES[p + n]) n = n + 1;
+        if (srcfind(LIBKEY_NAMES + p, n, 0) >= 0) {
+            b = LIBKEY_OFF[k]; e = LIBKEY_OFF[k + 1];
+            while (b < e) { libneed_mark[LIBKEY_DEP[b]] = 1; b = b + 1; }
+        }
+        p = p + n + 1; k = k + 1;
+    }
+    return 0;
+}
+int libneed_define(void) {
+    char nm[48]; int i; int p; int n; int k;
+    if (libneed_act == 0) return 0;
+    mdef1("__UNISA_LIBNEED");
+    i = 0; p = 0;
+    while (i < NLIBBODY) {
+        n = 0; while (LIBBODY_NAMES[p + n]) n = n + 1;
+        if (libneed_mark[i]) {
+            k = 0; while (k < 5) { nm[k] = "__UN_"[k]; k = k + 1; }
+            k = 0; while (k < n) { nm[5 + k] = LIBBODY_NAMES[p + k]; k = k + 1; }
+            mdefb(nm, 5 + n, "1", 1, 1);
+        }
+        p = p + n + 1; i = i + 1;
+    }
+    return 0;
+}
 int autoinc(void) {
     char *hs; int k; int st; int fd; int n; int p;
     hs = "assert.h ctype.h stdlib.h string.h wchar.h stdio.h ";
@@ -1606,6 +1673,7 @@ int autoinc(void) {
     }
     if (srcix_on == 0) srcix_build();
     if (nostdinc == 0) { if (rtprintf()) incappend("stdio.h", 7); }   /* -nostdinc: no header is added; printf is lowered (W-9) */
+    libneed_scan();
     srcix_on = 0;
     return 0;
 }

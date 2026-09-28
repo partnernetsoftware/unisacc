@@ -15,11 +15,13 @@ typedef int wchar_t;
 
 #define WEOF (0-1)
 
+#if !__UNISA_LIBNEED || __UN_wcslen
 static long wcslen(const wchar_t *__u_s) {
     long __u_n;
     __u_n = 0;
     while (__u_s[__u_n]) __u_n = __u_n + 1;
     return __u_n;
 }
+#endif
 
 #endif

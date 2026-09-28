@@ -55,34 +55,43 @@ static void *__uffi_call;
 static void *__uffi_types[12];
 static int __uffi_ready;
 
+#if !__UNISA_LIBNEED || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
     long __u_args[6];
     __u_args[0] = (long)__u_path; __u_args[1] = __u_mode;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (void *)__hostcall(__hostaddr0(), __u_args);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_uffi_dlsym
 static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
     long __u_args[6];
     __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (void *)__hostcall(__hostaddr1(), __u_args);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_uffi_dlclose
 static int uffi_dlclose(void *__u_handle) {
     long __u_args[6];
     __u_args[0] = (long)__u_handle; __u_args[1] = 0;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (int)__hostcall(__hostaddr2(), __u_args);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_uffi_dlerror
 static char *uffi_dlerror(void) {
     long __u_args[6];
     __u_args[0] = 0; __u_args[1] = 0; __u_args[2] = 0;
     __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (char *)__hostcall(__hostaddr3(), __u_args);
 }
+#endif
 /* 0 succeeds; -1 unsupported layout; -2 dlopen/dlsym failure.
  * A failed initialization is retried; the private libffi handle stays live
  * because its ffi_type pointers and entry addresses refer into that image.
  */
+#if !__UNISA_LIBNEED || __UN_uffi_init
 static int uffi_init(void) {
     int __u_i;
     if (__uffi_ready) return 0;
@@ -114,10 +123,13 @@ static int uffi_init(void) {
     __uffi_ready = 1;
     return 0;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_uffi_type
 static void *uffi_type(int __u_kind) {
     if (__u_kind < 0 || __u_kind >= 12 || uffi_init() != 0) return 0;
     return __uffi_types[__u_kind];
 }
+#endif
 /* Low-level typed call; types may also be native ffi_type objects provided
  * by a caller.  Their lifetime and argument storage must cover this call.
  * fixed == -1 selects a fixed signature; otherwise fixed is the number of
@@ -126,6 +138,7 @@ static void *uffi_type(int __u_kind) {
  * 0 succeeds, -3 rejects an invalid vector, and positive values are the
  * actual ffi_status from ffi_prep_cif[_var].  No call follows a prep error.
  */
+#if !__UNISA_LIBNEED || __UN_uffi_call_types
 static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
                            void **__u_values, int __u_n, int __u_fixed,
                            void *__u_result) {
@@ -167,6 +180,8 @@ static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
     __hostcall(__uffi_call, __u_args);
     return 0;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_uffi_call
 static int uffi_call(void *__u_fn, int __u_return_kind, int *__u_kinds,
                      void **__u_values, int __u_n, int __u_fixed,
                      void *__u_result) {
@@ -182,4 +197,5 @@ static int uffi_call(void *__u_fn, int __u_return_kind, int *__u_kinds,
     return uffi_call_types(__u_fn, __u_rtype, __u_types, __u_values,
                            __u_n, __u_fixed, __u_result);
 }
+#endif
 #endif

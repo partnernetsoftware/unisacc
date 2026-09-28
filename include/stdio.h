@@ -22,36 +22,48 @@ typedef struct _UNISA_FILE FILE;
 
 int printf();
 
+#if !__UNISA_LIBNEED || __UN__unisa_fd
 static int _unisa_fd(FILE *__u_f) { return (int)(long)__u_f; }
+#endif
 
+#if !__UNISA_LIBNEED || __UN__unisa_len
 static long _unisa_len(const char *__u_s) {
     long __u_n;
     __u_n = 0;
     while (__u_s[__u_n]) __u_n = __u_n + 1;
     return __u_n;
 }
+#endif
 
 static char _unisa_ch;
 
+#if !__UNISA_LIBNEED || __UN_fputc
 static int fputc(int __u_c, FILE *__u_f) {
     _unisa_ch = __u_c;
     __write(_unisa_fd(__u_f), &_unisa_ch, 1);
     return __u_c;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_putchar
 static int putchar(int __u_c) { return fputc(__u_c, stdout); }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_fputs
 static int fputs(const char *__u_s, FILE *__u_f) {
     __write(_unisa_fd(__u_f), (char *)__u_s, _unisa_len(__u_s));
     return 0;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_puts
 static int puts(const char *__u_s) {
     fputs(__u_s, stdout);
     _unisa_ch = 10;
     __write(1, &_unisa_ch, 1);
     return 0;
 }
+#endif
 
 /* fwrite: loops over __write until every byte is out or the gate stops.
  * What __write answers, audited per back end (2026-09-25):
@@ -75,6 +87,7 @@ static int puts(const char *__u_s) {
  * answer larger than what was asked is treated as an error rather than
  * trusted, so `done` cannot overflow either.
  * The return is complete elements: done / sz, rounded down. */
+#if !__UNISA_LIBNEED || __UN_fwrite
 static long fwrite(const void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
     long __u_total; long __u_done; long __u_r;
     if (__u_sz <= 0 || __u_n <= 0) return 0;
@@ -88,13 +101,16 @@ static long fwrite(const void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
     }
     return __u_n;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_fread
 static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
     long __u_got;
     __u_got = __read(_unisa_fd(__u_f), (char *)__u_p, __u_sz * __u_n);
     if (__u_got < 0) return 0;
     return __u_got / __u_sz;
 }
+#endif
 
 /* O_* are not portable numbers: Linux and the BSDs picked different bits,
    and we hardcoded Linux's.  On macOS that turned "w" into flags nobody
@@ -110,6 +126,7 @@ static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
 #define _U_O_APPEND  8
 #endif
 
+#if !__UNISA_LIBNEED || __UN_fopen
 static FILE *fopen(const char *__u_path, const char *__u_mode) {
     int __u_fd;
 #ifdef _WIN32
@@ -137,18 +154,26 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
     if (__u_fd < 0) return NULL;
     return (FILE *)(long)__u_fd;
 }
+#endif
 
 /* Unbuffered: a FILE * here is a file descriptor, so there is nowhere to
    keep a buffer and every character costs a read.  Correct, not fast. */
+#if !__UNISA_LIBNEED || __UN_fgetc
 static int fgetc(FILE *__u_f) {
     unsigned char __u_c;
     if (fread(&__u_c, 1, 1, __u_f) != 1) return EOF;
     return (int)__u_c;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_getc
 static int getc(FILE *__u_f) { return fgetc(__u_f); }
+#endif
+#if !__UNISA_LIBNEED || __UN_getchar
 static int getchar(void) { return fgetc(stdin); }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_fgets
 static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
     int __u_i;
     int __u_c;
@@ -165,26 +190,42 @@ static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
     __u_s[__u_i] = 0;
     return __u_s;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_fclose
 static int fclose(FILE *__u_f) { return __close(_unisa_fd(__u_f)); }
+#endif
 /* A FILE * is its descriptor and nothing is buffered, so the file offset
    is the stream's position: fseek and ftell are lseek.  [S-15 D2] */
+#if !__UNISA_LIBNEED || __UN_fseek
 static int fseek(FILE *__u_f, long __u_off, int __u_whence) {
     return __lseek(_unisa_fd(__u_f), __u_off, __u_whence) < 0 ? -1 : 0;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_ftell
 static long ftell(FILE *__u_f) { return __lseek(_unisa_fd(__u_f), 0, SEEK_CUR); }
+#endif
+#if !__UNISA_LIBNEED || __UN_rewind
 static void rewind(FILE *__u_f) { __lseek(_unisa_fd(__u_f), 0, SEEK_SET); }
+#endif
+#if !__UNISA_LIBNEED || __UN_remove
 static int remove(const char *__u_path) { return __unlink((char *)__u_path) < 0 ? -1 : 0; }
+#endif
+#if !__UNISA_LIBNEED || __UN_rename
 static int rename(const char *__u_from, const char *__u_to) {
     return __rename((char *)__u_from, (char *)__u_to) < 0 ? -1 : 0;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_fflush
 static int fflush(FILE *__u_f) { return 0; }
+#endif
 
 /* ---- a runtime formatter ------------------------------------------------
  * `printf` is desugared by the walker against its static format string, which
  * is the fast path and the one that does not need varargs.  Everything that
  * takes a format at RUN time is written here, in the subset itself. */
 
+#if !__UNISA_LIBNEED || __UN__u_put
 static void _u_put(char *__u_out, long __u_cap, long *__u_n, FILE *__u_f, int __u_c) {
     char __u_ch;
     if (__u_out != NULL) {
@@ -195,7 +236,9 @@ static void _u_put(char *__u_out, long __u_cap, long *__u_n, FILE *__u_f, int __
     }
     *__u_n = *__u_n + 1;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN__u_digits
 static long _u_digits(char *__u_buf, unsigned long __u_v, int __u_base, int __u_upper) {
     long __u_i;
     int __u_d;
@@ -210,6 +253,7 @@ static long _u_digits(char *__u_buf, unsigned long __u_v, int __u_base, int __u_
     }
     return __u_i;
 }
+#endif
 
 /* ---- floating conversions, exactly ------------------------------------
  * A double is m * 2^e with m < 2^53, so its value is a FINITE decimal:
@@ -223,6 +267,7 @@ static long _u_digits(char *__u_buf, unsigned long __u_v, int __u_base, int __u_
 
 /* digits of v, most significant first; returns their count, and *x is how
    many of them are before the decimal point (<= 0 for |v| < 1) */
+#if !__UNISA_LIBNEED || __UN__u_dexp
 static int _u_dexp(unsigned long __u_bits, char *__u_dig, int *__u_x) {
     unsigned long __u_lim[_U_NL];
     unsigned long __u_m;
@@ -273,9 +318,11 @@ static int _u_dexp(unsigned long __u_bits, char *__u_dig, int *__u_x) {
     *__u_x = __u_nd - __u_k;
     return __u_nd;
 }
+#endif
 
 /* keep r digits of dig[0..nd), rounding to nearest, ties to even; returns
    the new count, and bumps *x when the rounding carries out (9.99 -> 10.0) */
+#if !__UNISA_LIBNEED || __UN__u_round
 static int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u_x) {
     int __u_up;
     int __u_j;
@@ -302,16 +349,20 @@ static int _u_round(char *__u_dig, int __u_nd, int __u_r, int *__u_x) {
     }
     return __u_nd;
 }
+#endif
 
 /* the digit at position p of the number (0 = first integer digit) */
+#if !__UNISA_LIBNEED || __UN__u_dat
 static int _u_dat(char *__u_dig, int __u_nd, int __u_x, int __u_p) {
     if (__u_p < 0) return 48;
     if (__u_p >= __u_nd) return 48;
     return __u_dig[__u_p];
 }
+#endif
 
 /* %f %e %g (and upper case) of `bits` into out[]; returns the length.
    Sign, width and padding are the caller's. */
+#if !__UNISA_LIBNEED || __UN__u_ffmt
 static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_prec, int __u_alt) {
     char __u_dig[_U_ND];
     int __u_nd;
@@ -388,7 +439,9 @@ static int _u_ffmt(char *__u_out, unsigned long __u_bits, int __u_c, int __u_pre
     }
     return __u_n;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN__u_vfmt
 static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     long __u_n;
     long __u_i;
@@ -533,16 +586,24 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                                         else __u_out[__u_cap - 1] = 0; } } }
     return (int)__u_n;
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_vsprintf
 static int vsprintf(char *__u_b, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(__u_b, 0 - 1, NULL, __u_fmt, __u_ap);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_vsnprintf
 static int vsnprintf(char *__u_b, long __u_cap, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(__u_b, __u_cap, NULL, __u_fmt, __u_ap);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_vfprintf
 static int vfprintf(FILE *__u_f, const char *__u_fmt, va_list __u_ap) {
     return _u_vfmt(NULL, 0, __u_f, __u_fmt, __u_ap);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_sprintf
 static int sprintf(char *__u_b, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -550,6 +611,8 @@ static int sprintf(char *__u_b, const char *__u_fmt, ...) {
     va_end(__u_ap);
     return __u_r;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_snprintf
 static int snprintf(char *__u_b, long __u_cap, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -557,6 +620,8 @@ static int snprintf(char *__u_b, long __u_cap, const char *__u_fmt, ...) {
     va_end(__u_ap);
     return __u_r;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_fprintf
 static int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -564,9 +629,11 @@ static int fprintf(FILE *__u_f, const char *__u_fmt, ...) {
     va_end(__u_ap);
     return __u_r;
 }
+#endif
 /* The compiler desugars `printf` against a STATIC format string [W-9] -- the
  * fast path, and the common one.  A format that is not a literal cannot be
  * desugared at all, so it becomes an ordinary variadic call on this. */
+#if !__UNISA_LIBNEED || __UN_printf
 static int printf(const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -574,13 +641,17 @@ static int printf(const char *__u_fmt, ...) {
     va_end(__u_ap);
     return __u_r;
 }
+#endif
 /* ---- sscanf: the conversions a program reads numbers and words with --
    d i u x o c s f e g, the l and h length modifiers, a field width, `*`
    to discard, `%%`, and white space in the format matching any amount of
    it.  Returns the number of conversions stored, or EOF when the input
    ran out before the first one -- the same contract as the platform's,
    which is what a program comparing the two observes. [S-15 D2] */
+#if !__UNISA_LIBNEED || __UN__u_isspace
 static int _u_isspace(int __u_c) { return __u_c == 32 || (__u_c >= 9 && __u_c <= 13); }
+#endif
+#if !__UNISA_LIBNEED || __UN__u_digit
 static int _u_digit(int __u_c, int __u_base) {
     int __u_v;
     __u_v = 0 - 1;
@@ -590,6 +661,8 @@ static int _u_digit(int __u_c, int __u_base) {
     if (__u_v >= __u_base) return 0 - 1;
     return __u_v;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_vsscanf
 static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
     long __u_i; long __u_j; int __u_stored; int __u_c; int __u_width; int __u_skip; int __u_lng; int __u_base;
     int __u_neg; int __u_any; long __u_v; unsigned long __u_uv; double __u_d; double __u_scale; int exp; int __u_eneg;
@@ -689,6 +762,8 @@ static int vsscanf(const char *__u_in, const char *__u_fmt, va_list __u_ap) {
     }
     return __u_stored;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_sscanf
 static int sscanf(const char *__u_in, const char *__u_fmt, ...) {
     va_list __u_ap; int __u_r;
     va_start(__u_ap, __u_fmt);
@@ -696,9 +771,11 @@ static int sscanf(const char *__u_in, const char *__u_fmt, ...) {
     va_end(__u_ap);
     return __u_r;
 }
+#endif
 
 /* perror: the message, a colon, and errno's text -- the eleven codes
    <errno.h> defines, "Unknown error N" for the rest. */
+#if !__UNISA_LIBNEED || __UN_strerror
 static char *strerror(int __u_e) {
     if (__u_e == 0) return "Success";
     if (__u_e == 1) return "Operation not permitted";
@@ -714,10 +791,13 @@ static char *strerror(int __u_e) {
     if (__u_e == 34) return "Numerical result out of range";
     return "Unknown error";
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_perror
 static void perror(const char *__u_s) {
     if (__u_s) { if (*__u_s) { fputs(__u_s, stderr); fputs(": ", stderr); } }
     fputs(strerror(errno), stderr);
     fputc(10, stderr);
 }
+#endif
 
 #endif

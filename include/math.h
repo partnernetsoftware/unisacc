@@ -30,37 +30,66 @@
 #define M_SQRT2    1.41421356237309504880
 #define M_SQRT1_2  0.707106781186547524401
 
+#if !__UNISA_LIBNEED || __UN__m_hi
 static int _m_hi(double __u_x) { return *(1 + (int *)&__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN__m_lo
 static unsigned int _m_lo(double __u_x) { return *(unsigned int *)&__u_x; }
+#endif
+#if !__UNISA_LIBNEED || __UN__m_mk
 static double _m_mk(int __u_hi, unsigned int __u_lo) {
     double __u_r;
     *(unsigned int *)&__u_r = __u_lo;
     *(1 + (int *)&__u_r) = __u_hi;
     return __u_r;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN__m_sethi
 static double _m_sethi(double __u_x, int __u_hi) { return _m_mk(__u_hi, _m_lo(__u_x)); }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_sqrt
 static double sqrt(double __u_x) { return __builtin_sqrt(__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_sqrtf
 static float sqrtf(float __u_x) { return __builtin_sqrtf(__u_x); }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_fabs
 static double fabs(double __u_x) { return _m_mk(_m_hi(__u_x) & 2147483647, _m_lo(__u_x)); }
+#endif
+#if !__UNISA_LIBNEED || __UN_fabsf
 static float fabsf(float __u_x) { return (float)fabs((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_copysign
 static double copysign(double __u_x, double __u_y) {
     return _m_mk((_m_hi(__u_x) & 2147483647) | (_m_hi(__u_y) & (0 - 2147483647 - 1)), _m_lo(__u_x));
 }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_isnan
 static int isnan(double __u_x) { return __u_x != __u_x; }
+#endif
+#if !__UNISA_LIBNEED || __UN_isinf
 static int isinf(double __u_x) { return (_m_hi(__u_x) & 2147483647) == 2146435072 && _m_lo(__u_x) == 0; }
+#endif
+#if !__UNISA_LIBNEED || __UN_isfinite
 static int isfinite(double __u_x) { return (_m_hi(__u_x) & 2146435072) != 2146435072; }
+#endif
+#if !__UNISA_LIBNEED || __UN_signbit
 static int signbit(double __u_x) { return _m_hi(__u_x) < 0; }
+#endif
 
 /* integral parts: exact.  Past 2^52 every double is already an integer. */
+#if !__UNISA_LIBNEED || __UN_trunc
 static double trunc(double __u_x) {
     double __u_a;
     __u_a = fabs(__u_x);
     if (__u_a >= 4503599627370496.0 || __u_x != __u_x) return __u_x;
     return copysign((double)(long)__u_x, __u_x);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_floor
 static double floor(double __u_x) {
     double __u_t;
     __u_t = trunc(__u_x);
@@ -68,6 +97,8 @@ static double floor(double __u_x) {
     if (__u_t == 0.0) return copysign(0.0, __u_x);        /* floor(-0.0) is -0.0 */
     return __u_t;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_ceil
 static double ceil(double __u_x) {
     double __u_t;
     __u_t = trunc(__u_x);
@@ -75,6 +106,8 @@ static double ceil(double __u_x) {
     if (__u_t == 0.0) return copysign(0.0, __u_x);
     return __u_t;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_round
 static double round(double __u_x) {                  /* halfway away from zero */
     double __u_t;
     __u_t = trunc(__u_x);
@@ -82,10 +115,18 @@ static double round(double __u_x) {                  /* halfway away from zero *
     if (__u_t == 0.0) return copysign(0.0, __u_x);
     return __u_t;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_lround
 static long lround(double __u_x) { return (long)round(__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_floorf
 static float floorf(float __u_x) { return (float)floor((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_ceilf
 static float ceilf(float __u_x) { return (float)ceil((double)__u_x); }
+#endif
 
+#if !__UNISA_LIBNEED || __UN_modf
 static double modf(double __u_x, double *__u_ip) {
     double __u_t;
     __u_t = trunc(__u_x);
@@ -93,8 +134,10 @@ static double modf(double __u_x, double *__u_ip) {
     if (isinf(__u_x)) return copysign(0.0, __u_x);
     return copysign(__u_x - __u_t, __u_x);
 }
+#endif
 
 /* x = m * 2^e with 0.5 <= |m| < 1 */
+#if !__UNISA_LIBNEED || __UN_frexp
 static double frexp(double __u_x, int *__u_e) {
     int __u_hx; int __u_ix;
     __u_hx = _m_hi(__u_x); __u_ix = __u_hx & 2147483647;
@@ -107,6 +150,8 @@ static double frexp(double __u_x, int *__u_e) {
     *__u_e = *__u_e + (__u_ix >> 20) - 1022;
     return _m_sethi(__u_x, (__u_hx & (0 - 2146435073)) | 1071644672);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_ldexp
 static double ldexp(double __u_x, int __u_n) {
     /* by exact powers of two, in steps that cannot overflow the exponent */
     while (__u_n > 1000) { __u_x = __u_x * 1.0715086071862673e301; __u_n = __u_n - 1000; }       /* 2^1000 */
@@ -115,10 +160,14 @@ static double ldexp(double __u_x, int __u_n) {
     if (__u_n > 0 - 1022) return __u_x * _m_mk((__u_n + 1023) << 20, 0);
     return __u_x * _m_mk((__u_n + 1023 + 60) << 20, 0) * 8.673617379884035e-19;    /* 2^-60 */
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_scalbn
 static double scalbn(double __u_x, int __u_n) { return ldexp(__u_x, __u_n); }
+#endif
 
 /* fmod, exactly: C99 7.12.10.1 -- the result is x - n*y for the integer n
    that makes it have x's sign and be smaller than |y|, and it is exact. */
+#if !__UNISA_LIBNEED || __UN_fmod
 static double fmod(double __u_x, double __u_y) {
     int __u_ex; int __u_ey;
     double __u_ax; double __u_ay; double __u_r;
@@ -137,8 +186,10 @@ static double fmod(double __u_x, double __u_y) {
     }
     return copysign(__u_r, __u_x);
 }
+#endif
 
 /* ---- exp (fdlibm e_exp.c) ---------------------------------------------- */
+#if !__UNISA_LIBNEED || __UN_exp
 static double exp(double __u_x) {
     double __u_hi; double __u_lo; double __u_c; double __u_t; double __u_y;
     int __u_k; int __u_xsb; int __u_hx;
@@ -181,10 +232,16 @@ static double exp(double __u_x) {
     __u_y = _m_sethi(__u_y, _m_hi(__u_y) + ((__u_k + 1000) << 20));
     return __u_y * 9.33263618503218878990e-302;               /* 2^-1000 */
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_expf
 static float expf(float __u_x) { return (float)exp((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_exp2
 static double exp2(double __u_x) { return exp(__u_x * 6.93147180559945286227e-01); }
+#endif
 
 /* ---- log (fdlibm e_log.c) ---------------------------------------------- */
+#if !__UNISA_LIBNEED || __UN_log
 static double log(double __u_x) {
     double __u_hfsq; double __u_f; double __u_s; double __u_z; double __u_R; double __u_w; double __u_t1;
     double __u_t2; double __u_dk;
@@ -233,7 +290,11 @@ static double log(double __u_x) {
     if (__u_k == 0) return __u_f - __u_s * (__u_f - __u_R);
     return __u_dk * 6.93147180369123816490e-01 - ((__u_s * (__u_f - __u_R) - __u_dk * 1.90821492927058770002e-10) - __u_f);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_logf
 static float logf(float __u_x) { return (float)log((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_log10
 static double log10(double __u_x) {                            /* fdlibm e_log10.c */
     double __u_y; double __u_z;
     int __u_hx; int __u_k; int __u_i;
@@ -256,18 +317,24 @@ static double log10(double __u_x) {                            /* fdlibm e_log10
     __u_z = __u_y * 3.69423907715893078616e-13 + 4.34294481903251816668e-01 * log(__u_x);
     return __u_z + __u_y * 3.01029995663611771306e-01;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_log2
 static double log2(double __u_x) { return log(__u_x) * 1.44269504088896338700e+00; }
+#endif
 /* log(1+x) accurately for small x: the rounding error of 1+x is corrected
    by the ratio x / ((1+x) - 1) (Goldberg, "What every computer scientist
    should know about floating-point arithmetic", thm. 4) */
+#if !__UNISA_LIBNEED || __UN_log1p
 static double log1p(double __u_x) {
     double __u_u;
     __u_u = 1.0 + __u_x;
     if (__u_u == 1.0) return __u_x;
     return log(__u_u) * __u_x / (__u_u - 1.0);
 }
+#endif
 
 /* ---- sin, cos, tan (fdlibm k_sin.c, k_cos.c, e_rem_pio2.c) -------------- */
+#if !__UNISA_LIBNEED || __UN__m_ksin
 static double _m_ksin(double __u_x, double __u_y, int __u_iy) {
     double __u_z; double __u_r; double __u_v;
     int __u_ix;
@@ -280,6 +347,8 @@ static double _m_ksin(double __u_x, double __u_y, int __u_iy) {
     if (__u_iy == 0) return __u_x + __u_v * (0 - 1.66666666666666324348e-01 + __u_z * __u_r);
     return __u_x - ((__u_z * (0.5 * __u_y - __u_v * __u_r) - __u_y) - __u_v * (0 - 1.66666666666666324348e-01));
 }
+#endif
+#if !__UNISA_LIBNEED || __UN__m_kcos
 static double _m_kcos(double __u_x, double __u_y) {
     double __u_a; double __u_hz; double __u_z; double __u_r; double __u_qx;
     int __u_ix;
@@ -296,9 +365,11 @@ static double _m_kcos(double __u_x, double __u_y) {
     __u_a = 1.0 - __u_qx;
     return __u_a - (__u_hz - (__u_z * __u_r - __u_x * __u_y));
 }
+#endif
 /* x = n*(pi/2) + (y[0] + y[1]); returns n.  The medium range is fdlibm's;
    beyond |x| ~ 2^20*pi/2 the reduction is only as good as three terms of
    pi/2 make it (fdlibm's Payne-Hanek path is not carried). */
+#if !__UNISA_LIBNEED || __UN__m_rempio2
 static int _m_rempio2(double __u_x, double *__u_y) {
     double __u_z; double __u_w; double __u_t; double __u_r; double __u_fn;
     int __u_i; int __u_j; int __u_n; int __u_ix; int __u_hx;
@@ -356,6 +427,8 @@ static int _m_rempio2(double __u_x, double *__u_y) {
     if (__u_hx < 0) { __u_y[0] = 0 - __u_y[0]; __u_y[1] = 0 - __u_y[1]; return 0 - __u_n; }
     return __u_n;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_sin
 static double sin(double __u_x) {
     double __u_y[2];
     int __u_n; int __u_ix;
@@ -369,6 +442,8 @@ static double sin(double __u_x) {
     if (__u_n == 2) return 0 - _m_ksin(__u_y[0], __u_y[1], 1);
     return 0 - _m_kcos(__u_y[0], __u_y[1]);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_cos
 static double cos(double __u_x) {
     double __u_y[2];
     int __u_n; int __u_ix;
@@ -382,12 +457,22 @@ static double cos(double __u_x) {
     if (__u_n == 2) return 0 - _m_kcos(__u_y[0], __u_y[1]);
     return _m_ksin(__u_y[0], __u_y[1], 1);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_tan
 static double tan(double __u_x) { return sin(__u_x) / cos(__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_sinf
 static float sinf(float __u_x) { return (float)sin((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_cosf
 static float cosf(float __u_x) { return (float)cos((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_tanf
 static float tanf(float __u_x) { return (float)tan((double)__u_x); }
+#endif
 
 /* ---- atan, atan2, asin, acos (fdlibm s_atan.c, e_atan2.c) --------------- */
+#if !__UNISA_LIBNEED || __UN_atan
 static double atan(double __u_x) {
     double __u_w; double __u_s1; double __u_s2; double __u_z; double __u_hi; double __u_lo;
     int __u_ix; int __u_hx; int __u_id;
@@ -425,6 +510,8 @@ static double atan(double __u_x) {
     __u_z = __u_hi - ((__u_x * (__u_s1 + __u_s2) - __u_lo) - __u_x);
     return __u_hx < 0 ? 0 - __u_z : __u_z;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_atan2
 static double atan2(double __u_y, double __u_x) {
     double __u_z;
     if (__u_x != __u_x || __u_y != __u_y) return __u_x + __u_y;
@@ -448,19 +535,29 @@ static double atan2(double __u_y, double __u_x) {
     __u_z = 3.14159265358979311600e+00 - (__u_z - 1.22464679914735317720e-16);
     return __u_y > 0 ? __u_z : 0 - __u_z;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_asin
 static double asin(double __u_x) {
     if (__u_x > 1.0 || __u_x < 0 - 1.0) return (__u_x - __u_x) / (__u_x - __u_x);
     return atan2(__u_x, sqrt((1.0 - __u_x) * (1.0 + __u_x)));
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_acos
 static double acos(double __u_x) {
     if (__u_x > 1.0 || __u_x < 0 - 1.0) return (__u_x - __u_x) / (__u_x - __u_x);
     return atan2(sqrt((1.0 - __u_x) * (1.0 + __u_x)), __u_x);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_atanf
 static float atanf(float __u_x) { return (float)atan((double)__u_x); }
+#endif
+#if !__UNISA_LIBNEED || __UN_atan2f
 static float atan2f(float __u_y, float __u_x) { return (float)atan2((double)__u_y, (double)__u_x); }
+#endif
 
 /* ---- expm1, sinh, cosh, tanh (fdlibm s_expm1.c, e_sinh.c, e_cosh.c,
  *      s_tanh.c) -------------------------------------------------------- */
+#if !__UNISA_LIBNEED || __UN_expm1
 static double expm1(double __u_x) {
     double __u_y; double __u_hi; double __u_lo; double __u_c; double __u_t; double __u_e; double __u_hxs;
     double __u_hfx; double __u_r1;
@@ -533,6 +630,8 @@ static double expm1(double __u_x) {
     }
     return __u_y;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_sinh
 static double sinh(double __u_x) {
     double __u_t; double __u_w; double __u_h;
     int __u_ix; int __u_jx;
@@ -557,6 +656,8 @@ static double sinh(double __u_x) {
     }
     return __u_x * 1.0e307;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_cosh
 static double cosh(double __u_x) {
     double __u_t; double __u_w;
     int __u_ix;
@@ -579,6 +680,8 @@ static double cosh(double __u_x) {
     }
     return 1.0e300 * 1.0e300;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_tanh
 static double tanh(double __u_x) {
     double __u_t; double __u_z;
     int __u_jx; int __u_ix;
@@ -597,8 +700,10 @@ static double tanh(double __u_x) {
     } else __u_z = 1.0 - 1.0e-300;
     return __u_jx >= 0 ? __u_z : 0 - __u_z;
 }
+#endif
 
 /* ---- pow (fdlibm e_pow.c) ----------------------------------------------- */
+#if !__UNISA_LIBNEED || __UN_pow
 static double pow(double __u_x, double __u_y) {
     double __u_z; double __u_ax; double __u_z_h; double __u_z_l; double __u_p_h; double __u_p_l;
     double __u_y1; double __u_t1; double __u_t2; double __u_r; double __u_s; double __u_t; double __u_u;
@@ -752,7 +857,11 @@ static double pow(double __u_x, double __u_y) {
     else __u_z = _m_sethi(__u_z, _m_hi(__u_z) + (__u_n << 20));
     return __u_s * __u_z;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_powf
 static float powf(float __u_x, float __u_y) { return (float)pow((double)__u_x, (double)__u_y); }
+#endif
+#if !__UNISA_LIBNEED || __UN_hypot
 static double hypot(double __u_x, double __u_y) {
     double __u_a; double __u_b; double __u_t;
     __u_a = fabs(__u_x); __u_b = fabs(__u_y);
@@ -762,6 +871,8 @@ static double hypot(double __u_x, double __u_y) {
     __u_t = __u_b / __u_a;
     return __u_a * sqrt(1.0 + __u_t * __u_t);
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_cbrt
 static double cbrt(double __u_x) {
     double __u_y;
     int __u_k;
@@ -771,7 +882,14 @@ static double cbrt(double __u_x) {
     while (__u_k < 2) { __u_y = __u_y - (__u_y * __u_y * __u_y - __u_x) / (3.0 * __u_y * __u_y); __u_k = __u_k + 1; }   /* Newton */
     return __u_y;
 }
+#endif
+#if !__UNISA_LIBNEED || __UN_fmax
 static double fmax(double __u_a, double __u_b) { if (__u_a != __u_a) return __u_b; if (__u_b != __u_b) return __u_a; return __u_a > __u_b ? __u_a : __u_b; }
+#endif
+#if !__UNISA_LIBNEED || __UN_fmin
 static double fmin(double __u_a, double __u_b) { if (__u_a != __u_a) return __u_b; if (__u_b != __u_b) return __u_a; return __u_a < __u_b ? __u_a : __u_b; }
+#endif
+#if !__UNISA_LIBNEED || __UN_fdim
 static double fdim(double __u_a, double __u_b) { return __u_a > __u_b ? __u_a - __u_b : 0.0; }
+#endif
 #endif
