@@ -4,6 +4,9 @@
    parsing, priority selection or semantic filtering is performed here.
    Root owns invalidation/active guards and destroys images before clear(). */
 #include "librarybindings.h"
+#ifdef UNISACC_LIBRARYNATIVE_H
+#include "librarycallplans.h"
+#endif
 #include <limits.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -116,16 +119,20 @@ static int us_resolver_process(const us_resolver*r,HANDLE snapshot,const char*na
 }
 #endif
 #ifdef UNISACC_LIBRARYNATIVE_H
-static int us_resolver_candidate3(us_resolver_bytes*b,const us_binding*decl,uintptr_t address,unsigned origin,uint64_t ordinal,uintptr_t dispatcher,us_native_plans*plans,char*error,size_t cap){
- unsigned char *v=NULL;size_t payload;uint64_t handle=0;
+static int us_resolver_candidate3_extended(us_resolver_bytes*b,const us_binding*decl,uintptr_t address,unsigned origin,uint64_t ordinal,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,char*error,size_t cap){
+ unsigned char *v=NULL;size_t payload;uint64_t handle=0;unsigned format=1;
  if(decl->typed){
+  if(decl->variadic && templates){
+   format=2;dispatcher=variadic_dispatcher;
+   if(!dispatcher)return us_binding_error(error,cap,"missing variadic dispatcher");
+   if(us_native_template_add(templates,address,decl->signature,decl->signature_length,&handle,error,cap))return 1;
+  }else if(us_native_plan_add(plans,address,decl->signature,decl->signature_length,&handle,error,cap))return 1;
   if(!dispatcher)return us_binding_error(error,cap,"missing typed dispatcher");
-  if(us_native_plan_add(plans,address,decl->signature,decl->signature_length,&handle,error,cap))return 1;
   payload=62+strlen(decl->name)+decl->signature_length;
   v=malloc(payload);if(!v)return us_binding_error(error,cap,"resolver wire allocation failed");size_t at=0,n=strlen(decl->name);
   us_binding_put64(v+at,n);at+=8;memcpy(v+at,decl->name,n);at+=n;
   v[at++]=0;v[at++]=(unsigned char)origin;us_binding_put64(v+at,ordinal);at+=8;v[at++]=0;v[at++]=(unsigned char)decl->variadic;
-  us_binding_put64(v+at,address);at+=8;us_binding_put64(v+at,decl->count);at+=8;v[at++]=1;
+  us_binding_put64(v+at,address);at+=8;us_binding_put64(v+at,decl->count);at+=8;v[at++]=(unsigned char)format;
   us_binding_put64(v+at,dispatcher);at+=8;us_binding_put64(v+at,handle);at+=8;us_binding_put64(v+at,decl->signature_length);at+=8;
   memcpy(v+at,decl->signature,decl->signature_length);at+=decl->signature_length;v[at++]=handle!=0;
   if(at!=payload){free(v);return us_binding_error(error,cap,"typed wire length mismatch");}
@@ -175,8 +182,9 @@ static int us_resolver_freeze(const us_resolver*r,const us_bindings*injected,uns
  if(rc){free(b.p);return rc;}us_binding_put64(b.p+8,b.count);*out=b.p;*length=b.n;return 0;
 }
 #ifdef UNISACC_LIBRARYNATIVE_H
-static int us_resolver_freeze_with_plans(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,us_native_plans*plans,unsigned char**out,size_t*length,char*error,size_t cap){
- us_native_plans tmpplans={0};if(!plans || plans->head)return us_binding_error(error,cap,"invalid native plan output");
+static int us_resolver_freeze_with_templates(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,uintptr_t variadic_dispatcher,us_native_plans*plans,us_native_templates*templates,unsigned char**out,size_t*length,char*error,size_t cap){
+ us_native_plans tmpplans={0};us_native_templates tmptemplates={0};
+ if(!plans || plans->head || (templates&&templates->head))return us_binding_error(error,cap,"invalid native plan or template output");
  if(!out||!length)return us_binding_error(error,cap,"invalid resolver output");*out=NULL;*length=0;
  if(!r||r->handle_count>US_RESOLVER_HANDLES||r->declarations.count>US_RESOLVER_NAMES||(injected&&injected->count>US_RESOLVER_NAMES))return us_binding_error(error,cap,"invalid resolver registry");
  us_resolver_bytes b={malloc(16),16,0};if(!b.p)return us_binding_error(error,cap,"resolver wire allocation failed");memcpy(b.p,"USBIND3\n",8);
@@ -191,22 +199,27 @@ static int us_resolver_freeze_with_plans(const us_resolver*r,const us_bindings*i
    const us_binding*decl=list->items+i;const us_binding*x=us_resolver_find(injected,decl->name);
    if(group&&x){if(!us_resolver_declaration_equal(x,decl)){rc=us_binding_error(error,cap,"injected and import declarations disagree");break;}continue;}
    if(++names>US_RESOLVER_NAMES){rc=us_binding_error(error,cap,"resolver name capacity exceeded");break;}
-   if(x)rc=us_resolver_candidate3(&b,x,x->address,0,0,dispatcher,&tmpplans,error,cap);
+   if(x)rc=us_resolver_candidate3_extended(&b,x,x->address,0,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);
    if(rc)break;
 #ifdef _WIN32
    uintptr_t address=0;rc=us_resolver_process(r,snapshot,decl->name,&address,error,cap);
-   if(!rc&&address)rc=us_resolver_candidate3(&b,decl,address,1,0,dispatcher,&tmpplans,error,cap);
-   for(size_t j=0;j<r->handle_count&&!rc;j++){FARPROC a=GetProcAddress((HMODULE)r->handles[j].handle,decl->name);if(a)rc=us_resolver_candidate3(&b,decl,(uintptr_t)a,2,j+1,dispatcher,&tmpplans,error,cap);}
+   if(!rc&&address)rc=us_resolver_candidate3_extended(&b,decl,address,1,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);
+   for(size_t j=0;j<r->handle_count&&!rc;j++){FARPROC a=GetProcAddress((HMODULE)r->handles[j].handle,decl->name);if(a)rc=us_resolver_candidate3_extended(&b,decl,(uintptr_t)a,2,j+1,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);}
 #else
-   dlerror();void*a=dlsym(RTLD_DEFAULT,decl->name);const char*failure=dlerror();if(!failure)rc=us_resolver_candidate3(&b,decl,(uintptr_t)a,1,0,dispatcher,&tmpplans,error,cap);
-   for(size_t j=0;j<r->handle_count&&!rc;j++){dlerror();a=dlsym(r->handles[j].handle,decl->name);failure=dlerror();if(!failure)rc=us_resolver_candidate3(&b,decl,(uintptr_t)a,2,j+1,dispatcher,&tmpplans,error,cap);}
+   dlerror();void*a=dlsym(RTLD_DEFAULT,decl->name);const char*failure=dlerror();if(!failure)rc=us_resolver_candidate3_extended(&b,decl,(uintptr_t)a,1,0,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);
+   for(size_t j=0;j<r->handle_count&&!rc;j++){dlerror();a=dlsym(r->handles[j].handle,decl->name);failure=dlerror();if(!failure)rc=us_resolver_candidate3_extended(&b,decl,(uintptr_t)a,2,j+1,dispatcher,variadic_dispatcher,&tmpplans,templates?&tmptemplates:NULL,error,cap);}
 #endif
   }
  }
 #ifdef _WIN32
  CloseHandle(snapshot);
 #endif
- if(rc){free(b.p);us_native_plans_clear(&tmpplans);return rc;}us_binding_put64(b.p+8,b.count);*plans=tmpplans;*out=b.p;*length=b.n;return 0;
+ if(rc){free(b.p);us_native_plans_clear(&tmpplans);us_native_templates_clear(&tmptemplates);return rc;}
+ us_binding_put64(b.p+8,b.count);*plans=tmpplans;if(templates)*templates=tmptemplates;*out=b.p;*length=b.n;return 0;
+}
+/* Existing callers stay fixed-only until the model callsite stream is installed. */
+static int us_resolver_freeze_with_plans(const us_resolver*r,const us_bindings*injected,uintptr_t dispatcher,us_native_plans*plans,unsigned char**out,size_t*length,char*error,size_t cap){
+ return us_resolver_freeze_with_templates(r,injected,dispatcher,0,plans,NULL,out,length,error,cap);
 }
 #endif
 

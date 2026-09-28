@@ -52,7 +52,7 @@ def install(E):
     P('LBI.addrok').a(('STX','lbi_i',ADDRESS,'lbi_value')).call('LBI.u64').a(('COPYW','lbi_argc','lbi_value'),('STX','lbi_i',ARGC,'lbi_value')).branch({2:'LBI.fail'},'LBI.formatversion',[('LDI','lbi_max',1024),('C64U','lbi_argc','lbi_max')])
     P('LBI.formatversion').branch({1:'LBI.format'},'LBI.legacyformat',[('CMPI','lbi_version',3)])
     P('LBI.legacyformat').a(('LDI','lbi_format',0),('STX','lbi_i',FORMAT,'lbi_format')).goto('LBI.argkind')
-    P('LBI.format').call('LBI.byte').a(('STX','lbi_i',FORMAT,'lbi_byte')).branch({0:'LBI.argkind',1:'LBI.typeddispatcher'},'LBI.fail',[('RLD','lbi_byte')])
+    P('LBI.format').call('LBI.byte').a(('COPYW','lbi_format','lbi_byte'),('STX','lbi_i',FORMAT,'lbi_byte')).branch({0:'LBI.argkind',1:'LBI.typeddispatcher',2:'LBI.typeddispatcher'},'LBI.fail',[('RLD','lbi_byte')])
     P('LBI.typeddispatcher').call('LBI.u64').a(('STX','lbi_i',DISPATCH,'lbi_value')).call('LBI.u64').a(('STX','lbi_i',PLAN,'lbi_value')).call('LBI.u64').a(('COPYW','ms_len','lbi_value'),('MARK','lbi_sigstart'),('A64','add','lbi_sigend','lbi_sigstart','ms_len'),('OLEN','lbi_sigcut'),('SPAN2','lbi_sigstart','lbi_sigend'),('OCUT','ms_blob','lbi_sigcut'),('STX','lbi_i',TYPED,'ms_blob'),('JUMP','lbi_sigend')).call('MS.canonical').a(('STX','lbi_i',CANON,'ms_canon'),('STX','lbi_i',CANONLEN,'ms_canonlen'),('STX','lbi_i',RESULT_KIND,'ms_resultkind'),('STX','lbi_i',RESULT_WIDTH,'ms_resultwidth')).goto('LBI.supported')
     P('LBI.argkind').branch({1:'LBI.dataargc'},'LBI.descbegin',[('CMPI','lbi_kind',1)])
     P('LBI.dataargc').branch({1:'LBI.descbegin'},'LBI.fail',[('CMPI','lbi_argc',0)])

@@ -1,5 +1,6 @@
 """Declared USBIND1/2/3 capability gates dedicated library calls in lowering.
-The shared decoder validates format1 TypeGraphs/dispatcher handles as capabilities;
+The shared decoder validates fixed format1 and variadic-template format2
+TypeGraphs/dispatcher handles as capabilities;
 E3 chooses and types wrappers. Lower never classifies a source type or picks an import.
 Ordinary .hostcall handling is untouched; only the dedicated token uses this route.
 """

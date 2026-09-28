@@ -45,3 +45,27 @@ internal helper does not enable variadic bindings in existing public APIs.
 The model still needs to validate the prototype prefix and emit per-call plans;
 USLSIG2 export closure support for genuinely variadic functions remains pending.
 Reference: https://github.com/libffi/libffi/blob/master/doc/libffi.texi .
+
+## Variadic templates and concrete call requests (R10, partial integration)
+
+USBIND3 format2 uses format1 framing, but the handle owns a variadic prototype
+template rather than a prepared call cif. The prototype USLSIG2 has variadic1,
+ALL_STACK1, at least one fixed parameter and support0. The outer candidate may
+have support1 only when the prefix/result layout can be represented and the
+dedicated dispatcher and owned template handle are nonzero. Fixed format1 and
+legacy format0 retain their contracts. `us_resolver_freeze_with_templates`
+prepares these resources atomically; the existing fixed-only freeze is unchanged.
+
+USCPLAN1 has an eight-byte magic (no newline), little-endian u64 count, and
+length-framed records containing site_id, template_handle, fixed_count,
+signature_length and exactly that many USLSIG2 bytes. The concrete signature
+uses variadic0, ALL_STACK1, support1 and the actual total argument count. Its
+name, return and fixed prefix must equal the template's ABI graph; narrow tail
+integers and float32 are rejected because promotion belongs in E3.
+
+The host transaction owns every graph/cif and publishes all sites only after
+complete validation. An invalid request preserves the previous site set.
+This protocol and the real host va_arg path are tested; E3 callsite capture,
+USLTAPE2 emission, public-context dispatcher/lifecycle and full source-to-native
+variadic calls are still pending. Existing public APIs continue fixed-only
+preparation; adding these helpers does not claim public variadic support.

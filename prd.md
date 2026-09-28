@@ -2844,3 +2844,8 @@ R10 fixed参数修复局部证据：经典新参考与系统cc同输出，原参
 R10 fixed参数集成门禁纠正：1f146ec候选87a9082e…的语言一片发现function_pointer_arrays在O0崩溃，未提升根产物。通用参数查询过早替换首八槽的PDB声明转换，FN.pfpdecl1之前捕获的描述还不是数组/函数退化后的调用类型。修正只扩充缺失的第九及以后槽，首八保留原PDB路径；typed import完整签名路径不变。私有匹配--errors变体的ASM网络driver上，函数指针数组与b_fixedfp_many在O0/O1/O2六次运行均退出0；接着重跑正式language-1。不把scratch错误输入格式的unit-marker拒绝计为产品缺陷；失败候选与实际修复证据分别保留。
 
 R10 fixed参数修复正式收尾（e22d236源）：私有shared/六目标/pack逐步≤55s真实重构，根.com与原始sidecar同步为**1,081,132 B / SHA256 53abdd383b6817fa1c4a768b43934d5f6904db3120ca6b4bfbb39442e44cd154**。旧失败候选87a9082e未提升且保留；language-1的13探针/6拒绝控制rc0（47s）。新产品435次O0/O1/O2差分wrong0/refuse0；9项库ABI/变参宿主/产品run/C99/kernel/docs门禁rc0（16s），23对实际网络全域check-net一致，两个核心回归在三优化级与宿主cc六次实际输出一致。仅本机ARM与Rosetta范围，不冒称最终全部门禁、Windows/Linux库或完整变参模型调用已完。回执research/r10-fixed-parameters-evidence.json；完整0.0.10继续。
+
+### R10 typed variadic调用点接入决定（2026-09-29）
+沿research/r10-ffi-variadic-callsite-design.md执行一次E3：USBIND3 format2携带variadic模板，模型负责原型相等、固定转换/尾提升、选定候选与逐调用点具体USLSIG2；USCPLAN1请求由宿主在E3之后事务建立ffi_prep_cif_var，不重跑解析器。模板与具体调用计划分别拥有，未知/重复站点、固定前缀不符与截断失败不能部分发布。并发域：宿主模板/调用请求decoder与其测试；共享模型wire decoder/候选format2验证；主代理E3调用捕获/公开库集成/PRD/门禁/根产物。仍保持旧fixed格式与普通CLI；第一批先验证协议与宿主真实va_arg，随后接完整模型路线，未接通前不冒称公开variadic可用。无共享UA、无根com后台重建、无push或VM。
+
+R10 typedvariadic协议/宿主半部已实测：USBIND3 format2区分原型support0与外层模板可用位；固定格式0/1保留，USCPLAN1逐调用点完整图的事务发布/失败保留旧计划已实现。ARM/Rosetta普通+ASan/UBSan每轮300次真实va_arg（混合20、零尾、Pair）通过；模型655态/168734观察全域相等，4有效/10畸形/536截断在sim/C网络一致。父会话resolver冻结模板/缺dispatcher回滚/旧固定freeze对照通过，8项门禁双槽4秒全rc0。接下来仍需E3捕获与提升、USLTAPE2、公开上下文生命周期和完整调用闭环；不能把这些host/protocol单测称为公开变参已可用。
