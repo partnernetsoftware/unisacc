@@ -48,9 +48,12 @@ Canonicalisation zeroes parser base/shape and emits deterministic definition IDs
 preserving graph topology, layout and nested modes. Top-level mode remains separate
 metadata under the existing canonical comparison contract. Canonical graph bytes
 preserve sharing topology: one shared leaf and two identical leaf definitions can
-have different bytes despite ABI equivalence. Complete callback ABI compatibility
-therefore still requires a bounded structural signature-pair comparison; canonical
-byte equality alone is not claimed to establish all equivalent callback graphs.
+have different bytes despite ABI equivalence. The fixed and variadic declaration matchers now share MG.equal, a bounded
+coinductive node-pair comparison that ignores sharing topology and support metadata
+while preserving nested modes and layout facts. Its 65536 distinct-pair budget
+rejects exhaustion explicitly; canonical byte equality alone does not establish
+all equivalent callback graphs. Source callback-graph serialization and callable
+directional conversion remain separate integration work.
 Each descriptor payload is bounded by its declared length and must be consumed exactly.
 Limits: descriptor recursion32, nodes16384 and signature definitions1024 per record,
 parameter count1024 per signature, byte extent<=16MiB.
@@ -69,5 +72,7 @@ Prune consumes V1 and V2 framing, retaining public definitions regardless suppor
 It validates complete V2 descriptor and callback graphs through the shared model
 validator; the host typed decoder also validates the graph before any execution. No public roots are picked in C.
 
-This protocol alone is not complete R10 FFI. Typed variadic import callsites, union/bitfield
-NativePlan, function-pointer ownership, wider long double and all target native tests remain.
+This protocol alone is not complete R10 FFI. Public typed variadic import callsites
+are implemented and tested locally; variadic indirect callbacks, union/bitfield
+NativePlan, callable ownership/conversion, wider long double and remaining native
+platform tests still require completion.

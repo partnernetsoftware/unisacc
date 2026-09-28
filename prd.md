@@ -2879,3 +2879,5 @@ Callback模型图语义相等下一片决定：保持MS.canonical作为声明验
 宿主graph相等补回归：同一plain Leaf的supported0/1是能力声明而非ABI类型差异，新等价fixture先实际失败，再移除该证明位的结构比较；数据解码仍按supported约束拒绝冒充可执行callback。两ISA图门禁需在补丁后重跑，先前3门禁不代替新fixture验收。
 
 MG.equal独立模型已完成并连接LI固定/LV变参两处原型比较，移除各自bytecompare循环，共用图比较；来源脚本mode在MS scratch覆盖前保存。独立agent报告396态/101912观察、30双向独立oracle/sim/C-network与6畸形/65536预算控制通过，父会话随后复验。callback源图serializer与可调用转换仍未接入，不能以比较器到位称公开callback已绿。新增com-full-signature永久产品回归，旧根实际ptr9 O0退出1，正式重构候选必须21次全通过。
+
+R10 callback图基础与完整间接固定参数正式候选验收：a572ab0私有冻结源shared/六目标/P3/APE每步≤55s完整重构；根.com与原始来源侧车同步为**1,094,814 B / SHA256 587d000f4a4fda50abf2324a1b0ee00613e8a99f319b86fc5ef609f611a6ec86**，source freshness通过，比上一候选+10245B。22项正式候选受影响门禁全rc0：公开两ISAfixed/variadic+完整signature9项8s（7程序×三优化级21次），435产品差分wrong0/refuse0 15s，language-1单槽47s，库兼容/kernel59 stale0/docs/run12/c9957共8项16s；实际23对网络全域一致。另图声明两ISAASan/protocol3项4s、图语义比较396态/101912观察与30双向oracle通过。公开callback桥仍红，source→wire完整图与callable方向转换/错误生命周期未接通；不是最终全套、六平台原生或整个0.0.10完成。回执research/r10-callback-final-candidate.json；无VM/push/release。

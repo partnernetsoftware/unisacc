@@ -1,6 +1,6 @@
 # R10 recursive callback signature graphs: next design
 
-Status: **design only, not implementation or runtime proof**. Read-only audit of current source on 2026-09-29. No build, shared artifact, executable or existing file was changed. The parent owns PRD integration before implementation. Typed variadic integration is in flight; this report describes the next domain, not its completion.
+Status: **runtime bridge design, not callback execution proof**. Sections 1–2 preserve the source audit before `dadb2a6`. Owned graph decoding, full anonymous signature facts/query and shared semantic ABI comparison are now implemented; see `r10-callback-foundation-evidence.json`. Public typed variadic calls are independently implemented. Source callback-graph serialization, declared callable conversion and the execution/lifetime obligations below remain unfinished.
 
 ## 1. What actually exists
 
@@ -89,3 +89,34 @@ Additional minimal controls: different native leaf addresses with same type; rep
 4. **Parent integration:** `exec/c/libunisacc.c/.h`, ScriptFrame/boundary outcomes, public lifetime, resources/dispatcher addresses, public native test, gate registration, PRD and generated/model artifacts/candidate evidence. Coordinate with the in-flight variadic owner rather than edit its files concurrently. Freeze tree before rebuilding or integration runs.
 
 Recommended order: agree protocol/runtime handle contract → graph facts + decoder red probes → actual public fixed callback chain → sticky errors/lifetime/aggregate pointer fields → indirect variadic callback callsites and remaining platforms. Every successful stage must be labelled with actual proof scope; this report proves none of them.
+
+## 7. Mechanical runtime interfaces after the foundation (read-only design)
+
+Use a context-wide model-declared `signature_key` table, not a record-local graph
+ID as a global key. A callable carries `{handle, owner, image_generation, origin,
+signature, target, script_mode, cif, closure}`. `SCRIPT` introduction occurs only
+where the model declares script address-taking; `NATIVE` introduction occurs only
+when a declared kind4 native boundary supplies a pointer. No address-range or name
+heuristic chooses origin. Null is handle0; tokens do not get reused, and another
+owner or an invalidated image generation is rejected. Resolver registration
+version alone cannot identify image lifetime.
+
+A generic six-field introduction interface is
+`make_script(signature_key,raw,0,0,0,0) -> handle`; typed indirect dispatch is
+`call_callable(handle,signature_key,slots,result,count,concrete_site) -> status`.
+These are proposed interfaces, not existing callable APIs. Model declarations
+control fixed conversions/default promotions and concrete variadic callsites.
+The host applies libffi to the explicit signature and origin. Struct/array copies
+walk only declared by-value offsets/strides to translate callback slots; ordinary
+data-pointer pointees are never traversed. Known owned closure addresses can map
+back to their original handle, preserving roundtrip identity.
+
+Give each ScriptFrame an owner and heap-owned outcome. Each actual ffi call owns
+an arena and TLS native boundary whose first failure is sticky. A callback catches
+its own failure, returns an ABI-zero sentinel and allows the native function to
+return normally. Split `ffi_call` from result commit: inspect the boundary outcome
+before copying any result, clean the arena, then propagate at the script boundary.
+Only the outermost call publishes context status/error. Free registry closures and
+plans before their borrowed signature graphs and image; require caller quiescence
+before generation teardown. Neither this design nor macOS tests establishes
+foreign-thread concurrency, Windows SEH, or remaining platform qualification.
