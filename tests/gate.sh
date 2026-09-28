@@ -115,6 +115,7 @@ job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, re
 job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
 for part in stages chain resources; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
 job exec-net python3 ./exec/c/netcheck.py
+job exec-codec ./exec/c/codeccheck.sh
 job modelbenchcheck python3 ./tests/modelbenchcheck.py       # performance evidence fails on functional errors
 job bound python3 ./tests/boundcheck.py
 job qprefix python3 ./exec/c/qprefixcheck.py --artifact "${MODEL_COM:-./unisacc.com}"
