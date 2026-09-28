@@ -5255,3 +5255,7 @@ parse2 function/global/local_control 去重（本session直改主树，TDD验证
 候选实际红灯：FFI产品测试在ad239a6候选上报“host intrinsic argument count”，不能交付。源码定位检查发生在CL.pop之后，na已递减到0；已有nar保存真实参数数目。修复使用nar，不新增计数机制。该失败不由ABI桥造成；新候选必须重建后复验。
 
 FFI与实采父验收：narfix候选5,388,386 B；17/17系统ABI探针在模型-run与O2原生输出相同，错误hostcall/hostaddr参数数目以1拒绝。apps-real四应用全绿，procview/memmap/winlayout的原始快照从同一模型候选编译的应用--capture取，cc只作同输入分析器；删除两个cc采集器与相应测试路径。全门禁仍待冻结新树完成。新字节账独立存research/model-bytes.json，旧s17-final-evidence.json不改作新候选证据。
+
+冻结门禁 c227fd5 暴露测试参考构建缺口：exec-pploc、exec-lexpos、exec-diag 自行拼接源码时遗漏新增 src/host_dl.h，宿主 cc 报缺头文件；同结构 returnwarningcheck 也补齐。只改测试构建入口，不改候选产品。参考默认缓存依赖改为全部 src/*.h，防止桥头修改后仍复用旧参考。此次 28 项含 3 构建失败，不记全绿；修复后新冻结队列重新验证。
+
+测试入口修复验收：exec-pploc、exec-lexpos、exec-diag、exec-returnwarn 四项 rc0（19秒双槽）；在私有临时目录修改 host_dl.h，执行 lib.sh 中实际哈希命令，摘要改变，无共享参考写入。候选 .com 哈希与大小未变。

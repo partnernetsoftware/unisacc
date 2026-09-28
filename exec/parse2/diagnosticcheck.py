@@ -42,7 +42,9 @@ with tempfile.TemporaryDirectory(prefix='model-diagnostics-') as td:
     pieces=[R/'tests/refshim.h',R/'src/version.h',R/'kernel/unisa_model.inc',R/'kernel/unisa_headers.inc']
     source=''.join(p.read_text() for p in pieces)
     source+=''.join(l for l in (R/'kernel/unisa_core.c').read_text().splitlines(True) if not l.startswith('#include "unisa_'))
-    source+=''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','back_encode.c','back_image.c'])
+    source+=''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','host_dl.h','back_encode.c','back_image.c'])
+    assert source.count('#include "host_dl.h"\n') == 1
+    source = source.replace('#include "host_dl.h"\n', '')
     source+=(R/'tests/reffoot.h').read_text()
     helper='''static void probe_diag(void) { char *s; long v; int neg; int mode; int count; unsigned char out[4]; int i;
 s=getenv("UA_DIAG_POS"); mode=getenv("UA_DIAG_WARN")[0]==49; count=0; warnall=1; nwarn=0;
