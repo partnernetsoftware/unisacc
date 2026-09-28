@@ -458,37 +458,34 @@ def ordinary_control(section, warnings, extra=None):
     return bindings
 
 
+def _namespace_control(namespace, section, warnings, bindings):
+    """Shared dispatch loop: function_control/global_control/local_control differ
+    only in their tsv prefix and starting bindings, not in this iteration shape."""
+    mode_ok = "warnings" if warnings else "plain"
+    for part, mode, prefix, kind, key in tape_rows(namespace + "-fresh.tsv"):
+        if part == section and mode in ("common", mode_ok):
+            bindings[key] = P(prefix + "." + namespace + "_" + key).fresh(kind)
+    for owner, mode, rules in tape_rows(namespace + "-sections.tsv"):
+        if owner == section and mode in ("common", mode_ok):
+            structured_control(rules, False, bindings)
+
+
 def function_control(section, warnings):
     bindings = dict(PIDS=PIDS, PDB=PDB, LOC=LOC, FND=E.FND, FRD=E.FRD, FRB=E.FRB, VAR=E.VAR)
     bindings.update(("FN_PDB" + str(i), PDB + i) for i in range(16))
-    for part, mode, prefix, kind, key in tape_rows("function-fresh.tsv"):
-        if part == section and mode in ("common", "warnings" if warnings else "plain"):
-            bindings[key] = P(prefix + ".function_" + key).fresh(kind)
-    for owner, mode, rules in tape_rows("function-sections.tsv"):
-        if owner == section and mode in ("common", "warnings" if warnings else "plain"):
-            structured_control(rules, False, bindings)
+    _namespace_control("function", section, warnings, bindings)
 
 
 def global_control(section, warnings):
     bindings = {name: globals()[name] for name in
                 ("LOC", "GIBLOB", "GIEND", "GINPS", "GINPE", "GSZ", "GUNIT", "SINIT", "SKIPS")}
     bindings.update((name, getattr(E, name)) for name in ("FND", "GMARK", "BASE", "ARR", "PTR"))
-    for part, mode, prefix, kind, key in tape_rows("global-fresh.tsv"):
-        if part == section and mode in ("common", "warnings" if warnings else "plain"):
-            bindings[key] = P(prefix + ".global_" + key).fresh(kind)
-    for owner, mode, rules in tape_rows("global-sections.tsv"):
-        if owner == section and mode in ("common", "warnings" if warnings else "plain"):
-            structured_control(rules, False, bindings)
+    _namespace_control("global", section, warnings, bindings)
 
 
 def local_control(section, warnings):
     bindings = dict(SKIPS=SKIPS, PTR=E.PTR, BASE=E.BASE)
-    for part, mode, prefix, kind, key in tape_rows("local-fresh.tsv"):
-        if part == section and mode in ("common", "warnings" if warnings else "plain"):
-            bindings[key] = P(prefix + ".local_" + key).fresh(kind)
-    for owner, mode, rules in tape_rows("local-sections.tsv"):
-        if owner == section and mode in ("common", "warnings" if warnings else "plain"):
-            structured_control(rules, False, bindings)
+    _namespace_control("local", section, warnings, bindings)
 
 
 def return_control(section, extra=None):
