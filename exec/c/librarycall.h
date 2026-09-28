@@ -14,6 +14,25 @@ typedef struct us_library_signature {
     unsigned variadic;
 } us_library_signature;
 uint64_t us_library_bridge_raw(const void *entry,const uint64_t args[6],void *softstack_top);
+/* ALL_STACK is selected by a model-declared ScriptPlan. This mechanism copies
+   raw words only; it does not classify native types. Normal script C entries
+   preserve their caller's r6/frame register. Arbitrary machine code is not an
+   accepted entry contract. A private caller-owned downward stack is required. */
+#define US_LIBRARY_STACK_ARGUMENT_LIMIT 1024u
+uint64_t us_library_bridge_stack_raw(const void *entry,const uint64_t *slots,
+        void *softstack_top,uint64_t count);
+static inline int us_library_call_stack(const void *entry,const uint64_t *slots,
+        void *softstack_top,size_t available_stack_bytes,size_t count,uint64_t *result) {
+    size_t required;
+    if (!entry || (!slots && count) || !softstack_top || !result ||
+        ((uintptr_t)softstack_top & 15) || count>US_LIBRARY_STACK_ARGUMENT_LIMIT) return 0;
+    /* 32 covers continuation/alignment/anchor space; callee depth is separate
+       and must be included in available_stack_bytes by the guarded context. */
+    required=count*8+32;
+    if (available_stack_bytes<required || (uintptr_t)softstack_top<required) return 0;
+    *result=us_library_bridge_stack_raw(entry,slots,softstack_top,(uint64_t)count);
+    return 1;
+}
 static inline int us_library_signature_supported(const us_library_signature *s) {
     unsigned i;
     if (!s || s->variadic || s->argument_count>6 ||

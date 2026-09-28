@@ -2792,3 +2792,10 @@ Windows guest mmap契约经现有stdlib实读校准：Windows _UNISA_MAP传Virtu
 读源审计见research/r10-ffi-complete-design.md。现USLSIG1只写min(count,8)、FPS_PARAM按sig*16、双向桥args6，aggregate仅shape局部ID；必须先输出完整参数池、可移植TypeGraph与ScriptPlan，逐调用点记录转换后实参类型与变参fixed/actual count。下一实施采用共享ValueFrame：标量/FP逐位，aggregate按模型大小/布局独立复制；模型决定类型一致、符号优先、源转换与脚本register/all-stack模式。libffi作为显式可信通用原生ABI机制消费完整声明（普通固定签名/struct与具体变参调用点）；无法表示的union/bitfield等不能伪装byte array，另由模型NativePlan+通用搬运桥完成，仍属于R10待办。原生可变参函数地址无法自发现尾参，导出增加显式typed调用/特化入口契约，不能冒称us_sym任意varargs安全。第一实验同时覆盖9参混合FP/GP/指针/struct及struct返回、两个不同尾参调用点；先检模型元数据全量，再做实际双向调用，不以纯libffi smoke当编译器通过。
 
 **R10 resolver封存与完整FFI红基线**：ff54d4c冻结快照实际重构shared/六目标/pack；产物仍55e3425b/1,056,235B（resolver仅库适配器，不改变默认.com程序字节），原始build sidecar源hash更新自真实构建。8项受影响门禁全部rc0，15秒、双槽；回执research/r10-windows-resolver-final-gates.json。根.com及sidecar同步真实候选，不restamp旧物。完整FFI第一真实9参数混合probe保留在tests/libraryabi/nine_mixed.c：系统cc执行17.00/40；模型compile/relocate为0，但实际USLSIG1输出exchange count=9/stored=8/result_kind=5/result_width=0/supported=0，us_sym拒绝。这不是parse/lower失败，是元数据与ABI桥明确未完成；见research/r10-ffi-nine-mixed-baseline.json。不能把9参probe改为6参凑完成。完整R10仍待类型图/调用帧、所有ABI/六平台库、库+main副产品、最终CI/签名发布。
+
+
+### R10 完整FFI调用帧首片（2026-09-29，实施决定）
+先闭合共享脚本ALL_STACK搬运机制，同时保留原六GP入口。新低层入口`us_library_bridge_stack_raw(entry,slots,softtop,count)`只按模型声明的ALL_STACK模式逐项复制uint64位模式，不检查C类型、不选择原生ABI。参数0..N-1全部在脚本续点上方，callee FP+16+8k；FP是原始位，聚合槽是独立对象地址。checked包装限制N<=1024、top对齐、可用栈字节与乘加上限，失败不进入guest。x86正常C函数按既有脚本ABI保存/恢复r6（机器r9），桥将host保存帧地址放在调用者r6，返回后机械恢复host rsp；不是假定任意原始机器字节会保存它。ARM硬件SP仍保持host帧，仅x7作为软栈；Windows正常返回与宿主非易失寄存器保存，SEH穿越guest仍未证。
+四份ASM分为x86与ARM两个不相交并发域；父会话负责接口、实际编译器生成的多参数/FP用例、门禁和提交。旧六GP测试保持。新桥只有实际脚本ABI搬运专项通过后才称可用，不据此称完整FFI/us_sym九混合聚合probe通过；后续仍需全量USLSIG2参数/TypeGraph/ScriptPlan、libffi对象树与typed变参调用点，完整R10范围不变。
+
+R10 ALL_STACK首片实测：macOS ARM原生与Rosetta x86的实际模型生成机器码，9参混合FP/GP/指针、9参struct按值复制（caller对象不变）、9个float、17加权整数、嵌套调用各100轮通过，SP与低栈canary及拒绝控制通过。两个新增实际模型门禁和Win64宿主ABI适配门禁已加入gate。首轮旧Windows源解释器错误消费新增第二procedure导致1失败，已按精确seh_proc锚点分开；复跑7项全部rc0，双槽5秒，首失败保留在research/r10-ffi-stack-bridge-evidence.json。Windows/Linux只cross-assemble，不冒称客机执行；USLSIG1/us_sym仍缺完整类型图，原九混合聚合返回红基线尚未闭合。本片不改模型决策、未接宿主API新桥，根产物需按实际源码重构后验来源，不原地换侧车。

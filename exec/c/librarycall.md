@@ -32,3 +32,37 @@ pointer return/mutation and 100 same-thread repetitions. An assembly control
 clobbers every platform callee-saved GPR (and ARM d8–d15), checks their exact
 restoration and the hardware SP, and tests signature/alignment rejection.
 All subprocesses have a 25-second bound; wrap each ISA run with ≤60 seconds.
+
+
+## Declared ALL_STACK entry
+
+`us_library_bridge_stack_raw(entry, slots, softtop, count)` is the mechanical
+ALL_STACK ScriptPlan implementation. The model selects that plan; the bridge
+copies all `count` raw uint64 words in source order. FP occupies raw bits and
+an aggregate slot contains a separately owned object's address. This operation
+does not convert native types or discover a signature. It does not by itself
+make `us_sym` support FP, aggregates, variadic signatures or >6 parameters.
+
+The checked `us_library_call_stack` wrapper rejects a misaligned top, null
+entry/output, missing nonempty slots, count >1024 and insufficient supplied
+stack space before entering the script. Its size check covers the argument
+block plus bridge overhead, **not an arbitrary callee's stack depth**. The
+context must supply sufficient guarded stack for that depth.
+
+ARM places the continuation at `top - 8*(count+1)` and parameter zero eight
+bytes above it; the compiled callee then exposes FP+16+8*k. Hardware SP stays
+on its native frame. x86 copies the parameters before the return-address
+push and uses the script ABI's preserved caller frame register r6 (r9) to
+recover the native saved frame. Only balanced compiler-produced C entries
+that preserve r6 satisfy this contract; arbitrary raw instructions do not.
+The legacy register bridge and its adversarial clobber control are unchanged.
+Windows adapters preserve their host nonvolatile registers and emit host-frame
+unwind records; exception propagation while on a guest stack remains unproved.
+
+`librarystackcheck.py PRIVATE_MODEL_COM ARCH` invokes actual model-produced
+Mach-O function bytes: nine mixed integer/FP/pointer parameters, nine float
+parameters, a nine-parameter by-value struct argument (caller unchanged),
+seventeen weighted integer parameters and a nested all-stack call.
+It checks raw result bits, 100 repetitions, hardware SP, a low-stack canary and
+pre-entry guards. Native ARM and Rosetta x86 runs are separate gate jobs. This
+is a script-frame test, not complete native FFI or six-platform qualification.

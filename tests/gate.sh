@@ -191,6 +191,9 @@ job source-layout ./tests/source_layout.sh
 job target-package python3 ./tests/targetpackagecheck.py "${MODEL_COM:-./unisacc.com}"
 job lib-context python3 ./tests/libunisacccheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-format python3 ./tests/libunisaccformatcheck.py
+job lib-stack-arm python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" arm64
+job lib-stack-x86 python3 ./exec/c/librarystackcheck.py "${MODEL_COM:-./unisacc.com}" x86_64
+job lib-stack-x86-hostabi python3 ./tests/r10stackx86check.py
 job lib-artifacts python3 ./tests/libraryartifactcheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-native-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}"
 job lib-module-exports python3 ./tests/libunisaccexportcheck.py --package "${MODEL_COM:-./unisacc.com}" --no-main

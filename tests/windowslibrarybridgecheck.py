@@ -9,6 +9,11 @@ MASK=(1<<64)-1
 
 def instructions(path):
  text=path.read_text();text=re.sub(r'/\*.*?\*/','',text,flags=re.S)
+ # This interpreter models the legacy six-register entry only. The new
+ # ALL_STACK procedure has its own actual execution probes.
+ blocks=re.findall(r'\.seh_proc us_library_bridge_raw\s*\n(.*?)\.seh_endproc',text,re.S)
+ assert len(blocks)==1, 'missing or duplicate legacy bridge procedure'
+ text=blocks[0]
  return [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith('.') and not line.strip().endswith(':')]
 
 def arm(lines,seed):
@@ -92,7 +97,7 @@ def main():
  with tempfile.TemporaryDirectory(prefix='windows-library-bridge-') as tmp:
   d=pathlib.Path(tmp);out=[]
   for target,src,kind in [('aarch64-pc-windows-msvc',a,'COFF-ARM64'),('x86_64-pc-windows-msvc',x,'COFF-x86-64')]:
-   obj=d/(target+'.obj');command([clang,'-target',target,'-c',src,'-o',obj]);info=command([readobj,'--unwind',obj]);assert kind in info and 'us_library_bridge_raw' in info
+   obj=d/(target+'.obj');command([clang,'-target',target,'-c',src,'-o',obj]);info=command([readobj,'--unwind',obj]);assert kind in info and 'us_library_bridge_raw' in info and 'us_library_bridge_stack_raw' in info
    if src==x:
     assert 'ALLOC_LARGE size=200' in info
     for n in range(6,16):assert f'SAVE_XMM128 reg=XMM{n},' in info

@@ -88,3 +88,90 @@ us_library_bridge_raw:
     popq %rbp
     retq
     .seh_endproc
+
+/* ALL_STACK raw slots; r6/r9 is the preserved host-frame anchor.
+   Same normal-return-only unwind boundary as the fixed bridge above. */
+.p2align 4
+.globl us_library_bridge_stack_raw
+.def us_library_bridge_stack_raw; .scl 2; .type 32; .endef
+us_library_bridge_stack_raw:
+.seh_proc us_library_bridge_stack_raw
+    pushq %rbp
+    .seh_pushreg %rbp
+    pushq %rbx
+    .seh_pushreg %rbx
+    pushq %rdi
+    .seh_pushreg %rdi
+    pushq %rsi
+    .seh_pushreg %rsi
+    pushq %r12
+    .seh_pushreg %r12
+    pushq %r13
+    .seh_pushreg %r13
+    pushq %r14
+    .seh_pushreg %r14
+    pushq %r15
+    .seh_pushreg %r15
+    subq $200, %rsp
+    .seh_stackalloc 200
+    movdqu %xmm6, 32(%rsp)
+    .seh_savexmm %xmm6, 32
+    movdqu %xmm7, 48(%rsp)
+    .seh_savexmm %xmm7, 48
+    movdqu %xmm8, 64(%rsp)
+    .seh_savexmm %xmm8, 64
+    movdqu %xmm9, 80(%rsp)
+    .seh_savexmm %xmm9, 80
+    movdqu %xmm10, 96(%rsp)
+    .seh_savexmm %xmm10, 96
+    movdqu %xmm11, 112(%rsp)
+    .seh_savexmm %xmm11, 112
+    movdqu %xmm12, 128(%rsp)
+    .seh_savexmm %xmm12, 128
+    movdqu %xmm13, 144(%rsp)
+    .seh_savexmm %xmm13, 144
+    movdqu %xmm14, 160(%rsp)
+    .seh_savexmm %xmm14, 160
+    movdqu %xmm15, 176(%rsp)
+    .seh_savexmm %xmm15, 176
+    .seh_endprologue
+    movq %rcx, %r11
+    movq %rdx, %r10
+    movq %r9, %rcx
+    movq %rsp, %r9
+    movq %r8, %rsp
+    leaq 15(,%rcx,8), %rax
+    andq $-16, %rax
+    subq %rax, %rsp
+    xorq %rdx, %rdx
+.Lus_win_stack_copy:
+    cmpq %rcx, %rdx
+    jae .Lus_win_stack_ready
+    movq (%r10,%rdx,8), %rax
+    movq %rax, (%rsp,%rdx,8)
+    incq %rdx
+    jmp .Lus_win_stack_copy
+.Lus_win_stack_ready:
+    callq *%r11
+    movq %r9, %rsp
+    movdqu 32(%rsp), %xmm6
+    movdqu 48(%rsp), %xmm7
+    movdqu 64(%rsp), %xmm8
+    movdqu 80(%rsp), %xmm9
+    movdqu 96(%rsp), %xmm10
+    movdqu 112(%rsp), %xmm11
+    movdqu 128(%rsp), %xmm12
+    movdqu 144(%rsp), %xmm13
+    movdqu 160(%rsp), %xmm14
+    movdqu 176(%rsp), %xmm15
+    addq $200, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rsi
+    popq %rdi
+    popq %rbx
+    popq %rbp
+    retq
+    .seh_endproc
