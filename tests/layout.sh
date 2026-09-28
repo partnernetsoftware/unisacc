@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The data layout, enumerated rather than sampled. [A-41] [P-3] [S-13]
 #
 # `unisa acc` discharges the model by enumerating its FULL gold.  This does
@@ -22,5 +24,5 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 T=$(scratch)
 n=$(python3 tests/gen_layout.py "$T" "${DEPTH:-3}") || { echo "  FAIL generator"; exit 1; }
 [ "$n" -gt 0 ] || { echo "  FAIL the generator wrote no tapes"; exit 1; }
-perl -e 'alarm 900; exec @ARGV' python3 tests/layout_check.py "$UA" "$T" \
+"$_BOUND" 60 python3 tests/layout_check.py "$UA" "$T" \
     lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64

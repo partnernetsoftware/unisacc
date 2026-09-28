@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # -O1/-O2: the optimised tape means what the walker's tape means. [H1]
 #
 #   1. every probe and c-testsuite program: -run at -O2 prints and exits
@@ -21,7 +23,7 @@ for f in examples/*.c tests/c/*.c tests/c99/*.c corpus/c-testsuite/tests/single-
     [ -f "$f" ] || continue
     d="$R/$(dirname "$f")"
     for o in -O0 -O2; do
-        (cd "$T" && perl -e 'alarm 5; exec @ARGV' "$UA" $o -I "$d" "$R/$f" -run > "$T/out$o" 2>&1 </dev/null
+        (cd "$T" && "$_BOUND" 5 "$UA" $o -I "$d" "$R/$f" -run > "$T/out$o" 2>&1 </dev/null
          echo "rc=$?" >> "$T/out$o")
     done
     if cmp -s "$T/out-O0" "$T/out-O2"; then ok=$((ok+1)); else fail "$f: -O2 runs differently"; fi

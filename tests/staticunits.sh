@@ -1,10 +1,12 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Regression: per-file token numbers are not program-wide storage identities.
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b cc tests/multi/static1.c tests/multi/static2.c -o "$T/reference"
 b python3 - "$UA" "$T/reference" <<'PY'
 import subprocess,sys

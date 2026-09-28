@@ -8,7 +8,7 @@ set -u
 cd "$(dirname "$0")/../.."
 . exec/stamp.sh
 T=${E2TMP:-$X/e2}; mkdir -p "$T"
-B="perl -e alarm(58);exec(@ARGV)"
+B="tests/bound 58"
 export E2REF=$T/ua_ref E2NOAUTO=$T/ua_noauto
 ready() {
     fresh $T/ua_ref $B ./tests/build_ref.sh $T/ua_ref.c $T/ua_ref -- $REFSRC &&

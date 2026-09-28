@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Data laid out in shapes the corpus never asks for. [A-41] [S-13]
 #
 # tests/gen_data.py writes programs whose globals are declared in one order
@@ -28,7 +30,7 @@ for f in $files; do
     n=$((n+1))
     cc -w -o "$T/ref" "$f" 2>/dev/null || { echo "  FAIL cc refused $(basename "$f")"; bad=$((bad+1)); continue; }
     "$T/ref" > "$T/want" 2>/dev/null
-    perl -e 'alarm 120; exec @ARGV' "$UA" -run "$f" > "$T/got" 2>/dev/null
+    "$_BOUND" 60 "$UA" -run "$f" > "$T/got" 2>/dev/null
     cmp -s "$T/want" "$T/got" || { bad=$((bad+1))
         printf "  FAIL %s: want [%s] got [%s]\n" "$(basename "$f")" \
             "$(cat "$T/want")" "$(cat "$T/got")"; }
@@ -46,7 +48,7 @@ for f in $files; do
     c=$(grep -cE '^int g[0-9]+;$' "$f")
     v=$(grep -cE '^int g[0-9]+ = [0-9]+;$' "$f")
     [ "$c" -gt 0 ] && [ "$v" -gt 0 ] && tent=$((tent+1))
-    d=$(perl -e 'alarm 120; exec @ARGV' "$UA" "$f" -t lnx/x86_64 2>/dev/null |
+    d=$("$_BOUND" 60 "$UA" "$f" -t lnx/x86_64 2>/dev/null |
         awk '/^\.(bss|str) /{print $2}' | sort | uniq -d | wc -l)
     dup=$((dup + d))
 done

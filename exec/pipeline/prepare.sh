@@ -1,10 +1,12 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Cold model preparation. Called by models.py under a content-addressed lock.
 set -eu
 PYTHONHASHSEED=0; export PYTHONHASHSEED
 OUT=$1; TARGET=$2; NETWORK=$3; EXEC_CC=$4
 R=$(pwd)
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b "${EXEC_CC:-cc}" -O2 -o "$OUT/run" exec/c/run.c
 b python3 exec/pp/gen.py "$OUT/e2.json" "$TARGET"
 b python3 exec/lex/gen.py --typed "$OUT/e1.json"

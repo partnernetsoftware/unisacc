@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # M2/M3/P0 product gate (Paper B 出货脊 — not IntNet):
 #   default compile.mjs → compiler_core.wasm; stage2≡stage1; sim/drone body≡stage0;
 #   no python3 emit on ship path; no A-core copy for Pages.
@@ -52,19 +54,19 @@ STEP_EXPECT="$ROOT/tests/ujs2wasm/step_expect.json"
 for name in arith fact branch f64_arith list setidx dict globals_fold list_f64 unary_minus elseif logic str; do
   src="tests/ujs2wasm/corpus/${name}.ujs"
   echo "-- compile $name via compile.mjs (no python3)"
-  log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
+  log=$("$_BOUND" 60 node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm")
   echo "$log"
   [ -f "$OUT/${name}.wasm" ] || { echo "FAIL: no wasm for $name"; exit 1; }
   magic=$(head -c 4 "$OUT/${name}.wasm" | od -An -tx1 | tr -d ' \n')
   [ "$magic" = "0061736d" ] || { echo "FAIL: $name not \\0asm ($magic)"; exit 1; }
   echo "$log" | grep -q '"bridge":"compiler_core.wasm"' \
     || { echo "FAIL: fold corpus expects compiler_core bridge, got: $log"; exit 1; }
-  got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm" | node -e \
+  got=$("$_BOUND" 30 node "$RUNNER" "$OUT/${name}.wasm" | node -e \
     'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
   want=$(node -e "const e=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8')); process.stdout.write(String(e[process.argv[2]]))" "$EXPECT" "$name")
   [ "$got" = "$want" ] || { echo "FAIL: fold $name got=$got want=$want"; exit 1; }
   if [[ -n "$TINYVM" ]]; then
-    perl -e 'alarm 30; exec @ARGV' "$TINYVM" module validate "$OUT/${name}.wasm" >/dev/null \
+    "$_BOUND" 30 "$TINYVM" module validate "$OUT/${name}.wasm" >/dev/null \
       || { echo "FAIL: tinyvm validate $name"; exit 1; }
   fi
   echo "OK $name fold=$got"
@@ -81,10 +83,10 @@ BOUNDS_EXPECT="$ROOT/tests/ujs2wasm/str_bounds_expect.json"
 for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long dict_key8; do
   want=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String(e.accept[process.argv[2]]))' "$BOUNDS_EXPECT" "$name")
   src="tests/ujs2wasm/corpus/${name}.ujs"
-  if ! perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >"$OUT/${name}_core.compile.log" 2>&1; then
+  if ! "$_BOUND" 60 node ujs/compile.mjs "$src" -o "$OUT/${name}.wasm" >"$OUT/${name}_core.compile.log" 2>&1; then
     echo "FAIL: core compile $name (expected accept)"; cat "$OUT/${name}_core.compile.log"; exit 1
   fi
-  if ! perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  if ! "$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
       node ujs/compile.mjs "$src" -o "$OUT/${name}_s0.wasm" >"$OUT/${name}_s0.compile.log" 2>&1; then
     echo "FAIL: stage0 compile $name (expected accept)"; cat "$OUT/${name}_s0.compile.log"; exit 1
   fi
@@ -93,10 +95,10 @@ for name in str_empty str_lit7 str_lit8 str_lit32 str_lit255 str_cat_long dict_k
   [ "$magic" = "0061736d" ] || { echo "FAIL: $name core not \\0asm"; exit 1; }
   [ "$magic0" = "0061736d" ] || { echo "FAIL: $name stage0 not \\0asm"; exit 1; }
   set +e
-  got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}.wasm" | node -e \
+  got=$("$_BOUND" 30 node "$RUNNER" "$OUT/${name}.wasm" | node -e \
     'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
   rec=$?
-  got0=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/${name}_s0.wasm" | node -e \
+  got0=$("$_BOUND" 30 node "$RUNNER" "$OUT/${name}_s0.wasm" | node -e \
     'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{process.stdout.write(String(JSON.parse(d.trim())))})')
   re0=$?
   set -e
@@ -110,12 +112,12 @@ for neg in str_lit256 str_escape str_nonascii str_nul dict_key9; do
   src="tests/ujs2wasm/neg/${neg}.ujs"
   rm -f "$OUT/${neg}.wasm" "$OUT/${neg}_s0.wasm"
   set +e
-  perl -e 'alarm 30; exec @ARGV' node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" >"$OUT/${neg}_core.err" 2>&1
+  "$_BOUND" 30 node ujs/compile.mjs "$src" -o "$OUT/${neg}.wasm" >"$OUT/${neg}_core.err" 2>&1
   ec=$?
   set -e
   require_parse_reject "core $neg" "$ec" "$OUT/${neg}_core.err" "$OUT/${neg}.wasm"
   set +e
-  perl -e 'alarm 30; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+  "$_BOUND" 30 env UJS_REQUIRE_COMPILER_WASM=1 \
     node ujs/compile.mjs "$src" -o "$OUT/${neg}_s0.wasm" >"$OUT/${neg}_s0.err" 2>&1
   ec0=$?
   set -e
@@ -201,17 +203,17 @@ grep -q 'FAIL: UJS_REQUIRE_TINYVM=1 but tinyvm not found' "$ISO/tv.out" \
 echo "OK iso real-gate: missing FAIL; ALLOW ignored; REQUIRE_TINYVM FAIL; shared intact"
 
 echo "-- default compile.mjs → compiler_core (product path)"
-log=$(perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs \
+log=$("$_BOUND" 60 node ujs/compile.mjs \
   tests/ujs2wasm/corpus/arith.ujs -o "$OUT/arith_core.wasm")
 echo "$log" | grep -q '"bridge":"compiler_core.wasm"' \
   || { echo "FAIL: default bridge should be compiler_core.wasm: $log"; exit 1; }
-got=$(perl -e 'alarm 30; exec @ARGV' node "$RUNNER" "$OUT/arith_core.wasm")
+got=$("$_BOUND" 30 node "$RUNNER" "$OUT/arith_core.wasm")
 [ "$got" = "7" ] || { echo "FAIL: default-core arith fold=$got"; exit 1; }
 echo "OK default core arith fold=7"
 
 echo "-- setidx_globals via compile.mjs (default core) + run_step (no python3)"
 # Exercise compiler_core → rebuild-main splice (stub NG patch), not stage0 alone.
-comp_json=$(perl -e 'alarm 60; exec @ARGV' env -u UJS_REQUIRE_COMPILER_WASM -u UJS_COMPILER \
+comp_json=$("$_BOUND" 60 env -u UJS_REQUIRE_COMPILER_WASM -u UJS_COMPILER \
   node ujs/compile.mjs \
   tests/ujs2wasm/step_corpus/setidx_globals.ujs -o "$OUT/setidx_globals.wasm")
 echo "$comp_json" | grep -q 'compiler_core.wasm' || {
@@ -222,7 +224,7 @@ node -e '
 const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
 require("fs").writeFileSync(process.argv[2], JSON.stringify(e.setidx_globals.globals));
 ' "$STEP_EXPECT" "$OUT/setidx_globals.g.json"
-got=$(perl -e 'alarm 30; exec @ARGV' node "$STEP_RUNNER" \
+got=$("$_BOUND" 30 node "$STEP_RUNNER" \
   "$OUT/setidx_globals.wasm" "$OUT/setidx_globals.meta.json" "$OUT/setidx_globals.g.json" 1)
 want=$(node -e 'const e=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(JSON.stringify(e.setidx_globals.want))' "$STEP_EXPECT")
 node -e '
@@ -237,8 +239,8 @@ console.log("OK setidx_globals", JSON.stringify(got));
 ' "$got" "$want"
 
 echo "-- sim.ujs compile + instantiate (no python3)"
-perl -e 'alarm 60; exec @ARGV' node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/sim.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 60 node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/sim.wasm" >/dev/null
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
 console.log("OK sim.ujs instantiate", fs.statSync(process.argv[1]).size, "B");
@@ -253,10 +255,10 @@ for f in ujs/uxe/ship/build-asteroid-pages.mjs ujs/uxe/ship/build-drone-pages.mj
 done
 # default compile.mjs (no UJS_COMPILER) under PATH trap → core
 TRAPBIN2="$OUT/bin"
-got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" \
+got=$("$_BOUND" 60 env PATH="$TRAPBIN2:$PATH" \
   node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/ship_sim.wasm")
 echo "$got" | grep -q '"bridge":"compiler_core.wasm"' || { echo "FAIL ship sim emit: $got"; exit 1; }
-got=$(perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" \
+got=$("$_BOUND" 60 env PATH="$TRAPBIN2:$PATH" \
   node ujs/compile.mjs ujs/web/game/drone.ujs -o "$OUT/ship_drone.wasm")
 echo "$got" | grep -q '"bridge":"compiler_core.wasm"' || { echo "FAIL ship drone emit: $got"; exit 1; }
 echo "OK ship emit compiler_core.wasm default (PATH without python3)"
@@ -274,12 +276,12 @@ echo "OK ship path free of web-build / ujs_full"
 echo "-- M3 seed: compiler.ujs → core → splice return N"
 [ -f ujs/core/compiler_rt_stub.wasm ] || { echo "FAIL: missing ujs/core/compiler_rt_stub.wasm"; exit 1; }
 [ -f ujs/core/compiler.ujs ] || { echo "FAIL: missing ujs/core/compiler.ujs"; exit 1; }
-perl -e 'alarm 60; exec @ARGV' env PATH="$TRAPBIN2:$PATH" UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env PATH="$TRAPBIN2:$PATH" UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/core/compiler.ujs -o "$OUT/compiler_core.wasm" >/dev/null
 printf 'return 42;\n' > "$OUT/ret42.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/ret42.ujs" -o "$OUT/ret42.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 const { instance } = await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
 const ex = instance.exports;
@@ -292,9 +294,9 @@ if (ex.tag_of_export(r) !== 2 || Number(ex.i64_of_export(r)) !== 42) {
 console.log("OK M3 seed return 42 via compiler.ujs");
 ' "$OUT/ret42.wasm"
 printf '// c\n  return 7;\n' > "$OUT/ret7.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/ret7.ujs" -o "$OUT/ret7.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 const { instance } = await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
 const ex = instance.exports;
@@ -307,9 +309,9 @@ if (ex.tag_of_export(r) !== 2 || Number(ex.i64_of_export(r)) !== 7) {
 console.log("OK M3 seed comment/ws return 7");
 ' "$OUT/ret7.wasm"
 printf 'let x = 42;\nreturn x;\n' > "$OUT/letx.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/letx.ujs" -o "$OUT/letx.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 const { instance } = await WebAssembly.instantiate(fs.readFileSync(process.argv[1]));
 const ex = instance.exports;
@@ -322,12 +324,12 @@ if (ex.tag_of_export(r) !== 2 || Number(ex.i64_of_export(r)) !== 42) {
 console.log("OK M3 let x=42; return x");
 ' "$OUT/letx.wasm"
 printf 'let a = 3;\nlet b = 4;\nreturn a * b + 1;\n' > "$OUT/arith.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/arith.ujs" -o "$OUT/arith.wasm" >/dev/null
 # body ≡ stage0
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/arith.ujs" -o "$OUT/arith_s0.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -350,11 +352,11 @@ console.log("OK M3 arith body≡stage0 run=13");
 ' "$OUT/arith_s0.wasm" "$OUT/arith.wasm"
 
 printf 'let i = 0;\nwhile (i < 3) {\n  i = i + 1;\n}\nreturn i;\n' > "$OUT/while.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/while.ujs" -o "$OUT/while.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/while.ujs" -o "$OUT/while_s0.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -376,11 +378,11 @@ if(Number(instance.exports.i64_of_export(r))!==3){console.error("FAIL while run"
 console.log("OK M3 while body≡stage0 run=3");
 ' "$OUT/while_s0.wasm" "$OUT/while.wasm"
 printf 'let x = 1;\nif (x == 1) {\n  x = 2;\n} else {\n  x = 3;\n}\nreturn x;\n' > "$OUT/iff.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/iff.ujs" -o "$OUT/iff.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/iff.ujs" -o "$OUT/iff_s0.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -404,11 +406,11 @@ console.log("OK M3 if/else body≡stage0 run=2");
 
 echo "-- M3 v5: list/len/index/SRC body≡stage0"
 printf 'let xs = list(2);\nxs[0] = 5;\nxs[1] = xs[0] + 1;\nreturn xs[1];\n' > "$OUT/listx.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/listx.ujs" -o "$OUT/listx.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/listx.ujs" -o "$OUT/listx_s0.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -432,11 +434,11 @@ console.log("OK M3 list/setidx body≡stage0 run=6");
 
 echo "-- M3 v6: SRC cmp + if-no-else + self-host stage2≡stage1"
 printf 'let x = 0;\nif (SRC[0] == 47) { x = 1; }\nreturn x;\n' > "$OUT/srccmp.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/srccmp.ujs" -o "$OUT/srccmp.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/srccmp.ujs" -o "$OUT/srccmp_s0.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -456,21 +458,21 @@ console.log("OK M3 SRC[i]==N body≡stage0");
 
 echo "-- M3 v7: === + f64 lit/arith/mix body≡stage0"
 printf 'let x = 0;\nif (x === 0) { x = 1; }\nreturn x;\n' > "$OUT/eq3.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/eq3.ujs" -o "$OUT/eq3.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/eq3.ujs" -o "$OUT/eq3_s0.wasm" >/dev/null
 printf 'let x = 1.5;\nx = x * 2.0 + 0.5;\nreturn x;\n' > "$OUT/f64a.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/f64a.ujs" -o "$OUT/f64a.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/f64a.ujs" -o "$OUT/f64a_s0.wasm" >/dev/null
 printf 'let i = 3;\nlet x = 0.0;\nx = i * 1.5;\nreturn x;\n' > "$OUT/f64m.ujs"
-perl -e 'alarm 30; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 30 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/compiler_core.wasm" "$OUT/f64m.ujs" -o "$OUT/f64m.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs "$OUT/f64m.ujs" -o "$OUT/f64m_s0.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -493,11 +495,11 @@ console.log("OK M3 === + f64 lit/arith/mix body≡stage0");
 ' "$OUT/eq3_s0.wasm" "$OUT/eq3.wasm" "$OUT/f64a_s0.wasm" "$OUT/f64a.wasm" "$OUT/f64m_s0.wasm" "$OUT/f64m.wasm"
 
 # stage1 = stage0(compiler.ujs); stage2 = stage1(compiler.ujs); bodies must match
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/core/compiler.ujs -o "$OUT/stage1.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 60 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/stage1.wasm" ujs/core/compiler.ujs -o "$OUT/stage2.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -516,11 +518,11 @@ console.log("OK M3 stage2≡stage1 mainBody", a.length);
 ' "$OUT/stage1.wasm" "$OUT/stage2.wasm"
 
 echo "-- M3 v10: sim.ujs body≡stage0"
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/web/game/sim.ujs -o "$OUT/sim_s0.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 60 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/stage1.wasm" ujs/web/game/sim.ujs -o "$OUT/sim_s1.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -539,11 +541,11 @@ console.log("OK M3 sim.ujs body≡stage0", a.length);
 ' "$OUT/sim_s0.wasm" "$OUT/sim_s1.wasm"
 
 echo "-- M3 v11: drone.ujs body≡stage0"
-perl -e 'alarm 60; exec @ARGV' env UJS_REQUIRE_COMPILER_WASM=1 \
+"$_BOUND" 60 env UJS_REQUIRE_COMPILER_WASM=1 \
   node ujs/compile.mjs ujs/web/game/drone.ujs -o "$OUT/drone_s0.wasm" >/dev/null
-perl -e 'alarm 60; exec @ARGV' node ujs/scripts/run-compiler-core.mjs \
+"$_BOUND" 60 node ujs/scripts/run-compiler-core.mjs \
   "$OUT/stage1.wasm" ujs/web/game/drone.ujs -o "$OUT/drone_s1.wasm" >/dev/null
-perl -e 'alarm 30; exec @ARGV' node --input-type=module -e '
+"$_BOUND" 30 node --input-type=module -e '
 import fs from "fs";
 function mainBody(path) {
   const u = fs.readFileSync(path);
@@ -564,7 +566,7 @@ console.log("OK M3 drone.ujs body≡stage0", a.length);
 if [[ -n "$TINYVM" ]]; then
   echo "-- tinyvm validate ship twins (sim/drone)"
   for w in "$OUT/sim_s0.wasm" "$OUT/sim_s1.wasm" "$OUT/drone_s0.wasm" "$OUT/drone_s1.wasm"; do
-    perl -e 'alarm 30; exec @ARGV' "$TINYVM" module validate "$w" >/dev/null \
+    "$_BOUND" 30 "$TINYVM" module validate "$w" >/dev/null \
       || { echo "FAIL: tinyvm validate $(basename "$w")"; exit 1; }
   done
   echo "OK tinyvm validate sim+drone"

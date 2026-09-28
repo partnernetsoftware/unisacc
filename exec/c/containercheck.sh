@@ -1,9 +1,11 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # One carried model package and two carried ISA cores, no external kernel.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 if [ "${MODEL_COM+x}" = x ]; then
     [ -n "$MODEL_COM" ] && [ -f "$MODEL_COM" ] && [ -x "$MODEL_COM" ] || {
         echo 'containercheck: MODEL_COM must name an executable candidate' >&2; exit 2;

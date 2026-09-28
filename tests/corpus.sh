@@ -21,7 +21,7 @@ KNOWN=$REPO/tests/corpus.knownfail
 if [ ! -d "$SRC" ]; then
     [ "${FETCH:-1}" = "1" ] || { echo "corpus absent (FETCH=0)"; exit 1; }
     echo "fetching c-testsuite into $DIR ..."
-    python3 "$REPO/tests/bound.py" 30 git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$DIR" \
+    bound 30 git clone -q --depth 1 https://github.com/c-testsuite/c-testsuite.git "$DIR" \
         || { echo "clone failed -- corpus not tested"; exit 1; }
 fi
 
@@ -50,7 +50,7 @@ if [ -z "${HOST_TARGET:-}" ]; then
 fi
 case $LIMIT in ''|*[!0-9]*) echo 'invalid LIMIT' >&2; exit 2;; esac
 [ "$LIMIT" -ge 1 ] && [ "$LIMIT" -le 60 ] || exit 2
-runlim() { python3 "$REPO/tests/bound.py" "$LIMIT" "$@"; }
+runlim() { bound "$LIMIT" "$@"; }
 compile_one() {
     if [ -n "$CORPUS_UA" ]; then
         runlim "$CORPUS_UA" -O2 -b "$HOST_TARGET" "$1" -o "$2"

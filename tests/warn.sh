@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # What the compiler warns about, and what it does not. [S-15 C4]
 #
 # Four warnings under -Wall: an unused local, a non-void function whose
@@ -25,7 +27,7 @@ ok=0; bad=0
 for f in tests/warn/*.c; do
     b=$(basename "$f" .c)
     cc -std=c99 -Wall -fsyntax-only "$f" > "$T/cc.out" 2>&1
-    perl -e 'alarm 60; exec @ARGV' "$UA" -Wall "$f" -c -o "$T/x.tape" > "$T/ua.out" 2>&1
+    "$_BOUND" 60 "$UA" -Wall "$f" -c -o "$T/x.tape" > "$T/ua.out" 2>&1
     kinds "$T/cc.out" > "$T/cc.k"; kinds "$T/ua.out" > "$T/ua.k"
     if [ ! -s "$T/cc.k" ]; then echo "  FAIL $b: cc -Wall gives none of the four kinds here"; bad=$((bad+1)); continue; fi
     if cmp -s "$T/cc.k" "$T/ua.k"; then ok=$((ok+1))
@@ -36,7 +38,7 @@ fp=0; n=0
 for f in corpus/c-testsuite/tests/single-exec/*.c; do
     b=$(basename "$f" .c); n=$((n+1))
     cc -std=c99 -Wall -fsyntax-only "$f" > "$T/cc.out" 2>&1
-    perl -e 'alarm 60; exec @ARGV' "$UA" -Wall "$f" -c -o "$T/x.tape" > "$T/ua.out" 2>&1
+    "$_BOUND" 60 "$UA" -Wall "$f" -c -o "$T/x.tape" > "$T/ua.out" 2>&1
     kinds "$T/cc.out" > "$T/cc.k"; kinds "$T/ua.out" > "$T/ua.k"
     extra=$(comm -13 "$T/cc.k" "$T/ua.k")
     if [ -n "$extra" ]; then fp=$((fp+1)); printf "  FALSE %-8s %s\n" "$b" "$(echo "$extra" | head -1)"; fi

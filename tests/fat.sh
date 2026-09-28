@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # One file, both architectures.  [A-28]
 #
 # A Mach-O universal binary is the standard multi-ISA container, and this host
@@ -11,7 +13,7 @@ DRIVE=${DRIVE:-built}
 [ "$(uname -s)" = "Darwin" ] || { echo "fat skipped (macOS only)"; exit 0; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0
-bound() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+bound() { "$_BOUND" 60 "$@"; }
 PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
 . "$(dirname "$0")/par.sh"
 # A: build and run both slices of every probe, PAR at a time.

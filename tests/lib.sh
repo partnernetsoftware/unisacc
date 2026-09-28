@@ -10,7 +10,7 @@
 #     270-image "divergence" that was a stale binary from another tree, so
 #     ua_ready also says where the binary came from when UA was inherited.
 #   * the watchdog.  macOS has no timeout(1); the idiom is
-#     `perl -e 'alarm N; exec @ARGV'` and it appears thirty times.  A step
+#     `tests/bound N CMD...`, which also cleans descendants.  A step
 #     without one hung this session for twenty minutes.
 #   * this host's target.  Seven suites carry the same `uname` case, and a
 #     suite that gets it wrong silently tests a target it cannot run.
@@ -46,7 +46,8 @@ ua_ready() {
 }
 
 # bound N cmd... -- run with a hard limit.  macOS has no timeout(1).
-bound() { local n=$1; shift; perl -e 'alarm shift; exec @ARGV' "$n" "$@"; }
+_BOUND_HELPER=$("$_LIB_R/tests/bound" --helper) || exit 2
+bound() { local n=$1; shift; "$_BOUND_HELPER" "$n" "$@"; }
 
 # host_target -- echoes this machine's target, or nothing when it is not one
 # of the six.  A caller that gets "" must SKIP, not guess.

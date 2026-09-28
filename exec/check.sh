@@ -1,13 +1,15 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # E0 check: build exec.c with cc and with unisacc, T1 the loaded table against
 # gen.py's delta_ref on its whole domain, then run every case through both
-# builds and ref.py.  Every step is bounded (perl alarm), including the
+# builds and ref.py.  Every step is bounded (shared watchdog), including the
 # programs built here.  UA = a unisacc host binary, default: build it with
 # ../tests/build_ref.sh into build/.
 set -u
 cd "$(dirname "$0")"
 B=build; mkdir -p $B/cases
-bound() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+bound() { "$_BOUND" "$@"; }
 UA=${UA:-$B/ua_ref}
 if [ ! -x "$UA" ]; then
   (cd .. && bound 60 ./tests/build_ref.sh exec/$B/ua_ref.c exec/$B/ua_ref) || exit 1

@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # E1 on the C executor: sizes and speed.  Needs exec/lex/run.sh gen (the
 # delta, /tmp/ua_ref, /tmp/ua_pre).  Every step bounded, the built programs too.
 #   executor __text: exec.c built with cc -Os and with unisacc (/tmp/ua_ref)
@@ -10,7 +12,7 @@
 #     reference = lex() only (UA_LEXREP; tokens into arrays, no printing).
 set -u
 cd "$(dirname "$0")/../.."
-bound() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+bound() { "$_BOUND" "$@"; }
 B=/tmp/e1x; mkdir -p $B
 bound 50 python3 exec/lex/tbl.py /tmp/e1delta.json $B/e1.tbl || exit 1
 bound 30 cc -std=c99 -Os -w -o $B/exec_cc exec/exec.c || exit 1
@@ -19,7 +21,7 @@ for x in cc ua; do
   printf 'exec_%s __text ' $x; bound 10 size -m $B/exec_$x | awk '/Section __text/ {print $3}'
 done
 echo "table bytes $(wc -c < $B/e1.tbl)"
-env UA_LEXIN=$B/self.i perl -e "alarm 10; exec @ARGV" /tmp/ua_pre -dump-tokens unisacc.c
+env UA_LEXIN=$B/self.i "$_BOUND" 10 /tmp/ua_pre -dump-tokens unisacc.c
 echo "input bytes $(wc -c < $B/self.i)"
 bound 55 python3 - "$B" <<'EOF'
 import os, subprocess, sys, time, statistics
@@ -27,7 +29,7 @@ B = sys.argv[1]
 def wall(argv, env=None):
     e = dict(os.environ); e.update(env or {})
     a = time.perf_counter()
-    subprocess.run(['perl', '-e', 'alarm 15; exec @ARGV'] + argv, stdout=subprocess.DEVNULL, env=e, check=True)
+    subprocess.run([sys.executable, 'tests/bound.py', '15'] + argv, stdout=subprocess.DEVNULL, env=e, check=True)
     return time.perf_counter() - a
 n = os.path.getsize(B + '/self.i')
 def med(f, N):

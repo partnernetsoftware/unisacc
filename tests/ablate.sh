@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Is each stage's answer USED? [A-36]
 #
 # stages.sh proves a stage is ASKED.  That is weaker than it looks: an answer
@@ -36,7 +38,7 @@ images() {   # images <tag> -> one line per probe/target: sha or REFUSED
             # hangs on every probe -- waiting out 42 watchdogs took minutes
             # -- so after the first, the rest are marked without running.
             if [ "$hung" = 1 ]; then echo "$f $t REFUSED"; continue; fi
-            perl -e 'alarm 5; exec @ARGV' python3 -m unisa compile "$f" \
+            "$_BOUND" 5 python3 -m unisa compile "$f" \
                    -o "$T/img" --target "$t" --drive built >/dev/null 2>&1
             rc=$?
             if [ $rc -eq 0 ]; then

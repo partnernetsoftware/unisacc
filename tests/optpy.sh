@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Both front ends optimise alike [H1] [H2]: the C front end's -O0 tape, run
 # through unisa/opt.py, is the C front end's -O1 / -O2 tape byte for byte --
 # on every probe and on the compiler itself.  A decision the optimiser
@@ -8,7 +10,7 @@
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
-exec perl -e 'alarm 55; exec @ARGV' python3 - "$UA" <<'PY'
+exec "$_BOUND" 55 python3 - "$UA" <<'PY'
 import subprocess, sys, glob
 sys.path.insert(0, '.')
 from unisa.opt import optimise

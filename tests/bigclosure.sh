@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The closure on the one input big enough to matter: the compiler itself.
 # [A-42] [S-13]
 #
@@ -20,11 +22,11 @@ HOSTT=$(host_target)
 same=0; diff=0
 for t in $TARGETS; do
     tt=$(echo "$t" | tr / _)
-    perl -e 'alarm 600; exec @ARGV' "$UA" unisacc.c -t "$t" > "$T/tape.$tt" 2>/dev/null \
+    "$_BOUND" 60 "$UA" unisacc.c -t "$t" > "$T/tape.$tt" 2>/dev/null \
         || { echo "  FAIL $t: the front end did not finish"; diff=$((diff+1)); continue; }
-    perl -e 'alarm 1200; exec @ARGV' python3 -m unisa compile "$T/tape.$tt" \
+    "$_BOUND" 60 python3 -m unisa compile "$T/tape.$tt" \
         --from-tape -o "$T/py.$tt" --target "$t" --drive built >/dev/null 2>&1
-    perl -e 'alarm 600; exec @ARGV' "$UA" unisacc.c -b "$t" > "$T/ua.$tt" 2>/dev/null
+    "$_BOUND" 60 "$UA" unisacc.c -b "$t" > "$T/ua.$tt" 2>/dev/null
     if [ ! -s "$T/ua.$tt" ]; then
         echo "  FAIL $t: the C back end wrote nothing"; diff=$((diff+1)); continue
     fi
@@ -42,7 +44,7 @@ if [ -n "$HOSTT" ]; then
     if [ -s "$T/ua.$tt" ]; then
         cp "$T/ua.$tt" "$T/self"; chmod +x "$T/self"
         command -v codesign >/dev/null && codesign -f -s - "$T/self" >/dev/null 2>&1
-        got=$(perl -e 'alarm 120; exec @ARGV' "$T/self" -run examples/hello.c 2>&1)
+        got=$("$_BOUND" 60 "$T/self" -run examples/hello.c 2>&1)
         if [ "$got" = "hello from C99" ]; then ranok=1
         else ranwrong=1; echo "  the self-compiled compiler ran and said [$got]"; fi
     fi

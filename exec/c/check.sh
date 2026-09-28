@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # exec/c/check.sh DELTA.json FILE... -- the C executor (exec/c/run.c) against
 # the Python one (exec/pp/sim.py through exec/parse/compare.py) on E3.
 # Each file must get the same verdict:
@@ -16,7 +18,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 D=$1; shift
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "exec/c: cc failed"; exit 1; }
 b 60 python3 exec/c/tbl.py "$D" "$T/d.tbl" || { echo "exec/c: tbl.py failed"; exit 1; }
 E3V=1 b 60 python3 exec/parse/compare.py "$D" "$@" > "$T/py" 2>&1; prc=$?

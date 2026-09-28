@@ -1,11 +1,13 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The same network/action runtime compiled by cc and by unisacc.
 # Models are freshly constructed; every stage's bytes and status must agree.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 PART=${NATIVE_PART:-all}
 case $PART in
  all|stages) INPUTS="examples/hello.c examples/fib.c tests/c/b_toknames.c exec/c/run.c";;

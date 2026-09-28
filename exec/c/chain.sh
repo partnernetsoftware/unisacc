@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # exec/c/chain.sh FILE... -- source to tape through ONE generic executor
 # (exec/c/run.c) and three threshold networks: E2 (preprocess), E1 (lex, typed), E3
 # (parse).  Each stage runs as its own process; the reference's tape is only
@@ -22,7 +24,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 UA=${UA:-/tmp/ua_ref}; . "$R/tests/lib.sh"; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "chain: cc failed"; exit 1; }
 b 60 python3 exec/pp/gen.py "$T/e2.json" >/dev/null 2>&1 || { echo "chain: E2 gen failed"; exit 1; }
 b 60 python3 exec/lex/gen.py --typed "$T/e1.json" >/dev/null 2>&1 || { echo "chain: E1 gen failed"; exit 1; }

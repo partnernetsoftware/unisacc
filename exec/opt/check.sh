@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # exec/opt/check.sh FILE... -- E4 on the generic C executor, at -O1 and -O2: for
 # each file and level, the reference's -O0 tape through that level's E4 table
 # must equal the reference's tape at that level.  A failing tool, a stage that does not accept, or a differing tape fails.
@@ -8,7 +10,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 UA=${UA:-/tmp/ua_ref}; . "$R/tests/lib.sh"; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "e4: cc failed"; exit 1; }
 for L in 1 2; do
     b 60 python3 exec/opt/gen.py "$T/e4_$L.json" $L 2>/dev/null || { echo "e4: gen -O$L failed"; exit 1; }

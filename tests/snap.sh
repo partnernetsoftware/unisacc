@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Run suites on a FROZEN copy of the working tree, so the tree can keep
 # changing while they run.  [owner, 2026-09-25: tests in the background,
 # design in the foreground]
@@ -27,7 +29,7 @@ for t in "$@"; do
     *) cmd="./tests/$t"; cmd="${cmd%% *}.sh ${t#* }"; [ "$t" = "${t%% *}" ] && cmd="./tests/$t.sh"; name=${t%% *};;
     esac
     s=$(date +%s)
-    out=$(perl -e 'alarm 58; exec @ARGV' bash -c "$cmd" 2>&1); r=$?
+    out=$("$_BOUND" 58 bash -c "$cmd" 2>&1); r=$?
     [ $r -ne 0 ] && rc=1
     printf "%-14s rc=%-3s %3ss :: %s\n" "$name" "$r" "$(( $(date +%s)-s ))" "$(printf '%s\n' "$out" | grep -v '^$' | tail -1)"
     [ $r -ne 0 ] && printf '%s\n' "$out" | grep -E "FAIL|DIFF|WRONG|REGRESSION|STALE" | head -5 | sed 's/^/    /'

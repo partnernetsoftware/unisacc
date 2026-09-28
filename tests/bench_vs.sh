@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Side-by-side with other C compilers, for Paper A's comparison table.
 #
 #   TCC=/path/to/tcc/build-dir tests/bench_vs.sh
@@ -16,7 +18,7 @@ cat tests/refshim.h unisacc.c tests/reffoot.h > "$T/sr.c"
 best() {   # best of 3 wall-clock seconds for "$@"
     local b=999 t k
     for k in 1 2 3; do
-        /usr/bin/time -p perl -e 'alarm 30; exec @ARGV' "$@" >/dev/null 2>"$T/tm" || true
+        /usr/bin/time -p "$_BOUND" 30 "$@" >/dev/null 2>"$T/tm" || true
         t=$(awk '/^real/{print $2}' "$T/tm")
         b=$(echo "$t $b" | awk '{print ($1<$2)?$1:$2}')
     done; echo "$b"

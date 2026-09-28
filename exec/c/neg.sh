@@ -1,11 +1,13 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # exec/c/neg.sh -- the error paths of the two executors, which no real table
 # reaches: each tiny delta must end the same way in exec/c/run.c and in
 # exec/pp/sim.py (bad table / unreadable file: 2; reject: 1).
 set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 b 60 "${EXEC_CC:-cc}" -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "neg: cc failed"; exit 1; }
 printf 'x' > "$T/in"
 ok=0; bad=0

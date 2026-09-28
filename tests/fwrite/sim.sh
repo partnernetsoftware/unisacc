@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # fwrite, SIMULATED: tests the CURRENT fwrite function body from
 # include/stdio.h, as compiled by each front end (native executable, -run,
 # Python --drive built), against a scripted __write shim.
@@ -24,7 +26,7 @@ UA=${1:-/tmp/ua_ref}
 D=$(cd "$(dirname "$0")" && pwd); R=$(cd "$D/../.." && pwd)
 H=${2:-$R/include/stdio.h}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 
 awk '
   !on && /^static long fwrite\(/ { on = 1 }

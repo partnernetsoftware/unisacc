@@ -1,10 +1,12 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Host-side Windows binding check; native runs are opt-in winmemoryrun.py.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 ARCH=${1:-arm64}
 case $ARCH in arm64) FLAG=--arm64; ENCODER=arm.py;; x86_64) FLAG=; ENCODER=gen.py;; *) exit 2;; esac
 b cc -O2 exec/c/run.c -o "$T/run"

@@ -1,11 +1,13 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Real compiler source through three deltas, one generic C executor.
 # Python generates transition tables; it does not process the source at runtime.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b cc -O2 -o "$T/run" exec/c/run.c
 b python3 exec/pp/gen.py "$T/pp.json" > "$T/gen.log" 2>&1
 b python3 exec/lex/gen.py --typed "$T/lex.json" >> "$T/gen.log" 2>&1

@@ -1,0 +1,44 @@
+#!/bin/sh
+# Native test watchdog. Cold cc builds are test infrastructure only.
+set -eu
+case "$0" in
+    */*) directory=${0%/*} ;;
+    *) directory=. ;;
+esac
+here=$(CDPATH= cd -- "$directory" && pwd)
+print_helper=0
+if [ "${1-}" = --helper ]; then print_helper=1; shift; fi
+compiler=$(command -v "${CC:-cc}")
+arch=$(uname -m)
+# System openssl avoids Homebrew's first-launch scan on macOS.
+if [ -x /usr/bin/openssl ]; then hashcmd=/usr/bin/openssl; else hashcmd=openssl; fi
+digest=$({ printf '%s\n' "$compiler" "$arch"; cat "$here/bound.c"; } | "$hashcmd" dgst -sha256)
+key=${digest##* }
+case "$key" in *[!0123456789abcdef]*|'') echo 'bound: invalid cache digest' >&2; exit 2;; esac
+cache=${BOUND_CACHE:-${TMPDIR:-/tmp}/unisacc-bound-$(id -u)}
+mkdir -p "$cache"
+bin=$cache/$key
+if [ ! -x "$bin" ]; then
+    lock=$bin.lock
+    waited=0
+    while ! mkdir "$lock" 2>/dev/null; do
+        if [ -x "$bin" ]; then
+            if [ "$print_helper" = 1 ]; then printf '%s\n' "$bin"; exit 0; fi
+            exec "$bin" "$@"
+        fi
+        waited=$((waited + 1))
+        if [ "$waited" -ge 10 ]; then echo 'bound: cache build lock timed out' >&2; exit 2; fi
+        sleep 1
+    done
+    temporary=$cache/.$key.$$
+    trap 'rm -f "$temporary"; rmdir "$lock" 2>/dev/null || :' EXIT HUP INT TERM
+    if [ ! -x "$bin" ]; then
+        python3 "$here/bound.py" 55 "$compiler" -std=c99 -O2 -Wall -Wextra "$here/bound.c" -o "$temporary"
+        chmod 755 "$temporary"
+        mv -f "$temporary" "$bin"
+    fi
+    rmdir "$lock"
+    trap - EXIT HUP INT TERM
+fi
+if [ "$print_helper" = 1 ]; then printf '%s\n' "$bin"; exit 0; fi
+exec "$bin" "$@"

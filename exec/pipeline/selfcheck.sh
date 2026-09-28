@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Current compiler source through six deltas to the selected target image.
 # The output compiles the existing C compiler; it is not E7 product adoption.
 set -eu
@@ -6,7 +8,7 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 TARGET=${TARGET:-lnx/x86_64}; export TARGET
 UA=${UA:-/tmp/ua_ref}; . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b ./exec/pipeline/elf.sh "$T" unisacc.c > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
 # All target predefines have value 1; other platform/architecture names
 # must be absent. Exercise the generated E2 and the product -E independently.

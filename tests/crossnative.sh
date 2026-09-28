@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Execute the emitted images on targets that are NOT this host, using local
 # Linux VMs.  [A-27]
 #
@@ -92,7 +94,7 @@ run_windows() {
         echo "  skip $target ($vm not started)"; return 0; }
     # status can say `started` for a machine that is going down, or whose
     # guest agent is not up yet: only an answered command counts
-    perl -e 'alarm 20; exec @ARGV' "$UTM" exec "$vm" --cmd cmd.exe -- /c echo up \
+    "$_BOUND" 20 "$UTM" exec "$vm" --cmd cmd.exe -- /c echo up \
         >/dev/null 2>&1 || { echo "  skip $target ($vm agent not answering)"; return 0; }
     t=$(date +%s)$RANDOM
     Z='C:\u\z'"$t"'.txt'; Y='C:\u\y'"$t"'.txt'

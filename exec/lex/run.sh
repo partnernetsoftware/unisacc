@@ -10,7 +10,7 @@
 set -u
 cd "$(dirname "$0")/../.."
 . exec/stamp.sh
-B="perl -e alarm(58);exec(@ARGV)"
+B="tests/bound 58"
 D=$X/e1delta.json
 export E1REF=$X/ua_ref E1PRE=$X/ua_pre
 ready() {

@@ -54,7 +54,7 @@ def fresh(out, cmd, inputs):
 
 
 def refs():
-    b = ["perl", "-e", "alarm(58);exec(@ARGV)"]
+    b = [sys.executable, os.path.join(ROOT, "tests", "bound.py"), "58"]
     src = subprocess.run(["sh", "-c", '. exec/stamp.sh; echo $REFSRC'], cwd=ROOT,
                          capture_output=True, text=True).stdout.split()
     r, e = fresh(os.path.join(X, "ua_ref"), b + ["./tests/build_ref.sh", os.path.join(X, "ua_ref.c"),

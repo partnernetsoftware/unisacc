@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The self-hosting GAP, as a ratchet.  [A-29]
 #
 # `bootstrap.sh` proves B = C = U -- unisacc reproduces itself exactly.  That
@@ -24,7 +26,7 @@ T=$(scratch)
 # 10s is generous on real hardware and not enough in an emulated guest,
 # where a program that compiles fine looks like a refusal -- which reads as
 # a REGRESSION here, because this suite is a ratchet.
-try() { perl -e "alarm ${TRY_ALARM:-10}; exec @ARGV" "$UA" "$1" -c >/dev/null 2>&1; }
+try() { _try_seconds=${TRY_ALARM:-10}; [ "$_try_seconds" -le 60 ] || _try_seconds=60; "$_BOUND" "$_try_seconds" "$UA" "$1" -c >/dev/null 2>&1; }
 
 count() {           # count <tag> <file...>  -> accepted, listed in $T/got
     tag=$1; shift

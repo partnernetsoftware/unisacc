@@ -1,9 +1,11 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-perl -e 'alarm 60; exec @ARGV' python3 - "$UA" "$T" <<'PYTEST'
+"$_BOUND" 60 python3 - "$UA" "$T" <<'PYTEST'
 import subprocess,sys,pathlib
 ua,tmp=sys.argv[1:]; prefix=(['sh'] if ua.endswith('.com') else [])+[ua]
 forms=['return sizeof(*p);','return sizeof(struct S);','static int n=sizeof(struct S);return n;']

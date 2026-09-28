@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Room to grow.  [J-scale]
 #
 # 1. Headroom: the compiler's own source and tape against its capacity
@@ -19,7 +21,7 @@ half() {   # half <what> <used> <limit>
     else bad=$((bad+1)); printf "  FAIL %-26s %9s of %9s -- over half: raise the limit\n" "$1" "$2" "$3"; fi
 }
 half "source (MAXSRC)" "$(wc -c < unisacc.c | tr -d ' ')" "$(cap MAXSRC)"
-tape=$(perl -e 'alarm 30; exec @ARGV' "$UA" unisacc.c -t osx/arm64 2>/dev/null)
+tape=$("$_BOUND" 30 "$UA" unisacc.c -t osx/arm64 2>/dev/null)
 half "tape text (MAXOUT)" "$(printf '%s' "$tape" | wc -c | tr -d ' ')" "$(cap MAXOUT)"
 half "tape lines (OPT_MAXL)" "$(printf '%s\n' "$tape" | wc -l | tr -d ' ')" "$(cap OPT_MAXL)"
 half "tape instructions (BK_MAXI)" "$(printf '%s\n' "$tape" | grep -c '^  ')" "$(cap BK_MAXI)"
@@ -54,7 +56,7 @@ PY
 )
 printf "  generated %s bytes, %s functions\n" "$(wc -c < "$T/big.c" | tr -d ' ')" "$N"
 s=$(date +%s)
-got=$(cd "$T" && perl -e 'alarm 55; exec @ARGV' "$UA" -O2 big.c -run 2>&1); rc=$?
+got=$(cd "$T" && "$_BOUND" 55 "$UA" -O2 big.c -run 2>&1); rc=$?
 t=$(( $(date +%s) - s ))
 if [ $rc -eq 0 ] && [ "$got" = "$want" ]; then ok=$((ok+1)); printf "  ok   %-26s %ss\n" "large program at -O2" "$t"
 else bad=$((bad+1)); printf "  FAIL %-26s rc=%s got [%s] want [%s]\n" "large program at -O2" "$rc" "$(printf '%s' "$got" | head -c 80)" "$want"; fi

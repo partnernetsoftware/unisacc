@@ -1,10 +1,12 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Fresh models and product-shaped driver checks. Every inner run <=60 s.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) echo 'unsupported test host' >&2; exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 TARGET=$OS/$ARCH; export TARGET

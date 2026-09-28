@@ -1,11 +1,13 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # E0 artefact ledger: executor machine-code bytes (text), file bytes, delta
 # table bytes, speed.  Run check.sh first (it builds build/exec_cc, exec_ua).
 # Speed = in-process runs/sec from `exec -r N` minus `exec -r 1`, median of 5.
 set -u
 cd "$(dirname "$0")"
 B=build
-bound() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+bound() { "$_BOUND" "$@"; }
 for x in cc ua; do
   [ -x $B/exec_$x ] || { echo "run check.sh first"; exit 1; }
   echo "== exec_$x"
@@ -20,7 +22,7 @@ import subprocess, sys, time, statistics
 B = sys.argv[1]
 def t(exe, inp, n):
     a = time.perf_counter()
-    subprocess.run(['perl', '-e', 'alarm 20; exec @ARGV', exe, '-r', str(n), 'toy/toy.tbl', inp],
+    subprocess.run([sys.executable, '../tests/bound.py', '20', exe, '-r', str(n), 'toy/toy.tbl', inp],
                    stdout=subprocess.DEVNULL, check=True)
     return time.perf_counter() - a
 for x in ('cc', 'ua'):

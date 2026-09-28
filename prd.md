@@ -5234,6 +5234,17 @@ parse2 function/global/local_control 去重（本session直改主树，TDD验证
 
 用户纠正（2026-09-28）：上一示例交付只由unisacc分析、由system cc构建采集器，不满足“用unisacc.com做真实事情”。该方案撤回为未达目标；去除运行时cc采集路径，补实际程序可用的系统入口后由unisacc编译的程序主动采集，不以run.sh提示代替功能。已有快照对拍仅证明分析器行为，不证明程序自行采集能力。
 
+
+### 动态系统调用桥（2026-09-28，用户授权，进行中）
+
+用户明确允许采用更好的方案，`-run`是优先落点而非范围上限。先以四个libSystem dl入口、通用六整数参数ABI桥和libffi显式类型向量补能力；原生与内存执行共用声明。系统示例必须由unisacc编译的程序自己采集，不再运行cc采集器。绑定、编码、FFI运行时分文件并行；现阶段仅macOS实测，不把可调用系统API扩大为全部libc已经转发。FILE/分配器/变参家族须保持一致，避免混用不同ABI的对象。
+
 门禁慢因与修正（主人"172项太慢，一定有问题"，2026-09-28）：主人手动停止的那轮队列并非卡住：08:34:36–08:46:56共12.3分钟完成83项、0失败，窗口内槽位利用率87%，term.sh每次约0.4秒、plan/fingerprint约0.1秒，窗口间开销可忽略。慢在套件自身重复工作：约45–50个套件（memorycheck/multicheck/compilercheck/bindingcheck族）各自调用exec/c/compilerpack.py在临时目录重建一个编译器包，其中token/located警告lex/parse/errorparse/units/每目标located pp共7个模型每次都从Python生成器重新构造（实测17.6秒/次），而阶段模型早已走exec/pipeline/models.py的内容哈希缓存（1.8秒）。另：CLAUDE.md推荐的队列命令未设MODEL_COM时exec-container会整体重建编译器（约45秒），release.sh路径则要求显式MODEL_COM。
 决定：compilerpack的附加模型走同一缓存基址（UNISACC_MODEL_CACHE，默认$TMPDIR/unisacc-model-cache），键=models.py的文件闭包（抽出为closure()共用）+Python版本+脚本+参数+生成器可导入源码目录（exec/pp、lex、parse、parse2、unisa及finite_rules/tbl/net）中environ/getenv旁出现的全部环境名的有效值（新导入自动覆盖；各检查器的套件设置不进键）。每键flock、临时目录构造后原子rename、命中时逐文件sha256复核manifest。出货构建buildcompiler.sh传--no-model-cache，产物路径不变。
 验证：同一输入四种方式（HEAD版、冷缓存、热缓存、--no-model-cache）产出compiler.pkg逐字节相同（f89fd02f…）；热缓存17.6→0.1秒；篡改缓存条目被复核发现并重建、输出相同；改一个生成器源文件键即改变、复原即复原。实测套件：exec-driver-resources 28.3→7秒，exec-multiwarn 27.2→4秒（首轮冷构造后）。
+
+用户纠正测试工具（2026-09-28）：当前执行不再使用Perl看门狗；沿用已有Python测试依赖统一有界调度、返回码及所属进程树清理。保留每步60秒上限，不把测试调度器放进产品编译路径。
+
+看门狗性能纠偏（2026-09-28）：逐探针 Python 包装增加解释器启动成本，difftest_o 的双层 Python 尤其重复。保持不使用 Perl，热路径改为一次构建的原生 POSIX 看门狗；每个冻结套件起点解析 helper 一次，后续直接调用。Python 仅用于外层队列和冷构建限时。保留原始 wait status，不能混淆正常 exit(142) 与超时。前后同分片实测后再确认收益；macOS 已重新父化的完全脱离子进程仍有追踪限制，Linux subreaper 尚待实跑。
+
+原生看门狗验收：本机 macOS arm64，同参考二进制、SHARD=1/16、PAR=2、预热参考缓存，difftest_o 交替3轮均27 agree/0 wrong/0 refuse。bd8622e双Python热路径中位数1.4577秒，直接native中位数0.8309秒（-43.0%）；100次true的3轮中位数native0.5095秒、Python3.6688秒。此为分片/启动成本，不外推全门禁。父独立boundcheck验证两种工具正常退出0/2/142、信号和nested setsid超时清理；native额外核对原始waitstatus。67个原生入口shell语法通过，staticinit9项、exec/c/neg5项通过。全部时间约束不超过60秒。

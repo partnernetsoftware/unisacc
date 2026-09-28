@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # ujs2wasm step suite — path B host inject + run_step fold vs jtape.
 #
 #   ./tests/ujs2wasm_step.sh
@@ -15,10 +17,10 @@ OUT="${TMPDIR:-/tmp}/ujs2wasm-step.$$"
 mkdir -p "$OUT"
 trap 'rm -rf "$OUT"' EXIT
 
-# macOS has no timeout(1); perl alarm is the local convention.
+# Bound the command and all descendants with the shared watchdog.
 run_alarm() {
   local secs="$1"; shift
-  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  "$_BOUND" "$secs" "$@"
 }
 
 echo "== ujs2wasm_step ABI surface =="
@@ -143,7 +145,7 @@ sys.exit(1 if bad else 0)
 PY
 
 echo "== ujs2wasm_step sim.ujs (small N, multi-step fold) =="
-run_alarm 120 python3 - <<PY
+run_alarm 60 python3 - <<PY
 import json, subprocess, sys
 from pathlib import Path
 from ujs.construct.front.compile import compile_src
@@ -227,7 +229,7 @@ print("sim fold ok", "N", N, "steps", STEPS, meta["bytes"], "B",
 PY
 
 echo "== ujs2wasm_step sim.ujs (ship N=480, multi-step fold) =="
-run_alarm 180 python3 - <<PY
+run_alarm 60 python3 - <<PY
 import json, subprocess, sys
 from pathlib import Path
 from ujs.construct.front.compile import compile_src

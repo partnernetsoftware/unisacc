@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Development route: C source -> ELF, Mach-O or PE, six deltas on one generic C executor.
 # Python constructs models only; after that no Python stage processes a source.
 # NETWORK=0 selects the reference lookup-table execution; default is inference.
@@ -10,7 +12,7 @@ TARGET=${TARGET:-lnx/x86_64}
 case $TARGET in lnx/x86_64|lnx/arm64|osx/x86_64|osx/arm64|win/arm64|win/x86_64) ;; *) echo "unsupported target: $TARGET" >&2; exit 2;; esac
 OUT=$1; shift
 mkdir -p "$OUT"; OUT=$(cd "$OUT" && pwd)
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b python3 exec/pipeline/models.py "$OUT" "$TARGET" "${NETWORK:-1}" "${EXEC_CC:-cc}"
 case $TARGET in win/*) IMAGE=pe;; osx/*) IMAGE=macho;; *) IMAGE=elf;; esac
 case ${NETWORK:-1} in 0) MODEL=tbl;; 1) MODEL=net;; *) exit 2;; esac

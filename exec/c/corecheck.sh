@@ -1,10 +1,12 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The kernel is a separate C translation unit, not an estimate obtained by
 # subtracting unrelated executables. No source edits or cached model answers.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b env CORE_EXTERNAL=1 python3 exec/c/netcheck.py
 if [ "$(uname -s)" = Darwin ]; then
     for arch in arm64 x86_64; do

@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # exec/enc/check.sh -- E5's slices: the x86_64 encoder delta on the hand-written
 # fixtures, against unisa/assemble.py + emit_x86 through exec/enc/ref.py (which
 # fails unless every instruction encodes).  Both executors must agree with it;
@@ -7,7 +9,7 @@
 set -u
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 D=exec/enc
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "e5: cc failed"; exit 1; }
 b 60 python3 $D/gen.py "$T/d.json" 2>/dev/null || { echo "e5: gen failed"; exit 1; }

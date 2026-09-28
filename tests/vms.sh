@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The release gate's machines, up and down.  [S-15 F1]
 #
 #   tests/vms.sh up      start what crossnative needs and is not running,
@@ -17,7 +19,7 @@ STATE=${VMS_STATE:-${TMPDIR:-/tmp}/unisacc-vms.started}
 LIMA_VMS="${VM_X86:-minicon-lnx-x86_64} ${VM_ARM:-default}"
 UTM=/Applications/UTM.app/Contents/MacOS/utmctl
 WINVM=${WINVM:-minicon-win-arm-64}
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }   # b SECONDS cmd...
+b() { "$_BOUND" "$@"; }   # b SECONDS cmd...
 
 lima_status() { limactl list --format '{{.Name}} {{.Status}}' 2>/dev/null | awk -v n="$1" '$1==n{print $2}'; }
 

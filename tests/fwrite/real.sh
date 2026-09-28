@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # REAL fwrite probe: `ulimit -f 1`, SIGXFSZ ignored, 3000 B then 5000 B.
 # Runs the program built by the reference compiler natively, through -run,
 # and through the Python front end; passes when none of them claims both
@@ -7,7 +9,7 @@
 UA=${1:-/tmp/ua_ref}
 D=$(cd "$(dirname "$0")" && pwd); R=$(cd "$D/../.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+b() { "$_BOUND" "$@"; }
 b 30 "$UA" "$D/real.c" -b osx/arm64 -o "$T/real" >/dev/null 2>&1 || { echo "FAIL build"; exit 1; }
 bad=0
 ulimit -f 1

@@ -1,11 +1,13 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Static initialisation must not refer to a live automatic object.
 # Compilation only: never run the invalid input, even if a compiler accepts it.
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 10; exec @ARGV' "$@"; }
+b() { "$_BOUND" 10 "$@"; }
 cat > "$T/read.c" <<'SRC'
 int f(int k) { int n = k; static int m = n; return m; }
 int main(void) { return f(3); }

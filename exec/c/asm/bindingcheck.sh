@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Real unisacc ABI, carried library and assembly kernel, not a host-C bridge.
 set -eu
 R=$(cd "$(dirname "$0")/../../.." && pwd); cd "$R"
@@ -7,7 +9,7 @@ R=$(cd "$(dirname "$0")/../../.." && pwd); cd "$R"
 ARCH=${CORE_ASM_ARCH:-$(uname -m)}
 case $ARCH in arm64|x86_64) ;; *) exit 2;; esac
 T=$(mktemp -d);trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b python3 exec/c/asm/blob.py "$ARCH" "$T/kernel.blob"
 mkdir "$T/kernels"
 for ISA in arm64 x86_64; do b python3 exec/c/asm/blob.py "$ISA" "$T/kernels/$ISA"; done

@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Native-memory compilation: model bytes against retained bk_run, then execute.
 # POSIX host only here; cross-image gates retain all six file targets.
 set -eu
@@ -9,7 +11,7 @@ case $KIND in all|cc|ua|asm) ;; *) echo 'unknown DRIVER_KIND' >&2; exit 2;; esac
 export DRIVER_KIND
 case ${MEMORY_SHARD:-all} in all|1/3|2/3|3/3) ;; *) echo 'unknown MEMORY_SHARD' >&2; exit 2;; esac
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) echo 'unsupported memory-check host' >&2; exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 HOST_ARCH=$ARCH

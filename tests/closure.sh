@@ -1,4 +1,6 @@
 #!/bin/bash
+_BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # The self-hosting closure, byte for byte. [S-7 item 7]
 #
 # unisacc now carries its own back end (src/back_*.c): `unisacc FILE -b
@@ -43,7 +45,7 @@ for f in "$@"; do
         # 0.5-0.9 s XProtect scan, and the on-disk image is executed by
         # native.sh -- the same bytes, as the cmp above just proved.
         case "$f" in /*) src="$f";; *) src="$R/$f";; esac   # datashape passes absolute paths
-        (cd "$D" && perl -e 'alarm 30; exec @ARGV' "$UA" "$src" -run > "$D/run.out" 2>/dev/null)
+        (cd "$D" && "$_BOUND" 30 "$UA" "$src" -run > "$D/run.out" 2>/dev/null)
         python3 -m unisa vm --os "${HOSTT%/*}" "$D/tape.$tt" > "$D/vm.out" 2>/dev/null
         cmp -s "$D/run.out" "$D/vm.out" && echo "ran" >> "$D/verdict" || echo "RANWRONG" >> "$D/verdict"
     fi

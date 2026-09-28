@@ -1,4 +1,6 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # Opt-in real Linux execution. Requires an already-running Lima VM with this
 # source tree readable, cc and Python for the independent test referee.
 # Does not start/stop a VM. Every command is bounded; skips are not passes.
@@ -6,7 +8,7 @@ set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# = 1 ] || { echo 'usage: containerlinux.sh BUILD_DIR' >&2; exit 2; }
 . ./tests/lib.sh; ua_ready
-perl -e 'alarm 60; exec @ARGV' python3 - "$1" "$R" "$UA" <<'PY'
+"$_BOUND" 60 python3 - "$1" "$R" "$UA" <<'PY'
 import os,pathlib,subprocess,sys,tempfile
 build=pathlib.Path(sys.argv[1]).resolve();root=pathlib.Path(sys.argv[2]);ua=sys.argv[3]
 vm=os.environ.get('LIMA_VM','default')

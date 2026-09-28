@@ -1,8 +1,10 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 b cc -O2 -o "$T/run" exec/c/run.c
 ARCH=${ARCH:-arm64}
 case $ARCH in arm64) GEN=arm.py;; x86_64) GEN=gen.py;; *) exit 2;; esac

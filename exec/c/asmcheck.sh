@@ -1,10 +1,12 @@
 #!/bin/sh
+_BOUND=$(cd "$(dirname "$0")/../.." && pwd)/tests/bound
+_BOUND=$("$_BOUND" --helper) || exit 2
 # One real host ISA per bounded job; x86_64 on this ARM Mac uses Rosetta.
 set -eu
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl -e 'alarm 60; exec @ARGV' "$@"; }
+b() { "$_BOUND" 60 "$@"; }
 ARCH=${CORE_ASM_ARCH:-$(uname -m)}
 case $ARCH in aarch64) ARCH=arm64;; arm64|x86_64) ;; *) exit 2;; esac
 case $(uname -s) in Darwin) OS=osx; ARCHFLAG="-arch $ARCH";; Linux) OS=lnx; ARCHFLAG=;; *) exit 2;; esac
