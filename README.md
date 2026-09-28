@@ -22,11 +22,11 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| Current local candidate | Source closure built at `10994c2`; v0.0.9 `.com` 1,221,182 B; SHA-256 `7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846` |
+| Current local candidate | Source closure built at `d78da1a`; v0.0.9 `.com` 1,221,288 B; SHA-256 `d61d01531f845903ca8f57e271cd2fa5ee9a930359eb256f4e3778a1594b4459` |
 | Model organization | 32 shared constructed networks, 938 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
-| Local verification | Final 189-item queue pending; E2 off/on 312/312 byte-equal to fresh classic reference; model-built procview actually enumerated Linux arm64 processes |
-| Remaining release work | Local v0.0.9 candidate is **not published**; this round has no Windows execution or Linux x86-64 execution evidence |
+| Local verification | Previous candidate `7608a31b` passed the full 189-item local queue with 0 failures; `d61d0153` has passed the affected `.com` gates, nativeboot/kernel and all 32 network/table equality checks, and its full-queue rerun is pending; E2 off/on 312/312 byte-equal to fresh classic reference; model-built procview actually enumerated Linux arm64 processes |
+| Remaining release work | Local v0.0.9 candidate is **not published**. Pre-sign smoke covers six targets × hello/fib/convert (18 cells), but macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are not full native platform suites |
 
 The authoritative [pipeline design](prd.md#pipeline-design) describes each
 stage's inputs, outputs, control structure, rule sources and limits. The
@@ -45,11 +45,12 @@ gates, platform smoke and older performance measurements remain in the
 [original final evidence](research/s17-final-evidence.json); they do not transfer
 to the current candidate.
 
-Unreachable-function pruning is assigned to cc-unisacc and remains planned;
-it is not a stage in the current production route. Company signing remains release work: macOS app/DMG qualification has passed
+Unreachable-function pruning (tape-level, beyond `-libneed`) is planned and
+not yet a stage in the current production route. Company signing remains release work: macOS app/DMG qualification has passed
 actual Developer ID signing, notarization, stapling and Gatekeeper, with the
-sealed `.com` running inside. Windows Authenticode service signing and final
-signed-asset/platform acceptance remain pending. See the [R9 release checklist](prd.md).
+sealed `.com` running inside. Windows Authenticode signing is **deferred to
+v0.0.10** (owner decision, 2026-09-28): v0.0.9 Windows assets ship unsigned, so
+expect a SmartScreen / unknown-publisher prompt and check the published SHA-256. See the [R9 release checklist](prd.md).
 
 Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) — product, offline seed,
 static inputs, development tools and reference judges. The [research index](research/README.md)
@@ -70,12 +71,13 @@ machine). The C headers it needs travel inside it.
 ```
 
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
-  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `--version`; `-Wall`,
+  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `-libneed`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
-- **Headers:** nineteen standard/compatibility headers are bundled (`assert
-  ctype errno float inttypes iso646 limits math memory signal stdarg stdbool
+- **Headers:** twenty standard/compatibility headers are bundled (`assert
+  ctype dirent errno float inttypes iso646 limits math memory signal stdarg stdbool
   stddef stdint stdio stdlib string time wchar`), plus `unisacc_ffi.h`. Ordinary
-  library calls use the bundled C implementations, compiled on demand. On
+  library calls use the bundled C implementations, compiled on demand;
+  `-libneed` (off by default) keeps only the library bodies the program reaches. On
   macOS, the explicit dl/libffi bridge can call system APIs; it is not automatic
   forwarding of all libc calls. System FILE/va_list and allocator families must
   not be mixed with the bundled implementations.
