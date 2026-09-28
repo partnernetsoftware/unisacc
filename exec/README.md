@@ -18,8 +18,8 @@ not just the six-stage development route shown later in this file. See
 
 Published v0.0.8 is `10672e3`, unsigned 5,388,402 B, SHA-256
 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
-The current v0.0.9 source closure was built at `49a6e00`: 1,221,185 B,
-SHA-256 `c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`.
+The current v0.0.9 source closure was built at `10994c2`: 1,221,182 B,
+SHA-256 `7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846`.
 P3 compression and one-pass memory binding are implemented. The final
 189-item queue is pending; old 179-item receipts do not transfer. E2 off/on
 312/312 outputs match a fresh classic reference; current model-built procview

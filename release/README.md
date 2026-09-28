@@ -1,8 +1,8 @@
 # 发布签名接入与剩余验收
 
-当前本地版本为0.0.9候选，封存载荷 `unisacc.com` 为1,221,185 B，SHA256
-`c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`，
-构建来源为 `49a6e00`。这是当前签名资格证据的身份，不是已发布版本；
+当前本地版本为0.0.9候选，封存载荷 `unisacc.com` 为1,221,182 B，SHA256
+`7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846`，
+构建来源为 `10994c2`。这是当前待验收载荷身份，尚无其企业签名，不是已发布版本；
 后续产物改变须重新封存、签名并验证，不继承旧资产的回执。
 
 ## Windows：身份与格式已接入，服务签名待验
@@ -151,7 +151,7 @@ trust bundle fetch helper独立生成私有bundle，shell inspector不自动调�
 
 [macosbundle.py](macosbundle.py) 与 [macos-launcher.c](macos-launcher.c)
 分片构建原生入口、app与DMG；入口/app签名，内层 `.com` 的封存哈希独立验证。
-具体参数见工具 `--help`。当前c499载荷的公司Developer ID时间戳与Hardened Runtime
+具体参数见工具 `--help`。此前c499载荷的公司Developer ID时间戳与Hardened Runtime
 签名已成功，签后app实际 `--version`/`-run hello` 通过。Apple对app ZIP及DMG均返回
 Accepted；app/DMG均已staple并验证，Gatekeeper均为Notarized Developer ID。
 完整载荷、launcher及DMG SHA和资格边界见

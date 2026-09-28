@@ -21,7 +21,7 @@
 | 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
 | 已发布 v0.0.8 / `10672e3` | 未签名 5,388,402 B；`948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`；发布收据与限制封存 |
-| 当前集成源码闭包 `49a6e00` | 1,221,185 B；`c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8`；P3压缩、单次memory及R9接入，最终189项队列待完成；v0.0.9未发布 |
+| 当前集成源码闭包 `10994c2` | 1,221,182 B；`7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846`；P3压缩、单次memory及R9接入，最终189项队列待完成；v0.0.9未发布 |
 
 本轮当前模型编出的procview已在Linux arm64真实枚举进程；Windows 单次绑定只有 mock，
 Linux x86_64 未运行。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
@@ -35,7 +35,7 @@ Linux x86_64 未运行。macOS/Rosetta 本地门禁不等于六平台全绿。�
 固定包驱动自举不包含模型、整包或 APE 容器自构造。
 
 prune 由 cc-unisacc 负责、待实现，不在当前生产路由中。企业签名尚待最终发布验收：
-macOS app/dmg携带封存c499载荷已完成公司签名、公证/staple及Gatekeeper资格验证；
+此前macOS app/dmg携带c499载荷已完成公司签名、公证/staple及Gatekeeper资格验证；
 Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要求。
 
 ### 经典参考的种子与自举关系

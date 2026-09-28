@@ -22,7 +22,7 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| Current local candidate | Source closure built at `49a6e00`; v0.0.9 `.com` 1,221,185 B; SHA-256 `c4993fd0c7a812a7b986e5d6ede0ba6aa162b1688d53fb847df187608d468ff8` |
+| Current local candidate | Source closure built at `10994c2`; v0.0.9 `.com` 1,221,182 B; SHA-256 `7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846` |
 | Model organization | 32 shared constructed networks, 938 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
 | Local verification | Final 189-item queue pending; E2 off/on 312/312 byte-equal to fresh classic reference; model-built procview actually enumerated Linux arm64 processes |
