@@ -2334,3 +2334,9 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 ### R9 最终门禁发现并保留的夹具失败
 
 569325b冻结队列在53/189处有1失败：exec-winlower正例夹具遍历WINAPI的全部规划名字，包括getdents64及没有实际winimp的11项，触发已正确启用的“无Windows import”拒绝。真实c499模型在Windows两目标的hello/fib/convert均实跑通过，不据此忽略失败。修正夹具分类：有真实import的仍逐字段对拍；全部12个未实现项在两执行器及参考lower各显式拒绝，不删除原覆盖、不放松产品guard。保留旧失败日志，新冻结重验。
+
+### R9 当前候选重建、平台烟测与计时回执
+
+83cd6b7修正Windows lowering夹具后，七组模型与pack实际重新构建，每步≤55秒、最多双槽；根产物仍逐字节为c4993fd0/1,221,185 B，新的构建来源为83cd6b7，不伪造旧侧车。固定hello/fib/convert在六目标共18个单元实际输出与退出一致，见[平台回执](research/r9-platform-smoke-20260928.json)；Windows两目标-run均为x86 APE驱动，arm覆盖来自编出的ARM镜像，Linux x86与Rosetta为模拟。此为烟测，不替代完整平台门禁、自举或微软签后资产法院。Windows ARM和本轮Lima x86实际关机，原先Running的Lima default保留。Apple资格app的真实FFI演示再次实跑并保存日志（7正/38负控制、四分析器、winlist两模式），内层仍封存c499。
+
+同身份当前候选五次交替中位数：[计时回执](research/r9-current-bench-20260928.json)，calc -run 179.41ms、最小程序29.11ms；同输入输出与私有宿主cc构建经典种子相同（经典10.84/3.17ms）。这是热文件的新进程计时，不称冷启动，也不混用历史自托管经典基线。完整189门禁仍待新冻结，微软服务尚未调用。
