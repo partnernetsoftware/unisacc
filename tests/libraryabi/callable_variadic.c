@@ -23,7 +23,7 @@ static struct Pair other_exchange(double x,int mode,...){
  struct Pair out=leaf(x+y,k,p);out.d+=1;out.n+=10;mixed++;normal_returns++;return out;
 }
 static const char source[]=
- "#include <stdlib.h>\nstruct Pair{double d;int n;};"
+ "#include <stdlib.h>\n#include <stdarg.h>\nstruct Pair{double d;int n;};"
  "typedef struct Pair (*Leaf)(double,int,struct Pair);"
  "typedef struct Pair (*Var)(double,int,...);"
  "struct Pair host_exchange(double,int,...);"
@@ -34,9 +34,10 @@ static const char source[]=
  "struct Pair native_case(void){Var f=host_exchange;return entry(f);}"
  "struct Pair leaf_fail(double x,int k,struct Pair p){exit(23);return p;}"
  "struct Pair fail_case(Var f){struct Pair p={4.0,5};return f(1.5,1,2.5,7,p,leaf_fail,1.0,2.0,3.0,4.0,5.0,6.0,7.0);}"
- "struct Pair scriptvar(double x,int n,...){struct Pair p={x+1.0,n+2};return p;}"
- "struct Pair script_case(void){Var f=scriptvar;return f(4.25,3,1.0);}"
- "struct Pair nested_script_case(void){Var f=scriptvar;return f(tailvalue(f),3,1.0);}";
+ "struct Pair scriptvar(double x,int n,...){struct Pair p={x+1.0,n+2};"
+ "if(n){va_list ap;va_start(ap,n);p.d=p.d+va_arg(ap,double);p.n=p.n+va_arg(ap,int);va_end(ap);}return p;}"
+ "struct Pair script_case(void){Var f=scriptvar;float y=1.5;signed char k=7;return f(4.25,3,y,k);}"
+ "struct Pair nested_script_case(void){Var f=scriptvar;float y=1.5;signed char k=7;return f(tailvalue(f),3,y,k);}";
 static int bind(us_context *c,const char *dir){
  char path[2048];unsigned char bytes[16384];snprintf(path,sizeof path,"%s/host_exchange.sig",dir);
  FILE *f=fopen(path,"rb");if(!f)return 1;size_t n=fread(bytes,1,sizeof bytes,f);int bad=ferror(f)||!feof(f);fclose(f);
@@ -60,8 +61,8 @@ int main(int argc,char **argv){
    g.p=entry((i&1)?other_exchange:host_exchange);
    if(g.p.d!=36+(i&1)||g.p.n!=12+10*(i&1)||g.a!=123||g.z!=456)return fail(c,"incoming var pointer/promoted tail/Pair/fixed script callback");
    g.p=native_case();if(g.p.d!=36||g.p.n!=12)return fail(c,"frozen native template callable introduction");
-   g.p=script_case();if(g.p.d!=5.25||g.p.n!=5)return fail(c,"concrete script var handle");
-   g.p=nested();if(g.p.d!=4.5||g.p.n!=5)return fail(c,"nested concrete script sites");
+   g.p=script_case();if(g.p.d!=6.75||g.p.n!=12)return fail(c,"concrete script var handle");
+   g.p=nested();if(g.p.d!=6.0||g.p.n!=12)return fail(c,"nested concrete script sites");
    int status=-1;if(us_call_status(c,&status)||status||*us_error(c))return fail(c,"callable var status");
   }
   if(mixed-m!=200||empty-e!=200||normal_returns-r!=400)return fail(c,"actual native boundary counts");
