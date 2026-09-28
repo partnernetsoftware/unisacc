@@ -33,6 +33,12 @@ its schema. Target predefinitions come from predefines.tsv. No old kernel
 file supplies generation data. Transition rules live in the adjacent TSVs;
 see rules.md for their inputs and the remaining Python assembly boundary.
 This is source migration, not a claim of complete C99 coverage.
+
+--shared-predefines is an optional experiment: a target selector resource
+chooses the predefines.tsv-derived macro-name resource; this same delta is
+constructed for all six targets. Plain, located and no-autoinc tokenpp have
+different output contracts and remain separate networks. The default product
+path still uses its existing target-bound construction.
 """
 import json
 import os
@@ -102,17 +108,17 @@ def autoinc_map():
 
 AUTOINC = os.environ.get("E2_AUTOINC", "1") != "0"   # E2_AUTOINC=0: the delta without it
 AIB = 68 * 10 ** 6       # W[AIB + id]: bit 1 called, bit 2 defined (srcuse)
-# -libneed (src/front_pp.c libneed_scan/libneed_define): W[LNSB + id] = 1 when
+# -ftrim-libc (src/front_pp.c ftrim_libc_scan/ftrim_libc_define): W[LNSB + id] = 1 when
 # the identifier occurs anywhere in the unit (srcfind), kept apart from AIB so
 # the autoinc status compare is untouched; W[NEEDB + b] = 1 marks carried body b.
 LNSB, NEEDB = 71 * 10 ** 6, 70 * 10 ** 6
 
 
-def build_libneed(g):
-    """-libneed after the autoinc scan: with \\0cli/libneed and no quoted
+def build_ftrim_libc(g):
+    """-ftrim-libc after the autoinc scan: with \\0cli/ftrim-libc and no quoted
     #include (the LQ* prescan, quotedinc's line rule), mark the roots'
     closure, then every body reached by a seen key, then define __UN_<body>
-    for each marked body and __UNISA_LIBNEED.  Closures are the build-time
+    for each marked body and __UNISA_FTRIM_LIBC.  Closures are the build-time
     table of unisa/libneed.py; nothing is solved at run time."""
     sys.path.insert(0, ROOT)
     from unisa.libneed import table, roots, PREFIX
@@ -124,19 +130,19 @@ def build_libneed(g):
         for b in names:
             out += [("LDI", "t", NEEDB + index[b]), ("LDI", "v", 1), ("STX", "t", 0, "v")]
         return out
-    install_rules(g, HERE, "libneed", {"LNSB": LNSB}, {"roots": marks(roots(inc))})
+    install_rules(g, HERE, "ftrim-libc", {"LNSB": LNSB}, {"roots": marks(roots(inc))})
     for i, k in enumerate(keys):
-        install_rules(g, HERE, "libneed-key", {"entry": "LNK%d" % i, "test": "LNK%dr" % i,
+        install_rules(g, HERE, "ftrim-libc-key", {"entry": "LNK%d" % i, "test": "LNK%dr" % i,
             "next": "LNK%d" % (i + 1) if i + 1 < len(keys) else "LNB0", "LNSB": LNSB},
             {"name": sbconst(k), "mark": marks(closure[k])})
     for j, b in enumerate(bodies):
         nxt = "LNB%d" % (j + 1) if j + 1 < len(bodies) else "LNDEF"
-        install_rules(g, HERE, "libneed-body", {"entry": "LNB%d" % j, "test": "LNB%dr" % j,
+        install_rules(g, HERE, "ftrim-libc-body", {"entry": "LNB%d" % j, "test": "LNB%dr" % j,
             "next": nxt, "define": "LNB%dd" % j, "slot": NEEDB + j})
         install_rules(g, HERE, "assembly", {"entry": "LNB%dd" % j, "resume": "LNB%ddr" % j,
             "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(PREFIX + b)}, section="predefine")
     install_rules(g, HERE, "assembly", {"entry": "LNDEF", "resume": "LNDEFR",
-        "next": "AH0_0", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_LIBNEED")}, section="predefine")
+        "next": "AH0_0", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_FTRIM_LIBC")}, section="predefine")
 
 
 def build_autoinc(g, locations=False):
@@ -148,7 +154,7 @@ def build_autoinc(g, locations=False):
     `called` pulls it in; the lines are emitted in prepend order (rtprintf's
     stdio.h first, then the headers last-to-first) and x copied after."""
     install_rules(g, HERE, "autoinc", {"AIB": AIB, "LNSB": LNSB}, classes={"identifier": ID})
-    build_libneed(g)
+    build_ftrim_libc(g)
     # per header: does some name have status exactly `called`?
     amap = autoinc_map()
     H = list(AUTOINC_ORDER)
@@ -309,14 +315,29 @@ def build_hx(g):
 
 def build_cli(g, locations=False):
     layout = {name: globals()[name] for name in ['F_BODY', 'F_TO', 'NEWB', 'FSZ', 'MACB']}
-    # Without autoinc the libneed scan is absent; continue with forced includes.
+    # Without autoinc the ftrim-libc scan is absent; continue with forced includes.
     layout['after_flags'] = "CLI.LN" if AUTOINC else "CLI.INC"
     install_rules(g, HERE, "cli", layout,
         {"location_line": [("ALUI", "add", "CLI_PRELINES", "CLI_PRELINES", 1)] if locations else []})
 
 
 
-def build(target="lnx/x86_64", locations=False):
+def target_predefines(target):
+    """Ordered declaration bytes for the optional shared-target E2 variant."""
+    target_os, target_arch = target.split("/")
+    names = PREDEF["os", target_os] + PREDEF["arch", target_arch] + PREDEF["common", "*"]
+    if len(set(names)) != len(names):
+        raise ValueError("overlapping target predefinitions: " + target)
+    return b"".join(name.encode("ascii") + b"\0" for name in names)
+
+
+def predefine_resources():
+    return {b"\0predefines/" + (osname+"/"+arch).encode("ascii"):
+            target_predefines(osname+"/"+arch)
+            for osname in ("lnx", "osx", "win") for arch in ("arm64", "x86_64")}
+
+
+def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     if target not in ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"):
         raise ValueError("unsupported preprocessor target: "+target)
     target_os, target_arch = target.split("/")
@@ -356,10 +377,15 @@ def build(target="lnx/x86_64", locations=False):
         build_autoinc(g, locations)
 
     install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
-    for k, nm in enumerate(predef):
-        nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
-        install_rules(g, HERE, "assembly", {"entry": "P3PD%d" % k, "resume": "P3PDR%d" % k,
-            "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(nm)}, section="predefine")
+    if shared_predefines:
+        # One network per output format/autoinc mode; target data is supplied
+        # as resources. The legacy default remains byte-for-byte unchanged.
+        install_rules(g, HERE, "shared-predefine", {"F_BODY": F_BODY, "PD_SEEN": 72 * 10 ** 6})
+    else:
+        for k, nm in enumerate(predef):
+            nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
+            install_rules(g, HERE, "assembly", {"entry": "P3PD%d" % k, "resume": "P3PDR%d" % k,
+                "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(nm)}, section="predefine")
 
     cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")])}
     cases.update((k + 1, ("D_" + w, [])) for k, w in enumerate(DIRV))
@@ -413,9 +439,12 @@ def sizes(g):
 def main():
     locations="--locations" in sys.argv
     if locations: sys.argv.remove("--locations")
+    shared_predefines="--shared-predefines" in sys.argv
+    if shared_predefines: sys.argv.remove("--shared-predefines")
     if len(sys.argv)>3:
-        sys.exit("usage: gen.py [OUT.json] [OS/ARCH] [--locations]")
-    g = build(sys.argv[2] if len(sys.argv)>2 else "lnx/x86_64", locations=locations)
+        sys.exit("usage: gen.py [OUT.json] [OS/ARCH] [--locations] [--shared-predefines]")
+    g = build(sys.argv[2] if len(sys.argv)>2 else "lnx/x86_64", locations=locations,
+              shared_predefines=shared_predefines)
     out = sys.argv[1] if len(sys.argv) > 1 else "/tmp/e2delta.json"
     json.dump({"start": "START", "states": {k: [m, {str(kk): list(v) for kk, v in r.items()}]
                                             for k, (m, r) in g.st.items()},

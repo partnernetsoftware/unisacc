@@ -16,7 +16,8 @@ case $PART in
  *) echo 'unknown NATIVE_PART' >&2; exit 2;;
 esac
 b env EXEC_CC=cc NETWORK=1 TARGET=osx/arm64 ./exec/pipeline/elf.sh "$T" $INPUTS > "$T/log" 2>&1 || { cat "$T/log"; exit 1; }
-b "$UA" -O2 unisacc.c -o "$T/compiler"
+b python3 tests/sourceflat.py "$T/unisacc.c"
+b "$UA" -O2 "$T/unisacc.c" -o "$T/compiler"
 b "$T/compiler" -O2 exec/c/run.c -o "$T/run-ua"
 if [ "$PART" = all ] || [ "$PART" = stages ]; then
  b env EXEC_CC="$T/compiler" python3 exec/c/netcheck.py

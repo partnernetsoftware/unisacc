@@ -21,7 +21,7 @@ typedef int sig_atomic_t;
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
 
-#if !__UNISA_LIBNEED || __UN_signal
+#if !__UNISA_FTRIM_LIBC || __UN_signal
 static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
     void (*__u_old)(int);
     if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return SIG_ERR;
@@ -31,7 +31,7 @@ static void (*signal(int __u_sig, void (*__u_fn)(int)))(int) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_raise
+#if !__UNISA_FTRIM_LIBC || __UN_raise
 static int raise(int __u_sig) {
     void (*__u_fn)(int);
     if (__u_sig <= 0 || __u_sig >= _UNISA_NSIG) return 0 - 1;

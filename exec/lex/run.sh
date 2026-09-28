@@ -34,7 +34,8 @@ net)     $B python3 exec/lex/net.py $D $X/e1x && $B python3 exec/lex/tbl.py $X/e
          cmp $X/e1x/e1net.tbl $X/e1x/e1.tbl && echo "net-derived table identical to $X/e1x/e1.tbl" ;;
 lexdiff) $B python3 exec/lex/compare.py $D examples/*.c tests/c/*.c ;;
 probes)  $B python3 exec/lex/compare.py $D exec/lex/probes/*.c ;;
-self)    $B python3 exec/lex/compare.py $D unisacc.c ;;
+self)    $B python3 tests/sourceflat.py "$X/e1-self.c" &&
+         $B python3 exec/lex/compare.py "$D" "$X/e1-self.c" ;;
 corpus.*) # the list is rebuilt when the corpus changes (a cached one skips files)
          find "${CORPUS:-../../corpus}" -name '*.c' | sort > $X/e1corp.new
          cmp -s $X/e1corp.new $X/e1corp.txt || { mv $X/e1corp.new $X/e1corp.txt; rm -f $X/e1corp.a?; split -l 63 $X/e1corp.txt $X/e1corp.; }

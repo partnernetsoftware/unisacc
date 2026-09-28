@@ -55,7 +55,7 @@ static void *__uffi_call;
 static void *__uffi_types[12];
 static int __uffi_ready;
 
-#if !__UNISA_LIBNEED || __UN_uffi_dlopen
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
     long __u_args[6];
     __u_args[0] = (long)__u_path; __u_args[1] = __u_mode;
@@ -63,7 +63,7 @@ static void *uffi_dlopen(const char *__u_path, int __u_mode) {
     return (void *)__hostcall(__hostaddr0(), __u_args);
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_uffi_dlsym
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_dlsym
 static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
     long __u_args[6];
     __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name;
@@ -71,7 +71,7 @@ static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
     return (void *)__hostcall(__hostaddr1(), __u_args);
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_uffi_dlclose
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_dlclose
 static int uffi_dlclose(void *__u_handle) {
     long __u_args[6];
     __u_args[0] = (long)__u_handle; __u_args[1] = 0;
@@ -79,7 +79,7 @@ static int uffi_dlclose(void *__u_handle) {
     return (int)__hostcall(__hostaddr2(), __u_args);
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_uffi_dlerror
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_dlerror
 static char *uffi_dlerror(void) {
     long __u_args[6];
     __u_args[0] = 0; __u_args[1] = 0; __u_args[2] = 0;
@@ -91,7 +91,7 @@ static char *uffi_dlerror(void) {
  * A failed initialization is retried; the private libffi handle stays live
  * because its ffi_type pointers and entry addresses refer into that image.
  */
-#if !__UNISA_LIBNEED || __UN_uffi_init
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_init
 static int uffi_init(void) {
     int __u_i;
     if (__uffi_ready) return 0;
@@ -124,7 +124,7 @@ static int uffi_init(void) {
     return 0;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_uffi_type
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_type
 static void *uffi_type(int __u_kind) {
     if (__u_kind < 0 || __u_kind >= 12 || uffi_init() != 0) return 0;
     return __uffi_types[__u_kind];
@@ -138,7 +138,7 @@ static void *uffi_type(int __u_kind) {
  * 0 succeeds, -3 rejects an invalid vector, and positive values are the
  * actual ffi_status from ffi_prep_cif[_var].  No call follows a prep error.
  */
-#if !__UNISA_LIBNEED || __UN_uffi_call_types
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_call_types
 static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
                            void **__u_values, int __u_n, int __u_fixed,
                            void *__u_result) {
@@ -181,7 +181,7 @@ static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
     return 0;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_uffi_call
+#if !__UNISA_FTRIM_LIBC || __UN_uffi_call
 static int uffi_call(void *__u_fn, int __u_return_kind, int *__u_kinds,
                      void **__u_values, int __u_n, int __u_fixed,
                      void *__u_result) {

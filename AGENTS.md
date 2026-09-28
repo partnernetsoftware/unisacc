@@ -88,7 +88,7 @@
 | `unisa_core.c`、`unisa_self.c` | 整数推理内核 | `unisa/ckernel.py` 里的 `KERNEL_BODY` |
 | `weights/gold/*.tsv` | 各阶段的真值表，一行一个 key（由 `unisa gold-export` 写出，`build-weights` 会跑它） | `unisa/gold.py` |
 
-它们**有意提交进仓库**：`unisacc.c` 就是这些文件加 `src/` 拼起来的，所以编译器不需要 Python、不需要读文件，就能构建并重新构建自己。`tests/kernel.sh` 会重新生成，与已提交的副本不同就失败。
+它们**有意提交进仓库**：`unisacc.c` 是引用 `kernel/` 与 `src/` 的有序 include 入口，不混入权重字节。经典18阶段的连续 MODEL/DENSE 分别由生成的 `weight.<stage>.inc` / `dense.<stage>.inc` 字面量片段装配，默认产品的共享网络仍独立存于 P3 包。`tests/export_ref.sh OUTPUT` 无需 Python 就能导出完整独立 C 源；自举、跨机传送和规模测试使用该完整导出，不能只传入口或用入口行数冒充编译器规模。`tests/build_ref.sh` 只构建私有导出，不改根 `unisacc.c`；`tests/kernel.sh` 重新生成并检查片段及清单。
 
 ## 路线
 

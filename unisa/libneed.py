@@ -3,12 +3,12 @@
 The C library travels as include/*.h source whose functions are `static`
 bodies.  Each body is guarded
 
-    #if !__UNISA_LIBNEED || __UN_<name>
+    #if !__UNISA_FTRIM_LIBC || __UN_<name>
     static ... name(...) { ... }
     #endif
 
-so with __UNISA_LIBNEED undefined every body is compiled exactly as before.
-A preprocessor that defines __UNISA_LIBNEED also defines __UN_<name>
+so with __UNISA_FTRIM_LIBC undefined every body is compiled exactly as before.
+A preprocessor that defines __UNISA_FTRIM_LIBC also defines __UN_<name>
 for every name the translation unit uses, closed over this table: the bodies
 and function-like macros each carried name reaches.  The table is derived
 from the headers alone, so it cannot disagree with them.
@@ -112,7 +112,7 @@ def table(incdir):
             closure[n] = need
     for n in names:
         assert len(PREFIX) + len(n) <= MACRO_NAME_LIMIT, "need macro too long: " + n
-    assert len(names) <= 1024, "src/front_pp.c libneed_mark holds 1024 bodies"
+    assert len(names) <= 1024, "src/front_pp.c ftrim_libc_mark holds 1024 bodies"
     return sorted(closure), closure, names
 
 
@@ -123,9 +123,9 @@ def roots(incdir):
 
 
 def guard(name):
-    # An identifier #if does not know is 0 (C99 6.10.1p4): with __UNISA_LIBNEED
+    # An identifier #if does not know is 0 (C99 6.10.1p4): with __UNISA_FTRIM_LIBC
     # undefined the body is always kept; the short form saves header bytes.
-    return "#if !__UNISA_LIBNEED || %s%s" % (PREFIX, name)
+    return "#if !__UNISA_FTRIM_LIBC || %s%s" % (PREFIX, name)
 
 
 def check_guards(incdir):

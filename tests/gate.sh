@@ -190,6 +190,9 @@ job hostile     ./tests/hostile.sh
 job source-layout ./tests/source_layout.sh
 job target-package python3 ./tests/targetpackagecheck.py "${MODEL_COM:-./unisacc.com}"
 job lib-context python3 ./tests/libunisacccheck.py --package "${MODEL_COM:-./unisacc.com}"
+job shared-e2-plain ./tests/sharede2.sh plain
+job shared-e2-located ./tests/sharede2.sh located
+job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh

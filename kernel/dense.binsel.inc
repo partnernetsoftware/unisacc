@@ -6,6 +6,6 @@
  *   unisa/catalog.py             07ff7baa3166
  *   unisa/front/lex.py           67f2248c3a8a
  *   weights/built.json           8b10e43e2b3d
- *   unisa/ckernel.py             603e3fbc6e3a */
+ *   unisa/ckernel.py             d54d70c049f3 */
   "\x00\x00\x01\x01\x02\x02\x03\x10\x04\x11\x05\x12\x06\x13\x07\x14\x08\x15\x09\x09"
   "\x0a\x0a\x0b\x0b\x0c\x0c\x0d\x0d\x0e\x0e\x0f\x16"

@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Check canonical trim resource, six target E2 outputs and the CLI alias.
+Caller supplies a private C executor, rebuilt classic UA and the new E2 net.
+"""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import sys
+ROOT=Path(__file__).resolve().parents[2]
+sys.path[:0]=[str(ROOT/'exec/pp'),str(ROOT/'exec/c')]
+from gen import predefine_resources
+from pack import build as package
+
+def check(run,net,ua,out):
+    out.mkdir(parents=True,exist_ok=True)
+    res=out/'resources';res.mkdir(exist_ok=True)
+    for k,v in predefine_resources().items():
+        f=res/k[1:].decode();f.parent.mkdir(parents=True,exist_ok=True);f.write_bytes(v)
+    sel=res/'cli/target';sel.parent.mkdir(exist_ok=True);flag=res/'cli/ftrim-libc'
+    route=out/'route.tsv';route.write_text('pp\te2\tsrc.c\tpp.text\t'+str(net)+'\n')
+    probes={'stdio':'#include <stdio.h>\nint main(void){printf("hi %d\\n",7);return 0;}\n',
+            'stdlib':'#include <stdlib.h>\nint main(void){return atoi("0");}\n',
+            'address':'#include <string.h>\nint main(void){unsigned long (*f)(const char *) = strlen;return f("abc")==3?0:1;}\n'}
+    def call(args):
+        r=subprocess.run(list(map(str,args)),cwd=out,timeout=10,capture_output=True)
+        assert r.returncode==0,(args,r.returncode,r.stderr[:300])
+        return r.stdout
+    records=[]
+    for target in ('lnx/arm64','lnx/x86_64','osx/arm64','osx/x86_64','win/arm64','win/x86_64'):
+        sel.write_bytes(target.encode())
+        for on in (False,True):
+            if on:flag.write_bytes(b'1')
+            else:
+                try:flag.unlink()
+                except FileNotFoundError:pass
+            pkg=out/'pp.pkg';pkg.write_bytes(package([route],[('00',res),('006864722f',ROOT/'include')]))
+            for name,text in probes.items():
+                source=out/(name+'.c');source.write_text(text)
+                model=call([run,'--bundle',pkg,'pp',source,source,ROOT/'include'])
+                classic=call([ua,'-b',target,*(['-ftrim-libc'] if on else []),'-E',source])
+                assert model==classic,(target,on,name,'E2 differs')
+                if on:assert call([ua,'-b',target,'-libneed','-E',source])==classic,(target,name,'alias differs')
+                records.append([target,on,name,len(model)])
+    (out/'result.json').write_text(json.dumps({'equal':records,'alias_equal':18},indent=2)+'\n')
+    print('ftrim-libc: 36 E2 outputs equal, 18 alias outputs equal')
+
+if __name__=='__main__':
+    ap=argparse.ArgumentParser(description=__doc__)
+    for name in ('run','net','ua','output'):ap.add_argument('--'+name,type=lambda p:Path(p).resolve(),required=True)
+    a=ap.parse_args();check(a.run,a.net,a.ua,a.output)

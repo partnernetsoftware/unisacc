@@ -15,7 +15,7 @@ typedef struct {
     struct dirent ent;
     unsigned char buf[_UNISA_DIRBUF];
 } DIR;
-#if !__UNISA_LIBNEED || __UN_opendir
+#if !__UNISA_FTRIM_LIBC || __UN_opendir
 static DIR *opendir(const char *__u_path) {
     DIR *__u_d; long __u_fd;
 #ifdef __aarch64__
@@ -30,7 +30,7 @@ static DIR *opendir(const char *__u_path) {
     errno = 0; return __u_d;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_readdir
+#if !__UNISA_FTRIM_LIBC || __UN_readdir
 static struct dirent *readdir(DIR *__u_d) {
     unsigned char *__u_r; int __u_rl, __u_i, __u_left; long __u_n;
     errno = 0;
@@ -63,7 +63,7 @@ static struct dirent *readdir(DIR *__u_d) {
     return &__u_d->ent;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_closedir
+#if !__UNISA_FTRIM_LIBC || __UN_closedir
 static int closedir(DIR *__u_d) {
     long __u_r;
     if (__u_d == 0) { errno = EBADF; return -1; }

@@ -72,13 +72,13 @@ machine). The C headers it needs travel inside it.
 ```
 
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
-  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `-libneed`, `--version`; `-Wall`,
+  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `-ftrim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
 - **Headers:** twenty standard/compatibility headers are bundled (`assert
   ctype dirent errno float inttypes iso646 limits math memory signal stdarg stdbool
   stddef stdint stdio stdlib string time wchar`), plus `unisacc_ffi.h`. Ordinary
   library calls use the bundled C implementations, compiled on demand;
-  `-libneed` (off by default) conservatively selects library bodies using identifier and dependency closures. On
+  `-ftrim-libc` (off by default; `-libneed` is a compatible alias) conservatively selects library bodies using identifier and dependency closures. On
   macOS, the explicit dl/libffi bridge can call system APIs; it is not automatic
   forwarding of all libc calls. System FILE/va_list and allocator families must
   not be mixed with the bundled implementations.
@@ -95,14 +95,21 @@ machine). The C headers it needs travel inside it.
 ## Build it
 
 ```bash
-./tests/build_ref.sh            # cc builds unisacc from unisacc.c  (-> /tmp/ua_ref)
-/tmp/ua_ref -O2 unisacc.c -b osx/arm64 -o ua1   # unisacc builds itself
+./tests/build_ref.sh            # cc builds a private flat export (-> /tmp/ua_ref)
+make export-ref                 # independent full source: out/unisacc-flat.c
+/tmp/ua_ref -O2 out/unisacc-flat.c -b osx/arm64 -o ua1  # unisacc builds itself
 make com                        # construct the model compiler in two build slots
 make classic-com                # explicit classic fallback in out/
 ```
 
-`unisacc.c` is the classic single-file C seed (`kernel/` + `src/`). Its C
-self-hosting check needs no Python. The model route uses Python offline to
+`unisacc.c` is the classic reference's ordered include entry (`kernel/` +
+`src/`), with no embedded weight literals. The generated
+`kernel/weight.<stage>.inc` and `kernel/dense.<stage>.inc` keep the 18 classic
+stages' data separate. `tests/export_ref.sh OUTPUT` expands the entry into one
+independent C file without Python; transfer and self-hosting tests use this
+full export rather than the short entry. `build_ref.sh` never rewrites the
+root source. The default product's shared networks remain in its separate P3
+package; these classic fragments are not another copy of that package. The model route uses Python offline to
 bind declarations, construct and verify networks, package them, and assemble
 the APE container; the packaged compiler needs no Python to compile programs.
 Its fixed-package driver bootstrap (`N1 = N2 = N3`) has a narrower scope than
@@ -225,7 +232,8 @@ exec/             production model declarations, offline constructors, driver an
 src/*.c           classic reference compiler, written in the C subset it compiles
 kernel/           generated classic fact data + integer inference kernel, as C
 include/          the bundled C99 headers
-unisacc.c         kernel/ + src/ concatenated: classic reference and self-hosting seed
+unisacc.c         ordered include entry: classic reference, no inline weights
+out/unisacc-flat.c make export-ref: independent full source for transfer/self-hosting
 unisa/            the Python seed: gold tables, weight construction, reference front/back end, packaging
 weights/          the constructed weights (built.uns2) and the tables as data (gold/*.tsv)
 iterate/          development tools in C (weight constructor, kernel-data generator); not the product

@@ -37,7 +37,7 @@ static char *_unisa_freel[12];
 static char *_unisa_cur = 0;
 static long _unisa_left = 0;
 
-#if !__UNISA_LIBNEED || __UN__unisa_map
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_map
 static char *_unisa_map(long __u_n) {
     long __u_r;
     __u_r = (long)_UNISA_MAP(__u_n);
@@ -46,7 +46,7 @@ static char *_unisa_map(long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_malloc
+#if !__UNISA_FTRIM_LIBC || __UN_malloc
 static void *malloc(long __u_n) {
     long __u_sz; int __u_k; char *__u_p;
     if (__u_n < 0 || __u_n > 0x100000000000) return NULL;
@@ -82,7 +82,7 @@ static void *malloc(long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_free
+#if !__UNISA_FTRIM_LIBC || __UN_free
 static void free(void *__u_q) {
     char *__u_p; long __u_k;
     if (__u_q == NULL) return;
@@ -100,7 +100,7 @@ static void free(void *__u_q) {
  * reports for SIGABRT. */
 static void (*_unisa_atexit[32])(void);
 static int _unisa_natexit = 0;
-#if !__UNISA_LIBNEED || __UN_exit
+#if !__UNISA_FTRIM_LIBC || __UN_exit
 static void exit(int __u_code) {
     /* the atexit handlers, last registered first (C99 7.20.4.3p3) */
     while (_unisa_natexit > 0) {
@@ -110,11 +110,11 @@ static void exit(int __u_code) {
     __exit(__u_code);
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_abort
+#if !__UNISA_FTRIM_LIBC || __UN_abort
 static void abort(void) { __exit(134); }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_calloc
+#if !__UNISA_FTRIM_LIBC || __UN_calloc
 static void *calloc(long __u_n, long __u_sz) {
     long *__u_p; long __u_total; long __u_i;
     if (__u_n < 0 || __u_sz < 0) return NULL;
@@ -130,7 +130,7 @@ static void *calloc(long __u_n, long __u_sz) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_realloc
+#if !__UNISA_FTRIM_LIBC || __UN_realloc
 static void *realloc(void *__u_old, long __u_n) {
     long *__u_p; long *__u_o; long __u_i; long __u_cap;
     if (__u_old == NULL) return malloc(__u_n);
@@ -149,11 +149,11 @@ static void *realloc(void *__u_old, long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_abs
+#if !__UNISA_FTRIM_LIBC || __UN_abs
 static int abs(int __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v; }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_atoi
+#if !__UNISA_FTRIM_LIBC || __UN_atoi
 static int atoi(const char *__u_s) {
     int __u_v; int __u_sign; long __u_i;
     __u_v = 0; __u_sign = 1; __u_i = 0;
@@ -171,7 +171,7 @@ static int atoi(const char *__u_s) {
 /* Accumulate two 32-bit limbs in nonnegative longs.  Their products by
  * base (<=36) fit signed long, including at ULONG_MAX; no signed wrap or
  * unsigned division is needed.  Overflow still consumes every valid digit. */
-#if !__UNISA_LIBNEED || __UN__unisa_strdigit
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_strdigit
 static int _unisa_strdigit(int __u_c) {
     if (__u_c >= 48 && __u_c <= 57) return __u_c - 48;
     if (__u_c >= 97 && __u_c <= 122) return __u_c - 97 + 10;
@@ -179,7 +179,7 @@ static int _unisa_strdigit(int __u_c) {
     return 0 - 1;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN__unisa_strmag
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_strmag
 static int _unisa_strmag(const char *__u_s, char **__u_end, int __u_base,
                        long *__u_hi, long *__u_lo, int *__u_neg) {
     long __u_i; long __u_start; long __u_l; long __u_h; int __u_d; int __u_over; int __u_auto;
@@ -218,7 +218,7 @@ static int _unisa_strmag(const char *__u_s, char **__u_end, int __u_base,
     return __u_over;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_strtol
+#if !__UNISA_FTRIM_LIBC || __UN_strtol
 static long strtol(const char *__u_s, char **__u_end, int __u_base) {
     long __u_hi; long __u_lo; long __u_v; int __u_neg; int __u_over;
     __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
@@ -234,7 +234,7 @@ static long strtol(const char *__u_s, char **__u_end, int __u_base) {
     return __u_v;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_strtoul
+#if !__UNISA_FTRIM_LIBC || __UN_strtoul
 static unsigned long strtoul(const char *__u_s, char **__u_end, int __u_base) {
     long __u_hi; long __u_lo; unsigned long __u_v; int __u_neg; int __u_over;
     __u_over = _unisa_strmag(__u_s, __u_end, __u_base, &__u_hi, &__u_lo, &__u_neg);
@@ -244,13 +244,13 @@ static unsigned long strtoul(const char *__u_s, char **__u_end, int __u_base) {
     return __u_v;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_atol
+#if !__UNISA_FTRIM_LIBC || __UN_atol
 static long atol(const char *__u_s) { return strtol(__u_s, 0, 10); }
 #endif
 
 /* The fractional part is accumulated as an integer and scaled once, so a
  * long run of digits does not lose the low ones to repeated division. */
-#if !__UNISA_LIBNEED || __UN_strtod
+#if !__UNISA_FTRIM_LIBC || __UN_strtod
 static double strtod(const char *__u_s, char **__u_end) {
     double __u_v; double __u_frac; double __u_scale; int __u_sign; long __u_i; int __u_any;
     long __u_e; int __u_esign;
@@ -282,46 +282,46 @@ static double strtod(const char *__u_s, char **__u_end) {
     return __u_v * (double)__u_sign;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_strtof
+#if !__UNISA_FTRIM_LIBC || __UN_strtof
 static float strtof(const char *__u_s, char **__u_end) { return (float)strtod(__u_s, __u_end); }
 #endif
-#if !__UNISA_LIBNEED || __UN_strtold
+#if !__UNISA_FTRIM_LIBC || __UN_strtold
 static double strtold(const char *__u_s, char **__u_end) { return strtod(__u_s, __u_end); }
 #endif
-#if !__UNISA_LIBNEED || __UN_atof
+#if !__UNISA_FTRIM_LIBC || __UN_atof
 static double atof(const char *__u_s) { return strtod(__u_s, 0); }
 #endif
 
 static long _unisa_seed = 1;
-#if !__UNISA_LIBNEED || __UN_rand
+#if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
     _unisa_seed = _unisa_seed * 1103515245 + 12345;
     return (int)((_unisa_seed >> 16) & 32767);
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_srand
+#if !__UNISA_FTRIM_LIBC || __UN_srand
 static void srand(int __u_s) { _unisa_seed = __u_s; }
 #endif
 /* ---- C99 7.20.6-7.20.7 and the pieces of 7.20.4 a program can rely on
    here: labs, div, qsort, bsearch, atexit.  Real code, like the rest of
    this header: the sort is a heap sort, so its worst case is bounded and
    it needs no stack beyond one element's bytes [S-15 D2]. */
-#if !__UNISA_LIBNEED || __UN_labs
+#if !__UNISA_FTRIM_LIBC || __UN_labs
 static long labs(long __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v; }
 #endif
-#if !__UNISA_LIBNEED || __UN_llabs
+#if !__UNISA_FTRIM_LIBC || __UN_llabs
 static long long llabs(long long __u_v) { if (__u_v < 0) return 0 - __u_v; return __u_v; }
 #endif
 typedef struct { int quot; int rem; } div_t;
 typedef struct { long quot; long rem; } ldiv_t;
-#if !__UNISA_LIBNEED || __UN_div
+#if !__UNISA_FTRIM_LIBC || __UN_div
 static div_t div(int __u_a, int __u_b) { div_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
 #endif
-#if !__UNISA_LIBNEED || __UN_ldiv
+#if !__UNISA_FTRIM_LIBC || __UN_ldiv
 static ldiv_t ldiv(long __u_a, long __u_b) { ldiv_t __u_r; __u_r.quot = __u_a / __u_b; __u_r.rem = __u_a % __u_b; return __u_r; }
 #endif
 
-#if !__UNISA_LIBNEED || __UN__unisa_swap
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_swap
 static void _unisa_swap(char *__u_a, char *__u_b, long __u_n) {
     long __u_i; char __u_t;
     __u_i = 0;
@@ -330,7 +330,7 @@ static void _unisa_swap(char *__u_a, char *__u_b, long __u_n) {
 #endif
 
 /* Sift element `i` of a heap of `n` elements down to its place. */
-#if !__UNISA_LIBNEED || __UN__unisa_sift
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_sift
 static void _unisa_sift(char *__u_base, long __u_n, long __u_sz, long __u_i, int (*__u_cmp)(const void *, const void *)) {
     long __u_c;
     while (1) {
@@ -344,7 +344,7 @@ static void _unisa_sift(char *__u_base, long __u_n, long __u_sz, long __u_i, int
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_qsort
+#if !__UNISA_FTRIM_LIBC || __UN_qsort
 static void qsort(void *__u_v, long __u_n, long __u_sz, int (*__u_cmp)(const void *, const void *)) {
     char *__u_base; long __u_i;
     __u_base = (char *)__u_v;
@@ -360,7 +360,7 @@ static void qsort(void *__u_v, long __u_n, long __u_sz, int (*__u_cmp)(const voi
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_bsearch
+#if !__UNISA_FTRIM_LIBC || __UN_bsearch
 static void *bsearch(const void *__u_key, const void *__u_v, long __u_n, long __u_sz, int (*__u_cmp)(const void *, const void *)) {
     char *__u_base; long __u_lo; long __u_hi; long __u_mid; int __u_c;
     __u_base = (char *)__u_v; __u_lo = 0; __u_hi = __u_n;
@@ -377,7 +377,7 @@ static void *bsearch(const void *__u_key, const void *__u_v, long __u_n, long __
 /* atexit: the handlers run, last registered first, from `exit` -- which is
    also where a return from main ends up, since the entry stub calls `exit`
    whenever this header defined one.  Thirty-two is C's minimum (7.20.4.2). */
-#if !__UNISA_LIBNEED || __UN_atexit
+#if !__UNISA_FTRIM_LIBC || __UN_atexit
 static int atexit(void (*__u_fn)(void)) {
     if (_unisa_natexit >= 32) return 0 - 1;
     _unisa_atexit[_unisa_natexit] = __u_fn;
@@ -389,7 +389,7 @@ static int atexit(void (*__u_fn)(void)) {
 /* The environment is where a Unix kernel leaves it: after argv's NULL.
    `__argv(k)` reads that array itself, so the walk starts past argc.  On
    Windows nothing is there and getenv answers NULL. [S-15 D2] */
-#if !__UNISA_LIBNEED || __UN_getenv
+#if !__UNISA_FTRIM_LIBC || __UN_getenv
 static char *getenv(const char *__u_name) {
     int __u_k; int __u_i; char *__u_e;
     __u_k = __argc() + 1;

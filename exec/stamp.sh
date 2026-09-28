@@ -21,7 +21,7 @@ if [ -n "${UNISACC_EXEC_TMP:-}" ]; then X=$UNISACC_EXEC_TMP
 else X="${TMPDIR:-/tmp}"; X="${X%/}/unisacc-exec/$(printf %s "$_SR" | cksum | cut -d' ' -f1)"; fi
 mkdir -p "$X"
 # what tests/build_ref.sh builds the reference compiler from
-REFSRC="$(ls kernel/*.inc kernel/*.c src/*.c | tr '\n' ' ')tests/refshim.h tests/reffoot.h tests/build_ref.sh"
+REFSRC="$(ls kernel/*.inc kernel/*.c src/*.c src/*.h | tr '\n' ' ')unisacc.c tests/export_ref.sh tests/sourceflat.py tests/refshim.h tests/reffoot.h tests/build_ref.sh"
 # what a delta generator reads besides its own directory
 PYSRC="$(find unisa -type f \( -name '*.py' -o -name '*.tsv' \) | sort | tr '\n' ' ')"
 

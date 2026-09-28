@@ -101,7 +101,7 @@ def retain_models(directory, rows):
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
 
-def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True):
+def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None):
     mounts=[('006864722f',includes)]
     if kernels is not None:
         kernels=Path(kernels)
@@ -141,10 +141,26 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         # Offline construction of the shared unit-framing network. Runtime
         # does not invoke these Python tools or parse declarations in C.
         here=Path(__file__).resolve().parent
+        # Declare all target macro lists as resources; choosing and parsing
+        # the list remains in the shared E2 delta. The driver supplies target.
+        # Load by source path, avoiding other stage generators named gen.
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('exec_pp_predefines',here.parent/'pp/gen.py')
+        ppgen=importlib.util.module_from_spec(spec);spec.loader.exec_module(ppgen)
+        predefines=Path(td)/'predefines';predefines.mkdir()
+        for key,value in ppgen.predefine_resources().items():
+            target=key[len(b'\0predefines/'):].decode('ascii')
+            path=predefines/target;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value)
+        mounts.append(('00707265646566696e65732f',predefines))
+        plain_pp=Path(shared_e2).resolve() if shared_e2 is not None else built_model(
+            td,'plainpp',here.parent/'pp/gen.py',['--shared-predefines'])
+        for i,row in enumerate(rows):
+            cols=row.split('\t')
+            if cols[1]=='e2': cols[4]=str(plain_pp);rows[i]='\t'.join(cols)
         # Public token dump uses the reference's fixed Linux/x86 predefines
         # and the plain E1 output, independently of image-target selection.
         for name,script,args,inp,out in [
-                ('tokenpp',here.parent/'pp/gen.py',['lnx/x86_64'],'src.c','pp.text'),
+                ('tokenpp',here.parent/'pp/gen.py',['lnx/x86_64','--shared-predefines'],'src.c','pp.text'),
                 ('tokenlex',here.parent/'lex/gen.py',[],'pp.text','tokens.plain')]:
             # Public token dump has no implicit header selection.
             n=built_model(td,name,script,args,dict(os.environ,E2_AUTOINC='0') if name=='tokenpp' else None)
@@ -159,8 +175,8 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         located_units=warning_model('warnunits',here.parent/'parse2/units.py',['--locations'])
         quiet_parse=warning_model('errorparse',here.parent/'parse2/gen2.py',['--errors'])
         ordinary=list(rows)
+        warning_models['e2']=warning_model('warnpp-shared',here.parent/'pp/gen.py',['--locations','--shared-predefines'])
         for target in sorted(targets):
-            warning_models['e2']=warning_model('warnpp-'+target.replace('/','-'),here.parent/'pp/gen.py',[target,'--locations'])
             # Normal compilation also carries locations, without enabling
             # warnings. The same units model preserves file boundaries.
             quiet_routes={target+'/unit'}|{target+'/'+s for s,_,_ in specs if s!='pp'}
@@ -215,6 +231,7 @@ if __name__=='__main__':
     ap.add_argument('--include',required=True,type=Path)
     ap.add_argument('--kernels',type=Path,help='explicit directory containing both ISA kernel blobs')
     ap.add_argument('--audit-dir',type=Path,help='retain exact table/network pairs for offline --check-net')
+    ap.add_argument('--shared-e2',type=Path,help='fresh shared plain E2 network from --shared-predefines')
     ap.add_argument('--compressed',dest='compressed',action='store_true',default=True,help='P3 binary+DEFLATE models (default)')
     ap.add_argument('--legacy-package',dest='compressed',action='store_false',help='legacy uncompressed P1/P2')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
@@ -222,6 +239,6 @@ if __name__=='__main__':
     a=ap.parse_args()
     MODEL_CACHE=not a.no_model_cache
     try:
-        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed);a.o.write_bytes(payload)
+        payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
     print(f'compiler package: {len(payload)} B')

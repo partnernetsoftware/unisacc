@@ -2,7 +2,20 @@
 An already-running VM is required; this script does not start/stop it.
 Run with an outer 60 s alarm. Guest compile steps each have a 30 s watchdog.
 """
-import pathlib,subprocess,hashlib,time,uuid,sys,os
+import pathlib,subprocess,hashlib,time,uuid,sys,os,tempfile
+
+def bootstrap_source(path):
+ source=pathlib.Path(path).resolve()
+ repo=pathlib.Path(__file__).resolve().parents[2]
+ if source==repo/'unisacc.c':
+  # Only the canonical assembly entry needs exporting. Guest receives one
+  # independent file; no host-relative includes can escape into its source.
+  sys.path.insert(0,str(repo/'tests'))
+  from sourceflat import export_source
+  with tempfile.TemporaryDirectory(prefix='unisacc-winboot-source-') as d:
+   return export_source(pathlib.Path(d)/'unisacc.c').read_bytes()
+ return source.read_bytes()
+
 utm='/Applications/UTM.app/Contents/MacOS/utmctl';vm=os.environ.get('WINVM','minicon-win-arm-64')
 target=os.environ.get('TARGET','win/arm64');assert target in ('win/arm64','win/x86_64')
 root=pathlib.Path(sys.argv[1]);prefix='C:\\u\\peboot-'+uuid.uuid4().hex[:8]
@@ -10,7 +23,7 @@ def tool(*args,data=None):
  r=subprocess.run([utm,*args],input=data,capture_output=True,timeout=45)
  if r.returncode:raise RuntimeError((args,r.returncode,r.stdout,r.stderr))
  return r.stdout
-source=pathlib.Path(sys.argv[2]).read_bytes();n1=(root/'unisacc.exe').read_bytes()
+source=bootstrap_source(sys.argv[2]);n1=(root/'unisacc.exe').read_bytes()
 peoff=int.from_bytes(n1[60:64],'little');assert n1[peoff:peoff+4]==b'PE\0\0'
 assert int.from_bytes(n1[peoff+4:peoff+6],'little')=={'win/arm64':0xaa64,'win/x86_64':0x8664}[target]
 for path,data in [(prefix+'.c',source),(prefix+'-n1.exe',n1)]:

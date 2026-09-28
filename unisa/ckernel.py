@@ -165,7 +165,7 @@ def emit_headers(incdir, path):
     for i in range(len(names)):
         L.append('  if (i == %d) return HDR_%d;' % (i, i))
     L += ['  return 0;', '}', '']
-    # -libneed: each carried name's closure of guarded bodies (unisa/libneed.py)
+    # -ftrim-libc: each carried name's closure of guarded bodies (unisa/libneed.py)
     from unisa.libneed import table
     keys, closure, bodies = table(incdir)
     index = {b: i for i, b in enumerate(bodies)}

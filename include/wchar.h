@@ -15,7 +15,7 @@ typedef int wchar_t;
 
 #define WEOF (0-1)
 
-#if !__UNISA_LIBNEED || __UN_wcslen
+#if !__UNISA_FTRIM_LIBC || __UN_wcslen
 static long wcslen(const wchar_t *__u_s) {
     long __u_n;
     __u_n = 0;

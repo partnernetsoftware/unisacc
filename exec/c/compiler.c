@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
             if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
         }
         else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
-        else if (!strcmp(a,"-libneed")) { if (!libneed.n) bput(&libneed,1,0); }
+        else if (!strcmp(a,"-ftrim-libc") || !strcmp(a,"-libneed")) { if (!libneed.n) bput(&libneed,1,0); }
         else if (!strcmp(a,"-dump-tokens")) mode = 4;
         else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
@@ -214,12 +214,18 @@ int main(int argc, char **argv) {
         nimports=4;
 #endif
 #ifdef _WIN32
-        nimports=process_own_imports(cli+9,244,(long)process_own_imports);NRI=9+nimports;
+        nimports=process_own_imports(cli+9,243,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
-    ARGRESOURCE(NRI,"\0cli/libneed",libneed); NRI++;
+    ARGRESOURCE(NRI,"\0cli/ftrim-libc",libneed); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     ARGRESOURCE(NRI,"\0cli/error-limit",errorlimit); NRI++;
+    /* Target selection is input data; the E2 model chooses its declaration. */
+    const char *predefine_target=mode==4 ? "lnx/x86_64" : target;
+    cli[NRI].name=(const unsigned char *)"\0cli/target"; cli[NRI].n=11;
+    cli[NRI].data=(const unsigned char *)predefine_target;
+    cli[NRI].len=(int)strlen(predefine_target); NRI++;
+
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; int rc=0;

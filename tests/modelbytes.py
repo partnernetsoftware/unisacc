@@ -50,7 +50,7 @@ def capture(path, source):
     version=int(fields[1]);decoded=read_package(pkg)
     nm,nd,nr=map(int,fields[2:]);assert min(nm,nd,nr)>0
     parts={'package header':len(h),'directory':0,'model bodies':0,'model record headers':0,
-           'resource record headers':0,'resource keys':0,'C header bodies':0,'kernel bodies':0}
+           'resource record headers':0,'resource keys':0,'C header bodies':0,'kernel bodies':0,'target predefinitions':0}
     refs=collections.Counter(); kinds=collections.defaultdict(set);routes=set()
     for _ in range(nd):
         b=line();parts['directory']+=len(b);f=b.split();assert len(f)==6 and f[0]==b'D'
@@ -73,6 +73,12 @@ def capture(path, source):
         key=body(int(f[1]));data=body(int(f[2]));parts['resource keys']+=len(key)
         r={'key':key.decode(),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
         if key.startswith(b'\0hdr/'):parts['C header bodies']+=len(data)
+        elif key.startswith(b'\0predefines/'):
+            target=key[len(b'\0predefines/'):].decode('ascii')
+            assert target in {o+'/'+a for o in ('lnx','osx','win') for a in ('arm64','x86_64')}
+            assert data.endswith(b'\0') and all(re.fullmatch(rb'[A-Za-z_][A-Za-z_0-9]*',n) for n in data[:-1].split(b'\0'))
+            assert len(set(data[:-1].split(b'\0')))==len(data[:-1].split(b'\0'))
+            parts['target predefinitions']+=len(data)
         else:
             assert key.startswith(b'\0kernel/') and data[:8]==b'UNIKERN1'
             kind,entry,slot,n=struct.unpack_from('<4Q',data,8);assert n+40==len(data)
@@ -126,7 +132,8 @@ def render(evidence):
                     ("平台驱动、APE 启动/加载与对齐（混合账）", a["package_offset"]),
                     (f"{sum(r['key'].startswith(chr(0) + 'hdr/') for r in a['resources'])} 份 C 头文件/库实现源码", parts["C header bodies"]),
                     ("两 ISA 通用推理执行核资源", parts["kernel bodies"]),
-                    ("目录、记录头与资源键", a["package_bytes"] - parts["model bodies"] - parts["C header bodies"] - parts["kernel bodies"]),
+                    ("目标预定义宏声明资源", parts["target predefinitions"]),
+                    ("目录、记录头与资源键", a["package_bytes"] - parts["model bodies"] - parts["C header bodies"] - parts["kernel bodies"] - parts["target predefinitions"]),
                     ("尾部", a["footer_bytes"])]:
         lines.append(row(name, n))
     grouped = collections.defaultdict(lambda: [0, 0, 0])

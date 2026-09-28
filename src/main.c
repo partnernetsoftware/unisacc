@@ -69,7 +69,7 @@ int main(void) {
             } else { if (strsame(a, "-Wall") || strsame(a, "-Wextra")) { warnall = 1;
             } else { if (strpre(a, "-ferror-limit=")) { maxerr = 0; k = 14;
                 while (a[k] >= 48 && a[k] <= 57) { maxerr = maxerr * 10 + (a[k] - 48); k = k + 1; }
-            } else { if (strsame(a, "-libneed")) { libneed = 1;
+            } else { if (strsame(a, "-ftrim-libc") || strsame(a, "-libneed")) { ftrim_libc = 1;
             } else { if (strsame(a, "-nostdinc")) { nostdinc = 1;
             } else { if (strsame(a, "-MD") || strsame(a, "-MMD")) { wantdeps = 1; depfile = depfile ? depfile : "";
             } else { if (strsame(a, "-MF")) { i = i + 1; wantdeps = 1; depfile = __argv(i);

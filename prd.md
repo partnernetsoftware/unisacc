@@ -106,7 +106,7 @@
 **验收与停止点**：先固定单目标的服务范围和保留路由/资源清单（全部CLI，或明确受限的本机-run副产品）；私有打包选择原型对同目标的 -run 可观察行为、-S/tape与文件镜像逐字节对照统一产物。列清删去/保留的网络、内核、资源、驱动与外壳字节；在该目标原生验证对应套件，同身份测尺寸与启动。只因移除其他目标而变小，不以偷偷删除诊断/优化/多文件功能凑体积。不回改已发布 v0.0.9，未冻结清单前不承诺最终尺寸。
 
 
-**libunisacc：进程内 C99 JIT 引擎（2026-09-28 用户提出，定为激进版，暂不实施）。** 目标对标 libtcc 并超过它：一个库覆盖六个目标，自带 libc 和头文件，不依赖系统工具链，模型路线也在库里运行。进程内库是主形态，子进程封装（FX-2 第 1 级）只作降级选项。设计基础与缺口分析见 FX-2（libunisacc 与 crate）和 FX-1（tape 包与校验器）。
+**libunisacc：进程内 C99 JIT 引擎（2026-09-28 用户提出，定为激进版，0.0.10实施）。** 目标对标 libtcc 并超过它：一个库覆盖六个目标，自带 libc 和头文件，不依赖系统工具链，模型路线也在库里运行。进程内库是主形态，子进程封装（FX-2 第 1 级）只作降级选项。设计基础与缺口分析见 FX-2（libunisacc 与 crate）和 FX-1（tape 包与校验器）。
 - API（0.0.10）：`us_new/us_free`，多个上下文可在不同线程里并行；`us_add_source/us_add_file/us_add_tape`；`us_define/us_include_path`；`us_add_symbol(ctx,name,addr,sig)` 可注入函数和数据；`us_compile/us_relocate` 把代码映射进宿主内存；`us_sym` 返回真实指针，宿主与脚本可以互相调用、互传回调；`us_run_main`。出错时返回错误码和 `us_error` 消息；脚本调用 exit 只结束这一次运行，不结束宿主。
 - 顺延到 0.0.11：`us_eval`（REPL 与增量编译）、`us_reload`（通过跳板热替换单个函数）、`us_opt_verify`（FX-1 校验器，只允许声明过的 syscall 和注入的符号）、Rust 与 Python 绑定。
 - 状态隔离：脚本自带的 libc 编进它自己的镜像，errno 和 stdio 天然与宿主分开；编译器本体的 libc 加 `__us_` 前缀，不导出；约 610 MB 的静态数组收进堆上的上下文。可选 `us_opt_host_libc` 改用宿主的 libc，这样内存能在两边来回传递。
@@ -2588,3 +2588,28 @@ R10-3共享E2实验批准：plain/located/tokenpp输出格式仍各自保持独�
 R10本轮实际证据：canonical入口716B引用18对独立权重/答案片，flat完整1,298,121B；私有canonical/flat tape与osx/arm64镜像同，三代自举与五交叉目标、独立B=C=U、6000函数规模、自举准备均过。主树重新生成并实跑source-layout/嵌套与大头回归、C99 57/57、corecheck通过。进程内库首片实际四线程12次编译与统一产品tape同，语法/IO错误不退出宿主并可继续编译；仍仅host cc构建tape API原型，映射/符号/脚本exit/完整库产物未完成。六单目标副产品已私有构建约654–685KB，osx/arm64十二对拍通过，其他五运行证据未补。共享E2 plain/located压缩模型体合省240,507B，资源321B，各格式全域与六目标30输出同，未切出货。
 
 本轮候选重建：分阶段生成保留，整体55秒触限后独立pack成功，候选1,233,316B、SHA7cbf0df9d219c6f377820c5b2a00fdd63bd7ec392371f3b99940392915f8c2c4。候选com-run12/0、com-c99 57/57、lib-context通过（13秒并发），不是完整发布验收。随后修自源pipeline导出文件stem与strconvert引用消费者，需要下一轮构建身份更新；此记录保留该候选的准确验证范围，不当当前完整树验收。
+
+R10剩余消费者审计已授权：参考stamp补canonical/导出器/src头闭包，lex/native自身语料统一私有flat，Windows自举上传canonical先导出独立源码，README/AGENTS/CLAUDE修正入口表述。共享E2正式接入由分片代理处理包与字节账；driver传cli/target仅为参数适配（tokens固定lnx/x86_64），为Windows import资源留足槽位；不在执行核增加预处理决策。
+
+R10库第二片决定：模型按library/symbols=LE64(1)可选资源输出UNILIB1与SYMS1版本化地址记录；地址计算与数据g_别名在δ，普通UNIMEM1字节不变。先输出已验证code/data地图，TIns缺失签名/extern可见性不能据此假称任意宿主ABI函数；us_sym必须通过声明ABI桥，不能裸返软栈地址。另一独立lower δ选择library/exit地址，将退出转为已有hostcall桥；错误/脚本exit通过API边界返回宿主，不能退出宿主进程，普通产品exit保持。库adapter复用原网络，负责上下文、资源、格式解码、OS映射与通用调用边界；完整符号签名/回调/六目标证据仍是本目标待办。
+
+R10库宿主整合：库传cli/target/include-dir与宏资源，以兼容共享E2；多个源使用CLI既有unit byte framing与multi声明路由（不是新解析器）；编译后宿主通过声明stage边界运行prune/lower，映射仅解析模型给出的UNIMEM/UNILIB地址/长度。每个上下文持有编译输出和映射，销毁/重编译释放旧映射；未知跨宿主目标只能输出，不能本机执行。先macOS真实退出隔离与符号地图，其他目标仍需补验证，不称完成。
+
+### R10 开关统一实施边界（2026-09-28）
+正式用户接口改为 `-ftrim-libc`；`-libneed` 保留为明确标注的兼容别名，语义一致。内部资源改为 `cli/ftrim-libc`，守卫改为 `__UNISA_FTRIM_LIBC`，生成器与经典路径标识同步。现役 `unisa/libneed.py` 模块、`tests/libneed.sh` 门禁路径暂保留，避免仅改文件名引入无关导入迁移；两接口必须对拍。生成物统一重建。共享 located E2 已在六目标循环外构造一次，不重复扩建缓存机制。
+
+### R10 库调用桥与退出跨平台后续（2026-09-28）
+首个宿主到脚本桥显式限六个64位整数/指针参数及整数返回，FP/聚合/变参须拒绝，不称完整签名支持。ARM桥保存平台callee-saved寄存器，以独立软栈x7安排续点；x86桥保存平台callee-saved，切独立软栈并安排返回host栈的续点。桥只适配已声明ABI，不包含编译决策。默认产物不变。Linux库退出使用与SysV/ARM相同的现有桥字节，仅非零且合法library/exit资源允许，普通Linux hostcall继续拒绝；Windows尚未实现。实际native执行与网络/表等价分开计证据。多源库编译O0/O1/O2及include目录已与产品CLI逐字节对拍通过。
+
+### R10 库原生运行初验（2026-09-28）
+私有重构E2/lower/镜像网络的macOS arm64包，真实宿主内运行main(argc=2)返回39且宿主继续。四上下文并发运行及显式exit(51)接管通过；同一上下文100次compile→relocate→run循环19.09秒。此项尚不足证明1000次及内存无增长，默认专项100次以满足55秒门禁，1000次留为未完成项。加载器只按UNILIB1有界格式解码，地址仍由模型计算；符号地图不等于可直接调用的系统ABI入口。内核生成物59项一致。三个共享E2格式门禁独立入队，不能把plain/located/tokenpp的输入格式混合。
+
+### R10 库错误恢复文件描述符修复（2026-09-28）
+只读复核发现目录作为包输入时open成功、read报错longjmp绕过close，16次错误令fd从3增至19。库宿主层跟踪自身open/close并在每次调用结束关闭未完成读取的fd；不修改模型或编译决策。加入连续错误与fd计数回归，既验证失败返回，也验证错误恢复不泄漏。
+
+### R10 库函数签名与脚本分配生命周期（2026-09-28）
+E3库请求输出USLTAPE1外层（tape_len/meta_len LE64、原tape、USLSIG1元数据），普通输出不变。签名来自FN定义时的真实返回/参数descriptor及ellipsis，不用>6参数的内部vfn标志冒充C变参；记录storage/linkage、defined、variadic、supported、depth/base/shape与type_class/width/unsigned。宿主仅分离有界格式，不解析C。首片fixed<=6各宽整数、普通数据指针、void返回，FP/聚合/函数指针/变参保留descriptor但拒绝调用；已有存储仅前8参数如实标stored_params，无main库输入仍未完成。
+只读发现脚本小块malloc每次建立1MB mmap池，free仅回池；反复重建映像会丢池指针。context完整清理必须包含脚本映射，不能拿执行器arena无泄漏替代。后续以library资源请求让δ调用通用宿主mmap/munmap适配，context追踪并在镜像失效或free时回收；默认产品syscall路径不变，实际malloc/free循环列入测试。
+
+### R10 脚本映射资源schema确认（2026-09-28）
+`library/mmap`、`library/munmap`各为独立LE64地址资源；缺失/零保留原syscall，坏长度拒绝，Windows非零拒绝。模型mmap仅接已有六参数SYSA形态，不伪造普通三参数.sys的未定义机器寄存器；munmap使用原mode0/1已有两参数来源。hostcall返回r0回原结果路径。Linux桥门控允许三种库callback资源任一合法非零，仍不开放普通C hostcall；编码器适配与lower一起验收。

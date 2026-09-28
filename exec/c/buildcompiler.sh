@@ -22,9 +22,9 @@ settings={k:v for k,v in os.environ.items() if k.startswith(('E1','E2','E3','E4'
 assembly={str(p):digest(p) for p in sorted(pathlib.Path('exec/c/asm').glob('*.S'))}
 key=hashlib.sha256((key+json.dumps([settings,assembly],sort_keys=True)).encode()).hexdigest()
 if mode=='identity': print(key);raise SystemExit
-names=([f'shared/{s}.{e}' for s in ('e1','e3','e4','o1','prune') for e in ('json','tbl','net')]
+names=([f'shared/{s}.{e}' for s in ('e2','e1','e3','e4','o1','prune') for e in ('json','tbl','net')]
        + ['kernels/arm64','kernels/x86_64']) if stage=='shared' else (
-       [f'{stage}/{s}.{e}' for s in ('e2','lower','elf') for e in ('json','tbl','net')]+[f'{stage}/route.tsv'])
+       [f'{stage}/{s}.{e}' for s in ('lower','elf') for e in ('json','tbl','net')]+[f'{stage}/route.tsv'])
 record=root/stage/'manifest.json'
 if mode=='write':
     expected=(root/stage/'input.sha256').read_text().strip()
@@ -50,12 +50,13 @@ shared() {
     start shared
     mkdir -p "$T/kernels"
     for arch in arm64 x86_64; do b python3 exec/c/asm/blob.py "$arch" "$T/kernels/$arch"; done
+    b python3 exec/pp/gen.py "$T/shared/e2.json" --shared-predefines
     b python3 exec/lex/gen.py --typed "$T/shared/e1.json"
     b python3 exec/parse2/gen2.py "$T/shared/e3.json"
     b python3 exec/opt/gen.py "$T/shared/e4.json" 2
     b python3 exec/opt/gen.py "$T/shared/o1.json" 1
     b python3 exec/prune/gen.py "$T/shared/prune.json"
-    for s in e1 e3 e4 o1 prune; do
+    for s in e2 e1 e3 e4 o1 prune; do
         b python3 exec/c/tbl.py "$T/shared/$s.json" "$T/shared/$s.tbl"
         b python3 exec/c/net.py "$T/shared/$s.tbl" "$T/shared/$s.net"
     done
@@ -67,15 +68,14 @@ target() {
     start "$name"; d="$T/$name"
     case $os in lnx) osflag=; image=elf;; osx) osflag=--osx; image=macho;; win) osflag=--win; image=pe;; esac
     case $arch in arm64) archflag=--arm64; enc=arm.py;; x86_64) archflag=; enc=gen.py;; esac
-    b python3 exec/pp/gen.py "$d/e2.json" "$os/$arch"
     b python3 exec/lower/gen.py "$d/lower.json" --full $osflag $archflag
     b python3 "exec/enc/$enc" "$d/elf.json" "--$image"
-    for s in e2 lower elf; do
+    for s in lower elf; do
         b python3 exec/c/tbl.py "$d/$s.json" "$d/$s.tbl"
         b python3 exec/c/net.py "$d/$s.tbl" "$d/$s.net"
     done
     awk -v route="$os/$arch" '!/^#/ && NF {
-        file=$4; if ($1=="e1" || $1=="e3" || $1=="e4" || $1=="prune") file="../shared/" file;
+        file=$4; if ($1=="e2" || $1=="e1" || $1=="e3" || $1=="e4" || $1=="prune") file="../shared/" file;
         print route "\t" $1 "\t" $2 "\t" $3 "\t" file
     }' exec/pipeline/image-stages.tsv > "$d/route.tsv"
     manifest write "$name"
@@ -96,7 +96,7 @@ pack() {
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
     codec_flag=
     case ${PACK_COMPRESSED:-1} in 0) codec_flag=--legacy-package;; 1) codec_flag=--compressed;; *) echo "PACK_COMPRESSED must be 0 or 1" >&2; exit 2;; esac
-    b python3 exec/c/compilerpack.py $codec_flag --no-model-cache --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    b python3 exec/c/compilerpack.py $codec_flag --no-model-cache --shared-e2 "$T/shared/e2.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
     product_version=$(python3 -c 'import re; from pathlib import Path; m=re.findall(r"#define UNISACC_VERSION \"([0-9.]+)\"",Path("src/version.h").read_text()); assert len(m)==1; print(m[0])')
     b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" --product-name Unisacc --product-version "$product_version" -o "$T/unisacc-next.com"
     [ -s "$T/compiler.pkg" ] && [ -s "$T/unisacc-next.com" ]

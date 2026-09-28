@@ -7,7 +7,7 @@
 #include <stddef.h>
 #define NULL 0
 
-#if !__UNISA_LIBNEED || __UN_strlen
+#if !__UNISA_FTRIM_LIBC || __UN_strlen
 static long strlen(const char *__u_s) {
     long __u_n;
     __u_n = 0;
@@ -16,7 +16,7 @@ static long strlen(const char *__u_s) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strcpy
+#if !__UNISA_FTRIM_LIBC || __UN_strcpy
 static char *strcpy(char *__u_d, const char *__u_s) {
     long __u_i;
     __u_i = 0;
@@ -26,7 +26,7 @@ static char *strcpy(char *__u_d, const char *__u_s) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strncpy
+#if !__UNISA_FTRIM_LIBC || __UN_strncpy
 static char *strncpy(char *__u_d, const char *__u_s, long __u_n) {
     long __u_i;
     __u_i = 0;
@@ -36,14 +36,14 @@ static char *strncpy(char *__u_d, const char *__u_s, long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strcat
+#if !__UNISA_FTRIM_LIBC || __UN_strcat
 static char *strcat(char *__u_d, const char *__u_s) {
     strcpy(__u_d + strlen(__u_d), __u_s);
     return __u_d;
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strcmp
+#if !__UNISA_FTRIM_LIBC || __UN_strcmp
 static int strcmp(const char *__u_a, const char *__u_b) {
     long __u_i;
     __u_i = 0;
@@ -52,7 +52,7 @@ static int strcmp(const char *__u_a, const char *__u_b) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strncmp
+#if !__UNISA_FTRIM_LIBC || __UN_strncmp
 static int strncmp(const char *__u_a, const char *__u_b, long __u_n) {
     long __u_i;
     __u_i = 0;
@@ -65,7 +65,7 @@ static int strncmp(const char *__u_a, const char *__u_b, long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strchr
+#if !__UNISA_FTRIM_LIBC || __UN_strchr
 static char *strchr(const char *__u_s, int __u_c) {
     long __u_i;
     __u_i = 0;
@@ -77,7 +77,7 @@ static char *strchr(const char *__u_s, int __u_c) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strrchr
+#if !__UNISA_FTRIM_LIBC || __UN_strrchr
 static char *strrchr(const char *__u_s, int __u_c) {
     long __u_i;
     char *__u_r;
@@ -90,7 +90,7 @@ static char *strrchr(const char *__u_s, int __u_c) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_strstr
+#if !__UNISA_FTRIM_LIBC || __UN_strstr
 static char *strstr(const char *__u_h, const char *__u_n) {
     long __u_i; long __u_j;
     __u_i = 0;
@@ -104,7 +104,7 @@ static char *strstr(const char *__u_h, const char *__u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_memset
+#if !__UNISA_FTRIM_LIBC || __UN_memset
 static void *memset(void *__u_p, int __u_c, long __u_n) {
     char *__u_d; long __u_i;
     __u_d = (char *)__u_p; __u_i = 0;
@@ -113,7 +113,7 @@ static void *memset(void *__u_p, int __u_c, long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_memcpy
+#if !__UNISA_FTRIM_LIBC || __UN_memcpy
 static void *memcpy(void *__u_dst, const void *__u_src, long __u_n) {
     char *__u_d; char *__u_s; long __u_i;
     __u_d = (char *)__u_dst; __u_s = (char *)__u_src; __u_i = 0;
@@ -122,7 +122,7 @@ static void *memcpy(void *__u_dst, const void *__u_src, long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_memmove
+#if !__UNISA_FTRIM_LIBC || __UN_memmove
 static void *memmove(void *__u_dst, const void *__u_src, long __u_n) {
     char *__u_d; char *__u_s; long __u_i;
     __u_d = (char *)__u_dst; __u_s = (char *)__u_src;
@@ -133,7 +133,7 @@ static void *memmove(void *__u_dst, const void *__u_src, long __u_n) {
 }
 #endif
 
-#if !__UNISA_LIBNEED || __UN_memcmp
+#if !__UNISA_FTRIM_LIBC || __UN_memcmp
 static int memcmp(const void *__u_a, const void *__u_b, long __u_n) {
     char *__u_x; char *__u_y; long __u_i;
     __u_x = (char *)__u_a; __u_y = (char *)__u_b; __u_i = 0;
@@ -144,7 +144,7 @@ static int memcmp(const void *__u_a, const void *__u_b, long __u_n) {
     return 0;
 }
 #endif
-#if !__UNISA_LIBNEED || __UN_strncat
+#if !__UNISA_FTRIM_LIBC || __UN_strncat
 static char *strncat(char *__u_d, const char *__u_s, long __u_n) {
     long __u_i; long __u_j;
     __u_i = 0; while (__u_d[__u_i]) __u_i = __u_i + 1;
@@ -158,7 +158,7 @@ static char *strncat(char *__u_d, const char *__u_s, long __u_n) {
 /* strtok keeps its place between calls, as the standard says it must; the
    place is one static pointer, which is why strtok is not reentrant. */
 static char *_unisa_tok = 0;
-#if !__UNISA_LIBNEED || __UN_strtok
+#if !__UNISA_FTRIM_LIBC || __UN_strtok
 static char *strtok(char *__u_s, const char *__u_delim) {
     char *__u_start; long __u_k; int __u_isd;
     if (__u_s == 0) __u_s = _unisa_tok;

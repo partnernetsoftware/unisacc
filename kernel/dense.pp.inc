@@ -6,5 +6,5 @@
  *   unisa/catalog.py             07ff7baa3166
  *   unisa/front/lex.py           67f2248c3a8a
  *   weights/built.json           8b10e43e2b3d
- *   unisa/ckernel.py             603e3fbc6e3a */
+ *   unisa/ckernel.py             d54d70c049f3 */
   "\x01\x00\x00\x01\x01\x00\x01\x00\x01\x00\x02\x02\x03\x03\x03\x03\x03\x03"
