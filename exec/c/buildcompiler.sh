@@ -92,7 +92,7 @@ pack() {
     # Only packaging needs the classic seed; never race its creation in target jobs.
     . ./tests/lib.sh
     b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R" # caller-selected UA honored
-    b python3 exec/c/compilerpack.py --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    b python3 exec/c/compilerpack.py --no-model-cache --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
     b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" -o "$T/unisacc-next.com"
     [ -s "$T/compiler.pkg" ] && [ -s "$T/unisacc-next.com" ]
     manifest check shared

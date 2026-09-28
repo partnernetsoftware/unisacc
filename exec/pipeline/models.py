@@ -11,13 +11,9 @@ def digest(path):
             h.update(chunk)
     return h.hexdigest()
 
-def identity(target, network, compiler):
-    exe = pathlib.Path(shutil.which(compiler) or compiler).resolve(strict=True)
-    version = subprocess.run([str(exe), '--version'], capture_output=True, timeout=5, check=True)
-    h = hashlib.sha256(json.dumps([str(ROOT), target, network, str(exe), digest(exe),
-                                  platform.platform(), sys.version, version.stdout.hex()]).encode())
-    # Conservative dependency closure: includes imported Python, embedded C
-    # templates, gold tables, carried headers and the inference verifier.
+def closure(h):
+    """Conservative dependency closure: includes imported Python, embedded C
+    templates, gold tables, carried headers and the inference verifier."""
     for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights'):
         for path in sorted((ROOT / directory).rglob('*')):
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
@@ -26,7 +22,14 @@ def identity(target, network, compiler):
     path = ROOT / 'iterate/kernel/typekw.tsv'
     h.update(str(path.relative_to(ROOT)).encode() + b'\0')
     h.update(bytes.fromhex(digest(path)))
-    return h.hexdigest()
+    return h
+
+def identity(target, network, compiler):
+    exe = pathlib.Path(shutil.which(compiler) or compiler).resolve(strict=True)
+    version = subprocess.run([str(exe), '--version'], capture_output=True, timeout=5, check=True)
+    h = hashlib.sha256(json.dumps([str(ROOT), target, network, str(exe), digest(exe),
+                                  platform.platform(), sys.version, version.stdout.hex()]).encode())
+    return closure(h).hexdigest()
 
 def valid(cache, network):
     try:
