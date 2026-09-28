@@ -76,3 +76,5 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
     image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels})
     install_rules(g, Path(__file__).parent, 'elfimage', bindings=image_bindings,
                   sequences=image_sequences, section='output-common')
+    from librarysymbols import install as install_librarysymbols
+    install_librarysymbols(E, OFF, LABD, direct_labels, image_bindings['EI_loop_b0'])
