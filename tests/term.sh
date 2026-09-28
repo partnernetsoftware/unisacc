@@ -20,9 +20,9 @@ if [ "$TERM_SH_ALARM" -lt 1 ] || [ "$TERM_SH_ALARM" -gt 60 ]; then
     echo 'term.sh: timeout must be from 1 to 60 seconds' >&2; exit 2
 fi
 if [ "$(uname -s)" != Darwin ] || [ "${TERM_SH:-1}" = 0 ] || [ -n "${TERM_SH_INSIDE:-}" ]; then
-    exec perl "$(dirname "$0")/bound.pl" "$TERM_SH_ALARM" "$@"
+    exec python3 "$(dirname "$0")/bound.py" "$TERM_SH_ALARM" "$@"
 fi
-BOUND=$(cd "$(dirname "$0")" && pwd)/bound.pl
+BOUND=$(cd "$(dirname "$0")" && pwd)/bound.py
 d=$(mktemp -d); q=""
 started=$(date +%s)
 deadline=$((started + TERM_SH_ALARM))
@@ -32,7 +32,7 @@ cat > "$d/run.sh" <<EOS
 cd '$(pwd)'
 TERM_SH_INSIDE=1; export TERM_SH_INSIDE
 if [ \$(date +%s) -ge $deadline ]; then echo 142 > '$d/rc'; exit 142; fi
-perl '$BOUND' $TERM_SH_ALARM $q > '$d/out' 2>&1 &
+python3 '$BOUND' $TERM_SH_ALARM $q > '$d/out' 2>&1 &
 echo \$! > '$d/pid'
 wait \$!
 echo \$? > '$d/rc.tmp' && mv '$d/rc.tmp' '$d/rc'
@@ -55,49 +55,46 @@ done
 sed -i '' "2i\\
 . '$d/env'
 " "$d/run.sh"
-perl "$BOUND" 5 osascript -e "tell application \"Terminal\" to do script \"'$d/run.sh'; exit\"" >/dev/null 2>&1 || {
-    rm -rf "$d"; exec perl "$BOUND" "$TERM_SH_ALARM" "$@"; }
+python3 "$BOUND" 5 osascript -e "tell application \"Terminal\" to do script \"'$d/run.sh'; exit\"" >/dev/null 2>&1 || {
+    rm -rf "$d"; exec python3 "$BOUND" "$TERM_SH_ALARM" "$@"; }
 # One polling process streams output; no per-poll date/wc/tail subprocesses.
-perl - "$d" "$deadline" <<'PERL'
-use strict;
-use warnings;
-use Time::HiRes qw(time sleep);
-my ($dir, $deadline) = @ARGV;
-$| = 1;
-my $position = 0;
-sub drain {
-    if (open(my $out, '<', "$dir/out")) {
-        binmode $out; seek($out, $position, 0);
-        my $bytes;
-        while (read($out, $bytes, 65536)) {
-            print $bytes; $position += length($bytes);
-            last if time >= $deadline;
-        }
-        close $out;
-    }
-}
-sub stop {
-    my ($rc) = @_;
-    if (open(my $pidfile, '<', "$dir/pid")) {
-        my $pid = <$pidfile>; close $pidfile;
-        if (defined($pid) && $pid =~ /^([0-9]+)\s*$/) { kill 'TERM', $1; }
-    }
-    drain();
-    print STDERR "term.sh: stopped (rc $rc; log: $dir/out)\n";
-    exit $rc;
-}
-$SIG{INT} = sub { stop(130) };
-$SIG{TERM} = sub { stop(143) };
-while (1) {
-    drain();
-    if (open(my $result, '<', "$dir/rc")) {
-        my $rc = <$result>; close $result;
-        drain(); exit int($rc);
-    }
-    stop(142) if time >= $deadline;
-    sleep .1;
-}
-PERL
+python3 - "$d" "$deadline" <<'PYWATCH'
+import os, pathlib, signal, sys, time
+root = pathlib.Path(sys.argv[1]); deadline = float(sys.argv[2]); position = 0
+
+def drain():
+    global position
+    try:
+        with (root/'out').open('rb') as f:
+            f.seek(position)
+            while time.time() < deadline:
+                chunk = f.read(65536)
+                if not chunk: break
+                sys.stdout.buffer.write(chunk); sys.stdout.buffer.flush()
+                position += len(chunk)
+    except FileNotFoundError:
+        pass
+
+def stop(rc):
+    try:
+        os.kill(int((root/'pid').read_text()), signal.SIGTERM)
+    except (FileNotFoundError, ProcessLookupError):
+        pass
+    drain()
+    print(f'term.sh: stopped (rc {rc}; log: {root}/out)', file=sys.stderr)
+    raise SystemExit(rc)
+
+signal.signal(signal.SIGINT, lambda *_: stop(130))
+signal.signal(signal.SIGTERM, lambda *_: stop(143))
+while True:
+    drain()
+    try:
+        rc = int((root/'rc').read_text()); drain(); sys.exit(rc)
+    except FileNotFoundError:
+        pass
+    if time.time() >= deadline: stop(142)
+    time.sleep(.1)
+PYWATCH
 rc=$?
 # Preserve failed logs for diagnosis; successful handoffs need no temporary tree.
 [ "$rc" != 0 ] || rm -rf "$d"

@@ -7,7 +7,7 @@ flagset=sys.argv[5] if len(sys.argv)==6 else 'all'
 assert len(sys.argv) in (4,5,6) and kind in ('all','cc','ua','asm') and flagset in ('all','Wall','Wextra','Werror'), 'invalid warning driver/flag selection'
 drivers=['cc','ua','asm'] if kind=='all' else [kind]
 root=pathlib.Path(__file__).resolve().parents[2]
-def run(a):return subprocess.run(['perl',str(root/'tests/bound.pl'),'15',*map(str,a)],capture_output=True)
+def run(a):return subprocess.run(['python3',str(root/'tests/bound.py'),'15',*map(str,a)],capture_output=True)
 def equal(a,b):
     assert (a.returncode,a.stdout,a.stderr)==(b.returncode,b.stdout,b.stderr),(a.args,a.returncode,len(a.stdout),a.stderr[-1800:],b.returncode,len(b.stdout),b.stderr[-1800:])
 f=p/'warn.c';clean=p/'clean.c';hdr=p/'inside.h'

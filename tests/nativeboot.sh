@@ -20,7 +20,7 @@ case "${1:-}" in
     --windows)
         case "${2:-}" in win/arm64|win/x86_64) ;; *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;; esac
         # One independently scheduled VM proof, including transfer/poll overhead.
-        exec perl "$R/tests/bound.pl" 55 bash "$0" --windows-step "$2";;
+        exec python3 "$R/tests/bound.py" 55 bash "$0" --windows-step "$2";;
     --windows-step) mode=windows;;
     *) echo "usage: $0 [--windows win/arm64|win/x86_64]"; exit 2;;
 esac

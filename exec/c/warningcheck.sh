@@ -8,7 +8,7 @@ case $FLAG in all|Wall|Wextra|Werror) ;; *) echo 'unknown warning flag shard' >&
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 . ./tests/lib.sh; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-b() { perl "$R/tests/bound.pl" 45 "$@"; }
+b() { python3 "$R/tests/bound.py" 45 "$@"; }
 case $(uname -s) in Darwin) OS=osx;; Linux) OS=lnx;; *) exit 1;; esac
 case $(uname -m) in arm64|aarch64) ARCH=arm64;; x86_64) ARCH=x86_64;; *) exit 1;; esac
 TARGET=$OS/$ARCH; export TARGET

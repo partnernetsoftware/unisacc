@@ -14,7 +14,7 @@ if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
 out.mkdir(parents=True, exist_ok=False)
 
 def run(args):
-    return subprocess.run(["perl", str(R / "tests/bound.pl"), "10", *map(str, args)],
+    return subprocess.run(["python3", str(R / "tests/bound.py"), "10", *map(str, args)],
                           capture_output=True)
 
 def chain(source, stages):

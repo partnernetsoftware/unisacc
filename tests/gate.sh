@@ -14,7 +14,7 @@ if [ "$(uname -s)" = Darwin ] && [ -z "${TERM_SH_INSIDE:-}" ] && [ "${TERM_SH:-1
 fi
 # Also bound direct/non-macOS calls, including queueing and final collection.
 if [ "${GATE_BOUND:-0}" != 1 ]; then
-    exec perl "$R/tests/bound.pl" 60 env GATE_BOUND=1 "$0" "$@"
+    exec python3 "$R/tests/bound.py" 60 env GATE_BOUND=1 "$0" "$@"
 fi
 COM=0; LIST=0; SELECT=""
 while [ $# -gt 0 ]; do
@@ -53,7 +53,7 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do sleep 0.1; done
     n=$((n+1)); f="$O/$(printf %03d $n).$name"
     ( t0=$(date +%s)
-      out=$(perl "$R/tests/bound.pl" 60 env "$@" 2>&1); rc=$?
+      out=$(python3 "$R/tests/bound.py" 60 env "$@" 2>&1); rc=$?
       printf '%-14s rc=%-3s %3ss :: %s\n' "$name" "$rc" "$(( $(date +%s)-t0 ))" \
           "$(printf '%s' "$out" | grep -v '^ *$' | tail -1)" > "$f" ) &
 }
@@ -113,6 +113,7 @@ job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source
 for part in stages chain resources; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
 job exec-net python3 ./exec/c/netcheck.py
 job modelbenchcheck python3 ./tests/modelbenchcheck.py       # performance evidence fails on functional errors
+job bound python3 ./tests/boundcheck.py
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults
 job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external linkage and ISA byte ledger
 job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel

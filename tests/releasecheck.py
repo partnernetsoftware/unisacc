@@ -4,7 +4,7 @@ import hashlib,json,os,pathlib,shutil,subprocess,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='release-contract-') as td:
     p=pathlib.Path(td);t=p/'tests';t.mkdir()
-    for name in ('release.sh','bound.pl'):shutil.copy2(ROOT/'tests'/name,t/name)
+    for name in ('release.sh','bound.py'):shutil.copy2(ROOT/'tests'/name,t/name)
     candidate=p/'candidate';candidate.write_text('#!/bin/sh\nexit 0\n');candidate.chmod(0o755)
     reference=p/'reference';shutil.copy2(candidate,reference)
     (t/'gatequeue.py').write_text('''import json,os,pathlib,sys

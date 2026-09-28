@@ -8,7 +8,7 @@ step=${2:-all}
 case $step in all|shared|pack|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
 [ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
 mkdir -p "$1"; T=$(cd "$1" && pwd)
-b() { perl "$R/tests/bound.pl" 50 "$@"; }
+b() { python3 "$R/tests/bound.py" 50 "$@"; }
 # Reuse the model preparation identity/digest implementation. These are completion
 # records, not a result cache: requested stages always rebuild their own outputs.
 manifest() {
@@ -103,7 +103,7 @@ pack() {
 case $step in
     all)
         # One process-tree budget for the entire build, including all children.
-        perl "$R/tests/bound.pl" 55 sh -c '
+        python3 "$R/tests/bound.py" 55 sh -c '
             set -eu
             script=$1; out=$2
             pair() {

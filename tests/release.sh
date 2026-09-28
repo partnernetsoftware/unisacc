@@ -22,7 +22,7 @@ esac
 [ -f "$MODEL_COM" ] && [ -x "$MODEL_COM" ] && [ -s "$MODEL_COM" ] || { echo 'release: missing/empty/non-executable MODEL_COM' >&2; exit 2; }
 [ "$UA" != /tmp/ua_ref ] && [ -f "$UA" ] && [ -x "$UA" ] || { echo 'release: UA must be an existing private reference' >&2; exit 2; }
 if [ "${RELEASE_BOUND:-0}" != 1 ]; then
-    exec perl "$R/tests/bound.pl" 55 env RELEASE_BOUND=1 "$0" "$@"
+    exec python3 "$R/tests/bound.py" 55 env RELEASE_BOUND=1 "$0" "$@"
 fi
 MODEL_COM=$(cd "$(dirname "$MODEL_COM")" && printf '%s/%s' "$PWD" "$(basename "$MODEL_COM")")
 export MODEL_COM UA STRICT=1

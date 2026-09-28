@@ -123,7 +123,7 @@ def main():
                 n = max(alone or fits, key=estimate); pending.remove(n)
                 limit = max(1, int(left)-1)
                 log = (state/(n+'.log')).open('wb')
-                p = subprocess.Popen(['perl','tests/bound.pl',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT)
+                p = subprocess.Popen(['python3','tests/bound.py',str(limit),'env','PYTHONUNBUFFERED=1',*jobs[n]],stdout=log,stderr=subprocess.STDOUT)
                 active[n] = (p, log, time.monotonic(), limit)
                 print('START',n,'limit='+str(limit),flush=True)
                 left = deadline-time.monotonic()

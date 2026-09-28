@@ -26,14 +26,15 @@ for f in tests/c/*.c examples/*.c; do
 done
 [ "${#FILES[@]}" -gt 0 ] || { echo "empty SHARD=$SHARD" >&2; exit 2; }
 ua_ready
-perl "$R/tests/bound.pl" 10 "$CC" --version > "$T/cc-version" 2>&1 || { echo 'FAIL cc version'; exit 1; }
+python3 "$R/tests/bound.py" 10 "$CC" --version > "$T/cc-version" 2>&1 || { echo 'FAIL cc version'; exit 1; }
 CCV=$(head -1 "$T/cc-version")
 # Preserve normal exits 0..255, but reject signals and watchdog timeouts.
 # The raw wait status avoids confusing e.g. exit(142) with SIGALRM.
 run() { # output, error, command...
     local out=$1 err=$2 status; shift 2
-    perl "$R/tests/bound.pl" 10 perl -e 'my $p=shift; system @ARGV; my $s=$?;
-        open my $f, ">", $p or die $!; print {$f} $s;' "$out.status" "$@" \
+    python3 "$R/tests/bound.py" 10 python3 -c 'import os,pathlib,sys; p=sys.argv[1]; child=os.fork()
+if child==0: os.execvp(sys.argv[2],sys.argv[2:])
+_,status=os.waitpid(child,0); pathlib.Path(p).write_text(str(status))' "$out.status" "$@" \
         > "$out" 2> "$err" </dev/null || return 1
     status=$(cat "$out.status")
     [[ "$status" =~ ^[0-9]+$ ]] && [ $((status & 127)) -eq 0 ] || return 1
@@ -57,7 +58,7 @@ for f in "${FILES[@]}"; do
     key="$CACHE/$( (cat "$D/ref.c"; echo "wait-status-v2 $CCV -O2") | shasum | cut -c1-40)"
     if [ -f "$key" ]; then cp "$key" "$D/want"
     else
-        if ! perl "$R/tests/bound.pl" 20 "$CC" -w -std=c99 -O2 -o "$D/ref" "$D/ref.c" -lm > "$D/cc.out" 2> "$D/cc.err" || [ ! -s "$D/ref" ]; then
+        if ! python3 "$R/tests/bound.py" 20 "$CC" -w -std=c99 -O2 -o "$D/ref" "$D/ref.c" -lm > "$D/cc.out" 2> "$D/cc.err" || [ ! -s "$D/ref" ]; then
             echo 'reference compile failed' > "$D/v"; exit 0; fi
         if ! (cd "$D" && run "$D/want" "$D/ref.err" ./ref); then
             echo 'reference run signaled/timed out' > "$D/v"; exit 0; fi

@@ -30,5 +30,5 @@ PY
 [ -n "$led" ] && echo "$led"
 echo "docs  referee ledger $([ -z "$led" ] && echo ok || echo STALE)"
 model_rc=0
-perl "$R/tests/bound.pl" 60 python3 tests/modelbytes.py || model_rc=$?
+python3 "$R/tests/bound.py" 60 python3 tests/modelbytes.py || model_rc=$?
 [ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ]

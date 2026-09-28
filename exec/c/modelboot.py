@@ -4,10 +4,9 @@ MODEL_COM must explicitly name the finished model container. Run prepare,
 bootstrap and probe separately against the same private output directory.
 Python only snapshots, checks package framing, invokes tools and compares bytes.
 """
-import argparse, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, time
+import argparse, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 R = pathlib.Path(__file__).resolve().parents[2]
 START = time.monotonic()
-PERL = shutil.which('perl')
 PROBE = '#include <stdio.h>\nint fib(int n){return n<2?n:fib(n-1)+fib(n-2);}\nint main(void){printf("%d %u %d\\n",fib(10),4294967295u,(int)(unsigned char)257);return 0;}\n'
 
 def digest(data): return hashlib.sha256(data).hexdigest()
@@ -20,7 +19,7 @@ def call(args, env=None, okay=True):
     if env is not None:
         # Keep the watchdog's own process-discovery tools available; isolate its child.
         command=['/usr/bin/env','-u','UNISA_KERNEL','PATH=',*command]
-    p=subprocess.run([PERL,str(R/'tests/bound.pl'),str(seconds),*command],
+    p=subprocess.run([sys.executable,str(R/'tests/bound.py'),str(seconds),*command],
                      capture_output=True,timeout=seconds+2,cwd=OUT)
     if okay: require(p.returncode==0,f'{args}: rc={p.returncode}, stderr={p.stderr[-1500:]!r}')
     return p

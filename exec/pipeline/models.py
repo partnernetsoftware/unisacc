@@ -59,7 +59,7 @@ def prepare(out, target, network, compiler):
         if not hit:
             work = pathlib.Path(tempfile.mkdtemp(prefix=key + '.build-', dir=base))
             try:
-                subprocess.run(['perl', str(ROOT / 'tests/bound.pl'), '60', 'sh',
+                subprocess.run(['python3', str(ROOT / 'tests/bound.py'), '60', 'sh',
                                 str(ROOT / 'exec/pipeline/prepare.sh'), str(work),
                                 target, network, compiler], cwd=ROOT, check=True)
                 manifest = {p.name: digest(p) for p in sorted(work.iterdir()) if p.is_file()}

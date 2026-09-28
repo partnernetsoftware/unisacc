@@ -17,7 +17,7 @@ SOURCES = {
 }
 
 def run(args, seconds=15, data=None, okay=True):
-    p = subprocess.run(['perl', str(R/'tests/bound.pl'), str(seconds), *map(str,args)],
+    p = subprocess.run(['python3', str(R/'tests/bound.py'), str(seconds), *map(str,args)],
                        input=data, capture_output=True, timeout=seconds+3)
     if okay and (p.returncode or b'Error from event:' in p.stderr):
         raise RuntimeError(f'{args}: rc={p.returncode} {p.stderr.decode(errors="replace")[-2000:]}')

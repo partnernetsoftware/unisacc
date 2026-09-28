@@ -67,9 +67,9 @@ with tempfile.TemporaryDirectory() as td:
     jobs={'candidate':[sys.executable,'-c','import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("ran")',str(marker)]}
     # Keep real content hashing independent of concurrent repository edits.
     fixture=t/'queue-source';(fixture/'tests').mkdir(parents=True)
-    (fixture/'tests/bound.pl').write_bytes((ROOT/'tests/bound.pl').read_bytes())
+    (fixture/'tests/bound.py').write_bytes((ROOT/'tests/bound.py').read_bytes())
     subprocess.run(['git','init','-q',str(fixture)],check=True,timeout=5)
-    subprocess.run(['git','-C',str(fixture),'add','tests/bound.pl'],check=True,timeout=5)
+    subprocess.run(['git','-C',str(fixture),'add','tests/bound.py'],check=True,timeout=5)
     previous_cwd=pathlib.Path.cwd()
     with patch.object(q,'ROOT',fixture), patch.dict(os.environ,environment,clear=True):
         os.chdir(fixture)

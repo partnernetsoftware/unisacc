@@ -13,7 +13,7 @@ assert (platform.system(), platform.machine()) == ("Darwin", "arm64")
 out.mkdir(parents=True, exist_ok=False)
 
 def run(args, **kw):
-    return subprocess.run(["perl", str(R / "tests/bound.pl"), "10", *map(str, args)], capture_output=True, **kw)
+    return subprocess.run(["python3", str(R / "tests/bound.py"), "10", *map(str, args)], capture_output=True, **kw)
 
 def tokens(source):
     p = run([dump, "-dump-tokens", source], env=dict(os.environ, UA_TYPESPELL="1"))
