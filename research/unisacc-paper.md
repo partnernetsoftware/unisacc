@@ -389,6 +389,7 @@ tape 被 lower 到六个目标后，每个镜像由**按该目标 ABI 解释**�
 | S-17 冻结候选 | 网络编译器的首个冻结候选，6,279,167 B，SHA-256 `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`；§4.3 的改前数字属于它（[证据](s17-final-evidence.json)） |
 | v0.0.8 | 提交 `10672e3`，5,388,402 B，SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`，未签名发布 |
 | v0.0.9 | 发布 `a606ff4`，`unisacc.com` 1,233,236 B，SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`；193/193 本地门禁；表 2（[结构审计](r9-pipeline-structure-prune.json)）|
+| v0.0.10 | 冻结源 `fdff9c5`，`unisacc.com` 1,152,711 B（较 v0.0.9 −6.5%），SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`；24 个部署网络全域网络—表相等；进程内库 libunisacc 与跨来源 typed 导入（USLCALL3 别名）；本地门禁与平台/签名范围见 [发布回执](r10-release-acceptance.json) |
 | 历史候选 | 剪枝前候选 `d61d0153…` 与 `7608a31b…` 的结构与门禁记录见 [`archive/paper-a-history.md`](../archive/paper-a-history.md) |
 
 **数据来源。** 表 4 前两行：[基准](r9-current-bench-20260928.json)（剪枝前候选 `c4993fd0…`）；后两行：两项运行时改进之后的产物 `c94cf5fe…`。按需保留库函数的验收：[账本](r9-e2-libneed-acceptance-20260928.json)。尺寸改动：[压缩](compression-integrated-bench-20260928.json)、[单次内存镜像](memory-once-integrated-bench-20260928.json)。外部裁判登记：[referee.tsv](referee.tsv)。形式化：[formalization-roadmap.md](formalization-roadmap.md)、`research/lean/`。文献细目：`prior-art.md`。
