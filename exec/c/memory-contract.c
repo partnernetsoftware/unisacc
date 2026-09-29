@@ -22,6 +22,7 @@ static BOOL VirtualProtect(void *a,SIZE_T n,DWORD prot,DWORD *old) { (void)a;(vo
 static HANDLE GetCurrentProcess(void) { return (HANDLE)1; }
 static BOOL FlushInstructionCache(HANDLE h,const void *a,SIZE_T n) { (void)h;(void)a;(void)n;return 1; }
 #define UNISA_MEMORY_CONTRACT_DOUBLE
+#define _WIN32
 #include "memory.c"
 int main(int n,char **v) {
  mode=n>1?atoi(v[1]):0;
