@@ -2,7 +2,7 @@
 """Cross-assemble both ELF bridges and compare instruction bytes with Mach-O.
 This is format/symbol evidence, not native Linux execution evidence.
 """
-import argparse, json, os, pathlib, shutil, struct, subprocess, tempfile
+import argparse, json, os, pathlib, re, shutil, struct, subprocess, tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 def call(args,ok=True):
     p=subprocess.run(list(map(str,args)),capture_output=True,timeout=15)
@@ -31,6 +31,21 @@ def text(blob):
             pos+=size
     raise AssertionError('missing text')
 
+BR=re.compile(r"^(j\w+|b\w*|call\w*|bl|br|ret|cbz|cbnz|tbz|tbnz)$")
+def insns(objdump,path):
+    """Instructions of an object, normalised for ELF vs Mach-O comparison: drop
+    branch targets (rel8 vs rel32), symbol annotations and the '//' vs ';' comment
+    marker.  Rationale: research/r12-linuxbridgecheck-diagnosis.md."""
+    out=subprocess.run(list(map(str,[objdump,'-d',path])),capture_output=True,timeout=15).stdout.decode()
+    r=[]
+    for l in out.splitlines():
+        m=re.match(r"\s*[0-9a-f]+:\s+[0-9a-f ]+\t(\S+)(.*)",l)
+        if not m:continue
+        op=m.group(1);rest=re.split(r"//|;",m.group(2))[0]
+        rest=" ".join(re.sub(r"<[^>]*>","",rest).split()).rstrip(",")
+        r.append(op if BR.match(op) else (op+" "+rest).strip())
+    return r
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--evidence',type=pathlib.Path);a=ap.parse_args()
     llvm=pathlib.Path(os.environ.get('LLVM_BIN','/opt/homebrew/opt/llvm/bin'))
@@ -44,7 +59,9 @@ def main():
             call(['clang','-target',target,'-c',src,'-o',elf]);call(['clang','-arch',arch,'-c',src,'-o',mac])
             old=d/(arch+'-old.S');old.write_bytes(call(['git','-C',ROOT,'show','HEAD:exec/c/'+src.name]).stdout)
             baseline=d/(arch+'-old.o');call(['clang','-arch',arch,'-c',old,'-o',baseline])
-            assert text(elf.read_bytes())==text(mac.read_bytes())==text(baseline.read_bytes())
+            ei,mi,bi=insns(objdump,elf),insns(objdump,mac),insns(objdump,baseline)
+            assert ei==mi==bi,('instruction streams differ',arch,
+                next(((x,y) for x,y in zip(ei,mi) if x!=y),('len',len(ei),len(mi))))
             symbols=call([readelf,'-sSW',elf]).stdout.decode()
             assert 'FUNC    GLOBAL DEFAULT' in symbols and ' us_library_bridge_raw' in symbols
             assert ' _us_library_bridge_raw' not in symbols
@@ -54,7 +71,7 @@ def main():
             for windows in ('aarch64-windows-msvc','x86_64-windows-msvc'):
                 bad=call(['clang','-target',windows,'-c',src,'-o',d/'bad.o'],ok=False)
                 assert bad.returncode!=0 and b'does not implement the Windows host ABI' in bad.stderr
-            rows.append(dict(arch=arch,text_bytes=len(text(elf.read_bytes())),symbols='ELF GLOBAL FUNC',instruction_bytes='unchanged Mach-O baseline',gnu_stack='non-executable',windows='rejected'))
+            rows.append(dict(arch=arch,text_bytes=len(text(elf.read_bytes())),symbols='ELF GLOBAL FUNC',instruction_bytes='same instruction stream as Mach-O baseline',gnu_stack='non-executable',windows='rejected'))
     if a.evidence:a.evidence.write_text(json.dumps(rows,indent=2)+'\n')
     print(json.dumps(rows))
 if __name__=='__main__':main()

@@ -367,6 +367,11 @@ job tsv-build-account     python3 ./tests/tsvbuild_check.py
 # stages over one small program and calls check_<fmt>.py on each produced dump,
 # so a format checker that starts rejecting valid output fails here.
 job exec-formats python3 ./exec/pipeline/run.py examples/hello.c
+# The last check that was in no gate AND failing on this HEAD: it cross-assembles
+# librarycall_<arch>.S for a Linux target and an Apple target and requires the
+# same instruction stream.  It failed for a year of commits' worth of reasons
+# that were not drift -- see research/r12-linuxbridgecheck-diagnosis.md.
+job exec-bridge-linux python3 ./exec/c/linuxbridgecheck.py
 job windows-resolver-host python3 ./tests/windowsresolverhostcheck.py
 if [ "$COM" = 1 ]; then
     PRODUCT=${MODEL_COM-$R/unisacc.com}
