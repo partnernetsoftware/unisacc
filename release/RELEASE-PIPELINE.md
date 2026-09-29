@@ -32,7 +32,10 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 - Linux：`SUITE_LIMIT=55 JOBS=2 ./tests/linux.sh all`（linux.sh 默认 900 s 与 all.sh 上限 60 冲突，必须显式给 55）。`default`（4 GiB）跑不动两个 2.2 GB 的 Python 自编译（bigclosure/ape），要么 JOBS=1，要么用 8 GiB 的 `minicon-lnx-aarch64`（需 gcc/clang/libffi-dev/perl(shasum)，用后 `limactl stop`）。
 - Windows：`utmctl start minicon-win-arm-64`，`./tests/term.sh env UA=… STRICT=0 ./tests/crossnative.sh examples/*.c`（全探针超 60 s；utmctl 的 AppleEvents 只在 Terminal 内可用）。`nativeboot.sh --windows` 同样要 Terminal。用后 `utmctl stop`。
 
-## 5. CI（一次 push）
+## 5. CI（一次 push；2026-09-29 起为 minicon 模式）
+- push 只触发 `release-check.yml`（约 1 分钟：预检、权重构造、ELF 实跑；若 `release/candidate.json` 封存了 GHCR 摘要，再在 ubuntu/macos 拉取候选实跑）。全量 `ci.yml` 每周一定时或手动，是安全网不是前提。
+- `windows-signing.yml` 的上游是 release-check 的 run（id/attempt），main 按产品源闭包摘要比对；文档提交不打断签名。实测 push→签完约 4 分钟。
+- GHCR 封存：`gh auth refresh -s write:packages` 一次后 `oras push ghcr.io/partnernetsoftware/unisacc-candidate:<v> unisacc.com unisacc.com.build.json model-audit/models.json`，把摘要写进 `release/candidate.json`。
 `ci.yml` 先跑 `ciplancheck/ci_shard_plan/opt_partition_check`，再按 `all.sh --list` 逐套件 55 s。托管 runner 的 Python 参考 VM 约慢 4 倍：探针规模按 45 s 参考上限设计（b_malloc 已缩）。selfhost 在 `SELFHOST_STATE` 未准备时回退自建（acceptance8 在 prepare 之前运行）。
 
 ## 6. Apple 签名与公证
