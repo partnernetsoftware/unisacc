@@ -24,7 +24,7 @@ def main():
     table = {}
     for n in programs:
         cells = {lab: r['programs'].get(n) for lab, r in zip(labels, recs)}
-        table[n] = {lab: (None if c is None else {'rc': c['rc'], 'sha': c['stdout_sha256'][:12], 'ok': c['ok'], 'seconds': c['seconds'], 'reference': c.get('reference')}) for lab, c in cells.items()}
+        table[n] = {lab: (None if c is None else {'rc': c['rc'], 'sha': c['stdout_sha256'][:12], 'ok': c['ok'], 'seconds': c['seconds'], 'reference': c.get('reference'), 'unsupported': c.get('unsupported')}) for lab, c in cells.items()}
         det = [c for c in cells.values() if c and c['kind'] == 'deterministic']
         if det and len({c['stdout_sha256'] for c in det}) != 1:
             problems.append(f'{n}: deterministic output differs across machines')
@@ -34,7 +34,7 @@ def main():
     w = max(len(n) for n in programs) if programs else 8
     print('program'.ljust(w), *[l[:14].ljust(14) for l in labels])
     for n in programs:
-        print(n.ljust(w), *[('-' if c is None else ('ok ' if c['ok'] else 'FAIL') + ' ' + c['sha'][:6] + (' *' if c['reference'] == 'match' else '  ')).ljust(14) for c in table[n].values()])
+        print(n.ljust(w), *[('-' if c is None else ('n/a ' if c.get('unsupported') else ('ok ' if c['ok'] else 'FAIL')) + ' ' + c['sha'][:6] + (' *' if c['reference'] == 'match' else '  ')).ljust(14) for c in table[n].values()])
     print(matrix['status'], *problems, sep='\n' if problems else ' ')
     return 0 if not problems else 1
 

@@ -60,6 +60,11 @@ def main():
             ok = rc == 0 and r['reference'] != 'MISMATCH'
         elif kind == 'exit0':
             ok = rc == 0 and len(out) > 0
+        elif rc == 1 and b'on this platform' in err and not out:
+            # The system apps refuse platforms whose facts they cannot collect themselves
+            # (Windows: no /proc, no libproc); an explicit refusal is a recorded outcome, not a failure.
+            r['unsupported'] = err.decode(errors='replace').strip()[-160:]
+            ok = True
         else:
             ok = rc == 0 and len(out) > 0
             try:
