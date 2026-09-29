@@ -224,7 +224,24 @@
 
 **v0.0.11 收口（2026-09-29）**：R11-0 六片中 ①②③④ [v]、⑤⑥ [-] 显式顺延（设计与理由已记）；R11-3 默认切换 [v]（默认住在 E2 网络）、R11-2 关系账 [v]、R11-1/4/5/7 [-] 部分或顺延、R11-8 在 0.0.10 已落地并在本轮补“每片重封”。发布：源 `8b5abc9`，候选 `6a3dfce2…`（1,154,605 B，全量 338 项绿），release-check 36578604287；Windows qualification 36578789928、company 36578976300（签后 `unisacc.com` 1,170,384 B，SHA `e86cc61c…`）；Apple app zip `5039e4d4…`、dmg `7001ea5d…` 公证 Accepted 并 staple。验收 `research/r11-release-acceptance.json`；发布状态见该文件 `publication_status`。
 
-### v0.0.12 计划（收集中，2026-09-29 起；只登记 0.0.11 过程中的新经验与新问题，不在本轮实施）
+### v0.0.12 计划树（2026-09-29 v0.0.11 发布后梳理；来源=下表收集项 + 0.0.11 的全部 [-] 回执）
+
+**基线**：v0.0.11（tag 8b5abc9，签后 `unisacc.com` e86cc61c…，未签候选 6a3dfce2…，本地 338/338）。**原则**：每项有红例/判据、私有候选、受影响门禁、根产物、回执；默认值住在网络里；exec/ 全部改动先提交再构造候选；每片装根后重封 GHCR。**执行顺序**：R12-0 → R12-1 → R12-2 → R12-3 → R12-4 → R12-5 → R12-6 → R12-7（发布）。**停止条件**：R12-0..R12-6 各有 [v]/[-] 回执后走快链发布；超出的显式顺延 0.0.13 并写理由。
+
+| 项 | 内容（子项按做的顺序） | 判据 |
+|---|---|---|
+| R12-0 测试与流水线债（先修，便宜且影响后面所有队列） | ① `exec-memory-cc-1` 并行下偶发：查 memorycheck.py 的临时路径/时间/端口依赖，加确定性断言；② `exec-bindx86` 拆分（blob 构造、netcheck、elf 四例、o1 打包、编译器编译分三个作业）使热缓存 ≤35 s；③ 未入门禁的检查清点：`exec/pp/ftrimcheck.py` 等凡 `grep -L` 不在 gate.sh/all.sh 的检查脚本，要么入门禁要么删除；④ gatequeue stamp 细化：按 job 声明依赖 + 环境白名单，误触不再清空全部；⑤ term.sh 交接窗口自关或改无窗口豁免通道；⑥ release-check 候选作业“闭包不一致”改为带说明的跳过（tag 推送硬判）；⑦ windows-signing qualification 的本地演练脚本（gh api 只读 + 断言） | 三轮全量队列无偶发红；独占套件全部 ≤35 s；`tests/gate.sh --list` 覆盖 exec/ 下每个 *check* 脚本或有删除记录；一次误触只失效相关 job |
+| R12-1 库 ABI 收尾（0.0.11 顺延的模型工作） | ① **出站 general BANK 第一片**（按 `research/r11-bank-design.md`）：`BNK1` 计划记录 + 计数器分配器（Python oracle 先行）+ x86_64 SysV 网关与见证被调函数对照程序；首绿两族：SysV 5 字节 packed 按 MEMORY、SysV {u64,double} GP 用尽整体进栈；负例清单照报告；② BANK 第二片：AAPCS64 网关（mac-a64 子 8 字节栈标量在探针前拒绝）；③ packed 余域：packed 内 FP 叶/HFA 实测后放行或明确拒绝、降对齐位域、Win64 packed 客机实测；④ 递归 pointee 图（回引/环）、限定符、`void*` 通配策略；⑤ 源码 `#pragma pack`：源码事实链表达有效对齐后放行 origin1 packed | 每片：独立 oracle + 真实探针 3 档压力×100×O0/O1/O2 ASan/UBSan 两 ISA；受影响门禁绿；载体路由已接受类字节不变（回归夹具逐字节比对） |
+| R12-2 libunisacc 引擎能力（R11-1 顺延） | ① “代”对象：image+exports+callables+carrier 按代持有，`us_sym` 返回的句柄可重定向；② `us_eval(ctx, name, source)`：追加单元、重编译成新代、旧代保留到 `us_free`；③ `us_reload`：换代时改写句柄目标，下一次调用走新代；④ `us_opt_verify`：待 FX-1 tape 包格式定稿后做加载前校验（只允许声明过的 syscall 与注入符号）；⑤ 绑定：Python ctypes 示例宿主整理成 `examples/host/`（现有六个门禁已是宿主），Rust crate 示例 | 增量定义后可调用；热替换后下一次调用走新代且旧指针不悬空（ASan）；校验开启时恶意 tape 被拒、合法程序逐字节同；示例宿主在 osx/arm64、Rosetta、lnx/arm64 三处原生跑 |
+| R12-3 Windows 与六平台矩阵（⑥ 顺延 + 平台义务） | ① CI `windows-latest`（MSVC）作业：编译 `windowslibraryfaultnative.c` 五例（null 写、div0、显式 exit、回调内故障、线程内故障）与生命周期探针 `_WIN32` 分支，故障隔离用调用帧内 scoped vectored handler；② 六平台生命周期矩阵驱动 `librarylifecyclematrix.py`，逐格写 JSON（本机 osx/arm64、Rosetta、Lima arm64/x86_64；CI ubuntu、macos、windows）；③ 单架构产物在原生 runner 跑完整套件（GHCR 摘要 + ubuntu x86_64 / macos arm64）；④ `windowslibraryvmcheck.py` 的 powershell 驱动改 cmd 批处理；⑤ 客机残留清理与 `tests/vms.sh` 覆盖 Lima x86_64 | 六格生命周期 JSON 齐全且状态为实跑；Windows 故障五例宿主存活并可继续调用；CI 三平台完整套件绿一次 |
+| R12-4 裁判与账本（证明侧的工程部分） | ① 部署网络定名：给 P3 内 24 个网络稳定名字（阶段×目标/共享），关系账脚本 `package_relations.py` 入库并入门禁；② 33/24 个网络逐一登记裁判归属（参考实现/宿主编译器/测量），`docs.sh` 检查存在性；③ 经典 18 表具名外部裁判从 7 提到 ≥9（scope、irsel、pfconv、binsel 各找一个可命名裁判或明确 offpath）；④ 决策代码行数账本：v0.0.11 与 v0.0.12 各封存一行（手写决策逻辑 vs 表/声明） | 裁判登记表由门禁检查；账本两版数据入 prd |
+| R12-5 表化与容量（自 v0.1.2 提前） | ① 机器码字节模板、Windows argv 宿主模板迁入声明规则，字节账同步；② 容量：静态上限改为可证明的界或动态增长，先建规模门禁（610 MB 数组源码类）；③ 网络包与容器自构造可行性片：“候选 .com 重新打包出逐字节相同的 P3 包” | 迁移前后产物逐字节同；规模门禁有明确上界与失败样例；自打包逐字节相同 |
+| R12-6 文档、规格与论文 | ① R11-7 目录与文档职责梳理实施：README/ARCHITECTURE/PRD 权威划分，exec/c 职责清单，旧 parse/control 标历史参考；② T3 前置规格文档（C 子集、ABI、未定义/未指定行为清单）；③ 论文 A：图 2、算法 1 运行时间与逐表最优性差距、消融（前缀求值/声明返回/剪枝/trim-libc）、账本首期、参考文献核对 | 任一阶段能从规则追到运行；规格文档可被差分裁判引用；论文数字全部绑定产物身份 |
+| R12-7 发布 0.0.12 | 快链：全量队列 → 重封 → 一次 push → release-check → qualification → company → Apple → 发布；发布说明列出移出局限的项 | push→签完 ≤5 分钟；候选摘要在 GHCR、Release、回执三处一致 |
+
+**显式不做（留 0.1.x 证明侧）**：T2 机器证明、P-2 全走查器、随机程序差分裁判正式版、.o、wasm。
+
+### v0.0.12 收集表（来源；2026-09-29 起登记 0.0.11 过程中的新经验与新问题）
 
 | 来源 | 条目 | 状态 |
 |---|---|---|
