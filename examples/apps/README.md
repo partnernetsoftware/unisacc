@@ -18,6 +18,11 @@ suites' inputs.
 | `memmap.c` | address-space analysis of a `/proc/PID/maps` listing: hand-written unsigned 64-bit hex parsing (kernel-half addresses), region classification, image grouping, W+X / overlap / hole audit. Linux defaults to its own `/proc/self/maps`; macOS queries this application's own regions through libproc. Identical snapshots are compared against cc; live self maps are checked structurally |
 | `exeinfo.c` | dissects ELF64, Mach-O (thin and fat), PE32+ and the compiler's own polyglot `unisacc.com`; every field goes through a bounds-checked reader; reads the files named on the command line; with none, dissects this host's own system executables (`/bin/ls` and `/usr/lib/dyld` on macOS, the running image `/proc/self/exe` and `/bin/ls` on Linux, `cmd.exe`/`kernel32.dll` on Windows) |
 | `colorpack.c` | bit-field packed pixel formats (RGB565/555, RGBA4444): quantisation, round-trip error, per-channel histograms. Every field value matches host `cc`; `sizeof` currently does not (a filed, unfixed defect -- see the file comment) |
+| `args.c` | hello with the command line: `argc` and every `argv[i]` echoed back; arguments after `--` reach the program under `-run` |
+| `mandel.c` | an ASCII Mandelbrot set (78 x 32): nested `double` loops, escape-time iteration, `putchar` only |
+| `sieve.c` | the sieve of Eratosthenes over a `malloc`'d byte array, `long` arithmetic, an optional N argument (`atol`) |
+| `ctour.c` | a C feature tour, about a hundred one-line checks: structs by value, unions, bit-fields, static and designated initializers, compound literals, 1-D VLAs, varargs and `vsnprintf`, callback tables, `qsort`/`bsearch`, dense and sparse `switch`, `goto`, `#`/`##`/`__VA_ARGS__`, `<stdint.h>`/`<stdbool.h>`/`<limits.h>`/`<ctype.h>`/`<math.h>`, printf/sscanf formatting, strings and memory, 64-bit/unsigned/float arithmetic. Known 0.0.12 defects, undefined behaviour and implementation-defined differences are left out and listed in the file comment |
+| `xgui.c` | **Linux x86-64 only.** A real X11 window without Xlib: it speaks the X11 wire protocol over `/tmp/.X11-unix/X<N>` through a system-call stub copied into an `__mmap`'d page and made read+execute. The stub has to follow unisacc's private, undocumented calling convention (arguments on the stack, `r9` as frame pointer), explained in the file comment. Needs a running X server that accepts connections without an auth cookie. Other platforms explicitly reject |
 
 The four system tools consume real input. On macOS, procview, memmap and
 winlayout query system APIs themselves through `unisacc_ffi.h`. No system-cc
@@ -54,6 +59,24 @@ from each application for reproducible analysis tests.
 are compared byte for byte; live defaults are checked structurally because
 processes, windows and each executable's own maps vary between runs.
 
+
+The five small programs (`args`, `mandel`, `sieve`, `ctour`, `xgui`) live here
+rather than in `examples/` for the same reason: suites that glob
+`examples/*.c` keep their inputs. No suite lists them yet. `args`, `mandel`,
+`sieve` and `ctour` are deterministic: with 0.0.12 their stdout equals host
+`cc` byte for byte, and is the same on lnx/x86_64, osx/arm64 and osx/x86_64
+(Rosetta). `xgui` is platform-limited like `winlist`: on every target other
+than Linux x86-64 it prints `xgui: ... not available on this platform` to
+stderr and exits 1, with no output and no simulated window.
+
+```sh
+./unisacc.com -run examples/apps/args.c -- one "two words" 3
+./unisacc.com -run examples/apps/mandel.c
+./unisacc.com -run examples/apps/sieve.c -- 100
+./unisacc.com -run examples/apps/ctour.c
+DISPLAY=:0 ./unisacc.com -run examples/apps/xgui.c           # Linux x86-64, q/Esc closes
+./unisacc.com -run examples/apps/xgui.c -- --once              # exit after the first draw
+```
 
 The older six application checks below are historical evidence:
 
