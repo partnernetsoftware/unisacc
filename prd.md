@@ -32,6 +32,12 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 - **[-] 顺延 0.0.12（理由在 R12 计划树对应项）**：general BANK（设计 `research/r11-bank-design.md`）、Windows SEH/六平台生命周期矩阵、us_eval/us_reload/us_opt_verify、网络裁判登记、目录职责梳理、论文定稿。
 - 逐项回执全文见 [归档](archive/prd-history-20260929.md#v0-0-11)。
 
+### v0.0.12（2026-09-30 发布，源 `c4d667e`）
+
+- **发布**：https://github.com/partnernetsoftware/unisacc/releases/tag/v0.0.12 ；签后 `unisacc.com` fb607af5…（1,170,368 B），未签候选 df8cc9b4…（1,154,589 B）；最终树全量 350/350；验收 `research/r12-release-acceptance.json`。
+- **多架构结果**：六托管 runner（lnx/osx/win × x86_64/arm64）对同一候选跑演示套件六格全绿（`research/r12-demo-matrix-c4d667e.json`）；全套件 ci 矩阵 lnx/x86_64、lnx/arm64、osx/arm64 全绿，osx/x86_64（Intel）163/181（18 项为 Python 参考路径的时间预算）；本机六目标 8/8 与 Windows 双自举。
+- **[v]**：R12-0 测试债（清点/入门禁/usage/exec-formats/linuxbridgecheck/ua_ref 竞态/--list/bindingcheck 拆分）、R12-1 ① BANK 可执行部分（两 ISA 19 夹具）、R12-3 ③ 矩阵、R12-4 ③④（external 8/18、计数单一来源）、R12-5 ④ FX-6 量化负结果。**[-] 顺延 0.0.13**：BANK 表接线与宿主、R12-2、Windows 全套件 runner、网络裁判登记、R12-6 文档/规格/论文余项、FX-5。回执全文 `plans/v0.0.12.md`。
+
 ### 计划索引（正文在 plans/，prd 只放索引）
 
 | 版本 | 文件 | 状态 |
