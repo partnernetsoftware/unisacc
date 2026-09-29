@@ -45,11 +45,13 @@ def cases():
   classes,unit=words[name];return recipe(classes,unit)
  # Lane classification of anonymous-only bits differs by SysV ABI compat policy.
  unknown=agg([ent(I8,0,bits=1,kind=2),ent(D,1)],8,8,tag=2)
- bad=[d3(origin=0,known=0,natural=0),d3(known=0),d3(flags=1),d3(natural=8),d3(3,8,8,0,rank=3,fmt=2),agg([ent(I4,0,bits=1,kind=1)],8,4)]
+ bad=[d3(origin=0,known=0,natural=0),d3(known=0),d3(flags=1),d3(natural=8),agg([ent(I4,0,bits=1,kind=1)],8,4)]
  # Misrepresented natural container address, overlapping fields, stale order,
  # barrier-induced FP base/alignment mismatch, and unknown nested completeness.
  bad += [agg([ent(I4,0,bits=1,kind=1),ent(I4,1,bit=0,bits=2,kind=1)],4,4),agg([ent(I4,1,bits=1,kind=1)],4,4),agg([ent(d3(width=1,align=1),0),ent(I4,1,offset=1,bits=3,kind=1)],8,4),agg([ent(d3(origin=0,known=0,natural=0),0,bits=1,kind=1)],4,4)]
- return values,expected,unknown,bad
+ # rank-3 (long double) stored as F64: certified only where the profile's long double IS IEEE64.
+ longdouble=d3(3,8,8,0,rank=3,fmt=2)
+ return values,expected,unknown,bad,longdouble
 class Files:
  def __init__(self,target):self.target=target
  def get(self,key):return self.target if key==b'\0cli/target' else None
@@ -73,12 +75,16 @@ def main():
    assert (p.returncode==0)==(status=='accept'),(status,p.stderr)
    if expected is None:assert status=='reject' and not p.stdout,(status,p.stdout);refused+=1
    else:assert status=='accept' and p.stdout==out==expected,(target,status,len(out),len(expected),repr(out)[:300],repr(expected)[:300]);passed+=1
-  values,expected,unknown,bad=cases()
+  values,expected,unknown,bad,longdouble=cases()
   for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
    for name,obj in values.items():
     source=sig3(obj);carrier=expected(name,target);check(source,target,plan(target,source,sig2((carrier,),carrier,support=1)))
    for obj in bad:check(sig3(obj),target)
    if target in (b'osx/x86_64',b'lnx/x86_64'):check(sig3(unknown),target)
+   ldsrc=sig3(longdouble)
+   if target in (b'osx/arm64',b'win/arm64',b'win/x86_64'):
+    f64=desc(3,8,8,unsigned=0,base=0,shape=0);check(ldsrc,target,plan(target,ldsrc,sig2((f64,),f64,support=1)))
+   else:check(ldsrc,target)
    aligned_hfa=sig3(agg([ent(I8,0,kind=3),ent(F,1),ent(F,2,offset=4)],8,8))
    if target.endswith(b'arm64'):check(aligned_hfa,target)
    else:
