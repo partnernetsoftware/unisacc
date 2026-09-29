@@ -30,7 +30,7 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 
 ## 4. 平台客机
 - Linux：`SUITE_LIMIT=55 JOBS=2 ./tests/linux.sh all`（linux.sh 默认 900 s 与 all.sh 上限 60 冲突，必须显式给 55）。`default`（4 GiB）跑不动两个 2.2 GB 的 Python 自编译（bigclosure/ape），要么 JOBS=1，要么用 8 GiB 的 `minicon-lnx-aarch64`（需 gcc/clang/libffi-dev/perl(shasum)，用后 `limactl stop`）。
-- Windows：`utmctl start minicon-win-arm-64`，`./tests/term.sh env UA=… STRICT=0 ./tests/crossnative.sh examples/*.c`（全探针超 60 s；utmctl 的 AppleEvents 只在 Terminal 内可用）。`nativeboot.sh --windows` 同样要 Terminal。用后 `utmctl stop`。
+- Windows：`utmctl start minicon-win-arm-64`，等 `utmctl ip-address` 有值（agent 就绪）；`./tests/crossnative.sh examples/*.c`（8 例约 18 s）与 `env UA=… ./tests/nativeboot.sh --windows win/arm64|win/x86_64`（各约 10 s）都可从普通 shell 跑，**不需要 Terminal**：以前的 -10004 是 `utmctl exec --hide` 造成的（2026-09-29 查明）。客机坑见 prd v0.0.12 表“R11-0 ④ 复盘”。用后 `utmctl stop`。
 
 ## 5. CI（一次 push；2026-09-29 起为 minicon 模式）
 - push 只触发 `release-check.yml`（约 1 分钟：预检、权重构造、ELF 实跑；若 `release/candidate.json` 封存了 GHCR 摘要，再在 ubuntu/macos 拉取候选实跑）。全量 `ci.yml` 每周一定时或手动，是安全网不是前提。
