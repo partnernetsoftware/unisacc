@@ -89,13 +89,15 @@ run_windows() {
     target=$1; shift
     UTM=/Applications/UTM.app/Contents/MacOS/utmctl
     vm=${WINVM:-minicon-win-arm-64}
-    [ -x "$UTM" ] || { echo "  skip $target (no UTM)"; return 0; }
+    # Every skip is counted (SKIPFILE), like the Linux targets: the summary once said
+    # "(no target skipped)" while both Windows targets had been skipped.
+    [ -x "$UTM" ] || { echo "  skip $target (no UTM)"; echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
     "$UTM" status "$vm" 2>/dev/null | grep -q started || {
-        echo "  skip $target ($vm not started)"; return 0; }
+        echo "  skip $target ($vm not started)"; echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
     # status can say `started` for a machine that is going down, or whose
     # guest agent is not up yet: only an answered command counts
     "$_BOUND" 20 "$UTM" exec "$vm" --cmd cmd.exe -- /c echo up \
-        >/dev/null 2>&1 || { echo "  skip $target ($vm agent not answering)"; return 0; }
+        >/dev/null 2>&1 || { echo "  skip $target ($vm agent not answering)"; echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
     t=$(date +%s)$RANDOM
     Z='C:\u\z'"$t"'.txt'; Y='C:\u\y'"$t"'.txt'
     D='C:\u\d'"$t"'.txt'; G='C:\u\g'"$t"'.bat'
