@@ -185,6 +185,7 @@
 
 | 项 | 交付 | 完成判据与边界 |
 |---|---|---|
+| R11-0 v0.0.10 顺延项（先于新项闭合） | 库 ABI：V3 variadic 跨来源、pointee 完整身份、packed / native wide-FP / general BANK 载体、Windows SEH、六平台库生命周期矩阵、公共 origin0 refinement；平台：Windows 编译器自举（nativeboot --windows，需可用的 Terminal/utmctl 通道）、Linux x86_64 本机客机；测试：tools11（tiny-regex test2）拆分、hosted runner 余量；发布：GHCR 候选封存（主人一次 `gh auth refresh -s write:packages` 即可，本周内补，不等 0.0.11）| 每项有 [v]/[-] 回执；未闭合项不得从 README 能力边界移除 |
 | R11-1 libunisacc 扩展 | `us_eval`（REPL 与增量编译）、`us_reload`（经跳板热替换单个函数）、`us_opt_verify`（FX-1 加载前校验器，只允许声明过的 syscall 与注入符号）；Rust 与 Python 绑定作为示例宿主 | 增量定义后可调用；热替换后下一次调用走新代码；开校验时恶意 tape 被拒、合法程序结果与不开校验逐字节相同；绑定在六目标中至少三个原生验证 |
 | R11-2 按架构出包的研究账 | 六个单架构包与统一包之间逐网络、逐阶段的关系账：哪些共享、哪些按 OS 或 ISA 区分、差分大小；各架构原生机器上与本机编译器结果逐项比较 | 关系账由脚本从包中直接提取、可复现；原生比较 100% 一致，逐平台标明原生、仿真或未运行；v0.0.10 若已完成原生比较，这里只补关系账 |
 | R11-3 速度 | `-ftrim-libc` 在经典与模型两条路线同时改为默认开启；编码网络按 ISA 分片（跨 OS 共享编码器）；按需解压 | 默认切换前后全门禁通过；同一产物身份上测 calc `-run` 与最小程序启动并写入账本；只报告实测，不预设倍数目标 |
