@@ -28,10 +28,9 @@ Plain primitives and opaque pointers tag0/payload0. Tag0 kind4 stays unsupported
 no native function pointer may be treated as a script address.
 Tag1 struct or tag2 union payload: member_count (<=64), then for each ordered member
 `byte_offset, bit_offset, bit_width, storage_bytes, child_descriptor`.
-These layout facts come from SSZ/SAL/SMEM/MOF/MPT/MBS/MAR/BFW/BFO/BFS.
+These layout facts come from SSZ/SAL/SMEM/MOF/MPT/MBS/MAR/BFW/BFO, with storage from MSZ and signedness tracked separately by BFS. Named lookup members are a source projection: anonymous bitfields and zero-width barriers are not represented by V2.
 Tag3 array payload: element_count, stride_bytes, child_descriptor; width=count*stride.
-Bitfields, unions, flexible arrays and unresolved types stay represented but unsupported
-until a model NativePlan/typed callback path is implemented, never faked as byte arrays.
+Bitfields, flexible arrays and unresolved types retain conservative support0. Natural unions can now be certified by the model NativePlan route (see librarynativecarrier.md); V2 support0 is not erased as proof of native execution. Complete bitfield source certification requires the planned versioned ordered-layout facts, not a byte-array substitute.
 Tag4 payload0 is an old unresolved callback and remains unsupported. A nonempty
 payload is `schema:u8=1, form:u8, signature_id:LE64`. form1 is a reference with
 no additional bytes. form0 defines a signature, followed by

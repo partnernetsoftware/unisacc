@@ -3605,8 +3605,9 @@ int stbody(int si) {
                     if (sz > off) off = sz;
                     pos = 0;
                 } else {
+                    /* Ordinary members already reset bitpos to their byte end.
+                       Keep the exact cursor between adjacent bit-fields. */
                     pos = bitpos;
-                    if (off * 8 > pos) pos = off * 8;
                     if (bw == 0) {
                         pos = (pos + unit - 1) / unit * unit;
                         bitpos = pos;

@@ -194,7 +194,8 @@ class Struct:
                 self.obits.append((0, width, signed))
             self.size = max(self.size, ty.size(structs))
             return
-        pos = max(self.bitpos, self.size * 8)
+        # Ordinary members reset bitpos; ceil(size) must not separate bit-fields.
+        pos = self.bitpos
         if width == 0:
             self.bitpos = (pos + unit - 1) // unit * unit
             self.size = max(self.size, self.bitpos // 8)

@@ -208,6 +208,7 @@ job lib-callable-mechanism python3 ./tests/librarycallablescheck.py
 job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ffi-provider python3 ./tests/libraryffiprovidercheck.py
 job lib-bitfield-source python3 ./tests/modelbitfieldsourcecheck.py
+job lib-layout-source python3 ./tests/modellayoutfactscheck.py
 job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py

@@ -68,13 +68,15 @@ fp_rank:u8     0=none,1=float,2=double,3=long_double
 fp_format:u8   0=none,1=IEEE32,2=IEEE64,3=x87_extended80_padded16,4=IEEE128
 natural_alignment:LE64
 layout_flags:u8  bit0=packed-layout, bit1=explicit-type-alignment
+layout_known_mask:u8  bit0=packing事实已知, bit1=explicit alignment事实已知
+layout_origin:u8  0=parser投影,1=完整source事实,2=显式外部layout事实
 layout_tag:u8  (保持0 primitive,1 struct,2 union,3 array,4 callable)
 payload_length:LE64,payload
 ```
 
 FP rank解决source通常算术转换/默认提升，format解决位表示；相同width16的x87与IEEE128绝不等价。C type equivalence与native storage equivalence不是同一个问题，ABI matcher至少比较format/真实layout；source declaration matcher还保留rank。对非FP rank/format必须0。指针opaque保持0，不宣称指针pointee FP运算已支持；将来完整pointee语义沿source type pool保留。
 
-natural_alignment=完成成员有效alignment后、施加aggregate自身alignment override前的alignment。实际alignment仍原字段。packed/explicit旗标是声明事实，不可由host猜；完全普通natural layout旗标0。不强行保存pragma数字历史：member effective alignment和result type alignment已经保存实际效果；只有源码表达所需的pack state在source parser自己持有。
+natural_alignment=完成成员有效alignment后、施加aggregate自身alignment override前的alignment。实际alignment仍原字段。packed/explicit旗标是声明事实，不可由host猜；只有对应known bit存在时，旗标0才表示已知未设置，而非未知。当前E2会丢弃`_Pragma(pack(...))`（macrocheck已有用例），所以parser投影不能默认写全known或origin=完整source。完整source认证需要从E2保全/拒绝相关modifier，再由E3传播；外部layout则明确标其来源并只证明提供的事实域。完全已知ordinary natural layout可写旗标0、known_mask=3。不强行保存pragma数字历史：member effective alignment和result type alignment已经保存实际效果；只有源码表达所需的pack state在source parser自己持有。
 
 ### Struct/union payload
 
@@ -131,3 +133,7 @@ array仍count/stride/element child，descriptor新增facts继承；callback定�
 
 ## 父会话实测更新
 上述 BFS/MSZ 映射缺陷已经实际先红后绿，见 [位域回执](r10-bitfield-source-storage-evidence.json) 与 `tests/modelbitfieldsourcecheck.py`。修复仅改变 serializer 的 storage 读取，未放宽位域 FFI 支持。其余 USLSIG3/宽浮点/布局事实仍为未实施设计。
+
+## 8. Ordered事实实施（2026-09-29，在开发）
+
+第一步只保全模型内部按声明顺序的layout entries，保留V2原字节与support0，不从SMEM扁平化投影猜缺失条目。bank600..619已由PRD保留，记录容量有界且耗尽拒绝。真正V3消费者、model equality/NativePlan、宿主mechanical decoder和转换边仍需按同一版本边界接入，不能把内部记录完成称为公开ABI支持。实际位域carrier先验控制见`r10-bitfield-native-controls.json`，父会话复跑见`r10-bitfield-controls-rerun.json`；二者均不使用生产模型分类，不是产品认证。
