@@ -51,33 +51,29 @@ windows() {
     local n; n="$(date +%s)$RANDOM"
     local stem="C:\u\nb$n"
     compile "$T/W" "$UA" "$target" || return 1
-    bound 5 "$UTM" file push "$VM" "$stem.exe" < "$T/W" || return 1
-    bound 5 "$UTM" file push "$VM" "$stem.c" < "$SELF" || return 1
-    # Bound the guest process itself: a host-side alarm alone cannot stop it.
-    cat > "$T/run.ps1" <<EOF
-\$ErrorActionPreference = 'Stop'
-\$rc = 1
-try {
-  \$p = Start-Process -FilePath '$stem.exe' -ArgumentList '$stem.c','-b','$target' -RedirectStandardOutput '$stem.out' -RedirectStandardError '$stem.err' -PassThru
-  if (-not \$p.WaitForExit(30000)) { \$p.Kill(); [void]\$p.WaitForExit(2000); \$rc = 124 }
-  else { \$p.WaitForExit(); \$rc = \$p.ExitCode }
-} catch { \$rc = 1 }
-[IO.File]::WriteAllText('$stem.rc', [string]\$rc)
-EOF
-    bound 5 "$UTM" file push "$VM" "$stem.ps1" < "$T/run.ps1" || return 1
-    # exec may wait for PowerShell. Cover its 30s compile + 2s kill budget;
-    # an asynchronous return polls only the remainder of the SAME 35s window.
-    # The outer process-group watchdog caps transfer + execution at 55s.
+    # The agent moves ~0.25 MB/s: the 1.1 MB compiler and the 1.3 MB flat source each blew a
+    # 5 s watchdog. Both travel in one gzip tarball (~0.4 MB) that the guest's bsdtar unpacks.
+    # The guest runs a cmd batch: its PowerShell only echoes the command text back (2026-09-29).
+    mkdir -p "$T/g" && cp "$T/W" "$T/g/nb$n.exe" && cp "$SELF" "$T/g/nb$n.c" || return 1
+    (cd "$T/g" && tar -czf "$T/nb.tgz" "nb$n.exe" "nb$n.c") || return 1
+    bound 8 "$UTM" file push "$VM" "$stem.tgz" < "$T/nb.tgz" || return 1
+    printf '@echo off\r\ntar -xzf %s.tgz -C C:\\u\r\n%s.exe %s.c -b %s > %s.out 2> %s.err\r\necho %%errorlevel%% > %s.rc\r\n' \
+        "$stem" "$stem" "$stem" "$target" "$stem" "$stem" "$stem" > "$T/run.cmd"
+    bound 5 "$UTM" file push "$VM" "$stem.cmd" < "$T/run.cmd" || return 1
+    # `--hide` makes utmctl exec fail with OSStatus -10004; exec returns without waiting, and
+    # `file pull` of a missing file exits 0 with empty output, so poll for a non-empty .rc.
+    # The guest process is bounded from the host: taskkill on timeout.
     local deadline=$((SECONDS+35)) rc=''
-    bound 35 "$UTM" exec "$VM" --hide --cmd powershell.exe -- -NoProfile -ExecutionPolicy Bypass -File "$stem.ps1" >/dev/null || return 1
+    bound 10 "$UTM" exec "$VM" --cmd cmd.exe -- /c "$stem.cmd" >/dev/null 2>&1 || return 1
     while [ "$SECONDS" -lt "$deadline" ]; do
-        if bound 3 "$UTM" file pull "$VM" "$stem.rc" > "$T/rc" 2>/dev/null; then
-            rc=$(tr -d '\r\n' < "$T/rc"); break
+        if bound 3 "$UTM" file pull "$VM" "$stem.rc" > "$T/rc" 2>/dev/null && [ -s "$T/rc" ]; then
+            rc=$(tr -d '\r\n ' < "$T/rc"); break
         fi
         sleep 1
     done
+    [ -n "$rc" ] || bound 5 "$UTM" exec "$VM" --cmd taskkill.exe -- /F /IM "nb$n.exe" >/dev/null 2>&1
     [ "$rc" = 0 ] || { fail "$target guest compiler rc=${rc:-timeout}"; return 1; }
-    bound 5 "$UTM" file pull "$VM" "$stem.out" > "$T/got" || return 1
+    bound 12 "$UTM" file pull "$VM" "$stem.out" > "$T/got" || return 1   # ~1.1 MB back at ~0.25 MB/s
     [ -s "$T/got" ] && cmp -s "$T/W" "$T/got" || { fail "$target guest self-build empty or different"; return 1; }
     echo "  ok on Windows: $target rebuilt itself byte for byte"
 }
