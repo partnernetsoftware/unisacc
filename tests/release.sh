@@ -34,7 +34,8 @@ rc=0
 exclusive=(--exclusive-suite fat)  # bigclosure is six per-target jobs now (all.sh shape); no exclusive window
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
-if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindx86); fi
+# the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
+if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-x86_64); fi
 python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 50 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
 [ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
