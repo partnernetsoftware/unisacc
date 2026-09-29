@@ -18,7 +18,16 @@ int toinit;              /* 1 => ec() writes the __init body instead */
 int unevaluated;         /* nesting of non-evaluated sizeof operands */
 int hasinit;
 
-char symname[MAXSYM * 32];
+/* Identifier storage width.  C99 6.4.2.1 requires 63 significant
+   characters, so 64 bytes fits a 63-character name plus its NUL.  It was
+   32, which silently merged any two names sharing their first 32
+   characters and made every name of 32+ characters unfindable (the
+   symptom depended on the use: "a constant is required here" for an array
+   bound, "expected ')'" for a type name, "unknown identifier" for a
+   variable).  A longer name is refused by name_toolong() rather than
+   truncated.  [R13-0c #32] */
+#define NAMEW 64
+char symname[MAXSYM * NAMEW];
 int symkind[MAXSYM];        /* 0 global  1 local  2 function */
 int symoff[MAXSYM];         /* local: frame offset */
 int symelem[MAXSYM];        /* element width for [] and unary * */
@@ -66,7 +75,7 @@ int symstruct[MAXSYM];      /* index into the struct table, or -1 */
    members pass, 1000 refuse.  miniz reaches it because its members are
    registered once per unit as well.  [R13-0c #33] */
 #define MAXMEMB 4096
-char stname[MAXSTRUCT * 32];
+char stname[MAXSTRUCT * NAMEW];
 int stfirst[MAXSTRUCT]; int stcount[MAXSTRUCT];
 /* tags are block-scoped (C99 6.2.1): the block depth a tag was defined at,
    and whether that block has closed */
@@ -76,7 +85,7 @@ int curvla;               /* the thing in r0 is a VLA: its byte-count slot */
 int stsize[MAXSTRUCT]; int stalign[MAXSTRUCT]; int stunion[MAXSTRUCT];
 int stopen[MAXSTRUCT];      /* being defined: the tag's type is incomplete */
 int nstruct;
-char mbname[MAXMEMB * 32];
+char mbname[MAXMEMB * NAMEW];
 int mboff[MAXMEMB];     /* byte offset inside the struct */
 int mbbytes[MAXMEMB];   /* what `sizeof` reports for the member */
 int mbwidth[MAXMEMB];   /* the load/store width: 0 means "aggregate" */
@@ -111,7 +120,7 @@ int declspecptr;        /* the specifier itself was a pointer typedef */
    first refusal; the fb12-23 fixture needs 276 (91+92+93) across three units,
    which is why 256 was just barely not enough.  [R13-0c #33] */
 #define MAXTD 1024
-char tdname[MAXTD * 32];
+char tdname[MAXTD * NAMEW];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
 int tdbool[MAXTD];
@@ -617,15 +626,15 @@ int elab(char *p, int n) { es(p); en(n); return 0; }
    first, so its first live match is the walk's first match.  Scopes pop
    by lowering nsym; the dead entries (>= nsym) sit at the FRONT of their
    chains, are skipped on lookup, and are unlinked when their slot is
-   reused.  A name of 32 or more characters is stored truncated, so what
-   it matches is not its hash's business: those go on one chain of their
-   own (SH_LONG) that every lookup merges in, and a long query walks. */
+   reused.  A name of NAMEW or more characters is refused outright by
+   name_toolong(), so nothing truncated ever reaches the hash: those go on
+   one chain of their own (SH_LONG) that every lookup merges in. */
 #define SH_SIZE 65536
 #define SH_LONG SH_SIZE
 int sh_head[SH_SIZE + 1];                 /* index + 1, 0: empty */
 int sh_link[MAXSYM]; int sh_b[MAXSYM]; int sh_hi;
 int sh_bucket(int t) {
-    if (tlen[t] >= 32) return SH_LONG;
+    if (tlen[t] >= NAMEW) return SH_LONG;
     return vhash(src + tpos[t], tlen[t]) & (SH_SIZE - 1);
 }
 int sh_push(int i, int t) {
@@ -642,9 +651,9 @@ int sfind_is(int i, int t) {
     int k; int ok; int n;
     n = tlen[t];
     k = 0; ok = 1;
-    while (symname[i * 32 + k]) {
+    while (symname[i * NAMEW + k]) {
         if (k >= n) ok = 0;
-        if (ok) { if (symname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+        if (ok) { if (symname[i * NAMEW + k] != src[tpos[t] + k]) ok = 0; }
         k = k + 1;
     }
     if (ok) { if (k == n) return 1; }
@@ -656,9 +665,11 @@ int sfind_walk(int t) {
     while (i >= 0) { if (sfind_is(i, t)) return i; i = i - 1; }
     return 0 - 1;
 }
+int name_toolong(int t);
 int sfind(int t) {
     int a; int b;
-    if (tlen[t] >= 32) return sfind_walk(t);
+    name_toolong(t);                 /* never route a long name to the walk */
+    if (tlen[t] >= NAMEW) return sfind_walk(t);
     a = sh_head[sh_bucket(t)] - 1; b = sh_head[SH_LONG] - 1;
     while (a >= nsym) a = sh_link[a] - 1;
     while (b >= nsym) b = sh_link[b] - 1;
@@ -675,14 +686,15 @@ char *inputs[64]; int ninput;   /* the input files, in order */
    statics carry a suffix.  Unit 0 keeps its names, which is why compiling
    one file produces the same tape it always did. */
 #define MAXUSTAT 512
-char ustat[MAXUSTAT * 32]; int ustat_u[MAXUSTAT]; int nustat;
+char ustat[MAXUSTAT * NAMEW]; int ustat_u[MAXUSTAT]; int nustat;
 int ustat_add(int t) {
     int k;
+    name_toolong(t);
     if (curunit == 0) return 0;
     if (nustat >= MAXUSTAT) return 0;
     k = 0;
-    while (k < tlen[t] && k < 31) { ustat[nustat * 32 + k] = src[tpos[t] + k]; k = k + 1; }
-    ustat[nustat * 32 + k] = 0;
+    while (k < tlen[t] && k < NAMEW - 1) { ustat[nustat * NAMEW + k] = src[tpos[t] + k]; k = k + 1; }
+    ustat[nustat * NAMEW + k] = 0;
     ustat_u[nustat] = curunit; nustat = nustat + 1;
     return 0;
 }
@@ -694,8 +706,8 @@ int symfn(char *nm, int L) {
     while (i < nsym) {
         if (symkind[i] == 2) { if (symunit[i] == 0) {
             ok = 1; k = 0;
-            while (k < L) { if (symname[i * 32 + k] != nm[k]) ok = 0; k = k + 1; }
-            if (symname[i * 32 + L] != 0) ok = 0;
+            while (k < L) { if (symname[i * NAMEW + k] != nm[k]) ok = 0; k = k + 1; }
+            if (symname[i * NAMEW + L] != 0) ok = 0;
             if (ok) return i;
         } }
         i = i + 1;
@@ -710,9 +722,9 @@ int ustat_is(int t) {
     while (i < nustat) {
         if (ustat_u[i] == curunit) {
             k = 0; ok = 1;
-            while (ustat[i * 32 + k]) {
+            while (ustat[i * NAMEW + k]) {
                 if (k >= tlen[t]) { ok = 0; break; }
-                if (ustat[i * 32 + k] != src[tpos[t] + k]) { ok = 0; break; }
+                if (ustat[i * NAMEW + k] != src[tpos[t] + k]) { ok = 0; break; }
                 k = k + 1;
             }
             if (ok) { if (k == tlen[t]) return 1; }
@@ -730,12 +742,26 @@ char lbuf[131072];      /* a string literal can be the whole model blob */
 int needslen; int needchb; int needxb;
 
 int sh_push(int i, int t);
+/* C99 6.4.2.1 requires 63 significant characters in an identifier; NAMEW is
+   64 so a 63-character name fits with its NUL.  A longer one is refused here,
+   with a position, rather than truncated: truncating merged distinct names
+   into one symbol -- silently, and only for names sharing a prefix.  Called
+   from every place a name enters one of the five stores and from sfind, so a
+   long name can never reach the "a constant is required here" path, which
+   said nothing about the real problem.  [R13-0c #32] */
+int name_toolong(int t) {
+    if (tlen[t] < NAMEW) return 0;
+    err_tok(t, "identifier too long (max 63 characters)");
+    __exit(1);
+    return 0;
+}
 int sadd(int t, int kind, int off, int elem) {
     int k;
+    name_toolong(t);
     if (nsym >= MAXSYM) { __write(2, "symbol table full\n", 18); __exit(1); }
     k = 0;
-    while (k < tlen[t]) { if (k < 31) symname[nsym * 32 + k] = src[tpos[t] + k]; k = k + 1; }
-    if (tlen[t] < 32) symname[nsym * 32 + tlen[t]] = 0;
+    while (k < tlen[t]) { if (k < NAMEW - 1) symname[nsym * NAMEW + k] = src[tpos[t] + k]; k = k + 1; }
+    if (tlen[t] < NAMEW) symname[nsym * NAMEW + tlen[t]] = 0;
     symkind[nsym] = kind; symoff[nsym] = off; symelem[nsym] = elem;
     symptr[nsym] = declptr;
     symbytes[nsym] = declbytes;
@@ -3256,23 +3282,24 @@ int tdfind(int t) {
     while (i >= 0) {
         ok = 1; k = 0;
         while (k < tlen[t]) {
-            if (k > 30) ok = 0;
-            else { if (tdname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            if (k > NAMEW - 2) ok = 0;
+            else { if (tdname[i * NAMEW + k] != src[tpos[t] + k]) ok = 0; }
             k = k + 1;
         }
-        if (ok) { if (tdname[i * 32 + tlen[t]] == 0) return i; }
+        if (ok) { if (tdname[i * NAMEW + tlen[t]] == 0) return i; }
         i = i - 1;
     }
     return 0 - 1;
 }
 
 int tdadd(int t, int w, int sz, int si, int isptr) {
+    name_toolong(t);
     int k;
     if (ntd >= MAXTD) { __write(2, "too many typedefs\n", 18); __exit(1); }
     k = 0;
-    while (k < tlen[t]) { if (k < 31) tdname[ntd * 32 + k] = src[tpos[t] + k]; k = k + 1; }
-    if (k > 31) k = 31;
-    tdname[ntd * 32 + k] = 0;
+    while (k < tlen[t]) { if (k < NAMEW - 1) tdname[ntd * NAMEW + k] = src[tpos[t] + k]; k = k + 1; }
+    if (k > NAMEW - 1) k = NAMEW - 1;
+    tdname[ntd * NAMEW + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
     tduns[ntd] = declunsigned; tdbool[ntd] = declbool;
     tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1; tdflt[ntd] = declflt;
@@ -3287,11 +3314,11 @@ int stfind(int t) {
         if (stdead[i]) { i = i - 1; continue; }
         ok = 1; k = 0;
         while (k < tlen[t]) {
-            if (k > 30) ok = 0;
-            else { if (stname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            if (k > NAMEW - 2) ok = 0;
+            else { if (stname[i * NAMEW + k] != src[tpos[t] + k]) ok = 0; }
             k = k + 1;
         }
-        if (ok) { if (stname[i * 32 + tlen[t]] == 0) return i; }
+        if (ok) { if (stname[i * NAMEW + tlen[t]] == 0) return i; }
         i = i - 1;
     }
     return 0 - 1;
@@ -3299,13 +3326,14 @@ int stfind(int t) {
 
 int stnew(int t, int isunion) {
     int k;
+    name_toolong(t);
     if (nstruct >= MAXSTRUCT) { __write(2, "too many structs\n", 17); __exit(1); }
     k = 0;
     if (t >= 0) {
-        while (k < tlen[t]) { if (k < 31) stname[nstruct * 32 + k] = src[tpos[t] + k]; k = k + 1; }
+        while (k < tlen[t]) { if (k < NAMEW - 1) stname[nstruct * NAMEW + k] = src[tpos[t] + k]; k = k + 1; }
     }
-    if (k > 31) k = 31;
-    stname[nstruct * 32 + k] = 0;
+    if (k > NAMEW - 1) k = NAMEW - 1;
+    stname[nstruct * NAMEW + k] = 0;
     stfirst[nstruct] = nmemb; stcount[nstruct] = 0;
     stdepth[nstruct] = bdepth; stdead[nstruct] = 0;
     stsize[nstruct] = 0; stalign[nstruct] = 1; stunion[nstruct] = isunion;
@@ -3336,11 +3364,11 @@ int mbfind(int si, int t) {
     while (i < e) {
         ok = 1; k = 0;
         while (k < tlen[t]) {
-            if (k > 30) ok = 0;
-            else { if (mbname[i * 32 + k] != src[tpos[t] + k]) ok = 0; }
+            if (k > NAMEW - 2) ok = 0;
+            else { if (mbname[i * NAMEW + k] != src[tpos[t] + k]) ok = 0; }
             k = k + 1;
         }
-        if (ok) { if (mbname[i * 32 + tlen[t]] == 0) return i; }
+        if (ok) { if (mbname[i * NAMEW + tlen[t]] == 0) return i; }
         i = i + 1;
     }
     return 0 - 1;
@@ -3563,7 +3591,7 @@ int stbody(int si) {
             while (a < e) {
                 if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
                 k = 0;
-                while (k < 32) { mbname[nmemb * 32 + k] = mbname[a * 32 + k]; k = k + 1; }
+                while (k < NAMEW) { mbname[nmemb * NAMEW + k] = mbname[a * NAMEW + k]; k = k + 1; }
                 mboff[nmemb] = mo + mboff[a]; mbbytes[nmemb] = mbbytes[a];
                 mbwidth[nmemb] = mbwidth[a]; mbelem[nmemb] = mbelem[a]; mbarr[nmemb] = mbarr[a];
                 mbptr[nmemb] = mbptr[a]; mbstruct[nmemb] = mbstruct[a];
@@ -3705,9 +3733,9 @@ int stbody(int si) {
             }
             if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
             k = 0;
-            while (k < tlen[t]) { if (k < 31) mbname[nmemb * 32 + k] = src[tpos[t] + k]; k = k + 1; }
-            if (k > 31) k = 31;
-            mbname[nmemb * 32 + k] = 0;
+            while (k < tlen[t]) { if (k < NAMEW - 1) mbname[nmemb * NAMEW + k] = src[tpos[t] + k]; k = k + 1; }
+            if (k > NAMEW - 1) k = NAMEW - 1;
+            mbname[nmemb * NAMEW + k] = 0;
             mboff[nmemb] = mo; mbbytes[nmemb] = msz; mbwidth[nmemb] = mw;
             mbelem[nmemb] = mel; mbptr[nmemb] = declptr; mbarr[nmemb] = marr;
             mbdim2[nmemb] = mdim2; mbdim3[nmemb] = mdim3;
@@ -3721,6 +3749,7 @@ int stbody(int si) {
             mbuns[nmemb] = muns; mbbool[nmemb] = mbl;
             mbskip[nmemb] = 0;
             if (stunion[si]) { if (stcount[si] > 0) mbskip[nmemb] = 1; }
+            name_toolong(t);          /* the member's name goes in mbname */
             if (nown >= 256) { __write(2, "too many members\n", 17); __exit(1); }
             own[nown] = nmemb; nown = nown + 1;
             nmemb = nmemb + 1;
@@ -3740,7 +3769,7 @@ int stbody(int si) {
     while (j < nown) {
         if (nmemb >= MAXMEMB) { __write(2, "too many members\n", 17); __exit(1); }
         k = 0;
-        while (k < 32) { mbname[nmemb * 32 + k] = mbname[own[j] * 32 + k]; k = k + 1; }
+        while (k < NAMEW) { mbname[nmemb * NAMEW + k] = mbname[own[j] * NAMEW + k]; k = k + 1; }
         mboff[nmemb] = mboff[own[j]]; mbbytes[nmemb] = mbbytes[own[j]];
         mbwidth[nmemb] = mbwidth[own[j]];
         mbarr[nmemb] = mbarr[own[j]]; mbelem[nmemb] = mbelem[own[j]];
@@ -3792,7 +3821,7 @@ int block(void) {
             q = 0;
             while ("unused variable '"[q]) { wm[q] = "unused variable '"[q]; q = q + 1; }
             r = 0;
-            while (symname[k * 32 + r] && r < 24) { wm[q] = symname[k * 32 + r]; q = q + 1; r = r + 1; }
+            while (symname[k * NAMEW + r] && r < 24) { wm[q] = symname[k * NAMEW + r]; q = q + 1; r = r + 1; }
             wm[q] = 39; q = q + 1;
             r = 0;
             while (" [-Wunused-variable]"[r]) { wm[q] = " [-Wunused-variable]"[r]; q = q + 1; r = r + 1; }
