@@ -1,7 +1,7 @@
 # FFI_CARRIER prototype stage
 
 `python3 exec/nativeabi/gen.py OUT.json` constructs a finite delta accepting raw
-single-record USLSIG2 bytes and the explicit `\0cli/target` ASCII resource.
+single-record USLSIG2 or complete ordered USLSIG3 bytes and the explicit `\0cli/target` ASCII resource.
 The six exact profiles and qualified mixed-union8 rule are in `rules.tsv`.
 
 Output is `USLNCAR1\n`, little-endian u64 target length, target bytes, u64 original
@@ -118,3 +118,7 @@ parameter and sret identity. All recipes retain root alignment4/8, width16 and
 one logical object; no numeric conversions, artificial ffi layout fields,
 new executor primitives or C ABI classifier are introduced. Broader16B layouts,
 SSEUP/x87/vector classes, holes and general union extents remain rejected.
+
+## Complete ordered V3 facts
+
+Complete natural origin1/2 facts (known-mask3, no modifiers, known natural alignment) can produce a V2 struct carrier while retaining the untouched V3 original. Actual occupied bit intervals, zero-width barriers, container reuse and ordered anonymous aggregates are retained. SysV anonymous lanes qualify only where the two supported policies agree. Incomplete parser origin0, packed/over-aligned layouts, native long-double and general BANK remain outside this certified domain. See [the wire/certification contract](../c/librarysignature-v3.md), `tests/modelnativebitfieldcheck.py` and the measured two-ISA native/closure checks in `tests/modelorderedbitfieldnativecheck.py`. These explicit external-layout fixtures do not prove public source refinement or all six platforms.
