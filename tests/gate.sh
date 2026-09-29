@@ -233,6 +233,7 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-source-bitfield-import-native python3 ./tests/librarysourcebitfieldimportcheck.py
     job lib-source-callable-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode callable
     job lib-source-callback-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode callbacks
+    job lib-source-variadic-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode variadic
 fi
 job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
