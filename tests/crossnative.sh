@@ -118,7 +118,9 @@ run_windows() {
         printf 'copy %s %s >nul\r\n' "$Z" "$Y"
         printf 'echo done > %s\r\n' "$D"
     } | "$UTM" file push "$vm" "$G" 2>/dev/null
-    "$UTM" exec "$vm" --hide --cmd "cmd.exe" -- /c "$G" >/dev/null 2>&1
+    # `--hide` makes utmctl exec fail with OSStatus -10004 (2026-09-29); the batch is
+    # non-interactive, and a failed exec must not be silent.
+    "$UTM" exec "$vm" --cmd "cmd.exe" -- /c "$G" >/dev/null 2>&1 || { echo "  $target guest exec refused"; rm -rf "$d"; return 1; }
     i=0
     while [ $i -lt 150 ]; do
         case "$("$UTM" file pull "$vm" "$D" 2>&1)" in *done*) break;; esac
