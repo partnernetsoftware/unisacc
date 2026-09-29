@@ -4896,7 +4896,7 @@ int function(int t, int w) {
         c = kind(k);
         if (c == tidx("(", 1)) depth = depth + 1;
         if (c == tidx(")", 1)) { if (depth == 0) break; depth = depth - 1; }
-        if (c == tidx("...", 3)) fnvar = 1;
+        if (c == tidx("...", 3)) { if (depth == 0) fnvar = 1; }
         else { if (c == tidx(",", 1)) { if (depth == 0) npar = npar + 1; }
                else any = 1; }
         k = k + 1;
