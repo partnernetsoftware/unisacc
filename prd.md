@@ -190,6 +190,7 @@
 | R11-0 v0.0.10 顺延项（先于新项闭合） | 库 ABI：V3 variadic 跨来源、pointee 完整身份、packed / native wide-FP / general BANK 载体、Windows SEH、六平台库生命周期矩阵、公共 origin0 refinement；平台：Windows 编译器自举（nativeboot --windows，需可用的 Terminal/utmctl 通道）、Linux x86_64 本机客机；测试：tools11（tiny-regex test2）拆分、hosted runner 余量；发布：GHCR 候选封存（主人一次 `gh auth refresh -s write:packages` 即可，本周内补，不等 0.0.11）| 每项有 [v]/[-] 回执；未闭合项不得从 README 能力边界移除 |
 | R11-0 切片顺序（2026-09-29 只读研究后定；四份计划见 scratch，要点如下） | **① V3 variadic 跨来源**（进行中）：模型 `LV.native` 在 V3 下改用 MG.compatible；宿主接受 V3 变参模板（无 ffi 位），每个 V3 具体调用点在 E3 结束后由 nativeabi 认证固定图并配 carrier CIF（`ffi_prep_cif_var`）；公开探针 `source-variadic-import.c`（`--mode variadic`，两 ISA ×900，prefix 位宽与 pack(1) 拒绝）。**② pointee 完整身份**：V3 指针 descriptor 增加一个子描述（自引用用回引），MG.equal/compatible 比较子边，宿主只解析不比较；先红例（`void f(double*)` 绑到 `void f(int*)` 今天会成功），再改；V2 字节不变。**③ 宽 FP 第一步**：仅 IEEE64 profile（osx/arm64、win/x86_64、win/arm64）接受 rank3/format2 且宽度 8，其他 profile 显式拒绝、禁止把折叠到 F64 的 rank3 认证；**④ packed（仅 origin2 外部显式布局）**：AAPCS64/Win64 用 uint8[N] 载体，SysV ≤16B 且有非对齐成员保持拒绝直到 BANK；源码 `#pragma pack` 仍拒绝。**⑤ 出站 general BANK**（SysV x86_64 与 AAPCS64）：新 `USLNPLN1` 复制计划证书 + 每 ISA 一个汇编入口（装 GP/FP 银行、栈字、捕获 rax/rdx/xmm0-1/st0 或 x0/x1/q0-3/x8），入站 callback 的 BANK 与 Windows BANK 顺延 0.0.12。**⑥ Windows SEH/生命周期**：调用帧内 scoped vectored handler（按客机映像/栈地址过滤，`RtlRestoreContext` 回到帧），`windowslibraryfaultnative.c` 五例，生命周期探针加 Windows 分支与线程/回调/exit 模式，矩阵驱动逐格写 JSON；不依赖 Terminal 的通道（launchd gui 会话或客机 SSH）。 | 每片：红例→模型/宿主→私有候选→受影响门禁→根产物→回执；必须继续拒绝：源码 packed、非 IEEE64 的 long double 算术/字面量、vector/SSEUP/_Complex/__int128、变参载体的宽 FP、携带 BANK/packed/宽 FP 的入站 callback、origin0 投影 |
 | R11-0 ① 回执 [v]（2026-09-29，源 1e0d0fb） | V3 variadic 跨来源导入：候选 `unisacc.com` 5fdd00b1…（版本 0.0.11，字节与产品闭包同步）；公开探针 `source-variadic-import.c` 在 osx/arm64 与 qualified libffi3.5.2 Rosetta x86 各 O0/O1/O2×100×3=900 次 ASan/UBSan 通过（三种尾：double,int / 零尾 / unsigned,double,long），prefix 位宽不匹配与 `#pragma pack(1)` 拒绝；红例先于实现保留（0.0.10 包报 library import binding or signature）。31 项受影响门禁 rc0（旧 V2 变参 host/native/rosetta/resolver、callable-variadic 三项、fixed/callable/callbacks 导入、catalog/model/carrier、run12/0、C99 57/57、chain167/167、e3self、kernel、gate-infra、ape-version）。证据 `research/r11-variadic-import-evidence.json`。不含变参函数指针/callback、宽 FP 尾、六平台。 |
+| R11-0 ② 回执 [v]（2026-09-29） | 一层 pointee 身份：V3 数据指针 descriptor 带 tag5 浅 pointee（标量含 FP rank/format 与 void/unknown 完整；聚合为 struct/union tag+size/align、无成员；再下一层指针不透明；无递归无环，V2 字节不变）。MS canonical/MG equal+compatible/nativeabi/宿主解码与身份比较均含该边，carrier 配对按指针形状。公开探针 `source-pointee-import.c`（`--mode pointee`）两 ISA 各 900 次 ASan/UBSan 通过；external 声明 `double*` 对源码 `int*`、以及不透明外部指针均被模型拒绝。80 项受影响门禁：78 rc0，两项独立源码事实 oracle（sig3-source、fp-rank-source）因断言指针 payload=0 而红，按源码期望更新后直接重跑通过（`long double*` 现与 `double*` 可区分）。候选 `unisacc.com` b61ca965…。证据 `research/r11-pointee-identity-evidence.json`。**顺延 0.0.12**：递归 pointee 图（回引/环）、限定符、`void*` 通配策略。 |
 | R11-1 libunisacc 扩展 | `us_eval`（REPL 与增量编译）、`us_reload`（经跳板热替换单个函数）、`us_opt_verify`（FX-1 加载前校验器，只允许声明过的 syscall 与注入符号）；Rust 与 Python 绑定作为示例宿主 | 增量定义后可调用；热替换后下一次调用走新代码；开校验时恶意 tape 被拒、合法程序结果与不开校验逐字节相同；绑定在六目标中至少三个原生验证 |
 | R11-2 按架构出包的研究账 | 六个单架构包与统一包之间逐网络、逐阶段的关系账：哪些共享、哪些按 OS 或 ISA 区分、差分大小；各架构原生机器上与本机编译器结果逐项比较 | 关系账由脚本从包中直接提取、可复现；原生比较 100% 一致，逐平台标明原生、仿真或未运行；v0.0.10 若已完成原生比较，这里只补关系账 |
 | R11-3 速度 | `-ftrim-libc` 在经典与模型两条路线同时改为默认开启；编码网络按 ISA 分片（跨 OS 共享编码器）；按需解压 | 默认切换前后全门禁通过；同一产物身份上测 calc `-run` 与最小程序启动并写入账本；只报告实测，不预设倍数目标 |
@@ -430,28 +431,28 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 下面从 `research/model-bytes.json` 生成，按实际封存 `.com` 计。只对阶段/模式作可证的功能归属，不把跨阶段动作任意分摊成“指针占多少字节”。
 
 <!-- model-bytes:begin -->
-快照 SHA-256：`5fdd00b1a97b2bad5aace1c4cc2a6cea728aa1bb5a7d8980d5d59228050d3403`；总计 **1,152,791 B**。
+快照 SHA-256：`b61ca965653bed48443a0caab7ae271f14bd2d5da310e96b693236e4497b9bf4`；总计 **1,153,805 B**。
 
 | 物理内容 | 字节 | 占整个 .com |
 |---|---:|---:|
-| 24 个共享网络体 | 699,792 | 60.70% |
-| 平台驱动、APE 启动/加载与对齐（混合账） | 250,752 | 21.75% |
-| 21 份 C 头文件/库实现源码 | 123,856 | 10.74% |
+| 24 个共享网络体 | 700,804 | 60.74% |
+| 平台驱动、APE 启动/加载与对齐（混合账） | 250,752 | 21.73% |
+| 21 份 C 头文件/库实现源码 | 123,856 | 10.73% |
 | 两 ISA 通用推理执行核资源 | 15,520 | 1.35% |
 | 目标预定义宏声明资源 | 321 | 0.03% |
-| 目录、记录头与资源键 | 62,534 | 5.42% |
+| 目录、记录头与资源键 | 62,536 | 5.42% |
 | 尾部 | 16 | 0.00% |
 
 | 模型阶段 / 具体功能 | 物理模型数 | 模型体 B | 占 .com | 阶段行引用数 |
 |---|---:|---:|---:|---:|
-| `e2`：预处理、目标预定义宏与位置模式 | 2 | 49,196 | 4.27% | 126 |
+| `e2`：预处理、目标预定义宏与位置模式 | 2 | 49,196 | 4.26% | 126 |
 | `e1`：词法与 token/位置输出 | 1 | 27,764 | 2.41% | 120 |
-| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 282,828 | 24.53% | 216 |
+| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 283,279 | 24.55% | 216 |
 | `e4`：O1/O2 优化 | 2 | 14,404 | 1.25% | 144 |
-| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 15,680 | 1.36% | 6 |
-| `prune`：函数可达闭包与保守原文剪枝（数据/地址根保留） | 1 | 9,045 | 0.78% | 144 |
-| `lower`：ABI、调用、目标指令 lowering 与数据布局 | 6 | 132,468 | 11.49% | 144 |
-| `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 6 | 118,347 | 10.27% | 78 |
+| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 15,812 | 1.37% | 6 |
+| `prune`：函数可达闭包与保守原文剪枝（数据/地址根保留） | 1 | 9,103 | 0.79% | 144 |
+| `lower`：ABI、调用、目标指令 lowering 与数据布局 | 6 | 132,839 | 11.51% | 144 |
+| `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 6 | 118,347 | 10.26% | 78 |
 | `tokenpp`：公开 token 路线的预处理 | 1 | 11,443 | 0.99% | 1 |
 | `tokenlex`：公开 token 路线的词法输出 | 1 | 4,477 | 0.39% | 1 |
 | `units`：多文件分帧与文件级 static 隔离 | 1 | 34,140 | 2.96% | 108 |
@@ -460,11 +461,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 | 网络记录 / 含义 | 字节 | 占整个 .com |
 |---|---:|---:|
-| `H`：阈值/选择网络参数记录 | 982,019 | 85.19% |
-| `Q`：动作序列声明（包含编译模板动作） | 953,401 | 82.70% |
+| `H`：阈值/选择网络参数记录 | 984,126 | 85.29% |
+| `Q`：动作序列声明（包含编译模板动作） | 954,761 | 82.75% |
 | `S`：字节字符串声明 | 18,805 | 1.63% |
 | `N`：网络头记录 | 485 | 0.04% |
-| `C`：动作序列共享前缀声明 | 453,227 | 39.32% |
+| `C`：动作序列共享前缀声明 | 453,385 | 39.29% |
 <!-- model-bytes:end -->
 
 两个 e3 分别是错误与错误+告警变体；十二个 e2 是六目标的普通/位置变体。33 个共享物理模型被 1,082 条阶段行引用，引用次数不是物理份数。压缩前 Q/C 是动作与共享声明，H 是阈值/选择参数；三个数字不与压缩模型体相加。21 份头/库源码与两 ISA 核资源另计；混合平台驱动缺独立 link-map，不虚构其 libc/启动/OS 子项比例。当前产物1,233,236 B（包985,172 B）相对已发布v0.0.8的5,388,402 B小约77.11%，签名后字节变化另记。
