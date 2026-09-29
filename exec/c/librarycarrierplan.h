@@ -96,7 +96,7 @@ static int us_carrier_certificate_native_add_variadic(us_native_plans *plans,uin
        us_callable_export_signature(certificate->carrier.items,&carrier)||
        !us_callable_carrier_valid(&original,&carrier)||
        strcmp(certificate->original.items->name,certificate->carrier.items->name)||
-       original.variadic||carrier.variadic||original.mode!=1||!fixed_count||fixed_count>original.count||
+       original.variadic||carrier.variadic||!fixed_count||fixed_count>original.count||
        us_export_has_callbacks(certificate->original.items)||
        !(us_export_supported(certificate->carrier.items)||us_export_bridge_supported(certificate->carrier.items)))
         return us_export_error(error,cap,"invalid variadic carrier plan certificate");

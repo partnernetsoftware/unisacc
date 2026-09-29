@@ -90,10 +90,11 @@ static int us_native_callsites_load(us_native_callsites *out,const us_native_tem
         us_export *x=graph.items,*proto=t->graph.items;
         if(x->version!=proto->version||x->mode!=1||x->variadic||(x->version==2&&!us_export_supported(x))||x->count<fixed||strcmp(x->name,proto->name)||!us_native_type_equal(&x->result,&proto->result))goto bad;
         for(size_t j=0;j<(size_t)fixed;j++)if(!us_native_type_equal(us_export_arg(x,j),us_export_arg(proto,j)))goto bad;
+        unsigned site_version=x->version;
         us_exports_clear(&graph);
         us_native_callsite *p=calloc(1,sizeof *p);if(!p)goto bad;
         p->site_id=site;p->template_handle=th;p->fixed=fixed;p->next=tmp.head;tmp.head=p;
-        if(x->version==2){
+        if(site_version==2){
             uint64_t ph=0;if(us_native_plan_add_variadic(&tmp.plans,t->target,b+at,(size_t)sl,fixed,&ph,error,cap)||!ph)goto bad;
             p->plan_handle=ph;
         }else{

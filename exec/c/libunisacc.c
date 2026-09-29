@@ -501,12 +501,26 @@ static int library_variadic_sites_prepare(us_context *c){
         if(!site->pending)continue;
         us_native_template *t=us_native_template_find(&c->native_templates,site->template_handle);
         if(!t){error(c,"stale variadic template for a V3 call site");goto bad;}
-        int rc=library_carrier_model(c,c->target,site->pending,site->pending_length,&certificate);
-        if(rc){if(rc==2)error(c,"not covered: V3 variadic call site native ABI");goto bad;}
-        if(certificate.original.count!=1||certificate.original.items->wire_length!=site->pending_length||
-           memcmp(certificate.original.items->wire,site->pending,site->pending_length)){
-            error(c,"variadic site certificate original mismatch");goto bad;
+        /* A concrete site keeps the variadic frame convention (mode 1) by protocol;
+           the canonical signature rule ties mode to count for fixed graphs. Certify a
+           projection whose mode byte follows the fixed rule; nothing else changes and
+           native invocation never reads mode. The site wire itself stays the identity. */
+        unsigned char *canon=malloc(site->pending_length);if(!canon){error(c,"variadic site projection allocation failed");goto bad;}
+        memcpy(canon,site->pending,site->pending_length);
+        {
+            size_t pos=8;uint64_t records=0,namelen=0,count=0;
+            if(us_export_u64(canon,site->pending_length,&pos,&records)||records!=1||us_export_u64(canon,site->pending_length,&pos,&namelen)||
+               namelen>site->pending_length-pos||site->pending_length-pos-(size_t)namelen<12){free(canon);error(c,"malformed V3 variadic call site wire");goto bad;}
+            size_t mode_at=pos+(size_t)namelen+3,count_at=mode_at+1;
+            if(us_export_u64(canon,site->pending_length,&count_at,&count)){free(canon);error(c,"malformed V3 variadic call site wire");goto bad;}
+            canon[mode_at]=count>6?1:0;
         }
+        int rc=library_carrier_model(c,c->target,canon,site->pending_length,&certificate);
+        if(rc){free(canon);if(rc==2)error(c,"not covered: V3 variadic call site native ABI");goto bad;}
+        int same=certificate.original.count==1&&certificate.original.items->wire_length==site->pending_length&&
+                 !memcmp(certificate.original.items->wire,canon,site->pending_length);
+        free(canon);
+        if(!same){error(c,"variadic site certificate original mismatch");goto bad;}
         uint64_t handle=0;
         if(us_carrier_certificate_native_add_variadic(&c->native_callsites.plans,t->target,&certificate,site->fixed,&handle,c->error,sizeof c->error)||!handle)goto bad;
         us_carrier_certificate_clear(&certificate);
