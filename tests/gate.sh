@@ -361,6 +361,12 @@ job exec-lex-sourcefacts  python3 ./exec/lex/sourcefactscheck.py
 job exec-parse2-libimports python3 ./exec/parse2/libraryimportscheck.py
 job lib-bindings-registry python3 ./tests/librarybindingscheck.py
 job tsv-build-account     python3 ./tests/tsvbuild_check.py
+# The five exec/pipeline/check_*_text.py format checkers have no caller in any
+# gate; the only path that reaches them is exec/pipeline/run.py, which nothing
+# invoked either.  This suite is that path, made bounded: run.py walks the seven
+# stages over one small program and calls check_<fmt>.py on each produced dump,
+# so a format checker that starts rejecting valid output fails here.
+job exec-formats python3 ./exec/pipeline/run.py examples/hello.c
 job windows-resolver-host python3 ./tests/windowsresolverhostcheck.py
 if [ "$COM" = 1 ]; then
     PRODUCT=${MODEL_COM-$R/unisacc.com}
