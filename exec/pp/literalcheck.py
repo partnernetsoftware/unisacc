@@ -107,7 +107,10 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
         p = run([t/'run', t/'pp.net', f, f, R/'include'])
         assert p.returncode != 0 and b'argument count' in p.stderr, p.stderr
         assert run([os.environ.get('CC', 'cc'), '-E', '-P', f]).returncode != 0
-        f = R/'tests/c/b_ppif.c'
+        # Library bodies on demand is E2's default (R11-3) and cc has no such notion: a quoted
+        # #include switches the trimming off by rule, so both sides see every header body.
+        (t/'nothing.h').write_text('')
+        f = t/'b_ppif.c'; f.write_text('#include "nothing.h"\n'+(R/'tests/c/b_ppif.c').read_text())
         got = call([t/'run', t/'pp.net', f, f, R/'include'])
         if mode:
             length, _, _, ns, ni = struct.unpack_from('<5I', got, 7)
@@ -123,7 +126,7 @@ with tempfile.TemporaryDirectory(prefix='pp-literals-') as td:
             if (kind, target) in [('common', '*'), ('os', 'lnx'), ('arch', 'x86_64')]:
                 defines += ['-D'+name for name in names]
         want = call([os.environ.get('CC', 'cc'), '-E', '-P', '-undef', '-nostdinc',
-                     '-I'+str(R/'include'), *defines, f])
+                     '-I'+str(R/'include'), '-I'+str(t), *defines, f])
         sys.path.insert(0, str(R))
         from unisa.front.pp import _pieces
         tokens = lambda value: [s for s in _pieces(value.decode()) if not s.isspace()]
