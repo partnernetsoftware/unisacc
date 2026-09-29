@@ -27,6 +27,17 @@ while [ $# -gt 0 ]; do
         *) echo "unknown gate option: $1" >&2; exit 2;;
     esac
 done
+# --list must be able to enumerate every suite without requiring the inputs a
+# real run needs: a '${VAR:?}' expands during argument construction, so an unset
+# variable truncated the list at the first suite that needed one and every suite
+# below it became invisible.  In list mode the value is a placeholder; in a real
+# run the hard requirement stands.
+if [ "$LIST" != 0 ]; then
+    UNISACC_FFI_X86_PROVIDER=${UNISACC_FFI_X86_PROVIDER:-LIST-MODE-PLACEHOLDER}
+else
+    : "${UNISACC_FFI_X86_PROVIDER:?set UNISACC_FFI_X86_PROVIDER to the x86_64 libffi provider}"
+fi
+
 if [ "$LIST" = 0 ] && [ -z "$SELECT" ]; then
     echo 'gate: select a bounded batch with --suite NAME; use --list [--com] for names' >&2; exit 2
 fi
@@ -290,7 +301,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-outcome-rosetta python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
-    job lib-source-longdouble-import-rosetta python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble --arch x86_64 --ffi-provider "${UNISACC_FFI_X86_PROVIDER:?}"
+    job lib-source-longdouble-import-rosetta python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble --arch x86_64 --ffi-provider "$UNISACC_FFI_X86_PROVIDER"
     job lib-carrier-mechanism-rosetta python3 ./tests/librarycarriercheck.py --arch x86_64
     job lib-carrier-native-plan-rosetta python3 ./tests/librarycarriernativeplancheck.py --arch x86_64
     job lib-union-native-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
