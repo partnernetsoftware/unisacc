@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Reuse verified model preparation, never source execution or test results."""
-import fcntl, hashlib, json, os, pathlib, platform, shutil, subprocess, sys, tempfile, time
+import hashlib, json, os, pathlib, platform, shutil, subprocess, sys, tempfile, time
+try:
+    import fcntl          # POSIX build lock; absent on Windows, where only read-only identity (closure/digest) is used
+except ImportError:   # pragma: no cover - Windows runners
+    fcntl = None
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -56,6 +60,7 @@ def prepare(out, target, network, compiler):
     base.mkdir(parents=True, exist_ok=True)
     cache = base / key
     with (base / (key + '.lock')).open('a') as lock:
+        if fcntl is None: raise RuntimeError("model construction lock needs fcntl (POSIX); this is a read-only host")
         fcntl.flock(lock, fcntl.LOCK_EX)
         manifest = valid(cache, network)
         hit = bool(manifest)

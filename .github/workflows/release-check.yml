@@ -53,8 +53,12 @@ jobs:
           python3 - <<'PY'
           import json,subprocess,re
           want={}
-          for e in ('hello','fact','fib','ptr','struct','switch'):
-              want[e]=subprocess.run(['python3','tests/bound.py','30','python3','-m','unisa','run','examples/%s.c'%e,'--drive','built'],capture_output=True,text=True,check=True).stdout
+          for e in ('hello','fact','fib','ptr','struct','switch','do','host'):
+              want[e]=subprocess.run(['python3','tests/bound.py','40','python3','-m','unisa','run','examples/%s.c'%e,'--drive','built'],capture_output=True,text=True,check=True).stdout
+          for e in ('calc','life','wordfreq','queens','bf','dijkstra','colorpack'):
+              p=subprocess.run(['python3','tests/bound.py','40','python3','-m','unisa','run','examples/apps/%s.c'%e,'--drive','built'],capture_output=True,text=True)
+              if p.returncode==0: want[e]=p.stdout
+              else: print('no Python reference for',e,p.returncode,p.stderr[-200:])
           want['version']='unisacc '+re.findall(r'"([0-9.]+)"',open('src/version.h').read())[0]
           json.dump(want,open('expected.json','w'))
           PY
@@ -126,20 +130,37 @@ jobs:
         if: steps.seal.outputs.present == 'true'
         with:
           name: expected-outputs
-      - name: the candidate runs here (${{ matrix.target }})
+      - name: the multi-architecture demo suite (${{ matrix.target }})
         if: steps.seal.outputs.present == 'true'
         run: |
-          python - <<'PY'
-          import json,subprocess,sys,platform,time
-          want=json.load(open('expected.json'))
-          com='candidate/unisacc.com'
-          def run(args):
-              t=time.time();p=subprocess.run([com,*args],capture_output=True,text=True,timeout=60);return p,time.time()-t
-          p,dt=run(['--version']);print('version',repr(p.stdout.strip()),'%.2fs'%dt);assert p.returncode==0 and p.stdout.strip()==want['version'],p.stderr[:300]
-          bad=0
-          for e in ('hello','fact','fib','ptr','struct','switch'):
-              p,dt=run(['-run','examples/%s.c'%e]);ok=p.returncode==0 and p.stdout==want[e]
-              print('  %-7s %s %.2fs'%(e,'ok' if ok else 'MISMATCH',dt));bad+=not ok
-              if not ok:print('   got',repr(p.stdout[:200]),'want',repr(want[e][:200]),p.stderr[:200])
-          print('runner',platform.system(),platform.machine(),'target ${{ matrix.target }}');sys.exit(1 if bad else 0)
-          PY
+          python tests/comdemo.py --com candidate/unisacc.com --expected expected.json --label "${{ matrix.target }}" --out "demo-$(echo '${{ matrix.target }}' | tr / -).json"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.seal.outputs.present == 'true'
+        with:
+          name: demo-${{ matrix.target == 'lnx/x86_64' && 'lnx-x86_64' || matrix.target == 'lnx/arm64' && 'lnx-arm64' || matrix.target == 'osx/arm64' && 'osx-arm64' || matrix.target == 'osx/x86_64' && 'osx-x86_64' || matrix.target == 'win/x86_64' && 'win-x86_64' || 'win-arm64' }}
+          path: demo-*.json
+
+  matrix:
+    # The six records must agree byte for byte on every deterministic program and each
+    # must have passed its own machine's structural checks. The merged matrix is the
+    # per-push multi-architecture demo result (R12-3 ③ judges releases on it).
+    needs: candidate
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: demo-*
+          merge-multiple: true
+          path: demos
+      - name: merge and judge
+        run: |
+          ls demos || { echo "no demo records (no sealed candidate?)"; exit 0; }
+          python3 tests/comdemo_matrix.py --out matrix.json demos/*.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: demo-matrix
+          path: matrix.json
