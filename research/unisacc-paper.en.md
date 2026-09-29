@@ -252,7 +252,7 @@ After the tape is lowered to six targets, each image is executed by a machine mo
 
 ### 6.3 External referees
 
-Enumeration closes only "network = table"; it says nothing about "table = C". We register a referee for each stage: six stages have named external referees (preprocessing, parsing, type, ABI, precedence, type info), six have only cross-implementation agreement, four have no direct referee yet (scope, isel-prep, format conversion, binary selection), and two are not on the main compilation path; the ledger is `research/referee.tsv`.
+Enumeration closes only "network = table"; it says nothing about "table = C". We register a referee for each stage: eight stages have named external referees (preprocessing, parsing, type, ABI, precedence, type info, binary-operator selection, printf conversion), six have only cross-implementation agreement, two have no direct referee yet (scope, isel-prep), and two are not on the main compilation path; the ledger is `research/referee.tsv`.
 
 | External referee | Coverage and limits |
 |---|---|
@@ -262,8 +262,10 @@ Enumeration closes only "network = table"; it says nothing about "table = C". We
 | ABI | Numbers checked against host system-call headers; only the actual host OS and architecture |
 | Precedence | 324 ordered operator pairs: 291 distinguishable on the chosen constants and consistent, 33 indistinguishable |
 | Type info | Sizes of 11 types; signedness and narrowness of 8 integer types |
+| Binary-operator selection | The host cc compares signed and unsigned 64-bit results per operator: 7 of 16 operators depend on signedness, and the table names an unsigned flavour exactly there (`tests/binsel_audit.py`) |
+| printf conversion | The host printf output shape for the 9 conversion letters matches the routine class the table assigns (`tests/pfconv_audit.py`) |
 
-The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 6/18 stages have external referees of stated coverage. **Measurement** is a third kind of evidence: the peephole cost table is revised from measurements (§7.4), but that stage is registered in the ledger as cross-implementation agreement and is not counted among the six.
+The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 8/18 stages have external referees of stated coverage. **Measurement** is a third kind of evidence: the peephole cost table is revised from measurements (§7.4), but that stage is registered in the ledger as cross-implementation agreement and is not counted among the six.
 
 ## 7 Evaluation
 

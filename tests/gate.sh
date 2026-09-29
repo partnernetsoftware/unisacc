@@ -223,6 +223,8 @@ job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
 job lib-callable-mechanism python3 ./tests/librarycallablescheck.py
 job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py
+job referee-binsel python3 ./tests/binsel_audit.py        # external referee: host cc decides signedness-dependence
+job referee-pfconv python3 ./tests/pfconv_audit.py        # external referee: host printf decides each conversion
 job lib-ordered-carrier-host python3 ./tests/libraryorderedcarriercheck.py
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-ordered-carrier-native python3 ./tests/modelorderedbitfieldnativecheck.py --target osx/arm64
