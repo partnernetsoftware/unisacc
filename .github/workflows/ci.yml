@@ -78,6 +78,19 @@ jobs:
             [ "$got" = "$want" ] || { echo "MISMATCH: want '$want'"; exit 1; }
           done
 
+      - name: pull the sealed candidate by digest (tools suites use it as TOOLS_UA)
+        continue-on-error: true
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          [ -f release/candidate.json ] || exit 0
+          ref=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["ref"])')
+          sha=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["unisacc_com_sha256"])')
+          curl -sSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz | tar -xz oras && chmod +x oras
+          printf '%s' "$GHCR_TOKEN" | ./oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir -p candidate && ./oras pull "$ref" --output candidate
+          [ "$(sha256sum candidate/unisacc.com | cut -d' ' -f1)" = "$sha" ] && chmod +x candidate/unisacc.com
       - name: suites
         run: |
           set -e
@@ -89,6 +102,9 @@ jobs:
           python3 tests/bound.py 10 ./tests/all.sh --list > /tmp/unisacc-ci-plan
           logs=$(mktemp -d); pids=(); batch=(); bad=0
           export APE_STATE="$logs/ape" ACCEPT_STATE="$logs/accept" SELFHOST_STATE="$logs/selfhost"
+          # tools* compile third-party libraries; with a sealed candidate the product does
+          # it in milliseconds (tools11 alone took 41–50 s through the Python front end).
+          if [ -f candidate/unisacc.com ]; then export TOOLS_UA="$PWD/candidate/unisacc.com"; fi
           drain() {
             for pid in "${pids[@]}"; do wait "$pid" || true; done
             for name in "${batch[@]}"; do
@@ -196,6 +212,9 @@ jobs:
           python3 tests/bound.py 10 ./tests/all.sh --list > /tmp/unisacc-ci-plan
           logs=$(mktemp -d); pids=(); batch=(); bad=0
           export APE_STATE="$logs/ape" ACCEPT_STATE="$logs/accept" SELFHOST_STATE="$logs/selfhost"
+          # tools* compile third-party libraries; with a sealed candidate the product does
+          # it in milliseconds (tools11 alone took 41–50 s through the Python front end).
+          if [ -f candidate/unisacc.com ]; then export TOOLS_UA="$PWD/candidate/unisacc.com"; fi
           drain() {
             for pid in "${pids[@]}"; do wait "$pid" || true; done
             for name in "${batch[@]}"; do
