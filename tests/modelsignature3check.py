@@ -45,6 +45,7 @@ def oracle(blob):
   if origin==1:assert known==3 and (natural>0 or kind in (0,6))
   if kind!=3:assert rank==fmt==0
   else:
+   if fmt==0:assert rank==0 and origin==0
    assert fmt==0 or width=={1:4,2:8,3:16,4:16}[fmt]
    assert rank==0 or rank==1 and fmt==1 or rank==2 and fmt==2 or rank==3 and fmt in (2,3,4)
   metadata=bytes([rank,fmt])+U(natural)+bytes([flags,known,origin]);tag=byte(end);length=word(end);stop=p+length;assert stop<=end and length<=16777216
@@ -123,6 +124,7 @@ def fixtures():
  malformed=[signature((descriptor(**kw),)) for kw in badmeta]
  malformed += [signature((descriptor(3,8,8,rank=1,format=2),)),signature((descriptor(3,8,8,rank=2,format=0),)),signature((descriptor(3,8,8,rank=3,format=1),)),signature((descriptor(3,8,8,format=3),))]
  malformed += [signature((aggregate((entry(**kw),)),)) for kw in [dict(ordinal=1),dict(kind=5),dict(align=0),dict(align=3),dict(offset=1),dict(bitwidth=1),dict(storage=4),dict(kind=4),dict(kind=1,bitwidth=0),dict(kind=2,bitoffset=63,bitwidth=2),dict(kind=3,bitwidth=1),dict(kind=3,bitoffset=1),dict(kind=3,offset=9),dict(kind=1,bitoffset=1,bitwidth=(1<<64)-1),dict(kind=1,child=D,bitwidth=1)]]
+ malformed += [signature((descriptor(3,16,16,origin=2),)),signature((descriptor(3,16,16,natural=16,known=3,origin=1),))]
  malformed += [shared[:cut] for cut in (0,7,15,24,40,95,96,97,105,108,109,117,127,137,145,180,220)]
  malformed += [signature((aggregate((entry(child=descriptor(depth=1),kind=1,bitwidth=1),)),)),signature((aggregate(tuple(entry(ordinal=i,offset=i*8) for i in range(129)),width=1032),)),shared[:-1],signature((callback(reference=True),))]
  pairs=[(a,a,True) for a in valid]+[(shared,copied,True),(signature((selfcycle,)),signature((twocycle,)),True),(signature((descriptor(base=222,shape=333),)),signature(),False),(signature((descriptor(base=222,shape=333),)),signature((I,)),True)]

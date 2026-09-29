@@ -55,6 +55,8 @@ def main():
     add('v2',wire('v2',d(version=2),[d(version=2)],support=1,version=2))
     add('maxentries',wire('maxentries',agg([entry(i,0,integer) for i in range(128)],tag=2)))
     for label,result in [('ranknonfp',d(rank=1,fmt=1)),('formatwidth',d(3,8,8,rank=1,fmt=1)),('rankmismatch',d(3,8,8,rank=2,fmt=3)),('unknowncomplete',d(3,8,8,origin=1)),('knownmissing',d(known=1,natural=4,origin=1)),('natbad',d(natural=3)),('flagsunknown',d(flags=1)),('badknown',d(known=4)),('badorigin',d(origin=3)),('fpunknownrank',d(3,8,8,rank=2)),('badordinal',agg([entry(1,0,integer)])),('badkind',agg([entry(0,5,integer)])),('badentryalign',agg([entry(0,0,integer,align=3)])),('ordinarybits',agg([entry(0,0,integer,bw=1)])),('zeronamed',agg([entry(0,1,integer)])),('outsidebits',agg([entry(0,1,integer,bo=31,bw=2)])),('badstorage',agg([entry(0,1,integer,bw=1,storage=2)])),('barrierbits',agg([entry(0,3,integer,bw=1)])),('barrieroffset',agg([entry(0,3,integer,off=5)])),('badanonymous',agg([entry(0,4,integer)])),('tooentries',agg([entry(i,0,integer) for i in range(129)],tag=2)),('zerowidth',agg([entry(0,3,integer)],width=0)),('forward',ref(1)),('badid',cb(definition(integer,id=2))),('duplicate',cb(definition(cb(definition(integer,id=1))))),('nestedproof',cb(definition(integer,support=1))),('badstride',d(5,8,4,tag=3,payload=U(2)+U(3)+integer))]:add(label,wire(label,result),False)
+    add('unknownexternalfp',wire('unknownexternalfp',d(3,16,16,origin=2)),False)
+    add('unknowncompletefp',wire('unknowncompletefp',d(3,16,16,natural=16,known=3,origin=1)),False)
     add('topproof',wire('topproof',integer,support=1),False);add('trailer',wire('trailer',integer)+b'x',False)
     lines=[]
     for i,(name,b,yes) in enumerate(cases):
