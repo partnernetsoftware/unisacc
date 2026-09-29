@@ -46,7 +46,8 @@ def oracle(records):
  for side in ('result','params'):
   get=lambda name:records[name]['result'] if side=='result' else records[name]['params'][0]
   members(get('ranked'));n=get('nested');facts(n,0,5,88);assert n['child'][1]['layout']==(80,0,0,8);members(n['child'][0]['child']);facts(n['child'][1]['child'],2,3,8)
-  o=get('opaque');facts(o,0,2,8);assert o['fields'][0]==1 and o['tag']==0
+  # long double * now spells its pointee (tag 5): rank 3 / F64 storage, so it differs from double *.
+  o=get('opaque');facts(o,0,2,8);assert o['fields'][0]==1 and o['tag']==5;q=o['child'];facts(q,3,3,8);assert q['fields'][0]==0 and q['tag']==0
  def leaf(d):
   facts(d,0,4,8);g=d['child'];assert g and g['support']==0 and g['count']==1;facts(g['result'],3,3,8);facts(g['params'][0],3,3,8);return g
  f=records['relay'];assert leaf(f['result']) is leaf(f['params'][0])

@@ -47,6 +47,7 @@ def decode(data):
     assert ident==len(ids)+1;g={'id':ident};ids[ident]=g;d['child']=g
     g['var']=byte();g['mode']=byte();g['count']=word();g['result']=desc();assert word()==g['count'];g['params']=[desc() for _ in range(g['count'])];g['support']=byte()
    else:assert form==1 and ident in ids;d['child']=ids[ident]
+  elif tag==5:d['child']=desc() if n else None
   else:assert n==0
   assert at==end;return d
  records={}
@@ -79,7 +80,9 @@ def oracle(records):
   a=get('array');record(a,16,4,1,[(0,4,(0,0,0,12)),(0,2,(12,0,0,2))]);arr=a['child'][0]['child'];facts(arr);assert arr['tag']==3 and arr['fields'][3:]==(5,12,0,4) and arr['child'][:2]==(3,4);primitive(arr['child'][2],1,4,4);primitive(a['child'][1]['child'],1,2,2)
   a=get('choice');record(a,8,8,2,[(1,4,(0,0,3,4)),(0,8,(0,0,0,8))])
   a=get('reordered');record(a,16,8,1,[(0,8,(0,0,0,8)),(0,4,(8,0,0,4))])
-  a=get('holder');record(a,8,8,1,[(0,8,(0,0,0,8))]);primitive(a['child'][0]['child'],2,8,8,depth=1)
+  # V3 data pointers spell one shallow pointee (tag 5): struct Ordinary * -> tag1 extent 16/8, no members.
+  a=get('holder');record(a,8,8,1,[(0,8,(0,0,0,8))]);ptr=a['child'][0]['child'];facts(ptr);assert ptr['fields'][0]==1 and ptr['fields'][3:]==(2,8,0,8) and ptr['tag']==5,ptr
+  q=ptr['child'];facts(q);assert q['fields'][0]==0 and q['fields'][3:]==(5,16,0,8) and q['tag']==1 and q['child']==[],q
   a=get('grid');record(a,24,4,1,[(0,4,(0,0,0,24))]);arr=a['child'][0]['child'];assert arr['tag']==3 and arr['child'][:2]==(2,12);arr=arr['child'][2];assert arr['tag']==3 and arr['child'][:2]==(3,4);primitive(arr['child'][2],1,4,4)
  relay=records['relay'];assert relay['result']['child'] is relay['params'][0]['child'];sig=relay['result']['child'];assert (sig['count'],sig['mode'],sig['var'],sig['support'])==(1,0,0,0);record(sig['result'],4,4,1,shared);record(sig['params'][0],8,4,1,gaps)
  cycle=records['loop']['params'][0]['child'][0]['child']['child'];assert cycle['params'][0]['child'][0]['child']['child'] is cycle and cycle['support']==0
