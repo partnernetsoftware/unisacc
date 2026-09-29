@@ -9,6 +9,22 @@
 先读[当前模型流水线设计](#pipeline-design)：每步的输入/输出、网络控制结构、规则来源、功能、限制和验证。当前本地功能/权重字节账见[模型功能与物理字节账](#model-function-bytes)。
 
 
+### 开发与发布流水线（向 minicon 学习，v0.0.10 起实行；手册与脚本是权威，此处为索引）
+
+```
+本机：改代码 → 提交 → 冻结源构私有 UA → make model-com（shared/六 target/pack）→ 全量门禁 gatequeue（Terminal 交接）
+   → 装根 + 字节账 + 回执 → seal_candidate.sh：oras push 到 GHCR，release/candidate.json 记摘要 → 一次 push
+GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR 摘要拉取候选在 ubuntu/macos 实跑
+   → windows-signing.yml（手动 dispatch：qualification → company，release-signing 环境审批，Azure Artifact Signing）
+   → 草稿 Release（未签 zip + 回执 + 签后 .com + 回执 + Apple app/dmg）→ gh release 发布（tag 落在候选源 SHA）
+本机：Apple 签名/公证/staple（apple-sign.sh，与 CI 并行）；ci.yml 全量矩阵每周一或手动，是安全网不是前提
+```
+
+- **权威文档**：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)（§0–8：冻结源、UA、P3、门禁队列、客机、CI/GHCR、Apple、Windows 签名、发布；每步坑与判据）；契约 [release/README.md](release/README.md)；策略 `release/signing-policy.json`；封存 `release/candidate.json`；工作流 `.github/workflows/{release-check,windows-signing,ci}.yml`；本机技能 `~/.claude/skills/unisacc-release-pipeline`。
+- **与 minicon 的对应**：minicon 在 CI 构建候选并推 GHCR，我们**本机构建**（一个能写出六目标的编译器，CI 只测不建，见 CLAUDE.md）再推 GHCR；签名/运行验证都按摘要拉取，同 minicon；docs 提交不打断签名（按产品源闭包比较）。
+- **已落地**（0.0.10/0.0.11 两次实发）：push→签完约 4–5 分钟；GHCR 封存与 release-check 实跑；qualification→company；Apple 公证。**未落地**（R12-0/R12-7）：发布本身仍是本机 `gh release edit` 而非工作流；qualification 的本地演练脚本；单架构原生 runner 跑完整套件（R12-3）。
+- **每片重封**：开发期每次产品闭包变化都要 `seal_candidate.sh <ver>-dev`，否则 release-check 候选作业红（0.0.11 前三次 push 的教训）。
+
 ### v0.0.9 / R9（2026-09-28；已归档）
 
 v0.0.9 交付计划、R9 不可达函数消除的原型数字、R9 集成与签名状态（其中“库按需默认关闭”自 0.0.11 起已改为默认开启）见 [归档](archive/prd-r9-r10-receipts-20260929.md#v0-0-9)。v0.0.9 已发布（`a606ff4`）。
