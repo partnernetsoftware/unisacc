@@ -1,40 +1,37 @@
 # exec/ — model-driven compiler development route
 
-The production model compiler is built by `make com`, with the driver and
-generic execution/inference cores in `c/`, stage declarations and offline
-constructors in this tree, and bundled C headers as resources. `src/`,
-`kernel/`, `unisacc.c` and the Python seed remain behavior references;
-`make classic-com` builds an explicit classic fallback. Model refusals never
-silently use that fallback. Construction and packaging use offline Python;
-compiling and running with the packaged product do not.
+**This file is a map of `exec/`: what each part is, who writes it and who reads
+it.** The specification is [prd.md](../prd.md); the repository-wide map is
+[ARCHITECTURE.md](../ARCHITECTURE.md); working rules are [AGENTS.md](../AGENTS.md).
 
-Read the authoritative [current pipeline design](../prd.md#pipeline-design)
-for the E2 → E1 → optional units → E3 → optional E4 → lower → image/memory
-route, its rule sources and limits. The current product has 32 shared networks,
-not just the six-stage development route shown later in this file. See
-[rules.md](rules.md) for the rule-source inventory,
-[c/BUILDING.md](c/BUILDING.md) for building and
-[c/PACKAGE.md](c/PACKAGE.md) for the package contract.
+| Path | What it is | Written by | Read by |
+|---|---|---|---|
+| `c/` | Driver, generic execution core, inference kernel, packaged-library runtime | hand | `make com`, the shipped `unisacc.com` |
+| `c/asm/` | The same execution kernel as per-ISA assembly bindings | hand | the assembly route in `c/` |
+| `pipeline/` | Stage routing used by construction and the development route | hand | `pipeline/run.py`, `pipeline/elf.sh`, the gate |
+| `*/gen.py` | Offline constructors: turn a declaration into a network | hand | `unisa build-weights`, packaging |
+| `*/check.py` | Per-stage checks for that constructor's output | hand | the gate (listed in `tests/gate.sh`) |
+| `*/fixtures.json` | Inputs those checks compare against | hand | the matching `check.py` |
+| `stamp.sh` | Content-keyed artefact cache for the harnesses (`$X`, `fresh`) | hand | every script here that caches |
+| `build/` | Generated build output | build | nothing committed |
 
-Published v0.0.8 is `10672e3`, unsigned 5,388,402 B, SHA-256
-`948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
-Published v0.0.11 (2026-09-29, tag `8b5abc9`): unsigned gate candidate 1,154,605 B,
-SHA-256 `6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`; the shipped
-`unisacc.com` is these bytes plus the Authenticode signature (1,170,384 B, `e86cc61c…`).
-P3 compression, one-pass memory binding, the shared E2/24-network package and library
-bodies on demand by default are in the product; the local full queue is 338 suites;
-Windows arm64/x86_64 rebuild the compiler byte for byte in the local guest and the
-examples run on all six targets (`tests/crossnative.sh`). Receipts:
-[release acceptance](../research/r11-release-acceptance.json).
-See [current pipeline audit](../research/r9-pipeline-structure-20260928.json)
-and [the physical byte ledger](../prd.md#model-function-bytes); the prior
-[one-pass measurements](../research/memory-once-integrated-bench-20260928.json)
-remain historical evidence for their recorded identity.
+Authoritative detail, rather than restated here:
 
-Pruning remains cc-unisacc's planned work, not a current production stage.
-macOS company-signed app/DMG qualification has passed notarization, stapling,
-Gatekeeper and sealed-payload execution. Windows service signing and final
-signed-asset/platform release acceptance remain pending.
+- the route and each stage's inputs, outputs, rules and limits:
+  [prd §0 current pipeline](../prd.md#pipeline-design);
+- the rule-source inventory: [rules.md](rules.md);
+- building and the package contract: [c/BUILDING.md](c/BUILDING.md),
+  [c/PACKAGE.md](c/PACKAGE.md);
+- published versions, current candidate identity and every byte count:
+  [prd §0](../prd.md) and the generated ledger
+  [research/model-bytes.json](../research/model-bytes.json). **No byte count,
+  network count or SHA is restated in this file** — `tests/numberrestatements.py`
+  fails the gate if one is.
+
+Anything below this line is a **historical development milestone**: it
+describes the E0/E1 snapshots and the six-stage development route of its time,
+not the current production container.
+
 
 ## Historical development milestones
 

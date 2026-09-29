@@ -44,4 +44,22 @@ PY
 echo "docs  referee ledger $([ -z "$led" ] && echo ok || echo STALE)"
 model_rc=0
 python3 "$R/tests/bound.py" 60 python3 tests/modelbytes.py || model_rc=$?
-[ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ]
+# A current-state number belongs in a generated region or in a sentence that
+# points at the generated ledger -- nowhere else.  The three documents used to
+# restate the same two facts with three different values (24/1088 in the
+# ledger, 33/1082 in README and prd, 32/938 in ARCHITECTURE) and no check here
+# could see it, because docgen owns only the stage table and modelbytes owns
+# only the byte ledger: every wrong number sat outside both.
+num_rc=0
+python3 "$R/tests/bound.py" 60 python3 tests/numberrestatements.py || num_rc=$?
+# ... and the assertion must be able to fail.  Both mutations plant a number
+# into a real document and require the check to catch it, so this is a
+# mutation test and not just a call.
+if [ "$num_rc" -eq 0 ]; then
+    for m in size stale; do
+        python3 "$R/tests/bound.py" 60 python3 tests/numberrestatements.py --mutation "$m" --quiet || {
+            echo "docs  number mutation '$m' was not caught" >&2; num_rc=1; }
+    done
+fi
+echo "docs  state numbers $([ "$num_rc" -eq 0 ] && echo ok || echo STALE)"
+[ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ] && [ "$num_rc" -eq 0 ]
