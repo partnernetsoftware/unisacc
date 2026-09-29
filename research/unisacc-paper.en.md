@@ -234,6 +234,10 @@ The decision-network instance self-hosts in three layers, each judged by byte eq
 
 The network compiler self-hosts its driver with a fixed network package (N1 = N2 = N3 on macOS arm64); this does not include self-construction of the network package or of the multi-platform container.
 
+### 5.4 R10 development evidence (not a replacement release baseline)
+
+Table 2 and the performance tables retain the v0.0.9 release baseline. An R10 development candidate adds a `nativeabi` carrier-certification stage: the network maps an original type graph and target facts to a carrier certificate; the host executes the declared data moves and calls. The natural 16-byte union domain preserves logical parameter count, object extent and alignment 4/8, distinguishing integer/SSE lanes and ARM HFAs by target. The model has 1,332 states, with network=table over all 343,400 observations and 310 independent graph-oracle cases. Across two macOS ISAs, nine layouts, four register-pressure patterns and both call directions, 144 actual variants passed ASan/UBSan and 100 repetitions at each of three optimisation levels: 43,200 native calls and 21,600 SCRIPT callbacks. A mixed-register boundary failure with system macOS x86_64 libffi is retained separately; the actual calls pass with the pinned official 3.5.2 dependency. Network–table equality does not prove this host ABI fact. The development artifact is 1,116,367 B; all 24 deployed networks pass full-domain checks and 28 affected gates pass ([candidate](r10-union16-candidate-evidence.json), [public calls](r10-union16-qualified-public-evidence.json), [dependency counterexample and delivery](r10-ffi-provider-delivery-evidence.json)). This is not a v0.0.10 release claim or qualification of arbitrary union/BANK, bitfields, wide FP or all six platform ABIs; those remain development obligations.
+
 ## 6 Verification Methodology
 
 ### 6.1 Full-domain enumeration (T1)
