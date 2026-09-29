@@ -9,7 +9,7 @@ def install(E, P, section, warnings, templates, facts, alphabet):
     root = Path(__file__).parent
     def rows(suffix):
         return [line.split('\t') for line in (root / ('printfcontrol-' + suffix + '.tsv')).read_text().splitlines()[1:]]
-    bindings = dict(facts, FND=E.FND, PFSLOTS=32 << 40, TKEOF=E.TK['eof'])
+    bindings = dict(facts, FND=E.FND, VAR=E.VAR, PFSLOTS=32 << 40, TKEOF=E.TK['eof'])
     p = P('printfcontrol.bindings.' + section)
     for part, mode, owner, kind, key in rows('fresh'):
         if part == section and (mode == 'all' or warnings):
