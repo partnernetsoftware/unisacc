@@ -15,7 +15,7 @@
 
 `make com` 构建模型产品；`make classic-com` 把经典显式回退写到
 `out/unisacc-classic.com`。模型拒绝不隐式改走经典路线。规范入口是
-[prd §0.4 当前流水线](prd.md#pipeline-design)，当前字节账见
+[prd §0.3 当前流水线](prd.md#pipeline-design)，当前字节账见
 [模型功能与物理字节账](prd.md#model-function-bytes)。
 
 | 身份 | 尺寸 / SHA256 / 验证边界 |

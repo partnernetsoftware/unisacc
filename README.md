@@ -243,7 +243,7 @@ tests/            the suites (differential vs cc, native runs, self-hosting, clo
 prd.md            the specification and the measured log
 ```
 
-Current design and status are in [prd §0.4](prd.md#pipeline-design); older
+Current design and status are in [prd §0.3](prd.md#pipeline-design); older
 measured findings and failed predictions remain in [the archive](archive/s17-migration-log-20260928.md).
 
 ## Historical corpus and library observations
