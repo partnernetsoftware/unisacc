@@ -36,12 +36,15 @@ def main():
         ua.write_text('#!/bin/sh\nprintf "same tape\\n"\nexit 2\n')
         ua.chmod(0o755)
         env = dict(os.environ, OPTPY_PART='self', SHARD='1/1')
-        proc = subprocess.run([sys.executable, '-', str(ua), str(helper)],
+        # optpy.sh passes UA, the bound helper and the self source (third argument).
+        self_source = temp / 'self.c'
+        self_source.write_text('int main(void){return 0;}\n')
+        proc = subprocess.run([sys.executable, '-', str(ua), str(helper), str(self_source)],
                               input=script, text=True, capture_output=True,
                               cwd=ROOT, env=env, timeout=5)
         assert proc.returncode != 0 and 'rc=2' in proc.stderr, proc.stderr
         env['SHARD'] = '2/1'
-        proc = subprocess.run([sys.executable, '-', str(ua), str(helper)],
+        proc = subprocess.run([sys.executable, '-', str(ua), str(helper), str(self_source)],
                               input=script, text=True, capture_output=True,
                               cwd=ROOT, env=env, timeout=5)
         assert proc.returncode != 0 and 'invalid SHARD' in proc.stderr

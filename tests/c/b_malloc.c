@@ -1,5 +1,8 @@
 /* The allocator reuses what is freed: small enough for the reference VM
-   (whose munmap is a no-op), but well past the old 64 KB static pool. */
+   (whose munmap is a no-op, and which hosted CI runners interpret about
+   four times slower than the dev machine), but well past the old 64 KB
+   static pool.  Every allocator path below is kept; only repeat counts
+   are sized for the 45 s reference bound. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,7 +10,7 @@ int main(void) {
     char *p; char *q; long *z; int i; int j; long sum; int ok;
     char *v[300];
     ok = 1;
-    for (i = 0; i < 200; i++) {            /* 200 x 4 KB = 800 KB churn */
+    for (i = 0; i < 64; i++) {             /* 64 x 4 KB = 256 KB churn */
         p = (char *)malloc(4000);
         if (p == NULL) { ok = 0; break; }
         if (((long)p & 15) != 0) ok = 0;
@@ -29,13 +32,13 @@ int main(void) {
     q[4] = 0;
     printf("realloc %d %s\n", ok, q);
     free(q);
-    z = (long *)calloc(3000, 8);
+    z = (long *)calloc(1200, 8);
     sum = 0;
-    for (i = 0; i < 3000; i++) sum = sum + z[i];
+    for (i = 0; i < 1200; i++) sum = sum + z[i];
     printf("calloc %ld\n", sum);
     free(z);
     sum = 0;
-    for (j = 0; j < 3; j++) {
+    for (j = 0; j < 2; j++) {
         for (i = 0; i < 300; i++) { v[i] = (char *)malloc(i + 1); v[i][i] = (char)(i & 127); }
         for (i = 0; i < 300; i++) { sum = sum + v[i][i]; free(v[i]); }
     }

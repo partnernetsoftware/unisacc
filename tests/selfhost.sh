@@ -34,7 +34,9 @@ done
 run "unisacc built by cc" UA="$UA"
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
     if [ -n "${SELFHOST_STATE:-}" ]; then
-        self=$(bound 10 python3 tests/selfhost_prepare.py verify "$SELFHOST_STATE" "$UA") || exit 1
+        # A verify failure must name itself: CI once showed rc=1 with no message.
+        self=$(bound 10 python3 tests/selfhost_prepare.py verify "$SELFHOST_STATE" "$UA" 2>"$T/verify.err") || {
+            echo "selfhost verify failed (rc=$?): state=$SELFHOST_STATE"; cat "$T/verify.err"; ls -la "$SELFHOST_STATE" 2>&1; exit 1; }
     else
         bound 45 python3 -m unisa compile "$SELF" -o "$T/ua_self" --target osx/arm64 \
             --drive built >"$T/build.out" 2>"$T/build.err"; brc=$?

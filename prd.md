@@ -3072,3 +3072,15 @@ R10 natural16根候选已同步：源bbe5691，unisacc.com **1,116,367 B / SHA25
 
 
 **R10 跨来源callable配对实现决定（2026-09-29）**：fixed imports声明兼容已封存，下一步完成函数地址与递归callback。模型发USLCALL3显式别名记录，绑定source key、选中的冻结native plan、raw target、原始source/external wire；宿主只做完整边界/唯一性/已有对象和精确字节绑定，不比较跨来源ABI。E3验证MG.compatible；编译结束并退出active后nativeabi对完整source graph独立认证，生成alias-owned carrier plan，保留外部原plan与全部origin。派发与native introduction只按模型发的alias id选该计划，旧alias0/USLCALL1/2及host strict身份不变；未知/坏绑定/认证失败均编译失败，不回退。旧callable注册表、nested pair和image代际/释放规则继续严格；源/宿主/独立测试不交叠并行。首个公开取地址红例先保留，V3variadic与其他完整ABI项仍继续，不能用此片重定义R10完成。
+
+
+### v0.0.10 发布收口决定（2026-09-29，cc-unisacc 唯一编排者；主人 /goal：完成 0.0.10 并发布）
+按本计划停止条件执行：R10-1..7 逐项给回执后发布，超出本轮可交付的项**明确列出并顺延到 0.0.11**，不静默缩减。
+- **版本**：`src/version.h` 升为 0.0.10；根产物与 VERSIONINFO 随下一次冻结重构同步，未重构前 `ape-version` 门禁应当红。
+- **R10-1 CI**：远端最近三次全部死于 `tests/opt_partition_check.py` 的 argv 契约（optpy.sh 已改为三参数）；已修并本机 rc0。上一轮 30 分钟 run 的真实失败：`b_malloc` 参考 VM（Python 解释）本机 12.4s、托管 runner 触 45s 上限 → 缩为 64×4KB churn/1200 calloc/2 轮小块（4.2s，仍 >64KB 池，路径不减）；closure5/tools3 超时已由现役 16/11 分片覆盖并本机复验；selfhost1/2/4 在 macos-15 的静默 rc1 来自 `verify` 失败输出被丢弃，现改为打印原因与状态目录。远端绿只能靠随最终批次的一次 push 取证，不为测试 push。
+- **R10-2 签名**：Windows 按 release/README.md 契约：最终候选同 SHA CI 成功 → 草稿 Release 上传 `unisacc-unsigned.zip` + `unsigned-receipt.json` → 先 `qualification` 再把 policy 改 `required` 后 `company`；Apple 沿 0.0.9 的 bundle/sign/dmg/assess 与公证装订流程。任何一步失败不退回未签名出货。
+- **R10-3/4/5**：共享 E2/24 网、源码/权重 include 分离、六单目标私有构建、进程内库主 API/线程/生命周期/回调与本轮 USLCALL3 别名均已有回执；以候选全门禁为最终验收。
+- **R10-6**：`-ftrim-libc` 改名已落地；Paper A 中英以当前候选身份做一次最终数字对齐（字节账、门禁数），公式渲染/投稿版定稿顺延 0.0.11。
+- **R10-7**：演示入口为 `unisacc.com -run examples/apps/*.c`（apps 门禁）；发布顺序：pack → `tests/release.sh --com` 全量滚动队列 → `tests/linux.sh`（Lima）→ `tests/crossnative.sh`（UTM Windows，用后关机）→ 一次 push 取 CI → Apple/Windows 签名 → 草稿 → 正式发布。
+- **顺延到 0.0.11（明确）**：V3 variadic 跨来源、pointee 完整身份、packed/native wide-FP/general BANK、Windows SEH 与六平台库完整生命周期矩阵、公共 origin0 refinement、Paper A 定稿。这些在 0.0.10 说明中列为未完成，不改变已发布能力的边界描述。
+
