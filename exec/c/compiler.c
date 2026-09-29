@@ -100,8 +100,7 @@ int main(int argc, char **argv) {
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc;
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
-    Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0};
-    bput(&libneed,1,0);   /* R11-3: library bodies on demand by default; -fno-trim-libc sends an empty flag */
+    Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
@@ -122,8 +121,9 @@ int main(int argc, char **argv) {
             if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
         }
         else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
-        else if (!strcmp(a,"-ftrim-libc") || !strcmp(a,"-libneed")) { if (!libneed.n) bput(&libneed,1,0); }
-        else if (!strcmp(a,"-fno-trim-libc")) libneed.n = 0;
+        /* R11-3: library bodies on demand is the model's default; only the opt-out is a resource. */
+        else if (!strcmp(a,"-ftrim-libc") || !strcmp(a,"-libneed")) { notrim.n = 0; }
+        else if (!strcmp(a,"-fno-trim-libc")) { if (!notrim.n) bput(&notrim,1,0); }
         else if (!strcmp(a,"-dump-tokens")) mode = 4;
         else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
@@ -219,7 +219,7 @@ int main(int argc, char **argv) {
         nimports=process_own_imports(cli+9,243,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
-    ARGRESOURCE(NRI,"\0cli/ftrim-libc",libneed); NRI++;
+    ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     ARGRESOURCE(NRI,"\0cli/error-limit",errorlimit); NRI++;
     /* Target selection is input data; the E2 model chooses its declaration. */

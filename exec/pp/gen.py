@@ -115,7 +115,8 @@ LNSB, NEEDB = 71 * 10 ** 6, 70 * 10 ** 6
 
 
 def build_ftrim_libc(g):
-    """-ftrim-libc after the autoinc scan: with \\0cli/ftrim-libc and no quoted
+    """-ftrim-libc after the autoinc scan: the default since R11-3 -- unless the
+    \\0cli/fno-trim-libc resource is present (non-empty) -- and no quoted
     #include (the LQ* prescan, quotedinc's line rule), mark the roots'
     closure, then every body reached by a seen key, then define __UN_<body>
     for each marked body and __UNISA_FTRIM_LIBC.  Closures are the build-time

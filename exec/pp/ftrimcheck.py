@@ -17,7 +17,7 @@ def check(run,net,ua,out):
     res=out/'resources';res.mkdir(exist_ok=True)
     for k,v in predefine_resources().items():
         f=res/k[1:].decode();f.parent.mkdir(parents=True,exist_ok=True);f.write_bytes(v)
-    sel=res/'cli/target';sel.parent.mkdir(exist_ok=True);flag=res/'cli/ftrim-libc'
+    sel=res/'cli/target';sel.parent.mkdir(exist_ok=True);flag=res/'cli/fno-trim-libc'   # opt-out resource: absent = bodies on demand (R11-3)
     route=out/'route.tsv';route.write_text('pp\te2\tsrc.c\tpp.text\t'+str(net)+'\n')
     probes={'stdio':'#include <stdio.h>\nint main(void){printf("hi %d\\n",7);return 0;}\n',
             'stdlib':'#include <stdlib.h>\nint main(void){return atoi("0");}\n',
@@ -30,7 +30,7 @@ def check(run,net,ua,out):
     for target in ('lnx/arm64','lnx/x86_64','osx/arm64','osx/x86_64','win/arm64','win/x86_64'):
         sel.write_bytes(target.encode())
         for on in (False,True):
-            if on:flag.write_bytes(b'1')
+            if not on:flag.write_bytes(b'1')
             else:
                 try:flag.unlink()
                 except FileNotFoundError:pass
