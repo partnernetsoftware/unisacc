@@ -17,7 +17,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXAMPLES = ['hello', 'fact', 'fib', 'ptr', 'struct', 'switch', 'do', 'host']
 DETERMINISTIC_APPS = ['calc', 'life', 'wordfreq', 'queens', 'bf', 'dijkstra', 'colorpack']
 SYSTEM_APPS = {  # name -> (args after '--', kind of check)
-    'exeinfo': (['unisacc.com'], 'exit0'),
+    'exeinfo': (['SELF'], 'exit0'),   # SELF = the candidate's own path (the root unisacc.com is not in a checkout)
     'procview': (['--capture'], 'processes'),
     'memmap': (['--capture'], 'maps'),
 }
@@ -75,7 +75,7 @@ def main():
         if not ok: rec['failures'].append(name)
     for e in EXAMPLES: record(e, ROOT / f'examples/{e}.c', [], 'deterministic')
     for e in DETERMINISTIC_APPS: record(e, ROOT / f'examples/apps/{e}.c', [], 'deterministic')
-    for e, (args, kind) in SYSTEM_APPS.items(): record(e, ROOT / f'examples/apps/{e}.c', args, kind)
+    for e, (args, kind) in SYSTEM_APPS.items(): record(e, ROOT / f'examples/apps/{e}.c', [str(com) if x == 'SELF' else x for x in args], kind)
     # System apps are allowed to report an unsupported platform (exit 0 with a notice) but not to crash.
     rec['status'] = 'passed' if not rec['failures'] else 'failed'
     a.out.write_text(json.dumps(rec, indent=1))
