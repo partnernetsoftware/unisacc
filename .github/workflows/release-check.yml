@@ -106,6 +106,7 @@ jobs:
           [[ "$sha" =~ ^[0-9a-f]{64}$ ]] && [[ "$src" =~ ^[0-9a-f]{64}$ ]]
           { echo "present=true"; echo "ref=$ref"; echo "sha=$sha"; echo "src=$src"; } >> "$GITHUB_OUTPUT"
       - name: the sealed source closure is this tree's closure
+        id: closure
         if: steps.seal.outputs.present == 'true'
         run: |
           have=$(python - <<'PY'
@@ -123,7 +124,29 @@ jobs:
                   if p.relative_to(ROOT).parts[:2]==('exec','build'): continue
                   if p.is_file() and p.suffix in ('.py','.c','.h','.inc','.tsv','.json','.sh'): print(p.relative_to(ROOT).as_posix(), models.digest(p))
           PY
-            echo "closure_mismatch=true" >> "$GITHUB_OUTPUT"; exit 1
+            # A ref that is a release must have matching bytes, so it stays a
+            # hard failure.  An ordinary branch push is development, where the
+            # tree running ahead of the sealed candidate is the normal state:
+            # the 0.0.11 lesson was "reseal after every install", and failing
+            # the six-runner job instead of saying so only teaches people to
+            # ignore a red check.  So record the mismatch, skip the candidate
+            # work through steps.closure.outputs.closure_mismatch (every
+            # downstream step tests it), and let the source job stay the gate.
+            #
+            # Both spellings are here on purpose.  `github.ref_type` is the
+            # documented value, and the refs/tags/ test is the same question
+            # asked of the ref itself -- if a future edit adds tag triggering
+            # (this workflow is push:branches[main] plus dispatch today, so the
+            # tag arm is unreachable until one does), the release path must not
+            # silently become a skip.
+            case "${{ github.ref_type }} ${{ github.ref }}" in
+              tag\ *|*\ refs/tags/*)
+                echo "closure_mismatch=true" >> "$GITHUB_OUTPUT"
+                echo "release ref: the tagged tree does not match the sealed candidate" >&2
+                exit 1;;
+            esac
+            echo "closure_mismatch=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=candidate skipped::the tree is ahead of the sealed candidate ($have != ${{ steps.seal.outputs.src }}); reseal before the next release (release/RELEASE-PIPELINE.md). The candidate bytes were NOT run."
           fi
       - uses: actions/upload-artifact@v4
         if: failure()
@@ -132,7 +155,7 @@ jobs:
           path: closure-listing.txt
           if-no-files-found: ignore
       - name: oras (official release binary for this runner; setup-oras has no windows/arm64 build)
-        if: steps.seal.outputs.present == 'true'
+        if: steps.seal.outputs.present == 'true' && steps.closure.outputs.closure_mismatch != 'true'
         run: |
           set -euo pipefail
           v=1.3.0
@@ -150,7 +173,7 @@ jobs:
           fi
           ls -la
       - name: pull the exact candidate bytes by digest
-        if: steps.seal.outputs.present == 'true'
+        if: steps.seal.outputs.present == 'true' && steps.closure.outputs.closure_mismatch != 'true'
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
@@ -162,15 +185,15 @@ jobs:
           [ "$got" = "${{ steps.seal.outputs.sha }}" ] || { echo "candidate bytes differ: $got" >&2; exit 1; }
           chmod +x candidate/unisacc.com
       - uses: actions/download-artifact@v4
-        if: steps.seal.outputs.present == 'true'
+        if: steps.seal.outputs.present == 'true' && steps.closure.outputs.closure_mismatch != 'true'
         with:
           name: expected-outputs
       - name: the multi-architecture demo suite (${{ matrix.target }})
-        if: steps.seal.outputs.present == 'true'
+        if: steps.seal.outputs.present == 'true' && steps.closure.outputs.closure_mismatch != 'true'
         run: |
           python tests/comdemo.py --com candidate/unisacc.com --expected expected.json --label "${{ matrix.target }}" --out "demo-$(echo '${{ matrix.target }}' | tr / -).json"
       - uses: actions/upload-artifact@v4
-        if: always() && steps.seal.outputs.present == 'true'
+        if: always() && steps.seal.outputs.present == 'true' && steps.closure.outputs.closure_mismatch != 'true'
         with:
           name: demo-${{ matrix.target == 'lnx/x86_64' && 'lnx-x86_64' || matrix.target == 'lnx/arm64' && 'lnx-arm64' || matrix.target == 'osx/arm64' && 'osx-arm64' || matrix.target == 'osx/x86_64' && 'osx-x86_64' || matrix.target == 'win/x86_64' && 'win-x86_64' || 'win-arm64' }}
           path: demo-*.json
