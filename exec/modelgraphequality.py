@@ -1,4 +1,4 @@
-"""Bounded semantic USLSIG2 graph equality in ordinary model actions.
+"""Bounded semantic USLSIG2/3 graph equality in ordinary model actions.
 MG.equal: mg_left_blob/mg_left_len, mg_right_blob/mg_right_len -> mg_equal.
 Canonical validation precedes indexing. Top-level mode is excluded by the old
 contract; nested modes and every ABI layout fact remain significant. No host
@@ -6,22 +6,30 @@ parser, graph isomorphism or callback execution. Budget exhaustion rejects.
 """
 FIELDS, EDGES, LAYOUT, SIGID, PAIRLEFT, PAIRRIGHT, VISITED, FRAME = (i<<40 for i in range(430,438))
 assert not set(range(430,438)) & (set(range(350,358)) | set(range(400,408)) | set(range(410,414)))
+# Legacy FIELDS stride16, EDGES stride1025 and LAYOUT stride4 stay unchanged.
+# V3 extras: per-node [version,rank,format,natural,flags,known,origin];
+# per-entry [ordinal,kind,effective_alignment].
+EXTRA, ENTRYEXTRA = (i<<40 for i in range(632,634))
+assert not set(range(632,634)) & set(range(430,438))
 def install(E,fail='DEAD'):
  P=E.P
  if 'MG.equal' in E.g.st:return
  from modelsignature import install as canonical_install
  canonical_install(E,fail)
  def setfield(p,field,reg):return p.a(('ALUI','mul','mg_key','mg_node',16),('ALUI','add','mg_key','mg_key',field),('STX','mg_key',FIELDS,reg))
+ def extrafield(p,field,reg):return p.a(('ALUI','mul','mg_key','mg_node',8),('ALUI','add','mg_key','mg_key',field),('STX','mg_key',EXTRA,reg))
  def constfield(p,field,val):return setfield(p.a(('LDI','mg_v',val)),field,'mg_v')
  def edge(p):return p.a(('ALUI','mul','mg_key','mg_node',1025),('ALU','add','mg_key','mg_key','mg_i'),('STX','mg_key',EDGES,'mg_lastnode'))
  def eq(name,a,b,yes,no):P(name).branch({1:yes},no,[('C64U',a,b)])
  regs=('mg_node','mg_i','mg_count','mg_end','mg_id','mg_tag','mg_attr','mg_payload','mg_top')
  P('MG.fail').a(E.rej('not covered: signature graph equality budget')).goto(fail)
  P('MG.return').ret()
- P('MG.equal').a(('COPYW','ms_blob','mg_left_blob'),('COPYW','ms_len','mg_left_len')).call('MS.canonical').a(('COPYW','mg_left_canon','ms_canon'),('COPYW','mg_left_canonlen','ms_canonlen'),('COPYW','ms_blob','mg_right_blob'),('COPYW','ms_len','mg_right_len')).call('MS.canonical').a(('COPYW','mg_right_canon','ms_canon'),('COPYW','mg_right_canonlen','ms_canonlen'),('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','mg_left_canon'),('COPYW','ms_limit','mg_left_canonlen')).call('MG.root').a(('COPYW','mg_left_root','mg_lastnode'),('INPOP',),('LDI','mg_side',1),('LDI','mg_base',32768),('LDI','mg_next',0),('INPUSH','mg_right_canon'),('COPYW','ms_limit','mg_right_canonlen')).call('MG.root').a(('COPYW','mg_right_root','mg_lastnode'),('INPOP',),('ALUI','add','mg_epoch','mg_epoch',1),('LDI','mg_head',0),('LDI','mg_tail',0),('COPYW','mg_l','mg_left_root'),('COPYW','mg_r','mg_right_root')).call('MG.enqueue').goto('MG.queue')
+ P('MG.equal').a(('COPYW','ms_blob','mg_left_blob'),('COPYW','ms_len','mg_left_len')).call('MS.canonical').a(('COPYW','mg_left_canon','ms_canon'),('COPYW','mg_left_canonlen','ms_canonlen'),('COPYW','mg_left_version','ms_version'),('COPYW','ms_blob','mg_right_blob'),('COPYW','ms_len','mg_right_len')).call('MS.canonical').a(('COPYW','mg_right_canon','ms_canon'),('COPYW','mg_right_canonlen','ms_canonlen'),('COPYW','mg_right_version','ms_version'),('COPYW','mg_version','mg_left_version'),('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','mg_left_canon'),('COPYW','ms_limit','mg_left_canonlen')).call('MG.root').a(('COPYW','mg_left_root','mg_lastnode'),('INPOP',),('COPYW','mg_version','mg_right_version'),('LDI','mg_side',1),('LDI','mg_base',32768),('LDI','mg_next',0),('INPUSH','mg_right_canon'),('COPYW','ms_limit','mg_right_canonlen')).call('MG.root').a(('COPYW','mg_right_root','mg_lastnode'),('INPOP',),('ALUI','add','mg_epoch','mg_epoch',1),('LDI','mg_head',0),('LDI','mg_tail',0),('COPYW','mg_l','mg_left_root'),('COPYW','mg_r','mg_right_root')).call('MG.enqueue').goto('MG.queue')
  P('MG.new').a(('ALUI','add','mg_next','mg_next',1)).branch({2:'MG.fail'},'MG.newclear',[('CMPI','mg_next',17409)])
  P('MG.newclear').a(('ALU','add','mg_node','mg_base','mg_next'),('LDI','mg_clear',0),('LDI','mg_zero',0)).goto('MG.clear')
- P('MG.clear').a(('ALUI','mul','mg_key','mg_node',16),('ALU','add','mg_key','mg_key','mg_clear'),('STX','mg_key',FIELDS,'mg_zero'),('ALUI','add','mg_clear','mg_clear',1)).branch({1:'MG.return'},'MG.clear',[('CMPI','mg_clear',16)])
+ P('MG.clear').a(('ALUI','mul','mg_key','mg_node',16),('ALU','add','mg_key','mg_key','mg_clear'),('STX','mg_key',FIELDS,'mg_zero'),('ALUI','add','mg_clear','mg_clear',1)).branch({1:'MG.extraclearstart'},'MG.clear',[('CMPI','mg_clear',16)])
+ P('MG.extraclearstart').a(('LDI','mg_clear',0)).goto('MG.extraclear')
+ P('MG.extraclear').a(('ALUI','mul','mg_key','mg_node',8),('ALU','add','mg_key','mg_key','mg_clear'),('STX','mg_key',EXTRA,'mg_zero'),('ALUI','add','mg_clear','mg_clear',1)).branch({1:'MG.return'},'MG.extraclear',[('CMPI','mg_clear',8)])
  P('MG.push').a(('ALUI','add','mg_framelevel','mg_framelevel',1)).branch({2:'MG.fail'},'MG.pushfields',[('CMPI','mg_framelevel',66)])
  p=P('MG.pushfields')
  for i,r in enumerate(regs):p.a(('ALUI','mul','mg_key','mg_framelevel',16),('ALUI','add','mg_key','mg_key',i),('STX','mg_key',FRAME,r))
@@ -29,13 +37,20 @@ def install(E,fail='DEAD'):
  p=P('MG.pop')
  for i,r in enumerate(regs):p.a(('ALUI','mul','mg_key','mg_framelevel',16),('ALUI','add','mg_key','mg_key',i),('LDX',r,'mg_key',FRAME))
  p.a(('ALUI','sub','mg_framelevel','mg_framelevel',1)).ret()
- p=P('MG.root').call('MG.new');constfield(p,3,7).call('MS.byte');setfield(p,0,'ms_byte').call('MS.u64').a(('COPYW','mg_count','ms_value'));setfield(p,4,'mg_count').a(('LDI','mg_top',1)).goto('MG.sigchildren')
+ P('MG.root').branch({1:'MG.rootprefix'},'MG.rootbody',[('CMPI','mg_version',3)])
+ P('MG.rootprefix').a(*[('ADV',) for _ in range(8)]).goto('MG.rootbody')
+ p=P('MG.rootbody').call('MG.new');extrafield(p,0,'mg_version');constfield(p,3,7).call('MS.byte');setfield(p,0,'ms_byte').call('MS.u64').a(('COPYW','mg_count','ms_value'));setfield(p,4,'mg_count').a(('LDI','mg_top',1)).goto('MG.sigchildren')
  P('MG.desc').call('MG.new').a(('LDI','mg_field',0)).goto('MG.descfields')
- p=P('MG.descfields').call('MS.u64').a(('ALUI','mul','mg_key','mg_node',16),('ALU','add','mg_key','mg_key','mg_field'),('STX','mg_key',FIELDS,'ms_value'),('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.desctag'},'MG.descfields',[('CMPI','mg_field',7)])
+ p=P('MG.descfields').call('MS.u64').a(('ALUI','mul','mg_key','mg_node',16),('ALU','add','mg_key','mg_key','mg_field'),('STX','mg_key',FIELDS,'ms_value'),('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.descversion'},'MG.descfields',[('CMPI','mg_field',7)])
+ p=P('MG.descversion');extrafield(p,0,'mg_version').branch({1:'MG.meta0'},'MG.desctag',[('CMPI','mg_version',3)])
+ for i,word in enumerate((False,False,True,False,False,False)):
+  p=P('MG.meta'+str(i)).call('MS.u64' if word else 'MS.byte');extrafield(p,i+1,'ms_value' if word else 'ms_byte').goto('MG.meta'+str(i+1) if i<5 else 'MG.desctag')
  p=P('MG.desctag').call('MS.byte').a(('COPYW','mg_tag','ms_byte'));setfield(p,7,'mg_tag').call('MS.u64').a(('COPYW','mg_payload','ms_value')).branch({(1,2):'MG.members',3:'MG.array',4:'MG.callback'},'MG.descreturn',[('RLD','mg_tag')])
  p=P('MG.members').call('MS.u64').a(('COPYW','mg_count','ms_value'));setfield(p,8,'mg_count');setfield(p,10,'mg_count').a(('LDI','mg_i',0)).goto('MG.memberloop')
  eq('MG.memberloop','mg_i','mg_count','MG.descreturn','MG.memberlayout')
- P('MG.memberlayout').a(('LDI','mg_attr',0)).goto('MG.layoutread')
+ P('MG.memberlayout').a(('LDI','mg_attr',0)).branch({1:'MG.entryextra0'},'MG.layoutread',[('CMPI','mg_version',3)])
+ for i,word in enumerate((True,False,True)):
+  P('MG.entryextra'+str(i)).call('MS.u64' if word else 'MS.byte').a(('ALUI','mul','mg_key','mg_node',1025),('ALU','add','mg_key','mg_key','mg_i'),('ALUI','mul','mg_key','mg_key',3),('ALUI','add','mg_key','mg_key',i),('STX','mg_key',ENTRYEXTRA,'ms_value' if word else 'ms_byte')).goto('MG.entryextra'+str(i+1) if i<2 else 'MG.layoutread')
  P('MG.layoutread').call('MS.u64').a(('ALUI','mul','mg_key','mg_node',1025),('ALU','add','mg_key','mg_key','mg_i'),('ALUI','mul','mg_key','mg_key',4),('ALU','add','mg_key','mg_key','mg_attr'),('STX','mg_key',LAYOUT,'ms_value'),('ALUI','add','mg_attr','mg_attr',1)).branch({1:'MG.memberchild'},'MG.layoutread',[('CMPI','mg_attr',4)])
  p=P('MG.memberchild').call('MG.push').call('MG.desc').call('MG.pop');edge(p).a(('ALUI','add','mg_i','mg_i',1)).goto('MG.memberloop')
  p=P('MG.array').call('MS.u64');setfield(p,8,'ms_value').call('MS.u64');setfield(p,9,'ms_value');constfield(p,10,1).a(('LDI','mg_i',0)).call('MG.push').call('MG.desc').call('MG.pop');edge(p).goto('MG.descreturn')
@@ -61,14 +76,21 @@ def install(E,fail='DEAD'):
  P('MG.pair').a(('LDX','mg_l','mg_head',PAIRLEFT),('LDX','mg_r','mg_head',PAIRRIGHT),('ALUI','add','mg_head','mg_head',1),('ALUI','mul','mg_pair','mg_l',65536),('ALU','add','mg_pair','mg_pair','mg_r'),('LDX','mg_mark','mg_pair',VISITED)).goto('MG.visit')
  P('MG.visit').a(('STX','mg_pair',VISITED,'mg_epoch'),('LDI','mg_field',0)).goto('MG.fields')
  P('MG.fields').a(('ALUI','mul','mg_key','mg_l',16),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_a','mg_key',FIELDS),('ALUI','mul','mg_key','mg_r',16),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_b','mg_key',FIELDS)).branch({1:'MG.fieldnext'},'MG.no',[('C64U','mg_a','mg_b')])
- P('MG.fieldnext').a(('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.skipids',11:'MG.edgesstart'},'MG.fields',[('RLD','mg_field')])
+ P('MG.fieldnext').a(('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.skipids',11:'MG.extracomparestart'},'MG.fields',[('RLD','mg_field')])
  P('MG.skipids').a(('LDI','mg_field',3)).goto('MG.fields')
+ P('MG.extracomparestart').a(('LDI','mg_field',0)).goto('MG.extrafields')
+ P('MG.extrafields').a(('ALUI','mul','mg_key','mg_l',8),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_a','mg_key',EXTRA),('ALUI','mul','mg_key','mg_r',8),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_b','mg_key',EXTRA)).branch({1:'MG.extrafieldnext'},'MG.no',[('C64U','mg_a','mg_b')])
+ P('MG.extrafieldnext').a(('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.edgesstart'},'MG.extrafields',[('CMPI','mg_field',7)])
  P('MG.edgesstart').a(('COPYW','mg_pairleft','mg_l'),('COPYW','mg_pairright','mg_r'),('ALUI','mul','mg_key','mg_l',16),('ALUI','add','mg_key','mg_key',10),('LDX','mg_edges','mg_key',FIELDS),('LDI','mg_edge',0),('ALUI','sub','mg_key','mg_key',3),('LDX','mg_pairtag','mg_key',FIELDS)).goto('MG.edgesloop')
  eq('MG.edgesloop','mg_edge','mg_edges','MG.queue','MG.edgecompare')
  P('MG.edgecompare').branch({(1,2):'MG.edgelayout'},'MG.edgepush',[('RLD','mg_pairtag')])
  P('MG.edgelayout').a(('LDI','mg_attr',0)).goto('MG.edgelayoutread')
  P('MG.edgelayoutread').a(('ALUI','mul','mg_key','mg_pairleft',1025),('ALU','add','mg_key','mg_key','mg_edge'),('ALUI','mul','mg_key','mg_key',4),('ALU','add','mg_key','mg_key','mg_attr'),('LDX','mg_a','mg_key',LAYOUT),('ALUI','mul','mg_key','mg_pairright',1025),('ALU','add','mg_key','mg_key','mg_edge'),('ALUI','mul','mg_key','mg_key',4),('ALU','add','mg_key','mg_key','mg_attr'),('LDX','mg_b','mg_key',LAYOUT)).branch({1:'MG.edgelayoutnext'},'MG.no',[('C64U','mg_a','mg_b')])
- P('MG.edgelayoutnext').a(('ALUI','add','mg_attr','mg_attr',1)).branch({1:'MG.edgepush'},'MG.edgelayoutread',[('CMPI','mg_attr',4)])
+ P('MG.edgelayoutnext').a(('ALUI','add','mg_attr','mg_attr',1)).branch({1:'MG.edgeversion'},'MG.edgelayoutread',[('CMPI','mg_attr',4)])
+ P('MG.edgeversion').a(('ALUI','mul','mg_key','mg_pairleft',8),('LDX','mg_v','mg_key',EXTRA)).branch({1:'MG.entryextracomparestart'},'MG.edgepush',[('CMPI','mg_v',3)])
+ P('MG.entryextracomparestart').a(('LDI','mg_attr',0)).goto('MG.entryextracompare')
+ P('MG.entryextracompare').a(('ALUI','mul','mg_key','mg_pairleft',1025),('ALU','add','mg_key','mg_key','mg_edge'),('ALUI','mul','mg_key','mg_key',3),('ALU','add','mg_key','mg_key','mg_attr'),('LDX','mg_a','mg_key',ENTRYEXTRA),('ALUI','mul','mg_key','mg_pairright',1025),('ALU','add','mg_key','mg_key','mg_edge'),('ALUI','mul','mg_key','mg_key',3),('ALU','add','mg_key','mg_key','mg_attr'),('LDX','mg_b','mg_key',ENTRYEXTRA)).branch({1:'MG.entryextranext'},'MG.no',[('C64U','mg_a','mg_b')])
+ P('MG.entryextranext').a(('ALUI','add','mg_attr','mg_attr',1)).branch({1:'MG.edgepush'},'MG.entryextracompare',[('CMPI','mg_attr',3)])
  P('MG.edgepush').a(('ALUI','mul','mg_key','mg_pairleft',1025),('ALU','add','mg_key','mg_key','mg_edge'),('LDX','mg_l','mg_key',EDGES),('ALUI','mul','mg_key','mg_pairright',1025),('ALU','add','mg_key','mg_key','mg_edge'),('LDX','mg_r','mg_key',EDGES)).call('MG.enqueue').a(('ALUI','add','mg_edge','mg_edge',1)).goto('MG.edgesloop')
  P('MG.yes').a(('LDI','mg_equal',1)).ret()
  P('MG.no').a(('LDI','mg_equal',0)).ret()

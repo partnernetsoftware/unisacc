@@ -6,7 +6,7 @@ FRAME = 80 << 40
 def install(E,P,b,integers,union_bank):
     regs=('d_depth','d_base','d_shape','d_array','d_arraybytes','d_class','d_width',
           'd_unsigned','d_align','d_tag','d_sid','d_members','d_i','d_key','d_old',
-          'd_payload','d_blob','d_end','d_stride','d_return')
+          'd_payload','d_blob','d_end','d_stride','d_return','d_dim','d_rank')
     assert len(regs)<64
     def frame(p,op):
         for i,r in enumerate(regs):
@@ -24,7 +24,7 @@ def install(E,P,b,integers,union_bank):
     P('LTY.nodes').branch({2:'LX.fail'},'LTY.start',[('CMPI','lx_nodes',16384)])
     P('LTY.start').a(('COPYW','d_depth','lx_depth'),('COPYW','d_base','lx_base'),
         ('COPYW','d_shape','lx_shape'),('COPYW','d_array','lx_array'),('COPYW','d_arraybytes','lx_arraybytes'),
-        ('COPYW','d_return','lx_return'),('OCUT','d_old','lx_zero'),('LDI','d_class',6),
+        ('COPYW','d_return','lx_return'),('COPYW','d_dim','lx_arraydimension'),('OCUT','d_old','lx_zero'),('LDI','d_class',6),
         ('LDI','d_width',0),('LDI','d_unsigned',0),('LDI','d_align',0),('LDI','d_tag',0)).branch(
         {1:'LTY.scalar'},'LTY.pointer',[('CMPI','d_depth',0)])
     P('LTY.pointer').branch({1:'LTY.fp'},'LTY.pointerupper',[('CMPI','d_base',b['FPB'])])
@@ -76,12 +76,12 @@ def install(E,P,b,integers,union_bank):
     p=P('LTY.membertype')
     frame(p,'STX')
     p.a(('LDX','lx_depth','d_key',b['MPT']),('LDX','lx_base','d_key',b['MBS']),
-        ('LDI','lx_shape',0),('LDX','lx_array','d_key',b['MAR']),('LDX','lx_arraybytes','d_key',b['MSZ']),('LDI','lx_return',0)).call('LX.descriptor')
+        ('LDI','lx_shape',0),('LDX','lx_array','d_key',b['MAR']),('LDX','lx_arraybytes','d_key',b['MSZ']),('LDI','lx_arraydimension',0),('LDI','lx_return',0)).call('LX.descriptor')
     frame(p,'LDX').a(('ALUI','add','d_i','d_i',1)).goto('LTY.members')
     p=P('LTY.arraypayload').a(('COPYW','lx_v','d_array')).call('LX.u64').a(('COPYW','lx_v','d_stride')).call('LX.u64')
     frame(p,'STX')
     p.a(('COPYW','lx_depth','d_depth'),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),
-        ('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',0)).call('LX.descriptor')
+        ('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',0)).call('LX.descriptor')
     frame(p,'LDX').goto('LTY.out')
     from librarycallbackgraph import install as graph_install
     graph_install(E,P,b,frame)
@@ -91,3 +91,6 @@ def install(E,P,b,integers,union_bank):
     p.a(('OUTW','d_tag'),('BLEN','lx_v','d_payload')).call('LX.u64')
     blob(p,'d_payload').a(('OCUT','d_blob','lx_zero'))
     blob(p,'d_old');blob(p,'d_blob').a(('ALUI','sub','lx_recursion','lx_recursion',1)).ret()
+
+    from librarytypesv3 import install as v3_install
+    v3_install(E,P,b,frame,blob)

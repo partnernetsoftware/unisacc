@@ -87,3 +87,7 @@ Pair/fixed-callback tails and explicit variadic script export specialization.
 Union/bitfield NativePlan, wider long double and remaining native platforms
 still require completion. See librarycallable-specialization.md and the
 research/r10-*-evidence.json records; no six-platform completion is implied.
+
+## Ordered source facts
+
+The opt-in [USLSIG3 protocol](librarysignature-v3.md) retains declaration-order entries and explicit knowledge/origin metadata. It does not change the V2 default or certify new native ABI layouts.

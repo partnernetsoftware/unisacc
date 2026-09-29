@@ -52,7 +52,9 @@ def install(E):
    choices={p[len(prefix)]:names[p] for p in prefixes if len(p)==len(prefix)+1 and p.startswith(prefix)}
    P(names[prefix]).a(('MARK','nc_pos')).branch({0:names[prefix]+'.read'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
    P(names[prefix]+'.read').a(('BYTE','nc_byte'),('ADV',)).branch(choices,'NC.targetfail',[('RLD','nc_byte')])
- P('NC.profileok').a(('INPOP',),('COPYW','ms_blob','nc_original'),('COPYW','ms_len','nc_original_len')).call('MS.canonical').a(('COPYW','nc_count','ms_count'),('COPYW','nc_mode','ms_mode'),('COPYW','nc_support','ms_support'),('COPYW','nc_name','ms_name'),('BLEN','nc_namelen','nc_name')).branch({1:'NC.unsupported'},'NC.index',[('CMPI','ms_variadic',1)])
+ P('NC.profileok').a(('INPOP',),('COPYW','ms_blob','nc_original'),('COPYW','ms_len','nc_original_len')).call('MS.canonical').a(('COPYW','nc_count','ms_count'),('COPYW','nc_mode','ms_mode'),('COPYW','nc_support','ms_support'),('COPYW','nc_name','ms_name'),('BLEN','nc_namelen','nc_name')).branch({1:'NC.unsupported'},'NC.sourceversion',[('CMPI','ms_variadic',1)])
+ P('NC.sourceversion').branch({2:'NC.index'},'NC.sourcefactsfail',[('RLD','ms_version')])
+ P('NC.sourcefactsfail').a(E.rej('not covered: native ABI ordered source facts')).goto('DEAD')
  P('NC.index').a(('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','ms_canon'),('COPYW','ms_limit','ms_canonlen')).call('MG.root').a(('COPYW','nc_root','mg_lastnode'),('INPOP',),('OLEN','nc_cut')).o('USLSIG2\n').goto('NC.header')
  p=P('NC.header');constword(p,1);word(p,'nc_namelen');blob(p,'nc_name','nc_namelen').a(('OUTW','nc_zero'),('LDI','nc_one',1),('OUTW','nc_one'),('OUTW','nc_zero'),('OUTW','nc_mode'));word(p,'nc_count').a(('LDI','nc_i',0)).goto('NC.loop')
  P('NC.loop').a(('ALUI','mul','nc_key','nc_root',1025),('ALU','add','nc_key','nc_key','nc_i'),('LDX','nc_node','nc_key',EDGES)).call('NC.type').branch({1:'NC.stored'},'NC.next',[('CMPI','nc_i',0)])

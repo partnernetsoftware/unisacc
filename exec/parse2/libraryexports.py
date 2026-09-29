@@ -11,6 +11,15 @@ def install(E,P,b,start,integers):
     from finite_rules import install as rules
     g=E.g
     u64(E,'LX.resource',b'\0library/symbols','lx_flag','lx_present','LX.fail')
+    u64(E,'LX.versionresource',b'\0library/signatureversion','lx_wireversion','lx_versionpresent','LX.fail')
+    P('LX.version').call('LX.versionresource').branch({1:'LX.versiondefault'},'LX.versioncheck',[('CMPI','lx_versionpresent',0)])
+    P('LX.versiondefault').a(('LDI','lx_wireversion',2)).goto('LX.versioncheck')
+    P('LX.versioncheck').branch({(2,3):'LX.start'},'LX.fail',[('RLD','lx_wireversion')])
+    P('LX.magic').branch({3:'LX.magic3'},'LX.magic2',[('RLD','lx_wireversion')])
+    P('LX.magic2').o('USLSIG2\n').ret()
+    P('LX.magic3').o('USLSIG3\n').ret()
+    P('LX.support').branch({3:'LX.support3'},'RET',[('RLD','lx_wireversion')])
+    P('LX.support3').a(('LDI','lx_supported',0)).ret()
     P('LX.start').call('LX.resource').branch({1:'LX.startok'},'LX.flag',[('CMPI','lx_present',0)])
     P('LX.flag').branch({1:'LX.startok'},'LX.fail',[('CMPI','lx_flag',1)])
     P('LX.startok').a(('LDI','lx_count',0),('LDI','lx_storage',0)).goto(start)
@@ -64,7 +73,7 @@ def install(E,P,b,start,integers):
     p=P('LX.record').a(('LDI','lx_one',1),('STX','lx_id',SEEN,'lx_one'),('LDI','lx_zero',0),
        ('OCUT','lx_tape','lx_zero'),('LDX','lx_sig','lx_id',b['FPS_FN']),
        ('LDX','lx_epoch','lx_sig',SIGEPOCH),('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
-       ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).call('LCG.begin')
+       ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).call('LX.support').call('LCG.begin')
     p.branch({1:'LX.externalrecord'},'LX.unsupportedlink',[('CMPI','lx_linkage',0)])
     P('LX.unsupportedlink').a(('LDI','lx_supported',0)).goto('LX.externalrecord')
     P('LX.externalrecord').branch({1:'LX.paramlimit'},'LX.unsupportedvar',[('CMPI','lx_var',0)])
@@ -78,13 +87,13 @@ def install(E,P,b,start,integers):
        ('OUTW','lx_linkage'),('LDI','lx_one',1),('OUTW','lx_one'),('OUTW','lx_var'),('OUTW','lx_mode'))
     p.a(('COPYW','lx_v','lx_nparams')).call('LX.u64')
     p.a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),
-        ('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',1)).call('LX.descriptor')
+        ('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
     p.a(('COPYW','lx_v','lx_nparams')).call('LX.u64').a(('LDI','lx_i',0),('LDI','lx_return',0)).goto('LX.params')
     P('LX.params').branch({0:'LX.param'},'LX.recordend',[('CMP','lx_i','lx_nparams')])
     P('LX.param').a(('ALUI','mul','lx_index','lx_sig',1024),('ALU','add','lx_index','lx_index','lx_i'),
         ('LDX','lx_mark','lx_index',PARAMMARK)).branch({1:'LX.paramout'},'LX.fail',[('CMP','lx_mark','lx_epoch')])
     P('LX.paramout').a(('LDX','lx_depth','lx_index',PARAMDEPTH),('LDX','lx_base','lx_index',PARAMBASE),
-        ('LDX','lx_shape','lx_index',PARAMSHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0)).call('LX.descriptor').a(('ALUI','add','lx_i','lx_i',1)).goto('LX.params')
+        ('LDX','lx_shape','lx_index',PARAMSHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lx_i','lx_i',1)).goto('LX.params')
     P('LX.recordend').a(('OUTW','lx_supported'),('OCUT','lx_blob','lx_zero'),
         ('STX','lx_count',RECORDS,'lx_blob'),('ALUI','add','lx_count','lx_count',1),
         ('INPUSH','lx_tape'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',)).ret()
@@ -94,17 +103,17 @@ def install(E,P,b,start,integers):
     # already-owned blobs; parser source offsets no longer need remain active.
     p=P('LX.signature').a(('OCUT','lx_sigold','lx_zero'),('LDX','lx_epoch','lx_sig',SIGEPOCH),
         ('LDX','lx_nparams','lx_sig',b['FPS_COUNT']),('LDX','lx_var','lx_sig',VARIADIC),
-        ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).call('LCG.begin').o('USLSIG2\n').a(('LDI','lx_v',1)).call('LX.u64').goto('LX.signaturemode')
+        ('LDI','lx_supported',1),('LDI','lx_mode',0),('LDI','lx_recursion',0),('LDI','lx_nodes',0)).call('LX.support').call('LCG.begin').call('LX.magic').a(('LDI','lx_v',1)).call('LX.u64').goto('LX.signaturemode')
     P('LX.signaturemode').branch({2:'LX.signaturestack'},'LX.signaturevar',[('CMPI','lx_nparams',6)])
     # The preceding procedure builder continuation must explicitly reach mode.
     P('LX.signaturevar').branch({1:'LX.signaturestack'},'LX.signaturefields',[('CMPI','lx_var',1)])
     P('LX.signaturestack').a(('LDI','lx_mode',1)).goto('LX.signaturefields')
     p=P('LX.signaturefields').a(('STX','lx_sig',b['FPS_VAR'],'lx_mode'),('BLEN','lx_v','lx_nameblob')).call('LX.u64').a(('INPUSH','lx_nameblob'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',),('LDI','lx_one',1),('OUTW','lx_zero'),('OUTW','lx_one'),('OUTW','lx_var'),('OUTW','lx_mode'),('COPYW','lx_v','lx_nparams')).call('LX.u64')
-    p.a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',1)).call('LX.descriptor')
+    p.a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
     p.a(('COPYW','lx_v','lx_nparams')).call('LX.u64').a(('LDI','lx_proto_i',0)).goto('LX.prototypeparams')
     P('LX.prototypeparams').branch({0:'LX.prototypeparam'},'LX.signatureend',[('CMP','lx_proto_i','lx_nparams')])
     p=P('LX.prototypeparam').a(('ALUI','mul','lx_index','lx_sig',1024),('ALU','add','lx_index','lx_index','lx_proto_i'),('LDX','lx_mark','lx_index',PARAMMARK)).branch({1:'LX.prototypeparamout'},'LX.fail',[('CMP','lx_mark','lx_epoch')])
-    P('LX.prototypeparamout').a(('LDX','lx_depth','lx_index',PARAMDEPTH),('LDX','lx_base','lx_index',PARAMBASE),('LDX','lx_shape','lx_index',PARAMSHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_return',0)).call('LX.descriptor').a(('ALUI','add','lx_proto_i','lx_proto_i',1)).goto('LX.prototypeparams')
+    P('LX.prototypeparamout').a(('LDX','lx_depth','lx_index',PARAMDEPTH),('LDX','lx_base','lx_index',PARAMBASE),('LDX','lx_shape','lx_index',PARAMSHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',0)).call('LX.descriptor').a(('ALUI','add','lx_proto_i','lx_proto_i',1)).goto('LX.prototypeparams')
     P('LX.signatureend').branch({1:'LX.signatureunsupportedvar'},'LX.signaturefinish',[('CMPI','lx_var',1)])
     P('LX.signatureunsupportedvar').a(('LDI','lx_supported',0)).goto('LX.signaturefinish')
     P('LX.signaturefinish').a(('OUTW','lx_supported'),('OCUT','lx_sigblob','lx_zero'),('INPUSH','lx_sigold'),('XLEN','lx_end'),('SPAN2','lx_zero','lx_end'),('INPOP',)).ret()
@@ -114,7 +123,7 @@ def install(E,P,b,start,integers):
             seq=list(g.seqs[q])
             if seq and seq[-1][0]=='ACCEPT':row[k]=('LX.wrap',g.seq(seq[:-1]))
     P('LX.wrap').branch({1:'LX.accept'},'LX.envelope',[('CMPI','lx_present',0)])
-    p=P('LX.envelope').a(('LDI','lx_zero',0),('OCUT','lx_tape','lx_zero')).o('USLSIG2\n').a(('COPYW','lx_v','lx_count')).call('LX.u64')
+    p=P('LX.envelope').a(('LDI','lx_zero',0),('OCUT','lx_tape','lx_zero')).call('LX.magic').a(('COPYW','lx_v','lx_count')).call('LX.u64')
     p.a(('LDI','lx_i',0)).goto('LX.records')
     P('LX.records').branch({0:'LX.copyrecord'},'LX.outer',[('CMP','lx_i','lx_count')])
     P('LX.copyrecord').a(('LDX','lx_blob','lx_i',RECORDS),('INPUSH','lx_blob'),('XLEN','lx_end'),
@@ -150,4 +159,4 @@ def install(E,P,b,start,integers):
     for k,(n,q) in list(row.items()):
         assert n==start
         row[k]=(module_start,q)
-    return 'LX.start'
+    return 'LX.version'

@@ -47,7 +47,7 @@ def main():
   d=json.loads(model.read_text());loaded=load(d);cmd(sys.executable,ROOT/'exec/c/tbl.py',model,tbl);cmd(sys.executable,ROOT/'exec/c/net.py',tbl,net)
   full=cmd(runtime,'--check-net',tbl,net).decode().strip()
   routes=t/'routes';routes.write_text('carrier\tnativeabi\tbytes\tbytes\tm.net\n');rd=t/'resources';rd.mkdir();(rd/'cli').mkdir();(rd/'sentinel').write_bytes(b'x');pkg=t/'p';src=t/'input'
-  def check(original,target=b'osx/arm64',expected=None):
+  def check(original,target=b'osx/arm64',expected=None,reason=None):
    status,out,_=run(d,original,'carrier',files=Files(target),loaded=loaded,maxsteps=2000000)
    if target is not None:(rd/'cli/target').write_bytes(target)
    else:
@@ -58,6 +58,11 @@ def main():
    assert (status=='accept')==(p.returncode==0),(status,p.returncode,p.stderr)
    if expected is None:assert status=='reject' and not p.stdout,(status,p.stdout)
    else:assert status=='accept' and out==p.stdout==expected,(status,out,expected,p.stderr)
+   if reason is not None:assert reason in p.stderr.decode(),p.stderr
+  # A valid V3 scalar must pass framing and reach the named certification guard.
+  v3desc=struct.pack('<7Q',0,0,0,1,8,0,8)+bytes(14)+U(0)
+  v3=b'USLSIG3\n'+U(1)+U(5)+b'entry'+bytes((0,1,0,0))+U(1)+v3desc+U(1)+v3desc+b'\0'
+  for profile in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):check(v3,profile,reason='not covered: native ABI ordered source facts')
   successes=0
   for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
    for params,result in [((MIX,),MIX),((union((UI,D)),),union((UI,D))),((I,D,F,P,MIX),I),((I,)*8+(MIX,),MIX),((),VOID)]:
@@ -215,5 +220,5 @@ def main():
   for length in (0,7,16,len(original)//2,len(original)-1):check(original[:length])
   for original,_ in fixtures:
    for length in (len(original)//2,len(original)-1):check(original[:length])
-  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases+aggregate_cases+union16_cases,'union16_cases':union16_cases,'union16_layout_negatives':len(n16bad),'union16_cycle_truncations':12,'aggregate_cases':aggregate_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
+  print(json.dumps({'prototype_only':True,'V3_uncertified_profile_rejects':6,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases+aggregate_cases+union16_cases,'union16_cases':union16_cases,'union16_layout_negatives':len(n16bad),'union16_cycle_truncations':12,'aggregate_cases':aggregate_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
 if __name__=='__main__':main()

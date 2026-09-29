@@ -1,6 +1,7 @@
 #ifndef UNISACC_LIBRARYEXPORTS_H
 #define UNISACC_LIBRARYEXPORTS_H
-/* Host ABI adaptation of model-produced USLSIG1/USLSIG2 declarations. No C parser.
+/* Host ABI adaptation of model-produced USLSIG1/USLSIG2 declarations;
+   USLSIG3 is owned diagnostic facts only, never runtime certification. No C parser.
    Owner must quiesce all callbacks before clear/recompile/free; returned code
    pointers then become invalid. Context invocation/error/TLS/stack/init rules
    belong to the injected host invoke callback, never to this byte decoder. */
@@ -19,12 +20,15 @@ typedef struct us_export_signature us_export_signature;
 typedef struct us_export_graph {
     us_export_signature **signatures; size_t count;
 } us_export_graph;
-typedef struct us_export_member { uint64_t offset,bit_offset,bit_width,storage; us_export_type *type; } us_export_member;
+typedef struct us_export_member { uint64_t offset,bit_offset,bit_width,storage; us_export_type *type;
+    uint64_t ordinal,effective_alignment; unsigned entry_kind;
+} us_export_member;
 struct us_export_type {
     uint64_t depth,base,shape,kind,width,uns,alignment,tag,nmembers,count,stride;
     us_export_member *members; us_export_type *element;
     us_export_signature *signature; /* borrowed edge; graph owns each node once */
     ffi_type native; ffi_type **elements; ffi_type *ffi;
+    uint64_t natural_alignment; unsigned fp_rank,fp_format,layout_flags,layout_known_mask,layout_origin;
 };
 struct us_export_signature {
     uint64_t id,count,stored; unsigned variadic,mode,supported;
@@ -66,7 +70,7 @@ static void us_export_graph_clear(us_export_graph *g) {
     }
     free(g->signatures);memset(g,0,sizeof *g);
 }
-static const us_export_type *us_export_arg(const us_export *x,size_t i) { return x->version==2 ? &x->argtypes[i] : &x->args[i]; }
+static const us_export_type *us_export_arg(const us_export *x,size_t i) { return x->version>=2 ? &x->argtypes[i] : &x->args[i]; }
 static void us_exports_clear(us_exports *set) {
     if (!set) return;
     for(size_t i=0;i<set->count;i++) {
@@ -105,6 +109,7 @@ static ffi_type *us_export_ffitype(const us_export_type *t,int result) {
     }
 }
 static int us_export_supported(const us_export *x) {
+    if(x->version==3)return 0; /* No V3 certification seam yet. */
     if(x->linkage || x->defined!=1 || !x->supported || x->variadic || x->count>(x->version==2 ? 1024 : 6) || x->stored!=x->count || !us_export_ffitype(&x->result,1))return 0;
     if(x->version==2 && !x->result.ffi)return 0;
     if(x->version!=2){
@@ -115,13 +120,30 @@ static int us_export_supported(const us_export *x) {
     return 1;
 }
 /* Recursive payloads are bounded independently; no child can consume a sibling. */
-static int us_export_descriptor2(const unsigned char *b,size_t len,size_t *at,
-        us_export_type *t,unsigned depth,size_t *nodes,us_export_graph *graph) {
+static int us_export_descriptor_version(const unsigned char *b,size_t len,size_t *at,
+        us_export_type *t,unsigned depth,size_t *nodes,us_export_graph *graph,unsigned version) {
     uint64_t payload; size_t end;
     if(depth>32 || ++*nodes>16384 || us_export_u64(b,len,at,&t->depth) ||
        us_export_u64(b,len,at,&t->base)||us_export_u64(b,len,at,&t->shape)||
        us_export_u64(b,len,at,&t->kind)||us_export_u64(b,len,at,&t->width)||
        us_export_u64(b,len,at,&t->uns)||us_export_u64(b,len,at,&t->alignment)||*at>=len)return 1;
+    if(version==3){
+    if(len-*at<13)return 1;
+    t->fp_rank=b[(*at)++];t->fp_format=b[(*at)++];
+    if(us_export_u64(b,len,at,&t->natural_alignment))return 1;
+    t->layout_flags=b[(*at)++];t->layout_known_mask=b[(*at)++];t->layout_origin=b[(*at)++];
+    if(t->fp_rank>3 || t->fp_format>4 || t->layout_flags>3 || t->layout_known_mask>3 ||
+       (t->layout_flags & ~t->layout_known_mask) || t->layout_origin>2 ||
+       (t->natural_alignment && (t->natural_alignment>65536 || (t->natural_alignment&(t->natural_alignment-1)))) ||
+       (t->layout_origin==1 && (t->layout_known_mask!=3 || (t->width && !t->natural_alignment))))return 1;
+    if(t->kind!=3){if(t->fp_rank || t->fp_format)return 1;}
+    else if((t->fp_format==0 && (t->fp_rank || t->layout_origin!=0)) ||
+            (t->fp_format==1 && t->width!=4) || (t->fp_format==2 && t->width!=8) ||
+            (t->fp_format>=3 && t->width!=16) ||
+            (t->fp_rank==1 && t->fp_format!=1) || (t->fp_rank==2 && t->fp_format!=2) ||
+            (t->fp_rank==3 && t->fp_format<2))return 1;
+    }
+    if(*at>=len)return 1;
     t->tag=b[(*at)++];
     if(t->kind>6 || t->uns>1 || t->width>16777216 || t->tag>4 ||
        us_export_u64(b,len,at,&payload)||payload>16777216||payload>len-*at)return 1;
@@ -131,23 +153,44 @@ static int us_export_descriptor2(const unsigned char *b,size_t len,size_t *at,
     if(t->tag==0){
         if(payload || (t->kind==1 && (t->depth || (t->width!=1&&t->width!=2&&t->width!=4&&t->width!=8))) ||
            (t->kind==2 && (t->width!=8||!t->depth)) ||
-           (t->kind==3 && (t->depth||(t->width!=4&&t->width!=8))) || t->kind==5)return 1;
+           (t->kind==3 && (t->depth||(t->width!=4&&t->width!=8&&(version!=3||t->width!=16)))) || t->kind==5)return 1;
     }else if(t->tag==1 || t->tag==2){
-        if(t->kind!=5 || t->depth || !t->width || us_export_u64(b,end,at,&t->nmembers)||t->nmembers>64)return 1;
+        if(t->kind!=5 || t->depth || !t->width || us_export_u64(b,end,at,&t->nmembers)||t->nmembers>(version==3 ? 128:64))return 1;
         t->members=calloc(t->nmembers ? (size_t)t->nmembers:1,sizeof *t->members);if(!t->members)return 1;
         for(size_t i=0;i<(size_t)t->nmembers;i++){
             us_export_member *m=&t->members[i];m->type=calloc(1,sizeof *m->type);if(!m->type)return 1;
+            if(version==3){
+            if(us_export_u64(b,end,at,&m->ordinal)||m->ordinal!=i||*at>=end)return 1;
+            m->entry_kind=b[(*at)++];
+            if(m->entry_kind>4 || us_export_u64(b,end,at,&m->effective_alignment) ||
+               !m->effective_alignment || m->effective_alignment>65536 ||
+               (m->effective_alignment&(m->effective_alignment-1)) ||
+               us_export_u64(b,end,at,&m->offset)||us_export_u64(b,end,at,&m->bit_offset)||
+               us_export_u64(b,end,at,&m->bit_width)||us_export_u64(b,end,at,&m->storage)||
+               us_export_descriptor_version(b,end,at,m->type,depth+1,nodes,graph,version)||m->offset>t->width ||
+               m->storage!=m->type->width)return 1;
+            if(m->entry_kind==0 || m->entry_kind==4){
+                if(m->bit_width || m->bit_offset || m->storage>t->width-m->offset ||
+                   (m->entry_kind==4 && m->type->tag!=1 && m->type->tag!=2))return 1;
+            }else{
+                if(m->type->kind!=1 || m->type->depth || m->type->tag)return 1;
+                if(m->entry_kind==3){if(m->bit_width || m->bit_offset)return 1;}
+                else if(!m->bit_width || m->storage>t->width-m->offset ||
+                        m->bit_width>m->storage*8 || m->bit_offset>m->storage*8-m->bit_width)return 1;
+            }
+            }else{
             if(us_export_u64(b,end,at,&m->offset)||us_export_u64(b,end,at,&m->bit_offset)||
                us_export_u64(b,end,at,&m->bit_width)||us_export_u64(b,end,at,&m->storage)||
-               us_export_descriptor2(b,end,at,m->type,depth+1,nodes,graph)||m->offset>t->width ||
+               us_export_descriptor_version(b,end,at,m->type,depth+1,nodes,graph,version)||m->offset>t->width ||
                m->type->width>t->width-m->offset || m->storage>t->width-m->offset ||
                m->bit_width>m->storage*8 || m->bit_offset>m->storage*8-m->bit_width)return 1;
+            }
         }
     }else if(t->tag==3){
         if(t->kind!=5 || t->depth || us_export_u64(b,end,at,&t->count)||us_export_u64(b,end,at,&t->stride)||
            !t->count || t->count>16384 || !t->stride || t->stride>16777216 || t->count>16777216/t->stride ||
            t->width!=t->count*t->stride)return 1;
-        t->element=calloc(1,sizeof *t->element);if(!t->element || us_export_descriptor2(b,end,at,t->element,depth+1,nodes,graph)||t->element->width!=t->stride)return 1;
+        t->element=calloc(1,sizeof *t->element);if(!t->element || us_export_descriptor_version(b,end,at,t->element,depth+1,nodes,graph,version)||t->element->width!=t->stride)return 1;
     }else{
         if(t->kind!=4 || t->width!=8 || !t->depth)return 1;
         if(payload){
@@ -167,16 +210,23 @@ static int us_export_descriptor2(const unsigned char *b,size_t len,size_t *at,
                 sig->variadic=b[(*at)++];sig->mode=b[(*at)++];
                 if(sig->variadic>1 || sig->mode>1 || us_export_u64(b,end,at,&sig->count)||sig->count>1024 ||
                    (!sig->mode && (sig->count>6 || sig->variadic)) ||
-                   us_export_descriptor2(b,end,at,&sig->result,depth+1,nodes,graph) ||
+                   us_export_descriptor_version(b,end,at,&sig->result,depth+1,nodes,graph,version) ||
                    us_export_u64(b,end,at,&sig->stored)||sig->stored!=sig->count)return 1;
                 sig->argtypes=calloc(sig->stored ? (size_t)sig->stored:1,sizeof *sig->argtypes);if(!sig->argtypes)return 1;
                 for(size_t i=0;i<(size_t)sig->stored;i++)
-                    if(us_export_descriptor2(b,end,at,&sig->argtypes[i],depth+1,nodes,graph))return 1;
-                if(*at>=end || (sig->supported=b[(*at)++])>1)return 1;
+                    if(us_export_descriptor_version(b,end,at,&sig->argtypes[i],depth+1,nodes,graph,version))return 1;
+                if(*at>=end || (sig->supported=b[(*at)++])>1 || (version==3 && sig->supported))return 1;
             }
         }
     }
     return *at!=end;
+}
+/* Keep the V2 helper API and byte acceptance unchanged. V3 never certifies ABI. */
+static int us_export_descriptor2(const unsigned char *b,size_t n,size_t *at,us_export_type *t,unsigned depth,size_t *nodes,us_export_graph *g){
+    return us_export_descriptor_version(b,n,at,t,depth,nodes,g,2);
+}
+static int us_export_descriptor3(const unsigned char *b,size_t n,size_t *at,us_export_type *t,unsigned depth,size_t *nodes,us_export_graph *g){
+    return us_export_descriptor_version(b,n,at,t,depth,nodes,g,3);
 }
 /* Signature edges are not followed: a callable slot itself requires conversion.
    By-value child ownership is a depth-bounded tree, even in cyclic signatures. */
@@ -264,7 +314,7 @@ static int us_export_has_callbacks(const us_export *x){
 static int us_exports_load_capability(us_exports *set,const void *data,size_t length,int bridge,char *error,size_t cap) {
     const unsigned char *bytes=data;size_t at=8;uint64_t count;us_exports tmp={0};unsigned version;
     if(!set || !bytes || length<16)goto bad;
-    version=!memcmp(bytes,"USLSIG2\n",8) ? 2 : !memcmp(bytes,"USLSIG1\n",8) ? 1 : 0;
+    version=!memcmp(bytes,"USLSIG3\n",8) ? 3 : !memcmp(bytes,"USLSIG2\n",8) ? 2 : !memcmp(bytes,"USLSIG1\n",8) ? 1 : 0;
     if(!version || us_export_u64(bytes,length,&at,&count)||count>8192||count>SIZE_MAX/sizeof(us_export))goto bad;
     tmp.items=calloc(count ? (size_t)count:1,sizeof(us_export));if(!tmp.items)return us_export_error(error,cap,"export allocation failed");tmp.count=(size_t)count;
     for(size_t i=0;i<tmp.count;i++){
@@ -273,10 +323,16 @@ static int us_exports_load_capability(us_exports *set,const void *data,size_t le
         x->name=malloc((size_t)n+1);if(!x->name)goto bad;memcpy(x->name,bytes+at,(size_t)n);x->name[n]=0;at+=(size_t)n;
         for(size_t j=0;j<(size_t)n;j++){unsigned ch=(unsigned char)x->name[j];int letter=(ch>=65&&ch<=90)||(ch>=97&&ch<=122)||ch==95;if(!letter && !(j&&((ch>=48&&ch<=57)||ch==46||ch==36)))goto bad;}
         for(size_t j=0;j<i;j++)if(!strcmp(x->name,tmp.items[j].name))goto bad;
-        if(length-at<(version==2 ? 4:3))goto bad;
-        x->linkage=bytes[at++];x->defined=bytes[at++];x->variadic=bytes[at++];if(version==2)x->mode=bytes[at++];
+        if(length-at<(version>=2 ? 4:3))goto bad;
+        x->linkage=bytes[at++];x->defined=bytes[at++];x->variadic=bytes[at++];if(version>=2)x->mode=bytes[at++];
         if(x->linkage>1||x->defined!=1||x->variadic>1||x->mode>1||us_export_u64(bytes,length,&at,&x->count))goto bad;
-        if(version==2){
+        if(version==3){
+            if(x->count>1024 || (!x->mode && (x->count>6||x->variadic)) ||
+               us_export_descriptor3(bytes,length,&at,&x->result,1,&nodes,&x->graph)||
+               us_export_u64(bytes,length,&at,&x->stored)||x->stored!=x->count)goto bad;
+            x->argtypes=calloc(x->stored ? (size_t)x->stored:1,sizeof *x->argtypes);if(!x->argtypes)goto bad;
+            for(size_t j=0;j<(size_t)x->stored;j++)if(us_export_descriptor3(bytes,length,&at,&x->argtypes[j],1,&nodes,&x->graph))goto bad;
+        }else if(version==2){
             if(x->count>1024 || (!x->mode && (x->count>6||x->variadic)) ||
                us_export_descriptor2(bytes,length,&at,&x->result,1,&nodes,&x->graph)||us_export_u64(bytes,length,&at,&x->stored)||x->stored!=x->count)goto bad;
             x->argtypes=calloc(x->stored ? (size_t)x->stored:1,sizeof *x->argtypes);if(!x->argtypes)goto bad;
@@ -292,7 +348,7 @@ static int us_exports_load_capability(us_exports *set,const void *data,size_t le
             for(size_t j=0;j<(size_t)x->stored;j++)if(us_export_descriptor(bytes,length,&at,&x->args[j]))goto bad;
         }
         if(at>=length || (x->supported=bytes[at++])>1)goto bad;
-        if((version==2 && at-record_start>16777216) || (x->supported && !(bridge && version==2 ? us_export_bridge_supported(x):us_export_supported(x))))goto bad;
+        if((version>=2 && at-record_start>16777216) || (version==3 && x->supported) || (x->supported && !(bridge && version==2 ? us_export_bridge_supported(x):us_export_supported(x))))goto bad;
         /* Preserve the exact encoded graph rather than reconstructing ABI rules. */
         size_t record_length=at-record_start;
         if(record_length>SIZE_MAX-16)goto bad;
@@ -376,7 +432,7 @@ static void *us_exports_symbol(us_exports *set,const char *name,void *owner,
         us_export_lookup lookup,us_export_invoke invoke,char *error,size_t cap) {
     if(!set || !name || !lookup || !invoke){us_export_error(error,cap,"invalid export lookup");return NULL;}
     us_export *x=NULL;for(size_t i=0;i<set->count;i++)if(!strcmp(name,set->items[i].name)){x=&set->items[i];break;}
-    if(!x || x->count>6 || x->version==2 || !us_export_supported(x)){us_export_error(error,cap,"missing or unsupported function export");return NULL;}
+    if(!x || x->count>6 || x->version>=2 || !us_export_supported(x)){us_export_error(error,cap,"missing or unsupported function export");return NULL;}
     if(x->code){if(x->owner==owner && x->invoke==invoke)return x->code;us_export_error(error,cap,"export ownership changed");return NULL;}
     int kind=-1;const void *raw=NULL;
     if(lookup(owner,name,&raw,&kind) || !raw || kind!=0){us_export_error(error,cap,"export has no code address");return NULL;}

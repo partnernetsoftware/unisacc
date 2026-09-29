@@ -209,6 +209,10 @@ job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
 job lib-ffi-provider python3 ./tests/libraryffiprovidercheck.py
 job lib-bitfield-source python3 ./tests/modelbitfieldsourcecheck.py
 job lib-layout-source python3 ./tests/modellayoutfactscheck.py
+job lib-sig3-host python3 ./tests/librarysignature3check.py
+job lib-sig3-canonical ./tests/modelsignature3check.sh canonical
+job lib-sig3-equality ./tests/modelsignature3check.sh equal
+job lib-sig3-source python3 ./tests/modelsourcefacts3check.py
 job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py
