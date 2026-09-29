@@ -22,11 +22,22 @@ led=$(python3 - <<'PY'
 import os
 from unisa.gold import ALL
 rows = [l.rstrip("\n").split("\t") for l in open("research/referee.tsv") if l.strip() and not l.startswith("#")]
-bad = [r for r in rows if len(r) != 4 or r[1] not in ("external", "agreement", "unnamed", "offpath")
+bad = [r for r in rows if len(r) != 4 or r[1] not in ("external", "agreement", "unnamed", "offpath", "measurement")
        or (r[2] != "-" and not os.path.isfile(r[2])) or (r[1] in ("external", "agreement")) != (r[2] != "-")]
 st = [r[0] for r in rows]
 if bad or sorted(st) != sorted(ALL) or len(st) != len(set(st)):
     print("referee ledger out of step:", bad, sorted(set(ALL) ^ set(st)))
+# The counts quoted by the papers must be the ledger's counts (they drifted three ways once).
+import re
+n = {c: sum(1 for r in rows if r[1] == c) for c in ("external", "agreement", "unnamed", "offpath")}
+words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve"}
+zh = open("research/unisacc-paper.md", encoding="utf-8").read(); en = open("research/unisacc-paper.en.md", encoding="utf-8").read()
+want = [(zh, f"{n['external']} 个阶段有具名的外部裁判"), (zh, f"{n['agreement']} 个阶段只有实现间一致性"), (zh, f"{n['unnamed']} 个阶段尚无直接裁判"),
+        (zh, f"{n['external']}/18 个阶段有覆盖范围明确的外部裁判"),
+        (en, f"{words[n['external']]} stages have named external referees"), (en, f"{words[n['agreement']]} have only cross-implementation agreement"),
+        (en, f"{words[n['unnamed']]} have no direct referee yet"), (en, f"{n['external']}/18 stages have external referees")]
+missing = [t for doc, t in want if t not in doc]
+if missing: print("paper referee counts differ from the ledger:", missing)
 PY
 )
 [ -n "$led" ] && echo "$led"
