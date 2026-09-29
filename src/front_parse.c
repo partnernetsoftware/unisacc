@@ -4552,13 +4552,27 @@ int local_decl(void) {
                and the block's end -- or a break/continue out of it -- puts
                it back, or a loop would eat the stack. */
             int el; int szs; int vpd; int vbase; int vuns; int vbool; int vfp;
+            int vd2; int vd3;                /* `v[n][k]`, `v[n][k][j]`: constant trailing dimensions */
             vpd = declpd; vbase = declbase; vuns = declunsigned;
             vbool = declbool; vfp = declfp;
             el = w;
             if (sst >= 0) el = declsz;
             if (declptr) el = 8;
             adv(); expr(); loadval(); need(tidx("]", 1), "]");
-            eimm(2, el); es("  @alu.mul r0, r0, r2\n");
+            /* C99 6.7.5.2: only the first dimension may vary here; the rows
+               are a constant number of elements, so `v[i]` is a row and
+               `v[i][j]` an element exactly as for a fixed a[n][k] (decldim2).
+               A varying inner dimension is still not covered (R13-0 #05). */
+            vd2 = 0; vd3 = 0;
+            if (cur() == tidx("[", 1)) {
+                adv(); vd2 = cexpr(); need(tidx("]", 1), "]");
+                if (cur() == tidx("[", 1)) {
+                    adv(); vd3 = cexpr(); need(tidx("]", 1), "]");
+                    vd2 = vd2 * vd3;
+                    if (cur() == tidx("[", 1)) { printf("arrays of more than three dimensions are not supported\n"); __exit(1); }
+                }
+            }
+            eimm(2, vd2 > 0 ? el * vd2 : el); es("  @alu.mul r0, r0, r2\n");
             szs = alloc_local(8);
             es("  @mem.store [r6-"); en(szs); es("], r0\n");
             if (vlaslot[bdepth] == 0) {
@@ -4571,7 +4585,7 @@ int local_decl(void) {
             es("  @mem.store [r6-"); en(off); es("], r7\n");
             declptr = 1; declbytes = 8; declpd = vpd + 1; declbase = vbase;
             declstruct = sst; declflt = lflt0; declunsigned = vuns;
-            declbool = vbool; declfp = vfp; decldim2 = 0; decldim3 = 0;
+            declbool = vbool; declfp = vfp; decldim2 = vd2; decldim3 = vd3;
             sadd(t, lbind, off, el);
             symvla[nsym - 1] = szs;
             if (eat(tidx(",", 1))) continue;
