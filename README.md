@@ -22,6 +22,7 @@ retries through it.
 | Snapshot | Evidence / status |
 |---|---|
 | Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
+| v0.0.10 artifact | Version 0.0.10; source `160ac42`; `.com` 1,152,711 B; SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; 24 deployed networks each `network = table` over the whole domain; in-process `libunisacc` (contexts, symbol injection, typed V2/V3 signatures with model-certified carriers, callbacks, USLCALL3 source-origin aliases); local release gate 332 suites rc 0, Linux arm64 guest and Windows/x86_64 guest smoke recorded in the [release receipt](research/r10-release-acceptance.json) |
 | v0.0.9 artifact | Synchronized reference/network prune; the build sidecar records the actual source-content closure separately from its build-time base HEAD; `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
 | Model organization | 33 shared constructed networks, 1,082 stage-route rows; current physical byte ledger in [prd](prd.md#model-function-bytes) |
 | Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
@@ -49,9 +50,9 @@ Unreachable-function pruning is a separate constructed-network stage before
 lowering on image/run routes; ambiguous or unsupported tapes are retained whole.
 Public `-S`/`-c` tape output remains unchanged. macOS app/DMG qualification has passed
 actual Developer ID signing, notarization, stapling and Gatekeeper, with the
-sealed `.com` running inside. Windows Authenticode signing is **deferred to
-v0.0.10** (owner decision, 2026-09-28): v0.0.9 Windows assets ship unsigned, so
-expect a SmartScreen / unknown-publisher prompt and check the published SHA-256. See the [R9 release checklist](prd.md).
+sealed `.com` running inside. Windows Authenticode signing was deferred from v0.0.9 to v0.0.10 (owner
+decision, 2026-09-28); the v0.0.10 Windows signing status is recorded in the
+[release receipt](research/r10-release-acceptance.json) — check the published SHA-256 either way. See the [R9 release checklist](prd.md).
 
 Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) — product, offline seed,
 static inputs, development tools and reference judges. The [research index](research/README.md)

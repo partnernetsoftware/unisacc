@@ -387,16 +387,16 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 下面从 `research/model-bytes.json` 生成，按实际封存 `.com` 计。只对阶段/模式作可证的功能归属，不把跨阶段动作任意分摊成“指针占多少字节”。
 
 <!-- model-bytes:begin -->
-快照 SHA-256：`ec52bf9ca879a3cd3035ecb93e848bd015d2ea2c20148abc3e64acf07bb27d51`；总计 **1,152,695 B**。
+快照 SHA-256：`4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`；总计 **1,152,711 B**。
 
 | 物理内容 | 字节 | 占整个 .com |
 |---|---:|---:|
 | 24 个共享网络体 | 699,712 | 60.70% |
-| 平台驱动、APE 启动/加载与对齐（混合账） | 250,736 | 21.75% |
+| 平台驱动、APE 启动/加载与对齐（混合账） | 250,752 | 21.75% |
 | 21 份 C 头文件/库实现源码 | 123,856 | 10.74% |
 | 两 ISA 通用推理执行核资源 | 15,520 | 1.35% |
 | 目标预定义宏声明资源 | 321 | 0.03% |
-| 目录、记录头与资源键 | 62,534 | 5.43% |
+| 目录、记录头与资源键 | 62,534 | 5.42% |
 | 尾部 | 16 | 0.00% |
 
 | 模型阶段 / 具体功能 | 物理模型数 | 模型体 B | 占 .com | 阶段行引用数 |
@@ -417,7 +417,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 | 网络记录 / 含义 | 字节 | 占整个 .com |
 |---|---:|---:|
-| `H`：阈值/选择网络参数记录 | 981,815 | 85.18% |
+| `H`：阈值/选择网络参数记录 | 981,815 | 85.17% |
 | `Q`：动作序列声明（包含编译模板动作） | 953,369 | 82.71% |
 | `S`：字节字符串声明 | 18,805 | 1.63% |
 | `N`：网络头记录 | 485 | 0.04% |
@@ -3084,3 +3084,5 @@ R10 natural16根候选已同步：源bbe5691，unisacc.com **1,116,367 B / SHA25
 - **R10-7**：演示入口为 `unisacc.com -run examples/apps/*.c`（apps 门禁）；发布顺序：pack → `tests/release.sh --com` 全量滚动队列 → `tests/linux.sh`（Lima）→ `tests/crossnative.sh`（UTM Windows，用后关机）→ 一次 push 取 CI → Apple/Windows 签名 → 草稿 → 正式发布。
 - **顺延到 0.0.11（明确）**：V3 variadic 跨来源、pointee 完整身份、packed/native wide-FP/general BANK、Windows SEH 与六平台库完整生命周期矩阵、公共 origin0 refinement、Paper A 定稿。这些在 0.0.10 说明中列为未完成，不改变已发布能力的边界描述。
 
+
+**v0.0.10 本地验收回执（2026-09-29，源 160ac42）**：候选 `unisacc.com` **1,152,711 B / SHA256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`**（版本资源 0.0.10；私有参考 UA 由同一冻结源 `tests/build_ref.sh` 构建）。`tests/release.sh --com` 滚动队列 332 项全部 rc0（UNVERIFIED 说明：nativeboot 的 Windows 自建在门禁外，由 `tests/nativeboot.sh --windows win/arm64|win/x86_64` 独立证明）。Linux arm64：Lima `default`（4 GiB）157/185 通过，失败全部是两个 2.2 GB 的 Python 自编译并发 OOM 与缺 clang；同源在 `minicon-lnx-aarch64`（8 GiB，本轮装 gcc/clang/libffi-dev/perl 后关机）bigclosure/ape/warn 通过，其余见 acceptance15/difftest3（并发下 55s 超时）与 difftest_o1–4（客机缺 shasum）串行/装 perl 后全部 rc0。Windows：UTM `minicon-win-arm-64` 上 crossnative examples 8 程序 × win/arm64、win/x86_64、lnx/arm64、osx/x86_64 全部 ok；lnx/x86_64 由 CI ubuntu 原生执行覆盖，本机未启动模拟机。修的真回归：memory-contract 双身（memory.c 直接调用 VirtualAlloc 后 mock 仍定义 _WIN32 拉入 windows.h）、四个 ref 拼装检查缺 `-I kernel`、ape-version 只读根产物、gatedeps 已审核树哈希过期、term.sh 静默回退改变环境导致队列三次清零。教训见 memory `release-queue-pitfalls`。证据 `research/r10-release-acceptance.json`。
