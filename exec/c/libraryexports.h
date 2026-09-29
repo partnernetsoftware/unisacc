@@ -27,6 +27,7 @@ struct us_export_type {
     uint64_t depth,base,shape,kind,width,uns,alignment,tag,nmembers,count,stride;
     us_export_member *members; us_export_type *element;
     us_export_signature *signature; /* borrowed edge; graph owns each node once */
+    us_export_type *pointee; /* V3 tag 5: one shallow pointee descriptor; NULL when opaque */
     ffi_type native; ffi_type **elements; ffi_type *ffi;
     unsigned wire_version; uint64_t natural_alignment; unsigned fp_rank,fp_format,layout_flags,layout_known_mask,layout_origin;
 };
@@ -58,6 +59,7 @@ static void us_export_type_clear(us_export_type *t) {
     if(!t)return;
     for(size_t i=0;t->members && i<(size_t)t->nmembers;i++){us_export_type_clear(t->members[i].type);free(t->members[i].type);}
     free(t->members);if(t->element){us_export_type_clear(t->element);free(t->element);}
+    if(t->pointee){us_export_type_clear(t->pointee);free(t->pointee);}
     free(t->elements);memset(t,0,sizeof *t);
 }
 static void us_export_graph_clear(us_export_graph *g) {
@@ -192,6 +194,17 @@ static int us_export_descriptor_version(const unsigned char *b,size_t len,size_t
            !t->count || t->count>16384 || !t->stride || t->stride>16777216 || t->count>16777216/t->stride ||
            t->width!=t->count*t->stride)return 1;
         t->element=calloc(1,sizeof *t->element);if(!t->element || us_export_descriptor_version(b,end,at,t->element,depth+1,nodes,graph,version)||t->element->width!=t->stride)return 1;
+    }else if(t->tag==5){
+        /* V3 data pointer with one shallow pointee: scalar/void/unknown fully, an
+           aggregate as tag+extent with no members, a further pointer level opaque. */
+        if(version!=3 || t->kind!=2 || t->width!=8 || !t->depth)return 1;
+        if(payload){
+            t->pointee=calloc(1,sizeof *t->pointee);
+            if(!t->pointee || us_export_descriptor_version(b,end,at,t->pointee,depth+1,nodes,graph,version))return 1;
+            const us_export_type *q=t->pointee;
+            if(t->depth==1 ? q->depth!=0 : (q->kind!=2||q->depth!=t->depth-1||q->pointee))return 1;
+            if(q->nmembers || q->element || q->signature)return 1;
+        }
     }else{
         if(t->kind!=4 || t->width!=8 || !t->depth)return 1;
         if(payload){

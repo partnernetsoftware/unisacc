@@ -15,7 +15,12 @@ def install(E,P,b,frame,blob):
         P(alias).branch({3:v3},old,[('RLD','lx_wireversion')]);g.st[name]=g.st[alias]
     def word(p,r):return p.a(('COPYW','lx_v',r)).call('LX.u64')
     select('LTY.aggregatemembers','L3.aggregate')
-    P('L3.aggregate').a(('LDX','d_seen','d_sid',LF.SEEN)).branch({1:'L3.aggregatecount'},'LX.fail',[('CMPI','d_seen',1)])
+    # Shallow mode (pointee identity, one level): an aggregate pointee keeps its
+    # tag/width/alignment but emits no members; an incomplete one is class 6.
+    P('L3.aggregate').branch({1:'L3.shallowaggregate'},'L3.aggregateseen',[('CMPI','lx_shallow',1)])
+    P('L3.shallowaggregate').a(('LDX','d_seen','d_sid',LF.SEEN),('LDI','d_members',0)).branch({1:'LTY.arraycheck'},'L3.shallowunknown',[('CMPI','d_seen',1)])
+    P('L3.shallowunknown').a(('LDI','d_class',6),('LDI','d_width',0),('LDI','d_align',0),('LDI','d_tag',0)).goto('LTY.arraycheck')
+    P('L3.aggregateseen').a(('LDX','d_seen','d_sid',LF.SEEN)).branch({1:'L3.aggregatecount'},'LX.fail',[('CMPI','d_seen',1)])
     P('L3.aggregatecount').a(('LDX','d_members','d_sid',LF.COUNT)).branch({2:'LX.fail'},'LTY.arraycheck',[('CMPI','d_members',LF.ENTRY_LIMIT)])
     select('LTY.struct','L3.struct')
     p=P('L3.struct');word(p,'d_members').a(('LDI','d_i',0)).goto('L3.members')
@@ -44,6 +49,17 @@ def install(E,P,b,frame,blob):
     p.a(('COPYW','lx_rank','d_fprank'),('COPYW','lx_depth','d_depth'),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),('COPYW','lx_arraybytes','d_stride'),('ALUI','add','lx_arraydimension','d_dim',1),('LDI','lx_array',0),('LDI','lx_return',0)).branch({0:'L3.arraymore'},'L3.arraychild',[('CMP','lx_arraydimension','d_rank')])
     P('L3.arraymore').a(('LDI','lx_array',1)).goto('L3.arraychild')
     p=P('L3.arraychild').call('LX.descriptor');frame(p,'LDX').goto('LTY.out')
+    # Pointer descriptors (data pointers, class 2) carry one shallow pointee
+    # descriptor under tag 5 in V3: scalars fully, aggregates as tag/extent, a
+    # further pointer level without its own pointee. No recursion, no cycles.
+    select('LTY.payload','L3.payload')
+    P('L3.payload').branch({2:'L3.pointerpayload'},'L3.original.LTY.payload',[('RLD','d_class')])
+    P('L3.pointerpayload').branch({1:'L3.original.LTY.payload'},'L3.pointee',[('CMPI','lx_shallow',1)])
+    p=P('L3.pointee').a(('LDI','d_tag',5))
+    frame(p,'STX')
+    p.a(('LDI','lx_shallow',1),('ALUI','sub','lx_depth','d_depth',1),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),('COPYW','lx_rank','d_fprank'),
+        ('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
+    frame(p,'LDX').a(('LDI','lx_shallow',0)).goto('LTY.out')
     select('LTY.out','L3.out')
     p=P('L3.out').a(('OCUT','d_payload','lx_zero'))
     for r in ('d_depth','d_base','d_shape','d_class','d_width','d_unsigned','d_align'):word(p,r)

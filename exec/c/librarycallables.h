@@ -89,7 +89,8 @@ static int us_callable_type_identity(const us_export_type *a,const us_export_typ
         if(a->wire_version==3 && (a->fp_rank!=b->fp_rank||a->fp_format!=b->fp_format||
            a->natural_alignment!=b->natural_alignment||a->layout_flags!=b->layout_flags||
            a->layout_known_mask!=b->layout_known_mask||a->layout_origin!=b->layout_origin))goto done;
-        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL))goto done;
+        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL)||(a->pointee==NULL)!=(b->pointee==NULL))goto done;
+        if(a->pointee){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->pointee,b->pointee};}
         if(a->nmembers>128 || (a->nmembers && (!a->members||!b->members)))goto done;
         if(a->element){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
         for(size_t i=0;i<(size_t)a->nmembers;i++){

@@ -49,7 +49,8 @@ static int us_native_type_equal(const us_export_type *a,const us_export_type *b)
         us_native_type_pair pair=work[--pending];a=pair.a;b=pair.b;
         if(!a||!b||++steps>16384)goto done;
         if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)goto done;
-        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL))goto done;
+        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL)||(a->pointee==NULL)!=(b->pointee==NULL))goto done;
+        if(a->pointee){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->pointee,b->pointee};}
         if(a->nmembers>64 || (a->nmembers && (!a->members||!b->members)))goto done;
         if(a->element){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
         for(size_t i=0;i<(size_t)a->nmembers;i++){

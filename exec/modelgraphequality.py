@@ -48,7 +48,7 @@ def install(E,fail='DEAD'):
  p=P('MG.descversion');extrafield(p,0,'mg_version').branch({1:'MG.meta0'},'MG.desctag',[('CMPI','mg_version',3)])
  for i,word in enumerate((False,False,True,False,False,False)):
   p=P('MG.meta'+str(i)).call('MS.u64' if word else 'MS.byte');extrafield(p,i+1,'ms_value' if word else 'ms_byte').goto('MG.meta'+str(i+1) if i<5 else 'MG.desctag')
- p=P('MG.desctag').call('MS.byte').a(('COPYW','mg_tag','ms_byte'));setfield(p,7,'mg_tag').call('MS.u64').a(('COPYW','mg_payload','ms_value')).branch({(1,2):'MG.members',3:'MG.array',4:'MG.callback'},'MG.descreturn',[('RLD','mg_tag')])
+ p=P('MG.desctag').call('MS.byte').a(('COPYW','mg_tag','ms_byte'));setfield(p,7,'mg_tag').call('MS.u64').a(('COPYW','mg_payload','ms_value')).branch({(1,2):'MG.members',3:'MG.array',4:'MG.callback',5:'MG.pointee'},'MG.descreturn',[('RLD','mg_tag')])
  p=P('MG.members').call('MS.u64').a(('COPYW','mg_count','ms_value'));setfield(p,8,'mg_count');setfield(p,10,'mg_count').a(('LDI','mg_i',0)).goto('MG.memberloop')
  eq('MG.memberloop','mg_i','mg_count','MG.descreturn','MG.memberlayout')
  P('MG.memberlayout').a(('LDI','mg_attr',0)).branch({1:'MG.entryextra0'},'MG.layoutread',[('CMPI','mg_version',3)])
@@ -57,6 +57,8 @@ def install(E,fail='DEAD'):
  P('MG.layoutread').call('MS.u64').a(('ALUI','mul','mg_key','mg_node',1025),('ALU','add','mg_key','mg_key','mg_i'),('ALUI','mul','mg_key','mg_key',4),('ALU','add','mg_key','mg_key','mg_attr'),('STX','mg_key',LAYOUT,'ms_value'),('ALUI','add','mg_attr','mg_attr',1)).branch({1:'MG.memberchild'},'MG.layoutread',[('CMPI','mg_attr',4)])
  p=P('MG.memberchild').call('MG.push').call('MG.desc').call('MG.pop');edge(p).a(('ALUI','add','mg_i','mg_i',1)).goto('MG.memberloop')
  p=P('MG.array').call('MS.u64');setfield(p,8,'ms_value').call('MS.u64');setfield(p,9,'ms_value');constfield(p,10,1).a(('LDI','mg_i',0)).call('MG.push').call('MG.desc').call('MG.pop');edge(p).goto('MG.descreturn')
+ P('MG.pointee').branch({1:'MG.descreturn'},'MG.pointeechild',[('CMPI','mg_payload',0)])
+ p=P('MG.pointeechild');constfield(p,10,1).a(('LDI','mg_i',0)).call('MG.push').call('MG.desc').call('MG.pop');edge(p).goto('MG.descreturn')
  P('MG.callback').branch({1:'MG.descreturn'},'MG.callbackread',[('CMPI','mg_payload',0)])
  P('MG.callbackread').call('MS.byte').call('MS.byte').a(('COPYW','mg_form','ms_byte')).call('MS.u64').a(('ALUI','mul','mg_id','mg_side',1025),('ALU','add','mg_id','mg_id','ms_value')).branch({0:'MG.callbackdef'},'MG.callbackref',[('RLD','mg_form')])
  P('MG.callbackref').a(('LDX','mg_lastnode','mg_id',SIGID)).goto('MG.callbackedge')
