@@ -234,6 +234,8 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-source-callable-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode callable
     job lib-source-callback-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode callbacks
     job lib-source-variadic-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode variadic
+    job lib-source-pointee-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode pointee
+    job lib-source-longdouble-import-native python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble
 fi
 job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
@@ -286,6 +288,7 @@ if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
     job lib-callback-outcome-rosetta python3 ./tests/librarycallbackoutcomecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64
     job lib-callback-plan-rosetta python3 ./tests/librarycallbackplancheck.py --arch x86_64
     job lib-callable-catalog-rosetta python3 ./tests/librarycallablecatalogcheck.py --arch x86_64
+    job lib-source-longdouble-import-rosetta python3 ./tests/librarysourcebitfieldimportcheck.py --mode longdouble --arch x86_64 --ffi-provider "${UNISACC_FFI_X86_PROVIDER:?}"
     job lib-carrier-mechanism-rosetta python3 ./tests/librarycarriercheck.py --arch x86_64
     job lib-carrier-native-plan-rosetta python3 ./tests/librarycarriernativeplancheck.py --arch x86_64
     job lib-union-native-rosetta python3 ./tests/libraryunionnativecheck.py --package "${MODEL_COM:-./unisacc.com}" --arch x86_64 --sanitize
