@@ -18,15 +18,6 @@ int toinit;              /* 1 => ec() writes the __init body instead */
 int unevaluated;         /* nesting of non-evaluated sizeof operands */
 int hasinit;
 
-/* Identifier storage width.  C99 6.4.2.1 requires 63 significant
-   characters, so 64 bytes fits a 63-character name plus its NUL.  It was
-   32, which silently merged any two names sharing their first 32
-   characters and made every name of 32+ characters unfindable (the
-   symptom depended on the use: "a constant is required here" for an array
-   bound, "expected ')'" for a type name, "unknown identifier" for a
-   variable).  A longer name is refused by name_toolong() rather than
-   truncated.  [R13-0c #32] */
-#define NAMEW 64
 char symname[MAXSYM * NAMEW];
 int symkind[MAXSYM];        /* 0 global  1 local  2 function */
 int symoff[MAXSYM];         /* local: frame offset */
@@ -665,7 +656,6 @@ int sfind_walk(int t) {
     while (i >= 0) { if (sfind_is(i, t)) return i; i = i - 1; }
     return 0 - 1;
 }
-int name_toolong(int t);
 int sfind(int t) {
     int a; int b;
     name_toolong(t);                 /* never route a long name to the walk */
@@ -749,12 +739,6 @@ int sh_push(int i, int t);
    from every place a name enters one of the five stores and from sfind, so a
    long name can never reach the "a constant is required here" path, which
    said nothing about the real problem.  [R13-0c #32] */
-int name_toolong(int t) {
-    if (tlen[t] < NAMEW) return 0;
-    err_tok(t, "identifier too long (max 63 characters)");
-    __exit(1);
-    return 0;
-}
 int sadd(int t, int kind, int off, int elem) {
     int k;
     name_toolong(t);

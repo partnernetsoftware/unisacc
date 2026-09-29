@@ -187,7 +187,30 @@ int isdi(int c) { if (c >= 48) { if (c <= 57) return 1; } return 0; }
 #define MAXSEG 65536
 #define MACPOOL 131072
 #define MAXMPARAM 12
-char macname[MAXMAC * 32];
+/* Identifier storage width.  C99 6.4.2.1 requires 63 significant
+   characters, so 64 bytes fits a 63-character name plus its NUL.  It was
+   32, which silently merged any two names sharing their first 32
+   characters and made every name of 32+ characters unfindable (the
+   symptom depended on the use: "a constant is required here" for an array
+   bound, "expected ')'" for a type name, "unknown identifier" for a
+   variable).  A longer name is refused by name_toolong() rather than
+   truncated.  [R13-0c #32] */
+#define NAMEW 64
+int err_at(long p, char *msg);
+int err_tok(int t, char *msg);
+int name_toolong(int t) {
+    if (tlen[t] < NAMEW) return 0;
+    err_tok(t, "identifier too long (max 63 characters)");
+    __exit(1);
+    return 0;
+}
+int name_long(char *s, int n, long pos) {   /* the same rule, for a raw name */
+    if (n < NAMEW) return 0;
+    err_at(pos, "identifier too long (max 63 characters)");
+    __exit(1);
+    return 0;
+}
+char macname[MAXMAC * NAMEW];
 int macval[MAXMAC];      /* the numeric value, when the body is one number */
 int machas[MAXMAC];      /* ...and whether it was */
 /* The replacement list, as TEXT.  A numeric value is enough for `#if`, and
@@ -211,7 +234,7 @@ int srcseg[MAXSRC];      /* the segment of each byte of src */
 int eseg;                /* the segment of what eput is writing */
 /* #pragma push_macro / pop_macro: the saved entry (or -1) per push */
 #define MAXPUSH 256
-char pushname[MAXPUSH * 32]; int pushent[MAXPUSH]; int npush;
+char pushname[MAXPUSH * NAMEW]; int pushent[MAXPUSH]; int npush;
 
 int mfindt(int t);
 /* Every identifier in the source is looked up here -- that is what the
@@ -238,9 +261,9 @@ int mac_hash(char *s, int n) {
 int mac_is(int i, char *s, int n) {     /* is entry i the name s[0..n)? */
     int k;
     k = 0;
-    while (macname[i * 32 + k]) {
+    while (macname[i * NAMEW + k]) {
         if (k >= n) return 0;
-        if (macname[i * 32 + k] != s[k]) return 0;
+        if (macname[i * NAMEW + k] != s[k]) return 0;
         k = k + 1;
     }
     return k == n;
@@ -251,12 +274,12 @@ int mac_reindex(void) {
     i = 0; while (i < MACH) { mac_h[i] = 0; i = i + 1; }
     i = 0;
     while (i < nmac) {
-        { int L; L = 0; while (macname[i * 32 + L]) L = L + 1;
-          h = mac_hash(macname + i * 32, L);
+        { int L; L = 0; while (macname[i * NAMEW + L]) L = L + 1;
+          h = mac_hash(macname + i * NAMEW, L);
           /* a later entry of the same name takes the slot: the index
              holds the NEWEST, and macprev reaches the older ones */
           while (mac_h[h]) {
-              if (mac_is(mac_h[h] - 1, macname + i * 32, L)) break;
+              if (mac_is(mac_h[h] - 1, macname + i * NAMEW, L)) break;
               h = (h + 1) & (MACH - 1);
           } }
         mac_h[h] = i + 1;
@@ -292,7 +315,7 @@ int mfind(char *s, int n) {
     return 0 - 1;
 }
 
-int mdef(char *s, int n, int v, int has) {
+int mdef(char *s, int n, int v, int has, long pos) {
     int k; int old;
     old = mac_newest(s, n);
     if (nmac >= MAXMAC) { __write(2, "too many macro definitions\n", 27); __exit(1); }
@@ -300,8 +323,9 @@ int mdef(char *s, int n, int v, int has) {
     if (old >= 0) { if (macto[old] >= SEGINF) macto[old] = curseg; }
     macfrom[nmac] = curseg; macto[nmac] = SEGINF; macprev[nmac] = old;
     k = 0;
-    while (k < n) { if (k < 31) macname[nmac * 32 + k] = s[k]; k = k + 1; }
-    if (n < 32) macname[nmac * 32 + n] = 0;
+    name_long(s, n, pos);
+    while (k < n) { if (k < NAMEW - 1) macname[nmac * NAMEW + k] = s[k]; k = k + 1; }
+    if (n < NAMEW) macname[nmac * NAMEW + n] = 0;
     macval[nmac] = v; machas[nmac] = has;
     macboff[nmac] = 0; macblen[nmac] = 0; macfn[nmac] = 0; macnp[nmac] = 0;
     macvar[nmac] = 0;
@@ -1100,9 +1124,9 @@ int resync(int from) {
    `-t os/arch` name it; a bare tape is lnx/x86_64, as it is on the Python
    side and as the VM reads it. */
 char *tgt;
-int mdefb(char *s, int n, char *body, int bl, long v) {
+int mdefb(char *s, int n, char *body, int bl, long v, long pos) {
     int i;
-    mdef(s, n, v, 1);
+    mdef(s, n, v, 1, pos);
     i = mfind(s, n);
     if (i < 0) return 0;
     macboff[i] = macstashs(body, bl); macblen[i] = bl;
@@ -1112,7 +1136,7 @@ int mdefb(char *s, int n, char *body, int bl, long v) {
 /* `-D NAME` and the target's own macros: defined as 1, and they expand to
    "1" as well -- a macro with a value but no body expands to NOTHING, which
    turns `printf("%d", LEVEL)` into `printf("%d", )`. */
-int mdef1(char *s) { return mdefb(s, blen(s), "1", 1, 1); }
+int mdef1(char *s) { return mdefb(s, blen(s), "1", 1, 1, 0); }
 
 int blen(char *s) { int n; n = 0; while (s[n]) n = n + 1; return n; }
 int predef(void) {
@@ -1129,8 +1153,8 @@ int predef(void) {
             if (a[k] == 45) { neg = 1; k = k + 1; }
             while (a[k] >= 48 && a[k] <= 57) { v = v * 10 + (a[k] - 48); k = k + 1; }
             if (neg) v = 0 - v;
-            mdefb(a, n, a + n + 1, blen(a + n + 1), v);
-        } else mdefb(a, n, "1", 1, 1);
+            mdefb(a, n, a + n + 1, blen(a + n + 1), v, 0);
+        } else mdefb(a, n, "1", 1, 1, 0);
         i = i + 1;
     }
     t = tgt;
@@ -1178,8 +1202,8 @@ int pushpop(int ls, int p, int e) {
     if (ispush) {
         if (npush >= MAXPUSH) return 1;
         k = 0;
-        while (k < n1 - n0) { pushname[npush * 32 + k] = src[n0 + k]; k = k + 1; }
-        pushname[npush * 32 + k] = 0;
+        while (k < n1 - n0) { pushname[npush * NAMEW + k] = src[n0 + k]; k = k + 1; }
+        pushname[npush * NAMEW + k] = 0;
         pushent[npush] = mfind(src + n0, n1 - n0);
         npush = npush + 1;
         return 1;
@@ -1188,21 +1212,21 @@ int pushpop(int ls, int p, int e) {
     j = npush - 1;
     while (j >= 0) {
         k = 0; q = 1;
-        while (k < n1 - n0) { if (pushname[j * 32 + k] != src[n0 + k]) q = 0; k = k + 1; }
-        if (q) { if (pushname[j * 32 + k] == 0) break; }
+        while (k < n1 - n0) { if (pushname[j * NAMEW + k] != src[n0 + k]) q = 0; k = k + 1; }
+        if (q) { if (pushname[j * NAMEW + k] == 0) break; }
         j = j - 1;
     }
     if (j < 0) return 1;
     m = pushent[j];
     k = j; while (k + 1 < npush) {       /* drop that push */
-        q = 0; while (q < 32) { pushname[k * 32 + q] = pushname[(k + 1) * 32 + q]; q = q + 1; }
+        q = 0; while (q < NAMEW) { pushname[k * NAMEW + q] = pushname[(k + 1) * NAMEW + q]; q = q + 1; }
         pushent[k] = pushent[k + 1]; k = k + 1;
     }
     npush = npush - 1;
     newseg(ls);
     { int cur; cur = mfind(src + n0, n1 - n0); if (cur >= 0) macto[cur] = curseg; }
     if (m >= 0) {                        /* the saved definition, again */
-        mdef(src + n0, n1 - n0, macval[m], machas[m]);
+        mdef(src + n0, n1 - n0, macval[m], machas[m], n0);
         k = nmac - 1;
         macboff[k] = macboff[m]; macblen[k] = macblen[m];
         macfn[k] = macfn[m]; macnp[k] = macnp[m]; macvar[k] = macvar[m];
@@ -1363,7 +1387,7 @@ int preprocess(void) {
                             while (pe < i) { if (isdi(src[pe] & 255) == 0) break;
                                              vv = vv * 10 + ((src[pe] & 255) - 48);
                                              pe = pe + 1; } } }
-                        mdef(src + ns, ne - ns, vv, vh);
+                        mdef(src + ns, ne - ns, vv, vh, ns);
                         mi = mfind(src + ns, ne - ns);
                         if (mi >= 0) {
                             /* the replacement list runs to the end of the
@@ -1661,7 +1685,7 @@ int ftrim_libc_define(void) {
         if (ftrim_libc_mark[i]) {
             k = 0; while (k < 5) { nm[k] = "__UN_"[k]; k = k + 1; }
             k = 0; while (k < n) { nm[5 + k] = LIBBODY_NAMES[p + k]; k = k + 1; }
-            mdefb(nm, 5 + n, "1", 1, 1);
+            mdefb(nm, 5 + n, "1", 1, 1, 0);
         }
         p = p + n + 1; i = i + 1;
     }
