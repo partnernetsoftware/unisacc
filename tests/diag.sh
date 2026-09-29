@@ -18,6 +18,21 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
+# Diagnostics that do not yet carry what a reader needs, one per line:
+# <case> R13-0[b]#NN P0|P1|P2 <what is missing>.  Same contract as
+# tests/c99.knownfail and the difftest lists: a listed case may fail, and a
+# listed case that starts PASSING is a failure, so closing a gap means
+# deleting its line.
+# Two ledgers, because the two routes do not agree -- the same split the
+# difftest lists needed.  07 is the case that forces it: ua_ref already has
+# the position (5:11), the product has neither the position nor the header
+# name, so one shared list would be a false green on one route or the other.
+if [ "$(basename "${UA:-/tmp/ua_ref}")" = ua_ref ]; then
+    KNOWN=$R/tests/diag.knownfail
+else
+    KNOWN=$R/tests/diag.com.knownfail
+fi
+isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 T=$(scratch)
 ok=0; bad=0
 
@@ -151,6 +166,100 @@ for f in $(ls corpus/c-testsuite/tests/single-exec/*.c 2>/dev/null | head -40); 
 done
 printf "  damaged corpus: %d diagnosed cleanly, %d hung or crashed\n" "$dmg" "$dbad"
 [ "$dbad" -eq 0 ] && [ "$dmg" -gt 0 ] && ok=$((ok+1)) || bad=$((bad+1))
+
+# Every rejection carries a position -- and the position is the USER's.
+# [R13-0 N8]
+#
+# The external trial of 0.0.12 found three rejection shapes that named nothing
+# a reader could act on:
+#
+#   reject: not covered: <construct>            (no file:line:col at all)
+#   unisacc: error: undefined function 'f'      (no position; and it is the
+#                                                call site that matters)
+#   CError: line 853: undefined function 'f'    (a position, but 853 is a line
+#                                                in the compiler's SPLICED
+#                                                buffer; the user's file is 13
+#                                                lines long)
+#
+# The third is worse than the first two and is the reason this check states
+# the line it expects rather than merely requiring one: a wrong line sends the
+# reader somewhere else (the header of this file already says so).  Each case
+# below is a real red example, and the expected line is the one the marker
+# line sits on in the file as written.
+pos_ok=0; pos_bad=0; pos_known=0; pos_revived=0
+poscase() {  # poscase <file> <want line:col> <what must also appear> [<driver>]
+    local f=$1 want=$2 text=$3 driver=${4:-ua}
+    local got
+    # the product is tinycc-shaped: the file comes AFTER -O2 and `-run` closes
+    # the line (difftest_o.sh:68).  Getting this wrong makes the compiler
+    # compile nothing and the check compare an empty string -- which is how
+    # this block first reported three failures that were its own.
+    if [ "$driver" = ua ]; then
+        got=$("$_BOUND" 30 "$UA" -O2 "$f" -run 2>&1 | head -1)
+    else
+        got=$("$_BOUND" 30 python3 -m unisa run "$f" --drive built 2>&1 | head -1)
+    fi
+    local name="$(basename "$f" .c)"
+    case "$got" in
+        *"$(basename "$f"):$want"*"$text"*)
+            pos_ok=$((pos_ok+1))
+            if isknown "$name"; then
+                pos_revived=$((pos_revived+1))
+                printf "  note %-12s listed in diag.knownfail but now correct: delete its line\n" "$name"
+            fi;;
+        *) if isknown "$name"; then
+               pos_known=$((pos_known+1))
+               printf "  known %-11s %s\n" "$name" "$(grep -m1 "^$name[[:space:]]" "$KNOWN" | cut -c1-56)"
+           else
+               pos_bad=$((pos_bad+1))
+               printf "  FAIL %-12s want %s:%s (%s)\n       got  %s\n" \
+                   "$name" "$(basename "$f")" "$want" "$text" "$got"
+           fi;;
+    esac
+}
+red=$R/tests/c
+# 04: not covered, and the position is the assignment
+if [ "$(basename "$UA")" != ua_ref ]; then
+    # 04 is a product-only defect: the reference and cc both exit 22 where the
+    # product refuses with `not covered: width` (same shape as R13-0 03/05).
+    poscase "$red/fb12-04-deref-struct-assign.c" "13:12" "not covered"
+fi
+# 05: a declined construct reports the declaration.  It does NOT yet name the
+# construct (it says `expected ';'` where it means "2-D VLA unsupported"), so
+# the second field cannot ask for "VLA" until N4 lands.
+poscase "$red/fb12-05-vla-2d.c" "9:13" "error:"
+# 11/29: the `reject: not covered:` shape, which carried no position at all
+poscase "$red/fb12-11-comment-then-continuation.c" "10:1" "not covered"
+poscase "$red/fb12-29-macro-more-than-8-params.c" "12:1" "not covered"
+# 31: undefined function -- the call site is what a reader needs.  Measured
+# per driver, because the three drivers do NOT agree on this batch:
+#
+#   07  ua_ref   `f.c:5:11: error: no such file for #include`   position, no header name
+#       product  `run: a bundled header was asked for ...`      neither
+#       py_ref   `ValueError: f.c: no such file for #include: locale.h`  header name, no position
+#
+# None of the three gives both, and the product gives neither.  So a case is
+# asserted only against the driver whose contract covers it; asserting all
+# three everywhere would make each route fail on the other route's gap.
+poscase "$red/fb12-31-unused-static-refs-undefined.c" "12:41" "undefined function"
+if [ "$(basename "$UA")" = ua_ref ]; then
+    # the classic reference build has the 07 position; the product does not
+    poscase "$red/fb12-07-missing-header-diag.c" "5:11" "no such file for #include"
+else
+    # product route: both the position and the header name are still missing
+    poscase "$red/fb12-07-missing-header-diag.c" "5:11" "locale.h"
+fi
+# The reference front end, where 31 reports `CError: line 853` for a 13-line
+# file -- a position in the compiler's spliced buffer passed off as the user's.
+# A wrong line is worse than no line.  This one is about the PYTHON front end,
+# so it is meaningful only on the default route.
+if [ "$(basename "$UA")" = ua_ref ]; then
+    poscase "$red/fb12-31-unused-static-refs-undefined.c" "12:41" "undefined function" ref
+fi
+printf "  rejection positions: %d named correctly, %d known missing, %d wrong\n" \
+    "$pos_ok" "$pos_known" "$pos_bad"
+[ "$pos_bad" -eq 0 ] && [ $((pos_ok + pos_known)) -gt 0 ] && [ "$pos_revived" -eq 0 ] \
+    && ok=$((ok+1)) || bad=$((bad+1))
 
 echo
 echo "diag  ok $ok   wrong $bad"
