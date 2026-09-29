@@ -91,3 +91,28 @@ Fixed callback descriptors remain pointer-sized and their signature graphs are
 certified recursively. These arguments do not cover arbitrary packed layouts,
 bitfields, vector types, variadics or the pending general16-byte union recipe.
 They are model-domain proofs, not all-platform native qualification.
+
+## Natural16-byte union domain
+
+`NL.walk` recursively validates ordinary int/data-pointer/float leaves, natural
+struct/array placement and overlapping union alternatives. Returned occupied,
+INTEGER and FP byte masks cover exact relative offsets, then parent offsets shift
+the masks before merging. Every alternative must occupy its entire extent; holes
+and padding are explicitly outside this first domain. A union alternative must
+have the union extent; all alternatives together establish its natural maximum
+alignment. Callback object leaves reject even if overlapping integer alternatives
+would dominate their lane class. Existing callback signature topology is unchanged.
+Classifier recursion<=32 uses bank482 keys100000+depth*32, isolated from existing
+NC 32-slot emission frames; its return masks are outside saved scratch.
+
+`rules.tsv` declares six profile families, leaf classes, N<S<I joins, and eight
+natural recipes. SysV16B union alignment8 emits two64-bit elements with the
+computed II/IS/SI/SS classes; alignment4 emits four32-bit elements, repeating each
+lane class twice. ARM homogeneous FP base8/base4 emits double2/float4 respectively;
+any integer leaf or differing FP bases makes the object non-HFA, using GP II
+aggregate recipes. In particular `{double[2],float[4]}` is SysVSS but ARMII.
+Windows x64 retains an extent16 aggregate (II recipe), preserving indirect
+parameter and sret identity. All recipes retain root alignment4/8, width16 and
+one logical object; no numeric conversions, artificial ffi layout fields,
+new executor primitives or C ABI classifier are introduced. Broader16B layouts,
+SSEUP/x87/vector classes, holes and general union extents remain rejected.

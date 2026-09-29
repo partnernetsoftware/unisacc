@@ -119,6 +119,54 @@ def main():
    for originalvalue,convertedvalue in ((afp,cafp),(au,cau),(su,csu),(outer,couter)):
     original=signature((originalvalue,),I);converted=signature((convertedvalue,),identity(I),support=1)
     check(original,target,plan(target,original,converted));aggregate_cases+=1
+  # Independent nine concrete schemas; no model/rule table used for gold.
+  i4=desc(1,4,4,unsigned=1)
+  is8=structure((UI,D),(0,8),16,8);si8=structure((D,UI),(0,8),16,8)
+  ss8=structure((D,D),(0,8),16,8)
+  is4=structure((i4,i4,F,F),(0,4,8,12),16,4)
+  si4=structure((F,F,i4,i4),(0,4,8,12),16,4)
+  ss4=structure((F,F,F,F),(0,4,8,12),16,4)
+  ii4=structure((i4,i4,i4,i4),(0,4,8,12),16,4)
+  double2=array(D,2,8,16,8);float4=array(F,4,4,16,4)
+  schemas=[((is8,structure((UI,F,F),(0,8,12),16,8)),8,'IS',False),
+   ((si8,structure((F,F,UI),(0,4,8),16,8)),8,'SI',False),
+   ((double2,ss8),8,'SS',True),((is8,si8),8,'II',False),
+   ((is4,is4),4,'IS',False),((si4,si4),4,'SI',False),
+   ((float4,ss4),4,'SS',True),((float4,ii4),4,'II',False),
+   ((double2,float4),8,'SS',False)]
+  union16_cases=0
+  def recipe(classes,alignment):
+   codes=''.join(x*(2 if alignment==4 else 1) for x in classes)
+   children=tuple(desc(1 if x=='I' else 3,alignment,alignment,unsigned=int(x=='I'),base=0,shape=0) for x in codes)
+   return identity(structure(children,tuple(i*alignment for i in range(len(codes))),16,alignment))
+  for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
+   for children,alignment,sysv,hfa in schemas:
+    classes=('SS' if hfa else 'II') if target.endswith(b'/arm64') else 'II' if target==b'win/x86_64' else sysv
+    convertedvalue=recipe(classes,alignment)
+    for alternatives in (children,tuple(reversed(children)),children+children):
+     value=natural(alternatives,16)
+     # natural helper alignment defaults width; set exact original align4/8.
+     b=bytearray(value);b[48:56]=U(alignment);value=bytes(b)
+     original=signature((value,),value)
+     converted=signature((convertedvalue,),convertedvalue,support=1)
+     check(original,target,plan(target,original,converted));union16_cases+=1
+  # Parser aliases and a signature cycle do not affect the carrier recipe.
+  for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
+   value=bytearray(natural((double2,float4),16));value[48:56]=U(8);value[8:24]=U(77)+U(88);value=bytes(value)
+   convertedvalue=recipe('SS' if target.endswith(b'/x86_64') and target!=b'win/x86_64' else 'II',8)
+   original=signature((callback_ref(1),),callback_def(1,(value,callback_ref(1)),value))
+   converted=signature((callback_ref(1,True),),callback_def(1,(convertedvalue,callback_ref(1,True)),convertedvalue,support=1,canon=True),support=1)
+   check(original,target,plan(target,original,converted));union16_cases+=1
+   for length in (len(original)//2,len(original)-1):check(original[:length],target)
+  n16bad=[natural((structure((I,D),(0,4),16,8),),16),
+   natural((structure((desc(1,1,1),D),(0,8),16,8),),16),
+   natural((array(D,2,4,16,8),),16),natural((structure((callback_def(1),I),(0,8),16,8),),16),
+   natural((structure((desc(2,depth=1,unsigned=1),P),(0,8),16,8),),16),natural((structure((P,P),(0,8),16,8),),16)]
+  # Pointer leaves are I (positive), callable object leaves remain opaque-unsafe.
+  validptr=bytearray(n16bad.pop());validptr[48:56]=U(8);original=signature((bytes(validptr),),I)
+  check(original,b'osx/arm64',plan(b'osx/arm64',original,signature((recipe('II',8),),identity(I),support=1)));union16_cases+=1
+  for value in n16bad:
+   b=bytearray(value);b[48:56]=U(8);check(signature(result=bytes(b)))
   # Decode each certified callback graph through the existing bridge parser.
   host=t/'graphcheck.c';host.write_text('#include "exec/c/libraryexports.h"\nint main(int argc,char **argv){FILE *f=fopen(argv[1],"rb");fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);unsigned char *b=malloc(n);fread(b,1,n,f);fclose(f);us_exports x={0};char e[200]={0};int rc=us_exports_load_bridge(&x,b,n,e,sizeof e);if(rc)fprintf(stderr,"%s\\n",e);us_exports_clear(&x);free(b);return rc;}\n')
   hostrun=t/'graphcheck';cmd('cc','-O0','-I',ROOT,host,'-lffi','-o',hostrun)
@@ -167,5 +215,5 @@ def main():
   for length in (0,7,16,len(original)//2,len(original)-1):check(original[:length])
   for original,_ in fixtures:
    for length in (len(original)//2,len(original)-1):check(original[:length])
-  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases+aggregate_cases,'aggregate_cases':aggregate_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
+  print(json.dumps({'prototype_only':True,'states':len(d['states']),'full_domain':full,'six_explicit_profile_rules':True,'exact_sim_network_bytes':successes+natural_cases+aggregate_cases+union16_cases,'union16_cases':union16_cases,'union16_layout_negatives':len(n16bad),'union16_cycle_truncations':12,'aggregate_cases':aggregate_cases,'raw_graph_rejections':len(rejects),'unknown_profile_controls':7,'root_truncations':root_truncations,'callback_truncation_controls':2*len(fixtures),'reversed_members':True,'natural_scalar_union_cases':natural_cases,'arm_narrow_rejections':arm_narrow_rejections,'heterogeneous_fp_rejected':True,'one_logical_aggregate_one_carrier':True,'original_bytes_untouched':True,'fixed_mode1_nine_count':True,'callback_graph_cases':len(fixtures),'shared_self_mutual_factory':True,'nested_proof1_bridge_decode':True}))
 if __name__=='__main__':main()

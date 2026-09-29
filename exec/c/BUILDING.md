@@ -127,3 +127,49 @@ sidecar with a private candidate. Existing binaries are not automatically attest
 The record's `commit` is the base revision at build time; the content hash is
 authoritative when building a working tree with uncommitted product changes.
 Committing those same bytes does not change the input identity.
+
+## Qualified library FFI dependency
+
+The POSIX library builder checks the **selected dependency by executing a real
+C ABI probe**, not only by linking or trusting its version. The probe places a
+16-byte INTEGER/SSE aggregate after five GP and seven FP arguments, with two
+stack tails; it compares true C calling with libffi calls to union and struct
+callees. The system macOS x86_64 libffi used in the R10 investigation corrupted
+the first FP argument. That provider fails library construction; no silently
+miscompiling library is published. The same probe passes with the pinned official
+libffi 3.5.2 static provider. This observation does not qualify arbitrary layouts
+or replace the public callback/aggregate tests.
+
+`exec/c/buildffiprovider.py` prepares a private provider from the SHA-256-pinned
+official source archive, with separate bounded configure/build/install steps.
+Its manifest records target, source archive, static library, headers and license.
+Pass the completed directory with `buildlibrary.py --ffi-provider DIRECTORY`.
+Provider identity, artifact hashes and the actual ABI probe are checked before
+publishing the library files. Darwin builds may select either of the two Darwin
+ISAs; a non-native probe executes through `arch`, requiring Rosetta for x86_64.
+Other cross-platform library builders retain their separate qualification scope.
+
+The dynamic library statically links the selected provider. Static consumers
+link **both `libunisacc.a` and the delivered `libunisacc-ffi.a`**; they must not
+replace the latter with system `-lffi`. `LIBFFI-LICENSE` accompanies this dependency.
+The compiler model package remains separately supplied to `us_new()`.
+
+For the union16 gates set `UNISACC_FFI_X86_PROVIDER` to the completed x86_64
+provider directory; `UNISACC_FFI_PROVIDER` selects the native ARM provider.
+The runner validates the provider manifest before compiling. With no selector
+it uses the system dependency, so the known-bad x86_64 provider fails these
+probes rather than being recorded as unsupported or passing. The queue hashes
+provider manifest, archive, headers and license, including files outside the
+repository; changing provider bytes invalidates cached results.
+
+Example (each provider invocation runs one bounded next step):
+
+```sh
+python3 exec/c/buildffiprovider.py --tarball /private/path/libffi-3.5.2.tar.gz --output /private/tmp/ffi-x86 --target osx/x86_64
+# Repeat twice to complete make and install.
+python3 exec/c/buildlibrary.py --package /private/path/compiler.pkg --output /private/tmp/lib-x86 --target osx/x86_64 --ffi-provider /private/tmp/ffi-x86
+```
+
+Dynamic consumers use an rpath to the delivered library directory; for example,
+link with `-Wl,-rpath,/absolute/library/directory`. Its install name is
+`@rpath/libunisacc.dylib`, not an absolute development path.

@@ -36,7 +36,7 @@ def execution_environment():
 def execution_settings():
     return {k:os.environ[k] for k in ('MODEL_COM','UA','UA_RUN','TOOLS_UA','CORPUS_UA','CC','CFLAGS','TARGET','DRIVE','NETWORK',
                 'EXEC_CC','PAR','STRICT','SHARD','CHAINKEEP','E3KEEP','E4STRICT',
-                'UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL') if k in os.environ}
+                'UNISA_MAXSTEPS','UNISA_CONTAINER','UNISA_KERNEL','UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER') if k in os.environ}
 
 def executable_inputs(settings):
     # These selectors are one quoted executable argument, never shell commands.
@@ -109,7 +109,13 @@ def fingerprint(jobs):
         if settings.get(key):
             path = shutil.which(settings[key])
             tools[key] = [path, digest(path)] if path else ['missing', settings[key]]
-    common = [str(ROOT), execution_environment(), platform.platform(), platform.machine(), sys.version,
+    provider_inputs = {}
+    for key in ('UNISACC_FFI_PROVIDER','UNISACC_FFI_X86_PROVIDER'):
+        if settings.get(key):
+            directory = pathlib.Path(settings[key]).resolve(strict=True)
+            provider_inputs[key] = {str(directory/name):digest(str(directory/name)) for name in
+                ('manifest.json','lib/libffi.a','include/ffi.h','include/ffitarget.h','include/ffi/ffi.h','include/ffi/ffitarget.h','LICENSE')}
+    common = [provider_inputs, str(ROOT), execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
               {n:digest(n) for n in ('tests/gatequeue.py', 'tests/gate.sh', 'tests/bound.py', declaration)}]
     def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
