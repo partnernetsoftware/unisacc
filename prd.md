@@ -185,6 +185,13 @@
 
 | R11-7 目录与文档职责梳理（主人 2026-09-29 要求纳入，本轮只登记） | 主轴“规则→构造→网络→执行→验证”。1) 文档权威：README 管用户入口/发布版本/限制，ARCHITECTURE 管文件归属/生成者/消费者，PRD 管流水线规格/计划/验收；尺寸、网络数、平台结果引用同一生成账本，修正 ARCHITECTURE 与 exec/README 过期状态。2) 每阶段列规则来源→构造器→网络产物→执行入口→独立裁判，区分 TSV 事实与构造器手写控制流程。3) exec/c 先建职责清单：runtime（通用执行/推理/解码/存储）、driver（CLI/路由/装载）、library（嵌入库/调用/回调）、packaging（模型包/单目标构建）；测试与设计文档归各自区域，稳定后一次机械迁移并同步引用。4) unisa/src/kernel 保留种子/经典参考/生成输入职责；旧 parse/control/训练产物先标历史参考，确认活跃依赖后再归档；删除须核查调用与生成消费依赖。5) research 分论文、设计、按版本封存证据，失败记录保留但与当前状态分开；构建目录与候选定义生命周期和清理规则。顺序：文档去重纠错→职责清单→少量机械迁移→确认后删除重复或死代码 | 能追踪任一阶段从规则到运行，引用/生成链完整，相关门禁通过；搬目录不算逻辑减少，消除重复规则另计；不影响 0.0.10 发布收口 |
 
+**R11-8 发布链提速（主人 2026-09-29 要求，向 minicon 学习；0.0.10 发布后实施）**。minicon 实测：candidate 1.5 分钟 → company-signing 2 分钟 → release 1 分钟，全链十来分钟；unisacc 0.0.10 每次文档/工作流提交都重买一张 30 分钟的 ci.yml 票，共付 4 次。差异与对策：
+1. **上游不是全量测试 CI，而是“精确源的一次构建 run”**：minicon `company-signing.yml` 只要求 `minicon-com.yml`（workflow_dispatch 的一次打包 run）成功且 head_sha 一致；对 main 的比较用 `scripts/source-fingerprint.py` 的**产品源树指纹**，不是 HEAD 相等，因此文档提交不打断签名。unisacc 改法：新增 `unisacc-com.yml`（dispatch：在 macos runner 上 `make com` 或直接接收本机候选 + `provenance.py check`，≤5 分钟），`windows-signing.yml` 的上游改绑它；main 比较改为 `exec/pipeline/models.py:closure` 的 `sources_sha256` 相等。`ci.yml` 保留为 push 触发的异步安全网，不再是签名前提。
+2. **候选一次构建、按摘要复用（GHCR/oras）**：minicon `six-grid-cloud-build.yml` 用 `oras` 把六格产物作为 OCI index 推到 `ghcr.io/<owner>/<pkg>`，`six-grid-runtime.yml` 在各平台 runner 以 `@sha256:` 摘要拉取并核对 `source_sha`/`source_tree_sha256` 后只做运行验证。unisacc 改法：本机 pack 完成后 `oras push ghcr.io/partnernetsoftware/unisacc-candidate:<sources_sha256[:16]>`（成员：unisacc.com、build.json、model-audit/models.json、kernels），签名/平台 smoke/发布全部按摘要拉取，不再靠草稿 Release 中转 `unisacc-unsigned.zip`；CI 的 Linux/macOS 三台 runner 增加“拉取候选 + com-run/c99/apps 冒烟”，把本机 Lima/UTM 的部分平台义务搬到云上并行（本机仍做原生 ARM 与 Rosetta 全量门禁）。
+3. **发布批次冻结顺序**：代码→候选→本地门禁→一次 push→签名→发布→文档；中途零提交。若 main 已前进，按 minicon 惯例用一次性 `candidate-src-<v>` 分支 dispatch，用后删除。
+4. **签名 step 首跑安装客户端**：`cache-dependencies: true`、step 4 分钟、服务 timeout 200 s（已在 0.0.10 落地）。
+验收：从本机 pack 完成到 Release 发布 ≤ 15 分钟（不含本地全量门禁）；签名/发布 run 各 ≤ 5 分钟；任何 docs 提交不触发重签；候选摘要在 GHCR、Release 资产、回执三处一致。
+
 **编排**：R11-2 的关系账复用 v0.0.10 的分片与单目标闭包；R11-3 的默认切换必须两条路线同步；R11-5 只消费已封存身份上的数字。
 
 ### v0.1.x 路线（草案，2026-09-28 调整：把论文的开放问题分到几个小版本里，逐步把“未证”变成“已证”）
