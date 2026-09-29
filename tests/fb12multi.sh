@@ -91,7 +91,11 @@ for name in $SET; do
             printf "        %-32s listed in fb12.knownfail but passes: delete its line\n" "$name"
         fi
     elif isknown "$name"; then
-        known=$((known+1)); printf "  known %-32s rc=%s (want %s)  %s\n" "$name" "$rc" "$want_rc" \
+        # say WHICH dimension still fails: a compile failure and an assertion
+        # can share an exit status (03-assert-fires: both rc=1), and a known
+        # line that only quoted rc read as progress that had not happened
+        dim="rc=$rc (want $want_rc)"; [ "$got" = "$want" ] || dim="$dim stdout differs"
+        known=$((known+1)); printf "  known %-32s %s  %s\n" "$name" "$dim" \
             "$(grep -m1 "^$name[[:space:]]" "$KNOWN" | cut -c1-46)"
     else
         fail=$((fail+1)); printf "  FAIL  %-32s rc=%s (want %s)\n" "$name" "$rc" "$want_rc"
