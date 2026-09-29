@@ -54,8 +54,18 @@ int symstruct[MAXSYM];      /* index into the struct table, or -1 */
    boundary -- even though a local scalar still lives in an 8-byte slot.
    The two are different questions, and only the struct has to answer the
    first one. */
-#define MAXSTRUCT 128
-#define MAXMEMB 1024
+/* 512, not 128: miniz alone defines 11 structs, but the tables below are
+   shared across translation units and are NOT deduplicated -- the same
+   header included by each unit registers its tags again.  Measured on the
+   fb12-23 fixture: 128 refuses, 129 is the first refusal, and the real
+   program needs more than that once its units are counted.  [R13-0c #33] */
+#define MAXSTRUCT 512
+/* MAXMEMB is the same kind of shared table, and it is the one miniz hits
+   after the other two are raised: it is the TOTAL across every struct, not
+   per-struct (that is the separate `nown >= 256` check).  Measured: 500
+   members pass, 1000 refuse.  miniz reaches it because its members are
+   registered once per unit as well.  [R13-0c #33] */
+#define MAXMEMB 4096
 char stname[MAXSTRUCT * 32];
 int stfirst[MAXSTRUCT]; int stcount[MAXSTRUCT];
 /* tags are block-scoped (C99 6.2.1): the block depth a tag was defined at,
@@ -71,6 +81,8 @@ int mboff[MAXMEMB];     /* byte offset inside the struct */
 int mbbytes[MAXMEMB];   /* what `sizeof` reports for the member */
 int mbwidth[MAXMEMB];   /* the load/store width: 0 means "aggregate" */
 int mbarr[MAXMEMB];     /* an array member, including a one-element struct array */
+int mbdim2[MAXMEMB];    /* `T m[n][k]`: elements per row (k, or k*j for [n][k][j]); 0 for a 1-D member */
+int mbdim3[MAXMEMB];    /* `T m[n][k][j]`: j; 0 otherwise */
 int mbelem[MAXMEMB];    /* element size, for [] on an array member */
 int mbptr[MAXMEMB];
 int mbbase[MAXMEMB];    /* final pointee width, separate from array element width */
@@ -94,7 +106,11 @@ int declspecptr;        /* the specifier itself was a pointer typedef */
    The lexer cannot mark these: it runs over the whole file before the
    parser sees a line, so a name typedef'd on line 10 is already an ordinary
    identifier by then.  The parser resolves them by text instead. */
-#define MAXTD 256
+/* 1024, not 256, for the same reason as MAXSTRUCT above: the typedef table is
+   shared across units and not deduplicated.  Measured: 256 refuses, 257 is the
+   first refusal; the fb12-23 fixture needs 276 (91+92+93) across three units,
+   which is why 256 was just barely not enough.  [R13-0c #33] */
+#define MAXTD 1024
 char tdname[MAXTD * 32];
 int tdw[MAXTD]; int tdsz[MAXTD]; int tdstruct[MAXTD]; int tdptr[MAXTD];
 int tduns[MAXTD];
@@ -1330,7 +1346,7 @@ int postfix(void) {
             if (curptr) curelem = mbelem[mi];
             curpd = 0; curbase = mbelem[mi];
             if (curptr) { curpd = mbptrd[mi]; if (curpd >= 2) curelem = 8; }
-            cursize = mbbytes[mi]; curdim2 = 0; curdim3 = 0;
+            cursize = mbbytes[mi]; curdim2 = mbdim2[mi]; curdim3 = mbdim3[mi];
             curstruct = mbstruct[mi];
             /* `p->q->b`: a pointer member hands its pointee on */
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
@@ -3515,6 +3531,7 @@ int stbody(int si) {
     int msz; int mal; int mw; int mel; int mst; int mo; int muns;
     int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
     int flex; int marr;                   /* this member is `name[]`: a flexible array */
+    int mdim2; int mdim3;                 /* the trailing dimensions of `name[n][k][j]` */
     int mbl;                    /* ...and this one is _Bool */
     nown = 0; bitpos = 0; flex = 0;
     stopen[si] = 1;             /* this tag is INCOMPLETE until the `}` */
@@ -3554,6 +3571,7 @@ int stbody(int si) {
                 mbuns[nmemb] = mbuns[a];
                 mbskip[nmemb] = mbskip[a];
                 mbpst[nmemb] = mbpst[a];
+                mbdim2[nmemb] = mbdim2[a]; mbdim3[nmemb] = mbdim3[a];
                 mbflt[nmemb] = mbflt[a];
                 mbptrd[nmemb] = mbptrd[a];
                 if (stunion[mst]) { if (first == 0) mbskip[nmemb] = 1; }
@@ -3571,7 +3589,7 @@ int stbody(int si) {
             declptr = declspecptr; declpd = declspecpd;
             while (eatstar()) declptr = 1;
             t = 0 - 1;
-            n = 1; marr = 0;
+            n = 1; marr = 0; mdim2 = 0; mdim3 = 0;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 /* `int (*fptr)();` -- a pointer member, called through
                    its value; `(*f[4])()` is an array of them */
@@ -3589,6 +3607,20 @@ int stbody(int si) {
                 adv();
                 if (cur() == tidx("]", 1)) { n = 0; flex = 1; } else n = cexpr();
                 need(tidx("]", 1), "]");
+                /* `T m[n][k]` (and [n][k][j]): the member is n rows of k
+                   elements, and `s.m[i]` is a row whose size is k elements,
+                   as for a local a[n][k] (dimtail).  Without this the second
+                   `[` was "expected ;" and every 2-D member table was
+                   rewritten by hand (miniz, R13-0b#23). */
+                if (cur() == tidx("[", 1)) {
+                    adv(); mdim2 = cexpr(); need(tidx("]", 1), "]");
+                    n = n * mdim2;
+                    if (cur() == tidx("[", 1)) {
+                        adv(); mdim3 = cexpr(); need(tidx("]", 1), "]");
+                        mdim2 = mdim2 * mdim3; n = n * mdim3;
+                        if (cur() == tidx("[", 1)) { printf("arrays of more than three dimensions are not supported\n"); __exit(1); }
+                    }
+                }
             }
             isbf = 0;
             if (eat(tidx(":", 1))) {
@@ -3678,6 +3710,7 @@ int stbody(int si) {
             mbname[nmemb * 32 + k] = 0;
             mboff[nmemb] = mo; mbbytes[nmemb] = msz; mbwidth[nmemb] = mw;
             mbelem[nmemb] = mel; mbptr[nmemb] = declptr; mbarr[nmemb] = marr;
+            mbdim2[nmemb] = mdim2; mbdim3[nmemb] = mdim3;
             mbbase[nmemb] = sz; if (mst >= 0) mbbase[nmemb] = stsize[mst];
             mbstruct[nmemb] = 0 - 1;
             if (declptr == 0) { if (isbf == 0) mbstruct[nmemb] = mst; }
@@ -3718,6 +3751,7 @@ int stbody(int si) {
         mbskip[nmemb] = mbskip[own[j]];
         mbpst[nmemb] = mbpst[own[j]];
         mbflt[nmemb] = mbflt[own[j]];
+        mbdim2[nmemb] = mbdim2[own[j]]; mbdim3[nmemb] = mbdim3[own[j]];
         mbptrd[nmemb] = mbptrd[own[j]];
         nmemb = nmemb + 1;
         j = j + 1;

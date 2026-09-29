@@ -428,7 +428,7 @@ def shape_control(section):
 def structured_control(section, warnings, extra=None, sequence_bindings=None):
     section += "-warnings" if warnings and section in ("block", "if") else ""
     p = P("control." + section + (extra or {}).get("word_state", ""))
-    bindings = dict(TYPERANK=TYPERANK, MEMBERRANK=MEMBERRANK, RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK, SHAPE=SHAPE, VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
+    bindings = dict(TYPERANK=TYPERANK, MEMBERRANK=MEMBERRANK, RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK, SHAPE=SHAPE, VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, ARR=E.ARR, TDIM=TDIM, FPB=FPB, FPV=FPV,
                     UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
                     statement="STMT.body" if warnings else "STMT")
     bindings.update((name, globals()[name]) for name in
