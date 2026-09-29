@@ -42,7 +42,9 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 前提：候选同 SHA 的 CI 成功、main HEAD == source_sha、草稿 Release 已传 `unisacc-unsigned.zip` + `unsigned-receipt.json`、`release/signing-policy.json` mode=required。
 - 先 `mode=qualification`（零额度），再 `mode=company`。company 进入 `release-signing` 环境要审批：`POST /actions/runs/{id}/pending_deployments`（JSON body，environment_ids 为整数）。
 - 草稿只能按 `tag_name` 在 `/releases?per_page=100` 里找（`/releases/tags/{tag}` 不返回草稿），且需要 `contents: write` 的 token。
-- 任何 docs 提交都会移动 main HEAD：dispatch 前把回执（source_sha/run_id）重生成并重传，tag 与草稿 target 同步到该 SHA。
+- 任何 docs 提交都会移动 main HEAD：dispatch 前把回执（source_sha/run_id/**run_attempt**）重生成并重传，tag 与草稿 target 同步到该 SHA；CI 只重跑失败 job 会使 attempt 递增，回执必须写实际 attempt。
+- `Azure/artifact-signing-action` 的坑：a) 首跑安装 ArtifactSigning 模块与客户端包超过 1 分钟 → step 4 分钟、`cache-dependencies: true`、服务 `timeout: 200`；b) 它以 catalog 文件所在目录为文件根（Split-Path），catalog 放仓库根会得到空 Path（`Get-CatalogFileList: Cannot bind argument to parameter 'Path'`），必须像 minicon 一样放进子目录 `signing-input/`，条目写相对文件名，签完再拷回 `signed/` 供信任法院；c) Windows runner 的 Python 子进程按 cp1252 解码 gh 输出，顶层 `PYTHONUTF8=1`。
+- 托管 macOS runner 排队可达 30 分钟、速度波动大：CI 只允许重跑失败 job，不改源；`tools11`（tiny-regex test2）41–50 s 余量太薄，R11-1 拆分。
 
 ## 8. 发布
 签后产物从 run artifact `unisacc-company-signed-<attempt>` 下载，核对签前/签后 SHA 与尺寸，上传草稿，回执写入 `research/r<N>-release-acceptance.json`，`gh release edit --draft=false`。之后再提交回执/文档。
