@@ -215,6 +215,8 @@ job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py
 job lib-ordered-carrier-host python3 ./tests/libraryorderedcarriercheck.py
 if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     job lib-ordered-carrier-native python3 ./tests/modelorderedbitfieldnativecheck.py --target osx/arm64
+    job lib-packed-carrier-native python3 ./tests/modelpackednativecheck.py --target osx/arm64
+    job lib-packed-carrier-refusal python3 ./tests/modelpackednativecheck.py --target osx/x86_64
 fi
 job lib-ffi-provider python3 ./tests/libraryffiprovidercheck.py
 job lib-bitfield-source python3 ./tests/modelbitfieldsourcecheck.py
