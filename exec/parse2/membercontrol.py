@@ -27,11 +27,15 @@ def install(E, P, warnings, templates, facts, shape_control):
             if part==name and (mode=='all' or mode==('warnings' if warnings else 'plain')):
                 p.cur=b[owner[1:]] if owner.startswith('$') else owner
                 b[key]=p.fresh(kind)
-        for part,state_key in rows('operators'):
+        for part,state_key,load_state in rows('operators'):
             if part==name:
                 for op in E.CASOPS:
+                    # below a unary * (deref=1) the walk leaves `op=` to the caller: `*x.p += 2`
+                    check=b[state_key]+'.q'+op
+                    P(check).branch({1:check+'.l'},'LV.c'+op,[('CMPI','deref',1)])
+                    P(check+'.l').a(('LDI','deref',0)).goto(load_state)
                     rules=load_rules(root/'membercontrol-operator-rule.tsv',{},domain=[tokens[op+'=']],
-                                     bindings=dict(entry=b[state_key],target='LV.c'+op))
+                                     bindings=dict(entry=b[state_key],target='LV.c'+op,check=check))
                     for state,row in rules.items():
                         for key,(target,actions) in row.items():
                             E.g.on(state,[key],target,actions,'r')
