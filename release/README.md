@@ -135,7 +135,7 @@ attempt完整汇总与主人Promotion；Apple最终资产的签名、公证和�
 0.0.10待办：最终封存输入资格检查，政策正式启用required后的OIDC登录、公司
 服务签名与Windows信任回执，再验签后同一SHA的全部六平台、Defender和Promotion。
 当前policy为deferred，未调用Windows企业签名服务；company workflow保留
-required硬条件。每个workflow step最多一分钟，服务签名timeout为55秒；超时即失败。
+required硬条件。签名 step 上限 4 分钟（首次安装签名客户端包超过 1 分钟，2026-09-29 实测），服务调用 timeout 200 秒并缓存依赖；其余 step 仍最多一分钟；超时即失败。
 
 依据（2026-09-28 核对）：
 [官方 Artifact Signing action](https://github.com/Azure/artifact-signing-action)、
