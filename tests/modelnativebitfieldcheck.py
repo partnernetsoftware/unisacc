@@ -13,8 +13,9 @@ def d3(kind=1,width=4,align=4,unsigned=1,payload=b'',tag=0,rank=0,fmt=0,origin=2
  if natural is None:natural=align
  return struct.pack('<7Q',depth,321,987,kind,width,unsigned,align)+bytes([rank,fmt])+U(natural)+bytes([flags,known,origin,tag])+U(len(payload))+payload
 I4=d3();I8=d3(width=8,align=8);D=d3(3,8,8,0,rank=2,fmt=2);F=d3(3,4,4,0,rank=1,fmt=1)
-def ent(child,index,offset=0,bit=0,bits=0,kind=0):
- align=struct.unpack_from('<Q',child,48)[0];width=struct.unpack_from('<Q',child,32)[0]
+def ent(child,index,offset=0,bit=0,bits=0,kind=0,align=None):
+ if align is None:align=struct.unpack_from('<Q',child,48)[0]
+ width=struct.unpack_from('<Q',child,32)[0]
  return U(index)+bytes([kind])+U(align)+struct.pack('<4Q',offset,bit,bits,width)+child
 def agg(entries,width,align,tag=1,**kw):return d3(5,width,align,0,U(len(entries))+b''.join(entries),tag,**kw)
 def sig3(obj,name=b'entry'):
@@ -51,7 +52,21 @@ def cases():
  bad += [agg([ent(I4,0,bits=1,kind=1),ent(I4,1,bit=0,bits=2,kind=1)],4,4),agg([ent(I4,1,bits=1,kind=1)],4,4),agg([ent(d3(width=1,align=1),0),ent(I4,1,offset=1,bits=3,kind=1)],8,4),agg([ent(d3(origin=0,known=0,natural=0),0,bits=1,kind=1)],4,4)]
  # rank-3 (long double) stored as F64: certified only where the profile's long double IS IEEE64.
  longdouble=d3(3,8,8,0,rank=3,fmt=2)
- return values,expected,unknown,bad,longdouble
+ # Explicit packed external (origin 2) layouts: natural>alignment, members at reduced
+ # effective alignment. AAPCS64/Win64 carry them as declared-alignment integer arrays;
+ # SysV refuses (unaligned fields are MEMORY class, needs BANK).
+ C1=d3(width=1,align=1);S2=d3(width=2,align=2)
+ packed={'P5':(agg([ent(C1,0),ent(I4,1,offset=1,align=1)],5,1,natural=4),('I'*5,1)),
+         'P6':(agg([ent(C1,0),ent(I4,1,offset=2,align=2)],6,2,natural=4),('III',2)),
+         'P11':(agg([ent(S2,0,align=1),ent(I8,1,offset=2,align=1),ent(C1,2,offset=10)],11,1,natural=8),('I'*11,1)),
+         'PN':(agg([ent(C1,0),ent(agg([ent(I4,0),ent(I4,1,offset=4)],8,4),1,offset=1,align=1)],9,1,natural=4),('I'*9,1))}
+ packedbad=[agg([ent(C1,0),ent(D,1,offset=1,align=1)],9,1,natural=8),  # FP leaf inside packed
+  agg([ent(C1,0),ent(I4,1,offset=1,align=1)],5,1,natural=4,origin=1),  # source-origin packed
+  agg([ent(C1,0),ent(I4,1,offset=2,align=1)],6,1,natural=4),  # offset not the packed placement
+  agg([ent(C1,0),ent(I4,1,offset=1,bits=3,kind=1,align=1)],5,1,natural=4),  # bitfield at reduced alignment
+  agg([ent(I4,0)],4,4,natural=1),  # natural below alignment
+  agg([ent(C1,0),ent(I4,1,offset=1,align=1)],8,1,natural=4)]  # extent not the packed size
+ return values,expected,unknown,bad,longdouble,packed,packedbad
 class Files:
  def __init__(self,target):self.target=target
  def get(self,key):return self.target if key==b'\0cli/target' else None
@@ -75,12 +90,18 @@ def main():
    assert (p.returncode==0)==(status=='accept'),(status,p.stderr)
    if expected is None:assert status=='reject' and not p.stdout,(status,p.stdout);refused+=1
    else:assert status=='accept' and p.stdout==out==expected,(target,status,len(out),len(expected),repr(out)[:300],repr(expected)[:300]);passed+=1
-  values,expected,unknown,bad,longdouble=cases()
+  values,expected,unknown,bad,longdouble,packed,packedbad=cases()
   for target in (f'{os}/{arch}'.encode() for os in ('osx','lnx','win') for arch in ('arm64','x86_64')):
    for name,obj in values.items():
     source=sig3(obj);carrier=expected(name,target);check(source,target,plan(target,source,sig2((carrier,),carrier,support=1)))
    for obj in bad:check(sig3(obj),target)
    if target in (b'osx/x86_64',b'lnx/x86_64'):check(sig3(unknown),target)
+   for name,(obj,(classes,unit)) in packed.items():
+    src=sig3(obj)
+    if target in (b'osx/arm64',b'lnx/arm64',b'win/arm64',b'win/x86_64'):
+     v=recipe(classes,unit);check(src,target,plan(target,src,sig2((v,),v,support=1)))
+    else:check(src,target)
+   for obj in packedbad:check(sig3(obj),target)
    ldsrc=sig3(longdouble)
    if target in (b'osx/arm64',b'win/arm64',b'win/x86_64'):
     f64=desc(3,8,8,unsigned=0,base=0,shape=0);check(ldsrc,target,plan(target,ldsrc,sig2((f64,),f64,support=1)))

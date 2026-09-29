@@ -7,19 +7,25 @@ from modelgraphequality import EXTRA,ENTRYEXTRA,EDGES,LAYOUT
 # Additional values saved by NL's existing isolated recursive frame.
 REGS=('nl_bitoffset','nl_bitwidth','nl_entrykind','nl_entryalign','nl_cursor',
       'nl_accblo','nl_accbhi','nl_accanon','nl_acccount','nl_hcountchild')
+# ol_packed is deliberately NOT frame-saved: one packed node anywhere marks the whole object.
 def install(E,field,word,constword,blob,extents,alignments):
  P=E.P
  def extra(p,index,reg,node='ol_node'):
   return p.a(('ALUI','mul','nc_key',node,8),('ALUI','add','nc_key','nc_key',index),('LDX',reg,'nc_key',EXTRA))
  def check(name,reg,value,nx):P(name).branch({1:nx},'NC.sourcefactsfail',[('LDI','ol_expect',value),('C64U',reg,'ol_expect')])
  P('OL.ncmeta').branch({1:'OL.ncmetaread'},'OL.return',[('CMPI','nc_version',3)])
- P('OL.ncmetaread').a(('COPYW','ol_node','nc_node')).call('OL.meta').ret()
+ P('OL.ncmetaread').a(('COPYW','ol_node','nc_node'),('LDI','ol_packed',0)).call('OL.meta').ret()
  P('OL.return').ret()
  p=P('OL.meta')
  for i,reg in ((1,'ol_rank'),(2,'ol_format'),(3,'ol_natural'),(4,'ol_flags'),(5,'ol_known'),(6,'ol_origin')):extra(p,i,reg)
  field(p,3,'ol_kind','ol_node');field(p,6,'ol_alignment','ol_node').branch({(1,2):'OL.known'},'NC.sourcefactsfail',[('RLD','ol_origin')])
  check('OL.known','ol_known',3,'OL.flags');check('OL.flags','ol_flags',0,'OL.natural')
- P('OL.natural').branch({1:'OL.fpmeta'},'NC.sourcefactsfail',[('C64U','ol_natural','ol_alignment')])
+ # natural<alignment never; natural>alignment is an explicit packed layout, admitted only
+ # for external (origin 2) aggregates. Source facts (origin 1) with pack stay refused.
+ P('OL.natural').branch({1:'OL.fpmeta',2:'OL.packedkind'},'NC.sourcefactsfail',[('C64U','ol_natural','ol_alignment')])
+ P('OL.packedkind').branch({5:'OL.packedorigin'},'NC.sourcefactsfail',[('RLD','ol_kind')])
+ P('OL.packedorigin').branch({2:'OL.packedmark'},'NC.sourcefactsfail',[('RLD','ol_origin')])
+ P('OL.packedmark').a(('LDI','ol_packed',1)).goto('OL.return')
  P('OL.fpmeta').branch({3:'OL.rank'},'OL.return',[('RLD','ol_kind')])
  P('OL.rank').branch({1:'OL.float',2:'OL.double',3:'OL.longdouble'},'NC.sourcefactsfail',[('RLD','ol_rank')])
  check('OL.float','ol_format',1,'OL.return');check('OL.double','ol_format',2,'OL.return')
@@ -52,7 +58,12 @@ def install(E,field,word,constword,blob,extents,alignments):
   p.a(('LDX',reg,'nc_key',LAYOUT))
  p.goto('OL.childfields')
  p=field(P('OL.childfields'),4,'nl_cwidth','nl_child');field(p,6,'nl_calign','nl_child').a(('COPYW','ol_node','nl_child')).call('OL.meta').branch({3:'OL.arraylayout'},'OL.entryalign',[('RLD','nl_tag')])
- P('OL.entryalign').branch({1:'OL.kind'},'NC.unsupported',[('C64U','nl_entryalign','nl_calign')])
+ P('OL.entryalign').branch({1:'OL.kind',0:'OL.packedentry'},'NC.unsupported',[('C64U','nl_entryalign','nl_calign')])
+ # Reduced effective alignment: only inside a packed external object, only for ordinary
+ # members; placement and the object's alignment then follow the effective alignment.
+ P('OL.packedentry').branch({1:'OL.packedentrykind'},'NC.unsupported',[('CMPI','ol_packed',1)])
+ P('OL.packedentrykind').branch({(0,4):'OL.packedentryalign'},'NC.unsupported',[('RLD','nl_entrykind')])
+ P('OL.packedentryalign').a(('COPYW','nl_calign','nl_entryalign')).goto('OL.ordinary')
  P('OL.kind').branch({(0,4):'OL.ordinary',(1,2,3):'OL.bitfield'},'NC.unsupported',[('RLD','nl_entrykind')])
  P('OL.arraylayout').branch({1:'OL.ordinary'},'NC.unsupported',[('C64U','nl_stride','nl_cwidth')])
  P('OL.ordinary').a(('ALUI','mul','ol_begin','nl_offset',8),('ALUI','mul','ol_end','nl_cwidth',8),('ALU','add','ol_end','ol_end','ol_begin')).goto('OL.ordinarylayout')
@@ -103,7 +114,13 @@ def install(E,field,word,constword,blob,extents,alignments):
  P('OL.endextent').a(('ALUI','add','ol_expected','nl_cursor',7),('ALUI','div','ol_expected','ol_expected',8),('ALU','add','ol_expected','ol_expected','nl_align'),('ALUI','sub','ol_expected','ol_expected',1),('ALU','div','ol_expected','ol_expected','nl_align'),('ALU','mul','ol_expected','ol_expected','nl_align')).branch({1:'OL.result'},'NC.unsupported',[('C64U','nl_width','ol_expected')])
  P('OL.result').a(('COPYW','nl_mask','nl_accmask'),('COPYW','nl_imask','nl_accint'),('COPYW','nl_fmask','nl_accfp'),('COPYW','nl_blo','nl_accblo'),('COPYW','nl_bhi','nl_accbhi'),('COPYW','nl_anon','nl_accanon'),('COPYW','nl_hfa','nl_acchfa'),('COPYW','nl_hcount','nl_acccount')).ret()
  # V3 aggregates become genuine natural struct carriers, retaining one object.
- P('OL.certify').a(('LDI','nl_level',0),('COPYW','nl_node','nc_node')).call('NL.walk').branch({0:'OL.sysv',1:'OL.arm',2:'OL.gp'},'NC.unsupported',[('RLD','nc_family')])
+ P('OL.certify').a(('LDI','nl_level',0),('COPYW','nl_node','nc_node')).call('NL.walk').branch({1:'OL.family'},'OL.packedfamily',[('CMPI','ol_packed',0)])
+ P('OL.family').branch({0:'OL.sysv',1:'OL.arm',2:'OL.gp'},'NC.unsupported',[('RLD','nc_family')])
+ # Packed objects: AAPCS64 and Win64 copy composites by size, so the carrier is the
+ # declared-alignment integer array (uint8[N] for pack(1)). SysV classifies unaligned
+ # fields as MEMORY, which needs BANK: refused. Any FP leaf inside is refused (HFA open).
+ P('OL.packedfamily').branch({(1,2):'OL.packedfp'},'NC.unsupported',[('RLD','nc_family')])
+ P('OL.packedfp').branch({1:'OL.gp'},'NC.unsupported',[('CMPI','nl_fmask',0)])
  P('OL.sysv').a(('ALUI','and','ol_low','nl_imask',255),('ALUI','and','ol_high','nl_imask',65280),('ALUI','and','ol_anlow','nl_anon',255),('ALUI','and','ol_anhigh','nl_anon',65280)).goto('OL.anonlow')
  P('OL.anonlow').branch({1:'OL.anonhigh'},'OL.anonlowint',[('CMPI','ol_anlow',0)])
  P('OL.anonlowint').branch({1:'NC.policyfail'},'OL.anonhigh',[('CMPI','ol_low',0)])
