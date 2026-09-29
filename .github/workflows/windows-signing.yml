@@ -71,11 +71,18 @@ jobs:
           assert re.fullmatch('[1-9][0-9]*',env['UPSTREAM_RUN_ID']), 'invalid run id'
           assert re.fullmatch('[1-9][0-9]*',env['UPSTREAM_ATTEMPT']), 'invalid attempt'
           assert re.fullmatch('[A-Za-z0-9][A-Za-z0-9._-]{0,99}',env['SEAL_TAG']), 'invalid seal tag'
-          assert env['GITHUB_REF']=='refs/heads/main' and env['GITHUB_SHA']==sha, 'dispatch must use exact main'
+          assert env['GITHUB_REF']=='refs/heads/main', 'dispatch must run on main'
           assert call('git','rev-parse','HEAD').strip()==sha, 'checkout mismatch'
-          assert api(f'repos/{repo}/commits/main')['sha']==sha, 'main moved; reseal/review'
+          # Product source closure, not raw HEAD equality (minicon rule): documentation and
+          # workflow commits after the seal must not force a rebuild or a re-sign.
+          import sys; sys.path.insert(0,'exec/c'); import provenance
+          sealed_closure=provenance.source_digest()
+          call('git','fetch','--no-tags','origin','main')
+          call('git','worktree','add','--detach','../main-tip','origin/main')
+          main_closure=subprocess.run([sys.executable,'-c',"import sys; sys.path.insert(0,'exec/c'); import provenance; print(provenance.source_digest())"],cwd='../main-tip',check=True,capture_output=True,text=True,timeout=45).stdout.strip()
+          assert main_closure==sealed_closure, f'main product closure {main_closure} differs from sealed {sealed_closure}; reseal'
           run=api(f"repos/{repo}/actions/runs/{env['UPSTREAM_RUN_ID']}/attempts/{env['UPSTREAM_ATTEMPT']}")
-          assert run['head_sha']==sha and run['path']=='.github/workflows/ci.yml', 'wrong upstream source/workflow'
+          assert run['head_sha']==sha and run['path']=='.github/workflows/release-check.yml', 'wrong upstream source/workflow (release-check.yml is the release upstream)'
           assert run['id']==int(env['UPSTREAM_RUN_ID']) and run['run_attempt']==int(env['UPSTREAM_ATTEMPT']), 'wrong upstream run/attempt response'
           assert run['status']=='completed' and run['conclusion']=='success', 'upstream failed/incomplete'
           assert run['head_branch']=='main' and run['event'] in ('push','workflow_dispatch'), 'upstream is not main CI'

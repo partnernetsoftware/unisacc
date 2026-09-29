@@ -1,0 +1,111 @@
+name: release-check
+
+# The fast upstream of the release chain (minicon pattern): every push to main gets a
+# bounded source sanity pass plus a run of the exact sealed candidate bytes on two OSes.
+# It finishes in minutes; the full suite matrix (ci.yml) is a scheduled/manual safety net
+# and is NOT a prerequisite for signing. Local gates remain the authority (AGENTS.md).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: plan and partition self-checks
+        run: |
+          python3 tests/bound.py 10 python3 tests/ciplancheck.py
+          python3 tests/bound.py 10 python3 tests/ci_shard_plan.py
+          python3 tests/bound.py 10 python3 tests/opt_partition_check.py
+      - name: construct weights and check every stage
+        run: |
+          python3 tests/bound.py 55 python3 -m unisa build-weights
+          python3 tests/bound.py 55 python3 -m unisa acc
+      - name: the emitted ELF actually runs
+        run: |
+          set -e
+          for e in hello fact fib ptr struct 'do' switch; do
+            python3 tests/bound.py 30 python3 -m unisa compile examples/$e.c -o /tmp/$e --target lnx/x86_64 --drive built
+            chmod +x /tmp/$e
+            got=$(python3 tests/bound.py 8 /tmp/$e); code=$?
+            want=$(python3 tests/bound.py 15 python3 -m unisa run examples/$e.c --target lnx/x86_64 --drive built)
+            echo "  $e -> '$got' (exit $code)"
+            [ "$got" = "$want" ] || { echo "MISMATCH: want '$want'"; exit 1; }
+          done
+      - name: product source closure digest
+        run: |
+          python3 - <<'PY'
+          import sys; sys.path.insert(0,'exec/c'); import provenance
+          print('sources_sha256', provenance.source_digest())
+          PY
+
+  candidate:
+    # Runs the sealed candidate named by release/candidate.json (pushed to GHCR with oras
+    # from the owner's machine after the local gate). Skipped when no candidate is sealed.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: read the sealed candidate reference
+        id: seal
+        shell: bash
+        run: |
+          if [ ! -f release/candidate.json ]; then echo "present=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          ref=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["ref"])')
+          sha=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["unisacc_com_sha256"])')
+          src=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["sources_sha256"])')
+          [[ "$ref" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]] || { echo "candidate ref must be an immutable digest reference: $ref" >&2; exit 1; }
+          [[ "$sha" =~ ^[0-9a-f]{64}$ ]] && [[ "$src" =~ ^[0-9a-f]{64}$ ]]
+          { echo "present=true"; echo "ref=$ref"; echo "sha=$sha"; echo "src=$src"; } >> "$GITHUB_OUTPUT"
+      - name: the sealed source closure is this tree's closure
+        if: steps.seal.outputs.present == 'true'
+        run: |
+          have=$(python3 - <<'PY'
+          import sys; sys.path.insert(0,'exec/c'); import provenance
+          print(provenance.source_digest())
+          PY
+          )
+          [ "$have" = "${{ steps.seal.outputs.src }}" ] || { echo "release/candidate.json names sources_sha256 $have != sealed ${{ steps.seal.outputs.src }}: reseal the candidate" >&2; exit 1; }
+      - uses: oras-project/setup-oras@v1
+        if: steps.seal.outputs.present == 'true'
+      - name: pull the exact candidate bytes by digest
+        if: steps.seal.outputs.present == 'true'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mkdir candidate && oras pull "${{ steps.seal.outputs.ref }}" --output candidate
+          ls -la candidate
+          got=$(shasum -a 256 candidate/unisacc.com | cut -d' ' -f1)
+          [ "$got" = "${{ steps.seal.outputs.sha }}" ] || { echo "candidate bytes differ: $got" >&2; exit 1; }
+          chmod +x candidate/unisacc.com
+      - name: the candidate runs here
+        if: steps.seal.outputs.present == 'true'
+        run: |
+          set -e
+          v=$(python3 tests/bound.py 20 sh candidate/unisacc.com --version); echo "$v"
+          want=$(python3 -c 'import re;print(re.findall(r"\"([0-9.]+)\"",open("src/version.h").read())[0])')
+          [ "$v" = "unisacc $want" ]
+          out=$(python3 tests/bound.py 30 sh candidate/unisacc.com -run examples/hello.c); echo "$out"
+          [ "$out" = "hello from C99" ]
+          for e in fact fib ptr struct switch; do
+            got=$(python3 tests/bound.py 30 sh candidate/unisacc.com -run examples/$e.c)
+            want=$(python3 tests/bound.py 30 python3 -m unisa run examples/$e.c --drive built)
+            [ "$got" = "$want" ] || { echo "MISMATCH $e: '$got' vs '$want'" >&2; exit 1; }
+            echo "  $e ok"
+          done
