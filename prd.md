@@ -43,7 +43,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 | R12-2 libunisacc 引擎能力（R11-1 顺延） | ① “代”对象：image+exports+callables+carrier 按代持有，`us_sym` 返回的句柄可重定向；② `us_eval(ctx, name, source)`：追加单元、重编译成新代、旧代保留到 `us_free`；③ `us_reload`：换代时改写句柄目标，下一次调用走新代；④ `us_opt_verify`：待 FX-1 tape 包格式定稿后做加载前校验（只允许声明过的 syscall 与注入符号）；⑤ 绑定：Python ctypes 示例宿主整理成 `examples/host/`（现有六个门禁已是宿主），Rust crate 示例 ⑥ 内建 `fork`/`exec`/`popen` 系统调用绑定（§5.9 余项；abi.tsv 已有 clone/execve 号，接前端内建名与 libc 声明） | 增量定义后可调用；热替换后下一次调用走新代且旧指针不悬空（ASan）；校验开启时恶意 tape 被拒、合法程序逐字节同；示例宿主在 osx/arm64、Rosetta、lnx/arm64 三处原生跑 |
 | R12-3 Windows 与六平台矩阵（⑥ 顺延 + 平台义务） | ① CI `windows-latest`（MSVC）作业：编译 `windowslibraryfaultnative.c` 五例（null 写、div0、显式 exit、回调内故障、线程内故障）与生命周期探针 `_WIN32` 分支，故障隔离用调用帧内 scoped vectored handler；② 六平台生命周期矩阵驱动 `librarylifecyclematrix.py`，逐格写 JSON（本机 osx/arm64、Rosetta、Lima arm64/x86_64；CI ubuntu、macos、windows）；③ 单架构产物在原生 runner 跑完整套件（GHCR 摘要 + ubuntu x86_64 / macos arm64）；④ `windowslibraryvmcheck.py` 的 powershell 驱动改 cmd 批处理；⑤ 客机残留清理与 `tests/vms.sh` 覆盖 Lima x86_64 | 六格生命周期 JSON 齐全且状态为实跑；Windows 故障五例宿主存活并可继续调用；CI 三平台完整套件绿一次 |
 | R12-4 裁判与账本（证明侧的工程部分） | ① 部署网络定名：给 P3 内 24 个网络稳定名字（阶段×目标/共享），关系账脚本 `package_relations.py` 入库并入门禁；② 33/24 个网络逐一登记裁判归属（参考实现/宿主编译器/测量），`docs.sh` 检查存在性；③ 经典 18 表具名外部裁判从 7 提到 ≥9（scope、irsel、pfconv、binsel 各找一个可命名裁判或明确 offpath）；④ 决策代码行数账本：v0.0.11 与 v0.0.12 各封存一行（手写决策逻辑 vs 表/声明） | 裁判登记表由门禁检查；账本两版数据入 prd |
-| R12-5 表化与容量（自 v0.1.2 提前） | ① 机器码字节模板、Windows argv 宿主模板迁入声明规则，字节账同步；② 容量：静态上限改为可证明的界或动态增长，先建规模门禁（610 MB 数组源码类）；③ 网络包与容器自构造可行性片：“候选 .com 重新打包出逐字节相同的 P3 包” | 迁移前后产物逐字节同；规模门禁有明确上界与失败样例；自打包逐字节相同 |
+| R12-5 表化、容量与推理提速（自 v0.1.2 提前 + FX-6） | ① 机器码字节模板、Windows argv 宿主模板迁入声明规则，字节账同步；② 容量：静态上限改为可证明的界或动态增长，先建规模门禁（610 MB 数组源码类）；③ 网络包与容器自构造可行性片：“候选 .com 重新打包出逐字节相同的 P3 包”；④ **FX-6 可行性片（主人直觉：int32 权重 + SIMD）**：先量化现状——推理在 calc/自编译各阶段的耗时占比（perf/采样）、当前权重与累加宽度、每阶段推理次数；再做一个私有对照内核：同一网络、同一输入，int32 打包权重 + NEON/AVX2 点积（编译器自动向量化优先，必要时内建），输出逐字节相同为前提测时；结论写成“提速 X%/无收益 + 原因”，达标（≥15% 端到端）才进产品路线 | 迁移前后产物逐字节同；规模门禁有明确上界与失败样例；自打包逐字节相同；FX-6 有量化结论与是否进产品的决定 |
 | R12-6 文档、规格与论文 | ① R11-7 目录与文档职责梳理实施：README/ARCHITECTURE/PRD 权威划分，exec/c 职责清单，旧 parse/control 标历史参考；② T3 前置规格文档（C 子集、ABI、未定义/未指定行为清单）；③ 论文 A：图 2、算法 1 运行时间与逐表最优性差距、消融（前缀求值/声明返回/剪枝/trim-libc）、账本首期、参考文献核对 | 任一阶段能从规则追到运行；规格文档可被差分裁判引用；论文数字全部绑定产物身份 |
 | R12-7 发布 0.0.12 | 快链：全量队列 → 重封 → 一次 push → release-check → qualification → company → Apple → 发布；发布说明列出移出局限的项 | push→签完 ≤5 分钟；候选摘要在 GHCR、Release、回执三处一致 |
 
@@ -1253,7 +1253,7 @@ E-编号的已证实/待验证/已证伪/开放问题/复现/先行研究全表�
 
 
 
-### FX-6 推理提速猜想：int32 权重 + SIMD 向量化（用户直觉，2026-09-29 提出并澄清为整型；0.0.11 探索项，待验证，未排期）
+### FX-6 推理提速猜想：int32 权重 + SIMD 向量化（用户直觉，2026-09-29 提出并澄清为整型；已排入 R12-5 ④ 作为有界可行性片）
 
 **用户假设**：权重统一为 32 位整数（int32）、推理改用高级 CPU 向量指令（NEON / AVX2 / AVX-512）做整数向量运算，也许能让推理速度提升一个数量级。（最初记为 f32，用户已澄清是 int32；不涉及浮点。）
 
