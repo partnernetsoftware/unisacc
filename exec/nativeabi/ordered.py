@@ -21,8 +21,12 @@ def install(E,field,word,constword,blob,extents,alignments):
  check('OL.known','ol_known',3,'OL.flags');check('OL.flags','ol_flags',0,'OL.natural')
  P('OL.natural').branch({1:'OL.fpmeta'},'NC.sourcefactsfail',[('C64U','ol_natural','ol_alignment')])
  P('OL.fpmeta').branch({3:'OL.rank'},'OL.return',[('RLD','ol_kind')])
- P('OL.rank').branch({1:'OL.float',2:'OL.double'},'NC.sourcefactsfail',[('RLD','ol_rank')])
+ P('OL.rank').branch({1:'OL.float',2:'OL.double',3:'OL.longdouble'},'NC.sourcefactsfail',[('RLD','ol_rank')])
  check('OL.float','ol_format',1,'OL.return');check('OL.double','ol_format',2,'OL.return')
+ # long double: certified only where the target's long double IS IEEE64 and the
+ # source stored it as F64. x87 and IEEE128 targets reject explicitly: a rank-3
+ # value folded to F64 must never pass there.
+ check('OL.longdouble','ol_format',2,'OL.longdoubletarget');check('OL.longdoubletarget','nc_ldformat',2,'OL.return')
  P('OL.validate').a(('COPYW','ol_node','nl_node')).call('OL.meta').branch({5:'OL.aggregate'},'OL.leaf',[('RLD','nl_kind')])
  P('OL.leaf').call('NL.validate').a(('LDI','nl_anon',0),('LDI','nl_hcount',0),('LDI','nl_blo',0),('LDI','nl_bhi',0),('LDI','ol_begin',0),('ALUI','mul','ol_end','nl_width',8)).call('OL.interval').a(('COPYW','nl_blo','ol_lo'),('COPYW','nl_bhi','ol_hi')).branch({3:'OL.leafhfa'},'OL.return',[('RLD','nl_kind')])
  P('OL.leafhfa').a(('LDI','nl_hcount',1)).ret()

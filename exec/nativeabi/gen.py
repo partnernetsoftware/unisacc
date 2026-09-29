@@ -30,6 +30,9 @@ def install(E):
  profiles={r['profile'] for r in rows}
  assert profiles=={f'{os}/{arch}' for os in ('osx','lnx','win') for arch in ('arm64','x86_64')} and len(rows)==6
  policy={r['profile']:(int(r['integer_min_width']),int(r['homogeneous_fp_carrier_kind'])) for r in rows}
+ # Target long double representation: 2 IEEE64 (Apple arm64, Windows), 3 x87 80-bit, 4 IEEE128 (Linux arm64).
+ ldformat={r['profile']:int(r['long_double_format']) for r in rows}
+ assert set(ldformat.values())<={2,3,4}
  assert all(r['rule']=='natural_scalar_union_v2' and int(r['mixed_width'])==8 for r in rows)
  assert all(lo in (1,8) and fp in (1,3) for lo,fp in policy.values())
  def word(p,r):return p.a(('COPYW','ms_value',r)).call('MS.write64')
@@ -48,7 +51,7 @@ def install(E):
  names={p:'NC.profile'+('' if not p else '.'+p.hex()) for p in prefixes}
  for prefix in sorted(prefixes):
   if prefix.decode() in profiles:
-   P(names[prefix]).a(('LDI','nc_intminimum',policy[prefix.decode()][0]),('LDI','nc_fpcarrier',policy[prefix.decode()][1]),('LDI','nc_family',int(next(r['family'] for r in rows if r['profile']==prefix.decode()))),('MARK','nc_pos')).branch({1:'NC.profileok'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
+   P(names[prefix]).a(('LDI','nc_intminimum',policy[prefix.decode()][0]),('LDI','nc_fpcarrier',policy[prefix.decode()][1]),('LDI','nc_ldformat',ldformat[prefix.decode()]),('LDI','nc_family',int(next(r['family'] for r in rows if r['profile']==prefix.decode()))),('MARK','nc_pos')).branch({1:'NC.profileok'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
   else:
    choices={p[len(prefix)]:names[p] for p in prefixes if len(p)==len(prefix)+1 and p.startswith(prefix)}
    P(names[prefix]).a(('MARK','nc_pos')).branch({0:names[prefix]+'.read'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
