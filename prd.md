@@ -1421,6 +1421,10 @@ procview/winlayout/memmap/exeinfo 当时的逐目标实跑回报已归档（[归
 4. `sysctl`、窗口系统绑定排在后面，工作量更大。
 5. 一个后台代理（opus，独立 git worktree，不碰 cdx-unisacc 正在用的工作树）已按此清单第 1、2 项开工，见 §6 或后续记录其结果；这两项不必等 cdx-unisacc 手上的大任务腾出手再做。
 
+### 5.10 bit-field 存储单元宽度错误（2026-09-27 发现；已修复）
+
+2026-09-29 复验：最小复现 `struct a{unsigned short r:5,g:6,b:5;}` / `struct b{unsigned char x:3,y:3;}` / `struct c{unsigned r:5,g:6,b:5;}` 的 `sizeof` 在 cc 与 `unisacc.com -run` 下均为 2 1 4；`examples/apps/colorpack.c` 输出逐字节相同。原巡查记录见 [归档](archive/prd-r9-r10-receipts-20260929.md#5-10)。
+
 ## 6. 实验发现 [E] —— 面向论文
 
 本章随实现推进累积。**只记实测，不记预期**；每条含可复现命令，供论文直接引用。
@@ -2293,10 +2297,6 @@ ACAS Xu 那条线已经走完一整个循环：Julian et al.（DASC'16）用 45 
 - **最小实验（≤1 天）**：1) 剖面：`calc.c` 与 `unisacc.c` 自源在 `-run` 下拆出“网络求值 / 动作执行 / 系统调用”三段占比；2) 只对第二层 int32 累加与 argmax 写 NEON 版（arm64），装载时展开为 int32 数组，全域 net=table 不变，同机五次中位对比；3) 若推理段占比 < 30%，此猜想在当前结构下上限约 1.4 倍，记录后关闭；若 > 60%，再评估 x86 AVX2/SSE2 分发与包体代价。
 
 **结论状态**：用户直觉假设，方向合理（int32 权重 + SIMD 与现有整数内核同向，值得一测）；进入 0.0.11 探索区，按最小实验决定是否立项。
-
-### 5.10 bit-field 存储单元宽度错误（2026-09-27 发现；已修复）
-
-2026-09-29 复验：最小复现 `struct a{unsigned short r:5,g:6,b:5;}` / `struct b{unsigned char x:3,y:3;}` / `struct c{unsigned r:5,g:6,b:5;}` 的 `sizeof` 在 cc 与 `unisacc.com -run` 下均为 2 1 4；`examples/apps/colorpack.c` 输出逐字节相同。原巡查记录见 [归档](archive/prd-r9-r10-receipts-20260929.md#5-10)。
 
 ## 7. 附录
 
