@@ -15,6 +15,7 @@ Unsupported forms are rejected explicitly. Coverage is recorded in the
 fixed probe lists and prd.md, not inferred from the presence of a rule.
 """
 import json
+from libraryexports import TYPERANK, MEMBERRANK, RETURNRANK, PARAMRANK
 import os
 import re
 import sys
@@ -393,7 +394,7 @@ def types():
     for word, value in TYPEW.items():
         p = P("TS." + word)
         structured_control("type-word", False, dict(word_state=p.cur, word_return=p.fresh("r"),
-                           type_value=value, word_follow=follows.get(word, follows["*"])))
+                           type_value=value, type_rank_value=(1 if word=='type=float' else 2 if word=='type=double' else 0), word_follow=follows.get(word, follows["*"])))
     structured_control("type-tail", False)
     install_rules(g, os.path.dirname(__file__), "scalar-prefix", section="long-double",
                   bindings=dict(DBL=DBL), classes=dict(double=[TK["type=double"]]))
@@ -401,7 +402,7 @@ def types():
 
 def shape_control(section):
     bindings = {name: globals()[name] for name in
-                ("POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE")}
+                ("POSSPAN", "SHAPE", "SHAPE_IDS", "DIM", "TDIM", "MEMBER_STRIDE", "TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK")}
     bindings.update(ARR=E.ARR, UNSIGNED_CHAR=UNS + 1)
     p = P("shape." + section)
     for part, owner, kind, name in tape_rows("shape-fresh.tsv"):
@@ -421,7 +422,7 @@ def shape_control(section):
 def structured_control(section, warnings, extra=None, sequence_bindings=None):
     section += "-warnings" if warnings and section in ("block", "if") else ""
     p = P("control." + section + (extra or {}).get("word_state", ""))
-    bindings = dict(SHAPE=SHAPE, VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
+    bindings = dict(TYPERANK=TYPERANK, MEMBERRANK=MEMBERRANK, RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK, SHAPE=SHAPE, VLDEP=VLDEP, CSV=CSV, CSL=CSL, U32M=U32M, DIM=DIM, TDIM=TDIM, FPB=FPB, FPV=FPV,
                     UNSIGNED_INT=UNS + 4, UNSIGNED_LONG=UNS + 8,
                     statement="STMT.body" if warnings else "STMT")
     bindings.update((name, globals()[name]) for name in

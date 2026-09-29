@@ -3,6 +3,7 @@ The host receives only final length-framed declarations; no source decisions.
 """
 SITEFN,SITEBIND,COUNT,DEPTH,BASE,SHAPE,NAMES,REQUESTS=(i<<40 for i in range(400,408))
 def install(E,P,b,integers):
+    from libraryexports import RETURNRANK, PARAMRANK
     from libraryimports import BYNAME,FORMAT,IDS,PLAN,DISPATCH,CANON,RETKIND,RETWIDTH,SUPPORTED,NAMES as IMPORTNAMES
     from unresolved import DEFINED
     from libraryexports import SIGEPOCH
@@ -63,10 +64,10 @@ def install(E,P,b,integers):
     P('LV.native').a(('LDX','lx_sig','li_id',b['FPS_FN']),('LDX','lx_nameblob','li_i',IMPORTNAMES)).call('LX.signature').a(('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',libraryimports.TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.equal').branch({1:'LV.signature'},'LI.fail',[('CMPI','mg_equal',1)])
     p=P('LV.signature').a(('LDX','lv_total','lv_iter',COUNT),('LDX','lv_fixed','lx_sig',b['FPS_COUNT']),('LDI','lx_supported',1),('LDI','lx_recursion',0),('LDI','lx_nodes',0),('OCUT','lv_old','lx_zero')).call('LX.support').call('LCG.begin').call('LX.magic').a(('LDI','lx_v',1)).call('LX.u64').a(('LDX','lv_realname','li_i',IMPORTNAMES),('BLEN','lx_v','lv_realname')).call('LX.u64')
     blob(p,'lv_realname').a(('OUTW','lx_zero'),('LDI','lv_one',1),('OUTW','lv_one'),('OUTW','lx_zero'),('OUTW','lv_one'))
-    u(p,'lv_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
+    u(p,'lv_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_rank','lx_sig',RETURNRANK),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
     u(p,'lv_total').a(('LDI','lv_arg',0),('LDI','lx_return',0)).goto('LV.sigarg')
     P('LV.sigarg').branch({1:'LV.sigend'},'LV.sigargout',[('CMP','lv_arg','lv_total')])
-    P('LV.sigargout').a(('ALUI','mul','lv_index','lv_iter',1024),('ALU','add','lv_index','lv_index','lv_arg'),('LDX','lx_depth','lv_index',DEPTH),('LDX','lx_base','lv_index',BASE),('LDX','lx_shape','lv_index',SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lv_arg','lv_arg',1)).goto('LV.sigarg')
+    P('LV.sigargout').a(('ALUI','mul','lv_index','lv_iter',1024),('ALU','add','lv_index','lv_index','lv_arg'),('LDX','lx_depth','lv_index',DEPTH),('LDX','lx_base','lv_index',BASE),('LDI','lx_rank',0),('LDX','lx_shape','lv_index',SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lv_arg','lv_arg',1)).goto('LV.sigarg')
     P('LV.sigend').a(('OUTW','lx_supported')).branch({1:'LV.request'},'LI.fail',[('CMPI','lx_supported',1)])
     p=P('LV.request').a(('OCUT','lv_signature','lx_zero'),('BLEN','lv_siglen','lv_signature'),('ALUI','add','lx_v','lv_siglen',32)).call('LX.u64')
     u(p,'lv_iter').a(('LDX','lv_template','li_i',PLAN));u(p,'lv_template');u(p,'lv_fixed');u(p,'lv_siglen');blob(p,'lv_signature').a(('OCUT','lv_request','lx_zero'),('STX','lv_requests',REQUESTS,'lv_request'),('ALUI','add','lv_requests','lv_requests',1));blob(p,'lv_old').a(('LDX','li_name','lv_iter',NAMES),('LDX','li_argc','lv_iter',COUNT),('LDX','li_retclass','li_i',RETKIND),('LDX','li_retwidth','li_i',RETWIDTH),('LDI','li_sourcemode',1)).goto('LI.typedemit')

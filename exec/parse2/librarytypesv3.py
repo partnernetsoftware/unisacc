@@ -4,6 +4,7 @@ remain explicitly unknown. V2 actions and wire remain the default path.
 """
 def install(E,P,b,frame,blob):
     import layoutfacts as LF
+    from libraryexports import MEMBERRANK
     import gen2
     g=E.g
     def select(name,v3):
@@ -24,7 +25,7 @@ def install(E,P,b,frame,blob):
     for bank in (LF.ALIGN,LF.OFFSET,LF.BITOFFSET,LF.BITWIDTH,LF.STORAGE):
         p.a(('LDX','lx_v','d_key',bank)).call('LX.u64')
     frame(p,'STX')
-    p.a(('LDX','lx_depth','d_key',LF.DEPTH),('LDX','lx_base','d_key',LF.BASE),
+    p.a(('LDX','d_memberkey','d_key',LF.MEMBER),('LDX','lx_rank','d_memberkey',MEMBERRANK),('LDX','lx_depth','d_key',LF.DEPTH),('LDX','lx_base','d_key',LF.BASE),
         ('LDX','lx_shape','d_key',LF.SHAPE),('LDX','lx_array','d_key',LF.ARRAY),
         ('LDX','lx_arraybytes','d_key',LF.STORAGE),('LDI','lx_arraydimension',0),('LDI','lx_return',0)).call('LX.descriptor')
     frame(p,'LDX').a(('ALUI','add','d_i','d_i',1)).goto('L3.members')
@@ -40,14 +41,15 @@ def install(E,P,b,frame,blob):
     select('LTY.arraypayload','L3.arraypayload')
     p=P('L3.arraypayload');word(p,'d_array');word(p,'d_stride')
     frame(p,'STX')
-    p.a(('COPYW','lx_depth','d_depth'),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),('COPYW','lx_arraybytes','d_stride'),('ALUI','add','lx_arraydimension','d_dim',1),('LDI','lx_array',0),('LDI','lx_return',0)).branch({0:'L3.arraymore'},'L3.arraychild',[('CMP','lx_arraydimension','d_rank')])
+    p.a(('COPYW','lx_rank','d_fprank'),('COPYW','lx_depth','d_depth'),('COPYW','lx_base','d_base'),('COPYW','lx_shape','d_shape'),('COPYW','lx_arraybytes','d_stride'),('ALUI','add','lx_arraydimension','d_dim',1),('LDI','lx_array',0),('LDI','lx_return',0)).branch({0:'L3.arraymore'},'L3.arraychild',[('CMP','lx_arraydimension','d_rank')])
     P('L3.arraymore').a(('LDI','lx_array',1)).goto('L3.arraychild')
     p=P('L3.arraychild').call('LX.descriptor');frame(p,'LDX').goto('LTY.out')
     select('LTY.out','L3.out')
     p=P('L3.out').a(('OCUT','d_payload','lx_zero'))
     for r in ('d_depth','d_base','d_shape','d_class','d_width','d_unsigned','d_align'):word(p,r)
-    p.a(('OUTW','lx_zero'),('LDI','d_format',0)).branch({1:'L3.fpformat'},'L3.facts',[('CMPI','d_class',3)])
-    P('L3.fpformat').branch({4:'L3.fp32',8:'L3.fp64'},'LX.fail',[('RLD','d_width')])
+    p.a(('LDI','d_format',0)).branch({1:'L3.fpformat'},'L3.nonfp',[('CMPI','d_class',3)])
+    P('L3.fpformat').a(('OUTW','d_fprank')).branch({4:'L3.fp32',8:'L3.fp64'},'LX.fail',[('RLD','d_width')])
+    P('L3.nonfp').a(('OUTW','lx_zero')).goto('L3.facts')
     P('L3.fp32').a(('LDI','d_format',1)).goto('L3.facts')
     P('L3.fp64').a(('LDI','d_format',2)).goto('L3.facts')
     p=P('L3.facts').a(('OUTW','d_format'),('LDI','lx_v',0)).call('LX.u64').a(('OUTW','lx_zero'),('OUTW','lx_zero'),('OUTW','lx_zero'),('OUTW','d_tag'),('BLEN','lx_v','d_payload')).call('LX.u64')

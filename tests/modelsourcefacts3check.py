@@ -58,7 +58,7 @@ def decode(data):
 
 def oracle(records):
  def facts(d):
-  f=d['fields'];assert d['facts']==(0,1 if f[3]==3 and f[4]==4 else 2 if f[3]==3 and f[4]==8 else 0,0,0,0,0)
+  f=d['fields'];rank=1 if f[3]==3 and f[4]==4 else 2 if f[3]==3 and f[4]==8 else 0;assert d['facts']==(rank,rank,0,0,0,0)
  def primitive(d,kind,width,align,uns=0,depth=0):
   facts(d);assert d['fields'][0]==depth and d['fields'][3:]==(kind,width,uns,align) and d['tag']==0,d
  def record(d,width,align,tag,entries):

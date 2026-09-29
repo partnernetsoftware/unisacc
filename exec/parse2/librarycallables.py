@@ -6,6 +6,7 @@ SIGKEY,SIGLIST,FNSEEN,FNNAME,FNSIG,FNID=(i<<40 for i in range(440,446))
 assert not set(range(440,446)) & (set(range(72,83))|set(range(300,358))|set(range(400,438)))
 SITE_SIG,SITE_KEY,SITE_FIXED,SITE_COUNT,SITE_DEPTH,SITE_BASE,SITE_SHAPE=(i<<40 for i in range(460,467))
 def install(E,P,b,start):
+ from libraryexports import RETURNRANK, PARAMRANK
  from modelinput import u64
  from libraryimports import BYNAME,ADDRESS
  from libraryvariadic import REQUESTS
@@ -109,10 +110,10 @@ def install(E,P,b,start):
  P('LC.sitescount').a(('COPYW','lx_v','lc_sites')).call('LX.u64').a(('LDI','lc_iter',1)).goto('LC.siteloop')
  P('LC.siteloop').branch({2:'LC.envelope'},'LC.sitesignature',[('CMP','lc_iter','lc_sites')])
  p=P('LC.sitesignature').a(('LDX','lx_sig','lc_iter',SITE_SIG),('LDX','lc_total','lc_iter',SITE_COUNT),('LDX','lc_fixed','lc_iter',SITE_FIXED),('LDI','lx_supported',1),('LDI','lx_recursion',0),('LDI','lx_nodes',0),('OCUT','lc_old','lx_zero')).call('LX.support').call('LCG.begin').call('LX.magic').a(('LDI','lx_v',1)).call('LX.u64').a(('LDI','lx_v',8)).call('LX.u64').o('callable').a(('OUTW','lx_zero'),('LDI','lc_one',1),('OUTW','lc_one'),('OUTW','lx_zero'),('OUTW','lc_one'))
- u(p,'lc_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
+ u(p,'lc_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_rank','lx_sig',RETURNRANK),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
  u(p,'lc_total').a(('LDI','lc_arg',0),('LDI','lx_return',0)).goto('LC.sitearg')
  P('LC.sitearg').branch({1:'LC.siteend'},'LC.siteargout',[('CMP','lc_arg','lc_total')])
- P('LC.siteargout').a(('ALUI','mul','lc_index','lc_iter',1024),('ALU','add','lc_index','lc_index','lc_arg'),('LDX','lx_depth','lc_index',SITE_DEPTH),('LDX','lx_base','lc_index',SITE_BASE),('LDX','lx_shape','lc_index',SITE_SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lc_arg','lc_arg',1)).goto('LC.sitearg')
+ P('LC.siteargout').a(('ALUI','mul','lc_index','lc_iter',1024),('ALU','add','lc_index','lc_index','lc_arg'),('LDX','lx_depth','lc_index',SITE_DEPTH),('LDX','lx_base','lc_index',SITE_BASE),('LDI','lx_rank',0),('LDX','lx_shape','lc_index',SITE_SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lc_arg','lc_arg',1)).goto('LC.sitearg')
  P('LC.siteend').a(('OUTW','lx_supported'),('OCUT','lc_signature','lx_zero'),('BLEN','lc_siglen','lc_signature')).goto('LC.siterestore')
  blob(P('LC.siterestore'),'lc_old').a(('ALUI','add','lx_v','lc_siglen',32)).call('LX.u64').goto('LC.siterecord')
  p=P('LC.siterecord');u(p,'lc_iter').a(('LDX','lc_key','lc_iter',SITE_KEY));u(p,'lc_key');u(p,'lc_fixed');u(p,'lc_siglen');blob(p,'lc_signature').a(('ALUI','add','lc_iter','lc_iter',1)).goto('LC.siteloop')
