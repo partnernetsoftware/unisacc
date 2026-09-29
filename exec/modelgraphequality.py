@@ -1,5 +1,6 @@
 """Bounded semantic USLSIG2/3 graph equality in ordinary model actions.
 MG.equal: mg_left_blob/mg_left_len, mg_right_blob/mg_right_len -> mg_equal.
+MG.compatible: same inputs/output; complete source/external origins may differ.
 Canonical validation precedes indexing. Top-level mode is excluded by the old
 contract; nested modes and every ABI layout fact remain significant. No host
 parser, graph isomorphism or callback execution. Budget exhaustion rejects.
@@ -24,7 +25,9 @@ def install(E,fail='DEAD'):
  regs=('mg_node','mg_i','mg_count','mg_end','mg_id','mg_tag','mg_attr','mg_payload','mg_top')
  P('MG.fail').a(E.rej('not covered: signature graph equality budget')).goto(fail)
  P('MG.return').ret()
- P('MG.equal').a(('COPYW','ms_blob','mg_left_blob'),('COPYW','ms_len','mg_left_len')).call('MS.canonical').a(('COPYW','mg_left_canon','ms_canon'),('COPYW','mg_left_canonlen','ms_canonlen'),('COPYW','mg_left_version','ms_version'),('COPYW','ms_blob','mg_right_blob'),('COPYW','ms_len','mg_right_len')).call('MS.canonical').a(('COPYW','mg_right_canon','ms_canon'),('COPYW','mg_right_canonlen','ms_canonlen'),('COPYW','mg_right_version','ms_version'),('COPYW','mg_version','mg_left_version'),('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','mg_left_canon'),('COPYW','ms_limit','mg_left_canonlen')).call('MG.root').a(('COPYW','mg_left_root','mg_lastnode'),('INPOP',),('COPYW','mg_version','mg_right_version'),('LDI','mg_side',1),('LDI','mg_base',32768),('LDI','mg_next',0),('INPUSH','mg_right_canon'),('COPYW','ms_limit','mg_right_canonlen')).call('MG.root').a(('COPYW','mg_right_root','mg_lastnode'),('INPOP',),('ALUI','add','mg_epoch','mg_epoch',1),('LDI','mg_head',0),('LDI','mg_tail',0),('COPYW','mg_l','mg_left_root'),('COPYW','mg_r','mg_right_root')).call('MG.enqueue').goto('MG.queue')
+ P('MG.equal').a(('LDI','mg_compatmode',0)).goto('MG.compare')
+ P('MG.compatible').a(('LDI','mg_compatmode',1)).goto('MG.compare')
+ P('MG.compare').a(('COPYW','ms_blob','mg_left_blob'),('COPYW','ms_len','mg_left_len')).call('MS.canonical').a(('COPYW','mg_left_canon','ms_canon'),('COPYW','mg_left_canonlen','ms_canonlen'),('COPYW','mg_left_version','ms_version'),('COPYW','ms_blob','mg_right_blob'),('COPYW','ms_len','mg_right_len')).call('MS.canonical').a(('COPYW','mg_right_canon','ms_canon'),('COPYW','mg_right_canonlen','ms_canonlen'),('COPYW','mg_right_version','ms_version'),('COPYW','mg_version','mg_left_version'),('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','mg_left_canon'),('COPYW','ms_limit','mg_left_canonlen')).call('MG.root').a(('COPYW','mg_left_root','mg_lastnode'),('INPOP',),('COPYW','mg_version','mg_right_version'),('LDI','mg_side',1),('LDI','mg_base',32768),('LDI','mg_next',0),('INPUSH','mg_right_canon'),('COPYW','ms_limit','mg_right_canonlen')).call('MG.root').a(('COPYW','mg_right_root','mg_lastnode'),('INPOP',),('ALUI','add','mg_epoch','mg_epoch',1),('LDI','mg_head',0),('LDI','mg_tail',0),('COPYW','mg_l','mg_left_root'),('COPYW','mg_r','mg_right_root')).call('MG.enqueue').goto('MG.queue')
  P('MG.new').a(('ALUI','add','mg_next','mg_next',1)).branch({2:'MG.fail'},'MG.newclear',[('CMPI','mg_next',17409)])
  P('MG.newclear').a(('ALU','add','mg_node','mg_base','mg_next'),('LDI','mg_clear',0),('LDI','mg_zero',0)).goto('MG.clear')
  P('MG.clear').a(('ALUI','mul','mg_key','mg_node',16),('ALU','add','mg_key','mg_key','mg_clear'),('STX','mg_key',FIELDS,'mg_zero'),('ALUI','add','mg_clear','mg_clear',1)).branch({1:'MG.extraclearstart'},'MG.clear',[('CMPI','mg_clear',16)])
@@ -79,7 +82,15 @@ def install(E,fail='DEAD'):
  P('MG.fieldnext').a(('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.skipids',11:'MG.extracomparestart'},'MG.fields',[('RLD','mg_field')])
  P('MG.skipids').a(('LDI','mg_field',3)).goto('MG.fields')
  P('MG.extracomparestart').a(('LDI','mg_field',0)).goto('MG.extrafields')
- P('MG.extrafields').a(('ALUI','mul','mg_key','mg_l',8),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_a','mg_key',EXTRA),('ALUI','mul','mg_key','mg_r',8),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_b','mg_key',EXTRA)).branch({1:'MG.extrafieldnext'},'MG.no',[('C64U','mg_a','mg_b')])
+ P('MG.extrafields').a(('ALUI','mul','mg_key','mg_l',8),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_a','mg_key',EXTRA),('ALUI','mul','mg_key','mg_r',8),('ALU','add','mg_key','mg_key','mg_field'),('LDX','mg_b','mg_key',EXTRA)).branch({1:'MG.extrafieldnext'},'MG.originmode',[('C64U','mg_a','mg_b')])
+ # The sole compatibility relaxation is descriptor origin1 <-> origin2,
+ # after version and all preceding metadata (including known_mask) matched.
+ # Signature nodes have zero extras; no unknown/incomplete node can bridge.
+ P('MG.originmode').branch({1:'MG.originfield'},'MG.no',[('CMPI','mg_compatmode',1)])
+ P('MG.originfield').branch({1:'MG.originknown'},'MG.no',[('CMPI','mg_field',6)])
+ P('MG.originknown').a(('ALUI','mul','mg_key','mg_l',8),('ALUI','add','mg_key','mg_key',5),('LDX','mg_known','mg_key',EXTRA)).branch({1:'MG.originleft'},'MG.no',[('CMPI','mg_known',3)])
+ P('MG.originleft').branch({(1,2):'MG.originright'},'MG.no',[('RLD','mg_a')])
+ P('MG.originright').branch({(1,2):'MG.extrafieldnext'},'MG.no',[('RLD','mg_b')])
  P('MG.extrafieldnext').a(('ALUI','add','mg_field','mg_field',1)).branch({1:'MG.edgesstart'},'MG.extrafields',[('CMPI','mg_field',7)])
  P('MG.edgesstart').a(('COPYW','mg_pairleft','mg_l'),('COPYW','mg_pairright','mg_r'),('ALUI','mul','mg_key','mg_l',16),('ALUI','add','mg_key','mg_key',10),('LDX','mg_edges','mg_key',FIELDS),('LDI','mg_edge',0),('ALUI','sub','mg_key','mg_key',3),('LDX','mg_pairtag','mg_key',FIELDS)).goto('MG.edgesloop')
  eq('MG.edgesloop','mg_edge','mg_edges','MG.queue','MG.edgecompare')

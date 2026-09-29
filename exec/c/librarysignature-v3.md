@@ -53,3 +53,16 @@ The public source qualification currently measures B4/B8/DB16 calls on macOS
 ARM and qualified libffi 3.5.2 x86 at O0/O1/O2. It does not establish packed,
 wide floating point, BANK, source/import cross-origin refinement or six-platform
 qualification. Fixtures and framing checks are separate from actual calls.
+
+## Import declaration compatibility
+
+`MG.equal` remains strict graph identity. `MG.compatible` is a separate model
+operation for named typed imports: it compares every type/layout/rank/format
+fact and nested callback graph, allowing only complete known-mask-3 origin-1
+versus origin-2 provenance. Origin 0, differing versions and differing layouts
+do not bridge. The host retains strict graph comparisons and the original
+external declaration; this operation does not change either graph's origin.
+Fixed direct calls without callback parameters use the selected frozen plan.
+Taking a native function address, callback arguments/results and V3 variadic
+imports still require a model-issued alias certificate; fixed-call success is
+not evidence that these paths have been completed.

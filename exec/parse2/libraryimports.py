@@ -134,7 +134,7 @@ def install(E,P,b,start,integers):
     P('LI.importargc').a(('LDX','li_argc','li_i',ARGC),('LDX','li_format','li_i',FORMAT)).branch({1:'LI.typedprototype'},'LI.legacyargc',[('CMPI','li_format',1)])
     P('LI.legacyargc').branch({2:'LI.fail'},'LI.prototype',[('LDI','li_cmpmax',6),('C64U','li_argc','li_cmpmax')])
     P('LI.typedprototype').a(('LDX','lx_sig','li_id',b['FPS_FN']),('LDX','lx_nameblob','li_i',NAMES)).branch({1:'LI.fail'},'LI.typedsource',[('CMPI','lx_sig',0)])
-    P('LI.typedsource').call('LX.signature').a(('COPYW','ms_blob','lx_sigblob'),('BLEN','ms_len','lx_sigblob')).call('MS.canonical').a(('COPYW','li_sourcemode','ms_mode'),('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.equal').branch({1:'LI.typedemit'},'LI.fail',[('CMPI','mg_equal',1)])
+    P('LI.typedsource').call('LX.signature').a(('COPYW','ms_blob','lx_sigblob'),('BLEN','ms_len','lx_sigblob')).call('MS.canonical').a(('COPYW','li_sourcemode','ms_mode'),('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.compatible').branch({1:'LI.typedemit'},'LI.fail',[('CMPI','mg_equal',1)])
     P('LI.prototype').a(('LDX','li_sig','li_id',b['FPS_FN']),('LDX','li_argc','li_i',ARGC)).branch({1:'LI.fail'},'LI.variadiccheck',[('CMPI','li_sig',0)])
     P('LI.variadiccheck').a(('LDX','li_var','li_id',E.VAR)).branch({1:'LI.countmatch'},'LI.fail',[('CMPI','li_var',0)])
     P('LI.countmatch').a(('LDX','li_n','li_sig',b['FPS_COUNT'])).branch({1:'LI.return'},'LI.fail',[('CMP','li_n','li_argc')])
