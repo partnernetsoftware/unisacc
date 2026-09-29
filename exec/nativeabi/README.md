@@ -89,7 +89,9 @@ On Windows x64 small aggregates use extent-based integer passing and larger
 aggregates remain indirect; original and carrier extents are identical.
 Fixed callback descriptors remain pointer-sized and their signature graphs are
 certified recursively. These arguments do not cover arbitrary packed layouts,
-bitfields, vector types, variadics or the pending general16-byte union recipe.
+bitfields, vector types or variadics. Natural fully occupied16-byte unions are
+qualified in the following section; that does not establish arbitrary padded,
+packed or over-aligned16-byte unions.
 They are model-domain proofs, not all-platform native qualification.
 
 ## Natural16-byte union domain

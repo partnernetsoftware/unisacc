@@ -66,11 +66,11 @@
 
 **目标与基线**：以已发布 v0.0.9 / `a606ff4` 为基线，保持统一 `.com` 为主产品，优先补齐干净机器 CI 与 Windows 企业签名，再推进网络复用、单目标副产品及进程内库。沿用“表 → 构造确定性网络 → 通用执行器”的路线；不新增训练或另写一套编译逻辑。0.0.9 的193项本地通过不代表其 GitHub CI 通过。
 
-**当前进度（2026-09-29，26def90）**：七项交付未全部闭合。CI分片/共享准备、源码权重布局、共享E2已落地；远端CI与最终全门禁待证。六单目标曾私有交叉构建，最终平台验收未完成，单目标驱动尚未改为libunisacc+main。macOS ARM正式静态/动态库消费、上下文隔离、无main模块、GP原生导出、宿主函数注入/同步嵌套回调/exit恢复已实跑；本批整数/普通指针可写数据注入O0/O1/O2四上下文实际读写通过。候选完整重构并核源为0dadf387/1,039,038 B；首验12门禁11通过、1000循环原RSS判据失败已保留。分域实证后改为macOS全zone live/owned映射裁判（不称RSS零增长）；9332cb8冻结测试树的12项受影响门禁全部通过，Linux旧RSS判据与各平台库验收仍待。Windows两ISA桥只有交叉与模拟证据；resolver链、扩展ABI、六平台库、库+main单目标CLI、最终平台/CI/企业签名与发布仍待。根开发产物同步该真实候选，版本资源仍0.0.9，不是0.0.10发布物。
+**当前进度（2026-09-29，4112f14）**：七项交付未全部闭合。当前根开发产物1,116,367 B，SHA256 `6f1293ba9f2f64a726bd35acf76e60d5087e39a6461585313c79e3881ce39037`；版本资源仍0.0.9，不是0.0.10发布物。部署24个物理网络及1088条路由，全部网络与保留表全域一致；nativeabi有1332态、343400个观测及310项独立图裁判。无main模块、上下文隔离、递归callback图、具体variadic调用、自然复合体与完全占用16B union载体已分项实现。自然16B union真实双向ABI资格：macOS ARM与Rosetta x86共144变体，43200次native调用、21600次SCRIPT callback；正式受影响28项门禁通过，不冒称最终全套发布验收。macOS x86系统libffi的混合返回缺陷独立保留，正式库选择带身份校验与实际调用资格检查的官方3.5.2依赖。详情见[当前候选证据](research/r10-union16-candidate-evidence.json)和[合格依赖下的原生矩阵](research/r10-union16-qualified-public-evidence.json)。Linux ARM自然复合体、Windows两ISA DLL基础API已有独立记录，不能替代当前候选的六平台完整ABI/生命周期验收。六个libunisacc+main副产品、完整位域与宽FP/BANK域、Windows SEH、最终CI/企业签名与发布仍未完成。
 
-**R10 库格式边界修复（2026-09-29）**：新候选的lib-context在多单元O1检查明确失败：E3输出的USLTAPE1封装被E4当普通tape优化，tape缩短20字节而封装长度未更新。单单元O0、实际100次运行、CLI/C99检查仍通过；这些不能覆盖O1/O2库路径。修复决定：通用路由增加显式结束阶段边界，库先运行到E3、按有界格式拆出签名与tape，再仅把tape送进现有E4网络；C不做优化或编译决策，普通CLI路由不变。修复后lib-context多单元O0/O1/O2对拍、四线程、include目录与错误恢复实际通过；最新C适配器尚需重新装配根候选并跑完整门禁，原72bff5ea候选不能代表该修复后的驱动身份。
+**已闭合的库格式与callable接入（历史状态校准）**：早期多单元O1把USLTAPE1封装送入E4的问题已修：库在E3边界拆出签名和tape，仅把tape交给E4。library/module资源允许无main、可返回初始化；us_sym与宿主注入通过模型认证载体和原生闭包接入SCRIPT，原图保持身份和逻辑参数数量，载体图只负责原生ABI。原有失败与修复证据保留；早期“下一片待接入”的描述不再作为当前状态。
 
-**R10 callable/module 下一片决定**：继续并行补齐库API。显式library/module资源驱动E3允许无main、输出可返回的初始化函数，并让lower禁用程序入口兜底；默认程序路线保持不变。宿主的us_sym将按模型USLSIG1签名构造libffi原生ABI闭包，闭包经已有两ISA软栈调用桥进入脚本，不直接返回raw代码地址。初始化按映射世代一次，错误/exit在当前调用帧返回；函数指针生命周期绑定上下文。原生libffi两ISA混宽整数/指针/void smoke已通过，模型编译导出闭环尚待实施验证；FP/聚合/variadic/>6及symbol注入仍列为剩余，不缩减R10范围。
+**位域下一步决定（2026-09-29）**：完整位域ABI继续属于R10，不缩减为少数布局。先保全源码事实：USLSIG2仅有named成员，匿名位域和zero-width barrier在BF.padding路径被丢弃，不能从自然offset猜测完整声明。需要版本化的ordered布局事实（ordinary/named/anonymous/barrier、声明unit、有效alignment、packing与完整性），旧V2继续保持原字节和拒绝边界。分类扩展现有递归NL：实际bit占用与storage unit extent分开，按目标事实检查布局并生成普通carrier；所有ABI分类仍在模型，不加C分类器。callback-free对象由认证后的机械COPY处理；包含callback对象的位域复合体需显式转换边，不盲拷贝。独立先验控制已实跑14类×3种压力×2个macOS ISA，共8400次native及8400次closure调用；它们不是产品已支持证据。原始命令、ASan/UBSan结果、故意错误HFA反例和padding口径归档在[位域原生控制](research/r10-bitfield-native-controls.json)，后续模型/公开API必须分别通过同域资格检查。独立控制可用`tests/librarybitfieldcontrols.py --target osx/arm64|osx/x86_64 --provider DIR`重跑，每ISA单独有界；不把它命名为产品位域通过。
 
 **唯一交付树与执行顺序**（下文设计是各项的展开，不另开重复清单）：
 
@@ -78,7 +78,7 @@
 |---|---|---|
 | R10-1 CI 与测试效率（先做） | 对旧 `all.sh` 与现役 gate 做覆盖映射；重套件按输入/目标分片，准备按内容共享；APE 构建保留退出码和完整诊断；接入有界并发队列 | 不漏旧检查、不把超时/跳过当通过，每个执行单元≤60秒；Darwin getdents64 裁判修正88b0b9e已本机通过，剩余失败未修。先本地验证，再随正常批次push取得干净机器CI证据；不反复push试错。结果缓存只复用已审核输入闭包相同的项。 |
 | R10-2 Windows 企业签名 | 使用已有仓库身份、策略与工作流，对最终封存 `.com` 做微软 Authenticode；保留苹果 `.app`/DMG 的签名、公证和装订流程 | 同源成功CI及本地最终验收绑定签名前字节；签后验信任链/时间戳/防篡改/包定位与实际编译运行，公开前后SHA与尺寸。当前Windows未签名，不把自签演练当企业签名。 |
-| R10-3 模型分片与复用 | 更新33网络/七阶段的真实字节账；内容寻址分片；先实验共享E2与目标预定义数据，再评估其他重复记录 | 同一网络函数全域相等；拆开再组合统一包保持内容/行为；以重新构造后的实际尺寸和同身份时间决定采用，旧32网络估算不作承诺。保持已有P3压缩，不重新开发压缩器。 |
+| R10-3 模型分片与复用 | 更新当前部署24网络及逐阶段的真实字节账（33网络为R9历史基线）；内容寻址分片；先实验共享E2与目标预定义数据，再评估其他重复记录 | 同一网络函数全域相等；拆开再组合统一包保持内容/行为；以重新构造后的实际尺寸和同身份时间决定采用，旧32网络估算不作承诺。保持已有P3压缩，不重新开发压缩器。 |
 | R10-4 单目标原生产物 | 用同一构造器与模型选择闭包，提供六个OS/ISA的原生单格式副产品 | 固定各产物CLI/路由/资源范围；同目标与统一产物对拍，列删去的网络/内核/外壳字节；原生、仿真、未验分别记账。统一 `.com` 主线不受影响。 |
 | R10-5 libunisacc | 按下文已定进程内API推进上下文隔离、符号注入、编译/装载/调用；单目标CLI复用库 | 重复调用、并行上下文、错误不退出宿主、宿主与脚本互调及回调、自带库所有权各有回归；跨目标编译能力与本机执行能力分别验。REPL/热替换/语言绑定按既有安排留0.0.11。 |
 | R10-6 代码、文档与论文收敛 | 按引用审计清理/归档历史；统一阶段结构与字节账；执行既定 `-ftrim-libc` 改名；Paper A中英文对齐最终证据与公式渲染 | 不删现役构造器/裁判；历史证据可追溯；模型决策、声明原语、模板及宿主边界清楚。T1、经验证据和未证T2/T3分开，行数变化与规则来源均如实报告。 |
@@ -3012,3 +3012,5 @@ R10 FFI依赖纠正决定：相同GP5/FP7 carrier控制在系统macOS libffi失�
 R10一般natural16B候选与FFI依赖实际闭环：1332态/343400观测全域net=table、310独立图oracle；两mac ISA九类×四压力×direct/callback共144variants，ASan/UBSan、O0/O1/O2各100，总43200 native/21600 SCRIPT callback全部通过。Rosetta显式固定libffi3.5.2，ARM此矩阵沿原系统依赖；旧系统首差仍保留。独立私有工具buildffiprovider支持固定官方tarSHA、Darwin两个ISA、configure/make/install每次一步（各≤50秒），保存完整命令/源/头/静态库/license，六失败控制与实际看门狗清理通过。buildlibrary --ffi-provider校验其全部字节并执行GP5/FP7实际边界probe，系统x86 provider被拒绝；合格provider的两ISA static/dynamic交付库分别通过direct/callback真实SCRIPT调用（8variants、2400 native/1200 callback），动态库无systemlibffi依赖；静态产品随附libunisacc-ffi.a与MIT许可。最初消费者漏rpath失败单列保留，正确消费者后通过。新增20个自然16B实际门禁及provider身份/队列外部档案变更门禁；全部候选门禁仍待下一构建窗口，不称完整R10。永久证据 research/r10-union16-{model,qualified-public}-evidence.json、research/r10-ffi-provider-delivery-evidence.json。下一项仍保留general arbitrary union/BANK、bitfield/wide-FP、六平台完整调用/SEH/企业分发，不以已测域缩减目标。
 
 R10 natural16根候选已同步：源bbe5691，unisacc.com **1,116,367 B / SHA256 `6f1293ba9f2f64a726bd35acf76e60d5087e39a6461585313c79e3881ce39037`**（较前候选+3972 B）。shared、六target与pack各独立有界构造成功；compiler.pkg与144variants资格化包逐字节同，原rows/resources与其他23网络不变。全部24部署网络=保留表全域，正式新增ARM/Rosetta各10/10（31/40s），模型/FFI身份2/2，旧factory/relay/concrete native/variadic及com-run/com-c99共6/6，run12/0、C9957/57。字节账同步research/model-bytes.json，根来源校验通过；research/r10-union16-candidate-evidence.json保存全部日志和身份。这是28项受影响验收，不冒称完整发布门禁；Linux/Windows一般16B、BANK/位域/wide-FP/SEH与企业交付继续未完成。
+
+**R10 位域控制归档回执（2026-09-29）**：将独立true-C夹具与有界重跑工具纳入仓库，父会话ARM/Rosetta各42组实际重跑rc0，共8400次native与8400次closure调用；输入对象/邻接canary/压力前缀与双tail均检查。首次ARM Terminal交接窗口rc142、无回执，保留为基础设施超时，单独重跑后通过，不改超时上限。docs.sh rc0。见`research/r10-bitfield-controls-rerun.json`。本批更新当前PRD与载体文档、保留历史失败；根.com及模型未改，完整位域仍待版本化源码事实和模型认证，0.0.10继续进行中。

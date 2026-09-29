@@ -1,6 +1,6 @@
 # R10 NativePlan source facts：最小演进计划
 
-状态：**只是设计与实际源读发现**，2026-09-29。没有运行探针、测试、构建、VM；不修改仓库、PRD或共享产物。沿既有通用 NativePlan 设计继续，本文件只处理 SOURCE FACTS，绝不把 host ABI classification 搬入C。
+状态：**历史源读设计**，2026-09-29。初稿没有运行探针、测试、构建、VM。随后BFS/MSZ映射已修正，当前`librarytypes.py`读取MSZ；实际源码wire回归为`tests/modelbitfieldsourcecheck.py`。下文第一节保留当时发现与红probe，不代表该缺陷仍在。匿名/屏障、宽FP等事实缺口仍未闭合；最新位域设计与实际ABI控制见`r10-bitfield-model-plan.md`及`r10-bitfield-native-controls.json`。沿既有通用 NativePlan 设计继续，本文件只处理 SOURCE FACTS，绝不把 host ABI classification 搬入C。
 
 ## 1. 最优先真实源读缺陷：BFS误作storage
 
