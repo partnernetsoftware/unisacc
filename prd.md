@@ -66,7 +66,7 @@
 
 **目标与基线**：以已发布 v0.0.9 / `a606ff4` 为基线，保持统一 `.com` 为主产品，优先补齐干净机器 CI 与 Windows 企业签名，再推进网络复用、单目标副产品及进程内库。沿用“表 → 构造确定性网络 → 通用执行器”的路线；不新增训练或另写一套编译逻辑。0.0.9 的193项本地通过不代表其 GitHub CI 通过。
 
-**当前进度（2026-09-29，ed86747/8bb8ab4）**：七项交付未全部闭合。根开发产物1,151,061 B，SHA256 `112f58e78c12494e8c4a4a77c3736befe9007982398031fa23b28ec5af6fda30`；版本资源仍0.0.9，不是0.0.10发布物。24部署网络全部与保留表全域一致。公开V3源码自然位域导出及fixed typed imports在两macOS ISA各900次实际调用通过；旧V2/回调、chain167/167与本批12项受影响门禁保留，见[当前候选证据](research/r10-source-import-candidate-evidence.json)。取typed native函数地址后间接调用的公开红例实际给出错误值，已保留，不能称未覆盖或通过；显式alias模型证明与机械接线在实施。pointee完整身份、packed/native宽FP/general BANK、六平台生命周期与Windows SEH、最终全套/CI/企业签名发布仍未完成。
+**当前进度（2026-09-29，发布收口中，源 54290ba；产品闭包自 fdff9c5 未变）**：候选 `unisacc.com` 1,152,711 B / SHA256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`，版本资源 0.0.10。本地 `tests/release.sh --com` 332/332 rc0（同源私有 UA、x86 libffi 提供者、无回退 Terminal 交接）；Linux arm64 两台 Lima 客机合并全绿；Windows/x86_64 客机 crossnative examples 全 ok；nativeboot 的 Windows 自建为门禁外未验义务。CI 三平台绿（多次 run，见回执）。Apple app/DMG 已签名、公证、staple、Gatekeeper 通过。Windows Authenticode：workflow 已修四处（草稿按 tag_name 定位、contents:write、UTF-8、相对 catalog、客户端安装 4 分钟），qualification 已通过，company 签名进行中。草稿 Release v0.0.10 已建并上传资产。逐项回执见下表后的“R10 回执状态”与 [发布回执](research/r10-release-acceptance.json)；顺延到 0.0.11 的项见“发布收口决定”。
 
 **已闭合的库格式与callable接入（历史状态校准）**：早期多单元O1把USLTAPE1封装送入E4的问题已修：库在E3边界拆出签名和tape，仅把tape交给E4。library/module资源允许无main、可返回初始化；us_sym与宿主注入通过模型认证载体和原生闭包接入SCRIPT，原图保持身份和逻辑参数数量，载体图只负责原生ABI。原有失败与修复证据保留；早期“下一片待接入”的描述不再作为当前状态。
 
@@ -87,6 +87,15 @@
 **编排**：测试/CI修复与只读引用审计可并行；网络分片闭包稳定后再接单目标包和库，避免三处各写一份包装。签名准备可并行，真实签名只消费最终全绿封存候选。每批产品改动后重建并核验 `.com` 来源，执行受影响TDD；最终发布完整门禁，不以局部通过代替。新发现的正确性缺陷先加回归再修，未验证估算不写成完成率或交付日期。
 
 **发布流水线手册**：本轮实践沉淀在 [release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)（冻结源→同源 UA→P3→全量门禁→客机→一次 push→Apple→Windows 签名→发布，含每步坑与判据）；本机技能 `~/.claude/skills/unisacc-release-pipeline`。以后每次发布先读它，再补它。
+
+**R10 回执状态（2026-09-29 收口）**：
+- R10-1 CI/测试效率：本机全量 332 项滚动队列 rc0；CI 三平台绿；hosted runner 修正（opt_partition argv、b_malloc 规模、selfhost 无状态回退、acceptance8）。余量薄弱项：tools11（tiny-regex test2，41–50 s）在 macos-15 偏慢时超时，列入 R11-1 拆分。回执：`research/r10-release-acceptance.json`。
+- R10-2 Windows 企业签名：policy 已 `required`；qualification 通过；company 进行中（首次实签暴露并修复了 workflow 的五处缺陷，均已提交）。Apple 侧 app/DMG 公证 staple 完成。回执：同上 `signing` 节。
+- R10-3 模型分片与复用：共享 E2、24 部署网络全域 net=table、源码/权重 include 分离；字节账 `research/model-bytes.json` 同步到候选。
+- R10-4 单目标原生产物：六单目标私有构建与 `target-package` 门禁在全量队列内通过；平台原生完整验收未闭合（顺延，见收口决定）。
+- R10-5 libunisacc：主 API/线程/生命周期/回调/USLCALL3 别名在全量队列与公开探针通过；V3 variadic、pointee 完整身份、packed/宽 FP/BANK、Windows SEH 顺延。
+- R10-6 代码/文档/论文：`-ftrim-libc` 改名落地；Paper A 中英加 v0.0.10 身份行；发布手册 `release/RELEASE-PIPELINE.md`；Paper A 定稿与目录职责梳理（R11-7）顺延。
+- R10-7 演示与发布：`examples/apps` 门禁在队列内；发布链正在 company 签名→上传签后 `.com`→发布。
 
 **停止条件**：R10-1至R10-7逐项有回执后发布；下文原有大项如超出本轮可交付范围，先明确列出未完成项及顺延决定，不静默缩减功能。T2/T3、自构造、Wasm和完整系统libc改造不因本计划自动开工，仍按0.1.0/探索区管理。
 
