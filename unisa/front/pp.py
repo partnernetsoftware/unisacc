@@ -264,7 +264,28 @@ class _PPExpr:
                         raise ValueError("expected ) after defined in #if")
                     self.take()
                 return (1 if n[1] in self.macros else 0, False)
-            return (0, False)        # C99 6.10.1: an unknown name is 0
+            # C99 6.10.1: an unknown name is 0.  An unknown name followed by
+            # `(` is 0 as well, and the parenthesised group is consumed --
+            # that is what the C reference does with `__has_feature(x)`,
+            # `__has_builtin(x)` and `__has_include(<...>)`, which reach this
+            # point as ordinary unknown identifiers (they are not macros).
+            # Leaving the `(` in the token stream made every such `#if` fail
+            # with "unconsumed token in #if".  The argument list is NOT
+            # evaluated: it is skipped, so a division by zero inside it is
+            # not an error, as in C.
+            if self.peek() == ("op", "("):
+                self.take()
+                depth = 1
+                while depth:
+                    kk, vv = self.peek()
+                    if kk == "end":
+                        raise ValueError("unterminated ( in #if")
+                    self.take()
+                    if kk == "op" and vv == "(":
+                        depth += 1
+                    elif kk == "op" and vv == ")":
+                        depth -= 1
+            return (0, False)        # an unknown name is 0
         raise ValueError("expected operand in #if")
 
 
@@ -432,13 +453,29 @@ def preprocess(src, oracle, macros=None, path=None, includes=(), _depth=0,
             continue
 
         # the flag the table keys on
+        #
+        # C99 6.10.1: the controlling expression of an `#if` or `#elif` is
+        # evaluated only when its group can still be taken.  Inside a skipped
+        # group the directive is counted for nesting and nothing more -- so a
+        # condition written there is never evaluated, exactly as the C
+        # reference does it.  Evaluating it anyway is what broke
+        # `#if defined(__has_feature)` / `#if __has_feature(x)`: the outer
+        # condition is false (the reference and this front end agree on that),
+        # but the inner line was still put through _truth, which refused a
+        # name followed by `(`.  miniz.h:211 is that shape.
         if d in ("ifdef", "ifndef"):
-            flag = "1" if rest.split()[0] in macros else "0"
+            if live:
+                flag = "1" if rest.split()[0] in macros else "0"
+            else:
+                flag = "0"                # counted, not evaluated
         elif d in ("if", "elif"):
-            ol = live if d == "if" else (
-                bool(stack) and not stack[-1][1] and
-                all(x for (x, _) in stack[:-1]))
-            flag = "1" if _truth(rest, macros, ol) else "0"
+            taken = (live if d == "if" else
+                     bool(stack) and not stack[-1][1] and
+                     all(x for (x, _) in stack[:-1]))
+            if taken:
+                flag = "1" if _truth(rest, macros, True) else "0"
+            else:
+                flag = "0"                # counted, not evaluated
         elif d == "else":
             flag = "0" if (stack and stack[-1][1]) else "1"
         else:
