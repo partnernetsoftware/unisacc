@@ -263,7 +263,7 @@ Enumeration closes only "network = table"; it says nothing about "table = C". We
 | Precedence | 324 ordered operator pairs: 291 distinguishable on the chosen constants and consistent, 33 indistinguishable |
 | Type info | Sizes of 11 types; signedness and narrowness of 8 integer types |
 
-The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 6/18 stages have external referees of stated coverage. Nor is a reference implementation the only kind of referee: **the referee of a cost table is measurement** (§7.4).
+The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 6/18 stages have external referees of stated coverage. **Measurement** is a third kind of evidence: the peephole cost table is revised from measurements (§7.4), but that stage is registered in the ledger as cross-implementation agreement and is not counted among the six. Nor is a reference implementation the only kind of referee: **the referee of a cost table is measurement** (§7.4).
 
 ## 7 Evaluation
 
