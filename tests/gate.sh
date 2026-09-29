@@ -84,6 +84,11 @@ job fat         ./tests/fat.sh examples/*.c tests/c/*.c
 job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done
 for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
+# The fixture directory suite (tests/fb12/, driver tests/fb12multi.sh) lives in
+# the --com block only: it needs an executable compiler, and the default route
+# here is `python3 -m unisa`, which is a command rather than a file.  The
+# fixtures' expected values come from the host cc, and the defects they record
+# are all on the product side.
 job closure-ex  ./tests/closure.sh examples/*.c
 job closure-c1  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==1')   # four shards: three ran 22 s alone
 job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # but 61 s beside three other suites
@@ -407,6 +412,7 @@ if [ "$COM" = 1 ]; then
         job com-difftest-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest.sh
         job com-difftest_o-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest_o.sh
     done
+    job com-fb12-multi MODEL_COM="$PRODUCT" ./tests/fb12multi.sh
 fi
 [ "$LIST" = 0 ] || exit 0
 [ "$n" -gt 0 ] || { echo "gate: no suites executed" >&2; exit 2; }
