@@ -8,8 +8,8 @@ from models import closure, digest
 
 def source_digest():
     h = closure(hashlib.sha256())
-    for p in sorted((ROOT / 'exec/c/asm').glob('*.S')):
-        h.update(str(p.relative_to(ROOT)).encode() + b'\0')
+    for p in sorted((ROOT / 'exec/c/asm').glob('*.S'), key=lambda q: q.relative_to(ROOT).parts):   # host-independent spelling and order
+        h.update(p.relative_to(ROOT).as_posix().encode() + b'\0')
         h.update(bytes.fromhex(digest(p)))
     return h.hexdigest()
 
