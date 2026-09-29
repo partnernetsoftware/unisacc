@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent USLCALL1/2 exact wire and context-owned graph transaction checks."""
+"""Independent USLCALL1/2/3 exact wire and context-owned graph transaction checks."""
 import argparse
 import os
 import platform
@@ -28,6 +28,17 @@ def pack(version=2,protos=((22,PROTO),(23,FIXED)),sites=None):
   sites=sites if sites is not None else [site(),site(101,record=ZERO)];b+=u(len(sites))+b''.join(sites)
  return b
 one=pack(1,((11,FIXED),));two=pack()
+# USLCALL3: CALL2 body plus an alias section. A valid nonzero alias needs a context-owned
+# frozen plan, which the public source-import probes supply; here only framing/identity.
+def alias(ident=1,key=23,frozen=1,raw=1,source=None,external=b'e'*90,payload_delta=0,source_delta=0):
+ source=FIXED if source is None else source
+ return u(48+len(source)+len(external)+payload_delta)+u(ident)+u(key)+u(frozen)+u(raw)+u(len(source)+source_delta)+source+u(len(external))+external
+def pack3(aliases=(),protos=((22,PROTO),(23,FIXED))):return pack(2,protos).replace(b'USLCALL2\n',b'USLCALL3\n',1)+u(len(aliases))+b''.join(aliases)
+three=pack3()
+bad3=[pack().replace(b'USLCALL2\n',b'USLCALL3\n',1),three+b'x',pack3()[:-8]+u(1025),pack3([alias()]),pack3([alias(ident=0)]),
+ pack3([alias(key=0)]),pack3([alias(frozen=0)]),pack3([alias(raw=0)]),pack3([alias(ident=1025)]),pack3([alias(key=999)]),
+ pack3([alias(payload_delta=-1)]),pack3([alias(payload_delta=1)])+b'x',pack3([alias(source_delta=1)]),pack3([alias(external=b'')]),
+ pack3([alias(),alias(ident=2)]),pack3([alias(),alias(key=22)]),pack3([alias(key=22)])]
 bad=[pack(sites=[site(0)]),pack(sites=[site(key=999)]),pack(sites=[site(),site()]),
  pack(sites=[site(fixed=2)]),pack(sites=[site(key=23)]),pack(sites=[site(record=sig(mode=0))]),
  pack(sites=[site(record=sig(var=1))]),pack(sites=[site(record=sig(()))]),
@@ -44,7 +55,7 @@ with tempfile.TemporaryDirectory(prefix='r10-callcatalog-') as tmp:
   if f.is_file() and f.suffix in ('.c','.h','.S'):shutil.copy2(f,rt/f.name)
  shutil.copy2(ROOT/'src/host_dl.h',t/'src/host_dl.h')
  files=[]
- for i,data in enumerate([one,two,*bad]):
+ for i,data in enumerate([one,two,three,*bad,*bad3]):
   f=t/(str(i)+'.catalog');f.write_bytes(data);files.append(f)
  for sanitized in (False,True):
   exe=t/'probe';run(os.environ.get('CC','cc'),*flags,'-std=c11','-O1','-I',t,'-Wno-unused-function',ROOT/'tests/librarycallablecatalogcheck.c',rt/('librarycall_'+arch+'.S'),'-lffi',*(['-ldl'] if platform.system()!='Darwin' else []),'-o',exe,*(['-fsanitize=address,undefined','-fno-omit-frame-pointer','-g'] if sanitized else []))

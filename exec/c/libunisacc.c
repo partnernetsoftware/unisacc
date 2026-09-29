@@ -27,6 +27,8 @@ typedef struct Symbol { char *name; uintptr_t address; int kind; } Symbol;
 typedef struct Source { char *name, *bytes; struct Source *next; } Source;
 typedef struct LibraryCallableDeclaration {uint64_t key;us_exports graph;us_export_signature signature;} LibraryCallableDeclaration;
 typedef struct LibraryCallableSite {uint64_t site,key,fixed;us_exports graph;us_export_signature signature;} LibraryCallableSite;
+/* Trusted E3 pairs exact source bytes with one frozen candidate; ABI is certified later. */
+typedef struct LibraryImportAlias {uint64_t id,key,frozen,raw,plan;unsigned char *source;size_t source_length;} LibraryImportAlias;
 typedef struct LibraryCarrierExport {us_export *source;us_carrier_certificate certificate;struct LibraryCarrierExport *next;} LibraryCarrierExport;
 struct us_context {
     char *package, *definitions, *include_path, *target;
@@ -47,6 +49,7 @@ struct us_context {
     us_callables callables;uint64_t image_generation;
     LibraryCallableDeclaration *callable_declarations;size_t callable_count;
     LibraryCallableSite *callable_sites;size_t callable_site_count;
+    LibraryImportAlias *import_aliases;size_t import_alias_count;us_native_plans import_alias_plans;
     unsigned char *binding_blob; size_t binding_length;
     unsigned char *call_stack; size_t call_stack_size;
     int initialised, call_exited, call_exit_status, call_failed;
@@ -177,7 +180,17 @@ static void library_release_map(void *p,size_t extent) {
     munmap(p,extent);
 #endif
 }
+static void library_import_aliases_clear(us_context *c){
+    us_native_plans_clear(&c->import_alias_plans);
+    for(size_t i=0;i<c->import_alias_count;i++)free(c->import_aliases[i].source);
+    free(c->import_aliases);c->import_aliases=NULL;c->import_alias_count=0;
+}
+static LibraryImportAlias *library_import_alias(us_context *c,uint64_t id){
+    for(size_t i=0;i<c->import_alias_count;i++)if(c->import_aliases[i].id==id)return c->import_aliases+i;
+    return NULL;
+}
 static void library_callable_catalog_clear(us_context *c){
+    library_import_aliases_clear(c);
     for(size_t i=0;i<c->callable_count;i++)us_exports_clear(&c->callable_declarations[i].graph);
     free(c->callable_declarations);c->callable_declarations=NULL;c->callable_count=0;
     for(size_t i=0;i<c->callable_site_count;i++)us_exports_clear(&c->callable_sites[i].graph);
@@ -214,7 +227,7 @@ API us_context *us_new(const char *path) {
 }
 API void us_free(us_context *c) {
     if (!c) return;
-    discard_image(c);
+    discard_image(c);library_callable_catalog_clear(c);
     us_native_callsites_clear(&c->native_callsites);
     us_native_templates_clear(&c->native_templates);
     us_native_plans_clear(&c->native_plans);
@@ -223,7 +236,7 @@ API void us_free(us_context *c) {
     free(c->package); free(c->definitions); free(c->target);
     for (Source *s=c->sources;s;) { Source *next=s->next; free(s->name); free(s->bytes); free(s); s=next; }
     for (int i=0;i<c->argc;i++) free(c->argv[i]); free(c->argv);
-    library_callable_catalog_clear(c);free(c->include_path); free(c->tape); free(c->signatures); free(c);
+    free(c->include_path); free(c->tape); free(c->signatures); free(c);
 }
 API int us_add_source(us_context *c,const char *name,const char *source) {
     if (!c || !name || !source) return error(c,"missing source");
@@ -280,10 +293,11 @@ static int library_callable_native_hook(void *,ffi_cif *,uintptr_t,void *,void *
 static int library_callable_script_hook(void *,const void *,const us_export_signature *,const us_export_frame *);
 static void library_callable_failure_hook(void *,const char *);
 static int library_callable_catalog_load(us_context *c,const unsigned char *b,size_t n){
-    size_t at=9,built=0,sites_built=0;uint64_t count=0,site_count=0;
-    LibraryCallableDeclaration *items=NULL;LibraryCallableSite *sites=NULL;
+    size_t at=9,built=0,sites_built=0,aliases_built=0;uint64_t count=0,site_count=0,alias_count=0;
+    LibraryCallableDeclaration *items=NULL;LibraryCallableSite *sites=NULL;LibraryImportAlias *aliases=NULL;
     if(!c||!b||n<17||n>INT_MAX)return error(c,"invalid callable catalogue");
-    int version2=!memcmp(b,"USLCALL2\n",9);
+    int version3=!memcmp(b,"USLCALL3\n",9);
+    int version2=version3||!memcmp(b,"USLCALL2\n",9);
     if(!version2&&memcmp(b,"USLCALL1\n",9))return error(c,"invalid callable catalogue");
     if(us_export_u64(b,n,&at,&count)||count>8192)goto bad;
     items=calloc(count?count:1,sizeof *items);if(!items)goto bad;
@@ -316,12 +330,42 @@ static int library_callable_catalog_load(us_context *c,const unsigned char *b,si
             at=end;
         }
     }
+    if(version3){
+        if(us_export_u64(b,n,&at,&alias_count)||alias_count>1024)goto bad;
+        aliases=calloc(alias_count?alias_count:1,sizeof *aliases);if(!aliases)goto bad;
+        for(size_t i=0;i<(size_t)alias_count;i++){
+            uint64_t payload,source_length,external_length;size_t end;LibraryCallableDeclaration *decl=NULL;
+            if(us_export_u64(b,n,&at,&payload)||payload<48||payload>n-at)goto bad;
+            end=at+(size_t)payload;LibraryImportAlias *alias=aliases+i;aliases_built=i+1;
+            if(us_export_u64(b,end,&at,&alias->id)||us_export_u64(b,end,&at,&alias->key)||
+               us_export_u64(b,end,&at,&alias->frozen)||us_export_u64(b,end,&at,&alias->raw)||
+               us_export_u64(b,end,&at,&source_length)||!alias->id||alias->id>1024||!alias->key||!alias->frozen||!alias->raw||
+               source_length>16777216||source_length>end-at||end-at-(size_t)source_length<8)goto bad;
+            for(size_t j=0;j<i;j++)if(aliases[j].id==alias->id||
+                (aliases[j].key==alias->key&&aliases[j].frozen==alias->frozen))goto bad;
+            for(size_t j=0;j<(size_t)count;j++)if(items[j].key==alias->key){decl=items+j;break;}
+            if(!decl||decl->graph.items->linkage||decl->graph.items->defined!=1||decl->graph.items->variadic||
+               decl->graph.items->stored!=decl->graph.items->count||
+               source_length!=decl->graph.items->wire_length||memcmp(b+at,decl->graph.items->wire,(size_t)source_length))goto bad;
+            alias->source=malloc(source_length? (size_t)source_length:1);if(!alias->source)goto bad;
+            memcpy(alias->source,b+at,(size_t)source_length);alias->source_length=(size_t)source_length;at+=(size_t)source_length;
+            if(us_export_u64(b,end,&at,&external_length)||external_length>16777216||external_length!=end-at)goto bad;
+            us_native_plan *frozen=us_native_plan_find(&c->native_plans,alias->frozen);
+            if(!frozen||frozen->target!=alias->raw||frozen->graph.count!=1)goto bad;
+            us_export *external=frozen->graph.items;
+            if(external->linkage||external->defined!=1||external->variadic||external->stored!=external->count||
+               external_length!=external->wire_length||memcmp(b+at,external->wire,(size_t)external_length))goto bad;
+            at=end;
+        }
+    }
     if(at!=n)goto bad;
     library_callable_catalog_clear(c);c->callable_declarations=items;c->callable_count=(size_t)count;
-    c->callable_sites=sites;c->callable_site_count=(size_t)site_count;return 0;
+    c->callable_sites=sites;c->callable_site_count=(size_t)site_count;
+    c->import_aliases=aliases;c->import_alias_count=(size_t)alias_count;return 0;
 bad:
     for(size_t i=0;i<built;i++)us_exports_clear(&items[i].graph);free(items);
     for(size_t i=0;i<sites_built;i++)us_exports_clear(&sites[i].graph);free(sites);
+    for(size_t i=0;i<aliases_built;i++)free(aliases[i].source);free(aliases);
     return error(c,"invalid callable catalogue record");
 }
 static const LibraryCallableSite *library_callable_site(us_context *c,uint64_t key,uint64_t site){
@@ -417,6 +461,36 @@ static int library_carrier_model(us_context *c,const char *target,const void *wi
     cleanup();active=NULL;RI=NULL;NRI=0;NR=0;
     if(rc==2)c->error[0]=0;
     return (int)rc;
+}
+/* Certification runs only after E3 releases the active model runtime. Publish
+   all alias plans together; retained frozen plans remain unchanged. */
+static int library_import_aliases_prepare(us_context *c){
+    if(!c->import_alias_count)return 0;
+    us_native_plans prepared={0};us_carrier_certificate certificate={0};
+    uint64_t *handles=calloc(c->import_alias_count,sizeof *handles);if(!handles)return error(c,"import alias allocation failed");
+    for(size_t i=0;i<c->import_alias_count;i++){
+        LibraryImportAlias *alias=c->import_aliases+i;
+        us_native_plan *frozen=us_native_plan_find(&c->native_plans,alias->frozen);
+        const us_export_signature *source=library_callable_signature(c,alias->key);
+        if(!frozen||frozen->target!=alias->raw||!source){error(c,"stale import alias candidate");goto bad;}
+        int rc=library_carrier_model(c,c->target,alias->source,alias->source_length,&certificate);
+        if(rc){if(rc==2)error(c,"not covered: source import alias native ABI");goto bad;}
+        if(certificate.original.count!=1||certificate.original.items->wire_length!=alias->source_length||
+           memcmp(certificate.original.items->wire,alias->source,alias->source_length)){
+            error(c,"import alias certificate source mismatch");goto bad;
+        }
+        if(us_carrier_certificate_native_add(&prepared,(uintptr_t)alias->raw,&certificate,handles+i,c->error,sizeof c->error)||!handles[i])goto bad;
+        us_native_plan *plan=us_native_plan_find(&prepared,handles[i]);
+        if(!plan||!us_callable_signature_equal(source,&plan->signature)){
+            error(c,"import alias certified identity mismatch");goto bad;
+        }
+        us_carrier_certificate_clear(&certificate);
+    }
+    us_native_plans_clear(&c->import_alias_plans);c->import_alias_plans=prepared;
+    for(size_t i=0;i<c->import_alias_count;i++)c->import_aliases[i].plan=handles[i];
+    free(handles);return 0;
+ bad:
+    us_carrier_certificate_clear(&certificate);us_native_plans_clear(&prepared);free(handles);return 1;
 }
 static int library_carrier_exports_prepare(us_context *c){
     for(size_t i=0;i<c->exports.count;i++){
@@ -556,8 +630,10 @@ API int us_compile(us_context *c,const char *target,int level) {
         }
     } else rc=1;
     cleanup(); active=0; RI=0; NRI=0;
+    if(!rc)rc=library_import_aliases_prepare(c);
     if(rc){library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
-        us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;}
+        us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
+        free(c->tape);c->tape=0;c->tape_length=0;}
     return rc;
 }
 
@@ -690,8 +766,17 @@ static uint64_t library_native_dispatch(uint64_t handle,uint64_t slots,uint64_t 
                                        uint64_t count,uint64_t reserved0,uint64_t reserved1) {
     us_context *c=active;ScriptFrame *frame=script_frames;
     if(!c || !frame || frame->owner!=c)return 1;
-    if(reserved0 || reserved1)return library_dispatch_error(c,"invalid native call reserved fields");
-    return library_native_invoke(c,frame,us_native_plan_find(&c->native_plans,handle),slots,result,count);
+    if(reserved0)return library_dispatch_error(c,"invalid native call reserved fields");
+    us_native_plan *plan=NULL;
+    if(reserved1){
+        LibraryImportAlias *alias=library_import_alias(c,reserved1);
+        us_native_plan *frozen=us_native_plan_find(&c->native_plans,handle);
+        if(!alias||alias->frozen!=handle||!frozen||frozen->target!=alias->raw)
+            return library_dispatch_error(c,"invalid native import alias binding");
+        plan=us_native_plan_find(&c->import_alias_plans,alias->plan);
+        if(!plan||plan->target!=alias->raw)return library_dispatch_error(c,"unprepared native import alias");
+    }else plan=us_native_plan_find(&c->native_plans,handle);
+    return library_native_invoke(c,frame,plan,slots,result,count);
 }
 static uint64_t library_variadic_dispatch(uint64_t handle,uint64_t slots,uint64_t result,
                                          uint64_t count,uint64_t site,uint64_t reserved0) {

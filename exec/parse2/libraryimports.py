@@ -15,6 +15,7 @@ BYNAME = 329 << 40
 def install(E,P,b,start,integers):
     from finite_rules import install as rules
     from unresolved import DEFINED
+    from librarycallables import ALIASID
     g=E.g
     from modelgraphequality import install as install_graph_equality
     install_graph_equality(E)
@@ -134,7 +135,10 @@ def install(E,P,b,start,integers):
     P('LI.importargc').a(('LDX','li_argc','li_i',ARGC),('LDX','li_format','li_i',FORMAT)).branch({1:'LI.typedprototype'},'LI.legacyargc',[('CMPI','li_format',1)])
     P('LI.legacyargc').branch({2:'LI.fail'},'LI.prototype',[('LDI','li_cmpmax',6),('C64U','li_argc','li_cmpmax')])
     P('LI.typedprototype').a(('LDX','lx_sig','li_id',b['FPS_FN']),('LDX','lx_nameblob','li_i',NAMES)).branch({1:'LI.fail'},'LI.typedsource',[('CMPI','lx_sig',0)])
-    P('LI.typedsource').call('LX.signature').a(('COPYW','ms_blob','lx_sigblob'),('BLEN','ms_len','lx_sigblob')).call('MS.canonical').a(('COPYW','li_sourcemode','ms_mode'),('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.compatible').branch({1:'LI.typedemit'},'LI.fail',[('CMPI','mg_equal',1)])
+    P('LI.typedsource').call('LX.signature').a(('COPYW','ms_blob','lx_sigblob'),('BLEN','ms_len','lx_sigblob')).call('MS.canonical').a(('COPYW','li_sourcemode','ms_mode'),('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.compatible').branch({1:'LI.typedaliasenabled'},'LI.fail',[('CMPI','mg_equal',1)])
+    P('LI.typedaliasenabled').branch({1:'LI.typedaliasversion'},'LI.typedemit',[('CMPI','lc_enabled',1)])
+    P('LI.typedaliasversion').branch({3:'LI.typedalias'},'LI.typedemit',[('RLD','lx_wireversion')])
+    P('LI.typedalias').a(('COPYW','lc_alias_binding','li_i'),('COPYW','lc_alias_sig','lx_sig')).call('LC.alias.ensure').goto('LI.typedemit')
     P('LI.prototype').a(('LDX','li_sig','li_id',b['FPS_FN']),('LDX','li_argc','li_i',ARGC)).branch({1:'LI.fail'},'LI.variadiccheck',[('CMPI','li_sig',0)])
     P('LI.variadiccheck').a(('LDX','li_var','li_id',E.VAR)).branch({1:'LI.countmatch'},'LI.fail',[('CMPI','li_var',0)])
     P('LI.countmatch').a(('LDX','li_n','li_sig',b['FPS_COUNT'])).branch({1:'LI.return'},'LI.fail',[('CMP','li_n','li_argc')])
@@ -169,7 +173,9 @@ def install(E,P,b,start,integers):
     P('LI.typedcontrol').o('  imm r1, ').a(('LDX','li_print','li_i',PLAN)).call('LI.print64').o('\n  store64 [r7+0], r1\n  imm r1, 48\n  add64 r1, r7, r1\n  store64 [r7+8], r1\n').branch({1:'LI.typedaggregate'},'LI.typedscalarbuffer',[('CMPI','li_retclass',5)])
     P('LI.typedaggregate').o('  .lea r1, __rv_').a(('INPUSH','li_name'),('XLEN','li_n'),('SPAN2','ud_zero','li_n'),('INPOP',)).o('\n').goto('LI.typedresultpointer')
     P('LI.typedscalarbuffer').o('  imm r1, ').a(('ALUI','sub','li_print','li_frame',8)).call('LI.print64').o('\n  add64 r1, r7, r1\n').goto('LI.typedresultpointer')
-    P('LI.typedresultpointer').o('  store64 [r7+16], r1\n  imm r1, ').a(('COPYW','li_print','li_argc')).call('LI.print64').o('\n  store64 [r7+24], r1\n  imm r1, ').call('LV.siteword').o('\n  store64 [r7+32], r1\n  imm r1, 0\n  store64 [r7+40], r1\n  imm r1, ').a(('LDX','li_print','li_i',DISPATCH)).call('LI.print64').o('\n  mov r0, r7\n  .librarycall r1, r0\n').branch({0:'LI.typedvoid',5:'LI.typedaggregatereturn'},'LI.typedscalarreturn',[('RLD','li_retclass')])
+    P('LI.typedresultpointer').o('  store64 [r7+16], r1\n  imm r1, ').a(('COPYW','li_print','li_argc')).call('LI.print64').o('\n  store64 [r7+24], r1\n  imm r1, ').call('LV.siteword').o('\n  store64 [r7+32], r1\n  imm r1, ').call('LI.aliasword').call('LI.print64').o('\n  store64 [r7+40], r1\n  imm r1, ').a(('LDX','li_print','li_i',DISPATCH)).call('LI.print64').o('\n  mov r0, r7\n  .librarycall r1, r0\n').branch({0:'LI.typedvoid',5:'LI.typedaggregatereturn'},'LI.typedscalarreturn',[('RLD','li_retclass')])
+    P('LI.aliasword').a(('LDI','li_print',0)).branch({1:'LI.aliasload'},'RET',[('CMPI','lc_enabled',1)])
+    P('LI.aliasload').a(('LDX','li_print','li_i',ALIASID)).ret()
     P('LI.typedvoid').o('  imm r0, 0\n').goto('LI.typedtail')
     P('LI.typedaggregatereturn').o('  load64 r0, [r7+16]\n').goto('LI.typedtail')
     P('LI.typedscalarreturn').o('  load64 r1, [r7+16]\n  load64 r0, [r1+0]\n').goto('LI.typedtail')

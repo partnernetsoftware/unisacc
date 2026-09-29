@@ -40,9 +40,19 @@ static uint64_t library_callable_make_dispatch(uint64_t origin,uint64_t key,uint
     us_context *c=active;ScriptFrame *f=script_frames;
     if(!c||!f||f->owner!=c)return 1;
     const us_export_signature *s=library_callable_signature(c,key);
-    if(!s||r0||r1||!library_frame_region(c,f,output,8))return library_dispatch_error(c,"invalid callable introduction frame");
+    if(!s||r1||!library_frame_region(c,f,output,8))return library_dispatch_error(c,"invalid callable introduction frame");
     const us_export_signature *carrier=NULL;us_export_signature carrier_view;
-    if(origin==US_CALLABLE_SCRIPT){
+    if(r0){
+        /* Model-issued import alias: the frozen candidate stays the identity anchor, the
+           independently certified source plan supplies the carrier. No fallback. */
+        LibraryImportAlias *alias=origin==US_CALLABLE_NATIVE?library_import_alias(c,r0):NULL;
+        us_native_plan *frozen=alias?us_native_plan_find(&c->native_plans,alias->frozen):NULL;
+        us_native_plan *plan=alias?us_native_plan_find(&c->import_alias_plans,alias->plan):NULL;
+        if(!alias||alias->key!=key||alias->raw!=raw||!frozen||frozen->target!=raw||!plan||plan->target!=raw||
+           !us_callable_signature_equal(&plan->signature,s)||!plan->carrier.count)return library_dispatch_error(c,"invalid native import alias introduction");
+        if(us_callable_export_signature(plan->carrier.items,&carrier_view))return library_dispatch_error(c,"invalid import alias carrier graph");
+        carrier=&carrier_view;
+    }else if(origin==US_CALLABLE_SCRIPT){
         if(!library_region((uintptr_t)c->image,(size_t)c->image_text_size,(uintptr_t)raw,1))return library_dispatch_error(c,"script callable outside owner code");
         for(LibraryCarrierExport *entry=c->carrier_exports;entry;entry=entry->next){
             us_export_signature original;const void *address=NULL;int kind=-1;
