@@ -492,6 +492,30 @@ static int library_import_aliases_prepare(us_context *c){
  bad:
     us_carrier_certificate_clear(&certificate);us_native_plans_clear(&prepared);free(handles);return 1;
 }
+/* V3 variadic concrete sites (USCPLAN1 under signature version 3) are certified
+   here, after E3 released the model runtime: the concrete graph is a fixed graph
+   for nativeabi; the plan pairs that original with the carrier CIF. */
+static int library_variadic_sites_prepare(us_context *c){
+    us_carrier_certificate certificate={0};
+    for(us_native_callsite *site=c->native_callsites.head;site;site=site->next){
+        if(!site->pending)continue;
+        us_native_template *t=us_native_template_find(&c->native_templates,site->template_handle);
+        if(!t){error(c,"stale variadic template for a V3 call site");goto bad;}
+        int rc=library_carrier_model(c,c->target,site->pending,site->pending_length,&certificate);
+        if(rc){if(rc==2)error(c,"not covered: V3 variadic call site native ABI");goto bad;}
+        if(certificate.original.count!=1||certificate.original.items->wire_length!=site->pending_length||
+           memcmp(certificate.original.items->wire,site->pending,site->pending_length)){
+            error(c,"variadic site certificate original mismatch");goto bad;
+        }
+        uint64_t handle=0;
+        if(us_carrier_certificate_native_add_variadic(&c->native_callsites.plans,t->target,&certificate,site->fixed,&handle,c->error,sizeof c->error)||!handle)goto bad;
+        us_carrier_certificate_clear(&certificate);
+        site->plan_handle=handle;free(site->pending);site->pending=NULL;site->pending_length=0;
+    }
+    return 0;
+ bad:
+    us_carrier_certificate_clear(&certificate);return 1;
+}
 static int library_carrier_exports_prepare(us_context *c){
     for(size_t i=0;i<c->exports.count;i++){
         us_export *x=c->exports.items+i;
@@ -631,6 +655,7 @@ API int us_compile(us_context *c,const char *target,int level) {
     } else rc=1;
     cleanup(); active=0; RI=0; NRI=0;
     if(!rc)rc=library_import_aliases_prepare(c);
+    if(!rc)rc=library_variadic_sites_prepare(c);
     if(rc){library_callable_catalog_clear(c);us_native_callsites_clear(&c->native_callsites);us_native_templates_clear(&c->native_templates);
         us_native_plans_clear(&c->native_plans);free(c->signatures);c->signatures=0;c->signatures_length=0;
         free(c->tape);c->tape=0;c->tape_length=0;}

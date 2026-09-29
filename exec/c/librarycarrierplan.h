@@ -83,6 +83,37 @@ publish:
     plan->next=plans->head;plans->head=plan;*handle=(uintptr_t)plan;return 0;
 bad:us_native_plan_free(plan);return us_export_error(error,cap,"carrier native ffi signature rejected");
 }
+/* Variadic concrete site: the certified fixed concrete graph is the original,
+   the CIF is prepared from the carrier with ffi_prep_cif_var over the model's
+   fixed prefix count. Callback edges stay rejected here (no bridge for varargs). */
+static int us_carrier_certificate_native_add_variadic(us_native_plans *plans,uintptr_t raw,
+                                                      us_carrier_certificate *certificate,uint64_t fixed_count,
+                                                      uint64_t *handle,char *error,size_t cap){
+    if(!plans||!raw||!certificate||!handle)return us_export_error(error,cap,"invalid variadic carrier plan output");
+    *handle=0;us_export_signature original,carrier;
+    if(certificate->original.count!=1||certificate->carrier.count!=1||!certificate->target[0]||
+       us_callable_export_signature(certificate->original.items,&original)||
+       us_callable_export_signature(certificate->carrier.items,&carrier)||
+       !us_callable_carrier_valid(&original,&carrier)||
+       strcmp(certificate->original.items->name,certificate->carrier.items->name)||
+       original.variadic||carrier.variadic||original.mode!=1||!fixed_count||fixed_count>original.count||
+       us_export_has_callbacks(certificate->original.items)||
+       !(us_export_supported(certificate->carrier.items)||us_export_bridge_supported(certificate->carrier.items)))
+        return us_export_error(error,cap,"invalid variadic carrier plan certificate");
+    for(size_t i=(size_t)fixed_count;i<carrier.count;i++){
+        const us_export_type *t=carrier.argtypes+i;
+        if((t->kind==3&&t->width==4)||(t->kind==1&&t->width<4))return us_export_error(error,cap,"variadic tail requires promoted types");
+    }
+    us_native_plan *plan=calloc(1,sizeof *plan);if(!plan)return us_export_error(error,cap,"variadic carrier plan allocation failed");
+    plan->args=calloc(carrier.count?(size_t)carrier.count:1,sizeof *plan->args);if(!plan->args)goto bad;
+    for(size_t i=0;i<carrier.count;i++)if(!(plan->args[i]=us_export_ffitype(carrier.argtypes+i,0)))goto bad;
+    ffi_type *result=us_export_ffitype(&carrier.result,1);if(!result||
+       ffi_prep_cif_var(&plan->cif,FFI_DEFAULT_ABI,(unsigned)fixed_count,(unsigned)carrier.count,result,plan->args)!=FFI_OK)goto bad;
+    plan->graph=certificate->original;plan->carrier=certificate->carrier;plan->signature=original;plan->target=raw;
+    memset(certificate,0,sizeof *certificate);
+    plan->next=plans->head;plans->head=plan;*handle=(uintptr_t)plan;return 0;
+bad:us_native_plan_free(plan);return us_export_error(error,cap,"variadic carrier native ffi signature rejected");
+}
 static int us_carrier_certificate_make(const us_carrier_certificate *p,
                                       us_callables *registry,unsigned origin,
                                       const us_export_signature *expected,

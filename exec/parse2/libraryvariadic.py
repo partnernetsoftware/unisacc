@@ -62,7 +62,12 @@ def install(E,P,b,integers):
     P('LV.nativesupport').a(('LDX','lv_supported','li_i',SUPPORTED)).branch({1:'LV.native'},'LI.fail',[('CMPI','lv_supported',1)])
     p=blob(P('LV.redirect'),'li_name').o(':\n  jump ')
     blob(p.a(('LDX','lv_realname','li_i',IMPORTNAMES)),'lv_realname').o('\n').goto('LV.next')
-    P('LV.native').a(('LDX','lx_sig','li_id',b['FPS_FN']),('LDX','lx_nameblob','li_i',IMPORTNAMES)).call('LX.signature').a(('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',libraryimports.TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).call('MG.equal').branch({1:'LV.signature'},'LI.fail',[('CMPI','mg_equal',1)])
+    P('LV.native').a(('LDX','lx_sig','li_id',b['FPS_FN']),('LDX','lx_nameblob','li_i',IMPORTNAMES)).call('LX.signature').a(('COPYW','mg_left_blob','lx_sigblob'),('BLEN','mg_left_len','lx_sigblob'),('LDX','mg_right_blob','li_i',libraryimports.TYPEDSIG),('BLEN','mg_right_len','mg_right_blob')).branch({3:'LV.nativecompatible'},'LV.nativeequal',[('RLD','lx_wireversion')])
+    # V2 keeps strict equality; V3 source (origin1) against an external typed
+    # import (origin2) is judged by MG.compatible, the same authority as fixed
+    # imports. The host never compares origins; nativeabi certifies each site.
+    P('LV.nativeequal').call('MG.equal').branch({1:'LV.signature'},'LI.fail',[('CMPI','mg_equal',1)])
+    P('LV.nativecompatible').call('MG.compatible').branch({1:'LV.signature'},'LI.fail',[('CMPI','mg_equal',1)])
     p=P('LV.signature').a(('LDX','lv_total','lv_iter',COUNT),('LDX','lv_fixed','lx_sig',b['FPS_COUNT']),('LDI','lx_supported',1),('LDI','lx_recursion',0),('LDI','lx_nodes',0),('OCUT','lv_old','lx_zero')).call('LX.support').call('LCG.begin').call('LX.magic').a(('LDI','lx_v',1)).call('LX.u64').a(('LDX','lv_realname','li_i',IMPORTNAMES),('BLEN','lx_v','lv_realname')).call('LX.u64')
     blob(p,'lv_realname').a(('OUTW','lx_zero'),('LDI','lv_one',1),('OUTW','lv_one'),('OUTW','lx_zero'),('OUTW','lv_one'))
     u(p,'lv_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_rank','lx_sig',RETURNRANK),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
