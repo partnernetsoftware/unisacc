@@ -132,7 +132,7 @@ def aapcs64(params, result, profile):
                 src = (SCR, scr); scr += roundup(t.size, 16); words = 1; w0 = 8
             else:
                 src = (BYTES, 0); words = (t.size + 7) // 8; w0 = None
-            if t.align == 16 and words == 2: ngrn = roundup(ngrn, 2)
+            if t.align == 16: refuse('16-aligned composite: Apple arm64 passes it by reference where AAPCS64 says an even register pair (probe pending, 0.0.13)')
             if ngrn + words <= 8:
                 for j in range(words):
                     moves.append(Move(p, src[0], src[1] + 8 * j, GP, ngrn + j, w0 or min(8, t.size - 8 * j)))
@@ -210,13 +210,13 @@ def selftest():
     assert kinds[6:8] == [(FPLO, 6), (FPLO, 7)] and kinds[8:11] == [(STACK, 0), (STACK, 8), (STACK, 16)] and kinds[11] == (STACK, 24), describe(a)
     assert a['flags'] & 1 and a['hidden'] == 8 and a['fp'] == 8, a
     out['C-aapcs-hfa'] = describe(a)
-    rec, a = plan('lnx/arm64', [I(8)] * 7 + [AGG(16, 16, lanes=[]), AGG(40, 8)], I(8), b'protoD')
+    rec, a = plan('lnx/arm64', [I(8)] * 7 + [AGG(16, 8), AGG(40, 8)], I(8), b'protoD')
     kinds = [(m.dst_kind, m.dst_index) for m in a['moves']]
     assert kinds[7:9] == [(STACK, 0), (STACK, 8)] and kinds[9:14] == [(SCRATCH, 0), (SCRATCH, 8), (SCRATCH, 16), (SCRATCH, 24), (SCRATCH, 32)] and kinds[14] == (STACK, 16), describe(a)
-    out['D-aapcs-align16-byref'] = describe(a)
+    out['D-aapcs-spill-byref'] = describe(a)
     # refusals
     for prof, ps, why in (('lnx/x86_64', [F(16)], 'x87/IEEE128'), ('osx/arm64', [I(8)] * 8 + [I(2)], 'Apple sub-8 stack scalar'),
-                          ('win/x86_64', [I(8)], 'Windows'), ('lnx/x86_64', [AGG(80, 8, memory=True)], 'extent')):
+                          ('win/x86_64', [I(8)], 'Windows'), ('lnx/x86_64', [AGG(80, 8, memory=True)], 'extent'), ('osx/arm64', [AGG(16, 16)], '16-aligned composite')):
         try: plan(prof, ps, I(4), b'x'); raise AssertionError('accepted ' + why)
         except RuntimeError as e: out['refuse-' + why] = str(e)
     # record framing round trip

@@ -113,7 +113,24 @@ jobs:
           print(provenance.source_digest())
           PY
           )
-          [ "$have" = "${{ steps.seal.outputs.src }}" ] || { echo "release/candidate.json names sources_sha256 $have != sealed ${{ steps.seal.outputs.src }}: reseal the candidate" >&2; exit 1; }
+          if [ "$have" != "${{ steps.seal.outputs.src }}" ]; then
+            echo "release/candidate.json names sources_sha256 $have != sealed ${{ steps.seal.outputs.src }}: reseal the candidate" >&2
+            python - <<'PY' > closure-listing.txt
+          import sys, pathlib, hashlib; sys.path.insert(0,'exec/pipeline'); import models
+          ROOT=pathlib.Path('.').resolve()
+          for d in ('exec','unisa','src','kernel','include','weights'):
+              for p in sorted((ROOT/d).rglob('*'), key=lambda q: q.relative_to(ROOT).parts):
+                  if p.relative_to(ROOT).parts[:2]==('exec','build'): continue
+                  if p.is_file() and p.suffix in ('.py','.c','.h','.inc','.tsv','.json','.sh'): print(p.relative_to(ROOT).as_posix(), models.digest(p))
+          PY
+            echo "closure_mismatch=true" >> "$GITHUB_OUTPUT"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: closure-listing-${{ matrix.target == 'win/x86_64' && 'win-x86_64' || matrix.target == 'win/arm64' && 'win-arm64' || matrix.target == 'lnx/x86_64' && 'lnx-x86_64' || matrix.target == 'lnx/arm64' && 'lnx-arm64' || matrix.target == 'osx/arm64' && 'osx-arm64' || 'osx-x86_64' }}
+          path: closure-listing.txt
+          if-no-files-found: ignore
       - uses: oras-project/setup-oras@v1
         if: steps.seal.outputs.present == 'true'
       - name: pull the exact candidate bytes by digest

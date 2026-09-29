@@ -8,7 +8,7 @@
 #include <stdlib.h>
 
 typedef struct { uint64_t gp[8]; unsigned char fp[8][16]; uint64_t hidden; uint64_t stack_bytes; unsigned char *stack_image;
-                 uint64_t al; uint64_t rax, rdx; unsigned char xmm0[16], xmm1[16]; } us_bank_frame;
+                 uint64_t al; uint64_t rax, rdx; unsigned char xmm0[16], xmm1[16], v2[16], v3[16]; } us_bank_frame;   /* v2/v3: AAPCS64 HFA results */
 typedef struct { const unsigned char *rec; uint32_t length; uint32_t proto_len; unsigned params, gp_used, fp_used, al, moves, results, hidden, profile, flags;
                  unsigned stack_bytes, scratch_bytes; const unsigned char *move, *result; } us_bank_plan;
 
@@ -33,7 +33,7 @@ static int us_bank_plan_load(us_bank_plan *p,const unsigned char *rec,size_t n){
     for(unsigned i=0;i<p->moves;i++){
         const unsigned char *m=p->move+8*i;unsigned param=m[0],sk=m[1],dk=m[4],w=m[6];
         int pow2=(w==1||w==2||w==4||w==8||w==16);
-        if(param>=p->params||sk>2||dk>4||w==0||w>16||(dk<3&&!pow2))return 10;   /* memory copies may carry a byte tail (e.g. 5 of a MEMORY object) */
+        if(param>=p->params||sk>2||dk>4||w==0||w>16||(dk==0&&w>8)||((dk==1||dk==2)&&!pow2))return 10;   /* GP takes any 1..8 bytes (AAPCS64 small composites), FP lanes are 4/8/16 */
         if(dk==0){if(m[5]>=p->gp_used||w>8||m[7]>1)return 11;for(unsigned b=0;b<w;b++){if(gpmask[m[5]][b]++)return 12;}}
         else if(dk==1||dk==2){if(m[5]>=p->fp_used||(dk==2&&w>8))return 13;unsigned base=dk==2?8:0;for(unsigned b=0;b<w;b++){if(fpmask[m[5]][base+b]++)return 14;}}
         else{unsigned off=m[5]|(unsigned)m[7]<<8,lim=dk==3?p->stack_bytes:p->scratch_bytes;
@@ -79,7 +79,7 @@ static int us_bank_plan_apply(const us_bank_plan *p,const uint64_t *slots,const 
 
 static void us_bank_plan_capture(const us_bank_plan *p,const us_bank_frame *f,void *out){
     for(unsigned i=0;i<p->results;i++){const unsigned char *r=p->result+4*i;unsigned src=r[0],w=r[1],off=us_bp_u16(r+2);
-        const void *from=src==0?(const void*)&f->rax:src==1?(const void*)&f->rdx:src==2?(const void*)f->xmm0:(const void*)f->xmm1;
+        const void *from=src==0?(const void*)&f->rax:src==1?(const void*)&f->rdx:src==2?(const void*)f->xmm0:src==3?(const void*)f->xmm1:src==4?(const void*)f->v2:(const void*)f->v3;
         memcpy((unsigned char*)out+off,from,w);}
 }
 #endif
