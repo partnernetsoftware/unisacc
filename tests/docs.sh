@@ -62,4 +62,27 @@ if [ "$num_rc" -eq 0 ]; then
     done
 fi
 echo "docs  state numbers $([ "$num_rc" -eq 0 ] && echo ok || echo STALE)"
-[ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ] && [ "$num_rc" -eq 0 ]
+# README carries a known-limitations table, and it names the private calling
+# convention.  The external trial of 0.0.12 reported that the limitations it
+# hit were documented nowhere; a table that exists but goes empty, or loses the
+# calling-convention row while W-16 still describes one, would put that back.
+lim_rc=0
+if ! grep -q "^## Known limitations" README.md; then
+    echo "README: no '## Known limitations' section" >&2; lim_rc=1
+elif ! grep -q "Private calling convention" README.md; then
+    echo "README: the limitations table does not name the private calling convention" >&2; lim_rc=1
+fi
+# ...and the calling convention must not be attributed to W-13 anywhere: W-13
+# is "startup initialisation of global pointers", W-16 is the convention.
+# A wrong clause number sends a reader to a clause that says something else.
+# Both spellings, and anywhere on the line: the README table is in English
+# ("calling convention") while prd.md is in Chinese ("调用约定").  Two rounds
+# of mutation testing were needed to get here -- the first version matched only
+# the Chinese spelling, the second used `[^|]*` between the two, which cannot
+# cross the `|` that separates the table's cells, so changing README's
+# `prd W-16` to `prd W-13` left the suite green both times.
+if grep -rnE "(调用约定|calling convention).*W-13|W-13.*(调用约定|calling convention)" README.md prd.md ARCHITECTURE.md exec/README.md 2>/dev/null | grep -q .; then
+    echo "a document still attributes the calling convention to W-13 (it is W-16)" >&2; lim_rc=1
+fi
+echo "docs  README limitations $([ "$lim_rc" -eq 0 ] && echo ok || echo MISSING)"
+[ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ] && [ "$num_rc" -eq 0 ] && [ "$lim_rc" -eq 0 ]

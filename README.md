@@ -317,3 +317,27 @@ whole-stage networks and their limits are documented in
 is distinct from C semantics, stage compatibility, platform execution and
 package/container self-construction. Classical no-Python self-hosting and
 fixed-package model-driver self-hosting retain their separate evidence scopes.
+
+## Known limitations
+
+What this compiler does not do, so a reader does not have to find out by
+experiment.  Every line was measured against the shipped `unisacc.com`, and the
+reproduction is one short program.  The table exists because an external trial
+of 0.0.12 reported time lost on exactly these, documented nowhere.
+
+| Limitation | What happens | Reproduce |
+|---|---|---|
+| No `__LINE__` / `__FILE__` | `error: unknown identifier` at the use site.  `#include` is spliced inline without line markers, so a naive expansion would be wrong after the first header -- but the diagnostic engine does track the user's line, so "the information is unavailable" is not the reason | `int main(void){return __LINE__;}` |
+| `long double` is `double` | `sizeof(long double) == 8`; no extended precision | `printf("%d", (int)sizeof(long double))` |
+| No `offsetof` | `error: this is not the start of an expression` -- the macro is absent and the built-in form is not accepted | `#include <stddef.h>` then `offsetof(struct S,b)` |
+| `stdin` is `((FILE *)0)` | `stdin == 0` is 1, so `FILE *in = argv[1] ? fopen(argv[1],"r") : stdin; if (!in) ...` reads the stdin path as a failure; fd 0 gets no sentinel | `printf("%d", stdin == 0)` |
+| Private calling convention between generated code | Not SysV / AAPCS64: arguments are pushed on the tape stack left to right, `r9` is the frame pointer, the result is in `rax`, the caller pops.  **Unstable** -- it follows the regmap and abi tables and external code must not rely on it.  Interop with outside code goes through libunisacc's carriers, not through this convention.  [prd W-16](prd.md) | `examples/apps/xgui.c` writes a raw syscall stub by hand and must save `r9`, `rcx` and `r11`, because `r9` doubles as syscall argument 6 and `syscall` clobbers `rcx`/`r11` |
+| libffi interop is macOS-only | `include/unisacc_ffi.h` opens `/usr/lib/libffi.dylib` with no platform branch, so the FFI path is unavailable on Linux and Windows.  The bridge exists; the hard-coded path is what is missing | any FFI call on Linux |
+| Missing C library surface | No `setjmp.h`, `regex.h`, `termios.h`, `locale.h`, `strings.h`, `unistd.h`, `fcntl.h`, `sys/stat.h`.  Missing functions include `memchr` `strspn` `strpbrk` `strcspn` `strcoll`, `strtoll` `strtoull` `atoll`, `feof` `ferror` `ungetc` `clearerr` `setvbuf` `tmpfile` `vprintf`.  `errno.h` and `time.h` exist but are partial: several `errno` codes and `time()` itself are absent | plan item N14 carries the list |
+
+Two things that look like limitations and are not.  `-ftrim-libc` is on by
+default and keeps library bodies only when a program reaches them by identifier
+closure, so a symbol reached solely through a bundled header's macro expansion
+can be reported undefined ([R13-0 #03](tests/difftest.com.knownfail)).  And the
+model compiler refuses to compile rather than falling back to the classic path,
+by design.
