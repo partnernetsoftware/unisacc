@@ -387,25 +387,25 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 下面从 `research/model-bytes.json` 生成，按实际封存 `.com` 计。只对阶段/模式作可证的功能归属，不把跨阶段动作任意分摊成“指针占多少字节”。
 
 <!-- model-bytes:begin -->
-快照 SHA-256：`58bb6ee2fad605c54b067ab82088f502a346e8bd9126e84cd444d7c9794ae732`；总计 **1,150,785 B**。
+快照 SHA-256：`112f58e78c12494e8c4a4a77c3736befe9007982398031fa23b28ec5af6fda30`；总计 **1,151,061 B**。
 
 | 物理内容 | 字节 | 占整个 .com |
 |---|---:|---:|
-| 24 个共享网络体 | 697,803 | 60.64% |
-| 平台驱动、APE 启动/加载与对齐（混合账） | 250,736 | 21.79% |
+| 24 个共享网络体 | 698,078 | 60.65% |
+| 平台驱动、APE 启动/加载与对齐（混合账） | 250,736 | 21.78% |
 | 21 份 C 头文件/库实现源码 | 123,856 | 10.76% |
 | 两 ISA 通用推理执行核资源 | 15,520 | 1.35% |
 | 目标预定义宏声明资源 | 321 | 0.03% |
-| 目录、记录头与资源键 | 62,533 | 5.43% |
+| 目录、记录头与资源键 | 62,534 | 5.43% |
 | 尾部 | 16 | 0.00% |
 
 | 模型阶段 / 具体功能 | 物理模型数 | 模型体 B | 占 .com | 阶段行引用数 |
 |---|---:|---:|---:|---:|
 | `e2`：预处理、目标预定义宏与位置模式 | 2 | 49,196 | 4.27% | 126 |
 | `e1`：词法与 token/位置输出 | 1 | 27,764 | 2.41% | 120 |
-| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 280,927 | 24.41% | 216 |
+| `e3`：解析、类型/作用域、tape、错误与警告 | 2 | 281,114 | 24.42% | 216 |
 | `e4`：O1/O2 优化 | 2 | 14,404 | 1.25% | 144 |
-| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 15,592 | 1.35% | 6 |
+| `nativeabi`：宿主ABI carrier认证（原始类型图→目标载体证书） | 1 | 15,680 | 1.36% | 6 |
 | `prune`：函数可达闭包与保守原文剪枝（数据/地址根保留） | 1 | 9,045 | 0.79% | 144 |
 | `lower`：ABI、调用、目标指令 lowering 与数据布局 | 6 | 132,468 | 11.51% | 144 |
 | `elf`：目标指令编码及 ELF/Mach-O/PE 镜像写出 | 6 | 118,347 | 10.28% | 78 |
@@ -417,11 +417,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 | 网络记录 / 含义 | 字节 | 占整个 .com |
 |---|---:|---:|
-| `H`：阈值/选择网络参数记录 | 979,228 | 85.09% |
-| `Q`：动作序列声明（包含编译模板动作） | 951,963 | 82.72% |
+| `H`：阈值/选择网络参数记录 | 979,696 | 85.11% |
+| `Q`：动作序列声明（包含编译模板动作） | 952,066 | 82.71% |
 | `S`：字节字符串声明 | 18,805 | 1.63% |
 | `N`：网络头记录 | 485 | 0.04% |
-| `C`：动作序列共享前缀声明 | 453,281 | 39.39% |
+| `C`：动作序列共享前缀声明 | 453,371 | 39.39% |
 <!-- model-bytes:end -->
 
 两个 e3 分别是错误与错误+告警变体；十二个 e2 是六目标的普通/位置变体。33 个共享物理模型被 1,082 条阶段行引用，引用次数不是物理份数。压缩前 Q/C 是动作与共享声明，H 是阈值/选择参数；三个数字不与压缩模型体相加。21 份头/库源码与两 ISA 核资源另计；混合平台驱动缺独立 link-map，不虚构其 libc/启动/OS 子项比例。当前产物1,233,236 B（包985,172 B）相对已发布v0.0.8的5,388,402 B小约77.11%，签名后字节变化另记。
@@ -3066,3 +3066,6 @@ R10 natural16根候选已同步：源bbe5691，unisacc.com **1,116,367 B / SHA25
 **R10 跨来源声明兼容决定（2026-09-29）**：保留MG.equal及宿主图身份比较为严格相等；另设模型MG.compatible用于源码声明与已注册typed import。全部版本/类型/秩与格式/自然及有效对齐/packing facts/成员顺序与bit interval/数组/嵌套callback模式须相同；仅origin1与origin2、且两节点known3的差异可兼容，不允许origin0或跨wire版本升级。认证仍由nativeabi独立执行，执行器与宿主不新增ABI判断。先复现公开自然位域source→typed native→source往返，再验证属性与图错误拒绝；函数指针及callback的cross-origin handle身份另沿显式模型证书处理，不以固定直调通过替代完整imports目标。
 
 **R10 跨来源fixed imports私有实测**：旧根P3公开B4/B8/DB16注册成功但source-origin1对external-origin2在E3拒绝，红例已永久保留。新增MG.compatible复用严格比较/index/traversal，仅完整known3的origin1↔2可兼容；MG.equal每次重置模式。90独立wire/sim/C检查、5交错equal/compatible/strict操作及154,544观察全域net=table通过；旧SIG3 equality94项和旧carrier import模型通过。私有P2仅替换quiet E3：两macOS ISA各O0/O1/O2×100×3实际fixed import调用ASan/UBSan通过，bit-width mismatch与unknown-source均拒绝；宿主不增加ABI或compatibility判断，不改origin。原根仍3de360c候选，正式P3重构造待执行。函数地址/callback要以MODEL selected-import配对记录建立source-original别名计划，保留external frozen原计划和host strict identity；V3variadic仍待，不能把fixed直调片称完整imports。
+
+
+**R10 跨来源fixed imports正式P3回执（2026-09-29）**：源码ed86747，shared/六target/pack各有界完成；根.com已替换为 **1,151,061 B / SHA256 `112f58e78c12494e8c4a4a77c3736befe9007982398031fa23b28ec5af6fda30`**（较前根+276B），来源与字节账同步。24部署网络全部全域net=table且与解包模型内容集相同；正式P3公开源码→external V3自然位域fixed imports在ARM及qualified libffi3.5.2 Rosetta x86各900次实际调用ASan/UBSan通过，field-width mismatch与unknown源码布局拒绝。候选两批12项受影响门禁rc0（52s/22s）：chain167/167、C9957/57、run12/0、优化差分37×3=111agree/0wrong/0refuse、kernel59/0stale，旧V2 typed与callback往返保留。calc.c五次新进程-O2镜像构建中位428.22→425.69ms，全部输出与私有参考逐字节同；非-run或六平台性能证明。证据 `research/r10-source-import-candidate-evidence.json` 及source-import系列。MG.equal与宿主identity仍严格，仅模型MG.compatible允许完整known3的origin1↔2声明关系；函数地址/递归callback的显式配对证书、V3variadic、packed/宽FP/general BANK、完整六平台ABI与企业发布仍未完成，完整R10继续。
