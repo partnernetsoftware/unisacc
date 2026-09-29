@@ -148,7 +148,7 @@ static int us_export_descriptor_version(const unsigned char *b,size_t len,size_t
     }
     if(*at>=len)return 1;
     t->tag=b[(*at)++];
-    if(t->kind>6 || t->uns>1 || t->width>16777216 || t->tag>4 ||
+    if(t->kind>6 || t->uns>1 || t->width>16777216 || t->tag>5 || (t->tag==5 && version!=3) ||
        us_export_u64(b,len,at,&payload)||payload>16777216||payload>len-*at)return 1;
     end=*at+(size_t)payload;
     if(t->kind==0 || t->kind==6){if(t->width || t->alignment)return 1;}

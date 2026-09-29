@@ -219,6 +219,10 @@ static int us_callable_pair_type(us_callable_pair_check *c,const us_export_type 
     if(!a||!b||depth>32||++c->nodes>16384||a->width!=b->width||a->alignment!=b->alignment||a->width>16777216)return 0;
     if(a->kind==4||b->kind==4)return a->kind==4&&b->kind==4&&a->depth==1&&b->depth==1&&a->width==8&&a->alignment==8&&a->tag==4&&b->tag==4&&
         !a->nmembers&&!b->nmembers&&!a->element&&!b->element&&us_callable_pair_add(c,a->signature,b->signature);
+    /* A V3 original pointer may spell its pointee (tag 5); the carrier pointer is
+       opaque. Pairing is pointer-shape only; identity between originals stays strict. */
+    if(a->kind==2||b->kind==2)return a->kind==2&&b->kind==2&&a->depth==b->depth&&a->depth&&a->width==8&&a->alignment==8&&
+        !a->nmembers&&!b->nmembers&&!a->element&&!b->element&&!a->signature&&!b->signature&&!b->pointee;
     if(a->kind!=5)return us_native_type_equal(a,b);
     if(a->depth||!a->width||!a->alignment||(a->alignment&(a->alignment-1)))return 0;
     if(a->tag==2 || (a->wire_version==3&&!us_export_type_has_callback(a))){size_t nodes=0;return us_callable_opaque_safe(a,0,&nodes)&&us_callable_opaque_safe(b,0,&nodes);}
