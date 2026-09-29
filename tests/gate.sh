@@ -157,8 +157,17 @@ job exec-core ./exec/c/corecheck.sh     # isolated generic kernel, external link
 job exec-asm ./exec/c/asmcheck.sh       # complete assembly execution kernel
 if [ "$(uname -s)" = Darwin ]; then
     job exec-asmx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asmcheck.sh
-    job exec-bindarm env CORE_ASM_ARCH=arm64 ./exec/c/asm/bindingcheck.sh
-    job exec-bindx86 env CORE_ASM_ARCH=x86_64 ./exec/c/asm/bindingcheck.sh
+    # The binding check was one job per arch and measured 61 s warm, past the
+    # 60 s watchdog -- it was killed with rc=142 before any assert ran.  A warm
+    # trace split it prep 7 s / asserts 11 s, with the cold first run at 54 s
+    # because the model cache (models.py:61, content-addressed) is empty then.
+    # Two jobs per arch keep the warm path far inside the bound and let the
+    # cold path finish; self-prepare on a missing artefact keeps the pair
+    # order-independent when a queue runs them out of order.
+    for a in arm64 x86_64; do
+        job exec-bindprep-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindprep.sh
+        job exec-bindverify-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindverify.sh
+    done
     job exec-container ./exec/c/containercheck.sh
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
