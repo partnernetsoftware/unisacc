@@ -227,6 +227,9 @@
 | 0.0.10 发布复盘 | 发布链中每次 workflow 修正都需重过上游 run：把 windows-signing 的 qualification 做成可本地演练的脚本（gh api 只读 + 本地断言），减少云端试错 | 登记 |
 | 0.0.10 发布复盘 | term.sh 每次交接留一个 Terminal 窗口，累计上千后 osascript 超时；应让 run.sh 在结束时关闭自身窗口，或改用无窗口的 XProtect 豁免通道 | 登记 |
 | 0.0.10 发布复盘 | gatequeue 的 stamp 含全部环境变量与所有被声明文件；一次误触即清空结果。评估“按 job 依赖失效 + 环境白名单”的更细粒度 stamp | 登记 |
+| R11-0 ③ 复盘 | 独立 oracle 里的“必拒”夹具会把旧规则固化（rank3/format2 曾列为全 profile 拒绝，切片 ③ 改为按 profile 后队列红一项）。规则按 profile/来源分叉时，先把每个独立 oracle 的拒绝清单改成分叉期望，再进队列 | 登记 |
+| R11-0 ④ 复盘 | TCC 表显示 Terminal→UTM 的 AppleEvents 已授权（auth 2，2026-09-05），被拒的是非 Terminal 责任进程（hermes venv python，auth 0）。此前把 utmctl -10004 归因于“无授权”不准确：Windows nativeboot 的通道问题要按责任进程重查，而不是再申请授权 | 登记 |
+| R11-0 ④ 顺延 | packed 剩余域：SysV 的 packed（非对齐字段为 MEMORY 类，需 BANK 载体）；packed 内 FP 叶（AAPCS64 HFA 判定与 pack 的关系待实测）；降对齐的位域成员；Win64 packed 的原生实测（模型/oracle 已覆盖，未在客机跑）；源码 `#pragma pack`（origin1）继续拒绝直到源码事实链能表达有效对齐 | 登记 |
 
 ### v0.1.x 路线（草案，2026-09-28 调整；2026-09-29 主人要求：其中工程型条目已提前到 v0.0.12 计划，此处保留证明型条目——T2、P-2 全走查器、T3 机器证明、.o、wasm）
 
