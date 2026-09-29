@@ -37,7 +37,7 @@ SYSCALLS = ([(name, op, 3) for name, op in INTRINSIC.items()]
 
 O, TK, TK_ID, TK_NUM, LOC = E.O, E.TK, E.TK_ID, E.TK_NUM, E.LOC
 VLSIZE, VLFRAME, VLDEP = 52 << 40, 53 << 40, 54 << 40
-UNDO_SIZE = 41
+UNDO_SIZE = 43
 FPS_FIRST = 128  # disjoint primitive/signature/structure base-code ranges
 FPS_RD, FPS_RB, FPS_VAR, FPS_PARAM, FPS_RSH, FPS_FN, FPS_COUNT, FPS_PSH = (i << 40 for i in range(55, 63))
 # Shared rule/control entry points (reuse before adding a new state cluster):
@@ -53,6 +53,12 @@ DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges tw
 
 
 class P(E.P):
+    def vpush(self,*items):
+        from valueranks import slots
+        return super().vpush(*slots(items))
+    def vpop(self,*items):
+        from valueranks import slots
+        return super().vpop(*slots(items))
     def __init__(self, name):
         DEFS[name, "P"] = DEFS.get((name, "P"), 0) + 1
         super().__init__(name)
@@ -669,7 +675,8 @@ def build(locations=False, warnings=False, errors=False):
     # Scope record fields are declared once; bind/unwind share their layout bindings.
     scope_bindings = {name: getattr(E, name) for name in
                       ("UNDO", "PTR", "BASE", "ARR", "TDN", "TDB", "TDD", "FND", "FRD", "FRB", "VAR")}
-    scope_bindings.update(LOC=LOC, END_=END_, ENV=ENV, VLSIZE=VLSIZE, UNDO_SIZE=UNDO_SIZE, SHAPE=SHAPE, TDE=TDE)
+    from valueranks import VALUEBANK
+    scope_bindings.update(VALUEBANK=VALUEBANK, TYPERANK=TYPERANK, LOC=LOC, END_=END_, ENV=ENV, VLSIZE=VLSIZE, UNDO_SIZE=UNDO_SIZE, SHAPE=SHAPE, TDE=TDE)
     for name, base, size in (("UNDO", E.UNDO, UNDO_SIZE), ("DIM", DIM, 8), ("PDB", PDB, 16)):
         scope_bindings.update((name + "_" + str(i), base + i) for i in range(size))
     scope_sequences = {name: row[0][1] for name, row in load_rules(
@@ -875,6 +882,8 @@ def build(locations=False, warnings=False, errors=False):
     from layoutfacts import install as layoutfacts_install
     start = layoutfacts_install(E, P, {name: globals()[name] for name in
         ('SBB','MBS','MPT','MAR','MOF','BFW','MSZ','BFO','BFS','SHAPE_IDS','SHAPE')}, start)
+    from valueranks import install as valueranks_install
+    valueranks_install(E,P,dict(FPS_FN=FPS_FN,FPS_RB=FPS_RB,MBS=MBS,DBL=DBL,FLT=FLT))
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

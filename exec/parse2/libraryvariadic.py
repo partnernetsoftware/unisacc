@@ -4,6 +4,7 @@ The host receives only final length-framed declarations; no source decisions.
 SITEFN,SITEBIND,COUNT,DEPTH,BASE,SHAPE,NAMES,REQUESTS=(i<<40 for i in range(400,408))
 def install(E,P,b,integers):
     from libraryexports import RETURNRANK, PARAMRANK
+    from valueranks import LVSITERANK
     from libraryimports import BYNAME,FORMAT,IDS,PLAN,DISPATCH,CANON,RETKIND,RETWIDTH,SUPPORTED,NAMES as IMPORTNAMES
     from unresolved import DEFINED
     from libraryexports import SIGEPOCH
@@ -36,9 +37,9 @@ def install(E,P,b,integers):
     i32=next(code for name,code,_,_,_ in integers if name=='i32')
     # CL.default already emitted TO.d, which preserves its input descriptor.
     # Capture the effective double kind without converting those bits twice.
-    P('LV.promotefloat').a(('LDI','vb',b['DBL']),('LDI','type_shape',0)).goto('LV.argstore')
+    P('LV.promotefloat').a(('LDI','vb',b['DBL']),('LDI','value_rank',2),('LDI','type_shape',0)).goto('LV.argstore')
     P('LV.promoteint').a(('LDI','vb',i32),('LDI','type_shape',0)).goto('LV.argstore')
-    P('LV.argstore').a(('ALUI','mul','lv_index','lv_site',1024),('ALU','add','lv_index','lv_index','na'),('STX','lv_index',DEPTH,'vt'),('STX','lv_index',BASE,'vb'),('STX','lv_index',SHAPE,'type_shape')).ret()
+    P('LV.argstore').a(('ALUI','mul','lv_index','lv_site',1024),('ALU','add','lv_index','lv_index','na'),('STX','lv_index',DEPTH,'vt'),('STX','lv_index',BASE,'vb'),('STX','lv_index',LVSITERANK,'value_rank'),('STX','lv_index',SHAPE,'type_shape')).ret()
     hook('CL.done','LV.complete')
     P('LV.complete').branch({1:'RET'},'LV.completecount',[('CMPI','lv_site',0)])
     P('LV.completecount').a(('LDX','lv_sig','fid',b['FPS_FN']),('LDX','lv_fixed','lv_sig',b['FPS_COUNT'])).branch({0:'LI.fail'},'LV.completeput',[('CMP','na','lv_fixed')])
@@ -67,7 +68,7 @@ def install(E,P,b,integers):
     u(p,'lv_total').a(('LDX','lx_depth','lx_sig',b['FPS_RD']),('LDX','lx_base','lx_sig',b['FPS_RB']),('LDX','lx_rank','lx_sig',RETURNRANK),('LDX','lx_shape','lx_sig',b['FPS_RSH']),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0),('LDI','lx_return',1)).call('LX.descriptor')
     u(p,'lv_total').a(('LDI','lv_arg',0),('LDI','lx_return',0)).goto('LV.sigarg')
     P('LV.sigarg').branch({1:'LV.sigend'},'LV.sigargout',[('CMP','lv_arg','lv_total')])
-    P('LV.sigargout').a(('ALUI','mul','lv_index','lv_iter',1024),('ALU','add','lv_index','lv_index','lv_arg'),('LDX','lx_depth','lv_index',DEPTH),('LDX','lx_base','lv_index',BASE),('LDI','lx_rank',0),('LDX','lx_shape','lv_index',SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lv_arg','lv_arg',1)).goto('LV.sigarg')
+    P('LV.sigargout').a(('ALUI','mul','lv_index','lv_iter',1024),('ALU','add','lv_index','lv_index','lv_arg'),('LDX','lx_depth','lv_index',DEPTH),('LDX','lx_base','lv_index',BASE),('LDX','lx_rank','lv_index',LVSITERANK),('LDX','lx_shape','lv_index',SHAPE),('LDI','lx_array',0),('LDI','lx_arraybytes',0),('LDI','lx_arraydimension',0)).call('LX.descriptor').a(('ALUI','add','lv_arg','lv_arg',1)).goto('LV.sigarg')
     P('LV.sigend').a(('OUTW','lx_supported')).branch({1:'LV.request'},'LI.fail',[('CMPI','lx_supported',1)])
     p=P('LV.request').a(('OCUT','lv_signature','lx_zero'),('BLEN','lv_siglen','lv_signature'),('ALUI','add','lx_v','lv_siglen',32)).call('LX.u64')
     u(p,'lv_iter').a(('LDX','lv_template','li_i',PLAN));u(p,'lv_template');u(p,'lv_fixed');u(p,'lv_siglen');blob(p,'lv_signature').a(('OCUT','lv_request','lx_zero'),('STX','lv_requests',REQUESTS,'lv_request'),('ALUI','add','lv_requests','lv_requests',1));blob(p,'lv_old').a(('LDX','li_name','lv_iter',NAMES),('LDX','li_argc','lv_iter',COUNT),('LDX','li_retclass','li_i',RETKIND),('LDX','li_retwidth','li_i',RETWIDTH),('LDI','li_sourcemode',1)).goto('LI.typedemit')
