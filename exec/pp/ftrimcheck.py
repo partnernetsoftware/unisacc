@@ -12,7 +12,7 @@ sys.path[:0]=[str(ROOT/'exec/pp'),str(ROOT/'exec/c')]
 from gen import predefine_resources
 from pack import build as package
 
-def check(run,net,ua,out):
+def check(run,net,ua,out,targets=()):
     out.mkdir(parents=True,exist_ok=True)
     res=out/'resources';res.mkdir(exist_ok=True)
     for k,v in predefine_resources().items():
@@ -27,7 +27,8 @@ def check(run,net,ua,out):
         assert r.returncode==0,(args,r.returncode,r.stderr[:300])
         return r.stdout
     records=[]
-    for target in ('lnx/arm64','lnx/x86_64','osx/arm64','osx/x86_64','win/arm64','win/x86_64'):
+    # E2 is target-bound at construction (gen.py OUT target): compare only the net's own target.
+    for target in (targets if targets else ('lnx/x86_64',)):
         sel.write_bytes(target.encode())
         for on in (False,True):
             if not on:flag.write_bytes(b'1')
@@ -42,10 +43,11 @@ def check(run,net,ua,out):
                 assert model==classic,(target,on,name,'E2 differs')
                 if on:assert call([ua,'-b',target,'-libneed','-E',source])==classic,(target,name,'alias differs')
                 records.append([target,on,name,len(model)])
-    (out/'result.json').write_text(json.dumps({'equal':records,'alias_equal':18},indent=2)+'\n')
-    print('ftrim-libc: 36 E2 outputs equal, 18 alias outputs equal')
+    (out/'result.json').write_text(json.dumps({'equal':records,'alias_equal':len(records)//2},indent=2)+'\n')
+    print('ftrim-libc: %d E2 outputs equal (%d target(s) x 2 modes x 3 probes)'%(len(records),max(1,len(targets))))
 
 if __name__=='__main__':
     ap=argparse.ArgumentParser(description=__doc__)
     for name in ('run','net','ua','output'):ap.add_argument('--'+name,type=lambda p:Path(p).resolve(),required=True)
-    a=ap.parse_args();check(a.run,a.net,a.ua,a.output)
+    ap.add_argument('--target',action='append',default=[],help='target the E2 net was constructed for (repeatable); default lnx/x86_64')
+    a=ap.parse_args();check(a.run,a.net,a.ua,a.output,tuple(a.target))
