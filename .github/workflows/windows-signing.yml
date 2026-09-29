@@ -75,11 +75,26 @@ jobs:
           assert call('git','rev-parse','HEAD').strip()==sha, 'checkout mismatch'
           # Product source closure, not raw HEAD equality (minicon rule): documentation and
           # workflow commits after the seal must not force a rebuild or a re-sign.
-          import sys; sys.path.insert(0,'exec/c'); import provenance
-          sealed_closure=provenance.source_digest()
+          # Same inventory as exec/pipeline/models.py:closure (that module imports fcntl, so it
+          # cannot run on this Windows runner); both trees are digested here with one function.
+          def closure_digest(root):
+              root=Path(root); h=hashlib.sha256()
+              files=[]
+              for d in ('exec','unisa','src','kernel','include','weights'):
+                  for q in sorted((root/d).rglob('*')):
+                      rel=q.relative_to(root).as_posix()
+                      if rel.startswith('exec/build/'): continue
+                      if q.is_file() and q.suffix in ('.py','.c','.h','.inc','.tsv','.json','.sh'): files.append((rel,q))
+              files.append(('iterate/kernel/typekw.tsv',root/'iterate/kernel/typekw.tsv'))
+              for rel,q in files:
+                  h.update(rel.encode()+b'\0'); h.update(hashlib.sha256(q.read_bytes()).digest())
+              for q in sorted((root/'exec/c/asm').glob('*.S')):
+                  h.update(q.relative_to(root).as_posix().encode()+b'\0'); h.update(hashlib.sha256(q.read_bytes()).digest())
+              return h.hexdigest()
+          sealed_closure=closure_digest('.')
           call('git','fetch','--no-tags','origin','main')
           call('git','worktree','add','--detach','../main-tip','origin/main')
-          main_closure=subprocess.run([sys.executable,'-c',"import sys; sys.path.insert(0,'exec/c'); import provenance; print(provenance.source_digest())"],cwd='../main-tip',check=True,capture_output=True,text=True,timeout=45).stdout.strip()
+          main_closure=closure_digest('../main-tip')
           assert main_closure==sealed_closure, f'main product closure {main_closure} differs from sealed {sealed_closure}; reseal'
           run=api(f"repos/{repo}/actions/runs/{env['UPSTREAM_RUN_ID']}/attempts/{env['UPSTREAM_ATTEMPT']}")
           assert run['head_sha']==sha and run['path']=='.github/workflows/release-check.yml', 'wrong upstream source/workflow (release-check.yml is the release upstream)'
