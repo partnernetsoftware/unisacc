@@ -63,7 +63,12 @@ job() {   # job NAME ENV... -- CMD...: queued, JOBS at a time
 T0=$(date +%s)
 # longest first, so the tail of the run is short
 job tools       ./tests/tools.sh
-job bigclosure  ./tests/bigclosure.sh
+job bigclosure-lnx-x86_64 ./tests/bigclosure.sh --target lnx/x86_64
+job bigclosure-lnx-arm64 ./tests/bigclosure.sh --target lnx/arm64
+job bigclosure-osx-x86_64 ./tests/bigclosure.sh --target osx/x86_64
+job bigclosure-osx-arm64 ./tests/bigclosure.sh --target osx/arm64
+job bigclosure-win-x86_64 ./tests/bigclosure.sh --target win/x86_64
+job bigclosure-win-arm64 ./tests/bigclosure.sh --target win/arm64
 job fat         ./tests/fat.sh examples/*.c tests/c/*.c
 job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done

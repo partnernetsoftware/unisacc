@@ -49,7 +49,7 @@ __write(1,src,nsrc); }
     assert source.count(anchor)==1
     source=source.replace(anchor,'    if (getenv("UA_LOCATION_MAP")) { probe_map(); return 2; }\n'+anchor)
     (t/'ref.c').write_text(source)
-    call(['cc','-w','-O1',t/'ref.c','-o',t/'ref'])
+    call(['cc','-w','-O1','-I',R/'kernel',t/'ref.c','-o',t/'ref'])
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     call([sys.executable,R/'exec/pp/gen.py',t/'pp.json','--locations'])
     call([sys.executable,R/'exec/c/tbl.py',t/'pp.json',t/'pp.tbl'])

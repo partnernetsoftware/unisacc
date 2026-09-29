@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix='lex-positions-') as td:
     assert source.count(anchor) == 1
     source = source.replace(anchor, '        if (tkind[i] == 1) { __write(1,"=",1); __write(1,src+tpos[i],tlen[i]); }\n'+anchor)
     (t/'ref.c').write_text(source)
-    call(['cc','-w','-O1',t/'ref.c','-o',t/'ref'])
+    call(['cc','-w','-O1','-I',R/'kernel',t/'ref.c','-o',t/'ref'])
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for flag,name in [('--positions','positions'),('--typed','typed')]:
         call([sys.executable,R/'exec/lex/gen.py',t/(name+'.json'),flag])
