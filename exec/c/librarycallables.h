@@ -62,7 +62,7 @@ static void us_callables_clear(us_callables *r){
     us_callable_unlock();while(r->head){us_callable *p=r->head;r->head=p->next;us_callable_free(p);}r->generation=0;
 }
 static int us_callable_export_signature(const us_export *x,us_export_signature *s){
-    if(!x||!s||x->version!=2||x->count!=x->stored||x->count>1024)return 1;
+    if(!x||!s||(x->version!=2&&x->version!=3)||x->count!=x->stored||x->count>1024)return 1;
     memset(s,0,sizeof *s);s->count=x->count;s->stored=x->stored;s->variadic=x->variadic;s->mode=x->mode;s->supported=x->supported;s->result=x->result;s->argtypes=x->argtypes;return 0;
 }
 static int us_callable_budget(const us_export_signature *s){
@@ -75,9 +75,46 @@ static void us_callable_commit_slot(const us_export_type *t,void *dest,const voi
     if(t->kind==5)memcpy(dest,value,(size_t)t->width);
     else if(t->kind){uint64_t v=0;if(t->kind==4)memcpy(&v,value,8);else v=us_export_slot(t,value);memcpy(dest,&v,8);}
 }
+static int us_callable_type_identity(const us_export_type *a,const us_export_type *b){
+    us_native_type_pair *work=calloc(16384,sizeof *work);
+    us_native_signature_pair *seen=calloc(16384,sizeof *seen);
+    size_t pending=0,visited=0,steps=0;int equal=0;
+    if(!work||!seen)goto done;
+    work[pending++]=(us_native_type_pair){a,b};
+    while(pending){
+        us_native_type_pair pair=work[--pending];a=pair.a;b=pair.b;
+        if(!a||!b||++steps>16384)goto done;
+        if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)goto done;
+        if((a->wire_version==3)!=(b->wire_version==3))goto done;
+        if(a->wire_version==3 && (a->fp_rank!=b->fp_rank||a->fp_format!=b->fp_format||
+           a->natural_alignment!=b->natural_alignment||a->layout_flags!=b->layout_flags||
+           a->layout_known_mask!=b->layout_known_mask||a->layout_origin!=b->layout_origin))goto done;
+        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL))goto done;
+        if(a->nmembers>128 || (a->nmembers && (!a->members||!b->members)))goto done;
+        if(a->element){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
+        for(size_t i=0;i<(size_t)a->nmembers;i++){
+            const us_export_member *x=a->members+i,*y=b->members+i;
+            if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||pending>=16384)goto done;
+            if(a->wire_version==3 && (x->ordinal!=y->ordinal||x->entry_kind!=y->entry_kind||x->effective_alignment!=y->effective_alignment))goto done;
+            work[pending++]=(us_native_type_pair){x->type,y->type};
+        }
+        if(a->signature){
+            const us_export_signature *x=a->signature,*y=b->signature;size_t i;
+            for(i=0;i<visited;i++)if(seen[i].a==x && seen[i].b==y)break;
+            if(i<visited)continue;
+            if(visited>=16384||x->variadic!=y->variadic||x->mode!=y->mode||x->count!=y->count||x->stored!=y->stored||x->stored!=x->count||x->count>1024||
+               (x->count && (!x->argtypes||!y->argtypes))||pending+1+x->count>16384)goto done;
+            seen[visited++]=(us_native_signature_pair){x,y};
+            work[pending++]=(us_native_type_pair){&x->result,&y->result};
+            for(i=0;i<(size_t)x->count;i++)work[pending++]=(us_native_type_pair){&x->argtypes[i],&y->argtypes[i]};
+        }
+    }
+    equal=1;
+done:free(work);free(seen);return equal;
+}
 static int us_callable_signature_equal(const us_export_signature *a,const us_export_signature *b){
     us_export_type x={0},y={0};x.kind=y.kind=4;x.depth=y.depth=1;x.width=y.width=8;x.alignment=y.alignment=8;x.tag=y.tag=4;
-    x.signature=(us_export_signature*)a;y.signature=(us_export_signature*)b;return a&&b&&us_native_type_equal(&x,&y);
+    x.signature=(us_export_signature*)a;y.signature=(us_export_signature*)b;return a&&b&&us_callable_type_identity(&x,&y);
 }
 typedef struct us_callable_clone {
     us_export_graph *graph;const us_export_signature *source[1024];size_t nodes;
@@ -88,7 +125,7 @@ static us_export_signature *us_callable_clone_signature(us_callable_clone *c,con
     size_t i=c->graph->count++;c->source[i]=s;c->graph->signatures[i]=d;return d;
 }
 static int us_callable_clone_type(us_callable_clone *c,us_export_type *d,const us_export_type *s,unsigned depth){
-    if(!s||depth>32||++c->nodes>16384||s->nmembers>64)return 1;
+    if(!s||depth>32||++c->nodes>16384||s->nmembers>128)return 1;
     *d=*s;d->members=NULL;d->element=NULL;d->elements=NULL;d->ffi=NULL;memset(&d->native,0,sizeof d->native);d->signature=NULL;
     if(s->signature){d->signature=us_callable_clone_signature(c,s->signature);if(!d->signature)return 1;}
     if(s->nmembers){if(!s->members)return 1;d->members=calloc((size_t)s->nmembers,sizeof *d->members);if(!d->members)return 1;
@@ -164,11 +201,11 @@ static int us_callable_convert(us_callables *r,const us_export_type *t,void *des
 /* Carrier certificates are supplied by the model. This layer checks storage,
    owns both graphs, and never chooses an ABI class from union members. */
 static int us_callable_opaque_safe(const us_export_type *t,unsigned depth,size_t *nodes){
-    if(!t||depth>32||++*nodes>16384||t->kind==4||t->nmembers>64||t->width>16777216)return 0;
+    if(!t||depth>32||++*nodes>16384||t->kind==4||t->nmembers>128||t->width>16777216)return 0;
     if(t->nmembers&&!t->members)return 0;
     for(size_t i=0;i<t->nmembers;i++){
         const us_export_member *m=t->members+i;
-        if(!m->type||m->offset>t->width||m->type->width>t->width-m->offset||!us_callable_opaque_safe(m->type,depth+1,nodes))return 0;
+        if(!m->type||m->offset>t->width||(m->entry_kind!=3&&m->type->width>t->width-m->offset)||!us_callable_opaque_safe(m->type,depth+1,nodes))return 0;
     }
     return !t->element||us_callable_opaque_safe(t->element,depth+1,nodes);
 }
@@ -183,7 +220,7 @@ static int us_callable_pair_type(us_callable_pair_check *c,const us_export_type 
         !a->nmembers&&!b->nmembers&&!a->element&&!b->element&&us_callable_pair_add(c,a->signature,b->signature);
     if(a->kind!=5)return us_native_type_equal(a,b);
     if(a->depth||!a->width||!a->alignment||(a->alignment&(a->alignment-1)))return 0;
-    if(a->tag==2){size_t nodes=0;return us_callable_opaque_safe(a,0,&nodes)&&us_callable_opaque_safe(b,0,&nodes);}
+    if(a->tag==2 || (a->wire_version==3&&!us_export_type_has_callback(a))){size_t nodes=0;return us_callable_opaque_safe(a,0,&nodes)&&us_callable_opaque_safe(b,0,&nodes);}
     if(b->kind!=5||b->depth||a->tag!=b->tag)return 0;
     if(a->tag==1){
         if(!a->nmembers||a->nmembers>64||a->nmembers!=b->nmembers||!a->members||!b->members)return 0;
@@ -216,7 +253,7 @@ static int us_callable_carrier_type_valid(const us_export_type *a,const us_expor
 static us_callable_conversion *us_callable_conversion_make(const us_export_type *a,const us_export_type *b,unsigned depth){
     if(depth>32)return NULL;us_callable_conversion *p=calloc(1,sizeof *p);if(!p)return NULL;p->original=a;p->carrier=b;
     if(a->kind==4)p->action=2;
-    else if(a->kind==5&&a->tag==2)p->action=1;
+    else if(a->kind==5&&(a->tag==2||(a->wire_version==3&&!us_export_type_has_callback(a))))p->action=1;
     else if(a->kind==5){p->action=3;
         if(a->tag==1){p->members=calloc(a->nmembers,sizeof *p->members);if(!p->members)goto bad;
             for(size_t i=0;i<a->nmembers;i++)if(!(p->members[i]=us_callable_conversion_make(a->members[i].type,b->members[i].type,depth+1)))goto bad;
@@ -268,7 +305,13 @@ done:
 }
 static int us_callable_make_impl(us_callables *r,unsigned origin,const us_export_signature *s,const us_export_signature *carrier,uintptr_t raw,uint64_t *handle,char *error,size_t cap){
     if(!r||!handle||!r->owner||!r->generation||!s||(origin!=US_CALLABLE_SCRIPT&&origin!=US_CALLABLE_NATIVE))return us_callable_error(error,cap,"invalid declared callable introduction");
-    *handle=0;if(carrier&&!us_callable_carrier_valid(s,carrier))return us_callable_error(error,cap,"invalid callable carrier certificate");if(!raw)return 0;
+    *handle=0;
+    if(!carrier){
+        if(s->count>1024 || (s->count&&!s->argtypes))return us_callable_error(error,cap,"invalid callable argument graph");
+        if(s->result.wire_version==3)return us_callable_error(error,cap,"V3 callable requires model carrier certificate");
+        for(size_t i=0;i<s->count;i++)if(s->argtypes[i].wire_version==3)return us_callable_error(error,cap,"V3 callable requires model carrier certificate");
+    }
+    if(carrier&&!us_callable_carrier_valid(s,carrier))return us_callable_error(error,cap,"invalid callable carrier certificate");if(!raw)return 0;
     if((origin==US_CALLABLE_SCRIPT&&!r->script_call&&!r->invoke_frame)||(origin==US_CALLABLE_NATIVE&&!r->native_call))return us_callable_error(error,cap,"missing declared callable owner hook");
     for(us_callable *p=r->head;p;p=p->next)if(p->generation==r->generation&&p->origin==origin&&p->target==raw&&us_callable_signature_equal(p->graph.signatures[0],s)&&
        ((!carrier&&!p->carrier_graph.count)||(carrier&&p->carrier_graph.count&&us_callable_signature_equal(p->carrier_graph.signatures[0],carrier)))){*handle=p->token;return 0;}

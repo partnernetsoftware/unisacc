@@ -206,6 +206,11 @@ job lib-callback-graph-equality ./tests/modelgraphequalitycheck.sh
 job lib-callback-source-graph ./tests/modelcallbacksourcecheck.sh
 job lib-callable-mechanism python3 ./tests/librarycallablescheck.py
 job lib-carrier-model python3 ./tests/modelnativecarriercheck.py
+job lib-ordered-carrier-model python3 ./tests/modelnativebitfieldcheck.py
+job lib-ordered-carrier-host python3 ./tests/libraryorderedcarriercheck.py
+if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
+    job lib-ordered-carrier-native python3 ./tests/modelorderedbitfieldnativecheck.py --target osx/arm64
+fi
 job lib-ffi-provider python3 ./tests/libraryffiprovidercheck.py
 job lib-bitfield-source python3 ./tests/modelbitfieldsourcecheck.py
 job lib-layout-source python3 ./tests/modellayoutfactscheck.py

@@ -1,0 +1,17 @@
+#define US_CALLABLES_IMPLEMENTATION
+#include "librarycarrierplan.h"
+#include <assert.h>
+static uint64_t u64(const unsigned char*b){uint64_t n=0;for(unsigned i=0;i<8;i++)n|=(uint64_t)b[i]<<(i*8);return n;}
+static uint32_t flip(uint32_t v){return v^0x12345678;}
+static int native(void*owner,ffi_cif*c,uintptr_t f,void*out,void**in){(*(int*)owner)++;ffi_call(c,FFI_FN((void*)f),out,in);return 0;}
+int main(int argc,char**argv){assert(argc==2);FILE*f=fopen(argv[1],"rb");assert(f);fseek(f,0,SEEK_END);long z=ftell(f);rewind(f);unsigned char*b=malloc(z);assert(b&&fread(b,1,z,f)==(size_t)z);fclose(f);size_t at=8;uint64_t count=u64(b);us_carrier_certificate plan={0};char error[256];unsigned good=0,bad=0;
+for(uint64_t i=0;i<count;i++){assert((size_t)z-at>=16);uint64_t want=u64(b+at),n=u64(b+at+8);at+=16;assert(n<=(size_t)z-at);us_export*old=plan.original.items;int rc=us_carrier_certificate_load(&plan,"osx/arm64",b+at,n,error,sizeof error);at+=n;if((rc!=0)!=want){fprintf(stderr,"case %llu rc%d %s\n",(unsigned long long)i,rc,error);return 1;}if(rc){assert(plan.original.items==old);bad++;continue;}good++;
+us_export_signature o,c;assert(!us_callable_export_signature(plan.original.items,&o)&&!us_callable_export_signature(plan.carrier.items,&c));assert(us_callable_carrier_valid(&o,&c));assert(plan.original.items->version==3&&o.result.nmembers==3);assert(!us_export_supported(plan.original.items));assert(o.result.members[2].entry_kind==3&&o.result.members[2].offset==4);us_export_graph clone={0};assert(!us_callable_clone_graph(&clone,&o));assert(us_callable_signature_equal(&o,clone.signatures[0]));clone.signatures[0]->result.members[0].effective_alignment=2;assert(!us_callable_signature_equal(&o,clone.signatures[0]));us_export_graph_clear(&clone);
+#define MUTATE(F) do {assert(!us_callable_clone_graph(&clone,&o));clone.signatures[0]->result.F++;assert(!us_callable_signature_equal(&o,clone.signatures[0]));us_export_graph_clear(&clone);}while(0)
+MUTATE(fp_rank);MUTATE(fp_format);MUTATE(natural_alignment);MUTATE(layout_flags);MUTATE(layout_known_mask);MUTATE(layout_origin);MUTATE(members[0].ordinal);MUTATE(members[0].entry_kind);
+#undef MUTATE
+us_callable_conversion*p=us_callable_conversion_make(&o.result,&c.result,0);assert(p&&p->action==1);uint32_t input=0xfedcba98,output=0;assert(!us_callable_paired_convert(NULL,p,&output,&input,1,0,error,sizeof error)&&output==input);us_callable_conversion_free(p);
+us_callables registry;int calls=0;uint64_t h=0;us_callables_init(&registry,&calls,1,NULL,native,NULL);assert(us_callable_make(&registry,US_CALLABLE_NATIVE,&o,(uintptr_t)flip,&h,error,sizeof error)&&!h);assert(!us_carrier_certificate_make(&plan,&registry,US_CALLABLE_NATIVE,&o,(uintptr_t)flip,&h,error,sizeof error));uint64_t slot=(uintptr_t)&input;output=0;assert(!us_callable_call(&registry,h,&o,&slot,&output,1,error,sizeof error));assert(output==(input^0x12345678)&&calls==1);us_callables_clear(&registry);
+}
+/* An aggregate containing a callback cannot be treated as opaque bytes. */
+us_export_signature node={0};us_export_type cb={0},a={0},c={0};us_export_member m={0};cb.kind=4;cb.depth=1;cb.width=cb.alignment=8;cb.tag=4;cb.signature=&node;a.kind=5;a.tag=2;a.width=a.alignment=8;a.nmembers=1;a.members=&m;m.type=&cb;m.storage=8;c.kind=1;c.uns=1;c.width=c.alignment=8;assert(!us_callable_carrier_type_valid(&a,&c));us_carrier_certificate_clear(&plan);free(b);assert(at==(size_t)z&&good&&bad);printf("ordered carrier: %u good %u bad; COPY_BYTES and owned identity pass\n",good,bad);return 0;}

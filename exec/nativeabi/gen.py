@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone model-certified FFI_CARRIER first slice; raw USLSIG2 input.
+"""Standalone model-certified FFI_CARRIER first slice; raw USLSIG2 or complete ordered USLSIG3 input.
 Explicit resource \\0cli/target selects one of six exact profile rules.
 MS.canonical validates the entire graph; MG.root indexes its canonical form.
 No host ABI classifier or new executor action. Rule/native qualification are
@@ -9,6 +9,7 @@ import csv,importlib.util,json,pathlib,sys
 ROOT=pathlib.Path(__file__).resolve().parents[2]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT)]
 from modelgraphequality import install as graph_install,FIELDS,EDGES,LAYOUT
+from ordered import install as ordered_install,REGS as ORDERED_REGS
 SIGWIRE,SIGMARK,FRAME=(i<<40 for i in range(480,483))
 
 def install(E):
@@ -53,9 +54,9 @@ def install(E):
    P(names[prefix]).a(('MARK','nc_pos')).branch({0:names[prefix]+'.read'},'NC.targetfail',[('C64U','nc_pos','nc_targetlen')])
    P(names[prefix]+'.read').a(('BYTE','nc_byte'),('ADV',)).branch(choices,'NC.targetfail',[('RLD','nc_byte')])
  P('NC.profileok').a(('INPOP',),('COPYW','ms_blob','nc_original'),('COPYW','ms_len','nc_original_len')).call('MS.canonical').a(('COPYW','nc_count','ms_count'),('COPYW','nc_mode','ms_mode'),('COPYW','nc_support','ms_support'),('COPYW','nc_name','ms_name'),('BLEN','nc_namelen','nc_name')).branch({1:'NC.unsupported'},'NC.sourceversion',[('CMPI','ms_variadic',1)])
- P('NC.sourceversion').branch({2:'NC.index'},'NC.sourcefactsfail',[('RLD','ms_version')])
+ P('NC.sourceversion').a(('COPYW','nc_version','ms_version')).branch({2:'NC.index',3:'NC.index'},'NC.sourcefactsfail',[('RLD','ms_version')])
  P('NC.sourcefactsfail').a(E.rej('not covered: native ABI ordered source facts')).goto('DEAD')
- P('NC.index').a(('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','ms_canon'),('COPYW','ms_limit','ms_canonlen')).call('MG.root').a(('COPYW','nc_root','mg_lastnode'),('INPOP',),('OLEN','nc_cut')).o('USLSIG2\n').goto('NC.header')
+ P('NC.index').a(('COPYW','mg_version','nc_version'),('LDI','mg_side',0),('LDI','mg_base',0),('LDI','mg_next',0),('LDI','mg_framelevel',0),('INPUSH','ms_canon'),('COPYW','ms_limit','ms_canonlen')).call('MG.root').a(('COPYW','nc_root','mg_lastnode'),('INPOP',),('OLEN','nc_cut')).o('USLSIG2\n').goto('NC.header')
  p=P('NC.header');constword(p,1);word(p,'nc_namelen');blob(p,'nc_name','nc_namelen').a(('OUTW','nc_zero'),('LDI','nc_one',1),('OUTW','nc_one'),('OUTW','nc_zero'),('OUTW','nc_mode'));word(p,'nc_count').a(('LDI','nc_i',0)).goto('NC.loop')
  P('NC.loop').a(('ALUI','mul','nc_key','nc_root',1025),('ALU','add','nc_key','nc_key','nc_i'),('LDX','nc_node','nc_key',EDGES)).call('NC.type').branch({1:'NC.stored'},'NC.next',[('CMPI','nc_i',0)])
  P('NC.stored').a(('COPYW','ms_value','nc_count')).call('MS.write64').goto('NC.next')
@@ -68,7 +69,8 @@ def install(E):
  p=P('NC.pop')
  for i,r in enumerate(regs):p.a(('ALUI','mul','nc_slot','nc_level',32),('ALUI','add','nc_slot','nc_slot',i),('LDX',r,'nc_slot',FRAME))
  p.a(('ALUI','sub','nc_level','nc_level',1)).ret()
- P('NC.classify').call('NC.loadfields').branch({5:'NC.aggregatekind',4:'NC.callback',0:'NC.void',(1,2,3):'NC.plain'},'NC.unsupported',[('RLD','nc_kind')])
+ P('NC.policyfail').a(E.rej('not covered: anonymous bitfield ABI policy')).goto('DEAD')
+ P('NC.classify').call('NC.loadfields').call('OL.ncmeta').branch({5:'NC.aggregatekind',4:'NC.callback',0:'NC.void',(1,2,3):'NC.plain'},'NC.unsupported',[('RLD','nc_kind')])
  p=P('NC.loadfields')
  for index,name in ((0,'nc_depth'),(3,'nc_kind'),(4,'nc_width'),(5,'nc_unsigned'),(6,'nc_alignment'),(7,'nc_tag')):field(p,index,name)
  p.ret()
@@ -85,7 +87,8 @@ def install(E):
  P('NC.void').branch({1:'NC.voiddepth'},'NC.unsupported',[('CMPI','nc_i',0)])
  check('NC.voiddepth',0,0,'NC.voidalign');check('NC.voidalign',6,0,'NC.voidtag');check('NC.voidtag',7,0,'NC.voidunsigned');check('NC.voidunsigned',5,0,'NC.emit')
  # Natural aggregate framing: exact layout words are emitted unchanged.
- P('NC.aggregatekind').branch({1:'NC.aggstart',2:'NC.union',3:'NC.aggstart'},'NC.unsupported',[('RLD','nc_tag')])
+ P('NC.aggregatekind').branch({1:'OL.certify'},'NC.aggregatelegacy',[('CMPI','nc_version',3)])
+ P('NC.aggregatelegacy').branch({1:'NC.aggstart',2:'NC.union',3:'NC.aggstart'},'NC.unsupported',[('RLD','nc_tag')])
  P('NC.aggstart').branch({1:'NC.aggunsigned'},'NC.unsupported',[('CMPI','nc_depth',0)])
  P('NC.aggunsigned').branch({1:'NC.aggalign'},'NC.unsupported',[('CMPI','nc_unsigned',0)])
  P('NC.aggalign').branch({(1,2,4,8):'NC.aggwidth'},'NC.unsupported',[('RLD','nc_alignment')])
@@ -168,14 +171,16 @@ def install(E):
  P('NC.mapinteger').a(('LDI','nc_kind',1),('LDI','nc_unsigned',1)).goto('NC.mapped')
  P('NC.mapped').a(('LDI','nc_depth',0)).goto('NC.emit')
  # Generic natural <=16B classifier, byte-accurate masks, isolated frame region.
- nlregs=('nl_node','nl_parent','nl_kind','nl_width','nl_align','nl_depth','nl_unsigned','nl_tag','nl_count','nl_index','nl_stride','nl_end','nl_maxalign','nl_offset','nl_storage','nl_child','nl_cwidth','nl_calign','nl_accmask','nl_accint','nl_accfp','nl_acchfa')
- P('NL.walk').call('NL.push').call('NL.load').call('NL.validate').call('NL.pop').ret()
+ nlregs=('nl_node','nl_parent','nl_kind','nl_width','nl_align','nl_depth','nl_unsigned','nl_tag','nl_count','nl_index','nl_stride','nl_end','nl_maxalign','nl_offset','nl_storage','nl_child','nl_cwidth','nl_calign','nl_accmask','nl_accint','nl_accfp','nl_acchfa')+ORDERED_REGS
+ assert len(nlregs)<=64
+ P('NL.walk').call('NL.push').call('NL.load').call('NL.dispatch').call('NL.pop').ret()
+ P('NL.dispatch').branch({1:'OL.validate'},'NL.validate',[('CMPI','nc_version',3)])
  P('NL.push').a(('ALUI','add','nl_level','nl_level',1)).branch({2:'NC.unsupported'},'NL.pushfields',[('CMPI','nl_level',32)])
  p=P('NL.pushfields')
- for i,r in enumerate(nlregs):p.a(('ALUI','mul','nl_slot','nl_level',32),('ALUI','add','nl_slot','nl_slot',100000+i),('STX','nl_slot',FRAME,r))
+ for i,r in enumerate(nlregs):p.a(('ALUI','mul','nl_slot','nl_level',64),('ALUI','add','nl_slot','nl_slot',100000+i),('STX','nl_slot',FRAME,r))
  p.ret()
  p=P('NL.pop')
- for i,r in enumerate(nlregs):p.a(('ALUI','mul','nl_slot','nl_level',32),('ALUI','add','nl_slot','nl_slot',100000+i),('LDX',r,'nl_slot',FRAME))
+ for i,r in enumerate(nlregs):p.a(('ALUI','mul','nl_slot','nl_level',64),('ALUI','add','nl_slot','nl_slot',100000+i),('LDX',r,'nl_slot',FRAME))
  p.a(('ALUI','sub','nl_level','nl_level',1)).ret()
  p=P('NL.load')
  for index,out in ((0,'nl_depth'),(3,'nl_kind'),(4,'nl_width'),(5,'nl_unsigned'),(6,'nl_align'),(7,'nl_tag')):field(p,index,out,'nl_node')
@@ -277,6 +282,11 @@ def install(E):
  P('NC.carrierend').a(('OUTW','nc_one'),('OCUT','nc_carrier','nc_cut'),('BLEN','nc_carrierlen','nc_carrier')).o('USLNCAR1\n').goto('NC.envelope')
  p=P('NC.envelope');word(p,'nc_targetlen');blob(p,'nc_target','nc_targetlen');word(p,'nc_original_len');blob(p,'nc_original','nc_original_len');word(p,'nc_carrierlen');blob(p,'nc_carrier','nc_carrierlen').a(('ACCEPT',)).goto('NC.DONE')
  P('NC.DONE').a(('ACCEPT',)).goto('NC.DONE')
+ extents=tuple(int(x[1]) for x in declarations if x[0]=='ordered_extent')
+ alignments=tuple(int(x[1]) for x in declarations if x[0]=='ordered_alignment')
+ assert extents==tuple(range(1,17)) and alignments==(1,2,4,8)
+ assert [x[1] for x in declarations if x[0]=='ordered_anon_policy']==['invariant_integer_lanes']
+ ordered_install(E,field,word,constword,blob,extents,alignments)
  return 'NC.START'
 
 def build():

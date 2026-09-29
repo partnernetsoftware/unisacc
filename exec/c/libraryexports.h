@@ -28,7 +28,7 @@ struct us_export_type {
     us_export_member *members; us_export_type *element;
     us_export_signature *signature; /* borrowed edge; graph owns each node once */
     ffi_type native; ffi_type **elements; ffi_type *ffi;
-    uint64_t natural_alignment; unsigned fp_rank,fp_format,layout_flags,layout_known_mask,layout_origin;
+    unsigned wire_version; uint64_t natural_alignment; unsigned fp_rank,fp_format,layout_flags,layout_known_mask,layout_origin;
 };
 struct us_export_signature {
     uint64_t id,count,stored; unsigned variadic,mode,supported;
@@ -123,6 +123,7 @@ static int us_export_supported(const us_export *x) {
 static int us_export_descriptor_version(const unsigned char *b,size_t len,size_t *at,
         us_export_type *t,unsigned depth,size_t *nodes,us_export_graph *graph,unsigned version) {
     uint64_t payload; size_t end;
+    t->wire_version=version;
     if(depth>32 || ++*nodes>16384 || us_export_u64(b,len,at,&t->depth) ||
        us_export_u64(b,len,at,&t->base)||us_export_u64(b,len,at,&t->shape)||
        us_export_u64(b,len,at,&t->kind)||us_export_u64(b,len,at,&t->width)||

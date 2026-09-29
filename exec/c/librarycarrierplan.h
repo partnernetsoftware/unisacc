@@ -38,7 +38,7 @@ static int us_carrier_certificate_load(us_carrier_certificate *dest,
        us_exports_load_bridge(&tmp.carrier,carrier,cn,error,cap))goto bad;
     if(tmp.original.count!=1||tmp.carrier.count!=1)goto shape;
     us_export *x=tmp.original.items,*y=tmp.carrier.items;
-    if(x->version!=2||y->version!=2||x->linkage||y->linkage||
+    if((x->version!=2&&x->version!=3)||y->version!=2||x->linkage||y->linkage||
        x->defined!=1||y->defined!=1||x->variadic||y->variadic||
        x->count!=x->stored||y->count!=y->stored||
        x->count!=y->count||x->mode!=y->mode||strcmp(x->name,y->name)||
@@ -48,6 +48,10 @@ static int us_carrier_certificate_load(us_carrier_certificate *dest,
         const us_export_type *a=us_export_arg(x,i),*c=us_export_arg(y,i);
         if(a->width!=c->width||a->alignment!=c->alignment)goto shape;
     }
+    /* Internal model authority chooses the recipe; this is storage/edge pairing only. */
+    us_export_signature original_view,carrier_view;
+    if(us_callable_export_signature(x,&original_view)||us_callable_export_signature(y,&carrier_view)||
+       !us_callable_carrier_valid(&original_view,&carrier_view))goto shape;
     memcpy(tmp.target,name,nn);tmp.target[nn]=0;
     us_carrier_certificate_clear(dest);*dest=tmp;return 0;
 shape:us_export_error(error,cap,"model carrier signature storage mismatch");
