@@ -341,6 +341,16 @@ job kernel      ./tests/kernel.sh
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 job gate-infra python3 ./tests/queuecheck.py
+# R12-0 ③b: checks that were in no gate at all (research/r12-ungated-checks.tsv).
+# Each was run standalone with a measured rc=0 before being added; the four that
+# print a Usage line and the one that fails on this HEAD are NOT here -- see the
+# tsv.  all.sh is deliberately unchanged.
+job exec-elfdata-bridge   python3 ./exec/enc/librarysymbolscheck.py
+job exec-lex-sourcefacts  python3 ./exec/lex/sourcefactscheck.py
+job exec-parse2-libimports python3 ./exec/parse2/libraryimportscheck.py
+job lib-bindings-registry python3 ./tests/librarybindingscheck.py
+job tsv-build-account     python3 ./tests/tsvbuild_check.py
+job windows-resolver-host python3 ./tests/windowsresolverhostcheck.py
 if [ "$COM" = 1 ]; then
     PRODUCT=${MODEL_COM-$R/unisacc.com}
     case "$PRODUCT" in /*) ;; *) PRODUCT="$R/$PRODUCT";; esac
