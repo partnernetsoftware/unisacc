@@ -18,6 +18,11 @@ def command(c):
  return p.stdout
 
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 4:
+     _sys.stderr.write("usage: %s PARSE.json LOWER.json RUN DUMPER\n" % _sys.argv[0])
+     _sys.exit(2)
+
  runtime,pp,lexer,wj,wn,ej,en,out=sys.argv[1:]
  models={'warnings':json.loads(pathlib.Path(wj).read_text()),'errors':json.loads(pathlib.Path(ej).read_text())}
  loaded={k:sim.load(v) for k,v in models.items()};result=[]

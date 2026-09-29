@@ -108,4 +108,9 @@ def main(args):
             for raw in fixture['manual'].values():
                 raw=raw.encode();verdict,out=execute(None,raw);assert verdict=='accept' and out==prune_text(raw);tested+=1
         print(json.dumps({'default_manual_fixtures':tested,'default_base_equal':True,'public_unsupported_retained':True,'internal_dead_removed':True,'init_pointer_root_retained':True,'malformed_v1_rejected':len(malformed),'malformed_v2_rejected':len(v2bad),'v2_all_nine_params':True,'v2_parameter_cap_1024_accepted':True,'v2_void_unknown_fnptr_retained':True,'v2_struct_array_union_framing':True,'executors':'C constructed network and sim; full check-net'}))
+import sys as _sys
+if len(_sys.argv)-1 < 4:
+    _sys.stderr.write("usage: %s RUN LOWER.json ENC.json TARGET\n" % _sys.argv[0])
+    _sys.exit(2)
+
 if __name__=='__main__':main(sys.argv[1:])

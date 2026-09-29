@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 
 R = Path(__file__).resolve().parents[2]
+import sys as _sys
+if len(_sys.argv)-1 < 3:
+    _sys.stderr.write("usage: %s NET_DIR EXECUTOR PRIVATE_OUTPUT\n" % _sys.argv[0])
+    _sys.exit(2)
+
 models, executor, out = map(lambda x: Path(x).resolve(), sys.argv[1:])
 if (platform.system(), platform.machine()) != ("Darwin", "arm64"):
     sys.exit("this native check requires macOS arm64; not tested")

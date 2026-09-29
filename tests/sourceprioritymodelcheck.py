@@ -16,6 +16,11 @@ class Files:
  def __init__(self,v):self.v=v
  def get(self,k):return self.v.get(k)
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 3:
+     _sys.stderr.write("usage: %s MODEL.json RUN DUMPER\n" % _sys.argv[0])
+     _sys.exit(2)
+
  model,runtime,dumper=sys.argv[1:];d=json.loads(pathlib.Path(model).read_text());loaded=load(d)
  with tempfile.TemporaryDirectory(prefix='r10-sourcepriority-check-') as name:
   t=pathlib.Path(name)

@@ -35,6 +35,11 @@ class Files:
  def get(self,k):return self.blob if k==b'input' else None
 
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 1:
+     _sys.stderr.write("usage: %s MODEL.json\n" % _sys.argv[0])
+     _sys.exit(2)
+
  runtime=sys.argv[1]
  install(E)
  E.P('START').a(('SBCLR',),*[('SBOUT',x) for x in b'input'],('SBFIND','mc_blob'),('BLEN','mc_len','mc_blob')).call('MC.normalize').a(('INPUSH','mc_blob'),('LDI','mc_zero',0),('SPAN2','mc_zero','mc_len'),('INPOP',)).goto('DONE')

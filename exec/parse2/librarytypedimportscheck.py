@@ -81,4 +81,9 @@ def check(paths):
   p=run([dump,'-dump-tokens',src]);assert p.returncode==0
   assert execute(raw,p.stdout)[0]=='accept'
   print('USBind3 typed E3: four unnamed prototypes: Pair9/FPdouble9/FPfloat9/GP17 wrappers; C network=sim; all-observation check-net; wrong result/tail and missing binding rejected; unrelated signature epoch preserved; native execution not claimed')
+import sys as _sys
+if len(_sys.argv)-1 < 4:
+    _sys.stderr.write("usage: %s PARSE.json LOWER.json RUN DUMPER\n" % _sys.argv[0])
+    _sys.exit(2)
+
 if __name__=='__main__':check(sys.argv[1:])

@@ -29,6 +29,11 @@ def evaluate(tp,memory,initial):
  return regs
 
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 3:
+     _sys.stderr.write("usage: %s RUN LOWER.json TARGET [--native]\n" % _sys.argv[0])
+     _sys.exit(2)
+
  runtime,model,target=sys.argv[1:4];delta=json.loads(pathlib.Path(model).read_text());arch=target.split('/')[1]
  from unisa.catalog import REGMAP
  regs={'r'+str(i):v for i,v in enumerate(REGMAP[arch])};out=regs['r0'];index=regs['r1'];address=0x123456789abcdef0;one=(1).to_bytes(8,'little')

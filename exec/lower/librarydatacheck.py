@@ -22,6 +22,11 @@ def cmd(args):
  p=subprocess.run(list(map(str,args)),capture_output=True,timeout=25);assert p.returncode==0,(args,p.returncode,p.stderr);return p.stdout
 
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 3:
+     _sys.stderr.write("usage: %s RUN MODEL.json TARGET\n" % _sys.argv[0])
+     _sys.exit(2)
+
  runtime,model,target=sys.argv[1:];d=json.loads(pathlib.Path(model).read_text());loaded=load(d)
  tape=b'f:\n.libraryaddr r0, g_counter, 0, 1, 8, 0\nret\n';valid=binding(function(),data());base={b'\0library/module':U(1),b'\0library/symbols':U(1)}
  with tempfile.TemporaryDirectory(prefix='r10-lowerdata-check-') as name:

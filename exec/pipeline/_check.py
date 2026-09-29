@@ -3,7 +3,15 @@ import sys
 
 
 def main(line_ok=None, whole_ok=None):
-    b = open(sys.argv[1], "rb").read()
+    if len(sys.argv) != 2:
+        sys.stderr.write("usage: %s FILE  (checks the text of one dump)\n"
+                         % (sys.argv[0] or "check"))
+        return 2
+    try:
+        b = open(sys.argv[1], "rb").read()
+    except OSError as e:
+        sys.stderr.write("%s\n" % e)
+        return 2
     if b"\0" in b:
         sys.stderr.write("NUL byte\n")
         return 1

@@ -24,6 +24,11 @@ def canonical(blob):
  assert p+1==len(blob);return out
 
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 1:
+     _sys.stderr.write("usage: %s MODEL.json\n" % _sys.argv[0])
+     _sys.exit(2)
+
  runtime=sys.argv[1];install(E)
  E.P('START').a(('SBCLR',),*[('SBOUT',x) for x in b'input'],('SBFIND','ms_blob'),('BLEN','ms_len','ms_blob')).call('MS.canonical').a(('INPUSH','ms_canon'),('LDI','ms_zero',0),('SPAN2','ms_zero','ms_canonlen'),('INPOP',)).goto('DONE')
  E.P('DONE').a(('ACCEPT',)).goto('DONE');E.g.finish();d={'start':'START','states':{n:[m,{str(k):v for k,v in r.items()}] for n,(m,r) in E.g.st.items()},'seqs':[list(map(list,s)) for s in E.g.seqs]};loaded=load(d)

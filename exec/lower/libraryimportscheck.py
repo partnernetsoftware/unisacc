@@ -21,6 +21,11 @@ def command(args):
  if p.returncode:raise RuntimeError((args,p.returncode,p.stderr.decode()))
  return p.stdout
 def main():
+ import sys as _sys
+ if len(_sys.argv)-1 < 3:
+     _sys.stderr.write("usage: %s RUN MODEL.json TARGET\n" % _sys.argv[0])
+     _sys.exit(2)
+
  runtime,model,target=sys.argv[1:];d=json.loads(pathlib.Path(model).read_text());loaded=load(d)
  raw=b'f:\n.librarycall r1, r0\n.librarycall r1, r0\nret\n'
  valid=binding(); base={b'\0library/module':U(1),b'\0library/symbols':U(1)}

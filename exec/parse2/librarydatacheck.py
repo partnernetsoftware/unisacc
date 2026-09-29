@@ -29,4 +29,9 @@ def check(d):
   assert run(bad,tokens())[0]=='reject'
  v,classic,n=run(None,tokens());assert v=='accept' and b'.libraryaddr' not in classic and b'.bss g_value' in classic
  print(json.dumps({'scope':'typed E3 fixture only','data_scalar':True,'pointer':True,'later_definition':True,'default_unchanged_path':True,'truncations_reject':len(raw)-1,'native_execution':False}))
+import sys as _sys
+if len(_sys.argv)-1 < 1:
+    _sys.stderr.write("usage: %s PARSE.json\n" % _sys.argv[0])
+    _sys.exit(2)
+
 if __name__=='__main__':check(json.loads(Path(sys.argv[1]).read_text()))

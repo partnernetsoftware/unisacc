@@ -17,6 +17,11 @@ def command(args):
  return p.stdout
 def main():
  os.environ["UA_TYPESPELL"]="1"
+ import sys as _sys
+ if len(_sys.argv)-1 < 4:
+     _sys.stderr.write("usage: %s PARSE.json LOWER.json RUN DUMPER\n" % _sys.argv[0])
+     _sys.exit(2)
+
  parse,lower,runtime,dumper=sys.argv[1:];models={k:json.loads(pathlib.Path(f).read_text()) for k,f in [('parse',parse),('lower',lower)]}
  with tempfile.TemporaryDirectory(prefix='r10-modulecheck-') as tmp:
   t=pathlib.Path(tmp);manifest=t/'routes';manifest.write_text('parse\tparse\ttokens\ttape\tparse.net\nlower\tlower\ttape\ttins\tlower.net\n')
