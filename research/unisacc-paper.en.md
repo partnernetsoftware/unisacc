@@ -128,7 +128,7 @@ Table 1 lists the 18 stages; it is generated from the truth tables and the const
 | isel | Encoding form and target symbol of a tape operation per architecture (not on the main path) | op 74 × arch 2 | 2 heads | 148 | 74 | 1.000 |
 | abi | Calling-convention facts: system-call number, argument registers, return convention, import names | op 74 × OS 3 × arch 2 | 13 heads | 444 | 52 | 1.000 |
 | combo | isel and abi merged into one table, as a control experiment (not on the main path) | op 74 × OS 3 × arch 2 | 15 heads | 444 | 100 | 1.000 |
-| **Total** | | | | **8,506** | **517** | |
+| **Total** | | | | **8,508** | **517** | |
 
 ### 3.3 Deployment kernel and determinism
 
@@ -200,7 +200,7 @@ Command-line handling, file and resource adaptation, package reading and checkin
 |---|---|---|
 | Networks | 18 fact tables, cube networks | 33 distinct threshold networks |
 | Driver | classic recursive descent, lowering and image writers query networks at decision points | generic executor runs each stage network step by step |
-| Size | 8,506 keys, 517 hidden units, 9,124 B of weights | 129,944 threshold units, 783,938 B compressed |
+| Size | 8,508 keys, 517 hidden units, 9,124 B of weights | 129,944 threshold units, 783,938 B compressed |
 | Fallback | none (query discipline) | none: a model rejection is an error |
 | Distribution | a single C source file | a single 1,233,236 B multi-platform executable (v0.0.9) |
 
@@ -252,16 +252,18 @@ After the tape is lowered to six targets, each image is executed by a machine mo
 
 ### 6.3 External referees
 
-Enumeration closes only "network = table"; it says nothing about "table = C". We register a referee for each stage: four stages have named external referees (type, ABI, precedence, type info), six have only cross-implementation agreement, six have no direct referee yet, and two are not on the main compilation path.
+Enumeration closes only "network = table"; it says nothing about "table = C". We register a referee for each stage: six stages have named external referees (preprocessing, parsing, type, ABI, precedence, type info), six have only cross-implementation agreement, four have no direct referee yet (scope, isel-prep, format conversion, binary selection), and two are not on the main compilation path; the ledger is `research/referee.tsv`.
 
 | External referee | Coverage and limits |
 |---|---|
+| Preprocessing | Macro-expansion tokens aligned one by one with the host `cc -E -P` (`exec/pp/macrocheck.py`, `tests/ccparity.sh`) |
+| Parsing | The (line, kind) diagnostic set equals the host `cc -Wall` in both directions (`tests/warn.sh`, probes and corpus) |
 | Type | Result types checked with the host cc's C11 `_Generic`; 1,400 of 4,275 keys |
 | ABI | Numbers checked against host system-call headers; only the actual host OS and architecture |
 | Precedence | 324 ordered operator pairs: 291 distinguishable on the chosen constants and consistent, 33 indistinguishable |
 | Type info | Sizes of 11 types; signedness and narrowness of 8 integer types |
 
-The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 4/18 stages have external referees of stated coverage. Nor is a reference implementation the only kind of referee: **the referee of a cost table is measurement** (§7.4).
+The accurate statement is therefore: 18/18 stages have an enumeration proof of network = table, and 6/18 stages have external referees of stated coverage. Nor is a reference implementation the only kind of referee: **the referee of a cost table is measurement** (§7.4).
 
 ## 7 Evaluation
 
