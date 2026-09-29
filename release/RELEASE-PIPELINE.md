@@ -52,3 +52,8 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 
 ## 8. 发布
 签后产物从 run artifact `unisacc-company-signed-<attempt>` 下载，核对签前/签后 SHA 与尺寸，上传草稿，回执写入 `research/r<N>-release-acceptance.json`，`gh release edit --draft=false`。之后再提交回执/文档。
+
+**推送的独立证据**（2026-09-29，dsh 建议）：GitHub 间歇 500 时 `git push` 的返回不可信——同一晚两次“以为已推、实际未推”。任何“已推送”的宣布都以下面两串相等为准，而不是以 push 返回为准：
+```
+[ "$(git ls-remote origin refs/heads/main | cut -c1-40)" = "$(git rev-parse HEAD)" ] && echo synced || echo NOT-PUSHED
+```
