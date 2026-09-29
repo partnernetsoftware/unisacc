@@ -399,6 +399,12 @@ if [ "$COM" = 1 ]; then
     job com-tools UA="$PRODUCT" UA_RUN="$PRODUCT" TOOLS_UA="$PRODUCT" ./tests/tools.sh
     for shard in 1 2 3 4; do
         job com-corpus-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" CORPUS_UA="$PRODUCT" SHARD=$shard/4 FETCH=0 ./tests/corpus.sh
+        # difftest against the product, not the reference: R13-0's
+        # fb12-03/04/05 are wrong only here (the Python reference answers 0, 22
+        # and 8).  Same suite, UA selects the route; the known list differs too
+        # (tests/difftest.com.knownfail), because one list cannot be right for
+        # both routes.
+        job com-difftest-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest.sh
         job com-difftest_o-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest_o.sh
     done
 fi

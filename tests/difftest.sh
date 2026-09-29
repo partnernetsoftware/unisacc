@@ -4,15 +4,42 @@
 # `unisa acc` proves net == gold.  It says NOTHING about whether gold == C99 --
 # and gold has been wrong three times (E-2, E-15, E-16) while acc read 1.000.
 # The only instrument that can see that is a reference compiler.
+#
+# Two routes, one suite.  With UA unset this drives the Python reference
+# (`python3 -m unisa`), which is what the default gate has always run.  With
+# UA set -- the convention the other com-* jobs use, e.g. `UA="$PRODUCT"
+# UA_RUN="$PRODUCT" ./tests/difftest_o.sh` -- it drives the C product instead,
+# through the same `unisa FILE -run` command line.  The two are not
+# interchangeable and that is the point: R13-0's fb12-03/04/05 fail only on the
+# product (the reference exits 0/22/8 where 0.0.12 refuses to compile), so a
+# suite that can only run the reference cannot see them at all.
 set -u
 CC=${CC:-cc}
-U="python3 -m unisa"
 DRIVE=${DRIVE:-built}
 pass=0; fail=0; unsup=0
 T=$(mktemp -d); R=$(pwd)
 # `python3 -m unisa` resolves against the cwd, and we are about to leave it
 PYTHONPATH="$R${PYTHONPATH:+:$PYTHONPATH}"; export PYTHONPATH
 . "$R/tests/par.sh"
+if [ -n "${UA:-}" ]; then
+    # product route.  The two CLIs are not the same and this is where that
+    # bites: the reference takes a `run` subcommand and `--drive`, the product
+    # is tinycc-shaped and takes the file with `-run` after it -- the form
+    # difftest_o.sh:68 already uses.  Driving the product with `run FILE
+    # --drive` makes every probe fail to open the file, which reads as "the
+    # product supports nothing" (measured: match 0, unsupported 36-37 per
+    # shard) rather than as a wrong command line.
+    U_RUN=${UA_RUN:-$UA}
+    U_KIND=product
+    [ -x "$U_RUN" ] || { echo "difftest: UA=$U_RUN is not executable" >&2; exit 2; }
+    KNOWN=$R/tests/difftest.com.knownfail
+    seen() { (cd "$T" && "$U_RUN" -O2 "$R/$1" -run 2>"$2") > "$3"; }
+else
+    U_KIND=reference
+    KNOWN=$R/tests/difftest.knownfail
+    seen() { (cd "$T" && python3 -m unisa run "$R/$1" --drive "$DRIVE" 2>"$2") > "$3"; }
+fi
+isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 # SHARD=k/n runs every n-th probe from the k-th, so each shard stays under
 # the 60 s ceiling (AGENTS.md); the default 1/1 is the whole list.
 FILES=""; i=0
@@ -51,12 +78,19 @@ for f in $FILES; do
         exit 0
     fi
     (cd "$D" && ./"$b" 2>/dev/null) > "$T/$b.want"; echo $? > "$T/$b.wcode"
-    (cd "$D" && $U run "$R/$f" --drive "$DRIVE" 2>"$T/$b.err") > "$T/$b.got"
+    seen "$f" "$T/$b.err" "$T/$b.got"
     echo $? > "$T/$b.gcode"
     ) &
 done
 wait
 # B: the verdicts, in order.
+#
+# knownfail, the same rule as tests/c99.knownfail: a probe listed there may be
+# FAIL or UNS without failing the suite, and a listed probe that starts
+# PASSING is a failure -- so closing a defect means deleting its line and the
+# list cannot rot.  Without this, a red example could only be landed by
+# breaking the gate, which is why the six R13-0 probes waited for it.
+known=0; revived=0
 for f in $FILES; do
     b=$(basename "$f" .c)
     [ "$b" = "host" ] && continue
@@ -68,6 +102,12 @@ for f in $FILES; do
     got=$(cat "$T/$b.got"); gcode=$(cat "$T/$b.gcode")
     if [ ! -s "$T/$b.err" ] && [ "$got" = "$want" ] && [ "$gcode" = "$wcode" ]; then
         pass=$((pass+1)); printf "  ok   %-14s %s\n" "$b" "$(echo "$want" | head -1)"
+        if isknown "$b"; then
+            revived=$((revived+1))
+            printf "       %-14s is listed in difftest.knownfail but passes: delete its line\n" "$b"
+        fi
+    elif isknown "$b"; then
+        known=$((known+1)); printf "  known %-12s %s\n" "$b" "$(grep -m1 "^$b[[:space:]]" "$KNOWN" | cut -c1-58)"
     elif [ -s "$T/$b.err" ]; then
         unsup=$((unsup+1)); printf "  UNS  %-14s %s\n" "$b" "$(head -1 "$T/$b.err" | cut -c1-58)"
     else
@@ -76,7 +116,7 @@ for f in $FILES; do
 done
 rm -rf "$T"
 echo
-echo "match $pass   wrong $fail   unsupported $unsup"
+echo "match $pass   wrong $fail   unsupported $unsup   knownwrong $known   revived $revived"
 # A suite that checked nothing is not green: `closure.sh` with no
 # probes once printed `identical 0 differ 0` and exited 0.
-[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
+[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ] && [ "$revived" -eq 0 ]
