@@ -48,33 +48,61 @@ jobs:
           import sys; sys.path.insert(0,'exec/c'); import provenance
           print('sources_sha256', provenance.source_digest())
           PY
+      - name: expected outputs for the six-runner candidate smoke (Python reference on one machine)
+        run: |
+          python3 - <<'PY'
+          import json,subprocess,re
+          want={}
+          for e in ('hello','fact','fib','ptr','struct','switch'):
+              want[e]=subprocess.run(['python3','tests/bound.py','30','python3','-m','unisa','run','examples/%s.c'%e,'--drive','built'],capture_output=True,text=True,check=True).stdout
+          want['version']='unisacc '+re.findall(r'"([0-9.]+)"',open('src/version.h').read())[0]
+          json.dump(want,open('expected.json','w'))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: expected-outputs
+          path: expected.json
 
   candidate:
-    # Runs the sealed candidate named by release/candidate.json (pushed to GHCR with oras
-    # from the owner's machine after the local gate). Skipped when no candidate is sealed.
+    # Runs the sealed candidate named by release/candidate.json on all six product
+    # architectures GitHub hosts (the six-runner smoke, R12-0 ⓪a). Skipped when no
+    # candidate is sealed. The expected outputs come from the Python reference computed
+    # once in the source job, so no runner needs its own Python route.
+    needs: source
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-15]
+        include:
+          - { runner: ubuntu-latest,   target: lnx/x86_64 }
+          - { runner: ubuntu-24.04-arm, target: lnx/arm64 }
+          - { runner: macos-15,        target: osx/arm64 }
+          - { runner: macos-15-intel,  target: osx/x86_64 }
+          - { runner: windows-latest,  target: win/x86_64 }
+          - { runner: windows-11-arm,  target: win/arm64 }
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 8
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: read the sealed candidate reference
         id: seal
-        shell: bash
         run: |
           if [ ! -f release/candidate.json ]; then echo "present=false" >> "$GITHUB_OUTPUT"; exit 0; fi
-          ref=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["ref"])')
-          sha=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["unisacc_com_sha256"])')
-          src=$(python3 -c 'import json;print(json.load(open("release/candidate.json"))["sources_sha256"])')
+          ref=$(python -c 'import json;print(json.load(open("release/candidate.json"))["ref"])')
+          sha=$(python -c 'import json;print(json.load(open("release/candidate.json"))["unisacc_com_sha256"])')
+          src=$(python -c 'import json;print(json.load(open("release/candidate.json"))["sources_sha256"])')
           [[ "$ref" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]] || { echo "candidate ref must be an immutable digest reference: $ref" >&2; exit 1; }
           [[ "$sha" =~ ^[0-9a-f]{64}$ ]] && [[ "$src" =~ ^[0-9a-f]{64}$ ]]
           { echo "present=true"; echo "ref=$ref"; echo "sha=$sha"; echo "src=$src"; } >> "$GITHUB_OUTPUT"
       - name: the sealed source closure is this tree's closure
         if: steps.seal.outputs.present == 'true'
         run: |
-          have=$(python3 - <<'PY'
+          have=$(python - <<'PY'
           import sys; sys.path.insert(0,'exec/c'); import provenance
           print(provenance.source_digest())
           PY
@@ -91,21 +119,27 @@ jobs:
           printf '%s' "$GHCR_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
           mkdir candidate && oras pull "${{ steps.seal.outputs.ref }}" --output candidate
           ls -la candidate
-          got=$(shasum -a 256 candidate/unisacc.com | cut -d' ' -f1)
+          got=$(python -c 'import hashlib,sys;print(hashlib.sha256(open("candidate/unisacc.com","rb").read()).hexdigest())')
           [ "$got" = "${{ steps.seal.outputs.sha }}" ] || { echo "candidate bytes differ: $got" >&2; exit 1; }
           chmod +x candidate/unisacc.com
-      - name: the candidate runs here
+      - uses: actions/download-artifact@v4
+        if: steps.seal.outputs.present == 'true'
+        with:
+          name: expected-outputs
+      - name: the candidate runs here (${{ matrix.target }})
         if: steps.seal.outputs.present == 'true'
         run: |
-          set -e
-          v=$(python3 tests/bound.py 20 sh candidate/unisacc.com --version); echo "$v"
-          want=$(python3 -c 'import re;print(re.findall(r"\"([0-9.]+)\"",open("src/version.h").read())[0])')
-          [ "$v" = "unisacc $want" ]
-          out=$(python3 tests/bound.py 30 sh candidate/unisacc.com -run examples/hello.c); echo "$out"
-          [ "$out" = "hello from C99" ]
-          for e in fact fib ptr struct switch; do
-            got=$(python3 tests/bound.py 30 sh candidate/unisacc.com -run examples/$e.c)
-            want=$(python3 tests/bound.py 30 python3 -m unisa run examples/$e.c --drive built)
-            [ "$got" = "$want" ] || { echo "MISMATCH $e: '$got' vs '$want'" >&2; exit 1; }
-            echo "  $e ok"
-          done
+          python - <<'PY'
+          import json,subprocess,sys,platform,time
+          want=json.load(open('expected.json'))
+          com='candidate/unisacc.com'
+          def run(args):
+              t=time.time();p=subprocess.run([com,*args],capture_output=True,text=True,timeout=60);return p,time.time()-t
+          p,dt=run(['--version']);print('version',repr(p.stdout.strip()),'%.2fs'%dt);assert p.returncode==0 and p.stdout.strip()==want['version'],p.stderr[:300]
+          bad=0
+          for e in ('hello','fact','fib','ptr','struct','switch'):
+              p,dt=run(['-run','examples/%s.c'%e]);ok=p.returncode==0 and p.stdout==want[e]
+              print('  %-7s %s %.2fs'%(e,'ok' if ok else 'MISMATCH',dt));bad+=not ok
+              if not ok:print('   got',repr(p.stdout[:200]),'want',repr(want[e][:200]),p.stderr[:200])
+          print('runner',platform.system(),platform.machine(),'target ${{ matrix.target }}');sys.exit(1 if bad else 0)
+          PY
