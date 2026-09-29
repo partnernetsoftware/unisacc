@@ -18,6 +18,7 @@ int main(void) {
     int (*entry)(long, long);
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0;
     ninput = 0;
+    ftrim_libc = 1;                 /* R11-3: library bodies on demand by default; -fno-trim-libc restores the full set */
     i = 1;
     while (i < __argc()) {
         a = __argv(i);
@@ -70,6 +71,7 @@ int main(void) {
             } else { if (strpre(a, "-ferror-limit=")) { maxerr = 0; k = 14;
                 while (a[k] >= 48 && a[k] <= 57) { maxerr = maxerr * 10 + (a[k] - 48); k = k + 1; }
             } else { if (strsame(a, "-ftrim-libc") || strsame(a, "-libneed")) { ftrim_libc = 1;
+            } else { if (strsame(a, "-fno-trim-libc")) { ftrim_libc = 0;
             } else { if (strsame(a, "-nostdinc")) { nostdinc = 1;
             } else { if (strsame(a, "-MD") || strsame(a, "-MMD")) { wantdeps = 1; depfile = depfile ? depfile : "";
             } else { if (strsame(a, "-MF")) { i = i + 1; wantdeps = 1; depfile = __argv(i);
@@ -96,7 +98,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } }
+            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -116,6 +118,7 @@ int main(void) {
         return emsg("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
                " FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens] [-o out]"
                " [-- args...]\n"
+               "  -fno-trim-libc  keep every library body (default: bodies on demand, -ftrim-libc)\n"
                "  -S  write the tape, this compiler's assembly-level IR"
                " (-c is a synonym: there are no object files)", 0);
     }

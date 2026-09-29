@@ -38,7 +38,7 @@ def check(run,net,ua,out):
             for name,text in probes.items():
                 source=out/(name+'.c');source.write_text(text)
                 model=call([run,'--bundle',pkg,'pp',source,source,ROOT/'include'])
-                classic=call([ua,'-b',target,*(['-ftrim-libc'] if on else []),'-E',source])
+                classic=call([ua,'-b',target,'-ftrim-libc' if on else '-fno-trim-libc','-E',source])   # default is on since R11-3
                 assert model==classic,(target,on,name,'E2 differs')
                 if on:assert call([ua,'-b',target,'-libneed','-E',source])==classic,(target,name,'alias differs')
                 records.append([target,on,name,len(model)])

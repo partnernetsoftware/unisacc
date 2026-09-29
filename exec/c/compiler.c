@@ -101,6 +101,7 @@ int main(int argc, char **argv) {
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0};
+    bput(&libneed,1,0);   /* R11-3: library bodies on demand by default; -fno-trim-libc sends an empty flag */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
@@ -122,6 +123,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(a,"-nostdinc")) { if (!nostd.n) bput(&nostd,1,0); }
         else if (!strcmp(a,"-ftrim-libc") || !strcmp(a,"-libneed")) { if (!libneed.n) bput(&libneed,1,0); }
+        else if (!strcmp(a,"-fno-trim-libc")) libneed.n = 0;
         else if (!strcmp(a,"-dump-tokens")) mode = 4;
         else if (!strcmp(a,"-E")) mode = 1;
         else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;

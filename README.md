@@ -73,13 +73,13 @@ machine). The C headers it needs travel inside it.
 ```
 
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
-  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `-ftrim-libc`, `--version`; `-Wall`,
+  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
 - **Headers:** twenty standard/compatibility headers are bundled (`assert
   ctype dirent errno float inttypes iso646 limits math memory signal stdarg stdbool
   stddef stdint stdio stdlib string time wchar`), plus `unisacc_ffi.h`. Ordinary
   library calls use the bundled C implementations, compiled on demand;
-  `-ftrim-libc` (off by default; `-libneed` is a compatible alias) conservatively selects library bodies using identifier and dependency closures. On
+  `-ftrim-libc` (**on by default since 0.0.11**; `-fno-trim-libc` keeps every library body; `-libneed` is a compatible alias) conservatively selects library bodies using identifier and dependency closures. On
   macOS, the explicit dl/libffi bridge can call system APIs; it is not automatic
   forwarding of all libc calls. System FILE/va_list and allocator families must
   not be mixed with the bundled implementations.
