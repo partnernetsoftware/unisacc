@@ -417,3 +417,58 @@ M8 验收与度量     tests/acceptance.sh + bench             ⟦B-1..B-6⟧
 2. **acc 不达标不许加宽网络**（F-5）—— 是 key 编码错了
 3. **走查器 / 符号表 / 文件头不许神经化**（T-1）—— 它们是代数，不是表
 
+
+<a id="readme-migrated"></a>
+## README 迁入的历史快照与说明（2026-09-30 自 prd §0 移出）
+
+### 已发布版本身份与当前本地候选（原在 README，2026-09-30 迁入）
+
+README 是用户入口，不放状态；下面这张表与它后面的证据边界、历史外链原在 README 的
+"Model product" 一节，按 R12-6 ① 的职责分工迁到这里。**表中的字节数与 SHA 属"当前状态数字"，
+`tests/numberrestatements.py` 经 `docs.sh` 门禁断言它们不出现在生成区与账本指针之外的地方。**
+
+| Snapshot | Evidence / status |
+|---|---|
+| Snapshot | Evidence / status |
+|---|---|
+| Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
+| v0.0.12 artifact | Version 0.0.12; product closure sealed at `c4d667e` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,368 B, SHA-256 `fb607af59388aa20cbd9f536d6b781f3cf83a6a0294c0e4e69e844faba2736cb` (unsigned gate candidate 1,154,589 B, SHA-256 `df8cc9b4a3d997ea9e33bbdbaefeecb1a11d10dd98f529a4fb8d87f2e21e7f7a`); macOS app/dmg Developer ID signed and notarized; the same candidate bytes ran the demo suite on six hosted runners (lnx/osx/win × x86_64/arm64) and full suites on four native architectures; receipt [research/r12-release-acceptance.json](research/r12-release-acceptance.json) |
+| v0.0.11 artifact | Version 0.0.11; product closure sealed at `8b5abc9` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,384 B, SHA-256 `e86cc61c2d9ee8abd511f5d6b5c0f114a01a34dbe6146bb411e3f204c65d792a` (unsigned gate candidate 1,154,605 B, SHA-256 `6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`); macOS app/dmg Developer ID signed and notarized; library bodies on demand by default (`-fno-trim-libc` opts out); receipt [research/r11-release-acceptance.json](research/r11-release-acceptance.json) |
+| v0.0.10 artifact | Version 0.0.10; product closure sealed at `fdff9c5`, release source `ae6d512`; published `unisacc.com` is Authenticode-signed: 1,168,488 B, SHA-256 `f6e8e090a5288583389bdbbb5674f7e0fbb717baf13fa600f8074c77d1acdb2e` (unsigned gate candidate 1,152,711 B, SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; model package identical); 24 deployed networks each `network = table` over the whole domain; in-process `libunisacc` (contexts, symbol injection, typed V2/V3 signatures with model-certified carriers, callbacks, USLCALL3 source-origin aliases); local release gate 332 suites rc 0, Linux arm64 guest and Windows/x86_64 guest smoke recorded in the [release receipt](research/r10-release-acceptance.json) |
+| v0.0.9 artifact | Synchronized reference/network prune; the build sidecar records the actual source-content closure separately from its build-time base HEAD; `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
+| Model organization | Constructed networks, stage-route rows and every physical byte: the [ledger in prd](prd.md#model-function-bytes), generated from `research/model-bytes.json`. The counts are not restated here -- this row said 33 and 1,082 while the ledger said 24 and 1,088 |
+| Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
+| Local verification (v0.0.9, `d4f7d302`) | CLI 64, run 12, C99 57, nativeboot/kernel and every deployed network/table check of that candidate passed. Complete acceptance is recorded separately in the [release receipt](research/r9-release-acceptance.json); an unfinished queue is not a pass. Previous candidates retain separate historical receipts. The deployed-network count is the ledger's, not this row's: it read 33 here while the ledger reads 24 |
+| Platform and release scope | The exact `d4f7d302` bytes passed six targets × hello/fib/convert (18 cells). macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are smoke checks, not full native platform suites or Windows compiler bootstrap. Publication status is shown on the [GitHub releases page](https://github.com/partnernetsoftware/unisacc/releases). |
+
+The authoritative [pipeline design](prd.md#pipeline-design) describes each
+stage's inputs, outputs, control structure, rule sources and limits. The
+[historical one-pass measurements](research/memory-once-integrated-bench-20260928.json)
+records candidate identity, gate receipts and timing. On the same macOS arm64
+driver and calc input, five warm samples gave medians of 205.382 ms
+(P2/two-pass), 207.770 ms (P3/two-pass) and 172.749 ms (P3/one-pass).
+These are input-specific compilation/run-entry measurements, not produced
+program runtime or a claim about every program.
+
+Finite-domain checks prove network/table equality, not complete C99 semantics.
+Fixed-package driver N1=N2=N3 checks do not prove reconstruction of networks,
+the package or the APE container. Historical candidate hashes, 171/177-item
+gates, platform smoke and older performance measurements remain in the
+[S-17 migration archive](archive/s17-migration-log-20260928.md) and
+[original final evidence](research/s17-final-evidence.json); they do not transfer
+to the current candidate.
+
+Unreachable-function pruning is a separate constructed-network stage before
+lowering on image/run routes; ambiguous or unsupported tapes are retained whole.
+Public `-S`/`-c` tape output remains unchanged. macOS app/DMG qualification has passed
+actual Developer ID signing, notarization, stapling and Gatekeeper, with the
+sealed `.com` running inside. Windows Authenticode signing was deferred from v0.0.9 to v0.0.10 (owner
+decision, 2026-09-28); the v0.0.10 Windows signing status is recorded in the
+[release receipt](research/r10-release-acceptance.json) — check the published SHA-256 either way. See the [R9 release checklist](prd.md).
+
+Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) — product, offline seed,
+static inputs, development tools and reference judges. The [research index](research/README.md)
+keeps Papers A, B and C and their evidence separate from the product specification.
+
+（本节为迁移内容；版本小节索引见上，计划见 `plans/`。）
+

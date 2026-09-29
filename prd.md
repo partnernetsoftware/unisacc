@@ -25,69 +25,22 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 - **已落地**（0.0.10/0.0.11 两次实发）：push→签完约 4–5 分钟；GHCR 封存与 release-check 实跑；qualification→company；Apple 公证。**未落地**（R12-0/R12-7）：发布本身仍是本机 `gh release edit` 而非工作流；qualification 的本地演练脚本；单架构原生 runner 跑完整套件（R12-3）。
 - **每片重封**：开发期每次产品闭包变化都要 `seal_candidate.sh <ver>-dev`，否则 release-check 候选作业红（0.0.11 前三次 push 的教训）。
 
-### v0.0.11（2026-09-29 发布，tag 8b5abc9）
-
-- **发布**：https://github.com/partnernetsoftware/unisacc/releases/tag/v0.0.11 ；签后 `unisacc.com` e86cc61c…（1,170,384 B），未签候选 6a3dfce2…（1,154,605 B）；本地 338/338；验收 `research/r11-release-acceptance.json`。
-- **[v]**：V3 variadic 跨来源、一层 pointee 身份、long double（IEEE64 profile）、packed 外部布局（AAPCS64/Win64）—— `research/r11-{variadic-import,pointee-identity,longdouble,packed}-evidence.json`；`-ftrim-libc` 默认（住在 E2 网络，`-fno-trim-libc` 退出；calc -run 188.7→142.7 ms）—— `r11-trim-default-evidence.json`；关系账 —— `r11-package-relations.json`；Windows 双目标编译器自举与六目标 crossnative；GHCR 每片重封。
-- **[-] 顺延 0.0.12（理由在 R12 计划树对应项）**：general BANK（设计 `research/r11-bank-design.md`）、Windows SEH/六平台生命周期矩阵、us_eval/us_reload/us_opt_verify、网络裁判登记、目录职责梳理、论文定稿。
-- 逐项回执全文见 [归档](archive/prd-history-20260929.md#v0-0-11)。
-
 ### v0.0.12（2026-09-30 发布，源 `c4d667e`）
 
 - **发布**：https://github.com/partnernetsoftware/unisacc/releases/tag/v0.0.12 ；签后 `unisacc.com` fb607af5…（1,170,368 B），未签候选 df8cc9b4…（1,154,589 B）；最终树全量 350/350；验收 `research/r12-release-acceptance.json`。
 - **多架构结果**：六托管 runner（lnx/osx/win × x86_64/arm64）对同一候选跑演示套件六格全绿（`research/r12-demo-matrix-c4d667e.json`）；全套件 ci 矩阵 lnx/x86_64、lnx/arm64、osx/arm64 全绿，osx/x86_64（Intel）163/181（18 项为 Python 参考路径的时间预算）；本机六目标 8/8 与 Windows 双自举。
 - **[v]**：R12-0 测试债（清点/入门禁/usage/exec-formats/linuxbridgecheck/ua_ref 竞态/--list/bindingcheck 拆分）、R12-1 ① BANK 可执行部分（两 ISA 19 夹具）、R12-3 ③ 矩阵、R12-4 ③④（external 8/18、计数单一来源）、R12-5 ④ FX-6 量化负结果。**[-] 顺延 0.0.13**：BANK 表接线与宿主、R12-2、Windows 全套件 runner、网络裁判登记、R12-6 文档/规格/论文余项、FX-5。回执全文 `plans/v0.0.12.md`。
 
-### 已发布版本身份与当前本地候选（原在 README，2026-09-30 迁入）
+### 已发布版本身份（README 只放用户入口；本表按版本一行，数字以各版验收记录为准）
 
-README 是用户入口，不放状态；下面这张表与它后面的证据边界、历史外链原在 README 的
-"Model product" 一节，按 R12-6 ① 的职责分工迁到这里。**表中的字节数与 SHA 属"当前状态数字"，
-`tests/numberrestatements.py` 经 `docs.sh` 门禁断言它们不出现在生成区与账本指针之外的地方。**
-
-| Snapshot | Evidence / status |
+| 版本 | 身份 / 证据 |
 |---|---|
-| Snapshot | Evidence / status |
-|---|---|
-| Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
-| v0.0.12 artifact | Version 0.0.12; product closure sealed at `c4d667e` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,368 B, SHA-256 `fb607af59388aa20cbd9f536d6b781f3cf83a6a0294c0e4e69e844faba2736cb` (unsigned gate candidate 1,154,589 B, SHA-256 `df8cc9b4a3d997ea9e33bbdbaefeecb1a11d10dd98f529a4fb8d87f2e21e7f7a`); macOS app/dmg Developer ID signed and notarized; the same candidate bytes ran the demo suite on six hosted runners (lnx/osx/win × x86_64/arm64) and full suites on four native architectures; receipt [research/r12-release-acceptance.json](research/r12-release-acceptance.json) |
-| v0.0.11 artifact | Version 0.0.11; product closure sealed at `8b5abc9` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,384 B, SHA-256 `e86cc61c2d9ee8abd511f5d6b5c0f114a01a34dbe6146bb411e3f204c65d792a` (unsigned gate candidate 1,154,605 B, SHA-256 `6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`); macOS app/dmg Developer ID signed and notarized; library bodies on demand by default (`-fno-trim-libc` opts out); receipt [research/r11-release-acceptance.json](research/r11-release-acceptance.json) |
-| v0.0.10 artifact | Version 0.0.10; product closure sealed at `fdff9c5`, release source `ae6d512`; published `unisacc.com` is Authenticode-signed: 1,168,488 B, SHA-256 `f6e8e090a5288583389bdbbb5674f7e0fbb717baf13fa600f8074c77d1acdb2e` (unsigned gate candidate 1,152,711 B, SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; model package identical); 24 deployed networks each `network = table` over the whole domain; in-process `libunisacc` (contexts, symbol injection, typed V2/V3 signatures with model-certified carriers, callbacks, USLCALL3 source-origin aliases); local release gate 332 suites rc 0, Linux arm64 guest and Windows/x86_64 guest smoke recorded in the [release receipt](research/r10-release-acceptance.json) |
-| v0.0.9 artifact | Synchronized reference/network prune; the build sidecar records the actual source-content closure separately from its build-time base HEAD; `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
-| Model organization | Constructed networks, stage-route rows and every physical byte: the [ledger in prd](prd.md#model-function-bytes), generated from `research/model-bytes.json`. The counts are not restated here -- this row said 33 and 1,082 while the ledger said 24 and 1,088 |
-| Implemented changes | P3 binary networks with per-network DEFLATE/CRC and one-pass memory binding for `-run`; P1/P2 compatibility retained |
-| Local verification (v0.0.9, `d4f7d302`) | CLI 64, run 12, C99 57, nativeboot/kernel and every deployed network/table check of that candidate passed. Complete acceptance is recorded separately in the [release receipt](research/r9-release-acceptance.json); an unfinished queue is not a pass. Previous candidates retain separate historical receipts. The deployed-network count is the ledger's, not this row's: it read 33 here while the ledger reads 24 |
-| Platform and release scope | The exact `d4f7d302` bytes passed six targets × hello/fib/convert (18 cells). macOS x86_64 ran under Rosetta, Linux x86_64 under Lima emulation and the Windows driver under x86_64 emulation on ARM; these are smoke checks, not full native platform suites or Windows compiler bootstrap. Publication status is shown on the [GitHub releases page](https://github.com/partnernetsoftware/unisacc/releases). |
+| v0.0.12 | Version 0.0.12; product closure sealed at `c4d667e` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,368 B, SHA-256 `fb607af59388aa20cbd9f536d6b781f3cf83a6a0294c0e4e69e844faba2736cb` (unsigned gate candidate 1,154,589 B, SHA-256 `df8cc9b4a3d997ea9e33bbdbaefeecb1a11d10dd98f529a4fb8d87f2e21e7f7a`); macOS app/dmg Developer ID signed and notarized; the same candidate bytes ran the demo suite on six hosted runners (lnx/osx/win × x86_64/arm64) and full suites on four native architectures; receipt [research/r12-release-acceptance.json](research/r12-release-acceptance.json) |
+| v0.0.11 | Version 0.0.11; product closure sealed at `8b5abc9` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,384 B, SHA-256 `e86cc61c2d9ee8abd511f5d6b5c0f114a01a34dbe6146bb411e3f204c65d792a` (unsigned gate candidate 1,154,605 B, SHA-256 `6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`); macOS app/dmg Developer ID signed and notarized; library bodies on demand by default (`-fno-trim-libc` opts out); receipt [research/r11-release-acceptance.json](research/r11-release-acceptance.json) |
+| v0.0.10 | Version 0.0.10; product closure sealed at `fdff9c5`, release source `ae6d512`; published `unisacc.com` is Authenticode-signed: 1,168,488 B, SHA-256 `f6e8e090a5288583389bdbbb5674f7e0fbb717baf13fa600f8074c77d1acdb2e` (unsigned gate candidate 1,152,711 B, SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; model package identical); 24 deployed networks each `network = table` over the whole domain; in-process `libunisacc` (contexts, symbol injection, typed V2/V3 signatures with model-certified carriers, callbacks, USLCALL3 source-origin aliases); local release gate 332 suites rc 0, Linux arm64 guest and Windows/x86_64 guest smoke recorded in the [release receipt](research/r10-release-acceptance.json) |
+| v0.0.9 与更早 | 见 §7.1 版本沿革 |
 
-The authoritative [pipeline design](prd.md#pipeline-design) describes each
-stage's inputs, outputs, control structure, rule sources and limits. The
-[historical one-pass measurements](research/memory-once-integrated-bench-20260928.json)
-records candidate identity, gate receipts and timing. On the same macOS arm64
-driver and calc input, five warm samples gave medians of 205.382 ms
-(P2/two-pass), 207.770 ms (P3/two-pass) and 172.749 ms (P3/one-pass).
-These are input-specific compilation/run-entry measurements, not produced
-program runtime or a claim about every program.
-
-Finite-domain checks prove network/table equality, not complete C99 semantics.
-Fixed-package driver N1=N2=N3 checks do not prove reconstruction of networks,
-the package or the APE container. Historical candidate hashes, 171/177-item
-gates, platform smoke and older performance measurements remain in the
-[S-17 migration archive](archive/s17-migration-log-20260928.md) and
-[original final evidence](research/s17-final-evidence.json); they do not transfer
-to the current candidate.
-
-Unreachable-function pruning is a separate constructed-network stage before
-lowering on image/run routes; ambiguous or unsupported tapes are retained whole.
-Public `-S`/`-c` tape output remains unchanged. macOS app/DMG qualification has passed
-actual Developer ID signing, notarization, stapling and Gatekeeper, with the
-sealed `.com` running inside. Windows Authenticode signing was deferred from v0.0.9 to v0.0.10 (owner
-decision, 2026-09-28); the v0.0.10 Windows signing status is recorded in the
-[release receipt](research/r10-release-acceptance.json) — check the published SHA-256 either way. See the [R9 release checklist](prd.md).
-
-Where things are: [ARCHITECTURE.md](ARCHITECTURE.md) — product, offline seed,
-static inputs, development tools and reference judges. The [research index](research/README.md)
-keeps Papers A, B and C and their evidence separate from the product specification.
-
-（本节为迁移内容；版本小节索引见上，计划见 `plans/`。）
+### 计划索引（正文在 plans/，prd 只放索引）
 
 | 版本 | 文件 | 状态 |
 |---|---|---|
@@ -1287,6 +1240,22 @@ v1 到 v3.4 的逐版钉死条目，连同 14 阶段之前的模型总表，已�
 - **闭合项**：干净机器 CI（后改为 release-check 快链 + 每周全量）、Windows 企业签名（qualification→company）、Apple 公证、共享 E2/24 网、源码/权重 include 分离、六单目标私有构建、进程内库主 API/线程/生命周期/回调/USLCALL3 别名、`-ftrim-libc` 改名、GHCR 候选封存。
 - **顺延到 0.0.11**（已在 v0.0.11 节逐项回执）：V3 variadic 跨来源、pointee 身份、packed / 宽 FP / BANK、Windows SEH、六平台生命周期矩阵、公共 origin0 refinement、Paper A 定稿。
 - v0.0.9（`a606ff4`）及 R9 状态、v0.0.10 全计划见归档索引。
+
+
+**v0.0.11（2026-09-29 发布，tag 8b5abc9）**
+- **发布**：https://github.com/partnernetsoftware/unisacc/releases/tag/v0.0.11 ；签后 `unisacc.com` e86cc61c…（1,170,384 B），未签候选 6a3dfce2…（1,154,605 B）；本地 338/338；验收 `research/r11-release-acceptance.json`。
+- **[v]**：V3 variadic 跨来源、一层 pointee 身份、long double（IEEE64 profile）、packed 外部布局（AAPCS64/Win64）—— `research/r11-{variadic-import,pointee-identity,longdouble,packed}-evidence.json`；`-ftrim-libc` 默认（住在 E2 网络，`-fno-trim-libc` 退出；calc -run 188.7→142.7 ms）—— `r11-trim-default-evidence.json`；关系账 —— `r11-package-relations.json`；Windows 双目标编译器自举与六目标 crossnative；GHCR 每片重封。
+- **[-] 顺延 0.0.12（理由在 R12 计划树对应项）**：general BANK（设计 `research/r11-bank-design.md`）、Windows SEH/六平台生命周期矩阵、us_eval/us_reload/us_opt_verify、网络裁判登记、目录职责梳理、论文定稿。
+- 逐项回执全文见 [归档](archive/prd-history-20260929.md#v0-0-11)。
+
+**v0.0.9 / v0.0.8 身份行（自 README 迁入的快照表）**
+
+| 版本 | 身份 |
+|---|---|
+| v0.0.9 artifact | Synchronized reference/network prune; the build sidecar records the actual source-content closure separately from its build-time base HEAD; `.com` 1,233,236 B; SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b` |
+| Published v0.0.8 | `10672e3`; unsigned `.com` 5,388,402 B; SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737` |
+
+v0.0.9 时代的说明（单次绑定计时、平台范围 d4f7d302、Windows 签名顺延句、有限域检查边界）已随 README 迁入块移至 [archive/prd-history-20260929.md](archive/prd-history-20260929.md#readme-migrated)。
 
 ### 7.2 归档索引
 
