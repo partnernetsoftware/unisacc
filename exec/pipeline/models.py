@@ -19,15 +19,17 @@ def closure(h):
     """Conservative dependency closure: includes imported Python, embedded C
     templates, gold tables, carried headers and the inference verifier."""
     for directory in ('exec', 'unisa', 'src', 'kernel', 'include', 'weights'):
-        for path in sorted((ROOT / directory).rglob('*')):
+        # Byte-identical on every host: POSIX path spelling and case-sensitive part order
+        # (Windows would spell backslashes and sort case-insensitively).
+        for path in sorted((ROOT / directory).rglob('*'), key=lambda q: q.relative_to(ROOT).parts):
             # Declared generated seed/cache output, never a construction input.
             if path.relative_to(ROOT).parts[:2] == ('exec', 'build'):
                 continue
             if path.is_file() and path.suffix in ('.py', '.c', '.h', '.inc', '.tsv', '.json', '.sh'):
-                h.update(str(path.relative_to(ROOT)).encode() + b'\0')
+                h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
                 h.update(bytes.fromhex(digest(path)))
     path = ROOT / 'iterate/kernel/typekw.tsv'
-    h.update(str(path.relative_to(ROOT)).encode() + b'\0')
+    h.update(path.relative_to(ROOT).as_posix().encode() + b'\0')
     h.update(bytes.fromhex(digest(path)))
     return h
 

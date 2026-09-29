@@ -14,7 +14,8 @@ Every child is bounded; nothing here fabricates a result.
 """
 import argparse, hashlib, json, os, pathlib, platform, subprocess, sys, time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-EXAMPLES = ['hello', 'fact', 'fib', 'ptr', 'struct', 'switch', 'do', 'host']
+EXAMPLES = ['hello', 'fact', 'fib', 'ptr', 'struct', 'switch', 'do']
+HOST_EXAMPLES = ['host']   # prints host facts: must run (exit 0, output), not compared across machines
 DETERMINISTIC_APPS = ['calc', 'life', 'wordfreq', 'queens', 'bf', 'dijkstra', 'colorpack']
 SYSTEM_APPS = {  # name -> (args after '--', kind of check)
     'exeinfo': (['SELF'], 'exit0'),   # SELF = the candidate's own path (the root unisacc.com is not in a checkout)
@@ -74,6 +75,7 @@ def main():
         rec['programs'][name] = r
         if not ok: rec['failures'].append(name)
     for e in EXAMPLES: record(e, ROOT / f'examples/{e}.c', [], 'deterministic')
+    for e in HOST_EXAMPLES: record(e, ROOT / f'examples/{e}.c', [], 'exit0')
     for e in DETERMINISTIC_APPS: record(e, ROOT / f'examples/apps/{e}.c', [], 'deterministic')
     for e, (args, kind) in SYSTEM_APPS.items(): record(e, ROOT / f'examples/apps/{e}.c', [str(com) if x == 'SELF' else x for x in args], kind)
     # System apps are allowed to report an unsupported platform (exit 0 with a notice) but not to crash.
