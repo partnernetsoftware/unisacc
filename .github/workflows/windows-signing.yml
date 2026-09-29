@@ -231,15 +231,19 @@ jobs:
           $policy = Get-Content signed/signing-policy.json -Raw | ConvertFrom-Json
           $q = Get-Content signed/qualification-receipt.json -Raw | ConvertFrom-Json
           if ($policy.windows.mode -ne 'required' -or -not $q.versioninfo_ready) { throw 'sealed qualification is not signable' }
+          # The signing action takes the catalog's parent directory as the files root
+          # (Split-Path); a root-level catalog yields an empty Path (2026-09-29, twice).
+          # Same layout as minicon: a signing-input/ directory holding copies + catalog,
+          # signed bytes are copied back into signed/ for the trust court below.
+          New-Item -ItemType Directory -Path signing-input | Out-Null
           $catalog = @()
           foreach ($asset in $policy.windows.assets) {
             $path = (Resolve-Path (Join-Path signed $asset.path)).Path
             if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $q.before.($asset.path).sha256) { throw 'transferred input changed' }
-            # The signing client resolves catalog entries relative to the catalog file; an
-            # absolute entry came back as an empty Path (2026-09-29). Same shape as minicon.
-            $catalog += ('signed\' + $asset.path)
+            Copy-Item -LiteralPath $path -Destination (Join-Path signing-input $asset.path)
+            $catalog += $asset.path
           }
-          $catalog | Set-Content signing-catalog.txt -Encoding ascii
+          $catalog | Set-Content -LiteralPath signing-input/signing-catalog.txt -Encoding ascii
       - uses: azure/login@0949e32778441b2c442592b7a0e6313466dc8f29 # v3.0.2
         timeout-minutes: 1
         with:
@@ -255,7 +259,7 @@ jobs:
           endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
-          files-catalog: signing-catalog.txt
+          files-catalog: signing-input/signing-catalog.txt
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -275,6 +279,17 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
           correlation-id: unisacc-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Move the signed bytes back beside the sealed input
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = Get-Content signed/signing-policy.json -Raw | ConvertFrom-Json
+          foreach ($asset in $policy.windows.assets) {
+            $src = Join-Path signing-input $asset.path
+            if (-not (Test-Path -LiteralPath $src)) { throw "signed output missing: $($asset.path)" }
+            Copy-Item -LiteralPath $src -Destination (Join-Path signed $asset.path) -Force
+          }
       - name: Windows authoritative trust and public before-after receipt
         timeout-minutes: 1
         shell: pwsh
