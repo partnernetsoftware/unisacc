@@ -36,6 +36,9 @@ ua_rebuild_to() {   # ua_rebuild_to <final-path> <stamp-value-or-empty>
     bound 30 "$_LIB_R/tests/build_ref.sh" "$tmp.c" "$tmp" >/dev/null || {
         rm -f "$tmp" "$tmp.c"
         echo "  FAIL could not build the reference compiler ($1)"; exit 1; }
+    rm -f "$tmp.c" || :              # the export is 1.3 MB per build; it must not
+                                     # survive -- a per-pid name is never reused,
+                                     # so unlike the old fixed $UA.c it accumulates
     mv -f "$tmp" "$1" || { rm -f "$tmp"; echo "  FAIL could not install $1"; exit 1; }
     [ -n "$2" ] && printf '%s\n' "$2" > "$1.stamp.tmp.$$" && mv -f "$1.stamp.tmp.$$" "$1.stamp"
     return 0
