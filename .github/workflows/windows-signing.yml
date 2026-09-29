@@ -75,7 +75,12 @@ jobs:
           assert run['id']==int(env['UPSTREAM_RUN_ID']) and run['run_attempt']==int(env['UPSTREAM_ATTEMPT']), 'wrong upstream run/attempt response'
           assert run['status']=='completed' and run['conclusion']=='success', 'upstream failed/incomplete'
           assert run['head_branch']=='main' and run['event'] in ('push','workflow_dispatch'), 'upstream is not main CI'
-          release=api(f"repos/{repo}/releases/tags/{env['SEAL_TAG']}")
+          def draft_release(tag):
+              # /releases/tags/{tag} returns published releases only; an owner draft is found by tag_name.
+              found=[r for r in api(f'repos/{repo}/releases?per_page=100') if r['tag_name']==tag and r['draft'] is True]
+              assert len(found)==1, 'seal must be exactly one existing owner draft'
+              return found[0]
+          release=draft_release(env['SEAL_TAG'])
           assert release['draft'] is True, 'seal must be an existing owner draft'
           wanted={'unisacc-unsigned.zip','unsigned-receipt.json'}
           assets={a['name']:a for a in release['assets']}
@@ -85,7 +90,7 @@ jobs:
           assert 0<assets['unisacc-unsigned.zip']['size']<=16842752, 'archive size budget'
           Path('upstream').mkdir()
           call('gh','release','download',env['SEAL_TAG'],'--repo',repo,'--pattern','unisacc-unsigned.zip','--pattern','unsigned-receipt.json','--dir','upstream')
-          again=api(f"repos/{repo}/releases/tags/{env['SEAL_TAG']}")
+          again=draft_release(env['SEAL_TAG'])
           current={a['name']:a for a in again['assets']}
           assert again['id']==release['id'] and again['draft'] is True, 'seal release changed during download'
           assert sum(a['name'] in wanted for a in again['assets'])==2, 'seal asset set changed'
