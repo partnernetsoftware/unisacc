@@ -138,7 +138,7 @@ job strconvert-host python3 ./tests/strconvertcheck.py
 job pptruth python3 ./tests/pptruthcheck.py
 for route in seed classic model; do job strconvert-$route python3 ./tests/strconvertroute.py "$route"; done
 job package-footer python3 ./tests/packagefootercheck.py
-job ape-version python3 ./tests/apeversioncheck.py
+job ape-version python3 ./tests/apeversioncheck.py --ape "${MODEL_COM:-./unisacc.com}"
 job proc-enum python3 ./tests/procenumcheck.py
 job libneed ./tests/libneed.sh
 job apps-real python3 ./tests/appsrealcheck.py             # real snapshots, no fabricated application defaults

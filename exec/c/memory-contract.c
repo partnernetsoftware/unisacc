@@ -5,14 +5,23 @@
 typedef struct { unsigned char *b;int n; } Buf;
 static int mode=0,count=0;
 static void die(const char *s) { fprintf(stderr,"%s\n",s);exit(2); }
-static long __mmap(long a,long n,long flags,long prot,long fd,long off) {
+/* Doubles for the Win32 calls the host loader makes; no <windows.h> on this host. */
+typedef unsigned long DWORD; typedef size_t SIZE_T; typedef void *HANDLE; typedef int BOOL;
+#define MEM_RESERVE 0x2000
+#define MEM_COMMIT 0x1000
+#define PAGE_NOACCESS 1
+#define PAGE_READWRITE 4
+#define PAGE_EXECUTE_READ 0x20
+static void *VirtualAlloc(void *a,SIZE_T n,DWORD flags,DWORD prot) {
     count++;
-    if(count==1){ if(a || n!=2147467264 || flags!=0x2000 || prot!=1)die("bad reserve contract");return mode==1 ? 0 : 0x10000000000; }
-    if(a!=0x10000000000 || n!=32768 || flags!=0x1000 || prot!=4)die("bad commit contract");
-    return mode==2 ? 0 : mode==3 ? a+65536 : a;
+    if(count==1){ if(a || n!=2147467264 || flags!=MEM_RESERVE || prot!=PAGE_NOACCESS)die("bad reserve contract");return mode==1 ? 0 : (void *)0x10000000000; }
+    if(a!=(void *)0x10000000000 || n!=32768 || flags!=MEM_COMMIT || prot!=PAGE_READWRITE)die("bad commit contract");
+    return mode==2 ? 0 : mode==3 ? (unsigned char *)a+65536 : a;
 }
-static int __mprotect(long a,long n,long p) { return 0; }
-#define _WIN32
+static BOOL VirtualProtect(void *a,SIZE_T n,DWORD prot,DWORD *old) { (void)a;(void)n;(void)prot;*old=0;return 1; }
+static HANDLE GetCurrentProcess(void) { return (HANDLE)1; }
+static BOOL FlushInstructionCache(HANDLE h,const void *a,SIZE_T n) { (void)h;(void)a;(void)n;return 1; }
+#define UNISA_MEMORY_CONTRACT_DOUBLE
 #include "memory.c"
 int main(int n,char **v) {
  mode=n>1?atoi(v[1]):0;

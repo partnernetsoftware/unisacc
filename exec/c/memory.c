@@ -3,7 +3,7 @@
 #if !defined(__UNISA__) && !defined(_WIN32)
 #include <sys/mman.h>
 #endif
-#if defined(_WIN32) && !defined(__UNISA__)
+#if defined(_WIN32) && !defined(__UNISA__) && !defined(UNISA_MEMORY_CONTRACT_DOUBLE)
 #include <windows.h>
 #endif
 
