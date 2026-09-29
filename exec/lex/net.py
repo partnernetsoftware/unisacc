@@ -87,7 +87,7 @@ def main():
             a = net.predict((v,))
             row[key] = [a["nxt"], int(a["seq"])]
         states[q] = [mode, row]
-    dj = {"states": states, "seqs": d["seqs"], "tok_names": d["tok_names"]}
+    dj = {"start": d.get("start", "DISPATCH"), "states": states, "seqs": d["seqs"], "tok_names": d["tok_names"]}
     with open(os.path.join(out, "e1net.json"), "w") as f:
         json.dump(dj, f, separators=(",", ":"))
     same = dj["states"] == d["states"]

@@ -413,6 +413,8 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
         install_rules(g, HERE, "assembly", section="accept")
     build_xe(g)
     build_hx(g)
+    from sourcefacts import install as sourcefacts_install
+    sourcefacts_install(g)
     g.finish()
     return g
 

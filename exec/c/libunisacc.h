@@ -45,6 +45,10 @@ US_API int us_add_file(us_context *ctx, const char *path);
 US_API int us_add_tape(us_context *ctx, const void *bytes, size_t length);
 US_API int us_define(us_context *ctx, const char *definition);
 US_API int us_include_path(us_context *ctx, const char *path);
+/* Select source signature facts before compilation: default2 preserves V2;
+   version3 requests ordered source facts. Success on a changed value invalidates
+   compiled code/exports; it does not certify ABI or upgrade declaration proof. */
+US_API int us_set_signature_version(us_context *ctx, int version);
 /* Borrow address; caller owns its lifetime. Successful registration invalidates
    compiled code and previously returned exports; recompile before use. */
 US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const us_signature *signature);
@@ -57,7 +61,7 @@ US_API int us_add_symbol(us_context *ctx, const char *name, void *address, const
    Success invalidates code/exports; failure preserves the prior generation.
    Handles remain owned until us_free, after compiled code is destroyed. */
 US_API int us_declare_import(us_context *ctx, const char *name, const us_signature *signature);
-/* Typed fixed or variadic native declarations use the exact model USLSIG2 single-record
+/* Typed fixed or variadic native declarations use the exact model USLSIG2/3 single-record
    protocol. The record name must equal name; bytes are deep-owned on success.
    Old us_signature/API layout is unchanged. Mutation follows the same generation
    invalidation rule. A variadic prototype describes its fixed prefix; the model records and promotes

@@ -52,5 +52,11 @@ def install(E,P,b,frame,blob):
     P('L3.nonfp').a(('OUTW','lx_zero')).goto('L3.facts')
     P('L3.fp32').a(('LDI','d_format',1)).goto('L3.facts')
     P('L3.fp64').a(('LDI','d_format',2)).goto('L3.facts')
-    p=P('L3.facts').a(('OUTW','d_format'),('LDI','lx_v',0)).call('LX.u64').a(('OUTW','lx_zero'),('OUTW','lx_zero'),('OUTW','lx_zero'),('OUTW','d_tag'),('BLEN','lx_v','d_payload')).call('LX.u64')
+    P('L3.facts').a(('OUTW','d_format')).branch({1:'L3.knowncheck'},'L3.unknownfacts',[('CMPI','sf3_status',1)])
+    # Complete stage provenance is about our storage policy, not system ABI.
+    # Unknown/incomplete types are never promoted solely by clean syntax.
+    P('L3.knowncheck').branch({6:'L3.unknownfacts'},'L3.knownfacts',[('RLD','d_class')])
+    P('L3.knownfacts').a(('COPYW','lx_v','d_align')).call('LX.u64').a(('OUTW','lx_zero'),('LDI','l3_known',3),('OUTW','l3_known'),('LDI','l3_origin',1),('OUTW','l3_origin')).goto('L3.factspayload')
+    P('L3.unknownfacts').a(('LDI','lx_v',0)).call('LX.u64').a(('OUTW','lx_zero'),('OUTW','lx_zero'),('OUTW','lx_zero')).goto('L3.factspayload')
+    p=P('L3.factspayload').a(('OUTW','d_tag'),('BLEN','lx_v','d_payload')).call('LX.u64')
     blob(p,'d_payload').a(('OCUT','d_blob','lx_zero'));blob(p,'d_old');blob(p,'d_blob').a(('ALUI','sub','lx_recursion','lx_recursion',1)).ret()

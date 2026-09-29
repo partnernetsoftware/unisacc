@@ -226,6 +226,9 @@ if "--positions" in sys.argv:
 TYPED = "--typed" in sys.argv or POSITIONS
 if "--typed" in sys.argv:
     sys.argv.remove("--typed")
+SOURCEFACTS = TYPED or "--sourcefacts" in sys.argv
+if "--sourcefacts" in sys.argv:
+    sys.argv.remove("--sourcefacts")
 
 
 def OUT(s):
@@ -473,6 +476,9 @@ START = "DISPATCH"
 if LOCATIONS:
     from locations import install
     START = install(D)
+if SOURCEFACTS:
+    from lexsourcefacts import install as install_sourcefacts
+    START = install_sourcefacts(D, START)
 
 # ---- totality: every state total over what it reads -------------------------
 GAMMA = ["BOT", "P"] + ["D%d" % d for d in range(10)]
@@ -545,7 +551,7 @@ if __name__ == "__main__":
     st, classes = stats()
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "delta.json")
     with open(out, "w") as f:
-        json.dump({**({"start": START} if LOCATIONS else {}), "states": {k: [m, {str(v): list(e) for v, e in row.items()}]
+        json.dump({"start": START, "states": {k: [m, {str(v): list(e) for v, e in row.items()}]
                               for k, (m, row) in D.states.items()},
                    "seqs": [list(map(list, s)) for s in D.seqs],
                    "tok_names": list(TOKS)}, f, separators=(",", ":"))

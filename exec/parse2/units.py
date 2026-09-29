@@ -58,8 +58,10 @@ def build(locations=False):
     if locations:
         from unitlocations import install
         install(E,P)
+    from layoutprovenance import units as source_provenance
+    start=source_provenance(E,P,locations)
     g.finish()
-    return {'start':'START','states':{n:[m,{str(k):v for k,v in r.items()}] for n,(m,r) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
+    return {'start':start,'states':{n:[m,{str(k):v for k,v in r.items()}] for n,(m,r) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
 
 if __name__=='__main__':
     d=build("--locations" in sys.argv);pathlib.Path(sys.argv[1]).write_text(json.dumps(d,separators=(',',':')))

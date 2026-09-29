@@ -26,7 +26,19 @@ import sys
 EOF = 256
 
 
-def run(delta, x, cov=None):
+def run(delta, x, cov=None, files=None, maxsteps=3000000):
+    if delta.get("start") == "SF.start":
+        # Provenance and located framing use the shared ordinary-action simulator.
+        import importlib.util
+        from pathlib import Path
+        spec = importlib.util.spec_from_file_location("e1_core_sim", Path(__file__).resolve().parents[1] / "pp/sim.py")
+        core = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(core)
+        model = dict(delta)
+        model["states"] = dict(delta["states"], HALT=["b", {}])
+        model["seqs"] = [[("ALUI", "add", a[1], a[1], 1) if a[0] == "INC" else a
+                          for a in seq] for seq in delta["seqs"]]
+        return core.run(model, x, "", files=files, cov=cov, maxsteps=maxsteps)
     S = delta["states"]
     # decode rows once: state -> (mode, list/dict of (next, seq))
     rows = {}

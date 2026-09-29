@@ -31,7 +31,7 @@ typedef struct LibraryCarrierExport {us_export *source;us_carrier_certificate ce
 struct us_context {
     char *package, *definitions, *include_path, *target;
     Source *sources;
-    int source_count, optimisation;
+    int source_count, optimisation, signature_version;
     unsigned char *tape;
     size_t tape_length, definitions_length;
     unsigned char *signatures; size_t signatures_length;
@@ -209,6 +209,7 @@ API us_context *us_new(const char *path) {
     if (!path) return 0;
     us_context *c=calloc(1,sizeof *c);
     if (c && !(c->package=copy_string(path))) { free(c); return 0; }
+    if(c)c->signature_version=2;
     return c;
 }
 API void us_free(us_context *c) {
@@ -341,6 +342,13 @@ static void invalidate_bindings(us_context *c) {
 static us_binding_type binding_type(us_type_descriptor t) {
     us_binding_type r={t.depth,t.base,t.shape,t.kind,t.width,t.uns};return r;
 }
+API int us_set_signature_version(us_context *c,int version) {
+    if(!c || active || c->input_is_tape || (version!=2&&version!=3) ||
+       c->resolver.generation==UINT64_MAX || c->image_generation==UINT64_MAX)
+        return error(c,"invalid signature version configuration");
+    if(c->signature_version==version)return 0;
+    c->signature_version=version;c->resolver.generation++;invalidate_bindings(c);return 0;
+}
 API int us_add_symbol(us_context *c,const char *name,void *address,const us_signature *sig) {
     if(!c || !sig || sig->kind>1 || active)return error(c,"invalid symbol registration");
     if(c->input_is_tape)return error(c,"symbol injection requires C declarations");
@@ -413,7 +421,7 @@ static int library_carrier_model(us_context *c,const char *target,const void *wi
 static int library_carrier_exports_prepare(us_context *c){
     for(size_t i=0;i<c->exports.count;i++){
         us_export *x=c->exports.items+i;
-        if(x->version!=2||x->linkage||x->defined!=1||x->variadic||us_export_supported(x)||
+        if((x->version!=2&&x->version!=3)||x->linkage||x->defined!=1||x->variadic||us_export_supported(x)||
            (us_export_has_callbacks(x)&&us_export_bridge_supported(x)))continue;
         LibraryCarrierExport *entry=calloc(1,sizeof *entry);
         if(!entry)return error(c,"carrier export allocation failed");
@@ -458,9 +466,10 @@ API int us_compile(us_context *c,const char *target,int level) {
         RI=0; NRI=0; NR=0; FILE_READ_RECORD=0; FILE_READ_COUNT=0; FILE_READ_PATHS=0;
         INCDIR=c->include_path;
         package(c->package);
-        ResourceInput resources[9]; memset(resources,0,sizeof resources);
+        ResourceInput resources[11]; memset(resources,0,sizeof resources);
         unsigned char callable_values[2][8];resource_u64(callable_values[0],(uintptr_t)library_callable_make_dispatch);resource_u64(callable_values[1],(uintptr_t)library_callable_call_dispatch);
         unsigned char library_request[8]={1,0,0,0,0,0,0,0};
+        unsigned char signature_request[8]={3,0,0,0,0,0,0,0};
         RI=resources; NRI=0;
         resources[NRI].name=(const unsigned char *)"\0cli/target"; resources[NRI].n=11;
         resources[NRI].data=(const unsigned char *)target; resources[NRI].len=(int)strlen(target); NRI++;
@@ -485,6 +494,10 @@ API int us_compile(us_context *c,const char *target,int level) {
         resources[NRI].name=(const unsigned char *)"\0library/callables";resources[NRI].n=18;resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
         resources[NRI].name=(const unsigned char *)"\0library/callablemake";resources[NRI].n=21;resources[NRI].data=callable_values[0];resources[NRI].len=8;NRI++;
         resources[NRI].name=(const unsigned char *)"\0library/callablecall";resources[NRI].n=21;resources[NRI].data=callable_values[1];resources[NRI].len=8;NRI++;
+        if(c->signature_version==3){
+            resources[NRI].name=(const unsigned char *)"\0library/signatureversion";resources[NRI].n=25;resources[NRI].data=signature_request;resources[NRI].len=8;NRI++;
+            resources[NRI].name=(const unsigned char *)"\0library/sourcefacts";resources[NRI].n=20;resources[NRI].data=library_request;resources[NRI].len=8;NRI++;
+        }
         Buf input={0};
         char route[128];
         int z=snprintf(route,sizeof route,"%s/%stape/O%d",target,c->source_count>1 ? "multi/" : "",level);
@@ -519,7 +532,8 @@ API int us_compile(us_context *c,const char *target,int level) {
                 if (tape>(size_t)input.n-at || meta>(size_t)input.n-at-tape ||
                     calls>(size_t)input.n-at-tape-meta || catalogue!=(size_t)input.n-at-tape-meta-calls || meta<16 ||
                     (memcmp(input.b+at+(size_t)tape,"USLSIG1\n",8) &&
-                     memcmp(input.b+at+(size_t)tape,"USLSIG2\n",8))) __us_panic("bad library tape envelope");
+                     memcmp(input.b+at+(size_t)tape,"USLSIG2\n",8) &&
+                     memcmp(input.b+at+(size_t)tape,"USLSIG3\n",8))) __us_panic("bad library tape envelope");
                 c->signatures=malloc((size_t)meta);if (!c->signatures) __us_panic("out of memory");
                 memcpy(c->signatures,input.b+at+(size_t)tape,(size_t)meta);c->signatures_length=(size_t)meta;
                 if(version2 && us_native_callsites_load(&c->native_callsites,&c->native_templates,
@@ -995,7 +1009,7 @@ API void *us_sym(us_context *c,const char *name) {
                us_callable_pointer(&c->callables,h,&view,&code,c->error,sizeof c->error))return NULL;
             return code;
         }
-        if(x->version==2&&!x->linkage&&x->defined==1&&!x->variadic){
+        if((x->version==2||x->version==3)&&!x->linkage&&x->defined==1&&!x->variadic){
             LibraryCarrierExport *entry=c->carrier_exports;
             while(entry&&entry->source!=x)entry=entry->next;
             if(entry){

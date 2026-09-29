@@ -33,7 +33,7 @@ static int us_native_plan_add_call_capability(us_native_plans *plans,uintptr_t t
     *handle=0;us_native_plan *p=calloc(1,sizeof *p);if(!p)return us_export_error(error,cap,"native plan allocation failed");
     if(us_exports_load_capability(&p->graph,sig,length,bridge,error,cap)||p->graph.count!=1){us_native_plan_free(p);return us_export_error(error,cap,"invalid typed native graph");}
     us_export *x=p->graph.items;
-    if(x->version!=2||x->linkage||x->defined!=1){us_native_plan_free(p);return us_export_error(error,cap,"invalid typed native graph");}
+    if((x->version!=2&&x->version!=3)||x->linkage||x->defined!=1){us_native_plan_free(p);return us_export_error(error,cap,"invalid typed native graph");}
     if(variadic && (!fixed_count || fixed_count>x->count || x->variadic)){
         us_native_plan_free(p);return us_export_error(error,cap,"invalid variadic fixed prefix");
     }

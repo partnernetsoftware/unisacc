@@ -884,6 +884,8 @@ def build(locations=False, warnings=False, errors=False):
         ('SBB','MBS','MPT','MAR','MOF','BFW','MSZ','BFO','BFS','SHAPE_IDS','SHAPE')}, start)
     from valueranks import install as valueranks_install
     valueranks_install(E,P,dict(FPS_FN=FPS_FN,FPS_RB=FPS_RB,MBS=MBS,DBL=DBL,FLT=FLT))
+    from layoutprovenance import parser as source_provenance
+    start = source_provenance(E, P, start)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

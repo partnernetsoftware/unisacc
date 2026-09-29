@@ -1,4 +1,4 @@
-"""Library public roots from complete USLSIG1/2 framing, interpreted in delta."""
+"""Library public roots from complete USLSIG1/2/3 framing, interpreted in delta."""
 SEEN, ROOT = (i<<40 for i in (80,81))
 def install(E,P,B,limit):
     from pathlib import Path
@@ -25,9 +25,10 @@ def install(E,P,B,limit):
     for i,c in enumerate(magic[:6]):
         P("LR.magic"+str(i)).branch({c:"LR.magicadv"+str(i)},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
         P("LR.magicadv"+str(i)).a(("ADV",)).goto("LR.magic"+str(i+1))
-    P("LR.magic6").branch({49:"LR.version1",50:"LR.version2"},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
+    P("LR.magic6").branch({49:"LR.version1",50:"LR.version2",51:"LR.version3"},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
     P("LR.version1").a(("LDI","lr_version",1),("ADV",)).goto("LR.magic7")
     P("LR.version2").a(("LDI","lr_version",2),("ADV",),("LDI","lr_limit",extent_max)).branch({2:"LR.bad"},"LR.magic7",[("C64U","lr_len","lr_limit")])
+    P("LR.version3").a(("LDI","lr_version",3),("ADV",),("LDI","lr_limit",extent_max)).branch({2:"LR.bad"},"LR.magic7",[("C64U","lr_len","lr_limit")])
     P("LR.magic7").branch({10:"LR.magicadv7"},"LR.bad",[("BYTE","lr_c"),("RLD","lr_c")])
     P("LR.magicadv7").a(("ADV",)).goto("LR.count")
     P("LR.count").call("LR.u64").a(("COPYW","lr_records","lr_value"),("LDI","lr_limit",limit)).branch({2:"LR.bad"},"LR.begin",[("C64U","lr_records","lr_limit")])
@@ -74,7 +75,7 @@ def install(E,P,B,limit):
     P("LR.unsigned").call("LR.u64").a(("LDI","lr_limit",1)).branch({2:"LR.bad"},"LR.return",[("C64U","lr_value","lr_limit")])
     # Share the complete graph validator across result and all parameters.
     # Canonical bytes are private scratch; prune retains public roots by linkage.
-    P("LR.desc2").a(("COPYW","ms_limit","lr_len"),("OLEN","lr_canoncut")).call("MS.desc").a(("OCUT","lr_canon","lr_canoncut")).ret()
+    P("LR.desc2").a(("COPYW","ms_version","lr_version"),("COPYW","ms_limit","lr_len"),("OLEN","lr_canoncut")).call("MS.desc").a(("OCUT","lr_canon","lr_canoncut")).ret()
     P("LR.bit").a(("BYTE","lr_value"),("ADV",)).branch({(0,1):"LR.return"},"LR.bad",[("RLD","lr_value")])
     P("LR.u64").a(("MARK","lr_pos"),("A64","sub","lr_left","lr_len","lr_pos"),("LDI","lr_limit",8)).branch({0:"LR.bad"},"LR.u64read",[("C64U","lr_left","lr_limit")])
     P("LR.u64read").a(("LDI","lr_value",0),*[a for i in range(8) for a in [("BYTE","lr_byte"),("A64I","shl","lr_byte","lr_byte",i*8),("A64","or","lr_value","lr_value","lr_byte"),("ADV",)]]).ret()

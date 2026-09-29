@@ -57,3 +57,24 @@ Byte-stream integration checks positions and malformed location frames.
 Those checks establish migration agreement, not full C99 lexer correctness.
 The E3 product/signature changes in the working tree are a separate repair;
 E1 agreement does not validate them or complete the compiler migration.
+
+## Optional source provenance framing
+
+The ordinary-action entry `SF.start` reads the exact optional resource
+`\0library/sourcefacts`. Absent leaves lexer bytes unchanged; present must be
+eight little-endian bytes encoding one. The input must then be `USLFACT1\n`,
+stage 2, status 0 or 1, policy 1, a little-endian u64 payload length, and exactly
+that many payload bytes. The payload is the existing plain or located E2 output.
+The entry resets the global input to that payload using SPAN2/SWAP before the
+existing lexer, including its locations reader, starts.
+
+The output frames the complete existing E1 output with stage 1 and the same
+policy. Status is sticky: the actual SKIPPAREN opening-parenthesis transition
+sets it to zero before deleting an attribute/asm construct. Identifier spelling,
+comments, and string contents do not set status. No execution primitive is added.
+The resource-aware model uses `exec/c/tbl.py` and the shared ordinary-action core;
+the historical `exec/lex/tbl.py` adapter targets the older resource-free executor.
+`sourcefactscheck.py` generates private models and exercises simulator framing,
+default output, loss tracking, located payloads, and malformed resource/input rejection.
+
+Legacy untyped generation retains its old DISPATCH entry and legacy tbl.py compatibility. Typed/positions/locations models enable source-fact framing; --sourcefacts enables it explicitly for untyped simulator tests. Resource-aware models use the generic C table converter, not the legacy executor.

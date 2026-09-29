@@ -52,7 +52,7 @@ static int us_bindings_add_data(us_bindings *b,const char *name,uintptr_t addres
 #include "librarycallplans.h"
 static void us_binding_owned_clear(us_binding *x){if(!x)return;free(x->name);free(x->args);free(x->signature);if(x->typed){us_exports_clear(x->typed);free(x->typed);}memset(x,0,sizeof *x);}
 static int us_bindings_add_function_typed_capability(us_bindings *b,const char *name,uintptr_t address,const void *signature,size_t length,int bridge,char *error,size_t cap){
- if(!b||!us_binding_name(name)||!address||!signature||length<16||memcmp(signature,"USLSIG2\n",8)||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
+ if(!b||!us_binding_name(name)||!address||!signature||length<16||(memcmp(signature,"USLSIG2\n",8)&&memcmp(signature,"USLSIG3\n",8))||!us_binding_unique(b,name))return us_binding_error(error,cap,"invalid or duplicate typed function declaration");
  us_binding x={0};x.typed_clear=us_exports_clear;x.typed=calloc(1,sizeof *x.typed);if(!x.typed)return us_binding_error(error,cap,"typed declaration allocation failed");
  if(us_exports_load_capability(x.typed,signature,length,bridge,error,cap)||x.typed->count!=1)goto bad;
  us_export *f=x.typed->items;if(strcmp(name,f->name)||f->linkage||f->defined!=1)goto bad;
@@ -66,7 +66,41 @@ static int us_bindings_add_function_typed_bridge(us_bindings *b,const char *name
 /* Binding declarations obey the same recursive callback ABI equality as plans.
    IDs/sharing/support are not ABI; nested arguments/results/mode are. */
 static int us_binding_graph_equal(const us_export_type *a,const us_export_type *b){
- return us_native_type_equal(a,b);
+    us_native_type_pair *work=calloc(16384,sizeof *work);
+    us_native_signature_pair *seen=calloc(16384,sizeof *seen);
+    size_t pending=0,visited=0,steps=0;int equal=0;
+    if(!work||!seen)goto done;
+    work[pending++]=(us_native_type_pair){a,b};
+    while(pending){
+        us_native_type_pair pair=work[--pending];a=pair.a;b=pair.b;
+        if(!a||!b||++steps>16384)goto done;
+        if(a->depth!=b->depth||a->kind!=b->kind||a->width!=b->width||a->uns!=b->uns||a->alignment!=b->alignment||a->tag!=b->tag||a->nmembers!=b->nmembers||a->count!=b->count||a->stride!=b->stride)goto done;
+        if((a->wire_version==3)!=(b->wire_version==3))goto done;
+        if(a->wire_version==3 && (a->fp_rank!=b->fp_rank||a->fp_format!=b->fp_format||
+           a->natural_alignment!=b->natural_alignment||a->layout_flags!=b->layout_flags||
+           a->layout_known_mask!=b->layout_known_mask||a->layout_origin!=b->layout_origin))goto done;
+        if((a->element==NULL)!=(b->element==NULL)||(a->signature==NULL)!=(b->signature==NULL))goto done;
+        if(a->nmembers>128 || (a->nmembers && (!a->members||!b->members)))goto done;
+        if(a->element){if(pending>=16384)goto done;work[pending++]=(us_native_type_pair){a->element,b->element};}
+        for(size_t i=0;i<(size_t)a->nmembers;i++){
+            const us_export_member *x=a->members+i,*y=b->members+i;
+            if(x->offset!=y->offset||x->bit_offset!=y->bit_offset||x->bit_width!=y->bit_width||x->storage!=y->storage||pending>=16384)goto done;
+            if(a->wire_version==3 && (x->ordinal!=y->ordinal||x->entry_kind!=y->entry_kind||x->effective_alignment!=y->effective_alignment))goto done;
+            work[pending++]=(us_native_type_pair){x->type,y->type};
+        }
+        if(a->signature){
+            const us_export_signature *x=a->signature,*y=b->signature;size_t i;
+            for(i=0;i<visited;i++)if(seen[i].a==x && seen[i].b==y)break;
+            if(i<visited)continue;
+            if(visited>=16384||x->variadic!=y->variadic||x->mode!=y->mode||x->count!=y->count||x->stored!=y->stored||x->stored!=x->count||x->count>1024||
+               (x->count && (!x->argtypes||!y->argtypes))||pending+1+x->count>16384)goto done;
+            seen[visited++]=(us_native_signature_pair){x,y};
+            work[pending++]=(us_native_type_pair){&x->result,&y->result};
+            for(i=0;i<(size_t)x->count;i++)work[pending++]=(us_native_type_pair){&x->argtypes[i],&y->argtypes[i]};
+        }
+    }
+    equal=1;
+done:free(work);free(seen);return equal;
 }
 #endif
 static void us_binding_put64(unsigned char *p,uint64_t value){for(unsigned i=0;i<8;i++)p[i]=(unsigned char)(value>>(8*i));}

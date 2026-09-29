@@ -220,6 +220,11 @@ job lib-sig3-equality ./tests/modelsignature3check.sh equal
 job lib-sig3-source python3 ./tests/modelsourcefacts3check.py
 job lib-fp-rank-source python3 ./tests/modelfprankcheck.py
 job lib-fp-value-rank-source python3 ./tests/modelfpvaluerankcheck.py
+job lib-source-provenance ./tests/modelsourcelayoutprovenancecheck.sh plain
+job lib-source-provenance-located ./tests/modelsourcelayoutprovenancecheck.sh located
+if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
+    job lib-source-bitfield-native python3 ./tests/librarysourcebitfieldcheck.py
+fi
 job lib-carrier-mechanism python3 ./tests/librarycarriercheck.py
 job lib-carrier-plan python3 ./tests/librarycarrierplancheck.py
 job lib-carrier-native-plan python3 ./tests/librarycarriernativeplancheck.py
