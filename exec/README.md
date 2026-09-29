@@ -18,13 +18,14 @@ not just the six-stage development route shown later in this file. See
 
 Published v0.0.8 is `10672e3`, unsigned 5,388,402 B, SHA-256
 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`.
-The current v0.0.9 source closure was built at `10994c2`: 1,221,182 B,
-SHA-256 `7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846`.
-P3 compression and one-pass memory binding are implemented. The final
-189-item queue is pending; old 179-item receipts do not transfer. E2 off/on
-312/312 outputs match a fresh classic reference; current model-built procview
-ran with real Linux arm64 directory enumeration. Windows and Linux x86-64
-execution remain pending. v0.0.9 is not published.
+Published v0.0.11 (2026-09-29, tag `8b5abc9`): unsigned gate candidate 1,154,605 B,
+SHA-256 `6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`; the shipped
+`unisacc.com` is these bytes plus the Authenticode signature (1,170,384 B, `e86cc61c…`).
+P3 compression, one-pass memory binding, the shared E2/24-network package and library
+bodies on demand by default are in the product; the local full queue is 338 suites;
+Windows arm64/x86_64 rebuild the compiler byte for byte in the local guest and the
+examples run on all six targets (`tests/crossnative.sh`). Receipts:
+[release acceptance](../research/r11-release-acceptance.json).
 See [current pipeline audit](../research/r9-pipeline-structure-20260928.json)
 and [the physical byte ledger](../prd.md#model-function-bytes); the prior
 [one-pass measurements](../research/memory-once-integrated-bench-20260928.json)

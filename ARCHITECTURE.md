@@ -21,10 +21,9 @@
 | 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
 | 已发布 v0.0.8 / `10672e3` | 未签名 5,388,402 B；`948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`；发布收据与限制封存 |
-| 当前集成源码闭包 `10994c2` | 1,221,182 B；`7608a31b2f77038c2ba7516c1ce13c263dcd626343ac9e9825ce5017f273f846`；P3压缩、单次memory及R9接入，最终189项队列待完成；v0.0.9未发布 |
+| 已发布 v0.0.11 / `8b5abc9`（2026-09-29） | 未签候选 1,154,605 B；`6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`；签后 `unisacc.com` 1,170,384 B `e86cc61c…`；本地全量 338 项、release-check 与 GHCR 摘要实跑；验收 `research/r11-release-acceptance.json` |
 
-本轮当前模型编出的procview已在Linux arm64真实枚举进程；Windows 单次绑定只有 mock，
-Linux x86_64 未运行。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
+六目标实跑：本机 osx/arm64 与 Rosetta 全量门禁；Lima lnx/arm64、lnx/x86_64 与 UTM win/arm64、win/x86_64 跑 examples（`tests/crossnative.sh`）并完成 Windows 双目标编译器自举；完整套件在客机与 Windows 上仍是 0.0.12 义务（R12-3）。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
 历史单次memory计时与收据见 [单次 memory 集成证据](research/memory-once-integrated-bench-20260928.json)。
 32 个共享网络被 938 条阶段行引用；模板、库源码、核与平台驱动另计，
 不能把引用数当网络物理份数，也不能把 CRC 当发行签名。
