@@ -8,11 +8,23 @@ they are not claimed to be a fully language-independent constructor.
 """
 import os
 import sys
+import importlib.util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-sys.path.insert(0, os.path.join(ROOT, "exec", "pp"))
-from gen import G   # noqa: E402  (the pp table builder: seq dedup, RET, DEAD)
+# Loaded by path, not by name.  There are nine modules called `gen.py` under
+# exec/, and `from gen import G` after a sys.path insert resolves against
+# sys.modules first: measured, if another one has already been imported under
+# that name this line raises
+#     ImportError: cannot import name 'G' from 'gen' (.../exec/lex/gen.py)
+# It works today only because this module happens to reach the name first.
+# exec/prune/gen.py:12 already loads its dependency by explicit path for the
+# same reason; this is that same pattern.
+_spec = importlib.util.spec_from_file_location(
+    "pp_gen", os.path.join(ROOT, "exec", "pp", "gen.py"))
+_pp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_pp)
+G = _pp.G
 
 
 def gold(name):
