@@ -198,7 +198,8 @@ sec11() {
 echo "== native execution on this host =="
 if [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ]; then
     n=$(./tests/native.sh examples/*.c 2>/dev/null | tail -1)
-    chk "examples run natively" "native 8   mismatch 0" "$n"
+    ne=$(ls examples/*.c | wc -l | tr -d " ")   # every example, however many there are today
+    chk "examples run natively" "native $ne   mismatch 0   known 0   revived 0" "$n"
 else
     printf "  skip %-42s (no matching host toolchain)\n" "native execution"
 fi

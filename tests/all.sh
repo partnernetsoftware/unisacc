@@ -101,8 +101,11 @@ fi
 # deferred six-argument indirect call) stay red probes for difftest's ledger but
 # must not be fed to every other suite: 0.0.13's CI matrix went red on
 # opt/selfhost/native/ccrun over one such file while the local queue was green.
-refused() { grep -qs "^$1[[:space:]]" tests/difftest.knownfail; }
-PROBES=$(for f in examples/*.c tests/c/*.c; do refused "$(basename "$f" .c)" || printf '%s ' "$f"; done)
+# Read the list once and match in-shell: a grep per probe (~400 processes) made
+# `all.sh` start-up exceed ci_shard_plan's 5 s budget on the macOS runners.
+REFUSED=" $(awk 'NF && $1 !~ /^#/ {print $1}' tests/difftest.knownfail 2>/dev/null | tr '\n' ' ') "
+refused() { case "$REFUSED" in *" $1 "*) return 0;; esac; return 1; }
+PROBES=; for f in examples/*.c tests/c/*.c; do b=${f##*/}; refused "${b%.c}" || PROBES="$PROBES $f"; done
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching
 # its last line -- a summary line that happens to end differently is not a
 # failure, and a suite that dies silently must not read as green.
@@ -203,7 +206,7 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     serial selfhost-prepare-tape ./tests/selfhost.sh --prepare-tape
     serial selfhost-prepare-image ./tests/selfhost.sh --prepare-image
 fi
-FILES=(); for f in examples/*.c tests/c/*.c; do refused "$(basename "$f" .c)" || FILES+=("$f"); done
+FILES=(); for f in examples/*.c tests/c/*.c; do b=${f##*/}; refused "${b%.c}" || FILES+=("$f"); done
 for shard in 0 1 2 3 4 5 6 7; do
     CHUNK=()
     for ((i=shard; i<${#FILES[@]}; i+=8)); do CHUNK+=("${FILES[$i]}"); done
