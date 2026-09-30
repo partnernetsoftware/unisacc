@@ -38,6 +38,11 @@ printf 'local candidate: %s sha256 %s\n' "$MODEL_COM" "$before"
 # MODEL_COM explicitly across Terminal's whitelist. Never call ua_ready here.
 rc=0
 exclusive=()  # fat is three ~17 s shards since 0.0.13 and no longer needs a window of its own
+# These pass alone (6-33 s) but hit their bounds under --jobs 4 in every 0.0.13
+# release queue: a cold network build (bindprep-arm64, memx86-ua-1) and an
+# inner 20 s hard timeout (lib-carrier-import-model).  They get a window each.
+for s in exec-memx86-ua-1 lib-carrier-import-model; do exclusive+=(--exclusive-suite "$s"); done
+if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-arm64); fi
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 # the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
