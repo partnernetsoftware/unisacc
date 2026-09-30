@@ -7,6 +7,8 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import bounded as run
 ROOT = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
 p.add_argument('--arch', choices=['arm64', 'x86_64'])
@@ -31,7 +33,6 @@ def definition(i, args=(), result=I, var=0, mode=1, support=0, **kw):
 def pack(args, support=0):
     return b'USLSIG2\n'+u(1)+u(5)+b'graph'+bytes([0, 1, 0, 1])+u(len(args))+I+u(len(args))+b''.join(args)+bytes([support])
 def chain(n, i=1): return definition(i, [chain(n-1, i+1)] if n > 1 else [])
-def run(*cmd): subprocess.run([str(ROOT/'tests/bound'), '20', *map(str, cmd)], check=True)
 with tempfile.TemporaryDirectory(prefix='r10-callbackgraph-') as tmp:
     t = Path(tmp)
     def write(name, data):

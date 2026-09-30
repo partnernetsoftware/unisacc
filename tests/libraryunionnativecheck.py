@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Public union chain acceptance. Current rejection is a failure, never green."""
 import argparse, hashlib, json, pathlib, platform, shutil, struct, subprocess, tempfile
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import sha
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--package',default=str(ROOT/'unisacc.com'));ap.add_argument('--arch',choices=['arm64','x86_64']);ap.add_argument('--evidence',type=pathlib.Path);ap.add_argument('--export-only',action='store_true');ap.add_argument('--sanitize',action='store_true');ap.add_argument('--factory',action='store_true');ap.add_argument('--relay',action='store_true');a=ap.parse_args();assert sum([a.factory,a.export_only,a.relay])<=1
  host='arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64';arch=a.arch or host

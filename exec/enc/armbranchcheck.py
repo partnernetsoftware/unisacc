@@ -6,9 +6,10 @@ import sys
 import tempfile
 from tins import parse
 from unisa.assemble import assemble
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import run
 
 
-def run(cmd): return subprocess.run(cmd,capture_output=True,timeout=60)
 
 
 def check(args,native_host):

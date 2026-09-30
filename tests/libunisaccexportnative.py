@@ -4,8 +4,9 @@ No shared UA or root product writes; each native child compile/exec <=20 seconds
 Run --package PRIVATE/compiler.pkg [--arch arm64|x86_64].
 """
 import argparse,hashlib,json,pathlib,shutil,subprocess,tempfile,time
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import sha
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--package',required=True,type=pathlib.Path);ap.add_argument('--arch',choices=('arm64','x86_64'),required=True);ap.add_argument('--evidence',type=pathlib.Path);a=ap.parse_args()
  assert a.package.is_absolute() and a.package.is_file()

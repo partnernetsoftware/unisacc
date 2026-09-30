@@ -4,6 +4,8 @@ Uses private outputs only. Every compiler/process has a <=30 second timeout.
 Evidence applies only to the current POSIX host, not all six targets.
 """
 import argparse,hashlib,json,os,pathlib,shlex,subprocess,tempfile,time
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import sha
 SOURCE=r'''#include "libunisacc.h"
 #include <stdio.h>
 #include <string.h>
@@ -29,7 +31,6 @@ int main(int argc,char **argv){
  us_free(c);puts("public C API: parse failure recovery, O0/O1/O2 compile/map/main, native us_sym: ok");return 0;
 }
 '''
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def check(folder,cc):
  folder=pathlib.Path(folder).resolve();manifest=json.loads((folder/'manifest.json').read_text());target=manifest['target']
  import platform

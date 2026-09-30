@@ -2,9 +2,10 @@
 """True public composite/array/callback union ABI; actual rejection is red."""
 import argparse,hashlib,json,os,platform,shlex,shutil,struct,subprocess,tempfile
 from pathlib import Path
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import sha
 ROOT=Path(__file__).resolve().parents[1]
 U=lambda n:struct.pack('<Q',n)
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def explicit_files(flags):
  result={}
  for flag in flags:

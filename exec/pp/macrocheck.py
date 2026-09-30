@@ -7,8 +7,9 @@ import json,os,pathlib,re,struct,subprocess,sys,tempfile
 R=pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(R/'exec/pp'));import sim
 sys.path.insert(0,str(R));from unisa.front.pp import _pieces
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import run
 
-def run(args):return subprocess.run(list(map(str,args)),capture_output=True,timeout=60)
 def call(args):
  p=run(args);assert p.returncode==0,(p.args,p.returncode,p.stderr[-2000:]);return p.stdout
 

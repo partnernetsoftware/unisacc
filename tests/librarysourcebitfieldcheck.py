@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Actual public source-certified bitfield calls; any rejection is failure."""
 import argparse,hashlib,json,os,pathlib,platform,shutil,subprocess,tempfile,sys
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import sha
 ROOT=pathlib.Path(__file__).resolve().parents[1]
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--package',type=pathlib.Path,default=pathlib.Path(os.environ.get('MODEL_COM',ROOT/'unisacc.com')));ap.add_argument('--arch',choices=('arm64','x86_64'));ap.add_argument('--ffi-provider',type=pathlib.Path);ap.add_argument('--evidence',type=pathlib.Path);a=ap.parse_args()
  host='arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64';arch=a.arch or host

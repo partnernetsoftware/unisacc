@@ -5,8 +5,9 @@ build dependencies. This is not a six-target cross-library builder. The model
 package is delivered separately beside the libraries and passed to us_new().
 """
 import argparse,hashlib,json,os,pathlib,platform,shlex,shutil,subprocess,tempfile,time
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import sha
 ROOT=pathlib.Path(__file__).resolve().parents[2]
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def host_target():
  osname={'Darwin':'osx','Linux':'lnx'}.get(platform.system())
  arch={'arm64':'arm64','aarch64':'arm64','x86_64':'x86_64','amd64':'x86_64'}.get(platform.machine().lower())

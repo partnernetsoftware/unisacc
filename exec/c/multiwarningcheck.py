@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Full multi-unit warning/tape/exit comparison with the reference front end."""
 import pathlib,subprocess,sys
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import run
 p=pathlib.Path(sys.argv[1]);target=sys.argv[2];ref=sys.argv[3]
-def run(a):return subprocess.run(list(map(str,a)),capture_output=True,timeout=60)
 def equal(a,b):
     assert (a.returncode,a.stdout,a.stderr)==(b.returncode,b.stdout,b.stderr),(a.args,a.returncode,len(a.stdout),a.stderr[-2500:],b.returncode,len(b.stdout),b.stderr[-2500:])
 a=p/'first.c';b=p/'second.c';out=p/'sentinel';dep=p/'dependencies'

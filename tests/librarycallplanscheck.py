@@ -2,6 +2,8 @@
 """Owned host variadic templates and transactional model call declarations."""
 import argparse, os, platform, struct, subprocess, tempfile
 from pathlib import Path
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import bounded as run
 ROOT=Path(__file__).resolve().parents[1]
 parser=argparse.ArgumentParser();parser.add_argument('--arch',choices=['arm64','x86_64']);options=parser.parse_args()
 host='arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64';target=options.arch or host
@@ -15,8 +17,6 @@ PAIR=desc(5,16,8,1,u(2)+u(0)+u(0)+u(0)+u(8)+D+u(8)+u(0)+u(0)+u(4)+I)
 def signature(name,result,args,variadic=0):
     n=name.encode()
     return b'USLSIG2\n'+u(1)+u(len(n))+n+bytes([0,1,variadic,1])+u(len(args))+result+u(len(args))+b''.join(args)+bytes([0 if variadic else 1])
-def run(*cmd):
-    subprocess.run([str(ROOT/'tests/bound'),'20',*map(str,cmd)],check=True)
 with tempfile.TemporaryDirectory(prefix='r10-callplans-') as tmp:
     t=Path(tmp);exe=t/'probe'
     specs=[('mixed',D,[D,I],1),('mixed',D,[D,I],0),('mixed',D,[D,I]+[I,D]*9,0),('pair',PAIR,[I],1),('pair',PAIR,[I,PAIR,D,I],0)]

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Located unit framing: independent bytes, reference diagnostics, bad extents."""
 import os,pathlib,struct,subprocess,sys,tempfile
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import run
 R=pathlib.Path(__file__).resolve().parents[2]
-def run(a):return subprocess.run(list(map(str,a)),capture_output=True,timeout=60)
 def call(a):
  r=run(a);assert r.returncode==0,(a,r.returncode,r.stderr[-1200:]);return r.stdout
 u32=lambda x:struct.pack('<I',x)

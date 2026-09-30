@@ -3,9 +3,10 @@
 All generation, compilation and execution children have their own 60s bound.
 """
 import json,os,pathlib,struct,subprocess,sys,tempfile
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import run
 R=pathlib.Path(__file__).resolve().parents[2]
 
-def run(args):return subprocess.run(list(map(str,args)),capture_output=True,timeout=60)
 def call(args):
     p=run(args);assert p.returncode==0,(p.args,p.returncode,p.stderr[-1500:]);return p.stdout
 

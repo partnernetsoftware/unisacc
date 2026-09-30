@@ -1,7 +1,8 @@
 import pathlib,re,subprocess,sys,tempfile
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import run
 ua=sys.argv[1]
 compiler=["/bin/sh",ua] if ua.endswith(".com") else [ua]
-def run(a):return subprocess.run(list(map(str,a)),capture_output=True,timeout=60)
 with tempfile.TemporaryDirectory(prefix='diag-units-') as td:
  p=pathlib.Path(td);a=p/'first.c';b=p/'second.c';h=p/'local.h'
  h.write_text('static int helper(void){return 3;}\n')

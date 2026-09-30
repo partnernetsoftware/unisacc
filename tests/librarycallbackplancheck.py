@@ -7,6 +7,8 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import bounded as run
 ROOT=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser();p.add_argument('--arch',choices=['arm64','x86_64']);o=p.parse_args()
 host='arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64';arch=o.arch or host
@@ -22,7 +24,6 @@ def ref(i):return callback(bytes([1,1])+u(i))
 def pack(result,args,support=1):return b'USLSIG2\n'+u(1)+u(10)+b'host_drive'+bytes([0,1,0,int(len(args)>6)])+u(len(args))+result+u(len(args))+b''.join(args)+bytes([support])
 def graph(result=PAIR,last=I):
  leaf=define(2,result,[I,D,F,P,PAIR,I,D,I,last]);relay=define(1,PAIR,[leaf]);return pack(PAIR,[relay,ref(2)])
-def run(*cmd):subprocess.run([str(ROOT/'tests/bound'),'20',*map(str,cmd)],check=True)
 with tempfile.TemporaryDirectory(prefix='r10-callbackplan-') as tmp:
  t=Path(tmp);files=[]
  for i,b in enumerate([graph(),graph(last=D),graph(result=D),pack(I,[callback()],0),pack(I,[I])]):

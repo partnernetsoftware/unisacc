@@ -8,6 +8,8 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
+import sys as _sys, pathlib as _pl; _sys.path.insert(0, next(str(_p / 'tests') for _p in _pl.Path(__file__).resolve().parents if (_p / 'tests/checklib.py').is_file()))
+from checklib import bounded as run
 ROOT=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser();p.add_argument('--arch',choices=['arm64','x86_64']);o=p.parse_args()
 host='arm64' if platform.machine() in ('arm64','aarch64') else 'x86_64';arch=o.arch or host
@@ -48,7 +50,6 @@ bad=[pack(sites=[site(0)]),pack(sites=[site(key=999)]),pack(sites=[site(),site()
  pack(protos=((22,PROTO),(22,FIXED))),pack(protos=(),sites=[site()]),one+u(0),
  b'USLCALL2\n'+u(8193),b'USLCALL2\n'+u(0)+u(8193),two+b'x',
  pack(sites=[site(record=b'USLSIG1\n'+u(0))]),pack(sites=[site(number=1,record=CONCRETE[:65])])]
-def run(*cmd):subprocess.run([str(ROOT/'tests/bound'),'20',*map(str,cmd)],check=True)
 with tempfile.TemporaryDirectory(prefix='r10-callcatalog-') as tmp:
  t=Path(tmp);rt=t/'exec/c';rt.mkdir(parents=True);(t/'src').mkdir()
  for f in (ROOT/'exec/c').iterdir():
