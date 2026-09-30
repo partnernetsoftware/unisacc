@@ -10,9 +10,9 @@ September 2026 · Code, weights and all evidence: this repository (Appendix A)
 
 Many decisions inside a compiler are finite functions: character classes, production choice, type promotion, instruction and calling-convention selection, image field layout. We present a neural compilation method that involves no training. Each such decision is written as a truth table that is **total** on a finite Cartesian product; a deterministic integer network is **constructed directly** from the table; and the network is proved equal to the table by enumerating every key of its domain. Work that depends on unbounded structure is decomposed into finite control plus generic storage, so that the transition function of the finite control becomes, again, a table that can be constructed and enumerated.
 
-We implement the method in unisacc, a compiler for a subset of C99 targeting six platforms, {Linux, macOS, Windows} × {x86-64, arm64}, in two instances. In the **decision-network instance**, each of 18 fact tables is realised by a one-hot → integer affine → ReLU → integer affine → strict-argmax network with accuracy 1.000 on all 8,506 keys; classic code (recursive descent and the like) queries the networks at every decision point. This instance self-hosts byte-for-byte (N1 = N2 = N3) on five targets without Python. In the **network-compiler instance**, the whole pipeline — preprocessing, lexing, parsing, optimisation, unreachable-function pruning, lowering, encoding and image writing — is split into seven byte-stream stages; each stage is a constructed threshold network run step by step by one generic executor. A model rejection is an error; there is never a fallback to a classic compiler. The released v0.0.9 is a single 1,233,236-byte file carrying 33 distinct networks; it passed all 193 local gates.
+We implement the method in unisacc, a compiler for a subset of C99 targeting six platforms, {Linux, macOS, Windows} × {x86-64, arm64}, in two instances. In the **decision-network instance**, each of 18 fact tables is realised by a one-hot → integer affine → ReLU → integer affine → strict-argmax network with accuracy 1.000 on the 8,509 keys in Table 1; classic code (recursive descent and the like) queries the networks at every decision point. This instance self-hosts byte-for-byte (N1 = N2 = N3) on five targets without Python. In the **network-compiler instance**, the whole pipeline — preprocessing, lexing, parsing, optimisation, unreachable-function pruning, lowering, encoding and image writing — is split into seven byte-stream stages; each stage is a constructed threshold network run step by step by one generic executor. A model rejection is an error; there is never a fallback to a classic compiler. The v0.0.9 measurement baseline is a single 1,233,236-byte file carrying 33 distinct networks and passed 193 local gates; the v0.0.14 release and two remaining byte-level differences are reported separately in §5.5.
 
-Unlike training, construction stays exact when "one more rule" is added, whereas SGD fails systematically when tables are merged, extended, or multiplied across targets; we identify the mechanism. The cost of the method is equally real: the network compiler is roughly 4–17× slower than the classic route. Enumeration proves that a network equals its table, not that the table agrees with C semantics; that layer is covered only partially, by external referees.
+Unlike training, construction stays exact when "one more rule" is added, whereas SGD fails systematically when tables are merged, extended, or multiplied across targets; we identify the mechanism. The cost of the method is equally real: in the historical measurements of Table 4, the network compiler is roughly 4–17× slower than the classic route. Enumeration proves that a network equals its table, not that the table agrees with C semantics; that layer is covered only partially, by external referees.
 
 **Keywords**: neural compilation; weight construction; exact networks; exhaustive verification; finite control; self-hosting; reproducible builds
 
@@ -65,7 +65,7 @@ The decomposition rests on a standard result of computation theory: a determinis
 | Level | Content | Status |
 |---|---|---|
 | **T1** | Every released network equals its table on its whole domain (or declared observation domain) | Proved: constructive existence + full-domain enumeration |
-| **E** | The network compiler is byte-identical to the classic reference on the gate corpus | Empirical evidence |
+| **E** | Byte-level comparison with the classic reference on measured inputs; two named differences remain in v0.0.14 | Empirical evidence, scoped in §5.5 |
 | **T2** | The network compiler simulates the reference compiler over whole runs | Open: needs initial-state relation, state invariants, final-state match and divergence sensitivity |
 | **T3** | Compilation preserves the observable behaviour of the declared source language | Open: requires fixing the language subset, ABI and undefined behaviour first |
 
@@ -122,19 +122,21 @@ Table 1 lists the 18 stages; it is generated from the truth tables and the const
 | tyinfo | Size, signedness and narrowness of a type | type 16 | 3 heads | 16 | 6 | 1.000 |
 | pfconv | Output routine that handles a printf conversion (%d, %x, %s…) | conversion 9 | 7 | 9 | 7 | 1.000 |
 | peep | Peephole optimisation: whether, and how, to rewrite a pair of adjacent instructions in a given relation | insn A 8 × insn B 17 × relation 12 | 10 | 1,632 | 18 | 1.000 |
-| opinfo | Classification of a tape operation, used by the peephole optimiser | op 69 | 3 heads | 69 | 16 | 1.000 |
+| opinfo | Classification of a tape operation, used by the peephole optimiser | op 72 | 3 heads | 72 | 16 | 1.000 |
 | prec | Operator precedence level | op 19 | 11 | 19 | 11 | 1.000 |
 | binsel | Concrete instruction variant from operator and signedness (e.g. signed vs unsigned division) | op 16 × sign 2 | 23 | 32 | 18 | 1.000 |
 | isel | Encoding form and target symbol of a tape operation per architecture (not on the main path) | op 74 × arch 2 | 2 heads | 148 | 74 | 1.000 |
 | abi | Calling-convention facts: system-call number, argument registers, return convention, import names | op 74 × OS 3 × arch 2 | 13 heads | 444 | 52 | 1.000 |
 | combo | isel and abi merged into one table, as a control experiment (not on the main path) | op 74 × OS 3 × arch 2 | 15 heads | 444 | 100 | 1.000 |
-| **Total** | | | | **8,508** | **517** | |
+| **Total** | | | | **8,509** | **517** | |
 
 ### 3.3 Deployment kernel and determinism
 
 ![Figure 1. Deterministic integer feed-forward network: verification path (top) and deployment kernel (bottom). The key space is a finite product $K$; the output is the class name given by strict argmax.](figures/fig1-deterministic-intnet.png)
 
-Verification runs every key with integer gemv semantics: one-hot input, integer affine, $\max(0,\cdot)$, integer affine, strict argmax. The deployment kernel exploits the Boolean $W_1$ and hidden activations, turning the first layer into a conjunction of 64-bit masks and the second into integer addition; it agrees pointwise with the verification path on the domain. It uses no softmax, floating point, multiplication, libm or dynamic memory. The weights of all 18 stages total 9,124 bytes.
+Verification runs every key with integer gemv semantics: one-hot input, integer affine, $\max(0,\cdot)$, integer affine, strict argmax. The deployment kernel exploits the Boolean $W_1$ and hidden activations, turning the first layer into a conjunction of stage-local masks and the second into integer addition; it agrees pointwise with the verification path on the domain. It uses no softmax, floating point, multiplication, libm or dynamic memory. The weights of all 18 stages total 9,124 bytes.
+
+**Axiom of stage-independent representation.** The structure and numeric representation of stage $s$ are determined by its own finite key domain, vocabularies, output heads and value ranges; other stages impose no common shape. Construction chooses the mask width with `maskw(st)` separately for each stage. Q-8 chooses, per stage, the smallest representation by byte size that preserves its outputs and checks the corresponding arithmetic ranges. Stages agree only on category and byte-stream interfaces; they need not share a mask width, weight dtype or accumulator width. The basis is that exactness, $\forall k\in K_s:N_s(k)=G_s(k)$, is decided separately for each $s$. Enumeration of one stage neither requires another to use the same structure nor proves that either truth table agrees with C99.
 
 Byte-level reproducibility rests on two facts: **construction is deterministic** — the same truth tables yield byte-identical weights; and **inference is integer-only** — within the kernel's integer width and accumulation range, the result for a given input is unique. Together they make cross-target folding (§6.2) and the self-hosting fixed point (§5.3) possible; consistency across machines and compilers must still be verified on the target platforms.
 
@@ -172,7 +174,7 @@ The network compiler splits compilation into seven **byte-stream-in, byte-stream
 | Lowering | tape → target instructions and data | ABI, register mapping, system-call gates, data layout and relocation |
 | Encoding and image | target instructions → ELF / Mach-O / PE (or an in-memory image) | instruction encoding, branch layout, relocation, headers and segments, Mach-O signing |
 
-The tape is a target-independent intermediate representation: eight 64-bit registers (one is the stack pointer) and 65 operations. Floating-point values travel as IEEE bit patterns in general registers; since both sides of every call are generated by this compiler, no platform floating-point ABI is needed.
+The tape is a target-independent intermediate representation: eight 64-bit registers (one is the stack pointer) and 71 operations in the current `SHAPE` manifest. Floating-point values travel as IEEE bit patterns in general registers. Tape operation encodings do not bind an ISA; lowering and host-interaction boundaries still handle target ABI facts.
 
 **One executor step.** The current control state selects an observation bank; the observation is the next input byte, the top of the continuation stack, or the comparison result of the previous action; the network maps the observation to the next state and an action-sequence index; the executor then performs the generic actions of that sequence: advance, mark and rewind, register and indexed-memory reads and writes, output, push and pop, string interning. The executor contains no primitive specific to C, the tape, an instruction set or an image format.
 
@@ -200,13 +202,13 @@ Command-line handling, file and resource adaptation, package reading and checkin
 |---|---|---|
 | Networks | 18 fact tables, cube networks | 33 distinct threshold networks |
 | Driver | classic recursive descent, lowering and image writers query networks at decision points | generic executor runs each stage network step by step |
-| Size | 8,508 keys, 517 hidden units, 9,124 B of weights | 129,944 threshold units, 783,938 B compressed |
+| Size | 8,509 keys, 517 hidden units, 9,124 B of weights | 129,944 threshold units, 783,938 B compressed (v0.0.9) |
 | Fallback | none (query discipline) | none: a model rejection is an error |
 | Distribution | a single C source file | a single 1,233,236 B multi-platform executable (v0.0.9) |
 
 ### 5.2 Size and sharing in the network compiler
 
-**Table 2. Per-stage structure of the network compiler (v0.0.9, `osx/arm64` -O2 image route, static).** The package has 33 distinct networks and 1,082 stage-route rows; figures from the [structure audit](r9-pipeline-structure-prune.json).
+**Table 2. Per-stage structure of the network compiler (v0.0.9, `osx/arm64` -O2 image route, static).** The package has 33 distinct networks and 1,082 stage-route rows; figures from the [structure audit](../archive/research/r9/r9-pipeline-structure-prune.json).
 
 | Stage | States | Sequences | Expanded actions | Stored actions | Threshold units | Return banks / keys | Raw / compressed B | Package references |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -222,7 +224,7 @@ Command-line handling, file and resource adaptation, package reading and checkin
 
 The lexing, parsing, optimisation, pruning and multi-file framing networks are shared by all six targets; each target owns two preprocessing variants, one lowering network and one encoding network. The same preprocessing variant differs across targets only in predefined macros (record-level Jaccard 0.998–0.999, measured on the pre-pruning candidate), which suggests further room for sharding (§8).
 
-v0.0.9 passed 193/193 local gates on the final frozen source, with a six-target × three-program smoke test and execution evidence after macOS signing and packaging; which platforms ran natively or under emulation, and that Windows self-hosting was not verified, are recorded in the [release receipt](r9-release-acceptance.json).
+v0.0.9 passed 193/193 local gates on the final frozen source, with a six-target × three-program smoke test and execution evidence after macOS signing and packaging; which platforms ran natively or under emulation, and that Windows self-hosting was not verified, are recorded in the [release receipt](../archive/research/r9/r9-release-acceptance.json).
 
 ### 5.3 Self-hosting
 
@@ -236,13 +238,23 @@ The network compiler self-hosts its driver with a fixed network package (N1 = N2
 
 ### 5.4 R10 development evidence (not a replacement release baseline)
 
-Table 2 and the performance tables retain the v0.0.9 release baseline. An R10 development candidate adds a `nativeabi` carrier-certification stage: the network maps an original type graph and target facts to a carrier certificate; the host executes the declared data moves and calls. The natural 16-byte union domain preserves logical parameter count, object extent and alignment 4/8, distinguishing integer/SSE lanes and ARM HFAs by target. The model has 1,332 states, with network=table over all 343,400 observations and 310 independent graph-oracle cases. Across two macOS ISAs, nine layouts, four register-pressure patterns and both call directions, 144 actual variants passed ASan/UBSan and 100 repetitions at each of three optimisation levels: 43,200 native calls and 21,600 SCRIPT callbacks. A mixed-register boundary failure with system macOS x86_64 libffi is retained separately; the actual calls pass with the pinned official 3.5.2 dependency. Network–table equality does not prove this host ABI fact. The development artifact is 1,116,367 B; all 24 deployed networks pass full-domain checks and 28 affected gates pass ([candidate](r10-union16-candidate-evidence.json), [public calls](r10-union16-qualified-public-evidence.json), [dependency counterexample and delivery](r10-ffi-provider-delivery-evidence.json)). This is not a v0.0.10 release claim or qualification of arbitrary union/BANK, bitfields, wide FP or all six platform ABIs; those remain development obligations.
+Table 2 and the performance tables retain the v0.0.9 release baseline. An R10 development candidate adds a `nativeabi` carrier-certification stage: the network maps an original type graph and target facts to a carrier certificate; the host executes the declared data moves and calls. The natural 16-byte union domain preserves logical parameter count, object extent and alignment 4/8, distinguishing integer/SSE lanes and ARM HFAs by target. The model has 1,332 states, with network=table over all 343,400 observations and 310 independent graph-oracle cases. Across two macOS ISAs, nine layouts, four register-pressure patterns and both call directions, 144 actual variants passed ASan/UBSan and 100 repetitions at each of three optimisation levels: 43,200 native calls and 21,600 SCRIPT callbacks. A mixed-register boundary failure with system macOS x86_64 libffi is retained separately; the actual calls pass with the pinned official 3.5.2 dependency. Network–table equality does not prove this host ABI fact. The development artifact is 1,116,367 B; all 24 deployed networks pass full-domain checks and 28 affected gates pass ([candidate](../archive/research/r10/r10-union16-candidate-evidence.json), [public calls](../archive/research/r10/r10-union16-qualified-public-evidence.json), [dependency counterexample and delivery](../archive/research/r10/r10-ffi-provider-delivery-evidence.json)). This is not a v0.0.10 release claim or qualification of arbitrary union/BANK, bitfields, wide FP or all six platform ABIs; those remain development obligations.
+
+### 5.5 Subsequent evidence and open obligations in v0.0.13–v0.0.14
+
+This is an incremental release record. Tables 2 and 4 retain v0.0.9 as an identity-fixed historical baseline; network counts, bytes and timings from different versions are not combined into one measurement. The unsigned v0.0.13 candidate was 1,190,297 B; each of its 361 local gates passed and the six-target hosted demo matrix passed. The unsigned v0.0.14 candidate was 1,288,064 B. Its publicly signed `unisacc.com` was 1,303,840 B, SHA-256 `c229cebf6cd58ca018fece7f0d3cb142e3a6a52774ac7306f8d5423248b055df`. Each of 365 local gates passed, and the six-target hosted demo matrix passed. These are finite test results, not a proof of C99 correctness ([v0.0.13 receipt](../archive/research/r13/r13-release-acceptance.json), [v0.0.14 receipt](r14-release-acceptance.json)).
+
+v0.0.14 added [tapebin v1](../docs/tapebin-v1.md), a canonical binary representation of target-independent tape operation records. The header also records `origin_target`, preserving which target's front-end semantics produced the tape. The 71 opcode shapes are generated from `unisa/tape.py` and checked by the `tapebin-shape` gate. `tapebin-roundtrip` compares structured records and binary bytes through round trips. `com-tapebin` compares C-reference, Python and product encoders on the same textual tape, and checks that the product both emits and reads its own binary tape. Stability of canonical binary bytes does not mean recovering arbitrary whitespace or comments in hand-written text.
+
+The N22 bootstrap check produced identical **unsigned** files from the seed, second stage and third stage, each with SHA-256 `3d86639072f5d5625baa849041d1919863bf03c8bb4a2e684638ca83ce3f063a`. The publicly signed `.com` has different bytes and is not part of that fixed point. The C99 clause ledger, [`tests/c99/clauses.tsv`](../tests/c99/clauses.tsv), records evidence by normative subclause: among 98 language subclauses, 95 are covered, one partial and two unsupported; among 16 environment subclauses, 13 are covered, two partial and one unsupported; among 361 library subclauses, 127 are covered, 43 partial and 191 unsupported. The 59/59 result from `c99.sh` is a probe result and cannot replace these coverage denominators.
+
+Two named R14-8 byte-level obligations remain. For `b_compound` and `b_pp2`, global compound-literal paths in E3 produce tapes different from the C reference and therefore different images on all six targets; measured program outputs agree with the system compiler. `exec/c/chain.knownfail` marks either case becoming equal as a revived failure, requiring its ledger line to be removed. We therefore claim byte-level parity only for the listed measured inputs outside these two entries, and retain both as open obligations ([R14-8 record](../archive/plans/v0.0.14.md)).
 
 ## 6 Verification Methodology
 
 ### 6.1 Full-domain enumeration (T1)
 
-Every cube network is run with deployment arithmetic on **every** key of the original domain; any wrong key or tie fails construction and blocks release. On the normal path, the C side of the decision-network instance queries a dense table obtained by enumeration, and an explicit acceptance command compares, one by one, the table answer and the direct inference result for all 20,190 key–head questions (zero differences). Each of the 33 network-compiler networks is checked over its whole declared observation domain, comparing successor states, action sequences and strings.
+Every cube network is run with deployment arithmetic on **every** key of the original domain; any wrong key or tie fails construction and blocks release. On the normal path, the C side of the decision-network instance queries a dense table obtained by enumeration, and an explicit acceptance command compares, one by one, the table answer and the direct inference result for all 20,190 key–head questions (zero differences). Each of the 33 transition networks in the v0.0.9 baseline is checked over its declared observation domain, comparing successor states, action sequences and strings; later releases require their own network count.
 
 ### 6.2 Byte-level differential testing and six-target folding
 
@@ -288,13 +300,13 @@ We answer four questions. **RQ1**: Can the method support a real compiler? **RQ2
 | Back-end closure | Images byte-identical to the reference back end | 564/564; the compiler itself 6/6 |
 | Float formatting | `%f/%e/%g` bit-identical to the platform libc | identical; no floating-point arithmetic in the formatter |
 
-Network compiler v0.0.9: all 33 deployed networks are equal to their tables over their whole domains; 193/193 local gates pass (including byte-level comparison with the classic reference on the gate corpus); a six-target × three-program smoke test passes, with some targets executed under emulation (scope in the [release receipt](r9-release-acceptance.json)).
+Network compiler v0.0.9: all 33 deployed networks are equal to their tables over their whole domains; 193/193 local gates pass (including byte-level comparison with the classic reference on the gate corpus); a six-target × three-program smoke test passes, with some targets executed under emulation (scope in the [release receipt](../archive/research/r9/r9-release-acceptance.json)).
 
 ### 7.2 RQ2: Cost
 
 **Size.** The single-file product shrank from 5,388,402 B (v0.0.8) to 1,233,236 B (v0.0.9, −77.1%). The reduction comes from three changes that alter no network answer: networks are stored as binary records, compressed and checksummed one by one; action sequences reference shared prefixes; and `-run` emits the final bound memory image in one pass. After each change the full-domain network–table check was repeated.
 
-**Speed.** Table 4 reports medians of five fresh processes on the same machine (the compiler-source row is a single run); the product measured by each row is listed in Appendix A. On v0.0.9, compiling and running `calc.c` takes 0.177 s and starting a minimal program 0.029 s, level with the first two rows (pre-pruning candidate): pruning gave no measurable speed-up on this input ([receipt](r9-prune-product-bench.json)).
+**Speed.** Table 4 reports medians of five fresh processes on the same machine (the compiler-source row is a single run); the product measured by each row is listed in Appendix A. On v0.0.9, compiling and running `calc.c` takes 0.177 s and starting a minimal program 0.029 s, level with the first two rows (pre-pruning candidate): pruning gave no measurable speed-up on this input ([receipt](../archive/research/r9/r9-prune-product-bench.json)).
 
 **Table 4. Time of the network compiler relative to the classic reference**
 
@@ -353,9 +365,9 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 ## 8 Discussion and Limitations
 
-**Correctness of the tables.** The most important boundary of this paper: enumeration proves network = table, not table = C. External referees cover part of the keys of 4 of 18 decision stages; the evidence that the 33 transition networks respect C semantics comes from byte-level comparison with the classic reference, which is itself tested only on finite corpora.
+**Correctness of the tables.** The most important boundary of this paper: enumeration proves network = table, not table = C. Eight of the 18 decision stages have named external referees, each covering only the stated keys or behaviour. Evidence that the 33 transition networks in the v0.0.9 baseline respect C semantics comes from byte-level comparison with the classic reference, which is itself tested only on finite corpora. v0.0.14 still has two named front-end byte differences (§5.5); finite-corpus agreement is not full-domain equivalence.
 
-**Speed.** The network compiler is 4–17× slower. Unreachable-function pruning shipped in v0.0.9 but gave no measurable speed-up on `calc.c`; keeping only needed library functions (off by default) and sharding the networks are further directions, but the cost of step-by-step interpretation by a generic executor will not disappear.
+**Speed.** In the historical measurements of Table 4, the network compiler is 4–17× slower; this is not a same-identity v0.0.14 timing result. Unreachable-function pruning shipped in v0.0.9 but gave no measurable speed-up on `calc.c`; later library trimming and network sharding require their own measurements, while step-by-step interpretation by a generic executor retains a cost.
 
 **Language and product scope.** A C99 subset with bundled headers; multiple files are merged into one program; there is no system object-file linker and no conventional `.o` workflow. Networks are defined only on the enumerated domain — by design rather than as a defect: extending the language means extending the tables and rebuilding.
 
@@ -381,7 +393,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 ## 10 Conclusion
 
-For table-shaped decisions in a compiler, exactness is a property that can be decided by exhaustion, and the weights can be constructed from the tables instead of trained. Through the decomposition into finite control plus generic storage, the method extends from single decisions to an entire compilation pipeline: unisacc carries all compilation control and decisions on constructed networks, targets six platforms, is byte-identical to its reference, and self-hosts. Its costs are equally clear: execution is an order of magnitude slower, and the correctness of the tables themselves still needs external referees. We believe that construction plus enumeration plus byte-level differential testing, as a verification discipline, is valuable beyond neural networks: it also finds defects in hand-written code that sampled testing cannot.
+For table-shaped decisions in a compiler, exactness is a property that can be decided by exhaustion, and the weights can be constructed from the tables instead of trained. Through the decomposition into finite control plus generic storage, the method extends from single decisions to an entire compilation pipeline: unisacc carries the control and decisions of compilation stages on constructed networks, targets six platforms, and self-hosts. Named gates constrain byte-level parity with its reference; two differences remain registered in v0.0.14. Its costs are equally clear: Table 4's historical measurements show substantial execution cost, and the correctness of the tables themselves still needs external referees. We believe that construction plus enumeration plus byte-level differential testing, as a verification discipline, is valuable beyond neural networks: it also finds defects in hand-written code that sampled testing cannot.
 
 ---
 
@@ -390,13 +402,15 @@ For table-shaped decisions in a compiler, exactness is a property that can be de
 | Identity | Content |
 |---|---|
 | v0.0.7 | Last release of the decision-network instance; commit `f301df3`, 1,254,432 B, SHA-256 `00d25edb8cf35fce7ec3be5dcf50afd2af0d658b9a1e19abac615c94e3816bf0` |
-| S-17 frozen candidate | First frozen candidate of the network compiler, 6,279,167 B, SHA-256 `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`; the before-figures of §4.3 belong to it ([evidence](s17-final-evidence.json)) |
+| S-17 frozen candidate | First frozen candidate of the network compiler, 6,279,167 B, SHA-256 `9a0ae470718ea4db28a59ea838344004c741ea0119c771c1370454209bdecd46`; the before-figures of §4.3 belong to it ([evidence](../archive/research/20260928/s17-final-evidence.json)) |
 | v0.0.8 | Commit `10672e3`, 5,388,402 B, SHA-256 `948232f00028170d2090983375fbca2a3829ef8f73235baada5deb9db174d737`; released unsigned |
-| v0.0.9 | Release `a606ff4`; `unisacc.com` 1,233,236 B, SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`; 193/193 local gates; Table 2 ([structure audit](r9-pipeline-structure-prune.json)) |
-| v0.0.10 | Frozen source `fdff9c5`; `unisacc.com` 1,152,711 B (−6.5% vs v0.0.9), SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; all 24 deployed networks equal their tables over the whole domain; in-process libunisacc and cross-origin typed imports (USLCALL3 aliases); local gates, platform and signing scope in the [release receipt](r10-release-acceptance.json) |
+| v0.0.9 | Release `a606ff4`; `unisacc.com` 1,233,236 B, SHA-256 `d4f7d3022a373fb71ad46dde23c72fe450beefad045727122383c85da17c678b`; 193/193 local gates; Table 2 ([structure audit](../archive/research/r9/r9-pipeline-structure-prune.json)) |
+| v0.0.10 | Frozen source `fdff9c5`; `unisacc.com` 1,152,711 B (−6.5% vs v0.0.9), SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; all 24 deployed networks equal their tables over the whole domain; in-process libunisacc and cross-origin typed imports (USLCALL3 aliases); local gates, platform and signing scope in the [release receipt](../archive/research/r10/r10-release-acceptance.json) |
+| v0.0.13 | Unsigned candidate 1,190,297 B, SHA-256 prefix `94ea9c76`; each of 361 local gates passed once and the six-runner demo matrix passed; scope and platform evidence in the [release receipt](../archive/research/r13/r13-release-acceptance.json) |
+| v0.0.14 | Unsigned candidate 1,288,064 B, SHA-256 prefix `3d866390`; published signed `.com` 1,303,840 B, SHA-256 `c229cebf6cd58ca018fece7f0d3cb142e3a6a52774ac7306f8d5423248b055df`; each of 365 local gates passed once and the six-runner demo matrix passed; unsigned seed, stage 2 and stage 3 were byte-identical; scope in the [release receipt](r14-release-acceptance.json) |
 | Historical candidates | Structure and gate records of the pre-pruning candidates `d61d0153…` and `7608a31b…`: [`archive/paper-a-history.md`](../archive/paper-a-history.md) |
 
-**Data sources.** Table 4, first two rows: [benchmark](r9-current-bench-20260928.json) (pre-pruning candidate `c4993fd0…`); last two rows: the product `c94cf5fe…` after the two runtime improvements. Acceptance of keeping only needed library functions: [ledger](r9-e2-libneed-acceptance-20260928.json). Size changes: [compression](compression-integrated-bench-20260928.json), [one-pass memory image](memory-once-integrated-bench-20260928.json). Referee registry: [referee.tsv](referee.tsv). Formalisation: [formalization-roadmap.md](formalization-roadmap.md), `research/lean/`. Bibliographic details: `prior-art.md`.
+**Data sources.** Table 4, first two rows: [benchmark](../archive/research/r9/r9-current-bench-20260928.json) (pre-pruning candidate `c4993fd0…`); last two rows: the product `c94cf5fe…` after the two runtime improvements. Acceptance of keeping only needed library functions: [ledger](../archive/research/r9/r9-e2-libneed-acceptance-20260928.json). Size changes: [compression](../archive/research/20260928/compression-integrated-bench-20260928.json), [one-pass memory image](../archive/research/20260928/memory-once-integrated-bench-20260928.json). Referee registry: [referee.tsv](referee.tsv). Formalisation: [formalization-roadmap.md](formalization-roadmap.md), `research/lean/`. Bibliographic details: `prior-art.md`.
 
 **Reproduction.** Constructing and verifying the decision-network instance needs the Python 3.11+ standard library and a system C compiler; using a built compiler, native self-hosting and the network compiler need neither Python nor a GPU. Repository rules limit each step to 60 seconds; long suites run in batches.
 
