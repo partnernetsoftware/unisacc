@@ -29,7 +29,9 @@
 | v0.0.13 | [archive/plans/v0.0.13.md](archive/plans/v0.0.13.md) — 计划树 L0–L5/N0–N22 与逐项回执（R13-0 六例、R13-0b 25 条、N22 产物谱系、门禁队列方法）；状态叙事全文见 [archive/prd-history-20260930.md](archive/prd-history-20260930.md) | 已发布 2026-09-30（tag 3af8b36；公开 unisacc.com 75c698ec… 与 dmg；回执 archive/research/r13/r13-release-acceptance.json） |
 | v0.0.14 | [archive/plans/v0.0.14.md](archive/plans/v0.0.14.md) — #21 callm、8 个 L1 库体、#line、tapebin v1 端到端、C99 条款账本（语言 96%）、流水线方法债、R14-8 6/8 | 已发布 2026-09-30（tag 75ec4de；公开 unisacc.com c229cebf… 与 dmg；回执 research/r14-release-acceptance.json） |
 | v0.0.15 | [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 完成，不发布（全量队列 370/370，产品字节同 0.0.14） |
-| v0.0.16 | [plans/v0.0.16.md](plans/v0.0.16.md) — 原定 0.0.15 的功能项：R14-8 余项、续行 __LINE__、复数/三字符组决定、狗粮启动器（POSIX 最小面）、库面、CI 预热 | 草案 |
+| v0.0.16 | [plans/v0.0.16.md](plans/v0.0.16.md) — P0 origin CI 转绿 + 减法安全门禁；正确性与诊断余项；-M/-MD；ELF -c 设计 + 系统 ld 互链；语料门禁起步；工具链盘点表 | 草案（2026-10-01 重排） |
+| v0.0.17 | [plans/v0.0.17.md](plans/v0.0.17.md) — 主线自带静态链接器；Mach-O/COFF -c、ar/nm/objdump、-g 行号表、lua 语料与库面、队列清单合一、狗粮启动器 | 草案 |
+| v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；动态库、完整调试信息、sqlite 与 GNU 扩展子集、Csmith、论文 A 投稿条件 | 草案 |
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
