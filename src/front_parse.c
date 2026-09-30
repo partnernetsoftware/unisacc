@@ -1614,7 +1614,10 @@ int primary(void) {
             lbuf[wk * 4 + 2] = (wv >> 16) & 255; lbuf[wk * 4 + 3] = (wv >> 24) & 255;
             wk = wk + 1;
         }
-        i = addlit(lbuf, (wn + 1) * 4);
+        /* emit_pool closes every literal with one NUL byte, so the last byte of
+           the four-byte terminator is left to it: the object is exactly
+           (wn + 1) * 4 bytes, as the network writes it (R14-8 b_strsizeof) */
+        i = addlit(lbuf, (wn + 1) * 4 - 1);
         es("  @mem.lea r0, S"); en(i); ec(10);
         setkind(0); cursize = (wn + 1) * 4; curpd = 1; curbase = 4;
         lvalue = 0; curelem = 4; curptr = 1;
