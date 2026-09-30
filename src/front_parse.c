@@ -5494,6 +5494,41 @@ int istape(char *p) {
    files can be walked into one tape: preprocessing is per file (include
    guards, `#define` state, `__FILE__`), only the walk is shared -- the same
    division driver.compile_sources makes on the Python side. */
+/* `int (twice)(int x) { ... }`, `char *(greet)(void)`, `int (v) = 5`: a
+   parenthesised declarator NAME [R13-0b #14].  The parentheses only exist to
+   keep a function-like macro from expanding the name (every entry point in
+   lua.h is declared this way), so they are dropped from the token stream
+   here, once, and every declaration path sees the plain name.  The rule is
+   narrow: `( identifier )` right after a type keyword or `*`, followed by
+   `(` `=` `;` `,` `[` or `)`.  A cast `(T)x` follows an operator, not a type
+   word, so it is never touched; and around a lone identifier in an
+   expression (`a * (b)`) the parentheses change nothing anyway. */
+int parenfold(void) {
+    int i; int j; int prev; int nxt; int k;
+    int lp; int rp;
+    lp = tidx("(", 1); rp = tidx(")", 1);
+    i = 0; j = 0;
+    while (i < ntok) {
+        if (tkind[i] == lp && i + 2 < ntok && j > 0) { if (tkind[i + 1] == T_ID && tkind[i + 2] == rp) {
+            prev = tkind[j - 1];
+            nxt = kind(i + 3);
+            k = 0;
+            if (prev == T_TYPE || prev == tidx("*", 1)) k = 1;
+            if (k) { k = 0;
+                if (nxt == lp || nxt == rp || nxt == tidx("=", 1) || nxt == tidx(";", 1)
+                    || nxt == tidx(",", 1) || nxt == tidx("[", 1)) k = 1; }
+            if (k) {
+                tkind[j] = tkind[i + 1]; tpos[j] = tpos[i + 1]; tlen[j] = tlen[i + 1];
+                j = j + 1; i = i + 3; continue;
+            }
+        } }
+        tkind[j] = tkind[i]; tpos[j] = tpos[i]; tlen[j] = tlen[i];
+        j = j + 1; i = i + 1;
+    }
+    ntok = j;
+    return 0;
+}
+
 int fe_load(char *path, char *t) {
     int fd; int k;
     srcpath = path;
@@ -5565,6 +5600,7 @@ int fe_load(char *path, char *t) {
         return 2;
     }
     if (lex() < 0) return 1;
+    parenfold();
     tp = 0;
     return 0;
 }
