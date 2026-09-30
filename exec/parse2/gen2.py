@@ -811,6 +811,8 @@ def build(locations=False, warnings=False, errors=False):
     addr(P("ADR.object")).goto("ADR.object.next")
     ordinary_control('deref', warnings)
     shape_control("dereference")
+    for op in E.CASOPS:   # `*p += v` as an expression: the compound paths of the subscript walk
+        g.on('UD.load.b', [E.TK[op + '=']], 'LV.c' + op, [], 'r')
     ordinary_control('id', warnings)
     for tag, op in (("inc", "+"), ("dec", "-")):
         update=dict(word_state=tag, update_entry="ID."+tag, update_deref="UD."+tag, update_post="POST."+op)
