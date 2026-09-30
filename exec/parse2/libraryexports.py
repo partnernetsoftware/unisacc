@@ -43,6 +43,7 @@ def install(E,P,b,start,integers):
         else:P(state).branch({1:orig},'LX.hook.'+state,[('CMPI','lx_present',0)])
         P('LX.hook.'+state).a(('PUSH',orig)).goto(procedure)
     hook('TOP.st','LX.storage')
+    hook('TOP.static','LX.storage')   # file-scope `static` takes its own state since R13-0b #31 (STATICF); linkage must still be recorded
     append('FN',[('COPYW','lx_linkage','lx_storage'),('LDI','lx_storage',0)])
     # Each parameter list owns its epoch, including nested anonymous lists.
     P('LX.owner').branch({1:'LX.ownernamed'},'LX.ownertyped',[('CMPI','sig_fp',0)])

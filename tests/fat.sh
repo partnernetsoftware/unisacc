@@ -31,8 +31,21 @@ for f in "$@"; do
 done
 wait
 # B: the verdicts, in order.
+# tests/fat.knownfail: probes the PYTHON front end (which this suite drives)
+# does not handle yet, one per line, the same contract as the other lists: a
+# listed probe may fail, a listed probe that passes on both slices is a
+# failure -- delete its line.  The C reference and the product are checked
+# by difftest/closure; this list is the Python control group's debt.
+isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/fat.knownfail"; }
+known=0; revived=0
 for f in "$@"; do
     b=$(basename "$f" .c)
+    if isknown "$b"; then
+        if [ -f "$T/$b.xc" ] && [ "$(cat "$T/$b.a")" = "$(cat "$T/$b.want")" ] && [ "$(cat "$T/$b.x")" = "$(cat "$T/$b.want")" ] && [ "$(cat "$T/$b.ac")" = "$(cat "$T/$b.wc")" ]; then
+            revived=$((revived+1)); printf "       %-14s is listed in fat.knownfail but passes: delete its line\n" "$b"
+        else known=$((known+1)); fi
+        continue
+    fi
     [ -f "$T/$b.xc" ] || { printf "  FAIL %s (build/sign/run incomplete)\n" "$b"; cat "$T/$b.err"; fail=$((fail+1)); continue; }
     want=$(cat "$T/$b.want"); wc=$(cat "$T/$b.wc")
     a=$(cat "$T/$b.a"); ac=$(cat "$T/$b.ac")
@@ -46,7 +59,7 @@ for f in "$@"; do
     fi
 done
 echo
-echo "fat $pass   mismatch $fail   (both slices executed)"
+echo "fat $pass   mismatch $fail   known $known   revived $revived   (both slices executed)"
 # A suite that checked nothing is not green: `closure.sh` with no
 # probes once printed `identical 0 differ 0` and exited 0.
-[ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
+[ "$fail" -eq 0 ] && [ "$revived" -eq 0 ] && [ "$pass" -gt 0 ]
