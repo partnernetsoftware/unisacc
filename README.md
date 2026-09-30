@@ -358,7 +358,7 @@ ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are e
 
 | Part | Subclauses | Covered | Partial | Unsupported | Covered |
 |---|---|---|---|---|---|
-| Language (clause 6) | 98 | 96 | 0 | 2 | 97% |
+| Language (clause 6) | 98 | 95 | 1 | 2 | 96% |
 | Environment (clause 5) | 16 | 13 | 2 | 1 | 81% |
 | Library (clause 7) | 361 | 127 | 43 | 191 | 35% |
 | Annexes F, G | 19 | 0 | 0 | 19 | 0% |
@@ -376,6 +376,7 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 
 | Limitation | What happens | Reproduce |
 |---|---|---|
+| `__LINE__` before a line continuation (C99 6.10.8) | A token that sits BEFORE a backslash-newline on the same line reads one line too high (`int m = __LINE__; int \\` then ` n = __LINE__;` gives `3 3` where gcc gives `2 3`); diagnostics at such a token are off by one the same way.  Tokens after the join, and every later line, are right | the two-line example |
 | No complex types (C99 6.2.5, 6.3.1.6-7, 7.3, Annex G) | `double _Complex z;` is rejected (`expected ';'`); `<complex.h>` is not provided | `double _Complex z = 1.0;` |
 | No trigraph replacement (C99 5.2.1.1) | `"a??=b"` stays `a??=b`; C99 requires `??=` to become `#` in translation phase 1 (gcc/clang also skip it unless `-trigraphs`) | `printf("%s", "??=")` |
 | ~~No `__LINE__` / `__FILE__`~~ -- **supported as of 0.0.13** | Both work on the reference.  `__LINE__` is the PHYSICAL line of the token -- spliced headers and continuations notwithstanding -- and inside a macro body it is the line of the INVOCATION, which is what gcc and clang report; `tests/c/n17-line.c` is the six-value probe (`9 1010 11 12 15 16`, identical to cc).  `__FILE__` is the path as given on the command line, and reaches the front end through the `\0cli/source` resource when the driver passes no SRCPATH.  This row is kept, struck through, rather than deleted because it was the external trial's most-reported omission | `printf("%d %s\n", __LINE__, __FILE__)` |
