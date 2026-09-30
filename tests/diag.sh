@@ -32,8 +32,10 @@ if [ "$(basename "${UA:-/tmp/ua_ref}")" = ua_ref ]; then
 else
     KNOWN=$R/tests/diag.com.knownfail
 fi
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 T=$(scratch)
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 ok=0; bad=0
 
 check() {   # check <name> <want line:col> <want text in message>

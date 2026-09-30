@@ -26,7 +26,9 @@ PAR_WAIT=4   # the host run waits on the first-launch scan
 # tape by design, so they are counted as known here instead of as DIFF.  A
 # listed probe that does compile is not checked further either -- difftest
 # owns the revived verdict.
-isknown() { grep -qs "^$1[[:space:]]" "$R/tests/difftest.knownfail"; }
+. "$R/tests/knownfail.sh"
+knownfail_load "$R/tests/difftest.knownfail" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
     if isknown "$b"; then D="$T/$b.d"; mkdir -p "$D"; echo known > "$D/verdict"; continue; fi

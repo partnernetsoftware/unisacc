@@ -55,7 +55,10 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 UC=${MODEL_COM:-${UA:-$R/unisacc.com}}
 [ -x "$UC" ] || { echo "fb12multi: no compiler at $UC" >&2; exit 2; }
 KNOWN=$R/tests/fb12.knownfail
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 
 if [ "$#" -gt 0 ]; then SET="$*"; else
     SET=""

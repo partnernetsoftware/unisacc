@@ -84,7 +84,9 @@ ok=0; bad=0; refuse=0; known=0; revived=0
 # suite had no list at all, so the gate's difftest_o-N were red for every open
 # R13 defect the reference still has.
 case "$UA" in *.com) KNOWN=$R/tests/difftest.com.knownfail;; *) KNOWN=$R/tests/difftest.knownfail;; esac
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 for f in "${FILES[@]}"; do
     b=$(basename "$f" .c); D="$T/$b.d"
     [ "$b" = "host" ] && continue

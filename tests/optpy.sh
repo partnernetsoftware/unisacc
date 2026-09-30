@@ -19,6 +19,8 @@ exec "$_BOUND" 55 python3 - "$UA" "$_BOUND" "$SELF" <<'PY'
 import subprocess, sys, glob, os
 sys.path.insert(0, '.')
 from unisa.opt import optimise
+sys.path.insert(0, 'tests')
+from knownfail import read as knownfail_read
 ua = sys.argv[1]
 part = os.environ.get('OPTPY_PART', 'all')
 if part not in ('all', 'probes', 'self'): raise SystemExit('invalid OPTPY_PART')
@@ -27,7 +29,7 @@ import re
 if not re.fullmatch(r'[1-9][0-9]{0,5}/[1-9][0-9]{0,5}', shard): raise SystemExit('invalid SHARD')
 k, n = map(int, shard.split('/'))
 if k > n: raise SystemExit('invalid SHARD')
-refused = {l.split()[0] for l in open('tests/difftest.knownfail') if l.strip() and not l.startswith('#')}  # reference refuses on purpose
+refused = set(knownfail_read('tests/difftest.knownfail'))  # reference refuses on purpose
 probes = sorted(f for f in glob.glob('examples/*.c') + glob.glob('tests/c/*.c') if os.path.basename(f)[:-2] not in refused)
 files = (probes[k-1::n] if part != 'self' else []) + ([sys.argv[3]] if part != 'probes' else [])
 if not files: raise SystemExit('empty optpy partition')

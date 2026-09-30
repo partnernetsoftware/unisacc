@@ -16,6 +16,11 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 . "$R/tests/lib.sh"; ua_ready
 T=$(scratch)
+. "$R/tests/knownfail.sh"
+knownfail_load "$R/tests/corpus.knownfail" "$T/corpus.keys" || exit 1
+CORPUS_KEYS=$KNOWNFAIL_KEYS
+knownfail_load "$R/tests/difftest.knownfail" "$T/difftest.keys" || exit 1
+DIFFTEST_KEYS=$KNOWNFAIL_KEYS
 SELF="$T/unisacc.flat.c"
 bound 10 python3 "$R/tests/sourceflat.py" "$SELF" || exit 1
 OPT_PART=${OPT_PART:-all}; SHARD=${SHARD:-1/1}
@@ -35,9 +40,9 @@ for f in examples/*.c tests/c/*.c tests/c99/*.c corpus/c-testsuite/tests/single-
     for o in -O0 -O2; do
         if ! bound 10 "$UA" "$o" -I "$d" "$R/$f" -c >"$T/tape$o" 2>"$T/compile$o.log" || [ ! -s "$T/tape$o" ]; then
             # Known non-C99 corpus inputs remain explicit exclusions, never passes.
-            if [[ "$f" == corpus/* ]] && grep -qs "^$(basename "$f" .c)[[:space:]]" tests/corpus.knownfail; then
+            if [[ "$f" == corpus/* ]] && grep -Fxqs "$(basename "$f" .c)" "$CORPUS_KEYS"; then
                 echo "  KNOWN $f $o: non-C99 input refused"
-            elif grep -qs "^$(basename "$f" .c)[[:space:]]" tests/difftest.knownfail; then
+            elif grep -Fxqs "$(basename "$f" .c)" "$DIFFTEST_KEYS"; then
                 echo "  KNOWN $f $o: the reference refuses this probe on purpose (difftest.knownfail)"
             else fail "$f $o: tape build failed or empty"; cat "$T/compile$o.log"; fi
             valid=0; continue
@@ -61,7 +66,7 @@ if [ "$OPT_PART" = all ] || [ "$OPT_PART" = closure ]; then
 index=0
 for f in examples/*.c tests/c/*.c; do
     pick || continue
-    if grep -qs "^$(basename "$f" .c)[[:space:]]" tests/difftest.knownfail; then echo "  KNOWN $f: the reference refuses this probe on purpose"; continue; fi
+    if grep -Fxqs "$(basename "$f" .c)" "$DIFFTEST_KEYS"; then echo "  KNOWN $f: the reference refuses this probe on purpose"; continue; fi
     for t in lnx/x86_64 osx/arm64 win/arm64; do
         bound 10 "$UA" -O2 "$f" -t "$t" > "$T/p.tape" 2>"$T/tape.log" && [ -s "$T/p.tape" ] || { fail "$f $t: tape build"; cat "$T/tape.log"; continue; }
         bound 20 python3 -m unisa compile "$T/p.tape" --from-tape -o "$T/p.py" --target "$t" --drive built >"$T/python.log" 2>&1 || { fail "$f $t: Python image build"; cat "$T/python.log"; continue; }

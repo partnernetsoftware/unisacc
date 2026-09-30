@@ -28,7 +28,9 @@ PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
 # listed name that agrees is a revived failure (delete its line).  Shared with
 # tests/fat.sh and tests/ccrun.sh.
 known=0; revived=0
-isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/pyfront.knownfail"; }
+. "$R/tests/knownfail.sh"
+knownfail_load "$R/tests/pyfront.knownfail" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
     throttle

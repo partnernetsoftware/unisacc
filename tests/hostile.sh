@@ -42,6 +42,8 @@ try() {   # try <name> -- the file $T/<name>.c must make it exit cleanly
 # are listed in tests/hostile.knownfail with a reason, so the list cannot
 # rot and closing one means deleting a line.
 KNOWN=$R/tests/hostile.knownfail
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
 refuse() {   # refuse <name> -- $T/<name>.c must be rejected, with a message
     local name=$1 rc out
     out=$(bound 20 "$UA" "$T/$name.c" -c 2>&1 >/dev/null); rc=$?
@@ -51,13 +53,13 @@ refuse() {   # refuse <name> -- $T/<name>.c must be rejected, with a message
             bad=$((bad+1)); return;;
     esac
     if [ "$rc" -ne 0 ] && [ -n "$out" ]; then
-        if grep -qs "^$name[[:space:]]" "$KNOWN"; then
+        if knownfail_has "$name"; then
             printf "  REVIVED %s is diagnosed now -- delete it from hostile.knownfail\n" "$name"
             bad=$((bad+1))
         else ok=$((ok+1)); fi
         return
     fi
-    if grep -qs "^$name[[:space:]]" "$KNOWN"; then known=$((known+1)); return; fi
+    if knownfail_has "$name"; then known=$((known+1)); return; fi
     if [ "$rc" -eq 0 ]; then
         printf "  FAIL %-22s accepted silently; it is not valid C\n" "$name"
     else

@@ -26,7 +26,6 @@ if [ ! -d "$SRC" ]; then
 fi
 
 pass=0; wrong=0; unsup=0; known=0; revived=0; slow=0
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 
 # macOS has no `timeout`, and one heavy program must not hang the suite: the
 # reference VM is a Python interpreter, so an eight-queens search that a native
@@ -65,6 +64,10 @@ else
     echo "corpus driver: Python --drive $DRIVE"
 fi
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+R=$REPO
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 # SHARD=k/n runs every n-th program starting at the k-th.  The whole corpus
 # is 220 first executions, each a 0.5-0.9 s XProtect scan, and one run may
 # not take more than 60 s (AGENTS.md) -- so it goes in shards: 1/4 .. 4/4.

@@ -6,7 +6,11 @@ pass=0; fail=0; known=0
 # tests/pyfront.knownfail: probes the PYTHON front end does not accept yet (e.g.
 # __LINE__/__FILE__); listed names count as known, and a listed name that agrees
 # is a revived failure (delete its line).  Shared with fat/native/ccrun.
-isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/pyfront.knownfail"; }
+R=$(cd "$(dirname "$0")/.." && pwd)
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/knownfail.sh"
+knownfail_load "$R/tests/pyfront.knownfail" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 for f in "$@"; do
     a=$($UA -dump-tokens "$f" | sed '$d')
     b=$(python3 - "$f" <<'PY'

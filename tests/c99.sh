@@ -19,7 +19,9 @@ T=$(scratch)
 D=$R/tests/c99
 ok=0; bad=0; refused=0; known=0; revived=0
 KNOWN=$R/tests/c99.knownfail
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 : > "$T/passing"
 for f in "$D"/*.c; do
     b=$(basename "$f" .c)

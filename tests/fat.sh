@@ -36,7 +36,10 @@ wait
 # listed probe may fail, a listed probe that passes on both slices is a
 # failure -- delete its line.  The C reference and the product are checked
 # by difftest/closure; this list is the Python control group's debt.
-isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/pyfront.knownfail"; }
+R=$(cd "$(dirname "$0")/.." && pwd)
+. "$R/tests/knownfail.sh"
+knownfail_load "$R/tests/pyfront.knownfail" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 known=0; revived=0
 for f in "$@"; do
     b=$(basename "$f" .c)

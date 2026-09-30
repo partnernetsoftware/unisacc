@@ -10,6 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from unisa.tape import parse
 from unisa.tapebin import decode, encode
 from unisa.tapebin import TARGETS, target_id
+from knownfail import read as knownfail_read
 
 
 def check(text):
@@ -35,8 +36,7 @@ def check(text):
 
 def main():
     check('L:\n  nop\n.bss z 24\n.str a "x"\nL:\n.str a "y"\n  call L\n')
-    known = [line.split()[0] for line in pathlib.Path("exec/c/chain.knownfail").read_text().splitlines()
-             if line and not line.startswith("#")]
+    known = list(knownfail_read("exec/c/chain.knownfail"))
     files = sorted(pathlib.Path("examples").glob("*.c")) + [pathlib.Path("tests/c") / name for name in known]
     if not files:
         raise AssertionError("no C inputs")

@@ -10,6 +10,8 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 UA=${UA:-/tmp/ua_ref}; . "$R/tests/lib.sh"; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+. "$R/tests/knownfail.sh"
+knownfail_load "$R/tests/difftest.knownfail" "$T/known.keys" || exit 1
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "e4: cc failed"; exit 1; }
 for L in 1 2; do
@@ -29,7 +31,7 @@ for f in "$@"; do
             if [ -z "${E4STRICT:-}" ] && [ $r0 -eq $rl ] && [ $r0 -lt 128 ]; then skip=$((skip+1)); continue; fi
             # a probe the reference refuses on purpose (listed in tests/difftest.knownfail, e.g. the
             # deferred #21 six-argument indirect call) is a known refusal, not an E4 defect
-            if [ $r0 -eq $rl ] && [ $r0 -lt 128 ] && grep -q "^$(basename "$f" .c) " "$R/tests/difftest.knownfail" 2>/dev/null; then known=$((known+1)); continue; fi
+            if [ $r0 -eq $rl ] && [ $r0 -lt 128 ] && knownfail_has "$(basename "$f" .c)"; then known=$((known+1)); continue; fi
             bad=$((bad+1)); echo "  BAD $f -O$L  reference -O0 $r0 -O$L $rl"; continue
         fi
         UNISA_MAXSTEPS=400000000000 b 60 "$T/run" "$T/e4_$L.tbl" "$T/o0" > "$T/m" 2> "$T/e"; rc=$?

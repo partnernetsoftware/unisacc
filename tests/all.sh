@@ -103,7 +103,8 @@ fi
 # opt/selfhost/native/ccrun over one such file while the local queue was green.
 # Read the list once and match in-shell: a grep per probe (~400 processes) made
 # `all.sh` start-up exceed ci_shard_plan's 5 s budget on the macOS runners.
-REFUSED=" $(python3 tests/knownfail.py keys tests/difftest.knownfail | tr '\n' ' ') "
+REFUSED_KEYS=$(python3 tests/knownfail.py keys tests/difftest.knownfail) || exit 1
+REFUSED=" $(printf '%s\n' "$REFUSED_KEYS" | tr '\n' ' ') "
 refused() { case "$REFUSED" in *" $1 "*) return 0;; esac; return 1; }
 PROBES=; for f in examples/*.c tests/c/*.c; do b=${f##*/}; refused "${b%.c}" || PROBES="$PROBES $f"; done
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching

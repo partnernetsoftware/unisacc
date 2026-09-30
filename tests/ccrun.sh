@@ -13,7 +13,9 @@ pass=0; fail=0; uns=0; known=0; revived=0
 : > "$T/passing"
 PYFRONT=$R/tests/pyfront.knownfail   # Python-front-end gaps, shared with fat.sh/native.sh
 REFUSED=$R/tests/difftest.knownfail  # probes the C reference refuses on purpose (e.g. #21), as closure.sh/e4 treat them
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN" || grep -qs "^$1[[:space:]]" "$PYFRONT" || grep -qs "^$1[[:space:]]" "$REFUSED"; }
+. "$R/tests/knownfail.sh"
+knownfail_load_many "$T/known.keys" "$KNOWN" "$PYFRONT" "$REFUSED" || exit 1
+isknown() { knownfail_has "$1"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
     rm -f "$T/ref.status"

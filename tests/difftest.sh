@@ -49,7 +49,9 @@ else
     KNOWN=$R/tests/difftest.knownfail
     seen() { (cd "$T" && python3 -m unisa run "$R/$1" --drive "$DRIVE" 2>"$2") > "$3"; }
 fi
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
+. "$R/tests/knownfail.sh"
+knownfail_load "$KNOWN" "$T/known.keys" || exit 1
+isknown() { knownfail_has "$1"; }
 # SHARD=k/n runs every n-th probe from the k-th, so each shard stays under
 # the 60 s ceiling (AGENTS.md); the default 1/1 is the whole list.
 FILES=""; i=0

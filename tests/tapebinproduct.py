@@ -8,6 +8,7 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from unisa.tapebin import TARGETS, encode, target_id
+from knownfail import read as knownfail_read
 
 
 def run(argv):
@@ -52,13 +53,10 @@ def main():
         host = "osx/arm64" if sys.platform == "darwin" else "lnx/x86_64"
         matched = 0
         known_tape_diffs = set()
-        for line in pathlib.Path("exec/c/chain.knownfail").read_text().splitlines():
-            if not line or line.startswith("#"):
-                continue
-            cols = line.split(maxsplit=2)
-            if len(cols) != 3 or cols[1] != "R14-8" or cols[0] in known_tape_diffs:
-                raise AssertionError("bad tapebin knownfail line: " + line)
-            known_tape_diffs.add(cols[0])
+        for name, reason in knownfail_read("exec/c/chain.knownfail").items():
+            if not reason.startswith("R14-8 P1 "):
+                raise AssertionError("bad tapebin knownfail line: " + name)
+            known_tape_diffs.add(name)
         observed_tape_diffs = set()
         files = sorted(pathlib.Path("examples").glob("*.c")) + sorted(pathlib.Path("tests/c").glob("*.c"))
         if not files:
