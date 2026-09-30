@@ -64,6 +64,11 @@ STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
 STEP_LIST = ['shared', 'lnx/arm64', 'lnx/x86_64', 'osx/arm64', 'osx/x86_64',
              'win/arm64', 'win/x86_64', 'pack']
 COMB_BUILD = SEED.parent / 'comb-build'
+# Everything the pipeline reads to produce a model.  `step_done` pins each step
+# to a digest of these, so changing any of them invalidates every marker
+# instead of letting a stale artifact pass as current.
+SOURCE_ROOTS = ('exec/pipeline', 'exec/parse', 'exec/parse2', 'exec/pp',
+                'unisa', 'include', 'weights')
 HELLO = ROOT / 'examples' / 'hello.c'
 # The one probe every seed must pass: a compiler that cannot run a program is
 # not a seed, whatever its hash says.
@@ -143,6 +148,20 @@ def run(cmd, secs=55):
     return capture(cmd, secs)[0]
 
 
+def shown(p):
+    """A path for humans and logs: repository-relative when it is inside one.
+
+    Absolute host paths in gate output put the machine's user name into every
+    transcript and log, which is a leak rather than a detail.  The private
+    seed directory lives outside the tree, so it keeps its own absolute form --
+    that one is the caller's own input and carries no user name of ours.
+    """
+    try:
+        return str(pathlib.Path(p).resolve().relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
 def skipped(what, how):
     """A prerequisite the gate is not allowed to build for itself.
 
@@ -154,14 +173,56 @@ def skipped(what, how):
     return 1 if STRICT else 0
 
 
+def step_name(st):
+    """`lnx/arm64` is the build's name; `lnx-arm64` is its directory."""
+    return st.replace('/', '-')
+
+
+def source_digest():
+    """One digest over everything the pipeline READS to make the model.
+
+    This exists because `buildcompiler.sh`'s own `manifest` key does not cover
+    it: `models.identity` hashes the target, the network, the C compiler binary
+    and its version, the platform and the Python version -- but no pipeline
+    source.  So a change to `exec/parse2/parenfold.py` leaves every manifest
+    looking current while the artifacts on disk were produced by the old code.
+    Reusing a build directory across such a change would then draw a green gate
+    over stale artifacts, which is the one failure this file must not allow.
+    """
+    h = hashlib.sha256()
+    for root in SOURCE_ROOTS:
+        base = ROOT / root
+        if not base.exists():
+            continue
+        for p in sorted(base.rglob('*')):
+            if not p.is_file() or p.is_symlink():
+                continue
+            h.update(str(p.relative_to(ROOT)).encode())
+            h.update(p.read_bytes())
+    return h.hexdigest()
+
+
 def step_done(model_dir, st):
-    return (model_dir / ('step-' + st.replace('/', '_'))).exists()
+    """Whether this step's artifacts are present AND from the current sources."""
+    manifest = model_dir / step_name(st) / 'manifest.json'
+    marker = model_dir / ('step-' + st.replace('/', '_'))
+    if not manifest.exists() or not marker.exists():
+        return False
+    try:
+        return marker.read_text().strip() == '%s %s' % (source_digest(), sha(manifest))
+    except (OSError, ValueError):
+        return False
 
 
 def mark_done(model_dir, st):
+    manifest = model_dir / step_name(st) / 'manifest.json'
+    if not manifest.exists():
+        raise SystemExit(
+            'comboot: step %s reported success but wrote no %s; refusing to '
+            'record it as done' % (st, manifest))
     m = model_dir / ('step-' + st.replace('/', '_'))
     m.parent.mkdir(parents=True, exist_ok=True)
-    m.write_text('ok\n')
+    m.write_text('%s %s\n' % (source_digest(), sha(manifest)))
 
 
 def build_step(st, model_dir):
@@ -295,7 +356,7 @@ def shard(name):
             # stage 3 is built BY stage 2, so with stage 2 absent this shard has
             # nothing to do: say so and return 0.  Failing here instead would be
             # wrong -- a pipeline that has not run yet is not a defect.
-            return skipped('stage3', 'stage 2 (%s): run the stage2 shard' % STAGE2)
+            return skipped('stage3', 'stage 2 (%s): run the stage2 shard' % shown(STAGE2))
         model_dir = stage_dir(3)
         lk = lock(model_dir, 'stage 3')
         try:
@@ -309,7 +370,7 @@ def shard(name):
 
     if name == 'fixedpoint':
         if not STAGE2.exists() or not STAGE3.exists():
-            return skipped('fixedpoint', 'stage 2 and stage 3 (%s, %s)' % (STAGE2, STAGE3))
+            return skipped('fixedpoint', 'stage 2 and stage 3 (%s, %s)' % (shown(STAGE2), shown(STAGE3)))
         return cmp2(str(STAGE2), str(STAGE3))
 
     raise SystemExit('comboot: unknown shard %r' % name)
