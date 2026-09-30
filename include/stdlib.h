@@ -248,6 +248,22 @@ static unsigned long strtoul(const char *__u_s, char **__u_end, int __u_base) {
 static long atol(const char *__u_s) { return strtol(__u_s, 0, 10); }
 #endif
 
+/* This compiler uses 64-bit long and long long on all six targets.  Keep the
+ * conversion, overflow clamp, ERANGE and end-pointer rules in one routine. */
+#if !__UNISA_FTRIM_LIBC || __UN_strtoll
+static long long strtoll(const char *__u_s, char **__u_end, int __u_base) {
+    return strtol(__u_s, __u_end, __u_base);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_strtoull
+static unsigned long long strtoull(const char *__u_s, char **__u_end, int __u_base) {
+    return strtoul(__u_s, __u_end, __u_base);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_atoll
+static long long atoll(const char *__u_s) { return strtoll(__u_s, 0, 10); }
+#endif
+
 /* The fractional part is accumulated as an integer and scaled once, so a
  * long run of digits does not lose the low ones to repeated division. */
 #if !__UNISA_FTRIM_LIBC || __UN_strtod

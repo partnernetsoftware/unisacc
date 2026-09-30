@@ -183,4 +183,73 @@ static char *strtok(char *__u_s, const char *__u_delim) {
 }
 #endif
 
+#if !__UNISA_FTRIM_LIBC || __UN_memchr
+static void *memchr(const void *__u_p, int __u_c, long __u_n) {
+    const unsigned char *__u_s; long __u_i;
+    __u_s = (const unsigned char *)__u_p;
+    __u_i = 0;
+    while (__u_i < __u_n) {
+        if (__u_s[__u_i] == (unsigned char)__u_c) return (void *)(__u_s + __u_i);
+        __u_i = __u_i + 1;
+    }
+    return NULL;
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_strspn
+static long strspn(const char *__u_s, const char *__u_accept) {
+    long __u_i; long __u_j; int __u_found;
+    __u_i = 0;
+    while (__u_s[__u_i]) {
+        __u_found = 0; __u_j = 0;
+        while (__u_accept[__u_j]) {
+            if (__u_s[__u_i] == __u_accept[__u_j]) __u_found = 1;
+            __u_j = __u_j + 1;
+        }
+        if (!__u_found) break;
+        __u_i = __u_i + 1;
+    }
+    return __u_i;
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_strpbrk
+static char *strpbrk(const char *__u_s, const char *__u_accept) {
+    long __u_i; long __u_j;
+    __u_i = 0;
+    while (__u_s[__u_i]) {
+        __u_j = 0;
+        while (__u_accept[__u_j]) {
+            if (__u_s[__u_i] == __u_accept[__u_j]) return (char *)(__u_s + __u_i);
+            __u_j = __u_j + 1;
+        }
+        __u_i = __u_i + 1;
+    }
+    return NULL;
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_strcspn
+static long strcspn(const char *__u_s, const char *__u_reject) {
+    long __u_i; long __u_j;
+    __u_i = 0;
+    while (__u_s[__u_i]) {
+        __u_j = 0;
+        while (__u_reject[__u_j]) {
+            if (__u_s[__u_i] == __u_reject[__u_j]) return __u_i;
+            __u_j = __u_j + 1;
+        }
+        __u_i = __u_i + 1;
+    }
+    return __u_i;
+}
+#endif
+
+/* The bundled locale has only the C collation order. */
+#if !__UNISA_FTRIM_LIBC || __UN_strcoll
+static int strcoll(const char *__u_a, const char *__u_b) {
+    return strcmp(__u_a, __u_b);
+}
+#endif
+
 #endif
