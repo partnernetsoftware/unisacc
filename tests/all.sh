@@ -97,7 +97,12 @@ if [ "$LIST" -eq 0 ] && [ "${#SELECT[@]}" -gt 0 ]; then
         [ "$found" -eq 1 ] || { echo "unknown/unavailable suite: $wanted" >&2; exit 2; }
     done
 fi
-PROBES="examples/*.c tests/c/*.c"
+# Probes the C reference refuses ON PURPOSE (tests/difftest.knownfail, e.g. the
+# deferred six-argument indirect call) stay red probes for difftest's ledger but
+# must not be fed to every other suite: 0.0.13's CI matrix went red on
+# opt/selfhost/native/ccrun over one such file while the local queue was green.
+refused() { grep -qs "^$1[[:space:]]" tests/difftest.knownfail; }
+PROBES=$(for f in examples/*.c tests/c/*.c; do refused "$(basename "$f" .c)" || printf '%s ' "$f"; done)
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching
 # its last line -- a summary line that happens to end differently is not a
 # failure, and a suite that dies silently must not read as green.
@@ -198,7 +203,7 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
     serial selfhost-prepare-tape ./tests/selfhost.sh --prepare-tape
     serial selfhost-prepare-image ./tests/selfhost.sh --prepare-image
 fi
-FILES=(examples/*.c tests/c/*.c)
+FILES=(); for f in examples/*.c tests/c/*.c; do refused "$(basename "$f" .c)" || FILES+=("$f"); done
 for shard in 0 1 2 3 4 5 6 7; do
     CHUNK=()
     for ((i=shard; i<${#FILES[@]}; i+=8)); do CHUNK+=("${FILES[$i]}"); done

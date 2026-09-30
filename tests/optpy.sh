@@ -27,7 +27,8 @@ import re
 if not re.fullmatch(r'[1-9][0-9]{0,5}/[1-9][0-9]{0,5}', shard): raise SystemExit('invalid SHARD')
 k, n = map(int, shard.split('/'))
 if k > n: raise SystemExit('invalid SHARD')
-probes = sorted(glob.glob('examples/*.c') + glob.glob('tests/c/*.c'))
+refused = {l.split()[0] for l in open('tests/difftest.knownfail') if l.strip() and not l.startswith('#')}  # reference refuses on purpose
+probes = sorted(f for f in glob.glob('examples/*.c') + glob.glob('tests/c/*.c') if os.path.basename(f)[:-2] not in refused)
 files = (probes[k-1::n] if part != 'self' else []) + ([sys.argv[3]] if part != 'probes' else [])
 if not files: raise SystemExit('empty optpy partition')
 def tape(args):

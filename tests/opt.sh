@@ -37,6 +37,8 @@ for f in examples/*.c tests/c/*.c tests/c99/*.c corpus/c-testsuite/tests/single-
             # Known non-C99 corpus inputs remain explicit exclusions, never passes.
             if [[ "$f" == corpus/* ]] && grep -qs "^$(basename "$f" .c)[[:space:]]" tests/corpus.knownfail; then
                 echo "  KNOWN $f $o: non-C99 input refused"
+            elif grep -qs "^$(basename "$f" .c)[[:space:]]" tests/difftest.knownfail; then
+                echo "  KNOWN $f $o: the reference refuses this probe on purpose (difftest.knownfail)"
             else fail "$f $o: tape build failed or empty"; cat "$T/compile$o.log"; fi
             valid=0; continue
         fi
@@ -59,6 +61,7 @@ if [ "$OPT_PART" = all ] || [ "$OPT_PART" = closure ]; then
 index=0
 for f in examples/*.c tests/c/*.c; do
     pick || continue
+    if grep -qs "^$(basename "$f" .c)[[:space:]]" tests/difftest.knownfail; then echo "  KNOWN $f: the reference refuses this probe on purpose"; continue; fi
     for t in lnx/x86_64 osx/arm64 win/arm64; do
         bound 10 "$UA" -O2 "$f" -t "$t" > "$T/p.tape" 2>"$T/tape.log" && [ -s "$T/p.tape" ] || { fail "$f $t: tape build"; cat "$T/tape.log"; continue; }
         bound 20 python3 -m unisa compile "$T/p.tape" --from-tape -o "$T/p.py" --target "$t" --drive built >"$T/python.log" 2>&1 || { fail "$f $t: Python image build"; cat "$T/python.log"; continue; }
