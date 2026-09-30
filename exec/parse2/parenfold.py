@@ -18,9 +18,10 @@ def install(E, ordinal_table, locations=False):
         # only its entry and return to NX before ordinal assignment; the
         # shared prefix decoder and its validation remain unchanged.
         # Warning/error variants wrap NEXT with their own checks before the
-        # located decoder.  Lookahead needs the decoder itself, without those
-        # checks or their side effects.
-        mode, source = g.st["DL.read"]
+        # located decoder (DL.read).  In the locations-only variant NEXT is
+        # already that decoder.  Lookahead skips only the outer checks.
+        reader = "DL.read" if "DL.read" in g.st else "TN.checked"
+        mode, source = g.st[reader]
         assert mode == "r"
         copied = {}
         for key, (target, seqid) in source.items():
