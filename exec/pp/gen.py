@@ -189,7 +189,7 @@ SEGINF = 1000000000
 DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
 SPLB, IRLN, IRNL = 11 * 10 ** 7, 12 * 10 ** 7, 121 * 10 ** 6
 F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV, F_ACT, F_UP = 0, 1, 2, 3, 4, 5, 6, 7
-F_NP, F_P0, MAXP = 8, 9, 8          # function-like: parameter count, parameter ids
+F_NP, F_P0, MAXP = 8, 9, 12         # function-like: parameter count, parameter ids; MAXP = the reference's MAXMPARAM (12) -- 8 refused sqlite's 9-parameter WAGGREGATE (R13-0b #29)
 F_HASH = F_P0 + MAXP     # 1: the body has `#` outside literals (s12)
 F_VAR = F_HASH + 1      # final parameter is __VA_ARGS__
 FSZ = F_VAR + 1
