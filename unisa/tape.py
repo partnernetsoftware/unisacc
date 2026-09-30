@@ -92,6 +92,7 @@ class Tape:
     def __init__(self):
         self.code = []          # [Insn]
         self.labels = {}        # name -> pc
+        self.records = []       # source-order semantic records, including data definitions
         self.data = bytearray() # packed literals, based at DATA_BASE
         self.syms = {}          # name -> address
         # Offsets in `data` that hold an absolute data address (a global
@@ -102,12 +103,14 @@ class Tape:
     # -- building ---------------------------------------------------------
     def label(self, name):
         self.labels[name] = len(self.code)
+        self.records.append(("label", name))
 
     def emit(self, op, *args):
         assert op in SHAPE, "unknown tape op %r" % op
         exp = len(SHAPE[op])
         assert len(args) == exp, "%s takes %d operands, got %d" % (op, exp, len(args))
         self.code.append(Insn(op, list(args)))
+        self.records.append(("insn", op, tuple(args)))
         return len(self.code) - 1
 
     def string(self, name, raw, align=1):
@@ -124,6 +127,10 @@ class Tape:
         addr = DATA_BASE + len(self.data)
         self.data.extend(raw)
         self.syms[name] = addr
+        if len(raw) > 16 and not any(raw):
+            self.records.append(("bss", name, len(raw)))
+        else:
+            self.records.append(("str", name, bytes(raw)))
         return addr
 
     # -- text -------------------------------------------------------------
@@ -150,6 +157,21 @@ class Tape:
         for nm in sorted(rev.get(len(self.code), [])):
             out.append("%s:" % nm)
         return "\n".join(out) + "\n"
+
+    def to_canonical_text(self):
+        """Print semantic records in their original order, without text style data."""
+        out = []
+        for record in self.records:
+            kind = record[0]
+            if kind == "label":
+                out.append(record[1] + ":")
+            elif kind == "str":
+                out.append(".str %s %s" % (record[1], _quote(record[2])))
+            elif kind == "bss":
+                out.append(".bss %s %d" % (record[1], record[2]))
+            else:
+                out.append("  " + _fmt(Insn(record[1], record[2])))
+        return "\n".join(out) + ("\n" if out else "")
 
 
 def _quote(bs):
@@ -232,16 +254,30 @@ def parse(text):
             continue
         if line.startswith(".bss "):
             name, n = line[5:].split()
+            before = len(t.records)
             t.string(name, b"\x00" * int(n), align=8)
+            record = ("bss", name, int(n))
+            if len(t.records) == before:
+                t.records.append(record)
+            else:
+                t.records[-1] = record
             continue
         if line.startswith(".str "):
             rest = line[5:].strip()
             name, lit = rest.split(None, 1)
-            t.string(name, _unescape(lit.strip()[1:-1]))
+            blob = _unescape(lit.strip()[1:-1])
+            before = len(t.records)
+            t.string(name, blob)
+            record = ("str", name, blob)
+            if len(t.records) == before:
+                t.records.append(record)
+            else:
+                t.records[-1] = record
             continue
         if line.endswith(":") and " " not in line[:-1]:
             pending.append((line[:-1], lineno))
             t.labels[line[:-1]] = len(t.code)
+            t.records.append(("label", line[:-1]))
             continue
         body = line.replace("[", " ").replace("]", " ")
         parts = [p for p in body.replace(",", " ").split() if p]
@@ -257,6 +293,7 @@ def parse(text):
             else:
                 args.append(tok)
         t.code.append(Insn(op, args, lineno))
+        t.records.append(("insn", op, tuple(args)))
     return t
 
 
