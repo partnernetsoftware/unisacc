@@ -39,7 +39,7 @@ COMB      ?= 0
 COM_OUT   ?= unisacc.com
 
 .PHONY: help quick test com release linux bench acc weights clean ref \
-        c99 closure corpus classic-com model-com seed-com com3 comboot \
+        c99 closure corpus classic-com model-com seed-com com3 comboot gatedeps \
         stage2 stage3 comboot-seed-step comboot-stage2-step comboot-stage3-step
 
 help:
@@ -186,3 +186,8 @@ clean:
 export-ref:
 	@mkdir -p out
 	@./tests/export_ref.sh out/unisacc-flat.c
+
+# Reviewed-tree stamps for gate-infra, computed from HEAD in a temporary
+# extraction (git's content and modes), never from the shared checkout.
+gatedeps:
+	@python3 tests/bound.py 55 python3 tests/refresh_gatedeps.py
