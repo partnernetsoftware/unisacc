@@ -17,7 +17,19 @@ def run(argv):
     return p.stdout
 
 
+def shard():
+    """TAPEBIN_SHARD=k/n: probe files k-1, k-1+n, ...; the six-target image and
+    host-run/origin checks run in shard 1 only.  One pass was 45-53 s against a
+    53 s job bound (0.0.14 release queue), so it is split three ways."""
+    v = os.environ.get("TAPEBIN_SHARD", "1/1")
+    k, n = (int(x) for x in v.split("/"))
+    if not (1 <= k <= n):
+        raise AssertionError("bad TAPEBIN_SHARD " + v)
+    return k, n
+
+
 def main():
+    k, n = shard()
     product = pathlib.Path(os.environ.get("MODEL_COM", "unisacc.com")).resolve()
     if not product.is_file():
         raise AssertionError("missing model compiler")
@@ -25,7 +37,7 @@ def main():
         base = pathlib.Path(tmp)
         ref = base / "ref"
         run(["./tests/build_ref.sh", base / "ref.c", ref])
-        for target in TARGETS:
+        for target in (TARGETS if k == 1 else ()):
             binary = base / "hello.tapebin"
             classic = base / "classic.tapebin"
             run(["sh", product, "examples/hello.c", "-t", target, "--tapebin", "-o", binary])
@@ -51,6 +63,9 @@ def main():
         files = sorted(pathlib.Path("examples").glob("*.c")) + sorted(pathlib.Path("tests/c").glob("*.c"))
         if not files:
             raise AssertionError("empty tape input set")
+        files = files[k - 1::n]
+        names = {f.name for f in files}
+        known_tape_diffs &= names
         for path in files:
             classic = base / "classic.tapebin"
             product_bin = base / "product.tapebin"
@@ -86,6 +101,10 @@ def main():
                 matched += 1
         if observed_tape_diffs != known_tape_diffs:
             raise AssertionError(("upstream tape difference set changed", sorted(observed_tape_diffs)))
+        if k != 1:
+            print("tapebin product shard %d/%d: %d equal-source packages, %d known upstream tape diffs" % (k, n, matched, len(known_tape_diffs)))
+            return
+        binary = base / "hello.tapebin"; output = base / "image"
         run(["sh", product, "examples/hello.c", "-t", host, "--tapebin", "-o", binary])
         got = run(["sh", product, "-run", binary])
         want = run(["sh", product, "-run", "examples/hello.c"])
@@ -100,7 +119,7 @@ def main():
         if rejected.returncode == 0 or b"origin" not in rejected.stderr.lower():
             raise AssertionError("origin mismatch was not rejected")
         run(["sh", product, "--force-origin", binary, "-b", wrong, "-o", output])
-    print("tapebin product: %d equal-source packages, %d known upstream tape diffs, six images, host run, origin guard" % (matched, len(known_tape_diffs)))
+    print("tapebin product shard %d/%d: %d equal-source packages, %d known upstream tape diffs, six images, host run, origin guard" % (k, n, matched, len(known_tape_diffs)))
 
 
 if __name__ == "__main__":

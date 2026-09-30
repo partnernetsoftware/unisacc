@@ -408,7 +408,7 @@ if [ "$COM" = 1 ]; then
     fi
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
-    job com-tapebin MODEL_COM="$PRODUCT" python3 ./tests/tapebinproduct.py
+    for k in 1 2 3; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/3 python3 ./tests/tapebinproduct.py; done   # one pass was 45-53 s
     job com-closure UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/closure.sh examples/*.c
     job com-tools UA="$PRODUCT" UA_RUN="$PRODUCT" TOOLS_UA="$PRODUCT" ./tests/tools.sh
     for shard in 1 2 3 4; do
