@@ -16,14 +16,26 @@
 #define BUFSIZ 4096
 
 typedef struct _UNISA_FILE FILE;
-#define stdin  ((FILE *)0)
-#define stdout ((FILE *)1)
-#define stderr ((FILE *)2)
+/* A FILE* IS the descriptor cast to a pointer (fopen returns `(FILE *)(long)fd`),
+   so the three standard streams used to be ((FILE *)0/1/2) -- which made
+   `stdin == NULL` TRUE.  Programs test the result of fopen for NULL and then
+   use the stream, so the standard ones must not look like NULL.  They are
+   distinguishable, non-NULL, and `_unisa_fd` maps them back to 0/1/2, so no
+   caller has to know.  The values are far above any real descriptor. */
+#define _UNISA_STDIO_BASE 4611686018427387904L      /* 1 << 62 */
+#define stdin  ((FILE *)(_UNISA_STDIO_BASE + 0))
+#define stdout ((FILE *)(_UNISA_STDIO_BASE + 1))
+#define stderr ((FILE *)(_UNISA_STDIO_BASE + 2))
 
 int printf();
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_fd
-static int _unisa_fd(FILE *__u_f) { return (int)(long)__u_f; }
+static int _unisa_fd(FILE *__u_f) {
+    long __u_v;
+    __u_v = (long)__u_f;
+    if (__u_v >= _UNISA_STDIO_BASE) return (int)(__u_v - _UNISA_STDIO_BASE);
+    return (int)__u_v;
+}
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_len
@@ -116,6 +128,10 @@ static long fread(void *__u_p, long __u_sz, long __u_n, FILE *__u_f) {
    and we hardcoded Linux's.  On macOS that turned "w" into flags nobody
    accepts; the file was never created and every read of it came back
    empty. */
+/* O_RDONLY is 0, O_WRONLY is 1 and O_RDWR is 2 on Linux and on the BSDs
+   alike, which is why only the CREAT/TRUNC/APPEND bits need per-host values. */
+#define _U_O_WRONLY  1
+#define _U_O_RDWR    2
 #ifdef __linux__
 #define _U_O_CREAT   64
 #define _U_O_TRUNC   512
@@ -142,11 +158,25 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
     __u_fd = __open((char *)__u_path, __u_access, __u_disp);
 #else
     int __u_flags;
+    int __u_plus;
+    /* The trailing `+` means UPDATE: read AND write.  It was ignored, so "w+"
+       behaved as "w" (O_WRONLY) and a tmpfile could be written but never read
+       back -- fread failed and the answer looked like an empty file.  O_RDWR
+       is what the `+` asks for, on the modes that allow it. */
+    __u_plus = 0;
+    { int __u_j; __u_j = 0; while (__u_mode[__u_j]) {
+        if (__u_mode[__u_j] == 43) __u_plus = 1;
+        __u_j = __u_j + 1; } }
     __u_flags = 0;                            /* 'r': O_RDONLY */
+    if (__u_mode[0] == 114 && __u_plus) __u_flags = _U_O_RDWR;
     if (__u_mode[0] == 119)                   /* 'w' */
-        __u_flags = 1 | _U_O_CREAT | _U_O_TRUNC;
+        __u_flags = _U_O_WRONLY | _U_O_CREAT | _U_O_TRUNC;
+    if (__u_mode[0] == 119 && __u_plus)
+        __u_flags = _U_O_RDWR | _U_O_CREAT | _U_O_TRUNC;
     if (__u_mode[0] == 97)                    /* 'a' */
-        __u_flags = 1 | _U_O_CREAT | _U_O_APPEND;
+        __u_flags = _U_O_WRONLY | _U_O_CREAT | _U_O_APPEND;
+    if (__u_mode[0] == 97 && __u_plus)
+        __u_flags = _U_O_RDWR | _U_O_CREAT | _U_O_APPEND;
     /* 0644.  Passing no mode at all left it at 0, so the file we had just
        created could not be opened again. */
     __u_fd = __open((char *)__u_path, __u_flags, 420);
@@ -159,11 +189,109 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
 /* Unbuffered: a FILE * here is a file descriptor, so there is nowhere to
    keep a buffer and every character costs a read.  Correct, not fast. */
 #if !__UNISA_FTRIM_LIBC || __UN_fgetc
+/* ---- stream state ------------------------------------------------------
+   A FILE* is a descriptor and nothing more (see the top of this file), so
+   there is nowhere on the stream to remember that a read hit EOF or failed,
+   or to hold a byte pushed back by ungetc.  A small fixed table keyed by the
+   descriptor keeps that state.  Eight streams is what a program that uses
+   feof() at all is likely to hold open; a ninth simply forgets its flags
+   rather than failing, because a wrong answer from feof() is worse than none.
+   [R13-0 #06 / N15] */
+#define _U_NST 8
+static int _u_st_fd[_U_NST];
+static int _u_st_eof[_U_NST];
+static int _u_st_err[_U_NST];
+static int _u_st_ung[_U_NST];              /* a pushed-back byte, or -1 */
+static int _u_st_n;
+
+#if !__UNISA_FTRIM_LIBC || __UN__u_st_slot
+static int _u_st_slot(FILE *__u_f) {
+    int __u_fd; int __u_i;
+    __u_fd = _unisa_fd(__u_f);
+    __u_i = 0;
+    while (__u_i < _u_st_n) {
+        if (_u_st_fd[__u_i] == __u_fd) return __u_i;
+        __u_i = __u_i + 1;
+    }
+    if (_u_st_n >= _U_NST) return 0 - 1;
+    __u_i = _u_st_n; _u_st_n = _u_st_n + 1;
+    _u_st_fd[__u_i] = __u_fd;
+    _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0; _u_st_ung[__u_i] = 0 - 1;
+    return __u_i;
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_feof
+static int feof(FILE *__u_f) {
+    int __u_i; __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return 0;
+    return _u_st_eof[__u_i];
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_ferror
+static int ferror(FILE *__u_f) {
+    int __u_i; __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return 0;
+    return _u_st_err[__u_i];
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_clearerr
+static void clearerr(FILE *__u_f) {
+    int __u_i; __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return;
+    _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0;
+}
+#endif
+/* One byte of pushback (C99 7.19.7.11 guarantees at least one).  Pushing back
+   EOF fails, and pushing anything back CLEARS the end-of-file indicator. */
+#if !__UNISA_FTRIM_LIBC || __UN_ungetc
+static int ungetc(int __u_c, FILE *__u_f) {
+    int __u_i;
+    if (__u_c == EOF) return EOF;
+    __u_i = _u_st_slot(__u_f);
+    if (__u_i < 0) return EOF;
+    _u_st_ung[__u_i] = __u_c & 255;
+    _u_st_eof[__u_i] = 0;
+    return __u_c & 255;
+}
+#endif
+/* Buffering is not modelled (every read and write goes straight to the
+   descriptor), so a request to change it is honoured by doing nothing --
+   which C99 7.19.7.4 permits: the call may be made at any time, and only
+   _IOFBF/_IOLBF/_IONBF are defined.  Returning non-zero would mean failure. */
+#if !__UNISA_FTRIM_LIBC || __UN_setvbuf
+static int setvbuf(FILE *__u_f, char *__u_buf, int __u_mode, long __u_size) {
+    if (__u_f == NULL) return 0 - 1;
+    return 0;
+}
+#endif
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_fgetc
 static int fgetc(FILE *__u_f) {
     unsigned char __u_c;
-    if (fread(&__u_c, 1, 1, __u_f) != 1) return EOF;
+    int __u_i;
+    /* a byte pushed back by ungetc comes out before the descriptor does, and
+       reading it is not an error or an end-of-file [C99 7.19.7.11] */
+    __u_i = _u_st_slot(__u_f);
+    if (__u_i >= 0) {
+        if (_u_st_ung[__u_i] >= 0) {
+            __u_c = (unsigned char)_u_st_ung[__u_i];
+            _u_st_ung[__u_i] = 0 - 1;
+            return (int)__u_c;
+        }
+    }
+    if (fread(&__u_c, 1, 1, __u_f) != 1) {
+        /* the flag feof() reports is set HERE, where the short read happened;
+           without it feof() answered 0 forever.  A successful read clears it
+           [C99 7.19.7.1, 7.19.7.2] */
+        if (__u_i >= 0) _u_st_eof[__u_i] = 1;
+        return EOF;
+    }
+    if (__u_i >= 0) { _u_st_eof[__u_i] = 0; _u_st_err[__u_i] = 0; }
     return (int)__u_c;
 }
+#endif
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_getc
@@ -171,6 +299,56 @@ static int getc(FILE *__u_f) { return fgetc(__u_f); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_getchar
 static int getchar(void) { return fgetc(stdin); }
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_vprintf
+static int vprintf(const char *__u_fmt, va_list __u_ap) {
+    return _u_vfmt(NULL, 0 - 1, NULL, __u_fmt, __u_ap);
+}
+#endif
+
+#if !__UNISA_FTRIM_LIBC || __UN_tmpfile
+/* A file with no name that disappears when it is closed: open it, unlink it
+   immediately, and hand back the stream.  /tmp because the subset has no
+   TMPDIR lookup and every host this compiler targets has one.
+   The name has to be unique without a pid or mkstemp, so it is a counter mixed
+   with rand(); a collision shows up as fopen failing, and then we try again.
+   [R13-0 #06 / N15] */
+#if !__UNISA_FTRIM_LIBC || __UN_tmpfile
+static FILE *tmpfile(void) {
+    static int __u_seq;
+    char __u_p[64];
+    int __u_i; int __u_try;
+    FILE *__u_f;
+    __u_try = 0;
+    while (__u_try < 16) {
+        char __u_pfx[6];
+        int __u_v;
+        __u_pfx[0] = 47; __u_pfx[1] = 116; __u_pfx[2] = 109; __u_pfx[3] = 112; __u_pfx[4] = 47;
+        __u_i = 0;
+        while (__u_i < 5) { __u_p[__u_i] = __u_pfx[__u_i]; __u_i = __u_i + 1; }
+        __u_p[5] = 117; __u_p[6] = 110;                  /* "un" */
+        __u_v = __u_seq + rand();
+        __u_seq = __u_seq + 1;
+        /* _u_digits fills a buffer of 24 from the END and returns where the
+           digits start, so the decimal text lands in __u_d[__u_s..23] */
+        {   char __u_d[24];
+            long __u_s;
+            long __u_j;
+            __u_s = _u_digits(__u_d, (unsigned long)__u_v & 2147483647, 10, 0);
+            __u_j = __u_s;
+            __u_i = 7;
+            while (__u_j < 24) { __u_p[__u_i] = __u_d[__u_j]; __u_i = __u_i + 1; __u_j = __u_j + 1; }
+        }
+        __u_p[__u_i] = 46; __u_p[__u_i + 1] = 116; __u_p[__u_i + 2] = 109; __u_p[__u_i + 3] = 112;
+        __u_p[__u_i + 4] = 0;
+        __u_f = fopen(__u_p, "w+");
+        if (__u_f != NULL) { __unlink(__u_p); return __u_f; }
+        __u_try = __u_try + 1;
+    }
+    return NULL;
+}
+#endif
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fgets
@@ -193,7 +371,15 @@ static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
 #endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_fclose
-static int fclose(FILE *__u_f) { return __close(_unisa_fd(__u_f)); }
+/* The standard streams are not ours to close: `fclose(stdin)` on a POSIX libc
+   is defined to do the work and fail, but closing descriptor 0 here would take
+   the process's input away from every later read. */
+#if !__UNISA_FTRIM_LIBC || __UN_fclose
+static int fclose(FILE *__u_f) {
+    if ((long)__u_f >= _UNISA_STDIO_BASE) return 0;
+    return __close(_unisa_fd(__u_f));
+}
+#endif
 #endif
 /* A FILE * is its descriptor and nothing is buffered, so the file offset
    is the stream's position: fseek and ftell are lseek.  [S-15 D2] */
