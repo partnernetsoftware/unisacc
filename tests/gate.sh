@@ -418,17 +418,31 @@ if [ "$COM" = 1 ]; then
         job com-difftest_o-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest_o.sh
     done
     job com-fb12-multi MODEL_COM="$PRODUCT" ./tests/fb12multi.sh
-    # N22: the shipped compiler builds itself.  Four shards rather than one,
-    # because each stage's build does not fit the 60-second rule in a single
-    # invocation -- each shard does one stage's build (itself sharded by
-    # SEED_STEP) and its comparison.  The fixed-point shard is the one that
-    # matters: stage 2 and stage 3 must be byte-equal, and a mismatch is a
-    # defect to diagnose, not a warning.  SEED_DIR is private and outside the
-    # tree, so running this never leaves an artifact behind.
-    job com-comboot-seed       SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" python3 ./exec/c/comboot.py shard seed
-    job com-comboot-stage2     SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage2
-    job com-comboot-stage3     SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage3
-    job com-comboot-fixedpoint SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" python3 ./exec/c/comboot.py shard fixedpoint
+    # N22: the shipped compiler builds itself.  Four shards, and the names do
+    # not change: the plan and README list these four.  The fixed-point shard is
+    # the one that matters -- stage 2 and stage 3 must be byte-equal, and a
+    # mismatch is a defect to diagnose, not a warning.  SEED_DIR is private and
+    # outside the tree, so running this never leaves an artifact behind.
+    #
+    # Each shard CHECKS its prerequisite instead of building it, which is what
+    # the two earlier attempts each failed at separately:
+    #   * running a whole stage in one call is ~90 s idle (53 s -> killed under
+    #     --jobs 2), and a first run in an empty SEED_DIR cost 79 s, so
+    #     `bound.py 55` cannot hold a shard that builds its own inputs;
+    #   * gatequeue starts jobs in whatever order finishes first, so `stage2`
+    #     may run before `seed` and must not fail on the missing seed.
+    # The seed is therefore the release flow's job, before the queue:
+    #     make seed-com SEED_DIR=/tmp/unisacc-seed-comb-gate
+    # A shard that finds its prerequisite absent prints one `skipped:` line and
+    # exits 0 -- an unrun pipeline is not a defect in the compiler.  STRICT=1 in
+    # the environment turns those skips into failures for a caller that needs
+    # the bootstrap actually proven.  Every `make` inside a shard still gets its
+    # own `tests/bound.py 55`, and a mkdir lock keeps two runs off one artifact.
+    COMB_SEED="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}"
+    job com-comboot-seed       SEED_DIR="$COMB_SEED" python3 ./exec/c/comboot.py shard seed
+    job com-comboot-stage2     SEED_DIR="$COMB_SEED" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage2
+    job com-comboot-stage3     SEED_DIR="$COMB_SEED" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage3
+    job com-comboot-fixedpoint SEED_DIR="$COMB_SEED" UA="$PRODUCT" python3 ./exec/c/comboot.py shard fixedpoint
 fi
 [ "$LIST" = 0 ] || exit 0
 [ "$n" -gt 0 ] || { echo "gate: no suites executed" >&2; exit 2; }

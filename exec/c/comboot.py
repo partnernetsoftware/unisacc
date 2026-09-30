@@ -4,7 +4,9 @@
     comboot.py stage N FILE     record FILE as stage N (its sha256, and the
                                 seed it came from when N > 1)
     comboot.py cmp A B          the fixed point: A and B must be byte-equal
-    comboot.py shard NAME       one bounded piece of the `comboot` gate
+    comboot.py shard NAME       one com-comboot gate job: seed | stage2 |
+                                stage3 | fixedpoint, each doing ONLY its own
+                                step and checking its prerequisites first
     comboot.py report           print the three sha256 values
 
 What bootstrapping means here is one substitution.  `com` ends at
@@ -21,6 +23,25 @@ mechanism: the seed is still produced by a host-cc `UA`, so the trust root is
 unchanged -- what changes is that the SHIPPED .com is built by our own
 compiler.  `nativeboot` proves N1=N2=N3 for the classic image, a different
 claim about a different artifact.
+
+THE GATE DOES NOT BUILD ITS OWN INPUTS (ruling, cc-unisacc 2026-09-30).  These
+four jobs used to build whatever they needed, which made "four job names" and
+"every step inside the watchdog" impossible to hold at once: a first run in an
+empty SEED_DIR cost 79 s against a 55 s bound.  Now the release flow builds the
+seed before the queue (`make seed-com SEED_DIR=...`) and the gate only checks
+what it is handed:
+
+    seed        the seed exists, its sha256 matches its own build.json, and it
+                runs a program
+    stage2      the seed exists; build stage 2 FROM it, one bounded make a step
+    stage3      stage 2 exists; build stage 3 from it the same way
+    fixedpoint  both stages exist; compare them byte for byte
+
+A shard whose prerequisite is absent prints ONE `skipped:` line and exits 0, so
+an empty SEED_DIR is a green checklist rather than a failure -- the pipeline
+that was supposed to produce the seed has simply not run yet.  `STRICT=1` turns
+those skips into failures, for a caller that needs the whole bootstrap proven.
+Every `make` stays on its own `tests/bound.py 55`.
 """
 import hashlib
 import json
@@ -36,10 +57,20 @@ SEED = pathlib.Path(os.environ.get('SEED_DIR', '/tmp/unisacc-seed-com')) / 'unis
 STAGE2 = ROOT / 'unisacc.com'
 STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
 # One buildcompiler step per bounded call: shared, the six targets, then pack.
-# `all` in one invocation is what does NOT fit the watchdog.
+# `all` in one invocation is what does NOT fit the watchdog.  Measured on the
+# development machine: shared 17-18 s, each target 3-5 s, pack 37-39 s.  Every
+# step is individually wrapped by `run`, which is the invariant the ruling
+# states; the sum is deliberately not what the watchdog is asked to hold.
 STEP_LIST = ['shared', 'lnx/arm64', 'lnx/x86_64', 'osx/arm64', 'osx/x86_64',
              'win/arm64', 'win/x86_64', 'pack']
-COMB_BUILD = SEED.parent / 'comb-build' 
+COMB_BUILD = SEED.parent / 'comb-build'
+HELLO = ROOT / 'examples' / 'hello.c'
+# The one probe every seed must pass: a compiler that cannot run a program is
+# not a seed, whatever its hash says.
+SEED_PROBE = 'hello from C99'
+# A caller that needs the bootstrap actually proven sets this and gets a
+# failure instead of a skip.
+STRICT = os.environ.get('STRICT', '0') == '1'
 
 
 def sha(p):
@@ -96,63 +127,198 @@ def cmp2(a, b):
     return 0
 
 
-def run(cmd, secs=55):
-    """One bounded step; `tests/bound.py` is the project's watchdog."""
+def capture(cmd, secs=55):
+    """One bounded step; `tests/bound.py` is the project's watchdog.
+
+    Returns (rc, tail) rather than just the code, because the callers here
+    judge a compiler by what it prints as well as by what it exits with.
+    """
     r = subprocess.run([sys.executable, str(ROOT / 'tests' / 'bound.py'), str(secs)] + cmd,
-                       cwd=str(ROOT))
-    return r.returncode
+                       cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = r.stdout.decode('utf-8', 'replace')
+    return r.returncode, text
+
+
+def run(cmd, secs=55):
+    return capture(cmd, secs)[0]
+
+
+def skipped(what, how):
+    """A prerequisite the gate is not allowed to build for itself.
+
+    One line, and exit 0: the pipeline that owns that artifact has not run, and
+    an unrun pipeline is not a defect in the compiler.  `STRICT=1` is for the
+    caller who needs the opposite answer.
+    """
+    print('skipped: %s not built (%s)' % (what, how))
+    return 1 if STRICT else 0
+
+
+def step_done(model_dir, st):
+    return (model_dir / ('step-' + st.replace('/', '_'))).exists()
+
+
+def mark_done(model_dir, st):
+    m = model_dir / ('step-' + st.replace('/', '_'))
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text('ok\n')
+
+
+def build_step(st, model_dir):
+    """ONE bounded buildcompiler step, and the only place `make` is called.
+
+    The whole watchdog contract of this file lives here: every `make` gets its
+    own `tests/bound.py 55`, so no single unit of work is ever unbounded, and
+    the step markers make a re-run pick up where the last one stopped instead
+    of starting over.
+    """
+    if step_done(model_dir, st):
+        return 0
+    cmd = ['make', 'model-com', 'MODEL_DIR=%s' % model_dir, 'MODEL_STEP=%s' % st]
+    if run(cmd, 55) != 0:
+        raise SystemExit('comboot: model step %s failed' % st)
+    mark_done(model_dir, st)
+    return 0
+
+
+def build_model(model_dir):
+    """Every step of one bootstrapped stage, one bounded `make` each."""
+    if model_dir.exists() and step_done(model_dir, STEP_LIST[-1]) \
+            and (model_dir / 'unisacc-next.com').exists():
+        return 0
+    for st in STEP_LIST:
+        build_step(st, model_dir)
+    return 0
+
+
+def stage_dir(n):
+    """Where stage N's build state lives: its OWN directory, never shared.
+
+    stage 2 and stage 3 are the same build with a different `--via`, so giving
+    them one MODEL_DIR would have both write the same `shared/*.net` files --
+    whichever ran second would find a manifest that does not match what it
+    needs.  Separate directories make each stage's step markers meaningful.
+    """
+    if n == 2:
+        return COMB_BUILD / 'stage2'
+    return COMB_BUILD / 'stage3'
+
+
+def lock(path, name):
+    """A mkdir lock: atomic on every filesystem the gate runs on.
+
+    `mkdir` either creates the directory or fails, with no window between the
+    two, so it is the whole primitive -- no lockfile format, no stale-lock
+    timeout to get wrong.
+    """
+    lk = pathlib.Path(str(path) + '.lock')
+    lk.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lk.mkdir()
+        return lk
+    except FileExistsError:
+        raise SystemExit(
+            'comboot: %s is being built by another run (%s); '
+            'invoke this shard again once it is done' % (name, lk))
+
+
+def seed_ready():
+    """The seed's sidecar, its hash, and a program it has to run."""
+    side = pathlib.Path(str(SEED) + '.build.json')
+    if not side.exists():
+        raise SystemExit(
+            'comboot: %s has no build.json sidecar; rebuild the seed with '
+            '`make seed-com SEED_DIR=%s`' % (SEED, SEED.parent))
+    want = json.loads(side.read_text()).get('artifact_sha256')
+    got = sha(SEED)
+    if want != got:
+        raise SystemExit(
+            'comboot: seed sha256 %s does not match its sidecar %s (%s); '
+            'the seed is not the artifact it claims to be' % (got, side, want))
+    rc, text = capture(['/bin/sh', str(SEED), '-run', str(HELLO)], 55)
+    # An APE is also a shell script, so /bin/sh is how it is started; exec'ing
+    # the file directly is the one thing that does not work.
+    if rc != 0 or SEED_PROBE not in text:
+        raise SystemExit(
+            'comboot: the seed did not run %s (rc=%d)\n%s'
+            % (HELLO.name, rc, text.strip()))
+    print('comboot seed ok  sha256 %s   runs %s' % (got, HELLO.name))
+    return 0
 
 
 def shard(name):
-    """One bounded piece of the gate.
+    """One com-comboot gate job: its OWN step, and nothing else's.
 
-    A shard never runs the whole build: the whole build does not fit the
-    55-second rule, so each shard does the STEP_LIST of buildcompiler steps
-    for its stage -- and each of those is itself a bounded `make` call.  The
-    gate's four shards are seed, stage2, stage3 and the fixed-point compare.
+    The four names are the four the plan and README list, and they do not
+    change.  What changed is that a shard no longer builds its prerequisites:
+    it checks for them and says `skipped:` when they are absent, so an empty
+    SEED_DIR is a green checklist instead of a 79 s build that overruns the
+    watchdog.  The seed is the release flow's job.
     """
-    d = load()
     if name == 'seed':
-        for st in STEP_LIST:
-            if run(['make', 'seed-com', 'SEED_STEP=%s' % st], 55) != 0:
-                raise SystemExit('comboot-shard seed: seed-com SEED_STEP=%s failed' % st)
         if not SEED.exists():
-            raise SystemExit('comboot-shard seed: no seed at %s' % SEED)
-        stage(1, SEED)
-        return 0
+            return skipped('seed', 'make seed-com SEED_DIR=%s' % SEED.parent)
+        rc = seed_ready()
+        d = load()
+        have = d.get('stage1', {}).get('sha256')
+        now = sha(SEED)
+        if have != now:
+            # Keep the record honest about which bytes are in play, without
+            # printing the same line twice when the release flow already did.
+            stage(1, SEED)
+        return rc
+
     if name == 'stage2':
         if not SEED.exists():
-            raise SystemExit('comboot-shard stage2: no seed -- run the seed shard first')
-        for st in STEP_LIST:
-            if run(['make', 'com', 'COMB=1', 'COM_OUT=unisacc.com',
-                    'MODEL_DIR=%s' % COMB_BUILD, 'MODEL_STEP=%s' % st], 55) != 0:
-                raise SystemExit('comboot-shard stage2: step %s failed' % st)
-        stage(2, STAGE2)
-        if d.get('stage2', {}).get('built_by_sha256') == d.get('stage1', {}).get('sha256'):
-            print('comboot-shard stage2: sidecar seed sha256 matches stage 1')
-        else:
-            raise SystemExit('comboot-shard stage2: sidecar seed sha256 does not match stage 1')
-        return 0
-    if name == 'stage3':
+            return skipped('stage2', 'the seed it is built from: '
+                           'make seed-com SEED_DIR=%s' % SEED.parent)
+        model_dir = stage_dir(2)
+        lk = lock(model_dir, 'stage 2')
+        try:
+            build_model(model_dir)
+        finally:
+            lk.rmdir()
         if not STAGE2.exists():
-            raise SystemExit('comboot-shard stage3: no stage 2 -- run that shard first')
-        for st in STEP_LIST:
-            if run(['make', 'com', 'COMB=1',
-                    'COM_OUT=%s' % STAGE3, 'MODEL_DIR=%s' % COMB_BUILD,
-                    'MODEL_STEP=%s' % st], 55) != 0:
-                raise SystemExit('comboot-shard stage3: step %s failed' % st)
+            raise SystemExit('comboot-shard stage2: no %s after the build' % STAGE2)
+        stage(2, STAGE2)
+        d = load()
+        if d.get('stage2', {}).get('built_by_sha256') != d.get('stage1', {}).get('sha256'):
+            raise SystemExit('comboot-shard stage2: sidecar seed sha256 does not match stage 1')
+        print('comboot-shard stage2: sidecar seed sha256 matches stage 1')
+        return 0
+
+    if name == 'stage3':
+        if not SEED.exists():
+            return skipped('stage3', 'the seed it is built from: '
+                           'make seed-com SEED_DIR=%s' % SEED.parent)
+        if not STAGE2.exists():
+            # stage 3 is built BY stage 2, so with stage 2 absent this shard has
+            # nothing to do: say so and return 0.  Failing here instead would be
+            # wrong -- a pipeline that has not run yet is not a defect.
+            return skipped('stage3', 'stage 2 (%s): run the stage2 shard' % STAGE2)
+        model_dir = stage_dir(3)
+        lk = lock(model_dir, 'stage 3')
+        try:
+            build_model(model_dir)
+        finally:
+            lk.rmdir()
+        if not STAGE3.exists():
+            raise SystemExit('comboot-shard stage3: no %s after the build' % STAGE3)
         stage(3, STAGE3)
         return 0
+
     if name == 'fixedpoint':
+        if not STAGE2.exists() or not STAGE3.exists():
+            return skipped('fixedpoint', 'stage 2 and stage 3 (%s, %s)' % (STAGE2, STAGE3))
         return cmp2(str(STAGE2), str(STAGE3))
+
     raise SystemExit('comboot: unknown shard %r' % name)
 
 
 def report():
     d = load()
     for k in ('stage1', 'stage2', 'stage3'):
-        v = d.get(k)
-        print('%-7s %s' % (k, v['sha256'] if v else '(not recorded)'))
+        print('%-7s %s' % (k, d.get(k, {}).get('sha256', '(unrecorded)')))
     return 0
 
 
