@@ -226,16 +226,13 @@ poscase() {  # poscase <file> <want line:col> <what must also appear> [<driver>]
     esac
 }
 red=$R/tests/c
-# 04: not covered, and the position is the assignment
-if [ "$(basename "$UA")" != ua_ref ]; then
-    # 04 is a product-only defect: the reference and cc both exit 22 where the
-    # product refuses with `not covered: width` (same shape as R13-0 03/05).
-    poscase "$red/fb12-04-deref-struct-assign.c" "13:12" "not covered"
-fi
-# 05: a declined construct reports the declaration.  It does NOT yet name the
-# construct (it says `expected ';'` where it means "2-D VLA unsupported"), so
-# the second field cannot ask for "VLA" until N4 lands.
-poscase "$red/fb12-05-vla-2d.c" "9:13" "error:"
+# 04 and 05 used to be here, asking for the position of a diagnostic.  Both
+# constructs are now SUPPORTED on dev5 -- `*pp = b` and `*pp = mk(11)` compile,
+# `int m[n][4]` compiles -- and both programs run to the same exit status as
+# gcc (22 and 8, which are their return values).  There is no diagnostic left
+# to locate, so the assertion lost its subject; the probes stay in tests/c as
+# red examples for the difftest ledgers, and their positions are no longer
+# this suite's business.
 # 11/29: the `reject: not covered:` shape, which carried no position at all
 poscase "$red/fb12-11-comment-then-continuation.c" "10:1" "not covered"
 poscase "$red/fb12-29-macro-more-than-8-params.c" "12:1" "not covered"
