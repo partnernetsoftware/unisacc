@@ -7,6 +7,16 @@
 # built so that accidental sharing would be VISIBLE -- both units define
 # `hidden` and `helper` at file scope, with different values -- and so that
 # the units really do have to meet: unit two writes unit one's global.
+#
+# `fwd.h`/`fwd1.c`/`fwd2.c` are a second fixture for one specific defect
+# (R13-0b, the `multi` gate): a header whose static functions call one another
+# FORWARD, included by ONE unit, run in BOTH orders.  A file-scope `static`
+# used to be registered when its DEFINITION was reached, so a forward reference
+# in the header's first function was spelled without its unit suffix while the
+# label carried it -- `fwd1 fwd2` passed and `fwd2 fwd1` reported
+# `undefined function`.  libc's stdio.h has that shape (printf -> _u_vfmt ->
+# _u_digits), which is why the failure needed a unit that includes it and is
+# not the first.  The fix registers the unit's statics BEFORE it is walked.
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 D=$R/tests/multi
