@@ -46,7 +46,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 |---|---|---|
 | v0.0.12 | [archive/plans/v0.0.12.md](archive/plans/v0.0.12.md) — 计划树 R12-0..R12-7 与逐项回执（已发布 2026-09-30，归档） | 已发布 |
 | v0.0.13 | [archive/plans/v0.0.13.md](archive/plans/v0.0.13.md) — 计划树 L0–L5/N0–N22 与逐项回执（R13-0 六例、R13-0b 25 条、N22 产物谱系、门禁队列方法）；状态叙事全文见 [archive/prd-history-20260930.md](archive/prd-history-20260930.md) | 已发布 2026-09-30（tag 3af8b36；公开 unisacc.com 75c698ec… 与 dmg；回执 research/r13-release-acceptance.json） |
-| v0.0.14 | [plans/v0.0.14.md](plans/v0.0.14.md) — 草案（不急开工）：#21 六参数间接调用（callm，cdx 已开工）、缺失库体 L1、构建/门禁方法债（comboot 闭包、pack 拆分、gatedeps 干净检出）、`#line`、0.0.13 顺延承接 | 草案 |
+| v0.0.14 | [archive/plans/v0.0.14.md](archive/plans/v0.0.14.md) — #21 callm、8 个 L1 库体、#line、tapebin v1 端到端、C99 条款账本（语言 96%）、流水线方法债、R14-8 6/8 | 已发布 2026-09-30（tag 75ec4de；公开 unisacc.com c229cebf… 与 dmg；回执 research/r14-release-acceptance.json） |
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
