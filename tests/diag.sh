@@ -187,8 +187,8 @@ printf "  damaged corpus: %d diagnosed cleanly, %d hung or crashed\n" "$dmg" "$d
 # below is a real red example, and the expected line is the one the marker
 # line sits on in the file as written.
 pos_ok=0; pos_bad=0; pos_known=0; pos_revived=0
-poscase() {  # poscase <file> <want line:col> <what must also appear> [<driver>]
-    local f=$1 want=$2 text=$3 driver=${4:-ua}
+poscase() {  # poscase <file> <want line:col> <what must also appear> [<driver>] [<ledger key>]
+    local f=$1 want=$2 text=$3 driver=${4:-ua} key=${5:-}
     local got
     # the product is tinycc-shaped: the file comes AFTER -O2 and `-run` closes
     # the line (difftest_o.sh:68).  Getting this wrong makes the compiler
@@ -196,10 +196,18 @@ poscase() {  # poscase <file> <want line:col> <what must also appear> [<driver>]
     # this block first reported three failures that were its own.
     if [ "$driver" = ua ]; then
         got=$("$_BOUND" 30 "$UA" -O2 "$f" -run 2>&1 | head -1)
+    elif [ "$driver" = builtin ]; then
+        # a fixture directory: drive it the way fb12multi.sh does, or the case
+        # tests something else entirely (this is the mistake the block above
+        # records -- three phantom failures from the wrong command line)
+        local dd; dd="$(cd "$(dirname "$f")" && pwd)"
+        got=$(cd "$dd" && "$_BOUND" 45 sh -c "UC='$UA'; $(cat build 2>/dev/null || cat run)" 2>&1 | grep -m1 . )
     else
         got=$("$_BOUND" 30 python3 -m unisa run "$f" --drive built 2>&1 | head -1)
     fi
-    local name="$(basename "$f" .c)"
+    # a fixture directory's source is main.c, and every one of them is main.c;
+    # the ledger names the FIXTURE, so those cases pass their key explicitly
+    local name; if [ -n "$key" ]; then name="$key"; else name="$(basename "$f" .c)"; fi
     case "$got" in
         *"$(basename "$f"):$want"*"$text"*)
             pos_ok=$((pos_ok+1))
@@ -242,6 +250,35 @@ poscase "$red/fb12-29-macro-more-than-8-params.c" "12:1" "not covered"
 # asserted only against the driver whose contract covers it; asserting all
 # three everywhere would make each route fail on the other route's gap.
 poscase "$red/fb12-31-unused-static-refs-undefined.c" "12:41" "undefined function"
+# The fixtures, and the cases that are not compiler diagnostics at all.
+# Each asks the SAME question the block above asks -- does the message begin
+# with the user's file and line -- and each answers "no" on the product today,
+# so each is listed in diag.com.knownfail.  They are here rather than in a
+# comment because N8's rule is a rule: a required thing that nothing checks is
+# a wish.  The set comes from running every ledger entry on the candidate and
+# sorting by whether the message had a position (plans, N8 section).
+#
+# These five are PRODUCT-side gaps only: on the reference route every one of
+# them compiles and runs, so asking the reference for a diagnostic would fail
+# for the right reason in the wrong place.  That is the same two-ledger
+# problem the top of this file describes -- and the same answer: guard the
+# block, as the product-only 04/05 cases above already do.
+if [ "$(basename "$UA")" != ua_ref ]; then
+# 28: multi-unit static declarator                       exec/parse2/units-reject.tsv
+poscase "$R/tests/fb12/28-anon-struct-static-multiunit/main.c" "6:1" "multi-unit static declarator" builtin "28-anon-struct-static-multiunit"
+# 21's product side reports something the reference does not, and without a
+# position where the reference has one             exec/parse2/callcontrol-result.tsv
+poscase "$red/fb12-21-indirect-call-six-args.c" "16:27" "six indirect register"
+# 35/36: `#if` over a function-like unknown identifier      exec/pp/ (expression)
+poscase "$R/tests/fb12/35-has-feature/main.c" "18:1" "not covered" builtin "35-has-feature"
+poscase "$R/tests/fb12/36-if-has-feature-toplevel/main.c" "12:1" "not covered" builtin "36-if-has-feature-toplevel"
+# 34: the arm64 encoder's fallback.  cc-unisacc is adding the rejected line's
+# text on dev6, which is what this asks for                    exec/enc/arm.py
+poscase "$R/tests/fb12/34-arm64-fallback/main.c" "1:1" "ARM64 operand" builtin "34-arm64-fallback"
+# 24: the executor rather than a stage table -- exec/c/run.c:437 -- and the
+# file it should name is the one the user wrote, not the executor
+poscase "$R/tests/fb12/24-nested-quoted-include/lib/sub/main.c" "5:1" "include" builtin "24-nested-quoted-include"
+fi
 if [ "$(basename "$UA")" = ua_ref ]; then
     # the classic reference build has the 07 position; the product does not
     poscase "$red/fb12-07-missing-header-diag.c" "5:11" "no such file for #include"
