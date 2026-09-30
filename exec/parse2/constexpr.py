@@ -23,6 +23,8 @@ def install(E, P, levels, ops, enum_values, enum_defined):
         sequences[name] = getattr(p, method)(*slots.split(",")).acts
     tokens = dict(E.TK, identifier=E.TK_ID, number=E.TK_NUM)
     classes = {name: [tokens[token]] for name, token in rows("tokens")}
+    # a cast or sizeof(TYPE) inside a constant expression starts with a type word or a tag keyword
+    classes["typeword"] = sorted({tokens[w] for w in tokens if w.startswith("type")} | {tokens["struct"], tokens["union"], tokens["enum"]})
     fresh = rows("fresh")
     def emit(section, bindings):
         for part, prefix, kind, key in fresh:
