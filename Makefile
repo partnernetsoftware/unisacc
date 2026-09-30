@@ -28,9 +28,18 @@ OPT    ?= 2
 # Explicit model build stages never overwrite the default shipped artifact.
 MODEL_DIR  ?=
 MODEL_STEP ?=
+# N22: the seed and the bootstrap fixed point.  SEED_DIR is private, like
+# MODEL_DIR -- a seed is a build input, not an artifact we ship.  COMB=1 makes
+# `com` use unisacc-seed.com where it would have used $(UA), which is the
+# whole of what bootstrapping means on this line: buildcompiler.sh's last step
+# is `python3 -m unisa ape ... --via "$UA" ...`, and nothing else changes.
+SEED_DIR  ?= /tmp/unisacc-seed-com
+SEED_STEP ?=
+COMB      ?= 0
+COM_OUT   ?= unisacc.com
 
 .PHONY: help quick test com release linux bench acc weights clean ref \
-        c99 closure corpus classic-com model-com
+        c99 closure corpus classic-com model-com seed-com com3 comboot
 
 help:
 	@sed -n '13,19p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
@@ -77,15 +86,44 @@ weights:
 # point of a compiler that writes all six itself.  CI tests; it does not
 # build.
 com:
-	@UA="$(UA)" python3 tests/bound.py 60 sh -ec '\
+	@UA="$(if $(filter 1,$(COMB)),$(SEED_DIR)/unisacc-seed.com,$(UA))" \
+	 python3 tests/bound.py 60 sh -ec '\
 	    out="$(if $(MODEL_DIR),$(MODEL_DIR),out/model-com)"; \
+	    dst="$(COM_OUT)"; \
 	    ./exec/c/buildcompiler.sh "$$out"; \
-	    tmp=$$(mktemp ./unisacc.com.XXXXXX); \
+	    tmp=$$(mktemp ./"$$dst".XXXXXX); \
 	    trap "rm -f \"$$tmp\"" EXIT HUP INT TERM; \
 	    cp "$$out/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
-	    mv -f "$$tmp" unisacc.com; \
-	    cp "$$out/unisacc-next.com.build.json" unisacc.com.build.json; \
-	    python3 exec/c/provenance.py check unisacc.com'
+	    mv -f "$$tmp" "$$dst"; \
+	    cp "$$out/unisacc-next.com.build.json" "$$dst.build.json"; \
+	    python3 exec/c/provenance.py check "$$dst"'
+
+# N22 stage 1: the seed, built by $(UA) exactly as `com` builds today.  It is
+# never shipped; its only job is to be the compiler that builds stage 2.
+seed-com:
+	@UA="$(UA)" python3 tests/bound.py 55 sh -ec '\
+	    ./exec/c/buildcompiler.sh "$(SEED_DIR)" $(SEED_STEP); \
+	    [ -s "$(SEED_DIR)/unisacc-next.com" ] || { echo "seed-com: no artifact (run SEED_STEP=pack last)" >&2; exit 1; }; \
+	    dst="$(SEED_DIR)/unisacc-seed.com"; \
+	    tmp=$$(mktemp "$$dst".XXXXXX); \
+	    trap "rm -f \"$$tmp\"" EXIT HUP INT TERM; \
+	    cp "$(SEED_DIR)/unisacc-next.com" "$$tmp"; chmod +x "$$tmp"; \
+	    mv -f "$$tmp" "$$dst"; \
+	    cp "$(SEED_DIR)/unisacc-next.com.build.json" "$$dst.build.json"; \
+	    python3 exec/c/provenance.py check "$$dst"; \
+	    python3 exec/c/comboot.py stage 1 "$$dst"'
+
+# N22 stage 3: built BY stage 2, into SEED_DIR/stage3/.  Only its bytes matter;
+# it is never shipped.  `make comboot` runs all three stages and the cmp.
+com3:
+	@$(MAKE) --no-print-directory com COMB=1 COM_OUT="$(SEED_DIR)/stage3/unisacc.com"
+	@python3 tests/bound.py 55 exec/c/comboot.py cmp "$(COM_OUT)" "$(SEED_DIR)/stage3/unisacc.com"
+
+comboot:
+	@python3 tests/bound.py 55 exec/c/comboot.py shard seed
+	@python3 tests/bound.py 55 exec/c/comboot.py shard stage2
+	@python3 tests/bound.py 55 exec/c/comboot.py shard stage3
+	@python3 tests/bound.py 55 exec/c/comboot.py shard fixedpoint
 
 classic-com: ref
 	@mkdir -p out
