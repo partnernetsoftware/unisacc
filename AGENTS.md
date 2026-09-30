@@ -27,7 +27,8 @@
 
 ## 协作
 
-- 新知识和决定先写进 `prd.md`，再做别的；`prd.md` 是主上下文文件。
+- 新知识和决定先写进 `prd.md`，再做别的；`prd.md` 是主上下文文件（当前状态、架构、路线、问题索引），条款全文在 `spec.md`（编号稳定，只增不改）。
+- **一律在 main 上开发**，不用分支或工作树（主人 2026-09-30）；共享主检出时只提交自己的路径，冲突细心解决。
 - 提交一律带路径：`git commit -m … -- 路径`。别人已暂存的文件不能被顺带提交。
 - 改代码用精确匹配加断言的 Python 替换，不用 `sed`；`os.path.exists` 会把 ENOTDIR/EACCES 当成“不存在”，要用 `stat` 并只捕获 `FileNotFoundError`。
 
@@ -70,7 +71,7 @@
 
 `./tests/gate.sh --list [--com]` 列出门禁；用 `./tests/gate.sh [--com] --suite NAME [--suite NAME...]` 分批执行。每批整体和每个套件最多 60 秒，超时清理所属子进程；不要把全部套件塞进一次后台运行。`--com` 包含出货的 `unisacc.com` 套件。完整验证要求所有列出的套件各通过一次；单批通过不等于全套通过。
 
-推荐使用滚动队列：`./tests/term.sh env MODEL_COM=./unisacc.com python3 tests/gatequeue.py --state /tmp/本轮队列 --com --jobs 2`。每次调度窗口最多 55 秒，退出 75 表示尚有待办，用同一命令续跑；退出 0 才表示清单全通过，1 表示失败。结果逐项保存并实时打印，输入变更会拒绝复用旧结果。准备模型按输入内容哈希共享，缓存命中仍检查产物哈希；测试结果不跨源码变化复用。
+推荐使用滚动队列：发布验收只用 `tests/release.sh --com`（jobs 4、window 50，经 `tests/term.sh env …` 传 UA/MODEL_COM/SEED_DIR/GATE_STATE）；日常可 `./tests/term.sh env UA=… MODEL_COM=… python3 tests/gatequeue.py --state /tmp/本轮队列 --com --jobs 4`。完整发布命令序列见 `release/RELEASE-PIPELINE.md` §9。每次调度窗口最多 55 秒，退出 75 表示尚有待办，用同一命令续跑；退出 0 才表示清单全通过，1 表示失败。结果逐项保存并实时打印，输入变更会拒绝复用旧结果。准备模型按输入内容哈希共享，缓存命中仍检查产物哈希；测试结果不跨源码变化复用。
 
 ## 构建与发布
 
@@ -96,4 +97,4 @@
 
 ## 模型迁移：exec/
 
-`exec/` 是 S-17 迁移（见 prd.md）：每个编译阶段做成一个有限 δ，由通用执行器运行，与现有编译器（行为参考）逐字节对拍。`exec/pipeline/run.py FILE` 按 `exec/pipeline/stages.tsv` 把各阶段串起来；`exec/stamp.sh` 重建输入变过的生成物，**不要信 /tmp 里缓存的文件**。δ **接受**了输入却与参考不同，就是 bug；不能精确匹配的，必须拒绝并报“未覆盖”。
+`exec/` 是 S-17 迁移（见 spec.md）：每个编译阶段做成一个有限 δ，由通用执行器运行，与现有编译器（行为参考）逐字节对拍。`exec/pipeline/run.py FILE` 按 `exec/pipeline/stages.tsv` 把各阶段串起来；`exec/stamp.sh` 重建输入变过的生成物，**不要信 /tmp 里缓存的文件**。δ **接受**了输入却与参考不同，就是 bug；不能精确匹配的，必须拒绝并报“未覆盖”。
