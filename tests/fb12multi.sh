@@ -39,6 +39,15 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # its line -- the same contract as tests/c99.knownfail and the two difftest
 # lists.
 #
+# tests/fb12.knownfail describes THE PRODUCT ROUTE ONLY.  This suite is a
+# product gate: gate.sh lists it under --com, and `$UC` defaults to the shipped
+# unisacc.com.  Pointed at a reference compiler by hand (MODEL_COM=... ) it is
+# a debugging tool, not a gate, and `revived` there is a hint rather than a
+# failure -- the listed fixtures include defects the reference never had
+# (35-has-feature is exactly that: the reference is right, the product is not).
+# Unlike difftest, which carries two lists and picks one by whether UA is set,
+# one list is correct here because only one of the two routes is a gate.
+#
 # Usage:  fb12multi.sh [NAME...]        (default: every fixture)
 #         MODEL_COM=... fb12multi.sh    (default ./unisacc.com)
 set -u
