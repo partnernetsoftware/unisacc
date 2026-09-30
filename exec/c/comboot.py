@@ -210,6 +210,20 @@ def step_manifest(model_dir, st):
     return model_dir / step_name(st) / 'manifest.json'
 
 
+def install(model_dir, dest):
+    """Put the stage's artifact where the plan says it lives (ROOT/unisacc.com for
+    stage 2, SEED_DIR/stage3/unisacc.com for stage 3), with its build.json sidecar,
+    by tmp + rename so a reader sees the old file or the new one, never half."""
+    src = model_dir / 'unisacc-next.com'
+    if not src.exists():
+        raise SystemExit('comboot: no %s after the build' % src)
+    dest = pathlib.Path(dest); dest.parent.mkdir(parents=True, exist_ok=True)
+    for a, b in ((src, dest), (pathlib.Path(str(src) + '.build.json'), pathlib.Path(str(dest) + '.build.json'))):
+        tmp = pathlib.Path(str(b) + '.tmp.%d' % os.getpid())
+        tmp.write_bytes(a.read_bytes()); tmp.chmod(0o755 if a is src else 0o644); os.replace(tmp, b)
+    return dest
+
+
 def step_done(model_dir, st):
     """Whether this step's artifacts are present AND from the current sources."""
     manifest = step_manifest(model_dir, st)
@@ -344,7 +358,9 @@ def shard(name):
         model_dir = stage_dir(2)
         lk = lock(model_dir, 'stage 2')
         try:
+            os.environ['UA'] = str(SEED)          # stage 2 is the seed compiling the source
             build_model(model_dir)
+            install(model_dir, STAGE2)
         finally:
             lk.rmdir()
         if not STAGE2.exists():
@@ -368,7 +384,9 @@ def shard(name):
         model_dir = stage_dir(3)
         lk = lock(model_dir, 'stage 3')
         try:
+            os.environ['UA'] = str(STAGE2)        # stage 3 is stage 2 compiling the same source
             build_model(model_dir)
+            install(model_dir, STAGE3)
         finally:
             lk.rmdir()
         if not STAGE3.exists():
