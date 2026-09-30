@@ -26,7 +26,8 @@ def main():
     p = R / 'tests/gatedeps.json'; d = json.loads(p.read_text())
     trees = sorted({t for e in d['families'].values() for t in (e.get('reviewed_trees') or {})})
     with tempfile.TemporaryDirectory(prefix='unisacc-gatedeps-') as tmp:
-        blob = subprocess.run(['git', 'archive', '--format=tar', 'HEAD'] + trees, cwd=R, check=True, capture_output=True, timeout=60).stdout
+        blob = subprocess.run(['git', '-c', 'tar.umask=022', 'archive', '--format=tar', 'HEAD'] + trees,   # git's default archive umask is 002 (0664 files); a checkout has 0644/0755
+                           cwd=R, check=True, capture_output=True, timeout=60).stdout
         with tarfile.open(fileobj=io.BytesIO(blob)) as tf: tf.extractall(tmp, filter='fully_trusted')
         changed = []
         for fam, entry in d['families'].items():
