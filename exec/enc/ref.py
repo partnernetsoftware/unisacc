@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The referee for the x86_64 encoder slices (research/e5-slice.md): the TIns text
+"""The referee for the x86_64 encoder slices (docs/exec/e5-slice.md): the TIns text
 (exec/enc/tins.py) through unisa/assemble.py -- its relaxation rounds and
 unisa/emit_x86.encode; every instruction must encode (encoded == insns: no UD2
 placeholder), the bytes on stdout.  A branch or call without reloc gets rel32:

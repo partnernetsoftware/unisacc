@@ -57,7 +57,7 @@ they do not claim native qualification on all six targets.
 
 The stage is integrated into the development package and paired registry.
 Actual public native qualification of these natural scalar union rules is
-recorded separately in research/r10-natural-union-public-evidence.json.
+recorded separately in archive/research/r10/r10-natural-union-public-evidence.json.
 Six rule rows are not evidence of six native platforms passing; general
 aggregate/bitfield/wide-FP and BANK support remain unfinished.
 

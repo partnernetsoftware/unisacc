@@ -81,7 +81,7 @@ Final 189-item local acceptance is pending; old 179-item results do not
 transfer. E2 off/on 312/312 match the fresh classic reference; current
 model-built procview ran on Linux arm64. Windows one-pass checks remain mocks
 and Linux x86-64 has not run this round. v0.0.9 is not published.
-See [current structure audit](../research/r9-pipeline-structure-20260928.json)
+See [current structure audit](../archive/research/r9/r9-pipeline-structure-20260928.json)
 and [physical byte accounting](../prd.md#model-function-bytes).
 
 Prune is assigned to cc-unisacc and awaits implementation; the current route
@@ -93,7 +93,7 @@ The former `85eaeb9` / `9a0ae470` candidate, its 6,279,167-byte container,
 171-item gate, fixed-package driver bootstrap and older timing samples are
 historical snapshots. Their full records remain in the
 [S-17 archive](../archive/s17-migration-log-20260928.md) and
-[original final evidence](../research/s17-final-evidence.json). Their results do
+[original final evidence](../archive/research/20260928/s17-final-evidence.json). Their results do
 not validate the current artifact; fixed-package driver self-hosting does not
 prove reconstruction of networks, the package or APE container.
 

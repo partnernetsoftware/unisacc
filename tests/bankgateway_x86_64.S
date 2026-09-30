@@ -1,4 +1,4 @@
-/* SysV x86_64 register-bank gateway (R12-1 ①, design research/r11-bank-design.md §3).
+/* SysV x86_64 register-bank gateway (R12-1 ①, design archive/research/r11/r11-bank-design.md §3).
    void us_bank_call_x86_64(const BankFrame *f, void *fn)
    BankFrame layout (bytes):
      0   gp[8]       (rdi rsi rdx rcx r8 r9 used; 6..7 ignored)

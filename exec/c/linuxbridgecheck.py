@@ -35,7 +35,7 @@ BR=re.compile(r"^(j\w+|b\w*|call\w*|bl|br|ret|cbz|cbnz|tbz|tbnz)$")
 def insns(objdump,path):
     """Instructions of an object, normalised for ELF vs Mach-O comparison: drop
     branch targets (rel8 vs rel32), symbol annotations and the '//' vs ';' comment
-    marker.  Rationale: research/r12-linuxbridgecheck-diagnosis.md."""
+    marker.  Rationale: archive/research/r12/r12-linuxbridgecheck-diagnosis.md."""
     out=subprocess.run(list(map(str,[objdump,'-d',path])),capture_output=True,timeout=15).stdout.decode()
     r=[]
     for l in out.splitlines():

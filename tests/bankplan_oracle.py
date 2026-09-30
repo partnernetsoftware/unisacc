@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent oracle for register-bank call plans (R12-1 ①, design: research/r11-bank-design.md).
+"""Independent oracle for register-bank call plans (R12-1 ①, design: archive/research/r11/r11-bank-design.md).
 
 A plan says, for one prototype on one profile, how each argument's bytes move into the
 GP bank, the FP bank or the stack image, and how the result is captured. This oracle is

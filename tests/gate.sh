@@ -378,7 +378,7 @@ job tapebin-shape python3 -m unisa.tapebin_shape --check
 job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job gate-infra python3 ./tests/queuecheck.py
-# R12-0 ③b: checks that were in no gate at all (research/r12-ungated-checks.tsv).
+# R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that
 # print a Usage line and the one that fails on this HEAD are NOT here -- see the
 # tsv.  all.sh is deliberately unchanged.
@@ -396,7 +396,7 @@ job exec-formats python3 ./exec/pipeline/run.py examples/hello.c
 # The last check that was in no gate AND failing on this HEAD: it cross-assembles
 # librarycall_<arch>.S for a Linux target and an Apple target and requires the
 # same instruction stream.  It failed for a year of commits' worth of reasons
-# that were not drift -- see research/r12-linuxbridgecheck-diagnosis.md.
+# that were not drift -- see archive/research/r12/r12-linuxbridgecheck-diagnosis.md.
 job exec-bridge-linux python3 ./exec/c/linuxbridgecheck.py
 job windows-resolver-host python3 ./tests/windowsresolverhostcheck.py
 if [ "$COM" = 1 ]; then

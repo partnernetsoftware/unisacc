@@ -172,7 +172,7 @@ Apple公司签名与公证仍属于0.0.9交付；Windows延期不改变此范围
 签名已成功，签后app实际 `--version`/`-run hello` 通过。Apple对app ZIP及DMG均返回
 Accepted；app/DMG均已staple并验证，Gatekeeper均为Notarized Developer ID。
 完整载荷、launcher及DMG SHA和资格边界见
-[公开资格回执](../research/r9-apple-signing-qualification-20260928.json)。
+[公开资格回执](../archive/research/r9/r9-apple-signing-qualification-20260928.json)。
 
 资格回执仍为 `release_eligible=false`：尚需最终冻结门禁、签后确切分发资产的
 编译/`-run`/包读取与系统API检查、quarantine和各平台运行证据及主人Promotion。

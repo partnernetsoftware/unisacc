@@ -4,7 +4,7 @@
                                                  # or a diagnostic on stderr, exit 1
 
 The executor knows nothing about C.  Machine: research/delta-framework.md s2,
-extended as research/e2-pp-delta.md s3 says:
+extended as docs/exec/e2-pp-delta.md s3 says:
 
   obs = (q, r, b, t): b = byte of the TOP reader frame at its cursor, or EOF
   (256) at that frame's end; t = control-stack top (a return label, or BOT).
@@ -46,7 +46,7 @@ Every action (and nothing else runs):
 ALU ops: add sub mul div rem and or xor shl sar (int32; div/rem truncate
 toward zero, x/0 = 0, x%0 = 0, INT_MIN/-1 = INT_MIN, INT_MIN%-1 = 0; shift
 count taken mod 32).
-64-bit (added for #if; research/e2-pp-delta.md s11.1; old actions unchanged):
+64-bit (added for #if; docs/exec/e2-pp-delta.md s11.1; old actions unchanged):
   A64 op d a b | A64I op d a v             W[d] := op64(W[a], W[b] | v); r := 0,
                                            or 1 when a div/rem divisor is 0 (W[d] := 0)
   C64 a b | C64U a b                       r := 0,1,2 for <,=,> (signed / unsigned 64)

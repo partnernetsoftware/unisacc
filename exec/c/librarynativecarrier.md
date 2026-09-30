@@ -38,12 +38,12 @@ registry and retains callback signature topology.
 
 ## Evidence and dependency qualification
 
-[Current model/candidate evidence](../../research/r10-union16-candidate-evidence.json)
+[Current model/candidate evidence](../../archive/research/r10/r10-union16-candidate-evidence.json)
 records all24 deployed networks' equality to their retained tables and28
 specific affected formal gates. This is not a final release gate receipt.
-[Actual public union16 qualification](../../research/r10-union16-qualified-public-evidence.json)
+[Actual public union16 qualification](../../archive/research/r10/r10-union16-qualified-public-evidence.json)
 records144 macOS ARM/Rosetta variants,43200 native calls and21600 SCRIPT callbacks.
-The earlier [failed system-libffi matrix](../../research/r10-union16-public-evidence.json)
+The earlier [failed system-libffi matrix](../../archive/research/r10/r10-union16-public-evidence.json)
 is retained. An independently reproduced Darwin x86 mixed-return dependency
 failure is handled by a qualified official libffi3.5.2 provider, not by changing
 the model's class to hide the failure.
@@ -52,8 +52,8 @@ the model's class to hide the failure.
 an actual mixed-class pressure probe before publishing. Static consumers link
 both delivered archives; dynamic consumers set the documented rpath. Details
 and byte receipts are in [BUILDING.md](BUILDING.md) and
-[provider delivery evidence](../../research/r10-ffi-provider-delivery-evidence.json).
-The [early prototype receipt](../../research/r10-nativecarrier-prototype-evidence.json)
+[provider delivery evidence](../../archive/research/r10/r10-ffi-provider-delivery-evidence.json).
+The [early prototype receipt](../../archive/research/r10/r10-nativecarrier-prototype-evidence.json)
 remains historical: its mechanical SCRIPT hooks were not compiled script bodies.
 
 ## Remaining ABI obligations
@@ -61,7 +61,7 @@ remains historical: its mechanical SCRIPT hooks were not compiled script bodies.
 Bitfield source facts must retain anonymous entries, zero-width barriers and
 layout modifiers before complete source certification. Shared storage units
 need model-generated transport projections; callable objects inside such
-records need explicit conversion edges. [The design](../../research/r10-bitfield-model-plan.md)
-and [independent native controls](../../research/r10-bitfield-native-controls.json)
+records need explicit conversion edges. [The design](../../archive/research/r10/r10-bitfield-model-plan.md)
+and [independent native controls](../../archive/research/r10/r10-bitfield-native-controls.json)
 are separate from product support. BANK, wide FP, six actual platform aggregate/
 callback qualification and Windows SEH/lifecycle remain R10 obligations.

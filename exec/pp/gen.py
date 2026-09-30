@@ -3,7 +3,7 @@
     python3 exec/pp/gen.py [out.json] [OS/ARCH]      -> writes the table, prints sizes
 
 Machine and primitives: exec/pp/sim.py (generic, option A); design:
-research/e2-pp-delta.md.  The delta runs the reference's passes in order,
+docs/exec/e2-pp-delta.md.  The delta runs the reference's passes in order,
 each pass reading x and writing o, SWAP between passes:
 
   P0 shebang + splice      src/front_pp.c splice(), fe_load's shebang blank
@@ -254,7 +254,7 @@ def sbconst(s):
     return [("SBCLR",)] + [("SBOUT", c) for c in s.encode()]
 
 
-# ---- XE: #if expression evaluator (research/e2-pp-delta.md s11.2) ---------
+# ---- XE: #if expression evaluator (docs/exec/e2-pp-delta.md s11.2) ---------
 # shunting-yard over an operator stack (XOB) and value/poison stacks (XVB,
 # XPB) in W; signed intmax literals/ordinary signed-char constants via
 # literal-*.tsv, with checked uint64 accumulation and XUB type slots. Wide
@@ -297,7 +297,7 @@ def build_xe(g):
     install_rules(g, HERE, "reduce", layout)
 
 
-# ---- # and ## (research/e2-pp-delta.md s12) -------------------------------
+# ---- # and ## (docs/exec/e2-pp-delta.md s12) -------------------------------
 # HSCAN (at #define): F_HASH := 1 when the body has `#` outside literals.
 # HX (at expansion, `me` = the macro, arguments in ARGB): the body is
 # rewritten into the string builder and saved as blob NB, which is then

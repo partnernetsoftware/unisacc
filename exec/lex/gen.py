@@ -3,7 +3,7 @@
     python3 exec/lex/gen.py [out.json]      -> writes the table, prints sizes
 
 The machine is the one in research/delta-framework.md s2 and the design is in
-research/e1-lexer-delta.md.  delta maps an observation to (next state, action
+docs/exec/e1-lexer-delta.md.  delta maps an observation to (next state, action
 sequence).  Each state declares the ONE observation component it reads:
 
     'b'  the byte x[i] (0..255) or EOF (256)

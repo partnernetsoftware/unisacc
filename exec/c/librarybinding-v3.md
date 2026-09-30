@@ -80,4 +80,4 @@ float promotions and source priority are tested on private macOS ARM64 and
 Rosetta candidates. Legacy variadic us_signature, variadic script export
 closures, recursive callback signatures and other four native platforms remain
 separate uncompleted requirements. The first deployed-model red baseline is
-recorded in research/r10-variadic-public-red.json.
+recorded in archive/research/r10/r10-variadic-public-red.json.

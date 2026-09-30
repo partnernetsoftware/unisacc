@@ -1,4 +1,4 @@
-"""TIns text (research/e5-tins-interface.md): dump a real TargetProgram, parse it back.
+"""TIns text (docs/exec/e5-tins-interface.md): dump a real TargetProgram, parse it back.
 
 One instruction per line: `op a, b, ... key=value ...`; `name:` lines give labels
 (several may share an index; a label past the last instruction comes last).

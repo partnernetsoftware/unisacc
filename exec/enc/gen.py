@@ -1,4 +1,4 @@
-"""E5, first slice (research/e5-slice.md): the x86_64 encoder for straight-line
+"""E5, first slice (docs/exec/e5-slice.md): the x86_64 encoder for straight-line
 lowered instructions, as a delta for the generic executor.
 
     python3 exec/enc/gen.py delta.json

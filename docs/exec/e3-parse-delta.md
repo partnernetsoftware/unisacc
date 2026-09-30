@@ -109,4 +109,4 @@ not to treat it as a call. (A) With several headers, the reference's body
 order is the reverse of their prepending (a later `#include` lands above an
 earlier one); the delta's reading of the prelude must follow the token
 stream's physical order. Both stay rejected ("printf defined in the unit")
-until the structured E3 (research/e3-structured.md) handles them.
+until the structured E3 (docs/exec/e3-structured.md) handles them.
