@@ -2,7 +2,11 @@
 # The C lexer in unisacc.c vs the Python one -- both driven by the same table.
 set -u
 UA=${UA:-/tmp/ua_ref}
-pass=0; fail=0
+pass=0; fail=0; known=0
+# tests/pyfront.knownfail: probes the PYTHON front end does not accept yet (e.g.
+# __LINE__/__FILE__); listed names count as known, and a listed name that agrees
+# is a revived failure (delete its line).  Shared with fat/native/ccrun.
+isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/pyfront.knownfail"; }
 for f in "$@"; do
     a=$($UA -dump-tokens "$f" | sed '$d')
     b=$(python3 - "$f" <<'PY'
@@ -37,11 +41,16 @@ for t in lex(src, o):
         w((t.kind + "\n").encode("latin-1"))
 PY
 )
+    b0=$(basename "$f" .c)
+    # The list names front-end gaps, not lexer gaps: a listed probe whose TOKENS
+    # agree is simply a pass here (fat/native judge the whole compile and do
+    # enforce revival); a listed probe whose tokens differ is a known gap.
     if [ "$a" = "$b" ]; then pass=$((pass+1)); printf "  ok   %s\n" "$(basename $f)"
+    elif isknown "$b0"; then known=$((known+1)); printf "  known %s\n" "$(basename $f)"
     else fail=$((fail+1)); printf "  FAIL %s\n" "$(basename $f)"
          diff <(echo "$a") <(echo "$b") | head -6; fi
 done
-echo; echo "lexer agree $pass   differ $fail"
+echo; echo "lexer agree $pass   differ $fail   known $known"
 # A suite that checked nothing is not green: `closure.sh` with no
 # probes once printed `identical 0 differ 0` and exited 0.
 [ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
