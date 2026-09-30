@@ -292,7 +292,6 @@ static int fgetc(FILE *__u_f) {
     return (int)__u_c;
 }
 #endif
-#endif
 
 #if !__UNISA_FTRIM_LIBC || __UN_getc
 static int getc(FILE *__u_f) { return fgetc(__u_f); }
@@ -312,7 +311,9 @@ static int vprintf(const char *__u_fmt, va_list __u_ap) {
    immediately, and hand back the stream.  /tmp because the subset has no
    TMPDIR lookup and every host this compiler targets has one.
    The name has to be unique without a pid or mkstemp, so it is a counter mixed
-   with rand(); a collision shows up as fopen failing, and then we try again.
+   through a small LCG (not rand(): stdio.h must not pull in stdlib.h, and a program
+   that includes only <stdio.h> would otherwise stop at "undefined function 'rand'");
+   a collision shows up as fopen failing, and then we try again.
    [R13-0 #06 / N15] */
 #if !__UNISA_FTRIM_LIBC || __UN_tmpfile
 static FILE *tmpfile(void) {
@@ -328,7 +329,7 @@ static FILE *tmpfile(void) {
         __u_i = 0;
         while (__u_i < 5) { __u_p[__u_i] = __u_pfx[__u_i]; __u_i = __u_i + 1; }
         __u_p[5] = 117; __u_p[6] = 110;                  /* "un" */
-        __u_v = __u_seq + rand();
+        __u_v = (int)((unsigned int)__u_seq * 1103515245u + 12345u);
         __u_seq = __u_seq + 1;
         /* _u_digits fills a buffer of 24 from the END and returns where the
            digits start, so the decimal text lands in __u_d[__u_s..23] */
