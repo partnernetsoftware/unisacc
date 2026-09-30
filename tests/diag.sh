@@ -151,6 +151,24 @@ got=$("$_BOUND" 60 "$UA" -ferror-limit=1 -run "$T/multi.c" 2>&1 | grep -c "error
 if [ "$got" -eq 1 ]; then ok=$((ok+1)); else
     bad=$((bad+1)); printf "  FAIL %-14s want 1 error under -ferror-limit=1, got %s\n" limit "$got"; fi
 
+# R13-0b #31, the other direction: a static that main DOES reach (through a
+# forward prototype, defined after main) still reports the undefined function
+# it calls.  This is a must-reject probe, so it lives here and not in tests/c,
+# where closure/difftest would try to build and run it (fb12-31, the accepted
+# direction, stays in tests/c).  The reference at c23f12b missed it: a call
+# indented by two spaces was never an edge, main fell out of the reachable set,
+# and the program built with a call to text offset 0 that spun forever.
+cat > "$T/reach.c" <<'XEOF'
+static int a(void);
+int main(void) { return a(); }
+static int a(void) { return nosuch2(); }
+XEOF
+got=$("$_BOUND" 20 "$UA" -run "$T/reach.c" 2>&1 | head -1)
+case "$got" in
+    *"undefined function 'nosuch2'"*) ok=$((ok+1));;
+    *) bad=$((bad+1)); printf "  FAIL %-14s want undefined function 'nosuch2' from a static main reaches, got %s\n" reach "$got";;
+esac
+
 # Recovery must not turn a wrong program into a hang or a crash.  Damage
 # the first 40 corpus programs -- delete their third `;` -- and require a
 # diagnosis, exit status 1, no signal, within the bound.  The seeds are

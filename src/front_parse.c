@@ -638,11 +638,28 @@ int sh_bucket(int t) {
     return vhash(src + tpos[t], tlen[t]) & (SH_SIZE - 1);
 }
 int sh_push(int i, int t) {
-    int ob; int b;
+    int ob; int b; int j;
     if (i < sh_hi) {                      /* reusing a dead slot */
-        ob = sh_b[i];
-        while (sh_head[ob] - 1 >= i) sh_head[ob] = sh_link[sh_head[ob] - 1];
-    } else sh_hi = i + 1;
+        /* Every slot in [i, sh_hi) is dead (scopes pop by lowering nsym), and
+           each still hangs at the front of ITS bucket's chain.  Unlinking only
+           slot i's old bucket left the others in place, and one of them could
+           end up BEHIND a live entry: a function's `nm` at slot 964, the next
+           function's `nm` at 961 (chain 961 -> 964 -> BH_ABI_ARG2), then slot
+           964 reused for `k` in another bucket -- 964's link now belongs to
+           that bucket, and the next reuse of 961 pops along it and drops
+           BH_ABI_ARG2 from its chain: "unknown identifier" 17,000 lines later
+           for a global declared at the top (the compiler compiling itself,
+           2026-09-30).  So unlink every dead slot from its own bucket before
+           the reuse; each slot is cleaned once per death, so the total cost
+           stays linear in the pushes. */
+        j = sh_hi - 1;
+        while (j >= i) {
+            ob = sh_b[j];
+            while (sh_head[ob] - 1 >= i) sh_head[ob] = sh_link[sh_head[ob] - 1];
+            j = j - 1;
+        }
+    }
+    sh_hi = i + 1;
     b = sh_bucket(t);
     sh_b[i] = b; sh_link[i] = sh_head[b]; sh_head[b] = i + 1;
     return 0;
