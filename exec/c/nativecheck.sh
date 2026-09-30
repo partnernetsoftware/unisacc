@@ -77,7 +77,11 @@ if part in ('all', 'resources'):
     from pack import build as package_build
     (isolated/'without-resources.pkg').write_bytes(package_build([p/'route.tsv']))
     r=subprocess.run([str(netrun),'--bundle','without-resources.pkg','osx/arm64','runtime.c','runtime.c'],cwd=isolated,capture_output=True,timeout=60)
-    assert r.returncode==2 and not r.stdout and b'no include directory' in r.stderr,(r.returncode,r.stderr)
+    # Since R13-0b #07 the runtime no longer dies on an absent header resource: E2
+    # rejects.  With no include directory the first header to fail is one the
+    # autoinc pass inserted, which has no source line -- so the reject carries no
+    # position (a negative line was the bug this guards).
+    assert r.returncode==1 and not r.stdout and r.stderr==b'reject: no such file for #include\n',(r.returncode,r.stderr)
     print('resource-free control: isolated self build refuses, no partial output')
 
 
