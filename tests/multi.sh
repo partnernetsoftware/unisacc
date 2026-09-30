@@ -52,6 +52,10 @@ if [ "$status" -ne 0 ] || [ -z "$want" ]; then
     echo "  FAIL system reference execution ($status)"; exit 1
 fi
 printf "  reference (cc m1.c m2.c)   %s\n" "$want"
+# the forward-static pair: two() == 2, both() == 7 + 8, vfmt() + digits() == 8 + 7
+fwdwant=$(bound 20 cc -std=c99 -w -I "$D" -o "$T/fwdref" "$D/fwd1.c" "$D/fwd2.c" 2>/dev/null && "$T/fwdref")
+[ -n "$fwdwant" ] || fwdwant='(cc failed)'
+printf "  reference (cc fwd 1 2)     %s\n" "$fwdwant"
 checked "unisa run m1 m2" "$want" all $U run "$D/m1.c" "$D/m2.c"
 checked "unisa run m2 m1" "$want" all $U run "$D/m2.c" "$D/m1.c"
 # Implicit strlen must resolve in the second unit; clang has no such reference.
@@ -74,6 +78,14 @@ fi
 ua_ready
 checked "unisacc -run m1 m2" "$want" all "$UA" -run "$D/m1.c" "$D/m2.c"
 checked "unisacc m2 m1 -run" "$want" all "$UA" -run "$D/m2.c" "$D/m1.c"
+# A header whose statics call each other FORWARD, included by one unit only --
+# and the run where that unit is not first is the one that used to fail: the
+# static was registered when its DEFINITION was reached, so a forward
+# reference in the header's first function was spelled without the unit
+# suffix while the label carried it.  [R13-0b: register at the start of the
+# unit, before the walk]
+checked "unisacc fwd 1 2 -run" "$fwdwant" all "$UA" -run "$D/fwd1.c" "$D/fwd2.c"
+checked "unisacc fwd 2 1 -run" "$fwdwant" all "$UA" -run "$D/fwd2.c" "$D/fwd1.c"
 checked "unisacc libc on demand" 5 last "$UA" -run "$D/n1.c" "$D/n2.c"
 if [ -n "$HOST" ]; then
     if bound 20 "$UA" "$D/m1.c" "$D/m2.c" -b "$HOST" -o "$T/um" >/dev/null 2>&1; then

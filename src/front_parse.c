@@ -5195,6 +5195,49 @@ int function(int t, int w) {
     return 0;
 }
 
+/* Register every file-scope `static` name of the unit about to be walked.
+   Registering at the DEFINITION is too late for a forward reference: `etok`
+   spells a name with its unit suffix only when ustat_is() already knows it, so
+   `static int vfmt(void) { return digits() + 1; }` called `digits` with no
+   suffix while its definition emitted the label `digits__u1`, and the call was
+   reported as undefined.  Order-dependent, which is why `m1 m2` passed and
+   `m2 m1` failed.  [R13-0b, multi gate]
+
+   `lex()` starts each unit at token 0 (`ntok = 0`), so this always scans
+   0..ntok and depth can start at 0.  The scan is deliberately shallow: brace
+   depth 0 only, so a `static` inside a function or a struct body is not a
+   file-scope name.  `static` and the type words are kind T_TYPE, the NAME is
+   T_ID -- testing for T_ID alone skipped the very token we look for.  A
+   `static` function POINTER variable is registered too, since etok spells it
+   with the suffix as well.  Typedefs are skipped: their name is not storage. */
+int ustat_prescan(void) {
+    int i; int depth; int j; int t; int seenstatic;
+    i = 0; depth = 0; seenstatic = 0;
+    while (i < ntok) {
+        t = kind(i);
+        if (t == tidx("{", 1)) { depth = depth + 1; i = i + 1; continue; }
+        if (t == tidx("}", 1)) { depth = depth - 1; i = i + 1; continue; }
+        if (t == tidx(";", 1)) { seenstatic = 0; i = i + 1; continue; }
+        if (depth == 0) {
+            if (t == T_TYPE || t == T_ID) {
+                if (tlen[i] == 6) {
+                    if (srcis(tpos[i], 6, "static")) { seenstatic = 1; i = i + 1; continue; }
+                    if (srcis(tpos[i], 6, "typedef")) { seenstatic = 0; i = i + 1; continue; }
+                }
+            }
+            if (seenstatic) {
+                if (t == T_ID) {
+                    j = i + 1;
+                    if (kind(j) == tidx("(", 1)) { ustat_add(i); seenstatic = 0; }
+                    else { if (kind(j) == tidx("*", 1)) { ustat_add(i); seenstatic = 0; } }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 int unit(void) {
     int p; int w; int t; int n; int k; int isarr; int gstruct; int cpn; int gfpfn; int gk; int gpd; int gfpd; int gbool;
     while (1) {
@@ -5551,6 +5594,9 @@ int fe_units(char **paths, int npath, char *t) {
         curunit = u;
         r = fe_load(paths[u], t);
         if (r) return r;
+        /* before the walk, so a forward reference spells a name the way its
+           definition will */
+        if (u > 0) ustat_prescan();
         unit();
         u = u + 1;
     }
