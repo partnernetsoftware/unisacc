@@ -5835,9 +5835,10 @@ int ud_isstatic_label(int a, int e) {
    *blk, or 0 if the line is not one.  The name is resolved ONCE, here. */
 int ud_target(int a, int e, int *blk) {
     int j; int k; int nm; int L; int b;
-    if (e - a < 7) return 0;
     if (out[a] != 32) return 0;
-    j = a + 1;
+    j = a;
+    while (j < e && out[j] == 32) j = j + 1;      /* the tape indents by two */
+    if (e - j < 5) return 0;
     k = 0;
     if (out[j] == 99) { if (out[j+1] == 97) { if (out[j+2] == 108) { if (out[j+3] == 108) { if (out[j+4] == 32) k = j + 5; } } } }
     if (out[j] == 106) { if (out[j+1] == 117) { if (out[j+2] == 109) { if (out[j+3] == 112) { if (out[j+4] == 32) k = j + 5; } } } }
