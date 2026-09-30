@@ -9,6 +9,7 @@ from .tape import SHAPE
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SNAPSHOT = ROOT / "docs" / "tapebin-v1.shape.tsv"
 CHEADER = ROOT / "src" / "tapebin_shape.inc"
+PRODUCT = ROOT / "exec" / "c" / "tapebin.h"
 
 
 def render():
@@ -36,6 +37,8 @@ def main():
             raise SystemExit("tapebin shape snapshot is stale")
         if CHEADER.read_text(encoding="ascii") != render_c():
             raise SystemExit("tapebin C shape table is stale")
+        if '#include "../../src/tapebin_shape.inc"' not in PRODUCT.read_text():
+            raise SystemExit("tapebin model driver does not use the shared C shape table")
         print("tapebin shape: %d opcodes" % len(SHAPE))
     else:
         raise SystemExit("usage: python3 -m unisa.tapebin_shape --write|--check")
