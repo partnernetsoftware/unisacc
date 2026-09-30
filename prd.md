@@ -28,7 +28,7 @@
 | v0.0.12 | [archive/plans/v0.0.12.md](archive/plans/v0.0.12.md) — 计划树 R12-0..R12-7 与逐项回执（已发布 2026-09-30，归档） | 已发布 |
 | v0.0.13 | [archive/plans/v0.0.13.md](archive/plans/v0.0.13.md) — 计划树 L0–L5/N0–N22 与逐项回执（R13-0 六例、R13-0b 25 条、N22 产物谱系、门禁队列方法）；状态叙事全文见 [archive/prd-history-20260930.md](archive/prd-history-20260930.md) | 已发布 2026-09-30（tag 3af8b36；公开 unisacc.com 75c698ec… 与 dmg；回执 archive/research/r13/r13-release-acceptance.json） |
 | v0.0.14 | [archive/plans/v0.0.14.md](archive/plans/v0.0.14.md) — #21 callm、8 个 L1 库体、#line、tapebin v1 端到端、C99 条款账本（语言 96%）、流水线方法债、R14-8 6/8 | 已发布 2026-09-30（tag 75ec4de；公开 unisacc.com c229cebf… 与 dmg；回执 research/r14-release-acceptance.json） |
-| v0.0.15 | [plans/v0.0.15.md](plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 草案 |
+| v0.0.15 | [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 完成，不发布（全量队列 370/370，产品字节同 0.0.14） |
 | v0.0.16 | [plans/v0.0.16.md](plans/v0.0.16.md) — 原定 0.0.15 的功能项：R14-8 余项、续行 __LINE__、复数/三字符组决定、狗粮启动器（POSIX 最小面）、库面、CI 预热 | 草案 |
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
@@ -242,7 +242,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 | 版本 | 主线 |
 |---|---|
-| **v0.0.15**（进行中，不发布） | 整理：prd 重写、文件清单与归档、封装/复用、论文 A、剩余问题总结 → [plans/v0.0.15.md](plans/v0.0.15.md) |
+| **v0.0.15**（完成，不发布） | 整理：prd 重写、文件清单与归档、封装/复用、论文 A、剩余问题总结 → [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) |
 | v0.0.16 | 功能承接与问题总表；**工具链起步（R16-7，主人严肃需求）：`-c` 目标文件 → 链接器 → 汇编器 → ar/nm**，与系统工具互操作 → [plans/v0.0.16.md](plans/v0.0.16.md) |
 | v0.1.x | 证明侧（T2、P-2、T3、.o、wasm）、tapebin 平台化、内存安全检查节点（论文 D）→ [plans/v0.1.x.md](plans/v0.1.x.md) |
 | v0.2.x | 包市场 + agent 友好（tapebin 包、发布即证明、权限沙箱、官方包）→ 同上 |
