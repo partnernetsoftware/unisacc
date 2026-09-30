@@ -200,6 +200,8 @@ int mbfind(int si, int t);
 int eload(int w);
 int estore(int w);
 int is_typeat(int i);
+void declsave(void);
+void declrestore(void);
 int typesize(void);
 int declspec(void);
 int primary(void);
@@ -3182,18 +3184,48 @@ long cunary(void) {
     if (eat(tidx("+", 1))) return cunary();
     if (eat(tidx("!", 1))) { if (cunary()) return 0; return 1; }
     if (eat(tidx("~", 1))) return (0 - cunary()) - 1;
-    if (cur() == tidx("sizeof", 6)) { if (kind(tp + 1) == tidx("(", 1)) { if (is_typeat(tp + 2)) {
-        adv(); adv();
-        w = declspec(); w = declsz;
-        while (eatstar()) w = 8;
-        need(tidx(")", 1), ")");
-        if (declstruct >= 0 && w == 0) err_tok(tp, "sizeof incomplete structure");
-        return w;
-    } } }
+    if (cur() == tidx("sizeof", 6)) {
+        /* `sizeof (TYPE)`: the operand's type is spelled out */
+        if (kind(tp + 1) == tidx("(", 1)) { if (is_typeat(tp + 2)) {
+            int w2; int ds;
+            adv(); adv();
+            declsave();
+            w = declspec(); w = declsz;
+            while (eatstar()) w = 8;
+            need(tidx(")", 1), ")");
+            ds = declstruct; w2 = w;
+            declrestore();
+            if (ds >= 0 && w2 == 0) err_tok(tp, "sizeof incomplete structure");
+            return w2;
+        } }
+        /* `sizeof (expr)` and `sizeof expr`: the operand is NOT evaluated
+           (C99 6.5.3.4p2), so a constant expression only needs its SIZE --
+           and for a string literal that is the length plus the NUL it ends
+           with (C99 6.4.5p6).  Only the (TYPE) form was modelled, so
+           `char d[sizeof("abc")]` was "a constant is required here" while
+           `char a[sizeof(void *)]` -- the same operator, a type instead of an
+           expression -- worked.  Lua writes sizeof on both. */
+        adv();
+        if (cur() == tidx("(", 1)) {
+            adv();
+            if (kind(tp) == T_STR) {
+                int sl; char lb[4096];
+                sl = decode(adv(), lb, sizeof(lb));
+                need(tidx(")", 1), ")");
+                return sl + 1;
+            }
+            w = cexpr(); need(tidx(")", 1), ")");
+            return w;
+        }
+        return 8;                       /* `sizeof x`: a scalar in this subset */
+    }
     /* a cast inside a constant expression: `(int)7` */
     if (cur() == tidx("(", 1)) { if (is_typeat(tp + 1)) {
-        adv(); declspec(); while (eatstar()) { }
+        adv();
+        declsave();
+        declspec(); while (eatstar()) { }
         need(tidx(")", 1), ")");
+        declrestore();
         return cunary();
     } }
     return catom();
@@ -3394,6 +3426,34 @@ int mbfind(int si, int t) {
         i = i + 1;
     }
     return 0 - 1;
+}
+
+/* A constant expression can contain a CAST or a sizeof(TYPE), and both call
+   declspec() -- which overwrites the whole decl* family.  Inside an array
+   bound that family is the OUTER declaration's: `char b[(int)(2 * sizeof(
+   double))]` left declsz 8 (double) where the declarator, and the symbol it
+   registers, still meant char's 1.  Snapshot and restore rather than hand-
+   copying the fields at each call site: the list must be every decl*
+   declspec assigns, or the next one added silently reintroduces this. */
+static int declsv[13];
+void declsave(void) {
+    declsv[0] = declbase;      declsv[1] = declbool;
+    declsv[2] = declenum;      declsv[3] = declflt;
+    declsv[4] = declspecfp;    declsv[5] = declspecfpst;
+    declsv[6] = declspecpd;    declsv[7] = declspecptr;
+    declsv[8] = declstatic;    declsv[9] = declstruct;
+    declsv[10] = declsz;       declsv[11] = declunsigned;
+    declsv[12] = declpd;       /* eatstar() increments it, and it is what
+                                  makes the array a pointer array */
+}
+void declrestore(void) {
+    declbase = declsv[0];      declbool = declsv[1];
+    declenum = declsv[2];      declflt = declsv[3];
+    declspecfp = declsv[4];    declspecfpst = declsv[5];
+    declspecpd = declsv[6];    declspecptr = declsv[7];
+    declstatic = declsv[8];    declstruct = declsv[9];
+    declsz = declsv[10];       declunsigned = declsv[11];
+    declpd = declsv[12];
 }
 
 int is_typeat(int i) {
