@@ -815,10 +815,27 @@ int err_at(long p, char *msg);
 #define LINEMSG "not covered: this form of #line (C99 6.10.4: digit-sequence [\"file\"], in the main file)"
 int linedir(long ls, long ns, long ne, long le) {
     long v; long k; int inside; long here; int nm; long q;
-    if (ne <= ns || ne - ns > 10) { err_at(ns, LINEMSG); return 0; }   /* the network reads at most 10 digits */
+    if (ne <= ns) { err_at(ns, LINEMSG); return 0; }
+    if (isal(src[ns] & 255)) {
+        /* 6.10.4p5: the operand may be macro-replaced.  Covered form: one
+           object-like macro whose body is a digit sequence (c-testsuite 00152:
+           `#define line 1000` / `#line line`). */
+        int m; int b; int bl; int bk; char *bp;
+        m = mfind(src + ns, ne - ns);
+        if (m < 0) { err_at(ns, LINEMSG); return 0; }
+        if (macfn[m]) { err_at(ns, LINEMSG); return 0; }
+        bp = macpool + macboff[m]; bl = macblen[m]; b = 0;
+        while (b < bl) { if ((bp[b] & 255) != 32 && (bp[b] & 255) != 9) break; b = b + 1; }
+        bk = b; v = 0;
+        while (b < bl && (bp[b] & 255) >= 48 && (bp[b] & 255) <= 57) { v = v * 10 + (bp[b] & 255) - 48; b = b + 1; }
+        if (b == bk || b - bk > 10) { err_at(ns, LINEMSG); return 0; }
+        while (b < bl) { if ((bp[b] & 255) != 32 && (bp[b] & 255) != 9) { err_at(ns, LINEMSG); return 0; } b = b + 1; }
+    } else {
+    if (ne - ns > 10) { err_at(ns, LINEMSG); return 0; }   /* the network reads at most 10 digits */
     v = 0; k = ns;
     while (k < ne) { if ((src[k] & 255) < 48 || (src[k] & 255) > 57) { err_at(ns, LINEMSG); return 0; }
         v = v * 10 + (src[k] & 255) - 48; k = k + 1; }
+    }
     if (v <= 0 || v > 2147483647) { err_at(ns, LINEMSG); return 0; }
     nm = 0 - 1;
     q = ne; while (q < le) { if (wsat(q) == 0) break; q = q + 1; }

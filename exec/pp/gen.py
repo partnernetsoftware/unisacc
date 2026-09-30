@@ -387,7 +387,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
 
     install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
     from locations import IRNAME as _IRNAME
-    install_rules(g, HERE, "linedir", {"LDRAW": LDRAW, "LDUSER": LDUSER, "LDNUM": LDNUM, "LDNM": LDNM, "IRNAME": _IRNAME})
+    install_rules(g, HERE, "linedir", {"LDRAW": LDRAW, "LDUSER": LDUSER, "LDNUM": LDNUM, "LDNM": LDNM, "IRNAME": _IRNAME, "F_FN": F_FN, "F_BODY": F_BODY, "FSZ": FSZ, "MACB": MACB})
     if shared_predefines:
         # One network per output format/autoinc mode; target data is supplied
         # as resources. The legacy default remains byte-for-byte unchanged.
