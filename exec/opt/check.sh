@@ -16,7 +16,7 @@ for L in 1 2; do
     b 60 python3 exec/opt/gen.py "$T/e4_$L.json" $L 2>/dev/null || { echo "e4: gen -O$L failed"; exit 1; }
     b 60 python3 exec/c/tbl.py "$T/e4_$L.json" "$T/e4_$L.tbl" || { echo "e4: tbl -O$L failed"; exit 1; }
 done
-eq=0; bad=0; skip=0
+eq=0; bad=0; skip=0; known=0
 b 10 python3 tests/sourceflat.py "$T/unisacc-flat.c" || exit 1
 for f in "$@"; do
     case "$f" in unisacc.c|"$R/unisacc.c") f="$T/unisacc-flat.c";; esac
@@ -27,11 +27,14 @@ for f in "$@"; do
             # both refuse the program: an exploration skip -- but with E4STRICT=1 (the gate's fixed
             # sets) every listed file must compile at both levels, so a refusal fails
             if [ -z "${E4STRICT:-}" ] && [ $r0 -eq $rl ] && [ $r0 -lt 128 ]; then skip=$((skip+1)); continue; fi
+            # a probe the reference refuses on purpose (listed in tests/difftest.knownfail, e.g. the
+            # deferred #21 six-argument indirect call) is a known refusal, not an E4 defect
+            if [ $r0 -eq $rl ] && [ $r0 -lt 128 ] && grep -q "^$(basename "$f" .c) " "$R/tests/difftest.knownfail" 2>/dev/null; then known=$((known+1)); continue; fi
             bad=$((bad+1)); echo "  BAD $f -O$L  reference -O0 $r0 -O$L $rl"; continue
         fi
         UNISA_MAXSTEPS=400000000000 b 60 "$T/run" "$T/e4_$L.tbl" "$T/o0" > "$T/m" 2> "$T/e"; rc=$?
         if [ $rc -eq 0 ] && cmp -s "$T/m" "$T/oL"; then eq=$((eq+1)); else bad=$((bad+1)); echo "  BAD $f -O$L  e4 rc=$rc $(head -1 "$T/e")"; fi
     done
 done
-echo "e4 -O1/-O2  files $#   equal $eq   refused by the reference $skip   bad $bad"
+echo "e4 -O1/-O2  files $#   equal $eq   refused by the reference $skip   known refusals $known   bad $bad"
 [ $bad -eq 0 ] && [ $eq -gt 0 ]
