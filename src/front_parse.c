@@ -3855,9 +3855,18 @@ int do_typedef(void) {
             break;
         } }
         nt = adv();
-        if (cur() == tidx("(", 1)) {          /* a function-pointer typedef */
+        if (cur() == tidx("(", 1)) {          /* a FUNCTION typedef */
+            /* `typedef int binop(int, int);` -- the typedef names a function
+               TYPE, not a pointer to one, but the declarator that uses it is
+               nearly always `binop *f`, and calling `f(a, b)` has to go
+               through a pointer.  tdfp marks the typedef as callable; it was
+               left at whatever the previous entry held, so `binop *f; f(4,5)`
+               was reported as `undefined function 'f'` (and `expected ';'`
+               in the product).  stb_image_write.h writes
+               `typedef void stbi_write_func(void *, void *, int);`. */
             while (cur() != tidx(";", 1)) { if (cur() == T_EOF) break; adv(); }
             tdadd(nt, 8, 8, 0 - 1, 1);
+            tdfp[ntd - 1] = 1;
             break;
         }
         if (cur() == tidx("[", 1)) {
@@ -4318,6 +4327,20 @@ int skipparen(void) {                 /* over a balanced (...) at the cursor */
     }
     return var;
 }
+/* `int (twice)(int x);` -- a parenthesised declarator NAME.  The parentheses
+   do not make it a pointer; they exist to stop a function-like macro from
+   expanding the name, and every declaration in lua.h uses the form
+   (`LUA_API lua_State *(lua_newstate)(lua_Alloc, void *);`).  Only `(*name)`
+   was accepted, so the plain parenthesised name was skipped entirely and the
+   function stayed undeclared ("undefined function 'twice'"). */
+int parenname(void) {
+    int t;
+    t = 0 - 1;
+    adv();                                   /* the `(` */
+    if (cur() == T_ID) t = adv();
+    need(tidx(")", 1), ")");
+    return t;
+}
 int fpdecl(void) {
     int t; int var; int unsized;
     adv();
@@ -4451,7 +4474,13 @@ int local_decl(void) {
         declptr = declspecptr; declpd = declspecpd;
         declflt = lflt0; declbool = lbool; fpn = 0;
         while (eatstar()) { declptr = 1; }
-        if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+        if (cur() == tidx("(", 1)) { if (kind(tp + 1) == T_ID) {
+            /* `int (twice)(int x);` and `int (v) = 5;` -- a parenthesised
+               name, not a pointer declarator. */
+            t = parenname();
+            if (t >= 0) { lfpret = 0; sst = 0 - 1; declstruct = 0 - 1; }
+            if (cur() == tidx("(", 1)) { skipparen(); declfp = 1; declptr = 1; }
+        } else if (kind(tp + 1) == tidx("*", 1)) {
             t = fpdecl(); declptr = 1; lfpret = fpretfp; sst = 0 - 1; declstruct = 0 - 1;
             if (fpdim > 0) {
                 fpn = fpdim; declpd = 1; declfp = 0;
@@ -5114,7 +5143,17 @@ int unit(void) {
             declflt = gflt0; declbool = gbool;
             while (eatstar()) declptr = 1;
             gfpfn = 0; gfpd = 0;
-            if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
+            if (cur() == tidx("(", 1)) { if (kind(tp + 1) == T_ID) {
+                /* `int (twice)(int x);` / `char *(greet)(void);` at file
+                   scope -- a parenthesised declarator NAME.  Only `(*name)`
+                   was accepted here, so a prototype in this form was skipped
+                   and the function stayed undeclared.  lua.h declares every
+                   API entry point this way, to keep the name from being
+                   expanded as a function-like macro. */
+                t = parenname();
+                gstruct = 0 - 1; declstruct = 0 - 1; gfpd = 0;
+                if (cur() == tidx("(", 1)) { skipparen(); declfp = 1; declptr = 1; gfpd = 1; gfpfn = 1; }
+            } else if (kind(tp + 1) == tidx("*", 1)) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1; gfpd = 1;
                 if (fpfn >= 0) { fnresume = tp; tp = fpfn; gfpfn = 1; }
             } else t = adv(); }
