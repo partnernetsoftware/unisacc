@@ -3,7 +3,7 @@
 The only instrumentation appends bounded generic bank reads before ACCEPT.
 This is source-facts coverage, not product/native ABI qualification.
 """
-import argparse,copy,hashlib,json,os,pathlib,shutil,struct,subprocess,sys,tempfile
+import argparse,copy,hashlib,json,os,pathlib,re,shutil,struct,subprocess,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT),str(ROOT/'exec/c'),str(ROOT/'tests')]
 from exec.pp.sim import run,load
@@ -85,13 +85,14 @@ def parse_facts(data):
  assert at==len(data) and records and sum(len(r['entries']) for r in records.values())>0
  return records
 
+SBB=int(re.search(r'^SBB\s*=\s*(\d+)',(ROOT/'exec/parse/gen.py').read_text(),re.M).group(1))  # a struct's BASE code is SBB+sid (#27 moved it 1000->3840)
 def expected():
  def entry(kind,base,offset,storage,alignment,bits=0,bitoffset=0,signed=0,named=1,array=0,child=0,shape=0,depth=0):
   return dict(zip(FIELDS,(kind,base,depth,array,offset,bitoffset,bits,storage,alignment,child,named,shape,signed)))
  b=lambda base,offset,bits,bitoffset=0,signed=0,kind=1,named=1:entry(kind,base,offset,4,4,bits,bitoffset,signed,named)
  # Independent natural C allocation: these widths share one int unit.
  second,third=3,8
- rows={1:[b(20,0,3),b(4,0,5,second,1),b(20,0,6,third)],2:[b(20,0,3,kind=2,named=0),b(20,0,5,second),b(20,4,0,kind=3,named=0),b(20,4,4)],3:[entry(0,4,0,4,4),entry(0,64,8,8,8)],4:[entry(4,1005,0,4,4,named=0,child=5),entry(0,8,8,8,8)],5:[b(20,0,3),b(4,0,5,second,1)],6:[entry(0,4,0,12,4,array=3,shape=1),entry(0,2,12,2,2)],7:[b(20,0,3),entry(0,64,0,8,8)],8:[entry(0,64,0,8,8),entry(0,4,8,4,4)],9:[entry(0,1003,0,8,8,depth=1)]}
+ rows={1:[b(20,0,3),b(4,0,5,second,1),b(20,0,6,third)],2:[b(20,0,3,kind=2,named=0),b(20,0,5,second),b(20,4,0,kind=3,named=0),b(20,4,4)],3:[entry(0,4,0,4,4),entry(0,64,8,8,8)],4:[entry(4,SBB+5,0,4,4,named=0,child=5),entry(0,8,8,8,8)],5:[b(20,0,3),b(4,0,5,second,1)],6:[entry(0,4,0,12,4,array=3,shape=1),entry(0,2,12,2,2)],7:[b(20,0,3),entry(0,64,0,8,8)],8:[entry(0,64,0,8,8),entry(0,4,8,4,4)],9:[entry(0,SBB+3,0,8,8,depth=1)]}
  return {sid:{'union':int(sid==7),'entries':entries} for sid,entries in rows.items()}
 
 ORDINARY_SOURCE="""struct Ordinary {int n;double d;};
