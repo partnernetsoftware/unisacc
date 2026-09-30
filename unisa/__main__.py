@@ -423,7 +423,15 @@ def cmd_ape(a):
 
     def one(target, stub=b""):
         if a.via:
-            r = subprocess.run([a.via, "-O" + a.olevel, a.file, "-t", target],
+            # an APE (`MZqFpD=`) cannot be exec'd directly on POSIX (Exec format
+            # error): launch it through sh, as comdemo.py and the six runners do.
+            # The seed -> stage-2 bootstrap (N22) is the first --via that is an APE.
+            via = [a.via]
+            if os.name != "nt":
+                with open(a.via, "rb") as fh:
+                    if fh.read(2) == b"MZ":
+                        via = ["sh", a.via]
+            r = subprocess.run(via + ["-O" + a.olevel, a.file, "-t", target],
                                capture_output=True)
             if r.returncode != 0:
                 raise SystemExit("%s: %s" % (a.file, r.stderr.decode()[:200]))
