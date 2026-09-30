@@ -1490,7 +1490,7 @@ int icall(int si, int t) {
 /* The callee's address is in r0 and the cursor is on the `(`.  `var` says
    the pointee is variadic, which puts every argument on the tape stack. */
 int vcall(int var) {
-    int n; int k; int st;
+    int n; int k; int st; int rp;
     push();
     need(tidx("(", 1), "(");
     n = 0;
@@ -1499,6 +1499,7 @@ int vcall(int var) {
         expr(); loadval(); argconv(0 - 1, n); push(); n = n + 1;
         if (eat(tidx(",", 1)) == 0) break;
     }
+    rp = tp;                     /* the `)`: where the product places the six-argument diagnostic */
     need(tidx(")", 1), ")");
     st = 0;
     if (var) st = 1;
@@ -1515,7 +1516,7 @@ int vcall(int var) {
         es("  @mem.load r5, [r7+"); en(8 * n); es("]\n  @call.callr r5\n");
         es("  @call.frame -"); en(8 * (n + 1)); ec(10);
     } else {
-        if (n > 5) { printf("indirect call: six register arguments leave no register for the callee\n"); __exit(1); }
+        if (n > 5) err_tok(rp, "not covered: six indirect register arguments leave no callee register");   /* R13-0b #21 (0.0.14); positioned like the product [N8] */
         k = n - 1;
         while (k >= 0) { es("  @mem.load r"); en(k); es(", [r7+0]\n  @call.frame -8\n"); k = k - 1; }
         es("  @mem.load r5, [r7+0]\n  @call.frame -8\n  @call.callr r5\n");
