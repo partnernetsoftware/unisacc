@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Recompute the reviewed-tree stamps in tests/gatedeps.json from HEAD (R14-2 (4)).
+"""Recompute the reviewed-tree stamps and family guards in tests/gatedeps.json from HEAD (R14-2 (4)).
 
 gatequeue.py fingerprints each reviewed tree as sha256 over {path: [st_mode,
 sha256]}.  Computing that in the shared checkout is wrong twice over: a
@@ -40,6 +40,14 @@ def main():
                                and not any((base / x) == q or (base / x) in q.parents for x in entry.get('excluded_dirs', [])))
                 s = stamp({str(q.relative_to(base)): digest(q) for q in paths})
                 if rt[tree] != s: changed.append((fam, tree)); rt[tree] = s
+            for n, sha in list(entry.get('guards', {}).items()):
+                f = pathlib.Path(tmp) / n
+                if not f.is_file():
+                    blob2 = subprocess.run(['git', 'show', 'HEAD:' + n], cwd=R, capture_output=True, timeout=30)
+                    cur = hashlib.sha256(blob2.stdout).hexdigest() if blob2.returncode == 0 else None
+                else:
+                    cur = digest(f)[1]
+                if cur and cur != sha: changed.append((fam, 'guard:' + n)); entry['guards'][n] = cur
     p.write_text(json.dumps(d, indent=2) + '\n')
     dirty = subprocess.run(['git', 'status', '--porcelain', '--'] + trees, cwd=R, capture_output=True, text=True).stdout.strip()
     print('gatedeps: reviewed stamps from HEAD; changed %s' % (changed or 'none'))

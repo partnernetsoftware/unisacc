@@ -41,7 +41,7 @@ exclusive=()  # fat is three ~17 s shards since 0.0.13 and no longer needs a win
 # These pass alone (6-33 s) but hit their bounds under --jobs 4 in every 0.0.13
 # release queue: a cold network build (bindprep-arm64, memx86-ua-1) and an
 # inner 20 s hard timeout (lib-carrier-import-model).  They get a window each.
-for s in exec-memx86-ua-1 lib-carrier-import-model; do exclusive+=(--exclusive-suite "$s"); done
+for s in exec-memx86-ua-1 lib-carrier-import-model com-tapebin; do exclusive+=(--exclusive-suite "$s"); done   # com-tapebin: 45 s alone
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-arm64); fi
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
