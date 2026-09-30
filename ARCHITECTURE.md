@@ -8,7 +8,7 @@
 | 种子与参考实现 | `unisa/`、`src/`、`kernel/`、`unisacc.c` | Python 种子、经典 C 参考/回退、生成静态事实与容器打包；与模型路线对照 |
 | 静态输入与数据 | `weights/`（`built.uns2`、`gold/*.tsv`）、`include/*.h` | 构造与生成的输入；真值表的数据形态 |
 | 开发工具与参考裁判 | `iterate/`（C 写的权重构造器与 kernel 数据生成器，**不属于产品**）、`tests/`、各 `*_check.py` | 验证与复现，不进用户流程 |
-| 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`tape-vs-wasm.md`、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 属 ujs 子项目，不在本产品范围）、`plans/`（当前与未来版本）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
+| 文档、计划与历史 | `docs/`（`tapebin-v1.md` 格式契约、`tape-vs-wasm.md`、`dogfood-targets.md`；`docs/uxe/` 与 `docs/index.html` 属 ujs 子项目，不在本产品范围）、`prd.md`（当前状态、架构、路线与问题索引）与 `spec.md`（条款全文，编号稳定）、`plans/`（当前与未来版本；`plans/ideas.md` 为构想区）、`tests/INVENTORY.md`（每个测试/检查脚本在哪个门禁，`script-inventory` 门禁保证无孤儿）、`research/`（论文与仍被引用的证据）、`archive/`（已发布版本的计划、prd 叙事与证据，按版本分目录） | 只读参考；发布后把本版计划与证据移入 `archive/` |
 
 `.tapebin` 的格式见 [v1 契约](docs/tapebin-v1.md)：`unisa/tapebin.py`
 是种子编解码器，`src/tapebin.c` 是经典参考读器，
@@ -16,7 +16,7 @@
 `exec/c/tapebin.h`、`exec/c/tapebin_emit.h` 是模型驱动的容器适配层。
 后端编译决策仍由路由网络执行。
 
-规格在 [`prd.md`](prd.md)，工作规则在 [`AGENTS.md`](AGENTS.md)，论文在 [`research/`](research/)。
+当前状态与路线在 [`prd.md`](prd.md)，条款全文在 [`spec.md`](spec.md)，工作规则在 [`AGENTS.md`](AGENTS.md)，论文在 [`research/`](research/)。
 
 ## 模型路线：发布基线与当前本地候选
 

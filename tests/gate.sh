@@ -177,6 +177,7 @@ if [ "$(uname -s)" = Darwin ]; then
     for a in arm64 x86_64; do
         job exec-bindprep-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindprep.sh
         job exec-bindverify-$a env CORE_ASM_ARCH=$a ./exec/c/asm/bindverify.sh
+        job lib-bank-$a python3 ./tests/bankcheck.py --arch $a   # R12-1 BNK1 plan harness (was ungated; 7-10 s)
     done
     job exec-container ./exec/c/containercheck.sh
 fi
@@ -374,6 +375,7 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 job tapebin-roundtrip python3 ./tests/tapebin.py
 job tapebin-shape python3 -m unisa.tapebin_shape --check
+job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (research/r12-ungated-checks.tsv).
