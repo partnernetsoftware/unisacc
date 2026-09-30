@@ -85,7 +85,11 @@ VANAMES = ("va_start", "va_arg", "va_end")   # the reference's builtins (va_copy
 # MOF offset, MSZ size, MPT pointer depth, MBS base size.  Measured: each member is
 # aligned to its own size, the struct's size is rounded up to its largest member
 # (struct { char c; long x; short s; int *p; int i; }: c@0 x@8 s@16 p@24 i@32, size 40).
-SBB = 1000       # base code of a struct: SBB + sid (a local's BASE; its size is SSZ[sid])
+SBB = 3840       # base code of a struct: SBB + sid (a local's BASE; its size is SSZ[sid]).
+                 # 1000 until 2026-09-30: the function-signature pool of the E3 parser lives in
+                 # [FPS_FIRST, SBB) and 872 codes ran out at thirty units, each with its own
+                 # renamed static copy of the libc bodies (R13-0b #27, sbase); 3840 leaves
+                 # 3712 signatures and still keeps SBB + STRUCT_MAX (128) below 4096.
 STAG, SSZ, MOF, MSZ, MPT, MBS = (21 * 10 ** 6, 22 * 10 ** 6, 23 * 10 ** 6, 24 * 10 ** 6,
                                  25 * 10 ** 6, 26 * 10 ** 6)
 TWORDS = ("type", "type=void", "type=long", "type=char", "type=unsigned", "type=short", "type=signed")
