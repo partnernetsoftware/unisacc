@@ -19,6 +19,23 @@ implementations remain behavior references. `make classic-com` builds an
 explicit fallback at `out/unisacc-classic.com`; a model refusal never silently
 retries through it.
 
+### The bootstrap, and the two product names
+
+There are exactly two product names, and they mean two different things:
+
+| name | what it is | shipped? |
+| --- | --- | --- |
+| `unisacc-seed.com` | the **first generation**: built by the host, with the host's compiler as the `--via` | no -- a seed is a build input |
+| `unisacc.com` | the **final product**: the compiler rebuilt by the seed, and then by itself | yes |
+
+`make seed-com` writes the seed into `SEED_DIR` (default `/tmp/unisacc-seed-com`,
+private, outside the repository); `make com COMB=1` builds the second generation
+with `--via unisacc-seed.com`; making the third generation from the second
+produces byte-identical output, which is the fixed point `make comboot` checks.
+`exec/c/buildcompiler.sh` spells the file it writes `unisacc-next.com` while it
+is being built -- that is a name inside a build directory, it never leaves one,
+and it is not what either product is called.
+
 Published versions, their sizes, SHA-256 and acceptance receipts:
 [GitHub releases](https://github.com/partnernetsoftware/unisacc/releases), with
 the per-version rows and the current model byte ledger in
