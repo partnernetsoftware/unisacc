@@ -1,3 +1,10 @@
+/* LAYER (measured on candidate 0.0.13-dev4, 2026-09-30): E3, the signature pool.
+   dev4 rejects the build at `ctype.h:20:19: error: not covered: function signature
+   pool exhausted` (`static int isupper(...)`), i.e. while walking the bundled
+   header.  It carries a position, unlike the no-position rejects below.  Thirty
+   translation units exhaust a pool sized for fewer; the smallest repro is this
+   fixture's own `w*.c` set, and the pool is an E3 table, not a src/ limit.
+*/
 /* Driver for bug 27; the program is this file + 27-signature-pool/w1.c ..
    w30.c (each unit: #include stdio/stdlib/string/ctype, one static qsort
    comparator, one function calling ~12 common libc functions).
