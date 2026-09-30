@@ -100,7 +100,7 @@ job closure-c2  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==2')   # but 61 s be
 job closure-c3  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==3')
 job closure-c4  ./tests/closure.sh $(echo "$TC" | awk 'NR%4==0')
 job stages      ./tests/stages.sh examples/*.c tests/c/*.c
-job exec-chain  env CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt)   # S-17: network inference, E2/E1/E3
+job exec-chain  env CHAINKEEP=exec/c/keep-chain.txt ./exec/c/chain.sh $(cat exec/c/keep-chain.txt) examples/*.c tests/c/*.c   # S-17: all C probes, historical floor, named parity debt
 job exec-macros python3 ./exec/pp/macrocheck.py
 job exec-pp-literals python3 ./exec/pp/literalcheck.py
 job exec-pp-pragmas python3 ./exec/pp/pragmacheck.py

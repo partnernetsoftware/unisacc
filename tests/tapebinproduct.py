@@ -40,7 +40,7 @@ def main():
         host = "osx/arm64" if sys.platform == "darwin" else "lnx/x86_64"
         matched = 0
         known_tape_diffs = set()
-        for line in pathlib.Path("tests/tapebin.knownfail").read_text().splitlines():
+        for line in pathlib.Path("exec/c/chain.knownfail").read_text().splitlines():
             if not line or line.startswith("#"):
                 continue
             cols = line.split(maxsplit=2)

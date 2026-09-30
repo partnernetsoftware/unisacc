@@ -24,6 +24,19 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -gt 0 ] || { echo "no input files"; exit 1; }
 UA=${UA:-/tmp/ua_ref}; . "$R/tests/lib.sh"; ua_ready
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+# Gate passes the historical keep set plus the complete C probe glob.  Count
+# each path once, while keeping the fixed keep list as a non-regression floor.
+: > "$T/inputs"
+for f in "$@"; do
+    grep -Fxq "$f" "$T/inputs" || printf '%s\n' "$f" >> "$T/inputs"
+done
+set -- $(cat "$T/inputs")
+CHAINKNOWN=${CHAINKNOWN:-exec/c/chain.knownfail}
+awk 'NF < 4 || $2 != "R14-8" || $3 != "P1" { exit 1 } { print $1 }' "$CHAINKNOWN" > "$T/known" || { echo "chain: malformed knownfail"; exit 1; }
+[ -s "$T/known" ] || { echo "chain: empty knownfail"; exit 1; }
+for name in $(cat "$T/known"); do
+    { grep -Fxq "tests/c/$name" "$T/inputs" || grep -Fxq "examples/$name" "$T/inputs"; } || { echo "chain: missing known probe $name"; exit 1; }
+done
 b() { "$_BOUND" "$@"; }
 b 60 cc -O2 -std=c99 -w -o "$T/run" exec/c/run.c || { echo "chain: cc failed"; exit 1; }
 b 60 python3 exec/pp/gen.py "$T/e2.json" >/dev/null 2>&1 || { echo "chain: E2 gen failed"; exit 1; }
@@ -41,7 +54,7 @@ done
 if [ -n "${CHAINKEEP:-}" ]; then
     [ -s "$CHAINKEEP" ] || { echo "chain: CHAINKEEP names an empty list"; exit 1; }
 fi
-eq=0; nc=0; rj=0; bad=0; : > "$T/equal"
+eq=0; nc=0; rj=0; bad=0; known=0; revived=0; : > "$T/equal"
 for f in "$@"; do
     b 10 "$UA" "$f" -S -o - > "$T/ref" 2>/dev/null; rr=$?
     stage=""; rc=0; why=""
@@ -61,8 +74,19 @@ for f in "$@"; do
     elif [ $rc -ne 1 ]; then v=bad; why="$stage exited $rc: $why"
     else case "$why" in "reject: not covered"*) v=not-covered ;; *) v=rejected ;; esac
     fi
+    if grep -Fxq "${f##*/}" "$T/known"; then
+        if [ "$v" = bad ] && [ "$why" = "tape differs (reference rc=0)" ]; then
+            v=known
+        elif [ "$v" = equal ]; then
+            v=revived
+        else
+            v=bad; why="known probe changed verdict: $why"
+        fi
+    fi
     case $v in
     equal) eq=$((eq+1)); echo "$f" >> "$T/equal" ;;
+    known) known=$((known+1)); [ -n "${CHAINV:-}" ] && echo "  known $f  tape differs" ;;
+    revived) revived=$((revived+1)); echo "  REVIVED $f  remove it from chain.knownfail" ;;
     not-covered) nc=$((nc+1)) ;;
     rejected) rj=$((rj+1)); [ -n "${CHAINV:-}" ] && echo "  rejected $f  at $stage: $why" ;;
     bad) bad=$((bad+1)); echo "  BAD $f  ${stage:+at $stage: }$why" ;;
@@ -75,5 +99,5 @@ if [ -n "${CHAINKEEP:-}" ]; then
         grep -qx "$k" "$T/equal" || { echo "  LOST $k"; lost=$((lost+1)); }
     done
 fi
-echo "chain $MODEL  files $#   equal $eq   not-covered $nc   rejected $rj   bad $bad${CHAINKEEP:+   lost $lost}"
-[ $bad -eq 0 ] && [ $lost -eq 0 ] && [ $eq -gt 0 ]
+echo "chain $MODEL  files $#   equal $eq   known $known   revived $revived   not-covered $nc   rejected $rj   bad $bad${CHAINKEEP:+   lost $lost}"
+[ $bad -eq 0 ] && [ $revived -eq 0 ] && [ $lost -eq 0 ] && [ $eq -gt 0 ]

@@ -35,7 +35,7 @@ def check(text):
 
 def main():
     check('L:\n  nop\n.bss z 24\n.str a "x"\nL:\n.str a "y"\n  call L\n')
-    known = [line.split()[0] for line in pathlib.Path("tests/tapebin.knownfail").read_text().splitlines()
+    known = [line.split()[0] for line in pathlib.Path("exec/c/chain.knownfail").read_text().splitlines()
              if line and not line.startswith("#")]
     files = sorted(pathlib.Path("examples").glob("*.c")) + [pathlib.Path("tests/c") / name for name in known]
     if not files:
@@ -50,6 +50,12 @@ def main():
         ref = base / "ref"
         subprocess.run(["./tests/build_ref.sh", str(base / "ref.c"), str(ref)],
                        check=True, timeout=30)
+        all_sources = sorted(pathlib.Path("examples").glob("*.c")) + sorted(pathlib.Path("tests/c").glob("*.c"))
+        if not all_sources:
+            raise AssertionError("empty full probe set")
+        for path in all_sources:
+            text = subprocess.check_output([str(ref), str(path), "-t", "osx/arm64"], timeout=20)
+            check(text.decode("latin-1"))
         for path, text in tapes:
             plain = base / "probe.tape"
             binary = base / "probe.tapebin"
@@ -96,7 +102,7 @@ def main():
                 for source in (plain, binary)]
         if [(r.returncode, r.stdout) for r in runs][0] != [(r.returncode, r.stdout) for r in runs][1]:
             raise AssertionError("C reference run differs")
-    print("tapebin: %d C/Python byte-identical tapes, 6 target images, C run" % len(files))
+    print("tapebin: %d structural roundtrips, %d C/Python byte-identical tapes, 6 target images, C run" % (len(all_sources), len(files)))
 
 
 if __name__ == "__main__":
