@@ -805,6 +805,7 @@ def build(locations=False, warnings=False, errors=False):
     shape_control("sizeof-object")
     structured_control("sizeof2", False)
     strwalk("SZ.lwalk", "SZ.lbyte", "SZ.lend")
+    strwalk("CE.lwalk", "CE.lbyte", "CE.lend")   # sizeof("...") inside a constant expression
     structured_control("sizeof3", False)
     ordinary_control('dispatch', warnings)
     structured_control("address", False)

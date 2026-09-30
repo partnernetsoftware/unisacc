@@ -21,7 +21,7 @@ def install(E, P, levels, ops, enum_values, enum_defined):
     for name, method, slots in rows("stack"):
         p.acts = []
         sequences[name] = getattr(p, method)(*slots.split(",")).acts
-    tokens = dict(E.TK, identifier=E.TK_ID, number=E.TK_NUM)
+    tokens = dict(E.TK, identifier=E.TK_ID, number=E.TK_NUM, string=E.TK_STR)
     classes = {name: [tokens[token]] for name, token in rows("tokens")}
     # a cast or sizeof(TYPE) inside a constant expression starts with a type word or a tag keyword
     classes["typeword"] = sorted({tokens[w] for w in tokens if w.startswith("type")} | {tokens["struct"], tokens["union"], tokens["enum"]})
@@ -52,4 +52,4 @@ def install(E, P, levels, ops, enum_values, enum_defined):
             classes["comparison"] = list(map(int, comparison.split(","))) if comparison != "-" else []
             emit("prefix", bindings)
             emit(category, bindings)
-    emit("atom", dict(enum_values=enum_values, enum_defined=enum_defined))
+    emit("atom", dict(enum_values=enum_values, enum_defined=enum_defined, SKIPS=7 * (1 << 26)))   # SKIPS: gen2 POSSPAN region 7 -- a string sizeof() measured is not pooled
