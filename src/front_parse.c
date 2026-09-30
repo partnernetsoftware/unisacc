@@ -5491,9 +5491,11 @@ int fe_read(char *path) {
 
 /* Does the path end in ".c"?  Under `-run` this is what separates the
    inputs from the program's own arguments. */
+int istapebin(char *p);
 int isdotc(char *p) {
     int n;
     if (p[0] == 45 && p[1] == 0) return 1;         /* `-`: standard input */
+    if (istapebin(p)) return 1;
     n = 0; while (p[n]) n = n + 1;
     if (n < 2) return 0;
     if (p[n - 2] == 46 && p[n - 1] == 99) return 1;     /* .c */
@@ -5509,6 +5511,15 @@ int istape(char *p) {
     if (n < 5) return 0;
     return p[n - 5] == 46 && p[n - 4] == 116 && p[n - 3] == 97
         && p[n - 2] == 112 && p[n - 1] == 101;
+}
+
+int istapebin(char *p) {
+    int n;
+    n = 0; while (p[n]) n = n + 1;
+    if (n < 8) return 0;
+    return p[n - 8] == 46 && p[n - 7] == 116 && p[n - 6] == 97
+        && p[n - 5] == 112 && p[n - 4] == 101 && p[n - 3] == 98
+        && p[n - 2] == 105 && p[n - 1] == 110;
 }
 
 /* Read, preprocess and lex ONE file.  Split out of fe_tape so that several

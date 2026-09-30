@@ -11,12 +11,14 @@
    writing them AFTER the file and its own suites still spell it that way;
    the first argument that is not a flag is the input, and for `-run` what
    follows the input belongs to the PROGRAM. */
+int tb_read(char *path, int target, int force_origin);
+int tb_target_id(char *target);
 int main(void) {
-    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror;
+    int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror; int force_origin;
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
-    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0;
+    t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0;
     ninput = 0;
     ftrim_libc = 1;                 /* R11-3: library bodies on demand by default; -fno-trim-libc restores the full set */
     i = 1;
@@ -40,7 +42,8 @@ int main(void) {
             return 0;
         }
         if (a[0] == 45 && a[1]) {
-            if (a[1] == 73) {                              /* -I */
+            if (strsame(a, "--force-origin")) { force_origin = 1;
+            } else { if (a[1] == 73) {                              /* -I */
                 /* every -I, in order -- it used to keep only the last one */
                 if (noptinc < 16) {
                     if (a[2]) optincs[noptinc] = a + 2; else { i = i + 1; optincs[noptinc] = __argv(i); }
@@ -102,7 +105,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } }
+            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -136,7 +139,11 @@ int main(void) {
         depfile = dname;
     } }
     if (runit) {
-        if (fe_units(inputs, ninput, HOST_TARGET)) return 1;
+        if (istapebin(__argv(fi))) {
+            if (ninput != 1 || tb_read(__argv(fi), tb_target_id(HOST_TARGET), force_origin)) return 1;
+        } else { if (istape(__argv(fi))) {
+            if (ninput != 1 || fe_read(__argv(fi))) return 1;
+        } else { if (fe_units(inputs, ninput, HOST_TARGET)) return 1; } }
         if (werror && nwarn > 0) return 1;           /* -Werror: nothing runs */
         /* argv[0] is the program, which is its first source file; the rest
            of the line follows the inputs */
@@ -182,13 +189,14 @@ int main(void) {
             if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);
         }
         bkfd = ofd;
-        if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
+        if (istapebin(__argv(fi))) { if (ninput != 1 || tb_read(__argv(fi), tb_target_id(t), force_origin)) return 1; }
+        else { if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
         else {
             r = fe_units(inputs, ninput, t);
             if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
             if (r) return 1;
             if (werror && nwarn > 0) return 1;       /* -Werror: nothing written */
-        }
+        } }
         if (outpath && pponly == 0) {
             ofd = wopen(outpath);
             if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);

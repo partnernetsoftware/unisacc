@@ -16,6 +16,21 @@ HEADER = struct.Struct("<8s4H3I32sI")
 ENTRY = struct.Struct("<HHQQI")
 OPS = tuple(SHAPE)
 MAX_FILE = 1 << 30
+TARGETS = ("lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64",
+           "win/x86_64", "win/arm64")
+
+
+def target_id(name):
+    try:
+        return TARGETS.index(name) + 1
+    except ValueError:
+        raise ValueError("tapebin: unknown target " + name) from None
+
+
+def check_origin(tape, target, force=False):
+    origin = getattr(tape, "origin_target", 0)
+    if origin and origin != target_id(target) and not force:
+        raise ValueError("tapebin: origin target differs; use --force-origin to override")
 
 
 def _u(value):

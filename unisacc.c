@@ -15,3 +15,4 @@
 #include "src/back_encode.c"
 #include "src/tapeprune.c"
 #include "src/back_image.c"
+#include "src/tapebin.c"

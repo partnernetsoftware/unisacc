@@ -282,7 +282,19 @@ def cmd_tape(a):
     except Exception as e:
         print(str(e) if type(e).__name__ == "CDiag" else "%s: %s" % (type(e).__name__, e), file=sys.stderr)
         return 1
-    sys.stdout.write(t.to_text())
+    if a.tapebin:
+        from .tapebin import encode, target_id
+        # Until the existing text printer is switched to record order, the
+        # compiler's actual -S tape is the source of truth for this option.
+        from .tape import parse as tparse
+        blob = encode(tparse(t.to_text()), origin_target=target_id(a.target))
+        if a.out:
+            with open(a.out, "wb") as f:
+                f.write(blob)
+        else:
+            sys.stdout.buffer.write(blob)
+    else:
+        sys.stdout.write(t.to_text())
     return 0
 
 
@@ -343,8 +355,14 @@ def cmd_compile(a):
             from .tape import parse as tparse
             if len(a.file) != 1:
                 raise ValueError("--from-tape takes exactly one tape")
-            with open(a.file[0], encoding="latin-1") as f:
-                t = tparse(f.read())
+            if a.file[0].endswith(".tapebin"):
+                from .tapebin import decode, check_origin
+                with open(a.file[0], "rb") as f:
+                    t = decode(f.read())
+                check_origin(t, a.target, a.force_origin)
+            else:
+                with open(a.file[0], encoding="latin-1") as f:
+                    t = tparse(f.read())
         else:
             t = compile_file(a.file, o, a.target, getattr(a, "I", ()))
     except Exception as e:
@@ -691,6 +709,8 @@ def main(argv=None):
     tp.add_argument("-I", action="append", default=[],
                     metavar="DIR", help="header search path")
     tp.add_argument("--drive", default="built", choices=["gold", "spec", "combo", "built"])
+    tp.add_argument("--tapebin", action="store_true", help="write canonical tapebin v1")
+    tp.add_argument("-o", "--out", help="output path (with --tapebin)")
     tp.set_defaults(fn=cmd_tape)
 
     r = sub.add_parser("run")
@@ -714,7 +734,9 @@ def main(argv=None):
                     metavar="DIR", help="header search path")
     cp.add_argument("--drive", default="built", choices=["gold", "spec", "combo", "built"])
     cp.add_argument("--from-tape", action="store_true",
-                    help="input is a .tape, not C (lower + assemble only)")
+                    help="input is a .tape or .tapebin, not C (lower + assemble only)")
+    cp.add_argument("--force-origin", action="store_true",
+                    help="allow a tapebin's front-end origin target to differ")
     cp.set_defaults(fn=cmd_compile)
 
     ft = sub.add_parser("fat", help="one file, several architectures")

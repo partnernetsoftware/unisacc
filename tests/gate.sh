@@ -372,6 +372,8 @@ job shared-e2-tokens ./tests/sharede2.sh tokens
 job kernel      ./tests/kernel.sh
 job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
+job tapebin-roundtrip python3 ./tests/tapebin.py
+job tapebin-shape python3 -m unisa.tapebin_shape --check
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (research/r12-ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that
