@@ -38,11 +38,19 @@ def check(args,native_host):
             for cmd in cmds:
                 r=run(cmd+[str(f)]);assert r.returncode==0 and r.stdout==want,(name,r.returncode,r.stderr,r.stdout.hex(),want.hex())
             outputs[name]=want
-        for source in ['a:\na:\n','jump absent\n','call absent\n','jumpz x0, absent\n',':\n','a: nop\n','jumpz 0, a\na:\n']:
+        # `call absent` is no longer a refusal: it encodes as bl to text offset 0, as the C back end's
+        # bk_label and unisa.assemble answer for a label nobody defines (R13-0b #31: E3 lets such a call
+        # through only in a block it proved unreachable); jumps to undefined labels stay refused.
+        tp=parse('call absent\n',target='lnx/arm64')
+        for ins in tp.code: ins.meta['reloc']='arm26'
+        want,stats=assemble(tp); f.write_text('call absent\n')
+        for cmd in cmds:
+            r=run(cmd+[str(f)]);assert r.returncode==0 and r.stdout==want,('call absent',r.returncode,r.stderr,r.stdout.hex(),want.hex())
+        for source in ['a:\na:\n','jump absent\n','jumpz x0, absent\n',':\n','a: nop\n','jumpz 0, a\na:\n']:
             f.write_text(source)
             for cmd in cmds:
                 r=run(cmd+[str(f)]);assert r.returncode==1 and not r.stdout and b'not covered' in r.stderr,(source,r.returncode,r.stderr)
-        print('ARM64 branches: 10 fixtures on both executors; 6 worked byte expectations; 7 rejects')
+        print('ARM64 branches: 10 fixtures on both executors; 6 worked byte expectations; call absent = offset 0; 6 rejects')
         # Synthetic helper contexts: exercise the actual BR.range states without
         # materialising a 128 MB section. These are not full-layout fixtures.
         delta=json.loads(pathlib.Path(args[2]).read_text())
