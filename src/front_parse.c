@@ -2752,6 +2752,7 @@ int tycanon(int k, char *buf) {
 int binary(int level) {
     int k; int e; int lp; int lax; int rax; int ck; int res; int cl;
     int lf; int rf; int lk; int lfr; int rfr; int re; int rp; int lpd; int rpd; int lbase; int rbase;
+    int lsst; int rsst;           /* the struct each side points at, if any */
     char cb[4];
     if (level > 7) {
         if (havepre) { havepre = 0; return 0; }     /* parsed already, by expr */
@@ -2764,6 +2765,14 @@ int binary(int level) {
         loadval();
         e = curelem;
         lp = curptr;
+        /* The struct a pointer points AT: `p + 2` is still a `struct V *`,
+           so `(p + 2)->val` must find the member.  It was dropped here --
+           the pointer branch below restored curelem/curptr/curpd/curbase and
+           left curstruct at -1, so `->` reported "member access on something
+           that is not a struct" for every pointer that had been through
+           arithmetic (`p[2].val`, which takes the subscript path, worked).
+           Lua's s2v()/setobj macros are written as `&(L->top.p + idx)->val`. */
+        lsst = curstruct;
         lfr = curflt;                              /* float, or a pointee's */
         lf = 0; if (curptr == 0) { if (curstruct < 0) lf = curflt; }
         lk = fkind();
@@ -2775,6 +2784,7 @@ int binary(int level) {
         loadval();
         rf = 0; if (curptr == 0) { if (curstruct < 0) rf = curflt; }
         rfr = curflt; re = curelem; rp = curptr; rpd = curpd; rbase = curbase;
+        rsst = curstruct;
         rax = tyax();
         ck = tyask(lax, "+", 1, rax);              /* the conversion row */
         cl = tycanon(k, cb);
@@ -2830,8 +2840,10 @@ int binary(int level) {
         lvalue = 0; curstruct = 0 - 1; curdim2 = 0; curdim3 = 0;
         if (tyis(res, "ptr", 3)) { curelem = e; curptr = lp; curuns = 0; cursize = 8;
                                    curflt = lfr; curpd = lpd; curbase = lbase;
+                                   if (lp) curstruct = lsst;
                                    if (lp == 0) { curptr = 1; curelem = re; curflt = rfr;
-                                                  curpd = rpd; curbase = rbase; } }
+                                                  curpd = rpd; curbase = rbase;
+                                                  curstruct = rsst; } }
         else { curptr = 0; cursize = tysize(res); curelem = cursize;
                curuns = tyuns(res); curflt = 0; }
     }
@@ -2882,7 +2894,12 @@ int cond(void) {
     elab("  @ctrl.jumpz r0, __unisacc_L", els); ec(10);
     {   int save; int nsave; int k1; int k2; int a1; int cf;
         save = tp; nsave = nout;
-        expr(); loadval(); k1 = fkind(); a1 = tyax(); p1 = curptr; e1 = curelem;
+        /* The middle operand is an `expression`, not an `assignment-expression`
+           (C99 6.5.15), so an unparenthesised comma belongs to it:
+           `c ? f(), 7 : 0`.  It was parsed at the assignment level, which
+           stopped at the comma and then demanded a `:`.  stb_image_write.h's
+           stb_sb_free() expands to exactly that shape. */
+        exprc(); loadval(); k1 = fkind(); a1 = tyax(); p1 = curptr; e1 = curelem;
         elab("  @ctrl.jump __unisacc_L", end); ec(10);
         elab("__unisacc_L", els); es(":\n");
         need(tidx(":", 1), ":");
@@ -2897,7 +2914,7 @@ int cond(void) {
                was emitted before the second's type was known: again. */
             cf = tyis(tyask(a1, "+", 1, tyax()), "f64", 3) ? 8 : 4;
             tp = save; nout = nsave;
-            expr(); loadval(); fconv(fkind(), cf);
+            exprc(); loadval(); fconv(fkind(), cf);
             elab("  @ctrl.jump __unisacc_L", end); ec(10);
             elab("__unisacc_L", els); es(":\n");
             need(tidx(":", 1), ":");
