@@ -101,6 +101,7 @@ int main(int argc, char **argv) {
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
+    Buf srcres={0};                   /* \0cli/source: the main source path */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
@@ -220,6 +221,15 @@ int main(int argc, char **argv) {
         nimports=process_own_imports(cli+9,243,(long)process_own_imports);NRI=9+nimports;
 #endif
     }
+    /* The MAIN source's path, for the E2 stage to name in a diagnostic (and
+       for __FILE__, N17b): E2 is handed token bytes and never sees argv, so
+       the name has to travel as a resource like the -I list does.  Same shape:
+       the key starts with a NUL byte, `n` is the key length WITHOUT a NUL, and
+       the value is the path with no terminator.  It is only meaningful when E2
+       reads it, so nothing else has to change.  [N17b prerequisite] */
+    { Buf srcbuf={0}; if (src) argbytes(&srcbuf,src); }
+    srcres.n=0; if (src) argbytes(&srcres,src);
+    ARGRESOURCE(NRI,"\0cli/source",srcres); NRI++;
     ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
     ARGRESOURCE(NRI,"\0cli/error-limit",errorlimit); NRI++;
@@ -285,6 +295,7 @@ int main(int argc, char **argv) {
     unpackage(); RI=0; NRI=0;
     free(defs.b); free(defs.at); free(undefs.b); free(undefs.at);
     free(forced.b); free(forced.at); free(incdir.b); free(incdir.at);
+    free(srcres.b); free(srcres.at);
     free(werror.b); free(werror.at);
     if (rc) return rc;
     if (deps && mode!=1 && mode!=4 && !runit) {

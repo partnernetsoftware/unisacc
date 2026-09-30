@@ -166,6 +166,12 @@ if part in ('all','resources'):
         for key,values in [('defines',defs),('undefines',undefs),('includes',includes)]:
             files.cache[('\0cli/'+key).encode()]=b''.join(str(v).encode()+b'\0' for v in values)
         files.cache[b'\0cli/include-dir']=str(incdir).encode()
+        # \0cli/source: the main source's path, packed so the E2 stage can name
+        # the file it is reading (and __FILE__ can report it, N17b).  The key is
+        # NUL-prefixed and the VALUE has no terminator, exactly like
+        # include-dir above -- the '\0'-terminated form is for list-valued CLI
+        # resources (defines/undefines/includes) only.
+        files.cache[b'\0cli/source']=str(probe).encode()
         files.cache[b'\0cli/nostdinc']=b'\1' if nostd else b''
         verdict,out,_=sim.run(delta,probe.read_bytes(),str(probe),files,maxsteps=50000000,loaded=loaded)
         assert verdict=='accept' and out==want,(opts,verdict,out,want)
