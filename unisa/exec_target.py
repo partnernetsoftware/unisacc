@@ -148,8 +148,8 @@ class Machine:
             try:
                 fl, md = open_args(self.src_os, f0, m0)
                 return _os.open(path, fl, md)
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if op == "close":
             try:
                 _os.close(a0)

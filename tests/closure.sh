@@ -21,8 +21,15 @@ TARGETS="lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64"
 HOSTT=$(host_target)
 PAR_WAIT=4   # the host run waits on the first-launch scan
 . "$R/tests/par.sh"
+# tests/c also holds the red examples the reference is known to refuse
+# (tests/difftest.knownfail, the reference route's list): they cannot produce a
+# tape by design, so they are counted as known here instead of as DIFF.  A
+# listed probe that does compile is not checked further either -- difftest
+# owns the revived verdict.
+isknown() { grep -qs "^$1[[:space:]]" "$R/tests/difftest.knownfail"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
+    if isknown "$b"; then D="$T/$b.d"; mkdir -p "$D"; echo known > "$D/verdict"; continue; fi
     throttle
     (
     D="$T/$b.d"; mkdir -p "$D"
@@ -46,7 +53,7 @@ for f in "$@"; do
         # 0.5-0.9 s XProtect scan, and the on-disk image is executed by
         # native.sh -- the same bytes, as the cmp above just proved.
         case "$f" in /*) src="$f";; *) src="$R/$f";; esac   # datashape passes absolute paths
-        (cd "$D" && "$_BOUND" --status "$D/run.status" 30 "$UA" "$src" -run > "$D/run.out" 2>>"$D/errors"); rrc=$?
+        (cd "$D" && "$_BOUND" --status "$D/run.status" 30 "$UA" -run "$src" > "$D/run.out" 2>>"$D/errors"); rrc=$?   # -run BEFORE the file: after it, -run is the program's argv[1] (fb12-03/06 disagreed with the VM for that alone)
         "$_BOUND" --status "$D/vm.status" 45 python3 -m unisa vm --os "${HOSTT%/*}" "$D/tape.$tt" > "$D/vm.out" 2>>"$D/errors"; vrc=$?
         rs=$(cat "$D/run.status" 2>/dev/null); vs=$(cat "$D/vm.status" 2>/dev/null)
         if [ -n "$rs" ] && [ -n "$vs" ] && [ $((rs & 127)) -eq 0 ] && [ $((vs & 127)) -eq 0 ] && [ "$rrc" -eq "$vrc" ] && cmp -s "$D/run.out" "$D/vm.out"; then echo ran >>"$D/verdict"; else echo RANWRONG >>"$D/verdict"; fi
@@ -54,11 +61,12 @@ for f in "$@"; do
     ) &
 done
 wait
-same=0; diff=0; refused=0; ran=0; ranwrong=0
+same=0; diff=0; refused=0; ran=0; ranwrong=0; known=0
 for f in "$@"; do
     b=$(basename "$f" .c)
     v="$T/$b.d/verdict"
     [ -s "$v" ] || { echo "  $b: missing verdict"; diff=$((diff+1)); continue; }
+    if grep -q '^known$' "$v"; then known=$((known+1)); echo "  known $b"; continue; fi
     if grep -q refused "$v"; then refused=$((refused+1)); continue; fi
     s=$(grep -c "^same" "$v"); d=$(grep -c "^DIFF" "$v")
     same=$((same+s)); diff=$((diff+d))
@@ -67,7 +75,7 @@ for f in "$@"; do
     grep -q RANWRONG "$v" && { ranwrong=$((ranwrong+1)); echo "  $b: the host image ran and disagreed with the VM"; }
 done
 echo
-echo "closure  images identical $same   differ $diff   (refused $refused)   host-run ok $ran   wrong $ranwrong"
+echo "closure  images identical $same   differ $diff   (refused $refused)   host-run ok $ran   wrong $ranwrong   known $known"
 # A suite that checked nothing is not green: `closure.sh` with no
 # probes once printed `identical 0 differ 0` and exited 0.
 [ "$diff" -eq 0 ] && [ "$ranwrong" -eq 0 ] && [ "$same" -gt 0 ]

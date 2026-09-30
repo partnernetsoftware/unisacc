@@ -16,7 +16,7 @@ for f in "$R"/tests/malloc/*.c; do
     b=$(basename "$f" .c)
     cc -w -o "$T/$b.cc" "$f" || { echo "  $b: cc failed"; bad=$((bad+1)); continue; }
     "$_BOUND" 20 "$T/$b.cc" > "$T/$b.want" 2>&1
-    "$_BOUND" 20 "$UA" "$f" -run > "$T/$b.run" 2>&1
+    "$_BOUND" 20 "$UA" -run "$f" > "$T/$b.run" 2>&1   # -run before the file: after it, -run is the program's argv[1]
     if cmp -s "$T/$b.want" "$T/$b.run"; then ok=$((ok+1)); else bad=$((bad+1)); echo "  $b: -run differs"; fi
     "$UA" "$f" -b "$HOSTT" > "$T/$b.img" 2>/dev/null && chmod +x "$T/$b.img"
     "$_BOUND" 20 "$T/$b.img" > "$T/$b.out" 2>&1

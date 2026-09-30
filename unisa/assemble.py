@@ -11,6 +11,17 @@ from .tape import DATA_BASE
 BACKEND = {"x86_64": emit_x86, "arm64": emit_arm}
 
 
+
+class _Labels(dict):
+    """The label table the encoders read.  A name never defined resolves to
+    offset 0, as the C back end's bk_label does for a label with no
+    definition (bklab_tpc < 0): such a `call` can only sit in a block the
+    unresolved-call check proved unreachable (R13-0b #31), and the two back
+    ends must produce the same bytes for it.  `in` still answers whether the
+    name is defined (emit_arm's .lea decision relies on that)."""
+    def __missing__(self, key):
+        return 0
+
 def assemble(tp):
     be = BACKEND[tp.arch]
     # Branch relaxation [S-10 #1].  Every branch starts in its long form;
@@ -36,8 +47,8 @@ def assemble(tp):
             offs.append(off)
             off += n
         end = off
-        labels = {name: offs[pc] if pc < len(offs) else end
-                  for name, pc in tp.labels.items()}
+        labels = _Labels((name, offs[pc] if pc < len(offs) else end)
+                         for name, pc in tp.labels.items())
         fits = [(pc, n) for pc, n, tgt in cand
                 if pc not in short and
                 -128 <= labels[tgt] - (offs[pc] + n) <= 127]

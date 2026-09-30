@@ -140,45 +140,45 @@ class VM:
                 return a2
             try:
                 return _os.write(a0, bytes(self.mem[a1:a1 + a2]))
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if name == "read":
             try:
                 d = _os.read(a0, a2)
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
             self.mem[a1:a1 + len(d)] = d
             return len(d)
         if name == "open":
             try:
                 fl, md = open_args(self.os, a1, a2)
                 return _os.open(self.cstr(a0).decode(), fl, md)
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if name == "close":
             try:
                 _os.close(a0)
                 return 0
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if name == "lseek":
             try:
                 off = a1 - (1 << 64) if a1 >= 1 << 63 else a1
                 return _os.lseek(a0, off, a2)
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if name == "unlink":
             try:
                 _os.unlink(self.cstr(a0).decode())
                 return 0
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if name == "rename":
             try:
                 _os.rename(self.cstr(a0).decode(), self.cstr(a1).decode())
                 return 0
-            except OSError:
-                return u64(-1)
+            except OSError as e:
+                return u64(-(e.errno or 1))   # -errno, as the native gates answer (fopen sets errno from it)
         if name == "exit":
             raise Halt(a0 & 0xFF)
         raise AssertionError("vm: unsupported syscall %r" % name)

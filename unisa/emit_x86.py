@@ -695,9 +695,11 @@ class _Zero:
         return k in self._l
 
     def __getitem__(self, k):
-        if k in self._l:
-            return 0
-        raise KeyError(k)
+        # a name never defined resolves to offset 0, as the C back end's
+        # bk_label does (bklab_tpc < 0): it can only occur in a block the
+        # unresolved-call check proved unreachable (R13-0b #31), and both
+        # back ends must produce the same bytes for it
+        return 0
 
 
 def size(ins, labels, short=False):
