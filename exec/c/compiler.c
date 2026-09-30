@@ -10,6 +10,7 @@
 #include "run.c"
 #undef UNISA_RUNTIME_LIBRARY
 #include "tapebin.h"
+#include "tapebin_emit.h"
 #include "memory.c"
 #include "../../src/host_dl.h"
 #ifdef _WIN32
@@ -36,6 +37,9 @@ static int clierror(const char *s) {
 }
 static int tapebin_path(const char *path) {
     size_t n=strlen(path);return n>=8&&!strcmp(path+n-8,".tapebin");
+}
+static int tape_path(const char *path) {
+    size_t n=strlen(path);return n>=5&&!strcmp(path+n-5,".tape");
 }
 static int tapebin_target(const char *target) {
     static const char *names[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
@@ -106,7 +110,7 @@ static char *process_environment(int argc,char **argv,int i) {
 
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
-    int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0;
+    int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
@@ -121,9 +125,10 @@ int main(int argc, char **argv) {
         else if (!strncmp(a,"-ferror-limit=",14)) { errorlimit.n=0; argbytes(&errorlimit,a+14); }
         else if (!strcmp(a,"-run")) runit = 1;
         else if (!strcmp(a,"--force-origin")) force_origin=1;
+        else if (!strcmp(a,"--tapebin")) emitbin=1;
         else if (runit && !strcmp(a,"--")) { argstart=i+1; break; }
         else if (runit && src && a[0]!='-') {
-            if(tapebin_path(src)){argstart=i;break;}
+            if(tapebin_path(src)||tape_path(src)){argstart=i;break;}
             size_t len=strlen(a);
             if (len>=2 && !strcmp(a+len-2,".c")) sources[nsources++]=a;
             else { argstart=i; break; }
@@ -176,8 +181,9 @@ int main(int argc, char **argv) {
         else { sources[nsources++]=a; if (!src) src = a; }
     }
     if (!src) return clierror("expected a C source file");
-    int isbin=tapebin_path(src);
-    if(isbin&&(nsources!=1||mode==1||mode==4))return clierror("tapebin needs one source and a tape/image/run output");
+    int isbin=tapebin_path(src), istape=tape_path(src), tape_input=isbin||istape;
+    if(tape_input&&(nsources!=1||mode==1||mode==4))return clierror("tape needs one source and a tape/image/run output");
+    if(emitbin&&(mode!=2||runit))return clierror("--tapebin needs -S or -c");
     if (nsources>1 && (mode==1 || mode==4)) return clierror("multiple preprocessing outputs not migrated");
 #ifdef UNISA_SINGLE_TARGET
     if (target && strcmp(target,UNISA_SINGLE_TARGET))
@@ -284,8 +290,8 @@ int main(int argc, char **argv) {
         }
     }
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
-    if (!rc && !(isbin && mode==2))
-        rc = isbin ? runroute_from(route,level ? "e4" : "prune",&in,src) : runroute(route,&in,src);
+    if (!rc && !(tape_input && mode==2))
+        rc = tape_input ? runroute_from(route,level ? "e4" : "prune",&in,src) : runroute(route,&in,src);
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
         snprintf(route,sizeof route,"%s/memory",target);
@@ -321,6 +327,8 @@ int main(int argc, char **argv) {
     free(srcres.b); free(srcres.at);
     free(werror.b); free(werror.at);
     if (rc) return rc;
+    if(emitbin&&tbc_encode_product(&in,tape_input ? 0 : tapebin_target(target)))
+        return clierror("cannot encode tapebin");
     if (deps && mode!=1 && mode!=4 && !runit) {
         char *name=0;
         if (!deps[0]) {

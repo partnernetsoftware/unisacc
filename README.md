@@ -61,6 +61,9 @@ machine). The C headers it needs travel inside it.
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target
 ./unisacc.com -O2 a.c b.c -b lnx/x86_64 -o prog
 ./unisacc.com -E file.c                     # preprocess only
+./unisacc.com hello.c -S --tapebin -o hello.tapebin # write the portable tape container
+./unisacc.com -run hello.tapebin            # run its recorded program
+./unisacc.com hello.tapebin -b osx/arm64 -o hello
 ```
 
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
@@ -83,6 +86,11 @@ machine). The C headers it needs travel inside it.
   systems that compile each file with `-c` and link later cannot use it
   directly. C11 features and GCC extensions (statement expressions, `_Generic`,
   empty structs, inline asm) are outside the subset.
+- **Tape origin:** `.tapebin` records the target selected when C was compiled
+  to tape. A different `-b` target is rejected unless `--force-origin` is
+  given; forcing it does not undo target-specific preprocessing. See the
+  [v1 format](docs/tapebin-v1.md). `--tapebin` with `-S`/`-c` writes the
+  container; the same file can be read by `-run` or `-b <target>`.
 
 ## Build it
 

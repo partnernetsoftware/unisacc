@@ -35,7 +35,9 @@ def check(text):
 
 def main():
     check('L:\n  nop\n.bss z 24\n.str a "x"\nL:\n.str a "y"\n  call L\n')
-    files = sorted(pathlib.Path("examples").glob("*.c"))[:10]
+    known = [line.split()[0] for line in pathlib.Path("tests/tapebin.knownfail").read_text().splitlines()
+             if line and not line.startswith("#")]
+    files = sorted(pathlib.Path("examples").glob("*.c")) + [pathlib.Path("tests/c") / name for name in known]
     if not files:
         raise AssertionError("no C inputs")
     tapes = []
