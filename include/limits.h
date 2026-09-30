@@ -22,7 +22,10 @@
 
 #define INT_MIN     (-2147483647 - 1)
 #define INT_MAX     2147483647
-#define UINT_MAX    4294967295
+/* U: C99 5.2.4.2.1 gives UINT_MAX the type unsigned int.  Without the
+   suffix the literal does not fit int and becomes long, so `UINT_MAX + 1`
+   was 4294967296 where gcc wraps to 0 (fb12-08b). */
+#define UINT_MAX    4294967295U
 
 #define LONG_MIN    (-9223372036854775807 - 1)
 #define LONG_MAX    9223372036854775807
