@@ -437,6 +437,7 @@ def structured_control(section, warnings, extra=None, sequence_bindings=None):
     bindings.update(STRUCT_LIMIT=STRUCT_MAX + 1, MEMBER_MASK=-MEMBER_STRIDE,
                     TAGUNDO1=TAGUNDO + 1, TAGUNDO2=TAGUNDO + 2, TAGUNDO3=TAGUNDO + 3)
     bindings.update(TDN=E.TDN, TDB=E.TDB, TDD=E.TDD, UNS=UNS, UNSIGNED_CHAR=UNS + 1, UNSIGNED_SHORT=UNS + 2)
+    bindings.update(STATICF=35 << 40)   # STATICF[label id] = 1 for a file-scope static function (unresolved.py reads it)
     bindings.update(extra or {})
     for part, prefix, kind, key in tape_rows("control-fresh.tsv"):
         if part == section:
