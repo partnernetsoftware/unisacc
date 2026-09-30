@@ -18,7 +18,7 @@ def install(E, P, tyinfo, tape, integers, bindings):
     classes = {name: [E.TK[token]] for name, token in (("char", "type=char"), ("short", "type=short"), ("long", "type=long"), ("int", "type=int"), ("comma", ","), ("close", "}"))}
     install_rules(E.g, root, "bitfields", sequences=texts, bindings=bindings, classes=classes, section="core")
     for op in ("+", "-"):
-        install_rules(E.g, root, "bitfields", bindings=dict(bindings, post="BF.post"+op, change="BF.change"+op, prebinary="BF.bin"+op, store="BF.store"+op, old="BF.old"+op, binary="OPX."+op), sequences=dict(texts, push=E.O(E.PUSH), rhs=E.O("  imm r0, 1\n"), popaddr=E.O("  load64 r1, [r7+0]\n  .frame -8\n"), reverse=E.O("  imm r2, 1\n  "+("sub64" if op=="+" else "add64")+" r0, r0, r2\n")), section="post")
+        install_rules(E.g, root, "bitfields", bindings=dict(bindings, post="BF.post"+op, change="BF.change"+op, prebinary="BF.bin"+op, store="BF.store"+op, old="BF.old"+op, boolpost="BF.boolpost"+op, boolchange="BF.boolchange"+op, boolstore="BF.boolstore"+op, boolold="BF.boolold"+op), sequences=dict(texts, push=E.O(E.PUSH), arith=E.O("  imm r0, 1\n  load64 r1, [r7+0]\n  .frame -8\n  "+("add64" if op=="+" else "sub64")+" r0, r1, r0\n"), boolarith=E.O("  imm r1, 1\n  "+("add64" if op=="+" else "sub64")+" r0, r0, r1\n"), savedaddr=E.O("  load64 r1, [r7+8]\n"), oldvalue=E.O("  load64 r0, [r7+0]\n  .frame -16\n")), section="post")
     # Unit sizes come from the existing integer type facts, never test layouts.
     sizes = sorted({size for name, (size, _, _) in tyinfo.items() if name.startswith(("i", "u"))})
     for procedure, kind in (("BF.LOAD0", "load0"), ("BF.LOAD4", "load4"), ("BF.STORE4", "store4")):

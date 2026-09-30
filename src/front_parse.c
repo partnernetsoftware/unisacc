@@ -1359,10 +1359,21 @@ int postfix(void) {
                 setkind(fk);
                 continue;
             } }
-            push();                                  /* old value */
+            /* A bit-field can wrap on store.  Keep the value read before the
+               update: reversing the converted new value is not its old value
+               (for example, an unsigned 5-bit 0 followed by postfix --). */
+            if (e2 >= BFTAG) push();                 /* saved old value */
+            push();                                  /* operand for emit_binop */
             es("  @lit.imm r0, "); en(step); ec(10);
             if (op == tidx("++", 2)) emit_binop(tidx("+", 1));
             else emit_binop(tidx("-", 1));
+            if (e2 >= BFTAG) {
+                es("  @mem.load r1, [r7+8]\n");
+                estore(e2);
+                es("  @mem.load r0, [r7+0]\n  @call.frame -16\n");
+                curelem = e2;
+                continue;
+            }
             pop1();                                  /* address */
             estore(e2);
             es("  @lit.imm r2, "); en(step); ec(10);
