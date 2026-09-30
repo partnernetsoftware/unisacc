@@ -786,7 +786,7 @@ int ireg_path[MAXIREG];   /* actual disk path, separate from display name */
 char incpaths[65536]; int nincpaths; int incdisk;
 int nireg;
 #define MAXSPL 4096
-long spl_at[MAXSPL]; int nspl;   /* joined continuation lines */
+long spl_at[MAXSPL]; int nspl;   /* joined continuation lines: the file line of each backslash, ascending */
 char fnpool[8192]; int nfnpool;
 char incname[64];                 /* the header being spliced, for the table */
 int nautoinc;                     /* `#include` lines WE put at the top */
@@ -1067,9 +1067,10 @@ int diag_at(long p, char *msg, char *kind) {
     if (inside < 0) {
         line = line - nautoinc;   /* the headers we added on the user's behalf */
         /* each joined continuation line is a line the file has that this
-           buffer does not */
+           buffer does not: spl_at holds file lines in ascending order, and
+           every join at or before the line in hand pushes it down by one */
         i = 0;
-        while (i < nspl) { if (spl_at[i] < p) line = line + 1; i = i + 1; }
+        while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
     }
     __write(2, fname, blen(fname));
     ec2(58); en2(line); ec2(58); en2(col);
@@ -1078,6 +1079,32 @@ int diag_at(long p, char *msg, char *kind) {
     ec2(10);
     err_line(p);
     return 0;
+}
+
+/* The line a buffer position is on, as the user counts it: diag_at's
+   arithmetic (header splices undone innermost first, then the headers we
+   added and the continuation lines we joined) without the printing.  This is
+   what `__LINE__` expands to [N17a]: the lexer already knew the answer for
+   every diagnostic, it only had to be spelled into the text. */
+long line_at(long p) {
+    long q; long line; int i; int inside;
+    if (p < 0) p = 0;
+    if (p > nsrc) p = nsrc;
+    line = 1 - prelines; q = 0;
+    while (q < p) { if (src[q] == 10) line = line + 1; q = q + 1; }
+    inside = 0 - 1;
+    i = nireg - 1;
+    while (i >= 0) {
+        if (line > ireg_ln[i] + ireg_nl[i]) line = line - ireg_nl[i];
+        else { if (line >= ireg_ln[i]) { inside = i; line = line - ireg_ln[i] + 1; break; } }
+        i = i - 1;
+    }
+    if (inside < 0) {
+        line = line - nautoinc;
+        i = 0;
+        while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
+    }
+    return line;
 }
 
 /* More than one error per run [S-15 C3].  There is no longjmp here, so an
@@ -1894,6 +1921,7 @@ int xol[XST]; int nxol;      /* token lists: arguments, bodies, results */
 int xbase;                   /* the stack floor of the expansion in hand */
 int xsrcon;                  /* below the floor is the rest of the source */
 int xsp; int xend; int xnl;  /* the source cursor, its end, newlines passed */
+int xepi;                    /* where the episode in hand was invoked (for __LINE__) */
 
 int xfull(char *what) {
     __write(2, "macro expansion too large: ", 27); __write(2, what, blen(what));
@@ -2333,6 +2361,21 @@ int xstep(int t, int tolist) {
     pp_seg = xs[t];
     if (ppnow) pp_seg = 0 - 1;
     m = mfind(p, xl[t]);
+    if (m < 0 && xl[t] == 8 && vsame("__LINE__", 0, p, 8)) {
+        /* the predefined macro inside an expansion: the line of the token
+           itself when it came from the source (an argument), else the line
+           the invocation that brought it here ends on (C99 6.10.8 leaves it
+           to the implementation; gcc and clang answer this) */
+        long v; int off; char d[24]; int nd;
+        v = xk[t] == 0 ? line_at(xo[t]) : line_at(xepi);
+        if (nxpool + 24 >= XPOOL) xfull("text");
+        off = nxpool; nd = 0;
+        if (v < 0) { xpool[nxpool] = 45; nxpool = nxpool + 1; v = 0 - v; }
+        while (1) { d[nd] = 48 + v % 10; nd = nd + 1; v = v / 10; if (v == 0) break; }
+        while (nd > 0) { nd = nd - 1; xpool[nxpool] = d[nd]; nxpool = nxpool + 1; }
+        xout(xnew(2, off, nxpool - off, 0, xw[t], xs[t]), tolist);
+        return 0;
+    }
     if (m < 0 || hs_has(xh[t], m + 1)) { xout(t, tolist); return 0; }
     if (macfn[m] == 0) {
         h = hs_add(xh[t], m + 1);
@@ -2381,12 +2424,25 @@ int xrange(int from, int to) {
                 if (q < to) { if ((src[q] & 255) == 40) k = 1; }
             }
         }
+        if (k == 0 && m < 0 && j - i == 8 && srcis(i, 8, "__LINE__")) {
+            /* the predefined macro: the digits of this position's line */
+            long v; char d[24]; int nd;
+            v = line_at(i); nd = 0;
+            if (v < 0) { eput(45); v = 0 - v; }
+            while (1) { d[nd] = 48 + v % 10; nd = nd + 1; v = v / 10; if (v == 0) break; }
+            while (nd > 0) { nd = nd - 1; eput(d[nd] & 255); }
+            i = j; continue;
+        }
         if (k == 0) { eputsrc(i, j); i = j; continue; }
         /* an episode */
         nxt = 0; nhs = 1; nxst = 0; nxol = 0; nxpool = 0;
-        xbase = 0; xsrcon = 1; xsp = i; xend = to; xnl = 0;
+        xbase = 0; xsrcon = 1; xsp = i; xend = to; xnl = 0; xepi = i;
         t = xnext();
         xstep(t, 0);
+        /* the body's __LINE__ is the line the invocation ENDS on (gcc and
+           clang: the closing parenthesis); xsp is just past it now, and an
+           object-like macro ends where it starts */
+        xepi = xsp - 1;
         xrun(0);
         eput(32);
         while (xnl > 0) { eput(10); xnl = xnl - 1; }
@@ -2474,20 +2530,33 @@ int srcis(int p, int L, char *nm) {
 /* C99 phase 2: a backslash-newline pair is deleted, joining the two lines.
    It happens before tokenisation, so it applies inside literals too. */
 int splice(void) {
-    int i; int j;
-    i = 0; j = 0;
+    int i; int j; long ln;
+    i = 0; j = 0; ln = 1 - prelines;
     while (i < nsrc) {
         if (src[i] == 92) {                      /* backslash */
-            /* a joined line means one fewer newline than the file has */
+            /* a joined line means one fewer newline than the file has.
+               Recorded as the FILE LINE the backslash is on, not a buffer
+               offset: this pass runs before the headers are spliced in, so
+               an offset taken here is in a coordinate no later pass has,
+               and diag_at compared it with post-splice positions -- every
+               continuation line anywhere after an #include then counted as
+               "before" and every position ahead of it read one line too far
+               (h2.c:3 reported as :4) [N17a] */
+            /* Only the first pass records: it runs on the user's file alone,
+               so `ln` is that file's own line.  The re-run after a header
+               splice (incdo) sees only the header's continuation lines, in
+               buffer coordinates no reader of spl_at could relate to a file;
+               they are joined all the same. */
             if (src[i + 1] == 10) {
-                if (nspl < MAXSPL) { spl_at[nspl] = j; nspl = nspl + 1; }
-                i = i + 2; continue;
+                if (nspl < MAXSPL && nireg == 0) { spl_at[nspl] = ln; nspl = nspl + 1; }
+                i = i + 2; ln = ln + 1; continue;
             }
             if (src[i + 1] == 13) { if (src[i + 2] == 10) {
-                if (nspl < MAXSPL) { spl_at[nspl] = j; nspl = nspl + 1; }
-                i = i + 3; continue;
+                if (nspl < MAXSPL && nireg == 0) { spl_at[nspl] = ln; nspl = nspl + 1; }
+                i = i + 3; ln = ln + 1; continue;
             } }
         }
+        if (src[i] == 10) ln = ln + 1;
         src[j] = src[i]; j = j + 1; i = i + 1;
     }
     nsrc = j;
