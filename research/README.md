@@ -10,6 +10,7 @@
 | **Paper A** | 表即网络：用确定性模型推理替代 C99 编译 | 方法能否做成一个真实的编译器；理论依据（§1.1 已证 / 证据 / 未证） | [`unisacc-paper.md`](unisacc-paper.md) | 修订中 | cdx-unisacc 编辑，cc-unisacc 提供实现证据 |
 | **Paper B** | UJS：封闭 JavaScript 子集的构造式表网络 | 同一方法在第二门语言上是否成立 | [`ujs-paper.md`](ujs-paper.md) | 草稿 | csr |
 | **Paper C** | 把“确定性模型推理替代编译”推广为管道方法 | 为什么能推广、需要什么条件、能否机械化 | [`paper-c-intent.md`](paper-c-intent.md) | 意向书 | 待定 |
+| **Paper D** | 流水线上的可选内存安全节点：模型推断标注、确定性检查器验证、分级编译 | 不改一行 C99 能否拿到接近 Rust 的保证；保证从哪来、如何量化 | [`paper-d-intent.md`](paper-d-intent.md) | 意向书 | 待定 |
 
 A 与 B 分别提供 C99 子集与 UJS 的实现及验证证据；C 不重复这些工作，只把 A、B 当作证据引用。
 B 的方法命题一律引用 A；不编造延迟或准确率数字；不把 M3 写成 IntNet。
@@ -43,6 +44,12 @@ B 的方法命题一律引用 A；不编造延迟或准确率数字；不把 M3 
 | 文件 | 角色 |
 |---|---|
 | [`paper-c-intent.md`](paper-c-intent.md) | 意向书（方法、需要的理论、至少三个新场景、风险） |
+
+**Paper D**
+
+| 文件 | 角色 |
+|---|---|
+| [`paper-d-intent.md`](paper-d-intent.md) | 意向书（分工、三步、需要的理论、实验、风险）；工程条目在 plans/v0.1.x.md v0.1.3 |
 
 **三文共享**
 
