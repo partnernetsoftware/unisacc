@@ -182,7 +182,8 @@ def tytail():
         hit, nxt = "RESD." + name, "RESD.n" + name
         mask = O(TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1)) if unsigned and size < 8 else []
         structured_control("resd-row", False, dict(word_state=current, tail_current=current,
-            tail_test=P(current).fresh("b"), tail_hit=hit, tail_next=nxt, tail_axis=AX.index(name), tail_code=code),
+            tail_test=P(current).fresh("b"), tail_hit=hit, tail_mask_test=hit+".mask",
+            tail_next=nxt, tail_axis=AX.index(name), tail_code=code),
             dict(tail_initial=initial, tail_mask=mask))
         current, initial = nxt, []
     structured_control("resd-final", False, dict(tail_current=current), dict(tail_initial=initial))
