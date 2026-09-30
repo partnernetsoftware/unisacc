@@ -5558,7 +5558,7 @@ int fe_load(char *path, char *t) {
       while (q < noptinc) {
         char *d; int k2;
         d = optincs[q]; k2 = 0;
-        while (d[k2] && k2 < 60) { incdir[q][k2] = d[k2]; k2 = k2 + 1; }
+        while (d[k2] && k2 < 508) { incdir[q][k2] = d[k2]; k2 = k2 + 1; }
         if (k2 > 0 && incdir[q][k2 - 1] != 47) { incdir[q][k2] = 47; k2 = k2 + 1; }
         incdir[q][k2] = 0; iincdl[q] = k2;
         optincs[q] = incdir[q];

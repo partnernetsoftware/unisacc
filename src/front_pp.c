@@ -792,8 +792,11 @@ char incname[64];                 /* the header being spliced, for the table */
 int nautoinc;                     /* `#include` lines WE put at the top */
 char *srcpath;                    /* the file being compiled, for `"x.h"` */
 char optincdir[512]; int optincdl;   /* unused: kept so the symbols stay */
-char iincdl[16];                     /* each -I, normalised with a trailing slash */
-char incdir[16][64];                 /* ...and the normalised text itself */
+int iincdl[16];                      /* each -I, normalised with a trailing slash */
+char incdir[16][512];                /* ...and the normalised text itself: a temp
+                                        directory path is longer than the 60 bytes
+                                        this once held, and a truncated -I found
+                                        nothing (exec-driver-resources) */
 
 #define MAXINC MAXSRC    /* included source has the same limit as source */
 char incbuf[MAXINC];
