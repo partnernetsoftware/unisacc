@@ -583,7 +583,13 @@ def build(locations=False, warnings=False, errors=False):
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
     E.WORDS.append("type=_Bool"); E.TK["type=_Bool"] = max(E.TK.values()) + 1
-    E.tokenizer(("type=const", "type=volatile", "type=restrict", "type=inline"))
+    qualifiers = ("type=const", "type=volatile", "type=restrict", "type=inline")
+    E.tokenizer(qualifiers)
+    # The location/static readers replace NEXT later.  Keep the plain token
+    # decoder for lookahead; ordinary qualifier recursion must still pass
+    # through NEXT so each source token gets its ordinal.
+    assert "TN.raw" not in g.st
+    g.st["TN.raw"] = g.st["NEXT"]
     del g.st["NX"][1][64]
     for state,row in load_rules(Path(__file__).with_name("startup-entry.tsv"), {}, domain=[64]).items():
         for key,(target,actions) in row.items(): g.on(state,[key],target,actions)
@@ -890,6 +896,8 @@ def build(locations=False, warnings=False, errors=False):
     valueranks_install(E,P,dict(FPS_FN=FPS_FN,FPS_RB=FPS_RB,MBS=MBS,DBL=DBL,FLT=FLT))
     from layoutprovenance import parser as source_provenance
     start = source_provenance(E, P, start)
+    from parenfold import install as parenfold_install
+    parenfold_install(E, TIX, locations)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
