@@ -5450,13 +5450,19 @@ int fe_load(char *path, char *t) {
     srcpath = path;
     /* Source maps belong to this unit; warning counts belong to the program. */
     nspl = 0; nireg = 0; nfnpool = 0; nautoinc = 0;
+    /* normalise EACH -I with a trailing slash, in the order given; the search
+       walks them in that order */
     optincdl = 0;
-    if (optinc) {
-        k = 0;
-        while (optinc[k] && k < 500) { optincdir[k] = optinc[k]; k = k + 1; }
-        if (k > 0 && optincdir[k - 1] != 47) { optincdir[k] = 47; k = k + 1; }
-        optincdir[k] = 0; optincdl = k;
-    }
+    { int q; q = 0;
+      while (q < noptinc) {
+        char *d; int k2;
+        d = optincs[q]; k2 = 0;
+        while (d[k2] && k2 < 60) { incdir[q][k2] = d[k2]; k2 = k2 + 1; }
+        if (k2 > 0 && incdir[q][k2 - 1] != 47) { incdir[q][k2] = 47; k2 = k2 + 1; }
+        incdir[q][k2] = 0; iincdl[q] = k2;
+        optincs[q] = incdir[q];
+        q = q + 1;
+      } }
     toinit = 0; hasinit = 0; unevaluated = 0;
     fnresume = 0 - 1;
     /* `-` is standard input: the whole of it, in pieces */

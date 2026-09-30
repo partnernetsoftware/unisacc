@@ -41,7 +41,11 @@ int main(void) {
         }
         if (a[0] == 45 && a[1]) {
             if (a[1] == 73) {                              /* -I */
-                if (a[2]) optinc = a + 2; else { i = i + 1; optinc = __argv(i); }
+                /* every -I, in order -- it used to keep only the last one */
+                if (noptinc < 16) {
+                    if (a[2]) optincs[noptinc] = a + 2; else { i = i + 1; optincs[noptinc] = __argv(i); }
+                    noptinc = noptinc + 1;
+                }
             } else { if (a[1] == 68) {                     /* -D */
                 if (noptd < 16) {
                     if (a[2]) optd[noptd] = a + 2; else { i = i + 1; optd[noptd] = __argv(i); }

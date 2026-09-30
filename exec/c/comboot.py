@@ -35,6 +35,11 @@ REC = OUT / 'stages.json'
 SEED = pathlib.Path(os.environ.get('SEED_DIR', '/tmp/unisacc-seed-com')) / 'unisacc-seed.com'
 STAGE2 = ROOT / 'unisacc.com'
 STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
+# One buildcompiler step per bounded call: shared, the six targets, then pack.
+# `all` in one invocation is what does NOT fit the watchdog.
+STEP_LIST = ['shared', 'lnx/arm64', 'lnx/x86_64', 'osx/arm64', 'osx/x86_64',
+             'win/arm64', 'win/x86_64', 'pack']
+COMB_BUILD = SEED.parent / 'comb-build' 
 
 
 def sha(p):
@@ -99,23 +104,30 @@ def run(cmd, secs=55):
 
 
 def shard(name):
+    """One bounded piece of the gate.
+
+    A shard never runs the whole build: the whole build does not fit the
+    55-second rule, so each shard does the STEP_LIST of buildcompiler steps
+    for its stage -- and each of those is itself a bounded `make` call.  The
+    gate's four shards are seed, stage2, stage3 and the fixed-point compare.
+    """
     d = load()
     if name == 'seed':
-        # stage 1 already exists if `make seed-com` ran; build it here so the
-        # shard is self-contained, and record it either way
+        for st in STEP_LIST:
+            if run(['make', 'seed-com', 'SEED_STEP=%s' % st], 55) != 0:
+                raise SystemExit('comboot-shard seed: seed-com SEED_STEP=%s failed' % st)
         if not SEED.exists():
-            if run(['make', 'seed-com', 'COMB=0'], 55) != 0:
-                raise SystemExit('comboot-shard seed: make seed-com failed')
-        if not d.get('stage1') or d['stage1']['sha256'] != sha(SEED):
-            stage(1, SEED)
+            raise SystemExit('comboot-shard seed: no seed at %s' % SEED)
+        stage(1, SEED)
         return 0
     if name == 'stage2':
         if not SEED.exists():
-            raise SystemExit('comboot-shard stage2: run the seed shard first')
-        if run(['make', 'com', 'COMB=1', 'COM_OUT=unisacc.com'], 55) != 0:
-            raise SystemExit('comboot-shard stage2: make com COMB=1 failed')
+            raise SystemExit('comboot-shard stage2: no seed -- run the seed shard first')
+        for st in STEP_LIST:
+            if run(['make', 'com', 'COMB=1', 'COM_OUT=unisacc.com',
+                    'MODEL_DIR=%s' % COMB_BUILD, 'MODEL_STEP=%s' % st], 55) != 0:
+                raise SystemExit('comboot-shard stage2: step %s failed' % st)
         stage(2, STAGE2)
-        # the seed the sidecar was built from must be the one on disk
         if d.get('stage2', {}).get('built_by_sha256') == d.get('stage1', {}).get('sha256'):
             print('comboot-shard stage2: sidecar seed sha256 matches stage 1')
         else:
@@ -123,9 +135,12 @@ def shard(name):
         return 0
     if name == 'stage3':
         if not STAGE2.exists():
-            raise SystemExit('comboot-shard stage3: run the stage2 shard first')
-        if run(['make', 'com', 'COMB=1', 'COM_OUT=%s' % STAGE3], 55) != 0:
-            raise SystemExit('comboot-shard stage3: build failed')
+            raise SystemExit('comboot-shard stage3: no stage 2 -- run that shard first')
+        for st in STEP_LIST:
+            if run(['make', 'com', 'COMB=1',
+                    'COM_OUT=%s' % STAGE3, 'MODEL_DIR=%s' % COMB_BUILD,
+                    'MODEL_STEP=%s' % st], 55) != 0:
+                raise SystemExit('comboot-shard stage3: step %s failed' % st)
         stage(3, STAGE3)
         return 0
     if name == 'fixedpoint':

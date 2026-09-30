@@ -745,6 +745,12 @@ int ropen(char *path) {
    `-I dir` is searched before the built-in headers, `-D NAME[=n]` is
    predefined like any other macro. */
 char *optinc; int noptd; char *optd[16];
+/* -I is a LIST, like -D above, and ordered: a search tries them in the order
+   they were given.  It used to be one string that each -I overwrote, so
+   `-IincA -IincB` lost incA entirely and every build with two include
+   directories failed with a location-less `no such file for #include`
+   (R13-0b #22).  -D had the right shape all along; -I now matches it. */
+char *optincs[16]; int noptinc;
 /* The rest of what a Makefile passes [S-15 C1]: -U names, -include files,
    -nostdinc, and stdin as an input. */
 int noptu; char *optu[16];
@@ -785,7 +791,9 @@ char fnpool[8192]; int nfnpool;
 char incname[64];                 /* the header being spliced, for the table */
 int nautoinc;                     /* `#include` lines WE put at the top */
 char *srcpath;                    /* the file being compiled, for `"x.h"` */
-char optincdir[512]; int optincdl; /* -I, normalised with a trailing slash */
+char optincdir[512]; int optincdl;   /* unused: kept so the symbols stay */
+char iincdl[16];                     /* each -I, normalised with a trailing slash */
+char incdir[16][64];                 /* ...and the normalised text itself */
 
 #define MAXINC MAXSRC    /* included source has the same limit as source */
 char incbuf[MAXINC];
@@ -917,7 +925,11 @@ int incdo(int ls, int le, int from) {
         while (a[k]) { if (a[k] == 47) dl = k + 1; k = k + 1; }
         n = inctry(a, dl, nm, nl);
     }
-    if (n < 0) { if (optincdl) n = inctry(optincdir, optincdl, nm, nl); }
+    /* every -I in the order given; the including file's own directory has
+       already been tried above, and the bundled include/ comes after */
+    if (n < 0) { int q; q = 0;
+        while (q < noptinc) { if (n < 0) n = inctry(optincs[q], iincdl[q], nm, nl); q = q + 1; }
+    }
     if (n < 0) n = inctry("include/", 8, nm, nl);
     if (n < 0) { incdisk = 0; n = hdr_read(nm, nl); } /* embedded [S-11] */
     if (n < 0) {
