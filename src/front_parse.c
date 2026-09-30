@@ -129,6 +129,13 @@ int fnresume;             /* where a nested declarator's body starts, or -1 */
    call through it returns a pointer to, or -1.  fpretfp: the declarator
    just parsed points to a function that itself returns a function pointer. */
 int curfn; int curfnst; int fpretfp; int vcst; int vcfn;
+/* The width a call's value comes back as, when the callee is not a symbol we
+   can look up: `((double (*)(void)) vp)()` knows its return type only from
+   the cast.  vcst already carries a struct-pointer result and vcfn "returns a
+   function pointer"; vcflt is the same channel for a float.  Without it the
+   call result was an i64 and `printf("%g", ((double (*)(void))vp)())` printed
+   the BITS of 7.0 (4.61957e+18). */
+int vcflt;
 int curbool;                /* the lvalue in hand is _Bool [C99 6.3.1.2] */
 int fntok = 0 - 1;          /* the name token of the function being walked,
                                for C99's predefined `__func__` */
@@ -1276,6 +1283,17 @@ int postfix(void) {
             /* a call through whatever the expression produced: `pick()(3, 4)`,
                `s->f(5, 6)`.  The parse table said `call`; do it. */
             vcst = curfnst;
+            /* The callee's return type is known RIGHT HERE and nowhere else
+               for a cast: `((double (*)(void)) vp)()` -- the cast set
+               curflt, and vcall's result block would reset it to 0, so the
+               double came back as its bit pattern.  Remember it on the same
+               channel vcst/vcfn use; a plain `f()` still gets its type from
+               the symbol via callres(). */
+            /* curptr is 1 here -- the callee is a POINTER to a function, and
+               that is exactly the cast case; requiring curptr == 0 threw the
+               information away.  What must not leak is a result that is
+               itself a pointer or a struct (a float never is). */
+            if (curfn == 0 && curstruct < 0) vcflt = curflt;
             loadval();
             return vcall(0);
         }
@@ -1440,6 +1458,7 @@ int icall(int si, int t) {
     if (icparen) { icparen = 0; need(tidx(")", 1), ")"); }
     vcst = symcst[si];
     vcfn = symfpret[si];
+    vcflt = symflt[si];                   /* the symbol's own return type wins */
     return vcall(symfp[si] == 2);
 }
 
@@ -1478,6 +1497,8 @@ int vcall(int var) {
     }
     lvalue = 0; curelem = 8; curptr = 0; curuns = 0; cursize = 8; curstruct = 0 - 1;
     curfn = 0; curfnst = 0 - 1; curflt = 0;
+    if (vcflt) { curflt = vcflt; cursize = vcflt; curelem = vcflt; curuns = 0; }
+    vcflt = 0;
     /* the pointee returns a struct pointer: `go()()->zerofunc` */
     if (vcst >= 0) { curstruct = vcst; curptr = 1; curelem = stsize[vcst]; }
     vcst = 0 - 1;
