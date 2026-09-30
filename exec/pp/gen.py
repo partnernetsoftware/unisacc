@@ -260,6 +260,7 @@ def sbconst(s):
 # poison bit; && || ?: drop the poison of the operand they do not evaluate.
 # XUB uses a separate sparse region (IRNAME is 1 << 40); all its indexing is A64I.
 XOB, XVB, XPB, XPRB, XUB = 64 * 10 ** 6, 65 * 10 ** 6, 66 * 10 ** 6, 67 * 10 ** 6, 2 << 40
+IRPATH = 3 << 40   # IRPATH[region] = blob of the include's resolved path (nested quoted includes)
 # code: (spelling, prec, arity)
 XOPS = {}
 for line in (Path(HERE) / "operators.tsv").read_text().splitlines():
@@ -400,11 +401,14 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
             install_rules(g, HERE, "directive-action", links, section=w + "/" + PPT[(w, fl)])
 
     body_layout = {name: globals()[name] for name in ['F_BODY', 'F_FN', 'F_NP', 'F_P0', 'F_VAR', 'IRLN', 'IRNL', 'MAXP']}
-    body_layout["include_body"] = "INC.body" if locations else "INCOK"
+    # every include is recorded (name for the location envelope, resolved path for nested quoted
+    # includes, R13-0b #24): a quoted include inside a header is looked up beside that header,
+    # which the reference finds through its include-region table (front_pp.c hdr_find).
+    body_layout["include_body"] = "INC.body"
+    body_layout["IRPATH"] = IRPATH
     install_rules(g, HERE, "directive-body", body_layout)
-    if locations:
-        from locations import IRNAME
-        install_rules(g, HERE, "include-location", {"IRNAME": IRNAME})
+    from locations import IRNAME
+    install_rules(g, HERE, "include-location", {"IRNAME": IRNAME, "IRPATH": IRPATH})
 
     install_rules(g, HERE, "rescan", {name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP']})
     if locations:
