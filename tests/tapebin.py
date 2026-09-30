@@ -53,6 +53,11 @@ def main():
             binary = base / "probe.tapebin"
             plain.write_bytes(text)
             binary.write_bytes(encode(text.decode("latin-1")))
+            c_binary = base / "probe-c.tapebin"
+            subprocess.run([str(ref), str(plain), "--tapebin", "-o", str(c_binary)],
+                           check=True, timeout=20)
+            if c_binary.read_bytes() != binary.read_bytes():
+                raise AssertionError("C/Python encoder bytes differ for " + str(path))
             images = []
             for source in (plain, binary):
                 image = base / ("probe-image-%d" % len(images))
@@ -89,7 +94,7 @@ def main():
                 for source in (plain, binary)]
         if [(r.returncode, r.stdout) for r in runs][0] != [(r.returncode, r.stdout) for r in runs][1]:
             raise AssertionError("C reference run differs")
-    print("tapebin: %d real structural/C-image tapes, 6 target images, C run" % len(files))
+    print("tapebin: %d C/Python byte-identical tapes, 6 target images, C run" % len(files))
 
 
 if __name__ == "__main__":
