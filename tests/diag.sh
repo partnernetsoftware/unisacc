@@ -276,13 +276,12 @@ poscase "$R/tests/fb12/34-arm64-fallback/main.c" "1:1" "ARM64 operand" builtin "
 # file it should name is the one the user wrote, not the executor
 poscase "$R/tests/fb12/24-nested-quoted-include/lib/sub/main.c" "5:1" "include" builtin "24-nested-quoted-include"
 fi
-if [ "$(basename "$UA")" = ua_ref ]; then
-    # the classic reference build has the 07 position; the product does not
-    poscase "$red/fb12-07-missing-header-diag.c" "5:11" "no such file for #include"
-else
-    # product route: both the position and the header name are still missing
-    poscase "$red/fb12-07-missing-header-diag.c" "5:11" "locale.h"
-fi
+# 07's own probe compiles since include/locale.h exists (8025200); the shape it
+# stood for -- a header that is not there -- keeps its case on a header nobody
+# bundles, on both routes: the reference through err_at, the product through
+# E2's DG.inc (the same file:line:col, the same words).
+{ echo '/* a header that no distribution bundles */'; echo; echo; echo; echo '#include <no_such_header_zz.h>'; echo 'int main(void) { return 0; }'; } > "$T/nohdr.c"
+poscase "$T/nohdr.c" "5:11" "no such file for #include"
 # The reference front end, where 31 reports `CError: line 853` for a 13-line
 # file -- a position in the compiler's spliced buffer passed off as the user's.
 # A wrong line is worse than no line.  This one is about the PYTHON front end,
