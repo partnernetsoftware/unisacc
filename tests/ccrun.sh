@@ -11,7 +11,9 @@ KNOWN=$R/tests/ccrun.knownwrong
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 pass=0; fail=0; uns=0; known=0; revived=0
 : > "$T/passing"
-isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
+PYFRONT=$R/tests/pyfront.knownfail   # Python-front-end gaps, shared with fat.sh/native.sh
+REFUSED=$R/tests/difftest.knownfail  # probes the C reference refuses on purpose (e.g. #21), as closure.sh/e4 treat them
+isknown() { grep -qs "^$1[[:space:]]" "$KNOWN" || grep -qs "^$1[[:space:]]" "$PYFRONT" || grep -qs "^$1[[:space:]]" "$REFUSED"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
     rm -f "$T/ref.status"
@@ -33,7 +35,7 @@ for f in "$@"; do
     if [ "$got" = "$want" ] && [ "$wrc" -eq "$grc" ]; then
         if isknown "$b"; then
             revived=$((revived+1))
-            printf "  REVIVED %s  now agrees -- drop it from ccrun.knownwrong\n" "$b"
+            printf "  REVIVED %s  now agrees -- drop it from ccrun.knownwrong / pyfront.knownfail\n" "$b"
         else
             pass=$((pass+1)); echo "$b" >> "$T/passing"
             printf "  ok   %-12s %s\n" "$b" "$got"

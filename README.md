@@ -1,9 +1,16 @@
 # unisacc
 
-A C99-subset compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
+A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE; no assembler, no linker), compiles itself, and ships as one
-file, `unisacc.com`. What is unusual is inside: every *table-shaped*
+file, `unisacc.com`. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+N1256); conformance is being tracked clause by clause (plans/v0.0.14.md
+R14-6), not asserted. Today the front end takes C99 as
+written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and the
+c-testsuite corpus compile and run), with two language gaps still open --
+`#line` and calls through a function pointer with six or more arguments --
+and a bundled C library that is a documented subset; both are itemised in
+[the limitations table](#known-limitations) below. What is unusual is inside: every *table-shaped*
 decision the compiler makes (lexing classes, preprocessor directives,
 operator precedence, types, instruction selection, ABI facts, peephole
 rewrites ...) is answered by a small integer neural network whose weights are

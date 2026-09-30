@@ -31,18 +31,18 @@ for f in "$@"; do
 done
 wait
 # B: the verdicts, in order.
-# tests/fat.knownfail: probes the PYTHON front end (which this suite drives)
+# tests/pyfront.knownfail: probes the PYTHON front end (which this suite drives)
 # does not handle yet, one per line, the same contract as the other lists: a
 # listed probe may fail, a listed probe that passes on both slices is a
 # failure -- delete its line.  The C reference and the product are checked
 # by difftest/closure; this list is the Python control group's debt.
-isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/fat.knownfail"; }
+isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/pyfront.knownfail"; }
 known=0; revived=0
 for f in "$@"; do
     b=$(basename "$f" .c)
     if isknown "$b"; then
         if [ -f "$T/$b.xc" ] && [ "$(cat "$T/$b.a")" = "$(cat "$T/$b.want")" ] && [ "$(cat "$T/$b.x")" = "$(cat "$T/$b.want")" ] && [ "$(cat "$T/$b.ac")" = "$(cat "$T/$b.wc")" ]; then
-            revived=$((revived+1)); printf "       %-14s is listed in fat.knownfail but passes: delete its line\n" "$b"
+            revived=$((revived+1)); printf "       %-14s is listed in pyfront.knownfail but passes: delete its line\n" "$b"
         else known=$((known+1)); fi
         continue
     fi

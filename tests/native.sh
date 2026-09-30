@@ -23,6 +23,12 @@ PAR_WAIT=4   # mostly the first-launch scan: waiting, not computing
 # A: build, sign and run every probe, PAR at a time.  Most of the time here
 # is macOS vetting each freshly signed image on its first launch -- waiting,
 # not computing -- so this overlaps well.
+# tests/pyfront.knownfail: probes the PYTHON front end (which compiles the interp
+# side here) is known not to accept yet; listed names count as known, and a
+# listed name that agrees is a revived failure (delete its line).  Shared with
+# tests/fat.sh and tests/ccrun.sh.
+known=0; revived=0
+isknown() { grep -qs "^$1[[:space:]]" "$(dirname "$0")/pyfront.knownfail"; }
 for f in "$@"; do
     b=$(basename "$f" .c)
     throttle
@@ -48,14 +54,21 @@ for f in "$@"; do
     want=$(cat "$T/$b.want"); wcode=$(cat "$T/$b.wcode")
     got=$(cat "$T/$b.got"); gcode=$(cat "$T/$b.gcode")
     if [ "$got" = "$want" ] && [ "$gcode" = "$wcode" ]; then
-        pass=$((pass+1)); printf "  ok   %-10s %s\n" "$b" "$(echo "$got"|head -1)"
+        if isknown "$b"; then
+            revived=$((revived+1)); fail=$((fail+1))
+            printf "       %-10s is listed in pyfront.knownfail but agrees: delete its line\n" "$b"
+        else
+            pass=$((pass+1)); printf "  ok   %-10s %s\n" "$b" "$(echo "$got"|head -1)"
+        fi
+    elif isknown "$b"; then
+        known=$((known+1))
     else
         fail=$((fail+1)); printf "  FAIL %-10s native '%s'(%s) vs interp '%s'(%s)\n" \
             "$b" "$got" "$gcode" "$want" "$wcode"
     fi
 done
 rm -rf "$T"
-echo; echo "native $pass   mismatch $fail"
+echo; echo "native $pass   mismatch $fail   known $known   revived $revived"
 # A suite that checked nothing is not green: `closure.sh` with no
 # probes once printed `identical 0 differ 0` and exited 0.
 [ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]
