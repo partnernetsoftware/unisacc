@@ -2,8 +2,10 @@
 
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
-signature, PE; no assembler, no linker), compiles itself, and ships as one
-file, `unisacc.com`. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+signature, PE) directly from its own encoders, compiles itself, and ships as one
+file, `unisacc.com`. It does not yet produce object files, link, or
+assemble `.s` input; a staged toolchain (`-c` objects, a linker, an
+assembler, `ar`) is planned in [plans/v0.0.16.md](plans/v0.0.16.md) R16-7. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and

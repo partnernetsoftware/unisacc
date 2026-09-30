@@ -58,7 +58,7 @@ REGIONS = {
 }
 # Every document the rule applies to.  prd.tree.md and prd.map.md carry
 # generated stage tables too, and are held to the same rule.
-DOCS = ("README.md", "ARCHITECTURE.md", "prd.md", "prd.tree.md", "prd.map.md", "exec/README.md")
+DOCS = ("README.md", "ARCHITECTURE.md", "prd.md", "spec.md", "prd.tree.md", "prd.map.md", "exec/README.md")
 
 # A line is exempt when it is a version-table row (a pipe row naming a version)
 # or when it names the wrong value on purpose.  These are the smallest

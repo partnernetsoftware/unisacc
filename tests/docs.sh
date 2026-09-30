@@ -81,7 +81,7 @@ fi
 # the Chinese spelling, the second used `[^|]*` between the two, which cannot
 # cross the `|` that separates the table's cells, so changing README's
 # `prd W-16` to `prd W-13` left the suite green both times.
-if grep -rnE "(调用约定|calling convention).*W-13|W-13.*(调用约定|calling convention)" README.md prd.md ARCHITECTURE.md exec/README.md 2>/dev/null | grep -q .; then
+if grep -rnE "(调用约定|calling convention).*W-13|W-13.*(调用约定|calling convention)" README.md prd.md spec.md ARCHITECTURE.md exec/README.md 2>/dev/null | grep -q .; then
     echo "a document still attributes the calling convention to W-13 (it is W-16)" >&2; lim_rc=1
 fi
 echo "docs  README limitations $([ "$lim_rc" -eq 0 ] && echo ok || echo MISSING)"
