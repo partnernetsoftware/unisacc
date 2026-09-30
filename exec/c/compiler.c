@@ -144,7 +144,9 @@ int main(int argc, char **argv) {
         } else if (a[0]=='-' && a[1]=='o' && a[2]) out = a+2;
         else if (!strcmp(a,"-I")) {
             if (++i >= argc) return clierror("missing include path"); INCDIR = argv[i];
-        } else if (a[0]=='-' && a[1]=='I' && a[2]) INCDIR = a+2;
+            if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--;   /* every -I, in order (R13-0b #22) */
+        } else if (a[0]=='-' && a[1]=='I' && a[2]) { INCDIR = a+2;
+            if (incdir.n) bput(&incdir,'\n',0); argbytes(&incdir,INCDIR); incdir.n--; }
         /* Same build-system compatibility as the reference product: no
            external linker/search path, and only the C language. These
            arguments are consumed, not interpreted as input file names. */
@@ -182,7 +184,6 @@ int main(int argc, char **argv) {
         if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
     }
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
-    if (INCDIR) { argbytes(&incdir,INCDIR); incdir.n--; }
     ResourceInput cli[256]; memset(cli,0,sizeof cli);int nimports=0;
     unsigned char process_argc[8],process_argv[8],memory_text[8],memory_data[8],process_dl[4][8];
     char **runargs=0;
