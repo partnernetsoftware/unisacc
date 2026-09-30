@@ -62,7 +62,7 @@ STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
 # step is individually wrapped by `run`, which is the invariant the ruling
 # states; the sum is deliberately not what the watchdog is asked to hold.
 STEP_LIST = ['shared', 'lnx/arm64', 'lnx/x86_64', 'osx/arm64', 'osx/x86_64',
-             'win/arm64', 'win/x86_64', 'pack']
+             'win/arm64', 'win/x86_64', 'pack-models', 'pack-driver']
 COMB_BUILD = SEED.parent / 'comb-build'
 HELLO = ROOT / 'examples' / 'hello.c'
 # The one probe every seed must pass: a compiler that cannot run a program is
@@ -195,8 +195,10 @@ def source_digest():
 def step_manifest(model_dir, st):
     """The file that proves a step ran: each target step writes <step>/manifest.json;
     pack writes no such file -- its proof is the artifact's build.json sidecar."""
-    if st == 'pack':
+    if st in ('pack', 'pack-driver'):
         return model_dir / 'unisacc-next.com.build.json'
+    if st == 'pack-models':
+        return model_dir / 'compiler.pkg'
     return model_dir / step_name(st) / 'manifest.json'
 
 

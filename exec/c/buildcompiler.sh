@@ -5,7 +5,7 @@ PYTHONHASHSEED=${PYTHONHASHSEED:-0}; export PYTHONHASHSEED
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -ge 1 ] && [ $# -le 2 ] || { echo 'usage: buildcompiler.sh OUTPUT_DIR [shared|OS/ARCH|pack]' >&2; exit 2; }
 step=${2:-all}
-case $step in all|shared|pack|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
+case $step in all|shared|pack|pack-models|pack-driver|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
 [ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
 mkdir -p "$1"; T=$(cd "$1" && pwd)
 b() { python3 "$R/tests/bound.py" 50 "$@"; }
@@ -82,7 +82,7 @@ target() {
     manifest write "$name"
     echo "completed compiler target $os/$arch"
 }
-pack() {
+pack_models() {
     source_start=$(b python3 exec/c/provenance.py identity)
     manifest check shared
     set --
@@ -98,15 +98,29 @@ pack() {
     codec_flag=
     case ${PACK_COMPRESSED:-1} in 0) codec_flag=--legacy-package;; 1) codec_flag=--compressed;; *) echo "PACK_COMPRESSED must be 0 or 1" >&2; exit 2;; esac
     b python3 exec/c/compilerpack.py $codec_flag --no-model-cache --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    [ -s "$T/compiler.pkg" ]
+    printf '%s\n' "$source_start" > "$T/compiler.pkg.source"   # the identity pack-driver seals with
+    echo "model package: $T/compiler.pkg"
+}
+pack_driver() {
+    # The second half of pack: the APE driver around the package pack-models wrote.
+    # Split out because with the SEED as UA (comboot stage 2/3) the whole of pack
+    # took ~50 s of CPU against a 55 s bound (R14-2 (2)).
+    [ -s "$T/compiler.pkg" ] && [ -s "$T/compiler.pkg.source" ] || { echo "pack-driver: run pack-models first" >&2; exit 1; }
+    source_start=$(cat "$T/compiler.pkg.source")
+    [ "$(b python3 exec/c/provenance.py identity)" = "$source_start" ] || { echo "pack-driver: sources changed since pack-models" >&2; exit 1; }
+    . ./tests/lib.sh
+    b sh -c 'R=$1; . "$R/tests/lib.sh"; ua_ready' seed "$R"
     product_version=$(python3 -c 'import re; from pathlib import Path; m=re.findall(r"#define UNISACC_VERSION \"([0-9.]+)\"",Path("src/version.h").read_text()); assert len(m)==1; print(m[0])')
     b python3 -m unisa ape exec/c/asmcompiler.c --via "$UA" -O2 --payload "$T/compiler.pkg" --product-name Unisacc --product-version "$product_version" -o "$T/unisacc-next.com"
-    [ -s "$T/compiler.pkg" ] && [ -s "$T/unisacc-next.com" ]
+    [ -s "$T/unisacc-next.com" ]
     manifest check shared
     for os in lnx osx win; do for arch in arm64 x86_64; do manifest check "$os-$arch"; done; done
     b python3 exec/c/provenance.py write "$T/unisacc-next.com" "$source_start"
     chmod +x "$T/unisacc-next.com"
     echo "development assembly/network compiler: $T/unisacc-next.com"
 }
+pack() { pack_models; pack_driver; }
 case $step in
     all)
         # One process-tree budget for the entire build, including all children.
@@ -127,5 +141,5 @@ case $step in
             sh "$script" "$out" win/x86_64
             sh "$script" "$out" pack
         ' model-build "$R/exec/c/buildcompiler.sh" "$T";;
-    shared) shared;; pack) pack;; *) target "$step";;
+    shared) shared;; pack) pack;; pack-models) pack_models;; pack-driver) pack_driver;; *) target "$step";;
 esac

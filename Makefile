@@ -165,7 +165,7 @@ classic-com: ref
 # existing builder. Run pack separately, after shared and all six targets.
 model-com:
 	@test -n "$(MODEL_DIR)" || { echo 'model-com: set MODEL_DIR to a private output directory' >&2; exit 2; }
-	@case "$(MODEL_STEP)" in shared|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64|pack) ;; *) echo 'model-com: set MODEL_STEP=shared|OS/ARCH|pack (see exec/c/BUILDING.md)' >&2; exit 2;; esac
+	@case "$(MODEL_STEP)" in shared|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64|pack|pack-models|pack-driver) ;; *) echo 'model-com: set MODEL_STEP=shared|OS/ARCH|pack|pack-models|pack-driver (see exec/c/BUILDING.md)' >&2; exit 2;; esac
 	@UA="$(UA)" python3 tests/bound.py 55 ./exec/c/buildcompiler.sh "$(MODEL_DIR)" "$(MODEL_STEP)"
 
 release:
