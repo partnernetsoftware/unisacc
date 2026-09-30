@@ -287,6 +287,11 @@ class Machine:
                     R[self.sp] = u64(R[self.sp] - 8)
                     self.st(R[self.sp], pc)
                     pc = R[a[0]]
+                elif o == "callm":
+                    target = self.ld(self.addr(a[0], a[1]))
+                    R[self.sp] = u64(R[self.sp] - 8)
+                    self.st(R[self.sp], pc)
+                    pc = target
                 elif o == "ret":
                     pc = self.ld(R[self.sp])
                     R[self.sp] = u64(R[self.sp] + 8)

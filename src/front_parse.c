@@ -1516,10 +1516,13 @@ int vcall(int var) {
         es("  @mem.load r5, [r7+"); en(8 * n); es("]\n  @call.callr r5\n");
         es("  @call.frame -"); en(8 * (n + 1)); ec(10);
     } else {
-        if (n > 5) err_tok(rp, "not covered: six indirect register arguments leave no callee register");   /* R13-0b #21 (0.0.14); positioned like the product [N8] */
         k = n - 1;
         while (k >= 0) { es("  @mem.load r"); en(k); es(", [r7+0]\n  @call.frame -8\n"); k = k - 1; }
-        es("  @mem.load r5, [r7+0]\n  @call.frame -8\n  @call.callr r5\n");
+        if (n == 6) {
+            /* All six argument registers are occupied.  The callee remains
+               in the next tape-stack slot; lowering chooses an ISA scratch. */
+            es("  callm r7, 0\n  @call.frame -8\n");
+        } else es("  @mem.load r5, [r7+0]\n  @call.frame -8\n  @call.callr r5\n");
     }
     lvalue = 0; curelem = 8; curptr = 0; curuns = 0; cursize = 8; curstruct = 0 - 1;
     curfn = 0; curfnst = 0 - 1; curflt = 0;

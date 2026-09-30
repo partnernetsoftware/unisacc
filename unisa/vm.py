@@ -299,6 +299,11 @@ class VM:
                     r[SP] = u64(r[SP] - 8)
                     self.st(r[SP], pc, 8)
                     pc = r[ri[a[0]]]
+                elif op == "callm":
+                    target = self.ld(self._addr(ri[a[0]], a[1]), 8)
+                    r[SP] = u64(r[SP] - 8)
+                    self.st(r[SP], pc, 8)
+                    pc = target
                 elif op == "ret":
                     pc = self.ld(r[SP], 8)
                     r[SP] = u64(r[SP] + 8)

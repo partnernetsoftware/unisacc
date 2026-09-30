@@ -281,9 +281,6 @@ poscase "$red/fb12-31-unused-static-refs-undefined.c" "12:41" "undefined functio
 if [ "$(basename "$UA")" != ua_ref ]; then
 # 28: multi-unit static declarator                       exec/parse2/units-reject.tsv
 poscase "$R/tests/fb12/28-anon-struct-static-multiunit/main.c" "6:1" "multi-unit static declarator" builtin "28-anon-struct-static-multiunit"
-# 21's product side reports something the reference does not, and without a
-# position where the reference has one             exec/parse2/callcontrol-result.tsv
-poscase "$red/fb12-21-indirect-call-six-args.c" "16:27" "six indirect register"
 # 35/36: `#if` over a function-like unknown identifier      exec/pp/ (expression)
 poscase "$R/tests/fb12/35-has-feature/main.c" "18:1" "not covered" builtin "35-has-feature"
 poscase "$R/tests/fb12/36-if-has-feature-toplevel/main.c" "12:1" "not covered" builtin "36-if-has-feature-toplevel"
@@ -311,6 +308,12 @@ printf "  rejection positions: %d named correctly, %d known missing, %d wrong\n"
     "$pos_ok" "$pos_known" "$pos_bad"
 [ "$pos_bad" -eq 0 ] && [ $((pos_ok + pos_known)) -gt 0 ] && [ "$pos_revived" -eq 0 ] \
     && ok=$((ok+1)) || bad=$((bad+1))
+
+# R14-0: the old positioned refusal is now a successful six-argument call.
+want=$(printf '15\n16')
+got=$("$_BOUND" 60 "$UA" -run "$red/fb12-21-indirect-call-six-args.c" 2>"$T/indirect6.err"); rc=$?
+if [ "$rc" -eq 0 ] && [ "$got" = "$want" ]; then ok=$((ok+1));
+else bad=$((bad+1)); echo "  FAIL indirect6: rc=$rc output=[$got]"; fi
 
 echo
 echo "diag  ok $ok   wrong $bad"

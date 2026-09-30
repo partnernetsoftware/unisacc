@@ -52,6 +52,7 @@ SHAPE = {
     "jumpz":   ("r", "L"),
     "call":    ("L",),
     "callr":   ("r",),
+    "callm":   ("r", "i"),  # target at [base+offset]; lower uses an ISA scratch
     ".hostcall": ("r", "r"), # native fixed-six integer/pointer ABI bridge
     ".librarycall": ("r", "r"), # model-declared injected library function, gated by resources
     ".libraryaddr": ("r", "s", "i", "i", "i", "i"), # declared borrowed data address and canonical ABI facts
@@ -167,6 +168,8 @@ def _quote(bs):
 
 def _fmt(ins):
     op, a = ins.op, ins.args
+    if op == "callm":
+        return "%-7s [%s%+d]" % (op, a[0], a[1])
     if op in ("load64", ".ld"):
         tail = ", %d" % a[3] if op == ".ld" else ""
         return "%-7s %s, [%s%+d]%s" % (op, a[0], a[1], a[2], tail)
@@ -261,7 +264,7 @@ def _regroup(op, toks):
     """[rb+K] was flattened to one token like 'r1+8' -- split it back."""
     out = []
     for tok in toks:
-        if op in ("load64", "store64", ".ld", ".st", ".zero") and \
+        if op in ("load64", "store64", ".ld", ".st", ".zero", "callm") and \
                 tok[:1] == "r" and ("+" in tok[1:] or "-" in tok[1:]):
             i = max(tok.rfind("+"), tok.rfind("-"))
             out.append(tok[:i])

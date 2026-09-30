@@ -14,7 +14,7 @@ Every child is bounded; nothing here fabricates a result.
 """
 import argparse, hashlib, json, os, pathlib, platform, subprocess, sys, time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-EXAMPLES = ['hello', 'fact', 'fib', 'ptr', 'struct', 'switch', 'do']
+EXAMPLES = ['hello', 'fact', 'fib', 'ptr', 'struct', 'switch', 'do', 'indirect6']
 HOST_EXAMPLES = ['host']   # prints host facts: must run (exit 0, output), not compared across machines
 DETERMINISTIC_APPS = ['calc', 'life', 'wordfreq', 'queens', 'bf', 'dijkstra', 'colorpack']
 SYSTEM_APPS = {  # name -> (args after '--', kind of check)

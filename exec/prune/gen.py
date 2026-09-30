@@ -223,7 +223,7 @@ p=state('FALLTEST');p.branch({(OPS['ret'],OPS['jump'],OPS['.exit']):'FALLDONE'},
 p=state('FALLEDGE');cp(p,'from','prev');cp(p,'to','u');p.call('EDGE');p.goto('FALLDONE')
 state('FALLDONE').a(('COPYW','prev','u'),('LDI','lastop',0)).goto('EDGEROW')
 p=state('EDGEROW');get(p,'v','RK','ri');test(p,'v',1,'EDGEOP','EDGENEXT',True)
-p=state('EDGEOP');get(p,'op','RO','ri');cp(p,'lastop','op');p.branch({(OPS['call'],OPS['jump'],OPS['jumpz']):'DIRECT',OPS['.lea']:'ADDRESS',OPS['callr']:'INDIRECT'},'EDGENEXT',[('RLD','op')])
+p=state('EDGEOP');get(p,'op','RO','ri');cp(p,'lastop','op');p.branch({(OPS['call'],OPS['jump'],OPS['jumpz']):'DIRECT',OPS['.lea']:'ADDRESS',(OPS['callr'],OPS['callm']):'INDIRECT'},'EDGENEXT',[('RLD','op')])
 p=state('DIRECT');mul(p,'argi','ri',8);test(p,'op',OPS['jumpz'],'DIRECTZ','DIRECTGET',True)
 state('DIRECTZ').a(('ALUI','add','argi','argi',1)).goto('DIRECTGET')
 p=state('DIRECTGET');get(p,'id','AN','argi');get(p,'lr','LAB','id');test(p,'lr',0,'FALLBACK','DIRECTEDGE',True)

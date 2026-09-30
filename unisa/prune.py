@@ -122,7 +122,7 @@ def prune_text_with_receipt(raw):
             elif target not in data_names:
                 try:int(target,0)
                 except ValueError:reasons.append('unresolved address '+target)
-        if op=='callr':units[owner]['callr']=True
+        if op in ('callr','callm'):units[owner]['callr']=True
     for owner,unit in enumerate(units[:-1]):
         code=[r for r in rows[unit['start']:unit['end']] if r['kind']=='instruction']
         if not code or code[-1]['op'] not in ['ret','jump','.exit']:unit['edges'].add(owner+1)

@@ -2577,8 +2577,12 @@ class Walker:
             for k in range(args - 1, -1, -1):
                 self.em.pop(ARGREGS[k])
                 self.em.arg(k, ARGREGS[k])
-            self.em.pop(CALLEE)
-            self.em.call_reg(CALLEE)
+            if args == len(ARGREGS):
+                self.em.call_mem(SP, 0)
+                self.em.frame(-8)
+            else:
+                self.em.pop(CALLEE)
+                self.em.call_reg(CALLEE)
         rt = I64
         if ty is not None:
             if ty.kind == "ptr" and ty.to is not None and ty.to.kind == "fn":
@@ -2693,9 +2697,13 @@ class Walker:
         if indirect:
             if stacked:
                 self.em.load(CALLEE, SP, 8 * len(args))
+            elif len(args) == len(ARGREGS):
+                self.em.call_mem(SP, 0)
+                self.em.frame(-8)
             else:
                 self.em.pop(CALLEE)
-            self.em.call_reg(CALLEE)
+            if stacked or len(args) < len(ARGREGS):
+                self.em.call_reg(CALLEE)
         else:
             tgt = s0.sym if s0 is not None and s0.kind == "fn" else name
             self.pending.setdefault(tgt, self.peek().line)

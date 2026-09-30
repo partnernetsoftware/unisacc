@@ -26,10 +26,10 @@ def wide_bytes(cps, width=WCHAR):
     for c in list(cps) + [0]:
         out += (c & ((1 << (width * 8)) - 1)).to_bytes(width, "little")
     return bytes(out)
-# r0..r4 carry arguments; r5 is reserved as the indirect-call scratch, because
-# popping a callee address into any argument register would clobber an argument
-# that is already in place.  Five arguments is the documented limit.
-ARGREGS = ("r0", "r1", "r2", "r3", "r4")
+# All six tape argument registers are available.  A six-argument indirect
+# call reads its callee from the next stack slot through callm; shorter calls
+# may still use r5 as a temporary for the callee address.
+ARGREGS = ("r0", "r1", "r2", "r3", "r4", "r5")
 CALLEE = "r5"
 
 # C operator -> (irsel family, flavor, swap operands?)
@@ -312,6 +312,9 @@ class Emitter:
 
     def call_reg(self, reg=ACC):
         self.emit(self.recipe("call", "callr"), reg)
+
+    def call_mem(self, base=SP, offset=0):
+        self.emit("callm", base, offset)
 
     def ret(self):
         self.emit(self.recipe("ctrl", "ret"))

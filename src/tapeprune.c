@@ -8,16 +8,17 @@
 #define tp_OP_JUMPZ 28
 #define tp_OP_LEA 25
 #define tp_OP_CALLR 30
+#define tp_OP_CALLM 68
 #define tp_OP_RET 33
 #define tp_OP_EXIT 38
 #define tp_OP_LOAD64 21
 #define tp_OP_LD 23
 #define tp_OP_ST 24
 #define tp_OP_ZERO 26
-#define tp_NOPS 68
+#define tp_NOPS 69
 #define tp_NREGS 8
-char *tp_opnames[tp_NOPS] = {"imm","mov","add64","sub64","mul64","xor64","and64","or64","shl64","shr64","lshr64",".div",".mod",".udiv",".umod","slt64","sle64","ult64","ule64","eq","ne","load64","store64",".ld",".st",".lea",".zero","jump","jumpz","call","callr",".hostcall",".hostaddr","ret",".frame",".arg",".print",".write",".exit",".sys",".sys6",".argc",".argv","nop","fadd64","fsub64","fmul64","fdiv64","flt64","fle64","feq64","fadd32","fsub32","fmul32","fdiv32","flt32","fle32","feq32","cvtid","cvtud","cvtis","cvtus","cvtdi","cvtdu","cvtsd","cvtds","fsqrt64","fsqrt32"};
-char *tp_opshapes[tp_NOPS] = {"ri","rr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rri","rir","rrii","riri","rs","rii","L","rL","L","r","rr","ri","","i","ir","r","rr","r","srrr","srrrrrr","r","rr","","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rr","rr","rr","rr","rr","rr","rr","rr","rr","rr"};
+char *tp_opnames[tp_NOPS] = {"imm","mov","add64","sub64","mul64","xor64","and64","or64","shl64","shr64","lshr64",".div",".mod",".udiv",".umod","slt64","sle64","ult64","ule64","eq","ne","load64","store64",".ld",".st",".lea",".zero","jump","jumpz","call","callr",".hostcall",".hostaddr","ret",".frame",".arg",".print",".write",".exit",".sys",".sys6",".argc",".argv","nop","fadd64","fsub64","fmul64","fdiv64","flt64","fle64","feq64","fadd32","fsub32","fmul32","fdiv32","flt32","fle32","feq32","cvtid","cvtud","cvtis","cvtus","cvtdi","cvtdu","cvtsd","cvtds","fsqrt64","fsqrt32","callm"};
+char *tp_opshapes[tp_NOPS] = {"ri","rr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rri","rir","rrii","riri","rs","rii","L","rL","L","r","rr","ri","","i","ir","r","rr","r","srrr","srrrrrr","r","rr","","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rrr","rr","rr","rr","rr","rr","rr","rr","rr","rr","rr","ri"};
 char *tp_regnames[tp_NREGS] = {"r0","r1","r2","r3","r4","r5","r6","r7"};
 #define tp_SRCMAX 2097152
 #define tp_ROWMAX 32768
@@ -108,7 +109,7 @@ int tp_analyze(void){int i,j,k,id,op,u,last,target,tail=0,pos=0,entry;
   if(op==tp_OP_CALL||op==tp_OP_JUMP||op==tp_OP_JUMPZ){k=tp_length(tp_opshapes[op])-1;id=tp_an[i*8+k];if(id<0||tp_lab[id]<0){tp_bad=1;return 0;}
    if(!tp_edge(u,tp_owner[tp_lab[id]]))return 0;}
   else if(op==tp_OP_LEA){id=tp_an[i*8+1];if(id>=0&&tp_lab[id]>=0)tp_roots[tp_owner[tp_lab[id]]]=1;else if(id>=0&&!tp_datum[id]){tp_bad=1;return 0;}}
-  if(op==tp_OP_CALLR)tp_hascallr[u]=1;
+  if(op==tp_OP_CALLR||op==tp_OP_CALLM)tp_hascallr[u]=1;
  }
  for(u=0;u+1<tp_un;u++){last=-1;for(i=tp_us[u];i<tp_ue[u];i++)if(tp_rk[i]==1)last=tp_ro[i];
   if(last!=tp_OP_RET&&last!=tp_OP_JUMP&&last!=tp_OP_EXIT)if(!tp_edge(u,u+1))return 0;}

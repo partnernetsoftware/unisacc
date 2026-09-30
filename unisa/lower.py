@@ -382,6 +382,13 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
                     facts(oracle, x, os_, arch, drive)
             tp.emit(fop, R(b.args[0]), R(b.args[1]), v)
             skip = 1
+        elif o == "callm":
+            scratch = "x16" if arch == "arm64" else "r11"
+            assert scratch not in set(rmap.values()), "callm scratch aliases tape register"
+            load = facts(oracle, "load64", os_, arch, drive)
+            tp.emit("load64", scratch, R(a[0]), a[1], form=load["form"])
+            callr = facts(oracle, "callr", os_, arch, drive)
+            tp.emit("callr", scratch, form=callr["form"])
         elif o in ("jump", "jumpz", "call"):
             kind = JMPKIND[o]
             rk = oracle.ask("reloc", (kind, arch))             # [L-1]

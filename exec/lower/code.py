@@ -75,6 +75,17 @@ def install(E, arch="x86_64", os_="lnx"):
     dispatch_bindings.update({'id:'+name: value for name, value in ids.items()})
     install_rules(g, Path(__file__).parent, 'code-entry', bindings=dispatch_bindings,
                   section='dispatch-'+arch)
+    # callm carries a tape-stack address, not an extra argument register.
+    # Materialise its target in an ISA-reserved scratch, then reuse callr.
+    scratch = 'x16' if arch == 'arm64' else 'r11'
+    assert scratch not in set(regmap.values()), 'callm scratch aliases tape register'
+    g.st['CM.original'] = g.st.pop('C.dispatch.base')
+    g.labels.add('CM.original')
+    P('C.dispatch.base').a(('CMP','op',ids['callm'])).branch({1:'CM.emit'},'CM.original')
+    (P('CM.emit').o('load64 '+scratch+', ').a(('COPYW','tok','a0')).call('PRINT')
+     .o(', ').a(('COPYW','tok','a1')).call('PRINT')
+     .o(' form='+enc['load64']+'\ncallr '+scratch+' form='+enc['callr']+'\n')
+     .goto('C.advance'))
     hostbindings={'id:'+name:value for name,value in ids.items()}
     hostbindings.update(test0=P('CH').fresh('b'),test1=P('CH').fresh('b'),
                         call='CH.call' if os_=='osx' else 'C.fail',
