@@ -43,7 +43,7 @@ chmod +x "$d/run.sh"
 : > "$d/env"
 for name in UA UA_RUN PAR SHARD LIMA_VM STRICT DRIVE CC CFLAGS JOBS TARGET NETWORK EXEC_CC \
     E4STRICT CHAINKEEP CHAINV E3KEEP E3V E3REF E3DUMP E3DELTA \
-    E2_AUTOINC E2REF E2NOAUTO; do
+    E2_AUTOINC E2REF E2NOAUTO MODEL_COM SEED_DIR GATE_STATE RELEASE_JOBS UNISACC_FFI_X86_PROVIDER; do
     eval 'present=${'"$name"'+x}'
     if [ "$present" = x ]; then
         eval 'value=${'"$name"'}'

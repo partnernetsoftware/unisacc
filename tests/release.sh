@@ -1,7 +1,11 @@
 #!/bin/bash
 # Bounded LOCAL acceptance of an already-built immutable model candidate.
 # MODEL_COM=/absolute/candidate GATE_STATE=/private/queue UA=/private/reference \
-#   ./tests/release.sh [--com]
+#   SEED_DIR=/private/seed ./tests/release.sh [--com]
+# The ONE supported shape (R14-2 5): --jobs 4 --window 50, run through
+# tests/term.sh with every variable given as `env NAME=value`; SEED_DIR holds
+# unisacc-seed.com (make seed-com) so the four com-comboot jobs verify instead
+# of skipping -- STRICT=1 turns a skipped comboot job into a failure.
 # Repeat the identical command after rc=75 (pending). Each invocation <=55s;
 # queue work gets 50s, leaving time for input checks and final copy verification.
 # Optional RELEASE_OUT receives this exact candidate only after local completion.
@@ -19,19 +23,21 @@ esac
 : "${MODEL_COM:?explicit already-built candidate required}"
 : "${GATE_STATE:?explicit persistent private queue directory required}"
 : "${UA:?explicit existing private reference required}"
+: "${SEED_DIR:?explicit seed directory required (make seed-com SEED_DIR=...); comboot jobs fail under STRICT=1 without it}"
+[ -s "$SEED_DIR/unisacc-seed.com" ] || { echo "release: no $SEED_DIR/unisacc-seed.com" >&2; exit 2; }
 [ -f "$MODEL_COM" ] && [ -x "$MODEL_COM" ] && [ -s "$MODEL_COM" ] || { echo 'release: missing/empty/non-executable MODEL_COM' >&2; exit 2; }
 [ "$UA" != /tmp/ua_ref ] && [ -f "$UA" ] && [ -x "$UA" ] || { echo 'release: UA must be an existing private reference' >&2; exit 2; }
 if [ "${RELEASE_BOUND:-0}" != 1 ]; then
     exec python3 "$R/tests/bound.py" 55 env RELEASE_BOUND=1 "$0" "$@"
 fi
 MODEL_COM=$(cd "$(dirname "$MODEL_COM")" && printf '%s/%s' "$PWD" "$(basename "$MODEL_COM")")
-export MODEL_COM UA STRICT=1
+export MODEL_COM UA SEED_DIR STRICT=1
 before=$(shasum -a 256 "$MODEL_COM"); before=${before%% *}
 printf 'local candidate: %s sha256 %s\n' "$MODEL_COM" "$before"
 # Invoke through tests/term.sh externally if desired; env arguments preserve
 # MODEL_COM explicitly across Terminal's whitelist. Never call ua_ready here.
 rc=0
-exclusive=(--exclusive-suite fat)  # bigclosure is six per-target jobs now (all.sh shape); no exclusive window
+exclusive=()  # fat is three ~17 s shards since 0.0.13 and no longer needs a window of its own
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 # the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
