@@ -413,6 +413,17 @@ if [ "$COM" = 1 ]; then
         job com-difftest_o-$shard UA="$PRODUCT" UA_RUN="$PRODUCT" SHARD=$shard/4 ./tests/difftest_o.sh
     done
     job com-fb12-multi MODEL_COM="$PRODUCT" ./tests/fb12multi.sh
+    # N22: the shipped compiler builds itself.  Four shards rather than one,
+    # because each stage's build does not fit the 60-second rule in a single
+    # invocation -- each shard does one stage's build (itself sharded by
+    # SEED_STEP) and its comparison.  The fixed-point shard is the one that
+    # matters: stage 2 and stage 3 must be byte-equal, and a mismatch is a
+    # defect to diagnose, not a warning.  SEED_DIR is private and outside the
+    # tree, so running this never leaves an artifact behind.
+    job com-comboot-seed       SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" python3 ./exec/c/comboot.py shard seed
+    job com-comboot-stage2     SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage2
+    job com-comboot-stage3     SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" UA="$PRODUCT" python3 ./exec/c/comboot.py shard stage3
+    job com-comboot-fixedpoint SEED_DIR="${SEED_DIR:-/tmp/unisacc-seed-comb-gate}" python3 ./exec/c/comboot.py shard fixedpoint
 fi
 [ "$LIST" = 0 ] || exit 0
 [ "$n" -gt 0 ] || { echo "gate: no suites executed" >&2; exit 2; }

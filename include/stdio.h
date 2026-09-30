@@ -460,6 +460,7 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
     int __u_plus;
     int __u_space;
     int __u_alt;
+    int __u_hh;
     int __u_neg;
     long __u_j;
     long __u_sv;
@@ -494,10 +495,11 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
             while (__u_fmt[__u_i] >= 48) { if (__u_fmt[__u_i] > 57) break;
                 __u_prec = __u_prec * 10 + (__u_fmt[__u_i] - 48); __u_i = __u_i + 1; }
         }
-        __u_lng = 0;
+        __u_lng = 0; __u_hh = 0;
         while (__u_fmt[__u_i] == 104 | __u_fmt[__u_i] == 108 | __u_fmt[__u_i] == 122 | __u_fmt[__u_i] == 106
                | __u_fmt[__u_i] == 116 | __u_fmt[__u_i] == 76) {
-            if (__u_fmt[__u_i] != 104) __u_lng = 1;      /* l, z, j, t, L are 64-bit */
+            if (__u_fmt[__u_i] == 104) __u_hh = __u_hh + 1;   /* h, hh: narrow */
+            else __u_lng = 1;                                /* l, z, j, t, L are 64-bit */
             __u_i = __u_i + 1;
         }
         __u_c = __u_fmt[__u_i];
@@ -529,7 +531,14 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
             } else {
                 if (__u_c == 100 | __u_c == 105) {
                     __u_sv = va_arg(__u_ap, long);
-                    if (__u_lng == 0) __u_sv = (int)__u_sv;       /* an int is 32 bits */
+                    /* C99 7.19.6.1p7: hh converts to signed/unsigned char and h
+                       to short, BEFORE the value is printed -- `%hhd` of 300 is
+                       44, and going through a char keeps the sign (`%hhd` of 200
+                       is -56).  Only the 32-bit narrowing was done, so 300 and
+                       70000 printed whole. */
+                    if (__u_hh == 2) { __u_sv = (signed char)__u_sv; }
+                    else { if (__u_hh == 1) { __u_sv = (short)__u_sv; }
+                           else { if (__u_lng == 0) __u_sv = (int)__u_sv; } }
                     if (__u_sv < 0) { __u_sign = 1; __u_uv = 0 - __u_sv; } else __u_uv = __u_sv;
                     __u_neg = __u_sign;
                 } else {
@@ -538,10 +547,12 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                     if (__u_c == 111) { __u_base = 8; }
                     if (__u_c == 112) { __u_base = 16; }
                     __u_uv = va_arg(__u_ap, unsigned long);
-                    if (__u_lng == 0) {
-                        if (__u_c == 117 | __u_c == 120 | __u_c == 88 | __u_c == 111)
-                            __u_uv = __u_uv & 4294967295;
-                    }
+                    if (__u_hh == 2) __u_uv = __u_uv & 255;       /* %hhu, %hhx */
+                    else { if (__u_hh == 1) __u_uv = __u_uv & 65535;   /* %hu, %hx */
+                           else { if (__u_lng == 0) {
+                               if (__u_c == 117 | __u_c == 120 | __u_c == 88 | __u_c == 111)
+                                   __u_uv = __u_uv & 4294967295;
+                           } } }
                 }
                 __u_start = _u_digits(__u_buf, __u_uv, __u_base, __u_upper);
                 __u_len = 24 - __u_start;
@@ -549,6 +560,23 @@ static int _u_vfmt(char *__u_out, long __u_cap, FILE *__u_f, const char *__u_fmt
                    leaves the form implementation-defined) */
                 if (__u_c == 112) { __u_start = __u_start - 2; __u_buf[__u_start] = 48;
                                     __u_buf[__u_start + 1] = 120; __u_len = __u_len + 2; }
+                /* C99 7.19.6.1p6 -- the `#` flag: %#x / %#X get 0x / 0X, %#o gets a
+                   leading 0.  The flag was parsed (__u_alt) and passed to the FLOAT
+                   formatter, but the integer path never looked at it, so `%#x` of
+                   255 printed `ff`.  For %#o a single leading zero is enough even
+                   when the digits already start with one (`%#o` of 8 is "010", not
+                   "0010").  A value of 0 gets no prefix for x/X (7.19.6.1p6 says
+                   the result is "0" either way). */
+                if (__u_alt) {
+                    if (__u_c == 111) {
+                        if (__u_buf[__u_start] != 48) {
+                            __u_start = __u_start - 1; __u_buf[__u_start] = 48; __u_len = __u_len + 1; } }
+                    else { if ((__u_c == 120 | __u_c == 88) && __u_uv != 0) {
+                        __u_start = __u_start - 2;
+                        __u_buf[__u_start] = 48;
+                        __u_buf[__u_start + 1] = __u_c == 88 ? 88 : 120;
+                        __u_len = __u_len + 2; } }
+                }
                 /* C99 7.19.6.1p5: an integer's precision is the MINIMUM
                    number of digits -- `%.2x` of 0 is "00".  Zeros go in
                    before the sign does. */
