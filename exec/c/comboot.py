@@ -202,9 +202,17 @@ def source_digest():
     return h.hexdigest()
 
 
+def step_manifest(model_dir, st):
+    """The file that proves a step ran: each target step writes <step>/manifest.json;
+    pack writes no such file -- its proof is the artifact's build.json sidecar."""
+    if st == 'pack':
+        return model_dir / 'unisacc-next.com.build.json'
+    return model_dir / step_name(st) / 'manifest.json'
+
+
 def step_done(model_dir, st):
     """Whether this step's artifacts are present AND from the current sources."""
-    manifest = model_dir / step_name(st) / 'manifest.json'
+    manifest = step_manifest(model_dir, st)
     marker = model_dir / ('step-' + st.replace('/', '_'))
     if not manifest.exists() or not marker.exists():
         return False
@@ -215,7 +223,7 @@ def step_done(model_dir, st):
 
 
 def mark_done(model_dir, st):
-    manifest = model_dir / step_name(st) / 'manifest.json'
+    manifest = step_manifest(model_dir, st)
     if not manifest.exists():
         raise SystemExit(
             'comboot: step %s reported success but wrote no %s; refusing to '
