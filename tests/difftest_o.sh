@@ -65,7 +65,7 @@ for f in "${FILES[@]}"; do
         cp "$D/want" "$key.$$" && mv "$key.$$" "$key" || { echo 'cache write failed' > "$D/v"; exit 0; }
     fi
     for o in -O0 -O1 -O2; do
-        if ! (cd "$D" && run "$D/got$o" "$D/err$o" "$UA" "$o" "$R/$f" -run); then
+        if ! (cd "$D" && run "$D/got$o" "$D/err$o" "$UA" "$o" -run "$R/$f"); then   # -run before the file: see difftest.sh
             echo 'run signaled/timed out' > "$D/fail$o"
         fi
     done
@@ -73,10 +73,23 @@ for f in "${FILES[@]}"; do
     ) &
 done
 wait
-ok=0; bad=0; refuse=0
+ok=0; bad=0; refuse=0; known=0; revived=0
+# The same knownfail contract as difftest.sh, chosen by driver kind: a listed
+# probe may be WRONG (counted as known), a listed probe that agrees at every
+# level is REVIVED and fails the run (delete its line).  Before 2026-09-30 this
+# suite had no list at all, so the gate's difftest_o-N were red for every open
+# R13 defect the reference still has.
+case "$UA" in *.com) KNOWN=$R/tests/difftest.com.knownfail;; *) KNOWN=$R/tests/difftest.knownfail;; esac
+isknown() { grep -qs "^$1[[:space:]]" "$KNOWN"; }
 for f in "${FILES[@]}"; do
     b=$(basename "$f" .c); D="$T/$b.d"
     [ "$b" = "host" ] && continue
+    if isknown "$b"; then
+        kw=0; for o in -O0 -O1 -O2; do cmp -s "$D/want" "$D/got$o" || kw=1; done
+        if [ "$kw" = 0 ]; then revived=$((revived+1)); printf "       %-14s is listed in %s but agrees at every level: delete its line\n" "$b" "$(basename "$KNOWN")"
+        else known=$((known+1)); echo "  known $b"; fi
+        continue
+    fi
     case "$(cat "$D/v" 2>/dev/null)" in
     done) ;;
     *) bad=$((bad+1)); echo "  FAIL $b: $(cat "$D/v" 2>/dev/null || echo no-verdict)"; continue;;
@@ -92,5 +105,5 @@ for f in "${FILES[@]}"; do
     done
 done
 echo
-echo "difftest_o SHARD=$SHARD probes=${#FILES[@]}  agree $ok   wrong $bad   refuse $refuse   (-O0 -O1 -O2 against cc -O2)"
-[ "$bad" -eq 0 ] && [ "$refuse" -eq 0 ] && [ "$ok" -gt 0 ]
+echo "difftest_o SHARD=$SHARD probes=${#FILES[@]}  agree $ok   wrong $bad   refuse $refuse   known $known   revived $revived   (-O0 -O1 -O2 against cc -O2)"
+[ "$bad" -eq 0 ] && [ "$refuse" -eq 0 ] && [ "$revived" -eq 0 ] && [ "$ok" -gt 0 ]

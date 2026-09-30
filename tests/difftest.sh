@@ -32,8 +32,18 @@ if [ -n "${UA:-}" ]; then
     U_RUN=${UA_RUN:-$UA}
     U_KIND=product
     [ -x "$U_RUN" ] || { echo "difftest: UA=$U_RUN is not executable" >&2; exit 2; }
-    KNOWN=$R/tests/difftest.com.knownfail
-    seen() { (cd "$T" && "$U_RUN" -O2 "$R/$1" -run 2>"$2") > "$3"; }
+    # Which list describes this driver: the shipped .com has its own (the two
+    # routes disagree, see the header of difftest.com.knownfail); a UA that is
+    # the reference build (/tmp/ua_ref or a private tests/build_ref.sh output)
+    # is measured against the reference list, or every probe the reference
+    # already handles reads as "revived" under the product's list.
+    case "$U_RUN" in *.com) KNOWN=$R/tests/difftest.com.knownfail;; *) KNOWN=$R/tests/difftest.knownfail;; esac
+    # `-run` BEFORE the file: both drivers accept that form, whereas the
+    # reference (src/main.c) treats everything after the file as the program's
+    # argv, so `FILE -run` gave the probe an argument -- fb12-03 (asserts
+    # argc == 1) and fb12-06 (fopen(argv[1])) failed on the UA route for that
+    # reason alone, not because of the compiler.  [R13-0 #03/#06, 2026-09-30]
+    seen() { (cd "$T" && "$U_RUN" -O2 -run "$R/$1" 2>"$2") > "$3"; }
 else
     U_KIND=reference
     KNOWN=$R/tests/difftest.knownfail
