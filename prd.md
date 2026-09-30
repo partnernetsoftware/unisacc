@@ -46,6 +46,8 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 |---|---|---|
 | v0.0.12 | [archive/plans/v0.0.12.md](archive/plans/v0.0.12.md) — 计划树 R12-0..R12-7 与逐项回执（已发布 2026-09-30，归档） | 已发布 |
 | v0.0.13 | [plans/v0.0.13.md](plans/v0.0.13.md) — 草案：决策完备性主图（R13-1）、六目标零 #ifdef 门禁化（R13-2）、FX-6 结论进论文（R13-3）、0.0.12 顺延承接（BANK 表接线、R12-2、Windows 全套件 runner、网络裁判登记、文档/规格、FX-5） | 现行；2026-09-30 L0 五个 P0 与 N7/N10/N16 的 20 余条外部缺陷两侧修完，候选 0.0.13-dev7（b0ac8366…）六 runner 六格绿、miniz deflate/inflate 往返（23/30/34）在产品上通过，com 清单 29→8 行、fb12.knownfail 剩 27/28；N14 决定：FX-5 L1 自研库体；N15 收完（dsh ea1f1cf/2bd1865 + fd5f759 补修）；N22 定点在 dev9 上成立（三阶段 sha 全等 c09d32bc… = 候选本身）；候选 0.0.13-dev11（4a29c51b…，干净工作树 9729666）：#24/#27/#28/#25/#11、01/02/06、N17a `__LINE__` 在产品上转绿（com 清单 7 行：07/08b/14/21/29/31 + n17-file 待 dev12），fb12.knownfail 清空，产品 difftest/difftest_o 四片 wrong 0，demo 18 通过；multi 门禁修好（dsh ed02425）且参考侧 #31 可达性线性（c23f12b）；N17b `__FILE__` 两侧已做、随 dev12 上产品；剩：#07 位置、#31 产品侧、08b/14/21/29、发布链 |
+
+**产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm） | 草案 |
 | v0.0.11 及更早 | 见 §7.1 版本沿革与 §7.2 归档索引 | 已发布 |
 
