@@ -6,6 +6,7 @@ continuation calls the production renderer, not a Python reimplementation.
 import importlib.util,json,os,pathlib,struct,subprocess,sys,tempfile
 R=pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(R/'exec/c'));from pack import build as package
+from refsource import source_text,compile_command
 
 def run(args,**kw):return subprocess.run(list(map(str,args)),capture_output=True,timeout=60,**kw)
 def call(args,**kw):
@@ -39,13 +40,7 @@ def probe_model():
 
 with tempfile.TemporaryDirectory(prefix='model-diagnostics-') as td:
     t=pathlib.Path(td)
-    pieces=[R/'tests/refshim.h',R/'src/version.h',R/'kernel/unisa_model.inc',R/'kernel/unisa_headers.inc']
-    source=''.join(p.read_text() for p in pieces)
-    source+=''.join(l for l in (R/'kernel/unisa_core.c').read_text().splitlines(True) if not l.startswith('#include "unisa_'))
-    source+=''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','host_dl.h','back_encode.c','tapeprune.c','back_image.c','tapebin.c'])
-    assert source.count('#include "host_dl.h"\n') == 1
-    source = source.replace('#include "host_dl.h"\n', '')
-    source+=(R/'tests/reffoot.h').read_text()
+    source=source_text(R)
     helper='''static void probe_diag(void) { char *s; long v; int neg; int mode; int count; unsigned char out[4]; int i;
 s=getenv("UA_DIAG_POS"); mode=getenv("UA_DIAG_WARN")[0]==49; count=0; warnall=1; nwarn=0;
 while(*s) { neg=0; v=0; if(*s==45){neg=1;s=s+1;} while(*s>=48 && *s<=57){v=v*10+*s-48;s=s+1;}
@@ -56,7 +51,7 @@ if(mode)count=nwarn; for(i=0;i<4;i++)out[i]=(count>>(8*i))&255;__write(1,out,4);
     source=source.replace(anchor,helper+anchor)
     anchor='    if (pponly) {                       /* -E: the text, not a program */';assert source.count(anchor)==1
     source=source.replace(anchor,'    if (getenv("UA_DIAG_POS")) { probe_diag(); return 2; }\n'+anchor)
-    (t/'ref.c').write_text(source);call(['cc','-w','-O1','-I',R/'kernel','-I',R/'src',t/'ref.c','-o',t/'ref'])
+    (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     call([sys.executable,R/'exec/pp/gen.py',t/'pp.json','--locations'])
     (t/'diag.json').write_text(json.dumps(probe_model(),separators=(',',':')))

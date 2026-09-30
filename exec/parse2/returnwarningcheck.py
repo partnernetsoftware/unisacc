@@ -5,6 +5,7 @@ Both tape and complete diagnostic bytes must agree; every child is bounded.
 """
 import os,pathlib,subprocess,sys,tempfile
 R=pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(R/'exec/c'));from refsource import source_text,compile_command
 
 def run(args):return subprocess.run(list(map(str,args)),capture_output=True,timeout=60)
 def call(args):
@@ -12,14 +13,8 @@ def call(args):
 
 with tempfile.TemporaryDirectory(prefix='return-warnings-') as td:
     t=pathlib.Path(td)
-    pieces=[R/'tests/refshim.h',R/'src/version.h',R/'kernel/unisa_model.inc',R/'kernel/unisa_headers.inc']
-    source=''.join(p.read_text() for p in pieces)
-    source+=''.join(l for l in (R/'kernel/unisa_core.c').read_text().splitlines(True) if not l.startswith('#include "unisa_'))
-    source+=''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','host_dl.h','back_encode.c','tapeprune.c','back_image.c','tapebin.c'])
-    assert source.count('#include "host_dl.h"\n') == 1
-    source = source.replace('#include "host_dl.h"\n', '')
-    source+=(R/'tests/reffoot.h').read_text()
-    (t/'ref.c').write_text(source);call(['cc','-w','-O1','-I',R/'kernel','-I',R/'src',t/'ref.c','-o',t/'ref'])
+    source=source_text(R)
+    (t/'ref.c').write_text(source);call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for name,script,flag in [('pp','pp/gen.py','--locations'),('lex','lex/gen.py','--locations'),('parse','parse2/gen2.py','--warnings'),('plain','parse2/gen2.py','--locations')]:
         call([sys.executable,R/'exec'/script,t/(name+'.json'),flag])

@@ -5,6 +5,8 @@ has a 60 second bound; ordinary typed output is checked independently too.
 """
 import json, os, pathlib, struct, subprocess, sys, tempfile
 R = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(R/'exec/c'))
+from refsource import source_text, compile_command
 sys.path.insert(0, str(R/'exec/pp'))
 import sim
 
@@ -17,13 +19,7 @@ def call(args):
 
 with tempfile.TemporaryDirectory(prefix='lex-positions-') as td:
     t = pathlib.Path(td)
-    pieces = [R/'tests/refshim.h', R/'src/version.h', R/'kernel/unisa_model.inc', R/'kernel/unisa_headers.inc']
-    source = ''.join(p.read_text() for p in pieces)
-    source += ''.join(l for l in (R/'kernel/unisa_core.c').read_text().splitlines(True) if not l.startswith('#include "unisa_'))
-    source += ''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','host_dl.h','back_encode.c','tapeprune.c','back_image.c','tapebin.c'])
-    assert source.count('#include "host_dl.h"\n') == 1
-    source = source.replace('#include "host_dl.h"\n', '')
-    source += (R/'tests/reffoot.h').read_text()
+    source = source_text(R)
     helper = '''static void probe_word(long n) { unsigned char b[4]; int j; for(j=0;j<4;j++) b[j]=(n>>(8*j))&255; __write(1,b,4); }
 '''
     anchor = 'int main(void) {'
@@ -39,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='lex-positions-') as td:
     assert source.count(anchor) == 1
     source = source.replace(anchor, '        if (tkind[i] == 1) { __write(1,"=",1); __write(1,src+tpos[i],tlen[i]); }\n'+anchor)
     (t/'ref.c').write_text(source)
-    call(['cc','-w','-O1','-I',R/'kernel','-I',R/'src',t/'ref.c','-o',t/'ref'])
+    call(compile_command(R,t/'ref.c',t/'ref'))
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     for flag,name in [('--positions','positions'),('--typed','typed')]:
         call([sys.executable,R/'exec/lex/gen.py',t/(name+'.json'),flag])
