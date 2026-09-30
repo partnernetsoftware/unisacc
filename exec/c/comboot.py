@@ -64,11 +64,6 @@ STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
 STEP_LIST = ['shared', 'lnx/arm64', 'lnx/x86_64', 'osx/arm64', 'osx/x86_64',
              'win/arm64', 'win/x86_64', 'pack']
 COMB_BUILD = SEED.parent / 'comb-build'
-# Everything the pipeline reads to produce a model.  `step_done` pins each step
-# to a digest of these, so changing any of them invalidates every marker
-# instead of letting a stale artifact pass as current.
-SOURCE_ROOTS = ('exec/pipeline', 'exec/parse', 'exec/parse2', 'exec/pp',
-                'unisa', 'include', 'weights')
 HELLO = ROOT / 'examples' / 'hello.c'
 # The one probe every seed must pass: a compiler that cannot run a program is
 # not a seed, whatever its hash says.
@@ -181,25 +176,20 @@ def step_name(st):
 def source_digest():
     """One digest over everything the pipeline READS to make the model.
 
-    This exists because `buildcompiler.sh`'s own `manifest` key does not cover
-    it: `models.identity` hashes the target, the network, the C compiler binary
-    and its version, the platform and the Python version -- but no pipeline
-    source.  So a change to `exec/parse2/parenfold.py` leaves every manifest
-    looking current while the artifacts on disk were produced by the old code.
-    Reusing a build directory across such a change would then draw a green gate
-    over stale artifacts, which is the one failure this file must not allow.
+    It is `exec/c/provenance.py:source_digest` (models.closure plus the .S
+    kernels) -- the value the product's build.json records as `sources_sha256` -- so a step marker and the
+    candidate's build.json can never disagree about which sources count.  The
+    earlier private list (exec/pipeline, exec/parse, exec/parse2, exec/pp,
+    unisa, include, weights) left out exec/c, src and kernel: a change there
+    kept the marker valid while buildcompiler.sh called the manifest stale
+    (0.0.13, R14-2 (1)).
     """
-    h = hashlib.sha256()
-    for root in SOURCE_ROOTS:
-        base = ROOT / root
-        if not base.exists():
-            continue
-        for p in sorted(base.rglob('*')):
-            if not p.is_file() or p.is_symlink():
-                continue
-            h.update(str(p.relative_to(ROOT)).encode())
-            h.update(p.read_bytes())
-    return h.hexdigest()
+    import importlib.util, sys
+    for d in (ROOT / 'exec' / 'pipeline', ROOT / 'exec' / 'c'):
+        if str(d) not in sys.path: sys.path.insert(0, str(d))
+    spec = importlib.util.spec_from_file_location('unisacc_provenance', ROOT / 'exec' / 'c' / 'provenance.py')
+    prov = importlib.util.module_from_spec(spec); spec.loader.exec_module(prov)
+    return prov.source_digest()   # closure + exec/c/asm/*.S, exactly what build.json records
 
 
 def step_manifest(model_dir, st):
@@ -258,8 +248,12 @@ def build_step(st, model_dir):
     if step_done(model_dir, st):
         return 0
     cmd = ['make', 'model-com', 'MODEL_DIR=%s' % model_dir, 'MODEL_STEP=%s' % st]
-    if run(cmd, 55) != 0:
-        raise SystemExit('comboot: model step %s failed' % st)
+    rc, text = capture(cmd, 55)
+    if rc != 0:
+        # Name the cause: three 0.0.13 failures read only "model step pack failed"
+        # and each needed a hand re-run to see why (R14-2 (3)).
+        tail = '\n'.join(text.rstrip().splitlines()[-20:])
+        raise SystemExit('comboot: model step %s failed (rc=%s); last output:\n%s' % (st, rc, tail))
     mark_done(model_dir, st)
     return 0
 
