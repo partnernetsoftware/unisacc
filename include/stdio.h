@@ -181,7 +181,18 @@ static FILE *fopen(const char *__u_path, const char *__u_mode) {
        created could not be opened again. */
     __u_fd = __open((char *)__u_path, __u_flags, 420);
 #endif
-    if (__u_fd < 0) return NULL;
+    if (__u_fd < 0) {
+        /* The gate answers -errno on Linux and Darwin (see the __write audit
+           above); Windows' CreateFileA gate answers -1.  Without this line
+           errno stayed 0 and sbase said "fopen /nonexistent: Success"
+           [R13-0b #25].  A bare -1 is reported as ENOENT: an open that
+           failed with no code is almost always a missing file. */
+        errno = 0 - __u_fd;
+#ifdef _WIN32
+        if (errno == 1) errno = ENOENT;
+#endif
+        return NULL;
+    }
     return (FILE *)(long)__u_fd;
 }
 #endif
