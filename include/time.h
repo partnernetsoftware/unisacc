@@ -9,7 +9,10 @@
 #include <stddef.h>
 #define NULL 0
 #define CLOCKS_PER_SEC 1000000
+#ifndef _UNISA_TIME_T
+#define _UNISA_TIME_T
 typedef long time_t;
+#endif
 typedef long clock_t;
 struct tm {
     int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon;

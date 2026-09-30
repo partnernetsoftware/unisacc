@@ -33,5 +33,30 @@ typedef unsigned long  uintmax_t;
 #define UINT32_MAX  4294967295
 #define INT64_MIN   (-9223372036854775807 - 1)
 #define INT64_MAX   9223372036854775807
-#define UINT64_MAX  18446744073709551615
+/* The UL suffix is not decoration: without it this literal is too large for
+   every signed type and the reference refuses to fold the expression at all
+   (fb12-08).  gcc's own <stdint.h> carries it for the same reason. */
+#define UINT64_MAX  18446744073709551615UL
+
+/* C99 7.18 lists more than the INTn/UINTn limits.  These are the rest, all
+   written for a 64-bit target as the rest of the subset is.  Only names the
+   reference can actually evaluate go in here: no function-like limits beyond
+   INTn_C/UINTn_C, which fold to a plain cast of their argument. */
+#define SIZE_MAX    18446744073709551615UL
+#define PTRDIFF_MIN (-9223372036854775807L - 1)
+#define PTRDIFF_MAX 9223372036854775807L
+#define INTPTR_MIN  (-9223372036854775807L - 1)
+#define INTPTR_MAX  9223372036854775807L
+#define UINTPTR_MAX 18446744073709551615UL
+#define INTMAX_MIN  (-9223372036854775807L - 1)
+#define INTMAX_MAX  9223372036854775807L
+#define UINTMAX_MAX 18446744073709551615UL
+#define INT8_C(v)   v
+#define INT16_C(v)  v
+#define INT32_C(v)  v
+#define INT64_C(v)  v##L
+#define UINT8_C(v)  v
+#define UINT16_C(v) v
+#define UINT32_C(v) v##U
+#define UINT64_C(v) v##UL
 #endif

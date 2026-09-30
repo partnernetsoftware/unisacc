@@ -26,7 +26,11 @@
 
 #define LONG_MIN    (-9223372036854775807 - 1)
 #define LONG_MAX    9223372036854775807
-#define ULONG_MAX   18446744073709551615
+/* The UL suffix matters: without it this literal does not fit any signed
+   type, and the reference refuses to fold an expression containing it
+   (fb12-08, fb12-08b).  gcc's own <limits.h> writes it the same way.  The
+   value is unchanged -- measured equal to gcc before and after. */
+#define ULONG_MAX   18446744073709551615UL
 
 #define LLONG_MIN   LONG_MIN
 #define LLONG_MAX   LONG_MAX
