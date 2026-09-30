@@ -5711,36 +5711,73 @@ int ud_slot(int a) {                  /* its slot: found, or the free one */
    units, so they cannot be dropped), and the names a global initialiser
    reaches -- `__init` covers the last of those.  A two-unit static already
    carries its unit suffix, so equal spellings cannot merge. */
+/* ---- reachability, LINEAR in the size of the tape ----------------------
+   The previous version re-scanned the whole tape inside a `while (changed)`
+   fixed-point loop, and for every line it scanned back to find the enclosing
+   label and compared names character by character.  On a tape that carries the
+   libc bodies that is quadratic, and it cost the reference compiler 40x: 0.022 s
+   became 0.882 s on `examples/hello.c`.  exec-chain runs the reference on 177
+   files, so it went from 22 s to past its 60 s bound.
+
+   One pass now builds the block table, one pass builds the edges, and a work
+   queue propagates.  Each block is entered once and each line is touched a
+   constant number of times.
+
+     ud_lbl[i]    offset of block i's label line, -1 for a free slot
+     ud_beg[i]    offset of the line AFTER that label (the block's body)
+     ud_end[i]    offset one past the block's last line
+     ud_out[i]    start of block i's edge list in ud_edges
+     ud_nout[i]   how many edges
+     ud_edges[]   the blocks block i calls or jumps to                    */
+
+#define UD_MAXBLK 32768
+#define UD_MAXEDGE 65536
 int ud_reach[UD_SIZE];
-/* The block a line belongs to: the most recent `name:` at or above it.  Line
-   order in the tape is not the block order (a function's body follows its
-   label, and labels do not nest), so "the last label seen" is exactly the
-   enclosing function. */
-int ud_lastlabel;
-int ud_block_of(int a, int e) {
-    int i; int f; int h;
+int ud_lbl[UD_MAXBLK];
+int ud_beg[UD_MAXBLK];
+int ud_end[UD_MAXBLK];
+int ud_out[UD_MAXBLK];
+int ud_nout[UD_MAXBLK];
+int ud_edges[UD_MAXEDGE];
+int ud_nblk;
+int ud_nedge;
+int ud_queue[UD_MAXBLK];
+
+/* the block whose label is the name nm[0..L), or -1 */
+int ud_byname(char *nm, int L) {
+    int i; int k; int ok;
     i = 0;
-    while (i <= a) {
-        f = i; while (f < nout) { if (out[f] == 10) break; f = f + 1; }
-        if (f > i + 1) { if (out[f - 1] == 58) { if (out[i] != 32) { if (out[i] != 46) {
-            if (f - 1 <= a) ud_lastlabel = i;
-        } } } }
-        if (f >= a) break;
-        i = f + 1;
+    while (i < ud_nblk) {
+        if (ud_lbl[i] >= 0) {
+            if (ud_lbl[i] >= 0) { }
+            k = 0; ok = 1;
+            while (k < L) { if (out[ud_lbl[i] + k] != nm[k]) { ok = 0; break; } k = k + 1; }
+            if (ok) { if (out[ud_lbl[i] + L] == 58) return i; }
+        }
+        i = i + 1;
     }
-    h = ud_slot(ud_lastlabel);
-    return h;
+    return 0 - 1;
 }
-/* Is the label at `a` one of THIS unit's statics?  Ask ustat, do not guess
-   from the spelling: unit 0's statics carry no `__u<k>` suffix, so a name
-   shape test said "externally visible" about exactly the unused wrapper this
-   check exists for. */
+int ud_eol(int a) { int e; e = a; while (e < nout) { if (out[e] == 10) break; e = e + 1; } return e; }
+/* the block containing offset a: the last label at or above it.  ud_lbl is in
+   tape order, so a binary search is enough -- no rescanning the tape. */
+int ud_block_at(int a) {
+    int lo; int hi; int mid;
+    lo = 0; hi = ud_nblk - 1;
+    if (ud_nblk == 0) return 0 - 1;
+    if (a < ud_lbl[0]) return 0 - 1;
+    while (lo < hi) {
+        mid = (lo + hi + 1) / 2;
+        if (ud_lbl[mid] <= a) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+}
+/* is the label at `a` (ending at the colon `e-1`) one of THIS unit's statics? */
 int ud_isstatic_label(int a, int e) {
     int n; int i; int k; int ok;
     n = e - 1 - a;
-    /* strip a trailing `__u<k>` if the unit added one */
     i = 0;
-    while (i + 3 < n) {
+    while (i + 3 < n) {                  /* strip a trailing __u<k> */
         if (out[a + i] == 95) { if (out[a + i + 1] == 95) { if (out[a + i + 2] == 117) n = i; } }
         i = i + 1;
     }
@@ -5758,82 +5795,85 @@ int ud_isstatic_label(int a, int e) {
     }
     return 0;
 }
-/* Mark the names this line calls or jumps to.  Returns 1 if anything changed. */
-int ud_mark(char *nm, int L, int unused);
-int ud_spread(int a, int e) {
-    int i; int j; int ch; int h; int ch2;
-    ch = 0;
-    i = a;
-    while (i < e) {
-        /* `call X` / `jump X` -- find the operand and mark that label */
-        if (out[i] == 32) {
-            j = i + 1;
-            ch2 = 0;
-            if (out[j] == 99) { if (out[j + 1] == 97) { if (out[j + 2] == 108) { if (out[j + 3] == 108) { if (out[j + 4] == 32) ch2 = j + 5; } } } }
-            if (out[j] == 106) { if (out[j + 1] == 117) { if (out[j + 2] == 109) { if (out[j + 3] == 112) { if (out[j + 4] == 32) ch2 = j + 5; } } } }
-            if (ch2 > 0) {
-                int L; L = 0;
-                while (ch2 + L < e && out[ch2 + L] != 10 && out[ch2 + L] != 32 && out[ch2 + L] != 44) L = L + 1;
-                if (L > 0) { if (ud_mark(out + ch2, L, 0)) ch = 1; }
-                i = ch2 + L;
-                continue;
-            }
-        }
-        i = i + 1;
-    }
-    return ch;
-}
-/* Mark the block whose label is `nm`, and follow what it reaches.  `depth`
-   bounds the recursion: the tape's call graph is tiny and mostly flat. */
-int ud_mark(char *nm, int L, int depth) {
-    int h; int a; int e; int ch;
-    if (depth > 8) return 0;
-    h = ud_find(nm, L);
-    if (h < 0) return 0;
-    if (ud_reach[h]) return 0;
-    ud_reach[h] = 1;
-    a = ud_tab[h] - 1;
-    e = a; while (e < nout) { if (out[e] == 10) break; e = e + 1; }
-    /* the block runs from its label to the next label */
-    ch = 0;
-    { int i; int f; int stop;
-      i = e + 1; stop = nout;
-      while (i < nout) {
-          f = i; while (f < nout) { if (out[f] == 10) break; f = f + 1; }
-          if (f > i + 1) { if (out[f - 1] == 58) { if (out[i] != 32) { if (out[i] != 46) { stop = i; break; } } } }
-          i = f + 1;
-      }
-      ud_spread(e + 1, stop);
-    }
+/* The target of a call/jump on the line at `a`, written as a block index into
+   *blk, or 0 if the line is not one.  The name is resolved ONCE, here. */
+int ud_target(int a, int e, int *blk) {
+    int j; int k; int nm; int L; int b;
+    if (e - a < 7) return 0;
+    if (out[a] != 32) return 0;
+    j = a + 1;
+    k = 0;
+    if (out[j] == 99) { if (out[j+1] == 97) { if (out[j+2] == 108) { if (out[j+3] == 108) { if (out[j+4] == 32) k = j + 5; } } } }
+    if (out[j] == 106) { if (out[j+1] == 117) { if (out[j+2] == 109) { if (out[j+3] == 112) { if (out[j+4] == 32) k = j + 5; } } } }
+    if (k == 0) return 0;
+    nm = k; L = 0;
+    while (nm + L < e && out[nm + L] != 10 && out[nm + L] != 32 && out[nm + L] != 44) L = L + 1;
+    if (L == 0) return 0;
+    b = ud_byname(out + nm, L);
+    *blk = b;
     return 1;
 }
 int undef_reach(void) {
-    int i; int e; int h; int k; int changed;
+    int i; int e; int p; int b; int q; int head; int tail; int tgt;
     i = 0; while (i < UD_SIZE) { ud_reach[i] = 0; i = i + 1; }
-    /* mark the roots */
-    ud_mark("main", 4, 0);
-    ud_mark("__init", 6, 0);
-    /* every block that is not a static of this unit is externally visible */
+    ud_nblk = 0; ud_nedge = 0;
+    /* PASS 1: one block per `name:` line, in tape order */
     i = 0;
     while (i < nout) {
-        e = i; while (e < nout) { if (out[e] == 10) break; e = e + 1; }
+        e = ud_eol(i);
         if (e > i + 1) { if (out[e - 1] == 58) { if (out[i] != 32) { if (out[i] != 46) {
-            if (ud_isstatic_label(i, e) == 0) { h = ud_slot(i); if (h >= 0) ud_reach[h] = 1; }
+            if (ud_nblk < UD_MAXBLK) {
+                ud_lbl[ud_nblk] = i;
+                ud_beg[ud_nblk] = e + 1;
+                ud_nout[ud_nblk] = 0;
+                ud_reach[ud_nblk] = 0;
+                ud_nblk = ud_nblk + 1;
+            }
         } } } }
         i = e + 1;
     }
-    /* propagate until nothing changes: a reachable block reaches its calls */
-    changed = 1;
-    k = 0;
-    while (changed) {
-        changed = 0; k = k + 1;
-        if (k > 64) break;                    /* the tape is finite; stop anyway */
+    /* each block's end is the next label's line start (blocks do not nest) */
+    i = 0;
+    while (i < ud_nblk) {
+        if (i + 1 < ud_nblk) ud_end[i] = ud_lbl[i + 1]; else ud_end[i] = nout;
+        i = i + 1;
+    }
+    /* PASS 2: the edges, resolved once */
+    i = 0;
+    while (i < ud_nblk) {
+        ud_out[i] = ud_nedge;
+        p = ud_beg[i];
+        while (p < ud_end[i]) {
+            e = ud_eol(p);
+            if (ud_target(p, e, &tgt)) {
+                if (tgt >= 0) {
+                    if (ud_nedge < UD_MAXEDGE) { ud_edges[ud_nedge] = tgt; ud_nedge = ud_nedge + 1; ud_nout[i] = ud_nout[i] + 1; }
+                }
+            }
+            p = e + 1;
+        }
+        i = i + 1;
+    }
+    /* PASS 3: roots, then a work queue -- each block enqueued once */
+    head = 0; tail = 0;
+    b = ud_byname("main", 4);        if (b >= 0) { if (!ud_reach[b]) { ud_reach[b] = 1; ud_queue[tail++] = b; } }
+    b = ud_byname("__init", 6);      if (b >= 0) { if (!ud_reach[b]) { ud_reach[b] = 1; ud_queue[tail++] = b; } }
+    i = 0;
+    while (i < ud_nblk) {
+        e = ud_eol(ud_lbl[i]);
+        if (ud_isstatic_label(ud_lbl[i], e) == 0) {
+            if (!ud_reach[i]) { ud_reach[i] = 1; if (tail < UD_MAXBLK) ud_queue[tail++] = i; }
+        }
+        i = i + 1;
+    }
+    while (head < tail) {
+        b = ud_queue[head]; head = head + 1;
+        q = ud_out[b];
         i = 0;
-        while (i < nout) {
-            e = i; while (e < nout) { if (out[e] == 10) break; e = e + 1; }
-            h = ud_block_of(i, e);
-            if (h >= 0) { if (ud_reach[h]) { if (ud_spread(i, e)) changed = 1; } }
-            i = e + 1;
+        while (i < ud_nout[b]) {
+            tgt = ud_edges[q + i];
+            if (tgt >= 0) { if (tgt < ud_nblk) { if (!ud_reach[tgt]) { ud_reach[tgt] = 1; if (tail < UD_MAXBLK) ud_queue[tail++] = tgt; } } }
+            i = i + 1;
         }
     }
     return 0;
@@ -5856,7 +5896,7 @@ int undef_calls(void) {
         /* `  call NAME` -- es() has already asked irsel for the spelling */
         if (e - i > 7) { if (out[i] == 32) { if (out[i + 1] == 32) { if (out[i + 2] == 99) {
             if (out[i + 3] == 97) { if (out[i + 4] == 108) { if (out[i + 5] == 108) { if (out[i + 6] == 32) {
-                h = ud_block_of(i, e);
+                h = ud_block_at(i);
                 /* a call inside a block nothing reaches is not a reference:
                    gcc never emitted that block in the first place */
                 if (h >= 0) { if (ud_reach[h] == 0) { i = e + 1; continue; } }
