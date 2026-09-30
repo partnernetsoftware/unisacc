@@ -4,12 +4,12 @@ A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE; no assembler, no linker), compiles itself, and ships as one
 file, `unisacc.com`. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
-N1256); conformance is being tracked clause by clause (plans/v0.0.14.md
-R14-6), not asserted. Today the front end takes C99 as
-written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and the
-c-testsuite corpus compile and run), with `#line` still open --
-and a bundled C library that is a documented subset; both are itemised in
-[the limitations table](#known-limitations) below. What is unusual is inside: every *table-shaped*
+N1256), and how much of it is covered is a number from a clause-by-clause
+ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
+C99 as written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and
+the c-testsuite corpus compile and run); the language-side gaps are `#line`,
+complex types and trigraphs, and the bundled C library is a documented subset;
+all are itemised in [the limitations table](#known-limitations) below. What is unusual is inside: every *table-shaped*
 decision the compiler makes (lexing classes, preprocessor directives,
 operator precedence, types, instruction selection, ABI facts, peephole
 rewrites ...) is answered by a small integer neural network whose weights are
@@ -350,6 +350,23 @@ is distinct from C semantics, stage compatibility, platform execution and
 package/container self-construction. Classical no-Python self-hosting and
 fixed-package model-driver self-hosting retain their separate evidence scopes.
 
+## C99 coverage
+
+<!-- c99-ledger:begin -->
+Clause coverage from [tests/c99/clauses.tsv](tests/c99/clauses.tsv), one row per normative subclause of
+ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are excluded:
+
+| Part | Subclauses | Covered | Partial | Unsupported | Covered |
+|---|---|---|---|---|---|
+| Language (clause 6) | 98 | 95 | 0 | 3 | 96% |
+| Environment (clause 5) | 16 | 13 | 2 | 1 | 81% |
+| Library (clause 7) | 361 | 127 | 43 | 191 | 35% |
+| Annexes F, G | 19 | 0 | 0 | 19 | 0% |
+<!-- c99-ledger:end -->
+
+`python3 tests/c99ledger.py` (gate `c99-ledger`) checks that every listed probe exists and runs in a gate
+suite, that no language clause is left unmapped, and that this table matches the ledger.
+
 ## Known limitations
 
 What this compiler does not do, so a reader does not have to find out by
@@ -359,6 +376,8 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 
 | Limitation | What happens | Reproduce |
 |---|---|---|
+| No complex types (C99 6.2.5, 6.3.1.6-7, 7.3, Annex G) | `double _Complex z;` is rejected (`expected ';'`); `<complex.h>` is not provided | `double _Complex z = 1.0;` |
+| No trigraph replacement (C99 5.2.1.1) | `"a??=b"` stays `a??=b`; C99 requires `??=` to become `#` in translation phase 1 (gcc/clang also skip it unless `-trigraphs`) | `printf("%s", "??=")` |
 | ~~No `__LINE__` / `__FILE__`~~ -- **supported as of 0.0.13** | Both work on the reference.  `__LINE__` is the PHYSICAL line of the token -- spliced headers and continuations notwithstanding -- and inside a macro body it is the line of the INVOCATION, which is what gcc and clang report; `tests/c/n17-line.c` is the six-value probe (`9 1010 11 12 15 16`, identical to cc).  `__FILE__` is the path as given on the command line, and reaches the front end through the `\0cli/source` resource when the driver passes no SRCPATH.  This row is kept, struck through, rather than deleted because it was the external trial's most-reported omission | `printf("%d %s\n", __LINE__, __FILE__)` |
 | `long double` is `double` | `sizeof(long double) == 8`; no extended precision | `printf("%d", (int)sizeof(long double))` |
 | No `offsetof` | `error: this is not the start of an expression` -- the macro is absent and the built-in form is not accepted | `#include <stddef.h>` then `offsetof(struct S,b)` |

@@ -374,6 +374,7 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 job tapebin-roundtrip python3 ./tests/tapebin.py
 job tapebin-shape python3 -m unisa.tapebin_shape --check
+job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (research/r12-ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that

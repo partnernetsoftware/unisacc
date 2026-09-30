@@ -280,7 +280,7 @@ We answer four questions. **RQ1**: Can the method support a real compiler? **RQ2
 | Stage accuracy | Full-domain enumeration | all 18 stages 1.000 |
 | Truth table vs cc | Type table key by key against the system cc | 1,400 keys: 1,399 agree, 1 intentional deviation |
 | External corpus c-testsuite | Output equals the system cc | 216 of 220 pass, 0 errors; 4 outside the supported subset |
-| C99 probes | One by one against the system cc | 57/57 |
+| C99 probes | One by one against the system cc | 59/59 |
 | Differential tests | Against the system cc | 93/93 |
 | Optimisation levels | -O0/-O1/-O2 output equals cc -O2 | 279/279 |
 | Two optimisers agree | Same tape through both optimisers | 190/190 |
