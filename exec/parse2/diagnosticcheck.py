@@ -42,7 +42,7 @@ with tempfile.TemporaryDirectory(prefix='model-diagnostics-') as td:
     pieces=[R/'tests/refshim.h',R/'src/version.h',R/'kernel/unisa_model.inc',R/'kernel/unisa_headers.inc']
     source=''.join(p.read_text() for p in pieces)
     source+=''.join(l for l in (R/'kernel/unisa_core.c').read_text().splitlines(True) if not l.startswith('#include "unisa_'))
-    source+=''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','host_dl.h','back_encode.c','tapeprune.c','back_image.c'])
+    source+=''.join((R/'src'/n).read_text() for n in ['front_pp.c','front_parse.c','opt.c','main.c','back_lower.c','host_dl.h','back_encode.c','tapeprune.c','back_image.c','tapebin.c'])
     assert source.count('#include "host_dl.h"\n') == 1
     source = source.replace('#include "host_dl.h"\n', '')
     source+=(R/'tests/reffoot.h').read_text()
@@ -56,7 +56,7 @@ if(mode)count=nwarn; for(i=0;i<4;i++)out[i]=(count>>(8*i))&255;__write(1,out,4);
     source=source.replace(anchor,helper+anchor)
     anchor='    if (pponly) {                       /* -E: the text, not a program */';assert source.count(anchor)==1
     source=source.replace(anchor,'    if (getenv("UA_DIAG_POS")) { probe_diag(); return 2; }\n'+anchor)
-    (t/'ref.c').write_text(source);call(['cc','-w','-O1','-I',R/'kernel',t/'ref.c','-o',t/'ref'])
+    (t/'ref.c').write_text(source);call(['cc','-w','-O1','-I',R/'kernel','-I',R/'src',t/'ref.c','-o',t/'ref'])
     call([os.environ.get('EXEC_CC','cc'),'-O2',R/'exec/c/run.c','-o',t/'run'])
     call([sys.executable,R/'exec/pp/gen.py',t/'pp.json','--locations'])
     (t/'diag.json').write_text(json.dumps(probe_model(),separators=(',',':')))

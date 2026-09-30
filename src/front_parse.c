@@ -5565,7 +5565,7 @@ int fe_load(char *path, char *t) {
     int fd; int k;
     srcpath = path;
     /* Source maps belong to this unit; warning counts belong to the program. */
-    nspl = 0; nireg = 0; nfnpool = 0; nautoinc = 0;
+    nspl = 0; nireg = 0; nfnpool = 0; nautoinc = 0; nld = 0;
     /* normalise EACH -I with a trailing slash, in the order given; the search
        walks them in that order */
     optincdl = 0;

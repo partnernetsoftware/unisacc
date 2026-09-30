@@ -188,6 +188,8 @@ SEGINF = 1000000000
 # W regions (addresses; plain named slots are strings)
 DIRB, NEWB, MACB, TAKEB, SEENB = 10 ** 7, 2 * 10 ** 7, 5 * 10 ** 7, 6 * 10 ** 7, 61 * 10 ** 6
 SPLB, IRLN, IRNL = 11 * 10 ** 7, 12 * 10 ** 7, 121 * 10 ** 6
+# #line records (R14-3): W[LDRAW+k] raw line, W[LDUSER+k] user line, W[LDNUM+k] N, W[LDNM+k] name blob or -1
+LDRAW, LDUSER, LDNUM, LDNM = 141 * 10 ** 6, 142 * 10 ** 6, 143 * 10 ** 6, 144 * 10 ** 6
 F_NAME, F_BODY, F_FN, F_FROM, F_TO, F_PREV, F_ACT, F_UP = 0, 1, 2, 3, 4, 5, 6, 7
 F_NP, F_P0, MAXP = 8, 9, 12         # function-like: parameter count, parameter ids; MAXP = the reference's MAXMPARAM (12) -- 8 refused sqlite's 9-parameter WAGGREGATE (R13-0b #29)
 F_HASH = F_P0 + MAXP     # 1: the body has `#` outside literals (s12)
@@ -356,6 +358,8 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
                               ("LDI", "v", k + 1), ("STX", "a", 0, "v")]
     init += sbconst("pragma") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
                                  ("LDI", "v", 100), ("STX", "a", 0, "v")]
+    init += sbconst("line") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
+                               ("LDI", "v", 101), ("STX", "a", 0, "v")]   # #line (R14-3)
     init += sbconst("_Pragma") + [("SBINTERN", "ID_PRAGMAOP")]
     init += sbconst("push_macro") + [("SBINTERN", "ID_PUSHM")]
     init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
@@ -382,6 +386,8 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
         build_autoinc(g, locations)
 
     install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
+    from locations import IRNAME as _IRNAME
+    install_rules(g, HERE, "linedir", {"LDRAW": LDRAW, "LDUSER": LDUSER, "LDNUM": LDNUM, "LDNM": LDNM, "IRNAME": _IRNAME})
     if shared_predefines:
         # One network per output format/autoinc mode; target data is supplied
         # as resources. The legacy default remains byte-for-byte unchanged.
@@ -392,7 +398,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
             install_rules(g, HERE, "assembly", {"entry": "P3PD%d" % k, "resume": "P3PDR%d" % k,
                 "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(nm)}, section="predefine")
 
-    cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")])}
+    cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")]), 101: ("LDIR", [("RLD", "LIVE")])}
     cases.update((k + 1, ("D_" + w, [])) for k, w in enumerate(DIRV))
     g.r("DSW", cases)
     for w in DIRV:
@@ -413,7 +419,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     from locations import IRNAME
     install_rules(g, HERE, "include-location", {"IRNAME": IRNAME, "IRPATH": IRPATH})
 
-    install_rules(g, HERE, "rescan", dict({name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP', 'IRLN', 'IRNL', 'SPLB']}, IRNAME=IRNAME))   # IRLN/IRNL/SPLB/IRNAME: __LINE__/__FILE__ (N17a/b)
+    install_rules(g, HERE, "rescan", dict({name: globals()[name] for name in ['LDRAW', 'LDUSER', 'LDNUM', 'LDNM', 'ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP', 'IRLN', 'IRNL', 'SPLB']}, IRNAME=IRNAME))   # IRLN/IRNL/SPLB/IRNAME: __LINE__/__FILE__ (N17a/b)
     if locations:
         from locations import install
         install(g, SPLB, IRLN, IRNL)

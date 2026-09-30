@@ -788,6 +788,61 @@ int nireg;
 #define MAXSPL 4096
 long spl_at[MAXSPL]; int nspl;   /* joined continuation lines: the file line of each backslash, ascending */
 char fnpool[8192]; int nfnpool;
+/* #line N ["file"] (C99 6.10.4) [R14-3].  Each directive is recorded with
+   the include region it sits in and its own line as the user counts it; a
+   later position in the same region then reads line N + (its line - the
+   directive's line - 1), and the file name if one was given. */
+#define MAXLD 4096
+int nld; int ld_reg[MAXLD]; long ld_line[MAXLD]; long ld_num[MAXLD]; int ld_nm[MAXLD];
+int ld_raw;              /* line_at without the remap: used while recording one */
+int line_at_inside;      /* (tentative; defined with line_at below) */
+char *line_at_fname;     /* set by line_at: the name __FILE__ reads, after #line */
+long ld_map(int inside, long line, char **fname) {
+    int k; int best; best = 0 - 1;
+    k = 0;
+    while (k < nld) {
+        if (ld_reg[k] == inside && ld_line[k] < line) { if (best < 0 || ld_line[k] >= ld_line[best]) best = k; }
+        k = k + 1;
+    }
+    if (best < 0) return line;
+    if (ld_nm[best] >= 0) *fname = fnpool + ld_nm[best];
+    return ld_num[best] + (line - ld_line[best] - 1);
+}
+long line_at(long p);
+int err_at(long p, char *msg);
+/* `#line` digit-sequence ["s-char-sequence"]: literal forms only; a macro
+   operand (6.10.4p5) is refused with its position rather than misread. */
+#define LINEMSG "not covered: this form of #line (C99 6.10.4: digit-sequence [\"file\"], in the main file)"
+int linedir(long ls, long ns, long ne, long le) {
+    long v; long k; int inside; long here; int nm; long q;
+    if (ne <= ns || ne - ns > 10) { err_at(ns, LINEMSG); return 0; }   /* the network reads at most 10 digits */
+    v = 0; k = ns;
+    while (k < ne) { if ((src[k] & 255) < 48 || (src[k] & 255) > 57) { err_at(ns, LINEMSG); return 0; }
+        v = v * 10 + (src[k] & 255) - 48; k = k + 1; }
+    if (v <= 0 || v > 2147483647) { err_at(ns, LINEMSG); return 0; }
+    nm = 0 - 1;
+    q = ne; while (q < le) { if (wsat(q) == 0) break; q = q + 1; }
+    if (q < le) {
+        if ((src[q] & 255) != 34) { err_at(ns, LINEMSG); return 0; }
+        q = q + 1; nm = nfnpool;
+        while (q < le && (src[q] & 255) != 34 && nfnpool < 8000) {
+            if ((src[q] & 255) == 92) { err_at(ns, LINEMSG); return 0; }   /* escapes: not covered, as in E2 */
+            fnpool[nfnpool] = src[q]; nfnpool = nfnpool + 1; q = q + 1;
+        }
+        if (q >= le) { err_at(ns, LINEMSG); return 0; }                  /* unterminated */
+        fnpool[nfnpool] = 0; nfnpool = nfnpool + 1;
+        q = q + 1; while (q < le) { if (wsat(q) == 0) { err_at(ns, LINEMSG); return 0; } q = q + 1; }
+    }
+    /* no file operand: the presumed name stays what the last #line made it */
+    if (nm < 0 && nld > 0) nm = ld_nm[nld - 1];
+    if (nld >= MAXLD) { err_at(ns, LINEMSG); return 0; }
+    ld_raw = 1; here = line_at(ls); inside = line_at_inside; ld_raw = 0;
+    /* Main-file #line only, like the E2 network: a header that renumbers
+       itself is refused where it says so rather than half-supported. */
+    if (inside >= 0) { err_at(ns, LINEMSG); return 0; }
+    ld_reg[nld] = inside; ld_line[nld] = here; ld_num[nld] = v; ld_nm[nld] = nm; nld = nld + 1;
+    return 0;
+}
 char incname[64];                 /* the header being spliced, for the table */
 int nautoinc;                     /* `#include` lines WE put at the top */
 char *srcpath;                    /* the file being compiled, for `"x.h"` */
@@ -1075,6 +1130,7 @@ int diag_at(long p, char *msg, char *kind) {
         i = 0;
         while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
     }
+    line = ld_map(inside, line, &fname);
     __write(2, fname, blen(fname));
     ec2(58); en2(line); ec2(58); en2(col);
     __write(2, kind, blen(kind));
@@ -1109,6 +1165,8 @@ long line_at(long p) {
         while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
     }
     line_at_inside = inside;
+    line_at_fname = inside >= 0 ? fnpool + ireg_nm[inside] : srcpath;
+    if (ld_raw == 0) line = ld_map(inside, line, &line_at_fname);
     return line;
 }
 
@@ -1324,6 +1382,7 @@ int preprocess(void) {
             if (d < 0) { if (live) { if (we - ws == 6) { if (srcis(ws, 6, "pragma")) {
                 pushpop(ls, we, i);
             } } } }
+            if (d < 0) { if (live) { if (we - ws == 4) { if (srcis(ws, 4, "line")) { linedir(ls, ns, ne, i); } } } }
             if (d >= 0) {
                 if (d == 0) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
                 /* The table's key is `defined` -- whether the name IS
@@ -2360,7 +2419,7 @@ int xcall(int m, int *ao, int *al) {
 int file_at(long p, int topool) {
     char *nm; int k; int c;
     line_at(p);
-    nm = line_at_inside >= 0 ? fnpool + ireg_nm[line_at_inside] : srcpath;
+    nm = line_at_fname;       /* the include region's name, or #line's */
     if (topool) { if (nxpool + 2 * blen(nm) + 3 >= XPOOL) xfull("text"); }
     if (topool) { xpool[nxpool] = 34; nxpool = nxpool + 1; } else eput(34);
     k = 0;

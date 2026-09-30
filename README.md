@@ -7,8 +7,8 @@ file, `unisacc.com`. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text 
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and
-the c-testsuite corpus compile and run); the language-side gaps are `#line`,
-complex types and trigraphs, and the bundled C library is a documented subset;
+the c-testsuite corpus compile and run); the language-side gaps are complex
+types and trigraphs, and the bundled C library is a documented subset;
 all are itemised in [the limitations table](#known-limitations) below. What is unusual is inside: every *table-shaped*
 decision the compiler makes (lexing classes, preprocessor directives,
 operator precedence, types, instruction selection, ABI facts, peephole
@@ -358,7 +358,7 @@ ISO/IEC 9899:1999 + TC1-TC3 (WG14 N1256); headings and informative clauses are e
 
 | Part | Subclauses | Covered | Partial | Unsupported | Covered |
 |---|---|---|---|---|---|
-| Language (clause 6) | 98 | 95 | 0 | 3 | 96% |
+| Language (clause 6) | 98 | 96 | 0 | 2 | 97% |
 | Environment (clause 5) | 16 | 13 | 2 | 1 | 81% |
 | Library (clause 7) | 361 | 127 | 43 | 191 | 35% |
 | Annexes F, G | 19 | 0 | 0 | 19 | 0% |
@@ -389,7 +389,7 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 | Shared table capacities are not deduplicated | The typedef, struct-tag and member tables are shared across translation units and **not deduplicated**: every unit re-registers the headers it includes, so N units of the same headers consume N times the entries.  Counted rather than guessed -- one unit of the miniz headers contributes ~91 typedefs, and three units crossed the old limit of 256.  The limits are now typedefs 1024, struct tags 512, members 4096 | compile the same header from three translation units and watch the typedef count climb |
 | Headers and functions that are declared but absent | `setjmp.h`, `regex.h`, `strings.h`, `termios.h`, `sys/ioctl.h`, `utime.h`, `unistd.h`, `fcntl.h`, `sys/stat.h` (`locale.h` and `sys/types.h` exist as of 0.0.13); `system`, `strdup`, `getline`, `time()`.  A program that needs one gets a missing-header error, or an implicit declaration and then `undefined function`.  The 0.0.13 additions are `size_t`-style types, `strerror`, the stdio set (`feof`/`ferror`/`ungetc`/`clearerr`/`setvbuf`/`tmpfile`/`vprintf`) and `errno` codes.  The rest is the FX-5 layering decision: L2 (declare and import the host's) is 0.0.14 | `#include <setjmp.h>` or a call to `strdup` |
 | The private calling convention is not the host's | Code this compiler generates calls code it generated: arguments are pushed on the tape stack, `r9` is the frame pointer and the result is in `rax` (prd W-16).  It is explicitly unstable and external code must not depend on it; interop goes through the libunisacc carrier or the plan's bridge routes.  This is why `#21` above has nowhere to put the callee's address | any two units, or `nativeboot` |
-| `__FILE__` in a SPLICED header | The path reported is always the MAIN file's, and inside `#include`d text `__LINE__` is the line of the line as the user sees it in the header -- both matching gcc.  What is NOT modelled is `#line`, so a generated file that rewrites its own line numbering gets the physical numbers instead | a header that uses `__LINE__`, included from a file whose line numbers differ |
+| `__FILE__` in a SPLICED header; `#line` in a header | The path reported is always the MAIN file's, and inside `#include`d text `__LINE__` is the line of the line as the user sees it in the header -- both matching gcc.  `#line N ["file"]` (C99 6.10.4) is supported in the main file as of 0.0.14; inside an included header it is refused with its position (`not covered: this form of #line`), as are macro operands and escapes in the file name | `#line 7` inside a header |
 
 Two things that look like limitations and are not.  `-ftrim-libc` is on by
 default and keeps library bodies only when a program reaches them by identifier
