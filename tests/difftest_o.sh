@@ -54,6 +54,10 @@ for f in "${FILES[@]}"; do
       echo '#define __mmap(...) unisa_mmap_(__VA_ARGS__)'
       echo '#define __mprotect(a,n,p) mprotect((void *)(long)(a),(n),(p))'
       echo '#define __munmap(a,n) munmap((void *)(long)(a),(n))'
+      # #line: the shim above shifts every physical line, and __LINE__ /
+      # __FILE__ (N17) must see the probe as unisacc does -- its own
+      # numbering and the path it was handed (the same "$f" both sides get)
+      printf '#line 1 "%s"\n' "$f"
       cat "$f"; } > "$D/ref.c"
     key="$CACHE/$( (cat "$D/ref.c"; echo "wait-status-v2 $CCV -O2") | shasum | cut -c1-40)"
     if [ -f "$key" ]; then cp "$key" "$D/want"

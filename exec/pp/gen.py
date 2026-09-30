@@ -364,6 +364,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     init += sbconst("printf") + [("SBINTERN", "ID_PRINTF")]
     init += sbconst("__VA_ARGS__") + [("SBINTERN", "ID_VA")]
     init += sbconst("__LINE__") + [("SBINTERN", "ID_LINE")]   # the predefined macro (N17a)
+    init += sbconst("__FILE__") + [("SBINTERN", "ID_FILE")]   # (N17b)
     init += [("LDI", "RUN", 0), ("LDI", "FP", 0)] + xe_init()
     g.els("START", "CLI.FLAGS", init)
     build_cli(g, locations)
@@ -412,7 +413,7 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
     from locations import IRNAME
     install_rules(g, HERE, "include-location", {"IRNAME": IRNAME, "IRPATH": IRPATH})
 
-    install_rules(g, HERE, "rescan", {name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP', 'IRLN', 'IRNL', 'SPLB']})   # IRLN/IRNL/SPLB: __LINE__'s line mapping (N17a)
+    install_rules(g, HERE, "rescan", dict({name: globals()[name] for name in ['ARGB', 'ARGE', 'CRB', 'CRS', 'C_BDEP', 'C_EDEP', 'C_EXP', 'C_K', 'C_ME', 'C_OST', 'C_PRE', 'C_RAW', 'C_SB', 'C_SB0', 'C_SEP', 'FSZ', 'F_ACT', 'F_BODY', 'F_FN', 'F_HASH', 'F_NP', 'F_P0', 'F_UP', 'F_VAR', 'MACB', 'MAXP', 'IRLN', 'IRNL', 'SPLB']}, IRNAME=IRNAME))   # IRLN/IRNL/SPLB/IRNAME: __LINE__/__FILE__ (N17a/b)
     if locations:
         from locations import install
         install(g, SPLB, IRLN, IRNL)

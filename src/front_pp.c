@@ -1086,6 +1086,7 @@ int diag_at(long p, char *msg, char *kind) {
    added and the continuation lines we joined) without the printing.  This is
    what `__LINE__` expands to [N17a]: the lexer already knew the answer for
    every diagnostic, it only had to be spelled into the text. */
+int line_at_inside;         /* set by line_at: the include region p is in, or -1 (for __FILE__) */
 long line_at(long p) {
     long q; long line; int i; int inside;
     if (p < 0) p = 0;
@@ -1104,8 +1105,10 @@ long line_at(long p) {
         i = 0;
         while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
     }
+    line_at_inside = inside;
     return line;
 }
+
 
 /* More than one error per run [S-15 C3].  There is no longjmp here, so an
    error cannot unwind the walker; instead it PARKS the token pointer at
@@ -2347,6 +2350,27 @@ int xcall(int m, int *ao, int *al) {
     return 0;
 }
 
+/* The name `__FILE__` spells at a position: the header a spliced region
+   came from, else the file being compiled -- as a string literal, `"` and
+   `\` escaped [N17b].  Written into the pool at nxpool (the caller makes
+   the token) or into ebuf (dst == 0). */
+int file_at(long p, int topool) {
+    char *nm; int k; int c;
+    line_at(p);
+    nm = line_at_inside >= 0 ? fnpool + ireg_nm[line_at_inside] : srcpath;
+    if (topool) { if (nxpool + 2 * blen(nm) + 3 >= XPOOL) xfull("text"); }
+    if (topool) { xpool[nxpool] = 34; nxpool = nxpool + 1; } else eput(34);
+    k = 0;
+    while (nm[k]) {
+        c = nm[k] & 255;
+        if (c == 34 || c == 92) { if (topool) { xpool[nxpool] = 92; nxpool = nxpool + 1; } else eput(92); }
+        if (topool) { xpool[nxpool] = c; nxpool = nxpool + 1; } else eput(c);
+        k = k + 1;
+    }
+    if (topool) { xpool[nxpool] = 34; nxpool = nxpool + 1; } else eput(34);
+    return 0;
+}
+
 int xstep(int t, int tolist) {
     int m; int h; int mark; char *p;
     int ao[MAXMPARAM + 1]; int al[MAXMPARAM + 1];
@@ -2373,6 +2397,13 @@ int xstep(int t, int tolist) {
         if (v < 0) { xpool[nxpool] = 45; nxpool = nxpool + 1; v = 0 - v; }
         while (1) { d[nd] = 48 + v % 10; nd = nd + 1; v = v / 10; if (v == 0) break; }
         while (nd > 0) { nd = nd - 1; xpool[nxpool] = d[nd]; nxpool = nxpool + 1; }
+        xout(xnew(2, off, nxpool - off, 0, xw[t], xs[t]), tolist);
+        return 0;
+    }
+    if (m < 0 && xl[t] == 8 && vsame("__FILE__", 0, p, 8)) {
+        int off;
+        off = nxpool;
+        file_at(xk[t] == 0 ? xo[t] : xepi, 1);
         xout(xnew(2, off, nxpool - off, 0, xw[t], xs[t]), tolist);
         return 0;
     }
@@ -2432,6 +2463,9 @@ int xrange(int from, int to) {
             while (1) { d[nd] = 48 + v % 10; nd = nd + 1; v = v / 10; if (v == 0) break; }
             while (nd > 0) { nd = nd - 1; eput(d[nd] & 255); }
             i = j; continue;
+        }
+        if (k == 0 && m < 0 && j - i == 8 && srcis(i, 8, "__FILE__")) {
+            file_at(i, 0); i = j; continue;
         }
         if (k == 0) { eputsrc(i, j); i = j; continue; }
         /* an episode */

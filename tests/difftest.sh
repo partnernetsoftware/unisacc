@@ -83,6 +83,10 @@ for f in $FILES; do
       echo '#define __mmap(...) unisa_mmap_(__VA_ARGS__)'
       echo '#define __mprotect(a,n,p) mprotect((void *)(long)(a),(n),(p))'
       echo '#define __munmap(a,n) munmap((void *)(long)(a),(n))'
+      # #line: the shim above shifts every physical line, and __LINE__ /
+      # __FILE__ (N17) must see the probe as unisacc does -- its own
+      # numbering and the path it was handed (the same "$f" both sides get)
+      printf '#line 1 "%s"\n' "$f"
       cat "$f"; } > "$T/$b.ref.c"
     if ! $CC -w -std=c99 -o "$D/$b" "$T/$b.ref.c" -lm 2>"$T/$b.cc"; then
         exit 0
