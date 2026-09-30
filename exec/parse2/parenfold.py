@@ -17,7 +17,10 @@ def install(E, ordinal_table, locations=False):
         # The located reader consumes an @position prefix before NX.  Clone
         # only its entry and return to NX before ordinal assignment; the
         # shared prefix decoder and its validation remain unchanged.
-        mode, source = g.st["TN.checked"]
+        # Warning/error variants wrap NEXT with their own checks before the
+        # located decoder.  Lookahead needs the decoder itself, without those
+        # checks or their side effects.
+        mode, source = g.st["DL.read"]
         assert mode == "r"
         copied = {}
         for key, (target, seqid) in source.items():
