@@ -434,9 +434,19 @@ int core_host_fetch(const unsigned char *p,int n,unsigned char **bytes,int *len)
     }
     char path[4096];
     int header=n>=5 && !memcmp(p,"\0hdr/",5);
-    if (header && !INCDIR) die("a bundled header was asked for and no include directory was given");
-    if (header) snprintf(path,sizeof path,"%s/%.*s",INCDIR,n-5,p+5);
-    else snprintf(path,sizeof path,"%.*s",n,p);
+    /* A bundled header that cannot be produced is NOT this layer's error to
+       report: the resource is simply absent (return 0), which is what the E2
+       stage already turns into its own `no such file for #include` reject.
+       Dying here pre-empted that reject and cost the diagnostic its position
+       and the header's name -- both of which E2 has and this function does
+       not, since it is handed a resource key and never sees a token.  With no
+       -I at all, and with an -I whose directory lacks the header, the answer is
+       the same: absent.  [R13-0b #07] */
+    if (!header) { snprintf(path,sizeof path,"%.*s",n,p); }
+    else {
+        if (!INCDIR) return 0;
+        snprintf(path,sizeof path,"%s/%.*s",INCDIR,n-5,p+5);
+    }
     if ((int)strlen(path)!=(header ? (int)strlen(INCDIR)+1+n-5 : n)) return 0;
     *bytes=readfile(path,len,1);
     if (*bytes) record_file_read(path);
