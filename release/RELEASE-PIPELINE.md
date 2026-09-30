@@ -58,3 +58,29 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 ```
 [ "$(git ls-remote origin refs/heads/main | cut -c1-40)" = "$(git rev-parse HEAD)" ] && echo synced || echo NOT-PUSHED
 ```
+
+## 9. 一条命令序列（0.0.15 R15-5，按 0.0.13–0.0.14 两次实发整理；工具在 `release/tools/`）
+
+```
+# 0 冻结：通知 cdx 冻结 main；src/version.h 改版本号；提交推送
+S=<scratch>; V=0.0.N
+python3 tests/bound.py 58 ./tests/build_ref.sh $S/ua.c $S/ua                 # 1 同源参考（每次源码变都重建）
+release/tools/build_candidate.sh $S/cand $S/ua                               # 2 候选：七步 + pack-models + pack-driver
+D=/tmp/seed-$V; mkdir -p $D; cp $S/cand/unisacc-next.com $D/unisacc-seed.com; cp $S/cand/unisacc-next.com.build.json $D/unisacc-seed.com.build.json
+python3 exec/c/comboot.py stage 1 $D/unisacc-seed.com
+for s in stage2 stage3 fixedpoint; do SEED_DIR=$D python3 exec/c/comboot.py shard $s; done   # 3 N22（stage2 装到仓根 unisacc.com）
+MODEL_COM=$S/cand/unisacc-next.com tests/fb12multi.sh; python3 tests/comdemo.py --com $S/cand/unisacc-next.com --out $S/demo.json
+release/tools/seal_candidate.sh $S/cand $V "<note>"; git commit -- release/candidate.json   # 4 封 GHCR
+make gatedeps; git commit -- tests/gatedeps.json; git push                  # 5 最后一提交；ls-remote 核对
+# 6 预热冷建网络的两项（直到 R16-5 自动化）：bindprep.sh（CORE_ASM_ARCH=arm64）两次、memorycheck.sh（x86_64 ua 1/3）一次
+tests/term.sh env UA=$S/ua MODEL_COM=$S/cand/unisacc-next.com SEED_DIR=$D GATE_STATE=/tmp/gq UNISACC_FFI_X86_PROVIDER=... tests/release.sh --com   # 7 重复到 rc!=75
+release/tools/release_prep.sh $S/cand $V && release/tools/apple-sign.sh /tmp/r<N>-release/unisacc.com <sha> /tmp/r<N>-release/apple   # 8 Apple（可与 7 并行）
+# 9 release-check：push 后等 release-check.yml 对 HEAD 绿，记 run id / attempt
+gh release create v$V --draft --target $(git rev-parse HEAD) --notes-file notes.md; gh release upload v$V <dmg> <app.zip>
+python3 release/tools/unsigned_receipt.py /tmp/r<N>-release/unisacc.com /tmp/r<N>-release/windows $(git rev-parse HEAD) <run> <attempt>; gh release upload v$V <zip> <receipt>
+release/tools/windows_sign.sh qualification v$V <receipt> <run> <attempt>    # 10 Windows
+R=$(release/tools/windows_sign.sh company v$V <receipt> <run> <attempt>); release/tools/approve_signing.sh $R
+gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 下载签后产物，核对 before/after sha 与尺寸，本机跑 comdemo/fb12-multi
+# 12 向主人确认公开；只留签名 unisacc.com 与 dmg；gh release edit v$V --draft=false --latest
+# 13 回执 research/r<N>-release-acceptance.json；plans/v$V.md → archive/plans/；prd 版本行；通知 cdx 解冻
+```
