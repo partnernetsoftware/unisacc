@@ -23,7 +23,7 @@ BEGIN = "<!-- stages:begin -->"
 END = "<!-- stages:end -->"
 # Files that carry the table.  prd.md is the spec and keeps its own
 # annotated copy; these are the restatements that drifted.
-FILES = ("prd.tree.md", "prd.map.md", "README.md")
+FILES = ("README.md",)   # prd.tree.md / prd.map.md archived in 0.0.15 (early design views)
 
 
 def rows():

@@ -14,7 +14,7 @@ set -u
 R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 out=$("$_BOUND" 60 python3 -m unisa docs --check 2>&1); rc=$?
 [ -n "$out" ] && echo "$out"
-n=$(grep -l "stages:begin" prd.tree.md prd.map.md README.md 2>/dev/null | wc -l | tr -d ' ')
+n=$(grep -l "stages:begin" README.md 2>/dev/null | wc -l | tr -d ' ')
 echo
 echo "docs  generated tables $n   stale $([ $rc -eq 0 ] && echo 0 || echo yes)"
 # the referee ledger names every stage, no more, no fewer, and each provider exists
@@ -85,4 +85,4 @@ if grep -rnE "(调用约定|calling convention).*W-13|W-13.*(调用约定|callin
     echo "a document still attributes the calling convention to W-13 (it is W-16)" >&2; lim_rc=1
 fi
 echo "docs  README limitations $([ "$lim_rc" -eq 0 ] && echo ok || echo MISSING)"
-[ "$rc" -eq 0 ] && [ "$n" -eq 3 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ] && [ "$num_rc" -eq 0 ] && [ "$lim_rc" -eq 0 ]
+[ "$rc" -eq 0 ] && [ "$n" -eq 1 ] && [ -z "$led" ] && [ "$model_rc" -eq 0 ] && [ "$num_rc" -eq 0 ] && [ "$lim_rc" -eq 0 ]

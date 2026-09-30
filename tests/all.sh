@@ -51,7 +51,7 @@
 #               are the same numbers [A-43]
 #   oracle      every question the model can be asked, through the cache,
 #               equals the net's own answer -- both orders [A-49]
-#   docs        the stage tables in prd.tree.md, prd.map.md and README.md
+#   docs        the stage table in README.md
 #               are the generated ones, not copies that can drift [A-48]
 #   gold_audit  the type table against the system compiler, key by key:
 #               enumeration proves the net equals the gold, this asks
@@ -103,7 +103,7 @@ fi
 # opt/selfhost/native/ccrun over one such file while the local queue was green.
 # Read the list once and match in-shell: a grep per probe (~400 processes) made
 # `all.sh` start-up exceed ci_shard_plan's 5 s budget on the macOS runners.
-REFUSED=" $(awk 'NF && $1 !~ /^#/ {print $1}' tests/difftest.knownfail 2>/dev/null | tr '\n' ' ') "
+REFUSED=" $(python3 tests/knownfail.py keys tests/difftest.knownfail | tr '\n' ' ') "
 refused() { case "$REFUSED" in *" $1 "*) return 0;; esac; return 1; }
 PROBES=; for f in examples/*.c tests/c/*.c; do b=${f##*/}; refused "${b%.c}" || PROBES="$PROBES $f"; done
 # The verdict comes from each suite's EXIT STATUS, not from pattern-matching

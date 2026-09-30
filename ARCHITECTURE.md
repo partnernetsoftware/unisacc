@@ -149,7 +149,7 @@ Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要
 | [`examples/`](examples/) · `tests/c/` · `tests/c99/` | 探针程序 |
 | `corpus/` | 外部语料（c-testsuite、工具库），只读 |
 | [`Makefile`](Makefile) | `make`（快检）、`make test`、`make com`、`make release` |
-| README、`prd.tree.md`、`prd.map.md` 里的阶段表 | `python3 -m unisa docs` 生成，`tests/docs.sh` 检查 |
+| README 里的阶段表 | `python3 -m unisa docs` 生成，`tests/docs.sh` 检查 |
 | [`archive/`](archive/) | 旧版 prd，只作历史 |
 | `dist/` | `tests/release.sh --com` 保留的 `unisacc.com`（不提交） |
 
