@@ -907,6 +907,11 @@ def build(locations=False, warnings=False, errors=False):
     structreturnexpr_install(E, P)
     from forward import install as forward_install
     start = forward_install(E, P, start, FPS_FN, DEFS)
+    # The compound-literal output splice walks a saved byte blob.  Its
+    # EOF branch observes the reader byte, not the previous arithmetic result.
+    mode, row = g.st['CP.restore']
+    assert mode == 'r' and len(row) == 257
+    g.st['CP.restore'] = ('b', row)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}

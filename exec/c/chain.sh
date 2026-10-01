@@ -34,7 +34,6 @@ set -- $(cat "$T/inputs")
 CHAINKNOWN=${CHAINKNOWN:-exec/c/chain.knownfail}
 awk 'NF < 4 || $2 != "R14-8" || $3 != "P1" { exit 1 }' "$CHAINKNOWN" || { echo "chain: malformed knownfail"; exit 1; }
 python3 "$R/tests/knownfail.py" keys "$CHAINKNOWN" > "$T/known" || { echo "chain: malformed knownfail"; exit 1; }
-[ -s "$T/known" ] || { echo "chain: empty knownfail"; exit 1; }
 for name in $(cat "$T/known"); do
     { grep -Fxq "tests/c/$name" "$T/inputs" || grep -Fxq "examples/$name" "$T/inputs"; } || { echo "chain: missing known probe $name"; exit 1; }
 done
