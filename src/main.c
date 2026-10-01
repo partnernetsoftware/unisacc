@@ -218,7 +218,13 @@ int main(void) {
                 if (ninput >= 64) return 1;
                 td = "/tmp"; q = 0;
                 q = 0; while (td[q] && q < 500) { fwdpath[q] = td[q]; q = q + 1; }
-                { char *nm2; int r2; nm2 = "/unisacc-forward.c"; r2 = 0; while (nm2[r2]) { fwdpath[q] = nm2[r2]; q = q + 1; r2 = r2 + 1; } fwdpath[q] = 0; }
+                {   /* one file per process: a stack address differs per process (ASLR) */
+                    char *nm2; int r2; unsigned long v; nm2 = "/unisacc-forward-"; r2 = 0;
+                    while (nm2[r2]) { fwdpath[q] = nm2[r2]; q = q + 1; r2 = r2 + 1; }
+                    v = (unsigned long)&fd2; r2 = 0;
+                    while (r2 < 12) { fwdpath[q] = "0123456789abcdef"[v & 15]; v = v >> 4; q = q + 1; r2 = r2 + 1; }
+                    fwdpath[q] = 46; fwdpath[q + 1] = 99; fwdpath[q + 2] = 0;
+                }
                 fd2 = wopen(fwdpath); if (fd2 < 0) return 1;
                 __write(fd2, fwdsrc, nfwdsrc); __close(fd2);
                 inputs[ninput] = fwdpath; ninput = ninput + 1; fwdrun = 0;
