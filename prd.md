@@ -36,7 +36,7 @@
 | v0.0.15 | [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 完成，不发布（全量队列 370/370，产品字节同 0.0.14） |
 | v0.0.16 | [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) — origin CI 转绿、减法安全门禁、gcc 字节的 -M 族、参考侧 ELF `-c` 与系统 ld 互链（docs/toolchain.md）、realprog 语料门禁 2/6、全局结构体赋值修复；A1/A2/B1 顺延到 0.0.17 | 已发布 2026-10-01（主人确认；本地 375/375 + origin 六 runner 绿；回执 research/r16-release-acceptance.json） |
 | v0.0.17 | [archive/plans/v0.0.17.md](archive/plans/v0.0.17.md) — 三格式 .o（参考）与产品 Linux ELF 路由、-funit 分开编译、tape 级自带链接器与 ar、互操作 (a)、默认即运行、unistd.h（realprog 3/6） | 已发布 2026-10-01 |
-| v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；动态库、完整调试信息、cc 函数互调各自独立项；sqlite/GNU 子集、Csmith、论文 A 不与工具链硬绑 | 草案 |
+| v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；产品 Mach-O/COFF 对象（R18-0，已顺延一次）；宿主能力头 TUI 与文件（R18-10，dsh 实测需求）；动态库、调试信息、cc 函数互调各自独立；流程修复 R18-11 | 下一版（计划已细化 2026-10-01） |
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 | v0.0.19 | [plans/v0.0.19.md](plans/v0.0.19.md) — 宿主能力头·网络（socket/netdb/inet/select，dsh 实测需求；win 走 Winsock，不做 TLS） | 草案 |
