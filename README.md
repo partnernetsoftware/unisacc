@@ -3,13 +3,18 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. It does not yet produce object files, link, or
-assemble `.s` input; a staged toolchain (`-c` objects, a linker, an
-assembler, `ar`) is planned in [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) R16-7. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+file, `unisacc.com`. Toolchain status (0.0.16): the reference compiler writes a
+relocatable ELF `.o` for `-c -b lnx/x86_64|arm64` that GNU ld and lld link; the
+shipped `unisacc.com` still writes the tape for `-c`; there is no linker or
+assembler yet. The staged plan (three-format `.o`, own static linker, assembler)
+and the back-end facts behind it are in [docs/toolchain.md](docs/toolchain.md)
+and [plans/v0.0.17.md](plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
-C99 as written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and
-the c-testsuite corpus compile and run); the language-side gaps are complex
+C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
+c-testsuite corpus compile and run (`realprog`, `tools`, `corpus` gates); kilo,
+Lua and SQLite do not build yet, each for a named missing header (`termios.h`,
+`setjmp.h`, `pwd.h`), see `tests/realprog.sh`; the language-side gaps are complex
 types and trigraphs, and the bundled C library is a documented subset;
 all are itemised in [the limitations table](#known-limitations) below. What is unusual is inside: every *table-shaped*
 decision the compiler makes (lexing classes, preprocessor directives,
@@ -235,6 +240,9 @@ in a twentieth of a second, and the SGD control arm lives in
 | `datashape` | generated programs whose globals are declared in one order and allocated in another; the suite asserts the shape is present before it asserts the bytes match |
 | `bigclosure` | the closure on the compiler itself — the largest input there is, and the only one ever big enough to break the back end while every probe stayed green |
 | `corpus` | [c-testsuite](https://github.com/c-testsuite/c-testsuite) — 220 programs written by other people, for other compilers |
+| `realprog` | real PROGRAMS by other people, pinned (kilo, jsmn, cJSON, Lua 5.4.7, SQLite 3.49.1), built by unisacc and by `cc` from the same sources and run the same way; bytes and exit status must agree; `tests/realprog.baseline.list` is the ratchet (2 of 6 pass in 0.0.16; the four unsupported name the next headers: `setjmp.h`, `unistd.h`, `termios.h`, `pwd.h`) |
+| `elfobj` | `-c -b lnx/ARCH` writes a relocatable ELF: sections, allowed relocation types, `.text`/`.data` equal to the image outside relocated fields, ld.lld links both architectures, GNU ld links and the arm64 programs run in the Lima VM and print what the image prints |
+| `subtract-safety` | nothing outside `archive/` imports a module or names a path whose only copy is archived; `AGENTS.md`/`CLAUDE.md` resolve to a non-empty file without a link cycle (both 0.0.15 incidents are rebuilt by `--selftest` and must be caught) |
 | `tools` | real library code by other people — [crypto-algorithms](https://github.com/B-Con/crypto-algorithms), [tiny-AES-c](https://github.com/kokke/tiny-AES-c), [tiny-regex-c](https://github.com/kokke/tiny-regex-c); eleven entries, several files each, with their own known-answer tests |
 
 ## Layout

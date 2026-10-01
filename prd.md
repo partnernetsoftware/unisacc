@@ -15,6 +15,10 @@
 
 | 版本 | 身份 / 证据 |
 |---|---|
+| v0.0.16 | **未发布**（主人 2026-10-01）。Version 0.0.16；结项提交 `313610b`；候选 `unisacc.com` 1,295,312 B，SHA-256 `6fc720265f9a9573…`（与自举 stage2/stage3 字节相同，GHCR 重封 `10e9ca04…`）；已做而未公开：Azure 公司签名（run 36813357447，签后 `c1c72e2f90fd04b7…` 1,311,088 B）、Apple 公证 dmg `eb433bffa309c762…`；草稿 Release v0.0.16 保留；回执 research/r16-release-acceptance.json |
+| v0.0.15 | **未发布**（整理版）。结项 `d6a5046`；产品字节与 0.0.14 候选相同 |
+| v0.0.14 | Version 0.0.14; release source `75ec4de`; candidate `3d86639072f5d562…` 1,288,064 B; published `unisacc.com` Authenticode-signed 1,303,840 B, SHA-256 `c229cebf6cd58ca0…`; dmg `9f13acc4b87d6100…`; receipt research/r14-release-acceptance.json |
+| v0.0.13 | Version 0.0.13; release source `3af8b36`; candidate `94ea9c76f9cc62f1…` 1,190,297 B; published `unisacc.com` Authenticode-signed 1,206,080 B, SHA-256 `75c698ecb71f287c…`; receipt archive/research/r13/r13-release-acceptance.json |
 | v0.0.12 | Version 0.0.12; product closure sealed at `c4d667e` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,368 B, SHA-256 `fb607af59388aa20cbd9f536d6b781f3cf83a6a0294c0e4e69e844faba2736cb` (unsigned gate candidate 1,154,589 B, SHA-256 `df8cc9b4a3d997ea9e33bbdbaefeecb1a11d10dd98f529a4fb8d87f2e21e7f7a`); macOS app/dmg Developer ID signed and notarized; the same candidate bytes ran the demo suite on six hosted runners (lnx/osx/win × x86_64/arm64) and full suites on four native architectures; receipt [archive/research/r12/r12-release-acceptance.json](archive/research/r12/r12-release-acceptance.json) |
 | v0.0.11 | Version 0.0.11; product closure sealed at `8b5abc9` (candidate GHCR digest in `release/candidate.json`); published `unisacc.com` is Authenticode-signed: 1,170,384 B, SHA-256 `e86cc61c2d9ee8abd511f5d6b5c0f114a01a34dbe6146bb411e3f204c65d792a` (unsigned gate candidate 1,154,605 B, SHA-256 `6a3dfce28aa05ca474442ebe9e6fc4d07f4da7c15d1d3b5a6c21e91290f920c8`); macOS app/dmg Developer ID signed and notarized; library bodies on demand by default (`-fno-trim-libc` opts out); receipt [archive/research/r11/r11-release-acceptance.json](archive/research/r11/r11-release-acceptance.json) |
 | v0.0.10 | Version 0.0.10; product closure sealed at `fdff9c5`, release source `ae6d512`; published `unisacc.com` is Authenticode-signed: 1,168,488 B, SHA-256 `f6e8e090a5288583389bdbbb5674f7e0fbb717baf13fa600f8074c77d1acdb2e` (unsigned gate candidate 1,152,711 B, SHA-256 `4ba24140a1307a34216efd0f2e7c892a92990ee2729a8774a58e0a4fe2315002`; model package identical); 24 deployed networks each `network = table` over the whole domain; in-process `libunisacc` (contexts, symbol injection, typed V2/V3 signatures with model-certified carriers, callbacks, USLCALL3 source-origin aliases); local release gate 332 suites rc 0, Linux arm64 guest and Windows/x86_64 guest smoke recorded in the [release receipt](archive/research/r10/r10-release-acceptance.json) |
@@ -165,6 +169,9 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 | 产品是否完成实际编译/运行 | `.com` 用户命令、cc 可观察差分、真实应用与自举 | 编译器与平台 cc 所有实现定义相同 |
 | 包/宿主是否可靠 | codec、损坏包、资源、内存范围、API 失败 | CRC 已提供企业签名信任 |
 | 发布物是否可分发 | 精确 SHA、来源、签后运行、平台和信任回执 | 旧候选门禁适用于新源码/重签字节 |
+| 真实程序能否编译运行 | `realprog`（kilo/jsmn/cJSON/lua/sqlite 与 cc 同源构建同参运行，棘轮）、`tools`、`corpus` | 未登记的程序/库面 |
+| 目标文件能否被系统工具接受 | `elfobj`（参考侧 ELF `.o`：节/重定位集合、与映像的 .text/.data 不变量、ld.lld 与 GNU ld 链接、Lima 运行同映像） | 产品 δ 的 `.o`（0.0.17）、与 cc `.o` 的符号互引、函数互调 |
+| 减法是否安全 | `subtract-safety`（归档文件无外部引用、指令文件可解析） | 行为层面的回归（由各功能门禁负责） |
 
 当前集成候选身份及已验/待验范围以本页R9清单为准；旧候选的完整队列、平台与Apple资格不移植。完整610MB数组C源码仍是未解决规模限制。T1是有限转移/网络等价；全程T2和C语义T3仍为独立证明义务。
 
@@ -220,7 +227,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 ## 4. 质量体系
 
-- **门禁**：`tests/gate.sh --list [--com]`（约 365 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的两项先预热（R16-5 自动化）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
+- **门禁**：`tests/gate.sh --list [--com]`（0.0.16：375 项，含 `realprog`、`elfobj`、`subtract-safety`）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的两项先预热（R16-5 自动化）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。
 - **reviewed trees**：`make gatedeps` 从 HEAD 的 `git archive`（umask 022）计算戳与 guards，作为发布前最后一提交。
