@@ -42,6 +42,7 @@ int symptrd[MAXSYM]; int symbase[MAXSYM]; int symlab[MAXSYM];
    8 (double); like the unsigned bit it describes the object a pointer points
    to, so `*p` of a `double *` is a double. */
 int symflt[MAXSYM];
+int sympkw[MAXSYM * 8];        /* R19-10: each parameter's width in bytes (8 for a pointer) */
 int sympk[MAXSYM * 8];         /* append-only pool of complete parameter kinds */
 int nsympk;
 int sympkfirst[MAXSYM];        /* this declaration's first kind in the pool */
@@ -4619,6 +4620,7 @@ int parameter_decl(void) {
 /* Pool entries outlive local symbol slots, which block exit can reuse. */
 int paramkind_add(int pk) {
     if (nsympk >= MAXSYM * 8) { __write(2, "parameter kind pool full\n", 25); __exit(1); }
+    sympkw[nsympk] = declptr ? 8 : declsz;
     sympk[nsympk] = pk; nsympk = nsympk + 1;
     return 0;
 }
