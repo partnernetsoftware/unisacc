@@ -769,6 +769,9 @@ int ftrim_libc_scan(void); int ftrim_libc_define(void);
    not files and are not listed -- cc lists its system headers because they
    are on disk; ours travel inside the binary. */
 char *depfile; int wantdeps;
+int deponly;                /* -M / -MM: only the dependency line, no program, no -E text */
+int depphony;               /* -MP: a phony rule per header */
+char *deptargets[16]; int depquoted[16]; int ndeptargets;   /* -MT raw, -MQ munged */
 char deppool[65536]; int ndeppool; int ndeps;
 int prelines;               /* lines -include put before the user's own */
 
@@ -930,27 +933,74 @@ int inctry(char *dir, int dl, int nm, int nl) {
     return n;
 }
 
-/* the .d file: `target: input deps...`, one per line as make expects */
-int writedeps(char *target, char **inputs, int ninput) {
-    int fd; int k; int q; char *nm; char buf[4];
-    if (depfile == 0) return 0;
-    fd = wopen(depfile);
-    if (fd < 0) { printf("cannot write %s\n", depfile); return 1; }
-    nm = target; k = 0; while (nm[k]) k = k + 1; __write(fd, nm, k);
-    __write(fd, ":", 1);
-    q = 0;
-    while (q < ninput) {
-        nm = inputs[q]; k = 0; while (nm[k]) k = k + 1;
-        __write(fd, " \\\n  ", 5); __write(fd, nm, k);
-        q = q + 1;
+/* The .d file, byte for byte what gcc -MM writes (mkdeps.cc): names
+   separated by one space, a line broken with " \\\n " once it would pass
+   column 72, make's special characters escaped (space -> "\ ", # -> "\#",
+   $ -> "$$") in prerequisites and -MQ targets, and under -MP one phony
+   rule per header.  -M lists the same files as -MM: the bundled headers
+   are not on disk, so there are no "system headers" to add. */
+int depmunged(char *nm, char *to) {       /* escaped length; copies when `to` */
+    int k; int n; int c;
+    k = 0; n = 0;
+    while (nm[k]) {
+        c = nm[k] & 255;
+        if (c == 32 || c == 35) { if (to) to[n] = 92; n = n + 1; }
+        if (c == 36) { if (to) to[n] = 36; n = n + 1; }
+        if (to) to[n] = c;
+        n = n + 1; k = k + 1;
     }
+    if (to) to[n] = 0;
+    return n;
+}
+int depcol;
+void depname(int fd, char *nm, int quote) {   /* one name, wrapped like gcc */
+    static char esc[1100]; char *w; int L;
+    if (quote) { L = depmunged(nm, esc); w = esc; }
+    else { L = 0; while (nm[L]) L = L + 1; w = nm; }
+    if (depcol) {
+        if (depcol + L > 72) { __write(fd, " \\\n ", 4); depcol = 1; }
+        else { __write(fd, " ", 1); depcol = depcol + 1; }
+    }
+    __write(fd, w, L); depcol = depcol + L;
+}
+/* gcc's default target: the main input without directories, suffix -> .o;
+   with -o (and not -M/-MM) the driver passes `-MQ output` itself. */
+char *deptarget(char *outpath, char *input) {
+    static char tname[520]; int k; int dot; int b;
+    if (outpath && deponly == 0) return outpath;
+    k = 0; b = 0; dot = 0 - 1;
+    while (input[k] && k < 500) { if (input[k] == 47) { b = k + 1; dot = 0 - 1; } if (input[k] == 46) dot = k; k = k + 1; }
+    if (dot < b) dot = k;
+    k = b; while (k < dot) { tname[k - b] = input[k]; k = k + 1; }
+    tname[dot - b] = 46; tname[dot - b + 1] = 111; tname[dot - b + 2] = 0;
+    return tname;
+}
+int writedeps(char *target, char **inputs, int ninput) {
+    int fd; int k; int q; int L;
+    if (depfile == 0) return 0;
+    if (depfile[0] == 45 && depfile[1] == 0) fd = 1; else fd = wopen(depfile);
+    if (fd < 0) { printf("cannot write %s\n", depfile); return 1; }
+    depcol = 0;
+    if (ndeptargets) { q = 0; while (q < ndeptargets) { depname(fd, deptargets[q], depquoted[q]); q = q + 1; } }
+    else depname(fd, target, 1);
+    __write(fd, ":", 1); depcol = depcol + 1;
+    q = 0;
+    while (q < ninput) { depname(fd, inputs[q], 1); q = q + 1; }
     q = 0; k = 0;
     while (q < ndeps) {
-        int L; L = 0; while (deppool[k + L]) L = L + 1;
-        __write(fd, " \\\n  ", 5); __write(fd, deppool + k, L);
+        depname(fd, deppool + k, 1);
+        L = 0; while (deppool[k + L]) L = L + 1;
         k = k + L + 1; q = q + 1;
     }
-    buf[0] = 10; __write(fd, buf, 1);
+    __write(fd, "\n", 1);
+    if (depphony) {
+        q = 0; k = 0;
+        while (q < ndeps) {
+            depcol = 0; depname(fd, deppool + k, 1); __write(fd, ":\n", 2);
+            L = 0; while (deppool[k + L]) L = L + 1;
+            k = k + L + 1; q = q + 1;
+        }
+    }
     if (fd != 1) __close(fd);
     return 0;
 }

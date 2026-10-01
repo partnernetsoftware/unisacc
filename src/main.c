@@ -86,7 +86,11 @@ int main(void) {
             } else { if (strsame(a, "-MD") || strsame(a, "-MMD")) { wantdeps = 1; depfile = depfile ? depfile : "";
             } else { if (strsame(a, "-MF")) { i = i + 1; wantdeps = 1; depfile = __argv(i);
             } else { if (strsame(a, "-MT") || strsame(a, "-MQ")) { i = i + 1;
-            } else { if (strsame(a, "-MP") || strsame(a, "-M") || strsame(a, "-MM")) {
+                if (__argv(i) == 0) return emsg("unisacc: error: missing dependency target", 0);
+                if (ndeptargets < 16) { deptargets[ndeptargets] = __argv(i); depquoted[ndeptargets] = a[2] == 81; ndeptargets = ndeptargets + 1; }
+            } else { if (strsame(a, "-MP")) { depphony = 1;
+            } else { if (strsame(a, "-M") || strsame(a, "-MM")) {   /* like gcc: -E implied, only the .d line */
+                wantdeps = 1; deponly = 1; pponly = 1; dump = 1; depfile = depfile ? depfile : "";
             /* -l and -L: the library is in the headers, so there is nothing
                to link and nothing to search.  -x c: the only language. */
             } else { if (a[1] == 108 || a[1] == 76) {
@@ -108,7 +112,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } }
+            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -126,7 +130,7 @@ int main(void) {
     if (fi == 0) {
         model_dims(); setup();
         return emsg("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
-               " FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens] [-o out]"
+               " FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens | -M | -MM] [-o out]"
                " [-- args...]\n"
                "  -fno-trim-libc  keep every library body (default: bodies on demand, -ftrim-libc)\n"
                "  -S  write the tape, this compiler's assembly-level IR"
@@ -134,13 +138,19 @@ int main(void) {
     }
     if (emitbin && dump == 0 && runit == 0) dump = 1;
     if (depfile) { if (depfile[0] == 0) {
-        static char dname[520]; char *base; int k; int dot;
-        base = outpath ? outpath : inputs[0];
-        k = 0; dot = 0 - 1;
-        while (base[k] && k < 512) { dname[k] = base[k]; if (base[k] == 46) dot = k; if (base[k] == 47) dot = 0 - 1; k = k + 1; }
-        if (dot < 0) dot = k;
-        dname[dot] = 46; dname[dot + 1] = 100; dname[dot + 2] = 0;
-        depfile = dname;
+        /* gcc's names: -M/-MM go to -o or stdout; -MD/-MMD to -o with the
+           suffix .d, or to the input's basename .d in the current directory */
+        static char dname[520]; char *base; int k; int dot; int b;
+        if (deponly) depfile = outpath ? outpath : "-";
+        else {
+            base = outpath ? outpath : inputs[0];
+            k = 0; dot = 0 - 1; b = 0;
+            while (base[k] && k < 512) { if (base[k] == 47) { dot = 0 - 1; if (outpath == 0) b = k + 1; } if (base[k] == 46) dot = k; k = k + 1; }
+            if (dot < b) dot = k;
+            k = b; while (k < dot) { dname[k - b] = base[k]; k = k + 1; }
+            dname[dot - b] = 46; dname[dot - b + 1] = 100; dname[dot - b + 2] = 0;
+            depfile = dname;
+        }
     } }
     if (runit) {
         if (istapebin(__argv(fi))) {
@@ -188,7 +198,7 @@ int main(void) {
            has succeeded: a failed compile must not leave an empty a.out
            behind, newer than its sources, for make to trust. */
         ofd = 1;
-        if (outpath && pponly) {
+        if (outpath && pponly && deponly == 0) {
             ofd = wopen(outpath);
             if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);
         }
@@ -197,7 +207,9 @@ int main(void) {
         else { if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
         else {
             r = fe_units(inputs, ninput, t);
-            if (r == 2) { if (ofd != 1) __close(ofd); return 0; }  /* -E is done */
+            if (r == 2) {                                            /* -E is done */
+                if (deponly) return writedeps(deptarget(outpath, inputs[0]), inputs, ninput);
+                if (ofd != 1) __close(ofd); return 0; }
             if (r) return 1;
             if (werror && nwarn > 0) return 1;       /* -Werror: nothing written */
         } }
@@ -211,7 +223,7 @@ int main(void) {
             if (ofd < 0) return emsg("unisacc: error: cannot write ", outpath);
             bkfd = ofd;
         }
-        if (depfile) { if (writedeps(outpath ? outpath : "a.out", inputs, ninput)) return 1; }
+        if (depfile) { if (writedeps(deptarget(outpath, inputs[0]), inputs, ninput)) return 1; }
         if (emitbin) { __write(ofd, tb_file, binlen); if (ofd != 1) __close(ofd); return 0; }
         if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
         __write(ofd, out, nout);

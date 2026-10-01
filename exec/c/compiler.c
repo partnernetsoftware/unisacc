@@ -81,16 +81,53 @@ static long output_write(long fd, const void *p, long n) {
     return write((int)fd, p, (size_t)n);
 #endif
 }
-/* Dependency formatting is a driver/file contract. The read ledger comes
-   from the same host adapter used by C and ASM network execution. */
-static int deps_write(const char *path,const char *target,const char **sources,int count) {
-    FILE *f=fopen(path,"wb");
+/* Dependency formatting is a driver/file contract, byte for byte gcc -MM's
+   (mkdeps.cc): one space between names, " \\\n " once a line would pass
+   column 72, make's special characters escaped (space, #, $) in
+   prerequisites and -MQ targets, one phony rule per header under -MP.
+   -M lists what -MM lists: the bundled headers are not files. The read
+   ledger comes from the same host adapter used by C and ASM network execution. */
+static int deps_name(FILE *f,const char *name,int quote,int *col) {
+    char esc[1100]; int n=0;
+    if (quote) {
+        for (const char *s=name;*s && n<1090;s++) {
+            if (*s==' ' || *s=='#') esc[n++]='\\';
+            if (*s=='$') esc[n++]='$';
+            esc[n++]=*s;
+        }
+        esc[n]=0; name=esc;
+    } else n=(int)strlen(name);
+    int bad=0;
+    if (*col) {
+        if (*col+n>72) { bad|=fputs(" \\\n ",f)<0; *col=1; }
+        else { bad|=fputc(' ',f)<0; *col+=1; }
+    }
+    bad|=fputs(name,f)<0; *col+=n;
+    return bad;
+}
+static const char *deps_target(const char *out,const char *src,int deponly) {
+    static char tname[520];
+    if (out && !deponly) return out;
+    const char *base=strrchr(src,'/'); base=base ? base+1 : src;
+    const char *dot=strrchr(base,'.'); size_t n=dot ? (size_t)(dot-base) : strlen(base);
+    if (n>500) n=500;
+    memcpy(tname,base,n); tname[n]='.'; tname[n+1]='o'; tname[n+2]=0;
+    return tname;
+}
+static int deps_write(const char *path,const char *target,const char **sources,int count,
+                      const char **targets,const int *quoted,int ntargets,int phony) {
+    FILE *f=strcmp(path,"-") ? fopen(path,"wb") : stdout;
     if (!f) return clierror("cannot open dependency output");
-    int bad=fprintf(f,"%s:",target)<0;
-    for (int i=0;i<count;i++) if (fprintf(f," \\\n  %s",sources[i])<0) bad=1;
-    for (int i=0;i<FILE_READ_COUNT;i++) if (fprintf(f," \\\n  %s",FILE_READ_PATHS[i])<0) bad=1;
-    if (fwrite("\n",1,1,f)!=1) bad=1;
-    if (fclose(f)!=0) bad=1;
+    int bad=0,col=0;
+    if (ntargets) for (int i=0;i<ntargets;i++) bad|=deps_name(f,targets[i],quoted[i],&col);
+    else bad|=deps_name(f,target,1,&col);
+    bad|=fputc(':',f)<0; col++;
+    for (int i=0;i<count;i++) bad|=deps_name(f,sources[i],1,&col);
+    for (int i=0;i<FILE_READ_COUNT;i++) bad|=deps_name(f,FILE_READ_PATHS[i],1,&col);
+    bad|=fputc('\n',f)<0;
+    if (phony) for (int i=0;i<FILE_READ_COUNT;i++) { col=0; bad|=deps_name(f,FILE_READ_PATHS[i],1,&col); bad|=fputs(":\n",f)<0; }
+    if (f==stdout) { if (fflush(f)!=0) bad=1; }
+    else if (fclose(f)!=0) bad=1;
     return bad ? clierror("cannot write dependency output") : 0;
 }
 static void argbytes(Buf *b, const char *s) {
@@ -111,6 +148,8 @@ static char *process_environment(int argc,char **argv,int i) {
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
+    int deponly=0, depphony=0, ndeptargets=0;
+    const char **deptargets=xrealloc(0,argc*sizeof(char *)); int *depquoted=xrealloc(0,argc*sizeof(int));
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
@@ -134,6 +173,12 @@ int main(int argc, char **argv) {
             else { argstart=i; break; }
         }
         else if (!strcmp(a,"-MD") || !strcmp(a,"-MMD")) { if (!deps) deps=""; }
+        else if (!strcmp(a,"-M") || !strcmp(a,"-MM")) { deponly=1; mode=1; if (!deps) deps=""; }   /* gcc: -E implied, only the .d line */
+        else if (!strcmp(a,"-MT") || !strcmp(a,"-MQ")) {
+            if (++i>=argc) return clierror("missing dependency target");
+            deptargets[ndeptargets]=argv[i]; depquoted[ndeptargets]=a[2]=='Q'; ndeptargets++;
+        }
+        else if (!strcmp(a,"-MP")) depphony=1;
         else if (!strcmp(a,"-MF")) {
             if (++i>=argc) return clierror("missing dependency output"); deps=argv[i];
         }
@@ -329,17 +374,20 @@ int main(int argc, char **argv) {
     if (rc) return rc;
     if(emitbin&&tbc_encode_product(&in,tape_input ? 0 : tapebin_target(target)))
         return clierror("cannot encode tapebin");
-    if (deps && mode!=1 && mode!=4 && !runit) {
+    if (deps && (deponly || (mode!=1 && mode!=4 && !runit))) {
         char *name=0;
-        if (!deps[0]) {
-            const char *base=out ? out : src; int len=strlen(base),dot=len;
-            for (int k=0;k<len;k++) { if (base[k]=='/') dot=len; else if (base[k]=='.') dot=k; }
-            name=xrealloc(0,dot+3);memcpy(name,base,dot);name[dot]='.';name[dot+1]='d';name[dot+2]=0;deps=name;
+        if (!deps[0] && deponly) deps=out ? out : "-";       /* gcc: -M goes to -o or stdout */
+        else if (!deps[0]) {
+            /* -MD: -o with suffix .d, else the input's basename .d in the current directory */
+            const char *base=out ? out : src; int len=strlen(base),dot=len,b=0;
+            for (int k=0;k<len;k++) { if (base[k]=='/') { dot=len; if (!out) b=k+1; } else if (base[k]=='.') dot=k; }
+            name=xrealloc(0,dot-b+3);memcpy(name,base+b,dot-b);name[dot-b]='.';name[dot-b+1]='d';name[dot-b+2]=0;deps=name;
         }
-        int drc=deps_write(deps,out ? out : "a.out",sources,nsources);
+        int drc=deps_write(deps,deps_target(out,src,deponly),sources,nsources,deptargets,depquoted,ndeptargets,depphony);
         free(name);if (drc) return drc;
+        if (deponly) { free(sources); free(deptargets); free(depquoted); free(in.b); return 0; }
     }
-    free(sources);
+    free(sources); free(deptargets); free(depquoted);
     if (runit) return memory_enter(&mapping,&plan,&in);
     if (!out && !mode && !explicit_image) {
 #ifdef _WIN32

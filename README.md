@@ -69,7 +69,7 @@ machine). The C headers it needs travel inside it.
 ```
 
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
-  `-include`, `-E`, `-MD`/`-MF`/`-MT`/`-MP`, `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
+  `-include`, `-E`, `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MQ`/`-MP` (gcc's `.d` bytes; `-M` lists what `-MM` lists, the bundled headers are not files), `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
 - **Headers:** twenty standard/compatibility headers are bundled (`assert
   ctype dirent errno float inttypes iso646 limits math memory signal stdarg stdbool

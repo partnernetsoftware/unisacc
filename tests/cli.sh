@@ -134,7 +134,7 @@ say "-nostdinc printf lowered" "hi 42 ok!" "$( (cd "$T" && bound 60 "$UA_RUN" -n
 # -MD writes what make wants: `target: input headers`, only files that were
 # really opened (the built-in header copies are not files) [S-15 C2]
 (cd "$T" && bound 60 "$UA_RUN" -MD inc.c -S -I inc -o inc.tape >/dev/null 2>&1)
-say "-MD names the target" "inc.tape:" "$(head -1 "$T/inc.d" 2>/dev/null | tr -d ' \\')"
+say "-MD names the target" "inc.tape:" "$(head -1 "$T/inc.d" 2>/dev/null | cut -d' ' -f1)"   # gcc's .d: one line, names separated by spaces (R16-11)
 say "-MD lists the header" "greet.h" "$(grep -o 'greet.h' "$T/inc.d" 2>/dev/null | head -1)"
 
 # no #include at all, outside the repo: the header is found on demand from

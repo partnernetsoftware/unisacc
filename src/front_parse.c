@@ -5642,7 +5642,7 @@ int fe_load(char *path, char *t) {
     preprocess();
     expandsrc();
     if (pponly) {                       /* -E: the text, not a program */
-        __write(bkfd, src, nsrc);
+        if (deponly == 0) __write(bkfd, src, nsrc);   /* -M: only the .d line */
         return 2;
     }
     if (lex() < 0) return 1;
