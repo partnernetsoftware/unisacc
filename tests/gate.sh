@@ -114,6 +114,9 @@ job exec-pp-pragmas python3 ./exec/pp/pragmacheck.py
 job exec-pploc python3 ./exec/pp/locationcheck.py              # source-position metadata from actual preprocessing
 job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets against reference tpos
 job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location envelope
+job exec-objectplan python3 ./tests/objectplancheck.py         # ordered ELF symbol plan
+job exec-objectpack python3 ./tests/objectpackcheck.py         # target-scoped route declarations
+job exec-modelobject python3 ./tests/modelobjectcheck.py       # two ELF architectures against C reference
 job exec-objectfacts python3 ./tests/objectfactscheck.py       # object tape facts in delta
 job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent ET_REL layout oracle
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity

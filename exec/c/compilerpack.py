@@ -118,29 +118,46 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
     specs=[]
     for text in Path(__file__).with_name('compiler-routes.tsv').read_text().splitlines():
         if text and not text.startswith('#'): specs.append(text.split('\t'))
-    rows=[];targets=set()
+    rows=[];targets=set();target_specs={}
     for path in map(Path,manifests):
         stages=[x.split('\t') for x in path.read_text().splitlines() if x and not x.startswith('#')]
         if not stages or any(len(s)!=5 for s in stages): raise ValueError('invalid source route')
         target=stages[0][0]
         if target in targets or any(s[0]!=target for s in stages): raise ValueError('duplicate/mixed target')
         targets.add(target)
+        target_specs[target]=list(specs)
+        if target in ('lnx/x86_64','lnx/arm64'):
+            target_specs[target]+=[['object/'+level,'elf',opt] for level,opt in (('O0','none'),('O1','O1'),('O2','O2'))]
         names=[s[1] for s in stages]
         if names!=['e2','e1','e3','e4','prune','lower','elf']: raise ValueError('unexpected image stages')
         for _,name,inp,out,model in stages[:2]:
             rows.append('\t'.join([target+'/unit',name,inp,out,str((path.parent/model).resolve())]))
         _,name,inp,out,model=stages[-1]
         rows.append('\t'.join([target+'/memory',name,inp,'memory-v1',str((path.parent/model).resolve())]))
-        for suffix,last,opt in specs:
+        for suffix,last,opt in target_specs[target]:
             for _,name,inp,out,model in stages:
                 if name=='e4' and opt=='none': continue
                 model=Path(o1).resolve() if name=='e4' and opt=='O1' else (path.parent/model).resolve()
+                if suffix.startswith('object/') and name=='elf': out='object-v1'
                 rows.append('\t'.join([target+'/'+suffix,name,inp,out,str(model)]))
                 if name==last: break
     with tempfile.TemporaryDirectory(prefix='compiler-package-') as td:
         # Offline construction of the shared unit-framing network. Runtime
         # does not invoke these Python tools or parse declarations in C.
         here=Path(__file__).resolve().parent
+        object_models={}
+        for target in sorted(targets & {'lnx/x86_64','lnx/arm64'}):
+            arch=target.split('/')[1]
+            object_models[target]={
+                'lower':built_model(td,'object-lower-'+arch,here.parent/'lower/gen.py',
+                                    ['--full','--object']+(['--arm64'] if arch=='arm64' else [])),
+                'elf':built_model(td,'object-enc-'+arch,here.parent/'enc'/('arm.py' if arch=='arm64' else 'gen.py'),['--object'])}
+        for i,row in enumerate(rows):
+            cols=row.split('\t')
+            for target,models in object_models.items():
+                if cols[0].startswith(target+'/object/') and cols[1] in models:
+                    cols[4]=str(models[cols[1]]);break
+            rows[i]='\t'.join(cols)
         # Declare all target macro lists as resources; choosing and parsing
         # the list remains in the shared E2 delta. The driver supplies target.
         # Load by source path, avoiding other stage generators named gen.
@@ -179,7 +196,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         for target in sorted(targets):
             # Normal compilation also carries locations, without enabling
             # warnings. The same units model preserves file boundaries.
-            quiet_routes={target+'/unit'}|{target+'/'+s for s,_,_ in specs if s!='pp'}
+            quiet_routes={target+'/unit'}|{target+'/'+s for s,_,_ in target_specs[target] if s!='pp'}
             for i,row in enumerate(rows):
                 cols=row.split('\t')
                 if cols[0] not in quiet_routes: continue
@@ -189,7 +206,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                 rows[i]='\t'.join(cols)
             rows.append('\t'.join([target+'/warn/unit','e2','src.c','pp.locations',str(warning_models['e2'])]))
             rows.append('\t'.join([target+'/warn/unit','e1','pp.locations','tokens.locations',str(warning_models['e1'])]))
-            for suffix,last,opt in specs:
+            for suffix,last,opt in target_specs[target]:
                 if suffix=='pp': continue
                 for row in ordinary:
                     cols=row.split('\t')
@@ -202,7 +219,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                     rows.append('\t'.join(cols))
         base=list(rows)
         for target in sorted(targets):
-            for suffix,last,opt in specs:
+            for suffix,last,opt in target_specs[target]:
                 if suffix=='pp': continue
                 route=target+'/multi/'+suffix
                 rows.append('\t'.join([route,'units','units.locations','tokens.locations',str(located_units)]))
@@ -211,7 +228,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                     if cols[0]==target+'/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
         for target in sorted(targets):
-            for suffix,last,opt in specs:
+            for suffix,last,opt in target_specs[target]:
                 if suffix=='pp': continue
                 route=target+'/warn/multi/'+suffix
                 rows.append('\t'.join([route,'units','units.locations','tokens.locations',str(located_units)]))

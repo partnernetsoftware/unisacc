@@ -286,3 +286,5 @@ R17 产品对象路线实施：E3 读取 `\0cli/funit`/`\0cli/object` 资源，�
 R17 产品单元前端首片：`exec/parse2/unitmode.py` 用通用动作实现资源分支、全局/外部声明与入口延后；五个单元 tape 在 C 参考、模拟器、构造网络间逐字节同，plain/locations/warnings/errors/warnings+errors 五变体构造通过。整程序 exec-chain 264 输入：262 equal、2 既有 known、0 bad/lost；E3 全域 net=table 2,308,070 observations。门禁 `exec-unitparse` 已登记；对象写出仍未完成，驱动继续明确拒绝对象输出。
 
 R17 对象事实接口首片：对象专用 lower 构造开关 `--object` 保留原单元 tape（十六进制运输）、C tape 名字首次出现顺序与链接位，输出 `@obj_name`/`@obj_tape`/`@obj_nzend`；非零数据块末端与镜像最后非零字节明确分开。接口仍未接对象编码器，不表示产品 -c 可用。ELF 写出 δ 独立接收符号/重定位计划，独立结构打包 oracle 核对布局；后续接入实际计划再验参考对象字节。
+
+R17 Linux 对象路线闭合验收（实现片）：E3资源单元模式→既有E4/prune→对象lower→ELF编码/符号计划均为δ；x86/ARM按最终布局采集section/UND重定位，不在尺寸遍重复采集。`@obj_unit`按资源传入决定UNISATAPE1节，整程序对象不携带此节。实测22份真实tape，两架构单元/整程序含外部数据/调用、函数指针、零尾，ELF字节等于C参考；真实 P3 包 1,042,502 B 已构造；通过通用运行时注入与驱动同义资源，六类源码、O0/O1/O2、两架构单元/整程序共66份对象与C参考逐字节同。完整 .com 驱动入口待接通，osx/win不宣告对象路由。证据见 research/r17-product-elf-object-evidence.json。

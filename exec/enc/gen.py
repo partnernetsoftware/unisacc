@@ -124,7 +124,7 @@ def emit_rules(phase):
                       classes={'division_registers': tuple(NUM[r] for r in REGMAP['x86_64'][:7])})
 
 
-def build(image=False):
+def build(image=False, object_mode=False):
     E.prn()
     procs()
     p = P("START")
@@ -242,15 +242,23 @@ def build(image=False):
         install_elf(E, byte, OFF, LABD,image_format=image if isinstance(image,str) else "elf")
         completion['done3'] = P('DONE').fresh('r')
     install_rules(g, HERE, 'x86-emit', section='done-image' if image else 'done-raw', bindings=completion)
+    if object_mode:
+        assert image == 'elf'
+        from address import SYM, PRESENT
+        from objectplan import install as install_objectplan
+        from x86object import install as install_x86object
+        install_objectplan(E, byte, OFF, LABD, SYM, PRESENT)
+        install_x86object(E, byte, OFF, LABD, KND, TGT, SYM, PRESENT)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": "START", "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
 
 
 if __name__ == "__main__":
-    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ("--elf","--macho","--pe")):
+    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ("--elf","--macho","--pe","--object")):
         sys.exit("usage: gen.py OUT.json [--elf|--macho|--pe]")
-    d = build(image=sys.argv[2][2:] if len(sys.argv)==3 else False)
+    flag=sys.argv[2][2:] if len(sys.argv)==3 else False
+    d = build(image='elf' if flag=='object' else flag, object_mode=flag=='object')
     s = json.dumps(d, separators=(",", ":"))
     open(sys.argv[1], "w").write(s)
     st, ent, live, ns, na = E.sizes(d)

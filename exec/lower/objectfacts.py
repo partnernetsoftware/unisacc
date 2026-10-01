@@ -18,7 +18,7 @@ def install(E):
         name='OF.original.'+state;assert name not in g.st
         g.st[name]=g.st.pop(state);g.labels.add(name);return name
     start=move('START')
-    p=P('START').a(('MARK','of_zero'),('LDI','of_count',0))
+    p=P('START').a(('MARK','of_zero'),('LDI','of_count',0),('SBCLR',),[('SBOUT',c) for c in b'\0cli/funit'],('SBFIND','of_resource'),('BLEN','of_unit','of_resource'))
     words=list(SHAPE)+['.global','.extern','.bss','.str']
     for i,w in enumerate(words):
         p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN','of_key'+str(i)))
@@ -69,7 +69,7 @@ def install(E):
     second=move('R.second');P('R.second').a(('COPYW','of_nzend','outn')).goto(second)
     head=move('HEAD');P('HEAD').a(('COPYW','stored','of_nzend')).goto(head)
     end=move('H.end')
-    P('H.end').o('@obj_nzend ').a(('COPYW','n','of_nzend')).call('PRN').o('\n').a(('LDI','of_i',0)).goto('OF.headers')
+    P('H.end').o('@obj_unit ').a(('COPYW','n','of_unit')).call('PRN').o('\n@obj_nzend ').a(('COPYW','n','of_nzend')).call('PRN').o('\n').a(('LDI','of_i',0)).goto('OF.headers')
     P('OF.headers').branch({0:'OF.header'},'OF.raw',[('CMP','of_i','of_count')])
     P('OF.header').o('@obj_name ').a(('LDX','of_blob','of_i',NAMES),('INPUSH','of_blob')).call('OF.internblob').a(('INPOP',),('INPUSH','of_blob')).call('OF.printblob').a(('INPOP',),('LDX','n','of_nameid',GLOBAL)).o(' ').call('PRN').a(('LDX','n','of_nameid',EXTERN)).o(' ').call('PRN').o('\n').a(('ALUI','add','of_i','of_i',1)).goto('OF.headers')
     P('OF.internblob').a(('LDI','of_zero2',0)).goto('OF.ib')

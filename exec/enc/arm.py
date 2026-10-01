@@ -25,7 +25,9 @@ def word(p):
     return p
 
 
-def build(image=False):
+def build(image=False, object_mode=False):
+    if object_mode:
+        E.prn()
     specs = {'mov': ('rr', 1), 'imm': ('ri', 2), 'mul64': ('rrr', 3),
              'ret': ('', 4), 'nop': ('', 5), 'callr': ('r', 6),
              'hostcall': ('rr',60), 'hostaddr': ('ri',61),
@@ -140,12 +142,20 @@ def build(image=False):
         from elfimage import install as install_elf
         from armbranch import LABELS
         install_elf(E,_enc.byte,0,LABELS,arch='arm64',direct_labels=True,image_format=image if image in ('macho','pe') else 'elf')
+    if object_mode:
+        from armlayout import SYM, PRESENT
+        from objectplan import install as install_objectplan
+        install_objectplan(E, _enc.byte, 0, LABELS, SYM, PRESENT,
+                           arch='arm64', direct_labels=True)
+        from armobject import install as install_armobject
+        install_armobject(E, word)
     contract(section='fail', sequences={'reject': E.rej('not covered: ARM64 operand or instruction')})
     g.finish()
     return {'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in g.st.items()},'seqs':[list(map(list,s)) for s in g.seqs]}
 
 if __name__=='__main__':
-    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ('--elf','--macho','--pe')):
-        sys.exit('usage: arm.py OUT.json [--elf|--macho|--pe]')
-    d=build(image=sys.argv[2][2:] if len(sys.argv)==3 else False);open(sys.argv[1],'w').write(json.dumps(d,separators=(',',':')))
+    if len(sys.argv) not in (2,3) or (len(sys.argv)==3 and sys.argv[2] not in ('--elf','--macho','--pe','--object')):
+        sys.exit('usage: arm.py OUT.json [--elf|--macho|--pe|--object]')
+    mode=sys.argv[2][2:] if len(sys.argv)==3 else False
+    d=build(image='elf' if mode=='object' else mode, object_mode=mode=='object');open(sys.argv[1],'w').write(json.dumps(d,separators=(',',':')))
     print('ARM64 states',len(d['states']),file=sys.stderr)
