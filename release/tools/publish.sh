@@ -5,6 +5,10 @@
 # Prints the verdict; nothing here signs or edits the repository.
 set -u
 TAG=${1:?tag}; WANT=${2:?signed sha256}
+cd "$(dirname "$0")/../.." || exit 1          # gh needs the repository (0.0.19 published once with uploads failing outside it)
+have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || exit 1
+case " $have " in *" unisacc.com "*) ;; *) echo "refused: no signed unisacc.com on $TAG yet"; exit 1;; esac
+case " $have " in *" unisacc-macos-universal.dmg "*) ;; *) echo "refused: no unisacc-macos-universal.dmg on $TAG yet"; exit 1;; esac
 for a in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
   case "$a" in unisacc.com|unisacc-macos-universal.dmg) ;; *) gh release delete-asset "$TAG" "$a" -y >/dev/null || exit 1; echo "removed $a";; esac
 done
