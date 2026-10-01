@@ -227,7 +227,9 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
             # no number and not a WinAPI call: emitting the gate anyway would
             # enter the kernel with whatever the number register held
             raise ValueError("%s: no system call for this on %s" % (op, os_))
-        if sysno != "none":
+        if op == "syscall":
+            tp.emit("setreg", f["nrreg"], ("mem", SYSCELL[0]), role="sysno")
+        elif sysno != "none":
             n = int(sysno, 0)
             if fault == "osx_class_bit" and os_ == "osx":
                 n &= ~C.OSX_CLASS_BIT                     # [L-3] drop the bit
@@ -342,7 +344,7 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
                 tp.emit("setmem", SYSCELL[i], R(a[i + 1]))
             tp.emit("setmem", FPCELL, rmap["r6"])
             tp.emit("setmem", SPCELL, rmap["r7"])
-            syscall_seq(a[0], [("mem", c) for c in SYSCELL])
+            syscall_seq(a[0], [("mem", c) for c in (SYSCELL[1:] if a[0] == "syscall" else SYSCELL)])
             tp.emit("mov", rmap["r0"],
                     facts(oracle, a[0], os_, arch, drive)["ret"])
             tp.emit("setreg", rmap["r6"], ("mem", FPCELL), role="fp")

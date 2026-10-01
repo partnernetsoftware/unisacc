@@ -173,8 +173,16 @@ def install(E, arch="x86_64", os_="lnx"):
     put('finish', dict(entry=entry, next='C.fail'), {'pending': []})
     for op,f in selected:
         entry = 'SC.'+op
-        sysno = actions('sysno', {'reg': E.O(f[9]), 'value': E.O(str(int(f[0],0)))}) if f[0]!='none' else []
+        sysno = (actions('sysno', {'reg': E.O(f[9]), 'value': E.O(str(int(f[0],0)))})
+                 if f[0]!='none' and op != 'syscall' else [])
         pending = actions('head', {'retchars': [('SBOUT',c) for c in f[7].encode()], 'sysno': sysno})
+        if op == 'syscall':
+            # ADDR resolves the scratch-area base; a literal SYSA offset would
+            # address the wrong cell once the target data section is laid out.
+            resume = P(entry).fresh('r')
+            put('nrmem', dict(entry=entry, resume=resume, SYSA=SYSA),
+                {'pending': pending, 'reg': E.O(f[9])})
+            entry, pending = resume, actions('nrtail', {})
         if os_=='win':
             resume = P(entry).fresh('r')
             put('winhead', dict(entry=entry, resume=resume, WIN_SAVE=WIN_SAVE), {'pending': pending})
@@ -183,9 +191,10 @@ def install(E, arch="x86_64", os_="lnx"):
             match, nxt = 'SC.'+op+'.m'+str(mode), 'SC.'+op+'.n'+str(mode)
             put('mode', dict(entry=entry, branch=P(entry).fresh('b'), match=match,
                              next=nxt, mode=mode), {'pending': pending})
+            source_mode = 5 if op == 'syscall' and mode == 1 else mode
             sources = [(kind, source_values[value] if value in source_values else int(value))
                        for m, shape, kind, value in source_rows
-                       if int(m)==mode and shape in ('*', f[10])]
+                       if int(m)==source_mode and shape in ('*', f[10])]
             if not sources:
                 raise ValueError('new Linux '+arch+' argument shape requires migration: '+f[10])
             current, pending = match, []

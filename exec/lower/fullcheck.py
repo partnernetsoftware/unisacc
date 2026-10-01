@@ -21,7 +21,7 @@ def check(raw,out,oracle):
     assert same({k:v for k,v in vars(ref).items() if k not in ('code','data')},{k:v for k,v in vars(got).items() if k not in ('code','data')}),'layout/labels differ'
     assert len(ref.code)==len(got.code),'instruction count differs'
     for i,(a,b) in enumerate(zip(ref.code,got.code)):
-        assert a.op==b.op and same(list(a.args),list(b.args)) and same(a.meta,b.meta),(i,vars(a),vars(b))
+        assert a.op==b.op and same(list(a.args),list(b.args)) and same(a.meta,b.meta),(i,repr(a),repr(b))
     return len(ref.code)
 
 
@@ -43,6 +43,8 @@ def main():
         elif target.startswith('osx/'):
             fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in ('ioctl','fstat','stat','lstat','fcntl','mkdir','chmod','poll'))
             fixture += '  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n'
+        if target.startswith(('lnx/', 'osx/')):
+            fixture += '  .sys6 syscall, r0, r1, r2, r3, r4, r5\n'
         unavailable=[]
         if target.startswith('win/'):
             from unisa.catalog import WINAPI, winimp
