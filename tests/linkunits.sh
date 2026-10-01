@@ -105,6 +105,20 @@ say "two mains refused (one step)" "multiple definitions" "$("$_BOUND" 30 "$UA" 
 say "two mains refused (unit objects)" "multiple definitions of main" "$("$_BOUND" 30 "$UA" "$T/ma.o" "$T/mb.o" 2>&1 | grep -o 'multiple definitions of main')"
 printf 'int t;\nint main(void){ return t; }\n' > "$T/t1.c"; printf 'int t;\nint f(void){ return t; }\n' > "$T/t2.c"
 say "tentative definitions still merge" "rc=0" "$("$_BOUND" 30 "$UA" "$T/t1.c" "$T/t2.c" >/dev/null 2>&1; echo "rc=$?")"
+# R20-3: initialisers marked in the unit tape (.unit 2 / .gdef), checked at link time
+u() { "$_BOUND" 30 "$UA" "$1.c" -c -b "$HOST" -funit -o "$1.o" 2>/dev/null; }
+u "$T/d1"; u "$T/d2"
+say "two initialised globals refused (unit objects)" "multiple definitions of shared" "$("$_BOUND" 30 "$UA" "$T/d1.o" "$T/d2.o" 2>&1 | grep -o 'multiple definitions of shared')"
+printf 'int shared;\nint main(void){ return shared; }\n' > "$T/d7.c"; u "$T/d7"
+say "one initialiser + tentative keeps it (unit objects)" "rc=1" "$("$_BOUND" 30 "$UA" "$T/d1.o" "$T/d7.o" >/dev/null 2>&1; echo "rc=$?")"
+printf 'extern int nowhere;\nint main(void){ return nowhere; }\n' > "$T/x3.c"; printf 'int other(void){ return 0; }\n' > "$T/x4.c"; u "$T/x3"; u "$T/x4"
+say "extern-only object refused (unit objects)" "undefined reference to nowhere" "$("$_BOUND" 30 "$UA" "$T/x3.o" "$T/x4.o" 2>&1 | grep -o 'undefined reference to nowhere')"
+say "extern-only object refused (one step)" "undefined reference to nowhere" "$("$_BOUND" 30 "$UA" "$T/x3.c" "$T/x4.c" 2>&1 | grep -o 'undefined reference to nowhere')"
+python3 - "$T/x4.o" "$T/old.o" <<'PY'
+import sys; b=open(sys.argv[1],'rb').read(); i=b.find(b'.unit 2\n'); assert i>0
+open(sys.argv[2],'wb').write(b[:i]+b';unit 2\n'+b[i+8:])   # same length: the old object, without the record
+PY
+say "object without .unit 2 refused" "predates .unit 2" "$("$_BOUND" 30 "$UA" "$T/old.o" "$T/x3.o" 2>&1 | grep -o 'predates .unit 2')"
 echo
 echo "linkunits  ok $ok   wrong $bad"
 [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]
