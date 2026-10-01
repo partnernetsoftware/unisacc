@@ -28,6 +28,8 @@ ALLOWED = {'x86_64': {2}, 'arm64': {275, 277}}          # PC32; ADR_PREL_PG_HI21
 MACHINE = {'x86_64': 62, 'arm64': 183}
 LLD = ['/opt/homebrew/opt/lld@21/bin/ld.lld', '/opt/homebrew/opt/lld/bin/ld.lld', 'ld.lld']
 EMUL = {'x86_64': 'elf_x86_64', 'arm64': 'aarch64elf'}
+WINIMPORTS = ('GetStdHandle', 'WriteFile', 'ReadFile', 'CloseHandle', 'CreateFileA', 'ExitProcess', 'GetCommandLineA',
+              'VirtualAlloc', 'VirtualProtect', 'VirtualFree', 'FlushInstructionCache', 'SetFilePointer', 'DeleteFileA', 'MoveFileExA')
 
 
 def run(cmd, timeout=30, **kw):
@@ -109,6 +111,7 @@ def main(argv):
     ua = argv[1]
     want_link = '--link' in argv
     vm = argv[argv.index('--run-arm64-lima') + 1] if '--run-arm64-lima' in argv else None
+    winvm = argv[argv.index('--run-windows') + 1] if '--run-windows' in argv else None
     strict = os.environ.get('STRICT') == '1'
     tmp = pathlib.Path(os.environ.get('TMPDIR', '/tmp')) / ('elfobj-%d' % os.getpid())
     tmp.mkdir()
@@ -160,11 +163,68 @@ def main(argv):
             print('elfobj  Mach-O objects for osx/arm64 and osx/x86_64 link with ld64 and print what the images print')
         else:
             skips.append('Mach-O: not on macOS (needs ld64 and the SDK)')
-        # bare -c is still the tape; -c -b win/* is refused with a pointer to the design
+        # COFF objects (R17-1): lld-link with a kernel32 import library made by
+        # llvm-dlltool; the programs run in the Windows VM when one is named
+        lldlink = next((x for x in ('/opt/homebrew/opt/lld@21/bin/lld-link', '/opt/homebrew/opt/lld/bin/lld-link') if pathlib.Path(x).is_file()), shutil.which('lld-link'))
+        dlltool = next((x for x in ('/opt/homebrew/opt/llvm/bin/llvm-dlltool',) if pathlib.Path(x).is_file()), shutil.which('llvm-dlltool'))
+        winexe = {}
+        if lldlink and dlltool:
+            (tmp / 'k32.def').write_text('LIBRARY kernel32.dll\nEXPORTS\n' + ''.join('  %s\n' % n for n in WINIMPORTS))
+            for arch, m, mach in (('x86_64', 'i386:x86-64', 'x64'), ('arm64', 'arm64', 'arm64')):
+                lib = tmp / ('k32_%s.lib' % arch)
+                r = run([dlltool, '-m', m, '-d', tmp / 'k32.def', '-l', lib]); assert r.returncode == 0, r.stderr
+                for probe in PROBES:
+                    stem = pathlib.Path(probe).stem
+                    obj = tmp / ('%s.win.%s.obj' % (stem, arch)); exe = tmp / ('%s.win.%s.exe' % (stem, arch)); img = tmp / ('%s.win.%s.img.exe' % (stem, arch))
+                    r = run([ua, ROOT / probe, '-c', '-b', 'win/' + arch, '-o', obj], cwd=ROOT)
+                    assert r.returncode == 0, ('coff -c', probe, arch, r.stderr[-300:])
+                    blob = obj.read_bytes()
+                    assert struct.unpack_from('<HH', blob, 0) == ((0x8664 if arch == 'x86_64' else 0xAA64), 3), 'not a 3-section COFF object'
+                    r = run([lldlink, '/entry:_start', '/subsystem:console', '/nodefaultlib', '/machine:' + mach, '/out:%s' % exe, obj, lib])
+                    assert r.returncode == 0, ('lld-link', probe, arch, r.stdout[-300:], r.stderr[-300:])
+                    r = run([ua, ROOT / probe, '-b', 'win/' + arch, '-o', img], cwd=ROOT); assert r.returncode == 0
+                    winexe[(stem, arch)] = (exe, img); nobj += 1; linked[(stem, 'win-' + arch)] = exe
+            print('elfobj  COFF objects for win/x86_64 and win/arm64 link with lld-link against a kernel32 import library')
+            if winvm:
+                utm = '/Applications/UTM.app/Contents/MacOS/utmctl'
+                st = run([utm, 'status', winvm], timeout=20)
+                # utmctl exec returns 0 even when the guest agent is not up (it prints
+                # OSStatus -2700); an IP address from the agent is the readiness signal
+                if b'started' not in st.stdout or not run([utm, 'ip-address', winvm], timeout=20).stdout.strip():
+                    skips.append('run COFF programs: Windows VM %s not answering' % winvm)
+                else:
+                    t = str(os.getpid())
+                    bat = ['@echo off']
+                    runset = {k: v for k, v in winexe.items() if k[0] in ('hello', 'fact', 'ptr')}   # bounded: pushes cost seconds each
+                    for (stem, arch), (exe, img) in sorted(runset.items()):
+                        for kind, f in (('obj', exe), ('img', img)):
+                            g = 'C:\\u\\o%s_%s_%s_%s.exe' % (t, stem, arch, kind)
+                            run([utm, 'file', 'push', winvm, g], input=f.read_bytes(), timeout=30)
+                            bat.append('echo === %s %s %s >> C:\\u\\o%s.txt' % (stem, arch, kind, t))
+                            bat.append('%s >> C:\\u\\o%s.txt 2>&1' % (g, t))
+                            bat.append('echo RC=%%errorlevel%% >> C:\\u\\o%s.txt' % t)
+                    bat.append('echo done > C:\\u\\o%s.done' % t)
+                    run([utm, 'file', 'push', winvm, 'C:\\u\\o%s.bat' % t], input=('\r\n'.join(bat) + '\r\n').encode(), timeout=30)
+                    r = run([utm, 'exec', winvm, '--cmd', 'cmd.exe', '--', '/c', 'C:\\u\\o%s.bat' % t], timeout=40)
+                    assert r.returncode == 0, 'guest exec refused'
+                    import time
+                    for _ in range(20):                     # the batch runs on after exec returns
+                        if b'done' in run([utm, 'file', 'pull', winvm, 'C:\\u\\o%s.done' % t], timeout=15).stdout: break
+                        time.sleep(1.5)
+                    out = run([utm, 'file', 'pull', winvm, 'C:\\u\\o%s.txt' % t], timeout=30).stdout.decode(errors='replace').replace('\r', '')
+                    blocks = {}
+                    for chunk in out.split('=== ')[1:]:
+                        head, _, body = chunk.partition('\n'); blocks[tuple(head.split()[:3])] = body.strip()
+                    for (stem, arch) in runset:
+                        a = blocks.get((stem, arch, 'obj')); b = blocks.get((stem, arch, 'img'))
+                        assert a is not None and a == b, ('windows run', stem, arch, (a or '')[-200:], (b or '')[-200:])
+                    print('elfobj  COFF programs run in %s (win/x86_64 emulated, win/arm64 native) and print what the images print' % winvm)
+        else:
+            skips.append('COFF: no lld-link or llvm-dlltool')
+        # bare -c is still the tape
         r = run([ua, ROOT / 'examples/hello.c', '-c', '-o', tmp / 'bare.tape'], cwd=ROOT)
         assert r.returncode == 0 and (tmp / 'bare.tape').read_bytes().startswith(b'_start:'), 'bare -c no longer writes the tape'
-        r = run([ua, ROOT / 'examples/hello.c', '-c', '-b', 'win/x86_64', '-o', tmp / 'x.o'], cwd=ROOT)
-        assert r.returncode == 1 and b'docs/toolchain.md' in r.stderr and not (tmp / 'x.o').exists(), r.stderr
+
         if vm:
             if not shutil.which('limactl'):
                 skips.append('run arm64: no limactl')

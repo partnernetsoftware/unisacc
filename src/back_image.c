@@ -331,8 +331,108 @@ int bk_machoobj(void) {
     wname("_start", 7);
     return 0;
 }
+/* The COFF object (-c -b win/ARCH): three sections, section symbols as
+   relocation targets, every tape name a static symbol, `_start` external,
+   and each Windows import an undefined external `__imp_Name` (link against
+   kernel32.lib).  AMD64 REL32 keeps its addend in the displacement; ARM64
+   PAGEBASE_REL21 keeps a byte addend in immhi:immlo and PAGEOFFSET_12A the
+   low 12 bits in imm12 -- the encoder left all of them zero. */
+int bk_cname(char *s, int n, long *strpos) {          /* 8-byte short name, or 0 + string-table offset */
+    int k;
+    if (n <= 8) { k = 0; while (k < n) { wb(s[k]); k = k + 1; } while (k < 8) { wb(0); k = k + 1; } return 0; }
+    w32(0); w32(*strpos); *strpos = *strpos + n + 1; return 0;
+}
+int bk_csym(char *s, int n, long *strpos, long value, int sect, int type, int cls) {
+    bk_cname(s, n, strpos); w32(value); w16(sect); w16(type); wb(cls); wb(0); return 0;
+}
+int bk_coffobj(void) {
+    long L; long bss; long offt; long offr; long offd; long offs; long nsym; long strpos; long v; long f;
+    int id; int k; int start; int nimp; char *nm; int len; int base_imp;
+    L = bk_objnz; bss = bkdlen + bk_bss - L;      /* + the arm64 tape stack (bk_bss), which is not in bkdlen */
+    if (bknro > 65535) { __write(2, "object: more than 65535 relocations in .text\n", 45); __exit(1); }
+    start = bk_find("_start", 6);
+    k = 0;
+    while (k < bknro) {                                   /* the addends go into the instruction fields */
+        long o; long add; o = bkro_off[k]; add = bkro_add[k];
+        if (bkro_sect[k] < 100) {
+            if (bkarch == 0) {
+                f = add + 4;
+                bktext[o] = f & 255; bktext[o + 1] = (f >> 8) & 255; bktext[o + 2] = (f >> 16) & 255; bktext[o + 3] = (f >> 24) & 255;
+            } else {
+                long w;
+                if (add < 0 - 1048576 || add >= 1048576) { __write(2, "object: COFF ARM64 addend beyond 1 MB\n", 38); __exit(1); }
+                w = (bktext[o] & 255) | ((bktext[o + 1] & 255) << 8) | ((bktext[o + 2] & 255) << 16) | ((long)(bktext[o + 3] & 255) << 24);
+                if (bkro_type[k] == 275) w = w | ((add & 3) << 29) | (((add >> 2) & 0x7FFFF) << 5);
+                else w = w | ((add & 0xFFF) << 10);
+                bktext[o] = w & 255; bktext[o + 1] = (w >> 8) & 255; bktext[o + 2] = (w >> 16) & 255; bktext[o + 3] = (w >> 24) & 255;
+            }
+        }
+        k = k + 1;
+    }
+    nsym = 3; id = 0;
+    while (id < bknn) { if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) nsym = nsym + 1; id = id + 1; }
+    nsym = nsym + 1; base_imp = nsym; nimp = BK_NIMP; nsym = nsym + nimp;
+    offt = 144;
+    offr = bk_round(offt + bktlen, 4);
+    offd = bk_round(offr + 10 * bknro, 16);
+    offs = bk_round(offd + L, 4);
+    w16(bkarch ? 0xAA64 : 0x8664); w16(3); w32(0); w32(offs); w32(nsym); w16(0); w16(0);
+    wname(".text", 8); w32(0); w32(0); w32(bktlen); w32(offt); w32(offr); w32(0); w16(bknro); w16(0); w32(0x60500020);
+    wname(".data", 8); w32(0); w32(0); w32(L); w32(offd); w32(0); w32(0); w16(0); w16(0); w32(0xC0500040);
+    wname(".bss", 8); w32(0); w32(0); w32(bss); w32(0); w32(0); w32(0); w16(0); w16(0); w32(0xC0500080);
+    wz(offt - 140);
+    wtext(); wz(offr - offt - bktlen);
+    k = 0;
+    while (k < bknro) {
+        long sym; int ty;
+        sym = bkro_sect[k] >= 100 ? base_imp + bkro_sect[k] - 100 : bkro_sect[k] - 1;
+        if (bkarch) ty = bkro_type[k] == 275 ? 4 : 6; else ty = 4;
+        w32(bkro_off[k]); w32(sym); w16(ty);
+        k = k + 1;
+    }
+    wz(offd - offr - 10 * bknro);
+    wdata(L); wz(offs - offd - L);
+    strpos = 4;
+    bk_csym(".text", 5, &strpos, 0, 1, 0, 3); bk_csym(".data", 5, &strpos, 0, 2, 0, 3); bk_csym(".bss", 4, &strpos, 0, 3, 0, 3);
+    id = 0;
+    while (id < bknn) {
+        if (id != start && bklab_tpc[id] >= 0) bk_csym(bkpool + bkname_at[id], bkname_len[id], &strpos, toff[bklab_tpc[id]], 1, 0, 3);
+        else { if (id != start && bksym_addr[id] >= 0) {
+            v = bksym_addr[id] - BK_DATA_BASE;
+            if (v >= L) bk_csym(bkpool + bkname_at[id], bkname_len[id], &strpos, v - L, 3, 0, 3);
+            else bk_csym(bkpool + bkname_at[id], bkname_len[id], &strpos, v, 2, 0, 3);
+        } }
+        id = id + 1;
+    }
+    bk_csym("_start", 6, &strpos, start >= 0 ? toff[bklab_tpc[start]] : 0, 1, 0x20, 2);
+    nm = BK_IMPS; k = 0;
+    while (k < nimp) {
+        char b[48]; int q;
+        len = 0; while (nm[len]) len = len + 1;
+        b[0] = 95; b[1] = 95; b[2] = 105; b[3] = 109; b[4] = 112; b[5] = 95;   /* __imp_ */
+        q = 0; while (q < len && q < 40) { b[6 + q] = nm[q]; q = q + 1; }
+        bk_csym(b, 6 + q, &strpos, 0, 0, 0, 2);
+        nm = nm + len + 1; k = k + 1;
+    }
+    w32(strpos);                                          /* the string table, sized first */
+    id = 0;
+    while (id < bknn) {
+        if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0) && bkname_len[id] > 8) {
+            k = 0; while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; } wb(0);
+        }
+        id = id + 1;
+    }
+    nm = BK_IMPS; k = 0;
+    while (k < nimp) {
+        len = 0; while (nm[len]) len = len + 1;
+        if (6 + len > 8) { int q; wname("__imp_", 6); q = 0; while (q < len) { wb(nm[q]); q = q + 1; } wb(0); }
+        nm = nm + len + 1; k = k + 1;
+    }
+    return 0;
+}
 int bk_object(char *t, int n, char *target) {
     bkos = 0; if (target[0] == 111) bkos = 1;
+    if (target[0] == 119) bkos = 2;
     bkarch = 0; if (target[4] == 97) bkarch = 1;
     bk_objmode = 1;
     t = tp_prune(t, n); n = tp_prune_length;
@@ -341,7 +441,7 @@ int bk_object(char *t, int n, char *target) {
     bk_lower();
     bk_assemble();
     bkwn = 0; bkwtot = 0;
-    if (bkos == 1) bk_machoobj(); else bk_elfobj();
+    if (bkos == 1) bk_machoobj(); else { if (bkos == 2) bk_coffobj(); else bk_elfobj(); }
     wflush();
     bk_objmode = 0;
     return 0;

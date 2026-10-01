@@ -9,6 +9,7 @@ long bk_textva; long bk_shift; int bk_sizing;
    embed an address record one relocation each (x_rip) or two (a_adrp_add);
    branches are section-internal and record nothing. */
 #define BK_OBJDATA 4294967296
+#define BK_OBJIMP 17179869184           /* object mode: Windows import i is BK_OBJIMP + 8*i (an UND __imp_ symbol) */
 #define BK_MAXRELO 262144
 int bk_objmode;
 long bkro_off[BK_MAXRELO]; int bkro_type[BK_MAXRELO]; int bkro_sect[BK_MAXRELO]; long bkro_add[BK_MAXRELO]; int bknro;
@@ -22,6 +23,7 @@ int bk_relo(long off, int type, long target) {
     }
     if (bknro >= BK_MAXRELO) { __write(2, "object: too many relocations\n", 29); __exit(1); }
     bkro_off[bknro] = off; bkro_type[bknro] = type;
+    if (target >= BK_OBJIMP) { bkro_sect[bknro] = 100 + (int)((target - BK_OBJIMP) / 8); bkro_add[bknro] = 0; bknro = bknro + 1; return 1; }
     if (target >= BK_OBJDATA) {
         target = target - BK_OBJDATA;
         if (target >= bk_objnz) { bkro_sect[bknro] = 3; bkro_add[bknro] = target - bk_objnz; }
@@ -1124,6 +1126,7 @@ int bk_assemble(void) {
            symbol whose initialiser ends in zeros must not straddle two
            sections, which a linker may place apart */
         bk_textva = 0; bk_datava = BK_OBJDATA; bk_objnz = bk_nzend;
+        i = 0; while (i < BK_NIMP) { bk_imp[i] = BK_OBJIMP + 8 * i; i = i + 1; }
     } else { if (bk_runmode) {
         /* two mappings: text goes read-execute once it is written, data
            stays writable, so nothing is ever both [macOS forbids W^X] */
