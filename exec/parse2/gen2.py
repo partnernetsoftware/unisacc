@@ -905,6 +905,8 @@ def build(locations=False, warnings=False, errors=False):
     objectdefinitions_install(E, P)
     from structreturnexpr import install as structreturnexpr_install
     structreturnexpr_install(E, P)
+    from forward import install as forward_install
+    start = forward_install(E, P, start, FPS_FN, DEFS)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
