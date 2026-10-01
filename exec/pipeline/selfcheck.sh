@@ -69,13 +69,18 @@ if [ "$SELF_PART" = package ]; then
     echo "package self-source $TARGET: $(wc -c < "$T/pack.image" | tr -d ' ') bytes equal"
     exit 0
 fi
-# Execute the resulting compiler only on a host that can run this image.
-case "$(uname -s)/$(uname -m):$TARGET" in
-    Darwin/arm64:osx/*|Darwin/x86_64:osx/x86_64)
-        b "$T/unisacc.$IMAGE" -O2 -b "$TARGET" "$SELF" -o "$T/n2"
-        b "$T/n2" -O2 -b "$TARGET" "$SELF" -o "$T/n3"
-        cmp "$T/unisacc.$IMAGE" "$T/n2" && cmp "$T/n2" "$T/n3"
-        echo "$MODEL bootstrap $TARGET: N1=N2=N3" ;;
-    *) echo "$MODEL bootstrap $TARGET: not executed on this host" ;;
-esac
-echo "$MODEL self-source $TARGET: $(wc -c < "$T/unisacc.$IMAGE" | tr -d ' ') bytes equal; bootstrap result above"
+# The independent bootstrap job owns this check in the gate.  The default
+# aggregate CLI retains its historic behaviour for direct use.
+if [ "$SELF_PART" = all ]; then
+    case "$(uname -s)/$(uname -m):$TARGET" in
+        Darwin/arm64:osx/*|Darwin/x86_64:osx/x86_64)
+            b "$T/unisacc.$IMAGE" -O2 -b "$TARGET" "$SELF" -o "$T/n2"
+            b "$T/n2" -O2 -b "$TARGET" "$SELF" -o "$T/n3"
+            cmp "$T/unisacc.$IMAGE" "$T/n2" && cmp "$T/n2" "$T/n3"
+            echo "$MODEL bootstrap $TARGET: N1=N2=N3" ;;
+        *) echo "$MODEL bootstrap $TARGET: not executed on this host" ;;
+    esac
+else
+    echo "$MODEL bootstrap $TARGET: checked by separate suite"
+fi
+echo "$MODEL self-source $TARGET: $(wc -c < "$T/unisacc.$IMAGE" | tr -d ' ') bytes equal"
