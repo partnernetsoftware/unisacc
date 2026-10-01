@@ -901,6 +901,8 @@ def build(locations=False, warnings=False, errors=False):
     parenfold_install(E, TIX, locations)
     from unitmode import install as unitmode_install
     start = unitmode_install(E, P, start, DEFS)
+    from structreturnexpr import install as structreturnexpr_install
+    structreturnexpr_install(E, P)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
