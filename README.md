@@ -3,12 +3,16 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.16): the reference compiler writes a
-relocatable ELF `.o` for `-c -b lnx/x86_64|arm64` that GNU ld and lld link; the
-shipped `unisacc.com` still writes the tape for `-c`; there is no linker or
-assembler yet. The staged plan (three-format `.o`, own static linker, assembler)
-and the back-end facts behind it are in [docs/toolchain.md](docs/toolchain.md)
-and [plans/v0.0.17.md](plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+file, `unisacc.com`. Toolchain status (0.0.17): `-c -b os/arch` writes a
+relocatable object in the target's own format -- ELF, Mach-O or COFF -- that the
+system linkers (GNU ld, lld, ld64, lld-link) accept, and that may read data
+symbols a C compiler defined; `-c -b os/arch -funit` writes a *unit* object for
+separate compilation, and `unisacc a.o b.o lib.a [-o prog]` links unit objects
+and archives (`unisacc ar rcs|t|x`) for any of the six targets. Object writing
+is on the reference compiler; the shipped `unisacc.com` links unit objects and
+writes archives, and refuses `-c -b` by name until its own object route is done.
+There is no assembler yet. The design and the back-end facts behind it are in
+[docs/toolchain.md](docs/toolchain.md); the plan in [plans/v0.0.17.md](plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
@@ -90,16 +94,14 @@ machine). The C headers it needs travel inside it.
   of a program in one invocation. Each unit is preprocessed on its own, and a
   later unit's file-scope `static` names are renamed, so two units may each
   keep their own `helper`.
-- **Not a `cc` drop-in yet:** bare `-c` writes the compiler's intermediate
-  *tape*, not an object file. `-c -b lnx/x86_64` and `-c -b lnx/arm64` write a
-  relocatable ELF `.o` (reference compiler, since 0.0.16) that GNU ld and lld
-  link into a program on their own; it carries its own `_start` and library
-  bodies and does not yet share functions or data with cc-compiled objects
-  (the calling convention differs; the staged plan is in
-  [docs/toolchain.md](docs/toolchain.md)). The shipped `unisacc.com` still
-  writes the tape for `-c` with any target. There is no link step and no
-  `-l`/`-L`, so build systems that compile each file with `-c` and link later
-  cannot use it directly. C11 features and GCC extensions (statement
+- **Not a `cc` drop-in yet:** bare `-c` (no `-b`) writes the compiler's
+  intermediate *tape*. `-c -b os/arch` writes an object (reference compiler):
+  a whole-program object links with the system linker on its own and may read
+  data symbols from cc-compiled objects, but cannot call cc-compiled functions
+  or be called by them yet (the calling convention differs; 0.0.18). Unit
+  objects (`-funit`) are linked by `unisacc` itself, not by the system linker,
+  because only unisacc chains every unit's initialisers. `-l`/`-L` are still
+  accepted and ignored; pass archives by path. C11 features and GCC extensions (statement
   expressions, `_Generic`, empty structs, inline asm) are outside the subset.
 - **Tape origin:** `.tapebin` records the target selected when C was compiled
   to tape. A different `-b` target is rejected unless `--force-origin` is
