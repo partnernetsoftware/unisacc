@@ -80,6 +80,10 @@ printf 'int shared = 2;\nint get1(void);\nint main(void){ return get1(); }\n' > 
 say "two initialised globals refused" "multiple definitions" "$("$_BOUND" 30 "$UA" "$T/d1.c" "$T/d2.c" 2>&1 | grep -o 'multiple definitions' | head -1)"
 printf 'int dup = 1;\nint dup = 2;\nint main(void){ return dup; }\n' > "$T/d3.c"
 say "same-unit redefinition refused" "redefinition" "$("$_BOUND" 30 "$UA" "$T/d3.c" 2>&1 | grep -o 'redefinition' | head -1)"
+printf 'static int sx = 1;\nstatic int sx = 2;\nint main(void){ return sx; }\n' > "$T/d4.c"
+say "same-unit static redefinition refused" "redefinition" "$("$_BOUND" 30 "$UA" "$T/d4.c" 2>&1 | grep -o 'redefinition' | head -1)"
+printf 'static int sy = 1;\nint gy(void){ return sy; }\n' > "$T/d5.c"; printf 'static int sy = 2;\nint gy(void);\nint main(void){ return gy() + sy; }\n' > "$T/d6.c"
+say "statics in two units stay apart" "rc=3" "$("$_BOUND" 30 "$UA" "$T/d5.c" "$T/d6.c" >/dev/null 2>&1; echo "rc=$?")"
 printf 'int main(void){ return 1; }\n' > "$T/ma.c"; printf 'int main(void){ return 2; }\n' > "$T/mb.c"
 say "two mains refused (one step)" "multiple definitions" "$("$_BOUND" 30 "$UA" "$T/ma.c" "$T/mb.c" 2>&1 | grep -o 'multiple definitions' | head -1)"
 "$_BOUND" 30 "$UA" "$T/ma.c" -c -b "$HOST" -funit -o "$T/ma.o" 2>/dev/null; "$_BOUND" 30 "$UA" "$T/mb.c" -c -b "$HOST" -funit -o "$T/mb.o" 2>/dev/null

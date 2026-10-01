@@ -5493,9 +5493,9 @@ int unit(void) {
             if (cur() == tidx("=", 1)) {
                 /* R19-8: two definitions with initialisers are two objects that
                    cannot both be this name (C99 6.9p5); a tentative one merges */
-                if (gprev >= 0 && symginit[gprev] && declstatic == 0 && symgstat[gprev] == 0) {
+                if (gprev >= 0 && symginit[gprev]) {
                     if (symunit[gprev] == curunit) err_tok(t, "redefinition of this object (it already has an initialiser)");
-                    else err_tok(t, "multiple definitions of this object across units (each has an initialiser)");
+                    else { if (declstatic == 0 && symgstat[gprev] == 0) err_tok(t, "multiple definitions of this object across units (each has an initialiser)"); }
                 }
                 symginit[nsym - 1] = 1;
                 adv();
