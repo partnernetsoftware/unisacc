@@ -100,7 +100,16 @@ int sha_final(char *out) {            /* 32 bytes */
     return 0;
 }
 
-int wflush(void) { if (bkwn) __write(bkfd, bkwb, bkwn); bkwn = 0; return 0; }
+int wflush(void) {
+    if (bkwn) {
+        if (at_cap) {                            /* -S: the object stays in memory for src/asmtext.c */
+            int k; if (at_capn + bkwn > 33554432) { __write(2, "unisacc: error: object too large for -S\n", 41); __exit(1); }
+            k = 0; while (k < bkwn) { at_cap[at_capn + k] = bkwb[k]; k = k + 1; }
+            at_capn = at_capn + bkwn;
+        } else __write(bkfd, bkwb, bkwn);
+    }
+    bkwn = 0; return 0;
+}
 /* while signing, every byte written also goes through SHA-256, and each
    4 KB page's digest is kept: the signature is the last thing in the file,
    so it can be written from these once the rest is out [I-19] */

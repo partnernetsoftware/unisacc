@@ -20,11 +20,13 @@ int main(void) {
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
-    int objwant; int bgiven; int funit;
+    int objwant; int bgiven; int funit; int asmwant;
+    asmwant = 0;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
     ninput = 0; objwant = 0; bgiven = 0; funit = 0;
     ftrim_libc = 1;
     if (__argc() >= 2) { if (strsame(__argv(1), "ar")) return tl_ar(__argc()); }   /* `unisacc ar ...` (R17-3) */
+    if (__argc() >= 2) { if (strsame(__argv(1), "as")) return at_main(__argc()); }  /* `unisacc as ...` (R18-1) */
     /* Default mode is RUN (owner, 2026-10-01; 0.0.17 R17-10): with no mode or
        output flag at all, `unisacc FILE.c [args]` compiles and runs in memory,
        exactly as `-run` does -- deliberately unlike cc's silent a.out.  A file
@@ -83,6 +85,7 @@ int main(void) {
                means what it means to gcc, and the usage line says so. */
             } else { if (a[1] == 99 || a[1] == 83) { dump = 1;   /* -c, -S */
                 if (a[1] == 99) objwant = 1;             /* -c -b lnx/ARCH writes a relocatable ELF */
+                if (a[1] == 83) asmwant = 1;             /* -S -b lnx/ARCH writes that object as GNU assembly */
             } else { if (a[1] == 118) { verb = 1;          /* -v */
             } else { if (a[1] == 111) {                    /* -o */
                 if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
@@ -160,6 +163,14 @@ int main(void) {
        tape (86 suites spell -S that way) until Mach-O and COFF objects exist
        too, see docs/toolchain.md §4. */
     objwant = objwant && bgiven && dump == 2;
+    /* `-S -b lnx/ARCH`: the object -c -b would write, as GNU assembly
+       (src/asmtext.c).  Bare -S stays the tape. */
+    asmwant = asmwant && bgiven && pponly == 0;
+    if (asmwant) {
+        if (!(t[0] == 108 && t[1] == 110 && t[2] == 120 && t[3] == 47)) return emsg("unisacc: error: assembly text (-S -b) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was ", t);
+        dump = 2; objwant = 1;
+        if (outpath == 0) { outpath = deptarget(0, inputs[0]); outpath[blen(outpath) - 1] = 115; }
+    }
     if (funit && objwant == 0 && (dump != 1 || pponly)) return emsg("unisacc: error: -funit needs -c -b os/arch (a unit object) or -S (its tape)", 0);
     unitmode = funit;
     objextern = objwant;                   /* R17-9 (a): a whole-program object may read cc's data symbols */
@@ -266,6 +277,14 @@ int main(void) {
         }
         if (depfile) { if (writedeps(deptarget(outpath, inputs[0]), inputs, ninput)) return 1; }
         if (emitbin) { __write(ofd, tb_file, binlen); if (ofd != 1) __close(ofd); return 0; }
+        if (dump == 2 && asmwant) {
+            at_cap = at_src; at_capn = 0;
+            bk_object(out, nout, t);
+            at_cap = 0; at_fd = ofd;
+            if (at_dis(at_src, at_capn)) { if (ofd != 1) __close(ofd); return emsg("unisacc: error: -S: ", at_err); }
+            if (ofd != 1) __close(ofd);
+            return 0;
+        }
         if (dump == 2) { if (objwant) bk_object(out, nout, t); else bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
         __write(ofd, out, nout);
         if (ofd != 1) __close(ofd);

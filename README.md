@@ -11,7 +11,10 @@ separate compilation, and `unisacc a.o b.o lib.a [-o prog]` links unit objects
 and archives (`unisacc ar rcs|t|x`) for any of the six targets. Object writing
 is on the reference compiler; the shipped `unisacc.com` links unit objects and
 writes archives, and refuses `-c -b` by name until its own object route is done.
-There is no assembler yet. The design and the back-end facts behind it are in
+Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64` writes that object as GNU assembly
+(AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
+assembles it -- or hand-written code in the same subset -- back into the
+identical object; assembly text for Mach-O and COFF is 0.0.19. The design and the back-end facts behind it are in
 [docs/toolchain.md](docs/toolchain.md); the plan in [archive/plans/v0.0.17.md](archive/plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
@@ -74,6 +77,8 @@ machine). The C headers it needs travel inside it.
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target
 ./unisacc.com -O2 a.c b.c -b lnx/x86_64 -o prog
 ./unisacc.com -E file.c                     # preprocess only
+./unisacc.com hello.c -S -b lnx/x86_64 -o hello.s  # GNU assembly of the object -c -b would write
+./unisacc.com as hello.s -o hello.o         # assemble it back (also hand-written code in the subset)
 ./unisacc.com hello.c -S --tapebin -o hello.tapebin # write the portable tape container
 ./unisacc.com -run hello.tapebin            # run its recorded program
 ./unisacc.com hello.tapebin -b osx/arm64 -o hello
@@ -95,8 +100,11 @@ machine). The C headers it needs travel inside it.
   of a program in one invocation. Each unit is preprocessed on its own, and a
   later unit's file-scope `static` names are renamed, so two units may each
   keep their own `helper`.
-- **Not a `cc` drop-in yet:** bare `-c` (no `-b`) writes the compiler's
-  intermediate *tape*. `-c -b os/arch` writes an object (reference compiler):
+- **Not a `cc` drop-in yet:** bare `-c` and bare `-S` (no `-b`) write the compiler's
+  intermediate *tape*; with `-b lnx/ARCH`, `-S` writes GNU assembly. `unisacc as`
+  takes the subset the back end emits (plus `.text/.data/.bss`, `.globl`,
+  `.byte/.ascii/.zero`); other instructions, Intel syntax and inline `asm` are
+  refused by name (0.0.19). `-c -b os/arch` writes an object (reference compiler):
   a whole-program object links with the system linker on its own and may read
   data symbols from cc-compiled objects, but cannot call cc-compiled functions
   or be called by them yet (the calling convention differs; 0.0.18). Unit

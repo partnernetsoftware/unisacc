@@ -394,6 +394,7 @@ job subtract-safety python3 ./tests/subtractsafety.py   # R16-9: archived files 
 job subtract-safety-selftest python3 ./tests/subtractsafety.py --selftest   # R16-9: both 0.0.15 counterexamples are still caught
 job realprog    ./tests/realprog.sh   # R16-12: pinned real programs (kilo, jsmn, cJSON, lua, sqlite) built by us and cc, same run, same bytes; ratchet list
 job hosthdr     ./tests/hosthdr.sh   # R18-10: sys/stat, fcntl, poll, termios, sys/ioctl, isatty, dirent on macOS = cc (and gcc on Lima arm64)
+job asmtext     ./tests/asmtext.sh   # R18-1/R18-2: -S -b lnx | unisacc as == -c on the corpus; system as accepts; hand-written .s
 job linkunits   ./tests/linkunits.sh   # R17-2: units compiled alone (-c -b HOST -funit) and joined by the unisacc linker = cc = one-step
 job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sections, relocations, image invariant, GNU ld/lld link, Lima run
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table

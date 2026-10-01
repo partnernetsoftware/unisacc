@@ -10,6 +10,7 @@
 #include "src/front_pp.c"
 #include "src/front_parse.c"
 #include "src/tapelink.c"
+#include "src/asmtext.c"
 #include "src/opt.c"
 #include "src/main.c"
 #include "src/back_lower.c"
