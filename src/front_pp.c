@@ -1165,6 +1165,25 @@ int warn_at(long p, char *msg) {
     warnonly = 1;
     return diag_at(p, msg, ": warning: ");
 }
+/* R20-2: a coverage refusal also writes one machine record before the
+   human diagnostic:  UNCOVERED<TAB>stage<TAB>key<TAB>pos<TAB>file:line:col<TAB>construct<TAB>reason
+   (research/r20-2-reject-samples.md §5).  The reference has no δ key or tape
+   position here, so both are '-'. */
+char *uncov_stage; char *uncov_construct;
+int uncov_put(char *s) {
+    int k; k = 0;
+    while (s[k]) {
+        int c; c = s[k] & 255;
+        if (c == 92) __write(2, "\\\\", 2);
+        else if (c == 9) __write(2, "\\t", 2);
+        else if (c == 10) __write(2, "\\n", 2);
+        else if (c == 13) __write(2, "\\r", 2);
+        else if (c < 32 || c >= 127) { char h[4]; h[0] = 92; h[1] = 120; h[2] = "0123456789abcdef"[c >> 4]; h[3] = "0123456789abcdef"[c & 15]; __write(2, h, 4); }
+        else ec2(c);
+        k = k + 1;
+    }
+    return 0;
+}
 int diag_at(long p, char *msg, char *kind) {
     long q; long line; long col; int i; int inside; char *fname;
     if (p < 0) p = 0;
@@ -1198,6 +1217,14 @@ int diag_at(long p, char *msg, char *kind) {
         while (i < nspl) { if (spl_at[i] <= line) line = line + 1; i = i + 1; }
     }
     line = ld_map(inside, line, &fname);
+    if (uncov_stage) {
+        char *r; r = msg;
+        if (r[0] == 110 && r[1] == 111 && r[2] == 116 && r[3] == 32 && r[4] == 99 && r[11] == 58 && r[12] == 32) r = r + 13;   /* "not covered: " */
+        __write(2, "UNCOVERED\t", 10); uncov_put(uncov_stage); __write(2, "\t-\t-\t", 5);
+        uncov_put(fname); ec2(58); en2(line); ec2(58); en2(col); ec2(9);
+        uncov_put(uncov_construct); ec2(9); uncov_put(r); ec2(10);
+        uncov_stage = 0;
+    }
     __write(2, fname, blen(fname));
     ec2(58); en2(line); ec2(58); en2(col);
     __write(2, kind, blen(kind));
@@ -1256,6 +1283,12 @@ int nerr;                /* errors reported so far */
 int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
 int errtop;              /* where the top-level construct being walked began */
 
+int err_tok(int t, char *msg);
+int err_uncov(int t, char *stage, char *construct, char *msg) {   /* R20-2 */
+    if (panic) return 0;
+    uncov_stage = stage; uncov_construct = construct;
+    return err_tok(t, msg);
+}
 int err_tok(int t, char *msg) {        /* ...at a token */
     if (panic) return 0;
     if (t < 0 || t >= ntok) err_at(nsrc, msg); else err_at(tpos[t], msg);

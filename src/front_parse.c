@@ -674,6 +674,8 @@ int sh_push(int i, int t) {
     sh_b[i] = b; sh_link[i] = sh_head[b]; sh_head[b] = i + 1;
     return 0;
 }
+int isname(int t, char *nm, int L);
+int err_uncov(int t, char *stage, char *construct, char *msg);
 int sfind_is(int i, int t) {
     int k; int ok; int n;
     n = tlen[t];
@@ -1746,7 +1748,11 @@ int primary(void) {
             return postfix();
         } }
         i = sfind(tp);
-        if (i < 0) err_tok(tp, "unknown identifier");
+        if (i < 0) {
+            if (isname(tp, "_Complex", 8) || isname(tp, "_Imaginary", 10) || isname(tp, "__real__", 8) || isname(tp, "__imag__", 8))
+                err_uncov(tp, "ref.parse", "type.complex", "not covered: complex types (C99 6.2.5p11 _Complex is not supported)");
+            else err_tok(tp, "unknown identifier");
+        }
         if (i >= 0) {
             /* written, not read: `x = ...` as a statement of its own.  Any
                other position -- `*x = `, `a = x = 0`, `f(x = 1)` -- reads
