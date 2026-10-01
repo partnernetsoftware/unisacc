@@ -159,7 +159,7 @@ int main(void) {
        too, see docs/toolchain.md §4. */
     objwant = objwant && bgiven && dump == 2;
     if (objwant) {
-        if (t[0] != 108) return emsg("unisacc: error: -c writes only lnx/* objects in this version (docs/toolchain.md): ", t);
+        if (t[0] != 108 && t[0] != 111) return emsg("unisacc: error: -c writes lnx/* and osx/* objects in this version (docs/toolchain.md): ", t);
         if (outpath == 0) outpath = deptarget(0, inputs[0]);
     }
     if (depfile) { if (depfile[0] == 0) {

@@ -1120,7 +1120,10 @@ int bk_assemble(void) {
     /* image.layout: where text and data land, known before encoding */
     bk_idata_layout();
     if (bk_objmode) {
-        bk_textva = 0; bk_datava = BK_OBJDATA; bk_objnz = bk_nzlen();
+        /* .data ends at a BLOB boundary, not at the last nonzero byte: a
+           symbol whose initialiser ends in zeros must not straddle two
+           sections, which a linker may place apart */
+        bk_textva = 0; bk_datava = BK_OBJDATA; bk_objnz = bk_nzend;
     } else { if (bk_runmode) {
         /* two mappings: text goes read-execute once it is written, data
            stays writable, so nothing is ever both [macOS forbids W^X] */

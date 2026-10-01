@@ -92,10 +92,14 @@ def check_object(blob, arch, image):
     p_offset, = struct.unpack_from('<Q', image, 64 + 56 + 8)
     p_filesz, = struct.unpack_from('<Q', image, 64 + 56 + 32)
     p_memsz, = struct.unpack_from('<Q', image, 64 + 56 + 40)
+    # .data ends at a blob boundary (>= the image's last nonzero byte): its
+    # prefix is the image's stored data and the rest is zeros
     d = by['.data']
-    assert d['size'] == p_filesz, (d['size'], p_filesz)
-    assert blob[d['off']:d['off'] + d['size']] == image[p_offset:p_offset + p_filesz], 'object .data differs from the image data'
-    assert by['.bss']['size'] == p_memsz - p_filesz, (by['.bss']['size'], p_memsz, p_filesz)
+    assert d['size'] >= p_filesz, (d['size'], p_filesz)
+    obj_data = blob[d['off']:d['off'] + d['size']]
+    assert obj_data[:p_filesz] == image[p_offset:p_offset + p_filesz], 'object .data differs from the image data'
+    assert not any(obj_data[p_filesz:]), 'object .data has nonzero bytes past the image data'
+    assert d['size'] + by['.bss']['size'] == p_memsz, (d['size'], by['.bss']['size'], p_memsz)
     return len(relocs), len(syms)
 
 
@@ -135,10 +139,31 @@ def main(argv):
                         linked[(stem, arch)] = exe
                     else:
                         skips.append('link %s %s: no ld.lld and no GNU ld' % (stem, arch))
-        # bare -c is still the tape; -c -b osx/* is refused with a pointer to the design
+        # Mach-O objects (R17-1): MH_OBJECT, ld64 links them, the program prints what the image prints
+        if sys.platform == 'darwin' and shutil.which('ld') and shutil.which('xcrun'):
+            sdk = run(['xcrun', '--show-sdk-path']).stdout.decode().strip()
+            for probe in PROBES:
+                stem = pathlib.Path(probe).stem
+                for arch in ('arm64', 'x86_64'):
+                    obj = tmp / ('%s.osx.%s.o' % (stem, arch)); img = tmp / ('%s.osx.%s.img' % (stem, arch)); exe = tmp / ('%s.osx.%s.exe' % (stem, arch))
+                    r = run([ua, ROOT / probe, '-c', '-b', 'osx/' + arch, '-o', obj], cwd=ROOT)
+                    assert r.returncode == 0, ('macho -c', probe, arch, r.stderr[-300:])
+                    blob = obj.read_bytes()
+                    assert blob[:4] == b'\xcf\xfa\xed\xfe' and struct.unpack_from('<I', blob, 12)[0] == 1, 'not MH_OBJECT'
+                    r = run(['ld', '-arch', arch, '-o', exe, obj, '-e', '_start', '-lSystem', '-syslibroot', sdk])
+                    assert r.returncode == 0, ('ld64', probe, arch, r.stderr[-300:])
+                    r = run([ua, ROOT / probe, '-b', 'osx/' + arch, '-o', img], cwd=ROOT); assert r.returncode == 0
+                    img.chmod(0o755); run(['codesign', '-f', '-s', '-', img])
+                    a = run([exe], timeout=10); b = run([img], timeout=10)
+                    assert (a.returncode, a.stdout) == (b.returncode, b.stdout), ('macho run', probe, arch, a.stdout[-200:], b.stdout[-200:])
+                    nobj += 1; linked[(stem, 'osx-' + arch)] = exe
+            print('elfobj  Mach-O objects for osx/arm64 and osx/x86_64 link with ld64 and print what the images print')
+        else:
+            skips.append('Mach-O: not on macOS (needs ld64 and the SDK)')
+        # bare -c is still the tape; -c -b win/* is refused with a pointer to the design
         r = run([ua, ROOT / 'examples/hello.c', '-c', '-o', tmp / 'bare.tape'], cwd=ROOT)
         assert r.returncode == 0 and (tmp / 'bare.tape').read_bytes().startswith(b'_start:'), 'bare -c no longer writes the tape'
-        r = run([ua, ROOT / 'examples/hello.c', '-c', '-b', 'osx/arm64', '-o', tmp / 'x.o'], cwd=ROOT)
+        r = run([ua, ROOT / 'examples/hello.c', '-c', '-b', 'win/x86_64', '-o', tmp / 'x.o'], cwd=ROOT)
         assert r.returncode == 1 and b'docs/toolchain.md' in r.stderr and not (tmp / 'x.o').exists(), r.stderr
         if vm:
             if not shutil.which('limactl'):

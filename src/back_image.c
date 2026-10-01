@@ -197,7 +197,7 @@ int bk_oshdr(long name, long type, long flags, long off, long size, long link, l
 int bk_elfobj(void) {
     long L; long bss; long tend; long doff; long roff; long soff; long stoff; long shoff; long shsoff;
     long nsym; long strlen; int id; int k; int start; long name;
-    L = bk_nzlen(); bss = bkdlen - L;
+    L = bk_objnz; bss = bkdlen - L;
     start = bk_find("_start", 6);
     /* which names become symbols: every code label and data symbol but _start */
     nsym = 4; strlen = 1; id = 0;
@@ -250,8 +250,90 @@ int bk_elfobj(void) {
     bk_oshdr(45, 3, 0, shsoff, 55, 0, 0, 1, 0);
     return 0;
 }
+/* The Mach-O object (-c -b osx/ARCH): MH_OBJECT, one unnamed segment with
+   __text/__data/__bss, LC_BUILD_VERSION, LC_SYMTAB, LC_DYSYMTAB.  ld64 wants
+   EXTERNAL relocations on arm64, so each section gets a local anchor symbol
+   (ltmp0..2) and every relocation names its anchor; arm64 carries a nonzero
+   addend in a preceding ARM64_RELOC_ADDEND, x86_64 in the displacement field. */
+int bk_oname_w(int id) {                     /* a tape name as a Mach-O local: _name */
+    int k; wb(95); k = 0;
+    while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; }
+    wb(0); return bkname_len[id] + 2;
+}
+int bk_mrel(long addr, long sym, int pcrel, int ext, int type) {
+    w32(addr); w32((sym & 16777215) | (pcrel << 24) | (2 << 25) | (ext << 27) | (type << 28)); return 0;
+}
+int bk_msym(long strx, int type, int sect, long value) { w32(strx); wb(type); wb(sect); w16(0); w64(value); return 0; }
+int bk_machoobj(void) {
+    long L; long bss; long ad; long ab; long offt; long offd; long roff; long nrel; long soff; long stoff;
+    long nsym; long strsz; long name; long cmds; int id; int k; int start; long v;
+    L = bk_objnz; bss = bkdlen - L;
+    ad = bk_round(bktlen, 16); ab = ad + bk_round(L, 16);
+    start = bk_find("_start", 6);
+    nrel = 0; k = 0;
+    while (k < bknro) { nrel = nrel + 1; if (bkarch && bkro_add[k] != 0) nrel = nrel + 1; k = k + 1; }
+    nsym = 3; strsz = 1 + 3 * 6; id = 0;
+    while (id < bknn) {
+        if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) { nsym = nsym + 1; strsz = strsz + bkname_len[id] + 2; }
+        id = id + 1;
+    }
+    nsym = nsym + 1; strsz = strsz + 7;
+    cmds = 72 + 80 * 3 + 24 + 24 + 80;
+    offt = bk_round(32 + cmds, 16);
+    offd = offt + ad;
+    roff = bk_round(offd + L, 8);
+    soff = roff + 8 * nrel;
+    stoff = soff + 16 * nsym;
+    w32(0xFEEDFACF); w32(bkarch ? 0x0100000C : 0x01000007); w32(bkarch ? 0 : 3);
+    w32(1); w32(4); w32(cmds); w32(0); w32(0);
+    w32(25); w32(72 + 80 * 3); wname("", 16);
+    w64(0); w64(ab + bss); w64(offt); w64(ad + L); w32(7); w32(7); w32(3); w32(0);
+    wname("__text", 16); wname("__TEXT", 16); w64(0); w64(bktlen); w32(offt); w32(4); w32(roff); w32(nrel); w32(0x80000400); w32(0); w32(0); w32(0);
+    wname("__data", 16); wname("__DATA", 16); w64(ad); w64(L); w32(offd); w32(4); w32(0); w32(0); w32(0); w32(0); w32(0); w32(0);
+    wname("__bss", 16); wname("__DATA", 16); w64(ab); w64(bss); w32(0); w32(4); w32(0); w32(0); w32(1); w32(0); w32(0); w32(0);
+    w32(0x32); w32(24); w32(1); w32(13 << 16); w32(13 << 16); w32(0);          /* LC_BUILD_VERSION macOS 13 */
+    w32(2); w32(24); w32(soff); w32(nsym); w32(stoff); w32(strsz);              /* LC_SYMTAB */
+    w32(0xB); w32(80); w32(0); w32(nsym - 1); w32(nsym - 1); w32(1); w32(nsym); w32(0); wz(48);   /* LC_DYSYMTAB */
+    wz(offt - 32 - cmds);
+    /* x86_64 SIGNED keeps its addend IN the displacement (S + field - (P+4));
+       the encoder left 0 there and recorded the ELF-style A = offset - 4 */
+    if (bkarch == 0) { k = 0; while (k < bknro) {
+        long f; f = bkro_add[k] + 4;
+        bktext[bkro_off[k]] = f & 255; bktext[bkro_off[k] + 1] = (f >> 8) & 255;
+        bktext[bkro_off[k] + 2] = (f >> 16) & 255; bktext[bkro_off[k] + 3] = (f >> 24) & 255;
+        k = k + 1; } }
+    wtext(); wz(ad - bktlen); wdata(L); wz(roff - offd - L);
+    k = 0;
+    while (k < bknro) {
+        long a; long add; int s; a = bkro_off[k]; add = bkro_add[k]; s = bkro_sect[k] - 1;
+        if (bkarch) {
+            if (add != 0) bk_mrel(a, add, 0, 0, 10);                              /* ARM64_RELOC_ADDEND */
+            if (bkro_type[k] == 275) bk_mrel(a, s, 1, 1, 3);                       /* ARM64_RELOC_PAGE21 */
+            else bk_mrel(a, s, 0, 1, 4);                                           /* ARM64_RELOC_PAGEOFF12 */
+        } else bk_mrel(a, s, 1, 1, 1);                                             /* X86_64_RELOC_SIGNED */
+        k = k + 1;
+    }
+    bk_msym(1, 14, 1, 0); bk_msym(7, 14, 2, ad); bk_msym(13, 14, 3, ab);          /* ltmp0..2 */
+    name = 19; id = 0;
+    while (id < bknn) {
+        if (id != start && bklab_tpc[id] >= 0) { bk_msym(name, 14, 1, toff[bklab_tpc[id]]); name = name + bkname_len[id] + 2; }
+        else { if (id != start && bksym_addr[id] >= 0) {
+            v = bksym_addr[id] - BK_DATA_BASE;
+            if (v >= L) bk_msym(name, 14, 3, ab + v - L); else bk_msym(name, 14, 2, ad + v);
+            name = name + bkname_len[id] + 2;
+        } }
+        id = id + 1;
+    }
+    bk_msym(name, 15, 1, start >= 0 ? toff[bklab_tpc[start]] : 0);              /* N_SECT|N_EXT _start */
+    wb(0); wname("ltmp0", 6); wname("ltmp1", 6); wname("ltmp2", 6);
+    id = 0;
+    while (id < bknn) { if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) bk_oname_w(id); id = id + 1; }
+    wname("_start", 7);
+    return 0;
+}
 int bk_object(char *t, int n, char *target) {
-    bkos = 0; bkarch = 0; if (target[4] == 97) bkarch = 1;
+    bkos = 0; if (target[0] == 111) bkos = 1;
+    bkarch = 0; if (target[4] == 97) bkarch = 1;
     bk_objmode = 1;
     t = tp_prune(t, n); n = tp_prune_length;
     bk_parse(t, n);
@@ -259,7 +341,7 @@ int bk_object(char *t, int n, char *target) {
     bk_lower();
     bk_assemble();
     bkwn = 0; bkwtot = 0;
-    bk_elfobj();
+    if (bkos == 1) bk_machoobj(); else bk_elfobj();
     wflush();
     bk_objmode = 0;
     return 0;

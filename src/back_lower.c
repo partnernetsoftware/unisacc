@@ -138,6 +138,7 @@ int bk_bytes(char *b, int n) {
 long bkb_s[BK_MAXZ]; long bkb_e[BK_MAXZ]; long bkb_new[BK_MAXZ];
 int bkb_nz[BK_MAXZ]; int bkb_r0[BK_MAXZ]; int bkb_r1[BK_MAXZ]; int bknb;
 long bkt_at[BK_MAXZ]; int bkt_off[BK_MAXZ]; int bkt_len[BK_MAXZ];
+long bk_nzend;                       /* where the all-zero blobs begin, after repack (object .data/.bss split) */
 int bk_repack(void) {
     int i; int b; int a; int r; int pass; int nt; long o; long cur; long k; long at;
     /* The blob starts are the symbols' offsets, SORTED and deduplicated --
@@ -189,6 +190,7 @@ int bk_repack(void) {
             }
             b = b + 1;
         }
+        if (pass == 1) bk_nzend = cur;      /* nonzero blobs end here, zero blobs follow */
         pass = pass - 1;
     }
     bknd = 0; bknz = 0; bkdlen = 0; pass = 1;
