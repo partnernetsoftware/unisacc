@@ -38,6 +38,11 @@ pair() {   # pair NAME A.c B.c [nocc]  -- nocc: the fixture uses unisacc's on-de
     say "$n linked = one-step" "$one" "$got"
     got=$("$_BOUND" 30 "$UA" "$T/$n.a.o" "$T/$n.b.o" -o "$T/$n.prog" 2>&1 && "$_BOUND" 10 "$T/$n.prog" 2>&1; echo "rc=$?")
     say "$n linked -o = cc" "$want" "$got"
+    # the product links the same objects through its own route (LINK_PRODUCT: the shipped .com)
+    if [ -n "${LINK_PRODUCT:-}" ]; then
+        got=$("$_BOUND" 30 sh "$LINK_PRODUCT" "$T/$n.a.o" "$T/$n.b.o" 2>&1; echo "rc=$?")
+        say "$n product-linked = cc" "$want" "$got"
+    fi
 }
 pair m       tests/multi/m1.c tests/multi/m2.c
 pair m-rev   tests/multi/m2.c tests/multi/m1.c
@@ -45,6 +50,23 @@ pair n       tests/multi/n1.c tests/multi/n2.c nocc
 pair static  tests/multi/static1.c tests/multi/static2.c
 pair fwd     tests/multi/fwd1.c tests/multi/fwd2.c
 pair fwd-rev tests/multi/fwd2.c tests/multi/fwd1.c
+# archives (R17-3): `unisacc ar` writes a GNU/BSD archive the system `ar` lists,
+# and the linker pulls only the members that define a wanted name
+printf 'int sq(int x){return x*x;}\n' > "$T/sq.c"
+printf 'int unusedfn(void){return 9;}\nint never_used_object = 7;\n' > "$T/un.c"
+printf 'int helper2(int v){return v+1;}\n' > "$T/h2.c"
+printf '#include <stdio.h>\nint helper2(int);\nint sq(int);\nint main(void){ printf("%%d\\n", sq(helper2(3))); return 0; }\n' > "$T/um.c"
+for f in sq un h2 um; do "$_BOUND" 30 "$UA" "$T/$f.c" -c -b "$HOST" -funit -o "$T/$f.o" 2>/dev/null; done
+(cd "$T" && "$_BOUND" 20 "$UA" ar rcs lib.a sq.o un.o h2.o)
+say "ar t lists members" "sq.o un.o h2.o" "$( (cd "$T" && "$_BOUND" 20 "$UA" ar t lib.a) | tr '\n' ' ' | sed 's/ $//')"
+command -v ar >/dev/null && say "system ar reads it" "sq.o un.o h2.o" "$( (cd "$T" && ar t lib.a) | tr '\n' ' ' | sed 's/ $//')"
+say "link pulls needed members" "16 rc=0" "$( ("$_BOUND" 30 "$UA" "$T/um.o" "$T/lib.a"; echo "rc=$?") | tr '\n' ' ' | sed 's/ $//')"
+say "unneeded member not pulled" "0" "$("$_BOUND" 30 "$UA" "$T/um.o" "$T/lib.a" -S -o - 2>/dev/null | grep -c 'unusedfn')"
+if [ -n "${LINK_PRODUCT:-}" ]; then
+    say "product links the archive" "16 rc=0" "$( ("$_BOUND" 30 sh "$LINK_PRODUCT" "$T/um.o" "$T/lib.a"; echo "rc=$?") | tr '\n' ' ' | sed 's/ $//')"
+    (cd "$T" && "$_BOUND" 20 sh "$LINK_PRODUCT" ar rcs libp.a sq.o un.o h2.o)
+    say "product ar = reference ar bytes" "same" "$(cmp -s "$T/lib.a" "$T/libp.a" && echo same || echo differ)"
+fi
 # refusals, by name
 "$_BOUND" 30 "$UA" tests/multi/m1.c -c -b "$OTHER" -funit -o "$T/x1.o" 2>/dev/null
 "$_BOUND" 30 "$UA" tests/multi/m2.c -c -b "$HOST" -funit -o "$T/x2.o" 2>/dev/null

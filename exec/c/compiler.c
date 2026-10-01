@@ -130,6 +130,82 @@ static int deps_write(const char *path,const char *target,const char **sources,i
     else if (fclose(f)!=0) bad=1;
     return bad ? clierror("cannot write dependency output") : 0;
 }
+/* 0.0.17 R17-2: the unisacc linker joins -funit unit objects at the tape
+   level; the joining is the reference's src/tapelink.c, which only builds a
+   tape -- every compilation decision after it is the product route's. */
+static Buf linkbuf;
+int tl_o(int c) { bput(&linkbuf,(unsigned char)c,0); return 0; }
+int tl_fail(char *m) { fputs(m,stderr); exit(1); return 1; }
+#define TL_PRODUCT 1
+#include "../../src/tapelink.c"
+static int object_path(const char *p) {
+    size_t n=strlen(p);
+    return (n>=2 && (!strcmp(p+n-2,".o") || !strcmp(p+n-2,".a"))) || (n>=4 && !strcmp(p+n-4,".obj"));
+}
+static int archive_path(const char *p) { size_t n=strlen(p); return n>=2 && !strcmp(p+n-2,".a"); }
+static int take_unit(char *t,long tl,int u) {
+    if (u==0) { strncpy(tl_first,tl_target,31); tl_first[31]=0; }
+    else if (strcmp(tl_first,tl_target)) { fprintf(stderr,"unisacc: error: the objects were compiled for different targets (%s, %s)\n",tl_first,tl_target); return 1; }
+    tl_unit(t,(int)tl,u); tl_note_links(t,tl);
+    return 0;
+}
+static int link_objects(const char **paths,int n,Buf *out) {
+    int u=0;
+    linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0;
+    for (int p=0;p<n;p++) {                      /* every object is taken */
+        if (archive_path(paths[p])) continue;
+        int len=0; unsigned char *b=source_read(paths[p],&len); long tl=0;
+        char *t=tl_tape((char *)b,len,&tl);
+        if (!t) { fprintf(stderr,"unisacc: error: %s carries no unit tape (compile it with -c -b os/arch -funit; objects from other compilers are not linked yet)\n",paths[p]); free(b); return 1; }
+        if (take_unit(t,tl,u)) { free(b); return 1; }
+        u++; free(b);
+    }
+    for (int p=0;p<n;p++) {                      /* archives, in order: members that define a wanted name */
+        if (!archive_path(paths[p])) continue;
+        int len=0; unsigned char *b=source_read(paths[p],&len);
+        char *used=calloc(65536,1); int changed=1; char nm[256];
+        while (changed) {
+            changed=0;
+            for (int i=0;i<65536;i++) {
+                long ml=0; char *m=tl_ar_member((char *)b,len,i,nm,&ml);
+                if (!m) break;
+                if (used[i]) continue;
+                long tl=0; char *t=tl_tape(m,ml,&tl);
+                if (t && tl_needs(t,tl)) { if (take_unit(t,tl,u)) { free(b); free(used); return 1; } u++; used[i]=1; changed=1; }
+            }
+        }
+        free(used); free(b);
+    }
+    tl_os("__init:\n",8);
+    for (int k=0;k<u;k++) { tl_os("  call __init_u",15); tl_num(k); tl_o(10); }
+    tl_os("  ret\n",6);
+    *out=linkbuf; memset(&linkbuf,0,sizeof linkbuf);
+    return 0;
+}
+/* `unisacc ar rcs|t|x LIB.a [MEMBER...]` (R17-3): the reference's archive
+   code, with stdio for the files */
+static int product_ar(int argc,char **argv) {
+    if (argc<4) { fputs("usage: unisacc ar rcs|t|x LIB.a [MEMBER...]\n",stderr); return 2; }
+    const char *op=argv[2],*lib=argv[3];
+    if (op[0]=='r' || op[0]=='q') {
+        long cap=8; for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); free(b); cap+=len+400+strlen(argv[i]); }
+        char *ab=malloc(cap); memcpy(ab,"!<arch>\n",8); long at=8;
+        for (int i=4;i<argc;i++) { int len=0; unsigned char *b=source_read(argv[i],&len); at=tl_ar_add(ab,at,argv[i],(char *)b,len); free(b); }
+        FILE *f=fopen(lib,"wb"); if (!f) { fprintf(stderr,"ar: cannot write %s\n",lib); return 1; }
+        int bad=fwrite(ab,1,at,f)!=(size_t)at; bad|=fclose(f)!=0; free(ab);
+        return bad;
+    }
+    int len=0; unsigned char *b=source_read(lib,&len); char nm[256]; int i=0;
+    if (len<8 || memcmp(b,"!<arch>\n",8)) { fputs("ar: not an archive\n",stderr); return 1; }
+    for (;;i++) {
+        long ml=0; char *m=tl_ar_member((char *)b,len,i,nm,&ml);
+        if (!m) break;
+        if (op[0]=='t') puts(nm);
+        else if (op[0]=='x') { FILE *f=fopen(nm,"wb"); if (!f || fwrite(m,1,ml,f)!=(size_t)ml || fclose(f)) { fprintf(stderr,"ar: cannot write %s\n",nm); return 1; } }
+        else { fputs("ar: operation must be r, q, t or x\n",stderr); return 2; }
+    }
+    free(b); return 0;
+}
 static void argbytes(Buf *b, const char *s) {
     while (*s) { bput(b,(unsigned char)*s,0); s++; }
     bput(b,0,0);
@@ -148,11 +224,12 @@ static char *process_environment(int argc,char **argv,int i) {
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
-    int deponly=0, depphony=0, ndeptargets=0;
+    int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0;
     const char **deptargets=xrealloc(0,argc*sizeof(char *)); int *depquoted=xrealloc(0,argc*sizeof(int));
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
+    if (argc>=2 && !strcmp(argv[1],"ar")) return product_ar(argc,argv);   /* R17-3 */
     Buf srcres={0};                   /* \0cli/source: the main source path */
     /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output
        flag at all means `-run`; a file is written only on request. */
@@ -181,7 +258,7 @@ int main(int argc, char **argv) {
         else if (runit && src && a[0]!='-') {
             if(tapebin_path(src)||tape_path(src)){argstart=i;break;}
             size_t len=strlen(a);
-            if (len>=2 && !strcmp(a+len-2,".c")) sources[nsources++]=a;
+            if ((len>=2 && !strcmp(a+len-2,".c")) || object_path(a)) sources[nsources++]=a;
             else { argstart=i; break; }
         }
         else if (!strcmp(a,"-MD") || !strcmp(a,"-MMD")) { if (!deps) deps=""; }
@@ -200,7 +277,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-fno-trim-libc")) { if (!notrim.n) bput(&notrim,1,0); }
         else if (!strcmp(a,"-dump-tokens")) mode = 4;
         else if (!strcmp(a,"-E")) mode = 1;
-        else if (!strcmp(a,"-S") || !strcmp(a,"-c")) mode = 2;
+        else if (!strcmp(a,"-S") || !strcmp(a,"-c")) { mode = 2; if (a[1]=='c') sawc=1; }
+        else if (!strcmp(a,"-funit")) funit=1;      /* separate compilation (docs/toolchain.md §7) */
         else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
             const char *value=a+2;
             if (!*value) { if (++i >= argc) return clierror("missing macro argument"); value=argv[i]; }
@@ -238,7 +316,23 @@ int main(int argc, char **argv) {
         else { sources[nsources++]=a; if (!src) src = a; }
     }
     if (!src) return clierror("expected a C source file");
-    int isbin=tapebin_path(src), istape=tape_path(src), tape_input=isbin||istape;
+    /* -c with -b: an object (R17-1).  The product writes objects through its
+       own route (\0cli/object, \0cli/funit; exec/enc, in progress) -- until
+       that route exists the driver says so instead of writing a tape. */
+    if (sawc && target && !object_path(src)) return clierror("object output (-c -b) is not on the product route yet (0.0.17 R17-1 product side); the reference compiler writes objects");
+    if (funit && !(sawc && target)) return clierror("-funit needs -c -b os/arch (a unit object)");
+    /* unit objects (-funit): joined into one program tape here, before the
+       route is chosen, because the program's target is the objects' */
+    int linking=object_path(src); Buf linked={0};
+    if (linking) {
+        for (int j=0;j<nsources;j++) if (!object_path(sources[j])) return clierror("mix of objects and sources: compile each source with -c -b os/arch -funit first");
+        if (link_objects(sources,nsources,&linked)) return 1;
+        if (runit && strcmp(tl_first,NATIVE_OS "/" NATIVE_ARCH)) { fprintf(stderr,"unisacc: error: these objects were compiled for another target; running needs this machine's: %s\n",tl_first); return 1; }
+        if (target && strcmp(target,tl_first)) { fprintf(stderr,"unisacc: error: -b differs from the target these objects were compiled for: %s\n",tl_first); return 1; }
+        if (!target && !runit) { static char tbuf[32]; strcpy(tbuf,tl_first); target=tbuf; }
+        nsources=1;
+    }
+    int isbin=tapebin_path(src), istape=tape_path(src)||linking, tape_input=isbin||istape;
     if(tape_input&&(nsources!=1||mode==1||mode==4))return clierror("tape needs one source and a tape/image/run output");
     if(emitbin&&(mode!=2||runit))return clierror("--tapebin needs -S or -c");
     if (nsources>1 && (mode==1 || mode==4)) return clierror("multiple preprocessing outputs not migrated");
@@ -318,7 +412,8 @@ int main(int argc, char **argv) {
     FILE_READ_RECORD=deps!=0;
     package(pkg ? pkg : argv[0]);
     Buf in = {0}; int rc=0;
-    if (nsources==1) {
+    if (linking) in=linked;
+    else if (nsources==1) {
         in.b = source_read(src,&in.n);
         if(isbin){
             Buf decoded={0};int origin=tapebin_target(target);

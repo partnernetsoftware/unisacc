@@ -158,12 +158,12 @@ if part in ('all','core','core-dependencies'):
            (['-MM','-MT','foo','-MQ','$x','m.c','-I','inc'],None,'foo $$x: m.c inc/a.h inc/b.h\n'),
            (['-MM','m.c','-I','inc','-o','x.d'],'x.d',M),
            (['-MM','-MF','y.d','m.c','-I','inc'],'y.d',M),
-           (['-MMD','-c','m.c','-I','inc','-o','out/m.o'],'out/m.d','out/m.o: m.c inc/a.h inc/b.h\n'),
-           (['-MMD','-c','inc/../m.c','-I','inc','-o','out/m.tape'],'out/m.d','out/m.tape: inc/../m.c inc/a.h inc/b.h\n'),
+           (['-MMD','-S','m.c','-I','inc','-o','out/m.o'],'out/m.d','out/m.o: m.c inc/a.h inc/b.h\n'),   # -S: with -b, -c is an object (R17-1)
+           (['-MMD','-S','inc/../m.c','-I','inc','-o','out/m.tape'],'out/m.d','out/m.tape: inc/../m.c inc/a.h inc/b.h\n'),
            (['-MD','-S','m.c','-I','inc'],'m.d','m.o: m.c inc/a.h inc/b.h\n'),
            (['-MM','long.c','-I','inc'],None,LONG),
            (['-MM','-MP','-MT',T1,'-MT',T2,'long.c','-I','inc'],None,TWO+PHONY),
-           (['-MMD','-c','-o','out dir/x$1.o','long.c','-I','inc'],'out dir/x$1.d','out\\ dir/x$$1.o: '+LONG[len('long.o: '):])]
+           (['-MMD','-S','-o','out dir/x$1.o','long.c','-I','inc'],'out dir/x$1.d','out\\ dir/x$$1.o: '+LONG[len('long.o: '):])]
     for exe in [ua,*drivers]:
         base=[exe] if exe==ua else [exe,'--models',p/'compiler.pkg','-b',target]
         for flags,file,want in cases:
