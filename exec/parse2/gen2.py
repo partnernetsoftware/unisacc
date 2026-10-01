@@ -901,6 +901,8 @@ def build(locations=False, warnings=False, errors=False):
     parenfold_install(E, TIX, locations)
     from unitmode import install as unitmode_install
     start = unitmode_install(E, P, start, DEFS)
+    from objectdefinitions import install as objectdefinitions_install
+    objectdefinitions_install(E, P)
     from structreturnexpr import install as structreturnexpr_install
     structreturnexpr_install(E, P)
     g.finish()
