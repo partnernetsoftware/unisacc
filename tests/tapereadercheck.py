@@ -17,6 +17,7 @@ def run(args, **kwargs):
 
 def main():
     valid = {
+        "linkage": ".global\t_start\n.extern external.name\n.global payload\n.str payload \"x\"\n_start:\n  imm r0, 0\n  .exit r0\n",
         "minimal": "_start:\n  imm r0, 0\n  .exit r0\n",
         "data": '.str payload "A\\x00"\n.bss zeros 8\n_start:\n  imm r0, 0\n  .exit r0\n',
         "comments": '.str payload "a;b" ; outside string\n_start: ; entry\n  imm r0, 0 ; value\n  .exit r0\n',
@@ -25,6 +26,9 @@ def main():
         "unsigned-max": "_start:\n  imm r0, 18446744073709551615\n  .exit r0\n",
     }
     invalid = {
+        "linkage-missing": ".global\n",
+        "linkage-extra": ".extern foo bar\n",
+        "linkage-name": ".global 12bad\n",
         "empty-hex": "_start:\n  imm r0, 0x\n  .exit r0\n",
         "junk-number": "_start:\n  imm r0, 12q\n  .exit r0\n",
         "overflow": "_start:\n  imm r0, 18446744073709551616\n  .exit r0\n",
@@ -65,6 +69,10 @@ def main():
         prune = base / "prune"
         subprocess.run(["cc", "-O2", "-std=c99", "-o", str(prune),
                         str(ROOT / "tests/tapeprune_harness.c")], check=True, timeout=20)
+        adapter_c = base / "adapter.c"
+        adapter = base / "adapter"
+        adapter_c.write_text('#define UNISA_RUNTIME_LIBRARY\n#include "' + str(ROOT / 'exec/c/run.c') + '"\n#include "' + str(ROOT / 'exec/c/tapebin.h') + '"\n#include "' + str(ROOT / 'exec/c/tapebin_emit.h') + '"\nint main(void){Buf b={0};int c;while((c=getchar())!=EOF)bput(&b,c,0);Buf t={0};if(tbc_decode(b.b,b.n,0,0,&t))return 1;if(tbc_encode_product(&t,0))return 2;return fwrite(t.b,1,t.n,stdout)==(size_t)t.n?0:3;}\n')
+        subprocess.run(["cc", "-O2", "-o", str(adapter), str(adapter_c)], check=True, timeout=20)
         for name, text in valid.items():
             if matrix[name][0] != "accept":
                 raise AssertionError(name + ": backend matrix status changed")
@@ -73,6 +81,14 @@ def main():
             binary = base / (name + ".tapebin")
             plain.write_bytes(text.encode("ascii"))
             binary.write_bytes(encode(text))
+            if name == "linkage":
+                encoded = base / (name + ".c.tapebin")
+                result = run([str(ref), str(plain), "--tapebin", "-o", str(encoded)])
+                if result.returncode or encoded.read_bytes() != binary.read_bytes():
+                    raise AssertionError(name + ": C/Python encoder differs")
+                result = run([str(adapter)], input=binary.read_bytes())
+                if result.returncode or result.stdout != binary.read_bytes():
+                    raise AssertionError("product adapter linkage roundtrip differs")
             images = []
             for source in (plain, binary):
                 image = base / (name + (".text.elf" if source == plain else ".binary.elf"))
@@ -94,6 +110,10 @@ def main():
             check_encoder(name, text)
             plain = base / (name + ".tape")
             plain.write_bytes(text.encode("ascii"))
+            if name.startswith("linkage-"):
+                rejected = run([str(ref), str(plain), "--tapebin", "-o", str(base / "bad.tapebin")])
+                if rejected.returncode != 1:
+                    raise AssertionError(name + ": C encoder accepted malformed linkage")
             result = run([str(ref), str(plain), "-b", "lnx/x86_64", "-o", str(base / (name + ".elf"))])
             if result.returncode != 1 or b"back end: malformed tape" not in result.stderr:
                 raise AssertionError((name, result.returncode, result.stderr[:160]))

@@ -35,6 +35,7 @@ def check(text):
 
 
 def main():
+    check('.global exported\n.extern imported\nexported:\n  ret\n')
     check('L:\n  nop\n.bss z 24\n.str a "x"\nL:\n.str a "y"\n  call L\n')
     known = list(knownfail_read("exec/c/chain.knownfail"))
     files = sorted(pathlib.Path("examples").glob("*.c")) + [pathlib.Path("tests/c") / name for name in known]

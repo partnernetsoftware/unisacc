@@ -138,7 +138,21 @@ int tb_text_pass(int pass, int textlen) {
         p = line; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
         if (p == end) { line = next; continue; }
         tb_rec_count = tb_rec_count + 1;
-        if (end - p >= 5 && tb_wsame(out + p, ".str ", 5)) {
+        if (end - p >= 8 && (tb_wsame(out + p, ".global", 7) || tb_wsame(out + p, ".extern", 7)) && (out[p + 7] == 32 || out[p + 7] == 9)) {
+            int rk; rk = out[p + 1] == 103 ? TB_RECORD_GLOBAL : TB_RECORD_EXTERN;
+            p = p + 8; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
+            q = tb_token_end(p, end);
+            i = q; while (i < end && (out[i] == 32 || out[i] == 9)) i = i + 1;
+            if (q == p || i != end) return tb_fail();
+            i = p; while (i < q) {
+                int c; c = out[i];
+                if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+                    || (i > p && ((c >= 48 && c <= 57) || c == 46 || c == 36)))) return tb_fail();
+                i = i + 1;
+            }
+            name = tb_name_index(p, q - p);
+            if (pass) { tb_emit(rk); tb_emit_u(name); }
+        } else if (end - p >= 5 && tb_wsame(out + p, ".str ", 5)) {
             p = p + 5; q = tb_token_end(p, end); name = tb_name_index(p, q - p);
             p = q; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
             idx = tb_literal(p, end); if (tb_bad) return 0;

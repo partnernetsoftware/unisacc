@@ -49,6 +49,7 @@
 /* ---- names ------------------------------------------------------------- */
 char bkpool[BK_NPOOL]; int bkpoolend;
 int bkname_at[BK_MAXN]; int bkname_len[BK_MAXN]; int bknn;
+int bklink_global[BK_MAXN], bklink_extern[BK_MAXN]; /* linkage declarations, indexed by name */
 int bksym_addr[BK_MAXN];            /* a data symbol's address, or -1 */
 int bklab_pc[BK_MAXN];              /* a code label's tape pc, or -1 */
 int bkhash[262144];                 /* open addressing: name id + 1, or 0 */
@@ -79,6 +80,7 @@ int bk_name(char *s, int n) {
     bkname_at[id] = bkpoolend; bkname_len[id] = n;
     k = 0; while (k < n) { bkpool[bkpoolend] = s[k]; bkpoolend = bkpoolend + 1; k = k + 1; }
     bksym_addr[id] = 0 - 1; bklab_pc[id] = 0 - 1;
+    bklink_global[id] = 0; bklink_extern[id] = 0;
     bkhash[h] = id + 1;
     return id;
 }
@@ -377,6 +379,24 @@ int bk_parse(char *t, int n) {
         while (e > i && bk_tape_space(t[e - 1])) e = e - 1;
         j = i; while (j < e && bk_tape_space(t[j])) j = j + 1;
         if (j >= e) { i = lineend + 1; continue; }
+        if (e - j >= 7 && t[j] == 46 && ((t[j+1]==103 && t[j+2]==108 && t[j+3]==111 && t[j+4]==98 && t[j+5]==97 && t[j+6]==108) || (t[j+1]==101 && t[j+2]==120 && t[j+3]==116 && t[j+4]==101 && t[j+5]==114 && t[j+6]==110))
+            && (e - j == 7 || bk_tape_space(t[j + 7]))) {
+            int link_global; link_global = t[j + 1] == 103;
+            j = j + 7; while (j < e && bk_tape_space(t[j])) j = j + 1;
+            s0 = j; while (j < e && !bk_tape_space(t[j])) j = j + 1; s1 = j;
+            if (s0 == s1) return bk_tape_bad();
+            for (k = s0; k < s1; k++) {
+                int c; c = t[k];
+                if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95
+                    || (k > s0 && ((c >= 48 && c <= 57) || c == 46 || c == 36)))) return bk_tape_bad();
+            }
+            while (j < e && bk_tape_space(t[j])) j = j + 1;
+            if (j != e) return bk_tape_bad();
+            id = bk_name(t + s0, s1 - s0);
+            if (link_global) bklink_global[id] = 1;
+            else bklink_extern[id] = 1;
+            i = lineend + 1; continue;
+        }
         if (e - j >= 5 && t[j] == 46 && t[j + 1] == 98 && t[j + 2] == 115 && t[j + 3] == 115 && bk_tape_space(t[j + 4])) {
             /* .bss NAME N: zeros, 8-aligned */
             long cnt;

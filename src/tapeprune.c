@@ -73,6 +73,8 @@ int tp_parse(void){int p=0,end,textend,start,q,quoted,esc,i,op,shape,idx,id;long
    if(isbss){value=0;if(q==textend){tp_bad=1;return 0;}for(;q<textend;q++){if(tp_input[q]<'0'||tp_input[q]>'9'){tp_bad=1;return 0;}value=value*10+tp_input[q]-'0';if(value>33554432){tp_bad=1;return 0;}}}
    else {int decoded;if(!ts_quoted_length(tp_input+q,textend-q,1048576,&decoded)){tp_bad=1;return 0;}}
    tp_datum[id]=1;tp_rk[idx]=3;tp_rn[idx]=id;continue;}
+  /* Link-visible definitions may be roots in other units: preserve the whole tape. */
+  if(tp_same(start,q-start,".global")||tp_same(start,q-start,".extern")){tp_bad=1;return 0;}
   op=tp_getop(start,q-start);if(op<0){tp_bad=1;return 0;}tp_ro[idx]=op;
   if(!tp_tokenize(q,textend))return 0;shape=tp_length(tp_opshapes[op]);if(tp_nt!=shape||tp_nt>8){tp_bad=1;return 0;}
   for(i=0;i<tp_nt;i++){char kind=tp_opshapes[op][i];int at=idx*8+i;tp_numeric[at]=0;tp_an[at]=-1;

@@ -134,7 +134,10 @@ int tb_records(int from, int to, int expected) {
     while (i < n && !tb_bad) {
         if (p >= to) return tb_fail();
         kind = tb_file[p] & 255; p = p + 1;
-        if (kind < 3) {
+        if (kind == TB_RECORD_GLOBAL || kind == TB_RECORD_EXTERN) {
+            id = tb_uint(tb_file, &p, to);
+            tb_word(kind == TB_RECORD_GLOBAL ? ".global " : ".extern "); tb_name(id); tb_put(10);
+        } else if (kind < 3) {
             id = tb_uint(tb_file, &p, to);
             if (kind == 0) { tb_name(id); tb_word(":\n"); }
             else if (kind == 1) {

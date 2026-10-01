@@ -8,7 +8,7 @@ target chosen by the C front end, while the tape instruction set stays neutral.
 import hashlib
 import struct
 
-from .tape import REGS, SHAPE, Tape, parse
+from .tape import LINK_RECORDS, REGS, SHAPE, Tape, parse
 
 
 MAGIC = b"UTAPEBIN"
@@ -145,7 +145,7 @@ def _collect(records):
 
     for rec in records:
         kind = rec[0]
-        if kind in ("label", "str", "bss"):
+        if kind in ("label", "str", "bss", *LINK_RECORDS):
             name(rec[1])
             if kind == "str":
                 const(rec[2])
@@ -166,7 +166,10 @@ def _encode_records(records, name_idx, const_idx):
     out = bytearray(_u(len(records)))
     for rec in records:
         kind = rec[0]
-        if kind == "label":
+        if kind in LINK_RECORDS:
+            out.append(LINK_RECORDS[kind])
+            out.extend(_u(name_idx[_name_bytes(rec[1])]))
+        elif kind == "label":
             out.append(0)
             out.extend(_u(name_idx[_name_bytes(rec[1])]))
         elif kind == "str":
@@ -252,6 +255,12 @@ def _decode_records(data, count, names, consts):
     records = []
     for _ in range(n):
         kind = reader.byte()
+        if kind in LINK_RECORDS.values():
+            idx = reader.uint()
+            if idx >= len(names):
+                raise ValueError("tapebin: name index out of range")
+            records.append((next(k for k, v in LINK_RECORDS.items() if v == kind), names[idx]))
+            continue
         if kind <= 2:
             idx = reader.uint()
             if idx >= len(names):

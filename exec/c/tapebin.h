@@ -149,7 +149,10 @@ static int tbc_decode(const unsigned char *data,size_t size,int expected,int for
     if(r.bad||nr!=items[2]||nr>r.end)goto done;
     for(uint64_t row=0;row<nr;row++){
         if(r.pos>=r.end)goto done;int kind=r.p[r.pos++];
-        if(kind<=2){
+        if(kind==TB_RECORD_GLOBAL||kind==TB_RECORD_EXTERN){
+            uint64_t id=tbc_u(&r);if(r.bad||id>=items[0])goto done;
+            tbc_put(text,kind==TB_RECORD_GLOBAL?".global ":".extern ");tbc_name(text,names[id],namelen[id]);tbc_put(text,"\n");
+        }else if(kind<=2){
             uint64_t id=tbc_u(&r);if(r.bad||id>=items[0])goto done;
             if(kind==0){tbc_name(text,names[id],namelen[id]);tbc_put(text,":\n");}
             else if(kind==1){

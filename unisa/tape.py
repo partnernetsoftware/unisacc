@@ -10,6 +10,8 @@ return address pushed on the stack by `call`.
 bytes in the data area and binds NAME for `.lea`.
 """
 
+import re
+
 REGS = tuple("r%d" % i for i in range(8))
 SP = 7
 # 64 KB was fine for the examples; a self-hosting compiler needs room for its
@@ -20,6 +22,8 @@ STACK_TOP = 0x1000000
 DATA_BASE = 0x100
 
 # op -> operand shape.  r=register  i=immediate  L=label  s=symbol-or-imm
+LINK_RECORDS = {"global": 4, "extern": 5}
+
 SHAPE = {
     "imm":     ("r", "i"),
     "mov":     ("r", "r"),
@@ -156,6 +160,8 @@ class Tape:
             out.append("  " + _fmt(ins))
         for nm in sorted(rev.get(len(self.code), [])):
             out.append("%s:" % nm)
+        if any(rec[0] in LINK_RECORDS for rec in self.records):
+            return self.to_canonical_text()
         return "\n".join(out) + "\n"
 
     def to_canonical_text(self):
@@ -163,7 +169,9 @@ class Tape:
         out = []
         for record in self.records:
             kind = record[0]
-            if kind == "label":
+            if kind in LINK_RECORDS:
+                out.append(".%s %s" % (kind, record[1]))
+            elif kind == "label":
                 out.append(record[1] + ":")
             elif kind == "str":
                 out.append(".str %s %s" % (record[1], _quote(record[2])))
@@ -270,6 +278,12 @@ def parse(text):
                 t.records.append(record)
             else:
                 t.records[-1] = record
+            continue
+        if line.split()[0] in (".global", ".extern"):
+            parts = line.split()
+            if len(parts) != 2 or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9.$]*", parts[1]):
+                raise ValueError("line %d: malformed linkage record" % lineno)
+            t.records.append((parts[0][1:], parts[1]))
             continue
         if line.startswith(".str "):
             rest = line[5:].strip()
