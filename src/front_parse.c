@@ -2229,7 +2229,7 @@ int pf_call(int t) {
         setkind(0); cursize = 8; curelem = 8; lvalue = 0;
         return postfix();
     }
-    if (isname(t, "__mmap", 6)) {        /* six arguments: the .sys6 gate */
+    if (isname(t, "__mmap", 6) || isname(t, "__getdirentries64", 17)) {   /* the .sys6 gate */
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {
@@ -2239,7 +2239,8 @@ int pf_call(int t) {
         }
         need(tidx(")", 1), ")");
         sysargs6(n);
-        es("  .sys6 mmap, r0, r1, r2, r3, r4, r5\n");
+        if (isname(t, "__getdirentries64", 17)) es("  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n");
+        else es("  .sys6 mmap, r0, r1, r2, r3, r4, r5\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
@@ -2247,7 +2248,10 @@ int pf_call(int t) {
         isname(t, "__write", 7) || isname(t, "__close", 7) ||
         isname(t, "__mprotect", 10) || isname(t, "__munmap", 8) ||
         isname(t, "__exit", 6) || isname(t, "__lseek", 7) ||
-        isname(t, "__unlink", 8) || isname(t, "__rename", 8)) {
+        isname(t, "__unlink", 8) || isname(t, "__rename", 8) ||
+        isname(t, "__ioctl", 7) || isname(t, "__fstat", 7) || isname(t, "__stat", 6) ||
+        isname(t, "__lstat", 7) || isname(t, "__fcntl", 7) || isname(t, "__mkdir", 7) ||
+        isname(t, "__chmod", 7) || isname(t, "__poll", 6) || isname(t, "__ppoll", 7)) {
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {
@@ -2268,7 +2272,8 @@ int pf_call(int t) {
         else { if (isname(t, "__lseek", 7)) es("lseek");
         else { if (isname(t, "__unlink", 8)) es("unlink");
         else { if (isname(t, "__rename", 8)) es("rename");
-        else es("exit"); } } } } } } } } }
+        else { if (t >= 0 && tlen[t] > 2 && isname(t, "__exit", 6) == 0) { int q; q = 2; while (q < tlen[t]) { ec(src[tpos[t] + q] & 255); q = q + 1; } }   /* __ioctl -> ioctl, ... (R18-10) */
+        else es("exit"); } } } } } } } } } }
         es(", r0, r1, r2\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();

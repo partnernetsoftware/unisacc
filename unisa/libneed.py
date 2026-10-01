@@ -14,6 +14,12 @@ and function-like macros each carried name reaches.  The table is derived
 from the headers alone, so it cannot disagree with them.
 """
 import os
+
+
+def _headers(incdir):
+    """Every carried header, subdirectories included (`sys/stat.h`, 0.0.18)."""
+    return sorted(os.path.relpath(os.path.join(d, n), incdir)
+                  for d, _, fs in os.walk(incdir) for n in fs if n.endswith(".h"))
 import re
 
 PREFIX = "__UN_"
@@ -83,9 +89,7 @@ def table(incdir):
     """Sorted names, and for each the sorted closure of carried bodies it needs."""
     refs = {}
     kind = {}
-    for h in sorted(os.listdir(incdir)):
-        if not h.endswith(".h"):
-            continue
+    for h in _headers(incdir):
         text = open(os.path.join(incdir, h)).read()
         for name, a, b in bodies(text):
             assert name not in kind, "carried body defined twice: " + name
@@ -131,9 +135,7 @@ def guard(name):
 def check_guards(incdir):
     """Every carried body sits alone inside its own guard; returns problems."""
     bad = []
-    for h in sorted(os.listdir(incdir)):
-        if not h.endswith(".h"):
-            continue
+    for h in _headers(incdir):
         text = open(os.path.join(incdir, h)).read()
         for name, a, b in bodies(text):
             before = text[:a].rstrip("\n").rsplit("\n", 1)[-1]
@@ -147,9 +149,7 @@ def check_guards(incdir):
 def apply_guards(incdir):
     """Wrap every unguarded carried body; idempotent."""
     changed = 0
-    for h in sorted(os.listdir(incdir)):
-        if not h.endswith(".h"):
-            continue
+    for h in _headers(incdir):
         path = os.path.join(incdir, h)
         text = open(path).read()
         out, last = [], 0

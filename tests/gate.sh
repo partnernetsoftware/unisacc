@@ -393,6 +393,7 @@ job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/che
 job subtract-safety python3 ./tests/subtractsafety.py   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve
 job subtract-safety-selftest python3 ./tests/subtractsafety.py --selftest   # R16-9: both 0.0.15 counterexamples are still caught
 job realprog    ./tests/realprog.sh   # R16-12: pinned real programs (kilo, jsmn, cJSON, lua, sqlite) built by us and cc, same run, same bytes; ratchet list
+job hosthdr     ./tests/hosthdr.sh   # R18-10: sys/stat, fcntl, poll, termios, sys/ioctl, isatty, dirent on macOS = cc (and gcc on Lima arm64)
 job linkunits   ./tests/linkunits.sh   # R17-2: units compiled alone (-c -b HOST -funit) and joined by the unisacc linker = cc = one-step
 job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sections, relocations, image invariant, GNU ld/lld link, Lima run
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table

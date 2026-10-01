@@ -40,6 +40,20 @@ SYSCALLS = {
     "lseek":         (8, 62, 199, "SetFilePointer"),
     "unlink":        (87, 35, 10, "DeleteFileA"),
     "rename":        (82, 276, 128, "MoveFileExA"),
+    # 0.0.18 R18-10, host-capability headers for TUI and files (dsh's measured
+    # needs).  Linux/arm64 has only the *at forms (newfstatat, mkdirat,
+    # fchmodat) and ppoll; the headers pass the flags those forms take.  No
+    # WinAPI here: Windows refuses these ops until its own column exists.
+    "ioctl":         (16, 29, 54, None),
+    "fstat":         (5, 80, 339, None),      # osx fstat64
+    "stat":          (4, 79, 338, None),      # lnx arm = newfstatat; osx stat64
+    "lstat":         (6, 79, 340, None),      # lnx arm = newfstatat + AT_SYMLINK_NOFOLLOW (header); osx lstat64
+    "fcntl":         (72, 25, 92, None),
+    "mkdir":         (83, 34, 136, None),     # lnx arm = mkdirat
+    "chmod":         (90, 53, 15, None),      # lnx arm = fchmodat
+    "poll":          (7, None, 230, None),    # lnx arm has no poll: the header uses ppoll there
+    "ppoll":         (271, 73, None, None),
+    "getdirentries64": (None, None, 344, None),   # osx directory records (readdir)
 }
 
 SYSOPS = tuple(SYSCALLS.keys())                                        # 22
@@ -133,7 +147,8 @@ def sysno(op, os_, arch):
         return "none"
     lx, la, ox, _ = SYSCALLS[op]
     if os_ == "lnx":
-        return str(lx if arch == "x86_64" else la)
+        v = lx if arch == "x86_64" else la
+        return "none" if v is None else str(v)
     if ox is None:                          # no such syscall on this OS
         return "none"
     return hex(OSX_CLASS_BIT | ox)          # osx, both arches
@@ -187,8 +202,9 @@ def nrreg(op, os_, arch):
 # ---- [I4] how a call's arguments are shaped and its result converted ------
 # Linux/arm64 has no open/unlink/rename: the numbers are the *at forms, which
 # take a directory fd first (AT_FDCWD) -- renameat2 twice, plus flags 0.
-ARGSHAPES = ("plain", "atfd_1", "atfd_1_zero", "atfd_2_zero5")
-_ATFD = {"open": "atfd_1", "unlink": "atfd_1_zero", "rename": "atfd_2_zero5"}
+ARGSHAPES = ("plain", "atfd_1", "atfd_1_zero", "atfd_2_zero5", "zero4")
+_ATFD = {"open": "atfd_1", "unlink": "atfd_1_zero", "rename": "atfd_2_zero5",
+         "stat": "atfd_1", "lstat": "atfd_1", "mkdir": "atfd_1", "chmod": "atfd_1"}
 # What a WinAPI call's answer becomes: POSIX wants a count, 0/-1, or 0/1.
 RETCONVS = ("none", "wcount", "bool_inv", "bool_neg", "dword_sx")
 _RETCONV = {"write": "wcount", "read": "wcount", "mprotect": "bool_inv",
@@ -235,6 +251,8 @@ ENCSPEC = {
 def argshape(op, os_, arch):
     if (os_, arch) == ("lnx", "arm64") and op in _ATFD:
         return _ATFD[op]
+    if os_ == "lnx" and op == "ppoll":      # (fds, nfds, timeout, sigmask = NULL)
+        return "zero4"
     return "plain"
 
 

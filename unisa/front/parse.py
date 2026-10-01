@@ -28,11 +28,13 @@ ASSIGN_OPS = {"+=": "+", "-=": "-", "*=": "*", "/=": "/", "%=": "%",
 # still come from the abi/enc tables -- nothing here is hardcoded per target.
 INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
              "__close": "close", "__exit": "exit", "__getdents64": "getdents64",
+             "__ioctl": "ioctl", "__fstat": "fstat", "__stat": "stat", "__lstat": "lstat", "__fcntl": "fcntl",
+             "__mkdir": "mkdir", "__chmod": "chmod", "__poll": "poll", "__ppoll": "ppoll",   # R18-10
              "__mprotect": "mprotect", "__munmap": "munmap",
              "__lseek": "lseek", "__unlink": "unlink", "__rename": "rename"}
 # six arguments, so the six-register gate: a compiler that runs what it
 # compiles maps memory, and mmap takes six
-INTRINSIC6 = {"__mmap": "mmap"}
+INTRINSIC6 = {"__mmap": "mmap", "__getdirentries64": "getdirentries64"}
 # argc/argv are not syscalls -- the loader hands them over -- so they get their
 # own tape ops rather than going through `.sys`.
 ARGV_INTRINSIC = ("__argc", "__argv")

@@ -3,8 +3,8 @@
  * Network-evaluated dense literal for stage regmap
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
- *   unisa/catalog.py             07ff7baa3166
+ *   unisa/catalog.py             481bf9003ba5
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           6ef9b0cf29fb
+ *   weights/built.json           d7fba482b07e
  *   unisa/ckernel.py             db184ffec275 */
   "\x02\x08\x04\x09\x06\x0a\x05\x0b\x03\x0c\x00\x0d\x01\x0e\x07\x0f"

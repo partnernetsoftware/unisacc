@@ -3,9 +3,9 @@
  * Network-evaluated dense literal for stage scope
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
- *   unisa/catalog.py             07ff7baa3166
+ *   unisa/catalog.py             481bf9003ba5
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           6ef9b0cf29fb
+ *   weights/built.json           d7fba482b07e
  *   unisa/ckernel.py             db184ffec275 */
   "\x04\x00\x04\x03\x05\x03\x01\x03\x03\x03\x04\x02\x04\x03\x03\x03\x03\x03\x03\x03"
   "\x04\x03\x04\x03\x03\x03\x06\x03\x03\x03"

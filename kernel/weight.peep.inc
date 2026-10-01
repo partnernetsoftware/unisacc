@@ -3,9 +3,9 @@
  * Constructed weight literal for stage peep
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
- *   unisa/catalog.py             07ff7baa3166
+ *   unisa/catalog.py             481bf9003ba5
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           6ef9b0cf29fb
+ *   weights/built.json           d7fba482b07e
  *   unisa/ckernel.py             db184ffec275 */
   "\xca\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\x01\x00\x00"
   "\x00\x00\x00\x00\xb1\x00\x00\x00\x00\x00\x00\x00\xe7\xff\x01\x00\x00\x00\x00\x00"

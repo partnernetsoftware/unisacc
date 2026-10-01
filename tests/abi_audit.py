@@ -28,9 +28,16 @@ sys.path.insert(0, R)
 # maps to None: the catalog must say "none" for it.
 NAME = {
     "lnx": {"open": ["SYS_open", "SYS_openat"], "unlink": ["SYS_unlink", "SYS_unlinkat"],
-            "rename": ["SYS_rename", "SYS_renameat2"]},
+            "rename": ["SYS_rename", "SYS_renameat2"],
+            # R18-10: Linux/arm64 has only the *at forms and ppoll
+            "stat": ["SYS_stat", "SYS_newfstatat"], "lstat": ["SYS_lstat", "SYS_newfstatat"],
+            "mkdir": ["SYS_mkdir", "SYS_mkdirat"], "chmod": ["SYS_chmod", "SYS_fchmodat"],
+            "getdirentries64": None},
     "osx": {"clock_gettime": None, "nanosleep": None, "getdents64": None,
-            "futex": ["SYS_ulock_wait"], "clone": ["SYS_bsdthread_create"]},
+            "futex": ["SYS_ulock_wait"], "clone": ["SYS_bsdthread_create"],
+            # R18-10: the 64-bit-inode forms; macOS has no ppoll
+            "stat": ["SYS_stat64"], "lstat": ["SYS_lstat64"], "fstat": ["SYS_fstat64"],
+            "ppoll": None},
 }
 
 

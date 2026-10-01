@@ -328,7 +328,8 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
             FD, Z = ("imm", -100), ("imm", 0)
             srcs = {"plain": [A0, A1, A2], "atfd_1": [FD, A0, A1, A2],
                     "atfd_1_zero": [FD, A0, Z],
-                    "atfd_2_zero5": [FD, A0, FD, A1, Z]}[shape]
+                    "atfd_2_zero5": [FD, A0, FD, A1, Z],
+                    "zero4": [A0, A1, A2, Z]}[shape]
             syscall_seq(a[0], srcs)
             tp.emit("mov", rmap["r0"],
                     facts(oracle, a[0], os_, arch, drive)["ret"])

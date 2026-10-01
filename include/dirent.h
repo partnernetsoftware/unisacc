@@ -1,4 +1,4 @@
-/* Minimal Linux directory API; unsupported targets reject __getdents64.
+/* Minimal directory API: Linux getdents64, macOS getdirentries64 (0.0.18); Windows rejects it.
  * EOF sets errno=0; malformed kernel records set EIO and stop this stream. */
 #ifndef _UNISA_DIRENT_H
 #define _UNISA_DIRENT_H
@@ -10,18 +10,28 @@ struct dirent {
     char d_name[256];
 };
 #define _UNISA_DIRBUF 4096
+#ifdef __APPLE__
+#define _UNISA_DIRNAME 21
+#else
+#define _UNISA_DIRNAME 19
+#endif
 typedef struct {
     int fd, pos, len, failed;
+    long basep;                                  /* macOS getdirentries64 position */
     struct dirent ent;
     unsigned char buf[_UNISA_DIRBUF];
 } DIR;
 #if !__UNISA_FTRIM_LIBC || __UN_opendir
 static DIR *opendir(const char *__u_path) {
     DIR *__u_d; long __u_fd;
+#ifdef __APPLE__
+    __u_fd = __open((char *)__u_path, 0x100000, 0); /* macOS O_DIRECTORY */
+#else
 #ifdef __aarch64__
     __u_fd = __open((char *)__u_path, 16384, 0); /* Linux arm64 O_DIRECTORY */
 #else
     __u_fd = __open((char *)__u_path, 65536, 0); /* Linux x86_64 O_DIRECTORY */
+#endif
 #endif
     if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
     __u_d = (DIR *)malloc(sizeof(DIR));
@@ -37,7 +47,11 @@ static struct dirent *readdir(DIR *__u_d) {
     if (__u_d == 0) { errno = EBADF; return 0; }
     if (__u_d->failed) { errno = __u_d->failed; return 0; }
     if (__u_d->pos == __u_d->len) {
+#ifdef __APPLE__
+        __u_n = __getdirentries64(__u_d->fd, __u_d->buf, _UNISA_DIRBUF, (char *)&__u_d->basep, 0, 0);   /* R18-10 */
+#else
         __u_n = __getdents64(__u_d->fd, __u_d->buf, _UNISA_DIRBUF);
+#endif
         if (__u_n < 0) { __u_d->failed = (int)(0 - __u_n); errno = __u_d->failed; return 0; }
         if (__u_n == 0) return 0;
         if (__u_n > _UNISA_DIRBUF) { __u_d->failed = EIO; errno = EIO; return 0; }
@@ -47,19 +61,21 @@ static struct dirent *readdir(DIR *__u_d) {
     if (__u_left < 24) { __u_d->failed = EIO; errno = EIO; return 0; }
     __u_r = __u_d->buf + __u_d->pos;
     __u_rl = __u_r[16] | (__u_r[17] << 8);
-    if (__u_rl < 24 || (__u_rl & 7) || __u_rl > __u_left) {
+    /* linux_dirent64: d_type at 18, name at 19, records 8-aligned; macOS
+       struct direntry: d_namlen at 18, d_type at 20, name at 21, 4-aligned */
+    if (__u_rl < 24 || (__u_rl & (_UNISA_DIRNAME == 21 ? 3 : 7)) || __u_rl > __u_left) {
         __u_d->failed = EIO; errno = EIO; return 0;
     }
-    for (__u_i = 0; __u_i < 256 && 19 + __u_i < __u_rl && __u_r[19 + __u_i]; __u_i++) ;
-    if (__u_i == 0 || __u_i >= 256 || 19 + __u_i >= __u_rl) {
+    for (__u_i = 0; __u_i < 256 && _UNISA_DIRNAME + __u_i < __u_rl && __u_r[_UNISA_DIRNAME + __u_i]; __u_i++) ;
+    if (__u_i == 0 || __u_i >= 256 || _UNISA_DIRNAME + __u_i >= __u_rl) {
         __u_d->failed = EIO; errno = EIO; return 0;
     }
     __u_d->ent.d_name[__u_i] = 0;
-    while (__u_i > 0) { __u_i--; __u_d->ent.d_name[__u_i] = (char)__u_r[19 + __u_i]; }
+    while (__u_i > 0) { __u_i--; __u_d->ent.d_name[__u_i] = (char)__u_r[_UNISA_DIRNAME + __u_i]; }
     __u_d->ent.d_ino = 0;
     for (__u_i = 7; __u_i >= 0; __u_i--)
         __u_d->ent.d_ino = (__u_d->ent.d_ino << 8) | __u_r[__u_i];
-    __u_d->ent.d_type = __u_r[18]; __u_d->pos += __u_rl;
+    __u_d->ent.d_type = __u_r[_UNISA_DIRNAME - 1]; __u_d->pos += __u_rl;
     return &__u_d->ent;
 }
 #endif

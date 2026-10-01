@@ -1,8 +1,8 @@
 /* Minimal POSIX <unistd.h> (0.0.17 R17-5, ordered by the realprog corpus):
  * the file-descriptor calls the bundled library already makes through its
  * own syscall intrinsics, under their POSIX names.  Return values follow
- * POSIX: -1 with errno set on failure.  Not provided (yet): fork/exec,
- * isatty, getpid, sleep, pipes (POSIX L2, plans/v0.1.x.md). */
+ * POSIX: -1 with errno set on failure.  isatty arrived in 0.0.18.  Not provided (yet): fork/exec,
+ * getpid, sleep, pipes (POSIX L2, plans/v0.1.x.md). */
 #ifndef _UNISA_UNISTD_H
 #define _UNISA_UNISTD_H
 #include <stddef.h>
@@ -43,6 +43,19 @@ static off_t lseek(int __u_fd, off_t __u_off, int __u_whence) {
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
     return __u_r;
 }
+#endif
+#ifndef _WIN32
+#if !__UNISA_FTRIM_LIBC || __UN_isatty
+static int isatty(int __u_fd) {               /* a terminal answers the attribute request (R18-10) */
+    unsigned char __u_t[128]; long __u_r;
+#ifdef __APPLE__
+    __u_r = __ioctl(__u_fd, 0x40487413L, (char *)__u_t);
+#else
+    __u_r = __ioctl(__u_fd, 0x5401L, (char *)__u_t);
+#endif
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; } return 1;
+}
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlink
 static int unlink(const char *__u_path) {

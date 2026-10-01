@@ -892,8 +892,10 @@ int bk_lower(void) {
                 else { if (strsame(sh, "atfd_2_zero5")) {
                     bk_a4k = SK_IMM; bk_a4v = 0;
                     bk_syscall(cw, SK_IMM, 0 - 100, SK_MEM, bk_scr0, SK_IMM, 0 - 100, SK_MEM, bk_scr1);
-                } else
-                    bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0);
+                } else { if (strsame(sh, "zero4"))      /* ppoll: sigmask = NULL (R18-10) */
+                    bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, SK_IMM, 0);
+                else
+                    bk_syscall(cw, SK_MEM, bk_scr0, SK_MEM, bk_scr1, SK_MEM, bk_plen, 0 - 1, 0); }
                 } }
             }
             bk_facts(cw);
