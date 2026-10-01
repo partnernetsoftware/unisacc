@@ -18,6 +18,7 @@ struct dirent {
 typedef struct {
     int fd, pos, len, failed;
     long basep;                                  /* macOS getdirentries64 position */
+    long index;                                  /* entries returned so far (telldir) */
     struct dirent ent;
     unsigned char buf[_UNISA_DIRBUF];
 } DIR;
@@ -36,7 +37,7 @@ static DIR *opendir(const char *__u_path) {
     if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
     __u_d = (DIR *)malloc(sizeof(DIR));
     if (__u_d == 0) { __close(__u_fd); errno = ENOMEM; return 0; }
-    __u_d->fd = (int)__u_fd; __u_d->pos = 0; __u_d->len = 0; __u_d->failed = 0;
+    __u_d->fd = (int)__u_fd; __u_d->pos = 0; __u_d->len = 0; __u_d->failed = 0; __u_d->basep = 0; __u_d->index = 0;
     errno = 0; return __u_d;
 }
 #endif
@@ -75,8 +76,28 @@ static struct dirent *readdir(DIR *__u_d) {
     __u_d->ent.d_ino = 0;
     for (__u_i = 7; __u_i >= 0; __u_i--)
         __u_d->ent.d_ino = (__u_d->ent.d_ino << 8) | __u_r[__u_i];
-    __u_d->ent.d_type = __u_r[_UNISA_DIRNAME - 1]; __u_d->pos += __u_rl;
+    __u_d->ent.d_type = __u_r[_UNISA_DIRNAME - 1]; __u_d->pos += __u_rl; __u_d->index = __u_d->index + 1;
     return &__u_d->ent;
+}
+#endif
+/* 0.0.19 (dsh): rewinddir/telldir/seekdir.  A position is the number of
+   entries already returned; seekdir rewinds and reads forward to it (POSIX
+   only promises telldir's value is meaningful to seekdir on the same DIR). */
+#if !__UNISA_FTRIM_LIBC || __UN_rewinddir || __UN_seekdir
+static void rewinddir(DIR *__u_d) {
+    if (__u_d == 0) return;
+    __lseek(__u_d->fd, 0, 0);
+    __u_d->pos = 0; __u_d->len = 0; __u_d->failed = 0; __u_d->basep = 0; __u_d->index = 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_telldir
+static long telldir(DIR *__u_d) { return __u_d ? __u_d->index : -1; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_seekdir
+static void seekdir(DIR *__u_d, long __u_loc) {
+    if (__u_d == 0) return;
+    rewinddir(__u_d);
+    while (__u_d->index < __u_loc) { if (readdir(__u_d) == 0) break; }
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_closedir
