@@ -38,6 +38,11 @@ def main():
                 for barrier in ('','blocked'+str(width)+':\n'):
                     fixture += f'  .frame 8\n  .st [r7+0], r2, {width}\n{barrier}  .ld r1, [r7+0], {width}\n  .frame -8\n'
         target=os.environ.get('LOWER_TARGET','lnx/x86_64')
+        if target.startswith('lnx/'):
+            fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in (('ioctl','fstat','stat','lstat','fcntl','mkdir','chmod','ppoll') if target.endswith('/arm64') else ('ioctl','fstat','stat','lstat','fcntl','mkdir','chmod','poll','ppoll')))
+        elif target.startswith('osx/'):
+            fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in ('ioctl','fstat','stat','lstat','fcntl','mkdir','chmod','poll'))
+            fixture += '  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n'
         unavailable=[]
         if target.startswith('win/'):
             from unisa.catalog import WINAPI, winimp

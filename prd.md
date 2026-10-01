@@ -286,3 +286,7 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 - [prd-history-20260929.md](archive/prd-history-20260929.md)：本次第二轮清理移出的 §0.3 早期交付边界、§5.5 完成度盘点 S-1..S-17、§5.7/5.9 巡查记录、v0.0.11 逐项回执全文、附录 7.1/7.2/7.4。
 - [prd-findings-20260929.md](archive/prd-findings-20260929.md)：§6 实验发现 E-编号全表（论文引用按编号在此解析）。
 - [prd-r17-notes-20261001.md](archive/prd-r17-notes-20261001.md)：0.0.17 开发期间写在 prd 末尾的 R17 实施记录（tape 链接属性、产品对象路线各片）。
+
+### R18-10 产品侧参数形状（2026-10-01）
+
+E3 从 INTRINSIC/INTRINSIC6 读取新内建，不另造名单；P3 头资源挂载递归覆盖 include/sys/。lower 的 zero4 以 code-abi-sources.tsv 声明三参加零，继续由通用动作与 ABI 表生成。Linux ARM poll 无号，使用 ppoll；不把拒绝算通过。首片 Linux/macOS ARM 的 typed lowering 在 C 与 Python 执行器上与参考逐字段同；完整产品与六目标验收待后续。
