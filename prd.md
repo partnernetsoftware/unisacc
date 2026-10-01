@@ -252,6 +252,8 @@ R20-1 B 的首个可独立对拍切片定为现行 `.tbl → .net`：C99 构造�
 
 该首切片已在 `seed/net.c` 落地：`prune`（48,824 B）与 E3（891,284 B）的 `.net` 均与 Python 字节相同；`seed-construct` 固定检查 `prune` 和声明返回小表。完整输入闭包、命令及剩余 Python 边界记在 [R20-1 A/B 回执](research/r20-c99-seed-a-audit.md)。
 
+R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）与 `.gdef NAME`（该单元带初值的外部对象定义）。旧单元对象缺 `.unit 2` 时明确拒绝并要求重编，避免把旧带初值定义误当暂定定义。tapebin 为这些链接属性记录使用 v1/minor 1；旧 minor 0 包与整程序 tape 保持原字节，opset 不变。参考链接与产品格式同步推进，实测前不称完成。
+
 ## 6. 未解决问题
 
 - **匿名结构体的名字边界（2026-10-02 审查）**：`stnew(-1, ...)` 表示匿名 tag，原先在检查 `t >= 0` 前调用 `name_toolong(t)`；私有 `-fsanitize=bounds` 构建抓到 `tlen[-1]` 越界。现只对有名 tag 检查长度，并以 `front-bounds` 独立 UBSan 门禁持续检查。

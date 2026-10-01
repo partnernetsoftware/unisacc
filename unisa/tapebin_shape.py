@@ -3,7 +3,7 @@
 import pathlib
 import sys
 
-from .tape import LINK_RECORDS, SHAPE
+from .tape import LINK_RECORDS, SHAPE, UNIT_RECORD
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -23,13 +23,16 @@ def render():
 
 def render_records():
     return "kind\tname\tshape\n0\tlabel\tname\n1\t.str\tname,const\n2\t.bss\tname,size\n3\tinsn\topcode,operands\n" + "".join(
-        "%d\t.%s\tname\n" % (v, k) for k, v in LINK_RECORDS.items())
+        "%d\t.%s\tname\n" % (v, k) for k, v in LINK_RECORDS.items() if v < UNIT_RECORD) + \
+        "%d\t.unit\tversion\n" % UNIT_RECORD + "".join(
+        "%d\t.%s\tname\n" % (v, k) for k, v in LINK_RECORDS.items() if v > UNIT_RECORD)
 
 
 def render_c():
     rows = tuple(SHAPE.items())
     return ("/* Generated from unisa/tape.py SHAPE; do not edit. */\n"
             "#define TB_OPCOUNT %d\n" % len(rows)
+            + "#define TB_RECORD_UNIT %d\n" % UNIT_RECORD
             + "".join("#define TB_RECORD_%s %d\n" % (k.upper(), v) for k, v in LINK_RECORDS.items())
             + "char *tb_opnames[TB_OPCOUNT] = {" + ", ".join('"%s"' % name for name, _ in rows) + "};\n"
             + "char *tb_shapes[TB_OPCOUNT] = {" + ", ".join('"%s"' % "".join(shape) for _, shape in rows) + "};\n")

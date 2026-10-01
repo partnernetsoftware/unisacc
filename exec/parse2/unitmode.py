@@ -3,6 +3,11 @@ DECL = 230 << 40
 
 def install(E, P, start, definitions):
     g = E.g
+    # FN clears fstatic after taking the declaration specifier. Keep the
+    # storage fact for the later GV.storage/GV.record hooks.
+    mode, row = g.st['FN']
+    for key, (target, seq) in list(row.items()):
+        row[key] = (target, g.seq([('COPYW', 'um_static', 'fstatic')] + list(g.seqs[seq])))
     def original(state):
         name = 'UM.original.' + state
         assert name not in g.st
@@ -38,7 +43,8 @@ def install(E, P, start, definitions):
         g.labels.add(resume)
         g.st[state][1][key] = ('UM.header', g.seq(acts[:at] + [('PUSH', resume)]))
         g.on(resume, range(257), target, acts[at+len(header):], 'r')
-    P('UM.header').branch({0:'UM.header.emit'},'RET',[('RLD','um_unit')])
+    P('UM.header').branch({0:'UM.header.emit'},'UM.header.unit',[('RLD','um_unit')])
+    P('UM.header.unit').o('.unit 2\n').ret()
     P('UM.header.emit').o(E.HEADER).ret()
     hook('FN.def1', 'UM.function')
     P('UM.function').branch({0:'RET'},'UM.function.static',[('RLD','um_unit')])
@@ -52,9 +58,14 @@ def install(E, P, start, definitions):
     P('UM.extern').branch({0:'UM.extern.emit'},'GV.record',[('RLD','um_decl')])
     P('UM.extern.emit').o('.extern g_').a(('SPAN2','fns','fne')).o('\n').a(('LDI','um_decl',1),('STX','um_id',DECL,'um_decl')).goto('GV.record')
     P('UM.definition').a(('LDI','um_defined',2),('STX','um_id',DECL,'um_defined')).branch({0:storage},'UM.global.static',[('RLD','um_unit')])
-    P('UM.global.static').branch({1:storage},'UM.global.duplicate',[('CMPI','fstat_cur',1)])
+    P('UM.global.static').branch({1:storage},'UM.global.duplicate',[('CMPI','um_static',1)])
     P('UM.global.duplicate').branch({2:storage},'UM.global.emit',[('RLD','um_decl')])
     P('UM.global.emit').o('.global g_').a(('SPAN2','fns','fne')).o('\n').goto(storage)
+    record = original('GV.record')
+    P('GV.record').branch({0:record},'UM.gdef.test',[('RLD','um_unit')])
+    P('UM.gdef.test').branch({1:'UM.gdef.static'},record,[('CMPI','tk',E.TK['='])])
+    P('UM.gdef.static').branch({1:record},'UM.gdef.emit',[('CMPI','um_static',1)])
+    P('UM.gdef.emit').o('.gdef g_').a(('SPAN2','fns','fne')).o('\n').goto(record)
     end = original('END')
     P('END').branch({0:end},'UM.end',[('RLD','um_unit')])
     P('UM.end').a(('LDX','t','mnid',E.FND)).branch({1:'UM.entry'},'UM.init',[('CMPI','t',1)])

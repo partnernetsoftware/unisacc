@@ -126,17 +126,21 @@ int tb_name(long id) {
     if (id < 0 || id >= tb_nn) return tb_fail();
     return tb_bytes(tb_file + tb_name_at[id], tb_name_len[id]);
 }
-int tb_records(int from, int to, int expected) {
-    int p; long n; int i; int kind; long id; int op; char *shape; int j; int nr; int ri; int packed[4]; int tag;
+int tb_records(int from, int to, int expected, int minor) {
+    int p; long n; int i; int kind; long id; int op; char *shape; int j; int nr; int ri; int packed[4]; int tag; int unit;
     p = from; n = tb_uint(tb_file, &p, to);
     if (tb_bad || n < 0 || n != expected || n > MAXOUT) return tb_fail();
-    i = 0;
+    i = 0; unit = 0;
     while (i < n && !tb_bad) {
         if (p >= to) return tb_fail();
         kind = tb_file[p] & 255; p = p + 1;
-        if (kind == TB_RECORD_GLOBAL || kind == TB_RECORD_EXTERN) {
+        if (kind == TB_RECORD_UNIT) {
+            if (minor != 1 || i != 0 || tb_uint(tb_file, &p, to) != 2 || tb_bad) return tb_fail();
+            unit = 1; tb_word(".unit 2\n");
+        } else if (kind == TB_RECORD_GLOBAL || kind == TB_RECORD_EXTERN || kind == TB_RECORD_GDEF) {
+            if (kind == TB_RECORD_GDEF && (!unit || minor != 1)) return tb_fail();
             id = tb_uint(tb_file, &p, to);
-            tb_word(kind == TB_RECORD_GLOBAL ? ".global " : ".extern "); tb_name(id); tb_put(10);
+            tb_word(kind == TB_RECORD_GLOBAL ? ".global " : (kind == TB_RECORD_EXTERN ? ".extern " : ".gdef ")); tb_name(id); tb_put(10);
         } else if (kind < 3) {
             id = tb_uint(tb_file, &p, to);
             if (kind == 0) { tb_name(id); tb_word(":\n"); }
@@ -188,16 +192,17 @@ int tb_records(int from, int to, int expected) {
         } else return tb_fail();
         i = i + 1;
     }
-    if (p != to || tb_bad) return tb_fail();
+    if (p != to || tb_bad || (minor == 1 && !unit)) return tb_fail();
     return 1;
 }
 int tb_decode(int bytes, int target, int force_origin) {
-    int n; int p; int i; int kind; int flags; long off; long len; long count;
+    int n; int p; int i; int kind; int flags; long off; long len; long count; int minor;
     int sec_at[5]; int sec_len[5]; int sec_count[5]; int expected;
     char digest[32];
     tb_bad = 0; nout = 0;
     if (bytes < 136 || !tb_same(tb_file, "UTAPEBIN", 8)) return tb_fail();
-    if (tb_le(tb_file + 8, 2) != 1 || tb_le(tb_file + 10, 2) != 0
+    minor = tb_le(tb_file + 10, 2);
+    if (tb_le(tb_file + 8, 2) != 1 || (minor != 0 && minor != 1)
        || tb_le(tb_file + 12, 2) != 1 || tb_le(tb_file + 14, 2) != 0
        || tb_le(tb_file + 16, 4) != 0 || tb_le(tb_file + 24, 4) != 64) return tb_fail();
     n = tb_le(tb_file + 20, 4);
@@ -227,7 +232,7 @@ int tb_decode(int bytes, int target, int force_origin) {
     if (!tb_pool(tb_file, sec_at[1], sec_at[1] + sec_len[1], sec_count[1],
                  tb_const_at, tb_const_len, &tb_nc, 0)) return 0;
     if (n == 4 && (sec_len[3] != 32 || sec_count[3] != 1)) return tb_fail();
-    return tb_records(sec_at[2], sec_at[2] + sec_len[2], sec_count[2]);
+    return tb_records(sec_at[2], sec_at[2] + sec_len[2], sec_count[2], minor);
 }
 int tb_read(char *path, int target, int force_origin) {
     int fd; int n; int got;

@@ -8,7 +8,7 @@ target chosen by the C front end, while the tape instruction set stays neutral.
 import hashlib
 import struct
 
-from .tape import LINK_RECORDS, REGS, SHAPE, Tape, parse
+from .tape import LINK_RECORDS, UNIT_RECORD, REGS, SHAPE, Tape, parse
 
 
 MAGIC = b"UTAPEBIN"
@@ -145,6 +145,8 @@ def _collect(records):
 
     for rec in records:
         kind = rec[0]
+        if kind == "unit":
+            continue
         if kind in ("label", "str", "bss", *LINK_RECORDS):
             name(rec[1])
             if kind == "str":
@@ -166,7 +168,12 @@ def _encode_records(records, name_idx, const_idx):
     out = bytearray(_u(len(records)))
     for rec in records:
         kind = rec[0]
-        if kind in LINK_RECORDS:
+        if kind == "unit":
+            if rec != ("unit", 2):
+                raise ValueError("tapebin: unsupported unit version")
+            out.append(UNIT_RECORD)
+            out.extend(_u(2))
+        elif kind in LINK_RECORDS:
             out.append(LINK_RECORDS[kind])
             out.extend(_u(name_idx[_name_bytes(rec[1])]))
         elif kind == "label":
@@ -223,6 +230,11 @@ def encode(tape, origin_target=None, source_sha=None):
     if source_sha is not None and len(source_sha) != 32:
         raise ValueError("tapebin: SOURCE_SHA must be 32 bytes")
     records = tape.records
+    unit = bool(records and records[0] == ("unit", 2))
+    if any(rec[0] in ("unit", "gdef") for rec in records) and not unit:
+        raise ValueError("tapebin: unit marker must be first")
+    if sum(rec[0] == "unit" for rec in records) > 1:
+        raise ValueError("tapebin: duplicate unit marker")
     names, consts, name_idx, const_idx = _collect(records)
     sections = [(1, _put_pool(names), len(names)),
                 (2, _put_pool(consts), len(consts)),
@@ -242,20 +254,27 @@ def encode(tape, origin_target=None, source_sha=None):
     body = bytes(directory + payload)
     if len(body) > MAX_FILE:
         raise ValueError("tapebin: file too large")
-    head = HEADER.pack(MAGIC, 1, 0, 1, 0, 0, len(sections), 64,
+    head = HEADER.pack(MAGIC, 1, 1 if unit else 0, 1, 0, 0, len(sections), 64,
                        hashlib.sha256(body).digest(), origin_target)
     return head + body
 
 
-def _decode_records(data, count, names, consts):
+def _decode_records(data, count, names, consts, minor):
     reader = _Reader(data)
     n = reader.uint()
     if n != count or n > len(data):
         raise ValueError("tapebin: record count mismatch")
     records = []
-    for _ in range(n):
+    for row in range(n):
         kind = reader.byte()
+        if kind == UNIT_RECORD:
+            if minor != 1 or row != 0 or reader.uint() != 2:
+                raise ValueError("tapebin: invalid unit version")
+            records.append(("unit", 2))
+            continue
         if kind in LINK_RECORDS.values():
+            if kind == LINK_RECORDS["gdef"] and minor != 1:
+                raise ValueError("tapebin: .gdef requires minor 1")
             idx = reader.uint()
             if idx >= len(names):
                 raise ValueError("tapebin: name index out of range")
@@ -313,6 +332,10 @@ def _decode_records(data, count, names, consts):
                     args.append(names[idx])
         records.append(("insn", op, tuple(args)))
     reader.done()
+    if minor == 1 and (not records or records[0] != ("unit", 2)):
+        raise ValueError("tapebin: missing unit marker")
+    if any(rec[0] == "gdef" for rec in records) and (not records or records[0] != ("unit", 2)):
+        raise ValueError("tapebin: .gdef needs unit marker")
     return records
 
 
@@ -321,7 +344,7 @@ def decode(blob):
     if len(blob) < 64 or len(blob) > MAX_FILE:
         raise ValueError("tapebin: invalid file length")
     magic, major, minor, opset, flags, target, n, hlen, digest, origin = HEADER.unpack_from(blob)
-    if (magic, major, minor, opset, flags, target, hlen) != (MAGIC, 1, 0, 1, 0, 0, 64) or origin > 6:
+    if (magic, major, opset, flags, target, hlen) != (MAGIC, 1, 1, 0, 0, 64) or minor not in (0, 1) or origin > 6:
         raise ValueError("tapebin: unsupported header")
     if n < 3 or n > 5 or 64 + n * ENTRY.size > len(blob):
         raise ValueError("tapebin: invalid section count")
@@ -345,7 +368,7 @@ def decode(blob):
     consts = _get_pool(*sections[2])
     if len(set(consts)) != len(consts):
         raise ValueError("tapebin: duplicate constant")
-    records = _decode_records(*sections[3], [x.decode("latin-1") for x in names], consts)
+    records = _decode_records(*sections[3], [x.decode("latin-1") for x in names], consts, minor)
     tape = Tape()
     tape.records = records
     tape.origin_target = origin

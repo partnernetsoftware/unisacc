@@ -36,6 +36,16 @@ def check(text):
 
 def main():
     check('.global exported\n.extern imported\nexported:\n  ret\n')
+    unit_text = '.unit 2\n.global g_a\n.bss g_a 4\n.gdef g_a\n.extern g_b\n'
+    check(unit_text)
+    for invalid in ('.gdef g_a\n', '.unit 1\n', '.global g_a\n.unit 2\n',
+                    '.unit 2\n.unit 2\n'):
+        try:
+            encode(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid unit tape accepted: ' + invalid)
     check('L:\n  nop\n.bss z 24\n.str a "x"\nL:\n.str a "y"\n  call L\n')
     known = list(knownfail_read("exec/c/chain.knownfail"))
     files = sorted(pathlib.Path("examples").glob("*.c")) + [pathlib.Path("tests/c") / name for name in known]
@@ -51,6 +61,13 @@ def main():
         ref = base / "ref"
         subprocess.run(["./tests/build_ref.sh", str(base / "ref.c"), str(ref)],
                        check=True, timeout=30)
+        unit_plain = base / 'unit.tape'
+        unit_binary = base / 'unit.tapebin'
+        unit_plain.write_text(unit_text)
+        subprocess.run([str(ref), str(unit_plain), '--tapebin', '-o', str(unit_binary)],
+                       check=True, timeout=20)
+        if unit_binary.read_bytes() != encode(unit_text):
+            raise AssertionError('C/Python unit record encoding differs')
         all_sources = sorted(pathlib.Path("examples").glob("*.c")) + sorted(pathlib.Path("tests/c").glob("*.c"))
         if not all_sources:
             raise AssertionError("empty full probe set")

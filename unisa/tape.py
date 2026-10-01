@@ -22,7 +22,8 @@ STACK_TOP = 0x1000000
 DATA_BASE = 0x100
 
 # op -> operand shape.  r=register  i=immediate  L=label  s=symbol-or-imm
-LINK_RECORDS = {"global": 4, "extern": 5}
+LINK_RECORDS = {"global": 4, "extern": 5, "gdef": 7}
+UNIT_RECORD = 6
 
 SHAPE = {
     "imm":     ("r", "i"),
@@ -160,7 +161,7 @@ class Tape:
             out.append("  " + _fmt(ins))
         for nm in sorted(rev.get(len(self.code), [])):
             out.append("%s:" % nm)
-        if any(rec[0] in LINK_RECORDS for rec in self.records):
+        if any(rec[0] in LINK_RECORDS or rec[0] == "unit" for rec in self.records):
             return self.to_canonical_text()
         return "\n".join(out) + "\n"
 
@@ -169,7 +170,9 @@ class Tape:
         out = []
         for record in self.records:
             kind = record[0]
-            if kind in LINK_RECORDS:
+            if kind == "unit":
+                out.append(".unit %d" % record[1])
+            elif kind in LINK_RECORDS:
                 out.append(".%s %s" % (kind, record[1]))
             elif kind == "label":
                 out.append(record[1] + ":")
@@ -279,10 +282,17 @@ def parse(text):
             else:
                 t.records[-1] = record
             continue
-        if line.split()[0] in (".global", ".extern"):
+        if line.split()[0] == ".unit":
+            if line.split() != [".unit", "2"] or t.records:
+                raise ValueError("line %d: malformed unit version record" % lineno)
+            t.records.append(("unit", 2))
+            continue
+        if line.split()[0] in (".global", ".extern", ".gdef"):
             parts = line.split()
             if len(parts) != 2 or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9.$]*", parts[1]):
                 raise ValueError("line %d: malformed linkage record" % lineno)
+            if parts[0] == ".gdef" and (not t.records or t.records[0] != ("unit", 2)):
+                raise ValueError("line %d: .gdef needs .unit 2" % lineno)
             t.records.append((parts[0][1:], parts[1]))
             continue
         if line.startswith(".str "):

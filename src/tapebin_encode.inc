@@ -4,7 +4,7 @@
 #define TB_CONSTCAP 4194304
 char tb_constdata[TB_CONSTCAP]; int tb_constused;
 char tb_lit[1048576];
-int tb_rec_count; int tb_outpos;
+int tb_rec_count; int tb_outpos; int tb_minor;
 
 int tb_emit(int c) {
     if (tb_outpos >= MAXOUT) return tb_fail();
@@ -118,9 +118,9 @@ int tb_literal(int start, int end) {
 }
 int tb_text_pass(int pass, int textlen) {
     int line; int end; int next; int p; int q; int op; int i; int idx; int name; int regs[8]; int nr;
-    int quoted; int escape;
+    int quoted; int escape; int unit; int gdef;
     unsigned long values[8]; int neg[8]; int isname[8]; int regcount; char *shape;
-    line = 0; tb_rec_count = 0;
+    line = 0; tb_rec_count = 0; unit = 0; gdef = 0;
     while (line < textlen && !tb_bad) {
         end = line; while (end < textlen && out[end] != 10) end = end + 1;
         next = end + 1;
@@ -138,9 +138,19 @@ int tb_text_pass(int pass, int textlen) {
         p = line; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
         if (p == end) { line = next; continue; }
         tb_rec_count = tb_rec_count + 1;
-        if (end - p >= 8 && (tb_wsame(out + p, ".global", 7) || tb_wsame(out + p, ".extern", 7)) && (out[p + 7] == 32 || out[p + 7] == 9)) {
-            int rk; rk = out[p + 1] == 103 ? TB_RECORD_GLOBAL : TB_RECORD_EXTERN;
-            p = p + 8; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
+        if (end - p >= 6 && tb_wsame(out + p, ".unit", 5) && (out[p + 5] == 32 || out[p + 5] == 9)) {
+            p = p + 6; while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
+            q = tb_token_end(p, end);
+            if (tb_rec_count != 1 || q - p != 1 || out[p] != 50 || tb_skip(q, end) != end) return tb_fail();
+            unit = 1;
+            if (pass) { tb_emit(TB_RECORD_UNIT); tb_emit_u(2); }
+        } else if (end - p >= 7 &&
+                   ((end - p >= 8 && (tb_wsame(out + p, ".global", 7) || tb_wsame(out + p, ".extern", 7)) && (out[p + 7] == 32 || out[p + 7] == 9)) ||
+                    (tb_wsame(out + p, ".gdef", 5) && (out[p + 5] == 32 || out[p + 5] == 9)))) {
+            int rk; rk = out[p + 1] == 103 && out[p + 2] == 108 ? TB_RECORD_GLOBAL :
+                         (out[p + 1] == 101 ? TB_RECORD_EXTERN : TB_RECORD_GDEF);
+            p = p + (rk == TB_RECORD_GDEF ? 6 : 8);
+            while (p < end && (out[p] == 32 || out[p] == 9)) p = p + 1;
             q = tb_token_end(p, end);
             i = q; while (i < end && (out[i] == 32 || out[i] == 9)) i = i + 1;
             if (q == p || i != end) return tb_fail();
@@ -151,6 +161,7 @@ int tb_text_pass(int pass, int textlen) {
                 i = i + 1;
             }
             name = tb_name_index(p, q - p);
+            if (rk == TB_RECORD_GDEF) gdef = 1;
             if (pass) { tb_emit(rk); tb_emit_u(name); }
         } else if (end - p >= 5 && tb_wsame(out + p, ".str ", 5)) {
             p = p + 5; q = tb_token_end(p, end); name = tb_name_index(p, q - p);
@@ -215,12 +226,15 @@ int tb_text_pass(int pass, int textlen) {
         }
         line = next;
     }
+    if (gdef && !unit) return tb_fail();
+    if (pass && unit != tb_minor) return tb_fail();
+    if (!pass) tb_minor = unit;
     return !tb_bad;
 }
 int tb_encode(int textlen, int origin) {
     int i; int p; int at1; int at2; int at3; int end1; int end2; int nr; char digest[32];
     if (origin < 0 || origin > 6) return 0;
-    tb_bad = 0; tb_nn = 0; tb_nc = 0; tb_constused = 0;
+    tb_bad = 0; tb_nn = 0; tb_nc = 0; tb_constused = 0; tb_minor = 0;
     if (!tb_text_pass(0, textlen)) return 0;
     nr = tb_rec_count; tb_outpos = 64 + 3 * 24;
     at1 = tb_outpos; tb_emit_u(tb_nn);
@@ -237,7 +251,7 @@ int tb_encode(int textlen, int origin) {
     tb_wle(0, 0, 64); /* zero the header before filling its fields */
     tb_emit_bytes("", 0);
     i = 0; while (i < 8) { tb_file[i] = "UTAPEBIN"[i]; i = i + 1; }
-    tb_wle(8, 1, 2); tb_wle(12, 1, 2); tb_wle(20, 3, 4); tb_wle(24, 64, 4); tb_wle(60, origin, 4);
+    tb_wle(8, 1, 2); tb_wle(10, tb_minor, 2); tb_wle(12, 1, 2); tb_wle(20, 3, 4); tb_wle(24, 64, 4); tb_wle(60, origin, 4);
     tb_wle(64, 1, 2); tb_wle(66, 1, 2); tb_wle(68, at1, 8); tb_wle(76, end1 - at1, 8);
     tb_wle(84, tb_nn, 4);
     tb_wle(88, 2, 2); tb_wle(90, 1, 2); tb_wle(92, at2, 8); tb_wle(100, end2 - at2, 8); tb_wle(108, tb_nc, 4);

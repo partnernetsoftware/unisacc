@@ -111,7 +111,8 @@ static void tbc_insn(Buf *b,int op,const uint64_t *v,const int *tag,
 }
 static int tbc_decode(const unsigned char *data,size_t size,int expected,int force,Buf *text){
     if(size<136||size>33554432||memcmp(data,"UTAPEBIN",8))return 1;
-    if(tbc_le(data+8,2)!=1||tbc_le(data+10,2)||tbc_le(data+12,2)!=1||tbc_le(data+14,2)||
+    uint64_t minor=tbc_le(data+10,2);
+    if(tbc_le(data+8,2)!=1||minor>1||tbc_le(data+12,2)!=1||tbc_le(data+14,2)||
        tbc_le(data+16,4)||tbc_le(data+24,4)!=64)return 1;
     uint64_t count=tbc_le(data+20,4),origin=tbc_le(data+60,4);
     if(count<3||count>4||origin>6||64+24*count>size)return 1;
@@ -147,11 +148,17 @@ static int tbc_decode(const unsigned char *data,size_t size,int expected,int for
     }
     TbcReader r={data+at[2],0,length[2],0};uint64_t nr=tbc_u(&r);
     if(r.bad||nr!=items[2]||nr>r.end)goto done;
+    int unit=0;
     for(uint64_t row=0;row<nr;row++){
         if(r.pos>=r.end)goto done;int kind=r.p[r.pos++];
-        if(kind==TB_RECORD_GLOBAL||kind==TB_RECORD_EXTERN){
+        if(kind==TB_RECORD_UNIT){
+            if(minor!=1||row||tbc_u(&r)!=2||r.bad)goto done;
+            unit=1;tbc_put(text,".unit 2\n");
+        }else if(kind==TB_RECORD_GLOBAL||kind==TB_RECORD_EXTERN||kind==TB_RECORD_GDEF){
+            if(kind==TB_RECORD_GDEF&&(!unit||minor!=1))goto done;
             uint64_t id=tbc_u(&r);if(r.bad||id>=items[0])goto done;
-            tbc_put(text,kind==TB_RECORD_GLOBAL?".global ":".extern ");tbc_name(text,names[id],namelen[id]);tbc_put(text,"\n");
+            tbc_put(text,kind==TB_RECORD_GLOBAL?".global ":(kind==TB_RECORD_EXTERN?".extern ":".gdef "));
+            tbc_name(text,names[id],namelen[id]);tbc_put(text,"\n");
         }else if(kind<=2){
             uint64_t id=tbc_u(&r);if(r.bad||id>=items[0])goto done;
             if(kind==0){tbc_name(text,names[id],namelen[id]);tbc_put(text,":\n");}
@@ -186,7 +193,7 @@ static int tbc_decode(const unsigned char *data,size_t size,int expected,int for
         }else goto done;
         if(text->n>33554432)goto done;
     }
-    if(r.bad||r.pos!=r.end)goto done;
+    if(r.bad||r.pos!=r.end||(minor==1&&!unit))goto done;
     bad=0;
 done:
     free(names);free(namelen);free(consts);free(constlen);
