@@ -9,7 +9,12 @@ R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 # R19-0: the queue runs in its own detached worktree at the commit it started
 # on, so commits to main (plans, prd, other agents' work) never reach it.
 W=${QUEUE_WORKTREE:-/tmp/unisacc-queue-$(git rev-parse --short HEAD)}
-if [ ! -d "$W" ]; then git worktree add -q --detach "$W" HEAD || { echo "queue: cannot create worktree $W"; exit 2; }; fi
+if [ ! -d "$W" ]; then
+  git worktree add -q --detach "$W" HEAD || { echo "queue: cannot create worktree $W"; exit 2; }
+  # untracked inputs the gates read: the installed product (comboot writes it;
+  # absent at the start, its appearance invalidated the 0.0.19 queue at 408/415)
+  for f in unisacc.com unisacc.com.build.json; do [ -f "$R/$f" ] && cp -p "$R/$f" "$W/$f"; done
+fi
 cd "$W"
 [ -s "$SEED/unisacc-seed.com" ] || { echo "no $SEED/unisacc-seed.com"; exit 2; }
 [ -x "$UA" ] && [ -s "$D/unisacc-next.com" ] || { echo "missing UA or candidate"; exit 2; }
