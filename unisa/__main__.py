@@ -439,18 +439,31 @@ def cmd_ape(a):
     from .tape import parse as tparse, DATA_BASE
     o = _oracle(a.drive)
 
+    # The six tapes are independent: with --via they are asked for at once
+    # (0.0.18: with the seed as --via, six in a row passed pack-driver's 55 s
+    # bound once the driver grew).  Each answer is still the compiler's own.
+    pending = {}
+    if a.via:
+        # an APE (`MZqFpD=`) cannot be exec'd directly on POSIX (Exec format
+        # error): launch it through sh, as comdemo.py and the six runners do.
+        # The seed -> stage-2 bootstrap (N22) is the first --via that is an APE.
+        via = [a.via]
+        if os.name != "nt":
+            with open(a.via, "rb") as fh:
+                if fh.read(2) == b"MZ":
+                    via = ["sh", a.via]
+        for tg in ("lnx/arm64", "lnx/x86_64", "osx/arm64", "osx/x86_64", "win/arm64", "win/x86_64"):
+            pending[tg] = subprocess.Popen(via + ["-O" + a.olevel, a.file, "-t", tg],
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
     def one(target, stub=b""):
         if a.via:
-            # an APE (`MZqFpD=`) cannot be exec'd directly on POSIX (Exec format
-            # error): launch it through sh, as comdemo.py and the six runners do.
-            # The seed -> stage-2 bootstrap (N22) is the first --via that is an APE.
-            via = [a.via]
-            if os.name != "nt":
-                with open(a.via, "rb") as fh:
-                    if fh.read(2) == b"MZ":
-                        via = ["sh", a.via]
-            r = subprocess.run(via + ["-O" + a.olevel, a.file, "-t", target],
-                               capture_output=True)
+            pr = pending.get(target)
+            if pr is None:
+                pr = subprocess.Popen(via + ["-O" + a.olevel, a.file, "-t", target],
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out_, err_ = pr.communicate()
+            r = subprocess.CompletedProcess(pr.args, pr.returncode, out_, err_)
             if r.returncode != 0:
                 raise SystemExit("%s: %s" % (a.file, r.stderr.decode()[:200]))
             t = tparse(r.stdout.decode("latin-1"))
