@@ -280,3 +280,7 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 - [prd-findings-20260929.md](archive/prd-findings-20260929.md)：§6 实验发现 E-编号全表（论文引用按编号在此解析）。
 
 R17 分开编译格式前提：tape 新增 `.global NAME` / `.extern NAME` 链接属性，tapebin v1 追加记录 kind 4/5（仅名字索引，旧 opcode 与旧字节不变）。参考严格校验并按名字保留声明；prune 遇到属性整份透传，避免跨单元可见定义被删。对象符号/重定位语义由对象后端另行接入，格式接受不代表已可链接。
+
+R17 产品对象路线实施：E3 读取 `\0cli/funit`/`\0cli/object` 资源，单元模式输出链接属性及延后入口；对象布局、符号计划和重定位采集继续在 δ。lower→encoder 需补名字首次出现顺序、链接属性、数据块末端非零前缀、原始单元 tape；不由驱动猜重定位或调用参考对象写出器。先完成 E3 tape 对齐，再 ELF 两架构、Mach-O、COFF，路由拟为 `<os>/<arch>/object/O0|O1|O2`。
+
+R17 产品单元前端首片：`exec/parse2/unitmode.py` 用通用动作实现资源分支、全局/外部声明与入口延后；五个单元 tape 在 C 参考、模拟器、构造网络间逐字节同，plain/locations/warnings/errors/warnings+errors 五变体构造通过。整程序 exec-chain 264 输入：262 equal、2 既有 known、0 bad/lost；E3 全域 net=table 2,308,070 observations。门禁 `exec-unitparse` 已登记；对象写出仍未完成，驱动继续明确拒绝对象输出。

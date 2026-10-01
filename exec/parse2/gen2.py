@@ -899,6 +899,8 @@ def build(locations=False, warnings=False, errors=False):
     start = source_provenance(E, P, start)
     from parenfold import install as parenfold_install
     parenfold_install(E, TIX, locations)
+    from unitmode import install as unitmode_install
+    start = unitmode_install(E, P, start, DEFS)
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
