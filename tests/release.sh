@@ -47,6 +47,23 @@ for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdr
 # gate.sh registers the x86 assembly binding suite only on Darwin.
 # the binding check is four jobs since R12-0 ②; the x86_64 prep step is the one that needs a warm cache
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-x86_64); fi
+# R17-6 E1: the networks these suites build cold took 48 s+ in the first window
+# of every queue (0.0.16: exec-bindprep-arm64 and exec-warningdriver-ua-Wall
+# timed out once each and had to be popped by hand).  Warm them first, one
+# bounded step per invocation (rc 75 like a queue window), never in the queue.
+mkdir -p "$GATE_STATE"
+warm_done=0
+for w in 1 2 3; do
+    [ -f "$GATE_STATE/warm.$w" ] && { warm_done=$w; continue; }
+    case $w in
+        1) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
+        2) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
+        3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1;;
+    esac
+    : > "$GATE_STATE/warm.$w"
+    echo "warm-up $w/3 done (cold model caches built outside the queue)"
+    exit 75
+done
 python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 50 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
 [ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
