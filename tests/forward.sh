@@ -17,6 +17,10 @@ for f in tests/forward/*.c; do
     "$_BOUND" 30 cc -std=c99 -w -o "$T/$b" "$f" || { skip=$((skip+1)); continue; }
     want=$("$_BOUND" 10 "$T/$b" 2>&1); got=$("$_BOUND" 20 "$UA" "$f" 2>&1)
     if [ "$got" = "$want" ]; then ok=$((ok+1)); echo "  ok   $b"; else bad=$((bad+1)); echo "  FAIL $b: got [$got] want [$want]"; fi
+    if [ -n "${MODEL_COM:-}" ]; then
+        got=$("$_BOUND" 40 sh "$MODEL_COM" "$f" 2>&1)
+        if [ "$got" = "$want" ]; then ok=$((ok+1)); echo "  ok   $b (product)"; else bad=$((bad+1)); echo "  FAIL $b (product): got [$got] want [$want]"; fi
+    fi
 done
 printf 'int no_such_host_function_xyz(int);\nint main(void){ return no_such_host_function_xyz(1); }\n' > "$T/missing.c"
 m=$("$_BOUND" 20 "$UA" "$T/missing.c" 2>&1); rc=$?

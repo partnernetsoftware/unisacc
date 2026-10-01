@@ -144,6 +144,41 @@ static Buf asmbuf;
 int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)p[k],0); return 0; }
 #define AT_PRODUCT 1
 #include "../../src/asmtext.c"
+/* 0.0.19 R19-10: -run on macOS forwards prototyped undefined functions to the
+   host libc.  E3 (with \0cli/run-forward) appends a USLFW1 side-car naming
+   them with their USLSIG3 signatures; the stub text is src/fwdstub.c's, the
+   same bytes the reference front end writes. */
+#include "forwardsignature.h"
+#include "../../src/fwdstub.c"
+static int fwd_second;                           /* the recompile with the stubs: no side-car */
+static char fwd_path[600];
+static int fwd_sidecar(Buf *in, Buf *tape) {     /* 0: no records (tape set); 1: stubs written; -1: error */
+    size_t at=0,n=(size_t)in->n; const unsigned char *b=in->b; uint64_t tl=0,cnt=0;
+    if (n<7 || memcmp(b,"USLFW1\n",7)) { fputs("unisacc: error: forwarding side-car missing\n",stderr); return -1; }
+    at=7;
+    if (us_fw_u64(b,n,&at,&tl) || us_fw_u64(b,n,&at,&cnt) || tl>n-at) { fputs("unisacc: error: forwarding side-car malformed\n",stderr); return -1; }
+    tape->b=xrealloc(0,tl+1); memcpy(tape->b,b+at,tl); tape->n=(int)tl; at+=tl;
+    if (cnt==0) return 0;
+    nfwdsrc=0;
+    for (uint64_t r=0;r<cnt;r++) {
+        uint64_t nl=0,sl=0;
+        if (us_fw_u64(b,n,&at,&nl) || nl>n-at || nl>1024) return -1;
+        const char *nm=(const char *)b+at; at+=nl;
+        if (us_fw_u64(b,n,&at,&sl) || sl>n-at) return -1;
+        USForwardSig sig; memset(&sig,0,sizeof sig);
+        int bad=us_forward_sig_decode(b+at,(size_t)sl,nm,(size_t)nl,&sig); at+=sl;
+        if (bad || sig.variadic || sig.structbyval || sig.ret.structbyval || sig.n>32) {
+            fprintf(stderr,"unisacc: error: undefined function '%.*s'\n",(int)nl,nm); return -1;
+        }
+        int kk[33],ww[33],uu[33];
+        for (int k=0;k<sig.n;k++) { kk[k]=sig.args[k].kind; ww[k]=sig.args[k].width; uu[k]=0; }
+        fwd_emit((char *)nm,(int)nl,sig.n,kk,ww,uu,sig.ret.isvoid,sig.ret.kind,sig.ret.width,sig.ret.uns);
+    }
+    snprintf(fwd_path,sizeof fwd_path,"/tmp/unisacc-forward-%lx.c",(unsigned long)(uintptr_t)&at);
+    FILE *f=fopen(fwd_path,"wb"); if (!f) return -1;
+    int werr=fwrite(fwdsrc,1,nfwdsrc,f)!=(size_t)nfwdsrc; werr|=fclose(f)!=0;
+    return werr ? -1 : 1;
+}
 static int product_view(int argc,char **argv) {
     int dis=argv[1][0]=='o';
     if (dis ? (argc!=4 || strcmp(argv[2],"-d")) : argc!=3) { fputs(dis ? "usage: unisacc objdump -d FILE.o\n" : "usage: unisacc nm FILE.o\n",stderr); return 2; }
@@ -453,6 +488,14 @@ int main(int argc, char **argv) {
     ARGRESOURCE(NRI,"\0cli/source",srcres); NRI++;
     ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
+#ifdef __APPLE__
+    static const unsigned char fwd_one=1;
+    int fwdwant = runit && !fwd_second && nsources==1 && !tape_input && !linking;
+    if (fwdwant) { cli[NRI].name=(const unsigned char *)"\0cli/run-forward"; cli[NRI].n=16; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
+#else
+    int fwdwant = 0;
+#endif
+    int fwd_restart = 0;
     Buf objres={0}, funitres={0};
     if (objwant) bput(&objres,1,0);
     if (funit) bput(&funitres,1,0);
@@ -498,8 +541,25 @@ int main(int argc, char **argv) {
         }
     }
     free(in.at); in.at=0; /* Framing positions are not input to model inference. */
-    if (!rc && !(tape_input && mode==2))
+    if (!rc && !(tape_input && mode==2)) {
+        if (fwdwant) {
+            rc = runroute_range(route,NULL,"e3",&in,src);
+            if (!rc) {
+                Buf tape={0}; int fr=fwd_sidecar(&in,&tape);
+                if (fr<0) rc=1;
+                else if (fr==0) { free(in.b); in=tape; rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* the stage after e3, as for tape input */
+                else fwd_restart=1;
+            }
+        } else
         rc = tape_input ? runroute_from(route,level ? "e4" : "prune",&in,src) : runroute(route,&in,src);
+    }
+    if (!rc && fwd_restart) {                    /* compile again with the stubs as the last unit */
+        unpackage(); RI=0; NRI=0;
+        char **av=xrealloc(0,(argc+2)*sizeof(char *)); int j=0,put=0;
+        for (int i=0;i<argc;i++) { av[j++]=argv[i]; if (!put && argv[i]==src) { av[j++]=fwd_path; put=1; } }
+        av[j]=0; fwd_second=1;
+        return main(j,av);
+    }
     MemoryImage plan; MemoryMap mapping;
     if (!rc && runit) {
         snprintf(route,sizeof route,"%s/memory",target);

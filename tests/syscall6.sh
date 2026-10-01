@@ -12,6 +12,7 @@ ok=0; bad=0; skip=0
 chk() { if [ "$2" = "gate ok" ]; then ok=$((ok+1)); echo "  ok   $1"; else bad=$((bad+1)); echo "  FAIL $1: [$2]"; fi; }
 f=tests/syscall6/write.c
 chk "run (host)" "$("$_BOUND" 20 "$UA" "$f" 2>&1)"
+[ -n "${MODEL_COM:-}" ] && chk "run (host, product)" "$("$_BOUND" 40 sh "$MODEL_COM" "$f" 2>&1)"
 if [ "$(uname -s)" = Darwin ]; then
     "$_BOUND" 20 "$UA" "$f" -b osx/x86_64 -o "$T/x" && codesign -f -s - "$T/x" >/dev/null 2>&1
     chk "osx/x86_64 (Rosetta)" "$("$_BOUND" 10 "$T/x" 2>&1)"
