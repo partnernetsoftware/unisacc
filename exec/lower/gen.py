@@ -13,8 +13,8 @@ from data import install
 args=sys.argv[2:]
 full='--full' in args
 target=('win' if '--win' in args else 'osx' if '--osx' in args else 'lnx')+'/'+('arm64' if '--arm64' in args else 'x86_64')
-if len(sys.argv)<2 or len(args)!=len(set(args)) or any(a not in ('--full','--arm64','--osx','--win') for a in args):
-    sys.exit("usage: gen.py OUT.json [--full] [--arm64] [--osx|--win]")
+if len(sys.argv)<2 or len(args)!=len(set(args)) or any(a not in ('--full','--arm64','--osx','--win','--object') for a in args):
+    sys.exit("usage: gen.py OUT.json [--full] [--arm64] [--osx|--win] [--object]")
 if '--win' in args and '--osx' in args:
     sys.exit("choose one OS")
 install(E,code_start="C.prelude" if full else "H.code",target=target)
@@ -23,6 +23,9 @@ if full:
     install_code(E,arch=target.split("/")[1],os_=target.split("/")[0])
 from finite_rules import install as install_rules
 install_rules(E.g, pathlib.Path(__file__).parent, 'code-shell', section='data-end')
+if '--object' in args:
+    from objectfacts import install as install_objectfacts
+    install_objectfacts(E)
 E.g.finish()
 d={'start':'START','states':{n:[m,{str(k):v for k,v in row.items()}] for n,(m,row) in E.g.st.items()},'seqs':[list(map(list,s)) for s in E.g.seqs]}
 pathlib.Path(sys.argv[1]).write_text(json.dumps(d,separators=(',',':')))

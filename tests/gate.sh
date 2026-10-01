@@ -114,6 +114,8 @@ job exec-pp-pragmas python3 ./exec/pp/pragmacheck.py
 job exec-pploc python3 ./exec/pp/locationcheck.py              # source-position metadata from actual preprocessing
 job exec-lexpos python3 ./exec/lex/positioncheck.py             # token offsets against reference tpos
 job exec-lexloc python3 ./exec/lex/locationcheck.py             # E2/E1 location envelope
+job exec-objectfacts python3 ./tests/objectfactscheck.py       # object tape facts in delta
+job exec-elfobject python3 ./tests/elfobjectdeltacheck.py        # independent ET_REL layout oracle
 job exec-unitparse sh ./tests/unitparsecheck.sh              # separate-unit delta and network parity
 job exec-parseloc python3 ./exec/parse2/locationcheck.py         # E3 retained maps and tape parity
 job exec-diag python3 ./exec/parse2/diagnosticcheck.py           # actual reference diagnostic rendering

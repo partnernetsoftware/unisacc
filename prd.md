@@ -284,3 +284,5 @@ R17 分开编译格式前提：tape 新增 `.global NAME` / `.extern NAME` 链�
 R17 产品对象路线实施：E3 读取 `\0cli/funit`/`\0cli/object` 资源，单元模式输出链接属性及延后入口；对象布局、符号计划和重定位采集继续在 δ。lower→encoder 需补名字首次出现顺序、链接属性、数据块末端非零前缀、原始单元 tape；不由驱动猜重定位或调用参考对象写出器。先完成 E3 tape 对齐，再 ELF 两架构、Mach-O、COFF，路由拟为 `<os>/<arch>/object/O0|O1|O2`。
 
 R17 产品单元前端首片：`exec/parse2/unitmode.py` 用通用动作实现资源分支、全局/外部声明与入口延后；五个单元 tape 在 C 参考、模拟器、构造网络间逐字节同，plain/locations/warnings/errors/warnings+errors 五变体构造通过。整程序 exec-chain 264 输入：262 equal、2 既有 known、0 bad/lost；E3 全域 net=table 2,308,070 observations。门禁 `exec-unitparse` 已登记；对象写出仍未完成，驱动继续明确拒绝对象输出。
+
+R17 对象事实接口首片：对象专用 lower 构造开关 `--object` 保留原单元 tape（十六进制运输）、C tape 名字首次出现顺序与链接位，输出 `@obj_name`/`@obj_tape`/`@obj_nzend`；非零数据块末端与镜像最后非零字节明确分开。接口仍未接对象编码器，不表示产品 -c 可用。ELF 写出 δ 独立接收符号/重定位计划，独立结构打包 oracle 核对布局；后续接入实际计划再验参考对象字节。
