@@ -268,7 +268,7 @@ unisa/            the Python seed: gold tables, weight construction, reference f
 weights/          the constructed weights (built.uns2) and the tables as data (gold/*.tsv)
 iterate/          development tools in C (weight constructor, kernel-data generator); not the product
 tests/            the suites (differential vs cc, native runs, self-hosting, closure, corpora)
-prd.md            the specification and the measured log
+prd.md            current product state, architecture, roadmap and history index
 ```
 
 Current design and status are in [prd §0.3](prd.md#pipeline-design); older
