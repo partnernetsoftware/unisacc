@@ -2251,7 +2251,8 @@ int pf_call(int t) {
         isname(t, "__unlink", 8) || isname(t, "__rename", 8) ||
         isname(t, "__ioctl", 7) || isname(t, "__fstat", 7) || isname(t, "__stat", 6) ||
         isname(t, "__lstat", 7) || isname(t, "__fcntl", 7) || isname(t, "__mkdir", 7) ||
-        isname(t, "__chmod", 7) || isname(t, "__poll", 6) || isname(t, "__ppoll", 7)) {
+        isname(t, "__chmod", 7) || isname(t, "__poll", 6) || isname(t, "__ppoll", 7) ||
+        isname(t, "__ftruncate", 11) || isname(t, "__gettimeofday", 14)) {
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {

@@ -57,6 +57,13 @@ static int isatty(int __u_fd) {               /* a terminal answers the attribut
 }
 #endif
 #endif
+#if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_ftruncate)
+static int ftruncate(int __u_fd, off_t __u_len) {   /* R18-5 (kilo saves through it) */
+    long __u_r; __u_r = __ftruncate(__u_fd, (long)__u_len, 0);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
+    return 0;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlink
 static int unlink(const char *__u_path) {
     long __u_r; __u_r = __unlink((char *)__u_path);

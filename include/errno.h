@@ -13,6 +13,7 @@ static int errno = 0;
 #define ENOMEM  12
 #define EACCES  13
 #define EEXIST  17
+#define ENOTTY  25
 #define EINVAL  22
 #define ENOSPC  28
 #define EDOM    33

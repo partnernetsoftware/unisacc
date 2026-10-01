@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 _BOUND=$(cd "$(dirname "$0")/.." && pwd)/tests/bound
 _BOUND=$("$_BOUND" --helper) || exit 2
 # R18-10: host-capability headers (sys/stat.h, fcntl.h, poll.h, termios.h,

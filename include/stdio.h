@@ -1012,6 +1012,7 @@ static char *strerror(int __u_e) {
     if (__u_e == 13) return "Permission denied";
     if (__u_e == 17) return "File exists";
     if (__u_e == 22) return "Invalid argument";
+    if (__u_e == 25) return "Inappropriate ioctl for device";
     if (__u_e == 28) return "No space left on device";
     if (__u_e == 33) return "Numerical argument out of domain";
     if (__u_e == 34) return "Numerical result out of range";
@@ -1026,4 +1027,31 @@ static void perror(const char *__u_s) {
 }
 #endif
 
+/* getline (POSIX 2008), 0.0.18 R18-5: the line with its newline, the buffer
+   grown with realloc; -1 at end of file with nothing read. */
+#if !__UNISA_FTRIM_LIBC || __UN_getline
+#include <stdlib.h>
+static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
+    size_t __u_n; int __u_c; char *__u_p;
+    if (__u_line == NULL || __u_cap == NULL) { errno = EINVAL; return -1; }
+    if (*__u_line == NULL || *__u_cap == 0) {
+        __u_p = (char *)realloc(*__u_line, 128); if (__u_p == NULL) { errno = ENOMEM; return -1; }
+        *__u_line = __u_p; *__u_cap = 128;
+    }
+    __u_n = 0;
+    while (1) {
+        __u_c = fgetc(__u_f);
+        if (__u_c == EOF) break;
+        if (__u_n + 2 > *__u_cap) {
+            __u_p = (char *)realloc(*__u_line, *__u_cap * 2); if (__u_p == NULL) { errno = ENOMEM; return -1; }
+            *__u_line = __u_p; *__u_cap = *__u_cap * 2;
+        }
+        (*__u_line)[__u_n] = (char)__u_c; __u_n = __u_n + 1;
+        if (__u_c == 10) break;
+    }
+    if (__u_n == 0) return -1;
+    (*__u_line)[__u_n] = 0;
+    return (long)__u_n;
+}
+#endif
 #endif

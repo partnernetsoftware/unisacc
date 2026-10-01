@@ -18,6 +18,7 @@ typedef int sig_atomic_t;
 #define SIGFPE  8
 #define SIGSEGV 11
 #define SIGTERM 15
+#define SIGWINCH 28                 /* same number on Linux and macOS; recorded, never delivered (above) */
 #define _UNISA_NSIG 32
 static void (*_unisa_sig[_UNISA_NSIG])(int);
 

@@ -54,6 +54,9 @@ SYSCALLS = {
     "poll":          (7, None, 230, None),    # lnx arm has no poll: the header uses ppoll there
     "ppoll":         (271, 73, None, None),
     "getdirentries64": (None, None, 344, None),   # osx directory records (readdir)
+    # 0.0.18 R18-5: kilo (realprog) truncates the file it saves
+    "ftruncate":     (77, 46, 201, None),
+    "gettimeofday":  (96, 169, 116, None),    # time(): macOS has no clock_gettime syscall; xnu fills tv, returns 0
 }
 
 SYSOPS = tuple(SYSCALLS.keys())                                        # 22
