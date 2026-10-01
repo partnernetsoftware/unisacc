@@ -3,7 +3,7 @@
 A C99 compiler for six targets -- {Linux, macOS, Windows} x {x86-64,
 arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
-file, `unisacc.com`. Toolchain status (0.0.17): `-c -b os/arch` writes a
+file, `unisacc.com`. Toolchain status (0.0.18): `-c -b os/arch` writes a
 relocatable object in the target's own format -- ELF, Mach-O or COFF -- that the
 system linkers (GNU ld, lld, ld64, lld-link) accept, and that may read data
 symbols a C compiler defined; `-c -b os/arch -funit` writes a *unit* object for
@@ -15,7 +15,7 @@ Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64` writes that object as GNU assembly
 (AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
 assembles it -- or hand-written code in the same subset -- back into the
 identical object; assembly text for Mach-O and COFF is 0.0.19. The design and the back-end facts behind it are in
-[docs/toolchain.md](docs/toolchain.md); the plan in [archive/plans/v0.0.17.md](archive/plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+[docs/toolchain.md](docs/toolchain.md); the plan in [plans/v0.0.18.md](plans/v0.0.18.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
