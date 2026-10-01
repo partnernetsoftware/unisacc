@@ -89,6 +89,13 @@ job fat-3       ./tests/fat.sh $(echo "$FATC" | awk 'NR%3==0')
 job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done
 for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
+# R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
+# regressions found after 0.0.16's local queue was green came from here
+# (ccrun8: a Python-route bit-field value; opt-run1: c-testsuite 00204).
+CCRUNP=$(ls examples/*.c tests/c/*.c | grep -v '/b_malloc\.c$')
+for k in 1 2 3 4 5 6 7 8; do job ccrun-$k CCRUN_SHARD=1 ./tests/ccrun.sh $(echo "$CCRUNP" | awk -v k=$k 'NR%8==k%8'); done
+job ccrun-malloc CCRUN_SHARD=1 ./tests/ccrun.sh tests/c/b_malloc.c
+for k in 1 2 3 4 5 6 7 8; do job opt-run-$k OPT_PART=run SHARD=$k/8 ./tests/opt.sh; done
 # The fixture directory suite (tests/fb12/, driver tests/fb12multi.sh) lives in
 # the --com block only: it needs an executable compiler, and the default route
 # here is `python3 -m unisa`, which is a command rather than a file.  The
