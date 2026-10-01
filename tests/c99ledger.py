@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""C99 clause ledger gate (plans/v0.0.14.md R14-6).
+"""C99 clause ledger gate (archive/plans/v0.0.14.md R14-6).
 
 tests/c99/clauses.tsv has one row per normative subclause of ISO/IEC 9899:1999
 + TC1-TC3 (WG14 N1256): clause, title, part (env/lang/lib/annex), status

@@ -43,7 +43,7 @@
 
 | 主题 | 条目 |
 |---|---|
-| tapebin v1 格式与门禁 | plans/v0.0.14.md R14-7 落点 A |
+| tapebin v1 格式与门禁 | archive/plans/v0.0.14.md R14-7 落点 A |
 | 验证器（可达性、栈平衡、权限） | prd FX-1；v0.1.x 探索区 |
 | tape → wasm 第 7 目标 | prd FX-3；plans/v0.1.x.md v0.1.3 及以后 |
 | 运行时安全模式、检查器 | plans/v0.1.x.md v0.1.3；research/paper-d-intent.md |
