@@ -305,7 +305,7 @@ int ec(int c) {
    every emitted byte passes through -- so no tape mnemonic in this file is
    a hand-made choice.  The recipe -> mnemonic step afterwards is spelling
    (RECIPE_OP on the Python side), not a decision. */
-int nask[16];
+int nask[NSTAGE];
 
 /* The oracle's answers come from DENSE [J1]: every answer of every stage,
    computed when the kernel is emitted BY RUNNING the constructed net over
@@ -318,6 +318,9 @@ int nask[16];
    every ask ([A-33] stages.sh and `-c -v` read it). */
 int inf(int st, int *key, int head) {
     int f; int m; int x; int v;
+    if (st < 0 || st >= NSTAGE) {
+        __write(2, "oracle: stage outside domain\n", 29); __exit(1);
+    }
     nask[st] = nask[st] + 1;
     m = STAGE_M[st];
     if (head < 0 || head >= STAGE_NH[st]) {
