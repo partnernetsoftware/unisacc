@@ -75,7 +75,10 @@ def check():
         proc = subprocess.run(['bash', 'tests/all.sh', '--suite', 'native1'],
                               cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
         assert proc.returncode == 0, proc.stderr
+        # all.sh also calls `knownfail.py keys` through the faked python3 (0a8d265);
+        # only bound.py dispatches count as jobs.
         selected = [json.loads(line) for line in record.read_text().splitlines()]
+        selected = [args for args in selected if args[:1] == ['tests/bound.py']]
         assert sum('./tests/native.sh' in args for args in selected) == 1
         assert len(selected) == 2, selected  # one readiness check + one job
         record.write_text('')
@@ -83,7 +86,7 @@ def check():
                                '--suite', 'missing-suite'],
                               cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
         assert proc.returncode == 2, proc.returncode
-        assert not record.read_text(), 'unknown selection dispatched/prepared a job'
+        assert 'tests/bound.py' not in record.read_text(), 'unknown selection dispatched/prepared a job'
         # The aggregate must wait even for the slowest preparation job.
         runner.write_text('#!' + sys.executable + '\n' +
             'import os,sys,time,pathlib\n' +
