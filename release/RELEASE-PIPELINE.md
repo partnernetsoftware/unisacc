@@ -84,3 +84,5 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 # 12 向主人确认公开；只留签名 unisacc.com 与 dmg；gh release edit v$V --draft=false --latest
 # 13 回执 research/r<N>-release-acceptance.json；plans/v$V.md → archive/plans/；prd 版本行；通知 cdx 解冻
 ```
+
+**结项条件（0.0.16 起，发布与不发布的版本都适用）**：本地 `tests/release.sh --com` rc=0 **且** `gh run list -w release-check -L 1` 对结项提交为 success，两者缺一不得结项。0.0.15 只看了本地队列就结项，而 origin 自 300e8c9 起红了十二次提交（ci plan 自检被 0a8d265 的 knownfail 调用打破，127b6b1 修复）。
