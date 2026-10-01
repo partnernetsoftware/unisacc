@@ -216,12 +216,12 @@ static int archive_path(const char *p) { size_t n=strlen(p); return n>=2 && !str
 static int take_unit(char *t,long tl,int u) {
     if (u==0) { strncpy(tl_first,tl_target,31); tl_first[31]=0; }
     else if (strcmp(tl_first,tl_target)) { fprintf(stderr,"unisacc: error: the objects were compiled for different targets (%s, %s)\n",tl_first,tl_target); return 1; }
-    tl_unit(t,(int)tl,u); tl_note_links(t,tl);
+    tl_unitver(t,(int)tl); tl_unit(t,(int)tl,u); tl_note_links(t,tl);
     return 0;
 }
 static int link_objects(const char **paths,int n,Buf *out) {
     int u=0;
-    linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0;
+    linkbuf.n=0; tl_ng=0; tl_gend=0; tl_nend=0; tl_ndef=0; tl_next=0; tl_ngdef=0;
     for (int p=0;p<n;p++) {                      /* every object is taken */
         if (archive_path(paths[p])) continue;
         int len=0; unsigned char *b=source_read(paths[p],&len); long tl=0;

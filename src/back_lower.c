@@ -379,6 +379,9 @@ int bk_parse(char *t, int n) {
         while (e > i && bk_tape_space(t[e - 1])) e = e - 1;
         j = i; while (j < e && bk_tape_space(t[j])) j = j + 1;
         if (j >= e) { i = lineend + 1; continue; }
+        /* R20-3: `.unit 2` and `.gdef NAME` are link attributes for the
+           unisacc linker; one unit's own image has no use for them */
+        if (e - j >= 6 && t[j] == 46 && ((t[j+1]==117 && t[j+2]==110 && t[j+3]==105 && t[j+4]==116) || (t[j+1]==103 && t[j+2]==100 && t[j+3]==101 && t[j+4]==102)) && bk_tape_space(t[j + 5])) { i = lineend + 1; continue; }
         if (e - j >= 7 && t[j] == 46 && ((t[j+1]==103 && t[j+2]==108 && t[j+3]==111 && t[j+4]==98 && t[j+5]==97 && t[j+6]==108) || (t[j+1]==101 && t[j+2]==120 && t[j+3]==116 && t[j+4]==101 && t[j+5]==114 && t[j+6]==110))
             && (e - j == 7 || bk_tape_space(t[j + 7]))) {
             int link_global; link_global = t[j + 1] == 103;

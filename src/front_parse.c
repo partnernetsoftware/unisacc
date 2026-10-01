@@ -5513,6 +5513,7 @@ int unit(void) {
                     else { if (declstatic == 0 && symgstat[gprev] == 0) err_tok(t, "multiple definitions of this object across units (each has an initialiser)"); }
                 }
                 symginit[nsym - 1] = 1;
+                if (unitmode && declstatic == 0) { es(".gdef g_"); etok(t); ec(10); }   /* R20-3 */
                 adv();
                 toinit = 1; hasinit = 1;
                 gk = dkind(gflt0);
@@ -5780,6 +5781,7 @@ int fe_units(char **paths, int npath, char *t) {
        and printed zeros. */
     nibuf = 0; nustat = 0;
     if (unitmode == 0) emit_start();
+    else es(".unit 2\n");                  /* R20-3: this unit carries the .gdef contract */
     u = 0;
     while (u < npath) {
         curunit = u;

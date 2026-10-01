@@ -119,6 +119,28 @@ int tl_operands(char *t, int p, int e, int u) {
     return 0;
 }
 int tl_word(char *t, int p, int e) { int q; q = p; while (q < e && tl_isid(t[q] & 255)) q = q + 1; return q; }
+int tl_inset(int *at, int *ln, int cnt, char *s, int n); int tl_addname(int *at, int *ln, int *cnt, char *s, int n);
+int tl_gdef_at[65536]; int tl_gdef_len[65536]; int tl_ngdef;    /* R20-3: names some unit gave an initialiser */
+/* R20-3: a unit tape's first record must be `.unit 2` (exactly once); an
+   object without it predates the initialiser marks and could hide two
+   initialised definitions, so it is refused rather than guessed at */
+int tl_unitver(char *t, int n) {
+    int i; int e; int seen; int first; seen = 0; first = 1; i = 0;
+    while (i < n) {
+        e = i; while (e < n && t[e] != 10) e = e + 1;
+        if (e > i && t[i] != 59) {
+            int isu; isu = e - i >= 5 && tl_same(t + i, 5, ".unit", 5) && (e - i == 5 || t[i + 5] == 32);
+            if (isu) {
+                if (!first || seen || !(e - i == 7 && t[i + 6] == 50)) tl_fail("link: malformed .unit record (recompile the object with this unisacc)\n");
+                seen = 1;
+            }
+            first = 0;
+        }
+        i = e + 1;
+    }
+    if (!seen) tl_fail("link: object predates .unit 2 (recompile it with this unisacc -c -funit)\n");
+    return 0;
+}
 int tl_unit(char *t, int n, int u) {
     int i; int e; int j; int q; int pass;
     tl_t = t;
@@ -148,6 +170,21 @@ int tl_unit(char *t, int n, int u) {
             if (t[i] == 46) {
                 j = i + 1; q = tl_word(t, j, e);
                 if (tl_same(t + j, q - j, "global", 6) || tl_same(t + j, q - j, "extern", 6)) { i = e + 1; continue; }
+                if (tl_same(t + j, q - j, "unit", 4)) { i = e + 1; continue; }   /* checked in tl_takeunit */
+                /* R20-3: `.gdef NAME` -- this unit gives NAME an initialiser; a
+                   second unit doing the same is two definitions (C99 6.9p5) */
+                if (tl_same(t + j, q - j, "gdef", 4)) {
+                    int a; int b; a = q + 1; b = tl_word(t, a, e);
+                    if (tl_inset(tl_gdef_at, tl_gdef_len, tl_ngdef, t + a, b - a)) {
+                        char msg[320]; int m; int c; char *pre; pre = "link: multiple definitions of ";
+                        m = 0; while (pre[m]) { msg[m] = pre[m]; m = m + 1; }
+                        c = a; if (b - a > 2 && t[a] == 103 && t[a + 1] == 95) c = a + 2;
+                        while (c < b && m < 300) { msg[m] = t[c]; m = m + 1; c = c + 1; }
+                        msg[m] = 10; msg[m + 1] = 0; tl_fail(msg);
+                    }
+                    tl_addname(tl_gdef_at, tl_gdef_len, &tl_ngdef, t + a, b - a);
+                    i = e + 1; continue;
+                }
                 if (tl_same(t + j, q - j, "bss", 3)) {
                     int a; int b; a = q + 1; b = tl_word(t, a, e);
                     if (tl_kind(t + a, b - a) == 2) {
@@ -361,7 +398,7 @@ int tl_takeunit(char *path, char *t, long len, int u) {
     else { if (strsame(tl_first, tl_target) == 0) {
         __write(2, "unisacc: error: the objects were compiled for different targets (", 65); __write(2, tl_first, blen(tl_first));
         __write(2, ", ", 2); __write(2, tl_target, blen(tl_target)); __write(2, ")\n", 2); return 1; } }
-    tl_unit(t, (int)len, u); tl_note_links(t, len);
+    tl_unitver(t, (int)len); tl_unit(t, (int)len, u); tl_note_links(t, len);
     return 0;
 }
 int tl_readfile(char *path, long *n) {
@@ -377,7 +414,7 @@ char tl_used[65536];
 int fe_link(char **paths, int npath) {
     int u; int p; long n; long len; char *t; int k; int i; int changed; char nm[256];
     model_dims(); setup();
-    nout = 0; tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0;
+    nout = 0; tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0;
     u = 0; p = 0;
     while (p < npath) {                       /* every object is taken */
         if (isarchive(paths[p]) == 0) {
