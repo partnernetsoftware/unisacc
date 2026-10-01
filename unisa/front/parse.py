@@ -2466,6 +2466,21 @@ class Walker:
                     self.em.frame(-8)
                     ty = aty
                     continue
+                if bits is not None:
+                    # Keep the OLD value itself: recomputing it as new -/+ 1
+                    # is wrong when the store wrapped (an unsigned:5 at 0
+                    # becomes 31, and 31 + 1 is 32, not 0).  Stack: address,
+                    # old value; bits_set wants the address on top.
+                    self.em.push()
+                    self.em.imm(TMP, 1)
+                    self.em.emit(self.em.recipe("alu", "add" if op == "++" else "sub"), ACC, ACC, TMP)
+                    self.em.load(LHS, SP, 8)
+                    self.em.push(LHS)
+                    self.em.bits_set(bits[0], bits[1], bits[2], self.wid(aty))
+                    self.em.pop(ACC)
+                    self.em.frame(-8)
+                    ty = aty
+                    continue
                 self.em.push()
                 step = aty.to.size(self.sc.structs) if aty.kind == "ptr" else 1
                 self.em.imm(ACC, step)
