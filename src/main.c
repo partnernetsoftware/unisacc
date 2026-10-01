@@ -205,7 +205,28 @@ int main(void) {
             if (fe_link(inputs, ninput)) return 1;
             if (strsame(tl_first, HOST_TARGET) == 0) return emsg("unisacc: error: these objects were compiled for another target; running needs this machine's: ", tl_first);
         }
-        else { if (fe_units(inputs, ninput, HOST_TARGET)) return 1; } } }
+        else {
+            /* R19-10: on macOS, a prototyped function nobody defines is
+               forwarded to the host libc -- the front end writes C stubs, and
+               the program is compiled once more with them as a last unit */
+            fwdrun = HOST_TARGET[0] == 111;
+            {   int r1; r1 = fe_units(inputs, ninput, HOST_TARGET);
+                if (r1 && (fwdrun == 0 || nfwdsrc == 0)) return 1;
+            }
+            if (fwdrun && nfwdsrc > 0) {          /* stubs were written: the first pass left calls unbound */
+                static char fwdpath[600]; char *td; int q; int fd2;
+                if (ninput >= 64) return 1;
+                td = "/tmp"; q = 0;
+                q = 0; while (td[q] && q < 500) { fwdpath[q] = td[q]; q = q + 1; }
+                { char *nm2; int r2; nm2 = "/unisacc-forward.c"; r2 = 0; while (nm2[r2]) { fwdpath[q] = nm2[r2]; q = q + 1; r2 = r2 + 1; } fwdpath[q] = 0; }
+                fd2 = wopen(fwdpath); if (fd2 < 0) return 1;
+                __write(fd2, fwdsrc, nfwdsrc); __close(fd2);
+                inputs[ninput] = fwdpath; ninput = ninput + 1; fwdrun = 0;
+                if (fe_units(inputs, ninput, HOST_TARGET)) return 1;
+                ninput = ninput - 1;
+            }
+            fwdrun = 0;
+        } } }
         if (werror && nwarn > 0) return 1;           /* -Werror: nothing runs */
         /* argv[0] is the program, which is its first source file; the rest
            of the line follows the inputs */

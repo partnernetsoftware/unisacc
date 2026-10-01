@@ -29,6 +29,7 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
 int symginit[MAXSYM];       /* R19-8: a file-scope object defined WITH an initialiser */
 int symgstat[MAXSYM];       /* ...that is `static` (its unit's own) */
+int fwdrun; char fwdsrc[131072]; int nfwdsrc;   /* R19-10: host-forwarding stubs (see undef_calls) */
 int symxtrn[MAXSYM];        /* -funit: declared `extern`, no storage in this unit (yet) */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
@@ -5761,7 +5762,7 @@ int fe_units(char **paths, int npath, char *t) {
     model_dims();
     setup();
     nout = 0; nsym = 0; nsympk = 0; nlab = 0; npool = 0;
-    poolend = 0; nloop = 0;
+    poolend = 0; nloop = 0; fdef_n = 0; nfwdsrc = 0;
     /* `__init` ACCUMULATES: every unit's global initialisers run there, so
        this is reset once for the program, not once per file.  Resetting it
        per file silently dropped unit one's initialisers -- the program ran
@@ -6066,6 +6067,59 @@ int emit_start(void) {
     es("  @call.call main\n  @ctrl.jump __main_ret\n.bss __argvv 32768\n");
     return 0;                                  /* -funit: `__init` becomes .extern via undef_calls */
 }
+/* R19-10: `-run` on macOS forwards a prototyped function nobody defines to
+   the host libc -- a C stub per name (dlsym + the uffi bridge), compiled as
+   one more unit by the driver.  Variadic and struct-valued ones are left
+   undefined (named, not guessed). */
+int fwd_s(char *s) { while (*s && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = *s; nfwdsrc = nfwdsrc + 1; s = s + 1; } return 0; }
+int fwd_n(char *s, int n) { int k; k = 0; while (k < n && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; } return 0; }
+int fwd_d(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; fwdsrc[nfwdsrc] = d[n]; nfwdsrc = nfwdsrc + 1; } return 0; }
+char *fwd_ctype(int kind, int w, int uns) {
+    if (kind == 1) return w == 8 && uns ? "unsigned long" : "void *";
+    if (kind == 8) return "double";
+    if (kind == 4) return "float";
+    if (w == 8) return uns ? "unsigned long" : "long";
+    if (w == 2) return uns ? "unsigned short" : "short";
+    if (w == 1) return uns ? "unsigned char" : "signed char";
+    return uns ? "unsigned int" : "int";
+}
+int fwd_ukind(int kind, int w, int uns) {     /* UFFI_* from unisacc_ffi.h */
+    if (kind == 1) return 5;
+    if (kind == 8) return 6;
+    if (kind == 4) return 7;
+    if (w == 8) return uns ? 4 : 3;
+    if (w == 2) return uns ? 11 : 10;
+    if (w == 1) return uns ? 9 : 8;
+    return uns ? 2 : 1;
+}
+int fwd_stub(char *nm, int nl) {
+    int si; int k; int np; int f; int rk; int rw; char *rt; int isvoid;
+    si = nsym - 1;
+    while (si >= 0) {
+        if (symkind[si] == 2) { k = 0; while (k < nl && symname[si * NAMEW + k] == nm[k]) k = k + 1;
+            if (k == nl && (nl >= NAMEW || symname[si * NAMEW + nl] == 0)) break; }
+        si = si - 1;
+    }
+    if (si < 0 || symnpk[si] < 0 || symvar[si] || (symstruct[si] >= 0 && symptr[si] == 0)) return 0;   /* a struct by value: not yet */
+    np = symnpk[si]; f = sympkfirst[si];
+    k = 0; while (k < np) { if (sympk[f + k] == 9) return 0; k = k + 1; }
+    rw = symelem[si]; isvoid = rw == 0 && symptr[si] == 0 && symflt[si] == 0;
+    if (symptr[si]) { rt = "void *"; rk = 5; }
+    else { rt = fwd_ctype(symflt[si], rw, symuns[si]); rk = fwd_ukind(symflt[si], rw, symuns[si]); }
+    if (nfwdsrc == 0) fwd_s("#include <unisacc_ffi.h>\n#include <unistd.h>\n");
+    fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
+    k = 0; while (k < np) { if (k) fwd_s(", "); fwd_s(fwd_ctype(sympk[f + k], sympkw[f + k], 0)); fwd_s(" a"); fwd_d(k); k = k + 1; }
+    if (np == 0) fwd_s("void");
+    fwd_s(") {\n    static void *fn; int kinds[33]; void *vals[33];");
+    if (!isvoid) { fwd_s(" "); fwd_s(rt); fwd_s(" r;"); }
+    fwd_s("\n    if (fn == 0) fn = uffi_dlsym((void *)(0 - 2), \""); fwd_n(nm, nl); fwd_s("\");\n");
+    fwd_s("    if (fn == 0) { write(2, \"unisacc -run: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(32 + nl); fwd_s("); _exit(127); }\n");
+    k = 0; while (k < np) { fwd_s("    kinds["); fwd_d(k); fwd_s("] = "); fwd_d(fwd_ukind(sympk[f + k], sympkw[f + k], 0)); fwd_s("; vals["); fwd_d(k); fwd_s("] = &a"); fwd_d(k); fwd_s(";\n"); k = k + 1; }
+    fwd_s("    uffi_call(fn, "); fwd_d(isvoid ? 0 : rk); fwd_s(", kinds, vals, "); fwd_d(np); fwd_s(", 0 - 1, "); fwd_s(isvoid ? "0" : "&r"); fwd_s(");\n");
+    if (!isvoid) fwd_s("    return r;\n");
+    fwd_s("}\n");
+    return 1;
+}
 int undef_calls(void) {
     int i; int e; int h; int bad;
     i = 0; while (i < UD_SIZE) { ud_tab[i] = 0; i = i + 1; }
@@ -6093,12 +6147,14 @@ int undef_calls(void) {
                     ud_tab[h] = i + 8;        /* report each name once */
                     if (unitmode) {           /* defined in another unit: the linker's business */
                         if (nxtrn < 256) { xtrn_at[nxtrn] = i + 7; xtrn_len[nxtrn] = e - i - 7; nxtrn = nxtrn + 1; }
+                    } else { if (fwdrun && fwd_stub(out + i + 7, e - i - 7)) {
+                        /* forwarded to the host (R19-10): the driver compiles the stub */
                     } else {
                     __write(2, "unisacc: error: undefined function '", 36);
                     __write(2, out + i + 7, e - i - 7);
                     __write(2, "'\n", 2);
                     bad = bad + 1;
-                    }
+                    } }
                 }
             } } } } } } } }
         i = e + 1;

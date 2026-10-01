@@ -17,6 +17,9 @@ typedef long clock_t;
 struct tm {
     int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon;
     int tm_year; int tm_wday; int tm_yday; int tm_isdst;
+#ifndef _WIN32
+    long tm_gmtoff; const char *tm_zone;   /* the host libc's layout (glibc and macOS): -run forwarding writes them (R19-10) */
+#endif
 };
 /* time (0.0.18 R18-5): seconds from gettimeofday on Linux and macOS (the
    clock note above still holds for clock; Windows has no time yet) */
