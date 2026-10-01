@@ -95,6 +95,6 @@ ELF 头 (64)
 1. **tape 的链接属性**（格式变更，归 tape/tapebin 维护者）：新增两条记录 `.global NAME`（本单元定义、对外可见）与 `.extern NAME`（本单元引用、定义在别处）。tapebin v1 的 shape 表、C 与 Python 两侧的读者、docs/tapebin-v1.md 同步；整程序模式下两条记录不出现，旧 tape 字节不变。
 2. **前端的单元模式**（`-c -b` 时启用）：非 `static` 的函数与文件作用域对象发 `.global`；只声明未定义的函数与 `extern` 对象发 `.extern` 而不是报 “undefined function” 或静默分配；只有定义了 `main` 的单元发 `_start` 与 argv 序言；每个单元的初始化函数名为 `__init.<单元名>` 并 `.global`。库体（随带头文件里的 `static` 函数）保持局部，各单元各带一份，互不冲突。
 3. **后端的未定义符号**：对 `.extern` 名字的调用与取址发重定位——ELF `R_X86_64_PLT32`/`R_AARCH64_CALL26` 与已有的 PC32/ADR_PREL_PG_HI21+ADD_ABS_LO12_NC；Mach-O `X86_64_RELOC_BRANCH`/`ARM64_RELOC_BRANCH26`；COFF `IMAGE_REL_AMD64_REL32`/`IMAGE_REL_ARM64_BRANCH26`；`.global` 名字进符号表为全局。
-4. **初始化顺序**：自带链接器（R17-2）收集全部 `__init.*`，合成 `__init` 依链接顺序调用；用系统链接器链多个我们的 `.o` 时，需要初始化代码的单元会被拒绝并说明（只用常量初始化的单元不受影响）——不承诺系统 ld 的多对象初始化，直到有地址单元重定位（`R_X86_64_64` 等）为止。
+4. **初始化顺序**（0.0.17 已实现于参考侧：src/tapelink.c 在 tape 级合并单元，见 R17-2 收据；单元对象另带一个不装载的节 `.unisa.tape` / `__UNISA,__unisa_tape` / `.unisatp` 存本单元 tape）：自带链接器（R17-2）收集全部 `__init.*`，合成 `__init` 依链接顺序调用；用系统链接器链多个我们的 `.o` 时，需要初始化代码的单元会被拒绝并说明（只用常量初始化的单元不受影响）——不承诺系统 ld 的多对象初始化，直到有地址单元重定位（`R_X86_64_64` 等）为止。
 
 调用约定：我们的 `.o` 之间都是 tape 约定，互调无需适配；与 cc 的函数互调仍是 0.0.18 R18-9。

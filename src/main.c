@@ -185,7 +185,11 @@ int main(void) {
             if (ninput != 1 || tb_read(__argv(fi), tb_target_id(HOST_TARGET), force_origin)) return 1;
         } else { if (istape(__argv(fi))) {
             if (ninput != 1 || fe_read(__argv(fi))) return 1;
-        } else { if (fe_units(inputs, ninput, HOST_TARGET)) return 1; } }
+        } else { if (isobject(__argv(fi))) {                         /* unit objects: link, then run */
+            if (fe_link(inputs, ninput)) return 1;
+            if (strsame(tl_first, HOST_TARGET) == 0) return emsg("unisacc: error: these objects were compiled for another target; running needs this machine's: ", tl_first);
+        }
+        else { if (fe_units(inputs, ninput, HOST_TARGET)) return 1; } } }
         if (werror && nwarn > 0) return 1;           /* -Werror: nothing runs */
         /* argv[0] is the program, which is its first source file; the rest
            of the line follows the inputs */
@@ -233,14 +237,19 @@ int main(void) {
         bkfd = ofd;
         if (istapebin(__argv(fi))) { if (ninput != 1 || tb_read(__argv(fi), tb_target_id(t), force_origin)) return 1; }
         else { if (istape(__argv(fi))) { if (fe_read(__argv(fi))) return 1; }
-        else {
+        else { if (isobject(__argv(fi))) {
+            if (fe_link(inputs, ninput)) return 1;
+            /* the program is for the objects' target: -b may only repeat it */
+            if (bgiven == 0) t = tl_first;
+            else { if (strsame(t, tl_first) == 0) return emsg("unisacc: error: -b differs from the target these objects were compiled for: ", tl_first); }
+        } else {
             r = fe_units(inputs, ninput, t);
             if (r == 2) {                                            /* -E is done */
                 if (deponly) return writedeps(deptarget(outpath, inputs[0]), inputs, ninput);
                 if (ofd != 1) __close(ofd); return 0; }
             if (r) return 1;
             if (werror && nwarn > 0) return 1;       /* -Werror: nothing written */
-        } }
+        } } }
         binlen = 0;
         if (emitbin) {
             binlen = tb_encode(nout, istape(__argv(fi)) ? 0 : tb_target_id(t));

@@ -10,10 +10,20 @@ long bk_textva; long bk_shift; int bk_sizing;
    branches are section-internal and record nothing. */
 #define BK_OBJDATA 4294967296
 #define BK_OBJIMP 17179869184           /* object mode: Windows import i is BK_OBJIMP + 8*i (an UND __imp_ symbol) */
+#define BK_OBJUND 34359738368           /* object mode: undefined name id is BK_OBJUND + (id << 20) + offset */
 #define BK_MAXRELO 262144
 int bk_objmode;
 long bkro_off[BK_MAXRELO]; int bkro_type[BK_MAXRELO]; int bkro_sect[BK_MAXRELO]; long bkro_add[BK_MAXRELO]; int bknro;
 long bk_objnz;                       /* the .data length: offsets at or past it are .bss */
+/* a call to a name no unit here defines (-funit .extern): type 900 is an
+   x86-64 `call rel32` field, 901 an arm64 `bl`; the writers map them */
+int bk_relcall(long off, int id, int type) {
+    if (bk_sizing || bk_objmode == 0) return 0;
+    if (bknro >= BK_MAXRELO) { __write(2, "object: too many relocations\n", 29); __exit(1); }
+    bkro_off[bknro] = off; bkro_type[bknro] = type; bkro_sect[bknro] = 1000 + id;
+    bkro_add[bknro] = type == 900 ? 0 - 4 : 0; bknro = bknro + 1;
+    return 0;
+}
 int bk_relo(long off, int type, long target) {
     if (bk_sizing || bk_objmode == 0) return 0;
     /* the four host-FFI slots sit 32 bytes BELOW the data base (TO_HOSTADDR);
@@ -23,6 +33,7 @@ int bk_relo(long off, int type, long target) {
     }
     if (bknro >= BK_MAXRELO) { __write(2, "object: too many relocations\n", 29); __exit(1); }
     bkro_off[bknro] = off; bkro_type[bknro] = type;
+    if (target >= BK_OBJUND) { bkro_sect[bknro] = 1000 + (int)((target - BK_OBJUND) >> 20); bkro_add[bknro] = (target - BK_OBJUND) & 1048575; bknro = bknro + 1; return 1; }
     if (target >= BK_OBJIMP) { bkro_sect[bknro] = 100 + (int)((target - BK_OBJIMP) / 8); bkro_add[bknro] = 0; bknro = bknro + 1; return 1; }
     if (target >= BK_OBJDATA) {
         target = target - BK_OBJDATA;
@@ -62,6 +73,7 @@ long bk_leaaddr(int i) {
         id = tka[i * 4 + 1];
         if (bksym_addr[id] >= 0) return bksym_addr[id] + bk_shift;
         if (bklab_tpc[id] >= 0) return bk_textva + bk_label(id);
+        if (bk_objmode) return BK_OBJUND + ((long)id << 20);   /* defined in another unit */
         return 0;
     }
     return tka[i * 4 + 1] + bk_shift;
@@ -483,7 +495,8 @@ int bk_arm(int i, long off) {
         a_adr(A_IP1, pc, pc + 16);
         ow(0xD1002000 | (7 << 5) | 7);
         ow(0xF9000000 | (7 << 5) | A_IP1);
-        ow(0x94000000 | a_relf(i, bk_label(a[0]) - (off + 12)));   /* bl */
+        if (bk_objmode && bklab_tpc[a[0]] < 0) { bk_relcall(bkol, a[0], 901); ow(0x94000000); }
+        else ow(0x94000000 | a_relf(i, bk_label(a[0]) - (off + 12)));   /* bl */
         return 1;
     }
     if (strsame(o, "jumpz")) {
@@ -1043,6 +1056,7 @@ int bk_x86(int i, long off) {
                                               lands where the old sequence put
                                               it, so ret and the frame walk
                                               are unchanged */
+        if (bk_objmode && bklab_tpc[a[0]] < 0) { ob(0xE8); bk_relcall(bkol, a[0], 900); ob(0); ob(0); ob(0); ob(0); return 1; }
         ob(0xE8); x_rel(i, bk_label(a[0]) - (off + 5));
         return 1;
     }

@@ -5561,10 +5561,12 @@ int fe_read(char *path) {
 /* Does the path end in ".c"?  Under `-run` this is what separates the
    inputs from the program's own arguments. */
 int istapebin(char *p);
+int isobject(char *p);
 int isdotc(char *p) {
     int n;
     if (p[0] == 45 && p[1] == 0) return 1;         /* `-`: standard input */
     if (istapebin(p)) return 1;
+    if (isobject(p)) return 1;                       /* a unit object (-funit): linked */
     n = 0; while (p[n]) n = n + 1;
     if (n < 2) return 0;
     if (p[n - 2] == 46 && p[n - 1] == 99) return 1;     /* .c */

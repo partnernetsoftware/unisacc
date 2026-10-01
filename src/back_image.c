@@ -188,6 +188,79 @@ int bk_oname(int id) {                       /* a tape name into the string tabl
     while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; }
     wb(0); return bkname_len[id] + 1;
 }
+/* The object's symbol plan, shared by the three writers: every defined
+   name is a symbol -- local, or global when the tape said `.global` (and
+   `_start`) -- and every name a relocation targets without a definition
+   here is undefined.  Order: locals, globals, undefined (ELF and Mach-O
+   require it).  Exported and undefined DATA names drop the tape's `g_`
+   prefix, so they meet C's names (`g_banner` is `banner`). */
+/* -funit objects carry their unit tape for the unisacc linker (src/tapelink.c),
+   in a section no system linker loads: "UNISATAPE1 <length>\n" + the tape. */
+char *bk_objtape; long bk_objtapen; char *bk_objtarget;
+long bk_tapelen(void) {                        /* the blob's length, 0 when not a unit object */
+    long v; long d; int tl;
+    if (unitmode == 0 || bk_objtape == 0) return 0;
+    v = bk_objtapen; d = 1; while (v >= 10) { v = v / 10; d = d + 1; }
+    tl = 0; while (bk_objtarget[tl]) tl = tl + 1;
+    return 11 + tl + 1 + d + 1 + bk_objtapen;
+}
+int bk_tapew(void) {                           /* "UNISATAPE1 <os/arch> <length>\n" + tape */
+    char dg[24]; long v; int n; long k;
+    wname("UNISATAPE1 ", 11);
+    k = 0; while (bk_objtarget[k]) { wb(bk_objtarget[k]); k = k + 1; } wb(32);
+    v = bk_objtapen; n = 0; if (v == 0) { dg[0] = 48; n = 1; }
+    while (v > 0) { dg[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    while (n > 0) { n = n - 1; wb(dg[n]); }
+    wb(10);
+    k = 0; while (k < bk_objtapen) { wb(bk_objtape[k]); k = k + 1; }
+    return 0;
+}
+int bksp_kind[BK_MAXN]; long bksp_pos[BK_MAXN]; int bksp_n1; int bksp_n2; int bksp_n3;
+int bk_def(int id) { return bklab_tpc[id] >= 0 || bksym_addr[id] >= 0; }
+int bk_symplan(void) {
+    int id; int k; int start; int kind; long p;
+    start = bk_find("_start", 6);
+    id = 0;
+    while (id < bknn) {
+        bksp_kind[id] = 0;
+        if (bk_def(id)) bksp_kind[id] = (bklink_global[id] || id == start) ? 2 : 1;
+        id = id + 1;
+    }
+    k = 0;
+    while (k < bknro) { if (bkro_sect[k] >= 1000) { id = bkro_sect[k] - 1000; if (bk_def(id) == 0) bksp_kind[id] = 3; } k = k + 1; }
+    bksp_n1 = 0; bksp_n2 = 0; bksp_n3 = 0; kind = 1;
+    while (kind <= 3) {
+        id = 0;
+        while (id < bknn) {
+            if (bksp_kind[id] == kind) {
+                if (kind == 1) p = bksp_n1; else { if (kind == 2) p = bksp_n2; else p = bksp_n3; }
+                bksp_pos[id] = p;
+                if (kind == 1) bksp_n1 = bksp_n1 + 1; else { if (kind == 2) bksp_n2 = bksp_n2 + 1; else bksp_n3 = bksp_n3 + 1; }
+            }
+            id = id + 1;
+        }
+        kind = kind + 1;
+    }
+    id = 0;                                   /* positions in the one ordered list */
+    while (id < bknn) {
+        if (bksp_kind[id] == 2) bksp_pos[id] = bksp_pos[id] + bksp_n1;
+        if (bksp_kind[id] == 3) bksp_pos[id] = bksp_pos[id] + bksp_n1 + bksp_n2;
+        id = id + 1;
+    }
+    return 0;
+}
+int bk_sprefix(int id) {                       /* chars of the tape name dropped: `g_` on exported/undefined data */
+    if (bksp_kind[id] >= 2 && bkname_len[id] > 2 && bkpool[bkname_at[id]] == 103 && bkpool[bkname_at[id] + 1] == 95) return 2;
+    return 0;
+}
+int bk_snamelen(int id, int us) { return bkname_len[id] - bk_sprefix(id) + us; }
+int bk_sname_w(int id, int us) {               /* name + NUL; us: a leading `_` (Mach-O C names) */
+    int k;
+    if (us) wb(95);
+    k = bk_sprefix(id);
+    while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; }
+    wb(0); return 0;
+}
 int bk_osym(long name, int info, int shndx, long value) {
     w32(name); wb(info); wb(0); w16(shndx); w64(value); w64(0); return 0;
 }
@@ -196,58 +269,66 @@ int bk_oshdr(long name, long type, long flags, long off, long size, long link, l
 }
 int bk_elfobj(void) {
     long L; long bss; long tend; long doff; long roff; long soff; long stoff; long shoff; long shsoff;
-    long nsym; long strlen; int id; int k; int start; long name;
+    long nsym; long strlen; int id; int k; long name; int kind; long tlen; long toff8;
     L = bk_objnz; bss = bkdlen - L;
-    start = bk_find("_start", 6);
-    /* which names become symbols: every code label and data symbol but _start */
-    nsym = 4; strlen = 1; id = 0;
-    while (id < bknn) {
-        if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) { nsym = nsym + 1; strlen = strlen + bkname_len[id] + 1; }
-        id = id + 1;
-    }
-    nsym = nsym + 1; strlen = strlen + 7;                       /* _start */
+    bk_symplan();
+    nsym = 4 + bksp_n1 + bksp_n2 + bksp_n3; strlen = 1; id = 0;
+    while (id < bknn) { if (bksp_kind[id]) strlen = strlen + bk_snamelen(id, 0) + 1; id = id + 1; }
     tend = 64 + bktlen;
     doff = bk_round(tend, 16);
     roff = bk_round(doff + L, 8);
     soff = bk_round(roff + 24 * bknro, 8);
     stoff = soff + 24 * nsym;
     shsoff = stoff + strlen;
-    shoff = bk_round(shsoff + 55, 8);
+    tlen = bk_tapelen(); toff8 = shsoff + (tlen ? 67 : 55);
+    shoff = bk_round(toff8 + tlen, 8);
     wb(127); wb(69); wb(76); wb(70); wb(2); wb(1); wb(1); wb(0); wz(8);
     w16(1); w16(bkarch ? 183 : 62); w32(1);
     w64(0); w64(0); w64(shoff);
-    w32(0); w16(64); w16(0); w16(0); w16(64); w16(8); w16(7);
+    w32(0); w16(64); w16(0); w16(0); w16(64); w16(tlen ? 9 : 8); w16(7);
     wtext(); wz(doff - tend); wdata(L); wz(roff - (doff + L));
     k = 0;
-    while (k < bknro) { w64(bkro_off[k]); w32(bkro_type[k]); w32(bkro_sect[k]); w64(bkro_add[k]); k = k + 1; }
+    while (k < bknro) {
+        long sym; long ty; sym = bkro_sect[k]; ty = bkro_type[k];
+        if (sym >= 1000) sym = 4 + bksp_pos[sym - 1000];
+        if (ty == 900) ty = 4;                    /* R_X86_64_PLT32 */
+        if (ty == 901) ty = 283;                  /* R_AARCH64_CALL26 */
+        w64(bkro_off[k]); w32(ty); w32(sym); w64(bkro_add[k]); k = k + 1;
+    }
     wz(soff - (roff + 24 * bknro));
     bk_osym(0, 0, 0, 0);
     bk_osym(0, 3, 1, 0); bk_osym(0, 3, 2, 0); bk_osym(0, 3, 3, 0);    /* STT_SECTION */
-    name = 1; id = 0;
-    while (id < bknn) {
-        if (id != start && bklab_tpc[id] >= 0) { bk_osym(name, 0, 1, toff[bklab_tpc[id]]); name = name + bkname_len[id] + 1; }
-        else { if (id != start && bksym_addr[id] >= 0) {
-            long v; v = bksym_addr[id] - BK_DATA_BASE;
-            if (v >= L) bk_osym(name, 0, 3, v - L); else bk_osym(name, 0, 2, v);
-            name = name + bkname_len[id] + 1;
-        } }
-        id = id + 1;
+    name = 1; kind = 1;
+    while (kind <= 3) {
+        id = 0;
+        while (id < bknn) {
+            if (bksp_kind[id] == kind) {
+                int bind; bind = kind == 1 ? 0 : 16;
+                if (kind == 3) bk_osym(name, bind, 0, 0);
+                else { if (bklab_tpc[id] >= 0) bk_osym(name, bind | (kind == 2 ? 2 : 0), 1, toff[bklab_tpc[id]]);
+                else { long v; v = bksym_addr[id] - BK_DATA_BASE;
+                    if (v >= L) bk_osym(name, bind | (kind == 2 ? 1 : 0), 3, v - L); else bk_osym(name, bind | (kind == 2 ? 1 : 0), 2, v); } }
+                name = name + bk_snamelen(id, 0) + 1;
+            }
+            id = id + 1;
+        }
+        kind = kind + 1;
     }
-    bk_osym(name, 18, 1, start >= 0 ? toff[bklab_tpc[start]] : 0);  /* GLOBAL FUNC _start */
-    wb(0); id = 0;
-    while (id < bknn) { if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) bk_oname(id); id = id + 1; }
-    wname("_start", 7);
+    wb(0); kind = 1;
+    while (kind <= 3) { id = 0; while (id < bknn) { if (bksp_kind[id] == kind) bk_sname_w(id, 0); id = id + 1; } kind = kind + 1; }
     wname("", 1); wname(".text", 6); wname(".data", 6); wname(".bss", 5); wname(".rela.text", 11);
     wname(".symtab", 8); wname(".strtab", 8); wname(".shstrtab", 10);
-    wz(shoff - (shsoff + 55));
+    if (tlen) { wname(".unisa.tape", 12); bk_tapew(); }
+    wz(shoff - (toff8 + tlen));
     bk_oshdr(0, 0, 0, 0, 0, 0, 0, 0, 0);
     bk_oshdr(1, 1, 6, 64, bktlen, 0, 0, 16, 0);                   /* .text  PROGBITS AX */
     bk_oshdr(7, 1, 3, doff, L, 0, 0, 16, 0);                      /* .data  PROGBITS WA */
     bk_oshdr(13, 8, 3, doff + L, bss, 0, 0, 16, 0);               /* .bss   NOBITS   WA */
     bk_oshdr(18, 4, 64, roff, 24 * bknro, 5, 1, 8, 24);           /* .rela.text  INFO_LINK -> .text */
-    bk_oshdr(29, 2, 0, soff, 24 * nsym, 6, nsym - 1, 8, 24);      /* .symtab, first global last */
+    bk_oshdr(29, 2, 0, soff, 24 * nsym, 6, 4 + bksp_n1, 8, 24);   /* .symtab: sh_info = first global */
     bk_oshdr(37, 3, 0, stoff, strlen, 0, 0, 1, 0);
-    bk_oshdr(45, 3, 0, shsoff, 55, 0, 0, 1, 0);
+    bk_oshdr(45, 3, 0, shsoff, tlen ? 67 : 55, 0, 0, 1, 0);
+    if (tlen) bk_oshdr(55, 1, 0, toff8, tlen, 0, 0, 1, 0);         /* .unisa.tape: PROGBITS, not loaded */
     return 0;
 }
 /* The Mach-O object (-c -b osx/ARCH): MH_OBJECT, one unnamed segment with
@@ -266,34 +347,34 @@ int bk_mrel(long addr, long sym, int pcrel, int ext, int type) {
 int bk_msym(long strx, int type, int sect, long value) { w32(strx); wb(type); wb(sect); w16(0); w64(value); return 0; }
 int bk_machoobj(void) {
     long L; long bss; long ad; long ab; long offt; long offd; long roff; long nrel; long soff; long stoff;
-    long nsym; long strsz; long name; long cmds; int id; int k; int start; long v;
+    long nsym; long strsz; long name; long cmds; int id; int k; int start; long v; long tlen; long to; long at;
     L = bk_objnz; bss = bkdlen - L;
     ad = bk_round(bktlen, 16); ab = ad + bk_round(L, 16);
     start = bk_find("_start", 6);
+    bk_symplan();
     nrel = 0; k = 0;
-    while (k < bknro) { nrel = nrel + 1; if (bkarch && bkro_add[k] != 0) nrel = nrel + 1; k = k + 1; }
-    nsym = 3; strsz = 1 + 3 * 6; id = 0;
-    while (id < bknn) {
-        if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) { nsym = nsym + 1; strsz = strsz + bkname_len[id] + 2; }
-        id = id + 1;
-    }
-    nsym = nsym + 1; strsz = strsz + 7;
-    cmds = 72 + 80 * 3 + 24 + 24 + 80;
+    while (k < bknro) { nrel = nrel + 1; if (bkarch && bkro_add[k] != 0 && bkro_type[k] != 901) nrel = nrel + 1; k = k + 1; }
+    nsym = 3 + bksp_n1 + bksp_n2 + bksp_n3; strsz = 1 + 3 * 6; id = 0;
+    while (id < bknn) { if (bksp_kind[id]) strsz = strsz + bk_snamelen(id, id != start) + 1; id = id + 1; }
+    tlen = bk_tapelen();
+    cmds = 72 + 80 * (tlen ? 4 : 3) + 24 + 24 + 80;
     offt = bk_round(32 + cmds, 16);
     offd = offt + ad;
-    roff = bk_round(offd + L, 8);
+    to = bk_round(offd + L, 8); at = ab + bk_round(bss, 16);
+    roff = tlen ? bk_round(to + tlen, 8) : to;
     soff = roff + 8 * nrel;
     stoff = soff + 16 * nsym;
     w32(0xFEEDFACF); w32(bkarch ? 0x0100000C : 0x01000007); w32(bkarch ? 0 : 3);
     w32(1); w32(4); w32(cmds); w32(0); w32(0);
-    w32(25); w32(72 + 80 * 3); wname("", 16);
-    w64(0); w64(ab + bss); w64(offt); w64(ad + L); w32(7); w32(7); w32(3); w32(0);
+    w32(25); w32(72 + 80 * (tlen ? 4 : 3)); wname("", 16);
+    w64(0); w64(tlen ? at + tlen : ab + bss); w64(offt); w64(tlen ? to + tlen - offt : ad + L); w32(7); w32(7); w32(tlen ? 4 : 3); w32(0);
     wname("__text", 16); wname("__TEXT", 16); w64(0); w64(bktlen); w32(offt); w32(4); w32(roff); w32(nrel); w32(0x80000400); w32(0); w32(0); w32(0);
     wname("__data", 16); wname("__DATA", 16); w64(ad); w64(L); w32(offd); w32(4); w32(0); w32(0); w32(0); w32(0); w32(0); w32(0);
     wname("__bss", 16); wname("__DATA", 16); w64(ab); w64(bss); w32(0); w32(4); w32(0); w32(0); w32(1); w32(0); w32(0); w32(0);
+    if (tlen) { wname("__unisa_tape", 16); wname("__UNISA", 16); w64(at); w64(tlen); w32(to); w32(0); w32(0); w32(0); w32(0x02000000); w32(0); w32(0); w32(0); }   /* S_ATTR_DEBUG: not loaded */
     w32(0x32); w32(24); w32(1); w32(13 << 16); w32(13 << 16); w32(0);          /* LC_BUILD_VERSION macOS 13 */
     w32(2); w32(24); w32(soff); w32(nsym); w32(stoff); w32(strsz);              /* LC_SYMTAB */
-    w32(0xB); w32(80); w32(0); w32(nsym - 1); w32(nsym - 1); w32(1); w32(nsym); w32(0); wz(48);   /* LC_DYSYMTAB */
+    w32(0xB); w32(80); w32(0); w32(3 + bksp_n1); w32(3 + bksp_n1); w32(bksp_n2); w32(3 + bksp_n1 + bksp_n2); w32(bksp_n3); wz(48);   /* LC_DYSYMTAB */
     wz(offt - 32 - cmds);
     /* x86_64 SIGNED keeps its addend IN the displacement (S + field - (P+4));
        the encoder left 0 there and recorded the ELF-style A = offset - 4 */
@@ -302,33 +383,41 @@ int bk_machoobj(void) {
         bktext[bkro_off[k]] = f & 255; bktext[bkro_off[k] + 1] = (f >> 8) & 255;
         bktext[bkro_off[k] + 2] = (f >> 16) & 255; bktext[bkro_off[k] + 3] = (f >> 24) & 255;
         k = k + 1; } }
-    wtext(); wz(ad - bktlen); wdata(L); wz(roff - offd - L);
+    wtext(); wz(ad - bktlen); wdata(L); wz(to - offd - L);
+    if (tlen) { bk_tapew(); wz(roff - to - tlen); }
     k = 0;
     while (k < bknro) {
-        long a; long add; int s; a = bkro_off[k]; add = bkro_add[k]; s = bkro_sect[k] - 1;
-        if (bkarch) {
+        long a; long add; long s; a = bkro_off[k]; add = bkro_add[k];
+        s = bkro_sect[k] >= 1000 ? 3 + bksp_pos[bkro_sect[k] - 1000] : bkro_sect[k] - 1;
+        if (bkro_type[k] == 901) bk_mrel(a, s, 1, 1, 2);                          /* ARM64_RELOC_BRANCH26 */
+        else { if (bkro_type[k] == 900) bk_mrel(a, s, 1, 1, 2);                   /* X86_64_RELOC_BRANCH */
+        else { if (bkarch) {
             if (add != 0) bk_mrel(a, add, 0, 0, 10);                              /* ARM64_RELOC_ADDEND */
             if (bkro_type[k] == 275) bk_mrel(a, s, 1, 1, 3);                       /* ARM64_RELOC_PAGE21 */
             else bk_mrel(a, s, 0, 1, 4);                                           /* ARM64_RELOC_PAGEOFF12 */
-        } else bk_mrel(a, s, 1, 1, 1);                                             /* X86_64_RELOC_SIGNED */
+        } else bk_mrel(a, s, 1, 1, 1); } }                                         /* X86_64_RELOC_SIGNED */
         k = k + 1;
     }
     bk_msym(1, 14, 1, 0); bk_msym(7, 14, 2, ad); bk_msym(13, 14, 3, ab);          /* ltmp0..2 */
-    name = 19; id = 0;
-    while (id < bknn) {
-        if (id != start && bklab_tpc[id] >= 0) { bk_msym(name, 14, 1, toff[bklab_tpc[id]]); name = name + bkname_len[id] + 2; }
-        else { if (id != start && bksym_addr[id] >= 0) {
-            v = bksym_addr[id] - BK_DATA_BASE;
-            if (v >= L) bk_msym(name, 14, 3, ab + v - L); else bk_msym(name, 14, 2, ad + v);
-            name = name + bkname_len[id] + 2;
-        } }
-        id = id + 1;
+    name = 19; k = 1;
+    while (k <= 3) {
+        id = 0;
+        while (id < bknn) {
+            if (bksp_kind[id] == k) {
+                int ty; ty = k == 1 ? 14 : 15;                                     /* N_SECT, N_SECT|N_EXT */
+                if (k == 3) bk_msym(name, 1, 0, 0);                               /* N_UNDF|N_EXT */
+                else { if (bklab_tpc[id] >= 0) bk_msym(name, ty, 1, toff[bklab_tpc[id]]);
+                else { v = bksym_addr[id] - BK_DATA_BASE;
+                    if (v >= L) bk_msym(name, ty, 3, ab + v - L); else bk_msym(name, ty, 2, ad + v); } }
+                name = name + bk_snamelen(id, id != start) + 1;
+            }
+            id = id + 1;
+        }
+        k = k + 1;
     }
-    bk_msym(name, 15, 1, start >= 0 ? toff[bklab_tpc[start]] : 0);              /* N_SECT|N_EXT _start */
     wb(0); wname("ltmp0", 6); wname("ltmp1", 6); wname("ltmp2", 6);
-    id = 0;
-    while (id < bknn) { if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) bk_oname_w(id); id = id + 1; }
-    wname("_start", 7);
+    k = 1;
+    while (k <= 3) { id = 0; while (id < bknn) { if (bksp_kind[id] == k) bk_sname_w(id, id != start); id = id + 1; } k = k + 1; }
     return 0;
 }
 /* The COFF object (-c -b win/ARCH): three sections, section symbols as
@@ -346,15 +435,16 @@ int bk_csym(char *s, int n, long *strpos, long value, int sect, int type, int cl
     bk_cname(s, n, strpos); w32(value); w16(sect); w16(type); wb(cls); wb(0); return 0;
 }
 int bk_coffobj(void) {
-    long L; long bss; long offt; long offr; long offd; long offs; long nsym; long strpos; long v; long f;
+    long L; long bss; long offt; long offr; long offd; long offs; long nsym; long strpos; long v; long f; long tlen; long offtp;
     int id; int k; int start; int nimp; char *nm; int len; int base_imp;
     L = bk_objnz; bss = bkdlen + bk_bss - L;      /* + the arm64 tape stack (bk_bss), which is not in bkdlen */
     if (bknro > 65535) { __write(2, "object: more than 65535 relocations in .text\n", 45); __exit(1); }
     start = bk_find("_start", 6);
+    bk_symplan();
     k = 0;
     while (k < bknro) {                                   /* the addends go into the instruction fields */
         long o; long add; o = bkro_off[k]; add = bkro_add[k];
-        if (bkro_sect[k] < 100) {
+        if ((bkro_sect[k] < 100 || bkro_sect[k] >= 1000) && bkro_type[k] != 901) {
             if (bkarch == 0) {
                 f = add + 4;
                 bktext[o] = f & 255; bktext[o + 1] = (f >> 8) & 255; bktext[o + 2] = (f >> 16) & 255; bktext[o + 3] = (f >> 24) & 255;
@@ -369,42 +459,51 @@ int bk_coffobj(void) {
         }
         k = k + 1;
     }
-    nsym = 3; id = 0;
-    while (id < bknn) { if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) nsym = nsym + 1; id = id + 1; }
-    nsym = nsym + 1; base_imp = nsym; nimp = BK_NIMP; nsym = nsym + nimp;
-    offt = 144;
+    nsym = 3 + bksp_n1 + bksp_n2 + bksp_n3; base_imp = nsym; nimp = BK_NIMP; nsym = nsym + nimp;
+    tlen = bk_tapelen();
+    offt = tlen ? 192 : 144;
     offr = bk_round(offt + bktlen, 4);
     offd = bk_round(offr + 10 * bknro, 16);
-    offs = bk_round(offd + L, 4);
-    w16(bkarch ? 0xAA64 : 0x8664); w16(3); w32(0); w32(offs); w32(nsym); w16(0); w16(0);
+    offtp = bk_round(offd + L, 4);
+    offs = bk_round(offtp + tlen, 4);
+    w16(bkarch ? 0xAA64 : 0x8664); w16(tlen ? 4 : 3); w32(0); w32(offs); w32(nsym); w16(0); w16(0);
     wname(".text", 8); w32(0); w32(0); w32(bktlen); w32(offt); w32(offr); w32(0); w16(bknro); w16(0); w32(0x60500020);
     wname(".data", 8); w32(0); w32(0); w32(L); w32(offd); w32(0); w32(0); w16(0); w16(0); w32(0xC0500040);
     wname(".bss", 8); w32(0); w32(0); w32(bss); w32(0); w32(0); w32(0); w16(0); w16(0); w32(0xC0500080);
-    wz(offt - 140);
+    if (tlen) { wname(".unisatp", 8); w32(0); w32(0); w32(tlen); w32(offtp); w32(0); w32(0); w16(0); w16(0); w32(0x00100A00); }   /* LNK_INFO|LNK_REMOVE */
+    wz(offt - (tlen ? 180 : 140));
     wtext(); wz(offr - offt - bktlen);
     k = 0;
     while (k < bknro) {
         long sym; int ty;
-        sym = bkro_sect[k] >= 100 ? base_imp + bkro_sect[k] - 100 : bkro_sect[k] - 1;
-        if (bkarch) ty = bkro_type[k] == 275 ? 4 : 6; else ty = 4;
+        if (bkro_sect[k] >= 1000) sym = 3 + bksp_pos[bkro_sect[k] - 1000];
+        else sym = bkro_sect[k] >= 100 ? base_imp + bkro_sect[k] - 100 : bkro_sect[k] - 1;
+        if (bkarch) ty = bkro_type[k] == 901 ? 3 : (bkro_type[k] == 275 ? 4 : 6); else ty = 4;   /* BRANCH26 / PAGEBASE_REL21 / PAGEOFFSET_12A; REL32 */
         w32(bkro_off[k]); w32(sym); w16(ty);
         k = k + 1;
     }
     wz(offd - offr - 10 * bknro);
-    wdata(L); wz(offs - offd - L);
+    wdata(L); wz(offtp - offd - L);
+    if (tlen) bk_tapew();
+    wz(offs - offtp - tlen);
     strpos = 4;
     bk_csym(".text", 5, &strpos, 0, 1, 0, 3); bk_csym(".data", 5, &strpos, 0, 2, 0, 3); bk_csym(".bss", 4, &strpos, 0, 3, 0, 3);
-    id = 0;
-    while (id < bknn) {
-        if (id != start && bklab_tpc[id] >= 0) bk_csym(bkpool + bkname_at[id], bkname_len[id], &strpos, toff[bklab_tpc[id]], 1, 0, 3);
-        else { if (id != start && bksym_addr[id] >= 0) {
-            v = bksym_addr[id] - BK_DATA_BASE;
-            if (v >= L) bk_csym(bkpool + bkname_at[id], bkname_len[id], &strpos, v - L, 3, 0, 3);
-            else bk_csym(bkpool + bkname_at[id], bkname_len[id], &strpos, v, 2, 0, 3);
-        } }
-        id = id + 1;
+    k = 1;
+    while (k <= 3) {
+        id = 0;
+        while (id < bknn) {
+            if (bksp_kind[id] == k) {
+                char *sn; int sl; int cls; cls = k == 1 ? 3 : 2;           /* STATIC / EXTERNAL */
+                sn = bkpool + bkname_at[id] + bk_sprefix(id); sl = bk_snamelen(id, 0);
+                if (k == 3) bk_csym(sn, sl, &strpos, 0, 0, 0, 2);
+                else { if (bklab_tpc[id] >= 0) bk_csym(sn, sl, &strpos, toff[bklab_tpc[id]], 1, k == 2 ? 0x20 : 0, cls);
+                else { v = bksym_addr[id] - BK_DATA_BASE;
+                    if (v >= L) bk_csym(sn, sl, &strpos, v - L, 3, 0, cls); else bk_csym(sn, sl, &strpos, v, 2, 0, cls); } }
+            }
+            id = id + 1;
+        }
+        k = k + 1;
     }
-    bk_csym("_start", 6, &strpos, start >= 0 ? toff[bklab_tpc[start]] : 0, 1, 0x20, 2);
     nm = BK_IMPS; k = 0;
     while (k < nimp) {
         char b[48]; int q;
@@ -415,12 +514,11 @@ int bk_coffobj(void) {
         nm = nm + len + 1; k = k + 1;
     }
     w32(strpos);                                          /* the string table, sized first */
-    id = 0;
-    while (id < bknn) {
-        if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0) && bkname_len[id] > 8) {
-            k = 0; while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; } wb(0);
-        }
-        id = id + 1;
+    k = 1;
+    while (k <= 3) {
+        id = 0;
+        while (id < bknn) { if (bksp_kind[id] == k && bk_snamelen(id, 0) > 8) bk_sname_w(id, 0); id = id + 1; }
+        k = k + 1;
     }
     nm = BK_IMPS; k = 0;
     while (k < nimp) {
@@ -431,6 +529,7 @@ int bk_coffobj(void) {
     return 0;
 }
 int bk_object(char *t, int n, char *target) {
+    bk_objtape = t; bk_objtapen = n; bk_objtarget = target;   /* the unit tape, before pruning (tp_prune writes elsewhere) */
     bkos = 0; if (target[0] == 111) bkos = 1;
     if (target[0] == 119) bkos = 2;
     bkarch = 0; if (target[4] == 97) bkarch = 1;
