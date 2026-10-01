@@ -253,9 +253,11 @@ red=$R/tests/c
 # to locate, so the assertion lost its subject; the probes stay in tests/c as
 # red examples for the difftest ledgers, and their positions are no longer
 # this suite's business.
-# 11/29: the `reject: not covered:` shape, which carried no position at all
-poscase "$red/fb12-11-comment-then-continuation.c" "10:1" "not covered"
-poscase "$red/fb12-29-macro-more-than-8-params.c" "12:1" "not covered"
+# 11/29/31 used to be here too (the `reject: not covered:` shape and the
+# positionless `undefined function`).  All three constructs are SUPPORTED on
+# both routes since 0.0.16 (R16-10, 2026-10-01): the programs compile and run
+# to gcc's output and exit status, so there is no diagnostic left to locate;
+# the probes stay in tests/c as red examples for the difftest ledgers.
 # 31: undefined function -- the call site is what a reader needs.  Measured
 # per driver, because the three drivers do NOT agree on this batch:
 #
@@ -266,7 +268,6 @@ poscase "$red/fb12-29-macro-more-than-8-params.c" "12:1" "not covered"
 # None of the three gives both, and the product gives neither.  So a case is
 # asserted only against the driver whose contract covers it; asserting all
 # three everywhere would make each route fail on the other route's gap.
-poscase "$red/fb12-31-unused-static-refs-undefined.c" "12:41" "undefined function"
 # The fixtures, and the cases that are not compiler diagnostics at all.
 # Each asks the SAME question the block above asks -- does the message begin
 # with the user's file and line -- and each answers "no" on the product today,
@@ -299,13 +300,6 @@ fi
 # E2's DG.inc (the same file:line:col, the same words).
 { echo '/* a header that no distribution bundles */'; echo; echo; echo; echo '#include <no_such_header_zz.h>'; echo 'int main(void) { return 0; }'; } > "$T/nohdr.c"
 poscase "$T/nohdr.c" "5:11" "no such file for #include"
-# The reference front end, where 31 reports `CError: line 853` for a 13-line
-# file -- a position in the compiler's spliced buffer passed off as the user's.
-# A wrong line is worse than no line.  This one is about the PYTHON front end,
-# so it is meaningful only on the default route.
-if [ "$(basename "$UA")" = ua_ref ]; then
-    poscase "$red/fb12-31-unused-static-refs-undefined.c" "12:41" "undefined function" ref
-fi
 printf "  rejection positions: %d named correctly, %d known missing, %d wrong\n" \
     "$pos_ok" "$pos_known" "$pos_bad"
 [ "$pos_bad" -eq 0 ] && [ $((pos_ok + pos_known)) -gt 0 ] && [ "$pos_revived" -eq 0 ] \

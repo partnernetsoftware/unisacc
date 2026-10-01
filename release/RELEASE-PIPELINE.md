@@ -85,4 +85,18 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 # 13 回执 research/r<N>-release-acceptance.json；plans/v$V.md → archive/plans/；prd 版本行；通知 cdx 解冻
 ```
 
+## 10. 发布前必跑清单（R16-14，0.0.16 起；每项要有当次的证据行，缺一不发）
+
+| # | 项 | 怎么跑 | 证据 |
+|---|---|---|---|
+| 1 | 本地滚动队列全绿 | `tests/release.sh --com` 直到 rc=0 | GATE_STATE 目录与 HEAD |
+| 2 | origin `release-check` 对结项提交绿 | `gh run list -w release-check -L 1` | run id / attempt |
+| 3 | Windows `-run` 义务 | `tests/vms.sh up` → `./tests/crossnative.sh`（win/x86_64、win/arm64 都不得是 skip）→ `tests/vms.sh down` | crossnative 汇总行 |
+| 4 | 六平台外部执行与自举证据 | release-check 的六个 candidate runner 全绿（含 win 与 osx 两架构） | 同 2 的 run 页 |
+| 5 | Linux x86_64 真机运行 | `./tests/linux.sh`（minicon-lnx-x86_64，模拟时看门狗 ×10），含 elfobj 的 x86_64 程序链接后运行 | linux.sh 汇总行 |
+| 6 | 产品自我演示 | `python3 tests/comdemo.py --com <候选>`、`MODEL_COM=<候选> tests/fb12multi.sh` | demo.json、fb12multi 汇总 |
+| 7 | 语料棘轮 | `./tests/realprog.sh`、`./tests/tools.sh`、corpus 1–4：pass 不低于 baseline，且 realprog 比上一版至少多过一个 | 各自汇总行 |
+
+0.0.15 因不发布而没有补的是第 3、4 两项；0.0.16 新增第 5 项（x86_64 的 `.o` 只在本机链接过，还没在 x86_64 机器上运行）。
+
 **结项条件（0.0.16 起，发布与不发布的版本都适用）**：本地 `tests/release.sh --com` rc=0 **且** `gh run list -w release-check -L 1` 对结项提交为 success，两者缺一不得结项。0.0.15 只看了本地队列就结项，而 origin 自 300e8c9 起红了十二次提交（ci plan 自检被 0a8d265 的 knownfail 调用打破，127b6b1 修复）。
