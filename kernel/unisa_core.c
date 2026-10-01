@@ -4,7 +4,7 @@
  * unisa/ckernel.py.  The model it reads is the file included below.
  * No softmax, no libm, no malloc, no multiply, no float.
  * Inputs (sha256, first 12 hex digits):
- *   unisa/ckernel.py             d54d70c049f3 */
+ *   unisa/ckernel.py             db184ffec275 */
 
 #include "unisa_model.inc"
 
