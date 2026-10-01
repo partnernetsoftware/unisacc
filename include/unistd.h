@@ -71,4 +71,143 @@ static int unlink(const char *__u_path) {
     return 0;
 }
 #endif
+/* ---- processes (0.0.19 R19-5), through the generic gate __syscall6 (R19-9):
+   the call numbers live here, per OS/arch; nothing in the compiler's tables.
+   macOS x86-64 numbers carry the BSD class 0x2000000.  macOS fork returns the
+   same value in both processes (the child mark is in a second register), so
+   the child is told apart by its pid; macOS has no pipe2, so pipe is a
+   socketpair (AF_UNIX stream: bidirectional, stated rather than hidden). */
+#ifndef _WIN32
+#if defined(__APPLE__) && defined(__x86_64__)
+#define _UNISA_SC(n) (0x2000000L + (n))
+#else
+#define _UNISA_SC(n) ((long)(n))
+#endif
+#ifdef __APPLE__
+#define _UNISA_NR_getpid 20
+#define _UNISA_NR_fork 2
+#define _UNISA_NR_execve 59
+#define _UNISA_NR_wait4 7
+#define _UNISA_NR_dup2 90
+#define _UNISA_NR_getppid 39
+#elif defined(__x86_64__)
+#define _UNISA_NR_getpid 39
+#define _UNISA_NR_fork 57
+#define _UNISA_NR_execve 59
+#define _UNISA_NR_wait4 61
+#define _UNISA_NR_dup2 33
+#define _UNISA_NR_pipe2 293
+#define _UNISA_NR_getcwd 79
+#define _UNISA_NR_getppid 110
+#else
+#define _UNISA_NR_getpid 172
+#define _UNISA_NR_clone 220
+#define _UNISA_NR_execve 221
+#define _UNISA_NR_wait4 260
+#define _UNISA_NR_dup3 24
+#define _UNISA_NR_pipe2 59
+#define _UNISA_NR_getcwd 17
+#define _UNISA_NR_getppid 173
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__exit
+static void _exit(int __u_code) { __exit(__u_code); }   /* no atexit handlers, no stdio flush */
+#endif
+static long _unisa_ret(long __u_r) { if (__u_r < 0 && __u_r > -4096) { errno = (int)(0 - __u_r); return -1; } return __u_r; }
+#if !__UNISA_FTRIM_LIBC || __UN_getpid || __UN_fork
+static pid_t getpid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getpid), 0, 0, 0, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getppid
+static pid_t getppid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getppid), 0, 0, 0, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_fork
+static pid_t fork(void) {
+    long __u_r;
+#ifdef __APPLE__
+    long __u_me; __u_me = getpid();
+    __u_r = __syscall6(_UNISA_SC(_UNISA_NR_fork), 0, 0, 0, 0, 0);
+    if (__u_r >= 0 && getpid() != __u_me) return 0;   /* the child */
+#elif defined(__x86_64__)
+    __u_r = __syscall6(_UNISA_NR_fork, 0, 0, 0, 0, 0);
+#else
+    __u_r = __syscall6(_UNISA_NR_clone, 17, 0, 0, 0, 0);    /* SIGCHLD, no new stack: fork */
+#endif
+    return (pid_t)_unisa_ret(__u_r);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_execve || __UN_execvp || __UN_execv
+static int execve(const char *__u_path, char *const __u_argv[], char *const __u_envp[]) {
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_execve), (long)__u_path, (long)__u_argv, (long)__u_envp, 0, 0));
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_execvp || __UN_execv
+static char *_unisa_envv[4096];
+static char **_unisa_environ(void) {        /* the process environment, as getenv walks it */
+    int __u_k; int __u_n; __u_k = __argc() + 1; __u_n = 0;
+    while (__u_n < 4095 && __argv(__u_k) != 0) { _unisa_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+    _unisa_envv[__u_n] = 0;
+    return _unisa_envv;
+}
+static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, _unisa_environ()); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_execvp
+#include <stdlib.h>
+static int execvp(const char *__u_file, char *const __u_argv[]) {
+    char __u_buf[1024]; const char *__u_p; int __u_i; int __u_j; int __u_k;
+    __u_i = 0; while (__u_file[__u_i]) { if (__u_file[__u_i] == 47) return execv(__u_file, __u_argv); __u_i = __u_i + 1; }
+    __u_p = getenv("PATH"); if (__u_p == 0) __u_p = "/usr/bin:/bin";
+    while (1) {
+        __u_j = 0;
+        while (__u_p[__u_j] && __u_p[__u_j] != 58 && __u_j < 900) { __u_buf[__u_j] = __u_p[__u_j]; __u_j = __u_j + 1; }
+        if (__u_j == 0) { __u_buf[0] = 46; __u_j = 1; }
+        __u_buf[__u_j] = 47; __u_k = 0;
+        while (__u_file[__u_k] && __u_j + 1 + __u_k < 1023) { __u_buf[__u_j + 1 + __u_k] = __u_file[__u_k]; __u_k = __u_k + 1; }
+        __u_buf[__u_j + 1 + __u_k] = 0;
+        execv(__u_buf, __u_argv);
+        while (*__u_p && *__u_p != 58) __u_p = __u_p + 1;
+        if (*__u_p == 0) break;
+        __u_p = __u_p + 1;
+    }
+    return -1;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_dup2
+static int dup2(int __u_old, int __u_new) {
+#if defined(__APPLE__) || defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup2), __u_old, __u_new, 0, 0, 0));
+#else
+    if (__u_old == __u_new) { long __u_r; __u_r = __fcntl(__u_old, 1, 0); return __u_r < 0 ? (int)_unisa_ret(__u_r) : __u_new; }   /* F_GETFD: is it open */
+    return (int)_unisa_ret(__syscall6(_UNISA_NR_dup3, __u_old, __u_new, 0, 0, 0));
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_pipe
+static int pipe(int __u_fds[2]) {
+#ifdef __APPLE__
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(135), 1, 1, 0, (long)__u_fds, 0));   /* socketpair(AF_UNIX, SOCK_STREAM) */
+#else
+    return (int)_unisa_ret(__syscall6(_UNISA_NR_pipe2, (long)__u_fds, 0, 0, 0, 0));
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getcwd
+static char *getcwd(char *__u_buf, size_t __u_size) {
+#ifdef __APPLE__
+    char __u_tmp[1024]; long __u_fd; long __u_r; size_t __u_n;
+    __u_fd = __open(".", 0x100000, 0);           /* O_RDONLY | O_DIRECTORY */
+    if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
+    __u_r = __fcntl(__u_fd, 50, (long)__u_tmp);  /* F_GETPATH (needs MAXPATHLEN bytes) */
+    __close(__u_fd);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; }
+    __u_n = 0; while (__u_tmp[__u_n]) __u_n = __u_n + 1;
+    if (__u_n + 1 > __u_size) { errno = 34; return 0; }   /* ERANGE */
+    __u_n = 0; while ((__u_buf[__u_n] = __u_tmp[__u_n]) != 0) __u_n = __u_n + 1;
+    return __u_buf;
+#else
+    long __u_r; __u_r = __syscall6(_UNISA_NR_getcwd, (long)__u_buf, (long)__u_size, 0, 0, 0);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; }
+    return __u_buf;
+#endif
+}
+#endif
+#endif
 #endif

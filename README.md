@@ -20,7 +20,7 @@ N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
 c-testsuite corpus compile and run (`realprog`, `tools`, `corpus` gates), and
-since 0.0.18 so does the kilo editor; Lua and SQLite do not build yet, each for
+since 0.0.18 so does the kilo editor; processes (`fork`, `execvp`, `waitpid`, `pipe`, `dup2`, `getcwd`, `sys/wait.h`) arrived in 0.0.19 on Linux and macOS; Lua and SQLite do not build yet, each for
 a named missing header (`setjmp.h`, `pwd.h`), see `tests/realprog.sh`; the language-side gaps are complex
 types and trigraphs, and the bundled C library is a documented subset;
 all are itemised in [the limitations table](#known-limitations) below. What is unusual is inside: every *table-shaped*
