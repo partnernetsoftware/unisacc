@@ -48,13 +48,17 @@ up() {
             echo "  vm $WINVM starting"
             b 55 "$UTM" start "$WINVM" >/dev/null 2>&1
             echo "utm $WINVM" >> "$STATE"
-            # up means the guest agent answers, not that the VM is powered
+            # up means the guest agent answers, not that the VM is powered.
+            # `utmctl exec` (with or without --hide) returns 0 while the agent
+            # is still down (it only prints OSStatus -2700), so it cannot be
+            # the signal: an IP address is reported only by a running agent.
+            # 0.0.17's first must-run pass skipped every Windows leg on this.
             i=0
             while [ $i -lt 36 ]; do
-                b 10 "$UTM" exec "$WINVM" --hide --cmd cmd.exe -- /c echo up \
-                    >/dev/null 2>&1 && break
+                [ -n "$(b 10 "$UTM" ip-address "$WINVM" 2>/dev/null | head -1)" ] && break
                 sleep 5; i=$((i+1))
             done
+            [ $i -lt 36 ] && sleep 15      # the agent answers IP before it runs commands
             [ $i -lt 36 ] && echo "  vm $WINVM up" || echo "  vm $WINVM did NOT answer"
         fi
     fi

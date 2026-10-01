@@ -75,7 +75,7 @@ if [ -x "$UTM" ] && "$UTM" status "$VM" 2>/dev/null | grep -q started \
     "$UTM" file push "$VM" 'C:\u\r'"$n"'.c' < "$T/wf.c" 2>/dev/null
     printf '@echo off\r\ncd /d C:\\u\r\nr%swin_x86_64.exe -run r%s.c > r%s.txt 2>&1\r\nr%swin_arm64.exe -run r%s.c >> r%s.txt 2>&1\r\necho done > r%sd.txt\r\n' \
         "$n" "$n" "$n" "$n" "$n" "$n" "$n" | "$UTM" file push "$VM" 'C:\u\r'"$n"'.bat' 2>/dev/null
-    "$UTM" exec "$VM" --hide --cmd cmd.exe -- /c 'C:\u\r'"$n"'.bat' >/dev/null 2>&1
+    "$UTM" exec "$VM" --cmd cmd.exe -- /c 'C:\u\r'"$n"'.bat' >/dev/null 2>&1   # never --hide: OSStatus -10004
     i=0; while [ $i -lt 60 ]; do
         case "$("$UTM" file pull "$VM" 'C:\u\r'"$n"'d.txt' 2>&1)" in *done*) break;; esac
         i=$((i+1)); sleep 3; done

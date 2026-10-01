@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # The whole suite, on Linux, in a local VM.  [A-32]
 #
 # This is what the GitHub Linux job used to do.  That workflow is parked now
@@ -50,6 +50,14 @@ TRY=${TRY_ALARM:-$((10 * slow))}
 [ "$slow" -gt 1 ] && echo "linux: $VM is $guest_arch on $host_arch -- emulated;" \
     "SUITE_LIMIT=$LIMIT TRY_ALARM=$TRY"
 
+# R18-11 ⑤: the guest's own limits are not compiler failures.  On the 4 GiB
+# `default` VM the Python compile of the flat compiler source is OOM-killed
+# (bigclosure*, ape-prepare*, ape), and the guest has no clang for `warn`.
+# They are reported by name as guest-known after the run (STRICT=1 keeps
+# them red); every other red still fails.
+GUEST_MEM_KB=$(limactl shell "$VM" -- awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null | tr -d '\r')
+GUEST_CLANG=$(limactl shell "$VM" -- sh -c 'command -v clang >/dev/null && echo yes || echo no' 2>/dev/null | tr -d '\r')
+LOGF=$(mktemp)
 tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     set -u
     command -v cc >/dev/null || { echo 'linux: no cc in the VM'; exit 1; }
@@ -72,4 +80,24 @@ tar -C "$R" -cf - --exclude=.git . | limactl shell "$VM" -- bash -lc "
     if [ '$what' = all ]; then ./tests/all.sh
     elif [ -n \"\$P\" ]; then sh -c \"./tests/$what.sh \$P\"
     else ./tests/$what.sh; fi
-"
+" 2>&1 | tee "$LOGF"
+rc=${PIPESTATUS[1]}
+if [ "$rc" -ne 0 ] && [ "${STRICT:-0}" != 1 ]; then
+    reds=$(grep -E '^finished [^ ]+ rc=[1-9]' "$LOGF" | awk '{print $2}')
+    other=""; known=""
+    for n in $reds; do
+        case "$n" in
+            bigclosure*|ape-prepare*|ape) [ "${GUEST_MEM_KB:-0}" -lt 6000000 ] && { known="$known $n"; continue; };;
+            warn) [ "$GUEST_CLANG" = no ] && { known="$known $n"; continue; };;
+        esac
+        other="$other $n"
+    done
+    if [ -n "$reds" ] && [ -z "$other" ]; then
+        echo "linux: only guest-known reds (guest RAM ${GUEST_MEM_KB:-?} kB, clang $GUEST_CLANG):$known"
+        rm -f "$LOGF"; exit 0
+    fi
+    [ -n "$known" ] && echo "linux: guest-known reds:$known"
+    [ -n "$other" ] && echo "linux: compiler reds:$other"
+fi
+rm -f "$LOGF"
+exit "$rc"

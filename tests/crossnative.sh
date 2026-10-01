@@ -96,8 +96,9 @@ run_windows() {
         echo "  skip $target ($vm not started)"; echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
     # status can say `started` for a machine that is going down, or whose
     # guest agent is not up yet: only an answered command counts
-    "$_BOUND" 20 "$UTM" exec "$vm" --cmd cmd.exe -- /c echo up \
-        >/dev/null 2>&1 || { echo "  skip $target ($vm agent not answering)"; echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
+    # (utmctl exec returns 0 even without the agent; the agent's IP is the signal)
+    [ -n "$("$_BOUND" 20 "$UTM" ip-address "$vm" 2>/dev/null | head -1)" ] \
+        || { echo "  skip $target ($vm agent not answering)"; echo "$target" >> "${SKIPFILE:-/dev/null}"; return 0; }
     t=$(date +%s)$RANDOM
     Z='C:\u\z'"$t"'.txt'; Y='C:\u\y'"$t"'.txt'
     D='C:\u\d'"$t"'.txt'; G='C:\u\g'"$t"'.bat'
