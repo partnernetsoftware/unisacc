@@ -147,7 +147,11 @@ def emit_headers(incdir, path):
     has them, which keeps editing `include/` during development immediate.
     """
     import os as _os
-    names = sorted(n for n in _os.listdir(incdir) if n.endswith(".h"))
+    # every header, subdirectories included (`sys/types.h`): the product's
+    # package always carried them, the reference table did not, so
+    # `#include <sys/types.h>` failed outside the repository (0.0.17)
+    names = sorted(_os.path.relpath(_os.path.join(d, n), incdir).replace(_os.sep, "/")
+                   for d, _, fs in _os.walk(incdir) for n in fs if n.endswith(".h"))
     L = _provenance("The C library the compiler carries: each include/*.h packed "
                     "as a string,\n * because a shipped binary has no include/ to read.",
                     ["include/" + n for n in names]) + ['',

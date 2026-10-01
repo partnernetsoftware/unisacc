@@ -31,7 +31,7 @@ sqlite|zip|https://www.sqlite.org/2025/sqlite-amalgamation-3490100.zip|6cebd1d84
 # name|repo|files (relative to the clone)|extra cflags|program arguments|stdin file (or -)
 ENTRIES="jsmn-simple|jsmn|example/simple.c|-I.||-
 cjson|cJSON|cJSON.c test.c|-I.||-
-jsmn-dump|jsmn|example/jsondump.c|-I.||example/simple.c
+jsmn-dump|jsmn|example/jsondump.c|-I.||../cJSON/tests/inputs/test1
 kilo|kilo|kilo.c|||-
 lua|lua|onelua.c|-DMAKE_LUA -I.|-e print(1+1)|-
 sqlite|sqlite|shell.c sqlite3.c|-I.|:memory: select(1+1)|-"
