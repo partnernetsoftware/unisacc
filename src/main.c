@@ -27,6 +27,7 @@ int main(void) {
     ftrim_libc = 1;
     if (__argc() >= 2) { if (strsame(__argv(1), "ar")) return tl_ar(__argc()); }   /* `unisacc ar ...` (R17-3) */
     if (__argc() >= 2) { if (strsame(__argv(1), "as")) return at_main(__argc()); }  /* `unisacc as ...` (R18-1) */
+    if (__argc() >= 2) { if (strsame(__argv(1), "nm") || strsame(__argv(1), "objdump")) return at_view(__argc()); }   /* R18-4 */
     /* Default mode is RUN (owner, 2026-10-01; 0.0.17 R17-10): with no mode or
        output flag at all, `unisacc FILE.c [args]` compiles and runs in memory,
        exactly as `-run` does -- deliberately unlike cc's silent a.out.  A file

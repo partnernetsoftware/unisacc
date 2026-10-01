@@ -144,6 +144,14 @@ static Buf asmbuf;
 int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)p[k],0); return 0; }
 #define AT_PRODUCT 1
 #include "../../src/asmtext.c"
+static int product_view(int argc,char **argv) {
+    int dis=argv[1][0]=='o';
+    if (dis ? (argc!=4 || strcmp(argv[2],"-d")) : argc!=3) { fputs(dis ? "usage: unisacc objdump -d FILE.o\n" : "usage: unisacc nm FILE.o\n",stderr); return 2; }
+    const char *f=argv[dis ? 3 : 2]; int len=0; unsigned char *b=source_read(f,&len);
+    asmbuf.n=0;
+    if (dis ? at_dis((char *)b,len) : at_nm((char *)b,len)) { fprintf(stderr,"%s: %s: %s (Linux objects; Mach-O and COFF: 0.0.19)\n",dis ? "objdump" : "nm",f,at_err); free(b); return 1; }
+    free(b); fwrite(asmbuf.b,1,asmbuf.n,stdout); return 0;
+}
 static int product_as(int argc,char **argv) {
     const char *in=0,*out="a.out"; int arch=!strcmp(NATIVE_ARCH,"arm64");
     for (int i=2;i<argc;i++) {
@@ -258,6 +266,7 @@ int main(int argc, char **argv) {
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
     if (argc>=2 && !strcmp(argv[1],"ar")) return product_ar(argc,argv);   /* R17-3 */
     if (argc>=2 && !strcmp(argv[1],"as")) return product_as(argc,argv);   /* R18-1 */
+    if (argc>=2 && (!strcmp(argv[1],"nm") || !strcmp(argv[1],"objdump"))) return product_view(argc,argv);   /* R18-4 */
     int sawS=0;
     Buf srcres={0};                   /* \0cli/source: the main source path */
     /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output

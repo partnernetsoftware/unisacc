@@ -160,6 +160,12 @@ int tl_unit(char *t, int n, int u) {
             } else { if (t[i] == 32 || t[i] == 9) {
                 j = i; while (j < e && (t[j] == 32 || t[j] == 9)) j = j + 1;
                 q = j; while (q < e && t[q] != 32 && t[q] != 9) q = q + 1;   /* the op, as it is */
+                /* `.sys NAME, ...`: NAME is a system call, never a unit's name
+                   (a unit that carries `exit` or `rename` must not rename it) */
+                if (tl_same(t + j, q - j, ".sys", 4) || tl_same(t + j, q - j, ".sys6", 5)) {
+                    while (q < e && (t[q] == 32 || t[q] == 9)) q = q + 1;
+                    while (q < e && t[q] != 44) q = q + 1;
+                }
                 tl_os(t + i, q - i);
                 tl_operands(t, q, e, u);
             } else {

@@ -1380,6 +1380,53 @@ int at_dis(char *o, long n) {
     return 0;
 }
 
+/* ==== nm: the symbol table, as GNU/LLVM nm prints it (R18-4, 0.0.18) ==== */
+int at_nmord[AT_MAXS];
+int at_nmlt(int a, int b) {                    /* name a sorts before name b (bytes) */
+    int k; k = 0;
+    while (k < at_dsnl[a] && k < at_dsnl[b]) {
+        if ((at_dsnm[a][k] & 255) != (at_dsnm[b][k] & 255)) return (at_dsnm[a][k] & 255) < (at_dsnm[b][k] & 255);
+        k = k + 1;
+    }
+    return at_dsnl[a] < at_dsnl[b];
+}
+int at_nm(char *o, long n) {
+    long shoff; int shnum; long soff; long ssz; long stoff; long stsz; int nsym; int nloc; int i; int m;
+    at_err = 0; at_on = 0;
+    if (n < 64 || at_rd(o, 4) != 0x464C457F || (o[4] & 255) != 2 || at_rd(o + 16, 2) != 1) { at_err = "not an ELF relocatable object"; return 1; }
+    shoff = (long)at_rd(o + 40, 8); shnum = (int)at_rd(o + 60, 2);
+    if ((shnum != 8 && shnum != 9) || shoff + 64 * shnum > n) { at_err = "not an object unisacc wrote (section count)"; return 1; }
+    if (!at_secto(o, n, 5, &soff, &ssz, shoff) || !at_secto(o, n, 6, &stoff, &stsz, shoff)) { at_err = "section outside the file"; return 1; }
+    nsym = (int)(ssz / 24); nloc = (int)at_rd(o + shoff + 64 * 5 + 44, 4);
+    if (nsym > AT_MAXS) { at_err = "symbol table"; return 1; }
+    m = 0; i = 4;
+    while (i < nsym) {
+        char *s; long nm; s = o + soff + 24 * i;
+        nm = (long)at_rd(s, 4); if (nm >= stsz) { at_err = "symbol name"; return 1; }
+        at_dsnm[i] = o + stoff + nm; at_dsnl[i] = at_slen(at_dsnm[i]);
+        at_dsshn[i] = (int)at_rd(s + 6, 2); at_dsval[i] = (long)at_rd(s + 8, 8);
+        {   int j; j = m; while (j > 0 && at_nmlt(i, at_nmord[j - 1])) { at_nmord[j] = at_nmord[j - 1]; j = j - 1; } at_nmord[j] = i; }
+        m = m + 1; i = i + 1;
+    }
+    i = 0;
+    while (i < m) {
+        int j; int c; j = at_nmord[i];
+        if (at_dsshn[j] == 0) at_s("                 U ");
+        else {
+            c = at_dsshn[j] == 1 ? 116 : (at_dsshn[j] == 2 ? 100 : 98);
+            if (j >= nloc) c = c - 32;
+            {   char d[17]; int k; unsigned long v; v = at_dsval[j]; k = 15;
+                while (k >= 0) { d[k] = "0123456789abcdef"[v & 15]; v = v >> 4; k = k - 1; }
+                at_sn(d, 16); }
+            at_c(32); at_c(c); at_c(32);
+        }
+        at_sn(at_dsnm[j], at_dsnl[j]); at_c(10);
+        i = i + 1;
+    }
+    at_flush();
+    return 0;
+}
+
 /* ==== the assembler ==== */
 /* items: one per text line that emits (instruction or bytes) or defines a label */
 #define AT_MAXI 2097152
@@ -1749,6 +1796,20 @@ int at_asm(char *src, long n, int arch) {
 #ifndef AT_PRODUCT
 /* `unisacc as [-b lnx/ARCH] FILE.s [-o FILE.o]` */
 int at_say(char *m) { __write(2, m, blen(m)); return 0; }
+/* `unisacc nm FILE.o`, `unisacc objdump -d FILE.o` (Linux objects; R18-4) */
+int at_view(int argc) {
+    char *a; char *f; int fd; long n; int dis;
+    a = __argv(1); dis = a[0] == 111;
+    f = __argv(dis ? 3 : 2);
+    if (dis && (argc != 4 || !strsame(__argv(2), "-d"))) { at_say("usage: unisacc objdump -d FILE.o\n"); return 2; }
+    if (!dis && argc != 3) { at_say("usage: unisacc nm FILE.o\n"); return 2; }
+    fd = ropen(f); if (fd < 0) { at_say("cannot read "); at_say(f); at_say("\n"); return 1; }
+    n = __read(fd, at_src, 33554432); __close(fd);
+    if (n < 0 || n >= 33554432) { at_say("input too large\n"); return 1; }
+    at_fd = 1; at_wfail = 0;
+    if (dis ? at_dis(at_src, n) : at_nm(at_src, n)) { at_say(dis ? "objdump: " : "nm: "); at_say(f); at_say(": "); at_say(at_err); at_say(" (Linux objects; Mach-O and COFF: 0.0.19)\n"); return 1; }
+    return 0;
+}
 int at_main(int argc) {
     int i; char *in; char *out; int arch; int fd; long n; char *a;
     in = 0; out = "a.out"; arch = 0 - 1;

@@ -82,6 +82,17 @@ for a in x86_64 arm64; do
     say "hand-written $a = system as" same "$(cmp -s <(sections "$T/h1.o") <(sections "$T/h2.o") && echo same || echo differ)"
 done
 
+# nm (R18-4): the same lines as the system nm, on objects of both targets
+for a in x86_64 arm64; do
+    for b in a_arith b_funcptr; do
+        "$_BOUND" 20 "$UA" tests/c/$b.c -c -b lnx/$a -o "$T/n.o" 2>/dev/null
+        if nm "$T/n.o" >/dev/null 2>&1; then
+            say "nm $a $b = system nm" same "$(cmp -s <("$_BOUND" 20 "$UA" nm "$T/n.o") <(nm "$T/n.o") && echo same || echo differ)"
+        else skip=$((skip+1)); echo "  skip nm $a (the system nm does not read ELF)"; fi
+        say "objdump -d $a $b = -S" same "$(cmp -s <("$_BOUND" 20 "$UA" objdump -d "$T/n.o") <("$_BOUND" 20 "$UA" tests/c/$b.c -S -b lnx/$a -o -) && echo same || echo differ)"
+    done
+done
+
 # 5. refusals, by name
 printf '\t.text\n\tvfmadd231pd\t%%ymm1, %%ymm2, %%ymm3\n' > "$T/bad.s"
 say "unknown instruction refused" "not in the subset" "$("$_BOUND" 20 "$UA" as -b lnx/x86_64 "$T/bad.s" -o "$T/bad.o" 2>&1 | grep -o 'not in the subset')"
