@@ -3473,7 +3473,7 @@ int stfind(int t) {
 
 int stnew(int t, int isunion) {
     int k;
-    name_toolong(t);
+    if (t >= 0) name_toolong(t);
     if (nstruct >= MAXSTRUCT) { __write(2, "too many structs\n", 17); __exit(1); }
     k = 0;
     if (t >= 0) {
