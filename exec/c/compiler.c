@@ -246,6 +246,7 @@ static int link_objects(const char **paths,int n,Buf *out) {
         }
         free(used); free(b);
     }
+    if (tl_check_undef()) return 1;              /* R20-3: shared with the reference linker */
     tl_os("__init:\n",8);
     for (int k=0;k<u;k++) { tl_os("  call __init_u",15); tl_num(k); tl_o(10); }
     tl_os("  ret\n",6);

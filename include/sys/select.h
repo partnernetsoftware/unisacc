@@ -11,7 +11,8 @@ typedef struct { unsigned long fds_bits[FD_SETSIZE / 64]; } fd_set;
 #define FD_SET(d, s) ((s)->fds_bits[(d) / 64] |= (1UL << ((d) % 64)))
 #define FD_CLR(d, s) ((s)->fds_bits[(d) / 64] &= ~(1UL << ((d) % 64)))
 #define FD_ISSET(d, s) (((s)->fds_bits[(d) / 64] >> ((d) % 64)) & 1UL)
-#if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_select)   /* Windows has no poll here (poll.h) */
+#ifndef _WIN32   /* Windows has no poll here (poll.h) */
+#if !__UNISA_FTRIM_LIBC || __UN_select
 static int select(int __u_n, fd_set *__u_r, fd_set *__u_w, fd_set *__u_e, struct timeval *__u_t) {
     static struct pollfd __u_p[FD_SETSIZE]; int __u_m; int __u_d; int __u_rc; int __u_ms; int __u_cnt;
     __u_m = 0; if (__u_n > FD_SETSIZE) __u_n = FD_SETSIZE;
@@ -35,5 +36,6 @@ static int select(int __u_n, fd_set *__u_r, fd_set *__u_w, fd_set *__u_e, struct
     }
     return __u_cnt;
 }
+#endif
 #endif
 #endif

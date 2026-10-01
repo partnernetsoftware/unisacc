@@ -309,6 +309,24 @@ int tl_needs(char *t, long n) {                              /* defines somethin
     }
     return 0;
 }
+/* R20-3: an object some unit declares `extern` and no unit defines (the
+   link used to emit a reference to nothing and crash at run time) */
+int tl_check_undef(void) {
+    int i; int k; char msg[320]; char *pre;
+    i = 0;
+    while (i < tl_next) {
+        char *s; int n; s = tl_npool + tl_ext_at[i]; n = tl_ext_len[i];
+        if (n > 2 && n < 250 && s[0] == 103 && s[1] == 95 && !tl_inset(tl_def_at, tl_def_len, tl_ndef, s, n)) {
+            pre = "link: undefined reference to "; k = 0;
+            while (pre[k]) { msg[k] = pre[k]; k = k + 1; }
+            n = n - 2; s = s + 2; while (n > 0) { msg[k] = *s; k = k + 1; s = s + 1; n = n - 1; }
+            msg[k] = 10; msg[k + 1] = 0;
+            tl_fail(msg); return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 int isarchive(char *p) { int n; n = 0; while (p[n]) n = n + 1; return n >= 2 && p[n - 2] == 46 && p[n - 1] == 97; }
 
 /* the tape a unit object carries, or 0; its target goes to tl_target */
@@ -396,6 +414,7 @@ int fe_link(char **paths, int npath) {
         }
         p = p + 1;
     }
+    if (tl_check_undef()) return 1;
     tl_os("__init:\n", 8);
     k = 0; while (k < u) { tl_os("  call __init_u", 15); tl_num(k); tl_o(10); k = k + 1; }
     tl_os("  ret\n", 6);

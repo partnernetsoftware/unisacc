@@ -107,3 +107,12 @@ C99 6.9.2 + 传统 common 约定（unisacc 选择**接受** common，与 tapelin
 - 跑过：§1.1 tape 形状；§1.3 全表（unisacc 链接、一步、clang）。
 - 仅设计：§2 `.gdef`、§3 规则与消息文本、§4 顺序规则、§5 对三处分叉的影响、§6 的“实现后”期望列。
 - 未改：src/、exec/ 均未动，未提交。
+
+## 8. cdx 审核后的契约（2026-10-02，与上文冲突处以本节为准）
+
+批准 `.gdef NAME`：表示“本单元给出了该外部对象的带初值定义”。它是独立的 tape 记录，可以出现在首个 `.bss` 之后。分工：cdx 负责 shape、tapebin、C 与 Python 的读写、产品 E3 和对象路由；cc 负责参考侧的标记、tapelink 的 D/T/X 计数和红例。
+
+1. **旧对象不按“全是暂定定义”处理。** 旧的带初值 .o 同样没有 `.gdef`，两个这样的旧对象仍会静默地后者覆盖前者。所以新语义要求 unit tape 带一个**必需的版本标记**，缺版本的对象被 tapelink 拒绝，提示重新编译。不宣称向后兼容，§2 里“旧对象 = 全暂定”的说法作废。具体拼写与 cdx 一起定，在 tapebin 一侧落地。
+2. **“只有 extern”时的拒绝**，只适用于只链接本工具对象的路径：所有输入都查完以后，再按名报 `link: undefined reference to NAME`（已实现：src/tapelink.c 的 `tl_check_undef`，产品驱动调用同一个函数）。一步编译的全程序路径报 `unisacc: error: undefined reference to NAME (declared extern, defined in no unit)`。将来链接 cc 产出的 .o/.a 数据符号时，要在那些输入也查完之后才能下结论。这不写成适用于所有外部链接的一般 C99 规则。
+3. **§4 的统一顺序和 `__cl` 重新编号拆成 R20-3b**：先逐个复现 b_compound、b_pp2、fb12-13 的首处字节差异，再定统一顺序；没有逐字节证据之前，不把三处差异归为同一个根因。
+4. 正式探针使用当前 HEAD 的私有 UA，不用 /tmp/ua_ref。

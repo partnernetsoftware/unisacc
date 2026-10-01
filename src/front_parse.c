@@ -29,6 +29,8 @@ int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
 int symginit[MAXSYM];       /* R19-8: a file-scope object defined WITH an initialiser */
 int symgstat[MAXSYM];       /* ...that is `static` (its unit's own) */
+int nxonly;
+int symxonly[MAXSYM];       /* R20-3: whole program, declared `extern` and (so far) defined by no unit */
 int symxtrn[MAXSYM];        /* -funit: declared `extern`, no storage in this unit (yet) */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
@@ -5476,6 +5478,13 @@ int unit(void) {
                 if (unitmode && gdup == 0 && declstatic == 0) { es(".global g_"); etok(t); ec(10); }
             }
             sadd(t, gbind, 0, w);
+            /* R20-3: an extern-only object read by the program is defined by
+               no unit; any later definition (tentative or not) clears it */
+            symxonly[nsym - 1] = declextern && cur() != tidx("=", 1) && unitmode == 0 && declstatic == 0;
+            if (symxonly[nsym - 1]) nxonly = nxonly + 1;
+            if (nxonly == 0) { }
+            else if (symxonly[nsym - 1] == 0) { int xk; xk = 0; while (xk < nsym - 1) { if (symkind[xk] != 1 && sfind_is(xk, t)) symxonly[xk] = 0; xk = xk + 1; } }
+            else { int xk; xk = 0; while (xk < nsym - 1) { if (symkind[xk] != 1 && sfind_is(xk, t) && symxonly[xk] == 0) symxonly[nsym - 1] = 0; xk = xk + 1; } }
             /* a struct global is an aggregate: its name is its address */
             if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
                 symkind[nsym - 1] = 5; symptr[nsym - 1] = 1;
@@ -5819,6 +5828,12 @@ int fe_units(char **paths, int npath, char *t) {
            "itoab_done:\n  @call.frame -16\n  mov r0, r1\n  mov r1, r4\n  @ctrl.ret\n");
     }
     emit_pool();
+    if (nerr == 0) { int xi; xi = 0; while (xi < nsym) {        /* R20-3 */
+        if (symxonly[xi] && symused[xi]) {   /* named, not located: the declaring unit's tokens are gone by now */
+            __write(2, "unisacc: error: undefined reference to ", 39);
+            __write(2, symname + xi * NAMEW, blen(symname + xi * NAMEW));
+            __write(2, " (declared extern, defined in no unit)\n", 39); nerr = nerr + 1; }
+        xi = xi + 1; } }
     if (nerr == 0) nerr = undef_calls();
     if (nerr == 0 && optlevel > 0) opt_stack();
     if (nwarn > 0) { if (nerr == 0) {
