@@ -189,6 +189,74 @@ static int pipe(int __u_fds[2]) {
 #endif
 }
 #endif
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+#ifdef __APPLE__
+#define _UNISA_NR_fsync 95
+#define _UNISA_NR_dup 41
+#define _UNISA_NR_rmdir 137
+#define _UNISA_NR_access 33
+#define _UNISA_NR_readlink 58
+#define _UNISA_NR_symlink 57
+#elif defined(__x86_64__)
+#define _UNISA_NR_fsync 74
+#define _UNISA_NR_dup 32
+#define _UNISA_NR_rmdir 84
+#define _UNISA_NR_access 21
+#define _UNISA_NR_readlink 89
+#define _UNISA_NR_symlink 88
+#else
+#define _UNISA_NR_fsync 82
+#define _UNISA_NR_dup 23
+#define _UNISA_NR_unlinkat 35
+#define _UNISA_NR_faccessat 48
+#define _UNISA_NR_readlinkat 78
+#define _UNISA_NR_symlinkat 36
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_fsync
+static int fsync(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_fsync), __u_fd, 0, 0, 0, 0)); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_dup
+static int dup(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup), __u_fd, 0, 0, 0, 0)); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_rmdir
+static int rmdir(const char *__u_p) {
+#if defined(__APPLE__) || defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_rmdir), (long)__u_p, 0, 0, 0, 0));
+#else
+    return (int)_unisa_ret(__syscall6(_UNISA_NR_unlinkat, -100, (long)__u_p, 0x200, 0, 0));   /* AT_FDCWD, AT_REMOVEDIR */
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_access
+static int access(const char *__u_p, int __u_mode) {
+#if defined(__APPLE__) || defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_access), (long)__u_p, __u_mode, 0, 0, 0));
+#else
+    return (int)_unisa_ret(__syscall6(_UNISA_NR_faccessat, -100, (long)__u_p, __u_mode, 0, 0));
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_readlink
+static long readlink(const char *__u_p, char *__u_buf, size_t __u_n) {
+#if defined(__APPLE__) || defined(__x86_64__)
+    return _unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_readlink), (long)__u_p, (long)__u_buf, (long)__u_n, 0, 0));
+#else
+    return _unisa_ret(__syscall6(_UNISA_NR_readlinkat, -100, (long)__u_p, (long)__u_buf, (long)__u_n, 0));
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_symlink
+static int symlink(const char *__u_old, const char *__u_new) {
+#if defined(__APPLE__) || defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_symlink), (long)__u_old, (long)__u_new, 0, 0, 0));
+#else
+    return (int)_unisa_ret(__syscall6(_UNISA_NR_symlinkat, (long)__u_old, -100, (long)__u_new, 0, 0));
+#endif
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_getcwd
 static char *getcwd(char *__u_buf, size_t __u_size) {
 #ifdef __APPLE__

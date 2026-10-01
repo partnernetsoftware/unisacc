@@ -1054,4 +1054,14 @@ static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
     return (long)__u_n;
 }
 #endif
+/* fdopen (POSIX), 0.0.19: a FILE * IS its descriptor here (see FILE above);
+   0..2 are the standard streams' values.  The mode is not checked against the
+   descriptor's flags (POSIX allows EINVAL; not detected). */
+#if !__UNISA_FTRIM_LIBC || __UN_fdopen
+static FILE *fdopen(int __u_fd, const char *__u_mode) {
+    if (__u_fd < 0) { errno = 9; return NULL; }   /* EBADF */
+    if (__u_fd < 3) return (FILE *)(_UNISA_STDIO_BASE + __u_fd);
+    return (FILE *)(long)__u_fd;
+}
+#endif
 #endif
