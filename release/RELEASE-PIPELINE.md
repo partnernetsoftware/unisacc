@@ -100,3 +100,11 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 0.0.15 因不发布而没有补的是第 3、4 两项；0.0.16 新增第 5 项（x86_64 的 `.o` 只在本机链接过，还没在 x86_64 机器上运行）。
 
 **结项条件（0.0.16 起，发布与不发布的版本都适用）**：本地 `tests/release.sh --com` rc=0 **且** `gh run list -w release-check -L 1` 对结项提交为 success，两者缺一不得结项。0.0.15 只看了本地队列就结项，而 origin 自 300e8c9 起红了十二次提交（ci plan 自检被 0a8d265 的 knownfail 调用打破，127b6b1 修复）。
+
+## 11. 0.0.17 回顾的新经验（2026-10-01）
+
+- **改旗标语义前查遍调用方**：`-c -b` 从 tape 改为对象时，compilercheck 的依赖用例与 warningcheck 的障碍用例仍把 `-c` 当 tape，直到发布队列才红；exec/ 下的测试属于产品闭包，改它就要重建并重封候选（字节不变时 Apple 公证可沿用）。
+- **队列运行期间连 prd/plans 也不提交**：一次 prd 索引行提交让 93/401 作废。队列开始后写的计划先放暂存目录。
+- **Windows 就绪看 IP**：`utmctl exec`（含 `--hide`）在来宾代理未起时也返回 0；就绪判据用 `utmctl ip-address` 非空，再等十几秒。
+- **签名前冻结在最终提交**：签名回执绑定源提交与上游 run；签名后再修就整套重做（0.0.16 发生过一次）。
+- **公开后下载核对**：`gh release edit --draft=false` 之后下载公开的 `unisacc.com`，与签名回执的签后哈希比对，结果写进回执。

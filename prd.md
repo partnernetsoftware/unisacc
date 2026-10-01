@@ -4,7 +4,7 @@
 
 ## 1. 命题与产品
 
-- **产品**：一个文件 `unisacc.com`（APE），在 {Linux, macOS, Windows} × {x86-64, arm64} 上运行，自己写出六个目标的可执行文件（ELF、Mach-O、PE；不用汇编器、链接器），并能自举：宿主构建的 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。两代产品只叫 `unisacc-seed.com` 与 `unisacc.com`。
+- **产品**：一个文件 `unisacc.com`（APE），在 {Linux, macOS, Windows} × {x86-64, arm64} 上运行，自己写出六个目标的可执行文件（ELF、Mach-O、PE；映像不经汇编器和链接器），0.0.17 起也写三种格式的可重定位 `.o` 并自带链接器与 `ar`（§3.15），并能自举：宿主构建的 `unisacc-seed.com` → 种子自建 → 再自建，三个 sha256 相等（N22）。两代产品只叫 `unisacc-seed.com` 与 `unisacc.com`。
 - **语言**：C99 = ISO/IEC 9899:1999 + TC1–TC3（WG14 N1256）。覆盖度来自逐条款账本 [tests/c99/clauses.tsv](tests/c99/clauses.tsv)（门禁 `c99-ledger`，README 表由账本生成），不作主张；缺口在 README 限制表逐条点名。
 - **方法**：编译器里每个表状决策（词法类、预处理指令、优先级、类型、指令选择、ABI、窥孔……）由**构造**出来的小整数网络回答，权重从真值表派生、在表的全部定义域上**穷举验证**（不是训练）；结构性粘合是经典代码。两条路线：C 参考编译器（`unisacc.c` + `src/`，行为裁判与回退）与模型产品（`exec/` 各阶段网络 + 通用执行器），逐字节对拍（`exec-chain`、`closure`、`stages`、difftest 两侧）。
 - **交付物**：签名的 `unisacc.com` 与公证的 macOS dmg（公开资产只有这两个，主人 2026-09-30 裁定）；中间形式 `.tape`/`.tapebin`（[docs/tapebin-v1.md](docs/tapebin-v1.md)，内容寻址、C/Python/产品三方编码逐字节同）。
@@ -30,25 +30,21 @@
 
 | 版本 | 文件 | 状态 |
 |---|---|---|
-| v0.0.12 | [archive/plans/v0.0.12.md](archive/plans/v0.0.12.md) — 计划树 R12-0..R12-7 与逐项回执（已发布 2026-09-30，归档） | 已发布 |
-| v0.0.13 | [archive/plans/v0.0.13.md](archive/plans/v0.0.13.md) — 计划树 L0–L5/N0–N22 与逐项回执（R13-0 六例、R13-0b 25 条、N22 产物谱系、门禁队列方法）；状态叙事全文见 [archive/prd-history-20260930.md](archive/prd-history-20260930.md) | 已发布 2026-09-30（tag 3af8b36；公开 unisacc.com 75c698ec… 与 dmg；回执 archive/research/r13/r13-release-acceptance.json） |
-| v0.0.14 | [archive/plans/v0.0.14.md](archive/plans/v0.0.14.md) — #21 callm、8 个 L1 库体、#line、tapebin v1 端到端、C99 条款账本（语言 96%）、流水线方法债、R14-8 6/8 | 已发布 2026-09-30（tag 75ec4de；公开 unisacc.com c229cebf… 与 dmg；回执 research/r14-release-acceptance.json） |
-| v0.0.15 | [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 完成，不发布（全量队列 370/370，产品字节同 0.0.14） |
-| v0.0.16 | [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) — origin CI 转绿、减法安全门禁、gcc 字节的 -M 族、参考侧 ELF `-c` 与系统 ld 互链（docs/toolchain.md）、realprog 语料门禁 2/6、全局结构体赋值修复；A1/A2/B1 顺延到 0.0.17 | 已发布 2026-10-01（主人确认；本地 375/375 + origin 六 runner 绿；回执 research/r16-release-acceptance.json） |
-| v0.0.17 | [archive/plans/v0.0.17.md](archive/plans/v0.0.17.md) — 三格式 .o（参考）与产品 Linux ELF 路由、-funit 分开编译、tape 级自带链接器与 ar、互操作 (a)、默认即运行、unistd.h（realprog 3/6） | 已发布 2026-10-01 |
+| v0.0.12–v0.0.17 | [archive/plans/](archive/plans/) — 逐版计划与结项收据（0.0.15 整理版未发布，其余已发布；身份见上表） | 已归档 |
 | v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；产品 Mach-O/COFF 对象（R18-0，已顺延一次）；宿主能力头 TUI 与文件（R18-10，dsh 实测需求）；动态库、调试信息、cc 函数互调各自独立；流程修复 R18-11 | 下一版（计划已细化 2026-10-01） |
 
-**产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 | v0.0.19 | [plans/v0.0.19.md](plans/v0.0.19.md) — 宿主能力头·网络（socket/netdb/inet/select，dsh 实测需求；win 走 Winsock，不做 TLS） | 草案 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
-| v0.0.11 及更早 | 见 §7.1 版本沿革与 §7.2 归档索引 | 已发布 |
+| v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
+
+**产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 
 
 <a id="pipeline-design"></a>
 ## 3. 当前架构：模型流水线（结构、功能与边界）
 
-本节以 `68cdd50` 时的构造器、路由声明和执行器源码为依据；出货版本与本地候选身份见上面的 R9 清单。**本节描述当前设计；条款全文（含早期条款与经典实现规格）在 [spec.md](spec.md)。** 旧的“14 个决策点”不等于当前整条流水线的网络数，旧的“走查器不许模型化”不是当前迁移约束。
+本节描述 0.0.17 发布时（`ae3f989`）的构造器、路由声明和执行器；出货身份见 §2 的身份表。**本节描述当前设计；条款全文（含早期条款与经典实现规格）在 [spec.md](spec.md)。** 旧的“14 个决策点”不等于当前整条流水线的网络数，旧的“走查器不许模型化”不是当前迁移约束。
 
 **阅读顺序**：共同模型结构 → 路由总表 → 各阶段 → 打包/装载 → 字节账 → 验证与现状。详细源码边界另见 [规则来源](exec/rules.md)、[执行机制](exec/c/CORE.md)、[包协议](exec/c/PACKAGE.md)。迁移过程及原始失败记录完整保留在 [S-17 迁移档案](archive/s17-migration-log-20260928.md)，不再混入当前规格。
 
@@ -161,7 +157,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 共享索引让同一模型内容只保存一份；Q/C 动作、H 参数和 S 字节声明分别计账，解压后逻辑量不与压缩体相加。头文件库源码是另计资源，当前没有全库 AOT 或全系统 libc 转发；macOS FFI 是有边界的宿主能力，不把它说成六平台都可任意调用系统库。执行器、驱动/OS 适配、模板、库和网络均是产品组成，不能只报纯推理核几 KB。
 
-**macOS 发布方案（资格已通过，最终分发验收待做）**：采用 `unisacc.dmg → Unisacc.app → 签名的原生入口 → 同包封存 unisacc.com`，实际编译仍由 `.com` 完成，参数/退出状态应原样传递。先验证 quarantine/Gatekeeper、内层 APE 运行与解包缓存、`-run`/FFI，以及公证扫描能否接受整个 bundle。minicon 实际是先签内层 Mach-O，再签 app、公证并 staple app/dmg；不是给任意载荷加壳便完成信任。本方案若未过，不宣称 `.com` 已获得 Apple 签名，回报具体阻挡并评估同源原生内层，不静默更换编译路线。微软 Authenticode 与 Apple 分发链分别验，参见 R9-6。
+**macOS 发布方案（0.0.13 起实行，每版公证并公开 dmg）**：采用 `unisacc.dmg → Unisacc.app → 签名的原生入口 → 同包封存 unisacc.com`，实际编译仍由 `.com` 完成，参数/退出状态应原样传递。先验证 quarantine/Gatekeeper、内层 APE 运行与解包缓存、`-run`/FFI，以及公证扫描能否接受整个 bundle。minicon 实际是先签内层 Mach-O，再签 app、公证并 staple app/dmg；不是给任意载荷加壳便完成信任。本方案若未过，不宣称 `.com` 已获得 Apple 签名，回报具体阻挡并评估同源原生内层，不静默更换编译路线。微软 Authenticode 与 Apple 分发链分别验，参见 R9-6。
 
 ### 3.13 验证分层与当前证据
 
@@ -173,10 +169,11 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 | 包/宿主是否可靠 | codec、损坏包、资源、内存范围、API 失败 | CRC 已提供企业签名信任 |
 | 发布物是否可分发 | 精确 SHA、来源、签后运行、平台和信任回执 | 旧候选门禁适用于新源码/重签字节 |
 | 真实程序能否编译运行 | `realprog`（kilo/jsmn/cJSON/lua/sqlite 与 cc 同源构建同参运行，棘轮）、`tools`、`corpus` | 未登记的程序/库面 |
-| 目标文件能否被系统工具接受 | `elfobj`（参考侧 ELF `.o`：节/重定位集合、与映像的 .text/.data 不变量、ld.lld 与 GNU ld 链接、Lima 运行同映像） | 产品 δ 的 `.o`（0.0.17）、与 cc `.o` 的符号互引、函数互调 |
+| 目标文件能否被系统工具接受 | `elfobj`（ELF/Mach-O/COFF `.o`：节与重定位集合、与映像的不变量、GNU ld/lld/ld64/lld-link 链接并在 Lima/本机/Windows 虚拟机运行同映像；读 cc `.o` 的数据符号；产品 Linux 对象与参考逐字节同） | 产品的 Mach-O/COFF 对象（0.0.18）、与 cc 的函数互调（0.0.18） |
+| 分开编译与链接是否正确 | `linkunits`（单元单独编译再由 unisacc 链接 = cc = 一步编译；`.a` 只拉所需成员；产品链接与产品 ar 同参考） | 系统链接器链多个单元对象（不支持：初始化链只有 unisacc 会做） |
 | 减法是否安全 | `subtract-safety`（归档文件无外部引用、指令文件可解析） | 行为层面的回归（由各功能门禁负责） |
 
-当前集成候选身份及已验/待验范围以本页R9清单为准；旧候选的完整队列、平台与Apple资格不移植。完整610MB数组C源码仍是未解决规模限制。T1是有限转移/网络等价；全程T2和C语义T3仍为独立证明义务。
+出货身份以 §2 身份表与各版回执为准；旧候选的队列、平台与 Apple 资格不移植到新源码或重签字节。T1是有限转移/网络等价；全程T2和C语义T3仍为独立证明义务。
 
 <a id="model-function-bytes"></a>
 ### 3.14 当前模型功能与物理字节账
@@ -228,9 +225,15 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 **逐阶段结构计数口径**：论文 §1.3 的结构快照见 [pipeline-structure-20260928.json](archive/research/20260928/pipeline-structure-20260928.json)，绑定旧01e5c1d9测量基线；当前d4f7d302静态结构见[r9-pipeline-structure-prune.json](archive/research/r9/r9-pipeline-structure-prune.json)，旧calc动态计数不得外推。静态动作数按每个序列展开 Q/C 前缀后的动作次数求和；另记包中实际保存的后缀动作数。它们不等于一次程序运行的动态动作数，也不是动作操作码种类数。声明返回按银行数与键成员数另记；O1/O2 不能共用一组结构数字。结构审计另附 calc 动态计数：cc-unisacc 提供插桩/原始输出，cdx 用同一二进制独立复跑，五阶段计数一致；输入、模型与运行时 SHA、O0/run 与 memory 路由及日志归档到 research/pipeline-counts-20260928/。它不是出货汇编内核的性能测量，结构表中的 O2 网络未参与该次 O0 运行。
 
 
+### 3.15 目标文件、分开编译与链接（0.0.17）
+
+- **对象**：`-c -b os/arch` 写可重定位对象，格式随目标（ELF/Mach-O/COFF）。参考侧三格式都有；产品的 Linux ELF 由模型路由写出（对象专用 lower + ELF 写出 δ，与参考逐字节同），Mach-O/COFF 产品路由在 0.0.18（驱动按名拒绝）。整程序对象可被系统链接器单独链接，并可读 cc 定义的数据符号；与 cc 的函数互调需要调用约定适配（0.0.18）。设计与事实表见 [docs/toolchain.md](docs/toolchain.md)。
+- **单元与链接**：`-funit` 写单元对象（tape 带 `.global/.extern` 链接属性；对象里另有不装载的节存单元 tape）。`unisacc a.o b.o lib.a [-o prog]` 在 tape 级合并（src/tapelink.c：私有名改 `__u<k>_`、全局按名相会、同名全局对象按 C 公共定义合一、各单元 `__init_u` 串成 `__init`），再走普通后端，六目标都可出；`unisacc ar rcs|t|x` 读写系统 `ar` 也认的归档。产品驱动复用同一合并核心，编译决策仍全在模型路由。
+- **驱动默认模式**：见 §3.11（裸 `unisacc FILE.c` 即运行）。
+
 ## 4. 质量体系
 
-- **门禁**：`tests/gate.sh --list [--com]`（0.0.16：375 项，含 `realprog`、`elfobj`、`subtract-safety`）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的两项先预热（R16-5 自动化）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
+- **门禁**：`tests/gate.sh --list [--com]`（0.0.17：--com 401 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。
 - **reviewed trees**：`make gatedeps` 从 HEAD 的 `git archive`（umask 022）计算戳与 guards，作为发布前最后一提交。
@@ -248,7 +251,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 - **权威文档**：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)（§0–8：冻结源、UA、P3、门禁队列、客机、CI/GHCR、Apple、Windows 签名、发布；每步坑与判据）；契约 [release/README.md](release/README.md)；策略 `release/signing-policy.json`；封存 `release/candidate.json`；工作流 `.github/workflows/{release-check,windows-signing,ci}.yml`；本机技能 `~/.claude/skills/unisacc-release-pipeline`。
 - **与 minicon 的对应**：minicon 在 CI 构建候选并推 GHCR，我们**本机构建**（一个能写出六目标的编译器，CI 只测不建，见 CLAUDE.md）再推 GHCR；签名/运行验证都按摘要拉取，同 minicon；docs 提交不打断签名（按产品源闭包比较）。
-- **已落地**（0.0.10/0.0.11 两次实发）：push→签完约 4–5 分钟；GHCR 封存与 release-check 实跑；qualification→company；Apple 公证。**未落地**（R12-0/R12-7）：发布本身仍是本机 `gh release edit` 而非工作流；qualification 的本地演练脚本；单架构原生 runner 跑完整套件（R12-3）。
+- **现状**（0.0.16、0.0.17 实发）：push 后 release-check 约 1 分钟（六 runner 实跑封存候选）；资格→公司签名约 4 分钟；Apple 公证约 6 分钟，可与队列并行；公开后下载核对哈希。仍是手动的：删除非公开资产与 `gh release edit` 公开（脚本化列入 0.0.18 R18-11）；单架构原生 runner 跑完整套件。
 - **每片重封**：开发期每次产品闭包变化都要 `seal_candidate.sh <ver>-dev`，否则 release-check 候选作业红（0.0.11 前三次 push 的教训）。
 
 
@@ -256,18 +259,18 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 | 版本 | 主线 |
 |---|---|
-| **v0.0.15**（完成，不发布） | 整理：prd 重写、文件清单与归档、封装/复用、论文 A、剩余问题总结 → [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) |
-| v0.0.16 | 功能承接与问题总表；**工具链起步（R16-7，主人严肃需求）：`-c` 目标文件 → 链接器 → 汇编器 → ar/nm**，与系统工具互操作 → [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) |
-| v0.1.x | 证明侧（T2、P-2、T3、.o、wasm）、tapebin 平台化、内存安全检查节点（论文 D）→ [plans/v0.1.x.md](plans/v0.1.x.md) |
+| v0.0.18 | 汇编器子集 + `-S` 真汇编；产品 Mach-O/COFF 对象；宿主能力头 TUI 与文件（dsh 实测需求）；流程修复 → [plans/v0.0.18.md](plans/v0.0.18.md) |
+| v0.0.19 | 宿主能力头·网络（socket 系，Winsock 一列，不做 TLS）→ [plans/v0.0.19.md](plans/v0.0.19.md) |
+| v0.1.x | 证明侧（T2、P-2、T3）、tapebin 平台化、内存安全检查节点（论文 D）；从 0.0.17 降级的 A1/A2/B1 与 POSIX L2 → [plans/v0.1.x.md](plans/v0.1.x.md) |
 | v0.2.x | **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 → [plans/v0.2.x.md](plans/v0.2.x.md) |
 
 ## 6. 未解决问题
 
-全表（正确性 / 诊断 / C99 覆盖 / 反复顺延的架构项 / 流程 / 论文，每条带来源与优先级）在 [archive/plans/v0.0.16.md §剩余问题总表](archive/plans/v0.0.16.md)。摘要：
-- 正确性：全局初始化器里的复合字面量镜像不同（A1）、续行前 token 的 `__LINE__` 多 1（A2）。
-- 诊断：产品 9 类、参考 3 类拒绝仍无位置（B1/B2）。
-- C99：复数、三字符组未定；库条款 191 条 unsupported；POSIX 最小面缺（狗粮启动器前提）。
-- 自 0.0.11 起每版顺延：通用 BANK/nativeabi、Windows SEH、us_eval/us_reload、网络裁判登记、Windows 全套件 runner、发布工作流化——0.0.16 须逐项决定“做一片”或降级。
+- **正确性与诊断**（已降级到 0.1.x，见 plans/v0.1.x.md 附录）：全局初始化器里的复合字面量（A1，产品）、续行前 token 的 `__LINE__` 多 1（A2，两侧）、产品 5 类拒绝缺位置（B1）。参考侧 c-testsuite 00204 的按值传参/HFA 输出仍与期望不同（产品正确），记入 0.0.18 语料排查。
+- **C99**：复数与三字符组决定不做（账本写明理由）；库条款大量 unsupported，按真实程序与 dsh 的实测需求分批（0.0.18 TUI/文件、0.0.19 网络）。
+- **工具链**：无汇编器与 `-S` 真汇编（0.0.18）；与 cc 的函数互调（0.0.18）；产品 Mach-O/COFF 对象（0.0.18）。
+- **反复顺延的架构项**：通用 BANK/nativeabi、Windows SEH、us_eval/us_reload 已写入 0.1.x（D1–D3）。
+- **流程**：tests/vms.sh 的 Windows 就绪误判、队列运行中改被声明文件无提示、Linux 客机固定的环境红（4 GiB OOM、无 clang）——0.0.18 R18-11。
 
 ## 7. 归档索引
 
@@ -280,13 +283,4 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 - [prd-r9-r10-receipts-20260929.md](archive/prd-r9-r10-receipts-20260929.md)：v0.0.9/R9 状态、v0.0.10 全计划、R9/R10 逐片回执与发布收口、2026-09-27 巡查（5.6/5.8/5.10）。
 - [prd-history-20260929.md](archive/prd-history-20260929.md)：本次第二轮清理移出的 §0.3 早期交付边界、§5.5 完成度盘点 S-1..S-17、§5.7/5.9 巡查记录、v0.0.11 逐项回执全文、附录 7.1/7.2/7.4。
 - [prd-findings-20260929.md](archive/prd-findings-20260929.md)：§6 实验发现 E-编号全表（论文引用按编号在此解析）。
-
-R17 分开编译格式前提：tape 新增 `.global NAME` / `.extern NAME` 链接属性，tapebin v1 追加记录 kind 4/5（仅名字索引，旧 opcode 与旧字节不变）。参考严格校验并按名字保留声明；prune 遇到属性整份透传，避免跨单元可见定义被删。对象符号/重定位语义由对象后端另行接入，格式接受不代表已可链接。
-
-R17 产品对象路线实施：E3 读取 `\0cli/funit`/`\0cli/object` 资源，单元模式输出链接属性及延后入口；对象布局、符号计划和重定位采集继续在 δ。lower→encoder 需补名字首次出现顺序、链接属性、数据块末端非零前缀、原始单元 tape；不由驱动猜重定位或调用参考对象写出器。先完成 E3 tape 对齐，再 ELF 两架构、Mach-O、COFF，路由拟为 `<os>/<arch>/object/O0|O1|O2`。
-
-R17 产品单元前端首片：`exec/parse2/unitmode.py` 用通用动作实现资源分支、全局/外部声明与入口延后；五个单元 tape 在 C 参考、模拟器、构造网络间逐字节同，plain/locations/warnings/errors/warnings+errors 五变体构造通过。整程序 exec-chain 264 输入：262 equal、2 既有 known、0 bad/lost；E3 全域 net=table 2,308,070 observations。门禁 `exec-unitparse` 已登记；对象写出仍未完成，驱动继续明确拒绝对象输出。
-
-R17 对象事实接口首片：对象专用 lower 构造开关 `--object` 保留原单元 tape（十六进制运输）、C tape 名字首次出现顺序与链接位，输出 `@obj_name`/`@obj_tape`/`@obj_nzend`；非零数据块末端与镜像最后非零字节明确分开。接口仍未接对象编码器，不表示产品 -c 可用。ELF 写出 δ 独立接收符号/重定位计划，独立结构打包 oracle 核对布局；后续接入实际计划再验参考对象字节。
-
-R17 Linux 对象路线闭合验收（实现片）：E3资源单元模式→既有E4/prune→对象lower→ELF编码/符号计划均为δ；x86/ARM按最终布局采集section/UND重定位，不在尺寸遍重复采集。`@obj_unit`按资源传入决定UNISATAPE1节，整程序对象不携带此节。实测22份真实tape，两架构单元/整程序含外部数据/调用、函数指针、零尾，ELF字节等于C参考；真实 P3 包 1,042,502 B 已构造；通过通用运行时注入与驱动同义资源，六类源码、O0/O1/O2、两架构单元/整程序共66份对象与C参考逐字节同。完整 .com 驱动入口待接通，osx/win不宣告对象路由。证据见 research/r17-product-elf-object-evidence.json。
+- [prd-r17-notes-20261001.md](archive/prd-r17-notes-20261001.md)：0.0.17 开发期间写在 prd 末尾的 R17 实施记录（tape 链接属性、产品对象路线各片）。
