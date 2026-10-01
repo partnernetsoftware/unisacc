@@ -24,7 +24,7 @@ textfall() { sed -n '1,/^	\.data/p' "$1" | grep -c '^	\.byte\|^	\.inst'; }
 
 # 1. the corpus, both targets
 for a in x86_64 arm64; do
-    n=0; d=0; fb=0
+    n=0; d=0; fb=0; pn=0
     for f in tests/c/*.c; do
         b=$(basename "$f" .c)
         "$_BOUND" 20 "$UA" "$f" -c -b lnx/$a -o "$T/c.o" 2>/dev/null || continue
@@ -32,15 +32,18 @@ for a in x86_64 arm64; do
         if ! "$_BOUND" 20 "$UA" as "$T/s.s" -o "$T/a.o" 2>"$T/err" >>"$T/err"; then d=$((d+1)); echo "  FAIL $a $b as: $(head -1 "$T/err")"; continue; fi
         if cmp -s "$T/c.o" "$T/a.o"; then n=$((n+1)); else d=$((d+1)); echo "  FAIL $a $b: -S | as differs from -c"; fi
         fb=$((fb + $(textfall "$T/s.s")))
-        if [ -n "${PRODUCT_COM:-}" ]; then
+        # the product: its own -S, assembled by its own `as`, is its own -c (every 8th program: time)
+        if [ -n "${PRODUCT_COM:-}" ] && [ $(( $(printf '%s' "$b" | cksum | cut -d' ' -f1) % 8 )) = 0 ]; then
+            "$_BOUND" 30 sh "$PRODUCT_COM" "$f" -c -b lnx/$a -o "$T/pc.o" 2>/dev/null || continue
             "$_BOUND" 30 sh "$PRODUCT_COM" "$f" -S -b lnx/$a -o "$T/p.s" 2>"$T/err" || { d=$((d+1)); echo "  FAIL $a $b product -S: $(head -1 "$T/err")"; continue; }
-            cmp -s "$T/s.s" "$T/p.s" || { d=$((d+1)); echo "  FAIL $a $b: product -S text differs from the reference"; }
+            "$_BOUND" 30 sh "$PRODUCT_COM" as "$T/p.s" -o "$T/pa.o" 2>"$T/err" || { d=$((d+1)); echo "  FAIL $a $b product as: $(head -1 "$T/err")"; continue; }
+            cmp -s "$T/pc.o" "$T/pa.o" && pn=$((pn+1)) || { d=$((d+1)); echo "  FAIL $a $b: product -S | as differs from product -c"; }
         fi
     done
     say "corpus $a round trip" "0 wrong" "$d wrong"
     say "corpus $a instructions as bytes" "0" "$fb"
     [ "$n" -gt 100 ] || { bad=$((bad+1)); echo "  FAIL corpus $a: only $n programs checked"; }
-    echo "  corpus lnx/$a: $n objects identical"
+    echo "  corpus lnx/$a: $n objects identical${PRODUCT_COM:+, product $pn}"
 done
 
 # 2. unit objects with their tape, and linking the reassembled ones

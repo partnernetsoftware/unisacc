@@ -1776,7 +1776,8 @@ int at_main(int argc) {
     at_fd = 0 - 1;
     at_wfail = 1;
     if (at_asm(at_src, n, arch)) {
-        printf("as: %s:%d: %s\n", in, at_lineno, at_err ? at_err : "error");
+        at_say("as: "); at_say(in); at_say(":"); at_ln = 0; at_ldec(at_lineno); __write(2, at_lb, at_ln);
+        at_say(": "); at_say(at_err ? at_err : "error"); at_say("\n");
         return 1;
     }
     at_wfail = 0;

@@ -138,6 +138,33 @@ int tl_o(int c) { bput(&linkbuf,(unsigned char)c,0); return 0; }
 int tl_fail(char *m) { fputs(m,stderr); exit(1); return 1; }
 #define TL_PRODUCT 1
 #include "../../src/tapelink.c"
+/* 0.0.18 R18-1/R18-2: assembly text (-S -b lnx/ARCH) and `unisacc as` are the
+   reference's src/asmtext.c, which reads and writes ELF bytes only */
+static Buf asmbuf;
+int at_wr(char *p, long n) { for (long k=0;k<n;k++) bput(&asmbuf,(unsigned char)p[k],0); return 0; }
+#define AT_PRODUCT 1
+#include "../../src/asmtext.c"
+static int product_as(int argc,char **argv) {
+    const char *in=0,*out="a.out"; int arch=!strcmp(NATIVE_ARCH,"arm64");
+    for (int i=2;i<argc;i++) {
+        if (!strcmp(argv[i],"-o") && i+1<argc) out=argv[++i];
+        else if (!strcmp(argv[i],"-b") && i+1<argc) {
+            const char *t=argv[++i];
+            if (!strcmp(t,"lnx/x86_64")) arch=0; else if (!strcmp(t,"lnx/arm64")) arch=1;
+            else { fputs("as: targets are lnx/x86_64 and lnx/arm64 (Mach-O and COFF text: 0.0.19)\n",stderr); return 2; }
+        }
+        else if (argv[i][0]=='-' && argv[i][1]) { fprintf(stderr,"as: unknown option %s\n",argv[i]); return 2; }
+        else in=argv[i];
+    }
+    if (!in) { fputs("usage: unisacc as [-b lnx/x86_64|lnx/arm64] FILE.s [-o FILE.o]\n",stderr); return 2; }
+    int len=0; unsigned char *b=source_read(in,&len);
+    asmbuf.n=0;
+    if (at_asm((char *)b,len,arch)) { fprintf(stderr,"as: %s:%d: %s\n",in,at_lineno,at_err ? at_err : "error"); free(b); return 1; }
+    free(b);
+    FILE *f=fopen(out,"wb"); if (!f) { fprintf(stderr,"as: cannot write %s\n",out); return 1; }
+    int bad=fwrite(asmbuf.b,1,asmbuf.n,f)!=(size_t)asmbuf.n; bad|=fclose(f)!=0;
+    return bad;
+}
 static int object_path(const char *p) {
     size_t n=strlen(p);
     return (n>=2 && (!strcmp(p+n-2,".o") || !strcmp(p+n-2,".a"))) || (n>=4 && !strcmp(p+n-4,".obj"));
@@ -230,6 +257,8 @@ int main(int argc, char **argv) {
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
     if (argc>=2 && !strcmp(argv[1],"ar")) return product_ar(argc,argv);   /* R17-3 */
+    if (argc>=2 && !strcmp(argv[1],"as")) return product_as(argc,argv);   /* R18-1 */
+    int sawS=0;
     Buf srcres={0};                   /* \0cli/source: the main source path */
     /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output
        flag at all means `-run`; a file is written only on request. */
@@ -277,7 +306,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-fno-trim-libc")) { if (!notrim.n) bput(&notrim,1,0); }
         else if (!strcmp(a,"-dump-tokens")) mode = 4;
         else if (!strcmp(a,"-E")) mode = 1;
-        else if (!strcmp(a,"-S") || !strcmp(a,"-c")) { mode = 2; if (a[1]=='c') sawc=1; }
+        else if (!strcmp(a,"-S") || !strcmp(a,"-c")) { mode = 2; if (a[1]=='c') sawc=1; else sawS=1; }
         else if (!strcmp(a,"-funit")) funit=1;      /* separate compilation (docs/toolchain.md §7) */
         else if (a[0]=='-' && (a[1]=='D' || a[1]=='U')) {
             const char *value=a+2;
@@ -324,6 +353,13 @@ int main(int argc, char **argv) {
        resources \0cli/object and \0cli/funit); Mach-O and COFF objects are
        still the reference compiler's, and the driver says so by name. */
     int objwant = sawc && target && !object_path(src);
+    /* -S -b lnx/ARCH: the object -c -b writes, as GNU assembly; bare -S stays the tape */
+    int asmwant = sawS && target && !object_path(src);
+    if (asmwant) {
+        if (strncmp(target,"lnx/",4)) { fprintf(stderr,"unisacc: error: assembly text (-S -b) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was %s\n",target); return 1; }
+        objwant=1;
+        if (!out) { const char *o=deps_target(0,src,1); char *s2=xrealloc(0,strlen(o)+1); strcpy(s2,o); s2[strlen(s2)-1]='s'; out=s2; }
+    }
     if (objwant && strncmp(target,"lnx/",4)) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
     if (funit && !objwant) return clierror("-funit needs -c -b os/arch (a unit object)");
     if (objwant) { mode = 5; if (!out) out = deps_target(0,src,1); }
@@ -513,6 +549,11 @@ int main(int argc, char **argv) {
 #else
         out = "a.out";
 #endif
+    }
+    if (asmwant) {
+        asmbuf.n=0;
+        if (at_dis((char *)in.b,in.n)) { fprintf(stderr,"unisacc: error: -S: %s\n",at_err); free(in.b); return 1; }
+        free(in.b); in.b=asmbuf.b; in.n=asmbuf.n; memset(&asmbuf,0,sizeof asmbuf);
     }
     /* No destination is opened before successful compilation. */
     long fd = out && strcmp(out,"-") ? output_open(out) : 1;
