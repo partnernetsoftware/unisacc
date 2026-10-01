@@ -1031,6 +1031,7 @@ static void perror(const char *__u_s) {
    grown with realloc; -1 at end of file with nothing read. */
 #if !__UNISA_FTRIM_LIBC || __UN_getline
 #include <stdlib.h>
+#if !__UNISA_FTRIM_LIBC || __UN_getline
 static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
     size_t __u_n; int __u_c; char *__u_p;
     if (__u_line == NULL || __u_cap == NULL) { errno = EINVAL; return -1; }
@@ -1053,6 +1054,7 @@ static long getline(char **__u_line, size_t *__u_cap, FILE *__u_f) {
     (*__u_line)[__u_n] = 0;
     return (long)__u_n;
 }
+#endif
 #endif
 /* fdopen (POSIX), 0.0.19: a FILE * IS its descriptor here (see FILE above);
    0..2 are the standard streams' values.  The mode is not checked against the

@@ -22,8 +22,16 @@ struct sockaddr_in6 { sa_family_t sin6_family; in_port_t sin6_port; uint32_t sin
 #define INADDR_NONE ((in_addr_t)0xffffffff)
 #define INET_ADDRSTRLEN 16
 #define INET6_ADDRSTRLEN 46
+#if !__UNISA_FTRIM_LIBC || __UN_htons
 static uint16_t htons(uint16_t __u_x) { return (uint16_t)((__u_x << 8) | (__u_x >> 8)); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_ntohs
 static uint16_t ntohs(uint16_t __u_x) { return htons(__u_x); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_htonl
 static uint32_t htonl(uint32_t __u_x) { return (__u_x >> 24) | ((__u_x >> 8) & 0xff00) | ((__u_x << 8) & 0xff0000) | (__u_x << 24); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_ntohl
 static uint32_t ntohl(uint32_t __u_x) { return htonl(__u_x); }
+#endif
 #endif

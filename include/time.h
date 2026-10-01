@@ -24,6 +24,7 @@ struct tm {
 /* time (0.0.18 R18-5): seconds from gettimeofday on Linux and macOS (the
    clock note above still holds for clock; Windows has no time yet) */
 #if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_time)
+#if !__UNISA_FTRIM_LIBC || __UN_time
 static time_t time(time_t *__u_t) {
     long __u_tv[2]; long __u_r;
     __u_tv[0] = 0; __u_tv[1] = 0;
@@ -32,6 +33,7 @@ static time_t time(time_t *__u_t) {
     if (__u_t) *__u_t = __u_tv[0];
     return __u_tv[0];
 }
+#endif
 #endif
 /* ---- broken-down time (0.0.19, dsh): gmtime/localtime/mktime/strftime in C.
    localtime reads the zone from TZif data (RFC 8536, the 64-bit section):
@@ -42,6 +44,7 @@ static time_t time(time_t *__u_t) {
    last one use the last type (the footer rule is not evaluated).
    The C locale only. */
 #ifndef _WIN32
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_days_from_civil
 static long _unisa_days_from_civil(long y, int m, int d) {
     long era; long yoe; long doy; long doe;
     y = y - (m <= 2); era = (y >= 0 ? y : y - 399) / 400;
@@ -49,6 +52,8 @@ static long _unisa_days_from_civil(long y, int m, int d) {
     doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     return era * 146097 + doe - 719468;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_civil
 static void _unisa_civil(long z, long *py, int *pm, int *pd) {
     long era; long doe; long yoe; long doy; long mp; long y; int m;
     z = z + 719468; era = (z >= 0 ? z : z - 146096) / 146097;
@@ -57,7 +62,11 @@ static void _unisa_civil(long z, long *py, int *pm, int *pd) {
     *pd = (int)(doy - (153 * mp + 2) / 5 + 1); m = (int)(mp < 10 ? mp + 3 : mp - 9);
     *pm = m; *py = y + (m <= 2);
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_leap
 static int _unisa_leap(long y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_fill
 static struct tm *_unisa_fill(long t, long off, int dst, const char *zone, struct tm *r) {
     long days; long sec; long y; int m; int d; static int cum[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
     t = t + off; days = t / 86400; sec = t % 86400; if (sec < 0) { sec = sec + 86400; days = days - 1; }
@@ -69,18 +78,27 @@ static struct tm *_unisa_fill(long t, long off, int dst, const char *zone, struc
     r->tm_isdst = dst; r->tm_gmtoff = off; r->tm_zone = zone;
     return r;
 }
-#if !__UNISA_FTRIM_LIBC || __UN_gmtime_r || __UN_gmtime || __UN_asctime || __UN_ctime || __UN_localtime_r || __UN_localtime || __UN_mktime || __UN_strftime
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_gmtime_r
 static struct tm *gmtime_r(const time_t *__u_t, struct tm *__u_r) { return _unisa_fill((long)*__u_t, 0, 0, "UTC", __u_r); }
+#endif
 static struct tm _unisa_tmbuf;
+#if !__UNISA_FTRIM_LIBC || __UN_gmtime
 static struct tm *gmtime(const time_t *__u_t) { return gmtime_r(__u_t, &_unisa_tmbuf); }
+#endif
 /* the zone, loaded once */
 static unsigned char _unisa_tz[65536]; static long _unisa_tzn; static int _unisa_tzstate;   /* 0 not loaded, 1 TZif, 2 UTC */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_be
 static long _unisa_be(const unsigned char *p, int n) { long v; int k; v = 0; k = 0; while (k < n) { v = (v << 8) | p[k]; k = k + 1; } if (n == 4 && (v & 0x80000000L)) v = v - 4294967296L; return v; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_envget
 static char *_unisa_envget(const char *nm) {
     int k; int i; char *e; k = __argc() + 1;
     while ((e = __argv(k)) != 0) { i = 0; while (nm[i] && e[i] == nm[i]) i = i + 1; if (nm[i] == 0 && e[i] == 61) return e + i + 1; k = k + 1; }
     return 0;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_tzload
 static void _unisa_tzload(void) {
     char path[512]; char *tz; long fd; int q; char *pre;
     if (_unisa_tzstate) return;
@@ -98,7 +116,9 @@ static void _unisa_tzload(void) {
     _unisa_tzn = __read(fd, (char *)_unisa_tz, 65536); __close(fd);
     if (_unisa_tzn >= 44 && _unisa_tz[0] == 84 && _unisa_tz[1] == 90 && _unisa_tz[2] == 105 && _unisa_tz[3] == 102) _unisa_tzstate = 1;
 }
+#endif
 /* offset, dst and abbreviation in effect at UTC time t */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_tzat
 static long _unisa_tzat(long t, int *dst, const char **zone) {
     unsigned char *h; long isut; long isstd; long leap; long tc; long ty; long ch; int tsz; long p; long i; long idx; unsigned char *tt;
     _unisa_tzload(); *dst = 0; *zone = "UTC";
@@ -121,12 +141,18 @@ static long _unisa_tzat(long t, int *dst, const char **zone) {
     if (tt[5] < ch) *zone = (const char *)(h + 44 + tc * (tsz + 1) + ty * 6 + tt[5]);
     return _unisa_be(tt, 4);
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_localtime_r
 static struct tm *localtime_r(const time_t *__u_t, struct tm *__u_r) {
     int dst; const char *zone; long off;
     off = _unisa_tzat((long)*__u_t, &dst, &zone);
     return _unisa_fill((long)*__u_t, off, dst, zone, __u_r);
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_localtime
 static struct tm *localtime(const time_t *__u_t) { return localtime_r(__u_t, &_unisa_tmbuf); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_mktime
 static time_t mktime(struct tm *__u_tm) {
     long y; long m; long days; long t; long off; int dst; const char *zone;
     m = __u_tm->tm_mon; y = __u_tm->tm_year + 1900L + m / 12; m = m % 12; if (m < 0) { m = m + 12; y = y - 1; }
@@ -137,9 +163,13 @@ static time_t mktime(struct tm *__u_tm) {
     localtime_r((time_t *)&t, __u_tm);
     return (time_t)t;
 }
+#endif
 static const char *_unisa_wday[7] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
 static const char *_unisa_mon[12] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_put
 static size_t _unisa_put(char *s, size_t max, size_t n, const char *t, int k) { int i; i = 0; while (i < k && t[i]) { if (n + 1 < max) s[n] = t[i]; n = n + 1; i = i + 1; } return n; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_num
 static size_t _unisa_num(char *s, size_t max, size_t n, long v, int w, int pad) {
     char d[24]; int k; int neg; neg = v < 0; if (neg) v = 0 - v; k = 0;
     do { d[k] = (char)(48 + v % 10); v = v / 10; k = k + 1; } while (v > 0);
@@ -148,6 +178,8 @@ static size_t _unisa_num(char *s, size_t max, size_t n, long v, int w, int pad) 
     while (k > 0) { k = k - 1; if (n + 1 < max) s[n] = d[k]; n = n + 1; }
     return n;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_strftime
 static size_t strftime(char *__u_s, size_t __u_max, const char *__u_f, const struct tm *__u_tm) {
     size_t n; int c; long y;
     n = 0; y = __u_tm->tm_year + 1900L;
@@ -192,8 +224,12 @@ static size_t strftime(char *__u_s, size_t __u_max, const char *__u_f, const str
     __u_s[n] = 0;
     return n;
 }
+#endif
 static char _unisa_asc[32];
+#if !__UNISA_FTRIM_LIBC || __UN_asctime
 static char *asctime(const struct tm *__u_tm) { strftime(_unisa_asc, 32, "%a %b %e %H:%M:%S %Y\n", __u_tm); return _unisa_asc; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_ctime
 static char *ctime(const time_t *__u_t) { return asctime(localtime(__u_t)); }
 #endif
 #endif

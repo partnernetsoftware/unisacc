@@ -24,7 +24,7 @@ struct addrinfo { int ai_flags; int ai_family; int ai_socktype; int ai_protocol;
 #define AI_PASSIVE 1
 #define AI_NUMERICHOST 4
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_getaddrinfo || __UN_freeaddrinfo
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_hosts
 static int _unisa_hosts(const char *__u_name, struct in_addr *__u_out) {
     static char __u_buf[65536]; long __u_fd; long __u_n; long __u_i; long __u_ls; char __u_ip[64]; int __u_k;
     if (strcmp(__u_name, "localhost") == 0) { __u_out->s_addr = htonl(INADDR_LOOPBACK); return 1; }
@@ -46,6 +46,8 @@ static int _unisa_hosts(const char *__u_name, struct in_addr *__u_out) {
     }
     return 0;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getaddrinfo
 static int getaddrinfo(const char *__u_node, const char *__u_service, const struct addrinfo *__u_hints, struct addrinfo **__u_res) {
     struct addrinfo *__u_ai; struct sockaddr_in *__u_sa; struct in_addr __u_a; long __u_port; const char *__u_q;
     if (__u_hints && __u_hints->ai_family != AF_UNSPEC && __u_hints->ai_family != AF_INET) return EAI_FAMILY;
@@ -66,7 +68,11 @@ static int getaddrinfo(const char *__u_node, const char *__u_service, const stru
     __u_ai->ai_addrlen = sizeof(struct sockaddr_in); __u_ai->ai_addr = (struct sockaddr *)__u_sa;
     *__u_res = __u_ai; return 0;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_freeaddrinfo
 static void freeaddrinfo(struct addrinfo *__u_ai) { free(__u_ai); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_gai_strerror
 static const char *gai_strerror(int __u_e) { return __u_e == EAI_NONAME ? "Name not resolved (no DNS resolver is bundled)" : "getaddrinfo failed"; }
 #endif
 #endif

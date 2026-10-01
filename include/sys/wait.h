@@ -13,7 +13,7 @@
 #define WIFSTOPPED(s) (((s) & 0xff) == 0x7f)
 #define WSTOPSIG(s) (((s) >> 8) & 0xff)
 #ifndef _WIN32
-#if !__UNISA_FTRIM_LIBC || __UN_waitpid || __UN_wait
+#if !__UNISA_FTRIM_LIBC || __UN_waitpid
 static pid_t waitpid(pid_t __u_pid, int *__u_st, int __u_opt) {
     return (pid_t)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_wait4), (long)__u_pid, (long)__u_st, (long)__u_opt, 0, 0));
 }

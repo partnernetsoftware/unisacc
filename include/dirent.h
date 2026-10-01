@@ -83,7 +83,7 @@ static struct dirent *readdir(DIR *__u_d) {
 /* 0.0.19 (dsh): rewinddir/telldir/seekdir.  A position is the number of
    entries already returned; seekdir rewinds and reads forward to it (POSIX
    only promises telldir's value is meaningful to seekdir on the same DIR). */
-#if !__UNISA_FTRIM_LIBC || __UN_rewinddir || __UN_seekdir
+#if !__UNISA_FTRIM_LIBC || __UN_rewinddir
 static void rewinddir(DIR *__u_d) {
     if (__u_d == 0) return;
     __lseek(__u_d->fd, 0, 0);

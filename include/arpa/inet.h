@@ -3,7 +3,7 @@
 #ifndef _UNISA_ARPA_INET_H
 #define _UNISA_ARPA_INET_H
 #include <netinet/in.h>
-#if !__UNISA_FTRIM_LIBC || __UN_inet_pton || __UN_inet_addr || __UN_inet_aton || __UN_getaddrinfo
+#if !__UNISA_FTRIM_LIBC || __UN_inet_pton
 static int inet_pton(int __u_af, const char *__u_s, void *__u_dst) {
     unsigned long __u_v; int __u_parts; unsigned long __u_n; int __u_digits; unsigned char __u_b[4];
     if (__u_af != AF_INET) { errno = EAFNOSUPPORT; return -1; }
@@ -19,10 +19,14 @@ static int inet_pton(int __u_af, const char *__u_s, void *__u_dst) {
     __u_v = 0; ((unsigned char *)__u_dst)[0] = __u_b[0]; ((unsigned char *)__u_dst)[1] = __u_b[1]; ((unsigned char *)__u_dst)[2] = __u_b[2]; ((unsigned char *)__u_dst)[3] = __u_b[3];
     (void)__u_v; return 1;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_inet_addr
 static in_addr_t inet_addr(const char *__u_s) { in_addr_t __u_a; return inet_pton(AF_INET, __u_s, &__u_a) == 1 ? __u_a : INADDR_NONE; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_inet_aton
 static int inet_aton(const char *__u_s, struct in_addr *__u_a) { return inet_pton(AF_INET, __u_s, __u_a) == 1; }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_inet_ntop || __UN_inet_ntoa
+#if !__UNISA_FTRIM_LIBC || __UN_inet_ntop
 static const char *inet_ntop(int __u_af, const void *__u_src, char *__u_dst, socklen_t __u_size) {
     const unsigned char *__u_p; int __u_i; int __u_n; char __u_t[16]; int __u_v;
     if (__u_af != AF_INET) { errno = EAFNOSUPPORT; return 0; }
@@ -38,7 +42,9 @@ static const char *inet_ntop(int __u_af, const void *__u_src, char *__u_dst, soc
     for (__u_i = 0; __u_i < __u_n; __u_i++) __u_dst[__u_i] = __u_t[__u_i];
     __u_dst[__u_n] = 0; return __u_dst;
 }
+#endif
 static char _unisa_ntoa[16];
+#if !__UNISA_FTRIM_LIBC || __UN_inet_ntoa
 static char *inet_ntoa(struct in_addr __u_a) { inet_ntop(AF_INET, &__u_a, _unisa_ntoa, 16); return _unisa_ntoa; }
 #endif
 #endif

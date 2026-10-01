@@ -58,11 +58,13 @@ static int isatty(int __u_fd) {               /* a terminal answers the attribut
 #endif
 #endif
 #if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_ftruncate)
+#if !__UNISA_FTRIM_LIBC || __UN_ftruncate
 static int ftruncate(int __u_fd, off_t __u_len) {   /* R18-5 (kilo saves through it) */
     long __u_r; __u_r = __ftruncate(__u_fd, (long)__u_len, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
     return 0;
 }
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlink
 static int unlink(const char *__u_path) {
@@ -109,11 +111,14 @@ static int unlink(const char *__u_path) {
 #define _UNISA_NR_getcwd 17
 #define _UNISA_NR_getppid 173
 #endif
+/* _exit: no atexit handlers, no stdio flush */
 #if !__UNISA_FTRIM_LIBC || __UN__exit
-static void _exit(int __u_code) { __exit(__u_code); }   /* no atexit handlers, no stdio flush */
+static void _exit(int __u_code) { __exit(__u_code); }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_ret
 static long _unisa_ret(long __u_r) { if (__u_r < 0 && __u_r > -4096) { errno = (int)(0 - __u_r); return -1; } return __u_r; }
-#if !__UNISA_FTRIM_LIBC || __UN_getpid || __UN_fork
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_getpid
 static pid_t getpid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getpid), 0, 0, 0, 0, 0); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_getppid
@@ -134,23 +139,26 @@ static pid_t fork(void) {
     return (pid_t)_unisa_ret(__u_r);
 }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_execve || __UN_execvp || __UN_execv
+#if !__UNISA_FTRIM_LIBC || __UN_execve
 static int execve(const char *__u_path, char *const __u_argv[], char *const __u_envp[]) {
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_execve), (long)__u_path, (long)__u_argv, (long)__u_envp, 0, 0));
 }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_execvp || __UN_execv
 static char *_unisa_envv[4096];
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_environ
 static char **_unisa_environ(void) {        /* the process environment, as getenv walks it */
     int __u_k; int __u_n; __u_k = __argc() + 1; __u_n = 0;
     while (__u_n < 4095 && __argv(__u_k) != 0) { _unisa_envv[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
     _unisa_envv[__u_n] = 0;
     return _unisa_envv;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_execv
 static int execv(const char *__u_path, char *const __u_argv[]) { return execve(__u_path, __u_argv, _unisa_environ()); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_execvp
 #include <stdlib.h>
+#if !__UNISA_FTRIM_LIBC || __UN_execvp
 static int execvp(const char *__u_file, char *const __u_argv[]) {
     char __u_buf[1024]; const char *__u_p; int __u_i; int __u_j; int __u_k;
     __u_i = 0; while (__u_file[__u_i]) { if (__u_file[__u_i] == 47) return execv(__u_file, __u_argv); __u_i = __u_i + 1; }
@@ -169,6 +177,7 @@ static int execvp(const char *__u_file, char *const __u_argv[]) {
     }
     return -1;
 }
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_dup2
 static int dup2(int __u_old, int __u_new) {

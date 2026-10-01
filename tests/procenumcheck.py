@@ -36,6 +36,10 @@ static long __getdents64(int fd,void *p,int n) {
  if(mode==6)len=19;
  return len;
 }
+static long __lseek(int fd,long off,int whence) { return 0; }
+#include <stdlib.h>
+#include <errno.h>
+#undef __APPLE__   /* the mock writes Linux records (0.0.18 gave macOS its own layout) */
 #include "dirent.h"
 int main(void) {
  DIR *d; struct dirent *e; int k;

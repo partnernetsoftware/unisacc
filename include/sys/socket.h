@@ -114,8 +114,10 @@ struct msghdr { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov; si
 #define _UNISA_NR_sendmsg 211
 #define _UNISA_NR_recvmsg 212
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_sendmsg || __UN_sendto || __UN_send
+#if !__UNISA_FTRIM_LIBC || __UN_sendmsg
 static long sendmsg(int __u_s, const struct msghdr *__u_m, int __u_f) { return _UNISA_SOCK(_UNISA_NR_sendmsg, __u_s, __u_m, __u_f, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_sendto
 static long sendto(int __u_s, const void *__u_b, size_t __u_n, int __u_f, const struct sockaddr *__u_a, socklen_t __u_l) {
     struct msghdr __u_m; struct iovec __u_v;
     __u_v.iov_base = (void *)__u_b; __u_v.iov_len = __u_n;
@@ -123,10 +125,14 @@ static long sendto(int __u_s, const void *__u_b, size_t __u_n, int __u_f, const 
     __u_m.msg_control = 0; __u_m.msg_controllen = 0; __u_m.msg_flags = 0;
     return sendmsg(__u_s, &__u_m, __u_f);
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_send
 static long send(int __u_s, const void *__u_b, size_t __u_n, int __u_f) { return sendto(__u_s, __u_b, __u_n, __u_f, 0, 0); }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_recvmsg || __UN_recvfrom || __UN_recv
+#if !__UNISA_FTRIM_LIBC || __UN_recvmsg
 static long recvmsg(int __u_s, struct msghdr *__u_m, int __u_f) { return _UNISA_SOCK(_UNISA_NR_recvmsg, __u_s, __u_m, __u_f, 0, 0); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_recvfrom
 static long recvfrom(int __u_s, void *__u_b, size_t __u_n, int __u_f, struct sockaddr *__u_a, socklen_t *__u_l) {
     struct msghdr __u_m; struct iovec __u_v; long __u_r;
     __u_v.iov_base = __u_b; __u_v.iov_len = __u_n;
@@ -136,6 +142,8 @@ static long recvfrom(int __u_s, void *__u_b, size_t __u_n, int __u_f, struct soc
     if (__u_r >= 0 && __u_a && __u_l) *__u_l = __u_m.msg_namelen;
     return __u_r;
 }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_recv
 static long recv(int __u_s, void *__u_b, size_t __u_n, int __u_f) { return recvfrom(__u_s, __u_b, __u_n, __u_f, 0, 0); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setsockopt
