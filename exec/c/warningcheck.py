@@ -28,7 +28,10 @@ for name in drivers:
             equal(run(base+args),run([ref,*args]));count+=1
     if flagset in ('all','Werror'):
         # Rejection precedes any output/dependency opening and any user execution.
-        for mode in ['-S','-c','image','-run']:
+        # (-c left this list in 0.0.17: with -b it is an object (R17-1), and this
+        # harness's package carries only the host routes, where the product has
+        # no object route outside Linux; objects are checked by elfobj/linkunits)
+        for mode in ['-S','image','-run']:
             out=p/'sentinel';dep=p/'dependency';out.write_bytes(b'keep');dep.write_bytes(b'dep')
             args=[f,'-b',target,'-Werror','-MF',dep,'-o',out]+([] if mode=='image' else [mode])
             a,b=run(base+args),run([ref,*args]);equal(a,b)
@@ -37,5 +40,5 @@ for name in drivers:
             count+=1
         args=[clean,'-Werror','-run'];equal(run(base+args),run([ref,*args]));count+=1
     print(name+': '+flagset+' warning modes, preprocessing'+(', Werror output/run barrier' if flagset in ('all','Werror') else '')+' pass',flush=True)
-assert count==({'all':20,'Wall':5,'Wextra':5,'Werror':10}[flagset])*len(drivers),count
+assert count==({'all':19,'Wall':5,'Wextra':5,'Werror':9}[flagset])*len(drivers),count
 print('warning driver:',count,'full-result comparisons; single-unit checks')
