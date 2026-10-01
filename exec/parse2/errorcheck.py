@@ -34,14 +34,21 @@ with tempfile.TemporaryDirectory(prefix='parser-errors-') as td:
  ('warning-before-error','int f(void){int *p=3;return missing;} int main(void){int unused;return 0;}\n'),
  ('printf-error','int main(void){printf("%d",missing);return 0;}\n'),
  ('clean','int main(void){return 3;}\n'),
+ ('complex','int main(void){_Complex double z=1.0; return (int)__real__ z - 1;}\n'),
  ]
  for name,src in cases:
   f=t/(name+'.c');f.write_text(src)
   pkg.write_bytes(build([route],[('00636c692f',resources),('006864722f',R/'include')]))
   got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
   ref=run([os.environ.get('UA','/tmp/ua_ref'),*ref_flags,'-t','lnx/x86_64',f,'-o','-'])
-  assert (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,ref.stderr),(name,got.returncode,ref.returncode,got.stderr,ref.stderr)
+  expected_err=ref.stderr.replace(b'UNCOVERED\tref.parse\t',b'UNCOVERED\te3\t',1) if name=='complex' else ref.stderr
+  assert (got.returncode,got.stdout,got.stderr)==(ref.returncode,ref.stdout,expected_err),(name,got.returncode,ref.returncode,got.stderr,expected_err)
   print('parser errors',name,'full result identical',flush=True)
+ f=t/'struct-return.c';f.write_text('typedef struct { int a; int b; } T;\nstatic T mk(int n){T t;t.a=n;t.b=n;return t;}\nstatic T g(int n){return mk(n);}\nint main(void){return g(2).a-2;}\n')
+ got=run([t/'run','--bundle',pkg,'error',f,f,R/'include'])
+ assert got.returncode==1 and got.stderr.startswith((b'UNCOVERED\te3\t-\t-\t'+str(f).encode()+b':3:')),got.stderr
+ assert b'\texpr.call.ret-struct\tstruct return expression outside local lvalue\n' in got.stderr,got.stderr
+ print('parser errors struct-return product gap has a located coverage record',flush=True)
  for limit in ('1','2','0','3','20'):
   f=t/'limit.c';f.write_text(cases[3][1])
   (resources/'error-limit').write_text(limit)

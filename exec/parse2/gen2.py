@@ -904,7 +904,7 @@ def build(locations=False, warnings=False, errors=False):
     from objectdefinitions import install as objectdefinitions_install
     objectdefinitions_install(E, P)
     from structreturnexpr import install as structreturnexpr_install
-    structreturnexpr_install(E, P)
+    structreturnexpr_install(E, P, errors)
     from forward import install as forward_install
     start = forward_install(E, P, start, FPS_FN, DEFS)
     # The compound-literal output splice walks a saved byte blob.  Its
