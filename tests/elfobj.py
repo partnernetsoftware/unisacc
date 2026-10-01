@@ -241,6 +241,22 @@ def main(argv):
             r = run(['limactl', 'shell', vm, '--', 'sh', '-c', 'rm -rf /tmp/ia && mkdir /tmp/ia && cd /tmp/ia && tar xf - && gcc -c -o banner.o banner.c && ld -o prog use_lnx.o banner.o && ./prog'], input=tar, timeout=40)
             assert r.stdout == want, ('interop elf', r.stdout, r.stderr[-300:])
             print('elfobj  interop (a): our ELF object reads gcc-defined data symbols, linked by GNU ld in %s' % vm)
+        # the product's Linux object route (cdx 7f72206) writes the reference's bytes
+        prod = os.environ.get('OBJ_PRODUCT')
+        if prod:
+            same = 0
+            for probe in PROBES:
+                for arch in ('x86_64', 'arm64'):
+                    for unit in ([], ['-funit']):
+                        a = tmp / 'pr.o'; b = tmp / 'rf.o'
+                        r1 = run(['sh', prod, ROOT / probe, '-c', '-b', 'lnx/' + arch] + unit + ['-o', a], cwd=ROOT)
+                        r2 = run([ua, ROOT / probe, '-c', '-b', 'lnx/' + arch] + unit + ['-o', b], cwd=ROOT)
+                        assert r1.returncode == 0 and r2.returncode == 0, ('product object', probe, arch, unit, r1.stderr[-200:])
+                        assert a.read_bytes() == b.read_bytes(), ('product object bytes differ', probe, arch, unit)
+                        same += 1
+            r = run(['sh', prod, ROOT / 'examples/hello.c', '-c', '-b', 'osx/arm64', '-o', tmp / 'x.o'], cwd=ROOT)
+            assert r.returncode != 0 and b'not on the product route' in r.stderr, 'product osx object should be refused by name'
+            print('elfobj  product: %d Linux objects (whole and unit) byte-identical to the reference; osx/win refused by name' % same)
         # bare -c is still the tape
         r = run([ua, ROOT / 'examples/hello.c', '-c', '-o', tmp / 'bare.tape'], cwd=ROOT)
         assert r.returncode == 0 and (tmp / 'bare.tape').read_bytes().startswith(b'_start:'), 'bare -c no longer writes the tape'

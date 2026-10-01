@@ -319,8 +319,14 @@ int main(int argc, char **argv) {
     /* -c with -b: an object (R17-1).  The product writes objects through its
        own route (\0cli/object, \0cli/funit; exec/enc, in progress) -- until
        that route exists the driver says so instead of writing a tape. */
-    if (sawc && target && !object_path(src)) return clierror("object output (-c -b) is not on the product route yet (0.0.17 R17-1 product side); the reference compiler writes objects");
-    if (funit && !(sawc && target)) return clierror("-funit needs -c -b os/arch (a unit object)");
+    /* -c with -b: an object (R17-1).  The Linux targets have the product's
+       object route (cdx 7f72206: <os>/<arch>[/warn][/multi]/object/O<n>,
+       resources \0cli/object and \0cli/funit); Mach-O and COFF objects are
+       still the reference compiler's, and the driver says so by name. */
+    int objwant = sawc && target && !object_path(src);
+    if (objwant && strncmp(target,"lnx/",4)) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
+    if (funit && !objwant) return clierror("-funit needs -c -b os/arch (a unit object)");
+    if (objwant) { mode = 5; if (!out) out = deps_target(0,src,1); }
     /* unit objects (-funit): joined into one program tape here, before the
        route is chosen, because the program's target is the objects' */
     int linking=object_path(src); Buf linked={0};
@@ -348,10 +354,10 @@ int main(int argc, char **argv) {
     char route[96];
     int n = mode == 4 ? snprintf(route,sizeof route,"tokens") :
         mode == 1 ? snprintf(route,sizeof route,"%s/pp",target) :
-        snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
+        snprintf(route,sizeof route,"%s/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==5 ? "object" : mode==3 ? "run" : mode==2 ? "tape" : "image",level);
     if (n < 0 || n >= (int)sizeof route) return clierror("target name too long");
     if (warnings && mode!=1 && mode!=4) {
-        n=snprintf(route,sizeof route,"%s/warn/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==3 ? "run" : mode==2 ? "tape" : "image",level);
+        n=snprintf(route,sizeof route,"%s/warn/%s%s/O%d",target,nsources>1 ? "multi/" : "",mode==5 ? "object" : mode==3 ? "run" : mode==2 ? "tape" : "image",level);
         if (n<0 || n>=(int)sizeof route) return clierror("target name too long");
     }
     if (!pkg) pkg = getenv("UNISA_CONTAINER");
@@ -402,6 +408,11 @@ int main(int argc, char **argv) {
     ARGRESOURCE(NRI,"\0cli/source",srcres); NRI++;
     ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
+    Buf objres={0}, funitres={0};
+    if (objwant) bput(&objres,1,0);
+    if (funit) bput(&funitres,1,0);
+    if (objwant) { ARGRESOURCE(NRI,"\0cli/object",objres); NRI++; }
+    if (funit) { ARGRESOURCE(NRI,"\0cli/funit",funitres); NRI++; }
     ARGRESOURCE(NRI,"\0cli/error-limit",errorlimit); NRI++;
     /* Target selection is input data; the E2 model chooses its declaration. */
     const char *predefine_target=mode==4 ? "lnx/x86_64" : target;

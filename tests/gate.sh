@@ -430,6 +430,7 @@ if [ "$COM" = 1 ]; then
     for s in cli ccparity run multi diag diagunits hostile staticinit tagforward staticunits parserbounds formatonce c99; do job com-$s UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/$s.sh; done
     job com-full-signature python3 ./tests/fullsignaturecallcheck.py --package "$PRODUCT"
     for k in 1 2 3; do job com-tapebin-$k MODEL_COM="$PRODUCT" TAPEBIN_SHARD=$k/3 python3 ./tests/tapebinproduct.py; done   # one pass was 45-53 s
+    job com-elfobj OBJ_PRODUCT="$PRODUCT" ./tests/elfobj.sh   # R17-1: the product writes the reference's Linux object bytes
     job com-linkunits LINK_PRODUCT="$PRODUCT" ./tests/linkunits.sh   # R17-2: the product links reference-built unit objects
     job com-closure UA="$PRODUCT" UA_RUN="$PRODUCT" ./tests/closure.sh examples/*.c
     job com-tools UA="$PRODUCT" UA_RUN="$PRODUCT" TOOLS_UA="$PRODUCT" ./tests/tools.sh
