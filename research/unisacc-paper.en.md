@@ -377,7 +377,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 **Threats to validity.** Performance figures come from a single machine, and some platforms were executed under emulation; the rows of the speed table come from different product versions (Appendix A); coverage by c-testsuite and the probe corpus does not extrapolate to arbitrary C99 programs.
 
-**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../plans/v0.0.20.md) and [v0.0.21](../plans/v0.0.21.md). These are plans, not results.
+**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../archive/plans/v0.0.20.md) and [v0.0.21](../plans/v0.0.21.md). These are plans, not results.
 
 ## 9 Related Work
 

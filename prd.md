@@ -13,7 +13,7 @@
 
 ### 版本状态与历史身份
 
-最近已发布版本为 **v0.0.17**（本地 tag 核对）；0.0.18 未单独发布，其工作并入 0.0.19，后者处于候选验收阶段。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
+最近已发布版本为 **v0.0.20**（2026-10-01T22:28Z 公开）；0.0.18 未单独发布，其工作并入 0.0.19。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
 
 ### 计划索引（正文在 plans/，prd 只放索引）
 
@@ -22,13 +22,13 @@
 | v0.0.12–v0.0.17 | [archive/plans/](archive/plans/) — 逐版计划与结项收据（0.0.15 整理版未发布，其余已发布；身份见历史记录） | 已归档 |
 | v0.0.18 | [archive/plans/v0.0.18.md](archive/plans/v0.0.18.md) — 已完成部分并入 0.0.19，未单独发布 | 已结项、并入 0.0.19 |
 | v0.0.19 | [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) — 含 0.0.18 工作与宿主能力头·网络 | **已公开 2026-10-01**（signed sha256 ad1d87e9…，[回执](research/r19-release-acceptance.json)） |
-| v0.0.20 | [plans/v0.0.20.md](plans/v0.0.20.md) — C99 种子构造器：先与 Python 对照，再覆盖 δ / P3 / seed，成熟后切换默认（主人 2026-10-01 批准移回 0.0.x） | 已立项，后续版本 |
+| v0.0.20 | [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) — 链接阶段全程序事实（.unit 2/.gdef）、结构化拒绝、两条字节差异闭合、libc 增补；C99 种子构造器只完成首片（Python 仍为默认） | **已公开 2026-10-01**（signed sha256 3a201488…，[回执](research/r20-release-acceptance.json)） |
 | v0.0.21 | [plans/v0.0.21.md](plans/v0.0.21.md) — 承接 0.0.20 超量范围：cc ABI 互调及依赖它的转发/动态库，Windows 与汇编格式、Csmith 和语料扩展 | 范围重排；已二次顺延的旧版本承诺须显式降级，不把改编号视为完成 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
 
-历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的组合与链接问题由 [v0.0.20 计划](plans/v0.0.20.md) 跟踪。
+历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的组合与链接问题由 [v0.0.21 计划](plans/v0.0.21.md) 跟踪。
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 
@@ -244,7 +244,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 ## 5. 路线
 
-当前版本及其完成状态只在 §2 的计划索引维护。0.0.20 聚焦 C99 种子构造器、结构化拒绝与链接统一；依赖 ABI 互调的转发、动态库及其他超量范围列入 [0.0.21 计划](plans/v0.0.21.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。
+当前版本及其完成状态只在 §2 的计划索引维护。0.0.20 已公开；0.0.21 接续 C99 种子构造器余片与依赖 ABI 互调的转发、动态库及其他超量范围列入 [0.0.21 计划](plans/v0.0.21.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。
 
 R20-1 A 首轮复测：旧 C 构造器的 `prec` 单表与 Python/出货 UNS2 字节相同；完整旧检查在当前表上碰到 `abi` 规则容量、`isel` 类别容量与 `combo` 差异，58 秒整轮亦超时。旧 `genmodel.c` 在当前 `lexcls` 的 257 个字段值上超出 256 上限。它们是可复用算法的证据，尚不构成现行 P3/seed 的 C99 构造路径；逐项回执与边界见 [R20-1 A 复测](research/r20-c99-seed-a-audit.md)。
 

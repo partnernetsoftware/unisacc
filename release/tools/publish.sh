@@ -10,16 +10,16 @@ have=$(gh release view "$TAG" --json assets -q '[.assets[].name]|join(" ")') || 
 case " $have " in *" unisacc.com "*) ;; *) echo "refused: no signed unisacc.com on $TAG yet"; exit 1;; esac
 case " $have " in *" unisacc-macos-universal.dmg "*) ;; *) echo "refused: no unisacc-macos-universal.dmg on $TAG yet"; exit 1;; esac
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-url=$(gh release view "$TAG" --json assets -q '.assets[]|select(.name=="unisacc.com").url') || exit 1
-[ -n "$url" ] || { echo "refused: signed asset URL is empty"; exit 1; }
-curl -sfL -o "$T/draft-unisacc.com" "$url" || { echo "draft download failed"; exit 1; }
+# a draft's asset needs the authenticated client (0.0.20: plain curl of the asset URL failed)
+mkdir "$T/d" && gh release download "$TAG" --pattern unisacc.com -D "$T/d" >/dev/null || { echo "draft download failed"; exit 1; }
+mv "$T/d/unisacc.com" "$T/draft-unisacc.com"
 draft_hash=$(shasum -a 256 "$T/draft-unisacc.com" | cut -d' ' -f1)
 [ "$draft_hash" = "$WANT" ] || { echo "REFUSED DRAFT BYTES: $draft_hash != $WANT"; exit 1; }
 for a in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
   case "$a" in unisacc.com|unisacc-macos-universal.dmg) ;; *) gh release delete-asset "$TAG" "$a" -y >/dev/null || exit 1; echo "removed $a";; esac
 done
 gh release edit "$TAG" --draft=false --latest >/dev/null || exit 1
-curl -sfL -o "$T/unisacc.com" "$url" || { echo "download failed"; exit 1; }
+curl -sfL -o "$T/unisacc.com" "https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases/download/$TAG/unisacc.com" || { echo "download failed"; exit 1; }
 got=$(shasum -a 256 "$T/unisacc.com" | cut -d' ' -f1)
 echo "public $TAG: $(gh release view "$TAG" --json assets -q '[.assets[].name]|join(", ")')"
 [ "$got" = "$WANT" ] && echo "public unisacc.com sha256 $got = signed" || { echo "PUBLIC BYTES DIFFER: $got != $WANT"; exit 1; }
