@@ -179,6 +179,47 @@ static int execvp(const char *__u_file, char *const __u_argv[]) {
 }
 #endif
 #endif
+/* execl family (0.0.20 R20-6, dsh): the variadic list gathered into an
+   array, then execve/execvp; at most 255 arguments */
+#include <stdarg.h>
+#if !__UNISA_FTRIM_LIBC || __UN_execl
+static int execl(const char *__u_path, const char *__u_a0, ...) {
+    char *__u_v[256]; int __u_n; va_list __u_ap;
+    __u_v[0] = (char *)__u_a0; __u_n = 1; va_start(__u_ap, __u_a0);
+    while (__u_v[__u_n - 1] && __u_n < 256) { __u_v[__u_n] = va_arg(__u_ap, char *); __u_n = __u_n + 1; }
+    va_end(__u_ap);
+    if (__u_v[__u_n - 1]) return (int)_unisa_ret(0 - 7);    /* E2BIG */
+    return execve(__u_path, __u_v, _unisa_environ());
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_execlp
+static int execlp(const char *__u_file, const char *__u_a0, ...) {
+    char *__u_v[256]; int __u_n; va_list __u_ap;
+    __u_v[0] = (char *)__u_a0; __u_n = 1; va_start(__u_ap, __u_a0);
+    while (__u_v[__u_n - 1] && __u_n < 256) { __u_v[__u_n] = va_arg(__u_ap, char *); __u_n = __u_n + 1; }
+    va_end(__u_ap);
+    if (__u_v[__u_n - 1]) return (int)_unisa_ret(0 - 7);
+    return execvp(__u_file, __u_v);
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_execle
+static int execle(const char *__u_path, const char *__u_a0, ...) {
+    char *__u_v[256]; char **__u_e; int __u_n; va_list __u_ap;
+    __u_v[0] = (char *)__u_a0; __u_n = 1; va_start(__u_ap, __u_a0);
+    while (__u_v[__u_n - 1] && __u_n < 256) { __u_v[__u_n] = va_arg(__u_ap, char *); __u_n = __u_n + 1; }
+    if (__u_v[__u_n - 1]) { va_end(__u_ap); return (int)_unisa_ret(0 - 7); }
+    __u_e = va_arg(__u_ap, char **); va_end(__u_ap);
+    return execve(__u_path, __u_v, __u_e);
+}
+#endif
+/* sleep / usleep over the shared nanosleep primitive (sys/_timespec.h) */
+#include <sys/_timespec.h>
+#if !__UNISA_FTRIM_LIBC || __UN_sleep
+static unsigned sleep(unsigned __u_s) { struct timespec __u_q; __u_q.tv_sec = __u_s; __u_q.tv_nsec = 0; _unisa_nanosleep(&__u_q); return 0; }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_usleep
+static int usleep(unsigned __u_us) { struct timespec __u_q; __u_q.tv_sec = __u_us / 1000000; __u_q.tv_nsec = (long)(__u_us % 1000000) * 1000; return (int)_unisa_ret(_unisa_nanosleep(&__u_q)); }
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_dup2
 static int dup2(int __u_old, int __u_new) {
 #if defined(__APPLE__) || defined(__x86_64__)

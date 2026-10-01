@@ -14,6 +14,46 @@
 typedef long time_t;
 #endif
 typedef long clock_t;
+#include <sys/_timespec.h>
+/* clock_gettime / nanosleep (0.0.20 R20-6, dsh).  Linux: the system calls.
+   macOS has no clock_gettime call: both clocks read gettimeofday, so
+   CLOCK_MONOTONIC there is the wall clock at microsecond grain (stated). */
+typedef int clockid_t;
+#define CLOCK_REALTIME 0
+#ifdef __APPLE__
+#define CLOCK_MONOTONIC 6
+#else
+#define CLOCK_MONOTONIC 1
+#endif
+#ifndef _WIN32
+#if !__UNISA_FTRIM_LIBC || __UN_clock_gettime
+static int clock_gettime(clockid_t __u_c, struct timespec *__u_ts) {
+    long __u_r;
+#ifdef __APPLE__
+    long __u_tv[2];
+    if (__u_c != CLOCK_REALTIME && __u_c != CLOCK_MONOTONIC) return (int)_unisa_ret(0 - 22);
+    __u_tv[0] = 0; __u_tv[1] = 0;
+    __u_r = __gettimeofday((char *)__u_tv, 0, 0);
+    if (__u_r < 0) return (int)_unisa_ret(__u_r);
+    __u_ts->tv_sec = __u_tv[0]; __u_ts->tv_nsec = __u_tv[1] * 1000;
+    return 0;
+#elif defined(__x86_64__)
+    __u_r = __syscall6(228, __u_c, (long)__u_ts, 0, 0, 0);
+    return (int)_unisa_ret(__u_r);
+#else
+    __u_r = __syscall6(113, __u_c, (long)__u_ts, 0, 0, 0);
+    return (int)_unisa_ret(__u_r);
+#endif
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_nanosleep
+static int nanosleep(const struct timespec *__u_q, struct timespec *__u_rem) {
+    if (__u_q->tv_nsec < 0 || __u_q->tv_nsec > 999999999) return (int)_unisa_ret(0 - 22);
+    if (__u_rem) { __u_rem->tv_sec = 0; __u_rem->tv_nsec = 0; }
+    return (int)_unisa_ret(_unisa_nanosleep(__u_q));
+}
+#endif
+#endif
 struct tm {
     int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon;
     int tm_year; int tm_wday; int tm_yday; int tm_isdst;

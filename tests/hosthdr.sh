@@ -15,6 +15,16 @@ R=$(cd "$(dirname "$0")/.." && pwd); cd "$R"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 ok=0; bad=0; skip=0
 case "$(uname -s)/$(uname -m)" in Darwin/arm64) HOST=osx/arm64;; Darwin/x86_64) HOST=osx/x86_64;; Linux/x86_64) HOST=lnx/x86_64;; Linux/aarch64) HOST=lnx/arm64;; *) echo "hosthdr: no native target"; exit 1;; esac
+# R20-6: every carried header compiles when included on its own, for one
+# target per OS (a header that leans on another's includes, or a body that
+# names a call the target lacks, fails here before any program sees it)
+for h in $(cd include && find . -name '*.h' | sed 's|^\./||' | sort); do
+    printf '#include <%s>\nint main(void) { return 0; }\n' "$h" > "$T/alone.c"
+    for t in "$HOST" lnx/x86_64 win/x86_64; do
+        if "$_BOUND" 30 "$UA" "$T/alone.c" -b "$t" -o "$T/alone.out" 2>"$T/err"; then ok=$((ok+1)); else bad=$((bad+1)); echo "  FAIL alone $h $t: $(head -1 "$T/err")"; fi
+    done
+done
+echo "  alone: every include/ header on its own, $HOST lnx/x86_64 win/x86_64"
 for f in tests/hosthdr/*.c; do
     b=$(basename "$f" .c); mkdir -p "$T/u.$b" "$T/c.$b"
     "$_BOUND" 30 "$UA" "$f" -b "$HOST" -o "$T/u.$b/p" 2>"$T/err" || { bad=$((bad+1)); echo "  FAIL $b unisacc: $(head -1 "$T/err")"; continue; }
