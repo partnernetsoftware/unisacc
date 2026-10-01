@@ -1,14 +1,15 @@
 # Compiler driver gate parts
 
-`compilercheck.sh` / `compilercheck.py` accept `core-modes`, `core-contracts`,
+`compilercheck.sh` / `compilercheck.py` accept `core-build`, `core-modes`, `core-contracts`,
 `core-dependencies`, `resources`, `language-1`, `language-2`, and the aggregate aliases `language`, `core`
 and default `all`. `core` executes its three parts; `all` executes every assertion.
 The aliases retain the previous assertion set, but are not bounded gate units.
-A complete driver result requires all six gate receipts.
+A complete driver result requires all seven gate receipts.
 
 | Gate | Scope |
 |---|---|
-| `exec-driver-core-modes` | Network-built driver, version queries and 27 mode/optimization-level comparisons |
+| `exec-driver-core-build` | Network-built driver matches the reference image and runs a real probe |
+| `exec-driver-core-modes` | Version queries and 27 mode/optimization-level comparisons |
 | `exec-driver-core-contracts` | Compatibility flags, stdin, output preservation, source/output IO and undefined-function checks |
 | `exec-driver-core-dependencies` | Dependency resource-read ledger and token dump |
 | `exec-driver-resources` | Macro/include resources, printf fallback, isolated ASM package and APE CLI/memory/native checks |
@@ -25,7 +26,7 @@ there is no new cache or result reuse. Set `UNISACC_MODEL_CACHE` and `UA` explic
 for isolated runs. Use the existing rolling queue with the six actual gate names:
 
 ```sh
-./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources --suite exec-driver-language-1 --suite exec-driver-language-2
+./tests/term.sh env UA=/path/to/private/ua UNISACC_MODEL_CACHE=/path/to/private/cache python3 tests/gatequeue.py --state /tmp/private-driver-queue --jobs 2 --suite exec-driver-core-build --suite exec-driver-core-modes --suite exec-driver-core-contracts --suite exec-driver-core-dependencies --suite exec-driver-resources --suite exec-driver-language-1 --suite exec-driver-language-2
 ```
 
 Each invocation has a maximum 55-second window. Exit 75 means unfinished work:

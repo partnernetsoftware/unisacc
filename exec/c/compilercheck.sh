@@ -19,8 +19,10 @@ b python3 exec/c/compilerpack.py --o1 "$T/o1.net" --include include -o "$T/compi
 case ${1:-all} in all|core|core-modes|core-contracts|core-dependencies|resources)
 b cc -O2 -Wall -Wextra exec/c/compiler.c -o "$T/driver-cc"
 b "$UA" -O2 exec/c/compiler.c -o "$T/driver-ua"
+;; core-build)
+b "$UA" -O2 exec/c/compiler.c -o "$T/driver-ua"
 ;; esac
-b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.sh -O2 exec/c/compiler.c -o "$T/driver-asm"
+case ${1:-all} in core-build) ;; *) b env CORE_ASM_ARCH="$ARCH" ./exec/c/asm/cc.sh -O2 exec/c/compiler.c -o "$T/driver-asm";; esac
 # Only the resources contract executes the packaged container. Core checks
 # use the three raw drivers; rebuilding an unused APE costs their time budget.
 case ${1:-all} in all|resources)

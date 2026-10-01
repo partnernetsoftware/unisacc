@@ -153,9 +153,11 @@ job exec-winlower ./exec/lower/wincheck.sh                     # Windows typed s
 job exec-x86win ./exec/enc/x86wincheck.sh                      # Deferred Windows x86 setup after relaxation
 job exec-armwin ./exec/enc/armwincheck.sh                      # Windows ARM setup/gates, real text bytes
 job exec-pex86 env PE_ARCH=x86_64 ./exec/enc/pecheck.sh           # Shared PE writer, x86 text
-job exec-winx86self env TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
+job exec-winx86self env SELF_PART=stages TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
+job exec-winx86self-package env SELF_PART=package TARGET=win/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-pearm ./exec/enc/pecheck.sh                           # PE sections, relocations, real ARM images
-job exec-winself env TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
+job exec-winself env SELF_PART=stages TARGET=win/arm64 ./exec/pipeline/selfcheck.sh # full source PE, macros and reference bytes
+job exec-winself-package env SELF_PART=package TARGET=win/arm64 ./exec/pipeline/selfcheck.sh
 for part in stages chain resources; do job exec-native-$part env NATIVE_PART=$part ./exec/c/nativecheck.sh; done
 job exec-net python3 ./exec/c/netcheck.py
 job exec-codec ./exec/c/codeccheck.sh
@@ -195,7 +197,7 @@ if [ "$(uname -s)" = Darwin ]; then
     job exec-container ./exec/c/containercheck.sh
 fi
 job exec-embedded python3 ./exec/c/embeddedcheck.py
-for part in modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
+for part in build modes contracts dependencies; do job exec-driver-core-$part ./exec/c/compilercheck.sh core-$part; done
 job exec-driver-resources ./exec/c/compilercheck.sh resources
 for shard in 1 2; do job exec-driver-language-$shard ./exec/c/compilercheck.sh language-$shard; done
 for driver in cc asm; do job exec-warningdriver-$driver ./exec/c/warningcheck.sh "$driver"; done
@@ -215,11 +217,17 @@ if [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ]; then
 fi
 job exec-memwinarm ./exec/c/winmemorycheck.sh arm64
 job exec-memwinx86 ./exec/c/winmemorycheck.sh x86_64
-job exec-tableself env NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
-job exec-selfelf ./exec/pipeline/selfcheck.sh                    # current compiler source through seven deltas
-job exec-armself env TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines
-job exec-macself env TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh # Mach-O source route and native bootstrap
-job exec-macxself env TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh # x86/Rosetta bootstrap
+job exec-tableself env SELF_PART=stages NETWORK=0 TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
+job exec-selfelf env SELF_PART=stages ./exec/pipeline/selfcheck.sh                    # current compiler source through seven deltas
+job exec-selfelf-package env SELF_PART=package ./exec/pipeline/selfcheck.sh
+job exec-armself env SELF_PART=stages TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh # ARM source-to-ELF, includes target predefines
+job exec-armself-package env SELF_PART=package TARGET=lnx/arm64 ./exec/pipeline/selfcheck.sh
+job exec-macself env SELF_PART=stages TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh # Mach-O source route and native bootstrap
+job exec-macself-package env SELF_PART=package TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
+job exec-macxself env SELF_PART=stages TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh # x86/Rosetta bootstrap
+job exec-macxself-package env SELF_PART=package TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh
+job exec-bootstrap-osxarm env SELF_PART=bootstrap TARGET=osx/arm64 ./exec/pipeline/selfcheck.sh
+job exec-bootstrap-osxx86 env SELF_PART=bootstrap TARGET=osx/x86_64 ./exec/pipeline/selfcheck.sh
 job exec-srcelf ./exec/pipeline/check-elf.sh                     # fixed 68 complete source-to-ELF paths
 for k in 1 2 3 4; do job difftest_o-$k SHARD=$k/4 ./tests/difftest_o.sh; done
 job warn        ./tests/warn.sh

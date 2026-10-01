@@ -9,20 +9,23 @@ def ok(cmd, **kw):
 src=pathlib.Path('examples/hello.c').resolve();n=0
 drivers=[p/'driver-cc',p/'driver-ua',p/'driver-asm']
 part=sys.argv[4] if len(sys.argv)>4 else 'all'
-assert part in ('all','core','core-modes','core-contracts','core-dependencies','resources','language','language-1','language-2'),part
+assert part in ('all','core','core-build','core-modes','core-contracts','core-dependencies','resources','language','language-1','language-2'),part
 def assembly_package(directory):
     isolated=p/directory;isolated.mkdir()
     asm=isolated/'compiler';asm.write_bytes((p/'driver-asm').read_bytes());asm.chmod(0o755)
     (isolated/'models.pkg').write_bytes((p/'compiler.pkg').read_bytes())
     (isolated/'hello.c').write_bytes(src.read_bytes())
     return isolated,[asm,'--models','models.pkg']
-if part in ('all','core','core-modes'):
+if part in ('all','core','core-build'):
     # The migrated pipeline builds the driver itself, not just its input programs.
     netdriver=p/'driver-net'
-    netdriver.write_bytes(ok([p/'run','--bundle',p/'models.pkg',target,'exec/c/compiler.c']))
+    netdriver.write_bytes(ok([p/'run','--bundle',p/'models.pkg',target,'exec/c/compiler.c'],
+                             env=dict(os.environ, UNISA_MAXSTEPS='400000000000')))
     assert netdriver.read_bytes()==(p/'driver-ua').read_bytes(), 'network-built driver differs'
     netdriver.chmod(0o755)
     assert ok([netdriver,'--models',p/'compiler.pkg',src,'-b',target,'-O2'])==ok([ua,src,'-b',target,'-O2'])
+    print('compiler driver core-build: network-built driver matches reference',flush=True)
+if part in ('all','core','core-modes'):
     for exe in drivers:
         base=[exe,'--models',p/'compiler.pkg']
         # Version queries need no input or package, including outside the repo.
@@ -34,7 +37,7 @@ if part in ('all','core','core-modes'):
                 flags=['-b',target,mode]+([target] if mode=='-b' else [])+['-O'+str(level)]
                 got=ok([*base,src,*flags]);want=ok([ua,src,*flags]);assert got==want,(exe,flags)
                 n+=1
-    print(f'compiler driver core-modes: network-built driver and {n} mode/level matches pass',flush=True)
+    print(f'compiler driver core-modes: {n} mode/level matches pass',flush=True)
 if part in ('all','core','core-contracts'):
     for exe in drivers:
         base=[exe,'--models',p/'compiler.pkg']

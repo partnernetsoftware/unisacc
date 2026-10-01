@@ -28,7 +28,9 @@ def install(E, P, start, fps_fn, definitions):
                          {1: "UD.nextline"}, "FW.proto", [("RLD", "fw_seen")])
     P("FW.proto").a(("LDX", "lx_sig", "fw_id", fps_fn)).branch(
                          {0: "FW.missing"}, "FW.name", [("RLD", "lx_sig")])
-    P("FW.missing").a(E.rej("not covered: host-forwarded call lacks prototype")).goto("DEAD")
+    # The C reference does not forward an unprototyped call.  Keep the usual
+    # named undefined-function diagnostic from UD.error in that case.
+    P("FW.missing").goto(original)
     # UD is scanning a saved copy of the already emitted tape.  The current
     # output is empty, so it can hold one record until OCUT stores its blob.
     P("FW.name").branch({2: "FW.full"}, "FW.capture",
