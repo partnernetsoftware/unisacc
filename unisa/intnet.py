@@ -94,10 +94,30 @@ def build(stage, verify=True, stages=None):
     return n
 
 
+import os
+
+
+def _construct_one(name):
+    """A worker's share of build_all: one stage's construction and check."""
+    return name, to_dict(build(name))         # build() asserts exactness
+
+
 def build_all(names=None, verify=True, stages=None):
     from .gold import ALL as _ALL
     reg = stages if stages is not None else STAGES
     names = names or (list(reg) if stages is not None else _ALL)
+    # The stages are independent and each construction is deterministic, so
+    # the registry's stages are built four at a time (0.0.18: one after the
+    # other took 30 s here and past the 55 s bound on a hosted runner).  The
+    # nets are the same bytes either way; the order of the result is `names`.
+    if stages is None and verify and len(names) > 1 and os.environ.get("UNISA_BUILD_SERIAL") != "1":
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=4) as ex:
+            got = {r[0]: r for r in ex.map(_construct_one, names)}
+        out = {}
+        for nm in names:
+            out[nm] = from_dict(got[nm][1], stages=reg)
+        return out
     return {n: build(n, verify, stages=reg) for n in names}
 
 

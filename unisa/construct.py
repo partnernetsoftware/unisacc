@@ -33,8 +33,18 @@ SGD_THETA = 21925
 # cube = tuple of frozensets of value indices, one per field.
 # S_i == full vocab  =>  don't-care (no literal, not counted in the bias).
 
+_CUBE_KEYS = {}
+
+
 def cube_key(c):
-    return tuple(tuple(sorted(s)) for s in c)
+    # Memoised (0.0.18): the same cubes are keyed millions of times during
+    # construction; the key is a pure function of the cube.
+    k = _CUBE_KEYS.get(c)
+    if k is None:
+        k = tuple(tuple(sorted(s)) for s in c)
+        if len(_CUBE_KEYS) < 4000000:
+            _CUBE_KEYS[c] = k
+    return k
 
 
 class Domain:
@@ -115,28 +125,36 @@ def expand(D, seed, rem, badmask, order, setvalued=True):
     """Espresso EXPAND on the singleton cube {seed}: grow every literal as far
     as it stays consistent with the REMAINING keys (already-covered keys may be
     shadowed -- that is what makes this a decision list, not a cover)."""
-    cur = [D.mask[i][seed[i]] for i in range(D.m)]
-    sets = [{seed[i]} for i in range(D.m)]
+    mask = D.mask; m = D.m; ALL = D.ALL
+    cur = [mask[i][seed[i]] for i in range(m)]
+    sets = [{seed[i]} for i in range(m)]
     for i in order:
-        others = D.ALL
-        for j in range(D.m):
+        others = ALL
+        for j in range(m):
             if j != i:
                 others &= cur[j]
-        if not (others & badmask):
+        ob = others & badmask
+        if not ob:
             sets[i] = set(range(len(D.vocabs[i])))
-            cur[i] = D.ALL
+            cur[i] = ALL
             continue
         if not setvalued:
             continue
-        for v in range(len(D.vocabs[i])):
-            if v in sets[i]:
+        mi = mask[i]; si = sets[i]; c = cur[i]
+        for v in range(len(mi)):
+            if v in si:
                 continue
-            nm = cur[i] | D.mask[i][v]
-            if not (others & nm & badmask):
-                sets[i] = sets[i] | {v}
-                cur[i] = nm
+            if not (ob & (c | mi[v])):
+                si.add(v)
+                c |= mi[v]
+        cur[i] = c
     cube = tuple(frozenset(s) for s in sets)
-    return cube, D.cube_mask(cube)
+    # every literal's mask is already in cur: their AND is the cube's mask
+    cm = ALL
+    for i in range(m):
+        if len(sets[i]) != len(D.vocabs[i]):
+            cm &= cur[i]
+    return cube, cm
 
 
 def _orders(m):
