@@ -20,8 +20,9 @@ int main(void) {
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
+    int objwant; int bgiven;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
-    ninput = 0;
+    ninput = 0; objwant = 0; bgiven = 0;
     ftrim_libc = 1;                 /* R11-3: library bodies on demand by default; -fno-trim-libc restores the full set */
     i = 1;
     while (i < __argc()) {
@@ -64,6 +65,7 @@ int main(void) {
                there are no object files and no linker here, so `-c` never
                means what it means to gcc, and the usage line says so. */
             } else { if (a[1] == 99 || a[1] == 83) { dump = 1;   /* -c, -S */
+                if (a[1] == 99) objwant = 1;             /* -c -b lnx/ARCH writes a relocatable ELF */
             } else { if (a[1] == 118) { verb = 1;          /* -v */
             } else { if (a[1] == 111) {                    /* -o */
                 if (a[2]) outpath = a + 2; else { i = i + 1; outpath = __argv(i); }
@@ -99,7 +101,7 @@ int main(void) {
                 if (a[2] == 0) i = i + 1;
             } else { if (a[1] == 69) { pponly = 1; dump = 1;  /* -E */
             } else { if (a[1] == 98 || a[1] == 116) {      /* -b, -t */
-                if (a[1] == 98) dump = 2; else dump = 1;
+                if (a[1] == 98) { dump = 2; bgiven = 1; } else dump = 1;
                 i = i + 1; t = __argv(i);
             /* Flags a build system passes that mean nothing here: there is
                one dialect (C99), one optimisation level, and no separate
@@ -137,6 +139,14 @@ int main(void) {
                " (-c is a synonym: there are no object files)", 0);
     }
     if (emitbin && dump == 0 && runit == 0) dump = 1;
+    /* `-c` with an explicit `-b`: a relocatable object.  Bare `-c` stays the
+       tape (86 suites spell -S that way) until Mach-O and COFF objects exist
+       too, see docs/toolchain.md §4. */
+    objwant = objwant && bgiven && dump == 2;
+    if (objwant) {
+        if (t[0] != 108) return emsg("unisacc: error: -c writes only lnx/* objects in this version (docs/toolchain.md): ", t);
+        if (outpath == 0) outpath = deptarget(0, inputs[0]);
+    }
     if (depfile) { if (depfile[0] == 0) {
         /* gcc's names: -M/-MM go to -o or stdout; -MD/-MMD to -o with the
            suffix .d, or to the input's basename .d in the current directory */
@@ -225,7 +235,7 @@ int main(void) {
         }
         if (depfile) { if (writedeps(deptarget(outpath, inputs[0]), inputs, ninput)) return 1; }
         if (emitbin) { __write(ofd, tb_file, binlen); if (ofd != 1) __close(ofd); return 0; }
-        if (dump == 2) { bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
+        if (dump == 2) { if (objwant) bk_object(out, nout, t); else bk_build(out, nout, t); if (ofd != 1) __close(ofd); return 0; }
         __write(ofd, out, nout);
         if (ofd != 1) __close(ofd);
         /* `-c -v`: how many times each stage was asked, so a test can check

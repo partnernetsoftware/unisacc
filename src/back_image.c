@@ -179,6 +179,92 @@ int bk_elf(void) {
     return 0;
 }
 
+/* ---- the relocatable object (-c -b lnx/ARCH), docs/toolchain.md §4 -----
+   Eight sections; .text and .data are the image's bytes (the relocated
+   fields excepted), .bss is the zero tail; one Rela per recorded relocation;
+   every tape name a local symbol and `_start` the only global. */
+int bk_oname(int id) {                       /* a tape name into the string table */
+    int k; k = 0;
+    while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; }
+    wb(0); return bkname_len[id] + 1;
+}
+int bk_osym(long name, int info, int shndx, long value) {
+    w32(name); wb(info); wb(0); w16(shndx); w64(value); w64(0); return 0;
+}
+int bk_oshdr(long name, long type, long flags, long off, long size, long link, long info, long align, long entsize) {
+    w32(name); w32(type); w64(flags); w64(0); w64(off); w64(size); w32(link); w32(info); w64(align); w64(entsize); return 0;
+}
+int bk_elfobj(void) {
+    long L; long bss; long tend; long doff; long roff; long soff; long stoff; long shoff; long shsoff;
+    long nsym; long strlen; int id; int k; int start; long name;
+    L = bk_nzlen(); bss = bkdlen - L;
+    start = bk_find("_start", 6);
+    /* which names become symbols: every code label and data symbol but _start */
+    nsym = 4; strlen = 1; id = 0;
+    while (id < bknn) {
+        if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) { nsym = nsym + 1; strlen = strlen + bkname_len[id] + 1; }
+        id = id + 1;
+    }
+    nsym = nsym + 1; strlen = strlen + 7;                       /* _start */
+    tend = 64 + bktlen;
+    doff = bk_round(tend, 16);
+    roff = bk_round(doff + L, 8);
+    soff = bk_round(roff + 24 * bknro, 8);
+    stoff = soff + 24 * nsym;
+    shsoff = stoff + strlen;
+    shoff = bk_round(shsoff + 55, 8);
+    wb(127); wb(69); wb(76); wb(70); wb(2); wb(1); wb(1); wb(0); wz(8);
+    w16(1); w16(bkarch ? 183 : 62); w32(1);
+    w64(0); w64(0); w64(shoff);
+    w32(0); w16(64); w16(0); w16(0); w16(64); w16(8); w16(7);
+    wtext(); wz(doff - tend); wdata(L); wz(roff - (doff + L));
+    k = 0;
+    while (k < bknro) { w64(bkro_off[k]); w32(bkro_type[k]); w32(bkro_sect[k]); w64(bkro_add[k]); k = k + 1; }
+    wz(soff - (roff + 24 * bknro));
+    bk_osym(0, 0, 0, 0);
+    bk_osym(0, 3, 1, 0); bk_osym(0, 3, 2, 0); bk_osym(0, 3, 3, 0);    /* STT_SECTION */
+    name = 1; id = 0;
+    while (id < bknn) {
+        if (id != start && bklab_tpc[id] >= 0) { bk_osym(name, 0, 1, toff[bklab_tpc[id]]); name = name + bkname_len[id] + 1; }
+        else { if (id != start && bksym_addr[id] >= 0) {
+            long v; v = bksym_addr[id] - BK_DATA_BASE;
+            if (v >= L) bk_osym(name, 0, 3, v - L); else bk_osym(name, 0, 2, v);
+            name = name + bkname_len[id] + 1;
+        } }
+        id = id + 1;
+    }
+    bk_osym(name, 18, 1, start >= 0 ? toff[bklab_tpc[start]] : 0);  /* GLOBAL FUNC _start */
+    wb(0); id = 0;
+    while (id < bknn) { if (id != start && (bklab_tpc[id] >= 0 || bksym_addr[id] >= 0)) bk_oname(id); id = id + 1; }
+    wname("_start", 7);
+    wname("", 1); wname(".text", 6); wname(".data", 6); wname(".bss", 5); wname(".rela.text", 11);
+    wname(".symtab", 8); wname(".strtab", 8); wname(".shstrtab", 10);
+    wz(shoff - (shsoff + 55));
+    bk_oshdr(0, 0, 0, 0, 0, 0, 0, 0, 0);
+    bk_oshdr(1, 1, 6, 64, bktlen, 0, 0, 16, 0);                   /* .text  PROGBITS AX */
+    bk_oshdr(7, 1, 3, doff, L, 0, 0, 16, 0);                      /* .data  PROGBITS WA */
+    bk_oshdr(13, 8, 3, doff + L, bss, 0, 0, 16, 0);               /* .bss   NOBITS   WA */
+    bk_oshdr(18, 4, 64, roff, 24 * bknro, 5, 1, 8, 24);           /* .rela.text  INFO_LINK -> .text */
+    bk_oshdr(29, 2, 0, soff, 24 * nsym, 6, nsym - 1, 8, 24);      /* .symtab, first global last */
+    bk_oshdr(37, 3, 0, stoff, strlen, 0, 0, 1, 0);
+    bk_oshdr(45, 3, 0, shsoff, 55, 0, 0, 1, 0);
+    return 0;
+}
+int bk_object(char *t, int n, char *target) {
+    bkos = 0; bkarch = 0; if (target[4] == 97) bkarch = 1;
+    bk_objmode = 1;
+    t = tp_prune(t, n); n = tp_prune_length;
+    bk_parse(t, n);
+    bk_repack();
+    bk_lower();
+    bk_assemble();
+    bkwn = 0; bkwtot = 0;
+    bk_elfobj();
+    wflush();
+    bk_objmode = 0;
+    return 0;
+}
+
 int bk_seg(char *name, long vmaddr, long vmsize, long fileoff, long filesize, int maxp, int initp, int nsects) {
     w32(25); w32(72 + 80 * nsects); wname(name, 16);
     w64(vmaddr); w64(vmsize); w64(fileoff); w64(filesize);

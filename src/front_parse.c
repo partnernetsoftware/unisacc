@@ -235,6 +235,7 @@ int eatstar(void);
 #endif
 
 int bk_build(char *t, int n, char *target);
+int bk_object(char *t, int n, char *target);      /* -c -b lnx/ARCH: relocatable ELF (docs/toolchain.md) */
 int bkfd = 1;    /* where the image goes: -o, else stdout.  DEFINED here,
                     once: two definitions of one global become two .bss
                     lines, and the two back ends disagree about which of the

@@ -3,6 +3,28 @@
 char *bkout;                        /* where the current instruction's bytes go */
 int bkol;                           /* how many so far */
 long bk_textva; long bk_shift; int bk_sizing;
+/* ---- object mode (-c -b lnx/ARCH): a relocatable ELF, docs/toolchain.md §4.
+   Text is based at 0 and data at 2^32, so every address the encoders see is
+   a text offset (< 2^32) or a data offset (>= 2^32).  The two encoders that
+   embed an address record one relocation each (x_rip) or two (a_adrp_add);
+   branches are section-internal and record nothing. */
+#define BK_OBJDATA 4294967296
+#define BK_MAXRELO 262144
+int bk_objmode;
+long bkro_off[BK_MAXRELO]; int bkro_type[BK_MAXRELO]; int bkro_sect[BK_MAXRELO]; long bkro_add[BK_MAXRELO]; int bknro;
+long bk_objnz;                       /* the .data length: offsets at or past it are .bss */
+int bk_relo(long off, int type, long target) {
+    if (bk_sizing || bk_objmode == 0) return 0;
+    if (bknro >= BK_MAXRELO) { __write(2, "object: too many relocations\n", 29); __exit(1); }
+    bkro_off[bknro] = off; bkro_type[bknro] = type;
+    if (target >= BK_OBJDATA) {
+        target = target - BK_OBJDATA;
+        if (target >= bk_objnz) { bkro_sect[bknro] = 3; bkro_add[bknro] = target - bk_objnz; }
+        else { bkro_sect[bknro] = 2; bkro_add[bknro] = target; }
+    } else { bkro_sect[bknro] = 1; bkro_add[bknro] = target; }
+    bknro = bknro + 1;
+    return 1;
+}
 #define BK_NIMP 14                  /* pe.IMPORTS */
 char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000";
 long bk_imp[BK_NIMP];               /* Windows: the IAT slot of each import */
@@ -88,6 +110,10 @@ int a_adrp_add(int d, long pc, long target) {
     long page; long lo12;
     page = (target >> 12) - (pc >> 12);
     lo12 = target & 0xFFF;
+    if (bk_objmode) {                                   /* R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC */
+        bk_relo(bkol, 275, target); bk_relo(bkol + 4, 277, target);
+        page = 0; lo12 = 0;                             /* the linker fills both fields */
+    }
     ow(0x90000000 | ((page & 3) << 29) | (((page >> 2) & 0x7FFFF) << 5) | d);
     ow(0x91000000 | (lo12 << 10) | (d << 5) | d);
     return 0;
@@ -527,7 +553,13 @@ int x_store(int r, int b, long disp, int wd) {
 }
 /* [rip+disp32], 7 bytes fixed */
 int x_rip(int opc, int r, long pcnext, long target) {
-    x_rex(1, r >> 3, 0, 0); ob(opc); x_modrm(0, r, 5); x_d32(target - pcnext);
+    x_rex(1, r >> 3, 0, 0); ob(opc); x_modrm(0, r, 5);
+    if (bk_objmode && target >= BK_OBJDATA) {           /* R_X86_64_PC32 against .data/.bss, A = offset - 4 */
+        if (bk_relo(bkol, 2, target)) bkro_add[bknro - 1] = bkro_add[bknro - 1] - 4;
+        x_d32(0);
+        return 0;
+    }
+    x_d32(target - pcnext);                             /* text targets: section-internal, link-invariant */
     return 0;
 }
 int x_cmpset(int cc, int d, int ra, int rb) {
@@ -1082,7 +1114,9 @@ int bk_assemble(void) {
     bktlen = off;
     /* image.layout: where text and data land, known before encoding */
     bk_idata_layout();
-    if (bk_runmode) {
+    if (bk_objmode) {
+        bk_textva = 0; bk_datava = BK_OBJDATA; bk_objnz = bk_nzlen();
+    } else { if (bk_runmode) {
         /* two mappings: text goes read-execute once it is written, data
            stays writable, so nothing is ever both [macOS forbids W^X] */
         /* room for the import slots at the end of the text: they must be
@@ -1139,9 +1173,9 @@ int bk_assemble(void) {
         rd = 4096 + bk_round(bktlen, 4096);
         bk_datava = 5368709120 + rd + bk_round(bk_idata_len, 4096);
         i = 0; while (i < BK_NIMP) { bk_imp[i] = 5368709120 + rd + bk_iat_off + 8 * i; i = i + 1; }
-    } } }
+    } } } }
     bk_shift = bk_datava - BK_DATA_BASE;
-    bk_sizing = 0;
+    bk_sizing = 0; bknro = 0;
     bkout = bktext; bkol = 0;
     i = 0;
     while (i < tkn) {

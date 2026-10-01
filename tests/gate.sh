@@ -379,6 +379,7 @@ job tape-reader python3 ./tests/tapereadercheck.py
 job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
 job subtract-safety python3 ./tests/subtractsafety.py   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve
 job subtract-safety-selftest python3 ./tests/subtractsafety.py --selftest   # R16-9: both 0.0.15 counterexamples are still caught
+job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sections, relocations, image invariant, GNU ld/lld link, Lima run
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).

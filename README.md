@@ -83,11 +83,17 @@ machine). The C headers it needs travel inside it.
   of a program in one invocation. Each unit is preprocessed on its own, and a
   later unit's file-scope `static` names are renamed, so two units may each
   keep their own `helper`.
-- **Not a `cc` drop-in:** `-c` writes the compiler's intermediate *tape*, not
-  an object file; there is no `.o`, no link step, and no `-l`/`-L`. Build
-  systems that compile each file with `-c` and link later cannot use it
-  directly. C11 features and GCC extensions (statement expressions, `_Generic`,
-  empty structs, inline asm) are outside the subset.
+- **Not a `cc` drop-in yet:** bare `-c` writes the compiler's intermediate
+  *tape*, not an object file. `-c -b lnx/x86_64` and `-c -b lnx/arm64` write a
+  relocatable ELF `.o` (reference compiler, since 0.0.16) that GNU ld and lld
+  link into a program on their own; it carries its own `_start` and library
+  bodies and does not yet share functions or data with cc-compiled objects
+  (the calling convention differs; the staged plan is in
+  [docs/toolchain.md](docs/toolchain.md)). The shipped `unisacc.com` still
+  writes the tape for `-c` with any target. There is no link step and no
+  `-l`/`-L`, so build systems that compile each file with `-c` and link later
+  cannot use it directly. C11 features and GCC extensions (statement
+  expressions, `_Generic`, empty structs, inline asm) are outside the subset.
 - **Tape origin:** `.tapebin` records the target selected when C was compiled
   to tape. A different `-b` target is rejected unless `--force-origin` is
   given; forcing it does not undo target-specific preprocessing. See the
