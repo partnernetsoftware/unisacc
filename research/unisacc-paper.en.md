@@ -369,7 +369,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 **Speed.** In the historical measurements of Table 4, the network compiler is 4–17× slower; this is not a same-identity v0.0.14 timing result. Unreachable-function pruning shipped in v0.0.9 but gave no measurable speed-up on `calc.c`; later library trimming and network sharding require their own measurements, while step-by-step interpretation by a generic executor retains a cost.
 
-**Language and product scope.** A C99 subset with bundled headers; multiple files are merged into one program; there is no system object-file linker and no conventional `.o` workflow. Networks are defined only on the enumerated domain — by design rather than as a defect: extending the language means extending the tables and rebuilding.
+**Language and product scope.** A C99 subset with bundled headers. Since v0.0.16 the compiler can emit ELF, Mach-O and COFF object files; since v0.0.17 it supports separate compilation, unit-object linking and archives. The v0.0.18–v0.0.19 development tree added assembly text and a bundled assembler for Linux targets (§5.6). The network product still lacks Mach-O/COFF object output, and calling functions compiled by an external C compiler is not complete. The bundled C library is growing around a Linux-compatible interface dispatched per OS; host-libc forwarding under `-run` is macOS-only. Networks are defined only on their enumerated domains: extending the language requires extending the tables and rebuilding.
 
 **Representation versus maintenance cost.** Compiling control flow into tables does not by itself reduce the language logic that must be maintained: the offline constructor still orchestrates the rules, and machine-code byte templates are still code. Whether the maintenance surface really shrinks must be measured at equal coverage — declared rules, special-purpose generator logic and still-used legacy implementations — not judged by file type.
 
@@ -377,7 +377,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 **Threats to validity.** Performance figures come from a single machine, and some platforms were executed under emulation; the rows of the speed table come from different product versions (Appendix A); coverage by c-testsuite and the probe corpus does not extrapolate to arbitrary C99 programs.
 
-**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables, capacity and the `.o` workflow are each registered, with acceptance criteria, as deliverables of the [v0.1.0 plan](../prd.md); each moves from this section to the results once delivered.
+**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../plans/v0.0.20.md) and [v0.0.21](../plans/v0.0.21.md). These are plans, not results.
 
 ## 9 Related Work
 
