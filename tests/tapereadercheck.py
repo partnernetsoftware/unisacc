@@ -38,6 +38,25 @@ def main():
         "bad-string-hex": '.str x "\\xGG"\n_start:\n  .exit r0\n',
         "string-capacity": '.str x "' + 'a' * 1050000 + '"\n_start:\n  .exit r0\n',
     }
+    matrix = {}
+    rows = (ROOT / "tests/tapereader.matrix.tsv").read_text().splitlines()
+    if rows[2] != "name\tbackend\tprune\ttapebin":
+        raise AssertionError("tape reader matrix header changed")
+    for row in rows[3:]:
+        name, backend, prune_status, binary = row.split("\t")
+        if name in matrix:
+            raise AssertionError("duplicate tape reader matrix row: " + name)
+        matrix[name] = (backend, prune_status, binary)
+    if set(matrix) != set(valid) | set(invalid):
+        raise AssertionError("tape reader matrix does not cover all probes")
+    def check_encoder(name, text):
+        try:
+            encode(text)
+            status = "accept"
+        except (AssertionError, ValueError):
+            status = "reject"
+        if status != matrix[name][2]:
+            raise AssertionError(name + ": tapebin text encoder contract changed")
     with tempfile.TemporaryDirectory(prefix="unisacc-tapereader-") as tmp:
         base = pathlib.Path(tmp)
         ref = base / "ref"
@@ -47,6 +66,9 @@ def main():
         subprocess.run(["cc", "-O2", "-std=c99", "-o", str(prune),
                         str(ROOT / "tests/tapeprune_harness.c")], check=True, timeout=20)
         for name, text in valid.items():
+            if matrix[name][0] != "accept":
+                raise AssertionError(name + ": backend matrix status changed")
+            check_encoder(name, text)
             plain = base / (name + ".tape")
             binary = base / (name + ".tapebin")
             plain.write_bytes(text.encode("ascii"))
@@ -63,19 +85,21 @@ def main():
             pruned = run([str(prune)], input=plain.read_bytes())
             # The conservative pruner declines unsigned immediates above
             # LONG_MAX; the reader still accepts their 64-bit bit pattern.
-            expected = b"P" if name in ("unsigned-max", "crlf") else b"R"
+            expected = b"P" if matrix[name][1] == "pass" else b"R"
             if pruned.returncode or pruned.stdout[:1] != expected:
                 raise AssertionError(name + ": unexpected prune decision")
         for name, text in invalid.items():
+            if matrix[name][0] != "reject":
+                raise AssertionError(name + ": backend matrix status changed")
+            check_encoder(name, text)
             plain = base / (name + ".tape")
             plain.write_bytes(text.encode("ascii"))
             result = run([str(ref), str(plain), "-b", "lnx/x86_64", "-o", str(base / (name + ".elf"))])
             if result.returncode != 1 or b"back end: malformed tape" not in result.stderr:
                 raise AssertionError((name, result.returncode, result.stderr[:160]))
-            if name not in ("string-capacity", "bad-string-hex"):
-                pruned = run([str(prune)], input=plain.read_bytes())
-                if pruned.returncode or pruned.stdout != b"P" + plain.read_bytes():
-                    raise AssertionError(name + ": malformed tape was changed by prune")
+            pruned = run([str(prune)], input=plain.read_bytes())
+            if matrix[name][1] != "pass" or pruned.returncode or pruned.stdout != b"P" + plain.read_bytes():
+                raise AssertionError(name + ": malformed tape was changed by prune")
     print("tape reader: %d text/binary image pairs, %d malformed tapes rejected; prune preserves malformed input" %
           (len(valid), len(invalid)))
 

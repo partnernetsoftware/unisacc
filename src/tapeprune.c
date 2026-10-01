@@ -1,4 +1,5 @@
 /* Conservative original-span reference; the product route uses prune delta. */
+#include "tapescan.h"
 /* Schema derived from unisa/tape.py SHAPE/REGS; sha256 e45dd6919efca9a267893b9cc4301294eabafb328b40264328fcfdc64898490a */
 #define tp_OP_FRAME 34
 #define tp_OP_STORE64 22
@@ -41,14 +42,11 @@ int tp_validname(int at,int n){int i;if(n<1)return 0;for(i=0;i<n;i++)if(!tp_name
 int tp_intern(int at,int n){int i;for(i=0;i<tp_nn;i++)if(tp_nl[i]==n&&tp_equal(tp_input+tp_ns[i],tp_input+at,n))return i;
  if(tp_nn>=tp_NAMEMAX){tp_bad=1;return 0;}i=tp_nn++;tp_ns[i]=at;tp_nl[i]=n;tp_lab[i]=-1;return i;}
 int tp_lookup(char *s){int i;for(i=0;i<tp_nn;i++)if(tp_same(tp_ns[i],tp_nl[i],s))return i;return -1;}
-int tp_number(int at,int n,long *out){int i=0,base=10,d,c,neg=0;unsigned long value=0;unsigned long limit=9223372036854775807UL;
- if(n<1)return 0;if(tp_input[at]=='-'||tp_input[at]=='+'){neg=tp_input[at]=='-';i++;}if(neg)limit=9223372036854775808UL;
- if(i+2<n&&tp_input[at+i]=='0'&&(tp_input[at+i+1]=='x'||tp_input[at+i+1]=='X')){base=16;i+=2;}
- if(i>=n)return 0;
+int tp_number(int at,int n,long *out){unsigned long value;int neg,leading_zero;
+ if(!ts_integer(tp_input+at,n,&value,&neg,&leading_zero))return 0;
  /* Canonical decimal/hex spelling only; ambiguous legacy octal stays whole. */
- if(base==10&&n-i>1&&tp_input[at+i]=='0'){int z;for(z=i;z<n;z++)if(tp_input[at+z]!='0')return 0;}
- for(;i<n;i++){c=tp_input[at+i]&255;d=-1;if(c>=48&&c<=57)d=c-48;else if(c>=97&&c<=102)d=c-87;else if(c>=65&&c<=70)d=c-55;
-  if(d<0||d>=base)return 0;if(value>(limit-d)/base)return 0;value=value*base+d;}
+ if(leading_zero&&value!=0)return 0;
+ if(value>(neg?9223372036854775808UL:9223372036854775807UL))return 0;
  *out=neg?(long)(0UL-value):(long)value;return 1;}
 int tp_getreg(int at,int n){int i;for(i=0;i<tp_NREGS;i++)if(tp_same(at,n,tp_regnames[i]))return i;return -1;}
 int tp_getop(int at,int n){int i;for(i=0;i<tp_NOPS;i++)if(tp_same(at,n,tp_opnames[i]))return i;return -1;}
@@ -73,8 +71,7 @@ int tp_parse(void){int p=0,end,textend,start,q,quoted,esc,i,op,shape,idx,id;long
    if(!tp_validname(i,q-i)){tp_bad=1;return 0;}id=tp_intern(i,q-i);if(tp_bad)return 0;
    while(q<textend&&tp_space(tp_input[q]))q++;
    if(isbss){value=0;if(q==textend){tp_bad=1;return 0;}for(;q<textend;q++){if(tp_input[q]<'0'||tp_input[q]>'9'){tp_bad=1;return 0;}value=value*10+tp_input[q]-'0';if(value>33554432){tp_bad=1;return 0;}}}
-   else {if(q>=textend||tp_input[q]!=34){tp_bad=1;return 0;}q++;while(q<textend){if(tp_input[q]==92){q+=2;continue;}if(tp_input[q]==34)break;q++;}
-    if(q!=textend-1){tp_bad=1;return 0;}}
+   else {int decoded;if(!ts_quoted_length(tp_input+q,textend-q,1048576,&decoded)){tp_bad=1;return 0;}}
    tp_datum[id]=1;tp_rk[idx]=3;tp_rn[idx]=id;continue;}
   op=tp_getop(start,q-start);if(op<0){tp_bad=1;return 0;}tp_ro[idx]=op;
   if(!tp_tokenize(q,textend))return 0;shape=tp_length(tp_opshapes[op]);if(tp_nt!=shape||tp_nt>8){tp_bad=1;return 0;}

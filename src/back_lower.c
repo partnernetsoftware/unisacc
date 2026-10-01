@@ -16,6 +16,7 @@
    its zeros as it goes.  A compiler that stored its own zero-filled globals
    could not compile itself -- the buffer would be part of what it stores. */
 
+#include "tapescan.h"
 #define BK_DATA_BASE 256            /* tape.DATA_BASE */
 /* Which target this very binary runs on, for run mode [S-9], and the
    anonymous-mapping flags of that OS (MAP_PRIVATE | MAP_ANON). */
@@ -339,23 +340,9 @@ int bk_tape_bad(void) {
 /* Strict token conversion for externally supplied tape.  bk_num also reads
    fixed-width catalog fields, whose trailing NUL is not part of a token. */
 int bk_tape_num(char *s, int n, long *out) {
-    unsigned long v; unsigned long limit; int k; int neg; int base; int d; int c;
-    v = 0; k = 0; neg = 0; base = 10;
-    if (n <= 0) return 0;
-    if (s[k] == '-' || s[k] == '+') { neg = s[k] == '-'; k = k + 1; }
-    if (k + 1 < n && s[k] == '0' && (s[k + 1] == 'x' || s[k + 1] == 'X')) {
-        base = 16; k = k + 2;
-    }
-    if (k >= n) return 0;
-    limit = neg ? 9223372036854775808UL : ~0UL;
-    while (k < n) {
-        c = s[k] & 255; d = -1;
-        if (c >= '0' && c <= '9') d = c - '0';
-        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-        if (d < 0 || d >= base || v > (limit - d) / base) return 0;
-        v = v * base + d; k = k + 1;
-    }
+    unsigned long v; int neg; int leading_zero;
+    if (!ts_integer(s, n, &v, &neg, &leading_zero)) return 0;
+    if (neg && v > 9223372036854775808UL) return 0;
     *out = neg ? (long)(0UL - v) : (long)v;
     return 1;
 }
@@ -417,6 +404,7 @@ int bk_parse(char *t, int n) {
             if (s0 == s1 || j == e) return bk_tape_bad();
             while (j < e && bk_tape_space(t[j])) j = j + 1;
             if (j == e || t[j] != '"') return bk_tape_bad();
+            if (!ts_quoted_length(t + j, e - j, (int)sizeof(bkstrbuf), &m)) return bk_tape_bad();
             j = j + 1; m = 0;
             while (j < e) {
                 if (t[j] == 34) break;
