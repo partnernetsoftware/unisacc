@@ -208,16 +208,25 @@ def _unescape(s):
     out = bytearray()
     i = 0
     while i < len(s):
+        if len(out) >= 1048576:
+            raise ValueError("tape: .str exceeds tape reader capacity")
         c = s[i]
         if c == "\\" and i + 1 < len(s):
             n = s[i + 1]
             if n == "x":
+                if i + 3 >= len(s) or any(c not in "0123456789abcdefABCDEF"
+                                           for c in s[i + 2:i + 4]):
+                    raise ValueError("tape: malformed hex escape")
                 out.append(int(s[i + 2:i + 4], 16))
                 i += 4
                 continue
             out.extend(ESCAPES.get(n, n).encode("latin-1"))
             i += 2
             continue
+        if c == "\\":
+            raise ValueError("tape: trailing string escape")
+        if c == '"':
+            raise ValueError("tape: unescaped quote in .str")
         out.extend(c.encode("latin-1"))
         i += 1
     return bytes(out)
@@ -265,7 +274,10 @@ def parse(text):
         if line.startswith(".str "):
             rest = line[5:].strip()
             name, lit = rest.split(None, 1)
-            blob = _unescape(lit.strip()[1:-1])
+            lit = lit.strip()
+            if len(lit) < 2 or lit[0] != '"' or lit[-1] != '"':
+                raise ValueError("line %d: malformed .str literal" % lineno)
+            blob = _unescape(lit[1:-1])
             before = len(t.records)
             t.string(name, blob)
             record = ("str", name, blob)
@@ -283,8 +295,11 @@ def parse(text):
         parts = [p for p in body.replace(",", " ").split() if p]
         op, toks = parts[0], parts[1:]
         assert op in SHAPE, "line %d: unknown op %r" % (lineno, op)
+        grouped = _regroup(op, toks)
+        if len(grouped) != len(SHAPE[op]):
+            raise ValueError("line %d: wrong operand count for %s" % (lineno, op))
         args = []
-        for kind, tok in zip(SHAPE[op], _regroup(op, toks)):
+        for kind, tok in zip(SHAPE[op], grouped):
             if kind == "r":
                 assert tok in REGS, "line %d: %r is not a register" % (lineno, tok)
                 args.append(tok)
