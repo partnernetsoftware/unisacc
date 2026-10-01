@@ -59,9 +59,24 @@ printf '#include <stdio.h>\nint helper2(int);\nint sq(int);\nint main(void){ pri
 for f in sq un h2 um; do "$_BOUND" 30 "$UA" "$T/$f.c" -c -b "$HOST" -funit -o "$T/$f.o" 2>/dev/null; done
 (cd "$T" && "$_BOUND" 20 "$UA" ar rcs lib.a sq.o un.o h2.o)
 say "ar t lists members" "sq.o un.o h2.o" "$( (cd "$T" && "$_BOUND" 20 "$UA" ar t lib.a) | tr '\n' ' ' | sed 's/ $//')"
+cp "$T/sq.o" "$T/long_member_name_123.o"
+(cd "$T" && "$_BOUND" 20 "$UA" ar rcs long.a long_member_name_123.o)
+say "ar t BSD long name" "long_member_name_123.o" "$("$_BOUND" 20 "$UA" ar t "$T/long.a")"
 command -v ar >/dev/null && say "system ar reads it" "sq.o un.o h2.o" "$( (cd "$T" && ar t lib.a) | tr '\n' ' ' | sed 's/ $//')"
 say "link pulls needed members" "16 rc=0" "$( ("$_BOUND" 30 "$UA" "$T/um.o" "$T/lib.a"; echo "rc=$?") | tr '\n' ' ' | sed 's/ $//')"
 say "unneeded member not pulled" "0" "$("$_BOUND" 30 "$UA" "$T/um.o" "$T/lib.a" -S -o - 2>/dev/null | grep -c 'unusedfn')"
+python3 - "$T/truncated.a" <<'PY'
+from pathlib import Path
+import sys
+header = bytearray(b' ' * 60)
+header[:16] = b'ghost.o/        '
+header[48:58] = b'999999999 '
+header[58:60] = b'`\n'
+Path(sys.argv[1]).write_bytes(b'!<arch>\n' + header)
+PY
+ar_out=$("$_BOUND" 10 "$UA" ar t "$T/truncated.a" 2>&1); ar_rc=$?
+say "truncated archive refused" "rc=1" "rc=$ar_rc"
+say "truncated member not listed" "0" "$(printf '%s' "$ar_out" | grep -c 'ghost.o')"
 if [ -n "${LINK_PRODUCT:-}" ]; then
     say "product links the archive" "16 rc=0" "$( ("$_BOUND" 30 sh "$LINK_PRODUCT" "$T/um.o" "$T/lib.a"; echo "rc=$?") | tr '\n' ' ' | sed 's/ $//')"
     (cd "$T" && "$_BOUND" 20 sh "$LINK_PRODUCT" ar rcs libp.a sq.o un.o h2.o)

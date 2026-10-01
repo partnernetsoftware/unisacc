@@ -199,7 +199,18 @@ int tl_unit(char *t, int n, int u) {
    unisacc linker takes `.a` inputs and pulls in a member only when it
    defines a `.global` name that is still undefined (the classic rule), so a
    library of unit objects links like one made by a system `ar`. */
-long tl_dec(char *b, int w) { long v; int k; v = 0; k = 0; while (k < w && b[k] >= 48 && b[k] <= 57) { v = v * 10 + (b[k] - 48); k = k + 1; } return v; }
+long tl_ar_dec(char *b, int w, long max) {
+    long v; int k; int digit; int d;
+    v = 0; k = 0; digit = 0;
+    while (k < w && b[k] >= 48 && b[k] <= 57) {
+        d = b[k] - 48;
+        if (d > max || v > (max - d) / 10) return -1;
+        v = v * 10 + d; digit = 1; k = k + 1;
+    }
+    if (!digit) return -1;
+    while (k < w) { if (b[k] != 32) return -1; k = k + 1; }
+    return v;
+}
 int tl_field(char *dst, int w, long v, char *s) {   /* left-justified field, space padded */
     char d[24]; int n; int k; k = 0;
     if (s) { while (s[k] && k < w) { dst[k] = s[k]; k = k + 1; } }
@@ -227,12 +238,22 @@ long tl_ar_add(char *ab, long at, char *name, char *data, long n) {
 }
 /* the i-th member of an archive (symbol tables skipped): name into nm, data, length; 0 past the end */
 char *tl_ar_member(char *ab, long n, int i, char *nm, long *len) {
-    long at; int k; long sz; int nl; int idx; char *d; long dl;
-    if (n < 8 || ab[0] != 33 || ab[1] != 60 || ab[2] != 97 || ab[3] != 114) return 0;   /* "!<ar" */
+    long at; int k; long sz; long name_len; int nl; int idx; char *d; long dl;
+    if (n < 8 || ab[0] != 33 || ab[1] != 60 || ab[2] != 97 || ab[3] != 114 ||
+        ab[4] != 99 || ab[5] != 104 || ab[6] != 62 || ab[7] != 10) {
+        tl_fail("ar: not an archive\n"); return 0;
+    }
     at = 8; idx = 0;
     while (at + 60 <= n) {
-        sz = tl_dec(ab + at + 48, 10); nl = 0;
-        if (ab[at] == 35 && ab[at + 1] == 49 && ab[at + 2] == 47) nl = (int)tl_dec(ab + at + 3, 13);
+        if (ab[at + 58] != 96 || ab[at + 59] != 10) { tl_fail("ar: malformed member header\n"); return 0; }
+        sz = tl_ar_dec(ab + at + 48, 10, n - at - 60);
+        if (sz < 0) { tl_fail("ar: member exceeds archive\n"); return 0; }
+        nl = 0;
+        if (ab[at] == 35 && ab[at + 1] == 49 && ab[at + 2] == 47) {
+            name_len = tl_ar_dec(ab + at + 3, 13, sz);
+            if (name_len < 0 || name_len > 255) { tl_fail("ar: invalid member name length\n"); return 0; }
+            nl = (int)name_len;
+        }
         if (nl > 0) { k = 0; while (k < nl && k < 255 && ab[at + 60 + k]) { nm[k] = ab[at + 60 + k]; k = k + 1; } nm[k] = 0; d = ab + at + 60 + nl; dl = sz - nl; }
         else { k = 0; while (k < 16 && ab[at + k] != 32) { nm[k] = ab[at + k]; k = k + 1; }
                if (k > 1 && nm[k - 1] == 47) k = k - 1; nm[k] = 0; d = ab + at + 60; dl = sz; }
@@ -243,6 +264,7 @@ char *tl_ar_member(char *ab, long n, int i, char *nm, long *len) {
         }
         at = at + 60 + sz; if (at % 2) at = at + 1;
     }
+    if (at != n) { tl_fail("ar: truncated member header\n"); return 0; }
     return 0;
 }
 /* link-time name sets, for pulling archive members: names defined (.global)

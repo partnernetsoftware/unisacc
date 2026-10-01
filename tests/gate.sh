@@ -409,6 +409,7 @@ job forward     ./tests/forward.sh   # R19-10: -run forwards prototyped undefine
 job linkunits   ./tests/linkunits.sh   # R17-2: units compiled alone (-c -b HOST -funit) and joined by the unisacc linker = cc = one-step
 job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sections, relocations, image invariant, GNU ld/lld link, Lima run
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
+job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that
