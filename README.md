@@ -14,8 +14,8 @@ writes archives, and refuses `-c -b` by name until its own object route is done.
 Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64 -o FILE.s` writes that object as GNU assembly
 (AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
 assembles it -- or hand-written code in the same subset -- back into the
-identical object; assembly text for Mach-O and COFF is 0.0.19. The design and the back-end facts behind it are in
-[docs/toolchain.md](docs/toolchain.md); the plan in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+identical object; `unisacc nm` and `unisacc objdump -d` read the same objects. Assembly text for Mach-O and COFF, Intel syntax and inline `asm` are planned for 0.0.21 (R20-8). The design and the back-end facts behind it are in
+[docs/toolchain.md](docs/toolchain.md); the plans in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) (published) and [plans/v0.0.20.md](plans/v0.0.20.md) (in progress). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
@@ -88,13 +88,18 @@ machine). The C headers it needs travel inside it.
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
   `-include`, `-E`, `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MQ`/`-MP` (gcc's `.d` bytes; `-M` lists what `-MM` lists, the bundled headers are not files), `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.
-- **Headers:** twenty standard/compatibility headers are bundled (`assert
-  ctype dirent errno float inttypes iso646 limits math memory signal stdarg stdbool
-  stddef stdint stdio stdlib string time wchar`), plus `unisacc_ffi.h`. Ordinary
+- **Headers:** the standard/compatibility headers (`assert
+  ctype dirent errno float inttypes iso646 limits locale math memory signal stdarg stdbool
+  stddef stdint stdio stdlib string time wchar`) plus, on Linux and macOS, POSIX
+  ones implemented on kernel calls (`unistd fcntl poll termios sys/stat sys/ioctl
+  sys/wait sys/time sys/socket sys/select netinet/in netinet/tcp arpa/inet netdb`), and `unisacc_ffi.h`.
+  Every carried header compiles when included on its own (checked by `hosthdr`). Ordinary
   library calls use the bundled C implementations, compiled on demand;
   `-ftrim-libc` (**on by default since 0.0.11**; `-fno-trim-libc` keeps every library body; `-libneed` is a compatible alias) conservatively selects library bodies using identifier and dependency closures. On
-  macOS, the explicit dl/libffi bridge can call system APIs; it is not automatic
-  forwarding of all libc calls. System FILE/va_list and allocator families must
+  macOS, the explicit dl/libffi bridge can call system APIs. Since 0.0.19, `-run` on
+  macOS also forwards an external function that has a prototype, no definition and
+  no bundled body to the host libc (dlsym + libffi); variadic and struct-by-value
+  calls are refused by name, and writing a file or cross-compiling never forwards. System FILE/va_list and allocator families must
   not be mixed with the bundled implementations.
 - **Several files, one program:** `unisacc a.c b.c ...` compiles all the units
   of a program in one invocation. Each unit is preprocessed on its own, and a
@@ -368,9 +373,11 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 
 ## Status
 
-The published model baseline is v0.0.8; the smaller P3/one-pass-memory
-candidate is local and has not been released. Candidate-specific verification,
-platform gaps and signing work are recorded above and in [prd](prd.md).
+The latest release is **v0.0.19** (2026-10-01, includes 0.0.18): signed
+`unisacc.com` 1,922,560 B, SHA-256 `ad1d87e9…`; receipt in
+[research/r19-release-acceptance.json](research/r19-release-acceptance.json).
+0.0.20 is in development ([plan](plans/v0.0.20.md)). Verification, platform gaps
+and signing work are recorded in [prd](prd.md).
 
 The generated table above describes classic finite fact decisions; current
 whole-stage networks and their limits are documented in
@@ -406,19 +413,20 @@ of 0.0.12 reported time lost on exactly these, documented nowhere.
 | Limitation | What happens | Reproduce |
 |---|---|---|
 | `__LINE__` before a line continuation (C99 6.10.8) | A token that sits BEFORE a backslash-newline on the same line reads one line too high (`int m = __LINE__; int \\` then ` n = __LINE__;` gives `3 3` where gcc gives `2 3`); diagnostics at such a token are off by one the same way.  Tokens after the join, and every later line, are right | the two-line example |
-| No complex types (C99 6.2.5, 6.3.1.6-7, 7.3, Annex G) | `double _Complex z;` is rejected (`expected ';'`); `<complex.h>` is not provided | `double _Complex z = 1.0;` |
+| No complex types (C99 6.2.5, 6.3.1.6-7, 7.3, Annex G) | `double _Complex z;` is rejected; the 0.0.20 reference names it (`not covered: complex types`, with an `UNCOVERED` record), released compilers say `expected ';'` or `unknown identifier`; `<complex.h>` is not provided | `double _Complex z = 1.0;` |
 | No trigraph replacement (C99 5.2.1.1) | `"a??=b"` stays `a??=b`; C99 requires `??=` to become `#` in translation phase 1 (gcc/clang also skip it unless `-trigraphs`) | `printf("%s", "??=")` |
 | ~~No `__LINE__` / `__FILE__`~~ -- **supported as of 0.0.13** | Both work on the reference.  `__LINE__` is the PHYSICAL line of the token -- spliced headers and continuations notwithstanding -- and inside a macro body it is the line of the INVOCATION, which is what gcc and clang report; `tests/c/n17-line.c` is the six-value probe (`9 1010 11 12 15 16`, identical to cc).  `__FILE__` is the path as given on the command line, and reaches the front end through the `\0cli/source` resource when the driver passes no SRCPATH.  This row is kept, struck through, rather than deleted because it was the external trial's most-reported omission | `printf("%d %s\n", __LINE__, __FILE__)` |
 | `long double` is `double` | `sizeof(long double) == 8`; no extended precision | `printf("%d", (int)sizeof(long double))` |
 | No `offsetof` | `error: this is not the start of an expression` -- the macro is absent and the built-in form is not accepted | `#include <stddef.h>` then `offsetof(struct S,b)` |
 | Private calling convention between generated code | Not SysV / AAPCS64: arguments are pushed on the tape stack left to right, `r9` is the frame pointer, the result is in `rax`, the caller pops.  **Unstable** -- it follows the regmap and abi tables and external code must not rely on it.  Interop with outside code goes through libunisacc's carriers, not through this convention.  [prd W-16](prd.md) | `examples/apps/xgui.c` writes a raw syscall stub by hand and must save `r9`, `rcx` and `r11`, because `r9` doubles as syscall argument 6 and `syscall` clobbers `rcx`/`r11` |
 | libffi interop is macOS-only | `include/unisacc_ffi.h` opens `/usr/lib/libffi.dylib` with no platform branch, so the FFI path is unavailable on Linux and Windows.  The bridge exists; the hard-coded path is what is missing | any FFI call on Linux |
-| Missing C library surface | No `setjmp.h`, `regex.h`, `strings.h`. Since 0.0.19 on Linux and macOS: sockets (`sys/socket.h`, `netinet/in.h`, `arpa/inet.h` IPv4, `netdb.h` without DNS, `sys/select.h`), processes, `sys/wait.h`, the full errno set and the time functions. Since 0.0.18 `sys/stat.h`, `fcntl.h`, `poll.h`, `termios.h`, `sys/ioctl.h`, `isatty` and `dirent.h` on macOS exist on Linux and macOS (kernel calls, no host libc); Windows refuses them by name. A minimal `unistd.h` (fd calls) arrived in 0.0.17; `locale.h` and `sys/types.h` in 0.0.13. | `#include <setjmp.h>` |
+| Missing C library surface | No `setjmp.h`, `regex.h`, `strings.h`. In 0.0.20 (development): `struct timespec`, `clock_gettime` (on macOS both clocks read `gettimeofday`, so `CLOCK_MONOTONIC` is the wall clock at microsecond grain), `nanosleep`, `sleep`, `usleep`, `execl`/`execlp`/`execle`. Since 0.0.19 on Linux and macOS: sockets (`sys/socket.h`, `netinet/in.h`, `arpa/inet.h` IPv4, `netdb.h` without DNS, `sys/select.h`), processes, `sys/wait.h`, the full errno set and the time functions. Since 0.0.18 `sys/stat.h`, `fcntl.h`, `poll.h`, `termios.h`, `sys/ioctl.h`, `isatty` and `dirent.h` on macOS exist on Linux and macOS (kernel calls, no host libc); Windows refuses them by name. A minimal `unistd.h` (fd calls) arrived in 0.0.17; `locale.h` and `sys/types.h` in 0.0.13. | `#include <setjmp.h>` |
 | Identifiers: 63 significant characters | C99 6.4.2.1 requires that many, and both front ends keep them.  **The C reference refuses a 64-character name** with `error: identifier too long (max 63 characters)` at its position, rather than truncating it -- truncation merged two distinct names that shared a prefix, and miniz's `tinfl_`/`tdefl_` families are exactly that shape.  The **product accepts arbitrary lengths** (E3 interns names by source position), so a program the reference rejects still compiles on the product; the asymmetry is deliberate, not a bug in either | a 64-character identifier: the reference exits 1 with that message at the name, the product compiles it |
 | Struct member count: 256 per struct | A limit separate from the table capacities below: one struct may hold at most 256 members.  Both front ends refuse a 257th, worded differently -- the reference prints `too many members` with no position, the product prints `error: not covered: structure member capacity` at the member | a struct with 257 members, then `s.m0 = 1` |
 | Shared table capacities are not deduplicated | The typedef, struct-tag and member tables are shared across translation units and **not deduplicated**: every unit re-registers the headers it includes, so N units of the same headers consume N times the entries.  Counted rather than guessed -- one unit of the miniz headers contributes ~91 typedefs, and three units crossed the old limit of 256.  The limits are now typedefs 1024, struct tags 512, members 4096 | compile the same header from three translation units and watch the typedef count climb |
-| Headers and functions that are declared but absent | `setjmp.h`, `regex.h`, `strings.h`, `utime.h`, most of `unistd.h` (the file-descriptor calls and `isatty` exist), `fcntl.h`, `sys/stat.h` (`locale.h` and `sys/types.h` exist as of 0.0.13); `system`, `strdup`, `getline`, `time()`.  A program that needs one gets a missing-header error, or an implicit declaration and then `undefined function`.  The 0.0.13 additions are `size_t`-style types, `strerror`, the stdio set (`feof`/`ferror`/`ungetc`/`clearerr`/`setvbuf`/`tmpfile`/`vprintf`) and `errno` codes.  The rest is the FX-5 layering decision: L2 (declare and import the host's) is 0.0.14 | `#include <setjmp.h>` or a call to `strdup` |
+| Headers and functions that are declared but absent | `setjmp.h`, `regex.h`, `strings.h`, `utime.h`, `pwd.h`, `sys/un.h`; `system`, `strdup`, `sigaction`. (`unistd.h`, `fcntl.h`, `sys/stat.h`, `getline` and `time()` exist since 0.0.18-0.0.19; `clock_gettime`, `nanosleep`, `sleep`/`usleep` and `execl`/`execlp`/`execle` are in 0.0.20.)  A program that needs one gets a missing-header error, or an implicit declaration and then `undefined function`.  The 0.0.13 additions are `size_t`-style types, `strerror`, the stdio set (`feof`/`ferror`/`ungetc`/`clearerr`/`setvbuf`/`tmpfile`/`vprintf`) and `errno` codes.  The rest is the FX-5 layering decision: L2 (declare and import the host's) is 0.0.14 | `#include <setjmp.h>` or a call to `strdup` |
 | The private calling convention is not the host's | Code this compiler generates calls code it generated: arguments are pushed on the tape stack, `r9` is the frame pointer and the result is in `rax` (prd W-16).  It is explicitly unstable and external code must not depend on it; interop goes through the libunisacc carrier or the plan's bridge routes.  This is why `#21` above has nowhere to put the callee's address | any two units, or `nativeboot` |
+| Unit objects from before 0.0.20 | The 0.0.20 linker refuses a `-funit` object without the `.unit 2` record (`link: object predates .unit 2`): older objects cannot say which global had an initialiser, so two initialised definitions of one name would be silently merged. It also refuses two initialisers for one object across units and an object only ever declared `extern` (`link: undefined reference to NAME`) | recompile the objects with the new compiler |
 | `__FILE__` in a SPLICED header; `#line` in a header | The path reported is always the MAIN file's, and inside `#include`d text `__LINE__` is the line of the line as the user sees it in the header -- both matching gcc.  `#line N ["file"]` (C99 6.10.4) is supported in the main file as of 0.0.14; the operand may also be one object-like macro whose body is a digit sequence (c-testsuite 00152); inside an included header it is refused with its position (`not covered: this form of #line`), as are other macro operands and escapes in the file name | `#line 7` inside a header |
 
 Two things that look like limitations and are not.  `-ftrim-libc` is on by
