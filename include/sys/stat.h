@@ -1,7 +1,7 @@
 /* <sys/stat.h> (0.0.18 R18-10): struct stat and stat/lstat/fstat/chmod/mkdir
  * over the kernel's own calls -- no host libc.  The layout is the kernel's for
  * each target (Linux x86_64 and arm64 differ; macOS is stat64).  Windows has
- * no such calls here yet: nothing is declared there (plans/v0.0.19.md). */
+ * no such calls here yet: nothing is declared there (archive/plans/v0.0.19.md). */
 #ifndef _UNISA_SYS_STAT_H
 #define _UNISA_SYS_STAT_H
 #include <sys/types.h>

@@ -13,7 +13,7 @@
    and the gate counts the fallbacks.
 
    The subset is what the back end emits (measured over the 186 tests/c
-   programs: 59 x86-64 and 48 arm64 mnemonics, plans/v0.0.18.md).  The x86-64
+   programs: 59 x86-64 and 48 arm64 mnemonics, archive/plans/v0.0.18.md).  The x86-64
    encoder picks the same encoding the system assembler would, except a
    redundant REX 0x40 on narrow stores, which is written `{rex}`.
    Only the ELF layout bk_elfobj() writes is read; other objects are refused.
