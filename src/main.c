@@ -20,9 +20,9 @@ int main(void) {
     char *a; char *t; long e; int n; int j;
     char *outpath;
     int (*entry)(long, long);
-    int objwant; int bgiven;
+    int objwant; int bgiven; int funit;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
-    ninput = 0; objwant = 0; bgiven = 0;
+    ninput = 0; objwant = 0; bgiven = 0; funit = 0;
     ftrim_libc = 1;
     /* Default mode is RUN (owner, 2026-10-01; 0.0.17 R17-10): with no mode or
        output flag at all, `unisacc FILE.c [args]` compiles and runs in memory,
@@ -106,6 +106,7 @@ int main(void) {
             } else { if (strsame(a, "-MT") || strsame(a, "-MQ")) { i = i + 1;
                 if (__argv(i) == 0) return emsg("unisacc: error: missing dependency target", 0);
                 if (ndeptargets < 16) { deptargets[ndeptargets] = __argv(i); depquoted[ndeptargets] = a[2] == 81; ndeptargets = ndeptargets + 1; }
+            } else { if (strsame(a, "-funit")) { funit = 1;   /* separate compilation (docs/toolchain.md §7) */
             } else { if (strsame(a, "-MP")) { depphony = 1;
             } else { if (strsame(a, "-M") || strsame(a, "-MM")) {   /* like gcc: -E implied, only the .d line */
                 wantdeps = 1; deponly = 1; pponly = 1; dump = 1; depfile = depfile ? depfile : "";
@@ -130,7 +131,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } }
+            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -158,6 +159,8 @@ int main(void) {
        tape (86 suites spell -S that way) until Mach-O and COFF objects exist
        too, see docs/toolchain.md §4. */
     objwant = objwant && bgiven && dump == 2;
+    if (funit && objwant == 0 && (dump != 1 || pponly)) return emsg("unisacc: error: -funit needs -c -b os/arch (a unit object) or -S (its tape)", 0);
+    unitmode = funit;
     if (objwant) {
         /* lnx -> ELF, osx -> Mach-O, win -> COFF (docs/toolchain.md) */
         if (outpath == 0) outpath = deptarget(0, inputs[0]);

@@ -27,6 +27,7 @@ int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
 int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
+int symxtrn[MAXSYM];        /* -funit: declared `extern`, no storage in this unit (yet) */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symtok[MAXSYM];         /* the token that declared it */
@@ -757,6 +758,14 @@ int ustat_is(int t) {
     return 0;
 }
 int pponly;                 /* -E: stop after the preprocessor */
+/* -funit (with -c -b): a translation unit for separate compilation
+   (docs/toolchain.md §7).  Non-static functions and objects are `.global`,
+   names only declared here are `.extern`, `_start` comes only with `main`,
+   and this unit's initialisers form `__init_u` (the unisacc linker chains
+   every unit's `__init_u` into the program's `__init`). */
+int unitmode;
+int declextern;
+int emit_start(void);
 int gdup;                   /* this global was already defined further up */
 int declptr;                /* set by the declarator being processed */
 int declsz;                 /* the declared type's size, for `sizeof` */
@@ -3612,6 +3621,7 @@ int isspecq(int t) {
 int skipspecq(void) {
     while (isspecq(tp)) {
         if (srcis(tpos[tp], tlen[tp], "static")) declstatic = 1;
+        if (srcis(tpos[tp], tlen[tp], "extern")) declextern = 1;
         if (infunc) scopewant("local", 5, tp, "type_name", 9);
         else scopewant("top", 3, tp, "type_name", 9);
         adv();
@@ -3627,7 +3637,7 @@ int declspec(void) {                       /* -> element width */
     declspecptr = 0;
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
-    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0;
+    declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0; declextern = 0;
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -5131,10 +5141,11 @@ int stmt_(void) {
 int function(int t, int w) {
     int np; int pw; int pt; int off; int fpatch; int k; int start; int fnvoid;
     int fsym; int stacked; int npar; int depth; int c; int any; int havename;
-    int pst; int nsp; int spsym[16]; int pfl;
+    int pst; int nsp; int spsym[16]; int pfl; int fnglobal;
     /* `static int helper(...)` in the second unit is not the `helper` in
        the first: recorded here, before the label is emitted */
     if (declstatic) ustat_add(t);
+    fnglobal = declstatic == 0;              /* -funit: exported (bundled-header bodies are all static) */
     fnvoid = declvoid;                       /* before the parameters' types overwrite it */
     fntok = t;
     start = nout; nsp = 0; pst = 0 - 1;
@@ -5167,6 +5178,7 @@ int function(int t, int w) {
     scopebase = nsym;
     frameoff = 0; framemax = 0;
     np = 0;
+    if (unitmode && fnglobal) { es(".global "); etok(t); ec(10); }
     etok(t); es(":\n");
     es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
@@ -5412,6 +5424,22 @@ int unit(void) {
                under its own name */
             k = sfind(t);
             gdup = k >= 0 && symunit[k] == curunit;
+            /* -funit: `extern T x;` with no initialiser declares a name defined
+               elsewhere -- no storage here; a later definition in this unit
+               still allocates it (the extern mark is cleared then) */
+            if (unitmode) {
+                if (declextern && cur() != tidx("=", 1)) {
+                    if (gdup == 0) { es(".extern g_"); etok(t); ec(10); }
+                    sadd(t, gbind, 0, w); symxtrn[nsym - 1] = 1;
+                    if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symptrd[nsym - 1] = gpd + 1; }
+                    if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
+                        symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symelem[nsym - 1] = declsz; } } }
+                    if (eat(vfind(TOKV, NTOKV, ",", 1)) == 0) break;
+                    continue;
+                }
+                if (gdup) { if (symxtrn[k]) gdup = 0; }
+                if (gdup == 0 && declstatic == 0) { es(".global g_"); etok(t); ec(10); }
+            }
             sadd(t, gbind, 0, w);
             /* a struct global is an aggregate: its name is its address */
             if (declptr == 0) { if (gstruct >= 0) { if (isarr == 0) {
@@ -5697,13 +5725,7 @@ int fe_units(char **paths, int npath, char *t) {
        per file silently dropped unit one's initialisers -- the program ran
        and printed zeros. */
     nibuf = 0; nustat = 0;
-    es("_start:\n  @call.call __init\n");
-    es("  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n"
-       "  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n"
-       "  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n"
-       "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
-       "  jump __argv_top\n__argv_done:\n");
-    es("  @call.call main\n  @ctrl.jump __main_ret\n.bss __argvv 32768\n");
+    if (unitmode == 0) emit_start();
     u = 0;
     while (u < npath) {
         curunit = u;
@@ -5715,7 +5737,10 @@ int fe_units(char **paths, int npath, char *t) {
         unit();
         u = u + 1;
     }
-    es("__init:\n");
+    /* -funit: the entry comes with `main`; this unit's initialisers are
+       `__init_u`, and `__init` is the unisacc linker's chain of all of them */
+    if (unitmode) { if (symfn("main", 4) >= 0) emit_start(); es(".global __init_u\n__init_u:\n"); }
+    else es("__init:\n");
     k = 0; while (k < nibuf) { out[nout] = ibuf[k]; nout = nout + 1; k = k + 1; }
     es("  @ctrl.ret\n");
     /* A return from main is exit(status) (C99 5.1.2.2.3).  When the program
@@ -5988,6 +6013,17 @@ int undef_reach(void) {
     }
     return 0;
 }
+int xtrn_at[256]; int xtrn_len[256]; int nxtrn;
+int emit_start(void) {
+    es("_start:\n  @call.call __init\n");
+    es("  .argc r0\n  .lea r1, __argvv\n  imm r2, 0\n__argv_top:\n"
+       "  slt64 r3, r2, r0\n  jumpz r3, __argv_done\n  .argv r4, r2\n"
+       "  imm r5, 8\n  mul64 r5, r2, r5\n  add64 r5, r1, r5\n"
+       "  store64 [r5+0], r4\n  imm r5, 1\n  add64 r2, r2, r5\n"
+       "  jump __argv_top\n__argv_done:\n");
+    es("  @call.call main\n  @ctrl.jump __main_ret\n.bss __argvv 32768\n");
+    return 0;                                  /* -funit: `__init` becomes .extern via undef_calls */
+}
 int undef_calls(void) {
     int i; int e; int h; int bad;
     i = 0; while (i < UD_SIZE) { ud_tab[i] = 0; i = i + 1; }
@@ -6013,13 +6049,25 @@ int undef_calls(void) {
                 h = ud_slot(i + 7);
                 if (ud_tab[h] == 0) {
                     ud_tab[h] = i + 8;        /* report each name once */
+                    if (unitmode) {           /* defined in another unit: the linker's business */
+                        if (nxtrn < 256) { xtrn_at[nxtrn] = i + 7; xtrn_len[nxtrn] = e - i - 7; nxtrn = nxtrn + 1; }
+                    } else {
                     __write(2, "unisacc: error: undefined function '", 36);
                     __write(2, out + i + 7, e - i - 7);
                     __write(2, "'\n", 2);
                     bad = bad + 1;
+                    }
                 }
             } } } } } } } }
         i = e + 1;
     }
+    i = 0;
+    while (i < nxtrn) {                       /* appended after the scan: out must not move under it */
+        char nmb[256]; int q; q = 0;
+        while (q < xtrn_len[i] && q < 255) { nmb[q] = out[xtrn_at[i] + q]; q = q + 1; }
+        es(".extern "); q = 0; while (q < xtrn_len[i] && q < 255) { ec(nmb[q] & 255); q = q + 1; } ec(10);
+        i = i + 1;
+    }
+    nxtrn = 0;
     return bad;
 }
