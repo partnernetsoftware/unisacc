@@ -1745,6 +1745,11 @@ int primary(void) {
             curelem = symelem[i]; curptr = 1;
             curpd = symptrd[i]; curbase = symbase[i]; if (curpd >= 2) curelem = 8;
             adv(); lvalue = 0;
+            /* a global struct OBJECT (not an array of them: those carry
+               symptrd) is assignable like a local one: `g = l;` copies the
+               whole struct.  cJSON's `global_error = local_error;` was
+               refused with "expected ';'" (R16-12, 2026-10-01). */
+            if (symstruct[i] >= 0) { if (symptrd[i] == 0) { lvalue = 1; curptr = 0; curelem = 0; } }
             return postfix();
         }
         if (symkind[i] == 0) symlea(i, tp, "r0");
