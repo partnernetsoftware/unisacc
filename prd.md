@@ -246,6 +246,8 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 当前版本及其完成状态只在 §2 的计划索引维护。0.0.20 聚焦 C99 种子构造器、结构化拒绝与链接统一；依赖 ABI 互调的转发、动态库及其他超量范围列入 [0.0.21 计划](plans/v0.0.21.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。
 
+R20-1 A 首轮复测：旧 C 构造器的 `prec` 单表与 Python/出货 UNS2 字节相同；完整旧检查在当前表上碰到 `abi` 规则容量、`isel` 类别容量与 `combo` 差异，58 秒整轮亦超时。旧 `genmodel.c` 在当前 `lexcls` 的 257 个字段值上超出 256 上限。它们是可复用算法的证据，尚不构成现行 P3/seed 的 C99 构造路径；逐项回执与边界见 [R20-1 A 复测](research/r20-c99-seed-a-audit.md)。
+
 ## 6. 未解决问题
 
 - **匿名结构体的名字边界（2026-10-02 审查）**：`stnew(-1, ...)` 表示匿名 tag，原先在检查 `t >= 0` 前调用 `name_toolong(t)`；私有 `-fsanitize=bounds` 构建抓到 `tlen[-1]` 越界。现只对有名 tag 检查长度，并以 `front-bounds` 独立 UBSan 门禁持续检查。
