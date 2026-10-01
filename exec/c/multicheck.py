@@ -46,6 +46,22 @@ if part in ('all','isolation'):
             out=p/'sentinel';out.write_bytes(b'preserve')
             r=run([*base,a,p/'absent.c','-o',out]);assert r.returncode and out.read_bytes()==b'preserve'
     print('unit-local macros/guards/static function-pointer/global init: system cc exit 27, both orders',flush=True)
+    # The multi route parses all units in one E3 invocation.  Its diagnostics
+    # must detect duplicate external definitions before the backend sees tape.
+    d1=p/'duplicate-object-a.c';d2=p/'duplicate-object-b.c'
+    d1.write_text('int shared=1; int main(void){return shared;}\n')
+    d2.write_text('int shared=2;\n')
+    m1=p/'duplicate-main-a.c';m2=p/'duplicate-main-b.c'
+    m1.write_text('int main(void){return 1;}\n')
+    m2.write_text('int main(void){return 2;}\n')
+    for files,reason in (([d1,d2],b'multiple definitions of this object across units'),
+                         ([m1,m2],b'multiple definitions of this function')):
+        ref=run([ua,*files,'-t',target])
+        assert ref.returncode==1 and reason in ref.stderr,(files,ref)
+        for driver in drivers:
+            got=run([driver,'--models',p/'compiler.pkg',*files,'-t',target])
+            assert got.returncode==1 and reason in got.stderr and not got.stdout,(files,driver,got)
+    print('duplicate initialized object and duplicate main: named multi-unit rejection',flush=True)
 if part in ('all','static'):
     for files in (['tests/multi/static1.c','tests/multi/static2.c'],['tests/multi/static2.c','tests/multi/static1.c']):
         want=ok([ua,*files,'-t',target])
