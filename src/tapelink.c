@@ -171,6 +171,19 @@ int tl_unit(char *t, int n, int u) {
             } else {
                 if (t[e - 1] == 58) {
                     if (tl_is(t + i, e - 1 - i, "__init_u")) tl_inits = tl_inits | 0;
+                    /* R19-8: an exported name defined by two units (two `main`s) */
+                    if (tl_kind(t + i, e - 1 - i) == 2 && e - 1 - i < 250 && !tl_is(t + i, e - 1 - i, "__init_u")) {
+                        char fk[256]; int q; fk[0] = 1; q = 0;
+                        while (q < e - 1 - i) { fk[q + 1] = t[i + q]; q = q + 1; }
+                        if (tl_gseen(fk, q + 1)) {
+                            char msg[320]; int m; char *pre; pre = "link: multiple definitions of ";
+                            m = 0; while (pre[m]) { msg[m] = pre[m]; m = m + 1; }
+                            q = 0; while (q < e - 1 - i) { msg[m] = t[i + q]; m = m + 1; q = q + 1; }
+                            msg[m] = 10; msg[m + 1] = 0;
+                            tl_fail(msg);
+                        }
+                        tl_gadd(fk, q + 1);
+                    }
                     tl_name(t + i, e - 1 - i, u); tl_o(58);
                 } else tl_os(t + i, e - i);
             } }

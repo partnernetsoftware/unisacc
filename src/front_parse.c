@@ -27,6 +27,8 @@ int symbytes[MAXSYM];       /* what `sizeof` reports for the whole object */
 int symdim2[MAXSYM];        /* inner dimension of `a[n][m]`, else 0 */
 int symdim3[MAXSYM];        /* `a[n][m][k]`: k, and symdim2 is m*k */
 int symunit[MAXSYM];        /* which input file declared it */
+int symginit[MAXSYM];       /* R19-8: a file-scope object defined WITH an initialiser */
+int symgstat[MAXSYM];       /* ...that is `static` (its unit's own) */
 int symxtrn[MAXSYM];        /* -funit: declared `extern`, no storage in this unit (yet) */
 int symvar[MAXSYM];         /* a function that takes `...` */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
@@ -768,6 +770,7 @@ int objextern;              /* -c -b (any object): `extern` objects without a de
 int declextern;
 int emit_start(void);
 int gdup;                   /* this global was already defined further up */
+int gprev;                  /* R19-8: the earlier non-extern definition of it, or -1 */
 int declptr;                /* set by the declarator being processed */
 int declsz;                 /* the declared type's size, for `sizeof` */
 int declbytes;              /* ...times the array length, if it is one */
@@ -867,6 +870,23 @@ int scopeact(char *ctx, int cl, int t) {
 int lbind; int gbind;
 int actis(int a, char *nm, int L) { return a == vfind(SACTV, NSACTV, nm, L); }
 
+/* R19-8: external function definitions seen so far in this program */
+char fdef_pool[262144]; int fdef_n;
+int fdef_seen(int t) {
+    int p; int L; int k;
+    L = tlen[t]; p = 0;
+    while (p < fdef_n) {
+        int n; n = fdef_pool[p] & 255; n = n | ((fdef_pool[p + 1] & 255) << 8);
+        if (n == L) { k = 0; while (k < L && fdef_pool[p + 2 + k] == src[tpos[t] + k]) k = k + 1; if (k == L) return 1; }
+        p = p + 2 + n;
+    }
+    if (fdef_n + 2 + L < 262144) {
+        fdef_pool[fdef_n] = L & 255; fdef_pool[fdef_n + 1] = (L >> 8) & 255;
+        k = 0; while (k < L) { fdef_pool[fdef_n + 2 + k] = src[tpos[t] + k]; k = k + 1; }
+        fdef_n = fdef_n + 2 + L;
+    }
+    return 0;
+}
 int scopefail(char *what, int t) {
     /* The table would not bind this name where the walker stands.  On a
        valid program that is the two disagreeing -- an internal alarm; on
@@ -5186,6 +5206,7 @@ int function(int t, int w) {
     frameoff = 0; framemax = 0;
     np = 0;
     if (unitmode && fnglobal) { es(".global "); etok(t); ec(10); }
+    if (fnglobal && k + 1 < ntok && kind(k + 1) == tidx("{", 1) && fdef_seen(t)) err_tok(t, "multiple definitions of this function");   /* R19-8 (two `main`s, ...); a prototype is not a definition */
     etok(t); es(":\n");
     es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
@@ -5431,6 +5452,7 @@ int unit(void) {
                under its own name */
             k = sfind(t);
             gdup = k >= 0 && symunit[k] == curunit;
+            gprev = (k >= 0 && symxtrn[k] == 0) ? k : 0 - 1;   /* R19-8: an earlier definition of this name */
             /* -funit: `extern T x;` with no initialiser declares a name defined
                elsewhere -- no storage here; a later definition in this unit
                still allocates it (the extern mark is cleared then) */
@@ -5467,7 +5489,15 @@ int unit(void) {
                     if (gstruct >= 0) en(declsz); else en(n * w); } }
                 ec(10);
             }
+            symgstat[nsym - 1] = declstatic;
             if (cur() == tidx("=", 1)) {
+                /* R19-8: two definitions with initialisers are two objects that
+                   cannot both be this name (C99 6.9p5); a tentative one merges */
+                if (gprev >= 0 && symginit[gprev] && declstatic == 0 && symgstat[gprev] == 0) {
+                    if (symunit[gprev] == curunit) err_tok(t, "redefinition of this object (it already has an initialiser)");
+                    else err_tok(t, "multiple definitions of this object across units (each has an initialiser)");
+                }
+                symginit[nsym - 1] = 1;
                 adv();
                 toinit = 1; hasinit = 1;
                 gk = dkind(gflt0);

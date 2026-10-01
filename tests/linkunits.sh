@@ -74,6 +74,18 @@ say "mixed targets refused" "different targets" "$("$_BOUND" 30 "$UA" "$T/x1.o" 
 say "foreign run refused" "another target" "$("$_BOUND" 30 "$UA" "$T/x1.o" 2>&1 | grep -o 'another target')"
 printf 'int main(void){return 0;}\n' > "$T/plain.c"; "$_BOUND" 30 "$UA" "$T/plain.c" -c -b "$HOST" -o "$T/plain.o" 2>/dev/null
 say "whole-program object refused" "no unit tape" "$("$_BOUND" 30 "$UA" "$T/plain.o" 2>&1 | grep -o 'no unit tape')"
+# duplicate definitions are refused by name (R19-8, dsh 2026-10-01): gcc refuses all three
+printf 'int shared = 1;\nint get1(void){ return shared; }\n' > "$T/d1.c"
+printf 'int shared = 2;\nint get1(void);\nint main(void){ return get1(); }\n' > "$T/d2.c"
+say "two initialised globals refused" "multiple definitions" "$("$_BOUND" 30 "$UA" "$T/d1.c" "$T/d2.c" 2>&1 | grep -o 'multiple definitions' | head -1)"
+printf 'int dup = 1;\nint dup = 2;\nint main(void){ return dup; }\n' > "$T/d3.c"
+say "same-unit redefinition refused" "redefinition" "$("$_BOUND" 30 "$UA" "$T/d3.c" 2>&1 | grep -o 'redefinition' | head -1)"
+printf 'int main(void){ return 1; }\n' > "$T/ma.c"; printf 'int main(void){ return 2; }\n' > "$T/mb.c"
+say "two mains refused (one step)" "multiple definitions" "$("$_BOUND" 30 "$UA" "$T/ma.c" "$T/mb.c" 2>&1 | grep -o 'multiple definitions' | head -1)"
+"$_BOUND" 30 "$UA" "$T/ma.c" -c -b "$HOST" -funit -o "$T/ma.o" 2>/dev/null; "$_BOUND" 30 "$UA" "$T/mb.c" -c -b "$HOST" -funit -o "$T/mb.o" 2>/dev/null
+say "two mains refused (unit objects)" "multiple definitions of main" "$("$_BOUND" 30 "$UA" "$T/ma.o" "$T/mb.o" 2>&1 | grep -o 'multiple definitions of main')"
+printf 'int t;\nint main(void){ return t; }\n' > "$T/t1.c"; printf 'int t;\nint f(void){ return t; }\n' > "$T/t2.c"
+say "tentative definitions still merge" "rc=0" "$("$_BOUND" 30 "$UA" "$T/t1.c" "$T/t2.c" >/dev/null 2>&1; echo "rc=$?")"
 echo
 echo "linkunits  ok $ok   wrong $bad"
 [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]
