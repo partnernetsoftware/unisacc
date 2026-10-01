@@ -1749,7 +1749,12 @@ int primary(void) {
                symptrd) is assignable like a local one: `g = l;` copies the
                whole struct.  cJSON's `global_error = local_error;` was
                refused with "expected ';'" (R16-12, 2026-10-01). */
-            if (symstruct[i] >= 0) { if (symptrd[i] == 0) { lvalue = 1; curptr = 0; curelem = 0; } }
+            /* ONLY as the target of `=`: elsewhere (an argument, a member
+               access, sizeof) the global keeps the address-valued shape it
+               always had -- widening this to every use made the by-value
+               argument path load struct CONTENTS as an address (c-testsuite
+               00204 crashed; the by-value path's own gap is 0.0.17 R17-8). */
+            if (symstruct[i] >= 0) { if (symptrd[i] == 0) { if (cur() == tidx("=", 1)) { lvalue = 1; curptr = 0; curelem = 0; } } }
             return postfix();
         }
         if (symkind[i] == 0) symlea(i, tp, "r0");
