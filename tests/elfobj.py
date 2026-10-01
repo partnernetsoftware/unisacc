@@ -221,6 +221,26 @@ def main(argv):
                     print('elfobj  COFF programs run in %s (win/x86_64 emulated, win/arm64 native) and print what the images print' % winvm)
         else:
             skips.append('COFF: no lld-link or llvm-dlltool')
+        # R17-9 interop (a): our whole-program object reads data symbols a C compiler defined
+        bsrc = tmp / 'banner.c'; bsrc.write_text('const char banner[] = "banner from cc";\nint answer = 42;\n')
+        usrc = tmp / 'usebanner.c'; usrc.write_text('#include <stdio.h>\nextern const char banner[];\nextern int answer;\nint main(void){ printf("%s %d\\n", banner, answer); return 0; }\n')
+        want = b'banner from cc 42\n'
+        if sys.platform == 'darwin' and shutil.which('ld'):
+            sdk = run(['xcrun', '--show-sdk-path']).stdout.decode().strip()
+            for arch in ('arm64', 'x86_64'):
+                bo = tmp / ('banner_%s.o' % arch); uo = tmp / ('use_%s.o' % arch); ex = tmp / ('use_%s' % arch)
+                assert run(['cc', '-arch', arch, '-c', '-o', bo, bsrc]).returncode == 0
+                r = run([ua, usrc, '-c', '-b', 'osx/' + arch, '-o', uo]); assert r.returncode == 0, r.stderr
+                r = run(['ld', '-arch', arch, '-o', ex, uo, bo, '-e', '_start', '-lSystem', '-syslibroot', sdk]); assert r.returncode == 0, r.stderr
+                assert run([ex]).stdout == want, ('interop macho', arch)
+            print('elfobj  interop (a): our Mach-O objects read cc-defined data symbols (osx/arm64, osx/x86_64)')
+        if vm and shutil.which('limactl'):
+            uo = tmp / 'use_lnx.o'
+            r = run([ua, usrc, '-c', '-b', 'lnx/arm64', '-o', uo]); assert r.returncode == 0, r.stderr
+            tar = run(['tar', '-C', tmp, '-cf', '-', 'banner.c', 'use_lnx.o']).stdout
+            r = run(['limactl', 'shell', vm, '--', 'sh', '-c', 'rm -rf /tmp/ia && mkdir /tmp/ia && cd /tmp/ia && tar xf - && gcc -c -o banner.o banner.c && ld -o prog use_lnx.o banner.o && ./prog'], input=tar, timeout=40)
+            assert r.stdout == want, ('interop elf', r.stdout, r.stderr[-300:])
+            print('elfobj  interop (a): our ELF object reads gcc-defined data symbols, linked by GNU ld in %s' % vm)
         # bare -c is still the tape
         r = run([ua, ROOT / 'examples/hello.c', '-c', '-o', tmp / 'bare.tape'], cwd=ROOT)
         assert r.returncode == 0 and (tmp / 'bare.tape').read_bytes().startswith(b'_start:'), 'bare -c no longer writes the tape'

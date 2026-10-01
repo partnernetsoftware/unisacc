@@ -161,6 +161,7 @@ int main(void) {
     objwant = objwant && bgiven && dump == 2;
     if (funit && objwant == 0 && (dump != 1 || pponly)) return emsg("unisacc: error: -funit needs -c -b os/arch (a unit object) or -S (its tape)", 0);
     unitmode = funit;
+    objextern = objwant;                   /* R17-9 (a): a whole-program object may read cc's data symbols */
     if (objwant) {
         /* lnx -> ELF, osx -> Mach-O, win -> COFF (docs/toolchain.md) */
         if (outpath == 0) outpath = deptarget(0, inputs[0]);

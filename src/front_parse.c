@@ -764,6 +764,7 @@ int pponly;                 /* -E: stop after the preprocessor */
    and this unit's initialisers form `__init_u` (the unisacc linker chains
    every unit's `__init_u` into the program's `__init`). */
 int unitmode;
+int objextern;              /* -c -b (any object): `extern` objects without a definition are .extern, not storage */
 int declextern;
 int emit_start(void);
 int gdup;                   /* this global was already defined further up */
@@ -5427,7 +5428,7 @@ int unit(void) {
             /* -funit: `extern T x;` with no initialiser declares a name defined
                elsewhere -- no storage here; a later definition in this unit
                still allocates it (the extern mark is cleared then) */
-            if (unitmode) {
+            if (unitmode || objextern) {
                 if (declextern && cur() != tidx("=", 1)) {
                     if (gdup == 0) { es(".extern g_"); etok(t); ec(10); }
                     sadd(t, gbind, 0, w); symxtrn[nsym - 1] = 1;
@@ -5438,7 +5439,7 @@ int unit(void) {
                     continue;
                 }
                 if (gdup) { if (symxtrn[k]) gdup = 0; }
-                if (gdup == 0 && declstatic == 0) { es(".global g_"); etok(t); ec(10); }
+                if (unitmode && gdup == 0 && declstatic == 0) { es(".global g_"); etok(t); ec(10); }
             }
             sadd(t, gbind, 0, w);
             /* a struct global is an aggregate: its name is its address */
