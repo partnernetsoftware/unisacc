@@ -2,7 +2,7 @@
  * the file-descriptor calls the bundled library already makes through its
  * own syscall intrinsics, under their POSIX names.  Return values follow
  * POSIX: -1 with errno set on failure.  Not provided (yet): fork/exec,
- * isatty, getpid, sleep, pipes (plans/v0.0.17.md R17-7). */
+ * isatty, getpid, sleep, pipes (POSIX L2, plans/v0.1.x.md). */
 #ifndef _UNISA_UNISTD_H
 #define _UNISA_UNISTD_H
 #include <stddef.h>

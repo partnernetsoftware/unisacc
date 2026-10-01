@@ -15,6 +15,7 @@
 
 | 版本 | 身份 / 证据 |
 |---|---|
+| v0.0.17 | **已发布 2026-10-01**（主人预先批准）。Version 0.0.17；源 `ae3f989`；候选 `5c4802c2…` 1,452,870 B；公开签名 `unisacc.com` `cdbd714c…` 1,468,648 B；公证 dmg `986a5fe7…`；回执 research/r17-release-acceptance.json |
 | v0.0.16 | **已发布 2026-10-01**（主人确认）。公开资产只有签名 `unisacc.com` 与公证 dmg。Version 0.0.16；结项提交 `313610b`；候选 `unisacc.com` 1,295,312 B，SHA-256 `6fc720265f9a9573…`（与自举 stage2/stage3 字节相同，GHCR 重封 `10e9ca04…`）；已做而未公开：Azure 公司签名（run 36813357447，签后 `c1c72e2f90fd04b7…` 1,311,088 B）、Apple 公证 dmg `eb433bffa309c762…`；回执 research/r16-release-acceptance.json |
 | v0.0.15 | **未发布**（整理版）。结项 `d6a5046`；产品字节与 0.0.14 候选相同 |
 | v0.0.14 | Version 0.0.14; release source `75ec4de`; candidate `3d86639072f5d562…` 1,288,064 B; published `unisacc.com` Authenticode-signed 1,303,840 B, SHA-256 `c229cebf6cd58ca0…`; dmg `9f13acc4b87d6100…`; receipt research/r14-release-acceptance.json |
@@ -34,7 +35,7 @@
 | v0.0.14 | [archive/plans/v0.0.14.md](archive/plans/v0.0.14.md) — #21 callm、8 个 L1 库体、#line、tapebin v1 端到端、C99 条款账本（语言 96%）、流水线方法债、R14-8 6/8 | 已发布 2026-09-30（tag 75ec4de；公开 unisacc.com c229cebf… 与 dmg；回执 research/r14-release-acceptance.json） |
 | v0.0.15 | [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 完成，不发布（全量队列 370/370，产品字节同 0.0.14） |
 | v0.0.16 | [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) — origin CI 转绿、减法安全门禁、gcc 字节的 -M 族、参考侧 ELF `-c` 与系统 ld 互链（docs/toolchain.md）、realprog 语料门禁 2/6、全局结构体赋值修复；A1/A2/B1 顺延到 0.0.17 | 已发布 2026-10-01（主人确认；本地 375/375 + origin 六 runner 绿；回执 research/r16-release-acceptance.json） |
-| v0.0.17 | [plans/v0.0.17.md](plans/v0.0.17.md) — **主线：三格式自家 `.o` → 自家 `.o` 静态链接器**；`ar` 只为 `.a` 输入；互操作 (a) 读 cc `.o` 数据符号；库面按语料顺序（setjmp/unistd/termios/pwd）；R17-8 债；E1/E2 流程；`-g` 行号、nm/objdump、POSIX L2/狗粮可后置 | 开工（2026-10-01） |
+| v0.0.17 | [archive/plans/v0.0.17.md](archive/plans/v0.0.17.md) — 三格式 .o（参考）与产品 Linux ELF 路由、-funit 分开编译、tape 级自带链接器与 ar、互操作 (a)、默认即运行、unistd.h（realprog 3/6） | 已发布 2026-10-01 |
 | v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；动态库、完整调试信息、cc 函数互调各自独立项；sqlite/GNU 子集、Csmith、论文 A 不与工具链硬绑 | 草案 |
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。

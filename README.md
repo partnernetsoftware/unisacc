@@ -12,7 +12,7 @@ and archives (`unisacc ar rcs|t|x`) for any of the six targets. Object writing
 is on the reference compiler; the shipped `unisacc.com` links unit objects and
 writes archives, and refuses `-c -b` by name until its own object route is done.
 There is no assembler yet. The design and the back-end facts behind it are in
-[docs/toolchain.md](docs/toolchain.md); the plan in [plans/v0.0.17.md](plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+[docs/toolchain.md](docs/toolchain.md); the plan in [archive/plans/v0.0.17.md](archive/plans/v0.0.17.md). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
