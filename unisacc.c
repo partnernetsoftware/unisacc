@@ -8,6 +8,7 @@
 #include "kernel/unisa_headers.inc"
 #include "kernel/unisa_core.c"
 #include "src/front_pp.c"
+#include "src/fwdstub.c"
 #include "src/front_parse.c"
 #include "src/tapelink.c"
 #include "src/asmtext.c"
