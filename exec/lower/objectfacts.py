@@ -19,7 +19,7 @@ def install(E):
         g.st[name]=g.st.pop(state);g.labels.add(name);return name
     start=move('START')
     p=P('START').a(('MARK','of_zero'),('LDI','of_count',0),('SBCLR',),[('SBOUT',c) for c in b'\0cli/funit'],('SBFIND','of_resource'),('BLEN','of_unit','of_resource'))
-    words=list(SHAPE)+['.global','.extern','.bss','.str']
+    words=list(SHAPE)+['.global','.extern','.bss','.str','.unit','.gdef']
     for i,w in enumerate(words):
         p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN','of_key'+str(i)))
         if w in SHAPE:
@@ -32,10 +32,11 @@ def install(E):
     P('OF.op').call('OF.word').branch({1:'OF.label'},'OF.dispatch',[('CMPI','of_last',58)])
     P('OF.label').a(('ALUI','sub','of_we','of_we',1)).call('OF.name').goto('OF.skip')
     p=P('OF.dispatch').a(('INTERN','of_op','of_ws','of_we'),('LDI','of_arg',0))
-    for w in ['.global','.extern','.bss','.str']:
+    for w in ['.global','.extern','.bss','.str','.unit','.gdef']:
         nxt=p.fresh('r');p.branch({1:'OF.directive.'+w},nxt,[('CMP','of_op',key[w])]);p.label(nxt)
     p.goto('OF.args')
-    for w in ['.global','.extern','.bss','.str']:
+    P('OF.directive..unit').goto('OF.skip')
+    for w in ['.global','.extern','.bss','.str','.gdef']:
         p=P('OF.directive.'+w).call('OF.whitespace').call('OF.word').call('OF.name')
         if w in ('.global','.extern'):
             p.a(('LDI','of_one',1),('STX','of_nameid',GLOBAL if w=='.global' else EXTERN,'of_one'))
@@ -63,7 +64,7 @@ def install(E):
     # Link attributes carry no target instruction, but still define symbol order.
     previous=move('WORD.end')
     p=P('WORD.end').a(('INTERN','wi','ws','we'))
-    for w in ('.global','.extern'):
+    for w in ('.global','.extern','.unit','.gdef'):
         nxt=p.fresh('r');p.branch({1:'SKIP'},nxt,[('CMP','wi',key[w])]);p.label(nxt)
     p.goto(previous)
     second=move('R.second');P('R.second').a(('COPYW','of_nzend','outn')).goto(second)
