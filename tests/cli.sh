@@ -161,6 +161,8 @@ say "FILE.c alone runs" "plain build" "$( (cd "$T" && bound 60 "$UA_RUN" plain.c
 say "FILE.c alone leaves no a.out" "none" "$([ -e "$T/a.out" ] && echo left || echo none)"
 printf '#include <stdio.h>\nint main(int c,char**v){printf("%%d %%s\\n",c,v[1]);return 0;}\n' > "$T/argv.c"
 say "FILE.c args go to the program" "2 hi" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c hi) 2>&1)"
+say "-- passes dash arguments" "2 --flag" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c -- --flag) 2>&1)"
+say "dash argument without -- is named" "go after --" "$( (cd "$T" && bound 60 "$UA_RUN" argv.c --flag) 2>&1 | grep -o 'go after --' | head -1)"
 (cd "$T" && bound 60 "$UA_RUN" plain.c -o plainx >/dev/null 2>&1)
 say "FILE.c -o names it" "plain build" "$( (cd "$T" && bound 10 ./plainx) 2>&1)"
 say "-dump-tokens" "6 tokens" "$( (cd "$T" && printf 'int x = 1;\n' > tk.c && bound 20 "$UA_RUN" -dump-tokens tk.c) | tail -1)"

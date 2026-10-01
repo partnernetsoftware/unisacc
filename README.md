@@ -68,6 +68,7 @@ machine). The C headers it needs travel inside it.
 
 ```bash
 ./unisacc.com hello.c [args]                # compile and RUN in memory (the default; not cc's a.out)
+./unisacc.com hello.c -- --flag -x          # arguments that start with '-' go after --
 ./unisacc.com -run hello.c [args]          # compile and run in memory, nothing on disk
 ./unisacc.com hello.c -o hello              # write an executable for this machine
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target

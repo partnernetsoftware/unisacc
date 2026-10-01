@@ -224,7 +224,7 @@ static char *process_environment(int argc,char **argv,int i) {
 int main(int argc, char **argv) {
     const char *src = 0, *out = 0, *target = 0, *pkg = 0, *deps = 0;
     int mode = 0, level = 0, explicit_image = 0, runit = 0, argstart = argc, force_origin=0, emitbin=0;
-    int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0;
+    int deponly=0, depphony=0, ndeptargets=0, sawc=0, funit=0, defrun=0;
     const char **deptargets=xrealloc(0,argc*sizeof(char *)); int *depquoted=xrealloc(0,argc*sizeof(int));
     int warnings=0; Buf werror={0}, errorlimit={0};
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
@@ -242,7 +242,7 @@ int main(int argc, char **argv) {
         if (!strcmp(a,"-run")||!strcmp(a,"-dump-tokens")||!strcmp(a,"--tapebin")||!strcmp(a,"--version")||!strcmp(a,"-version")) modeflag=1;
         if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")) i++;   /* skip the option's argument */
       }
-      if (!modeflag) runit=1; }
+      if (!modeflag) { runit=1; defrun=1; } }
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {
@@ -303,7 +303,7 @@ int main(int argc, char **argv) {
            external linker/search path, and only the C language. These
            arguments are consumed, not interpreted as input file names. */
         else if (a[0]=='-' && (a[1]=='l' || a[1]=='L' || a[1]=='x')) {
-            if (!a[2] && ++i >= argc) return clierror("missing compatibility argument");
+            if (!a[2] && ++i >= argc) return clierror(defrun && src ? "missing compatibility argument (arguments for the program go after --: unisacc prog.c -- -x)" : "missing compatibility argument");
         }
         else if (!strcmp(a,"-g") || !strncmp(a,"-std=",5)) {
             /* No separate debug information or dialect switch. */
@@ -312,7 +312,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a,"-O0")) level = 0;
         else if (!strcmp(a,"-O1")) level = 1;
         else if (!strcmp(a,"-O2")) level = 2;
-        else if (a[0]=='-' && a[1]) return clierror("option not migrated");
+        else if (a[0]=='-' && a[1]) return clierror(defrun && src ? "option not migrated (arguments for the program go after --: unisacc prog.c -- --flag)" : "option not migrated");
         else { sources[nsources++]=a; if (!src) src = a; }
     }
     if (!src) return clierror("expected a C source file");

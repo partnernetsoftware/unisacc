@@ -132,7 +132,7 @@ int main(void) {
                     optlevel = 1;
                     if (a[2] >= 48 && a[2] <= 57) optlevel = a[2] - 48;
                 }
-            } else { return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } } }
+            } else { if (j == 0 && fi) return emsg("unisacc: error: unknown option (arguments for the program go after --) ", a); return emsg("unisacc: error: unknown option ", a); } } } } } } } } } } } } } } } } } } } } } } } } } } } }
         } else {
             /* Several inputs make ONE program.  Under `-run` the line also
                carries the PROGRAM's arguments, so the inputs are the `.c`
@@ -196,11 +196,13 @@ int main(void) {
         /* argv[0] is the program, which is its first source file; the rest
            of the line follows the inputs */
         n = __argc() - (fi + ninput) + 1;
+        j = fi + ninput;                             /* the program's first argument... */
+        if (j < __argc()) { if (strsame(__argv(j), "--")) { j = j + 1; n = n - 1; } }   /* ...not the `--` that ends the inputs */
         if (n > 255) n = 255;
         if (n < 1) n = 1;
         runargv[0] = __argv(fi);
         k = 1;
-        while (k < n) { runargv[k] = __argv(fi + ninput + k - 1); k = k + 1; }
+        while (k < n) { runargv[k] = __argv(j + k - 1); k = k + 1; }
         runargv[n] = 0;
         /* ...and after the NULL, our own environment, where a kernel would
            put envp: getenv walks __argv past argc [S-15 D2] */
