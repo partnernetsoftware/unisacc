@@ -262,6 +262,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 |---|---|
 | v0.0.18 | 汇编器子集 + `-S` 真汇编；产品 Mach-O/COFF 对象；宿主能力头 TUI 与文件（dsh 实测需求）；流程修复 → [plans/v0.0.18.md](plans/v0.0.18.md) |
 | v0.0.19 | 宿主能力头·网络（socket 系，Winsock 一列，不做 TLS）→ [plans/v0.0.19.md](plans/v0.0.19.md) |
+| v0.0.20 | C99 种子构造器（主人 2026-10-01 批准）：先复测已有 C 构造器，再覆盖现行 δ/网络、P3/APE seed，成熟后切默认 → [plans/v0.0.20.md](plans/v0.0.20.md) |
 | v0.1.x | 证明侧（T2、P-2、T3）、tapebin 平台化、内存安全检查节点（论文 D）；从 0.0.17 降级的 A1/A2/B1 与 POSIX L2 → [plans/v0.1.x.md](plans/v0.1.x.md) |
 | v0.2.x | **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 → [plans/v0.2.x.md](plans/v0.2.x.md) |
 
