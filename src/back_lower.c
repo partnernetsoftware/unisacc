@@ -333,19 +333,69 @@ long bk_num(char *s, int n) {       /* int(tok, 0): decimal, 0x, a sign */
     return v;
 }
 int bk_hex(int c) { if (c >= 48 && c <= 57) return c - 48; return (c | 32) - 87; }
+int bk_tape_bad(void) {
+    __write(2, "back end: malformed tape\n", 25); __exit(1); return 0;
+}
+/* Strict token conversion for externally supplied tape.  bk_num also reads
+   fixed-width catalog fields, whose trailing NUL is not part of a token. */
+int bk_tape_num(char *s, int n, long *out) {
+    unsigned long v; unsigned long limit; int k; int neg; int base; int d; int c;
+    v = 0; k = 0; neg = 0; base = 10;
+    if (n <= 0) return 0;
+    if (s[k] == '-' || s[k] == '+') { neg = s[k] == '-'; k = k + 1; }
+    if (k + 1 < n && s[k] == '0' && (s[k + 1] == 'x' || s[k + 1] == 'X')) {
+        base = 16; k = k + 2;
+    }
+    if (k >= n) return 0;
+    limit = neg ? 9223372036854775808UL : ~0UL;
+    while (k < n) {
+        c = s[k] & 255; d = -1;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        if (d < 0 || d >= base || v > (limit - d) / base) return 0;
+        v = v * base + d; k = k + 1;
+    }
+    *out = neg ? (long)(0UL - v) : (long)v;
+    return 1;
+}
+int bk_tape_space(int c) { return c == ' ' || c == '\t' || c == '\r'; }
+int bk_tape_sep(int c) {
+    return bk_tape_space(c) || c == ',' || c == '[' || c == ']';
+}
 char bkstrbuf[1048576];
 int bk_parse(char *t, int n) {
-    int i; int e; int j; int k; int op; int na; int s0; int s1; char *sh; int id;
+    int i; int e; int lineend; int j; int k; int op; int na; int s0; int s1; char *sh; int id;
+    long value;
+    if (n < 0) return bk_tape_bad();
     i = 0; bkni = 0; bkentry = 0 - 1;
     while (i < n) {
         e = i; while (e < n) { if (t[e] == 10) break; e = e + 1; }
-        j = i; while (j < e) { if (t[j] != 32 && t[j] != 9) break; j = j + 1; }
-        if (j >= e) { i = e + 1; continue; }
-        if (t[j] == 46 && t[j + 1] == 98 && t[j + 2] == 115 && t[j + 3] == 115 && t[j + 4] == 32) {
+        lineend = e;
+        { int quoted; int escaped;
+          quoted = 0; escaped = 0;
+          for (k = i; k < e; k++) {
+              if (quoted) {
+                  if (escaped) escaped = 0;
+                  else if (t[k] == 92) escaped = 1;
+                  else if (t[k] == 34) quoted = 0;
+              } else {
+                  if (t[k] == 34) quoted = 1;
+                  else if (t[k] == 59) { e = k; break; }
+              }
+          }
+        }
+        while (e > i && bk_tape_space(t[e - 1])) e = e - 1;
+        j = i; while (j < e && bk_tape_space(t[j])) j = j + 1;
+        if (j >= e) { i = lineend + 1; continue; }
+        if (e - j >= 5 && t[j] == 46 && t[j + 1] == 98 && t[j + 2] == 115 && t[j + 3] == 115 && bk_tape_space(t[j + 4])) {
             /* .bss NAME N: zeros, 8-aligned */
             long cnt;
-            j = j + 5; s0 = j; while (t[j] != 32) j = j + 1; s1 = j;
-            cnt = bk_num(t + j + 1, e - j - 1);
+            j = j + 5; while (j < e && bk_tape_space(t[j])) j = j + 1;
+            s0 = j; while (j < e && !bk_tape_space(t[j])) j = j + 1; s1 = j;
+            if (s0 == s1 || j == e) return bk_tape_bad();
+            while (j < e && bk_tape_space(t[j])) j = j + 1;
+            if (!bk_tape_num(t + j, e - j, &cnt) || cnt < 0 || cnt > 2147483647) return bk_tape_bad();
             id = bk_name(t + s0, s1 - s0);
             /* Tape.string interns: a name already known keeps its address
                and reserves NOTHING the second time.  This used to allocate
@@ -357,19 +407,27 @@ int bk_parse(char *t, int n) {
                 bksym_addr[id] = BK_DATA_BASE + bkdlen; bk_dsym(id);
                 bk_zeros(cnt);
             }
-            i = e + 1; continue;
+            i = lineend + 1; continue;
         }
-        if (t[j] == 46 && t[j + 1] == 115 && t[j + 2] == 116 && t[j + 3] == 114 && t[j + 4] == 32) {
+        if (e - j >= 5 && t[j] == 46 && t[j + 1] == 115 && t[j + 2] == 116 && t[j + 3] == 114 && bk_tape_space(t[j + 4])) {
             /* .str NAME "..." */
             int m;
-            j = j + 5; s0 = j; while (t[j] != 32) j = j + 1; s1 = j;
-            while (t[j] != 34) j = j + 1;
+            j = j + 5; while (j < e && bk_tape_space(t[j])) j = j + 1;
+            s0 = j; while (j < e && !bk_tape_space(t[j])) j = j + 1; s1 = j;
+            if (s0 == s1 || j == e) return bk_tape_bad();
+            while (j < e && bk_tape_space(t[j])) j = j + 1;
+            if (j == e || t[j] != '"') return bk_tape_bad();
             j = j + 1; m = 0;
             while (j < e) {
                 if (t[j] == 34) break;
+                if (m >= (int)sizeof(bkstrbuf)) return bk_tape_bad();
                 if (t[j] == 92) {
-                    int c; c = t[j + 1];
-                    if (c == 120) { bkstrbuf[m] = bk_hex(t[j + 2]) * 16 + bk_hex(t[j + 3]); j = j + 4; }
+                    int c; if (j + 1 >= e) return bk_tape_bad(); c = t[j + 1];
+                    if (c == 120) {
+                        if (j + 3 >= e || !((t[j + 2] >= '0' && t[j + 2] <= '9') || ((t[j + 2] | 32) >= 'a' && (t[j + 2] | 32) <= 'f'))
+                            || !((t[j + 3] >= '0' && t[j + 3] <= '9') || ((t[j + 3] | 32) >= 'a' && (t[j + 3] | 32) <= 'f'))) return bk_tape_bad();
+                        bkstrbuf[m] = bk_hex(t[j + 2]) * 16 + bk_hex(t[j + 3]); j = j + 4;
+                    }
                     else {
                         if (c == 110) bkstrbuf[m] = 10;
                         else { if (c == 116) bkstrbuf[m] = 9; else { if (c == 114) bkstrbuf[m] = 13;
@@ -380,21 +438,26 @@ int bk_parse(char *t, int n) {
                 }
                 bkstrbuf[m] = t[j]; m = m + 1; j = j + 1;
             }
+            if (j >= e || t[j] != '"') return bk_tape_bad();
+            j = j + 1; while (j < e && bk_tape_space(t[j])) j = j + 1;
+            if (j != e) return bk_tape_bad();
             id = bk_name(t + s0, s1 - s0);
             if (bksym_addr[id] < 0) {
                 bksym_addr[id] = BK_DATA_BASE + bkdlen; bk_dsym(id);
                 bk_bytes(bkstrbuf, m);
             }
-            i = e + 1; continue;
+            i = lineend + 1; continue;
         }
         if (t[e - 1] == 58) {               /* NAME: */
+            if (e - 1 == j) return bk_tape_bad();
+            for (k = j; k < e - 1; k++) if (bk_tape_space(t[k])) return bk_tape_bad();
             id = bk_name(t + j, e - 1 - j);
             bklab_pc[id] = bkni;
             if (e - 1 - j == 6) { if (bk_same(id, "_start", 6)) bkentry = bkni; }
-            i = e + 1; continue;
+            i = lineend + 1; continue;
         }
         /* an instruction: the op, then operands split on space , [ ] and +/- in [r+K] */
-        s0 = j; while (j < e && t[j] != 32) j = j + 1;
+        s0 = j; while (j < e && !bk_tape_space(t[j])) j = j + 1;
         op = bk_opof(t + s0, j - s0);
         if (op < 0) { __write(2, "back end: unknown tape op\n", 26); __exit(1); }
         if (bkni >= BK_MAXI) { __write(2, "back end: tape too long\n", 24); __exit(1); }
@@ -402,27 +465,37 @@ int bk_parse(char *t, int n) {
         na = 0;
         while (sh[na]) {
             int q;
-            while (j < e && (t[j] == 32 || t[j] == 44 || t[j] == 91 || t[j] == 93)) j = j + 1;
+            if (na >= 8) return bk_tape_bad();
+            while (j < e && bk_tape_sep(t[j])) j = j + 1;
+            if (j >= e) return bk_tape_bad();
             q = j;
             if (sh[na] == 114) {             /* a register: r0..r7 */
+                if (j + 1 >= e || t[j] != 'r' || t[j + 1] < '0' || t[j + 1] > '7') return bk_tape_bad();
+                if (j + 2 < e && !bk_tape_sep(t[j + 2]) &&
+                    !(sh[na + 1] == 'i' && (t[j + 2] == '+' || t[j + 2] == '-'))) return bk_tape_bad();
                 bkak[bkni * 8 + na] = BK_R; bkav[bkni * 8 + na] = t[j + 1] - 48;
                 j = j + 2;
             } else { if (sh[na] == 105) {    /* an immediate, maybe +K/-K after a register */
-                while (j < e && t[j] != 32 && t[j] != 44 && t[j] != 93) j = j + 1;
-                bkak[bkni * 8 + na] = BK_I; bkav[bkni * 8 + na] = bk_num(t + q, j - q);
+                while (j < e && !bk_tape_sep(t[j])) j = j + 1;
+                if (!bk_tape_num(t + q, j - q, &value)) return bk_tape_bad();
+                bkak[bkni * 8 + na] = BK_I; bkav[bkni * 8 + na] = value;
             } else {                         /* L or s: a name, or a number */
-                while (j < e && t[j] != 32 && t[j] != 44) j = j + 1;
-                if ((t[q] >= 48 && t[q] <= 57) || t[q] == 45) {
-                    bkak[bkni * 8 + na] = BK_I; bkav[bkni * 8 + na] = bk_num(t + q, j - q);
+                while (j < e && !bk_tape_sep(t[j])) j = j + 1;
+                if ((t[q] >= 48 && t[q] <= 57) || t[q] == '-' || t[q] == '+') {
+                    if (!bk_tape_num(t + q, j - q, &value)) return bk_tape_bad();
+                    bkak[bkni * 8 + na] = BK_I; bkav[bkni * 8 + na] = value;
                 } else {
+                    if (j == q) return bk_tape_bad();
                     bkak[bkni * 8 + na] = BK_N; bkav[bkni * 8 + na] = bk_name(t + q, j - q);
                 }
             } }
             na = na + 1;
         }
+        while (j < e && bk_tape_sep(t[j])) j = j + 1;
+        if (j != e) return bk_tape_bad();
         bkop[bkni] = op;
         bkni = bkni + 1;
-        i = e + 1;
+        i = lineend + 1;
     }
     if (bkentry < 0) bkentry = 0;
     return bkni;

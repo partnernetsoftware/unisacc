@@ -375,6 +375,7 @@ job malloc      ./tests/malloc.sh
 job docs        ./tests/docs.sh
 job tapebin-roundtrip python3 ./tests/tapebin.py
 job tapebin-shape python3 -m unisa.tapebin_shape --check
+job tape-reader python3 ./tests/tapereadercheck.py
 job script-inventory python3 ./tests/inventory.py --check   # R15-1: no test/check script without a gate, a caller or a disposition
 job subtract-safety python3 ./tests/subtractsafety.py   # R16-9: archived files have no users outside archive/; AGENTS.md/CLAUDE.md resolve
 job subtract-safety-selftest python3 ./tests/subtractsafety.py --selftest   # R16-9: both 0.0.15 counterexamples are still caught
