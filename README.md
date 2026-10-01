@@ -5,7 +5,7 @@ arm64} -- that writes the executables itself (ELF, Mach-O with an ad-hoc
 signature, PE) directly from its own encoders, compiles itself, and ships as one
 file, `unisacc.com`. It does not yet produce object files, link, or
 assemble `.s` input; a staged toolchain (`-c` objects, a linker, an
-assembler, `ar`) is planned in [plans/v0.0.16.md](plans/v0.0.16.md) R16-7. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+assembler, `ar`) is planned in [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) R16-7. "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects (jsmn, cJSON, kilo, miniz, stb, tinyexpr and
@@ -58,8 +58,10 @@ as a PE; a Unix shell runs it as a script that picks the slice for the
 machine). The C headers it needs travel inside it.
 
 ```bash
-./unisacc.com hello.c                       # like cc: a.out for this machine
+./unisacc.com hello.c [args]                # 0.0.16: like cc, writes a.out.  From 0.0.17 the bare form
+                                            # RUNS the program (owner decision 2026-10-01, see below)
 ./unisacc.com -run hello.c [args]          # compile and run in memory, nothing on disk
+./unisacc.com hello.c -o hello              # write an executable for this machine
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target
 ./unisacc.com -O2 a.c b.c -b lnx/x86_64 -o prog
 ./unisacc.com -E file.c                     # preprocess only
@@ -68,6 +70,7 @@ machine). The C headers it needs travel inside it.
 ./unisacc.com hello.tapebin -b osx/arm64 -o hello
 ```
 
+- **Default mode is run (from 0.0.17):** `unisacc file.c [args]` with neither `-run` nor `-o` compiles and runs the program in memory; this is deliberately unlike cc's silent `a.out`. Writing a file always takes `-o` (or `-b target`). 0.0.16 still writes `a.out` like cc.
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
   `-include`, `-E`, `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MQ`/`-MP` (gcc's `.d` bytes; `-M` lists what `-MM` lists, the bundled headers are not files), `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.

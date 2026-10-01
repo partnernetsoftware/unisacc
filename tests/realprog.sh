@@ -17,7 +17,7 @@ _BOUND=$("$_BOUND" --helper) || exit 2
 # UNS (we refuse it: printed with the reason, not a failure), skip (the
 # system compiler will not build it here).  tests/realprog.baseline.list is
 # the ratchet: every name in it must be ok, and each version adds at least
-# one name (plans/v0.0.16.md R16-12).
+# one name (archive/plans/v0.0.16.md R16-12).
 set -u
 R=$(cd "$(dirname "$0")/.." && pwd)
 CACHE=${REALPROG_CACHE:-$R/corpus}

@@ -29,9 +29,9 @@
 | v0.0.13 | [archive/plans/v0.0.13.md](archive/plans/v0.0.13.md) — 计划树 L0–L5/N0–N22 与逐项回执（R13-0 六例、R13-0b 25 条、N22 产物谱系、门禁队列方法）；状态叙事全文见 [archive/prd-history-20260930.md](archive/prd-history-20260930.md) | 已发布 2026-09-30（tag 3af8b36；公开 unisacc.com 75c698ec… 与 dmg；回执 archive/research/r13/r13-release-acceptance.json） |
 | v0.0.14 | [archive/plans/v0.0.14.md](archive/plans/v0.0.14.md) — #21 callm、8 个 L1 库体、#line、tapebin v1 端到端、C99 条款账本（语言 96%）、流水线方法债、R14-8 6/8 | 已发布 2026-09-30（tag 75ec4de；公开 unisacc.com c229cebf… 与 dmg；回执 research/r14-release-acceptance.json） |
 | v0.0.15 | [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) — 整理版（主人 2026-09-30）：prd 重写（≤500 行、只写当前与将来）、文件梳理与归档、封装/抽象/复用、论文 A 梳理、剩余问题总结进 0.0.16 | 完成，不发布（全量队列 370/370，产品字节同 0.0.14） |
-| v0.0.16 | [plans/v0.0.16.md](plans/v0.0.16.md) — P0 origin CI 转绿 + 减法安全门禁；正确性与诊断余项；-M/-MD；ELF -c 设计 + 系统 ld 互链；语料门禁起步；工具链盘点表 | 草案（2026-10-01 重排） |
-| v0.0.17 | [plans/v0.0.17.md](plans/v0.0.17.md) — 主线自带静态链接器；Mach-O/COFF -c、ar/nm/objdump、-g 行号表、lua 语料与库面、队列清单合一、狗粮启动器 | 草案 |
-| v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；动态库、完整调试信息、sqlite 与 GNU 扩展子集、Csmith、论文 A 投稿条件 | 草案 |
+| v0.0.16 | [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) — origin CI 转绿、减法安全门禁、gcc 字节的 -M 族、参考侧 ELF `-c` 与系统 ld 互链（docs/toolchain.md）、realprog 语料门禁 2/6、全局结构体赋值修复；A1/A2/B1 顺延到 0.0.17 | 完成，不发布（主人 2026-10-01；本地 375/375 + origin 六 runner 绿；回执 research/r16-release-acceptance.json） |
+| v0.0.17 | [plans/v0.0.17.md](plans/v0.0.17.md) — **主线：三格式自家 `.o` → 自家 `.o` 静态链接器**；`ar` 只为 `.a` 输入；互操作 (a) 读 cc `.o` 数据符号；库面按语料顺序（setjmp/unistd/termios/pwd）；R17-8 债；E1/E2 流程；`-g` 行号、nm/objdump、POSIX L2/狗粮可后置 | 开工（2026-10-01） |
+| v0.0.18 | [plans/v0.0.18.md](plans/v0.0.18.md) — 主线汇编器子集 + -S 真汇编；动态库、完整调试信息、cc 函数互调各自独立项；sqlite/GNU 子集、Csmith、论文 A 不与工具链硬绑 | 草案 |
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
@@ -142,6 +142,8 @@ opcode、NUM、FP/存取/relocation 字段来自 catalog/emit 的声明；扫描
 
 ### 3.11 `-run`：一次绑定与宿主装载
 
+**驱动默认模式（主人裁定 2026-10-01）：不带 `-run` 也不带 `-o` 时，`unisacc FILE.c [args]` 就是运行模式**——与 cc 的“静默写 a.out”刻意不同，这是产品的特点，不是兼容缺口。`-o` 才写可执行文件，`-run` 保留为显式写法。0.0.16 及之前的产品仍按 cc 语义写 a.out（ccparity 套件曾把它当作对等项检查）；**0.0.17 R17-10（P0）两条路线一起改**，并同步 README 用法、`--help`、ccparity 与 cli 套件。
+
 源码先到 lower，再给 memory 入口传实际 OS 预留地址、容量、argc/argv 和适用的动态导入资源。模型据真实代码/导入长度计算对齐与数据位置，**只生成一次最终绑定的 UNIMEM1**（magic、text/extent/stored/entry 四个 u64 及代码/保存数据）。模型负责布局；宿主 reserve/commit、校验、复制、设置权限、清缓存、进入入口，不解释 C/tape/指令。
 
 预留约 2GB 虚拟区由 OS 选地址，不用 MAP_FIXED；Windows reserve 与原地址 commit 分开。失败和错误地址显式拒绝。`UNISA_MEMORY_TWOPASS=1` 只作同驱动比较基线，不能当默认路线。memorycheck 比同基址镜像、资源/范围失败、loader 边界和 Windows API mock；mock 不是客机实测。当前同身份 calc 五次暖中位为 P2/双遍 205.382ms、P3/双遍 207.770ms、P3/单遍 172.749ms；它是该输入的测量，不外推所有程序。证据见 [集成测量](archive/research/20260928/memory-once-integrated-bench-20260928.json)。
@@ -245,13 +247,13 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 | 版本 | 主线 |
 |---|---|
 | **v0.0.15**（完成，不发布） | 整理：prd 重写、文件清单与归档、封装/复用、论文 A、剩余问题总结 → [archive/plans/v0.0.15.md](archive/plans/v0.0.15.md) |
-| v0.0.16 | 功能承接与问题总表；**工具链起步（R16-7，主人严肃需求）：`-c` 目标文件 → 链接器 → 汇编器 → ar/nm**，与系统工具互操作 → [plans/v0.0.16.md](plans/v0.0.16.md) |
+| v0.0.16 | 功能承接与问题总表；**工具链起步（R16-7，主人严肃需求）：`-c` 目标文件 → 链接器 → 汇编器 → ar/nm**，与系统工具互操作 → [archive/plans/v0.0.16.md](archive/plans/v0.0.16.md) |
 | v0.1.x | 证明侧（T2、P-2、T3、.o、wasm）、tapebin 平台化、内存安全检查节点（论文 D）→ [plans/v0.1.x.md](plans/v0.1.x.md) |
 | v0.2.x | 包市场 + agent 友好（tapebin 包、发布即证明、权限沙箱、官方包）→ 同上 |
 
 ## 6. 未解决问题
 
-全表（正确性 / 诊断 / C99 覆盖 / 反复顺延的架构项 / 流程 / 论文，每条带来源与优先级）在 [plans/v0.0.16.md §剩余问题总表](plans/v0.0.16.md)。摘要：
+全表（正确性 / 诊断 / C99 覆盖 / 反复顺延的架构项 / 流程 / 论文，每条带来源与优先级）在 [archive/plans/v0.0.16.md §剩余问题总表](archive/plans/v0.0.16.md)。摘要：
 - 正确性：全局初始化器里的复合字面量镜像不同（A1）、续行前 token 的 `__LINE__` 多 1（A2）。
 - 诊断：产品 9 类、参考 3 类拒绝仍无位置（B1/B2）。
 - C99：复数、三字符组未定；库条款 191 条 unsupported；POSIX 最小面缺（狗粮启动器前提）。

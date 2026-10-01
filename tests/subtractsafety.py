@@ -17,7 +17,7 @@ Checks, all over the tracked tree (git ls-files; ujs/ is another project and ski
   3. AGENTS.md and CLAUDE.md each resolve (at most 8 symlink hops, no cycle) to
      a non-empty regular file with a heading.
 `--selftest` builds one counterexample per incident in a temp tree and requires
-the gate to catch both (the acceptance in plans/v0.0.16.md).
+the gate to catch both (the acceptance in archive/plans/v0.0.16.md).
 """
 import os
 import pathlib
