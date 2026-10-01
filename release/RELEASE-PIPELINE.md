@@ -108,3 +108,9 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - **Windows 就绪看 IP**：`utmctl exec`（含 `--hide`）在来宾代理未起时也返回 0；就绪判据用 `utmctl ip-address` 非空，再等十几秒。
 - **签名前冻结在最终提交**：签名回执绑定源提交与上游 run；签名后再修就整套重做（0.0.16 发生过一次）。
 - **公开后下载核对**：`gh release edit --draft=false` 之后下载公开的 `unisacc.com`，与签名回执的签后哈希比对，结果写进回执。
+
+## 12. 不被打断的发布（0.0.19 R19-0，2026-10-01）
+- 冻结前先跑 `release/tools/precheck.sh UA`：build-weights 本地 ≤19 s、队列预热三步都过，才建候选（0.0.18 三次重建都是这类问题建候选后才暴露）。
+- `release/tools/queue.sh` 在 `/tmp/unisacc-queue-<sha>` 独立工作树里跑；main 上的提交不影响队列。realprog 语料经 `REALPROG_CACHE` 指回主检出。用完 `git worktree remove`。
+- `tests/release.sh` 以被声明输入的 `git ls-tree` 哈希判作废，不再看 HEAD：提交 plans/prd 不作废队列。
+

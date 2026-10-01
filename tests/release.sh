@@ -54,17 +54,20 @@ if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-
 mkdir -p "$GATE_STATE"
 # R18-11 ②: the queue's results are only valid for the tree it started on.
 # 0.0.17 lost 93/401 to a prd.md commit made mid-queue; say so at once.
-head_now=$(git -C "$R" rev-parse HEAD 2>/dev/null || echo none)
+# R19-0: what invalidates the queue is a change to the declared inputs, not
+# any commit (0.0.18 lost a queue to a plans/ commit).  Compare their trees.
+DECLARED="src exec tests include kernel weights unisa examples unisacc.c README.md ARCHITECTURE.md AGENTS.md prd.md release scripts Makefile"
+head_now=$(cd "$R" && git ls-tree HEAD -- $DECLARED 2>/dev/null | shasum -a 256 | cut -c1-64)
 if [ -s "$GATE_STATE/head" ]; then
     head_was=$(cat "$GATE_STATE/head")
     if [ "$head_was" != "$head_now" ]; then
-        echo "release: HEAD moved during the queue ($head_was -> $head_now): results are invalid; start a new GATE_STATE" >&2
+        echo "release: declared inputs changed during the queue ($head_was -> $head_now): results are invalid; start a new GATE_STATE" >&2
         exit 1
     fi
 else
     echo "$head_now" > "$GATE_STATE/head"
 fi
-dirty=$(git -C "$R" status --porcelain -- src exec tests include kernel weights unisa examples unisacc.c README.md ARCHITECTURE.md AGENTS.md prd.md release scripts Makefile 2>/dev/null | head -3)
+dirty=$(cd "$R" && git status --porcelain -- $DECLARED 2>/dev/null | head -3)
 [ -z "$dirty" ] || { printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty" >&2; exit 1; }
 warm_done=0
 for w in 1 2 3; do
