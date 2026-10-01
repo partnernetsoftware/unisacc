@@ -11,7 +11,7 @@ separate compilation, and `unisacc a.o b.o lib.a [-o prog]` links unit objects
 and archives (`unisacc ar rcs|t|x`) for any of the six targets. Object writing
 is on the reference compiler; the shipped `unisacc.com` links unit objects and
 writes archives, and refuses `-c -b` by name until its own object route is done.
-Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64` writes that object as GNU assembly
+Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64 -o FILE.s` writes that object as GNU assembly
 (AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
 assembles it -- or hand-written code in the same subset -- back into the
 identical object; assembly text for Mach-O and COFF is 0.0.19. The design and the back-end facts behind it are in
@@ -101,7 +101,7 @@ machine). The C headers it needs travel inside it.
   later unit's file-scope `static` names are renamed, so two units may each
   keep their own `helper`.
 - **Not a `cc` drop-in yet:** bare `-c` and bare `-S` (no `-b`) write the compiler's
-  intermediate *tape*; with `-b lnx/ARCH`, `-S` writes GNU assembly. `unisacc as`
+  intermediate *tape* (so does `-S -b T` without a `.s` output); `-S -b lnx/ARCH -o FILE.s` writes GNU assembly. `unisacc as`
   takes the subset the back end emits (plus `.text/.data/.bss`, `.globl`,
   `.byte/.ascii/.zero`); other instructions, Intel syntax and inline `asm` are
   refused by name (0.0.19). `-c -b os/arch` writes an object (reference compiler):

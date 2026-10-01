@@ -89,7 +89,7 @@ for a in x86_64 arm64; do
         if nm "$T/n.o" >/dev/null 2>&1; then
             say "nm $a $b = system nm" same "$(cmp -s <("$_BOUND" 20 "$UA" nm "$T/n.o") <(nm "$T/n.o") && echo same || echo differ)"
         else skip=$((skip+1)); echo "  skip nm $a (the system nm does not read ELF)"; fi
-        say "objdump -d $a $b = -S" same "$(cmp -s <("$_BOUND" 20 "$UA" objdump -d "$T/n.o") <("$_BOUND" 20 "$UA" tests/c/$b.c -S -b lnx/$a -o -) && echo same || echo differ)"
+        say "objdump -d $a $b = -S" same "$(cmp -s <("$_BOUND" 20 "$UA" objdump -d "$T/n.o") <("$_BOUND" 20 "$UA" tests/c/$b.c -S -b lnx/$a -o "$T/v.s" && cat "$T/v.s") && echo same || echo differ)"
     done
 done
 
@@ -98,6 +98,8 @@ printf '\t.text\n\tvfmadd231pd\t%%ymm1, %%ymm2, %%ymm3\n' > "$T/bad.s"
 say "unknown instruction refused" "not in the subset" "$("$_BOUND" 20 "$UA" as -b lnx/x86_64 "$T/bad.s" -o "$T/bad.o" 2>&1 | grep -o 'not in the subset')"
 say "refused input leaves no file" "absent" "$([ -e "$T/bad.o" ] && echo present || echo absent)"
 say "-S for Mach-O refused" "Linux targets" "$("$_BOUND" 20 "$UA" tests/c/a_arith.c -S -b osx/arm64 -o "$T/x.s" 2>&1 | grep -o 'Linux targets')"
+"$_BOUND" 20 "$UA" tests/c/a_arith.c -S -b lnx/x86_64 -o "$T/tape.t" 2>/dev/null
+say "-S -b without .s is the tape" "tape" "$(head -c 200 "$T/tape.t" | grep -q 'unisacc -S' && echo text || echo tape)"
 say "as for Mach-O refused" "lnx/x86_64 and lnx/arm64" "$("$_BOUND" 20 "$UA" as -b osx/arm64 tests/asm/hand-arm64.s -o "$T/x.o" 2>&1 | grep -o 'lnx/x86_64 and lnx/arm64')"
 "$_BOUND" 20 "$UA" tests/c/a_arith.c -S -o "$T/tape.s" 2>/dev/null
 say "bare -S is still the tape" "tape" "$(head -c 200 "$T/tape.s" | grep -q 'unisacc -S' && echo text || echo tape)"

@@ -363,11 +363,11 @@ int main(int argc, char **argv) {
        still the reference compiler's, and the driver says so by name. */
     int objwant = sawc && target && !object_path(src);
     /* -S -b lnx/ARCH: the object -c -b writes, as GNU assembly; bare -S stays the tape */
-    int asmwant = sawS && target && !object_path(src);
+    /* ...and only when -o names a .s file; `-S -b T` alone stays the target's tape */
+    int asmwant = sawS && target && !object_path(src) && out && strlen(out)>2 && !strcmp(out+strlen(out)-2,".s");
     if (asmwant) {
-        if (strncmp(target,"lnx/",4)) { fprintf(stderr,"unisacc: error: assembly text (-S -b) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was %s\n",target); return 1; }
+        if (strncmp(target,"lnx/",4)) { fprintf(stderr,"unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was %s\n",target); return 1; }
         objwant=1;
-        if (!out) { const char *o=deps_target(0,src,1); char *s2=xrealloc(0,strlen(o)+1); strcpy(s2,o); s2[strlen(s2)-1]='s'; out=s2; }
     }
     if (objwant && strncmp(target,"lnx/",4)) return clierror("object output (-c -b) for this target is not on the product route yet (Linux targets are); the reference compiler writes Mach-O and COFF objects");
     if (funit && !objwant) return clierror("-funit needs -c -b os/arch (a unit object)");

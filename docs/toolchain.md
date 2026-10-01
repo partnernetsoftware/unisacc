@@ -103,7 +103,7 @@ ELF 头 (64)
 
 ## 8. 汇编文本与 `unisacc as`（0.0.18 R18-1/R18-2，实际跑过）
 
-- **形态**：`-S -b lnx/x86_64|lnx/arm64` 把 `-c -b` 会写的那个 ELF 目标文件打印成 GNU 汇编（x86-64 用 AT&T 语法）；`unisacc as [-b lnx/ARCH] FILE.s [-o FILE.o]` 把它读回来。代码在 `src/asmtext.c`，只依赖 ELF 字节：先由后端写出目标文件，再反汇编，所以 `-S` 与 `-c` 不可能分叉。不带 `-b` 的 `-S` 仍写 tape。
+- **形态**：`-S -b lnx/x86_64|lnx/arm64 -o FILE.s` 把 `-c -b` 会写的那个 ELF 目标文件打印成 GNU 汇编（x86-64 用 AT&T 语法）；`unisacc as [-b lnx/ARCH] FILE.s [-o FILE.o]` 把它读回来。代码在 `src/asmtext.c`，只依赖 ELF 字节：先由后端写出目标文件，再反汇编，所以 `-S` 与 `-c` 不可能分叉。不带 `-b`、或输出不是 `.s` 文件的 `-S` 仍写 tape（内部套件大量用 `-b T -S` 取目标 tape，2026-10-01 队列预热时发现，故以 `.s` 输出为准）。
 - **一个编码器两用**：反汇编出的每条指令都再交给同一个编码器汇编一遍，字节和重定位都相同才打印助记符，否则打印 `.byte`/`.inst`。所以 `-S | as == -c` 由构造保证，门禁再数回退条数（语料里是 0）。
 - **子集**：后端实际发出的指令。实测 186 个 tests/c 程序：x86-64 用到 59 个助记符，arm64 用到 48 个；表里另收了几种同族形式（setcc/jcc 全集、cmpXXsd 全集、ldur/stur 各宽度、逻辑立即数）。指令之外只收 `.text/.data/.bss/.section .unisa.tape`、`.globl/.global/.local`（`.type/.size` 接受但不用）、`.byte/.ascii/.asciz/.zero/.p2align`，`.text` 里的对齐只能放在开头。
 - **两处编码要写明**：x86-64 后端在 32/16/8 位存储上总带一个多余的 REX 0x40，写作 `{rex}`；有些长跳转其实短跳转也够得着（后端的松弛轮次与汇编器的最小不动点不同），写作 `{disp32}`。GNU as 与 LLVM 都接受这两个伪前缀。其余编码都与系统汇编器的默认选择一致（arm64 143 万条、x86-64 145 万条逐条对过）。

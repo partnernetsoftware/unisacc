@@ -166,11 +166,13 @@ int main(void) {
     objwant = objwant && bgiven && dump == 2;
     /* `-S -b lnx/ARCH`: the object -c -b would write, as GNU assembly
        (src/asmtext.c).  Bare -S stays the tape. */
-    asmwant = asmwant && bgiven && pponly == 0;
+    /* ...and only when -o names a .s file: `-S -b T` without one is still the
+       target's tape, which the suites have always spelled that way */
+    asmwant = asmwant && bgiven && pponly == 0 && outpath != 0;
+    if (asmwant) { k = blen(outpath); asmwant = k > 2 && outpath[k - 2] == 46 && outpath[k - 1] == 115; }
     if (asmwant) {
-        if (!(t[0] == 108 && t[1] == 110 && t[2] == 120 && t[3] == 47)) return emsg("unisacc: error: assembly text (-S -b) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was ", t);
+        if (!(t[0] == 108 && t[1] == 110 && t[2] == 120 && t[3] == 47)) return emsg("unisacc: error: assembly text (-S -b ... -o FILE.s) is written for Linux targets in this version (Mach-O and COFF text: 0.0.19); the target was ", t);
         dump = 2; objwant = 1;
-        if (outpath == 0) { outpath = deptarget(0, inputs[0]); outpath[blen(outpath) - 1] = 115; }
     }
     if (funit && objwant == 0 && (dump != 1 || pponly)) return emsg("unisacc: error: -funit needs -c -b os/arch (a unit object) or -S (its tape)", 0);
     unitmode = funit;
