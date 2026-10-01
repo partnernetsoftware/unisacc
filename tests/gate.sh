@@ -411,6 +411,7 @@ job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sec
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table
 job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
 job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
+job seed-construct python3 ./tests/seedconstructcheck.py   # C99 flat-table network construction equals Python bytes
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that

@@ -248,6 +248,10 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 R20-1 A 首轮复测：旧 C 构造器的 `prec` 单表与 Python/出货 UNS2 字节相同；完整旧检查在当前表上碰到 `abi` 规则容量、`isel` 类别容量与 `combo` 差异，58 秒整轮亦超时。旧 `genmodel.c` 在当前 `lexcls` 的 257 个字段值上超出 256 上限。它们是可复用算法的证据，尚不构成现行 P3/seed 的 C99 构造路径；逐项回执与边界见 [R20-1 A 复测](research/r20-c99-seed-a-audit.md)。
 
+R20-1 B 的首个可独立对拍切片定为现行 `.tbl → .net`：C99 构造器读取与 Python `exec/c/net.py` 相同的整数表，产出逐字节相同的阈值网络，并以 `exec/c/core.h` 的动作元数核验 Q 记录。它是通用网络构造的一步；各阶段的规则装配、P3 打包与 seed 仍需分别实现，不能凭本切片称 B 完成。
+
+该首切片已在 `seed/net.c` 落地：`prune`（48,824 B）与 E3（891,284 B）的 `.net` 均与 Python 字节相同；`seed-construct` 固定检查 `prune` 和声明返回小表。完整输入闭包、命令及剩余 Python 边界记在 [R20-1 A/B 回执](research/r20-c99-seed-a-audit.md)。
+
 ## 6. 未解决问题
 
 - **匿名结构体的名字边界（2026-10-02 审查）**：`stnew(-1, ...)` 表示匿名 tag，原先在检查 `t >= 0` 前调用 `name_toolong(t)`；私有 `-fsanitize=bounds` 构建抓到 `tlen[-1]` 越界。现只对有名 tag 检查长度，并以 `front-bounds` 独立 UBSan 门禁持续检查。
