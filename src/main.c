@@ -23,7 +23,23 @@ int main(void) {
     int objwant; int bgiven;
     t = "lnx/x86_64"; fi = 0; runit = 0; dump = 0; verb = 0; outpath = 0; dumptok = 0; werror = 0; force_origin = 0; emitbin = 0;
     ninput = 0; objwant = 0; bgiven = 0;
-    ftrim_libc = 1;                 /* R11-3: library bodies on demand by default; -fno-trim-libc restores the full set */
+    ftrim_libc = 1;
+    /* Default mode is RUN (owner, 2026-10-01; 0.0.17 R17-10): with no mode or
+       output flag at all, `unisacc FILE.c [args]` compiles and runs in memory,
+       exactly as `-run` does -- deliberately unlike cc's silent a.out.  A file
+       is written only on request: -o, -b/-t, -S/-c, -E, -M*, -dump-tokens. */
+    i = 1; j = 0;
+    while (i < __argc()) {
+        a = __argv(i);
+        if (a[0] == 45 && a[1] == 45 && a[2] == 0) break;          /* `--` */
+        if (a[0] == 45) {
+            if (a[1] == 111 || a[1] == 98 || a[1] == 116 || a[1] == 83 || a[1] == 99 || a[1] == 69 || a[1] == 77) j = 1;
+            if (strsame(a, "-run") || strsame(a, "-dump-tokens") || strsame(a, "--tapebin")
+                || strsame(a, "--version") || strsame(a, "-version") || strsame(a, "--check-oracle")) j = 1;
+        }
+        i = i + 1;
+    }
+    if (j == 0) runit = 1;                 /* R11-3: library bodies on demand by default; -fno-trim-libc restores the full set */
     i = 1;
     while (i < __argc()) {
         a = __argv(i);
@@ -131,9 +147,8 @@ int main(void) {
     }
     if (fi == 0) {
         model_dims(); setup();
-        return emsg("usage: unisacc [-run] [-E] [-I dir] [-D name[=n]]"
-               " FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens | -M | -MM] [-o out]"
-               " [-- args...]\n"
+        return emsg("usage: unisacc FILE.c [FILE.c...] [-- args...]      compile and RUN (the default)\n"
+               "       unisacc [-E] [-I dir] [-D name[=n]] FILE.c [FILE.c...] [-S | -b os/arch | -dump-tokens | -M | -MM] -o out\n"
                "  -fno-trim-libc  keep every library body (default: bodies on demand, -ftrim-libc)\n"
                "  -S  write the tape, this compiler's assembly-level IR"
                " (-c is a synonym: there are no object files)", 0);

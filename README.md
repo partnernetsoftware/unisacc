@@ -63,8 +63,7 @@ as a PE; a Unix shell runs it as a script that picks the slice for the
 machine). The C headers it needs travel inside it.
 
 ```bash
-./unisacc.com hello.c [args]                # 0.0.16: like cc, writes a.out.  From 0.0.17 the bare form
-                                            # RUNS the program (owner decision 2026-10-01, see below)
+./unisacc.com hello.c [args]                # compile and RUN in memory (the default; not cc's a.out)
 ./unisacc.com -run hello.c [args]          # compile and run in memory, nothing on disk
 ./unisacc.com hello.c -o hello              # write an executable for this machine
 ./unisacc.com hello.c -b osx/arm64 -o hello # write an executable for a target
@@ -75,7 +74,7 @@ machine). The C headers it needs travel inside it.
 ./unisacc.com hello.tapebin -b osx/arm64 -o hello
 ```
 
-- **Default mode is run (from 0.0.17):** `unisacc file.c [args]` with neither `-run` nor `-o` compiles and runs the program in memory; this is deliberately unlike cc's silent `a.out`. Writing a file always takes `-o` (or `-b target`). 0.0.16 still writes `a.out` like cc.
+- **Default mode is run:** `unisacc file.c [args]` with neither `-run` nor an output flag compiles and runs the program in memory (owner decision 2026-10-01; 0.0.17); this is deliberately unlike cc's silent `a.out`. Writing a file always takes `-o` (or `-b target`, `-S`, `-c`, `-E`). Releases up to 0.0.16 wrote `a.out` like cc.
 - **Flags:** `-O0`/`-O1`/`-O2`, `-o`, `-b os/arch`, `-run`, `-I`, `-D`,
   `-include`, `-E`, `-M`/`-MM`/`-MD`/`-MMD`/`-MF`/`-MT`/`-MQ`/`-MP` (gcc's `.d` bytes; `-M` lists what `-MM` lists, the bundled headers are not files), `-nostdinc`, `-ftrim-libc`/`-fno-trim-libc`, `--version`; `-Wall`,
   `-Wextra`, `-g`, `-std=c99` are accepted. A `#!` first line is skipped.

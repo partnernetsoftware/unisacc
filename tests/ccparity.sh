@@ -84,9 +84,10 @@ mkdir inc; printf '#define HV 77\n' > inc/hdr.h
 printf 'int main(void) { int unused; return 0; }\n' > warn.c
 
 # --- the default output --------------------------------------------------
-both "no flag -> a.out"         hello.c
-rm -f a.out; ua hello.c; say "a.out runs" "hello" "$(rb ./a.out)"
-say "no flag: silent stdout"    "empty" "$(has o.ua)"
+# The one DOCUMENTED difference from cc: with no flag unisacc RUNS the program
+# (owner decision 2026-10-01, R17-10) and writes nothing; cc writes a.out.
+rm -f a.out; ua hello.c; say "no flag: runs, prints" "hello" "$(cat o.ua 2>/dev/null | tr -d '\n')"
+say "no flag: no a.out"         "no" "$(ex a.out)"
 rm -f prog a.out; ua -o prog hello.c; say "-o NAME" "yes hello" "$(ex prog) $(rb ./prog)"
 say "-o NAME: no a.out"         "no" "$(ex a.out)"
 rm -f p1 p2; cc_ -o p1 -o p2 hello.c; w="$(ex p1) $(ex p2)"
@@ -110,7 +111,7 @@ echo keep > a.out; cc_ bad.c; w=$(cat a.out)
 echo keep > a.out; ua bad.c;  say "syntax: old a.out kept" "$w" "$(cat a.out)"
 
 # --- the built program ----------------------------------------------------
-rm -f a.out; ua st.c
+rm -f a.out; ua -o a.out st.c          # R17-10: a file only on request
 for s in 0 3 255; do rb ./a.out $s; say "binary exit $s" "$s" "$?"; done
 for s in 0 3 255; do bound 20 "$UA_RUN" -run st.c $s >/dev/null 2>&1; say "-run exit $s" "$s" "$?"; done
 cc_ -o io.cc io.c; ua -o io.ua io.c
@@ -211,11 +212,11 @@ report(x>y, "x is %d but y is %d", x, y);'
 printf '#if 1 / 0\n#endif\nint main(void) { return 0; }\n' > ppdiv.c
 printf '#if 0 && 1 / 0\n#endif\n#if 0\n#if 1 %% 0\n#endif\n#endif\nint main(void) { return 0; }\n' > ppdivok.c
 both "#if division by zero" ppdiv.c
-both "#if unevaluated 1/0"  ppdivok.c
+both "#if unevaluated 1/0"  ppdivok.c -o a.out
 
 # --- warnings --------------------------------------------------------------
 cc_ -Wall warn.c; w=$(nz $?); rm -f a.out
-ua -Wall warn.c; say "warning keeps exit 0" "$w a.out=yes" "$(nz $?) a.out=$(ex a.out)"
+ua -Wall warn.c -o a.out; say "warning keeps exit 0" "$w a.out=yes" "$(nz $?) a.out=$(ex a.out)"
 say "warning on stderr"         "text" "$(has e.ua)"
 rm -f a.out; cc_ -Wall -Werror warn.c; w="$(nz $?) a.out=$(ex a.out)"
 rm -f a.out; ua  -Wall -Werror warn.c

@@ -4434,6 +4434,22 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
             i = cxbase[depth] + membstart(cxst[depth], mi);
             continue;
         } }
+        /* C99 6.7.8p14: a character-array MEMBER may be initialised by a
+           string literal without its own braces (`struct p { char x[2]; } g
+           = { "12" };`).  This used to fall through to the scalar path, which
+           stored the literal's ADDRESS into x[0] (R17-8: cdx probes
+           tests/r17probes/structarg_*.c printed 57 0 / 63 0 instead of 49 50). */
+        if (cur() == T_STR && iswide(tp) == 0 && cxst[depth] >= 0) {
+            int ms; int mi;
+            mi = memberat(cxst[depth], i - cxbase[depth], &ms);
+            if (mi >= 0 && ms == i - cxbase[depth] && mbstruct[mi] < 0 && mbptr[mi] == 0
+                && mbslots(mi) > 1 && mbelem[mi] == 1) {
+                slotat(i, w, sst);
+                initstr(isglobal, gt, off, mbbytes[mi], slotoff);
+                i = i + mbslots(mi);
+                continue;
+            }
+        }
         initflt = myflt;
         slotat(i, w, sst);
         delta = slotoff; ew = slotw; sk = slotflt;

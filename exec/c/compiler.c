@@ -154,6 +154,18 @@ int main(int argc, char **argv) {
     const char **sources=xrealloc(0,argc*sizeof(char *)); int nsources=0;
     Buf defs={0}, undefs={0}, forced={0}, incdir={0}, nostd={0}, libneed={0}, notrim={0};
     Buf srcres={0};                   /* \0cli/source: the main source path */
+    /* Default mode is RUN (owner 2026-10-01, 0.0.17 R17-10): no mode or output
+       flag at all means `-run`; a file is written only on request. */
+    { int modeflag=0;
+      for (int i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (!strcmp(a,"--")) break;
+        if (a[0]!='-') continue;
+        if (a[1]=='o'||a[1]=='b'||a[1]=='t'||a[1]=='S'||a[1]=='c'||a[1]=='E'||a[1]=='M') modeflag=1;
+        if (!strcmp(a,"-run")||!strcmp(a,"-dump-tokens")||!strcmp(a,"--tapebin")||!strcmp(a,"--version")||!strcmp(a,"-version")) modeflag=1;
+        if (!strcmp(a,"--models")||!strcmp(a,"-I")||!strcmp(a,"-D")||!strcmp(a,"-U")||!strcmp(a,"-include")||!strcmp(a,"-MF")||!strcmp(a,"-MT")||!strcmp(a,"-MQ")) i++;   /* skip the option's argument */
+      }
+      if (!modeflag) runit=1; }
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (!strcmp(a,"--version") || !strcmp(a,"-version")) {

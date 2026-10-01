@@ -269,11 +269,12 @@ if part in ('all','resources'):
     for mode in ['-E','-S']:
         flags=['-b',target,mode,'-O2']
         assert ok([*base,'hello.c',*flags],cwd=asmdir)==ok([ua,src,*flags])
-    ok([*base,'hello.c','-O2'],cwd=asmdir)
+    ok([*base,'hello.c','-O2','-o','a.out'],cwd=asmdir)
     assert (asmdir/'a.out').read_bytes()==ok([ua,src,'-b',target,'-O2'])
     assert ok([asmdir/'a.out'])==b'hello from C99\n'
     before=set(asmdir.iterdir())
     assert ok([*base,'-run','hello.c'],cwd=asmdir)==b'hello from C99\n'
+    assert ok([*base,'hello.c'],cwd=asmdir)==b'hello from C99\n'   # R17-10: bare = run
     assert set(asmdir.iterdir())==before
     print('assembly compiler driver: isolated package, native output and memory run pass')
     # Public-shaped commands operate with only the container and source in cwd.
@@ -284,11 +285,12 @@ if part in ('all','resources'):
     for mode in ['-E','-S']:
         flags=['-b',target,mode,'-O2']
         assert ok([*base,'hello.c',*flags],cwd=isolated)==ok([ua,src,*flags])
-    ok([*base,'hello.c','-O2'],cwd=isolated)
+    ok([*base,'hello.c','-O2','-o','a.out'],cwd=isolated)
     assert (isolated/'a.out').read_bytes()==ok([ua,src,'-b',target,'-O2'])
     assert ok([isolated/'a.out'])==b'hello from C99\n'
     before=set(isolated.iterdir())
     assert ok([*base,'-run','hello.c'],cwd=isolated)==b'hello from C99\n'
+    assert ok([*base,'hello.c'],cwd=isolated)==b'hello from C99\n'   # R17-10: bare = run
     assert set(isolated.iterdir())==before, 'memory run created a file'
     print('compiler driver resources: macros, headers, printf and isolated containers pass',flush=True)
 

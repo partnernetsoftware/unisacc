@@ -15,6 +15,11 @@ long bkro_off[BK_MAXRELO]; int bkro_type[BK_MAXRELO]; int bkro_sect[BK_MAXRELO];
 long bk_objnz;                       /* the .data length: offsets at or past it are .bss */
 int bk_relo(long off, int type, long target) {
     if (bk_sizing || bk_objmode == 0) return 0;
+    /* the four host-FFI slots sit 32 bytes BELOW the data base (TO_HOSTADDR);
+       an object has no such cells -- refuse rather than mislink */
+    if (target >= BK_OBJDATA - 32 && target < BK_OBJDATA) {
+        __write(2, "object: host FFI slots have no object-file form yet (docs/toolchain.md)\n", 72); __exit(1);
+    }
     if (bknro >= BK_MAXRELO) { __write(2, "object: too many relocations\n", 29); __exit(1); }
     bkro_off[bknro] = off; bkro_type[bknro] = type;
     if (target >= BK_OBJDATA) {
