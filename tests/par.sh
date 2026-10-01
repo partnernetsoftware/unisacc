@@ -11,4 +11,12 @@
 # beyond the core budget.  (Adding the terminal to System Settings > Privacy &
 # Security > Developer Tools removes that scan altogether.)
 PAR=${PAR:-${PAR_WAIT:-3}}
-throttle() { while [ "$(jobs -rp | wc -l)" -ge "$PAR" ]; do sleep 0.1; done; }
+# bash sees its jobs inside $(...); dash (a Linux guest's sh) does not, and has
+# no `jobs -r`, so there the throttle counts launches and waits for the batch
+# (0.0.19: unthrottled compiles were OOM-killed on the 4 GiB guest).
+_par_n=0
+if [ -n "${BASH_VERSION:-}" ]; then
+    throttle() { while [ "$(jobs -rp | wc -l)" -ge "$PAR" ]; do sleep 0.1; done; }
+else
+    throttle() { _par_n=$((_par_n + 1)); if [ "$_par_n" -gt "$PAR" ]; then wait; _par_n=1; fi; }
+fi

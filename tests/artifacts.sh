@@ -61,7 +61,9 @@ w=$(python3 -c "
 import zipfile; print(len(zipfile.ZipFile('/tmp/art_k1.zip').read('weights/built.uns2')))")
 k=$(wc -c < /tmp/art_k1.zip | tr -d ' ')
 chk "weights <= 32768 B" "yes" "$([ "$w" -le 32768 ] && echo yes || echo "no ($w)")"
-chk "kit <= 65536 B" "yes" "$([ "$k" -le 65536 ] && echo yes || echo "no ($k)")"
+# 0.0.19 raised from 65536: the bundled C library (kernel/unisa_headers.inc)
+# grew by the Linux-interface layer (processes, sockets, time, errno)
+chk "kit <= 98304 B" "yes" "$([ "$k" -le 98304 ] && echo yes || echo "no ($k)")"
 
 echo; echo "artifacts $pass   failed $fail"
 # A suite that checked nothing is not green: `closure.sh` with no

@@ -237,7 +237,7 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
         if win:
             tp.emit("winsave", SAVE)
         for i, src in enumerate(arg_srcs):
-            if args[i] == "none":
+            if i >= len(args) or args[i] == "none":
                 # Win64 passes the fifth argument and beyond on the stack,
                 # which this gate does not do.  The WinAPI shapes it calls
                 # take four or fewer, so the rest are simply not passed --

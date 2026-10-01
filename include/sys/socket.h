@@ -82,21 +82,24 @@ struct sockaddr_storage { sa_family_t ss_family; char __ss_pad[126]; };
 #define _UNISA_NR_getpeername 205
 #define _UNISA_NR_shutdown 210
 #endif
-#define _UNISA_SOCK(nr, a, b, c, d, e) _unisa_ret(__syscall6(_UNISA_SC(nr), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e)))
+/* the raw call; each body names _unisa_ret itself, so the on-demand library
+   sees the dependency (a macro hiding it left socket() unlinkable unless
+   another header had pulled _unisa_ret in -- dsh, 0.0.19) */
+#define _UNISA_SYSC(nr, a, b, c, d, e) __syscall6(_UNISA_SC(nr), (long)(a), (long)(b), (long)(c), (long)(d), (long)(e))
 #if !__UNISA_FTRIM_LIBC || __UN_socket
-static int socket(int __u_d, int __u_t, int __u_p) { return (int)_UNISA_SOCK(_UNISA_NR_socket, __u_d, __u_t, __u_p, 0, 0); }
+static int socket(int __u_d, int __u_t, int __u_p) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_socket, __u_d, __u_t, __u_p, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_connect
-static int connect(int __u_s, const struct sockaddr *__u_a, socklen_t __u_l) { return (int)_UNISA_SOCK(_UNISA_NR_connect, __u_s, __u_a, __u_l, 0, 0); }
+static int connect(int __u_s, const struct sockaddr *__u_a, socklen_t __u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_connect, __u_s, __u_a, __u_l, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_bind
-static int bind(int __u_s, const struct sockaddr *__u_a, socklen_t __u_l) { return (int)_UNISA_SOCK(_UNISA_NR_bind, __u_s, __u_a, __u_l, 0, 0); }
+static int bind(int __u_s, const struct sockaddr *__u_a, socklen_t __u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_bind, __u_s, __u_a, __u_l, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_listen
-static int listen(int __u_s, int __u_n) { return (int)_UNISA_SOCK(_UNISA_NR_listen, __u_s, __u_n, 0, 0, 0); }
+static int listen(int __u_s, int __u_n) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_listen, __u_s, __u_n, 0, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_accept
-static int accept(int __u_s, struct sockaddr *__u_a, socklen_t *__u_l) { return (int)_UNISA_SOCK(_UNISA_NR_accept, __u_s, __u_a, __u_l, 0, 0); }
+static int accept(int __u_s, struct sockaddr *__u_a, socklen_t *__u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_accept, __u_s, __u_a, __u_l, 0, 0)); }
 #endif
 /* sendto/recvfrom take six arguments; the gate carries five, so they go
    through sendmsg/recvmsg (three), with the per-OS struct msghdr below */
@@ -115,7 +118,7 @@ struct msghdr { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov; si
 #define _UNISA_NR_recvmsg 212
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_sendmsg
-static long sendmsg(int __u_s, const struct msghdr *__u_m, int __u_f) { return _UNISA_SOCK(_UNISA_NR_sendmsg, __u_s, __u_m, __u_f, 0, 0); }
+static long sendmsg(int __u_s, const struct msghdr *__u_m, int __u_f) { return _unisa_ret(_UNISA_SYSC(_UNISA_NR_sendmsg, __u_s, __u_m, __u_f, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_sendto
 static long sendto(int __u_s, const void *__u_b, size_t __u_n, int __u_f, const struct sockaddr *__u_a, socklen_t __u_l) {
@@ -130,7 +133,7 @@ static long sendto(int __u_s, const void *__u_b, size_t __u_n, int __u_f, const 
 static long send(int __u_s, const void *__u_b, size_t __u_n, int __u_f) { return sendto(__u_s, __u_b, __u_n, __u_f, 0, 0); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_recvmsg
-static long recvmsg(int __u_s, struct msghdr *__u_m, int __u_f) { return _UNISA_SOCK(_UNISA_NR_recvmsg, __u_s, __u_m, __u_f, 0, 0); }
+static long recvmsg(int __u_s, struct msghdr *__u_m, int __u_f) { return _unisa_ret(_UNISA_SYSC(_UNISA_NR_recvmsg, __u_s, __u_m, __u_f, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_recvfrom
 static long recvfrom(int __u_s, void *__u_b, size_t __u_n, int __u_f, struct sockaddr *__u_a, socklen_t *__u_l) {
@@ -147,19 +150,19 @@ static long recvfrom(int __u_s, void *__u_b, size_t __u_n, int __u_f, struct soc
 static long recv(int __u_s, void *__u_b, size_t __u_n, int __u_f) { return recvfrom(__u_s, __u_b, __u_n, __u_f, 0, 0); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setsockopt
-static int setsockopt(int __u_s, int __u_lv, int __u_o, const void *__u_v, socklen_t __u_l) { return (int)_UNISA_SOCK(_UNISA_NR_setsockopt, __u_s, __u_lv, __u_o, __u_v, __u_l); }
+static int setsockopt(int __u_s, int __u_lv, int __u_o, const void *__u_v, socklen_t __u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_setsockopt, __u_s, __u_lv, __u_o, __u_v, __u_l)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_getsockopt
-static int getsockopt(int __u_s, int __u_lv, int __u_o, void *__u_v, socklen_t *__u_l) { return (int)_UNISA_SOCK(_UNISA_NR_getsockopt, __u_s, __u_lv, __u_o, __u_v, __u_l); }
+static int getsockopt(int __u_s, int __u_lv, int __u_o, void *__u_v, socklen_t *__u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_getsockopt, __u_s, __u_lv, __u_o, __u_v, __u_l)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_getsockname
-static int getsockname(int __u_s, struct sockaddr *__u_a, socklen_t *__u_l) { return (int)_UNISA_SOCK(_UNISA_NR_getsockname, __u_s, __u_a, __u_l, 0, 0); }
+static int getsockname(int __u_s, struct sockaddr *__u_a, socklen_t *__u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_getsockname, __u_s, __u_a, __u_l, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_getpeername
-static int getpeername(int __u_s, struct sockaddr *__u_a, socklen_t *__u_l) { return (int)_UNISA_SOCK(_UNISA_NR_getpeername, __u_s, __u_a, __u_l, 0, 0); }
+static int getpeername(int __u_s, struct sockaddr *__u_a, socklen_t *__u_l) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_getpeername, __u_s, __u_a, __u_l, 0, 0)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_shutdown
-static int shutdown(int __u_s, int __u_h) { return (int)_UNISA_SOCK(_UNISA_NR_shutdown, __u_s, __u_h, 0, 0, 0); }
+static int shutdown(int __u_s, int __u_h) { return (int)_unisa_ret(_UNISA_SYSC(_UNISA_NR_shutdown, __u_s, __u_h, 0, 0, 0)); }
 #endif
 #endif
 #endif

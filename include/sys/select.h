@@ -7,7 +7,7 @@
 #include <string.h>
 #define FD_SETSIZE 1024
 typedef struct { unsigned long fds_bits[FD_SETSIZE / 64]; } fd_set;
-#define FD_ZERO(s) memset((s), 0, sizeof(fd_set))
+#define FD_ZERO(s) do { int __u_z; for (__u_z = 0; __u_z < FD_SETSIZE / 64; __u_z++) (s)->fds_bits[__u_z] = 0; } while (0)   /* no memset: a macro must not hide a library call (the on-demand library cannot see it) */
 #define FD_SET(d, s) ((s)->fds_bits[(d) / 64] |= (1UL << ((d) % 64)))
 #define FD_CLR(d, s) ((s)->fds_bits[(d) / 64] &= ~(1UL << ((d) % 64)))
 #define FD_ISSET(d, s) (((s)->fds_bits[(d) / 64] >> ((d) % 64)) & 1UL)

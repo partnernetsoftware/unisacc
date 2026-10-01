@@ -88,6 +88,8 @@ def main():
 
     ok = bad = 0
     for op in ops:
+        if op == "syscall":
+            continue                                  # the generic gate (R19-9): its number comes at run time
         have = catalog.sysno(op, os_, arch)
         w = want.get(op)
         if w is None:
@@ -97,6 +99,9 @@ def main():
                 bad += 1
                 print("  FAIL %-14s the catalog says %s, but %s/%s has no such "
                       "syscall -- it must say none" % (op, have, os_, arch))
+            continue
+        if w < 0 and have == "none":
+            ok += 1                                   # absent here, and the catalog agrees
             continue
         if w < 0:
             bad += 1
