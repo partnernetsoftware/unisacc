@@ -32,7 +32,7 @@ NAME = {
             # R18-10: Linux/arm64 has only the *at forms and ppoll
             "stat": ["SYS_stat", "SYS_newfstatat"], "lstat": ["SYS_lstat", "SYS_newfstatat"],
             "mkdir": ["SYS_mkdir", "SYS_mkdirat"], "chmod": ["SYS_chmod", "SYS_fchmodat"],
-            "getdirentries64": None},
+            "getdirentries64": None, "syscall": None},
     "osx": {"clock_gettime": None, "nanosleep": None, "getdents64": None,
             "futex": ["SYS_ulock_wait"], "clone": ["SYS_bsdthread_create"],
             # R18-10: the 64-bit-inode forms; macOS has no ppoll

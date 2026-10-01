@@ -3,9 +3,9 @@
  * Constructed weight literal for stage pfconv
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
- *   unisa/catalog.py             6b876d045c17
+ *   unisa/catalog.py             b3ff45a5f1fd
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           574920f09a56
+ *   weights/built.json           5e45bf5e018c
  *   unisa/ckernel.py             db184ffec275 */
   "\x03\x00\x00\x00\x00\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x48\x00\x00\x00"
   "\x00\x00\x00\x00\x10\x00\x00\x00\x00\x00\x00\x00\x20\x00\x00\x00\x00\x00\x00\x00"

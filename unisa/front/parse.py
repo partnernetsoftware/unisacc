@@ -34,7 +34,7 @@ INTRINSIC = {"__read": "read", "__write": "write", "__open": "open",
              "__lseek": "lseek", "__unlink": "unlink", "__rename": "rename"}
 # six arguments, so the six-register gate: a compiler that runs what it
 # compiles maps memory, and mmap takes six
-INTRINSIC6 = {"__mmap": "mmap", "__getdirentries64": "getdirentries64"}
+INTRINSIC6 = {"__mmap": "mmap", "__getdirentries64": "getdirentries64", "__syscall6": "syscall"}
 # argc/argv are not syscalls -- the loader hands them over -- so they get their
 # own tape ops rather than going through `.sys`.
 ARGV_INTRINSIC = ("__argc", "__argv")

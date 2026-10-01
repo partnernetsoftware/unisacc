@@ -56,7 +56,11 @@ SYSCALLS = {
     "getdirentries64": (None, None, 344, None),   # osx directory records (readdir)
     # 0.0.18 R18-5: kilo (realprog) truncates the file it saves
     "ftruncate":     (77, 46, 201, None),
-    "gettimeofday":  (96, 169, 116, None),    # time(): macOS has no clock_gettime syscall; xnu fills tv, returns 0
+    "gettimeofday":  (96, 169, 116, None),
+    # 0.0.19 R19-9 (3): the generic gate.  The call number is the FIRST tape
+    # argument, chosen per OS/arch by the header that calls __syscall6; the
+    # numbers here are never used.  Adding a system call is header-only from now.
+    "syscall":       (0, 0, 0, None),    # time(): macOS has no clock_gettime syscall; xnu fills tv, returns 0
 }
 
 SYSOPS = tuple(SYSCALLS.keys())                                        # 22

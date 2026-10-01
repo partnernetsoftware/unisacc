@@ -7,9 +7,9 @@
  * tuples named at each string.  The kernel that reads this is unisa_core.c.
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
- *   unisa/catalog.py             6b876d045c17
+ *   unisa/catalog.py             b3ff45a5f1fd
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           574920f09a56
+ *   weights/built.json           5e45bf5e018c
  *   unisa/ckernel.py             db184ffec275 */
 
 #ifndef UNISA_MODEL_INC
@@ -92,7 +92,7 @@ char *DENSE =
 #include "dense.abi.inc"
 #include "dense.combo.inc"
 ;
-#define DENSE_LEN 22513
+#define DENSE_LEN 22691
 int STAGE_DOFF[18]; int STAGE_NH[18];
 
 int model_dims(void) {
@@ -103,17 +103,17 @@ int model_dims(void) {
   STAGE_DOFF[4] = 4777; STAGE_NH[4] = 1;
   STAGE_DOFF[5] = 4807; STAGE_NH[5] = 1;
   STAGE_DOFF[6] = 5227; STAGE_NH[6] = 1;
-  STAGE_DOFF[7] = 5743; STAGE_NH[7] = 1;
-  STAGE_DOFF[8] = 5749; STAGE_NH[8] = 1;
-  STAGE_DOFF[9] = 5765; STAGE_NH[9] = 3;
-  STAGE_DOFF[10] = 5813; STAGE_NH[10] = 1;
-  STAGE_DOFF[11] = 5822; STAGE_NH[11] = 1;
-  STAGE_DOFF[12] = 7454; STAGE_NH[12] = 3;
-  STAGE_DOFF[13] = 7670; STAGE_NH[13] = 1;
-  STAGE_DOFF[14] = 7689; STAGE_NH[14] = 1;
-  STAGE_DOFF[15] = 7721; STAGE_NH[15] = 2;
-  STAGE_DOFF[16] = 8065; STAGE_NH[16] = 13;
-  STAGE_DOFF[17] = 14773; STAGE_NH[17] = 15;
+  STAGE_DOFF[7] = 5749; STAGE_NH[7] = 1;
+  STAGE_DOFF[8] = 5755; STAGE_NH[8] = 1;
+  STAGE_DOFF[9] = 5771; STAGE_NH[9] = 3;
+  STAGE_DOFF[10] = 5819; STAGE_NH[10] = 1;
+  STAGE_DOFF[11] = 5828; STAGE_NH[11] = 1;
+  STAGE_DOFF[12] = 7460; STAGE_NH[12] = 3;
+  STAGE_DOFF[13] = 7676; STAGE_NH[13] = 1;
+  STAGE_DOFF[14] = 7695; STAGE_NH[14] = 1;
+  STAGE_DOFF[15] = 7727; STAGE_NH[15] = 2;
+  STAGE_DOFF[16] = 8075; STAGE_NH[16] = 13;
+  STAGE_DOFF[17] = 14861; STAGE_NH[17] = 15;
   STAGE_M[0] = 2; STAGE_H[0] = 6; STAGE_OFF[0] = 0;  STAGE_MW[0] = 1;
   STAGE_NCLS[0] = 4;
   STAGE_VN[0] = 9;
@@ -141,7 +141,7 @@ int model_dims(void) {
   STAGE_VN[21] = 70;
   STAGE_M[6] = 3; STAGE_H[6] = 5; STAGE_OFF[6] = 7817;  STAGE_MW[6] = 2;
   STAGE_NCLS[96] = 5;
-  STAGE_VN[24] = 86;
+  STAGE_VN[24] = 87;
   STAGE_VN[25] = 3;
   STAGE_VN[26] = 2;
   STAGE_M[7] = 2; STAGE_H[7] = 3; STAGE_OFF[7] = 8096;  STAGE_MW[7] = 1;
@@ -177,13 +177,13 @@ int model_dims(void) {
   STAGE_NCLS[224] = 23;
   STAGE_VN[56] = 16;
   STAGE_VN[57] = 2;
-  STAGE_M[15] = 2; STAGE_H[15] = 86; STAGE_OFF[15] = 10624;  STAGE_MW[15] = 2;
+  STAGE_M[15] = 2; STAGE_H[15] = 88; STAGE_OFF[15] = 10624;  STAGE_MW[15] = 2;
   STAGE_NCLS[240] = 5;
   STAGE_NCLS[241] = 107;
-  STAGE_VN[60] = 86;
+  STAGE_VN[60] = 87;
   STAGE_VN[61] = 2;
-  STAGE_M[16] = 3; STAGE_H[16] = 67; STAGE_OFF[16] = 15298;  STAGE_MW[16] = 2;
-  STAGE_NCLS[256] = 95;
+  STAGE_M[16] = 3; STAGE_H[16] = 69; STAGE_OFF[16] = 15383;  STAGE_MW[16] = 2;
+  STAGE_NCLS[256] = 96;
   STAGE_NCLS[257] = 19;
   STAGE_NCLS[258] = 19;
   STAGE_NCLS[259] = 19;
@@ -196,13 +196,13 @@ int model_dims(void) {
   STAGE_NCLS[266] = 5;
   STAGE_NCLS[267] = 5;
   STAGE_NCLS[268] = 12;
-  STAGE_VN[64] = 86;
+  STAGE_VN[64] = 87;
   STAGE_VN[65] = 3;
   STAGE_VN[66] = 2;
-  STAGE_M[17] = 3; STAGE_H[17] = 116; STAGE_OFF[17] = 20415;  STAGE_MW[17] = 2;
+  STAGE_M[17] = 3; STAGE_H[17] = 121; STAGE_OFF[17] = 20631;  STAGE_MW[17] = 2;
   STAGE_NCLS[272] = 5;
   STAGE_NCLS[273] = 107;
-  STAGE_NCLS[274] = 95;
+  STAGE_NCLS[274] = 96;
   STAGE_NCLS[275] = 19;
   STAGE_NCLS[276] = 19;
   STAGE_NCLS[277] = 19;
@@ -215,7 +215,7 @@ int model_dims(void) {
   STAGE_NCLS[284] = 5;
   STAGE_NCLS[285] = 5;
   STAGE_NCLS[286] = 12;
-  STAGE_VN[68] = 86;
+  STAGE_VN[68] = 87;
   STAGE_VN[69] = 3;
   STAGE_VN[70] = 2;
   return 18;
@@ -286,8 +286,8 @@ char *IRRECV = "add64\0and64\0arg\0call\0callpush\0callr\0cvtdi\0cvtds\0cvtdu\0c
 #define NIRRECV 70
 
 /* BF_ENC_0: unisa/gold.py STAGES["enc"].fields[0] (op) */
-char *BF_ENC_0 = "exit\000read\000write\000open\000close\000getdents64\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000lseek\000unlink\000rename\000ioctl\000fstat\000stat\000lstat\000fcntl\000mkdir\000chmod\000poll\000ppoll\000getdirentries64\000ftruncate\000gettimeofday\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
-#define NBF_ENC_0 86
+char *BF_ENC_0 = "exit\000read\000write\000open\000close\000getdents64\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000lseek\000unlink\000rename\000ioctl\000fstat\000stat\000lstat\000fcntl\000mkdir\000chmod\000poll\000ppoll\000getdirentries64\000ftruncate\000gettimeofday\000syscall\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define NBF_ENC_0 87
 
 /* BF_ENC_1: unisa/gold.py STAGES["enc"].fields[1] (os) */
 char *BF_ENC_1 = "lnx\000osx\000win\000";
@@ -415,8 +415,8 @@ char *BH_BINSEL_Y = "add\000sub\000mul\000div\000mod\000lt\000gt\000le\000ge\000
 #define HD_BINSEL_Y 0
 
 /* BF_ISEL_0: unisa/gold.py STAGES["isel"].fields[0] (op) */
-char *BF_ISEL_0 = "exit\000read\000write\000open\000close\000getdents64\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000lseek\000unlink\000rename\000ioctl\000fstat\000stat\000lstat\000fcntl\000mkdir\000chmod\000poll\000ppoll\000getdirentries64\000ftruncate\000gettimeofday\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
-#define NBF_ISEL_0 86
+char *BF_ISEL_0 = "exit\000read\000write\000open\000close\000getdents64\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000lseek\000unlink\000rename\000ioctl\000fstat\000stat\000lstat\000fcntl\000mkdir\000chmod\000poll\000ppoll\000getdirentries64\000ftruncate\000gettimeofday\000syscall\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define NBF_ISEL_0 87
 
 /* BF_ISEL_1: unisa/gold.py STAGES["isel"].fields[1] (arch) */
 char *BF_ISEL_1 = "x86_64\000arm64\000";
@@ -433,8 +433,8 @@ char *BH_ISEL_SYMBOL = "accept\000add\000addsd\000addss\000and\000asr\000b\000bi
 #define HD_ISEL_SYMBOL 1
 
 /* BF_ABI_0: unisa/gold.py STAGES["abi"].fields[0] (op) */
-char *BF_ABI_0 = "exit\000read\000write\000open\000close\000getdents64\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000lseek\000unlink\000rename\000ioctl\000fstat\000stat\000lstat\000fcntl\000mkdir\000chmod\000poll\000ppoll\000getdirentries64\000ftruncate\000gettimeofday\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
-#define NBF_ABI_0 86
+char *BF_ABI_0 = "exit\000read\000write\000open\000close\000getdents64\000mmap\000munmap\000mprotect\000getpid\000clock_gettime\000nanosleep\000futex\000socket\000connect\000bind\000listen\000accept\000clone\000execve\000lseek\000unlink\000rename\000ioctl\000fstat\000stat\000lstat\000fcntl\000mkdir\000chmod\000poll\000ppoll\000getdirentries64\000ftruncate\000gettimeofday\000syscall\000add64\000sub64\000xor64\000mul64\000slt64\000sle64\000load64\000store64\000jump\000jumpz\000call\000ret\000nop\000cas64\000fence\000syscall_gate\000tls_base\000cycle_counter\000stack_enter\000and64\000or64\000shl64\000shr64\000callr\000ult64\000ule64\000lshr64\000fadd64\000fsub64\000fmul64\000fdiv64\000flt64\000fle64\000feq64\000fadd32\000fsub32\000fmul32\000fdiv32\000flt32\000fle32\000feq32\000cvtid\000cvtud\000cvtis\000cvtus\000cvtdi\000cvtdu\000cvtsd\000cvtds\000fsqrt64\000fsqrt32\000";
+#define NBF_ABI_0 87
 
 /* BF_ABI_1: unisa/gold.py STAGES["abi"].fields[1] (os) */
 char *BF_ABI_1 = "lnx\000osx\000win\000";
@@ -445,8 +445,8 @@ char *BF_ABI_2 = "x86_64\000arm64\000";
 #define NBF_ABI_2 2
 
 /* BH_ABI_SYSNO: the classes of head "sysno" of stage "abi", in the constructed net's order (weights/built.json) */
-char *BH_ABI_SYSNO = "0\0000x2000001\0000x2000003\0000x2000004\0000x2000005\0000x2000006\0000x200000a\0000x200000f\0000x2000014\0000x200001e\0000x2000036\0000x200003b\0000x2000049\0000x200004a\0000x200005c\0000x2000061\0000x2000062\0000x2000068\0000x200006a\0000x2000074\0000x2000080\0000x2000088\0000x20000c5\0000x20000c7\0000x20000c9\0000x20000e6\0000x2000152\0000x2000153\0000x2000154\0000x2000158\0000x2000168\0000x2000203\0001\00010\000101\00011\000113\00016\000169\000172\000198\0002\000200\000201\000202\000203\000215\000217\000220\000221\000222\000226\000228\00025\000271\000276\00029\0003\00034\00035\00039\0004\00041\00042\00043\00046\00049\0005\00050\00053\00056\00057\00059\0006\00060\00061\00062\00063\00064\0007\00072\00073\00077\00079\0008\00080\00082\00083\00087\0009\00090\00093\00096\00098\000none\000";
-#define NBH_ABI_SYSNO 95
+char *BH_ABI_SYSNO = "0\0000x2000000\0000x2000001\0000x2000003\0000x2000004\0000x2000005\0000x2000006\0000x200000a\0000x200000f\0000x2000014\0000x200001e\0000x2000036\0000x200003b\0000x2000049\0000x200004a\0000x200005c\0000x2000061\0000x2000062\0000x2000068\0000x200006a\0000x2000074\0000x2000080\0000x2000088\0000x20000c5\0000x20000c7\0000x20000c9\0000x20000e6\0000x2000152\0000x2000153\0000x2000154\0000x2000158\0000x2000168\0000x2000203\0001\00010\000101\00011\000113\00016\000169\000172\000198\0002\000200\000201\000202\000203\000215\000217\000220\000221\000222\000226\000228\00025\000271\000276\00029\0003\00034\00035\00039\0004\00041\00042\00043\00046\00049\0005\00050\00053\00056\00057\00059\0006\00060\00061\00062\00063\00064\0007\00072\00073\00077\00079\0008\00080\00082\00083\00087\0009\00090\00093\00096\00098\000none\000";
+#define NBH_ABI_SYSNO 96
 #define HD_ABI_SYSNO 0
 
 /* BH_ABI_ARG0: the classes of head "arg0" of stage "abi", in the constructed net's order (weights/built.json) */

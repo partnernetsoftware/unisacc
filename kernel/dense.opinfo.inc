@@ -3,9 +3,9 @@
  * Network-evaluated dense literal for stage opinfo
  * Inputs (sha256, first 12 hex digits):
  *   unisa/gold.py                25721a152d0d
- *   unisa/catalog.py             6b876d045c17
+ *   unisa/catalog.py             b3ff45a5f1fd
  *   unisa/front/lex.py           67f2248c3a8a
- *   weights/built.json           574920f09a56
+ *   weights/built.json           5e45bf5e018c
  *   unisa/ckernel.py             db184ffec275 */
   "\x01\x02\x02\x01\x03\x03\x01\x06\x06\x01\x06\x07\x01\x06\x08\x01\x06\x0d\x01\x06"
   "\x0e\x01\x06\x0c\x01\x06\x09\x01\x06\x0a\x01\x06\x0b\x00\x07\x0f\x00\x07\x0f\x00"

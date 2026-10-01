@@ -2249,7 +2249,7 @@ int pf_call(int t) {
         setkind(0); cursize = 8; curelem = 8; lvalue = 0;
         return postfix();
     }
-    if (isname(t, "__mmap", 6) || isname(t, "__getdirentries64", 17)) {   /* the .sys6 gate */
+    if (isname(t, "__mmap", 6) || isname(t, "__getdirentries64", 17) || isname(t, "__syscall6", 10)) {   /* the .sys6 gate */
         need(tidx("(", 1), "(");
         n = 0;
         while (cur() != tidx(")", 1)) {
@@ -2259,8 +2259,9 @@ int pf_call(int t) {
         }
         need(tidx(")", 1), ")");
         sysargs6(n);
-        if (isname(t, "__getdirentries64", 17)) es("  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n");
-        else es("  .sys6 mmap, r0, r1, r2, r3, r4, r5\n");
+        if (isname(t, "__syscall6", 10)) es("  .sys6 syscall, r0, r1, r2, r3, r4, r5\n");   /* R19-9: r0 is the call number */
+        else { if (isname(t, "__getdirentries64", 17)) es("  .sys6 getdirentries64, r0, r1, r2, r3, r4, r5\n");
+        else es("  .sys6 mmap, r0, r1, r2, r3, r4, r5\n"); }
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }

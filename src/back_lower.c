@@ -690,6 +690,22 @@ int bk_syscall6(int cop, long cell) {      /* six arguments, all spilled */
     return 0;
 }
 
+/* R19-9 (3): the generic gate -- the call number is the first spilled cell,
+   the five arguments follow.  Same gate, return register and save/restore
+   as the six-argument form; no WinAPI form (headers do not use it there). */
+int bk_syscalln(int cop, long cell) {
+    int g; int i;
+    bk_facts(cop);
+    if (bkos == 2) { __write(2, "__syscall6 has no Windows form\n", 31); __exit(1); }
+    tk_setreg(bkf_nr, SK_MEM, cell);
+    i = 0;
+    while (i < 5) { if (bkf_arg[i] < 0) break; tk_setreg(bkf_arg[i], SK_MEM, cell + 8 * (i + 1)); i = i + 1; }
+    g = tk(TO_GATE, 0, 0, 0, 0);
+    tkg_form[g] = bkf_form; tkg_gate[g] = bkf_gate; tkg_cop[g] = cop; tkg_ret[g] = bkf_ret;
+    tkg_rc[g] = bkf_retconv; tkg_wi[g] = bkf_winimp;
+    return 0;
+}
+
 /* a fifth argument, for the one call that has one (renameat2); used once */
 int bk_a4k = 0 - 1; long bk_a4v;
 int bk_syscall(int cop, int k0, long v0, int k1, long v1, int k2, long v2, int k3, long v3) {
@@ -914,7 +930,8 @@ int bk_lower(void) {
                frame and stack pointers: save them across the call [S-9] */
             tk(TO_SETMEM, bk_sysfp, bk_rmap[6], 0, 0);
             tk(TO_SETMEM, bk_syssp, bk_rmap[7], 0, 0);
-            bk_syscall6(cw, bk_sysa);
+            if (strsame(nm, "syscall")) bk_syscalln(cw, bk_sysa);   /* R19-9: number in the first cell */
+            else bk_syscall6(cw, bk_sysa);
             bk_facts(cw);
             tk(bk_opof("mov", 3), bk_rmap[0], bkf_ret < 0 ? 31 : bkf_ret, 0, 0);
             tk_setreg(bk_rmap[6], SK_MEM, bk_sysfp);
