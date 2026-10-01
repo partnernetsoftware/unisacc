@@ -815,51 +815,52 @@ long line_at(long p);
 int err_at(long p, char *msg);
 /* `#line` digit-sequence ["s-char-sequence"]: literal forms only; a macro
    operand (6.10.4p5) is refused with its position rather than misread. */
+int err_atu(long p, char *stage, char *construct, char *msg);   /* R20-2: err_at with an UNCOVERED record */
 #define LINEMSG "not covered: this form of #line (C99 6.10.4: digit-sequence [\"file\"], in the main file)"
 int linedir(long ls, long ns, long ne, long le) {
     long v; long k; int inside; long here; int nm; long q;
-    if (ne <= ns) { err_at(ns, LINEMSG); return 0; }
+    if (ne <= ns) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
     if (isal(src[ns] & 255)) {
         /* 6.10.4p5: the operand may be macro-replaced.  Covered form: one
            object-like macro whose body is a digit sequence (c-testsuite 00152:
            `#define line 1000` / `#line line`). */
         int m; int b; int bl; int bk; char *bp;
         m = mfind(src + ns, ne - ns);
-        if (m < 0) { err_at(ns, LINEMSG); return 0; }
-        if (macfn[m]) { err_at(ns, LINEMSG); return 0; }
+        if (m < 0) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
+        if (macfn[m]) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
         bp = macpool + macboff[m]; bl = macblen[m]; b = 0;
         while (b < bl) { if ((bp[b] & 255) != 32 && (bp[b] & 255) != 9) break; b = b + 1; }
         bk = b; v = 0;
         while (b < bl && (bp[b] & 255) >= 48 && (bp[b] & 255) <= 57) { v = v * 10 + (bp[b] & 255) - 48; b = b + 1; }
-        if (b == bk || b - bk > 10) { err_at(ns, LINEMSG); return 0; }
-        while (b < bl) { if ((bp[b] & 255) != 32 && (bp[b] & 255) != 9) { err_at(ns, LINEMSG); return 0; } b = b + 1; }
+        if (b == bk || b - bk > 10) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
+        while (b < bl) { if ((bp[b] & 255) != 32 && (bp[b] & 255) != 9) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; } b = b + 1; }
     } else {
-    if (ne - ns > 10) { err_at(ns, LINEMSG); return 0; }   /* the network reads at most 10 digits */
+    if (ne - ns > 10) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }   /* the network reads at most 10 digits */
     v = 0; k = ns;
-    while (k < ne) { if ((src[k] & 255) < 48 || (src[k] & 255) > 57) { err_at(ns, LINEMSG); return 0; }
+    while (k < ne) { if ((src[k] & 255) < 48 || (src[k] & 255) > 57) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
         v = v * 10 + (src[k] & 255) - 48; k = k + 1; }
     }
-    if (v <= 0 || v > 2147483647) { err_at(ns, LINEMSG); return 0; }
+    if (v <= 0 || v > 2147483647) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
     nm = 0 - 1;
     q = ne; while (q < le) { if (wsat(q) == 0) break; q = q + 1; }
     if (q < le) {
-        if ((src[q] & 255) != 34) { err_at(ns, LINEMSG); return 0; }
+        if ((src[q] & 255) != 34) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
         q = q + 1; nm = nfnpool;
         while (q < le && (src[q] & 255) != 34 && nfnpool < 8000) {
-            if ((src[q] & 255) == 92) { err_at(ns, LINEMSG); return 0; }   /* escapes: not covered, as in E2 */
+            if ((src[q] & 255) == 92) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }   /* escapes: not covered, as in E2 */
             fnpool[nfnpool] = src[q]; nfnpool = nfnpool + 1; q = q + 1;
         }
-        if (q >= le) { err_at(ns, LINEMSG); return 0; }                  /* unterminated */
+        if (q >= le) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }                  /* unterminated */
         fnpool[nfnpool] = 0; nfnpool = nfnpool + 1;
-        q = q + 1; while (q < le) { if (wsat(q) == 0) { err_at(ns, LINEMSG); return 0; } q = q + 1; }
+        q = q + 1; while (q < le) { if (wsat(q) == 0) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; } q = q + 1; }
     }
     /* no file operand: the presumed name stays what the last #line made it */
     if (nm < 0 && nld > 0) nm = ld_nm[nld - 1];
-    if (nld >= MAXLD) { err_at(ns, LINEMSG); return 0; }
+    if (nld >= MAXLD) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
     ld_raw = 1; here = line_at(ls); inside = line_at_inside; ld_raw = 0;
     /* Main-file #line only, like the E2 network: a header that renumbers
        itself is refused where it says so rather than half-supported. */
-    if (inside >= 0) { err_at(ns, LINEMSG); return 0; }
+    if (inside >= 0) { err_atu(ns, "ref.pp", "pp.line", LINEMSG); return 0; }
     ld_reg[nld] = inside; ld_line[nld] = here; ld_num[nld] = v; ld_nm[nld] = nm; nld = nld + 1;
     return 0;
 }
@@ -1283,6 +1284,7 @@ int nerr;                /* errors reported so far */
 int maxerr = 20;         /* -ferror-limit=N; 0 is no limit (clang's rule) */
 int errtop;              /* where the top-level construct being walked began */
 
+int err_atu(long p, char *stage, char *construct, char *msg) { uncov_stage = stage; uncov_construct = construct; return err_at(p, msg); }
 int err_tok(int t, char *msg);
 int err_uncov(int t, char *stage, char *construct, char *msg) {   /* R20-2 */
     if (panic) return 0;
