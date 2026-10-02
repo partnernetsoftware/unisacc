@@ -781,7 +781,7 @@ int prelines;               /* lines -include put before the user's own */
    header's text (many more).  Two small tables record exactly that, and
    `err_at` walks them backwards.  Macro expansion rewrites in place and
    never adds or removes a newline, so it does not enter into it. [S-12] */
-#define MAXIREG 512
+#define MAXIREG 4096   /* onelua.c needs ~260; past this, positions name the wrong file */
 long ireg_ln[MAXIREG];    /* the line the header's text starts on */
 long ireg_nl[MAXIREG];    /* how many lines it is */
 int ireg_nm[MAXIREG];     /* its name, as an offset into `fnpool` */
@@ -1021,7 +1021,10 @@ int incdo(int ls, int le, int from) {
         j = j + 1;
     }
     nl = j - nm;
-    if (nincl > 200) return 0;               /* a header that includes itself */
+    /* a header that includes itself without a guard.  It was 200 and
+       silent: onelua.c's chain reaches ~260 splices, and everything after
+       the 200th was dropped (lparser.c on: "undefined function 'main'"). */
+    if (nincl > 4000) { err_at(nm, "more than 4000 #include splices (a header that includes itself?)"); __exit(1); }
     {   int q2;                              /* the name, before the shift */
         incname[0] = 0; q2 = 0;
         while (q2 < nl && q2 < 62) { incname[q2] = src[nm + q2]; q2 = q2 + 1; }
@@ -2616,7 +2619,11 @@ int xrange(int from, int to) {
         j = identend(i);
         if (j > to) j = to;
         if (j < to) { q = src[j] & 255;
-            if (q == 34 || q == 39) { j = xlex(src, i, to); eputsrc(i, j); i = j; continue; } }
+            /* only L u U u8 prefix a literal: `LUA_POF"%s"` is a macro
+               followed by a string (lua loadlib.c) */
+            if ((q == 34 || q == 39) && ((j - i == 1 && (c == 76 || c == 117 || c == 85))
+                || (j - i == 2 && c == 117 && (src[i + 1] & 255) == 56))) {
+                j = xlex(src, i, to); eputsrc(i, j); i = j; continue; } }
         pp_seg = srcseg[i];
         if (ppnow) pp_seg = 0 - 1;
         m = mfind(src + i, j - i);

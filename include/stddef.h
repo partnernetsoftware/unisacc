@@ -10,7 +10,8 @@ typedef long size_t;
 #endif
 typedef long ptrdiff_t;
 typedef int wchar_t;
-/* offsetof is omitted on purpose: our macro expansion parenthesises an
- * argument that is not a single token, and a parenthesised TYPE NAME is
- * not a type name.  Write `(long)&((T *)0)->m` directly if you need it. */
+/* offsetof is a compiler intrinsic (__builtin_offsetof reads the struct
+ * table), not pointer arithmetic on a null pointer.  It accepts a type name
+ * that macro expansion has parenthesised. */
+#define offsetof(T, m) __builtin_offsetof(T, m)
 #endif

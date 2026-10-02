@@ -266,6 +266,9 @@ static int ungetc(int __u_c, FILE *__u_f) {
     return __u_c & 255;
 }
 #endif
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
 /* Buffering is not modelled (every read and write goes straight to the
    descriptor), so a request to change it is honoured by doing nothing --
    which C99 7.19.7.4 permits: the call may be made at any time, and only
@@ -317,6 +320,24 @@ static int vprintf(const char *__u_fmt, va_list __u_ap) {
 }
 #endif
 
+#define L_tmpnam 64
+#define TMP_MAX 238328
+/* tmpnam (C99 7.19.4.4): "/tmp/untm" plus a counter.  No existence check
+   (the name may be taken by another process; C99 only promises it is
+   different from earlier results in this program). */
+#if !__UNISA_FTRIM_LIBC || __UN_tmpnam
+static char *tmpnam(char *__u_s) {
+    static char __u_own[64]; static int __u_n;
+    int __u_v; int __u_k; char *__u_p;
+    __u_p = __u_s ? __u_s : __u_own;
+    __u_p[0] = 47; __u_p[1] = 116; __u_p[2] = 109; __u_p[3] = 112; __u_p[4] = 47;
+    __u_p[5] = 117; __u_p[6] = 110; __u_p[7] = 116; __u_p[8] = 109;
+    __u_n = __u_n + 1; __u_v = __u_n; __u_k = 9;
+    while (__u_k < 19) { __u_p[__u_k] = (char)(48 + __u_v % 10); __u_v = __u_v / 10; __u_k = __u_k + 1; }
+    __u_p[19] = 0;
+    return __u_p;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_tmpfile
 /* A file with no name that disappears when it is closed: open it, unlink it
    immediately, and hand back the stream.  /tmp because the subset has no

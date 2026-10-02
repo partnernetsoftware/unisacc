@@ -2361,6 +2361,34 @@ int pf_call(int t) {
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
+    if (isname(t, "__builtin_offsetof", 18)) {
+        /* offsetof(T, m.n[k]) (C99 7.17): a constant from the struct table.
+           The type may arrive parenthesised (`(struct S)`) because macro
+           expansion wraps a multi-token argument. */
+        int ost; int ooff; int omi; int opar;
+        need(tidx("(", 1), "(");
+        opar = eat(tidx("(", 1));
+        declsave(); declspec(); ost = declstruct; declrestore();
+        if (opar) need(tidx(")", 1), ")");
+        need(tidx(",", 1), ",");
+        ooff = 0;
+        while (1) {
+            if (ost < 0) err_tok(tp, "offsetof needs a struct or union type");
+            omi = mbfind(ost, tp);
+            if (omi < 0) err_tok(tp, "no such member");
+            adv();
+            ooff = ooff + mboff[omi];
+            while (cur() == tidx("[", 1)) {
+                adv(); ooff = ooff + mbelem[omi] * cexpr(); need(tidx("]", 1), "]");
+            }
+            if (eat(tidx(".", 1)) == 0) break;
+            ost = mbstruct[omi];
+        }
+        need(tidx(")", 1), ")");
+        eimm(0, ooff);
+        lvalue = 0; curelem = 8; curptr = 0; curflt = 0; cursize = 8; curuns = 1; curstruct = 0 - 1;
+        return postfix();
+    }
     if (isname(t, "setjmp", 6) || isname(t, "_setjmp", 7) || isname(t, "__builtin_setjmp", 16)) {
         /* setjmp is an intrinsic, not a library call: it must capture THIS
            frame (r6) and stack (r7), which a forwarded host call cannot.
@@ -3803,7 +3831,10 @@ int declspec(void) {                       /* -> element width */
         declspecpd = tdptr[td] ? tdpd[td] : 0;
         declbase = tdw[td];
         if (declstruct >= 0) declbase = stsize[declstruct];
-        declspectdn = tdn[td]; declspectdsz = tdsz[td];
+        /* `typedef struct CI CI;` before `struct CI {...}`: the size is the
+           struct table's NOW, not the zero recorded at typedef time */
+        if (declstruct >= 0 && tdptr[td] == 0) declsz = stsize[declstruct] * (tdn[td] > 0 ? tdn[td] : 1);
+        declspectdn = tdn[td]; declspectdsz = declsz;
         skipspecq();
         return tdw[td];
     }
@@ -5090,7 +5121,7 @@ int stmt_(void) {
     if (p == P_DECL) return local_decl();
     if (p == P_IF) {
         adv(); need(vfind(TOKV, NTOKV, "(", 1), "(");
-        expr(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        exprc(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         a = newlab();
         elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
         stmt();
@@ -5110,7 +5141,7 @@ int stmt_(void) {
         top = newlab(); a = newlab();
         elab("__unisacc_L", top); es(":\n");
         need(vfind(TOKV, NTOKV, "(", 1), "(");
-        expr(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
+        exprc(); loadval(); ftruthy(); need(vfind(TOKV, NTOKV, ")", 1), ")");
         elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
         brkstack[nloop] = a; cntstack[nloop] = top;
         brkdep[nloop] = bdepth; cntdep[nloop] = bdepth; nloop = nloop + 1;
@@ -5133,7 +5164,7 @@ int stmt_(void) {
         top = newlab(); a = newlab(); c = newlab();
         elab("__unisacc_L", top); es(":\n");
         if (cur() != tidx(";", 1)) {
-            expr(); loadval(); ftruthy();
+            exprc(); loadval(); ftruthy();
             elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
         }
         need(tidx(";", 1), ";");
@@ -5294,7 +5325,7 @@ int stmt_(void) {
         elab("__unisacc_L", c); es(":\n");
         need(tidx("while", 5), "while");
         need(tidx("(", 1), "(");
-        expr(); loadval(); ftruthy();
+        exprc(); loadval(); ftruthy();
         need(tidx(")", 1), ")");
         need(tidx(";", 1), ";");
         elab("  @ctrl.jumpz r0, __unisacc_L", a); ec(10);
