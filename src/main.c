@@ -296,8 +296,8 @@ int main(void) {
             else { if (strsame(t, tl_first) == 0) return emsg("unisacc: error: -b differs from the target these objects were compiled for: ", tl_first); }
         } else {
             /* R21-4a': a written image forwards too (osx: libSystem; lnx: libc.so.6
-               through a dynamic ELF); objects, tapes, -E and -S do not */
-            if (pponly == 0 && objwant == 0 && emitbin == 0 && asmwant == 0 && dump == 2 && (t[0] == 111 || t[0] == 108)) {
+               through a dynamic ELF; win: ucrtbase/kernel32/ws2_32 via GetProcAddress); objects, tapes, -E and -S do not */
+            if (pponly == 0 && objwant == 0 && emitbin == 0 && asmwant == 0 && dump == 2 && (t[0] == 111 || t[0] == 108 || t[0] == 119)) {
                 if (fe_units_fwd(inputs, &ninput, t, 1)) return 1;
                 r = 0;
             } else r = fe_units(inputs, ninput, t);

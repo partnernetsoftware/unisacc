@@ -7,8 +7,8 @@
  */
 #ifndef _UNISACC_FFI_H
 #define _UNISACC_FFI_H
-#ifndef __APPLE__
-#error unisacc_ffi currently requires macOS
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
+#error unisacc_ffi requires macOS, Linux or Windows
 #endif
 #if defined(__aarch64__) || defined(__arm64__)
 #define UFFI_ABI 1
@@ -61,11 +61,16 @@ static void *__uffi_call;
 static void *__uffi_types[12];
 static int __uffi_ready;
 
-#ifndef _WIN32   /* the host channel (__hostcall/__hostaddr) is macOS and Linux only until the Windows slots land (0.0.21 item 4a) */
+/* the four loader names: macOS/Linux dlopen dlsym dlclose dlerror; Windows
+   (0.0.21 R21-4a') LoadLibraryA GetProcAddress FreeLibrary GetLastError, where
+   RTLD_DEFAULT (0) searches ucrtbase, kernel32, ws2_32, msvcrt in turn */
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
     long __u_args[6];
     __u_args[0] = (long)__u_path; __u_args[1] = __u_mode;
+#ifdef _WIN32
+    __u_args[1] = 0;
+#endif
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (void *)__hostcall(__hostaddr0(), __u_args);
 }
@@ -73,9 +78,24 @@ static void *uffi_dlopen(const char *__u_path, int __u_mode) {
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlsym
 static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
     long __u_args[6];
+#ifdef _WIN32
+    void *__u_r; int __u_i; char *__u_dll[4];
+    __u_dll[0] = "ucrtbase.dll"; __u_dll[1] = "kernel32.dll"; __u_dll[2] = "ws2_32.dll"; __u_dll[3] = "msvcrt.dll";
+    __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
+    if (__u_handle) { __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name; return (void *)__hostcall(__hostaddr1(), __u_args); }
+    __u_i = 0;
+    while (__u_i < 4) {
+        __u_args[0] = (long)__u_dll[__u_i]; __u_args[1] = 0;
+        __u_args[0] = __hostcall(__hostaddr0(), __u_args);
+        if (__u_args[0]) { __u_args[1] = (long)__u_name; __u_r = (void *)__hostcall(__hostaddr1(), __u_args); if (__u_r) return __u_r; }
+        __u_i = __u_i + 1;
+    }
+    return 0;
+#else
     __u_args[0] = (long)__u_handle; __u_args[1] = (long)__u_name;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (void *)__hostcall(__hostaddr1(), __u_args);
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlclose
@@ -83,17 +103,26 @@ static int uffi_dlclose(void *__u_handle) {
     long __u_args[6];
     __u_args[0] = (long)__u_handle; __u_args[1] = 0;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
+#ifdef _WIN32
+    return __hostcall(__hostaddr2(), __u_args) ? 0 : -1;
+#else
     return (int)__hostcall(__hostaddr2(), __u_args);
+#endif
 }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlerror
 static char *uffi_dlerror(void) {
+#ifdef _WIN32
+    return "Windows loader error";
+#else
     long __u_args[6];
     __u_args[0] = 0; __u_args[1] = 0; __u_args[2] = 0;
     __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (char *)__hostcall(__hostaddr3(), __u_args);
+#endif
 }
 #endif
+#ifndef _WIN32   /* the host channel (__hostcall/__hostaddr) is macOS and Linux only until the Windows slots land (0.0.21 item 4a) */
 /* 0 succeeds; -1 unsupported layout; -2 dlopen/dlsym failure.
  * A failed initialization is retried; the private libffi handle stays live
  * because its ffi_type pointers and entry addresses refer into that image.
@@ -204,6 +233,7 @@ static int uffi_call(void *__u_fn, int __u_return_kind, int *__u_kinds,
     return uffi_call_types(__u_fn, __u_rtype, __u_types, __u_values,
                            __u_n, __u_fixed, __u_result);
 }
+#endif
 #endif
 #endif
 #endif

@@ -1485,6 +1485,16 @@ int preprocess(void) {
                 pushpop(ls, we, i);
             } } } }
             if (d < 0) { if (live) { if (we - ws == 4) { if (srcis(ws, 4, "line")) { linedir(ls, ns, ne, i); } } } }
+            /* C99 6.10.5: a live #error stops the translation (it was ignored
+               until 0.0.21 -- `#include <unisacc_ffi.h>` compiled on Linux) */
+            if (d < 0) { if (live) { if (we - ws == 5) { if (srcis(ws, 5, "error")) {
+                static char emsg_b[300]; int q; int m; char *pre; pre = "#error "; m = 0;
+                while (pre[m]) { emsg_b[m] = pre[m]; m = m + 1; }
+                q = ns; while (q < i && m < 290 && src[q] != 10) { emsg_b[m] = src[q]; m = m + 1; q = q + 1; }
+                while (m > 7 && (emsg_b[m - 1] == 32 || emsg_b[m - 1] == 9 || emsg_b[m - 1] == 13)) m = m - 1;
+                emsg_b[m] = 0;
+                err_at(ws - 1, emsg_b); nerr = nerr + 1;
+            } } } }
             if (d >= 0) {
                 if (d == 0) { if (mfind(src + ns, ne - ns) >= 0) flag = 1; }
                 /* The table's key is `defined` -- whether the name IS
