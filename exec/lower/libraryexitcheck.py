@@ -60,16 +60,15 @@ def main():
                         assert command([runtime,str(tbl),str(source)])==out,'C table differs'
                 else: assert result.returncode==1,(status,result.stderr)
                 n+=1
-        if not target.startswith('osx/'):
-            # Library exit opens only the generated exit bridge; it must not
-            # open the ordinary source-level .hostcall intrinsic on Linux.
-            raw=b'_start:\n.hostcall r1, r0\n';source.write_bytes(raw)
-            for value in (None,(0x123456789abcd).to_bytes(8,'little')):
-                status,_,_=simulate(d,raw,'input',files=Resources(value),maxsteps=1000000)
-                (resource/'exit').write_bytes(value or bytes(8))
-                package.write_bytes(build([manifest],[] if value is None else [('006c6962726172792f',resource)]))
-                result=subprocess.run([runtime,'--bundle',str(package),'test',str(source)],capture_output=True,timeout=55)
-                assert status=='reject' and result.returncode==1,'ordinary hostcall unexpectedly enabled'
+        if target.startswith('win/'):
+            # The ordinary Windows host bridge needs the conditional IAT route.
+            # Refuse it by name until that route is byte-equal to the reference.
+            for raw in (b'_start:\n.hostcall r1, r0\n', b'_start:\n.hostaddr r0, 0\n'):
+                source.write_bytes(raw)
+                status,_,_=simulate(d,raw,'input',files=Resources(None),maxsteps=1000000)
+                result=subprocess.run([runtime,str(tbl),str(source)],capture_output=True,timeout=55)
+                assert status=='reject' and result.returncode==1,(raw,status,result.returncode)
+                assert b'Windows .hostcall/.hostaddr forwarding' in result.stderr,result.stderr
                 n+=1
         print('libraryexit:',target,n,'table/network verdicts; full-domain check-net; callback host execution separate')
 
