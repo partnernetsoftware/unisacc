@@ -3845,14 +3845,22 @@ int declspec(void) {                       /* -> element width */
         return tdw[td];
     }
     if (cur() == tidx("struct", 6)) {
-        declstruct = stparse(0);
+        /* the members' own specifiers must not leak out: a `CF func;`
+           member (a function-pointer typedef) left declspecptr set, and
+           `typedef struct Reg {...} Reg;` became an 8-byte pointer type
+           (lua's luaL_Reg tables) */
+        { int sti; declsave(); sti = stparse(0); declrestore(); declstruct = sti; }
         declsz = stsize[declstruct];
         declbase = declsz;
         skipspecq();
         return 8;
     }
     if (cur() == tidx("union", 5)) {
-        declstruct = stparse(1);
+        /* the members' own specifiers must not leak out: a `CF func;`
+           member (a function-pointer typedef) left declspecptr set, and
+           `typedef struct Reg {...} Reg;` became an 8-byte pointer type
+           (lua's luaL_Reg tables) */
+        { int sti; declsave(); sti = stparse(1); declrestore(); declstruct = sti; }
         declsz = stsize[declstruct];
         declbase = declsz;
         skipspecq();
