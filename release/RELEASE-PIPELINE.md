@@ -53,7 +53,7 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 
 ## 8. 发布
 **只发封存字节**：签名前 `before_sha256` 必须等于本机队列验证过的候选哈希（`release/candidate.json` 的 `unisacc_com_sha256`）；`release/tools/publish.sh TAG 签后sha` 先核对草稿字节再公开，公开后再下载比对。
-**发布后立即**把本轮候选放回仓根作为本地“当前产品”（不跟踪，但门禁与 `MODEL_COM` 默认读它）：`cp <cand>/unisacc-next.com unisacc.com && cp <cand>/unisacc-next.com.build.json unisacc.com.build.json && python3 exec/c/provenance.py check unisacc.com`——放的是**未签名候选字节**（与 build.json 的 artifact_sha256 一致；签名后的字节只在 release 资产里）。0.0.13 发布后仓根仍是 0.0.12 的 df8cc9b4…，主人发现 `--version` 不对（2026-09-30）。
+**发布后立即**把本轮候选放回仓根作为本地“当前产品”（不跟踪，但门禁与 `MODEL_COM` 默认读它）：`cp <cand>/unisacc-next.com unisacc.com && cp <cand>/unisacc-next.com.build.json unisacc.com.build.json && rm -rf model-audit && cp -R <cand>/model-audit model-audit && python3 exec/c/provenance.py check unisacc.com`——放的是**未签名候选字节**（与 build.json 的 artifact_sha256 一致；签名后的字节只在 release 资产里）。0.0.13 发布后仓根仍是 0.0.12 的 df8cc9b4…，主人发现 `--version` 不对（2026-09-30）。
 签后产物从 run artifact `unisacc-company-signed-<attempt>` 下载，核对签前/签后 SHA 与尺寸，上传草稿，回执写入 `research/r<N>-release-acceptance.json`，`gh release edit --draft=false`。之后再提交回执/文档。
 
 **推送的独立证据**（2026-09-29，dsh 建议）：GitHub 间歇 500 时 `git push` 的返回不可信——同一晚两次“以为已推、实际未推”。任何“已推送”的宣布都以下面两串相等为准，而不是以 push 返回为准：
@@ -91,7 +91,7 @@ R=$(release/tools/windows_sign.sh company v$V <receipt> <run> <attempt>); releas
 gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 下载签后产物，核对 before/after sha 与尺寸，本机跑 comdemo/fb12-multi
 # 12 向主人确认公开；只留签名 unisacc.com 与 dmg；gh release edit v$V --draft=false --latest
 # 12b 冒烟：gh workflow run release-smoke.yml -f tag=v$V -f sha256=<签后sha>，六格全绿写进回执（0.0.22 起）
-# 13 回执 research/r<N>-release-acceptance.json；plans/v$V.md → archive/plans/；prd 版本行；通知 cdx 解冻
+# 13 回执 research/r<N>-release-acceptance.json（含 com-auditnet 的网络计数行）；plans/v$V.md → archive/plans/；prd 版本行；通知 cdx 解冻
 ```
 
 ## 10. 发布前必跑清单（R16-14，0.0.16 起；每项要有当次的证据行，缺一不发）
