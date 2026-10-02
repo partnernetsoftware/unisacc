@@ -9,6 +9,9 @@ echo "build-weights ${t}s (local budget 19 s: release-check runs it under 55 s o
 [ -z "$(git status --porcelain -- weights)" ] || { echo "  FAIL: build-weights changed weights/ (commit the construction first)"; bad=1; }
 for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh" "CORE_ASM_ARCH=x86_64 exec/c/asm/bindprep.sh" "UA=$UA exec/c/warningcheck.sh ua Wall"; do
     t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 ))
+    # 0.0.23 F1: a cold cache (new sources) cost 55 s in 0.0.21 and 0.0.22; the first pass builds it,
+    # the second is the check -- a timeout only fails when the warm pass times out too
+    if [ "$rc" -eq 142 ]; then echo "warm-up: $w cold pass timed out (${t}s); checking warm"; t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 )); fi
     echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
 done
 # 0.0.21 R21-14: the two reworks of the 0.0.20 release, caught before freezing

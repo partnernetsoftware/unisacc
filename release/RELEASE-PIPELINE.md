@@ -152,3 +152,12 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - `defender-ci-scan.yml`：用 Windows Defender 扫描封存字节。
 在这些落地之前，本文 §9 的序列仍然有效，加上 §4 和本节的修正。
 
+## 15. 0.0.22 回顾（2026-10-03）：第一次 rc 绑定发版
+
+- **rc 绑定已实测可用**：`release/tools/rc_tag.sh v$V` 在封存与 gatedeps 推送之后打标签；签名按 rc 指向的提交校验，main 在签名期间已前进，资格和公司签名都通过。第一次资格签名失败，原因是签名工作流的 checkout 是浅克隆，祖先检查找不到 sealed_from_commit；已改为 `fetch-depth: 0`。
+- **候选重建时要移动 rc 标签**：`git push origin :refs/tags/rc/v$V && git tag -d rc/v$V`，然后重新执行 rc_tag.sh。
+- **队列状态放在候选目录之外**（0.0.23 F6）：queue.sh 现在用 `CAND_DIR.queue/`（日志也在里面）。0.0.22 重建候选时清空了候选目录，原来放在里面的 GATE_STATE 被一起删掉，只能整轮重跑。
+- **comboot 的先后顺序**：gatequeue 的 `AFTER` 表保证 stage2、stage3、fixedpoint 在前一阶段通过后才开始；以前“耗时最长优先”会把 stage2 排在 seed 前面。
+- **precheck 的冷缓存**（0.0.23 F1）：第一遍超时只说明缓存是冷的，precheck 会自动再跑一遍热的，第二遍仍超时才判失败。
+- **发布后冒烟**：`gh workflow run release-smoke.yml -f tag=v$V -f sha256=<签后 sha>`，0.0.22 六格全绿，结果写进回执的 post_release_smoke。
+
