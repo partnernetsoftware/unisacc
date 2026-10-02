@@ -14,6 +14,12 @@ if [ ! -d "$W" ]; then
   # untracked inputs the gates read: the installed product (comboot writes it;
   # absent at the start, its appearance invalidated the 0.0.19 queue at 408/415)
   for f in unisacc.com unisacc.com.build.json; do [ -f "$R/$f" ] && cp -p "$R/$f" "$W/$f"; done
+  # 0.0.21 R21-14: a stale build.json beside a new unisacc.com is rewritten by comboot mid-queue
+  # and invalidates every job that declares it (0.0.20: six exec-driver results)
+  if [ -f "$W/unisacc.com" ]; then
+    want=$(python3 -c "import json;print(json.load(open('$W/unisacc.com.build.json'))['artifact_sha256'])" 2>/dev/null)
+    [ "$want" = "$(shasum -a 256 "$W/unisacc.com" | cut -d' ' -f1)" ] || { echo "queue: unisacc.com and its build.json are not a pair; install both from stage 2"; exit 2; }
+  fi
 fi
 cd "$W"
 [ -s "$SEED/unisacc-seed.com" ] || { echo "no $SEED/unisacc-seed.com"; exit 2; }

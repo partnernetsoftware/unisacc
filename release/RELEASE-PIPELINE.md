@@ -114,3 +114,10 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - `release/tools/queue.sh` 在 `/tmp/unisacc-queue-<sha>` 独立工作树里跑；main 上的提交不影响队列。realprog 语料经 `REALPROG_CACHE` 指回主检出。被忽略的根产物 `unisacc.com`(.build.json) 在建工作树时复制进去（0.0.19 队列在 408/415 时因 comboot 写出它而判“输入变化”作废）。用完 `git worktree remove`。
 - `tests/release.sh` 以被声明输入的 `git ls-tree` 哈希判作废，不再看 HEAD：提交 plans/prd 不作废队列。
 
+## 13. 0.0.20 回顾（2026-10-02，0.0.21 R21-14）
+
+- 冻结前 `release/tools/precheck.sh` 现在也跑 subtract-safety，并核对仓根 `unisacc.com` 与 `unisacc.com.build.json` 成对；queue.sh 遇到不成对直接拒绝开跑。
+- 平台必跑项串行：Windows 虚拟机做自举时不要同时跑 Linux 必跑项（0.0.20 一次并行导致 19 个套件超时假红）；冻结时就在后台启动 Windows 虚拟机（开机约 250 秒），`tests/vms.sh up` 等不到代理就手动 `utmctl start` 再等 IP。
+- Apple 公证在载荷定稿（队列与平台必跑全绿）之后只做一次。
+- 提速分析见 research/pipeline-speed-review-0020.md。
+

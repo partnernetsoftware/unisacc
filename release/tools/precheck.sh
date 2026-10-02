@@ -11,5 +11,13 @@ for w in "CORE_ASM_ARCH=arm64 exec/c/asm/bindprep.sh" "CORE_ASM_ARCH=x86_64 exec
     t0=$(date +%s); python3 tests/bound.py 55 env $w >/dev/null 2>&1; rc=$?; t=$(( $(date +%s) - t0 ))
     echo "warm-up: $w rc=$rc ${t}s"; [ "$rc" -eq 0 ] || bad=1
 done
+# 0.0.21 R21-14: the two reworks of the 0.0.20 release, caught before freezing
+python3 tests/bound.py 30 python3 tests/subtractsafety.py > /tmp/precheck-ss.$$ 2>&1 || { tail -3 /tmp/precheck-ss.$$; echo "  FAIL: subtract-safety (a live file names an archived one)"; bad=1; }
+rm -f /tmp/precheck-ss.$$
+if [ -f unisacc.com ] && [ -f unisacc.com.build.json ]; then
+    want=$(python3 -c "import json;print(json.load(open('unisacc.com.build.json'))['artifact_sha256'])" 2>/dev/null)
+    have=$(shasum -a 256 unisacc.com | cut -d' ' -f1)
+    [ "$want" = "$have" ] || { echo "  FAIL: unisacc.com and unisacc.com.build.json are not a pair (install both from stage 2)"; bad=1; }
+fi
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
 exit $bad
