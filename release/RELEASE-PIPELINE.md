@@ -77,8 +77,9 @@ make gatedeps; git commit -- tests/gatedeps.json; git push                  # 5 
 # 5b x86 libffi 提供者（rosetta 套件需要；/var/folders 下的旧目录会被清掉）：
 #    curl -sSLfo $S/libffi-3.5.2.tar.gz https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3.5.2.tar.gz   # sha256 f3a3082a…
 #    python3 exec/c/buildffiprovider.py --tarball … --output $S/ffix86 --target osx/x86_64   # 调三次，每次一步
+# 5d precheck.sh 现在检查 5b 的 manifest 与 5c 的虚拟机，缺一项就失败
 # 5c 开 x86_64 Lima（ccinterop 的 lnx/x86_64 三项，否则 skip 判失败）：limactl start minicon-lnx-x86_64；用完 stop
-# 6 预热冷建网络的两项，**在队列自己的工作树里**（换工作树就是冷缓存，0.0.21 两项因此 53 s 超时）：bindprep.sh（CORE_ASM_ARCH=arm64）两次、memorycheck.sh（x86_64 ua 1/3）一次、warningcheck.sh ua Wall 一次
+# 6 预热：release.sh 前三窗自动做，标记按工作树区分（0.0.22 起，换工作树会重新预热）；手动预热时也要**在队列自己的工作树里**做（0.0.21 两项冷缓存 53 s 超时）：bindprep.sh（CORE_ASM_ARCH=arm64）两次、memorycheck.sh（x86_64 ua 1/3）一次、warningcheck.sh ua Wall 一次
 tests/term.sh env UA=$S/ua MODEL_COM=$S/cand/unisacc-next.com SEED_DIR=$D GATE_STATE=/tmp/gq UNISACC_FFI_X86_PROVIDER=... tests/release.sh --com   # 7 重复到 rc!=75
 release/tools/release_prep.sh $S/cand $V && release/tools/apple-sign.sh /tmp/r<N>-release/unisacc.com <sha> /tmp/r<N>-release/apple   # 8 Apple（可与 7 并行）
 # 9 release-check：push 后等 release-check.yml 对 HEAD 绿，记 run id / attempt

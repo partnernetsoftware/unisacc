@@ -76,15 +76,18 @@ fi
 dirty=$(cd "$R" && git status --porcelain -- $DECLARED 2>/dev/null | head -3)
 [ -z "$dirty" ] || { printf 'release: declared inputs are modified in the working tree; the queue would be invalidated:\n%s\n' "$dirty" >&2; exit 1; }
 warm_done=0
+# 0.0.22: the caches live in the checkout, so the markers are per checkout -- a state continued
+# in a new worktree warms again (0.0.21: bindprep/warningdriver timed out cold at 53 s)
+wk=$(printf '%s' "$R" | cksum | cut -d' ' -f1)
 for w in 1 2 3; do
-    [ -f "$GATE_STATE/warm.$w" ] && { warm_done=$w; continue; }
+    [ -f "$GATE_STATE/warm.$w.$wk" ] && { warm_done=$w; continue; }
     case $w in
         1) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=arm64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
         2) [ "$(uname -s)" = Darwin ] && python3 "$R/tests/bound.py" 50 env CORE_ASM_ARCH=x86_64 "$R/exec/c/asm/bindprep.sh" >/dev/null 2>&1;;
         3) python3 "$R/tests/bound.py" 50 "$R/exec/c/warningcheck.sh" ua Wall >/dev/null 2>&1;;
     esac
-    : > "$GATE_STATE/warm.$w"
-    echo "warm-up $w/3 done (cold model caches built outside the queue)"
+    : > "$GATE_STATE/warm.$w.$wk"
+    echo "warm-up $w/3 done in $R (cold model caches built outside the queue)"
     exit 75
 done
 python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?

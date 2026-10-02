@@ -19,5 +19,12 @@ if [ -f unisacc.com ] && [ -f unisacc.com.build.json ]; then
     have=$(shasum -a 256 unisacc.com | cut -d' ' -f1)
     [ "$want" = "$have" ] || { echo "  FAIL: unisacc.com and unisacc.com.build.json are not a pair (install both from stage 2)"; bad=1; }
 fi
+# 0.0.22 P1-B 7: the two external preparations the 0.0.21 queue lost 14 jobs to
+if [ ! -s "${UNISACC_FFI_X86_PROVIDER:-/nonexistent}/manifest.json" ]; then
+    echo "  FAIL: UNISACC_FFI_X86_PROVIDER has no manifest.json (rebuild: release/RELEASE-PIPELINE.md section 9 step 5b)"; bad=1
+fi
+if [ "$(limactl list minicon-lnx-x86_64 --format '{{.Status}}' 2>/dev/null)" != Running ]; then
+    echo "  FAIL: Lima minicon-lnx-x86_64 is not running (ccinterop skips its lnx/x86_64 cells, and a skip is a failure): limactl start minicon-lnx-x86_64"; bad=1
+fi
 echo "precheck $([ $bad -eq 0 ] && echo passed || echo FAILED: fix before freezing)"
 exit $bad
