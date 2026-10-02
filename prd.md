@@ -256,7 +256,7 @@ R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）�
 
 ### 5.1 libc 路线裁定（主人 2026-10-02）
 
-**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。排期在 [v0.0.21](plans/v0.0.21.md) 第 4a 项。**补充裁定（主人 2026-10-02）**：不接受“Linux 静态 ELF 没有动态装载器所以不转发”——三个 OS 都要把动态装载做好：Linux 写最小动态 ELF（PT_INTERP 指向系统 ld.so，DT_NEEDED libc.so.6，四个 GLOB_DAT 槽绑定 dlopen/dlsym/dlclose/dlerror，与 macOS 的四个 eager bind 同形），Windows 把同样四个槽映射到 LoadLibraryA/GetProcAddress/FreeLibrary/GetLastError；于是 `__hostaddr0..3` + `__hostcall` 在六个目标上是同一条转发通道。只有用到转发的程序才写动态头，其余镜像字节不变。
+**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。排期在 [v0.0.21](plans/v0.0.21.md) 第 4a 项。**补充裁定（主人 2026-10-02）**：不接受“Linux 静态 ELF 没有动态装载器所以不转发”——三个 OS 都要把动态装载做好：Linux 写最小动态 ELF（PT_INTERP 指向系统 ld.so，DT_NEEDED libc.so.6，四个 GLOB_DAT 槽绑定 dlopen/dlsym/dlclose/dlerror，与 macOS 的四个 eager bind 同形），Windows 把同样四个槽映射到 LoadLibraryA/GetProcAddress/FreeLibrary/GetLastError；于是 `__hostaddr0..3` + `__hostcall` 在六个目标上是同一条转发通道。只有用到转发的程序才写动态头，其余镜像字节不变。**方向澄清（主人 2026-10-02）**：反对自研 libc 的原因是它是大工程，**将来应做成外置的 libc 包，而不是内置在 unisacc.com 里**；“缺什么函数就补一个函数体编进去”的亡羊补牢做法是无底洞，停止。于是 0.0.21 的转发不是逐个函数写转发桩，而是**通用转发**：有原型、无定义、随带库也没有的外部函数，一律由编译器生成转发桩（0.0.19 R19-10 的 `fwd_stub` 机制，目前只在 macOS `-run` 下），扩展到写出的镜像与 Linux（借上面的四个 dl 槽）；随带头文件逐步收缩为声明，函数体只留纯计算且影响确定性的部分，最终外置。主人也说明静态与动态不是硬要求、产物体积暂不是关键，以实现与可维护为先。
 
 ## 6. 未解决问题
 
