@@ -250,6 +250,16 @@ The N22 bootstrap check produced identical **unsigned** files from the seed, sec
 
 Two named R14-8 byte-level obligations remain. For `b_compound` and `b_pp2`, global compound-literal paths in E3 produce tapes different from the C reference and therefore different images on all six targets; measured program outputs agree with the system compiler. `exec/c/chain.knownfail` marks either case becoming equal as a revived failure, requiring its ledger line to be removed. We therefore claim byte-level parity only for the listed measured inputs outside these two entries, and retain both as open obligations ([R14-8 record](../archive/plans/v0.0.14.md)).
 
+### 5.8 v0.0.21 development increments (unreleased)
+
+The following is development-tree work after v0.0.20 was published (2026-10-01). It is not a release result and has not passed the release gates or a candidate build.
+
+**libc direction (owner, 2026-10-02).** The home-grown libc no longer grows: the bundled library is to become an external libc package rather than live inside `unisacc.com`, and "add a body when a program needs it" stops. Functions the system already has are forwarded to the system libc; the [route table](libc-route-table.md) (design) assigns each family to forward, keep or refuse.
+
+**Generic forwarding.** The forwarding stubs that were limited to macOS `-run` are generalised: every function with a prototype, no definition and no bundled body gets a compiler-generated stub (dlsym plus a host call), in written images and under `-run`, on macOS and Linux (commit `f0b31b9`). Linux images that forward are written as a minimal dynamic ELF: PT_INTERP, DT_NEEDED `libc.so.6`, and four dl* GLOB_DAT slots in the same place as the Mach-O eager bind; programs that do not forward keep identical bytes. Development-tree measurements: gethostname, sysconf and getpagesize forwarded correctly on lnx/arm64, lnx/x86_64, osx/arm64 and osx/x86_64; the forward suite passes 10/10, including written osx images and lnx/arm64 dynamic ELF images compared against cc/gcc. A cosmopolitan-style POSIX layer for Windows is planned only ([design](win-posix-plan.md)); it is not implemented.
+
+**A lesson from the header-standalone check.** The check that each bundled header compiles when included alone ran with library trimming on, so bodies no program used were never compiled and the check missed them. Recompiling every body found `time.h` calling a helper defined only in `unistd.h`, and two headers that cannot work on Windows (`dirent.h`, `unisacc_ffi.h`, now refused by name). This is the theme of §7.4: a check covers only what it actually exercises.
+
 ## 6 Verification Methodology
 
 ### 6.1 Full-domain enumeration (T1)
@@ -369,7 +379,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 **Speed.** In the historical measurements of Table 4, the network compiler is 4–17× slower; this is not a same-identity v0.0.14 timing result. Unreachable-function pruning shipped in v0.0.9 but gave no measurable speed-up on `calc.c`; later library trimming and network sharding require their own measurements, while step-by-step interpretation by a generic executor retains a cost.
 
-**Language and product scope.** A C99 subset with bundled headers. Since v0.0.16 the compiler can emit ELF, Mach-O and COFF object files; since v0.0.17 it supports separate compilation, unit-object linking and archives. The v0.0.18–v0.0.19 development tree added assembly text and a bundled assembler for Linux targets (§5.6). The network product still lacks Mach-O/COFF object output, and calling functions compiled by an external C compiler is not complete. The bundled C library is growing around a Linux-compatible interface dispatched per OS; host-libc forwarding under `-run` is macOS-only. Networks are defined only on their enumerated domains: extending the language requires extending the tables and rebuilding.
+**Language and product scope.** A C99 subset with bundled headers. Since v0.0.16 the compiler can emit ELF, Mach-O and COFF object files; since v0.0.17 it supports separate compilation, unit-object linking and archives. The v0.0.18–v0.0.19 development tree added assembly text and a bundled assembler for Linux targets (§5.6). The network product still lacks Mach-O/COFF object output, and calling functions compiled by an external C compiler is not complete. The bundled C library no longer grows on demand and is to become an external package; the v0.0.21 development tree generalises forwarding to the system libc (written images and `-run`, macOS and Linux, §5.8), while the Windows POSIX layer is still a plan. Networks are defined only on their enumerated domains: extending the language requires extending the tables and rebuilding.
 
 **Representation versus maintenance cost.** Compiling control flow into tables does not by itself reduce the language logic that must be maintained: the offline constructor still orchestrates the rules, and machine-code byte templates are still code. Whether the maintenance surface really shrinks must be measured at equal coverage — declared rules, special-purpose generator logic and still-used legacy implementations — not judged by file type.
 
@@ -377,7 +387,7 @@ Two lessons transfer: construction plus enumeration is not merely a substitute f
 
 **Threats to validity.** Performance figures come from a single machine, and some platforms were executed under emulation; the rows of the speed table come from different product versions (Appendix A); coverage by c-testsuite and the probe corpus does not extrapolate to arbitrary C99 programs.
 
-**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../archive/plans/v0.0.20.md) and [v0.0.21](../plans/v0.0.21.md). These are plans, not results.
+**Where the open problems go.** T2, T3, P-2 for all walkers, external-referee coverage, speed, maintenance surface, self-construction of the network package, moving templates into tables and capacity remain open research or engineering obligations in the [roadmap](../prd.md). Basic `.o` output and unit linking are implemented (§5.5); product Mach-O/COFF objects, external C ABI calls and dependent forwarding have specific acceptance plans for [v0.0.20](../archive/plans/v0.0.20.md) and [v0.0.21](../plans/v0.0.21.md). These are plans, not results. The v0.0.20 release took about 115 min from freeze to publish, about 50 min of it rework ([timeline review](pipeline-speed-review-0020.md)); the process fixes are v0.0.21 item 14b.
 
 ## 9 Related Work
 
