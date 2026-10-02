@@ -23,7 +23,7 @@ def launch(comp): return ['sh', comp] if comp.endswith('.com') else [comp]
 
 ua = os.environ.get('UA')
 if not ua:
-    subprocess.run(['bash', '-c', '. tests/lib.sh && ua_ready'], cwd=ROOT, check=True, timeout=45)
+    subprocess.run(['bash', '-c', '. "$0" && ua_ready', str(ROOT / 'tests/lib.sh')], cwd=ROOT, check=True, timeout=45)
     ua = '/tmp/ua_ref'
 product = os.environ.get('MODEL_COM')
 lo, hi = (int(x) for x in os.environ.get('SEEDS', '1-40').split('-'))
