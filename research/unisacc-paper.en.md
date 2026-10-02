@@ -260,6 +260,10 @@ The following is development-tree work after v0.0.20 was published (2026-10-01).
 
 **A lesson from the header-standalone check.** The check that each bundled header compiles when included alone ran with library trimming on, so bodies no program used were never compiled and the check missed them. Recompiling every body found `time.h` calling a helper defined only in `unistd.h`, and two headers that cannot work on Windows (`dirent.h`, `unisacc_ffi.h`, now refused by name). This is the theme of §7.4: a check covers only what it actually exercises.
 
+**Real programs keep finding defects.** Making Lua 5.4's single-file build (onelua.c) pass required fixing more than ten defects in the reference front end, each with a probe compared against cc: typedef'd arrays not treated as arrays at declarations; a `T **` struct member indexed in sizeof(T) steps; a call through a function-pointer member dereferenced once too often; member declaration specifiers leaking out of a struct body; an incomplete extern array sized wrongly when defined later (its initialiser cleared the adjacent character-class table); `#include` silently dropped after 200 inclusions; a live `#error` ignored. setjmp/longjmp became compiler intrinsics (they cannot be forwarded: they must capture the generated code's own frame). None of these constructs is a key of any single table, consistent with §7.4: combinations and real programs are the main source of failures outside the unit of verification. The corpus ratchet therefore passes one more program than 0.0.20.
+
+**cc interoperation.** Objects written by `-c` can now call and be called by functions compiled by the system cc: outbound with integer, pointer, floating-point and stack arguments, inbound with integers and pointers (osx/arm64, lnx/arm64, lnx/x86_64); other signatures are refused by name.
+
 ## 6 Verification Methodology
 
 ### 6.1 Full-domain enumeration (T1)
