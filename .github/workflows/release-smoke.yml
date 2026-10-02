@@ -1,0 +1,65 @@
+# 0.0.22 P1-B ⑥ (after minicon's release-smoke-test.yml): download the PUBLISHED unisacc.com --
+# the bytes a user gets, not the candidate or a rebuild -- check its sha256 against the signed
+# hash, and run the demo suite on each of the six native runners.  Read-only; never compiles
+# the compiler, never touches signing or candidate state.
+name: release-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published release tag, e.g. v0.0.22"
+        required: true
+        type: string
+      sha256:
+        description: "Signed unisacc.com sha256 from the signing receipt"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15,         target: osx/arm64 }
+          - { runner: macos-15-intel,   target: osx/x86_64 }
+          - { runner: ubuntu-latest,    target: lnx/x86_64 }
+          - { runner: ubuntu-24.04-arm, target: lnx/arm64 }
+          - { runner: windows-latest,   target: win/x86_64 }
+          - { runner: windows-11-arm,   target: win/arm64 }
+    name: smoke ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: download the public asset (unauthenticated, as a user would)
+        run: |
+          set -euo pipefail
+          mkdir -p dl
+          curl -fsSL --retry 4 --retry-all-errors --retry-delay 5 -o dl/unisacc.com \
+            "https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/unisacc.com"
+          got=$(python -c "import hashlib,sys;print(hashlib.sha256(open('dl/unisacc.com','rb').read()).hexdigest())")
+          echo "public sha256 $got"
+          [ "$got" = "${{ inputs.sha256 }}" ] || { echo "PUBLIC BYTES DIFFER from the signed hash"; exit 1; }
+          chmod +x dl/unisacc.com
+      - name: demo suite on the public bytes (${{ matrix.target }})
+        run: |
+          python tests/comdemo.py --com dl/unisacc.com --label "${{ matrix.target }}" --out "smoke-$(echo '${{ matrix.target }}' | tr / -).json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.target == 'lnx/x86_64' && 'lnx-x86_64' || matrix.target == 'lnx/arm64' && 'lnx-arm64' || matrix.target == 'osx/arm64' && 'osx-arm64' || matrix.target == 'osx/x86_64' && 'osx-x86_64' || matrix.target == 'win/x86_64' && 'win-x86_64' || 'win-arm64' }}
+          path: smoke-*.json
