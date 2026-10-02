@@ -1644,6 +1644,9 @@ int primary(void) {
            is an unsigned int, and `s == 0xffffffff` compares in 32 bits. */
         if ((src[tpos[tp]] & 255) == 48) { if (tlen[tp] > 1) {
             if (v > 2147483647) { if (v <= 4294967295) { cursize = 4; curuns = 1; } }
+            /* past LLONG_MAX (it parsed to a negative long): unsigned long long, LL suffix
+               or not (csmith seeds 108, 128, 168: p <= 0xAB4624F099C83E0CLL compared signed) */
+            if (v < 0) { cursize = 8; curuns = 1; }
         } }
         /* Character contents are not integer suffixes: 'U' is an int. */
         if ((src[tpos[tp]] & 255) != 39) {
