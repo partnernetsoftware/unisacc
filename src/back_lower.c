@@ -18,6 +18,7 @@
 
 #include "tapescan.h"
 #define BK_DATA_BASE 256            /* tape.DATA_BASE */
+int bk_anyccw;                       /* some __ccw_ wrapper exists (its body's local symbol is renamed) */
 int bk_dyn;                 /* 0.0.21 R21-4a': a Linux image that imports dlopen/dlsym/dlclose/dlerror (dynamic ELF) */
 int bk_elf_hdrs(void) { return bk_dyn ? 784 : 176; }   /* ELF header bytes before the code (bk_elf) */
 /* Which target this very binary runs on, for run mode [S-9], and the
@@ -197,7 +198,7 @@ int bk_repack(void) {
         if (pass == 1) bk_nzend = cur;      /* nonzero blobs end here, zero blobs follow */
         pass = pass - 1;
     }
-    bknd = 0; bknz = 0; bkdlen = 0; pass = 1; bk_dyn = 0;
+    bknd = 0; bknz = 0; bkdlen = 0; pass = 1; bk_dyn = 0; bk_anyccw = 0;
     while (pass >= 0) {
         b = 0;
         while (b < bknb) {
@@ -849,7 +850,7 @@ int bk_lower(void) {
     pc = 0;
     while (pc <= bkni) {
         j = bklab_first[pc];
-        while (j >= 0) { bklab_tpc[j] = tkn; if (bk_isccw(j)) ccw = 1; j = bklab_next[j]; }
+        while (j >= 0) { bklab_tpc[j] = tkn; if (bk_isccw(j)) { ccw = 1; bk_anyccw = 1; } j = bklab_next[j]; }
         if (pc == bkni) break;
         if (ccw == 1) {
             /* cc interop inbound (front_parse.c ccw_emit): the host's

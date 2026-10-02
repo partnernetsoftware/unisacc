@@ -301,12 +301,33 @@ int bk_sprefix(int id) {                       /* chars of the tape name dropped
         && bkpool[bkname_at[id] + 3] == 99 && bkpool[bkname_at[id] + 4] == 119 && bkpool[bkname_at[id] + 5] == 95) return 6;
     return 0;
 }
-int bk_snamelen(int id, int us) { return bkname_len[id] - bk_sprefix(id) + us; }
+/* cc interop inbound: the exported NAME is the wrapper, so the body's own
+   local symbol is written NAME.body (one name, one symbol -- an assembler
+   rejects a local and a global spelled alike) */
+int bk_hasccw(int id) {
+    int j; int n; int k; char *a;
+    if (!bk_anyccw || bksp_kind[id] != 1) return 0;
+    n = bkname_len[id]; a = bkpool + bkname_at[id];
+    j = 0;
+    while (j < bknn) {
+        if (bkname_len[j] == n + 6) {
+            char *b; b = bkpool + bkname_at[j];
+            if (b[0] == 95 && b[1] == 95 && b[2] == 99 && b[3] == 99 && b[4] == 119 && b[5] == 95) {
+                k = 0; while (k < n && b[6 + k] == a[k]) k = k + 1;
+                if (k == n) return 1;
+            }
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+int bk_snamelen(int id, int us) { return bkname_len[id] - bk_sprefix(id) + us + (bk_hasccw(id) ? 5 : 0); }
 int bk_sname_w(int id, int us) {               /* name + NUL; us: a leading `_` (Mach-O C names) */
     int k;
     if (us) wb(95);
     k = bk_sprefix(id);
     while (k < bkname_len[id]) { wb(bkpool[bkname_at[id] + k]); k = k + 1; }
+    if (bk_hasccw(id)) { wb(46); wb(98); wb(111); wb(100); wb(121); }   /* .body */
     wb(0); return 0;
 }
 int bk_osym(long name, int info, int shndx, long value) {

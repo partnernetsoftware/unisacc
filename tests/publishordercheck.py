@@ -23,6 +23,8 @@ if a[:2]==['release','view']:
  elif 'select(' in q:print('https://example.invalid/unisacc.com')
  elif 'join(" ")' in q:print('unisacc.com unsigned.zip unisacc-macos-universal.dmg')
  elif 'join(", ")' in q:print('unisacc.com, unisacc-macos-universal.dmg')
+if a[:2]==['release','download']:
+ d=Path(a[a.index('-D')+1]); d.mkdir(parents=True,exist_ok=True); (d/'unisacc.com').write_bytes(b'signed asset')
 ''')
     (bin_dir / 'curl').write_text('''#!/usr/bin/env python3
 import os,sys
@@ -44,11 +46,11 @@ Path(a[a.index('-o')+1]).write_bytes(b'signed asset')
 
     result, rows = run('0' * 64)
     assert result.returncode != 0, result.stdout
-    assert 'curl' in rows, rows
+    assert any('release download' in row for row in rows), rows   # 0.0.21: a draft asset is fetched with the authenticated client
     assert not any('delete-asset' in row or 'release edit' in row for row in rows), rows
     result, rows = run(expected)
     assert result.returncode == 0, (result.stdout, result.stderr)
-    checked = rows.index('curl')
+    checked = next(i for i, row in enumerate(rows) if 'release download' in row)
     deleted = next(i for i, row in enumerate(rows) if 'delete-asset' in row)
     published = next(i for i, row in enumerate(rows) if 'release edit' in row)
     assert checked < deleted < published, rows

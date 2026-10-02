@@ -57,6 +57,7 @@ def main():
             if not reason.startswith("R14-8 P1 "):
                 raise AssertionError("bad tapebin knownfail line: " + name)
             known_tape_diffs.add(name)
+        refused_ok = set(knownfail_read("tests/product-refusals.knownfail"))
         observed_tape_diffs = set()
         files = sorted(pathlib.Path("examples").glob("*.c")) + sorted(pathlib.Path("tests/c").glob("*.c"))
         if not files:
@@ -73,6 +74,10 @@ def main():
                                capture_output=True, timeout=20)
             b = subprocess.run(["sh", str(product), str(path), "-t", host, "--tapebin", "-o", str(product_bin)],
                                capture_output=True, timeout=20)
+            if path.name in refused_ok:
+                if a.returncode or not b.returncode:
+                    raise AssertionError((str(path), "listed in tests/product-refusals.knownfail but not (reference accepts, product refuses): delete or fix its line"))
+                continue
             if bool(a.returncode) != bool(b.returncode):
                 raise AssertionError((str(path), "reference/product acceptance differs", a.stderr[:160], b.stderr[:160]))
             if a.returncode:
