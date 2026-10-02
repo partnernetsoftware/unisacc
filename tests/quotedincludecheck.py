@@ -30,7 +30,7 @@ with tempfile.TemporaryDirectory(prefix='unisacc-quoted-include-') as folder:
         result = subprocess.run([bound, '5', str(output)], capture_output=True, timeout=7)
         if result.returncode != 31:
             raise SystemExit('nested/angle/large header: wrong exit ' + str(result.returncode))
-    (work / 'too-large.h').write_bytes(b' ' * 4194304)
+    (work / 'too-large.h').write_bytes(b' ' * 8388608)   # MAXSRC is 8 MB since 0.0.21
     source.write_text('#include "too-large.h"\nint main(void){return 0;}\n')
     result = subprocess.run([bound, '15', ua, str(source), '-o', str(work / 'invalid')],
                             capture_output=True, timeout=17)

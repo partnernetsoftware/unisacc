@@ -180,13 +180,20 @@ def fingerprint(jobs):
     return result
 
 def resume(data, stamps, jobs, exclusive):
+    # 0.0.21: a changed job list or exclusive set no longer forces a new state: results
+    # survive only for jobs whose command and fingerprint are both unchanged; added jobs
+    # are simply pending, removed ones are dropped
     if data['jobs'] != jobs or data.get('exclusive', []) != sorted(exclusive):
-        raise SystemExit('queue input changed: selected jobs/options require a new state directory')
+        oldjobs = data['jobs']
+        changed = [n for n in list(data['results']) if n not in jobs or oldjobs.get(n) != jobs[n]]
+        for n in changed: data['results'].pop(n, None)
+        if changed: print('INVALIDATE', ','.join(changed), flush=True)
+        data['jobs'] = jobs; data['exclusive'] = sorted(exclusive)
     old = data['stamp']
     if not isinstance(stamps, dict) or not isinstance(old, dict):
         if old != stamps: raise SystemExit('queue input changed: use a new state directory')
         return
-    invalid = [n for n in jobs if old.get(n) != stamps[n]]
+    invalid = [n for n in jobs if n in data['results'] and old.get(n) != stamps[n]]
     for n in invalid: data['results'].pop(n, None)
     if invalid: print('INVALIDATE', ','.join(invalid), flush=True)
     data['stamp'] = stamps

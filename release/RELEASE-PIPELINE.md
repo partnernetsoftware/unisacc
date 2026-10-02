@@ -120,4 +120,5 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - 平台必跑项串行：Windows 虚拟机做自举时不要同时跑 Linux 必跑项（0.0.20 一次并行导致 19 个套件超时假红）；冻结时就在后台启动 Windows 虚拟机（开机约 250 秒），`tests/vms.sh up` 等不到代理就手动 `utmctl start` 再等 IP。
 - Apple 公证在载荷定稿（队列与平台必跑全绿）之后只做一次。
 - 提速分析见 research/pipeline-speed-review-0020.md。
+- **发布与同时修改互不冲突（0.0.21，主人要求）**：队列跑在钉住提交的独立工作树里；一轮里发现测试或清单要改时，直接提交，然后用**同一份 GATE_STATE** 在新 HEAD 上续跑（`QUEUE_WORKTREE=/tmp/unisacc-queue-<新sha> release/tools/queue.sh ...`）。release.sh 不再因树变化拒绝续跑；gatequeue 逐任务比对指纹（声明输入、设置、可执行文件），只重跑受影响的任务；任务表变了也只丢掉改了命令或已删除的任务。产品闭包变了才需要重建候选，那时同源编译器和候选的指纹会让相关任务自动重跑。
 

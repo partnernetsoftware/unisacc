@@ -63,8 +63,12 @@ head_now=$(cd "$R" && git ls-tree HEAD -- $DECLARED 2>/dev/null | shasum -a 256 
 if [ -s "$GATE_STATE/head" ]; then
     head_was=$(cat "$GATE_STATE/head")
     if [ "$head_was" != "$head_now" ]; then
-        echo "release: declared inputs changed during the queue ($head_was -> $head_now): results are invalid; start a new GATE_STATE" >&2
-        exit 1
+        # 0.0.21 (owner: a release run and ongoing changes must not conflict): the state
+        # may continue on a newer tree.  gatequeue keeps a result only when the job's own
+        # fingerprint (its declared inputs, settings and executables) is unchanged, so a
+        # test or doc fix re-runs exactly the jobs it touches, not the whole queue.
+        echo "release: tree changed since this state began ($head_was -> $head_now); reusing results whose job fingerprints are unchanged" >&2
+        echo "$head_now" > "$GATE_STATE/head"
     fi
 else
     echo "$head_now" > "$GATE_STATE/head"
