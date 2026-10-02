@@ -44,8 +44,9 @@ int bk_relo(long off, int type, long target) {
     return 1;
 }
 #define BK_NIMP 14                  /* pe.IMPORTS */
-char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000";
-long bk_imp[BK_NIMP];               /* Windows: the IAT slot of each import */
+#define BK_NIMPMAX 18               /* + LoadLibraryA GetProcAddress FreeLibrary GetLastError (R21-4a') */
+char *BK_IMPS = "GetStdHandle\000WriteFile\000ReadFile\000CloseHandle\000CreateFileA\000ExitProcess\000GetCommandLineA\000VirtualAlloc\000VirtualProtect\000VirtualFree\000FlushInstructionCache\000SetFilePointer\000DeleteFileA\000MoveFileExA\000LoadLibraryA\000GetProcAddress\000FreeLibrary\000GetLastError\000";
+long bk_imp[BK_NIMPMAX];               /* Windows: the IAT slot of each import */
 long toff[BK_MAXT + 1];             /* each lowered instruction's byte offset */
 /* Branch relaxation, the same rounds as assemble.py [S-10 #1]: tshort[i]
    says instruction i is a branch encoded in its short form; tjk[i] is that
@@ -82,6 +83,10 @@ long bk_leaaddr(int i) {
 /* Fixed host ABI bridge: mirrored from exec/enc/hostbridge.tsv. */
 unsigned long BK_HOST_ARM[] = {0x910003e9,0xd101c0ea,0x927ced4a,0x9100015f,0xf90003e1,0xf90007e2,0xf9000be3,0xf9000fe4,0xf90013e5,0xf90017e6,0xf9001be7,0xf9001fe9,0xf90023fe,0xf9400220,0xf9400621,0xf9400a22,0xf9400e23,0xf9401224,0xf9401625,0xd63f0200,0xf94003e1,0xf94007e2,0xf9400be3,0xf9400fe4,0xf94013e5,0xf94017e6,0xf9401be7,0xf9401fe9,0xf94023fe,0x9100013f};
 char *BK_HOST_X86 = "\123\110\211\303\110\211\340\110\203\354\140\110\203\344\360\110\211\074\044\110\211\164\044\010\110\211\124\044\020\114\211\104\044\030\114\211\124\044\040\114\211\114\044\050\110\211\104\044\070\110\213\073\110\213\163\010\110\213\123\020\110\213\113\030\114\213\103\040\114\213\113\050\061\300\101\377\323\110\213\074\044\110\213\164\044\010\110\213\124\044\020\114\213\104\044\030\114\213\124\044\040\114\213\114\044\050\110\213\144\044\070\133";
+/* R21-4a': the Win64 form -- rcx/rdx/r8/r9, 32-byte shadow space, args 5-6 at [rsp+32]/[rsp+40];
+   rcx rdx r8 r9 r10 rsi rdi saved around the call (caller-saved under Win64) */
+char *BK_HOST_WIN_X86 = "\123\110\211\303\110\211\340\110\201\354\200\000\000\000\110\203\344\360\110\211\104\044\160\110\211\114\044\060\110\211\124\044\070\114\211\104\044\100\114\211\114\044\110\114\211\124\044\120\110\211\164\044\130\110\211\174\044\140\110\213\013\110\213\123\010\114\213\103\020\114\213\113\030\110\213\103\040\110\211\104\044\040\110\213\103\050\110\211\104\044\050\101\377\323\110\213\114\044\060\110\213\124\044\070\114\213\104\044\100\114\213\114\044\110\114\213\124\044\120\110\213\164\044\130\110\213\174\044\140\110\213\144\044\160\133";
+#define BK_HOST_WIN_X86_N 135
 #define BK_HOST_ARM_N 30
 #define BK_HOST_X86_N 112
 
@@ -334,7 +339,7 @@ int bk_arm(int i, long off) {
         k = 0; while (k < BK_HOST_ARM_N) { ow(BK_HOST_ARM[k]); k = k+1; } return 1;
     }
     if (op == TO_HOSTADDR) {
-        a_adrp_add(a[0], pc, BK_DATA_BASE+bk_shift-32+8*a[1]);
+        a_adrp_add(a[0], pc, bkos == 2 ? bk_imp[BK_NIMP+a[1]] : BK_DATA_BASE+bk_shift-32+8*a[1]);
         ow(0xF9400000 | (a[0]<<5) | a[0]); return 1;
     }
     if (op == TO_SETREG) {
@@ -875,10 +880,11 @@ int bk_x86(int i, long off) {
     pc = bk_textva + off;
     if (op == TO_HOSTCALL) {
         x_movrr(X_R11, a[0]); x_movrr(X_RAX, a[1]);
+        if (bkos == 2) { k = 0; while (k < BK_HOST_WIN_X86_N) { ob(BK_HOST_WIN_X86[k]); k = k+1; } return 1; }
         k = 0; while (k < BK_HOST_X86_N) { ob(BK_HOST_X86[k]); k = k+1; } return 1;
     }
     if (op == TO_HOSTADDR) {
-        x_rip(0x8B, a[0], pc+7, BK_DATA_BASE+bk_shift-32+8*a[1]); return 1;
+        x_rip(0x8B, a[0], pc+7, bkos == 2 ? bk_imp[BK_NIMP+a[1]] : BK_DATA_BASE+bk_shift-32+8*a[1]); return 1;
     }
     if (op == TO_SETREG) {
         if (a[3] == SK_IMM) { x_movri(a[0], a[1]); return 1; }
@@ -1080,18 +1086,20 @@ long bk_round(long v, long a) { return (v + a - 1) / a * a; }
 
 /* Windows' import section layout (pe._idata) -- the same arithmetic */
 long bk_idata_len; long bk_iat_off; long bk_cfg_off;
+/* a Windows image that forwards (bk_dyn) imports four more kernel32 names */
+int bk_nimp(void) { return BK_NIMP + ((bkos == 2 && bk_dyn) ? 4 : 0); }
 int bk_idata_layout(void) {
     long off; int k; int L; char *e;
-    off = 40 + (BK_NIMP + 1) * 8 * 2;               /* desc + ILT + IAT */
+    off = 40 + (bk_nimp() + 1) * 8 * 2;               /* desc + ILT + IAT */
     k = 0;
-    while (k < BK_NIMP) {
+    while (k < bk_nimp()) {
         e = bk_nth(BK_IMPS, k); L = 0; while (e[L]) L = L + 1;
         L = 2 + L + 1; if (L % 2) L = L + 1;
         off = off + L; k = k + 1;
     }
     off = off + 13;                                  /* KERNEL32.dll and its NUL */
     off = (off + 7) / 8 * 8;
-    bk_cfg_off = off; bk_iat_off = 40 + (BK_NIMP + 1) * 8;   /* after the ILT */
+    bk_cfg_off = off; bk_iat_off = 40 + (bk_nimp() + 1) * 8;   /* after the ILT */
     bk_idata_len = off + 320;                        /* LOADCFG 0x140 */
     return 0;
 }
@@ -1173,6 +1181,9 @@ int bk_assemble(void) {
             bk_runtext == 0 || bk_rundata == 0) {
             __write(2, "run: cannot map memory\n", 23); __exit(1);
         }
+        if (bkos == 2 && bk_dyn) {
+            __write(2, "unisacc: host forwarding under -run is not available on Windows yet; write the program with -o\n", 95); __exit(1);
+        }
         if (bkos == 0 && bk_dyn && host_dl_slot(1) == 0) {
             __write(2, "unisacc: host forwarding under -run needs a compiler that can reach the host loader (this build cannot); write the program with -o instead\n", 136); __exit(1);
         }
@@ -1201,7 +1212,7 @@ int bk_assemble(void) {
         bk_textva = 5368709120 + 4096;
         rd = 4096 + bk_round(bktlen, 4096);
         bk_datava = 5368709120 + rd + bk_round(bk_idata_len, 4096);
-        i = 0; while (i < BK_NIMP) { bk_imp[i] = 5368709120 + rd + bk_iat_off + 8 * i; i = i + 1; }
+        i = 0; while (i < bk_nimp()) { bk_imp[i] = 5368709120 + rd + bk_iat_off + 8 * i; i = i + 1; }
     } } } }
     bk_shift = bk_datava - BK_DATA_BASE;
     bk_sizing = 0; bknro = 0;

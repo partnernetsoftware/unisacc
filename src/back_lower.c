@@ -878,8 +878,7 @@ int bk_lower(void) {
             pc = pc + 1; continue;
         }
         if (bk_is(op, ".hostcall") || bk_is(op, ".hostaddr")) {
-            if (bkos == 2) { __write(2, "foreign host ABI is only supported on osx and lnx\n", 50); __exit(1); }
-            if (bkos == 0) bk_dyn = 1;      /* the image becomes a dynamic ELF with the four dl* slots */
+            bk_dyn = 1;       /* lnx: dynamic ELF; win: four more kernel32 imports */      /* the image becomes a dynamic ELF with the four dl* slots */
             if (bk_is(op, ".hostaddr")) {
                 if (bkav[pc*8+1] < 0 || bkav[pc*8+1] >= 4) { __write(2, "hostaddr index must be 0..3\n", 28); __exit(1); }
                 tk(TO_HOSTADDR, bk_rmap[bkav[pc*8]], bkav[pc*8+1], 0, 0);

@@ -672,7 +672,7 @@ int bk_pesect(char *name, long rva, long vsize, long foff, long fsize, long flag
 int bk_pe(void) {
     long rd_rva; long dt_rva; long cookie_rva; long rd_file; long dt_file; long dlen2;
     long dvs; long rl_rva; long rl_file; long img; long reloc_rva; long page; long k;
-    long nmrva[BK_NIMP]; long off; long dllrva; int j; int L; char *e; long cfgstart; long nzl; long raw;
+    long nmrva[BK_NIMPMAX]; long off; long dllrva; int j; int L; char *e; long cfgstart; long nzl; long raw;
     rd_rva = 4096 + bk_round(bktlen, 4096);
     dt_rva = rd_rva + bk_round(bk_idata_len, 4096);
     cookie_rva = dt_rva + bk_round(bkdlen > 1 ? bkdlen : 1, 8);
@@ -699,7 +699,7 @@ int bk_pe(void) {
         if (j == 1) { w32(rd_rva); w32(40); }
         else { if (j == 5) { w32(rl_rva); w32(12); }
         else { if (j == 10) { w32(rd_rva + bk_cfg_off); w32(320); }
-        else { if (j == 12) { w32(rd_rva + bk_iat_off); w32((BK_NIMP + 1) * 8); }
+        else { if (j == 12) { w32(rd_rva + bk_iat_off); w32((bk_nimp() + 1) * 8); }
         else { w32(0); w32(0); } } } }
         j = j + 1;
     }
@@ -710,8 +710,8 @@ int bk_pe(void) {
     wz(1024 - bkwtot);
     wtext(); wz(bk_round(bktlen, 512) - bktlen);
     /* the import section, at rd_rva */
-    off = 40 + (BK_NIMP + 1) * 8 * 2; j = 0;
-    while (j < BK_NIMP) {
+    off = 40 + (bk_nimp() + 1) * 8 * 2; j = 0;
+    while (j < bk_nimp()) {
         e = bk_nth(BK_IMPS, j); L = 0; while (e[L]) L = L + 1;
         nmrva[j] = rd_rva + off;
         L = 2 + L + 1; if (L % 2) L = L + 1;
@@ -719,12 +719,12 @@ int bk_pe(void) {
     }
     dllrva = rd_rva + off;
     w32(rd_rva + 40); w32(0); w32(0); w32(dllrva);
-    w32(rd_rva + 40 + (BK_NIMP + 1) * 8);           /* the IAT */
+    w32(rd_rva + 40 + (bk_nimp() + 1) * 8);           /* the IAT */
     wz(20);
-    j = 0; while (j < BK_NIMP) { w64(nmrva[j]); j = j + 1; } w64(0);
-    j = 0; while (j < BK_NIMP) { w64(nmrva[j]); j = j + 1; } w64(0);
+    j = 0; while (j < bk_nimp()) { w64(nmrva[j]); j = j + 1; } w64(0);
+    j = 0; while (j < bk_nimp()) { w64(nmrva[j]); j = j + 1; } w64(0);
     j = 0;
-    while (j < BK_NIMP) {
+    while (j < bk_nimp()) {
         e = bk_nth(BK_IMPS, j); L = 0; while (e[L]) L = L + 1;
         w16(0); k = 0; while (k < L) { wb(e[k]); k = k + 1; } wb(0);
         if ((2 + L + 1) % 2) wb(0);
