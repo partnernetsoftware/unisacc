@@ -32,8 +32,8 @@ for source in ['examples/hello.c','tests/c/b_funcptr.c']:
  lines=lowered.decode().splitlines();headers={x.split()[0]:x.split()[1] for x in lines if x.startswith(('@argc ','@argv '))}
  tp=parse('\n'.join(x for x in lines if not x.startswith(('@argc ','@argv ')))+'\n')
  oldlayout,oldimports=image.layout,image.imports
- image.layout=lambda *args:(tb,db)
- image.imports=lambda os,arch,n:{'__imp_'+name:tb+((n+7)&-8)+8*i for i,name in enumerate(IMPORTS)}
+ image.layout=lambda *args,**kw:(tb,db)   # 0.0.21: layout takes dynamic= (Linux forwarding ELF)
+ image.imports=lambda os,arch,n,**kw:{'__imp_'+name:tb+((n+7)&-8)+8*i for i,name in enumerate(IMPORTS)}
  try: code,stats=assemble.assemble(tp)
  finally:image.layout,image.imports=oldlayout,oldimports
  assert stats['encoded']==stats['insns']

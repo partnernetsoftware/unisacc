@@ -406,6 +406,7 @@ static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
 /* freopen: open the new file and move it onto the stream's descriptor, so
    the same FILE * (stdin/stdout/stderr included) now refers to it.  Windows:
    a HANDLE cannot be renumbered, so the new stream is returned instead. */
+#ifndef __UNISA_PYFRONT   /* the Python control-group front end folds one tape across targets */
 #if !__UNISA_FTRIM_LIBC || __UN_freopen
 static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
     FILE *__u_n; long __u_r;
@@ -431,6 +432,7 @@ static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
     return __u_f;
 #endif
 }
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fclose
 /* The standard streams are not ours to close: `fclose(stdin)` on a POSIX libc

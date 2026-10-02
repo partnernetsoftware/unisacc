@@ -23,6 +23,7 @@ def predefines(target):
     for m in PREDEF[os_] + PREDEF[arch]:
         d[m] = "1"
     d["__UNISA__"] = "1"
+    d["__UNISA_PYFRONT"] = "1"   # 0.0.21: the control-group front end compiles every carried body (no trimming)
     return d
 
 

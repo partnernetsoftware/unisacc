@@ -71,7 +71,7 @@ def encodings(d,runner,arch,models):
          'hostaddr '+regs[0]+', 4294967296',
          'hostcall '+regs[0]+', '+('x16' if arch=='arm64' else 'r11')]
     for text in bad: reject(runner,models,inp,'@target osx/'+arch+'\n'+text+'\n')
-    for os_ in ('lnx','win'): reject(runner,models,inp,'@target '+os_+'/'+arch+'\nhostcall '+regs[0]+', '+regs[1]+'\n')
+    for os_ in ('win',): reject(runner,models,inp,'@target '+os_+'/'+arch+'\nhostcall '+regs[0]+', '+regs[1]+'\n')   # 0.0.21: lnx encodes host calls (dynamic ELF); win is refused until 0.0.22
     print(arch+': 96 bridge encodings identical on table/net; 8 invalid cases rejected',flush=True)
 
 

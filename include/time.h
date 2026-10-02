@@ -327,7 +327,7 @@ static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u
 #endif
 /* clock: user + system processor time from getrusage, in microseconds
    (the kernel's call, no host library).  Windows: not yet (0.0.22). */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__UNISA_PYFRONT)
 #if !__UNISA_FTRIM_LIBC || __UN_clock
 static clock_t clock(void) {
     long __u_ru[18]; long __u_r;

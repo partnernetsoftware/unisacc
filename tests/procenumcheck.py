@@ -62,6 +62,7 @@ int main(int argc,char **argv){DIR *d;struct dirent *e;int n=0;
 with tempfile.TemporaryDirectory(prefix='procenum-private-') as temp:
     d=pathlib.Path(temp)
     (d/'dirent.h').write_bytes((ROOT/'include/dirent.h').read_bytes())
+    (d/'sys').mkdir(); (d/'sys'/'_win.h').write_bytes((ROOT/'include/sys/_win.h').read_bytes())   # dirent.h includes it (0.0.21)
     (d/'control.c').write_text(CONTROL)
     run(['cc','-std=c99','-I',d,d/'control.c','-o',d/'control'])
     print(run([d/'control']).stdout.decode().strip())

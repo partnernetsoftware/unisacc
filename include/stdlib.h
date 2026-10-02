@@ -483,7 +483,7 @@ static int unsetenv(const char *__u_name) {
 /* system: /bin/sh -c CMD in a child, waited for; the kernel's calls, no
    host library (0.0.21: the compiler must build without the host channel).
    Windows: not yet (0.0.22, through the host channel). */
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__UNISA_PYFRONT)   /* the Python front end keeps every body and folds one tape across targets */
 #if !__UNISA_FTRIM_LIBC || __UN_system
 static int system(const char *__u_cmd) {
     static char *__u_env[512]; char *__u_argv[4]; long __u_pid; long __u_me; int __u_st; int __u_k; int __u_n;
