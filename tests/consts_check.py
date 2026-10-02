@@ -69,10 +69,10 @@ def main():
     from unisa.image import elf, macho, pe
     ehdr_and_phdrs = 64 + 56 * elf.NPH          # where ELF text starts
     checks += [
-        ("elf.VADDR (text)", elf.VADDR, r"bk_textva = (\d+) \+ \d+;"),
-        ("elf.VADDR (data)", elf.VADDR, r"bk_datava = (\d+) \+ bk_round\(\d+ \+ bktlen, 4096\)"),
-        ("elf headers", ehdr_and_phdrs, r"bk_textva = \d+ \+ (\d+);"),
-        ("elf.PAGE", elf.PAGE, r"bk_datava = \d+ \+ bk_round\(\d+ \+ bktlen, (\d+)\)"),
+        ("elf.VADDR (text)", elf.VADDR, r"bk_textva = (\d+) \+ h;\s*\n\s*bk_datava = \d+ \+ bk_round\(h \+ bktlen, 4096\)"),
+        ("elf.VADDR (data)", elf.VADDR, r"bk_datava = (\d+) \+ bk_round\(h \+ bktlen, 4096\)"),   # 0.0.21: h = bk_elf_hdrs()
+        ("elf headers", ehdr_and_phdrs, r"int bk_elf_hdrs\(void\) \{ return bk_dyn \? \d+ : (\d+); \}"),   # the static (non-forwarding) image
+        ("elf.PAGE", elf.PAGE, r"bk_datava = 4194304 \+ bk_round\(h \+ bktlen, (\d+)\)"),
         ("elf entry", elf.VADDR, r"w64\((\d+) \+ \d+ \+ bk_entry\)"),
         ("macho.VMADDR (text)", macho.VMADDR, r"bk_textva = (\d+) \+ h;"),
         ("macho.VMADDR (data)", macho.VMADDR, r"bk_datava = (\d+) \+ bk_round\(h \+ bktlen"),

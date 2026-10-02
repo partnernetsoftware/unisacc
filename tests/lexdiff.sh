@@ -30,7 +30,8 @@ src = open(sys.argv[1], encoding="latin-1").read()
 # #include now, looking beside the file and then in include/.
 import os
 # both front ends predefine the target's macros; a bare run is lnx/x86_64
-src, macros = preprocess(src, o, predefines("lnx/x86_64"), sys.argv[1], ("include",))
+pd = predefines("lnx/x86_64"); pd.pop("__UNISA_PYFRONT", None)   # 0.0.21: lexers are compared on the same text the C front end sees
+src, macros = preprocess(src, o, pd, sys.argv[1], ("include",))
 # expanded POSITIONALLY: each stretch with the macros in force there
 src = expand_positional(src, macros)
 # the source was read as latin-1 (one char per byte), so write the spelling

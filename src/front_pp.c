@@ -7,7 +7,7 @@
  * Stage 1: the lexer.  `unisacc -tokens f.c` prints the token stream.
  */
 
-#define MAXSRC 4194304   /* 4 MB: unisacc.c itself had reached 1,042,362 of the old 1 MB */
+#define MAXSRC 8388608   /* 8 MB (0.0.21: the flattened self-source passed half of 4 MB, 2,140,736) */
 #define MAXTOK 2097152   /* about one token per two bytes of the 4 MB MAXSRC */
 
 char src[MAXSRC];
