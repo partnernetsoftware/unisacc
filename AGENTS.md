@@ -43,7 +43,7 @@
 | 平台 | 方法 | 覆盖 |
 |---|---|---|
 | macOS arm64 与 x86_64 | `./tests/all.sh`、`./tests/fat.sh`（Rosetta） | osx/arm64、osx/x86_64 |
-| Linux | `./tests/linux.sh`：整套测试跑在本机 Lima 虚拟机里。`LIMA_VM=minicon-lnx-x86_64` 在 arm64 宿主上是**模拟**的，脚本发现架构不一致会把看门狗放大 10 倍（曾有七个套件因超时被误判失败）。虚拟机不挂载仓库，树是用管道送进去的 | lnx/arm64、lnx/x86_64 |
+| Linux | `./tests/linux.sh`：整套测试跑在本机 Lima 虚拟机里。`LIMA_VM=minicon-lnx-x86_64` 在 arm64 宿主上是**模拟**的，脚本发现架构不一致会把看门狗放大 10 倍（曾有七个套件因超时被误判失败）。**模拟机上的全套不算发版证据**（0.0.21 实测：约 95 个超时假红），全套跑原生 arm64（`LIMA_VM=default`），x86_64 证据看 release-check 的真机 runner，见 release/RELEASE-PIPELINE.md §4/§14。虚拟机不挂载仓库，树是用管道送进去的 | lnx/arm64、lnx/x86_64 |
 | Windows 11 | `./tests/crossnative.sh`：本机 UTM 虚拟机，用 `utmctl` 驱动 | win/arm64、win/x86_64 |
 
 - `crossnative.sh` 在虚拟机没开时**跳过**该目标：先开机再看 Windows 结果，用完要**关机**（很耗 CPU）。`tests/vms.sh up` / `down` 两件事都做（down 只关 up 开的）；`make release` 自己会调用。

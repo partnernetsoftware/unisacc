@@ -221,7 +221,7 @@ P3 在动作共享前缀 `compact_q` 后，将网络编码为 `UNINETB1`：整�
 
 ## 4. 质量体系
 
-- **门禁**：`tests/gate.sh --list [--com]`（0.0.17：--com 401 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
+- **门禁**：`tests/gate.sh --list [--com]`（0.0.21：--com 432 项）；发布验收只用 `tests/release.sh --com`（jobs 4、window 50、经 `tests/term.sh`、`SEED_DIR` 必填、STRICT=1），每项各绿一次；冷建网络的预热已并进 release.sh（队列前三窗，0.0.17 E1）。CI（`ci.yml` 跑 `all.sh`）是第二意见，Intel runner 仅供参考。每次运行 ≤60 s。
 - **清单契约**：knownfail/knownwrong 文件一行一个名字，列名即 known、转同即 revived（红，必须删行）：difftest(.com)、pyfront（Python 对照组缺口）、chain（模型与参考镜像差异）、diag(.com)、corpus（非 C99 输入）、c99。没有隐式排除——任何“覆盖名单”都要配清单（R14-8 教训）。
 - **账本**：C99 条款账本（覆盖）、模型字节账（`research/model-bytes.json`）、裁判登记（`research/referee.tsv`）；README/ARCHITECTURE 不重抄账本数字（docs 门禁断言）。
 - **reviewed trees**：`make gatedeps` 从 HEAD 的 `git archive`（umask 022）计算戳与 guards，作为发布前最后一提交。
@@ -237,23 +237,15 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 本机：Apple 签名/公证/staple（apple-sign.sh，与 CI 并行）；ci.yml 全量矩阵每周一或手动，是安全网不是前提
 ```
 
-- **权威文档**：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)（§0–8：冻结源、UA、P3、门禁队列、客机、CI/GHCR、Apple、Windows 签名、发布；每步坑与判据）；契约 [release/README.md](release/README.md)；策略 `release/signing-policy.json`；封存 `release/candidate.json`；工作流 `.github/workflows/{release-check,windows-signing,ci}.yml`；本机技能 `~/.claude/skills/unisacc-release-pipeline`。
+- **权威文档**：[release/RELEASE-PIPELINE.md](release/RELEASE-PIPELINE.md)（§0–10：冻结源、UA、P3、门禁队列、客机、CI/GHCR、Apple、Windows 签名、发布、命令序列、必跑清单；§11–14 逐版教训）；契约 [release/README.md](release/README.md)；策略 `release/signing-policy.json`；封存 `release/candidate.json`；工作流 `.github/workflows/{release-check,windows-signing,ci}.yml`；本机技能 `~/.claude/skills/unisacc-release-pipeline`。
 - **与 minicon 的对应**：minicon 在 CI 构建候选并推 GHCR，我们**本机构建**（一个能写出六目标的编译器，CI 只测不建，见 CLAUDE.md）再推 GHCR；签名/运行验证都按摘要拉取，同 minicon；docs 提交不打断签名（按产品源闭包比较）。
-- **现状**（0.0.16、0.0.17 实发）：push 后 release-check 约 1 分钟（六 runner 实跑封存候选）；资格→公司签名约 4 分钟；Apple 公证约 6 分钟，可与队列并行；公开后下载核对哈希。仍是手动的：删除非公开资产与 `gh release edit` 公开（脚本化列入 0.0.18 R18-11）；单架构原生 runner 跑完整套件。
+- **现状**（0.0.21 实发）：push 后 release-check 约 1 分钟（六个原生 runner 跑封存候选，这就是六格产品证据，x86_64 Linux 也以此为准）；资格→公司签名约 4 分钟；Apple 公证约 6 分钟，可与队列并行；`release/tools/publish.sh` 先核对草稿字节再公开，公开后下载核对。Linux 源码全套只在原生 arm64 客机上跑，模拟机全套不算证据。教训与下一版目标流程（照搬 minicon 的候选绑定、只发封存字节、发布后冒烟）见 RELEASE-PIPELINE.md §14 与 0.0.22 计划第 2 项。
 - **每片重封**：开发期每次产品闭包变化都要 `seal_candidate.sh <ver>-dev`，否则 release-check 候选作业红（0.0.11 前三次 push 的教训）。
 
 
 ## 5. 路线
 
-当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。
-
-R20-1 A 首轮复测：旧 C 构造器的 `prec` 单表与 Python/出货 UNS2 字节相同；完整旧检查在当前表上碰到 `abi` 规则容量、`isel` 类别容量与 `combo` 差异，58 秒整轮亦超时。旧 `genmodel.c` 在当前 `lexcls` 的 257 个字段值上超出 256 上限。它们是可复用算法的证据，尚不构成现行 P3/seed 的 C99 构造路径；逐项回执与边界见 [R20-1 A 复测](research/r20-c99-seed-a-audit.md)。
-
-R20-1 B 的首个可独立对拍切片定为现行 `.tbl → .net`：C99 构造器读取与 Python `exec/c/net.py` 相同的整数表，产出逐字节相同的阈值网络，并以 `exec/c/core.h` 的动作元数核验 Q 记录。它是通用网络构造的一步；各阶段的规则装配、P3 打包与 seed 仍需分别实现，不能凭本切片称 B 完成。
-
-该首切片已在 `seed/net.c` 落地：`prune`（48,824 B）与 E3（891,284 B）的 `.net` 均与 Python 字节相同；`seed-construct` 固定检查 `prune` 和声明返回小表。完整输入闭包、命令及剩余 Python 边界记在 [R20-1 A/B 回执](research/r20-c99-seed-a-audit.md)。后续逐网络 B 对拍的 [30 项矩阵回执](research/r21-c99-seed-b-matrix.md)覆盖共享、特性、六目标与对象路由；P3 包、seed 与默认切换仍属后续阶段。
-
-R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）与 `.gdef NAME`（该单元带初值的外部对象定义）。旧单元对象缺 `.unit 2` 时明确拒绝并要求重编，避免把旧带初值定义误当暂定定义。tapebin 为这些链接属性记录使用 v1/minor 1；旧 minor 0 包与整程序 tape 保持原字节，opset 不变。参考链接与产品格式同步推进，实测前不称完成。
+当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
 
 ### 5.1 libc 路线裁定（主人 2026-10-02）
 
@@ -261,16 +253,13 @@ R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）�
 
 ## 6. 未解决问题
 
-- **匿名结构体的名字边界（2026-10-02 审查）**：`stnew(-1, ...)` 表示匿名 tag，原先在检查 `t >= 0` 前调用 `name_toolong(t)`；私有 `-fsanitize=bounds` 构建抓到 `tlen[-1]` 越界。现只对有名 tag 检查长度，并以 `front-bounds` 独立 UBSan 门禁持续检查。
-- **询问计数越界（2026-10-02 审查）**：经典参考原为 `nask[16]`，生成权重有 `NSTAGE=18`；私有 UBSan 在 ABI/组合阶段报告第 16 格越界。现用 `NSTAGE` 定维并先检验阶段号；同源参考的 `linkunits` 35/35、`stages` 单探针通过，UBSan 重跑不再出现第 16 格越界。全套 sanitizer 仍有其他旧告警，另行归因；本项不能冒充全套 sanitizer 通过。
-- **归档输入与发布边界（2026-10-02 审查）**：截断 ar 成员原先可在 `ar t` 中以 rc 0 列名；当前参考侧已按名拒绝，`linkunits` 含失败与正常长成员探针。发布脚本原先先公开再验哈希；现在先校验草稿签名资产，错误哈希不得删除资产或公开，`publish-order` 隔离模拟通过。出货模型产品仍需从新源码重建并跑 `com-linkunits`，不得把参考绿算作出货绿。
 - **论文 A 口径**：表 2/表 4 与 v0.0.9 的数字是绑定旧候选的历史实验；§8 当前能力边界须与 §3.15 对齐。目标文件/分开编译已实现的范围不可再写成“没有 `.o` 工作流”，未完成的是产品 Mach-O/COFF 对象与外部函数 ABI 互调。
 
-- **正确性与诊断**（已降级到 0.1.x，见 plans/v0.1.x.md 附录）：全局初始化器里的复合字面量（A1，产品）、续行前 token 的 `__LINE__` 多 1（A2，两侧）、产品 5 类拒绝缺位置（B1）。参考侧 c-testsuite 00204 的按值传参/HFA 输出仍与期望不同（产品正确），记入 0.0.18 语料排查。
-- **C99**：复数与三字符组决定不做（账本写明理由）；库条款大量 unsupported，按真实程序与 dsh 的实测需求分批（0.0.18 TUI/文件、0.0.19 网络）。
-- **工具链**：cc 函数互调与产品 Mach-O/COFF 对象仍未闭合；自带汇编器子集与 `-S` 的已做范围见 0.0.18/0.0.19 计划。
+- **正确性与诊断**：产品 5 类拒绝缺位置（B1）与 `c_struct_ret` 在 0.0.22 第 4 项；全局复合字面量（A1）已于 0.0.20 闭合；续行前 token 的 `__LINE__`（A2）见 0.1.x 附录。
+- **C99**：复数与三字符组决定不做（账本写明理由）；库函数按“转发 / 保留 / 拒绝”路由表处理（§5.1），不再逐个补函数体。
+- **工具链**：产品侧的 cc 互调、Windows 转发和产品 Mach-O/COFF 对象未闭合（0.0.22 第 1、11 项）。
 - **反复顺延的架构项**：通用 BANK/nativeabi、Windows SEH、us_eval/us_reload 已写入 0.1.x（D1–D3）。
-- **流程**：tests/vms.sh 的 Windows 就绪误判、队列运行中改被声明文件无提示、Linux 客机固定的环境红（4 GiB OOM、无 clang）——0.0.18 R18-11。
+- **流程**：换工作树续跑整轮作废（指纹含路径）、模拟机误报、候选绑定 main HEAD 导致重封——0.0.22 第 2 项；Linux 客机固定的环境红（4 GiB 内存不够、没有 clang）照旧点名登记。
 
 ## 7. 归档索引
 
@@ -284,4 +273,5 @@ prd 只描述当前与将来；过程记录、旧计划与历史数字按时间�
 - [prd-history-20260929.md](archive/prd-history-20260929.md)：本次第二轮清理移出的 §0.3 早期交付边界、§5.5 完成度盘点 S-1..S-17、§5.7/5.9 巡查记录、v0.0.11 逐项回执全文、附录 7.1/7.2/7.4。
 - [prd-findings-20260929.md](archive/prd-findings-20260929.md)：§6 实验发现 E-编号全表（论文引用按编号在此解析）。
 - [prd-r17-notes-20261001.md](archive/prd-r17-notes-20261001.md)：0.0.17 开发期间写在 prd 末尾的 R17 实施记录（tape 链接属性、产品对象路线各片）。
+- [prd-notes-20261002.md](archive/prd-notes-20261002.md)：0.0.21 发布后从 §5/§6 移出的 R20-1/R20-3 实施记录、已修复问题与旧排期条目。
 - [prd-release-and-development-history-20261001.md](archive/prd-release-and-development-history-20261001.md)：逐版发布身份、R19 开发决定、旧结构测量与 R18/R19 实施回执。
