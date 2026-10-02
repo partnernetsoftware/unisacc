@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <sys/_ret.h>
+#include <sys/_win.h>
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
@@ -44,9 +46,14 @@ static off_t lseek(int __u_fd, off_t __u_off, int __u_whence) {
     return __u_r;
 }
 #endif
-#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_isatty
 static int isatty(int __u_fd) {               /* a terminal answers the attribute request (R18-10) */
+#ifdef _WIN32
+    static long __u_f;                        /* GetFileType == FILE_TYPE_CHAR */
+    if (!__u_f) __u_f = _ux_sym("GetFileType");
+    if ((_ux_call(__u_f, (long)__u_fd, 0, 0, 0) & 0xFFFFFFFFL) == 2) return 1;
+    errno = ENOTTY; return 0;
+#else
     unsigned char __u_t[128]; long __u_r;
 #ifdef __APPLE__
     __u_r = __ioctl(__u_fd, 0x40487413L, (char *)__u_t);
@@ -54,8 +61,8 @@ static int isatty(int __u_fd) {               /* a terminal answers the attribut
     __u_r = __ioctl(__u_fd, 0x5401L, (char *)__u_t);
 #endif
     if (__u_r < 0) { errno = (int)(0 - __u_r); return 0; } return 1;
-}
 #endif
+}
 #endif
 #if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_ftruncate)
 #if !__UNISA_FTRIM_LIBC || __UN_ftruncate
@@ -68,9 +75,16 @@ static int ftruncate(int __u_fd, off_t __u_len) {   /* R18-5 (kilo saves through
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlink
 static int unlink(const char *__u_path) {
+#ifdef _WIN32
+    static long __u_f;                        /* DeleteFileA: a BOOL */
+    if (!__u_f) __u_f = _ux_sym("DeleteFileA");
+    if (_ux_call(__u_f, (long)__u_path, 0, 0, 0) & 0xFFFFFFFFL) return 0;
+    return _ux_fail();
+#else
     long __u_r; __u_r = __unlink((char *)__u_path);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
     return 0;
+#endif
 }
 #endif
 /* ---- processes (0.0.19 R19-5), through the generic gate __syscall6 (R19-9):
@@ -116,9 +130,19 @@ static int unlink(const char *__u_path) {
 static void _exit(int __u_code) { __exit(__u_code); }
 #endif
 #include <sys/_ret.h>
-#if !__UNISA_FTRIM_LIBC || __UN_getpid
-static pid_t getpid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getpid), 0, 0, 0, 0, 0); }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_getpid
+static pid_t getpid(void) {
+#ifdef _WIN32
+    static long __u_f;
+    if (!__u_f) __u_f = _ux_sym("GetCurrentProcessId");
+    return (pid_t)(_ux_call(__u_f, 0, 0, 0, 0) & 0xFFFFFFFFL);
+#else
+    return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getpid), 0, 0, 0, 0, 0);
+#endif
+}
+#endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_getppid
 static pid_t getppid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getppid), 0, 0, 0, 0, 0); }
 #endif
@@ -210,7 +234,8 @@ static int execle(const char *__u_path, const char *__u_a0, ...) {
     return execve(__u_path, __u_v, __u_e);
 }
 #endif
-/* sleep / usleep over the shared nanosleep primitive (sys/_timespec.h) */
+#endif
+/* sleep / usleep over the shared nanosleep primitive (sys/_timespec.h; Sleep on Windows) */
 #include <sys/_timespec.h>
 #if !__UNISA_FTRIM_LIBC || __UN_sleep
 static unsigned sleep(unsigned __u_s) { struct timespec __u_q; __u_q.tv_sec = __u_s; __u_q.tv_nsec = 0; _unisa_nanosleep(&__u_q); return 0; }
@@ -218,6 +243,7 @@ static unsigned sleep(unsigned __u_s) { struct timespec __u_q; __u_q.tv_sec = __
 #if !__UNISA_FTRIM_LIBC || __UN_usleep
 static int usleep(unsigned __u_us) { struct timespec __u_q; __u_q.tv_sec = __u_us / 1000000; __u_q.tv_nsec = (long)(__u_us % 1000000) * 1000; return (int)_unisa_ret(_unisa_nanosleep(&__u_q)); }
 #endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_dup2
 static int dup2(int __u_old, int __u_new) {
 #if defined(__APPLE__) || defined(__x86_64__)
@@ -237,10 +263,12 @@ static int pipe(int __u_fds[2]) {
 #endif
 }
 #endif
+#endif
 #define F_OK 0
 #define X_OK 1
 #define W_OK 2
 #define R_OK 4
+#ifndef _WIN32
 #ifdef __APPLE__
 #define _UNISA_NR_fsync 95
 #define _UNISA_NR_dup 41
@@ -269,9 +297,15 @@ static int fsync(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNIS
 #if !__UNISA_FTRIM_LIBC || __UN_dup
 static int dup(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup), __u_fd, 0, 0, 0, 0)); }
 #endif
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_rmdir
 static int rmdir(const char *__u_p) {
-#if defined(__APPLE__) || defined(__x86_64__)
+#ifdef _WIN32
+    static long __u_f;
+    if (!__u_f) __u_f = _ux_sym("RemoveDirectoryA");
+    if (_ux_call(__u_f, (long)__u_p, 0, 0, 0) & 0xFFFFFFFFL) return 0;
+    return _ux_fail();
+#elif defined(__APPLE__) || defined(__x86_64__)
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_rmdir), (long)__u_p, 0, 0, 0, 0));
 #else
     return (int)_unisa_ret(__syscall6(_UNISA_NR_unlinkat, -100, (long)__u_p, 0x200, 0, 0));   /* AT_FDCWD, AT_REMOVEDIR */
@@ -280,13 +314,21 @@ static int rmdir(const char *__u_p) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_access
 static int access(const char *__u_p, int __u_mode) {
-#if defined(__APPLE__) || defined(__x86_64__)
+#ifdef _WIN32
+    static long __u_f; long __u_a;            /* GetFileAttributesA; X_OK is existence */
+    if (!__u_f) __u_f = _ux_sym("GetFileAttributesA");
+    __u_a = _ux_call(__u_f, (long)__u_p, 0, 0, 0) & 0xFFFFFFFFL;
+    if (__u_a == 0xFFFFFFFFL) return _ux_fail();
+    if ((__u_mode & W_OK) && (__u_a & 1) && !(__u_a & 0x10)) { errno = EACCES; return -1; }   /* READONLY file */
+    return 0;
+#elif defined(__APPLE__) || defined(__x86_64__)
     return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_access), (long)__u_p, __u_mode, 0, 0, 0));
 #else
     return (int)_unisa_ret(__syscall6(_UNISA_NR_faccessat, -100, (long)__u_p, __u_mode, 0, 0));
 #endif
 }
 #endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_readlink
 static long readlink(const char *__u_p, char *__u_buf, size_t __u_n) {
 #if defined(__APPLE__) || defined(__x86_64__)
@@ -305,9 +347,33 @@ static int symlink(const char *__u_old, const char *__u_new) {
 #endif
 }
 #endif
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_chdir
+static int chdir(const char *__u_p) {
+#ifdef _WIN32
+    static long __u_f;
+    if (!__u_f) __u_f = _ux_sym("SetCurrentDirectoryA");
+    if (_ux_call(__u_f, (long)__u_p, 0, 0, 0) & 0xFFFFFFFFL) return 0;
+    return _ux_fail();
+#elif defined(__APPLE__)
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(12), (long)__u_p, 0, 0, 0, 0));
+#elif defined(__x86_64__)
+    return (int)_unisa_ret(__syscall6(80, (long)__u_p, 0, 0, 0, 0));
+#else
+    return (int)_unisa_ret(__syscall6(49, (long)__u_p, 0, 0, 0, 0));
+#endif
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_getcwd
 static char *getcwd(char *__u_buf, size_t __u_size) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    static long __u_f; long __u_n;            /* GetCurrentDirectoryA (backslashes kept) */
+    if (!__u_f) __u_f = _ux_sym("GetCurrentDirectoryA");
+    __u_n = _ux_call(__u_f, (long)__u_size, (long)__u_buf, 0, 0) & 0xFFFFFFFFL;
+    if (__u_n == 0) { _ux_fail(); return 0; }
+    if ((size_t)__u_n >= __u_size) { errno = ERANGE; return 0; }
+    return __u_buf;
+#elif defined(__APPLE__)
     char __u_tmp[1024]; long __u_fd; long __u_r; size_t __u_n;
     __u_fd = __open(".", 0x100000, 0);           /* O_RDONLY | O_DIRECTORY */
     if (__u_fd < 0) { errno = (int)(0 - __u_fd); return 0; }
@@ -324,6 +390,5 @@ static char *getcwd(char *__u_buf, size_t __u_size) {
     return __u_buf;
 #endif
 }
-#endif
 #endif
 #endif

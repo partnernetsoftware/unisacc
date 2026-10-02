@@ -26,11 +26,26 @@ typedef int clockid_t;
 #else
 #define CLOCK_MONOTONIC 1
 #endif
-#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_clock_gettime
 static int clock_gettime(clockid_t __u_c, struct timespec *__u_ts) {
     long __u_r;
-#ifdef __APPLE__
+#ifdef _WIN32
+    static long __u_ft; static long __u_qc; static long __u_qf; static long __u_freq;
+    unsigned int __u_t[2]; long __u_v;
+    if (__u_c == CLOCK_REALTIME) {            /* GetSystemTimePreciseAsFileTime */
+        if (!__u_ft) __u_ft = _ux_sym("GetSystemTimePreciseAsFileTime");
+        __u_t[0] = 0; __u_t[1] = 0; _ux_call(__u_ft, (long)__u_t, 0, 0, 0);
+        __u_v = (((long)__u_t[1] << 32) | (long)__u_t[0]) - 116444736000000000L;
+        __u_ts->tv_sec = __u_v / 10000000L; __u_ts->tv_nsec = (__u_v % 10000000L) * 100;
+        return 0;
+    }
+    if (__u_c != CLOCK_MONOTONIC) return (int)_unisa_ret(0 - 22);
+    if (!__u_qc) { __u_qc = _ux_sym("QueryPerformanceCounter"); __u_qf = _ux_sym("QueryPerformanceFrequency"); }
+    if (!__u_freq) { _ux_call(__u_qf, (long)&__u_freq, 0, 0, 0); if (__u_freq <= 0) __u_freq = 1; }
+    __u_r = 0; _ux_call(__u_qc, (long)&__u_r, 0, 0, 0);
+    __u_ts->tv_sec = __u_r / __u_freq; __u_ts->tv_nsec = (__u_r % __u_freq) * 1000000000L / __u_freq;
+    return 0;
+#elif defined(__APPLE__)
     long __u_tv[2];
     if (__u_c != CLOCK_REALTIME && __u_c != CLOCK_MONOTONIC) return (int)_unisa_ret(0 - 22);
     __u_tv[0] = 0; __u_tv[1] = 0;
@@ -54,7 +69,6 @@ static int nanosleep(const struct timespec *__u_q, struct timespec *__u_rem) {
     return (int)_unisa_ret(_unisa_nanosleep(__u_q));
 }
 #endif
-#endif
 struct tm {
     int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon;
     int tm_year; int tm_wday; int tm_yday; int tm_isdst;
@@ -64,17 +78,24 @@ struct tm {
 };
 /* time (0.0.18 R18-5): seconds from gettimeofday on Linux and macOS (the
    clock note above still holds for clock; Windows has no time yet) */
-#if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_time)
 #if !__UNISA_FTRIM_LIBC || __UN_time
 static time_t time(time_t *__u_t) {
+#ifdef _WIN32
+    static long __u_f; unsigned int __u_ft[2]; long __u_s;   /* GetSystemTimeAsFileTime */
+    if (!__u_f) __u_f = _ux_sym("GetSystemTimeAsFileTime");
+    __u_ft[0] = 0; __u_ft[1] = 0; _ux_call(__u_f, (long)__u_ft, 0, 0, 0);
+    __u_s = _ux_ft2unix(__u_ft);
+    if (__u_t) *__u_t = __u_s;
+    return __u_s;
+#else
     long __u_tv[2]; long __u_r;
     __u_tv[0] = 0; __u_tv[1] = 0;
     __u_r = __gettimeofday((char *)__u_tv, 0, 0);
     if (__u_r < 0) return (time_t)(0 - 1);
     if (__u_t) *__u_t = __u_tv[0];
     return __u_tv[0];
-}
 #endif
+}
 #endif
 /* ---- broken-down time (0.0.19, dsh): gmtime/localtime/mktime/strftime in C.
    localtime reads the zone from TZif data (RFC 8536, the 64-bit section):

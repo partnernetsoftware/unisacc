@@ -1,12 +1,13 @@
 /* <sys/stat.h> (0.0.18 R18-10): struct stat and stat/lstat/fstat/chmod/mkdir
  * over the kernel's own calls -- no host libc.  The layout is the kernel's for
- * each target (Linux x86_64 and arm64 differ; macOS is stat64).  Windows has
- * no such calls here yet: nothing is declared there (archive/plans/v0.0.19.md). */
+ * each target (Linux x86_64 and arm64 differ; macOS is stat64).  Windows
+ * (0.0.21 batch 1): a long-field struct stat and stat/fstat/mkdir over
+ * kernel32 (sys/_win.h); lstat and chmod are not there yet. */
 #ifndef _UNISA_SYS_STAT_H
 #define _UNISA_SYS_STAT_H
 #include <sys/types.h>
 #include <errno.h>
-#ifndef _WIN32
+#include <sys/_win.h>
 #define S_IFMT   0170000
 #define S_IFIFO  0010000
 #define S_IFCHR  0020000
@@ -38,7 +39,12 @@
 #define _UNISA_TIMESPEC
 struct timespec { long tv_sec; long tv_nsec; };
 #endif
-#ifdef __APPLE__
+#ifdef _WIN32
+struct stat {
+    long st_dev; long st_ino; long st_mode; long st_nlink; long st_uid; long st_gid;
+    long st_rdev; long st_size; long st_atime; long st_mtime; long st_ctime;
+};
+#elif defined(__APPLE__)
 struct stat {                                   /* struct stat64 */
     int st_dev; unsigned short st_mode; unsigned short st_nlink; unsigned long st_ino;
     unsigned int st_uid; unsigned int st_gid; int st_rdev;
@@ -70,33 +76,70 @@ struct stat {                                   /* x86_64 */
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_stat
 static int stat(const char *__u_p, struct stat *__u_b) {
+#ifdef _WIN32
+    static long __u_f; unsigned int __u_d[9];   /* GetFileAttributesExA: WIN32_FILE_ATTRIBUTE_DATA */
+    if (!__u_f) __u_f = _ux_sym("GetFileAttributesExA");
+    if (!(_ux_call(__u_f, (long)__u_p, 0, (long)__u_d, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    __u_b->st_dev = 0; __u_b->st_ino = 0; __u_b->st_nlink = 1; __u_b->st_uid = 0; __u_b->st_gid = 0; __u_b->st_rdev = 0;
+    __u_b->st_mode = (__u_d[0] & 0x10) ? (S_IFDIR | 0755) : (S_IFREG | ((__u_d[0] & 1) ? 0444 : 0644));
+    __u_b->st_ctime = _ux_ft2unix(__u_d + 1); __u_b->st_atime = _ux_ft2unix(__u_d + 3); __u_b->st_mtime = _ux_ft2unix(__u_d + 5);
+    __u_b->st_size = ((long)__u_d[7] << 32) | (long)__u_d[8];
+    return 0;
+#else
     long __u_r; __u_r = __stat((char *)__u_p, (char *)__u_b, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
+#endif
 }
 #endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_lstat
 static int lstat(const char *__u_p, struct stat *__u_b) {
     long __u_r; __u_r = __lstat((char *)__u_p, (char *)__u_b, 256);   /* AT_SYMLINK_NOFOLLOW for newfstatat */
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
 }
 #endif
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_fstat
 static int fstat(int __u_fd, struct stat *__u_b) {
+#ifdef _WIN32
+    static long __u_ft; static long __u_fi; long __u_k; unsigned int __u_d[13];
+    if (!__u_ft) { __u_ft = _ux_sym("GetFileType"); __u_fi = _ux_sym("GetFileInformationByHandle"); }
+    __u_b->st_dev = 0; __u_b->st_ino = 0; __u_b->st_nlink = 1; __u_b->st_uid = 0; __u_b->st_gid = 0; __u_b->st_rdev = 0;
+    __u_b->st_size = 0; __u_b->st_atime = 0; __u_b->st_mtime = 0; __u_b->st_ctime = 0;
+    __u_k = _ux_call(__u_ft, (long)__u_fd, 0, 0, 0) & 0xFFFFFFFFL;
+    if (__u_k == 2) { __u_b->st_mode = S_IFCHR | 0666; return 0; }            /* FILE_TYPE_CHAR */
+    if (__u_k == 3) { __u_b->st_mode = S_IFIFO | 0666; return 0; }            /* FILE_TYPE_PIPE */
+    if (!(_ux_call(__u_fi, (long)__u_fd, (long)__u_d, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    __u_b->st_mode = (__u_d[0] & 0x10) ? (S_IFDIR | 0755) : (S_IFREG | ((__u_d[0] & 1) ? 0444 : 0644));
+    __u_b->st_ctime = _ux_ft2unix(__u_d + 1); __u_b->st_atime = _ux_ft2unix(__u_d + 3); __u_b->st_mtime = _ux_ft2unix(__u_d + 5);
+    __u_b->st_dev = __u_d[7]; __u_b->st_size = ((long)__u_d[8] << 32) | (long)__u_d[9];
+    __u_b->st_nlink = __u_d[10]; __u_b->st_ino = ((long)__u_d[11] << 32) | (long)__u_d[12];
+    return 0;
+#else
     long __u_r; __u_r = __fstat(__u_fd, (char *)__u_b, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
+#endif
 }
 #endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_chmod
 static int chmod(const char *__u_p, mode_t __u_m) {
     long __u_r; __u_r = __chmod((char *)__u_p, (long)__u_m, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
 }
 #endif
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_mkdir
 static int mkdir(const char *__u_p, mode_t __u_m) {
+#ifdef _WIN32
+    static long __u_f;                         /* CreateDirectoryA (the mode is not mapped) */
+    if (!__u_f) __u_f = _ux_sym("CreateDirectoryA");
+    if (_ux_call(__u_f, (long)__u_p, 0, 0, 0) & 0xFFFFFFFFL) return 0;
+    return _ux_fail();
+#else
     long __u_r; __u_r = __mkdir((char *)__u_p, (long)__u_m, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
-}
 #endif
+}
 #endif
 #endif

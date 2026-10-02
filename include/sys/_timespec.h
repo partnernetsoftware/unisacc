@@ -12,10 +12,15 @@ typedef long time_t;
 #define _UNISA_TIMESPEC
 struct timespec { long tv_sec; long tv_nsec; };   /* one definition with sys/stat.h */
 #endif
-#ifndef _WIN32
+#include <sys/_win.h>
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_nanosleep
 static long _unisa_nanosleep(const struct timespec *__u_q) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    static long __u_f;                        /* Sleep(ms), rounded up */
+    if (!__u_f) __u_f = _ux_sym("Sleep");
+    _ux_call(__u_f, __u_q->tv_sec * 1000 + (__u_q->tv_nsec + 999999) / 1000000, 0, 0, 0);
+    return 0;
+#elif defined(__APPLE__)
     long __u_tv[2];
     __u_tv[0] = __u_q->tv_sec; __u_tv[1] = (__u_q->tv_nsec + 999) / 1000;
 #ifdef __x86_64__
@@ -29,6 +34,5 @@ static long _unisa_nanosleep(const struct timespec *__u_q) {
     return __syscall6(101, (long)__u_q, 0, 0, 0, 0);
 #endif
 }
-#endif
 #endif
 #endif
