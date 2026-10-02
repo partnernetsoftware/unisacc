@@ -3,7 +3,7 @@ No host compiler/encoder is called by this model generator.
 """
 from pathlib import Path
 from finite_rules import install as install_rules, load as load_rules
-from unisa.hostabi import ARM_FN, ARM_ARGV, ARM_BODY, X86_BODY, WIN_X86_BODY
+from unisa.hostabi import ARM_FN, ARM_ARGV, ARM_BODY, X86_BODY, WIN_ARM_BODY, WIN_X86_BODY
 from unisa.catalog import REGMAP
 from unisa.emit_x86 import NUM
 
@@ -50,7 +50,12 @@ def install(E, arch, word=None):
     if arch=='arm64':
         for base,arg in [(ARM_FN,'a0'),(ARM_ARGV,'a1')]:
             p.a(('ALUI','shl','w',arg,16),('ALUI','or','w','w',base));word(p)
+        p.branch({1:'HB.call.armwin'},'HB.call.armposix',[('CMPI','target_os',3)])
+        p=P('HB.call.armposix')
         for value in ARM_BODY:p.a(('LDI','w',value));word(p)
+        p.goto('LINE')
+        p=P('HB.call.armwin')
+        for value in WIN_ARM_BODY:p.a(('LDI','w',value));word(p)
         p.goto('LINE')
         p=P('HB.addr.emit').a(('LDI','host_dyn',1))
         p.a(('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),

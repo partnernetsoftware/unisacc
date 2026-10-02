@@ -43,10 +43,12 @@ def main():
                     assert got.returncode==(0 if accept else 1),(os_,op,value,got.returncode,got.stderr)
                     if accept:
                         assert got.stdout==out,'table/network bytes differ'
-                        if op=='hostcall' and os_=='win' and arch=='x86_64':
-                            from unisa.hostabi import WIN_X86_BODY
-                            assert out.endswith(WIN_X86_BODY), 'Win64 ABI declaration missing'
-                        if op=='hostcall' and (os_!='win' or arch=='arm64'):
+                        if op=='hostcall' and os_=='win':
+                            from unisa.hostabi import WIN_X86_BODY, WIN_ARM_BODY
+                            body=(WIN_X86_BODY if arch=='x86_64' else
+                                  b''.join(w.to_bytes(4,'little') for w in WIN_ARM_BODY))
+                            assert out.endswith(body), 'Win64 ABI declaration missing'
+                        if op=='hostcall' and os_!='win':
                             if equalbytes is None:equalbytes=out
                             assert out==equalbytes,'Linux/macOS integer ABI bridge differs'
                         if value is None:assert command([runtime,str(tbl),str(source)])==out,'C table differs'

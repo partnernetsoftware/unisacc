@@ -66,7 +66,7 @@ static int __uffi_ready;
    RTLD_DEFAULT (0) searches ucrtbase, kernel32, ws2_32, msvcrt in turn */
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
-    long __u_args[6];
+    long __u_args[10] = {0};
     __u_args[0] = (long)__u_path; __u_args[1] = __u_mode;
 #ifdef _WIN32
     __u_args[1] = 0;
@@ -77,7 +77,7 @@ static void *uffi_dlopen(const char *__u_path, int __u_mode) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlsym
 static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
-    long __u_args[6];
+    long __u_args[10] = {0};
 #ifdef _WIN32
     void *__u_r; int __u_i; char *__u_dll[4];
     __u_dll[0] = "ucrtbase.dll"; __u_dll[1] = "kernel32.dll"; __u_dll[2] = "ws2_32.dll"; __u_dll[3] = "msvcrt.dll";
@@ -100,7 +100,7 @@ static void *uffi_dlsym(void *__u_handle, const char *__u_name) {
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlclose
 static int uffi_dlclose(void *__u_handle) {
-    long __u_args[6];
+    long __u_args[10] = {0};
     __u_args[0] = (long)__u_handle; __u_args[1] = 0;
     __u_args[2] = 0; __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
 #ifdef _WIN32
@@ -115,7 +115,7 @@ static char *uffi_dlerror(void) {
 #ifdef _WIN32
     return "Windows loader error";
 #else
-    long __u_args[6];
+    long __u_args[10] = {0};
     __u_args[0] = 0; __u_args[1] = 0; __u_args[2] = 0;
     __u_args[3] = 0; __u_args[4] = 0; __u_args[5] = 0;
     return (char *)__hostcall(__hostaddr3(), __u_args);
@@ -179,7 +179,7 @@ static int uffi_call_types(void *__u_fn, void *__u_rtype, void **__u_types,
                            void **__u_values, int __u_n, int __u_fixed,
                            void *__u_result) {
     struct uffi_cif __u_cif;
-    long __u_args[6];
+    long __u_args[10] = {0};
     int __u_i; int __u_status;
     __u_status = uffi_init();
     if (__u_status != 0) return __u_status;

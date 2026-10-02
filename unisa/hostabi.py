@@ -1,4 +1,4 @@
-"""Fixed six integer/pointer foreign ABI bridge declarations.
+"""Foreign integer/pointer ABI bridge declarations.
 The declaration source is exec/enc/hostbridge.tsv; no language predicates.
 """
 from pathlib import Path
@@ -10,6 +10,6 @@ ARM_FN, ARM_ARGV = (int(next(v for a,p,v in _ROWS if a=='arm64' and p==name),16)
 ARM_BODY = tuple(int(v,16) for a,p,v in _ROWS if a=='arm64' and p=='body')
 X86_BODY = bytes.fromhex(next(v for a,p,v in _ROWS if a=='x86_64' and p=='body'))
 
-# Windows ARM GP ABI uses the same six integer argument registers; x18 untouched.
-WIN_ARM_BODY = ARM_BODY
+# Windows permits eight GP registers and stack arguments nine and ten.
+WIN_ARM_BODY = tuple(int(v,16) for a,p,v in _ROWS if a=='win_arm64' and p=='body')
 WIN_X86_BODY = bytes.fromhex(next(v for a,p,v in _ROWS if a=="win_x86_64" and p=="body"))

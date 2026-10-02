@@ -41,10 +41,10 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
             fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
             k = 0; while (k < np) { if (k) fwd_s(", "); fwd_s(fwd_ctype(kind[k], w[k], 0)); fwd_s(" a"); fwd_d(k); k = k + 1; }
             if (np == 0) fwd_s("void");
-            fwd_s(") {\n    static void *fn; long v[6];\n");
+            fwd_s(") {\n    static void *fn; long v[10];\n");
             fwd_s("    if (fn == 0) fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, \""); fwd_n(nm, nl); fwd_s("\");\n");
             fwd_s("    if (fn == 0) { write(2, \"unisacc: no host function "); fwd_n(nm, nl); fwd_s("\\n\", "); fwd_d(27 + nl); fwd_s("); exit(127); }\n");
-            k = 0; while (k < 6) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { fwd_s("(long)a"); fwd_d(k); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
+            k = 0; while (k < 10) { fwd_s("    v["); fwd_d(k); fwd_s("] = "); if (k < np) { fwd_s("(long)a"); fwd_d(k); } else fwd_s("0"); fwd_s(";\n"); k = k + 1; }
             if (isvoid) fwd_s("    __hostcall(fn, v);\n");
             else { fwd_s("    return ("); fwd_s(rt); fwd_s(")__hostcall(fn, v);\n"); }
             fwd_s("}\n");
