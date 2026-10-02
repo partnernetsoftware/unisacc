@@ -1,3 +1,6 @@
+/* 0.0.21: the compiler itself does not use the Windows host channel (include/sys/_win.h); the
+   Python seed and the product lower refuse .hostcall on win until 0.0.22 */
+#define _UNISA_NO_HOSTCALL 1
 /* Product-driver migration: IO and route selection only. All source handling
    is performed by the package's networks. Unsupported CLI remains an explicit
    error until migrated; no call to a reference compiler. Not the default yet. */

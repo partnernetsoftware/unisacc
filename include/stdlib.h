@@ -427,21 +427,11 @@ static int _unisa_envslot(const char *__u_name, int __u_make) {
     return __u_make ? __u_free : -1;
 }
 #endif
+/* Windows reads the real environment through the host channel in 0.0.22,
+   when the product lowers it (the compiler itself must not need it yet). */
 #if !__UNISA_FTRIM_LIBC || __UN_getenv
 static char *getenv(const char *__u_name) {
     int __u_k; int __u_i; char *__u_e;
-#ifdef _WIN32
-    static long __u_f; static char __u_b[4][1024]; static int __u_r; long __u_n;
-    if (!__u_f) __u_f = _ux_sym("GetEnvironmentVariableA");
-    __u_r = (__u_r + 1) & 3;
-    __u_n = _ux_call(__u_f, (long)__u_name, (long)__u_b[__u_r], 1024, 0) & 0xFFFFFFFFL;
-    if (__u_n >= 1024) return 0;
-    if (__u_n == 0) {                   /* empty value vs ERROR_ENVVAR_NOT_FOUND (203) */
-        if ((_ux_call(__hostaddr3(), 0, 0, 0, 0) & 0xFFFFFFFFL) == 203) return 0;
-        __u_b[__u_r][0] = 0;
-    }
-    return __u_b[__u_r];
-#endif
     __u_k = _unisa_envslot(__u_name, 0);
     if (__u_k >= 0) {
         if (_unisa_envf[__u_k] == 2) return 0;
@@ -464,12 +454,6 @@ static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
     if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
     if (!__u_over && getenv(__u_name)) return 0;
-#ifdef _WIN32
-    {   static long __u_f;
-        if (!__u_f) __u_f = _ux_sym("SetEnvironmentVariableA");
-        if (!(_ux_call(__u_f, (long)__u_name, (long)__u_val, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
-        return 0; }
-#endif
     __u_k = _unisa_envslot(__u_name, 1);
     if (__u_k < 0) { errno = ENOMEM; return -1; }
     __u_i = 0; while (__u_name[__u_i]) __u_i = __u_i + 1;
@@ -488,12 +472,6 @@ static int unsetenv(const char *__u_name) {
     int __u_k; int __u_i;
     if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
-#ifdef _WIN32
-    {   static long __u_f;
-        if (!__u_f) __u_f = _ux_sym("SetEnvironmentVariableA");
-        _ux_call(__u_f, (long)__u_name, 0, 0, 0);
-        return 0; }
-#endif
     __u_k = _unisa_envslot(__u_name, 1);
     if (__u_k < 0) { errno = ENOMEM; return -1; }
     for (__u_i = 0; __u_name[__u_i]; __u_i++) _unisa_envk[__u_k][__u_i] = __u_name[__u_i];
@@ -505,7 +483,7 @@ static int unsetenv(const char *__u_name) {
 
 /* system: forwarded to the system's own (0.0.21 R21-4a'; the bundled library
    does not grow a shell launcher of its own) */
-#ifndef __UNISA_OBJECT   /* objects have no loader slots: no forwarded bodies there */
+#if !defined(__UNISA_OBJECT) && !defined(_UNISA_NO_HOSTCALL) && !(defined(_WIN32) && !defined(_UNISA_WINHOST))   /* objects have no loader slots; Windows forwarding waits for the product (0.0.22) */
 #include <unisacc_ffi.h>
 #if !__UNISA_FTRIM_LIBC || __UN_system
 static int system(const char *__u_cmd) {

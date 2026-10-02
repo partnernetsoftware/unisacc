@@ -7,7 +7,7 @@
  * On Windows an fd IS the HANDLE value (as the bundled stdio already has it). */
 #ifndef _UNISA_SYS_WIN_H
 #define _UNISA_SYS_WIN_H
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(_UNISA_NO_HOSTCALL)   /* the compiler builds itself without the host channel until the product lowers it on Windows (0.0.22) */
 #include <errno.h>
 #if !__UNISA_FTRIM_LIBC || __UN__ux_sym
 static long _ux_sym(const char *__u_name) {          /* GetProcAddress(kernel32, name) */
