@@ -250,9 +250,13 @@ R20-1 A 首轮复测：旧 C 构造器的 `prec` 单表与 Python/出货 UNS2 �
 
 R20-1 B 的首个可独立对拍切片定为现行 `.tbl → .net`：C99 构造器读取与 Python `exec/c/net.py` 相同的整数表，产出逐字节相同的阈值网络，并以 `exec/c/core.h` 的动作元数核验 Q 记录。它是通用网络构造的一步；各阶段的规则装配、P3 打包与 seed 仍需分别实现，不能凭本切片称 B 完成。
 
-该首切片已在 `seed/net.c` 落地：`prune`（48,824 B）与 E3（891,284 B）的 `.net` 均与 Python 字节相同；`seed-construct` 固定检查 `prune` 和声明返回小表。完整输入闭包、命令及剩余 Python 边界记在 [R20-1 A/B 回执](research/r20-c99-seed-a-audit.md)。
+该首切片已在 `seed/net.c` 落地：`prune`（48,824 B）与 E3（891,284 B）的 `.net` 均与 Python 字节相同；`seed-construct` 固定检查 `prune` 和声明返回小表。完整输入闭包、命令及剩余 Python 边界记在 [R20-1 A/B 回执](research/r20-c99-seed-a-audit.md)。后续逐网络 B 对拍的 [30 项矩阵回执](research/r21-c99-seed-b-matrix.md)覆盖共享、特性、六目标与对象路由；P3 包、seed 与默认切换仍属后续阶段。
 
 R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）与 `.gdef NAME`（该单元带初值的外部对象定义）。旧单元对象缺 `.unit 2` 时明确拒绝并要求重编，避免把旧带初值定义误当暂定定义。tapebin 为这些链接属性记录使用 v1/minor 1；旧 minor 0 包与整程序 tape 保持原字节，opset 不变。参考链接与产品格式同步推进，实测前不称完成。
+
+### 5.1 libc 路线裁定（主人 2026-10-02）
+
+**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。排期在 [v0.0.21](plans/v0.0.21.md) 第 4a 项。
 
 ## 6. 未解决问题
 
