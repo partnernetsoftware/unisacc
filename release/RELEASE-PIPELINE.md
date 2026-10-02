@@ -130,7 +130,7 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - Apple 公证在载荷定稿（队列与平台必跑全绿）之后只做一次。
 - 提速分析见 research/pipeline-speed-review-0020.md。
 - **发布与同时修改互不冲突（0.0.21，主人要求）**：队列跑在钉住提交的独立工作树里；一轮里发现测试或清单要改时，直接提交，然后用**同一份 GATE_STATE** 在新 HEAD 上续跑（`QUEUE_WORKTREE=/tmp/unisacc-queue-<新sha> release/tools/queue.sh ...`）。release.sh 不再因树变化拒绝续跑；gatequeue 逐任务比对指纹（声明输入、设置、可执行文件），只重跑受影响的任务；任务表变了也只丢掉改了命令或已删除的任务。产品闭包变了才需要重建候选，那时同源编译器和候选的指纹会让相关任务自动重跑。
-  **实测修正（0.0.21 发布）**：上面的续跑只在**同一个工作树**里成立。gatequeue 的指纹含工作树路径（ROOT），换到 `/tmp/unisacc-queue-<新sha>` 后约 420/432 项作废，等于整轮重跑；comboot 的阶段记录写在工作树的 `out/comboot/stages.json`，沿用旧的 seed 结果会让 stage2/3 报“recorded before”。所以在修好指纹（plans/v0.0.22.md）之前：只改测试、不改产品时，**在原工作树里**补跑（把失败项从 `$GATE_STATE/results.json` 删掉再跑 queue.sh），必须换工作树时 comboot 整组一起删。
+  **实测修正（0.0.21 发布）**：上面的续跑只在**同一个工作树**里成立。gatequeue 的指纹含工作树路径（ROOT），换到 `/tmp/unisacc-queue-<新sha>` 后约 420/432 项作废，等于整轮重跑；comboot 的阶段记录写在工作树的 `out/comboot/stages.json`，沿用旧的 seed 结果会让 stage2/3 报“recorded before”。所以在修好指纹（archive/plans/v0.0.22.md）之前：只改测试、不改产品时，**在原工作树里**补跑（把失败项从 `$GATE_STATE/results.json` 删掉再跑 queue.sh），必须换工作树时 comboot 整组一起删。
 
 ## 14. 0.0.21 回顾（2026-10-02）与下一版流程
 
@@ -145,7 +145,7 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 6. **skip 就是失败**：ccinterop 在 x86_64 Lima 没开时跳过 3 项，整套判红。
 7. **限时边缘的任务**：bindprep 和 warningdriver 在冷缓存下超过 53 s，预热后只要 6–15 s。
 
-**下一版的目标流程（照搬 minicon，排期见 plans/v0.0.22.md）**：minicon 的 `.github/workflows/` 已经跑顺——
+**下一版的目标流程（照搬 minicon，排期见 archive/plans/v0.0.22.md）**：minicon 的 `.github/workflows/` 已经跑顺——
 - `candidate.yml`：输入精确的 40 位源 SHA 和成功的六格 run，把候选绑定在这个 SHA 和 run 上，而不是“main HEAD 冻结”；封存信息记在 rc/ tag 上，main 照常提交推送。
 - `release.yml`：只按候选 run 的封存字节发布，不重建；发布前在 Windows 上执行一次；要求输入确认串 `publish-vX.Y.Z`，并支持 dry-run。
 - `release-smoke-test.yml`：发布后从公开资产下载，核对 checksum，在 linux、windows、macos（挂载 dmg、验签与公证）上冒烟。

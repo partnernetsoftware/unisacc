@@ -13,7 +13,7 @@
 
 ### 版本状态与历史身份
 
-最近已发布版本为 **v0.0.21**（2026-10-02 公开）；0.0.18 未单独发布，其工作并入 0.0.19。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
+最近已发布版本为 **v0.0.22**（2026-10-03 公开）；0.0.18 未单独发布，其工作并入 0.0.19。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
 
 ### 计划索引（正文在 plans/，prd 只放索引）
 
@@ -24,13 +24,13 @@
 | v0.0.19 | [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) — 含 0.0.18 工作与宿主能力头·网络 | **已公开 2026-10-01**（signed sha256 ad1d87e9…，[回执](research/r19-release-acceptance.json)） |
 | v0.0.20 | [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) — 链接阶段全程序事实（.unit 2/.gdef）、结构化拒绝、两条字节差异闭合、libc 增补；C99 种子构造器只完成首片（Python 仍为默认） | **已公开 2026-10-01**（signed sha256 3a201488…，[回执](research/r20-release-acceptance.json)） |
 | v0.0.21 | [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) — 参考侧通用 libc 转发（六目标，Linux 最小动态 ELF、Windows 条件导入）、Windows POSIX 层首批、cc 互调、setjmp/lua；产品侧对应构造按名拒绝 | **已公开 2026-10-02**（signed sha256 1658fea8…，[回执](research/r21-release-acceptance.json)） |
-| v0.0.22 | [plans/v0.0.22.md](plans/v0.0.22.md) — 产品追平、发版与论文；[阶段契约子计划](plans/v0.0.22-stage-contracts.md) — 声明符形状与跨阶段信息守恒的预见性门禁 | 计划中 |
+| v0.0.22 | [archive/plans/v0.0.22.md](archive/plans/v0.0.22.md) — 已公开版本的两个产品错码修复（函数名 r0–r7、赋值表达式）、TDD 套件 declmatrix/csmithdiff/declshape 与参考 11 处修复、发版绑定 rc 标签与发布后冒烟、Windows dup/spawn | **已公开 2026-10-03**（signed sha256 5d47aed6…，[回执](research/r22-release-acceptance.json)） |
 | v0.0.23 | [plans/v0.0.23.md](plans/v0.0.23.md) — 产品追平余项（第二次顺延，本版了结或砍掉）、产品诊断定案、依赖声明、A2 实验、0.0.22 发版暴露的问题；R20-1 B 降级到 0.1.x | 计划中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
 
-历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的问题由 [v0.0.22 计划](plans/v0.0.22.md) 跟踪。
+历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的问题由 [v0.0.22 计划](archive/plans/v0.0.22.md) 跟踪。
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 
@@ -246,7 +246,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 ## 5. 路线
 
-当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
+当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](archive/plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。C99 种子构造器（R20-1）与单元链接语义（R20-3）的实施记录已移到 [archive/prd-notes-20261002.md](archive/prd-notes-20261002.md)，进度以 0.0.22 计划第 7 项为准。
 
 ### 5.1 libc 路线裁定（主人 2026-10-02）
 
