@@ -1147,7 +1147,7 @@ int bk_assemble(void) {
         /* room for the import slots at the end of the text: they must be
            within reach of a rip-relative call, and read-only suits them */
         bk_runtsz = bk_round((bktlen > 1 ? bktlen : 1) + 128, 16384);
-        bk_rundsz = bk_round(bkdlen + 65536 + (bkos == 1 ? 32 : 0), 16384);
+        bk_rundsz = bk_round(bkdlen + 65536 + ((bkos == 1 || (bkos == 0 && bk_dyn)) ? 32 : 0), 16384);
 #ifdef _WIN32
         /* ONE region, PAGE_EXECUTE_READWRITE: the gate calls its imports
            rip-relative, and two separate allocations can land more than
@@ -1173,7 +1173,10 @@ int bk_assemble(void) {
             bk_runtext == 0 || bk_rundata == 0) {
             __write(2, "run: cannot map memory\n", 23); __exit(1);
         }
-        if (bkos == 1) {
+        if (bkos == 0 && bk_dyn && host_dl_slot(1) == 0) {
+            __write(2, "unisacc: host forwarding under -run needs a compiler that can reach the host loader (this build cannot); write the program with -o instead\n", 136); __exit(1);
+        }
+        if (bkos == 1 || (bkos == 0 && bk_dyn)) {
             int q; int b; long v; char *slots;
             slots = (char *)bk_rundata; q = 0;
             while (q < 4) {
@@ -1190,8 +1193,9 @@ int bk_assemble(void) {
         bk_textva = 4294967296 + h;
         bk_datava = 4294967296 + bk_round(h + bktlen, 16384) + 32;
     } else { if (bkos == 0) {
-        bk_textva = 4194304 + 176;
-        bk_datava = 4194304 + bk_round(176 + bktlen, 4096);
+        long h; h = bk_elf_hdrs();
+        bk_textva = 4194304 + h;
+        bk_datava = 4194304 + bk_round(h + bktlen, 4096) + (bk_dyn ? 32 : 0);
     } else {
         long rd;
         bk_textva = 5368709120 + 4096;

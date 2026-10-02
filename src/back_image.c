@@ -173,8 +173,41 @@ int wdata(long lim) {                /* the data's first lim bytes */
     return 0;
 }
 
+/* R21-4a': the dynamic form, written only when the program forwards to the
+   host libc.  The smallest ELF ld.so accepts: PT_INTERP, a read-only region
+   of dynstr/dynsym/hash/rela/dynamic before the code, and four GLOB_DAT
+   slots at the start of the data segment -- the same four names and the
+   same place (32 bytes below the data base) as the Mach-O eager bind.
+   DT_NEEDED libc.so.6: glibc 2.34+ carries dlopen and friends in libc. */
+int bk_elf_dyn(void) {
+    long tend; long doff; long L; long B; long slots; int i; char *interp; int il;
+    L = bk_nzlen(); B = 4194304;
+    tend = 784 + bktlen; doff = bk_round(tend, 4096); slots = B + doff;
+    interp = bkarch ? "/lib/ld-linux-aarch64.so.1" : "/lib64/ld-linux-x86-64.so.2";
+    il = 0; while (interp[il]) il = il + 1;
+    wb(127); wb(69); wb(76); wb(70); wb(2); wb(1); wb(1); wb(0); wz(8);
+    w16(2); w16(bkarch ? 183 : 62); w32(1);
+    w64(B + 784 + bk_entry); w64(64); w64(0);
+    w32(0); w16(64); w16(56); w16(4); w16(0); w16(0); w16(0);
+    w32(3); w32(4); w64(288); w64(B + 288); w64(B + 288); w64(il + 1); w64(il + 1); w64(1);   /* PT_INTERP */
+    w32(1); w32(5); w64(0); w64(B); w64(B); w64(tend); w64(tend); w64(4096);
+    w32(1); w32(6); w64(doff); w64(B + doff); w64(B + doff); w64(32 + L); w64(32 + bkdlen); w64(4096);
+    w32(2); w32(4); w64(608); w64(B + 608); w64(B + 608); w64(176); w64(176); w64(8);           /* PT_DYNAMIC */
+    wname(interp, 32);                                                       /* 288..320 */
+    wb(0); wname("libc.so.6", 10); wname("dlopen", 7); wname("dlsym", 6); wname("dlclose", 8); wname("dlerror", 8);   /* 320..360 */
+    wz(24);                                                                  /* dynsym 360..480 */
+    i = 0; while (i < 4) { w32(i == 0 ? 11 : (i == 1 ? 18 : (i == 2 ? 24 : 32))); wb(0x12); wb(0); w16(0); w64(0); w64(0); i = i + 1; }
+    w32(1); w32(5); wz(24);                                                  /* hash 480..512: one empty bucket */
+    i = 0; while (i < 4) { w64(slots + 8 * i); w64(((long)(i + 1) << 32) | (bkarch ? 1025 : 6)); w64(0); i = i + 1; }   /* rela 512..608 */
+    w64(1); w64(1); w64(4); w64(B + 480); w64(5); w64(B + 320); w64(6); w64(B + 360);       /* dynamic 608..784 */
+    w64(10); w64(40); w64(11); w64(24); w64(7); w64(B + 512); w64(8); w64(96); w64(9); w64(24);
+    w64(30); w64(8); w64(0); w64(0);                                         /* DT_FLAGS BIND_NOW; DT_NULL */
+    wtext(); wz(doff - tend); wz(32); wdata(L);
+    return 0;
+}
 int bk_elf(void) {
     long tend; long doff; long L;
+    if (bk_dyn) return bk_elf_dyn();
     L = bk_nzlen();
     tend = 176 + bktlen;
     doff = bk_round(tend, 4096);

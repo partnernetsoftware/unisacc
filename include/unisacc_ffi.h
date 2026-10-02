@@ -37,6 +37,12 @@
 /* Layout from Apple's SDK ffi/ffi.h and ffitarget_{arm64,x86}.h.
  * Native unsigned fields have the same representation as these int fields.
  */
+/* the loader's RTLD_DEFAULT: macOS (void *)-2, glibc (void *)0 */
+#ifdef __APPLE__
+#define UFFI_RTLD_DEFAULT (0 - 2)
+#else
+#define UFFI_RTLD_DEFAULT 0
+#endif
 struct uffi_cif {
     int __u_abi;
     int __u_nargs;

@@ -18,6 +18,8 @@
 
 #include "tapescan.h"
 #define BK_DATA_BASE 256            /* tape.DATA_BASE */
+int bk_dyn;                 /* 0.0.21 R21-4a': a Linux image that imports dlopen/dlsym/dlclose/dlerror (dynamic ELF) */
+int bk_elf_hdrs(void) { return bk_dyn ? 784 : 176; }   /* ELF header bytes before the code (bk_elf) */
 /* Which target this very binary runs on, for run mode [S-9], and the
    anonymous-mapping flags of that OS (MAP_PRIVATE | MAP_ANON). */
 #ifdef __linux__
@@ -195,7 +197,7 @@ int bk_repack(void) {
         if (pass == 1) bk_nzend = cur;      /* nonzero blobs end here, zero blobs follow */
         pass = pass - 1;
     }
-    bknd = 0; bknz = 0; bkdlen = 0; pass = 1;
+    bknd = 0; bknz = 0; bkdlen = 0; pass = 1; bk_dyn = 0;
     while (pass >= 0) {
         b = 0;
         while (b < bknb) {
@@ -876,7 +878,8 @@ int bk_lower(void) {
             pc = pc + 1; continue;
         }
         if (bk_is(op, ".hostcall") || bk_is(op, ".hostaddr")) {
-            if (bkos != 1) { __write(2, "foreign host ABI is only supported on osx\n", 42); __exit(1); }
+            if (bkos == 2) { __write(2, "foreign host ABI is only supported on osx and lnx\n", 50); __exit(1); }
+            if (bkos == 0) bk_dyn = 1;      /* the image becomes a dynamic ELF with the four dl* slots */
             if (bk_is(op, ".hostaddr")) {
                 if (bkav[pc*8+1] < 0 || bkav[pc*8+1] >= 4) { __write(2, "hostaddr index must be 0..3\n", 28); __exit(1); }
                 tk(TO_HOSTADDR, bk_rmap[bkav[pc*8]], bkav[pc*8+1], 0, 0);

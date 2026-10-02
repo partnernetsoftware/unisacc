@@ -15,6 +15,36 @@ int tb_read(char *path, int target, int force_origin);
 int tb_target_id(char *target);
 int tb_encode(int textlen, int origin);
 extern char tb_file[MAXOUT];
+/* Compile; when `fwd` and the first pass left prototyped functions without
+   a definition, write their C forwarding stubs (src/fwdstub.c) to a private
+   file and compile once more with it as the last unit.  1 on failure. */
+int fe_units_fwd(char **inputs, int *ninput, char *t, int fwd) {
+    int r1;
+    fwdrun = fwd; nfwdsrc = 0;
+    r1 = fe_units(inputs, *ninput, t);
+    if (r1 && (fwdrun == 0 || nfwdsrc == 0)) { fwdrun = 0; return 1; }
+    if (fwdrun && nfwdsrc > 0) {
+        static char fwdpath[600]; char *td; int q; int fd2;
+        if (*ninput >= 64) return 1;
+        td = "/tmp"; q = 0;
+        while (td[q] && q < 500) { fwdpath[q] = td[q]; q = q + 1; }
+        {   /* one file per process: a stack address differs per process (ASLR) */
+            char *nm2; int r2; unsigned long v; nm2 = "/unisacc-forward-"; r2 = 0;
+            while (nm2[r2]) { fwdpath[q] = nm2[r2]; q = q + 1; r2 = r2 + 1; }
+            v = (unsigned long)&fd2; r2 = 0;
+            while (r2 < 12) { fwdpath[q] = "0123456789abcdef"[v & 15]; v = v >> 4; q = q + 1; r2 = r2 + 1; }
+            fwdpath[q] = 46; fwdpath[q + 1] = 99; fwdpath[q + 2] = 0;
+        }
+        fd2 = wopen(fwdpath); if (fd2 < 0) return 1;
+        __write(fd2, fwdsrc, nfwdsrc); __close(fd2);
+        inputs[*ninput] = fwdpath; *ninput = *ninput + 1; fwdrun = 0;
+        r1 = fe_units(inputs, *ninput, t);
+        *ninput = *ninput - 1;
+        if (r1) return 1;
+    }
+    fwdrun = 0;
+    return 0;
+}
 int main(void) {
     int fd; int i; int p; int L; int k; int fi; int runit; int dump; int verb; int dumptok; int werror; int force_origin; int emitbin;
     char *a; char *t; long e; int n; int j;
@@ -206,32 +236,9 @@ int main(void) {
             if (strsame(tl_first, HOST_TARGET) == 0) return emsg("unisacc: error: these objects were compiled for another target; running needs this machine's: ", tl_first);
         }
         else {
-            /* R19-10: on macOS, a prototyped function nobody defines is
-               forwarded to the host libc -- the front end writes C stubs, and
-               the program is compiled once more with them as a last unit */
-            fwdrun = HOST_TARGET[0] == 111;
-            {   int r1; r1 = fe_units(inputs, ninput, HOST_TARGET);
-                if (r1 && (fwdrun == 0 || nfwdsrc == 0)) return 1;
-            }
-            if (fwdrun && nfwdsrc > 0) {          /* stubs were written: the first pass left calls unbound */
-                static char fwdpath[600]; char *td; int q; int fd2;
-                if (ninput >= 64) return 1;
-                td = "/tmp"; q = 0;
-                q = 0; while (td[q] && q < 500) { fwdpath[q] = td[q]; q = q + 1; }
-                {   /* one file per process: a stack address differs per process (ASLR) */
-                    char *nm2; int r2; unsigned long v; nm2 = "/unisacc-forward-"; r2 = 0;
-                    while (nm2[r2]) { fwdpath[q] = nm2[r2]; q = q + 1; r2 = r2 + 1; }
-                    v = (unsigned long)&fd2; r2 = 0;
-                    while (r2 < 12) { fwdpath[q] = "0123456789abcdef"[v & 15]; v = v >> 4; q = q + 1; r2 = r2 + 1; }
-                    fwdpath[q] = 46; fwdpath[q + 1] = 99; fwdpath[q + 2] = 0;
-                }
-                fd2 = wopen(fwdpath); if (fd2 < 0) return 1;
-                __write(fd2, fwdsrc, nfwdsrc); __close(fd2);
-                inputs[ninput] = fwdpath; ninput = ninput + 1; fwdrun = 0;
-                if (fe_units(inputs, ninput, HOST_TARGET)) return 1;
-                ninput = ninput - 1;
-            }
-            fwdrun = 0;
+            /* R19-10 / R21-4a': a prototyped function nobody defines is
+               forwarded to the host libc (macOS and Linux) */
+            if (fe_units_fwd(inputs, &ninput, HOST_TARGET, HOST_TARGET[0] == 111 || HOST_TARGET[0] == 108)) return 1;
         } } }
         if (werror && nwarn > 0) return 1;           /* -Werror: nothing runs */
         /* argv[0] is the program, which is its first source file; the rest
@@ -288,7 +295,12 @@ int main(void) {
             if (bgiven == 0) t = tl_first;
             else { if (strsame(t, tl_first) == 0) return emsg("unisacc: error: -b differs from the target these objects were compiled for: ", tl_first); }
         } else {
-            r = fe_units(inputs, ninput, t);
+            /* R21-4a': a written image forwards too (osx: libSystem; lnx: libc.so.6
+               through a dynamic ELF); objects, tapes, -E and -S do not */
+            if (pponly == 0 && objwant == 0 && emitbin == 0 && asmwant == 0 && dump == 2 && (t[0] == 111 || t[0] == 108)) {
+                if (fe_units_fwd(inputs, &ninput, t, 1)) return 1;
+                r = 0;
+            } else r = fe_units(inputs, ninput, t);
             if (r == 2) {                                            /* -E is done */
                 if (deponly) return writedeps(deptarget(outpath, inputs[0]), inputs, ninput);
                 if (ofd != 1) __close(ofd); return 0; }
