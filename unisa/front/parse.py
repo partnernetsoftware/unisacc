@@ -1906,6 +1906,13 @@ class Walker:
                     self.em.blockcopy(LHS, ACC, aty.size(self.sc.structs))
                 else:
                     self.em.store(LHS, 0, ACC, self.wid(aty))
+                    # the value of `a = x` is a's value after the store (6.5.16p3), when it is
+                    # used: read it back at a's width (csmith seeds 10/17; the C reference narrows)
+                    if self.peek().kind != ";" and aty.kind not in ("ptr", "arr") and not self.isflt(aty) \
+                            and not aty.boolean and self.wid(aty) < 8:
+                        self.em.load(ACC, LHS, 0, self.wid(aty))
+                        if is_unsigned(aty.kind):
+                            self.em.zext(self.wid(aty))
                 return aty
             if nxt in ASSIGN_OPS:
                 op = ASSIGN_OPS[self.next().kind]
