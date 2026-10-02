@@ -29,7 +29,8 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 - 判据：`queue: N/N completed, 0 failed` 且 release.sh 打印 `final rc=0`；`UNVERIFIED` 行是门禁外义务，逐条写进回执。
 
 ## 4. 平台客机
-- Linux：`SUITE_LIMIT=55 JOBS=2 ./tests/linux.sh all`（linux.sh 默认 900 s 与 all.sh 上限 60 冲突，必须显式给 55）。`default`（4 GiB）跑不动两个 2.2 GB 的 Python 自编译（bigclosure/ape），要么 JOBS=1，要么用 8 GiB 的 `minicon-lnx-aarch64`（需 gcc/clang/libffi-dev/perl(shasum)，用后 `limactl stop`）。
+- Linux 源码套件：只在**原生 arm64** 客机上跑全套：`LIMA_VM=default SUITE_LIMIT=55 JOBS=2 ./tests/linux.sh all`（约 7 分钟；linux.sh 默认 900 s 与 all.sh 上限 60 冲突，必须显式给 55）。结论只认“only guest-known reds”那一行。
+- **Linux x86_64 不在模拟机上跑全套**（0.0.21 教训）：`minicon-lnx-x86_64` 在 arm64 宿主上是 qemu 模拟，约慢 10 倍。显式 `SUITE_LIMIT=55` 会覆盖 linux.sh 的 ×10 放大，0.0.21 一轮约 95 个超时、8 个 rc=1，而这些套件在原生 arm64 上全绿；`tests/all.sh` 构建参考 UA 的 45 s 与 `tests/lib.sh` 的 30 s 限时也不随之放大（模拟机上 gcc -O2 需 76 s）。x86_64 的产品证据来自 release-check 的真机 runner（ubuntu-latest，见 §5）；模拟机只用于定向套件（ccinterop、forward 的 lnx/x86_64 项，队列运行时开着它即可）。`default`（4 GiB）跑不动两个 2.2 GB 的 Python 自编译（bigclosure/ape），要么 JOBS=1，要么用 8 GiB 的 `minicon-lnx-aarch64`（需 gcc/clang/libffi-dev/perl(shasum)，用后 `limactl stop`）。
 - Windows：`utmctl start minicon-win-arm-64`，等 `utmctl ip-address` 有值（agent 就绪）；`./tests/crossnative.sh examples/*.c`（8 例约 18 s）与 `env UA=… ./tests/nativeboot.sh --windows win/arm64|win/x86_64`（各约 10 s）都可从普通 shell 跑，**不需要 Terminal**：以前的 -10004 是 `utmctl exec --hide` 造成的（2026-09-29 查明）。客机坑见 prd v0.0.12 表“R11-0 ④ 复盘”。用后 `utmctl stop`。
 
 ## 5. CI（一次 push；2026-09-29 起为 minicon 模式）
@@ -51,6 +52,7 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 - 托管 macOS runner 排队可达 30 分钟、速度波动大：CI 只允许重跑失败 job，不改源；`tools11`（tiny-regex test2）41–50 s 余量太薄，R11-1 拆分。
 
 ## 8. 发布
+**只发封存字节**：签名前 `before_sha256` 必须等于本机队列验证过的候选哈希（`release/candidate.json` 的 `unisacc_com_sha256`）；`release/tools/publish.sh TAG 签后sha` 先核对草稿字节再公开，公开后再下载比对。
 **发布后立即**把本轮候选放回仓根作为本地“当前产品”（不跟踪，但门禁与 `MODEL_COM` 默认读它）：`cp <cand>/unisacc-next.com unisacc.com && cp <cand>/unisacc-next.com.build.json unisacc.com.build.json && python3 exec/c/provenance.py check unisacc.com`——放的是**未签名候选字节**（与 build.json 的 artifact_sha256 一致；签名后的字节只在 release 资产里）。0.0.13 发布后仓根仍是 0.0.12 的 df8cc9b4…，主人发现 `--version` 不对（2026-09-30）。
 签后产物从 run artifact `unisacc-company-signed-<attempt>` 下载，核对签前/签后 SHA 与尺寸，上传草稿，回执写入 `research/r<N>-release-acceptance.json`，`gh release edit --draft=false`。之后再提交回执/文档。
 
@@ -72,7 +74,11 @@ for s in stage2 stage3 fixedpoint; do SEED_DIR=$D python3 exec/c/comboot.py shar
 MODEL_COM=$S/cand/unisacc-next.com tests/fb12multi.sh; python3 tests/comdemo.py --com $S/cand/unisacc-next.com --out $S/demo.json
 release/tools/seal_candidate.sh $S/cand $V "<note>"; git commit -- release/candidate.json   # 4 封 GHCR
 make gatedeps; git commit -- tests/gatedeps.json; git push                  # 5 最后一提交；ls-remote 核对
-# 6 预热冷建网络的两项（直到 R16-5 自动化）：bindprep.sh（CORE_ASM_ARCH=arm64）两次、memorycheck.sh（x86_64 ua 1/3）一次
+# 5b x86 libffi 提供者（rosetta 套件需要；/var/folders 下的旧目录会被清掉）：
+#    curl -sSLfo $S/libffi-3.5.2.tar.gz https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3.5.2.tar.gz   # sha256 f3a3082a…
+#    python3 exec/c/buildffiprovider.py --tarball … --output $S/ffix86 --target osx/x86_64   # 调三次，每次一步
+# 5c 开 x86_64 Lima（ccinterop 的 lnx/x86_64 三项，否则 skip 判失败）：limactl start minicon-lnx-x86_64；用完 stop
+# 6 预热冷建网络的两项，**在队列自己的工作树里**（换工作树就是冷缓存，0.0.21 两项因此 53 s 超时）：bindprep.sh（CORE_ASM_ARCH=arm64）两次、memorycheck.sh（x86_64 ua 1/3）一次、warningcheck.sh ua Wall 一次
 tests/term.sh env UA=$S/ua MODEL_COM=$S/cand/unisacc-next.com SEED_DIR=$D GATE_STATE=/tmp/gq UNISACC_FFI_X86_PROVIDER=... tests/release.sh --com   # 7 重复到 rc!=75
 release/tools/release_prep.sh $S/cand $V && release/tools/apple-sign.sh /tmp/r<N>-release/unisacc.com <sha> /tmp/r<N>-release/apple   # 8 Apple（可与 7 并行）
 # 9 release-check：push 后等 release-check.yml 对 HEAD 绿，记 run id / attempt
@@ -93,7 +99,7 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 | 2 | origin `release-check` 对结项提交绿 | `gh run list -w release-check -L 1` | run id / attempt |
 | 3 | Windows `-run` 义务 | `tests/vms.sh up` → `./tests/crossnative.sh`（win/x86_64、win/arm64 都不得是 skip）→ `tests/vms.sh down` | crossnative 汇总行 |
 | 4 | 六平台外部执行与自举证据 | release-check 的六个 candidate runner 全绿（含 win 与 osx 两架构） | 同 2 的 run 页 |
-| 5 | Linux x86_64 真机运行 | `./tests/linux.sh`（minicon-lnx-x86_64，模拟时看门狗 ×10），含 elfobj 的 x86_64 程序链接后运行 | linux.sh 汇总行 |
+| 5 | Linux 源码套件与 x86_64 真机运行 | 原生 arm64 `LIMA_VM=default ./tests/linux.sh all`（只剩客机已知红）；x86_64 由第 4 项的 ubuntu-latest runner 跑封存字节，模拟机全套不算证据 | linux.sh 汇总行 + run 页 |
 | 6 | 产品自我演示 | `python3 tests/comdemo.py --com <候选>`、`MODEL_COM=<候选> tests/fb12multi.sh` | demo.json、fb12multi 汇总 |
 | 7 | 语料棘轮 | `./tests/realprog.sh`、`./tests/tools.sh`、corpus 1–4：pass 不低于 baseline，且 realprog 比上一版至少多过一个 | 各自汇总行 |
 
@@ -121,4 +127,25 @@ gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 �
 - Apple 公证在载荷定稿（队列与平台必跑全绿）之后只做一次。
 - 提速分析见 research/pipeline-speed-review-0020.md。
 - **发布与同时修改互不冲突（0.0.21，主人要求）**：队列跑在钉住提交的独立工作树里；一轮里发现测试或清单要改时，直接提交，然后用**同一份 GATE_STATE** 在新 HEAD 上续跑（`QUEUE_WORKTREE=/tmp/unisacc-queue-<新sha> release/tools/queue.sh ...`）。release.sh 不再因树变化拒绝续跑；gatequeue 逐任务比对指纹（声明输入、设置、可执行文件），只重跑受影响的任务；任务表变了也只丢掉改了命令或已删除的任务。产品闭包变了才需要重建候选，那时同源编译器和候选的指纹会让相关任务自动重跑。
+  **实测修正（0.0.21 发布）**：上面的续跑只在**同一个工作树**里成立。gatequeue 的指纹含工作树路径（ROOT），换到 `/tmp/unisacc-queue-<新sha>` 后约 420/432 项作废，等于整轮重跑；comboot 的阶段记录写在工作树的 `out/comboot/stages.json`，沿用旧的 seed 结果会让 stage2/3 报“recorded before”。所以在修好指纹（plans/v0.0.22.md）之前：只改测试、不改产品时，**在原工作树里**补跑（把失败项从 `$GATE_STATE/results.json` 删掉再跑 queue.sh），必须换工作树时 comboot 整组一起删。
+
+## 14. 0.0.21 回顾（2026-10-02）与下一版流程
+
+**这次实际走通的顺序**：precheck → 候选（44f9eb15）→ comboot N22 → 封存 GHCR → 队列八轮加续跑（最终 432/432）→ push → release-check（六格真机 runner 全绿）→ 草稿 + 未签名回执 → Windows 资格签名 → 公司签名并审批 → 下载签后产物、核对 before = 候选 → 上传 → Linux arm64 原生全套 → `publish.sh` → 下载公开资产冒烟 → 回执 → 归档计划 → 通知 cdx 解冻。
+
+**教训**
+1. **模拟机误报**：在模拟的 x86_64 上跑全套只会得到超时（见 §4）。x86_64 证据用真机 runner。
+2. **原生 runner 六格就是产品证据**：release-check 的 candidate 作业按 GHCR 摘要拉取封存字节，在 macos-15、macos-15-intel、ubuntu-latest、ubuntu-24.04-arm、windows-latest、windows-11-arm 上跑演示套件，runner 上不编译。回执的 release_check 字段记 run id 和六格结论。
+3. **封存与重封**：release-check 先比对 `candidate.json.sources_sha256` 与树的产品闭包；产品闭包一变（含 exec/ 下的检查脚本）就要重建并重封。冻结 main 之后仍重封了 6 次，根源是候选和签名都绑在 main HEAD 上。
+4. **sealed_from_commit 指向不存在的提交**：0.0.21 在封存后变基（远端先进了 e44dbe1），`sealed_from_commit` 留下的 40d3d9d 在 origin 上不存在。闭包摘要仍一致，所以字节可信，但溯源断了。规则：封存前先 `git fetch` 并与 origin 对齐，封存后不再变基；需要整合远端提交就用 merge，或者重封。
+5. **外部状态会消失**：rosetta 套件用的 x86 libffi 提供者放在 /var/folders，被系统清掉后 11 项红。提供者放 scratchpad，或者每次发版按 §9 第 5b 步重建。
+6. **skip 就是失败**：ccinterop 在 x86_64 Lima 没开时跳过 3 项，整套判红。
+7. **限时边缘的任务**：bindprep 和 warningdriver 在冷缓存下超过 53 s，预热后只要 6–15 s。
+
+**下一版的目标流程（照搬 minicon，排期见 plans/v0.0.22.md）**：minicon 的 `.github/workflows/` 已经跑顺——
+- `candidate.yml`：输入精确的 40 位源 SHA 和成功的六格 run，把候选绑定在这个 SHA 和 run 上，而不是“main HEAD 冻结”；封存信息记在 rc/ tag 上，main 照常提交推送。
+- `release.yml`：只按候选 run 的封存字节发布，不重建；发布前在 Windows 上执行一次；要求输入确认串 `publish-vX.Y.Z`，并支持 dry-run。
+- `release-smoke-test.yml`：发布后从公开资产下载，核对 checksum，在 linux、windows、macos（挂载 dmg、验签与公证）上冒烟。
+- `defender-ci-scan.yml`：用 Windows Defender 扫描封存字节。
+在这些落地之前，本文 §9 的序列仍然有效，加上 §4 和本节的修正。
 

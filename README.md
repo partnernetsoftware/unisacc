@@ -14,7 +14,7 @@ writes archives, and refuses `-c -b` by name until its own object route is done.
 Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64 -o FILE.s` writes that object as GNU assembly
 (AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
 assembles it -- or hand-written code in the same subset -- back into the
-identical object; `unisacc nm` and `unisacc objdump -d` read the same objects. Assembly text for Mach-O and COFF, Intel syntax and inline `asm` are planned for 0.0.21 (R20-8). The design and the back-end facts behind it are in
+identical object; `unisacc nm` and `unisacc objdump -d` read the same objects. Assembly text for Mach-O and COFF, Intel syntax and inline `asm` are planned for 0.0.22 (R20-8). The design and the back-end facts behind it are in
 [docs/toolchain.md](docs/toolchain.md); the plans in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) (published) and [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) (published) and [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) (published). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
