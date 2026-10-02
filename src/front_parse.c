@@ -104,6 +104,7 @@ int mbbool[MAXMEMB];        /* the member is _Bool */
 int mbskip[MAXMEMB];
 int mbpst[MAXMEMB];       /* a pointer member: the struct it points to, or -1 */
 int mbflt[MAXMEMB]; int mbptrd[MAXMEMB];
+int mbfn[MAXMEMB];        /* a function-pointer member: `*s.f` is s.f (C99 6.5.3.2p4) */
 int nmemb;
 int declstruct;         /* the struct declspec() just saw, or -1 */
 int decldim2;           /* `a[n][m]` -- m, so the first index strides a row */
@@ -1467,6 +1468,7 @@ int postfix(void) {
             if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
             curuns = mbuns[mi]; curbool = mbbool[mi];
             curflt = mbflt[mi];
+            if (mbfn[mi]) { curfn = 1; curfnst = 0 - 1; }
             if (mbarr[mi]) {
                 /* T *a[N] decays to T **, without loading its first slot. */
                 lvalue = 0; curptr = 1; curpd = mbptrd[mi] + 1;
@@ -1514,6 +1516,9 @@ int postfix(void) {
             /* an element of an array of pointers, or q[i] of int **q, is a
                pointer itself */
             curpd = 0;
+            /* a row of `T *a[n][m]` keeps its pointer elements for the next
+               index: `g->strcache[i][j] = s` stored a whole T (lua lstring.c) */
+            if (row > 0) { if (ipd >= 2) { curpd = ipd; curbase = ibase; } }
             if (row == 0) { if (ipd >= 2) {
                 curptr = 1; curpd = ipd - 1; curbase = ibase;
                 curelem = curpd >= 2 ? 8 : ibase;
@@ -3889,6 +3894,7 @@ int stbody(int si) {
     int own[256]; int nown; int j; int bitpos; int bw; int isbf; int menum; int mflt;
     int flex; int marr;                   /* this member is `name[]`: a flexible array */
     int mdim2; int mdim3;                 /* the trailing dimensions of `name[n][k][j]` */
+    int mfn;                              /* this member is a function pointer */
     int mbl;                    /* ...and this one is _Bool */
     nown = 0; bitpos = 0; flex = 0;
     stopen[si] = 1;             /* this tag is INCOMPLETE until the `}` */
@@ -3923,7 +3929,7 @@ int stbody(int si) {
                 while (k < NAMEW) { mbname[nmemb * NAMEW + k] = mbname[a * NAMEW + k]; k = k + 1; }
                 mboff[nmemb] = mo + mboff[a]; mbbytes[nmemb] = mbbytes[a];
                 mbwidth[nmemb] = mbwidth[a]; mbelem[nmemb] = mbelem[a]; mbarr[nmemb] = mbarr[a];
-                mbptr[nmemb] = mbptr[a]; mbstruct[nmemb] = mbstruct[a];
+                mbptr[nmemb] = mbptr[a]; mbstruct[nmemb] = mbstruct[a]; mbfn[nmemb] = mbfn[a];
                 mbbase[nmemb] = mbbase[a];
                 mbuns[nmemb] = mbuns[a];
                 mbskip[nmemb] = mbskip[a];
@@ -3944,7 +3950,8 @@ int stbody(int si) {
         } }
         while (1) {
             declptr = declspecptr; declpd = declspecpd;
-            while (eatstar()) declptr = 1;
+            mfn = declspecfp != 0;
+            while (eatstar()) { declptr = 1; mfn = 0; }
             t = 0 - 1;
             n = 1; marr = 0; mdim2 = 0; mdim3 = 0;
             if (declspectdn > 0) sz = declspectdsz;
@@ -3952,6 +3959,7 @@ int stbody(int si) {
                 /* `int (*fptr)();` -- a pointer member, called through
                    its value; `(*f[4])()` is an array of them */
                 t = fpdecl(); declptr = 1; mst = 0 - 1;
+                mfn = fpdim == 0 && fpadim == 0;
                 if (fpdim > 0) n = fpdim;
             } }
             flex = 0;
@@ -4072,6 +4080,7 @@ int stbody(int si) {
             mbname[nmemb * NAMEW + k] = 0;
             mboff[nmemb] = mo; mbbytes[nmemb] = msz; mbwidth[nmemb] = mw;
             mbelem[nmemb] = mel; mbptr[nmemb] = declptr; mbarr[nmemb] = marr;
+            mbfn[nmemb] = mfn && marr == 0;
             mbdim2[nmemb] = mdim2; mbdim3[nmemb] = mdim3;
             mbbase[nmemb] = sz; if (mst >= 0) mbbase[nmemb] = stsize[mst];
             mbstruct[nmemb] = 0 - 1;
@@ -4107,7 +4116,7 @@ int stbody(int si) {
         mboff[nmemb] = mboff[own[j]]; mbbytes[nmemb] = mbbytes[own[j]];
         mbwidth[nmemb] = mbwidth[own[j]];
         mbarr[nmemb] = mbarr[own[j]]; mbelem[nmemb] = mbelem[own[j]];
-        mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]];
+        mbptr[nmemb] = mbptr[own[j]]; mbstruct[nmemb] = mbstruct[own[j]]; mbfn[nmemb] = mbfn[own[j]];
         mbbase[nmemb] = mbbase[own[j]];
         mbuns[nmemb] = mbuns[own[j]];
         mbbool[nmemb] = mbbool[own[j]];

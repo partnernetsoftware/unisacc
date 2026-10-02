@@ -505,6 +505,7 @@ static int unsetenv(const char *__u_name) {
 
 /* system: forwarded to the system's own (0.0.21 R21-4a'; the bundled library
    does not grow a shell launcher of its own) */
+#ifndef __UNISA_OBJECT   /* objects have no loader slots: no forwarded bodies there */
 #include <unisacc_ffi.h>
 #if !__UNISA_FTRIM_LIBC || __UN_system
 static int system(const char *__u_cmd) {
@@ -515,5 +516,6 @@ static int system(const char *__u_cmd) {
     __u_v[0] = (long)__u_cmd;
     return (int)__hostcall(__u_fn, __u_v);
 }
+#endif
 #endif
 #endif

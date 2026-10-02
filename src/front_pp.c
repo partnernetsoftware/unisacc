@@ -815,6 +815,7 @@ long line_at(long p);
 int err_at(long p, char *msg);
 /* `#line` digit-sequence ["s-char-sequence"]: literal forms only; a macro
    operand (6.10.4p5) is refused with its position rather than misread. */
+int unitmode; int objextern;   /* defined with the parser (front_parse.c); tentative here */
 int err_atu(long p, char *stage, char *construct, char *msg);   /* R20-2: err_at with an UNCOVERED record */
 #define LINEMSG "not covered: this form of #line (C99 6.10.4: digit-sequence [\"file\"], in the main file)"
 int linedir(long ls, long ns, long ne, long le) {
@@ -1369,6 +1370,9 @@ int predef(void) {
     if (t[0] == 108) { mdef1("__linux__"); mdef1("__unix__"); mdef1("__ELF__"); }
     if (t[0] == 111) { mdef1("__APPLE__"); mdef1("__MACH__"); mdef1("__unix__"); }
     if (t[0] == 119) { mdef1("_WIN32"); mdef1("_WIN64"); }
+    /* R21-4a': an object (-c -b / -funit) has no host loader slots, so the
+       carried bodies that forward to the system library are left out there */
+    if (unitmode || objextern) mdef1("__UNISA_OBJECT");
     if (t[4] == 120) mdef1("__x86_64__"); else mdef1("__aarch64__");
     mdef1("__LP64__");
     mdef1("__UNISA__");

@@ -330,6 +330,7 @@ static char *ctime(const time_t *__u_t) { return asctime(localtime(__u_t)); }
 static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u_b); }
 #endif
 /* clock: processor time, forwarded to the system's own (0.0.21 R21-4a') */
+#ifndef __UNISA_OBJECT   /* objects have no loader slots: no forwarded bodies there */
 #include <unisacc_ffi.h>
 #if !__UNISA_FTRIM_LIBC || __UN_clock
 static clock_t clock(void) {
@@ -339,5 +340,6 @@ static clock_t clock(void) {
     __u_i = 0; while (__u_i < 10) { __u_v[__u_i] = 0; __u_i = __u_i + 1; }
     return (clock_t)__hostcall(__u_fn, __u_v);
 }
+#endif
 #endif
 #endif
