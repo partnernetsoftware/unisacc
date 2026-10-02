@@ -4783,9 +4783,9 @@ int dkind(int flt) {
    Definitions and block prototypes use the same declarator rules. */
 int paramtok; int paramnamed; int paramstruct; int paramflt;
 int parameter_decl(void) {
-    int pw;
+    int pw; int pw0;
     paramtok = 0 - 1;
-    pw = declspec();
+    pw = declspec(); pw0 = pw;
     paramstruct = declstruct; paramflt = declflt;
     declptr = declspecptr; declpd = declspecpd; declfp = declspecfp;
     while (eatstar()) declptr = 1;
@@ -4795,6 +4795,7 @@ int parameter_decl(void) {
             paramtok = fpdecl(); declptr = 1; pw = 8;
             if (paramtok >= 0) paramnamed = 1;
             if (fpdim > 0) declfp = 0;       /* an array of them decays */
+            if (fpadim > 0) { decldim2 = fpadim; declpd = declspecpd; declfp = 0; pw = pw0; }   /* `int (*v)[3]`: v[1] strides a row of the element type, as `int v[][3]` (0.0.22 declmatrix) */
         } else {
             /* `int f1(int (), int)`: a function type, adjusted to a
                pointer to it (C99 6.7.5.3p8) */
@@ -4805,9 +4806,18 @@ int parameter_decl(void) {
     /* `int a[n]`, `int a[static 5]`: an array parameter IS a pointer
        (C99 6.7.5.3p7), whatever the brackets say */
     if (cur() == tidx("[", 1)) declpd = declpd + 1;   /* `char *v[]` is char **: the brackets are one more level (0.0.22; v[1][0] read a char) */
-    while (cur() == tidx("[", 1)) {
+    if (cur() == tidx("[", 1)) {
+        int tdrow; tdrow = declspectdn > 0 && declptr == 0;
         while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
         adv(); declptr = 1;
+        /* `EA3 v[]` (typedef int EA3[3]) is int (*v)[3]: the typedef's count is the row (0.0.22 declmatrix) */
+        if (tdrow && cur() != tidx("[", 1)) { decldim2 = declspectdn; declsz = declspectdsz / declspectdn; declpd = declpd - 1; return pw0; }
+        /* `int v[][3]` is int (*v)[3]: the second dimension is the row stride (0.0.22 declmatrix) */
+        if (cur() == tidx("[", 1)) { adv(); decldim2 = cexpr(); need(tidx("]", 1), "]"); declpd = declpd - 1; }
+        while (cur() == tidx("[", 1)) {
+            while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
+            adv();
+        }
     }
     /* `jmp_buf env` is a pointer to the typedef's element (C99 6.7.5.3p7) */
     if (declspectdn > 0 && declptr == 0) { declsz = declspectdsz / declspectdn; declptr = 1; }
