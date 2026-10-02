@@ -164,6 +164,13 @@ static double ldexp(double __u_x, int __u_n) {
 #if !__UNISA_FTRIM_LIBC || __UN_scalbn
 static double scalbn(double __u_x, int __u_n) { return ldexp(__u_x, __u_n); }
 #endif
+/* float forms of the exact bit manipulations (route table: math stays in the bundled library) */
+#if !__UNISA_FTRIM_LIBC || __UN_ldexpf
+static float ldexpf(float __u_x, int __u_n) { return (float)ldexp((double)__u_x, __u_n); }
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_frexpf
+static float frexpf(float __u_x, int *__u_e) { return (float)frexp((double)__u_x, __u_e); }
+#endif
 
 /* fmod, exactly: C99 7.12.10.1 -- the result is x - n*y for the integer n
    that makes it have x's sign and be smaller than |y|, and it is exact. */
