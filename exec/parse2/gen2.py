@@ -888,7 +888,8 @@ def build(locations=False, warnings=False, errors=False):
     member_control(E, P, warnings, TEMPL,
                    dict(SBB=SBB, MEMBER_STRIDE=MEMBER_STRIDE, MOF=MOF, MSZ=MSZ, MPT=MPT, MBS=MBS,
                         MAR=MAR, BFW=BFW, BFO=BFO, BFS=BFS, SHAPE_IDS=SHAPE_IDS, SHAPE=SHAPE,
-                        ARR=E.ARR, SSZ=SSZ, DBL=DBL, FLT=FLT, BOOL=BOOL), shape_control)
+                        ARR=E.ARR, SSZ=SSZ, DBL=DBL, FLT=FLT, BOOL=BOOL,
+                        TYINT=TYINT), shape_control)
     # statement `*E = e` / `*E ...;`: E's value is the address
     ordinary_control('star', warnings)
     update_control("fnvalue")

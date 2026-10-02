@@ -45,3 +45,30 @@ def install(E, P, warnings, templates, facts, shape_control):
     section('part0')
     shape_control('subscript')
     section('part2')
+    # Assignment expression values are narrowed only when the right value's
+    # width exceeds the left width or their signedness differs.  Generate the
+    # finite comparison states from tyinfo, the same type facts used by the
+    # conversion network; an unused `a = x;` skips this path in the table.
+    tyint = facts['TYINT']
+    sources = [(code, size, uns) for _, code, size, uns, _ in tyint]
+    sources += [(facts['FLT'], 4, 0), (facts['DBL'], 8, 0), (facts['BOOL'], 1, 0)]
+    P('AS.mask').branch({1:'AS.mask.target'}, 'AS.store', [('CMPI','lt',0)])
+    target = P('AS.mask.target')
+    for name, code, size, uns, _ in tyint:
+        next_target = target.fresh('b')
+        state = 'AS.mask.' + name
+        target.branch({1:state}, next_target, [('CMPI','lb',code)])
+        target.label(next_target)
+        if size >= 8:
+            P(state).goto('AS.store')
+            continue
+        P(state).branch({1:state+'.scalar'}, 'AS.needmask', [('CMPI','rvt',0)])
+        no_mask = sorted({v for v, width, signedness in sources
+                          if width <= size and signedness == uns})
+        rhs = P(state+'.scalar')
+        for value in no_mask:
+            next_rhs = rhs.fresh('b')
+            rhs.branch({1:'AS.store'}, next_rhs, [('CMPI','rvb',value)])
+            rhs.label(next_rhs)
+        rhs.goto('AS.needmask')
+    target.goto('AS.store')
