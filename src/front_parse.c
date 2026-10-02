@@ -3328,7 +3328,7 @@ int expr(void) {
             pop1();
             estore(e);
             if (ak >= 4) setkind(ak);
-            else if (tptr == 0 && bl == 0) { curuns = tuns; curptr = 0; }
+            else if (tptr == 0 && bl == 0 && e > 0 && e < BFTAG) { curuns = tuns; curptr = 0; cursize = e; curelem = e; }   /* typed as the left operand (seed 17: (a = -1) < c with long long a) */
             return 0;
         }
     }
