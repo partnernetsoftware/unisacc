@@ -15,6 +15,7 @@ typedef long time_t;
 #endif
 typedef long clock_t;
 #include <sys/_timespec.h>
+#include <sys/_ret.h>
 /* clock_gettime / nanosleep (0.0.20 R20-6, dsh).  Linux: the system calls.
    macOS has no clock_gettime call: both clocks read gettimeofday, so
    CLOCK_MONOTONIC there is the wall clock at microsecond grain (stated). */

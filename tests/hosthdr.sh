@@ -21,7 +21,7 @@ case "$(uname -s)/$(uname -m)" in Darwin/arm64) HOST=osx/arm64;; Darwin/x86_64) 
 for h in $(cd include && find . -name '*.h' | sed 's|^\./||' | sort); do
     printf '#include <%s>\nint main(void) { return 0; }\n' "$h" > "$T/alone.c"
     for t in "$HOST" lnx/x86_64 win/x86_64; do
-        if "$_BOUND" 30 "$UA" "$T/alone.c" -b "$t" -o "$T/alone.out" 2>"$T/err"; then ok=$((ok+1)); else bad=$((bad+1)); echo "  FAIL alone $h $t: $(head -1 "$T/err")"; fi
+        if "$_BOUND" 30 "$UA" -fno-trim-libc "$T/alone.c" -b "$t" -o "$T/alone.out" 2>"$T/err"; then ok=$((ok+1)); else bad=$((bad+1)); echo "  FAIL alone $h $t: $(head -1 "$T/err")"; fi
     done
 done
 echo "  alone: every include/ header on its own, $HOST lnx/x86_64 win/x86_64"

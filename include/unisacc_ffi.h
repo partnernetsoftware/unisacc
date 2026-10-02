@@ -61,6 +61,7 @@ static void *__uffi_call;
 static void *__uffi_types[12];
 static int __uffi_ready;
 
+#ifndef _WIN32   /* the host channel (__hostcall/__hostaddr) is macOS and Linux only until the Windows slots land (0.0.21 item 4a) */
 #if !__UNISA_FTRIM_LIBC || __UN_uffi_dlopen
 static void *uffi_dlopen(const char *__u_path, int __u_mode) {
     long __u_args[6];
@@ -203,5 +204,6 @@ static int uffi_call(void *__u_fn, int __u_return_kind, int *__u_kinds,
     return uffi_call_types(__u_fn, __u_rtype, __u_types, __u_values,
                            __u_n, __u_fixed, __u_result);
 }
+#endif
 #endif
 #endif

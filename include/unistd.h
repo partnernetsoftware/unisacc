@@ -115,9 +115,7 @@ static int unlink(const char *__u_path) {
 #if !__UNISA_FTRIM_LIBC || __UN__exit
 static void _exit(int __u_code) { __exit(__u_code); }
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN__unisa_ret
-static long _unisa_ret(long __u_r) { if (__u_r < 0 && __u_r > -4096) { errno = (int)(0 - __u_r); return -1; } return __u_r; }
-#endif
+#include <sys/_ret.h>
 #if !__UNISA_FTRIM_LIBC || __UN_getpid
 static pid_t getpid(void) { return (pid_t)__syscall6(_UNISA_SC(_UNISA_NR_getpid), 0, 0, 0, 0, 0); }
 #endif

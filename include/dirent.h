@@ -22,6 +22,7 @@ typedef struct {
     struct dirent ent;
     unsigned char buf[_UNISA_DIRBUF];
 } DIR;
+#ifndef _WIN32   /* Windows has no directory calls yet: refused by name until the Windows POSIX layer (0.0.21 item 4a) */
 #if !__UNISA_FTRIM_LIBC || __UN_opendir
 static DIR *opendir(const char *__u_path) {
     DIR *__u_d; long __u_fd;
@@ -108,5 +109,6 @@ static int closedir(DIR *__u_d) {
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
     return 0;
 }
+#endif
 #endif
 #endif
