@@ -90,7 +90,7 @@ job c99         ./tests/c99.sh
 for k in 1 2 3 4; do job corpus-$k   SHARD=$k/4 ./tests/corpus.sh; done
 for k in 1 2 3 4; do job difftest-$k SHARD=$k/4 ./tests/difftest.sh; done
 for k in 1 2 3 4 5; do job declmatrix-$k SHARD=$k/5 python3 ./tests/declmatrix.py; done   # 0.0.22 TDD: declarator forms x positions vs cc (found four reference defects)
-job declshape python3 ./tests/declshape.py   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
+job declshape bash -c 'R=$PWD; export UA=${UA:-/tmp/ua_ref}; . tests/lib.sh && ua_ready && python3 ./tests/declshape.py'   # 0.0.22 (cdx): declarator metamorphisms -- equivalent spellings agree
 for k in 1 2 3 4 5 6 7 8; do job csmithdiff-$k SEEDS=1-200 SHARD=$k/8 python3 ./tests/csmithdiff.py; done   # 0.0.22 TDD: fixed Csmith seeds 1-200, reference vs cc (found 7 reference defects)
 # R17-6 (E2, first step): suites that only all.sh / CI / linux.sh ran.  Both
 # regressions found after 0.0.16's local queue was green came from here
