@@ -236,4 +236,3 @@ static int uffi_call(void *__u_fn, int __u_return_kind, int *__u_kinds,
 #endif
 #endif
 #endif
-#endif
