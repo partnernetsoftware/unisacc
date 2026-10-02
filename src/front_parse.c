@@ -5095,7 +5095,7 @@ int local_decl(void) {
             lfpret = 0;
         }
         if (eat(vfind(TOKV, NTOKV, "=", 1))) {
-            int lk; int lptr;
+            int lk; int lptr; int lpd;
             lk = dkind(lflt0);
             /* Whether the thing being initialised is a POINTER, taken now:
                the initialiser can contain a type name of its own -- a
@@ -5105,11 +5105,13 @@ int local_decl(void) {
                width, and read it back 8: the top half was whatever the
                stack held.  It passed here by luck and printed garbage on
                a GitHub runner. */
-            lptr = declptr;
+            lptr = declptr; lpd = declpd;
             initflt = valuekind(w, declpd, declunsigned, lflt0, declbool);
             if (cur() == tidx("{", 1)) {
                 if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; }
-                initaggr(0, 0, off, w, sst, n * w);
+                /* an array of struct POINTERS holds pointers, not structs (csmith seed 44:
+                   struct S *l[2][2] = {{&g,&g},{&g,&g}} laid out struct slots and crashed) */
+                initaggr(0, 0, off, w, lpd > 0 ? 0 - 1 : sst, n * w);   /* declptr is 1 for any array: the pointer depth says whether the elements are pointers */
             }
             else { if (cur() == T_STR) { if (isarr) { if (w == strw(tp)) {
                 initstr(0, 0, off, n, 0);
@@ -5758,7 +5760,7 @@ int unit(void) {
                 cpn = 0 - 1;
                 if (cur() == tidx("(", 1)) cpn = cplit();
                 if (cur() == tidx("{", 1)) {
-                    if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; initaggr(1, t, 0, w, gstruct, n * w); }
+                    if (isarr) { initisarr = 1; initrows = decldim2; initrows3 = decldim3; initaggr(1, t, 0, w, declpd > 0 ? 0 - 1 : gstruct, n * w); }   /* struct POINTER elements are pointers (csmith seed 143) */
                     else { if (gstruct >= 0) initaggr(1, t, 0, w, gstruct, declsz);
                            else initaggr(1, t, 0, w, 0 - 1, n * w); }
                     while (cpn > 0) { need(tidx(")", 1), ")"); cpn = cpn - 1; }
