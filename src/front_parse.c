@@ -5216,6 +5216,7 @@ int function(int t, int w) {
     }
     if (any) npar = npar + 1;
     if (fnvar) npar = npar - 1;              /* the `...` is not a parameter */
+    if (isname(tp, "void", 4) && kind(tp + 1) == tidx(")", 1)) npar = 0;   /* (void): no parameters */
     stacked = 0;
     if (fnvar) stacked = 1;
     if (npar > 6) stacked = 1;
@@ -5229,6 +5230,7 @@ int function(int t, int w) {
     etok(t); es(":\n");
     es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
+    if (isname(tp, "void", 4) && kind(tp + 1) == tidx(")", 1)) adv();   /* f(void): the prototype path already did this; the stub generator counted `void` as an argument */
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (cur() == T_EOF) break;
         if (eat(tidx("...", 3))) break;
@@ -6113,6 +6115,7 @@ int fwd_stub(char *nm, int nl) {
     np = symnpk[si]; f = sympkfirst[si];
     k = 0; while (k < np) { if (sympk[f + k] == 9) return 0; k = k + 1; }
     rw = symelem[si]; isvoid = rw == 0 && symptr[si] == 0 && symflt[si] == 0;
+    if (isvoid == 0 && symptr[si] == 0 && symflt[si] == 0 && symretw[si]) rw = symretw[si];   /* int is 4, not the element width */
     {   int kk[64]; int ww[64]; int uu[64];
         if (np > 64) return 0;
         k = 0; while (k < np) { kk[k] = sympk[f + k]; ww[k] = sympkw[f + k]; uu[k] = 0; k = k + 1; }
