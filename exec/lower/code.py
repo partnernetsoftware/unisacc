@@ -9,7 +9,7 @@ from pathlib import Path
 # input: buffered rows fit 2^30 slots; their eight-wide ARG offsets fit 2^33.
 # Interned tokens (TXT/REG/FORM) fit 2^31 slots; low PRN scratch and data.py
 # regions 1..8 are disjoint. ARG index arithmetic uses A64/A64I in every reader.
-OP, KIND, AC, ARG, TXT, REG, FORM = (i << 40 for i in range(105,112))
+OP, KIND, AC, ARG, TXT, REG, FORM, ARGREG = (i << 40 for i in range(105,113))
 
 
 def rows(name):
@@ -32,6 +32,13 @@ def install(E, arch="x86_64", os_="lnx"):
     ids={w:'idc'+str(i) for i,w in enumerate(words)}
     for w,d in ids.items():
         p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN',d),('SBSAVE','blob'),('STX',d,TXT,'blob'))
+        if w in SHAPE:
+            for j, kind in enumerate(SHAPE[w]):
+                if kind == 'r':
+                    p.a(('ALUI','mul','argshapeidx',d,8),
+                        ('ALUI','add','argshapeidx','argshapeidx',j),
+                        ('LDI','argshape_reg',1),
+                        ('STX','argshapeidx',ARGREG,'argshape_reg'))
         if w in regmap:
             p.a(('SBCLR',),[('SBOUT',c) for c in regmap[w].encode()],('SBSAVE','blob'),('STX',d,REG,'blob'))
         if w in enc:
@@ -117,7 +124,8 @@ def install(E, arch="x86_64", os_="lnx"):
                     ('DA', 'b'), ('DA', 'r'), ('DA', 'b'), ('DA', 'r'))
     print_bindings = {'label'+str(i): P(owner).fresh(kind)
                       for i, (owner, kind) in enumerate(print_labels)}
-    print_bindings.update(OP=OP, KIND=KIND, ARG=ARG, TXT=TXT, REG=REG, FORM=FORM)
+    print_bindings.update(OP=OP, KIND=KIND, ARG=ARG, TXT=TXT, REG=REG, FORM=FORM,
+                          ARGREG=ARGREG)
     print_bindings.update({'id:'+name: value for name, value in ids.items()})
     print_sequences = {'text'+str(i): E.O(text) for i, text in enumerate((
         ' ', ', ', ' reloc='+reloc['jmp'], ' reloc='+reloc['jz'], ' reloc='+reloc['call'], '\n',

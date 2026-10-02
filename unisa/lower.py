@@ -211,6 +211,10 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
     def R(x):
         return rmap[x] if x in rmap else x
 
+    def mapped_args(op, args):
+        return tuple(R(x) if kind == "r" else x
+                     for x, kind in zip(args, TAPE_SHAPE[op]))
+
     def syscall_seq(op, arg_srcs):
         f = facts(oracle, op, os_, arch, drive)
         if win and (C.WINAPI.get(op) is None or f["winimp"] == "none"):
@@ -397,13 +401,13 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
             rk = oracle.ask("reloc", (kind, arch))             # [L-1]
             cop = "call" if o == "call" else o
             f = facts(oracle, cop if cop in C.OPS else "jump", os_, arch, drive)
-            tp.emit(o, *[R(x) for x in a], reloc=rk, form=f["form"])
+            tp.emit(o, *mapped_args(o, a), reloc=rk, form=f["form"])
         else:
             meta = {}
             if o in C.OPS:
                 f = facts(oracle, o, os_, arch, drive)
                 meta = {"form": f["form"]}
-            tp.emit(o, *[R(x) if isinstance(x, str) else x for x in a], **meta)
+            tp.emit(o, *mapped_args(o, a), **meta)
 
     for name, at in tape.labels.items():
         if at == len(tape.code):

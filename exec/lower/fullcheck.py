@@ -54,7 +54,10 @@ def main():
             assert supported and unavailable, 'Windows import fixture classes must be nonempty'
             fixture += ''.join('  .sys '+op+', r0, r1, r2\n' for op in supported)
         fixture += '  .print r0\n  .print r3\n'
-        cases=[('fixture',fixture)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
+        regnames=('r0:\n  ret\nr1:\n  ret\nr7:\n  ret\n_start:\n'
+                  '  call r1\n  jump r0\n  jumpz r2, r7\n'
+                  '  .lea r3, r1\n  ret\n')
+        cases=[('fixture',fixture),('regnames',regnames)]+[(f,pathlib.Path(f).read_text()) for f in sys.argv[4:]]
         if os.environ.get('LOWER_TARGET','').endswith('/arm64'):
             # Immediate limits, power-of-two multiply, aliasing and liveness.
             chunks=['_start:']
@@ -74,11 +77,17 @@ def main():
         for name,raw in cases:
             p.write_text(raw)
             commands=[[sys.argv[1],sys.argv[2],str(p)]]
-            if name in ('fixture','immediate'):commands.append([sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)])
+            if name in ('fixture','immediate','regnames'):commands.append([sys.executable,'exec/pp/sim.py',sys.argv[3],str(p)])
             for cmd in commands:
                 r=subprocess.run(cmd,capture_output=True,timeout=60)
                 if r.returncode:raise RuntimeError((name,r.returncode,r.stderr))
                 n=check(raw,r.stdout.decode(),oracle)
+                if name=='regnames':
+                    code=parse_tins(r.stdout.decode()).code
+                    assert any(i.op=='call' and i.args==['r1'] for i in code), 'call target became a register'
+                    assert any(i.op=='jump' and i.args==['r0'] for i in code), 'jump target became a register'
+                    assert any(i.op=='jumpz' and i.args[1]=='r7' for i in code), 'jumpz target became a register'
+                    assert any(i.op=='.lea' and i.args[1]=='r1' for i in code), 'address name became a register'
                 if name=='fixture' and os.environ.get('LOWER_TARGET','').endswith('/arm64'):
                     sexts=[tuple(i.args) for i in parse_tins(r.stdout.decode()).code if i.op=='sext']
                     assert sexts==[('x1','x2',1),('x1','x2',2),('x1','x2',4)],sexts
