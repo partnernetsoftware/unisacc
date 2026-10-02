@@ -32,7 +32,7 @@ for i in $(seq 1 300); do
     [ "$k" -ge 60 ] && awk '{print $1}' "$D/.gq" | xargs kill 2>/dev/null
     sleep 2
   done
-  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$R/corpus" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$D/queue" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
+  env TERM_SH_NOFALLBACK=1 ./tests/term.sh env REALPROG_CACHE="$R/corpus" CORPUS="$R/corpus/c-testsuite" UNISACC_FFI_X86_PROVIDER="$UNISACC_FFI_X86_PROVIDER" MODEL_COM="$D/unisacc-next.com" UA="$UA" SEED_DIR="$SEED" GATE_STATE="$D/queue" ./tests/release.sh --com >> "$LOG" 2>&1; rc=$?
   echo "window $i rc=$rc $(date +%H:%M:%S)" >> "$LOG"
   case $rc in 0) break;; 75|142) ;; *) tail -25 "$LOG" | grep -q BlockingIOError && continue; break;; esac
   [ $((i % 40)) -eq 0 ] && osascript -e 'tell application "Terminal" to close (every window whose busy is false)' >/dev/null 2>&1
