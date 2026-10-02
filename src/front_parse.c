@@ -1465,7 +1465,8 @@ int postfix(void) {
             cursize = mbbytes[mi]; curdim2 = mbdim2[mi]; curdim3 = mbdim3[mi];
             curstruct = mbstruct[mi];
             /* `p->q->b`: a pointer member hands its pointee on */
-            if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) curelem = stsize[curstruct]; }
+            /* ...but `TS **hash` steps by pointers, not by TS (lua lstring.c tb->hash[i]) */
+            if (mbptr[mi]) { curstruct = mbpst[mi]; if (curstruct >= 0) { if (curpd >= 2) curelem = 8; else curelem = stsize[curstruct]; } }
             curuns = mbuns[mi]; curbool = mbbool[mi];
             curflt = mbflt[mi];
             if (mbfn[mi]) { curfn = 1; curfnst = 0 - 1; }
