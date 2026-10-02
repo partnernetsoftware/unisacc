@@ -40,7 +40,7 @@ def install(E, ordinal_table, locations=False):
     # by the shared E3 reader.
     types = {value for word, value in TK.items() if word == "type" or word.startswith("type=")}
     previous = types | {TK["*"]}
-    g.labels.update(("PF.got", "PF.id", "PF.close", "PF.follow"))
+    g.labels.update(("PF.got", "PF.id", "PF.close", "PF.follow", "PF.prevadj", "PF.prevtypedef"))
 
     def any_r(state, target, actions=()):
         g.on(state, range(257), target, actions, "r")
@@ -52,7 +52,21 @@ def install(E, ordinal_table, locations=False):
     g.on("PF.open", [lp], "PF.previous", [("RLD", "pf_previous")], "r")
     any_r("PF.open", "PF.done")
     g.on("PF.previous", previous, "PF.readid", [], "r")
+    # Some consumers use the raw token reader.  In that case pf_previous may
+    # name an older token: require adjacent ordinals before treating it as a
+    # typedef declarator prefix (notably across consecutive `(B)` casts).
+    g.on("PF.previous", [ident], "PF.prevadj", [
+        ("LDX", "pf_cur_ord", "tpos", ordinal_table),
+        ("ALUI", "add", "pf_want_ord", "pf_prev_ord", 1),
+        ("CMP", "pf_cur_ord", "pf_want_ord")], "r")
+    g.on("PF.prevadj", [1], "PF.prevtypedef", [
+        ("INTERN", "pf_prev_id", "pf_prev_s", "pf_prev_e"),
+        ("LDX", "pf_is_td", "pf_prev_id", E.TDN),
+        ("CMPI", "pf_is_td", 1)], "r")
+    any_r("PF.prevadj", "PF.done")
     any_r("PF.previous", "PF.done")
+    g.on("PF.prevtypedef", [1], "PF.readid", [], "r")
+    any_r("PF.prevtypedef", "PF.done")
     any_r("PF.readid", peek, [("MARK", "pf_afteropen"),
                                    ("COPYW", "pf_openpos", "tpos"), ("PUSH", "PF.id")])
     any_r("PF.id", "PF.idtest", [("RLD", "tk")])
@@ -73,7 +87,11 @@ def install(E, ordinal_table, locations=False):
                              ("COPYW", "ixn", "pf_neword"),
                              ("JUMP", "tpos"), ("LDI", "tk", ident),
                              ("COPYW", "ps", "pf_ids"), ("COPYW", "pe", "pf_ide"),
-                             ("COPYW", "tpos", "pf_idpos"), ("LDI", "pf_previous", ident)])
+                             ("COPYW", "tpos", "pf_idpos"), ("LDI", "pf_previous", ident),
+                             ("COPYW", "pf_prev_s", "pf_ids"), ("COPYW", "pf_prev_e", "pf_ide"),
+                             ("COPYW", "pf_prev_ord", "pf_neword")])
     any_r("PF.fail", "RET", [("JUMP", "pf_afteropen"), ("LDI", "tk", lp),
                              ("COPYW", "tpos", "pf_openpos"), ("LDI", "pf_previous", lp)])
-    any_r("PF.done", "RET", [("COPYW", "pf_previous", "tk")])
+    any_r("PF.done", "RET", [("COPYW", "pf_previous", "tk"),
+                               ("LDX", "pf_prev_ord", "tpos", ordinal_table),
+                               ("COPYW", "pf_prev_s", "ps"), ("COPYW", "pf_prev_e", "pe")])
