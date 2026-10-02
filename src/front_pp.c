@@ -1899,7 +1899,7 @@ int ftrim_libc_scan(void) {
     return 0;
 }
 int ftrim_libc_define(void) {
-    char nm[48]; int i; int p; int n; int k;
+    char nm[80]; int i; int p; int n; int k;
     if (ftrim_libc_act == 0) return 0;
     mdef1("__UNISA_FTRIM_LIBC");
     i = 0; p = 0;

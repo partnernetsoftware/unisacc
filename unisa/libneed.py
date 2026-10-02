@@ -27,7 +27,7 @@ PREFIX = "__UN_"
 # exit after main returns whenever an exit function exists (src/front_parse.c
 # `__main_ret`), so its closure is needed whenever pruning is on.
 ROOTS = ("exit",)
-MACRO_NAME_LIMIT = 31          # src/front_pp.c keeps 31 bytes of a macro name
+MACRO_NAME_LIMIT = 63          # src/front_pp.c keeps NAMEW-1 = 63 bytes of a macro name (C99 5.2.4.1)
 IDENT = re.compile(r"[A-Za-z_]\w*")
 HEAD = re.compile(r"^static\b[^;{]*?\{", re.M)
 KEYWORDS = {"void", "char", "short", "int", "long", "float", "double", "signed", "unsigned",
