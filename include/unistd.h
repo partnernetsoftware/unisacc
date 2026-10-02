@@ -64,14 +64,26 @@ static int isatty(int __u_fd) {               /* a terminal answers the attribut
 #endif
 }
 #endif
-#if !defined(_WIN32) && (!__UNISA_FTRIM_LIBC || __UN_ftruncate)
 #if !__UNISA_FTRIM_LIBC || __UN_ftruncate
 static int ftruncate(int __u_fd, off_t __u_len) {   /* R18-5 (kilo saves through it) */
+#ifdef _WIN32
+    static long __u_sp; static long __u_se; long __u_cur; int __u_ok;   /* the file position is kept, as POSIX has it */
+    if (!__u_sp) { __u_sp = _ux_sym("SetFilePointerEx"); __u_se = _ux_sym("SetEndOfFile"); }
+    if (__u_len < 0) { errno = EINVAL; return -1; }
+    __u_cur = 0;
+    if (!(_ux_call(__u_sp, (long)__u_fd, 0, (long)&__u_cur, 1) & 0xFFFFFFFFL)) return _ux_fail();
+    if (!(_ux_call(__u_sp, (long)__u_fd, (long)__u_len, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    __u_ok = (int)(_ux_call(__u_se, (long)__u_fd, 0, 0, 0) & 0xFFFFFFFFL);
+    if (!__u_ok) __u_ok = 0 - _ux_errno();
+    _ux_call(__u_sp, (long)__u_fd, __u_cur, 0, 0);
+    if (__u_ok < 0) { errno = 0 - __u_ok; return -1; }
+    return 0;
+#else
     long __u_r; __u_r = __ftruncate(__u_fd, (long)__u_len, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; }
     return 0;
-}
 #endif
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_unlink
 static int unlink(const char *__u_path) {
@@ -254,15 +266,25 @@ static int dup2(int __u_old, int __u_new) {
 #endif
 }
 #endif
+#endif
+/* Windows: pipe is CreatePipe (two HANDLEs, not inheritable).  dup/dup2 stay
+   refused by name there: DuplicateHandle takes seven arguments and the host
+   call carries six. */
 #if !__UNISA_FTRIM_LIBC || __UN_pipe
 static int pipe(int __u_fds[2]) {
-#ifdef __APPLE__
+#ifdef _WIN32
+    static long __u_cp; long __u_h[2];
+    if (!__u_cp) __u_cp = _ux_sym("CreatePipe");
+    __u_h[0] = 0; __u_h[1] = 0;
+    if (!(_ux_call(__u_cp, (long)&__u_h[0], (long)&__u_h[1], 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    __u_fds[0] = (int)__u_h[0]; __u_fds[1] = (int)__u_h[1];
+    return 0;
+#elif defined(__APPLE__)
     return (int)_unisa_ret(__syscall6(_UNISA_SC(135), 1, 1, 0, (long)__u_fds, 0));   /* socketpair(AF_UNIX, SOCK_STREAM) */
 #else
     return (int)_unisa_ret(__syscall6(_UNISA_NR_pipe2, (long)__u_fds, 0, 0, 0, 0));
 #endif
 }
-#endif
 #endif
 #define F_OK 0
 #define X_OK 1
@@ -291,9 +313,20 @@ static int pipe(int __u_fds[2]) {
 #define _UNISA_NR_readlinkat 78
 #define _UNISA_NR_symlinkat 36
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_fsync
-static int fsync(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_fsync), __u_fd, 0, 0, 0, 0)); }
 #endif
+#if !__UNISA_FTRIM_LIBC || __UN_fsync
+static int fsync(int __u_fd) {
+#ifdef _WIN32
+    static long __u_ff;
+    if (!__u_ff) __u_ff = _ux_sym("FlushFileBuffers");
+    if (!(_ux_call(__u_ff, (long)__u_fd, 0, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    return 0;
+#else
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_fsync), __u_fd, 0, 0, 0, 0));
+#endif
+}
+#endif
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_dup
 static int dup(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup), __u_fd, 0, 0, 0, 0)); }
 #endif

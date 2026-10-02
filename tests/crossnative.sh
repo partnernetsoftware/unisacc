@@ -132,8 +132,8 @@ run_windows() {
     # cmd.exe's `echo ===\xa0x` keeps the space before the redirect, so the
     # marker lines come back with one trailing blank.  Strip it on both sides.
     "$UTM" file pull "$vm" "$Y" 2>&1 | tr -d '\r' | grep -v '^RC=' \
-        | sed -e 's/[ \t]*$//' -e '/^$/d' > "$d/.got"
-    sed -e 's/[ \t]*$//' -e '/^$/d' "$d/.want" > "$d/.w"
+        | sed -e 's/[[:blank:]]*$//' -e '/^$/d' > "$d/.got"
+    sed -e 's/[[:blank:]]*$//' -e '/^$/d' "$d/.want" > "$d/.w"
     if cmp -s "$d/.got" "$d/.w"; then
         printf "  %-12s ok %s   mismatch 0\n" "$target" \
             "$(grep -c '^=== ' "$d/.w")"

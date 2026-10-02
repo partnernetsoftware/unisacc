@@ -2,7 +2,8 @@
  * over the kernel's own calls -- no host libc.  The layout is the kernel's for
  * each target (Linux x86_64 and arm64 differ; macOS is stat64).  Windows
  * (0.0.21 batch 1): a long-field struct stat and stat/fstat/mkdir over
- * kernel32 (sys/_win.h); lstat and chmod are not there yet. */
+ * kernel32 (sys/_win.h); lstat is stat there (no symlinks followed or not),
+ * chmod maps S_IWUSR to the read-only attribute (0.0.21 batch 2). */
 #ifndef _UNISA_SYS_STAT_H
 #define _UNISA_SYS_STAT_H
 #include <sys/types.h>
@@ -91,13 +92,15 @@ static int stat(const char *__u_p, struct stat *__u_b) {
 #endif
 }
 #endif
-#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_lstat
 static int lstat(const char *__u_p, struct stat *__u_b) {
+#ifdef _WIN32
+    return stat(__u_p, __u_b);
+#else
     long __u_r; __u_r = __lstat((char *)__u_p, (char *)__u_b, 256);   /* AT_SYMLINK_NOFOLLOW for newfstatat */
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
-}
 #endif
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_fstat
 static int fstat(int __u_fd, struct stat *__u_b) {
@@ -121,13 +124,21 @@ static int fstat(int __u_fd, struct stat *__u_b) {
 #endif
 }
 #endif
-#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_chmod
 static int chmod(const char *__u_p, mode_t __u_m) {
+#ifdef _WIN32
+    static long __u_ga; static long __u_sa; long __u_at;
+    if (!__u_ga) { __u_ga = _ux_sym("GetFileAttributesA"); __u_sa = _ux_sym("SetFileAttributesA"); }
+    __u_at = _ux_call(__u_ga, (long)__u_p, 0, 0, 0) & 0xFFFFFFFFL;
+    if (__u_at == 0xFFFFFFFFL) return _ux_fail();
+    __u_at = (__u_m & 0200) ? (__u_at & ~1L) : (__u_at | 1L);         /* FILE_ATTRIBUTE_READONLY */
+    if (!(_ux_call(__u_sa, (long)__u_p, __u_at, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+    return 0;
+#else
     long __u_r; __u_r = __chmod((char *)__u_p, (long)__u_m, 0);
     if (__u_r < 0) { errno = (int)(0 - __u_r); return -1; } return 0;
-}
 #endif
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_mkdir
 static int mkdir(const char *__u_p, mode_t __u_m) {

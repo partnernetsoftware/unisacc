@@ -104,8 +104,13 @@ static time_t time(time_t *__u_t) {
    strings in TZ ("EST5EDT,...") are not parsed: such a TZ falls back to
    the zoneinfo file of that name, else UTC.  Transitions after the table's
    last one use the last type (the footer rule is not evaluated).
-   The C locale only. */
-#ifndef _WIN32
+   The C locale only.
+   Windows (0.0.21 batch 2): the same arithmetic; localtime takes the offset
+   from GetTimeZoneInformation -- the system's CURRENT bias (standard or
+   daylight, whichever is in effect now) is applied to every time, so dates
+   on the other side of a DST change are off by the DST delta; TZ is not
+   read.  struct tm has no tm_gmtoff/tm_zone there: %Z prints "UTC" for a
+   zero offset and "" otherwise, %z the current bias. */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_days_from_civil
 static long _unisa_days_from_civil(long y, int m, int d) {
     long era; long yoe; long doy; long doe;
@@ -137,7 +142,10 @@ static struct tm *_unisa_fill(long t, long off, int dst, const char *zone, struc
     r->tm_mday = d; r->tm_mon = m - 1; r->tm_year = (int)(y - 1900);
     r->tm_wday = (int)((days % 7 + 11) % 7);          /* 1970-01-01 was a Thursday */
     r->tm_yday = cum[m - 1] + d - 1 + (m > 2 && _unisa_leap(y));
-    r->tm_isdst = dst; r->tm_gmtoff = off; r->tm_zone = zone;
+    r->tm_isdst = dst;
+#ifndef _WIN32
+    r->tm_gmtoff = off; r->tm_zone = zone;
+#endif
     return r;
 }
 #endif
@@ -164,6 +172,9 @@ static char *_unisa_envget(const char *nm) {
 static void _unisa_tzload(void) {
     char path[512]; char *tz; long fd; int q; char *pre;
     if (_unisa_tzstate) return;
+#ifdef _WIN32
+    _unisa_tzstate = 2; (void)path; (void)tz; (void)fd; (void)q; (void)pre;
+#else
     _unisa_tzstate = 2; tz = _unisa_envget("TZ");
     if (tz == 0) tz = "/etc/localtime";
     else {
@@ -177,12 +188,23 @@ static void _unisa_tzload(void) {
     fd = __open(path, 0, 0); if (fd < 0) return;
     _unisa_tzn = __read(fd, (char *)_unisa_tz, 65536); __close(fd);
     if (_unisa_tzn >= 44 && _unisa_tz[0] == 84 && _unisa_tz[1] == 90 && _unisa_tz[2] == 105 && _unisa_tz[3] == 102) _unisa_tzstate = 1;
+#endif
 }
 #endif
 /* offset, dst and abbreviation in effect at UTC time t */
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_tzat
 static long _unisa_tzat(long t, int *dst, const char **zone) {
     unsigned char *h; long isut; long isstd; long leap; long tc; long ty; long ch; int tsz; long p; long i; long idx; unsigned char *tt;
+#ifdef _WIN32
+    static long __u_gz; int __u_ti[43]; long __u_k; long __u_b;   /* TIME_ZONE_INFORMATION, 172 bytes */
+    if (!__u_gz) __u_gz = _ux_sym("GetTimeZoneInformation");
+    __u_ti[0] = 0; __u_ti[21] = 0; __u_ti[42] = 0;
+    __u_k = _ux_call(__u_gz, (long)__u_ti, 0, 0, 0) & 0xFFFFFFFFL;
+    __u_b = __u_ti[0] + (__u_k == 2 ? __u_ti[42] : (__u_k == 1 ? __u_ti[21] : 0));   /* Bias + DaylightBias / StandardBias, minutes */
+    *dst = __u_k == 2; *zone = __u_b == 0 ? "UTC" : "";
+    (void)t; (void)h; (void)isut; (void)isstd; (void)leap; (void)tc; (void)ty; (void)ch; (void)tsz; (void)p; (void)i; (void)idx; (void)tt;
+    return 0 - __u_b * 60;
+#endif
     _unisa_tzload(); *dst = 0; *zone = "UTC";
     if (_unisa_tzstate != 1) return 0;
     h = _unisa_tz; tsz = 4;
@@ -270,8 +292,14 @@ static size_t strftime(char *__u_s, size_t __u_max, const char *__u_f, const str
         else if (c == 110) n = _unisa_put(__u_s, __u_max, n, "\n", 1);
         else if (c == 116) n = _unisa_put(__u_s, __u_max, n, "\t", 1);
         else if (c == 37) n = _unisa_put(__u_s, __u_max, n, "%", 1);
+#ifdef _WIN32
+        else if (c == 90 || c == 122) { int __u_dz; const char *__u_z; long o; o = _unisa_tzat(0, &__u_dz, &__u_z);
+            if (c == 90) n = _unisa_put(__u_s, __u_max, n, __u_z, 99);
+            else { n = _unisa_put(__u_s, __u_max, n, o < 0 ? "-" : "+", 1); if (o < 0) o = 0 - o; n = _unisa_num(__u_s, __u_max, n, o / 3600 * 100 + o / 60 % 60, 4, 48); } }
+#else
         else if (c == 90) n = _unisa_put(__u_s, __u_max, n, __u_tm->tm_zone ? __u_tm->tm_zone : "", 99);
         else if (c == 122) { long o; o = __u_tm->tm_gmtoff; n = _unisa_put(__u_s, __u_max, n, o < 0 ? "-" : "+", 1); if (o < 0) o = 0 - o; n = _unisa_num(__u_s, __u_max, n, o / 3600 * 100 + o / 60 % 60, 4, 48); }
+#endif
         else if (c == 115) { struct tm __u_c; __u_c = *__u_tm; n = _unisa_num(__u_s, __u_max, n, (long)mktime(&__u_c), 1, 48); }
         else if (c == 68) n = n + strftime(__u_s + (n < __u_max ? n : __u_max), n < __u_max ? __u_max - n : 0, "%m/%d/%y", __u_tm);
         else if (c == 70) n = n + strftime(__u_s + (n < __u_max ? n : __u_max), n < __u_max ? __u_max - n : 0, "%Y-%m-%d", __u_tm);
@@ -293,7 +321,6 @@ static char *asctime(const struct tm *__u_tm) { strftime(_unisa_asc, 32, "%a %b 
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_ctime
 static char *ctime(const time_t *__u_t) { return asctime(localtime(__u_t)); }
-#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_difftime
 static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u_b); }

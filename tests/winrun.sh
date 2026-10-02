@@ -14,4 +14,4 @@ t=$(date +%s)$RANDOM; Z='C:\u\z'"$t"'.txt'; D='C:\u\d'"$t"'.txt'; G='C:\u\g'"$t"
   printf 'echo done > %s\r\n' "$D"; } | "$UTM" file push "$vm" "$G" 2>/dev/null
 "$UTM" exec "$vm" --cmd "cmd.exe" -- /c "$G" >/dev/null 2>&1 || { echo "winrun: guest exec refused"; exit 1; }
 i=0; while [ $i -lt 60 ]; do case "$("$UTM" file pull "$vm" "$D" 2>&1)" in *done*) break;; esac; i=$((i+1)); sleep 1; done
-"$UTM" file pull "$vm" "$Z" 2>&1 | tr -d '\r' | sed -e 's/[ \t]*$//'
+"$UTM" file pull "$vm" "$Z" 2>&1 | tr -d '\r' | sed -e 's/[[:blank:]]*$//'   # BSD sed reads \t in brackets as backslash and t (it ate a.txt's last t)
