@@ -8,7 +8,10 @@
 #define _UNISA_TIME_T
 typedef long time_t;
 #endif
-struct timespec { time_t tv_sec; long tv_nsec; };
+#ifndef _UNISA_TIMESPEC
+#define _UNISA_TIMESPEC
+struct timespec { long tv_sec; long tv_nsec; };   /* one definition with sys/stat.h */
+#endif
 #ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_nanosleep
 static long _unisa_nanosleep(const struct timespec *__u_q) {
