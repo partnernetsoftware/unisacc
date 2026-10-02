@@ -3550,6 +3550,11 @@ int dim3decl(void) {
 int tdarrdecl(void) {
     if (declspectdn <= 0) return 0;
     declsz = declspectdsz;
+    /* `EA3 ta[2]` (typedef int EA3[3]): an array of arrays through a typedef.  The element
+       type was taken as the typedef's element, so ta[1][2] indexed an int (0.0.22 declmatrix
+       found the crash); refused by name, as the product refuses it. */
+    if (!declptr && declpd == 0 && cur() == tidx("[", 1))
+        err_uncov(tp, "ref.parse", "decl.tdarray", "not covered: array typedef with extra suffix");
     if (declptr || declpd > 0 || cur() == tidx("[", 1)) return 0;
     declsz = declspectdsz / declspectdn;
     decldim2 = 0; decldim3 = 0;
@@ -4799,6 +4804,7 @@ int parameter_decl(void) {
     if (cur() == T_ID) { paramtok = adv(); paramnamed = 1; }
     /* `int a[n]`, `int a[static 5]`: an array parameter IS a pointer
        (C99 6.7.5.3p7), whatever the brackets say */
+    if (cur() == tidx("[", 1)) declpd = declpd + 1;   /* `char *v[]` is char **: the brackets are one more level (0.0.22; v[1][0] read a char) */
     while (cur() == tidx("[", 1)) {
         while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
         adv(); declptr = 1;

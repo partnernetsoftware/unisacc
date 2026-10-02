@@ -12,7 +12,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 UTM=/Applications/UTM.app/Contents/MacOS/utmctl
 if [ -z "$("$UTM" ip-address "${WINVM:-minicon-win-arm-64}" 2>/dev/null | head -1)" ]; then
     echo "winposix  skipped (Windows VM not answering)"; [ "${STRICT:-0}" != 1 ]; exit; fi
-ok=0; bad=0; exes=""; PS="tests/hosthdr/winposix.c tests/hosthdr/winposix2.c tests/hosthdr/winposix3.c tests/hosthdr/winposix4.c"
+ok=0; bad=0; exes=""; PS="tests/hosthdr/winposix.c tests/hosthdr/winposix2.c tests/hosthdr/winposix3.c tests/hosthdr/winposix4.c tests/hosthdr/winposix5.c"
 mkdir -p "$T/c"; k=0
 for P in $PS; do                      # compile everything, then one guest round trip
     k=$((k+1))
