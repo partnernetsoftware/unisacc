@@ -44,10 +44,10 @@ make model-com MODEL_DIR=$D MODEL_STEP=pack UA=/tmp/<tag>-ua
 `release/macosbundle.py build|sign|dmg|assess` + 自己的 notarytool 步骤（见 scratch 中的 apple-sign.sh 流程）：专用临时 keychain 导入公司 Developer ID p12（`~/.private_keys/`），`codesign --options runtime --timestamp`，`ditto` 打 zip → `notarytool submit --keychain-profile minicon-notary --wait` → `stapler staple` app → dmg → 再公证 → staple → `spctl` 评估。profile 存于系统新式凭据库，`security find-generic-password` 找不到是正常的。
 
 ## 7. Windows 企业签名（`windows-signing.yml`）
-前提：候选同 SHA 的 CI 成功、main HEAD == source_sha、草稿 Release 已传 `unisacc-unsigned.zip` + `unsigned-receipt.json`、`release/signing-policy.json` mode=required。
+前提：候选同 SHA 的 CI 成功、`rc/<tag>` 指向 source_sha 且它在 main 上（0.0.22 起；main 之后可以继续前进）、草稿 Release 已传 `unisacc-unsigned.zip` + `unsigned-receipt.json`、`release/signing-policy.json` mode=required。
 - 先 `mode=qualification`（零额度），再 `mode=company`。company 进入 `release-signing` 环境要审批：`POST /actions/runs/{id}/pending_deployments`（JSON body，environment_ids 为整数）。
 - 草稿只能按 `tag_name` 在 `/releases?per_page=100` 里找（`/releases/tags/{tag}` 不返回草稿），且需要 `contents: write` 的 token。
-- 任何 docs 提交都会移动 main HEAD：dispatch 前把回执（source_sha/run_id/**run_attempt**）重生成并重传，tag 与草稿 target 同步到该 SHA；CI 只重跑失败 job 会使 attempt 递增，回执必须写实际 attempt。
+- 0.0.22 起签名绑定 `rc/<tag>`，不再比较 main 末端：main 上的后续提交（含产品改动）不影响签名；回执的 source_sha、草稿 target 都用 rc 指向的 SHA；CI 只重跑失败 job 会使 attempt 递增，回执必须写实际 attempt。
 - `Azure/artifact-signing-action` 的坑：a) 首跑安装 ArtifactSigning 模块与客户端包超过 1 分钟 → step 4 分钟、`cache-dependencies: true`、服务 `timeout: 200`；b) 它以 catalog 文件所在目录为文件根（Split-Path），catalog 放仓库根会得到空 Path（`Get-CatalogFileList: Cannot bind argument to parameter 'Path'`），必须像 minicon 一样放进子目录 `signing-input/`，条目写相对文件名，签完再拷回 `signed/` 供信任法院；c) Windows runner 的 Python 子进程按 cp1252 解码 gh 输出，顶层 `PYTHONUTF8=1`。
 - 托管 macOS runner 排队可达 30 分钟、速度波动大：CI 只允许重跑失败 job，不改源；`tools11`（tiny-regex test2）41–50 s 余量太薄，R11-1 拆分。
 
@@ -74,6 +74,7 @@ for s in stage2 stage3 fixedpoint; do SEED_DIR=$D python3 exec/c/comboot.py shar
 MODEL_COM=$S/cand/unisacc-next.com tests/fb12multi.sh; python3 tests/comdemo.py --com $S/cand/unisacc-next.com --out $S/demo.json
 release/tools/seal_candidate.sh $S/cand $V "<note>"; git commit -- release/candidate.json   # 4 封 GHCR
 make gatedeps; git commit -- tests/gatedeps.json; git push                  # 5 最后一提交；ls-remote 核对
+release/tools/rc_tag.sh v$V                                                 # 5a 绑定：rc/v$V 指向这个提交；拒绝 sealed_from_commit 不在 origin 上的情况；之后 main 可以继续提交
 # 5b x86 libffi 提供者（rosetta 套件需要；/var/folders 下的旧目录会被清掉）：
 #    curl -sSLfo $S/libffi-3.5.2.tar.gz https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3.5.2.tar.gz   # sha256 f3a3082a…
 #    python3 exec/c/buildffiprovider.py --tarball … --output $S/ffix86 --target osx/x86_64   # 调三次，每次一步
@@ -83,12 +84,13 @@ make gatedeps; git commit -- tests/gatedeps.json; git push                  # 5 
 tests/term.sh env UA=$S/ua MODEL_COM=$S/cand/unisacc-next.com SEED_DIR=$D GATE_STATE=/tmp/gq UNISACC_FFI_X86_PROVIDER=... tests/release.sh --com   # 7 重复到 rc!=75
 release/tools/release_prep.sh $S/cand $V && release/tools/apple-sign.sh /tmp/r<N>-release/unisacc.com <sha> /tmp/r<N>-release/apple   # 8 Apple（可与 7 并行）
 # 9 release-check：push 后等 release-check.yml 对 HEAD 绿，记 run id / attempt
-gh release create v$V --draft --target $(git rev-parse HEAD) --notes-file notes.md; gh release upload v$V <dmg> <app.zip>
-python3 release/tools/unsigned_receipt.py /tmp/r<N>-release/unisacc.com /tmp/r<N>-release/windows $(git rev-parse HEAD) <run> <attempt>; gh release upload v$V <zip> <receipt>
+RC=$(git rev-parse rc/v$V^{commit}); gh release create v$V --draft --target $RC --notes-file notes.md; gh release upload v$V <dmg> <app.zip>
+python3 release/tools/unsigned_receipt.py /tmp/r<N>-release/unisacc.com /tmp/r<N>-release/windows $RC <run> <attempt>; gh release upload v$V <zip> <receipt>
 release/tools/windows_sign.sh qualification v$V <receipt> <run> <attempt>    # 10 Windows
 R=$(release/tools/windows_sign.sh company v$V <receipt> <run> <attempt>); release/tools/approve_signing.sh $R
 gh api repos/.../actions/artifacts/<id>/zip > signed.zip                  # 11 下载签后产物，核对 before/after sha 与尺寸，本机跑 comdemo/fb12-multi
 # 12 向主人确认公开；只留签名 unisacc.com 与 dmg；gh release edit v$V --draft=false --latest
+# 12b 冒烟：gh workflow run release-smoke.yml -f tag=v$V -f sha256=<签后sha>，六格全绿写进回执（0.0.22 起）
 # 13 回执 research/r<N>-release-acceptance.json；plans/v$V.md → archive/plans/；prd 版本行；通知 cdx 解冻
 ```
 

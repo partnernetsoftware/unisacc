@@ -9,7 +9,7 @@ on:
         default: qualification
         required: true
       source_sha:
-        description: Exact current main SHA of the owner-built bytes
+        description: Exact source SHA of the owner-built bytes (on main, named by rc/<seal_tag>)
         type: string
         required: true
       seal_tag:
@@ -91,11 +91,16 @@ jobs:
               for q in sorted((root/'exec/c/asm').glob('*.S')):
                   h.update(q.relative_to(root).as_posix().encode()+b'\0'); h.update(hashlib.sha256(q.read_bytes()).digest())
               return h.hexdigest()
-          sealed_closure=closure_digest('.')
-          call('git','fetch','--no-tags','origin','main')
-          call('git','worktree','add','--detach','../main-tip','origin/main')
-          main_closure=closure_digest('../main-tip')
-          assert main_closure==sealed_closure, f'main product closure {main_closure} differs from sealed {sealed_closure}; reseal'
+          # 0.0.22 P1-B 2 (minicon candidate binding): the release is bound to the rc tag on its exact
+          # source commit, not to the moving main tip -- main keeps receiving commits while a release
+          # is signed.  The source must be on main, and rc/<seal tag> must name exactly this commit.
+          call('git','fetch','--no-tags','origin','+refs/heads/main:refs/remotes/origin/main',
+               f"+refs/tags/rc/{env['SEAL_TAG']}:refs/tags/rc/{env['SEAL_TAG']}")
+          assert subprocess.run(['git','merge-base','--is-ancestor',sha,'origin/main'],timeout=45).returncode==0, 'source is not on main'
+          assert call('git','rev-parse',f"rc/{env['SEAL_TAG']}^{{commit}}").strip()==sha, f"rc/{env['SEAL_TAG']} does not name the source commit"
+          sealed=json.loads(Path('release/candidate.json').read_text())
+          assert sealed['version']==env['SEAL_TAG'].lstrip('v'), 'candidate.json version is not the seal tag'
+          assert subprocess.run(['git','merge-base','--is-ancestor',sealed['sealed_from_commit'],sha],timeout=45).returncode==0, 'sealed_from_commit is not an ancestor of the source (rebased after sealing?)'
           run=api(f"repos/{repo}/actions/runs/{env['UPSTREAM_RUN_ID']}/attempts/{env['UPSTREAM_ATTEMPT']}")
           assert run['head_sha']==sha and run['path']=='.github/workflows/release-check.yml', 'wrong upstream source/workflow (release-check.yml is the release upstream)'
           assert run['id']==int(env['UPSTREAM_RUN_ID']) and run['run_attempt']==int(env['UPSTREAM_ATTEMPT']), 'wrong upstream run/attempt response'
