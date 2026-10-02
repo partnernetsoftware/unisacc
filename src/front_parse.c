@@ -3118,7 +3118,7 @@ int land(void) {
         binary(0); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("__unisacc_L", end); es(":\n");
-        setkind(0); cursize = 4; curelem = 4; curptr = 0;   /* an int (6.5.13p3) */
+        setkind(0); cursize = 4; curelem = 4; curptr = 0; curuns = 0; curflt = 0;   /* an int (6.5.13p3) */   /* signed: csmith seed 1 (0.0.22) */
     }
     return 0;
 }
@@ -3136,7 +3136,7 @@ int lor(void) {
         land(); loadval(); ftruthy();
         es("  @lit.imm r1, 0\n  @alu.ne r0, r0, r1\n");
         elab("__unisacc_L", end); es(":\n");
-        setkind(0); cursize = 4; curelem = 4; curptr = 0;   /* an int (6.5.14p3) */
+        setkind(0); cursize = 4; curelem = 4; curptr = 0; curuns = 0; curflt = 0;   /* an int (6.5.14p3) */   /* signed: csmith seed 1 (0.0.22) */
     }
     return 0;
 }
@@ -3297,9 +3297,9 @@ int expr(void) {
             return 0;
         }
         if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
-            int ak; int tptr; int rt;
+            int ak; int tptr; int rt; int tuns;
             adv();
-            tptr = curptr; rt = tp; curcall = 0;
+            tptr = curptr; rt = tp; curcall = 0; tuns = curuns;
             ak = fkind();
             if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
@@ -3319,9 +3319,16 @@ int expr(void) {
             expr(); loadval();
             intptr_check(tptr, rt);
             fconv(fkind(), ak);                      /* C99 6.5.16.1p2 */
+            /* the value of `a = x` is a's value after the store (6.5.16p3): narrowed to a's
+               type, not x's (csmith seed 10: unsigned a; long long g = (a = -2LL) was -2) */
+            /* only when the value is used: an expression statement (`a = x;`) discards it, and
+               keeping those bytes keeps every such image identical to the product's */
+            if (cur() != tidx(";", 1) && bl == 0 && ak < 4 && tptr == 0 && e > 0 && e < 8 && e < BFTAG
+                && (cursize > e || curuns != tuns)) { if (tuns) zext(e); else snarrow(e); }
             pop1();
             estore(e);
             if (ak >= 4) setkind(ak);
+            else if (tptr == 0 && bl == 0) { curuns = tuns; curptr = 0; }
             return 0;
         }
     }
