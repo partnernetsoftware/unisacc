@@ -1,6 +1,7 @@
 # cc interop plan (R20-4, plans/v0.0.21.md item 1)
 
-Status: DESIGN ONLY, nothing run. [read] = seen in the tree on 2026-10-02; [prop] = proposed.
+Status: slice 1 IMPLEMENTED in the reference compiler (src/, 2026-10-02, run: tests/ccinterop.sh ok 9 wrong 0 skipped 0 on osx/arm64, lnx/arm64, lnx/x86_64); slices 2-4 and the exec/ mirror are DESIGN ONLY.
+Slice 1 as built (differs from section 1 in the mechanism, not the contract): the thunk is tape, not new ISA ops. In a whole-program object (`-c -b`, objextern, not -funit) undef_calls queues each called-but-undefined prototyped function; ccx_emit (src/front_parse.c) appends a local tape function NAME that stores r0..r(n-1) into a 6-slot frame array, `.lea r0, __ccx_NAME` (an undefined label -> BK_OBJUND relocation), `.hostcall r0, r1` (the existing BK_HOST_* sequences: host register order, x9/x30 and tape regs saved, sp aligned, r9 loaded from the array on SysV), then sign/zero-extends a narrow return (symretw). bk_sprefix (src/back_image.c) writes an undefined `__ccx_NAME` as the symbol NAME. No TO_CALLX/reloc 901 was needed: the call is indirect through the address relocation (ARM64 ADRP/ADD page relocs, x86 RIP-relative). Refused by name: `interop: no prototype for` (`f()` too, via symempty), `more than 6 arguments`, `variadic function`, `struct return`/`struct argument` (sympks), `floating-point return`/`argument`. Programs without such calls are byte-identical (thunks only appear where the old compiler said `undefined function`). [read] = seen in the tree on 2026-10-02; [prop] = proposed.
 
 ## 0. What exists [read]
 - Private convention: args pushed on the tape stack left to right, r9 frame pointer, result rax, caller pops (README rows 421/428, prd W-16).

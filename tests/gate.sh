@@ -407,6 +407,7 @@ job combo       python3 ./tests/combo.py "$UA" "${MODEL_COM:-./unisacc.com}"   #
 job syscall6    ./tests/syscall6.sh   # R19-9 (3): generic system-call gate on osx/arm64, Rosetta x86_64, Lima lnx/arm64
 job forward     ./tests/forward.sh   # R19-10/R21-4a': prototyped undefined functions forward to the system libc (-run and images, six targets)
 job winposix    ./tests/winposix.sh   # R21-4a': Windows POSIX layer over kernel32 = macOS cc (win/arm64, win/x86_64 in the UTM VM; skipped when it is down)
+job ccinterop   ./tests/ccinterop.sh   # R21-1: -c objects call cc-compiled int/pointer functions (osx/arm64, lnx/arm64, lnx/x86_64); other signatures refused by name
 job linkunits   ./tests/linkunits.sh   # R17-2: units compiled alone (-c -b HOST -funit) and joined by the unisacc linker = cc = one-step
 job elfobj      ./tests/elfobj.sh   # R16-7: -c -b lnx/ARCH relocatable ELF: sections, relocations, image invariant, GNU ld/lld link, Lima run
 job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger and README's coverage table

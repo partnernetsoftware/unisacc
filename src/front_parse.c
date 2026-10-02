@@ -49,6 +49,8 @@ int sympk[MAXSYM * 8];         /* append-only pool of complete parameter kinds *
 int nsympk;
 int sympkfirst[MAXSYM];        /* this declaration's first kind in the pool */
 int symnpk[MAXSYM];            /* how many; -1: no prototype seen */
+char symempty[MAXSYM];         /* declared `f()`: no prototype (cc interop refuses it) */
+char sympks[MAXSYM * 8];       /* that parameter is a struct by value */
 int symretw[MAXSYM];        /* a function's int return width: 1 2 4, or 0 for 8/other */
 int symfpret[MAXSYM];        /* calling it yields a function pointer */
 int symrfst[MAXSYM];         /* ...whose call returns a pointer to this struct */
@@ -815,7 +817,7 @@ int sadd(int t, int kind, int off, int elem) {
     symvla[nsym] = 0;
     symretw[nsym] = 0;
     symfpret[nsym] = 0; symrfst[nsym] = 0 - 1; symcst[nsym] = 0 - 1;
-    symflt[nsym] = declflt; symnpk[nsym] = 0 - 1;
+    symflt[nsym] = declflt; symnpk[nsym] = 0 - 1; symempty[nsym] = 0;
     sympkfirst[nsym] = nsympk;
     symptrd[nsym] = 0; symlab[nsym] = 0 - 1;
     if (declptr) symptrd[nsym] = declpd > 0 ? declpd : 1;
@@ -4632,6 +4634,7 @@ int parameter_decl(void) {
 int paramkind_add(int pk) {
     if (nsympk >= MAXSYM * 8) { __write(2, "parameter kind pool full\n", 25); __exit(1); }
     sympkw[nsympk] = declptr ? 8 : declsz;
+    sympks[nsympk] = declstruct >= 0 && declptr == 0;
     sympk[nsympk] = pk; nsympk = nsympk + 1;
     return 0;
 }
@@ -4644,6 +4647,7 @@ int block_prototype(int t, int w) {
     si = sadd(t, 2, 0, w);
     sympkfirst[si] = nsympk;
     need(tidx("(", 1), "(");
+    symempty[si] = cur() == tidx(")", 1);
     np = 0; var = 0;
     if (isname(tp, "void", 4) && kind(tp + 1) == tidx(")", 1)) adv();
     while (cur() != tidx(")", 1) && cur() != T_EOF) {
@@ -5194,6 +5198,7 @@ int function(int t, int w) {
     if (fsym >= 0) sympkfirst[fsym] = nsympk;
     scopewant("top", 3, tp, "fn_name", 7);  /* lparen -> fn_name */
     need(vfind(TOKV, NTOKV, "(", 1), "(");
+    if (fsym >= 0) symempty[fsym] = cur() == vfind(TOKV, NTOKV, ")", 1);
     /* Look ahead at the whole parameter list before emitting a byte of it:
        a variadic function, or one with more parameters than there are
        argument registers, takes EVERY argument on the tape stack, arg[k] at
@@ -6115,6 +6120,60 @@ int fwd_stub(char *nm, int nl) {
     }
     return 1;
 }
+/* cc interop slice 1 (research/cc-interop-plan.md): in a whole-program
+   object (-c -b, not -funit) a prototyped function nobody defines becomes a
+   local thunk NAME that packs its integer/pointer arguments into the
+   __hostcall array and calls the cc symbol through a relocation (tape label
+   `__ccx_NAME`, written to the symbol table as NAME).  Anything else is
+   refused by name.  Returns 0 (thunk queued), 1 (refused, reported). */
+int ccx_at[256]; int ccx_len[256]; int nccx;
+int ccx_sym(char *nm, int nl) {
+    int si; int k;
+    si = nsym - 1;
+    while (si >= 0) {
+        if (symkind[si] == 2) { k = 0; while (k < nl && symname[si * NAMEW + k] == nm[k]) k = k + 1;
+            if (k == nl && (nl >= NAMEW || symname[si * NAMEW + nl] == 0)) break; }
+        si = si - 1;
+    }
+    return si;
+}
+int ccx_refuse(char *nm, int nl, char *why, int wl) {
+    __write(2, "unisacc: error: interop: ", 25); __write(2, why, wl);
+    __write(2, " '", 2); __write(2, nm, nl); __write(2, "'\n", 2);
+    return 1;
+}
+int ccx_check(char *nm, int nl) {
+    int si; int k; int f;
+    si = ccx_sym(nm, nl);
+    if (si < 0 || symnpk[si] < 0 || symempty[si]) return ccx_refuse(nm, nl, "no prototype for", 16);
+    if (symnpk[si] > 6) return ccx_refuse(nm, nl, "more than 6 arguments not supported yet:", 40);
+    if (symvar[si]) return ccx_refuse(nm, nl, "variadic function not supported yet:", 36);
+    if (symstruct[si] >= 0 && symptr[si] == 0) return ccx_refuse(nm, nl, "struct return not supported yet:", 32);
+    if (symflt[si] && symptr[si] == 0) return ccx_refuse(nm, nl, "floating-point return not supported yet:", 40);
+    f = sympkfirst[si]; k = 0;
+    while (k < symnpk[si]) {
+        if (sympks[f + k]) return ccx_refuse(nm, nl, "struct argument not supported yet:", 34);
+        if (sympk[f + k] == 4 || sympk[f + k] == 8) return ccx_refuse(nm, nl, "floating-point argument not supported yet:", 42);
+        k = k + 1;
+    }
+    if (nccx >= 256) return ccx_refuse(nm, nl, "too many extern functions:", 26);
+    return 0;
+}
+int ccx_emit(char *nm, int nl) {
+    int si; int k; int np; int rw; int sh;
+    si = ccx_sym(nm, nl); np = symnpk[si];
+    k = 0; while (k < nl) { ec(nm[k] & 255); k = k + 1; }
+    es(":\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 48\n");
+    k = 0; while (k < np) { es("  store64 [r6-"); en(48 - 8 * k); es("], r"); en(k); es("\n"); k = k + 1; }
+    es("  imm r2, 48\n  sub64 r1, r6, r2\n  .lea r0, __ccx_");
+    k = 0; while (k < nl) { ec(nm[k] & 255); k = k + 1; }
+    es("\n  imm r2, 0\n  .hostcall r0, r1\n");
+    rw = symretw[si]; sh = 0;                 /* the host leaves the bits above a narrow result undefined */
+    if (symptr[si] == 0 && rw > 0 && rw < 8) sh = 64 - 8 * rw;
+    if (sh) { es("  imm r2, "); en(sh); es("\n  shl64 r0, r0, r2\n  "); es(symuns[si] ? "lshr64" : "shr64"); es(" r0, r0, r2\n"); }
+    es("  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n");
+    return 0;
+}
 int undef_calls(void) {
     int i; int e; int h; int bad;
     i = 0; while (i < UD_SIZE) { ud_tab[i] = 0; i = i + 1; }
@@ -6144,12 +6203,15 @@ int undef_calls(void) {
                         if (nxtrn < 256) { xtrn_at[nxtrn] = i + 7; xtrn_len[nxtrn] = e - i - 7; nxtrn = nxtrn + 1; }
                     } else { if (fwdrun && fwd_stub(out + i + 7, e - i - 7)) {
                         /* forwarded to the host (R19-10): the driver compiles the stub */
+                    } else { if (objextern) {
+                        if (ccx_check(out + i + 7, e - i - 7)) bad = bad + 1;
+                        else { ccx_at[nccx] = i + 7; ccx_len[nccx] = e - i - 7; nccx = nccx + 1; }
                     } else {
                     __write(2, "unisacc: error: undefined function '", 36);
                     __write(2, out + i + 7, e - i - 7);
                     __write(2, "'\n", 2);
                     bad = bad + 1;
-                    } }
+                    } } }
                 }
             } } } } } } } }
         i = e + 1;
@@ -6162,5 +6224,13 @@ int undef_calls(void) {
         i = i + 1;
     }
     nxtrn = 0;
+    i = 0;
+    while (i < nccx) {                        /* the thunks, also after the scan */
+        char nmc[256]; int q; q = 0;
+        while (q < ccx_len[i] && q < 255) { nmc[q] = out[ccx_at[i] + q]; q = q + 1; }
+        ccx_emit(nmc, q);
+        i = i + 1;
+    }
+    nccx = 0;
     return bad;
 }
