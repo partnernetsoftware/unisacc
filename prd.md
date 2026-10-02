@@ -25,6 +25,7 @@
 | v0.0.20 | [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) — 链接阶段全程序事实（.unit 2/.gdef）、结构化拒绝、两条字节差异闭合、libc 增补；C99 种子构造器只完成首片（Python 仍为默认） | **已公开 2026-10-01**（signed sha256 3a201488…，[回执](research/r20-release-acceptance.json)） |
 | v0.0.21 | [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) — 参考侧通用 libc 转发（六目标，Linux 最小动态 ELF、Windows 条件导入）、Windows POSIX 层首批、cc 互调、setjmp/lua；产品侧对应构造按名拒绝 | **已公开 2026-10-02**（signed sha256 1658fea8…，[回执](research/r21-release-acceptance.json)） |
 | v0.0.22 | [plans/v0.0.22.md](plans/v0.0.22.md) — 产品追平、发版与论文；[阶段契约子计划](plans/v0.0.22-stage-contracts.md) — 声明符形状与跨阶段信息守恒的预见性门禁 | 计划中 |
+| v0.0.23 | [plans/v0.0.23.md](plans/v0.0.23.md) — 产品追平余项（第二次顺延，本版了结或砍掉）、产品诊断定案、依赖声明、A2 实验、0.0.22 发版暴露的问题；R20-1 B 降级到 0.1.x | 计划中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
