@@ -128,6 +128,12 @@ int tdbool[MAXTD];
 int tdfp[MAXTD];          /* a function-pointer typedef: 1, or 2 if variadic */
 int tdfpst[MAXTD];        /* ...and the struct its call returns a pointer to */
 int tdflt[MAXTD]; int tdpd[MAXTD];
+/* `typedef long jmp_buf[8];`: the element count (0: not an array typedef).
+   tdsz stays the whole size, which is what sizeof(jmp_buf) reports; a
+   declarator of that type becomes an array of tdn elements (tdarrdecl). */
+int tdn[MAXTD];
+int declspectdn;          /* declspec's typedef was an array of this many */
+int declspectdsz;         /* ...whose whole size is this */
 int declspecfp;           /* what declspec's typedef said about that */
 int declenum;             /* the specifier was an enum */
 int enumneg;              /* some enumerator seen so far is negative */
@@ -185,6 +191,7 @@ int tp;                     /* current token */
 int nlab;                   /* label counter */
 int frameoff;               /* bytes of locals allocated so far */
 int framemax;
+int fnbody;        /* out[] offset just past the function's frame reservation */
 int retlab;
 
 int P_END; int P_GLOBAL; int P_TYPEDEF; int P_STRUCT; int P_ENUM;
@@ -2197,10 +2204,47 @@ int callptr(int si) {
     curelem = curpd >= 2 ? 8 : symbase[si];
     return 0;
 }
+/* the jmp_buf operand of the setjmp/longjmp intrinsics, as an address in r0.
+   A typedef'd array object (`jmp_buf b`, a struct member of that type) is
+   not marked as an array by the declarator, so it arrives as an lvalue of
+   its full size: its address is the buffer.  A `jmp_buf` parameter is a
+   pointer (8 bytes) and is loaded. */
+/* How many bytes of expression temporaries are pushed right now: the sum
+   of the `.frame` lines emitted since the function's reservation (they
+   balance within every statement).  setjmp must save them -- `r =
+   setjmp(b)` has &r pushed, and after the first return that slot is free
+   and reused, so longjmp would pop garbage.  */
+int tempdepth(void) {
+    int i; int d; int v; int neg;
+    d = 0; i = fnbody;
+    if (toinit) return 0;
+    while (i + 9 < nout) {
+        if (out[i] == 10 && out[i + 1] == 32 && out[i + 2] == 32 && out[i + 3] == 46
+            && out[i + 4] == 102 && out[i + 5] == 114 && out[i + 6] == 97 && out[i + 7] == 109
+            && out[i + 8] == 101 && out[i + 9] == 32) {
+            i = i + 10; neg = 0; v = 0;
+            while (i < nout && out[i] == 32) i = i + 1;
+            if (i < nout && out[i] == 45) { neg = 1; i = i + 1; }
+            while (i < nout && out[i] >= 48 && out[i] <= 57) { v = v * 10 + out[i] - 48; i = i + 1; }
+            if (neg) d = d - v; else d = d + v;
+            continue;
+        }
+        i = i + 1;
+    }
+    return d;
+}
+
+int jbufarg(void) {
+    expr();
+    if (lvalue && cursize > 8 && curptr == 0) { lvalue = 0; return 0; }
+    loadval();
+    return 0;
+}
 int callres(int si) {
     /* signedness from the callee's return type, not the last argument
        evaluated: `long g(unsigned long)`'s g(v)/2 divides signed */
     curflt = 0; curcall = 1; curuns = 0; cursize = 8;
+    curstruct = 0 - 1;   /* not the last argument's struct: `ld(&s) != 1.5` (lua lundump.c) */
     if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) curuns = symuns[si]; } }
     if (si >= 0) { if (symkind[si] == 2) { if (symptr[si] == 0) { if (symflt[si]) { curuns = 0;
         curflt = symflt[si]; cursize = curflt; curelem = curflt;
@@ -2314,6 +2358,55 @@ int pf_call(int t) {
         else { if (t >= 0 && tlen[t] > 2 && isname(t, "__exit", 6) == 0) { int q; q = 2; while (q < tlen[t]) { ec(src[tpos[t] + q] & 255); q = q + 1; } }   /* __ioctl -> ioctl, ... (R18-10) */
         else es("exit"); } } } } } } } } } }
         es(", r0, r1, r2\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    if (isname(t, "setjmp", 6) || isname(t, "_setjmp", 7) || isname(t, "__builtin_setjmp", 16)) {
+        /* setjmp is an intrinsic, not a library call: it must capture THIS
+           frame (r6) and stack (r7), which a forwarded host call cannot.
+           jmp_buf: [0] r6, [8] r7, [16] the resume label.  longjmp lands
+           there with r1 = buf, r0 = value; the static .frame depth at the
+           label equals the one here, so the restored r7 matches it. */
+        int lres; int lend; int nsv;
+        lres = newlab(); lend = newlab();
+        need(tidx("(", 1), "(");
+        jbufarg();
+        need(tidx(")", 1), ")");
+        es("  @mem.store [r0+0], r6\n  @mem.store [r0+8], r7\n");
+        nsv = tempdepth() / 8;
+        if (nsv < 0) nsv = 0;
+        if (nsv > 5) err_tok(t, "setjmp inside an expression nested too deeply (more than 5 pending temporaries)");
+        k = 0;
+        while (k < nsv) {
+            es("  @mem.load r2, [r7+"); en(8 * k); es("]\n");
+            es("  @mem.store [r0+"); en(24 + 8 * k); es("], r2\n");
+            k = k + 1;
+        }
+        elab("  @mem.lea r1, __unisacc_L", lres); ec(10);
+        es("  @mem.store [r0+16], r1\n  @lit.imm r0, 0\n");
+        elab("  @ctrl.jump __unisacc_L", lend); ec(10);
+        elab("__unisacc_L", lres); es(":\n");
+        es("  @mem.load r6, [r1+0]\n  @mem.load r7, [r1+8]\n");
+        k = 0;
+        while (k < nsv) {
+            es("  @mem.load r2, [r1+"); en(24 + 8 * k); es("]\n");
+            es("  @mem.store [r7+"); en(8 * k); es("], r2\n");
+            k = k + 1;
+        }
+        elab("__unisacc_L", lend); es(":\n");
+        lvalue = 0; curelem = 8; curptr = 0;
+        return postfix();
+    }
+    if (isname(t, "longjmp", 7) || isname(t, "_longjmp", 8) || isname(t, "__builtin_longjmp", 17)) {
+        /* r1 = buf, r0 = value (0 becomes 1, C99 7.13.2.1), jump to [buf+16] */
+        need(tidx("(", 1), "(");
+        jbufarg(); push();
+        need(tidx(",", 1), ",");
+        expr(); loadval();
+        need(tidx(")", 1), ")");
+        pop1();
+        es("  @lit.imm r2, 0\n  @alu.eq r2, r0, r2\n  @alu.add r0, r0, r2\n");
+        es("  @mem.load r5, [r1+16]\n  @call.callr r5\n  @lit.imm r0, 0\n");
         lvalue = 0; curelem = 8; curptr = 0;
         return postfix();
     }
@@ -3413,6 +3506,20 @@ int dim3decl(void) {
     return 0;
 }
 
+/* A declarator whose specifier was an array typedef and that adds no
+   brackets of its own (`jmp_buf b;`) is an array of the typedef's count:
+   declsz becomes the element size.  Each declarator restores the whole
+   size first, so `jmp_buf a, *p;` sees 64 for p's pointee.  Returns 1 when
+   the declarator is such an array. */
+int tdarrdecl(void) {
+    if (declspectdn <= 0) return 0;
+    declsz = declspectdsz;
+    if (declptr || declpd > 0 || cur() == tidx("[", 1)) return 0;
+    declsz = declspectdsz / declspectdn;
+    decldim2 = 0; decldim3 = 0;
+    return 1;
+}
+
 /* Shared trailing dimensions for automatic, static and global arrays. */
 int dimtail(int n) {
     decldim2 = 0; decldim3 = 0;
@@ -3462,7 +3569,7 @@ int tdadd(int t, int w, int sz, int si, int isptr) {
     tdname[ntd * NAMEW + k] = 0;
     tdw[ntd] = w; tdsz[ntd] = sz; tdstruct[ntd] = si; tdptr[ntd] = isptr;
     tduns[ntd] = declunsigned; tdbool[ntd] = declbool;
-    tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1; tdflt[ntd] = declflt;
+    tdfp[ntd] = 0; tdfpst[ntd] = 0 - 1; tdflt[ntd] = declflt; tdn[ntd] = 0;
     ntd = ntd + 1;
     return ntd - 1;
 }
@@ -3683,6 +3790,7 @@ int declspec(void) {                       /* -> element width */
     declunsigned = 0;
     declspecfp = 0; declspecfpst = 0 - 1;
     declenum = 0; declflt = 0; declspecpd = 0; declstatic = 0; declbool = 0; declextern = 0;
+    declspectdn = 0; declspectdsz = 0;
     skipspecq();
     td = tdfind(tp);
     if (td >= 0) {
@@ -3695,6 +3803,7 @@ int declspec(void) {                       /* -> element width */
         declspecpd = tdptr[td] ? tdpd[td] : 0;
         declbase = tdw[td];
         if (declstruct >= 0) declbase = stsize[declstruct];
+        declspectdn = tdn[td]; declspectdsz = tdsz[td];
         skipspecq();
         return tdw[td];
     }
@@ -3807,6 +3916,7 @@ int stbody(int si) {
             while (eatstar()) declptr = 1;
             t = 0 - 1;
             n = 1; marr = 0; mdim2 = 0; mdim3 = 0;
+            if (declspectdn > 0) sz = declspectdsz;
             if (cur() == tidx("(", 1)) { if (kind(tp + 1) == tidx("*", 1)) {
                 /* `int (*fptr)();` -- a pointer member, called through
                    its value; `(*f[4])()` is an array of them */
@@ -3838,6 +3948,10 @@ int stbody(int si) {
                         if (cur() == tidx("[", 1)) { printf("arrays of more than three dimensions are not supported\n"); __exit(1); }
                     }
                 }
+            }
+            /* a member of an array typedef (`jmp_buf b;`) is that array */
+            if (marr == 0 && declspectdn > 0 && declptr == 0 && declpd == 0) {
+                marr = 1; n = declspectdn; sz = declspectdsz / declspectdn;
             }
             isbf = 0;
             if (eat(tidx(":", 1))) {
@@ -4027,7 +4141,7 @@ int block(void) {
 
 /* `typedef TYPE name, *other;` -- one entry per declarator. */
 int do_typedef(void) {
-    int tw; int tsz; int tsi; int tptr; int nt;
+    int tw; int tsz; int tsi; int tptr; int nt; int tcnt;
     adv();
     tw = declspec(); tsz = declsz; tsi = declstruct;
     while (1) {
@@ -4057,11 +4171,12 @@ int do_typedef(void) {
             tdfp[ntd - 1] = 1;
             break;
         }
+        tcnt = 0;
         if (cur() == tidx("[", 1)) {
-            adv(); tsz = tsz * cexpr(); need(tidx("]", 1), "]");
+            adv(); tcnt = cexpr(); need(tidx("]", 1), "]");
         }
-        if (tptr) { tdadd(nt, tw, 8, tsi, 1); tdpd[ntd - 1] = declpd > 0 ? declpd : 1; }
-        else tdadd(nt, tw, tsz, tsi, 0);
+        if (tptr) { tdadd(nt, tw, tcnt > 0 ? 8 * tcnt : 8, tsi, 1); tdpd[ntd - 1] = declpd > 0 ? declpd : 1; tdn[ntd - 1] = tcnt; }
+        else { tdadd(nt, tw, tcnt > 0 ? tsz * tcnt : tsz, tsi, 0); tdn[ntd - 1] = tcnt; }
         if (eat(tidx(",", 1)) == 0) break;
     }
     need(tidx(";", 1), ";");
@@ -4630,6 +4745,8 @@ int parameter_decl(void) {
         while (cur() != tidx("]", 1)) { if (cur() == T_EOF) break; adv(); }
         adv(); declptr = 1;
     }
+    /* `jmp_buf env` is a pointer to the typedef's element (C99 6.7.5.3p7) */
+    if (declspectdn > 0 && declptr == 0) { declsz = declspectdsz / declspectdn; declptr = 1; }
     return pw;
 }
 
@@ -4667,7 +4784,7 @@ int block_prototype(int t, int w) {
 }
 
 int local_decl(void) {
-    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool;
+    int w; int t; int off; int n; int nelem; int sst; int isarr; int apd; int lstat; int fpn; int lbool; int tdhere;
     int psave[9];
     if (cur() == tidx("typedef", 7)) return do_typedef();
     w = declspec();
@@ -4741,6 +4858,8 @@ int local_decl(void) {
                inputs and MAXTOK tokens each, so these ranges are disjoint
                and fit an int; unit zero retains its existing labels. */
             slabel = curunit * MAXTOK + t;
+            if (tdarrdecl()) { n = declspectdn; isarr = 1; }
+            else
             if (cur() == tidx("[", 1)) {
                 adv(); isarr = 1;
                 if (cur() == tidx("]", 1)) {
@@ -4828,9 +4947,12 @@ int local_decl(void) {
             if (eat(tidx(",", 1))) continue;
             break;
         } }
-        if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
+        tdhere = tdarrdecl();
+        if (tdhere || cur() == vfind(TOKV, NTOKV, "[", 1)) {
+          isarr = 1;
+          if (tdhere) n = declspectdn;
+          else {
             adv();
-            isarr = 1;
             /* `int a[] = {1,2,3}` -- the initialiser says how long it is,
                and for an array of structs it says how many SCALARS */
             if (cur() == vfind(TOKV, NTOKV, "]", 1)) {
@@ -4845,6 +4967,7 @@ int local_decl(void) {
             /* `a[n][m]` is n*m elements in a row; the FIRST index strides a
                whole row, which is what decldim2 records */
             n = dimtail(n);
+          }
             if (sst >= 0) w = declsz;
             apd = declpd;
             if (apd > 0) w = 8;            /* an array of POINTERS: 8 each */
@@ -5235,6 +5358,7 @@ int function(int t, int w) {
     etok(t); es(":\n");
     es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
+    fnbody = nout;
     if (isname(tp, "void", 4) && kind(tp + 1) == tidx(")", 1)) adv();   /* f(void): the prototype path already did this; the stub generator counted `void` as an argument */
     while (cur() != vfind(TOKV, NTOKV, ")", 1)) {
         if (cur() == T_EOF) break;
@@ -5443,6 +5567,10 @@ int unit(void) {
             if (gfpd) { if (gfpfn == 0) { if (fpdim > 0) {
                 n = fpdim; isarr = 1; declpd = 1; declfp = 0;
             } } }
+            if (tdarrdecl()) {
+                n = declspectdn; isarr = 1;
+                if (gstruct >= 0) w = declsz;
+            } else
             if (cur() == vfind(TOKV, NTOKV, "[", 1)) {
                 adv();
                 if (cur() == vfind(TOKV, NTOKV, "]", 1)) {

@@ -404,10 +404,50 @@ static int atexit(void (*__u_fn)(void)) {
 
 /* The environment is where a Unix kernel leaves it: after argv's NULL.
    `__argv(k)` reads that array itself, so the walk starts past argc.  On
-   Windows nothing is there and getenv answers NULL. [S-15 D2] */
+   Unix setenv/unsetenv keep a small override table consulted first (16
+   names, 255 bytes each; overflow answers ENOMEM).  On Windows the process
+   environment block is the store: GetEnvironmentVariableA /
+   SetEnvironmentVariableA through kernel32 (0.0.21 batch 3); getenv's answer
+   lives in one of four rotating static buffers. [S-15 D2] */
+#ifdef _WIN32
+#include <sys/_win.h>
+#endif
+static char _unisa_envk[16][256];   /* "NAME=VALUE" (Unix overrides) */
+static int _unisa_envf[16];         /* 0 free, 1 set, 2 unset */
+#if !__UNISA_FTRIM_LIBC || __UN__unisa_envslot
+static int _unisa_envslot(const char *__u_name, int __u_make) {
+    int __u_k; int __u_i; int __u_free;
+    __u_free = -1;
+    for (__u_k = 0; __u_k < 16; __u_k++) {
+        if (!_unisa_envf[__u_k]) { if (__u_free < 0) __u_free = __u_k; continue; }
+        __u_i = 0;
+        while (__u_name[__u_i] && _unisa_envk[__u_k][__u_i] == __u_name[__u_i]) __u_i = __u_i + 1;
+        if (__u_name[__u_i] == 0 && _unisa_envk[__u_k][__u_i] == 61) return __u_k;
+    }
+    return __u_make ? __u_free : -1;
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_getenv
 static char *getenv(const char *__u_name) {
     int __u_k; int __u_i; char *__u_e;
+#ifdef _WIN32
+    static long __u_f; static char __u_b[4][1024]; static int __u_r; long __u_n;
+    if (!__u_f) __u_f = _ux_sym("GetEnvironmentVariableA");
+    __u_r = (__u_r + 1) & 3;
+    __u_n = _ux_call(__u_f, (long)__u_name, (long)__u_b[__u_r], 1024, 0) & 0xFFFFFFFFL;
+    if (__u_n >= 1024) return 0;
+    if (__u_n == 0) {                   /* empty value vs ERROR_ENVVAR_NOT_FOUND (203) */
+        if ((_ux_call(__hostaddr3(), 0, 0, 0, 0) & 0xFFFFFFFFL) == 203) return 0;
+        __u_b[__u_r][0] = 0;
+    }
+    return __u_b[__u_r];
+#endif
+    __u_k = _unisa_envslot(__u_name, 0);
+    if (__u_k >= 0) {
+        if (_unisa_envf[__u_k] == 2) return 0;
+        __u_i = 0; while (_unisa_envk[__u_k][__u_i] != 61) __u_i = __u_i + 1;
+        return _unisa_envk[__u_k] + __u_i + 1;
+    }
     __u_k = __argc() + 1;
     while ((__u_e = __argv(__u_k)) != 0) {
         __u_i = 0;
@@ -415,6 +455,50 @@ static char *getenv(const char *__u_name) {
         if (__u_name[__u_i] == 0 && __u_e[__u_i] == 61) return __u_e + __u_i + 1;
         __u_k = __u_k + 1;
     }
+    return 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_setenv
+static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
+    int __u_k; int __u_i; int __u_j;
+    if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
+    for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
+    if (!__u_over && getenv(__u_name)) return 0;
+#ifdef _WIN32
+    {   static long __u_f;
+        if (!__u_f) __u_f = _ux_sym("SetEnvironmentVariableA");
+        if (!(_ux_call(__u_f, (long)__u_name, (long)__u_val, 0, 0) & 0xFFFFFFFFL)) return _ux_fail();
+        return 0; }
+#endif
+    __u_k = _unisa_envslot(__u_name, 1);
+    if (__u_k < 0) { errno = ENOMEM; return -1; }
+    __u_i = 0; while (__u_name[__u_i]) __u_i = __u_i + 1;
+    __u_j = 0; while (__u_val[__u_j]) __u_j = __u_j + 1;
+    if (__u_i + __u_j + 2 > 256) { errno = ENOMEM; return -1; }
+    for (__u_j = 0; __u_name[__u_j]; __u_j++) _unisa_envk[__u_k][__u_j] = __u_name[__u_j];
+    _unisa_envk[__u_k][__u_i] = 61;
+    for (__u_j = 0; __u_val[__u_j]; __u_j++) _unisa_envk[__u_k][__u_i + 1 + __u_j] = __u_val[__u_j];
+    _unisa_envk[__u_k][__u_i + 1 + __u_j] = 0;
+    _unisa_envf[__u_k] = 1;
+    return 0;
+}
+#endif
+#if !__UNISA_FTRIM_LIBC || __UN_unsetenv
+static int unsetenv(const char *__u_name) {
+    int __u_k; int __u_i;
+    if (!__u_name || !__u_name[0]) { errno = EINVAL; return -1; }
+    for (__u_i = 0; __u_name[__u_i]; __u_i++) if (__u_name[__u_i] == 61) { errno = EINVAL; return -1; }
+#ifdef _WIN32
+    {   static long __u_f;
+        if (!__u_f) __u_f = _ux_sym("SetEnvironmentVariableA");
+        _ux_call(__u_f, (long)__u_name, 0, 0, 0);
+        return 0; }
+#endif
+    __u_k = _unisa_envslot(__u_name, 1);
+    if (__u_k < 0) { errno = ENOMEM; return -1; }
+    for (__u_i = 0; __u_name[__u_i]; __u_i++) _unisa_envk[__u_k][__u_i] = __u_name[__u_i];
+    _unisa_envk[__u_k][__u_i] = 61; _unisa_envk[__u_k][__u_i + 1] = 0;
+    _unisa_envf[__u_k] = 2;
     return 0;
 }
 #endif
