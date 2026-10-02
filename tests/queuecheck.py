@@ -53,9 +53,10 @@ with tempfile.TemporaryDirectory() as td:
         try:run('invalid-exclusive',extra=extra)
         except SystemExit as e:assert e.code==2
         else:raise AssertionError('unselected exclusive accepted')
-    try:run('exclusive')
-    except SystemExit as e:assert 'input changed' in str(e)
-    else:raise AssertionError('changed exclusivity reused results')
+    # 0.0.21: a changed exclusive set keeps results whose job and fingerprint are unchanged
+    before=json.loads((t/'exclusive/results.json').read_text())['results']
+    assert run('exclusive')==1, 'kept failing result lost'
+    assert json.loads((t/'exclusive/results.json').read_text())['results']==before, 'changed exclusivity reran unchanged jobs'
     print('queue: exclusive priority/no overlap, ordinary concurrency, nonzero exclusive and selected-name validation pass')
     # Exercise real queue identity and resume, not a mocked candidate stamp.
     q.fingerprint=real_fingerprint
