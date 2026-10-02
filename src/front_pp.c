@@ -1544,13 +1544,15 @@ int preprocess(void) {
                     }
                 } else {
                 if (d == 4) {                     /* else */
+                    if (ndepth == 0) { err_at(ws - 1, "#else without #if"); nerr = nerr + 1; }
                     if (ndepth > 0) {
                         takest[ndepth-1] = 0;
                         if (a == 0) { if (seenst[ndepth-1] == 0) takest[ndepth-1] = 1; }
                         if (takest[ndepth-1]) seenst[ndepth-1] = 1;
                     }
                 } else {
-                if (a == 2) { if (ndepth > 0) ndepth = ndepth - 1; }   /* pop */
+                if (a == 2) { if (ndepth > 0) ndepth = ndepth - 1;   /* pop */
+                    else { err_at(ws - 1, "#endif without #if"); nerr = nerr + 1; } }   /* C99 6.10.1 (0.0.21: unisacc_ffi.h carried one) */
                 else {
                 if (a == 3) {                     /* macro: define / undef */
                     /* #undef NAME: the live definition ends here */
