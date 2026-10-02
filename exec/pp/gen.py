@@ -360,6 +360,8 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
                                  ("LDI", "v", 100), ("STX", "a", 0, "v")]
     init += sbconst("line") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
                                ("LDI", "v", 101), ("STX", "a", 0, "v")]   # #line (R14-3)
+    init += sbconst("error") + [("SBINTERN", "t"), ("ALUI", "add", "a", "t", DIRB),
+                                ("LDI", "v", 102), ("STX", "a", 0, "v")]
     init += sbconst("_Pragma") + [("SBINTERN", "ID_PRAGMAOP")]
     init += sbconst("push_macro") + [("SBINTERN", "ID_PUSHM")]
     init += sbconst("pop_macro") + [("SBINTERN", "ID_POPM")]
@@ -386,6 +388,9 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
         build_autoinc(g, locations)
 
     install_rules(g, HERE, "directive-scan", {"TAKEB": TAKEB, "SEENB": SEENB, "DIRB": DIRB})
+    install_rules(g, HERE, "object-predefine")
+    install_rules(g, HERE, "assembly", {"entry": "OOBJ.DEF", "resume": "OOBJ.RESUME",
+        "next": "CLI.U", "F_BODY": F_BODY}, {"name": sbconst("__UNISA_OBJECT")}, section="predefine")
     from locations import IRNAME as _IRNAME
     install_rules(g, HERE, "linedir", {"LDRAW": LDRAW, "LDUSER": LDUSER, "LDNUM": LDNUM, "LDNM": LDNM, "IRNAME": _IRNAME, "F_FN": F_FN, "F_BODY": F_BODY, "FSZ": FSZ, "MACB": MACB})
     if shared_predefines:
@@ -394,11 +399,12 @@ def build(target="lnx/x86_64", locations=False, shared_predefines=False):
         install_rules(g, HERE, "shared-predefine", {"F_BODY": F_BODY, "PD_SEEN": 72 * 10 ** 6})
     else:
         for k, nm in enumerate(predef):
-            nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "CLI.U"
+            nxt = "P3PD%d" % (k + 1) if k + 1 < len(predef) else "OOBJ.start"
             install_rules(g, HERE, "assembly", {"entry": "P3PD%d" % k, "resume": "P3PDR%d" % k,
                 "next": nxt, "F_BODY": F_BODY}, {"name": sbconst(nm)}, section="predefine")
 
-    cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")]), 101: ("LDIR", [("RLD", "LIVE")])}
+    cases = {0: ("P3BLANK", [("JUMP", "LS")]), 100: ("PRAG", [("RLD", "LIVE")]), 101: ("LDIR", [("RLD", "LIVE")]),
+             102: ("D_ERROR", [("RLD", "LIVE")])}
     cases.update((k + 1, ("D_" + w, [])) for k, w in enumerate(DIRV))
     g.r("DSW", cases)
     for w in DIRV:
