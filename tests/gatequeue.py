@@ -10,6 +10,9 @@ outer watchdog. Long jobs go first; shorter jobs fill remaining slots.
 import argparse, fcntl, hashlib, json, os, pathlib, platform, shutil, stat, subprocess, sys, time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+# comboot records its stages in ROOT/out/comboot/stages.json: a seed result from another
+# checkout does not put stage 1 there (0.0.21: stage2/3 "recorded before stage 1")
+LOCATION_BOUND = ('com-comboot-',)
 
 def atomic(path, obj):
     tmp = path.with_suffix(path.suffix + '.tmp')
@@ -115,7 +118,10 @@ def fingerprint(jobs):
             directory = pathlib.Path(settings[key]).resolve(strict=True)
             provider_inputs[key] = {str(directory/name):digest(str(directory/name)) for name in
                 ('manifest.json','lib/libffi.a','include/ffi.h','include/ffitarget.h','include/ffi/ffi.h','include/ffi/ffitarget.h','LICENSE')}
-    common = [provider_inputs, str(ROOT), execution_environment(), platform.platform(), platform.machine(), sys.version,
+    # 0.0.22: the checkout path is not an identity -- a queue continued in a new worktree of the
+    # same content reuses its results (0.0.21: ~420/432 invalidated by the path alone).  Jobs that
+    # keep state inside the checkout (LOCATION_BOUND) still carry it.
+    common = [provider_inputs, execution_environment(), platform.platform(), platform.machine(), sys.version,
               str(pathlib.Path(sys.executable).resolve()), tools,
               {n:digest(n) for n in ('tests/gatequeue.py', 'tests/gate.sh', 'tests/bound.py', declaration)}]
     def stamp(value): return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
@@ -171,11 +177,13 @@ def fingerprint(jobs):
         if audited:
             identity = [common, command, {n:digest(n) for n in inputs}]
             if entry.get('executable_inputs'): identity += [settings, executables, inventory, extra]
+            if name.startswith(LOCATION_BOUND): identity.append(str(ROOT))
             result[name] = stamp(identity)
         else:
             if global_inputs is None: global_inputs = {n:digest(n) for n in names}
             identity = [common, jobs, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
             if inventory: identity += [inventory, extra]
+            if name.startswith(LOCATION_BOUND): identity.append(str(ROOT))
             result[name] = stamp(identity)
     return result
 
@@ -227,7 +235,7 @@ def main():
     resume(data, stamp, jobs, exclusive)
     atomic(path, data)
     # Classic and network drivers, and different concurrency, have different costs.
-    profile = json.dumps([str(ROOT), execution_settings(), sorted(exclusive)], sort_keys=True).encode()
+    profile = json.dumps([execution_settings(), sorted(exclusive)], sort_keys=True).encode()
     histpath = pathlib.Path(os.environ.get('TMPDIR','/tmp')) / ('unisacc-gate-times-'+hashlib.sha256(profile).hexdigest()[:16]+'.json')
     history = json.loads(histpath.read_text()) if histpath.is_file() else {}
     pending = [n for n in jobs if n not in data['results']]

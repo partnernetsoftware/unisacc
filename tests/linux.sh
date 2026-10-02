@@ -49,6 +49,12 @@ LIMIT=${SUITE_LIMIT:-$((900 * slow))}
 TRY=${TRY_ALARM:-$((10 * slow))}
 [ "$slow" -gt 1 ] && echo "linux: $VM is $guest_arch on $host_arch -- emulated;" \
     "SUITE_LIMIT=$LIMIT TRY_ALARM=$TRY"
+# 0.0.22: a full run on an emulated guest is not evidence -- the reference build alone needs
+# 76 s there against fixed 45/30 s watchdogs (bound.py caps at 60), and 0.0.21 got ~95 timeouts.
+# x86_64 product evidence is the release-check real runner; run targeted suites here instead.
+if [ "$slow" -gt 1 ] && [ "$what" = all ] && [ "${ALLOW_EMULATED_ALL:-0}" != 1 ]; then
+    echo "linux: refusing 'all' on emulated $VM (release/RELEASE-PIPELINE.md section 4); run a named suite, or ALLOW_EMULATED_ALL=1"; exit 2
+fi
 
 # R18-11 ⑤: the guest's own limits are not compiler failures.  On the 4 GiB
 # `default` VM the Python compile of the flat compiler source is OOM-killed
