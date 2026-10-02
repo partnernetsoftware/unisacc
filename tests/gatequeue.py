@@ -13,6 +13,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # comboot records its stages in ROOT/out/comboot/stages.json: a seed result from another
 # checkout does not put stage 1 there (0.0.21: stage2/3 "recorded before stage 1")
 LOCATION_BOUND = ('com-comboot-',)
+# A job that consumes another's recorded state starts only after it passed (0.0.21 and 0.0.22:
+# the longest-first pick ran stage2 before seed -- "stage 2 recorded before stage 1").
+AFTER = {'com-comboot-stage2': 'com-comboot-seed', 'com-comboot-stage3': 'com-comboot-stage2',
+         'com-comboot-fixedpoint': 'com-comboot-stage3'}
 
 def atomic(path, obj):
     tmp = path.with_suffix(path.suffix + '.tmp')
@@ -246,7 +250,11 @@ def main():
             left = deadline-time.monotonic()
             while pending and len(active) < args.jobs and left > 2:
                 if exclusive.intersection(active): break
-                fits = [n for n in pending if estimate(n) <= left-1]
+                for n in [n for n in pending if AFTER.get(n) in data['results'] and data['results'][AFTER[n]]['rc'] != 0]:
+                    pending.remove(n); data['results'][n] = {'rc': 1, 'seconds': 0, 'limit': 0}
+                    print('DONE', n, 'rc=1 0.00s predecessor', AFTER[n], 'failed', flush=True)
+                fits = [n for n in pending if estimate(n) <= left-1
+                        and (AFTER.get(n) not in jobs or AFTER[n] in data['results'])]
                 if not fits: break
                 alone = [n for n in fits if n in exclusive]
                 if alone and active: break  # drain ordinary work before the priority job

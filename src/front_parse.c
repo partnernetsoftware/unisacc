@@ -3300,9 +3300,10 @@ int expr(void) {
             return 0;
         }
         if (cur() == vfind(TOKV, NTOKV, "=", 1)) {
-            int ak; int tptr; int rt; int tuns;
+            int ak; int tptr; int rt; int tuns; int tsz; int tel; int tpd; int tbase; int tst;
             adv();
             tptr = curptr; rt = tp; curcall = 0; tuns = curuns;
+            tsz = cursize; tel = curelem; tpd = curpd; tbase = curbase; tst = curstruct;
             ak = fkind();
             if (curptr == 0) { if (curflt) ak = curflt; }
             e = stw();
@@ -3332,6 +3333,7 @@ int expr(void) {
             estore(e);
             if (ak >= 4) setkind(ak);
             else if (tptr == 0 && bl == 0 && e > 0 && e < BFTAG) { curuns = tuns; curptr = 0; cursize = e; curelem = e; }   /* typed as the left operand (seed 17: (a = -1) < c with long long a) */
+            else if (tptr) { curptr = 1; cursize = tsz; curelem = tel; curpd = tpd; curbase = tbase; curstruct = tst; curuns = 0; }   /* `p = (q = 7)`: a pointer, as q is (0.0.22: the product warns once; so must the reference) */
             return 0;
         }
     }
