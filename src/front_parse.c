@@ -33,6 +33,8 @@ int nxonly;
 int symxonly[MAXSYM];       /* R20-3: whole program, declared `extern` and (so far) defined by no unit */
 int symxtrn[MAXSYM];        /* -funit: declared `extern`, no storage in this unit (yet) */
 int symvar[MAXSYM];         /* a function that takes `...` */
+int symdots[MAXSYM];        /* ...really (symvar also marks more than 6 parameters) */
+int ccx_os; int ccx_arm;    /* cc interop: the -b target (0 lnx 1 osx 2 win; arm64) */
 int symuns[MAXSYM];         /* the (element) type is unsigned */
 int symtok[MAXSYM];         /* the token that declared it */
 int symused[MAXSYM];        /* read at least once (not just assigned) */
@@ -809,7 +811,7 @@ int sadd(int t, int kind, int off, int elem) {
     symstruct[nsym] = declstruct;
     symdim2[nsym] = decldim2;
     symdim3[nsym] = decldim3;
-    symvar[nsym] = 0;
+    symvar[nsym] = 0; symdots[nsym] = 0;
     symunit[nsym] = curunit;
     symuns[nsym] = declunsigned;
     symtok[nsym] = t; symused[nsym] = 0;
@@ -4660,7 +4662,7 @@ int block_prototype(int t, int w) {
     }
     need(tidx(")", 1), ")");
     symnpk[si] = np;
-    symvar[si] = var || np > 6;
+    symvar[si] = var || np > 6; symdots[si] = var;
     return 0;
 }
 
@@ -5223,7 +5225,7 @@ int function(int t, int w) {
     if (fnvar) stacked = 1;
     if (npar > 6) stacked = 1;
     fnnfixed = npar;
-    if (fsym >= 0) symvar[fsym] = stacked;
+    if (fsym >= 0) { symvar[fsym] = stacked; symdots[fsym] = fnvar; }
     scopebase = nsym;
     frameoff = 0; framemax = 0;
     np = 0;
@@ -6148,19 +6150,46 @@ int ccx_refuse(char *nm, int nl, char *why, int wl) {
     __write(2, " '", 2); __write(2, nm, nl); __write(2, "'\n", 2);
     return 1;
 }
+/* argument class for the FP/stack thunk: 0 int8/pointer, 1 double, 2 float,
+   3 int4, 4 narrower integer (bool, char, short) */
+int ccx_cls(int si, int k) {
+    int f; f = sympkfirst[si];
+    if (sympk[f + k] == 8) return 1;
+    if (sympk[f + k] == 4) return 2;
+    if (sympkw[f + k] == 4) return 3;
+    if (sympkw[f + k] < 4) return 4;
+    return 0;
+}
+/* slice 1 signatures (int/pointer, <=6) keep the BK_HOST_* sequences; the rest
+   go through the generated one (back_encode.c bk_hostsig) */
+int ccx_plain(int si) {
+    int k;
+    if (symnpk[si] > 6) return 0;
+    if (symflt[si] && symptr[si] == 0) return 0;
+    k = 0; while (k < symnpk[si]) { if (ccx_cls(si, k) == 1 || ccx_cls(si, k) == 2) return 0; k = k + 1; }
+    return 1;
+}
 int ccx_check(char *nm, int nl) {
-    int si; int k; int f;
+    int si; int k; int f; int ni; int nf; int c;
     si = ccx_sym(nm, nl);
     if (si < 0 || symnpk[si] < 0 || symempty[si]) return ccx_refuse(nm, nl, "no prototype for", 16);
-    if (symnpk[si] > 6) return ccx_refuse(nm, nl, "more than 6 arguments not supported yet:", 40);
-    if (symvar[si]) return ccx_refuse(nm, nl, "variadic function not supported yet:", 36);
+    if (symnpk[si] > 16) return ccx_refuse(nm, nl, "more than 16 arguments not supported yet:", 41);
+    if (symdots[si]) return ccx_refuse(nm, nl, "variadic function not supported yet:", 36);
     if (symstruct[si] >= 0 && symptr[si] == 0) return ccx_refuse(nm, nl, "struct return not supported yet:", 32);
-    if (symflt[si] && symptr[si] == 0) return ccx_refuse(nm, nl, "floating-point return not supported yet:", 40);
     f = sympkfirst[si]; k = 0;
     while (k < symnpk[si]) {
         if (sympks[f + k]) return ccx_refuse(nm, nl, "struct argument not supported yet:", 34);
-        if (sympk[f + k] == 4 || sympk[f + k] == 8) return ccx_refuse(nm, nl, "floating-point argument not supported yet:", 42);
         k = k + 1;
+    }
+    if (ccx_plain(si) == 0) {
+        if (ccx_os == 2) return ccx_refuse(nm, nl, "floating-point or stacked arguments on Windows not supported yet:", 65);
+        ni = 0; nf = 0; k = 0;     /* Darwin arm64 packs stacked arguments at their natural alignment */
+        while (k < symnpk[si]) {
+            c = ccx_cls(si, k);
+            if (c == 1 || c == 2) { if (nf >= 8 && ccx_os == 1 && ccx_arm && c == 2) return ccx_refuse(nm, nl, "stacked float argument on Darwin arm64 not supported yet:", 57); nf = nf + 1; }
+            else { if (ni >= (ccx_arm ? 8 : 6) && ccx_os == 1 && ccx_arm && c == 4) return ccx_refuse(nm, nl, "stacked char/short argument on Darwin arm64 not supported yet:", 62); ni = ni + 1; }
+            k = k + 1;
+        }
     }
     if (nccx >= 256) return ccx_refuse(nm, nl, "too many extern functions:", 26);
     return 0;
@@ -6170,12 +6199,38 @@ int ccx_emit(char *nm, int nl) {
     si = ccx_sym(nm, nl); np = symnpk[si];
     k = 0; while (k < nl) { ec(nm[k] & 255); k = k + 1; }
     es(":\n  .frame 8\n  store64 [r7+0], r6\n  mov r6, r7\n  .frame 48\n");
+    if (ccx_plain(si)) {
     k = 0; while (k < np) { es("  store64 [r6-"); en(48 - 8 * k); es("], r"); en(k); es("\n"); k = k + 1; }
     es("  imm r2, 48\n  sub64 r1, r6, r2\n  .lea r0, __ccx_");
     k = 0; while (k < nl) { ec(nm[k] & 255); k = k + 1; }
     es("\n  imm r2, 0\n  .hostcall r0, r1\n");
+    } else {
+        /* FP and/or stacked: the raw tape values (double bits, float bits in
+           the low half) in an array, the signature as `imm r2, 0x7C..` right
+           before .hostcall -- the back end reads it and generates the moves */
+        long sig; int A; char dg[24]; int nd;
+        A = 8 * np; if (A < 16) A = 16; A = (A + 15) / 16 * 16;
+        es("  .frame "); en(A); es("\n");
+        k = 0;
+        while (k < np) {
+            if (symvar[si]) { es("  load64 r1, [r6+"); en(16 + 8 * k); es("]\n  store64 [r6-"); en(A - 8 * k); es("], r1\n"); }
+            else { es("  store64 [r6-"); en(A - 8 * k); es("], r"); en(k); es("\n"); }
+            k = k + 1;
+        }
+        sig = 0; k = 0; while (k < np) { sig = sig | ((long)ccx_cls(si, k) << (8 + 3 * k)); k = k + 1; }
+        sig = sig | ((long)np << 2);
+        if (symflt[si] == 8 && symptr[si] == 0) sig = sig | 1;
+        if (symflt[si] == 4 && symptr[si] == 0) sig = sig | 2;
+        sig = sig | ((long)124 << 56);
+        es("  imm r2, "); en(A); es("\n  sub64 r1, r6, r2\n  .lea r0, __ccx_");
+        k = 0; while (k < nl) { ec(nm[k] & 255); k = k + 1; }
+        es("\n  imm r2, ");
+        nd = 0; while (sig > 0) { dg[nd] = 48 + sig % 10; sig = sig / 10; nd = nd + 1; }
+        while (nd > 0) { nd = nd - 1; ec(dg[nd]); }
+        es("\n  .hostcall r0, r1\n");
+    }
     rw = symretw[si]; sh = 0;                 /* the host leaves the bits above a narrow result undefined */
-    if (symptr[si] == 0 && rw > 0 && rw < 8) sh = 64 - 8 * rw;
+    if (symptr[si] == 0 && symflt[si] == 0 && rw > 0 && rw < 8) sh = 64 - 8 * rw;
     if (sh) { es("  imm r2, "); en(sh); es("\n  shl64 r0, r0, r2\n  "); es(symuns[si] ? "lshr64" : "shr64"); es(" r0, r0, r2\n"); }
     es("  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n");
     return 0;

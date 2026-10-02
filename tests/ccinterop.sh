@@ -27,8 +27,9 @@ for f in "$P"/refuse_*.c; do
 done
 
 # pairs NAME:A:B -- A by unisacc -c -b, B by cc; int = outbound (slice 1),
-# inb = inbound: cc calls the functions the unisacc half exports (slice 2)
-PAIRS="int:int_a:int_b inb:inb_a:inb_b"
+# inb = inbound: cc calls the functions the unisacc half exports (slice 2),
+# fp = outbound floating-point arguments/returns and 8-/10-argument calls (2B/2C)
+PAIRS="int:int_a:int_b inb:inb_a:inb_b fp:fp_a:fp_b"
 # osx/arm64 on this machine
 osx() {   # name a b
     sdk=$(xcrun --show-sdk-path 2>/dev/null)

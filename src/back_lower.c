@@ -905,7 +905,15 @@ int bk_lower(void) {
             if (bk_is(op, ".hostaddr")) {
                 if (bkav[pc*8+1] < 0 || bkav[pc*8+1] >= 4) { __write(2, "hostaddr index must be 0..3\n", 28); __exit(1); }
                 tk(TO_HOSTADDR, bk_rmap[bkav[pc*8]], bkav[pc*8+1], 0, 0);
-            } else tk(TO_HOSTCALL, bk_rmap[bkav[pc*8]], bk_rmap[bkav[pc*8+1]], 0, 0);
+            } else {
+                /* cc interop FP/stack thunk: `imm r2, 0x7C..` right before
+                   carries the signature (front_parse.c ccx_emit); anything
+                   else is the fixed BK_HOST_* sequence */
+                long sg; sg = 0;
+                if (pc > 0 && bk_is(bkop[pc - 1], "imm") && bkak[(pc - 1) * 8] == BK_R && bkav[(pc - 1) * 8] == 2
+                    && bkak[(pc - 1) * 8 + 1] == BK_I && ((bkav[(pc - 1) * 8 + 1] >> 56) & 255) == 124) sg = bkav[(pc - 1) * 8 + 1];
+                tk(TO_HOSTCALL, bk_rmap[bkav[pc*8]], bk_rmap[bkav[pc*8+1]], sg, 0);
+            }
             pc = pc + 1; continue;
         }
         if (bk_is(op, ".write")) {

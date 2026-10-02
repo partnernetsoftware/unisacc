@@ -206,6 +206,7 @@ int main(void) {
     }
     if (funit && objwant == 0 && (dump != 1 || pponly)) return emsg("unisacc: error: -funit needs -c -b os/arch (a unit object) or -S (its tape)", 0);
     unitmode = funit;
+    if (bgiven && t) { ccx_os = t[0] == 119 ? 2 : (t[0] == 111 ? 1 : 0); ccx_arm = t[4] == 97; }
     objextern = objwant;                   /* R17-9 (a): a whole-program object may read cc's data symbols */
     if (objwant) {
         /* lnx -> ELF, osx -> Mach-O, win -> COFF (docs/toolchain.md) */

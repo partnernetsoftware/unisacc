@@ -329,6 +329,102 @@ int a_fp(char *o, long *a) {
     return 0;
 }
 
+/* cc interop FP/stack thunks (front_parse.c ccx_emit): the signature from
+   the `imm r2, 0x7C..` before .hostcall -- bits 0-1 the return (0 integer,
+   1 double, 2 float), 2-6 the count, 3 bits per argument from bit 8 (0 int8,
+   1 double, 2 float, 3 int4, 4 narrower).  x16 = function, x17 / rax = the
+   array of raw tape values.  Same frame and saves as BK_HOST_*, plus the
+   outgoing stack area of S bytes at the bottom.  bk_hs_* computes it. */
+int bk_hs_kind[16]; int bk_hs_reg[16]; int bk_hs_off[16]; int bk_hs_w[16];
+int bk_hs_plan(long sig, int arm, int darwin) {
+    int n; int k; int c; int ni; int nf; int so; int w;
+    n = (sig >> 2) & 31; ni = 0; nf = 0; so = 0;
+    k = 0;
+    while (k < n) {
+        c = (sig >> (8 + 3 * k)) & 7;
+        bk_hs_kind[k] = c; bk_hs_reg[k] = 0 - 1;
+        if (c == 1 || c == 2) { if (nf < 8) { bk_hs_reg[k] = nf; nf = nf + 1; } }
+        else { if (ni < (arm ? 8 : 6)) { bk_hs_reg[k] = ni; ni = ni + 1; } }
+        if (bk_hs_reg[k] < 0) {
+            w = 8; if (arm && darwin && (c == 3 || c == 2)) w = 4;
+            so = (so + w - 1) / w * w; bk_hs_off[k] = so; bk_hs_w[k] = w; so = so + w;
+        }
+        k = k + 1;
+    }
+    return (so + 15) / 16 * 16;
+}
+int bk_hostsig_arm(long sig) {
+    int S; int n; int k; int q;
+    S = bk_hs_plan(sig, 1, bkos == 1); n = (sig >> 2) & 31;
+    ow(0x910003e9); ow(0xD100000A | ((0x70 + S) << 10) | (7 << 5)); ow(0x927ced4a); ow(0x9100015f);
+    q = 0; while (q < 7) { ow(0xF90003E0 | (((S + 8 * q) / 8) << 10) | (q + 1)); q = q + 1; }
+    ow(0xF90003E9 | (((S + 56) / 8) << 10)); ow(0xF90003FE | (((S + 64) / 8) << 10));
+    k = 0;
+    while (k < n) {
+        if (bk_hs_reg[k] < 0) {
+            ow(0xF940022A | (k << 10));                       /* ldr x10, [x17, #8k] */
+            if (bk_hs_w[k] == 4) ow(0xB90003EA | ((bk_hs_off[k] / 4) << 10));
+            else ow(0xF90003EA | ((bk_hs_off[k] / 8) << 10));
+        }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n) {
+        if (bk_hs_reg[k] >= 0) {
+            if (bk_hs_kind[k] == 1) ow(0xFD400220 | (k << 10) | bk_hs_reg[k]);              /* ldr dN */
+            else { if (bk_hs_kind[k] == 2) ow(0xBD400220 | ((2 * k) << 10) | bk_hs_reg[k]);   /* ldr sN */
+            else ow(0xF9400220 | (k << 10) | bk_hs_reg[k]); }                               /* ldr xN */
+        }
+        k = k + 1;
+    }
+    ow(0xd63f0200);
+    if ((sig & 3) == 1) ow(0x9E660000);       /* fmov x0, d0 */
+    if ((sig & 3) == 2) ow(0x1E260000);       /* fmov w0, s0 */
+    q = 0; while (q < 7) { ow(0xF94003E0 | (((S + 8 * q) / 8) << 10) | (q + 1)); q = q + 1; }
+    ow(0xF94003E9 | (((S + 56) / 8) << 10)); ow(0xF94003FE | (((S + 64) / 8) << 10));
+    ow(0x9100013f);
+    return 1;
+}
+int bk_x_mem(int opc, int reg, int base, int disp) {
+    ob(0x48 | (reg >= 8 ? 4 : 0) | (base >= 8 ? 1 : 0)); ob(opc);
+    ob(0x80 | ((reg & 7) << 3) | (base & 7)); if ((base & 7) == 4) ob(0x24);
+    ob(disp & 255); ob((disp >> 8) & 255); ob((disp >> 16) & 255); ob((disp >> 24) & 255);
+    return 0;
+}
+int bk_hostsig_x86(long sig) {
+    int S; int n; int k; int q; int sv[6]; int so[6]; int ir[6];
+    S = bk_hs_plan(sig, 0, 0); n = (sig >> 2) & 31;
+    sv[0] = 7; sv[1] = 6; sv[2] = 2; sv[3] = 8; sv[4] = 10; sv[5] = 9;
+    so[0] = 0; so[1] = 8; so[2] = 16; so[3] = 24; so[4] = 32; so[5] = 40;
+    ir[0] = 7; ir[1] = 6; ir[2] = 2; ir[3] = 1; ir[4] = 8; ir[5] = 9;
+    ob(0x53); ob(0x48); ob(0x89); ob(0xc3); ob(0x48); ob(0x89); ob(0xe0);
+    ob(0x48); ob(0x81); ob(0xec); q = 0x60 + S; ob(q & 255); ob((q >> 8) & 255); ob(0); ob(0);
+    ob(0x48); ob(0x83); ob(0xe4); ob(0xf0);
+    q = 0; while (q < 6) { bk_x_mem(0x89, sv[q], 4, S + so[q]); q = q + 1; }
+    bk_x_mem(0x89, 0, 4, S + 56);
+    k = 0;
+    while (k < n) {
+        if (bk_hs_reg[k] < 0) { bk_x_mem(0x8B, 0, 3, 8 * k); bk_x_mem(0x89, 0, 4, bk_hs_off[k]); }
+        k = k + 1;
+    }
+    k = 0;
+    while (k < n) {
+        if (bk_hs_reg[k] >= 0) {
+            if (bk_hs_kind[k] == 1 || bk_hs_kind[k] == 2) {
+                ob(bk_hs_kind[k] == 1 ? 0xF2 : 0xF3); ob(0x0F); ob(0x10); ob(0x80 | (bk_hs_reg[k] << 3) | 3);
+                ob((8 * k) & 255); ob(0); ob(0); ob(0);
+            } else bk_x_mem(0x8B, ir[bk_hs_reg[k]], 3, 8 * k);
+        }
+        k = k + 1;
+    }
+    ob(0x31); ob(0xc0); ob(0x41); ob(0xff); ob(0xd3);
+    if ((sig & 3) == 1) { ob(0x66); ob(0x48); ob(0x0f); ob(0x7e); ob(0xc0); }
+    if ((sig & 3) == 2) { ob(0x66); ob(0x0f); ob(0x7e); ob(0xc0); }
+    q = 0; while (q < 6) { bk_x_mem(0x8B, sv[q], 4, S + so[q]); q = q + 1; }
+    bk_x_mem(0x8B, 4, 4, S + 56); ob(0x5b);
+    return 1;
+}
+
 /* one lowered instruction -> bytes at bkout; 0 when it has no encoding */
 int bk_arm(int i, long off) {
     int op; long *a; char *o; long pc; long v; int k; int d; int n;
@@ -336,6 +432,7 @@ int bk_arm(int i, long off) {
     pc = bk_textva + off;
     if (op == TO_HOSTCALL) {
         ow(0xAA0003F0 | (a[0] << 16)); ow(0xAA0003F1 | (a[1] << 16));
+        if (a[2]) return bk_hostsig_arm(a[2]);
         k = 0; while (k < BK_HOST_ARM_N) { ow(BK_HOST_ARM[k]); k = k+1; } return 1;
     }
     if (op == TO_HENTRY) {              /* stp x29, x30, [sp, #-16]!; mov x29, sp; mov x7, sp */
@@ -884,6 +981,7 @@ int bk_x86(int i, long off) {
     pc = bk_textva + off;
     if (op == TO_HOSTCALL) {
         x_movrr(X_R11, a[0]); x_movrr(X_RAX, a[1]);
+        if (a[2] && bkos != 2) return bk_hostsig_x86(a[2]);
         if (bkos == 2) { k = 0; while (k < BK_HOST_WIN_X86_N) { ob(BK_HOST_WIN_X86[k]); k = k+1; } return 1; }
         k = 0; while (k < BK_HOST_X86_N) { ob(BK_HOST_X86[k]); k = k+1; } return 1;
     }
