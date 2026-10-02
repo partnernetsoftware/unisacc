@@ -30,6 +30,7 @@ int symunit[MAXSYM];        /* which input file declared it */
 int symginit[MAXSYM];       /* R19-8: a file-scope object defined WITH an initialiser */
 int symgstat[MAXSYM];       /* ...that is `static` (its unit's own) */
 int nxonly;
+int symnobss[MAXSYM];       /* `extern T x[];`: no storage reserved yet, the definition does it */
 int symxonly[MAXSYM];       /* R20-3: whole program, declared `extern` and (so far) defined by no unit */
 int symxtrn[MAXSYM];        /* -funit: declared `extern`, no storage in this unit (yet) */
 int symvar[MAXSYM];         /* a function that takes `...` */
@@ -818,6 +819,7 @@ int sadd(int t, int kind, int off, int elem) {
     symbytes[nsym] = declbytes;
     symstruct[nsym] = declstruct;
     symdim2[nsym] = decldim2;
+    symnobss[nsym] = 0;
     symdim3[nsym] = decldim3;
     symvar[nsym] = 0; symdots[nsym] = 0;
     symunit[nsym] = curunit;
@@ -4338,7 +4340,14 @@ int initcount(int chars) {
     int j; int depth; int n; int k; int c; int pos;
     char buf[4096];
     j = tp;
-    while (j < ntok) { if (kind(j) == tidx("=", 1)) break; j = j + 1; }
+    /* only THIS declarator's initialiser: `extern const char x[];` has none,
+       and the next `=` in the file (lua_ident's was 89,000 lines on) is
+       somebody else's -- its count sized this object */
+    while (j < ntok) {
+        if (kind(j) == tidx("=", 1)) break;
+        if (kind(j) == tidx(";", 1)) return 0;
+        j = j + 1;
+    }
     j = j + 1;
     if (chars && kind(tp + 1) == tidx("=", 1)) {
         k = bracedstr(j);
@@ -5582,8 +5591,13 @@ int unit(void) {
                    API entry point this way, to keep the name from being
                    expanded as a function-like macro. */
                 t = parenname();
-                gstruct = 0 - 1; declstruct = 0 - 1; gfpd = 0;
-                if (cur() == tidx("(", 1)) { skipparen(); declfp = 1; declptr = 1; gfpd = 1; gfpfn = 1; }
+                /* `(name)(args)` declares the FUNCTION name, exactly like
+                   `name(args)`: the parameter list is left for the FNSIG
+                   path.  It used to be skipped and the name made a pointer
+                   variable, so `lua_CFunction (lua_tocfunction)(...)` became
+                   `.bss g_lua_tocfunction 8` and an early call went
+                   through it. */
+                gfpd = 0;
             } else if (kind(tp + 1) == tidx("*", 1)) {
                 t = fpdecl(); declptr = 1; gstruct = 0 - 1; declstruct = 0 - 1; gfpd = 1;
                 if (fpfn >= 0) { fnresume = tp; tp = fpfn; gfpfn = 1; }
@@ -5655,6 +5669,7 @@ int unit(void) {
                under its own name */
             k = sfind(t);
             gdup = k >= 0 && symunit[k] == curunit;
+            if (gdup && symnobss[k]) gdup = 0;      /* `extern T x[];` reserved nothing */
             gprev = (k >= 0 && symxtrn[k] == 0) ? k : 0 - 1;   /* R19-8: an earlier definition of this name */
             /* -funit: `extern T x;` with no initialiser declares a name defined
                elsewhere -- no storage here; a later definition in this unit
@@ -5688,6 +5703,7 @@ int unit(void) {
                one -- without this `read(fd, src, n)` passes the first eight
                BYTES OF src as the pointer */
             if (isarr) { symkind[nsym - 1] = 5; symptr[nsym - 1] = 1; symptrd[nsym - 1] = gpd + 1; }
+            if (gdup == 0 && isarr && n == 0 && declextern && cur() != tidx("=", 1)) { symnobss[nsym - 1] = 1; gdup = 1; }
             if (gdup == 0) {
                 es(".bss g_"); etok(t); ec(32);
                 /* an ARRAY needs its full storage; a bare pointer needs 8.
