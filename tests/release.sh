@@ -2,7 +2,7 @@
 # Bounded LOCAL acceptance of an already-built immutable model candidate.
 # MODEL_COM=/absolute/candidate GATE_STATE=/private/queue UA=/private/reference \
 #   SEED_DIR=/private/seed ./tests/release.sh [--com]
-# The ONE supported shape (R14-2 5): --jobs 4 --window 50, run through
+# The ONE supported shape (R14-2 5): --jobs 4 --window 55 (50 until 0.0.21), run through
 # tests/term.sh with every variable given as `env NAME=value`; SEED_DIR holds
 # unisacc-seed.com (make seed-com) so the four com-comboot jobs verify instead
 # of skipping -- STRICT=1 turns a skipped comboot job into a failure.
@@ -41,7 +41,9 @@ exclusive=()  # fat is three ~17 s shards since 0.0.13 and no longer needs a win
 # These pass alone (6-33 s) but hit their bounds under --jobs 4 in every 0.0.13
 # release queue: a cold network build (bindprep-arm64, memx86-ua-1) and an
 # inner 20 s hard timeout (lib-carrier-import-model).  They get a window each.
-for s in exec-memx86-ua-1 lib-carrier-import-model; do exclusive+=(--exclusive-suite "$s"); done
+# 0.0.21: exec-tableself (the self-source through seven table stages) reached 48 s alone and the
+# Python image step of bigclosure-osx-arm64 exceeds its 45 s bound under contention; both get a window
+for s in exec-memx86-ua-1 lib-carrier-import-model exec-tableself bigclosure-osx-arm64; do exclusive+=(--exclusive-suite "$s"); done
 if [ "$(uname -s)" = Darwin ]; then exclusive+=(--exclusive-suite exec-bindprep-arm64); fi
 for flag in Wall Wextra Werror; do exclusive+=(--exclusive-suite "exec-warningdriver-ua-$flag"); done
 # gate.sh registers the x86 assembly binding suite only on Darwin.
@@ -81,7 +83,7 @@ for w in 1 2 3; do
     echo "warm-up $w/3 done (cold model caches built outside the queue)"
     exit 75
 done
-python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 50 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?
+python3 "$R/tests/gatequeue.py" --com --jobs "${RELEASE_JOBS:-4}" --window 55 "${exclusive[@]}" --state "$GATE_STATE" || rc=$?
 after=$(shasum -a 256 "$MODEL_COM"); after=${after%% *}
 [ "$before" = "$after" ] || { echo 'release: candidate changed during acceptance' >&2; exit 1; }
 case "$rc" in
