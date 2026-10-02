@@ -465,7 +465,7 @@ int main(int argc, char **argv) {
         cli[5].name=(const unsigned char *)"\0process/argc";cli[5].n=13;cli[5].data=process_argc;cli[5].len=8;
         cli[6].name=(const unsigned char *)"\0process/argv";cli[6].n=13;cli[6].data=process_argv;cli[6].len=8;
         NRI=9;
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__linux__)
         static const char *dlkeys[4] = {"\0process/dl/0", "\0process/dl/1", "\0process/dl/2", "\0process/dl/3"};
         for (int j=0;j<4;j++) {
             resource_u64(process_dl[j],host_dl_slot(j));
@@ -489,13 +489,10 @@ int main(int argc, char **argv) {
     ARGRESOURCE(NRI,"\0cli/source",srcres); NRI++;
     ARGRESOURCE(NRI,"\0cli/fno-trim-libc",notrim); NRI++;
     ARGRESOURCE(NRI,"\0cli/werror",werror); NRI++;
-#ifdef __APPLE__
     static const unsigned char fwd_one=1;
-    int fwdwant = runit && !fwd_second && nsources==1 && !tape_input && !linking;
+    int fwdwant = (runit || mode==0) && !fwd_second && nsources==1 && !tape_input && !linking
+        && (!strncmp(target,"osx/",4) || !strncmp(target,"lnx/",4));
     if (fwdwant) { cli[NRI].name=(const unsigned char *)"\0cli/run-forward"; cli[NRI].n=16; cli[NRI].data=&fwd_one; cli[NRI].len=1; NRI++; }
-#else
-    int fwdwant = 0;
-#endif
     int fwd_restart = 0;
     Buf objres={0}, funitres={0};
     if (objwant) bput(&objres,1,0);
@@ -549,7 +546,12 @@ int main(int argc, char **argv) {
                 Buf tape={0}; int fr=fwd_sidecar(&in,&tape);
                 if (fr<0) rc=1;
                 else if (fr==0) { free(in.b); in=tape; rc=runroute_from(route,level ? "e4" : "prune",&in,src); }   /* the stage after e3, as for tape input */
-                else fwd_restart=1;
+                else {
+#ifdef __linux__
+                    if (host_dl_slot(1)==0) return clierror("host libc forwarding needs a dynamic compiler image");
+#endif
+                    fwd_restart=1;
+                }
             }
         } else
         rc = tape_input ? runroute_from(route,level ? "e4" : "prune",&in,src) : runroute(route,&in,src);

@@ -300,8 +300,8 @@ def lower(tape, target, oracle, fault=None, drive="spec", *, prune_input=False):
         o, a = ins.op, ins.args
 
         if o in (".hostcall", ".hostaddr"):
-            if os_ != "osx":
-                raise ValueError("foreign host ABI is only supported on osx")
+            if os_ not in ("osx", "lnx"):
+                raise ValueError("foreign host ABI is only supported on osx or lnx")
             if o == ".hostaddr" and not 0 <= a[1] < 4:
                 raise ValueError("hostaddr index must be 0..3")
             tp.emit(o[1:], *[R(x) for x in a])

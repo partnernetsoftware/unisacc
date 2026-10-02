@@ -26,11 +26,14 @@ def install(E, byte, KND, SZ, OFF, LABD):
     idata = ((idata+7)&-8)+pe.LOADCFG
     layouts = {tag: dict(text=base+m.HDRS('x86_64'), round=m.HDRS('x86_64')+m.PAGE-1, mask=-m.PAGE, base=base+(macho.DLPREFIX if tag=="osx" else 0))
                for tag, m, base in [('lnx',elf,elf.VADDR), ('osx',macho,macho.VMADDR)]}
+    layouts['lnx_dyn'] = dict(text=elf.VADDR+784, round=784+elf.PAGE-1, mask=-elf.PAGE, base=elf.VADDR+32)
     layouts['win'] = dict(text=pe.IMAGEBASE+pe.TEXT_RVA, round=pe.SECT_ALIGN-1, mask=-pe.SECT_ALIGN,
         imports=pe.IMAGEBASE+pe.TEXT_RVA+40+8*(len(pe.IMPORTS)+1),
         base=pe.IMAGEBASE+pe.TEXT_RVA+((idata+pe.SECT_ALIGN-1)&-pe.SECT_ALIGN))
     for phase in ('pre', 'post'):
-        if phase == 'post': memory_layout(E, 'DEAD.addr')
+        if phase == 'post':
+            memory_layout(E, 'DEAD.addr')
+            install_rules(E.g, root, 'address', section='lnx-dynamic')
         for line in (root/'address-instances.tsv').read_text().splitlines():
             if line.startswith('#'): continue
             selected, section, values, names, prepare = line.split('\t')

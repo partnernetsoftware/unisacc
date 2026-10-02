@@ -88,10 +88,10 @@ def install(E, arch="x86_64", os_="lnx"):
      .goto('C.advance'))
     hostbindings={'id:'+name:value for name,value in ids.items()}
     hostbindings.update(test0=P('CH').fresh('b'),test1=P('CH').fresh('b'),
-                        call='CH.call' if os_=='osx' else 'C.fail',
-                        addr='CH.addr' if os_=='osx' else 'C.fail')
+                        call='CH.call' if os_ in ('osx','lnx') else 'C.fail',
+                        addr='CH.addr' if os_ in ('osx','lnx') else 'C.fail')
     install_rules(g,Path(__file__).parent,'code-host',section='entry',bindings=hostbindings)
-    if os_=='osx':
+    if os_ in ('osx','lnx'):
         hostbindings.update(test2=P('CH').fresh('b'),test3=P('CH').fresh('b'))
         hostbindings.update({'ret'+str(i):P('CH').fresh('r') for i in range(4)})
         install_rules(g,Path(__file__).parent,'code-host',section='supported',bindings=hostbindings,

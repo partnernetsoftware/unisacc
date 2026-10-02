@@ -26,6 +26,8 @@ def install(E,word):
         h, pg = image.HDRS("arm64"), image.PAGE
         bindings.update({name+"_text": base+h, name+"_align_add": h+pg-1,
                          name+"_mask": -pg, name+"_base": base+(macho.DLPREFIX if name=="osx" else 0)})
+    bindings.update(lnx_dyn_text=elf.VADDR+784, lnx_dyn_align_add=784+elf.PAGE-1,
+                    lnx_dyn_mask=-elf.PAGE, lnx_dyn_base=elf.VADDR+32)
     idata = 40+16*(len(pe.IMPORTS)+1)+sum((len(n.encode())+4)&-2 for n in pe.IMPORTS)+len(pe.DLL)+1
     idata = ((idata+7)&-8)+pe.LOADCFG
     pg, base = pe.SECT_ALIGN, pe.IMAGEBASE+pe.TEXT_RVA

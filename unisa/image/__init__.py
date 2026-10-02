@@ -15,17 +15,17 @@ HDRS = {"lnx": elf.HDRS, "osx": macho.HDRS, "win": pe.HDRS}
 BASE = {"lnx": elf.VADDR, "osx": macho.VMADDR, "win": pe.IMAGEBASE}
 
 
-def layout(os_, arch, textlen):
+def layout(os_, arch, textlen, dynamic=False):
     """-> (text_vaddr, data_vaddr).  Mach-O puts the data in its own rw
     segment, so it starts on the next page, not straight after the text."""
-    h = HDRS[os_](arch)
+    h = 784 if os_ == "lnx" and dynamic else HDRS[os_](arch)
     t = BASE[os_] + h
     if os_ == "osx":
         return t, BASE[os_] + macho._round(h + textlen)
     if os_ == "lnx":
         # the data is written to, so it needs its own rw PT_LOAD -- which means
         # its own page, not the bytes straight after the text [I-12]
-        return t, BASE[os_] + elf._round(h + textlen)
+        return t, BASE[os_] + elf._round(h + textlen) + (32 if dynamic else 0)
     if os_ == "win":
         # .text / .rdata (the import table) / .data, each on its own page:
         # a section RVA must be a multiple of SectionAlignment [I-16]
@@ -58,4 +58,7 @@ def build(tp, text, data, entry, stub=b""):
         return pe.write(tp.arch, text, data, entry,
                         relocs=getattr(tp, "relocs", ()),
                         bss=getattr(tp, "bss", 0), full=full, stub=stub)
+    dynamic = tp.os == "lnx" and any(i.op in ("hostcall", "hostaddr") for i in tp.code)
+    if tp.os == "lnx":
+        return elf.write(tp.arch, text, data, entry, full=full, dynamic=dynamic)
     return WRITER[tp.os](tp.arch, text, data, entry, full=full)

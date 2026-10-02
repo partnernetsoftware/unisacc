@@ -26,10 +26,10 @@ def install(E, arch, word=None):
     regkind,intkind=(1,2) if arch=='arm64' else (0,1)
     allowed=tuple(range(8)) if arch=='arm64' else tuple(NUM[r] for r in REGMAP['x86_64'])
     for op,start in [('call',entry),('addr','EMIT.61' if arch=='arm64' else 'HB.addr')]:
-        # Ordinary foreign calls remain macOS-only. Linux gets this identical
-        # integer ABI bridge only with an explicit nonzero library callback.
-        guard(E,start,[('CMPI','target_os',2)],'HB.'+op+'.arity',
-              no='HB.call.librarytarget' if op=='call' else 'HB.fail')
+        # macOS and Linux use the same fixed integer/pointer ABI bridge. Linux
+        # additionally needs a dynamic ELF and four loader slots in the image.
+        guard(E,start,[('RLD','target_os')],'HB.'+op+'.arity',
+              accepted=(1,2), no='HB.call.librarytarget' if op=='call' else 'HB.fail')
         guard(E,'HB.'+op+'.arity',[('CMPI',count,2)],'HB.'+op+'.kind0')
         guard(E,'HB.'+op+'.kind0',[('CMPI',kind+'0',regkind)],'HB.'+op+'.kind1')
         guard(E,'HB.'+op+'.kind1',[('CMPI',kind+'1',regkind if op=='call' else intkind)],'HB.'+op+'.reg0')
@@ -43,7 +43,7 @@ def install(E, arch, word=None):
     guard(E,'HB.call.librarytarget',[('RLD','target_os')],'HB.call.libraryread',(1,3))
     install_rules(E.g,Path(__file__).parent,'hostbridge',section='library')
     P('HB.fail').a(E.rej('not covered: foreign host ABI target or operands')).goto('DEAD')
-    p=P('HB.call.emit')
+    p=P('HB.call.emit').a(('LDI','host_dyn',1))
     if arch=='x86_64':
         p.branch({1:'HB.call.emitwin'},'HB.call.emitposix',[('CMPI','target_os',3)])
         p=P('HB.call.emitposix')
@@ -52,7 +52,7 @@ def install(E, arch, word=None):
             p.a(('ALUI','shl','w',arg,16),('ALUI','or','w','w',base));word(p)
         for value in ARM_BODY:p.a(('LDI','w',value));word(p)
         p.goto('LINE')
-        p=P('HB.addr.emit')
+        p=P('HB.addr.emit').a(('LDI','host_dyn',1))
         p.a(('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),
             ('A64I','add','ad_v','ad_v',224)).call('AD.data').call('ADRP')
         p.a(('ALUI','shl','w','a0',5),('ALU','or','w','w','a0'),('ALUI','or','w','w',0xF9400000))
@@ -72,5 +72,5 @@ def install(E, arch, word=None):
                 ('ALUI','and','t',arg,7),('ALUI','shl','t','t',3),
                 ('ALUI','or','t','t',0xC0|(dest&7)),('OUTW','t'))
         win.a([('OUT',b) for b in WIN_X86_BODY]).goto('NEXTL')
-        P('HB.addr.emit').a(('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),
+        P('HB.addr.emit').a(('LDI','host_dyn',1),('COPYW','ad_r','a0'),('A64I','mul','ad_v','a1',8),
             ('A64I','add','ad_v','ad_v',224),('LDI','ad_o',0x8B),('LDI','anamed',0)).goto('AD.store')

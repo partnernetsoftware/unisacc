@@ -62,15 +62,54 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         install_macho(E,byte,arch)
     header = load_rules(Path(__file__).with_name('elfimage-result.tsv'), {},
                         bindings={'HDRS': elf.HDRS(arch), 'VADDR': elf.VADDR}, section='header-init')
-    p=P('EH.elfwrite').a(header['actions'][0][1])
-    for b in b'\x7fELF'+bytes([2,1,1,0])+bytes(8):byte(p,b)
-    def field(width,v):
+    P('EH.elfwrite').branch({1:'EH.elfwrite.dyn'},'EH.elfwrite.static',
+                             [('CMPI','host_dyn',1)])
+    def field(p,width,v):
         p.a(('LDI' if isinstance(v,int) else 'COPYW','lb_v',v),('LDI','lb_n',width)).call('EI.bytes')
-    for w,v in [(2,2),(2,elf.MACHINE[arch]),(4,1),(8,'entryva'),(8,elf.EHDR),(8,0),(4,0),(2,elf.EHDR),(2,elf.PHDR),(2,elf.NPH),(2,0),(2,0),(2,0)]:field(w,v)
-    for flags,offset,va,fs,ms in [(5,0,elf.VADDR,'tend','tend'),(6,'doff','data_va','stored','memlen')]:
-        for w,v in [(4,1),(4,flags),(8,offset),(8,va),(8,va),(8,fs),(8,ms),(8,elf.PAGE)]:field(w,v)
+    def preamble(p,phnum,hdr):
+        for b in b'\x7fELF'+bytes([2,1,1,0])+bytes(8):byte(p,b)
+        for w,v in [(2,2),(2,elf.MACHINE[arch]),(4,1),(8,'entryva'),(8,elf.EHDR),(8,0),
+                    (4,0),(2,elf.EHDR),(2,elf.PHDR),(2,phnum),(2,0),(2,0),(2,0)]:field(p,w,v)
+    def phdr(p,typ,flags,off,va,filesz,memsz,align):
+        for w,v in [(4,typ),(4,flags),(8,off),(8,va),(8,va),(8,filesz),(8,memsz),(8,align)]:field(p,w,v)
+    p=P('EH.elfwrite.static').a(header['actions'][0][1])
+    preamble(p,2,elf.HDRS(arch))
+    phdr(p,1,5,0,elf.VADDR,'tend','tend',elf.PAGE)
+    phdr(p,1,6,'doff','data_va','stored','memlen',elf.PAGE)
     install_rules(g, Path(__file__).parent, 'elfimage', section='header-end',
                   bindings={'state': p.cur}, sequences={'pending': p.acts})
+    p=P('EH.elfwrite.dyn').a(('A64','add','entryva','entryoff','text_va'),
+                             ('A64I','add','tend','endo',784),
+                             ('A64I','sub','doff','data_va',elf.VADDR+32),
+                             ('A64I','add','dyn_filesz','stored',32),
+                             ('A64I','add','dyn_memsz','memlen',32),
+                             ('A64I','sub','dyn_slots','data_va',32))
+    preamble(p,4,784)
+    interp=b'/lib/ld-linux-aarch64.so.1' if arch=='arm64' else b'/lib64/ld-linux-x86-64.so.2'
+    phdr(p,3,4,288,elf.VADDR+288,len(interp)+1,len(interp)+1,1)
+    phdr(p,1,5,0,elf.VADDR,'tend','tend',elf.PAGE)
+    phdr(p,1,6,'doff','dyn_slots','dyn_filesz','dyn_memsz',elf.PAGE)
+    phdr(p,2,4,608,elf.VADDR+608,176,176,8)
+    for b in interp+b'\0'+bytes(32-len(interp)-1):byte(p,b)
+    for b in b'\0libc.so.6\0dlopen\0dlsym\0dlclose\0dlerror\0':byte(p,b)
+    for _ in range(24):byte(p,0)
+    for nameoff in (11,18,24,32):
+        field(p,4,nameoff)
+        for b in (0x12,0,0,0):byte(p,b)
+        field(p,8,0);field(p,8,0)
+    field(p,4,1);field(p,4,5)
+    for _ in range(24):byte(p,0)
+    for i in range(4):
+        p.a(('A64I','add','dyn_reloc','dyn_slots',8*i))
+        field(p,8,'dyn_reloc');field(p,8,((i+1)<<32)|(1025 if arch=='arm64' else 6));field(p,8,0)
+    for tag,val in ((1,1),(4,elf.VADDR+480),(5,elf.VADDR+320),(6,elf.VADDR+360),
+                    (10,40),(11,24),(7,elf.VADDR+512),(8,96),(9,24),(30,8),(0,0)):
+        field(p,8,tag);field(p,8,val)
+    install_rules(g, Path(__file__).parent, 'elfimage', section='header-end',
+                  bindings={'state': p.cur}, sequences={'pending': p.acts})
+    p=P('EI.dynslots')
+    for _ in range(32):byte(p,0)
+    p.goto('EI.data')
     labels = (('EI_pad_b0', 'EI', 'b'), ('EI_loop_b0', 'EI', 'b'),
               ('EI_bytes_b0', 'EI', 'b'))
     image_bindings.update({key: P(owner).fresh(kind) for key, owner, kind in labels})
