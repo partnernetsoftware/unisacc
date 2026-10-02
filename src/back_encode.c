@@ -338,6 +338,10 @@ int bk_arm(int i, long off) {
         ow(0xAA0003F0 | (a[0] << 16)); ow(0xAA0003F1 | (a[1] << 16));
         k = 0; while (k < BK_HOST_ARM_N) { ow(BK_HOST_ARM[k]); k = k+1; } return 1;
     }
+    if (op == TO_HENTRY) {              /* stp x29, x30, [sp, #-16]!; mov x29, sp; mov x7, sp */
+        ow(0xa9bf7bfd); ow(0x910003fd); ow(0x910003e0 | a[0]); return 1;
+    }
+    if (op == TO_HLEAVE) { ow(0xa8c17bfd); ow(0xd65f03c0); return 1; }   /* ldp x29, x30, [sp], #16; ret */
     if (op == TO_HOSTADDR) {
         a_adrp_add(a[0], pc, bkos == 2 ? bk_imp[BK_NIMP+a[1]] : BK_DATA_BASE+bk_shift-32+8*a[1]);
         ow(0xF9400000 | (a[0]<<5) | a[0]); return 1;

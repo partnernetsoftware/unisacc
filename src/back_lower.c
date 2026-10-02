@@ -630,6 +630,8 @@ int bk_cop(char *nm) {                  /* a catalog op's index */
 #define TO_SEXT 116
 #define TO_HOSTCALL 117
 #define TO_HOSTADDR 118
+#define TO_HENTRY 119            /* cc interop inbound: arm64 save fp/lr, x7 = sp */
+#define TO_HLEAVE 120            /* ... and restore, ret */
 /* setreg's source kinds */
 #define SK_IMM 1
 #define SK_REG 2
@@ -648,6 +650,11 @@ long bk_scr0; long bk_scr1; long bk_plen; long bk_pbuf; long bk_argc; long bk_ar
 long bk_sysa; long bk_sysfp; long bk_syssp; long bk_argva; long bk_hstd; long bk_written; long bk_save; long bk_stacktop; long bk_bss;
 int bk_rmap[8];                     /* tape register -> machine register */
 
+int bk_isccw(int j) {                /* a `__ccw_` label: cc interop inbound wrapper */
+    char *p; if (bkname_len[j] <= 6) return 0;
+    p = bkpool + bkname_at[j];
+    return p[0] == 95 && p[1] == 95 && p[2] == 99 && p[3] == 99 && p[4] == 119 && p[5] == 95;
+}
 int tk(int op, long a0, long a1, long a2, long a3) {
     if (tkn >= BK_MAXT) { __write(2, "back end: lowered program too long\n", 35); __exit(1); }
     tkop[tkn] = op; tka[tkn * 4] = a0; tka[tkn * 4 + 1] = a1; tka[tkn * 4 + 2] = a2; tka[tkn * 4 + 3] = a3;
@@ -806,7 +813,8 @@ int bk_genfacts(int op) {             /* the facts the generic path asks for op 
 
 int bk_lower(void) {
     long base; int pc; int op; int k; int cw;
-    int j;
+    int j; int ccw;
+    ccw = 0;
     bkrel = 0 - 1;
     /* data: pad to 8, then the scratch cells -- and on Windows the save area
        and the tape's own stack (that one bss, not file) */
@@ -841,8 +849,23 @@ int bk_lower(void) {
     pc = 0;
     while (pc <= bkni) {
         j = bklab_first[pc];
-        while (j >= 0) { bklab_tpc[j] = tkn; j = bklab_next[j]; }
+        while (j >= 0) { bklab_tpc[j] = tkn; if (bk_isccw(j)) ccw = 1; j = bklab_next[j]; }
         if (pc == bkni) break;
+        if (ccw == 1) {
+            /* cc interop inbound (front_parse.c ccw_emit): the host's
+               argument registers become r0..r5 -- in order, so each source
+               is read before a later move overwrites it (x86-64: r(k) is
+               host argument k-1) */
+            int ha[6]; int q;
+            if (bkos == 2) { __write(2, "back end: interop export is not wired for Windows yet\n", 54); __exit(1); }
+            if (bkarch == 1) { tk(TO_HENTRY, bk_rmap[7], 0, 0, 0); q = 0; while (q < 6) { ha[q] = q; q = q + 1; } }
+            else { ha[0] = 7; ha[1] = 6; ha[2] = 2; ha[3] = 1; ha[4] = 8; ha[5] = 9; }
+            bk_facts(bk_cop("add64"));
+            q = 0; while (q < 6) { if (bk_rmap[q] != ha[q]) tk(bk_opof("mov", 3), bk_rmap[q], ha[q], 0, 0); q = q + 1; }
+            ccw = 2;
+        }
+        if (ccw == 2 && bkarch == 1 && bk_is(bkop[pc], "ret")) { tk(TO_HLEAVE, 0, 0, 0, 0); ccw = 0; pc = pc + 1; continue; }
+        if (ccw == 2 && bk_is(bkop[pc], "ret")) ccw = 0;
         if (pc == bkentry) {
             /* bind the tape SP at the ENTRY: a real process has a real stack */
             if (bkos == 2) tk(TO_WINSTDH, bk_hstd, 0, 0, 0);

@@ -776,6 +776,7 @@ int pponly;                 /* -E: stop after the preprocessor */
    and this unit's initialisers form `__init_u` (the unisacc linker chains
    every unit's `__init_u` into the program's `__init`). */
 int unitmode;
+int ccw_note(int t, int ext); int ccw_def(int t);
 int objextern;              /* -c -b (any object): `extern` objects without a definition are .extern, not storage */
 int declextern;
 int emit_start(void);
@@ -5190,6 +5191,7 @@ int function(int t, int w) {
     /* `static int helper(...)` in the second unit is not the `helper` in
        the first: recorded here, before the label is emitted */
     if (declstatic) ustat_add(t);
+    if (objextern && unitmode == 0 && declstatic == 0) ccw_note(t, declextern);
     fnglobal = declstatic == 0;              /* -funit: exported (bundled-header bodies are all static) */
     fnvoid = declvoid;                       /* before the parameters' types overwrite it */
     fntok = t;
@@ -5227,6 +5229,7 @@ int function(int t, int w) {
     np = 0;
     if (unitmode && fnglobal) { es(".global "); etok(t); ec(10); }
     if (fnglobal && k + 1 < ntok && kind(k + 1) == tidx("{", 1) && fdef_seen(t)) err_tok(t, "multiple definitions of this function");   /* R19-8 (two `main`s, ...); a prototype is not a definition */
+    if (objextern && unitmode == 0 && declstatic == 0) ccw_def(t);
     etok(t); es(":\n");
     es("  @call.frame 8\n  @mem.store [r7+0], r6\n  mov r6, r7\n  @call.frame ");
     fpatch = nout; es("      "); ec(10);
@@ -6177,6 +6180,62 @@ int ccx_emit(char *nm, int nl) {
     es("  mov r7, r6\n  load64 r6, [r7+0]\n  .frame -8\n  ret\n");
     return 0;
 }
+/* cc interop slice 2 (inbound): in a whole-program object a function
+   that is DEFINED here and was DECLARED `extern` somewhere in the unit
+   (the interface header's spelling: `extern int api(int);`) is exported to
+   the cc half as NAME = tape label `__ccw_NAME`, a host-ABI wrapper the back
+   end brackets (host argument registers -> r0..r5, a private stack on
+   arm64) around `call NAME`; NAME itself stays local and internal calls go
+   straight to it.  Plain prototypes do not export -- they are everywhere for
+   forward use -- so objects without an `extern` function declaration are
+   byte-identical to before. */
+char ccw_nm[256 * 64]; int ccw_l[256]; int ccw_ext[256]; int ccw_isdef[256]; int nccw;
+int ccw_find(int t) {
+    int i; int k; int L; L = tlen[t];
+    if (L > 63) return 0 - 1;
+    i = 0;
+    while (i < nccw) {
+        if (ccw_l[i] == L) { k = 0; while (k < L && ccw_nm[i * 64 + k] == src[tpos[t] + k]) k = k + 1; if (k == L) return i; }
+        i = i + 1;
+    }
+    if (nccw >= 256) return 0 - 1;
+    k = 0; while (k < L) { ccw_nm[nccw * 64 + k] = src[tpos[t] + k]; k = k + 1; }
+    ccw_l[nccw] = L; ccw_ext[nccw] = 0; ccw_isdef[nccw] = 0; nccw = nccw + 1;
+    return nccw - 1;
+}
+int ccw_note(int t, int ext) { int i; if (ext == 0) return 0; i = ccw_find(t); if (i >= 0) ccw_ext[i] = 1; return 0; }
+int ccw_def(int t) { int i; i = ccw_find(t); if (i >= 0) ccw_isdef[i] = 1; return 0; }
+int ccw_emit(void) {
+    int i; int k; int si; int f; int bad; char *nm; int nl; int q;
+    bad = 0; i = 0;
+    while (i < nccw) {
+        nm = ccw_nm + i * 64; nl = ccw_l[i];
+        if (ccw_ext[i] && ccw_isdef[i] && !(nl == 4 && nm[0] == 109 && nm[1] == 97 && nm[2] == 105 && nm[3] == 110)) {
+            si = ccx_sym(nm, nl); k = 0;
+            if (si < 0 || symnpk[si] < 0) k = 1;
+            else {
+                if (symnpk[si] > 6) { ccx_refuse(nm, nl, "export with more than 6 arguments not supported yet:", 52); k = 2; }
+                else { if (symvar[si]) { ccx_refuse(nm, nl, "variadic export not supported yet:", 34); k = 2; }
+                else { if ((symstruct[si] >= 0 || symflt[si]) && symptr[si] == 0) { ccx_refuse(nm, nl, "export with a struct or floating-point return not supported yet:", 64); k = 2; }
+                else { f = sympkfirst[si]; q = 0;
+                    while (q < symnpk[si]) {
+                        if (sympks[f + q] || sympk[f + q] == 4 || sympk[f + q] == 8) { ccx_refuse(nm, nl, "export with a struct or floating-point argument not supported yet:", 66); k = 2; break; }
+                        q = q + 1;
+                    } } } }
+            }
+            if (k == 2) bad = bad + 1;
+            if (k == 0) {
+                es(".global __ccw_"); q = 0; while (q < nl) { ec(nm[q] & 255); q = q + 1; }
+                es("\n__ccw_"); q = 0; while (q < nl) { ec(nm[q] & 255); q = q + 1; }
+                es(":\n  call "); q = 0; while (q < nl) { ec(nm[q] & 255); q = q + 1; }
+                es("\n  ret\n");
+            }
+        }
+        i = i + 1;
+    }
+    nccw = 0;
+    return bad;
+}
 int undef_calls(void) {
     int i; int e; int h; int bad;
     i = 0; while (i < UD_SIZE) { ud_tab[i] = 0; i = i + 1; }
@@ -6235,5 +6294,6 @@ int undef_calls(void) {
         i = i + 1;
     }
     nccx = 0;
+    if (objextern && unitmode == 0) bad = bad + ccw_emit();
     return bad;
 }

@@ -296,6 +296,9 @@ int bk_sprefix(int id) {                       /* chars of the tape name dropped
     /* cc interop: the thunk calls `__ccx_NAME`, the cc symbol NAME */
     if (bksp_kind[id] == 3 && bkname_len[id] > 6 && bkpool[bkname_at[id]] == 95 && bkpool[bkname_at[id] + 1] == 95 && bkpool[bkname_at[id] + 2] == 99
         && bkpool[bkname_at[id] + 3] == 99 && bkpool[bkname_at[id] + 4] == 120 && bkpool[bkname_at[id] + 5] == 95) return 6;
+    /* cc interop inbound: the wrapper `__ccw_NAME` is the exported NAME */
+    if (bksp_kind[id] == 2 && bkname_len[id] > 6 && bkpool[bkname_at[id]] == 95 && bkpool[bkname_at[id] + 1] == 95 && bkpool[bkname_at[id] + 2] == 99
+        && bkpool[bkname_at[id] + 3] == 99 && bkpool[bkname_at[id] + 4] == 119 && bkpool[bkname_at[id] + 5] == 95) return 6;
     return 0;
 }
 int bk_snamelen(int id, int us) { return bkname_len[id] - bk_sprefix(id) + us; }
