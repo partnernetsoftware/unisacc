@@ -403,6 +403,35 @@ static char *fgets(char *__u_s, int __u_n, FILE *__u_f) {
 }
 #endif
 
+/* freopen: open the new file and move it onto the stream's descriptor, so
+   the same FILE * (stdin/stdout/stderr included) now refers to it.  Windows:
+   a HANDLE cannot be renumbered, so the new stream is returned instead. */
+#if !__UNISA_FTRIM_LIBC || __UN_freopen
+static FILE *freopen(const char *__u_path, const char *__u_mode, FILE *__u_f) {
+    FILE *__u_n; long __u_r;
+    if (__u_path == 0) { errno = EINVAL; return NULL; }
+    __u_n = fopen(__u_path, __u_mode);
+    if (__u_n == NULL) return NULL;
+#ifdef _WIN32
+    return __u_n;
+#else
+#ifdef __APPLE__
+#ifdef __x86_64__
+    __u_r = __syscall6(0x2000000L + 90, (long)__u_n, (long)__u_f, 0, 0, 0);
+#else
+    __u_r = __syscall6(90, (long)__u_n, (long)__u_f, 0, 0, 0);
+#endif
+#elif defined(__x86_64__)
+    __u_r = __syscall6(33, (long)__u_n, (long)__u_f, 0, 0, 0);
+#else
+    __u_r = __syscall6(24, (long)__u_n, (long)__u_f, 0, 0, 0);     /* dup3 */
+#endif
+    __close((long)__u_n);
+    if (__u_r < 0) { errno = (int)(0 - __u_r); return NULL; }
+    return __u_f;
+#endif
+}
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_fclose
 /* The standard streams are not ours to close: `fclose(stdin)` on a POSIX libc
    is defined to do the work and fail, but closing descriptor 0 here would take

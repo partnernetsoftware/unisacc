@@ -8,7 +8,11 @@
 #define _UNISA_TIME_H
 #include <stddef.h>
 #define NULL 0
+#ifdef _WIN32
+#define CLOCKS_PER_SEC 1000   /* clock() is forwarded to ucrt, which counts milliseconds */
+#else
 #define CLOCKS_PER_SEC 1000000
+#endif
 #ifndef _UNISA_TIME_T
 #define _UNISA_TIME_T
 typedef long time_t;
@@ -324,5 +328,16 @@ static char *ctime(const time_t *__u_t) { return asctime(localtime(__u_t)); }
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_difftime
 static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u_b); }
+#endif
+/* clock: processor time, forwarded to the system's own (0.0.21 R21-4a') */
+#include <unisacc_ffi.h>
+#if !__UNISA_FTRIM_LIBC || __UN_clock
+static clock_t clock(void) {
+    static void *__u_fn; long __u_v[10]; int __u_i;
+    if (__u_fn == 0) __u_fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "clock");
+    if (__u_fn == 0) return (clock_t)(0 - 1);
+    __u_i = 0; while (__u_i < 10) { __u_v[__u_i] = 0; __u_i = __u_i + 1; }
+    return (clock_t)__hostcall(__u_fn, __u_v);
+}
 #endif
 #endif

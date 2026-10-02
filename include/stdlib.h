@@ -503,4 +503,17 @@ static int unsetenv(const char *__u_name) {
 }
 #endif
 
+/* system: forwarded to the system's own (0.0.21 R21-4a'; the bundled library
+   does not grow a shell launcher of its own) */
+#include <unisacc_ffi.h>
+#if !__UNISA_FTRIM_LIBC || __UN_system
+static int system(const char *__u_cmd) {
+    static void *__u_fn; long __u_v[10]; int __u_i;
+    if (__u_fn == 0) __u_fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "system");
+    if (__u_fn == 0) return -1;
+    __u_i = 0; while (__u_i < 10) { __u_v[__u_i] = 0; __u_i = __u_i + 1; }
+    __u_v[0] = (long)__u_cmd;
+    return (int)__hostcall(__u_fn, __u_v);
+}
+#endif
 #endif
