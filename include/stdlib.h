@@ -410,7 +410,6 @@ static int atexit(void (*__u_fn)(void)) {
    SetEnvironmentVariableA through kernel32 (0.0.21 batch 3); getenv's answer
    lives in one of four rotating static buffers. [S-15 D2] */
 #ifdef _WIN32
-#include <sys/_win.h>
 #endif
 static char _unisa_envk[16][256];   /* "NAME=VALUE" (Unix overrides) */
 static int _unisa_envf[16];         /* 0 free, 1 set, 2 unset */
@@ -481,18 +480,55 @@ static int unsetenv(const char *__u_name) {
 }
 #endif
 
-/* system: forwarded to the system's own (0.0.21 R21-4a'; the bundled library
-   does not grow a shell launcher of its own) */
-#if !defined(__UNISA_OBJECT) && !defined(_UNISA_NO_HOSTCALL) && !(defined(_WIN32) && !defined(_UNISA_WINHOST))   /* objects have no loader slots; Windows forwarding waits for the product (0.0.22) */
-#include <unisacc_ffi.h>
+/* system: /bin/sh -c CMD in a child, waited for; the kernel's calls, no
+   host library (0.0.21: the compiler must build without the host channel).
+   Windows: not yet (0.0.22, through the host channel). */
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_system
 static int system(const char *__u_cmd) {
-    static void *__u_fn; long __u_v[10]; int __u_i;
-    if (__u_fn == 0) __u_fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "system");
-    if (__u_fn == 0) return -1;
-    __u_i = 0; while (__u_i < 10) { __u_v[__u_i] = 0; __u_i = __u_i + 1; }
-    __u_v[0] = (long)__u_cmd;
-    return (int)__hostcall(__u_fn, __u_v);
+    static char *__u_env[512]; char *__u_argv[4]; long __u_pid; long __u_me; int __u_st; int __u_k; int __u_n;
+    if (__u_cmd == 0) return 1;
+    __u_argv[0] = "sh"; __u_argv[1] = "-c"; __u_argv[2] = (char *)__u_cmd; __u_argv[3] = 0;
+    __u_n = 0; __u_k = __argc() + 1;
+    while (__u_n < 511 && __argv(__u_k) != 0) { __u_env[__u_n] = __argv(__u_k); __u_n = __u_n + 1; __u_k = __u_k + 1; }
+    __u_env[__u_n] = 0;
+#ifdef __APPLE__
+#ifdef __x86_64__
+    __u_me = __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0);
+    __u_pid = __syscall6(0x2000000L + 2, 0, 0, 0, 0, 0);
+    if (__u_pid >= 0 && __syscall6(0x2000000L + 20, 0, 0, 0, 0, 0) != __u_me) __u_pid = 0;
+#else
+    __u_me = __syscall6(20, 0, 0, 0, 0, 0);
+    __u_pid = __syscall6(2, 0, 0, 0, 0, 0);
+    if (__u_pid >= 0 && __syscall6(20, 0, 0, 0, 0, 0) != __u_me) __u_pid = 0;
+#endif
+#elif defined(__x86_64__)
+    __u_me = 0; __u_pid = __syscall6(57, 0, 0, 0, 0, 0);
+#else
+    __u_me = 0; __u_pid = __syscall6(220, 17, 0, 0, 0, 0);
+#endif
+    if (__u_pid < 0) return -1;
+    if (__u_pid == 0) {
+#if defined(__APPLE__) && defined(__x86_64__)
+        __syscall6(0x2000000L + 59, (long)"/bin/sh", (long)__u_argv, (long)__u_env, 0, 0);
+#elif defined(__APPLE__) || defined(__x86_64__)
+        __syscall6(59, (long)"/bin/sh", (long)__u_argv, (long)__u_env, 0, 0);
+#else
+        __syscall6(221, (long)"/bin/sh", (long)__u_argv, (long)__u_env, 0, 0);
+#endif
+        __exit(127);
+    }
+    __u_st = 0;
+#if defined(__APPLE__) && defined(__x86_64__)
+    if (__syscall6(0x2000000L + 7, __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#elif defined(__APPLE__)
+    if (__syscall6(7, __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#elif defined(__x86_64__)
+    if (__syscall6(61, __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#else
+    if (__syscall6(260, __u_pid, (long)&__u_st, 0, 0, 0) < 0) return -1;
+#endif
+    return __u_st;
 }
 #endif
 #endif

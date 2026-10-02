@@ -8,11 +8,7 @@
 #define _UNISA_TIME_H
 #include <stddef.h>
 #define NULL 0
-#ifdef _WIN32
-#define CLOCKS_PER_SEC 1000   /* clock() is forwarded to ucrt, which counts milliseconds */
-#else
 #define CLOCKS_PER_SEC 1000000
-#endif
 #ifndef _UNISA_TIME_T
 #define _UNISA_TIME_T
 typedef long time_t;
@@ -329,16 +325,23 @@ static char *ctime(const time_t *__u_t) { return asctime(localtime(__u_t)); }
 #if !__UNISA_FTRIM_LIBC || __UN_difftime
 static double difftime(time_t __u_a, time_t __u_b) { return (double)(__u_a - __u_b); }
 #endif
-/* clock: processor time, forwarded to the system's own (0.0.21 R21-4a') */
-#if !defined(__UNISA_OBJECT) && !defined(_UNISA_NO_HOSTCALL) && !(defined(_WIN32) && !defined(_UNISA_WINHOST))   /* objects have no loader slots; Windows forwarding waits for the product (0.0.22) */
-#include <unisacc_ffi.h>
+/* clock: user + system processor time from getrusage, in microseconds
+   (the kernel's call, no host library).  Windows: not yet (0.0.22). */
+#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_clock
 static clock_t clock(void) {
-    static void *__u_fn; long __u_v[10]; int __u_i;
-    if (__u_fn == 0) __u_fn = uffi_dlsym((void *)UFFI_RTLD_DEFAULT, "clock");
-    if (__u_fn == 0) return (clock_t)(0 - 1);
-    __u_i = 0; while (__u_i < 10) { __u_v[__u_i] = 0; __u_i = __u_i + 1; }
-    return (clock_t)__hostcall(__u_fn, __u_v);
+    long __u_ru[18]; long __u_r;
+#if defined(__APPLE__) && defined(__x86_64__)
+    __u_r = __syscall6(0x2000000L + 117, 0, (long)__u_ru, 0, 0, 0);
+#elif defined(__APPLE__)
+    __u_r = __syscall6(117, 0, (long)__u_ru, 0, 0, 0);
+#elif defined(__x86_64__)
+    __u_r = __syscall6(98, 0, (long)__u_ru, 0, 0, 0);
+#else
+    __u_r = __syscall6(165, 0, (long)__u_ru, 0, 0, 0);
+#endif
+    if (__u_r < 0) return (clock_t)(0 - 1);
+    return (clock_t)((__u_ru[0] + __u_ru[2]) * 1000000 + (__u_ru[1] & 0xFFFFFFFFL) + (__u_ru[3] & 0xFFFFFFFFL));
 }
 #endif
 #endif

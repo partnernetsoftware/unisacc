@@ -2,6 +2,9 @@
  * kernel/weight.<stage>.inc; dense answers in kernel/dense.<stage>.inc.
  * Default product networks are separate .net/P3 data, not these literals.
  * tests/export_ref.sh exports one independent C file for transfer/selfhost. */
+/* 0.0.21: the compiler does not use the host channel itself (include/sys/_win.h, forwarded
+   system/clock); same rule as exec/c/compiler.c */
+#define _UNISA_NO_HOSTCALL 1
 #include <stdio.h> /* explicit library dependency of the classic compiler */
 #include "src/version.h"
 #include "kernel/unisa_model.inc"
