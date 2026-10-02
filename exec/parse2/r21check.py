@@ -27,6 +27,9 @@ PROBES = [  # (item, name, source)
  (2, 'late-sizeof', 'typedef struct CI CI; struct CI { long a, b; CI *next; }; int main(void){ return (int)sizeof(CI); }\n'),
  (3, 'extern-array-defined', 'extern int arr[];\nstatic int other[] = {1, 2, 3, 4, 5, 6, 7, 8, 9};\nint arr[3] = {7, 8, 9};\nint main(void){ return arr[2] + (int)sizeof other; }\n'),
  (3, 'extern-array-undefined', 'extern int arr[];\nint main(void){ return 0; }\n'),
+ (3, 'extern-arrays-then-definitions', 'extern const char a[];\nextern int b[];\nconst char a[] = "xy";\nint b[] = { 1, 2 };\nint main(void){return b[1]+(int)sizeof a;}\n'),
+ (3, 'extern-array-then-object', 'extern int t[];\nint z;\nint t[] = {1,2,3};\nint main(void){return t[2]+z;}\n'),
+ (3, 'extern-array-then-function', 'extern int t[];\nint f(void){ int q = 2; return t[0]+q; }\nint t[3] = {1,2,3};\nint main(void){return f();}\n'),
  (3, 'tentative-array', 'int arr[];\nint main(void){ return arr[0]; }\n'),
  (3, 'flexible-member', 'struct S { int n; int d[]; };\nint main(void){ int x = 1; return (int)sizeof(struct S) + x; }\n'),
  (4, 'ptrptr-member', 'typedef struct TS { long a, b, c, d; } TS; typedef struct st { TS **hash; int n; } st; int main(void){ TS *v[8]; st t; st *tb=&t; TS x; t.hash=v; tb->hash[5]=&x; return v[5]==&x; }\n'),
@@ -53,7 +56,7 @@ OBJECTS = [  # (item, name, source, refusal)
  (13, 'ccx-call', 'int h(int);\nint main(void){return h(1);}\n', 'not covered: cc interop call'),
 ]
 FILES = [(1, 'a_tdarr'), (2, 'a_tdlate'), (5, 'a_fpmemb'), (6, 'a_ptr2d'), (4, 'a_ptrptrmemb'),
-         (7, 'a_regtab'), (3, 'a_externarr'), (8, 'a_parenfn'), (12, 'a_callres')]
+         (7, 'a_regtab'), (3, 'a_externarr'), (3, 'fb12-13-extern-incomplete-array'), (8, 'a_parenfn'), (12, 'a_callres')]
 
 
 def call(args, **kw):

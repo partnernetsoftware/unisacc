@@ -379,6 +379,42 @@ def types():
     structured_control("dimensions", False)
     strwalk("DM.s", "DM.sb", "DM.se")
     structured_control("dimensions-tail", False)
+    # `T x[];` then a later '=': the size comes only from the definition of
+    # the same name at file scope (the reference's 0.0.21 rule); an earlier
+    # unrelated '=' is skipped.  No definition at all: not covered.
+    TK = E.TK
+    E.g.labels.update(("DM.tent.scan", "DM.tent.after"))  # NEXT returns here
+    TENTATIVE = 764 << 40  # TENTATIVE[id] = 1: declared `T x[];`, its definition still ahead
+    P("DM.tent.start").a(("INTERN", "dm_self", "fns", "fne"), ("LDI", "dm_one", 1), ("STX", "dm_self", TENTATIVE, "dm_one"), ("LDI", "dm_sq", 0), ("LDI", "dm_br", 0),
+                         ("LDI", "dm_last", -1), ("LDI", "dm_eq", 0), ("LDI", "dm_p1", 0), ("LDI", "dm_p2", 0)).goto("DM.tent.next")
+    P("DM.tent.scan").branch({TK["="]: "DM.tent.eq", TK["eof"]: "DM.tent.none", TK_ID: "DM.tent.id",
+                              TK["["]: "DM.tent.sqo", TK["]"]: "DM.tent.sqc", TK["{"]: "DM.tent.bro",
+                              TK["}"]: "DM.tent.brc", TK[";"]: "DM.tent.semi"}, "DM.tent.next", [("RLD", "tk")])
+    P("DM.tent.next").a(("LDI", "dm_eq", 0)).goto("DM.tent.step")
+    P("DM.tent.nexteq").a(("LDI", "dm_eq", 1)).goto("DM.tent.step")
+    P("DM.tent.step").a(("COPYW", "dm_p2", "dm_p1"), ("COPYW", "dm_p1", "tk"), ("PUSH", "DM.tent.scan")).goto("NEXT")
+    # Only `T y[];` declarations and definitions of such names may stand
+    # between this declaration and its definition (the reference emits storage
+    # at the definition); a function body or other declaration is not covered.
+    later = ("rej", "not covered: incomplete array declaration before another definition")
+    P("DM.tent.semi").a(("ALU", "or", "dm_t", "dm_sq", "dm_br")).branch({0: "DM.tent.semitent"}, "DM.tent.next", [("RLD", "dm_t")])
+    P("DM.tent.semitent").a(("LDX", "dm_t", "dm_last", TENTATIVE)).branch({1: "DM.tent.next"}, "DM.tent.semi1", [("CMPI", "dm_t", 1)])
+    P("DM.tent.semi1").branch({TK["]"]: "DM.tent.semi2"}, later, [("RLD", "dm_p1")])
+    P("DM.tent.semi2").branch({TK["["]: "DM.tent.next"}, later, [("RLD", "dm_p2")])
+    P("DM.tent.bro").branch({0: "DM.tent.bro0"}, "DM.tent.broin", [("RLD", "dm_br")])
+    P("DM.tent.bro0").branch({1: "DM.tent.broin"}, later, [("RLD", "dm_eq")])
+    for st, reg, op in (("sqo", "dm_sq", "add"), ("sqc", "dm_sq", "sub"), ("broin", "dm_br", "add"), ("brc", "dm_br", "sub")):
+        P("DM.tent." + st).a(("ALUI", op, reg, reg, 1)).goto("DM.tent.next")
+    P("DM.tent.id").a(("ALU", "or", "dm_t", "dm_sq", "dm_br")).branch({0: "DM.tent.idset"}, "DM.tent.next", [("RLD", "dm_t")])
+    P("DM.tent.idset").a(("INTERN", "dm_last", "ps", "pe")).goto("DM.tent.next")
+    P("DM.tent.eq").a(("ALU", "or", "dm_t", "dm_sq", "dm_br")).branch({0: "DM.tent.eqname"}, "DM.tent.next", [("RLD", "dm_t")])
+    P("DM.tent.eqname").branch({1: "DM.tent.eqok"}, "DM.tent.other", [("CMP", "dm_last", "dm_self")])
+    # Another definition first: the reference places its storage before this
+    # one's, E3 at the declaration.  Equal only if that one is tentative too.
+    P("DM.tent.other").a(("LDX", "dm_t", "dm_last", TENTATIVE)).branch({1: "DM.tent.nexteq"}, later, [("CMPI", "dm_t", 1)])
+    P("DM.tent.eqok").a(("PUSH", "DM.tent.after")).goto("NEXT")
+    P("DM.tent.after").branch({TK["{"]: "DM.o2", E.TK_STR: "DM.s"}, ("rej", "not covered: incomplete array declaration without an initializer"), [("RLD", "tk")])
+    P("DM.tent.none").branch({}, ("rej", "not covered: incomplete array declaration without an initializer"))
     shape_control("dimensions")
 
     # TSPEC: type words then stars -> tb (base size, 0 void), td (depth); current token after
