@@ -1,7 +1,7 @@
 """E3 delta generator: shared expression/type helpers and handwritten
 state/action rules, with selected attributes read from the gold tables.
 
-The declarative grammar compiler described in docs/exec/e3-structured.md is
+The declarative grammar compiler described in archive/docs/exec/e3-structured.md is
 an unfulfilled design, not the implementation of this file. Runtime model
 construction does not by itself remove the handwritten compilation rules.
 

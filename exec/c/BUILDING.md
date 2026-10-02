@@ -5,7 +5,7 @@ with a 55-second process-tree bound inside the 60-second make bound. Shared
 and six target stages finish before packaging; only a successful build
 atomically replaces root `unisacc.com`. Set `MODEL_DIR` for a private build
 directory and `UA` for a private classic seed. `make classic-com` is the
-explicit fallback, writing `out/unisacc-classic.com`. Published v0.0.7 is unchanged.
+explicit fallback, writing `out/unisacc-classic.com`. The default shipped route is the constructed model compiler.
 
 `make model-com` performs **one explicit step**, bounded at 55 seconds including
 its child processes. Set both `MODEL_DIR` and `MODEL_STEP`; missing or unknown
@@ -61,7 +61,7 @@ strictly last, with no writers running; its existing seven-manifest checks are
 the dependency gate, even if an earlier shell command was accidentally skipped.
 
 The existing one-argument `buildcompiler.sh OUTPUT_DIR` still builds everything;
-it does not replace shipped `unisacc.com`. For bounded external scheduling:
+it does not replace shipped `unisacc.com` unless `make com` installs the checked candidate. For bounded external scheduling:
 
 ```sh
 ./exec/c/buildcompiler.sh /tmp/my-container shared

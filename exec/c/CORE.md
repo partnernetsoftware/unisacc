@@ -62,7 +62,7 @@ sizes produced by unisacc; the latter remains a separate task.
 The network-built runtime still reconstructs itself through all six networks
 in nativecheck.sh. Its isolated input directory now explicitly includes core.c
 and core.h alongside runtime.c: those are real source inputs, not copied model
-answers. Product unisacc.com still uses the retained reference compiler route.
+answers. The shipped unisacc.com uses the constructed model route; the retained compiler remains a behavior reference and explicit classic build.
 
 The following compression/whole-tool measurements are the initial 8b3be84
 baseline, before the assembly-interface changes; they are not current sizes.
@@ -75,7 +75,7 @@ has __text 98,288 B and file 132,258 B (gzip-9 22,613 B; carried library
 included). This is not a same-optimization speed/size comparison. Models and
 templates are external to these tools; this slice changes no model payload.
 The loader/IO portions are still linked with their respective libraries; a
-complete per-component release ledger is still required at final switching.
+per-component release ledger is maintained in research/model-bytes.json.
 
 The former 603-line run.c is now 418 lines, plus 254 lines of core.c and 32
 of core.h (704 combined). This is an explicit API/ownership split, not a
@@ -86,4 +86,4 @@ Both ISA adapters now select assembly for inference, all actions and storage,
 the step loop, initialization and ownership cleanup; they do not link core.c.
 The retained C implementation is the differential reference. CoreMachine keeps
 mutable state explicit and invocation-local. The loader, IO, host callbacks and
-library allocation remain outside this kernel. Product routing is unchanged.
+library allocation remain outside this kernel. These interface measurements are a historical baseline; current product routing is the constructed model route.

@@ -6,7 +6,7 @@
  * stopping at the first halt.  Nothing here knows any language or grammar:
  * all of that is in the delta table, loaded from a file at run time.
  *
- * Table format and action codes: exec/README.md.
+ * Table format and action codes: archive/exec/README-history-20261002.md.
  *
  *   exec delta.tbl [input]      run once (input from file, else stdin)
  *   exec -r N delta.tbl input   run N times (timing), output once

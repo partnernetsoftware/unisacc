@@ -7,7 +7,7 @@ exec/exec.c knows nothing about C; this only renames.  States become
 numbers (DISPATCH first, so q0 = 0; the pseudo-state HALT, reached only by
 actions that halt, becomes 0 too), stack symbols P D0..D9 become 0..10 with
 BOT = NG = 11, R = 0..19, and each E1 action becomes a fixed sequence of the
-executor's generic actions (exec/README.md):
+executor's generic actions (archive/exec/README-history-20261002.md):
 
     ADV          ADV
     OUT b        EMIT b

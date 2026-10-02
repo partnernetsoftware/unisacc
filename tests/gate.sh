@@ -412,6 +412,15 @@ job c99-ledger  python3 ./tests/c99ledger.py   # R14-6: the C99 clause ledger an
 job publish-order python3 ./tests/publishordercheck.py   # wrong signed hash must leave the draft and assets untouched
 job front-bounds python3 ./tests/frontboundscheck.py   # anonymous struct tags must not read token -1
 job seed-construct python3 ./tests/seedconstructcheck.py   # C99 flat-table network construction equals Python bytes
+job seed-matrix-shared python3 ./tests/seedconstructmatrix.py shared
+job seed-matrix-features python3 ./tests/seedconstructmatrix.py features
+job seed-matrix-lnx-arm64 python3 ./tests/seedconstructmatrix.py lnx/arm64
+job seed-matrix-lnx-x86_64 python3 ./tests/seedconstructmatrix.py lnx/x86_64
+job seed-matrix-osx-arm64 python3 ./tests/seedconstructmatrix.py osx/arm64
+job seed-matrix-osx-x86_64 python3 ./tests/seedconstructmatrix.py osx/x86_64
+job seed-matrix-win-arm64 python3 ./tests/seedconstructmatrix.py win/arm64
+job seed-matrix-win-x86_64 python3 ./tests/seedconstructmatrix.py win/x86_64
+job seed-matrix-object python3 ./tests/seedconstructmatrix.py object
 job gate-infra python3 ./tests/queuecheck.py
 # R12-0 ③b: checks that were in no gate at all (tests/ungated-checks.tsv).
 # Each was run standalone with a measured rc=0 before being added; the four that

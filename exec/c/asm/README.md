@@ -8,8 +8,8 @@ handlers and their dispatch in assembly.
 The transition loop, initialization and cleanup are also assembly on both ISAs.
 Allocation remains libc. The default standalone run.c retains the C oracle;
 asmcompiler.c uses the product-ABI bridge and a carried assembly core. The
-shipped product still uses its reference compiler route; default switching
-remains unfinished. Current package/platform evidence is summarized below.
+shipped product uses the constructed model route. Historical package/platform
+measurements below retain their original dates and scopes.
 
 Both transition routines evaluate the threshold network directly: initialize the two
 signed 64-bit outputs, visit every threshold, activate `key >= threshold`,
@@ -228,7 +228,7 @@ in a preprocessor macro; the source now uses separate assembly lines.
 
 Both ISA integration jobs pass six-image/five-native comparisons. C network
 self-reconstruction and ASan/UBSan pass. This is not an assembly self-compiler:
-the generated run.c image is still C, and the shipped product route is unchanged.
+the generated run.c image is still C; this paragraph records the route at the time of measurement.
 SWAP allocation failures are not directly injected by the action suite.
 
 The full 82-suite gate (--com, JOBS=2) passed on 8743d4f in 428 s, including
@@ -313,7 +313,7 @@ memory runs, two multi-unit runs, missing/corrupt blob rejection and N1=N2=N3
 for the assembly-bound compiler driver rebuilt through networks. The assembly
 blob itself remains a fixed package resource; the rebuilt driver does not
 assemble it. Native macOS arm64 and Rosetta x86-64 binding checks pass, as does
-the Linux arm64 carried driver self-rebuild. The final default product switch
+the Linux arm64 carried driver self-rebuild. At the time of this measurement, the default product switch
 remains pending.
 
 ## Carried kernel and compiler container
@@ -332,8 +332,8 @@ container does not invoke them.
 two exact kernel resources, removes the loose inputs, then tests all six output
 targets and actual arm64/x86-64 host execution. `bindingcheck.sh` now also checks
 N1=N2=N3 with the kernel carried in the model package and no UNISA_KERNEL.
-These are development artifacts, not a default-product switch or a claim of
-complete source-language/CLI parity.
+These checks remain development evidence; current product adoption and
+source-language/CLI coverage are tracked in prd.md and release receipts.
 
 ARM bridge tag bit 1 identifies Windows' separate tape stack; bit 0 selects
 transition rather than execution. On POSIX, the kernel hardware stack moves
