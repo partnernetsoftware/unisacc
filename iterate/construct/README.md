@@ -88,5 +88,5 @@ subset, and can run the whole list as bounded batches.
 The 2026-09-25 development log (what was proven per stage, capacity steps, audits) moved to
 [archive/iterate/construct-log-20260925.md](../../archive/iterate/construct-log-20260925.md).
 It no longer passes on the current tables: research/r20-c99-seed-a-audit.md records `abi` rules over 96,
-an `isel` class count of 107 and a `combo` difference. The C99 seed constructor of plans/v0.0.21.md (item 0)
+an `isel` class count of 107 and a `combo` difference. The C99 seed constructor of archive/plans/v0.0.21.md (item 0)
 lives in `seed/`; this directory is re-tested and reused only, not extended.

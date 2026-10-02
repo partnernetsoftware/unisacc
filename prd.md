@@ -13,7 +13,7 @@
 
 ### 版本状态与历史身份
 
-最近已发布版本为 **v0.0.20**（2026-10-01T22:28Z 公开）；0.0.18 未单独发布，其工作并入 0.0.19。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
+最近已发布版本为 **v0.0.21**（2026-10-02 公开）；0.0.18 未单独发布，其工作并入 0.0.19。逐版发布身份见 [历史记录](archive/prd-release-and-development-history-20261001.md#逐版发布身份) 与 [GitHub Release](https://github.com/partnernetsoftware/unisacc/releases)；候选哈希与逐版验收不在本文件复写。后续计划见下表。
 
 ### 计划索引（正文在 plans/，prd 只放索引）
 
@@ -23,12 +23,13 @@
 | v0.0.18 | [archive/plans/v0.0.18.md](archive/plans/v0.0.18.md) — 已完成部分并入 0.0.19，未单独发布 | 已结项、并入 0.0.19 |
 | v0.0.19 | [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) — 含 0.0.18 工作与宿主能力头·网络 | **已公开 2026-10-01**（signed sha256 ad1d87e9…，[回执](research/r19-release-acceptance.json)） |
 | v0.0.20 | [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) — 链接阶段全程序事实（.unit 2/.gdef）、结构化拒绝、两条字节差异闭合、libc 增补；C99 种子构造器只完成首片（Python 仍为默认） | **已公开 2026-10-01**（signed sha256 3a201488…，[回执](research/r20-release-acceptance.json)） |
-| v0.0.21 | [plans/v0.0.21.md](plans/v0.0.21.md) — 承接 0.0.20 超量范围：cc ABI 互调及依赖它的转发/动态库，Windows 与汇编格式、Csmith 和语料扩展 | 范围重排；已二次顺延的旧版本承诺须显式降级，不把改编号视为完成 |
+| v0.0.21 | [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) — 参考侧通用 libc 转发（六目标，Linux 最小动态 ELF、Windows 条件导入）、Windows POSIX 层首批、cc 互调、setjmp/lua；产品侧对应构造按名拒绝 | **已公开 2026-10-02**（signed sha256 1658fea8…，[回执](research/r21-release-acceptance.json)） |
+| v0.0.22 | [plans/v0.0.22.md](plans/v0.0.22.md) — 产品侧补齐 0.0.21 移出项、发版与开发解耦（对照 minicon）、论文 A/A2 同行调研与审稿修改 | 计划中 |
 | v0.1.x | [plans/v0.1.x.md](plans/v0.1.x.md) — 证明侧路线（T2 机器证明、P-2 全走查器、T3、.o、wasm）；v0.1.3 内存安全检查节点（模型推断标注 + 确定性检查器 + 分级编译，论文 D）；v0.2.x 高阶应用（见 plans/v0.2.x.md）；原包市场 + agent 友好主线（tapebin 包格式、发布即证明、权限沙箱、官方包） | 草案 |
 | v0.2.x | [plans/v0.2.x.md](plans/v0.2.x.md) — **高阶应用**（主人 2026-10-01）：沙箱、容器/镜像、虚拟/仿真、高性能、硬件、网络、harness + agent；包市场与发布即证明并入 | 草案 |
 | v0.0.11 及更早 | 见 §7 归档索引 | 已发布 |
 
-历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的组合与链接问题由 [v0.0.21 计划](plans/v0.0.21.md) 跟踪。
+历史实施决定与试验见 [R19 过程记录](archive/prd-release-and-development-history-20261001.md#r19-开发决定)；仍未解决的问题由 [v0.0.22 计划](plans/v0.0.22.md) 跟踪。
 
 **产品命名（主人 2026-09-30 提醒，硬规则）**：两代产品只有两个名字——宿主构建的第一代叫 **`unisacc-seed.com`**，由它自举出来的最终产品叫 **`unisacc.com`**（发布物、GHCR 候选、README 与 N22 三阶段的文件名都按此；`unisacc-next.com` 只是构建目录里的中间名，不出仓）。
 
@@ -244,7 +245,7 @@ GitHub：release-check.yml（每次 push，约 1 分钟）= 源预检 + 按 GHCR
 
 ## 5. 路线
 
-当前版本及其完成状态只在 §2 的计划索引维护。0.0.20 已公开；0.0.21 接续 C99 种子构造器余片与依赖 ABI 互调的转发、动态库及其他超量范围列入 [0.0.21 计划](plans/v0.0.21.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。
+当前版本及其完成状态只在 §2 的计划索引维护。0.0.21 已公开；后续列入 [0.0.22 计划](plans/v0.0.22.md)。长期证明与应用方向分别见 [0.1.x](plans/v0.1.x.md)、[0.2.x](plans/v0.2.x.md)。
 
 R20-1 A 首轮复测：旧 C 构造器的 `prec` 单表与 Python/出货 UNS2 字节相同；完整旧检查在当前表上碰到 `abi` 规则容量、`isel` 类别容量与 `combo` 差异，58 秒整轮亦超时。旧 `genmodel.c` 在当前 `lexcls` 的 257 个字段值上超出 256 上限。它们是可复用算法的证据，尚不构成现行 P3/seed 的 C99 构造路径；逐项回执与边界见 [R20-1 A 复测](research/r20-c99-seed-a-audit.md)。
 
@@ -256,7 +257,7 @@ R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）�
 
 ### 5.1 libc 路线裁定（主人 2026-10-02）
 
-**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。排期在 [v0.0.21](plans/v0.0.21.md) 第 4a 项。**补充裁定（主人 2026-10-02）**：不接受“Linux 静态 ELF 没有动态装载器所以不转发”——三个 OS 都要把动态装载做好：Linux 写最小动态 ELF（PT_INTERP 指向系统 ld.so，DT_NEEDED libc.so.6，四个 GLOB_DAT 槽绑定 dlopen/dlsym/dlclose/dlerror，与 macOS 的四个 eager bind 同形），Windows 把同样四个槽映射到 LoadLibraryA/GetProcAddress/FreeLibrary/GetLastError；于是 `__hostaddr0..3` + `__hostcall` 在六个目标上是同一条转发通道。只有用到转发的程序才写动态头，其余镜像字节不变。**方向澄清（主人 2026-10-02）**：反对自研 libc 的原因是它是大工程，**将来应做成外置的 libc 包，而不是内置在 unisacc.com 里**；“缺什么函数就补一个函数体编进去”的亡羊补牢做法是无底洞，停止。于是 0.0.21 的转发不是逐个函数写转发桩，而是**通用转发**：有原型、无定义、随带库也没有的外部函数，一律由编译器生成转发桩（0.0.19 R19-10 的 `fwd_stub` 机制，目前只在 macOS `-run` 下），扩展到写出的镜像与 Linux（借上面的四个 dl 槽）；随带头文件逐步收缩为声明，函数体只留纯计算且影响确定性的部分，最终外置。主人也说明静态与动态不是硬要求、产物体积暂不是关键，以实现与可维护为先。
+**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。参考侧已随 v0.0.21 交付（[归档计划](archive/plans/v0.0.21.md) 第 4a 项），产品侧在 0.0.22。**补充裁定（主人 2026-10-02）**：不接受“Linux 静态 ELF 没有动态装载器所以不转发”——三个 OS 都要把动态装载做好：Linux 写最小动态 ELF（PT_INTERP 指向系统 ld.so，DT_NEEDED libc.so.6，四个 GLOB_DAT 槽绑定 dlopen/dlsym/dlclose/dlerror，与 macOS 的四个 eager bind 同形），Windows 把同样四个槽映射到 LoadLibraryA/GetProcAddress/FreeLibrary/GetLastError；于是 `__hostaddr0..3` + `__hostcall` 在六个目标上是同一条转发通道。只有用到转发的程序才写动态头，其余镜像字节不变。**方向澄清（主人 2026-10-02）**：反对自研 libc 的原因是它是大工程，**将来应做成外置的 libc 包，而不是内置在 unisacc.com 里**；“缺什么函数就补一个函数体编进去”的亡羊补牢做法是无底洞，停止。于是 0.0.21 的转发不是逐个函数写转发桩，而是**通用转发**：有原型、无定义、随带库也没有的外部函数，一律由编译器生成转发桩（0.0.19 R19-10 的 `fwd_stub` 机制，目前只在 macOS `-run` 下），扩展到写出的镜像与 Linux（借上面的四个 dl 槽）；随带头文件逐步收缩为声明，函数体只留纯计算且影响确定性的部分，最终外置。主人也说明静态与动态不是硬要求、产物体积暂不是关键，以实现与可维护为先。
 
 ## 6. 未解决问题
 

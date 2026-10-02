@@ -15,7 +15,7 @@ Since 0.0.18, `-S -b lnx/x86_64|lnx/arm64 -o FILE.s` writes that object as GNU a
 (AT&T syntax on x86-64) which the system assembler accepts, and `unisacc as`
 assembles it -- or hand-written code in the same subset -- back into the
 identical object; `unisacc nm` and `unisacc objdump -d` read the same objects. Assembly text for Mach-O and COFF, Intel syntax and inline `asm` are planned for 0.0.21 (R20-8). The design and the back-end facts behind it are in
-[docs/toolchain.md](docs/toolchain.md); the plans in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) (published) and [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) (published) and [plans/v0.0.21.md](plans/v0.0.21.md) (in progress). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
+[docs/toolchain.md](docs/toolchain.md); the plans in [archive/plans/v0.0.19.md](archive/plans/v0.0.19.md) (published) and [archive/plans/v0.0.20.md](archive/plans/v0.0.20.md) (published) and [archive/plans/v0.0.21.md](archive/plans/v0.0.21.md) (published). "C99" is ISO/IEC 9899:1999 as amended by TC1-TC3 (the text is WG14
 N1256), and how much of it is covered is a number from a clause-by-clause
 ledger, not a claim -- see [C99 coverage](#c99-coverage). The front end takes
 C99 as written in real projects: jsmn, cJSON, miniz, stb, tinyexpr and the
@@ -373,10 +373,10 @@ console.log((await wasm_run("return 1+2;", {}, {})).ok);
 
 ## Status
 
-The latest release is **v0.0.20** (2026-10-01): signed `unisacc.com`
-1,944,384 B, SHA-256 `3a201488…`; receipt in
-[research/r20-release-acceptance.json](research/r20-release-acceptance.json).
-0.0.21 is in development ([plan](plans/v0.0.21.md)). Verification, platform gaps
+The latest release is **v0.0.21** (2026-10-02): signed `unisacc.com`
+2,006,000 B, SHA-256 `1658fea8…`; receipt in
+[research/r21-release-acceptance.json](research/r21-release-acceptance.json).
+0.0.22 is in development ([plan](plans/v0.0.22.md)). Verification, platform gaps
 and signing work are recorded in [prd](prd.md).
 
 The generated table above describes classic finite fact decisions; current
