@@ -256,7 +256,7 @@ R20-3 的单元链接语义采用 `.unit 2`（单元 tape 首条必需记录）�
 
 ### 5.1 libc 路线裁定（主人 2026-10-02）
 
-**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。排期在 [v0.0.21](plans/v0.0.21.md) 第 4a 项。
+**反对自研 libc：系统已有的尽量复用（转发给系统 libc），参照 tinycc / `tcc -run`。** 依据与移交见 [research/libc-forward-handoff.md](research/libc-forward-handoff.md)，方案底稿是 [libc-unify-design.md](research/libc-unify-design.md) 的 D2。落地口径：每个函数族先进“转发 / 保留 / 拒绝”路由表，用探针与宿主逐字节对拍通过才切换，否则维持按名拒绝；字节与自举（N22、六目标折叠）的影响逐条标注。排期在 [v0.0.21](plans/v0.0.21.md) 第 4a 项。**补充裁定（主人 2026-10-02）**：不接受“Linux 静态 ELF 没有动态装载器所以不转发”——三个 OS 都要把动态装载做好：Linux 写最小动态 ELF（PT_INTERP 指向系统 ld.so，DT_NEEDED libc.so.6，四个 GLOB_DAT 槽绑定 dlopen/dlsym/dlclose/dlerror，与 macOS 的四个 eager bind 同形），Windows 把同样四个槽映射到 LoadLibraryA/GetProcAddress/FreeLibrary/GetLastError；于是 `__hostaddr0..3` + `__hostcall` 在六个目标上是同一条转发通道。只有用到转发的程序才写动态头，其余镜像字节不变。
 
 ## 6. 未解决问题
 
