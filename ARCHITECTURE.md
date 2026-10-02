@@ -27,13 +27,12 @@
 
 | 身份 | 尺寸 / SHA256 / 验证边界 |
 |---|---|
-| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)（v0.0.8 / 0.0.9 / 0.0.10 / 0.0.11 / **0.0.12**），每行带 tag、签后大小、SHA-256 与验收收据。此处曾只列到 v0.0.11 并把 v0.0.8 与它并列称「已发布」，读者无法判断哪个是当前 |
+| 已发布版本及其字节 | **不在本文件重述**：权威表在 [README 的 artifact 行](README.md)与 [prd §2 计划索引](prd.md)，每个版本带签后大小、SHA-256 与验收收据（最新 v0.0.20） |
 
 六目标实跑：本机 osx/arm64 与 Rosetta 全量门禁；Lima lnx/arm64、lnx/x86_64 与 UTM win/arm64、win/x86_64 跑 examples（`tests/crossnative.sh`）并完成 Windows 双目标编译器自举。macOS/Rosetta 本地门禁不等于六平台全绿。完整身份、
 历史单次memory计时与收据见 [单次 memory 集成证据](archive/research/20260928/memory-once-integrated-bench-20260928.json)。
 共享网络数与阶段行数**不在此重述**：权威是 [prd 的模型字节账](prd.md#model-function-bytes)（生成自
-`research/model-bytes.json`）。此处曾写「32 个共享网络被 938 条阶段行引用」，而账本当时是
-24 与 1,088；模板、库源码、核与平台驱动另计，
+`research/model-bytes.json`）；模板、库源码、核与平台驱动另计，
 不能把引用数当网络物理份数，也不能把 CRC 当发行签名。
 
 旧候选 6MB/171 项、Q 编码/177 项与各平台自举、失败及性能记录均保留在
@@ -43,8 +42,7 @@
 
 prune 是生产路由中的一个构造网络阶段，位于 lowering 之前
 （`exec/pipeline/image-stages.tsv`：`prune  tape.text  tape.text  prune.net`；
-实现与检查在 `exec/prune/`）。此处曾写「由 cc-unisacc 负责、待实现，不在当前生产路由中」，
-与路由表和 `exec/prune/` 都不符。企业签名尚待最终发布验收：
+实现与检查在 `exec/prune/`）。企业签名尚待最终发布验收：
 此前macOS app/dmg携带c499载荷已完成公司签名、公证/staple及Gatekeeper资格验证；
 Windows Authenticode 单列验收。Mach-O ad-hoc 签名仅满足运行格式要求。
 

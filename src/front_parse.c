@@ -4488,7 +4488,7 @@ int initaggr(int isglobal, int gt, int off, int w, int sst, int nbytes) {
            string literal without its own braces (`struct p { char x[2]; } g
            = { "12" };`).  This used to fall through to the scalar path, which
            stored the literal's ADDRESS into x[0] (R17-8: cdx probes
-           tests/r17probes/structarg_*.c printed 57 0 / 63 0 instead of 49 50). */
+           archive/tests/r17probes/structarg_*.c printed 57 0 / 63 0 instead of 49 50). */
         if (cur() == T_STR && iswide(tp) == 0 && cxst[depth] >= 0) {
             int ms; int mi;
             mi = memberat(cxst[depth], i - cxbase[depth], &ms);

@@ -19,7 +19,7 @@
 | 宿主交互 | `.hostcall/.librarycall/.libraryaddr/.hostaddr/.sys/.sys6`：直接触达宿主 ABI 与系统调用（能力强、边界弱） | 只能通过导入；WASI 给出能力型的系统接口（预打开目录、权限由宿主决定） |
 | 语言前端 | C99（本仓）；第二前端是 R14-7 方向 | C/C++（clang/emscripten）、Rust、Go、Zig、AssemblyScript…… |
 | 工具链与生态 | 自有：编译器 + 运行时 + 门禁 + 包（v0.2.x）；单文件签名 `.com` | 成熟：多运行时、调试信息（DWARF）、组件注册表（warg）、浏览器原生 |
-| 逆向/保密 | 与 `.class`/wasm 同级（prd FX-1 第 4 条） | 同级 |
+| 逆向/保密 | 与 `.class`/wasm 同级（plans/ideas.md FX-1 第 4 条） | 同级 |
 
 ## 2　同与异的要点
 
@@ -44,7 +44,7 @@
 | 主题 | 条目 |
 |---|---|
 | tapebin v1 格式与门禁 | archive/plans/v0.0.14.md R14-7 落点 A |
-| 验证器（可达性、栈平衡、权限） | prd FX-1；v0.1.x 探索区 |
-| tape → wasm 第 7 目标 | prd FX-3；plans/v0.1.x.md v0.1.3 及以后 |
+| 验证器（可达性、栈平衡、权限） | plans/ideas.md FX-1；v0.1.x 探索区 |
+| tape → wasm 第 7 目标 | plans/ideas.md FX-3；plans/v0.1.x.md v0.1.3 及以后 |
 | 运行时安全模式、检查器 | plans/v0.1.x.md v0.1.3；research/paper-d-intent.md |
 | 包清单、权限、内容寻址 | plans/v0.1.x.md v0.2.x |

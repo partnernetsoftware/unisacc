@@ -62,8 +62,8 @@ processes, windows and each executable's own maps vary between runs.
 
 The five small programs (`args`, `mandel`, `sieve`, `ctour`, `xgui`) live here
 rather than in `examples/` for the same reason: suites that glob
-`examples/*.c` keep their inputs. No suite lists them yet. `args`, `mandel`,
-`sieve` and `ctour` are deterministic: with 0.0.12 their stdout equals host
+`examples/*.c` keep their inputs; `tests/comdemo.py` and `tests/libneed.sh` list them. `args`, `mandel`,
+`sieve` and `ctour` are deterministic: their stdout equals host
 `cc` byte for byte, and is the same on lnx/x86_64, osx/arm64 and osx/x86_64
 (Rosetta). `xgui` is platform-limited like `winlist`: on every target other
 than Linux x86-64 it prints `xgui: ... not available on this platform` to
@@ -78,23 +78,4 @@ DISPLAY=:0 ./unisacc.com -run examples/apps/xgui.c           # Linux x86-64, q/E
 ./unisacc.com -run examples/apps/xgui.c -- --once              # exit after the first draw
 ```
 
-The older six application checks below are historical evidence:
-
-Independent takeover check (2026-09-26): all six compile warning-free under
-host `cc -std=c99 -Wall -Wextra`. The Linux x86-64 compiler image produced by
-the six-delta source-to-ELF route runs every example with `-run`; each exits 0
-and its stdout equals host cc byte for byte. Execution was in the local Lima
-x86-64 VM, emulated on an arm64 host. The compiler image is the existing C
-compiler built through the new route, not an executor-based product switch.
-The VM was stopped afterwards. These examples are not yet fixed E3 keep items.
-
-Evidence provenance: product C source `7d50875`, delta generators/runtime
-`1775315`; `exec/pipeline/elf.sh` produced
-`/tmp/unisacc-self-route/final-pipeline/unisacc.elf` (671,404 B), SHA256
-`d8f7586e1d0250064c248cfbb1bfe8ad8dc8021abf6f9f6e86da5d50b58d1979`.
-In Lima `minicon-lnx-x86_64`, this image was named `n1`; each application ran
-as `timeout 10 ./n1 -run examples/apps/NAME.c`, with stdout compared to the
-host cc result. The same image rebuilt unisacc.c twice with
-`-O2 -b lnx/x86_64`; N1, N2 and N3 have that same hash. These runtime checks
-do not claim that the application sources themselves passed through all six
-deltas; they were compiled by the resulting C compiler.
+The older six-application evidence (0.0.12 era, a `/tmp` self-route hash) moved to [archive/docs/apps-history-0012.md](../../archive/docs/apps-history-0012.md).

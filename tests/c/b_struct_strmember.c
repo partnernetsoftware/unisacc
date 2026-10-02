@@ -1,6 +1,6 @@
 /* R17-8: a character-array MEMBER initialised by a bare string literal (C99 6.7.8p14),
    global, array-of-struct, local and designated.  The reference stored the
-   literal's ADDRESS into the first byte (cdx probes tests/r17probes/structarg_*.c). */
+   literal's ADDRESS into the first byte (cdx probes archive/tests/r17probes/structarg_*.c). */
 #include <stdio.h>
 struct a { char x[3]; int n; char y[4]; };
 struct a g = { "ab", 7, "xyz" };
