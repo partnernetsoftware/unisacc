@@ -185,7 +185,9 @@ def fingerprint(jobs):
             result[name] = stamp(identity)
         else:
             if global_inputs is None: global_inputs = {n:digest(n) for n in names}
-            identity = [common, jobs, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
+            # 0.0.23 E: the job's own command, not the whole job table -- adding or changing one
+            # `job` line no longer invalidates every undeclared result (inputs stay global)
+            identity = [common, command, settings, executables, global_inputs, {n:digest(n) for n in inputs}]
             if inventory: identity += [inventory, extra]
             if name.startswith(LOCATION_BOUND): identity.append(str(ROOT))
             result[name] = stamp(identity)
