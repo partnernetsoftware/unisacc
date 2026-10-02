@@ -80,9 +80,19 @@ def install(E, P, start, definitions):
     assert len(targets)==1
     target, acts = targets.pop()
     P('UM.init').o('.global __init_u\n__init_u:\n').a(*acts).goto(target)
+    # cc interop (reference -c -b without -funit): an undefined prototyped
+    # call becomes a __ccx_ thunk and an `extern` function defined here a
+    # __ccw_ entry.  E3 builds neither: such objects are refused by name.
+    bodykind = original('FN.bodykind')
+    P('FN.bodykind').branch({0:bodykind},'UM.cc.unit',[('RLD','um_object')])
+    P('UM.cc.unit').branch({0:'UM.cc.extern'},bodykind,[('RLD','um_unit')])
+    P('UM.cc.extern').branch({1:'UM.cc.export'},bodykind,[('CMPI','ld_decl',E.TK['type=extern'])])
+    P('UM.cc.export').branch({},('rej','not covered: cc interop export (an extern function in a -c -b object)'))
     # Undefined calls become declarations in source emission order.
     error = original('UD.error')
-    P('UD.error').branch({0:error},'UM.unresolved',[('RLD','um_unit')])
+    P('UD.error').branch({0:'UM.cc.call'},'UM.unresolved',[('RLD','um_unit')])
+    P('UM.cc.call').branch({0:error},'UM.cc.thunk',[('RLD','um_object')])
+    P('UM.cc.thunk').branch({},('rej','not covered: cc interop call (an undefined function in a -c -b object)'))
     P('UM.unresolved').a(('LDI','ud_one',1),('STX','ud_id',33<<40,'ud_one'),('ALUI','mul','um_extindex','um_extcount',2),('STX','um_extindex',DECL+1,'ud_start'),('ALUI','add','um_extindex','um_extindex',1),('STX','um_extindex',DECL+1,'ud_end'),('ALUI','add','um_extcount','um_extcount',1)).goto('UD.nextline')
     ok = original('UD.ok')
     P('UD.ok').branch({0:ok},'UM.externs',[('RLD','um_unit')])

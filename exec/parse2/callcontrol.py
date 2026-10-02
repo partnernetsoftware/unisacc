@@ -48,7 +48,13 @@ def install(E, P, warnings, templates, addr, facts, syscalls, fpu, phase, bindin
         install_rules(E.g,root,'varargs',bindings=b,section='aggregate')
         section('part10')
         for k,_ in enumerate(syscalls,1):
-            section('sysfind',find_entry='CL.b%d'%k,find_hit='CL.s%d'%k,find_next='CL.b%d'%(k+1),sys_register='sy%d'%k,sys_index=k)
+            section('sysfind',find_entry='CL.b%d'%k,find_hit='CL.s%d'%k,find_next='CL.b%d'%(k+1) if k<len(syscalls) else 'CL.sj0',sys_register='sy%d'%k,sys_index=k)
+        # setjmp/longjmp are reference intrinsics (jmp_buf r6/r7/resume label);
+        # E3 does not construct them yet, so a call by any of their names is
+        # refused by name instead of reaching the unresolved-call diagnostic.
+        for k in range(6):
+            P('CL.sj%d'%k).branch({1:'CL.sjrej'}, 'CL.sj%d'%(k+1) if k<5 else 'CL.b%d'%(len(syscalls)+1), [('CMP','v','sj%d'%k)])
+        P('CL.sjrej').branch({}, ('rej','not covered: setjmp/longjmp intrinsic'))
         section('part12')
         for k,(base,suffix) in enumerate(((b['DBL'],'d'),(b['FLT'],'s'))):
             sequences['text12']=E.O(formats['sqrt']%fpu[suffix+'sqrt'])
@@ -60,7 +66,7 @@ def install(E, P, warnings, templates, addr, facts, syscalls, fpu, phase, bindin
         for k,(_,opcode,width) in enumerate(syscalls,1):
             registers=', '.join('r%d'%i for i in range(width))
             if opcode == 'hostcall':
-                text = '  .hostcall r0, r1\n'
+                text = '  imm r2, 0\n  .hostcall r0, r1\n'  # the reference's sysargs zero-fills r0..r2
             elif opcode.startswith('hostaddr'):
                 text = '  .hostaddr r0, %s\n' % opcode[-1]
             else:
