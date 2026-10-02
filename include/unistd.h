@@ -267,9 +267,9 @@ static int dup2(int __u_old, int __u_new) {
 }
 #endif
 #endif
-/* Windows: pipe is CreatePipe (two HANDLEs, not inheritable).  dup/dup2 stay
-   refused by name there: DuplicateHandle takes seven arguments and the host
-   call carries six. */
+/* Windows: pipe is CreatePipe (two HANDLEs, not inheritable).  dup is
+   DuplicateHandle (below); dup2 stays refused by name there: a HANDLE cannot be
+   placed at a chosen number. */
 #if !__UNISA_FTRIM_LIBC || __UN_pipe
 static int pipe(int __u_fds[2]) {
 #ifdef _WIN32
@@ -326,10 +326,22 @@ static int fsync(int __u_fd) {
 #endif
 }
 #endif
-#ifndef _WIN32
 #if !__UNISA_FTRIM_LIBC || __UN_dup
-static int dup(int __u_fd) { return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup), __u_fd, 0, 0, 0, 0)); }
+static int dup(int __u_fd) {
+#ifdef _WIN32
+    /* 0.0.22 Windows POSIX batch 4: DuplicateHandle(self, h, self, &new, 0, FALSE,
+       DUPLICATE_SAME_ACCESS) -- seven arguments, carried by the ten-slot host call. */
+    static long __u_dh, __u_gp; long __u_a[10] = {0}; long __u_h, __u_self;
+    if (!__u_dh) { __u_dh = _ux_sym("DuplicateHandle"); __u_gp = _ux_sym("GetCurrentProcess"); }
+    __u_self = _ux_call(__u_gp, 0, 0, 0, 0); __u_h = 0;
+    __u_a[0] = __u_self; __u_a[1] = (long)__u_fd; __u_a[2] = __u_self; __u_a[3] = (long)&__u_h;
+    __u_a[4] = 0; __u_a[5] = 0; __u_a[6] = 2;
+    if (!(__hostcall(__u_dh, __u_a) & 0xFFFFFFFFL)) return _ux_fail();
+    return (int)__u_h;
+#else
+    return (int)_unisa_ret(__syscall6(_UNISA_SC(_UNISA_NR_dup), __u_fd, 0, 0, 0, 0));
 #endif
+}
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_rmdir
 static int rmdir(const char *__u_p) {

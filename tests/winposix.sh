@@ -1,5 +1,5 @@
 #!/bin/bash
-# winposix.sh -- 0.0.21 Windows POSIX layer (batches 1-3): tests/hosthdr/winposix.c, winposix2.c, winposix3.c
+# winposix.sh -- Windows POSIX layer (0.0.21 batches 1-3, 0.0.22 batch 4): tests/hosthdr/winposix*.c
 # compiled by unisacc for win/arm64 and win/x86_64, run in the UTM Windows VM
 # (tests/winrun.sh), against the same probe built with the system cc and run
 # here.  Skips (exit 0, named; STRICT=1 makes it a failure) when the VM agent
@@ -12,7 +12,7 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 UTM=/Applications/UTM.app/Contents/MacOS/utmctl
 if [ -z "$("$UTM" ip-address "${WINVM:-minicon-win-arm-64}" 2>/dev/null | head -1)" ]; then
     echo "winposix  skipped (Windows VM not answering)"; [ "${STRICT:-0}" != 1 ]; exit; fi
-ok=0; bad=0; exes=""; PS="tests/hosthdr/winposix.c tests/hosthdr/winposix2.c tests/hosthdr/winposix3.c"
+ok=0; bad=0; exes=""; PS="tests/hosthdr/winposix.c tests/hosthdr/winposix2.c tests/hosthdr/winposix3.c tests/hosthdr/winposix4.c"
 mkdir -p "$T/c"; k=0
 for P in $PS; do                      # compile everything, then one guest round trip
     k=$((k+1))
