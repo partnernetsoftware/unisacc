@@ -60,6 +60,17 @@
   templates reject/trie/union16 and ordered header/write (fresh P:OL.recipeheader / P:OL.recipewrite / P:NC.fresh);
   then parse, pp, lex, primitives -> exec/build/, rebase onto origin/main, full graphhash + gates.
 
+- 6fc17964 nativeabi done: exec/nativeabi/gen-manifest.tsv (`#! start NC.START`, build/gen.py reads it), gen.py and
+  ordered.py deleted, facts/nativeabi from export.py nativeabi() (the trie choice order is the PYTHONHASHSEED=0 set
+  order of the old code, recorded by a seeded child process), assemble opts `seqfact` (fact {name: acts} merged into
+  sequences). Byte-equal; graphhash --only nativeabi 0 bad. Callers: tests/model*native*check.py, compilerpack,
+  buildcompiler, seedconstructmatrix, graphhash.
+- exec/pipeline/models.py closure skipped all of exec/build (cache) -> exec/build/gen.py was not in the model cache
+  key; now only exec/build subdirectories are skipped. NOTE exec/build is .gitignored: new files there need `add -f`
+  (prefer un-ignoring files directly in exec/build before moving primitives there).
+- Gates after round 3: decision-ledger, finite-template, exec-lower ok. Rebased: origin/main had nothing new at 16:37.
+- Next: parse (P class/tokenizer -> generic module), pp, lex; then full graphhash + exec-lexloc/exec-pploc/exec-chain.
+
 ## Gotchas
 - gate.sh needs UNISACC_FFI_X86_PROVIDER set even for unrelated suites (any value works for these).
 - Worktree guard rejects commands that call a shell variable as the command (`$S ...`); write the
