@@ -123,6 +123,7 @@ def install(E, byte, OFF, LABD, arch="x86_64", direct_labels=False, image_format
         from exec.facts.load import facts as _f
         SYM, PRESENT = (next(r['value'] for r in _f('enc-armlayout-bindings') if r['name'] == k) for k in ('SYM', 'PRESENT'))
     else:
-        from address import SYM, PRESENT
+        from exec.facts.load import facts as _f
+        SYM, PRESENT = (next(r['value'] for r in _f('enc-address-bindings') if r['name'] == k) for k in ('SYM', 'PRESENT'))
     assemble.run(Path(__file__).with_name('librarysymbols-manifest.tsv'), E, P, dict(direct_labels=direct_labels),
                  dict(OFF=OFF, LABD=LABD, SYM=SYM, PRESENT=PRESENT))

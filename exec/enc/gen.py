@@ -43,7 +43,6 @@ g, P, EOF = E.g, E.P, 256
 sys.path.insert(0, os.path.join(HERE, "..", ".."))
 from unisa.catalog import ENCSPEC   # noqa: E402  (generation time only)
 from unisa.emit_x86 import NUM      # noqa: E402
-from address import install as install_address
 from exec.facts.load import facts as _facts  # noqa: E402
 META_KEYS = tuple(_facts("enc-tins-meta"))
 from fp import FP_IDS, install as install_fp  # local delta generator, not an encoder oracle
@@ -225,7 +224,8 @@ def build(image=False, object_mode=False):
     emit_rules('division')
     emit_rules('post')
     install_fp(E, byte)
-    install_address(E, byte, KND, SZ, OFF, LABD)
+    import assemble
+    assemble.run(os.path.join(HERE, 'address-manifest.tsv'), E, P, {}, dict(KND=KND, SZ=SZ, OFF=OFF, LABD=LABD))
     from hostbridge import install as install_hostbridge
     install_hostbridge(E,'x86_64')
     import assemble
@@ -242,7 +242,7 @@ def build(image=False, object_mode=False):
     install_rules(g, HERE, 'x86-emit', section='done-image' if image else 'done-raw', bindings=completion)
     if object_mode:
         assert image == 'elf'
-        from address import SYM, PRESENT
+        SYM, PRESENT = (_facts('enc-address-bindings')[[r['name'] for r in _facts('enc-address-bindings')].index(k)]['value'] for k in ('SYM', 'PRESENT'))
         import assemble
         assemble.run(os.path.join(HERE, 'objectplan-manifest.tsv'), E, E.P, dict(direct_labels=False),
                      dict(OFF=OFF, LABD=LABD, SYM=SYM, PRESENT=PRESENT, arch='x86_64'))
