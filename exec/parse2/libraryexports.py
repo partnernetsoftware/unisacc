@@ -96,8 +96,8 @@ def install(E,P,b,start,integers):
     section('argument')
     template('argumentcopy')
     section('call')
-    from libraryvariadic import install as variadic_install
-    variadic_install(E,P,b,integers)
+    import assemble
+    assemble.run(root/'libraryvariadic-manifest.tsv',E,P,{})
     from librarycallables import install as callable_install
     callable_start=callable_install(E,P,b,imports_start)
     module_start=module_install(E,P,callable_start)

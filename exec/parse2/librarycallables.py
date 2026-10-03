@@ -14,7 +14,7 @@ def install(E,P,b,start):
  import assemble
  u64=lambda E,l,k,r,p,f:assemble.run(assemble.FACTS.parent/'modelinput-manifest.tsv',E,E.P,{},dict(entry=l,key=[('SBOUT',c) for c in k],result=r,present=p,fail=f))  # modelinput-manifest.tsv
  from libraryimports import BYNAME,ADDRESS,FORMAT,SUPPORTED,TYPEDSIG,PLAN
- from libraryvariadic import REQUESTS
+ REQUESTS=assemble.load_facts('libraryvariadic')['REQUESTS']  # exec/facts/libraryvariadic.tsv
  from unresolved import DEFINED
  from libraryexports import VARIADIC
  import sys
