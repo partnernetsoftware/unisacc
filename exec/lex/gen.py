@@ -355,11 +355,14 @@ sys.path.insert(0, os.path.join(ROOT, "exec"))
 from finite_rules import load as load_byte_rules
 
 
-def install_rules(filename, mode, domain, sequences=None, classes=None):
+def install_rules(filename, mode, domain, sequences=None, classes=None, skip=(), in_domain_order=False):
     rows = load_byte_rules(Path(HERE) / filename, sequences or {}, domain, classes)
     for state, row in rows.items():
+        if state in skip:
+            continue
         out = D.state(state, mode)
-        for observation, (target, actions) in row.items():
+        for observation in (domain if in_domain_order else row):
+            target, actions = row[observation]
             out[observation] = target, D.seq(actions)
 
 
@@ -372,11 +375,8 @@ def num_start(c):
 
 
 def build_num():
-    for state, row in NUMBER.items():
-        if state != "NSTART":  # entry action is inlined by dispatch
-            for byte in ALLB:
-                target, actions = row[byte]
-                D.put(state, byte, target, actions)
+    # entry action is inlined by dispatch, so NSTART is not installed
+    install_rules("number.tsv", "b", ALLB, {"number": emit_kind(KNUM)}, skip=("NSTART",), in_domain_order=True)
 
 
 # ---- literal/comment transitions share the finite rule loader -----------------
