@@ -29,11 +29,12 @@ def install(E, P, bindings, integers):
         for part, key, kind, prefix in fresh:
             if part == name: bindings[key] = E.P.fresh(_Scope(prefix), kind)
         install_rules(E.g, root, 'functiontypes', bindings=bindings, sequences=sequences, section=name)
-    E.g.st.pop('FS.query')
+    from finite_rules import install_template
+    def edit(name, **facts): install_template(E.g, root, 'functiontypes', facts, None, section=name)
+    edit('drop_query')
     section('s1')
     def rankhook(state, part):
-        old='FS.rank.original.'+state;E.g.st[old]=E.g.st.pop(state);E.g.labels.add(old)
-        alias='FS.rank.hook.'+state;section(part+'h');E.g.st[state]=E.g.st[alias]
+        edit('hook_original', state=[state]); section(part+'h'); edit('hook_alias', state=[state])
         section(part)
     rankhook('FS.eq.field2.test', 's2')
     rankhook('FS.eq.param.base', 's3')
