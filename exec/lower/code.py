@@ -42,12 +42,8 @@ def install(E, arch="x86_64", os_="lnx"):
                  dict(arch=arch, ids=ids, idmap={'id:'+n: v for n, v in ids.items()}, scratch=scratch,
                       form_load64=enc['load64'], form_callr=enc['callr'],
                       **{'reloc_'+k: v for k, v in reloc.items()}, **{'reg_'+k: v for k, v in regmap.items()}))
-    # Wrapper around init, for the eight numeric spellings and syscall ids.
-    p=P('C.prelude')
-    for i in range(8):p.a(('SBCLR',),('SBOUT',48+i),('SBINTERN','inum'+str(i)))
-    for op in dict.fromkeys([*abi, 'exit_group']):p.a(('SBCLR',),[('SBOUT',c) for c in op.encode()],('SBINTERN','sysid_'+op))
     assemble.run(Path(__file__).parent/'codeprep-manifest.tsv', E, P, {},
-                 dict(prelude_init=p.acts, idmap={'id:'+n: v for n, v in ids.items()}, **{'reg_'+k: v for k, v in regmap.items()}))
+                 dict(target=target, idmap={'id:'+n: v for n, v in ids.items()}, **{'reg_'+k: v for k, v in regmap.items()}))
     # Finite source layouts are declarations; ABI register facts stay in current rows.
     source_rows = [line.split('\t') for line in
                    Path(__file__).with_name('code-abi-sources.tsv').read_text().splitlines()

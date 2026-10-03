@@ -93,10 +93,36 @@ def lowerarmfuse():
     return out
 
 
+
+def lowerabi():
+    """Lower syscall ABI per os/arch (domain data, no labels): gold abi rows (sysno, argument
+    registers, return register, gate, number register, argument shape, return convention,
+    Windows import), encoding form, Windows API name, and whether the target lowers the op
+    (native syscall number, or a Windows API with an import)."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from unisa.catalog import WINAPI
+    out = ["@abiops\ttarget:str\top:str",
+           ]
+    rows = ["@abi\ttarget:str\top:str\tsysno:str\targs:json\tret:str\tgate:str\tnrreg:str\targshape:str\tretconv:str\twinimp:str\twinapi:str\tform:str\tselected:int"]
+    for os_ in ("lnx", "osx", "win"):
+        for arch in ("x86_64", "arm64"):
+            t = os_ + "/" + arch
+            abi = {r[0]: r[3:] for r in _gold("abi") if r[1:3] == [os_, arch]}
+            enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
+            out += ["\t%s\t%s" % (t, _esc(o)) for o in dict.fromkeys([*abi, "exit_group"])]
+            for o, f in abi.items():
+                sel = f[0] != "none" or (os_ == "win" and WINAPI.get(o) is not None and f[12] != "none")
+                rows.append("\t" + "\t".join([t, _esc(o), f[0], json.dumps(f[1:7]), f[7], f[8], f[9], f[10], f[11], f[12],
+                                                 "none" if WINAPI.get(o) is None else WINAPI[o], enc.get(o, ""), str(int(sel))]))
+    return out + rows
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
+    ("lower-abi", ["unisa/catalog.py", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
 ]
 
