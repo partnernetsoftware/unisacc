@@ -1,76 +1,42 @@
-# K2 round 3 slice B (enc + entry drivers) — handoff
+# K2 enc slice (block 4) — handoff (current as of 2026-10-03 17:25, commit after 554a0b5d)
 
-## Done (round 1, graphhash `--only exec/enc` 10/10 identical after each)
-- tools moved to tests/enc: ref.py, pereal.py, tins.py (TIns text). tins META -> fact enc-tins-meta;
-  check importers insert tests/enc into sys.path (one line before `from tins import`).
-- memorylayout.py -> memorylayout-manifest.tsv (env in: fail, code_size; foreach+chain over
-  enc-memorylayout-resources / -dl / -imports; u64 = rows ../modelinput u64; key/pending via mapseq).
-- armlayout.py -> armlayout-manifest.tsv (bindmap enc-armlayout-bindings!, freshrows over enc-armlayout-names,
-  accumulate; call memorylayout). init inlined in arm.py START; SYM/PRESENT read from facts.
-- address.py -> address-manifest.tsv (one row per former instance; layouts split to enc-address-layout-<tag>).
-- fp.py -> fp-manifest.tsv (foreach ops as op, nested foreach op.regs as r; FP_IDS from enc-fp-ops).
+## Rules (from coordinator / exec/k2-boundary.md)
+- Manifests use only ops rows/table/template/call/foreach(<=2)/holder/label/assert-absent/let (+ bind/seq/mapseq/result/export).
+  No `py` op, no `state:` / live-graph reads, no callbacks.
+- P4: facts are domain data only (fields, widths, constants, names). No state labels or action lists in facts. Facts come
+  from exec/facts/export.py producers (or hand header-form tables with a `# source:` line). After editing export.py run
+  `python3 exec/facts/export.py` (every table's input sha changes) and commit the re-rendered tables.
+- Verify after each file: `GRAPHHASH_JOBS=1 SLOT python3 tests/graphhash.py --only exec/enc` must say 10 entries, 0 bad.
+  SLOT = /private/tmp/claude-501/-Users-wjc-repos-unisacc/a4100558-c3da-4eaf-85bb-27b1ebf587d1/scratchpad/slot.sh
+- Gates (SLOT ./tests/gate.sh --suite ...; batches of <=60 s): finite-template, decision-ledger, exec-arm (25 s),
+  exec-elf, exec-pex86, exec-machx86, exec-armwin. decision-ledger counts `.rows/.st/.seqs... .append(...)` in any exec/*.py
+  as a graph edit: avoid those attribute names in export.py helpers.
+- Commit per file with pathspec; no push; temp files only inside the worktree (scratch generators in .k2enc/, not committed).
 
-## Done (round 2)
-- x86win.py -> x86win-manifest.tsv (foreach over enc-x86win-{regs,stdh,arity,metarows,oprows,rcs}; section chaining via
-  opts export {"wx_prev": last fresh}; init/reset inlined in gen.py START).
-- hostbridge.py -> hostbridge-manifest.tsv (flag arm64; guard chain = facts enc-hostbridge-guards-<arch>; guard template
-  test label now {fresh:t:b} with fresh column P:EMIT / P:HB chosen by `when fact:own_X`).
-- gates after round 2 (each one slot.sh call, UNISACC_FFI_X86_PROVIDER=unused needed by gate.sh): finite-template,
-  decision-ledger, exec-arm, exec-elf, exec-pex86, exec-machx86, exec-armwin all rc=0 (arm/elf/machx86/armwin ran
-  before the hostbridge change; finite-template, decision-ledger, pex86 re-ran after).
+## Done (all graphhash-identical, py deleted)
+- tools moved to tests/enc: ref.py, pereal.py, tins.py (META -> fact enc-tins-meta).
+- memorylayout, armlayout, address, fp, x86win, hostbridge -> *-manifest.tsv (+ facts enc-*).
+- pedelta, machodelta, elfimage -> *-manifest.tsv + *-template.tsv with field-schema facts enc-pe / enc-macho / enc-elf
+  (export.py producers pefields / machofields / elffields; helper _fieldchain/_rows).
+  Pattern: fact table rows (i, width, src const|reg, value, endian, lead = names of preceding items: byteN or a
+  computation name). Manifest mapseq builds byte{v}, computation sequences (actions with $CONST cells), and per-field
+  lead{i} = splice(lead) + field load (where src). Template block: `fresh START ret`, loop rule
+  `{prev:ret} * WRITER [["@","lead{f.i}"],["PUSH","{fresh@row:ret:r}"]]`, then end rules; extra labels used by later rules
+  are allocated in the original order with `fresh {fresh:lN:k} -` rows. Template vars come only from each/over scope,
+  so lists go in through opts let `@ref:...`; template $NAME cells resolve through the row's bind.
+- exec/assemble.py: approved generic block "enc field chains" (mapseq key with {col}: {"over", "parts": [{"splice"} |
+  {"where", "acts"}]}).
+- 7 gates green after machodelta (0b1859b6) and after elfimage (554a0b5d).
 
 ## Remaining
-- elfimage.py (calls pedelta/machodelta installs), machodelta.py, pedelta.py.
-- header-form facts gotcha: a first data row starting with TAB (empty first cell) is read as the old =/@ format.
-- entries gen.py, arm.py -> exec/enc/gen-manifest.tsv, arm-manifest.tsv run by exec/build/gen.py; switch
-  tests/graphhash.py keys, exec/pipeline/prepare.sh, exec/c/*, check scripts (pecheck.sh uses `exec/enc/$encoder`).
-- gates at end (one per slot.sh): finite-template, decision-ledger, exec-arm, exec-elf, exec-pex86, exec-machx86, exec-armwin.
-
-## Patterns that worked
-- byte(p,v) callback == [["LDI","ob",v],["OUTW","ob"]]: build via mapseq (literal or "$name" from bind).
-- a fresh whose owner is another fresh: `.let bind x=fresh:P:{entry}:r` then `fresh:P:{x}:b` in the next row.
-- names TSVs (section/name/owner/kind) -> exec/facts table + opts freshrows where {"section": ...}.
-- python generators for manifests were scratch (.k2enc/, uncommitted).
-
-## Round 3 (rebased: already on origin/main 9ecfe45e)
-- all 7 gates re-run after the last change (hostbridge 48ed2aa8): rc=0.
-- not converted: pedelta/machodelta/elfimage. They are field-emission chains: P.call(proc) = goto proc with the
-  pending acts + PUSH of a fresh ret label (P counter, owner prefix PE/MH), literal bytes are LDI ob/OUTW ob appended
-  to the pending acts. Plan: field schema as facts (rows: kind field|literal, width, value int|register name, big),
-  one template block per chain: `rule {prev:cur} * {fresh:ret:r}`-style per field row with the literal bytes folded
-  into the row's actions; first state = section entry, last label exported (result) for the following install
-  (header-end/imports-end/signature-end take state + pending). Verify fresh order against the P counter by graphhash.
-  load_rules(...)['actions'][0][1] uses (entry-value, directory-values, reloc-align, import-values, name-value,
-  signature-length) become literal act facts with bindings resolved via mapseq "$name".
-- then gen.py/arm.py entries -> manifests (touch only enc lines in shared caller scripts).
-
-## Round 4 (rebased on origin/main)
-- pedelta.py -> pedelta-manifest.tsv + pedelta-template.tsv: field chains recorded into facts
-  enc-pedelta-{header,imports}-<arch> (proc, pre = JSON text of the actions before the call); template block
-  `each tl` (one-element list holding the tail text, since template vars come only from each/over scope):
-  fresh row seeds prev:ret (literal or $entry via bindings), loop rule `{prev:ret} * {f.proc} {f.pre}["PUSH","{fresh@row:ret:r}"]]`,
-  then the old header-end/imports-end rules as `-` rows. pedelta-result.tsv sections entry-value/directory-values/
-  reloc-align/import-values/name-value/header-end/imports-end are now read only by the scratch generator (can be pruned).
-- next: machodelta (same pattern; its field() calls MB.big/MB.little, p.call(ret=label5) once), elfimage
-  (iat/dlslots chains + header field chain), then entries.
-
-## P4 rework of pedelta (coordinator 2026-10-03): open
-- current enc-pedelta-{header,imports}-<arch> rows hold proc labels + action-list text: recorded transitions, violates P4.
-- target: facts = domain fields from unisa.image.pe via exec/facts/export.py: per field (name, width, endian kind,
-  value const|register), literal byte runs (hex) and named computations (entry-value, directory-values, reloc-align,
-  import-values, name-value(offset)) as separate items; template maps kind -> writer proc (EI.bytes / MB.little / MB.big).
-- blocker: one graph transition = all literal bytes + computations since the previous field + that field. A template
-  loop cannot concatenate a variable number of items into one action list; one rule per item changes the graph
-  (graphhash red). Needs either (a) a generic assemble opt: mapseq part with a formatted key per element
-  (e.g. "lead_{i}" over a field list, acts built from the item's hex bytes and from named result-tsv sections), with the
-  template splicing ["@","lead_{f.i}"]; or (b) accepting extra states (graph changes, new hashes). Decision: (a).
-
-## Round 5: P4 rework done for pedelta (f2a54b75)
-- facts exec/facts/enc-pe.tsv written by exec/facts/export.py `pefields` (from unisa.image.pe): constants, tables
-  header_<arch>/imports (i, width, src const|reg, value, endian, lead = item names byteN / entry-value / name-valueN),
-  *_tail, bytes, names. No labels or action lists in facts.
-- exec/assemble.py block "enc field chains": mapseq key with {col} + {"over", "parts": [{"splice": COL} | {"where", "acts"}]}.
-- machodelta plan: same; writer MB.{endian}; copy section rows move into the template with $labelN -> {fresh:lN:k},
-  allocation order forced by `fresh {fresh:lN:k} -` rows (owner MH); p.call('MH.pad', ret=label5) -> rule to MH.pad
-  pushing {fresh:l5:r}; signature chain starts at {fresh:l6:r} (big-endian); signature-length becomes a mapseq computation.
-- editing exec/facts/export.py changes the input sha of every table: rerun `python3 exec/facts/export.py`.
+1. Entries: exec/enc/gen.py and exec/enc/arm.py still Python. Convert to exec/enc/gen-manifest.tsv / arm-manifest.tsv run
+   by exec/build/gen.py (see exec/lower/gen-manifest.tsv: `#! base`, `#! flags`, let rows). Flags: elf macho pe object.
+   gen.py pieces: START symbol interning (classes/ops/META/x86win keys), procs(), emit_rules pre/division/post,
+   x86-shell dispatch (install_rows per class), relax(), done-write/done-image/done-raw; arm.py: specs, contract
+   (armcontract sections put/check/signed/finish loops), armbase, manifests. START interning loops become foreach over
+   fact tables (ops, META, keys); check loops over specs become foreach over a spec fact table (shape string -> rows).
+2. Switch callers (enc lines only; R3-C edits the same scripts for other stages): tests/graphhash.py keys
+   ('exec/enc/gen.py', 'exec/enc/arm.py' -> 'exec/build/gen.py enc' / 'exec/build/gen.py arm'?), exec/pipeline/prepare.sh,
+   exec/c/*, exec/enc/*check.sh (pecheck.sh uses `exec/enc/$encoder`), tests/gate.sh rows.
+3. Re-run 7 gates after each change.
+4. Optional cleanup: remaining *-result.tsv sections no longer read; .k2enc/ scratch can be deleted.
