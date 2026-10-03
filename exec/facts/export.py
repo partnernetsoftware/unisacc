@@ -36,9 +36,41 @@ def structreturnexpr():
             "\tLI.original.structreturn\t%d\t%s" % (E.LOC, _esc(reason))]
 
 
+
+def _gold(name):
+    lines = (ROOT / "weights" / "gold" / (name + ".tsv")).read_text().splitlines()
+    return [x.split("\t") for x in lines if x and not x.startswith("#") and "=>" not in x]
+
+
+def lowercode():
+    """Lower code-route target facts: tape-word interning per os/arch (TAPE SHAPE words,
+    tape registers, fixed spellings), the machine register / encoding form each word
+    carries, and the side-table key bases (was exec/lower/code.py)."""
+    import json
+    sys.path.insert(0, str(ROOT))
+    from unisa.tape import SHAPE
+    out = ["=%s\tint\t%d" % (n, (105 + i) << 40)
+           for i, n in enumerate(("OP", "KIND", "AC", "ARG", "TXT", "REG", "FORM", "ARGREG"))]
+    words = list(dict.fromkeys(list(SHAPE) + ["r" + str(i) for i in range(8)] + [
+        "0", "1", "2", "3", "4", "8", "-8", "_start:", "write", "exit",
+        ".hostcall", ".hostaddr", ".librarycall", ".libraryaddr"]))
+    out.append("@words\ttarget:str\ti:int\tword:str\trslots:json\treg:json\tform:json")
+    for os_ in ("lnx", "osx", "win"):
+        for arch in ("x86_64", "arm64"):
+            regmap = {r[0]: r[2] for r in _gold("regmap") if r[1] == arch}
+            enc = {r[0]: r[3] for r in _gold("enc") if r[1:3] == [os_, arch]}
+            for i, w in enumerate(words):
+                out.append("\t%s/%s\t%d\t%s\t%s\t%s\t%s" % (
+                    os_, arch, i, _esc(w), json.dumps([j for j, k in enumerate(SHAPE.get(w, ())) if k == "r"]),
+                    json.dumps([regmap[w]] if w in regmap else []),
+                    json.dumps([" form=" + enc[w]] if w in enc else [])))
+    return out
+
+
 # (fact stem, inputs whose sha prefixes head the file, producer)
 TABLES = [
     ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
+    ("lower-code", ["unisa/tape.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowercode),
 ]
 
 

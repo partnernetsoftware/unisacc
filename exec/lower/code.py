@@ -27,25 +27,11 @@ def install(E, arch="x86_64", os_="lnx"):
     abi={r[0]:r[3:] for r in rows('abi') if r[1:3]==[os_,arch]}
     reloc={r[0]:r[2] for r in rows('reloc') if r[1]==arch}
     # C.init runs with the code blob active; headers have already been output.
-    p=P('C.init')
-    words=list(dict.fromkeys(list(SHAPE)+['r'+str(i) for i in range(8)]+['0','1','2','3','4','8','-8','_start:','write','exit','.hostcall','.hostaddr','.librarycall','.libraryaddr']))
-    ids={w:'idc'+str(i) for i,w in enumerate(words)}
-    for w,d in ids.items():
-        p.a(('SBCLR',),[('SBOUT',c) for c in w.encode()],('SBINTERN',d),('SBSAVE','blob'),('STX',d,TXT,'blob'))
-        if w in SHAPE:
-            for j, kind in enumerate(SHAPE[w]):
-                if kind == 'r':
-                    p.a(('ALUI','mul','argshapeidx',d,8),
-                        ('ALUI','add','argshapeidx','argshapeidx',j),
-                        ('LDI','argshape_reg',1),
-                        ('STX','argshapeidx',ARGREG,'argshape_reg'))
-        if w in regmap:
-            p.a(('SBCLR',),[('SBOUT',c) for c in regmap[w].encode()],('SBSAVE','blob'),('STX',d,REG,'blob'))
-        if w in enc:
-            p.a(('SBCLR',),[('SBOUT',c) for c in (' form='+enc[w]).encode()],('SBSAVE','blob'),('STX',d,FORM,'blob'))
+    import assemble
+    target = os_ + '/' + arch
+    ids = {r['word']: 'idc' + str(r['i']) for r in assemble.load_facts('lower-code')['words'] if r['target'] == target}
+    assemble.run(Path(__file__).parent/'codeinit-manifest.tsv', E, P, {}, dict(target=target))
     from finite_rules import install as install_rules
-    install_rules(g, Path(__file__).parent, 'code-shell',
-                  sequences={'data': p.acts}, section='init')
     # Complete token/buffer traversal group; setup and dynamic dispatch follow below.
     scan_labels = (('C', 'r'), ('C', 'b'), ('C', 'b'), ('C', 'b'),
                    ('C', 'b'), ('C', 'r'), ('C', 'b'), ('C', 'b'),

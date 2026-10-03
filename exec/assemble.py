@@ -353,7 +353,8 @@ def _fresh_table(self, stem, o):
 def _mapseq(self, spec, facts, bd):
     # a part without "over" emits its acts once; an act {"over": FIELD, "as": NAME,
     # "acts": [...]} repeats per element of the current element's FIELD (depth 2);
-    # an act ["@bytes", TEXT] is one SBOUT per byte of the formatted TEXT.
+    # an act ["@bytes", TEXT] is one SBOUT per byte of the formatted TEXT;
+    # a part's "where" {col: FMT} keeps elements whose col equals FMT over the row facts.
     def cell(c, x):
         m = re.fullmatch(r"\{(\w+)\}", c) if isinstance(c, str) else None
         if m:
@@ -378,6 +379,8 @@ def _mapseq(self, spec, facts, bd):
         acts = []
         for part in parts:
             for x in (_path(facts, part["over"]) if "over" in part else [{}]):
+                if any(str(x[c]) != _fmt(v, facts) for c, v in part.get("where", {}).items()):
+                    continue
                 for a in part["acts"]:
                     emit(acts, a, x)
         out[name] = acts
