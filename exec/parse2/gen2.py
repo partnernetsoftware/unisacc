@@ -622,8 +622,12 @@ def build(locations=False, warnings=False, errors=False):
     const_install(E, P, LEVELS, OPS, ENV, END_)
     from statics import install as static_install
     static_install(E, P, TIX, SINIT, SIEND, LOC, SKIPS, BOOL)
-    from initializers import install as init_install
-    init_install(E, P, SBB, LOC, DIM, SSZ, SMN, SMEM, MOF, MSZ, MPT, MBS, MAR, SFLAT, MFLAT, MEMBER_STRIDE, SKIPS, dict(BFW=BFW, BFO=BFO, BFS=BFS, SHAPE=SHAPE, SHAPE_IDS=SHAPE_IDS))
+    import assemble
+    assemble.run(Path(__file__).parent / "initializers-manifest.tsv", E, P, {}, dict(
+        SBB=SBB, LOC=LOC, SSZ=SSZ, SMN=SMN, SMEM=SMEM, MOF=MOF, MPT=MPT, MBS=MBS, MAR=MAR,
+        SFLAT=SFLAT, MFLAT=MFLAT, MEMBER_STRIDE=MEMBER_STRIDE, SKIPS=SKIPS, UCHAR=E.UNS + 1,
+        BFW=BFW, BFO=BFO, BFS=BFS, SHAPE=SHAPE, SHAPE_IDS=SHAPE_IDS, MSZ=MSZ,
+        PTR=E.PTR, BASE=E.BASE, ARR=E.ARR, DIM=DIM, DIM1=DIM + 1, DIM2=DIM + 2))
     strwalk("IC.string", "IC.string_byte", "IC.string_end")
     structured_control("ordinary-staticauto", False)
     # ---- declared data 3: the grammar, compiled to procedures ---------------------------

@@ -192,7 +192,8 @@ class Run:
         if v.startswith("@seqmap:"):
             return self.seqmap(*v[8:].rsplit(":", 1), facts=facts)
         if v.startswith("@acts:"):
-            return [tuple(a) for a in _path(facts, v[6:])]
+            t = lambda x: tuple(map(t, x)) if isinstance(x, list) else x
+            return [t(a) for a in _path(facts, v[6:])]
         if v.startswith("@stack:"):
             h, m, slots = v[7:].split(":", 2)
             h = self.holders[h]
@@ -203,6 +204,8 @@ class Run:
             return self.env[d][k]
         if v.startswith("$"):
             return self.env[v[1:]]
+        if v.startswith("@textf:"):
+            return self.E.O(_path(facts, v[7:]))
         if v.startswith("@text:"):
             return self.E.O(json.loads(v[6:]))
         if v.startswith("fresh:"):
