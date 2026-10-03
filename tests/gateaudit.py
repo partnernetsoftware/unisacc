@@ -41,6 +41,7 @@ def main(names):
         command, files, trees = declared(name)
         mc = os.environ.get('MODEL_COM') or './unisacc.com'
         command = [mc if a == '{MODEL_COM}' else a for a in command]
+        if command and '=' in command[0].split('/')[0]: command = ['env'] + command   # NAME=value prefixes (gate.sh job lines)
         files = files | {'unisacc.com', 'unisacc.com.build.json'} if mc == './unisacc.com' else files
         with tempfile.NamedTemporaryFile('w', suffix='.sb', delete=False) as f:
             f.write(profile(files, trees)); sb = f.name
