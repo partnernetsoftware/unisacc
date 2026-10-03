@@ -410,3 +410,19 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   with a plain segment gate, never another block gate); every exit zeroes the caller's gate (bind seg_BLOCK=zero,
   seg_X=one on each recursive row) because call inherits the parent env. Blocks now: early, statics, ladders.
   tytail() def removed. sha SAME default/--errors/--warnings --errors.
+  Blocks body1 (ns-local-local0/2, ns-function-function9, ns-local-local4/6/8, ret0, if-loops, ret-expr, ret-qt0,
+  ret-qt, upd-id/compound/type/modes/var) and body2 (ord-string, sizeof0-3, ord-dispatch, address, ord-deref/id/
+  update/value/down, upd-prefix, ord-array); gen2.py calls segment("body1"/"body2", warnings). Segments that ran
+  without warnings get opts {"flags":{"warnings":false}} on their recursive row (existing opts key). sha SAME x3.
+  ROUND 32 END STATE (full): branch worktree-agent-aaa06feb4c0200862, commits since origin/main: layoutprovenance
+  manifest; librarymodule lm_mainnext/lm_mainreject; shape/update/strwalk/strings call rows; types/ladder blocks;
+  blocks early/statics/ladders/body1/body2. gen2.py build() still holds, in order: tokens + early; constexpr.install
+  (cdx); statics; startup-run + lm glue (c); global0..5 with global-results glue (c); function0..8 +
+  parameter-declarators; scope part1 -> sb -> dispatch-block -> scope part2 (extra=sb: fold as a block row with
+  result + $$ binding); body1; ladders; body2; membercontrol.install (cdx, passes shape_control); star, upd-lookup;
+  callcontrol-begin (fpcont glue, c) / truth-conversions (fpu from irsel gold -> facts) / callcontrol-finish (cb);
+  offsetof; locations/warnings/errors manifests (Python constants from tokenlocations: cdx); libraryexports (cdx,
+  blocked on its manifest); layoutfacts, valueranks, layoutprovenance, parenfold, unitmode, objectdefinitions, ...
+  Next: block for function0..8 + parameter-declarators (no glue); star+upd-lookup block; then scope round trip;
+  then (c)+(d) together (top-level env = E.results via exec/build/gen.py parse2). Tools: .k2tmp/chk.sh (export +
+  default + --warnings --errors to .k2tmp/m0/m1.json), plus --errors to m2.json; want 32fb8e3c/3a7edf34/7ea0e979.

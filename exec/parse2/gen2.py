@@ -336,42 +336,9 @@ def build(locations=False, warnings=False, errors=False):
     segment("dispatch-block", warnings)
     assemble.run(Path(__file__).parent / 'scope-manifest.tsv', E, P, dict(warnings=warnings), dict(scope_part2=1, extra=scope))
 
-    local_control("local0", warnings)   # + call shape local-type (gen2-manifest)
-    local_control("local2", warnings)
-    # Same parameter parser, no frame or parameter bindings for a prototype.
-    function_control("function9", warnings)
-    local_control("local4", warnings)   # + call shape local-binding (gen2-manifest)
-    local_control("local6", warnings)
-    local_control("local8", warnings)
-    segment("ret0")
-    segment("if-loops", warnings)
-    segment("ret-expr")
-    segment("ret-qt0")
-    segment("ret-qt")
-    segment("upd-id")   # + call shape update-entry (gen2-manifest)
-    segment("upd-compound")   # + calls folded into gen2-manifest
-    segment("upd-type")   # + calls folded into gen2-manifest
-    segment("upd-modes")
-    segment("upd-var")
+    segment("body1", warnings)   # gen2-manifest block body1
     segment("ladders")
-    ordinary_control('string', warnings)
-    # sizeof: a constant, `imm r0, N`; the operand emits nothing (measured). A type, a variable,
-    # or a variable with subscripts (each drops one dimension); anything else is not covered
-    segment("sizeof0")   # + calls folded into gen2-manifest
-    segment("sizeof1")   # + calls folded into gen2-manifest
-    segment("sizeof2")   # + calls folded into gen2-manifest
-    segment("sizeof3")
-    ordinary_control('dispatch', warnings)
-    segment("address")
-    ordinary_control('deref', warnings)   # + calls folded into gen2-manifest
-    ordinary_control('id', warnings)
-    segment("ord-update", warnings)
-    ordinary_control('value', warnings)
-    ordinary_control('down', warnings)
-    # Prefix updates share the existing member/subscript address walk. The
-    # address is evaluated once; its value kind then selects step/load/store.
-    segment("upd-prefix", warnings)   # + calls folded into gen2-manifest
-    ordinary_control('array', warnings)
+    segment("body2", warnings)   # gen2-manifest block body2
     from membercontrol import install as member_control
     member_control(E, P, warnings, TEMPL,
                    dict(SBB=SBB, MEMBER_STRIDE=MEMBER_STRIDE, MOF=MOF, MSZ=MSZ, MPT=MPT, MBS=MBS,
