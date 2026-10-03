@@ -12,6 +12,19 @@ from pack import build
 # (buildcompiler.sh) passes --no-model-cache and constructs every model afresh.
 MODEL_CACHE=True
 _KEYBASE=None
+# pack-models with --require-cached: every model must already sit verified in
+# the cache (written by the pack-prep-K steps); constructing one here is an error.
+REQUIRE_CACHED=False
+# Prepare steps: buildcompiler.sh pack-prep-K builds part K of PREP_PARTS into
+# $T/model-cache, so that no single bounded step constructs all models.  Groups
+# are fixed (by name, measured to stay under ~45 s each); every model job must
+# appear in exactly one group (checked in prepare()).
+PREP_PARTS=[
+    ['warnparse'],
+    ['errorparse'],
+    ['warnunits','warnlex','tokenlex','tokenpp','warnpp-shared','plainpp','nativeabi',
+     'object-lower-arm64','object-lower-x86_64','object-enc-arm64','object-enc-x86_64'],
+]
 
 def _digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -63,6 +76,7 @@ def built_model(td,name,script,args,env=None):
     with (base/('pack-'+key+'.lock')).open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
         if not _valid(cache):
+            if REQUIRE_CACHED: raise ValueError('model %s not prepared (run the pack-prep steps first)'%name)
             work=Path(tempfile.mkdtemp(prefix='pack-'+key+'.build-',dir=base))
             try:
                 _construct(script,args,env,work/'m.json',work/'m.tbl',work/'m.net')
@@ -100,6 +114,38 @@ def retain_models(directory, rows):
     if not models: raise ValueError('empty model audit')
     record.write_text(json.dumps({'pairs':models},sort_keys=True,indent=2)+'\n')
 
+
+def model_jobs(targets, shared_e2=None, shared_nativeabi=None):
+    """Every model compiler_package constructs, as (name, script, args), in order."""
+    gen=Path(__file__).resolve().parent.parent/'build/gen.py'
+    jobs=[]
+    for target in sorted(set(targets) & {'lnx/x86_64','lnx/arm64'}):
+        arch=target.split('/')[1]
+        jobs.append(('object-lower-'+arch,gen,['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])))
+        jobs.append(('object-enc-'+arch,gen,['enc/arm' if arch=='arm64' else 'enc','--object']))
+    if shared_e2 is None: jobs.append(('plainpp',gen,['pp','--shared-predefines']))
+    jobs+=[('tokenpp',gen,['pp','--shared-predefines','--no-autoinc']),
+           ('tokenlex',gen,['lex']),
+           ('warnlex',gen,['lex','--locations']),
+           ('warnparse',gen,['parse2','--warnings','--errors']),
+           ('warnunits',gen,['parse2/units','--locations']),
+           ('errorparse',gen,['parse2','--errors']),
+           ('warnpp-shared',gen,['pp','--locations','--shared-predefines'])]
+    if shared_nativeabi is None: jobs.append(('nativeabi',gen,['nativeabi']))
+    return jobs
+
+def manifest_targets(manifests):
+    return {next(x for x in Path(m).read_text().splitlines() if x and not x.startswith('#')).split('\t')[0] for m in manifests}
+
+def prepare(manifests, part, parts, shared_e2=None, shared_nativeabi=None):
+    """Construct part PART (1-based) of PARTS into the model cache; no package."""
+    if parts!=len(PREP_PARTS) or not 1<=part<=parts: raise ValueError('--part must be K/%d'%len(PREP_PARTS))
+    jobs={n:(sc,a) for n,sc,a in model_jobs(manifest_targets(manifests),shared_e2,shared_nativeabi)}
+    named=[n for g in PREP_PARTS for n in g]
+    if len(named)!=len(set(named)) or not set(jobs)<=set(named): raise ValueError('PREP_PARTS does not cover the model jobs once each')
+    with tempfile.TemporaryDirectory(prefix='compiler-prepare-') as td:
+        for n in PREP_PARTS[part-1]:
+            if n in jobs: built_model(td,n,*jobs[n]); print('prepared',n,flush=True)
 
 def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, compressed=True, shared_e2=None, shared_nativeabi=None):
     mounts=[('006864722f',includes)]
@@ -145,13 +191,13 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         # Offline construction of the shared unit-framing network. Runtime
         # does not invoke these Python tools or parse declarations in C.
         here=Path(__file__).resolve().parent
+        jobs={n:(sc,a) for n,sc,a in model_jobs(targets,shared_e2,shared_nativeabi)}
+        def job(name): return built_model(td,name,*jobs[name])
         object_models={}
         for target in sorted(targets & {'lnx/x86_64','lnx/arm64'}):
             arch=target.split('/')[1]
             object_models[target]={
-                'lower':built_model(td,'object-lower-'+arch,here.parent/'build/gen.py',
-                                    ['lower','--full','--object']+(['--arm64'] if arch=='arm64' else [])),
-                'elf':built_model(td,'object-enc-'+arch,here.parent/'build/gen.py',['enc/arm' if arch=='arm64' else 'enc','--object'])}
+                'lower':job('object-lower-'+arch),'elf':job('object-enc-'+arch)}
         for i,row in enumerate(rows):
             cols=row.split('\t')
             for target,models in object_models.items():
@@ -167,30 +213,25 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
         for target,value in sorted(assemble.load_facts('pp-gen')['predefres'].items()):
             path=predefines/target;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(value.encode('ascii'))
         mounts.append(('00707265646566696e65732f',predefines))
-        plain_pp=Path(shared_e2).resolve() if shared_e2 is not None else built_model(
-            td,'plainpp',here.parent/'build/gen.py',['pp','--shared-predefines'])
+        plain_pp=Path(shared_e2).resolve() if shared_e2 is not None else job('plainpp')
         for i,row in enumerate(rows):
             cols=row.split('\t')
             if cols[1]=='e2': cols[4]=str(plain_pp);rows[i]='\t'.join(cols)
         # Public token dump uses the reference's fixed Linux/x86 predefines
         # and the plain E1 output, independently of image-target selection.
-        for name,script,args,inp,out in [
-                ('tokenpp',here.parent/'build/gen.py',['pp','--shared-predefines','--no-autoinc'],'src.c','pp.text'),
-                ('tokenlex',here.parent/'build/gen.py',['lex'],'pp.text','tokens.plain')]:
+        for name,inp,out in [('tokenpp','src.c','pp.text'),('tokenlex','pp.text','tokens.plain')]:
             # Public token dump has no implicit header selection.
-            n=built_model(td,name,script,args)
+            n=job(name)
             rows.append('\t'.join(['tokens',name,inp,out,str(n)]))
         # Located warning routes share one lexer/parser; preprocessing keeps
         # target predefines. This construction never runs in the driver.
         warning_models={}
-        def warning_model(name,script,args):
-            return built_model(td,name,script,args)
-        warning_models['e1']=warning_model('warnlex',here.parent/'build/gen.py',['lex','--locations'])
-        warning_models['e3']=warning_model('warnparse',here.parent/'build/gen.py',['parse2','--warnings','--errors'])
-        located_units=warning_model('warnunits',here.parent/'build/gen.py',['parse2/units','--locations'])
-        quiet_parse=warning_model('errorparse',here.parent/'build/gen.py',['parse2','--errors'])
+        warning_models['e1']=job('warnlex')
+        warning_models['e3']=job('warnparse')
+        located_units=job('warnunits')
+        quiet_parse=job('errorparse')
         ordinary=list(rows)
-        warning_models['e2']=warning_model('warnpp-shared',here.parent/'build/gen.py',['pp','--locations','--shared-predefines'])
+        warning_models['e2']=job('warnpp-shared')
         for target in sorted(targets):
             # Normal compilation also carries locations, without enabling
             # warnings. The same units model preserves file boundaries.
@@ -234,8 +275,7 @@ def compiler_package(manifests, o1, includes, kernels=None, audit_dir=None, comp
                     cols=row.split('\t')
                     if cols[0]==target+'/warn/'+suffix and cols[1] not in ('e2','e1'):
                         cols[0]=route;rows.append('\t'.join(cols))
-        nativeabi=Path(shared_nativeabi).resolve() if shared_nativeabi is not None else built_model(
-            td,'nativeabi',here.parent/'build/gen.py',['nativeabi'])
+        nativeabi=Path(shared_nativeabi).resolve() if shared_nativeabi is not None else job('nativeabi')
         for target in sorted(targets):
             rows.append('\t'.join([target+'/nativeabi','nativeabi','USLSIG2','USLNCAR1',str(nativeabi)]))
         manifest=Path(td)/'routes.tsv';manifest.write_text('\n'.join(rows)+'\n')
@@ -255,9 +295,20 @@ if __name__=='__main__':
     ap.add_argument('--compressed',dest='compressed',action='store_true',default=True,help='P3 binary+DEFLATE models (default)')
     ap.add_argument('--legacy-package',dest='compressed',action='store_false',help='legacy uncompressed P1/P2')
     ap.add_argument('--no-model-cache',action='store_true',help='construct every model afresh (the shipped build)')
+    ap.add_argument('--prepare-only',action='store_true',help='construct models of --part into the cache; write no package')
+    ap.add_argument('--part',help='K/N: which prepare group (with --prepare-only)')
+    ap.add_argument('--require-cached',action='store_true',help='fail if any model is not already in the cache')
     ap.add_argument('manifests',nargs='+',type=Path)
     a=ap.parse_args()
     MODEL_CACHE=not a.no_model_cache
+    REQUIRE_CACHED=a.require_cached
+    if a.prepare_only:
+        try:
+            k,n=map(int,(a.part or '').split('/'))
+        except ValueError: ap.exit(2,'compilerpack: --prepare-only needs --part K/N\n')
+        try: prepare(a.manifests,k,n,a.shared_e2,a.shared_nativeabi)
+        except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')
+        raise SystemExit(0)
     try:
         payload=compiler_package(a.manifests,a.o1,a.include,a.kernels,a.audit_dir,a.compressed,a.shared_e2,a.shared_nativeabi);a.o.write_bytes(payload)
     except (OSError,ValueError) as e: ap.exit(1,f'compilerpack: {e}\n')

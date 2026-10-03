@@ -5,7 +5,7 @@ PYTHONHASHSEED=${PYTHONHASHSEED:-0}; export PYTHONHASHSEED
 R=$(cd "$(dirname "$0")/../.." && pwd); cd "$R"
 [ $# -ge 1 ] && [ $# -le 2 ] || { echo 'usage: buildcompiler.sh OUTPUT_DIR [shared|OS/ARCH|pack]' >&2; exit 2; }
 step=${2:-all}
-case $step in all|shared|pack|pack-models|pack-driver|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
+case $step in all|shared|pack|pack-prep-1|pack-prep-2|pack-prep-3|pack-models|pack-driver|lnx/arm64|lnx/x86_64|osx/arm64|osx/x86_64|win/arm64|win/x86_64) ;; *) echo "unknown build step: $step" >&2; exit 2;; esac
 [ "$(uname -s)" = Darwin ] || { echo 'kernel seed assembler requires macOS' >&2; exit 2; }
 mkdir -p "$1"; T=$(cd "$1" && pwd)
 b() { python3 "$R/tests/bound.py" 50 "$@"; }
@@ -82,6 +82,22 @@ target() {
     manifest write "$name"
     echo "completed compiler target $os/$arch"
 }
+pack_prep() {
+    # Part $1 of the model construction (compilerpack.py PREP_PARTS) into this
+    # build's own cache, so each bounded step stays well under 55 s (0.0.23: one
+    # pack-models constructing every model ran past the bound).  No package here.
+    manifest check shared
+    routes=
+    for os in lnx osx win; do
+        for arch in arm64 x86_64; do
+            manifest check "$os-$arch"
+            routes="$routes $T/$os-$arch/route.tsv"
+        done
+    done
+    UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py --prepare-only --part "$1/3" --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include -o /dev/null $routes
+    b python3 exec/c/provenance.py identity > "$T/pack-prep-$1.done"   # completion record (comboot step manifest)
+    echo "prepared model part $1/3"
+}
 pack_models() {
     source_start=$(b python3 exec/c/provenance.py identity)
     manifest check shared
@@ -98,10 +114,10 @@ pack_models() {
     codec_flag=
     case ${PACK_COMPRESSED:-1} in 0) codec_flag=--legacy-package;; 1) codec_flag=--compressed;; *) echo "PACK_COMPRESSED must be 0 or 1" >&2; exit 2;; esac
     # Fresh construction per candidate: the model cache lives inside this build's own
-    # directory (empty at the first pack-models), so a bounded run that stops part-way
-    # resumes from the models it already built instead of starting over (0.0.23: parse2
-    # pushed one pass past the 55 s bound).  Cache hits re-check the product digests.
-    UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py $codec_flag --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
+    # directory (empty before pack-prep-1); pack-prep-1..3 fill it and pack-models only
+    # packages (--require-cached: a missing model is an error, not a slow rebuild).
+    # Cache hits re-check the product digests.
+    UNISACC_MODEL_CACHE="$T/model-cache" b python3 exec/c/compilerpack.py --require-cached $codec_flag --shared-e2 "$T/shared/e2.net" --shared-nativeabi "$T/shared/nativeabi.net" --o1 "$T/shared/o1.net" --include include --kernels "$T/kernels" --audit-dir "$T/model-audit" -o "$T/compiler.pkg" "$@"
     [ -s "$T/compiler.pkg" ]
     printf '%s\n' "$source_start" > "$T/compiler.pkg.source"   # the identity pack-driver seals with
     echo "model package: $T/compiler.pkg"
@@ -143,7 +159,10 @@ case $step in
             pair lnx/x86_64 osx/arm64
             pair osx/x86_64 win/arm64
             sh "$script" "$out" win/x86_64
+            sh "$script" "$out" pack-prep-1
+            sh "$script" "$out" pack-prep-2
+            sh "$script" "$out" pack-prep-3
             sh "$script" "$out" pack
         ' model-build "$R/exec/c/buildcompiler.sh" "$T";;
-    shared) shared;; pack) pack;; pack-models) pack_models;; pack-driver) pack_driver;; *) target "$step";;
+    shared) shared;; pack) pack;; pack-prep-[123]) pack_prep "${step#pack-prep-}";; pack-models) pack_models;; pack-driver) pack_driver;; *) target "$step";;
 esac

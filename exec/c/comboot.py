@@ -58,11 +58,14 @@ STAGE2 = ROOT / 'unisacc.com'
 STAGE3 = SEED.parent / 'stage3' / 'unisacc.com'
 # One buildcompiler step per bounded call: shared, the six targets, then pack.
 # `all` in one invocation is what does NOT fit the watchdog.  Measured on the
-# development machine: shared 17-18 s, each target 3-5 s, pack 37-39 s.  Every
+# development machine: shared 17-18 s, each target 3-5 s, pack 37-39 s (after K2
+# the model construction alone passed 55 s, so it is split into pack-prep-1..3,
+# each filling the build's own model cache; pack-models then only packages).  Every
 # step is individually wrapped by `run`, which is the invariant the ruling
 # states; the sum is deliberately not what the watchdog is asked to hold.
 STEP_LIST = ['shared', 'lnx/arm64', 'lnx/x86_64', 'osx/arm64', 'osx/x86_64',
-             'win/arm64', 'win/x86_64', 'pack-models', 'pack-driver']
+             'win/arm64', 'win/x86_64', 'pack-prep-1', 'pack-prep-2', 'pack-prep-3',
+             'pack-models', 'pack-driver']
 COMB_BUILD = SEED.parent / 'comb-build'
 HELLO = ROOT / 'examples' / 'hello.c'
 # The one probe every seed must pass: a compiler that cannot run a program is
@@ -197,6 +200,8 @@ def step_manifest(model_dir, st):
     pack writes no such file -- its proof is the artifact's build.json sidecar."""
     if st in ('pack', 'pack-driver'):
         return model_dir / 'unisacc-next.com.build.json'
+    if st.startswith('pack-prep-'):
+        return model_dir / (st + '.done')
     if st == 'pack-models':
         return model_dir / 'compiler.pkg'
     return model_dir / step_name(st) / 'manifest.json'
