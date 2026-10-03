@@ -618,7 +618,41 @@ def ppgen():
 
 
 # (fact stem, inputs whose sha prefixes head the file, producer)
+def k2gen2():
+    """parse2/gen2-manifest.tsv constants: POSSPAN, type words, tytail ckm/resd tables (from gen2.py constants)."""
+    for d in ("exec", "exec/parse2"):
+        if str(ROOT / d) not in sys.path:
+            sys.path.insert(0, str(ROOT / d))
+    G = _module("exec/parse2/gen2.py", "gen2")
+    acts = lambda a: [list(x) for x in a]
+    dump = lambda v: json.dumps(v)
+    follow = dict(G.tape_rows("type-follow.tsv"))
+    words = [dict(word=w, value=v, rank=(1 if w == "type=float" else 2 if w == "type=double" else 0),
+                  follow=follow.get(w, follow["*"])) for w, v in G.TYPEW.items()]
+    initials = {name: row[0][1] for name, row in G.load_rules(ROOT / "exec/parse2/operator-actions.tsv",
+                {}, domain=[0], section="initial").items()}
+    ck, current, initial = [], "CKM", initials["ckm"]
+    for width, mask in [(sz, (1 << (8 * sz)) - 1) for _, _, sz, un, _ in G.TYINT if un and sz < 8]:
+        nxt = "CKM.k%d" % width
+        ck.append(dict(current=current, hit="CKM.m%d" % width, next=nxt, axis=G.AX.index("u%d" % (8 * width)),
+                       initial=acts(initial), mask=acts(G.O(G.TYPE_TAPE["mask_pair"] % mask))))
+        current, initial = nxt, []
+    ckf = dict(current=current, axis=G.AX.index("u64"), initial=acts(initial))
+    rs, current, initial = [], "RESD", initials["resd"]
+    for name, code, size, unsigned, _ in G.TYINT:
+        hit, nxt = "RESD." + name, "RESD.n" + name
+        mask = G.O(G.TYPE_TAPE["mask"] % ((1 << (8 * size)) - 1)) if unsigned and size < 8 else []
+        rs.append(dict(current=current, hit=hit, next=nxt, axis=G.AX.index(name), code=code,
+                       initial=acts(initial), mask=acts(mask)))
+        current, initial = nxt, []
+    rsf = dict(current=current, initial=acts(initial))
+    return ["=POSSPAN\tint\t%d" % G.POSSPAN, "=typewords\tjson\t" + dump(words),
+            "=ckmrows\tjson\t" + dump(ck), "=ckmfinal\tjson\t" + dump(ckf),
+            "=resdrows\tjson\t" + dump(rs), "=resdfinal\tjson\t" + dump(rsf)]
+
+
 TABLES = [
+    ("k2-gen2", ["exec/parse2/gen2.py", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),

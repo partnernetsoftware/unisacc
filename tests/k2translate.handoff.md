@@ -113,6 +113,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   them from TYINT/AX/TYPE_TAPE) are rows. Left: optail, ladder (template interleaved: dispatch template rows can
   move into the manifest as template ops), startup-run, _namespace_control, ordinary_control.
 
+- Round 8 (owner rule: facts only from exec/facts/export.py --check; DSL capped, no new opts keys): k2-gen2.tsv
+  is now produced by export.py k2gen2() (imports gen2.py for TYINT/AX/TYPE_TAPE/TYPEW/POSSPAN); mktytail.py deleted.
+  Other facts files changed only in their export.py input-hash header line. Left (same as round 7): optail,
+  ladder+dispatch templates, startup-run, _namespace_control, ordinary_control; then single manifest;
+  exec/parse/gen.py; librarymodule after lm_nomain_msg lands (block-3 branch).
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
