@@ -59,6 +59,28 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sj_text/text12/text35 are cells). Scope (coordinator): cdx owns constexpr/truth/strings/tokenlocations/
   unitlocations/unresolved/membercontrol; this slice keeps only the ~40 gen2 structured_control sites -> call
   control rows, then gen2 driver itself.
+## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
+1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
+   control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
+   (`STMT.body` if warnings else `STMT`), extra (dict of bindings), seqb (dict of sequences; facts `empty` = {}).
+   Extra values are mostly gen2 labels (word_state, tail_current, ladder_* ...) and fresh labels allocated just
+   before the call (`P(x).fresh(k)`): allocate them in the caller manifest with `fresh:U:{x}:k` / holder rows in
+   the same order (global counter P.n), and pass the dict with a `let` opts dict (let builds dicts element-wise).
+   Group by gen2 function: types(), tytail(), optail(), ladder(), build() startup/statement sites, sizeof/address.
+   Work one function at a time; check each with .k2tmp/cmp.sh (one mode, bytes vs HEAD) then graphhash.
+2. Then gen2 build() itself -> exec/parse2/gen2-manifest.tsv run by the generic driver (exec/build/gen.py, as the
+   other stages do), so gen2.py shrinks to constants/facts export and finally disappears. Constants gen2 computes
+   (TYPERANK.., POSSPAN regions, TYINT, TWORDS, MAXTOK from src/front_pp.c) belong in facts (k2-control/k2-call
+   already hold the ones those manifests use; MAXTOK is read from source at build time -> a facts exporter row).
+3. Boundary with cdx: truth.conversions (called in gen2 between callcontrol-begin and -finish), strings.rules/
+   token_span/initializer, tokenlocations/unitlocations/unresolved, constexpr, membercontrol are cdx's. Leave
+   their call sites in gen2 as is until cdx exposes manifests; then replace each with a `call` row (callcontrol
+   begin/finish can then merge into one manifest with conversions as middle rows).
+4. Tools: .k2tmp/ (uncommitted, worktree-local) mkaddr/mkfmt/mkctl/mkstr/mkun/mkcall.py regenerate the hand-made
+   manifests + facts; classes that use E.TK must be computed after build's TK additions (type=extern, type=_Bool,
+   E.tokenizer(qualifiers)). Gates: slot.sh ./tests/gate.sh --suite finite-template | decision-ledger |
+   exec-r21-e3 | exec-chain-1 | exec-chain-2 | exec-chain-3, one per call; graphhash FAIL:142 = rerun the mode alone.
+
 - (old plan) Next for structured_control: its bindings are ~60 gen2 constants + extra; plan = k2-control facts (=NAME int per
   constant) + control-manifest.tsv with env section/extra keys; fresh via control-fresh.tsv rows (owner=prefix or env
   label -> needs `fresh:U:{x}` per row, or the `tape:` fresh with interp); stack sequences via @stack on a P holder
