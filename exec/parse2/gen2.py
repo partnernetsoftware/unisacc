@@ -259,7 +259,7 @@ def fmtwalk(pre, on_byte, on_d, on_end):
 def printf(warnings=False):
     from printfcontrol import install as printf_control
     import assemble
-    assemble.run(Path(__file__).resolve().parent / 'printfallback-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), {})
+    assemble.run(Path(__file__).resolve().parent / 'printfallback-manifest.tsv', E, P, dict(warnings=warnings), {})   # manifest has no mode rows; the flags were script globals
     printf_control(E, P, "part0", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
     strwalk("FMT.walk","FMT.byte","FMT.end")
     printf_control(E, P, "part1", warnings, TEMPL, dict(SKIPS=SKIPS, FNSTR=FNSTR), HEX)
@@ -368,8 +368,7 @@ def types():
                   sequences={"store_float": O(TYPE_TAPE["storen"] % 4)}, section="store")
     width_dispatch("STOREV0", "store")
     import assemble   # K2 trace translation: bitfields-manifest.tsv
-    assemble.run(Path(__file__).parent / 'bitfields-manifest.tsv', E, P,
-                 dict(locations=locations, warnings=warnings, errors=errors), {})
+    assemble.run(Path(__file__).parent / 'bitfields-manifest.tsv', E, P, {}, {})   # no mode rows
     bindings = {key: P(state).fresh("b") for key, state in
                 (("pointer_test", "NARROW"), ("wide_test", "NARROW.b"), ("unsigned_test", "NARROW.u"),
                  ("double_test", "NARROW.dd"), ("bool_test", "NARROW.ui"))}
