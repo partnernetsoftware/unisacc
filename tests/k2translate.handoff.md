@@ -316,3 +316,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Next commit: statics + initializers -> segment statics-init (`call` rows; constants in facts k2-gen2 staticsenv/initenv;
   JSON-dumped values gave the same graph). Same recipe for vla/truth/booleans/conditional/offsetof/unary/layoutfacts.
   prn/numout/autoscan: not yet examined as sub-manifests (round budget).
+- Round 30: 42361927 functiontypes/truth/booleans (segment typing), vla (start of dispatch-block), conditional (end of
+  ret-qt0), offsetof/setjmp/unresolved (segment offsetof) -> `call` rows; constants in facts k2-gen2 k2env. sha SAME.
+  Still Python-fed: unarycontrol (env warnings + MAXTOK from src/front_pp.c -> facts exporter row), layoutfacts/unitmode/
+  forward (env start from libraryexports, cdx), warnings-only manifests (_tl constants from tokenlocations, cdx).
+  prn/numout/autoscan (exec/parse/gen.py) are expressible as sub-manifests: `rows numeric` section prn/numout with
+  non-holder freshrows over exec/facts/numeric-names.tsv (where selected=SECTION, owner "{prefix}.numeric_{name}"; same
+  E.P(owner).fresh as numeric_rules) + DIG/TK_FNUM; prn twice (owner PRN/PRNW, PRN_* = name+suffix, width 0/6);
+  autoscan = `rows autoscan` section auto, freshrows autoscan-names.tsv owner "{prefix}.autoscan_{name}", classes from
+  TK. Not done yet. layoutprovenance.parser not started.
