@@ -309,7 +309,7 @@ class Emitter:
             raise Refuse("fresh labels allocated but never bound: %s" % pending[:3])
         if ret is not None and retrow is None:
             if isinstance(ret, str) and not any(ch in ret for ch in ",\t\n{}\\"):
-                out.append(("set", "-", "-", (), (("ret", "@str:" + ret),), "{}", "null"))
+                out.append(("let", "-", "-", (), (("ret", "@str:" + ret),), "{}", "null"))
             else:
                 raise Refuse("install return value %r not traceable" % (ret,))
         return out
