@@ -1,4 +1,4 @@
-"""Generic procedure assembler (K2, was the core of class P in exec/parse/gen.py): a label
+"""Generic procedure assembler (K2, was the core of class P in exec/parse/gen.py, now exec/build/parsebase.py): a label
 is a state, straight-line actions ride on the outgoing transition, a branch is a state reading r,
 call pushes a fresh return label. No stage names, no domain facts. make_P(g, O, rej) returns a
 fresh class (its own fresh-label counter n) bound to graph g, text encoder O and reject sequence rej.

@@ -7,7 +7,7 @@ from modeltypedcandidatescheck import U,d2,I,D,F,PTR,PAIR,sig,Files
 import assemble
 install=lambda E,fail='DEAD':assemble.run(assemble.FACTS.parent/'modelsignature-manifest.tsv',E,E.P,{},dict(fail=fail))  # modelsignature-manifest.tsv
 from exec.pp.sim import run,load
-spec=importlib.util.spec_from_file_location('canonicalbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
+spec=importlib.util.spec_from_file_location('canonicalbase',ROOT/'exec/build/parsebase.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 def canonical(blob):
  p=16;n=struct.unpack_from('<Q',blob,p)[0];p+=8+n;var=blob[p+2];p+=4;count=struct.unpack_from('<Q',blob,p)[0];p+=8
  def desc():

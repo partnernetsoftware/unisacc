@@ -1,4 +1,4 @@
-"""Generic parse2 executor base (K2): the parse/gen.py token reader and assembler, extended for parse2.
+"""Generic parse2 executor base (K2): the build/parsebase.py assembler and parse token facts, extended for parse2.
 
 No stage rules here: only executor behaviour shared by every parse2 manifest row.
   P          E.P whose vpush/vpop append each value slot's rank companion (facts valueranks, kind=rank)
@@ -63,8 +63,8 @@ def twice():
 
 
 def executor():
-    """exec/build/gen.py base hook: parse/gen.py (token reader, assembler, gold tables) with the parse2 P and tokens."""
-    spec = importlib.util.spec_from_file_location("e3gen", str(_ROOT / "parse" / "gen.py"))
+    """exec/build/gen.py base hook: build/parsebase.py (assembler, parse token facts) with the parse2 P and tokens."""
+    spec = importlib.util.spec_from_file_location("e3gen", str(_ROOT / "build" / "parsebase.py"))
     E = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(E)
     install(E)

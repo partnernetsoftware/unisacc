@@ -14,7 +14,7 @@ def call(args,**kw):
 
 
 def probe_model():
-    spec=importlib.util.spec_from_file_location('diag_grammar',R/'exec/parse/gen.py')
+    spec=importlib.util.spec_from_file_location('diag_grammar',R/'exec/build/parsebase.py')
     E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
     import assemble
     _tl=assemble.load_facts('tokenlocations')['tokenlocations!']  # exec/facts/tokenlocations.tsv

@@ -71,7 +71,7 @@ def gen_inputs(cmd):
     builder), unisa/ and the reference it may consult."""
     d = os.path.dirname(shlex.split(cmd)[1])
     fs = set()
-    for top in (d, "exec/pp", "unisa") + (("exec/parse",) if d.endswith("parse2") else ()):   # E3 builds on exec/parse/gen.py
+    for top in (d, "exec/pp", "unisa") + (("exec/parse",) if d.endswith("parse2") else ()):   # parse2 rows call exec/parse manifests (base exec/build/parsebase.py)
         for dp, _, names in os.walk(os.path.join(ROOT, top)):
             fs.update(os.path.relpath(os.path.join(dp, n), ROOT) for n in names
                       if n.endswith((".py", ".tsv")))

@@ -4,7 +4,7 @@ and rename rewriting PUSH arguments.  Synthetic graph; no stage involved."""
 import importlib.util,pathlib,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT/'exec')]
 import finite_rules as F
-spec=importlib.util.spec_from_file_location('fr_lexgen',ROOT/'exec/parse/gen.py');M=importlib.util.module_from_spec(spec);spec.loader.exec_module(M)
+spec=importlib.util.spec_from_file_location('fr_lexgen',ROOT/'exec/build/parsebase.py');M=importlib.util.module_from_spec(spec);spec.loader.exec_module(M)
 n=[0]
 def fresh(k):n[0]+=1;return f'T.{k}{n[0]}'
 rows=['# section\tblock\teach\tover\tkind\ta\tb\tc\td',

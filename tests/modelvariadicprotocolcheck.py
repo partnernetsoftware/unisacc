@@ -12,7 +12,7 @@ _MB=assemble.load_facts('top-modelbindings-banks')['top-modelbindings-banks!']
 FORMAT,DISPATCH,PLAN,ARGC,VARIADIC,CANON,CANONLEN=(_MB[k] for k in ('FORMAT','DISPATCH','PLAN','ARGC','VARIADIC','CANON','CANONLEN'))
 install=lambda E:assemble.run(assemble.FACTS.parent/'modelbindings-manifest.tsv',E,E.P,{})  # modelbindings-manifest.tsv
 from exec.pp.sim import run,load
-spec=importlib.util.spec_from_file_location('variadicprotocolbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
+spec=importlib.util.spec_from_file_location('variadicprotocolbase',ROOT/'exec/build/parsebase.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 def signature(params=(F,I),var=1,mode=1,support=0,name=b'host'):
  return b'USLSIG2\n'+U(1)+U(len(name))+name+bytes([0,1,var,mode])+U(len(params))+PAIR+U(len(params))+b''.join(params)+bytes([support])
 def template(params=(F,I),var=1,mode=1,fmt=2,support=1,dispatcher=8192,handle=12288,count=None,origin=0,ordinal=0,prototype_support=0):

@@ -7,7 +7,7 @@ from modeltypedcandidatescheck import U,d2,I,D,F,PTR,PAIR,sig,Files
 import assemble
 install=lambda E,fail='DEAD':assemble.run(assemble.FACTS.parent/'modelgraphequality-manifest.tsv',E,E.P,{},dict(fail=fail))  # modelgraphequality-manifest.tsv
 from exec.pp.sim import run,load
-spec=importlib.util.spec_from_file_location('canonicalbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
+spec=importlib.util.spec_from_file_location('canonicalbase',ROOT/'exec/build/parsebase.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 from modelcallbackgraphcheck import canonical,ref,definition
 
 def semantic(blob):
@@ -104,7 +104,7 @@ def main():
   # Boundary tests seed the same entry states, avoiding enormous source fixtures.
   # A full queue must reject a new pair, but an already visited pair still returns.
   for name,tail,visited,want in [('budget-new',65536,False,'reject'),('budget-repeat',65536,True,'accept')]:
-   bs=importlib.util.spec_from_file_location(name,ROOT/'exec/parse/gen.py');BE=importlib.util.module_from_spec(bs);bs.loader.exec_module(BE);install(BE)
+   bs=importlib.util.spec_from_file_location(name,ROOT/'exec/build/parsebase.py');BE=importlib.util.module_from_spec(bs);bs.loader.exec_module(BE);install(BE)
    bp=BE.P('START').a(('LDI','mg_l',1),('LDI','mg_r',2),('LDI','mg_epoch',1),('LDI','mg_tail',tail))
    if visited:bp.a(('LDI','mg_key',65538),('STX','mg_key',436<<40,'mg_epoch'))
    bp.call('MG.enqueue').a(('ACCEPT',)).goto('DONE');BE.P('DONE').a(('ACCEPT',)).goto('DONE');BE.g.finish()

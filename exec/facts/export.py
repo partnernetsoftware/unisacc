@@ -27,7 +27,7 @@ def _autonames(E):
     reference reads it."""
     import os
     out = []
-    for h in E._FC["AUTOINC_HEADERS"]:
+    for h in E.AUTOINC_HEADERS:
         for ln in open(os.path.join(E.ROOT, "include", h), encoding="utf-8", errors="replace"):
             ln = ln.rstrip("\n")
             if len(ln) <= 7 or not ln.startswith("static") or "(" not in ln or "{" not in ln:
@@ -46,6 +46,62 @@ def _module(rel, name):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     return m
+
+
+_SKIP = ("type=const", "type=volatile")   # the token reader's default skipped qualifiers (was parse/gen.py tokenizer)
+
+
+def _gold(name):   # weights/gold/NAME.tsv rows, `#` comments and `=>` rows dropped (was exec/parse/gen.py gold)
+    rows = []
+    for ln in open(ROOT / "weights" / "gold" / (name + ".tsv"), encoding="utf-8"):
+        if ln.startswith("#"):
+            continue
+        f = ln.rstrip("\n").split("\t")
+        if "=>" in f:
+            continue
+        rows.append(f)
+    return rows
+
+
+def parsetokens():
+    """parse token words and codes (was exec/parse/gen.py module level): words = pre + compound-assign
+    (casops + "=") + sorted(gold prec operators) + post; TK = 1-based index, "type" = the "type=int" code."""
+    import json
+    fw = {}
+    for ln in (ROOT / "exec/facts/parse-words.tsv").read_text().splitlines()[1:]:
+        if ln and not ln.startswith("#"):
+            k, v = ln.split("\t")
+            fw.setdefault(k, []).append(json.loads(v))
+    prec = {f[0]: int(f[1]) for f in _gold("prec") if f[1].isdigit()}
+    words = fw["words_pre"] + [o + "=" for o in fw["casops"]] + sorted(prec) + fw["words_post"]
+    tk = {w: k + 1 for k, w in enumerate(words)}
+    tk["type"] = tk["type=int"]
+    return ["=WORDS\tjson\t" + json.dumps(words, separators=(",", ":")),
+            "=TK\tjson\t" + json.dumps(tk, separators=(",", ":"))]
+
+
+def _parse_e(tag):
+    """exec/build/parsebase.py plus the gold-derived tables export.py reads (was exec/parse/gen.py)."""
+    E = _module("exec/build/parsebase.py", tag)
+    E.gold = _gold
+    E.PREC = {f[0]: int(f[1]) for f in _gold("prec") if f[1].isdigit()}
+    E.BINSEL = {(f[0], f[1]): f[2] for f in _gold("binsel") if f[1] in ("s", "u")}
+    E.IRSEL = {f[1]: f[2] for f in _gold("irsel") if f[0] == "alu"}
+
+    def optext(op, u=False):
+        sp = E.IRSEL[E.BINSEL[(op, "u" if u else "s")]]
+        rev = sp.endswith("_rev")
+        sp = sp[:-4] if rev else sp
+        if sp in ("div", "mod", "udiv", "umod"):
+            sp = "." + sp
+        return "  %s r0, %s\n" % (sp, "r0, r1" if rev else "r1, r0")
+    E.optext = optext
+    E.TY = {f[0]: (int(f[1]), int(f[2])) for f in _gold("tyinfo") if len(f) >= 3 and f[1].isdigit()}
+    E.SZ = {c: E.TY[k][0] for c, k in E.CTY.items()}
+    E.PSZ = E.TY["ptr"][0]
+    assert E.SZ == {"char": 1, "short": 2, "int": 4, "long": 8} and E.PSZ == 8, (E.SZ, E.PSZ)   # measured widths
+    assert not any(E.TY[k][1] for k in E.CTY.values())
+    return E
 
 
 def _gen2ns(tag):
@@ -67,7 +123,7 @@ def _gen2ns(tag):
     from pathlib import Path
 
     import importlib.util
-    E = _module("exec/parse/gen.py", tag + "_e3gen")
+    E = _parse_e(tag + "_e3gen")
 
     # Intrinsic names come from the product declaration, not a second hand list.
     sys.path.insert(0, E.ROOT)
@@ -479,7 +535,7 @@ def _esc(s):
 def constexprentry():
     """Integer-expression precedence and token classes for the E3 table."""
     import csv
-    E = _module("exec/parse/gen.py", "exec_parse_gen_constexpr_facts")
+    E = _parse_e("exec_parse_gen_constexpr_facts")
     levels = sorted(set(E.PREC.values()))
     path = ROOT / "exec/parse2/constexpr-operators.tsv"
     with path.open() as f:
@@ -509,7 +565,7 @@ def constexprentry():
 
 
 def structreturnexpr():
-    E = _module("exec/parse/gen.py", "exec_parse_gen_facts")
+    E = _parse_e("exec_parse_gen_facts")
     reason = "not covered: struct return expression outside local lvalue"
     return ["=reason\tstr\t" + _esc(reason),
             "@sr\tentry:str\tloc:int\treason:str",
@@ -1081,7 +1137,7 @@ def k2gen2tokens():
     if str(ROOT / "exec") not in sys.path:
         sys.path.insert(0, str(ROOT / "exec"))
     from finite_rules import prefix_facts
-    E = _module("exec/parse/gen.py", "k2gen2tok_parse")
+    E = _parse_e("k2gen2tok_parse")
     B = _module("exec/build/parse2base.py", "k2gen2tok_base")
     tk = dict(E.TK)
     words = list(E.WORDS)
@@ -1110,7 +1166,7 @@ def k2unitstokens():
     if str(ROOT / "exec") not in sys.path:
         sys.path.insert(0, str(ROOT / "exec"))
     from finite_rules import prefix_facts
-    E = _module("exec/parse/gen.py", "k2units_parse")
+    E = _parse_e("k2units_parse")
     rows = lambda f: [ln.split("\t") for ln in (ROOT / "exec/parse2" / f).read_text().splitlines()[1:]]
     quals = [r[0] for r in rows("units-qualifiers.tsv")]
     tk = dict(E.TK)
@@ -1119,7 +1175,7 @@ def k2unitstokens():
     words = E.WORDS + quals
     spans = dict(ln.split("\t") for ln in (ROOT / "exec/parse/token-prefixes.tsv").read_text().splitlines()
                  if ln and not ln.startswith("#"))
-    skip = E.tokenizer.__defaults__[0]   # the reader's own skipped qualifiers; units qualifiers are words
+    skip = _SKIP   # the reader's own skipped qualifiers; units qualifiers are words
     root, pre = prefix_facts(words + list(spans))
     def node(n):
         p = n["name"]
@@ -1157,18 +1213,19 @@ def k2unitstokens():
 
 
 TABLES = [
-    ("k2-gen2-tokens", ["exec/parse/gen.py", "exec/build/parse2base.py", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
-    ("k2-units-tokens", ["exec/parse/gen.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
-    ("k2-gen2", ["exec/parse/gen.py", "exec/build/parse2base.py", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
+    ("parse-tokens", ["exec/facts/parse-words.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], parsetokens),
+    ("k2-gen2-tokens", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/parse/token-prefixes.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2gen2tokens),
+    ("k2-units-tokens", ["exec/build/parsebase.py", "exec/parse/token-prefixes.tsv", "exec/parse2/units-qualifiers.tsv", "exec/parse2/units-builtin.tsv", "exec/parse2/units-tokens.tsv", "exec/parse2/units-reject.tsv", "exec/parse2/units-counters.tsv", "exec/parse2/units-separators.tsv", "exec/parse2/units-trailer.tsv", "exec/finite_rules.py", "exec/facts/export.py"], k2unitstokens),
+    ("k2-gen2", ["exec/build/parsebase.py", "exec/build/parse2base.py", "src/front_pp.c", "exec/parse2/operator-actions.tsv", "exec/parse2/type-follow.tsv", "exec/parse2/ladder-modes.tsv", "exec/parse2/shape-reject.tsv", "exec/parse2/shape-stack.tsv", "exec/parse2/shape-tokens.tsv", "exec/parse2/return-text.tsv", "exec/parse2/return-template.tsv", "exec/parse2/return-reject.tsv", "exec/parse2/return-stack.tsv", "exec/parse2/return-tokens.tsv", "exec/parse2/tape-templates.tsv", "exec/parse2/update-text.tsv", "exec/parse2/update-reject.tsv", "exec/parse2/update-template.tsv", "exec/parse2/update-stack.tsv", "exec/parse2/update-modes.tsv", "exec/parse2/update-pointer.tsv", "exec/parse2/update-float.tsv", "exec/parse2/update-tokens.tsv", "exec/parse2/type-tape.tsv", "exec/parse2/scope-actions.tsv", "exec/parse2/type-entry.tsv", "exec/facts/export.py"], k2gen2),
     ("lex-gen", ["weights/gold/parse.tsv", "iterate/kernel/typekw.tsv", "weights/gold/lexcls.tsv", "weights/gold/lexword.tsv", "weights/gold/lex.tsv", "exec/lex/output.tsv", "exec/lex/spelling.tsv", "exec/lex/entry.tsv", "exec/lex/number.tsv", "exec/facts/lex-consts.tsv", "exec/finite_rules.py", "exec/facts/export.py"], lexgen),
     ("pp-gen", ["exec/facts/pp-targets.tsv", "exec/facts/pp-bytes.tsv", "exec/facts/pp-autoinc.tsv", "exec/pp/operators.tsv", "exec/pp/predefines.tsv", "weights/gold/pp.tsv", "exec/facts/pp-init.tsv", "exec/facts/pp-layout.tsv", "unisa/front/lex.py", "exec/facts/export.py"], ppgen),
     ("pp-autoinc-gen", ["exec/facts/pp-bytes.tsv", "unisa/libneed.py", "exec/facts/pp-autoinc.tsv", "exec/facts/pp-layout.tsv", "exec/facts/export.py"], ppautoinc),
     ("nativeabi", ["exec/nativeabi/rules.tsv", "exec/nativeabi/ordered-result.tsv", "exec/nativeabi/gen-fresh.tsv", "exec/nativeabi/ordered-fresh.tsv", "exec/facts/nativeabi-gen-reject.tsv", "exec/facts/top-modelgraphequality-banks.tsv", "exec/facts/export.py"], nativeabi),
     ("opt-gen", ["weights/gold/peep.tsv", "weights/gold/opinfo.tsv", "exec/facts/opt-gen-constants.tsv", "exec/facts/opt-gen-startwords.tsv", "exec/opt/answer-targets.tsv", "exec/facts/export.py"], optgen),
     ("top-modelbindings-template", ["exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], modelbindingstemplate),
-    ("structreturnexpr", ["exec/parse/gen.py", "exec/facts/export.py"], structreturnexpr),
+    ("structreturnexpr", ["exec/build/parsebase.py", "exec/facts/export.py"], structreturnexpr),
     ("k2-tokenlocations-map", ["exec/facts/tokenlocations.tsv", "exec/facts/export.py"], tokenlocationsmap),
-    ("k2-constexpr", ["exec/parse/gen.py", "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], constexprentry),
+    ("k2-constexpr", ["exec/build/parsebase.py", "exec/parse2/constexpr-operators.tsv", "exec/parse2/constexpr-tokens.tsv", "weights/gold/prec.tsv", "exec/facts/export.py"], constexprentry),
     ("lower-armfuse", ["unisa/tape.py", "exec/lower/armfuse-shapes.tsv", "exec/facts/export.py"], lowerarmfuse),
     ("lower-abi", ["unisa/catalog.py", "unisa/lower.py", "exec/lower/code-abi-sources.tsv", "weights/gold/abi.tsv", "weights/gold/enc.tsv", "exec/facts/export.py"], lowerabi),
     ("lower-code", ["unisa/tape.py", "unisa/lower.py", "weights/gold/regmap.tsv", "weights/gold/enc.tsv", "weights/gold/reloc.tsv", "unisa/emit_x86.py", "unisa/emit_arm.py", "exec/facts/top-modelbindings-banks.tsv", "exec/facts/top-modelbindings-const.tsv", "exec/facts/export.py"], lowercode),
@@ -1644,7 +1701,7 @@ def k2membercontrol():
             "=pop1_text\tjson\t" + compact(templates["template1"])]
 
 
-TABLES.append(("k2-membercontrol", ["exec/parse/gen.py", "exec/build/parse2base.py", "exec/parse2/membercontrol-template.tsv",
+TABLES.append(("k2-membercontrol", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/parse2/membercontrol-template.tsv",
                                     "exec/parse2/membercontrol-tokens.tsv", "exec/parse2/membercontrol-operators.tsv",
                                     "exec/parse2/membercontrol-fresh.tsv", "exec/parse2/membercontrol-manifest-fresh.tsv",
                                     "exec/parse2/membercontrol-text.tsv", "exec/parse2/membercontrol-stack.tsv",
@@ -1737,7 +1794,7 @@ def k2libraryenv():
             "=nomain\tjson\t" + dump(L(E.rej(mainreason))), "=ret\tjson\t" + dump(L(E.O('  ret\n')))]
 
 
-TABLES.append(("k2-libraryenv", ["exec/parse/gen.py", "exec/build/parse2base.py", "exec/parse/gen.py", "exec/parse2/librarycallables-result.tsv",
+TABLES.append(("k2-libraryenv", ["exec/build/parsebase.py", "exec/build/parse2base.py", "exec/build/parsebase.py", "exec/parse2/librarycallables-result.tsv",
                "exec/facts/libraryexports.tsv", "exec/facts/librarycallables.tsv", "exec/facts/libraryimports.tsv",
                "exec/facts/libraryvariadic.tsv", "exec/facts/unresolved.tsv", "exec/facts/valueranks.tsv",
                "exec/facts/k2-gen2.tsv", "exec/facts/k2-librarymodule-map.tsv", "exec/facts/export.py"], k2libraryenv))

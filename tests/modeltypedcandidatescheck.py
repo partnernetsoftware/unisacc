@@ -3,7 +3,7 @@
 import importlib.util,json,pathlib,struct,sys,tempfile,subprocess
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 sys.path[:0]=[str(ROOT/'exec'),str(ROOT)]
-spec=importlib.util.spec_from_file_location('candidatesbase',ROOT/'exec/parse/gen.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
+spec=importlib.util.spec_from_file_location('candidatesbase',ROOT/'exec/build/parsebase.py');E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
 import assemble
 install=lambda E,fail='DEAD':assemble.run(assemble.FACTS.parent/'modelcandidates-manifest.tsv',E,E.P,{},dict(fail=fail))  # modelcandidates-manifest.tsv
 from exec.pp.sim import run,load

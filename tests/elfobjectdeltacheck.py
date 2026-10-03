@@ -15,7 +15,7 @@ import assemble
 
 
 def fixture(arch,tape,work,runtime,bad=None):
-    spec=importlib.util.spec_from_file_location("eogen",ROOT/"exec/parse/gen.py")
+    spec=importlib.util.spec_from_file_location("eogen",ROOT/"exec/build/parsebase.py")
     E=importlib.util.module_from_spec(spec);spec.loader.exec_module(E)
     regions={k:(i+100)<<40 for i,k in enumerate(("text","data","strings","tape","symbols","relocs"))}
     text=b"\xc3\x90\0";data=b"a\0\0";strings=b"\0local\0entry\0missing\0"
