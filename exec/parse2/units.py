@@ -58,8 +58,12 @@ def build(locations=False):
     accept=dict(acc_state="DONE",acc_acts=load_rules(pathlib.Path(__file__).with_name("units-result.tsv"),sequences,
                 bindings=main12,section="main12")["DONE"][0][1][:-1])
     if locations:
-        from unitlocations import install
-        accept=install(E,P)
+        import assemble
+        here=pathlib.Path(__file__).parent
+        assemble.run(here/'tokenlocations-manifest.tsv',E,P,dict(multi=False,record=False,ordinal=False),
+                     dict(ready='LS.ready',token_record='RET',ordinal_table=0))   # K2: tokenlocations
+        _ul=assemble.run(here/'unitlocations-manifest.tsv',E,P,{},{})   # K2: unitlocations
+        accept=dict(acc_state=_ul['acc_state'],acc_acts=_ul['acc_acts'])
     from layoutprovenance import units as source_provenance
     start=source_provenance(E,P,locations,accept)
     g.finish()

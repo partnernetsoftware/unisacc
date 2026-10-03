@@ -509,3 +509,14 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   Step 4 (unitlocations) not started: acc_acts is the LS.tokens row's actions minus ACCEPT after sequence expansion
   (word_unit/prefix_diag_textlen/text7 from the manifest mapseq/textrows); cdx's manifest returns nothing. Plan: a `let`
   row in unitlocations-manifest with mapseq acc_acts = those parts (existing opts), result read by units.py.
+- Round 38 (unitlocations wired): units.py --locations runs tokenlocations-manifest (multi/record/ordinal false,
+  ready LS.ready) then unitlocations-manifest; acc_state/acc_acts kept as named results of two new `let` rows
+  (the rows' textrows+mapseq re-run as let -> env seqs, then mapseq acc_acts = LS.tokens actions minus ACCEPT with
+  $prefix_diag_textlen/$text7 spliced; acc_state=@str:LS.tokens). unitlocations.py deleted.
+  cdx manifest did not run on this tree: (a) mapseq values were {"parts":[...]} dicts (current _mapseq wants a list ->
+  AttributeError), flattened to lists; (b) word/prefix acts wrote ["constant","reg"] where the old load_rules
+  had already substituted the plain register name (finite_rules: unknown constant binding ls_namelen) -> plain names.
+  export.py rerun: no facts change. No new ops/opts.
+  sha SAME (actually run, bound 58, serial): units.py --locations 0137a215, gen.py parse2/units 6fc8d7f5,
+  gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34, --locations a4c6fa73.
+  All four wiring steps done (r35-r38). Not run: decisionledger --ops count, gate closures referencing deleted .py.
