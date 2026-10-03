@@ -520,3 +520,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sha SAME (actually run, bound 58, serial): units.py --locations 0137a215, gen.py parse2/units 6fc8d7f5,
   gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34, --locations a4c6fa73.
   All four wiring steps done (r35-r38). Not run: decisionledger --ops count, gate closures referencing deleted .py.
+- Round 39 (step 1 of gen2.py removal): 5b12ecac gen2.build runs membercontrol-manifest.tsv
+  (assemble.run, opts warnings, shape via its `call shape` row) and constexpr-manifest.tsv (env enum_values=ENV,
+  enum_defined=END_) directly; membercontrol.py and constexpr.py deleted. No new ops/opts. export.py rerun: header only.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Leftover text mentions only: exec/rules.md, tests/k2translate.refusals.tsv.
+  Next: (2) exec/parse2/gen-manifest.tsv (#! base build/parse2base.py, #! flags locations warnings errors) via
+  exec/build/gen.py parse2; E.results producers -> export/let aliases (global-results, lm_*, fpcont), lm_header/lm_errors
+  -> fact/flag; (3) switch graphhash keys/tests/exec scripts/compilerpack closure as in 4ea3f5e8, delete gen2.py.
