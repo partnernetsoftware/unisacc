@@ -108,6 +108,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   mask text via @fmt), ladder, type-entry (dispatch label used by the following template: export it),
   startup-run, _namespace_control, ordinary_control.
 
+- Round 7: type-entry (let row allocates td=fresh:P:TSPEC:b, segment() returns env, gen2 uses env td for the
+  dispatch template) and tytail (foreach over facts ckmrows/resdrows + finals; tests/k2gen/mktytail.py regenerates
+  them from TYINT/AX/TYPE_TAPE) are rows. Left: optail, ladder (template interleaved: dispatch template rows can
+  move into the manifest as template ops), startup-run, _namespace_control, ordinary_control.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
