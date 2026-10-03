@@ -76,6 +76,14 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   passes them to a librarymodule manifest by name. librarycallables (scope add): callcontrol-begin/finish
   export the part2 FPCALL PUSH label as `fpcont`.
 
+- Round 2: named results via E.results: gen2 _namespace_control exports global3 fresh labels by
+  exec/parse2/global-results.tsv (lm_main, lm_initret, lm_tailret); callcontrol-begin part2.all row exports
+  fpcont (f_part2_1430_FPCALL_r_1) and gen2 stores it. librarymodule no longer scans for END.ok/END.x2 and
+  librarycallables no longer scans for FS.CALLTYPE. Still live reads in librarymodule: HEADER split scan
+  (needs startup-run to export the header-bearing state/key) and main-row keys/reject of lm_main (move to
+  facts: keys [*], reject = global_reject5). Next: libraryexports u64 -> ../modelinput rows; the remaining
+  structured_control sites; E.results becomes manifest env once gen2 build is one manifest.
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement

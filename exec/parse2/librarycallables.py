@@ -69,9 +69,7 @@ def install(E,P,b,start):
  hook('FNV.y','LC.fnvalue')
  section('s2')
  # Override the continuation immediately after FS.CALLTYPE, preserving parser stack.
- continuations={a[1] for name,(mode,row) in g.st.items() for nx,q in row.values() if nx=='FS.CALLTYPE' for a in g.seqs[q] if a[0]=='PUSH'}
- assert len(continuations)==1,continuations
- name=continuations.pop();move(name,'LC.original.fpclassified')
+ name=E.results['fpcont'];move(name,'LC.original.fpclassified')   # callcontrol-begin part2 named result
  section('s3',fpcont=name)
  hook('CL.ok','LC.named')
  section('s4')

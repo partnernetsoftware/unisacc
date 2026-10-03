@@ -843,6 +843,7 @@ def build(locations=False, warnings=False, errors=False):
     import assemble
     call_env = assemble.run(Path(__file__).resolve().parent / 'callcontrol-begin-manifest.tsv', E, P,
                             dict(warnings=warnings), dict(warnings=warnings))
+    E.__dict__.setdefault("results", {})["fpcont"] = call_env["fpcont"]   # FS.CALLTYPE continuation (librarycallables)
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
     from truth import conversions as scalar_conversions
     scalar_conversions(E, P, DBL, FLT, UNS + 8, fpu)
