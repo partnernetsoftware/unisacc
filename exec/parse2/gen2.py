@@ -20,16 +20,8 @@ _s.path.insert(0, str(_p.Path(__file__).resolve().parents[1] / "facts"))
 from load import facts as _facts
 _LX = {r["name"]: r["value"] for r in _facts("libraryexports")}
 _VR = {r["name"]: r["value"] for r in _facts("valueranks") if r["kind"] == "bank"}   # exec/facts/valueranks.tsv
-_RANKOF = {r["name"]: r["value"] for r in _facts("valueranks") if r["kind"] == "rank"}
 
 
-def _slots(items):   # each value slot is followed by its rank companion (valueranks facts)
-    result = []
-    for item in items:
-        result.append(item)
-        companion = _RANKOF.get(item)
-        if companion and companion not in items: result.append(companion)
-    return result
 TYPERANK, MEMBERRANK, RETURNRANK, PARAMRANK = (_LX[k] for k in ("TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK"))
 import os
 import re
@@ -64,24 +56,10 @@ FPS_RD, FPS_RB, FPS_VAR, FPS_PARAM, FPS_RSH, FPS_FN, FPS_COUNT, FPS_PSH = (i << 
 # ASSIGNCV, CKM/RESD: conversions and table-derived arithmetic type decisions.
 # INITLIST/STRINGINIT: aggregate and string initialisation.
 # These are existing helpers, not a claim that grammar duplication is gone.
-DEFS = {}   # (name, how) -> count: a procedure or label defined twice merges two states silently
-
-
-class P(E.P):
-    def vpush(self,*items):
-        return super().vpush(*_slots(items))
-    def vpop(self,*items):
-        return super().vpop(*_slots(items))
-    def __init__(self, name):
-        DEFS[name, "P"] = DEFS.get((name, "P"), 0) + 1
-        super().__init__(name)
-
-    def label(self, lab):
-        DEFS[lab, "L"] = DEFS.get((lab, "L"), 0) + 1
-        return super().label(lab)
-
-
-E.P = P
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "build"))
+import parse2base as _base   # exec/build/parse2base.py: the parse2 executor (rank-slot P, DEFS, token additions)
+P = _base.install(E)
+DEFS = _base.DEFS
 g = E.g
 from finite_rules import install as install_rules, install_rows, install_template, load as load_rules
 
@@ -369,10 +347,7 @@ def update_control(section, extra=None):
 def build(locations=False, warnings=False, errors=False):
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
-    E.WORDS.append("type=extern"); E.TK["type=extern"] = max(E.TK.values()) + 1
-    E.WORDS.append("type=_Bool"); E.TK["type=_Bool"] = max(E.TK.values()) + 1
-    qualifiers = ("type=const", "type=volatile", "type=restrict", "type=inline")
-    E.tokenizer(qualifiers)
+    _base.tokens(E)
     # The location/static readers replace NEXT later.  Keep the plain token
     # decoder for lookahead; ordinary qualifier recursion must still pass
     # through NEXT so each source token gets its ordinal.
@@ -593,7 +568,7 @@ if __name__ == "__main__":
     if "--locations" in sys.argv:
         sys.argv.remove("--locations")
     d = build(locations=locations, warnings=warnings, errors=errors)
-    twice = sorted(k for k, n in DEFS.items() if n > 1)
+    twice = _base.twice()
     assert not twice, "defined twice: %r" % twice
     s = json.dumps(d, separators=(",", ":"))
     open(sys.argv[1], "w").write(s)

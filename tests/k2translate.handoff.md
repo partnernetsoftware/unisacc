@@ -298,3 +298,15 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   in vpush/vpop, DEFS twice-check) -> belong in a `#! base` executor module for parse2 (exec/parse2 base, cdx/owner call).
   (c) sub-manifests fed Python constants (statics/initializers/vla/truth/booleans/conditional/offsetof/unary/...) ->
   move constants into facts k2-gen2 then `call` rows; mechanical, next for this slice.
+- Round 28: exec/build/parse2base.py (executor base, same class as graph.py/procs.py): rank-slot P + DEFS (install(E)),
+  token additions + qualifier tokenizer (tokens(E)), twice(). gen2.py now uses it (sha SAME both modes). For the final
+  `#! base build/parse2base.py`, it must also load exec/parse/gen.py as E and run install/tokens at import; prn/numout/
+  autoscan stay ordered calls mid-build (they install graph pieces between rows) -> still open: they need to run from a
+  row (no py op) — candidate: make each an `@`-free sub-manifest once their bodies are table-shaped, or base-module hooks
+  keyed by `#! after STEM` header (proposal, not done).
+  E.results: checked — `result=`/`export` write only Run.env (assemble.py one(): self.env[o["result"]]), never E.results.
+  Minimal proposal (not implemented, no new key added): the top-level Run of exec/build/gen.py publishes its env as
+  E.results (`E.results = env` alias set before run, one line in gen.py, no opts key); producers already name values via
+  `export`/`result=` (global-results.tsv -> export names lm_main/lm_initret/...; startup-run lm_hstate/lm_hnext;
+  callcontrol-begin fpcont; errors lm_nomain_msg), consumers keep reading E.results[name]. lm_header/lm_errors become
+  facts/flags. Needs coordinator approval (touches the generic driver).
