@@ -15,7 +15,11 @@ Unsupported forms are rejected explicitly. Coverage is recorded in the
 fixed probe lists and prd.md, not inferred from the presence of a rule.
 """
 import json
-from libraryexports import TYPERANK, MEMBERRANK, RETURNRANK, PARAMRANK
+import sys as _s, pathlib as _p
+_s.path.insert(0, str(_p.Path(__file__).resolve().parents[1] / "facts"))
+from load import facts as _facts
+_LX = {r["name"]: r["value"] for r in _facts("libraryexports")}
+TYPERANK, MEMBERRANK, RETURNRANK, PARAMRANK = (_LX[k] for k in ("TYPERANK", "MEMBERRANK", "RETURNRANK", "PARAMRANK"))
 import os
 import re
 import sys
@@ -890,8 +894,8 @@ def build(locations=False, warnings=False, errors=False):
         assert locations
         _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
         assemble.run(Path(__file__).parent / 'returnwarnings-manifest.tsv', E, P, _flags, dict(_tokens, SBB=SBB))
-        from intwarnings import install as int_warning_install
-        int_warning_install(E, P, DBL, FLT, FPB, SBB)
+        assemble.run(Path(__file__).parent / "intwarnings-manifest.tsv", E, P, {},
+                     dict(TOKEN_POS=_tl.TOKEN_POS, DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
         assemble.run(Path(__file__).parent / 'unusedwarnings-manifest.tsv', E, P, _flags,
                      dict(_tokens, TIX=TIX, UNDO_SIZE=UNDO_SIZE))
         import tokenlocations as _tl

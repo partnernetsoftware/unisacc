@@ -14,7 +14,11 @@ def slots(items):
     return result
 
 def install(E,P,b):
-    from libraryexports import RETURNRANK,PARAMRANK,MEMBERRANK,TYPERANK
+    import sys as _s,pathlib as _p
+    _s.path.insert(0,str(_p.Path(__file__).resolve().parents[1]/"facts"))
+    from load import facts as _f
+    _LX={r["name"]:r["value"] for r in _f("libraryexports")}
+    RETURNRANK,PARAMRANK,MEMBERRANK,TYPERANK=(_LX[k] for k in ("RETURNRANK","PARAMRANK","MEMBERRANK","TYPERANK"))
     import modelsignature,modelgraphequality,libraryexports,layoutfacts,libraryimports,librarycallables
     owned={VALUEBANK,NAMEDRETURN,LVSITERANK,LCSITERANK,COMMONBANK}
     for owner in (modelsignature,modelgraphequality,libraryexports,layoutfacts,libraryimports,librarycallables):

@@ -203,6 +203,8 @@ class Run:
             return self.env[d][k]
         if v.startswith("$"):
             return self.env[v[1:]]
+        if v.startswith("@text:"):
+            return self.E.O(json.loads(v[6:]))
         if v.startswith("fresh:"):
             scope, kind = v[6:].rsplit(":", 1)
             return self.fresh(scope)(kind)
@@ -327,6 +329,8 @@ class Run:
         elif op == "holder":
             k, _, name = fresh.partition(":")
             self.holders[stem] = self.P(name) if k == "P" else self.holder(name or stem)
+            if "cur" in o:
+                self.holders[stem].cur = o["cur"]
         else:
             raise ValueError("manifest op " + op)
         if "result" in o:

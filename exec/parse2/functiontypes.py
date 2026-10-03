@@ -4,7 +4,11 @@ from finite_rules import install as install_rules
 
 
 def install(E, P, bindings, integers):
-    from libraryexports import PARAMDEPTH, PARAMBASE, PARAMSHAPE, PARAMMARK, SIGEPOCH, VARIADIC, RETURNRANK, PARAMRANK, PREVRETURN, RETURNPENDING
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "facts"))
+    from load import facts
+    LX = {r["name"]: r["value"] for r in facts("libraryexports")}
+    PARAMDEPTH, PARAMBASE, PARAMSHAPE, PARAMMARK, SIGEPOCH, VARIADIC, RETURNRANK, PARAMRANK, PREVRETURN, RETURNPENDING = (LX[k] for k in ("PARAMDEPTH", "PARAMBASE", "PARAMSHAPE", "PARAMMARK", "SIGEPOCH", "VARIADIC", "RETURNRANK", "PARAMRANK", "PREVRETURN", "RETURNPENDING"))
     bindings = dict(bindings, PARAMDEPTH=PARAMDEPTH, PARAMBASE=PARAMBASE, PARAMSHAPE=PARAMSHAPE, VARIADIC=VARIADIC, RETURNRANK=RETURNRANK, PARAMRANK=PARAMRANK)
     root = Path(__file__).parent
     contexts = [line.split('\t') for line in (root / 'functiontypes-context.tsv').read_text().splitlines()[1:]]
