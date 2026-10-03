@@ -258,42 +258,10 @@ red=$R/tests/c
 # both routes since 0.0.16 (R16-10, 2026-10-01): the programs compile and run
 # to gcc's output and exit status, so there is no diagnostic left to locate;
 # the probes stay in tests/c as red examples for the difftest ledgers.
-# 31: undefined function -- the call site is what a reader needs.  Measured
-# per driver, because the three drivers do NOT agree on this batch:
-#
-#   07  ua_ref   `f.c:5:11: error: no such file for #include`   position, no header name
-#       product  `run: a bundled header was asked for ...`      neither
-#       py_ref   `ValueError: f.c: no such file for #include: locale.h`  header name, no position
-#
-# None of the three gives both, and the product gives neither.  So a case is
-# asserted only against the driver whose contract covers it; asserting all
-# three everywhere would make each route fail on the other route's gap.
-# The fixtures, and the cases that are not compiler diagnostics at all.
-# Each asks the SAME question the block above asks -- does the message begin
-# with the user's file and line -- and each answers "no" on the product today,
-# so each is listed in diag.com.knownfail.  They are here rather than in a
-# comment because N8's rule is a rule: a required thing that nothing checks is
-# a wish.  The set comes from running every ledger entry on the candidate and
-# sorting by whether the message had a position (plans, N8 section).
-#
-# These five are PRODUCT-side gaps only: on the reference route every one of
-# them compiles and runs, so asking the reference for a diagnostic would fail
-# for the right reason in the wrong place.  That is the same two-ledger
-# problem the top of this file describes -- and the same answer: guard the
-# block, as the product-only 04/05 cases above already do.
-if [ "$(basename "$UA")" != ua_ref ]; then
-# 28: multi-unit static declarator                       exec/parse2/units-reject.tsv
-poscase "$R/tests/fb12/28-anon-struct-static-multiunit/main.c" "6:1" "multi-unit static declarator" builtin "28-anon-struct-static-multiunit"
-# 35/36: `#if` over a function-like unknown identifier      exec/pp/ (expression)
-poscase "$R/tests/fb12/35-has-feature/main.c" "18:1" "not covered" builtin "35-has-feature"
-poscase "$R/tests/fb12/36-if-has-feature-toplevel/main.c" "12:1" "not covered" builtin "36-if-has-feature-toplevel"
-# 34: the arm64 encoder's fallback.  cc-unisacc is adding the rejected line's
-# text on dev6, which is what this asks for                    exec/enc/arm.py
-poscase "$R/tests/fb12/34-arm64-fallback/main.c" "1:1" "ARM64 operand" builtin "34-arm64-fallback"
-# 24: the executor rather than a stage table -- exec/c/run.c:437 -- and the
-# file it should name is the one the user wrote, not the executor
-poscase "$R/tests/fb12/24-nested-quoted-include/lib/sub/main.c" "5:1" "include" builtin "24-nested-quoted-include"
-fi
+# The former 28/35/36/34/24 diagnostics are no longer applicable: those
+# constructs now compile.  fb12multi checks their output or target image.
+# In particular, asking for a diagnostic from the nested-include fixture used
+# to read `run` from lib/sub instead of the fixture root, a false green.
 # 07's own probe compiles since include/locale.h exists (8025200); the shape it
 # stood for -- a header that is not there -- keeps its case on a header nobody
 # bundles, on both routes: the reference through err_at, the product through

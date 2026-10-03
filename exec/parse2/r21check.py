@@ -56,7 +56,9 @@ OBJECTS = [  # (item, name, source, refusal)
  (13, 'ccx-call', 'int h(int);\nint main(void){return h(1);}\n', 'not covered: cc interop call'),
 ]
 FILES = [(1, 'a_tdarr'), (2, 'a_tdlate'), (5, 'a_fpmemb'), (6, 'a_ptr2d'), (4, 'a_ptrptrmemb'),
-         (7, 'a_regtab'), (3, 'a_externarr'), (3, 'fb12-13-extern-incomplete-array'), (8, 'a_parenfn'), (12, 'a_callres')]
+         (7, 'a_regtab'), (3, 'a_externarr'), (3, 'fb12-13-extern-incomplete-array'), (8, 'a_parenfn'), (12, 'a_callres'),
+         (10, 'a_setjmp_nested'), (14, 'a_strlit_subaddr'), (14, 'a_addr_parmember'), (14, 'a_addr_postmember'), (14, 'a_addr_premember'),
+         (14, 'a_fpstar_stmt')]
 
 
 def call(args, **kw):

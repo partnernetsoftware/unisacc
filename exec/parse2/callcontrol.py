@@ -49,12 +49,29 @@ def install(E, P, warnings, templates, addr, facts, syscalls, fpu, phase, bindin
         section('part10')
         for k,_ in enumerate(syscalls,1):
             section('sysfind',find_entry='CL.b%d'%k,find_hit='CL.s%d'%k,find_next='CL.b%d'%(k+1) if k<len(syscalls) else 'CL.sj0',sys_register='sy%d'%k,sys_index=k)
-        # setjmp/longjmp are reference intrinsics (jmp_buf r6/r7/resume label);
-        # E3 does not construct them yet, so a call by any of their names is
-        # refused by name instead of reaching the unresolved-call diagnostic.
         for k in range(6):
-            P('CL.sj%d'%k).branch({1:'CL.sjrej'}, 'CL.sj%d'%(k+1) if k<5 else 'CL.b%d'%(len(syscalls)+1), [('CMP','v','sj%d'%k)])
-        P('CL.sjrej').branch({}, ('rej','not covered: setjmp/longjmp intrinsic'))
+            P('CL.sj%d'%k).branch({1:'CL.sj' if k<3 else 'CL.lj'},
+                'CL.sj%d'%(k+1) if k<5 else 'CL.b%d'%(len(syscalls)+1), [('CMP','v','sj%d'%k)])
+        # These are tape-level continuations, not host libc calls.  The
+        # reference allocates the two resume labels before parsing the buffer.
+        p=P('CL.sj').newlab('sj_resume').newlab('sj_end').expect('(').call('NEXT').call('EXPR').expect(')').call('SJ.depth')
+        p.o('  store64 [r0+0], r6\n  store64 [r0+8], r7\n').goto('SJ.save0')
+        for k in range(5):
+            following='SJ.save%d'%(k+1)
+            P('SJ.save%d'%k).branch({1:'SJ.saveemit%d'%k,2:'SJ.saveemit%d'%k},following,
+                [('CMPI','sj_depth',8*(k+1))])
+            P('SJ.saveemit%d'%k).o('  load64 r2, [r7+%d]\n  store64 [r0+%d], r2\n'%(8*k,24+8*k)).goto(following)
+        p=P('SJ.save5').o('  .lea r1, __unisacc_L').num('sj_resume').o('\n  store64 [r0+16], r1\n  imm r0, 0\n  jump __unisacc_L').num('sj_end').o('\n__unisacc_L').num('sj_resume').o(':\n  load64 r6, [r1+0]\n  load64 r7, [r1+8]\n').goto('SJ.restore0')
+        for k in range(5):
+            following='SJ.restore%d'%(k+1)
+            P('SJ.restore%d'%k).branch({1:'SJ.restoreemit%d'%k,2:'SJ.restoreemit%d'%k},following,
+                [('CMPI','sj_depth',8*(k+1))])
+            P('SJ.restoreemit%d'%k).o('  load64 r2, [r1+%d]\n  store64 [r7+%d], r2\n'%(24+8*k,8*k)).goto(following)
+        p=P('SJ.restore5').o('__unisacc_L').num('sj_end').o(':\n')
+        p.a(('LDI','vt',0),('LDI','vb',8)).call('NEXT').call('POSTIX').ret()
+        p=P('CL.lj').expect('(').call('NEXT').call('EXPR').o(E.PUSH).expect(',').call('NEXT').call('EXPR').expect(')')
+        p.o(E.POP1).o('  imm r2, 0\n  eq r2, r0, r2\n  add64 r0, r0, r2\n  load64 r5, [r1+16]\n  callr r5\n  imm r0, 0\n')
+        p.a(('LDI','vt',0),('LDI','vb',8)).call('NEXT').call('POSTIX').ret()
         section('part12')
         for k,(base,suffix) in enumerate(((b['DBL'],'d'),(b['FLT'],'s'))):
             sequences['text12']=E.O(formats['sqrt']%fpu[suffix+'sqrt'])
