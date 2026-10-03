@@ -326,29 +326,8 @@ def build(locations=False, warnings=False, errors=False):
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
          'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',
          'SSZ','SAL','SMN','SMEM','MOF','MSZ','MPT','MBS','MAR','BFW','BFO','BFS')}, start, C["TYINT"])
-    assemble.run(Path(__file__).parent / 'layoutfacts-manifest.tsv', E, P, {}, dict(start=start, **{'b_' + name: C[name] for name in
-        ('SBB','MBS','MPT','MAR','MOF','BFW','MSZ','BFO','BFS','SHAPE_IDS','SHAPE')}))   # K2: layoutfacts
-    start = 'LF.start'
-    assemble.run(Path(__file__).parent / 'valueranks-manifest.tsv', E, P, _flags, dict())   # K2: valueranks
-    assemble.run(Path(__file__).parents[1] / 'layoutprovenance-manifest.tsv', E, P, {}, dict(start=start))   # K2: layoutprovenance parser
-    start = 'SF3.start'
-    assemble.run(Path(__file__).parent / 'parenfold-manifest.tsv', E, P, _flags, dict(ordinal_table=C["TIX"]))   # K2: parenfold
-    assemble.run(Path(__file__).parent / 'unitmode-manifest.tsv', E, P, _flags,   # K2: unitmode
-                 dict(start=start, FND=E.FND, TK_extern=E.TK['type=extern'], TK_assign=E.TK['='],
-                      header_json=json.dumps([list(a) for a in E.O(E.HEADER)]), lm_initret=E.results['lm_initret']))
-    start = 'UM.start'
-    assemble.run(Path(__file__).parent / 'objectdefinitions-manifest.tsv', E, P, _flags, dict(TKEQ=E.TK["="]))
-    import assemble
-    assemble.run(Path(__file__).parent / 'structreturnexpr-manifest.tsv', E, P,
-                 dict(locations=locations, warnings=warnings, errors=errors))
-    import assemble   # K2 trace translation: forward-manifest.tsv
-    from types import SimpleNamespace
-    start = assemble.run(Path(__file__).resolve().parent / 'forward-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(fps_fn=C["FPS_FN"], start=start))['ret']
-    # The compound-literal output splice walks a saved byte blob.  Its
-    # EOF branch observes the reader byte, not the previous arithmetic result.
-    mode, row = g.st['CP.restore']
-    assert mode == 'r' and len(row) == 257
-    assemble.run(Path(__file__).parent / 'gen2parts-manifest.tsv', E, P, {}, dict(part_final=1))
+    env = assemble.run(Path(__file__).resolve().parent / 'gen-manifest.tsv', E, P, _flags, dict(env, tail=1, ex_start=start))   # phase tail
+    start = env["ex_ret"]
     g.finish()
     states = {n: [m, {str(k): v for k, v in row.items()}] for n, (m, row) in g.st.items()}
     return {"start": start, "states": states, "seqs": [list(map(list, s)) for s in g.seqs]}
