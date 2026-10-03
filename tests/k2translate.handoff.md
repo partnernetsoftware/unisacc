@@ -157,6 +157,12 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   sha SAME default + --warnings --errors. Next: ordinary_control (single P holder ordinary.bindings.SECTION+ws with
   p.cur=owner per row: needs a holder row with cur per fresh row, or freshrows holder), then merge segments.
 
+- Round 17 (692aef78): 1e3b8824 verified (graphhash: one FAIL:142 = timeout on default mode, 4 shards 0 bad; that
+  mode SAME by direct run; 6 exec gates green). ordinary_control -> segments ord-SECTION: one let KEY=fresh:U:OWNER:KIND
+  per ordinary-fresh row (fresh:P registers the owner -> "defined twice"; U holder = same label), mode-gated; calls
+  with seqb from ordinary-text via @text:; caller values (update_*, resume) via segment(name, warnings, env).
+  sha SAME default + --warnings --errors. Next: the single manifest (fold segment() calls + Python between them).
+
 ## gen2 driver plan (next agent; slice A keeps only callcontrol follow-ups + gen2 driver)
 1. ~40 `structured_control(section, warnings, extra, seqs)` sites in exec/parse2/gen2.py -> `call control` rows.
    control-manifest.tsv takes env control_section (block/if get `-warnings` when warnings), statement
