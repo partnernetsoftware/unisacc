@@ -186,7 +186,7 @@ class Emitter:
             for n, a in args.items():
                 if a == v and type(a) == type(v) and not isinstance(v, bool):
                     return "$" + n, False
-            return ("lit", v), False
+            return ("lit", json.dumps(v, sort_keys=True)), False
 
         for c in t["calls"]:
             if c[0] == "fresh":
@@ -221,7 +221,7 @@ class Emitter:
             if exp:
                 o["export"] = exp
             if d.get("classes"):
-                o["classes"] = ("lit", d["classes"])
+                o["classes"] = d["classes"]
             dom = d.get("domain")
             if dom and dom != {"__range__": [0, 257]}:
                 o["domain"] = dom["__range__"]
@@ -310,7 +310,7 @@ def emit(module, specs):
             oo["classes"] = em.fact(json.loads(cl))
         if len(grp) >= 3 and not oo.get("export"):
             cols = [k for k, v in seq + bind if not isinstance(v, str)]
-            tab = [{k: v[1] for k, v in r[0][3] + r[0][4] if not isinstance(v, str)} for r in grp]
+            tab = [{k: json.loads(v[1]) for k, v in r[0][3] + r[0][4] if not isinstance(v, str)} for r in grp]
             tn = "t%d" % (len(em.tables) + 1)
             em.tables[tn] = (cols, tab)
             lines.append(["foreach", "-", "-", w, stem, "-", "-", "-", json.dumps({"over": tn, "as": "it"})])
@@ -319,7 +319,7 @@ def emit(module, specs):
                           ",".join(map(c, bind)) or "-", json.dumps(oo) if oo else "-"])
             continue
         for r, w in grp:
-            c = lambda kv: "%s=%s" % (kv[0], kv[1] if isinstance(kv[1], str) else em.fact(kv[1][1]))
+            c = lambda kv: "%s=%s" % (kv[0], kv[1] if isinstance(kv[1], str) else em.fact(json.loads(kv[1][1])))
             lines.append([op, st, sec, w, stem, "-", ",".join(map(c, r[3])) or "-",
                           ",".join(map(c, r[4])) or "-", json.dumps(oo) if oo else "-"])
     if len(lines) > FOLD_MAX:

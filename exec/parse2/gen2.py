@@ -365,8 +365,9 @@ def types():
     install_rules(g, os.path.dirname(__file__), "width", bindings=bindings,
                   sequences={"store_float": O(TYPE_TAPE["storen"] % 4)}, section="store")
     width_dispatch("STOREV0", "store")
-    from bitfields import install as bitfield_install
-    bitfield_install(E, P, TYINFO, TYPE_TAPE, TYINT, dict(BFW=BFW, BFO=BFO, BFS=BFS, ETAG=ETAG, ENV=ENV, END_=END_, MOF=MOF, MSZ=MSZ, MPT=MPT, MBS=MBS, MAR=MAR, MEMBER_STRIDE=MEMBER_STRIDE, BOOL=BOOL, INTBITS=8 * TYINFO["i32"][0], INTCODE=TYINFO["i32"][0]))
+    import assemble   # K2 trace translation: bitfields-manifest.tsv
+    assemble.run(Path(__file__).parent / 'bitfields-manifest.tsv', E, P,
+                 dict(locations=locations, warnings=warnings, errors=errors), {})
     bindings = {key: P(state).fresh("b") for key, state in
                 (("pointer_test", "NARROW"), ("wide_test", "NARROW.b"), ("unsigned_test", "NARROW.u"),
                  ("double_test", "NARROW.dd"), ("bool_test", "NARROW.ui"))}
@@ -614,10 +615,12 @@ def build(locations=False, warnings=False, errors=False):
     types()
     from functiontypes import install as functiontypes_install
     functiontypes_install(E, P, dict(FPS_FIRST=FPS_FIRST, SBB=SBB, FPS_RD=FPS_RD, FPS_RB=FPS_RB, FPS_VAR=FPS_VAR, FPS_PARAM=FPS_PARAM, FPS_RSH=FPS_RSH, FPS_FN=FPS_FN, FPS_COUNT=FPS_COUNT, FPS_PSH=FPS_PSH, SHAPE=SHAPE, ARR=E.ARR, DIM=DIM, PDB=PDB, FPB=FPB, FPV=FPV), TYINT)
-    from truth import install as truth_install
-    truth_install(E, P, DBL, FLT)
-    from booleans import install as bool_install
-    bool_install(E, P, BOOL, DBL, FLT)
+    import assemble   # K2 trace translation: truth-manifest.tsv
+    assemble.run(Path(__file__).parent / 'truth-manifest.tsv', E, P,
+                 dict(locations=locations, warnings=warnings, errors=errors), dict(DBL=DBL, FLT=FLT))
+    import assemble   # K2 trace translation: booleans-manifest.tsv
+    assemble.run(Path(__file__).parent / 'booleans-manifest.tsv', E, P,
+                 dict(locations=locations, warnings=warnings, errors=errors), dict(BOOL=BOOL, DBL=DBL, FLT=FLT))
     from constexpr import install as const_install
     const_install(E, P, LEVELS, OPS, ENV, END_)
     from statics import install as static_install
@@ -660,11 +663,9 @@ def build(locations=False, warnings=False, errors=False):
         p.a(*init_actions("auto",dict(AUT=E.AUT)))
     structured_control("startup-run", False, sequence_bindings=dict(startup_data=p.acts, startup_header=O(E.HEADER)))
     global_control("global0", warnings)
-    from enumtypes import install as enum_install
-    enum_install(E, P, dict(ENUM_FIRST=ENUM_FIRST, ENUM_LIMIT=FPS_FIRST, ENUM_STATE=ENUM_STATE, TAG_EPOCH=TAG_EPOCH,
-                           ETAG=ETAG, TAGLEVEL=TAGLEVEL, STAG=STAG, INT=TYINFO["i32"][0],
-                           FPS_FN=FPS_FN, FPS_PARAM=FPS_PARAM),
-                 [TK[w] for w in TWORDS if w != "type=void"])
+    import assemble   # K2 trace translation: enumtypes-manifest.tsv
+    assemble.run(Path(__file__).parent / 'enumtypes-manifest.tsv', E, P,
+                 dict(locations=locations, warnings=warnings, errors=errors), {})
     # enum is a type specifier in both declarations and typedefs.
     global_control("global1", warnings)
     shape_control("typedef-shape")
@@ -742,8 +743,9 @@ def build(locations=False, warnings=False, errors=False):
     for name,op in (("inc","+"),("dec","-")):
         return_control("update", dict(update_entry="LP."+name,update_target="POST."+op))
     return_control("qt0")
-    from conditional import install as conditional_install
-    conditional_install(E, P, ENV, END_)
+    import assemble   # K2 trace translation: conditional-manifest.tsv
+    assemble.run(Path(__file__).parent / 'conditional-manifest.tsv', E, P,
+                 dict(locations=locations, warnings=warnings, errors=errors), dict(enum_values=ENV, enum_defined=END_))
     return_control("qt1")
     for label,cv,base in (("double","d",DBL),("single","s",FLT)):
         return_control("floating", dict(float_entry="QT."+label,float_convert="TO."+cv,result_base=base))
