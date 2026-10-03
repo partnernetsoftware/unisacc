@@ -815,11 +815,12 @@ def build(locations=False, warnings=False, errors=False):
                   classes=dict(promote=[BOOL] + [code for _, code, size, _, _ in TYINT if size < TYINFO["i32"][0]],
                                arithmetic=[DBL, FLT] + [code for _, code, size, _, _ in TYINT if size >= TYINFO["i32"][0]]),
                   sequences=dict(reject=E.rej("not covered: unary + requires arithmetic operand")))
-    from unarycontrol import install as unary_control
+    import assemble
     unit_span = int(re.search(r"^#define MAXTOK ([0-9]+)\b", Path(E.ROOT, "src/front_pp.c").read_text(), re.M).group(1))
-    unary_control(E, P, warnings, TEMPL, addr, printf, structured_control,
-                  dict(DBL=DBL, FLT=FLT, BOOL=BOOL, UNS1=UNS+1, UNS3=UNS+3, UNS4=UNS+4, UNS8=UNS+8,
-                       U32M=U32M, ENV=ENV, END_=END_, FNSTR=FNSTR, TIX=TIX, MAXTOK=unit_span), TWORDS)
+    assemble.run(Path(__file__).resolve().parent / 'unarycontrol-manifest.tsv', E, P, dict(warnings=warnings),
+                 dict(warnings=warnings, ucx=dict(TIX=TIX, MAXTOK=unit_span),
+                      ufacts=dict(DBL=DBL, FLT=FLT, BOOL=BOOL, UNS1=UNS+1, UNS3=UNS+3, UNS4=UNS+4, UNS8=UNS+8,
+                                  U32M=U32M, ENV=ENV, END_=END_, FNSTR=FNSTR, TIX=TIX, MAXTOK=unit_span)))
     shape_control("value-load")
     ordinary_control('array', warnings)
     from membercontrol import install as member_control
