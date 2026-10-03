@@ -58,7 +58,7 @@ itoab_done:
 def install(E, P):
     import json
     from pathlib import Path
-    from finite_rules import install as install_rules
+    from finite_rules import install as install_rules, install_template
     root = Path(__file__).parent
     def rows(suffix):
         return (line.split('\t') for line in (root/('printfallback-'+suffix+'.tsv')).read_text().splitlines()
@@ -77,7 +77,8 @@ def install(E, P):
     rules('head')
     for index,kind in enumerate(KINDS):
         bindings['convert'] = 'PF.convert.'+kind
-        E.g.on(bindings['PF_b1'], [index], bindings['convert'], [], 'r')
+        install_template(E.g, root, 'printfallback', {'kind':[{'i':index,'name':kind}]}, None,
+                         bindings=bindings, section='dispatch')
         sequences['body'] = [op for action in templates.get(kind, [])
                              for op in (E.O(action[1]) if action[0]=='text' else [tuple(action)])]
         rules('body')

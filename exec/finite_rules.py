@@ -51,6 +51,8 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
   - kind `fresh` emits nothing: its columns are only substituted, so a row
     `fresh  {fresh@row:TAG:KIND}` allocates a label at that point of row order
     (for chains that allocate a label before the edge that names it).
+  - in graph edits, a column a/b/c of the form `$NAME` names the caller's state
+    binding NAME (as in rule rows).
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -316,6 +318,9 @@ def install_template(g, root, stem, facts, fresh, bindings=None, sequences=None,
                 g.on(state, [key], target, actions, modes.get(state, mode))
                 g.labels.update(a[1] for a in actions if a[0] == "PUSH")
     for where, kind, a, b, c, d in edits:
+        if bindings is not None:
+            a, b, c = (bindings[x[1:]] if x.startswith("$") and type(bindings.get(x[1:])) is str
+                       else x for x in (a, b, c))
         if kind == "alias":
             g.on(a, range(257), b, [], mode)
             continue
