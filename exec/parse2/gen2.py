@@ -882,7 +882,7 @@ def build(locations=False, warnings=False, errors=False):
     lookup_entry=update_control("lookup-warn")["f112"] if warnings else "LOOKUP"
     update_control("lookup-body",dict(lookup_entry=lookup_entry))
     from callcontrol import install as call_control
-    call_facts = dict(LOC=LOC, SBB=SBB, SSZ=SSZ, FPS_FN=FPS_FN, PDB=PDB, DBL=DBL, FLT=FLT, BOOL=BOOL)
+    call_facts = dict(LOC=LOC, SBB=SBB, SSZ=SSZ, FPS_FN=FPS_FN, PDB=PDB, DBL=DBL, FLT=FLT, BOOL=BOOL, TIX=TIX)
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
     call_bindings = call_control(E, P, warnings, TEMPL, addr, call_facts, SYSCALLS, fpu, "begin")
     from truth import conversions as scalar_conversions
