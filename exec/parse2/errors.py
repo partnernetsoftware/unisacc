@@ -11,13 +11,18 @@ def install(E,P,warnings=False):
     g=E.g
     import json
     from pathlib import Path
-    from finite_rules import install as install_rules, load as load_rules
+    from finite_rules import install as install_rules, install_rows, install_template, load as load_rules
     root=Path(__file__).parent
     def rows(suffix):
         return [line.split('\t') for line in (root/('errors-'+suffix+'.tsv')).read_text().splitlines()[1:]]
     messages={reason:(json.loads(message),bool(int(identifier))) for reason,message,identifier in rows('messages')}
     bindings=dict(NAMES=NAMES,TOKEN_POS=TOKEN_POS,recorded='WU.token' if warnings else 'RET')
     sequences={name:E.O(json.loads(value)) for name,value in rows('text')}
+    holder=P('errors.fresh')  # unregistered: only names fresh labels
+    def fresh(kind):  # KIND is OWNER_H: label OWNER.H<n>
+        holder.cur,h=kind.split('_');return holder.fresh(h)
+    def declare(section,**facts):
+        install_template(g,root,'errors',facts,fresh,bindings=bindings,section=section)
     positions=load_rules(root/'errors-position.tsv',{},domain=(0,1),bindings=bindings)['position']
     # Locate prototype rejects; only mapped reference diagnostics recover.
     # Valid parsing and the branch that classifies each error stay unchanged.
@@ -38,45 +43,27 @@ def install(E,P,warnings=False):
         install_rules(g,root,'errors',bindings=dict(bindings,entry=tag,recover=int(recover)),sequences=sequences,section='message')
         mode,row=g.st[tag]
         assert mode=='r' and len(row)==257
+        # 'unknown identifier' first tests for _Complex; every message clears uc_kind.
         if message=='unknown identifier':
-            original=tag+'.ordinary'
-            g.st[original]=(mode,{key:(nxt,g.seq([('LDI','uc_kind',0),*g.seqs[seq]])) for key,(nxt,seq) in row.items()})
-            del g.st[tag]
-            P(tag).a(('SBCLR',),*(('SBOUT',c) for c in b'_Complex'),('SBINTERN','uc_expected'),
-                     ('INTERN','uc_actual','ips','ipe')).branch({1:'UC.complex'},original,
-                                                               [('CMP','uc_actual','uc_expected')])
-            P('UC.complex').a(('LDI','uc_kind',2),('LDX','er_at','ips',NAMES),('LDI','er_recover',0),
-                              ('SBCLR',),*(('SBOUT',c) for c in b'not covered: complex types (C99 6.2.5p11 _Complex is not supported)'),
-                              ('SBSAVE','diag_message')).goto('ER.frames')
+            declare('unknown.move',tag=[tag]);declare('unknown',tag=[tag])
         else:
-            g.st[tag]=(mode,{key:(nxt,g.seq([('LDI','uc_kind',0),*g.seqs[seq]])) for key,(nxt,seq) in row.items()})
+            declare('plain',tag=[tag])
     p=P('errors.bindings')
     for owner,kind,key in rows('fresh'):
         p.cur=owner;bindings[key]=p.fresh(kind)
     # The located renderer has already resolved the include/continuation map
     # when it reaches DP.emit.  Reuse those coordinates for the first machine
     # readable coverage record, then let the ordinary human diagnostic run.
-    g.st['DP.emit.original']=g.st.pop('DP.emit')
-    P('DP.emit').branch({1:'UC.frame.start',2:'UC.frame.start'},'DP.emit.original',
-                        [('RLD','uc_kind')])
-    P('UC.frame.start').a(('OSEL',1)).o('UNCOVERED\te3\t-\t-\t').a(
-        ('INPUSH','dp_file'),('BLEN','dp_len','dp_file'),('SPAN2','dp_zero','dp_len'),('INPOP',)
-    ).o(':').a(('COPYW','dp_num','dp_line')).call('DP.number').o(':').a(
-        ('COPYW','dp_num','dp_col')).call('DP.number').o('\t').branch(
-            {1:'UC.frame.struct',2:'UC.frame.complex'},'DP.emit.original',
-            [('RLD','uc_kind')])
-    P('UC.frame.struct').o('expr.call.ret-struct\tstruct return expression outside local lvalue\n').goto('DP.emit.original')
-    P('UC.frame.complex').o('type.complex\tcomplex types (C99 6.2.5p11 _Complex is not supported)\n').goto('DP.emit.original')
+    declare('emit.move')
+    declare('emit')  # also moves UNIT/START/END to *.original
     tokens=dict(E.TK,identifier=E.TK_ID)
     classes={name:[tokens[token]] for name,token in rows('tokens')}
-    for name in ('UNIT','START','END'):
-        g.st[name+'.original']=g.st.pop(name)
     install_rules(g,root,'errors',bindings=bindings,sequences=sequences,classes=classes,section='main')
-    mode,row=g.st['START']
-    g.st['START']=(mode,{key:(nxt,g.seq([('LDI','uc_kind',0),*g.seqs[seq]])) for key,(nxt,seq) in row.items()})
+    declare('start')
     # Clear the actual return alphabet after all continuation labels exist.
-    for state,row in load_rules(root/'errors-stack.tsv',{},domain=sorted(g.labels)+['BOT']).items():
-        g.st[state]=['t',{key:(target,g.seq(acts)) for key,(target,acts) in row.items()}]
+    stack=load_rules(root/'errors-stack.tsv',{},domain=sorted(g.labels)+['BOT'])
+    assert not set(stack)&set(g.st)
+    install_rows(g,root/'errors-stack.tsv',domain=sorted(g.labels)+['BOT'],mode='t')
     # Track every input view in the complete graph, including the renderer.
     for _,row in g.st.values():
         for key,(nxt,seq) in list(row.items()):
