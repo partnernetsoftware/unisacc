@@ -546,3 +546,11 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
       starlookup, callcontrol-begin, truth-conversions, then the tail above); ns sections called from inside other
       segments (ord-*, ret-*, ladder-*) keep their guards as call sub-sections.
   Suggested order: (a) facts first (export.py, hash SAME by construction), then (c), then (b), then build the manifest.
+- Round 41 (step 2a): gen2.build reads its module constants from new fact k2-gen2 `buildconst` (export.py k2gen2:
+  FPS_*, SBB/FPB/FPV/FPS_FIRST/BOOL/DBL/FLT/ENUM_FIRST/GSZ/GUNIT/SSZ/SAL/SMN/SMEM, MOF..BFS, SHAPE_IDS/SHAPE, UNS, TIX,
+  UNDO_SIZE, ENV/END_, TYINT) via C = assemble.load_facts("k2-gen2")["buildconst"]; export.py rerun, facts committed.
+  sha SAME (actually run, bound 58, serial): gen2 32fb8e3c, --errors 7ea0e979, --warnings --errors 3a7edf34,
+  --locations a4c6fa73, gen.py parse2/units 6fc8d7f5, units.py --locations 0137a215.
+  Still Python-derived in build(): E.TK[...] keys, E.O(E.HEADER) (header_json/lm_header), E.gold('irsel') fpu,
+  E.FND, _tl/_LX/_VR facts reads; _libraryexports internals (DIM, RETURNRANK/PARAMRANK, librarymodule -> cdx).
+  Next: (c) E.results writers -> export/let alias rows.

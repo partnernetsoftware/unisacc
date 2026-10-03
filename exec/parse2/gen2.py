@@ -304,16 +304,17 @@ def update_control(section, extra=None):
 
 
 def build(locations=False, warnings=False, errors=False):
+    import assemble
     # Unit markers are emitted only by the model framing pass. Each scan's
     # first marker resets the epoch; single-unit token dumps keep epoch zero.
     _base.tokens(E)
+    C = assemble.load_facts("k2-gen2")["buildconst"]   # gen2 module constants (export.py k2gen2)
     # The location/static readers replace NEXT later.  Keep the plain token
     # decoder for lookahead; ordinary qualifier recursion must still pass
     # through NEXT so each source token gets its ordinal.
     assert "TN.raw" not in g.st
-    import assemble
     segment("early")   # startup-marker, numeric, types, typing (gen2-manifest block)
-    assemble.run(Path(__file__).resolve().parent / 'constexpr-manifest.tsv', E, P, {}, dict(enum_values=ENV, enum_defined=END_))
+    assemble.run(Path(__file__).resolve().parent / 'constexpr-manifest.tsv', E, P, {}, dict(enum_values=C["ENV"], enum_defined=C["END_"]))
     segment("statics")   # statics-init, staticauto, startup-guard (gen2-manifest block)
     env = segment("startup-run")   # startup data from facts k2-gen2 (tyrows, syscalls, autonames)
     E.__dict__.setdefault("results", {}).update(lm_hstate=env["lm_hstate"], lm_hnext=env["lm_hnext"], lm_header=O(E.HEADER), lm_errors=errors)
@@ -336,7 +337,7 @@ def build(locations=False, warnings=False, errors=False):
     fpu = {row[1]: row[2] for row in E.gold("irsel") if row[0] == "fpu"}
     import assemble
     assemble.run(Path(__file__).parent / "truth-conversions-manifest.tsv", E, P, {},
-                 dict(DBL=DBL, FLT=FLT, UNSIGNED_WIDE=UNS + 8, **fpu))
+                 dict(DBL=C["DBL"], FLT=C["FLT"], UNSIGNED_WIDE=C["UNS"] + 8, **fpu))
     assemble.run(Path(__file__).resolve().parent / 'callcontrol-finish-manifest.tsv', E, P,
                  dict(warnings=warnings), dict(warnings=warnings, cb=call_env['cb']))
     import assemble
@@ -348,36 +349,36 @@ def build(locations=False, warnings=False, errors=False):
         _rec = "ER.token" if errors else "WU.token" if warnings else None
         start = assemble.run(Path(__file__).parent / 'tokenlocations-manifest.tsv', E, P,   # K2: tokenlocations
                              dict(multi=True, record=bool(_rec), ordinal=True),
-                             dict(ready="START", token_record=_rec or "RET", ordinal_table=TIX))['start']
+                             dict(ready="START", token_record=_rec or "RET", ordinal_table=C["TIX"]))['start']
         assemble.run(Path(__file__).parent / 'diagnostics-manifest.tsv', E, P, {},
                      {k: _tl[k] for k in ('SPLICES', 'INCLUDE_LINE', 'INCLUDE_LINES', 'INCLUDE_NAME')})
     if warnings:
         assert locations
         _tokens = dict(TK=E.TK, TK_ID=E.TK_ID, TK_NUM=E.TK_NUM, TK_FNUM=E.TK_FNUM)
-        assemble.run(Path(__file__).parent / 'returnwarnings-manifest.tsv', E, P, _flags, dict(_tokens, SBB=SBB))
+        assemble.run(Path(__file__).parent / 'returnwarnings-manifest.tsv', E, P, _flags, dict(_tokens, SBB=C["SBB"]))
         assemble.run(Path(__file__).parent / "intwarnings-manifest.tsv", E, P, {},
-                     dict(TOKEN_POS=_tl['TOKEN_POS'], DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
+                     dict(TOKEN_POS=_tl['TOKEN_POS'], DBL=C["DBL"], FLT=C["FLT"], FPB=C["FPB"], SBB=C["SBB"]))
         assemble.run(Path(__file__).parent / 'unusedwarnings-manifest.tsv', E, P, _flags,
-                     dict(_tokens, TIX=TIX, UNDO_SIZE=UNDO_SIZE))
+                     dict(_tokens, TIX=C["TIX"], UNDO_SIZE=C["UNDO_SIZE"]))
         assemble.run(Path(__file__).parent / 'formatwarnings-manifest.tsv', E, P, {},
                      dict(TOKEN_POS=_tl['TOKEN_POS'], NAME_TOKEN=assemble.load_facts('unusedwarnings')['NAME_TOKEN'],
-                          DBL=DBL, FLT=FLT, FPB=FPB, SBB=SBB))
+                          DBL=C["DBL"], FLT=C["FLT"], FPB=C["FPB"], SBB=C["SBB"]))
     if errors:
         _err = assemble.run(Path(__file__).parent / 'errors-manifest.tsv', E, P, _flags, {})   # K2: errors
         # librarymodule's no-main continuation: the errors message state that replaced the reject (named at creation,
         # errors-manifest.tsv lm_nomain_msg); the message state itself rejects, so the edge carries no actions.
         E.__dict__.setdefault("results", {}).update(lm_nomain_msg=_err["lm_nomain_msg"], lm_mainnext=_err["lm_nomain_msg"], lm_mainreject=[])
-    start = _libraryexports(E, P, {name: globals()[name] for name in
+    start = _libraryexports(E, P, {name: C[name] for name in
         ('FPS_FN','FPS_RD','FPS_RB','FPS_RSH','FPS_COUNT','FPS_PARAM','FPS_PSH','FPS_VAR',
          'SBB','FPB','FPV','FPS_FIRST','BOOL','DBL','FLT','ENUM_FIRST','GSZ','GUNIT',
-         'SSZ','SAL','SMN','SMEM','MOF','MSZ','MPT','MBS','MAR','BFW','BFO','BFS')}, start, TYINT)
-    assemble.run(Path(__file__).parent / 'layoutfacts-manifest.tsv', E, P, {}, dict(start=start, **{'b_' + name: globals()[name] for name in
+         'SSZ','SAL','SMN','SMEM','MOF','MSZ','MPT','MBS','MAR','BFW','BFO','BFS')}, start, C["TYINT"])
+    assemble.run(Path(__file__).parent / 'layoutfacts-manifest.tsv', E, P, {}, dict(start=start, **{'b_' + name: C[name] for name in
         ('SBB','MBS','MPT','MAR','MOF','BFW','MSZ','BFO','BFS','SHAPE_IDS','SHAPE')}))   # K2: layoutfacts
     start = 'LF.start'
     assemble.run(Path(__file__).parent / 'valueranks-manifest.tsv', E, P, _flags, dict())   # K2: valueranks
     assemble.run(Path(__file__).parents[1] / 'layoutprovenance-manifest.tsv', E, P, {}, dict(start=start))   # K2: layoutprovenance parser
     start = 'SF3.start'
-    assemble.run(Path(__file__).parent / 'parenfold-manifest.tsv', E, P, _flags, dict(ordinal_table=TIX))   # K2: parenfold
+    assemble.run(Path(__file__).parent / 'parenfold-manifest.tsv', E, P, _flags, dict(ordinal_table=C["TIX"]))   # K2: parenfold
     assemble.run(Path(__file__).parent / 'unitmode-manifest.tsv', E, P, _flags,   # K2: unitmode
                  dict(start=start, FND=E.FND, TK_extern=E.TK['type=extern'], TK_assign=E.TK['='],
                       header_json=json.dumps([list(a) for a in E.O(E.HEADER)]), lm_initret=E.results['lm_initret']))
@@ -388,7 +389,7 @@ def build(locations=False, warnings=False, errors=False):
                  dict(locations=locations, warnings=warnings, errors=errors))
     import assemble   # K2 trace translation: forward-manifest.tsv
     from types import SimpleNamespace
-    start = assemble.run(Path(__file__).resolve().parent / 'forward-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(fps_fn=FPS_FN, start=start))['ret']
+    start = assemble.run(Path(__file__).resolve().parent / 'forward-manifest.tsv', E, P, dict(locations=locations, warnings=warnings, errors=errors), dict(fps_fn=C["FPS_FN"], start=start))['ret']
     # The compound-literal output splice walks a saved byte blob.  Its
     # EOF branch observes the reader byte, not the previous arithmetic result.
     mode, row = g.st['CP.restore']
