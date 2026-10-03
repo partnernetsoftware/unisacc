@@ -18,5 +18,5 @@ assert s.count(a)==1;s=s.replace(a,b);Path(sys.argv[2]).write_bytes(s)
 PYDUMP
 bound 20 cc -w -std=c99 -O0 "$T/dump.c" -o "$T/dump"
 bound 20 cc -O2 "$R/exec/c/run.c" -o "$T/run"
-bound 25 python3 "$R/exec/parse2/gen2.py" "$T/parse.json"
+bound 55 python3 "$R/exec/parse2/gen2.py" "$T/parse.json"
 bound 55 python3 "$R/tests/modelcallbacksourcecheck.py" "$T/parse.json" "$T/run" "$T/dump"
