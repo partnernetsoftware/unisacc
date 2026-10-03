@@ -12,8 +12,9 @@ from pathlib import Path
 from finite_rules import install as install_rules, install_template
 from armbranch import LABELS
 from objectplan import OBJ_RELOCS
-DATA_BASE = 1 << 32
-UNDEF_BASE = 1 << 35
+from exec.facts.load import facts
+CONST = {r['name']: r['value'] for r in facts('enc-armobject-bindings')}
+DATA_BASE, UNDEF_BASE = CONST['DATA_BASE'], CONST['UNDEF_BASE']
 
 
 def install(E, word):
@@ -34,7 +35,6 @@ def install(E, word):
                 bindings[key] = E.P.fresh(type('FreshScope', (), {'cur': prefix})(), kind)
         install_rules(g, root, 'armobject', bindings, None, None, name)
     section('s1')
-    for state, name in [('LAYOUT', 's2'), ('EMIT.60', 's3'), ('EMIT.61', 's4'),
-                        ('LEA.code', 's5'), ('ADRP', 's6'), ('BR.undef', 's7')]:
-        replace(state)
-        section(name)
+    for r in facts('enc-armobject-moves'):
+        replace(r['state'])
+        section(r['section'])
