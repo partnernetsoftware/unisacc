@@ -26,18 +26,9 @@ def install(E,P,warnings=False):
     positions=load_rules(root/'errors-position.tsv',{},domain=(0,1),bindings=bindings)['position']
     # Locate prototype rejects; only mapped reference diagnostics recover.
     # Valid parsing and the branch that classifies each error stay unchanged.
-    mapped={}
-    for name,(mode,row) in list(g.st.items()):
-        if name == 'DL.bad': continue  # malformed transport cannot locate its own error
-        for key,(nxt,seq) in list(row.items()):
-            acts=list(g.seqs[seq])
-            if acts and acts[-1][0]=='REJECT' and acts[-1][1].startswith('not covered: '):
-                reason=acts[-1][1]
-                message,identifier=messages.get(reason,(reason,False))
-                recover=reason in messages
-                info=(message,identifier,recover)
-                tag=mapped.setdefault(info,'ER.message'+str(len(mapped)))
-                row[key]=(tag,g.seq(acts[:-1]))
+    # One tag per distinct reason (messages are distinct per reason).
+    groups=install_template(g,root,'errors',{},fresh,bindings=bindings,section='reasons')
+    mapped={(*messages.get(reason,(reason,False)),reason in messages):tag for reason,tag in groups.items()}
     for (message,identifier,recover),tag in mapped.items():
         sequences.update(position=positions[int(identifier)][1],message=[('SBOUT',c) for c in message.encode()])
         install_rules(g,root,'errors',bindings=dict(bindings,entry=tag,recover=int(recover)),sequences=sequences,section='message')
