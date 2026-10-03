@@ -13,22 +13,17 @@ def install(E,P,b,integers):
     for module in (modelsignature,modelcandidates,libraryimports,libraryexports):
         assert not owned.intersection(v for v in vars(module).values() if type(v) is int and v>=1<<40), module.__name__
     g=E.g
-    def hook(name,proc):
-        old='LV.original.'+name;g.st[old]=g.st.pop(name);g.labels.add(old)
-        alias='LV.hook.'+name
-        P(alias).a(('PUSH',old)).goto(proc);g.st[name]=g.st[alias]
     # Stage control lives in libraryvariadic-result.tsv / -byte.tsv (sections s00..s13);
     # fresh labels are declared in libraryvariadic-fresh.tsv. Python binds only dynamic
     # facts: graph constants (this module's and its sources'), the parent's banks (b) and
-    # the i32 code. Residue: parent-row edits (hook, pops/aliases of FPCALL, CL.ok, CL.a2,
-    # CL.done, CL.vdirect, LI.wrapend, LI.typedemit, LI.wrapnext, LX.outer; the derived
-    # LV.direct and LV.typedemit rows rewrite the parents' own action sequences) and the
-    # narrow-integer promotion branch (keys come from the integers list).
+    # the i32 code. Parent-row edits (hooks, renames to LV.original.*, aliases, the derived
+    # LV.direct / LV.typedemit rows) and the narrow-integer promotion branch are
+    # declared in libraryvariadic-template.tsv.
     class _Scope:
         a=E.P.a
         def __init__(self,cur):self.cur=cur;self.acts=[]
     from pathlib import Path
-    from finite_rules import install as rules
+    from finite_rules import install as rules,install_template
     import importlib
     root=Path(__file__).parent
     bindings={'i32':next(code for name,code,_,_,_ in integers if name=='i32')}
@@ -48,6 +43,12 @@ def install(E,P,b,integers):
         for part,key,kind in fresh:
             if part==name:bindings[key]=E.P.fresh(_Scope(key.split('.')[0]),kind)
         rules(g,root,'libraryvariadic',bindings,sequences,None,name)
+    def tmpl(name,**facts):
+        install_template(g,root,'libraryvariadic',facts,lambda kind:E.P.fresh(_Scope('LV'),kind),section=name)
+    def move(old,new):tmpl('move',m=[dict(old=old,new=new)])
+    def hook(name,proc):move(name,'LV.original.'+name);tmpl('hookcall',h=[dict(name=name,proc=proc)])
+    def alias(new,src):tmpl('copy',c=[dict(new=new,src=src)])
+    k=[dict(NAMES=NAMES,IMPORTNAMES=IMPORTNAMES)]
     hook('FPCALL','LV.indirect')
     section('s00')
     hook('CL.ok','LV.begin')
@@ -55,38 +56,34 @@ def install(E,P,b,integers):
     hook('CL.a2','LV.argument')
     section('s02')
     narrow={code:'LV.promoteint' for _,code,width,_,_ in integers if width<4};narrow[b['BOOL']]='LV.promoteint';narrow[b['FLT']]='LV.promotefloat'
-    P('LV.tailscalar').branch(narrow,'LV.argstore',[('RLD','vb')])
+    tmpl('narrow',n=[dict(code=c,target=t) for c,t in narrow.items()])
     section('s03')
     hook('CL.done','LV.complete')
     section('s04')
     # Replace only the callee span of stacked direct calls. The following
     # return-type query still uses the real source name and signature.
-    old='LV.original.direct';g.st[old]=g.st.pop('CL.vdirect');g.labels.add(old)
+    move('CL.vdirect','LV.original.direct')
     section('s05')
-    mode,row=g.st[old];assert mode=='r' and len(set(row.values()))==1
-    _,seq=next(iter(row.values()));actions=list(g.seqs[seq]);at=actions.index(('SPAN2','cls','cle'))
-    actions[at:at+1]=[('LDX','lv_name','lv_site',NAMES),('INPUSH','lv_name'),('XLEN','lv_len'),('SPAN2','lx_zero','lv_len'),('INPOP',)]
-    g.st['LV.direct']=(mode,{k:(nx,g.seq(actions)) for k,(nx,q) in row.items()})
+    tmpl('direct',k=k)
     # Source definitions are final now, after all units. Native source-priority
     # is never delegated to the host. A source winner gets a tail redirect.
-    g.st['LV.original.wrapend']=g.st.pop('LI.wrapend');g.labels.add('LV.original.wrapend')
+    move('LI.wrapend','LV.original.wrapend')
     section('s06')
-    g.st['LI.wrapend']=g.st['LV.wrapend']
+    alias('LI.wrapend','LV.wrapend')
     section('s07')
     # The shared wrapper ordinarily reloads the function name. Site wrappers
     # instead keep their unique label, while retaining the same result rules.
-    g.st['LV.original.typedemit']=g.st.pop('LI.typedemit');g.labels.add('LV.original.typedemit')
+    move('LI.typedemit','LV.original.typedemit')
     section('s08')
-    g.st['LI.typedemit']=g.st['LV.typedselect']
-    mode,row=g.st['LV.original.typedemit'];old=('LDX','li_name','li_i',IMPORTNAMES)
-    g.st['LV.typedemit']=(mode,{k:(nx,g.seq([('LDX','li_name','lv_iter',NAMES) if x==old else x for x in g.seqs[q]])) for k,(nx,q) in row.items()})
+    alias('LI.typedemit','LV.typedselect')
+    tmpl('typed',k=k)
     section('s09')
-    g.st['LV.original.wrapnext']=g.st.pop('LI.wrapnext');g.labels.add('LV.original.wrapnext')
+    move('LI.wrapnext','LV.original.wrapnext')
     section('s10')
-    g.st['LI.wrapnext']=g.st['LV.wrapnext']
+    alias('LI.wrapnext','LV.wrapnext')
     section('s11')
     # Requests exist only for selected native sites, never source winners.
-    g.st['LV.original.outer']=g.st.pop('LX.outer');g.labels.add('LV.original.outer')
+    move('LX.outer','LV.original.outer')
     section('s12')
-    g.st['LX.outer']=g.st['LV.outerselect']
+    alias('LX.outer','LV.outerselect')
     section('s13')
