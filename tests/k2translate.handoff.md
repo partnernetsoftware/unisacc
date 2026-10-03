@@ -769,3 +769,26 @@ Copied from the agent scratch .k2tmp/handoff.md. Scratch helpers (.k2tmp/rec2.sh
   irsel), WORDS/TK (parse-words already), TY/SZ/PSZ (gold tyinfo) with the asserts moved into export.py.
   (c) tokenizer()/numeric_rules/prn/fconv: check callers (`grep -rn 'E\.tokenizer\|E\.prn\|E\.fconv\|optext\|E\.TK\b'
   exec`); units uses manifests already. Then repoint `#! base parse/gen.py` headers and run all gen.py graphhash.
+
+## Round 56 (2026-10-04, cc background agent) — exec/parse/gen.py survey; facts headers fixed
+- bd0eb326: round 55 edited a comment in exec/parse/gen.py, a listed input of 7 facts tables; export.py rerun,
+  header-only sha change (content identical). Lesson: any parse/gen.py edit -> rerun export.py.
+- Survey (grepped): parse/gen.py globals used outside it:
+  * assemble.py: E.TK/TK_ID/TK_NUM/TK_STR (tokens opt); parse2base.py: E.TK/E.WORDS mutation + loads parse/gen.py
+    by path in executor(); manifests librarydata/librarytypesv3: E.GMARK/E.LOC/E.ARR (parse-constants names).
+  * export.py: gold, PREC, optext, SZ, CASOPS, tokenizer.__defaults__ (skip list), TK/WORDS, constants;
+    loads parse/gen.py via _module (~lines 70, 482, 512, 1113).
+  * tokenizer()/numeric_rules/prn/fconv/sizes: no caller (export only reads tokenizer.__defaults__) -> delete.
+  * 10 tests/*check.py + tests/decisionledger.allow + exec/parse2/diagnosticcheck.py + pipeline/run.py name the path.
+- Plan (design only, next round):
+  1. export.py new table `parse-tokens` (inputs parse-words.tsv, weights/gold/prec.tsv, export.py):
+     =WORDS json (pre + casops"=" + sorted(prec) + post), =TK json (enumerate+1, plus "type"=TK["type=int"]).
+  2. exec/build/parsebase.py (generic executor base): g=G(), O, rej, P(make_P) + tok/expect/num/lab/vpush/vpop/
+     newlab; module attrs = every parse-constants row (generic loop) + WORDS/TK from parse-tokens + tuple groups
+     from parse-words (CASOPS, VANAMES, TWORDS). No gold, no asserts.
+  3. export.py: local gold(), PREC/BINSEL/IRSEL/optext, tyinfo->SZ/PSZ + the two asserts, skip list literal
+     ("type=const","type=volatile"); `_parse_e(tag)` loads exec/build/parsebase.py and attaches those (replaces
+     _module("exec/parse/gen.py", ...)). Facts input lists: parse/gen.py -> build/parsebase.py.
+  4. Repoint `#! base parse/gen.py` in the 7 manifests (+ exec/parse/*-manifest.tsv comments), parse2base.executor,
+     pipeline/run.py, procs doc, tests loading the path; delete exec/parse/gen.py; rerun export.py (commit facts);
+     six modes + full serial gen.py graphhash (--shard, one at a time).
