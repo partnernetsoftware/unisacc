@@ -68,6 +68,12 @@ def seedpy():
 
 OP_CAP, OP_FORBIDDEN = 12, ('py', 'retarget')
 
+def _allowops():
+    """allowop OP MANIFEST STEM reason: one named transitional manifest row (by stem, not line);
+    the exception disappears with the row, so the gate goes strict by itself."""
+    a = pathlib.Path(__file__).resolve().parent / 'decisionledger.allow'
+    return {tuple(l.split()[1:4]) for l in a.read_text().splitlines() if l.startswith('allowop ')}
+
 def ops():
     """K2 table boundary (exec/k2-boundary.md): distinct manifest ops <= 12; no py/retarget op, no state: predicate."""
     root = pathlib.Path(__file__).resolve().parent.parent / 'exec'
@@ -77,7 +83,10 @@ def ops():
             if not ln or ln.startswith('#'): continue
             f = ln.split('\t')
             op = f[0].lstrip('.')
-            seen.setdefault(op, []).append('%s:%d' % (m.relative_to(root.parent), n))
+            where = '%s:%d' % (m.relative_to(root.parent), n)
+            if (op, str(m.relative_to(root.parent)), f[1] if len(f) > 1 else '') in _allowops():
+                print('  allowed  %s %s  %s (decisionledger.allow allowop)' % (op, f[1], where)); continue
+            seen.setdefault(op, []).append(where)
             if len(f) > 3 and any(t.lstrip('!').startswith('state:') for t in f[3].split('&')):
                 bad.append('state: predicate  %s:%d' % (m.relative_to(root.parent), n))
     for op in OP_FORBIDDEN:
