@@ -34,7 +34,8 @@ Parameterised template tables (STEM-template.tsv, installed by install_template)
     `drop-edge` a=STATE b=KEY (KEY must exist),
     `set-mode` a=STATE b=OLD c=NEW (OLD must match).
     `copy-state` a=SOURCE b=NEW (shallow alias, no target rewriting),
-    `move-state` a=OLD b=NEW (move without target rewriting).
+    `move-state` a=OLD b=NEW (move without target rewriting); `move` and `copy` are short
+    names for move-state and copy-state.
 No predicate lives here: substitution, product enumeration and graph edits only.
 """
 import itertools
@@ -266,7 +267,8 @@ def expand_template(path, facts, fresh, section=None):
                     prev.update(rowlabels)
                     if kind == "rule":
                         out.append("\t".join((a2, b2, c2, d2)))
-                    elif kind in ("rename", "alias", "prepend", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state"):
+                    elif kind in ("rename", "alias", "prepend", "insert-edge", "fill-edge", "drop-edge", "set-mode", "copy-state", "move-state", "clone-push", "move", "copy"):
+                        kind = {"move": "move-state", "copy": "copy-state"}.get(kind, kind)   # short names used by some tables
                         edits.append((where, kind, a2, b2, c2, d2))
                     else:
                         raise ValueError(f"{where}: unknown template kind {kind}")
